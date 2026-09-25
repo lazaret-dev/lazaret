@@ -133,7 +133,19 @@ class DefaultClientCertificateTests(HomeDirCase):
                         "-days", "1", "-subj", "/CN=u"], check=True, capture_output=True, timeout=40)
         with mock.patch.object(ssl.SSLContext, "load_cert_chain") as load:
             self.context(sslmode="require")
-        load.assert_called_once_with(crt, key, password=None)
+        load.assert_called_once_with(crt, key, password="")
+
+    @unittest.skipUnless(shutil.which("openssl"), "needs the openssl command to make a throwaway key")
+    def test_encrypted_key_uses_sslpassword_and_never_prompts(self):
+        import subprocess
+        os.makedirs(default_ssl_dir())
+        key, crt = (os.path.join(default_ssl_dir(), n) for n in ("postgresql.key", "postgresql.crt"))
+        subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-passout", "pass:dummy-pass",
+                        "-keyout", key, "-out", crt, "-days", "1", "-subj", "/CN=u"],
+                       check=True, capture_output=True, timeout=40)
+        with self.assertRaisesRegex(pg.OperationalError, "sslpassword"):
+            self.context(sslmode="require")
+        self.context(sslmode="require", sslpassword="dummy-pass")
 
     def test_revocation_lists(self):
         crldir = tempfile.mkdtemp()

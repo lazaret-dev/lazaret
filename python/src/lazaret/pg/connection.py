@@ -799,9 +799,12 @@ class Connection:
                     raise OperationalError(f"certificate present, but not private key file "
                                            f"(expected next to {cert} as postgresql.key)")
                 try:
-                    ctx.load_cert_chain(cert, key, password=p.sslpassword)
+                    # password="" rather than None: never let OpenSSL prompt on the
+                    # terminal for an encrypted key's pass phrase (set sslpassword).
+                    ctx.load_cert_chain(cert, key, password=p.sslpassword or "")
                 except (OSError, ValueError) as exc:
-                    raise OperationalError(f"could not load client certificate {cert}: {exc}") from exc
+                    raise OperationalError(f"could not load client certificate {cert} "
+                                           f"(an encrypted key needs sslpassword): {exc}") from exc
         return ctx
 
     # --- authentication ----------------------------------------------------------
