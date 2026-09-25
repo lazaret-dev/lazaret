@@ -1,0 +1,33 @@
+{
+  "_comment": "Lazaret custom taint spec. Copy to .lazaret-taint.json in your project root (auto-loaded) or pass with --taint-config. 'sources' and sink 'pattern' are regular expressions; 'sanitizer' names are exact call names (module.func or func). Valid categories: SQL injection, command injection, code injection, template injection, path traversal, server-side request forgery, open redirect, cross-site scripting.",
+  "python": {
+    "sources": [
+      "current_app\\.config\\['UNTRUSTED'\\]",
+      "mylib\\.read_untrusted"
+    ],
+    "sinks": [
+      {"pattern": "mylib\\.run_shell", "category": "command injection"},
+      {"pattern": "orm\\.raw_sql", "category": "SQL injection"}
+    ],
+    "sanitizers": {
+      "full": ["mylib.validate_id"],
+      "partial": {
+        "mylib.clean_cmd": ["command injection"],
+        "mylib.sanitize_html": ["cross-site scripting"]
+      }
+    }
+  },
+  "javascript": {
+    "sources": ["getUserInput", "ctx\\.request\\.rawBody"],
+    "sinks": [
+      {"pattern": "runShell", "category": "command injection"},
+      {"pattern": "rawQuery", "category": "SQL injection"}
+    ],
+    "sanitizers": {
+      "full": ["toSafeInt"],
+      "partial": {
+        "myEscapeHtml": ["cross-site scripting"]
+      }
+    }
+  }
+}

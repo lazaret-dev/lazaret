@@ -1,0 +1,7 @@
+{
+  "python": {
+    "sources": ["mylib\\.read_untrusted"],
+    "sinks": [{"pattern": "mylib\\.run_shell", "category": "command injection"}],
+    "sanitizers": {"partial": {"mylib.clean_cmd": ["command injection"]}}
+  }
+}

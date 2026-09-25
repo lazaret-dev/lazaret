@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "lazaret": {
+      "command": "lazaret-mcp",
+      "args": [],
+      "env": {
+        "LAZARET_DB": "/ABSOLUTE/PATH/TO/lazaret-registry.db"
+      }
+    }
+  }
+}

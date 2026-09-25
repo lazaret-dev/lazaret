@@ -1,0 +1,43 @@
+{
+  "name": "lazaret",
+  "version": "0.0.1",
+  "description": "Quarantine for your dependencies: supply-chain security for Python and JavaScript packages.",
+  "type": "module",
+  "bin": {
+    "lazaret": "bin/lazaret.js"
+  },
+  "exports": "./src/index.js",
+  "files": [
+    "bin/",
+    "src/",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "keywords": [
+    "supply-chain",
+    "security",
+    "dependencies",
+    "npm",
+    "pypi",
+    "typosquatting"
+  ],
+  "author": "John A. Booth",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lazaret-dev/lazaret.git"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "homepage": "https://lazaret.dev",
+  "bugs": {
+    "url": "https://github.com/lazaret-dev/lazaret/issues"
+  }
+}

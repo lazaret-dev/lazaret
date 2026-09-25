@@ -1,0 +1,9 @@
+# Lazaret builds with its own standard-library backend (_build/lazaret_build.py):
+# no build requirements, nothing downloaded. Package metadata and console
+# scripts are defined in that module; the version is __version__ in
+# src/lazaret/__init__.py. Lazaret has no runtime dependencies.
+
+[build-system]
+requires = []
+build-backend = "lazaret_build"
+backend-path = ["_build"]
