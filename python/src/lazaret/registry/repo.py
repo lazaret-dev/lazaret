@@ -1754,6 +1754,27 @@ def db_json(obj):
     return json.dumps(_db_clean(obj), ensure_ascii=False)
 
 
+# Insecure escape hatches for a Postgres state DB that still authenticates
+# with MD5 or a cleartext password. lazaret.pg refuses both over TLS whose
+# certificate is not verified (sslmode=prefer/require, the default is
+# prefer): a man-in-the-middle terminating TLS could relay the MD5 response
+# or read the password. Its opt-outs are keyword arguments of pg.connect(),
+# not libpq parameters — the DSN parser rejects them as unknown — so a
+# LAZARET_DB DSN cannot carry them. Set one of these variables to "1" to
+# opt in; prefer sslmode=verify-full or a SCRAM-SHA-256 role instead.
+PG_INSECURE_AUTH_ENV = {
+    "LAZARET_PG_ALLOW_MD5_OVER_UNVERIFIED_TLS": "allow_md5_over_unverified_tls",
+    "LAZARET_PG_ALLOW_CLEARTEXT_PASSWORD": "allow_cleartext_password",
+}
+
+
+def pg_insecure_auth_options(environ=None):
+    """pg.connect() keyword arguments enabled by PG_INSECURE_AUTH_ENV
+    (exactly "1" enables one; anything else leaves lazaret.pg's refusal)."""
+    env = os.environ if environ is None else environ
+    return {kw: True for var, kw in PG_INSECURE_AUTH_ENV.items() if env.get(var) == "1"}
+
+
 class Store:
     def __init__(self, dsn):
         kind, target = classify_dsn(dsn)
@@ -1771,7 +1792,8 @@ class Store:
             # lazaret_pg client — no external driver, nothing to pip-install.)
             try:
                 self.conn = lazaret_pg.connect(   # DSN should target a dedicated lazaret DB
-                    target, timeout=30, application_name="lazaret")
+                    target, timeout=30, application_name="lazaret",
+                    **pg_insecure_auth_options())
             except (lazaret_pg.Error, OSError) as exc:
                 raise RuntimeError(f"Postgres backend unreachable: {exc}") from exc
             self._pg_errors = lazaret_pg
