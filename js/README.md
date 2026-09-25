@@ -128,7 +128,9 @@ Python-only options (`--taint-config`, `--strict-taint-config`,
 `--trust-repo-config`) are refused with a pointer to `pip install lazaret`.
 
 Exit codes: `0` ok (also a failed gate without `--ci`) · `1` gate failed
-with `--ci`, or a hostile-depth manifest (`SC-MANIFEST-DEPTH`) · `2` usage
+with `--ci`, or a hostile-depth manifest (`SC-MANIFEST-DEPTH`: `package.json`
+or `binding.gyp` nested deeper than 500 levels, the same limit as the Python
+engine on every Python version) · `2` usage
 error (unknown option; missing, non-directory or empty target) · `3` report
 output error (unsafe or unwritable report path, checked before the scan) ·
 `5` internal error (`error: internal: …`; set `LAZARET_DEBUG=1` for a stack
@@ -144,7 +146,9 @@ outside (e.g. in `$RUNNER_TEMP`). An untrusted baseline counts every finding
 as new.
 
 **Terminal output.** File names, messages and excerpts come from the scanned
-tree; control characters in them are printed as `·`.
+tree; C0 control characters (except tab and newline), DEL, C1 controls
+(U+0080–U+009F) and bidi controls in them are printed as `·`, exactly as the
+Python CLI prints them, so a hostile file name can't rewrite your terminal.
 
 ## Library
 

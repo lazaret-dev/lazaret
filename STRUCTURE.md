@@ -29,12 +29,14 @@ lazaret/
 ├── .github/            workflows (ci.yml, release.yml) and dependabot.yml
 ├── docs/RELEASING.md   claiming names, trusted publishing, cutting a release
 ├── examples/           lazaret-taint.example.json, mcp-config.json
-├── scripts/            check-versions.sh, make_bundle.py, make_typosquat_stubs.py
+├── .gitattributes      LF line endings everywhere (reproducible builds on Windows too)
+├── scripts/            check-versions.sh, tag-release.sh, make_bundle.py,
+│                       make_typosquat_stubs.py, dashboard_csp.py
 ├── python/             the PyPI package   (sections 3–4)
 └── js/                 the npm package    (section 5)
 ```
 
-`scripts/check-versions.sh` fails CI if the Python and npm versions, or a release tag, disagree, so the two packages release in lockstep. `scripts/make_bundle.py` builds a source bundle of the repository (for sharing the repo itself, not for installing). `scripts/make_typosquat_stubs.py` builds the defensive stub packages described in `docs/RELEASING.md`.
+`scripts/check-versions.sh [REF [TAG]]` fails if the Python and npm versions, or a release tag, disagree, so the two packages release in lockstep. Given a ref it reads both version files from that commit (`git show`), so it checks what a tag actually points at; with no ref it reads the working tree and refuses uncommitted changes to either version file. `scripts/tag-release.sh vX.Y.Z` is the only way to cut a tag: it refuses a dirty tree or a commit that isn't on `main`, runs the version check against the tag-to-be, creates a signed annotated tag, and prints the one-tag push command (see `docs/RELEASING.md`). `scripts/make_bundle.py` builds a source bundle of the repository (for sharing the repo itself, not for installing): only git-tracked files when `.git` exists, never credential files (`.env*`, `.npmrc`, `.pypirc`, `.netrc`, keys, …) or OS junk (`._*`, `.DS_Store`), and byte-for-byte reproducible. Use it (or `git archive`) rather than a plain `tar` of a working tree. `scripts/make_typosquat_stubs.py` builds the defensive stub packages described in `docs/RELEASING.md`; `--check` reports which stub names are still unclaimed. `scripts/dashboard_csp.py` recomputes the dashboard's script hash in its content-security policy (run it after editing the page's script).
 
 ---
 
@@ -52,9 +54,12 @@ python/
 │   ├── __init__.py         __version__ (the single source of the version)
 │   ├── __main__.py         python -m lazaret  →  the scanner CLI
 │   ├── scanner/
-│   │   ├── core.py         rule engine, intra-file taint, the `lazaret` CLI
+│   │   ├── core.py         rule engine, intra-file taint, scan_project() (the one
+│   │   │                   project-scan pipeline, shared by the CLI and MCP), the
+│   │   │                   `lazaret` CLI
 │   │   ├── flow.py         interprocedural / cross-file taint
-│   │   ├── reports.py      safe report-path handling
+│   │   ├── taintspec.py    taint-config validation (shared by both taint engines)
+│   │   ├── reports.py      safe report paths, report provenance, baseline signing
 │   │   └── sca.py          dependency CVE matching (`lazaret-sca`)
 │   ├── registry/
 │   │   ├── repo.py         npm / PyPI package auditing (`lazaret-registry`)
@@ -131,12 +136,14 @@ class IntegrationTests(unittest.TestCase):
 
 | Variable | Enables | Value |
 |---|---|---|
-| `LAZARET_TEST_PG_DSN` | `tests/pg/test_integration.py`, the live parts of `tests/registry/test_pg_backend.py` | a DSN for a user with `CREATEDB` (the registry tests create a scratch database). `test_pg_backend.py` also honors the older `LAZARET_PG_TEST_DSN`, and without either it boots a throwaway cluster if `initdb` is installed |
-| `LAZARET_TEST_PG_MATRIX` | `tests/pg/test_auth_matrix.py` | `"<host> <port> <ca.crt path> <unix socket dir>"` for a server configured as in that file's docstring |
+| `LAZARET_TEST_PG_DSN` | `tests/pg/test_integration.py`, `tests/pg/test_review_live.py`, the live parts of `tests/registry/test_pg_backend.py`, `test_review_store.py` and `test_review_store_reconnect.py` | a DSN for a user with `CREATEDB` (the registry tests create a scratch database). `test_pg_backend.py` also honors the older `LAZARET_PG_TEST_DSN`, and without either it boots a throwaway cluster if `initdb` is installed |
+| `LAZARET_TEST_PG_MATRIX` | `tests/pg/test_auth_matrix.py`, the live TLS cases in `test_review_tls.py` and `test_review_libpq_params.py` | `"<host> <port> <ca.crt path> <unix socket dir>"` for a server configured as in that file's docstring (a few TLS tests also need the `openssl` command and skip without it) |
 | `LAZARET_SAMPLES_DIR` | `tests/scanner/test_detection_corpus.py` | path to a checkout of `lazaret-samples` |
 | `LAZARET_BENCHMARK` | `tests/registry/test_benchmark.py` | any value; scans 21 real, legitimate npm and PyPI packages over the network and checks none is SUSPICIOUS and each matches its expected verdict |
 
-Tests that depend on file permissions skip themselves when run as root, since root ignores directory permissions.
+Tests that depend on file permissions skip themselves when run as root, since root ignores directory permissions (the npm suite re-runs them under `unshare -U` where available).
+
+Regression tests for the September 2026 review are named `test_review_<topic>.py` (Python) and `review-<topic>.test.js` (npm); each was written from the finding's reproduction and fails on the code before the fix.
 
 ### Running
 
@@ -158,7 +165,7 @@ pytest also runs the suite unchanged, for anyone who prefers it, but nothing req
 
 ## 5. JavaScript package
 
-The npm package `lazaret` is a zero-dependency, ES-module port of the project scanner (the same rules, taint-flow and SQL-sink analyzers, and obfuscation/secret detection as `lazaret.scanner` and the browser dashboard), tested with Node's built-in `node --test` (Node 22+). Registry auditing, cross-file taint, and custom taint specs are Python-only.
+The npm package `lazaret` is a zero-dependency, ES-module port of the project scanner (the same rules, comment lexer, taint-flow and SQL-sink analyzers, encoding handling, and obfuscation/secret detection as `lazaret.scanner`), tested with Node's built-in `node --test` (Node 22+). Registry auditing, cross-file taint, custom taint specs and SCA are Python-only. The browser dashboard (`python/src/lazaret/web/lazaret.html`) carries a single-file port of this engine.
 
 ```
 js/
@@ -168,21 +175,25 @@ js/
 │   ├── cli.js            `lazaret check <dir>`; returns an exit code (testable)
 │   ├── index.js          public exports
 │   ├── report.js         report format (JSON + HTML), terminal output
-│   ├── scanner/          rules, scan loop, taint, SQL sinks, functions, metrics
-│   └── lib/              leaf helpers: fs (collection, report paths), issue,
-│                         supplychain (install hooks, secret redaction);
+│   ├── scanner/          rules, scan loop, comment lexer, linear-time matchers,
+│   │                     taint, SQL sinks, functions, metrics
+│   └── lib/              leaf helpers: fs (collection, report paths), encoding
+│                         and codecs (BOM/UTF-16/PEP 263), binary (magic
+│                         bytes), redact, issue, supplychain (install hooks),
+│                         pyjson/pycompat (Python-compatible JSON and text);
 │                         never import src/scanner/
 └── test/
     ├── cli.test.js            CLI commands, exit codes, report paths, suppression
     ├── report-format.test.js  the report contract (key order, gate math, redaction)
     ├── architecture.test.js   layering and ship policy
     ├── corpus.test.js         fixtures policy; samples corpus (gated)
+    ├── review-*.test.js       regression tests for the review findings
     ├── fixtures/              inert .json/.txt/.md only (enforced)
     ├── lib/                   install-hook classification
     └── scanner/               detection rules, hex decoding, private-key material
 ```
 
-**The two engines must agree.** `python/tests/architecture/test_js_parity.py` runs both CLIs on every fixture tree and on a synthetic project covering the false-positive fixes, and fails on any difference other than the listed Python-only features. When a rule changes in one engine, it changes in the other in the same commit; the JS twins of Python helpers say so in a comment (`Twin of lazaret.scanner.core....`).
+**The two engines must agree.** `python/tests/architecture/test_js_parity.py` runs both CLIs on every fixture tree, on a synthetic project covering the false-positive fixes, and on an adversarial tree generated at test time (BOM, UTF-16 and UTF-7 files, a NUL near the top of a UTF-8 file, `.github/`, `node_modules/` with and without `--deps`, suppression tricks, a 600-issue file, CRLF, Unicode identifiers, bidi characters, `.pyc` files, symlinks, a deep manifest, a large non-source file). It compares every finding as a multiset of (rule, file, line, severity, message), plus metrics, ratings, the gate and the exit code, and fails on any difference other than the listed Python-only features. `python/tests/scanner/test_review_dashboard_parity.py` holds the dashboard to the same standard. When a rule changes in one engine, it changes in the other in the same commit; the JS twins of Python helpers say so in a comment (`Twin of lazaret.scanner.core....`).
 
 Tests needing a service or the samples checkout are gated with an in-test guard and named with a suffix so they're recognizable:
 
@@ -233,7 +244,9 @@ cd python && python _build/lazaret_build.py dist     # writes the wheel and the 
 
 Package metadata and the console scripts are defined in that module rather than in a `[project]` table: a backend must honor `[project]` if one exists, and reading TOML on Python 3.10 would need a third-party parser. The version's single source is `__version__` in `src/lazaret/__init__.py`.
 
-Builds are reproducible: file order, timestamps, and permissions are fixed, and release CI stamps artifacts with the tagged commit's time (`SOURCE_DATE_EPOCH`), so rebuilding a tag gives byte-identical files. `tests/build/test_build_backend.py` checks this, along with the archive contents, the RECORD hashes, the absence of dependencies, and that the installed wheel runs.
+The backend packs from an allowlist (`*.py`, `*.sql`, `*.html`, `py.typed` under `src/lazaret/`) and stops with a list of offenders if anything else is there — a stray `.env`, `._*`, `.DS_Store`, `*.orig` or editor swap file can't reach a wheel or sdist built from a working tree. Metadata is version 2.4 with `License-Expression: Apache-2.0` and `License-File: LICENSE` (PEP 639).
+
+Builds are reproducible: file order, timestamps, permissions and the zip "created on" system are fixed, `.gitattributes` keeps line endings LF on every checkout, and release CI stamps artifacts with the tagged commit's time (`SOURCE_DATE_EPOCH`), so rebuilding a tag gives byte-identical files on any OS. `tests/build/test_build_backend.py` checks this, along with the archive contents, the RECORD hashes, the absence of dependencies, and that the installed wheel runs.
 
 ---
 
@@ -243,9 +256,9 @@ Builds are reproducible: file order, timestamps, and permissions are fixed, and 
 
 **PyPI sdist:** `pyproject.toml`, `_build/`, `src/`, `README.md`, `LICENSE`, `PKG-INFO`. Enough to rebuild the wheel, and no tests. Many projects include tests in the sdist so Linux distributions can run them; Lazaret deliberately doesn't, because its fixtures include entity-bomb documents and lookalike-package files that other scanners may flag on a PyPI release. Distribution packagers can use the tagged GitHub release archive, which has everything.
 
-**npm:** `package.json` `"files"` restricts the tarball to `bin/`, `src/`, `README.md`, and `LICENSE`.
+**npm:** `package.json` `"files"` restricts the tarball to `bin/`, `src/`, `README.md`, and `LICENSE`, and excludes dotfiles and key files inside them (`!**/.*`, `!**/*.pem`, `!**/*.key`, `!**/id_rsa*`, `!**/id_ed25519*`).
 
-Nothing from `lazaret-samples` ever enters any artifact. `.env` files are refused by `scripts/make_bundle.py` and never reach a package.
+Nothing from `lazaret-samples` ever enters any artifact. Credential files are refused by the build backend's allowlist, by npm's `files` negations, and by `scripts/make_bundle.py`.
 
 ---
 
@@ -255,10 +268,10 @@ Nothing from `lazaret-samples` ever enters any artifact. `.env` files are refuse
 
 - **versions**: Python and npm versions (and any release tag) agree.
 - **python-unit**: the whole suite on Linux, macOS, and Windows × Python 3.10–3.14. Gated tests skip. The OS matrix matters more than usual: Python bundles different Expat versions on macOS and Windows (which `safexml` depends on), and `pg` has platform-specific paths (Unix sockets, the pgpass permission check, the Windows `APPDATA` location).
-- **python-integration**: the live-Postgres tests against a throwaway `postgres:17` service container.
+- **python-integration**: the live-Postgres tests against a throwaway `postgres:17` service container, pinned by digest.
 - **js**: `npm test` on Linux, macOS, and Windows × Node 22 and 24.
 
-Nothing is installed in any job. `.github/workflows/release.yml` reruns CI on a `v*` tag, builds with the stdlib backend, and publishes each package after approval on its `pypi` or `npm` environment. npm releases are staged: they go public only after a second approval, with 2FA, on npm itself.
+Nothing is installed in any job, and tool versions (Python, Node and its bundled npm) are exact. `.github/workflows/release.yml` runs on a `v*` tag: `verify-tag` checks that the tagged commit is on `main` and that both versions match the tag, then CI reruns, `build-python` and `build-npm` build the artifacts (the npm tarball is packed once and published as built), and each package is published after approval on its `pypi` or `npm` environment. Both publish jobs need both builds, so one registry never gets a release the other can't. npm releases are staged: they go public only after a second approval, with 2FA, on npm itself. Dependabot proposes action updates after a 7-day cooldown.
 
 The auth-matrix and samples-corpus tests don't run in CI yet: the first needs a Postgres container with a custom `pg_hba.conf` and TLS certificate, the second a deploy key for the private samples repository.
 
