@@ -87,15 +87,30 @@ def _cstr(s: str, errors: str = "strict") -> bytes:
     return b + b"\x00"
 
 
+# Exceptions that mean a server message could not be parsed. Raised while the
+# connection is mid-protocol they become OperationalError and close it.
+_MALFORMED = (struct.error, ValueError, IndexError)
+
+
+def _malformed(what: str) -> OperationalError:
+    return OperationalError(f"protocol violation: malformed {what} from server")
+
+
 def _parse_fields(body: bytes) -> dict[str, str]:
     fields: dict[str, str] = {}
     pos = 0
     while pos < len(body) and body[pos] != 0:
         code = chr(body[pos])
-        end = body.index(b"\x00", pos + 1)
+        end = body.find(b"\x00", pos + 1)
+        if end < 0:
+            raise _malformed("error or notice message")
         fields[code] = body[pos + 1:end].decode("utf-8", "replace")
         pos = end + 1
     return fields
+
+
+def _tag(body: bytes) -> str:
+    return body[:-1].decode("utf-8", "replace")
 
 
 def _default_notice_handler(notice: Notice) -> None:
@@ -121,8 +136,10 @@ def connect(dsn: str | None = None, /, *, timeout: float | None = None,
                       allow_cleartext_password=allow_cleartext_password)
     try:
         conn._open()
-    except BaseException:
+    except BaseException as exc:
         conn._abort()
+        if isinstance(exc, _MALFORMED) and not isinstance(exc, Error):
+            raise OperationalError(f"protocol violation during connection setup: {exc}") from exc
         raise
     return conn
 
@@ -244,7 +261,7 @@ class Connection:
                 while done < len(chunk):
                     kind, body = self._read_message()
                     if kind == b"C":
-                        result = CommandResult.from_tag(body[:-1].decode("utf-8"))
+                        result = CommandResult.from_tag(_tag(body))
                         if result.rowcount is not None:
                             total += result.rowcount
                             counted = True
@@ -273,7 +290,7 @@ class Connection:
             while True:
                 kind, body = self._read_message()
                 if kind == b"C":
-                    results.append(CommandResult.from_tag(body[:-1].decode("utf-8")))
+                    results.append(CommandResult.from_tag(_tag(body)))
                 elif kind == b"E":
                     error = error or error_from_fields(_parse_fields(body))
                 elif kind == b"Z":
@@ -488,7 +505,7 @@ class Connection:
                 sock = socket.create_connection((p.host, p.port), timeout=p.connect_timeout)
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-        except OSError as exc:
+        except (OSError, ValueError) as exc:  # ValueError: e.g. a host name IDNA can't encode
             where = p.unix_socket_path if p.is_unix_socket else f"{p.host}:{p.port}"
             raise OperationalError(f"could not connect to {where}: {exc}") from exc
         return sock
@@ -504,7 +521,12 @@ class Connection:
         except OSError as exc:
             raise OperationalError(f"SSL negotiation failed: {exc}") from exc
         if answer == b"S":
-            context = self._ssl_context()
+            try:
+                context = self._ssl_context()
+            except OperationalError:
+                raise
+            except (OSError, ValueError) as exc:  # missing or unreadable cert/key/CA file
+                raise OperationalError(f"could not set up TLS: {exc}") from exc
             try:
                 wrapped = context.wrap_socket(sock, server_hostname=p.host)
             except ssl.SSLCertVerificationError as exc:
@@ -540,9 +562,15 @@ class Connection:
                     raise OperationalError(
                         f"sslmode={p.sslmode} needs a root certificate: {root} does not exist "
                         "(set sslrootcert to a CA file, or sslrootcert=system with verify-full)")
-                ctx.load_verify_locations(cafile=root)
+                try:
+                    ctx.load_verify_locations(cafile=root)
+                except (OSError, ValueError) as exc:
+                    raise OperationalError(f"could not load root certificate {root}: {exc}") from exc
         if p.sslcert:
-            ctx.load_cert_chain(p.sslcert, p.sslkey)
+            try:
+                ctx.load_cert_chain(p.sslcert, p.sslkey)
+            except (OSError, ValueError) as exc:
+                raise OperationalError(f"could not load client certificate {p.sslcert}: {exc}") from exc
         return ctx
 
     # --- authentication ----------------------------------------------------------
@@ -575,6 +603,8 @@ class Connection:
                 continue
             if kind != b"R":
                 raise OperationalError(f"unexpected message {kind!r} during authentication")
+            if len(body) < 4:
+                raise _malformed("authentication request")
             code = _I32.unpack_from(body)[0]
 
             if code == 0:  # AuthenticationOk
@@ -606,12 +636,14 @@ class Connection:
                         "refusing (use TLS, or pass allow_cleartext_password=True)")
                 self._send(_msg(b"p", _cstr(self._password(), "surrogateescape")))
             elif code == 5:
+                if len(body) != 8:
+                    raise _malformed("MD5 authentication request")
                 salt = body[4:8]
                 inner = hashlib.md5((self._password() + p.user).encode("utf-8", "surrogateescape")).hexdigest()
                 outer = hashlib.md5(inner.encode("ascii") + salt).hexdigest()
                 self._send(_msg(b"p", _cstr("md5" + outer)))
             elif code == 10:
-                mechanisms = [m.decode("ascii") for m in body[4:].split(b"\x00") if m]
+                mechanisms = [m.decode("ascii", "replace") for m in body[4:].split(b"\x00") if m]
                 scram = self._start_scram(mechanisms)
                 first = scram.client_first()
                 self._send(_msg(b"p", _cstr(scram.mechanism) + _I32.pack(len(first)) + first))
@@ -659,11 +691,13 @@ class Connection:
             raise InterfaceError("connection is already in use by another thread")
         try:
             yield
-        except BaseException:
+        except BaseException as exc:
             # Any failure that leaves the protocol out of sync makes the
             # connection unusable; errors raised after ReadyForQuery do not.
             if not self._synced:
                 self._abort()
+                if isinstance(exc, _MALFORMED) and not isinstance(exc, Error):
+                    raise OperationalError(f"protocol violation: malformed message from server ({exc})") from exc
             raise
         finally:
             self._lock.release()
@@ -709,7 +743,7 @@ class Connection:
             elif kind == b"T":
                 columns, decode = self._row_decoder(body)
             elif kind == b"C":
-                tags.append(body[:-1].decode("utf-8"))
+                tags.append(_tag(body))
             elif kind == b"Z":
                 self._ready(body)
                 break
@@ -733,7 +767,7 @@ class Connection:
         names, decoders = [], []
         for _ in range(count):
             end = body.index(b"\x00", pos)
-            names.append(body[pos:end].decode("utf-8"))
+            names.append(body[pos:end].decode("utf-8", "replace"))
             pos = end + 1
             type_oid = struct.unpack_from("!IhI", body, pos)[2]
             pos += 18
@@ -753,6 +787,8 @@ class Connection:
                 if length < 0:
                     values.append(None)
                 else:
+                    if pos + length > len(data):
+                        raise _malformed("data row")
                     values.append(fn(data[pos:pos + length]))
                     pos += length
             return row_cls(values)
@@ -775,24 +811,32 @@ class Connection:
 
     def _handle_async(self, kind: bytes, body: bytes) -> bool:
         if kind == b"N":
+            notice = Notice.from_fields(_parse_fields(body))  # a malformed notice is a protocol error
             try:
-                self.notice_handler(Notice.from_fields(_parse_fields(body)))
+                self.notice_handler(notice)
             except Exception:
                 _log.exception("notice handler raised")
             return True
         if kind == b"S":
-            name, value = body[:-1].split(b"\x00", 1)
-            self.parameters[name.decode("utf-8")] = value.rstrip(b"\x00").decode("utf-8")
-            if name == b"client_encoding" and self.parameters["client_encoding"] != "UTF8":
-                _log.warning("client_encoding changed to %s; lazaret.pg only supports UTF8",
-                             self.parameters["client_encoding"])
+            parts = body.split(b"\x00")
+            if len(parts) < 3:
+                raise _malformed("parameter status message")
+            name, value = parts[0].decode("utf-8", "replace"), parts[1].decode("utf-8", "replace")
+            self.parameters[name] = value
+            if name == "client_encoding" and value != "UTF8":
+                _log.warning("client_encoding changed to %s; lazaret.pg only supports UTF8", value)
             return True
         if kind == b"A":
+            parts = body[4:].split(b"\x00")
+            if len(body) < 4 or len(parts) < 3:
+                raise _malformed("notification message")
             pid = _I32.unpack_from(body)[0]
-            channel, payload = body[4:].split(b"\x00")[:2]
-            self.notifications.append(Notification(pid, channel.decode("utf-8"), payload.decode("utf-8")))
+            self.notifications.append(Notification(pid, parts[0].decode("utf-8", "replace"),
+                                                   parts[1].decode("utf-8", "replace")))
             return True
         if kind == b"K":
+            if len(body) < 8:
+                raise _malformed("backend key message")
             self._backend_key = (_I32.unpack_from(body)[0], bytes(body[4:]))
             return True
         return False

@@ -132,6 +132,13 @@ def _hmac(key: bytes, msg: bytes) -> bytes:
     return hmac.new(key, msg, hashlib.sha256).digest()
 
 
+def _decode(msg: bytes) -> str:
+    try:
+        return msg.decode("utf-8")
+    except UnicodeDecodeError:
+        raise AuthenticationError("malformed SCRAM message from server") from None
+
+
 def _parse_attrs(msg: str) -> dict[str, str]:
     out = {}
     for part in msg.split(","):
@@ -177,7 +184,7 @@ class ScramClient:
         return (self._gs2 + self._client_first_bare).encode("utf-8")
 
     def client_final(self, server_first: bytes) -> bytes:
-        server_first_str = server_first.decode("utf-8")
+        server_first_str = _decode(server_first)
         attrs = _parse_attrs(server_first_str)
         if "m" in attrs:
             raise AuthenticationError("server requires an unsupported SCRAM extension")
@@ -206,7 +213,7 @@ class ScramClient:
         return f"{final_without_proof},p={base64.b64encode(proof).decode('ascii')}".encode("ascii")
 
     def verify_server_final(self, server_final: bytes) -> None:
-        attrs = _parse_attrs(server_final.decode("utf-8"))
+        attrs = _parse_attrs(_decode(server_final))
         if "e" in attrs:
             raise AuthenticationError(f"server rejected SCRAM authentication: {attrs['e']}")
         if self._server_signature is None or "v" not in attrs:

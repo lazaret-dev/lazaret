@@ -320,7 +320,7 @@ def lookup_pgpass(params: ConnectParams) -> str | None:
     host = "localhost" if params.is_unix_socket else params.host
     wanted = (host, str(params.port), params.database, params.user)
     try:
-        with open(path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8", errors="surrogateescape") as f:
             for raw in f:
                 line = raw.rstrip("\r\n")
                 if not line or line.startswith("#"):
