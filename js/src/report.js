@@ -81,8 +81,9 @@ export function jsonRenderer(res, { key = null } = {}) {
 // Terminal escape-sequence injection (audit H1): every string derived from
 // scanned content — file names, messages, excerpts, the project path — passes
 // through sanitizeTerm()/safeExcerpt() before it reaches a terminal. C0
-// controls except TAB/LF, CR, DEL (as the Python engine's sanitize_term), plus
-// C1 controls and bidi overrides, become '·'.
+// controls except TAB/LF, CR, DEL, the C1 controls (0x9b is a one-byte CSI)
+// and the bidi controls become '·' — exactly the set of the Python engine's
+// sanitize_term (python/tests/scanner/test_review_term_c1.py compares them).
 const TERM_UNSAFE_RE = /[\x00-\x08\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g;
 export function sanitizeTerm(text) {
   return String(text).replace(TERM_UNSAFE_RE, "·");

@@ -52,13 +52,16 @@ from lazaret.scanner import taintspec
 # BY lazaret, so it keeps a byte-identical local duplicate rather than
 # importing it (no import cycle). test_terminal_sanitize.py asserts the two
 # agree on a hostile matrix. Mapped set: every C0 control byte except TAB
-# (0x09) and LF (0x0a), plus CR (0x0d) and DEL (0x7f) — ESC/BEL, the two
-# bytes of the audit PoC, are inside these ranges.
+# (0x09) and LF (0x0a), plus CR (0x0d), DEL (0x7f), the C1 controls
+# U+0080–U+009F and the bidi controls U+202A–U+202E, U+2066–U+2069 — ESC/BEL,
+# the two bytes of the audit PoC, are inside these ranges.
 _SANITIZE_TERM_CHARS = (
     "".join(chr(n) for n in range(0x00, 0x09))      # NUL … BS
     + "".join(chr(n) for n in (0x0b, 0x0c))         # VT, FF
     + "".join(chr(n) for n in range(0x0d, 0x20))    # CR, SO … US (incl. ESC)
-    + chr(0x7f)                                     # DEL
+    + "".join(chr(n) for n in range(0x7f, 0xa0))    # DEL, C1 controls (incl. CSI)
+    + "".join(chr(n) for n in range(0x202a, 0x202f))  # bidi LRE RLE PDF LRO RLO
+    + "".join(chr(n) for n in range(0x2066, 0x206a))  # bidi LRI RLI FSI PDI
 )
 _SANITIZE_TERM_TAB = str.maketrans(
     {ch: "·" for ch in _SANITIZE_TERM_CHARS})

@@ -4032,14 +4032,24 @@ SEV_COLOR = {"BLOCKER": "41;97", "CRITICAL": "31", "MAJOR": "33", "MINOR": "36",
 # a terminal/CI log. safe_excerpt always did this for the code excerpt; the
 # file-path header, the issue messages and the registry print paths did not.
 # The mapped set: every C0 control byte except TAB (0x09) and LF (0x0a),
-# plus CR (0x0d) and DEL (0x7f). Built with chr() so the table is exact and
-# readable; ESC (0x1b) and BEL (0x07) — the two bytes the audit PoC used to
-# forge SGR colors and hijack the terminal title — are inside these ranges.
+# plus CR (0x0d), DEL (0x7f), the C1 controls U+0080–U+009F (0x9b is a
+# one-byte CSI introducer on many terminals, 0x9d an OSC) and the bidi
+# embedding/override/isolate controls U+202A–U+202E, U+2066–U+2069 (they
+# reorder what the terminal shows — Trojan Source). The npm engine's
+# sanitizeTerm maps exactly the same set. Built with chr() so the table is
+# exact and readable; ESC (0x1b) and BEL (0x07) — the two bytes the audit
+# PoC used to forge SGR colors and hijack the terminal title — are inside
+# these ranges.
+_BIDI_CONTROLS = (
+    "".join(chr(n) for n in range(0x202a, 0x202f))  # LRE RLE PDF LRO RLO
+    + "".join(chr(n) for n in range(0x2066, 0x206a))  # LRI RLI FSI PDI
+)
 _SANITIZE_TERM_CHARS = (
     "".join(chr(n) for n in range(0x00, 0x09))      # NUL … BS
     + "".join(chr(n) for n in (0x0b, 0x0c))         # VT, FF
     + "".join(chr(n) for n in range(0x0d, 0x20))    # CR, SO … US (incl. ESC)
-    + chr(0x7f)                                     # DEL
+    + "".join(chr(n) for n in range(0x7f, 0xa0))    # DEL, C1 controls (incl. CSI)
+    + _BIDI_CONTROLS
 )
 _SANITIZE_TERM_TAB = str.maketrans(
     {ch: "·" for ch in _SANITIZE_TERM_CHARS})
@@ -4051,7 +4061,8 @@ def sanitize_term(s):
     Hostile package content reaches the terminal via file paths (archive
     member names, walked repo paths), issue messages (X-FLOW source/sink
     paths, install-hook command text), registry metadata and config paths.
-    Every C0 control byte except newline and tab, plus CR and DEL, maps to
+    Every C0 control byte except newline and tab, plus CR, DEL, the C1
+    controls and the bidi controls (_SANITIZE_TERM_CHARS), maps to
     '·' — the line terminator is preserved so a multi-line message still
     prints as multiple lines (the existing behaviour), and tab is printable
     structure (safe_excerpt keeps tabs too). Same contract as safe_excerpt
@@ -4080,8 +4091,11 @@ EXCERPT_WIDTH = 100   # overridable via --excerpt-width
 def safe_excerpt(text, width=None):
     """Sanitize a source line for terminal display. Scanned code may be hostile
     (esp. packages), so strip ANSI/control bytes that could rewrite the terminal
-    — ESC, CR, BS, BEL, NUL — replacing them with '·'. Tabs become spaces, the
-    line is trimmed and truncated with an ellipsis."""
+    — ESC, CR, BS, BEL, NUL, C1 controls, bidi controls and anything else
+    str.isprintable() rejects — replacing them with '·'. Tabs become spaces,
+    the line is trimmed and truncated with an ellipsis. (Twin of the npm
+    engine's safeExcerpt; the bidi controls are named explicitly there and
+    here so the result does not hang on a Unicode database's category.)"""
     if width is None:
         width = EXCERPT_WIDTH
     text = text.replace("\t", " ").strip()
@@ -4090,7 +4104,8 @@ def safe_excerpt(text, width=None):
     out = []
     for ch in text[:width]:
         o = ord(ch)
-        if ch == " " or 0x20 <= o < 0x7f or (o > 0xa0 and ch.isprintable()):
+        if ch == " " or 0x20 <= o < 0x7f or (
+                o > 0xa0 and ch.isprintable() and ch not in _BIDI_CONTROLS):
             out.append(ch)
         else:
             out.append("·")
