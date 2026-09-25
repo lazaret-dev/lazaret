@@ -1948,18 +1948,18 @@ import traceback as _traceback
 #     to a host file pulled that file into the report;
 #   * symlinks are never followed; each one inside the tree is an INFO
 #     Q-SYMLINK finding; unreadable entries are INFO Q-UNREADABLE findings;
-#   * reads are bounded (size cap + 1; a header sample for compiled
-#     artifacts);
+#   * reads are bounded (size cap + 1 for scanned files, a header sample for
+#     everything else);
 #   * the walk is iterative (os.walk recursed: a 1,100-deep tree raised
 #     RecursionError on 3.10/3.11);
 #   * paths in findings are root-relative and valid UTF-8 (a non-UTF-8 file
 #     name crashed the HTML writer after the scan).
 
-#: Files larger than this are not read: they get an SC-TRUNCATED finding
-#: instead (compiled artifacts are classified from their header whatever
-#: their size).
+#: Files that would be source-scanned or parsed as manifests and are larger
+#: than this are not read: they get an SC-TRUNCATED finding instead. Every
+#: other file is classified from a header sample whatever its size.
 SOURCE_SIZE_CAP = 2_000_000
-#: Bytes of a metadata file (AppleDouble) passed to classify_binary.
+#: Bytes read from every non-source regular file for magic-byte classification.
 HEADER_SAMPLE_BYTES = 512
 MANIFEST_NAMES = ("package.json", "binding.gyp")
 #: AppleDouble / AppleSingle metadata ("._name" files macOS writes on non-HFS
@@ -2244,20 +2244,21 @@ def _collect_file(path, rel, st, in_dep, col):
     manifest = name in MANIFEST_NAMES
     lang = None if manifest else EXTS.get(ext)
     issues = col["issues"]
-    # compiled artifacts: flag by header regardless of size
-    if ext in COMPILED_EXTS:
-        head = _read_prefix(path, 8192)
+    if not manifest and lang is None:
+        # FIX-SPEC 9: every non-source regular file is classified by magic
+        # bytes from a header sample (repo mode used to look at a fixed list
+        # of extensions only: an ELF named `helper` or `logo.png` passed).
+        head = _read_prefix(path, HEADER_SAMPLE_BYTES)
         bi = classify_binary(disp, head, size, "repo")
         if bi:
             issues.append(bi)
         return
+    # FIX-SPEC 9: the size cap applies only to files that would be read whole.
     # Verdict integrity (audit C2/G16): an oversize file is an SC-TRUNCATED
     # finding, never a silent skip, and it is not added to the scanned files.
     if size > SOURCE_SIZE_CAP:
         issues.append(truncated_issue(
             disp, f"{size:,} bytes exceeds the {SOURCE_SIZE_CAP:,}-byte file limit"))
-        return
-    if not manifest and lang is None:
         return
     data = _read_prefix(path, SOURCE_SIZE_CAP + 1)
     if len(data) > SOURCE_SIZE_CAP:      # grew between the lstat and the read
