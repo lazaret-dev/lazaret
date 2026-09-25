@@ -4,6 +4,12 @@
 # tokens are stored in GitHub. Each publish job runs in its own environment;
 # add required reviewers to the "pypi" and "npm" environments so nothing ships
 # without your approval.
+#
+# Order: verify-tag -> test -> build-python + build-npm -> publish-pypi +
+# publish-npm. Both publish jobs need BOTH builds, so a failure on either
+# side stops both registries (they stay in lockstep). The jobs that hold
+# id-token: write install nothing: they publish the artifacts the build jobs
+# uploaded, with tools pinned to exact versions.
 name: Release
 
 on:
@@ -14,11 +20,47 @@ permissions:
   contents: read
 
 jobs:
+  # The tag must be what scripts/tag-release.sh makes: an annotated, signed
+  # tag on a commit that is on main, whose committed versions match the tag.
+  verify-tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Tagged commit is on main
+        run: |
+          # Fetch main explicitly (public repository: no credentials needed).
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          # Re-fetch the tag itself: checkout can leave a lightweight copy of it.
+          git fetch --no-tags --force origin "+refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+          commit=$(git rev-parse "refs/tags/${GITHUB_REF_NAME}^{commit}")
+          if ! git merge-base --is-ancestor "$commit" refs/remotes/origin/main; then
+            echo "::error::${GITHUB_REF_NAME} points at ${commit}, which is not on main. Delete the tag and re-tag a commit on main (docs/RELEASING.md, Recovering from a bad tag)."
+            exit 1
+          fi
+          echo "${GITHUB_REF_NAME} -> ${commit} is on main"
+      - name: Tag is annotated and signed
+        run: |
+          if [ "$(git cat-file -t "refs/tags/${GITHUB_REF_NAME}")" != "tag" ]; then
+            echo "::error::${GITHUB_REF_NAME} is a lightweight tag. Release tags are annotated and signed: use scripts/tag-release.sh."
+            exit 1
+          fi
+          if ! git cat-file tag "refs/tags/${GITHUB_REF_NAME}" \
+               | grep -Eq '^-----BEGIN (PGP|SSH) SIGNATURE-----|^-----BEGIN SIGNED MESSAGE-----'; then
+            echo "::error::${GITHUB_REF_NAME} is not signed. Release tags are signed: use scripts/tag-release.sh."
+            exit 1
+          fi
+      - name: Committed versions match the tag
+        run: sh scripts/check-versions.sh "refs/tags/${GITHUB_REF_NAME}" "${GITHUB_REF_NAME}"
+
   test:
+    needs: verify-tag
     uses: ./.github/workflows/ci.yml
 
   build-python:
-    needs: test
+    needs: [verify-tag, test]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -26,18 +68,49 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.12"
+          # Exact version: the compressed bytes depend on the interpreter's
+          # zlib, so rebuilding a tag byte-for-byte needs the same Python.
+          python-version: "3.12.14"
       - working-directory: python
         # Reproducible: stamped with the tagged commit's time, so rebuilding
-        # the same tag gives byte-identical artifacts.
+        # the same tag gives byte-identical artifacts. The backend refuses to
+        # build if anything outside its allowlist is in the source tree.
         run: SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)" python _build/lazaret_build.py dist
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: python-dist
           path: python/dist/
 
+  build-npm:
+    needs: [verify-tag, test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.21.0"   # exact; bundles npm 11.19.0
+      - name: Pack
+        working-directory: js
+        run: |
+          mkdir -p ../npm-dist
+          npm pack --ignore-scripts --pack-destination ../npm-dist
+          tarball="../npm-dist/lazaret-${GITHUB_REF_NAME#v}.tgz"
+          test -f "$tarball" || { echo "::error::expected $tarball"; ls -l ../npm-dist; exit 1; }
+          tar -tzf "$tarball"
+          # package.json "files" excludes dotfiles; this is the backstop.
+          if tar -tzf "$tarball" | grep -E '(^|/)\.'; then
+            echo "::error::the npm tarball contains dotfiles (listed above)"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: npm-dist
+          path: npm-dist/
+
   publish-pypi:
-    needs: build-python
+    needs: [build-python, build-npm]
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -52,7 +125,7 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
 
   publish-npm:
-    needs: test
+    needs: [build-python, build-npm]
     runs-on: ubuntu-latest
     environment:
       name: npm
@@ -60,20 +133,37 @@ jobs:
     permissions:
       id-token: write   # trusted publishing + provenance
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          persist-credentials: false
+          name: npm-dist
+          path: npm-dist/
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "24"
+          # Exact Node version, and its bundled npm: nothing is downloaded
+          # from the npm registry and run in this job, which can mint an
+          # OIDC token. Bump both together (see docs/RELEASING.md).
+          node-version: "24.21.0"   # bundles npm 11.19.0
           registry-url: "https://registry.npmjs.org"
-      - run: npm install -g npm@11   # trusted publishing needs npm >= 11.5.1; staged publishing >= 11.15.0
-      - working-directory: js
-        # Stage only. The npm trusted publisher allows `npm stage publish` and
-        # nothing else, so this version stays hidden until a maintainer
-        # approves it with 2FA: npmjs.com -> lazaret -> Staged Packages, or
-        # `npm stage approve <stage-id>`.
-        run: npm stage publish
+      - name: npm supports trusted and staged publishing
+        # trusted publishing needs npm >= 11.5.1; `npm stage` >= 11.15.0
+        run: |
+          node -e '
+            const have = process.argv[1].trim().split(".").map(Number);
+            const need = [11, 15, 0];
+            for (let i = 0; i < 3; i++) {
+              if (have[i] > need[i]) break;
+              if (have[i] < need[i]) {
+                console.error(`npm ${process.argv[1].trim()} is too old: need >= ${need.join(".")}`);
+                process.exit(1);
+              }
+            }
+            console.log(`npm ${process.argv[1].trim()}`);
+          ' "$(npm --version)"
+      # Stage only. The npm trusted publisher allows `npm stage publish` and
+      # nothing else, so this version stays hidden until a maintainer
+      # approves it with 2FA: npmjs.com -> lazaret -> Staged Packages, or
+      # `npm stage approve <stage-id>`. The tarball is the one build-npm packed.
+      - run: npm stage publish "npm-dist/lazaret-${GITHUB_REF_NAME#v}.tgz"
       - name: Approval reminder
         run: >-
           echo "lazaret ${GITHUB_REF_NAME} is staged on npm, not yet public. Approve it with 2FA at
