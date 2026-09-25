@@ -1595,9 +1595,18 @@ def scan_sql_nowhere(path, content, issues, lines):
             skip_to = semi  # non-overlapping: heads before the ';' are spent
 
 
+def normalize_newlines(text):
+    """Line endings as text mode reads them: \r\n and a lone \r become \n.
+    Project files are read in text mode already; registry archives are decoded
+    from bytes, so a package authored on Windows would otherwise leave "\r" on
+    every line. Twin of normalizeNewlines in js/src/lib/fs.js."""
+    return text.replace("\r\n", "\n").replace("\r", "\n") if "\r" in text else text
+
+
 def scan_file(path, content, lang, dep=False):
     """Scan one file. dep=True → dependency mode: only supply-chain and
     secret rules run (quality/bug rules would be pure noise in vendored code)."""
+    content = normalize_newlines(content)
     issues = []
     lines = content.split("\n")
     for i, line in enumerate(lines):

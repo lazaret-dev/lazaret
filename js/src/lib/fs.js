@@ -10,6 +10,16 @@ export const EXTS = {
 
 // G10: only .git and __pycache__ are skipped by default (VCS metadata and
 // build cache — never source). Dependency dirs are opt-in via includeDeps.
+/**
+ * Line endings as Python's text mode reads them: \r\n and a lone \r both become \n.
+ * Without this, a file with Windows line endings leaves "\r" at the end of every
+ * line, which (for one) turns a bare "# nosec" into a suppression that matches no
+ * rule. Twin of lazaret.scanner.core.normalize_newlines.
+ */
+export function normalizeNewlines(text) {
+  return typeof text === "string" && text.includes("\r") ? text.replace(/\r\n?/g, "\n") : text;
+}
+
 export const SKIP_DIRS = new Set([".git", "__pycache__"]);
 export const OPTIN_SKIP_DIRS = [
   "node_modules", "venv", ".venv", "env", "dist", "build", ".next",
@@ -71,12 +81,12 @@ export function collectFiles(root, { includeDeps = false } = {}) {
       continue;
     }
     if (rel === "package.json" || rel.endsWith(`${sep}package.json`)) {
-      manifests.push({ kind: "package.json", path: rel, content: readFileSync(full, "utf8") });
+      manifests.push({ kind: "package.json", path: rel, content: normalizeNewlines(readFileSync(full, "utf8")) });
       continue;
     }
     if (rel === "binding.gyp" || rel.endsWith(`${sep}binding.gyp`)) {
       // G11: node-gyp actions run at install time (see scanManifests).
-      manifests.push({ kind: "binding.gyp", path: rel, content: readFileSync(full, "utf8") });
+      manifests.push({ kind: "binding.gyp", path: rel, content: normalizeNewlines(readFileSync(full, "utf8")) });
       continue;
     }
     const ext = extname(rel).toLowerCase();
@@ -85,7 +95,7 @@ export function collectFiles(root, { includeDeps = false } = {}) {
     const inDep = rel.split(sep).some((p) => DEP_MARKERS.has(p));
     if (inDep && !includeDeps) continue;   // opt-in only
     files.push({
-      path: rel, content: readFileSync(full, "utf8"), lang, dep: includeDeps ? inDep : false,
+      path: rel, content: normalizeNewlines(readFileSync(full, "utf8")), lang, dep: includeDeps ? inDep : false,
     });
   }
   return { files, manifests, binaryIssues };

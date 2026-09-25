@@ -76,6 +76,33 @@ class EngineParityTests(unittest.TestCase):
                 if name not in PYTHON_ONLY:
                     self.assertEqual(js_exit, py_exit)
 
+    def test_windows_line_endings_change_nothing(self):
+        """Every fixture, converted to CRLF (as a Windows checkout does), must
+        give exactly the findings its LF original gives, in both engines. CI
+        on Windows first caught this: a bare "# nosec" on a CRLF line was
+        ignored by the JS engine."""
+        for name in sorted(os.listdir(_support.FIXTURES)):
+            src = os.path.join(_support.FIXTURES, name)
+            if not os.path.isdir(src):
+                continue
+            with self.subTest(fixture=name), tempfile.TemporaryDirectory() as tmp:
+                lf, crlf = os.path.join(tmp, "lf"), os.path.join(tmp, "crlf")
+                shutil.copytree(src, lf)
+                shutil.copytree(src, crlf)
+                for dirpath, _, files in os.walk(crlf):
+                    for fname in files:
+                        if fname.endswith((".py", ".js", ".sql", ".json")):
+                            path = os.path.join(dirpath, fname)
+                            with open(path, "rb") as f:
+                                data = f.read().replace(b"\r\n", b"\n")
+                            with open(path, "wb") as f:
+                                f.write(data.replace(b"\n", b"\r\n"))
+                (js_lf_exit, js_lf), (py_lf_exit, py_lf) = both(lf)
+                (js_cr_exit, js_cr), (py_cr_exit, py_cr) = both(crlf)
+                self.assertEqual(js_cr, js_lf, "JS engine: CRLF changed the findings")
+                self.assertEqual(py_cr, py_lf, "Python engine: CRLF changed the findings")
+                self.assertEqual((js_cr_exit, py_cr_exit), (js_lf_exit, py_lf_exit))
+
     def test_false_positive_fixes_agree(self):
         with tempfile.TemporaryDirectory() as root:
             for rel, content in SYNTHETIC.items():

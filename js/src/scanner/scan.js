@@ -1,4 +1,5 @@
 // scanFile and helpers — verbatim from the dashboard (lazaret/web/lazaret.html) (exports added).
+import { normalizeNewlines } from "../lib/fs.js";
 import { RULES, TEXT_RULES } from "./rules.js";
 import { STRING_LIT_RE, ASSIGN_RE, TAINT_SOURCES, TAINT_SINKS, FULL_SAN, PARTIAL_SAN, neutralize, escRe } from "./taint.js";
 import { sqlSinkScan } from "./sql.js";
@@ -95,6 +96,10 @@ function tokenHasMaterial(ruleRe, line, lines, i){
 }
 
 export function scanFile(file){
+  // library callers may pass content with Windows line endings; the CLI's
+  // collectFiles has already normalized (both engines scan \n-separated text)
+  if (typeof file.content === "string" && file.content.includes("\r"))
+    file = { ...file, content: normalizeNewlines(file.content) };
   const issues = [];
   const lines = file.content.split("\n");
   const lang = file.lang;

@@ -32,3 +32,17 @@ test("a PEM header constant is not a key; a header with key material is", () => 
   const key = "KEY = '''-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA0000000000000000000000000000000000000000000\n'''\n";
   assert.ok(rules(key).some(([r]) => r === "S-TOKEN"));
 });
+
+test("Windows line endings change nothing: nosec still suppresses", () => {
+  const lf = "import subprocess\n" +
+             "def run(cmd):\n" +
+             "    subprocess.run(cmd, shell=True)  # nosec\n" +
+             "    subprocess.run(cmd, shell=True)\n";
+  const key = (content) => scanFile({ name: "t.py", path: "t.py", content, lang: "py" })
+    .map((i) => `${i.rule}:${i.line}`).sort();
+  assert.deepEqual(key(lf.replaceAll("\n", "\r\n")), key(lf));
+  assert.deepEqual(key(lf.replaceAll("\n", "\r")), key(lf));
+  // the finding on line 3 is suppressed, the one on line 4 is not
+  assert.ok(!key(lf.replaceAll("\n", "\r\n")).includes("S-SHELL-TRUE:3"));
+  assert.ok(key(lf.replaceAll("\n", "\r\n")).includes("S-SHELL-TRUE:4"));
+});
