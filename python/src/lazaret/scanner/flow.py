@@ -6,37 +6,46 @@ function. This module adds *whole-program* analysis: it follows untrusted data
 through function calls and across files, so a source in one module that flows
 into a sink in another is caught.
 
-Approach — function summaries + a bounded fixpoint (the standard scalable
+Approach — function summaries + a worklist fixpoint (the standard scalable
 technique):
 
-  1. Parse every file. For each user-defined function compute a summary:
-        param_to_sink   : parameter -> the dangerous sink its value reaches
-        param_to_return : parameters whose value flows into the return value
-        returns_source  : the function returns data derived from a taint source
-  2. Iterate to a fixpoint so summaries compose transitively (f calls g calls
-     a sink; g returns tainted data that f then passes to a sink; etc.).
+  1. Parse every file (a file the parser rejects is skipped with an INFO
+     note; it never costs the rest of the pass). Every function, method,
+     nested def and each module's top-level code (as a pseudo-function, so
+     scripts and `if __name__ == "__main__":` blocks count) gets a summary:
+        param_to_sink   : parameter -> {sink category: sink location}
+        param_to_return : parameter -> categories it is sanitized for when
+                          it flows into the return value
+        ret_source      : a taint source the function returns (and its origin)
+  2. Calls are resolved through imports, classes and self (see "Resolution
+     model" below) and arguments are bound like inspect.signature. Summaries
+     are iterated to a fixpoint callee-first, re-analyzing a function only
+     when something it depends on changed (a generous cap reports itself).
   3. On the final pass, wherever a concrete taint *source* reaches a sink —
-     directly, through a returned-tainted call, or by being passed into a
-     function whose parameter reaches a sink — emit an X-FLOW finding naming
-     the source and sink locations (which may be in different files).
+     by being passed into a function whose parameter reaches a sink, or by
+     being returned from another function straight into a sink — emit an
+     X-* finding naming the source and sink locations (possibly different
+     files).
 
-Python analysis is AST-based (accurate, stdlib only). JavaScript uses a
-bounded regex/brace heuristic (no JS parser available without dependencies),
-so JS results are best-effort and intentionally conservative.
+Python analysis is AST-based (stdlib only). JavaScript uses a bounded
+lexer/regex heuristic (no JS parser available without dependencies), so JS
+results are best-effort and intentionally conservative.
 
-Public entry point: analyze(files) -> list[issue dict]
+Public entry point: analyze(files) -> list[issue dict] (never raises)
   files: iterable of {"path": str, "content": str, "lang": "py"|"js"}
 """
 import ast
 import bisect
+import builtins as _builtins
+import collections
 import json
 import os
+import posixpath
 import re
 import sys
+import time
 
 from lazaret.scanner import taintspec
-
-MAX_ITERS = 6  # fixpoint safety bound
 
 # ---------------- terminal-control neutralizer (audit H1) ----------------
 # lazaret.sanitize_term is the canonical copy; lazaret_flow is imported
@@ -137,33 +146,113 @@ def _issue(cat, caller_file, line, lines, source_loc, sink_loc, chain):
 # ======================================================================
 # Python — AST based
 # ======================================================================
+#
+# Resolution model (review finding 10): a call is matched only against the
+# function it can actually name —
+#   f()           a module-level function defined in, or imported into, the
+#                 calling module (`from m import f as g`, `import m; m.f()`,
+#                 relative imports, re-exports, star imports), a nested def,
+#                 or a class constructor (its __init__); a bare name that is
+#                 neither defined, imported nor a builtin falls back to the
+#                 project's only module-level function of that name;
+#   self.m()      methods of the enclosing class and its project bases;
+#   C().m(), x.m() with x = C(...), C.m(), super().m()   methods of C;
+#   obj.m()       unknown receiver: the project's methods named m, only when
+#                 there are at most MAX_DUCK_CANDIDATES of them and m is not a
+#                 builtin/dict/str/file-like name (get, open, run, …).
+# Anything else is an external call: it propagates taint from its arguments
+# (and receiver) to its return value, unless it is a sanitizer or returns a
+# non-string value (len, isinstance, …).
+
+MAX_ITERS = 50                 # re-analyses of one function before cutoff
+FLOW_MAX_FILES = 20_000        # Python files analyzed per run
+FLOW_MAX_BYTES = 64_000_000    # Python source characters analyzed per run
+FLOW_TIME_BUDGET = 120.0       # seconds for the Python summary fixpoint
+MAX_DUCK_CANDIDATES = 4        # obj.m() with an unknown receiver
+_MAX_IMPORT_HOPS = 5
+_BUILTIN_NAMES = frozenset(dir(_builtins))
+_BUILTIN_FULL_PY = frozenset(FULL_SANITIZERS_PY)   # before any configure()
+
+# Method names never resolved by duck typing when the receiver is unknown:
+# builtin container/str/file/db-API/logging names that almost always belong
+# to library objects (a project `def get(self, name)` must not turn every
+# dict.get / os.environ.get into a source).
+_COMMON_METHODS = frozenset("""
+get set setdefault pop popitem update keys values items copy clear append
+extend insert remove index count sort reverse add discard union intersection
+difference issubset issuperset open close read readline readlines write
+writelines seek tell flush truncate fileno run start stop join split rsplit
+strip lstrip rstrip replace format format_map encode decode lower upper title
+capitalize casefold startswith endswith find rfind partition rpartition
+splitlines expandtabs zfill center ljust rjust send recv sendall sendto
+connect bind listen accept execute executemany fetchone fetchall fetchmany
+commit rollback cursor call apply map filter reduce next iter throw match
+search sub subn fullmatch findall finditer group groups groupdict compile
+load loads dump dumps parse render process handle dispatch emit log debug
+info warning warn error exception critical submit result cancel wait put
+get_nowait put_nowait acquire release lock notify notify_all is_set
+setattr getattr delattr register unregister exists makedirs mkdir unlink
+""".split())
+
+# External calls whose result carries no attacker-controlled text.
+_CLEAN_RESULT = frozenset("""
+len bool isinstance issubclass hasattr callable id hash type ord abs round sum
+any all divmod exists isfile isdir islink ismount isabs getsize getmtime
+getatime getctime startswith endswith isdigit isalpha isalnum isspace
+isnumeric isdecimal isidentifier islower isupper istitle isascii isprintable
+count find rfind index rindex hexdigest digest compare_digest time monotonic
+perf_counter
+""".split())
+
+
 def _dotted(node):
     """Best-effort dotted string for a Name/Attribute/Call/Subscript expr."""
-    if isinstance(node, ast.Name):
-        return node.id
-    if isinstance(node, ast.Attribute):
-        return _dotted(node.value) + "." + node.attr
-    if isinstance(node, ast.Call):
-        return _dotted(node.func)
-    if isinstance(node, ast.Subscript):
-        return _dotted(node.value)
-    return ""
+    parts = []
+    while True:
+        if isinstance(node, ast.Name):
+            parts.append(node.id)
+            break
+        if isinstance(node, ast.Attribute):
+            parts.append(node.attr)
+            node = node.value
+        elif isinstance(node, ast.Call):
+            if (isinstance(node.func, ast.Name) and node.func.id == "__import__"
+                    and node.args and isinstance(node.args[0], ast.Constant)
+                    and isinstance(node.args[0].value, str)):
+                parts.append(node.args[0].value)   # __import__('shlex').quote
+                break
+            node = node.func
+        elif isinstance(node, ast.Subscript):
+            node = node.value
+        else:
+            parts.append("")
+            break
+    return ".".join(reversed(parts))
 
 
 _PY_SOURCE_RE = re.compile(
     r"\brequest\.(args|form|values|json|data|cookies|headers|files)\b"
     r"|\brequest\.get_json\b|\bsys\.argv\b|\bflask\.request\b")
-_PY_SOURCE_EXTRA = []    # extra compiled source patterns (from config)
-_EXTRA_PY_SINKS = []     # (compiled_pattern, category) from config
-
-def _is_py_source(s):
-    return bool(_PY_SOURCE_RE.search(s)) or any(p.search(s) for p in _PY_SOURCE_EXTRA)
+_PY_SOURCE_EXTRA = []    # guarded source patterns (from config)
+_EXTRA_PY_SINKS = []     # (guarded pattern, category) from config
 
 
-def _py_sink(callee):
+def _is_py_source(*names):
+    for s in names:
+        if s and (_PY_SOURCE_RE.search(s) or any(p.search(s) for p in _PY_SOURCE_EXTRA)):
+            return True
+    return False
+
+
+def _py_config_sink(*names):
     for pat, cat in _EXTRA_PY_SINKS:      # configured sinks take precedence
-        if pat.search(callee):
-            return cat
+        for s in names:
+            if s and pat.search(s):
+                return cat
+    return None
+
+
+def _py_builtin_sink(callee):
     last = callee.split(".")[-1]
     if last in ("execute", "executemany"):
         return "SQL injection"
@@ -172,11 +261,11 @@ def _py_sink(callee):
     if callee.startswith("subprocess.") and last in (
             "run", "call", "check_output", "check_call", "Popen"):
         return "command injection"
-    if callee in ("eval", "exec"):
+    if callee in ("eval", "exec", "builtins.eval", "builtins.exec"):
         return "code injection"
     if last == "render_template_string":
         return "template injection"
-    if callee == "open" or last in ("send_file", "send_from_directory"):
+    if callee in ("open", "builtins.open") or last in ("send_file", "send_from_directory"):
         return "path traversal"
     if last == "urlopen" or (callee.startswith("requests.") and last in (
             "get", "post", "put", "delete", "head", "request")):
@@ -186,325 +275,1208 @@ def _py_sink(callee):
     return None
 
 
-class _Taint:
-    __slots__ = ("source", "params", "clean")
+def _py_sink(callee):
+    """Sink category of a callee name (configured patterns first)."""
+    return _py_config_sink(callee) or _py_builtin_sink(callee)
 
-    def __init__(self, source=False, params=None, clean=()):
-        self.source = source
-        self.params = set(params or ())
-        self.clean = frozenset(clean)   # sink categories this value is safe for
+
+def _py_config_sanitizer(*names):
+    """'full', a set of categories, or None — from a taint config only."""
+    for callee in names:
+        if not callee:
+            continue
+        if callee in FULL_SANITIZERS_PY and callee not in _BUILTIN_FULL_PY:
+            return "full"
+        if callee in _EXTRA_PARTIAL_PY:
+            return _EXTRA_PARTIAL_PY[callee]
+    return None
+
+
+def _py_builtin_sanitizer(*names):
+    for callee in names:
+        if not callee:
+            continue
+        last = callee.split(".")[-1]
+        if callee in FULL_SANITIZERS_PY or last in FULL_SANITIZERS_PY:
+            return "full"
+        for table in (PARTIAL_SANITIZERS_PY, _EXTRA_PARTIAL_PY):
+            if callee in table:
+                return table[callee]
+            if last in table:
+                return table[last]
+    return None
+
+
+class _Taint:
+    """Abstract value: tainted by a concrete source and/or by parameters of
+    the function being analyzed; `clean` = sink categories it is sanitized
+    for. origin = file:line of the concrete source; via = the function whose
+    return value delivered it (None if read in the current function)."""
+    __slots__ = ("source", "params", "clean", "origin", "via")
+
+    def __init__(self, source=False, params=(), clean=(), origin=None, via=None):
+        self.source = bool(source)
+        self.params = frozenset(params)
+        self.clean = frozenset(clean)
+        self.origin = origin if source else None
+        self.via = via if source else None
 
     def union(self, other):
-        # concatenation is safe for a category only if BOTH parts are safe for it
+        # concatenation is safe for a category only if BOTH parts are safe
+        if other is EMPTY or other is None:
+            return self
+        if self is EMPTY:
+            return other
+        src = self if self.source else other
         return _Taint(self.source or other.source, self.params | other.params,
-                      self.clean & other.clean)
+                      self.clean & other.clean, src.origin, src.via)
 
     def tainted(self):
         return self.source or bool(self.params)
 
     def effective(self, cat):
-        """Is this value still dangerous for sink category cat (not sanitized)?"""
+        """Is this value still dangerous for sink category cat?"""
         return self.tainted() and cat not in self.clean
 
     def sanitize(self, cats):
-        return _Taint(self.source, self.params, self.clean | set(cats))
+        if not self.tainted():
+            return EMPTY
+        return _Taint(self.source, self.params, self.clean | set(cats),
+                      self.origin, self.via)
 
 
 EMPTY = _Taint(clean=ALL_CATS)   # not tainted, safe for everything
 
 
-class _PyFunc:
-    def __init__(self, name, file, node, lines):
+def _union_all(vals):
+    t = EMPTY
+    for v in vals:
+        if v is not None:
+            t = t.union(v)
+    return t
+
+
+class _PyModule:
+    def __init__(self, path, content, tree):
+        self.path = path
+        self.lines = content.split("\n")
+        self.tree = tree
+        norm = path.replace("\\", "/")
+        while norm.startswith("./"):
+            norm = norm[2:]
+        stem = norm[:-3] if norm.endswith(".py") else norm
+        if posixpath.basename(stem) == "__init__":
+            stem = posixpath.dirname(stem)
+        self.key = stem
+        self.dir = posixpath.dirname(norm)
+        self.funcs = {}       # module-level def name -> _PyFunc
+        self.classes = {}     # class name -> _PyClass
+        self.nested = {}      # nested def name -> [_PyFunc]
+        self.imports = {}     # bound name -> import record
+        self.stars = []       # (module, level) of `from m import *`
+        self.all_funcs = []
+        self.globals = {}     # module variable -> source taint
+        self.body_fn = None
+
+
+class _PyClass:
+    def __init__(self, name, mod, node):
         self.name = name
-        self.file = file
+        self.mod = mod
         self.node = node
-        self.lines = lines
-        self.params = [a.arg for a in node.args.args] + [a.arg for a in node.args.kwonlyargs]
-        if node.args.vararg:
-            self.params.append(node.args.vararg.arg)
+        self.methods = {}
+        self.attr_taint = {}  # self.<attr> -> source taint (any method)
+        self.bases = None     # resolved lazily: [_PyClass]
+        self.subclasses = []
+
+
+class _PyFunc:
+    def __init__(self, name, mod, node, cls=None, pseudo=False):
+        self.name = name
+        self.mod = mod
+        self.file = mod.path
+        self.lines = mod.lines
+        self.node = node
+        self.cls = cls
+        self.pseudo = pseudo
+        self.qualname = "<module>" if pseudo else (f"{cls.name}.{name}" if cls else name)
+        self.line = 1 if pseudo else getattr(node, "lineno", 1)
+        self.kind = "function"
+        if pseudo:
+            self.posonly, self.args, self.kwonly = [], [], []
+            self.vararg = self.kwarg = None
+        else:
+            a = node.args
+            self.posonly = [x.arg for x in getattr(a, "posonlyargs", [])]
+            self.args = [x.arg for x in a.args]
+            self.kwonly = [x.arg for x in a.kwonlyargs]
+            self.vararg = a.vararg.arg if a.vararg else None
+            self.kwarg = a.kwarg.arg if a.kwarg else None
+            if cls is not None:
+                self.kind = "method"
+                for d in node.decorator_list:
+                    dn = _dotted(d)
+                    if dn in ("staticmethod", "builtins.staticmethod"):
+                        self.kind = "static"
+                    elif dn in ("classmethod", "builtins.classmethod"):
+                        self.kind = "class"
+        positional = self.posonly + self.args
+        # the implicit receiver of a bound method carries no caller data
+        self.receiver = (positional[0] if self.kind in ("method", "class")
+                         and positional else None)
+        self.params = [p for p in positional + ([self.vararg] if self.vararg else [])
+                       + self.kwonly + ([self.kwarg] if self.kwarg else [])
+                       if p != self.receiver]
         # summaries
-        self.param_to_sink = {}      # param -> category
-        self.param_to_return = set()
-        self.returns_source = False
+        self.param_to_sink = {}      # param -> {category: sink location}
+        self.param_to_return = {}    # param -> frozenset(categories clean on return)
+        self.ret_source = None       # _Taint of a concrete source it returns
+        # pre-pass results
+        self.local_names = set()
+        self.types = {}              # local var -> _PyClass (x = C(...))
+        self.callees = set()
+        self.callers = set()
+        self.runs = 0
+
+    def body(self):
+        return self.node.body
 
 
-def _collect_py(files, overflow=None):
-    funcs = {}   # name -> list[_PyFunc]
-    for f in files:
-        if f["lang"] != "py":
+def _bind(fn, pos, starred, kws, dstar, skip_first):
+    """Bind call-site argument taints to fn's parameters like
+    inspect.signature: positional-only + regular params in order (the
+    receiver skipped for bound calls), extra positionals into *args,
+    keywords by name (never positional-only), unknown keywords into
+    **kwargs; a *iterable / **mapping argument may fill any remaining
+    parameter."""
+    positional = fn.posonly + fn.args
+    if skip_first and positional:
+        positional = positional[1:]
+    out = {}
+
+    def put(name, t):
+        out[name] = out[name].union(t) if name in out else t
+
+    i = 0
+    for t in pos:
+        if i < len(positional):
+            put(positional[i], t)
+            i += 1
+        elif fn.vararg:
+            put(fn.vararg, t)
+    if starred is not None:
+        for p in positional[i:]:
+            put(p, starred)
+        if fn.vararg:
+            put(fn.vararg, starred)
+    by_name = set(fn.args) | set(fn.kwonly)
+    if skip_first and fn.posonly + fn.args:
+        by_name.discard((fn.posonly + fn.args)[0])
+    for name, t in kws:
+        if name in by_name:
+            put(name, t)
+        elif fn.kwarg:
+            put(fn.kwarg, t)
+    if dstar is not None:
+        for p in by_name:
+            if p not in out:
+                put(p, dstar)
+        if fn.kwarg:
+            put(fn.kwarg, dstar)
+    return out
+
+
+class _CallRes:
+    __slots__ = ("targets", "ctor", "canon", "precise")
+
+    def __init__(self, targets, ctor, canon, precise):
+        self.targets = targets      # [(_PyFunc, skip_first)]
+        self.ctor = ctor            # _PyClass when the call constructs one
+        self.canon = canon          # import-canonical dotted callee name
+        self.precise = precise      # resolved through names, not duck typing
+
+
+def _own_nodes(stmts):
+    """Every AST node of these statements, without descending into nested
+    function/class bodies or lambdas (those are analyzed on their own)."""
+    stack = list(reversed(stmts))
+    while stack:
+        node = stack.pop()
+        yield node
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            # decorators, defaults and bases belong to the enclosing scope
+            stack.extend(getattr(node, "decorator_list", []))
+            stack.extend(getattr(node, "bases", []))
+            args = getattr(node, "args", None)
+            if args is not None:
+                stack.extend(d for d in args.defaults + args.kw_defaults if d is not None)
             continue
-        try:
-            tree = ast.parse(f["content"])
-        except SyntaxError:
+        if isinstance(node, ast.Lambda):
             continue
-        except RecursionError:
-            # A deep operator chain can overflow the *parser* itself: on
-            # Python 3.11, and on Windows (smaller C stack) even on later
-            # versions. Skip the file and report it like an analysis overflow,
-            # instead of letting one file abort the whole flow pass.
-            if overflow is not None:
-                overflow[f["path"]] = 1
-            continue
-        lines = f["content"].split("\n")
-        for node in ast.walk(tree):
+        stack.extend(reversed(list(ast.iter_child_nodes(node))))
+
+
+class _PyProject:
+    def __init__(self):
+        self.modules = []
+        self.by_key = {}          # path key (no .py / __init__) -> module
+        self.by_dotted = {}       # dotted suffix -> [modules]
+        self.funcs_by_name = {}   # module-level def name -> [_PyFunc]
+        self.methods_by_name = {} # method name -> [_PyFunc]
+        self.classes = []
+        self.funcs = []           # every analyzable function incl. <module>
+        self._name_cache = {}
+        self._call_cache = {}
+
+    # ---------- collection ----------
+    def add_module(self, mod):
+        self.modules.append(mod)
+        self.by_key[mod.key] = mod
+        parts = [p for p in mod.key.split("/") if p and p != "."]
+        for k in range(1, min(len(parts), 8) + 1):
+            self.by_dotted.setdefault(".".join(parts[-k:]), []).append(mod)
+        self._collect(mod.tree.body, mod, None, False)
+        mod.body_fn = _PyFunc("<module>", mod, mod.tree, pseudo=True)
+        mod.all_funcs.append(mod.body_fn)
+        for node in _own_nodes(mod.tree.body):
+            self._record_import(mod, node)
+
+    def _record_import(self, mod, node):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                if a.asname:
+                    mod.imports[a.asname] = ("import", a.name)
+                else:
+                    head = a.name.split(".")[0]
+                    mod.imports.setdefault(head, ("import", head))
+        elif isinstance(node, ast.ImportFrom):
+            base = node.module or ""
+            for a in node.names:
+                if a.name == "*":
+                    mod.stars.append((base, node.level or 0))
+                else:
+                    mod.imports[a.asname or a.name] = ("from", base, a.name, node.level or 0)
+
+    def _collect(self, body, mod, cls, in_func):
+        for node in body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                funcs.setdefault(node.name, []).append(_PyFunc(node.name, f["path"], node, lines))
-    return funcs
+                fn = _PyFunc(node.name, mod, node, cls=cls if not in_func else None)
+                mod.all_funcs.append(fn)
+                if in_func:
+                    mod.nested.setdefault(node.name, []).append(fn)
+                elif cls is not None:
+                    cls.methods[node.name] = fn
+                    self.methods_by_name.setdefault(node.name, []).append(fn)
+                else:
+                    mod.funcs[node.name] = fn
+                    self.funcs_by_name.setdefault(node.name, []).append(fn)
+                self._collect(node.body, mod, None, True)
+                for n in _own_nodes(node.body):     # imports inside functions
+                    self._record_import(mod, n)
+            elif isinstance(node, ast.ClassDef):
+                c = _PyClass(node.name, mod, node)
+                self.classes.append(c)
+                if not in_func and cls is None:
+                    mod.classes[node.name] = c
+                self._collect(node.body, mod, c, False)
+            else:
+                for field in ("body", "orelse", "finalbody", "handlers", "cases"):
+                    sub = getattr(node, field, None)
+                    if isinstance(sub, list):
+                        stmts = []
+                        for s in sub:
+                            if isinstance(s, (ast.excepthandler,)) or type(s).__name__ == "match_case":
+                                stmts.extend(s.body)
+                            elif isinstance(s, ast.stmt):
+                                stmts.append(s)
+                        self._collect(stmts, mod, cls, in_func)
+
+    # ---------- name resolution ----------
+    def resolve_module(self, dotted, frm, level=0):
+        if level:
+            base = frm.dir
+            for _ in range(level - 1):
+                base = posixpath.dirname(base)
+            key = posixpath.join(base, *dotted.split(".")) if dotted else base
+            m = self.by_key.get(key)
+            return [m] if m is not None else []
+        cands = self.by_dotted.get(dotted, [])
+        if len(cands) <= 1:
+            return list(cands)
+        fparts = frm.dir.split("/")
+
+        def score(m):
+            n = 0
+            for a, b in zip(m.dir.split("/"), fparts):
+                if a != b:
+                    break
+                n += 1
+            return n
+        best = max(score(m) for m in cands)
+        return [m for m in cands if score(m) == best]
+
+    def resolve_name(self, mod, name, hops=0):
+        """[(kind, target)] — kind 'func' | 'class' | 'module' | 'ext'."""
+        key = (id(mod), name)
+        hit = self._name_cache.get(key)
+        if hit is not None:
+            return hit
+        self._name_cache[key] = []            # cycle guard (re-export loops)
+        out = self._resolve_name(mod, name, hops)
+        self._name_cache[key] = out
+        return out
+
+    def _resolve_name(self, mod, name, hops):
+        if name in mod.funcs:
+            return [("func", mod.funcs[name])]
+        if name in mod.classes:
+            return [("class", mod.classes[name])]
+        imp = mod.imports.get(name)
+        if imp is not None:
+            if imp[0] == "import":
+                ms = self.resolve_module(imp[1], mod)
+                return [("module", m) for m in ms] or [("ext", imp[1])]
+            _, base, attr, level = imp
+            sub = self.resolve_module(f"{base}.{attr}" if base else attr, mod, level)
+            if sub:
+                return [("module", m) for m in sub]
+            out = []
+            if hops < _MAX_IMPORT_HOPS and (base or level):
+                for m in self.resolve_module(base, mod, level):
+                    out.extend(self.resolve_name(m, attr, hops + 1))
+            internal = [t for t in out if t[0] != "ext"]
+            if internal:
+                return internal
+            if out:
+                return out
+            return [("ext", f"{base}.{attr}" if base and not level else attr)]
+        if name in mod.nested:
+            return [("func", f) for f in mod.nested[name]]
+        if hops < _MAX_IMPORT_HOPS:
+            for base, level in mod.stars:
+                for m in self.resolve_module(base, mod, level):
+                    r = [t for t in self.resolve_name(m, name, hops + 1) if t[0] != "ext"]
+                    if r:
+                        return r
+        return []
+
+    def canonical(self, mod, dotted):
+        """Replace an import alias at the head of a dotted name with what it
+        imports: `sp.run` -> `subprocess.run`, `check_output` (from
+        subprocess) -> `subprocess.check_output`."""
+        head, sep, rest = dotted.partition(".")
+        imp = mod.imports.get(head)
+        if imp is None:
+            return dotted
+        if imp[0] == "import":
+            base = imp[1]
+        else:
+            base = f"{imp[1]}.{imp[2]}" if imp[1] and not imp[3] else imp[2]
+        return base + (sep + rest if rest else "")
+
+    def bases(self, cls):
+        if cls.bases is None:
+            cls.bases = []
+            for b in cls.node.bases:
+                for kind, t in self._expr_targets(cls.mod, b):
+                    if kind == "class" and t is not cls and t not in cls.bases:
+                        cls.bases.append(t)
+                        t.subclasses.append(cls)
+        return cls.bases
+
+    def _expr_targets(self, mod, node):
+        if isinstance(node, ast.Name):
+            return self.resolve_name(mod, node.id)
+        if isinstance(node, ast.Attribute):
+            out = []
+            for kind, t in self._expr_targets(mod, node.value):
+                if kind == "module":
+                    out.extend(self.resolve_name(t, node.attr))
+            return out
+        return []
+
+    def lookup_method(self, cls, name):
+        seen, stack = set(), [cls]
+        while stack:
+            c = stack.pop(0)
+            if id(c) in seen:
+                continue
+            seen.add(id(c))
+            if name in c.methods:
+                return [c.methods[name]]
+            stack.extend(self.bases(c))
+        return []
+
+    def mro_attr_taint(self, cls, attr):
+        seen, stack, t = set(), [cls], None
+        while stack:
+            c = stack.pop()
+            if id(c) in seen:
+                continue
+            seen.add(id(c))
+            v = c.attr_taint.get(attr)
+            if v is not None:
+                t = v if t is None else t.union(v)
+            stack.extend(self.bases(c))
+        return t
+
+    # ---------- call resolution ----------
+    def _receiver(self, fn, val):
+        if isinstance(val, ast.Name):
+            if fn.cls is not None and fn.receiver and val.id == fn.receiver:
+                return ("instance", fn.cls)
+            if val.id in fn.types:
+                return ("instance", fn.types[val.id])
+            if val.id in fn.local_names:
+                return None
+            tl = self.resolve_name(fn.mod, val.id)
+            mods = [t for k, t in tl if k == "module"]
+            if mods:
+                return ("module", mods)
+            classes = [t for k, t in tl if k == "class"]
+            if classes:
+                return ("classref", classes[0])
+            ext = [t for k, t in tl if k == "ext"]
+            if ext:
+                return ("ext", ext[0])
+            return None
+        if isinstance(val, ast.Call):
+            if isinstance(val.func, ast.Name) and val.func.id == "super" and fn.cls is not None:
+                return ("super", fn.cls)
+            classes = [t for k, t in self._expr_targets(fn.mod, val.func) if k == "class"]
+            if classes:
+                return ("instance", classes[0])
+            return None
+        if isinstance(val, ast.Attribute):
+            tl = self._expr_targets(fn.mod, val)
+            mods = [t for k, t in tl if k == "module"]
+            if mods:
+                return ("module", mods)
+            classes = [t for k, t in tl if k == "class"]
+            if classes:
+                return ("classref", classes[0])
+            root = val
+            while isinstance(root, ast.Attribute):
+                root = root.value
+            if isinstance(root, ast.Name) and root.id not in fn.local_names and not (
+                    fn.receiver and root.id == fn.receiver):
+                if any(k == "ext" for k, _ in self.resolve_name(fn.mod, root.id)):
+                    return ("ext", None)
+        return None
+
+    def resolve_call(self, fn, call):
+        key = (id(call), id(fn))
+        res = self._call_cache.get(key)
+        if res is None:
+            res = self._resolve_call(fn, call)
+            self._call_cache[key] = res
+        return res
+
+    def _resolve_call(self, fn, call):
+        func = call.func
+        canon = self.canonical(fn.mod, _dotted(func))
+        targets, ctor, precise = [], None, True
+
+        def add_class(c):
+            nonlocal ctor
+            ctor = c
+            for m in self.lookup_method(c, "__init__"):
+                targets.append((m, True))
+
+        if isinstance(func, ast.Name):
+            tl = self.resolve_name(fn.mod, func.id)
+            if not tl and func.id not in _BUILTIN_NAMES and func.id not in fn.local_names:
+                cands = self.funcs_by_name.get(func.id, [])
+                if len(cands) == 1:           # unique project-wide fallback
+                    tl = [("func", cands[0])]
+            for kind, t in tl:
+                if kind == "func":
+                    targets.append((t, False))
+                elif kind == "class":
+                    add_class(t)
+        elif isinstance(func, ast.Attribute):
+            attr = func.attr
+            recv = self._receiver(fn, func.value)
+            if recv is None:
+                if not attr.startswith("__") and attr not in _COMMON_METHODS:
+                    cands = self.methods_by_name.get(attr, [])
+                    if 0 < len(cands) <= MAX_DUCK_CANDIDATES:
+                        precise = False
+                        targets = [(m, m.kind != "static") for m in cands]
+            elif recv[0] == "instance":
+                targets = [(m, m.kind != "static") for m in self.lookup_method(recv[1], attr)]
+            elif recv[0] == "super":
+                for b in self.bases(recv[1]):
+                    targets.extend((m, m.kind != "static") for m in self.lookup_method(b, attr))
+            elif recv[0] == "classref":
+                targets = [(m, m.kind == "class") for m in self.lookup_method(recv[1], attr)]
+            elif recv[0] == "module":
+                for m in recv[1]:
+                    for kind, t in self.resolve_name(m, attr):
+                        if kind == "func":
+                            targets.append((t, False))
+                        elif kind == "class":
+                            add_class(t)
+        return _CallRes(targets, ctor, canon, precise and bool(targets or ctor))
+
+    # ---------- pre-pass ----------
+    def prepass(self, fn):
+        nodes = list(_own_nodes(fn.body()))
+        names = set(fn.posonly + fn.args + fn.kwonly)
+        names.update(x for x in (fn.vararg, fn.kwarg) if x)
+        for n in nodes:
+            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
+                names.add(n.id)
+        if not fn.pseudo:
+            fn.local_names = names
+        for n in nodes:
+            if (isinstance(n, ast.Assign) and len(n.targets) == 1
+                    and isinstance(n.targets[0], ast.Name) and isinstance(n.value, ast.Call)):
+                classes = [t for k, t in self._expr_targets(fn.mod, n.value.func) if k == "class"]
+                if classes:
+                    fn.types[n.targets[0].id] = classes[0]
+        for n in nodes:
+            if isinstance(n, ast.Call):
+                for f, _ in self.resolve_call(fn, n).targets:
+                    fn.callees.add(f)
+                    f.callers.add(fn)
 
 
-def _py_expr_taint(expr, env, funcs):
-    """Taint of an expression given the current variable env."""
-    if expr is None:
+class _Analyzer:
+    """One pass over one function: computes its summary contributions and,
+    when emit is set, the findings at its call sites and sinks."""
+
+    def __init__(self, proj, fn, emit, findings):
+        self.p = proj
+        self.fn = fn
+        self.emit = emit
+        self.findings = findings
+        self.env = {p: _Taint(params={p}) for p in fn.params}
+        if fn.receiver:
+            self.env[fn.receiver] = EMPTY
+        self.sink_adds = []
+        self.ret_params = {}
+        self.ret_source = None
+        self.attr_writes = {}
+
+    # ---------- reporting / summaries ----------
+    def here(self, line):
+        return f"{self.fn.file}:{line}"
+
+    def sink_loc(self, line):
+        if self.fn.pseudo:
+            return f"{self.fn.file}:{line} (module level)"
+        return f"{self.fn.file}:{line} (in {self.fn.qualname}())"
+
+    def report(self, cat, line, source_loc, sink_loc, chain):
+        self.findings.append(_issue(cat, self.fn.file, line, self.fn.lines,
+                                    source_loc=source_loc, sink_loc=sink_loc,
+                                    chain=chain))
+
+    def ret(self, t):
+        if t.source:
+            self.ret_source = t if self.ret_source is None else self.ret_source.union(t)
+        for p in t.params:
+            self.ret_params[p] = (t.clean if p not in self.ret_params
+                                  else self.ret_params[p] & t.clean)
+
+    def sink(self, cat, t, line):
+        if t is None or not t.tainted() or cat in t.clean:
+            return
+        for p in t.params:
+            self.sink_adds.append((p, cat, self.sink_loc(line)))
+        if t.source and t.via and self.emit:
+            # a source returned by another function reaches a sink here —
+            # the intra-file engine cannot see this one (finding 7)
+            self.report(cat, line, t.origin, self.here(line),
+                        f"the value returned by {t.via}()")
+
+    # ---------- statements ----------
+    def run(self):
+        self.stmts(self.fn.body())
+
+    def stmts(self, body):
+        for st in body:
+            self.stmt(st)
+
+    def _fork(self):
+        return dict(self.env)
+
+    @staticmethod
+    def _merge(a, b):
+        out = dict(a)
+        for k, v in b.items():
+            out[k] = out[k].union(v) if k in out else v
+        return out
+
+    def stmt(self, st):
+        if isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            for d in st.decorator_list:
+                self.expr(d)
+            return
+        if isinstance(st, ast.Assign):
+            v = self.expr(st.value)
+            for tgt in st.targets:
+                self.assign(tgt, v)
+        elif isinstance(st, ast.AugAssign):
+            v = self.expr(st.value)
+            self.assign(st.target, self.expr(st.target).union(v))
+        elif isinstance(st, ast.AnnAssign):
+            if st.value is not None:
+                self.assign(st.target, self.expr(st.value))
+        elif isinstance(st, ast.Return):
+            self.ret(self.expr(st.value) if st.value is not None else EMPTY)
+        elif isinstance(st, ast.Expr):
+            self.expr(st.value)
+        elif isinstance(st, ast.If):
+            self.expr(st.test)
+            before = self._fork()
+            self.stmts(st.body)
+            after_body = self.env
+            self.env = before
+            self.stmts(st.orelse)
+            self.env = self._merge(after_body, self.env)
+        elif isinstance(st, (ast.For, ast.AsyncFor)):
+            it = self.expr(st.iter)
+            before = self._fork()
+            for _ in range(2):                 # second round: loop-carried taint
+                self.assign(st.target, it)
+                self.stmts(st.body)
+            self.env = self._merge(before, self.env)
+            self.stmts(st.orelse)
+        elif isinstance(st, ast.While):
+            before = self._fork()
+            for _ in range(2):
+                self.expr(st.test)
+                self.stmts(st.body)
+            self.env = self._merge(before, self.env)
+            self.stmts(st.orelse)
+        elif isinstance(st, (ast.With, ast.AsyncWith)):
+            for item in st.items:
+                v = self.expr(item.context_expr)
+                if item.optional_vars is not None:
+                    self.assign(item.optional_vars, v)
+            self.stmts(st.body)
+        elif isinstance(st, ast.Try) or type(st).__name__ == "TryStar":
+            before = self._fork()
+            self.stmts(st.body)
+            after = self.env
+            merged = self._merge(before, after)
+            outs = [after]
+            for h in st.handlers:
+                self.env = dict(merged)
+                if h.type is not None:
+                    self.expr(h.type)
+                if h.name:
+                    self.env[h.name] = EMPTY
+                self.stmts(h.body)
+                outs.append(self.env)
+            self.env = after
+            self.stmts(st.orelse)
+            outs[0] = self.env
+            acc = outs[0]
+            for o in outs[1:]:
+                acc = self._merge(acc, o)
+            self.env = acc
+            self.stmts(st.finalbody)
+        elif type(st).__name__ == "Match":
+            subj = self.expr(st.subject)
+            before = self._fork()
+            acc = before
+            for case in st.cases:
+                self.env = dict(before)
+                self.bind_pattern(case.pattern, subj)
+                if case.guard is not None:
+                    self.expr(case.guard)
+                self.stmts(case.body)
+                acc = self._merge(acc, self.env)
+            self.env = acc
+        elif isinstance(st, ast.Raise):
+            self.expr(st.exc)
+            self.expr(st.cause)
+        elif isinstance(st, ast.Assert):
+            self.expr(st.test)
+            self.expr(st.msg)
+        elif isinstance(st, (ast.Import, ast.ImportFrom, ast.Global, ast.Nonlocal,
+                             ast.Pass, ast.Break, ast.Continue, ast.Delete)):
+            return
+        else:
+            for child in ast.iter_child_nodes(st):
+                if isinstance(child, ast.expr):
+                    self.expr(child)
+                elif isinstance(child, ast.stmt):
+                    self.stmt(child)
+
+    def bind_pattern(self, pat, t):
+        stack = [pat]
+        while stack:
+            p = stack.pop()
+            if p is None:
+                continue
+            name = getattr(p, "name", None) or getattr(p, "rest", None)
+            if isinstance(name, str):
+                self.env[name] = t
+            for field in ("pattern", "patterns", "kwd_patterns"):
+                sub = getattr(p, field, None)
+                if isinstance(sub, list):
+                    stack.extend(sub)
+                elif sub is not None:
+                    stack.append(sub)
+
+    def assign(self, tgt, t):
+        if isinstance(tgt, ast.Name):
+            self.env[tgt.id] = t
+        elif isinstance(tgt, (ast.Tuple, ast.List)):
+            for e in tgt.elts:
+                self.assign(e, t)
+        elif isinstance(tgt, ast.Starred):
+            self.assign(tgt.value, t)
+        elif isinstance(tgt, ast.Attribute):
+            if isinstance(tgt.value, ast.Name):
+                self.env[f"{tgt.value.id}.{tgt.attr}"] = t
+                fn = self.fn
+                if fn.cls is not None and fn.receiver == tgt.value.id and t.source:
+                    prev = self.attr_writes.get(tgt.attr)
+                    self.attr_writes[tgt.attr] = t if prev is None else prev.union(t)
+            else:
+                self.expr(tgt.value)
+        elif isinstance(tgt, ast.Subscript):
+            self.expr(tgt.slice)
+            base = tgt.value
+            if isinstance(base, ast.Name):
+                self.env[base.id] = self.name_taint(base.id).union(t)
+            else:
+                self.expr(base)
+
+    # ---------- expressions ----------
+    def name_taint(self, name):
+        v = self.env.get(name)
+        if v is None:
+            v = self.fn.mod.globals.get(name, EMPTY)
+        return v
+
+    def source(self, line):
+        return _Taint(source=True, origin=self.here(line))
+
+    def expr(self, e):
+        if e is None:
+            return EMPTY
+        if isinstance(e, ast.Name):
+            return self.name_taint(e.id)
+        if isinstance(e, ast.Constant):
+            return EMPTY
+        if isinstance(e, ast.Call):
+            return self.call(e)
+        if isinstance(e, ast.Attribute):
+            s = _dotted(e)
+            if _is_py_source(s, self.p.canonical(self.fn.mod, s)):
+                return self.source(e.lineno)
+            if isinstance(e.value, ast.Name):
+                k = f"{e.value.id}.{e.attr}"
+                if k in self.env:
+                    return self.env[k]
+                fn = self.fn
+                if fn.cls is not None and fn.receiver == e.value.id:
+                    t = self.p.mro_attr_taint(fn.cls, e.attr)
+                    if t is not None:
+                        return t
+            return self.expr(e.value)
+        if isinstance(e, ast.Subscript):
+            s = _dotted(e)
+            if _is_py_source(s, self.p.canonical(self.fn.mod, s)):
+                self.expr(e.slice)
+                return self.source(e.lineno)
+            v = self.expr(e.value)
+            self.expr(e.slice)
+            return v
+        if isinstance(e, ast.BinOp):
+            return self.expr(e.left).union(self.expr(e.right))
+        if isinstance(e, ast.BoolOp):
+            return _union_all([self.expr(v) for v in e.values])
+        if isinstance(e, ast.UnaryOp):
+            v = self.expr(e.operand)
+            return EMPTY if isinstance(e.op, ast.Not) else v
+        if isinstance(e, ast.Compare):
+            self.expr(e.left)
+            for c in e.comparators:
+                self.expr(c)
+            return EMPTY
+        if isinstance(e, ast.IfExp):
+            self.expr(e.test)
+            return self.expr(e.body).union(self.expr(e.orelse))
+        if isinstance(e, ast.JoinedStr):
+            return _union_all([self.expr(v) for v in e.values])
+        if isinstance(e, ast.FormattedValue):
+            self.expr(e.format_spec)
+            return self.expr(e.value)
+        if isinstance(e, (ast.List, ast.Tuple, ast.Set)):
+            return _union_all([self.expr(x) for x in e.elts])
+        if isinstance(e, ast.Dict):
+            return _union_all([self.expr(x) for x in e.keys if x is not None]
+                              + [self.expr(x) for x in e.values])
+        if isinstance(e, (ast.Starred, ast.Await)):
+            return self.expr(e.value)
+        if isinstance(e, (ast.Yield, ast.YieldFrom)):
+            self.ret(self.expr(e.value))       # generators "return" what they yield
+            return EMPTY
+        if isinstance(e, ast.NamedExpr):
+            v = self.expr(e.value)
+            self.assign(e.target, v)
+            return v
+        if isinstance(e, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
+            return self.comprehension(e.generators, [e.elt])
+        if isinstance(e, ast.DictComp):
+            return self.comprehension(e.generators, [e.key, e.value])
+        if isinstance(e, ast.Lambda):
+            return EMPTY
+        for child in ast.iter_child_nodes(e):
+            if isinstance(child, ast.expr):
+                self.expr(child)
         return EMPTY
-    if isinstance(expr, ast.Name):
-        return env.get(expr.id, EMPTY)
-    # M16/F12: ast.Num/ast.Str (and ast.Bytes/ast.NameConstant) were removed in
-    # Python 3.12 — referencing them raises AttributeError, which crashed the
-    # scanner on the first non-ast.Name expression in any function body on
-    # 3.12+. All literals are ast.Constant since 3.8 (PEP 612/628); the
-    # deprecated aliases were equivalent to Constant, so this drops nothing.
-    # (Full ast.X inventory re-checked: this was the only occurrence.)
-    if isinstance(expr, ast.Constant):
-        return EMPTY
-    if isinstance(expr, (ast.BinOp, ast.BoolOp)):
-        vals = expr.values if isinstance(expr, ast.BoolOp) else [expr.left, expr.right]
-        t = EMPTY
-        for v in vals:
-            t = t.union(_py_expr_taint(v, env, funcs))
-        return t
-    if isinstance(expr, ast.JoinedStr):  # f-string
-        t = EMPTY
-        for v in expr.values:
-            if isinstance(v, ast.FormattedValue):
-                t = t.union(_py_expr_taint(v.value, env, funcs))
-        return t
-    if isinstance(expr, (ast.List, ast.Tuple, ast.Set)):
-        t = EMPTY
-        for e in expr.elts:
-            t = t.union(_py_expr_taint(e, env, funcs))
-        return t
-    if isinstance(expr, ast.Subscript):
-        s = _dotted(expr)
-        if _is_py_source(s):
-            return _Taint(source=True)
-        return _py_expr_taint(expr.value, env, funcs)
-    if isinstance(expr, ast.Attribute):
-        s = _dotted(expr)
-        if _is_py_source(s):
-            return _Taint(source=True)
-        return _py_expr_taint(expr.value, env, funcs)
-    if isinstance(expr, ast.Call):
-        callee = _dotted(expr.func)
-        # source calls: request.args.get(...), input(), etc.
-        if _is_py_source(callee) or callee == "input" or callee.endswith(".get_json"):
-            return _Taint(source=True)
-        args = list(expr.args) + [k.value for k in expr.keywords if k.arg]
-        arg_taints = [_py_expr_taint(a, env, funcs) for a in args]
-        # sanitizers: int(x) fully cleanses; html.escape(x) clears XSS; etc.
-        san = _py_sanitizer(callee)
+
+    def comprehension(self, generators, elts):
+        saved = self.env
+        self.env = dict(saved)
+        for gen in generators:
+            self.assign(gen.target, self.expr(gen.iter))
+            for cond in gen.ifs:
+                self.expr(cond)
+        out = _union_all([self.expr(x) for x in elts])
+        self.env = saved
+        return out
+
+    def call(self, e):
+        fn, p = self.fn, self.p
+        raw = _dotted(e.func)
+        res = p.resolve_call(fn, e)
+        canon = res.canon
+        recv = self.expr(e.func.value) if isinstance(e.func, ast.Attribute) else EMPTY
+        pos, starred, kws, dstar = [], None, [], None
+        for a in e.args:
+            if isinstance(a, ast.Starred):
+                v = self.expr(a.value)
+                starred = v if starred is None else starred.union(v)
+            elif starred is not None:          # positional after *x: position unknown
+                starred = starred.union(self.expr(a))
+            else:
+                pos.append(self.expr(a))
+        for k in e.keywords:
+            v = self.expr(k.value)
+            if k.arg is None:
+                dstar = v if dstar is None else dstar.union(v)
+            else:
+                kws.append((k.arg, v))
+        all_args = _union_all(pos + [starred, dstar] + [v for _, v in kws])
+        line = getattr(e, "lineno", 1)
+
+        # 1) sources: request.args.get(...), input(), sys.argv, …
+        if (_is_py_source(raw, canon) or raw == "input"
+                or raw.endswith(".get_json")):
+            return self.source(line)
+
+        # 2) direct sink. Only the primary data argument is a sink position
+        # (execute("… %s", (x,)) stays clean). Not emitted when the source is
+        # read in this same function — that flow is intra-procedural and the
+        # intra-file engine reports it; this records the param→sink summary
+        # and reports sources that arrived through another function's return.
+        cat = _py_config_sink(raw, canon)
+        if cat is None and not res.precise:
+            cat = _py_builtin_sink(canon) or _py_builtin_sink(raw)
+        if cat:
+            first = (pos[0] if pos else starred if starred is not None
+                     else kws[0][1] if kws else dstar)
+            self.sink(cat, first, line)
+
+        # 3) calls into project functions whose parameters reach sinks
+        bound_all = []
+        for f, skip in res.targets:
+            bound = _bind(f, pos, starred, kws, dstar, skip)
+            bound_all.append((f, bound))
+            for pname, cats in f.param_to_sink.items():
+                t = bound.get(pname)
+                if t is None or not t.tainted():
+                    continue
+                for c, loc in cats.items():
+                    if c in t.clean:                 # sanitized for this sink
+                        continue
+                    if t.source and self.emit:
+                        self.report(c, line, t.origin, loc,
+                                    f"the call to {f.qualname}()")
+                    for q in t.params:                # transitivity
+                        self.sink_adds.append((q, c, loc))
+
+        # 4) the call's own value
+        san = _py_config_sanitizer(raw, canon)
         if san == "full":
             return EMPTY
-        if san is not None:                       # partial sanitizer
-            inner = EMPTY
-            for at in arg_taints:
-                inner = inner.union(at)
-            return inner.sanitize(san)
-        # propagation through a user function's summary
-        t = EMPTY
-        for cand in funcs.get(callee.split(".")[-1], []):
-            if cand.returns_source:
-                t = t.union(_Taint(source=True))
-            for idx, pname in enumerate(cand.params):
-                if pname in cand.param_to_return and idx < len(arg_taints):
-                    t = t.union(arg_taints[idx])
-        # unknown callee: propagate taint of args conservatively only for common
-        # taint-preserving builtins
-        if callee.split(".")[-1] in ("str", "bytes", "format", "join", "strip",
-                                     "decode", "encode", "replace", "lower", "upper"):
-            for at in arg_taints:
-                t = t.union(at)
-        # taint of the object a method is called on (e.g. tainted.strip())
-        if isinstance(expr.func, ast.Attribute):
-            t = t.union(_py_expr_taint(expr.func.value, env, funcs))
-        return t
-    return EMPTY
+        if san is not None:
+            return all_args.sanitize(san)
+        if bound_all or res.ctor is not None:
+            t = EMPTY
+            for f, bound in bound_all:
+                if f.ret_source is not None:
+                    rs = f.ret_source
+                    t = t.union(_Taint(True, (), rs.clean, rs.origin, f.qualname))
+                for pname, clean in f.param_to_return.items():
+                    b = bound.get(pname)
+                    if b is not None and b.tainted():
+                        t = t.union(b.sanitize(clean))
+            if res.ctor is not None or not res.precise:
+                t = t.union(all_args)          # objects carry their data
+            return t
+        san = _py_builtin_sanitizer(canon, raw)
+        if san == "full":
+            return EMPTY
+        if san is not None:
+            return all_args.sanitize(san)
+        if raw.rsplit(".", 1)[-1] in _CLEAN_RESULT:
+            return EMPTY
+        return all_args.union(recv)            # unknown call: taint propagates
 
-
-def _py_analyze_fn(fn, funcs, emit, findings):
-    """Run one function; update its summary. If emit, record findings."""
-    env = {p: _Taint(params={p}) for p in fn.params}
-    changed = False
-
-    def set_env(name, taint):
-        prev = env.get(name)
-        env[name] = taint
-
-    def visit_stmts(stmts):
-        nonlocal changed
-        for st in stmts:
-            _visit(st)
-
-    def check_call(node):
-        """Check a Call node for sinks; return its taint (for nested use)."""
-        nonlocal changed
-        callee = _dotted(node.func)
-        args = list(node.args) + [k.value for k in node.keywords if k.arg]
-        arg_taints = [_py_expr_taint(a, env, funcs) for a in args]
-        obj_taint = (_py_expr_taint(node.func.value, env, funcs)
-                     if isinstance(node.func, ast.Attribute) else EMPTY)
-        involved = arg_taints + [obj_taint]
-
-        # 1) direct dangerous sink. Only the primary data argument (arg 0) is a
-        # sink position — this keeps parameterized queries, e.g.
-        # execute("… %s", (x,)), from being flagged (x is arg 1, safe).
-        # We do NOT emit here: a source and sink in the *same* function is
-        # intra-procedural and already reported by lazaret.taint_scan. This
-        # pass only records the param→sink summary, which powers the
-        # interprocedural detection in section 2.
-        cat = _py_sink(callee)
-        if cat:
-            merged = arg_taints[0] if arg_taints else EMPTY
-            if cat not in merged.clean:            # not sanitized for this sink
-                for p in merged.params:
-                    if fn.param_to_sink.get(p) != cat:
-                        fn.param_to_sink[p] = cat
-                        changed = True
-
-        # 2) call into a user function whose parameter reaches a sink
-        for cand in funcs.get(callee.split(".")[-1], []):
-            for idx, pname in enumerate(cand.params):
-                sink_cat = cand.param_to_sink.get(pname)
-                if not sink_cat or idx >= len(arg_taints):
-                    continue
-                at = arg_taints[idx]
-                if sink_cat in at.clean:            # argument sanitized for this sink
-                    continue
-                if at.source and emit:
-                    line = getattr(node, "lineno", 1)
-                    sink_line = getattr(cand.node, "lineno", 1)
-                    findings.append(_issue(
-                        sink_cat, fn.file, line, fn.lines,
-                        source_loc=f"{fn.file}:{line}",
-                        sink_loc=f"{cand.file}:{sink_line} (in {cand.name}())",
-                        chain=f"the call to {cand.name}()"))
-                for p in at.params:  # transitivity: our param reaches sink via cand
-                    if fn.param_to_sink.get(p) != sink_cat:
-                        fn.param_to_sink[p] = sink_cat
-                        changed = True
-
-    def check_calls_in(expr):
-        """Run sink checks for every Call node within an expression subtree."""
-        if expr is None:
-            return
-        for child in ast.walk(expr):
-            if isinstance(child, ast.Call):
-                check_call(child)
-
-    def _visit(node):
-        nonlocal changed
-        # nested function definitions are analyzed on their own as top-level funcs
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            return
-        if isinstance(node, ast.Assign):
-            check_calls_in(node.value)
-            t = _py_expr_taint(node.value, env, funcs)
-            for tgt in node.targets:
-                if isinstance(tgt, ast.Name):
-                    set_env(tgt.id, t)
-                elif isinstance(tgt, (ast.Tuple, ast.List)):
-                    for e in tgt.elts:
-                        if isinstance(e, ast.Name):
-                            set_env(e.id, t)
-        elif isinstance(node, ast.AugAssign):
-            check_calls_in(node.value)
-            if isinstance(node.target, ast.Name):
-                cur = env.get(node.target.id, EMPTY)
-                set_env(node.target.id, cur.union(_py_expr_taint(node.value, env, funcs)))
-        elif isinstance(node, ast.AnnAssign) and node.value is not None:
-            check_calls_in(node.value)
-            if isinstance(node.target, ast.Name):
-                set_env(node.target.id, _py_expr_taint(node.value, env, funcs))
-        elif isinstance(node, ast.Return):
-            check_calls_in(node.value)
-            t = _py_expr_taint(node.value, env, funcs) if node.value else EMPTY
-            if t.source and not fn.returns_source:
-                fn.returns_source = True
+    # ---------- commit ----------
+    def commit(self):
+        """Merge this pass into the function's summary (monotone: sinks and
+        returned params only grow, clean sets only shrink). Returns
+        (summary_changed, class_attrs_changed, globals_changed)."""
+        f = self.fn
+        changed = cls_changed = glob_changed = False
+        for pname, cat, loc in self.sink_adds:
+            d = f.param_to_sink.setdefault(pname, {})
+            if cat not in d:
+                d[cat] = loc
                 changed = True
-            for p in t.params:
-                if p not in fn.param_to_return:
-                    fn.param_to_return.add(p)
-                    changed = True
-        elif isinstance(node, ast.Expr):
-            check_calls_in(node.value)
-        else:
-            # compound statement: check calls in its guard/iterable, then recurse
-            for guard in ("test", "iter"):
-                check_calls_in(getattr(node, guard, None))
-            for item in getattr(node, "items", []) or []:
-                check_calls_in(getattr(item, "context_expr", None))
-            for field in ("body", "orelse", "finalbody"):
-                visit_stmts(getattr(node, field, []) or [])
-            for handler in getattr(node, "handlers", []) or []:
-                visit_stmts(handler.body)
+        for pname, clean in self.ret_params.items():
+            old = f.param_to_return.get(pname)
+            new = clean if old is None else (old & clean)
+            if new != old:
+                f.param_to_return[pname] = new
+                changed = True
+        rs = self.ret_source
+        if rs is not None:
+            old = f.ret_source
+            if old is None:
+                f.ret_source = _Taint(True, (), rs.clean, rs.origin, rs.via)
+                changed = True
+            elif (old.clean & rs.clean) != old.clean:
+                f.ret_source = _Taint(True, (), old.clean & rs.clean, old.origin, old.via)
+                changed = True
+        if f.cls is not None:
+            for attr, t in self.attr_writes.items():
+                old = f.cls.attr_taint.get(attr)
+                new = _Taint(True, (), t.clean if old is None else old.clean & t.clean,
+                             t.origin if old is None else old.origin,
+                             t.via if old is None else old.via)
+                if old is None or new.clean != old.clean:
+                    f.cls.attr_taint[attr] = new
+                    cls_changed = True
+        if f.pseudo:
+            g = f.mod.globals
+            for name, t in self.env.items():
+                if "." in name or not t.source:
+                    continue
+                old = g.get(name)
+                if old is None or (old.clean & t.clean) != old.clean:
+                    g[name] = _Taint(True, (), t.clean if old is None else old.clean & t.clean,
+                                     t.origin if old is None else old.origin,
+                                     t.via if old is None else old.via)
+                    glob_changed = True
+        return changed, cls_changed, glob_changed
 
-    for st in fn.node.body:
-        _visit(st)
-    return changed
+
+def _flow_note(rule, name, fname, line, msg, why, fix):
+    return {"rule": rule, "name": name, "type": "SMELL", "sev": "INFO",
+            "msg": msg, "why": why, "fix": fix,
+            "ref": "CWE-400 (uncontrolled resource consumption)" if rule == "Q-FLOW-RECURSION"
+                   else "Analysis coverage",
+            "file": fname, "line": line, "snippet": [], "snipStart": 1}
 
 
-def _analyze_python(files, findings):
-    overflow = {}  # file -> lowest function line that hit the limit (1: the parser did)
-    funcs = _collect_py(files, overflow)
-    flat = [fn for lst in funcs.values() for fn in lst]
-    # M16/F12 (C1 follow-up): _py_analyze_fn → _visit/visit_stmts are mutually
-    # recursive with no bound, and _py_expr_taint recurses on operand trees.
-    # CPython's parser rejects >100 *nested parentheses* (SyntaxError), but an
-    # operator chain ("1+1+…" / "- - -1") still parses and builds a left-deep
-    # AST, so hostile/generated code CAN overflow the ~1000-frame limit while
-    # being valid Python. The CLI/MCP/registry drivers have no per-file
-    # isolation, so one RecursionError would otherwise abort the whole report
-    # with zero findings. Guard per function, in both passes: a pathological
-    # function is skipped (its findings lost, an INFO note emitted — Q- class,
-    # like Q-SKIPPED-TREE) while every other function keeps its results.
+def _parse_py(f):
+    """(tree, None) or (None, (kind, detail)); kind is 'overflow' or 'skip'.
+    Never raises: one unparseable file costs only that file (finding 6)."""
+    content = f.get("content")
+    if not isinstance(content, str):
+        return None, ("skip", "content is not text")
+    try:
+        return ast.parse(content), None
+    except (RecursionError, MemoryError):
+        # a deep operator chain can overflow the *parser* itself (Python
+        # 3.11 / Windows: RecursionError; "Parser stack overflowed":
+        # MemoryError)
+        return None, ("overflow", None)
+    except SyntaxError as exc:
+        text = str(getattr(exc, "msg", "") or exc)
+        if "null bytes" in text.lower():
+            return None, ("skip", "it contains NUL bytes")
+        if ("Missing parentheses in call to 'print'" in text
+                or "Missing parentheses in call to 'exec'" in text
+                or re.search(r"^\s*print\s+[\"'\w]", content, re.M)):
+            return None, ("skip", "it looks like Python 2 source")
+        return None, ("skip", f"syntax error at line {getattr(exc, 'lineno', '?')}")
+    except ValueError as exc:                  # NUL bytes on Python 3.10/3.11
+        if "null bytes" in str(exc).lower():
+            return None, ("skip", "it contains NUL bytes")
+        return None, ("skip", f"it could not be parsed ({type(exc).__name__})")
+    except Exception as exc:                   # never drop the whole pass
+        return None, ("skip", f"it could not be parsed ({type(exc).__name__})")
 
-    def _safe_analyze(fn, emit):
+
+def _analyze_python(files, findings, time_budget=None):
+    budget = FLOW_TIME_BUDGET if time_budget is None else time_budget
+    started = time.monotonic()
+    overflow = {}   # file -> lowest line that hit a stack limit (1: the parser)
+    skipped = {}    # file -> reason the parser rejected it
+    notes = []
+    proj = _PyProject()
+    py_files = [f for f in files if f.get("lang") == "py"]
+    total, over_budget = 0, []
+    for f in py_files:
+        size = len(f.get("content") or "")
+        if len(proj.modules) >= FLOW_MAX_FILES or total + size > FLOW_MAX_BYTES:
+            over_budget.append(f.get("path", "?"))
+            continue
+        tree, err = _parse_py(f)
+        if err is not None:
+            if err[0] == "overflow":
+                overflow[f["path"]] = 1
+            else:
+                skipped[f["path"]] = err[1]
+            continue
+        total += size
         try:
-            return _py_analyze_fn(fn, funcs, emit=emit, findings=findings)
+            proj.add_module(_PyModule(f["path"], f["content"], tree))
         except RecursionError:
-            overflow[fn.file] = min(overflow.get(fn.file, 1 << 30),
-                                    fn.node.lineno)
-            return False
+            overflow[f["path"]] = 1
+    if over_budget:
+        notes.append(_flow_note(
+            "Q-FLOW-INCOMPLETE", "Flow analysis incomplete (size budget)",
+            over_budget[0], 1,
+            f"Cross-file taint analysis skipped {len(over_budget)} Python file(s) "
+            f"beyond its budget ({FLOW_MAX_FILES} files / {FLOW_MAX_BYTES:,} "
+            f"characters), starting with {over_budget[0]!r}.",
+            "Very large code bases are analyzed up to a fixed budget so a scan "
+            "cannot run unbounded; flows through the skipped files are not seen.",
+            "Scan sub-trees separately, or exclude generated code."))
 
-    # fixpoint on summaries (no emission)
-    for _ in range(MAX_ITERS):
-        changed = False
-        for fn in flat:
-            if _safe_analyze(fn, emit=False):
-                changed = True
-        if not changed:
+    funcs = [fn for m in proj.modules for fn in m.all_funcs]
+
+    def guarded(fn, emit):
+        try:
+            a = _Analyzer(proj, fn, emit, findings)
+            a.run()
+            return a.commit()
+        except RecursionError:
+            overflow[fn.file] = min(overflow.get(fn.file, 1 << 30), fn.line)
+            return (False, False, False)
+
+    for fn in funcs:
+        try:
+            proj.prepass(fn)
+        except RecursionError:
+            overflow[fn.file] = min(overflow.get(fn.file, 1 << 30), fn.line)
+
+    # callee-first order (iterative DFS post-order), then a worklist: a
+    # function is re-analyzed only when a summary it depends on changed.
+    order, seen = [], set()
+    for root in funcs:
+        if id(root) in seen:
+            continue
+        seen.add(id(root))
+        stack = [(root, iter(root.callees))]
+        while stack:
+            node, it = stack[-1]
+            nxt = next(it, None)
+            if nxt is None:
+                stack.pop()
+                order.append(node)
+            elif id(nxt) not in seen:
+                seen.add(id(nxt))
+                stack.append((nxt, iter(nxt.callees)))
+    queue = collections.deque(order)
+    queued = {id(f) for f in order}
+    cutoff, timed_out = [], False
+    while queue:
+        if time.monotonic() - started > budget:
+            timed_out = True
             break
+        fn = queue.popleft()
+        queued.discard(id(fn))
+        fn.runs += 1
+        changed, cls_changed, glob_changed = guarded(fn, emit=False)
+        deps = set()
+        if changed:
+            deps.update(fn.callers)
+        if cls_changed:
+            stack, seen_c = [fn.cls], set()
+            while stack:
+                c = stack.pop()
+                if id(c) in seen_c:
+                    continue
+                seen_c.add(id(c))
+                deps.update(c.methods.values())
+                stack.extend(c.subclasses)
+        if glob_changed:
+            deps.update(fn.mod.all_funcs)
+        for d in deps:
+            if id(d) in queued:
+                continue
+            if d.runs >= MAX_ITERS:
+                cutoff.append(d)
+                continue
+            queue.append(d)
+            queued.add(id(d))
+    if cutoff:
+        first = min(cutoff, key=lambda f: (f.file, f.line))
+        notes.append(_flow_note(
+            "Q-FLOW-INCOMPLETE", "Flow analysis incomplete (iteration cap)",
+            first.file, first.line,
+            f"Interprocedural summaries for {len(cutoff)} function(s) did not "
+            f"converge within {MAX_ITERS} re-analyses (first: "
+            f"{first.qualname}() in {first.file!r}); flows through them may be "
+            f"missing.",
+            "Summaries are iterated to a fixpoint with a generous safety cap; "
+            "hitting it means an unusually long or cyclic call chain.",
+            "Report the pattern to the Lazaret maintainers; split the chain if "
+            "possible."))
+    if timed_out:
+        first = funcs[0].file if funcs else "?"
+        notes.append(_flow_note(
+            "Q-FLOW-INCOMPLETE", "Flow analysis incomplete (time budget)",
+            first, 1,
+            f"Cross-file taint analysis stopped after {budget:.0f} s before its "
+            f"summaries converged; findings may be missing.",
+            "The interprocedural pass has a time budget so a scan cannot run "
+            "unbounded on very large code bases.",
+            "Scan sub-trees separately, or exclude generated code."))
     # final emission pass
-    for fn in flat:
-        _safe_analyze(fn, emit=True)
+    for fn in order:
+        guarded(fn, emit=True)
+        if time.monotonic() - started > 2 * budget:
+            break
     for fname in sorted(overflow):
-        findings.append({
-            "rule": "Q-FLOW-RECURSION",
-            "name": "Flow analysis incomplete (recursion cutoff)",
-            "type": "SMELL", "sev": "INFO",
-            "msg": f"Lazaret's flow pass hit Python's recursion limit while "
-                   f"analyzing {fname!r} — findings for the affected function(s) "
-                   f"may be missing; every other function was still analyzed.",
-            "why": "A pathologically deep expression (e.g. a long operator "
-                   "chain in generated code) can overflow Python's parser or "
-                   "the analysis stack even though it is valid Python. Lazaret "
-                   "skips only the affected function(s), or the file if the "
-                   "parser overflowed, instead of crashing the whole scan.",
-            "fix": "Split or format the flagged file to keep expressions "
-                   "shallow, then re-run Lazaret.",
-            "ref": "CWE-400 (uncontrolled resource consumption)",
-            "file": fname,
-            "line": overflow[fname],
-        })
+        notes.append(_flow_note(
+            "Q-FLOW-RECURSION", "Flow analysis incomplete (recursion cutoff)",
+            fname, overflow[fname],
+            f"Lazaret's flow pass hit Python's parser/recursion limit while "
+            f"analyzing {fname!r} — findings for the affected function(s) may "
+            f"be missing; every other function was still analyzed.",
+            "A pathologically deep expression (e.g. a long operator chain in "
+            "generated code) can overflow Python's parser or the analysis "
+            "stack even though it is valid Python. Lazaret skips only the "
+            "affected function(s), or the file if the parser overflowed, "
+            "instead of crashing the whole scan.",
+            "Split or format the flagged file to keep expressions shallow, "
+            "then re-run Lazaret."))
+    for fname in sorted(skipped):
+        notes.append(_flow_note(
+            "Q-FLOW-SKIPPED", "File skipped by flow analysis",
+            fname, 1,
+            f"Cross-file taint analysis skipped {fname!r}: {skipped[fname]}.",
+            "Only files Python 3 can parse take part in the interprocedural "
+            "pass; flows into or out of this file are not seen (the "
+            "per-file rules still ran).",
+            "Fix the syntax error (or port the file to Python 3), then re-run."))
+    findings.extend(notes)
 
 
 # ======================================================================
@@ -807,14 +1779,38 @@ def load_config_quietly(path, warnings_out=None, allow_sanitizers=True):
 
 # ======================================================================
 def analyze(files):
-    """Return interprocedural/cross-file taint findings for the file set."""
-    files = [f for f in files if f.get("lang") in ("py", "js") and not f.get("dep")]
+    """Return interprocedural/cross-file taint findings for the file set.
+
+    Never raises (finding 6): a file the parser rejects costs only that file
+    (a Q-FLOW-SKIPPED / Q-FLOW-RECURSION INFO note names it), and an
+    unexpected internal error ends the pass with a Q-FLOW-INCOMPLETE note
+    instead of an exception — the CLI, MCP run_project_scan and registry
+    --full callers all get results plus notes."""
     findings = []
-    _analyze_python(files, findings)
-    _analyze_js(files, findings)
-    # dedupe by (rule, file, line, sink text)
+    try:
+        files = [f for f in files if isinstance(f, dict)
+                 and f.get("lang") in ("py", "js") and not f.get("dep")
+                 and isinstance(f.get("path"), str)]
+    except Exception:                              # not even iterable
+        files = []
+    for engine, lang in ((_analyze_python, "py"), (_analyze_js, "js")):
+        try:
+            engine(files, findings)
+        except Exception as exc:                   # never drop the whole scan
+            first = next((f["path"] for f in files if f.get("lang") == lang), "?")
+            findings.append(_flow_note(
+                "Q-FLOW-INCOMPLETE", "Flow analysis incomplete (internal error)",
+                first, 1,
+                f"The {'Python' if lang == 'py' else 'JavaScript'} cross-file taint "
+                f"pass stopped on an internal error ({type(exc).__name__}); "
+                f"findings it had already produced are kept.",
+                "An unexpected input made the interprocedural engine fail; the "
+                "rest of the scan is unaffected.",
+                "Please report the file that triggers this to the Lazaret "
+                "maintainers."))
+    # dedupe by (rule, file, line, message)
     seen, unique = set(), []
-    for i in sorted(findings, key=lambda x: (x["file"], x["line"])):
+    for i in sorted(findings, key=lambda x: (str(x["file"]), x["line"])):
         key = (i["rule"], i["file"], i["line"], i["msg"])
         if key not in seen:
             seen.add(key)
