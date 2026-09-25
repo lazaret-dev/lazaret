@@ -50,9 +50,14 @@ class LoadsTests(unittest.TestCase):
         self.assertEqual(safe_xmlrpc.loads(request), xmlrpc.client.loads(request))
 
     def test_loads_refuses_attacks(self):
+        # XML-RPC never uses a DOCTYPE, so any is refused by default; with
+        # DOCTYPEs allowed, the entity declarations are still refused.
         for doc in (BILLION_LAUGHS, XXE_FILE):
-            with self.subTest(doc=doc[:30]), self.assertRaises(sx.EntitiesForbidden):
-                safe_xmlrpc.loads(doc)
+            with self.subTest(doc=doc[:30]):
+                with self.assertRaises(sx.DTDForbidden):
+                    safe_xmlrpc.loads(doc)
+                with self.assertRaises(sx.EntitiesForbidden):
+                    safe_xmlrpc.loads(doc, forbid_dtd=False)
 
     def test_loads_limits(self):
         deep = b"<methodResponse>" + b"<a>" * 600 + b"</a>" * 600 + b"</methodResponse>"
@@ -91,8 +96,11 @@ class ServerProxyTests(unittest.TestCase):
         self.assertIsInstance(https._ServerProxy__transport, safe_xmlrpc.SafeTransport)
 
     def test_server_proxy_refuses_entity_bomb(self):
+        url = self.hostile(BILLION_LAUGHS)
+        with self.assertRaises(sx.DTDForbidden):
+            safe_xmlrpc.ServerProxy(url).anything()
         with self.assertRaises(sx.EntitiesForbidden):
-            safe_xmlrpc.ServerProxy(self.hostile(BILLION_LAUGHS)).anything()
+            safe_xmlrpc.ServerProxy(url, forbid_dtd=False).anything()
 
     def test_server_proxy_caps_decompressed_size(self):
         self.assertLess(len(gzip.compress(ZIP_BOMB)), 100_000)  # ~40 KB on the wire, 40 MB decompressed
@@ -114,7 +122,7 @@ class ServerProxyTests(unittest.TestCase):
         original = xmlrpc.client.ExpatParser
         try:
             safe_xmlrpc.monkey_patch()
-            with self.assertRaises(sx.EntitiesForbidden):
+            with self.assertRaises(sx.DTDForbidden):
                 xmlrpc.client.loads(BILLION_LAUGHS)
             self.assertEqual(xmlrpc.client.ServerProxy(self.url).package_info("x")["name"], "x")
         finally:
