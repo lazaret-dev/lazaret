@@ -12,7 +12,14 @@ from xml.sax import expatreader as _expatreader  # lazaret-ignore: S-XML (this m
 from xml.sax import handler as _handler  # lazaret-ignore: S-XML (this module is the hardening layer)
 from xml.sax import xmlreader as _xmlreader  # lazaret-ignore: S-XML (this module is the hardening layer)
 
-from ._common import DEFAULT_MAX_DEPTH, Options, depth_exceeded, install_handlers, size_exceeded
+from ._common import (
+    DEFAULT_MAX_ATTLIST_DEFAULTS,
+    DEFAULT_MAX_DEPTH,
+    Options,
+    depth_exceeded,
+    install_handlers,
+    size_exceeded,
+)
 
 __all__ = ["make_parser", "parse", "parseString", "SafeExpatParser"]
 
@@ -25,35 +32,38 @@ class SafeExpatParser(_expatreader.ExpatParser):
 
     def __init__(self, namespaceHandling: int = 0, bufsize: int = 2**16 - 20, *,
                  forbid_dtd: bool = False, forbid_entities: bool = True, forbid_external: bool = True,
-                 max_depth: int | None = DEFAULT_MAX_DEPTH, max_bytes: int | None = None):
+                 max_depth: int | None = DEFAULT_MAX_DEPTH, max_bytes: int | None = None,
+                 max_attlist_defaults: int | None = DEFAULT_MAX_ATTLIST_DEFAULTS):
         super().__init__(namespaceHandling, bufsize)
-        self.options = Options(forbid_dtd, forbid_entities, forbid_external, max_depth, max_bytes)
+        self.options = Options(forbid_dtd, forbid_entities, forbid_external, max_depth, max_bytes,
+                               max_attlist_defaults)
         self._depth = 0
         self._fed = 0
 
     def reset(self) -> None:
         super().reset()
         self._depth = 0
-        install_handlers(self._parser, self.options)
+        self._attlist = install_handlers(self._parser, self.options)
 
     def feed(self, data, isFinal: bool = False) -> None:
         if not self._parsing:
             self._fed = 0  # a new document is starting
+        self._fed += len(data)
         limit = self.options.max_bytes
-        if limit is not None:
-            self._fed += len(data)
-            if self._fed > limit:
-                raise size_exceeded(limit)
+        if limit is not None and self._fed > limit:
+            raise size_exceeded(limit)
         super().feed(data, isFinal)
 
-    def _enter(self) -> None:
+    def _enter(self, attrs) -> None:
         self._depth += 1
         limit = self.options.max_depth
         if limit is not None and self._depth > limit:
             raise depth_exceeded(limit)
+        if self._attlist.active:
+            self._attlist.check(attrs.values(), self._fed)
 
     def start_element(self, name, attrs):
-        self._enter()
+        self._enter(attrs)
         super().start_element(name, attrs)
 
     def end_element(self, name):
@@ -61,7 +71,7 @@ class SafeExpatParser(_expatreader.ExpatParser):
         super().end_element(name)
 
     def start_element_ns(self, name, attrs):
-        self._enter()
+        self._enter(attrs)
         super().start_element_ns(name, attrs)
 
     def end_element_ns(self, name):

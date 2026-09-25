@@ -5,7 +5,8 @@
 
 Parsing functions return ordinary xml.etree.ElementTree objects, so the rest of
 your ElementTree code is unchanged. Each accepts the keyword options
-forbid_dtd, forbid_entities, forbid_external, max_depth, and max_bytes.
+forbid_dtd, forbid_entities, forbid_external, max_depth, max_bytes, and
+max_attlist_defaults.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from xml.etree.ElementTree import ParseError, TreeBuilder, tostring  # lazaret-i
 from xml.parsers import expat
 
 from ._common import (
+    DEFAULT_MAX_ATTLIST_DEFAULTS,
     DEFAULT_MAX_DEPTH,
     Options,
     depth_exceeded,
@@ -36,8 +38,10 @@ class XMLParser:
 
     def __init__(self, *, target: Any = None, encoding: str | None = None,
                  forbid_dtd: bool = False, forbid_entities: bool = True, forbid_external: bool = True,
-                 max_depth: int | None = DEFAULT_MAX_DEPTH, max_bytes: int | None = None):
-        self.options = Options(forbid_dtd, forbid_entities, forbid_external, max_depth, max_bytes)
+                 max_depth: int | None = DEFAULT_MAX_DEPTH, max_bytes: int | None = None,
+                 max_attlist_defaults: int | None = DEFAULT_MAX_ATTLIST_DEFAULTS):
+        self.options = Options(forbid_dtd, forbid_entities, forbid_external, max_depth, max_bytes,
+                               max_attlist_defaults)
         parser = expat.ParserCreate(encoding, "}")
         self.target = target if target is not None else TreeBuilder()
         self.parser = parser
@@ -65,7 +69,7 @@ class XMLParser:
             parser.CommentHandler = target.comment
         if hasattr(target, "pi"):
             parser.ProcessingInstructionHandler = target.pi
-        install_handlers(parser, self.options)
+        self._attlist = install_handlers(parser, self.options)
 
     # --- expat callbacks ---------------------------------------------------
 
@@ -81,6 +85,8 @@ class XMLParser:
         limit = self.options.max_depth
         if limit is not None and self._depth > limit:
             raise depth_exceeded(limit)
+        if self._attlist.active:
+            self._attlist.check(attr_list[1::2], self._fed)
         fixname = self._fixname
         attrib = {fixname(attr_list[i]): attr_list[i + 1] for i in range(0, len(attr_list), 2)}
         return self.target.start(fixname(tag), attrib)
@@ -134,11 +140,10 @@ class XMLParser:
     # --- public protocol ---------------------------------------------------
 
     def feed(self, data: bytes | str) -> None:
+        self._fed += len(data)
         limit = self.options.max_bytes
-        if limit is not None:
-            self._fed += len(data)
-            if self._fed > limit:
-                raise size_exceeded(limit)
+        if limit is not None and self._fed > limit:
+            raise size_exceeded(limit)
         try:
             self.parser.Parse(data, False)
         except expat.error as exc:

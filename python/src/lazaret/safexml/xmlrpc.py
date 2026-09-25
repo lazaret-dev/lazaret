@@ -5,7 +5,8 @@
 
 Responses are parsed with the safexml protections, and their size is capped
 (max_bytes, 32 MiB by default). The cap applies after gzip decompression, so
-a compressed "zip bomb" response is cut off too.
+a compressed "zip bomb" response is cut off too. XML-RPC messages never have a
+DOCTYPE, so forbid_dtd defaults to True here.
 
 monkey_patch() applies the same parser to the stdlib's xmlrpc.client and
 xmlrpc.server globally
@@ -17,35 +18,48 @@ import xmlrpc.client as _client
 from typing import Any
 from urllib.parse import urlsplit
 
-from ._common import DEFAULT_MAX_DEPTH, Options, depth_exceeded, install_handlers, size_exceeded
+from ._common import (
+    DEFAULT_MAX_ATTLIST_DEFAULTS,
+    DEFAULT_MAX_DEPTH,
+    Options,
+    depth_exceeded,
+    install_handlers,
+    size_exceeded,
+)
 
 __all__ = ["SafeXMLRPCParser", "Transport", "SafeTransport", "ServerProxy", "loads",
            "monkey_patch", "unmonkey_patch", "DEFAULT_MAX_BYTES"]
 
 DEFAULT_MAX_BYTES = 32 * 1024 * 1024
 
-_SAFE_KEYS = ("forbid_dtd", "forbid_entities", "forbid_external", "max_depth", "max_bytes")
+_SAFE_KEYS = ("forbid_dtd", "forbid_entities", "forbid_external", "max_depth", "max_bytes",
+              "max_attlist_defaults")
 
 
 class SafeXMLRPCParser(_client.ExpatParser):
-    """Replacement for xmlrpc.client.ExpatParser."""
+    """Replacement for xmlrpc.client.ExpatParser. XML-RPC never uses a
+    DOCTYPE, so unlike the other APIs, forbid_dtd defaults to True."""
 
-    def __init__(self, target: Any, *, forbid_dtd: bool = False, forbid_entities: bool = True,
+    def __init__(self, target: Any, *, forbid_dtd: bool = True, forbid_entities: bool = True,
                  forbid_external: bool = True, max_depth: int | None = DEFAULT_MAX_DEPTH,
-                 max_bytes: int | None = DEFAULT_MAX_BYTES):
-        self.options = Options(forbid_dtd, forbid_entities, forbid_external, max_depth, max_bytes)
+                 max_bytes: int | None = DEFAULT_MAX_BYTES,
+                 max_attlist_defaults: int | None = DEFAULT_MAX_ATTLIST_DEFAULTS):
+        self.options = Options(forbid_dtd, forbid_entities, forbid_external, max_depth, max_bytes,
+                               max_attlist_defaults)
         super().__init__(target)
         self._depth = 0
         self._fed = 0
         self._parser.StartElementHandler = self._start
         self._parser.EndElementHandler = self._end
-        install_handlers(self._parser, self.options)
+        self._attlist = install_handlers(self._parser, self.options)
 
     def _start(self, tag, attrs):
         self._depth += 1
         limit = self.options.max_depth
         if limit is not None and self._depth > limit:
             raise depth_exceeded(limit)
+        if self._attlist.active:
+            self._attlist.check(attrs.values(), self._fed)
         self._target.start(tag, attrs)
 
     def _end(self, tag):
@@ -53,11 +67,10 @@ class SafeXMLRPCParser(_client.ExpatParser):
         self._target.end(tag)
 
     def feed(self, data) -> None:
+        self._fed += len(data)
         limit = self.options.max_bytes
-        if limit is not None:
-            self._fed += len(data)
-            if self._fed > limit:
-                raise size_exceeded(limit)
+        if limit is not None and self._fed > limit:
+            raise size_exceeded(limit)
         super().feed(data)
 
 

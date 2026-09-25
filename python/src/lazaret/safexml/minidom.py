@@ -12,7 +12,15 @@ import os
 from typing import Any
 from xml.dom import expatbuilder as _expatbuilder  # lazaret-ignore: S-XML (this module is the hardening layer)
 
-from ._common import DEFAULT_MAX_DEPTH, LimitedReader, Options, depth_exceeded, install_handlers, size_exceeded
+from ._common import (
+    DEFAULT_MAX_ATTLIST_DEFAULTS,
+    DEFAULT_MAX_DEPTH,
+    LimitedReader,
+    Options,
+    depth_exceeded,
+    install_handlers,
+    size_exceeded,
+)
 
 __all__ = ["parse", "parseString", "SafeExpatBuilder", "SafeExpatBuilderNS"]
 
@@ -28,6 +36,9 @@ class _SafeBuilderMixin:
 
     def install(self, parser) -> None:
         super().install(parser)
+        # The builder sets specified_attributes, so Expat never reports
+        # defaulted attributes to it: only the declarations need a budget, and
+        # install_handlers() chains that to the builder's AttlistDeclHandler.
         install_handlers(parser, self._safe)
 
     def start_element_handler(self, name, attributes):
@@ -67,10 +78,11 @@ def _builder(namespaces: bool, safe: dict[str, Any]):
 
 def parse(file: Any, *, namespaces: bool = True, forbid_dtd: bool = False, forbid_entities: bool = True,
           forbid_external: bool = True, max_depth: int | None = DEFAULT_MAX_DEPTH,
-          max_bytes: int | None = None):
+          max_bytes: int | None = None, max_attlist_defaults: int | None = DEFAULT_MAX_ATTLIST_DEFAULTS):
     """Parse a file path or binary file object into a minidom Document."""
     builder = _builder(namespaces, dict(forbid_dtd=forbid_dtd, forbid_entities=forbid_entities,
-                                        forbid_external=forbid_external, max_depth=max_depth, max_bytes=max_bytes))
+                                        forbid_external=forbid_external, max_depth=max_depth, max_bytes=max_bytes,
+                                        max_attlist_defaults=max_attlist_defaults))
     if isinstance(file, (str, bytes, os.PathLike)):
         with open(file, "rb") as fp:
             return builder.parseFile(fp)
@@ -79,8 +91,10 @@ def parse(file: Any, *, namespaces: bool = True, forbid_dtd: bool = False, forbi
 
 def parseString(string: bytes | str, *, namespaces: bool = True, forbid_dtd: bool = False,
                 forbid_entities: bool = True, forbid_external: bool = True,
-                max_depth: int | None = DEFAULT_MAX_DEPTH, max_bytes: int | None = None):
+                max_depth: int | None = DEFAULT_MAX_DEPTH, max_bytes: int | None = None,
+                max_attlist_defaults: int | None = DEFAULT_MAX_ATTLIST_DEFAULTS):
     """Parse a string or bytes into a minidom Document."""
     builder = _builder(namespaces, dict(forbid_dtd=forbid_dtd, forbid_entities=forbid_entities,
-                                        forbid_external=forbid_external, max_depth=max_depth, max_bytes=max_bytes))
+                                        forbid_external=forbid_external, max_depth=max_depth, max_bytes=max_bytes,
+                                        max_attlist_defaults=max_attlist_defaults))
     return builder.parseString(string)

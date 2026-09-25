@@ -9,6 +9,8 @@ installing handlers on the Expat parser before any input is read:
 - external entity references raise ExternalReferenceForbidden;
 - DOCTYPE declarations optionally raise DTDForbidden;
 - external DTDs and parameter entities are never loaded, in every API;
+- attribute defaults declared in the DTD are budgeted (AttlistGuard), because
+  Expat copies each one onto every element of that type;
 - element content models are never converted to Python (pyexpat does that
   recursively in C, so a deeply nested model overflows the C stack);
 - nesting depth and input size are bounded.
@@ -20,6 +22,20 @@ import pyexpat
 from dataclasses import dataclass
 
 DEFAULT_MAX_DEPTH = 500
+DEFAULT_MAX_ATTLIST_DEFAULTS = 64 * 1024
+
+# Attribute defaults (<!ATTLIST a x CDATA "AAAA...">) are copied by Expat onto
+# every <a> element, with no entity involved, so a small document can put
+# gigabytes of attribute values in memory. Two checks bound this:
+# - the declarations: the lengths of all declared default values, plus
+#   ATTRIBUTE_COST per declaration, must fit in max_attlist_defaults;
+# - the attributes reported, once any default has been declared: like
+#   libexpat's own amplification limit, their total size (values plus
+#   ATTRIBUTE_COST each) may not exceed AMPLIFICATION_FACTOR times the input
+#   read so far, once past AMPLIFICATION_THRESHOLD.
+ATTRIBUTE_COST = 64
+AMPLIFICATION_THRESHOLD = 8 * 1024 * 1024
+AMPLIFICATION_FACTOR = 100
 
 # libexpat 2.4.1+ limits entity amplification ("billion laughs") by itself.
 # Declared entities are only ever allowed on top of that protection.
@@ -74,6 +90,9 @@ class Options:
     forbid_external: refuse references to external entities.
     max_depth: maximum element nesting (None for no limit).
     max_bytes: maximum input size, in bytes, or characters for str input (None for no limit).
+    max_attlist_defaults: budget for attribute defaults declared in the DTD: the
+        total length of the default values, plus 64 per declaration (None for no
+        limit, which also turns off the attribute amplification check).
     """
 
     forbid_dtd: bool = False
@@ -81,13 +100,14 @@ class Options:
     forbid_external: bool = True
     max_depth: int | None = DEFAULT_MAX_DEPTH
     max_bytes: int | None = None
+    max_attlist_defaults: int | None = DEFAULT_MAX_ATTLIST_DEFAULTS
 
     def __post_init__(self) -> None:
         if not self.forbid_entities and not EXPAT_HAS_AMPLIFICATION_LIMIT:
             raise NotSupportedError(
                 "forbid_entities=False requires libexpat 2.4.1 or later (found "
                 f"{'.'.join(map(str, pyexpat.version_info))}), which limits entity expansion")
-        for name in ("max_depth", "max_bytes"):
+        for name in ("max_depth", "max_bytes", "max_attlist_defaults"):
             value = getattr(self, name)
             if value is not None and (not isinstance(value, int) or value < 1):
                 raise ValueError(f"{name} must be a positive integer or None")
@@ -109,9 +129,48 @@ def _forbid_external(context, base, sysid, pubid):
     raise ExternalReferenceForbidden(context, base, sysid, pubid)
 
 
-def install_handlers(parser, options: Options) -> None:
+class AttlistGuard:
+    """Budget for attribute defaults declared in the DTD (see ATTRIBUTE_COST).
+
+    install_handlers() makes one per Expat parser and installs attlist_decl as
+    its AttlistDeclHandler, chaining to any handler already there (minidom has
+    its own). APIs whose start-element handler receives the defaulted
+    attributes call check() there while `active` is true."""
+
+    def __init__(self, limit: int | None, previous=None):
+        self.limit = limit
+        self.previous = previous
+        self.active = False  # a default has been declared, and there is a limit
+        self._declared = 0
+        self._reported = 0
+
+    def attlist_decl(self, elname, attname, type_, default, required):
+        if default is not None and self.limit is not None:
+            self.active = True
+            self._declared += len(default) + ATTRIBUTE_COST
+            if self._declared > self.limit:
+                raise LimitExceeded(
+                    f"attribute defaults declared in the DTD exceed max_attlist_defaults={self.limit}")
+        if self.previous is not None:
+            self.previous(elname, attname, type_, default, required)
+
+    def check(self, values, consumed: int) -> None:
+        """Account for one element's attribute values; `consumed` is the size
+        of the input fed to the parser so far."""
+        total = self._reported
+        for value in values:
+            total += len(value) + ATTRIBUTE_COST
+        self._reported = total
+        if total > AMPLIFICATION_THRESHOLD and total > AMPLIFICATION_FACTOR * consumed:
+            raise LimitExceeded(
+                "attribute defaults declared in the DTD expand to more than "
+                f"{AMPLIFICATION_FACTOR} times the size of the document")
+
+
+def install_handlers(parser, options: Options) -> AttlistGuard:
     """Apply the protections to a pyexpat parser. Must run before parsing
-    starts, after the API has installed its own handlers."""
+    starts, after the API has installed its own handlers. Returns the parser's
+    AttlistGuard."""
     # Never read an external DTD subset or external parameter entities. The
     # stdlib SAX reader turns this on; we turn it off everywhere, so a DOCTYPE
     # with a SYSTEM or PUBLIC id is inert in every API.
@@ -129,6 +188,9 @@ def install_handlers(parser, options: Options) -> None:
     # handler Expat never builds the model. minidom installs one; nothing it
     # does by default needs it.
     parser.ElementDeclHandler = None
+    guard = AttlistGuard(options.max_attlist_defaults, parser.AttlistDeclHandler)
+    parser.AttlistDeclHandler = guard.attlist_decl
+    return guard
 
 
 def depth_exceeded(limit: int) -> LimitExceeded:
