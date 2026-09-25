@@ -1,6 +1,6 @@
 {
   "name": "lazaret",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Quarantine for your dependencies: supply-chain security for Python and JavaScript packages.",
   "type": "module",
   "bin": {
