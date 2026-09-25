@@ -106,6 +106,12 @@ class PythonInstallScriptTests(unittest.TestCase):
                 hook = issues(res, "SC-INSTALL-HOOK")
                 self.assertEqual([(i["file"], i["sev"]) for i in hook], [("setup.py", "CRITICAL")])
 
+    def test_helper_module_imported_by_setup_py(self):
+        res = scan_sdist({"setup.py": "from setuptools import setup\nimport _build_helpers\nsetup(name='x')\n",
+                          "_build_helpers.py": self.ENV_TO_WEBHOOK.replace("setup(name='x')\n", "")})
+        self.assertEqual(res["verdict"], "SUSPICIOUS")
+        self.assertEqual({i["file"] for i in issues(res, "SC-INSTALL-HOOK")}, {"_build_helpers.py"})
+
     def test_ordinary_setup_py_is_ok(self):
         body = ("import os\nfrom setuptools import setup\n"
                 "setup(name='x', version=os.environ.get('X_VERSION', '1.0'))\n")
@@ -183,6 +189,13 @@ class TestPathTests(unittest.TestCase):
                 self.assertEqual(res["verdict"], "WARN", res["verdictReason"])
                 self.assertEqual({i["sev"] for i in res["issues"] if i["rule"] in ("SC-B64", "SC-BINARY")},
                                  {"MAJOR"})
+
+    def test_default_main_index_js_counts_as_an_entry(self):
+        files = self.package("test")
+        files["package.json"] = manifest()
+        files["index.js"] = "module.exports = require('./test/index.js');\n"
+        res = scan_npm(files)
+        self.assertEqual(res["verdict"], "WARN", res["verdictReason"])
 
     def test_unreachable_test_fixtures_are_still_inventory(self):
         files = self.package("test")

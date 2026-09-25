@@ -1151,8 +1151,8 @@ def _rel_join(base, target):
 def _package_entry_targets(data):
     targets = []
     main = data.get("main")
-    if isinstance(main, str) and main.strip():
-        targets.append(main)
+    # no main: require(pkg) loads index.js
+    targets.append(main if isinstance(main, str) and main.strip() else "index.js")
     bins = data.get("bin")
     if isinstance(bins, str):
         targets.append(bins)
@@ -1454,6 +1454,19 @@ class _ArtifactScan:
                 rel = self._find([_rel_join(root, mod + ".py"), _rel_join(root, mod + "/__init__.py")])
                 if rel:
                     scripts.append(rel)
+        # modules they import from the sdist itself run at install time too
+        queue, seen = list(scripts), set(scripts)
+        while queue and len(seen) < 200:
+            text, lang = self.sources.get(queue.pop(), ("", None))
+            if lang != "py":
+                continue
+            for m in _PY_LOCAL_IMPORT_RE.finditer(text):
+                mod = (m.group(1) or m.group(2)).replace(".", "/")
+                rel = self._find([mod + ".py", mod + "/__init__.py"])
+                if rel and rel not in seen:
+                    seen.add(rel)
+                    scripts.append(rel)
+                    queue.append(rel)
         for rel in scripts:
             self.entries.add(rel)
             text = self.sources.get(rel, ("", "py"))[0]
@@ -1517,6 +1530,7 @@ class _ArtifactScan:
         self.sources, self.deferred, self.shell = {}, {}, {}
 
 
+_PY_LOCAL_IMPORT_RE = re.compile(r"^\s*(?:from\s+([A-Za-z_][\w.]*)\s+import\b|import\s+([A-Za-z_][\w.]*))", re.M)
 _PEP517_SECTION_RE = re.compile(r"^\s*\[build-system\]\s*$(.*?)(?=^\s*\[|\Z)", re.M | re.S)
 
 
