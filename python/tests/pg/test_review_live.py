@@ -166,5 +166,26 @@ class CommitTimeErrorTests(LiveCase):
         self.assertEqual(self.count(), 3)
 
 
+@_support.requires_env("LAZARET_TEST_PG_DSN")
+class ExecutemanyNoticeFloodTests(LiveCase):
+    tables = ("lz_rv_flood",)
+
+    def test_trigger_notice_per_row_does_not_deadlock(self):
+        c = pg.connect(DSN, timeout=20)
+        self.addCleanup(c.close)
+        c.notice_handler = lambda notice: None
+        c.execute_script("""
+            DROP TABLE IF EXISTS lz_rv_flood;
+            CREATE TABLE lz_rv_flood (v text);
+            CREATE FUNCTION pg_temp.lz_rv_note() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN RAISE NOTICE '%', repeat('n', 20000); RETURN NEW; END $$;
+            CREATE TRIGGER lz_rv_note BEFORE INSERT ON lz_rv_flood
+                FOR EACH ROW EXECUTE FUNCTION pg_temp.lz_rv_note();
+        """)
+        result = c.executemany("INSERT INTO lz_rv_flood VALUES ($1)", [("x" * 200_000,)] * 300)
+        self.assertEqual(result.rowcount, 300)
+        self.assertEqual(c.fetchval("SELECT count(*) FROM lz_rv_flood"), 300)
+
+
 if __name__ == "__main__":
     unittest.main()

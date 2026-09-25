@@ -11,6 +11,7 @@ import collections
 import hashlib
 import logging
 import os
+import selectors
 import socket
 import ssl
 import struct
@@ -39,12 +40,16 @@ SSL_REQUEST = 80877103
 CANCEL_REQUEST = 80877102
 MAX_MESSAGE = 1 << 30  # refuse absurd lengths from a broken or hostile server
 MAX_PARAMS = 65535
-EXECUTEMANY_CHUNK = 500
+EXECUTEMANY_CHUNK = 500             # rows per pipelined chunk...
+EXECUTEMANY_CHUNK_BYTES = 1 << 20   # ...and bytes (a single larger row is sent alone)
+_RECV_SIZE = 65536
 
 _I32 = struct.Struct("!i")
+_KINDS = [bytes((i,)) for i in range(256)]
 _I16 = struct.Struct("!h")
 _SYNC = b"S\x00\x00\x00\x04"
 _FLUSH = b"H\x00\x00\x00\x04"
+_EXECUTE_ALL = b"E\x00\x00\x00\x09\x00\x00\x00\x00\x00"  # unnamed portal, no row limit
 _TERMINATE = b"X\x00\x00\x00\x04"
 _COUNTED_TAGS = {"INSERT", "UPDATE", "DELETE", "SELECT", "MOVE", "FETCH", "COPY", "MERGE"}
 _ISOLATION = {"read committed", "repeatable read", "serializable"}
@@ -159,7 +164,7 @@ class Connection:
         self._timeout = timeout
         self._allow_cleartext = allow_cleartext_password
         self._sock: socket.socket | None = None
-        self._rfile = None
+        self._rbuf = bytearray()  # bytes received from the server but not yet parsed
         self._closed = True
         self._synced = True
         self._streaming = False
@@ -252,24 +257,28 @@ class Connection:
         with self._io():
             self._synced = False
             last_oids = None
-            # The first row goes alone: if the statement turns out to be COPY FROM
-            # STDIN, any message pipelined behind it makes the server drop the
-            # connection ("protocol synchronization was lost").
-            bounds = [0, 1] + list(range(1 + EXECUTEMANY_CHUNK, len(encoded), EXECUTEMANY_CHUNK))
-            for start, stop in zip(bounds, bounds[1:] + [len(encoded)]):
-                if start >= stop:
-                    break
-                chunk = encoded[start:stop]
+            start = 0
+            while start < len(encoded):
+                # The first row goes alone: if the statement turns out to be COPY FROM
+                # STDIN, any message pipelined behind it makes the server drop the
+                # connection ("protocol synchronization was lost"). Later chunks are
+                # capped by rows and by bytes.
+                limit = 1 if start == 0 else EXECUTEMANY_CHUNK
                 out = bytearray()
-                for oids, formats, values in chunk:
+                stop = start
+                while stop < len(encoded) and stop - start < limit and len(out) < EXECUTEMANY_CHUNK_BYTES:
+                    oids, formats, values = encoded[stop]
                     if oids != last_oids:  # re-prepare when parameter types change
                         out += self._parse_msg(sql_b, oids)
                         last_oids = oids
                     out += self._bind_msg(formats, values)
-                    out += _msg(b"E", b"\x00" + _I32.pack(0))
-                self._send(bytes(out) + _FLUSH)
+                    out += _EXECUTE_ALL
+                    stop += 1
+                out += _FLUSH
+                self._send_pipelined(out)
+                expected, start = stop - start, stop
                 done = 0
-                while done < len(chunk):
+                while done < expected:
                     kind, body = self._read_message()
                     if kind == b"C":
                         result = CommandResult.from_tag(_tag(body))
@@ -497,7 +506,7 @@ class Connection:
         if not p.is_unix_socket and p.sslmode != "disable":
             sock = self._negotiate_ssl(sock)
             self._sock = sock
-        self._rfile = sock.makefile("rb", buffering=65536)
+        self._rbuf = bytearray()
 
         startup = {
             "user": p.user,
@@ -903,20 +912,112 @@ class Connection:
             self._abort()
             raise OperationalError(f"connection lost while sending: {exc}") from exc
 
-    def _read_exact(self, n: int) -> bytes:
+    def _send_pipelined(self, data: bytes | bytearray) -> None:
+        """sendall() for a pipelined batch that keeps reading the server's
+        replies into the read buffer while it writes. With a plain sendall(),
+        a server that sends a lot per row (e.g. a NOTICE from a trigger) fills
+        its socket buffers and stops reading our input while we are still
+        writing, and both sides wait forever."""
+        sock = self._sock
+        view = memoryview(data)
+        timeout = sock.gettimeout()
+        tls = isinstance(sock, ssl.SSLSocket)
+        both = selectors.EVENT_READ | selectors.EVENT_WRITE
+        selector = selectors.DefaultSelector()
         try:
-            data = self._rfile.read(n)
-        except (OSError, ValueError) as exc:
+            sock.setblocking(False)
+            selector.register(sock, both)
+            events = both
+            while view:
+                if tls and sock.pending():
+                    ready = selectors.EVENT_READ
+                else:
+                    ready = 0
+                    for _, mask in selector.select(timeout):
+                        ready |= mask
+                    if not ready:
+                        raise TimeoutError("timed out")
+                if ready & selectors.EVENT_READ:
+                    self._recv_available(sock, tls)
+                wanted = both
+                if ready & selectors.EVENT_WRITE:
+                    try:
+                        view = view[sock.send(view[:1 << 18]):]
+                    except (BlockingIOError, InterruptedError, ssl.SSLWantWriteError):
+                        pass
+                    except ssl.SSLWantReadError:  # TLS must read first: don't spin on "writable"
+                        wanted = selectors.EVENT_READ
+                if wanted != events:
+                    selector.modify(sock, wanted)
+                    events = wanted
+        except OSError as exc:  # TimeoutError and ssl.SSLError are OSErrors
             self._abort()
             if isinstance(exc, TimeoutError):
-                raise OperationalError("timed out waiting for the server; connection closed") from exc
-            raise OperationalError(f"connection lost while reading: {exc}") from exc
-        if len(data) != n:
-            self._abort()
-            raise OperationalError("server closed the connection unexpectedly")
+                raise OperationalError("timed out sending to the server; connection closed") from exc
+            raise OperationalError(f"connection lost while sending: {exc}") from exc
+        finally:
+            selector.close()
+            if self._sock is sock:
+                sock.settimeout(timeout)
+
+    def _recv_available(self, sock: socket.socket, tls: bool) -> None:
+        """Move whatever the server has sent into the read buffer, without blocking."""
+        while True:
+            try:
+                chunk = sock.recv(_RECV_SIZE)
+            except (BlockingIOError, InterruptedError, ssl.SSLWantReadError, ssl.SSLWantWriteError):
+                return
+            if not chunk:
+                raise ConnectionResetError("server closed the connection")
+            self._rbuf += chunk
+            if not (tls and sock.pending()):
+                return
+
+    def _read_exact(self, n: int) -> bytes:
+        buf = self._rbuf
+        if len(buf) < n:
+            try:
+                if n - len(buf) > _RECV_SIZE:  # a large message: read straight into place
+                    out = bytearray(n)
+                    got = len(buf)
+                    out[:got] = buf
+                    buf.clear()
+                    view = memoryview(out)
+                    while got < n:
+                        count = self._sock.recv_into(view[got:], n - got)
+                        if not count:
+                            break
+                        got += count
+                    if got == n:
+                        return bytes(out)
+                    buf += view[:got]
+                else:
+                    while len(buf) < n:
+                        chunk = self._sock.recv(_RECV_SIZE)
+                        if not chunk:
+                            break
+                        buf += chunk
+            except (OSError, ValueError, AttributeError) as exc:  # AttributeError: closed meanwhile
+                self._abort()
+                if isinstance(exc, TimeoutError):
+                    raise OperationalError("timed out waiting for the server; connection closed") from exc
+                raise OperationalError(f"connection lost while reading: {exc}") from exc
+            if len(buf) < n:
+                self._abort()
+                raise OperationalError("server closed the connection unexpectedly")
+        data = bytes(buf[:n])
+        del buf[:n]
         return data
 
     def _read_message(self) -> tuple[bytes, bytes]:
+        buf = self._rbuf
+        if len(buf) >= 5:  # fast path: the whole message is already buffered
+            length = _I32.unpack_from(buf, 1)[0]
+            if 4 <= length < len(buf):
+                kind = _KINDS[buf[0]]
+                body = bytes(buf[5:length + 1])
+                del buf[:length + 1]
+                return kind, body
         header = self._read_exact(5)
         length = _I32.unpack_from(header, 1)[0]
         if length < 4 or length > MAX_MESSAGE:
@@ -928,11 +1029,10 @@ class Connection:
         self._closed = True
         self._synced = True
         self._backend_key = None
-        for resource in (self._rfile, self._sock):
-            if resource is not None:
-                try:
-                    resource.close()
-                except OSError:
-                    pass
-        self._rfile = None
+        if self._sock is not None:
+            try:
+                self._sock.close()
+            except OSError:
+                pass
+        self._rbuf = bytearray()
         self._sock = None
