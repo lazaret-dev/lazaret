@@ -882,7 +882,22 @@ def entropy_secretish(v):
     return shannon_entropy(v) > 4.0
 
 # ---------------- Inline suppression ----------------
-SUPPRESS_RE = re.compile(r"(?:#|//|--)\s*(?:nosec|NOSONAR|lazaret-ignore)\b(?::?\s*([\w,\s-]+))?", re.I)
+# Marker grammar (review fix, shared semantics 2): `#`, `//` or `--`, optional
+# spaces/tabs, then nosec / NOSONAR / lazaret-ignore (case-insensitive, whole
+# word). If what follows (after optional spaces and ':') is a comma-separated
+# list of rule IDs, the marker suppresses only those rules; anything else —
+# nothing, trailing whitespace, or a free-text reason such as "- reviewed by
+# bob" — makes it a blanket marker for the line. The marker counts only when
+# its introducer ('#', '//', '--') lies inside a real comment as the per-file
+# comment lexer sees it (so `--` works in .sql comments, `#` in Python ones,
+# and nothing inside a string, a template literal or code such as `x --nosec`
+# or a JS `#private` field does). It applies to its own line, or to the next
+# line when it sits on a standalone comment line.
+_RULE_ID_SRC = r"(?:S|T|SC|X|SQL|B|Q)-[A-Z0-9]+(?:-[A-Z0-9]+)*"
+SUPPRESS_RE = re.compile(
+    r"(?:#|//|--)[ \t]*(?:nosec|NOSONAR|lazaret-ignore)\b"
+    r"(?:[ \t]*:?[ \t]*(" + _RULE_ID_SRC + r"(?:[ \t]*,[ \t]*" + _RULE_ID_SRC + r")*))?",
+    re.I)
 
 # Verdict integrity (audit C2/H6): findings from these rule families are never
 # suppressible by markers in the scanned code. Supply-chain indicators (SC-*)
@@ -927,38 +942,68 @@ def string_literal_mask(line, lang=None):
     return mask
 
 
-def marker_in_comment(line, lang=None):
-    """The SUPPRESS_RE match on this line if it lives in real comment text —
-    i.e. at least one character of the marker's span is outside every string
-    literal — else None. A `-- nosec` inside a string (the audit PoC
-    `os.system("rm -rf / -- nosec")`) returns None and does not suppress."""
-    mask = string_literal_mask(line, lang)
+def _find_marker(line, spans):
+    """The first SUPPRESS_RE match on `line` whose introducer lies inside one
+    of the line's comment spans, else None."""
+    if not spans:
+        return None
     for m in SUPPRESS_RE.finditer(line):
-        if any(not mask[k] for k in range(m.start(), m.end())):
+        p = m.start()
+        if any(a <= p < b for a, b in spans):
             return m
     return None
+
+
+def _marker_rules(m):
+    """None for a blanket marker, else the frozenset of rule IDs it names."""
+    ids = m.group(1)
+    if not ids:
+        return None
+    return frozenset(s.strip().upper() for s in ids.split(","))
+
+
+def marker_in_comment(line, lang=None):
+    """The suppression marker on this line if it lives in real comment text
+    (the line lexed on its own), else None. A `-- nosec` inside a string
+    (the audit PoC `os.system("rm -rf / -- nosec")`) returns None."""
+    return _find_marker(line, _comment_layout(line, [line], lang)[1].get(0))
+
+
+_NO_MARKER = object()
+
+
+def _suppressed_in(issue, ctx):
+    rule = str(issue.get("rule", "")).upper()
+    ln = issue["line"] - 1
+    for k in (ln, ln - 1):
+        if not (0 <= k < len(ctx.lines)):
+            continue
+        if k != ln and not ctx.cmask[k]:
+            continue  # the line above counts only if it is a standalone comment
+        ids = ctx.marker(k)
+        if ids is _NO_MARKER:
+            continue
+        if ids is None or rule in ids:
+            return True
+    return False
 
 
 def is_suppressed(issue, lines, lang=None, dep=False):
     # Suppression markers are reviewer annotations. The scanned code itself
     # must not be able to forge them (audit C2/G1: a marker inside a string
-    # literal made a CRITICAL finding vanish and the gate PASSED), and
+    # literal made a CRITICAL finding vanish and the gate PASSED; review: a
+    # `# nosec"""` closing a docstring, a `// NOSONAR` inside a template
+    # literal and `os.system(x) --nosec` in Python did the same), and
     # dependency/registry mode has no reviewer at all (G2: `// nosec` cleared
     # SC-EVAL-DECODE on a live implant). Never suppress supply-chain or
-    # interprocedural findings, and never in dep mode.
+    # interprocedural findings, and never in dep mode. Suppression never
+    # crosses files: the marker must be in `lines`, the finding's own file.
     if dep or str(issue.get("rule", "")).startswith(UNSUPPRESSIBLE_PREFIXES):
         return False
-    for ln in (issue["line"] - 1, issue["line"] - 2):
-        if not (0 <= ln < len(lines)):
-            continue
-        if ln == issue["line"] - 2 and not lines[ln].strip().startswith(("#", "//")):
-            continue  # previous line counts only if it is a standalone comment
-        m = marker_in_comment(lines[ln], lang)
-        if m:
-            ids = m.group(1)
-            if not ids or issue["rule"].upper() in [s.strip().upper() for s in ids.split(",")]:
-                return True
-    return False
+    ctx = _active_ctx(lines)
+    if ctx is None or ctx.lang != lang:
+        ctx = _FileCtx(lines, lang)
+    return _suppressed_in(issue, ctx)
 
 # ---------------- Binary / compiled-artifact detection ----------------
 # Source packages (sdists, npm tarballs, repos) should ship reviewable source,
@@ -1418,6 +1463,22 @@ class _FileCtx:
         self.content = "\n".join(lines) if content is None else content
         self.cmask, self.cspans, self.code = _comment_layout(self.content, lines, lang)
         self.deadline = deadline
+        self._markers = {}
+
+    def marker(self, k):
+        """Parsed suppression marker of line k: _NO_MARKER, None (blanket)
+        or a frozenset of rule IDs. Parsed once per line."""
+        v = self._markers.get(k, self)
+        if v is self:
+            m = _find_marker(self.lines[k], self.cspans.get(k))
+            v = _NO_MARKER if m is None else _marker_rules(m)
+            self._markers[k] = v
+        return v
+
+    def suppressed(self, issue, dep=False):
+        if dep or str(issue.get("rule", "")).startswith(UNSUPPRESSIBLE_PREFIXES):
+            return False
+        return _suppressed_in(issue, self)
 
     def check_time(self):
         if self.deadline is not None and time.monotonic() > self.deadline:
@@ -1974,7 +2035,7 @@ def _scan_file(path, content, lines, lang, dep, ctx):
         except Exception:
             pass
     if dep:
-        return [i for i in issues if not is_suppressed(i, lines, lang=lang, dep=True)]
+        return [i for i in issues if not ctx.suppressed(i, dep=True)]
     for fn in extract_functions(lines, lang):
         if fn["len"] > FN_LEN_LIMIT:
             issues.append(mk_issue(
@@ -1990,7 +2051,7 @@ def _scan_file(path, content, lines, lang, dep, ctx):
                  "why": "Highly branched code is hard to reason about and to cover with tests.",
                  "fix": "Split branches into smaller functions; use early returns or lookup tables.",
                  "ref": "Maintainability"}, path, fn["line"], lines))
-    return [i for i in issues if not is_suppressed(i, lines, lang=lang)]
+    return [i for i in issues if not ctx.suppressed(i)]
 
 DEP_MARKERS = {"node_modules", "site-packages", "bower_components", "vendor",
                "venv", ".venv"}
