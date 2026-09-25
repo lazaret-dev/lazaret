@@ -22,6 +22,7 @@ AUTH_METHODS = ("password", "md5", "gss", "sspi", "scram-sha-256", "none")
 _KEYS = {
     "host", "port", "user", "password", "dbname", "sslmode", "sslrootcert", "sslcert", "sslkey",
     "connect_timeout", "application_name", "channel_binding", "require_auth", "options", "passfile",
+    "keepalives", "keepalives_idle", "keepalives_interval", "keepalives_count",
 }
 _ALIASES = {"database": "dbname"}
 _ENV = {
@@ -50,6 +51,10 @@ class ConnectParams:
     require_auth: tuple[bool, frozenset[str]] | None = None  # (negated, methods)
     options: str | None = None
     passfile: str | None = None
+    keepalives: bool = True                 # TCP keepalives, as in libpq
+    keepalives_idle: int | None = None      # seconds; None: the system default
+    keepalives_interval: int | None = None  # seconds
+    keepalives_count: int | None = None
 
     @property
     def is_unix_socket(self) -> bool:
@@ -215,6 +220,20 @@ def _parse_require_auth(value: str) -> tuple[bool, frozenset[str]]:
     return negated.pop(), methods
 
 
+def _nonnegative_int(merged: dict[str, str], key: str) -> int | None:
+    """libpq-style integer setting: unset or 0 means "system default" (None)."""
+    raw = merged.get(key)
+    if raw is None or raw == "":
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        raise InterfaceError(f"{key} must be a whole number") from None
+    if value < 0:
+        raise InterfaceError(f"{key} must not be negative")
+    return value or None
+
+
 def _default_user() -> str:
     try:
         return getpass.getuser()
@@ -277,6 +296,10 @@ def resolve(dsn: str | None = None, **kwargs: object) -> ConnectParams:
         require_auth=_parse_require_auth(merged["require_auth"]) if merged.get("require_auth") else None,
         options=merged.get("options"),
         passfile=merged.get("passfile"),
+        keepalives=(_nonnegative_int(merged, "keepalives") or 0) != 0 if merged.get("keepalives") else True,
+        keepalives_idle=_nonnegative_int(merged, "keepalives_idle"),
+        keepalives_interval=_nonnegative_int(merged, "keepalives_interval"),
+        keepalives_count=_nonnegative_int(merged, "keepalives_count"),
     )
 
 

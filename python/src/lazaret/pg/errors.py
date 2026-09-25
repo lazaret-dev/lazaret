@@ -3,7 +3,11 @@
     Error
     ├── InterfaceError          misuse of the API or an unsupported feature (client side)
     ├── OperationalError        network, TLS, or protocol failure; the connection is unusable
-    │   └── AuthenticationError the client refused or failed to complete authentication
+    │   ├── AuthenticationError the client refused or failed to complete authentication
+    │   └── ServerOperationalError  (also a DatabaseError) SQLSTATE class 08, class 53,
+    │                           and 57P01-57P05: the server reports a connection or resource
+    │                           problem (admin shutdown, pg_terminate_backend, idle session
+    │                           timeout, too many connections, out of disk or memory)
     └── DatabaseError           an error reported by the server (has .sqlstate, .detail, ...)
         ├── DataError               SQLSTATE class 22 (bad value, overflow, ...)
         ├── IntegrityError          class 23 (unique, foreign key, not null, check)
@@ -30,7 +34,9 @@ class InterfaceError(Error):
 
 
 class OperationalError(Error):
-    """Network, TLS, or protocol failure. The connection is closed afterwards."""
+    """Network, TLS, or protocol failure. The connection is closed afterwards,
+    except after some ServerOperationalErrors (see there): check
+    Connection.closed, and call Connection.reconnect() for a new session."""
 
 
 class AuthenticationError(OperationalError):
@@ -84,6 +90,17 @@ class QueryCanceledError(DatabaseError):
     pass
 
 
+class ServerOperationalError(DatabaseError, OperationalError):
+    """The server reported a connection-level or resource problem: SQLSTATE
+    class 08 (connection exception), class 53 (insufficient resources, e.g. too
+    many connections, disk full), or 57P01-57P05 (administrator shutdown or
+    pg_terminate_backend, crash shutdown, cannot connect now, database dropped,
+    idle session timeout). Both an OperationalError and a DatabaseError, with
+    .sqlstate and the other server fields. After a FATAL one (.severity), the
+    server has ended the session and the connection is closed; a class 53
+    ERROR such as disk full leaves it usable. Connection.closed tells which."""
+
+
 _BY_CLASS = {
     "22": DataError,
     "23": IntegrityError,
@@ -93,10 +110,16 @@ _BY_CLASS = {
 }
 
 
+_OPERATIONAL_CLASSES = {"08", "53"}
+_OPERATIONAL_CODES = {"57P01", "57P02", "57P03", "57P04", "57P05"}
+
+
 def error_from_fields(fields: dict[str, str]) -> DatabaseError:
     code = fields.get("C", "")
     if code == "57014":
         return QueryCanceledError(fields)
+    if code[:2] in _OPERATIONAL_CLASSES or code in _OPERATIONAL_CODES:
+        return ServerOperationalError(fields)
     return _BY_CLASS.get(code[:2], DatabaseError)(fields)
 
 

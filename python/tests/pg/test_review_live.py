@@ -3,6 +3,8 @@ set LAZARET_TEST_PG_DSN to a DSN for a user with CREATEDB. Skipped when unset.
 """
 
 import os
+import threading
+import time
 import unittest
 import uuid
 from datetime import date, timedelta
@@ -214,6 +216,49 @@ class OpenIteratorTests(LiveCase):
         with self.assertRaisesRegex(pg.InterfaceError, "ended early"):
             list(rows)
         self.still_works()
+
+
+@_support.requires_env("LAZARET_TEST_PG_DSN")
+class ServerEndedSessionTests(LiveCase):
+    def test_pg_terminate_backend_during_a_query(self):
+        victim = pg.connect(DSN, timeout=20)
+        self.addCleanup(victim.close)
+        pid = victim.backend_pid
+        timer = threading.Timer(0.3, lambda: self.conn.execute("SELECT pg_terminate_backend($1)", pid))
+        timer.start()
+        self.addCleanup(timer.cancel)
+        with self.assertRaises(pg.ServerOperationalError) as info:
+            victim.execute("SELECT pg_sleep(5)")
+        self.assertEqual(info.exception.sqlstate, "57P01")
+        self.assertTrue(victim.closed)
+        victim.reconnect()
+        self.assertNotEqual(victim.backend_pid, pid)
+        self.still_works(victim)
+
+    def test_idle_session_timeout(self):
+        c = pg.connect(DSN, timeout=20)
+        self.addCleanup(c.close)
+        if c.server_version < (14,):
+            self.skipTest("idle_session_timeout needs PostgreSQL 14")
+        c.execute("SET idle_session_timeout = '200ms'")
+        time.sleep(0.8)
+        with self.assertRaises(pg.OperationalError) as info:
+            c.execute("SELECT 1")
+        self.assertEqual(info.exception.sqlstate, "57P05")
+        c.reconnect()
+        self.assertEqual(c.fetchval("SHOW idle_session_timeout"), "0")  # a fresh session
+        self.still_works(c)
+
+    def test_keepalive_settings_are_applied(self):
+        import socket
+        c = pg.connect(DSN, keepalives_idle=45, keepalives_count=4)
+        self.addCleanup(c.close)
+        if c._params.is_unix_socket:
+            self.skipTest("keepalives apply to TCP connections")
+        self.assertEqual(c._sock.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE), 1)
+        if hasattr(socket, "TCP_KEEPIDLE"):
+            self.assertEqual(c._sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE), 45)
+        self.still_works(c)
 
 
 if __name__ == "__main__":

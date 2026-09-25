@@ -18,7 +18,7 @@ import struct
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable, Iterator, Sequence
+from typing import Any, Callable, Iterable, Iterator, NoReturn, Sequence
 
 from . import _types
 from ._dsn import ConnectParams, lookup_pgpass, resolve
@@ -136,7 +136,8 @@ def connect(dsn: str | None = None, /, *, timeout: float | None = None,
     params: libpq-style keywords that override the DSN: host, port, user,
         password, dbname (or database), sslmode, sslrootcert, sslcert, sslkey,
         connect_timeout, application_name, channel_binding, require_auth,
-        options, passfile. Unset values fall back to PG* environment variables.
+        options, passfile, keepalives, keepalives_idle, keepalives_interval,
+        keepalives_count. Unset values fall back to PG* environment variables.
     timeout: socket timeout in seconds for each network operation after
         connecting. If it expires mid-query, the connection is closed.
     allow_cleartext_password: permit the server's "password" method (plaintext
@@ -144,14 +145,32 @@ def connect(dsn: str | None = None, /, *, timeout: float | None = None,
     """
     conn = Connection(resolve(dsn, **params), timeout=timeout,
                       allow_cleartext_password=allow_cleartext_password)
-    try:
-        conn._open()
-    except BaseException as exc:
-        conn._abort()
-        if isinstance(exc, _MALFORMED) and not isinstance(exc, Error):
-            raise OperationalError(f"protocol violation during connection setup: {exc}") from exc
-        raise
+    conn._connect()
     return conn
+
+
+def _set_keepalive(sock: socket.socket, idle: int | None, interval: int | None, count: int | None) -> None:
+    """Apply libpq's keepalives_idle/_interval/_count where the platform allows."""
+    options = ((idle, getattr(socket, "TCP_KEEPIDLE", None) or getattr(socket, "TCP_KEEPALIVE", None)),
+               (interval, getattr(socket, "TCP_KEEPINTVL", None)),
+               (count, getattr(socket, "TCP_KEEPCNT", None)))
+    missing = False
+    for value, option in options:
+        if value is None:
+            continue
+        if option is None:
+            missing = True
+            continue
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, option, value)
+        except OSError as exc:
+            _log.debug("could not set TCP keepalive option %s: %s", option, exc)
+    if missing and (idle or interval) and hasattr(socket, "SIO_KEEPALIVE_VALS"):
+        # Older Windows: idle time and interval in milliseconds, in one call.
+        try:
+            sock.ioctl(socket.SIO_KEEPALIVE_VALS, (1, (idle or 7200) * 1000, (interval or 1) * 1000))
+        except (OSError, ValueError) as exc:
+            _log.debug("could not set TCP keepalive values: %s", exc)
 
 
 class Connection:
@@ -171,6 +190,7 @@ class Connection:
         self._tx_status = b"I"
         self._tx_depth = 0
         self._backend_key: tuple[int, bytes] | None = None
+        self._last_error: DatabaseError | None = None  # server error seen in the current exchange
         self._lock = threading.Lock()
         self._decoders: dict[int, Callable[[str], Any]] = dict(_types.DECODERS)
         self._decoder_cache: dict[int, Callable[[bytes], Any]] = {}
@@ -287,7 +307,7 @@ class Connection:
                             counted = True
                         done += 1
                     elif kind == b"E":
-                        error = error_from_fields(_parse_fields(body))
+                        error = self._server_error(body)
                         self._send(_SYNC)
                         self._drain_until_ready()
                         raise error
@@ -324,7 +344,8 @@ class Connection:
                 if kind == b"C":
                     results.append(CommandResult.from_tag(_tag(body)))
                 elif kind == b"E":
-                    error = error or error_from_fields(_parse_fields(body))
+                    reported = self._server_error(body)
+                    error = error or reported
                 elif kind == b"Z":
                     self._ready(body)
                     break
@@ -405,7 +426,7 @@ class Connection:
             elif kind == b"s":  # PortalSuspended: batch complete
                 return batch, False, decode
             elif kind == b"E":
-                error = error_from_fields(_parse_fields(body))
+                error = self._server_error(body)
                 self._stream = None
                 self._send(_SYNC)
                 self._drain_until_ready()
@@ -543,8 +564,38 @@ class Connection:
 
     # --- connection setup -------------------------------------------------------------
 
+    def reconnect(self) -> None:
+        """Close this connection if it is still open, then open a new session
+        with the same parameters (for example after the server ended the
+        session: ServerOperationalError 57P01, idle session timeout, a network
+        failure). Session state such as SET values, temporary tables and LISTEN
+        is not carried over; registered decoders, the notice handler and unread
+        notifications are kept. Not allowed inside a transaction() block: the
+        whole block has to be retried after leaving it."""
+        if self._tx_depth:
+            raise InterfaceError("cannot reconnect inside a transaction() block; "
+                                 "leave the block, then reconnect and retry it")
+        self.close()
+        self._tx_status = b"I"
+        self._decoder_cache.clear()
+        self.parameters = {}
+        self.ssl_in_use = False
+        self.auth_method = None
+        self.channel_binding_used = False
+        self._connect()
+
+    def _connect(self) -> None:
+        try:
+            self._open()
+        except BaseException as exc:
+            self._abort()
+            if isinstance(exc, _MALFORMED) and not isinstance(exc, Error):
+                raise OperationalError(f"protocol violation during connection setup: {exc}") from exc
+            raise
+
     def _open(self) -> None:
         p = self._params
+        self._last_error = None
         sock = self._socket_connect()
         self._sock = sock
         self._closed = False
@@ -583,7 +634,9 @@ class Connection:
             else:
                 sock = socket.create_connection((p.host, p.port), timeout=p.connect_timeout)
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+                if p.keepalives:
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+                    _set_keepalive(sock, p.keepalives_idle, p.keepalives_interval, p.keepalives_count)
         except (OSError, ValueError) as exc:  # ValueError: e.g. a host name IDNA can't encode
             where = p.unix_socket_path if p.is_unix_socket else f"{p.host}:{p.port}"
             raise OperationalError(f"could not connect to {where}: {exc}") from exc
@@ -677,7 +730,7 @@ class Connection:
         while True:
             kind, body = self._read_message()
             if kind == b"E":
-                raise error_from_fields(_parse_fields(body))
+                raise self._server_error(body)
             if kind == b"v":  # NegotiateProtocolVersion; 3.0 is always supported
                 continue
             if kind != b"R":
@@ -831,7 +884,8 @@ class Connection:
                 self._ready(body)
                 break
             elif kind == b"E":
-                error = error or error_from_fields(_parse_fields(body))
+                reported = self._server_error(body)
+                error = error or reported
             elif kind in (b"1", b"2", b"n", b"I", b"s"):
                 pass
             elif kind in (b"G", b"H", b"W", b"d", b"c"):
@@ -927,6 +981,50 @@ class Connection:
     def _ready(self, body: bytes) -> None:
         self._tx_status = body[:1]
         self._synced = True
+        self._last_error = None
+
+    def _server_error(self, body: bytes) -> DatabaseError:
+        """Parse an ErrorResponse, and remember it: if the server closes the
+        connection next (a FATAL error), that is the reason to report."""
+        error = error_from_fields(_parse_fields(body))
+        if self._last_error is None or error.severity in ("FATAL", "PANIC"):
+            self._last_error = error
+        return error
+
+    def _lost(self, message: str, cause: BaseException | None = None) -> NoReturn:
+        """The connection is gone: close it and raise OperationalError. If the
+        server sent an error first (e.g. FATAL 57P01 from pg_terminate_backend
+        or 57P05 idle_session_timeout), raise that, with its SQLSTATE."""
+        error = self._last_error
+        self._abort()
+        if isinstance(error, OperationalError):
+            raise error from cause
+        if error is not None:
+            raise OperationalError(f"{message}; the server reported: {error}") from error
+        raise OperationalError(message) from cause
+
+    def _salvage_error(self) -> None:
+        """After a failed send, look for an ErrorResponse the server sent
+        before it closed the connection."""
+        sock = self._sock
+        if sock is None:
+            return
+        try:
+            sock.setblocking(False)
+            self._recv_available(sock, isinstance(sock, ssl.SSLSocket))
+        except (OSError, ValueError):
+            pass
+        buf, pos = self._rbuf, 0
+        while len(buf) - pos >= 5:
+            length = _I32.unpack_from(buf, pos + 1)[0]
+            if length < 4 or pos + 1 + length > len(buf):
+                break
+            if buf[pos] == ord("E"):
+                try:
+                    self._server_error(bytes(buf[pos + 5:pos + 1 + length]))
+                except Error:
+                    break
+            pos += 1 + length
 
     def _drain_until_ready(self, *, startup: bool = False) -> DatabaseError | None:
         """Read until ReadyForQuery, discarding results of an abandoned query.
@@ -943,8 +1041,9 @@ class Connection:
             if kind == b"E":
                 if startup:
                     # e.g. "database does not exist": the server closes the socket next
-                    raise error_from_fields(_parse_fields(body))
-                error = error or error_from_fields(_parse_fields(body))
+                    raise self._server_error(body)
+                reported = self._server_error(body)
+                error = error or reported
             elif kind == b"G":  # never leave the server waiting in copy-in mode
                 self._handle_copy(kind, extended=True)
             else:
@@ -958,8 +1057,11 @@ class Connection:
         try:
             self._sock.sendall(data)
         except OSError as exc:
-            self._abort()
-            raise OperationalError(f"connection lost while sending: {exc}") from exc
+            if isinstance(exc, TimeoutError):
+                self._abort()
+                raise OperationalError("timed out sending to the server; connection closed") from exc
+            self._salvage_error()
+            self._lost(f"connection lost while sending: {exc}", exc)
 
     def _send_pipelined(self, data: bytes | bytearray) -> None:
         """sendall() for a pipelined batch that keeps reading the server's
@@ -1000,10 +1102,11 @@ class Connection:
                     selector.modify(sock, wanted)
                     events = wanted
         except OSError as exc:  # TimeoutError and ssl.SSLError are OSErrors
-            self._abort()
             if isinstance(exc, TimeoutError):
+                self._abort()
                 raise OperationalError("timed out sending to the server; connection closed") from exc
-            raise OperationalError(f"connection lost while sending: {exc}") from exc
+            self._salvage_error()  # the replies read so far may explain why
+            self._lost(f"connection lost while sending: {exc}", exc)
         finally:
             selector.close()
             if self._sock is sock:
@@ -1047,13 +1150,12 @@ class Connection:
                             break
                         buf += chunk
             except (OSError, ValueError, AttributeError) as exc:  # AttributeError: closed meanwhile
-                self._abort()
                 if isinstance(exc, TimeoutError):
+                    self._abort()
                     raise OperationalError("timed out waiting for the server; connection closed") from exc
-                raise OperationalError(f"connection lost while reading: {exc}") from exc
+                self._lost(f"connection lost while reading: {exc}", exc)
             if len(buf) < n:
-                self._abort()
-                raise OperationalError("server closed the connection unexpectedly")
+                self._lost("server closed the connection unexpectedly")
         data = bytes(buf[:n])
         del buf[:n]
         return data
@@ -1078,6 +1180,7 @@ class Connection:
         self._closed = True
         self._synced = True
         self._stream = None
+        self._last_error = None
         self._backend_key = None
         if self._sock is not None:
             try:

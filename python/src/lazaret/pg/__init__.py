@@ -29,6 +29,7 @@ from .errors import (
     OperationalError,
     ProgrammingError,
     QueryCanceledError,
+    ServerOperationalError,
     TransactionRollbackError,
 )
 
@@ -36,5 +37,5 @@ __all__ = [
     "connect", "Connection", "CommandResult", "Notification", "Notice", "Json", "Rows",
     "Error", "InterfaceError", "OperationalError", "AuthenticationError", "DatabaseError",
     "DataError", "IntegrityError", "InvalidAuthorization", "TransactionRollbackError",
-    "ProgrammingError", "QueryCanceledError",
+    "ProgrammingError", "QueryCanceledError", "ServerOperationalError",
 ]
