@@ -1498,7 +1498,126 @@ _JS_SINKS = [
 ]
 
 
-def _js_functions(content):
+# ---- a small linear lexer (review finding 12) ----
+# The brace pass used to count braces inside strings, comments, regex and
+# template literals: `const b = "}"; exec(cmd);` closed the function early
+# (missed sink) and `console.log("{" + cmd)` made one function swallow the
+# next (false positive). _js_mask() returns a same-length copy of the source
+# in which the CONTENT of '…', "…", `…` template text, comments and regex
+# literals is blanked (delimiters, ${…} code and newlines are kept), so every
+# later regex/brace pass only sees code. Regex literals are recognized
+# heuristically: a '/' where an expression may start (after an operator,
+# '(', ',', '=', ':', '[', '!', '&', '|', '?', '{', '}', ';' or a keyword
+# like return/typeof), never after an identifier, number, ')' or ']'.
+_JS_TOKEN_RE = re.compile(
+    r"(?P<ws>\s+)"
+    r"|(?P<lc>//[^\n  ]*)"
+    r"|(?P<bc>/\*.*?(?:\*/|\Z))"
+    r"|(?P<sq>'(?:[^'\\\n]|\\.)*'?)"
+    r"|(?P<dq>\"(?:[^\"\\\n]|\\.)*\"?)"
+    r"|(?P<bt>`)"
+    r"|(?P<id>[A-Za-z_$\u0080-￿][\w$\u0080-￿]*)"
+    r"|(?P<num>\d[\w.]*)"
+    r"|(?P<p>.)", re.S)
+_JS_TPL_TEXT_RE = re.compile(r"(?:[^`\\$]|\\.|\$(?!\{))*", re.S)
+_JS_REGEX_LIT_RE = re.compile(r"/(?:[^/\\\[\n]|\\.|\[(?:[^\]\\\n]|\\.)*\])+/[A-Za-z]*")
+_JS_NOT_NL_RE = re.compile(r"[^\n  ]")
+_JS_REGEX_AFTER = set("(,=:[!&|?{};+-*%<>~^")
+_JS_REGEX_KEYWORDS = frozenset((
+    "return", "typeof", "case", "do", "else", "in", "of", "new", "delete",
+    "void", "throw", "instanceof", "yield", "await"))
+
+
+def _js_mask(src):
+    """Same-length copy of src with string/template-text/comment/regex
+    CONTENT replaced by spaces (newlines kept, ${…} code kept). Linear."""
+    out = []
+    last_copy = 0
+    n = len(src)
+
+    def blank(a, b):
+        nonlocal last_copy
+        if b > a:
+            out.append(src[last_copy:a])
+            out.append(_JS_NOT_NL_RE.sub(" ", src[a:b]))
+            last_copy = b
+
+    def template_text(i):
+        """Scan template text from i; returns (next index, opened ${)."""
+        m = _JS_TPL_TEXT_RE.match(src, i)
+        j = m.end()
+        blank(i, j)
+        if j >= n:
+            return n, False
+        if src[j] == "`":
+            return j + 1, False
+        return j + 2, True                      # at "${"
+
+    stack = []            # brace depth inside each open ${ … }
+    last_sig, last_word = "", ""
+    i = 0
+    while i < n:
+        m = _JS_TOKEN_RE.match(src, i)
+        kind = m.lastgroup
+        j = m.end()
+        if kind == "ws":
+            i = j
+            continue
+        if kind in ("lc", "bc"):
+            blank(i, j)
+            i = j
+            continue
+        if kind in ("sq", "dq"):
+            closed = j - i >= 2 and src[j - 1] == src[i]
+            blank(i + 1, j - 1 if closed else j)
+            last_sig, last_word = '"', ""
+            i = j
+            continue
+        if kind == "bt":
+            k, opened = template_text(i + 1)
+            if opened:
+                stack.append(0)
+            last_sig, last_word = "`" if not opened else "{", ""
+            i = k
+            continue
+        if kind == "id":
+            last_sig, last_word = "a", m.group()
+            i = j
+            continue
+        if kind == "num":
+            last_sig, last_word = "0", ""
+            i = j
+            continue
+        ch = m.group()
+        if ch == "/" and (last_sig == "" or last_sig in _JS_REGEX_AFTER and last_sig != "}"
+                          or (last_sig == "a" and last_word in _JS_REGEX_KEYWORDS)):
+            rm = _JS_REGEX_LIT_RE.match(src, i)
+            if rm is not None:
+                end = rm.end()
+                close = src.rindex("/", i + 1, end)
+                blank(i + 1, close)
+                last_sig, last_word = ")", ""     # a value: '/' after it divides
+                i = end
+                continue
+        if ch == "{" and stack:
+            stack[-1] += 1
+        elif ch == "}" and stack:
+            if stack[-1] == 0:
+                stack.pop()
+                k, opened = template_text(i + 1)
+                if opened:
+                    stack.append(0)
+                last_sig, last_word = "`" if not opened else "{", ""
+                i = k
+                continue
+            stack[-1] -= 1
+        last_sig, last_word = ch, ""
+        i = j
+    out.append(src[last_copy:])
+    return "".join(out)
+
+
+def _js_functions(content, code=None):
     """Yield (name, params[list], body_span, start_line).
 
     body_span is (start_offset, end_offset) into content — the slice the old
@@ -1508,38 +1627,92 @@ def _js_functions(content):
     memory (audit G3: ~27 s and ~GB of copies for a 1.5 MB file of
     unterminated functions; an unterminated final brace scanned to EOF for
     every match). One linear brace pass now computes the spans; nothing is
-    copied and no per-match scan runs.
+    copied and no per-match scan runs. Headers and braces are read from the
+    masked code (_js_mask), so braces in strings/comments/regex/template
+    text no longer count.
     """
-    matches = list(_JS_FUNC_RE.finditer(content))
+    if code is None:
+        code = _js_mask(content)
+    matches = list(_JS_FUNC_RE.finditer(code))
     if not matches:
         return []
     # matching '}' for every '{', plus all '{' offsets — one stack pass
     opens, match_close, stack = [], {}, []
-    for bm in re.finditer(r"[{}]", content):
+    for bm in re.finditer(r"[{}]", code):
         if bm.group() == "{":
             opens.append(bm.start())
             stack.append(bm.start())
         elif stack:
             match_close[stack.pop()] = bm.start()
     # newline offsets once, for start_line
-    nl = [i for i, ch in enumerate(content) if ch == "\n"]
+    nl = [m.start() for m in re.finditer("\n", code)]
     from bisect import bisect_left
     out = []
     for m in matches:
         name = m.group("n1") or m.group("n2") or m.group("n3")
         params_s = m.group("p1") or m.group("p2") or m.group("p3") or ""
         params = [p.strip().split("=")[0].strip() for p in params_s.split(",") if p.strip()]
-        # first '{' at/after m.end()-1 — exactly what the old content.find()
-        # located (a match may claim a brace inside its own header, or a
-        # later brace for brace-less arrow bodies)
+        # first '{' at/after m.end()-1 (a match may claim a brace inside its
+        # own header, or a later brace for brace-less arrow bodies)
         k = bisect_left(opens, m.end() - 1)
         if k == len(opens):
             continue
         brace = opens[k]
-        close = match_close.get(brace, len(content))  # EOF if never closed
+        close = match_close.get(brace, len(code))  # EOF if never closed
         start_line = bisect_left(nl, m.start()) + 1
         out.append((name, params, (brace, close + 1), start_line))
     return out
+
+
+_JS_ARG_SCAN = 4000   # max characters scanned for a sink's argument list
+
+
+def _js_sink_args(code, start, end):
+    """The text a sink match can consume: the balanced argument list of a
+    call sink (`exec(` … `)`), else the rest of the statement (`x.innerHTML
+    = …;`). Computed on masked code, so parentheses in strings don't count.
+    The old 200-character window after the sink also matched a parameter
+    used in a LATER statement (`exec("uptime"); console.log(msg)`)."""
+    k = end
+    if not (end > start and code[end - 1] == "("):
+        k2 = end
+        while k2 < len(code) and code[k2] in " \t":
+            k2 += 1
+        if k2 < len(code) and code[k2] == "(":
+            k = k2 + 1
+        else:
+            stop = min(len(code), end + _JS_ARG_SCAN)
+            depth = 0
+            for idx in range(end, stop):
+                ch = code[idx]
+                if ch in "([{":
+                    depth += 1
+                elif ch in ")]}":
+                    if depth == 0:
+                        return code[end:idx]
+                    depth -= 1
+                elif ch in ";\n" and depth == 0:
+                    return code[end:idx]
+            return code[end:stop]
+    depth = 0
+    stop = min(len(code), k + _JS_ARG_SCAN)
+    for idx in range(k, stop):
+        ch = code[idx]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            if depth == 0:
+                return code[k:idx]
+            depth -= 1
+    return code[k:stop]
+
+
+def _js_sink_matches(pattern, code):
+    """(start, end) of every sink match in code. Built-in sinks are compiled
+    regexes; configured ones are taintspec.GuardedPattern (per-line, each
+    line capped) — both expose finditer()."""
+    for m in pattern.finditer(code):
+        yield m.start(), m.end()
 
 
 # JS sanitizers: full (numeric coercion) neutralize everything; partial clear a category.
@@ -1577,6 +1750,7 @@ def _analyze_js(files, findings):
     summaries = {}   # name -> (params, dict(param -> category))
     fn_defs = {}     # name -> (file, start_line)
     js_files = [f for f in files if f["lang"] == "js"]
+    codes = {}       # id(file) -> masked code (_js_mask), computed once
     # G3 fix: the old version was quadratic/memory-explosive on adversarial
     # input — per-match char-by-char brace scans to EOF, whole-body string
     # copies, per-sink-match×param regex passes over each body, and a
@@ -1605,7 +1779,9 @@ def _analyze_js(files, findings):
                 "file": f["path"], "line": 1,
                 "snippet": [], "snipStart": 1})
             continue
-        funcs = _js_functions(content)
+        code = _js_mask(content)
+        codes[id(f)] = code
+        funcs = _js_functions(content, code)
         if not funcs:
             continue
         fn_defs.update({name: (f["path"], start) for name, _, _, start in funcs})
@@ -1624,15 +1800,14 @@ def _analyze_js(files, findings):
             spans_by_start = sorted(spans)
             active = []
             add_idx = 0
-            for sm in sink_re.finditer(content):
-                pos = sm.start()
+            for pos, send in _js_sink_matches(sink_re, code):
                 while add_idx < len(spans_by_start) and spans_by_start[add_idx][0] <= pos:
                     active.append(spans_by_start[add_idx])
                     add_idx += 1
                 active[:] = [sp for sp in active if sp[1] > pos]
                 if not active:
                     continue
-                seg = content[pos:pos + 200]
+                seg = _js_sink_args(code, pos, send)
                 for s, e, fi in active:
                     params = funcs[fi][1]
                     for p in params:
@@ -1651,6 +1826,10 @@ def _analyze_js(files, findings):
         if len(f["content"]) > _JS_MAX_FILE:
             continue   # already reported above
         lines = f["content"].split("\n")
+        code = codes.get(id(f))
+        if code is None:
+            code = _js_mask(f["content"])
+        code_lines = code.split("\n")
         # per-file tainted-var set. Find variable declarations/assignments
         # anywhere (not just at line start) so `foo(){ const q=req.query.q; ... }`
         # is handled. Processed in source order for simple forward transitivity.
@@ -1665,13 +1844,13 @@ def _analyze_js(files, findings):
             r"(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([^;\n]+)"
             r"|(?:^|[;{]\s*)([A-Za-z_$][\w$]*)\s*=(?![=>])\s*([^;\n]+)")
         word_re = re.compile(r"[A-Za-z_$][\w$]*")
-        for am in assign_re.finditer(f["content"]):
+        for am in assign_re.finditer(code):
             name = am.group(1) or am.group(3)
             rhs = am.group(2) or am.group(4) or ""
             rhs = _js_neutralize(rhs, ())   # a value wrapped in parseInt/Number is clean
             if _JS_SOURCE_RE.search(rhs) or (tainted & set(word_re.findall(rhs))):
                 tainted.add(name)
-        for i, ln in enumerate(lines):
+        for i, ln in enumerate(code_lines):
             for cm in call_re.finditer(ln):
                 fname, argstr = cm.group(1), cm.group(2)
                 if fname not in summaries:
