@@ -2400,13 +2400,10 @@ def sarif_report(res):
 
 # ---------------- Baseline (new-code focus) ----------------
 def fingerprint(issue):
-    idx = issue["line"] - issue["snipStart"]
-    snippet = issue.get("snippet") or []
-    line_text = snippet[idx].strip() if 0 <= idx < len(snippet) else ""
-    # Forward slashes, so a baseline written on macOS/Linux still matches a
-    # Windows run (whose report paths use backslashes), and vice versa.
-    path = str(issue["file"]).replace("\\", "/")
-    return f"{issue['rule']}|{path}|{line_text}"
+    # One definition shared with the report writer (which signs these
+    # fingerprints when $LAZARET_BASELINE_KEY is set): rule | path with
+    # forward slashes (portable across OSes) | stripped flagged line.
+    return lazaret_report.fingerprint(issue)
 # NOTE: redaction (audit L1) happens at mk_issue time, BEFORE this
 # fingerprint is computed — the placeholder text is deterministic for a
 # given (rule, secret length), so same-engine baselines still match; a
@@ -2414,37 +2411,62 @@ def fingerprint(issue):
 # secret fingerprint any more, and those issues surface as new — the safe
 # direction for a security tool.
 
-def apply_baseline(res, baseline_path):
-    # G17 (artifact hygiene): a baseline is a REPORT-shaped file that CI may
-    # gate on. Any file in the scanned repo can become a baseline argument
-    # (relative --baseline paths resolve inside the repo), so the baseline
-    # must be provenance-checked exactly like a report destination: an
-    # arbitrary attacker-supplied JSON with attacker-computed fingerprints
-    # can otherwise zero `newIssues` and make a CI gate pass (audit probe:
-    # a forged-but-real-shaped baseline printed "New issues vs baseline: 0"
-    # while the scan had 2 live findings).
+
+def _baseline_untrusted(res, baseline_path, reason):
+    """Count every current finding as new and say why the baseline was not
+    trusted."""
+    # audit H1: baseline_path may resolve inside the scanned repo; the
+    # message text is sanitized before it reaches the terminal.
+    print(f"warning: baseline {sanitize_term(baseline_path)} {reason} — "
+          f"treating it as untrusted: all current findings are counted "
+          f"as new", file=sys.stderr)
+    for i in res["issues"]:
+        i["new"] = True
+    res["newIssues"] = len(res["issues"])
+    res["baselineUntrusted"] = True
+
+
+def apply_baseline(res, baseline_path, scan_root=None):
+    """Mark res["issues"] new/not-new against a previous JSON report.
+
+    Trust (G17): a baseline is a REPORT-shaped file that CI may gate on, and
+    the engine marker is a public constant — a hand-written 5-line file
+    carrying it used to zero `newIssues` ("New issues vs baseline: 0") while
+    the scan had live findings. So:
+      * $LAZARET_BASELINE_KEY set: reports are HMAC-signed over their
+        fingerprints, and a baseline is trusted only if its signature
+        verifies with that key (wherever it lives).
+      * no key: a baseline inside the scanned tree (*scan_root*) is
+        untrusted — the scanned repository could have planted it; outside
+        the tree the engine-marker check applies.
+    An untrusted baseline counts every finding as new (fail closed)."""
     if lazaret_report is None:
         print("warning: baseline validation unavailable (lazaret_report not "
               "importable); baseline ignored", file=sys.stderr)
         return
     if not lazaret_report.is_our_report(baseline_path, "json"):
-        # audit H1: baseline_path may resolve inside the scanned repo; the
-        # message text is sanitized before it reaches the terminal.
-        print(f"warning: baseline {sanitize_term(baseline_path)} is not a report produced by "
-              f"this engine (no matching engine marker, or wrong shape) — "
-              f"treating it as untrusted: all current findings are counted "
-              f"as new", file=sys.stderr)
-        for i in res["issues"]:
-            i["new"] = True
-        res["newIssues"] = len(res["issues"])
-        res["baselineUntrusted"] = True
+        _baseline_untrusted(
+            res, baseline_path,
+            "is not a report produced by this engine (no matching engine "
+            "marker, or wrong shape)")
+        return
+    key = lazaret_report.baseline_key()
+    if (key is None and scan_root is not None
+            and lazaret_report.path_is_inside(baseline_path, scan_root)):
+        _baseline_untrusted(
+            res, baseline_path,
+            f"is inside the scanned tree and ${lazaret_report.BASELINE_KEY_ENV} "
+            f"is not set (the scanned repository could have planted it) — "
+            f"keep baselines outside the scanned tree (e.g. in $RUNNER_TEMP) "
+            f"or set {lazaret_report.BASELINE_KEY_ENV} so reports are signed")
         return
     try:
         with open(baseline_path, encoding="utf-8") as fh:
             prev = json.load(fh)
-    except (OSError, json.JSONDecodeError, RecursionError) as exc:
-        # audit H1: {exc} can echo hostile baseline content (JSONDecodeError
-        # position text); sanitize both interpolations.
+    except (OSError, ValueError, RecursionError, MemoryError) as exc:
+        # ValueError covers JSONDecodeError, UnicodeDecodeError and the
+        # int-digit limit. audit H1: {exc} can echo hostile baseline content
+        # (JSONDecodeError position text); sanitize both interpolations.
         print(f"warning: could not read baseline {sanitize_term(baseline_path)}: "
               f"{sanitize_term(exc)}", file=sys.stderr)
         return
@@ -2466,6 +2488,11 @@ def apply_baseline(res, baseline_path):
               f"{type(issues).__name__}, not a list — baseline ignored",
               file=sys.stderr)
         return
+    if key is not None:
+        ok, why = lazaret_report.verify_signature(prev, key)
+        if not ok:
+            _baseline_untrusted(res, baseline_path, f"is not trusted: {why}")
+            return
     known, skipped = set(), 0
     for i in issues:
         # Each baseline entry must at least look like an issue (rule/file/line
@@ -2652,7 +2679,7 @@ def main():
     # path produced it.
     redact_result(res)
     if args.baseline:
-        apply_baseline(res, args.baseline)
+        apply_baseline(res, args.baseline, scan_root=args.directory)
     print_report(res, args.quiet)
 
     # Writes are validated (writability + no-clobber) before the scan; each
