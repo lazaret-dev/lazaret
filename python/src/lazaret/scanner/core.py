@@ -14,6 +14,11 @@ Options:
     --ci            Exit with code 1 if the quality gate fails
     -q, --quiet     Only print the summary (no per-issue lines)
 
+Exit codes: 0 scan ok (also when the gate fails without --ci); 1 quality gate
+failed with --ci, or a hostile manifest (SC-MANIFEST-DEPTH); 2 usage error
+(unknown option; target missing, not a directory, unreadable or empty);
+3 report output error; 4 taint config rejected; 5 internal error.
+
 Reports are written under the scan root (or --out-dir), never the current
 working directory; writability and collisions are checked before scanning
 (exit 3 on a problem), and pre-existing files not produced by Lazaret are
@@ -2042,6 +2047,143 @@ def collect_files(root, extra_excludes, include_deps=False):
             found.append({"path": rel, "content": content, "lang": EXTS[ext], "dep": in_dep})
     return found, manifests, binary_issues
 
+import traceback as _traceback
+
+
+class ScanTargetError(ValueError):
+    """The scan target is missing, not a directory, unreadable or has nothing
+    to scan. A usage error: the CLI exits 2."""
+
+
+def _safe_text(s):
+    """Any str as valid UTF-8 text (lone surrogates become escapes)."""
+    s = str(s)
+    try:
+        s.encode("utf-8")
+        return s
+    except UnicodeEncodeError:
+        return s.encode("utf-8", "backslashreplace").decode("utf-8")
+
+
+def _coverage_issue(rule, name, path, msg, why, fix, ref="Maintainability"):
+    return {"rule": rule, "name": name, "type": "SMELL", "sev": "INFO",
+            "msg": msg, "why": why, "fix": fix, "ref": ref,
+            "file": path, "line": 1, "snippet": [], "snipStart": 1}
+
+
+def scan_error_issue(path, exc):
+    """Q-SCAN-ERROR: one file's scan raised; the run continues without it."""
+    return _coverage_issue(
+        "Q-SCAN-ERROR", "File scan failed", path,
+        f"Scanning {path} failed ({type(exc).__name__}); findings for this file are incomplete.",
+        "An internal error while scanning one file is reported here instead of aborting "
+        "the whole run, so the rest of the project still gets a report. This file's "
+        "result is not evidence that it is clean.",
+        "Review the file manually and report the error (re-run with LAZARET_DEBUG=1 "
+        "for a traceback).",
+        "Scan coverage")
+
+
+def _scan_manifest_entry(mf):
+    """binding.gyp -> scan_gyp (G11); package.json -> scan_manifest. A
+    manifest inside a detected dependency tree gets the registry hook set."""
+    if os.path.basename(mf["path"]) == "binding.gyp":
+        return scan_gyp(mf["path"], mf["content"])
+    dep = mf.get("dep")
+    if dep is None:
+        dep = is_dependency_manifest(mf["path"])
+    return scan_manifest(mf["path"], mf["content"], registry=dep)
+
+
+def scan_project(root, exclude=(), include_deps=False, taint_config=None,
+                 redact_secrets=True):
+    """The complete project scan, shared by the CLI (main) and the MCP server:
+    collect -> scan files -> manifests / binding.gyp -> collection findings
+    (binary, pyc, encoding, symlink, unreadable, truncated) -> interprocedural
+    flow analysis (guarded: a failure degrades to the intra-file engine with a
+    visible warning) -> pruned-tree notes -> metrics / quality gate ->
+    secret-redaction sweep. Prints nothing; safe to call repeatedly in one
+    process (no per-scan module state leaks between calls).
+
+    root            directory to scan (str)
+    exclude         directory names to prune (like --exclude)
+    include_deps    walk dependency trees too (like --deps)
+    taint_config    optional, already-parsed taint spec (dict) applied before
+                    scanning; rejected rules are returned as warnings. The CLI
+                    loads and validates its config itself (SEAM: flow-sca's
+                    taint-config block in main()) and passes None. NOTE: the
+                    taint tables are process-global; a spec applied here stays
+                    applied for later scans in the same process.
+    redact_secrets  redact credentials in snippets (default on; REDACT_SECRETS
+                    is restored afterwards)
+
+    Returns the build_result() dict — project, scannedAt, pass, conditions,
+    metrics, counts, ratings, supplyChain, crossFile, perFile, issues — plus
+    "warnings": [str] (degraded-analysis notes; the CLI prints them).
+    Raises ScanTargetError (usage error) when root does not exist, is not a
+    directory, cannot be read, or holds nothing to scan.
+    """
+    global REDACT_SECRETS
+    root = os.fspath(root)
+    if not os.path.exists(root):
+        raise ScanTargetError(f"{_safe_text(root)} does not exist")
+    if not os.path.isdir(root):
+        raise ScanTargetError(f"{_safe_text(root)} is not a directory")
+    saved_redact = REDACT_SECRETS
+    REDACT_SECRETS = bool(redact_secrets)
+    try:
+        warnings = []
+        # --- SEAM (flow-sca): library callers' taint spec ------------------
+        if taint_config is not None:
+            flow_warnings = []
+            apply_taint_config(taint_config)
+            if lazaret_flow is not None:
+                lazaret_flow.configure(taint_config,
+                                       on_warn=lambda msg: flow_warnings.append(msg))
+            warnings.extend(f"taint config: {m}" for m in
+                            _dedupe(get_taint_config_warnings() + flow_warnings))
+        _reset_scan_state()
+        files, manifests, collected = collect_files(root, list(exclude or ()),
+                                                    include_deps=include_deps)
+        skipped = skipped_tree_issues()
+        _reset_scan_state()
+        if not files and not manifests and not collected:
+            raise ScanTargetError(
+                f"nothing to scan under {_safe_text(root)}: no Python, JavaScript or "
+                f"SQL sources, package manifests or other files to check")
+        issues = list(collected)
+        for f in files:
+            try:
+                issues.extend(scan_file(f["path"], f["content"], f["lang"],
+                                        dep=f.get("dep", False)))
+            except Exception as exc:        # one file must never kill the run
+                issues.append(scan_error_issue(f["path"], exc))
+        for mf in manifests:
+            try:
+                issues.extend(_scan_manifest_entry(mf))
+            except Exception as exc:
+                issues.append(scan_error_issue(mf["path"], exc))
+        # G10: skipped-directory accounting — INFO findings make the coverage
+        # gap visible instead of silent.
+        issues.extend(skipped)
+        if lazaret_flow is not None:
+            # The interprocedural engine can fail on input it does not
+            # understand; degrade to the intra-file engine rather than crash
+            # mid-scan, and say so instead of hiding it.
+            try:
+                issues.extend(lazaret_flow.analyze(files))
+            except Exception as exc:
+                warnings.append(f"interprocedural taint analysis skipped "
+                                f"({type(exc).__name__}: {_safe_text(exc)})")
+        res = build_result(root, files, issues)
+        res["warnings"] = warnings
+        # L1: belt-and-braces — no SECRET-rule issue may reach a report or
+        # the baseline fingerprinter with its raw flagged line.
+        redact_result(res)
+        return res
+    finally:
+        REDACT_SECRETS = saved_redact
+
 # ---------------- Metrics / ratings ----------------
 def compute_metrics(all_files):
     files = [f for f in all_files if not f.get("dep")]  # deps excluded from quality metrics
@@ -2078,8 +2220,15 @@ def worst_sev_rating(issues, types):
             return rating
     return "A"
 
+#: INFO scan-coverage notes. Typed SMELL for display, but they describe what
+#: the scanner could not look at, not the code: they do not count toward the
+#: maintainability rating (a single skipped tree in a small project used to
+#: be enough to fail "Maintainability >= C").
+COVERAGE_RULES = frozenset({"Q-SKIPPED-TREE", "Q-SCAN-ERROR"})
+
 def maintainability_rating(issues, ncloc):
-    smells = sum(1 for i in issues if i["type"] == "SMELL")
+    smells = sum(1 for i in issues
+                 if i["type"] == "SMELL" and i.get("rule") not in COVERAGE_RULES)
     per100 = 100 * smells / ncloc if ncloc else 0
     for limit, rating in ((5, "A"), (10, "B"), (20, "C"), (40, "D")):
         if per100 <= limit:
@@ -2525,8 +2674,54 @@ def apply_baseline(res, baseline_path):
     res["newIssues"] = new_count
 
 # ---------------- Main ----------------
-def main():
+# Exit codes (FIX-SPEC 10): 0 scan ok (or the gate failed without --ci);
+# 1 gate failed with --ci, or a hostile manifest (SC-MANIFEST-DEPTH — the only
+# finding that forces a non-zero exit without --ci); 2 usage error (unknown
+# option; missing, non-directory, unreadable or empty target); 3 report output
+# error (lazaret_report.EXIT_OUTPUT); 4 taint config rejected
+# (EXIT_TAINT_CONFIG); 5 internal error — never a raw traceback, and never
+# confusable with "gate failed".
+EXIT_OK = 0
+EXIT_GATE = 1
+EXIT_USAGE = 2
+EXIT_INTERNAL = 5
+
+
+def _internal_error(exc):
+    """Report an uncaught exception as `error: internal: …` and exit 5. The
+    traceback is printed only with LAZARET_DEBUG=1."""
+    debug = os.environ.get("LAZARET_DEBUG") == "1"
+    try:
+        if debug:
+            _traceback.print_exc()
+        detail = sanitize_term(_safe_text(exc)).replace("\n", " ")
+        if len(detail) > 500:
+            detail = detail[:497] + "..."
+        print(f"error: internal: {type(exc).__name__}" + (f": {detail}" if detail else ""),
+              file=sys.stderr)
+        if not debug:
+            print("  (this is a Lazaret bug, not a scan result; set LAZARET_DEBUG=1 "
+                  "for a traceback)", file=sys.stderr)
+    except Exception:
+        pass
+    sys.exit(EXIT_INTERNAL)
+
+
+def main(argv=None):
+    """`lazaret` console entry point. argv defaults to sys.argv[1:]. Any
+    uncaught exception becomes `error: internal: …` with exit 5 (review item
+    4: a non-UTF-8 file name crashed the HTML writer with a traceback and
+    exit 1 — indistinguishable from a failed gate)."""
     configure_stdio()
+    try:
+        return _main(argv)
+    except (SystemExit, KeyboardInterrupt):
+        raise
+    except Exception as exc:
+        _internal_error(exc)
+
+
+def _main(argv=None):
     global REDACT_SECRETS, EXCERPT_WIDTH
     ap = argparse.ArgumentParser(prog="lazaret", description="Lazaret — security & quality scanner for Python/JS projects.")
     ap.add_argument("directory", help="Project directory to scan")
@@ -2570,13 +2765,22 @@ def main():
     ap.add_argument("--excerpt-width", type=int, default=EXCERPT_WIDTH, metavar="N",
                     help=f"Chars of the matched line to show under each finding (default {EXCERPT_WIDTH})")
     ap.add_argument("-q", "--quiet", action="store_true")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
     REDACT_SECRETS = not args.no_redact_secrets
     EXCERPT_WIDTH = args.excerpt_width
 
+    # Usage errors (exit 2) before anything else: a missing target, a file
+    # instead of a directory. (An unreadable or empty directory is reported
+    # by scan_project, also exit 2.)
+    target_disp = sanitize_term(_safe_text(args.directory))
+    if not os.path.exists(args.directory):
+        print(f"error: {target_disp} does not exist (expected a directory to scan)",
+              file=sys.stderr)
+        sys.exit(EXIT_USAGE)
     if not os.path.isdir(args.directory):
-        print(f"error: {sanitize_term(args.directory)} is not a directory", file=sys.stderr)
-        sys.exit(2)
+        print(f"error: {target_disp} is not a directory (lazaret scans a project "
+              f"directory; for single files use the MCP scan_files tool)", file=sys.stderr)
+        sys.exit(EXIT_USAGE)
 
     # Report destinations (JSON/HTML/SARIF): resolve under the scan root (or
     # --out-dir) — never bare CWD-relative names — and validate BEFORE
@@ -2602,6 +2806,9 @@ def main():
         print(f"error: {sanitize_term(exc)}", file=sys.stderr)
         sys.exit(lazaret_report.EXIT_OUTPUT)
 
+    # ---- SEAM (flow-sca): taint-config block — loads, validates and applies
+    # the config BEFORE scan_project() runs (scan_project's own taint_config
+    # parameter is for library callers such as the MCP server).
     # taint config: explicit flag, else auto-load .lazaret-taint.json from root.
     # Validation is fail-loud: rules that fail validation (unknown category,
     # empty pattern, malformed section) produce warnings naming the file, the
@@ -2652,44 +2859,22 @@ def main():
                       f"detection they define will not run", file=sys.stderr)
                 sys.exit(EXIT_TAINT_CONFIG)
 
-    files, manifests, binary_issues = collect_files(args.directory, args.exclude,
-                                                    include_deps=args.deps)
-    if not files and not manifests and not binary_issues:
-        print("No Python or JavaScript files found.", file=sys.stderr)
-        sys.exit(2)
+    # ---- the project scan: one pipeline shared with the MCP server --------
+    # (collect -> scan -> manifests -> collection findings -> flow ->
+    # skipped-tree notes -> gate -> redaction; see scan_project). The taint
+    # config above is already applied, so none is passed here.
+    try:
+        res = scan_project(args.directory, args.exclude, include_deps=args.deps,
+                           redact_secrets=REDACT_SECRETS)
+    except ScanTargetError as exc:
+        print(f"error: {sanitize_term(exc)}", file=sys.stderr)
+        sys.exit(EXIT_USAGE)
+    for warning in res.get("warnings", ()):
+        # audit H1: a warning can carry content parsed out of scanned files
+        # (the flow engine raises on hostile input); sanitize it.
+        print(f"warning: {sanitize_term(warning)}", file=sys.stderr)
 
-    issues = list(binary_issues)
-    for f in files:
-        issues.extend(scan_file(f["path"], f["content"], f["lang"], dep=f.get("dep", False)))
-    for mf in manifests:
-        # binding.gyp manifests are handled by scan_gyp (G11); package.json by
-        # scan_manifest.
-        if os.path.basename(mf["path"]) == "binding.gyp":
-            issues.extend(scan_gyp(mf["path"], mf["content"]))
-        else:
-            issues.extend(scan_manifest(mf["path"], mf["content"],
-                                        registry=is_dependency_manifest(mf["path"])))
-    # G10: skipped-directory accounting — INFO findings make the coverage gap
-    # visible instead of silent.
-    issues.extend(skipped_tree_issues())
-    if lazaret_flow is not None:
-        # The interprocedural engine predates Python 3.12's ast changes
-        # (ast.Num/ast.Str removed) and raises AttributeError on
-        # multi-function files there. That is a defect of the flow engine
-        # itself (tracked separately); the CLI must degrade to the intra-file
-        # engine rather than crash mid-scan, and say so instead of hiding it.
-        try:
-            issues.extend(lazaret_flow.analyze(files))
-        except Exception as exc:
-            # audit H1: {exc} can carry content parsed out of scanned files
-            # (the flow engine raises on hostile input); sanitize it.
-            print(f"warning: interprocedural taint analysis skipped "
-                  f"({type(exc).__name__}: {sanitize_term(exc)})", file=sys.stderr)
-    res = build_result(args.directory, files, issues)
-    # L1: belt-and-braces — no SECRET-rule issue may reach a report or the
-    # baseline fingerprinter with its raw flagged line, whichever engine
-    # path produced it.
-    redact_result(res)
+    # ---- SEAM (flow-sca): baseline block ---------------------------------
     if args.baseline:
         apply_baseline(res, args.baseline)
     print_report(res, args.quiet)
@@ -2722,15 +2907,24 @@ def main():
         # audit H1: sanitize the echoed path before it reaches the terminal.
         print(f"error: {sanitize_term(exc)}", file=sys.stderr)
         sys.exit(lazaret_report.EXIT_OUTPUT)
+    except OSError as exc:
+        # disk full, quota, a directory removed mid-run: an output error (3),
+        # not an internal one.
+        print(f"error: could not write a report: {sanitize_term(_safe_text(exc))}",
+              file=sys.stderr)
+        sys.exit(lazaret_report.EXIT_OUTPUT)
     print()
     if args.ci and not res["pass"]:
-        sys.exit(1)
-    # 48033f94: a hostile-depth manifest (SC-MANIFEST-DEPTH) is a CRITICAL
-    # supply-chain finding by design; make sure the exit code reflects it,
-    # mirroring --ci (scan completes, reports are written — then signal).
-    if any(i.get("sev") == "CRITICAL" and i.get("rule", "").startswith("SC-")
-           for i in res["issues"]):
-        sys.exit(1)
+        sys.exit(EXIT_GATE)
+    # 48033f94: a hostile-depth manifest (SC-MANIFEST-DEPTH) exists only to
+    # crash or blind scanners, so it forces exit 1 even without --ci (scan
+    # completes, reports are written — then signal). It is the ONLY such
+    # finding: every other one, CRITICAL SC-* included, leaves the exit code
+    # to --ci (review item 6: any CRITICAL SC-* used to exit 1 without --ci,
+    # contradicting the documented "0 without --ci").
+    if any(i.get("rule") == "SC-MANIFEST-DEPTH" for i in res["issues"]):
+        sys.exit(EXIT_GATE)
+    return EXIT_OK
 
 if __name__ == "__main__":
     main()
