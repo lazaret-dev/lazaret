@@ -15,10 +15,12 @@ Usage:
     lazaret-registry report npm:left-pad@1.3.0          # stored findings for a scan
 
 State backends (--db or LAZARET_DB env):
-    default            SQLite file lazaret-registry.db (no dependencies)
+    default            SQLite file lazaret-registry.db (no dependencies);
+                       also `sqlite:PATH` / `sqlite:///PATH`
     postgres://…       PostgreSQL via the internal wire-protocol client
                        (lazaret.pg — pure stdlib, SCRAM-SHA-256 + TLS; nothing
-                       to pip-install).
+                       to pip-install). A libpq keyword string
+                       ("host=db user=… dbname=lazaret") works too.
                        Point the DSN at a dedicated database on your server, e.g.
                        postgres://user:pass@host:5432/lazaret — see registry/schema.sql
                        for one-time setup. Don't reuse an existing application DB.
@@ -1631,9 +1633,86 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
 
 
 # ---------------- State store (SQLite / Postgres) ----------------
+_PG_KEYWORD_RE = re.compile(
+    r"^\s*(?:host|hostaddr|port|dbname|database|user|password|passfile|sslmode|sslrootcert|"
+    r"sslcert|sslkey|connect_timeout|application_name|channel_binding|require_auth|options|"
+    r"service|target_session_attrs)\s*=", re.I)
+_PG_SCHEME_RE = re.compile(r"^\s*(postgres(?:ql)?)://", re.I)
+
+
+def classify_dsn(dsn):
+    """--db / LAZARET_DB -> ('pg', dsn) or ('sqlite', path).
+
+    postgres:// and postgresql:// in any letter case, and libpq keyword
+    strings ("host=db user=app dbname=lazaret"), select Postgres; `sqlite:`
+    / `sqlite:///` prefixes and plain paths select SQLite. A plain path
+    containing '=' is refused: it is almost certainly a mistyped connection
+    string, and SQLite would create a FILE named after it — password
+    included. Error messages never echo the value."""
+    if not isinstance(dsn, str) or not dsn.strip():
+        raise StoreConfigError("empty database location (--db / LAZARET_DB)")
+    m = _PG_SCHEME_RE.match(dsn)
+    if m:
+        return "pg", m.group(1).lower() + dsn[m.end(1):].lstrip()
+    if _PG_KEYWORD_RE.match(dsn):
+        return "pg", dsn.strip()
+    if dsn.lower().startswith("sqlite:"):
+        path = dsn[len("sqlite:"):]
+        if path.startswith("///"):
+            path = path[3:]
+        elif path.startswith("//"):
+            path = path[2:]
+        if not path:
+            raise StoreConfigError("sqlite: needs a path (sqlite:PATH or sqlite:///PATH)")
+        return "sqlite", path
+    if "=" in dsn:
+        raise StoreConfigError(
+            "database location contains '=' but is not a recognized Postgres connection "
+            "string; refusing to create a SQLite file with that name (use postgres://…, "
+            "a libpq 'host=… dbname=…' string, or sqlite:PATH)")
+    if "://" in dsn:
+        raise StoreConfigError("unsupported database URL scheme (use postgres:// or sqlite:)")
+    return "sqlite", dsn
+
+
+def _db_text(value):
+    """Text a Postgres TEXT/JSONB value can hold: no NUL, no lone surrogate
+    (a hook command with \\u0000, an archive member name that is not UTF-8)."""
+    if not isinstance(value, str):
+        return value
+    if "\x00" in value:
+        value = value.replace("\x00", "\\x00")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        value = value.encode("utf-8", "backslashreplace").decode("utf-8")
+    return value
+
+
+def _db_clean(obj, depth=0):
+    """_db_text over a JSON-shaped structure (bounded depth)."""
+    if isinstance(obj, str):
+        return _db_text(obj)
+    if depth > 64:
+        return None
+    if isinstance(obj, dict):
+        return {_db_text(str(k)): _db_clean(v, depth + 1) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_db_clean(v, depth + 1) for v in obj]
+    return obj
+
+
+def db_json(obj):
+    """JSON text for the issues/artifacts columns. Non-ASCII stays literal
+    UTF-8 (a \\uXXXX escape above U+007F is refused by a JSONB column in a
+    non-UTF8 database), NUL and lone surrogates are made storable first."""
+    return json.dumps(_db_clean(obj), ensure_ascii=False)
+
+
 class Store:
     def __init__(self, dsn):
-        self.pg = dsn.startswith(("postgres://", "postgresql://"))
+        kind, target = classify_dsn(dsn)
+        self.pg = kind == "pg"
         if self.pg:
             from lazaret import pg as lazaret_pg
             # audit H2 (=F3/F4): Store is LIBRARY code — the MCP server
@@ -1647,8 +1726,8 @@ class Store:
             # lazaret_pg client — no external driver, nothing to pip-install.)
             try:
                 self.conn = lazaret_pg.connect(   # DSN should target a dedicated lazaret DB
-                    dsn, timeout=30, application_name="lazaret")
-            except lazaret_pg.Error as exc:
+                    target, timeout=30, application_name="lazaret")
+            except (lazaret_pg.Error, OSError) as exc:
                 raise RuntimeError(f"Postgres backend unreachable: {exc}") from exc
             self.ph, self.t = "$1", ""
         else:
@@ -1659,7 +1738,10 @@ class Store:
             # gave us the 5s default lock timeout and no WAL, so writers
             # crashed with "database is locked" mid-sweep. 30s busy timeout
             # + WAL (readers never block writers) is the standard remedy.
-            self.conn = sqlite3.connect(dsn, timeout=30)
+            try:
+                self.conn = sqlite3.connect(target, timeout=30)
+            except sqlite3.Error as exc:
+                raise StoreConfigError(f"cannot open SQLite database: {exc}") from exc
             self._configure_sqlite()
             self.ph, self.t = "?", ""
         self._init_schema()
@@ -1688,6 +1770,8 @@ class Store:
                 pass
 
     def _init_schema(self):
+        """Create the tables, and migrate older ones in place (idempotent):
+        scans.artifacts holds the per-file detail of multi-artifact scans."""
         if self.pg:
             # Postgres DDL (SERIAL / JSONB): execute_script runs the whole
             # script as ONE implicit transaction via the simple protocol.
@@ -1700,7 +1784,9 @@ class Store:
                 engine_version TEXT NOT NULL, files_scanned INTEGER, archive_bytes INTEGER,
                 blockers INTEGER, criticals INTEGER, majors INTEGER,
                 supply_chain INTEGER, issue_count INTEGER, verdict TEXT,
-                issues JSONB, UNIQUE (package_id, version, profile, engine_version));
+                issues JSONB, artifacts JSONB,
+                UNIQUE (package_id, version, profile, engine_version));
+                ALTER TABLE {self.t}scans ADD COLUMN IF NOT EXISTS artifacts JSONB;
                 CREATE INDEX IF NOT EXISTS idx_scans_package
                 ON {self.t}scans(package_id, scanned_at DESC)""")
             return
@@ -1715,7 +1801,11 @@ class Store:
             engine_version TEXT NOT NULL, files_scanned INTEGER, archive_bytes INTEGER,
             blockers INTEGER, criticals INTEGER, majors INTEGER,
             supply_chain INTEGER, issue_count INTEGER, verdict TEXT,
-            issues {jsontype}, UNIQUE (package_id, version, profile, engine_version))""")
+            issues {jsontype}, artifacts {jsontype},
+            UNIQUE (package_id, version, profile, engine_version))""")
+        columns = {row[1] for row in cur.execute(f"PRAGMA table_info({self.t}scans)")}
+        if "artifacts" not in columns:
+            cur.execute(f"ALTER TABLE {self.t}scans ADD COLUMN artifacts {jsontype}")
         # G20: WAL already set at connect; index for the status() lateral join
         cur.execute(f"CREATE INDEX IF NOT EXISTS idx_scans_package "
                     f"ON {self.t}scans(package_id, scanned_at DESC)")
@@ -1753,7 +1843,7 @@ class Store:
                 f"ON CONFLICT (ecosystem,name) DO UPDATE "
                 f"SET added_at={self.t}packages.added_at "
                 f"RETURNING id, (xmax = 0) AS created",
-                eco, name, now)
+                eco, _db_text(name), now)
             return row[0], row[1]
         cur = self.conn.cursor()
         # SQLite: single write that is a no-op if the row exists (keeps the
@@ -1795,7 +1885,7 @@ class Store:
         return self._one(
             f"SELECT id FROM {self.t}scans WHERE package_id={p1} AND version={p2} "
             f"AND profile={p3} AND engine_version={p4}",
-            (pid, version, profile, engine_version)) is not None
+            (pid, _db_text(version), profile, engine_version)) is not None
 
     def save_scan(self, pid, res):
         """Persist one scan result as a SINGLE atomic statement (audit G20).
@@ -1808,6 +1898,10 @@ class Store:
         the same UNIQUE (package_id, version, profile, engine_version) the
         schema already declares, inside one transaction: there is no window
         in which the version has no row.
+
+        Text is made storable first (_db_clean): Postgres rejects NUL and
+        lone surrogates in TEXT/JSONB, and an issue that quotes a hostile
+        hook command or a non-UTF-8 member name must not cost the verdict.
         """
         sc = res["sevCounts"]
         conflict_key = ("ON CONFLICT (package_id, version, profile, engine_version) "
@@ -1819,41 +1913,28 @@ class Store:
                         "blockers=excluded.blockers, criticals=excluded.criticals, "
                         "majors=excluded.majors, supply_chain=excluded.supply_chain, "
                         "issue_count=excluded.issue_count, verdict=excluded.verdict, "
-                        "issues=excluded.issues")
+                        "issues=excluded.issues, artifacts=excluded.artifacts")
+        values = (pid, _db_text(res["version"]), res["profile"], res["scannedAt"], ENGINE_VERSION,
+                  res["filesScanned"], res["archiveBytes"], sc["BLOCKER"], sc["CRITICAL"],
+                  sc["MAJOR"], res["supplyChain"], len(res["issues"]), _db_text(res["verdict"]),
+                  db_json(res["issues"]), db_json(res.get("artifacts") or []))
+        columns = ("INSERT INTO {t}scans (package_id,version,profile,scanned_at,"
+                   "engine_version,files_scanned,archive_bytes,blockers,criticals,majors,"
+                   "supply_chain,issue_count,verdict,issues,artifacts) ").format(t=self.t)
         if self.pg:
-            # (external-driver removal) the old code called
-            # self.conn.execute("BEGIN IMMEDIATE") — external-driver
-            # connections had no .execute method, so this path raised
-            # AttributeError before it could ever persist anything (latent
-            # bug: never exercised on a real server). The wire client's
-            # transaction() context gives the
-            # same single-atomic-statement guarantee (commit on success,
-            # rollback on exception). $14::jsonb casts the dumps'd issues text
-            # into the JSONB column (sqlite stores TEXT identically).
+            # The wire client's transaction() gives the single-atomic-statement
+            # guarantee (commit on success, rollback on exception). ::jsonb
+            # casts the dumps'd text into the JSONB columns (sqlite stores TEXT).
             with self.conn.transaction():
                 self.conn.execute(
-                    f"INSERT INTO {self.t}scans (package_id,version,profile,scanned_at,"
-                    f"engine_version,files_scanned,archive_bytes,blockers,criticals,majors,"
-                    f"supply_chain,issue_count,verdict,issues) "
-                    f"VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb) "
-                    f"{conflict_key}",
-                    pid, res["version"], res["profile"], res["scannedAt"], ENGINE_VERSION,
-                    res["filesScanned"], res["archiveBytes"], sc["BLOCKER"], sc["CRITICAL"],
-                    sc["MAJOR"], res["supplyChain"], len(res["issues"]), res["verdict"],
-                    json.dumps(res["issues"]))
+                    columns + "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,"
+                              f"$14::jsonb,$15::jsonb) {conflict_key}",
+                    *values)
             return
         cur = self.conn.cursor()
         try:
             self.conn.execute("BEGIN IMMEDIATE")
-            cur.execute(
-                f"INSERT INTO {self.t}scans (package_id,version,profile,scanned_at,"
-                f"engine_version,files_scanned,archive_bytes,blockers,criticals,majors,"
-                f"supply_chain,issue_count,verdict,issues) "
-                f"VALUES ({','.join([self.ph]*14)}) {conflict_key}",
-                (pid, res["version"], res["profile"], res["scannedAt"], ENGINE_VERSION,
-                 res["filesScanned"], res["archiveBytes"], sc["BLOCKER"], sc["CRITICAL"],
-                 sc["MAJOR"], res["supplyChain"], len(res["issues"]), res["verdict"],
-                 json.dumps(res["issues"])))
+            cur.execute(columns + f"VALUES ({','.join([self.ph] * 15)}) {conflict_key}", values)
             self.conn.commit()
         except Exception:
             self.conn.rollback()
@@ -1876,7 +1957,7 @@ class Store:
 
     def report(self, eco, name, version=None):
         p1, p2 = self._phs(2)
-        q = (f"SELECT s.version, s.profile, s.scanned_at, s.verdict, s.issues "
+        q = (f"SELECT s.version, s.profile, s.scanned_at, s.verdict, s.issues, s.artifacts "
              f"FROM {self.t}scans s JOIN {self.t}packages p ON p.id = s.package_id "
              f"WHERE p.ecosystem={p1} AND p.name={p2}")
         args = [eco, name]
@@ -1924,8 +2005,15 @@ class Store:
                              "with --rescan to rebuild a sane stored result."),
                      "ref": "CWE-506 · Supply chain"},
                     row[0] or "<stored>", 1, [])]
+        artifacts = row[5] if len(row) > 5 else None
+        if isinstance(artifacts, str):
+            try:
+                artifacts = json.loads(artifacts)
+            except (ValueError, RecursionError):
+                artifacts = None
         return {"version": row[0], "profile": row[1], "scannedAt": row[2],
-                "verdict": row[3], "issues": issues}
+                "verdict": row[3], "issues": issues,
+                "artifacts": artifacts if isinstance(artifacts, list) else []}
 
 
 # ---------------- CLI ----------------
@@ -2146,20 +2234,32 @@ def cmd_discover(store, args):
     return False
 
 
-def cmd_scan(store, specs, full, rescan):
+def cmd_scan(store, specs, full, rescan, errors=None):
+    """Scan each spec; returns True when any result is SUSPICIOUS/INCOMPLETE
+    or any spec failed. One package's failure (bad name in the watchlist,
+    network, a store error) never stops the sweep. `errors`, when given,
+    collects store failures (the CLI exits non-zero for them)."""
     exit_bad = False
+    profile = "full" if full else "supply-chain"
     for spec in specs:
-        eco, name, ver = parse_spec(spec)
-        pid, _ = store.add_package(eco, name)
-        profile = "full" if full else "supply-chain"
-        if ver and not rescan and store.has_scan(pid, ver, profile):
-            # audit H1: name/version echo registry- or feed-derived text.
-            print(f"{lazaret.sanitize_term(eco)}:{lazaret.sanitize_term(name)}@"
-                  f"{lazaret.sanitize_term(ver)} already scanned ({profile}); "
-                  f"use --rescan to redo")
-            continue
         try:
-            res = scan_package(eco, name, ver, full)
+            eco, name, ver = parse_spec(spec)
+            pid, _ = store.add_package(eco, name)
+            resolved = None
+            if not rescan:
+                if ver is None:
+                    # scan-all specs carry no version: ask the registry which
+                    # version is current BEFORE downloading, so an already
+                    # scanned version is skipped instead of re-scanned.
+                    resolved = resolve(eco, name, None)
+                    ver = resolved[0]
+                if ver and store.has_scan(pid, ver, profile):
+                    # audit H1: name/version echo registry- or feed-derived text.
+                    print(f"{lazaret.sanitize_term(eco)}:{lazaret.sanitize_term(name)}@"
+                          f"{lazaret.sanitize_term(ver)} already scanned ({profile}); "
+                          f"use --rescan to redo")
+                    continue
+            res = scan_package(eco, name, ver, full, resolved=resolved)
         except Exception as exc:
             # audit H1: {spec} is echoed verbatim and {exc} embeds registry
             # response text (FetchError URL/reason, JSON parse position) —
@@ -2168,14 +2268,22 @@ def cmd_scan(store, specs, full, rescan):
                   f"{lazaret.sanitize_term(exc)}", file=sys.stderr)
             exit_bad = True
             continue
-        if not rescan and store.has_scan(pid, res["version"], profile):
-            # audit H1: res['version'] is re-read from registry metadata and
-            # is NOT NAME_RE/version-gated at this point.
-            print(f"{lazaret.sanitize_term(eco)}:{lazaret.sanitize_term(name)}@"
-                  f"{lazaret.sanitize_term(res['version'])} already scanned "
-                  f"({profile}); skipping store")
-        else:
-            store.save_scan(pid, res)
+        try:
+            if not rescan and store.has_scan(pid, res["version"], profile):
+                # audit H1: res['version'] is re-read from registry metadata.
+                print(f"{lazaret.sanitize_term(eco)}:{lazaret.sanitize_term(name)}@"
+                      f"{lazaret.sanitize_term(res['version'])} already scanned "
+                      f"({profile}); skipping store")
+            else:
+                store.save_scan(pid, res)
+        except Exception as exc:
+            # The verdict is printed below all the same; the failure to record
+            # it is an error of its own and fails the run at the end.
+            print(f"error storing the scan of {lazaret.sanitize_term(spec)}: "
+                  f"{type(exc).__name__}: {lazaret.sanitize_term(exc)}", file=sys.stderr)
+            exit_bad = True
+            if errors is not None:
+                errors.append(spec)
         print_scan(res)
         exit_bad |= res["verdict"] in ("SUSPICIOUS", "INCOMPLETE")  # a partial scan never passes
     return exit_bad
@@ -2188,7 +2296,8 @@ def main():
     ap.add_argument("command", choices=["add", "scan", "scan-all", "list", "report", "discover"])
     ap.add_argument("specs", nargs="*", help="npm:<name>[@ver] or pypi:<name>[@ver]")
     ap.add_argument("--db", default=os.environ.get("LAZARET_DB", "lazaret-registry.db"),
-                    help="SQLite path or postgres:// DSN (env LAZARET_DB)")
+                    help="SQLite path (or sqlite:PATH), postgres:// URL or libpq "
+                         "'host=… dbname=…' string (env LAZARET_DB)")
     ap.add_argument("--full", action="store_true",
                     help="Run the full ruleset, not just supply-chain/secret rules")
     ap.add_argument("--rescan", action="store_true", help="Re-scan already-scanned versions")
@@ -2229,13 +2338,19 @@ def main():
         store = Store(args.db)
     except RuntimeError as exc:
         # CLI boundary: Store.__init__ raises RuntimeError when the Postgres
-        # backend is unreachable (library code must not sys.exit — the MCP
-        # server dispatches it); here the CLI keeps the exact legacy behavior.
+        # backend is unreachable or --db is unusable (library code must not
+        # sys.exit — the MCP server dispatches it); here the CLI keeps the
+        # exact legacy behavior.
         sys.exit(str(exc))
+    errors = []
+    args._errors = errors
 
     if args.command == "add":
         for spec in args.specs:
-            eco, name, _ = parse_spec(spec)
+            try:
+                eco, name, _ = parse_spec(spec)
+            except SpecError as exc:
+                sys.exit(f"error: {lazaret.sanitize_term(exc)}")
             _, created = store.add_package(eco, name)
             # audit H1: operator CLI arg; sanitize is a no-op for clean names.
             print(f"{'added' if created else 'already tracked'}: "
@@ -2244,8 +2359,8 @@ def main():
     elif args.command == "scan":
         if not args.specs:
             sys.exit("scan needs at least one package spec")
-        bad = cmd_scan(store, args.specs, args.full, args.rescan)
-        if args.ci and bad:
+        bad = cmd_scan(store, args.specs, args.full, args.rescan, errors=errors)
+        if errors or (args.ci and bad):
             sys.exit(1)
 
     elif args.command == "scan-all":
@@ -2253,8 +2368,8 @@ def main():
         if not specs:
             sys.exit("no tracked packages — use 'add' first")
         print(f"Scanning latest versions of {len(specs)} tracked package(s)…")
-        bad = cmd_scan(store, specs, args.full, args.rescan)
-        if args.ci and bad:
+        bad = cmd_scan(store, specs, args.full, args.rescan, errors=errors)
+        if errors or (args.ci and bad):
             sys.exit(1)
 
     elif args.command == "discover":
@@ -2266,7 +2381,7 @@ def main():
             # dispatches discover_packages); the CLI keeps the exact legacy
             # behavior: message on stderr, exit 1.
             sys.exit(str(exc))
-        if args.ci and bad:
+        if errors or (args.ci and bad):
             sys.exit(1)
 
     elif args.command == "list":
@@ -2293,7 +2408,10 @@ def main():
     elif args.command == "report":
         if not args.specs:
             sys.exit("report needs a package spec")
-        eco, name, ver = parse_spec(args.specs[0])
+        try:
+            eco, name, ver = parse_spec(args.specs[0])
+        except SpecError as exc:
+            sys.exit(f"error: {lazaret.sanitize_term(exc)}")
         rep = store.report(eco, name, ver)
         if not rep:
             # audit H1: args.specs[0] is echoed before any validation applies
@@ -2306,6 +2424,10 @@ def main():
               f"{lazaret.sanitize_term(rep['version'])} — "
               f"{lazaret.sanitize_term(rep['verdict'])} "
               f"(profile {rep['profile']}, scanned {rep['scannedAt']})")
+        for a in rep.get("artifacts") or []:
+            if isinstance(a, dict) and len(rep["artifacts"]) > 1:
+                print(f"  {lazaret.sanitize_term(a.get('verdict'))!s:<10} "
+                      f"{lazaret.sanitize_term(a.get('filename'))}")
         for i in rep["issues"]:
             prefix = f"  {i['sev']:<8} [{i['rule']}] "
             # audit H1: stored archive member names + rule messages that embed

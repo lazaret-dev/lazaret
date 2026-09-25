@@ -10,11 +10,12 @@
 --
 -- Then point the scanner at it:
 --   export LAZARET_DB="postgres://lazaret_app:<password>@<host>:5432/lazaret"
---   python3 lazaret_repo.py scan-all
+--   lazaret-registry scan-all
 --
--- Note: lazaret_repo.py also runs this DDL automatically on first connect
--- (CREATE TABLE IF NOT EXISTS), so this file is optional if the app role may
--- create tables.
+-- Note: lazaret-registry also runs this DDL automatically on first connect
+-- (CREATE TABLE IF NOT EXISTS, and ADD COLUMN IF NOT EXISTS for columns
+-- added since), so this file is optional if the app role may create tables.
+-- Re-running it on an existing database is safe: it only adds what is missing.
 
 CREATE TABLE IF NOT EXISTS packages (
     id         SERIAL PRIMARY KEY,
@@ -38,13 +39,19 @@ CREATE TABLE IF NOT EXISTS scans (
     majors         INTEGER,
     supply_chain   INTEGER,
     issue_count    INTEGER,
-    verdict        TEXT,                 -- 'OK' | 'WARN' | 'SUSPICIOUS'
+    verdict        TEXT,                 -- 'OK' | 'WARN' | 'INCOMPLETE' | 'SUSPICIOUS'
     issues         JSONB,
+    -- per-file detail: a PyPI release is judged on the sdist AND every
+    -- distinct wheel; [{filename, kind, verdict, verdictReason, ...}]
+    artifacts      JSONB,
     -- Verdict-integrity fix (audit C2/G16): keyed on the engine version so a
     -- stale-clean verdict from an older engine cannot shadow future re-scans
     -- (the app-side Store.has_scan matches on engine_version too).
     UNIQUE (package_id, version, profile, engine_version)
 );
+
+-- databases created before the artifacts column existed
+ALTER TABLE scans ADD COLUMN IF NOT EXISTS artifacts JSONB;
 
 CREATE INDEX IF NOT EXISTS idx_scans_package ON scans(package_id, scanned_at DESC);
 CREATE INDEX IF NOT EXISTS idx_scans_verdict ON scans(verdict);
