@@ -296,8 +296,10 @@ class Connection:
                         pass
                     elif not self._handle_async(kind, body):
                         self._unexpected(kind)
-            self._send(_SYNC)
-            self._drain_until_ready()
+            self._send(_SYNC)  # commits the implicit transaction...
+            error = self._drain_until_ready()
+            if error is not None:  # ...which can still fail (deferred constraint, serialization)
+                raise error
         return CommandResult(f"executemany {len(encoded)}", total if counted else None)
 
     def execute_script(self, sql: str) -> list[CommandResult]:
@@ -378,8 +380,10 @@ class Connection:
                     if finished:
                         break
                     self._send(execute + _FLUSH)
-                self._send(_SYNC)
-                self._drain_until_ready()
+                self._send(_SYNC)  # commits an implicit transaction, which can still fail
+                error = self._drain_until_ready()
+                if error is not None:
+                    raise error
             finally:
                 if not self._synced and not self._closed:
                     # Consumer stopped early or an error occurred: end the portal.
@@ -866,19 +870,27 @@ class Connection:
         self._tx_status = body[:1]
         self._synced = True
 
-    def _drain_until_ready(self, *, startup: bool = False) -> None:
-        """Read until ReadyForQuery, discarding results of an abandoned query."""
+    def _drain_until_ready(self, *, startup: bool = False) -> DatabaseError | None:
+        """Read until ReadyForQuery, discarding results of an abandoned query.
+        Returns the first error the server reported on the way, such as a
+        deferred constraint or serialization failure raised when Sync committed
+        the implicit transaction. Callers that finished their work successfully
+        must raise it; cleanup paths that already have an error ignore it."""
+        error = None
         while True:
             kind, body = self._read_message()
             if kind == b"Z":
                 self._ready(body)
-                return
-            if kind == b"E" and startup:
-                # e.g. "database does not exist": the server closes the socket next
-                raise error_from_fields(_parse_fields(body))
-            if kind == b"G":  # never leave the server waiting in copy-in mode
+                return error
+            if kind == b"E":
+                if startup:
+                    # e.g. "database does not exist": the server closes the socket next
+                    raise error_from_fields(_parse_fields(body))
+                error = error or error_from_fields(_parse_fields(body))
+            elif kind == b"G":  # never leave the server waiting in copy-in mode
                 self._handle_copy(kind, extended=True)
-            self._handle_async(kind, body)
+            else:
+                self._handle_async(kind, body)
 
     def _unexpected(self, kind: bytes) -> None:
         self._abort()

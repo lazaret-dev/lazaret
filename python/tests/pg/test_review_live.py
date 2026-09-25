@@ -129,5 +129,42 @@ class ExecutemanyResultTests(LiveCase):
                 self.assertFalse(self.conn.in_transaction)
 
 
+@_support.requires_env("LAZARET_TEST_PG_DSN")
+class CommitTimeErrorTests(LiveCase):
+    tables = ("lz_rv_child", "lz_rv_parent")
+
+    def setUp(self):
+        super().setUp()
+        self.conn.execute_script("""
+            DROP TABLE IF EXISTS lz_rv_child, lz_rv_parent;
+            CREATE TABLE lz_rv_parent (id int PRIMARY KEY);
+            CREATE TABLE lz_rv_child (id int, pid int REFERENCES lz_rv_parent DEFERRABLE INITIALLY DEFERRED);
+        """)
+
+    def count(self):
+        return self.conn.fetchval("SELECT count(*) FROM lz_rv_child")
+
+    def test_executemany_raises_the_deferred_constraint_error(self):
+        with self.assertRaises(pg.IntegrityError) as info:
+            self.conn.executemany("INSERT INTO lz_rv_child VALUES ($1, $2)", [(1, 999), (2, 999)])
+        self.assertEqual(info.exception.sqlstate, "23503")
+        self.assertEqual(self.count(), 0)
+        self.still_works()
+
+    def test_iterate_raises_the_deferred_constraint_error(self):
+        rows = []
+        with self.assertRaises(pg.IntegrityError):
+            for row in self.conn.iterate("INSERT INTO lz_rv_child VALUES (3, 999) RETURNING id"):
+                rows.append(row[0])
+        self.assertEqual((rows, self.count()), ([3], 0))
+        self.still_works()
+
+    def test_success_still_commits(self):
+        self.conn.execute("INSERT INTO lz_rv_parent VALUES (1)")
+        self.assertEqual(self.conn.executemany("INSERT INTO lz_rv_child VALUES ($1, $2)", [(1, 1), (2, 1)]).rowcount, 2)
+        self.assertEqual([r[0] for r in self.conn.iterate("INSERT INTO lz_rv_child VALUES (3, 1) RETURNING id")], [3])
+        self.assertEqual(self.count(), 3)
+
+
 if __name__ == "__main__":
     unittest.main()
