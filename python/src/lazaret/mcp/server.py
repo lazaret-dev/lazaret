@@ -9,6 +9,19 @@ Tools:
     scan_files      — scan specific files (e.g. just the ones you changed)
     scan_snippet    — scan a code string before writing it to disk
     quality_gate    — pass/fail gate only, for quick change verification
+    scan_package / registry_status / discover_packages — npm / PyPI registry
+
+Tool calls run one at a time on a worker thread, so the server keeps
+answering ping and honors notifications/cancelled while a scan runs.
+
+Environment:
+    LAZARET_DB                registry state DB (see lazaret-registry --db)
+    LAZARET_MCP_ROOTS         os.pathsep-separated directories; when set, a
+                              path outside them is a tool error
+    LAZARET_MCP_MAX_FILES     files one tool call may scan   (default 20000)
+    LAZARET_MCP_MAX_BYTES     source bytes one call may read (default 200000000)
+    LAZARET_MCP_MAX_SECONDS   wall-clock budget per call     (default 300)
+    A call that hits a cap returns what it scanned, marked "incomplete".
 """
 import json
 import os
@@ -18,6 +31,7 @@ import sys
 import threading
 import time
 
+import lazaret as _lazaret_package
 from lazaret.scanner import core as lazaret  # noqa: E402
 try:
     from lazaret.registry import repo as lazaret_repo  # registry scanning (optional)
@@ -35,6 +49,11 @@ REGISTRY_DB = os.environ.get("LAZARET_DB", "lazaret-registry.db")
 if os.environ.get("LAZARET_NO_REDACT") == "1":
     lazaret.REDACT_SECRETS = False
 
+# Protocol revisions this server speaks, newest first. A client asking for
+# one of them gets it back; any other request is answered with the newest
+# (the client then decides whether it can continue). A client that names
+# none gets the revision the server was first written against.
+SUPPORTED_PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18", "2024-11-05")
 PROTOCOL_VERSION = "2024-11-05"
 MAX_ISSUES = 200
 
@@ -581,63 +600,77 @@ HANDLERS = {
 }
 
 
+# ---------------- JSON-RPC framing ----------------
 # Deepest JSON nesting accepted in a request. Real MCP traffic is a handful of
 # levels deep; anything past this is treated as hostile (see _loads_frame).
 MAX_FRAME_DEPTH = 512
-_JSON_STRUCTURE = re.compile(r'"(?:\\.|[^"\\])*"|[\[\]{}]')   # string literals, or brackets
 _DEPTH_ERROR = {"code": -32700, "message": (
     f"Parse error: request JSON exceeds the maximum nesting depth of "
     f"{MAX_FRAME_DEPTH} (treated as hostile input, not a crash; re-send the "
     f"request with bounded depth)")}
+_PARSE_ERROR = {"code": -32700, "message": "Parse error: the frame is not valid JSON"}
+_STRUCTURE_RE = re.compile(r'["\[\]{}]')
 
 
 def _frame_depth_exceeds(line, limit=MAX_FRAME_DEPTH):
     """True if the frame nests arrays/objects deeper than `limit`. Brackets
-    inside string literals don't count."""
+    inside string literals don't count. One linear pass with string/escape
+    state (the old regex backtracked quadratically on an unterminated
+    string: 41 KB took 6 s)."""
     if line.count("[") + line.count("{") <= limit:
         return False          # can't be that deep; skip the scan
-    depth = 0
-    for match in _JSON_STRUCTURE.finditer(line):
-        token = match.group()
-        if token == "[" or token == "{":
+    n = len(line)
+    depth, in_string, i = 0, False, 0
+    backslash = -1            # position of the next backslash at or after i
+    while i < n:
+        if in_string:
+            quote = line.find('"', i)
+            if quote == -1:
+                return False                  # unterminated string: nothing more counts
+            if backslash < i:
+                backslash = line.find("\\", i)
+                if backslash == -1:
+                    backslash = n
+            if backslash < quote:
+                i = backslash + 2             # skip the escaped character
+                continue
+            in_string, i = False, quote + 1
+            continue
+        m = _STRUCTURE_RE.search(line, i)
+        if m is None:
+            return False
+        ch, i = m.group(), m.end()
+        if ch == '"':
+            in_string = True
+        elif ch in "[{":
             depth += 1
             if depth > limit:
                 return True
-        elif token == "]" or token == "}":
+        else:
             depth -= 1
     return False
 
 
 def _loads_frame(line):
     """Parse one JSON-RPC frame with the deep-nesting guard (card 1149e3e5).
-
-    Hostile-repo chain: a scanned package stores findings/scan results
-    (user-supplied repo content) in the registry DB; every later
-    registry_status / scan_package / discover_packages reply embeds those
-    blobs in its JSON-RPC result. When the poisoned frame comes back as the
-    NEXT request line (a client that pipes its transcript back, a
-    transcript-driven runner, or a hostile repo planting a
-    .lazaret/transcript line), json.loads(line) at 60k nesting depth blows
-    CPython's recursion limit and takes the whole server down — every other
-    tool call after it is lost. JSON-RPC says a server MUST NOT die on a bad
-    frame: report -32700 and keep serving. Same contract for the reversed
-    chain, where a hostile repo's transcripts are consumed as client input.
-    A merely-bad frame (syntax) is still dropped as before; only
-    parse failures caused by depth get a structured error response.
-
-    Depth is measured explicitly (MAX_FRAME_DEPTH) before parsing, because
-    whether json.loads overflows depends on the interpreter: Python 3.14's
-    parser accepts depths that older versions reject, so a RecursionError
-    alone is not a reliable signal. The RecursionError handler stays as a
-    fallback."""
+    -> (request, error): error is a -32700 JSON-RPC error for a frame that is
+    not JSON (a client must get an answer, never silence) or that nests
+    deeper than MAX_FRAME_DEPTH (measured explicitly: whether json.loads
+    overflows depends on the interpreter)."""
     if _frame_depth_exceeds(line):
         return None, _DEPTH_ERROR
     try:
         return json.loads(line), None
-    except json.JSONDecodeError:
-        return None, None
     except RecursionError:
         return None, _DEPTH_ERROR
+    except ValueError:                        # JSONDecodeError, int digit limit
+        return None, _PARSE_ERROR
+
+
+# The stream protocol frames go to. main() points sys.stdout at stderr so a
+# stray print() in library code can never corrupt the protocol stream.
+_OUT = None
+_WRITE_LOCK = threading.Lock()
 
 
 def reply(msg_id, result=None, error=None):
@@ -646,8 +679,10 @@ def reply(msg_id, result=None, error=None):
         msg["error"] = error
     else:
         msg["result"] = result
-    sys.stdout.write(json.dumps(msg) + "\n")
-    sys.stdout.flush()
+    stream = _OUT if _OUT is not None else sys.stdout
+    with _WRITE_LOCK:
+        stream.write(json.dumps(msg) + "\n")
+        stream.flush()
 
 
 # audit H3/G5/G6 (this card): a single line frame may itself be enormous —
@@ -661,84 +696,211 @@ MAX_FRAME_BYTES = 16 * 1024 * 1024
 def _validated_request(req):
     """Frame validation (audit H3 = F4/G5/G6).
 
-    Returns (method, msg_id, params, err) where err is a JSON-RPC error dict
-    when the frame does not conform to JSON-RPC 2.0 / MCP shape:
-      * non-object frame ("hello", 42, [1,2])           → -32600 Invalid Request
-      * jsonrpc != "2.0" or method not a string         → -32600 Invalid Request
-      * params present, non-null and not an object      → -32602 Invalid params
-    A missing or null params is coerced to {} (the spec allows it and clients
-    really do send `"params": null` — the initialize handshake of every
-    minimal client) so the tool/handler layer never sees a non-dict.
-    """
+    Returns (method, msg_id, params, err, is_notification). err is a JSON-RPC
+    error dict when the frame does not conform to JSON-RPC 2.0 / MCP shape
+    (always answered, with the id when it is readable):
+      * non-object frame ("hello", 42, [1,2] — batches are not supported)
+                                                         → -32600, id null
+      * jsonrpc != "2.0" or method not a string         → -32600
+      * id present but not a string/integer (MCP forbids null) → -32600, id null
+      * params present, non-null and not an object      → -32602
+    A frame without "id" is a notification: never answered.
+    A missing or null params is coerced to {}."""
     if not isinstance(req, dict):
         return None, None, None, {"code": -32600, "message": (
             "Invalid Request: frame must be a JSON object "
-            f"(got {type(req).__name__})")}
-    method, msg_id = req.get("method"), req.get("id")
+            f"(got {type(req).__name__})")}, False
+    has_id = "id" in req
+    msg_id = req.get("id")
+    if has_id and (isinstance(msg_id, bool) or not isinstance(msg_id, (str, int))):
+        return None, None, None, {"code": -32600, "message": (
+            "Invalid Request: id must be a string or an integer")}, False
+    method = req.get("method")
     if req.get("jsonrpc") != "2.0" or not isinstance(method, str):
         return None, msg_id, None, {"code": -32600, "message": (
-            "Invalid Request: needs jsonrpc==\"2.0\" and a string method")}
+            "Invalid Request: needs jsonrpc==\"2.0\" and a string method")}, False
     params = req.get("params")
     if params is None:
         params = {}
     elif not isinstance(params, dict):
         return None, msg_id, None, {"code": -32602, "message": (
-            f"Invalid params: 'params' must be an object (got {type(params).__name__})")}
-    return method, msg_id, params, None
+            f"Invalid params: 'params' must be an object (got {type(params).__name__})")}, False
+    return method, msg_id, params, None, not has_id
 
 
-def _dispatch(method, msg_id, params):
-    """Route one validated request. Raises nothing that escapes main()'s
-    (Exception, SystemExit) safety net; KeyboardInterrupt is re-raised by
-    the caller. Tool-level failures come back as isError content (the
-    existing contract), so this returns None on every handled path."""
-    if method == "initialize":
-        # params is a validated dict here — the `{"method":"initialize",
-        # "params":null}` frame of the G5 PoC used to crash on
-        # params.get(...) BEFORE any try block, killing the server on the
-        # very first message a client sends.
-        reply(msg_id, {
-            "protocolVersion": params.get("protocolVersion", PROTOCOL_VERSION),
-            "capabilities": {"tools": {}},
-            "serverInfo": {"name": "lazaret", "version": "1.0.0"},
-        })
-    elif method == "notifications/initialized":
-        pass
-    elif method == "ping":
-        reply(msg_id, {})
-    elif method == "tools/list":
-        reply(msg_id, {"tools": TOOLS})
-    elif method == "tools/call":
-        name = params.get("name")
-        handler = HANDLERS.get(name)
-        if handler is None:
-            reply(msg_id, error={"code": -32602, "message": f"Unknown tool: {name}"})
+def negotiate_protocol(requested):
+    if isinstance(requested, str) and requested in SUPPORTED_PROTOCOL_VERSIONS:
+        return requested
+    if requested is None:
+        return PROTOCOL_VERSION
+    return SUPPORTED_PROTOCOL_VERSIONS[0]
+
+
+LAZARET_VERSION = _lazaret_package.__version__
+
+
+def _id_key(msg_id):
+    return json.dumps(msg_id)
+
+
+class Server:
+    """Reader loop on the main thread, tool calls on one worker thread.
+
+    The reader answers initialize / ping / tools/list itself and queues
+    tools/call, so a long scan never blocks ping, and notifications/cancelled
+    reaches the running call (its cancel flag is checked between files). Per
+    MCP, a cancelled request gets no response."""
+
+    def __init__(self):
+        self.jobs = queue.Queue()
+        self.lock = threading.Lock()
+        self.pending = {}                       # id key -> cancel Event
+        self.worker = threading.Thread(target=self._work, name="lazaret-mcp-tools",
+                                       daemon=True)
+        self.worker.start()
+
+    # ---- worker ----
+    def _work(self):
+        while True:
+            job = self.jobs.get()
+            if job is None:
+                return
+            msg_id, handler, args, event = job
+            try:
+                if event.is_set():
+                    continue                    # cancelled while queued: no reply
+                _LOCAL.ctx = ToolContext(event)
+                try:
+                    result = handler(args)
+                except ToolCancelled:
+                    continue
+                except Exception as exc:        # noqa: BLE001  (tool failure → isError)
+                    if lazaret_repo is not None and isinstance(exc, lazaret_repo.ScanCancelled):
+                        continue
+                    if not event.is_set():
+                        reply(msg_id, {"content": [{"type": "text", "text": f"Error: {exc}"}],
+                                       "isError": True})
+                    continue
+                except SystemExit as exc:
+                    # audit H2 (=F3/F4): tool code must never take the server down.
+                    reply(msg_id, {"content": [{"type": "text", "text": f"Error: {exc}"}],
+                                   "isError": True})
+                    continue
+                if event.is_set():
+                    continue                    # cancelled as it finished: no reply
+                try:
+                    text = json.dumps(result, indent=2)
+                except (TypeError, ValueError) as exc:
+                    reply(msg_id, error={"code": -32603, "message": f"Internal error: {exc}"})
+                    continue
+                reply(msg_id, {"content": [{"type": "text", "text": text}]})
+            except Exception as exc:            # noqa: BLE001  never let the worker die
+                try:
+                    reply(msg_id, error={"code": -32603,
+                                         "message": f"Internal error: {type(exc).__name__}: {exc}"})
+                except Exception:               # noqa: BLE001
+                    pass
+            finally:
+                _LOCAL.ctx = None
+                with self.lock:
+                    if self.pending.get(_id_key(msg_id)) is event:
+                        del self.pending[_id_key(msg_id)]
+
+    def submit(self, msg_id, handler, args):
+        event = threading.Event()
+        with self.lock:
+            self.pending[_id_key(msg_id)] = event
+        self.jobs.put((msg_id, handler, args, event))
+
+    def cancel(self, request_id):
+        with self.lock:
+            event = self.pending.get(_id_key(request_id))
+        if event is not None:
+            event.set()
+
+    def cancel_all(self):
+        with self.lock:
+            for event in self.pending.values():
+                event.set()
+
+    def close(self, timeout=None):
+        self.jobs.put(None)
+        self.worker.join(timeout)
+
+    # ---- reader ----
+    def handle_line(self, line):
+        line = line.strip()
+        if not line:
             return
-        args = params.get("arguments")
-        if args is None:
-            args = {}
-        elif not isinstance(args, dict):
-            reply(msg_id, error={"code": -32602, "message": (
-                f"Invalid params: 'arguments' must be an object (got {type(args).__name__})")})
+        if len(line) > MAX_FRAME_BYTES:
+            # oversized frame: reject with -32600 and keep serving
+            reply(None, error={"code": -32600, "message": (
+                f"Invalid Request: frame exceeds {MAX_FRAME_BYTES} byte limit")})
+            return
+        req, frame_error = _loads_frame(line)
+        if frame_error is not None:
+            # not JSON / too deep: -32700 with id null (the id is unreadable)
+            reply(None, error=frame_error)
+            return
+        method, msg_id, params, err, is_notification = _validated_request(req)
+        if err is not None:
+            reply(msg_id, error=err)
+            return
+        if is_notification:
+            self.notification(method, params)
             return
         try:
-            result = handler(args)
-            reply(msg_id, {"content": [{"type": "text",
-                                        "text": json.dumps(result, indent=2)}]})
-        except SystemExit as exc:
-            # audit H2 (=F3/F4): tool code (e.g. lazaret_repo) used to be
-            # able to raise SystemExit — `except Exception` missed it and the
-            # whole server died. Tool failure is reported, server stays up.
-            reply(msg_id, {"content": [{"type": "text", "text": f"Error: {exc}"}],
-                           "isError": True})
-        except Exception as exc:  # report tool failure, keep server alive
-            reply(msg_id, {"content": [{"type": "text", "text": f"Error: {exc}"}],
-                           "isError": True})
-    elif msg_id is not None:
-        reply(msg_id, error={"code": -32601, "message": f"Method not found: {method}"})
+            self.request(method, msg_id, params)
+        except Exception as exc:                        # noqa: BLE001
+            # audit H2: the dispatch safety net — reply -32603, keep serving.
+            try:
+                reply(msg_id, error={"code": -32603,
+                                     "message": f"Internal error: {type(exc).__name__}: {exc}"})
+            except Exception:                           # noqa: BLE001
+                pass
+
+    def notification(self, method, params):
+        """Notifications are never answered; unknown ones are ignored, and an
+        id-less tools/call is not executed."""
+        if method == "notifications/cancelled":
+            request_id = params.get("requestId")
+            if isinstance(request_id, (str, int)) and not isinstance(request_id, bool):
+                self.cancel(request_id)
+
+    def request(self, method, msg_id, params):
+        if method == "initialize":
+            # params is a validated dict here — the `{"method":"initialize",
+            # "params":null}` frame of the G5 PoC used to crash on
+            # params.get(...) BEFORE any try block.
+            reply(msg_id, {
+                "protocolVersion": negotiate_protocol(params.get("protocolVersion")),
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "lazaret", "version": LAZARET_VERSION},
+            })
+        elif method == "ping":
+            reply(msg_id, {})
+        elif method == "tools/list":
+            reply(msg_id, {"tools": TOOLS})
+        elif method == "tools/call":
+            name = params.get("name")
+            handler = HANDLERS.get(name) if isinstance(name, str) else None
+            if handler is None:
+                reply(msg_id, error={"code": -32602, "message": f"Unknown tool: {name}"})
+                return
+            args = params.get("arguments")
+            if args is None:
+                args = {}
+            elif not isinstance(args, dict):
+                reply(msg_id, error={"code": -32602, "message": (
+                    f"Invalid params: 'arguments' must be an object (got {type(args).__name__})")})
+                return
+            self.submit(msg_id, handler, args)
+        else:
+            reply(msg_id, error={"code": -32601, "message": f"Method not found: {method}"})
 
 
 def main():
+    global _OUT
     # MCP messages are UTF-8 by definition. On Windows, stdin/stdout would
     # otherwise use the ANSI code page: a client's non-ASCII text (a code
     # snippet with an accented character) would be misread, or crash the loop.
@@ -748,47 +910,20 @@ def main():
         except (AttributeError, OSError, ValueError):
             pass
     lazaret.configure_stdio()   # stderr: never crash on a diagnostic
-    for line in sys.stdin:
-        line = line.strip()
-        if not line:
-            continue
-        if len(line) > MAX_FRAME_BYTES:
-            # oversized frame: reject with -32600 and keep serving
-            reply(None, error={"code": -32600, "message": (
-                f"Invalid Request: frame exceeds {MAX_FRAME_BYTES} byte limit")})
-            continue
-        req, frame_error = _loads_frame(line)
-        if frame_error is not None:
-            # deep-nested frame: structured error, server keeps serving
-            # (id is unknown — the frame never parsed; null is the JSON-RPC
-            # convention for errors detected before the id is readable)
-            reply(None, error=frame_error)
-            continue
-        if req is None:
-            # merely-bad frame (syntax error): dropped silently as before
-            continue
-        method, msg_id, params, err = _validated_request(req)
-        if err is not None:
-            # frame validation: -32600 / -32602 per JSON-RPC 2.0 (MCP spec).
-            # msg_id is None when the id itself was unreadable (non-object
-            # frame) — the JSON-RPC convention for pre-id errors.
-            reply(msg_id, error=err)
-            continue
-        try:
-            _dispatch(method, msg_id, params)
-        except KeyboardInterrupt:
-            raise                    # operator interrupt is never swallowed
-        except (Exception, SystemExit) as exc:
-            # audit H2: the dispatch safety net. One try around the WHOLE
-            # dispatch, catching BaseException classes that mean "library
-            # code tried to die" (SystemExit) and every ordinary failure.
-            # The server replies -32603 and keeps serving — a tool crash
-            # must never take down every other connection/request.
-            detail = f"{type(exc).__name__}: {exc}" if not isinstance(exc, SystemExit) else f"{exc}"
-            try:
-                reply(msg_id, error={"code": -32603, "message": f"Internal error: {detail}"})
-            except Exception:
-                pass                 # never let the error reply itself kill us
+    # stdout carries protocol frames only: anything library code prints
+    # goes to stderr instead.
+    _OUT = sys.stdout
+    sys.stdout = sys.stderr
+    server = Server()
+    try:
+        for line in sys.stdin:
+            server.handle_line(line)
+    except KeyboardInterrupt:
+        server.cancel_all()      # operator interrupt is never swallowed
+        server.close(timeout=5)
+        raise
+    # end of input: finish the queued calls, then exit
+    server.close()
 
 
 if __name__ == "__main__":
