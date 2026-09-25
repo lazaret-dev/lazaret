@@ -82,7 +82,8 @@ class EncodeTests(unittest.TestCase):
             (None, 0, None),
             (True, t.BOOL, b"t"),
             (False, t.BOOL, b"f"),
-            (42, t.INT8, b"42"),
+            (42, t.INT4, b"42"),
+            (2**31, t.INT8, b"2147483648"),
             (-(2**63), t.INT8, str(-(2**63)).encode()),
             (2**63, t.NUMERIC, str(2**63).encode()),
             (1.5, t.FLOAT8, b"1.5"),
@@ -94,7 +95,7 @@ class EncodeTests(unittest.TestCase):
             (datetime(2026, 9, 24, 1, 2, 3), t.TIMESTAMP, b"2026-09-24 01:02:03"),
             (datetime(2026, 9, 24, 1, 2, 3, tzinfo=timezone.utc), t.TIMESTAMPTZ, b"2026-09-24 01:02:03+00:00"),
             (time(1, 2, 3), t.TIME, b"01:02:03"),
-            (timedelta(days=-1, seconds=5), t.INTERVAL, b"-1 days 5.000000 seconds"),
+            (timedelta(days=-1, seconds=5), t.INTERVAL, b"-1 days +5.000000 seconds"),
             (uuid.UUID(int=1), t.UUID, b"00000000-0000-0000-0000-000000000001"),
             ({"a": [1, 2]}, t.JSONB, b'{"a": [1, 2]}'),
             (t.Json([1, "x"]), t.JSONB, b'[1, "x"]'),
@@ -111,9 +112,9 @@ class EncodeTests(unittest.TestCase):
 
     def test_encode_arrays(self):
         cases = [
-            ([1, 2, None], 1016, '{"1","2",NULL}'),
-            (["a,b", 'q"', "back\\slash"], 1009, '{"a,b","q\\"","back\\\\slash"}'),
-            ([[1, 2], [3, 4]], 1016, '{{"1","2"},{"3","4"}}'),
+            ([1, 2, None], 1007, '{"1","2",NULL}'),
+            (["a,b", 'q"', "back\\slash"], 0, '{"a,b","q\\"","back\\\\slash"}'),
+            ([[1, 2], [3, 4]], 1007, '{{"1","2"},{"3","4"}}'),
             ([1, 2.5], 1022, '{"1","2.5"}'),
             ([], 0, "{}"),
             ([None], 0, "{NULL}"),

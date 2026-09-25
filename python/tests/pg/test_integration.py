@@ -50,7 +50,7 @@ class IntegrationTests(unittest.TestCase):
             ({"nested": {"list": [1, 2.5, None, "x"]}, "unicode": "ü"}, ""),
             (ipaddress.ip_address("2001:db8::1"), ""), (ipaddress.ip_interface("10.1.2.3/24"), ""),
             (ipaddress.ip_network("192.168.0.0/16"), ""),
-            ([1, 2, None, 4], ""), (["a,b", 'q"q', "back\\slash", "NULL", ""], ""),
+            ([1, 2, None, 4], ""), (["a,b", 'q"q', "back\\slash", "NULL", ""], "::text[]"),
             ([[1, 2], [3, 4]], ""), ([True, False], ""), ([uuid.UUID(int=5)], ""), ([], "::int[]"),
         ]
         for value, cast in cases:

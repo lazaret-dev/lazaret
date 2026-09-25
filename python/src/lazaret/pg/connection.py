@@ -11,16 +11,17 @@ import collections
 import hashlib
 import logging
 import os
+import selectors
 import socket
 import ssl
 import struct
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable, Iterator, Sequence
+from typing import Any, Callable, Iterable, Iterator, NoReturn, Sequence
 
 from . import _types
-from ._dsn import ConnectParams, lookup_pgpass, resolve
+from ._dsn import ConnectParams, default_root_cert, default_ssl_file, lookup_pgpass, resolve
 from ._scram import ScramClient, tls_server_end_point
 from .errors import (
     AuthenticationError,
@@ -39,12 +40,16 @@ SSL_REQUEST = 80877103
 CANCEL_REQUEST = 80877102
 MAX_MESSAGE = 1 << 30  # refuse absurd lengths from a broken or hostile server
 MAX_PARAMS = 65535
-EXECUTEMANY_CHUNK = 500
+EXECUTEMANY_CHUNK = 500             # rows per pipelined chunk...
+EXECUTEMANY_CHUNK_BYTES = 1 << 20   # ...and bytes (a single larger row is sent alone)
+_RECV_SIZE = 65536
 
 _I32 = struct.Struct("!i")
+_KINDS = [bytes((i,)) for i in range(256)]
 _I16 = struct.Struct("!h")
 _SYNC = b"S\x00\x00\x00\x04"
 _FLUSH = b"H\x00\x00\x00\x04"
+_EXECUTE_ALL = b"E\x00\x00\x00\x09\x00\x00\x00\x00\x00"  # unnamed portal, no row limit
 _TERMINATE = b"X\x00\x00\x00\x04"
 _COUNTED_TAGS = {"INSERT", "UPDATE", "DELETE", "SELECT", "MOVE", "FETCH", "COPY", "MERGE"}
 _ISOLATION = {"read committed", "repeatable read", "serializable"}
@@ -78,11 +83,27 @@ def _msg(kind: bytes, payload: bytes) -> bytes:
     return kind + _I32.pack(len(payload) + 4) + payload
 
 
-def _cstr(s: str) -> bytes:
-    b = s.encode("utf-8")
+# A Parse the server always rejects (syntax error): sent before Sync to make
+# the implicit transaction of a pipelined batch fail rather than commit.
+_ABORT_BATCH = _msg(b"P", b"\x00lazaret.pg: abandon this batch\x00\x00\x00")
+
+
+def _cstr(s: str, errors: str = "strict") -> bytes:
+    # errors="surrogateescape" for connection values and passwords: bytes that
+    # are not UTF-8 (from a percent-encoded URL or the environment) are sent as is.
+    b = s.encode("utf-8", errors)
     if b"\x00" in b:
         raise InterfaceError("strings sent to the server cannot contain NUL characters")
     return b + b"\x00"
+
+
+# Exceptions that mean a server message could not be parsed. Raised while the
+# connection is mid-protocol they become OperationalError and close it.
+_MALFORMED = (struct.error, ValueError, IndexError)
+
+
+def _malformed(what: str) -> OperationalError:
+    return OperationalError(f"protocol violation: malformed {what} from server")
 
 
 def _parse_fields(body: bytes) -> dict[str, str]:
@@ -90,10 +111,16 @@ def _parse_fields(body: bytes) -> dict[str, str]:
     pos = 0
     while pos < len(body) and body[pos] != 0:
         code = chr(body[pos])
-        end = body.index(b"\x00", pos + 1)
+        end = body.find(b"\x00", pos + 1)
+        if end < 0:
+            raise _malformed("error or notice message")
         fields[code] = body[pos + 1:end].decode("utf-8", "replace")
         pos = end + 1
     return fields
+
+
+def _tag(body: bytes) -> str:
+    return body[:-1].decode("utf-8", "replace")
 
 
 def _default_notice_handler(notice: Notice) -> None:
@@ -102,27 +129,84 @@ def _default_notice_handler(notice: Notice) -> None:
 
 
 def connect(dsn: str | None = None, /, *, timeout: float | None = None,
-            allow_cleartext_password: bool = False, **params: Any) -> Connection:
+            allow_cleartext_password: bool = False, allow_md5_over_unverified_tls: bool = False,
+            **params: Any) -> Connection:
     """Open a connection.
 
     dsn: a postgresql:// URL or libpq "key=value" string (optional).
-    params: libpq-style keywords that override the DSN: host, port, user,
-        password, dbname (or database), sslmode, sslrootcert, sslcert, sslkey,
-        connect_timeout, application_name, channel_binding, require_auth,
-        options, passfile. Unset values fall back to PG* environment variables.
+    params: libpq-style keywords that override the DSN: host, hostaddr, port,
+        user, password, dbname (or database), passfile, options,
+        application_name, fallback_application_name, connect_timeout,
+        sslmode, sslrootcert, sslcert, sslkey, sslpassword, sslcertmode,
+        sslcrl, sslcrldir, sslsni, ssl_min_protocol_version,
+        ssl_max_protocol_version, channel_binding, require_auth,
+        target_session_attrs, requirepeer, keepalives, keepalives_idle,
+        keepalives_interval, keepalives_count, tcp_user_timeout (plus
+        client_encoding=UTF8, gssencmode=disable/prefer, requiressl). Other
+        libpq parameters are accepted with a warning and have no effect,
+        except service and replication, which are refused. Unset values fall
+        back to PG* environment variables, and libpq's default files
+        (~/.pgpass, ~/.postgresql/root.crt, root.crl, postgresql.crt/.key;
+        %APPDATA%\\postgresql on Windows) are used when present.
     timeout: socket timeout in seconds for each network operation after
         connecting. If it expires mid-query, the connection is closed.
-    allow_cleartext_password: permit the server's "password" method (plaintext
-        password) over an unencrypted TCP connection. Off by default.
+    allow_cleartext_password: permit the server's "password" method (the
+        plaintext password) over TCP when the server is not authenticated:
+        without TLS, or with TLS but no certificate verification (sslmode
+        prefer or require). Off by default, because a man-in-the-middle that
+        terminates TLS could otherwise ask for the password and read it.
+        Unix sockets and sslmode verify-ca/verify-full don't need it.
+    allow_md5_over_unverified_tls: permit MD5 password authentication over
+        TLS whose certificate was not verified (sslmode prefer or require). Off
+        by default: an attacker terminating TLS could relay the MD5 response to
+        log in as you, or crack it offline. SCRAM-SHA-256 is unaffected (with
+        channel binding it can't be relayed). MD5 without TLS is still allowed,
+        as before; use require_auth=scram-sha-256 to refuse MD5 everywhere.
     """
     conn = Connection(resolve(dsn, **params), timeout=timeout,
-                      allow_cleartext_password=allow_cleartext_password)
-    try:
-        conn._open()
-    except BaseException:
-        conn._abort()
-        raise
+                      allow_cleartext_password=allow_cleartext_password,
+                      allow_md5_over_unverified_tls=allow_md5_over_unverified_tls)
+    conn._connect()
     return conn
+
+
+def _check_peer(sock: socket.socket, wanted: str) -> None:
+    """libpq's requirepeer: the Unix-socket server must run as this OS user."""
+    if not hasattr(socket, "SO_PEERCRED"):
+        raise OperationalError("requirepeer is not supported on this platform")
+    import pwd  # POSIX only; SO_PEERCRED exists only there
+    creds = sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+    uid = struct.unpack("3i", creds)[1]
+    try:
+        name = pwd.getpwuid(uid).pw_name
+    except KeyError:
+        raise OperationalError(f"requirepeer: local user with ID {uid} does not exist") from None
+    if name != wanted:
+        raise OperationalError(f"requirepeer specifies \"{wanted}\", but actual peer user name is \"{name}\"")
+
+
+def _set_keepalive(sock: socket.socket, idle: int | None, interval: int | None, count: int | None) -> None:
+    """Apply libpq's keepalives_idle/_interval/_count where the platform allows."""
+    options = ((idle, getattr(socket, "TCP_KEEPIDLE", None) or getattr(socket, "TCP_KEEPALIVE", None)),
+               (interval, getattr(socket, "TCP_KEEPINTVL", None)),
+               (count, getattr(socket, "TCP_KEEPCNT", None)))
+    missing = False
+    for value, option in options:
+        if value is None:
+            continue
+        if option is None:
+            missing = True
+            continue
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, option, value)
+        except OSError as exc:
+            _log.debug("could not set TCP keepalive option %s: %s", option, exc)
+    if missing and (idle or interval) and hasattr(socket, "SIO_KEEPALIVE_VALS"):
+        # Older Windows: idle time and interval in milliseconds, in one call.
+        try:
+            sock.ioctl(socket.SIO_KEEPALIVE_VALS, (1, (idle or 7200) * 1000, (interval or 1) * 1000))
+        except (OSError, ValueError) as exc:
+            _log.debug("could not set TCP keepalive values: %s", exc)
 
 
 class Connection:
@@ -130,18 +214,21 @@ class Connection:
     threads, except cancel(), which is designed to be called from another thread."""
 
     def __init__(self, params: ConnectParams, *, timeout: float | None = None,
-                 allow_cleartext_password: bool = False):
+                 allow_cleartext_password: bool = False, allow_md5_over_unverified_tls: bool = False):
         self._params = params
         self._timeout = timeout
         self._allow_cleartext = allow_cleartext_password
+        self._allow_md5_unverified = allow_md5_over_unverified_tls
+        self._tls_verified = False  # the server's certificate chain was checked (verify-ca/full)
         self._sock: socket.socket | None = None
-        self._rfile = None
+        self._rbuf = bytearray()  # bytes received from the server but not yet parsed
         self._closed = True
         self._synced = True
-        self._streaming = False
+        self._stream: object | None = None  # the iterate() that owns the connection, if any
         self._tx_status = b"I"
         self._tx_depth = 0
         self._backend_key: tuple[int, bytes] | None = None
+        self._last_error: DatabaseError | None = None  # server error seen in the current exchange
         self._lock = threading.Lock()
         self._decoders: dict[int, Callable[[str], Any]] = dict(_types.DECODERS)
         self._decoder_cache: dict[int, Callable[[bytes], Any]] = {}
@@ -228,36 +315,58 @@ class Connection:
         with self._io():
             self._synced = False
             last_oids = None
-            for start in range(0, len(encoded), EXECUTEMANY_CHUNK):
-                chunk = encoded[start:start + EXECUTEMANY_CHUNK]
+            start = 0
+            while start < len(encoded):
+                # The first row goes alone: if the statement turns out to be COPY FROM
+                # STDIN, any message pipelined behind it makes the server drop the
+                # connection ("protocol synchronization was lost"). Later chunks are
+                # capped by rows and by bytes.
+                limit = 1 if start == 0 else EXECUTEMANY_CHUNK
                 out = bytearray()
-                for oids, formats, values in chunk:
+                stop = start
+                while stop < len(encoded) and stop - start < limit and len(out) < EXECUTEMANY_CHUNK_BYTES:
+                    oids, formats, values = encoded[stop]
                     if oids != last_oids:  # re-prepare when parameter types change
                         out += self._parse_msg(sql_b, oids)
                         last_oids = oids
                     out += self._bind_msg(formats, values)
-                    out += _msg(b"E", b"\x00" + _I32.pack(0))
-                self._send(bytes(out) + _FLUSH)
+                    out += _EXECUTE_ALL
+                    stop += 1
+                out += _FLUSH
+                self._send_pipelined(out)
+                expected, start = stop - start, stop
                 done = 0
-                while done < len(chunk):
+                while done < expected:
                     kind, body = self._read_message()
                     if kind == b"C":
-                        result = CommandResult.from_tag(body[:-1].decode("utf-8"))
+                        result = CommandResult.from_tag(_tag(body))
                         if result.rowcount is not None:
                             total += result.rowcount
                             counted = True
                         done += 1
                     elif kind == b"E":
-                        error = error_from_fields(_parse_fields(body))
+                        error = self._server_error(body)
                         self._send(_SYNC)
                         self._drain_until_ready()
                         raise error
-                    elif kind in (b"1", b"2", b"n", b"I"):
-                        done += kind == b"I"
+                    elif kind in (b"1", b"2", b"n", b"I", b"T", b"D"):
+                        done += kind == b"I"  # rows (e.g. from RETURNING) are discarded
+                    elif kind in (b"G", b"H", b"W"):
+                        message = self._handle_copy(kind, extended=True)  # CopyIn: CopyFail + Sync
+                        if kind == b"H":
+                            # COPY TO finishes by itself, and the rows pipelined after it would
+                            # still run and commit at Sync: make the batch fail first.
+                            self._send(_ABORT_BATCH + _SYNC)
+                        self._drain_until_ready()
+                        raise InterfaceError(f"{message} (in executemany; nothing was committed)")
+                    elif kind in (b"d", b"c"):
+                        pass
                     elif not self._handle_async(kind, body):
                         self._unexpected(kind)
-            self._send(_SYNC)
-            self._drain_until_ready()
+            self._send(_SYNC)  # commits the implicit transaction...
+            error = self._drain_until_ready()
+            if error is not None:  # ...which can still fail (deferred constraint, serialization)
+                raise error
         return CommandResult(f"executemany {len(encoded)}", total if counted else None)
 
     def execute_script(self, sql: str) -> list[CommandResult]:
@@ -271,9 +380,10 @@ class Connection:
             while True:
                 kind, body = self._read_message()
                 if kind == b"C":
-                    results.append(CommandResult.from_tag(body[:-1].decode("utf-8")))
+                    results.append(CommandResult.from_tag(_tag(body)))
                 elif kind == b"E":
-                    error = error or error_from_fields(_parse_fields(body))
+                    reported = self._server_error(body)
+                    error = error or reported
                 elif kind == b"Z":
                     self._ready(body)
                     break
@@ -292,63 +402,100 @@ class Connection:
     def iterate(self, sql: str, *args: Any, batch_size: int = 1000) -> Iterator[Any]:
         """Stream rows in batches instead of loading them all into memory.
         No other query can run on this connection until the iterator is
-        exhausted or closed (use it in a for loop, or call .close())."""
+        exhausted or closed (use it in a for loop, or call .close()). Leaving
+        a transaction() block, or closing the connection, ends a stream that is
+        still open; resuming that iterator then raises InterfaceError."""
         if batch_size < 1:
             raise InterfaceError("batch_size must be at least 1")
         oids, formats, values = self._encode_args(args)
         execute = _msg(b"E", b"\x00" + _I32.pack(batch_size))
+        request = (self._parse_msg(_cstr(sql), oids) + self._bind_msg(formats, values)
+                   + _msg(b"D", b"P\x00") + execute + _FLUSH)
+        stream = object()  # identifies this iterate() while it owns the connection
         with self._io():
-            self._streaming = True
             self._synced = False
-            try:
-                self._send(self._parse_msg(_cstr(sql), oids) + self._bind_msg(formats, values)
-                           + _msg(b"D", b"P\x00") + execute + _FLUSH)
-                decode = None
-                while True:
-                    batch, finished = [], False
-                    while True:
-                        kind, body = self._read_message()
-                        if kind == b"D":
-                            batch.append(decode(body))
-                        elif kind == b"T":
-                            _, decode = self._row_decoder(body)
-                        elif kind in (b"C", b"I"):
-                            finished = True
-                            break
-                        elif kind == b"s":  # PortalSuspended: batch complete
-                            break
-                        elif kind == b"E":
-                            error = error_from_fields(_parse_fields(body))
-                            self._send(_SYNC)
-                            self._drain_until_ready()
-                            raise error
-                        elif kind in (b"1", b"2", b"n"):
-                            # NoData: nothing to stream, but keep reading. The server has
-                            # already started executing, and may be entering COPY mode.
-                            pass
-                        elif kind in (b"G", b"H", b"W"):
-                            message = self._handle_copy(kind, extended=True)
-                            if kind == b"H":
-                                self._send(_SYNC)
-                            self._drain_until_ready()
-                            raise InterfaceError(message)
-                        elif not self._handle_async(kind, body):
-                            self._unexpected(kind)
-                    yield from batch
-                    if finished:
-                        break
-                    self._send(execute + _FLUSH)
+            self._stream = stream
+            self._send(request)
+        # The lock is only held while talking to the server, not while the
+        # consumer handles a batch: close() and transaction() can end the stream.
+        try:
+            decode, finished = None, False
+            while not finished:
+                with self._io(stream):
+                    batch, finished, decode = self._read_batch(decode)
+                yield from batch
+                if not finished:
+                    with self._io(stream):
+                        self._send(execute + _FLUSH)
+            with self._io(stream):
+                self._stream = None
+                self._send(_SYNC)  # commits an implicit transaction, which can still fail
+                error = self._drain_until_ready()
+            if error is not None:
+                raise error
+        except GeneratorExit:
+            # The consumer stopped early: end the portal. Sync also commits an
+            # implicit transaction (e.g. an INSERT ... RETURNING), which can fail.
+            if self._stream is stream:
+                error = self._end_stream()
+                if error is not None:
+                    raise error from None
+            raise
+        finally:
+            if self._stream is stream:
+                try:
+                    self._end_stream()
+                except Error:
+                    pass  # an exception is already propagating
+
+    def _read_batch(self, decode):
+        """Read one batch of an iterate(): (rows, finished, decode)."""
+        batch = []
+        while True:
+            kind, body = self._read_message()
+            if kind == b"D":
+                if decode is None:
+                    raise _malformed("data row before row description")
+                batch.append(decode(body))
+            elif kind == b"T":
+                _, decode = self._row_decoder(body)
+            elif kind in (b"C", b"I"):
+                return batch, True, decode
+            elif kind == b"s":  # PortalSuspended: batch complete
+                return batch, False, decode
+            elif kind == b"E":
+                error = self._server_error(body)
+                self._stream = None
                 self._send(_SYNC)
                 self._drain_until_ready()
-            finally:
-                if not self._synced and not self._closed:
-                    # Consumer stopped early or an error occurred: end the portal.
-                    try:
-                        self._send(_SYNC)
-                        self._drain_until_ready()
-                    except Error:
-                        pass
-                self._streaming = False
+                raise error
+            elif kind in (b"1", b"2", b"n"):
+                # NoData: nothing to stream, but keep reading. The server has
+                # already started executing, and may be entering COPY mode.
+                pass
+            elif kind in (b"G", b"H", b"W"):
+                message = self._handle_copy(kind, extended=True)
+                self._stream = None
+                if kind == b"H":
+                    self._send(_SYNC)
+                self._drain_until_ready()
+                raise InterfaceError(message)
+            elif not self._handle_async(kind, body):
+                self._unexpected(kind)
+
+    def _end_stream(self) -> DatabaseError | None:
+        """End an iterate() whose rows were not all read: Sync closes its
+        portal (and commits an implicit transaction). Returns the error the
+        server reported at that point, if any."""
+        stream = self._stream
+        if stream is None or self._closed:
+            return None
+        with self._io(stream):
+            self._stream = None
+            if self._synced:
+                return None
+            self._send(_SYNC)
+            return self._drain_until_ready()
 
     # --- transactions ------------------------------------------------------------
 
@@ -380,6 +527,10 @@ class Connection:
         self._tx_depth += 1
         try:
             yield self
+            # An iterate() still open inside the block ends with it.
+            error = self._end_stream()
+            if error is not None:
+                raise error
         except BaseException:
             self._tx_depth -= 1
             self._rollback(savepoint)
@@ -396,6 +547,7 @@ class Connection:
         if self._closed:
             return
         try:
+            self._end_stream()  # an iterate() left open would block the ROLLBACK
             if savepoint:
                 self.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
                 self.execute(f"RELEASE SAVEPOINT {savepoint}")
@@ -436,24 +588,60 @@ class Connection:
         """Close the connection. Safe to call more than once."""
         if self._closed:
             return
-        try:
-            if self._synced and not self._streaming:
+        # Say goodbye unless another thread is in the middle of a query. A
+        # suspended iterate() is fine: the server is waiting for a message, and
+        # Terminate rolls back its uncommitted work.
+        if self._lock.acquire(blocking=False):
+            try:
                 self._sock.sendall(_TERMINATE)
-        except OSError:
-            pass
+            except OSError:
+                pass
+            finally:
+                self._lock.release()
         self._abort()
 
     # --- connection setup -------------------------------------------------------------
 
+    def reconnect(self) -> None:
+        """Close this connection if it is still open, then open a new session
+        with the same parameters (for example after the server ended the
+        session: ServerOperationalError 57P01, idle session timeout, a network
+        failure). Session state such as SET values, temporary tables and LISTEN
+        is not carried over; registered decoders, the notice handler and unread
+        notifications are kept. Not allowed inside a transaction() block: the
+        whole block has to be retried after leaving it."""
+        if self._tx_depth:
+            raise InterfaceError("cannot reconnect inside a transaction() block; "
+                                 "leave the block, then reconnect and retry it")
+        self.close()
+        self._tx_status = b"I"
+        self._decoder_cache.clear()
+        self.parameters = {}
+        self.ssl_in_use = False
+        self._tls_verified = False
+        self.auth_method = None
+        self.channel_binding_used = False
+        self._connect()
+
+    def _connect(self) -> None:
+        try:
+            self._open()
+        except BaseException as exc:
+            self._abort()
+            if isinstance(exc, _MALFORMED) and not isinstance(exc, Error):
+                raise OperationalError(f"protocol violation during connection setup: {exc}") from exc
+            raise
+
     def _open(self) -> None:
         p = self._params
+        self._last_error = None
         sock = self._socket_connect()
         self._sock = sock
         self._closed = False
         if not p.is_unix_socket and p.sslmode != "disable":
             sock = self._negotiate_ssl(sock)
             self._sock = sock
-        self._rfile = sock.makefile("rb", buffering=65536)
+        self._rbuf = bytearray()
 
         startup = {
             "user": p.user,
@@ -467,12 +655,35 @@ class Connection:
             startup["application_name"] = p.application_name
         if p.options:
             startup["options"] = p.options
-        payload = _I32.pack(PROTOCOL_3_0) + b"".join(_cstr(k) + _cstr(v) for k, v in startup.items()) + b"\x00"
+        payload = (_I32.pack(PROTOCOL_3_0)
+                   + b"".join(_cstr(k) + _cstr(v, "surrogateescape") for k, v in startup.items()) + b"\x00")
         self._send(_I32.pack(len(payload) + 4) + payload)
         self._synced = False
         self._authenticate()
         self._drain_until_ready(startup=True)
         sock.settimeout(self._timeout)
+        if p.target_session_attrs not in ("any", "prefer-standby"):  # one host: prefer-standby = any
+            self._check_session_attrs(p.target_session_attrs)
+
+    def _check_session_attrs(self, wanted: str) -> None:
+        """libpq's target_session_attrs for a single host: refuse a server of
+        the wrong kind. PostgreSQL 14+ reports both settings at startup."""
+        read_only = self.parameters.get("default_transaction_read_only")
+        standby = self.parameters.get("in_hot_standby")
+        if standby is None or (wanted in ("read-write", "read-only") and read_only is None):
+            row = self.fetchrow("SELECT pg_catalog.pg_is_in_recovery(), "
+                                "pg_catalog.current_setting('transaction_read_only')")
+            standby = "on" if row[0] else "off"
+            read_only = row[1]
+        problem = {
+            "read-write": "session is read-only" if "on" in (read_only, standby) else None,
+            "read-only": "session is not read-only" if "on" not in (read_only, standby) else None,
+            "primary": "server is in hot standby mode" if standby == "on" else None,
+            "standby": "server is not in hot standby mode" if standby != "on" else None,
+        }[wanted]
+        if problem:
+            self.close()
+            raise OperationalError(f"target_session_attrs={wanted}: {problem}")
 
     def _socket_connect(self) -> socket.socket:
         p = self._params
@@ -482,12 +693,25 @@ class Connection:
                 sock.settimeout(p.connect_timeout)
                 sock.connect(p.unix_socket_path)
             else:
-                sock = socket.create_connection((p.host, p.port), timeout=p.connect_timeout)
+                sock = socket.create_connection((p.hostaddr or p.host, p.port), timeout=p.connect_timeout)
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-        except OSError as exc:
-            where = p.unix_socket_path if p.is_unix_socket else f"{p.host}:{p.port}"
+                if p.keepalives:
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+                    _set_keepalive(sock, p.keepalives_idle, p.keepalives_interval, p.keepalives_count)
+                if p.tcp_user_timeout:
+                    if hasattr(socket, "TCP_USER_TIMEOUT"):
+                        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_USER_TIMEOUT, p.tcp_user_timeout)
+                    else:
+                        _log.debug("tcp_user_timeout is not supported on this platform")
+        except (OSError, ValueError) as exc:  # ValueError: e.g. a host name IDNA can't encode
+            where = p.unix_socket_path if p.is_unix_socket else f"{p.hostaddr or p.host}:{p.port}"
             raise OperationalError(f"could not connect to {where}: {exc}") from exc
+        if p.is_unix_socket and p.requirepeer:
+            try:
+                _check_peer(sock, p.requirepeer)
+            except BaseException:
+                sock.close()
+                raise
         return sock
 
     def _negotiate_ssl(self, sock: socket.socket) -> socket.socket:
@@ -501,14 +725,25 @@ class Connection:
         except OSError as exc:
             raise OperationalError(f"SSL negotiation failed: {exc}") from exc
         if answer == b"S":
-            context = self._ssl_context()
             try:
-                wrapped = context.wrap_socket(sock, server_hostname=p.host)
+                context = self._ssl_context()
+            except OperationalError:
+                raise
+            except (OSError, ValueError) as exc:  # missing or unreadable cert/key/CA file
+                raise OperationalError(f"could not set up TLS: {exc}") from exc
+            # SNI and the name to verify. With sslsni=0 no SNI is sent, which
+            # Python can only do when the host name is not being verified.
+            name = p.host if (p.sslsni or context.check_hostname) else None
+            if not p.sslsni and context.check_hostname:
+                _log.warning("sslsni=0 is ignored with sslmode=verify-full: the host name is sent to be verified")
+            try:
+                wrapped = context.wrap_socket(sock, server_hostname=name)
             except ssl.SSLCertVerificationError as exc:
                 raise OperationalError(f"server certificate verification failed: {exc.verify_message}") from exc
             except (ssl.SSLError, OSError) as exc:
                 raise OperationalError(f"TLS handshake failed: {exc}") from exc
             self.ssl_in_use = True
+            self._tls_verified = context.verify_mode == ssl.CERT_REQUIRED
             return wrapped
         if answer == b"N":
             if p.sslmode in ("require", "verify-ca", "verify-full"):
@@ -519,27 +754,57 @@ class Connection:
     def _ssl_context(self) -> ssl.SSLContext:
         p = self._params
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        versions = {"TLSv1.2": ssl.TLSVersion.TLSv1_2, "TLSv1.3": ssl.TLSVersion.TLSv1_3}
+        ctx.minimum_version = versions[p.ssl_min_protocol_version]
+        if p.ssl_max_protocol_version:
+            ctx.maximum_version = versions.get(p.ssl_max_protocol_version, ssl.TLSVersion.TLSv1_2)
         mode = p.sslmode
-        if mode == "require" and p.sslrootcert and p.sslrootcert != "system":
-            mode = "verify-ca"  # libpq: an explicit root cert upgrades require to verify-ca
+        root = p.sslrootcert or default_root_cert()
+        if mode == "require" and root != "system" and (p.sslrootcert or os.path.exists(root)):
+            # libpq: a root certificate (sslrootcert, or the default ~/.postgresql/root.crt
+            # or %APPDATA%\postgresql\root.crt when it exists) upgrades require to verify-ca
+            mode = "verify-ca"
         if mode in ("prefer", "require"):
             ctx.check_hostname = False
             ctx.verify_mode = ssl.CERT_NONE
         else:
             ctx.check_hostname = mode == "verify-full"
             ctx.verify_mode = ssl.CERT_REQUIRED
-            if p.sslrootcert == "system":
+            if root == "system":
                 ctx.load_default_certs()
             else:
-                root = p.sslrootcert or os.path.expanduser("~/.postgresql/root.crt")
                 if not os.path.exists(root):
                     raise OperationalError(
                         f"sslmode={p.sslmode} needs a root certificate: {root} does not exist "
                         "(set sslrootcert to a CA file, or sslrootcert=system with verify-full)")
-                ctx.load_verify_locations(cafile=root)
-        if p.sslcert:
-            ctx.load_cert_chain(p.sslcert, p.sslkey)
+                try:
+                    ctx.load_verify_locations(cafile=root)
+                except (OSError, ValueError) as exc:
+                    raise OperationalError(f"could not load root certificate {root}: {exc}") from exc
+            # Certificate revocation lists, as in libpq: sslcrl / sslcrldir, or ~/.postgresql/root.crl.
+            crl = p.sslcrl or (None if p.sslcrldir else default_ssl_file("root.crl"))
+            if crl or p.sslcrldir:
+                try:
+                    ctx.load_verify_locations(cafile=crl, capath=p.sslcrldir)
+                except (OSError, ValueError) as exc:
+                    raise OperationalError(f"could not load certificate revocation list: {exc}") from exc
+                ctx.verify_flags |= ssl.VERIFY_CRL_CHECK_CHAIN
+        if p.sslcertmode != "disable":
+            # A client certificate: sslcert/sslkey, or libpq's default
+            # ~/.postgresql/postgresql.crt and .key when the certificate exists.
+            cert = p.sslcert or default_ssl_file("postgresql.crt")
+            if cert:
+                key = p.sslkey or default_ssl_file("postgresql.key")
+                if key is None and not p.sslcert:  # an explicit sslcert may hold its key
+                    raise OperationalError(f"certificate present, but not private key file "
+                                           f"(expected next to {cert} as postgresql.key)")
+                try:
+                    # password="" rather than None: never let OpenSSL prompt on the
+                    # terminal for an encrypted key's pass phrase (set sslpassword).
+                    ctx.load_cert_chain(cert, key, password=p.sslpassword or "")
+                except (OSError, ValueError) as exc:
+                    raise OperationalError(f"could not load client certificate {cert} "
+                                           f"(an encrypted key needs sslpassword): {exc}") from exc
         return ctx
 
     # --- authentication ----------------------------------------------------------
@@ -550,6 +815,11 @@ class Connection:
             return True
         negated, methods = rule
         return (method not in methods) if negated else (method in methods)
+
+    def _server_authenticated(self) -> bool:
+        """True if nobody can be between us and the server: a Unix socket, or
+        TLS with a verified certificate chain (verify-ca or verify-full)."""
+        return self._params.is_unix_socket or (self.ssl_in_use and self._tls_verified)
 
     def _password(self) -> str:
         password = self._params.password
@@ -567,11 +837,13 @@ class Connection:
         while True:
             kind, body = self._read_message()
             if kind == b"E":
-                raise error_from_fields(_parse_fields(body))
+                raise self._server_error(body)
             if kind == b"v":  # NegotiateProtocolVersion; 3.0 is always supported
                 continue
             if kind != b"R":
                 raise OperationalError(f"unexpected message {kind!r} during authentication")
+            if len(body) < 4:
+                raise _malformed("authentication request")
             code = _I32.unpack_from(body)[0]
 
             if code == 0:  # AuthenticationOk
@@ -597,18 +869,29 @@ class Connection:
                                               f"'{method}' authentication, which cannot use it")
 
             if code == 3:
-                if not (self.ssl_in_use or p.is_unix_socket or self._allow_cleartext):
+                if not (self._server_authenticated() or self._allow_cleartext):
+                    where = ("TLS without certificate verification (sslmode=%s)" % p.sslmode
+                             if self.ssl_in_use else "an unencrypted connection")
                     raise AuthenticationError(
-                        "server requested a cleartext password over an unencrypted connection; "
-                        "refusing (use TLS, or pass allow_cleartext_password=True)")
-                self._send(_msg(b"p", _cstr(self._password())))
+                        f"server requested a cleartext password over {where}; refusing, since a "
+                        "man-in-the-middle could read it (use sslmode=verify-full or verify-ca with "
+                        "sslrootcert, or pass allow_cleartext_password=True)")
+                self._send(_msg(b"p", _cstr(self._password(), "surrogateescape")))
             elif code == 5:
+                if len(body) != 8:
+                    raise _malformed("MD5 authentication request")
+                if self.ssl_in_use and not self._tls_verified and not self._allow_md5_unverified:
+                    raise AuthenticationError(
+                        f"server requested MD5 password authentication over TLS without certificate "
+                        f"verification (sslmode={p.sslmode}); refusing, since a man-in-the-middle "
+                        "could relay or crack it (use sslmode=verify-full or verify-ca with "
+                        "sslrootcert, switch the role to SCRAM, or pass allow_md5_over_unverified_tls=True)")
                 salt = body[4:8]
-                inner = hashlib.md5((self._password() + p.user).encode("utf-8")).hexdigest()
+                inner = hashlib.md5((self._password() + p.user).encode("utf-8", "surrogateescape")).hexdigest()
                 outer = hashlib.md5(inner.encode("ascii") + salt).hexdigest()
                 self._send(_msg(b"p", _cstr("md5" + outer)))
             elif code == 10:
-                mechanisms = [m.decode("ascii") for m in body[4:].split(b"\x00") if m]
+                mechanisms = [m.decode("ascii", "replace") for m in body[4:].split(b"\x00") if m]
                 scram = self._start_scram(mechanisms)
                 first = scram.client_first()
                 self._send(_msg(b"p", _cstr(scram.mechanism) + _I32.pack(len(first)) + first))
@@ -646,21 +929,27 @@ class Connection:
     # --- protocol plumbing -------------------------------------------------------------
 
     @contextmanager
-    def _io(self) -> Iterator[None]:
+    def _io(self, stream: object | None = None) -> Iterator[None]:
+        """Guard one exchange with the server. stream: the iterate() doing it."""
         if self._closed:
             raise InterfaceError("connection is closed")
-        if self._streaming:
-            raise InterfaceError("an iterate() is still in progress on this connection; "
-                                 "finish or close it first")
+        if self._stream is not stream:
+            if stream is None:
+                raise InterfaceError("an iterate() is still in progress on this connection; "
+                                     "finish or close it first")
+            raise InterfaceError("this iterate() was ended early, by leaving its transaction() block "
+                                 "or by an error")
         if not self._lock.acquire(blocking=False):
             raise InterfaceError("connection is already in use by another thread")
         try:
             yield
-        except BaseException:
+        except BaseException as exc:
             # Any failure that leaves the protocol out of sync makes the
             # connection unusable; errors raised after ReadyForQuery do not.
             if not self._synced:
                 self._abort()
+                if isinstance(exc, _MALFORMED) and not isinstance(exc, Error):
+                    raise OperationalError(f"protocol violation: malformed message from server ({exc})") from exc
             raise
         finally:
             self._lock.release()
@@ -706,12 +995,13 @@ class Connection:
             elif kind == b"T":
                 columns, decode = self._row_decoder(body)
             elif kind == b"C":
-                tags.append(body[:-1].decode("utf-8"))
+                tags.append(_tag(body))
             elif kind == b"Z":
                 self._ready(body)
                 break
             elif kind == b"E":
-                error = error or error_from_fields(_parse_fields(body))
+                reported = self._server_error(body)
+                error = error or reported
             elif kind in (b"1", b"2", b"n", b"I", b"s"):
                 pass
             elif kind in (b"G", b"H", b"W", b"d", b"c"):
@@ -730,7 +1020,7 @@ class Connection:
         names, decoders = [], []
         for _ in range(count):
             end = body.index(b"\x00", pos)
-            names.append(body[pos:end].decode("utf-8"))
+            names.append(body[pos:end].decode("utf-8", "replace"))
             pos = end + 1
             type_oid = struct.unpack_from("!IhI", body, pos)[2]
             pos += 18
@@ -750,6 +1040,8 @@ class Connection:
                 if length < 0:
                     values.append(None)
                 else:
+                    if pos + length > len(data):
+                        raise _malformed("data row")
                     values.append(fn(data[pos:pos + length]))
                     pos += length
             return row_cls(values)
@@ -772,24 +1064,32 @@ class Connection:
 
     def _handle_async(self, kind: bytes, body: bytes) -> bool:
         if kind == b"N":
+            notice = Notice.from_fields(_parse_fields(body))  # a malformed notice is a protocol error
             try:
-                self.notice_handler(Notice.from_fields(_parse_fields(body)))
+                self.notice_handler(notice)
             except Exception:
                 _log.exception("notice handler raised")
             return True
         if kind == b"S":
-            name, value = body[:-1].split(b"\x00", 1)
-            self.parameters[name.decode("utf-8")] = value.rstrip(b"\x00").decode("utf-8")
-            if name == b"client_encoding" and self.parameters["client_encoding"] != "UTF8":
-                _log.warning("client_encoding changed to %s; lazaret.pg only supports UTF8",
-                             self.parameters["client_encoding"])
+            parts = body.split(b"\x00")
+            if len(parts) < 3:
+                raise _malformed("parameter status message")
+            name, value = parts[0].decode("utf-8", "replace"), parts[1].decode("utf-8", "replace")
+            self.parameters[name] = value
+            if name == "client_encoding" and value != "UTF8":
+                _log.warning("client_encoding changed to %s; lazaret.pg only supports UTF8", value)
             return True
         if kind == b"A":
+            parts = body[4:].split(b"\x00")
+            if len(body) < 4 or len(parts) < 3:
+                raise _malformed("notification message")
             pid = _I32.unpack_from(body)[0]
-            channel, payload = body[4:].split(b"\x00")[:2]
-            self.notifications.append(Notification(pid, channel.decode("utf-8"), payload.decode("utf-8")))
+            self.notifications.append(Notification(pid, parts[0].decode("utf-8", "replace"),
+                                                   parts[1].decode("utf-8", "replace")))
             return True
         if kind == b"K":
+            if len(body) < 8:
+                raise _malformed("backend key message")
             self._backend_key = (_I32.unpack_from(body)[0], bytes(body[4:]))
             return True
         return False
@@ -797,20 +1097,73 @@ class Connection:
     def _ready(self, body: bytes) -> None:
         self._tx_status = body[:1]
         self._synced = True
+        self._last_error = None
 
-    def _drain_until_ready(self, *, startup: bool = False) -> None:
-        """Read until ReadyForQuery, discarding results of an abandoned query."""
+    def _server_error(self, body: bytes) -> DatabaseError:
+        """Parse an ErrorResponse, and remember it: if the server closes the
+        connection next (a FATAL error), that is the reason to report."""
+        error = error_from_fields(_parse_fields(body))
+        if self._last_error is None or error.severity in ("FATAL", "PANIC"):
+            self._last_error = error
+        return error
+
+    def _lost(self, message: str, cause: BaseException | None = None) -> NoReturn:
+        """The connection is gone: close it and raise OperationalError. If the
+        server sent an error first (e.g. FATAL 57P01 from pg_terminate_backend
+        or 57P05 idle_session_timeout), raise that, with its SQLSTATE."""
+        error = self._last_error
+        self._abort()
+        if isinstance(error, OperationalError):
+            raise error from cause
+        if error is not None:
+            raise OperationalError(f"{message}; the server reported: {error}") from error
+        raise OperationalError(message) from cause
+
+    def _salvage_error(self) -> None:
+        """After a failed send, look for an ErrorResponse the server sent
+        before it closed the connection."""
+        sock = self._sock
+        if sock is None:
+            return
+        try:
+            sock.setblocking(False)
+            self._recv_available(sock, isinstance(sock, ssl.SSLSocket))
+        except (OSError, ValueError):
+            pass
+        buf, pos = self._rbuf, 0
+        while len(buf) - pos >= 5:
+            length = _I32.unpack_from(buf, pos + 1)[0]
+            if length < 4 or pos + 1 + length > len(buf):
+                break
+            if buf[pos] == ord("E"):
+                try:
+                    self._server_error(bytes(buf[pos + 5:pos + 1 + length]))
+                except Error:
+                    break
+            pos += 1 + length
+
+    def _drain_until_ready(self, *, startup: bool = False) -> DatabaseError | None:
+        """Read until ReadyForQuery, discarding results of an abandoned query.
+        Returns the first error the server reported on the way, such as a
+        deferred constraint or serialization failure raised when Sync committed
+        the implicit transaction. Callers that finished their work successfully
+        must raise it; cleanup paths that already have an error ignore it."""
+        error = None
         while True:
             kind, body = self._read_message()
             if kind == b"Z":
                 self._ready(body)
-                return
-            if kind == b"E" and startup:
-                # e.g. "database does not exist": the server closes the socket next
-                raise error_from_fields(_parse_fields(body))
-            if kind == b"G":  # never leave the server waiting in copy-in mode
+                return error
+            if kind == b"E":
+                if startup:
+                    # e.g. "database does not exist": the server closes the socket next
+                    raise self._server_error(body)
+                reported = self._server_error(body)
+                error = error or reported
+            elif kind == b"G":  # never leave the server waiting in copy-in mode
                 self._handle_copy(kind, extended=True)
-            self._handle_async(kind, body)
+            else:
+                self._handle_async(kind, body)
 
     def _unexpected(self, kind: bytes) -> None:
         self._abort()
@@ -820,23 +1173,118 @@ class Connection:
         try:
             self._sock.sendall(data)
         except OSError as exc:
-            self._abort()
-            raise OperationalError(f"connection lost while sending: {exc}") from exc
+            if isinstance(exc, TimeoutError):
+                self._abort()
+                raise OperationalError("timed out sending to the server; connection closed") from exc
+            self._salvage_error()
+            self._lost(f"connection lost while sending: {exc}", exc)
+
+    def _send_pipelined(self, data: bytes | bytearray) -> None:
+        """sendall() for a pipelined batch that keeps reading the server's
+        replies into the read buffer while it writes. With a plain sendall(),
+        a server that sends a lot per row (e.g. a NOTICE from a trigger) fills
+        its socket buffers and stops reading our input while we are still
+        writing, and both sides wait forever."""
+        sock = self._sock
+        view = memoryview(data)
+        timeout = sock.gettimeout()
+        tls = isinstance(sock, ssl.SSLSocket)
+        both = selectors.EVENT_READ | selectors.EVENT_WRITE
+        selector = selectors.DefaultSelector()
+        try:
+            sock.setblocking(False)
+            selector.register(sock, both)
+            events = both
+            while view:
+                if tls and sock.pending():
+                    ready = selectors.EVENT_READ
+                else:
+                    ready = 0
+                    for _, mask in selector.select(timeout):
+                        ready |= mask
+                    if not ready:
+                        raise TimeoutError("timed out")
+                if ready & selectors.EVENT_READ:
+                    self._recv_available(sock, tls)
+                wanted = both
+                if ready & selectors.EVENT_WRITE:
+                    try:
+                        view = view[sock.send(view[:1 << 18]):]
+                    except (BlockingIOError, InterruptedError, ssl.SSLWantWriteError):
+                        pass
+                    except ssl.SSLWantReadError:  # TLS must read first: don't spin on "writable"
+                        wanted = selectors.EVENT_READ
+                if wanted != events:
+                    selector.modify(sock, wanted)
+                    events = wanted
+        except OSError as exc:  # TimeoutError and ssl.SSLError are OSErrors
+            if isinstance(exc, TimeoutError):
+                self._abort()
+                raise OperationalError("timed out sending to the server; connection closed") from exc
+            self._salvage_error()  # the replies read so far may explain why
+            self._lost(f"connection lost while sending: {exc}", exc)
+        finally:
+            selector.close()
+            if self._sock is sock:
+                sock.settimeout(timeout)
+
+    def _recv_available(self, sock: socket.socket, tls: bool) -> None:
+        """Move whatever the server has sent into the read buffer, without blocking."""
+        while True:
+            try:
+                chunk = sock.recv(_RECV_SIZE)
+            except (BlockingIOError, InterruptedError, ssl.SSLWantReadError, ssl.SSLWantWriteError):
+                return
+            if not chunk:
+                raise ConnectionResetError("server closed the connection")
+            self._rbuf += chunk
+            if not (tls and sock.pending()):
+                return
 
     def _read_exact(self, n: int) -> bytes:
-        try:
-            data = self._rfile.read(n)
-        except (OSError, ValueError) as exc:
-            self._abort()
-            if isinstance(exc, TimeoutError):
-                raise OperationalError("timed out waiting for the server; connection closed") from exc
-            raise OperationalError(f"connection lost while reading: {exc}") from exc
-        if len(data) != n:
-            self._abort()
-            raise OperationalError("server closed the connection unexpectedly")
+        buf = self._rbuf
+        if len(buf) < n:
+            try:
+                if n - len(buf) > _RECV_SIZE:  # a large message: read straight into place
+                    out = bytearray(n)
+                    got = len(buf)
+                    out[:got] = buf
+                    buf.clear()
+                    view = memoryview(out)
+                    while got < n:
+                        count = self._sock.recv_into(view[got:], n - got)
+                        if not count:
+                            break
+                        got += count
+                    if got == n:
+                        return bytes(out)
+                    buf += view[:got]
+                else:
+                    while len(buf) < n:
+                        chunk = self._sock.recv(_RECV_SIZE)
+                        if not chunk:
+                            break
+                        buf += chunk
+            except (OSError, ValueError, AttributeError) as exc:  # AttributeError: closed meanwhile
+                if isinstance(exc, TimeoutError):
+                    self._abort()
+                    raise OperationalError("timed out waiting for the server; connection closed") from exc
+                self._lost(f"connection lost while reading: {exc}", exc)
+            if len(buf) < n:
+                self._lost("server closed the connection unexpectedly")
+        data = bytes(buf[:n])
+        del buf[:n]
         return data
 
     def _read_message(self) -> tuple[bytes, bytes]:
+        buf = self._rbuf
+        if len(buf) >= 5:  # fast path: the whole message is already buffered
+            length = _I32.unpack_from(buf, 1)[0]
+            if 4 <= length < len(buf):
+                kind = _KINDS[buf[0]]
+                body = bytes(buf[5:length + 1])
+                del buf[:length + 1]
+                return kind, body
         header = self._read_exact(5)
         length = _I32.unpack_from(header, 1)[0]
         if length < 4 or length > MAX_MESSAGE:
@@ -847,12 +1295,13 @@ class Connection:
     def _abort(self) -> None:
         self._closed = True
         self._synced = True
+        self._stream = None
+        self._last_error = None
         self._backend_key = None
-        for resource in (self._rfile, self._sock):
-            if resource is not None:
-                try:
-                    resource.close()
-                except OSError:
-                    pass
-        self._rfile = None
+        if self._sock is not None:
+            try:
+                self._sock.close()
+            except OSError:
+                pass
+        self._rbuf = bytearray()
         self._sock = None

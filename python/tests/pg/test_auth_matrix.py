@@ -50,14 +50,24 @@ class AuthMatrixTests(unittest.TestCase):
     def test_trust(self):
         self.check(connect("trust_user"), "none", False)
 
-    def test_cleartext_password_needs_tls_or_opt_in(self):
-        with self.assertRaisesRegex(pg.AuthenticationError, "cleartext"):
-            connect("pw_user", "pw secret")
+    def test_cleartext_password_needs_verified_tls_or_opt_in(self):
+        # Unverified TLS (prefer/require) is treated like plaintext: a man-in-the-middle
+        # terminating TLS could ask for the password.
+        for sslmode in ("disable", "prefer", "require"):
+            with self.subTest(sslmode=sslmode), self.assertRaisesRegex(pg.AuthenticationError, "cleartext"):
+                connect("pw_user", "pw secret", sslmode=sslmode)
         self.check(connect("pw_user", "pw secret", allow_cleartext_password=True), "password", False)
-        self.check(connect("pw_user", "pw secret", sslmode="require"), "password", True)
+        self.check(connect("pw_user", "pw secret", sslmode="require", allow_cleartext_password=True),
+                   "password", True)
+        self.check(connect("pw_user", "pw secret", sslmode="verify-ca", sslrootcert=CA), "password", True)
 
     def test_md5(self):
         self.check(connect("md5_user", "md5 secret"), "md5", False)
+        with self.assertRaisesRegex(pg.AuthenticationError, "MD5"):
+            connect("md5_user", "md5 secret", sslmode="require")
+        self.check(connect("md5_user", "md5 secret", sslmode="require", allow_md5_over_unverified_tls=True),
+                   "md5", True)
+        self.check(connect("md5_user", "md5 secret", sslmode="verify-ca", sslrootcert=CA), "md5", True)
 
     def test_scram_plain_and_with_channel_binding(self):
         self.check(connect("scram_user", "scram secret"), "scram-sha-256", False)
