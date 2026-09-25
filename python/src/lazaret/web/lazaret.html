@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-A0bFjiq7C2WTfH7kul9axGSxMnamD8BnkPFLzBI/xbM='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-3BPeZ66Dtxfr0NbSoQ0MCLg+zWcK0mR8ZSE82lwZpTk='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
 <title>Lazaret — Security &amp; Quality Review</title>
 <style>
   :root{
@@ -879,11 +879,71 @@ function scanFile(file){
   if(lang === "py"){ try{ sqlSinkScan(file, lines, issues); }catch(e){ /* analyzer must never break a scan */ } }
   return issues.filter(i=>!isSuppressed(i, lines));
 }
+/* ---------------- Secret redaction (same output as the CLI) ----------------
+   Every issue is redacted when it is created, so the rendered list and the
+   JSON export never carry a credential (the CLI redacts by default too;
+   lazaret.scanner.core: mk_issue / redact_secret_snippet). Placeholders match
+   the CLI: the flagged line of a secret-rule finding becomes
+   "[redacted: secret rule RULE] (N chars)"; a credential-shaped substring on
+   any other snippet line, or in the message, becomes "[redacted]".
+   Beyond the CLI's current list this implements FIX-SPEC item 6: every line
+   of a PEM private-key block (BEGIN ... END) is redacted, entropy-flagged
+   literals are redacted wherever they appear, SQL IDENTIFIED BY / PASSWORD is
+   case-insensitive, GitHub tokens (ghp_/gho_/ghu_/ghs_/ghr_), and msg is
+   swept too. INTEGRATOR: keep SECRET_LINE_PATTERNS identical to core.py's
+   _SECRET_LINE_PATTERNS once item 6 lands there. */
+const SECRET_RULES = new Set(["S-SECRET","S-TOKEN","SQL-CRED","S-ENTROPY"]);
+const SECRET_LINE_PATTERNS = [
+  /AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36,}|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----|eyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}/g,
+  /IDENTIFIED\s+BY\s+(?:PASSWORD\s*)?['"][^'"]+['"]|IDENTIFIED\s+BY\s+PASSWORD\b|PASSWORD\s*=?\s*['"][^'"]+['"]/gi,
+  /(?:password|passwd|pwd|secret|api[_-]?key|access[_-]?key|auth[_-]?token|private[_-]?key)\s*[:=]\s*["'][^"']{4,}["']/gi,
+];
+const PEM_BEGIN_RE = /-----BEGIN [A-Z ]*PRIVATE KEY-----/;
+const PEM_END_RE = /-----END [A-Z ]*PRIVATE KEY-----/;
+const PEM_MAX_LINES = 200;                 // a BEGIN with no END this close is a constant, not a key
+const REDACTED = "[redacted]";
+const redactionContexts = new WeakMap();   // lines array -> {pemLines, literals}
+function redactionContext(file, lines){
+  let ctx = redactionContexts.get(lines);
+  if(ctx) return ctx;
+  const pemLines = new Set(), literals = new Set();
+  for(let i=0;i<lines.length;i++){
+    const line = lines[i];
+    if(PEM_BEGIN_RE.test(line)){
+      let end = -1;
+      if(!PEM_END_RE.test(line.slice(line.search(PEM_BEGIN_RE))))
+        for(let j=i+1;j<lines.length && j<=i+PEM_MAX_LINES;j++) if(PEM_END_RE.test(lines[j])){ end=j; break; }
+      for(let j=i;j<=Math.max(i,end);j++) pemLines.add(j);
+    }
+    // literals the entropy rule flags (or would, were the line not already a secret finding)
+    if(!isComment(line, file.lang) && !SECRET_SKIP_RE.test(line)){
+      const em = line.match(ENTROPY_VALUE_RE);
+      if(em && shannonEntropy(em[1])>4.0) literals.add(em[1]);
+    }
+  }
+  ctx = {pemLines, literals:[...literals].sort((a,b)=>b.length-a.length)};
+  redactionContexts.set(lines, ctx);
+  return ctx;
+}
+function redactText(text, ctx){
+  let out = String(text);
+  for(const re of SECRET_LINE_PATTERNS){ re.lastIndex = 0; out = out.replace(re, REDACTED); }
+  for(const lit of ctx.literals) if(out.includes(lit)) out = out.split(lit).join(REDACTED);
+  return out;
+}
 function mkIssue(rule, file, line, lines){
-  return {rule:rule.id, name:rule.name, type:rule.type, sev:rule.sev, msg:rule.msg,
+  const start = Math.max(0,line-3);
+  const ctx = redactionContext(file, lines);
+  const snippet = lines.slice(start, Math.min(lines.length, line+2)).map((text, k)=>{
+    const idx = start + k;                                   // 0-based line index
+    if(idx === line-1 && SECRET_RULES.has(rule.id))
+      return `[redacted: secret rule ${rule.id}] (${[...lines[line-1]].length} chars)`;
+    if(ctx.pemLines.has(idx)) return REDACTED;
+    return redactText(text, ctx);
+  });
+  return {rule:rule.id, name:rule.name, type:rule.type, sev:rule.sev, msg:redactText(rule.msg, ctx),
     why:rule.why, fix:rule.fix, ref:rule.ref, file:file.name, line,
-    snippet: lines.slice(Math.max(0,line-3), Math.min(lines.length, line+2)),
-    snipStart: Math.max(0,line-3)+1};
+    snippet, snipStart: start+1};
 }
 
 function extractFunctions(lines, lang){
@@ -1174,11 +1234,18 @@ function renderIssues(){
     h.addEventListener("click",()=>h.parentElement.classList.toggle("open")));
 }
 
+// The export is the dashboard's own format, not a CLI report: a different
+// file name (the CLI writes lazaret-report.json) and a generatedBy marker the
+// CLI's reports don't carry, so neither can be mistaken for the other (e.g.
+// as a --baseline). Issues are already redacted (mkIssue).
+const EXPORT_FORMAT = "lazaret-dashboard-1";
+const EXPORT_FILENAME = "lazaret-dashboard-export.json";
 $("#exportBtn").addEventListener("click",()=>{
   if(!lastResult) return;
-  const blob = new Blob([JSON.stringify(lastResult,null,2)],{type:"application/json"});
+  const report = Object.assign({generatedBy: EXPORT_FORMAT}, lastResult);
+  const blob = new Blob([JSON.stringify(report,null,2)],{type:"application/json"});
   const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob); a.download = "lazaret-report.json"; a.click();
+  a.href = URL.createObjectURL(blob); a.download = EXPORT_FILENAME; a.click();
   URL.revokeObjectURL(a.href);
 });
 
