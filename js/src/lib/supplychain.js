@@ -1,16 +1,24 @@
 // Supply-chain manifest scanning (package.json lifecycle scripts, binding.gyp
-// actions) and secret redaction — JS twin of lazaret.py's scan_manifest /
-// scan_gyp / redaction helpers.
+// actions and command expansions) — JS twin of lazaret.scanner.core's
+// load_manifest / scan_manifest / scan_gyp (shared semantics spec 3). Secret
+// redaction lives in ./redact.js and is re-exported here for the existing
+// import paths.
 
 import { mkIssue } from "./issue.js";
 import { DEP_MARKERS } from "./fs.js";
+import { pyRepr, pyStr, pyStrip } from "./pycompat.js";
+import { pyJsonParse, jsonErrorWhere, pyLiteralParse } from "./pyjson.js";
+import { REDACT, redactText } from "./redact.js";
+
+export { SECRET_RULES, REDACT_PLACEHOLDER, redactContextLine, redactSecretSnippet, redactResult, setRedactSecrets } from "./redact.js";
 
 // Scripts npm runs when a package is installed as a dependency. Publisher-side
 // scripts (prepack, prepublishOnly, postpublish, ...) only ever run on the
 // maintainer's machine while packaging a release, so they are not install hooks.
 export const NPM_INSTALL_SCRIPTS = ["preinstall", "install", "postinstall"];
-// In a checked-out project (not an installed dependency), `npm install` also runs prepare.
-export const NPM_LOCAL_INSTALL_SCRIPTS = [...NPM_INSTALL_SCRIPTS, "prepare"];
+// In a checked-out project, `npm install` also runs the prepare family.
+export const NPM_PREPARE_SCRIPTS = ["preprepare", "prepare", "postprepare"];
+export const NPM_LOCAL_INSTALL_SCRIPTS = [...NPM_INSTALL_SCRIPTS, ...NPM_PREPARE_SCRIPTS];
 export const NPM_LIFECYCLE_SCRIPTS = NPM_LOCAL_INSTALL_SCRIPTS;   // backwards-compatible name
 
 // A manifest inside an installed-dependency directory belongs to a package that
@@ -18,6 +26,12 @@ export const NPM_LIFECYCLE_SCRIPTS = NPM_LOCAL_INSTALL_SCRIPTS;   // backwards-c
 // Twin of lazaret.scanner.core.is_dependency_manifest (same DEP_MARKERS list).
 export function isDependencyManifest(path) {
   return String(path).split(/[\\/]/).slice(0, -1).some((part) => DEP_MARKERS.has(part));
+}
+/** A manifest at the top of the scanned tree / package (no directory part). */
+export function isRootManifest(path) {
+  const p = String(path).replace(/\\/g, "/").replace(/^\/+/, "");
+  const dir = p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "";
+  return dir === "" || dir === ".";
 }
 
 // G11: fetch/eval pattern list. Mere presence of a lifecycle script is MAJOR;
@@ -47,21 +61,28 @@ export function hookIsSuspicious(cmd) {
   return INSTALL_HOOK_RE.test(remainder);
 }
 
-function scInstallHookIssue(path, lineNo, lines, script, cmd, suspicious) {
-  const sev = suspicious ? "CRITICAL" : "MAJOR";
+function scInstallHookIssue(path, lineNo, lines, script, cmd, suspicious, sev = null) {
+  sev = sev || (suspicious ? "CRITICAL" : "MAJOR");
   let msg, why;
   if (suspicious) {
     msg = `"${script}" script runs a network-fetch/eval command at install time.`;
     why = "Install hooks execute automatically on npm install — the most common supply-chain compromise vector — and this one fetches or executes remote code.";
   } else {
-    msg = `"${script}" script runs code at install time: ${JSON.stringify(cmd)}.`;
+    msg = `"${script}" script runs code at install time: ${pyRepr(cmd)}.`;
     why = "Install hooks run automatically with user privileges on npm install, before anyone reviews the package. Many legitimate packages use one (to fetch a platform binary, for example), so on its own this is a capability to review, not evidence of malice.";
+    if (sev === "INFO") {
+      why = "A prepare-family script runs on `npm install` in this checkout; it is the project's own build step (husky, patch-package, a compile), listed for inventory. Suspicious commands here stay CRITICAL.";
+    }
   }
-  return mkIssue(
+  const issue = mkIssue(
     { id: "SC-INSTALL-HOOK", name: "Install hook", type: "HOTSPOT",
       sev, msg, why,
       fix: `Review the ${script} script; use --ignore-scripts in CI if unneeded.`,
-      ref: "CWE-506 · Supply chain" }, { name: path }, lineNo, lines);
+      ref: "CWE-506 · Supply chain" }, path, lineNo, lines);
+  // lets a caller follow the hook to the script it runs; redacted here (spec 6:
+  // any field copying source text) so library callers never see a credential
+  issue.cmd = REDACT.on ? redactText(cmd) : cmd;
+  return issue;
 }
 
 function manifestDepthIssue(path) {
@@ -69,133 +90,159 @@ function manifestDepthIssue(path) {
   // never a crash, never a silent skip.
   return mkIssue(
     { id: "SC-MANIFEST-DEPTH", name: "Hostile manifest nesting depth",
-      type: "HOTSPOT", "sev": "CRITICAL",
+      type: "HOTSPOT", sev: "CRITICAL",
       msg: "Manifest is too deeply nested to parse (recursion limit hit).",
-      why: "A hostile repo benefits from both a crash and a silent skip; this finding keeps the signal visible either way.",
-      fix: "Review the manifest manually.",
-      ref: "CWE-506 · Supply chain" }, { name: path }, 1, [""]);
+      why: "A manifest nested this deep cannot be produced by any real build tool — it exists purely to crash or blind security scanners. Treating it as data would silently drop every other finding in the package.",
+      fix: "Reject this package/file at your ingestion boundary; investigate the source.",
+      ref: "CWE-506 · Supply chain" }, path, 1, []);
 }
 
-/**
- * json.loads-equivalent for manifest-shaped, attacker-controlled content:
- * returns [data, depthIssue]. data is null on any parse failure (normal JSON
- * errors → no issues); a depth error yields the SC-MANIFEST-DEPTH finding so
- * a hostile file can neither crash the scan nor hide behind "unparseable".
- */
-function loadManifest(path, content) {
-  try {
-    return [JSON.parse(content), null];
-  } catch (e) {
-    if (e instanceof RangeError && /call stack|Maximum/i.test(String(e.message)))
-      return [null, manifestDepthIssue(path)];
-    return [null, null];
-  }
+/** SC-MANIFEST-UNPARSEABLE (MAJOR): a ROOT package.json / binding.gyp the scanner cannot read. */
+export function manifestUnparseableIssue(path, reason) {
+  const p = String(path).replace(/\\/g, "/");
+  const name = p.slice(p.lastIndexOf("/") + 1) || String(path);
+  return mkIssue(
+    { id: "SC-MANIFEST-UNPARSEABLE", name: "Unparseable manifest",
+      type: "HOTSPOT", sev: "MAJOR",
+      msg: `${name} could not be parsed (${reason}); its install hooks could not be checked.`,
+      why: "Package managers are more forgiving than a strict parser in places (a byte-order mark, number formats), so a manifest the scanner cannot read may still run install scripts when the package is installed. An unreadable root manifest is reported instead of treated as empty.",
+      fix: "Make the manifest valid JSON (binding.gyp: a Python/JSON literal) and review its scripts by hand.",
+      ref: "CWE-506 · Supply chain" }, path, 1, []);
 }
+
+const pyTypeName = (v) => (v === null ? "NoneType" : Array.isArray(v) ? "list" : typeof v === "string" ? "str"
+  : typeof v === "boolean" ? "bool" : typeof v === "number" ? (Number.isInteger(v) ? "int" : "float") : "dict");
+
+/**
+ * Parse manifest-shaped, attacker-controlled text the way the package
+ * manager does (twin of core.load_manifest) → [data, issues]. A leading
+ * UTF-8 BOM is stripped first (npm does). data is null when the text cannot
+ * be parsed; issues then holds SC-MANIFEST-DEPTH for a too-deep document, or
+ * SC-MANIFEST-UNPARSEABLE when the manifest is at the root. A top level
+ * that is not an object counts as unparseable too. pythonLiteral: also
+ * accept Python literal syntax (binding.gyp).
+ */
+export function loadManifest(path, content, { pythonLiteral = false } = {}) {
+  const root = isRootManifest(path);
+  if (typeof content !== "string") return [null, root ? [manifestUnparseableIssue(path, "not text")] : []];
+  const text = content.startsWith("\ufeff") ? content.slice(1) : content;
+  let data = null, reason = null, litType = null;
+  const r = pyJsonParse(text);
+  if (r.depth) return [null, [manifestDepthIssue(path)]];
+  if (r.ok) {
+    data = r.value;
+    // json.loads(parse_int=_json_int): an integer literal up to 1000 characters is a Python int
+    if (typeof data === "number") {
+      const lit = pyStrip(text);
+      litType = /^-?(?:0|[1-9]\d*)$/.test(lit) && lit.length <= 1000 ? "int" : "float";
+    }
+  } else reason = `JSONDecodeError: ${jsonErrorWhere(text, r.pos)}`;
+  if (data === null && pythonLiteral) {
+    const lit = pyLiteralParse(pyStrip(text));
+    if (lit.ok) { data = lit.value; reason = null; litType = lit.type; }
+    else reason ||= lit.error;
+  }
+  if (data === null || typeof data !== "object" || Array.isArray(data)) {
+    if (data !== null) reason = `top level is a ${litType ?? pyTypeName(data)}, not an object`;
+    return [null, root ? [manifestUnparseableIssue(path, reason || "unparseable")] : []];
+  }
+  return [data, []];
+}
+
+const own = (obj, key) => (Object.prototype.hasOwnProperty.call(obj, key) ? obj[key] : undefined);
 
 /**
  * package.json install hooks (G11 policy). `registry: true` (or a manifest
  * inside node_modules/...) counts only the scripts npm runs for an installed
- * dependency; a checked-out project also counts `prepare`.
+ * dependency; a checked-out project also counts the prepare family, which
+ * is INFO unless suspicious. An unparseable root manifest is
+ * SC-MANIFEST-UNPARSEABLE.
  */
 export function scanManifest(path, content, { registry = isDependencyManifest(path) } = {}) {
-  const [data, depthIssue] = loadManifest(path, content);
-  if (depthIssue) return [depthIssue];
-  if (!data || typeof data !== "object" || Array.isArray(data)) return [];
-  const issues = [], lines = content.split("\n");
-  const scripts = data.scripts;
+  const [data, issues] = loadManifest(path, content);
+  if (data === null) return issues;
+  const body = String(content).startsWith("\ufeff") ? String(content).slice(1) : String(content);
+  const lines = body.split("\n");
+  const scripts = own(data, "scripts");
   if (scripts && typeof scripts === "object" && !Array.isArray(scripts)) {
     for (const hook of (registry ? NPM_INSTALL_SCRIPTS : NPM_LOCAL_INSTALL_SCRIPTS)) {
-      const cmd = scripts[hook];
-      if (typeof cmd !== "string" || !cmd.trim()) continue;
+      const cmd = own(scripts, hook);
+      if (typeof cmd !== "string" || !pyStrip(cmd)) continue;
       const suspicious = hookIsSuspicious(cmd);
+      const sev = !registry && NPM_PREPARE_SCRIPTS.includes(hook) && !suspicious ? "INFO" : null;
       const lineNo = lines.findIndex((l) => l.includes(`"${hook}"`)) + 1 || 1;
-      issues.push(scInstallHookIssue(path, lineNo, lines, hook, cmd, suspicious));
+      issues.push(scInstallHookIssue(path, lineNo, lines, hook, cmd, suspicious, sev));
     }
   }
   return issues;
 }
 
-/** binding.gyp custom build actions (G11 policy, same as lifecycle scripts). */
-export function scanGyp(path, content) {
-  const [data, depthIssue] = loadManifest(path, content);
-  if (depthIssue) return [depthIssue];
-  if (!data || typeof data !== "object" || Array.isArray(data)) return [];
-  const issues = [], lines = content.split("\n");
-  const actions = [];
-  const targets = Array.isArray(data.targets) ? data.targets : [];
-  for (const target of targets) {
-    if (!target || typeof target !== "object") continue;
-    const acts = Array.isArray(target.actions) ? target.actions : [];
-    for (const act of acts) {
-      if (act && typeof act === "object" && Array.isArray(act.action))
-        actions.push(act.action.map(String));
-    }
+// gyp command expansions run a shell command while node-gyp configures the
+// build: '<!(cmd)', '<!@(cmd)', '>!(cmd)', '>!@(cmd)'.
+const GYP_EXPANSION_RE = /[<>]!@?\(/g;
+// The ubiquitous benign form: print an include path of a dependency.
+const GYP_NODE_REQUIRE_RE = /node\s+-[ep]\s+(?:"|')\s*require\(\s*\\?["'][\w@./-]+\\?["']\s*\)(?:\.[\w$]+)*\s*;?\s*(?:"|')/g;
+const GYP_MAX_NODES = 100_000;
+
+function gypExpansionCommand(text, start) {
+  const i = text.indexOf("(", start) + 1;
+  let depth = 1, j = i;
+  while (j < text.length && depth) {
+    if (text[j] === "(") depth++;
+    else if (text[j] === ")") depth--;
+    j++;
   }
-  for (const act of actions) {
-    const cmd = act.join(" ");
-    const suspicious = hookIsSuspicious(cmd);
-    const lineNo = lines.findIndex((l) => act.some((a) => a && l.includes(a))) + 1 || 1;
-    issues.push(scInstallHookIssue(path, lineNo, lines, "binding.gyp action", cmd, suspicious));
-  }
-  return issues;
+  return depth === 0 ? text.slice(i, j - 1) : text.slice(i);
 }
 
-// ---- Secret redaction (audit L1) -----------------------------------------
-// The flagged line of a SECRET-rule finding is redacted at creation time, so
-// every sink (terminal excerpt, JSON report) persists the placeholder, never
-// the credential.
-
-export const SECRET_RULES = new Set(["S-SECRET", "S-TOKEN", "SQL-CRED", "S-ENTROPY"]);
-export const REDACT_PLACEHOLDER = "[redacted: secret rule {RULE}]";
-
-const SECRET_LINE_PATTERNS = [
-  /(?:password|passwd|pwd|secret|api[_-]?key|access[_-]?key|auth[_-]?token|private[_-]?key)\s*[:=]\s*["'][^"']{4,}["']/gi,
-  /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g,
-  /\bghp_[A-Za-z0-9]{36,}\b/g,
-  /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g,
-  /\bsk_live_[A-Za-z0-9]{20,}\b/g,
-  /\bAIza[0-9A-Za-z_-]{35}\b/g,
-  /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, // JWT
-];
-
-export function redactContextLine(line) {
-  let out = line;
-  for (const pat of SECRET_LINE_PATTERNS) out = out.replace(pat, "[redacted]");
-  return out;
+/** [command, kind] for every action and command expansion anywhere in a parsed gyp document. */
+function gypCommands(data) {
+  const out = [];
+  const stack = [data];
+  let seen = 0;
+  while (stack.length && seen < GYP_MAX_NODES) {
+    const node = stack.pop();
+    seen++;
+    if (Array.isArray(node)) { for (const x of node) stack.push(x); continue; }
+    if (node && typeof node === "object") {
+      for (const [key, value] of Object.entries(node)) {
+        if (key === "action" && Array.isArray(value)) out.push([value.map(pyStr).join(" "), "action"]);
+        stack.push(key);
+        stack.push(value);
+      }
+      continue;
+    }
+    if (typeof node === "string" && /[<>]!@?\(/.test(node)) {
+      GYP_EXPANSION_RE.lastIndex = 0;
+      let m;
+      while ((m = GYP_EXPANSION_RE.exec(node))) out.push([gypExpansionCommand(node, m.index), "expansion"]);
+    }
+  }
+  return out.reverse();
 }
 
 /**
- * Redact a secret-bearing snippet copy (never mutates the caller's array).
- * Flagged line → REDACT_PLACEHOLDER + length (deterministic, so two scans of
- * the same line redact identically); context lines get credential matches
- * replaced with [redacted].
+ * binding.gyp custom build actions (G11 policy, same as lifecycle scripts):
+ * any action is MAJOR, one matching INSTALL_HOOK_RE is CRITICAL; command
+ * expansions ('<!(cmd)') are findings only when suspicious. gyp files are
+ * Python literals, so JSON and Python-literal syntax are both accepted.
  */
-export function redactSecretSnippet(ruleId, snippet, flaggedIdx, rawLine) {
-  const out = [...snippet];
-  for (let i = 0; i < out.length; i++) {
-    if (i === flaggedIdx) {
-      out[i] = REDACT_PLACEHOLDER.replace("{RULE}", ruleId) + ` (${rawLine.length} chars)`;
-    } else if (typeof out[i] === "string") {
-      out[i] = redactContextLine(out[i]);
+export function scanGyp(path, content) {
+  const [data, issues] = loadManifest(path, content, { pythonLiteral: true });
+  if (data === null) return issues;
+  const body = String(content).startsWith("\ufeff") ? String(content).slice(1) : String(content);
+  const lines = body.split("\n");
+  for (const [cmd, kind] of gypCommands(data)) {
+    let suspicious;
+    if (kind === "action") suspicious = INSTALL_HOOK_RE.test(cmd);
+    else {
+      suspicious = INSTALL_HOOK_RE.test(cmd.replace(GYP_NODE_REQUIRE_RE, " "));
+      if (!suspicious) continue;
     }
+    const needles = kind === "expansion" ? [cmd] : cmd.split(" ");
+    const lineNo = lines.findIndex((l) => needles.some((a) => a && l.includes(a))) + 1 || 1;
+    issues.push(scInstallHookIssue(path, lineNo, lines,
+      kind === "action" ? "binding.gyp action" : "binding.gyp command expansion", cmd, suspicious));
   }
-  return out;
-}
-
-/** Sweep a whole result: belt-and-braces pass over every issue's snippet. */
-export function redactResult(res) {
-  for (const i of res.issues ?? []) {
-    const snip = i.snippet;
-    if (!Array.isArray(snip)) continue;
-    const idx = i.line - (i.snipStart ?? i.line);
-    const secret = SECRET_RULES.has(i.rule);
-    if (secret && idx >= 0 && idx < snip.length && typeof snip[idx] === "string"
-        && !snip[idx].startsWith("[redacted: secret rule ")) {
-      const raw = snip[idx];
-      i.snippet = redactSecretSnippet(i.rule, snip, idx, raw);
-    } else if (!secret) {
-      i.snippet = snip.map((l) => (typeof l === "string" ? redactContextLine(l) : l));
-    }
-  }
-  return res;
+  return issues;
 }

