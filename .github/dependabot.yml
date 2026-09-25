@@ -1,6 +1,11 @@
 version: 2
 updates:
+  # The only dependencies Lazaret has are the GitHub Actions its workflows use
+  # (pinned to commit SHAs). Proposals wait 7 days after an upstream release,
+  # so a compromised or broken release is usually caught before it gets here.
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
