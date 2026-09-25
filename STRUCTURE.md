@@ -173,10 +173,13 @@ js/
 │                         supplychain (install hooks, secret redaction);
 │                         never import src/scanner/
 └── test/
-    ├── cli.test.js       the real CLI as a child process
+    ├── cli.test.js            CLI commands, exit codes, report paths, suppression
+    ├── report-format.test.js  the report contract (key order, gate math, redaction)
     ├── architecture.test.js   layering and ship policy
-    ├── lib/              install-hook classification
-    └── scanner/          hex decoding, private-key material
+    ├── corpus.test.js         fixtures policy; samples corpus (gated)
+    ├── fixtures/              inert .json/.txt/.md only (enforced)
+    ├── lib/                   install-hook classification
+    └── scanner/               detection rules, hex decoding, private-key material
 ```
 
 **The two engines must agree.** `python/tests/architecture/test_js_parity.py` runs both CLIs on every fixture tree and on a synthetic project covering the false-positive fixes, and fails on any difference other than the listed Python-only features. When a rule changes in one engine, it changes in the other in the same commit; the JS twins of Python helpers say so in a comment (`Twin of lazaret.scanner.core....`).
@@ -207,7 +210,7 @@ Functional samples you author, plus curated real-world malware, live only in the
 lazaret-samples/
 ├── README.md          what this is, handling rules, who has access
 ├── USAGE.md           research-only terms
-├── manifest.json      one entry per sample: id, path, sha256, lang, category, source, expect
+├── manifest.json      one entry per sample: id, path, sha256, lang, category, source, defanged, expect
 ├── synthetic/         samples you authored, by attack class
 │   ├── typosquat/
 │   ├── install-hook/
@@ -216,7 +219,7 @@ lazaret-samples/
     └── <osv-id>/      keyed to the OSV "MAL-" report it came from
 ```
 
-The manifest is JSON rather than TOML because reading TOML on Python 3.10 would need a third-party parser. Each entry names the rule IDs the scanner must report (`expect`), and `tests/scanner/test_detection_corpus.py` checks every sample's SHA-256 before scanning it. Samples are defanged (the payload neutralized, the detectable pattern kept) and stored non-executable, for example as `.txt`. Real malware is handled only inside a disposable VM and never installed; source it from public collections such as the OpenSSF malicious-packages repository or Datadog's malicious-software-packages dataset.
+The manifest is JSON rather than TOML because neither Python 3.10 nor Node can read TOML without a third-party parser. Each entry names its category (`typosquat`, `install-hook`, `obfuscation`, `secrets`, `taint-sql`, `taint-command`, `exfiltration`), must declare `"defanged": true`, and lists the rule IDs the scanner must report (`expect`). Both engines check the same manifest: `python/tests/scanner/test_detection_corpus.py` and `js/test/corpus.test.js` verify every SHA-256, fail if any file under `synthetic/` or `real/` is unlisted, and require each sample to be flagged. Samples are defanged (the payload neutralized, the detectable pattern kept) and stored non-executable, for example as `.txt`. Real malware is handled only inside a disposable VM and never installed; source it from public collections such as the OpenSSF malicious-packages repository or Datadog's malicious-software-packages dataset.
 
 ---
 
