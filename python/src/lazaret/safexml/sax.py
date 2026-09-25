@@ -16,6 +16,7 @@ from ._common import (
     DEFAULT_MAX_ATTLIST_DEFAULTS,
     DEFAULT_MAX_DEPTH,
     Options,
+    _forbid_dtd,
     depth_exceeded,
     install_handlers,
     size_exceeded,
@@ -44,6 +45,14 @@ class SafeExpatParser(_expatreader.ExpatParser):
         super().reset()
         self._depth = 0
         self._attlist = install_handlers(self._parser, self.options)
+
+    def _reset_lex_handler_prop(self) -> None:
+        # Setting a lexical handler while parsing (say, from startDocument)
+        # makes the stdlib reader reinstall its own StartDoctypeDeclHandler,
+        # which would silently turn off forbid_dtd.
+        super()._reset_lex_handler_prop()
+        if self.options.forbid_dtd:
+            self._parser.StartDoctypeDeclHandler = _forbid_dtd
 
     def feed(self, data, isFinal: bool = False) -> None:
         if not self._parsing:
