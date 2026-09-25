@@ -970,7 +970,28 @@ COMPILED_EXTS = {".so", ".pyd", ".dll", ".dylib", ".node", ".a", ".lib", ".o",
 # Recognized benign binary assets — data, not code. Not flagged.
 BENIGN_MAGIC = [b"\x89PNG", b"\xff\xd8\xff", b"GIF8", b"RIFF", b"OggS", b"BM",
                 b"\x00\x00\x01\x00", b"wOFF", b"wOF2", b"ID3", b"%PDF",
-                b"II*\x00", b"MM\x00*", b"\x1a\x45\xdf\xa3", b"ftyp"]
+                b"II*\x00", b"MM\x00*", b"\x1a\x45\xdf\xa3", b"ftyp",
+                # JPEG 2000 (codestream, JP2), Photoshop, Apple icons, DirectDraw,
+                # OpenType / TrueType collections, PostScript, GIMP, SGI, Sun raster,
+                # FITS, QOI, Radiance HDR, FLAC, cursors
+                b"\xff\x4f\xff\x51", b"\x00\x00\x00\x0cjP  ", b"8BPS", b"icns", b"DDS ",
+                b"OTTO", b"ttcf", b"%!PS", b"\xc5\xd0\xd3\xc6", b"gimp xcf", b"\x01\xda",
+                b"\x59\xa6\x6a\x95", b"SIMPLE  =", b"qoif", b"#?RADIANCE", b"fLaC",
+                b"\x00\x00\x02\x00"]
+# Formats identified by a signature that isn't at offset 0, or by extension
+# because their magic is too generic to trust alone.
+# Document and asset formats that are zip or gzip containers by design.
+CONTAINER_DOCUMENT_EXTS = {".docx", ".xlsx", ".pptx", ".odt", ".ods", ".odp", ".odg", ".epub",
+                           ".dia", ".svgz", ".ora", ".kmz", ".3mf", ".xmind", ".vsdx"}
+FONT_EXTS = {".ttf", ".otf", ".ttc", ".woff", ".woff2", ".eot", ".pfb", ".pcf", ".bdf"}
+
+
+def is_benign_media(header, ext):
+    if any(header.startswith(sig) for sig in BENIGN_MAGIC) or b"ftyp" in header[:16]:
+        return True
+    if header[36:40] == b"acsp":                       # ICC color profile
+        return True
+    return ext in FONT_EXTS and header[:4] in (b"\x00\x01\x00\x00", b"true", b"typ1")
 NESTED_ARCHIVE_MAGIC = [(b"PK\x03\x04", "zip"), (b"\x1f\x8b", "gzip"),
                         (b"BZh", "bzip2"), (b"\xfd7zXZ\x00", "xz"),
                         (b"7z\xbc\xaf\x27\x1c", "7-zip"), (b"Rar!", "rar")]
@@ -1025,13 +1046,17 @@ def classify_binary(path, data, size, context):
                 "Cross-check against the upstream build; prefer building from source in sensitive contexts.")
         where = {"sdist": "a source distribution", "npm": "an npm package",
                  "repo": "the source tree"}.get(context, "the package")
-        return issue("SC-BINARY", "Binary artifact in package", "CRITICAL",
+        return issue("SC-BINARY", "Binary artifact in package", "MAJOR",
             f"Executable/compiled binary in {where}: {desc}.",
-            "Source packages should contain buildable source, not prebuilt binaries. "
-            "Smuggled binaries are a primary supply-chain compromise vector — malicious "
-            "code inside a compiled blob never appears in reviewable source.",
+            "Prebuilt binaries can't be reviewed as source, and smuggled binaries are a "
+            "known compromise vector. Many legitimate packages ship some (Windows "
+            "launcher stubs, test fixtures), so on its own this is a capability to "
+            "review, not evidence of malice.",
             "Confirm the binary's provenance; build from source instead of trusting a prebuilt blob.")
     # 2) nested archive — a known way to hide a second-stage payload from review
+    #    (document formats that are zip/gzip containers by design are data)
+    if ext in CONTAINER_DOCUMENT_EXTS:
+        return None
     if header[257:262] == b"ustar":
         return issue("SC-NESTED-ARCHIVE", "Nested archive in package", "MINOR",
             "Embedded tar archive inside the package.",
@@ -1047,7 +1072,7 @@ def classify_binary(path, data, size, context):
                 "(a known supply-chain evasion technique).",
                 "Extract and inspect the archive's contents.")
     # 3) recognized benign asset (image/font/media/pdf) -> ignore
-    if any(header.startswith(sig) for sig in BENIGN_MAGIC) or b"ftyp" in header[:16]:
+    if is_benign_media(header, ext):
         return None
     # 4) opaque high-entropy blob -> possible packed/encrypted payload
     if is_bin and size >= 1024:
@@ -1203,6 +1228,52 @@ def redact_secret_snippet(rid, snippet, flagged_idx, raw_line):
         elif isinstance(out[i], str):
             out[i] = _redact_context_line(out[i])
     return out
+
+
+# ---------------- Hex-escape decoding (SC-HEXSTR) ----------------
+# Obfuscation means escaping characters that did not need it: "\x65\x76\x61\x6c"
+# spells "eval". Binary data (NUL bytes, byte-order marks, UTF-8 sequences,
+# protocol bytes) legitimately *needs* escapes and is never flagged.
+_HEX_ESCAPE_RE = re.compile(r"\\x([0-9A-Fa-f]{2})")
+HEX_MIN_ESCAPES = 8
+HEX_PRINTABLE_SHARE = 0.75
+_LETTER_RUN_RE = re.compile(r"[A-Za-z]{3}")
+HIDDEN_TEXT_DANGER_RE = re.compile(
+    r"https?://|\b(?:eval|exec|execSync|compile|__import__|import|require|child_process|"
+    r"subprocess|system|popen|spawn|powershell|cmd\.exe|curl|wget|base64|b64decode|atob|"
+    r"Function|fromCharCode|marshal|pickle)\b|/bin/(?:ba)?sh", re.I)
+
+
+def hex_hidden_text(line):
+    r"""The readable text hidden in a line's \xNN escapes, or None when the
+    escapes encode binary data (or there are too few to matter)."""
+    codes = [int(h, 16) for h in _HEX_ESCAPE_RE.findall(line)]
+    if len(codes) < HEX_MIN_ESCAPES:
+        return None
+    printable = [c for c in codes if 0x20 <= c < 0x7F]
+    if len(printable) / len(codes) < HEX_PRINTABLE_SHARE:
+        return None
+    text = "".join(map(chr, printable))
+    # Readable means words: palette bytes and punctuation tables that happen to
+    # fall in the printable range ("-95479:37", "!$*-:=?[]") are data.
+    letters = sum(ch.isalpha() for ch in text)
+    if not _LETTER_RUN_RE.search(text) or letters / len(text) < 0.4:
+        return None
+    return text
+
+
+_PEM_BODY_RE = re.compile(r"[A-Za-z0-9+/]{40,}={0,2}")
+
+
+def _token_has_material(rule_re, line, lines, i):
+    """A "-----BEGIN ... PRIVATE KEY-----" header alone is not a key: libraries
+    keep the header as a constant to recognize key files. Require base64 key
+    material after it, on the same line or the next two."""
+    match = rule_re.search(line)
+    if not match or not match.group(0).startswith("-----BEGIN"):
+        return True
+    following = [line[match.end():]] + lines[i + 1:i + 3]
+    return any(_PEM_BODY_RE.search(text) for text in following)
 
 
 def mk_issue(rule_or_dict, path, line_no, lines):
@@ -1545,6 +1616,8 @@ def scan_file(path, content, lang, dep=False):
                 continue
             if is_comment(line, lang) and r["id"] not in ("Q-TODO", "S-TOKEN"):
                 continue
+            if r["id"] == "S-TOKEN" and not _token_has_material(r["re"], line, lines, i):
+                continue
             issues.append(mk_issue(r, path, i + 1, lines))
         if not dep and len(line) > LONG_LINE:
             issues.append(mk_issue(
@@ -1554,12 +1627,19 @@ def scan_file(path, content, lang, dep=False):
                  "fix": "Break the line up for readability.", "ref": "Maintainability"},
                 path, i + 1, lines))
         # --- obfuscation heuristics (strong supply-chain indicators) ---
-        if line.count("\\x") >= 8:
+        hidden = hex_hidden_text(line)
+        if hidden is not None:
+            dangerous = bool(HIDDEN_TEXT_DANGER_RE.search(hidden))
+            preview = hidden if len(hidden) <= 60 else hidden[:57] + "..."
             issues.append(mk_issue(
-                {"id": "SC-HEXSTR", "name": "Hex-escaped string blob", "type": "HOTSPOT", "sev": "MAJOR",
-                 "msg": f"String built from {line.count(chr(92) + 'x')} hex escapes — obfuscation indicator.",
-                 "why": "Dense \\xNN escaping hides strings (URLs, commands) from review and grep.",
-                 "fix": "Decode and review the string; legitimate code rarely needs this.",
+                {"id": "SC-HEXSTR", "name": "Hex-escaped readable text", "type": "HOTSPOT",
+                 "sev": "CRITICAL" if dangerous else "MAJOR",
+                 "msg": f"Hex escapes hide readable text: {preview!r}.",
+                 "why": ("Escaping ordinary printable characters serves no purpose except hiding "
+                         "them from review and search; this text "
+                         + ("names code execution, a download, or a URL." if dangerous
+                            else "is readable once decoded.")),
+                 "fix": "Decode the string and review what it does.",
                  "ref": "CWE-506 · Supply chain"}, path, i + 1, lines))
         if lang == "js" and CHARCODE_RE.search(line) and len(re.findall(r"\b\d{2,3}\b", line)) >= 10:
             issues.append(mk_issue(
@@ -1650,9 +1730,13 @@ INSTALL_HOOK_RE = re.compile(
 # none of those tokens). Presence of *any* install-time script is itself worth
 # a finding: it runs with user privileges on `npm install` before the package
 # is reviewed. The pattern list is only a severity escalator.
-NPM_LIFECYCLE_SCRIPTS = ("preinstall", "install", "postinstall", "prepare",
-                         "prepublish", "prepublishOnly", "prepack", "postpack",
-                         "prepackOnly", "postpublish", "prebundle", "postbundle")
+# Scripts npm runs when a package is installed as a dependency. Publisher-side
+# scripts (prepack, prepublishOnly, postpublish, ...) only ever run on the
+# maintainer's machine while packaging a release, so they are not install hooks.
+NPM_INSTALL_SCRIPTS = ("preinstall", "install", "postinstall")
+# In a checked-out project (not a registry tarball), `npm install` also runs prepare.
+NPM_LOCAL_INSTALL_SCRIPTS = NPM_INSTALL_SCRIPTS + ("prepare",)
+NPM_LIFECYCLE_SCRIPTS = NPM_LOCAL_INSTALL_SCRIPTS   # backwards-compatible name
 PY_LIFECYCLE_SECTIONS = ("build-system", "tool.poetry", "project")
 
 def _sc_install_hook_issue(path, line_no, lines, script, cmd, suspicious):
@@ -1663,15 +1747,18 @@ def _sc_install_hook_issue(path, line_no, lines, script, cmd, suspicious):
                "supply-chain compromise vector — and this one fetches or executes "
                "remote code.")
     else:
-        msg = f'"{script}" lifecycle script runs code at install time: {cmd!r}.'
-        why = ("Install hooks execute automatically with user privileges on "
-               "npm install/publish, before anyone reviews the package. npm itself "
-               "recommends --ignore-scripts unless the hook is essential.")
-    return mk_issue(
-        {"id": "SC-INSTALL-HOOK", "name": "Suspicious install hook", "type": "HOTSPOT",
+        msg = f'"{script}" script runs code at install time: {cmd!r}.'
+        why = ("Install hooks run automatically with user privileges on npm install, "
+               "before anyone reviews the package. Many legitimate packages use one "
+               "(to fetch a platform binary, for example), so on its own this is a "
+               "capability to review, not evidence of malice.")
+    issue = mk_issue(
+        {"id": "SC-INSTALL-HOOK", "name": "Install hook", "type": "HOTSPOT",
          "sev": sev, "msg": msg, "why": why,
          "fix": f"Review the {script} script; use --ignore-scripts in CI if unneeded.",
          "ref": "CWE-506 · Supply chain"}, path, line_no, lines)
+    issue["cmd"] = cmd   # lets the registry follow the hook to the script it runs
+    return issue
 
 def _sc_manifest_depth_issue(path):
     """48033f94: a pathologically deep-nested manifest (e.g. 60k+ '[' bytes)
@@ -1704,7 +1791,38 @@ def _json_loads_manifest(path, content):
     except RecursionError:
         return None, _sc_manifest_depth_issue(path)
 
-def scan_manifest(path, content):
+_NODE_E_RE = re.compile(r"""node\s+-e\s+(?:"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'|(\S+))""")
+_LOCAL_REQUIRE_RE = re.compile(r"""require\(\s*\\?["'](\.{1,2}/[^"'\\]+)\\?["']\s*\)""")
+_INLINE_DANGER_RE = re.compile(
+    r"https?|fetch|child_process|exec|spawn|eval|Function|Buffer|atob|base64|net\.|dgram|process\.env")
+
+
+def _hook_is_suspicious(cmd):
+    """Does an install-hook command fetch or evaluate code? `node -e` alone is
+    not evidence: core-js's `node -e "try{require('./postinstall')}catch(e){}"`
+    only loads a file shipped in the package (which is scanned like any other)."""
+    if not INSTALL_HOOK_RE.search(cmd):
+        return False
+    remainder = cmd
+    for m in _NODE_E_RE.finditer(cmd):
+        code = next(g for g in m.groups() if g is not None)
+        if _LOCAL_REQUIRE_RE.search(code) and not _INLINE_DANGER_RE.search(
+                _LOCAL_REQUIRE_RE.sub("", code)):
+            remainder = remainder.replace(m.group(0), " ")
+    return bool(INSTALL_HOOK_RE.search(remainder))
+
+
+def hook_script_targets(cmd):
+    """Package-relative files an install hook runs: `node install.js`,
+    `node ./scripts/x.mjs`, or `node -e "require('./postinstall')"`."""
+    targets = re.findall(r"""\bnode\s+(?!-)["']?((?:\./)?[\w./-]+\.(?:c|m)?js)\b""", cmd)
+    for m in _NODE_E_RE.finditer(cmd):
+        code = next(g for g in m.groups() if g is not None)
+        targets += _LOCAL_REQUIRE_RE.findall(code)
+    return targets
+
+
+def scan_manifest(path, content, registry=False):
     """Check package.json / pyproject.toml install hooks — the primary
     supply-chain attack vector.
 
@@ -1721,11 +1839,11 @@ def scan_manifest(path, content):
     issues, lines = [], content.split("\n")
     scripts = data.get("scripts")
     if isinstance(scripts, dict):
-        for hook in NPM_LIFECYCLE_SCRIPTS:
+        for hook in (NPM_INSTALL_SCRIPTS if registry else NPM_LOCAL_INSTALL_SCRIPTS):
             cmd = scripts.get(hook)
             if not isinstance(cmd, str) or not cmd.strip():
                 continue
-            suspicious = bool(INSTALL_HOOK_RE.search(cmd))
+            suspicious = _hook_is_suspicious(cmd)
             line_no = next((i + 1 for i, l in enumerate(lines) if f'"{hook}"' in l), 1)
             issues.append(_sc_install_hook_issue(path, line_no, lines, hook, cmd, suspicious))
     return issues

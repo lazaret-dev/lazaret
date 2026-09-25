@@ -145,12 +145,25 @@ lazaret-registry add npm:express pypi:requests   # track packages
 lazaret-registry scan npm:left-pad@1.3.0         # scan a specific version
 lazaret-registry scan pypi:six --full            # full ruleset, not just supply-chain
 lazaret-registry scan-all                        # scan latest of every tracked package
-lazaret-registry scan-all --rescan --ci          # re-scan all; exit 1 on any SUSPICIOUS
+lazaret-registry scan-all --rescan --ci          # re-scan all; exit 1 on SUSPICIOUS or INCOMPLETE
 lazaret-registry list                            # tracked packages + last verdict
 lazaret-registry report npm:left-pad@1.3.0       # stored findings for one scan
 ```
 
-Each scan yields a verdict: **OK**, **WARN** (a critical finding), or **SUSPICIOUS** (a blocker or any supply-chain indicator). Already-scanned versions are skipped unless `--rescan` is passed, so incremental sweeps are cheap.
+Each scan answers one question, "does this package look malicious?", with a verdict and a one-line reason:
+
+| Verdict | Meaning |
+|---|---|
+| **SUSPICIOUS** | A strong supply-chain indicator: decode-then-execute, packed or obfuscated code, code hidden in hex escapes, or an install script that sends environment or credential data over the network or contacts a known exfiltration endpoint. |
+| **INCOMPLETE** | Part of the package couldn't be scanned (a source file over the size limit, or an archive over the file-count limit), so it can't be cleared. Nothing strong was found in the part that was scanned. |
+| **WARN** | Weaker indicators or capabilities worth a look: an install script, shipped binaries, nested archives, opaque blobs. Plenty of legitimate packages do these things (esbuild and puppeteer download a platform binary at install; setuptools and pip ship Windows launchers). |
+| **OK** | None of the above. |
+
+Weaker indicators inside test code (`tests/`, `test cases/`, `*.spec.js`, ...) are listed as inventory and don't count, since tests aren't imported or run when a package is installed; strong indicators count wherever they are. **Secrets and code-quality findings are reported but never decide the verdict**: a test key inside someone else's package isn't a threat to you. With `--ci`, SUSPICIOUS and INCOMPLETE fail the run; a partial scan never passes.
+
+Only the scripts npm runs on install count as install hooks (`preinstall`, `install`, `postinstall`); publisher-side scripts like `prepack` run only on the maintainer's machine. Lazaret follows each hook to the script it runs and judges it by what that script does.
+
+Already-scanned versions are skipped unless `--rescan` is passed, so incremental sweeps are cheap.
 
 ### Discovering new packages (time-windowed)
 
@@ -159,7 +172,7 @@ Instead of a fixed watchlist, you can pull packages **newly published or updated
 ```bash
 lazaret-registry discover --since 7d                       # list new PyPI+npm pkgs (last week)
 lazaret-registry discover --since 2w --ecosystem pypi      # PyPI only, last two weeks
-lazaret-registry discover --since 24h --scan --ci          # scan them; exit 1 on anything SUSPICIOUS
+lazaret-registry discover --since 24h --scan --ci          # scan them; exit 1 on SUSPICIOUS or INCOMPLETE
 lazaret-registry discover --since 7d --limit 100 --add     # just add to the watchlist
 ```
 
@@ -171,11 +184,11 @@ This pairs naturally with a schedule — e.g. a daily task running `discover --s
 
 Archives are classified file by file. Source files run through the normal ruleset; **binary/compiled files are inspected by content (magic bytes), not extension**, because smuggled binaries are a primary supply-chain vector — malicious code inside a compiled blob never appears in reviewable source. The scanner flags:
 
-- **Executables / shared objects** (ELF, PE/DLL, Mach-O, WebAssembly, `.node`, `.pyc`, Java `.class`) — **CRITICAL** when found in a source distribution or npm tarball (they don't belong there), but **INFO inventory** in a wheel, where compiled extensions are expected and the verdict stays OK.
-- **Nested archives** (zip/gzip/xz/tar inside the package) — a known way to hide a second-stage payload from review.
-- **Opaque high-entropy blobs** — possible encrypted/packed payloads decoded at runtime. Recognized data assets (images, fonts, audio, PDF) are not flagged.
+- **Executables / shared objects** (ELF, PE/DLL, Mach-O, WebAssembly, `.node`, `.pyc`, Java `.class`) — **MAJOR** (WARN) when found in a source distribution or npm tarball, but **INFO inventory** in a wheel, where compiled extensions are expected and the verdict stays OK.
+- **Nested archives** (zip/gzip/xz/tar inside the package) — a known way to hide a second-stage payload from review. Document formats that are archives by design (`.docx`, `.odg`, `.epub`, ...) are not flagged.
+- **Opaque high-entropy blobs** — possible encrypted/packed payloads decoded at runtime. Recognized data assets (images including JPEG 2000 and Photoshop, fonts, ICC color profiles, audio, PDF) are not flagged.
 
-Oversized files aren't loaded whole — only a header/entropy sample is read — so a large binary is still classified without blowing up memory. The same detection runs in directory scans (`--deps`): a committed `.so`/`.exe`/`.node` in your tree or dependencies is flagged as **SC-BINARY**.
+Oversized binaries aren't loaded whole — only a header/entropy sample is read — so a large image or font is still classified, and doesn't make the scan INCOMPLETE. Only source files that would be scanned in full count toward INCOMPLETE. The same detection runs in directory scans (`--deps`): a committed `.so`/`.exe`/`.node` in your tree or dependencies is flagged as **SC-BINARY**.
 
 ### State backend
 

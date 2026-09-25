@@ -114,9 +114,12 @@ class G11InstallHooks(unittest.TestCase):
         res = scan_to_result(os.path.join(FIXTURES, "hooks"))
         hooks = rules_at(res, "SC-INSTALL-HOOK")
         names = {i["msg"].split('"')[1] for i in hooks}
-        self.assertTrue({"preinstall", "install", "postinstall", "prepare",
-                         "prepublishOnly"} <= names,
+        # every script `npm install` runs in a checked-out project is flagged
+        self.assertTrue({"preinstall", "install", "postinstall", "prepare"} <= names,
                         f"missing lifecycle hooks in {names}")
+        # publisher-side scripts only run on the maintainer's machine while
+        # packaging a release, never on install, so they are not install hooks
+        self.assertNotIn("prepublishOnly", names)
 
     def test_pattern_escalates_to_critical(self):
         res = scan_to_result(os.path.join(FIXTURES, "hooks"))

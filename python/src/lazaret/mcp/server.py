@@ -102,7 +102,7 @@ TOOLS = [
     {
         "name": "registry_status",
         "description": ("List tracked npm/PyPI packages and the verdict of their most recent "
-                        "scan (OK / WARN / SUSPICIOUS) from the registry state DB."),
+                        "scan (OK / WARN / INCOMPLETE / SUSPICIOUS) from the registry state DB."),
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
@@ -259,7 +259,8 @@ def tool_scan_package(args):
     pid, _ = store.add_package(eco, name)
     store.save_scan(pid, res)
     return {"package": f"{eco}:{name}@{res['version']}", "artifact": res.get("artifact"),
-            "verdict": res["verdict"], "profile": res["profile"],
+            "verdict": res["verdict"], "verdictReason": res.get("verdictReason"),
+            "profile": res["profile"],
             "filesScanned": res["filesScanned"], "binaryArtifacts": res.get("binaryArtifacts", 0),
             "supplyChainIndicators": res["supplyChain"], "severityCounts": res["sevCounts"],
             "issueTotal": len(res["issues"]), "issues": [slim(i) for i in res["issues"][:MAX_ISSUES]]}
@@ -302,12 +303,14 @@ def tool_discover_packages(args):
                 pid, _ = store.add_package(e, n)
                 store.save_scan(pid, res)
                 results.append({"package": f"{e}:{n}@{res['version']}", "verdict": res["verdict"],
+                                "verdictReason": res.get("verdictReason"),
                                 "supplyChainIndicators": res["supplyChain"],
                                 "binaryArtifacts": res.get("binaryArtifacts", 0)})
             except Exception as exc:                       # noqa: BLE001
                 results.append({"package": f"{e}:{n}", "error": str(exc)})
         out["scanned"] = results
-        out["flagged"] = [r for r in results if r.get("verdict") in ("WARN", "SUSPICIOUS")]
+        out["flagged"] = [r for r in results
+                          if r.get("verdict") in ("WARN", "INCOMPLETE", "SUSPICIOUS")]
     return out
 
 

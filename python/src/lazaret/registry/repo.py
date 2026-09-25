@@ -50,9 +50,9 @@ FEED_MAX_BYTES = 16 * 1024 * 1024   # a registry RSS feed is ~100 entries; far b
 
 USER_AGENT = "Lazaret-registry-scanner/1.0"
 MAX_MEMBER = 1_000_000     # bytes of a text file we will scan as source
-MAX_FILES = 4000           # files per package
+MAX_FILES = 20_000         # files per package (numpy's sdist alone has >4,000)
 SAMPLE = 8192              # header/entropy sample read from oversized files
-ENGINE_VERSION = "2.2.0"   # 2.2: verdict-integrity (suppression/size/cache); 2.1: binary-artifact awareness
+ENGINE_VERSION = "2.3.0"   # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2: verdict-integrity; 2.1: binary-artifact awareness
 
 # ---------------- Trust-chain limits (F9/G14/F10) ----------------
 # Only these hosts may ever be fetched, over https only, and redirects to any
@@ -246,13 +246,17 @@ def resolve_npm(name, version):
     consumed by scan_package for artifact verification (G15)."""
     _check_name("npm", name)
     version = _check_version("npm", version)
-    meta = http_json("https://registry.npmjs.org/" + urllib.parse.quote(name, safe="@"))
-    if version is None:
-        version = meta.get("dist-tags", {}).get("latest")
-    v = (meta.get("versions") or {}).get(version)
-    if not v:
+    # Ask for one version's manifest (/<name>/latest or /<name>/<version>), not
+    # the full packument: that lists every version ever published and runs to
+    # tens of MB for packages like typescript.
+    url = ("https://registry.npmjs.org/" + urllib.parse.quote(name, safe="@") + "/"
+           + (_quote_seg(version) if version else "latest"))
+    v = http_json(url)
+    if not isinstance(v, dict) or not isinstance(v.get("dist"), dict) or "tarball" not in v["dist"]:
+        raise ValueError(f"npm:{name}@{version or 'latest'} not found")
+    if version is not None and v.get("version") != version:
         raise ValueError(f"npm:{name}@{version} not found")
-    return version, v["dist"]["tarball"], "tgz", "npm", v
+    return v.get("version") or version, v["dist"]["tarball"], "tgz", "npm", v
 
 
 def resolve_pypi(name, version):
@@ -264,7 +268,16 @@ def resolve_pypi(name, version):
     version = _check_version("pypi", version)
     url = (f"https://pypi.org/pypi/{_quote_seg(name)}/{_quote_seg(version)}/json" if version
            else f"https://pypi.org/pypi/{_quote_seg(name)}/json")
-    meta = http_json(url)
+    try:
+        meta = http_json(url)
+    except FetchError as exc:
+        # The unversioned document lists every release's files (9 MB for
+        # grpcio). Find the latest stable version from the release feed
+        # instead, then fetch just that version's document.
+        if version is not None or "budget" not in str(exc):
+            raise
+        version = pypi_latest_from_feed(name)
+        meta = http_json(f"https://pypi.org/pypi/{_quote_seg(name)}/{_quote_seg(version)}/json")
     version = meta["info"]["version"]
     urls = meta.get("urls") or []
     sdist = next((u for u in urls if u.get("packagetype") == "sdist"), None)
@@ -275,6 +288,38 @@ def resolve_pypi(name, version):
     container = "zip" if pick["filename"].endswith((".whl", ".zip")) else "tgz"
     artifact = "sdist" if pick is sdist else "wheel"
     return version, pick["url"], container, artifact, pick
+
+
+_PEP440_FINAL_RE = re.compile(r"^(\d+(?:\.\d+)*)(?:\.post(\d+))?$")
+
+
+def _final_release_key(v):
+    """Sort key for a final (non-pre/dev) PEP 440 version, or None otherwise."""
+    m = _PEP440_FINAL_RE.match(v.strip())
+    if not m:
+        return None
+    release = tuple(int(x) for x in m.group(1).split("."))
+    return release + (0,) * (10 - len(release)), int(m.group(2) or 0)
+
+
+def pypi_latest_from_feed(name):
+    """Latest final release of a PyPI project, from its release RSS feed
+    (parsed with lazaret.safexml). The feed is ordered by upload time, and a
+    backport can be uploaded after a newer release, so pick the highest
+    version, not the first item."""
+    raw = _fetch(f"https://pypi.org/rss/project/{_quote_seg(name)}/releases.xml",
+                 max_bytes=MAX_FEED_BYTES, timeout=METADATA_TIMEOUT)
+    try:
+        root = _safe_ET.fromstring(raw, forbid_dtd=True, max_bytes=FEED_MAX_BYTES)
+    except (_safexml.SafeXMLError, _safe_ET.ParseError) as exc:
+        raise FeedError(f"pypi:{name}: unreadable release feed: {exc}") from None
+    titles = [(item.findtext("title") or "").strip() for item in root.iter("item")]
+    finals = [(key, t) for t in titles if (key := _final_release_key(t)) is not None]
+    if finals:
+        return max(finals)[1]
+    if titles:
+        return titles[0]
+    raise ValueError(f"pypi:{name} has no releases")
 
 
 # ---------------- Artifact integrity (G15) ----------------
@@ -413,6 +458,15 @@ def strip_root(path):
     return "/".join(parts[1:]) if len(parts) > 1 else parts[0]
 
 
+def _would_scan_as_source(rel, sample):
+    """Is this member one the source scan would read in full?"""
+    base = os.path.basename(rel)
+    if base in ("package.json", "setup.py", "binding.gyp", "pyproject.toml"):
+        return True
+    return (not lazaret.looks_binary(sample[:2048])
+            and os.path.splitext(base)[1].lower() in lazaret.EXTS)
+
+
 # Detail text for each truncation reason (verdict integrity, audit C2/G16).
 _TRUNC_DETAILS = {
     "member": lambda rel, size: (
@@ -429,6 +483,118 @@ _TRUNC_DETAILS = {
 # thousands of oversize members cannot flood the report; the `truncated`
 # count in the result always reflects the true number.
 TRUNCATED_FINDING_CAP = 20
+
+
+# ---------------- Verdicts ----------------
+# The registry verdict answers one question: does this package look malicious?
+#   SUSPICIOUS  a strong supply-chain indicator (CRITICAL/BLOCKER SC-* finding):
+#               decode-then-execute, packed code, an install script that ships
+#               data off the machine, hidden code in hex escapes, ...
+#   INCOMPLETE  part of the package could not be scanned, so it cannot be
+#               cleared; nothing strong was found in the part that was.
+#   WARN        weaker indicators or capabilities worth a look: install hooks,
+#               shipped binaries, opaque blobs.
+#   OK          none of the above.
+# Secrets and code-quality findings are reported but never decide the verdict:
+# a test key inside someone else's package is not a threat to you.
+STRONG_SEVERITIES = ("BLOCKER", "CRITICAL")
+TEST_DIR_NAMES = {"test", "tests", "testing", "__tests__", "spec", "specs", "fixtures",
+                  "__fixtures__", "testdata", "test_data", "test-data", "test-fixtures"}
+_TEST_FILE_RE = re.compile(r"(?:^test_.*\.py|.*_test\.py|.*\.(?:test|spec)\.[cm]?[jt]sx?)$", re.I)
+
+
+def is_test_path(rel):
+    parts = rel.replace("\\", "/").split("/")
+    return (any(_is_test_dir(part.lower()) for part in parts[:-1])
+            or bool(_TEST_FILE_RE.match(parts[-1])))
+
+
+def _is_test_dir(name):
+    # tests/, testing/, "test cases/", unittests/, "manual tests/", test_data/, ...
+    return name in TEST_DIR_NAMES or name.startswith("test") or name.endswith("tests")
+
+
+def _demote_test_findings(issues):
+    """Weaker supply-chain findings inside test code become inventory (INFO):
+    test fixtures legitimately contain binaries, blobs and escaped bytes, and
+    tests are neither imported nor run when the package is installed. Strong
+    findings are never demoted: hiding a payload in tests/ doesn't make it safe."""
+    for issue in issues:
+        if (issue["rule"].startswith("SC-") and issue["rule"] != "SC-TRUNCATED"
+                and issue["sev"] not in STRONG_SEVERITIES + ("INFO",)
+                and is_test_path(issue["file"])):
+            issue["sev"] = "INFO"
+            issue["msg"] = issue["msg"].rstrip() + " (in test code: listed, not counted)"
+
+
+def decide_verdict(issues, truncated):
+    """-> (verdict, reason, strong_count, weak_count)."""
+    indicators = [i for i in issues if i["rule"].startswith("SC-")
+                  and i["rule"] != "SC-TRUNCATED" and i["sev"] != "INFO"]
+    strong = sum(1 for i in indicators if i["sev"] in STRONG_SEVERITIES)
+    weak = len(indicators) - strong
+    plural = lambda n, word: f"{n} {word}{'' if n == 1 else 's'}"
+    if strong:
+        return "SUSPICIOUS", plural(strong, "strong supply-chain indicator"), strong, weak
+    if truncated:
+        return ("INCOMPLETE", f"scan incomplete: {plural(truncated, 'part')} not fully scanned, "
+                "so the package can't be cleared", strong, weak)
+    if weak:
+        return "WARN", plural(weak, "weaker supply-chain indicator") + " to review", strong, weak
+    return "OK", "no supply-chain indicators", strong, weak
+
+
+# ---------------- Install-script inspection ----------------
+# An install hook is a capability; what makes it hostile is what the script it
+# runs does. Escalate only on the patterns malicious install scripts share:
+# shipping environment/credential data over the network, or talking to
+# throwaway exfiltration endpoints. Downloading a platform binary from the
+# registry (esbuild, puppeteer) is not either.
+_NETWORK_RE = re.compile(
+    r"""\b(?:https?\.(?:get|request)|fetch\s*\(|axios|XMLHttpRequest|net\.connect|dns\.resolve|"""
+    r"""require\(\s*["'](?:node:)?(?:https?|net|dgram|tls)["']\s*\)|"""
+    r"""from\s+["'](?:node:)?(?:https?|net|dgram|tls)["'])""")
+_SECRET_SOURCE_RE = re.compile(
+    r"""JSON\.stringify\(\s*process\.env|Object\.(?:keys|entries|values)\(\s*process\.env|"""
+    r"""\.npmrc|[/\\]\.ssh\b|id_rsa|id_ed25519|\.aws[/\\]credentials|\.git-credentials|"""
+    r"""\.docker[/\\]config\.json|\.kube[/\\]config|Local Storage[/\\]leveldb""", re.I)
+_EXFIL_DEST_RE = re.compile(
+    r"""https?://(?:\d{1,3}\.){3}\d{1,3}\b|pastebin\.com|\bngrok|webhook\.site|"""
+    r"""discord(?:app)?\.com/api/webhooks|api\.telegram\.org|oastify\.com|burpcollaborator|"""
+    r"""\binteract\.sh|\boast\.(?:pro|live|site|online|fun|me)\b|requestbin|pipedream\.net|"""
+    r"""transfer\.sh|\.onion\b""", re.I)
+
+
+def install_script_risk(text):
+    """Reasons an install-time script looks hostile ([] if none)."""
+    reasons = []
+    network = bool(_NETWORK_RE.search(text))
+    if network and _SECRET_SOURCE_RE.search(text):
+        reasons.append("reads environment variables or credential files and sends data over the network")
+    dest = _EXFIL_DEST_RE.search(text)
+    if dest:
+        reasons.append(f"contacts an address typical of data exfiltration ({dest.group(0)[:40]})")
+    return reasons
+
+
+def _inspect_install_scripts(issues, sources):
+    """Follow each install hook to the script it runs and escalate the hook
+    finding when that script looks hostile. `sources` maps path -> text."""
+    for issue in issues:
+        if issue["rule"] != "SC-INSTALL-HOOK" or issue["sev"] in STRONG_SEVERITIES:
+            continue
+        cmd = issue.get("cmd") or ""
+        base = os.path.dirname(issue["file"])
+        for target in lazaret.hook_script_targets(cmd):
+            rel = os.path.normpath(os.path.join(base, target)).replace(os.sep, "/")
+            candidates = [rel] + ([rel + ext for ext in (".js", ".cjs", ".mjs", "/index.js")]
+                                  if not os.path.splitext(rel)[1] else [])
+            text = next((sources[c] for c in candidates if c in sources), None)
+            reasons = install_script_risk(text) if text else []
+            if reasons:
+                issue["sev"] = "CRITICAL"
+                issue["msg"] = (f"Install hook runs {target}, which {'; and '.join(reasons)}.")
+                break
 
 
 def scan_package(eco, name, version=None, full=False):
@@ -451,12 +617,21 @@ def scan_package(eco, name, version=None, full=False):
     truncated = 0
     truncated_emitted = 0
     for rel, size, raw, reason in iter_archive(data, container):
+        if reason == "member" and not _would_scan_as_source(rel, raw):
+            # An oversized image, font, archive or other binary is classified
+            # from its leading bytes (magic + entropy) exactly as a small one
+            # is, so nothing that would have been scanned was skipped.
+            bi = lazaret.classify_binary(rel, raw, size, artifact)
+            if bi:
+                binaries += 1
+                issues.append(bi)
+            continue
         if reason:
             # Verdict integrity (audit C2/G16): a cut-short scan is a signal,
             # not a clean verdict. Every cutoff reason — an oversize member,
             # the file-count cap, the cumulative budget — becomes an
             # SC-TRUNCATED finding (capped per-package; the count is exact)
-            # and forces verdict=SUSPICIOUS.
+            # and the package can't be cleared (verdict=INCOMPLETE at least).
             truncated += 1
             if truncated_emitted < TRUNCATED_FINDING_CAP:
                 issues.append(lazaret.truncated_issue(
@@ -474,7 +649,7 @@ def scan_package(eco, name, version=None, full=False):
         if not lazaret.looks_binary(raw[:2048]):
             text = raw.decode("utf-8", "replace")
             if base == "package.json":
-                issues.extend(lazaret.scan_manifest(rel, text))
+                issues.extend(lazaret.scan_manifest(rel, text, registry=True))
                 continue
             ext = os.path.splitext(base)[1].lower()
             lang = lazaret.EXTS.get(ext)
@@ -491,6 +666,8 @@ def scan_package(eco, name, version=None, full=False):
     # interprocedural / cross-file taint (full profile only — needs whole source)
     if full and getattr(lazaret, "lazaret_flow", None) is not None:
         issues.extend(lazaret.lazaret_flow.analyze(source_records))
+    _inspect_install_scripts(issues, {r["path"]: r["content"] for r in source_records})
+    _demote_test_findings(issues)
     # F9b: the decompressed sources are no longer needed — drop the reference
     # before building the result so cumulative archive contents don't stay
     # pinned in RSS until the next scan.
@@ -499,17 +676,11 @@ def scan_package(eco, name, version=None, full=False):
     sev_counts = {s: 0 for s in lazaret.SEV_ORDER}
     for i in issues:
         sev_counts[i["sev"]] += 1
-    # supply-chain indicators drive the verdict; INFO-level inventory (expected
-    # binaries in a wheel) is surfaced but does not count against the package.
-    supply = sum(1 for i in issues if i["rule"].startswith("SC-") and i["sev"] != "INFO")
-    # Verdict integrity: a truncated scan can never yield a clean verdict —
-    # the unscanned members are attacker-chosen.
-    if supply or sev_counts["BLOCKER"] or truncated:
-        verdict = "SUSPICIOUS"
-    elif sev_counts["CRITICAL"]:
-        verdict = "WARN"
-    else:
-        verdict = "OK"
+    # Only supply-chain indicators decide the verdict (see "Verdicts" above).
+    # Verdict integrity: a truncated scan can never be cleared, because the
+    # unscanned members are attacker-chosen: it is INCOMPLETE at best.
+    verdict, reason, strong, weak = decide_verdict(issues, truncated)
+    supply = strong + weak
     # L1 (artifact hygiene): redaction is default-on, so the issues this
     # result carries — including the ones persisted as the Store blob via
     # save_scan — already have placeholder/scrubbed snippets from mk_issue.
@@ -520,8 +691,9 @@ def scan_package(eco, name, version=None, full=False):
     return {"ecosystem": eco, "name": name, "version": version, "artifact": artifact,
             "archiveBytes": len(data), "filesScanned": files_scanned,
             "binaryArtifacts": binaries, "profile": "full" if full else "supply-chain",
-            "sevCounts": sev_counts, "supplyChain": supply, "truncated": truncated,
-            "verdict": verdict, "issues": issues, "digest": digest,
+            "sevCounts": sev_counts, "supplyChain": supply, "strongIndicators": strong,
+            "weakIndicators": weak, "truncated": truncated,
+            "verdict": verdict, "verdictReason": reason, "issues": issues, "digest": digest,
             "scannedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")}
 
 
@@ -827,13 +999,13 @@ class Store:
 def c(code, s):
     return f"\033[{code}m{s}\033[0m" if sys.stdout.isatty() else str(s)
 
-VERDICT_COLOR = {"OK": "42;30", "WARN": "43;30", "SUSPICIOUS": "41;97"}
+VERDICT_COLOR = {"OK": "42;30", "WARN": "43;30", "INCOMPLETE": "44;97", "SUSPICIOUS": "41;97"}
 
 def print_scan(res, top=15):
     # audit H1: the verdict badge is wrapped in its own SGR sequence by c(),
     # so the sanitized value must be the ARGUMENT of c() — sanitizing the
     # result would strip Lazaret's own color codes and leave the span open.
-    v = c(VERDICT_COLOR[res["verdict"]], f" {lazaret.sanitize_term(res['verdict'])} ")
+    v = c(VERDICT_COLOR.get(res["verdict"], "7"), f" {lazaret.sanitize_term(res['verdict'])} ")
     sc = res["sevCounts"]
     # audit H1: ecosystem/name/version come from registry metadata; `version`
     # in particular is re-read from the feed (after _check_version), so it is
@@ -841,6 +1013,8 @@ def print_scan(res, top=15):
     print(f"\n{lazaret.sanitize_term(res['ecosystem'])}:"
           f"{lazaret.sanitize_term(res['name'])}@"
           f"{lazaret.sanitize_term(res['version'])}  {v}")
+    if res.get("verdictReason"):
+        print(f"  {lazaret.sanitize_term(res['verdictReason'])}")
     print(f"  {res['filesScanned']} source files · {res.get('binaryArtifacts', 0)} binary "
           f"artifacts · {res['archiveBytes']//1024} KB {res.get('artifact','')} "
           f"· profile: {res['profile']}")
@@ -1065,7 +1239,7 @@ def cmd_scan(store, specs, full, rescan):
         else:
             store.save_scan(pid, res)
         print_scan(res)
-        exit_bad |= res["verdict"] == "SUSPICIOUS"
+        exit_bad |= res["verdict"] in ("SUSPICIOUS", "INCOMPLETE")  # a partial scan never passes
     return exit_bad
 
 
@@ -1079,7 +1253,8 @@ def main():
     ap.add_argument("--full", action="store_true",
                     help="Run the full ruleset, not just supply-chain/secret rules")
     ap.add_argument("--rescan", action="store_true", help="Re-scan already-scanned versions")
-    ap.add_argument("--ci", action="store_true", help="Exit 1 if any package is SUSPICIOUS")
+    ap.add_argument("--ci", action="store_true",
+                    help="Exit 1 if any package is SUSPICIOUS or INCOMPLETE")
     ap.add_argument("--no-redact-secrets", action="store_true",
                     help="Opt OUT of secret redaction: keep the matched line for "
                          "credential findings (default: redacted in every artifact, "

@@ -133,6 +133,7 @@ class IntegrationTests(unittest.TestCase):
 | `LAZARET_TEST_PG_DSN` | `tests/pg/test_integration.py`, the live parts of `tests/registry/test_pg_backend.py` | a DSN for a user with `CREATEDB` (the registry tests create a scratch database). `test_pg_backend.py` also honors the older `LAZARET_PG_TEST_DSN`, and without either it boots a throwaway cluster if `initdb` is installed |
 | `LAZARET_TEST_PG_MATRIX` | `tests/pg/test_auth_matrix.py` | `"<host> <port> <ca.crt path> <unix socket dir>"` for a server configured as in that file's docstring |
 | `LAZARET_SAMPLES_DIR` | `tests/scanner/test_detection_corpus.py` | path to a checkout of `lazaret-samples` |
+| `LAZARET_BENCHMARK` | `tests/registry/test_benchmark.py` | any value; scans 21 real, legitimate npm and PyPI packages over the network and checks none is SUSPICIOUS and each matches its expected verdict |
 
 Tests that depend on file permissions skip themselves when run as root, since root ignores directory permissions.
 
