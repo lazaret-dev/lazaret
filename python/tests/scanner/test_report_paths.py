@@ -105,11 +105,15 @@ class TestReportPaths(unittest.TestCase):
         self.assertEqual(p["sarif"], os.path.join(out, "c.sarif"))
 
     def test_absolute_explicit_paths_are_kept(self):
-        p = cr.report_paths(Args(json="/tmp/x.json", html="/tmp/y.html",
-                                 sarif="/tmp/z.sarif"), "/scan/root")
-        self.assertEqual(p["json"], "/tmp/x.json")
-        self.assertEqual(p["html"], "/tmp/y.html")
-        self.assertEqual(p["sarif"], "/tmp/z.sarif")
+        # An absolute path on this platform: "/tmp" on POSIX, "D:\\tmp" on
+        # Windows. (A bare "/tmp/x.json" is NOT absolute on Windows: since
+        # Python 3.13 os.path.isabs agrees, and it resolves onto a drive.)
+        tmp = os.path.abspath(os.path.join(os.sep, "tmp"))
+        json_p, html_p, sarif_p = (os.path.join(tmp, n) for n in ("x.json", "y.html", "z.sarif"))
+        p = cr.report_paths(Args(json=json_p, html=html_p, sarif=sarif_p), "/scan/root")
+        self.assertEqual(p["json"], json_p)
+        self.assertEqual(p["html"], html_p)
+        self.assertEqual(p["sarif"], sarif_p)
 
 
 # ---------------------------------------------------------------------------
