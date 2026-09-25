@@ -36,8 +36,12 @@ every request after it was lost. These tests pin the hardened contract:
     * CLI boundary keeps exact legacy behavior: stderr message, exit 1
 
   Vacuity: clean traffic behaves exactly as before (replies only, no error
-  frames); syntax-error frames still dropped silently (deep-json card
-  1149e3e5 contract).
+  frames). A syntax-error frame gets a -32700 reply with id null (review
+  finding 18c: the old silent drop left clients waiting forever).
+
+Tool calls run on a worker thread (ping stays answered during a long scan),
+so a tool reply and a later ping reply may arrive in either order: tests
+that send a tools/call followed by other requests match replies by id.
 
 NOTE for the -32600 contract: non-object frames ([1,2]) used to be dropped
 silently as the INTERIM guard of card 1149e3e5; this card upgrades that to
@@ -75,6 +79,11 @@ def _serve(lines, db=None, timeout=120):
 
 def _frames(proc):
     return [json.loads(l) for l in proc.stdout.splitlines() if l.strip()]
+
+
+def _by_id(proc):
+    """Replies keyed by id (JSON-RPC does not order responses)."""
+    return {f.get("id"): f for f in _frames(proc)}
 
 
 PING = '{"jsonrpc":"2.0","id":99,"method":"ping"}'
@@ -204,14 +213,13 @@ class SystemExitSafetyTests(unittest.TestCase):
         p = _serve([bad, PING], timeout=240)
         self.assertEqual(p.returncode, 0, p.stderr[-800:])
         self.assertNotIn("Traceback", p.stderr)
-        frames = _frames(p)
-        self.assertEqual(frames[0]["id"], 1)
-        body = json.dumps(frames[0])
+        frames = _by_id(p)
+        self.assertEqual(sorted(frames, key=str), [1, 99])
+        body = json.dumps(frames[1])
         self.assertIn('"isError": true', body)
         self.assertIn("bad --since", body)
         self.assertIn("garbage!!", body)
-        self.assertEqual(frames[1]["id"], 99)          # server kept serving
-        self.assertIn("result", frames[1])
+        self.assertIn("result", frames[99])            # server kept serving
 
     def test_registry_status_postgres_dsn_is_tool_error_not_death(self):
         # PoC: Store.__init__ used to sys.exit on a postgres DSN; now the
@@ -224,12 +232,11 @@ class SystemExitSafetyTests(unittest.TestCase):
             p = _serve([bad, PING], db="postgresql://127.0.0.1:5432/nonexistent",
                        timeout=240)
         self.assertEqual(p.returncode, 0, p.stderr[-800:])
-        frames = _frames(p)
-        self.assertEqual(frames[0]["id"], 1)
-        body = json.dumps(frames[0])
+        frames = _by_id(p)
+        body = json.dumps(frames[1])
         self.assertIn('"isError": true', body)
         self.assertIn("Postgres backend unreachable", body)
-        self.assertEqual(frames[1]["id"], 99)
+        self.assertIn("result", frames[99])
 
     def test_scan_package_postgres_dsn_is_tool_error_not_death(self):
         bad = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
@@ -238,11 +245,11 @@ class SystemExitSafetyTests(unittest.TestCase):
         p = _serve([bad, PING], db="postgresql://127.0.0.1:5432/nonexistent",
                    timeout=240)
         self.assertEqual(p.returncode, 0, p.stderr[-800:])
-        frames = _frames(p)
-        body = json.dumps(frames[0])
+        frames = _by_id(p)
+        body = json.dumps(frames[1])
         self.assertIn('"isError": true', body)
         self.assertIn("Postgres backend unreachable", body)
-        self.assertEqual(frames[1]["id"], 99)
+        self.assertIn("result", frames[99])
 
     def test_dispatch_crash_replies_32603_and_server_survives(self):
         # a tool raising something unexpected mid-dispatch (outside its own
@@ -276,16 +283,15 @@ class ScanFilesCapTests(unittest.TestCase):
                                       "arguments": {"paths": [huge]}}})
         p = _serve([call, PING], timeout=120)     # was: unbounded read, hang
         self.assertEqual(p.returncode, 0, p.stderr[-800:])
-        frames = _frames(p)
-        self.assertEqual(frames[0]["id"], 1)
-        payload = json.loads(frames[0]["result"]["content"][0]["text"])
+        frames = _by_id(p)
+        payload = json.loads(frames[1]["result"]["content"][0]["text"])
         entry = payload["files"][huge]
         self.assertIn("SC-TRUNCATED", entry.get("rule", ""))
         self.assertEqual(entry.get("sev"), "CRITICAL")
         self.assertIn("exceeds", entry.get("error", ""))
         self.assertEqual(payload["totalIssues"], 1)
         self.assertEqual(payload["worstSeverity"], "CRITICAL")
-        self.assertEqual(frames[1]["id"], 99)
+        self.assertIn("result", frames[99])
 
     def test_growing_file_toctou_bounded_read(self):
         # small file under the cap: fully scanned, no truncation entry
@@ -389,13 +395,15 @@ class KeptContractsTests(unittest.TestCase):
         frames = _frames(p)
         self.assertEqual(frames[0]["error"]["code"], -32601)
 
-    def test_syntax_error_frame_still_silent(self):
-        # card 1149e3e5 contract: a merely-bad frame is dropped, no -32700 spam
+    def test_syntax_error_frame_answered_32700(self):
+        # JSON-RPC 2.0: a frame that is not JSON gets -32700 with id null
+        # (review finding 18c; the old silent drop left the client waiting)
         p = _serve(["{not json at all", PING])
         self.assertEqual(p.returncode, 0)
         frames = _frames(p)
-        self.assertEqual([f.get("id") for f in frames], [99])
-        self.assertIn("result", frames[0])
+        self.assertEqual([f.get("id") for f in frames], [None, 99])
+        self.assertEqual(frames[0]["error"]["code"], -32700)
+        self.assertIn("result", frames[1])
 
     def test_deep_frame_32700_id_null_kept(self):
         deep = "[" * 60000

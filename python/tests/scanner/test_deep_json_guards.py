@@ -133,14 +133,17 @@ class McpDeepFrameTests(unittest.TestCase):
             names = [t["name"] for t in frames[2]["result"]["tools"]]
             self.assertIn("scan_directory", names)
 
-    def test_malformed_frame_still_dropped_silently(self):
+    def test_malformed_frame_answered_and_server_survives(self):
+        # a frame that is not JSON now gets -32700 with id null (JSON-RPC 2.0;
+        # review finding 18c: the old silent drop left clients waiting)
         with tempfile.TemporaryDirectory(prefix="cg-mcp-") as tmp:
             p = self._serve(["{not json at all",
                              '{"jsonrpc":"2.0","id":9,"method":"ping"}'], tmp)
             self.assertNotIn("Traceback", p.stderr)
             frames = [json.loads(l) for l in p.stdout.splitlines() if l.strip()]
-            self.assertEqual([f.get("id") for f in frames], [9])  # no -32700
-            self.assertIn("result", frames[0])
+            self.assertEqual([f.get("id") for f in frames], [None, 9])
+            self.assertEqual(frames[0]["error"]["code"], -32700)
+            self.assertIn("result", frames[1])
 
     def test_non_object_frame_does_not_kill_loop(self):
         # parses fine, but is not a dict: req.get() used to AttributeError.

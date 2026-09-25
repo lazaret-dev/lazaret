@@ -15,28 +15,38 @@ Usage:
     lazaret-registry report npm:left-pad@1.3.0          # stored findings for a scan
 
 State backends (--db or LAZARET_DB env):
-    default            SQLite file lazaret-registry.db (no dependencies)
+    default            SQLite file lazaret-registry.db (no dependencies);
+                       also `sqlite:PATH` / `sqlite:///PATH`
     postgres://…       PostgreSQL via the internal wire-protocol client
                        (lazaret.pg — pure stdlib, SCRAM-SHA-256 + TLS; nothing
-                       to pip-install).
+                       to pip-install). A libpq keyword string
+                       ("host=db user=… dbname=lazaret") works too.
                        Point the DSN at a dedicated database on your server, e.g.
                        postgres://user:pass@host:5432/lazaret — see registry/schema.sql
                        for one-time setup. Don't reuse an existing application DB.
 
 Package specs: npm:<name>[@version]  |  pypi:<name>[@version or ==version]
 Scoped npm packages work: npm:@scope/pkg@1.0.0
+PyPI releases are judged on every file pip may install: the sdist and each
+distinct wheel (up to --max-artifacts); the verdict is the worst of them.
 """
 import argparse
 import base64
+import bz2
 import datetime
 import hashlib
+import importlib
 import io
 import json
+import lzma
 import os
+import posixpath
 import re
 import sys
 import tarfile
+import time
 import zipfile
+import zlib
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -46,13 +56,22 @@ from lazaret.scanner import core as lazaret  # noqa: E402
 from lazaret import safexml as _safexml                 # noqa: E402
 from lazaret.safexml import ElementTree as _safe_ET     # noqa: E402
 
-FEED_MAX_BYTES = 16 * 1024 * 1024   # a registry RSS feed is ~100 entries; far below this
+
+def _env_number(var, default, kind=int):
+    try:
+        value = kind(os.environ.get(var, default))
+        return value if value > 0 else default
+    except (TypeError, ValueError):
+        return default
+
 
 USER_AGENT = "Lazaret-registry-scanner/1.0"
 MAX_MEMBER = 1_000_000     # bytes of a text file we will scan as source
 MAX_FILES = 20_000         # files per package (numpy's sdist alone has >4,000)
 SAMPLE = 8192              # header/entropy sample read from oversized files
-ENGINE_VERSION = "2.3.0"   # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2: verdict-integrity; 2.1: binary-artifact awareness
+# 2.4: every PyPI artifact, decode/cookie handling, archive structure checks,
+#      entry points and hook targets, Python install scripts
+ENGINE_VERSION = "2.4.0"   # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2: verdict-integrity; 2.1: binary-artifact awareness
 
 # ---------------- Trust-chain limits (F9/G14/F10) ----------------
 # Only these hosts may ever be fetched, over https only, and redirects to any
@@ -61,14 +80,29 @@ REGISTRY_HOSTS = {"registry.npmjs.org", "replicate.npmjs.com",
                   "pypi.org", "files.pythonhosted.org"}
 MAX_DOWNLOAD_BYTES = 200 * 1024 * 1024     # one artifact archive (F9a)
 MAX_FEED_BYTES = 5 * 1024 * 1024           # registry metadata / RSS / _changes feed
-MAX_ARCHIVE_TOTAL = 500 * 1024 * 1024      # cumulative *decompressed* bytes per archive (F9b)
+FEED_MAX_BYTES = MAX_FEED_BYTES            # XML parser cap: never above the fetch cap
+# Every byte the decompressor produces counts, including member data that is
+# skipped rather than read (F9b): a 2 MB gzip that inflates to 2 GiB stops here.
+MAX_ARCHIVE_TOTAL = 500 * 1024 * 1024
 MAX_REDIRECTS = 3                          # no redirect loops / long hop chains
 FETCH_CHUNK = 64 * 1024
 METADATA_TIMEOUT = 30                      # seconds for registry metadata / feeds
 DOWNLOAD_TIMEOUT = 60                      # seconds for artifact archives
+# Wall-clock budget for reading and scanning ONE artifact archive; past it the
+# scan stops and the verdict is INCOMPLETE. Env LAZARET_SCAN_TIMEOUT / --scan-timeout.
+SCAN_TIMEOUT = _env_number("LAZARET_SCAN_TIMEOUT", 120.0, float)
+# PyPI: artifacts scanned per release (sdist + distinct wheels). More than
+# this makes the verdict INCOMPLETE. Env LAZARET_MAX_ARTIFACTS / --max-artifacts.
+MAX_ARTIFACTS = _env_number("LAZARET_MAX_ARTIFACTS", 50)
+# Non-source text members kept in memory until package.json says whether
+# they are entry points (main/bin/exports) or hook targets.
+DEFERRED_TEXT_BUDGET = 64 * 1024 * 1024
 # Package names come from user input AND from registry feeds, and end up in URLs
 # and the watchlist — validate before either.
-NAME_RE = re.compile(r"^[a-zA-Z0-9._-]{1,100}$")
+NAME_RE = re.compile(r"^[a-zA-Z0-9._-]{1,100}$")          # versions
+NAME_MAX = 214                                           # npm's limit; PyPI has none
+_NPM_NAME_PART_RE = re.compile(r"^[a-zA-Z0-9~-][a-zA-Z0-9._~-]*$")
+_PYPI_NAME_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")   # PEP 508
 
 
 class SpecError(ValueError):
@@ -89,7 +123,37 @@ class DigestError(ValueError):
 class FeedError(ValueError):
     """A registry change feed was rejected as unsafe (DTD / entity declaration)."""
 
+
+class StoreConfigError(RuntimeError):
+    """--db / LAZARET_DB is not a usable SQLite path or Postgres DSN."""
+
+
+class ScanCancelled(Exception):
+    """The caller asked a running scan to stop (MCP notifications/cancelled)."""
+
+
 # ---------------- Package spec parsing ----------------
+def _check_npm_name(name):
+    """npm's naming rules (validate-npm-package-name), restricted to URL-safe
+    ASCII: an optional @scope/, at most 214 characters, no leading '.' or
+    '_', nothing that could escape the registry API path."""
+    if len(name) > NAME_MAX:
+        raise SpecError(f"npm: package name longer than {NAME_MAX} characters")
+    if name.startswith("@"):
+        scope, sep, pkg = name[1:].partition("/")
+        if not sep or not scope or not pkg or "/" in pkg:
+            raise SpecError(f"npm: scoped name must be @scope/pkg, got {name!r}")
+        parts = (scope, pkg)
+    else:
+        parts = (name,)
+    for part in parts:
+        if part in (".", "..") or not _NPM_NAME_PART_RE.fullmatch(part):
+            raise SpecError(f"npm: invalid package name {name!r}")
+    if name.lower() in ("node_modules", "favicon.ico"):
+        raise SpecError(f"npm: reserved package name {name!r}")
+    return name
+
+
 def _check_name(eco, name):
     """Reject names that could escape the registry API path or poison the DB (F10).
 
@@ -97,11 +161,21 @@ def _check_name(eco, name):
     end up interpolated into URLs and persisted — so traversal segments, path
     separators and control characters must never be accepted.
     """
-    if not name:
+    if not isinstance(name, str) or not name:
         raise SpecError(f"{eco}: empty package name")
-    if name in (".", "..") or not NAME_RE.fullmatch(name):
+    if eco == "npm":
+        return _check_npm_name(name)
+    if len(name) > NAME_MAX or not _PYPI_NAME_RE.fullmatch(name):
         raise SpecError(f"{eco}: invalid package name {name!r}")
     return name
+
+
+def valid_name(eco, name):
+    try:
+        _check_name(eco, name)
+        return True
+    except SpecError:
+        return False
 
 
 def _check_version(eco, version):
@@ -118,25 +192,19 @@ def _check_version(eco, version):
 
 def parse_spec(spec):
     """'npm:@scope/pkg@1.2.3' -> ('npm', '@scope/pkg', '1.2.3'); version may be None."""
-    if ":" not in spec:
-        raise ValueError(f"Spec must be npm:<name> or pypi:<name> — got {spec!r}")
+    if not isinstance(spec, str) or ":" not in spec:
+        raise SpecError(f"Spec must be npm:<name> or pypi:<name> — got {spec!r}")
     eco, rest = spec.split(":", 1)
-    eco = eco.lower()
+    eco = eco.strip().lower()
     if eco not in ("npm", "pypi"):
-        raise ValueError(f"Unknown ecosystem {eco!r} (use npm or pypi)")
+        raise SpecError(f"Unknown ecosystem {eco!r} (use npm or pypi)")
     rest = rest.strip().replace("==", "@")
     if rest.startswith("@"):                      # scoped npm package
-        if "@" in rest[1:]:
-            name, ver = rest[1:].split("@", 1)
-        else:
-            name, ver = rest[1:], None
-        scope, _, tail = name.partition("/")
-        if not tail or "/" in tail:
-            raise SpecError(f"npm: scoped name must be @scope/pkg, got {rest!r}")
-        _check_name(eco, scope)
-        _check_name(eco, tail)
-        return eco, "@" + name, _check_version(eco, ver)
-    if "@" in rest:
+        if eco != "npm":
+            raise SpecError(f"{eco}: invalid package name {rest!r}")
+        at = rest.find("@", 1)
+        name, ver = (rest[:at], rest[at + 1:]) if at != -1 else (rest, None)
+    elif "@" in rest:
         name, ver = rest.split("@", 1)
     else:
         name, ver = rest, None
@@ -225,7 +293,7 @@ def _deep_safe_loads(raw, what):
     a wrong verdict, remaining work still reported)."""
     try:
         return json.loads(raw)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except (UnicodeDecodeError, ValueError) as exc:     # JSONDecodeError, int digits
         raise FetchError(f"invalid JSON {what}: {exc}") from exc
     except RecursionError as exc:
         raise FetchError(
@@ -240,6 +308,21 @@ def http_bytes(url):
 
 
 # ---------------- Registry metadata ----------------
+class Resolution(tuple):
+    """(version, url, container_format, artifact_kind, meta_entry) — the
+    primary artifact, unpackable as before — plus .artifacts: every artifact
+    to scan, as dicts {url, container, artifact, entry, filename}, and
+    .skipped: files of the release that are not scanned (with the reason)."""
+
+    def __new__(cls, version, artifacts, skipped=()):
+        first = artifacts[0]
+        self = super().__new__(cls, (version, first["url"], first["container"],
+                                     first["artifact"], first["entry"]))
+        self.artifacts = list(artifacts)
+        self.skipped = list(skipped)
+        return self
+
+
 def resolve_npm(name, version):
     """-> (version, url, container_format, artifact_kind, meta_entry).
     meta_entry is the version metadata (dist.integrity digest lives there),
@@ -248,22 +331,45 @@ def resolve_npm(name, version):
     version = _check_version("npm", version)
     # Ask for one version's manifest (/<name>/latest or /<name>/<version>), not
     # the full packument: that lists every version ever published and runs to
-    # tens of MB for packages like typescript.
+    # tens of MB for packages like typescript. A scoped name keeps its '@' and
+    # encodes the '/' (registry.npmjs.org/@babel%2Fcore/latest).
     url = ("https://registry.npmjs.org/" + urllib.parse.quote(name, safe="@") + "/"
            + (_quote_seg(version) if version else "latest"))
     v = http_json(url)
-    if not isinstance(v, dict) or not isinstance(v.get("dist"), dict) or "tarball" not in v["dist"]:
+    if not isinstance(v, dict) or not isinstance(v.get("dist"), dict) \
+            or not isinstance(v["dist"].get("tarball"), str):
         raise ValueError(f"npm:{name}@{version or 'latest'} not found")
     if version is not None and v.get("version") != version:
         raise ValueError(f"npm:{name}@{version} not found")
-    return v.get("version") or version, v["dist"]["tarball"], "tgz", "npm", v
+    found = v.get("version") if isinstance(v.get("version"), str) else version
+    return found or version, v["dist"]["tarball"], "tgz", "npm", v
+
+
+def pypi_container(filename):
+    """Archive format of a PyPI file, from its name (pip decides the same
+    way); None for formats pip does not install."""
+    f = (filename or "").lower()
+    if f.endswith((".whl", ".zip")):
+        return "zip"
+    if f.endswith((".tar.gz", ".tgz")):
+        return "tgz"
+    if f.endswith((".tar.bz2", ".tbz", ".tbz2")):
+        return "tbz2"
+    if f.endswith((".tar.xz", ".txz")):
+        return "txz"
+    if f.endswith(".tar"):
+        return "tar"
+    return None
 
 
 def resolve_pypi(name, version):
-    """-> (version, url, container_format, artifact_kind, meta_entry).
-    Prefers the sdist (buildable source) over a wheel so binaries stand out
-    as unexpected. URL path segments are quoted (F10) and the chosen files
-    entry (digests.sha256 lives there) is returned for G15 verification."""
+    """-> Resolution: (version, url, container_format, artifact_kind,
+    meta_entry) of the primary file, and .artifacts = EVERY file pip may
+    install for that release: the sdist and each distinct wheel (pip picks a
+    compatible wheel when one exists, so scanning only the sdist judged a
+    file that is usually never installed). Duplicate files (same sha256) are
+    scanned once. URL path segments are quoted (F10); each entry carries its
+    digests.sha256 for G15 verification."""
     _check_name("pypi", name)
     version = _check_version("pypi", version)
     url = (f"https://pypi.org/pypi/{_quote_seg(name)}/{_quote_seg(version)}/json" if version
@@ -278,16 +384,34 @@ def resolve_pypi(name, version):
             raise
         version = pypi_latest_from_feed(name)
         meta = http_json(f"https://pypi.org/pypi/{_quote_seg(name)}/{_quote_seg(version)}/json")
-    version = meta["info"]["version"]
-    urls = meta.get("urls") or []
-    sdist = next((u for u in urls if u.get("packagetype") == "sdist"), None)
-    wheel = next((u for u in urls if u.get("packagetype") == "bdist_wheel"), None)
-    pick = sdist or wheel
-    if not pick:
+    info = meta.get("info") if isinstance(meta, dict) else None
+    if not isinstance(info, dict) or not isinstance(info.get("version"), str):
+        raise ValueError(f"pypi:{name}@{version or 'latest'} not found")
+    version = info["version"]
+    urls = meta.get("urls") if isinstance(meta.get("urls"), list) else []
+    artifacts, skipped, seen = [], [], set()
+    for entry in urls:
+        if not isinstance(entry, dict) or not isinstance(entry.get("url"), str):
+            continue
+        filename = entry.get("filename") if isinstance(entry.get("filename"), str) \
+            else entry["url"].rsplit("/", 1)[-1]
+        kind = entry.get("packagetype")
+        container = pypi_container(filename)
+        if kind not in ("sdist", "bdist_wheel") or container is None:
+            skipped.append({"filename": filename, "reason": f"{kind or 'unknown'} is not installed by pip"})
+            continue
+        digest = expected_digest(entry)
+        key = digest or entry["url"]
+        if key in seen:
+            continue
+        seen.add(key)
+        artifacts.append({"url": entry["url"], "container": container,
+                          "artifact": "sdist" if kind == "sdist" else "wheel",
+                          "entry": entry, "filename": filename})
+    if not artifacts:
         raise ValueError(f"pypi:{name}@{version} has no downloadable archive")
-    container = "zip" if pick["filename"].endswith((".whl", ".zip")) else "tgz"
-    artifact = "sdist" if pick is sdist else "wheel"
-    return version, pick["url"], container, artifact, pick
+    artifacts.sort(key=lambda a: (a["artifact"] != "sdist", a["filename"]))
+    return Resolution(version, artifacts, skipped)
 
 
 _PEP440_FINAL_RE = re.compile(r"^(\d+(?:\.\d+)*)(?:\.post(\d+))?$")
@@ -320,6 +444,12 @@ def pypi_latest_from_feed(name):
     if titles:
         return titles[0]
     raise ValueError(f"pypi:{name} has no releases")
+
+
+def resolve(eco, name, version):
+    """Registry metadata for one package version (network seam: tests patch
+    resolve_npm / resolve_pypi)."""
+    return (resolve_npm if eco == "npm" else resolve_pypi)(name, version)
 
 
 # ---------------- Artifact integrity (G15) ----------------
@@ -377,94 +507,484 @@ def verify_digest(data, meta_entry, eco, name, version):
     return alg, want
 
 
-# ---------------- In-memory archive scanning ----------------
-def iter_archive(data, container):
-    """Yield (relative_path, real_size, raw_bytes, reason) for every file in
-    the archive.
+# ---------------- In-memory archive reading ----------------
+class ArchiveLimit(Exception):
+    """Internal: reading stopped (reason 'total' | 'time' | 'corrupt')."""
 
-    Verdict-integrity fix (audit C2/G16): sizes are now REAL decompressed byte
-    counts, never the archive-declared file_size/tar m.size — a hostile
-    archive used to declare >MAX_MEMBER and skip scanning entirely with zero
-    signal. Reading is bounded at MAX_MEMBER+1 per member, so neither a lying
-    header nor a decompression bomb can exhaust memory.
+    def __init__(self, reason, detail=""):
+        super().__init__(detail or reason)
+        self.reason, self.detail = reason, detail
 
-    reason is None for a fully-scanned member, or:
-      "member" — the member decompresses to more than MAX_MEMBER bytes; only
-                 the first SAMPLE bytes are returned (real_size is the length
-                 of that decompressed prefix, not the declared size), so the
-                 caller can still classify by magic/entropy but must not scan
-                 it as source.
-      "files"  — the archive has more than MAX_FILES entries (attacker
-                 controls entry order; the member that tripped the cap is
-                 yielded with b"" so the cutoff is attributable). Iteration
-                 stops after this yield.
-      "total"  — the cumulative REAL decompressed size of members yielded so
-                 far exceeds MAX_ARCHIVE_TOTAL (F9b); iteration stops after
-                 this yield. The budget is charged from measured bytes, not
-                 declared ones, so a lying header cannot stop the scan early
-                 either."""
-    count = 0
-    total = 0
-    if container == "zip":
-        with zipfile.ZipFile(io.BytesIO(data)) as zf:
-            for info in zf.infolist():
-                if info.is_dir():
-                    continue
-                count += 1
-                if count > MAX_FILES:
-                    yield strip_root(info.filename), 0, b"", "files"
-                    return
-                # real decompressed bytes read for the yielded member
-                with zf.open(info) as fh:
-                    raw = fh.read(MAX_MEMBER + 1)  # bounded, real bytes
-                if len(raw) > MAX_MEMBER:
-                    raw = raw[:SAMPLE]
-                    yield strip_root(info.filename), len(raw), raw, "member"
-                    continue
-                total += len(raw)
-                if total > MAX_ARCHIVE_TOTAL:
-                    yield strip_root(info.filename), len(raw), raw, "total"
-                    return
-                yield strip_root(info.filename), len(raw), raw, None
+
+class Budget:
+    """Decompression and time budget for reading one archive. Every
+    decompressed byte is charged — including member data tarfile skips over
+    rather than returns — and the deadline / cancellation hook is checked
+    between chunks and between members."""
+
+    def __init__(self, total=None, deadline=None, cancel=None):
+        self.limit = MAX_ARCHIVE_TOTAL if total is None else total
+        self.used = 0
+        self.deadline = deadline
+        self.cancel = cancel
+
+    def charge(self, n):
+        self.used += n
+        if self.used > self.limit:
+            raise ArchiveLimit("total")
+
+    def check(self):
+        if self.cancel is not None and self.cancel():
+            raise ScanCancelled("scan cancelled")
+        if self.deadline is not None and time.monotonic() > self.deadline:
+            raise ArchiveLimit("time")
+
+
+_GZIP_MAGIC, _BZ2_MAGIC, _XZ_MAGIC = b"\x1f\x8b", b"BZh", b"\xfd7zXZ\x00"
+_CODEC_MAGIC = {"gz": _GZIP_MAGIC, "bz2": _BZ2_MAGIC, "xz": _XZ_MAGIC}
+_INPUT_CHUNK = 64 * 1024
+_OUTPUT_CHUNK = 1024 * 1024
+
+
+class _Inflater:
+    """Read-only, forward-only file object over one compressed tar stream.
+
+    Decompresses in bounded chunks with the container's REAL codec (gzip for
+    npm and .tar.gz, bzip2/xz only for .tar.bz2/.tar.xz files), charges every
+    produced byte to the budget, follows concatenated streams (gzip allows
+    several members; node-tar reads them all), and keeps the last bytes it
+    produced for the end-of-archive check. Data after the last stream that
+    is not zero padding, or a stream cut short, raises ArchiveLimit('corrupt')."""
+
+    def __init__(self, data, codec, budget):
+        self.data, self.pos, self.codec, self.budget = memoryview(data), 0, codec, budget
+        self.dec = self._decompressor() if codec != "tar" else None
+        self.buf, self.tail = bytearray(), bytearray()
+        self.produced, self.eof = 0, False
+
+    def _decompressor(self):
+        if self.codec == "gz":
+            return zlib.decompressobj(31)
+        if self.codec == "bz2":
+            return bz2.BZ2Decompressor()
+        return lzma.LZMADecompressor(format=lzma.FORMAT_XZ)
+
+    def readable(self):
+        return True
+
+    def read(self, n=-1):
+        if n is None or n < 0:
+            n = _OUTPUT_CHUNK
+        while len(self.buf) < n and not self.eof:
+            self.budget.check()
+            self._fill(n - len(self.buf))
+        out = bytes(self.buf[:n])
+        del self.buf[:n]
+        return out
+
+    def _emit(self, out):
+        if out:
+            self.budget.charge(len(out))
+            self.produced += len(out)
+            self.buf += out
+            self.tail += out[-1024:]
+            del self.tail[:-1024]
+
+    def _next_input(self):
+        chunk = self.data[self.pos:self.pos + _INPUT_CHUNK]
+        self.pos += len(chunk)
+        return bytes(chunk)
+
+    def _fill(self, want):
+        want = min(max(want, _INPUT_CHUNK), _OUTPUT_CHUNK)
+        if self.dec is None:                                   # plain tar
+            chunk = self.data[self.pos:self.pos + want]
+            self.pos += len(chunk)
+            if not chunk:
+                self.eof = True
+            self._emit(bytes(chunk))
+            return
+        try:
+            if self.codec == "gz":
+                inp = self.dec.unconsumed_tail or self._next_input()
+                if not inp and not self.dec.eof:
+                    raise ArchiveLimit("corrupt", "compressed stream is truncated")
+                out = self.dec.decompress(inp, want)
+            else:
+                inp = self._next_input() if self.dec.needs_input else b""
+                if not inp and self.dec.needs_input and not self.dec.eof:
+                    raise ArchiveLimit("corrupt", "compressed stream is truncated")
+                out = self.dec.decompress(inp, want)
+        except (zlib.error, OSError, lzma.LZMAError, EOFError, ValueError) as exc:
+            raise ArchiveLimit("corrupt", f"decompression failed ({type(exc).__name__})") from None
+        self._emit(out)
+        if self.dec.eof:
+            rest = bytes(self.dec.unused_data) + bytes(self.data[self.pos:])
+            self.data, self.pos = memoryview(rest), 0
+            if not rest or not rest.strip(b"\x00"):
+                self.eof = True
+            elif rest.startswith(_CODEC_MAGIC[self.codec]):
+                self.dec = self._decompressor()             # concatenated stream
+            else:
+                raise ArchiveLimit("corrupt", "data after the end of the compressed stream")
+
+
+class _TarReader(tarfile.TarFile):
+    """Records the blocks tarfile skips with ignore_zeros=True: zero blocks
+    (end-of-archive markers) and invalid headers (a bad checksum). Python's
+    tarfile used to STOP at either, while npm's node-tar skips a bad header
+    and reads on — so what npm installed was never scanned."""
+
+    def _dbg(self, level, msg):
+        if level == 2 and isinstance(msg, str) and msg.startswith("0x") and ": " in msg:
+            offset, _, what = msg.partition(": ")
+            try:
+                offset = int(offset, 16)
+            except ValueError:
+                offset = -1
+            key = "_lazaret_zero_blocks" if what == "end of file header" else "_lazaret_bad_blocks"
+            self.__dict__.setdefault(key, []).append(offset)
+        super()._dbg(level, msg)
+
+
+class Member(tuple):
+    """(relative_path, real_size, raw_bytes, reason) with a .detail text for
+    reasons that need one ('corrupt')."""
+
+    def __new__(cls, rel, size, raw, reason, detail=""):
+        self = super().__new__(cls, (rel, size, raw, reason))
+        self.detail = detail
+        return self
+
+
+_DRIVE_ROOT_RE = re.compile(r"^(?:[A-Za-z]:)?/+")
+
+
+def canonical_member_path(name, artifact=None):
+    """Where an extractor puts an archive member, relative to the package
+    root. -> (rel or None, problem or None).
+
+    npm: exactly pacote's node-tar strip:1 — drop the FIRST path component
+    whatever it is ('./decoy/setup.js' -> 'decoy/setup.js', never
+    'setup.js'), strip absolute roots, refuse '..'; a member that ends up as
+    the package root itself (a top-level file) is not extracted.
+    wheel: paths are install paths, nothing stripped.
+    sdist (and the legacy default): '.' / empty segments dropped, then the
+    top directory. Backslashes count as separators (npm on Windows)."""
+    p = str(name).replace("\\", "/")
+    if artifact == "npm":
+        rest = "/".join(p.split("/")[1:])
+    elif artifact == "wheel":
+        rest = p
     else:
-        with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as tf:
-            for m in tf:
-                if not m.isfile():
-                    continue
-                count += 1
-                if count > MAX_FILES:
-                    yield strip_root(m.name), 0, b"", "files"
-                    return
-                if total > MAX_ARCHIVE_TOTAL:
-                    yield strip_root(m.name), 0, b"", "total"
-                    return
-                f = tf.extractfile(m)
-                if f is None:
-                    continue
-                raw = f.read(MAX_MEMBER + 1)           # bounded, real bytes
-                if len(raw) > MAX_MEMBER:
-                    raw = raw[:SAMPLE]
-                    yield strip_root(m.name), len(raw), raw, "member"
-                    continue
-                total += len(raw)
-                if total > MAX_ARCHIVE_TOTAL:
-                    yield strip_root(m.name), len(raw), raw, "total"
-                    return
-                yield strip_root(m.name), len(raw), raw, None
+        parts = [x for x in p.split("/") if x not in ("", ".")]
+        rest = "/".join(parts[1:]) if len(parts) > 1 else (parts[0] if parts else "")
+    while True:
+        stripped = _DRIVE_ROOT_RE.sub("", rest)
+        if stripped == rest:
+            break
+        rest = stripped
+    if ".." in rest.split("/"):
+        return None, "path contains '..'"
+    norm = posixpath.normpath(rest) if rest else ""
+    if norm in ("", "."):
+        return None, None
+    return norm, None
 
 
 def strip_root(path):
-    parts = path.replace("\\", "/").lstrip("./").split("/")
-    return "/".join(parts[1:]) if len(parts) > 1 else parts[0]
+    """Legacy helper: canonical_member_path() without artifact semantics."""
+    rel, _problem = canonical_member_path(path)
+    return rel if rel is not None else str(path).replace("\\", "/")
 
 
-def _would_scan_as_source(rel, sample):
-    """Is this member one the source scan would read in full?"""
-    base = os.path.basename(rel)
-    if base in ("package.json", "setup.py", "binding.gyp", "pyproject.toml"):
-        return True
-    return (not lazaret.looks_binary(sample[:2048])
-            and os.path.splitext(base)[1].lower() in lazaret.EXTS)
+def _tar_codec(data, container, artifact):
+    """The only codec a container may use -> 'gz' | 'bz2' | 'xz' | 'tar'.
+    Raises ArchiveLimit('corrupt') on a mismatch: a bzip2 or xz stream served
+    as an npm .tgz is rejected, not decompressed (pip opens .tar.gz with
+    r:gz; npm auto-detects gzip and otherwise reads plain tar)."""
+    head = bytes(data[:6])
+    is_tar = len(data) >= 262 and bytes(data[257:262]) == b"ustar"
+    want = {"tgz": "gz", "tbz2": "bz2", "txz": "xz", "tar": "tar"}.get(container, "gz")
+    if want == "gz" and head.startswith(_GZIP_MAGIC):
+        return "gz"
+    if want == "gz" and artifact in (None, "npm") and (is_tar or not head.startswith(
+            (_BZ2_MAGIC, _XZ_MAGIC, b"PK", b"(\xb5/\xfd"))):
+        return "tar"                   # node-tar reads uncompressed tarballs too
+    if want in ("bz2", "xz") and head.startswith(_CODEC_MAGIC[want]):
+        return want
+    if want == "tar":
+        return "tar"
+    found = next((k for k, magic in _CODEC_MAGIC.items() if head.startswith(magic)), "unknown")
+    raise ArchiveLimit("corrupt", f"{container} artifact is {found}-compressed; "
+                                  f"only {want} is accepted for this format")
+
+
+def _note_member(seen, rel, anomalies):
+    if rel in seen:
+        if seen[rel] == 1:
+            anomalies.append(("dup", rel, "two archive entries extract to this path; "
+                                          "the later one wins"))
+        seen[rel] += 1
+    else:
+        seen[rel] = 1
+
+
+def iter_archive(data, container, artifact=None, *, budget=None, anomalies=None):
+    """Yield Member(relative_path, real_size, raw_bytes, reason) for every file
+    an installer would extract from the archive.
+
+    Verdict-integrity fix (audit C2/G16): sizes are REAL decompressed byte
+    counts, never the archive-declared file_size/tar m.size — a hostile
+    archive used to declare >MAX_MEMBER and skip scanning entirely with zero
+    signal. Reading is bounded at MAX_MEMBER+1 per member, and every
+    decompressed byte (skipped member data included) is charged to the
+    budget, so neither a lying header nor a decompression bomb can exhaust
+    memory or time.
+
+    Paths are canonicalized like the installer does it (canonical_member_path).
+    In-archive links in sdists and wheels are resolved and their target's
+    content is yielded under the link's name (pip extracts them); npm drops
+    links (pacote), so they are skipped there. Structural problems that do
+    not stop the scan — duplicate paths, links out of the archive, '..'
+    entries — are appended to `anomalies` as (kind, path, detail).
+
+    reason is None for a fully-read member, or:
+      "member"  — more than MAX_MEMBER bytes; only the first SAMPLE bytes are
+                  returned, so the caller can classify but not scan it.
+      "files"   — more than MAX_FILES entries; iteration stops.
+      "total"   — the decompression budget is spent; iteration stops.
+      "time"    — the scan deadline passed; iteration stops.
+      "corrupt" — the archive is damaged or ambiguous (bad header block,
+                  entries after an end-of-archive block, trailing data, a
+                  truncated or wrongly compressed stream); .detail says what."""
+    budget = budget if budget is not None else Budget()
+    anomalies = anomalies if anomalies is not None else []
+    if container == "zip":
+        yield from _iter_zip(data, artifact, budget, anomalies)
+    else:
+        yield from _iter_tar(data, container, artifact, budget, anomalies)
+
+
+def _iter_tar(data, container, artifact, budget, anomalies):
+    last = "(archive)"
+    try:
+        codec = _tar_codec(data, container, artifact)
+        reader = _Inflater(data, codec, budget)
+        tf = _TarReader.open(fileobj=reader, mode="r|", ignore_zeros=True)
+    except ArchiveLimit as lim:
+        yield Member(last, 0, b"", lim.reason, lim.detail)
+        return
+    except (tarfile.TarError, EOFError, OSError, ValueError) as exc:
+        yield Member(last, 0, b"", "corrupt", f"not a readable tar archive ({type(exc).__name__})")
+        return
+    seen, links, offsets, count = {}, [], [], 0
+    try:
+        for m in tf:
+            budget.check()
+            offsets.append(m.offset)
+            if m.isdir():
+                continue
+            rel, problem = canonical_member_path(m.name, artifact)
+            if m.issym() or m.islnk():
+                if artifact != "npm":                  # pacote drops links
+                    links.append((m.name, m.linkname, m.issym(), rel, problem))
+                continue
+            if not m.isfile():
+                continue
+            if problem:
+                anomalies.append(("path", m.name, problem))
+                continue
+            if rel is None:
+                continue                               # the extractor drops it
+            count += 1
+            if count > MAX_FILES:
+                yield Member(rel, 0, b"", "files")
+                return
+            _note_member(seen, rel, anomalies)
+            last = rel
+            f = tf.extractfile(m)
+            raw = f.read(MAX_MEMBER + 1) if f is not None else b""
+            if len(raw) > MAX_MEMBER:
+                yield Member(rel, SAMPLE, raw[:SAMPLE], "member")
+                continue
+            yield Member(rel, len(raw), raw, None)
+    except ArchiveLimit as lim:
+        yield Member(last, 0, b"", lim.reason, lim.detail)
+        return
+    except (tarfile.TarError, EOFError, OSError, zlib.error, lzma.LZMAError, ValueError) as exc:
+        yield Member(last, 0, b"", "corrupt",
+                     f"archive could not be read past {last} ({type(exc).__name__})")
+        return
+    bad = tf.__dict__.get("_lazaret_bad_blocks", [])
+    zeros = tf.__dict__.get("_lazaret_zero_blocks", [])
+    if bad:
+        yield Member("(archive)", 0, b"", "corrupt",
+                     f"{len(bad)} invalid tar header block(s) skipped (first at byte "
+                     f"{bad[0]:#x}); tar readers disagree about what follows")
+    if zeros and offsets and max(offsets) > min(zeros):
+        yield Member("(archive)", 0, b"", "corrupt",
+                     "entries follow an end-of-archive block; pip stops reading there "
+                     "while npm reads on")
+    leftover = reader.produced - tf.offset
+    if 0 < leftover <= len(reader.tail) and reader.tail[-leftover:].strip(b"\x00"):
+        yield Member("(archive)", 0, b"", "corrupt", "data after the last tar entry")
+    if links:
+        yield from _resolve_tar_links(data, codec, artifact, links, seen, budget, anomalies, count)
+
+
+def _link_target(member_name, linkname, symbolic):
+    """Archive path a link points to, or None when it leaves the archive."""
+    linkname = str(linkname).replace("\\", "/")
+    if linkname.startswith("/") or _DRIVE_ROOT_RE.match(linkname):
+        return None
+    base = posixpath.dirname(str(member_name).replace("\\", "/")) if symbolic else ""
+    target = posixpath.normpath(posixpath.join(base, linkname))
+    if target == ".." or target.startswith("../"):
+        return None
+    return target
+
+
+def _link_plan(links, artifact, anomalies):
+    """{target rel: [link rel, ...]} with link chains followed (8 hops)."""
+    by_rel = {}
+    for name, linkname, symbolic, rel, problem in links:
+        if problem or rel is None:
+            if problem:
+                anomalies.append(("path", name, problem))
+            continue
+        target = _link_target(name, linkname, symbolic)
+        if target is None:
+            anomalies.append(("link", rel, f"link to {linkname!r} points outside the archive"))
+            continue
+        # tar link targets are archive paths: canonicalize them like members
+        trel, tproblem = canonical_member_path(target, artifact)
+        if tproblem or trel is None:
+            anomalies.append(("link", rel, f"link to {linkname!r} points outside the archive"))
+            continue
+        by_rel[rel] = trel
+    plan = {}
+    for rel, trel in by_rel.items():
+        hops = 0
+        while trel in by_rel and hops < 8:
+            trel, hops = by_rel[trel], hops + 1
+        plan.setdefault(trel, []).append(rel)
+    return plan
+
+
+def _resolve_tar_links(data, codec, artifact, links, seen, budget, anomalies, count):
+    plan = _link_plan(links, artifact, anomalies)
+    if not plan:
+        return
+    last = "(archive)"
+    try:
+        reader = _Inflater(data, codec, budget)
+        tf = tarfile.open(fileobj=reader, mode="r|", ignore_zeros=True)
+        for m in tf:
+            budget.check()
+            if not m.isfile():
+                continue
+            rel, _problem = canonical_member_path(m.name, artifact)
+            if rel not in plan:
+                continue
+            f = tf.extractfile(m)
+            raw = f.read(MAX_MEMBER + 1) if f is not None else b""
+            for link_rel in plan.pop(rel):
+                count += 1
+                if count > MAX_FILES:
+                    yield Member(link_rel, 0, b"", "files")
+                    return
+                _note_member(seen, link_rel, anomalies)
+                last = link_rel
+                if len(raw) > MAX_MEMBER:
+                    yield Member(link_rel, SAMPLE, raw[:SAMPLE], "member")
+                else:
+                    yield Member(link_rel, len(raw), raw, None)
+            if not plan:
+                return
+    except ArchiveLimit as lim:
+        yield Member(last, 0, b"", lim.reason, lim.detail)
+    except (tarfile.TarError, EOFError, OSError, zlib.error, lzma.LZMAError, ValueError) as exc:
+        yield Member(last, 0, b"", "corrupt", f"links could not be resolved ({type(exc).__name__})")
+
+
+def _zip_is_symlink(info):
+    return (info.external_attr >> 16) & 0o170000 == 0o120000
+
+
+def _iter_zip(data, artifact, budget, anomalies):
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(data))
+        infos = zf.infolist()
+    except (zipfile.BadZipFile, zipfile.LargeZipFile, OSError, EOFError, ValueError,
+            NotImplementedError, RuntimeError) as exc:
+        yield Member("(archive)", 0, b"", "corrupt", f"not a readable zip archive ({type(exc).__name__})")
+        return
+    seen, by_rel, links, count, last = {}, {}, [], 0, "(archive)"
+
+    def read(info, limit):
+        with zf.open(info) as fh:
+            raw = fh.read(limit)
+        budget.charge(len(raw))
+        return raw
+
+    with zf:
+        try:
+            for info in infos:
+                budget.check()
+                if info.is_dir():
+                    continue
+                rel, problem = canonical_member_path(info.filename, artifact)
+                if problem:
+                    anomalies.append(("path", info.filename, problem))
+                    continue
+                if rel is None:
+                    continue
+                count += 1
+                if count > MAX_FILES:
+                    yield Member(rel, 0, b"", "files")
+                    return
+                if _zip_is_symlink(info):
+                    links.append((info, rel))
+                    continue
+                by_rel[rel] = info
+                _note_member(seen, rel, anomalies)
+                last = rel
+                try:
+                    raw = read(info, MAX_MEMBER + 1)          # bounded, real bytes
+                except (zipfile.BadZipFile, OSError, EOFError, ValueError, zlib.error,
+                        lzma.LZMAError, NotImplementedError, RuntimeError) as exc:
+                    yield Member(rel, 0, b"", "corrupt",
+                                 f"member {rel} could not be read ({type(exc).__name__})")
+                    continue
+                if len(raw) > MAX_MEMBER:
+                    yield Member(rel, SAMPLE, raw[:SAMPLE], "member")
+                    continue
+                yield Member(rel, len(raw), raw, None)
+            for info, rel in links:
+                budget.check()
+                try:
+                    linkname = read(info, 4096).decode("utf-8", "replace")
+                except (zipfile.BadZipFile, OSError, EOFError, ValueError, zlib.error,
+                        NotImplementedError, RuntimeError):
+                    linkname = ""
+                target = _link_target(info.filename, linkname, True) if linkname else None
+                trel = canonical_member_path(target, artifact)[0] if target else None
+                if trel is None:
+                    anomalies.append(("link", rel, f"link to {linkname!r} points outside the archive"))
+                    continue
+                tinfo = by_rel.get(trel)
+                if tinfo is None:
+                    continue                                   # dangling inside the archive
+                _note_member(seen, rel, anomalies)
+                last = rel
+                raw = read(tinfo, MAX_MEMBER + 1)
+                if len(raw) > MAX_MEMBER:
+                    yield Member(rel, SAMPLE, raw[:SAMPLE], "member")
+                else:
+                    yield Member(rel, len(raw), raw, None)
+        except ArchiveLimit as lim:
+            yield Member(last, 0, b"", lim.reason, lim.detail)
 
 
 # Detail text for each truncation reason (verdict integrity, audit C2/G16).
@@ -478,6 +998,8 @@ _TRUNC_DETAILS = {
     "total": lambda rel, size: (
         f"cumulative decompressed archive size exceeds {MAX_ARCHIVE_TOTAL:,} "
         f"bytes (stopped at {rel})"),
+    "time": lambda rel, size: (
+        f"scan time budget of {SCAN_TIMEOUT:g} s exceeded (stopped at {rel})"),
 }
 # Hard cap on SC-TRUNCATED findings per package so a hostile archive with
 # thousands of oversize members cannot flood the report; the `truncated`
@@ -498,8 +1020,16 @@ TRUNCATED_FINDING_CAP = 20
 # Secrets and code-quality findings are reported but never decide the verdict:
 # a test key inside someone else's package is not a threat to you.
 STRONG_SEVERITIES = ("BLOCKER", "CRITICAL")
+VERDICT_RANK = {"OK": 0, "WARN": 1, "INCOMPLETE": 2, "SUSPICIOUS": 3}
+# Rules that mean "not fully scanned": they make a scan INCOMPLETE instead
+# of counting as indicators.
+TRUNCATION_RULES = ("SC-TRUNCATED", "SC-MANIFEST-UNPARSEABLE")
+# Directory names that hold tests / fixtures (exact names, case-insensitive).
+# Weaker findings in them are listed as INFO unless the file is reachable from
+# an entry point (main/bin/exports, an install hook, setup.py).
 TEST_DIR_NAMES = {"test", "tests", "testing", "__tests__", "spec", "specs", "fixtures",
-                  "__fixtures__", "testdata", "test_data", "test-data", "test-fixtures"}
+                  "__fixtures__", "testdata", "test_data", "test-data", "test-fixtures",
+                  "unittests", "test cases"}
 _TEST_FILE_RE = re.compile(r"(?:^test_.*\.py|.*_test\.py|.*\.(?:test|spec)\.[cm]?[jt]sx?)$", re.I)
 
 
@@ -510,18 +1040,21 @@ def is_test_path(rel):
 
 
 def _is_test_dir(name):
-    # tests/, testing/, "test cases/", unittests/, "manual tests/", test_data/, ...
-    return name in TEST_DIR_NAMES or name.startswith("test") or name.endswith("tests")
+    # exact names only: testkit/, testutils/, attestation/ are code, not tests
+    return name in TEST_DIR_NAMES
 
 
-def _demote_test_findings(issues):
+def _demote_test_findings(issues, reachable=frozenset()):
     """Weaker supply-chain findings inside test code become inventory (INFO):
     test fixtures legitimately contain binaries, blobs and escaped bytes, and
     tests are neither imported nor run when the package is installed. Strong
-    findings are never demoted: hiding a payload in tests/ doesn't make it safe."""
+    findings are never demoted: hiding a payload in tests/ doesn't make it safe.
+    Nor is anything reachable from an entry point: a main that points into
+    test/ makes that code the package."""
     for issue in issues:
-        if (issue["rule"].startswith("SC-") and issue["rule"] != "SC-TRUNCATED"
+        if (issue["rule"].startswith("SC-") and issue["rule"] not in TRUNCATION_RULES
                 and issue["sev"] not in STRONG_SEVERITIES + ("INFO",)
+                and issue["file"] not in reachable
                 and is_test_path(issue["file"])):
             issue["sev"] = "INFO"
             issue["msg"] = issue["msg"].rstrip() + " (in test code: listed, not counted)"
@@ -530,7 +1063,7 @@ def _demote_test_findings(issues):
 def decide_verdict(issues, truncated):
     """-> (verdict, reason, strong_count, weak_count)."""
     indicators = [i for i in issues if i["rule"].startswith("SC-")
-                  and i["rule"] != "SC-TRUNCATED" and i["sev"] != "INFO"]
+                  and i["rule"] not in TRUNCATION_RULES and i["sev"] != "INFO"]
     strong = sum(1 for i in indicators if i["sev"] in STRONG_SEVERITIES)
     weak = len(indicators) - strong
     plural = lambda n, word: f"{n} {word}{'' if n == 1 else 's'}"
@@ -549,20 +1082,39 @@ def decide_verdict(issues, truncated):
 # runs does. Escalate only on the patterns malicious install scripts share:
 # shipping environment/credential data over the network, or talking to
 # throwaway exfiltration endpoints. Downloading a platform binary from the
-# registry (esbuild, puppeteer) is not either.
+# registry (esbuild, puppeteer) is not either. The same test applies to the
+# Python code pip runs at install time (an sdist's setup.py, an in-tree PEP 517
+# backend) and to shell scripts a hook runs.
 _NETWORK_RE = re.compile(
     r"""\b(?:https?\.(?:get|request)|fetch\s*\(|axios|XMLHttpRequest|net\.connect|dns\.resolve|"""
     r"""require\(\s*["'](?:node:)?(?:https?|net|dgram|tls)["']\s*\)|"""
-    r"""from\s+["'](?:node:)?(?:https?|net|dgram|tls)["'])""")
+    r"""from\s+["'](?:node:)?(?:https?|net|dgram|tls)["'])"""
+    # Python
+    r"""|\burllib\.request\b|\burlopen\s*\(|\burlretrieve\s*\(|\bhttp\.client\b|"""
+    r"""\bHTTPS?Connection\s*\(|\bsocket\.(?:socket|create_connection)\s*\(|"""
+    r"""\brequests\.(?:get|post|put|patch|request|Session)\b|\bimport\s+(?:requests|httpx|aiohttp|urllib3)\b|"""
+    r"""\bfrom\s+(?:requests|httpx|aiohttp|urllib3|urllib\.request|http\.client)\s+import\b|"""
+    r"""\bhttpx\.\w+\s*\(|\baiohttp\.ClientSession\b|\bsmtplib\b|\bftplib\b"""
+    # shell: a download tool pointed at a URL, netcat to a host and port, bash's /dev/tcp
+    r"""|\b(?:curl|wget)\s+(?:-{1,2}[\w-]+(?:[ =](?!https?:)\S+)?\s+)*["']?https?://"""
+    r"""|\b(?:nc|ncat|netcat)\s+(?:-\w+\s+)*[\w.-]+\s+\d{2,5}\b|/dev/tcp/""", re.M)
 _SECRET_SOURCE_RE = re.compile(
     r"""JSON\.stringify\(\s*process\.env|Object\.(?:keys|entries|values)\(\s*process\.env|"""
-    r"""\.npmrc|[/\\]\.ssh\b|id_rsa|id_ed25519|\.aws[/\\]credentials|\.git-credentials|"""
-    r"""\.docker[/\\]config\.json|\.kube[/\\]config|Local Storage[/\\]leveldb""", re.I)
+    r"""\.npmrc|[/\\]\.ssh\b|~/\.ssh\b|id_rsa|id_ed25519|\.aws[/\\]|~/\.aws\b|\.git-credentials|"""
+    r"""\.docker[/\\]config\.json|\.kube[/\\]config|Local Storage[/\\]leveldb|\.pypirc|\.netrc\b|"""
+    # Python: the whole environment, not one variable
+    r"""\bdict\(\s*os\.environ\s*\)|\bos\.environ\.(?:items|keys|values|copy)\(\s*\)|"""
+    r"""json\.dumps\(\s*(?:dict\(\s*)?os\.environ|\b(?:str|repr)\(\s*os\.environ\s*\)|"""
+    r"""\{\s*\*\*\s*os\.environ|\burlencode\(\s*(?:dict\(\s*)?os\.environ|\bos\.environb\b"""
+    # shell: the whole environment piped or redirected somewhere
+    r"""|(?:^|[\s;&(`])(?:env|printenv|set)\s*(?:\|(?!\|)|>)|\$\(\s*(?:env|printenv)\s*\)|`\s*(?:env|printenv)\s*`""",
+    re.I | re.M)
 _EXFIL_DEST_RE = re.compile(
     r"""https?://(?:\d{1,3}\.){3}\d{1,3}\b|pastebin\.com|\bngrok|webhook\.site|"""
     r"""discord(?:app)?\.com/api/webhooks|api\.telegram\.org|oastify\.com|burpcollaborator|"""
     r"""\binteract\.sh|\boast\.(?:pro|live|site|online|fun|me)\b|requestbin|pipedream\.net|"""
     r"""transfer\.sh|\.onion\b""", re.I)
+_PIPE_TO_SHELL_RE = re.compile(r"""\b(?:curl|wget)\b[^\n|;&]*\|\s*(?:sudo\s+)?(?:ba|z|da|k)?sh\b""")
 
 
 def install_script_risk(text):
@@ -574,133 +1126,638 @@ def install_script_risk(text):
     dest = _EXFIL_DEST_RE.search(text)
     if dest:
         reasons.append(f"contacts an address typical of data exfiltration ({dest.group(0)[:40]})")
+    if _PIPE_TO_SHELL_RE.search(text):
+        reasons.append("pipes a download into a shell")
     return reasons
 
 
-def _inspect_install_scripts(issues, sources):
-    """Follow each install hook to the script it runs and escalate the hook
-    finding when that script looks hostile. `sources` maps path -> text."""
-    for issue in issues:
-        if issue["rule"] != "SC-INSTALL-HOOK" or issue["sev"] in STRONG_SEVERITIES:
+def _node_candidates(rel):
+    """Files Node tries for a path it is asked to run or load."""
+    rel = rel.rstrip("/")
+    return [rel, rel + ".js", rel + ".cjs", rel + ".mjs", rel + ".json", rel + ".node",
+            rel + "/index.js", rel + "/index.cjs", rel + "/index.mjs", rel + "/index.json"]
+
+
+def _rel_join(base, target):
+    target = str(target).replace("\\", "/")
+    if target.startswith("/"):
+        target = target.lstrip("/")
+    joined = posixpath.normpath(posixpath.join(base or ".", target))
+    return "" if joined in (".", "") else joined
+
+
+# Entry points declared in package.json: what `require(pkg)`, `import pkg`
+# and the installed command run.
+def _package_entry_targets(data):
+    targets = []
+    main = data.get("main")
+    # no main: require(pkg) loads index.js
+    targets.append(main if isinstance(main, str) and main.strip() else "index.js")
+    bins = data.get("bin")
+    if isinstance(bins, str):
+        targets.append(bins)
+    elif isinstance(bins, dict):
+        targets += [v for v in bins.values() if isinstance(v, str)]
+    stack, nodes = [data.get("exports")], 0
+    while stack and nodes < 10_000:
+        node = stack.pop()
+        nodes += 1
+        if isinstance(node, str):
+            if node.startswith("./") and "*" not in node:
+                targets.append(node)
+        elif isinstance(node, dict):
+            stack.extend(node.values())
+        elif isinstance(node, list):
+            stack.extend(node)
+    return targets
+
+
+_JS_LOCAL_DEP_RE = re.compile(
+    r"""(?:\brequire\s*\(\s*|\bimport\s*\(\s*|\bfrom\s+|^\s*import\s+|\bexport\s+[^'"\n;]*?\bfrom\s+)"""
+    r"""(['"])(\.{1,2}/[^'"\n]+)\1""", re.M)
+_SHEBANG_RE = re.compile(r"^#!\s*(\S+)(?:\s+(?:-\S+\s+)*(\S+))?")
+_MANIFEST_NAMES = ("package.json", "binding.gyp", "pyproject.toml")
+
+
+def _shebang_lang(text):
+    """'js' | 'py' | 'sh' | None from a script's #! line."""
+    m = _SHEBANG_RE.match(text)
+    if not m:
+        return None
+    prog = m.group(1).rsplit("/", 1)[-1].lower()
+    if prog == "env" and m.group(2):
+        prog = m.group(2).rsplit("/", 1)[-1].lower()
+    if prog in ("node", "nodejs"):
+        return "js"
+    if lazaret._PYTHON_NAME_RE.match(prog):
+        return "py"
+    if prog in lazaret._SHELL_NAMES:
+        return "sh"
+    return None
+
+
+_PTH_EXEC_RE = re.compile(
+    r"\b(?:exec|eval|compile)\s*\(|\b(?:b64decode|b32decode|b85decode|a85decode|fromhex|unhexlify)\b"
+    r"|\.decode\s*\(|\bmarshal\.loads\b|\bzlib\.decompress\b|\bcodecs\.decode\b|\\x[0-9a-fA-F]{2}")
+
+
+def pth_issues(path, text):
+    """SC-PTH-EXEC: site.py executes every line of a .pth file in
+    site-packages that starts with 'import' at EVERY interpreter start — no
+    import of the package needed. CRITICAL when the line also executes or
+    decodes code, MAJOR otherwise (setuptools' distutils shim and namespace
+    .pth files are this shape: listed for review)."""
+    out, lines = [], lazaret.normalize_newlines(text).split("\n")
+    for i, line in enumerate(lines):
+        if not line.startswith(("import ", "import\t")):
             continue
-        cmd = issue.get("cmd") or ""
-        base = os.path.dirname(issue["file"])
-        for target in lazaret.hook_script_targets(cmd):
-            rel = os.path.normpath(os.path.join(base, target)).replace(os.sep, "/")
-            candidates = [rel] + ([rel + ext for ext in (".js", ".cjs", ".mjs", "/index.js")]
-                                  if not os.path.splitext(rel)[1] else [])
-            text = next((sources[c] for c in candidates if c in sources), None)
-            reasons = install_script_risk(text) if text else []
+        hostile = bool(_PTH_EXEC_RE.search(line))
+        out.append(lazaret.mk_issue(
+            {"id": "SC-PTH-EXEC", "name": "Code in a .pth file", "type": "HOTSPOT",
+             "sev": "CRITICAL" if hostile else "MAJOR",
+             "msg": (".pth line runs code at every Python start"
+                     + (" and executes or decodes a payload." if hostile else ".")),
+             "why": ("site.py executes .pth lines that start with 'import' whenever the "
+                     "interpreter starts, whether or not the package is imported — a "
+                     "persistence and execution vector that needs no install hook."),
+             "fix": "Find out why the package ships executable .pth code; remove it if unexplained.",
+             "ref": "CWE-506 · Supply chain"}, path, i + 1, lines))
+    return out
+
+
+def _archive_issue(kind, path, detail):
+    rules = {
+        "dup": ("SC-ARCHIVE-DUP", "Duplicate archive path",
+                "Two entries in the archive extract to the same path, so what a reviewer "
+                "(or a scanner reading the first) sees is not what gets installed."),
+        "link": ("SC-ARCHIVE-LINK", "Archive link leaves the package",
+                 "A symlink or hardlink pointing outside the extraction directory can make "
+                 "the installer read or overwrite files elsewhere on the machine."),
+        "path": ("SC-ARCHIVE-PATH", "Unsafe archive path",
+                 "An entry with '..' in its path tries to escape the extraction directory; "
+                 "installers refuse it, and no legitimate package tool produces one."),
+    }
+    rid, name, why = rules[kind]
+    return {"rule": rid, "name": name, "type": "HOTSPOT", "sev": "MAJOR",
+            "msg": f"{name}: {path} — {detail}.", "why": why,
+            "fix": "Inspect the archive listing (tar -tvf / unzip -l) before installing.",
+            "ref": "CWE-506 · Supply chain", "file": str(path), "line": 1,
+            "snippet": [], "snipStart": 1}
+
+
+class _ArtifactScan:
+    """Scan state for one archive: classify members as they stream by, then
+    resolve what package.json / setup.py say runs (entry points, install
+    hooks, build backends) once every member is known."""
+
+    def __init__(self, artifact, full):
+        self.artifact, self.full = artifact, full
+        self.issues, self.files_scanned, self.binaries = [], 0, 0
+        self.truncated, self.truncated_emitted = 0, 0
+        self.sources = {}          # rel -> (text, lang) scanned as source
+        self.deferred = {}         # rel -> raw bytes (text, not scanned yet)
+        self.deferred_bytes = 0
+        self.dropped = set()       # text members not kept (budget)
+        self.shell = {}            # rel -> text of shell scripts
+        self.binary = set()        # classified as binary
+        self.oversize = set()
+        self.members = set()
+        self.manifests = {}        # rel -> text (package.json, binding.gyp, pyproject.toml)
+        self.entries = set()       # rels that run when installed / imported
+
+    # ---- bookkeeping ----
+    def truncate(self, rel, detail):
+        self.truncated += 1
+        if self.truncated_emitted < TRUNCATED_FINDING_CAP:
+            self.issues.append(lazaret.truncated_issue(rel, detail))
+            self.truncated_emitted += 1
+
+    def add_decode_issues(self, extra, keep_encoding=True):
+        for i in extra:
+            if i["rule"] == "SC-TRUNCATED":
+                self.truncate(i["file"], i["msg"].removeprefix("File not fully scanned: ").rstrip("."))
+            elif keep_encoding or i["rule"] != "Q-ENCODING":
+                self.issues.append(i)
+
+    def classify(self, rel, raw, size):
+        bi = lazaret.classify_binary(rel, raw, size, self.artifact)
+        if bi:
+            self.binaries += 1
+            self.issues.append(bi)
+
+    def scan_source(self, rel, text, lang):
+        self.files_scanned += 1
+        self.issues.extend(lazaret.scan_file(rel, text, lang, dep=not self.full))
+        self.sources[rel] = (text, lang)
+
+    # ---- pass 1: members ----
+    def member(self, m):
+        rel, size, raw, reason = m
+        if reason in ("files", "total", "time", "corrupt"):
+            detail = getattr(m, "detail", "") or _TRUNC_DETAILS.get(
+                reason, lambda r, s: f"archive not fully read ({reason})")(rel, size)
+            self.truncate(rel, detail)
+            return
+        self.members.add(rel)
+        base = os.path.basename(rel)
+        ext = os.path.splitext(base)[1].lower()
+        wants_text = (base in _MANIFEST_NAMES or ext in lazaret.EXTS
+                      or ext in (".pth", ".gyp", ".gypi"))
+        if reason == "member":
+            self.oversize.add(rel)
+            if wants_text and not (ext == ".ts" and lazaret._mpeg_ts(raw[:512])):
+                # Verdict integrity (audit C2/G16): a cut-short scan is a
+                # signal, not a clean verdict — whatever the first bytes look like.
+                self.truncate(rel, _TRUNC_DETAILS["member"](rel, size))
+            # still classifiable by magic/entropy from the decompressed prefix
+            self.classify(rel, raw, size)
+            return
+        if base == "package.json":
+            text, extra = lazaret.decode_source(rel, raw)
+            self.add_decode_issues(extra, keep_encoding=False)
+            self.manifests[rel] = text
+            for i in lazaret.scan_manifest(rel, text, registry=True):
+                if i["rule"] == "SC-MANIFEST-UNPARSEABLE":
+                    self.truncated += 1
+                self.issues.append(i)
+            return
+        if base in ("binding.gyp",) or ext in (".gyp", ".gypi"):
+            text, extra = lazaret.decode_source(rel, raw)
+            self.add_decode_issues(extra, keep_encoding=False)
+            self.manifests[rel] = text
+            for i in lazaret.scan_gyp(rel, text):
+                if i["rule"] == "SC-MANIFEST-UNPARSEABLE":
+                    self.truncated += 1
+                self.issues.append(i)
+            return
+        if base == "pyproject.toml":
+            self.manifests[rel] = raw.decode("utf-8", "replace")
+            return
+        if ext == ".pth":
+            text = raw.decode("utf-8-sig", "replace")
+            self.issues.extend(pth_issues(rel, text))
+            self.scan_source(rel, text, "py")
+            return
+        lang = lazaret.EXTS.get(ext)
+        if lang is not None:
+            text, extra = lazaret.decode_source(rel, raw)
+            self.add_decode_issues(extra)
+            if any(i["rule"] == "SC-TRUNCATED" for i in extra):
+                self.classify(rel, raw, size)   # an ELF named index.js is still an ELF
+            self.scan_source(rel, text, lang)
+            return
+        if lazaret.looks_binary(raw[:2048]):
+            self.binary.add(rel)
+            self.classify(rel, raw, size)
+            return
+        # Text without a source extension: a script by its #! line, or kept
+        # until package.json says whether it runs (main -> lib/core.dat).
+        if raw.startswith(b"#!"):
+            text = raw.decode("utf-8", "replace")
+            kind = _shebang_lang(text)
+            if kind in ("js", "py"):
+                self.scan_source(rel, text, kind)
+                return
+            if kind == "sh":
+                self.shell[rel] = text
+                return
+        if self.deferred_bytes + len(raw) <= DEFERRED_TEXT_BUDGET:
+            self.deferred[rel] = raw
+            self.deferred_bytes += len(raw)
+        else:
+            self.dropped.add(rel)
+
+    # ---- pass 2: what runs ----
+    def _find(self, candidates):
+        return next((c for c in candidates if c in self.members), None)
+
+    def _text_of(self, rel, as_lang="js"):
+        """Text of a member that is run as code, scanning it as `as_lang`
+        first when it has not been scanned (non-source extension). None when
+        it cannot be read as text — that is counted as INCOMPLETE."""
+        if rel in self.sources:
+            return self.sources[rel][0]
+        if rel in self.shell:
+            return self.shell[rel]
+        if os.path.splitext(rel)[1].lower() in (".json", ".node", ".wasm"):
+            return None          # loaded as data / native code, not run as script text
+        if rel in self.deferred:
+            raw = self.deferred.pop(rel)
+            if as_lang == "sh" or _shebang_lang(raw[:256].decode("utf-8", "replace")) == "sh":
+                text = raw.decode("utf-8", "replace")
+                self.shell[rel] = text
+                return text
+            text, extra = lazaret.decode_source(rel, raw)
+            self.add_decode_issues(extra)
+            self.scan_source(rel, text, as_lang)
+            return text
+        if rel in self.dropped:
+            self.truncate(rel, f"{rel} runs at install/import time but was not kept for "
+                               f"scanning (text budget exhausted)")
+        elif rel in self.oversize:
+            self.truncate(rel, f"{rel} runs at install/import time but exceeds the "
+                               f"{MAX_MEMBER:,}-byte scan limit")
+        elif rel in self.binary and os.path.splitext(rel)[1].lower() not in (".node", ".wasm", ".json"):
+            self.truncate(rel, f"{rel} runs at install/import time but is not text, so it "
+                               f"could not be scanned")
+        return None
+
+    def _entry_points(self, manifest_rel, data):
+        base = posixpath.dirname(manifest_rel)
+        for target in _package_entry_targets(data):
+            rel = self._find(_node_candidates(_rel_join(base, target)))
+            if rel:
+                self.entries.add(rel)
+                self._text_of(rel, "js")
+
+    def _implicit_gyp_hook(self, manifest_rel, data):
+        """npm runs `node-gyp rebuild` for a root binding.gyp when the package
+        defines no install/preinstall script (and gypfile isn't false)."""
+        scripts = data.get("scripts") if isinstance(data.get("scripts"), dict) else {}
+        if "binding.gyp" not in self.members or data.get("gypfile") is False:
+            return
+        if any(isinstance(scripts.get(h), str) and scripts[h].strip() for h in ("install", "preinstall")):
+            return
+        self.issues.append(lazaret._sc_install_hook_issue(
+            "binding.gyp", 1, [], "install (implicit)", "node-gyp rebuild", False))
+
+    def _follow_hooks(self):
+        """Follow each install hook to the scripts it runs; escalate the hook
+        when one looks hostile (see install_script_risk)."""
+        for issue in list(self.issues):
+            if issue["rule"] != "SC-INSTALL-HOOK" or not issue.get("cmd"):
+                continue
+            base = posixpath.dirname(issue["file"])
+            for target in lazaret.hook_script_targets(issue["cmd"]):
+                rel = self._find(_node_candidates(_rel_join(base, target)))
+                if rel is None:
+                    continue
+                self.entries.add(rel)
+                lang = "sh" if rel.endswith(".sh") else "js"
+                text = self._text_of(rel, lang)
+                reasons = install_script_risk(text) if text else []
+                if reasons and issue["sev"] not in STRONG_SEVERITIES:
+                    issue["sev"] = "CRITICAL"
+                    issue["msg"] = f"Install hook runs {target}, which {'; and '.join(reasons)}."
+
+    def _python_install_scripts(self):
+        """Python code pip runs to build/install an sdist: setup.py and an
+        in-tree PEP 517 backend (build-system.backend-path)."""
+        scripts = []
+        if "setup.py" in self.sources:
+            scripts.append("setup.py")
+        backend, paths = _pep517_backend(self.manifests.get("pyproject.toml", ""))
+        if backend and paths:
+            mod = backend.split(":", 1)[0].replace(".", "/")
+            for p in paths:
+                root = _rel_join("", p)
+                rel = self._find([_rel_join(root, mod + ".py"), _rel_join(root, mod + "/__init__.py")])
+                if rel:
+                    scripts.append(rel)
+        # modules they import from the sdist itself run at install time too
+        queue, seen = list(scripts), set(scripts)
+        while queue and len(seen) < 200:
+            text, lang = self.sources.get(queue.pop(), ("", None))
+            if lang != "py":
+                continue
+            for m in _PY_LOCAL_IMPORT_RE.finditer(text):
+                mod = (m.group(1) or m.group(2)).replace(".", "/")
+                rel = self._find([mod + ".py", mod + "/__init__.py"])
+                if rel and rel not in seen:
+                    seen.add(rel)
+                    scripts.append(rel)
+                    queue.append(rel)
+        for rel in scripts:
+            self.entries.add(rel)
+            text = self.sources.get(rel, ("", "py"))[0]
+            reasons = install_script_risk(text)
             if reasons:
-                issue["sev"] = "CRITICAL"
-                issue["msg"] = (f"Install hook runs {target}, which {'; and '.join(reasons)}.")
-                break
+                lines = lazaret.normalize_newlines(text).split("\n")
+                self.issues.append(lazaret.mk_issue(
+                    {"id": "SC-INSTALL-HOOK", "name": "Install hook", "type": "HOTSPOT",
+                     "sev": "CRITICAL",
+                     "msg": f"{rel} runs when pip builds or installs this sdist, and it "
+                            f"{'; and '.join(reasons)}.",
+                     "why": ("pip executes an sdist's setup.py (or its in-tree build "
+                             "backend) with the user's privileges before anything is "
+                             "reviewed — the Python twin of an npm install hook."),
+                     "fix": "Do not install this sdist; report it to the index.",
+                     "ref": "CWE-506 · Supply chain"}, rel, 1, lines))
+
+    def _reachable(self):
+        """Entry files plus local files they require/import (JS), transitively."""
+        seen, queue = set(self.entries), list(self.entries)
+        while queue and len(seen) < 10_000:
+            rel = queue.pop()
+            text, lang = self.sources.get(rel, (None, None))
+            if not text or lang != "js":
+                continue
+            base = posixpath.dirname(rel)
+            for _q, target in _JS_LOCAL_DEP_RE.findall(text):
+                dep = self._find(_node_candidates(_rel_join(base, target)))
+                if dep and dep not in seen:
+                    seen.add(dep)
+                    queue.append(dep)
+        return seen
+
+    def finish(self, anomalies):
+        for kind, path, detail in anomalies:
+            self.issues.append(_archive_issue(kind, path, detail))
+        for rel, text in list(self.manifests.items()):
+            if os.path.basename(rel) != "package.json":
+                continue
+            data, _problems = lazaret.load_manifest(rel, text)
+            if data is None:
+                continue
+            if rel == "package.json":
+                self._entry_points(rel, data)
+                self._implicit_gyp_hook(rel, data)
+        self._follow_hooks()
+        if self.artifact == "sdist":
+            self._python_install_scripts()
+        reachable = self._reachable()
+        # interprocedural / cross-file taint (full profile only — needs whole source)
+        if self.full and getattr(lazaret, "lazaret_flow", None) is not None:
+            records = [{"path": r, "content": t, "lang": lang}
+                       for r, (t, lang) in self.sources.items()]
+            try:
+                self.issues.extend(lazaret.lazaret_flow.analyze(records))
+            except Exception as exc:                            # noqa: BLE001
+                print(f"warning: interprocedural taint analysis skipped "
+                      f"({type(exc).__name__})", file=sys.stderr)
+        _demote_test_findings(self.issues, reachable)
+        # F9b: the decompressed sources are no longer needed
+        self.sources, self.deferred, self.shell = {}, {}, {}
 
 
-def scan_package(eco, name, version=None, full=False):
+_PY_LOCAL_IMPORT_RE = re.compile(r"^\s*(?:from\s+([A-Za-z_][\w.]*)\s+import\b|import\s+([A-Za-z_][\w.]*))", re.M)
+_PEP517_SECTION_RE = re.compile(r"^\s*\[build-system\]\s*$(.*?)(?=^\s*\[|\Z)", re.M | re.S)
+
+
+def _pep517_backend(pyproject):
+    """(build-backend, backend-path list) from pyproject.toml text; tomllib
+    where available (3.11+), a narrow regex reader on 3.10."""
+    if not pyproject:
+        return None, []
+    try:
+        # stdlib from Python 3.11; loaded by name so the 3.10 stdlib guard
+        # (tests/architecture) does not see an import it cannot resolve
+        tomllib = importlib.import_module("tomllib")
+    except ImportError:
+        tomllib = None
+    if tomllib is not None:
+        try:
+            section = tomllib.loads(pyproject).get("build-system") or {}
+        except (ValueError, RecursionError):       # TOMLDecodeError is a ValueError
+            section = None
+        if isinstance(section, dict):
+            backend = section.get("build-backend")
+            paths = section.get("backend-path")
+            return (backend if isinstance(backend, str) else None,
+                    [p for p in paths if isinstance(p, str)] if isinstance(paths, list) else [])
+    m = _PEP517_SECTION_RE.search(pyproject)
+    if not m:
+        return None, []
+    body = m.group(1)
+    backend = re.search(r"""^\s*build-backend\s*=\s*["']([^"']+)["']""", body, re.M)
+    paths = re.search(r"""^\s*backend-path\s*=\s*\[([^\]]*)\]""", body, re.M | re.S)
+    return (backend.group(1) if backend else None,
+            re.findall(r"""["']([^"']+)["']""", paths.group(1)) if paths else [])
+
+
+def _scan_artifact(data, container, artifact, full, budget):
+    """Scan one archive -> per-artifact result fields (issues, counts, verdict)."""
+    st = _ArtifactScan(artifact, full)
+    anomalies = []
+    try:
+        for m in iter_archive(data, container, artifact, budget=budget, anomalies=anomalies):
+            st.member(m)
+            budget.check()
+    except ArchiveLimit as lim:          # deadline hit between members
+        st.truncate("(archive)", lim.detail or _TRUNC_DETAILS.get(
+            lim.reason, lambda r, s: lim.reason)("(archive)", 0))
+    st.finish(anomalies)
+    issues = st.issues
+    verdict, reason, strong, weak = decide_verdict(issues, st.truncated)
+    return {"issues": issues, "filesScanned": st.files_scanned, "binaryArtifacts": st.binaries,
+            "truncated": st.truncated, "verdict": verdict, "verdictReason": reason,
+            "strongIndicators": strong, "weakIndicators": weak}
+
+
+def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline=None,
+                 cancel=None, max_artifacts=None):
     """Fetch and scan one package version. Returns a result dict.
 
     Every archive member is classified as source or binary. Source files (by
-    extension) are run through the normal ruleset; binary/compiled artifacts
-    are run through classify_binary, which flags smuggled executables, nested
-    archives, and opaque high-entropy blobs — with severity that depends on
-    whether they belong (sdist/npm vs wheel)."""
-    version, url, container, artifact, meta_entry = (
-        resolve_npm if eco == "npm" else resolve_pypi)(name, version)
-    data = http_bytes(url)
-    # G15: verify the artifact against the registry-published digest BEFORE
-    # scanning anything — a mismatch raises and nothing is persisted under
-    # this name/version.
-    digest = verify_digest(data, meta_entry, eco, name, version)
-    issues, files_scanned, binaries = [], 0, 0
-    source_records = []
-    truncated = 0
-    truncated_emitted = 0
-    for rel, size, raw, reason in iter_archive(data, container):
-        if reason == "member" and not _would_scan_as_source(rel, raw):
-            # An oversized image, font, archive or other binary is classified
-            # from its leading bytes (magic + entropy) exactly as a small one
-            # is, so nothing that would have been scanned was skipped.
-            bi = lazaret.classify_binary(rel, raw, size, artifact)
-            if bi:
-                binaries += 1
-                issues.append(bi)
-            continue
-        if reason:
-            # Verdict integrity (audit C2/G16): a cut-short scan is a signal,
-            # not a clean verdict. Every cutoff reason — an oversize member,
-            # the file-count cap, the cumulative budget — becomes an
-            # SC-TRUNCATED finding (capped per-package; the count is exact)
-            # and the package can't be cleared (verdict=INCOMPLETE at least).
-            truncated += 1
-            if truncated_emitted < TRUNCATED_FINDING_CAP:
-                issues.append(lazaret.truncated_issue(
-                    rel, _TRUNC_DETAILS[reason](rel, size)))
-                truncated_emitted += 1
-            if reason == "member":
-                # still classifiable by magic/entropy from the decompressed
-                # prefix — real size, no declared-size trust.
-                bi = lazaret.classify_binary(rel, raw, size, artifact)
-                if bi:
-                    binaries += 1
-                    issues.append(bi)
-            continue
-        base = os.path.basename(rel)
-        if not lazaret.looks_binary(raw[:2048]):
-            text = raw.decode("utf-8", "replace")
-            if base == "package.json":
-                issues.extend(lazaret.scan_manifest(rel, text, registry=True))
-                continue
-            ext = os.path.splitext(base)[1].lower()
-            lang = lazaret.EXTS.get(ext)
-            if lang is None:
-                continue
-            files_scanned += 1
-            issues.extend(lazaret.scan_file(rel, text, lang, dep=not full))
-            source_records.append({"path": rel, "content": text, "lang": lang})
-        else:
-            bi = lazaret.classify_binary(rel, raw, size, artifact)
-            if bi:
-                binaries += 1
-                issues.append(bi)
-    # interprocedural / cross-file taint (full profile only — needs whole source)
-    if full and getattr(lazaret, "lazaret_flow", None) is not None:
-        issues.extend(lazaret.lazaret_flow.analyze(source_records))
-    _inspect_install_scripts(issues, {r["path"]: r["content"] for r in source_records})
-    _demote_test_findings(issues)
-    # F9b: the decompressed sources are no longer needed — drop the reference
-    # before building the result so cumulative archive contents don't stay
-    # pinned in RSS until the next scan.
-    source_records = None
-    issues.sort(key=lambda i: (lazaret.SEV_ORDER[i["sev"]], i["file"], i["line"]))
+    extension, by #! line, or because package.json runs them) are run through
+    the normal ruleset; binary/compiled artifacts through classify_binary,
+    which flags smuggled executables, nested archives, and opaque
+    high-entropy blobs — with severity that depends on whether they belong
+    (sdist/npm vs wheel).
+
+    PyPI: every file of the release pip may install is scanned (sdist and
+    each distinct wheel, at most max_artifacts); the verdict is the worst
+    one, and result["artifacts"] keeps the per-file detail.
+
+    resolved: a resolve_npm/resolve_pypi result already fetched (scan-all
+    checks the version before downloading). deadline: absolute
+    time.monotonic() bound for the whole package (MCP budget); each archive
+    also gets SCAN_TIMEOUT. cancel: callable; True stops the scan with
+    ScanCancelled."""
+    if resolved is None:
+        resolved = resolve(eco, name, version)
+    version, url, container, artifact, meta_entry = resolved
+    refs = getattr(resolved, "artifacts", None) or [
+        {"url": url, "container": container, "artifact": artifact, "entry": meta_entry,
+         "filename": url.rsplit("/", 1)[-1] if isinstance(url, str) else None}]
+    limit = max_artifacts or MAX_ARTIFACTS
+    over, refs = refs[limit:], refs[:limit]
+    per, all_issues, truncated = [], [], 0
+    multi = len(refs) > 1
+    for ref in refs:
+        data = http_bytes(ref["url"])
+        # G15: verify the artifact against the registry-published digest BEFORE
+        # scanning anything — a mismatch raises and nothing is persisted under
+        # this name/version.
+        digest = verify_digest(data, ref["entry"], eco, name, version)
+        stop = time.monotonic() + SCAN_TIMEOUT
+        budget = Budget(deadline=min(stop, deadline) if deadline else stop, cancel=cancel)
+        r = _scan_artifact(data, ref["container"], ref["artifact"], full, budget)
+        prefix = f"{ref['filename']}/" if multi and ref.get("filename") else ""
+        for issue in r["issues"]:
+            if prefix:
+                issue["file"] = prefix + issue["file"]
+                issue["artifact"] = ref["filename"]
+            all_issues.append(issue)
+        truncated += r["truncated"]
+        per.append({"filename": ref.get("filename"), "kind": ref["artifact"], "url": ref["url"],
+                    "archiveBytes": len(data), "digest": digest,
+                    **{k: r[k] for k in ("verdict", "verdictReason", "filesScanned",
+                                         "binaryArtifacts", "truncated",
+                                         "strongIndicators", "weakIndicators")}})
+    if over:
+        truncated += 1
+        all_issues.append(lazaret.truncated_issue(
+            "(release)", f"{len(over)} more release file(s) not scanned (limit {limit} "
+                         f"artifacts per release; raise --max-artifacts)"))
+    all_issues.sort(key=lambda i: (lazaret.SEV_ORDER[i["sev"]], i["file"], i["line"]))
     sev_counts = {s: 0 for s in lazaret.SEV_ORDER}
-    for i in issues:
+    for i in all_issues:
         sev_counts[i["sev"]] += 1
     # Only supply-chain indicators decide the verdict (see "Verdicts" above).
     # Verdict integrity: a truncated scan can never be cleared, because the
     # unscanned members are attacker-chosen: it is INCOMPLETE at best.
-    verdict, reason, strong, weak = decide_verdict(issues, truncated)
-    supply = strong + weak
+    verdict, reason, strong, weak = decide_verdict(all_issues, truncated)
+    if multi:
+        worst = max(per, key=lambda p: VERDICT_RANK.get(p["verdict"], 0))
+        if VERDICT_RANK.get(worst["verdict"], 0) == VERDICT_RANK.get(verdict, 0) \
+                and verdict != "OK":
+            reason += f" (worst: {worst['filename']}; {len(per)} release files scanned)"
+        else:
+            reason += f" ({len(per)} release files scanned)"
     # L1 (artifact hygiene): redaction is default-on, so the issues this
     # result carries — including the ones persisted as the Store blob via
     # save_scan — already have placeholder/scrubbed snippets from mk_issue.
-    # This defensive sweep exists so the registry path cannot regress: an
-    # issue entering from any unpatched engine path gets its context lines
-    # scrubbed before the blob is written.
-    issues = lazaret.redact_result({"issues": list(issues)})["issues"]
-    return {"ecosystem": eco, "name": name, "version": version, "artifact": artifact,
-            "archiveBytes": len(data), "filesScanned": files_scanned,
-            "binaryArtifacts": binaries, "profile": "full" if full else "supply-chain",
-            "sevCounts": sev_counts, "supplyChain": supply, "strongIndicators": strong,
+    # This defensive sweep exists so the registry path cannot regress.
+    all_issues = lazaret.redact_result({"issues": list(all_issues)})["issues"]
+    kinds = [p["kind"] for p in per]
+    artifact_label = kinds[0] if len(kinds) == 1 else (
+        "+".join(filter(None, ["sdist" if "sdist" in kinds else "",
+                               f"{kinds.count('wheel')} wheel{'s' if kinds.count('wheel') != 1 else ''}"
+                               if "wheel" in kinds else ""])))
+    return {"ecosystem": eco, "name": name, "version": version, "artifact": artifact_label,
+            "archiveBytes": sum(p["archiveBytes"] for p in per),
+            "filesScanned": sum(p["filesScanned"] for p in per),
+            "binaryArtifacts": sum(p["binaryArtifacts"] for p in per),
+            "profile": "full" if full else "supply-chain",
+            "sevCounts": sev_counts, "supplyChain": strong + weak, "strongIndicators": strong,
             "weakIndicators": weak, "truncated": truncated,
-            "verdict": verdict, "verdictReason": reason, "issues": issues, "digest": digest,
+            "verdict": verdict, "verdictReason": reason, "issues": all_issues,
+            "digest": per[0]["digest"] if per else None, "artifacts": per,
             "scannedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")}
 
 
 # ---------------- State store (SQLite / Postgres) ----------------
+_PG_KEYWORD_RE = re.compile(
+    r"^\s*(?:host|hostaddr|port|dbname|database|user|password|passfile|sslmode|sslrootcert|"
+    r"sslcert|sslkey|connect_timeout|application_name|channel_binding|require_auth|options|"
+    r"service|target_session_attrs)\s*=", re.I)
+_PG_SCHEME_RE = re.compile(r"^\s*(postgres(?:ql)?)://", re.I)
+
+
+def classify_dsn(dsn):
+    """--db / LAZARET_DB -> ('pg', dsn) or ('sqlite', path).
+
+    postgres:// and postgresql:// in any letter case, and libpq keyword
+    strings ("host=db user=app dbname=lazaret"), select Postgres; `sqlite:`
+    / `sqlite:///` prefixes and plain paths select SQLite. A plain path
+    containing '=' is refused: it is almost certainly a mistyped connection
+    string, and SQLite would create a FILE named after it — password
+    included. Error messages never echo the value."""
+    if not isinstance(dsn, str) or not dsn.strip():
+        raise StoreConfigError("empty database location (--db / LAZARET_DB)")
+    m = _PG_SCHEME_RE.match(dsn)
+    if m:
+        return "pg", m.group(1).lower() + dsn[m.end(1):].lstrip()
+    if _PG_KEYWORD_RE.match(dsn):
+        return "pg", dsn.strip()
+    if dsn.lower().startswith("sqlite:"):
+        path = dsn[len("sqlite:"):]
+        if path.startswith("///"):
+            path = path[3:]
+        elif path.startswith("//"):
+            path = path[2:]
+        if not path:
+            raise StoreConfigError("sqlite: needs a path (sqlite:PATH or sqlite:///PATH)")
+        return "sqlite", path
+    if "=" in dsn:
+        raise StoreConfigError(
+            "database location contains '=' but is not a recognized Postgres connection "
+            "string; refusing to create a SQLite file with that name (use postgres://…, "
+            "a libpq 'host=… dbname=…' string, or sqlite:PATH)")
+    if "://" in dsn:
+        raise StoreConfigError("unsupported database URL scheme (use postgres:// or sqlite:)")
+    return "sqlite", dsn
+
+
+def _db_text(value):
+    """Text a Postgres TEXT/JSONB value can hold: no NUL, no lone surrogate
+    (a hook command with \\u0000, an archive member name that is not UTF-8)."""
+    if not isinstance(value, str):
+        return value
+    if "\x00" in value:
+        value = value.replace("\x00", "\\x00")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        value = value.encode("utf-8", "backslashreplace").decode("utf-8")
+    return value
+
+
+def _db_clean(obj, depth=0):
+    """_db_text over a JSON-shaped structure (bounded depth)."""
+    if isinstance(obj, str):
+        return _db_text(obj)
+    if depth > 64:
+        return None
+    if isinstance(obj, dict):
+        return {_db_text(str(k)): _db_clean(v, depth + 1) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_db_clean(v, depth + 1) for v in obj]
+    return obj
+
+
+def db_json(obj):
+    """JSON text for the issues/artifacts columns. Non-ASCII stays literal
+    UTF-8 (a \\uXXXX escape above U+007F is refused by a JSONB column in a
+    non-UTF8 database), NUL and lone surrogates are made storable first."""
+    return json.dumps(_db_clean(obj), ensure_ascii=False)
+
+
 class Store:
     def __init__(self, dsn):
-        self.pg = dsn.startswith(("postgres://", "postgresql://"))
+        kind, target = classify_dsn(dsn)
+        self.pg = kind == "pg"
         if self.pg:
             from lazaret import pg as lazaret_pg
             # audit H2 (=F3/F4): Store is LIBRARY code — the MCP server
@@ -714,8 +1771,8 @@ class Store:
             # lazaret_pg client — no external driver, nothing to pip-install.)
             try:
                 self.conn = lazaret_pg.connect(   # DSN should target a dedicated lazaret DB
-                    dsn, timeout=30, application_name="lazaret")
-            except lazaret_pg.Error as exc:
+                    target, timeout=30, application_name="lazaret")
+            except (lazaret_pg.Error, OSError) as exc:
                 raise RuntimeError(f"Postgres backend unreachable: {exc}") from exc
             self.ph, self.t = "$1", ""
         else:
@@ -726,7 +1783,10 @@ class Store:
             # gave us the 5s default lock timeout and no WAL, so writers
             # crashed with "database is locked" mid-sweep. 30s busy timeout
             # + WAL (readers never block writers) is the standard remedy.
-            self.conn = sqlite3.connect(dsn, timeout=30)
+            try:
+                self.conn = sqlite3.connect(target, timeout=30)
+            except sqlite3.Error as exc:
+                raise StoreConfigError(f"cannot open SQLite database: {exc}") from exc
             self._configure_sqlite()
             self.ph, self.t = "?", ""
         self._init_schema()
@@ -755,6 +1815,8 @@ class Store:
                 pass
 
     def _init_schema(self):
+        """Create the tables, and migrate older ones in place (idempotent):
+        scans.artifacts holds the per-file detail of multi-artifact scans."""
         if self.pg:
             # Postgres DDL (SERIAL / JSONB): execute_script runs the whole
             # script as ONE implicit transaction via the simple protocol.
@@ -767,7 +1829,9 @@ class Store:
                 engine_version TEXT NOT NULL, files_scanned INTEGER, archive_bytes INTEGER,
                 blockers INTEGER, criticals INTEGER, majors INTEGER,
                 supply_chain INTEGER, issue_count INTEGER, verdict TEXT,
-                issues JSONB, UNIQUE (package_id, version, profile, engine_version));
+                issues JSONB, artifacts JSONB,
+                UNIQUE (package_id, version, profile, engine_version));
+                ALTER TABLE {self.t}scans ADD COLUMN IF NOT EXISTS artifacts JSONB;
                 CREATE INDEX IF NOT EXISTS idx_scans_package
                 ON {self.t}scans(package_id, scanned_at DESC)""")
             return
@@ -782,7 +1846,11 @@ class Store:
             engine_version TEXT NOT NULL, files_scanned INTEGER, archive_bytes INTEGER,
             blockers INTEGER, criticals INTEGER, majors INTEGER,
             supply_chain INTEGER, issue_count INTEGER, verdict TEXT,
-            issues {jsontype}, UNIQUE (package_id, version, profile, engine_version))""")
+            issues {jsontype}, artifacts {jsontype},
+            UNIQUE (package_id, version, profile, engine_version))""")
+        columns = {row[1] for row in cur.execute(f"PRAGMA table_info({self.t}scans)")}
+        if "artifacts" not in columns:
+            cur.execute(f"ALTER TABLE {self.t}scans ADD COLUMN artifacts {jsontype}")
         # G20: WAL already set at connect; index for the status() lateral join
         cur.execute(f"CREATE INDEX IF NOT EXISTS idx_scans_package "
                     f"ON {self.t}scans(package_id, scanned_at DESC)")
@@ -820,7 +1888,7 @@ class Store:
                 f"ON CONFLICT (ecosystem,name) DO UPDATE "
                 f"SET added_at={self.t}packages.added_at "
                 f"RETURNING id, (xmax = 0) AS created",
-                eco, name, now)
+                eco, _db_text(name), now)
             return row[0], row[1]
         cur = self.conn.cursor()
         # SQLite: single write that is a no-op if the row exists (keeps the
@@ -862,7 +1930,7 @@ class Store:
         return self._one(
             f"SELECT id FROM {self.t}scans WHERE package_id={p1} AND version={p2} "
             f"AND profile={p3} AND engine_version={p4}",
-            (pid, version, profile, engine_version)) is not None
+            (pid, _db_text(version), profile, engine_version)) is not None
 
     def save_scan(self, pid, res):
         """Persist one scan result as a SINGLE atomic statement (audit G20).
@@ -875,6 +1943,10 @@ class Store:
         the same UNIQUE (package_id, version, profile, engine_version) the
         schema already declares, inside one transaction: there is no window
         in which the version has no row.
+
+        Text is made storable first (_db_clean): Postgres rejects NUL and
+        lone surrogates in TEXT/JSONB, and an issue that quotes a hostile
+        hook command or a non-UTF-8 member name must not cost the verdict.
         """
         sc = res["sevCounts"]
         conflict_key = ("ON CONFLICT (package_id, version, profile, engine_version) "
@@ -886,41 +1958,28 @@ class Store:
                         "blockers=excluded.blockers, criticals=excluded.criticals, "
                         "majors=excluded.majors, supply_chain=excluded.supply_chain, "
                         "issue_count=excluded.issue_count, verdict=excluded.verdict, "
-                        "issues=excluded.issues")
+                        "issues=excluded.issues, artifacts=excluded.artifacts")
+        values = (pid, _db_text(res["version"]), res["profile"], res["scannedAt"], ENGINE_VERSION,
+                  res["filesScanned"], res["archiveBytes"], sc["BLOCKER"], sc["CRITICAL"],
+                  sc["MAJOR"], res["supplyChain"], len(res["issues"]), _db_text(res["verdict"]),
+                  db_json(res["issues"]), db_json(res.get("artifacts") or []))
+        columns = ("INSERT INTO {t}scans (package_id,version,profile,scanned_at,"
+                   "engine_version,files_scanned,archive_bytes,blockers,criticals,majors,"
+                   "supply_chain,issue_count,verdict,issues,artifacts) ").format(t=self.t)
         if self.pg:
-            # (external-driver removal) the old code called
-            # self.conn.execute("BEGIN IMMEDIATE") — external-driver
-            # connections had no .execute method, so this path raised
-            # AttributeError before it could ever persist anything (latent
-            # bug: never exercised on a real server). The wire client's
-            # transaction() context gives the
-            # same single-atomic-statement guarantee (commit on success,
-            # rollback on exception). $14::jsonb casts the dumps'd issues text
-            # into the JSONB column (sqlite stores TEXT identically).
+            # The wire client's transaction() gives the single-atomic-statement
+            # guarantee (commit on success, rollback on exception). ::jsonb
+            # casts the dumps'd text into the JSONB columns (sqlite stores TEXT).
             with self.conn.transaction():
                 self.conn.execute(
-                    f"INSERT INTO {self.t}scans (package_id,version,profile,scanned_at,"
-                    f"engine_version,files_scanned,archive_bytes,blockers,criticals,majors,"
-                    f"supply_chain,issue_count,verdict,issues) "
-                    f"VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb) "
-                    f"{conflict_key}",
-                    pid, res["version"], res["profile"], res["scannedAt"], ENGINE_VERSION,
-                    res["filesScanned"], res["archiveBytes"], sc["BLOCKER"], sc["CRITICAL"],
-                    sc["MAJOR"], res["supplyChain"], len(res["issues"]), res["verdict"],
-                    json.dumps(res["issues"]))
+                    columns + "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,"
+                              f"$14::jsonb,$15::jsonb) {conflict_key}",
+                    *values)
             return
         cur = self.conn.cursor()
         try:
             self.conn.execute("BEGIN IMMEDIATE")
-            cur.execute(
-                f"INSERT INTO {self.t}scans (package_id,version,profile,scanned_at,"
-                f"engine_version,files_scanned,archive_bytes,blockers,criticals,majors,"
-                f"supply_chain,issue_count,verdict,issues) "
-                f"VALUES ({','.join([self.ph]*14)}) {conflict_key}",
-                (pid, res["version"], res["profile"], res["scannedAt"], ENGINE_VERSION,
-                 res["filesScanned"], res["archiveBytes"], sc["BLOCKER"], sc["CRITICAL"],
-                 sc["MAJOR"], res["supplyChain"], len(res["issues"]), res["verdict"],
-                 json.dumps(res["issues"])))
+            cur.execute(columns + f"VALUES ({','.join([self.ph] * 15)}) {conflict_key}", values)
             self.conn.commit()
         except Exception:
             self.conn.rollback()
@@ -943,7 +2002,7 @@ class Store:
 
     def report(self, eco, name, version=None):
         p1, p2 = self._phs(2)
-        q = (f"SELECT s.version, s.profile, s.scanned_at, s.verdict, s.issues "
+        q = (f"SELECT s.version, s.profile, s.scanned_at, s.verdict, s.issues, s.artifacts "
              f"FROM {self.t}scans s JOIN {self.t}packages p ON p.id = s.package_id "
              f"WHERE p.ecosystem={p1} AND p.name={p2}")
         args = [eco, name]
@@ -991,8 +2050,15 @@ class Store:
                              "with --rescan to rebuild a sane stored result."),
                      "ref": "CWE-506 · Supply chain"},
                     row[0] or "<stored>", 1, [])]
+        artifacts = row[5] if len(row) > 5 else None
+        if isinstance(artifacts, str):
+            try:
+                artifacts = json.loads(artifacts)
+            except (ValueError, RecursionError):
+                artifacts = None
         return {"version": row[0], "profile": row[1], "scannedAt": row[2],
-                "verdict": row[3], "issues": issues}
+                "verdict": row[3], "issues": issues,
+                "artifacts": artifacts if isinstance(artifacts, list) else []}
 
 
 # ---------------- CLI ----------------
@@ -1018,6 +2084,11 @@ def print_scan(res, top=15):
     print(f"  {res['filesScanned']} source files · {res.get('binaryArtifacts', 0)} binary "
           f"artifacts · {res['archiveBytes']//1024} KB {res.get('artifact','')} "
           f"· profile: {res['profile']}")
+    arts = res.get("artifacts") or []
+    if len(arts) > 1:
+        for a in arts:
+            print(f"    {lazaret.sanitize_term(a.get('verdict'))!s:<10} "
+                  f"{lazaret.sanitize_term(a.get('filename'))}")
     print(f"  blockers {sc['BLOCKER']} · criticals {sc['CRITICAL']} · majors {sc['MAJOR']} "
           f"· supply-chain indicators {res['supplyChain']}")
     for i in res["issues"][:top]:
@@ -1041,7 +2112,10 @@ def parse_since(s):
     m = re.fullmatch(r"(\d+)\s*([hdw])", s)
     if m:
         hours = int(m.group(1)) * {"h": 1, "d": 24, "w": 168}[m.group(2)]
-        return now - datetime.timedelta(hours=hours)
+        try:
+            return now - datetime.timedelta(hours=hours)
+        except OverflowError:
+            raise ValueError(f"bad --since {s!r}; use e.g. 7d, 2w, 24h, or 2026-06-25") from None
     try:
         d = datetime.datetime.fromisoformat(s)
         return d if d.tzinfo else d.replace(tzinfo=datetime.timezone.utc)
@@ -1075,6 +2149,8 @@ def _parse_xml(raw):
         return _safe_ET.fromstring(raw, forbid_dtd=True, max_bytes=FEED_MAX_BYTES)
     except _safexml.SafeXMLError as exc:
         raise FeedError(f"feed rejected by the XML hardening layer: {exc}") from None
+    except (_safe_ET.ParseError, ValueError, RecursionError) as exc:
+        raise FeedError(f"feed is not well-formed XML ({type(exc).__name__})") from None
 
 
 def _feed_token_ok(value):
@@ -1091,7 +2167,8 @@ def discover_pypi(cutoff, limit):
     found = {}
     for feed in ("https://pypi.org/rss/packages.xml", "https://pypi.org/rss/updates.xml"):
         try:
-            raw = http_bytes(feed)
+            # metadata budget (5 MB) and timeout, not the 200 MB artifact budget
+            raw = _fetch(feed, max_bytes=MAX_FEED_BYTES, timeout=METADATA_TIMEOUT)
         except Exception as exc:                                   # noqa: BLE001
             # audit H1: FetchError/_fetch messages can embed text derived from
             # the network response; `feed` is a constant URL.
@@ -1112,7 +2189,7 @@ def discover_pypi(cutoff, limit):
                 continue
             try:
                 when = email.utils.parsedate_to_datetime(pub)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, IndexError, OverflowError):
                 continue
             when = _to_utc(when)
             if when < cutoff:
@@ -1121,8 +2198,8 @@ def discover_pypi(cutoff, limit):
             name = parts[0]
             version = parts[1] if len(parts) > 1 else None
             # G14/F10: feed-derived names drive downloads — validate them
-            # against the same allowlist as CLI specs.
-            if not _feed_token_ok(name):
+            # against the same rules as CLI specs.
+            if not valid_name("pypi", name):
                 continue
             if version is not None and not _feed_token_ok(version):
                 version = None
@@ -1135,7 +2212,8 @@ def discover_pypi(cutoff, limit):
 def discover_npm(cutoff, limit):
     """Recently updated npm packages via the replication _changes feed. Best-effort:
     the feed requires network access to replicate.npmjs.com; on failure npm
-    discovery is skipped with a warning rather than aborting the run."""
+    discovery is skipped with a warning rather than aborting the run. Rows of
+    an unexpected shape, and names npm itself would not accept, are skipped."""
     want = (limit or 100) * 3
     url = (f"https://replicate.npmjs.com/_changes?descending=true"
            f"&include_docs=true&limit={want}")
@@ -1149,15 +2227,26 @@ def discover_npm(cutoff, limit):
               f"({lazaret.sanitize_term(exc)}); npm discovery skipped "
               f"(needs access to replicate.npmjs.com).", file=sys.stderr)
         return []
-    out = {}
-    for row in data.get("results", []):
-        doc = row.get("doc") or {}
-        name = doc.get("name") or row.get("id")
-        if not name or name.startswith("_"):
+    results = data.get("results") if isinstance(data, dict) else None
+    if not isinstance(results, list):
+        print("warning: npm changes feed has an unexpected shape; npm discovery skipped.",
+              file=sys.stderr)
+        return []
+    out, rejected = {}, 0
+    for row in results:
+        if not isinstance(row, dict):
             continue
-        modified = (doc.get("time") or {}).get("modified")
+        doc = row.get("doc") if isinstance(row.get("doc"), dict) else {}
+        name = doc.get("name") if isinstance(doc.get("name"), str) else row.get("id")
+        if not isinstance(name, str) or not name or name.startswith("_"):
+            continue
+        if not valid_name("npm", name):
+            rejected += 1
+            continue
+        times = doc.get("time") if isinstance(doc.get("time"), dict) else {}
+        modified = times.get("modified")
         when = None
-        if modified:
+        if isinstance(modified, str):
             try:
                 # G13: 'Z' suffix makes fromisoformat produce aware datetimes on
                 # Python < 3.11; force every parse to UTC-aware either way so
@@ -1168,9 +2257,15 @@ def discover_npm(cutoff, limit):
                 when = None
         if when is None or when < cutoff:
             continue
-        version = (doc.get("dist-tags") or {}).get("latest")
+        tags = doc.get("dist-tags") if isinstance(doc.get("dist-tags"), dict) else {}
+        version = tags.get("latest") if isinstance(tags.get("latest"), str) else None
+        if version is not None and not _feed_token_ok(version):
+            version = None
         if name not in out or when > out[name][3]:
             out[name] = ("npm", name, version, when)
+    if rejected:
+        print(f"warning: skipped {rejected} npm feed name(s) that are not valid package names.",
+              file=sys.stderr)
     res = sorted(out.values(), key=lambda x: x[3], reverse=True)
     return res[:limit] if limit else res
 
@@ -1191,37 +2286,49 @@ def cmd_discover(store, args):
         return False
     print(f"\nDiscovered {len(discovered)} package(s) since {cutoff.strftime('%Y-%m-%d %H:%M')} UTC:")
     for eco, name, ver, when in discovered:
-        # audit H1: discovery-feed name/version — the npm branch does NOT
-        # run _feed_token_ok, so both are raw feed text. Sanitize before the
-        # width-free print (the strftime timestamp is engine-controlled).
+        # audit H1: discovery-feed name/version are raw feed text. Sanitize
+        # before the width-free print (the strftime timestamp is engine-controlled).
         print(f"  {when.strftime('%Y-%m-%d %H:%M')}  "
               f"{lazaret.sanitize_term(eco)}:{lazaret.sanitize_term(name)}"
               f"{('@' + lazaret.sanitize_term(ver)) if ver else ''}")
     if args.add or args.scan:
         for eco, name, _ver, _when in discovered:
-            store.add_package(eco, name)
+            if valid_name(eco, name):
+                store.add_package(eco, name)
     if args.scan:
         specs = [f"{eco}:{name}" + (f"@{ver}" if ver else "")
                  for eco, name, ver, _ in discovered]
         print(f"\nScanning {len(specs)} discovered package(s)…")
-        return cmd_scan(store, specs, args.full, args.rescan)
+        return cmd_scan(store, specs, args.full, args.rescan, errors=getattr(args, "_errors", None))
     return False
 
 
-def cmd_scan(store, specs, full, rescan):
+def cmd_scan(store, specs, full, rescan, errors=None):
+    """Scan each spec; returns True when any result is SUSPICIOUS/INCOMPLETE
+    or any spec failed. One package's failure (bad name in the watchlist,
+    network, a store error) never stops the sweep. `errors`, when given,
+    collects store failures (the CLI exits non-zero for them)."""
     exit_bad = False
+    profile = "full" if full else "supply-chain"
     for spec in specs:
-        eco, name, ver = parse_spec(spec)
-        pid, _ = store.add_package(eco, name)
-        profile = "full" if full else "supply-chain"
-        if ver and not rescan and store.has_scan(pid, ver, profile):
-            # audit H1: name/version echo registry- or feed-derived text.
-            print(f"{lazaret.sanitize_term(eco)}:{lazaret.sanitize_term(name)}@"
-                  f"{lazaret.sanitize_term(ver)} already scanned ({profile}); "
-                  f"use --rescan to redo")
-            continue
         try:
-            res = scan_package(eco, name, ver, full)
+            eco, name, ver = parse_spec(spec)
+            pid, _ = store.add_package(eco, name)
+            resolved = None
+            if not rescan:
+                if ver is None:
+                    # scan-all specs carry no version: ask the registry which
+                    # version is current BEFORE downloading, so an already
+                    # scanned version is skipped instead of re-scanned.
+                    resolved = resolve(eco, name, None)
+                    ver = resolved[0]
+                if ver and store.has_scan(pid, ver, profile):
+                    # audit H1: name/version echo registry- or feed-derived text.
+                    print(f"{lazaret.sanitize_term(eco)}:{lazaret.sanitize_term(name)}@"
+                          f"{lazaret.sanitize_term(ver)} already scanned ({profile}); "
+                          f"use --rescan to redo")
+                    continue
+            res = scan_package(eco, name, ver, full, resolved=resolved)
         except Exception as exc:
             # audit H1: {spec} is echoed verbatim and {exc} embeds registry
             # response text (FetchError URL/reason, JSON parse position) —
@@ -1230,26 +2337,36 @@ def cmd_scan(store, specs, full, rescan):
                   f"{lazaret.sanitize_term(exc)}", file=sys.stderr)
             exit_bad = True
             continue
-        if not rescan and store.has_scan(pid, res["version"], profile):
-            # audit H1: res['version'] is re-read from registry metadata and
-            # is NOT NAME_RE/version-gated at this point.
-            print(f"{lazaret.sanitize_term(eco)}:{lazaret.sanitize_term(name)}@"
-                  f"{lazaret.sanitize_term(res['version'])} already scanned "
-                  f"({profile}); skipping store")
-        else:
-            store.save_scan(pid, res)
+        try:
+            if not rescan and store.has_scan(pid, res["version"], profile):
+                # audit H1: res['version'] is re-read from registry metadata.
+                print(f"{lazaret.sanitize_term(eco)}:{lazaret.sanitize_term(name)}@"
+                      f"{lazaret.sanitize_term(res['version'])} already scanned "
+                      f"({profile}); skipping store")
+            else:
+                store.save_scan(pid, res)
+        except Exception as exc:
+            # The verdict is printed below all the same; the failure to record
+            # it is an error of its own and fails the run at the end.
+            print(f"error storing the scan of {lazaret.sanitize_term(spec)}: "
+                  f"{type(exc).__name__}: {lazaret.sanitize_term(exc)}", file=sys.stderr)
+            exit_bad = True
+            if errors is not None:
+                errors.append(spec)
         print_scan(res)
         exit_bad |= res["verdict"] in ("SUSPICIOUS", "INCOMPLETE")  # a partial scan never passes
     return exit_bad
 
 
 def main():
+    global SCAN_TIMEOUT, MAX_ARTIFACTS
     lazaret.configure_stdio()
     ap = argparse.ArgumentParser(prog="lazaret-registry", description="Lazaret npm/PyPI registry scanner")
     ap.add_argument("command", choices=["add", "scan", "scan-all", "list", "report", "discover"])
     ap.add_argument("specs", nargs="*", help="npm:<name>[@ver] or pypi:<name>[@ver]")
     ap.add_argument("--db", default=os.environ.get("LAZARET_DB", "lazaret-registry.db"),
-                    help="SQLite path or postgres:// DSN (env LAZARET_DB)")
+                    help="SQLite path (or sqlite:PATH), postgres:// URL or libpq "
+                         "'host=… dbname=…' string (env LAZARET_DB)")
     ap.add_argument("--full", action="store_true",
                     help="Run the full ruleset, not just supply-chain/secret rules")
     ap.add_argument("--rescan", action="store_true", help="Re-scan already-scanned versions")
@@ -1261,6 +2378,12 @@ def main():
                          "including the DB blob)")
     ap.add_argument("--excerpt-width", type=int, metavar="N",
                     help="Chars of the matched line to show under each finding (default 100)")
+    ap.add_argument("--scan-timeout", type=float, metavar="SECONDS",
+                    help=f"Time budget per archive (default {SCAN_TIMEOUT:g}, env "
+                         f"LAZARET_SCAN_TIMEOUT); past it the verdict is INCOMPLETE")
+    ap.add_argument("--max-artifacts", type=int, metavar="N",
+                    help=f"PyPI files scanned per release (default {MAX_ARTIFACTS}, env "
+                         f"LAZARET_MAX_ARTIFACTS); more makes the verdict INCOMPLETE")
     # discover options
     ap.add_argument("--since", default="7d",
                     help="discover: time window — 7d, 2w, 24h, or an ISO date (default 7d)")
@@ -1276,17 +2399,27 @@ def main():
     lazaret.REDACT_SECRETS = not args.no_redact_secrets
     if args.excerpt_width:
         lazaret.EXCERPT_WIDTH = args.excerpt_width
+    if args.scan_timeout and args.scan_timeout > 0:
+        SCAN_TIMEOUT = args.scan_timeout
+    if args.max_artifacts and args.max_artifacts > 0:
+        MAX_ARTIFACTS = args.max_artifacts
     try:
         store = Store(args.db)
     except RuntimeError as exc:
         # CLI boundary: Store.__init__ raises RuntimeError when the Postgres
-        # backend is unreachable (library code must not sys.exit — the MCP
-        # server dispatches it); here the CLI keeps the exact legacy behavior.
+        # backend is unreachable or --db is unusable (library code must not
+        # sys.exit — the MCP server dispatches it); here the CLI keeps the
+        # exact legacy behavior.
         sys.exit(str(exc))
+    errors = []
+    args._errors = errors
 
     if args.command == "add":
         for spec in args.specs:
-            eco, name, _ = parse_spec(spec)
+            try:
+                eco, name, _ = parse_spec(spec)
+            except SpecError as exc:
+                sys.exit(f"error: {lazaret.sanitize_term(exc)}")
             _, created = store.add_package(eco, name)
             # audit H1: operator CLI arg; sanitize is a no-op for clean names.
             print(f"{'added' if created else 'already tracked'}: "
@@ -1295,8 +2428,8 @@ def main():
     elif args.command == "scan":
         if not args.specs:
             sys.exit("scan needs at least one package spec")
-        bad = cmd_scan(store, args.specs, args.full, args.rescan)
-        if args.ci and bad:
+        bad = cmd_scan(store, args.specs, args.full, args.rescan, errors=errors)
+        if errors or (args.ci and bad):
             sys.exit(1)
 
     elif args.command == "scan-all":
@@ -1304,8 +2437,8 @@ def main():
         if not specs:
             sys.exit("no tracked packages — use 'add' first")
         print(f"Scanning latest versions of {len(specs)} tracked package(s)…")
-        bad = cmd_scan(store, specs, args.full, args.rescan)
-        if args.ci and bad:
+        bad = cmd_scan(store, specs, args.full, args.rescan, errors=errors)
+        if errors or (args.ci and bad):
             sys.exit(1)
 
     elif args.command == "discover":
@@ -1317,7 +2450,7 @@ def main():
             # dispatches discover_packages); the CLI keeps the exact legacy
             # behavior: message on stderr, exit 1.
             sys.exit(str(exc))
-        if args.ci and bad:
+        if errors or (args.ci and bad):
             sys.exit(1)
 
     elif args.command == "list":
@@ -1344,7 +2477,10 @@ def main():
     elif args.command == "report":
         if not args.specs:
             sys.exit("report needs a package spec")
-        eco, name, ver = parse_spec(args.specs[0])
+        try:
+            eco, name, ver = parse_spec(args.specs[0])
+        except SpecError as exc:
+            sys.exit(f"error: {lazaret.sanitize_term(exc)}")
         rep = store.report(eco, name, ver)
         if not rep:
             # audit H1: args.specs[0] is echoed before any validation applies
@@ -1357,6 +2493,10 @@ def main():
               f"{lazaret.sanitize_term(rep['version'])} — "
               f"{lazaret.sanitize_term(rep['verdict'])} "
               f"(profile {rep['profile']}, scanned {rep['scannedAt']})")
+        for a in rep.get("artifacts") or []:
+            if isinstance(a, dict) and len(rep["artifacts"]) > 1:
+                print(f"  {lazaret.sanitize_term(a.get('verdict'))!s:<10} "
+                      f"{lazaret.sanitize_term(a.get('filename'))}")
         for i in rep["issues"]:
             prefix = f"  {i['sev']:<8} [{i['rule']}] "
             # audit H1: stored archive member names + rule messages that embed

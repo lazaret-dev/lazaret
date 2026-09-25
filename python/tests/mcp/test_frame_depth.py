@@ -35,8 +35,11 @@ class FrameDepthTests(unittest.TestCase):
         self.assertIsNone(err)
         self.assertEqual(req["id"], 7)
 
-    def test_malformed_frames_are_still_dropped_quietly(self):
-        self.assertEqual(_loads_frame('{"jsonrpc": "2.0", "id": 1'), (None, None))
+    def test_malformed_frames_are_a_parse_error(self):
+        # JSON-RPC 2.0: not-JSON is answered with -32700 (review finding 18c)
+        req, err = _loads_frame('{"jsonrpc": "2.0", "id": 1')
+        self.assertIsNone(req)
+        self.assertEqual(err["code"], -32700)
 
 
 if __name__ == "__main__":

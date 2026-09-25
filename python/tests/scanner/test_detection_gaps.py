@@ -127,8 +127,10 @@ class G11InstallHooks(unittest.TestCase):
         # npx/node/git-clone hooks bypass the old denylist: MAJOR presence
         self.assertEqual(sevs["postinstall"], "MAJOR")   # git clone … && make
         self.assertEqual(sevs["preinstall"], "MAJOR")    # npx --yes evil
-        # a curl in a hook still escalates
-        self.assertEqual(sevs["prepare"], "MAJOR")
+        # shared semantics 3: in a project checkout a prepare-family hook
+        # whose command does not match the fetch/eval patterns is INFO (the
+        # project's own build step); a suspicious one stays CRITICAL
+        self.assertEqual(sevs["prepare"], "INFO")
 
     def test_binding_gyp_actions_flagged(self):
         res = scan_to_result(os.path.join(FIXTURES, "gyp"))

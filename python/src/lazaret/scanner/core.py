@@ -1177,15 +1177,169 @@ def byte_entropy(data):
     n = len(data)
     return -sum((c / n) * math.log2(c / n) for c in freq if c)
 
+# Characters that cannot occur in text: bytes of invalid UTF-8 sequences
+# (decoded with surrogateescape to U+DC80..U+DCFF) and C0 controls other than
+# whitespace and ESC, NUL included.
+_NON_TEXT_CHARS_RE = re.compile("[\udc80-\udcff\x00-\x08\x0e-\x1a\x1c-\x1f\x7f]")
+_NON_TEXT_SHARE = 0.30
+
+
 def looks_binary(sample):
-    """Heuristic text/binary classification from a leading byte sample."""
+    """Heuristic text/binary classification from a leading byte sample.
+
+    Only bytes that cannot be text count: invalid UTF-8 and C0 control
+    characters (NUL included). Valid non-ASCII UTF-8 is text however much of
+    it there is (an accented package description, CJK comments), and a single
+    NUL inside a comment does not turn a source file into a "binary" that is
+    never scanned. Callers must not use this to decide whether a file with a
+    source extension or a manifest name gets scanned: those are always
+    scanned as text (see decode_source)."""
     if not sample:
         return False
-    if b"\x00" in sample[:1024]:
-        return True
-    textset = set(range(0x20, 0x7f)) | {9, 10, 12, 13, 27}
-    nontext = sum(1 for b in sample if b not in textset)
-    return nontext / len(sample) > 0.30
+    sample = bytes(sample)
+    text = sample.decode("utf-8", "surrogateescape")
+    bad = len(_NON_TEXT_CHARS_RE.findall(text))
+    return bad / len(sample) > _NON_TEXT_SHARE
+
+
+def _mpeg_ts(header):
+    """MPEG transport stream (.ts video): sync byte every 188 bytes. Shares
+    the .ts extension with TypeScript."""
+    return len(header) >= 377 and header[0] == header[188] == header[376] == 0x47
+
+
+# ---------------- Source decoding (registry, MCP; spec items 1/4/15) ----------------
+_PY_COOKIE_RE = re.compile(rb"^[ \t\f]*#.*?coding[:=][ \t]*([-\w.]+)", re.ASCII)
+_PY_BLANK_RE = re.compile(rb"^[ \t\f]*(?:[#\r\n]|$)", re.ASCII)
+_Q_ENCODING = {
+    "id": "Q-ENCODING", "name": "Non-UTF-8 source encoding", "type": "SMELL", "sev": "INFO",
+    "why": "A non-UTF-8 source read as UTF-8 decodes to mojibake, hiding every "
+           "pattern-based finding — a UTF-16 eval() scans clean.",
+    "fix": "Re-save the file as UTF-8 so tooling reads it as written.",
+    "ref": "Maintainability"}
+_SC_UTF7 = {
+    "id": "SC-UTF7", "name": "UTF-7 source encoding", "type": "HOTSPOT", "sev": "CRITICAL",
+    "msg": "Python source declares UTF-7; code can hide in comments.",
+    "why": ("Under a UTF-7 coding cookie, '+AAo-' decodes to a newline: what looks "
+            "like a comment line to a reviewer, an editor and a UTF-8 scanner is "
+            "executable code to the interpreter. No legitimate project needs it."),
+    "fix": "Treat the package as hostile; review the UTF-7-decoded text (scanned here).",
+    "ref": "CWE-506 · Supply chain"}
+
+
+def _is_utf7(codec):
+    try:
+        import codecs
+        return codecs.lookup(codec).name == "utf-7"
+    except (LookupError, TypeError, ValueError):
+        return False
+
+
+def _python_cookie(data):
+    """PEP 263 coding cookie of Python source bytes, exactly where CPython
+    looks: line 1, or line 2 when line 1 is blank or a comment. -> (codec
+    name as written, line number) or (None, None)."""
+    lines = data.split(b"\n", 2)
+    for idx, line in enumerate(lines[:2]):
+        m = _PY_COOKIE_RE.match(line)
+        if m:
+            return m.group(1).decode("ascii"), idx + 1
+        if idx == 0 and not _PY_BLANK_RE.match(line):
+            break
+    return None, None
+
+
+def _text_is_plausible(text):
+    """Does a UTF-16 guess (NUL in the first four bytes, no BOM) read as
+    text? A UTF-8 file with a NUL near the top (`/*\\0*/eval(…)`) decodes to
+    CJK-looking garbage under UTF-16; real UTF-16 source is mostly ASCII."""
+    if not text:
+        return False
+    sample = text[:2048]
+    plain = sum(1 for ch in sample if " " <= ch <= "~" or ch in "\t\r\n")
+    return plain / len(sample) >= 0.70
+
+
+def _undecodable_share(text):
+    if not text:
+        return 0.0
+    sample = text[:65536]
+    bad = sample.count("�") + len(_NON_TEXT_CHARS_RE.findall(sample))
+    return bad / len(sample)
+
+
+def decode_source(path, data):
+    """Decode a source file's bytes the way its runtime reads it.
+    -> (text, extra_issues).
+
+    Order (shared semantics 4 and 15): a BOM decides first (UTF-8-sig,
+    UTF-16 LE/BE); a NUL in the first four bytes suggests BOM-less UTF-16,
+    accepted only when the result reads as text; for .py (and .pyw) files a
+    PEP 263 cookie on line 1/2 names the codec. Any non-plain-UTF-8 case adds
+    Q-ENCODING (INFO); a UTF-7 cookie adds SC-UTF7 (CRITICAL) and the
+    UTF-7-decoded text is what gets scanned. Nothing here raises: an unknown
+    or broken codec falls back to UTF-8 with replacement.
+
+    A file that does not decode to anything text-like (more than 30% invalid
+    bytes or control characters) adds SC-TRUNCATED: it was "scanned" only as
+    mojibake, so the scan of it proves nothing."""
+    data = bytes(data or b"")
+    ext = os.path.splitext(path)[1].lower()
+    codec, body, cookie_line = None, data, None
+    if data.startswith(b"\xef\xbb\xbf"):
+        codec, body = "utf-8-sig", data[3:]
+    elif data.startswith(b"\xff\xfe"):
+        codec, body = "utf-16-le", data[2:]
+    elif data.startswith(b"\xfe\xff"):
+        codec, body = "utf-16-be", data[2:]
+    elif b"\x00" in data[:4]:
+        nul = data[:4].index(b"\x00")
+        guess = "utf-16-le" if nul in (1, 3) else "utf-16-be"
+        text = data.decode(guess, "replace")
+        if _text_is_plausible(text):
+            codec = guess
+    label = codec              # what Q-ENCODING reports; None = plain UTF-8
+    if ext in (".py", ".pyw") and codec in (None, "utf-8-sig"):
+        cookie, cookie_line = _python_cookie(body)
+        if cookie:
+            import codecs
+            try:
+                norm = codecs.lookup(cookie).name
+            except LookupError:
+                norm = None
+            if norm is None:
+                label = f"unknown codec {cookie!r}; read as UTF-8"
+            elif norm != "utf-8" and codec is None:
+                codec = label = cookie
+    utf7 = bool(codec) and _is_utf7(codec)
+    decoded = None
+    if codec in (None, "utf-8-sig"):
+        decoded = body.decode("utf-8", "replace")
+    else:
+        try:
+            decoded = body.decode(codec)
+        except (UnicodeDecodeError, LookupError, TypeError, ValueError):
+            try:
+                decoded = body.decode(codec, "replace")
+            except (LookupError, TypeError, ValueError):
+                decoded = None
+    if not isinstance(decoded, str):          # unusable or bytes-to-bytes codec
+        label = f"{codec} (not usable; read as UTF-8)"
+        decoded = body.decode("utf-8", "replace")
+    lines = normalize_newlines(decoded).split("\n")
+    extra = []
+    if label:
+        q = dict(_Q_ENCODING)
+        q["msg"] = f"Source file is not UTF-8 (detected {label}); decoded explicitly."
+        extra.append(mk_issue(q, path, 1, lines))
+    if utf7:
+        extra.append(mk_issue(_SC_UTF7, path, cookie_line or 1, lines))
+    share = _undecodable_share(decoded)
+    if share > _NON_TEXT_SHARE and not (ext == ".ts" and _mpeg_ts(data[:512])):
+        extra.append(truncated_issue(
+            path, f"content is not decodable as text ({share:.0%} invalid bytes or "
+                  f"control characters), so no rule could read it"))
+    return decoded, extra
 
 def classify_binary(path, data, size, context):
     """Return a supply-chain issue dict for a suspicious non-source file, or None.
@@ -2782,13 +2936,15 @@ INSTALL_HOOK_RE = re.compile(
 # scripts (prepack, prepublishOnly, postpublish, ...) only ever run on the
 # maintainer's machine while packaging a release, so they are not install hooks.
 NPM_INSTALL_SCRIPTS = ("preinstall", "install", "postinstall")
-# In a checked-out project (not a registry tarball), `npm install` also runs prepare.
-NPM_LOCAL_INSTALL_SCRIPTS = NPM_INSTALL_SCRIPTS + ("prepare",)
+# In a checked-out project (not a registry tarball), `npm install` also runs
+# the prepare family (preprepare, prepare, postprepare).
+NPM_PREPARE_SCRIPTS = ("preprepare", "prepare", "postprepare")
+NPM_LOCAL_INSTALL_SCRIPTS = NPM_INSTALL_SCRIPTS + NPM_PREPARE_SCRIPTS
 NPM_LIFECYCLE_SCRIPTS = NPM_LOCAL_INSTALL_SCRIPTS   # backwards-compatible name
 PY_LIFECYCLE_SECTIONS = ("build-system", "tool.poetry", "project")
 
-def _sc_install_hook_issue(path, line_no, lines, script, cmd, suspicious):
-    sev = "CRITICAL" if suspicious else "MAJOR"
+def _sc_install_hook_issue(path, line_no, lines, script, cmd, suspicious, sev=None):
+    sev = sev or ("CRITICAL" if suspicious else "MAJOR")
     if suspicious:
         msg = f'"{script}" script runs a network-fetch/eval command at install time.'
         why = ("Install hooks execute automatically on npm install — the most common "
@@ -2800,6 +2956,10 @@ def _sc_install_hook_issue(path, line_no, lines, script, cmd, suspicious):
                "before anyone reviews the package. Many legitimate packages use one "
                "(to fetch a platform binary, for example), so on its own this is a "
                "capability to review, not evidence of malice.")
+        if sev == "INFO":
+            why = ("A prepare-family script runs on `npm install` in this checkout; it "
+                   "is the project's own build step (husky, patch-package, a compile), "
+                   "listed for inventory. Suspicious commands here stay CRITICAL.")
     issue = mk_issue(
         {"id": "SC-INSTALL-HOOK", "name": "Install hook", "type": "HOTSPOT",
          "sev": sev, "msg": msg, "why": why,
@@ -2826,18 +2986,88 @@ def _sc_manifest_depth_issue(path):
          "fix": "Reject this package/file at your ingestion boundary; investigate the source.",
          "ref": "CWE-506 · Supply chain"}, path, 1, [])
 
-def _json_loads_manifest(path, content):
-    """json.loads for manifest-shaped, attacker-controlled content: returns
-    (data, depth_issue). data is None on any parse failure — normal JSON
-    errors yield [] issues (an unparseable manifest has nothing to check),
-    while RecursionError yields the SC-MANIFEST-DEPTH finding so a hostile
-    file can neither crash the scan nor hide behind the 'unparseable' path."""
+
+def manifest_unparseable_issue(path, reason):
+    """SC-MANIFEST-UNPARSEABLE (MAJOR): a ROOT package.json / binding.gyp the
+    scanner cannot read. npm may still read it (it strips a byte-order mark,
+    for one) and run its install hooks, so "nothing to check" is not a clean
+    result. The registry turns this into an INCOMPLETE verdict."""
+    name = os.path.basename(path.replace("\\", "/")) or path
+    return mk_issue(
+        {"id": "SC-MANIFEST-UNPARSEABLE", "name": "Unparseable manifest",
+         "type": "HOTSPOT", "sev": "MAJOR",
+         "msg": f"{name} could not be parsed ({reason}); its install hooks could not be checked.",
+         "why": ("Package managers are more forgiving than a strict parser in places (a "
+                 "byte-order mark, number formats), so a manifest the scanner cannot read "
+                 "may still run install scripts when the package is installed. An "
+                 "unreadable root manifest is reported instead of treated as empty."),
+         "fix": "Make the manifest valid JSON (binding.gyp: a Python/JSON literal) and "
+                "review its scripts by hand.",
+         "ref": "CWE-506 · Supply chain"}, path, 1, [])
+
+
+def is_root_manifest(path):
+    """A manifest at the top of the scanned tree / package (no directory part)."""
+    return os.path.dirname(path.replace("\\", "/").lstrip("/")) in ("", ".")
+
+
+def _json_int(text):
+    # JavaScript parses every JSON number as a double, so a 5000-digit
+    # integer is fine for npm (it becomes Infinity); int() would raise
+    # ValueError past sys.int_info.str_digits_check_threshold.
+    return int(text) if len(text) <= 1000 else float(text)
+
+
+def load_manifest(path, content, python_literal=False):
+    """Parse manifest-shaped, attacker-controlled text the way the package
+    manager does. -> (data, issues).
+
+    A leading UTF-8 BOM is stripped first (npm does). data is None when the
+    text cannot be parsed; issues then holds SC-MANIFEST-DEPTH for a
+    recursion-limit document, or SC-MANIFEST-UNPARSEABLE when the manifest
+    is at the root (a nested unreadable manifest is not a hook npm runs).
+    A top level that is not an object counts as unparseable too.
+    python_literal: also accept Python literal syntax (binding.gyp / .gypi:
+    gyp reads them as Python, so single quotes, comments and trailing commas
+    are normal there)."""
+    if not isinstance(content, str):
+        return None, ([manifest_unparseable_issue(path, "not text")]
+                      if is_root_manifest(path) else [])
+    text = content[1:] if content.startswith("\ufeff") else content
+    reason = None
     try:
-        return json.loads(content), None
-    except (json.JSONDecodeError, AttributeError):
-        return None, None
+        data = json.loads(text, parse_int=_json_int)
     except RecursionError:
-        return None, _sc_manifest_depth_issue(path)
+        return None, [_sc_manifest_depth_issue(path)]
+    except (ValueError, TypeError) as exc:
+        data = None
+        reason = (f"{type(exc).__name__}: line {exc.lineno} column {exc.colno}"
+                  if isinstance(exc, json.JSONDecodeError) else type(exc).__name__)
+    if data is None and python_literal:
+        import ast
+        try:
+            data = ast.literal_eval(text.strip())
+            reason = None
+        except RecursionError:
+            return None, [_sc_manifest_depth_issue(path)]
+        except (ValueError, TypeError, SyntaxError, MemoryError, OverflowError) as exc:
+            data = None
+            reason = reason or type(exc).__name__
+    if not isinstance(data, dict):
+        if data is not None:
+            reason = f"top level is a {type(data).__name__}, not an object"
+        return None, ([manifest_unparseable_issue(path, reason or "unparseable")]
+                      if is_root_manifest(path) else [])
+    return data, []
+
+
+def _json_loads_manifest(path, content):
+    """Backwards-compatible wrapper: (data, depth_issue). data is None on any
+    parse failure; depth_issue is SC-MANIFEST-DEPTH for recursion-limit input.
+    New code uses load_manifest, which also reports unparseable roots."""
+    data, issues = load_manifest(path, content)
+    depth = next((i for i in issues if i["rule"] == "SC-MANIFEST-DEPTH"), None)
+    return data, depth
 
 _NODE_E_RE = re.compile(r"""node\s+-e\s+(?:"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'|(\S+))""")
 _LOCAL_REQUIRE_RE = re.compile(r"""require\(\s*\\?["'](\.{1,2}/[^"'\\]+)\\?["']\s*\)""")
@@ -2860,14 +3090,176 @@ def _hook_is_suspicious(cmd):
     return bool(INSTALL_HOOK_RE.search(remainder))
 
 
+# ---- Following a hook command to the files it runs (registry) ----
+_HOOK_SEPARATORS = {"&&", "||", ";", "|", "&", "(", ")", ";;", "|&"}
+_HOOK_REDIRECTS = {">", ">>", "<", "<<", ">&", "<&", "&>", ">|"}
+_HOOK_WRAPPERS = {"env", "cross-env", "exec", "command", "nohup", "time", "nice", "sudo",
+                  "cross-env-shell", "dotenv"}
+_NODE_NAMES = {"node", "nodejs", "node.exe"}
+_SHELL_NAMES = {"sh", "bash", "dash", "zsh", "ksh", "ash", "sh.exe", "bash.exe"}
+_PYTHON_NAME_RE = re.compile(r"^(?:python(?:\d+(?:\.\d+)?)?|py)(?:\.exe)?$", re.I)
+_NODE_CODE_FLAGS = {"-e", "--eval", "-p", "--print"}
+_NODE_PRELOAD_FLAGS = {"-r", "--require", "--import", "--loader", "--experimental-loader"}
+_NODE_VALUE_FLAGS = _NODE_PRELOAD_FLAGS | {"-C", "--conditions", "--input-type", "--env-file",
+                                           "--title", "--inspect-port", "--redirect-warnings",
+                                           "--report-dir", "--diagnostic-dir", "--cpu-prof-dir",
+                                           "--heap-prof-dir", "--watch-path"}
+_SCRIPT_EXT_RE = re.compile(r"\.(?:c|m)?js$|\.sh$|\.py$", re.I)
+_ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def _hook_tokens(cmd):
+    """Shell-like tokenization of an npm script: quotes respected, operators
+    (&& || ; | & parentheses) as their own tokens. Never raises."""
+    import shlex
+    try:
+        lex = shlex.shlex(cmd, posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        lex.commenters = ""
+        return list(lex)
+    except ValueError:                     # unbalanced quotes: best effort
+        return re.findall(r"&&|\|\||[;|&()]|[^\s;|&()]+", cmd)
+
+
+def _local_module(value):
+    return bool(value) and (value.startswith(("./", "../", "/")) or bool(_SCRIPT_EXT_RE.search(value)))
+
+
+def _node_script(args):
+    """-> (script, preloads) for `node [flags] script [args]`."""
+    preloads, i = [], 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            return (args[i + 1] if i + 1 < len(args) else None), preloads
+        if a.startswith("-") and a != "-":
+            name, eq, val = a.partition("=")
+            if name in _NODE_CODE_FLAGS:
+                return None, preloads        # inline code: see the -e require scan
+            if name in _NODE_VALUE_FLAGS:
+                value = val if eq else (args[i + 1] if i + 1 < len(args) else "")
+                if name in _NODE_PRELOAD_FLAGS and _local_module(value):
+                    preloads.append(value)
+                i += 1 if eq else 2
+                continue
+            i += 1
+            continue
+        return a, preloads
+    return None, preloads
+
+
+def _interpreter_script(args, inline_flags=("-c",)):
+    """-> (script, inline_code) for `sh|python [flags] script` / `-c code`."""
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a in inline_flags:
+            return None, (args[i + 1] if i + 1 < len(args) else "")
+        if a == "-m" and i + 1 < len(args):                     # python -m pkg.mod
+            return args[i + 1].replace(".", "/") + ".py", None
+        if a in ("-o", "-O", "-W", "-X") and i + 1 < len(args):
+            i += 2
+            continue
+        if a.startswith("-") and a != "-":
+            i += 1
+            continue
+        return a, None
+    return None, None
+
+
+def _hook_segment_targets(tokens, depth):
+    """Targets of one tokenized command line; tracks `cd` across segments."""
+    targets, cwd, seg = [], "", []
+
+    def join(path):
+        path = path.replace("\\", "/")
+        if not cwd or path.startswith("/"):
+            return path
+        import posixpath
+        return posixpath.normpath(posixpath.join(cwd, path))
+
+    def flush(seg):
+        nonlocal cwd
+        words, skip = [], False
+        for tok in seg:
+            if skip:
+                skip = False
+                continue
+            if tok in _HOOK_REDIRECTS or re.fullmatch(r"\d?[<>]{1,2}&?\d?", tok):
+                skip = not re.search(r"&\d$", tok)
+                continue
+            words.append(tok)
+        while words and (_ENV_ASSIGN_RE.match(words[0]) or
+                         words[0].lower() in _HOOK_WRAPPERS):
+            words.pop(0)
+        if not words:
+            return
+        head = words[0].replace("\\", "/")
+        base = head.rsplit("/", 1)[-1].lower()
+        if base in ("cd", "pushd"):
+            dest = next((w for w in words[1:] if not w.startswith("-")), "")
+            if dest and dest not in ("~", "-") and not dest.startswith(("$", "~")):
+                import posixpath
+                dest = dest.replace("\\", "/")
+                cwd = dest.lstrip("/") if dest.startswith("/") else \
+                    posixpath.normpath(posixpath.join(cwd or ".", dest))
+                if cwd == ".":
+                    cwd = ""
+            return
+        script, extra = None, []
+        if base in _NODE_NAMES:
+            script, extra = _node_script(words[1:])
+        elif base in _SHELL_NAMES or _PYTHON_NAME_RE.match(base):
+            script, inline = _interpreter_script(words[1:])
+            if inline and depth < 2 and base in _SHELL_NAMES:
+                targets.extend(join(t) for t in _hook_targets(inline, depth + 1))
+        elif head.startswith(("./", "../")) or ("/" in head and not head.startswith("/")) \
+                or _SCRIPT_EXT_RE.search(head):
+            script = head                       # executed directly (shebang)
+        for t in [script] + extra:
+            if t:
+                targets.append(join(t))
+
+    for tok in tokens:
+        if tok in _HOOK_SEPARATORS or (tok and set(tok) <= set(";&|()")):
+            flush(seg)
+            seg = []
+        else:
+            seg.append(tok)
+    flush(seg)
+    return targets
+
+
+def _hook_targets(cmd, depth=0):
+    targets = []
+    variants = [cmd]
+    if "\\" in cmd:
+        variants.append(cmd.replace("\\", "/"))   # cmd.exe: backslash is a path separator
+    for variant in variants:
+        targets += _hook_segment_targets(_hook_tokens(variant), depth)
+    return targets
+
+
 def hook_script_targets(cmd):
-    """Package-relative files an install hook runs: `node install.js`,
-    `node ./scripts/x.mjs`, or `node -e "require('./postinstall')"`."""
-    targets = re.findall(r"""\bnode\s+(?!-)["']?((?:\./)?[\w./-]+\.(?:c|m)?js)\b""", cmd)
+    """Package-relative files an install hook runs, in order and without
+    duplicates: `node install.js`, `node ./scripts/x.mjs`, `node install`
+    (no extension: resolve like Node), `node --no-warnings x.js`,
+    `node -r ./preload.js x.js`, `cd scripts && node x.js`, `sh ./install.sh`,
+    `./install.sh`, `python setup_helper.py`, `node scripts\\x.js`, and
+    `node -e "require('./postinstall')"`. The command is tokenized like a
+    shell (quotes, && || ; | operators, env assignments, cd)."""
+    if not isinstance(cmd, str) or not cmd.strip():
+        return []
+    targets = _hook_targets(cmd)
     for m in _NODE_E_RE.finditer(cmd):
         code = next(g for g in m.groups() if g is not None)
         targets += _LOCAL_REQUIRE_RE.findall(code)
-    return targets
+    seen, out = set(), []
+    for t in targets:
+        if t and t not in seen and t not in ("-", "."):
+            seen.add(t)
+            out.append(t)
+    return out
 
 
 def is_dependency_manifest(path):
@@ -2886,13 +3278,19 @@ def scan_manifest(path, content, registry=False):
     command matches the fetch/eval pattern list escalates to CRITICAL. The old
     behavior (pattern-only) was a denylist every `npx evil-pkg` or
     `node ./scripts/payload.js` sailed through. Also covers setup.py and
-    binding.gyp via scan_file()/scan_gyp() (see collect_files)."""
-    data, depth_issue = _json_loads_manifest(path, content)
-    if depth_issue:
-        return [depth_issue]
-    if not isinstance(data, dict):
-        return []
-    issues, lines = [], content.split("\n")
+    binding.gyp via scan_file()/scan_gyp() (see collect_files).
+
+    Shared semantics 3: a leading BOM is stripped before parsing; an
+    unparseable ROOT manifest is SC-MANIFEST-UNPARSEABLE (MAJOR). registry /
+    dependency manifests count preinstall, install, postinstall; a project
+    checkout also counts preprepare, prepare, postprepare, and there a
+    prepare-family hook that is not suspicious is INFO (the project's own
+    build step, e.g. `husky install`), while a suspicious one stays CRITICAL."""
+    data, issues = load_manifest(path, content)
+    if data is None:
+        return issues
+    body = content[1:] if content.startswith("\ufeff") else content
+    lines = body.split("\n")
     scripts = data.get("scripts")
     if isinstance(scripts, dict):
         for hook in (NPM_INSTALL_SCRIPTS if registry else NPM_LOCAL_INSTALL_SCRIPTS):
@@ -2900,33 +3298,93 @@ def scan_manifest(path, content, registry=False):
             if not isinstance(cmd, str) or not cmd.strip():
                 continue
             suspicious = _hook_is_suspicious(cmd)
+            sev = "INFO" if (not registry and hook in NPM_PREPARE_SCRIPTS
+                             and not suspicious) else None
             line_no = next((i + 1 for i, l in enumerate(lines) if f'"{hook}"' in l), 1)
-            issues.append(_sc_install_hook_issue(path, line_no, lines, hook, cmd, suspicious))
+            issues.append(_sc_install_hook_issue(path, line_no, lines, hook, cmd,
+                                                 suspicious, sev=sev))
     return issues
+
+
+# gyp command expansions run a shell command while node-gyp configures the
+# build: '<!(cmd)', '<!@(cmd)', '>!(cmd)', '>!@(cmd)'.
+_GYP_EXPANSION_RE = re.compile(r"[<>]!@?\(")
+# The ubiquitous benign form: print an include path of a dependency.
+_GYP_NODE_REQUIRE_RE = re.compile(
+    r"""node\s+-[ep]\s+(?:"|')\s*require\(\s*\\?["'][\w@./-]+\\?["']\s*\)(?:\.[\w$]+)*\s*;?\s*(?:"|')""")
+_GYP_MAX_NODES = 100_000
+
+
+def _gyp_expansion_command(text, start):
+    """The command inside the expansion that starts at `start` ('<!(' ...),
+    up to its balanced closing parenthesis (or the end of the string)."""
+    i = text.index("(", start) + 1
+    depth, j = 1, i
+    while j < len(text) and depth:
+        if text[j] == "(":
+            depth += 1
+        elif text[j] == ")":
+            depth -= 1
+        j += 1
+    return text[i:j - 1] if depth == 0 else text[i:]
+
+
+def _gyp_commands(data):
+    """(command, kind) for every action/rule command and every command
+    expansion anywhere in a parsed gyp document (targets, conditions,
+    target_defaults, variables ...). Bounded walk, no recursion."""
+    out, stack, seen = [], [data], 0
+    while stack and seen < _GYP_MAX_NODES:
+        node = stack.pop()
+        seen += 1
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key == "action" and isinstance(value, (list, tuple)):
+                    out.append((" ".join(str(a) for a in value), "action"))
+                stack.append(key)
+                stack.append(value)
+        elif isinstance(node, (list, tuple, set, frozenset)):
+            stack.extend(node)
+        elif isinstance(node, str) and _GYP_EXPANSION_RE.search(node):
+            for m in _GYP_EXPANSION_RE.finditer(node):
+                out.append((_gyp_expansion_command(node, m.start()), "expansion"))
+    out.reverse()
+    return out
+
 
 def scan_gyp(path, content):
     """G11: binding.gyp custom build actions run arbitrary commands at
     `node-gyp rebuild` (i.e. `npm install` of any native module). Flag each
     action whose command matches the fetch/eval patterns, and any action at
-    all as MAJOR — same policy as package.json lifecycle scripts."""
-    data, depth_issue = _json_loads_manifest(path, content)
-    if depth_issue:
-        return [depth_issue]
-    if not isinstance(data, dict):
-        return []
-    issues, lines = [], content.split("\n")
-    actions = []
-    for target in data.get("targets", []) if isinstance(data.get("targets"), list) else []:
-        if isinstance(target, dict):
-            for act in target.get("actions", []) if isinstance(target.get("actions"), list) else []:
-                if isinstance(act, dict) and isinstance(act.get("action"), list):
-                    actions.append([str(a) for a in act["action"]])
-    for act in actions:
-        cmd = " ".join(act)
-        suspicious = bool(INSTALL_HOOK_RE.search(cmd))
-        line_no = next((i + 1 for i, l in enumerate(lines) if any(a and a in l for a in act)), 1)
-        issues.append(_sc_install_hook_issue(path, line_no, lines,
-                                             "binding.gyp action", cmd, suspicious))
+    all as MAJOR — same policy as package.json lifecycle scripts.
+
+    gyp files are Python literals (single quotes, comments, trailing commas),
+    so both JSON and Python-literal syntax are accepted. Actions and rules
+    are found anywhere in the document (conditions, target_defaults ...).
+    Command expansions ('<!(cmd)') also run at configure time: they are
+    flagged CRITICAL when the command fetches or evaluates code; the usual
+    `<!(node -p "require('node-addon-api').include")` and pkg-config calls
+    are not findings. An unparseable ROOT binding.gyp is
+    SC-MANIFEST-UNPARSEABLE."""
+    data, issues = load_manifest(path, content, python_literal=True)
+    if data is None:
+        return issues
+    body = content[1:] if content.startswith("\ufeff") else content
+    lines = body.split("\n")
+    for cmd, kind in _gyp_commands(data):
+        if kind == "action":
+            suspicious = bool(INSTALL_HOOK_RE.search(cmd))
+        else:
+            suspicious = bool(INSTALL_HOOK_RE.search(_GYP_NODE_REQUIRE_RE.sub(" ", cmd)))
+            if not suspicious:
+                continue
+        needles = [cmd] if kind == "expansion" else cmd.split(" ")
+        line_no = next((i + 1 for i, l in enumerate(lines)
+                        if any(a and a in l for a in needles)), 1)
+        issues.append(_sc_install_hook_issue(
+            path, line_no, lines,
+            "binding.gyp action" if kind == "action" else "binding.gyp command expansion",
+            cmd, suspicious))
     return issues
 
 import codecs as _codecs
@@ -3609,7 +4067,9 @@ def build_result(root, files, issues):
     per_file = {}
     for i in issues:
         per_file[i["file"]] = per_file.get(i["file"], 0) + 1
-    supply = sum(1 for i in issues if i["rule"].startswith("SC-"))
+    # INFO supply-chain entries are inventory (e.g. a project's own prepare
+    # hook, shared semantics 3), not indicators.
+    supply = sum(1 for i in issues if i["rule"].startswith("SC-") and i["sev"] != "INFO")
     conds.append({"label": "No supply-chain indicators", "ok": supply == 0})
     cross_file = sum(1 for i in issues if i["rule"].startswith("X-"))
     conds.append({"label": "No cross-file taint flows", "ok": cross_file == 0})
