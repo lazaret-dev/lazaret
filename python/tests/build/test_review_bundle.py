@@ -128,6 +128,7 @@ class GitTrackedTests(BundleCase):
         super().setUp()
         self.git("init", "-q")
         self.git("add", *LEGIT)
+        self.git("update-index", "--chmod=+x", "scripts/check-versions.sh")   # also where chmod is a no-op (Windows)
         self.git("commit", "-q", "-m", "legit")
 
     def test_only_tracked_files_ship(self):
