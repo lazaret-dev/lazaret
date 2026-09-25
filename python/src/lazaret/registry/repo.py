@@ -80,7 +80,7 @@ REGISTRY_HOSTS = {"registry.npmjs.org", "replicate.npmjs.com",
                   "pypi.org", "files.pythonhosted.org"}
 MAX_DOWNLOAD_BYTES = 200 * 1024 * 1024     # one artifact archive (F9a)
 MAX_FEED_BYTES = 5 * 1024 * 1024           # registry metadata / RSS / _changes feed
-FEED_MAX_BYTES = 16 * 1024 * 1024   # a registry RSS feed is ~100 entries; far below this
+FEED_MAX_BYTES = MAX_FEED_BYTES            # XML parser cap: never above the fetch cap
 # Every byte the decompressor produces counts, including member data that is
 # skipped rather than read (F9b): a 2 MB gzip that inflates to 2 GiB stops here.
 MAX_ARCHIVE_TOTAL = 500 * 1024 * 1024
@@ -99,7 +99,10 @@ MAX_ARTIFACTS = _env_number("LAZARET_MAX_ARTIFACTS", 50)
 DEFERRED_TEXT_BUDGET = 64 * 1024 * 1024
 # Package names come from user input AND from registry feeds, and end up in URLs
 # and the watchlist — validate before either.
-NAME_RE = re.compile(r"^[a-zA-Z0-9._-]{1,100}$")
+NAME_RE = re.compile(r"^[a-zA-Z0-9._-]{1,100}$")          # versions
+NAME_MAX = 214                                           # npm's limit; PyPI has none
+_NPM_NAME_PART_RE = re.compile(r"^[a-zA-Z0-9~-][a-zA-Z0-9._~-]*$")
+_PYPI_NAME_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")   # PEP 508
 
 
 class SpecError(ValueError):
@@ -130,6 +133,27 @@ class ScanCancelled(Exception):
 
 
 # ---------------- Package spec parsing ----------------
+def _check_npm_name(name):
+    """npm's naming rules (validate-npm-package-name), restricted to URL-safe
+    ASCII: an optional @scope/, at most 214 characters, no leading '.' or
+    '_', nothing that could escape the registry API path."""
+    if len(name) > NAME_MAX:
+        raise SpecError(f"npm: package name longer than {NAME_MAX} characters")
+    if name.startswith("@"):
+        scope, sep, pkg = name[1:].partition("/")
+        if not sep or not scope or not pkg or "/" in pkg:
+            raise SpecError(f"npm: scoped name must be @scope/pkg, got {name!r}")
+        parts = (scope, pkg)
+    else:
+        parts = (name,)
+    for part in parts:
+        if part in (".", "..") or not _NPM_NAME_PART_RE.fullmatch(part):
+            raise SpecError(f"npm: invalid package name {name!r}")
+    if name.lower() in ("node_modules", "favicon.ico"):
+        raise SpecError(f"npm: reserved package name {name!r}")
+    return name
+
+
 def _check_name(eco, name):
     """Reject names that could escape the registry API path or poison the DB (F10).
 
@@ -137,11 +161,21 @@ def _check_name(eco, name):
     end up interpolated into URLs and persisted — so traversal segments, path
     separators and control characters must never be accepted.
     """
-    if not name:
+    if not isinstance(name, str) or not name:
         raise SpecError(f"{eco}: empty package name")
-    if name in (".", "..") or not NAME_RE.fullmatch(name):
+    if eco == "npm":
+        return _check_npm_name(name)
+    if len(name) > NAME_MAX or not _PYPI_NAME_RE.fullmatch(name):
         raise SpecError(f"{eco}: invalid package name {name!r}")
     return name
+
+
+def valid_name(eco, name):
+    try:
+        _check_name(eco, name)
+        return True
+    except SpecError:
+        return False
 
 
 def _check_version(eco, version):
@@ -158,25 +192,19 @@ def _check_version(eco, version):
 
 def parse_spec(spec):
     """'npm:@scope/pkg@1.2.3' -> ('npm', '@scope/pkg', '1.2.3'); version may be None."""
-    if ":" not in spec:
-        raise ValueError(f"Spec must be npm:<name> or pypi:<name> — got {spec!r}")
+    if not isinstance(spec, str) or ":" not in spec:
+        raise SpecError(f"Spec must be npm:<name> or pypi:<name> — got {spec!r}")
     eco, rest = spec.split(":", 1)
-    eco = eco.lower()
+    eco = eco.strip().lower()
     if eco not in ("npm", "pypi"):
-        raise ValueError(f"Unknown ecosystem {eco!r} (use npm or pypi)")
+        raise SpecError(f"Unknown ecosystem {eco!r} (use npm or pypi)")
     rest = rest.strip().replace("==", "@")
     if rest.startswith("@"):                      # scoped npm package
-        if "@" in rest[1:]:
-            name, ver = rest[1:].split("@", 1)
-        else:
-            name, ver = rest[1:], None
-        scope, _, tail = name.partition("/")
-        if not tail or "/" in tail:
-            raise SpecError(f"npm: scoped name must be @scope/pkg, got {rest!r}")
-        _check_name(eco, scope)
-        _check_name(eco, tail)
-        return eco, "@" + name, _check_version(eco, ver)
-    if "@" in rest:
+        if eco != "npm":
+            raise SpecError(f"{eco}: invalid package name {rest!r}")
+        at = rest.find("@", 1)
+        name, ver = (rest[:at], rest[at + 1:]) if at != -1 else (rest, None)
+    elif "@" in rest:
         name, ver = rest.split("@", 1)
     else:
         name, ver = rest, None
@@ -303,7 +331,8 @@ def resolve_npm(name, version):
     version = _check_version("npm", version)
     # Ask for one version's manifest (/<name>/latest or /<name>/<version>), not
     # the full packument: that lists every version ever published and runs to
-    # tens of MB for packages like typescript.
+    # tens of MB for packages like typescript. A scoped name keeps its '@' and
+    # encodes the '/' (registry.npmjs.org/@babel%2Fcore/latest).
     url = ("https://registry.npmjs.org/" + urllib.parse.quote(name, safe="@") + "/"
            + (_quote_seg(version) if version else "latest"))
     v = http_json(url)
@@ -2067,7 +2096,10 @@ def parse_since(s):
     m = re.fullmatch(r"(\d+)\s*([hdw])", s)
     if m:
         hours = int(m.group(1)) * {"h": 1, "d": 24, "w": 168}[m.group(2)]
-        return now - datetime.timedelta(hours=hours)
+        try:
+            return now - datetime.timedelta(hours=hours)
+        except OverflowError:
+            raise ValueError(f"bad --since {s!r}; use e.g. 7d, 2w, 24h, or 2026-06-25") from None
     try:
         d = datetime.datetime.fromisoformat(s)
         return d if d.tzinfo else d.replace(tzinfo=datetime.timezone.utc)
@@ -2101,6 +2133,8 @@ def _parse_xml(raw):
         return _safe_ET.fromstring(raw, forbid_dtd=True, max_bytes=FEED_MAX_BYTES)
     except _safexml.SafeXMLError as exc:
         raise FeedError(f"feed rejected by the XML hardening layer: {exc}") from None
+    except (_safe_ET.ParseError, ValueError, RecursionError) as exc:
+        raise FeedError(f"feed is not well-formed XML ({type(exc).__name__})") from None
 
 
 def _feed_token_ok(value):
@@ -2117,7 +2151,8 @@ def discover_pypi(cutoff, limit):
     found = {}
     for feed in ("https://pypi.org/rss/packages.xml", "https://pypi.org/rss/updates.xml"):
         try:
-            raw = http_bytes(feed)
+            # metadata budget (5 MB) and timeout, not the 200 MB artifact budget
+            raw = _fetch(feed, max_bytes=MAX_FEED_BYTES, timeout=METADATA_TIMEOUT)
         except Exception as exc:                                   # noqa: BLE001
             # audit H1: FetchError/_fetch messages can embed text derived from
             # the network response; `feed` is a constant URL.
@@ -2138,7 +2173,7 @@ def discover_pypi(cutoff, limit):
                 continue
             try:
                 when = email.utils.parsedate_to_datetime(pub)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, IndexError, OverflowError):
                 continue
             when = _to_utc(when)
             if when < cutoff:
@@ -2147,8 +2182,8 @@ def discover_pypi(cutoff, limit):
             name = parts[0]
             version = parts[1] if len(parts) > 1 else None
             # G14/F10: feed-derived names drive downloads — validate them
-            # against the same allowlist as CLI specs.
-            if not _feed_token_ok(name):
+            # against the same rules as CLI specs.
+            if not valid_name("pypi", name):
                 continue
             if version is not None and not _feed_token_ok(version):
                 version = None
@@ -2161,7 +2196,8 @@ def discover_pypi(cutoff, limit):
 def discover_npm(cutoff, limit):
     """Recently updated npm packages via the replication _changes feed. Best-effort:
     the feed requires network access to replicate.npmjs.com; on failure npm
-    discovery is skipped with a warning rather than aborting the run."""
+    discovery is skipped with a warning rather than aborting the run. Rows of
+    an unexpected shape, and names npm itself would not accept, are skipped."""
     want = (limit or 100) * 3
     url = (f"https://replicate.npmjs.com/_changes?descending=true"
            f"&include_docs=true&limit={want}")
@@ -2175,15 +2211,26 @@ def discover_npm(cutoff, limit):
               f"({lazaret.sanitize_term(exc)}); npm discovery skipped "
               f"(needs access to replicate.npmjs.com).", file=sys.stderr)
         return []
-    out = {}
-    for row in data.get("results", []):
-        doc = row.get("doc") or {}
-        name = doc.get("name") or row.get("id")
-        if not name or name.startswith("_"):
+    results = data.get("results") if isinstance(data, dict) else None
+    if not isinstance(results, list):
+        print("warning: npm changes feed has an unexpected shape; npm discovery skipped.",
+              file=sys.stderr)
+        return []
+    out, rejected = {}, 0
+    for row in results:
+        if not isinstance(row, dict):
             continue
-        modified = (doc.get("time") or {}).get("modified")
+        doc = row.get("doc") if isinstance(row.get("doc"), dict) else {}
+        name = doc.get("name") if isinstance(doc.get("name"), str) else row.get("id")
+        if not isinstance(name, str) or not name or name.startswith("_"):
+            continue
+        if not valid_name("npm", name):
+            rejected += 1
+            continue
+        times = doc.get("time") if isinstance(doc.get("time"), dict) else {}
+        modified = times.get("modified")
         when = None
-        if modified:
+        if isinstance(modified, str):
             try:
                 # G13: 'Z' suffix makes fromisoformat produce aware datetimes on
                 # Python < 3.11; force every parse to UTC-aware either way so
@@ -2194,9 +2241,15 @@ def discover_npm(cutoff, limit):
                 when = None
         if when is None or when < cutoff:
             continue
-        version = (doc.get("dist-tags") or {}).get("latest")
+        tags = doc.get("dist-tags") if isinstance(doc.get("dist-tags"), dict) else {}
+        version = tags.get("latest") if isinstance(tags.get("latest"), str) else None
+        if version is not None and not _feed_token_ok(version):
+            version = None
         if name not in out or when > out[name][3]:
             out[name] = ("npm", name, version, when)
+    if rejected:
+        print(f"warning: skipped {rejected} npm feed name(s) that are not valid package names.",
+              file=sys.stderr)
     res = sorted(out.values(), key=lambda x: x[3], reverse=True)
     return res[:limit] if limit else res
 
@@ -2217,20 +2270,20 @@ def cmd_discover(store, args):
         return False
     print(f"\nDiscovered {len(discovered)} package(s) since {cutoff.strftime('%Y-%m-%d %H:%M')} UTC:")
     for eco, name, ver, when in discovered:
-        # audit H1: discovery-feed name/version — the npm branch does NOT
-        # run _feed_token_ok, so both are raw feed text. Sanitize before the
-        # width-free print (the strftime timestamp is engine-controlled).
+        # audit H1: discovery-feed name/version are raw feed text. Sanitize
+        # before the width-free print (the strftime timestamp is engine-controlled).
         print(f"  {when.strftime('%Y-%m-%d %H:%M')}  "
               f"{lazaret.sanitize_term(eco)}:{lazaret.sanitize_term(name)}"
               f"{('@' + lazaret.sanitize_term(ver)) if ver else ''}")
     if args.add or args.scan:
         for eco, name, _ver, _when in discovered:
-            store.add_package(eco, name)
+            if valid_name(eco, name):
+                store.add_package(eco, name)
     if args.scan:
         specs = [f"{eco}:{name}" + (f"@{ver}" if ver else "")
                  for eco, name, ver, _ in discovered]
         print(f"\nScanning {len(specs)} discovered package(s)…")
-        return cmd_scan(store, specs, args.full, args.rescan)
+        return cmd_scan(store, specs, args.full, args.rescan, errors=getattr(args, "_errors", None))
     return False
 
 
