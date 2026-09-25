@@ -2878,17 +2878,51 @@ def _sc_install_hook_issue(path, line_no, lines, script, cmd, suspicious, sev=No
     issue["cmd"] = cmd   # lets the registry follow the hook to the script it runs
     return issue
 
+# Nesting limit for manifests (package.json, binding.gyp): deeper documents are
+# SC-MANIFEST-DEPTH. Measured explicitly (json_depth_exceeds) instead of
+# waiting for json.loads to hit the interpreter's recursion limit, which sits
+# near 995 levels on Python 3.10/3.11 and near 10,000 on 3.12+ — so the same
+# manifest used to be a finding on one interpreter and parse on another, and
+# disagree with the npm engine (pycompat.js MAX_JSON_DEPTH, the same 500).
+MAX_MANIFEST_DEPTH = 500
+MANIFEST_DEPTH_MSG = (f"Manifest is too deeply nested to parse (more than "
+                      f"{MAX_MANIFEST_DEPTH} levels).")
+_JSON_STRING_RE = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"?', re.S)   # unterminated: to the end
+_NOT_BRACKET_RE = re.compile(r"[^\[\]{}]+")
+
+
+def json_depth_exceeds(text, limit=MAX_MANIFEST_DEPTH):
+    """True if `text` nests [ / { deeper than `limit`, counting only brackets
+    outside JSON (double-quoted) strings — twin of the npm engine's
+    jsonDepthExceeds. Linear: the strings and everything but brackets are
+    stripped by two non-backtracking regexes, and the remaining brackets are
+    walked only when there are more openers than the limit."""
+    brackets = _NOT_BRACKET_RE.sub("", _JSON_STRING_RE.sub("", text))
+    if brackets.count("[") + brackets.count("{") <= limit:
+        return False
+    depth = 0
+    for ch in brackets:
+        if ch in "[{":
+            depth += 1
+            if depth > limit:
+                return True
+        else:
+            depth -= 1
+    return False
+
+
 def _sc_manifest_depth_issue(path):
     """48033f94: a pathologically deep-nested manifest (e.g. 60k+ '[' bytes)
     blows json.loads' recursion limit. The old code crashed the CLI (exit 1,
     results lost) and in registry mode suppressed every other finding in the
     package (scan recorded as 'error' instead of reporting). Both are wins for
     a hostile repo, so this is reported as a CRITICAL supply-chain finding —
-    never a crash, never a silent skip."""
+    never a crash, never a silent skip. Anything nested deeper than
+    MAX_MANIFEST_DEPTH gets it, whatever the interpreter's recursion limit."""
     return mk_issue(
         {"id": "SC-MANIFEST-DEPTH", "name": "Hostile manifest nesting depth",
          "type": "HOTSPOT", "sev": "CRITICAL",
-         "msg": "Manifest is too deeply nested to parse (recursion limit hit).",
+         "msg": MANIFEST_DEPTH_MSG,
          "why": ("A manifest nested this deep cannot be produced by any real "
                  "build tool — it exists purely to crash or blind security "
                  "scanners. Treating it as data would silently drop every "
@@ -2933,8 +2967,10 @@ def load_manifest(path, content, python_literal=False):
     manager does. -> (data, issues).
 
     A leading UTF-8 BOM is stripped first (npm does). data is None when the
-    text cannot be parsed; issues then holds SC-MANIFEST-DEPTH for a
-    recursion-limit document, or SC-MANIFEST-UNPARSEABLE when the manifest
+    text cannot be parsed; issues then holds SC-MANIFEST-DEPTH for a document
+    nested deeper than MAX_MANIFEST_DEPTH (checked before parsing, so the
+    result does not depend on the interpreter's recursion limit or on where
+    a syntax error sits), or SC-MANIFEST-UNPARSEABLE when the manifest
     is at the root (a nested unreadable manifest is not a hook npm runs).
     A top level that is not an object counts as unparseable too.
     python_literal: also accept Python literal syntax (binding.gyp / .gypi:
@@ -2944,10 +2980,12 @@ def load_manifest(path, content, python_literal=False):
         return None, ([manifest_unparseable_issue(path, "not text")]
                       if is_root_manifest(path) else [])
     text = content[1:] if content.startswith("\ufeff") else content
+    if json_depth_exceeds(text):
+        return None, [_sc_manifest_depth_issue(path)]
     reason = None
     try:
         data = json.loads(text, parse_int=_json_int)
-    except RecursionError:
+    except RecursionError:              # backstop: a deep caller stack
         return None, [_sc_manifest_depth_issue(path)]
     except (ValueError, TypeError) as exc:
         data = None
@@ -2973,7 +3011,7 @@ def load_manifest(path, content, python_literal=False):
 
 def _json_loads_manifest(path, content):
     """Backwards-compatible wrapper: (data, depth_issue). data is None on any
-    parse failure; depth_issue is SC-MANIFEST-DEPTH for recursion-limit input.
+    parse failure; depth_issue is SC-MANIFEST-DEPTH for too-deep input.
     New code uses load_manifest, which also reports unparseable roots."""
     data, issues = load_manifest(path, content)
     depth = next((i for i in issues if i["rule"] == "SC-MANIFEST-DEPTH"), None)

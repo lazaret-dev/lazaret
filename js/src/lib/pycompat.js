@@ -234,7 +234,10 @@ export function cmpCodePoints(a, b) {
 /**
  * Nesting depth of a JSON text (brackets outside strings) — V8's JSON.parse
  * is iterative and never fails on depth, while Python's json.loads raises
- * RecursionError. Both engines treat depth > MAX_JSON_DEPTH as hostile.
+ * RecursionError at an interpreter-dependent depth. Both engines check
+ * depth > MAX_JSON_DEPTH explicitly before parsing a manifest (twin of
+ * core.json_depth_exceeds / core.MAX_MANIFEST_DEPTH) and report
+ * SC-MANIFEST-DEPTH.
  */
 export const MAX_JSON_DEPTH = 500;
 export function jsonDepthExceeds(text, limit = MAX_JSON_DEPTH) {

@@ -320,6 +320,34 @@ class EngineParityTests(unittest.TestCase):
                     self.assertIn(("Q-ENCODING", "enc/le16_nobom.py"), found)
                     self.assertIn(("S-OSCMD-PY", "enc/le16_nobom.py"), found)
 
+    def test_manifest_depth_limit_agrees(self):
+        """Both engines check a manifest's nesting (brackets outside strings)
+        against the same limit, 500, before parsing it. The Python engine
+        used to rely on json.loads' recursion limit (~995 levels on 3.10/3.11,
+        ~10,000 on 3.12+), so a 700-deep package.json was SC-MANIFEST-DEPTH
+        (and a forced exit 1) in the npm engine only."""
+        def nested(depth):
+            return '{"name": "x", "a": ' + "[" * (depth - 1) + "]" * (depth - 1) + "}"
+        tree = {
+            "package.json": nested(700),
+            "ok/package.json": nested(500),
+            "strings/package.json": json.dumps({"name": "s", "d": "[" * 1000}),
+            "late/package.json": '{"a": x, "b": ' + "[" * 700 + "]" * 700 + "}",
+            "native/binding.gyp": nested(700),
+            "index.js": "module.exports = 1;\n",
+        }
+        with tempfile.TemporaryDirectory() as root:
+            for rel, text in tree.items():
+                path = os.path.join(root, *rel.split("/"))
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(text)
+            js, py = both(root)
+            self.assert_same(js, py, label="manifest depth")
+            deep = sorted(i["file"] for i in py[1]["issues"] if i["rule"] == "SC-MANIFEST-DEPTH")
+            self.assertEqual(deep, ["late/package.json", "native/binding.gyp", "package.json"])
+            self.assertEqual((js[0], py[0]), (1, 1))
+
     def test_usage_and_forced_exit_codes_agree(self):
         with tempfile.TemporaryDirectory() as tmp:
             empty = os.path.join(tmp, "empty")
@@ -331,8 +359,12 @@ class EngineParityTests(unittest.TestCase):
             os.mkdir(deep)
             with open(os.path.join(deep, "package.json"), "w", encoding="utf-8") as f:
                 # deeper than any interpreter parses (3.10/3.11 stop near 995
-                # levels, 3.12+ near 10,000; the JS engine at 500)
+                # levels, 3.12+ near 10,000); both engines stop at 500
                 f.write('{"a":' + "[" * 100_000 + "]" * 100_000 + "}")
+            deep700 = os.path.join(tmp, "deep700")
+            os.mkdir(deep700)
+            with open(os.path.join(deep700, "package.json"), "w", encoding="utf-8") as f:
+                f.write('{"a":' + "[" * 699 + "]" * 699 + "}")    # over the shared limit of 500
             foreign = os.path.join(tmp, "foreign")
             os.mkdir(foreign)
             with open(os.path.join(foreign, "a.py"), "w", encoding="utf-8") as f:
@@ -345,6 +377,7 @@ class EngineParityTests(unittest.TestCase):
                 ("a file, not a directory", [afile], 2),
                 ("unknown option", [afile, "--no-such-option"], 2),
                 ("hostile-depth manifest", [deep, "--no-html", "--out-dir", tmp], 1),
+                ("700-deep manifest", [deep700, "--no-html", "--out-dir", tmp], 1),
                 ("foreign file at the report path", [foreign, "--no-html"], 3),
             ]
             for label, args, want in cases:

@@ -6,7 +6,7 @@
 
 import { mkIssue } from "./issue.js";
 import { DEP_MARKERS } from "./fs.js";
-import { pyRepr, pyStr, pyStrip } from "./pycompat.js";
+import { pyRepr, pyStr, pyStrip, MAX_JSON_DEPTH, jsonDepthExceeds } from "./pycompat.js";
 import { pyJsonParse, jsonErrorWhere, pyLiteralParse } from "./pyjson.js";
 import { REDACT, redactText } from "./redact.js";
 
@@ -85,13 +85,17 @@ function scInstallHookIssue(path, lineNo, lines, script, cmd, suspicious, sev = 
   return issue;
 }
 
+// core.MANIFEST_DEPTH_MSG: the same limit (MAX_JSON_DEPTH = core.MAX_MANIFEST_DEPTH)
+// and the same text in both engines.
+export const MANIFEST_DEPTH_MSG = `Manifest is too deeply nested to parse (more than ${MAX_JSON_DEPTH} levels).`;
+
 function manifestDepthIssue(path) {
   // 48033f94: pathologically deep-nested manifest — reported as CRITICAL,
   // never a crash, never a silent skip.
   return mkIssue(
     { id: "SC-MANIFEST-DEPTH", name: "Hostile manifest nesting depth",
       type: "HOTSPOT", sev: "CRITICAL",
-      msg: "Manifest is too deeply nested to parse (recursion limit hit).",
+      msg: MANIFEST_DEPTH_MSG,
       why: "A manifest nested this deep cannot be produced by any real build tool — it exists purely to crash or blind security scanners. Treating it as data would silently drop every other finding in the package.",
       fix: "Reject this package/file at your ingestion boundary; investigate the source.",
       ref: "CWE-506 · Supply chain" }, path, 1, []);
@@ -117,7 +121,9 @@ const pyTypeName = (v) => (v === null ? "NoneType" : Array.isArray(v) ? "list" :
  * Parse manifest-shaped, attacker-controlled text the way the package
  * manager does (twin of core.load_manifest) → [data, issues]. A leading
  * UTF-8 BOM is stripped first (npm does). data is null when the text cannot
- * be parsed; issues then holds SC-MANIFEST-DEPTH for a too-deep document, or
+ * be parsed; issues then holds SC-MANIFEST-DEPTH for a document nested
+ * deeper than MAX_JSON_DEPTH (brackets outside strings, checked before
+ * parsing wherever a syntax error sits, as the Python engine does), or
  * SC-MANIFEST-UNPARSEABLE when the manifest is at the root. A top level
  * that is not an object counts as unparseable too. pythonLiteral: also
  * accept Python literal syntax (binding.gyp).
@@ -126,6 +132,7 @@ export function loadManifest(path, content, { pythonLiteral = false } = {}) {
   const root = isRootManifest(path);
   if (typeof content !== "string") return [null, root ? [manifestUnparseableIssue(path, "not text")] : []];
   const text = content.startsWith("\ufeff") ? content.slice(1) : content;
+  if (jsonDepthExceeds(text)) return [null, [manifestDepthIssue(path)]];
   let data = null, reason = null, litType = null;
   const r = pyJsonParse(text);
   if (r.depth) return [null, [manifestDepthIssue(path)]];
