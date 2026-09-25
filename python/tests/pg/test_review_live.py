@@ -51,7 +51,7 @@ class IntervalStyleTests(LiveCase):
 @_support.requires_env("LAZARET_TEST_PG_DSN")
 class DecoderFailureTests(LiveCase):
     def test_deep_jsonb_comes_back_as_text(self):
-        deep = "[" * 3000 + "]" * 3000   # PostgreSQL accepts it; json.loads hits the recursion limit
+        deep = "[" * 10000 + "]" * 10000   # PostgreSQL accepts it; json.loads hits the recursion limit
         self.assertEqual(self.conn.fetchval("SELECT $1::jsonb", deep), deep)
         self.assertEqual([r[0] for r in self.conn.iterate("SELECT $1::jsonb FROM generate_series(1, 3)", deep)],
                          [deep] * 3)
