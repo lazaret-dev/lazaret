@@ -2891,7 +2891,7 @@ def html_report(res):
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Lazaret Report — {esc(os.path.basename(res['project']))}</title>
 <style>{HTML_CSS}</style></head><body>
-<header><div class="logo">Code<span>Guard</span> · Project Report</div>
+<header><div class="logo">Laza<span>ret</span> · Project Report</div>
 <div class="meta">{esc(res['project'])} · scanned {esc(res['scannedAt'])}</div></header>
 <div class="wrap">
 <div class="panel"><div class="gate"><div class="gate-badge {gate_cls}">{gate_txt}</div>{conds}</div>

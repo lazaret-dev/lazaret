@@ -1,4 +1,4 @@
-"""Review item 8: the SARIF emitter.
+"""Review items 8 and 9: report emitters.
 
 8. SARIF: artifactLocation.uri was the raw path ("my dir/a#1%2.py" verbatim,
    so '#' started a fragment); there was no uriBaseId/originalUriBaseIds; the
@@ -6,6 +6,7 @@
    percent-encoded relative references against %SRCROOT% (the scan root as a
    file: URI), lazaret.__version__, https://lazaret.dev. The log is checked
    against the SARIF 2.1.0 required fields below (stdlib only: no jsonschema).
+9. The HTML report header still said "CodeGuard"; no report output may.
 """
 import json
 import os
@@ -130,6 +131,33 @@ class Sarif(unittest.TestCase):
         uri, base = core.sarif_uri(os.path.abspath("x y.py"))
         self.assertTrue(uri.startswith("file:"))
         self.assertIsNone(base)
+
+
+class Branding(unittest.TestCase):
+    def test_no_codeguard_in_any_output(self):
+        root = make_tree({"a.py": "eval(x)\n", "b.js": "eval(y)\n", "c.sql": "GRANT ALL ON a TO b;\n",
+                          "package.json": json.dumps({"scripts": {"postinstall": "node x.js"}})})
+        self.addCleanup(shutil.rmtree, root, True)
+        out = tempfile.mkdtemp(prefix="lz-review-out-")
+        self.addCleanup(shutil.rmtree, out, True)
+        p = subprocess.run([PY, _support.CLI, root, "--out-dir", out, "--sarif",
+                            os.path.join(out, "r.sarif")],
+                           capture_output=True, encoding="utf-8", errors="replace", timeout=40)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        outputs = {"stdout": p.stdout, "stderr": p.stderr}
+        for name in os.listdir(out):
+            with open(os.path.join(out, name), encoding="utf-8") as fh:
+                outputs[name] = fh.read()
+        self.assertEqual(set(outputs), {"stdout", "stderr", "lazaret-report.json",
+                                        "lazaret-report.html", "r.sarif"})
+        for name, text in outputs.items():
+            self.assertNotIn("codeguard", text.lower(), name)
+            self.assertNotIn("code guard", text.lower(), name)
+        self.assertIn('class="logo">Laza<span>ret</span>', outputs["lazaret-report.html"])
+
+    def test_no_codeguard_in_scanner_source(self):
+        with open(core.__file__, encoding="utf-8") as fh:
+            self.assertNotIn("codeguard", fh.read().lower())
 
 
 if __name__ == "__main__":
