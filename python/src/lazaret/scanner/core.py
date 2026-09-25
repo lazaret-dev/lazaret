@@ -1545,6 +1545,8 @@ class _FileCtx:
         self.deadline = deadline
         self._markers = {}
         self._red = {}
+        self._pem = None
+        self._secrets = None
         self._mlines = None
         self._mcode = {}
         self._starts = None
@@ -1611,13 +1613,27 @@ class _FileCtx:
             out = "".join(parts)
         return out.replace("\ufeff", " ") if "\ufeff" in out else out
 
+    def secrets(self):
+        """This file's entropy-flagged literals (see _SecretLiterals)."""
+        if self._secrets is None:
+            self._secrets = _SecretLiterals(self.lines)
+        return self._secrets
+
     def redacted(self, k):
-        """Line k with secret-shaped substrings redacted — computed once per
-        line, not once per finding whose snippet shows it (review: 3000
-        findings on one 45 KB line re-ran the redaction 15000 times)."""
+        """Line k as any snippet may show it: whole-line [redacted] inside a
+        PEM key block, else with secret patterns and this file's entropy
+        literals replaced. Computed once per line, not once per finding
+        whose snippet shows it (review: 3000 findings on one 45 KB line
+        re-ran the redaction 15000 times)."""
         r = self._red.get(k)
         if r is None:
-            r = self._red[k] = _redact_context_line(self.lines[k])
+            if self._pem is None:
+                self._pem = _pem_block_lines(self.lines)
+            if k in self._pem:
+                r = REDACTED
+            else:
+                r = self.secrets().redact(_redact_context_line(self.lines[k]))
+            self._red[k] = r
         return r
 
     def marker(self, k):
@@ -1651,14 +1667,25 @@ def _active_ctx(lines):
 # "skip" noise filter run raw; S-SECRET re-uses its own assignment regex so
 # the same detection contract applies on context lines.
 _SECRET_LINE_PATTERNS = [
-    re.compile(r"AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36}|xox[baprs]-[A-Za-z0-9-]{10,}"
-               r"|sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\-]{35}"
-               r"|-----BEGIN [A-Z ]*PRIVATE KEY-----|eyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}"),
+    # provider token formats (S-TOKEN's list, plus fine-grained github_pat_);
+    # a PEM private-key header is redacted through its END marker or, when
+    # the key continues on later lines, to end of line (see _pem_block_lines)
+    re.compile(r"AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}"
+               r"|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\-]{35}"
+               r"|-----BEGIN [A-Z ]*PRIVATE KEY-----(?:.*?-----END [A-Z ]*PRIVATE KEY-----|.*)"
+               r"|eyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}"),
+    # SQL credentials — case-insensitive like the SQL-CRED rule (review fix:
+    # lowercase `identified by '…'` leaked through other findings' context)
     re.compile(r"(?:IDENTIFIED\s+BY\s+['\"][^'\"]+['\"]|PASSWORD\s*=?\s*['\"][^'\"]+['\"]"
-               r"|IDENTIFIED\s+BY\s+PASSWORD)"),
+               r"|IDENTIFIED\s+BY\s+PASSWORD)", re.I),
     re.compile(r"(?:password|passwd|pwd|secret|api[_-]?key|access[_-]?key|auth[_-]?token|"
                r"private[_-]?key)\s*[:=]\s*[\"'][^\"']{4,}[\"']", re.I),
+    # credentials in a URL's userinfo: scheme://user:password@host, scheme://token@host
+    re.compile(r"(?<=://)[^/\s@'\"]+(?=@)"),
 ]
+REDACTED = "[redacted]"
+_PEM_BEGIN_RE = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
+_PEM_END_RE = re.compile(r"-----END [A-Z ]*PRIVATE KEY-----")
 
 
 def _redact_context_line(line):
@@ -1667,8 +1694,108 @@ def _redact_context_line(line):
     original line if nothing matched."""
     out = line
     for pat in _SECRET_LINE_PATTERNS:
-        out = pat.sub("[redacted]", out)
+        out = pat.sub(REDACTED, out)
     return out
+
+
+def _pem_block_lines(lines):
+    """Indices of the lines of multi-line PEM private keys that follow the
+    BEGIN line, through the END line — or through the last line when no END
+    follows (review fix: an S-TOKEN on `-----BEGIN RSA PRIVATE KEY-----`
+    redacted the header while the next two key lines shipped in its
+    snippet). Such lines are redacted whole; the BEGIN line itself is
+    handled by the pattern list."""
+    out = set()
+    inside = False
+    for k, line in enumerate(lines):
+        if not isinstance(line, str):
+            continue
+        if inside:
+            out.add(k)
+            if "-----END" in line and _PEM_END_RE.search(line):
+                inside = False
+        elif "PRIVATE KEY-----" in line:
+            m = _PEM_BEGIN_RE.search(line)
+            inside = bool(m) and not _PEM_END_RE.search(line, m.end())
+    return out
+
+
+_SECRET_RUN_RE = re.compile(r"[A-Za-z0-9+/=_\-]{20,}")
+
+
+class _SecretLiterals:
+    """The high-entropy literals S-ENTROPY would flag in one file, redacted
+    as substrings wherever they appear (review fix: a literal redacted in its
+    own S-ENTROPY finding shipped raw in a neighbouring finding's snippet).
+    Candidates are the literals ENTROPY_VALUE_RE finds on any line not
+    matching SECRET_SKIP_RE, comment lines included, that pass
+    entropy_secretish()."""
+
+    def __init__(self, lines):
+        self.lits = set()
+        for line in lines:
+            if not isinstance(line, str) or ("=" not in line and ":" not in line):
+                continue
+            if SECRET_SKIP_RE.search(line):
+                continue
+            for m in ENTROPY_VALUE_RE.finditer(line):
+                if entropy_secretish(m.group(1)):
+                    self.lits.add(m.group(1))
+        self.by_prefix = {}
+        for lit in self.lits:
+            self.by_prefix.setdefault(lit[:20], []).append(lit)
+
+    def redact(self, text):
+        if not self.lits or not isinstance(text, str):
+            return text
+        hits = []
+        for m in _SECRET_RUN_RE.finditer(text):
+            run, base = m.group(), m.start()
+            if run in self.lits:
+                hits.append((base, m.end()))
+                continue
+            for p in range(len(run) - 19):
+                for lit in self.by_prefix.get(run[p:p + 20], ()):
+                    if run.startswith(lit, p):
+                        hits.append((base + p, base + p + len(lit)))
+        if not hits:
+            return text
+        hits.sort()
+        parts, pos = [], 0
+        for a, b in hits:
+            if b <= pos:
+                continue
+            parts.append(text[pos:max(a, pos)])
+            parts.append(REDACTED)
+            pos = b
+        parts.append(text[pos:])
+        return "".join(parts)
+
+
+def _redact_lines(lines, secrets=None):
+    """Redacted copies of a list of lines: PEM blocks whole, then the
+    pattern list and the file's entropy literals."""
+    pem = _pem_block_lines(lines)
+    out = []
+    for k, l in enumerate(lines):
+        if not isinstance(l, str):
+            out.append(l)
+        elif k in pem:
+            out.append(REDACTED)
+        else:
+            l = _redact_context_line(l)
+            out.append(secrets.redact(l) if secrets is not None else l)
+    return out
+
+
+def _redact_text(text, secrets=None):
+    """Redaction for free text that may copy source (issue msg, hook cmd)."""
+    if not isinstance(text, str):
+        return text
+    if "\n" in text:
+        return "\n".join(_redact_lines(text.split("\n"), secrets))
+    text = _redact_context_line(text)
+    return secrets.redact(text) if secrets is not None else text
 
 
 def redact_secret_snippet(rid, snippet, flagged_idx, raw_line):
@@ -1685,15 +1812,13 @@ def redact_secret_snippet(rid, snippet, flagged_idx, raw_line):
        commonly contains a SECOND credential the flagged rule didn't match
        (my probe: S-SECRET at line 3, AKIA… at line 4 in the same snippet).
        Only the matched substring is replaced; surrounding code stays
-       readable.
+       readable. Lines of a PEM key block that starts in the snippet are
+       redacted whole.
     """
-    out = list(snippet)
-    for i in range(len(out)):
-        if i == flagged_idx:
-            out[i] = (REDACT_PLACEHOLDER.replace("{RULE}", rid)
-                      + f" ({len(raw_line)} chars)")
-        elif isinstance(out[i], str):
-            out[i] = _redact_context_line(out[i])
+    out = _redact_lines(snippet)
+    if 0 <= flagged_idx < len(out):
+        out[flagged_idx] = (REDACT_PLACEHOLDER.replace("{RULE}", rid)
+                            + f" ({len(raw_line)} chars)")
     return out
 
 
@@ -1787,29 +1912,30 @@ def mk_issue(rule_or_dict, path, line_no, lines, col=None):
     # routinely contains the file's actual credentials on adjacent lines).
     # Redaction runs on the whole line, before clipping, so a clip boundary
     # can never cut a secret into a no-longer-matching fragment.
+    # The message is redacted too: some embed source text (an install hook's
+    # command line, a hex-decoded preview) — review: a PAT in a `prepare`
+    # script reached the terminal, JSON, HTML and SARIF through msg.
+    msg = r["msg"]
+    ctx = _active_ctx(lines) if REDACT_SECRETS else None
+    if REDACT_SECRETS:
+        msg = _redact_text(msg, ctx.secrets() if ctx is not None else None)
     redact = REDACT_SECRETS and 0 <= flag < len(lines)
-    if redact:
-        ctx = _active_ctx(lines)
-        if ctx is None and r["id"] in SECRET_RULES:
-            snippet = redact_secret_snippet(r["id"], lines[start:stop], flag - start, lines[flag])
-            snippet = [clip_snippet_line(l, col if start + k == flag else None)
-                       for k, l in enumerate(snippet)]
-    if not snippet:
-        for k in range(start, stop):
-            l = lines[k]
-            if not isinstance(l, str):
-                snippet.append(l)
-                continue
-            if redact:
-                if k == flag and r["id"] in SECRET_RULES:
-                    l = REDACT_PLACEHOLDER.replace("{RULE}", r["id"]) + f" ({len(l)} chars)"
-                elif ctx is not None:
-                    l = ctx.redacted(k)
-                else:
-                    l = _redact_context_line(l)
-            snippet.append(clip_snippet_line(l, col if k == flag else None))
+    pem = _pem_block_lines(lines) if redact and ctx is None else ()
+    for k in range(start, stop):
+        l = lines[k]
+        if not isinstance(l, str):
+            snippet.append(l)
+            continue
+        if redact:
+            if k == flag and r["id"] in SECRET_RULES:
+                l = REDACT_PLACEHOLDER.replace("{RULE}", r["id"]) + f" ({len(l)} chars)"
+            elif ctx is not None:
+                l = ctx.redacted(k)
+            else:
+                l = REDACTED if k in pem else _redact_context_line(l)
+        snippet.append(clip_snippet_line(l, col if k == flag else None))
     return {"rule": r["id"], "name": r["name"], "type": r["type"], "sev": r["sev"],
-            "msg": r["msg"], "why": r["why"], "fix": r["fix"], "ref": r["ref"],
+            "msg": msg, "why": r["why"], "fix": r["fix"], "ref": r["ref"],
             "file": path, "line": line_no,
             "snippet": snippet,
             "snipStart": start + 1}
@@ -2864,6 +2990,15 @@ def redact_result(res):
     mk_issue, e.g. by the flow engine, get the same size bound).
     """
     for i in res.get("issues", []):
+        if REDACT_SECRETS:
+            # free-text fields that can copy source: the message, and the
+            # install-hook command kept for the registry (`cmd`)
+            for key in ("msg", "cmd"):
+                v = i.get(key)
+                if isinstance(v, str):
+                    nv = _redact_text(v)
+                    if nv != v:
+                        i[key] = nv
         snip = i.get("snippet")
         if not isinstance(snip, list):
             continue
@@ -2880,8 +3015,7 @@ def redact_result(res):
                             redact_secret_snippet(i["rule"], snip, idx, snip[idx])]
             continue
         # non-secret rule (or already-redacted secret): sweep context lines
-        cleaned = [(clip_snippet_line(_redact_context_line(l)) if isinstance(l, str) else l)
-                   for l in snip]
+        cleaned = [clip_snippet_line(l) for l in _redact_lines(snip)]
         if cleaned != snip:
             i["snippet"] = cleaned
     return res
