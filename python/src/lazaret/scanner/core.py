@@ -289,6 +289,17 @@ R("S-TOKEN", "Known secret token format", "VULN", "BLOCKER", ("py", "js"),
   "Provider-format tokens in source are live credentials until proven otherwise.",
   "Remove it, rotate the credential immediately, and load it from a secrets manager.",
   "CWE-798 · OWASP A07"),
+# Review fix (shared semantics 5): Trojan Source. Bidi embedding/override/
+# isolate controls reorder how a line DISPLAYS without changing how it is
+# parsed. Flagged anywhere on a line, comment lines included.
+R("S-BIDI", "Trojan Source bidi control", "VULN", "CRITICAL", ("py", "js", "sql"),
+  r"[\u202a-\u202e\u2066-\u2069]",
+  "Bidirectional control character in source (Trojan Source)",
+  "Bidi override and isolate characters make code display in a different order than the "
+  "compiler reads it, so reviewers approve logic that is not what runs (CVE-2021-42574).",
+  "Remove the control characters; where a string really needs one, write it as an escape "
+  "sequence (e.g. \\u202e) so it is visible.",
+  "CWE-451 · CVE-2021-42574"),
 # ---- Additional vulnerability classes ----
 R("S-SSTI", "Template injection risk", "VULN", "CRITICAL", ("py",),
   r"render_template_string\s*\(\s*(?![\"'])",
@@ -813,7 +824,8 @@ def taint_scan(path, lines, lang, ctx=None):
         ctx = _FileCtx(lines, lang)
     # Each line is matched with its comment text removed: `/**/const d =
     # req.query.x` is an assignment, and `x = 1  // req.query` is not a source.
-    cmask, code_lines = ctx.cmask, ctx.code
+    # (Match text: NFKC for Python, decoded identifier escapes for JS.)
+    cmask = ctx.cmask
     issues = []
     tainted = {}   # var -> (line_no, frozenset(clean sink suffixes), taint order)
     src = TAINT_SOURCES[lang]
@@ -830,8 +842,11 @@ def taint_scan(path, lines, lang, ctx=None):
         found.sort(key=lambda v: tainted[v][2])
         return found
 
-    for i, line in enumerate(code_lines):
-        if cmask[i] or not line or line.isspace():
+    for i in range(len(lines)):
+        if cmask[i]:
+            continue
+        line = ctx.mcode(i)
+        if not line or line.isspace():
             continue
         if not i & 63:
             ctx.check_time()
@@ -1324,10 +1339,12 @@ def _js_regex_allowed(prev, tail):
     return False
 
 
-def _lex_comment_spans(content, lang):
+def _lex_comment_spans(content, lang, strings=None):
     """Absolute (start, end) spans of every comment in `content` (see the
     lexer semantics above). Linear: a regex finds each next interesting
-    character and strings/comments are consumed with bounded matches."""
+    character and strings/comments are consumed with bounded matches.
+    If `strings` is a list, the spans of '…' and "…" literals are appended
+    to it."""
     lang = lang if lang in ("py", "js", "sql") else None
     nxt = _LEX_NEXT[lang]
     spans = []
@@ -1378,6 +1395,8 @@ def _lex_comment_spans(content, lang):
         sm = _LEX_STR[(lang, key)].match(content, k)
         pos = max(sm.end() if sm else k + 1, k + 1)
         prev, tail = '"', ""
+        if strings is not None and ch != "`":
+            strings.append((k, pos))
     return spans
 
 
@@ -1403,15 +1422,15 @@ def _py_tokenize_comment_spans(content):
     return [(starts[r - 1] + c, starts[r - 1] + c + ln) for (r, c), ln in rows]
 
 
-def _comment_spans(content, lang):
+def _comment_spans(content, lang, strings=None):
     if lang == "py":
         spans = _py_tokenize_comment_spans(content)
         if spans is not None:
             return spans
-    return _lex_comment_spans(content, lang)
+    return _lex_comment_spans(content, lang, strings)
 
 
-def _comment_layout(content, lines, lang):
+def _comment_layout(content, lines, lang, strings=None):
     """(mask, spans, code) for the lines of `content`:
     mask[i]  — line i is a comment line (has non-whitespace, all of it in comments);
     spans    — {i: [(start, end), …]} comment spans relative to line i;
@@ -1419,7 +1438,7 @@ def _comment_layout(content, lines, lang):
     n = len(lines)
     mask = [False] * n
     by_line = {}
-    spans = _comment_spans(content, lang)
+    spans = _comment_spans(content, lang, strings)
     if not spans:
         return mask, by_line, lines
     starts = _line_starts(content)
@@ -1477,6 +1496,33 @@ def source_lines(content, lang):
     return content.split("\n")
 
 
+# ---------------- Match text (review fix: shared semantics 5) ----------------
+# Rules match each line in the form the language runtime reads it, so
+# Unicode spellings of the same code cannot slip past ASCII patterns:
+#   py : a line containing non-ASCII is matched in its NFKC-normalized form —
+#        Python NFKC-normalizes identifiers, so `ｅｘｅｃ(…)` and
+#        `os.ｓｙｓｔｅｍ(…)` run as exec / os.system;
+#   js : identifier escapes \uXXXX and \u{X…} outside '…'/"…" string
+#        literals are decoded when they denote an identifier character
+#        (`\u0065val(` is eval), and U+FEFF — JavaScript whitespace that
+#        Python's \s does not match — becomes a space (`eval\ufeff(`).
+# Line numbers never change; snippets still show the original text.
+_JS_UESC_RE = re.compile(r"\\u\{([0-9A-Fa-f]{1,6})\}|\\u([0-9A-Fa-f]{4})")
+_BIDI_CHARS_RE = re.compile("[\u202a-\u202e\u2066-\u2069]")
+
+
+def _js_ident_char(m):
+    cp = int(m.group(1) or m.group(2), 16)
+    if cp > 0x10FFFF:
+        return None
+    ch = chr(cp)
+    return ch if ch == "$" or ("a" + ch).isidentifier() else None
+
+
+def _py_match_text(text):
+    return text if text.isascii() else unicodedata.normalize("NFKC", text)
+
+
 class _ScanBudgetExceeded(Exception):
     """Raised inside scan_file when the per-file time budget is spent."""
 
@@ -1493,15 +1539,77 @@ class _FileCtx:
         self.lines = lines
         self.lang = lang
         self.content = "\n".join(lines) if content is None else content
-        self.cmask, self.cspans, self.code = _comment_layout(self.content, lines, lang)
+        self._strings = [] if lang == "js" else None      # '…' "…" spans (absolute)
+        self.cmask, self.cspans, self.code = _comment_layout(
+            self.content, lines, lang, self._strings)
         self.deadline = deadline
         self._markers = {}
         self._red = {}
+        self._mlines = None
+        self._mcode = {}
+        self._starts = None
 
     @property
     def mlines(self):
-        """The text each line is matched in."""
-        return self.lines
+        """The text each line is matched in (see "Match text" above)."""
+        if self._mlines is None:
+            if self.lang == "py":
+                self._mlines = [_py_match_text(l) for l in self.lines]
+            elif self.lang == "js":
+                self._mlines = [self._js_text(i, False) for i in range(len(self.lines))]
+            else:
+                self._mlines = self.lines
+        return self._mlines
+
+    def mcode(self, i):
+        """Match text of line i with its comment text removed."""
+        if self.code is self.lines:
+            return self.mlines[i]
+        v = self._mcode.get(i)
+        if v is None:
+            if self.lang == "py":
+                v = _py_match_text(self.code[i])
+            elif self.lang == "js":
+                v = self._js_text(i, True)
+            else:
+                v = self.code[i]
+            self._mcode[i] = v
+        return v
+
+    def _js_text(self, i, drop_comments):
+        line = self.lines[i]
+        plain = self.code[i] if drop_comments else line
+        if "\\u" not in line:
+            return plain.replace("\ufeff", " ") if "\ufeff" in plain else plain
+        if self._starts is None:
+            self._starts = _line_starts(self.content)
+            self._str_starts = [a for a, _ in self._strings]
+        base = self._starts[i]
+        cuts = list(self.cspans.get(i, ())) if drop_comments else []
+        edits = [(a, b, "") for a, b in cuts]
+        for m in _JS_UESC_RE.finditer(line):
+            if any(a <= m.start() < b for a, b in cuts):
+                continue
+            k = bisect.bisect_right(self._str_starts, base + m.start()) - 1
+            if k >= 0 and self._strings[k][1] > base + m.start():
+                continue                          # inside a '…' or "…" literal
+            ch = _js_ident_char(m)
+            if ch is not None:
+                edits.append((m.start(), m.end(), ch))
+        if not edits:
+            out = plain
+        else:
+            edits.sort()
+            parts, p = [], 0
+            for a, b, rep_ in edits:
+                if a < p:
+                    continue
+                parts.append(line[p:a])
+                parts.append(rep_)
+                p = b
+            parts.append(line[p:])
+            out = "".join(parts)
+        return out.replace("\ufeff", " ") if "\ufeff" in out else out
 
     def redacted(self, k):
         """Line k with secret-shaped substrings redacted — computed once per
@@ -2140,8 +2248,12 @@ def scan_file(path, content, lang, dep=False):
         _TLS.ctx = outer
 
 
+# Rules that also run on comment lines.
+_COMMENT_LINE_RULES = frozenset(("Q-TODO", "S-TOKEN", "S-BIDI"))
+
+
 def _scan_file(path, content, lines, lang, dep, ctx, issues):
-    cmask = ctx.cmask
+    cmask, mlines = ctx.cmask, ctx.mlines
     rules = [r for r in RULES if lang in r["langs"]
              and (not dep or r["id"].startswith(DEP_RULE_PREFIXES))]
     secret_lines = set()          # lines with S-TOKEN / S-SECRET (S-ENTROPY dedupe)
@@ -2157,19 +2269,20 @@ def _scan_file(path, content, lines, lang, dep, ctx, issues):
                      "fix": "Break the line up for readability.", "ref": "Maintainability"},
                     path, i + 1, lines))
             continue
+        mline = mlines[i]
         for r in rules:
-            if cmask[i] and r["id"] not in ("Q-TODO", "S-TOKEN"):
+            if cmask[i] and r["id"] not in _COMMENT_LINE_RULES:
                 continue
             # equality checks shouldn't match inside string literals
-            target = STRING_LIT_RE.sub("\"\"", line) if r["id"] == "B-EQEQ" else line
+            target = STRING_LIT_RE.sub("\"\"", mline) if r["id"] == "B-EQEQ" else mline
             m = r["re"].search(target)
             if not m:
                 continue
-            if r["need"] and not r["need"].search(line):
+            if r["need"] and not r["need"].search(mline):
                 continue
-            if r["skip"] and r["skip"].search(line):
+            if r["skip"] and r["skip"].search(mline):
                 continue
-            if r["id"] == "S-TOKEN" and not _token_has_material(r["re"], line, lines, i):
+            if r["id"] == "S-TOKEN" and not _token_has_material(r["re"], mline, mlines, i):
                 continue
             if r["id"] in ("S-TOKEN", "S-SECRET"):
                 secret_lines.add(i)
@@ -2242,17 +2355,18 @@ def _scan_file(path, content, lines, lang, dep, ctx, issues):
                 first_off - content.rfind("\n", 0, first_off) - 1))
     if dep:
         return
+    mcontent = content if mlines is lines else "\n".join(mlines)
     starts = None
     for r in TEXT_RULES:
         # *-NOWHERE SQL rules are fired by scan_sql_nowhere() (linear pass),
         # not here — their regexes match only the statement head.
         if lang not in r["langs"] or r["id"] in _SQL_NOWHERE_SKIP:
             continue
-        for n, m in enumerate(r["re"].finditer(content)):
+        for n, m in enumerate(r["re"].finditer(mcontent)):
             if not n & 255:
                 ctx.check_time()
             if starts is None:        # review fix: was content[:pos].count("\n") per match
-                starts = _line_starts(content)
+                starts = _line_starts(mcontent)
             line_no = bisect.bisect_right(starts, m.start())
             issues.append(mk_issue(r, path, line_no, lines, m.start() - starts[line_no - 1]))
     ctx.check_time()
