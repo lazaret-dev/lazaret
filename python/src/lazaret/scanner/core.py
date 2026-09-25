@@ -585,10 +585,55 @@ TAINT_SINKS = {
          "Escape/sanitize before rendering; prefer textContent."),
     ],
 }
+# Review fix (shared semantics 12): a Python annotated assignment
+# `x: T = source` binds x (the optional `: T` part), and a JS destructuring
+# declaration binds every name in its pattern (_JS_DESTRUCT_RE below) —
+# `target: str = request.args.get("next")` and `const { file } = req.query`
+# used to leave their names untainted.
 ASSIGN_RE = {
-    "py": re.compile(r"^\s*([A-Za-z_]\w*)\s*=(?![=])\s*(.+)"),
+    "py": re.compile(r"^\s*([A-Za-z_]\w*)\s*(?::[^=\n]*)?=(?![=])\s*(.+)"),
     "js": re.compile(r"^\s*(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=(?![=>])\s*(.+)"),
 }
+# one-level object / array pattern: `{ a, b: c, d = 1, ...e }` / `[a, , b = 2, ...c]`
+_JS_DESTRUCT_RE = re.compile(
+    r"^\s*(?:(?:const|let|var)\s+)?(\{[^{}]*\}|\[[^\[\]]*\])\s*=(?![=>])\s*(.+)")
+_JS_BINDING_RE = re.compile(r"[A-Za-z_$][\w$]*")
+
+
+def _destructured_names(pattern):
+    """Names bound by a one-level JS destructuring pattern:
+    `{ a, b: c, d = 1, ...e }` -> [a, c, d, e]; `[a, , b = 2, ...c]` -> [a, b, c]."""
+    names = []
+    for part in pattern[1:-1].split(","):
+        part = part.strip()
+        if part.startswith("..."):
+            part = part[3:].strip()
+        elif pattern[0] == "{" and ":" in part:
+            part = part.split(":", 1)[1].strip()
+        part = part.split("=", 1)[0].strip()
+        if _JS_BINDING_RE.fullmatch(part):
+            names.append(part)
+    return names
+
+
+def _assignment(line, lang):
+    """(names bound, right-hand side) of an assignment line, or (None, None).
+    A Python keyword never counts as a name (`else: x = …` is not an
+    annotated assignment to `else`)."""
+    m = ASSIGN_RE[lang].match(line)
+    if m:
+        name = m.group(1)
+        if lang == "py" and (keyword.iskeyword(name) or (
+                keyword.issoftkeyword(name) and line[m.end(1):].lstrip().startswith(":"))):
+            return None, None
+        return [name], m.group(2)
+    if lang == "js":
+        dm = _JS_DESTRUCT_RE.match(line)
+        if dm:
+            names = _destructured_names(dm.group(1))
+            if names:
+                return names, dm.group(2)
+    return None, None
 
 STRING_LIT_RE = re.compile(r"\"[^\"]*\"|'[^']*'|`[^`]*`")
 
@@ -857,9 +902,8 @@ def taint_scan(path, lines, lang, ctx=None):
             continue
         if not i & 63:
             ctx.check_time()
-        m = ASSIGN_RE[lang].match(line)
-        if m:
-            name, rhs = m.group(1), m.group(2)
+        names, rhs = _assignment(line, lang)
+        if names:
             base = STRING_LIT_RE.sub("", _neutralize(rhs, lang))  # full sanitizers stripped
             is_tainted = bool(src.search(base)) or bool(carriers_in(base, None))
             if is_tainted:
@@ -868,8 +912,9 @@ def taint_scan(path, lines, lang, ctx=None):
                     neut = STRING_LIT_RE.sub("", _neutralize(rhs, lang, suf))
                     if not src.search(neut) and not carriers_in(neut, suf):
                         clean.add(suf)
-                if name not in tainted:
-                    tainted[name] = (i + 1, frozenset(clean), len(tainted))
+                for name in names:
+                    if name not in tainted:
+                        tainted[name] = (i + 1, frozenset(clean), len(tainted))
         for suffix, sink_re, cat, sev, cwe, fix in TAINT_SINKS[lang]:
             sm = sink_re.search(line)
             if not sm:
