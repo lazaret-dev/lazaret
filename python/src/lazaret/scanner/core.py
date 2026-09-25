@@ -1132,46 +1132,71 @@ OPTIN_SKIP_DIRS = ["node_modules", "venv", ".venv", "env", "dist", "build",
                    ".next", "coverage", "vendor", "site-packages", ".tox",
                    ".mypy_cache", ".pytest_cache", "migrations"]
 
-# G10: skipped-directory accounting — every pruned tree is counted here and
-# surfaced as INFO findings, never silently dropped. Reset per scan.
+# G10: skipped-directory accounting. collect_files() fills this for callers of
+# the legacy (files, manifests, binary_issues) API that then call
+# skipped_tree_issues(); it is RESET at the start of every collect_files()
+# call, so repeated scans in one process (the MCP server) never leak one
+# scan's pruned trees into the next. scan_project() does not use it at all.
 _SKIPPED_TREES = []   # [(relpath, file_count, byte_count)]
 
 def _reset_scan_state():
     global _SKIPPED_TREES
     _SKIPPED_TREES = []
 
-def _count_skipped_tree(root, tree_path):
-    """Record a pruned directory with its file count and total size for the
-    INFO blind-spot accounting surfaced after the scan."""
+def _tree_stats(tree_path):
+    """(file_count, byte_count) of a pruned tree, walked iteratively without
+    following symlinks (a pruned tree can be arbitrarily deep or hostile)."""
     n_files, n_bytes = 0, 0
-    for dp, _dns, fns in os.walk(tree_path):
-        for fn in fns:
-            n_files += 1
+    stack = [tree_path]
+    while stack:
+        cur = stack.pop()
+        try:
+            with os.scandir(cur) as it:
+                entries = list(it)
+        except OSError:
+            continue
+        for e in entries:
             try:
-                n_bytes += os.path.getsize(os.path.join(dp, fn))
+                st = e.stat(follow_symlinks=False)
             except OSError:
-                pass
-    rel = os.path.relpath(tree_path, root) if os.path.isabs(tree_path) else tree_path
-    _SKIPPED_TREES.append((rel, n_files, n_bytes))
+                continue
+            if _stat.S_ISDIR(st.st_mode) and not _is_reparse_point(st):
+                stack.append(e.path)
+            else:
+                n_files += 1
+                if _stat.S_ISREG(st.st_mode):
+                    n_bytes += st.st_size
+    return n_files, n_bytes
 
-def skipped_tree_issues():
+def _count_skipped_tree(root, tree_path, rel=None, into=None):
+    """Record a pruned directory with its file count and total size for the
+    INFO blind-spot accounting surfaced after the scan. `rel` is the
+    root-relative display path (review item 5: it used to be cwd-relative,
+    e.g. './app/vendor', when the root was given as a relative path)."""
+    n_files, n_bytes = _tree_stats(tree_path)
+    if rel is None:
+        rel = _fs_display(os.path.relpath(tree_path, root))
+    (_SKIPPED_TREES if into is None else into).append((rel, n_files, n_bytes))
+
+def _skipped_issue(rel, n_files, n_bytes):
+    return {
+        "rule": "Q-SKIPPED-TREE", "name": "Skipped directory (not scanned)",
+        "type": "SMELL", "sev": "INFO",
+        "msg": f"Directory {rel} was skipped ({n_files} files, {n_bytes} bytes unread).",
+        "why": "Skipped trees are invisible to every rule — the classic hiding places "
+               "(dist, build, .git) hold published code and committed-then-deleted "
+               "secrets. Generated trees you own are fine to skip on purpose; "
+               "unexpected entries here are blind spots.",
+        "fix": "Only exclude generated trees you control; remove the exclusion "
+               "otherwise so the tree is scanned.",
+        "ref": "Maintainability",
+        "file": rel, "line": 1, "snippet": [], "snipStart": 1}
+
+def skipped_tree_issues(skipped=None):
     """INFO issues summarizing the trees pruned by SKIP_DIRS/--exclude so the
-    coverage gap is visible instead of silent."""
-    out = []
-    for rel, n_files, n_bytes in _SKIPPED_TREES:
-        out.append({
-            "rule": "Q-SKIPPED-TREE", "name": "Skipped directory (not scanned)",
-            "type": "SMELL", "sev": "INFO",
-            "msg": f"Directory {rel} was skipped ({n_files} files, {n_bytes} bytes unread).",
-            "why": "Skipped trees are invisible to every rule — the classic hiding places "
-                   "(dist, build, .git) hold published code and committed-then-deleted "
-                   "secrets. Generated trees you own are fine to skip on purpose; "
-                   "unexpected entries here are blind spots.",
-            "fix": "Only exclude generated trees you control; remove the exclusion "
-                   "otherwise so the tree is scanned.",
-            "ref": "Maintainability",
-            "file": rel, "line": 1, "snippet": "", "snipStart": 0})
-    return out
+    coverage gap is visible instead of silent. `skipped` defaults to the
+    trees recorded by the most recent collect_files()."""
+    return [_skipped_issue(*t) for t in (_SKIPPED_TREES if skipped is None else skipped)]
 
 # ---------------- Scanning ----------------
 def is_comment(line, lang):
@@ -1895,10 +1920,150 @@ def scan_gyp(path, content):
                                              "binding.gyp action", cmd, suspicious))
     return issues
 
+import stat as _stat
+import traceback as _traceback
+
+# ---------------- File collection (the project walk) ----------------
+# The walk is the attack surface a hostile repository controls completely, so:
+#   * only REGULAR files are ever opened (lstat + S_ISREG, and O_NOFOLLOW |
+#     O_NONBLOCK + fstat at open time): a FIFO named b.py used to hang the
+#     scan forever, a symlink to /dev/urandom exhausted memory, and a symlink
+#     to a host file pulled that file into the report;
+#   * symlinks are never followed; each one inside the tree is an INFO
+#     Q-SYMLINK finding; unreadable entries are INFO Q-UNREADABLE findings;
+#   * reads are bounded (size cap + 1; a header sample for compiled
+#     artifacts);
+#   * the walk is iterative (os.walk recursed: a 1,100-deep tree raised
+#     RecursionError on 3.10/3.11);
+#   * paths in findings are root-relative and valid UTF-8 (a non-UTF-8 file
+#     name crashed the HTML writer after the scan).
+
+#: Files larger than this are not read: they get an SC-TRUNCATED finding
+#: instead (compiled artifacts are classified from their header whatever
+#: their size).
+SOURCE_SIZE_CAP = 2_000_000
+#: Bytes of a metadata file (AppleDouble) passed to classify_binary.
+HEADER_SAMPLE_BYTES = 512
+MANIFEST_NAMES = ("package.json", "binding.gyp")
 #: AppleDouble / AppleSingle metadata ("._name" files macOS writes on non-HFS
 #: volumes and into tarballs). Starts with a NUL, so it can never be Python or
-#: JavaScript source; it is classified like a binary file, not decoded.
+#: JavaScript source; it is classified like any other non-source file.
 APPLE_DOUBLE_MAGIC = (b"\x00\x05\x16\x07", b"\x00\x05\x16\x00")
+
+
+class ScanTargetError(ValueError):
+    """The scan target is missing, not a directory, unreadable or has nothing
+    to scan. A usage error: the CLI exits 2."""
+
+
+class _NotRegularFile(OSError):
+    """Raised by _read_prefix when the path is not a regular file at open time."""
+
+
+def _fs_display(path):
+    """A path as valid UTF-8 text. Non-UTF-8 names (surrogate-escaped by
+    os.scandir on POSIX) become backslash escapes, e.g. 'bad\\xff.py'."""
+    try:
+        path.encode("utf-8")
+        return path
+    except UnicodeEncodeError:
+        return os.fsencode(path).decode("utf-8", "backslashreplace")
+
+
+def _safe_text(s):
+    """Any str as valid UTF-8 text (lone surrogates become escapes)."""
+    s = str(s)
+    try:
+        s.encode("utf-8")
+        return s
+    except UnicodeEncodeError:
+        return s.encode("utf-8", "backslashreplace").decode("utf-8")
+
+
+def _is_reparse_point(st):
+    """Windows junctions / mount points are not symlinks to os.lstat on older
+    Pythons; treat any reparse-point directory like a symlink (never followed)."""
+    return bool(getattr(st, "st_file_attributes", 0) & 0x400)   # FILE_ATTRIBUTE_REPARSE_POINT
+
+
+_SPECIAL_KIND = ((_stat.S_ISFIFO, "a named pipe (FIFO)"), (_stat.S_ISSOCK, "a socket"),
+                 (_stat.S_ISCHR, "a character device"), (_stat.S_ISBLK, "a block device"))
+
+
+def _special_kind(mode):
+    return next((name for test, name in _SPECIAL_KIND if test(mode)), "not a regular file")
+
+
+_OPEN_FLAGS = (os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+               | getattr(os, "O_NOCTTY", 0) | getattr(os, "O_CLOEXEC", 0)
+               | getattr(os, "O_BINARY", 0))
+
+
+def _read_prefix(path, limit):
+    """Read at most `limit` bytes of a REGULAR file without following a
+    symlink or blocking on a FIFO swapped in after the lstat (O_NOFOLLOW |
+    O_NONBLOCK, then fstat). Raises OSError (incl. _NotRegularFile)."""
+    fd = os.open(path, _OPEN_FLAGS)
+    try:
+        st = os.fstat(fd)
+        if not _stat.S_ISREG(st.st_mode):
+            raise _NotRegularFile(f"{_special_kind(st.st_mode)}")
+        chunks, remaining = [], limit
+        while remaining > 0:
+            chunk = os.read(fd, min(remaining, 1 << 20))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
+
+
+def _coverage_issue(rule, name, path, msg, why, fix, ref="Maintainability"):
+    return {"rule": rule, "name": name, "type": "SMELL", "sev": "INFO",
+            "msg": msg, "why": why, "fix": fix, "ref": ref,
+            "file": path, "line": 1, "snippet": [], "snipStart": 1}
+
+
+def symlink_issue(path, target):
+    """Q-SYMLINK: a symbolic link inside the tree (never followed)."""
+    target = _safe_text(target)
+    if len(target) > 200:
+        target = target[:197] + "..."
+    return _coverage_issue(
+        "Q-SYMLINK", "Symbolic link (not followed)", path,
+        f"Symbolic link {path} -> {target} was not followed; its target was not scanned.",
+        "Following links would let a repository pull files from outside the scanned tree "
+        "(host credentials, /dev/urandom) into the scan and its reports, or loop forever. "
+        "The link target is not part of the tree under review.",
+        "If the target belongs to the project, scan it directly.",
+        "CWE-59 · Scan coverage")
+
+
+def unreadable_issue(path, reason):
+    """Q-UNREADABLE: an entry that could not be read (permissions, special file)."""
+    return _coverage_issue(
+        "Q-UNREADABLE", "Unreadable entry (not scanned)", path,
+        f"{path} could not be read ({_safe_text(reason)}); it was not scanned.",
+        "An entry the scanner cannot read is invisible to every rule. Special files "
+        "(named pipes, sockets, devices) are never opened: reading one can hang or "
+        "exhaust the scan.",
+        "Fix the permissions (or remove the special file) and re-scan.",
+        "Scan coverage")
+
+
+def scan_error_issue(path, exc):
+    """Q-SCAN-ERROR: one file's scan raised; the run continues without it."""
+    return _coverage_issue(
+        "Q-SCAN-ERROR", "File scan failed", path,
+        f"Scanning {path} failed ({type(exc).__name__}); findings for this file are incomplete.",
+        "An internal error while scanning one file is reported here instead of aborting "
+        "the whole run, so the rest of the project still gets a report. This file's "
+        "result is not evidence that it is clean.",
+        "Review the file manually and report the error (re-run with LAZARET_DEBUG=1 "
+        "for a traceback).",
+        "Scan coverage")
 
 
 def detect_encoding(head):
@@ -1961,127 +2126,143 @@ def encoding_issues(path, text, info):
          "ref": "Maintainability"}, path, 1, lines)]
     return out
 
-def collect_files(root, extra_excludes, include_deps=False):
-    """Returns (files, manifests, binary_issues). With include_deps, dependency
-    directories (node_modules, venv, vendor…) are also walked; their files are
-    marked dep=True and scanned only with supply-chain/secret rules. Compiled
-    binary artifacts (.so/.pyd/.dll/.node/.exe…) are flagged via classify_binary
-    regardless of size."""
-    skip = SKIP_DIRS | set(extra_excludes)
-    if include_deps:
-        skip -= DEP_MARKERS
-    found, manifests, binary_issues = [], [], []
-    for dirpath, dirnames, filenames in os.walk(root):
-        rel_dir = os.path.relpath(dirpath, root)
-        in_dep = any(part in DEP_MARKERS for part in rel_dir.split(os.sep))
-        # G10: path-based skip. A directory is pruned when its name is in
-        # `skip` (so a directory named dist is skipped but a *file* named dist
-        # is not); every prune is counted so the blind spot is visible.
-        prune = []
-        for d in list(dirnames):
-            if d in skip:
-                _count_skipped_tree(root, os.path.join(dirpath, d))
-                prune.append(d)
-            elif d in DEP_MARKERS and not include_deps:
-                _count_skipped_tree(root, os.path.join(dirpath, d))
-                prune.append(d)
-        dirnames[:] = sorted(d for d in dirnames if d not in prune)
-        for fn in sorted(filenames):
-            full = os.path.join(dirpath, fn)
-            rel = os.path.relpath(full, root)
-            ext = os.path.splitext(fn)[1].lower()
-            # compiled artifacts: flag by header regardless of size
-            if ext in COMPILED_EXTS:
-                try:
-                    size = os.path.getsize(full)
-                    with open(full, "rb") as f:
-                        head = f.read(8192)
-                except OSError:
-                    continue
-                bi = classify_binary(rel, head, size, "repo")
-                if bi:
-                    binary_issues.append(bi)
-                continue
-            try:
-                if os.path.getsize(full) > 2_000_000:
-                    # Verdict integrity (audit C2/G16): a silent `continue` here
-                    # made an oversize file invisible — no scan, no signal, and
-                    # a clean gate. Emit SC-TRUNCATED instead. The file is NOT
-                    # added to `found` (metrics stay honest: we did not scan it).
-                    binary_issues.append(truncated_issue(
-                        rel, f"{os.path.getsize(full):,} bytes exceeds the 2,000,000-byte "
-                        "file limit"))
-                    continue
-            except OSError:
-                continue
-            if fn == "package.json":
-                try:
-                    with open(full, encoding="utf-8", errors="replace") as f:
-                        manifests.append({"path": rel, "content": f.read()})
-                except OSError:
-                    pass
-                continue
-            if fn == "binding.gyp":  # G11: node-gyp actions run at install time
-                try:
-                    with open(full, encoding="utf-8", errors="replace") as f:
-                        manifests.append({"path": rel, "content": f.read()})
-                except OSError:
-                    pass
-                continue
-            if ext not in EXTS:
-                continue
-            # M17: sniff before decoding — errors="replace" alone turns a
-            # UTF-16 source into mojibake every rule then misses.
-            try:
-                with open(full, "rb") as f:
-                    data = f.read()
-            except OSError:
-                continue
-            if data[:4] in APPLE_DOUBLE_MAGIC:
-                bi = classify_binary(rel, data[:512], len(data), "repo")
-                if bi:
-                    binary_issues.append(bi)
-                continue
-            content, info = decode_source(data, EXTS[ext])
-            binary_issues.extend(encoding_issues(rel, content, info))
-            found.append({"path": rel, "content": content, "lang": EXTS[ext], "dep": in_dep})
-    return found, manifests, binary_issues
 
-import traceback as _traceback
-
-
-class ScanTargetError(ValueError):
-    """The scan target is missing, not a directory, unreadable or has nothing
-    to scan. A usage error: the CLI exits 2."""
-
-
-def _safe_text(s):
-    """Any str as valid UTF-8 text (lone surrogates become escapes)."""
-    s = str(s)
+def _readlink(path):
     try:
-        s.encode("utf-8")
-        return s
-    except UnicodeEncodeError:
-        return s.encode("utf-8", "backslashreplace").decode("utf-8")
+        return os.readlink(path)
+    except (OSError, ValueError):
+        return "?"
 
 
-def _coverage_issue(rule, name, path, msg, why, fix, ref="Maintainability"):
-    return {"rule": rule, "name": name, "type": "SMELL", "sev": "INFO",
-            "msg": msg, "why": why, "fix": fix, "ref": ref,
-            "file": path, "line": 1, "snippet": [], "snipStart": 1}
+def _collect_file(path, rel, st, in_dep, col):
+    """Classify and read one regular file (see the section comment)."""
+    name = os.path.basename(rel)
+    disp = _fs_display(rel)
+    ext = os.path.splitext(name)[1].lower()
+    size = st.st_size
+    manifest = name in MANIFEST_NAMES
+    lang = None if manifest else EXTS.get(ext)
+    issues = col["issues"]
+    # compiled artifacts: flag by header regardless of size
+    if ext in COMPILED_EXTS:
+        head = _read_prefix(path, 8192)
+        bi = classify_binary(disp, head, size, "repo")
+        if bi:
+            issues.append(bi)
+        return
+    # Verdict integrity (audit C2/G16): an oversize file is an SC-TRUNCATED
+    # finding, never a silent skip, and it is not added to the scanned files.
+    if size > SOURCE_SIZE_CAP:
+        issues.append(truncated_issue(
+            disp, f"{size:,} bytes exceeds the {SOURCE_SIZE_CAP:,}-byte file limit"))
+        return
+    if not manifest and lang is None:
+        return
+    data = _read_prefix(path, SOURCE_SIZE_CAP + 1)
+    if len(data) > SOURCE_SIZE_CAP:      # grew between the lstat and the read
+        issues.append(truncated_issue(
+            disp, f"read exceeded the {SOURCE_SIZE_CAP:,}-byte file limit"))
+        return
+    if manifest:
+        col["manifests"].append({"path": disp, "dep": in_dep,
+                                 "content": normalize_newlines(data.decode("utf-8", "replace"))})
+        return
+    if data[:4] in APPLE_DOUBLE_MAGIC:
+        bi = classify_binary(disp, data[:HEADER_SAMPLE_BYTES], size, "repo")
+        if bi:
+            issues.append(bi)
+        return
+    text, info = decode_source(data, lang)
+    issues.extend(encoding_issues(disp, text, info))
+    col["files"].append({"path": disp, "content": text, "lang": lang, "dep": in_dep})
 
 
-def scan_error_issue(path, exc):
-    """Q-SCAN-ERROR: one file's scan raised; the run continues without it."""
-    return _coverage_issue(
-        "Q-SCAN-ERROR", "File scan failed", path,
-        f"Scanning {path} failed ({type(exc).__name__}); findings for this file are incomplete.",
-        "An internal error while scanning one file is reported here instead of aborting "
-        "the whole run, so the rest of the project still gets a report. This file's "
-        "result is not evidence that it is clean.",
-        "Review the file manually and report the error (re-run with LAZARET_DEBUG=1 "
-        "for a traceback).",
-        "Scan coverage")
+def _collect(root, excludes=(), include_deps=False):
+    """Walk `root` iteratively. Returns {"files", "manifests", "issues",
+    "skipped"}: files = [{path, content, lang, dep}], manifests = [{path,
+    content, dep}], issues = collection findings (binary classification,
+    SC-TRUNCATED, Q-ENCODING, Q-SYMLINK, Q-UNREADABLE),
+    skipped = [(rel, n_files, n_bytes)] pruned trees. Paths are root-relative
+    (os.sep separators) and valid UTF-8. Raises ScanTargetError when the root
+    itself cannot be listed."""
+    excludes = set(excludes or ())
+    col = {"files": [], "manifests": [], "issues": [], "skipped": []}
+    issues = col["issues"]
+    seen_dirs = set()
+    stack = [("", False)]
+    while stack:
+        rel_dir, in_dep = stack.pop()
+        full_dir = os.path.join(root, rel_dir) if rel_dir else root
+        try:
+            with os.scandir(full_dir) as it:
+                entries = sorted(it, key=lambda e: e.name)
+            st_dir = os.stat(full_dir) if not rel_dir else None
+        except OSError as exc:
+            if not rel_dir:
+                raise ScanTargetError(
+                    f"cannot read directory {_fs_display(str(root))}: "
+                    f"{exc.strerror or type(exc).__name__}") from None
+            issues.append(unreadable_issue(_fs_display(rel_dir), exc.strerror or type(exc).__name__))
+            continue
+        if st_dir is not None and st_dir.st_ino:
+            seen_dirs.add((st_dir.st_dev, st_dir.st_ino))
+        subdirs = []
+        for e in entries:
+            rel = os.path.join(rel_dir, e.name) if rel_dir else e.name
+            try:
+                st = e.stat(follow_symlinks=False)
+            except OSError as exc:
+                issues.append(unreadable_issue(_fs_display(rel), exc.strerror or type(exc).__name__))
+                continue
+            mode = st.st_mode
+            if _stat.S_ISLNK(mode) or (_stat.S_ISDIR(mode) and _is_reparse_point(st)):
+                issues.append(symlink_issue(_fs_display(rel), _readlink(e.path)))
+            elif _stat.S_ISDIR(mode):
+                subdirs.append((e, rel, st))
+            elif not _stat.S_ISREG(mode):
+                issues.append(unreadable_issue(_fs_display(rel), _special_kind(mode)))
+            else:
+                try:
+                    _collect_file(e.path, rel, st, in_dep, col)
+                except OSError as exc:
+                    reason = (str(exc) if isinstance(exc, _NotRegularFile)
+                              else exc.strerror or type(exc).__name__)
+                    issues.append(unreadable_issue(_fs_display(rel), reason))
+                except Exception as exc:        # one file must never kill the walk
+                    issues.append(scan_error_issue(_fs_display(rel), exc))
+        push = []
+        for e, rel, st in subdirs:
+            name = e.name
+            if name in SKIP_DIRS or name in excludes:
+                _count_skipped_tree(root, e.path, _fs_display(rel), col["skipped"])
+                continue
+            key = (st.st_dev, st.st_ino)
+            if st.st_ino and key in seen_dirs:
+                issues.append(unreadable_issue(_fs_display(rel),
+                                               "directory already visited (filesystem loop)"))
+                continue
+            if st.st_ino:
+                seen_dirs.add(key)
+            dep = in_dep or name in DEP_MARKERS
+            if dep and not in_dep and not include_deps:
+                _count_skipped_tree(root, e.path, _fs_display(rel), col["skipped"])
+                continue
+            push.append((rel, dep))
+        stack.extend(reversed(push))       # pop order = sorted, depth-first (like os.walk)
+    return col
+
+
+def collect_files(root, extra_excludes, include_deps=False):
+    """Legacy API: returns (files, manifests, binary_issues) — binary_issues
+    being every collection finding (see _collect) — and records the pruned
+    trees for skipped_tree_issues() (reset per call). With include_deps,
+    dependency directories (node_modules, venv, vendor…) are walked too;
+    their files are marked dep=True and scanned only with supply-chain/secret
+    rules. New callers: scan_project()."""
+    _reset_scan_state()
+    col = _collect(root, extra_excludes, include_deps=include_deps)
+    _SKIPPED_TREES.extend(col["skipped"])
+    return col["files"], col["manifests"], col["issues"]
 
 
 def _scan_manifest_entry(mf):
@@ -2126,9 +2307,9 @@ def scan_project(root, exclude=(), include_deps=False, taint_config=None,
     global REDACT_SECRETS
     root = os.fspath(root)
     if not os.path.exists(root):
-        raise ScanTargetError(f"{_safe_text(root)} does not exist")
+        raise ScanTargetError(f"{_fs_display(root)} does not exist")
     if not os.path.isdir(root):
-        raise ScanTargetError(f"{_safe_text(root)} is not a directory")
+        raise ScanTargetError(f"{_fs_display(root)} is not a directory")
     saved_redact = REDACT_SECRETS
     REDACT_SECRETS = bool(redact_secrets)
     try:
@@ -2142,16 +2323,13 @@ def scan_project(root, exclude=(), include_deps=False, taint_config=None,
                                        on_warn=lambda msg: flow_warnings.append(msg))
             warnings.extend(f"taint config: {m}" for m in
                             _dedupe(get_taint_config_warnings() + flow_warnings))
-        _reset_scan_state()
-        files, manifests, collected = collect_files(root, list(exclude or ()),
-                                                    include_deps=include_deps)
-        skipped = skipped_tree_issues()
-        _reset_scan_state()
-        if not files and not manifests and not collected:
+        col = _collect(root, exclude, include_deps=include_deps)
+        files, manifests = col["files"], col["manifests"]
+        if not files and not manifests and not col["issues"]:
             raise ScanTargetError(
-                f"nothing to scan under {_safe_text(root)}: no Python, JavaScript or "
+                f"nothing to scan under {_fs_display(root)}: no Python, JavaScript or "
                 f"SQL sources, package manifests or other files to check")
-        issues = list(collected)
+        issues = list(col["issues"])
         for f in files:
             try:
                 issues.extend(scan_file(f["path"], f["content"], f["lang"],
@@ -2165,7 +2343,7 @@ def scan_project(root, exclude=(), include_deps=False, taint_config=None,
                 issues.append(scan_error_issue(mf["path"], exc))
         # G10: skipped-directory accounting — INFO findings make the coverage
         # gap visible instead of silent.
-        issues.extend(skipped)
+        issues.extend(skipped_tree_issues(col["skipped"]))
         if lazaret_flow is not None:
             # The interprocedural engine can fail on input it does not
             # understand; degrade to the intra-file engine rather than crash
@@ -2222,9 +2400,9 @@ def worst_sev_rating(issues, types):
 
 #: INFO scan-coverage notes. Typed SMELL for display, but they describe what
 #: the scanner could not look at, not the code: they do not count toward the
-#: maintainability rating (a single skipped tree in a small project used to
-#: be enough to fail "Maintainability >= C").
-COVERAGE_RULES = frozenset({"Q-SKIPPED-TREE", "Q-SCAN-ERROR"})
+#: maintainability rating (a single symlink in a small project used to be
+#: enough to fail "Maintainability >= C").
+COVERAGE_RULES = frozenset({"Q-SKIPPED-TREE", "Q-SYMLINK", "Q-UNREADABLE", "Q-SCAN-ERROR"})
 
 def maintainability_rating(issues, ncloc):
     smells = sum(1 for i in issues
@@ -2257,7 +2435,7 @@ def build_result(root, files, issues):
     conds.append({"label": "No supply-chain indicators", "ok": supply == 0})
     cross_file = sum(1 for i in issues if i["rule"].startswith("X-"))
     conds.append({"label": "No cross-file taint flows", "ok": cross_file == 0})
-    return {"project": os.path.abspath(root),
+    return {"project": _fs_display(os.path.abspath(os.fspath(root))),
             "scannedAt": datetime.datetime.now().isoformat(timespec="seconds"),
             "pass": all(c["ok"] for c in conds), "conditions": conds,
             "metrics": metrics, "counts": counts, "ratings": ratings,
@@ -2772,7 +2950,7 @@ def _main(argv=None):
     # Usage errors (exit 2) before anything else: a missing target, a file
     # instead of a directory. (An unreadable or empty directory is reported
     # by scan_project, also exit 2.)
-    target_disp = sanitize_term(_safe_text(args.directory))
+    target_disp = sanitize_term(_fs_display(args.directory))
     if not os.path.exists(args.directory):
         print(f"error: {target_disp} does not exist (expected a directory to scan)",
               file=sys.stderr)

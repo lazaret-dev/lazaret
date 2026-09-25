@@ -112,6 +112,14 @@ class UsageErrors(unittest.TestCase):
                 self.assertEqual(p.returncode, 2, p.stdout)
                 self.assertIn("nothing to scan", p.stderr)
 
+    def test_unreadable_root_is_a_usage_error(self):
+        root = make_tree({"a.py": "x = 1\n"})
+        self.addCleanup(shutil.rmtree, root, True)
+        with mock.patch.object(core.os, "scandir", side_effect=PermissionError(13, "Permission denied")):
+            with self.assertRaises(core.ScanTargetError) as cm:
+                core.scan_project(root)
+        self.assertIn("cannot read directory", str(cm.exception))
+
     def test_unknown_option(self):
         root = make_tree({"a.py": "x = 1\n"})
         self.addCleanup(shutil.rmtree, root, True)
