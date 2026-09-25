@@ -11,9 +11,12 @@ Tools:
     quality_gate    — pass/fail gate only, for quick change verification
 """
 import json
-import re
 import os
+import queue
+import re
 import sys
+import threading
+import time
 
 from lazaret.scanner import core as lazaret  # noqa: E402
 try:
@@ -137,12 +140,78 @@ TOOLS = [
 ]
 
 
+# ---------------- Per-call context: cancellation, caps, allowed roots ----------------
+class ToolCancelled(Exception):
+    """The client cancelled the running call (notifications/cancelled)."""
+
+
+def _env_number(name, default, kind=int):
+    try:
+        value = kind(os.environ.get(name, default))
+        return value if value > 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+def allowed_roots():
+    """Real paths of LAZARET_MCP_ROOTS entries ([] = no restriction)."""
+    raw = os.environ.get("LAZARET_MCP_ROOTS", "")
+    return [os.path.normcase(os.path.realpath(os.path.expanduser(p.strip())))
+            for p in raw.split(os.pathsep) if p.strip()]
+
+
+class ToolContext:
+    """What one tool call may use. Handlers call check() between files."""
+
+    def __init__(self, cancel_event=None):
+        self.cancel_event = cancel_event if cancel_event is not None else threading.Event()
+        self.max_files = _env_number("LAZARET_MCP_MAX_FILES", 20_000)
+        self.max_bytes = _env_number("LAZARET_MCP_MAX_BYTES", 200_000_000)
+        self.max_seconds = _env_number("LAZARET_MCP_MAX_SECONDS", 300.0, float)
+        self.deadline = time.monotonic() + self.max_seconds
+        self.roots = allowed_roots()
+
+    def cancelled(self):
+        return self.cancel_event.is_set()
+
+    def check(self):
+        if self.cancel_event.is_set():
+            raise ToolCancelled("cancelled by the client")
+
+    def expired(self):
+        return time.monotonic() > self.deadline
+
+    def check_path(self, path):
+        """Tool error for a path outside LAZARET_MCP_ROOTS (symlinks resolved)."""
+        if not isinstance(path, str) or not path or "\x00" in path:
+            raise ValueError("path must be a non-empty string")
+        if not self.roots:
+            return
+        real = os.path.normcase(os.path.realpath(path))
+        for root in self.roots:
+            try:
+                if os.path.commonpath([real, root]) == root:
+                    return
+            except ValueError:            # different drives
+                continue
+        raise ValueError(f"path is outside the allowed roots (LAZARET_MCP_ROOTS): {path}")
+
+
+_LOCAL = threading.local()
+
+
+def _ctx():
+    """The running call's context (a fresh default one outside the server)."""
+    ctx = getattr(_LOCAL, "ctx", None)
+    return ctx if ctx is not None else ToolContext()
+
+
 def slim(issue):
     return {k: issue[k] for k in ("rule", "type", "sev", "msg", "fix", "file", "line")}
 
 
 def result_summary(res, max_issues):
-    return {
+    out = {
         "qualityGate": "PASSED" if res["pass"] else "FAILED",
         "conditions": res["conditions"],
         "metrics": res["metrics"],
@@ -151,27 +220,131 @@ def result_summary(res, max_issues):
         "issueTotal": len(res["issues"]),
         "issues": [slim(i) for i in res["issues"][:max_issues]],
     }
+    for key in ("incomplete", "incompleteReason", "notes"):
+        if res.get(key):
+            out[key] = res[key]
+    return out
 
 
-def run_project_scan(path, exclude=None, include_deps=False):
-    files, manifests, binary_issues = lazaret.collect_files(
-        path, exclude or [], include_deps=include_deps)
+# ---------------- Project scan (mirrors the CLI pipeline) ----------------
+_MANIFEST_NAMES = ("package.json", "binding.gyp")
+_SOURCE_CAP = 2_000_000          # collect_files' per-file limit
+
+
+def _preflight(root, exclude, include_deps, ctx):
+    """Count what collect_files would read before it reads it; stops at the
+    caps (and on cancel / deadline) so a huge tree costs a bounded walk.
+    -> None when within budget, else the reason."""
+    skip = set(lazaret.SKIP_DIRS) | set(exclude)
+    deps = set(lazaret.DEP_MARKERS)
+    if include_deps:
+        skip -= deps
+    n_files = n_bytes = 0
+    stack = [root]
+    while stack:
+        ctx.check()
+        if ctx.expired():
+            return f"time budget of {ctx.max_seconds:g} s spent while listing files"
+        try:
+            with os.scandir(stack.pop()) as it:
+                entries = list(it)
+        except OSError:
+            continue
+        for e in entries:
+            try:
+                if e.is_dir(follow_symlinks=False):
+                    if e.name not in skip and (include_deps or e.name not in deps):
+                        stack.append(e.path)
+                    continue
+                if not e.is_file(follow_symlinks=False):
+                    continue
+                ext = os.path.splitext(e.name)[1].lower()
+                source = ext in lazaret.EXTS or e.name in _MANIFEST_NAMES
+                if not source and ext not in lazaret.COMPILED_EXTS:
+                    continue
+                n_files += 1
+                if source:
+                    size = e.stat(follow_symlinks=False).st_size
+                    n_bytes += size if size <= _SOURCE_CAP else 0
+            except OSError:
+                continue
+            if n_files > ctx.max_files:
+                return f"more than {ctx.max_files:,} files to scan (LAZARET_MCP_MAX_FILES)"
+            if n_bytes > ctx.max_bytes:
+                return f"more than {ctx.max_bytes:,} bytes of source (LAZARET_MCP_MAX_BYTES)"
+    return None
+
+
+def run_project_scan(path, exclude=None, include_deps=False, ctx=None):
+    """The CLI's project pipeline, for the MCP tools — ONE helper so it can
+    be swapped for a shared core.scan_project() without touching the tools:
+    collect_files; scan_file per file (dep mode for dependency dirs);
+    binding.gyp through scan_gyp and package.json through scan_manifest
+    (dependency manifests with registry semantics); Q-SKIPPED-TREE entries;
+    the cross-file taint engine, guarded (a failure there becomes a note in
+    the result, never a failed tool call); build_result + redact_result.
+    Per-call scan state (skipped-tree accounting) is reset first.
+
+    MCP budget (ctx): cancellation and the deadline are checked between
+    files; caps on files / bytes are enforced before anything is read. A
+    call that stops early returns what it scanned with "incomplete": true
+    and an SC-TRUNCATED finding, so it can never pass the gate."""
+    ctx = ctx or _ctx()
+    exclude = list(exclude or [])
+    lazaret._reset_scan_state()
+    notes = []
+    over = _preflight(path, exclude, include_deps, ctx)
+    if over:
+        res = lazaret.build_result(path, [], [lazaret.truncated_issue(
+            ".", f"directory not scanned: {over}; narrow the path or raise the MCP caps")])
+        res.update(incomplete=True, incompleteReason=over, notes=notes)
+        return res
+    files, manifests, binary_issues = lazaret.collect_files(path, exclude, include_deps=include_deps)
     issues = list(binary_issues)
+    scanned, stopped = [], None
     for f in files:
-        issues.extend(lazaret.scan_file(f["path"], f["content"], f["lang"],
-                                          dep=f.get("dep", False)))
+        ctx.check()
+        if ctx.expired():
+            stopped = f"time budget of {ctx.max_seconds:g} s (LAZARET_MCP_MAX_SECONDS) exceeded"
+            break
+        issues.extend(lazaret.scan_file(f["path"], f["content"], f["lang"], dep=f.get("dep", False)))
+        scanned.append(f)
+    if stopped:
+        issues.append(lazaret.truncated_issue(
+            ".", f"{stopped}: {len(files) - len(scanned)} of {len(files)} files not scanned"))
     for mf in manifests:
-        issues.extend(lazaret.scan_manifest(mf["path"], mf["content"]))
-    if getattr(lazaret, "lazaret_flow", None) is not None:
-        issues.extend(lazaret.lazaret_flow.analyze(files))
-    return lazaret.build_result(path, files, issues)
+        ctx.check()
+        if os.path.basename(mf["path"]) == "binding.gyp":
+            issues.extend(lazaret.scan_gyp(mf["path"], mf["content"]))
+        else:
+            issues.extend(lazaret.scan_manifest(
+                mf["path"], mf["content"], registry=lazaret.is_dependency_manifest(mf["path"])))
+    issues.extend(lazaret.skipped_tree_issues())
+    flow = getattr(lazaret, "lazaret_flow", None)
+    if flow is not None and not stopped:
+        try:
+            issues.extend(flow.analyze(scanned))
+        except Exception as exc:                                  # noqa: BLE001
+            notes.append(f"interprocedural taint analysis skipped "
+                         f"({type(exc).__name__}: {lazaret.sanitize_term(exc)})")
+    res = lazaret.build_result(path, scanned, issues)
+    lazaret.redact_result(res)
+    res["notes"] = notes
+    if stopped:
+        res.update(incomplete=True, incompleteReason=stopped)
+    return res
 
 
 def tool_scan_directory(args):
-    path = args["path"]
+    ctx = _ctx()
+    path = args.get("path")
+    ctx.check_path(path)
     if not os.path.isdir(path):
         raise ValueError(f"Not a directory: {path}")
-    res = run_project_scan(path, args.get("exclude"), bool(args.get("include_deps")))
+    exclude = args.get("exclude") or []
+    if not isinstance(exclude, list) or not all(isinstance(x, str) for x in exclude):
+        raise ValueError("exclude must be an array of directory names")
+    res = run_project_scan(path, exclude, bool(args.get("include_deps")), ctx=ctx)
     out = result_summary(res, int(args.get("max_issues") or MAX_ISSUES))
     out["supplyChainIndicators"] = res.get("supplyChain", 0)
     return out
@@ -187,8 +360,26 @@ MAX_SCAN_FILE_BYTES = 2_000_000
 
 
 def tool_scan_files(args):
+    ctx = _ctx()
+    paths = args.get("paths")
+    if not isinstance(paths, list) or not all(isinstance(p, str) for p in paths):
+        raise ValueError("paths must be an array of strings")
+    for p in paths:                      # every path is checked before any is read
+        ctx.check_path(p)
     out, all_issues, files = {}, [], []
-    for p in args["paths"]:
+    read_bytes, stopped = 0, None
+    for idx, p in enumerate(paths):
+        ctx.check()
+        if idx >= ctx.max_files:
+            stopped = f"file cap of {ctx.max_files:,} (LAZARET_MCP_MAX_FILES) reached"
+        elif read_bytes > ctx.max_bytes:
+            stopped = f"byte cap of {ctx.max_bytes:,} (LAZARET_MCP_MAX_BYTES) reached"
+        elif ctx.expired():
+            stopped = f"time budget of {ctx.max_seconds:g} s (LAZARET_MCP_MAX_SECONDS) exceeded"
+        if stopped:
+            for q in paths[idx:]:
+                out.setdefault(q, {"error": f"not scanned: {stopped}"})
+            break
         ext = os.path.splitext(p)[1].lower()
         lang = lazaret.EXTS.get(ext)
         if lang is None:
@@ -210,15 +401,23 @@ def tool_scan_files(args):
             continue
         # bounded read: read cap+1 so a file that GREW between stat and read
         # (TOCTOU) is still caught, then falls into the truncation path.
-        with open(p, encoding="utf-8", errors="replace") as fh:
-            content = fh.read(MAX_SCAN_FILE_BYTES + 1)
-        if len(content) > MAX_SCAN_FILE_BYTES:
+        try:
+            with open(p, "rb") as fh:
+                data = fh.read(MAX_SCAN_FILE_BYTES + 1)
+        except OSError as exc:
+            out[p] = {"error": f"Cannot read file: {exc}"}
+            continue
+        if len(data) > MAX_SCAN_FILE_BYTES:
             ti = lazaret.truncated_issue(
                 p, f"read exceeded the {MAX_SCAN_FILE_BYTES:,}-byte file limit")
             all_issues.append(ti)
             out[p] = {"error": ti["msg"], "rule": ti["rule"], "sev": ti["sev"]}
             continue
-        issues = lazaret.scan_file(p, content, lang)
+        read_bytes += len(data)
+        # BOM / UTF-16 / PEP 263 coding cookie (UTF-7 → SC-UTF7), like the
+        # registry: scan what the interpreter will read.
+        content, extra = lazaret.decode_source(p, data)
+        issues = extra + lazaret.scan_file(p, content, lang)
         files.append({"path": p, "content": content, "lang": lang})
         all_issues.extend(issues)
         out[p] = {"issueCount": len(issues), "issues": [slim(i) for i in issues]}
@@ -228,42 +427,75 @@ def tool_scan_files(args):
         "worstSeverity": min((i["sev"] for i in all_issues),
                              key=lambda s: lazaret.SEV_ORDER[s], default=None),
     }
+    if stopped:
+        summary["incomplete"] = True
+        summary["incompleteReason"] = stopped
     return summary
 
 
 def tool_scan_snippet(args):
-    lang = args["language"]
+    lang = args.get("language")
+    code = args.get("code")
+    if lang not in ("py", "js") or not isinstance(code, str):
+        raise ValueError("scan_snippet needs code (string) and language 'py' or 'js'")
     name = "snippet.py" if lang == "py" else "snippet.js"
-    issues = lazaret.scan_file(name, args["code"], lang)
+    issues = lazaret.scan_file(name, code, lang)
     issues.sort(key=lambda i: (lazaret.SEV_ORDER[i["sev"]], i["line"]))
     return {"issueCount": len(issues), "issues": [slim(i) for i in issues]}
 
 
 def tool_quality_gate(args):
-    path = args["path"]
+    ctx = _ctx()
+    path = args.get("path")
+    ctx.check_path(path)
     if not os.path.isdir(path):
         raise ValueError(f"Not a directory: {path}")
-    res = run_project_scan(path)
-    return {"qualityGate": "PASSED" if res["pass"] else "FAILED",
-            "conditions": res["conditions"], "counts": res["counts"],
-            "ratings": res["ratings"],
-            "supplyChainIndicators": res.get("supplyChain", 0)}
+    res = run_project_scan(path, ctx=ctx)
+    out = {"qualityGate": "PASSED" if res["pass"] else "FAILED",
+           "conditions": res["conditions"], "counts": res["counts"],
+           "ratings": res["ratings"],
+           "supplyChainIndicators": res.get("supplyChain", 0)}
+    for key in ("incomplete", "incompleteReason", "notes"):
+        if res.get(key):
+            out[key] = res[key]
+    return out
+
+
+def _store_result(store, eco, name, res):
+    """Persist; a DB failure is reported next to the verdict, never instead of it."""
+    try:
+        pid, _ = store.add_package(eco, name)
+        store.save_scan(pid, res)
+        return None
+    except Exception as exc:                                       # noqa: BLE001
+        return f"{type(exc).__name__}: {exc}"
 
 
 def tool_scan_package(args):
     if lazaret_repo is None:
         raise ValueError("Registry scanning unavailable (lazaret.registry not importable).")
-    eco, name, ver = lazaret_repo.parse_spec(args["spec"])
-    res = lazaret_repo.scan_package(eco, name, ver, full=bool(args.get("full")))
+    spec = args.get("spec")
+    if not isinstance(spec, str):
+        raise ValueError("spec must be a string like npm:left-pad@1.3.0")
+    ctx = _ctx()
+    eco, name, ver = lazaret_repo.parse_spec(spec)
+    # open the state DB first: an unreachable DB is a tool error before any download
     store = lazaret_repo.Store(REGISTRY_DB)
-    pid, _ = store.add_package(eco, name)
-    store.save_scan(pid, res)
-    return {"package": f"{eco}:{name}@{res['version']}", "artifact": res.get("artifact"),
-            "verdict": res["verdict"], "verdictReason": res.get("verdictReason"),
-            "profile": res["profile"],
-            "filesScanned": res["filesScanned"], "binaryArtifacts": res.get("binaryArtifacts", 0),
-            "supplyChainIndicators": res["supplyChain"], "severityCounts": res["sevCounts"],
-            "issueTotal": len(res["issues"]), "issues": [slim(i) for i in res["issues"][:MAX_ISSUES]]}
+    res = lazaret_repo.scan_package(eco, name, ver, full=bool(args.get("full")),
+                                    deadline=ctx.deadline, cancel=ctx.cancelled)
+    store_error = _store_result(store, eco, name, res)
+    out = {"package": f"{eco}:{name}@{res['version']}", "artifact": res.get("artifact"),
+           "verdict": res["verdict"], "verdictReason": res.get("verdictReason"),
+           "profile": res["profile"],
+           "filesScanned": res["filesScanned"], "binaryArtifacts": res.get("binaryArtifacts", 0),
+           "supplyChainIndicators": res["supplyChain"], "severityCounts": res["sevCounts"],
+           "issueTotal": len(res["issues"]), "issues": [slim(i) for i in res["issues"][:MAX_ISSUES]]}
+    if len(res.get("artifacts") or []) > 1:
+        out["artifacts"] = [{k: a.get(k) for k in ("filename", "kind", "verdict", "verdictReason")}
+                            for a in res["artifacts"]]
+    if store_error:
+        out["storeError"] = store_error
+    return out
 
 
 def tool_registry_status(args):
@@ -280,10 +512,16 @@ def tool_registry_status(args):
 def tool_discover_packages(args):
     if lazaret_repo is None:
         raise ValueError("Registry scanning unavailable (lazaret.registry not importable).")
+    ctx = _ctx()
     since = args.get("since") or "7d"
+    if not isinstance(since, str):
+        raise ValueError("since must be a string like 7d, 2w, 24h or an ISO date")
     cutoff = lazaret_repo.parse_since(since)
     ecos = args.get("ecosystem") or ["pypi", "npm"]
-    limit = min(int(args.get("limit") or 25), 50)
+    try:
+        limit = min(int(args.get("limit") or 25), 50)
+    except (TypeError, ValueError):
+        raise ValueError("limit must be an integer") from None
     discovered = []
     if "pypi" in ecos:
         discovered += lazaret_repo.discover_pypi(cutoff, limit)
@@ -298,16 +536,34 @@ def tool_discover_packages(args):
         store = lazaret_repo.Store(REGISTRY_DB)
         results = []
         for e, n, v, _w in discovered[:15]:
+            ctx.check()
+            if ctx.expired():
+                results.append({"package": f"{e}:{n}", "verdict": "INCOMPLETE",
+                                "error": "not scanned: MCP time budget exceeded"})
+                continue
             try:
-                res = lazaret_repo.scan_package(e, n, v)
-                pid, _ = store.add_package(e, n)
-                store.save_scan(pid, res)
-                results.append({"package": f"{e}:{n}@{res['version']}", "verdict": res["verdict"],
-                                "verdictReason": res.get("verdictReason"),
-                                "supplyChainIndicators": res["supplyChain"],
-                                "binaryArtifacts": res.get("binaryArtifacts", 0)})
+                # tracked even when the scan fails, so the next sweep retries it
+                store.add_package(e, n)
+            except Exception:                              # noqa: BLE001
+                pass
+            try:
+                res = lazaret_repo.scan_package(e, n, v, deadline=ctx.deadline,
+                                                cancel=ctx.cancelled)
+            except lazaret_repo.ScanCancelled:
+                raise
             except Exception as exc:                       # noqa: BLE001
-                results.append({"package": f"{e}:{n}", "error": str(exc)})
+                # a package that could not be scanned cannot be cleared
+                results.append({"package": f"{e}:{n}" + (f"@{v}" if v else ""),
+                                "verdict": "INCOMPLETE", "error": str(exc)})
+                continue
+            entry = {"package": f"{e}:{n}@{res['version']}", "verdict": res["verdict"],
+                     "verdictReason": res.get("verdictReason"),
+                     "supplyChainIndicators": res["supplyChain"],
+                     "binaryArtifacts": res.get("binaryArtifacts", 0)}
+            store_error = _store_result(store, e, n, res)
+            if store_error:
+                entry["storeError"] = store_error
+            results.append(entry)
         out["scanned"] = results
         out["flagged"] = [r for r in results
                           if r.get("verdict") in ("WARN", "INCOMPLETE", "SUSPICIOUS")]
