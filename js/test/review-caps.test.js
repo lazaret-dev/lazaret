@@ -1,10 +1,13 @@
 // Review regressions: per-rule caps, snippet clipping and very large finding
-// counts (shared semantics 7; review finding 2). Expectations match
+// counts (shared semantics 7; review findings 2 and 11). Expectations match
 // the Python engine's cap_issues / clip_snippet_line on the same input.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { scanFile } from "../src/index.js";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { scanFile, run } from "../src/index.js";
 
 const count = (issues, rule) => issues.filter((i) => i.rule === rule).length;
 
@@ -42,4 +45,18 @@ test("snippet lines are clipped to 240 characters, windowed around the match", (
   // another finding on the same line (not windowed on eval) is clipped from the start
   const ll = r.find((i) => i.rule === "Q-LONGLINE");
   assert.ok(ll.snippet[1].startsWith("x = 1; x = 1;") && ll.snippet[1].endsWith("x…"));
+});
+
+test("140,000 findings: no RangeError from push(...array), a normal exit", () => {
+  // was: issues.push(...array) threw RangeError around 130k issues (no report)
+  const d = mkdtempSync(join(tmpdir(), "lazaret-many-"));
+  try {
+    writeFileSync(join(d, "a.js"), "eval(a)\n".repeat(140000));
+    const out = [], err = [];
+    const code = run(["check", d, "-q", "--no-json", "--no-html"], { out: (s) => out.push(s), err: (s) => err.push(s) });
+    assert.equal(code, 0, err.join("\n"));
+    assert.match(out.join("\n"), /Issues: 140000 vulnerabilities/);
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
 });

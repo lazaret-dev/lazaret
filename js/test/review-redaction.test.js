@@ -7,8 +7,10 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { scanFile } from "../src/index.js";
-import { scanManifest } from "../src/lib/supplychain.js";
+import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { scanFile, scanManifest, setRedactSecrets, run } from "../src/index.js";
 
 const AWS = "AKIA" + "ZZZZ9999ZZZZ9999";
 const GH = (p) => `${p}${"a1B2".repeat(9)}`;
@@ -62,4 +64,20 @@ test("install-hook msg and cmd are redacted by the library call itself", () => {
   assert.equal(hook.msg, `"postinstall" script runs code at install time: 'node x.js --token [redacted]'.`);
   assert.equal(hook.cmd, "node x.js --token [redacted]");
   assert.ok(!JSON.stringify(hook).includes(GH("ghp_")));
+});
+
+test("--no-redact-secrets keeps the raw lines (and resets after the run)", () => {
+  const d = mkdtempSync(join(tmpdir(), "lazaret-redact-"));
+  try {
+    writeFileSync(join(d, "a.js"), `const k = "${AWS}";\n`);
+    const io = { out: () => {}, err: () => {}, env: {} };
+    assert.equal(run(["check", d, "--no-html", "--no-redact-secrets"], io), 0);
+    assert.ok(readFileSync(join(d, "lazaret-report.json"), "utf8").includes(AWS));
+    assert.equal(run(["check", d, "--no-html"], io), 0);
+    assert.ok(!readFileSync(join(d, "lazaret-report.json"), "utf8").includes(AWS));
+    assert.ok(!JSON.stringify(scan(`const k = "${AWS}";\n`, "js")).includes(AWS));   // library default: on
+  } finally {
+    setRedactSecrets(true);
+    rmSync(d, { recursive: true, force: true });
+  }
 });
