@@ -78,8 +78,10 @@ def _msg(kind: bytes, payload: bytes) -> bytes:
     return kind + _I32.pack(len(payload) + 4) + payload
 
 
-def _cstr(s: str) -> bytes:
-    b = s.encode("utf-8")
+def _cstr(s: str, errors: str = "strict") -> bytes:
+    # errors="surrogateescape" for connection values and passwords: bytes that
+    # are not UTF-8 (from a percent-encoded URL or the environment) are sent as is.
+    b = s.encode("utf-8", errors)
     if b"\x00" in b:
         raise InterfaceError("strings sent to the server cannot contain NUL characters")
     return b + b"\x00"
@@ -467,7 +469,8 @@ class Connection:
             startup["application_name"] = p.application_name
         if p.options:
             startup["options"] = p.options
-        payload = _I32.pack(PROTOCOL_3_0) + b"".join(_cstr(k) + _cstr(v) for k, v in startup.items()) + b"\x00"
+        payload = (_I32.pack(PROTOCOL_3_0)
+                   + b"".join(_cstr(k) + _cstr(v, "surrogateescape") for k, v in startup.items()) + b"\x00")
         self._send(_I32.pack(len(payload) + 4) + payload)
         self._synced = False
         self._authenticate()
@@ -601,10 +604,10 @@ class Connection:
                     raise AuthenticationError(
                         "server requested a cleartext password over an unencrypted connection; "
                         "refusing (use TLS, or pass allow_cleartext_password=True)")
-                self._send(_msg(b"p", _cstr(self._password())))
+                self._send(_msg(b"p", _cstr(self._password(), "surrogateescape")))
             elif code == 5:
                 salt = body[4:8]
-                inner = hashlib.md5((self._password() + p.user).encode("utf-8")).hexdigest()
+                inner = hashlib.md5((self._password() + p.user).encode("utf-8", "surrogateescape")).hexdigest()
                 outer = hashlib.md5(inner.encode("ascii") + salt).hexdigest()
                 self._send(_msg(b"p", _cstr("md5" + outer)))
             elif code == 10:

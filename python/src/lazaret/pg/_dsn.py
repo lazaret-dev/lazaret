@@ -6,9 +6,10 @@ from __future__ import annotations
 import getpass
 import logging
 import os
+import re
 import stat
 from dataclasses import dataclass, field
-from urllib.parse import parse_qsl, unquote, urlsplit
+from urllib.parse import unquote
 
 from .errors import InterfaceError
 
@@ -60,37 +61,82 @@ class ConnectParams:
 
 
 def parse_dsn(dsn: str) -> dict[str, str]:
-    """Parse a postgresql:// URL or a libpq key=value string into a dict."""
+    """Parse a postgresql:// URL or a libpq key=value string into a dict.
+
+    Error messages never include parsed values, because a malformed string
+    may put part of the password where another value was expected."""
     dsn = dsn.strip()
-    if dsn.startswith(("postgresql://", "postgres://")):
-        return _parse_url(dsn)
+    for prefix in ("postgresql://", "postgres://"):
+        if dsn.startswith(prefix):
+            return _parse_url(dsn[len(prefix):])
     return _parse_keyvalue(dsn)
 
 
-def _parse_url(url: str) -> dict[str, str]:
-    parts = urlsplit(url)
+_PCT_RE = re.compile(r"%(?![0-9A-Fa-f]{2})")
+
+
+def _pct(text: str) -> str:
+    """Percent-decode one URI component the way libpq does: '+' stays '+',
+    malformed escapes and %00 are errors, and bytes that are not UTF-8 are
+    kept (as surrogate escapes) so they reach the server unchanged."""
+    if "%" not in text:
+        return text
+    if _PCT_RE.search(text):
+        raise InterfaceError("invalid percent-encoded token in connection URI")
+    if re.search(r"%00", text):
+        raise InterfaceError("forbidden value %00 in percent-encoded value in connection URI")
+    return unquote(text, errors="surrogateescape")
+
+
+def _parse_url(rest: str) -> dict[str, str]:
+    """Parse the part after postgresql:// by hand, like libpq (not urlsplit):
+    there are no fragments, so '#' and '?' may appear unencoded in the
+    password; the credentials end at the last '@' before the first '/';
+    and query values are percent-decoded without turning '+' into a space."""
     out: dict[str, str] = {}
-    userinfo, _, hostport = parts.netloc.rpartition("@")
-    if userinfo:
-        user, sep, password = userinfo.partition(":")
+    slash = rest.find("/")
+    at = (rest if slash < 0 else rest[:slash]).rfind("@")
+    if at >= 0:
+        user, sep, password = rest[:at].partition(":")
         if user:
-            out["user"] = unquote(user)
-        if sep:
-            out["password"] = unquote(password)
+            out["user"] = _pct(user)
+        if sep and password:
+            out["password"] = _pct(password)
+        rest = rest[at + 1:]
+    end = min((i for i in (rest.find("/"), rest.find("?")) if i >= 0), default=len(rest))
+    hostport, rest = rest[:end], rest[end:]
     if "," in hostport:
         raise InterfaceError("multiple hosts in one connection string are not supported")
     if hostport.startswith("["):  # [IPv6]:port
-        host, _, rest = hostport[1:].partition("]")
-        port = rest[1:] if rest.startswith(":") else ""
+        close = hostport.find("]")
+        if close < 0:
+            raise InterfaceError("missing ']' after an IPv6 host address in connection URI")
+        host, after = hostport[1:close], hostport[close + 1:]
+        if after and not after.startswith(":"):
+            raise InterfaceError("unexpected character after an IPv6 host address in connection URI")
+        port = after[1:]
     else:
-        host, _, port = hostport.rpartition(":") if ":" in hostport else (hostport, "", "")
+        host, _, port = hostport.partition(":")
     if host:
-        out["host"] = unquote(host)
+        out["host"] = _pct(host)
     if port:
-        out["port"] = port
-    if parts.path and parts.path != "/":
-        out["dbname"] = unquote(parts.path[1:])
-    for key, value in parse_qsl(parts.query, keep_blank_values=True):
+        out["port"] = _pct(port)
+    query = ""
+    if rest.startswith("/"):
+        path, _, query = rest[1:].partition("?")
+        if path:
+            out["dbname"] = _pct(path)
+    elif rest.startswith("?"):
+        query = rest[1:]
+    for item in query.split("&"):
+        if not item:
+            continue
+        key, sep, value = item.partition("=")
+        if not sep:
+            raise InterfaceError("missing key/value separator '=' in connection URI query parameter")
+        key, value = _pct(key), _pct(value)
+        if key == "ssl" and value == "true":  # libpq's JDBC-compatible spelling
+            key, value = "sslmode", "require"
         out[_ALIASES.get(key, key)] = value
     _check_keys(out)
     return out
@@ -105,13 +151,15 @@ def _parse_keyvalue(s: str) -> dict[str, str]:
         if i >= n:
             break
         start = i
-        while i < n and s[i] not in "= \t\n":
+        while i < n and s[i] not in "= \t\n\r\f\v":
             i += 1
         key = s[start:i]
         while i < n and s[i].isspace():
             i += 1
-        if i >= n or s[i] != "=":
-            raise InterfaceError(f"missing '=' after {key!r} in connection string")
+        if i >= n or s[i] != "=" or not key:
+            # Don't name the word: after "password=two words" it is part of the password.
+            raise InterfaceError("missing '=' after a parameter name in connection string "
+                                 "(quote values that contain spaces: password='two words')")
         i += 1
         while i < n and s[i].isspace():
             i += 1
@@ -146,6 +194,10 @@ def _parse_keyvalue(s: str) -> dict[str, str]:
 def _check_keys(d: dict[str, str]) -> None:
     unknown = set(d) - _KEYS
     if unknown:
+        if "password" in d:
+            # A misquoted password can turn into "keys": don't echo them.
+            raise InterfaceError("unknown connection parameter in connection string "
+                                 "(names not shown because the string contains a password)")
         raise InterfaceError(f"unknown connection parameter(s): {', '.join(sorted(unknown))}")
 
 
@@ -187,19 +239,25 @@ def resolve(dsn: str | None = None, **kwargs: object) -> ConnectParams:
 
     user = merged.get("user") or _default_user()
     try:
-        port = int(merged.get("port", "5432"))
+        port = int(merged.get("port") or "5432")
+        if not 0 < port < 65536:
+            raise ValueError
     except ValueError:
-        raise InterfaceError(f"invalid port: {merged['port']!r}") from None
+        # The value is not shown: in a malformed URL it can be part of the password.
+        raise InterfaceError("invalid port number in connection parameters") from None
     sslmode = merged.get("sslmode", "prefer")
     if sslmode not in SSLMODES:
-        raise InterfaceError(f"sslmode must be one of {', '.join(SSLMODES)} (got {sslmode!r})")
+        raise InterfaceError(f"sslmode must be one of {', '.join(SSLMODES)}")
     channel_binding = merged.get("channel_binding", "prefer")
     if channel_binding not in CHANNEL_BINDING:
         raise InterfaceError(f"channel_binding must be one of {', '.join(CHANNEL_BINDING)}")
     if merged.get("sslrootcert") == "system" and sslmode != "verify-full":
         raise InterfaceError("sslrootcert=system requires sslmode=verify-full")
     timeout = merged.get("connect_timeout")
-    connect_timeout = float(timeout) if timeout else 30.0
+    try:
+        connect_timeout = float(timeout) if timeout else 30.0
+    except ValueError:
+        raise InterfaceError("connect_timeout must be a number of seconds") from None
     if connect_timeout <= 0:
         connect_timeout = None
 
