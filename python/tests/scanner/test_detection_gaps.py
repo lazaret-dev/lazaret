@@ -213,7 +213,10 @@ class M17Encoding(unittest.TestCase):
 
     def test_detect_encoding_bom(self):
         de = lazaret.detect_encoding
-        self.assertEqual(de(b"\xff\xfep\x00")["encoding"], "utf-16")
+        # FIX-SPEC 4: an explicit byte order (the generic "utf-16" codec's
+        # BOM-less decoder raised UnicodeError and killed the scan)
+        self.assertEqual(de(b"\xff\xfep\x00")["encoding"], "utf-16-le")
+        self.assertEqual(de(b"\xfe\xff\x00p")["encoding"], "utf-16-be")
         self.assertTrue(de(b"\xff\xfep\x00")["reported"])
         self.assertEqual(de(b"\xef\xbb\xbfimport os\n")["encoding"], "utf-8-sig")
         self.assertEqual(de(b"import os\n")["encoding"], "utf-8")

