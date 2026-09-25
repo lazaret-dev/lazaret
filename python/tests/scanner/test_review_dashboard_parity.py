@@ -109,7 +109,7 @@ class DashboardParityTests(unittest.TestCase):
         """Control: a page that drops a rule is caught."""
         with open(dash.HTML, encoding="utf-8", newline="") as f:
             html = f.read()
-        broken = html.replace('{id:"S-PICKLE"', '{id:"S-PICKLE-OFF"', 1)
+        broken = html.replace('id:"S-PICKLE"', 'id:"S-PICKLE-OFF"', 1)
         self.assertNotEqual(broken, html)
         import tempfile
         with tempfile.TemporaryDirectory() as d:

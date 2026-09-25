@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-10/Q/SlM+pfyBn9wDy+I5VUefgtibS+ltzOAYN9GoDg='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-EUj4iSuAi0/81gydX0yEGXBF7QKJAOk2/MYX9nYVMQc='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
 <title>Lazaret — Security &amp; Quality Review</title>
 <style>
   :root{
@@ -138,1006 +138,3008 @@
 
 <script>
 "use strict";
-/* ---------------- Rule definitions ---------------- */
+/* Lazaret dashboard — one self-contained page: no network, no dependencies.
+
+   The scan engine below is a port of the npm engine: js/src/lib/*.js and
+   js/src/scanner/*.js, one "======== file ========" section each, with the
+   import/export lines and the helpers the page doesn't use dropped. The npm
+   and Python engines are kept in step by tests/architecture/test_js_parity.py.
+   The page differs only where it has to: no dependency mode, no directory
+   walk, uploads decoded from their bytes as core.decode_source does (with its
+   plausibility check for a BOM-less UTF-16 guess), and every finding always
+   redacted. python/tests/scanner/test_review_dashboard_*.py run this script
+   in node:vm and compare its findings (every field), its tables and its
+   report with lazaret.scanner.core, so the copies cannot drift apart
+   silently. After editing this script run `python3 scripts/dashboard_csp.py`:
+   the page's CSP allows exactly this script, by hash. */
+
+/* ======== lib/pycompat.js ======== */
+// Python-compatibility helpers for the JS engine (zero-dependency leaf).
+//
+// The two engines must report the same findings for the same input, and the
+// Python engine's regexes run with Python `re` semantics on `str`: \w, \d, \s
+// and \b are Unicode-aware there, `.` matches everything except "\n", and
+// re.I folds case the Unicode way. JavaScript's \w/\b are ASCII-only, so a
+// rule written with the same source text silently diverged (a `café = …`
+// assignment was invisible to the JS taint tracker). pyRe() compiles a
+// Python pattern string into an equivalent JavaScript RegExp, so rule tables
+// can carry the Python source text verbatim.
+
+const W = "\\p{L}\\p{N}_";                 // Python str \w: isalnum() or "_"
+// Python str \s: exactly the characters for which str.isspace() is true.
+// (JS \s differs: it lacks \x1c-\x1f and \x85 and adds U+FEFF. For JS
+// sources the scanner maps U+FEFF to a space before matching — spec 5.)
+const WS = "\\t\\n\\v\\f\\r\\x1c-\\x20\\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000";
+const WORD_CLASS = `[${W}]`;
+const BOUNDARY = `(?:(?<=[${W}])(?![${W}])|(?<![${W}])(?=[${W}]))`;
+const NOT_BOUNDARY = `(?:(?<=[${W}])(?=[${W}])|(?<![${W}])(?![${W}]))`;
+const SYNTAX = new Set("^$\\.*+?()[]{}|/");
+
+/** Translate Python `re` pattern text into JavaScript (u-mode) pattern text. */
+function pyRegexSource(src) {
+  let out = "";
+  for (let i = 0; i < src.length; i++) {
+    const ch = src[i];
+    if (ch === "\\") {
+      const n = src[++i];
+      if (n === undefined) { out += "\\\\"; break; }
+      switch (n) {
+        case "w": out += `[${W}]`; continue;
+        case "W": out += `[^${W}]`; continue;
+        case "d": out += "\\p{Nd}"; continue;
+        case "D": out += "\\P{Nd}"; continue;
+        case "s": out += `[${WS}]`; continue;
+        case "S": out += `[^${WS}]`; continue;
+        case "b": out += BOUNDARY; continue;
+        case "B": out += NOT_BOUNDARY; continue;
+        case "A": out += "^"; continue;
+        case "Z": out += "$"; continue;
+        case "U": out += `\\u{${src.slice(i + 1, i + 9)}}`; i += 8; continue;
+        default: out += escapeOut(n); continue;
+      }
+    }
+    if (ch === "[") { const [text, next] = translateClass(src, i); out += text; i = next; continue; }
+    if (ch === ".") { out += "[^\\n]"; continue; }
+    out += ch;
+  }
+  return out;
+}
+
+function escapeOut(n) {
+  if (/[A-Za-z0-9]/.test(n)) return "\\" + n;               // \n \t \x.. \u.... \1
+  if (SYNTAX.has(n)) return "\\" + n;
+  return n;                                                  // \" \' \- \# \  …
+}
+
+// Python class shorthands and their complements, as class contents.
+const CLASS_SETS = { w: W, d: "\\p{Nd}", s: WS };
+/**
+ * Translate the character class starting at src[i] === "[". Returns
+ * [js text, index of the closing "]"]. A negated shorthand inside a class
+ * (\S, \W, \D — e.g. `[^\S\n]`) is rewritten with a look-ahead, since the
+ * JS shorthands have different contents.
+ */
+function translateClass(src, i) {
+  let j = i + 1;
+  let negated = false;
+  if (src[j] === "^") { negated = true; j++; }
+  const items = [];
+  const negSets = [];
+  let first = true;
+  for (; j < src.length; j++) {
+    const ch = src[j];
+    if (ch === "]" && !first) break;
+    first = false;
+    if (ch === "\\") {
+      const n = src[++j];
+      if (n === "w" || n === "d" || n === "s") items.push(CLASS_SETS[n]);
+      else if (n === "W" || n === "D" || n === "S") negSets.push(CLASS_SETS[n.toLowerCase()]);
+      else if (n === "b") items.push("\\x08");
+      else if (/[A-Za-z0-9]/.test(n) || SYNTAX.has(n) || n === "-") items.push("\\" + n);
+      else items.push(n);
+      continue;
+    }
+    if (ch === "[" || ch === "]") { items.push("\\" + ch); continue; }
+    items.push(ch);
+  }
+  const rest = items.join("");
+  if (!negSets.length) return [`[${negated ? "^" : ""}${rest}]`, j];
+  if (negSets.length > 1) throw new Error("pyRe: several negated shorthands in one class are not supported");
+  const c = negSets[0];
+  // [^\S rest] = whitespace and not rest; [\S rest] = non-whitespace or rest
+  const text = negated
+    ? (rest ? `(?:(?=[${c}])[^${rest}])` : `[${c}]`)
+    : (rest ? `(?:[^${c}]|[${rest}])` : `[^${c}]`);
+  return [text, j];
+}
+
+/**
+ * Compile a Python pattern (as written in lazaret/scanner/core.py) with
+ * Python semantics. `flags` uses JS letters: i (re.I), s (re.S), m (re.M),
+ * g (for iteration). The u flag is always added.
+ */
+function pyRe(src, flags = "") {
+  const re = new RegExp(pyRegexSource(src), [...new Set((flags + "u").split(""))].join(""));
+  re.pySource = src;       // (dashboard) the Python text, for the rule-table drift test
+  return re;
+}
+
+// ---- strings -----------------------------------------------------------
+// Characters for which Python's str.isspace() is true.
+const PY_SPACE = "\t\n\v\f\r\x1c\x1d\x1e\x1f \x85\xa0\u1680\u2000\u2001\u2002\u2003" +
+  "\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000";
+const PY_SPACE_SET = new Set(PY_SPACE);
+const isPySpace = (ch) => PY_SPACE_SET.has(ch);
+
+/** Python str.strip() (not JS trim(), which also strips U+FEFF). */
+function pyStrip(s) {
+  let a = 0, b = s.length;
+  while (a < b && PY_SPACE_SET.has(s[a])) a++;
+  while (b > a && PY_SPACE_SET.has(s[b - 1])) b--;
+  return a === 0 && b === s.length ? s : s.slice(a, b);
+}
+function pyLstrip(s) {
+  let a = 0;
+  while (a < s.length && PY_SPACE_SET.has(s[a])) a++;
+  return a ? s.slice(a) : s;
+}
+function pyRstrip(s) {
+  let b = s.length;
+  while (b > 0 && PY_SPACE_SET.has(s[b - 1])) b--;
+  return b === s.length ? s : s.slice(0, b);
+}
+
+const SURROGATE_RE = /[\ud800-\udbff][\udc00-\udfff]/g;
+/** len(s) as Python counts it (code points, not UTF-16 units). */
+function cpLen(s) {
+  if (!/[\ud800-\udbff]/.test(s)) return s.length;
+  return s.length - (s.match(SURROGATE_RE) || []).length;
+}
+/** Code-point index of the UTF-16 offset `off` in s. */
+function cpIndex(s, off) {
+  return cpLen(s.slice(0, off));
+}
+
+const WORD_CHAR_RE = new RegExp(`^[${W}]$`, "u");
+/** Python \w for one character (code point). */
+const isWordChar = (ch) => ch !== undefined && WORD_CHAR_RE.test(ch);
+
+// ---- repr() -------------------------------------------------------------
+const NONPRINTABLE_RE = /[\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Cn}\p{Zl}\p{Zp}\p{Zs}]/u;
+/** Python str.isprintable() for one code point. */
+const isPrintable = (ch) => ch === " " || !NONPRINTABLE_RE.test(ch);
+
+/** Python repr() of a str: messages quote source text exactly as Python does. */
+function pyRepr(s) {
+  s = String(s);
+  const quote = s.includes("'") && !s.includes('"') ? '"' : "'";
+  let out = quote;
+  for (const ch of s) {
+    if (ch === quote || ch === "\\") { out += "\\" + ch; continue; }
+    if (ch === "\t") { out += "\\t"; continue; }
+    if (ch === "\n") { out += "\\n"; continue; }
+    if (ch === "\r") { out += "\\r"; continue; }
+    const cp = ch.codePointAt(0);
+    if (cp < 0x20 || cp === 0x7f || (cp >= 0x80 && !isPrintable(ch))) {
+      if (cp < 0x100) out += "\\x" + cp.toString(16).padStart(2, "0");
+      else if (cp < 0x10000) out += "\\u" + cp.toString(16).padStart(4, "0");
+      else out += "\\U" + cp.toString(16).padStart(8, "0");
+      continue;
+    }
+    out += ch;
+  }
+  return out + quote;
+}
+
+/** Python round(x, 1): round-half-even on the exact binary value. */
+function pyRound1(x) {
+  const q = x * 4;
+  if (Number.isInteger(q) && Math.abs(q % 2) === 1) {        // exact tie: x = odd/4
+    const lo = Math.floor(x * 10) / 10, hi = Math.ceil(x * 10) / 10;
+    const loDigit = Math.round(Math.abs(lo) * 10) % 2;
+    return +(loDigit === 0 ? lo : hi).toFixed(1);
+  }
+  return +x.toFixed(1);
+}
+
+/* ======== lib/codecs.js ======== */
+// Python codec names (codecs.lookup(name).name) for every alias Python
+// resolves to a text encoding — generated from encodings.aliases and the
+// encodings package of CPython 3.11. Keys are normalized like
+// encodings.normalize_encoding: lower case, non-alphanumerics except '.' → '_'.
+const PY_CODEC_ALIASES = {
+  "ascii": ["646", "ansi_x3.4_1968", "ansi_x3.4_1986", "ansi_x3_4_1968", "ascii", "cp367", "csascii", "ibm367", "iso646_us", "iso_646.irv_1991", "iso_ir_6", "us", "us_ascii"],
+  "big5": ["big5", "big5_tw", "csbig5", "x_mac_trad_chinese"],
+  "big5hkscs": ["big5_hkscs", "big5hkscs", "hkscs"],
+  "charmap": ["charmap"],
+  "cp037": ["037", "cp037", "csibm037", "ebcdic_cp_ca", "ebcdic_cp_nl", "ebcdic_cp_us", "ebcdic_cp_wt", "ibm037", "ibm039"],
+  "cp1006": ["cp1006"],
+  "cp1026": ["1026", "cp1026", "csibm1026", "ibm1026"],
+  "cp1125": ["1125", "cp1125", "cp866u", "ibm1125", "ruscii"],
+  "cp1140": ["1140", "cp1140", "ibm1140"],
+  "cp1250": ["1250", "cp1250", "windows_1250"],
+  "cp1251": ["1251", "cp1251", "windows_1251"],
+  "cp1252": ["1252", "cp1252", "windows_1252"],
+  "cp1253": ["1253", "cp1253", "windows_1253"],
+  "cp1254": ["1254", "cp1254", "windows_1254"],
+  "cp1255": ["1255", "cp1255", "windows_1255"],
+  "cp1256": ["1256", "cp1256", "windows_1256"],
+  "cp1257": ["1257", "cp1257", "windows_1257"],
+  "cp1258": ["1258", "cp1258", "windows_1258"],
+  "cp273": ["273", "cp273", "csibm273", "ibm273"],
+  "cp424": ["424", "cp424", "csibm424", "ebcdic_cp_he", "ibm424"],
+  "cp437": ["437", "cp437", "cspc8codepage437", "ibm437"],
+  "cp500": ["500", "cp500", "csibm500", "ebcdic_cp_be", "ebcdic_cp_ch", "ibm500"],
+  "cp720": ["cp720"],
+  "cp737": ["cp737"],
+  "cp775": ["775", "cp775", "cspc775baltic", "ibm775"],
+  "cp850": ["850", "cp850", "cspc850multilingual", "ibm850"],
+  "cp852": ["852", "cp852", "cspcp852", "ibm852"],
+  "cp855": ["855", "cp855", "csibm855", "ibm855"],
+  "cp856": ["cp856"],
+  "cp857": ["857", "cp857", "csibm857", "ibm857"],
+  "cp858": ["858", "cp858", "csibm858", "ibm858"],
+  "cp860": ["860", "cp860", "csibm860", "ibm860"],
+  "cp861": ["861", "cp861", "cp_is", "csibm861", "ibm861"],
+  "cp862": ["862", "cp862", "cspc862latinhebrew", "ibm862"],
+  "cp863": ["863", "cp863", "csibm863", "ibm863"],
+  "cp864": ["864", "cp864", "csibm864", "ibm864"],
+  "cp865": ["865", "cp865", "csibm865", "ibm865"],
+  "cp866": ["866", "cp866", "csibm866", "ibm866"],
+  "cp869": ["869", "cp869", "cp_gr", "csibm869", "ibm869"],
+  "cp874": ["cp874"],
+  "cp875": ["cp875"],
+  "cp932": ["932", "cp932", "ms932", "ms_kanji", "mskanji"],
+  "cp949": ["949", "cp949", "ms949", "uhc"],
+  "cp950": ["950", "cp950", "ms950"],
+  "euc_jis_2004": ["euc_jis2004", "euc_jis_2004", "eucjis2004", "jisx0213"],
+  "euc_jisx0213": ["euc_jisx0213", "eucjisx0213"],
+  "euc_jp": ["euc_jp", "eucjp", "u_jis", "ujis"],
+  "euc_kr": ["euc_kr", "euckr", "korean", "ks_c_5601", "ks_c_5601_1987", "ks_x_1001", "ksc5601", "ksx1001", "x_mac_korean"],
+  "gb18030": ["gb18030", "gb18030_2000"],
+  "gb2312": ["chinese", "csiso58gb231280", "euc_cn", "euccn", "eucgb2312_cn", "gb2312", "gb2312_1980", "gb2312_80", "iso_ir_58", "x_mac_simp_chinese"],
+  "gbk": ["936", "cp936", "gbk", "ms936"],
+  "hp-roman8": ["cp1051", "hp_roman8", "ibm1051", "r8", "roman8"],
+  "hz": ["hz", "hz_gb", "hz_gb_2312", "hzgb"],
+  "idna": ["idna"],
+  "iso2022_jp": ["csiso2022jp", "iso2022_jp", "iso2022jp", "iso_2022_jp"],
+  "iso2022_jp_1": ["iso2022_jp_1", "iso2022jp_1", "iso_2022_jp_1"],
+  "iso2022_jp_2": ["iso2022_jp_2", "iso2022jp_2", "iso_2022_jp_2"],
+  "iso2022_jp_2004": ["iso2022_jp_2004", "iso2022jp_2004", "iso_2022_jp_2004"],
+  "iso2022_jp_3": ["iso2022_jp_3", "iso2022jp_3", "iso_2022_jp_3"],
+  "iso2022_jp_ext": ["iso2022_jp_ext", "iso2022jp_ext", "iso_2022_jp_ext"],
+  "iso2022_kr": ["csiso2022kr", "iso2022_kr", "iso2022kr", "iso_2022_kr"],
+  "iso8859-1": ["8859", "cp819", "csisolatin1", "ibm819", "iso8859", "iso8859_1", "iso_8859_1", "iso_8859_1_1987", "iso_ir_100", "l1", "latin", "latin1", "latin_1"],
+  "iso8859-10": ["csisolatin6", "iso8859_10", "iso_8859_10", "iso_8859_10_1992", "iso_ir_157", "l6", "latin6"],
+  "iso8859-11": ["iso8859_11", "iso_8859_11", "iso_8859_11_2001", "thai"],
+  "iso8859-13": ["iso8859_13", "iso_8859_13", "l7", "latin7"],
+  "iso8859-14": ["iso8859_14", "iso_8859_14", "iso_8859_14_1998", "iso_celtic", "iso_ir_199", "l8", "latin8"],
+  "iso8859-15": ["iso8859_15", "iso_8859_15", "l9", "latin9"],
+  "iso8859-16": ["iso8859_16", "iso_8859_16", "iso_8859_16_2001", "iso_ir_226", "l10", "latin10"],
+  "iso8859-2": ["csisolatin2", "iso8859_2", "iso_8859_2", "iso_8859_2_1987", "iso_ir_101", "l2", "latin2"],
+  "iso8859-3": ["csisolatin3", "iso8859_3", "iso_8859_3", "iso_8859_3_1988", "iso_ir_109", "l3", "latin3"],
+  "iso8859-4": ["csisolatin4", "iso8859_4", "iso_8859_4", "iso_8859_4_1988", "iso_ir_110", "l4", "latin4"],
+  "iso8859-5": ["csisolatincyrillic", "cyrillic", "iso8859_5", "iso_8859_5", "iso_8859_5_1988", "iso_ir_144"],
+  "iso8859-6": ["arabic", "asmo_708", "csisolatinarabic", "ecma_114", "iso8859_6", "iso_8859_6", "iso_8859_6_1987", "iso_ir_127"],
+  "iso8859-7": ["csisolatingreek", "ecma_118", "elot_928", "greek", "greek8", "iso8859_7", "iso_8859_7", "iso_8859_7_1987", "iso_ir_126"],
+  "iso8859-8": ["csisolatinhebrew", "hebrew", "iso8859_8", "iso_8859_8", "iso_8859_8_1988", "iso_ir_138"],
+  "iso8859-9": ["csisolatin5", "iso8859_9", "iso_8859_9", "iso_8859_9_1989", "iso_ir_148", "l5", "latin5"],
+  "johab": ["cp1361", "johab", "ms1361"],
+  "koi8-r": ["cskoi8r", "koi8_r"],
+  "koi8-t": ["koi8_t"],
+  "koi8-u": ["koi8_u"],
+  "kz1048": ["kz1048", "kz_1048", "rk1048", "strk1048_2002"],
+  "mac-arabic": ["mac_arabic"],
+  "mac-croatian": ["mac_croatian"],
+  "mac-cyrillic": ["mac_cyrillic", "maccyrillic"],
+  "mac-farsi": ["mac_farsi"],
+  "mac-greek": ["mac_greek", "macgreek"],
+  "mac-iceland": ["mac_iceland", "maciceland"],
+  "mac-latin2": ["mac_centeuro", "mac_latin2", "maccentraleurope", "maclatin2"],
+  "mac-roman": ["mac_roman", "macintosh", "macroman"],
+  "mac-romanian": ["mac_romanian"],
+  "mac-turkish": ["mac_turkish", "macturkish"],
+  "palmos": ["palmos"],
+  "ptcp154": ["cp154", "csptcp154", "cyrillic_asian", "pt154", "ptcp154"],
+  "punycode": ["punycode"],
+  "raw-unicode-escape": ["raw_unicode_escape"],
+  "shift_jis": ["csshiftjis", "s_jis", "shift_jis", "shiftjis", "sjis", "x_mac_japanese"],
+  "shift_jis_2004": ["s_jis_2004", "shift_jis_2004", "shiftjis2004", "sjis_2004"],
+  "shift_jisx0213": ["s_jisx0213", "shift_jisx0213", "shiftjisx0213", "sjisx0213"],
+  "tis-620": ["iso_ir_166", "tis620", "tis_620", "tis_620_0", "tis_620_2529_0", "tis_620_2529_1"],
+  "undefined": ["undefined"],
+  "unicode-escape": ["unicode_escape"],
+  "utf-16": ["u16", "utf16", "utf_16"],
+  "utf-16-be": ["unicodebigunmarked", "utf_16_be", "utf_16be"],
+  "utf-16-le": ["unicodelittleunmarked", "utf_16_le", "utf_16le"],
+  "utf-32": ["u32", "utf32", "utf_32"],
+  "utf-32-be": ["utf_32_be", "utf_32be"],
+  "utf-32-le": ["utf_32_le", "utf_32le"],
+  "utf-7": ["u7", "unicode_1_1_utf_7", "utf7", "utf_7"],
+  "utf-8": ["cp65001", "u8", "utf", "utf8", "utf8_ucs2", "utf8_ucs4", "utf_8"],
+  "utf-8-sig": ["utf_8_sig"],
+};
+
+/* ======== lib/encoding.js ======== */
+// Source decoding (shared semantics specs 4 and 15) for UPLOADED files (the
+// page gets their bytes; pasted text is already a string). Twin of
+// core.decode_source, including its plausibility check for a BOM-less UTF-16
+// guess (textIsPlausible below), which the npm engine's copy predates.
+
+// ---- BOM / NUL sniff (spec 4) --------------------------------------------
+/**
+ * Encoding sniff for a source file's leading bytes:
+ *   FF FE → utf-16-le; FE FF → utf-16-be; EF BB BF → utf-8-sig;
+ *   else a NUL in the first 4 bytes → utf-16-le when it sits at index 1 or
+ *   3, utf-16-be otherwise; else plain utf-8.
+ */
+function sniffEncoding(buf) {
+  if (buf.length >= 2 && buf[0] === 0xff && buf[1] === 0xfe) return { encoding: "utf-16-le", bom: 2 };
+  if (buf.length >= 2 && buf[0] === 0xfe && buf[1] === 0xff) return { encoding: "utf-16-be", bom: 2 };
+  if (buf.length >= 3 && buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf) return { encoding: "utf-8-sig", bom: 3 };
+  const head = buf.subarray(0, 4);
+  const nul = head.indexOf(0);
+  if (nul !== -1) return { encoding: head[1] === 0 || head[3] === 0 ? "utf-16-le" : "utf-16-be", bom: 0 };
+  return { encoding: "utf-8", bom: 0 };
+}
+
+/**
+ * core._text_is_plausible: does a UTF-16 guess (NUL in the first four bytes,
+ * no BOM) read as text? A UTF-8 file with a NUL near the top
+ * (`/*\0*\/eval(…)`) decodes to CJK-looking garbage under UTF-16; real
+ * UTF-16 source is mostly ASCII: at least 70% of its first 2048 characters
+ * are printable ASCII or \t \r \n.
+ */
+function textIsPlausible(text) {
+  if (!text) return false;
+  let n = 0, plain = 0;
+  for (const ch of text) {
+    if (n === 2048) break;
+    n++;
+    if ((ch >= " " && ch <= "~") || ch === "\t" || ch === "\r" || ch === "\n") plain++;
+  }
+  return plain / n >= 0.70;
+}
+
+// ---- PEP 263 cookies (spec 15) --------------------------------------------
+// core._PY_COOKIE_RE / _PY_BLANK_RE (bytes patterns: \w is ASCII).
+const COOKIE_RE = /^[ \t\f]*#[^\n]*?coding[:=][ \t]*([-\w.]+)/;
+const BLANK_RE = /^[ \t\f]*(?:#[^\n]*)?$/;
+
+const PY_NAME_BY_ALIAS = new Map();
+for (const [name, aliases] of Object.entries(PY_CODEC_ALIASES)) for (const a of aliases) PY_NAME_BY_ALIAS.set(a, name);
+const normEnc = (name) => String(name).toLowerCase().replace(/[^a-z0-9.]+/g, "_").replace(/^_+|_+$/g, "");
+/** codecs.lookup(name).name for a text encoding, or null (unknown / not a text codec). */
+function pythonCodecName(name) {
+  const n = normEnc(name);
+  return PY_NAME_BY_ALIAS.get(n) ?? PY_NAME_BY_ALIAS.get(n.replace(/\./g, "_")) ?? null;
+}
+/**
+ * core._normal_codec: the codec a cookie name resolves to as the interpreter
+ * does (utf-8-* and latin-1-* spellings fold to their base codec), or null.
+ */
+function normalCodec(name) {
+  const short = String(name).slice(0, 12).toLowerCase().replace(/_/g, "-");
+  if (short === "utf-8" || short.startsWith("utf-8-")) return "utf-8";
+  if (["latin-1", "iso-8859-1", "iso-latin-1"].includes(short)
+      || ["latin-1-", "iso-8859-1-", "iso-latin-1-"].some((p) => short.startsWith(p))) return "iso8859-1";
+  return pythonCodecName(name);
+}
+
+const UTF7_NAMES = new Set(["utf-7", "utf7", "u7", "unicode-1-1-utf-7"]);
+/** Spec 15: utf-7 / utf7 / u7 / unicode-1-1-utf-7, case- and _-insensitive. */
+const isUtf7Name = (name) => UTF7_NAMES.has(String(name).toLowerCase().replace(/_/g, "-"));
+
+/**
+ * PEP 263 cookie of Python source bytes (core._python_cookie): line 1, or
+ * line 2 when line 1 is blank or a comment. Returns {name, line} or null.
+ */
+function findCookie(buf) {
+  let end = 0, breaks = 0;                            // bytes through the second line break
+  while (end < buf.length && breaks < 2) { const c = buf[end++]; if (c === 10 || c === 13) breaks++; }
+  const lines = decodeLatin1(buf.subarray(0, end)).split(/\r\n|\r|\n/, 2);
+  for (let idx = 0; idx < lines.length; idx++) {
+    const m = COOKIE_RE.exec(lines[idx]);
+    if (m) return { name: m[1], line: idx + 1 };
+    if (!BLANK_RE.test(lines[idx])) break;
+  }
+  return null;
+}
+
+// ---- decoders ---------------------------------------------------------------
+const B64 = new Int16Array(128).fill(-1);
+"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".split("")
+  .forEach((c, i) => { B64[c.charCodeAt(0)] = i; });
+
+/** RFC 2152 UTF-7 decoder (errors="replace"). */
+function decodeUtf7(buf) {
+  const units = [];
+  let i = 0;
+  const n = buf.length;
+  while (i < n) {
+    const c = buf[i];
+    if (c === 0x2b) {                                    // '+'
+      if (buf[i + 1] === 0x2d) { units.push(0x2b); i += 2; continue; }   // "+-" → '+'
+      if (i + 1 < n && !(buf[i + 1] < 128 && B64[buf[i + 1]] >= 0)) {     // ill-formed "+x"
+        units.push(0xfffd); i += 2; continue;
+      }
+      i++;
+      let bits = 0, nbits = 0;
+      while (i < n && buf[i] < 128 && B64[buf[i]] >= 0) {
+        bits = ((bits << 6) | B64[buf[i]]) & 0xffffff;
+        nbits += 6;
+        if (nbits >= 16) { nbits -= 16; units.push((bits >> nbits) & 0xffff); }
+        i++;
+      }
+      if (nbits >= 6 || (bits & ((1 << nbits) - 1)) !== 0) units.push(0xfffd);   // partial / non-zero padding
+      if (buf[i] === 0x2d) i++;                          // '-' ends the shift and is absorbed
+      continue;
+    }
+    units.push(c < 0x80 ? c : 0xfffd);
+    i++;
+  }
+  return fixSurrogates(units);
+}
+function fixSurrogates(units) {
+  let out = "";
+  for (let k = 0; k < units.length; k++) {
+    const u = units[k];
+    if (u >= 0xd800 && u <= 0xdbff && units[k + 1] >= 0xdc00 && units[k + 1] <= 0xdfff) {
+      out += String.fromCharCode(u, units[++k]);
+    } else if (u >= 0xd800 && u <= 0xdfff) out += "\ufffd";
+    else out += String.fromCharCode(u);
+  }
+  return out;
+}
+function decodeAscii(buf) {
+  let out = "";
+  for (let k = 0; k < buf.length; k += 8192) {
+    const part = buf.subarray(k, k + 8192);
+    out += String.fromCharCode(...Array.from(part, (b) => (b < 0x80 ? b : 0xfffd)));
+  }
+  return out;
+}
+/** ISO-8859-1 (Python latin-1: byte n is U+00nn; TextDecoder's "latin1" is windows-1252). */
+function decodeLatin1(buf) {
+  let out = "";
+  for (let k = 0; k < buf.length; k += 8192) out += String.fromCharCode(...buf.subarray(k, k + 8192));
+  return out;
+}
+const UTF8 = new TextDecoder("utf-8", { fatal: false, ignoreBOM: true });
+const decodeUtf8 = (buf) => UTF8.decode(buf);
+
+// Python codec name → WHATWG TextDecoder label (codecs the runtime can decode).
+const WHATWG = {
+  "utf-16": "utf-16le", "utf-16-le": "utf-16le", "utf-16-be": "utf-16be",
+  "cp866": "ibm866", "koi8-r": "koi8-r", "koi8-u": "koi8-u", "mac-roman": "macintosh",
+  "mac-cyrillic": "x-mac-cyrillic", "shift_jis": "shift_jis", "cp932": "shift_jis", "euc_jp": "euc-jp",
+  "iso2022_jp": "iso-2022-jp", "gbk": "gbk", "gb2312": "gbk", "cp936": "gbk", "gb18030": "gb18030",
+  "big5": "big5", "cp950": "big5", "euc_kr": "euc-kr", "cp949": "euc-kr", "cp874": "windows-874",
+  "tis-620": "windows-874",
+};
+for (let n = 1250; n <= 1258; n++) WHATWG[`cp${n}`] = `windows-${n}`;
+for (const n of [2, 3, 4, 5, 6, 7, 8, 10, 13, 14, 15, 16]) WHATWG[`iso8859-${n}`] = `iso-8859-${n}`;
+
+/** Decode `buf` with a Python codec name; null when this runtime cannot. */
+function decodeWith(codec, buf) {
+  if (codec === "utf-8" || codec === "utf-8-sig") return decodeUtf8(codec === "utf-8-sig" && buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf ? buf.subarray(3) : buf);
+  if (codec === "utf-7") return decodeUtf7(buf);
+  if (codec === "iso8859-1") return decodeLatin1(buf);
+  if (codec === "ascii") return decodeAscii(buf);
+  const label = WHATWG[codec];
+  if (!label) return null;
+  try { return new TextDecoder(label, { fatal: false, ignoreBOM: codec !== "utf-16" }).decode(buf); } catch { return null; }
+}
+
+/**
+ * Decode a source file's bytes the way its interpreter reads them (twin of
+ * core.decode_source). Returns {text, encoding, reported, utf7, cookieLine}:
+ * reported → Q-ENCODING ("detected <encoding>"); utf7 → SC-UTF7 at
+ * cookieLine. BOM / NUL sniff first (spec 4); for Python source without a
+ * BOM or NUL, a PEP 263 cookie naming a codec other than UTF-8 decodes with
+ * that codec (spec 15); an unknown codec decodes as UTF-8 with replacement.
+ * Never throws on content.
+ */
+function decodeSource(buf, { py = false } = {}) {
+  let sniff = sniffEncoding(buf);
+  if (sniff.encoding.startsWith("utf-16") && !sniff.bom
+      && !textIsPlausible(decodeWith(sniff.encoding, buf.subarray(0, 4096)))) {
+    sniff = { encoding: "utf-8", bom: 0 };            // a NUL near the top of a UTF-8 file is not UTF-16
+  }
+  let codec = sniff.encoding;
+  const body = buf.subarray(sniff.bom);
+  const info = { encoding: codec, reported: codec !== "utf-8", utf7: false, cookieLine: null };
+  if (py && !info.reported) {
+    const cookie = findCookie(buf);
+    if (cookie) {
+      const real = normalCodec(cookie.name);
+      if (real === null) {
+        Object.assign(info, { encoding: cookie.name, reported: true, cookieLine: cookie.line });
+      } else if (real !== "utf-8") {
+        codec = real;
+        Object.assign(info, { encoding: real, reported: true, cookieLine: cookie.line,
+          utf7: real === "utf-7" || isUtf7Name(cookie.name) });
+      }
+    }
+  }
+  const text = decodeWith(codec, body) ?? decodeUtf8(body);
+  return { text, ...info };
+}
+
+/* ======== scanner/lines.js ======== */
+// Line splitting shared by the scanner and the metrics (spec 1): \r\n and a
+// lone \r are newlines (Python text mode), and in JavaScript sources U+2028
+// and U+2029 are line terminators too.
+
+const JS_LINE_SEP_RE = /[\u2028\u2029]/g;
+
+/** \r\n and a lone \r become \n (core.normalize_newlines; fs.js in the npm engine). */
+function normalizeNewlines(text) {
+  return typeof text === "string" && text.includes("\r") ? text.replace(/\r\n?/g, "\n") : text;
+}
+
+function normalizeSource(content, lang) {
+  let text = normalizeNewlines(String(content ?? ""));
+  if (lang === "js" && (text.includes("\u2028") || text.includes("\u2029"))) text = text.replace(JS_LINE_SEP_RE, "\n");
+  return text;
+}
+
+
+/* ======== lib/redact.js ======== */
+// Secret redaction (audit L1, shared semantics spec 6) — leaf module.
+//
+// The flagged line of a SECRET-rule finding is replaced by a deterministic
+// placeholder, and every other snippet line (and the issue msg, and any
+// field that copies source text such as an install hook's `cmd`) has
+// credential-shaped substrings replaced by "[redacted]". The pattern list is
+// copied verbatim from lazaret.scanner.core._SECRET_LINE_PATTERNS (with the
+// SQL credential pattern case-insensitive); PEM private-key blocks are
+// redacted line by line from BEGIN through END; high-entropy literals the
+// S-ENTROPY heuristic would flag are redacted wherever they appear as a
+// whole token in any snippet line. mkIssue() applies all of it, so the
+// library API (`import { scanFile } from "lazaret"`) is covered too.
+
+
+const SECRET_RULES = new Set(["S-SECRET", "S-TOKEN", "SQL-CRED", "S-ENTROPY"]);
+const REDACT_PLACEHOLDER = "[redacted: secret rule {RULE}]";
+
+/** Global switch (the CLI's --no-redact-secrets; the dashboard always redacts). */
+const REDACT = { on: true };
+
+// ---- entropy heuristic (twin of core.shannon_entropy / entropy_secretish) --
+function shannonEntropy(s) {
+  if (!s) return 0;
+  const f = new Map();
+  let n = 0;
+  for (const ch of s) { f.set(ch, (f.get(ch) || 0) + 1); n++; }
+  let e = 0;
+  for (const c of f.values()) e -= (c / n) * Math.log2(c / n);
+  return e;
+}
+const ENTROPY_VALUE_RE = pyRe(String.raw`[=:]\s*[\"']([A-Za-z0-9+/=_\-]{20,})[\"']`);
+const ENTROPY_VALUE_G = new RegExp(ENTROPY_VALUE_RE.source, "gu");
+
+/** A high-entropy literal that looks like a credential, not a path/identifier. */
+function entropySecretish(v) {
+  if ((v.match(/\//g) || []).length >= 2 || v.startsWith("/") || v.includes(" ") || v.includes("\\")) return false;
+  const core = v.replace(/[_.\-]/g, "");
+  if (/^[A-Za-z]+$/.test(core)) return false;
+  if (!(/[0-9]/.test(v) || /[+=]/.test(v))) return false;
+  return shannonEntropy(v) > 4.0;
+}
+
+// ---- provider token signatures, matched in linear time --------------------
+// Same language as the S-TOKEN rule regex
+//   AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36}|xox[baprs]-[A-Za-z0-9-]{10,}
+//   |sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\-]{35}
+//   |-----BEGIN [A-Z ]*PRIVATE KEY-----|eyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}
+// but without the backtracking blow-up of the JWT alternative on a run of
+// "eyJeyJeyJ…" (every head rescanned the whole run: quadratic).
+const HEAD_RE = /AKIA|gh[pousr]_|xox[baprs]-|sk_live_|AIza|-----BEGIN |eyJ/g;
+const HEAD_RE_REDACT = /AKIA|gh[pousr]_|github_pat_|xox[baprs]-|sk_live_|AIza|-----BEGIN |eyJ/g;
+const PEM_END_G = /-----END [A-Z ]*PRIVATE KEY-----/g;
+const isPat = (c) => isAlnum(c) || c === 95;                     // [A-Za-z0-9_]
+const isUpperDigit = (c) => (c >= 48 && c <= 57) || (c >= 65 && c <= 90);
+const isAlnum = (c) => isUpperDigit(c) || (c >= 97 && c <= 122);
+const isJwt = (c) => isAlnum(c) || c === 95 || c === 45;          // [A-Za-z0-9_-]
+const isXox = (c) => isAlnum(c) || c === 45;                      // [A-Za-z0-9-]
+const isPemName = (c) => (c >= 65 && c <= 90) || c === 32;        // [A-Z ]
+function runEnd(s, i, pred) { while (i < s.length && pred(s.charCodeAt(i))) i++; return i; }
+function fixedRun(s, i, n, pred) {
+  if (i + n > s.length) return false;
+  for (let k = i; k < i + n; k++) if (!pred(s.charCodeAt(k))) return false;
+  return true;
+}
+
+/**
+ * Leftmost S-TOKEN match at or after `from`: {index, end, text} or null.
+ * `redact` switches to the redaction pattern (core._SECRET_LINE_PATTERNS[0]):
+ * gh[pousr]_ takes 36+ characters, github_pat_… tokens count, and a PEM
+ * header takes the rest of the line (through a same-line END marker).
+ */
+function findSecretToken(s, from = 0, { redact = false } = {}) {
+  const head = new RegExp(redact ? HEAD_RE_REDACT.source : HEAD_RE.source, "g");
+  head.lastIndex = from;
+  let jwtEnd = -1, jwtOk = -1;          // cache per [A-Za-z0-9_-] run
+  let m;
+  while ((m = head.exec(s))) {
+    const p = m.index;
+    head.lastIndex = p + 1;
+    let end = -1;
+    switch (m[0][0]) {
+      case "A":
+        if (m[0] === "AKIA") { if (fixedRun(s, p + 4, 16, isUpperDigit)) end = p + 20; }
+        else if (fixedRun(s, p + 4, 35, isJwt)) end = p + 39;
+        break;
+      case "g":
+        if (m[0] === "github_pat_") { const e = runEnd(s, p + 11, isPat); if (e - (p + 11) >= 22) end = e; }
+        else if (redact) { const e = runEnd(s, p + 4, isAlnum); if (e - (p + 4) >= 36) end = e; }
+        else if (fixedRun(s, p + 4, 36, isAlnum)) end = p + 40;
+        break;
+      case "x": { const e = runEnd(s, p + 5, isXox); if (e - (p + 5) >= 10) end = e; break; }
+      case "s": { const e = runEnd(s, p + 8, isAlnum); if (e - (p + 8) >= 16) end = e; break; }
+      case "-": {
+        const r = runEnd(s, p + 11, isPemName);
+        if (r - 11 >= p + 11 && s.startsWith("PRIVATE KEY", r - 11) && s.startsWith("-----", r)) {
+          end = r + 5;
+          if (redact) {                                             // (?:.*?-----END … KEY-----|.*)
+            const nl = s.indexOf("\n", end);
+            const eol = nl < 0 ? s.length : nl;
+            PEM_END_G.lastIndex = end;
+            const em = PEM_END_G.exec(s);
+            end = em && em.index + em[0].length <= eol ? em.index + em[0].length : eol;
+          }
+        }
+        break;
+      }
+      case "e": {
+        if (p >= jwtEnd) {
+          jwtEnd = runEnd(s, p, isJwt);
+          jwtOk = -1;
+          if (s.charCodeAt(jwtEnd) === 46 && s.startsWith("eyJ", jwtEnd + 1)) {
+            const e2 = runEnd(s, jwtEnd + 4, isJwt);
+            if (e2 - (jwtEnd + 4) >= 10) jwtOk = e2;
+          }
+        }
+        if (jwtOk >= 0 && jwtEnd - (p + 3) >= 10) end = jwtOk;
+        break;
+      }
+    }
+    if (end >= 0) return { index: p, end, text: s.slice(p, end) };
+  }
+  return null;
+}
+
+function redactTokens(s) {
+  let out = "", pos = 0, t;
+  while ((t = findSecretToken(s, pos, { redact: true }))) {
+    out += s.slice(pos, t.index) + "[redacted]";
+    pos = t.end;
+  }
+  return pos === 0 ? s : out + s.slice(pos);
+}
+
+// core._SECRET_LINE_PATTERNS verbatim, as [Python pattern text, flags]
+// (test_review_dashboard_tables checks the list against core). Entry 0, the
+// provider-token formats, runs as findSecretToken(…, {redact: true}) above:
+// the same language without the pattern's quadratic backtracking on a run of
+// "eyJeyJ…". The others compile with pyRe.
+const SECRET_LINE_PATTERNS = [
+  [String.raw`AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}`
+    + String.raw`|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\-]{35}`
+    + String.raw`|-----BEGIN [A-Z ]*PRIVATE KEY-----(?:.*?-----END [A-Z ]*PRIVATE KEY-----|.*)`
+    + String.raw`|eyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}`, ""],
+  // SQL credentials, case-insensitive like the SQL-CRED rule
+  [String.raw`(?:IDENTIFIED\s+BY\s+['\"][^'\"]+['\"]|PASSWORD\s*=?\s*['\"][^'\"]+['\"]`
+    + String.raw`|IDENTIFIED\s+BY\s+PASSWORD)`, "i"],
+  [String.raw`(?:password|passwd|pwd|secret|api[_-]?key|access[_-]?key|auth[_-]?token|`
+    + String.raw`private[_-]?key)\s*[:=]\s*[\"'][^\"']{4,}[\"']`, "i"],
+  // credentials in a URL's userinfo: scheme://user:password@host, scheme://token@host
+  [String.raw`(?<=://)[^/\s@'\"]+(?=@)`, ""],
+];
+const [SQL_CRED_LINE_RE, ASSIGN_LINE_RE, URL_USERINFO_RE] =
+  SECRET_LINE_PATTERNS.slice(1).map(([src, flags]) => pyRe(src, "g" + flags));
+const REDACTED = "[redacted]";
+
+const PEM_BEGIN_RE = /-----BEGIN [A-Z ]*PRIVATE KEY-----/;
+const PEM_END_RE = /-----END [A-Z ]*PRIVATE KEY-----/;
+
+/**
+ * Indices of the lines of multi-line PEM private keys that FOLLOW the BEGIN
+ * line, through the END line — or through the last line when no END
+ * follows. Such lines are redacted whole; the BEGIN line itself is handled
+ * by the token pattern (twin of core._pem_block_lines).
+ */
+function pemBlockLines(lines) {
+  const out = new Set();
+  let inside = false;
+  for (let k = 0; k < lines.length; k++) {
+    const line = lines[k];
+    if (typeof line !== "string") continue;
+    if (inside) {
+      out.add(k);
+      if (line.includes("-----END") && PEM_END_RE.test(line)) inside = false;
+    } else if (line.includes("PRIVATE KEY-----")) {
+      const m = PEM_BEGIN_RE.exec(line);
+      inside = !!m && !PEM_END_RE.test(line.slice(m.index + m[0].length));
+    }
+  }
+  return out;
+}
+
+const SECRET_RUN_RE = /[A-Za-z0-9+/=_-]{20,}/g;
+/**
+ * The high-entropy literals S-ENTROPY would flag in one file, redacted as
+ * substrings wherever they appear (twin of core._SecretLiterals): literals
+ * ENTROPY_VALUE_RE finds on any line not matching SECRET_SKIP_RE (comment
+ * lines included) that pass entropySecretish().
+ */
+class SecretLiterals {
+  constructor(lines, skipRe) {
+    this.lits = new Set();
+    for (const line of lines) {
+      if (typeof line !== "string" || (!line.includes("=") && !line.includes(":"))) continue;
+      if (skipRe && skipRe.test(line)) continue;
+      ENTROPY_VALUE_G.lastIndex = 0;
+      let m;
+      while ((m = ENTROPY_VALUE_G.exec(line))) if (entropySecretish(m[1])) this.lits.add(m[1]);
+    }
+    this.byPrefix = new Map();
+    for (const lit of this.lits) {
+      const k = lit.slice(0, 20);
+      if (!this.byPrefix.has(k)) this.byPrefix.set(k, []);
+      this.byPrefix.get(k).push(lit);
+    }
+  }
+  redact(text) {
+    if (!this.lits.size || typeof text !== "string") return text;
+    const hits = [];
+    SECRET_RUN_RE.lastIndex = 0;
+    let m;
+    while ((m = SECRET_RUN_RE.exec(text))) {
+      const run = m[0], base = m.index;
+      if (this.lits.has(run)) { hits.push([base, base + run.length]); continue; }
+      for (let p = 0; p + 20 <= run.length; p++) {
+        for (const lit of this.byPrefix.get(run.slice(p, p + 20)) || []) {
+          if (run.startsWith(lit, p)) hits.push([base + p, base + p + lit.length]);
+        }
+      }
+    }
+    if (!hits.length) return text;
+    hits.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+    let out = "", pos = 0;
+    for (const [a, b] of hits) {
+      if (b <= pos) continue;
+      out += text.slice(pos, Math.max(a, pos)) + REDACTED;
+      pos = b;
+    }
+    return out + text.slice(pos);
+  }
+}
+
+// Per-file redaction contexts, registered by scanFile for the lines it
+// scans (the Python engine's scan context): PEM block lines, the file's
+// entropy literals, and a per-line cache of redacted text.
+const CONTEXTS = new WeakMap();
+function registerScanContext(lines, skipRe) {
+  const ctx = { pem: null, secrets: null, cache: new Map(), lines, skipRe };
+  CONTEXTS.set(lines, ctx);
+  return ctx;
+}
+function scanContext(lines) {
+  return Array.isArray(lines) ? CONTEXTS.get(lines) ?? null : null;
+}
+function contextSecrets(ctx) {
+  ctx.secrets ??= new SecretLiterals(ctx.lines, ctx.skipRe);
+  return ctx.secrets;
+}
+/** Line k as any snippet may show it (PEM block → whole line redacted). */
+function contextRedacted(ctx, k) {
+  let r = ctx.cache.get(k);
+  if (r === undefined) {
+    ctx.pem ??= pemBlockLines(ctx.lines);
+    r = ctx.pem.has(k) ? REDACTED : contextSecrets(ctx).redact(redactContextLine(ctx.lines[k]));
+    ctx.cache.set(k, r);
+  }
+  return r;
+}
+
+/** Replace credential-shaped substrings in one line (twin of core._redact_context_line). */
+function redactContextLine(line) {
+  if (typeof line !== "string" || !line) return line;
+  let out = redactTokens(line);
+  out = out.replace(SQL_CRED_LINE_RE, REDACTED).replace(ASSIGN_LINE_RE, REDACTED);
+  if (out.includes("://")) out = out.replace(URL_USERINFO_RE, REDACTED);
+  return out;
+}
+
+/** Redacted copies of a list of lines: PEM blocks whole, then patterns (and literals). */
+function redactLines(lines, secrets = null) {
+  const pem = pemBlockLines(lines);
+  return lines.map((l, k) => {
+    if (typeof l !== "string") return l;
+    if (pem.has(k)) return REDACTED;
+    const r = redactContextLine(l);
+    return secrets ? secrets.redact(r) : r;
+  });
+}
+
+/** Redaction for free text that may copy source (issue msg, hook cmd). */
+function redactText(text, secrets = null) {
+  if (typeof text !== "string") return text;
+  if (text.includes("\n")) return redactLines(text.split("\n"), secrets).join("\n");
+  const r = redactContextLine(text);
+  return secrets ? secrets.redact(r) : r;
+}
+
+function secretPlaceholder(ruleId, rawLine) {
+  return REDACT_PLACEHOLDER.replace("{RULE}", ruleId) + ` (${cpLen(String(rawLine))} chars)`;
+}
+
+/* ======== lib/issue.js ======== */
+// Issue shape-builder — the one shared primitive every producer (scanner
+// engine, SQL-sink analyzer, supply-chain manifest scanner) needs. Lives here
+// so src/lib/supplychain.js can build issues without importing the scanner
+// (RESTRUCTURE.md §5: src/lib/ imports nothing from src/scanner/); the
+// scanner's engine.js re-exports it, so existing scanner-side imports keep
+// working unchanged.
+//
+// Twin of lazaret.scanner.core.mk_issue / clip_snippet_line: snippets
+// (spec 7) and redaction (spec 6) happen HERE, so library callers of
+// scanFile never see a raw credential or a multi-megabyte snippet either.
+
+
+const SNIPPET_MAX = 240;      // characters (code points) per snippet line
+const SNIPPET_LEAD = 60;      // context kept before the match on the flagged line
+const ELLIPSIS = "…";
+
+/**
+ * Clip one snippet line to SNIPPET_MAX characters. The flagged line is
+ * windowed around the match (`col`, a code-point offset): the window starts
+ * SNIPPET_LEAD characters before it (never past the point where it would
+ * run off the end) and "…" marks each side that was cut. Other lines keep
+ * their start.
+ */
+function clipLine(text, col = null) {
+  if (typeof text !== "string" || text.length <= SNIPPET_MAX) return text;
+  const n = cpLen(text);
+  if (n <= SNIPPET_MAX) return text;
+  const cps = Array.from(text);
+  let start = col == null ? 0 : Math.max(0, col - SNIPPET_LEAD);
+  start = Math.min(start, n - (SNIPPET_MAX - 1));
+  const head = start > 0 ? ELLIPSIS : "";
+  const end = start + SNIPPET_MAX - head.length;
+  if (end < n) return head + cps.slice(start, end - 1).join("") + ELLIPSIS;
+  return head + cps.slice(start).join("");
+}
+
+/**
+ * Build a finding. `rule` is a table row or a hand-built row with
+ * {id, name, type, sev, msg, why, fix, ref}; `file` is {name} / {path} or
+ * the name. Snippet is ±2 lines around the finding line. `col` is the
+ * UTF-16 offset of the match on the flagged line (optional).
+ */
+function mkIssue(rule, file, line, lines, col = null) {
+  const name = typeof file === "string" ? file : (file.name ?? file.path);
+  const start = Math.max(0, line - 3);
+  const stop = Math.min(lines.length, line + 2);
+  const flag = line - 1;
+  const ctx = REDACT.on ? scanContext(lines) : null;
+  const msg = REDACT.on ? redactText(rule.msg, ctx ? contextSecrets(ctx) : null) : rule.msg;
+  const redact = REDACT.on && flag >= 0 && flag < lines.length;
+  const pem = redact && !ctx ? pemBlockLines(lines) : null;
+  const cpCol = col != null && typeof lines[flag] === "string" ? cpIndex(lines[flag], col) : null;
+  const snippet = [];
+  for (let k = start; k < stop; k++) {
+    let l = lines[k];
+    if (typeof l !== "string") { snippet.push(l); continue; }
+    if (redact) {
+      if (k === flag && SECRET_RULES.has(rule.id)) l = secretPlaceholder(rule.id, l);
+      else if (ctx) l = contextRedacted(ctx, k);
+      else l = pem.has(k) ? REDACTED : redactContextLine(l);
+    }
+    snippet.push(clipLine(l, k === flag ? cpCol : null));
+  }
+  return {
+    rule: rule.id, name: rule.name, type: rule.type, sev: rule.sev, msg,
+    why: rule.why, fix: rule.fix, ref: rule.ref, file: name, line,
+    snippet, snipStart: start + 1,
+  };
+}
+
+/** File-level synthetic finding with an empty snippet (walker/truncation). */
+function fileIssue(rule, file, line = 1) {
+  return {
+    rule: rule.id, name: rule.name, type: rule.type, sev: rule.sev,
+    msg: REDACT.on ? redactText(rule.msg) : rule.msg,
+    why: rule.why, fix: rule.fix, ref: rule.ref, file, line,
+    snippet: [], snipStart: 1,
+  };
+}
+
+/* ======== scanner/linear.js ======== */
+// Linear-time matchers for rule patterns that backtrack super-linearly on
+// adversarial input (audit: a 547 KB .sql took 15.7 s in one regex; 2 MB
+// files took minutes). Each function implements EXACTLY the language of the
+// Python pattern it replaces (quoted above it) — same matches, so the
+// engines agree — using head regexes plus precomputed delimiter positions
+// instead of rescanning the line from every head.
+
+const isWs = isPySpace;
+
+/** Sorted positions of every match of `re` (global) in s. */
+function positions(s, re) {
+  const out = [];
+  re.lastIndex = 0;
+  let m;
+  while ((m = re.exec(s))) { out.push(m.index); if (m[0].length === 0) re.lastIndex++; }
+  return out;
+}
+/** Index of the first element >= x in the sorted array a (a.length if none). */
+function lowerBound(a, x) {
+  let lo = 0, hi = a.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (a[mid] < x) lo = mid + 1; else hi = mid; }
+  return lo;
+}
+const firstAtOrAfter = (a, x) => { const k = lowerBound(a, x); return k < a.length ? a[k] : -1; };
+function heads(s, re) {
+  const out = [];
+  re.lastIndex = 0;
+  let m;
+  while ((m = re.exec(s))) {
+    out.push([m.index, m.index + m[0].length]);
+    re.lastIndex = m.index + 1;               // every head, even overlapping ones
+  }
+  return out;
+}
+
+// SQL-DYNAMIC (re.I) — the Python engine's linear form: each tempered scan
+// stops at the next head of its own kind.
+//   EXEC(?:UTE)?\s*\(\s*@?\w+\s*\+
+//   |EXECUTE\s+IMMEDIATE\b(?:(?!EXECUTE\s+IMMEDIATE\b)[^;])*\|\|
+//   |sp_executesql\b(?:(?!sp_executesql\b)[^;])*\+
+//   |EXEC\s*\(\s*['\"][^']*['\"]\s*\+
+//   |SET\s+@\w+\s*=(?:(?!SET\s+@)[^;'\"])*['\"](?:(?!SET\s+@)[^;])*(?:\+|\|\|)
+const DYN_A1 = pyRe(String.raw`EXEC(?:UTE)?\s*\(\s*@?\w+\s*\+`, "i");
+const DYN_A2 = pyRe(String.raw`EXECUTE\s+IMMEDIATE\b`, "gi");
+const DYN_A3 = pyRe(String.raw`sp_executesql\b`, "gi");
+const DYN_A4 = pyRe(String.raw`EXEC\s*\(\s*['\"]`, "gi");
+const DYN_A5 = pyRe(String.raw`SET\s+@\w+\s*=`, "gi");
+const SET_AT = pyRe(String.raw`SET\s+@`, "gi");
+const none = (x) => x < 0 ? Infinity : x;
+function sqlDynamicFind(s) {
+  if (!/exec|sp_executesql|set/i.test(s)) return -1;
+  let best = -1;
+  const take = (i) => { if (i >= 0 && (best < 0 || i < best)) best = i; };
+  const m1 = DYN_A1.exec(s);
+  if (m1) take(m1.index);
+  let semis = null, pipes = null, pluses = null, quotes = null, setAt = null;
+  const semiAfter = (i) => { semis ??= positions(s, /;/g); const x = firstAtOrAfter(semis, i); return x < 0 ? s.length : x; };
+  const pipeAfter = (i) => { pipes ??= positions(s, /\|(?=\|)/g); return firstAtOrAfter(pipes, i); };
+  const plusAfter = (i) => { pluses ??= positions(s, /\+/g); return firstAtOrAfter(pluses, i); };
+  const setAfter = (i) => { setAt ??= positions(s, SET_AT); return none(firstAtOrAfter(setAt, i)); };
+  const a2 = heads(s, DYN_A2), a2starts = a2.map((h) => h[0]);
+  for (const [h, e] of a2) {                         // tempered [^;]* then \|\|
+    const p = pipeAfter(e);
+    if (p >= 0 && p < semiAfter(e) && p < none(firstAtOrAfter(a2starts, e))) { take(h); break; }
+  }
+  const a3 = heads(s, DYN_A3), a3starts = a3.map((h) => h[0]);
+  for (const [h, e] of a3) {                         // tempered [^;]* then \+
+    const p = plusAfter(e);
+    if (p >= 0 && p < semiAfter(e) && p < none(firstAtOrAfter(a3starts, e))) { take(h); break; }
+  }
+  const a4 = heads(s, DYN_A4);
+  if (a4.length) {                                   // [^']*['\"]\s*\+
+    const n = s.length;
+    const plusFrom = new Uint8Array(n + 1);          // s[i:] matches \s*\+
+    for (let i = n - 1; i >= 0; i--) plusFrom[i] = s[i] === "+" || (isWs(s[i]) && plusFrom[i + 1]) ? 1 : 0;
+    const goodDq = new Int32Array(n + 1);            // prefix count of `"` followed by \s*\+
+    for (let i = 0; i < n; i++) goodDq[i + 1] = goodDq[i] + (s[i] === '"' && plusFrom[i + 1] ? 1 : 0);
+    const sq = positions(s, /'/g);
+    for (const [h, e] of a4) {
+      const q0 = e - 1;                               // the opening quote
+      let nsq = firstAtOrAfter(sq, q0 + 1);
+      if (nsq < 0) nsq = n;
+      if (goodDq[nsq] - goodDq[q0 + 1] > 0 || (nsq < n && plusFrom[nsq + 1])) { take(h); break; }
+    }
+  }
+  for (const [h, e] of heads(s, DYN_A5)) {           // tempered, quote first, then + or ||
+    const semi = semiAfter(e);
+    quotes ??= positions(s, /['"]/g);
+    const q = firstAtOrAfter(quotes, e);
+    if (q < 0 || q >= semi || setAfter(e) < q) continue;
+    const p = plusAfter(q + 1), d = pipeAfter(q + 1);
+    const limit = Math.min(semi, setAfter(q + 1));
+    if ((p >= 0 && p < limit) || (d >= 0 && d < limit)) { take(h); break; }
+  }
+  return best;
+}
+
+// SQL-GRANT-PUBLIC (re.I): \bGRANT\b(?:(?!\bGRANT\b)[^;])*\bTO\s+PUBLIC\b
+const GRANT_HEAD = pyRe(String.raw`\bGRANT\b`, "gi");
+const TO_PUBLIC = pyRe(String.raw`\bTO\s+PUBLIC\b`, "gi");
+function grantPublicFind(s) {
+  if (!/grant/i.test(s)) return -1;
+  const targets = positions(s, TO_PUBLIC);
+  if (!targets.length) return -1;
+  const semis = positions(s, /;/g);
+  const grants = heads(s, GRANT_HEAD), starts = grants.map((g) => g[0]);
+  for (const [h, e] of grants) {
+    const t = firstAtOrAfter(targets, e);
+    if (t < 0) break;
+    const semi = firstAtOrAfter(semis, e);
+    if ((semi < 0 || t < semi) && t < none(firstAtOrAfter(starts, e))) return h;
+  }
+  return -1;
+}
+
+// S-YAML: yaml\.load\s*\((?!(?:(?!yaml\.load)[^)])*(?:SafeLoader|safe_load))
+// (the look-ahead stops at the next ')' and at the next yaml.load)
+const YAML_HEAD = pyRe(String.raw`yaml\.load\s*\(`, "g");
+const YAML_SAFE = /SafeLoader|safe_load/g;
+function yamlLoadFind(s) {
+  if (!s.includes("yaml.load")) return -1;
+  const safe = positions(s, YAML_SAFE);             // the words contain no ')'
+  const parens = positions(s, /\)/g);
+  const loads = positions(s, /yaml\.load/g);
+  for (const [h, e] of heads(s, YAML_HEAD)) {
+    const rp = none(firstAtOrAfter(parens, e));
+    const a = firstAtOrAfter(safe, e);
+    if (a < 0 || a >= rp || a >= none(firstAtOrAfter(loads, e))) return h;
+  }
+  return -1;
+}
+
+// S-CHMOD: chmod\s*\([^,()]*,\s*0o?7[67]7
+const CHMOD_HEAD = pyRe(String.raw`chmod\s*\(`, "g");
+const CHMOD_TAIL = pyRe(String.raw`^\s*0o?7[67]7`);
+function chmodFind(s) {
+  if (!s.includes("chmod")) return -1;
+  const delims = positions(s, /[,()]/g);
+  for (const [h, e] of heads(s, CHMOD_HEAD)) {
+    const c = firstAtOrAfter(delims, e);
+    if (c < 0) break;
+    if (s[c] === "," && CHMOD_TAIL.test(s.slice(c + 1, c + 64))) return h;
+  }
+  return -1;
+}
+
+// ---- TEXT_RULES over the whole file ----------------------------------------
+// B-EMPTY-CATCH: catch\s*(\([^()]*\))?\s*\{\s*\}   (finditer: non-overlapping)
+function emptyCatchScan(content) {
+  const out = [];
+  if (!content.includes("catch")) return out;
+  const parens = positions(content, /[()]/g);
+  const n = content.length;
+  const skipWs = (i) => { while (i < n && isWs(content[i])) i++; return i; };
+  const tail = (k) => {                            // \s*\{\s*\}
+    k = skipWs(k);
+    if (content[k] !== "{") return -1;
+    k = skipWs(k + 1);
+    return content[k] === "}" ? k + 1 : -1;
+  };
+  let pos = 0, p;
+  while ((p = content.indexOf("catch", pos)) !== -1) {
+    const i = skipWs(p + 5);
+    let end = -1;
+    if (content[i] === "(") {
+      const rp = firstAtOrAfter(parens, i + 1);        // [^()]*\) — the next paren must close
+      if (rp >= 0 && content[rp] === ")") end = tail(rp + 1);
+    } else {
+      end = tail(i);
+    }
+    if (end >= 0) { out.push(p); pos = end; } else pos = p + 1;
+  }
+  return out;
+}
+
+// B-EXCEPT-PASS: except(?:(?!except)[^\n:])*:[^\S\n]*\n\s*pass\b   (finditer)
+// ≡ an "except", then (same line, no ':' in between) the first ':', then a
+// whitespace run containing a newline, then `pass` at a word boundary.
+function exceptPassScan(content) {
+  const out = [];
+  if (!content.includes("except")) return out;
+  const stops = positions(content, /[:\n]/g);
+  const n = content.length;
+  const verdict = new Map();                       // colon offset → match end or -1
+  const atColon = (c) => {
+    if (verdict.has(c)) return verdict.get(c);
+    let k = c + 1, sawNl = false;
+    while (k < n && isWs(content[k])) { if (content[k] === "\n") sawNl = true; k++; }
+    const ok = sawNl && content.startsWith("pass", k) && !isWordChar(String.fromCodePoint(content.codePointAt(k + 4) ?? 0x20));
+    const end = ok ? k + 4 : -1;
+    verdict.set(c, end);
+    return end;
+  };
+  const excepts = positions(content, /except/g);
+  let pos = 0, p;
+  while ((p = content.indexOf("except", pos)) !== -1) {
+    const c = firstAtOrAfter(stops, p + 6);
+    const inner = firstAtOrAfter(excepts, p + 1);             // (?!except) inside the run
+    const end = c >= 0 && content[c] === ":" && (inner < 0 || inner >= c) ? atColon(c) : -1;
+    if (end >= 0) { out.push(p); pos = end; } else pos = p + 1;
+  }
+  return out;
+}
+
+/* ======== scanner/rules.js ======== */
+// Rule tables — the Python engine's tables (lazaret.scanner.core RULES /
+// TEXT_RULES) with their pattern text copied VERBATIM and compiled with
+// Python `re` semantics by pyRe() (Unicode \w/\b/\s, `.` ≠ "\n", Unicode
+// case folding). Generated from the live Python tables, then extended with
+// the linear-time matchers below. Where a Python pattern can backtrack
+// super-linearly on adversarial input, the rule carries a `find(line)`
+// function with the SAME match semantics in linear time; `re` stays the
+// reference pattern. (Dashboard: test_review_dashboard_tables compares
+// every rule's fields and pattern text with core.RULES / TEXT_RULES.)
+
 const SEV_ORDER = {BLOCKER:0, CRITICAL:1, MAJOR:2, MINOR:3, INFO:4};
 const TYPES = {VULN:"Vulnerability", HOTSPOT:"Security Hotspot", BUG:"Bug", SMELL:"Code Smell"};
 
-// Line-based rules: {id,name,type,sev,langs,re,skip?,msg,why,fix,ref}
+// Line-based rules: {id,name,type,sev,langs,re,skip?,need?,find?,msg,why,fix,ref}
 const RULES = [
-// ---- Injection / code execution ----
-{id:"S-EVAL-PY", name:"Dynamic code execution", type:"VULN", sev:"CRITICAL", langs:["py"],
- re:/(?<![\w.])(eval|exec)\s*\(/,
+{
+id:"S-EVAL-PY", name:"Dynamic code execution", type:"VULN", sev:"CRITICAL", langs:["py"],
+ re:pyRe("(?<![\\w.])(eval|exec)\\s*\\(", ""),
  msg:"Use of eval/exec enables arbitrary code execution.",
  why:"If any part of the evaluated string derives from user input, an attacker can run arbitrary code in your process.",
  fix:"Replace with safe parsing (ast.literal_eval) or an explicit dispatch table.",
- ref:"CWE-95 · OWASP A03: Injection"},
-{id:"S-EVAL-JS", name:"Dynamic code execution", type:"VULN", sev:"CRITICAL", langs:["js"],
- re:/(?<![\w.])eval\s*\(/,
- msg:"Use of eval/exec enables arbitrary code execution.",
- why:"If any part of the evaluated string derives from user input, an attacker can run arbitrary code in your process.",
- fix:"Replace with safe parsing (JSON.parse, ast.literal_eval) or an explicit dispatch table.",
- ref:"CWE-95 · OWASP A03: Injection"},
-{id:"S-NEWFUNC", name:"Function constructor", type:"VULN", sev:"CRITICAL", langs:["js"],
- re:/new\s+Function\s*\(/,
+ ref:"CWE-95 · OWASP A03: Injection",
+},
+{
+id:"S-EVAL-JS", name:"Dynamic code execution", type:"VULN", sev:"CRITICAL", langs:["js"],
+ re:pyRe("(?<![\\w.])eval\\s*\\(", ""),
+ msg:"Use of eval enables arbitrary code execution.",
+ why:"If any part of the evaluated string derives from user input, an attacker can run arbitrary code.",
+ fix:"Replace with JSON.parse or an explicit dispatch table.",
+ ref:"CWE-95 · OWASP A03: Injection",
+},
+{
+id:"S-NEWFUNC", name:"Function constructor", type:"VULN", sev:"CRITICAL", langs:["js"],
+ re:pyRe("new\\s+Function\\s*\\(", ""),
  msg:"new Function() compiles strings into code, equivalent to eval.",
  why:"String-built functions can execute attacker-controlled input.",
  fix:"Define functions statically or use a whitelisted dispatch map.",
- ref:"CWE-95 · OWASP A03"},
-{id:"S-SQL-PY", name:"SQL built from strings", type:"VULN", sev:"BLOCKER", langs:["py"],
- re:/\.(execute|executemany)\s*\(\s*(f["']|["'][^"']*["']\s*(%|\+|\.format))/,   // the JS-only `[\w.]+\s*%\s` alternative was dropped (bd71e458): it fired on numeric modulo (3 % 2) Python never flags and pre-empted the analyzer message; sqlSinkScan covers it with Python's exact semantics
+ ref:"CWE-95 · OWASP A03",
+},
+{
+id:"S-SQL-PY", name:"SQL built from strings", type:"VULN", sev:"BLOCKER", langs:["py"],
+ re:pyRe("\\.(execute|executemany)\\s*\\(\\s*(f[\\\"']|[\\\"'][^\\\"']*[\\\"']\\s*(%|\\+|\\.format))", ""),
  msg:"SQL query built with string formatting/concatenation.",
  why:"Interpolating values into SQL enables SQL injection — the classic path to full database compromise.",
  fix:"Use parameterized queries: cursor.execute(\"SELECT … WHERE id = %s\", (user_id,)).",
- ref:"CWE-89 · OWASP A03"},
-{id:"S-SQL-JS", name:"SQL built from strings", type:"VULN", sev:"BLOCKER", langs:["js"],
- re:/\.(query|execute)\s*\(\s*(`[^`]*\$\{|"[^"]*"\s*\+|'[^']*'\s*\+|\w+\s*\+\s*["'`])/,
+ ref:"CWE-89 · OWASP A03",
+},
+{
+id:"S-SQL-JS", name:"SQL built from strings", type:"VULN", sev:"BLOCKER", langs:["js"],
+ re:pyRe("\\.(query|execute)\\s*\\(\\s*(`[^`]*\\$\\{|\\\"[^\\\"]*\\\"\\s*\\+|'[^']*'\\s*\\+|\\w+\\s*\\+\\s*[\\\"'`])", ""),
  msg:"SQL query built with template literal or concatenation.",
  why:"Interpolating values into SQL enables SQL injection.",
  fix:"Use placeholders: db.query('SELECT … WHERE id = ?', [id]).",
- ref:"CWE-89 · OWASP A03"},
-{id:"S-OSCMD-PY", name:"OS command execution", type:"VULN", sev:"CRITICAL", langs:["py"],
- re:/os\.(system|popen)\s*\(/,
+ ref:"CWE-89 · OWASP A03",
+},
+{
+id:"S-OSCMD-PY", name:"OS command execution", type:"VULN", sev:"CRITICAL", langs:["py"],
+ re:pyRe("os\\.(system|popen)\\s*\\(", ""),
  msg:"os.system/os.popen runs shell commands.",
  why:"Any user-influenced portion of the command allows shell injection.",
  fix:"Use subprocess.run([...]) with a list of args and shell=False.",
- ref:"CWE-78 · OWASP A03"},
-{id:"S-SHELL-TRUE", name:"subprocess with shell=True", type:"VULN", sev:"CRITICAL", langs:["py"],
- re:/shell\s*=\s*True/,
+ ref:"CWE-78 · OWASP A03",
+},
+{
+id:"S-SHELL-TRUE", name:"subprocess with shell=True", type:"VULN", sev:"CRITICAL", langs:["py"],
+ re:pyRe("shell\\s*=\\s*True", ""),
  msg:"shell=True passes the command through the shell.",
  why:"Shell metacharacters in user input become command injection.",
  fix:"Pass args as a list with shell=False.",
- ref:"CWE-78"},
-{id:"S-EXEC-JS", name:"Shell exec", type:"HOTSPOT", sev:"CRITICAL", langs:["js"],
- re:/\b(exec|execSync)\s*\(\s*(`[^`]*\$\{|["'][^"']*["']\s*\+|\w+\s*[,)+])/,
+ ref:"CWE-78",
+},
+{
+id:"S-EXEC-JS", name:"Shell exec", type:"HOTSPOT", sev:"CRITICAL", langs:["js"],
+ re:pyRe("\\b(exec|execSync)\\s*\\(\\s*(`[^`]*\\$\\{|[\\\"'][^\\\"']*[\\\"']\\s*\\+|\\w+\\s*[,)+])", ""),
  msg:"child_process exec with dynamic command string.",
  why:"Dynamic command strings passed to a shell risk command injection.",
  fix:"Use execFile/spawn with an argument array.",
- ref:"CWE-78 · OWASP A03"},
-// ---- Deserialization ----
-{id:"S-PICKLE", name:"Unsafe deserialization (pickle)", type:"VULN", sev:"CRITICAL", langs:["py"],
- re:/pickle\.loads?\s*\(/,
+ ref:"CWE-78 · OWASP A03",
+},
+{
+id:"S-PICKLE", name:"Unsafe deserialization (pickle)", type:"VULN", sev:"CRITICAL", langs:["py"],
+ re:pyRe("pickle\\.loads?\\s*\\(", ""),
  msg:"pickle.load(s) executes code embedded in the payload.",
  why:"Unpickling untrusted data is remote code execution by design.",
  fix:"Use JSON or another data-only format for untrusted input.",
- ref:"CWE-502 · OWASP A08"},
-{id:"S-YAML", name:"Unsafe yaml.load", type:"VULN", sev:"CRITICAL", langs:["py"],
- re:/yaml\.load\s*\((?![^)]*(SafeLoader|safe_load))/,
+ ref:"CWE-502 · OWASP A08",
+},
+{
+id:"S-YAML", name:"Unsafe yaml.load", type:"VULN", sev:"CRITICAL", langs:["py"],
+ re:pyRe("yaml\\.load\\s*\\((?!(?:(?!yaml\\.load)[^)])*(?:SafeLoader|safe_load))", ""),
+ find:yamlLoadFind,
  msg:"yaml.load without SafeLoader can instantiate arbitrary objects.",
  why:"Full YAML loading executes constructors from the document.",
  fix:"Use yaml.safe_load() or Loader=yaml.SafeLoader.",
- ref:"CWE-502"},
-// ---- Secrets ----
-{id:"S-SECRET", name:"Hardcoded credential", type:"VULN", sev:"BLOCKER", langs:["py","js"],
- re:/(password|passwd|pwd|secret|api[_-]?key|access[_-]?key|auth[_-]?token|private[_-]?key)\s*[:=]\s*["'][^"']{4,}["']/i,
- skip:/(environ|process\.env|getenv|config\[|\bimport\b|placeholder|example|<[^>]+>|\{\{)/i,
+ ref:"CWE-502",
+},
+{
+id:"S-SECRET", name:"Hardcoded credential", type:"VULN", sev:"BLOCKER", langs:["py", "js"],
+ re:pyRe("(password|passwd|pwd|secret|api[_-]?key|access[_-]?key|auth[_-]?token|private[_-]?key)\\s*[:=]\\s*[\\\"'][^\\\"']{4,}[\\\"']", "i"),
+ skip:pyRe("(environ|process\\.env|getenv|config\\[|\\bimport\\b|\\bplaceholder\\b|\\bexample\\b|\\bdummy\\b|\\bsample\\b|\\bmock\\b|\\bmocked\\b|\\bxxxx+\\b|\\{\\{)", "i"),
  msg:"Credential appears to be hardcoded in source.",
  why:"Secrets in code leak through version control, logs, and builds; rotation requires a deploy.",
  fix:"Load secrets from environment variables or a secrets manager, and rotate this one now.",
- ref:"CWE-798 · OWASP A07"},
-// ---- Crypto / transport ----
-{id:"S-WEAKHASH-PY", name:"Weak hash algorithm", type:"VULN", sev:"MAJOR", langs:["py"],
- re:/hashlib\.(md5|sha1)\s*\(/,
+ ref:"CWE-798 · OWASP A07",
+},
+{
+id:"S-WEAKHASH-PY", name:"Weak hash algorithm", type:"VULN", sev:"MAJOR", langs:["py"],
+ re:pyRe("hashlib\\.(md5|sha1)\\s*\\(", ""),
  msg:"MD5/SHA-1 are cryptographically broken.",
  why:"Collisions are practical; unusable for passwords or signatures.",
  fix:"Use SHA-256+ for integrity; bcrypt/scrypt/argon2 for passwords.",
- ref:"CWE-327/328"},
-{id:"S-WEAKHASH-JS", name:"Weak hash algorithm", type:"VULN", sev:"MAJOR", langs:["js"],
- re:/createHash\s*\(\s*["'](md5|sha1)["']/,
+ ref:"CWE-327/328",
+},
+{
+id:"S-WEAKHASH-JS", name:"Weak hash algorithm", type:"VULN", sev:"MAJOR", langs:["js"],
+ re:pyRe("createHash\\s*\\(\\s*[\\\"'](md5|sha1)[\\\"']", ""),
  msg:"MD5/SHA-1 are cryptographically broken.",
  why:"Collisions are practical; unusable for passwords or signatures.",
  fix:"Use sha256+ for integrity; bcrypt/scrypt/argon2 for passwords.",
- ref:"CWE-327/328"},
-{id:"S-VERIFY", name:"TLS verification disabled", type:"VULN", sev:"MAJOR", langs:["py"],
- re:/verify\s*=\s*False|_create_unverified_context/,
+ ref:"CWE-327/328",
+},
+{
+id:"S-VERIFY", name:"TLS verification disabled", type:"VULN", sev:"MAJOR", langs:["py"],
+ re:pyRe("verify\\s*=\\s*False|_create_unverified_context", ""),
  msg:"Certificate verification is disabled.",
  why:"Disabling TLS verification allows trivial man-in-the-middle attacks.",
  fix:"Keep verify=True; add the internal CA to the trust store instead.",
- ref:"CWE-295 · OWASP A02"},
-{id:"S-HTTP", name:"Cleartext HTTP URL", type:"HOTSPOT", sev:"MINOR", langs:["py","js"],
- re:/["']http:\/\/(?!localhost|127\.0\.0\.1|0\.0\.0\.0)/,
+ ref:"CWE-295 · OWASP A02",
+},
+{
+id:"S-HTTP", name:"Cleartext HTTP URL", type:"HOTSPOT", sev:"MINOR", langs:["py", "js"],
+ re:pyRe("[\\\"']http://(?!localhost|127\\.0\\.0\\.1|0\\.0\\.0\\.0)", ""),
  msg:"URL uses unencrypted http://.",
  why:"Data sent over HTTP can be read or altered in transit.",
  fix:"Use https:// unless this is a deliberate local/dev endpoint.",
- ref:"CWE-319 · OWASP A02"},
-{id:"S-RANDOM", name:"Non-crypto randomness for secret", type:"HOTSPOT", sev:"MAJOR", langs:["py","js"],
- re:/(random\.(random|randint|choice|randrange|getrandbits)|Math\.random)\s*\(/,
- need:/(token|secret|password|otp|nonce|session|key|reset|csrf)/i,
+ ref:"CWE-319 · OWASP A02",
+},
+{
+id:"S-RANDOM", name:"Non-crypto randomness for secret", type:"HOTSPOT", sev:"MAJOR", langs:["py", "js"],
+ re:pyRe("(random\\.(random|randint|choice|randrange|getrandbits)|Math\\.random)\\s*\\(", ""),
+ need:pyRe("(token|secret|password|otp|nonce|session|key|reset|csrf)", "i"),
  msg:"PRNG used in a security-sensitive value.",
  why:"random/Math.random are predictable; generated tokens can be guessed.",
  fix:"Use secrets module (Python) or crypto.randomBytes / crypto.getRandomValues (JS).",
- ref:"CWE-338"},
-// ---- XSS / client ----
-{id:"S-INNERHTML", name:"HTML injection sink", type:"HOTSPOT", sev:"MAJOR", langs:["js"],
- re:/\.(innerHTML|outerHTML)\s*=|document\.write\s*\(|insertAdjacentHTML\s*\(/,
+ ref:"CWE-338",
+},
+{
+id:"S-INNERHTML", name:"HTML injection sink", type:"HOTSPOT", sev:"MAJOR", langs:["js"],
+ re:pyRe("\\.(innerHTML|outerHTML)\\s*=|document\\.write\\s*\\(|insertAdjacentHTML\\s*\\(", ""),
  msg:"Assigning raw HTML — potential XSS sink.",
  why:"If the value contains user input, scripts can be injected into the page.",
  fix:"Use textContent, or sanitize with DOMPurify before inserting HTML.",
- ref:"CWE-79 · OWASP A03"},
-{id:"S-DANGER", name:"dangerouslySetInnerHTML", type:"HOTSPOT", sev:"MAJOR", langs:["js"],
- re:/dangerouslySetInnerHTML/,
+ ref:"CWE-79 · OWASP A03",
+},
+{
+id:"S-DANGER", name:"dangerouslySetInnerHTML", type:"HOTSPOT", sev:"MAJOR", langs:["js"],
+ re:pyRe("dangerouslySetInnerHTML", ""),
  msg:"React raw-HTML escape hatch in use.",
  why:"Bypasses React's XSS protection.",
  fix:"Render as text, or sanitize the HTML first.",
- ref:"CWE-79"},
-{id:"S-TIMEOUT-STR", name:"setTimeout with string", type:"VULN", sev:"MAJOR", langs:["js"],
- re:/set(Timeout|Interval)\s*\(\s*["'`]/,
+ ref:"CWE-79",
+},
+{
+id:"S-TIMEOUT-STR", name:"setTimeout with string", type:"VULN", sev:"MAJOR", langs:["js"],
+ re:pyRe("set(Timeout|Interval)\\s*\\(\\s*[\\\"'`]", ""),
  msg:"String argument to setTimeout/setInterval is implied eval.",
- fix:"Pass a function reference instead.",
  why:"The string is compiled and executed like eval.",
- ref:"CWE-95"},
-{id:"S-LOCALSTORAGE", name:"Secret in localStorage", type:"HOTSPOT", sev:"MAJOR", langs:["js"],
- re:/localStorage\.setItem\s*\(\s*["'][^"']*(token|jwt|password|secret|auth)/i,
+ fix:"Pass a function reference instead.",
+ ref:"CWE-95",
+},
+{
+id:"S-LOCALSTORAGE", name:"Secret in localStorage", type:"HOTSPOT", sev:"MAJOR", langs:["js"],
+ re:pyRe("localStorage\\.setItem\\s*\\(\\s*[\\\"'][^\\\"']*(token|jwt|password|secret|auth)", "i"),
  msg:"Sensitive value stored in localStorage.",
  why:"localStorage is readable by any script on the page (XSS steals it).",
  fix:"Prefer httpOnly cookies for session tokens.",
- ref:"CWE-522"},
-{id:"S-JWT-NONE", name:"JWT 'none' algorithm", type:"VULN", sev:"BLOCKER", langs:["js","py"],
- re:/algorithms?\s*[:=]\s*\[?\s*["']none["']/i,
+ ref:"CWE-522",
+},
+{
+id:"S-JWT-NONE", name:"JWT 'none' algorithm", type:"VULN", sev:"BLOCKER", langs:["js", "py"],
+ re:pyRe("algorithms?\\s*[:=]\\s*\\[?\\s*[\\\"']none[\\\"']", "i"),
  msg:"JWT verification accepts the 'none' algorithm.",
  why:"Attackers can forge unsigned tokens that pass verification.",
  fix:"Pin an explicit algorithm list, e.g. ['HS256'] or ['RS256'].",
- ref:"CWE-347"},
-{id:"S-CORS", name:"CORS wildcard", type:"HOTSPOT", sev:"MAJOR", langs:["js","py"],
- re:/Access-Control-Allow-Origin["']?\s*[,:]\s*["']\*/,
+ ref:"CWE-347",
+},
+{
+id:"S-CORS", name:"CORS wildcard", type:"HOTSPOT", sev:"MAJOR", langs:["js", "py"],
+ re:pyRe("Access-Control-Allow-Origin[\\\"']?\\s*[,:]\\s*[\\\"']\\*", ""),
  msg:"CORS allows all origins.",
  why:"Any website can call this API with the user's credentials context.",
  fix:"Whitelist specific origins.",
- ref:"OWASP A05"},
-// ---- Config / misc ----
-{id:"S-DEBUG", name:"Debug mode enabled", type:"HOTSPOT", sev:"MAJOR", langs:["py"],
- re:/debug\s*=\s*True/,
+ ref:"OWASP A05",
+},
+{
+id:"S-DEBUG", name:"Debug mode enabled", type:"HOTSPOT", sev:"MAJOR", langs:["py"],
+ re:pyRe("debug\\s*=\\s*True", ""),
  msg:"debug=True — never in production.",
  why:"Flask/Django debug mode exposes an interactive console and stack traces.",
  fix:"Drive debug from an environment variable, defaulting to off.",
- ref:"CWE-489 · OWASP A05"},
-{id:"S-BIND-ALL", name:"Binding to all interfaces", type:"HOTSPOT", sev:"MINOR", langs:["py","js"],
- re:/["']0\.0\.0\.0["']/,
+ ref:"CWE-489 · OWASP A05",
+},
+{
+id:"S-BIND-ALL", name:"Binding to all interfaces", type:"HOTSPOT", sev:"MINOR", langs:["py", "js"],
+ re:pyRe("[\\\"']0\\.0\\.0\\.0[\\\"']", ""),
  msg:"Service binds to 0.0.0.0 (all interfaces).",
  why:"Exposes the service on every network interface, including public ones.",
  fix:"Bind to 127.0.0.1 unless external access is intended.",
- ref:"CWE-668"},
-{id:"S-MKTEMP", name:"Insecure temp file", type:"VULN", sev:"MAJOR", langs:["py"],
- re:/tempfile\.mktemp\s*\(/,
+ ref:"CWE-668",
+},
+{
+id:"S-MKTEMP", name:"Insecure temp file", type:"VULN", sev:"MAJOR", langs:["py"],
+ re:pyRe("tempfile\\.mktemp\\s*\\(", ""),
  msg:"tempfile.mktemp is race-condition prone.",
  why:"The name can be claimed by an attacker between creation and use.",
  fix:"Use tempfile.NamedTemporaryFile or mkstemp.",
- ref:"CWE-377"},
-// ---- Bugs ----
-{id:"B-BARE-EXCEPT", name:"Bare except", type:"BUG", sev:"MAJOR", langs:["py"],
- re:/^\s*except\s*:/,
+ ref:"CWE-377",
+},
+{
+id:"B-BARE-EXCEPT", name:"Bare except", type:"BUG", sev:"MAJOR", langs:["py"],
+ re:pyRe("^\\s*except\\s*:", ""),
  msg:"Bare except: catches everything, including SystemExit/KeyboardInterrupt.",
  why:"Hides real failures and makes the process unkillable.",
  fix:"Catch the specific exception types you expect.",
- ref:"Reliability"},
-{id:"B-EQEQ", name:"Loose equality", type:"BUG", sev:"MINOR", langs:["js"],
- re:/[^=!<>]==[^=]|[^!]!=[^=]/,
- skip:/^\s*(\/\/|\*|\/\*)/,
+ ref:"Reliability",
+},
+{
+id:"B-EQEQ", name:"Loose equality", type:"BUG", sev:"MINOR", langs:["js"],
+ re:pyRe("[^=!<>]==[^=]|[^!]!=[^=]", ""),
+ skip:pyRe("^\\s*(//|\\*|/\\*)", "i"),
  msg:"== / != perform type coercion.",
  why:"'' == 0 is true; coercion causes subtle logic bugs.",
  fix:"Use === and !==.",
- ref:"Reliability"},
-// ---- Code smells ----
-{id:"Q-TODO", name:"TODO/FIXME marker", type:"SMELL", sev:"INFO", langs:["py","js","sql"],
- re:/\b(TODO|FIXME|XXX|HACK)\b/,
+ ref:"Reliability",
+},
+{
+id:"Q-TODO", name:"TODO/FIXME marker", type:"SMELL", sev:"INFO", langs:["py", "js", "sql"],
+ re:pyRe("\\b(TODO|FIXME|XXX|HACK)\\b", ""),
  msg:"Unresolved TODO/FIXME comment.",
  why:"Tracked work living only in comments tends to be forgotten.",
  fix:"File a ticket and link it, or resolve it.",
- ref:"Maintainability"},
-{id:"Q-CONSOLE", name:"console.log left in code", type:"SMELL", sev:"MINOR", langs:["js"],
- re:/console\.(log|debug)\s*\(/,
+ ref:"Maintainability",
+},
+{
+id:"Q-CONSOLE", name:"console.log left in code", type:"SMELL", sev:"MINOR", langs:["js"],
+ re:pyRe("console\\.(log|debug)\\s*\\(", ""),
  msg:"Debug logging left in code.",
- fix:"Remove, or use a leveled logger.",
  why:"Noisy output and possible data leakage in production.",
- ref:"Maintainability"},
-{id:"Q-VAR", name:"var declaration", type:"SMELL", sev:"MINOR", langs:["js"],
- re:/\bvar\s+[A-Za-z_$]/,
+ fix:"Remove, or use a leveled logger.",
+ ref:"Maintainability",
+},
+{
+id:"Q-VAR", name:"var declaration", type:"SMELL", sev:"MINOR", langs:["js"],
+ re:pyRe("\\bvar\\s+[A-Za-z_$]", ""),
  msg:"var is function-scoped and hoisted.",
- fix:"Use let or const.",
  why:"Block-scoped declarations prevent shadowing bugs.",
- ref:"Maintainability"},
-{id:"Q-LONGLINE", name:"Line too long", type:"SMELL", sev:"MINOR", langs:["py","js"],
- check:(line)=>line.length>160,
- msg:"Line exceeds 160 characters.",
- fix:"Break the line up for readability.",
- why:"Very long lines hurt readability and reviews.",
- ref:"Maintainability"},
-// ---- Secret token signatures (Gitleaks-style) ----
-{id:"S-TOKEN", name:"Known secret token format", type:"VULN", sev:"BLOCKER", langs:["py","js"],
- re:/AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36}|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----|eyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}/,
+ fix:"Use let or const.",
+ ref:"Maintainability",
+},
+{
+id:"S-TOKEN", name:"Known secret token format", type:"VULN", sev:"BLOCKER", langs:["py", "js"],
+ re:pyRe("AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36}|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\\-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----|eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}", ""),
+ find:(line) => { const t = findSecretToken(line); return t ? t.index : -1; },
  msg:"String matches a known secret format (AWS/GitHub/Slack/Stripe/Google key, private key, or JWT).",
  why:"Provider-format tokens in source are live credentials until proven otherwise.",
  fix:"Remove it, rotate the credential immediately, and load it from a secrets manager.",
- ref:"CWE-798 · OWASP A07"},
-// ---- Additional vulnerability classes ----
-{id:"S-SSTI", name:"Template injection risk", type:"VULN", sev:"CRITICAL", langs:["py"],
- re:/render_template_string\s*\(\s*(?!["'])/,
+ ref:"CWE-798 · OWASP A07",
+},
+{
+id:"S-BIDI", name:"Trojan Source bidi control", type:"VULN", sev:"CRITICAL", langs:["py", "js", "sql"],
+ re:pyRe("[\\u202a-\\u202e\\u2066-\\u2069]", ""),
+ msg:"Bidirectional control character in source (Trojan Source)",
+ why:"Bidi override and isolate characters make code display in a different order than the compiler reads it, so reviewers approve logic that is not what runs (CVE-2021-42574).",
+ fix:"Remove the control characters; where a string really needs one, write it as an escape sequence (e.g. \\u202e) so it is visible.",
+ ref:"CWE-451 · CVE-2021-42574",
+},
+{
+id:"S-SSTI", name:"Template injection risk", type:"VULN", sev:"CRITICAL", langs:["py"],
+ re:pyRe("render_template_string\\s*\\(\\s*(?![\\\"'])", ""),
  msg:"render_template_string with a non-literal template.",
  why:"User input compiled as a Jinja2 template is server-side template injection → RCE.",
  fix:"Pass data as template parameters; never build template source from input.",
- ref:"CWE-1336 · OWASP A03"},
-{id:"S-XML", name:"XML parsing without a hardened parser", type:"HOTSPOT", sev:"MINOR", langs:["py"],
- re:/(?:^|\s)(?:import\s+xml\.(?:etree|dom|sax)|from\s+xml\.(?:etree|dom|sax))/,
+ ref:"CWE-1336 · OWASP A03",
+},
+{
+id:"S-XML", name:"XML parsing without a hardened parser", type:"HOTSPOT", sev:"MINOR", langs:["py"],
+ re:pyRe("(?:^|\\s)(?:import\\s+xml\\.(?:etree|dom|sax)|from\\s+xml\\.(?:etree|dom|sax))", ""),
  msg:"Stdlib XML parsers are unsafe for untrusted input.",
- why:"xml.etree/dom/sax are vulnerable to entity-expansion and XXE attacks.",
+ why:"xml.etree/dom/sax are vulnerable to entity-expansion and (historically) XXE attacks.",
  fix:"Parse untrusted XML with a hardened parser such as defusedxml or lazaret.safexml.",
- ref:"CWE-611"},
-{id:"S-MARKSAFE", name:"mark_safe usage", type:"HOTSPOT", sev:"MAJOR", langs:["py"],
- re:/mark_safe\s*\(/,
+ ref:"CWE-611",
+},
+{
+id:"S-MARKSAFE", name:"mark_safe usage", type:"HOTSPOT", sev:"MAJOR", langs:["py"],
+ re:pyRe("mark_safe\\s*\\(", ""),
  msg:"mark_safe bypasses Django's HTML escaping.",
  why:"If the value contains user input, this is an XSS vector.",
  fix:"Escape user data; use format_html for building markup.",
- ref:"CWE-79"},
-{id:"S-AUTOESCAPE", name:"Template autoescape disabled", type:"VULN", sev:"MAJOR", langs:["py"],
- re:/autoescape\s*=\s*False/,
+ ref:"CWE-79",
+},
+{
+id:"S-AUTOESCAPE", name:"Template autoescape disabled", type:"VULN", sev:"MAJOR", langs:["py"],
+ re:pyRe("autoescape\\s*=\\s*False", ""),
  msg:"Template autoescaping is turned off.",
  why:"Every rendered variable becomes a potential XSS vector.",
  fix:"Leave autoescape on; mark trusted fragments individually.",
- ref:"CWE-79"},
-{id:"S-PARAMIKO", name:"SSH host key verification disabled", type:"VULN", sev:"MAJOR", langs:["py"],
- re:/AutoAddPolicy|WarningPolicy/,
+ ref:"CWE-79",
+},
+{
+id:"S-PARAMIKO", name:"SSH host key verification disabled", type:"VULN", sev:"MAJOR", langs:["py"],
+ re:pyRe("AutoAddPolicy|WarningPolicy", ""),
  msg:"SSH host keys accepted without verification.",
  why:"Enables man-in-the-middle attacks on SSH connections.",
  fix:"Use RejectPolicy with a managed known_hosts file.",
- ref:"CWE-295"},
-{id:"S-CLEARTEXT-PROTO", name:"Cleartext protocol module", type:"HOTSPOT", sev:"MINOR", langs:["py"],
- re:/(?:^|\s)(?:import\s+(?:telnetlib|ftplib)|from\s+(?:telnetlib|ftplib))/,
+ ref:"CWE-295",
+},
+{
+id:"S-CLEARTEXT-PROTO", name:"Cleartext protocol module", type:"HOTSPOT", sev:"MINOR", langs:["py"],
+ re:pyRe("(?:^|\\s)(?:import\\s+(?:telnetlib|ftplib)|from\\s+(?:telnetlib|ftplib))", ""),
  msg:"Telnet/FTP transmit credentials in cleartext.",
  why:"Anyone on the network path can capture the credentials.",
  fix:"Use SSH/SFTP (e.g. paramiko) instead.",
- ref:"CWE-319"},
-{id:"S-CHMOD", name:"Overly permissive file mode", type:"VULN", sev:"MAJOR", langs:["py"],
- re:/chmod\s*\([^,)]*,\s*0o?7[67]7/,
+ ref:"CWE-319",
+},
+{
+id:"S-CHMOD", name:"Overly permissive file mode", type:"VULN", sev:"MAJOR", langs:["py"],
+ re:pyRe("chmod\\s*\\([^,()]*,\\s*0o?7[67]7", ""),
+ find:chmodFind,
  msg:"File made world-writable (777/767).",
  why:"Any local user or process can modify the file.",
  fix:"Use the least permissive mode that works (e.g. 0o600/0o644).",
- ref:"CWE-732"},
-{id:"S-WEAKCIPHER-PY", name:"Weak cipher or mode", type:"VULN", sev:"MAJOR", langs:["py"],
- re:/\b(?:DES|DES3|ARC4|Blowfish)\.new|MODE_ECB/,
+ ref:"CWE-732",
+},
+{
+id:"S-WEAKCIPHER-PY", name:"Weak cipher or mode", type:"VULN", sev:"MAJOR", langs:["py"],
+ re:pyRe("\\b(?:DES|DES3|ARC4|Blowfish)\\.new|MODE_ECB", ""),
  msg:"DES/RC4/Blowfish/ECB are cryptographically weak.",
  why:"These ciphers/modes are breakable or leak plaintext structure.",
  fix:"Use AES-GCM (cryptography library, AESGCM).",
- ref:"CWE-327"},
-{id:"S-WEAKCIPHER-JS", name:"Weak cipher", type:"VULN", sev:"MAJOR", langs:["js"],
- re:/createCipheriv\s*\(\s*["'](?:des|des-ede3?|rc4|aes-\d+-ecb)/i,
+ ref:"CWE-327",
+},
+{
+id:"S-WEAKCIPHER-JS", name:"Weak cipher", type:"VULN", sev:"MAJOR", langs:["js"],
+ re:pyRe("createCipheriv\\s*\\(\\s*[\\\"'](?:des|des-ede3?|rc4|aes-\\d+-ecb)", "i"),
  msg:"DES/RC4/ECB are cryptographically weak.",
  why:"These ciphers/modes are breakable or leak plaintext structure.",
  fix:"Use aes-256-gcm.",
- ref:"CWE-327"},
-{id:"S-PROTO", name:"Prototype pollution sink", type:"VULN", sev:"MAJOR", langs:["js"],
- re:/\[\s*["']__proto__["']\s*\]|\.__proto__\s*[=.[]|constructor\s*\[\s*["']prototype["']\s*\]/,
+ ref:"CWE-327",
+},
+{
+id:"S-PROTO", name:"Prototype pollution sink", type:"VULN", sev:"MAJOR", langs:["js"],
+ re:pyRe("\\[\\s*[\\\"']__proto__[\\\"']\\s*\\]|\\.__proto__\\s*[=.[]|constructor\\s*\\[\\s*[\\\"']prototype[\\\"']\\s*\\]", ""),
  msg:"Write access to __proto__/prototype.",
  why:"Attacker-controlled keys can pollute Object.prototype and change app behavior globally.",
  fix:"Block __proto__/constructor/prototype keys in merges; use Object.create(null) maps.",
- ref:"CWE-1321"},
-{id:"S-NOSQL", name:"MongoDB $where operator", type:"VULN", sev:"MAJOR", langs:["js"],
- re:/\$where/,
+ ref:"CWE-1321",
+},
+{
+id:"S-NOSQL", name:"MongoDB $where operator", type:"VULN", sev:"MAJOR", langs:["js"],
+ re:pyRe("\\$where", ""),
  msg:"$where evaluates JavaScript inside the database.",
  why:"User input in $where is NoSQL injection with code execution.",
  fix:"Use query operators ($eq, $in, …) instead.",
- ref:"CWE-943"},
-{id:"S-VM-JS", name:"vm module code execution", type:"HOTSPOT", sev:"MAJOR", langs:["js"],
- re:/vm\.runIn(?:New|This)?Context|require\s*\(\s*["']vm["']/,
+ ref:"CWE-943",
+},
+{
+id:"S-VM-JS", name:"vm module code execution", type:"HOTSPOT", sev:"MAJOR", langs:["js"],
+ re:pyRe("vm\\.runIn(?:New|This)?Context|require\\s*\\(\\s*[\\\"']vm[\\\"']", ""),
  msg:"Node vm module is not a security sandbox.",
  why:"Code can escape the vm context and reach the host process.",
  fix:"Don't run untrusted code in-process; use isolated workers/containers.",
- ref:"CWE-94"},
-{id:"S-SPAWN-SHELL", name:"child_process with shell:true", type:"VULN", sev:"CRITICAL", langs:["js"],
- re:/shell\s*:\s*true/,
+ ref:"CWE-94",
+},
+{
+id:"S-SPAWN-SHELL", name:"child_process with shell:true", type:"VULN", sev:"CRITICAL", langs:["js"],
+ re:pyRe("shell\\s*:\\s*true", ""),
  msg:"shell:true routes the command through a shell.",
  why:"Shell metacharacters in arguments become command injection.",
  fix:"Use execFile/spawn with an args array and shell:false.",
- ref:"CWE-78"},
-// ---- Supply-chain / obfuscation indicators ----
-{id:"SC-EVAL-DECODE", name:"Decoded payload execution", type:"VULN", sev:"BLOCKER", langs:["py","js"],
- re:/\b(?:eval|exec|Function)\s*\(\s*(?:atob|unescape|decodeURIComponent|Buffer\.from|base64\.b64decode|b64decode|codecs\.decode|zlib\.decompress|marshal\.loads)\s*\(/,
+ ref:"CWE-78",
+},
+{
+id:"SC-EVAL-DECODE", name:"Decoded payload execution", type:"VULN", sev:"BLOCKER", langs:["py", "js"],
+ re:pyRe("\\b(?:eval|exec|execSync|Function|runIn(?:This|New)?Context)\\s*\\(\\s*(?:[\\w$]+\\s*\\.\\s*)*(?:atob|unescape|decodeURIComponent|Buffer\\s*\\.\\s*from|b64decode|codecs\\s*\\.\\s*decode|zlib\\s*\\.\\s*decompress|marshal\\s*\\.\\s*loads|fromhex|unhexlify)\\s*\\(", ""),
  msg:"Code decoded (base64/escape) and immediately executed.",
  why:"Decode-then-execute is the signature pattern of malware droppers and supply-chain implants.",
  fix:"Treat as hostile until proven otherwise; inspect the decoded payload.",
- ref:"CWE-506 · Supply chain"},
-{id:"SC-PACKER", name:"Packed JavaScript (p,a,c,k,e,d)", type:"VULN", sev:"CRITICAL", langs:["js"],
- re:/eval\s*\(\s*function\s*\(\s*p\s*,\s*a\s*,\s*c\s*,\s*k\s*,\s*e/,
+ ref:"CWE-506 · Supply chain",
+},
+{
+id:"SC-PACKER", name:"Packed JavaScript (p,a,c,k,e,d)", type:"VULN", sev:"CRITICAL", langs:["js"],
+ re:pyRe("eval\\s*\\(\\s*function\\s*\\(\\s*p\\s*,\\s*a\\s*,\\s*c\\s*,\\s*k\\s*,\\s*e", ""),
  msg:"Dean Edwards packer signature — self-decoding packed code.",
  why:"Legitimate modern packages ship minified, not packed; packing hides intent.",
  fix:"Unpack and review the payload before trusting this file.",
- ref:"CWE-506 · Supply chain"},
-{id:"SC-MARSHAL", name:"Marshalled bytecode execution", type:"VULN", sev:"CRITICAL", langs:["py"],
- re:/marshal\.loads\s*\(|exec\s*\(\s*compile\s*\(/,
+ ref:"CWE-506 · Supply chain",
+},
+{
+id:"SC-MARSHAL", name:"Marshalled bytecode execution", type:"VULN", sev:"CRITICAL", langs:["py"],
+ re:pyRe("marshal\\.loads\\s*\\(|exec\\s*\\(\\s*compile\\s*\\(", ""),
  msg:"Executing marshalled/compiled bytecode blobs.",
  why:"Bytecode blobs evade source review — a common Python malware technique.",
  fix:"Inspect the blob's origin; refuse opaque executable data in source trees.",
- ref:"CWE-506 · Supply chain"},
-// ---- SQL (.sql scripts, stored procedures, migrations) ----
-{id:"SQL-XPCMD", name:"OS command execution via SQL", type:"VULN", sev:"CRITICAL", langs:["sql"],
- re:/\bxp_cmdshell\b/i,
+ ref:"CWE-506 · Supply chain",
+},
+{
+id:"SQL-XPCMD", name:"OS command execution via SQL", type:"VULN", sev:"CRITICAL", langs:["sql"],
+ re:pyRe("\\bxp_cmdshell\\b", "i"),
  msg:"xp_cmdshell runs operating-system commands from SQL Server.",
  why:"Enables full OS command execution from the database; a top post-exploitation target.",
  fix:"Keep xp_cmdshell disabled; use a vetted, sandboxed job runner instead.",
- ref:"CWE-78 · OWASP A03"},
-{id:"SQL-DYNAMIC", name:"Dynamic SQL from concatenation", type:"VULN", sev:"BLOCKER", langs:["sql"],
- re:/EXEC(?:UTE)?\s*\(\s*@?\w+\s*\+|EXECUTE\s+IMMEDIATE\b[^;]*\|\||sp_executesql\b[^;]*\+|EXEC\s*\(\s*['"][^']*['"]\s*\+|SET\s+@\w+\s*=[^;]*['"][^;]*(?:\+|\|\|)/i,
+ ref:"CWE-78 · OWASP A03",
+},
+{
+id:"SQL-DYNAMIC", name:"Dynamic SQL from concatenation", type:"VULN", sev:"BLOCKER", langs:["sql"],
+ re:pyRe("EXEC(?:UTE)?\\s*\\(\\s*@?\\w+\\s*\\+|EXECUTE\\s+IMMEDIATE\\b(?:(?!EXECUTE\\s+IMMEDIATE\\b)[^;])*\\|\\||sp_executesql\\b(?:(?!sp_executesql\\b)[^;])*\\+|EXEC\\s*\\(\\s*['\\\"][^']*['\\\"]\\s*\\+|SET\\s+@\\w+\\s*=(?:(?!SET\\s+@)[^;'\\\"])*['\\\"](?:(?!SET\\s+@)[^;])*(?:\\+|\\|\\|)", "i"),
+ find:sqlDynamicFind,
  msg:"Dynamic SQL built by concatenating variables into the statement.",
  why:"String-built SQL executed with EXEC / EXECUTE IMMEDIATE / sp_executesql is SQL injection inside the database.",
  fix:"Use parameterized dynamic SQL (sp_executesql with @params, or bind variables).",
- ref:"CWE-89 · OWASP A03"},
-{id:"SQL-CRED", name:"Hardcoded database credential", type:"VULN", sev:"BLOCKER", langs:["sql"],
- re:/IDENTIFIED\s+BY\s+['"][^'"]+['"]|PASSWORD\s*=?\s*['"][^'"]+['"]|IDENTIFIED\s+BY\s+PASSWORD/i,
+ ref:"CWE-89 · OWASP A03",
+},
+{
+id:"SQL-CRED", name:"Hardcoded database credential", type:"VULN", sev:"BLOCKER", langs:["sql"],
+ re:pyRe("(?:IDENTIFIED\\s+BY\\s+['\\\"][^'\\\"]+['\\\"]|PASSWORD\\s*=?\\s*['\\\"][^'\\\"]+['\\\"]|IDENTIFIED\\s+BY\\s+PASSWORD)", "i"),
+ skip:pyRe("\\bplaceholder\\b|\\bexample\\b|\\bdummy\\b|\\bmock\\b|\\bxxxx+\\b", "i"),
  msg:"Credential embedded in a SQL script.",
  why:"Passwords in DDL scripts leak through version control and backups.",
  fix:"Provision credentials out-of-band (secrets manager / vault), not in checked-in SQL.",
- ref:"CWE-798 · OWASP A07"},
-{id:"SQL-GRANT-ALL", name:"Excessive privilege grant", type:"HOTSPOT", sev:"MAJOR", langs:["sql"],
- re:/\bGRANT\s+ALL\b|\bWITH\s+GRANT\s+OPTION\b/i,
+ ref:"CWE-798 · OWASP A07",
+},
+{
+id:"SQL-GRANT-ALL", name:"Excessive privilege grant", type:"HOTSPOT", sev:"MAJOR", langs:["sql"],
+ re:pyRe("\\bGRANT\\s+ALL\\b|\\bWITH\\s+GRANT\\s+OPTION\\b", "i"),
  msg:"GRANT ALL / WITH GRANT OPTION hands over broad privileges.",
  why:"Violates least privilege; a compromised account inherits everything.",
  fix:"Grant only the specific privileges the role needs.",
- ref:"CWE-732 · OWASP A01"},
-{id:"SQL-GRANT-PUBLIC", name:"Grant to PUBLIC", type:"HOTSPOT", sev:"MAJOR", langs:["sql"],
- re:/\bGRANT\b[^;]*\bTO\s+PUBLIC\b/i,
+ ref:"CWE-732 · OWASP A01",
+},
+{
+id:"SQL-GRANT-PUBLIC", name:"Grant to PUBLIC", type:"HOTSPOT", sev:"MAJOR", langs:["sql"],
+ re:pyRe("\\bGRANT\\b(?:(?!\\bGRANT\\b)[^;])*\\bTO\\s+PUBLIC\\b", "i"),
+ find:grantPublicFind,
  msg:"Privilege granted to PUBLIC (every user).",
  why:"PUBLIC grants apply to all current and future accounts, including low-trust ones.",
  fix:"Grant to a specific role instead of PUBLIC.",
- ref:"CWE-732 · OWASP A01"},
-{id:"SQL-FILE", name:"Filesystem access from SQL", type:"VULN", sev:"CRITICAL", langs:["sql"],
- re:/\bINTO\s+(?:OUTFILE|DUMPFILE)\b|\bLOAD_FILE\s*\(|\bLOAD\s+DATA\s+INFILE\b/i,
+ ref:"CWE-732 · OWASP A01",
+},
+{
+id:"SQL-FILE", name:"Filesystem access from SQL", type:"VULN", sev:"CRITICAL", langs:["sql"],
+ re:pyRe("\\bINTO\\s+(?:OUTFILE|DUMPFILE)\\b|\\bLOAD_FILE\\s*\\(|\\bLOAD\\s+DATA\\s+INFILE\\b", "i"),
  msg:"SQL reads/writes the server filesystem (OUTFILE / LOAD_FILE).",
  why:"A classic data-exfiltration and webshell-drop primitive in SQL injection exploitation.",
  fix:"Disable FILE privilege; never build these paths from untrusted input.",
- ref:"CWE-73 · OWASP A03"},
-{id:"SQL-OPENROWSET", name:"Ad-hoc remote data access", type:"HOTSPOT", sev:"MAJOR", langs:["sql"],
- re:/\b(?:OPENROWSET|OPENQUERY|OPENDATASOURCE)\s*\(/i,
+ ref:"CWE-73 · OWASP A03",
+},
+{
+id:"SQL-OPENROWSET", name:"Ad-hoc remote data access", type:"HOTSPOT", sev:"MAJOR", langs:["sql"],
+ re:pyRe("\\b(?:OPENROWSET|OPENQUERY|OPENDATASOURCE)\\s*\\(", "i"),
  msg:"OPENROWSET/OPENQUERY perform ad-hoc external connections.",
  why:"Can reach arbitrary hosts/files and is abused for lateral movement.",
  fix:"Disable Ad Hoc Distributed Queries; use configured linked servers with least privilege.",
- ref:"CWE-610"},
-{id:"SQL-FK-OFF", name:"Integrity checks disabled", type:"HOTSPOT", sev:"MAJOR", langs:["sql"],
- re:/SET\s+FOREIGN_KEY_CHECKS\s*=\s*0|NOCHECK\s+CONSTRAINT|SET\s+CONSTRAINTS\s+ALL\s+DEFERRED/i,
+ ref:"CWE-610",
+},
+{
+id:"SQL-FK-OFF", name:"Integrity checks disabled", type:"HOTSPOT", sev:"MAJOR", langs:["sql"],
+ re:pyRe("SET\\s+FOREIGN_KEY_CHECKS\\s*=\\s*0|NOCHECK\\s+CONSTRAINT|SET\\s+CONSTRAINTS\\s+ALL\\s+DEFERRED", "i"),
  msg:"Referential-integrity enforcement is turned off.",
  why:"Disabling constraints allows orphaned/inconsistent data to be written.",
  fix:"Re-enable checks immediately after the bulk operation; scope it tightly.",
- ref:"CWE-20"},
-{id:"SQL-TRUSTWORTHY", name:"TRUSTWORTHY database", type:"HOTSPOT", sev:"MAJOR", langs:["sql"],
- re:/SET\s+TRUSTWORTHY\s+ON/i,
+ ref:"CWE-20",
+},
+{
+id:"SQL-TRUSTWORTHY", name:"TRUSTWORTHY database", type:"HOTSPOT", sev:"MAJOR", langs:["sql"],
+ re:pyRe("SET\\s+TRUSTWORTHY\\s+ON", "i"),
  msg:"TRUSTWORTHY ON enables privilege escalation paths in SQL Server.",
  why:"Combined with impersonation it can lead to sysadmin escalation.",
  fix:"Leave TRUSTWORTHY OFF; sign modules instead.",
- ref:"CWE-269"},
-{id:"SQL-NOLOCK", name:"Dirty-read hint", type:"SMELL", sev:"MINOR", langs:["sql"],
- re:/WITH\s*\(\s*NOLOCK\s*\)|READ\s+UNCOMMITTED/i,
+ ref:"CWE-269",
+},
+{
+id:"SQL-NOLOCK", name:"Dirty-read hint", type:"SMELL", sev:"MINOR", langs:["sql"],
+ re:pyRe("WITH\\s*\\(\\s*NOLOCK\\s*\\)|READ\\s+UNCOMMITTED", "i"),
  msg:"NOLOCK / READ UNCOMMITTED permits dirty reads.",
  why:"Returns uncommitted, possibly inconsistent data; a common source of subtle bugs.",
  fix:"Use an appropriate isolation level (e.g. READ COMMITTED SNAPSHOT).",
- ref:"Reliability"},
-{id:"SQL-SELECT-STAR", name:"SELECT *", type:"SMELL", sev:"MINOR", langs:["sql"],
- re:/\bSELECT\s+\*/i,
+ ref:"Reliability",
+},
+{
+id:"SQL-SELECT-STAR", name:"SELECT *", type:"SMELL", sev:"MINOR", langs:["sql"],
+ re:pyRe("\\bSELECT\\s+\\*", "i"),
  msg:"SELECT * fetches all columns.",
  why:"Breaks silently on schema changes and moves unneeded data.",
  fix:"List the columns you actually need.",
- ref:"Maintainability"},
+ ref:"Maintainability",
+},
 ];
-
-// Multiline (whole-text) rules
 const TEXT_RULES = [
-{id:"B-EMPTY-CATCH", name:"Empty catch block", type:"BUG", sev:"MAJOR", langs:["js"],
- re:/catch\s*(\([^)]*\))?\s*\{\s*\}/g,
+{
+id:"B-EMPTY-CATCH", name:"Empty catch block", type:"BUG", sev:"MAJOR", langs:["js"],
+ re:pyRe("catch\\s*(\\([^()]*\\))?\\s*\\{\\s*\\}", ""),
+ scan:emptyCatchScan,
  msg:"Exception swallowed by empty catch.",
  why:"Errors vanish silently, making failures undiagnosable.",
  fix:"Handle the error or at least log it.",
- ref:"Reliability"},
-{id:"B-EXCEPT-PASS", name:"except: pass", type:"BUG", sev:"MAJOR", langs:["py"],
- re:/except[^\n:]*:\s*\n\s*pass\b/g,
+ ref:"Reliability",
+},
+{
+id:"B-EXCEPT-PASS", name:"except: pass", type:"BUG", sev:"MAJOR", langs:["py"],
+ re:pyRe("except(?:(?!except)[^\\n:])*:[^\\S\\n]*\\n\\s*pass\\b", ""),
+ scan:exceptPassScan,
  msg:"Exception swallowed with pass.",
  why:"Errors vanish silently, making failures undiagnosable.",
  fix:"Handle the error or at least log it.",
- ref:"Reliability"},
-{id:"SQL-DELETE-NOWHERE", name:"DELETE without WHERE", type:"BUG", sev:"MAJOR", langs:["sql"],
- re:/\bDELETE\s+FROM\s+[^;]+;/gi, noWhere:true,  // single-class quantifier → linear (the [\w..]+[^;]* form backtracked quadratically on unterminated input; noWhere check restores WHERE semantics)
+ ref:"Reliability",
+},
+{
+id:"SQL-DELETE-NOWHERE", name:"DELETE without WHERE", type:"BUG", sev:"MAJOR", langs:["sql"],
+ re:pyRe("\\bDELETE\\s+FROM\\s+[\\w.\\\"\\[\\]`]+", "i"),
+ nowhere:true, // fired by scanSqlNowhere (sql.js), linear
  msg:"DELETE has no WHERE clause — it removes every row.",
  why:"An unqualified DELETE wipes the whole table; usually a mistake outside teardown scripts.",
  fix:"Add a WHERE clause, or use TRUNCATE deliberately if a full wipe is intended.",
- ref:"CWE-665"},
-{id:"SQL-UPDATE-NOWHERE", name:"UPDATE without WHERE", type:"BUG", sev:"MAJOR", langs:["sql"],
- re:/\bUPDATE\s+[\w."\[\]`]+\s+SET\b[^;]*;/gi, noWhere:true,  // linear-time twin of SQL-DELETE-NOWHERE
+ ref:"CWE-665",
+},
+{
+id:"SQL-UPDATE-NOWHERE", name:"UPDATE without WHERE", type:"BUG", sev:"MAJOR", langs:["sql"],
+ re:pyRe("\\bUPDATE\\s+[\\w.\\\"\\[\\]`]+\\s+SET\\b", "i"),
+ nowhere:true,
  msg:"UPDATE has no WHERE clause — it changes every row.",
  why:"An unqualified UPDATE rewrites the entire table.",
  fix:"Add a WHERE clause to scope the update.",
- ref:"CWE-665"},
+ ref:"CWE-665",
+},
 ];
+
+/* ======== scanner/taint.js ======== */
+// Taint sources/sinks and sanitizer model — the Python engine's tables
+// (lazaret.scanner.core TAINT_SOURCES / TAINT_SINKS / ASSIGN_RE /
+// _FULL_SAN / _PARTIAL_SAN), pattern text verbatim, Python regex semantics.
+
 
 /* ---------------- Taint tracking (lightweight, intra-file) ---------------- */
 const TAINT_SOURCES = {
-  py: /request\.(args|form|values|json|data|cookies|headers|files|get_json)|input\s*\(|sys\.argv|b64decode\s*\(|zlib\.decompress\s*\(/,
-  js: /req\.(query|body|params|headers|cookies)|process\.argv|location\.(search|hash|href)|document\.URL|new\s+URLSearchParams|atob\s*\(|unescape\s*\(|decodeURIComponent\s*\(/
+  py: pyRe(String.raw`request\.(args|form|values|json|data|cookies|headers|files|get_json)|input\s*\(|sys\.argv|b64decode\s*\(|zlib\.decompress\s*\(`),
+  js: pyRe(String.raw`req\.(query|body|params|headers|cookies)|process\.argv|location\.(search|hash|href)|document\.URL|new\s+URLSearchParams|atob\s*\(|unescape\s*\(|decodeURIComponent\s*\(`),
 };
 const TAINT_SINKS = {
   py: [
-    ["CMD", /os\.(system|popen)\s*\(|subprocess\.(run|call|check_output|check_call|Popen)\s*\(/, "command injection","CRITICAL","CWE-78","Validate/allowlist the value; pass args as a list with shell=False."],
-    ["CODE", /(?<![\w.])(eval|exec)\s*\(/, "code injection","CRITICAL","CWE-95","Never execute untrusted strings; use safe parsing."],
-    ["SQL", /\.(execute|executemany)\s*\(/, "SQL injection","BLOCKER","CWE-89","Use parameterized queries."],
-    ["PATH", /(?<![\w.])open\s*\(|send_file\s*\(|send_from_directory\s*\(/, "path traversal","MAJOR","CWE-22","Resolve the path and verify it stays inside an allowed base directory."],
-    ["SSRF", /requests\.(get|post|put|delete|head|request)\s*\(|urlopen\s*\(/, "server-side request forgery","MAJOR","CWE-918","Allowlist target hosts and schemes; block internal addresses."],
-    ["REDIR", /(?<![\w.])redirect\s*\(/, "open redirect","MAJOR","CWE-601","Allowlist redirect targets or use relative paths."],
-    ["SSTI", /render_template_string\s*\(/, "template injection","CRITICAL","CWE-1336","Pass data as template parameters, never into template source."],
+    ["CMD", pyRe(String.raw`os\.(system|popen)\s*\(|subprocess\.(run|call|check_output|check_call|Popen)\s*\(`), "command injection", "CRITICAL", "CWE-78", "Validate/allowlist the value; pass args as a list with shell=False."],
+    ["CODE", pyRe(String.raw`(?<![\w.])(eval|exec)\s*\(`), "code injection", "CRITICAL", "CWE-95", "Never execute untrusted strings; use safe parsing."],
+    ["SQL", pyRe(String.raw`\.(execute|executemany)\s*\(`), "SQL injection", "BLOCKER", "CWE-89", "Use parameterized queries."],
+    ["PATH", pyRe(String.raw`(?<![\w.])open\s*\(|send_file\s*\(|send_from_directory\s*\(`), "path traversal", "MAJOR", "CWE-22", "Resolve the path and verify it stays inside an allowed base directory."],
+    ["SSRF", pyRe(String.raw`requests\.(get|post|put|delete|head|request)\s*\(|urlopen\s*\(`), "server-side request forgery", "MAJOR", "CWE-918", "Allowlist target hosts and schemes; block internal addresses."],
+    ["REDIR", pyRe(String.raw`(?<![\w.])redirect\s*\(`), "open redirect", "MAJOR", "CWE-601", "Allowlist redirect targets or use relative paths."],
+    ["SSTI", pyRe(String.raw`render_template_string\s*\(`), "template injection", "CRITICAL", "CWE-1336", "Pass data as template parameters, never into template source."],
   ],
   js: [
-    ["CMD", /\b(exec|execSync|spawn|spawnSync)\s*\(/, "command injection","CRITICAL","CWE-78","Use execFile/spawn with an args array; validate the value."],
-    ["CODE", /(?<![\w.])eval\s*\(|new\s+Function\s*\(/, "code injection","CRITICAL","CWE-95","Never execute untrusted strings; use JSON.parse or a dispatch map."],
-    ["SQL", /\.(query|execute)\s*\(/, "SQL injection","BLOCKER","CWE-89","Use placeholders with a parameter array."],
-    ["PATH", /\.(sendFile|download)\s*\(|readFile(Sync)?\s*\(|createReadStream\s*\(/, "path traversal","MAJOR","CWE-22","Resolve the path and verify it stays inside an allowed base directory."],
-    ["SSRF", /\bfetch\s*\(|axios(\.(get|post|put|delete|request))?\s*\(|https?\.(get|request)\s*\(/, "server-side request forgery","MAJOR","CWE-918","Allowlist target hosts and schemes; block internal addresses."],
-    ["REDIR", /\.redirect\s*\(/, "open redirect","MAJOR","CWE-601","Allowlist redirect targets or use relative paths."],
-    ["XSS", /\.innerHTML\s*=|document\.write\s*\(/, "cross-site scripting","MAJOR","CWE-79","Escape/sanitize before rendering; prefer textContent."],
-  ]
+    ["CMD", pyRe(String.raw`\b(exec|execSync|spawn|spawnSync)\s*\(`), "command injection", "CRITICAL", "CWE-78", "Use execFile/spawn with an args array; validate the value."],
+    ["CODE", pyRe(String.raw`(?<![\w.])eval\s*\(|new\s+Function\s*\(`), "code injection", "CRITICAL", "CWE-95", "Never execute untrusted strings; use JSON.parse or a dispatch map."],
+    ["SQL", pyRe(String.raw`\.(query|execute)\s*\(`), "SQL injection", "BLOCKER", "CWE-89", "Use placeholders with a parameter array."],
+    ["PATH", pyRe(String.raw`\.(sendFile|download)\s*\(|readFile(Sync)?\s*\(|createReadStream\s*\(`), "path traversal", "MAJOR", "CWE-22", "Resolve the path and verify it stays inside an allowed base directory."],
+    ["SSRF", pyRe(String.raw`\bfetch\s*\(|axios(\.(get|post|put|delete|request))?\s*\(|https?\.(get|request)\s*\(`), "server-side request forgery", "MAJOR", "CWE-918", "Allowlist target hosts and schemes; block internal addresses."],
+    ["REDIR", pyRe(String.raw`\.redirect\s*\(`), "open redirect", "MAJOR", "CWE-601", "Allowlist redirect targets or use relative paths."],
+    ["XSS", pyRe(String.raw`\.innerHTML\s*=|document\.write\s*\(`), "cross-site scripting", "MAJOR", "CWE-79", "Escape/sanitize before rendering; prefer textContent."],
+  ],
 };
+
+// Spec 12: a Python annotated assignment `x: T = source` binds x (the
+// optional `: T` part), and a JS destructuring declaration binds every name
+// in its (one-level) pattern — twin of core.ASSIGN_RE / _assignment.
 const ASSIGN_RE = {
-  py: /^\s*([A-Za-z_]\w*)\s*=(?!=)\s*(.+)/,
-  js: /^\s*(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=(?![=>])\s*(.+)/
+  py: pyRe(String.raw`^\s*([A-Za-z_]\w*)\s*(?::[^=\n]*)?=(?![=])\s*(.+)`),
+  js: pyRe(String.raw`^\s*(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=(?![=>])\s*(.+)`),
 };
-const STRING_LIT_RE = /"[^"]*"|'[^']*'|`[^`]*`/g;
-const escRe = s=>s.replace(/[.*+?^${}()|[\]\\]/g,"\\$&");
+// one-level object / array pattern: `{ a, b: c, d = 1, ...e }` / `[a, , b = 2, ...c]`
+const JS_DESTRUCT_RE = pyRe(String.raw`^\s*(?:(?:const|let|var)\s+)?(\{[^{}]*\}|\[[^\[\]]*\])\s*=(?![=>])\s*(.+)`);
+const JS_BINDING_RE = pyRe(String.raw`^[A-Za-z_$][\w$]*$`);
+// Python 3.11 keyword.kwlist / softkwlist
+const PY_KEYWORDS = new Set(["False", "None", "True", "and", "as", "assert", "async", "await", "break",
+  "class", "continue", "def", "del", "elif", "else", "except", "finally", "for", "from", "global",
+  "if", "import", "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try",
+  "while", "with", "yield"]);
+const PY_SOFT_KEYWORDS = new Set(["_", "case", "match"]);
+
+/** Names bound by a one-level JS destructuring pattern (twin of core._destructured_names). */
+function destructuredNames(pattern) {
+  const names = [];
+  for (let part of pattern.slice(1, -1).split(",")) {
+    part = pyStrip(part);
+    if (part.startsWith("...")) part = pyStrip(part.slice(3));
+    else if (pattern[0] === "{" && part.includes(":")) part = pyStrip(part.slice(part.indexOf(":") + 1));
+    part = pyStrip(part.split("=")[0]);
+    if (JS_BINDING_RE.test(part)) names.push(part);
+  }
+  return names;
+}
+
+/** {names, rhs} of an assignment line, or null (twin of core._assignment). */
+function parseAssignment(line, lang) {
+  const m = ASSIGN_RE[lang].exec(line);
+  if (m) {
+    const name = m[1];
+    if (lang === "py" && (PY_KEYWORDS.has(name)
+        || (PY_SOFT_KEYWORDS.has(name) && pyLstrip(line.slice(m.index + m[0].indexOf(name) + name.length)).startsWith(":")))) {
+      return null;
+    }
+    return { names: [name], rhs: m[2] };
+  }
+  if (lang === "js") {
+    const dm = JS_DESTRUCT_RE.exec(line);
+    if (dm) {
+      const names = destructuredNames(dm[1]);
+      if (names.length) return { names, rhs: dm[2] };
+    }
+  }
+  return null;
+}
+
+const STRING_LIT_RE = pyRe(String.raw`\"[^\"]*\"|'[^']*'|` + "`[^`]*`", "g");
+
+const escRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /* Sanitizer model (SonarQube / Semgrep style). Full sanitizers (numeric
    coercion) cleanse every sink; partial ones clear a category. Body allows one
    nested-paren level so int(request.args.get("id")) is recognized. */
-const SAN_BODY = "(?:[^()]|\\([^()]*\\))*";
+const SAN_BODY = String.raw`(?:[^()]|\([^()]*\))*`;
 const FULL_SAN = {
-  py: new RegExp("(?:int|float|bool|complex|uuid\\.UUID|ipaddress\\.ip_address)\\s*\\("+SAN_BODY+"\\)","g"),
-  js: new RegExp("(?:parseInt|parseFloat|Number)\\s*\\("+SAN_BODY+"\\)","g")
+  py: pyRe(String.raw`(?:int|float|bool|complex|uuid\.UUID|ipaddress\.ip_address)\s*\(` + SAN_BODY + String.raw`\)`, "g"),
+  js: pyRe(String.raw`(?:parseInt|parseFloat|Number)\s*\(` + SAN_BODY + String.raw`\)`, "g"),
 };
 const PARTIAL_SAN = {
   py: {
-    CMD: new RegExp("(?:shlex|pipes)\\.quote\\s*\\("+SAN_BODY+"\\)","g"),
-    XSS: new RegExp("(?:html\\.escape|markupsafe\\.escape|cgi\\.escape|bleach\\.clean|escape)\\s*\\("+SAN_BODY+"\\)","g"),
-    PATH: new RegExp("(?:os\\.path\\.basename|basename|secure_filename)\\s*\\("+SAN_BODY+"\\)","g")
+    CMD: pyRe(String.raw`(?:shlex|pipes)\.quote\s*\(` + SAN_BODY + String.raw`\)`, "g"),
+    XSS: pyRe(String.raw`(?:html\.escape|markupsafe\.escape|cgi\.escape|bleach\.clean|escape)\s*\(` + SAN_BODY + String.raw`\)`, "g"),
+    PATH: pyRe(String.raw`(?:os\.path\.basename|basename|secure_filename)\s*\(` + SAN_BODY + String.raw`\)`, "g"),
   },
   js: {
-    XSS: new RegExp("(?:DOMPurify\\.sanitize|encodeURIComponent|escapeHtml|sanitizeHtml)\\s*\\("+SAN_BODY+"\\)","g"),
-    SQL: new RegExp("(?:mysql2?|pool|connection|conn|db)\\.escape\\s*\\("+SAN_BODY+"\\)","g"),
-    PATH: new RegExp("path\\.basename\\s*\\("+SAN_BODY+"\\)","g"),
-    CMD: new RegExp("(?:shellQuote|shell_quote)\\s*\\("+SAN_BODY+"\\)","g")
-  }
+    XSS: pyRe(String.raw`(?:DOMPurify\.sanitize|encodeURIComponent|escapeHtml|sanitizeHtml)\s*\(` + SAN_BODY + String.raw`\)`, "g"),
+    SQL: pyRe(String.raw`(?:mysql2?|pool|connection|conn|db)\.escape\s*\(` + SAN_BODY + String.raw`\)`, "g"),
+    PATH: pyRe(String.raw`path\.basename\s*\(` + SAN_BODY + String.raw`\)`, "g"),
+    CMD: pyRe(String.raw`(?:shellQuote|shell_quote)\s*\(` + SAN_BODY + String.raw`\)`, "g"),
+  },
 };
-function neutralize(text, lang, suffix){
+function neutralize(text, lang, suffix) {
   text = text.replace(FULL_SAN[lang], " ");
-  if(suffix && PARTIAL_SAN[lang] && PARTIAL_SAN[lang][suffix])
+  if (suffix && PARTIAL_SAN[lang] && PARTIAL_SAN[lang][suffix])
     text = text.replace(PARTIAL_SAN[lang][suffix], " ");
   return text;
 }
 
-/* ---------------- Flow-sensitive SQL-sink analysis (G12) ----------------
-   Mirror of the Python CLI's sql_sink_analyzer (lazaret.scanner.core): the S-SQL-PY
-   line rule only sees formatting applied to a literal INSIDE execute(); SQL
-   assigned to a variable earlier in the file (concat / %-interpolation /
-   .format / f-string) then passed to execute(q) escapes it. Parity rules
-   (stage 4): mirrors Python exactly, INCLUDING not skipping comment lines
-   (only the nosec filter applied to the final issue list removes those) and
-   including the dedup-by-line against the S-SQL-PY line-rule pass. Parameterized
-   calls (2nd top-level arg starting with ( [ or {) are safe and never flagged. */
-const SQL_CALL_RE   = /\.(execute|executemany)\s*\(/g;   // .exec → reuse via lastIndex=0
-const SQL_IDENT_RE  = /^[A-Za-z_]\w*$/;
-const SQL_ASSIGN_RE = /^\s*([A-Za-z_]\w*)\s*(\+=|=)(?!=)\s*(.+?)\s*$/;
-const SQL_LIT_RE    = /^(?:[rbu]*)["'](.*)["']$/s;
-function sqlSplitTopLevel(argstr){      // split on top-level commas (nested brackets/quotes respected)
-  const parts=[]; let cur="", depth=0, quote=null;
-  for(const ch of argstr){
-    if(quote){ cur+=ch; if(ch===quote) quote=null; continue; }
-    if(ch==='"'||ch==="'"){ quote=ch; cur+=ch; }
-    else if(ch==="("||ch==="["||ch==="{"){ depth++; cur+=ch; }
-    else if(ch===")"||ch==="]"||ch==="}"){ depth--; cur+=ch; }
-    else if(ch===","&&depth===0){ parts.push(cur); cur=""; }
-    else cur+=ch;
-  }
-  parts.push(cur); return parts;
-}
-function sqlParenSlice(line, openIdx){  // content of the balanced (…) starting at openIdx, or null
-  let depth=0, quote=null;
-  for(let j=openIdx;j<line.length;j++){
-    const ch=line[j];
-    if(quote){ if(ch===quote) quote=null; continue; }
-    if(ch==='"'||ch==="'") quote=ch;
-    else if(ch==="(") depth++;
-    else if(ch===")"){ if(--depth===0) return line.slice(openIdx+1, j); }
-  }
-  return null;
-}
-function sqlBuildMethod(arg){           // 'format' | 'percent' | 'concat' | null
-  if(/\.format\s*\(/.test(arg) || /^\s*(?:f"|f')/.test(arg)) return "format";
-  if(/(?:["'][^"']*["']|\b[A-Za-z_]\w*)\s*%\s*[^=%\s]/.test(arg)) return "percent";
-  if(/["'][^"']*["']\s*\+/.test(arg) || /\+\s*["']/.test(arg)) return "concat";
-  return null;
-}
-function sqlTemplateMap(lines){         // varname → how its value was built (flow-sensitive)
-  const tmap={};
-  for(const ln of lines){
-    const mm=ln.match(SQL_ASSIGN_RE); if(!mm) continue;
-    const name=mm[1], op=mm[2], rhs=mm[3];
-    if(op==="+="){ tmap[name]=tmap[name]||"concat"; continue; }  // += keeps earlier state (a var built static then += stays flagged once built)
-    const build=sqlBuildMethod(rhs);
-    if(build){ tmap[name]=build; continue; }
-    const lit=rhs.trim().match(SQL_LIT_RE);
-    if(lit) tmap[name]=lit[1].includes("%")?"percent":(lit[1].includes("{")?"format":"static");
-  }
-  return tmap;
-}
-function sqlSinkScan(file, lines, issues){
-  const tmap=sqlTemplateMap(lines);
-  const flagged=new Set(issues.filter(i=>i.rule==="S-SQL-PY").map(i=>i.line));  // dedup vs the line-rule pass
-  const HOW={percent:"%-interpolation", format:".format()/f-string", concat:"concatenation"};
-  lines.forEach((line,i)=>{
-    if(flagged.has(i+1)) return;
-    SQL_CALL_RE.lastIndex=0; let m;
-    while((m=SQL_CALL_RE.exec(line))){
-      const argStr=sqlParenSlice(line, m.index+m[0].length-1);
-      if(argStr===null) continue;
-      const parts=sqlSplitTopLevel(argStr);
-      const first=(parts[0]||"").trim();
-      const second=(parts.length>1?parts[1]:"").trim();
-      if(!first) continue;
-      // SAFE: parameterized call — literal/identifier first arg + a tuple/list/dict after the top-level comma
-      if(parts.length>=2 && second && "([{".includes(second[0])) continue;
-      let build=sqlBuildMethod(first);
-      if(build===null && SQL_IDENT_RE.test(first)){
-        build=tmap[first];
-        if(build===undefined || build==="static") continue;
-      }
-      if(build) issues.push(mkIssue({id:"S-SQL-PY", name:"SQL built from strings", type:"VULN", sev:"BLOCKER",
-        msg:`SQL query built with ${HOW[build]||"string-building"} into execute().`,
-        why:"Interpolating values into SQL enables SQL injection — the classic path to full database compromise.",
-        fix:'Use parameterized queries: cursor.execute("SELECT … WHERE id = %s", (user_id,)).',
-        ref:"CWE-89 · OWASP A03"}, file, i+1, lines, m.index));
-    }
-  });
-}
+/* ======== scanner/lexer.js ======== */
+// Comment lexer shared by rule skipping, suppression markers, taint and the
+// metrics — twin of lazaret.scanner.core._lex_comment_spans /
+// _comment_layout (shared semantics, spec 1).
+//
+// Comment state is tracked ACROSS lines; a line is a comment line only if it
+// has non-whitespace text and all of it is inside comments, so `/**/eval(x)`
+// is code and ` * foo` is a comment only while a block comment is open.
+//   py : '#' to end of line; '…' "…" end at end of line unless the newline is
+//        backslash-escaped; '''…''' """…""" span lines; backslash escapes.
+//        (The Python engine uses Python's own tokenizer when the file
+//        tokenizes; this lexer is its fallback and agrees on valid code.)
+//   js : '//' to end of line; '/* … */' spans lines; '…' "…" as in py;
+//        `…` template literals span lines (${…} is not re-lexed); a '/' that
+//        starts a regex literal (previous significant code character is
+//        start-of-file or one of ( , = : [ ! & | ? { } ; + - * % < > ~ ^, or
+//        the previous word is return/typeof/instanceof/in/of/new/delete/void/
+//        throw/case/do/else/yield/await) consumes the literal /…/ up to its
+//        closing '/' on the same line; with no closing '/' on the line it is a
+//        plain division, and so is every later '/' on that line.
+//   sql: '--' to end of line; '/* … */' spans lines; '…' and "…" span lines,
+//        no backslash escapes.
+// Unterminated block comments and multi-line strings run to end of file.
 
-function taintScan(file, lines, lang){
-  if(!TAINT_SOURCES[lang]) return [];   // SQL and others: pattern rules only
-  const issues=[], tainted={};          // var -> {line, clean:Set(suffix)}
-  const src = TAINT_SOURCES[lang];
-  const partialCats = Object.keys(PARTIAL_SAN[lang]||{});
-  const hasVar = (code, suf)=>Object.keys(tainted).some(v=>
-    !tainted[v].clean.has(suf) && new RegExp(`\\b${escRe(v)}\\b`).test(code));
-  lines.forEach((line,i)=>{
-    if(isComment(line,lang)) return;
-    const m = line.match(ASSIGN_RE[lang]);
-    if(m){
-      const name=m[1], rhs=m[2];
-      const base = neutralize(rhs, lang).replace(STRING_LIT_RE,"");
-      if(src.test(base) || hasVar(base, null)){
-        const clean = new Set();
-        for(const suf of partialCats){
-          const neut = neutralize(rhs, lang, suf).replace(STRING_LIT_RE,"");
-          if(!src.test(neut) && !hasVar(neut, suf)) clean.add(suf);
-        }
-        if(!(name in tainted)) tainted[name] = {line:i+1, clean};
-      }
-    }
-    for(const [suffix, sinkRe, cat, sev, cwe, fix] of TAINT_SINKS[lang]){
-      const sm = sinkRe.exec(line);
-      if(!sm) continue;
-      const rest = neutralize(line.slice(sm.index + sm[0].length), lang, suffix);
-      const restCode = rest.replace(STRING_LIT_RE,"");
-      const carriers = Object.keys(tainted).filter(v=>
-        !tainted[v].clean.has(suffix) && new RegExp(`\\b${escRe(v)}\\b`).test(restCode));
-      if(!carriers.length && !src.test(restCode)) continue;
-      const what = carriers.length? `untrusted data via '${carriers[0]}' (tainted at line ${tainted[carriers[0]].line})` : "untrusted data";
-      issues.push(mkIssue({id:`T-${suffix}`, name:`Tainted flow → ${cat}`, type:"VULN", sev,
-        msg:`Possible ${cat}: ${what} reaches this sink.`,
-        why:"Data from user input or a decode function flows into a dangerous call without visible sanitization (lightweight intra-file taint tracking).",
-        fix, ref:`${cwe} · Taint analysis`}, file, i+1, lines, sm.index));
-    }
-  });
-  return issues;
-}
 
-/* ---------------- Obfuscation / entropy / suppression ---------------- */
-function shannonEntropy(s){
-  const f={}; for(const ch of s) f[ch]=(f[ch]||0)+1;
-  return -Object.values(f).reduce((a,n)=>a+(n/s.length)*Math.log2(n/s.length),0);
-}
-const ENTROPY_VALUE_RE = /[=:]\s*["']([A-Za-z0-9+\/=_\-]{20,})["']/;
-const B64_BLOB_RE = /["'][A-Za-z0-9+\/]{200,}={0,2}["']/;
-const OBF_IDENT_RE = /\b_0x[0-9a-f]{4,}\b/g;
-const SECRET_SKIP_RE = /environ|process\.env|getenv|placeholder|example|test|dummy|sample/i;
-const SUPPRESS_RE = /(?:#|\/\/|--)\s*(?:nosec|NOSONAR|lazaret-ignore)\b(?::?\s*([\w,\s-]+))?/i;
+const NEXT = {
+  py: /[#'"]/g,
+  js: /[/'"`]/g,
+  sql: /--|\/\*|['"]/g,
+  any: /#|\/[/*]|['"`]/g,
+};
+const lineStr = (q) => new RegExp(`${q}(?:[^${q}\\\\\\n]|\\\\[\\s\\S])*${q}?`, "y");
+const LINE_STR = { "'": lineStr("'"), '"': lineStr('"'), "`": lineStr("`") };
+const STR = {
+  py: { "'": LINE_STR["'"], '"': LINE_STR['"'],
+    "'''": /'''(?:[^'\\]|\\[\s\S]|'(?!''))*(?:'''|$)/y, '"""': /"""(?:[^"\\]|\\[\s\S]|"(?!""))*(?:"""|$)/y },
+  js: { "'": LINE_STR["'"], '"': LINE_STR['"'], "`": /`(?:[^`\\]|\\[\s\S])*`?/y },
+  sql: { "'": /'[^']*'?/y, '"': /"[^"]*"?/y },
+  any: LINE_STR,
+};
+const JS_REGEX_LIT_RE = /\/(?![*/])(?:[^/\\[\n]|\\[^\n]|\[(?:[^\]\\\n]|\\[^\n])*\])+\//y;
+const JS_REGEX_PREV = new Set("(,=:[!&|?{};+-*%<>~^");
+const JS_REGEX_KEYWORDS = new Set(["return", "typeof", "instanceof", "in", "of", "new", "delete",
+  "void", "throw", "case", "do", "else", "yield", "await"]);
+const isJsWord = (ch) => ch === "$" || ch === "_" || isWordChar(ch);
 
-function isSuppressed(issue, lines){
-  for(const ln of [issue.line-1, issue.line-2]){
-    if(ln<0 || ln>=lines.length) continue;
-    if(ln===issue.line-2 && !/^\s*(#|\/\/|--)/.test(lines[ln])) continue;
-    const m = lines[ln].match(SUPPRESS_RE);
-    if(m && (!m[1] || m[1].split(",").map(s=>s.trim().toUpperCase()).includes(issue.rule.toUpperCase())))
-      return true;
+function jsRegexAllowed(prev, tail) {
+  if (prev === "" || JS_REGEX_PREV.has(prev)) return true;
+  if (isJsWord(prev)) {
+    let k = tail.length;
+    while (k > 0 && isJsWord(tail[k - 1])) k--;
+    if (k === 0 && tail.length >= 11) return false;          // word longer than any keyword
+    return JS_REGEX_KEYWORDS.has(tail.slice(k));
   }
   return false;
 }
 
-/* ---------------- Analyzers ---------------- */
-function detectLang(name, content){
-  if(/\.(py)$/i.test(name)) return "py";
-  if(/\.(js|jsx|ts|tsx|mjs|cjs)$/i.test(name)) return "js";
-  if(/\.sql$/i.test(name)) return "sql";
-  // content heuristic: SQL keywords dominate and no JS/py structure
-  if(/\b(SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM|CREATE\s+(TABLE|PROCEDURE|USER)|GRANT|ALTER\s+TABLE)\b/i.test(content)
-     && !/\b(function|=>|def |import )\b/.test(content)) return "sql";
-  if(/^\s*(def |import |from \w+ import|class \w+.*:)/m.test(content) && !/[{};]\s*$/m.test(content)) return "py";
-  return /\b(def |elif |None|self\.)/.test(content) && !/\b(const|let|=>|function)\b/.test(content) ? "py" : "js";
-}
-function isComment(line, lang){
-  const t = line.trim();
-  if(lang==="py") return t.startsWith("#");
-  if(lang==="sql") return t.startsWith("--")||t.startsWith("/*")||t.startsWith("*");
-  return t.startsWith("//")||t.startsWith("*")||t.startsWith("/*");
+/**
+ * Absolute [start, end) spans of every comment in `content`. When `strings`
+ * is an array, the spans of '…' and "…" literals are appended to it.
+ */
+function commentSpans(content, lang, strings = null) {
+  const L = lang === "py" || lang === "js" || lang === "sql" ? lang : "any";
+  const next = NEXT[L];
+  const spans = [];
+  const n = content.length;
+  let pos = 0, prev = "", tail = "", noRegexUntil = -1;
+  while (pos < n) {
+    next.lastIndex = pos;
+    const m = next.exec(content);
+    if (!m) break;
+    const k = m.index;
+    if (L === "js" && k > pos) {
+      const seg = pyRstrip(content.slice(pos, k));
+      if (seg) { prev = seg[seg.length - 1]; tail = seg.slice(-11); }
+    }
+    const ch = content[k];
+    const two = content.slice(k, k + 2);
+    if ((ch === "#" && (L === "py" || L === "any")) || (two === "//" && (L === "js" || L === "any"))
+        || (two === "--" && L === "sql")) {
+      let e = content.indexOf("\n", k);
+      if (e < 0) e = n;
+      spans.push([k, e]);
+      pos = e;
+      continue;
+    }
+    if (two === "/*" && L !== "py") {
+      let e = content.indexOf("*/", k + 2);
+      e = e < 0 ? n : e + 2;
+      spans.push([k, e]);
+      pos = e;
+      continue;
+    }
+    if (ch === "/") {                          // js only: regex literal or division
+      if (k >= noRegexUntil && jsRegexAllowed(prev, tail)) {
+        JS_REGEX_LIT_RE.lastIndex = k;
+        const rm = JS_REGEX_LIT_RE.exec(content);
+        if (rm) { pos = k + rm[0].length; prev = '"'; tail = ""; continue; }
+        noRegexUntil = content.indexOf("\n", k);
+        if (noRegexUntil < 0) noRegexUntil = n;
+      }
+      pos = k + 1;
+      prev = "/"; tail = "/";
+      continue;
+    }
+    const key = L === "py" && content.startsWith(ch + ch + ch, k) ? ch + ch + ch : ch;
+    const re = STR[L][key];
+    re.lastIndex = k;
+    const sm = re.exec(content);
+    pos = Math.max(sm ? k + sm[0].length : k + 1, k + 1);
+    prev = '"'; tail = "";
+    if (strings && ch !== "`") strings.push([k, pos]);
+  }
+  return spans;
 }
 
-/* Limits, the same as the CLI's (lazaret.scanner.core; FIX-SPEC items 7 and 9):
-   - a file over 2,000,000 bytes is not scanned: it gets one SC-TRUNCATED
-     finding (which fails the gate) instead of freezing the tab;
-   - there is no per-file issue budget (the old 500-issue budget and its
-     SCAN-BUDGET notice made big files look cleaner than they are);
-   - per (file, rule), at most RULE_CAP findings of an INFO or MINOR rule or a
-     code smell are kept, then one Q-CAPPED finding says how many were
-     omitted. Security findings (S-, T-, SC-, X-, SQL-) are never capped;
-   - every snippet line is clipped to SNIPPET_MAX characters, the flagged
-     line in a window starting ~SNIPPET_LEAD characters before the match. */
+function lineStarts(content) {
+  const starts = [0];
+  let p = content.indexOf("\n");
+  while (p !== -1) { starts.push(p + 1); p = content.indexOf("\n", p + 1); }
+  return starts;
+}
+
+/**
+ * Comment layout of a file's lines:
+ *   comment[i] — 1 when line i is a comment line;
+ *   spans.get(i) — comment spans of line i, relative to the line;
+ *   code[i]   — line i with its comment text removed (strings kept);
+ *   strings   — absolute spans of '…' / "…" literals (JavaScript only);
+ *   starts    — line start offsets in the joined content.
+ */
+function lexLines(lines, lang, content = null) {
+  content ??= lines.join("\n");
+  const strings = lang === "js" ? [] : null;
+  const all = commentSpans(content, lang, strings);
+  const n = lines.length;
+  const comment = new Uint8Array(n);
+  const spans = new Map();
+  const starts = lineStarts(content);
+  let code = lines;
+  if (all.length) {
+    let i = 0;
+    for (const [s, e] of all) {
+      while (i + 1 < n && starts[i + 1] <= s) i++;
+      for (let j = i; j < n; j++) {
+        const ls = starts[j], le = ls + lines[j].length;
+        const a = Math.max(s, ls) - ls, b = Math.min(e, le) - ls;
+        if (b > a) { let list = spans.get(j); if (!list) { list = []; spans.set(j, list); } list.push([a, b]); }
+        if (e <= le + 1) break;
+      }
+    }
+    code = lines.slice();
+    for (const [j, list] of spans) {
+      const line = lines[j];
+      let c = "", p = 0;
+      for (const [a, b] of list) { c += line.slice(p, a); p = b; }
+      c += line.slice(p);
+      code[j] = c;
+      comment[j] = pyStrip(c) === "" && pyStrip(line) !== "" ? 1 : 0;
+    }
+  }
+  const inComment = (j, p) => (spans.get(j) || []).some(([a, b]) => a <= p && p < b);
+  return { comment, spans, code, strings, starts, content, inComment };
+}
+
+/* ======== scanner/engine.js ======== */
+// Obfuscation/entropy/suppression helpers — twins of lazaret.scanner.core
+// (B64_BLOB_RE, OBF_IDENT_RE, SECRET_SKIP_RE, SUPPRESS_RE, is_suppressed).
+// mkIssue itself lives in the leaf ../lib/issue.js and is re-exported here so
+// scanner-side imports stay as they were (scanner→lib is the allowed direction;
+// lib must never import scanner).
+
+
+
+const B64_BLOB_RE = pyRe(String.raw`[\"'][A-Za-z0-9+/]{200,}={0,2}[\"']`);
+const OBF_IDENT_RE = pyRe(String.raw`\b_0x[0-9a-f]{4,}\b`, "g");
+const CHARCODE_RE = /String\.fromCharCode/;
+// Verdict integrity (audit C2/G2): no bare `test`, word-bounded tokens, so
+// `latest` / `attested` / `# example_user` no longer suppress a real secret.
+const SECRET_SKIP_RE = pyRe(String.raw`environ|process\.env|getenv|\bplaceholder\b|\bexample\b|\bdummy\b|\bsample\b|\bmock\b|\bredacted\b|\bxxxx+\b`, "i");
+
+// ---------------- Inline suppression (shared semantics spec 2) --------------
+// Marker grammar (twin of core.SUPPRESS_RE): `#`, `//` or `--`, optional
+// spaces/tabs, then nosec / NOSONAR / lazaret-ignore (case-insensitive, whole
+// word). If what follows (after optional spaces and ':') is a comma-separated
+// list of rule IDs, the marker suppresses only those rules; anything else —
+// nothing, trailing whitespace, or a free-text reason such as "- reviewed by
+// bob" — makes it a blanket marker for the line. The marker counts only when
+// its introducer lies inside a real comment as the per-file lexer sees it
+// (so `--` works in .sql comments, `#` in Python ones, and nothing inside a
+// string, a template literal or code such as `x --nosec` or a JS `#private`
+// field does). It applies to its own line, or to the next line when it sits
+// on a standalone comment line.
+const RULE_ID = String.raw`(?:S|T|SC|X|SQL|B|Q)-[A-Z0-9]+(?:-[A-Z0-9]+)*`;
+const SUPPRESS_RE = pyRe(String.raw`(?:#|//|--)[ \t]*(?:nosec|NOSONAR|lazaret-ignore)\b`
+  + String.raw`(?:[ \t]*:?[ \t]*(` + RULE_ID + String.raw`(?:[ \t]*,[ \t]*` + RULE_ID + String.raw`)*))?`, "gi");
+
+/** Findings from these families are never suppressible by markers in scanned code. */
+const UNSUPPRESSIBLE_PREFIXES = ["SC-", "X-"];
+
+const NO_MARKER = Symbol("none");
+/** Parsed marker of line i: NO_MARKER, null (blanket) or a Set of rule IDs. */
+function markerOn(lines, lex, i) {
+  const line = lines[i];
+  if (!lex.spans.has(i) || !/nosec|nosonar|lazaret-ignore/i.test(line)) return NO_MARKER;
+  SUPPRESS_RE.lastIndex = 0;
+  let m;
+  while ((m = SUPPRESS_RE.exec(line))) {
+    if (!lex.inComment(i, m.index)) continue;
+    return m[1] ? new Set(m[1].split(",").map((x) => x.trim().toUpperCase())) : null;
+  }
+  return NO_MARKER;
+}
+
+/**
+ * Suppression filter for one file. SC-* and X-* findings are never
+ * suppressed, and nothing is suppressed in dependency files (no reviewer
+ * vouches for a marker there).
+ */
+function makeSuppressor(lines, lang, { dep = false, lex = null } = {}) {
+  if (dep) return () => false;
+  lex ??= lexLines(lines, lang);
+  const cache = new Map();
+  const marker = (i) => {
+    if (!cache.has(i)) cache.set(i, markerOn(lines, lex, i));
+    return cache.get(i);
+  };
+  return (issue) => {
+    const rule = String(issue.rule ?? "");
+    if (UNSUPPRESSIBLE_PREFIXES.some((p) => rule.startsWith(p))) return false;
+    const ln = issue.line - 1;
+    for (const k of [ln, ln - 1]) {
+      if (k < 0 || k >= lines.length) continue;
+      if (k !== ln && !lex.comment[k]) continue;   // the line above counts only as a standalone comment
+      const ids = marker(k);
+      if (ids === NO_MARKER) continue;
+      if (ids === null || ids.has(rule.toUpperCase())) return true;
+    }
+    return false;
+  };
+}
+
+
+/* ======== scanner/sql.js ======== */
+// SQL analyzers — twins of lazaret.scanner.core.sql_sink_analyzer (G12) and
+// scan_sql_nowhere (F11), with the Python regex text verbatim.
+
+/* ---------------- Flow-sensitive SQL-sink analysis (G12) ----------------
+   The S-SQL-PY line rule only sees formatting applied to a literal INSIDE
+   execute(); SQL assigned to a variable earlier in the file (concat /
+   %-interpolation / .format / f-string) then passed to execute(q) escapes it.
+   Mirrors Python exactly, INCLUDING not skipping comment lines (only the
+   suppression filter applied to the final issue list removes those) and the
+   dedup-by-line against the S-SQL-PY line-rule pass. Parameterized calls
+   (2nd top-level arg starting with ( [ or {) are safe and never flagged. */
+const SQL_CALL_RE = pyRe(String.raw`\.(execute|executemany)\s*\(`, "g");
+const SQL_IDENT_RE = pyRe(String.raw`^[A-Za-z_]\w*$`);
+// SQL_ASSIGN_RE = ^\s*([A-Za-z_]\w*)\s*(\+=|=)(?!=)\s*(.+)$ with the rhs
+// rstrip()-ed by the caller (twin of core._sql_template_map).
+const SQL_ASSIGN_RE = pyRe(String.raw`^\s*([A-Za-z_]\w*)\s*(\+=|=)(?!=)\s*(.+)$`);
+const SQL_LIT_RE = pyRe(String.raw`^(?:[rbu]*)[\"'](.*)[\"']$`, "s");
+const FORMAT_CALL_RE = pyRe(String.raw`\.format\s*\(`);
+const PERCENT_RE = pyRe(String.raw`(?:[\"'][^\"']*[\"']|\b[A-Za-z_]\w*)\s*%\s*[^=%\s]`);
+const CONCAT_L_RE = pyRe(String.raw`[\"'][^\"']*[\"']\s*\+`);
+const CONCAT_R_RE = pyRe(String.raw`\+\s*[\"']`);
+
+/** SQL_ASSIGN_RE.match(line) → [name, op, rhs.rstrip()] or null. */
+function sqlAssign(line) {
+  const m = SQL_ASSIGN_RE.exec(line);
+  return m ? [m[1], m[2], pyRstrip(m[3])] : null;
+}
+
+function sqlSplitTopLevel(argstr) {      // split on top-level commas (nested brackets/quotes respected)
+  const parts = [];
+  let cur = "", depth = 0, quote = null;
+  for (const ch of argstr) {
+    if (quote) { cur += ch; if (ch === quote) quote = null; continue; }
+    if (ch === '"' || ch === "'") { quote = ch; cur += ch; }
+    else if (ch === "(" || ch === "[" || ch === "{") { depth++; cur += ch; }
+    else if (ch === ")" || ch === "]" || ch === "}") { depth--; cur += ch; }
+    else if (ch === "," && depth === 0) { parts.push(cur); cur = ""; }
+    else cur += ch;
+  }
+  parts.push(cur);
+  return parts;
+}
+function sqlParenSlice(line, openIdx) {  // content of the balanced (…) starting at openIdx, or null
+  let depth = 0, quote = null;
+  for (let j = openIdx; j < line.length; j++) {
+    const ch = line[j];
+    if (quote) { if (ch === quote) quote = null; continue; }
+    if (ch === '"' || ch === "'") quote = ch;
+    else if (ch === "(") depth++;
+    else if (ch === ")") { if (--depth === 0) return line.slice(openIdx + 1, j); }
+  }
+  return null;
+}
+function sqlBuildMethod(arg) {           // 'format' | 'percent' | 'concat' | null
+  if (FORMAT_CALL_RE.test(arg) || /^(?:f"|f')/.test(pyLstrip(arg))) return "format";
+  if (PERCENT_RE.test(arg)) return "percent";
+  if (CONCAT_L_RE.test(arg) || CONCAT_R_RE.test(arg)) return "concat";
+  return null;
+}
+function sqlTemplateMap(lines) {         // varname → how its value was built (flow-sensitive)
+  const tmap = new Map();                // a Map: `constructor`/`toString` are just names
+  for (const ln of lines) {
+    const mm = sqlAssign(ln);
+    if (!mm) continue;
+    const [name, op, rhs] = mm;
+    if (op === "+=") { if (!tmap.has(name)) tmap.set(name, "concat"); continue; }
+    const build = sqlBuildMethod(rhs);
+    if (build) { tmap.set(name, build); continue; }
+    const lit = SQL_LIT_RE.exec(pyStrip(rhs));
+    if (lit) tmap.set(name, lit[1].includes("%") ? "percent" : (lit[1].includes("{") ? "format" : "static"));
+  }
+  return tmap;
+}
+const HOW = { percent: "%-interpolation", format: ".format()/f-string", concat: "concatenation" };
+
+// Per line, at most SQL_CALLS_PER_LINE execute() calls are analyzed and each
+// argument string is cut to SQL_ARG_MAX characters (core.sql_sink_analyzer).
+const SQL_CALLS_PER_LINE = 64;
+const SQL_ARG_MAX = 10000;
+/** {index of '(' → index of its ')'} for one line; quotes tracked from the line start. */
+function parenCloseMap(line) {
+  const close = new Map(), stack = [];
+  let quote = null;
+  for (let j = 0; j < line.length; j++) {
+    const ch = line[j];
+    if (ch !== "(" && ch !== ")" && ch !== '"' && ch !== "'") continue;
+    if (quote) { if (ch === quote) quote = null; }
+    else if (ch === '"' || ch === "'") quote = ch;
+    else if (ch === "(") stack.push(j);
+    else if (stack.length) close.set(stack.pop(), j);
+  }
+  return close;
+}
+
+/**
+ * Append S-SQL-PY issues for execute()/executemany() calls on `lines`
+ * (matching text) to `issues`; `snipLines` (default: lines) feed snippets.
+ */
+function sqlSinkScan(file, lines, issues, snipLines = lines) {
+  const tmap = sqlTemplateMap(lines);
+  const flagged = new Set(issues.filter((i) => i.rule === "S-SQL-PY").map((i) => i.line));
+  lines.forEach((line, i) => {
+    if (flagged.has(i + 1) || !line.includes(".execute")) return;
+    SQL_CALL_RE.lastIndex = 0;
+    let m, nCall = 0, close = null;
+    while ((m = SQL_CALL_RE.exec(line))) {
+      if (nCall++ >= SQL_CALLS_PER_LINE) break;
+      close ??= parenCloseMap(line);
+      const j = close.get(m.index + m[0].length - 1);
+      if (j === undefined) continue;
+      const argStr = line.slice(m.index + m[0].length, j).slice(0, SQL_ARG_MAX);
+      const parts = sqlSplitTopLevel(argStr);
+      const first = pyStrip(parts[0] ?? "");
+      const second = parts.length > 1 ? pyStrip(parts[1]) : "";
+      if (!first) continue;
+      // SAFE: parameterized call — a tuple/list/dict of parameters after the top-level comma
+      if (parts.length >= 2 && second && "([{".includes(second[0])) continue;
+      let build = sqlBuildMethod(first);
+      if (build === null && SQL_IDENT_RE.test(first)) {
+        build = tmap.get(first);
+        if (build === undefined || build === "static") continue;
+      }
+      if (build) issues.push(mkIssue({ id: "S-SQL-PY", name: "SQL built from strings", type: "VULN", sev: "BLOCKER",
+        msg: `SQL query built with ${HOW[build] || "string-building"} into execute().`,
+        why: "Interpolating values into SQL enables SQL injection — the classic path to full database compromise.",
+        fix: 'Use parameterized queries: cursor.execute("SELECT … WHERE id = %s", (user_id,)).',
+        ref: "CWE-89 · OWASP A03" }, file, i + 1, snipLines));
+    }
+  });
+}
+
+/* ---------------- Linear SQL *-NOWHERE scan (F11) ----------------
+   Reproduces the original tempered-dot finditer semantics in one O(n)
+   pass: a match starts at a DELETE/UPDATE head, consumes up to the next ';'
+   and is aborted by a WHERE in between; heads before a reported match's ';'
+   are consumed (non-overlapping); heads after a WHERE-aborted statement are
+   still tried. */
+const NOWHERE_RULES = TEXT_RULES.filter((r) => r.nowhere);
+const WHERE_RE = pyRe(String.raw`\bWHERE\b`, "gi");
+function scanSqlNowhere(file, content, issues, lines, deadline = Infinity) {
+  let semis = null, wheres = null, nl = null;
+  for (const r of NOWHERE_RULES) {
+    const re = new RegExp(r.re.source, r.re.flags.includes("g") ? r.re.flags : r.re.flags + "g");
+    let skipTo = -1, m, count = 0;
+    while ((m = re.exec(content))) {
+      if (m[0].length === 0) { re.lastIndex++; continue; }
+      if ((++count & 1023) === 0 && Date.now() > deadline) return false;
+      const start = m.index, end = start + m[0].length;
+      if (start < skipTo) continue;
+      if (semis === null) {
+        semis = []; nl = [];
+        for (let i = 0; i < content.length; i++) {
+          const c = content.charCodeAt(i);
+          if (c === 59) semis.push(i); else if (c === 10) nl.push(i);
+        }
+        wheres = [];
+        WHERE_RE.lastIndex = 0;
+        let w;
+        while ((w = WHERE_RE.exec(content))) wheres.push(w.index);
+      }
+      const k = lowerBound(semis, end);
+      if (k === semis.length) continue;     // no ';' ahead: the old pattern could never match
+      const semi = semis[k];
+      const w = lowerBound(wheres, end);
+      if (w < wheres.length && wheres[w] < semi) { skipTo = end; continue; }
+      issues.push(mkIssue(r, file, lowerBound(nl, start) + 1, lines));
+      skipTo = semi;
+    }
+  }
+  return true;
+}
+
+
+/* ======== scanner/functions.js ======== */
+// extractFunctions — twin of lazaret.scanner.core.extract_functions (G4
+// linear brace-walk for JS; indentation spans for Python).
+
+
+const PY_DEF_RE = pyRe(String.raw`^(\s*)(?:async\s+)?def\s+(\w+)`);
+const PY_CX_RE = pyRe(String.raw`\b(if|elif|for|while|and|or|except|case)\b`, "g");
+const JS_CX_RE = pyRe(String.raw`\b(if|for|while|case|catch)\b|&&|\|\||\?[^.:]`, "g");
+const count = (s, re) => { re.lastIndex = 0; let n = 0; while (re.exec(s)) n++; return n; };
+
+const isW = (s, i) => {
+  if (i < 0 || i >= s.length) return false;
+  const c = s.charCodeAt(i);
+  if (c < 128) return (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 95;
+  return isWordChar(String.fromCodePoint(s.codePointAt(i)));
+};
+function wordEnd(s, i) {
+  while (i < s.length && isW(s, i)) i += s.codePointAt(i) > 0xffff ? 2 : 1;
+  return i;
+}
+function skipSpace(s, i) { while (i < s.length && isPySpace(s[i])) i++; return i; }
+/** The first `n` code points of s. */
+function cpSlice(s, n) {
+  if (s.length <= n) return s;
+  if (!/[\ud800-\udbff]/.test(s.slice(0, 2 * n))) return s.slice(0, n);
+  return Array.from(s).slice(0, n).join("");
+}
+
+/**
+ * First function header on a line — the language of the Python engine's
+ *   (?:function\s+(\w+)
+ *    |(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s*)?(?:function|\([^()]*\)\s*=>|\w+\s*=>)
+ *    |(?<!\w)(\w+)\s*\([^()]*\)\s*\{)
+ * searched in the first FN_HEADER_SCAN_LIMIT characters of the line,
+ * leftmost-first, in linear time. Returns the name or null.
+ */
+const FN_HEADER_SCAN_LIMIT = 2000;
+function fnHeader(fullLine) {
+  const line = cpSlice(fullLine, FN_HEADER_SCAN_LIMIT);
+  const n = line.length;
+  let parens = null;
+  const closeAfter = (i) => {                      // first '(' or ')' at or after i: must be ')'
+    if (parens === null) {
+      parens = [];
+      for (let k = 0; k < n; k++) { const c = line.charCodeAt(k); if (c === 40 || c === 41) parens.push(k); }
+    }
+    let lo = 0, hi = parens.length;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (parens[mid] < i) lo = mid + 1; else hi = mid; }
+    return lo < parens.length && line[parens[lo]] === ")" ? parens[lo] : -1;
+  };
+  const arrowTail = (q) => {                        // function | \([^()]*\)\s*=> | \w+\s*=>
+    if (line.startsWith("function", q)) return true;
+    if (line[q] === "(") {
+      const rp = closeAfter(q + 1);
+      if (rp < 0) return false;
+      const k = skipSpace(line, rp + 1);
+      return line.startsWith("=>", k);
+    }
+    if (!isW(line, q)) return false;
+    return line.startsWith("=>", skipSpace(line, wordEnd(line, q)));
+  };
+  for (let p = 0; p < n; p++) {
+    // alternative 1: function\s+(\w+)
+    if (line.startsWith("function", p)) {
+      const s = skipSpace(line, p + 8);
+      if (s > p + 8 && isW(line, s)) return line.slice(s, wordEnd(line, s));
+    }
+    // alternative 2: (?:const|let|var)\s+(\w+)\s*=\s*(?:async\s*)?(…)
+    const kw = line.startsWith("const", p) ? 5 : (line.startsWith("let", p) || line.startsWith("var", p)) ? 3 : 0;
+    if (kw) {
+      const s = skipSpace(line, p + kw);
+      if (s > p + kw && isW(line, s)) {
+        const e = wordEnd(line, s);
+        const eq = skipSpace(line, e);
+        if (line[eq] === "=") {
+          const q = skipSpace(line, eq + 1);
+          let ok = false;
+          if (line.startsWith("async", q)) ok = arrowTail(skipSpace(line, q + 5));
+          if (!ok) ok = arrowTail(q);
+          if (ok) return line.slice(s, e);
+        }
+      }
+    }
+    // alternative 3: (?<!\w)(\w+)\s*\([^()]*\)\s*\{
+    if (isW(line, p) && (p === 0 || (!isW(line, p - 1)
+        && !(p >= 2 && line.charCodeAt(p - 1) >= 0xdc00 && line.charCodeAt(p - 1) <= 0xdfff && isW(line, p - 2))))) {
+      const e = wordEnd(line, p);
+      const k = skipSpace(line, e);
+      if (line[k] === "(") {
+        const rp = closeAfter(k + 1);
+        if (rp >= 0) {
+          const b = skipSpace(line, rp + 1);
+          if (line[b] === "{") return line.slice(p, e);
+        }
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Functions with their length and cyclomatic complexity.
+ */
+function extractFunctions(lines, lang) {
+  const fns = [];
+  if (lang !== "py" && lang !== "js") return fns;   // no function metrics for SQL
+  if (lang === "py") {
+    // A def ends at the first later line that is non-blank, not a comment
+    // ('#' after stripping) and indented no deeper than the def — one pass
+    // with a stack of open defs (twin of core.extract_functions).
+    const cxPrefix = [0];
+    for (const line of lines) cxPrefix.push(cxPrefix[cxPrefix.length - 1] + count(line, PY_CX_RE));
+    const found = [], spans = new Map(), stack = [];
+    for (let k = 0; k < lines.length; k++) {
+      const l = lines[k];
+      const m = l.includes("def") ? PY_DEF_RE.exec(l) : null;
+      const t = pyStrip(l);
+      if (t && !t.startsWith("#")) {
+        const ind = m ? m[1].length : l.length - pyLstrip(l).length;
+        while (stack.length && stack[stack.length - 1][0] >= ind) spans.set(stack.pop()[1], k);
+      }
+      if (m) { found.push([k, m[2]]); stack.push([m[1].length, k]); }
+    }
+    for (const [, k] of stack) spans.set(k, lines.length);
+    for (const [i, name] of found) {
+      const end = spans.get(i);
+      fns.push({ name, line: i + 1, len: end - i, cx: 1 + cxPrefix[end] - cxPrefix[i] });
+    }
+    return fns;
+  }
+  // G4 (twin of the Python extract_functions fix): one linear brace walk.
+  // Each header claims the first '{' at/after its LINE START, spans share a
+  // brace exactly as the old independent scans did, the 800-line cap is
+  // kept, and complexity comes from per-line counts instead of body copies.
+  const content = lines.join("\n");
+  const starts = [0];
+  for (let j = 0; j < content.length; j++) if (content.charCodeAt(j) === 10) starts.push(j + 1);
+  starts.push(content.length + 1);            // sentinel
+  const headers = [];                          // {line, name}
+  for (let i = 0; i < lines.length; i++) {
+    const name = fnHeader(lines[i]);
+    if (name !== null) headers.push({ line: i, name: name || "(anonymous)" });
+  }
+  const cxPrefix = [0];
+  for (const line of lines) cxPrefix.push(cxPrefix[cxPrefix.length - 1] + count(line, JS_CX_RE));
+  const opens = [];
+  for (let j = 0; j < content.length; j++) if (content.charCodeAt(j) === 123) opens.push(j);
+  const matched = new Map();                   // header idx -> [openPos, closePos]
+  const stack = [];
+  let waiting = [];
+  let hi = 0;
+  for (let bpos = 0; bpos < content.length; bpos++) {
+    const c = content.charCodeAt(bpos);
+    if (c !== 123 && c !== 125) continue;
+    while (hi < headers.length && starts[headers[hi].line] <= bpos) waiting.push(hi++);
+    if (c === 123) { stack.push([bpos, waiting]); waiting = []; }
+    else if (stack.length) {
+      const [openPos, owners] = stack.pop();
+      for (const h of owners) matched.set(h, [openPos, bpos]);
+    }
+  }
+  const n = lines.length;
+  for (let h = 0; h < headers.length; h++) {
+    const i = headers[h].line, name = headers[h].name;
+    const windowEndOff = starts[Math.min(n, i + 800)];
+    let lo = 0, hiB = opens.length;               // first '{' at/after the header's line start
+    while (lo < hiB) { const mid = (lo + hiB) >> 1; if (opens[mid] < starts[i]) lo = mid + 1; else hiB = mid; }
+    if (lo === opens.length || opens[lo] >= windowEndOff) continue;   // no '{' in window
+    let end;
+    if (matched.has(h) && matched.get(h)[1] < windowEndOff) {
+      const closePos = matched.get(h)[1];
+      let a = 0, b = starts.length;               // bisect_right(starts, closePos) - 1
+      while (a < b) { const mid = (a + b) >> 1; if (starts[mid] <= closePos) a = mid + 1; else b = mid; }
+      end = a - 1;
+    } else {
+      end = Math.min(n, i + 800) - 1;            // unclosed within window: old truncation
+    }
+    fns.push({ name, line: i + 1, len: end - i + 1, cx: 1 + cxPrefix[end + 1] - cxPrefix[i] });
+  }
+  return fns;
+}
+
+/* ======== scanner/scan.js ======== */
+// scanFile — twin of lazaret.scanner.core.scan_file / _scan_file,
+// implementing the shared semantics (FIX-SPEC items 1, 2, 5, 6, 7, 12, 13, 14).
+
+
+const LONG_LINE = 160;
+const FN_LEN_LIMIT = 60;
+const FN_CX_LIMIT = 12;
+/** Spec 7: per (file, rule) cap for INFO/MINOR/SMELL findings (security rules are never capped). */
+const CAP_PER_RULE = 200;
+const NEVER_CAPPED_PREFIXES = ["S-", "T-", "SC-", "X-", "SQL-"];
+/** Spec 14: per-file backstop for pattern rules (the regexes themselves are linear). */
+const SCAN_TIME_BUDGET_MS = 30_000;
+let timeBudgetMs = SCAN_TIME_BUDGET_MS;
+function setScanTimeBudget(ms) { timeBudgetMs = ms ?? SCAN_TIME_BUDGET_MS; }
+
+const COMMENT_LINE_RULES = new Set(["Q-TODO", "S-TOKEN", "S-BIDI"]);
+
+/* ---------------- Analyzers ---------------- */
+function detectLang(name, content) {
+  if (/\.(py)$/i.test(name)) return "py";
+  if (/\.(js|jsx|ts|tsx|mjs|cjs)$/i.test(name)) return "js";
+  if (/\.sql$/i.test(name)) return "sql";
+  // content heuristic: SQL keywords dominate and no JS/py structure
+  if (/\b(SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM|CREATE\s+(TABLE|PROCEDURE|USER)|GRANT|ALTER\s+TABLE)\b/i.test(content)
+     && !/\b(function|=>|def |import )\b/.test(content)) return "sql";
+  if (/^\s*(def |import |from \w+ import|class \w+.*:)/m.test(content) && !/[{};]\s*$/m.test(content)) return "py";
+  return /\b(def |elif |None|self\.)/.test(content) && !/\b(const|let|=>|function)\b/.test(content) ? "py" : "js";
+}
+
+class ScanBudgetExceeded extends Error {}
+const isBlank = (s) => { for (const ch of s) if (!isPySpace(ch)) return false; return true; };
+
+// ---- match text (spec 5) --------------------------------------------------
+// Rules match each line in the form the language runtime reads it:
+//   py : a line containing non-ASCII is matched in its NFKC-normalized form;
+//   js : identifier escapes \uXXXX and \u{X…} outside '…'/"…" string
+//        literals are decoded when they denote an identifier character, and
+//        U+FEFF (JavaScript whitespace Python's \s lacks) becomes a space.
+// Line numbers never change; snippets still show the original text.
+const NON_ASCII_RE = /[^\x00-\x7f]/;
+const JS_UESC_RE = /\\u\{([0-9A-Fa-f]{1,6})\}|\\u([0-9A-Fa-f]{4})/g;
+const ID_CONTINUE_RE = /^[\p{XID_Continue}$]$/u;
+const pyMatchText = (t) => (NON_ASCII_RE.test(t) ? t.normalize("NFKC") : t);
+
+class FileCtx {
+  constructor(lines, lang, content, deadline) {
+    this.lines = lines;
+    this.lang = lang;
+    this.content = content;
+    this.lex = lexLines(lines, lang, content);
+    this.cmask = this.lex.comment;
+    this.deadline = deadline;
+    this._mlines = null;
+    this._mcode = new Map();
+    this._strStarts = null;
+  }
+  get mlines() {
+    if (this._mlines === null) {
+      if (this.lang === "py") this._mlines = this.lines.map(pyMatchText);
+      else if (this.lang === "js") this._mlines = this.lines.map((_, i) => this.jsText(i, false));
+      else this._mlines = this.lines;
+    }
+    return this._mlines;
+  }
+  /** Match text of line i with its comment text removed. */
+  mcode(i) {
+    if (this.lex.code === this.lines) return this.mlines[i];
+    let v = this._mcode.get(i);
+    if (v === undefined) {
+      if (this.lang === "py") v = pyMatchText(this.lex.code[i]);
+      else if (this.lang === "js") v = this.jsText(i, true);
+      else v = this.lex.code[i];
+      this._mcode.set(i, v);
+    }
+    return v;
+  }
+  jsText(i, dropComments) {
+    const line = this.lines[i];
+    const plain = dropComments ? this.lex.code[i] : line;
+    if (!line.includes("\\u")) return plain.includes("\ufeff") ? plain.replaceAll("\ufeff", " ") : plain;
+    if (this._strStarts === null) this._strStarts = this.lex.strings.map((s) => s[0]);
+    const base = this.lex.starts[i];
+    const cuts = dropComments ? (this.lex.spans.get(i) || []) : [];
+    const edits = cuts.map(([a, b]) => [a, b, ""]);
+    JS_UESC_RE.lastIndex = 0;
+    let m;
+    while ((m = JS_UESC_RE.exec(line))) {
+      const at = m.index;
+      if (cuts.some(([a, b]) => a <= at && at < b)) continue;
+      const k = upperBound(this._strStarts, base + at) - 1;
+      if (k >= 0 && this.lex.strings[k][1] > base + at) continue;   // inside a '…' or "…" literal
+      const cp = parseInt(m[1] ?? m[2], 16);
+      if (cp > 0x10ffff) continue;
+      const ch = String.fromCodePoint(cp);
+      if (ch === "$" || ID_CONTINUE_RE.test(ch)) edits.push([at, at + m[0].length, ch]);
+    }
+    let out = plain;
+    if (edits.length) {
+      edits.sort((x, y) => x[0] - y[0] || x[1] - y[1]);
+      out = "";
+      let p = 0;
+      for (const [a, b, rep] of edits) {
+        if (a < p) continue;
+        out += line.slice(p, a) + rep;
+        p = b;
+      }
+      out += line.slice(p);
+    }
+    return out.includes("\ufeff") ? out.replaceAll("\ufeff", " ") : out;
+  }
+  checkTime() {
+    if (Date.now() > this.deadline) throw new ScanBudgetExceeded();
+  }
+}
+function upperBound(a, x) {
+  let lo = 0, hi = a.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (a[mid] <= x) lo = mid + 1; else hi = mid; }
+  return lo;
+}
+
+// ---- Hex-escape decoding (SC-HEXSTR); twin of core.hex_hidden_text -------
+const HEX_ESCAPE_RE = /\\x([0-9A-Fa-f]{2})/g;
+const HEX_MIN_ESCAPES = 8;
+const HEX_PRINTABLE_SHARE = 0.75;
+const LETTER_RUN_RE = /[A-Za-z]{3}/;
+const HIDDEN_TEXT_DANGER_RE = pyRe(
+  String.raw`https?://|\b(?:eval|exec|execSync|compile|__import__|import|require|child_process|` +
+  String.raw`subprocess|system|popen|spawn|powershell|cmd\.exe|curl|wget|base64|b64decode|atob|` +
+  String.raw`Function|fromCharCode|marshal|pickle)\b|/bin/(?:ba)?sh`, "i");
+
+function hexHiddenText(line) {
+  if (!line.includes("\\x")) return null;
+  let total = 0, text = "", letters = 0;
+  HEX_ESCAPE_RE.lastIndex = 0;
+  let m;
+  while ((m = HEX_ESCAPE_RE.exec(line))) {
+    total++;
+    const c = parseInt(m[1], 16);
+    if (c >= 0x20 && c < 0x7f) {
+      text += String.fromCharCode(c);
+      if ((c >= 65 && c <= 90) || (c >= 97 && c <= 122)) letters++;
+    }
+  }
+  if (total < HEX_MIN_ESCAPES) return null;
+  if (text.length / total < HEX_PRINTABLE_SHARE) return null;
+  if (!LETTER_RUN_RE.test(text) || letters / text.length < 0.4) return null;
+  return text;
+}
+
+// A "-----BEGIN ... PRIVATE KEY-----" header alone is not a key: libraries keep the
+// header as a constant to recognize key files. Require base64 key material after it,
+// on the same line or the next two. Twin of core._token_has_material.
+const PEM_BODY_RE = /[A-Za-z0-9+/]{40,}={0,2}/;
+function tokenHasMaterial(line, lines, i) {
+  const t = findSecretToken(line);
+  if (!t || !t.text.startsWith("-----BEGIN")) return true;
+  return [line.slice(t.end), ...lines.slice(i + 1, i + 3)].some((x) => PEM_BODY_RE.test(x));
+}
+
+// ---- intra-file taint ------------------------------------------------------
+const IDENT_RUN_RE = { py: /[\p{L}\p{N}_]+/gu, js: /[\p{L}\p{N}_$]+/gu };
+/**
+ * Taint tracking (twin of core.taint_scan): each line is matched with its
+ * comment text removed; assignments from sources (or from tainted
+ * variables) taint every bound name (spec 12); a sink whose arguments carry
+ * a tainted variable (or a source) not cleansed for that sink is reported.
+ */
+function taintScan(file, lines, lang, ctx = null) {
+  const src = TAINT_SOURCES[lang];
+  if (!src) return [];                   // SQL and others: pattern rules only
+  if (!ctx || ctx.lines !== lines) {
+    const content = lines.join("\n");
+    ctx = new FileCtx(lines, lang, content, Infinity);
+  }
+  const issues = [];
+  const tainted = new Map();             // var -> {line, clean:Set(suffix), order}
+  const partialCats = Object.keys(PARTIAL_SAN[lang] || {});
+  const identRe = IDENT_RUN_RE[lang];
+  const carriers = (code, suf) => {
+    if (!tainted.size) return [];
+    const found = new Set();
+    identRe.lastIndex = 0;
+    let m;
+    while ((m = identRe.exec(code))) {
+      const t = tainted.get(m[0]);
+      if (t && !(suf && t.clean.has(suf))) found.add(m[0]);
+    }
+    return [...found].sort((a, b) => tainted.get(a).order - tainted.get(b).order);
+  };
+  for (let i = 0; i < lines.length; i++) {
+    if (ctx.cmask[i]) continue;
+    const line = ctx.mcode(i);
+    if (!line || isBlank(line)) continue;
+    if (!(i & 63)) ctx.checkTime();
+    const a = parseAssignment(line, lang);
+    if (a) {
+      const base = neutralize(a.rhs, lang).replace(STRING_LIT_RE, "");
+      if (src.test(base) || carriers(base, null).length) {
+        const clean = new Set();
+        for (const suf of partialCats) {
+          const neut = neutralize(a.rhs, lang, suf).replace(STRING_LIT_RE, "");
+          if (!src.test(neut) && !carriers(neut, suf).length) clean.add(suf);
+        }
+        for (const name of a.names) if (!tainted.has(name)) tainted.set(name, { line: i + 1, clean, order: tainted.size });
+      }
+    }
+    for (const [suffix, sinkRe, cat, sev, cwe, fix] of TAINT_SINKS[lang]) {
+      const sm = sinkRe.exec(line);
+      if (!sm) continue;
+      const rest = neutralize(line.slice(sm.index + sm[0].length), lang, suffix);
+      const restCode = rest.replace(STRING_LIT_RE, "");
+      const found = carriers(restCode, suffix);
+      if (!found.length && !src.test(restCode)) continue;
+      const what = found.length ? `untrusted data via '${found[0]}' (tainted at line ${tainted.get(found[0]).line})` : "untrusted data";
+      issues.push(mkIssue({ id: `T-${suffix}`, name: `Tainted flow → ${cat}`, type: "VULN", sev,
+        msg: `Possible ${cat}: ${what} reaches this sink.`,
+        why: "Data from user input or a decode function flows into a dangerous call without visible sanitization (lightweight intra-file taint tracking).",
+        fix, ref: `${cwe} · Taint analysis` }, file, i + 1, lines, sm.index));
+    }
+  }
+  return issues;
+}
+
+// ---- decode → execute across lines (spec 13) --------------------------------
+// SC-EVAL-DECODE is matched per line, so `eval(\n  atob(…))` would be
+// missed: when a line names a sink and leaves parentheses open (or ends
+// with the sink's name), it is joined — comment text removed — with up to
+// SC_JOIN_MAX_LINES following lines until the parentheses balance, and the
+// rule is matched on the joined statement; a match must begin on the first
+// line (twin of core._joined_eval_decode).
+const SC_JOIN_MAX_LINES = 8;
+const SC_JOIN_MAX_CHARS = 4000;
+const SC_SINK_NAMES = ["eval", "exec", "execSync", "Function", "runInContext", "runInThisContext", "runInNewContext"];
+const SC_SINK_WORD_RE = pyRe(String.raw`\b(?:eval|exec|execSync|Function|runIn(?:This|New)?Context)\b`);
+function parenBalance(code) {
+  const t = code.replace(STRING_LIT_RE, "");
+  let d = 0;
+  for (const ch of t) { if (ch === "(") d++; else if (ch === ")") d--; }
+  return d;
+}
+function joinedEvalDecode(ctx, i, ruleRe) {
+  const code = ctx.mcode(i);
+  if (!SC_SINK_WORD_RE.test(code)) return null;
+  let depth = parenBalance(code);
+  const trimmed = pyRstrip(code);
+  if (depth <= 0 && !SC_SINK_NAMES.some((n) => trimmed.endsWith(n))) return null;
+  const parts = [code];
+  let added = 0;
+  for (let k = i + 1; k < Math.min(ctx.lines.length, i + 1 + SC_JOIN_MAX_LINES); k++) {
+    if (ctx.cmask[k]) continue;
+    const nxt = ctx.mcode(k);
+    parts.push(nxt);
+    added += cpLen(nxt);
+    depth += parenBalance(nxt);
+    if ((depth <= 0 && !isBlank(nxt)) || added > SC_JOIN_MAX_CHARS) break;
+  }
+  const m = ruleRe.exec(parts.join(" "));
+  return m && m.index < code.length ? m.index : null;
+}
+
+// ---- findings cap (spec 7) -------------------------------------------------
+function cappable(i) {
+  return !NEVER_CAPPED_PREFIXES.some((p) => String(i.rule).startsWith(p))
+    && (i.sev === "INFO" || i.sev === "MINOR" || i.type === "SMELL");
+}
+/** At most CAP_PER_RULE findings per rule, in line order; one Q-CAPPED per capped rule at its first omitted line. */
+function capIssues(path, issues, lines) {
+  const order = issues.map((_, k) => k).sort((a, b) => (issues[a].line ?? 0) - (issues[b].line ?? 0) || a - b);
+  const counts = new Map(), dropped = new Set(), omitted = new Map();
+  for (const k of order) {
+    const i = issues[k];
+    if (!cappable(i)) continue;
+    const n = (counts.get(i.rule) ?? 0) + 1;
+    counts.set(i.rule, n);
+    if (n > CAP_PER_RULE) {
+      dropped.add(k);
+      const o = omitted.get(i.rule);
+      if (o) o[0]++; else omitted.set(i.rule, [1, i.line]);
+    }
+  }
+  if (!dropped.size) return issues;
+  const out = issues.filter((_, k) => !dropped.has(k));
+  for (const [rid, [n, first]] of omitted) {
+    out.push(mkIssue({ id: "Q-CAPPED", name: "Findings capped", type: "SMELL", sev: "INFO",
+      msg: `${n} more ${rid} findings omitted`,
+      why: "Low-severity findings that repeat hundreds of times in one file are capped so reports stay readable; security findings are never capped.",
+      fix: `Fix or deliberately suppress the ${rid} pattern in this file, then re-scan to see the remaining occurrences.`,
+      ref: "Maintainability" }, path, first, lines));
+  }
+  return out;
+}
+
+/**
+ * Scan one file: {name, content, lang, size?}. (The CLI's dependency mode —
+ * only supply-chain and secret rules, no suppression — has no dashboard
+ * equivalent.) A file over MAX_FILE_BYTES is not scanned: it gets one
+ * SC-TRUNCATED finding, like a file the CLI's walker skips for its size.
+ */
+function scanFile(file) {
+  const path = file.name ?? file.path;
+  const bytes = fileBytes(file);
+  if (bytes > MAX_FILE_BYTES)
+    return [truncatedIssue(path, `${withCommas(bytes)} bytes exceeds the ${withCommas(MAX_FILE_BYTES)}-byte file limit`)];
+  const lang = file.lang ?? detectLang(String(path ?? ""), String(file.content ?? ""));
+  const content = normalizeSource(file.content, lang);
+  const lines = content.split("\n");
+  const ctx = new FileCtx(lines, lang, content, Date.now() + timeBudgetMs);
+  registerScanContext(lines, SECRET_SKIP_RE);
+  const issues = [];
+  try {
+    scanLines(path, content, lines, lang, ctx, issues);
+  } catch (e) {
+    if (!(e instanceof ScanBudgetExceeded)) throw e;
+    issues.push(truncatedIssue(path, "scan time budget exceeded"));
+  }
+  const suppressed = makeSuppressor(lines, lang, { lex: ctx.lex });
+  return capIssues(path, issues.filter((i) => !suppressed(i)), lines);
+}
+
+function longLineIssue(path, i, lines) {
+  return mkIssue({ id: "Q-LONGLINE", name: "Line too long", type: "SMELL", sev: "MINOR",
+    msg: `Line exceeds ${LONG_LINE} characters.`,
+    why: "Very long lines hurt readability and reviews.",
+    fix: "Break the line up for readability.", ref: "Maintainability" }, path, i + 1, lines);
+}
+
+function scanLines(path, content, lines, lang, ctx, issues) {
+  const { cmask } = ctx;
+  const mlines = ctx.mlines;
+  const rules = RULES.filter((r) => r.langs.includes(lang));
+  const secretLines = new Set();          // lines with S-TOKEN / S-SECRET (S-ENTROPY dedupe)
+  for (let i = 0; i < lines.length; i++) {
+    ctx.checkTime();
+    const line = lines[i];
+    if (!line || isBlank(line)) {
+      // no rule or heuristic matches whitespace alone; only the length rule applies
+      if (cpLen(line) > LONG_LINE) issues.push(longLineIssue(path, i, lines));
+      continue;
+    }
+    const mline = mlines[i];
+    for (const r of rules) {
+      if (cmask[i] && !COMMENT_LINE_RULES.has(r.id)) continue;
+      // equality checks shouldn't match inside string literals
+      const target = r.id === "B-EQEQ" ? mline.replace(STRING_LIT_RE, '""') : mline;
+      let col;
+      if (r.find) col = r.find(target);
+      else { const m = r.re.exec(target); col = m ? m.index : -1; }
+      if (col < 0 && r.id === "SC-EVAL-DECODE" && !cmask[i]) col = joinedEvalDecode(ctx, i, r.re) ?? -1;
+      if (col < 0) continue;
+      if (r.need && !r.need.test(mline)) continue;
+      if (r.skip && r.skip.test(mline)) continue;
+      if (r.id === "S-TOKEN" && !tokenHasMaterial(mline, mlines, i)) continue;
+      if (r.id === "S-TOKEN" || r.id === "S-SECRET") secretLines.add(i);
+      issues.push(mkIssue(r, path, i + 1, lines, col));
+    }
+    if (cpLen(line) > LONG_LINE) issues.push(longLineIssue(path, i, lines));
+    // --- obfuscation heuristics (strong supply-chain indicators) ---
+    const hidden = hexHiddenText(line);
+    if (hidden !== null) {
+      const dangerous = HIDDEN_TEXT_DANGER_RE.test(hidden);
+      const preview = hidden.length <= 60 ? hidden : hidden.slice(0, 57) + "...";
+      issues.push(mkIssue({ id: "SC-HEXSTR", name: "Hex-escaped readable text", type: "HOTSPOT",
+        sev: dangerous ? "CRITICAL" : "MAJOR",
+        msg: `Hex escapes hide readable text: ${pyRepr(preview)}.`,
+        why: "Escaping ordinary printable characters serves no purpose except hiding them from review and search; this text "
+          + (dangerous ? "names code execution, a download, or a URL." : "is readable once decoded."),
+        fix: "Decode the string and review what it does.",
+        ref: "CWE-506 · Supply chain" }, path, i + 1, lines, line.search(/\\x[0-9A-Fa-f]{2}/)));
+    }
+    const cm = lang === "js" ? CHARCODE_RE.exec(line) : null;
+    if (cm && countMatches(line, CHARCODE_NUM_RE) >= 10)
+      issues.push(mkIssue({ id: "SC-CHARCODE", name: "Char-code string building", type: "HOTSPOT", sev: "MAJOR",
+        msg: "String assembled from character codes — obfuscation indicator.",
+        why: "fromCharCode chains hide payloads from static review.",
+        fix: "Decode and review what string is being built.",
+        ref: "CWE-506 · Supply chain" }, path, i + 1, lines, cm.index));
+    const bm = B64_BLOB_RE.exec(line);
+    if (bm && !line.includes("sourceMappingURL"))
+      issues.push(mkIssue({ id: "SC-B64", name: "Large base64 blob", type: "HOTSPOT", sev: "MAJOR",
+        msg: "Base64 blob (200+ chars) embedded in code.",
+        why: "Embedded encoded blobs can carry second-stage payloads.",
+        fix: "Decode and verify the content; move legitimate assets to data files.",
+        ref: "CWE-506 · Supply chain" }, path, i + 1, lines, bm.index));
+    // --- entropy-based secret detection ---
+    if (!cmask[i] && !secretLines.has(i) && !SECRET_SKIP_RE.test(line)) {
+      const em = ENTROPY_VALUE_RE.exec(line);
+      if (em && entropySecretish(em[1]))
+        issues.push(mkIssue({ id: "S-ENTROPY", name: "High-entropy string", type: "HOTSPOT", sev: "MAJOR",
+          msg: "High-entropy string literal — possible hardcoded secret.",
+          why: "Random-looking constants are usually keys or tokens.",
+          fix: "If it is a secret, rotate it and load it from the environment.",
+          ref: "CWE-798 · OWASP A07" }, path, i + 1, lines, em.index + em[0].indexOf(em[1], 1)));
+    }
+  }
+  // file-level: javascript-obfuscator identifier signature
+  if (lang === "js" && content.includes("_0x")) {
+    OBF_IDENT_RE.lastIndex = 0;
+    const obf = content.match(OBF_IDENT_RE) || [];
+    const uniq = new Set(obf);
+    if (uniq.size >= 5) {
+      const firstOff = content.indexOf(obf[0]);
+      let firstLine = 1;
+      for (let k = content.indexOf("\n"); k !== -1 && k < firstOff; k = content.indexOf("\n", k + 1)) firstLine++;
+      issues.push(mkIssue({ id: "SC-OBF-IDENT", name: "Obfuscated identifier pattern", type: "HOTSPOT", sev: "CRITICAL",
+        msg: `${uniq.size} '_0x…' identifiers — javascript-obfuscator signature.`,
+        why: "This naming pattern is produced by obfuscation tools; in a dependency it is a classic indicator of a compromised or malicious package.",
+        fix: "Diff against the package's published repository; consider removing the dependency.",
+        ref: "CWE-506 · Supply chain" }, path, firstLine, lines, firstOff - content.lastIndexOf("\n", firstOff - 1) - 1));
+    }
+  }
+  const mcontent = mlines === lines ? content : mlines.join("\n");
+  let starts = null;
+  for (const r of TEXT_RULES) {
+    // *-NOWHERE SQL rules are fired by scanSqlNowhere() (linear pass)
+    if (!r.langs.includes(lang) || !r.scan) continue;
+    for (const off of r.scan(mcontent)) {
+      starts ??= lineStarts(mcontent);
+      const lineNo = upperBound(starts, off);
+      issues.push(mkIssue(r, path, lineNo, lines, off - starts[lineNo - 1]));
+    }
+    ctx.checkTime();
+  }
+  ctx.checkTime();
+  if (lang === "sql") {
+    try { scanSqlNowhere(path, content, issues, lines); } catch { /* analyzer must never break a scan */ }
+  }
+  ctx.checkTime();
+  for (const t of taintScan(path, lines, lang, ctx)) issues.push(t);
+  // G12: whole-argument SQL-sink analysis (Python, project mode)
+  if (lang === "py") {
+    try { sqlSinkScan(path, mlines, issues, lines); } catch (e) { if (e instanceof ScanBudgetExceeded) throw e; }
+  }
+  ctx.checkTime();
+  for (const fn of extractFunctions(lines, lang)) {
+    if (fn.len > FN_LEN_LIMIT) issues.push(mkIssue({ id: "Q-FN-LONG", name: "Function too long", type: "SMELL", sev: "MAJOR",
+      msg: `Function "${fn.name}" is ${fn.len} lines long (limit ${FN_LEN_LIMIT}).`,
+      why: "Long functions do too much and resist testing and reuse.",
+      fix: "Extract cohesive blocks into helper functions.", ref: "Maintainability" }, path, fn.line, lines));
+    if (fn.cx > FN_CX_LIMIT) issues.push(mkIssue({ id: "Q-FN-CX", name: "High cyclomatic complexity", type: "SMELL", sev: "MAJOR",
+      msg: `Function "${fn.name}" has complexity ~${fn.cx} (limit ${FN_CX_LIMIT}).`,
+      why: "Highly branched code is hard to reason about and to cover with tests.",
+      fix: "Split branches into smaller functions; use early returns or lookup tables.", ref: "Maintainability" }, path, fn.line, lines));
+  }
+}
+
+const CHARCODE_NUM_RE = pyRe(String.raw`\b\d{2,3}\b`, "g");
+function countMatches(s, re) { re.lastIndex = 0; let n = 0; while (re.exec(s)) n++; return n; }
+
+/* ======== scanner/metrics.js ======== */
+// Metrics & ratings — twin of lazaret.scanner.core compute_metrics /
+// worst_sev_rating / maintainability_rating.
+
+
+function computeMetrics(files) {
+  let ncloc = 0, comments = 0;
+  // a file over the size limit is not scanned (SC-TRUNCATED), so not measured either,
+  // like a file the CLI's walker skips; the dashboard has no dependency files
+  const measured = files.filter((f) => fileBytes(f) <= MAX_FILE_BYTES);
+  const winMap = new Map();
+  for (const f of measured) {
+    const key = f.name;
+    const lines = normalizeNewlines(String(f.content ?? "")).split("\n");   // (no U+2028 split: core.compute_metrics)
+    const lex = lexLines(lines, f.lang);
+    const code = [];
+    for (let i = 0; i < lines.length; i++) {
+      const t = pyStrip(lines[i]);
+      if (!t) continue;
+      if (lex.comment[i]) { comments++; continue; }
+      ncloc++;
+      code.push([t, i]);
+    }
+    for (let i = 0; i + 6 <= code.length; i++) {
+      let k = code[i][0];
+      for (let j = i + 1; j < i + 6; j++) k += code[j][0];
+      let occ = winMap.get(k);
+      if (!occ) { occ = []; winMap.set(k, occ); }
+      occ.push([key, i, code]);
+    }
+  }
+  const dupSet = new Set();
+  for (const occ of winMap.values()) {
+    if (occ.length < 2) continue;
+    for (const [key, i, code] of occ) for (let j = i; j < i + 6; j++) dupSet.add(`${key}\u0000${code[j][1]}`);
+  }
+  const dupPct = ncloc ? pyRound1(100 * dupSet.size / ncloc) : 0;
+  return { files: measured.length, depFiles: 0, ncloc, comments, dupPct };
+}
+
+function worstSevRating(issues, types) {
+  const sevs = new Set(issues.filter((i) => types.includes(i.type)).map((i) => i.sev));
+  if (sevs.has("BLOCKER")) return "E";
+  if (sevs.has("CRITICAL")) return "D";
+  if (sevs.has("MAJOR")) return "C";
+  if (sevs.has("MINOR")) return "B";
+  return "A";
+}
+/**
+ * INFO scan-coverage notes: typed SMELL for display, but they describe what
+ * the scanner could not look at, not the code, so they do not count toward
+ * the maintainability rating (twin of core.COVERAGE_RULES).
+ */
+const COVERAGE_RULES = new Set(["Q-SKIPPED-TREE", "Q-SYMLINK", "Q-UNREADABLE", "Q-SCAN-ERROR"]);
+function maintainabilityRating(issues, ncloc) {
+  const smells = issues.filter((i) => i.type === "SMELL" && !COVERAGE_RULES.has(i.rule)).length;
+  const per100 = ncloc ? 100 * smells / ncloc : 0;
+  return per100 <= 5 ? "A" : per100 <= 10 ? "B" : per100 <= 20 ? "C" : per100 <= 40 ? "D" : "E";
+}
+
+/* ======== dashboard: files, limits, uploads ======== */
+// The CLI's limits (FIX-SPEC items 7, 9, 14; see scanFile / capIssues above):
+// a file over MAX_FILE_BYTES is not scanned but gets one SC-TRUNCATED
+// finding (which fails the gate) instead of freezing the tab; there is no
+// per-file issue budget; per (file, rule) at most CAP_PER_RULE findings of an
+// INFO or MINOR rule or a code smell, then one Q-CAPPED; snippet lines are
+// clipped to SNIPPET_MAX characters; a file whose rules run longer than
+// SCAN_TIME_BUDGET_MS stops with SC-TRUNCATED.
 const MAX_FILE_BYTES = 2000000;
-const RULE_CAP = 200;
-const NEVER_CAPPED_RE = /^(?:S|T|SC|X|SQL)-/;
-const SNIPPET_MAX = 240, SNIPPET_LEAD = 60;
-function utf8Length(s){
+function utf8Length(s) {
   let n = 0;
-  for(let i=0;i<s.length;i++){
+  for (let i = 0; i < s.length; i++) {
     const c = s.charCodeAt(i);
-    if(c < 0x80) n += 1;
-    else if(c < 0x800) n += 2;
-    else if(c >= 0xD800 && c <= 0xDBFF && i+1 < s.length && (s.charCodeAt(i+1) & 0xFC00) === 0xDC00){ n += 4; i++; }
+    if (c < 0x80) n += 1;
+    else if (c < 0x800) n += 2;
+    else if (c >= 0xD800 && c <= 0xDBFF && i + 1 < s.length && (s.charCodeAt(i + 1) & 0xFC00) === 0xDC00) { n += 4; i++; }
     else n += 3;
   }
   return n;
 }
-function fileBytes(file){ return typeof file.size === "number" ? file.size : utf8Length(file.content); }
-const withCommas = n => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-function truncatedIssue(file, detail){   // same fields as the CLI's truncated_issue()
-  return {rule:"SC-TRUNCATED", name:"Scan truncated", type:"HOTSPOT", sev:"CRITICAL",
-    msg:`File not fully scanned: ${detail}.`,
-    why:"Scanning stopped early, so a clean verdict for this file is not evidence of anything — the unscanned bytes are exactly where a hostile artifact would put its payload (audit C2/G16: declared sizes and entry counts are attacker-controlled and were used to skip files with zero signal).",
-    fix:"Review the file manually or raise the limit and re-scan.",
-    ref:"CWE-506 · Supply chain", file:file.name, line:1, snippet:[], snipStart:1};
-}
-function capIssues(issues, file, lines){
-  const counts = new Map(), omitted = new Map(), out = [];
-  for(const i of issues){
-    const cappable = !NEVER_CAPPED_RE.test(i.rule) && (i.sev==="INFO" || i.sev==="MINOR" || i.type==="SMELL");
-    if(!cappable){ out.push(i); continue; }
-    const n = (counts.get(i.rule)||0) + 1;
-    counts.set(i.rule, n);
-    if(n <= RULE_CAP){ out.push(i); continue; }
-    const o = omitted.get(i.rule);
-    if(o) o.n++; else omitted.set(i.rule, {n:1, line:i.line});
-  }
-  for(const [rule, o] of omitted)
-    out.push(mkIssue({id:"Q-CAPPED", name:"Findings capped", type:"SMELL", sev:"INFO",
-      msg:`${o.n} more ${rule} findings omitted`,
-      why:`Only the first ${RULE_CAP} ${rule} findings in this file are listed, to keep the report readable. Security findings are never capped.`,
-      fix:"Fix or suppress the listed findings and scan again to see the rest.",
-      ref:"Report limits"}, file, o.line, lines));
-  return out;
+/** Size in bytes: an upload's file size, else the UTF-8 length of pasted text. */
+function fileBytes(file) { return typeof file.size === "number" ? file.size : utf8Length(file.content); }
+const withCommas = (n) => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+
+/** Same fields as core.truncated_issue(). */
+function truncatedIssue(path, detail) {
+  return fileIssue({ id: "SC-TRUNCATED", name: "Scan truncated", type: "HOTSPOT", sev: "CRITICAL",
+    msg: `File not fully scanned: ${detail}.`,
+    why: "Scanning stopped early, so a clean verdict for this file is not evidence of anything — the unscanned bytes are exactly where a hostile artifact would put its payload (audit C2/G16: declared sizes and entry counts are attacker-controlled and were used to skip files with zero signal).",
+    fix: "Review the file manually or raise the limit and re-scan.",
+    ref: "CWE-506 · Supply chain" }, path);
 }
 
-function scanFile(file){
-  const bytes = fileBytes(file);
-  if(bytes > MAX_FILE_BYTES)
-    return [truncatedIssue(file, `${withCommas(bytes)} bytes exceeds the ${withCommas(MAX_FILE_BYTES)}-byte file limit`)];
-  const issues = [];
+const EXT_LANGS = { ".py": "py", ".js": "js", ".jsx": "js", ".ts": "js", ".tsx": "js",
+  ".mjs": "js", ".cjs": "js", ".sql": "sql" };             // core.EXTS
+function langFromName(name) {
+  const m = /\.[^./\\]+$/.exec(String(name));
+  return m ? EXT_LANGS[m[0].toLowerCase()] ?? null : null;
+}
+
+/**
+ * An uploaded file, decoded from its bytes the way the CLI reads a source
+ * file (core.decode_source: BOM / UTF-16 sniff, PEP 263 cookie for Python,
+ * CRLF → LF). `enc` feeds encodingIssues(). Pasted code is already text
+ * and has no `enc`.
+ */
+function decodeUpload(name, bytes, size) {
+  let lang = langFromName(name);
+  let dec = decodeSource(bytes, { py: lang === "py" });
+  if (!lang) {                                    // no known extension: detect on the text
+    lang = detectLang(String(name), dec.text);
+    if (lang === "py") dec = decodeSource(bytes, { py: true });
+  }
+  const { text, ...enc } = dec;
+  return { name, content: normalizeNewlines(text), size, lang, enc };
+}
+
+/** Q-ENCODING (and SC-UTF7) for a decoded upload — twin of core.encoding_issues. */
+function encodingIssues(file) {
+  const info = file.enc;
+  if (!info || !info.reported) return [];
   const lines = file.content.split("\n");
-  const lang = file.lang;
-
-  // line rules
-  lines.forEach((line, i)=>{
-    const lineFirst = issues.length;
-    for(const r of RULES){
-      if(!r.langs.includes(lang)) continue;
-      const target = r.id==="B-EQEQ" ? line.replace(STRING_LIT_RE,'""') : line;
-      let hit = r.check ? r.check(target) : r.re.test(target);
-      if(hit && r.need && !r.need.test(line)) hit = false;
-      if(hit && r.skip && r.skip.test(line)) hit = false;
-      // don't flag security rules inside comments (except TODO + token signatures)
-      if(hit && !["Q-TODO","Q-LONGLINE","S-TOKEN"].includes(r.id) && isComment(line, lang)) hit = false;
-      if(hit) issues.push(mkIssue(r, file, i+1, lines, r.re ? Math.max(0, line.search(r.re)) : 0));
-    }
-    // obfuscation heuristics (supply-chain indicators)
-    const hexCount = (line.match(/\\x/g)||[]).length;
-    if(hexCount >= 8) issues.push(mkIssue({id:"SC-HEXSTR", name:"Hex-escaped string blob", type:"HOTSPOT", sev:"MAJOR",
-      msg:`String built from ${hexCount} hex escapes — obfuscation indicator.`,
-      why:"Dense \\xNN escaping hides strings (URLs, commands) from review and grep.",
-      fix:"Decode and review the string; legitimate code rarely needs this.",
-      ref:"CWE-506 · Supply chain"}, file, i+1, lines, line.indexOf("\\x")));
-    if(lang==="js" && /String\.fromCharCode/.test(line) && (line.match(/\b\d{2,3}\b/g)||[]).length>=10)
-      issues.push(mkIssue({id:"SC-CHARCODE", name:"Char-code string building", type:"HOTSPOT", sev:"MAJOR",
-        msg:"String assembled from character codes — obfuscation indicator.",
-        why:"fromCharCode chains hide payloads from static review.",
-        fix:"Decode and review what string is being built.",
-        ref:"CWE-506 · Supply chain"}, file, i+1, lines, line.indexOf("String.fromCharCode")));
-    if(B64_BLOB_RE.test(line) && !line.includes("sourceMappingURL"))
-      issues.push(mkIssue({id:"SC-B64", name:"Large base64 blob", type:"HOTSPOT", sev:"MAJOR",
-        msg:"Base64 blob (200+ chars) embedded in code.",
-        why:"Embedded encoded blobs can carry second-stage payloads.",
-        fix:"Decode and verify the content; move legitimate assets to data files.",
-        ref:"CWE-506 · Supply chain"}, file, i+1, lines, line.search(B64_BLOB_RE)));
-    // entropy-based secret detection
-    if(!isComment(line, lang) && !SECRET_SKIP_RE.test(line)){
-      const em = line.match(ENTROPY_VALUE_RE);
-      if(em && shannonEntropy(em[1])>4.0 &&
-         !issues.slice(lineFirst).some(x=>x.rule==="S-TOKEN"||x.rule==="S-SECRET"))
-        issues.push(mkIssue({id:"S-ENTROPY", name:"High-entropy string", type:"HOTSPOT", sev:"MAJOR",
-          msg:"High-entropy string literal — possible hardcoded secret.",
-          why:"Random-looking constants are usually keys or tokens.",
-          fix:"If it is a secret, rotate it and load it from the environment.",
-          ref:"CWE-798 · OWASP A07"}, file, i+1, lines, em.index));
-    }
-  });
-  // file-level: javascript-obfuscator identifier signature
-  if(lang==="js"){
-    const obf = file.content.match(OBF_IDENT_RE)||[];
-    const uniq = new Set(obf);
-    if(uniq.size>=5){
-      const firstLine = file.content.slice(0, file.content.indexOf(obf[0])).split("\n").length;
-      issues.push(mkIssue({id:"SC-OBF-IDENT", name:"Obfuscated identifier pattern", type:"HOTSPOT", sev:"CRITICAL",
-        msg:`${uniq.size} '_0x…' identifiers — javascript-obfuscator signature.`,
-        why:"This naming pattern is produced by obfuscation tools; in a dependency it is a classic indicator of a compromised or malicious package.",
-        fix:"Diff against the package's published repository; consider removing the dependency.",
-        ref:"CWE-506 · Supply chain"}, file, firstLine, lines, lines[firstLine-1].search(OBF_IDENT_RE)));
-    }
-  }
-  // text rules
-  let lineStarts = null;   // line-start offsets, computed on the first match
-  for(const r of TEXT_RULES){
-    if(!r.langs.includes(lang)) continue;
-    r.re.lastIndex = 0; let m;
-    while((m = r.re.exec(file.content))){
-      if(m[0].length===0){ r.re.lastIndex++; continue; }   // zero-length match: advance, never loop
-      if(r.noWhere && /\bWHERE\b/i.test(m[0])) continue;   // linear form: skip statements that DO have WHERE
-      if(!lineStarts){
-        lineStarts = [0];
-        for(let j=0;j<file.content.length;j++)
-          if(file.content.charCodeAt(j)===10) lineStarts.push(j+1);
-      }
-      const at = m.index;
-      const lineNo = lowerBound(lineStarts.length, x => lineStarts[x] > at);   // line starts ≤ offset
-      issues.push(mkIssue(r, file, lineNo, lines, at - lineStarts[lineNo-1]));
-    }
-  }
-  // function length & complexity
-  for(const fn of extractFunctions(lines, lang)){
-    if(fn.len > 60) issues.push(mkIssue({id:"Q-FN-LONG", name:"Function too long", type:"SMELL", sev:"MAJOR",
-      msg:`Function "${fn.name}" is ${fn.len} lines long (limit 60).`,
-      why:"Long functions do too much and resist testing and reuse.",
-      fix:"Extract cohesive blocks into helper functions.", ref:"Maintainability"}, file, fn.line, lines));
-    if(fn.cx > 12) issues.push(mkIssue({id:"Q-FN-CX", name:"High cyclomatic complexity", type:"SMELL", sev:"MAJOR",
-      msg:`Function "${fn.name}" has complexity ~${fn.cx} (limit 12).`,
-      why:"Highly branched code is hard to reason about and to cover with tests.",
-      fix:"Split branches into smaller functions; use early returns or lookup tables.", ref:"Maintainability"}, file, fn.line, lines));
-  }
-  issues.push(...taintScan(file, lines, lang));
-  // G12: whole-argument SQL-sink analysis (py only) — mirrors the CLI/MCP
-  // sql_sink_analyzer so a dashboard scan reports the same S-SQL-PY set the
-  // CLI and MCP report for identical Python input.
-  if(lang === "py"){ try{ sqlSinkScan(file, lines, issues); }catch(e){ /* analyzer must never break a scan */ } }
-  return capIssues(issues.filter(i=>!isSuppressed(i, lines)), file, lines);
-}
-/* ---------------- Secret redaction (same output as the CLI) ----------------
-   Every issue is redacted when it is created, so the rendered list and the
-   JSON export never carry a credential (the CLI redacts by default too;
-   lazaret.scanner.core: mk_issue / redact_secret_snippet). Placeholders match
-   the CLI: the flagged line of a secret-rule finding becomes
-   "[redacted: secret rule RULE] (N chars)"; a credential-shaped substring on
-   any other snippet line, or in the message, becomes "[redacted]".
-   Beyond the CLI's current list this implements FIX-SPEC item 6: every line
-   of a PEM private-key block (BEGIN ... END) is redacted, entropy-flagged
-   literals are redacted wherever they appear, SQL IDENTIFIED BY / PASSWORD is
-   case-insensitive, GitHub tokens (ghp_/gho_/ghu_/ghs_/ghr_), and msg is
-   swept too. INTEGRATOR: keep SECRET_LINE_PATTERNS identical to core.py's
-   _SECRET_LINE_PATTERNS once item 6 lands there. */
-const SECRET_RULES = new Set(["S-SECRET","S-TOKEN","SQL-CRED","S-ENTROPY"]);
-const SECRET_LINE_PATTERNS = [
-  /AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36,}|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----|eyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}/g,
-  /IDENTIFIED\s+BY\s+(?:PASSWORD\s*)?['"][^'"]+['"]|IDENTIFIED\s+BY\s+PASSWORD\b|PASSWORD\s*=?\s*['"][^'"]+['"]/gi,
-  /(?:password|passwd|pwd|secret|api[_-]?key|access[_-]?key|auth[_-]?token|private[_-]?key)\s*[:=]\s*["'][^"']{4,}["']/gi,
-];
-const PEM_BEGIN_RE = /-----BEGIN [A-Z ]*PRIVATE KEY-----/;
-const PEM_END_RE = /-----END [A-Z ]*PRIVATE KEY-----/;
-const PEM_MAX_LINES = 200;                 // a BEGIN with no END this close is a constant, not a key
-const REDACTED = "[redacted]";
-const redactionContexts = new WeakMap();   // lines array -> {pemLines, literals}
-function redactionContext(file, lines){
-  let ctx = redactionContexts.get(lines);
-  if(ctx) return ctx;
-  const pemLines = new Set(), literals = new Set();
-  for(let i=0;i<lines.length;i++){
-    const line = lines[i];
-    if(PEM_BEGIN_RE.test(line)){
-      let end = -1;
-      if(!PEM_END_RE.test(line.slice(line.search(PEM_BEGIN_RE))))
-        for(let j=i+1;j<lines.length && j<=i+PEM_MAX_LINES;j++) if(PEM_END_RE.test(lines[j])){ end=j; break; }
-      for(let j=i;j<=Math.max(i,end);j++) pemLines.add(j);
-    }
-    // literals the entropy rule flags (or would, were the line not already a secret finding)
-    if(!isComment(line, file.lang) && !SECRET_SKIP_RE.test(line)){
-      const em = line.match(ENTROPY_VALUE_RE);
-      if(em && shannonEntropy(em[1])>4.0) literals.add(em[1]);
-    }
-  }
-  ctx = {pemLines, literals:[...literals].sort((a,b)=>b.length-a.length)};
-  redactionContexts.set(lines, ctx);
-  return ctx;
-}
-function redactText(text, ctx){
-  let out = String(text);
-  for(const re of SECRET_LINE_PATTERNS){ re.lastIndex = 0; out = out.replace(re, REDACTED); }
-  for(const lit of ctx.literals) if(out.includes(lit)) out = out.split(lit).join(REDACTED);
+  const out = [mkIssue({ id: "Q-ENCODING", name: "Non-UTF-8 source encoding", type: "SMELL", sev: "INFO",
+    msg: `Source file is not UTF-8 (detected ${info.encoding}); decoded explicitly.`,
+    why: "A non-UTF-8 source read as UTF-8 decodes to mojibake, hiding every pattern-based finding — a UTF-16 eval() scans clean.",
+    fix: "Re-save the file as UTF-8 so tooling reads it as written.",
+    ref: "Maintainability" }, file.name, 1, lines)];
+  if (info.utf7) out.push(mkIssue({ id: "SC-UTF7", name: "UTF-7 source encoding", type: "HOTSPOT", sev: "CRITICAL",
+    msg: "Python source declares UTF-7; code can hide in comments.",
+    why: "In UTF-7, '+AAo-' decodes to a newline: text that every editor, diff and reviewer shows as a comment becomes executable code when Python reads the file. No legitimate project needs a UTF-7 source file.",
+    fix: "Re-save the file as UTF-8 and review the decoded text (the findings for this file are reported against it).",
+    ref: "CWE-506 · Supply chain" }, file.name, info.cookieLine || 1, lines));
   return out;
 }
-function clipSnippetLine(text, col){
-  // at most SNIPPET_MAX characters (code points) including the "…" markers
-  if(text.length <= SNIPPET_MAX) return text;
-  const cps = Array.from(text);
-  if(cps.length <= SNIPPET_MAX) return text;
-  const at = col ? Array.from(text.slice(0, col)).length : 0;
-  const start = Math.min(Math.max(0, at - SNIPPET_LEAD), cps.length - (SNIPPET_MAX - 1));
-  if(start === 0) return cps.slice(0, SNIPPET_MAX - 1).join("") + "…";
-  if(start + SNIPPET_MAX - 1 >= cps.length) return "…" + cps.slice(cps.length - (SNIPPET_MAX - 1)).join("");
-  return "…" + cps.slice(start, start + SNIPPET_MAX - 2).join("") + "…";
-}
-function mkIssue(rule, file, line, lines, col){
-  const start = Math.max(0,line-3);
-  const ctx = redactionContext(file, lines);
-  // redact first, then clip: clipping first could cut a secret in half and
-  // hide it from the patterns
-  const snippet = lines.slice(start, Math.min(lines.length, line+2)).map((text, k)=>{
-    const idx = start + k;                                   // 0-based line index
-    if(idx === line-1 && SECRET_RULES.has(rule.id))
-      return `[redacted: secret rule ${rule.id}] (${[...lines[line-1]].length} chars)`;
-    if(ctx.pemLines.has(idx)) return REDACTED;
-    return clipSnippetLine(redactText(text, ctx), idx === line-1 ? col : 0);
-  });
-  return {rule:rule.id, name:rule.name, type:rule.type, sev:rule.sev, msg:redactText(rule.msg, ctx),
-    why:rule.why, fix:rule.fix, ref:rule.ref, file:file.name, line,
-    snippet, snipStart: start+1};
+
+/** Every finding for one file: its encoding notes, then its scan. */
+function analyzeFile(file) {
+  return encodingIssues(file).concat(scanFile(file));
 }
 
-function extractFunctions(lines, lang){
-  const fns = [];
-  if(lang!=="py" && lang!=="js") return fns;   // no function metrics for SQL
-  const cxRe = lang==="py"
-    ? /\b(if|elif|for|while|and|or|except|case)\b/g
-    : /\b(if|for|while|case|catch)\b|&&|\|\||\?[^.:]/g;
-  if(lang==="py"){
-    for(let i=0;i<lines.length;i++){
-      const m = lines[i].match(/^(\s*)(?:async\s+)?def\s+(\w+)/);
-      if(!m) continue;
-      const indent = m[1].length; let end = i+1;
-      while(end<lines.length){
-        const l = lines[end];
-        if(l.trim()!=="" && !isComment(l,"py") && l.search(/\S/)<=indent) break;
-        end++;
-      }
-      const body = lines.slice(i,end).join("\n");
-      fns.push({name:m[2], line:i+1, len:end-i, cx:1+(body.match(cxRe)||[]).length});
-    }
-  } else {
-    // G4 fix (twin of the Python extract_functions fix): the old loop
-    // restarted a forward 800-line window scan for EVERY fn header —
-    // O(lines × 800 × line-length) on minified/adversarial JS (browser tab
-    // freeze; audit G4) — and copied a body string per function. One linear
-    // brace walk now: each header claims the first '{' at/after its LINE
-    // START (exactly where the old per-line scan began), spans share a brace
-    // exactly as the old independent scans did, the 800-line cap is kept,
-    // and complexity comes from per-line counts instead of body copies.
-    const content = lines.join("\n");
-    const starts = [0];
-    for(let j=0;j<content.length;j++)
-      if(content.charCodeAt(j)===10) starts.push(j+1);
-    starts.push(content.length+1);            // sentinel
-    // (?<!\w): the method-header alternative only starts at the beginning of a
-    // word. Without it, a long identifier run (a 2 MB minified line) made
-    // `(\w+)\s*\(` retry from every position: quadratic. Same matches.
-    const fnRe = /(?:function\s+(\w+)|(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s*)?(?:function|\([^)]*\)\s*=>|\w+\s*=>)|(?<!\w)(\w+)\s*\([^)]*\)\s*\{)/g;
-    const headers = [];                        // {line, name}
-    for(let i=0;i<lines.length;i++){
-      fnRe.lastIndex = 0;
-      const m = fnRe.exec(lines[i]);
-      if(m) headers.push({line:i, name:m[1]||m[2]||m[3]||"(anonymous)"});
-    }
-    // per-line complexity counts (tokens cannot span '\n')
-    const cxPrefix = [0];
-    for(const line of lines) cxPrefix.push(cxPrefix[cxPrefix.length-1] + ((line.match(cxRe)||[]).length));
-    // one brace walk: stack of [openPos, owner header indices]
-    const matched = new Map();                 // header idx -> [openPos, closePos]
-    const stack = [], waiting = [];
-    let hi = 0;
-    const braceRe = /[{}]/g; let bm;
-    while((bm = braceRe.exec(content)) !== null){
-      const bpos = bm.index;
-      while(hi < headers.length && starts[headers[hi].line] <= bpos){
-        waiting.push(hi);                      // header's line has begun: it
-        hi++;                                  // claims the next '{' it sees
-      }
-      if(bm[0]==="{"){
-        stack.push([bpos, waiting.splice(0, waiting.length)]);
-      } else if(stack.length){
-        const [openPos, owners] = stack.pop();
-        for(const h of owners) matched.set(h, [openPos, bpos]);
-      }
-    }
-    for(let h=0;h<headers.length;h++){
-      const i = headers[h].line, name = headers[h].name;
-      const n = lines.length;
-      const windowEndOff = starts[Math.min(n, i+800)];
-      // first '{' at/after the header's line start (old semantics: the scan
-      // started at the first char of the line)
-      let braceOff = -1;
-      for(let o = starts[i]; o < content.length && o < windowEndOff; o++){
-        if(content.charCodeAt(o)===123){ braceOff = o; break; }
-      }
-      if(braceOff === -1) continue;            // no '{' in window: old `started` never set
-      let end;
-      if(matched.has(h) && matched.get(h)[1] < windowEndOff){
-        const closePos = matched.get(h)[1];
-        end = lowerBound(starts.length, x => starts[x] > closePos) - 1; // line of '}'
-      } else {
-        end = Math.min(n, i+800) - 1;          // unclosed within window: old truncation
-      }
-      fns.push({name, line:i+1, len:end-i+1, cx:1+cxPrefix[end+1]-cxPrefix[i]});
-    }
+/** Compare two strings by code point (Python's str ordering). */
+function cmpCodePoints(a, b) {
+  if (a === b) return 0;
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) {
+    const x = a.charCodeAt(i), y = b.charCodeAt(i);
+    if (x === y) continue;
+    const xs = x >= 0xd800 && x <= 0xdfff, ys = y >= 0xd800 && y <= 0xdfff;
+    if (xs !== ys) return xs ? 1 : -1;       // a surrogate encodes a code point > U+FFFF
+    return x - y;
   }
-  return fns;
-}
-function lowerBound(n, pred){
-  let lo=0, hi=n;
-  while(lo<hi){ const mid=(lo+hi)>>1; if(pred(mid)) hi=mid; else lo=mid+1; }
-  return lo;
+  return a.length - b.length;
 }
 
-function computeMetrics(files){
-  let ncloc=0, comments=0, dupLines=0;
-  const winMap = new Map();
-  for(const f of files){
-    if(fileBytes(f) > MAX_FILE_BYTES) continue;   // not scanned (SC-TRUNCATED): not measured either
-    const lines = f.content.split("\n");
-    const code = [];
-    lines.forEach((l,i)=>{
-      const t=l.trim();
-      if(!t) return;
-      if(isComment(l,f.lang)){comments++; return;}
-      ncloc++; code.push({t,i,f:f.name});
-    });
-    for(let i=0;i+6<=code.length;i++){
-      const key = code.slice(i,i+6).map(c=>c.t).join("");
-      if(!winMap.has(key)) winMap.set(key, []);
-      winMap.get(key).push(code.slice(i,i+6));
-    }
-  }
-  const dupSet = new Set();
-  for(const [,occ] of winMap){
-    if(occ.length>1) occ.forEach(win=>win.forEach(c=>dupSet.add(c.f+":"+c.i)));
-  }
-  dupLines = dupSet.size;
-  return {ncloc, comments, dupPct: ncloc? +(100*dupLines/ncloc).toFixed(1) : 0};
+/** The report for a set of files — twin of core.build_result (no cross-file flow engine here). */
+function buildResult(files) {
+  let issues = [];
+  for (const f of files) issues = issues.concat(analyzeFile(f));
+  issues.sort((a, b) => SEV_ORDER[a.sev] - SEV_ORDER[b.sev] || cmpCodePoints(a.file, b.file) || a.line - b.line);
+  const metrics = computeMetrics(files);
+  const counts = { VULN: 0, HOTSPOT: 0, BUG: 0, SMELL: 0 };
+  issues.forEach((i) => counts[i.type]++);
+  const ratings = { security: worstSevRating(issues, ["VULN"]), reliability: worstSevRating(issues, ["BUG"]),
+    maintainability: maintainabilityRating(issues, metrics.ncloc) };
+  const conds = [
+    { label: "No blocker issues", ok: !issues.some((i) => i.sev === "BLOCKER") },
+    { label: "No critical vulnerabilities", ok: !issues.some((i) => i.type === "VULN" && (i.sev === "CRITICAL" || i.sev === "BLOCKER")) },
+    { label: "Duplication < 10%", ok: metrics.dupPct < 10 },
+    { label: "Maintainability ≥ C", ok: "ABC".includes(ratings.maintainability) },
+  ];
+  // INFO supply-chain entries are inventory, not indicators (as in the CLI)
+  const supply = issues.filter((i) => i.rule.startsWith("SC-") && i.sev !== "INFO").length;
+  conds.push({ label: "No supply-chain indicators", ok: supply === 0 });
+  return { files: files.map((f) => f.name), scannedAt: new Date().toISOString(), pass: conds.every((c) => c.ok),
+    conds, metrics, counts, supplyChain: supply, ratings, issues };
 }
 
-function worstSevRating(issues, types){
-  const sevs = issues.filter(i=>types.includes(i.type)).map(i=>i.sev);
-  if(sevs.includes("BLOCKER")) return "E";
-  if(sevs.includes("CRITICAL")) return "D";
-  if(sevs.includes("MAJOR")) return "C";
-  if(sevs.includes("MINOR")) return "B";
-  return "A";
-}
-function maintainabilityRating(issues, ncloc){
-  const smells = issues.filter(i=>i.type==="SMELL").length;
-  const per100 = ncloc? 100*smells/ncloc : 0;
-  return per100<=5?"A":per100<=10?"B":per100<=20?"C":per100<=40?"D":"E";
-}
-
-/* ---------------- UI ---------------- */
+/* ======== dashboard: UI ======== */
 const $ = s=>document.querySelector(s);
 let uploaded = [], lastResult = null;
 let fSev = new Set(), fType = new Set(), fText = "";
@@ -1151,12 +3153,15 @@ $("#files").addEventListener("change", async e=>{
   // collect it, keep going, and always repaint so the UI never shows a stale
   // selection while pasted code would silently still be scanned.
   // Files over the size limit aren't read at all: they become an
-  // SC-TRUNCATED finding (scanFile), not a frozen tab.
-  const settled = await Promise.allSettled(fileArr.map(f=>f.size > MAX_FILE_BYTES ? Promise.resolve("") : f.text()));
+  // SC-TRUNCATED finding (scanFile), not a frozen tab. The rest are read as
+  // bytes and decoded like the CLI decodes a source file (decodeUpload).
+  const settled = await Promise.allSettled(fileArr.map(f=>f.size > MAX_FILE_BYTES ? Promise.resolve(null) : f.arrayBuffer()));
   settled.forEach((r, k)=>{
     if(r.status === "fulfilled"){
       const f = fileArr[k];
-      uploaded.push({name:f.name, content:r.value, size:f.size, lang:detectLang(f.name, r.value)});
+      uploaded.push(r.value === null
+        ? {name:f.name, content:"", size:f.size, lang:langFromName(f.name) || detectLang(f.name, "")}
+        : decodeUpload(f.name, new Uint8Array(r.value), f.size));
     }else{
       const reason = r.reason && r.reason.message ? r.reason.message : String(r.reason);
       readErrs.push({name:fileArr[k].name, reason});
@@ -1183,28 +3188,8 @@ $("#scanBtn").addEventListener("click", ()=>{
 });
 
 function runScan(files){
-  let issues = [];
-  for(const f of files) issues = issues.concat(scanFile(f));
-  issues.sort((a,b)=>SEV_ORDER[a.sev]-SEV_ORDER[b.sev] || a.file.localeCompare(b.file) || a.line-b.line);
-  const metrics = computeMetrics(files);
-  const counts = {VULN:0,HOTSPOT:0,BUG:0,SMELL:0};
-  issues.forEach(i=>counts[i.type]++);
-  const secRating = worstSevRating(issues, ["VULN"]);
-  const relRating = worstSevRating(issues, ["BUG"]);
-  const mntRating = maintainabilityRating(issues, metrics.ncloc);
-  const conds = [
-    {label:"No blocker issues", ok: !issues.some(i=>i.sev==="BLOCKER")},
-    {label:"No critical vulnerabilities", ok: !issues.some(i=>i.type==="VULN" && (i.sev==="CRITICAL"||i.sev==="BLOCKER"))},
-    {label:"Duplication < 10%", ok: metrics.dupPct < 10},
-    {label:"Maintainability ≥ C", ok: "ABC".includes(mntRating)},
-  ];
-  const supply = issues.filter(i=>i.rule.startsWith("SC-")).length;
-  conds.push({label:"No supply-chain indicators", ok: supply===0});
-  const pass = conds.every(c=>c.ok);
-  lastResult = {files:files.map(f=>f.name), scannedAt:new Date().toISOString(), pass, conds, metrics, counts,
-    supplyChain: supply,
-    ratings:{security:secRating, reliability:relRating, maintainability:mntRating}, issues};
-  renderOverview(); renderFilters(issues); renderIssues();
+  lastResult = buildResult(files);
+  renderOverview(); renderFilters(lastResult.issues);
   curPage = 0; renderIssues();   // new result set → restart at page 1 (a paged-away state must not leak into a new scan)
   $("#overview").style.display="block"; $("#issuesPanel").style.display="block";
   $("#overview").scrollIntoView({behavior:"smooth"});

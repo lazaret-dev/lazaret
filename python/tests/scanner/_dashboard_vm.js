@@ -8,7 +8,9 @@
 //   {op: "scanFile", file: {name, content, lang?, size?}} -> issues
 //   {op: "runScan", files: [...]}                         -> lastResult
 //   {op: "export"}                                        -> {filename, text} of the export download
-//   {op: "upload", files: [{name, content, size?}]}       -> files the page accepted (name, lang, size, contentLength)
+//   {op: "upload", files: [{name, content|b64, size?}]}   -> files the page accepted (name, lang, size, contentLength)
+//   {op: "uploadScan", files: [{name, content|b64}]}       -> each accepted file's findings (analyzeFile)
+//   (content is sent as UTF-8 bytes; b64 is the file's raw bytes, base64)
 //   {op: "eval", expr}                                    -> value of expr in the page's scope
 "use strict";
 const fs = require("node:fs");
@@ -49,10 +51,24 @@ const URL_ = {
   revokeObjectURL() {},
 };
 const context = vm.createContext({
-  document, Blob, URL: URL_, alert() {}, console, TextEncoder, setTimeout, clearTimeout,
+  document, Blob, URL: URL_, alert() {}, console, TextEncoder, TextDecoder, setTimeout, clearTimeout,
 });
 vm.runInContext(scripts[0][1], context, { filename: "lazaret.html#script" });
 const inPage = (expr) => vm.runInContext(expr, context);
+
+/** Pick `files` in the page's upload control (File-like objects: name, size, arrayBuffer()). */
+async function upload(reqFiles) {
+  const input = document.querySelector("#files");
+  const files = reqFiles.map((f) => {
+    const bytes = f.b64 !== undefined ? Buffer.from(f.b64, "base64") : Buffer.from(f.content, "utf8");
+    return {
+      name: f.name,
+      size: f.size !== undefined ? f.size : bytes.length,
+      arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.length),
+    };
+  });
+  for (const fn of input.listeners.change || []) await fn({ target: { files } });
+}
 
 async function handle(req) {
   switch (req.op) {
@@ -73,16 +89,12 @@ async function handle(req) {
       if (!a) return null;
       return { filename: a.download, text: blobs.get(a.href).text };
     }
-    case "upload": {
-      const input = document.querySelector("#files");
-      const files = req.files.map((f) => ({
-        name: f.name,
-        size: f.size !== undefined ? f.size : Buffer.byteLength(f.content, "utf8"),
-        text: async () => f.content,
-      }));
-      for (const fn of input.listeners.change || []) await fn({ target: { files } });
-      return JSON.parse(inPage(
-        "JSON.stringify(uploaded.map(f=>({name:f.name, lang:f.lang, size:f.size, contentLength:f.content.length})))"));
+    case "upload":
+    case "uploadScan": {
+      await upload(req.files);
+      return JSON.parse(inPage(req.op === "upload"
+        ? "JSON.stringify(uploaded.map(f=>({name:f.name, lang:f.lang, size:f.size, contentLength:f.content.length})))"
+        : "JSON.stringify(uploaded.map(f=>analyzeFile(f)))"));
     }
     case "eval":
       return JSON.parse(JSON.stringify(inPage(req.expr)));
