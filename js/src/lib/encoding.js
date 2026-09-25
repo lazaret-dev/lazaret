@@ -20,6 +20,26 @@ export function sniffEncoding(buf) {
   return { encoding: "utf-8", bom: 0 };
 }
 
+/**
+ * core._text_is_plausible: does a BOM-less UTF-16 guess (a NUL in the first
+ * four bytes, no BOM) read as text? A UTF-8 file with a NUL near the top
+ * (`/*\0*\/eval(…)`) decodes to CJK-looking garbage under UTF-16; real
+ * UTF-16 source is mostly ASCII. Plausible when at least 70% of the first
+ * 2048 characters (code points, as Python counts them) are ' '..'~' or
+ * TAB / LF / CR.
+ */
+export function textIsPlausible(text) {
+  if (!text) return false;
+  let n = 0, plain = 0;
+  for (const ch of text) {
+    if (n === 2048) break;
+    n++;
+    const c = ch.codePointAt(0);
+    if ((c >= 0x20 && c <= 0x7e) || c === 9 || c === 10 || c === 13) plain++;
+  }
+  return plain / n >= 0.70;
+}
+
 // ---- PEP 263 cookies (spec 15) --------------------------------------------
 // core._PY_COOKIE_RE / _PY_BLANK_RE (bytes patterns: \w is ASCII).
 const COOKIE_RE = /^[ \t\f]*#[^\n]*?coding[:=][ \t]*([-\w.]+)/;
@@ -148,13 +168,22 @@ function decodeWith(codec, buf) {
  * Decode a source file's bytes the way its interpreter reads them (twin of
  * core.decode_source). Returns {text, encoding, reported, utf7, cookieLine}:
  * reported → Q-ENCODING ("detected <encoding>"); utf7 → SC-UTF7 at
- * cookieLine. BOM / NUL sniff first (spec 4); for Python source without a
+ * cookieLine. BOM / NUL sniff first (spec 4; a BOM-less UTF-16 guess only
+ * when textIsPlausible, else plain UTF-8); for Python source without a
  * BOM or NUL, a PEP 263 cookie naming a codec other than UTF-8 decodes with
  * that codec (spec 15); an unknown codec decodes as UTF-8 with replacement.
  * Never throws on content.
  */
 export function decodeSource(buf, { py = false } = {}) {
-  const sniff = sniffEncoding(buf);
+  let sniff = sniffEncoding(buf);
+  if (sniff.bom === 0 && sniff.encoding.startsWith("utf-16")
+      && !textIsPlausible(decodeWith(sniff.encoding, buf.subarray(0, 4096)))) {
+    // A NUL near the top of a UTF-8 file (`/*\0*/eval(…)`) is not UTF-16:
+    // decoded that way the payload turns into CJK-looking garbage that no
+    // rule reads. Accept the BOM-less UTF-16 guess only when it reads as
+    // text (real UTF-16 source is mostly ASCII) — as core.decode_source.
+    sniff = { encoding: "utf-8", bom: 0 };
+  }
   let codec = sniff.encoding;
   const body = buf.subarray(sniff.bom);
   const info = { encoding: codec, reported: codec !== "utf-8", utf7: false, cookieLine: null };

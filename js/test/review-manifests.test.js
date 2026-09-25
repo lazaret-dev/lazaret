@@ -64,7 +64,7 @@ test("binding.gyp: Python-literal syntax, actions anywhere, command expansions",
 test("a hostile-depth manifest is SC-MANIFEST-DEPTH (V8's JSON.parse would not recurse)", () => {
   const deep = '{"a":' + "[".repeat(5000) + "]".repeat(5000) + "}";
   assert.deepEqual(brief(scanManifest("package.json", deep)), [["SC-MANIFEST-DEPTH", 1, "CRITICAL",
-    "Manifest is too deeply nested to parse (recursion limit hit)."]]);
+    "Manifest is too deeply nested to parse (more than 500 levels)."]]);
   assert.deepEqual(brief(scanGyp("binding.gyp", deep)).map((x) => x[0]), ["SC-MANIFEST-DEPTH"]);
 });
 

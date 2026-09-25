@@ -1754,6 +1754,27 @@ def db_json(obj):
     return json.dumps(_db_clean(obj), ensure_ascii=False)
 
 
+# Insecure escape hatches for a Postgres state DB that still authenticates
+# with MD5 or a cleartext password. lazaret.pg refuses both over TLS whose
+# certificate is not verified (sslmode=prefer/require, the default is
+# prefer): a man-in-the-middle terminating TLS could relay the MD5 response
+# or read the password. Its opt-outs are keyword arguments of pg.connect(),
+# not libpq parameters — the DSN parser rejects them as unknown — so a
+# LAZARET_DB DSN cannot carry them. Set one of these variables to "1" to
+# opt in; prefer sslmode=verify-full or a SCRAM-SHA-256 role instead.
+PG_INSECURE_AUTH_ENV = {
+    "LAZARET_PG_ALLOW_MD5_OVER_UNVERIFIED_TLS": "allow_md5_over_unverified_tls",
+    "LAZARET_PG_ALLOW_CLEARTEXT_PASSWORD": "allow_cleartext_password",
+}
+
+
+def pg_insecure_auth_options(environ=None):
+    """pg.connect() keyword arguments enabled by PG_INSECURE_AUTH_ENV
+    (exactly "1" enables one; anything else leaves lazaret.pg's refusal)."""
+    env = os.environ if environ is None else environ
+    return {kw: True for var, kw in PG_INSECURE_AUTH_ENV.items() if env.get(var) == "1"}
+
+
 class Store:
     def __init__(self, dsn):
         kind, target = classify_dsn(dsn)
@@ -1771,9 +1792,11 @@ class Store:
             # lazaret_pg client — no external driver, nothing to pip-install.)
             try:
                 self.conn = lazaret_pg.connect(   # DSN should target a dedicated lazaret DB
-                    target, timeout=30, application_name="lazaret")
+                    target, timeout=30, application_name="lazaret",
+                    **pg_insecure_auth_options())
             except (lazaret_pg.Error, OSError) as exc:
                 raise RuntimeError(f"Postgres backend unreachable: {exc}") from exc
+            self._pg_errors = lazaret_pg
             self.ph, self.t = "$1", ""
         else:
             import sqlite3
@@ -1856,11 +1879,42 @@ class Store:
                     f"ON {self.t}scans(package_id, scanned_at DESC)")
         self.conn.commit()
 
+    def _pg_call(self, run):
+        """Run one self-contained Postgres operation, run() -> result, and
+        survive a dropped session. The MCP server and scan-all keep a Store
+        open for a long time; an admin shutdown or pg_terminate_backend
+        (57P01), idle_session_timeout (57P05) or a network blip ends the
+        session, and every later call used to fail with "connection is
+        closed" until the process restarted.
+
+        A connection already found closed (lost during an earlier call) is
+        reopened first. An OperationalError from run() is followed by ONE
+        conn.reconnect() and ONE retry; a second failure, or a failed
+        reconnect (server still down), propagates. Never inside a
+        transaction: when the caller has a transaction open, run() is not
+        retried (a lone retried statement would silently drop the ones
+        before it), and reconnect() itself refuses inside a transaction()
+        block. run() may be a whole transaction() block of Store's own
+        (save_scan): it is retried only as a whole, after the block has
+        been left and rolled back. Every Store write is an idempotent
+        upsert, so a retry after a lost COMMIT acknowledgement is safe
+        (add_package's `created` flag may then read False)."""
+        conn = self.conn
+        if conn.closed:
+            conn.reconnect()
+        elif conn.in_transaction:
+            return run()                  # the caller's transaction: never retried
+        try:
+            return run()
+        except self._pg_errors.OperationalError:
+            conn.reconnect()
+            return run()
+
     def _one(self, sql, args=()):
         if self.pg:
             # wire client: fetchrow(sql, *args) with $n placeholders already
             # written into the SQL by the caller
-            return self.conn.fetchrow(sql, *args)
+            return self._pg_call(lambda: self.conn.fetchrow(sql, *args))
         cur = self.conn.cursor()
         cur.execute(sql, args)
         return cur.fetchone()
@@ -1882,13 +1936,13 @@ class Store:
             # writers on the same id; (xmax = 0) reports whether THIS call
             # created the row (False when it already existed, exactly like the
             # old DO NOTHING + SELECT fallback).
-            row = self.conn.fetchrow(
+            row = self._pg_call(lambda: self.conn.fetchrow(
                 f"INSERT INTO {self.t}packages (ecosystem,name,added_at) "
                 f"VALUES ($1,$2,$3) "
                 f"ON CONFLICT (ecosystem,name) DO UPDATE "
                 f"SET added_at={self.t}packages.added_at "
                 f"RETURNING id, (xmax = 0) AS created",
-                eco, _db_text(name), now)
+                eco, _db_text(name), now))
             return row[0], row[1]
         cur = self.conn.cursor()
         # SQLite: single write that is a no-op if the row exists (keeps the
@@ -1915,7 +1969,7 @@ class Store:
         if self.pg:
             # wire client: fetch() rows are tuple-subclass Rows — positional
             # unpacking (id, eco, name) works unchanged
-            return self.conn.fetch(sql)
+            return self._pg_call(lambda: self.conn.fetch(sql))
         cur = self.conn.cursor()
         cur.execute(sql)
         return cur.fetchall()
@@ -1970,11 +2024,15 @@ class Store:
             # The wire client's transaction() gives the single-atomic-statement
             # guarantee (commit on success, rollback on exception). ::jsonb
             # casts the dumps'd text into the JSONB columns (sqlite stores TEXT).
-            with self.conn.transaction():
-                self.conn.execute(
-                    columns + "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,"
-                              f"$14::jsonb,$15::jsonb) {conflict_key}",
-                    *values)
+            # _pg_call retries the WHOLE block once after a dropped session
+            # (the upsert is idempotent), never a statement inside it.
+            def upsert():
+                with self.conn.transaction():
+                    self.conn.execute(
+                        columns + "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,"
+                                  f"$14::jsonb,$15::jsonb) {conflict_key}",
+                        *values)
+            self._pg_call(upsert)
             return
         cur = self.conn.cursor()
         try:
@@ -1995,7 +2053,7 @@ class Store:
               ORDER BY scanned_at DESC, id DESC LIMIT 1)
             ORDER BY p.ecosystem, p.name""")
         if self.pg:
-            return self.conn.fetch(sql)
+            return self._pg_call(lambda: self.conn.fetch(sql))
         cur = self.conn.cursor()
         cur.execute(sql)
         return cur.fetchall()

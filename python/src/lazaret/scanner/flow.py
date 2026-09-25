@@ -52,13 +52,16 @@ from lazaret.scanner import taintspec
 # BY lazaret, so it keeps a byte-identical local duplicate rather than
 # importing it (no import cycle). test_terminal_sanitize.py asserts the two
 # agree on a hostile matrix. Mapped set: every C0 control byte except TAB
-# (0x09) and LF (0x0a), plus CR (0x0d) and DEL (0x7f) — ESC/BEL, the two
-# bytes of the audit PoC, are inside these ranges.
+# (0x09) and LF (0x0a), plus CR (0x0d), DEL (0x7f), the C1 controls
+# U+0080–U+009F and the bidi controls U+202A–U+202E, U+2066–U+2069 — ESC/BEL,
+# the two bytes of the audit PoC, are inside these ranges.
 _SANITIZE_TERM_CHARS = (
     "".join(chr(n) for n in range(0x00, 0x09))      # NUL … BS
     + "".join(chr(n) for n in (0x0b, 0x0c))         # VT, FF
     + "".join(chr(n) for n in range(0x0d, 0x20))    # CR, SO … US (incl. ESC)
-    + chr(0x7f)                                     # DEL
+    + "".join(chr(n) for n in range(0x7f, 0xa0))    # DEL, C1 controls (incl. CSI)
+    + "".join(chr(n) for n in range(0x202a, 0x202f))  # bidi LRE RLE PDF LRO RLO
+    + "".join(chr(n) for n in range(0x2066, 0x206a))  # bidi LRI RLI FSI PDI
 )
 _SANITIZE_TERM_TAB = str.maketrans(
     {ch: "·" for ch in _SANITIZE_TERM_CHARS})
@@ -1745,11 +1748,23 @@ def _js_param_dangerous(seg, p, cat):
     return re.search(r"\b%s\b" % pe, seg) is not None
 
 
+def _js_text(content):
+    """JS source as the pattern engine numbers its lines (core.source_lines,
+    shared semantics 1): U+2028 / U+2029 are ECMAScript line terminators, so
+    they end a line like LF. Same length as content (one character for one),
+    so offsets, the size cap and the masked code stay aligned; X-* line
+    numbers and snippets then match core's findings on the same file."""
+    if "\u2028" in content or "\u2029" in content:
+        return content.replace("\u2028", "\n").replace("\u2029", "\n")
+    return content
+
+
 def _analyze_js(files, findings):
     # summary: fname -> set of param names reaching a sink (with category)
     summaries = {}   # name -> (params, dict(param -> category))
     fn_defs = {}     # name -> (file, start_line)
     js_files = [f for f in files if f["lang"] == "js"]
+    texts = {id(f): _js_text(f["content"]) for f in js_files}   # U+2028/9 -> \n
     codes = {}       # id(file) -> masked code (_js_mask), computed once
     # G3 fix: the old version was quadratic/memory-explosive on adversarial
     # input — per-match char-by-char brace scans to EOF, whole-body string
@@ -1763,7 +1778,7 @@ def _analyze_js(files, findings):
     # propagation. Files above _JS_MAX_FILE are skipped with an INFO
     # finding so the blind spot is visible rather than silent (audit G3).
     for f in js_files:
-        content = f["content"]
+        content = texts[id(f)]
         if len(content) > _JS_MAX_FILE:
             findings.append({
                 "rule": "X-FLOW-SKIPPED", "name": "JS flow analysis skipped (size)",
@@ -1823,12 +1838,13 @@ def _analyze_js(files, findings):
     # scan call sites: a source-derived variable passed into a summarized function
     call_re = re.compile(r"\b(\w+)\s*\(([^;()]*)\)")
     for f in js_files:
-        if len(f["content"]) > _JS_MAX_FILE:
+        content = texts[id(f)]
+        if len(content) > _JS_MAX_FILE:
             continue   # already reported above
-        lines = f["content"].split("\n")
+        lines = content.split("\n")
         code = codes.get(id(f))
         if code is None:
-            code = _js_mask(f["content"])
+            code = _js_mask(content)
         code_lines = code.split("\n")
         # per-file tainted-var set. Find variable declarations/assignments
         # anywhere (not just at line start) so `foo(){ const q=req.query.q; ... }`

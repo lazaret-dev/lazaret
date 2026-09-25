@@ -2878,17 +2878,51 @@ def _sc_install_hook_issue(path, line_no, lines, script, cmd, suspicious, sev=No
     issue["cmd"] = cmd   # lets the registry follow the hook to the script it runs
     return issue
 
+# Nesting limit for manifests (package.json, binding.gyp): deeper documents are
+# SC-MANIFEST-DEPTH. Measured explicitly (json_depth_exceeds) instead of
+# waiting for json.loads to hit the interpreter's recursion limit, which sits
+# near 995 levels on Python 3.10/3.11 and near 10,000 on 3.12+ — so the same
+# manifest used to be a finding on one interpreter and parse on another, and
+# disagree with the npm engine (pycompat.js MAX_JSON_DEPTH, the same 500).
+MAX_MANIFEST_DEPTH = 500
+MANIFEST_DEPTH_MSG = (f"Manifest is too deeply nested to parse (more than "
+                      f"{MAX_MANIFEST_DEPTH} levels).")
+_JSON_STRING_RE = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"?', re.S)   # unterminated: to the end
+_NOT_BRACKET_RE = re.compile(r"[^\[\]{}]+")
+
+
+def json_depth_exceeds(text, limit=MAX_MANIFEST_DEPTH):
+    """True if `text` nests [ / { deeper than `limit`, counting only brackets
+    outside JSON (double-quoted) strings — twin of the npm engine's
+    jsonDepthExceeds. Linear: the strings and everything but brackets are
+    stripped by two non-backtracking regexes, and the remaining brackets are
+    walked only when there are more openers than the limit."""
+    brackets = _NOT_BRACKET_RE.sub("", _JSON_STRING_RE.sub("", text))
+    if brackets.count("[") + brackets.count("{") <= limit:
+        return False
+    depth = 0
+    for ch in brackets:
+        if ch in "[{":
+            depth += 1
+            if depth > limit:
+                return True
+        else:
+            depth -= 1
+    return False
+
+
 def _sc_manifest_depth_issue(path):
     """48033f94: a pathologically deep-nested manifest (e.g. 60k+ '[' bytes)
     blows json.loads' recursion limit. The old code crashed the CLI (exit 1,
     results lost) and in registry mode suppressed every other finding in the
     package (scan recorded as 'error' instead of reporting). Both are wins for
     a hostile repo, so this is reported as a CRITICAL supply-chain finding —
-    never a crash, never a silent skip."""
+    never a crash, never a silent skip. Anything nested deeper than
+    MAX_MANIFEST_DEPTH gets it, whatever the interpreter's recursion limit."""
     return mk_issue(
         {"id": "SC-MANIFEST-DEPTH", "name": "Hostile manifest nesting depth",
          "type": "HOTSPOT", "sev": "CRITICAL",
-         "msg": "Manifest is too deeply nested to parse (recursion limit hit).",
+         "msg": MANIFEST_DEPTH_MSG,
          "why": ("A manifest nested this deep cannot be produced by any real "
                  "build tool — it exists purely to crash or blind security "
                  "scanners. Treating it as data would silently drop every "
@@ -2933,8 +2967,10 @@ def load_manifest(path, content, python_literal=False):
     manager does. -> (data, issues).
 
     A leading UTF-8 BOM is stripped first (npm does). data is None when the
-    text cannot be parsed; issues then holds SC-MANIFEST-DEPTH for a
-    recursion-limit document, or SC-MANIFEST-UNPARSEABLE when the manifest
+    text cannot be parsed; issues then holds SC-MANIFEST-DEPTH for a document
+    nested deeper than MAX_MANIFEST_DEPTH (checked before parsing, so the
+    result does not depend on the interpreter's recursion limit or on where
+    a syntax error sits), or SC-MANIFEST-UNPARSEABLE when the manifest
     is at the root (a nested unreadable manifest is not a hook npm runs).
     A top level that is not an object counts as unparseable too.
     python_literal: also accept Python literal syntax (binding.gyp / .gypi:
@@ -2944,10 +2980,12 @@ def load_manifest(path, content, python_literal=False):
         return None, ([manifest_unparseable_issue(path, "not text")]
                       if is_root_manifest(path) else [])
     text = content[1:] if content.startswith("\ufeff") else content
+    if json_depth_exceeds(text):
+        return None, [_sc_manifest_depth_issue(path)]
     reason = None
     try:
         data = json.loads(text, parse_int=_json_int)
-    except RecursionError:
+    except RecursionError:              # backstop: a deep caller stack
         return None, [_sc_manifest_depth_issue(path)]
     except (ValueError, TypeError) as exc:
         data = None
@@ -2973,7 +3011,7 @@ def load_manifest(path, content, python_literal=False):
 
 def _json_loads_manifest(path, content):
     """Backwards-compatible wrapper: (data, depth_issue). data is None on any
-    parse failure; depth_issue is SC-MANIFEST-DEPTH for recursion-limit input.
+    parse failure; depth_issue is SC-MANIFEST-DEPTH for too-deep input.
     New code uses load_manifest, which also reports unparseable roots."""
     data, issues = load_manifest(path, content)
     depth = next((i for i in issues if i["rule"] == "SC-MANIFEST-DEPTH"), None)
@@ -4032,14 +4070,24 @@ SEV_COLOR = {"BLOCKER": "41;97", "CRITICAL": "31", "MAJOR": "33", "MINOR": "36",
 # a terminal/CI log. safe_excerpt always did this for the code excerpt; the
 # file-path header, the issue messages and the registry print paths did not.
 # The mapped set: every C0 control byte except TAB (0x09) and LF (0x0a),
-# plus CR (0x0d) and DEL (0x7f). Built with chr() so the table is exact and
-# readable; ESC (0x1b) and BEL (0x07) — the two bytes the audit PoC used to
-# forge SGR colors and hijack the terminal title — are inside these ranges.
+# plus CR (0x0d), DEL (0x7f), the C1 controls U+0080–U+009F (0x9b is a
+# one-byte CSI introducer on many terminals, 0x9d an OSC) and the bidi
+# embedding/override/isolate controls U+202A–U+202E, U+2066–U+2069 (they
+# reorder what the terminal shows — Trojan Source). The npm engine's
+# sanitizeTerm maps exactly the same set. Built with chr() so the table is
+# exact and readable; ESC (0x1b) and BEL (0x07) — the two bytes the audit
+# PoC used to forge SGR colors and hijack the terminal title — are inside
+# these ranges.
+_BIDI_CONTROLS = (
+    "".join(chr(n) for n in range(0x202a, 0x202f))  # LRE RLE PDF LRO RLO
+    + "".join(chr(n) for n in range(0x2066, 0x206a))  # LRI RLI FSI PDI
+)
 _SANITIZE_TERM_CHARS = (
     "".join(chr(n) for n in range(0x00, 0x09))      # NUL … BS
     + "".join(chr(n) for n in (0x0b, 0x0c))         # VT, FF
     + "".join(chr(n) for n in range(0x0d, 0x20))    # CR, SO … US (incl. ESC)
-    + chr(0x7f)                                     # DEL
+    + "".join(chr(n) for n in range(0x7f, 0xa0))    # DEL, C1 controls (incl. CSI)
+    + _BIDI_CONTROLS
 )
 _SANITIZE_TERM_TAB = str.maketrans(
     {ch: "·" for ch in _SANITIZE_TERM_CHARS})
@@ -4051,7 +4099,8 @@ def sanitize_term(s):
     Hostile package content reaches the terminal via file paths (archive
     member names, walked repo paths), issue messages (X-FLOW source/sink
     paths, install-hook command text), registry metadata and config paths.
-    Every C0 control byte except newline and tab, plus CR and DEL, maps to
+    Every C0 control byte except newline and tab, plus CR, DEL, the C1
+    controls and the bidi controls (_SANITIZE_TERM_CHARS), maps to
     '·' — the line terminator is preserved so a multi-line message still
     prints as multiple lines (the existing behaviour), and tab is printable
     structure (safe_excerpt keeps tabs too). Same contract as safe_excerpt
@@ -4080,8 +4129,11 @@ EXCERPT_WIDTH = 100   # overridable via --excerpt-width
 def safe_excerpt(text, width=None):
     """Sanitize a source line for terminal display. Scanned code may be hostile
     (esp. packages), so strip ANSI/control bytes that could rewrite the terminal
-    — ESC, CR, BS, BEL, NUL — replacing them with '·'. Tabs become spaces, the
-    line is trimmed and truncated with an ellipsis."""
+    — ESC, CR, BS, BEL, NUL, C1 controls, bidi controls and anything else
+    str.isprintable() rejects — replacing them with '·'. Tabs become spaces,
+    the line is trimmed and truncated with an ellipsis. (Twin of the npm
+    engine's safeExcerpt; the bidi controls are named explicitly there and
+    here so the result does not hang on a Unicode database's category.)"""
     if width is None:
         width = EXCERPT_WIDTH
     text = text.replace("\t", " ").strip()
@@ -4090,7 +4142,8 @@ def safe_excerpt(text, width=None):
     out = []
     for ch in text[:width]:
         o = ord(ch)
-        if ch == " " or 0x20 <= o < 0x7f or (o > 0xa0 and ch.isprintable()):
+        if ch == " " or 0x20 <= o < 0x7f or (
+                o > 0xa0 and ch.isprintable() and ch not in _BIDI_CONTROLS):
             out.append(ch)
         else:
             out.append("·")
