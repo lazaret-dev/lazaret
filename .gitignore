@@ -1,7 +1,21 @@
-# secrets: never commit
+# secrets: never commit (scripts/make_bundle.py refuses the same names)
 .env
 .env.*
 !.env.example
+.envrc
+.npmrc
+.pypirc
+.netrc
+_netrc
+.git-credentials
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_dsa*
+id_ecdsa*
+id_ed25519*
 
 # python
 __pycache__/

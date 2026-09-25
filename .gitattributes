@@ -1,0 +1,27 @@
+# Every text file is checked out with LF line endings, on Windows too
+# (Git for Windows' core.autocrlf would otherwise write CRLF). The release
+# artifacts, the dashboard's CSP script hash and scripts/*.sh all depend on the
+# committed bytes. The Python build backend also packs text as LF, so a CRLF
+# checkout can't change a wheel or sdist either.
+* text=auto eol=lf
+
+# Binary files: never converted or diffed as text. No binary fixture is
+# committed today; these cover the kinds the tests generate or might add.
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.whl binary
+*.zip binary
+*.tar binary
+*.gz binary
+*.tgz binary
+*.pyc binary
+*.db binary
+*.sqlite binary
+*.node binary
+*.wasm binary
+*.so binary
+*.dll binary
+*.exe binary

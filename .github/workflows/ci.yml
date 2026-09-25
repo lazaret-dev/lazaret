@@ -46,7 +46,13 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:17
+        # Pinned by digest (the multi-arch index of postgres:17 = 17.11). Resolved
+        # 2026-09-25 from docker-library/repo-info (repos/postgres/remote/17.md),
+        # which mirrors Docker Hub; Docker Hub itself was not reachable from the
+        # machine that made this change. Verify or update with:
+        #   docker buildx imagetools inspect postgres:17
+        # Dependabot does not update service images: bump this by hand.
+        image: postgres:17.11@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f
         env:
           POSTGRES_PASSWORD: lazaret-ci
           POSTGRES_DB: lazaret_test
