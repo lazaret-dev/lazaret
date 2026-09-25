@@ -253,6 +253,10 @@ class NonUtf8Names(unittest.TestCase):
         files = by_file(report)
         self.assertIn("S-EVAL-PY", files["bad\\xff.py"])
         self.assertIn("S-EVAL-JS", files["d\\xfe/x.js"])
+        sarif = json.loads(blobs["r.sarif"])
+        uris = {r["locations"][0]["physicalLocation"]["artifactLocation"]["uri"]
+                for r in sarif["runs"][0]["results"]}
+        self.assertIn("bad%5Cxff.py", uris)
 
 
 class RepeatedCalls(unittest.TestCase):

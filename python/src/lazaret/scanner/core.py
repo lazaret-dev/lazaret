@@ -1938,8 +1938,12 @@ def scan_gyp(path, content):
     return issues
 
 import codecs as _codecs
+import pathlib as _pathlib
 import stat as _stat
 import traceback as _traceback
+import urllib.parse as _urlparse
+
+import lazaret as _lazaret_pkg   # __version__ (the package root imports nothing)
 
 # ---------------- File collection (the project walk) ----------------
 # The walk is the attack surface a hostile repository controls completely, so:
@@ -2911,30 +2915,74 @@ def _html_report_marked(res):
         lazaret_report.HTML_ENGINE_MARKER + '\n<meta name="viewport"',
         1)
 
-def sarif_report(res):
+#: SARIF run-level base for every repo-relative artifactLocation.
+SARIF_SRCROOT = "%SRCROOT%"
+LAZARET_INFORMATION_URI = "https://lazaret.dev"
+SARIF_SCHEMA = "https://json.schemastore.org/sarif-2.1.0.json"
+
+
+def sarif_uri(path):
+    """A report path as a SARIF artifactLocation: (uri, uriBaseId or None).
+
+    Review item 8: the uri used to be the raw path — 'my dir/a#1%2.py'
+    verbatim, so '#' started a fragment and '%2.' was a broken escape. Now a
+    root-relative path becomes a percent-encoded relative reference (RFC
+    3986, '/' separators) resolved against %SRCROOT%; an absolute path
+    becomes a file: URI."""
+    p = _safe_text(path)
+    if os.path.isabs(p):
+        return _pathlib.Path(p).as_uri(), None
+    if os.sep != "/":
+        p = p.replace(os.sep, "/")
+    return _urlparse.quote(p, safe="/"), SARIF_SRCROOT
+
+
+def _root_uri(root):
+    uri = _pathlib.Path(os.path.abspath(os.fspath(root))).as_uri()
+    return uri if uri.endswith("/") else uri + "/"
+
+
+def sarif_report(res, root=None):
+    """SARIF 2.1.0 log for a scan result. `root` is the scan root (defaults
+    to res['project']); it becomes originalUriBaseIds['%SRCROOT%']."""
     # L1: sarif_report receives the result AFTER redact_result has swept it,
     # and it emits no snippet text — but it does embed issue msg/why/fix
     # strings from the result. Defensively sweep here too so a future caller
     # that skips the main() pass cannot ship an unredacted result into SARIF.
     redact_result(res)
-    rules_seen, results = {}, []
+    rules_seen, rule_index, results = {}, {}, []
     for i in res["issues"]:
-        rules_seen.setdefault(i["rule"], {
-            "id": i["rule"], "name": i["name"],
-            "shortDescription": {"text": i["name"]},
-            "fullDescription": {"text": i["why"]},
-            "help": {"text": i["fix"]}})
+        if i["rule"] not in rules_seen:
+            rule_index[i["rule"]] = len(rules_seen)
+            rules_seen[i["rule"]] = {
+                "id": i["rule"], "name": i["name"],
+                "shortDescription": {"text": i["name"]},
+                "fullDescription": {"text": i["why"]},
+                "help": {"text": i["fix"]}}
+        uri, base = sarif_uri(i["file"])
+        loc = {"uri": uri}
+        if base:
+            loc["uriBaseId"] = base
+        try:
+            line = max(1, int(i.get("line") or 1))
+        except (TypeError, ValueError):
+            line = 1
         results.append({
-            "ruleId": i["rule"], "level": SARIF_LEVEL[i["sev"]],
+            "ruleId": i["rule"],
+            "ruleIndex": rule_index[i["rule"]],
+            "level": SARIF_LEVEL[i["sev"]],
             "message": {"text": i["msg"]},
             "locations": [{"physicalLocation": {
-                "artifactLocation": {"uri": i["file"].replace(os.sep, "/")},
-                "region": {"startLine": i["line"]}}}]})
-    return {"$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+                "artifactLocation": loc,
+                "region": {"startLine": line}}}]})
+    return {"$schema": SARIF_SCHEMA,
             "version": "2.1.0",
-            "runs": [{"tool": {"driver": {"name": "Lazaret", "version": "2.0.0",
-                                          "informationUri": "https://example.invalid/lazaret",
+            "runs": [{"tool": {"driver": {"name": "Lazaret",
+                                          "version": _lazaret_pkg.__version__,
+                                          "informationUri": LAZARET_INFORMATION_URI,
                                           "rules": list(rules_seen.values())}},
+                      "originalUriBaseIds": {SARIF_SRCROOT: {
+                          "uri": _root_uri(res["project"] if root is None else root)}},
                       "results": results}]}
 
 # ---------------- Baseline (new-code focus) ----------------
@@ -3237,7 +3285,7 @@ def _main(argv=None):
         if args.sarif:
             sarif_path = lazaret_report.write_report(
                 paths["sarif"],
-                lambda: lazaret_report.sarif_renderer(sarif_report(res)),
+                lambda: lazaret_report.sarif_renderer(sarif_report(res, root=args.directory)),
                 kind="sarif", strict=args.force_overwrite)
             print(f"  SARIF report: {sanitize_term(sarif_path)}")
         if not args.no_json:
