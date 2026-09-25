@@ -95,7 +95,8 @@ tests/
 ├── _bin/                  launchers equivalent to the installed console scripts,
 │                          plus registry_bootstrap.py (the registry with a faked network)
 ├── fixtures/              inert fixture trees and demo scan inputs (section 6)
-├── architecture/          rules about the code: stdlib-only imports, layering
+├── architecture/          rules about the code: stdlib-only imports, layering,
+│                          and JS/Python engine parity
 ├── build/                 the build backend and the typosquat stubs
 ├── scanner/               the engine, taint, reports, SCA, dashboard, bundle hygiene,
 │                          and the samples-corpus test
@@ -157,20 +158,30 @@ pytest also runs the suite unchanged, for anyone who prefers it, but nothing req
 
 ## 5. JavaScript package
 
-The npm package `lazaret` is zero-dependency and ES-module, tested with Node's built-in `node --test` (Node 22+).
+The npm package `lazaret` is a zero-dependency, ES-module port of the project scanner (the same rules, taint-flow and SQL-sink analyzers, and obfuscation/secret detection as `lazaret.scanner` and the browser dashboard), tested with Node's built-in `node --test` (Node 22+). Registry auditing, cross-file taint, and custom taint specs are Python-only.
 
 ```
 js/
-├── package.json         "files": bin/, src/, README.md, LICENSE (tests never ship)
-├── bin/lazaret.js       executable shim only
+├── package.json          "files": bin/, src/, README.md, LICENSE (tests never ship)
+├── bin/lazaret.js        executable shim only
 ├── src/
-│   ├── cli.js           CLI logic; returns an exit code rather than calling process.exit
-│   └── index.js         public exports
+│   ├── cli.js            `lazaret check <dir>`; returns an exit code (testable)
+│   ├── index.js          public exports
+│   ├── report.js         report format (JSON + HTML), terminal output
+│   ├── scanner/          rules, scan loop, taint, SQL sinks, functions, metrics
+│   └── lib/              leaf helpers: fs (collection, report paths), issue,
+│                         supplychain (install hooks, secret redaction);
+│                         never import src/scanner/
 └── test/
-    └── cli.test.js
+    ├── cli.test.js       the real CLI as a child process
+    ├── architecture.test.js   layering and ship policy
+    ├── lib/              install-hook classification
+    └── scanner/          hex decoding, private-key material
 ```
 
-As the npm scanner grows, it goes in `src/scanner/`, with any zero-dependency helpers in `src/lib/` (never importing the scanner), and `test/` mirrors `src/`. Tests needing a service or the samples checkout are gated with an in-test guard and named with a suffix so they're recognizable:
+**The two engines must agree.** `python/tests/architecture/test_js_parity.py` runs both CLIs on every fixture tree and on a synthetic project covering the false-positive fixes, and fails on any difference other than the listed Python-only features. When a rule changes in one engine, it changes in the other in the same commit; the JS twins of Python helpers say so in a comment (`Twin of lazaret.scanner.core....`).
+
+Tests needing a service or the samples checkout are gated with an in-test guard and named with a suffix so they're recognizable:
 
 ```js
 // test/scanner/detection.corpus.test.js

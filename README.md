@@ -10,6 +10,14 @@ pip install lazaret          # from PyPI: one package, zero dependencies
 
 This gives four commands: `lazaret` (project scanner), `lazaret-registry` (npm/PyPI package auditing), `lazaret-mcp` (MCP server), and `lazaret-sca` (dependency CVE matching). Each also runs as a module, e.g. `python -m lazaret`.
 
+On a machine with Node but no Python, the project scanner is also on npm, with the same rules and zero dependencies:
+
+```bash
+npx lazaret check .          # or: npm install -g lazaret
+```
+
+The npm package is the project scanner only; registry auditing, cross-file taint, custom taint specs, SCA and the MCP server come with the Python package. The two engines are tested to report identical findings.
+
 From a checkout, `pip install ./python` (or `pip install -e ./python` for development) works with no network access: Lazaret builds with its own standard-library build backend.
 
 ## Components

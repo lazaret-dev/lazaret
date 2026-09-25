@@ -1822,6 +1822,14 @@ def hook_script_targets(cmd):
     return targets
 
 
+def is_dependency_manifest(path):
+    """A manifest inside an installed-dependency directory (node_modules/, ...)
+    belongs to a package that came from a registry: only the scripts npm runs
+    for an installed dependency apply to it, not `prepare`."""
+    parts = path.replace("\\", "/").split("/")[:-1]
+    return any(part in DEP_MARKERS for part in parts)
+
+
 def scan_manifest(path, content, registry=False):
     """Check package.json / pyproject.toml install hooks — the primary
     supply-chain attack vector.
@@ -2608,7 +2616,8 @@ def main():
         if os.path.basename(mf["path"]) == "binding.gyp":
             issues.extend(scan_gyp(mf["path"], mf["content"]))
         else:
-            issues.extend(scan_manifest(mf["path"], mf["content"]))
+            issues.extend(scan_manifest(mf["path"], mf["content"],
+                                        registry=is_dependency_manifest(mf["path"])))
     # G10: skipped-directory accounting — INFO findings make the coverage gap
     # visible instead of silent.
     issues.extend(skipped_tree_issues())
