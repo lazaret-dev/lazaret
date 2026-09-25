@@ -2626,7 +2626,9 @@ def _scan_file(path, content, lines, lang, dep, ctx, issues):
         # issue so far, per line — 15.7 s on 20k lines; now a set lookup)
         if not cmask[i] and i not in secret_lines and not SECRET_SKIP_RE.search(line):
             em = ENTROPY_VALUE_RE.search(line)
-            if em and entropy_secretish(em.group(1)):
+            # the file's literal index holds exactly the entropy_secretish()
+            # literals of non-skip lines — computed once, shared with redaction
+            if em and em.group(1) in ctx.secrets().lits:
                 issues.append(mk_issue(
                     {"id": "S-ENTROPY", "name": "High-entropy string", "type": "HOTSPOT", "sev": "MAJOR",
                      "msg": "High-entropy string literal — possible hardcoded secret.",

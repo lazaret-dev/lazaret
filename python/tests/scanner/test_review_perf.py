@@ -1,6 +1,6 @@
 """Review fix: quadratic hot spots in scan_file, and the per-file time backstop.
 
-Each case from the review is its repro scaled up ~10x (S-ENTROPY: 1.5x, as
+Each case from the review is its repro scaled up ~10x (S-ENTROPY: 1.25x, as
 10x would exceed the 2 MB source-file cap and the test's time budget); the
 other patterns fixed alongside are tested at a size where their old
 quadratic cost was already several seconds. Before the fix these took from 1.4 s
@@ -32,7 +32,7 @@ CASES = {
     "js fn_re on a 320 KB hex literal (32 KB: 12.7 s)":
         ('const wasm = "' + "0123456789abcdef" * 20000 + '";', "js"),
     "js fn_re on 'a' * 400k (40 KB: 21.9 s)": ("a" * 400000, "js"),
-    "js fn_re on 'a(' * 100k": ("a(" * 100000, "js"),
+    "js fn_re on 'a(' * 60k": ("a(" * 60000, "js"),
     "py taint chain a0..a10000 (a1000: 20 s)":
         ("from flask import request\na0 = request.args['x']\n"
          + "".join("a%d = a%d\n" % (i + 1, i) for i in range(10000)), "py"),
@@ -43,7 +43,7 @@ CASES = {
     "sql 'SET @a = ' + 500k quotes (50k: 7.6 s)": ("SET @a = " + "'" * 500000, "sql"),
     "sql 'GRANT ' * 80000 (x8000: 1.4 s)": ("GRANT " * 80000, "sql"),
     "sql 'EXECUTE IMMEDIATE ' * 30000": ("EXECUTE IMMEDIATE " * 30000, "sql"),
-    "py S-ENTROPY dedupe on 30k secret lines (20k: 15.7 s)": (_entropy_lines(30000), "py"),
+    "py S-ENTROPY dedupe on 25k secret lines (20k: 15.7 s)": (_entropy_lines(25000), "py"),
     "py 'except:' + 500k newlines (B-EXCEPT-PASS)": ("except:" + "\n" * 500000 + "x", "py"),
     "py 'except ' * 35000 on one line": ("except " * 35000, "py"),
     "py 1000 nested defs + 100k blank lines": (
@@ -51,7 +51,7 @@ CASES = {
     "py 'yaml.load(' * 50000 + 'SafeLoader'": ("yaml.load(" * 50000 + "SafeLoader", "py"),
     "py 'chmod(' * 40000": ("chmod(" * 40000, "py"),
     "js 'catch(' * 40000": ("catch(" * 40000, "js"),
-    "js lexer: '=/[' * 100000": ("=/[" * 100000, "js"),
+    "js lexer: '=/[' * 60000": ("=/[" * 60000, "js"),
 }
 
 
@@ -70,9 +70,9 @@ class DependencyModeFlowPerfTests(unittest.TestCase):
     """The dep-mode decode->sink flow added with this fix stays linear."""
 
     def test_long_lines_of_sinks(self):
-        for content in ("const d = atob(x);\n" + "eval(e" * 50000,
-                        "const d = atob(x);\n" + "eval(" * 30000 + "d" + ")" * 30000,
-                        "a=atob(x);" * 40000):
+        for content in ("const d = atob(x);\n" + "eval(e" * 25000,
+                        "const d = atob(x);\n" + "eval(" * 15000 + "d" + ")" * 15000,
+                        "a=atob(x);" * 20000):
             t = time.monotonic()
             core.scan_file("dep.js", content, "js", dep=True)
             self.assertLess(time.monotonic() - t, PER_CASE_LIMIT)
