@@ -9,7 +9,7 @@ results for the same input. Runs both CLIs and compares:
 
 Inputs: every fixture tree, a synthetic project covering earlier
 false-positive fixes, and an ADVERSARIAL tree generated at test time (BOM /
-UTF-16 / UTF-7-cookie sources, .github/, node_modules/ scanned with and
+UTF-16 / UTF-7-cookie sources, a UTF-8 file with a NUL near the top, .github/, node_modules/ scanned with and
 without --deps, suppression tricks, a file with hundreds of findings, CRLF,
 Unicode identifiers, a bidi control, .pyc files, symlinks and special files
 where the OS supports them, files over the 2 MB limit). All fixture content
@@ -80,6 +80,10 @@ ADVERSARIAL = {
     "enc/utf7.py": b"# -*- coding: utf-7 -*-\n# harmless comment +AAo-eval(e)\n",
     "enc/latin1.py": b"# coding: latin-1\ns = '\xe9'\neval(f)\n",
     "enc/unknown.py": b"# coding: no-such-codec\neval(g)\n",
+    # a NUL near the top of a UTF-8 file is not BOM-less UTF-16 (the guess is
+    # kept only when the text reads as text); a genuine BOM-less UTF-16LE file is
+    "enc/nul-top.js": b"/*\x00*/eval(atob(\"Y29uc29sZS5sb2coMSk=\"))\n",
+    "enc/le16_nobom.py": "import os\nos.system(input())\n".encode("utf-16-le"),
     # .github is first-party code; .git is never scanned
     ".github/scripts/deploy.js": "eval(atob(payload))\n",
     ".git/hooks/pre-commit.js": "eval(hidden)\n",
@@ -310,6 +314,11 @@ class EngineParityTests(unittest.TestCase):
                                  "SC-PYC-UNCHECKED", "SC-BINARY", "SC-TRUNCATED", "SC-MANIFEST-UNPARSEABLE"):
                         self.assertIn(rule, rules)
                     self.assertEqual("Q-SKIPPED-TREE" in rules, True)
+                    found = {(i["rule"], i["file"]) for i in js[1]["issues"]}
+                    self.assertIn(("SC-EVAL-DECODE", "enc/nul-top.js"), found)
+                    self.assertNotIn(("Q-ENCODING", "enc/nul-top.js"), found)
+                    self.assertIn(("Q-ENCODING", "enc/le16_nobom.py"), found)
+                    self.assertIn(("S-OSCMD-PY", "enc/le16_nobom.py"), found)
 
     def test_usage_and_forced_exit_codes_agree(self):
         with tempfile.TemporaryDirectory() as tmp:
