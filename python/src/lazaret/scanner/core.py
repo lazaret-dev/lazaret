@@ -143,7 +143,11 @@ R("S-PICKLE", "Unsafe deserialization (pickle)", "VULN", "CRITICAL", ("py",),
   "Use JSON or another data-only format for untrusted input.",
   "CWE-502 · OWASP A08"),
 R("S-YAML", "Unsafe yaml.load", "VULN", "CRITICAL", ("py",),
-  r"yaml\.load\s*\((?![^)]*(SafeLoader|safe_load))",
+  # the look-ahead stops at the next yaml.load as well as at ')' — it used to
+  # rescan to the end of the line from every call ('yaml.load(' * 50k +
+  # 'SafeLoader': 7 s). An outer call whose only SafeLoader belongs to a
+  # nested yaml.load is now (correctly) flagged.
+  r"yaml\.load\s*\((?!(?:(?!yaml\.load)[^)])*(?:SafeLoader|safe_load))",
   "yaml.load without SafeLoader can instantiate arbitrary objects.",
   "Full YAML loading executes constructors from the document.",
   "Use yaml.safe_load() or Loader=yaml.SafeLoader.",
@@ -323,7 +327,7 @@ R("S-CLEARTEXT-PROTO", "Cleartext protocol module", "HOTSPOT", "MINOR", ("py",),
   "Use SSH/SFTP (e.g. paramiko) instead.",
   "CWE-319"),
 R("S-CHMOD", "Overly permissive file mode", "VULN", "MAJOR", ("py",),
-  r"chmod\s*\([^,)]*,\s*0o?7[67]7",
+  r"chmod\s*\([^,()]*,\s*0o?7[67]7",
   "File made world-writable (777/767).",
   "Any local user or process can modify the file.",
   "Use the least permissive mode that works (e.g. 0o600/0o644).",
@@ -392,11 +396,17 @@ R("SQL-XPCMD", "OS command execution via SQL", "VULN", "CRITICAL", ("sql",),
   "Keep xp_cmdshell disabled; use a vetted, sandboxed job runner instead.",
   "CWE-78 · OWASP A03", flags=re.I),
 R("SQL-DYNAMIC", "Dynamic SQL from concatenation", "VULN", "BLOCKER", ("sql",),
+  # Review fix: every unbounded [^;]* used to restart at each statement head
+  # ('SET @a = ' + 20k quotes: 7.6 s). The scans below stop at the next head
+  # of the same kind, and the SET form scans to its FIRST quote, so each
+  # character is examined a bounded number of times. A line matches iff the
+  # old pattern matched, except `SET @a = 'x' SET @b = 1 + 2` (two
+  # statements without ';'), which no longer counts as one.
   r"EXEC(?:UTE)?\s*\(\s*@?\w+\s*\+"
-  r"|EXECUTE\s+IMMEDIATE\b[^;]*\|\|"
-  r"|sp_executesql\b[^;]*\+"
+  r"|EXECUTE\s+IMMEDIATE\b(?:(?!EXECUTE\s+IMMEDIATE\b)[^;])*\|\|"
+  r"|sp_executesql\b(?:(?!sp_executesql\b)[^;])*\+"
   r"|EXEC\s*\(\s*['\"][^']*['\"]\s*\+"
-  r"|SET\s+@\w+\s*=[^;]*['\"][^;]*(?:\+|\|\|)",
+  r"|SET\s+@\w+\s*=(?:(?!SET\s+@)[^;'\"])*['\"](?:(?!SET\s+@)[^;])*(?:\+|\|\|)",
   "Dynamic SQL built by concatenating variables into the statement.",
   "String-built SQL executed with EXEC / EXECUTE IMMEDIATE / sp_executesql is SQL injection inside the database.",
   "Use parameterized dynamic SQL (sp_executesql with @params, or bind variables).",
@@ -417,7 +427,7 @@ R("SQL-GRANT-ALL", "Excessive privilege grant", "HOTSPOT", "MAJOR", ("sql",),
   "Grant only the specific privileges the role needs.",
   "CWE-732 · OWASP A01", flags=re.I),
 R("SQL-GRANT-PUBLIC", "Grant to PUBLIC", "HOTSPOT", "MAJOR", ("sql",),
-  r"\bGRANT\b[^;]*\bTO\s+PUBLIC\b",
+  r"\bGRANT\b(?:(?!\bGRANT\b)[^;])*\bTO\s+PUBLIC\b",   # linear: stops at the next GRANT
   "Privilege granted to PUBLIC (every user).",
   "PUBLIC grants apply to all current and future accounts, including low-trust ones.",
   "Grant to a specific role instead of PUBLIC.",
@@ -462,13 +472,15 @@ R("SQL-SELECT-STAR", "SELECT *", "SMELL", "MINOR", ("sql",),
 
 TEXT_RULES = [
 R("B-EMPTY-CATCH", "Empty catch block", "BUG", "MAJOR", ("js",),
-  r"catch\s*(\([^)]*\))?\s*\{\s*\}",
+  r"catch\s*(\([^()]*\))?\s*\{\s*\}",
   "Exception swallowed by empty catch.",
   "Errors vanish silently, making failures undiagnosable.",
   "Handle the error or at least log it.",
   "Reliability"),
 R("B-EXCEPT-PASS", "except: pass", "BUG", "MAJOR", ("py",),
-  r"except[^\n:]*:\s*\n\s*pass\b",
+  # linear: the old `:\s*\n\s*` backtracked over every newline run, and
+  # `except[^\n:]*` restarted at each 'except' on a long line
+  r"except(?:(?!except)[^\n:])*:[^\S\n]*\n\s*pass\b",
   "Exception swallowed with pass.",
   "Errors vanish silently, making failures undiagnosable.",
   "Handle the error or at least log it.",
@@ -786,6 +798,14 @@ def apply_taint_config(cfg):
                     continue
                 _PARTIAL_SAN[lang][suf] = new_re
 
+# Identifier runs for carrier matching. A variable v "appears" in a text iff
+# it equals one of these maximal runs — the old per-variable `\bv\b` regex
+# test, done as one findall + set lookups. (One compiled regex per tainted
+# variable thrashed re's 512-pattern cache: an a1=a0 … a1000=a999 chain took
+# 20 s.) For JS, `$` counts as an identifier character.
+_IDENT_RUN_RE = {"py": re.compile(r"\w+"), "js": re.compile(r"[\w$]+")}
+
+
 def taint_scan(path, lines, lang, ctx=None):
     if lang not in TAINT_SOURCES:   # SQL and others: pattern rules only, no taint flow
         return []
@@ -795,33 +815,39 @@ def taint_scan(path, lines, lang, ctx=None):
     # req.query.x` is an assignment, and `x = 1  // req.query` is not a source.
     cmask, code_lines = ctx.cmask, ctx.code
     issues = []
-    tainted = {}   # var -> (line_no, frozenset(sink suffixes it is sanitized/clean for))
+    tainted = {}   # var -> (line_no, frozenset(clean sink suffixes), taint order)
     src = TAINT_SOURCES[lang]
     partial_cats = list(_PARTIAL_SAN.get(lang, {}))
+    ident_re = _IDENT_RUN_RE[lang]
 
-    def has_var(text_code, suf):
-        """A carrier var still poses danger for suffix suf if present and not clean for it."""
-        for v, (_, clean) in tainted.items():
-            if suf not in clean and re.search(r"\b%s\b" % re.escape(v), text_code):
-                return True
-        return False
+    def carriers_in(text_code, suf):
+        """Tainted vars present in text_code that still pose danger for sink
+        suffix suf (None: any), in the order they were tainted."""
+        if not tainted:
+            return []
+        found = [v for v in set(ident_re.findall(text_code))
+                 if v in tainted and suf not in tainted[v][1]]
+        found.sort(key=lambda v: tainted[v][2])
+        return found
 
     for i, line in enumerate(code_lines):
-        if cmask[i]:
+        if cmask[i] or not line or line.isspace():
             continue
+        if not i & 63:
+            ctx.check_time()
         m = ASSIGN_RE[lang].match(line)
         if m:
             name, rhs = m.group(1), m.group(2)
             base = STRING_LIT_RE.sub("", _neutralize(rhs, lang))  # full sanitizers stripped
-            is_tainted = bool(src.search(base)) or has_var(base, None)
+            is_tainted = bool(src.search(base)) or bool(carriers_in(base, None))
             if is_tainted:
                 clean = set()
                 for suf in partial_cats:
                     neut = STRING_LIT_RE.sub("", _neutralize(rhs, lang, suf))
-                    if not src.search(neut) and not has_var(neut, suf):
+                    if not src.search(neut) and not carriers_in(neut, suf):
                         clean.add(suf)
                 if name not in tainted:
-                    tainted[name] = (i + 1, frozenset(clean))
+                    tainted[name] = (i + 1, frozenset(clean), len(tainted))
         for suffix, sink_re, cat, sev, cwe, fix in TAINT_SINKS[lang]:
             sm = sink_re.search(line)
             if not sm:
@@ -829,9 +855,7 @@ def taint_scan(path, lines, lang, ctx=None):
             # neutralize full + this-category sanitizers in the sink's arguments
             rest = _neutralize(line[sm.end():], lang, suffix)
             rest_code = STRING_LIT_RE.sub("", rest)
-            carriers = [v for v in tainted
-                        if suffix not in tainted[v][1]
-                        and re.search(r"\b%s\b" % re.escape(v), rest_code)]
+            carriers = carriers_in(rest_code, suffix)
             if not carriers and not src.search(rest_code):
                 continue
             what = (f"untrusted data via '{carriers[0]}' (tainted at line {tainted[carriers[0]][0]})"
@@ -1166,6 +1190,7 @@ def truncated_issue(path, detail, sev="CRITICAL", rule="SC-TRUNCATED", name="Sca
 LONG_LINE = 160
 FN_LEN_LIMIT = 60
 FN_CX_LIMIT = 12
+FN_HEADER_SCAN_LIMIT = 2000   # chars of a JS line searched for a function header
 EXTS = {".py": "py", ".js": "js", ".jsx": "js", ".ts": "js", ".tsx": "js",
         ".mjs": "js", ".cjs": "js", ".sql": "sql"}
 # G10: only .git and __pycache__ are skipped by default. The former is VCS
@@ -1246,7 +1271,8 @@ def skipped_tree_issues():
 #        the previous word is return/typeof/instanceof/in/of/new/delete/void/
 #        throw/case/do/else/yield/await) consumes the literal /…/ up to its
 #        closing '/' on the same line (escapes and [classes] honoured); with no
-#        closing '/' on the line it is a plain division.
+#        closing '/' on the line it is a plain division, and so is every
+#        later '/' on that line.
 #   sql: '--' to end of line; '/* … */' spans lines; '…' and "…" span lines,
 #        no backslash escapes ('' is two adjacent strings, same result).
 #   other/unknown (lang None): '#' and '//' line comments, '/* … */', and
@@ -1308,6 +1334,7 @@ def _lex_comment_spans(content, lang):
     n = len(content)
     pos = 0
     prev, tail = "", ""        # js: last significant code char / trailing code text
+    no_regex_until = -1        # js: a regex literal failed to close before here
     while pos < n:
         m = nxt.search(content, pos)
         if m is None:
@@ -1333,12 +1360,17 @@ def _lex_comment_spans(content, lang):
             pos = e
             continue
         if ch == "/":                      # js only: regex literal or division
-            if _js_regex_allowed(prev, tail):
+            if k >= no_regex_until and _js_regex_allowed(prev, tail):
                 rm = _JS_REGEX_LIT_RE.match(content, k)
                 if rm:
                     pos = rm.end()
                     prev, tail = '"', ""
                     continue
+                # no closing '/' on this line: the rest of the line holds no
+                # regex literal either (one failed attempt per line keeps the
+                # lexer linear on input like "=/[" repeated)
+                no_regex_until = content.find("\n", k)
+                no_regex_until = n if no_regex_until < 0 else no_regex_until
             pos = k + 1
             prev, tail = "/", "/"
             continue
@@ -1464,6 +1496,21 @@ class _FileCtx:
         self.cmask, self.cspans, self.code = _comment_layout(self.content, lines, lang)
         self.deadline = deadline
         self._markers = {}
+        self._red = {}
+
+    @property
+    def mlines(self):
+        """The text each line is matched in."""
+        return self.lines
+
+    def redacted(self, k):
+        """Line k with secret-shaped substrings redacted — computed once per
+        line, not once per finding whose snippet shows it (review: 3000
+        findings on one 45 KB line re-ran the redaction 15000 times)."""
+        r = self._red.get(k)
+        if r is None:
+            r = self._red[k] = _redact_context_line(self.lines[k])
+        return r
 
     def marker(self, k):
         """Parsed suppression marker of line k: _NO_MARKER, None (blanket)
@@ -1601,7 +1648,13 @@ def mk_issue(rule_or_dict, path, line_no, lines):
     # secret-shaped substrings (a snippet around an os.system finding
     # routinely contains the file's actual credentials on adjacent lines).
     if REDACT_SECRETS and 0 <= line_no - 1 < len(lines):
-        if r["id"] in SECRET_RULES:
+        ctx = _active_ctx(lines)
+        if ctx is not None:
+            flag = line_no - 1 - start if r["id"] in SECRET_RULES else -1
+            snippet = [(REDACT_PLACEHOLDER.replace("{RULE}", r["id"]) + f" ({len(l)} chars)")
+                       if k == flag else ctx.redacted(start + k) if isinstance(l, str) else l
+                       for k, l in enumerate(snippet)]
+        elif r["id"] in SECRET_RULES:
             snippet = redact_secret_snippet(
                 r["id"], snippet, line_no - 1 - start, lines[line_no - 1])
         else:
@@ -1618,21 +1671,35 @@ def extract_functions(lines, lang):
     if lang not in ("py", "js"):   # function/complexity metrics don't apply to SQL
         return fns
     if lang == "py":
+        # A def ends at the first later line that is non-blank, not a
+        # comment, and indented no deeper than the def. Review fix: that was
+        # a forward scan per def — O(defs × lines) (300 nested defs over
+        # 30 000 blank lines: 0.85 s, quadratic). One pass with a stack of
+        # open defs gives the same spans; complexity is summed per line.
         cx_re = re.compile(r"\b(if|elif|for|while|and|or|except|case)\b")
-        for i, line in enumerate(lines):
-            m = re.match(r"^(\s*)(?:async\s+)?def\s+(\w+)", line)
-            if not m:
-                continue
-            indent = len(m.group(1))
-            end = i + 1
-            while end < len(lines):
-                l = lines[end]
-                if l.strip() and not is_comment(l, "py") and (len(l) - len(l.lstrip())) <= indent:
-                    break
-                end += 1
-            body = "\n".join(lines[i:end])
-            fns.append({"name": m.group(2), "line": i + 1, "len": end - i,
-                        "cx": 1 + len(cx_re.findall(body))})
+        def_re = re.compile(r"^(\s*)(?:async\s+)?def\s+(\w+)")
+        cx_prefix = [0]
+        for line in lines:
+            cx_prefix.append(cx_prefix[-1] + len(cx_re.findall(line)))
+        found = []                        # (line_i, name) in source order
+        spans = {}                        # line_i -> end (exclusive)
+        stack = []                        # (indent, line_i), indents increasing
+        for k, l in enumerate(lines):
+            m = def_re.match(l)
+            t = l.strip()
+            if t and not t.startswith("#"):
+                ind = len(m.group(1)) if m else len(l) - len(l.lstrip())
+                while stack and stack[-1][0] >= ind:
+                    spans[stack.pop()[1]] = k
+            if m:
+                found.append((k, m.group(2)))
+                stack.append((len(m.group(1)), k))
+        for _ind, k in stack:
+            spans[k] = len(lines)
+        for i, name in found:
+            end = spans[i]
+            fns.append({"name": name, "line": i + 1, "len": end - i,
+                        "cx": 1 + cx_prefix[end] - cx_prefix[i]})
     else:
         # G4 fix: the old implementation restarted a forward 800-line window
         # scan for EVERY fn_re match — on minified/adversarial JS that is
@@ -1653,13 +1720,19 @@ def extract_functions(lines, lang):
             pos = find("\n", pos + 1)
         starts.append(len(content) + 1)   # sentinel
         cx_re = re.compile(r"\b(if|for|while|case|catch)\b|&&|\|\||\?[^.:]")
+        # Review fix: `(\w+)\s*\([^)]*\)\s*\{` restarted inside every \w run
+        # and every unclosed '(' scan ran to the end of the line — O(n²): a
+        # benign 32 KB hex literal took 12.7 s. The name must now start a
+        # word run (?<!\w), parameter lists stop at the next '(' ([^()]*), and
+        # only the first FN_HEADER_SCAN_LIMIT characters of a line are
+        # searched for its (first) header.
         fn_re = re.compile(
             r"(?:function\s+(\w+)|(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s*)?"
-            r"(?:function|\([^)]*\)\s*=>|\w+\s*=>)|(\w+)\s*\([^)]*\)\s*\{)")
+            r"(?:function|\([^()]*\)\s*=>|\w+\s*=>)|(?<!\w)(\w+)\s*\([^()]*\)\s*\{)")
         # headers: first match per line (old semantics)
         headers = []                      # (line_i, name)
         for i, line in enumerate(lines):
-            m = fn_re.search(line)
+            m = fn_re.search(line, 0, FN_HEADER_SCAN_LIMIT)
             if m:
                 name = m.group(1) or m.group(2) or m.group(3) or "(anonymous)"
                 headers.append((i, name))
@@ -1719,7 +1792,9 @@ DEP_RULE_PREFIXES = ("SC-", "S-TOKEN", "S-SECRET")
 # are the SAFE idiom and are never flagged here.
 SQL_CALL_RE = re.compile(r"\.(execute|executemany)\s*\(")
 SQL_IDENT_RE = re.compile(r"[A-Za-z_]\w*")
-SQL_ASSIGN_RE = re.compile(r"^\s*([A-Za-z_]\w*)\s*(\+=|=)(?!=)\s*(.+?)\s*$")
+# `(.+)$` + rstrip() in the caller: the old lazy `(.+?)\s*$` retried `\s*$`
+# at every character of a long whitespace run (quadratic).
+SQL_ASSIGN_RE = re.compile(r"^\s*([A-Za-z_]\w*)\s*(\+=|=)(?!=)\s*(.+)$")
 SQL_LIT_RE = re.compile(r"^(?:[rbu]*)[\"'](.*)[\"']$", re.S)
 
 def _split_top_level(argstr):
@@ -1773,7 +1848,7 @@ def _sql_template_map(lines):
         mm = SQL_ASSIGN_RE.match(ln)
         if not mm:
             continue
-        var, op, rhs = mm.group(1), mm.group(2), mm.group(3)
+        var, op, rhs = mm.group(1), mm.group(2), mm.group(3).rstrip()
         if op == "+=":
             tmap[var] = tmap.get(var, "concat")
             continue
@@ -1787,19 +1862,57 @@ def _sql_template_map(lines):
             tmap[var] = "percent" if "%" in t else "format" if "{" in t else "static"
     return tmap
 
-def sql_sink_analyzer(path, lines, issues):
+#: Review fix (quadratic hot spot): per line, at most this many execute()
+#: calls are analyzed and each argument string is cut to SQL_ARG_MAX chars.
+#: '.execute(' * 4000 on one line took 3.3 s — every call re-scanned the rest
+#: of the line for its closing paren and re-split it.
+SQL_CALLS_PER_LINE = 64
+SQL_ARG_MAX = 10000
+_PAREN_TOKEN_RE = re.compile(r"[()\"']")
+
+
+def _paren_close_map(line):
+    """{index of '(' : index of its matching ')'} for one line, in one pass.
+    Quotes are tracked from the start of the line (a '(' inside a string
+    literal has no entry); same pairing as _paren_slice otherwise."""
+    close, stack, quote = {}, [], None
+    for m in _PAREN_TOKEN_RE.finditer(line):
+        ch, j = m.group(), m.start()
+        if quote:
+            if ch == quote:
+                quote = None
+        elif ch in "\"'":
+            quote = ch
+        elif ch == "(":
+            stack.append(j)
+        elif stack:
+            close[stack.pop()] = j
+    return close
+
+
+def sql_sink_analyzer(path, lines, issues, ctx=None):
     """Whole-argument analysis of execute()/executemany() calls (G12).
     Appends S-SQL-PY issues to `issues` (deduped against the line-rule pass
-    by line number); safe parameterized calls are skipped."""
-    tmap = _sql_template_map(lines)
+    by line number); safe parameterized calls are skipped. `ctx` (scan_file's
+    per-file context) supplies the normalized match text and the time budget."""
+    match_lines = ctx.mlines if ctx is not None and ctx.lines is lines else lines
+    tmap = _sql_template_map(match_lines)
     flagged = {i["line"] for i in issues if i.get("rule") == "S-SQL-PY"}
-    for i, line in enumerate(lines):
-        if i + 1 in flagged:
+    for i, line in enumerate(match_lines):
+        if i + 1 in flagged or ".execute" not in line:
             continue
-        for m in SQL_CALL_RE.finditer(line):
-            arg_str = _paren_slice(line, m.end() - 1)
-            if arg_str is None:
+        if ctx is not None:
+            ctx.check_time()
+        close = None
+        for n_call, m in enumerate(SQL_CALL_RE.finditer(line)):
+            if n_call >= SQL_CALLS_PER_LINE:
+                break
+            if close is None:
+                close = _paren_close_map(line)
+            j = close.get(m.end() - 1)
+            if j is None:
                 continue
+            arg_str = line[m.end():j][:SQL_ARG_MAX]
             parts = [p for p in _split_top_level(arg_str)]
             first = parts[0].strip() if parts else ""
             second = parts[1].strip() if len(parts) > 1 else ""
@@ -1915,28 +2028,51 @@ def normalize_newlines(text):
     return text.replace("\r\n", "\n").replace("\r", "\n") if "\r" in text else text
 
 
+#: Per-file time backstop (review fix, shared semantics 14): when the pattern
+#: rules on one file have run this many seconds (checked between lines and
+#: between passes), the file's scan stops with an SC-TRUNCATED finding. The
+#: quadratic regexes themselves are fixed; this only bounds what is left.
+SCAN_TIME_BUDGET = 30.0
+
+
 def scan_file(path, content, lang, dep=False):
     """Scan one file. dep=True → dependency mode: only supply-chain and
     secret rules run (quality/bug rules would be pure noise in vendored code)."""
     lines = source_lines(content, lang)
     content = "\n".join(lines)
-    ctx = _FileCtx(lines, lang, content)
+    ctx = _FileCtx(lines, lang, content, time.monotonic() + SCAN_TIME_BUDGET)
     outer = getattr(_TLS, "ctx", None)
     _TLS.ctx = ctx
     try:
-        return _scan_file(path, content, lines, lang, dep, ctx)
+        issues = []
+        try:
+            _scan_file(path, content, lines, lang, dep, ctx, issues)
+        except _ScanBudgetExceeded:
+            issues.append(truncated_issue(path, "scan time budget exceeded"))
+        return [i for i in issues if not ctx.suppressed(i, dep=dep)]
     finally:
         _TLS.ctx = outer
 
 
-def _scan_file(path, content, lines, lang, dep, ctx):
-    issues = []
+def _scan_file(path, content, lines, lang, dep, ctx, issues):
     cmask = ctx.cmask
+    rules = [r for r in RULES if lang in r["langs"]
+             and (not dep or r["id"].startswith(DEP_RULE_PREFIXES))]
+    secret_lines = set()          # lines with S-TOKEN / S-SECRET (S-ENTROPY dedupe)
     for i, line in enumerate(lines):
-        for r in RULES:
-            if lang not in r["langs"]:
-                continue
-            if dep and not r["id"].startswith(DEP_RULE_PREFIXES):
+        ctx.check_time()
+        if not line or line.isspace():
+            # no rule or heuristic matches whitespace alone; only the length rule applies
+            if not dep and len(line) > LONG_LINE:
+                issues.append(mk_issue(
+                    {"id": "Q-LONGLINE", "name": "Line too long", "type": "SMELL", "sev": "MINOR",
+                     "msg": f"Line exceeds {LONG_LINE} characters.",
+                     "why": "Very long lines hurt readability and reviews.",
+                     "fix": "Break the line up for readability.", "ref": "Maintainability"},
+                    path, i + 1, lines))
+            continue
+        for r in rules:
+            if cmask[i] and r["id"] not in ("Q-TODO", "S-TOKEN"):
                 continue
             # equality checks shouldn't match inside string literals
             target = STRING_LIT_RE.sub("\"\"", line) if r["id"] == "B-EQEQ" else line
@@ -1946,10 +2082,10 @@ def _scan_file(path, content, lines, lang, dep, ctx):
                 continue
             if r["skip"] and r["skip"].search(line):
                 continue
-            if cmask[i] and r["id"] not in ("Q-TODO", "S-TOKEN"):
-                continue
             if r["id"] == "S-TOKEN" and not _token_has_material(r["re"], line, lines, i):
                 continue
+            if r["id"] in ("S-TOKEN", "S-SECRET"):
+                secret_lines.add(i)
             issues.append(mk_issue(r, path, i + 1, lines))
         if not dep and len(line) > LONG_LINE:
             issues.append(mk_issue(
@@ -1988,10 +2124,11 @@ def _scan_file(path, content, lines, lang, dep, ctx):
                  "fix": "Decode and verify the content; move legitimate assets to data files.",
                  "ref": "CWE-506 · Supply chain"}, path, i + 1, lines))
         # --- entropy-based secret detection ---
-        if not cmask[i] and not SECRET_SKIP_RE.search(line):
+        # (review fix: the S-TOKEN/S-SECRET dedupe was an any() over every
+        # issue so far, per line — 15.7 s on 20k lines; now a set lookup)
+        if not cmask[i] and i not in secret_lines and not SECRET_SKIP_RE.search(line):
             em = ENTROPY_VALUE_RE.search(line)
-            if em and entropy_secretish(em.group(1)) and not any(
-                    x["line"] == i + 1 and x["rule"] in ("S-TOKEN", "S-SECRET") for x in issues):
+            if em and entropy_secretish(em.group(1)):
                 issues.append(mk_issue(
                     {"id": "S-ENTROPY", "name": "High-entropy string", "type": "HOTSPOT", "sev": "MAJOR",
                      "msg": "High-entropy string literal — possible hardcoded secret.",
@@ -2011,31 +2148,42 @@ def _scan_file(path, content, lines, lang, dep, ctx):
                         "a classic indicator of a compromised or malicious package.",
                  "fix": "Diff against the package's published repository; consider removing the dependency.",
                  "ref": "CWE-506 · Supply chain"}, path, first_line, lines))
+    if dep:
+        return
+    starts = None
     for r in TEXT_RULES:
         # *-NOWHERE SQL rules are fired by scan_sql_nowhere() (linear pass),
         # not here — their regexes match only the statement head.
-        if lang not in r["langs"] or dep or r["id"] in _SQL_NOWHERE_SKIP:
+        if lang not in r["langs"] or r["id"] in _SQL_NOWHERE_SKIP:
             continue
-        for m in r["re"].finditer(content):
-            line_no = content[:m.start()].count("\n") + 1
+        for n, m in enumerate(r["re"].finditer(content)):
+            if not n & 255:
+                ctx.check_time()
+            if starts is None:        # review fix: was content[:pos].count("\n") per match
+                starts = _line_starts(content)
+            line_no = bisect.bisect_right(starts, m.start())
             issues.append(mk_issue(r, path, line_no, lines))
-    if not dep and lang == "sql":
+    ctx.check_time()
+    if lang == "sql":
         try:
             scan_sql_nowhere(path, content, issues, lines)
         except Exception:
             pass
-    if not dep:
-        issues.extend(taint_scan(path, lines, lang, ctx))
+    ctx.check_time()
+    issues.extend(taint_scan(path, lines, lang, ctx))
     # G12: whole-argument SQL-sink analysis (Python only) — catches
     # execute(sql % x) with no space after %, .format() on a template variable,
     # and execute(name) where name was built by interpolation/concatenation.
+    # (Project mode only, like every non-supply-chain rule; it used to run
+    # in dependency mode too, unlike the JS engine.)
     if lang == "py":
         try:
-            sql_sink_analyzer(path, lines, issues)
+            sql_sink_analyzer(path, lines, issues, ctx)
+        except _ScanBudgetExceeded:
+            raise
         except Exception:
             pass
-    if dep:
-        return [i for i in issues if not ctx.suppressed(i, dep=True)]
+    ctx.check_time()
     for fn in extract_functions(lines, lang):
         if fn["len"] > FN_LEN_LIMIT:
             issues.append(mk_issue(
@@ -2051,7 +2199,6 @@ def _scan_file(path, content, lines, lang, dep, ctx):
                  "why": "Highly branched code is hard to reason about and to cover with tests.",
                  "fix": "Split branches into smaller functions; use early returns or lookup tables.",
                  "ref": "Maintainability"}, path, fn["line"], lines))
-    return [i for i in issues if not ctx.suppressed(i)]
 
 DEP_MARKERS = {"node_modules", "site-packages", "bower_components", "vendor",
                "venv", ".venv"}
