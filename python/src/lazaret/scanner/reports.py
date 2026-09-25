@@ -16,8 +16,11 @@ Imported by lazaret.scanner.core; stdlib only, unit-testable on its own.
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
+import re
 import stat
 import tempfile
 
@@ -41,6 +44,34 @@ EXIT_OUTPUT = 3
 #: are written at the very start of a report (first key / <head>), so a
 #: bounded read is enough for multi-megabyte reports.
 MARKER_READ_BYTES = 65536
+
+# Provenance is decided by a bounded PREFIX match, never by parsing the head:
+# the old check json.loads()-ed only the first 64 KiB, so every real report
+# larger than that (~100 findings) failed to parse and counted as "not ours"
+# — a plain re-scan exited 3 ("refusing to overwrite") and every genuine
+# --baseline was treated as untrusted. JSON reports start with the marker as
+# their first key; SARIF logs with a top-level property bag holding it.
+_JSON_MARKER_RE = re.compile(
+    r'\A\ufeff?\s*\{\s*"%s"\s*:\s*"%s"\s*[,}]'
+    % (re.escape(ENGINE_MARKER), re.escape(ENGINE_VERSION)))
+_SARIF_MARKER_RE = re.compile(
+    r'\A\ufeff?\s*\{\s*"properties"\s*:\s*\{\s*"%s"\s*:\s*"%s"\s*[,}]'
+    % (re.escape(ENGINE_MARKER), re.escape(ENGINE_VERSION)))
+
+# ---------------------------------------------------------------------------
+# Baseline signatures (G17 follow-up)
+# ---------------------------------------------------------------------------
+#: When this environment variable is set, JSON reports carry an HMAC-SHA256
+#: signature over their finding fingerprints, and --baseline trusts a file
+#: only if that signature verifies with the same key. The engine marker alone
+#: is a public constant: anyone can hand-write a 5-line "baseline" carrying it.
+BASELINE_KEY_ENV = "LAZARET_BASELINE_KEY"
+#: Report key holding the signature ({"alg": ..., "value": hex}).
+SIGNATURE_FIELD = "baselineSignature"
+SIGNATURE_ALG = "HMAC-SHA256"
+# Domain separation: the MAC input is this prefix + the canonical JSON array
+# of the sorted, de-duplicated fingerprints (ASCII-escaped, no whitespace).
+_SIGNATURE_DOMAIN = b"lazaret-baseline-v1\n"
 
 
 class ReportPathError(Exception):
@@ -140,57 +171,158 @@ def writability_error(path):
 # ---------------------------------------------------------------------------
 # Provenance check (no-clobber)
 # ---------------------------------------------------------------------------
-def is_our_report(path, kind):
-    """True if *path* is an existing regular file this engine produced.
+def _read_head(path, limit=MARKER_READ_BYTES):
+    """First *limit* bytes of *path* decoded as UTF-8 (replacement on bad
+    bytes), or None unless *path* is an existing REGULAR file.
 
-    kind is "json", "html" or "sarif". JSON and SARIF reports carry the
-    marker as their FIRST key (JSON) / in a top-level property bag (SARIF);
-    HTML reports carry the meta-tag marker in their <head>. Anything else is
-    NOT ours and must not be overwritten: missing file, directory, symlink
-    (never write through a link, wherever it points), special file,
-    unreadable file, wrong content, content without our marker, or hostile
-    content that fails to parse — including a deeply nested document whose
-    json.loads raises RecursionError (NOT a ValueError; card f22ce3c5),
-    which is treated exactly like an unreadable file: not ours → refused.
-
-    The file is lstat-ed BEFORE it is opened (card 12c56422): is_our_report
-    ran open() on any path that passed the earlier isfile() check, but
-    os.path.isfile follows symlinks and a FIFO planted at the default
-    report destination passed it (os.path.isfile is True for a FIFO) while
-    open() blocked forever on the read — a trivial hang from a hostile
-    repo. Now anything that is not a REGULAR file (per lstat, so symlinks
-    and specials fail the same check) is refused before any open.
+    The file is lstat-ed BEFORE it is opened (card 12c56422): anything that
+    is not a regular file per lstat (symlink, FIFO, socket, device,
+    directory) is refused without an open() — a FIFO planted at the default
+    report destination used to hang the scan on the read. The open itself
+    uses O_NOFOLLOW/O_NONBLOCK where available and re-checks with fstat, so a
+    swap between the lstat and the open cannot reintroduce either problem.
     """
     try:
         st = os.lstat(path)
     except OSError:
-        return False                   # missing (or unreadable) → not ours
+        return None                    # missing (or unreadable) → not ours
     if not stat.S_ISREG(st.st_mode):
-        return False                   # FIFO/socket/device/directory/symlink
+        return None                    # FIFO/socket/device/directory/symlink
+    flags = (os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+             | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0))
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            head = fh.read(MARKER_READ_BYTES)
+        fd = os.open(path, flags)
     except OSError:
-        return False           # unreadable → treat as not-ours → refuse
+        return None
     try:
-        data = json.loads(head)
-    except (ValueError, RecursionError):
-        # RecursionError is NOT a ValueError: a hostile repo can pre-plant
-        # the default report destination (lazaret-report.json resolves
-        # under the scan root) with a ~60k-deep '[' head, and without
-        # RecursionError in this tuple the crash escaped pre-scan
-        # validation as a traceback with an undefined exit code (card
-        # f22ce3c5; same primitive 48033f94/1149e3e5 guarded elsewhere).
-        # A parse failure — any parse failure — means not ours → refuse,
-        # matching the "unreadable file → not ours" contract above.
-        return kind == "html" and HTML_ENGINE_MARKER in head
-    if not isinstance(data, dict):
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        chunks, want = [], limit
+        while want > 0:
+            b = os.read(fd, want)
+            if not b:
+                break
+            chunks.append(b)
+            want -= len(b)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    return b"".join(chunks).decode("utf-8", errors="replace")
+
+
+def is_our_report(path, kind):
+    """True if *path* is an existing regular file this engine produced.
+
+    kind is "json", "html" or "sarif". JSON reports carry the marker as their
+    FIRST key, SARIF logs in a top-level property bag (first key too); HTML
+    reports carry the meta-tag marker in their <head>. The check is a
+    bounded prefix match on the first MARKER_READ_BYTES of the file — never
+    a parse, so a report of any size is recognized (the old json.loads of a
+    64 KiB head failed for every report over ~100 findings) and hostile
+    content (deep nesting, huge numbers, bad UTF-8) cannot crash it.
+
+    Anything else is NOT ours and must not be overwritten: missing file,
+    directory, symlink (never write through a link, wherever it points),
+    special file, unreadable file, or content without our marker.
+    """
+    head = _read_head(path)
+    if head is None:
         return False
-    if data.get(ENGINE_MARKER) == ENGINE_VERSION:
-        return True                       # JSON report (marker is key #1)
-    props = data.get("properties")        # SARIF top-level property bag
-    return (isinstance(props, dict)
-            and props.get(ENGINE_MARKER) == ENGINE_VERSION)
+    if kind == "html":
+        idx = head.find(HTML_ENGINE_MARKER)
+        end = head.lower().find("</head>")
+        return idx >= 0 and (end < 0 or idx < end)
+    return bool(_JSON_MARKER_RE.match(head) or _SARIF_MARKER_RE.match(head))
+
+
+# ---------------------------------------------------------------------------
+# Baseline fingerprints and signatures
+# ---------------------------------------------------------------------------
+def fingerprint(issue):
+    """Baseline identity of one issue: rule | path | flagged line text.
+
+    Forward slashes in the path, so a baseline written on macOS/Linux still
+    matches a Windows run (whose report paths use backslashes) and vice
+    versa. Raises KeyError/TypeError/AttributeError for a malformed entry —
+    callers skip those.
+    """
+    idx = issue["line"] - issue["snipStart"]
+    snippet = issue.get("snippet") or []
+    line_text = snippet[idx].strip() if 0 <= idx < len(snippet) else ""
+    path = str(issue["file"]).replace("\\", "/")
+    return f"{issue['rule']}|{path}|{line_text}"
+
+
+def baseline_key():
+    """The signing key from $LAZARET_BASELINE_KEY as bytes, or None if unset
+    or empty."""
+    key = os.environ.get(BASELINE_KEY_ENV)
+    if not key:
+        return None
+    return key.encode("utf-8", errors="surrogateescape")
+
+
+def _fingerprints(issues):
+    out = []
+    for i in issues if isinstance(issues, list) else ():
+        try:
+            fp = fingerprint(i)
+        except (KeyError, TypeError, AttributeError):
+            continue
+        out.append(fp)
+    return out
+
+
+def sign_fingerprints(fingerprints, key):
+    """Hex HMAC-SHA256 over the canonical serialization of *fingerprints*:
+    a domain prefix plus the JSON array of the sorted, de-duplicated
+    fingerprints (ASCII-escaped, no whitespace). Order and duplicates do not
+    matter, and path separators are already normalized by fingerprint(), so
+    a signed baseline stays portable across machines that share the key."""
+    canon = json.dumps(sorted(set(fingerprints)), ensure_ascii=True,
+                       separators=(",", ":"))
+    return hmac.new(key, _SIGNATURE_DOMAIN + canon.encode("ascii"),
+                    hashlib.sha256).hexdigest()
+
+
+def report_signature(res, key=None):
+    """The signature object a JSON report carries when a key is configured
+    (None when no key is set)."""
+    key = key if key is not None else baseline_key()
+    if not key:
+        return None
+    return {"alg": SIGNATURE_ALG,
+            "value": sign_fingerprints(_fingerprints(res.get("issues")), key)}
+
+
+def verify_signature(doc, key):
+    """(ok, reason) — does the parsed report *doc* carry a valid signature
+    for *key* over the fingerprints of its own issues?"""
+    if not isinstance(doc, dict):
+        return False, "not a JSON object"
+    sig = doc.get(SIGNATURE_FIELD)
+    if not isinstance(sig, dict) or not isinstance(sig.get("value"), str):
+        return False, "it carries no baseline signature"
+    if sig.get("alg") != SIGNATURE_ALG:
+        return False, "unsupported signature algorithm"
+    expected = sign_fingerprints(_fingerprints(doc.get("issues")), key)
+    if not hmac.compare_digest(expected, sig["value"]):
+        return False, ("its signature does not verify with "
+                       f"${BASELINE_KEY_ENV} (forged, edited, or signed "
+                       "with another key)")
+    return True, ""
+
+
+def path_is_inside(path, root):
+    """True if *path* resolves (symlinks followed) to a location inside the
+    directory *root* (also resolved)."""
+    try:
+        p = os.path.realpath(path)
+        r = os.path.realpath(root)
+        return os.path.commonpath([p, r]) == r
+    except (OSError, ValueError):
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -320,10 +452,29 @@ def write_report(path, render, kind, strict=False):
     if isinstance(rendered, str):
         rendered = rendered.encode("utf-8")
     parent = os.path.dirname(os.path.abspath(path)) or os.curdir
+    # A re-scan must keep an existing report's permissions (a 0600 report
+    # used to come back 0644); a new report gets the classic 0666 & ~umask
+    # so CI artifact collectors (other uids) can read it. mkstemp creates
+    # 0600, so the mode is set on the temp file BEFORE the rename — there is
+    # never a moment where the destination has the wrong mode.
+    mode = 0o666 & ~_umask()
+    try:
+        st = os.lstat(path)
+        if stat.S_ISREG(st.st_mode):
+            mode = stat.S_IMODE(st.st_mode) & 0o777
+    except OSError:
+        pass
     fd, tmp = tempfile.mkstemp(dir=parent, prefix=".lazaret-report-",
                                suffix=".tmp")
     try:
         _write_all(fd, rendered)
+        try:
+            if hasattr(os, "fchmod"):
+                os.fchmod(fd, mode)
+            else:                              # pragma: no cover (Windows < 3.13)
+                os.chmod(tmp, mode)
+        except OSError:
+            pass
         os.fsync(fd)
         os.close(fd)
         fd = -1
@@ -335,12 +486,6 @@ def write_report(path, render, kind, strict=False):
         os.replace(tmp, path)          # atomic; also replaces our old report
         tmp = None
         _fsync_dir(path)
-        try:
-            # mkstemp creates 0600; reports used to be 0644&~umask — keep
-            # that so CI artifact collectors (other uids) can read them.
-            os.chmod(path, 0o666 & ~_umask())
-        except OSError:
-            pass
     finally:
         if fd >= 0:
             try:
@@ -373,8 +518,15 @@ def mark_result(res):
 
 
 def json_renderer(res):
-    """JSON report text: the result dict with the marker as key #1."""
-    return json.dumps(mark_result(res), indent=2)
+    """JSON report text: the result dict with the marker as key #1 and, when
+    $LAZARET_BASELINE_KEY is set, the baseline signature as key #2."""
+    out = mark_result(res)
+    sig = report_signature(res)
+    if sig is not None:
+        out = {ENGINE_MARKER: ENGINE_VERSION, SIGNATURE_FIELD: sig}
+        out.update((k, v) for k, v in res.items()
+                   if k not in (ENGINE_MARKER, SIGNATURE_FIELD))
+    return json.dumps(out, indent=2)
 
 
 def sarif_renderer(sarif):

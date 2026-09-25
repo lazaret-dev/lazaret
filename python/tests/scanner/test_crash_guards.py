@@ -441,7 +441,7 @@ class TestCLIEndToEnd(unittest.TestCase):
     def test_poc1_bad_regex_taint_config(self):
         self.write(".lazaret-taint.json", '{"python":{"sources":["("]}}')
         self.write("a.py", "x = 1\n")
-        p = self.run_cli()
+        p = self.run_cli("--trust-repo-config")  # repo config is opt-in (review finding 5)
         self.assert_no_crash(p, 0)
         self.assertIn("not a valid regex", p.stderr)  # both engines (deduped ≥1)
         self.assertIn("Loaded taint config", p.stdout)
@@ -451,7 +451,7 @@ class TestCLIEndToEnd(unittest.TestCase):
         self.write(".lazaret-taint.json",
                    json.dumps({"python": {"sources": [r"\brequest\.args\b", "("]}}))
         self.write("a.py", APPEAL_PY)
-        p = self.run_cli()
+        p = self.run_cli("--trust-repo-config")  # repo config is opt-in (review finding 5)
         self.assert_no_crash(p, 0)
         self.assertIn("not a valid regex", p.stderr)
         # good rule applied — the custom source still taints (T/X findings fire)
@@ -497,11 +497,17 @@ class TestCLIEndToEnd(unittest.TestCase):
 
     def test_poc4_baseline_issues_not_a_list(self):
         # marker-bearing so it passes the trust gate; then 'issues' is a
-        # string → the SHAPE validation path fires ("not a list")
+        # string → the SHAPE validation path fires ("not a list"). The
+        # baseline sits OUTSIDE the scanned tree: an unsigned in-tree
+        # baseline is untrusted before its shape is ever looked at (review
+        # finding 2; test updated accordingly).
         self.write("a.py", "x = 1\n")
-        self.write("base.json",
-                   '{"generatedBy": "lazaret-cli-1", "issues": "not-a-list"}')
-        p = self.run_cli("--baseline", os.path.join(self.tmp, "base.json"))
+        outside = tempfile.mkdtemp(prefix="cg-crash-base-")
+        self.addCleanup(shutil.rmtree, outside, True)
+        base = os.path.join(outside, "base.json")
+        with open(base, "w") as fh:
+            fh.write('{"generatedBy": "lazaret-cli-1", "issues": "not-a-list"}')
+        p = self.run_cli("--baseline", base)
         self.assert_no_crash(p, 0)
         self.assertIn("not a list", p.stderr)
 

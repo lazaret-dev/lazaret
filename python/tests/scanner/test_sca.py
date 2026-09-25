@@ -71,7 +71,10 @@ class TestVersionEngine(unittest.TestCase):
         self.assertTrue(sca.is_comparable_version("v1.2"))
         self.assertFalse(sca.is_comparable_version("beta"))
         self.assertFalse(sca.is_comparable_version("*"))
-        self.assertFalse(sca.is_comparable_version("1"))       # needs a dot — parity with TS
+        # single-segment versions are versions (review finding 15: '5' used
+        # to be "not comparable" and its advisory match was dropped)
+        self.assertTrue(sca.is_comparable_version("1"))
+        self.assertFalse(sca.is_comparable_version("2.*"))      # wildcard: unknown
 
     def test_unbounded(self):
         for b in (None, "", "*"):
@@ -134,7 +137,8 @@ class TestNormalize(unittest.TestCase):
         # an npm scoped dep finds a CPE entry recorded unscoped
         v = sca.name_variants("@babel/core", "npm")
         self.assertIn("babel-core", v)
-        self.assertIn("core", v)
+        # review finding 18: no unscoped variant — @types/lodash is not lodash
+        self.assertNotIn("core", v)
         # a pypi dep finds a CPE entry recorded 'python-<name>'
         v2 = sca.name_variants("urllib3", "pypi")
         self.assertIn("urllib3", v2)
@@ -438,11 +442,13 @@ class TestFindings(unittest.TestCase):
         fresh = [c for c in res["conditions"] if c["label"].startswith("CVE bundle fresh")]
         self.assertTrue(fresh[0]["ok"])
 
-    def test_missing_generated_at_is_not_a_failure(self):
+    def test_missing_generated_at_fails_freshness(self):
+        # review finding 19: freshness used to fail OPEN — an undated (or
+        # "last tuesday") bundle passed as fresh. An unknown age now fails.
         undated = sca.CveBundle({**BUNDLE_DOC, "generatedAt": None})
         res = sca.build_sca_result("/tmp/proj", undated, [], sca.Inventory(), {})
         fresh = [c for c in res["conditions"] if c["label"].startswith("CVE bundle fresh")]
-        self.assertTrue(fresh[0]["ok"])     # unknown age does not fail the gate
+        self.assertFalse(fresh[0]["ok"])
 
     def test_bundle_age_days_parses_iso_z(self):
         import datetime

@@ -23,7 +23,9 @@ JS_BIN = os.path.join(_support.REPO_ROOT, "js", "bin", "lazaret.js")
 
 # fixture -> rules only the Python engine implements
 PYTHON_ONLY = {
-    "cfgproj": {"T-CMD"},    # custom taint spec (lazaret-taint.json): Python-only
+    # cfgproj's .lazaret-taint.json is repository content: the Python engine
+    # loads it only with --trust-repo-config (not passed here), so both
+    # engines now report the same findings for it.
     "flowproj": {"X-SQL"},   # cross-file taint (lazaret.scanner.flow): Python-only
 }
 

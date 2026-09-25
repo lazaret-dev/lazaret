@@ -48,9 +48,9 @@ def write_project(tmp, name="proj"):
     return root
 
 
-def run_cli(args, timeout=120):
+def run_cli(args, timeout=120, env=None):
     return subprocess.run([PY, CLI, *args], capture_output=True, encoding="utf-8", errors="replace",
-                          timeout=timeout)
+                          timeout=timeout, env=env)
 
 
 # ---------------------------------------------------------------------------
@@ -137,12 +137,17 @@ class TestSecretRedaction(unittest.TestCase):
     def test_baseline_fingerprint_stable_across_scans(self):
         # same line scanned twice redacts to the same placeholder → a
         # same-engine baseline still matches (newIssues == 0)
+        # The baseline lives INSIDE the scanned tree (self.tmp/out3), which is
+        # only trusted when reports are signed: run both scans with a
+        # LAZARET_BASELINE_KEY (review finding 2 — unsigned in-tree baselines
+        # are now untrusted; test updated accordingly).
         out = os.path.join(self.tmp, "out3")
         os.makedirs(out)
+        env = dict(os.environ, LAZARET_BASELINE_KEY="test-key-not-secret")
         r1 = run_cli([self.tmp, "--no-html", "--json",
-                      os.path.join(out, "base.json"), "-q"])
+                      os.path.join(out, "base.json"), "-q"], env=env)
         r2 = run_cli([self.tmp, "--no-html", "--no-json", "--baseline",
-                      os.path.join(out, "base.json")])
+                      os.path.join(out, "base.json")], env=env)
         self.assertIn("New issues vs baseline: 0", r2.stdout)
 
 
