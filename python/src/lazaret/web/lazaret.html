@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-3BPeZ66Dtxfr0NbSoQ0MCLg+zWcK0mR8ZSE82lwZpTk='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-10/Q/SlM+pfyBn9wDy+I5VUefgtibS+ltzOAYN9GoDg='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
 <title>Lazaret — Security &amp; Quality Review</title>
 <style>
   :root{
@@ -683,7 +683,7 @@ function sqlSinkScan(file, lines, issues){
         msg:`SQL query built with ${HOW[build]||"string-building"} into execute().`,
         why:"Interpolating values into SQL enables SQL injection — the classic path to full database compromise.",
         fix:'Use parameterized queries: cursor.execute("SELECT … WHERE id = %s", (user_id,)).',
-        ref:"CWE-89 · OWASP A03"}, file, i+1, lines));
+        ref:"CWE-89 · OWASP A03"}, file, i+1, lines, m.index));
     }
   });
 }
@@ -722,7 +722,7 @@ function taintScan(file, lines, lang){
       issues.push(mkIssue({id:`T-${suffix}`, name:`Tainted flow → ${cat}`, type:"VULN", sev,
         msg:`Possible ${cat}: ${what} reaches this sink.`,
         why:"Data from user input or a decode function flows into a dangerous call without visible sanitization (lightweight intra-file taint tracking).",
-        fix, ref:`${cwe} · Taint analysis`}, file, i+1, lines));
+        fix, ref:`${cwe} · Taint analysis`}, file, i+1, lines, sm.index));
     }
   });
   return issues;
@@ -768,14 +768,71 @@ function isComment(line, lang){
   return t.startsWith("//")||t.startsWith("*")||t.startsWith("/*");
 }
 
+/* Limits, the same as the CLI's (lazaret.scanner.core; FIX-SPEC items 7 and 9):
+   - a file over 2,000,000 bytes is not scanned: it gets one SC-TRUNCATED
+     finding (which fails the gate) instead of freezing the tab;
+   - there is no per-file issue budget (the old 500-issue budget and its
+     SCAN-BUDGET notice made big files look cleaner than they are);
+   - per (file, rule), at most RULE_CAP findings of an INFO or MINOR rule or a
+     code smell are kept, then one Q-CAPPED finding says how many were
+     omitted. Security findings (S-, T-, SC-, X-, SQL-) are never capped;
+   - every snippet line is clipped to SNIPPET_MAX characters, the flagged
+     line in a window starting ~SNIPPET_LEAD characters before the match. */
+const MAX_FILE_BYTES = 2000000;
+const RULE_CAP = 200;
+const NEVER_CAPPED_RE = /^(?:S|T|SC|X|SQL)-/;
+const SNIPPET_MAX = 240, SNIPPET_LEAD = 60;
+function utf8Length(s){
+  let n = 0;
+  for(let i=0;i<s.length;i++){
+    const c = s.charCodeAt(i);
+    if(c < 0x80) n += 1;
+    else if(c < 0x800) n += 2;
+    else if(c >= 0xD800 && c <= 0xDBFF && i+1 < s.length && (s.charCodeAt(i+1) & 0xFC00) === 0xDC00){ n += 4; i++; }
+    else n += 3;
+  }
+  return n;
+}
+function fileBytes(file){ return typeof file.size === "number" ? file.size : utf8Length(file.content); }
+const withCommas = n => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+function truncatedIssue(file, detail){   // same fields as the CLI's truncated_issue()
+  return {rule:"SC-TRUNCATED", name:"Scan truncated", type:"HOTSPOT", sev:"CRITICAL",
+    msg:`File not fully scanned: ${detail}.`,
+    why:"Scanning stopped early, so a clean verdict for this file is not evidence of anything — the unscanned bytes are exactly where a hostile artifact would put its payload (audit C2/G16: declared sizes and entry counts are attacker-controlled and were used to skip files with zero signal).",
+    fix:"Review the file manually or raise the limit and re-scan.",
+    ref:"CWE-506 · Supply chain", file:file.name, line:1, snippet:[], snipStart:1};
+}
+function capIssues(issues, file, lines){
+  const counts = new Map(), omitted = new Map(), out = [];
+  for(const i of issues){
+    const cappable = !NEVER_CAPPED_RE.test(i.rule) && (i.sev==="INFO" || i.sev==="MINOR" || i.type==="SMELL");
+    if(!cappable){ out.push(i); continue; }
+    const n = (counts.get(i.rule)||0) + 1;
+    counts.set(i.rule, n);
+    if(n <= RULE_CAP){ out.push(i); continue; }
+    const o = omitted.get(i.rule);
+    if(o) o.n++; else omitted.set(i.rule, {n:1, line:i.line});
+  }
+  for(const [rule, o] of omitted)
+    out.push(mkIssue({id:"Q-CAPPED", name:"Findings capped", type:"SMELL", sev:"INFO",
+      msg:`${o.n} more ${rule} findings omitted`,
+      why:`Only the first ${RULE_CAP} ${rule} findings in this file are listed, to keep the report readable. Security findings are never capped.`,
+      fix:"Fix or suppress the listed findings and scan again to see the rest.",
+      ref:"Report limits"}, file, o.line, lines));
+  return out;
+}
+
 function scanFile(file){
+  const bytes = fileBytes(file);
+  if(bytes > MAX_FILE_BYTES)
+    return [truncatedIssue(file, `${withCommas(bytes)} bytes exceeds the ${withCommas(MAX_FILE_BYTES)}-byte file limit`)];
   const issues = [];
   const lines = file.content.split("\n");
   const lang = file.lang;
 
   // line rules
   lines.forEach((line, i)=>{
-    if(issues.length >= FILE_ISSUE_BUDGET) return;   // per-file issue budget (G19)
+    const lineFirst = issues.length;
     for(const r of RULES){
       if(!r.langs.includes(lang)) continue;
       const target = r.id==="B-EQEQ" ? line.replace(STRING_LIT_RE,'""') : line;
@@ -784,7 +841,7 @@ function scanFile(file){
       if(hit && r.skip && r.skip.test(line)) hit = false;
       // don't flag security rules inside comments (except TODO + token signatures)
       if(hit && !["Q-TODO","Q-LONGLINE","S-TOKEN"].includes(r.id) && isComment(line, lang)) hit = false;
-      if(hit) issues.push(mkIssue(r, file, i+1, lines));
+      if(hit) issues.push(mkIssue(r, file, i+1, lines, r.re ? Math.max(0, line.search(r.re)) : 0));
     }
     // obfuscation heuristics (supply-chain indicators)
     const hexCount = (line.match(/\\x/g)||[]).length;
@@ -792,29 +849,29 @@ function scanFile(file){
       msg:`String built from ${hexCount} hex escapes — obfuscation indicator.`,
       why:"Dense \\xNN escaping hides strings (URLs, commands) from review and grep.",
       fix:"Decode and review the string; legitimate code rarely needs this.",
-      ref:"CWE-506 · Supply chain"}, file, i+1, lines));
+      ref:"CWE-506 · Supply chain"}, file, i+1, lines, line.indexOf("\\x")));
     if(lang==="js" && /String\.fromCharCode/.test(line) && (line.match(/\b\d{2,3}\b/g)||[]).length>=10)
       issues.push(mkIssue({id:"SC-CHARCODE", name:"Char-code string building", type:"HOTSPOT", sev:"MAJOR",
         msg:"String assembled from character codes — obfuscation indicator.",
         why:"fromCharCode chains hide payloads from static review.",
         fix:"Decode and review what string is being built.",
-        ref:"CWE-506 · Supply chain"}, file, i+1, lines));
+        ref:"CWE-506 · Supply chain"}, file, i+1, lines, line.indexOf("String.fromCharCode")));
     if(B64_BLOB_RE.test(line) && !line.includes("sourceMappingURL"))
       issues.push(mkIssue({id:"SC-B64", name:"Large base64 blob", type:"HOTSPOT", sev:"MAJOR",
         msg:"Base64 blob (200+ chars) embedded in code.",
         why:"Embedded encoded blobs can carry second-stage payloads.",
         fix:"Decode and verify the content; move legitimate assets to data files.",
-        ref:"CWE-506 · Supply chain"}, file, i+1, lines));
+        ref:"CWE-506 · Supply chain"}, file, i+1, lines, line.search(B64_BLOB_RE)));
     // entropy-based secret detection
     if(!isComment(line, lang) && !SECRET_SKIP_RE.test(line)){
       const em = line.match(ENTROPY_VALUE_RE);
       if(em && shannonEntropy(em[1])>4.0 &&
-         !issues.some(x=>x.line===i+1 && (x.rule==="S-TOKEN"||x.rule==="S-SECRET")))
+         !issues.slice(lineFirst).some(x=>x.rule==="S-TOKEN"||x.rule==="S-SECRET"))
         issues.push(mkIssue({id:"S-ENTROPY", name:"High-entropy string", type:"HOTSPOT", sev:"MAJOR",
           msg:"High-entropy string literal — possible hardcoded secret.",
           why:"Random-looking constants are usually keys or tokens.",
           fix:"If it is a secret, rotate it and load it from the environment.",
-          ref:"CWE-798 · OWASP A07"}, file, i+1, lines));
+          ref:"CWE-798 · OWASP A07"}, file, i+1, lines, em.index));
     }
   });
   // file-level: javascript-obfuscator identifier signature
@@ -827,26 +884,14 @@ function scanFile(file){
         msg:`${uniq.size} '_0x…' identifiers — javascript-obfuscator signature.`,
         why:"This naming pattern is produced by obfuscation tools; in a dependency it is a classic indicator of a compromised or malicious package.",
         fix:"Diff against the package's published repository; consider removing the dependency.",
-        ref:"CWE-506 · Supply chain"}, file, firstLine, lines));
+        ref:"CWE-506 · Supply chain"}, file, firstLine, lines, lines[firstLine-1].search(OBF_IDENT_RE)));
     }
   }
   // text rules
-  let lineStarts = null, budgetNoted = false;   // precomputed line-start offsets; budgetNoted guards the one-time SCAN-BUDGET notice
-  const truncated = (issues.length >= FILE_ISSUE_BUDGET);   // line rules/entropy already filled the budget
-  const noteBudget = () => {   // one-time per-file "budget reached" transparency notice
-    if(budgetNoted || issues.length < FILE_ISSUE_BUDGET) return;
-    budgetNoted = true;
-    issues.push(mkIssue({id:"SCAN-BUDGET", name:"Issue budget reached",
-      type:"SMELL", sev:"INFO",
-      msg:`Issue generation for "${file.name}" was capped at ${FILE_ISSUE_BUDGET} issues (per-file budget) — further matches in this file were not recorded.`,
-      why:"Very issue-dense input produces overwhelming, slow output; the budget keeps the dashboard responsive.",
-      fix:"Fix the highest-severity issues first, or split the file and rescan the remainder.",
-      ref:"Performance"}, file, 1, lines));
-  };
-  if(truncated) noteBudget();   // line rules alone exhausted the budget — don't go silent about it
+  let lineStarts = null;   // line-start offsets, computed on the first match
   for(const r of TEXT_RULES){
     if(!r.langs.includes(lang)) continue;
-    r.re.lastIndex = 0; let m; let guard = 0;
+    r.re.lastIndex = 0; let m;
     while((m = r.re.exec(file.content))){
       if(m[0].length===0){ r.re.lastIndex++; continue; }   // zero-length match: advance, never loop
       if(r.noWhere && /\bWHERE\b/i.test(m[0])) continue;   // linear form: skip statements that DO have WHERE
@@ -855,10 +900,9 @@ function scanFile(file){
         for(let j=0;j<file.content.length;j++)
           if(file.content.charCodeAt(j)===10) lineStarts.push(j+1);
       }
-      const lineNo = lineStarts.filter(off=>off<=m.index).length;   // line starts ≤ offset
-      if(issues.length < FILE_ISSUE_BUDGET) issues.push(mkIssue(r, file, lineNo, lines));
-      else noteBudget();
-      if(++guard > FILE_ISSUE_BUDGET) break;   // pathological rule: stop after budget matches
+      const at = m.index;
+      const lineNo = lowerBound(lineStarts.length, x => lineStarts[x] > at);   // line starts ≤ offset
+      issues.push(mkIssue(r, file, lineNo, lines, at - lineStarts[lineNo-1]));
     }
   }
   // function length & complexity
@@ -877,7 +921,7 @@ function scanFile(file){
   // sql_sink_analyzer so a dashboard scan reports the same S-SQL-PY set the
   // CLI and MCP report for identical Python input.
   if(lang === "py"){ try{ sqlSinkScan(file, lines, issues); }catch(e){ /* analyzer must never break a scan */ } }
-  return issues.filter(i=>!isSuppressed(i, lines));
+  return capIssues(issues.filter(i=>!isSuppressed(i, lines)), file, lines);
 }
 /* ---------------- Secret redaction (same output as the CLI) ----------------
    Every issue is redacted when it is created, so the rendered list and the
@@ -931,15 +975,28 @@ function redactText(text, ctx){
   for(const lit of ctx.literals) if(out.includes(lit)) out = out.split(lit).join(REDACTED);
   return out;
 }
-function mkIssue(rule, file, line, lines){
+function clipSnippetLine(text, col){
+  // at most SNIPPET_MAX characters (code points) including the "…" markers
+  if(text.length <= SNIPPET_MAX) return text;
+  const cps = Array.from(text);
+  if(cps.length <= SNIPPET_MAX) return text;
+  const at = col ? Array.from(text.slice(0, col)).length : 0;
+  const start = Math.min(Math.max(0, at - SNIPPET_LEAD), cps.length - (SNIPPET_MAX - 1));
+  if(start === 0) return cps.slice(0, SNIPPET_MAX - 1).join("") + "…";
+  if(start + SNIPPET_MAX - 1 >= cps.length) return "…" + cps.slice(cps.length - (SNIPPET_MAX - 1)).join("");
+  return "…" + cps.slice(start, start + SNIPPET_MAX - 2).join("") + "…";
+}
+function mkIssue(rule, file, line, lines, col){
   const start = Math.max(0,line-3);
   const ctx = redactionContext(file, lines);
+  // redact first, then clip: clipping first could cut a secret in half and
+  // hide it from the patterns
   const snippet = lines.slice(start, Math.min(lines.length, line+2)).map((text, k)=>{
     const idx = start + k;                                   // 0-based line index
     if(idx === line-1 && SECRET_RULES.has(rule.id))
       return `[redacted: secret rule ${rule.id}] (${[...lines[line-1]].length} chars)`;
     if(ctx.pemLines.has(idx)) return REDACTED;
-    return redactText(text, ctx);
+    return clipSnippetLine(redactText(text, ctx), idx === line-1 ? col : 0);
   });
   return {rule:rule.id, name:rule.name, type:rule.type, sev:rule.sev, msg:redactText(rule.msg, ctx),
     why:rule.why, fix:rule.fix, ref:rule.ref, file:file.name, line,
@@ -979,7 +1036,10 @@ function extractFunctions(lines, lang){
     for(let j=0;j<content.length;j++)
       if(content.charCodeAt(j)===10) starts.push(j+1);
     starts.push(content.length+1);            // sentinel
-    const fnRe = /(?:function\s+(\w+)|(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s*)?(?:function|\([^)]*\)\s*=>|\w+\s*=>)|(\w+)\s*\([^)]*\)\s*\{)/g;
+    // (?<!\w): the method-header alternative only starts at the beginning of a
+    // word. Without it, a long identifier run (a 2 MB minified line) made
+    // `(\w+)\s*\(` retry from every position: quadratic. Same matches.
+    const fnRe = /(?:function\s+(\w+)|(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s*)?(?:function|\([^)]*\)\s*=>|\w+\s*=>)|(?<!\w)(\w+)\s*\([^)]*\)\s*\{)/g;
     const headers = [];                        // {line, name}
     for(let i=0;i<lines.length;i++){
       fnRe.lastIndex = 0;
@@ -1040,6 +1100,7 @@ function computeMetrics(files){
   let ncloc=0, comments=0, dupLines=0;
   const winMap = new Map();
   for(const f of files){
+    if(fileBytes(f) > MAX_FILE_BYTES) continue;   // not scanned (SC-TRUNCATED): not measured either
     const lines = f.content.split("\n");
     const code = [];
     lines.forEach((l,i)=>{
@@ -1089,11 +1150,13 @@ $("#files").addEventListener("change", async e=>{
   // Read all files in parallel; a failed read must not abort the batch (G18):
   // collect it, keep going, and always repaint so the UI never shows a stale
   // selection while pasted code would silently still be scanned.
-  const settled = await Promise.allSettled(fileArr.map(f=>f.text()));
+  // Files over the size limit aren't read at all: they become an
+  // SC-TRUNCATED finding (scanFile), not a frozen tab.
+  const settled = await Promise.allSettled(fileArr.map(f=>f.size > MAX_FILE_BYTES ? Promise.resolve("") : f.text()));
   settled.forEach((r, k)=>{
     if(r.status === "fulfilled"){
       const f = fileArr[k];
-      uploaded.push({name:f.name, content:r.value, lang:detectLang(f.name, r.value)});
+      uploaded.push({name:f.name, content:r.value, size:f.size, lang:detectLang(f.name, r.value)});
     }else{
       const reason = r.reason && r.reason.message ? r.reason.message : String(r.reason);
       readErrs.push({name:fileArr[k].name, reason});
@@ -1185,7 +1248,6 @@ function renderFilters(issues){
 
 function esc(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;");}
 const MAX_RENDERED_ISSUES = 500;   // cap issues rendered into one innerHTML string (tab-freeze guard)
-const FILE_ISSUE_BUDGET = 500;     // per-file issue budget while scanning
 function renderIssues(){
   const all = lastResult.issues;
   const shown = all.filter(i=>
