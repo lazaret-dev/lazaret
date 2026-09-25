@@ -10,6 +10,7 @@ import { computeMetrics, worstSevRating, maintainabilityRating } from "./scanner
 import { ENGINE_VERSION, ENGINE_MARKER, HTML_ENGINE_MARKER } from "./lib/fs.js";
 import { cmpCodePoints, pyStrip, isPrintable } from "./lib/pycompat.js";
 import { REDACT, SECRET_RULES } from "./lib/redact.js";
+import { reportSignature, SIGNATURE_FIELD } from "./baseline.js";
 
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 
@@ -63,10 +64,16 @@ export function buildResult(root, files, issues) {
   };
 }
 
-/** JSON report text: the result dict with the provenance marker as key #1. */
-export function jsonRenderer(res) {
+/**
+ * JSON report text: the result dict with the marker as key #1 and, when a
+ * baseline key is given ($LAZARET_BASELINE_KEY), the baseline signature as
+ * key #2.
+ */
+export function jsonRenderer(res, { key = null } = {}) {
+  const sig = key ? reportSignature(res, key) : null;
   const out = { [ENGINE_MARKER]: ENGINE_VERSION };
-  for (const [k, v] of Object.entries(res)) if (k !== ENGINE_MARKER) out[k] = v;
+  if (sig) out[SIGNATURE_FIELD] = sig;
+  for (const [k, v] of Object.entries(res)) if (k !== ENGINE_MARKER && k !== SIGNATURE_FIELD) out[k] = v;
   return JSON.stringify(out, null, 2);
 }
 

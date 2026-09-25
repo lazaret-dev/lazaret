@@ -18,6 +18,7 @@ import {
   sanitizeTerm, setExcerptWidth,
 } from "./report.js";
 import { clipLine } from "./lib/issue.js";
+import { applyBaseline, BASELINE_KEY_ENV } from "./baseline.js";
 
 // Local copies (NOT imported from index.js — that would be a cycle).
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
@@ -48,6 +49,9 @@ Options:
   --deps, --include-deps
                         Also scan dependency directories (node_modules, venv,
                         vendor…) with the supply-chain/secret rules.
+  --baseline PATH       Previous JSON report; findings not in it are marked new.
+                        A baseline inside the scanned tree is trusted only when
+                        ${BASELINE_KEY_ENV} is set and its signature verifies.
   --no-redact-secrets   Keep credential lines in reports (default: redacted).
   --excerpt-width N     Characters of the flagged line shown per finding (100).
   -q, --quiet           Only print the summary (no per-issue lines).
@@ -64,6 +68,7 @@ const OPTIONS = [
   { flag: "--json", dest: "json", value: true },
   { flag: "--html", dest: "html", value: true },
   { flag: "--sarif", dest: "sarif", value: true },
+  { flag: "--baseline", dest: "baseline", value: true },
   { flag: "--excerpt-width", dest: "excerptWidth", value: true, int: true },
   { flag: "--no-json", dest: "noJson" },
   { flag: "--no-html", dest: "noHtml" },
@@ -172,6 +177,7 @@ export function run(argv, io = {}) {
 function runChecked(argv, io) {
   const out = io.out ?? ((s) => console.log(s));
   const err = io.err ?? ((s) => console.error(s));
+  const env = io.env ?? process.env;
   const usage = (msg) => {
     err(`error: ${sanitizeTerm(msg)}`);
     err("Run 'lazaret --help' for usage.");
@@ -251,6 +257,9 @@ function runChecked(argv, io) {
   }
   add(skippedIssues);
   const res = redactResult(buildResult(root, files, issues), clipLine);
+  if (opts.baseline) {
+    applyBaseline(res, opts.baseline, { root, env, warn: (m) => err(sanitizeTerm(m)) });
+  }
   printReport(res, { out, quiet: !!opts.quiet });
 
   // ---- reports (atomic, no-clobber, marker-checked) ----------------------
@@ -261,7 +270,7 @@ function runChecked(argv, io) {
       out(`  SARIF report: ${sanitizeTerm(paths.sarif)}`);
     }
     if (paths.json) {
-      writeReport(paths.json, () => jsonRenderer(res), { kind: "json", strict });
+      writeReport(paths.json, () => jsonRenderer(res, { key: env[BASELINE_KEY_ENV] }), { kind: "json", strict });
       out(`  JSON report: ${sanitizeTerm(paths.json)}`);
     }
     if (paths.html) {
