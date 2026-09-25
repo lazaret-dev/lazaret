@@ -228,6 +228,7 @@ def _decode_text(raw: bytes) -> str:
 
 # --- encoding (Python -> server) -------------------------------------------------
 
+_INT4_MIN, _INT4_MAX = -(2**31), 2**31 - 1
 _INT8_MIN, _INT8_MAX = -(2**63), 2**63 - 1
 
 
@@ -244,7 +245,13 @@ def _scalar(v: Any) -> tuple[int, str]:
     if isinstance(v, bool):
         return BOOL, "t" if v else "f"
     if isinstance(v, int):
-        return (INT8 if _INT8_MIN <= v <= _INT8_MAX else NUMERIC), str(v)
+        # The smallest of int4 / int8 / numeric that holds the value: PostgreSQL
+        # casts integer types up implicitly but never down, so an int8 argument
+        # fails for functions that take int4 (repeat, left, make_date, date + n).
+        # int2 is not used: $1 + $2 on two smallints overflows at 32767.
+        # str(int(v)): str() of an IntEnum member is its name on Python 3.10.
+        oid = INT4 if _INT4_MIN <= v <= _INT4_MAX else INT8 if _INT8_MIN <= v <= _INT8_MAX else NUMERIC
+        return oid, str(int(v))
     if isinstance(v, float):
         return FLOAT8, _float_text(v)
     if isinstance(v, Decimal):
@@ -303,15 +310,20 @@ def _encode_array(v: list | tuple) -> tuple[int, str]:
     literal = walk(v)
     if not oids:
         return 0, literal  # empty or all NULL: let the server infer
-    if oids == {INT8, FLOAT8}:
-        oids = {FLOAT8}
-    elif oids == {INT8, NUMERIC}:
-        oids = {NUMERIC}
+    # Widen mixed integer sizes (int4 < int8 < numeric), and ints mixed with floats.
+    if len(oids) > 1:
+        for common in (INT8, FLOAT8, NUMERIC):
+            if oids <= {INT4, INT8, common}:
+                oids = {common}
+                break
     if len(oids) > 1:
         raise TypeError("array parameters must contain values of a single type")
     elem = oids.pop()
     if elem == 0:
-        return ARRAY_OF[TEXT], literal
+        # Untyped, like str scalars: the server infers uuid[], int[], text[], ...
+        # from the context (uuid_col = ANY($1)). Polymorphic functions need a
+        # cast: unnest($1::text[]).
+        return 0, literal
     if elem not in ARRAY_OF:
         raise TypeError("unsupported array element type")
     return ARRAY_OF[elem], literal
