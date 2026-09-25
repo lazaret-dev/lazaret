@@ -60,7 +60,7 @@ class Args:
 class TestReportPaths(unittest.TestCase):
     def setUp(self):
         self._cwd = os.getcwd()
-        self.tmp = tempfile.mkdtemp(prefix="cg-unit-")
+        self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cg-unit-"))
 
     def tearDown(self):
         os.chdir(self._cwd)
@@ -117,7 +117,7 @@ class TestReportPaths(unittest.TestCase):
 # ---------------------------------------------------------------------------
 class TestValidatePaths(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="cg-unit-")
+        self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cg-unit-"))
 
     def tearDown(self):
         import shutil
@@ -131,9 +131,7 @@ class TestValidatePaths(unittest.TestCase):
         cr.validate_report_paths({"json": p})
         self.assertFalse(os.path.exists(p))          # nothing created
 
-    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0,
-
-                     "root ignores directory permissions, so chmod can't make it unwritable")
+    @_support.skip_unless_permissions_enforced
 
     def test_unwritable_dir_fails_with_clear_message(self):
         ro = os.path.join(self.tmp, "ro")
@@ -188,7 +186,10 @@ class TestValidatePaths(unittest.TestCase):
             with self.assertRaises(cr.ReportPathError) as cm:
                 cr.validate_report_paths({"json": p}, strict=strict)
             self.assertIn("symlink", str(cm.exception))
-        self.assertEqual(os.readlink(p), real)      # untouched
+        target = os.readlink(p)
+        if target.startswith("\\\\?\\"):       # Windows returns an extended-length path
+            target = target[4:]
+        self.assertEqual(target, real)      # untouched
 
     def test_symlink_lying_between_path_and_file(self):
         # dir link + real file: replacing through it would silently clobber
@@ -273,7 +274,7 @@ class TestValidatePaths(unittest.TestCase):
 # ---------------------------------------------------------------------------
 class TestWriteReport(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="cg-unit-")
+        self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cg-unit-"))
 
     def tearDown(self):
         import shutil
@@ -353,7 +354,7 @@ class TestDeepNestGuard(unittest.TestCase):
     naming the path, never a RecursionError traceback."""
 
     def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="cg-deep-")
+        self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="cg-deep-"))
 
     def tearDown(self):
         import shutil
@@ -461,7 +462,7 @@ class TestReadOnlyCwd(unittest.TestCase):
     paths computed for the same invocation don't change with the CWD."""
 
     def test_paths_stable_across_cwd_change(self):
-        tmp = tempfile.mkdtemp(prefix="cg-unit-")
+        tmp = os.path.realpath(tempfile.mkdtemp(prefix="cg-unit-"))
         # Cleanups run LIFO: rmtree (with its own chmod-safe lambda) first…
         self.addCleanup(
             lambda: (os.path.isdir(tmp) and os.chmod(tmp, 0o755),

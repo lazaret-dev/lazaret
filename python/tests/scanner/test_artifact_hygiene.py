@@ -49,7 +49,7 @@ def write_project(tmp, name="proj"):
 
 
 def run_cli(args, timeout=120):
-    return subprocess.run([PY, CLI, *args], capture_output=True, text=True,
+    return subprocess.run([PY, CLI, *args], capture_output=True, encoding="utf-8", errors="replace",
                           timeout=timeout)
 
 
@@ -189,6 +189,7 @@ class TestBaselineTrust(unittest.TestCase):
                 lazaret_report._validate_path(dev, "json", strict=True)
             self.assertIn("device", str(cm.exception))
 
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "no FIFOs on this platform")
     def test_fifo_report_path_refused_without_open(self):
         fifo = os.path.join(self.tmp, "lazaret-report.json")
         os.mkfifo(fifo)
@@ -276,7 +277,7 @@ class TestBundleHygiene(unittest.TestCase):
     def build(self, *extra):
         out = os.path.join(self.tmp, "b.tgz")
         p = subprocess.run([PY, _support.MAKE_BUNDLE, out,
-                            *extra], capture_output=True, text=True,
+                            *extra], capture_output=True, encoding="utf-8", errors="replace",
                            timeout=120, cwd=HERE)
         return out, p
 
@@ -301,7 +302,8 @@ class TestBundleHygiene(unittest.TestCase):
     def test_bundle_has_no_junk_and_carries_engine(self):
         out, p = self.build()
         self.assertEqual(p.returncode, 0, p.stderr[:400])
-        names = tarfile.open(out).getnames()
+        with tarfile.open(out) as tf:
+            names = tf.getnames()
         junk = [n for n in names if "__pycache__" in n or n.endswith(
             (".pyc", ".pyo", ".db", ".db-wal", ".db-shm", ".sarif",
              "-report.json", "-report.html")) or "/._" in n
@@ -340,7 +342,7 @@ class TestBundleHygiene(unittest.TestCase):
         scan = subprocess.run(
             [PY, CLI, os.path.join(root, "lazaret", "python", "src"),
              "--no-html", "--no-json", "-q"],
-            capture_output=True, text=True, timeout=300)
+            capture_output=True, encoding="utf-8", errors="replace", timeout=300)
         self.assertNotIn("Traceback", scan.stderr)
         # product sources must carry no hardcoded-secret findings of their own
         self.assertNotIn("S-SECRET", scan.stdout)

@@ -11,6 +11,7 @@ Tools:
     quality_gate    — pass/fail gate only, for quick change verification
 """
 import json
+import re
 import os
 import sys
 
@@ -321,6 +322,33 @@ HANDLERS = {
 }
 
 
+# Deepest JSON nesting accepted in a request. Real MCP traffic is a handful of
+# levels deep; anything past this is treated as hostile (see _loads_frame).
+MAX_FRAME_DEPTH = 512
+_JSON_STRUCTURE = re.compile(r'"(?:\\.|[^"\\])*"|[\[\]{}]')   # string literals, or brackets
+_DEPTH_ERROR = {"code": -32700, "message": (
+    f"Parse error: request JSON exceeds the maximum nesting depth of "
+    f"{MAX_FRAME_DEPTH} (treated as hostile input, not a crash; re-send the "
+    f"request with bounded depth)")}
+
+
+def _frame_depth_exceeds(line, limit=MAX_FRAME_DEPTH):
+    """True if the frame nests arrays/objects deeper than `limit`. Brackets
+    inside string literals don't count."""
+    if line.count("[") + line.count("{") <= limit:
+        return False          # can't be that deep; skip the scan
+    depth = 0
+    for match in _JSON_STRUCTURE.finditer(line):
+        token = match.group()
+        if token == "[" or token == "{":
+            depth += 1
+            if depth > limit:
+                return True
+        elif token == "]" or token == "}":
+            depth -= 1
+    return False
+
+
 def _loads_frame(line):
     """Parse one JSON-RPC frame with the deep-nesting guard (card 1149e3e5).
 
@@ -336,16 +364,21 @@ def _loads_frame(line):
     frame: report -32700 and keep serving. Same contract for the reversed
     chain, where a hostile repo's transcripts are consumed as client input.
     A merely-bad frame (syntax) is still dropped as before; only
-    parse failures caused by depth get a structured error response."""
+    parse failures caused by depth get a structured error response.
+
+    Depth is measured explicitly (MAX_FRAME_DEPTH) before parsing, because
+    whether json.loads overflows depends on the interpreter: Python 3.14's
+    parser accepts depths that older versions reject, so a RecursionError
+    alone is not a reliable signal. The RecursionError handler stays as a
+    fallback."""
+    if _frame_depth_exceeds(line):
+        return None, _DEPTH_ERROR
     try:
         return json.loads(line), None
     except json.JSONDecodeError:
         return None, None
     except RecursionError:
-        return None, {"code": -32700, "message": (
-            "Parse error: request JSON exceeds the parser's nesting depth "
-            "(recursion limit hit — treated as hostile input, not a crash; "
-            "re-send the request with bounded depth)")}
+        return None, _DEPTH_ERROR
 
 
 def reply(msg_id, result=None, error=None):
@@ -447,6 +480,15 @@ def _dispatch(method, msg_id, params):
 
 
 def main():
+    # MCP messages are UTF-8 by definition. On Windows, stdin/stdout would
+    # otherwise use the ANSI code page: a client's non-ASCII text (a code
+    # snippet with an accented character) would be misread, or crash the loop.
+    for stream in (sys.stdin, sys.stdout):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError, ValueError):
+            pass
+    lazaret.configure_stdio()   # stderr: never crash on a diagnostic
     for line in sys.stdin:
         line = line.strip()
         if not line:

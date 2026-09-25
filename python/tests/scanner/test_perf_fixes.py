@@ -400,7 +400,7 @@ class CliEndToEnd(unittest.TestCase):
                 f.write("\nDELETE FROM sessions;\n")
             t0 = time.perf_counter()
             r = subprocess.run([PY, CLI, d, "--no-html", "--quiet"],
-                               capture_output=True, text=True, timeout=120)
+                               capture_output=True, encoding="utf-8", errors="replace", timeout=120)
             dt = time.perf_counter() - t0
             self.assertEqual(r.returncode, 0, r.stderr)
             with open(os.path.join(d, "lazaret-report.json")) as f:

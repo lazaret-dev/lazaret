@@ -1070,6 +1070,7 @@ def cmd_scan(store, specs, full, rescan):
 
 
 def main():
+    lazaret.configure_stdio()
     ap = argparse.ArgumentParser(prog="lazaret-registry", description="Lazaret npm/PyPI registry scanner")
     ap.add_argument("command", choices=["add", "scan", "scan-all", "list", "report", "discover"])
     ap.add_argument("specs", nargs="*", help="npm:<name>[@ver] or pypi:<name>[@ver]")

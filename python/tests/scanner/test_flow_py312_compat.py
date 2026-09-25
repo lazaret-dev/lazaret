@@ -147,7 +147,7 @@ class C1DriverInheritance(unittest.TestCase):
         out_json = os.path.join(root, "report.json")
         proc = subprocess.run(
             [sys.executable, CLI, "--json", out_json, "--no-html", root],
-            cwd=root, capture_output=True, text=True, timeout=180)
+            cwd=root, capture_output=True, encoding="utf-8", errors="replace", timeout=180)
         self.assertNotIn("interprocedural taint analysis skipped",
                          proc.stderr,
                          "flow engine still degrading on this Python: "

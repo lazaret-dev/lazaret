@@ -50,7 +50,7 @@ SAMPLE = {
 
 def run_cli(args, cwd, cli_path=CLI):
     return subprocess.run([sys.executable, cli_path] + args,
-                          cwd=cwd, capture_output=True, text=True,
+                          cwd=cwd, capture_output=True, encoding="utf-8", errors="replace",
                           timeout=120)
 
 
@@ -113,9 +113,7 @@ class TestReadOnlyCwd(CliReportBase):
             self.assertGreater(os.path.getsize(path), 0)
         self.assertEqual(os.listdir(ro_cwd), [])   # nothing dropped in CWD
 
-    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0,
-
-                     "root ignores directory permissions, so chmod can't make it unwritable")
+    @_support.skip_unless_permissions_enforced
 
     def test_read_only_cwd_and_read_only_scan_root_fails_fast_prescan(self):
         # Both read-only: the default report destinations are unwritable →
@@ -218,9 +216,7 @@ class TestOutDirAndExplicitPaths(CliReportBase):
         self.assertIn("does not exist", p.stderr)
         self.assertNotIn("Traceback", p.stderr)
 
-    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0,
-
-                     "root ignores directory permissions, so chmod can't make it unwritable")
+    @_support.skip_unless_permissions_enforced
 
     def test_out_dir_read_only_fails_fast_pre_scan(self):
         root = self.make_scan_root()

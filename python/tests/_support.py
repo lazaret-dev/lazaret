@@ -36,3 +36,28 @@ def requires_env(var):
     tests that need a live service (Postgres) or the private samples checkout."""
     import unittest
     return unittest.skipUnless(os.environ.get(var), f"{var} not set")
+
+
+def skip_unless_permissions_enforced(test):
+    """For tests that make a directory unwritable with chmod and expect a
+    failure. Root ignores directory permissions, and on Windows chmod can't
+    make a directory unwritable at all."""
+    import sys
+    import unittest
+    if sys.platform == "win32":
+        return unittest.skip("chmod can't make a directory unwritable on Windows")(test)
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        return unittest.skip("root ignores directory permissions")(test)
+    return test
+
+
+def skip_on_windows(reason):
+    import sys
+    import unittest
+    return unittest.skipIf(sys.platform == "win32", reason)
+
+
+def unix_newlines(data: bytes) -> bytes:
+    """Windows text-mode output ends lines with CRLF. Normalize it so checks for
+    a stray carriage return (a terminal-spoofing byte) only see real ones."""
+    return data.replace(b"\r\n", b"\n")

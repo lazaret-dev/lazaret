@@ -144,7 +144,7 @@ class G10SkipDirs(unittest.TestCase):
 
     def test_dist_migrations_hidden_scanned(self):
         res = scan_to_result(os.path.join(FIXTURES, "skips"))
-        secrets = {i["file"] for i in res["issues"]
+        secrets = {i["file"].replace(os.sep, "/") for i in res["issues"]
                    if i["rule"] in ("S-SECRET", "S-TOKEN")}
         self.assertIn("dist/bundle.py", secrets, "dist/ secret was skipped")
         self.assertIn("migrations/0001.py", secrets, "migrations/ secret was skipped")
@@ -152,7 +152,7 @@ class G10SkipDirs(unittest.TestCase):
 
     def test_file_named_dist_scanned(self):
         res = scan_to_result(os.path.join(FIXTURES, "skips"))
-        secrets = {i["file"] for i in res["issues"]
+        secrets = {i["file"].replace(os.sep, "/") for i in res["issues"]
                    if i["rule"] in ("S-SECRET", "S-TOKEN")}
         self.assertIn("dist-file.py", secrets, "file named dist was skipped")
 
@@ -162,7 +162,7 @@ class G10SkipDirs(unittest.TestCase):
 
     def test_opt_in_exclude_still_works_and_counted(self):
         res = scan_to_result(os.path.join(FIXTURES, "skips"), exclude=["dist"])
-        secrets = {i["file"] for i in res["issues"]
+        secrets = {i["file"].replace(os.sep, "/") for i in res["issues"]
                    if i["rule"] in ("S-SECRET", "S-TOKEN")}
         self.assertNotIn("dist/bundle.py", secrets, "explicit exclude ignored")
         skipped = rules_at(res, "Q-SKIPPED-TREE")

@@ -61,6 +61,7 @@ ALL_CONTROL = [chr(n) for n in range(0x20) if n not in (0x09, 0x0a)] + [chr(0x7f
 
 def assert_clean(out_bytes, msg):
     """Assert no terminal-control byte survives in subprocess output."""
+    out_bytes = _support.unix_newlines(out_bytes)
     for b in FORBIDDEN_BYTES:
         if b in out_bytes:
             # Show the offending line for diagnosis.
@@ -277,6 +278,7 @@ class RepoModeFileHeaderPoc(unittest.TestCase):
     scan root. Before the fix, print_report printed the path raw (severity
     color spoofing + terminal title hijack)."""
 
+    @_support.skip_on_windows("Windows forbids control characters in file names")
     def test_hostile_filename_sanitized(self):
         with tempfile.TemporaryDirectory() as root:
             with open(os.path.join(root, POC_NAME), "w",
@@ -395,6 +397,7 @@ class ScaOutputPoc(unittest.TestCase):
     node_modules package.json) and CVE-bundle fields (advisory title,
     sources, generated_at) into its terminal output."""
 
+    @_support.skip_on_windows("Windows forbids control characters in file names")
     def test_sca_issue_line_sanitized(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = os.path.join(tmp, "proj")

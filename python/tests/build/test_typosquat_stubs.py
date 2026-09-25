@@ -17,11 +17,12 @@ class StubTests(unittest.TestCase):
         stubs = _support.load_script(SCRIPT, "make_typosquat_stubs")
         with tempfile.TemporaryDirectory() as d:
             wheel = stubs.build_python_stub("lazarat", os.path.join(d, "dist"))
-            meta = zipfile.ZipFile(wheel).read("lazarat-0.0.1.dist-info/METADATA").decode()
-            self.assertNotIn("Requires-Dist", meta)
             target = os.path.join(d, "site")
-            zipfile.ZipFile(wheel).extractall(target)
-            p = subprocess.run([sys.executable, "-c", "import lazarat"], capture_output=True, text=True,
+            with zipfile.ZipFile(wheel) as z:   # closed before the temp dir is removed (Windows)
+                meta = z.read("lazarat-0.0.1.dist-info/METADATA").decode()
+                z.extractall(target)
+            self.assertNotIn("Requires-Dist", meta)
+            p = subprocess.run([sys.executable, "-c", "import lazarat"], capture_output=True, encoding="utf-8", errors="replace",
                                env=dict(os.environ, PYTHONPATH=target), timeout=60)
             self.assertNotEqual(p.returncode, 0)
             self.assertIn("You probably want 'lazaret'", p.stderr)

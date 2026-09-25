@@ -417,7 +417,7 @@ class TestCLIEndToEnd(unittest.TestCase):
 
     def run_cli(self, *extra):
         p = subprocess.run([PY, CLI, self.tmp, "--no-html", "--no-json",
-                            *extra], capture_output=True, text=True, timeout=120)
+                            *extra], capture_output=True, encoding="utf-8", errors="replace", timeout=120)
         return p
 
     def write(self, name, content):

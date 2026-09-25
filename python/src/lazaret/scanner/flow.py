@@ -226,7 +226,7 @@ class _PyFunc:
         self.returns_source = False
 
 
-def _collect_py(files):
+def _collect_py(files, overflow=None):
     funcs = {}   # name -> list[_PyFunc]
     for f in files:
         if f["lang"] != "py":
@@ -234,6 +234,14 @@ def _collect_py(files):
         try:
             tree = ast.parse(f["content"])
         except SyntaxError:
+            continue
+        except RecursionError:
+            # A deep operator chain can overflow the *parser* itself: on
+            # Python 3.11, and on Windows (smaller C stack) even on later
+            # versions. Skip the file and report it like an analysis overflow,
+            # instead of letting one file abort the whole flow pass.
+            if overflow is not None:
+                overflow[f["path"]] = 1
             continue
         lines = f["content"].split("\n")
         for node in ast.walk(tree):
@@ -443,9 +451,8 @@ def _py_analyze_fn(fn, funcs, emit, findings):
 
 
 def _analyze_python(files, findings):
-    funcs = _collect_py(files)
-    if not funcs:
-        return
+    overflow = {}  # file -> lowest function line that hit the limit (1: the parser did)
+    funcs = _collect_py(files, overflow)
     flat = [fn for lst in funcs.values() for fn in lst]
     # M16/F12 (C1 follow-up): _py_analyze_fn → _visit/visit_stmts are mutually
     # recursive with no bound, and _py_expr_taint recurses on operand trees.
@@ -457,7 +464,6 @@ def _analyze_python(files, findings):
     # with zero findings. Guard per function, in both passes: a pathological
     # function is skipped (its findings lost, an INFO note emitted — Q- class,
     # like Q-SKIPPED-TREE) while every other function keeps its results.
-    overflow = {}  # file -> lowest function line that hit the limit
 
     def _safe_analyze(fn, emit):
         try:
@@ -487,9 +493,10 @@ def _analyze_python(files, findings):
                    f"analyzing {fname!r} — findings for the affected function(s) "
                    f"may be missing; every other function was still analyzed.",
             "why": "A pathologically deep expression (e.g. a long operator "
-                   "chain in generated code) can overflow the analysis stack "
-                   "even though the code parses fine. Lazaret skips only the "
-                   "affected function(s) instead of crashing the whole scan.",
+                   "chain in generated code) can overflow Python's parser or "
+                   "the analysis stack even though it is valid Python. Lazaret "
+                   "skips only the affected function(s), or the file if the "
+                   "parser overflowed, instead of crashing the whole scan.",
             "fix": "Split or format the flagged file to keep expressions "
                    "shallow, then re-run Lazaret.",
             "ref": "CWE-400 (uncontrolled resource consumption)",

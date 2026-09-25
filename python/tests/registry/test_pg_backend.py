@@ -59,7 +59,7 @@ def _pg_bins():
         pg_config = shutil.which("pg_config")
         if pg_config:
             bindir = subprocess.run([pg_config, "--bindir"],
-                                    capture_output=True, text=True).stdout.strip()
+                                    capture_output=True, encoding="utf-8", errors="replace").stdout.strip()
             initdb = os.path.join(bindir, "initdb") if os.path.isdir(bindir) else None
             postgres = os.path.join(bindir, "postgres") if os.path.isdir(bindir) else None
     return initdb, postgres
@@ -88,7 +88,7 @@ def _boot_scratch_cluster(tmpdir):
     logs = os.path.join(tmpdir, "cluster.log")
     try:
         if subprocess.run([initdb, "-D", data, "-U", "cgtest", "--no-locale",
-                           "-E", "UTF8"], capture_output=True, text=True,
+                           "-E", "UTF8"], capture_output=True, encoding="utf-8", errors="replace",
                           timeout=120).returncode != 0:
             return None
         port = 55100 + (os.getpid() % 400)

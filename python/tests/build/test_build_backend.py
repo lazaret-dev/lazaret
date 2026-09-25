@@ -18,6 +18,11 @@ from tests import _support
 BACKEND = os.path.join(_support.PY_ROOT, "_build", "lazaret_build.py")
 
 
+def read_member(wheel, name):
+    with zipfile.ZipFile(wheel) as z:
+        return z.read(name)
+
+
 def backend(path=BACKEND):
     return _support.load_script(path, f"lazaret_build_{abs(hash(path))}")
 
@@ -37,7 +42,8 @@ class BuildTests(unittest.TestCase):
         shutil.rmtree(cls.tmp)
 
     def names(self):
-        return zipfile.ZipFile(self.wheel).namelist()
+        with zipfile.ZipFile(self.wheel) as z:
+            return z.namelist()
 
     def test_pyproject_declares_no_requirements(self):
         text = pathlib.Path(_support.PY_ROOT, "pyproject.toml").read_text()
@@ -62,26 +68,26 @@ class BuildTests(unittest.TestCase):
                              or name.endswith((".pyc", ".pyo")), name)
 
     def test_metadata(self):
-        meta = zipfile.ZipFile(self.wheel).read(f"lazaret-{self.version}.dist-info/METADATA").decode()
+        meta = read_member(self.wheel, f"lazaret-{self.version}.dist-info/METADATA").decode()
         self.assertIn(f"Version: {self.version}\n", meta)
         self.assertIn("Requires-Python: >=3.10\n", meta)
         self.assertIn("License: Apache-2.0\n", meta)
         self.assertNotIn("Requires-Dist", meta)
 
     def test_record_hashes_match(self):
-        z = zipfile.ZipFile(self.wheel)
-        record = z.read(f"lazaret-{self.version}.dist-info/RECORD").decode().splitlines()
-        self.assertEqual(len(record), len(z.namelist()))
-        for line in record:
-            name, digest, size = line.rsplit(",", 2)
-            if not digest:
-                continue  # RECORD itself
-            data = z.read(name)
-            expected = "sha256=" + base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
-            self.assertEqual((digest, int(size)), (expected, len(data)), name)
+        with zipfile.ZipFile(self.wheel) as z:
+            record = z.read(f"lazaret-{self.version}.dist-info/RECORD").decode().splitlines()
+            self.assertEqual(len(record), len(z.namelist()))
+            for line in record:
+                name, digest, size = line.rsplit(",", 2)
+                if not digest:
+                    continue  # RECORD itself
+                data = z.read(name)
+                expected = "sha256=" + base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
+                self.assertEqual((digest, int(size)), (expected, len(data)), name)
 
     def test_console_scripts_resolve(self):
-        ep = zipfile.ZipFile(self.wheel).read(f"lazaret-{self.version}.dist-info/entry_points.txt").decode()
+        ep = read_member(self.wheel, f"lazaret-{self.version}.dist-info/entry_points.txt").decode()
         import importlib
         for name, module, func in re.findall(r"^(\S+) = ([\w.]+):(\w+)$", ep, re.M):
             with self.subTest(script=name):
@@ -109,35 +115,39 @@ class BuildTests(unittest.TestCase):
                 # a wheel built from the sdist has the same files as one built from the repo
                 inner = backend(os.path.join(d, base, "_build", "lazaret_build.py"))
                 rebuilt = os.path.join(d, inner.build_wheel(d))
-                self.assertEqual(sorted(zipfile.ZipFile(rebuilt).namelist()), sorted(self.names()))
+                with zipfile.ZipFile(rebuilt) as z:
+                    self.assertEqual(sorted(z.namelist()), sorted(self.names()))
 
     def test_installed_wheel_runs_without_the_source_tree(self):
         with tempfile.TemporaryDirectory() as target:
-            zipfile.ZipFile(self.wheel).extractall(target)
+            with zipfile.ZipFile(self.wheel) as z:
+                z.extractall(target)
             env = dict(os.environ, PYTHONPATH=target)   # only the installed copy
             check = subprocess.run(
                 [sys.executable, "-c", "import lazaret, lazaret.registry.repo, lazaret.mcp.server; print(lazaret.__file__)"],
-                capture_output=True, text=True, env=env, cwd=target, timeout=60)
+                capture_output=True, encoding="utf-8", errors="replace", env=env, cwd=target, timeout=60)
             self.assertEqual(check.returncode, 0, check.stderr)
-            self.assertTrue(check.stdout.strip().startswith(target), check.stdout)
+            # compare resolved paths: on macOS the temp dir is a symlink (/var -> /private/var)
+            installed = os.path.realpath(check.stdout.strip())
+            self.assertTrue(installed.startswith(os.path.realpath(target) + os.sep), check.stdout)
             scan = subprocess.run(
                 [sys.executable, "-m", "lazaret", os.path.join(_support.FIXTURES, "testproj"),
                  "--no-html", "--no-json", "-q"],
-                capture_output=True, text=True, env=env, cwd=target, timeout=120)
+                capture_output=True, encoding="utf-8", errors="replace", env=env, cwd=target, timeout=120)
             self.assertNotIn("Traceback", scan.stderr)
             self.assertIn("Supply-chain", scan.stdout)
 
     def test_editable_wheel_points_at_src(self):
         with tempfile.TemporaryDirectory() as d:
             wheel = os.path.join(d, self.b.build_editable(d))
-            z = zipfile.ZipFile(wheel)
-            pth = [n for n in z.namelist() if n.endswith(".pth")]
-            self.assertEqual(len(pth), 1)
-            self.assertEqual(z.read(pth[0]).decode().strip(), _support.SRC)
+            with zipfile.ZipFile(wheel) as z:
+                pth = [n for n in z.namelist() if n.endswith(".pth")]
+                self.assertEqual(len(pth), 1)
+                self.assertEqual(z.read(pth[0]).decode().strip(), _support.SRC)
 
     def test_command_line_build(self):
         with tempfile.TemporaryDirectory() as d:
-            p = subprocess.run([sys.executable, BACKEND, d], capture_output=True, text=True, timeout=120)
+            p = subprocess.run([sys.executable, BACKEND, d], capture_output=True, encoding="utf-8", errors="replace", timeout=120)
             self.assertEqual(p.returncode, 0, p.stderr)
             self.assertEqual(sorted(os.listdir(d)),
                              sorted([f"lazaret-{self.version}.tar.gz", f"lazaret-{self.version}-py3-none-any.whl"]))

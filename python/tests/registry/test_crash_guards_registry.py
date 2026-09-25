@@ -75,7 +75,7 @@ def run_cli(args, db, tarballs, timeout=300):
     env["LAZARET_DB"] = db
     return subprocess.run(
         [sys.executable, reg, "lazaret_repo.py"] + args,
-        capture_output=True, text=True, cwd=HERE, env=env, timeout=timeout)
+        capture_output=True, encoding="utf-8", errors="replace", cwd=HERE, env=env, timeout=timeout)
 
 
 class RegistryGuardTests(unittest.TestCase):

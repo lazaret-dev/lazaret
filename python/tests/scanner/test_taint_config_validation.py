@@ -276,7 +276,7 @@ class TestCLI(unittest.TestCase):
     def run_cli(self, *extra):
         # NOT -q: the control test needs per-issue lines (e.g. "T-SQL").
         p = subprocess.run([PY, CLI, self.tmp, "--no-html", "--no-json",
-                            *extra], capture_output=True, text=True, timeout=120)
+                            *extra], capture_output=True, encoding="utf-8", errors="replace", timeout=120)
         return p.returncode, p.stdout, p.stderr
 
     def assert_unknown_category_warning(self, rc, out, err, cfg_name):

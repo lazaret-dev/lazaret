@@ -70,7 +70,7 @@ def _serve(lines, db=None, timeout=120):
     else:
         env["LAZARET_DB"] = os.path.join(tempfile.mkdtemp(prefix="cg-mcph-"), "reg.db")
     return subprocess.run([PY, MCP], input="\n".join(lines) + "\n",
-                          capture_output=True, text=True, timeout=timeout, env=env)
+                          capture_output=True, encoding="utf-8", errors="replace", timeout=timeout, env=env)
 
 
 def _frames(proc):
@@ -357,14 +357,14 @@ class LibraryCodeTests(unittest.TestCase):
         env["LAZARET_DB"] = os.path.join(tempfile.mkdtemp(prefix="cg-mcph-cli-"), "r.db")
         p = subprocess.run([PY, _support.REGISTRY,
                             "discover", "--since", "garbage!!"],
-                           capture_output=True, text=True, timeout=120, env=env)
+                           capture_output=True, encoding="utf-8", errors="replace", timeout=120, env=env)
         self.assertEqual(p.returncode, 1)
         self.assertEqual(p.stderr, "bad --since 'garbage!!'; use e.g. 7d, 2w, 24h, or 2026-06-25\n")
         self.assertNotIn("Traceback", p.stderr)
 
     def test_cli_list_postgres_dsn_legacy_parity(self):
         p = subprocess.run([PY, _support.REGISTRY, "list"],
-                           capture_output=True, text=True, timeout=120,
+                           capture_output=True, encoding="utf-8", errors="replace", timeout=120,
                            env=dict(os.environ,
                                     LAZARET_DB="postgresql://127.0.0.1:5432/none"))
         self.assertEqual(p.returncode, 1)

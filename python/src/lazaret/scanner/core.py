@@ -41,6 +41,29 @@ except Exception:  # pragma: no cover
 
 from lazaret.scanner import reports as lazaret_report  # report paths: pre-scan validation, atomic writes
 
+
+def configure_stdio():
+    """Never crash while printing. Reports use characters such as the check
+    and cross marks; a Windows console shows them fine, but redirected output
+    (a pipe, a file, CI logs) defaults to the ANSI code page (e.g. cp1252),
+    which cannot encode them, and print() would raise UnicodeEncodeError
+    mid-report. There, write UTF-8 instead. Everywhere, replace anything a
+    stream can't encode rather than raising. An explicit PYTHONIOENCODING is
+    respected. Called at the start of every CLI entry point."""
+    for stream, errors in ((sys.stdout, "replace"), (sys.stderr, "backslashreplace")):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            redirected_on_windows = (sys.platform == "win32" and not stream.isatty()
+                                     and not os.environ.get("PYTHONIOENCODING"))
+            if redirected_on_windows:
+                reconfigure(encoding="utf-8", errors=errors)
+            else:
+                reconfigure(errors=errors)
+        except (OSError, ValueError):
+            pass
+
 # ---------------- Rules (mirrors lazaret.html) ----------------
 SEV_ORDER = {"BLOCKER": 0, "CRITICAL": 1, "MAJOR": 2, "MINOR": 3, "INFO": 4}
 TYPE_LABEL = {"VULN": "Vulnerability", "HOTSPOT": "Security Hotspot",
@@ -2326,6 +2349,7 @@ def apply_baseline(res, baseline_path):
 
 # ---------------- Main ----------------
 def main():
+    configure_stdio()
     global REDACT_SECRETS, EXCERPT_WIDTH
     ap = argparse.ArgumentParser(prog="lazaret", description="Lazaret — security & quality scanner for Python/JS projects.")
     ap.add_argument("directory", help="Project directory to scan")

@@ -95,7 +95,7 @@ def run_registry_cli(args, db, tarballs, timeout=300):
     })
     env["LAZARET_DB"] = db
     return subprocess.run([PY, reg, "lazaret_repo.py"] + args,
-                          capture_output=True, text=True, cwd=HERE, env=env,
+                          capture_output=True, encoding="utf-8", errors="replace", cwd=HERE, env=env,
                           timeout=timeout)
 
 
@@ -110,7 +110,7 @@ class McpDeepFrameTests(unittest.TestCase):
         env = dict(os.environ)
         env["LAZARET_DB"] = os.path.join(tmp, "reg.db")
         p = subprocess.run([PY, MCP], input="\n".join(lines) + "\n",
-                           capture_output=True, text=True, timeout=120, env=env)
+                           capture_output=True, encoding="utf-8", errors="replace", timeout=120, env=env)
         return p
 
     def test_deep_frame_error_reply_and_server_survives(self):
@@ -183,7 +183,7 @@ class CliConfigBaselineTests(unittest.TestCase):
     def _cli(self, *extra):
         return subprocess.run(
             [PY, CLI, self.tmp, "--no-html", "--no-json", *extra],
-            capture_output=True, text=True, timeout=120)
+            capture_output=True, encoding="utf-8", errors="replace", timeout=120)
 
     def test_autoloaded_deep_taint_config_warns_and_scans(self):
         # scanned-repo content: hostile repo plants .lazaret-taint.json

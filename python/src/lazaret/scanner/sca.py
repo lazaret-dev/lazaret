@@ -755,6 +755,7 @@ def scan_all(root, extra_site_packages=None):
 
 
 def main(argv=None):
+    lazaret.configure_stdio()
     args = parse_args(argv if argv is not None else sys.argv[1:])
     if not os.path.isdir(args.directory):
         # audit H1: sanitize the CLI value — no-op for clean paths, uniformity.
