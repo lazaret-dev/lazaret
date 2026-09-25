@@ -55,10 +55,12 @@ class XMLParser:
         parser.ordered_attributes = 1
         parser.DefaultHandlerExpand = self._default
         target = self.target
-        if hasattr(target, "start"):
-            parser.StartElementHandler = self._start
-        if hasattr(target, "end"):
-            parser.EndElementHandler = self._end
+        # Nesting depth is counted on every element, whether or not the
+        # target implements start() and end().
+        self._target_start = getattr(target, "start", None)
+        self._target_end = getattr(target, "end", None)
+        parser.StartElementHandler = self._start
+        parser.EndElementHandler = self._end
         if hasattr(target, "start_ns"):
             parser.StartNamespaceDeclHandler = self._start_ns
         if hasattr(target, "end_ns"):
@@ -87,13 +89,19 @@ class XMLParser:
             raise depth_exceeded(limit)
         if self._attlist.active:
             self._attlist.check(attr_list[1::2], self._fed)
+        start = self._target_start
+        if start is None:
+            return None
         fixname = self._fixname
         attrib = {fixname(attr_list[i]): attr_list[i + 1] for i in range(0, len(attr_list), 2)}
-        return self.target.start(fixname(tag), attrib)
+        return start(fixname(tag), attrib)
 
     def _end(self, tag: str) -> Any:
         self._depth -= 1
-        return self.target.end(self._fixname(tag))
+        end = self._target_end
+        if end is None:
+            return None
+        return end(self._fixname(tag))
 
     def _start_ns(self, prefix: str | None, uri: str | None) -> Any:
         return self.target.start_ns(prefix or "", uri or "")
