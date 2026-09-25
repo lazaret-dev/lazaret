@@ -4,7 +4,7 @@ registry, the MCP server and project scans).
 - looks_binary: only invalid UTF-8 and control bytes count as non-text (an
   accented description or a NUL in a comment made files "binary", never
   scanned).
-- decode_source: BOM / UTF-16 / PEP 263 cookies (UTF-7 -> SC-UTF7) and
+- decode_member: BOM / UTF-16 / PEP 263 cookies (UTF-7 -> SC-UTF7) and
   SC-TRUNCATED for content that is not text at all.
 - Manifests (shared semantics 3): BOM stripped, JavaScript-like number
   parsing, SC-MANIFEST-UNPARSEABLE for an unreadable ROOT manifest, the
@@ -47,13 +47,13 @@ class LooksBinaryTests(unittest.TestCase):
         self.assertFalse(lazaret.looks_binary(b""))
 
 
-class DecodeSourceTests(unittest.TestCase):
+class DecodeMemberTests(unittest.TestCase):
     def test_plain_utf8_has_no_extra_issues(self):
-        text, extra = lazaret.decode_source("a.py", b"x = 1\n")
+        text, extra = lazaret.decode_member("a.py", b"x = 1\n")
         self.assertEqual((text, extra), ("x = 1\n", []))
 
     def test_utf7_cookie_is_decoded_and_flagged(self):
-        text, extra = lazaret.decode_source("setup.py", UTF7_SETUP.encode())
+        text, extra = lazaret.decode_member("setup.py", UTF7_SETUP.encode())
         self.assertIn("\nimport base64;exec(base64.b64decode('cHJpbnQoMSk='))", text)
         by_rule = {i["rule"]: i for i in extra}
         self.assertEqual(by_rule["SC-UTF7"]["sev"], "CRITICAL")
@@ -64,52 +64,52 @@ class DecodeSourceTests(unittest.TestCase):
     def test_utf7_aliases(self):
         for name in ("utf7", "UTF_7", "u7", "unicode-1-1-utf-7"):
             with self.subTest(codec=name):
-                _text, extra = lazaret.decode_source("a.py", f"# coding: {name}\nx = 1\n".encode())
+                _text, extra = lazaret.decode_member("a.py", f"# coding: {name}\nx = 1\n".encode())
                 self.assertIn("SC-UTF7", {i["rule"] for i in extra})
 
     def test_cookie_on_line_two_only_after_a_comment_line(self):
-        _t, extra = lazaret.decode_source("a.py", b"#!/usr/bin/env python\n# coding: utf-7\n")
+        _t, extra = lazaret.decode_member("a.py", b"#!/usr/bin/env python\n# coding: utf-7\n")
         self.assertIn("SC-UTF7", {i["rule"] for i in extra})
         # CPython ignores a line-2 cookie after a code line; so do we
-        _t, extra = lazaret.decode_source("a.py", b"x = 1\n# coding: utf-7\n")
+        _t, extra = lazaret.decode_member("a.py", b"x = 1\n# coding: utf-7\n")
         self.assertEqual(extra, [])
 
     def test_other_codecs_and_unknown_codecs(self):
-        text, extra = lazaret.decode_source("a.py", "# coding: latin-1\nx = 'é'\n".encode("latin-1"))
+        text, extra = lazaret.decode_member("a.py", "# coding: latin-1\nx = 'é'\n".encode("latin-1"))
         self.assertIn("x = 'é'", text)
         self.assertEqual([i["rule"] for i in extra], ["Q-ENCODING"])
-        text, extra = lazaret.decode_source("a.py", b"# coding: no-such-codec\nx = 1\n")
+        text, extra = lazaret.decode_member("a.py", b"# coding: no-such-codec\nx = 1\n")
         self.assertIn("x = 1", text)
         self.assertEqual([i["rule"] for i in extra], ["Q-ENCODING"])
         # a bytes-to-bytes "codec" is not usable: read as UTF-8, never crash
-        text, extra = lazaret.decode_source("a.py", b"# coding: rot13\nx = 1\n")
+        text, extra = lazaret.decode_member("a.py", b"# coding: rot13\nx = 1\n")
         self.assertIn("x = 1", text)
 
     def test_cookie_only_applies_to_python(self):
-        _t, extra = lazaret.decode_source("a.js", b"// coding: utf-7\nx = 1\n")
+        _t, extra = lazaret.decode_member("a.js", b"// coding: utf-7\nx = 1\n")
         self.assertEqual(extra, [])
 
     def test_boms_and_utf16(self):
-        text, extra = lazaret.decode_source("a.js", b"\xef\xbb\xbfeval(x)")
+        text, extra = lazaret.decode_member("a.js", b"\xef\xbb\xbfeval(x)")
         self.assertEqual(text, "eval(x)")
         self.assertEqual([i["rule"] for i in extra], ["Q-ENCODING"])
-        text, _ = lazaret.decode_source("a.py", "eval(x)\n".encode("utf-16"))
+        text, _ = lazaret.decode_member("a.py", "eval(x)\n".encode("utf-16"))
         self.assertEqual(text, "eval(x)\n")
-        text, _ = lazaret.decode_source("a.py", "eval(x)\n".encode("utf-16-le"))
+        text, _ = lazaret.decode_member("a.py", "eval(x)\n".encode("utf-16-le"))
         self.assertEqual(text, "eval(x)\n")
 
     def test_nul_near_the_top_does_not_flip_utf8_to_utf16(self):
-        text, extra = lazaret.decode_source("a.js", b"/*\x00*/" + DECODE_EXEC_JS.encode())
+        text, extra = lazaret.decode_member("a.js", b"/*\x00*/" + DECODE_EXEC_JS.encode())
         self.assertIn("eval(Buffer.from", text)
         self.assertEqual(extra, [])
 
     def test_binary_content_is_a_truncation(self):
-        _t, extra = lazaret.decode_source("index.js", ELF + bytes(range(256)) * 8)
+        _t, extra = lazaret.decode_member("index.js", ELF + bytes(range(256)) * 8)
         self.assertEqual([i["rule"] for i in extra], ["SC-TRUNCATED"])
 
     def test_mpeg_ts_video_named_ts_is_not_a_truncation(self):
         ts = bytes([0x47] + [0x11] * 187) * 4
-        _t, extra = lazaret.decode_source("clip.ts", ts)
+        _t, extra = lazaret.decode_member("clip.ts", ts)
         self.assertEqual(extra, [])
 
 

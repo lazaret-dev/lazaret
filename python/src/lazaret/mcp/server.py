@@ -295,62 +295,38 @@ def _preflight(root, exclude, include_deps, ctx):
 
 
 def run_project_scan(path, exclude=None, include_deps=False, ctx=None):
-    """The CLI's project pipeline, for the MCP tools — ONE helper so it can
-    be swapped for a shared core.scan_project() without touching the tools:
-    collect_files; scan_file per file (dep mode for dependency dirs);
-    binding.gyp through scan_gyp and package.json through scan_manifest
-    (dependency manifests with registry semantics); Q-SKIPPED-TREE entries;
-    the cross-file taint engine, guarded (a failure there becomes a note in
-    the result, never a failed tool call); build_result + redact_result.
-    Per-call scan state (skipped-tree accounting) is reset first.
+    """The CLI's project pipeline for the MCP tools: core.scan_project(), the
+    same function `lazaret <dir>` runs (collection, scan_file per file,
+    package.json / binding.gyp, skipped-tree notes, the guarded cross-file
+    pass, gate, redaction), so the two can never drift apart again.
 
-    MCP budget (ctx): cancellation and the deadline are checked between
-    files; caps on files / bytes are enforced before anything is read. A
-    call that stops early returns what it scanned with "incomplete": true
-    and an SC-TRUNCATED finding, so it can never pass the gate."""
+    MCP budget (ctx): caps on files / bytes are enforced before anything is
+    read; cancellation and the deadline are checked between files. A call
+    that stops early returns what it scanned with "incomplete": true and an
+    SC-TRUNCATED finding, so it can never pass the gate."""
     ctx = ctx or _ctx()
     exclude = list(exclude or [])
-    lazaret._reset_scan_state()
-    notes = []
     over = _preflight(path, exclude, include_deps, ctx)
     if over:
         res = lazaret.build_result(path, [], [lazaret.truncated_issue(
             ".", f"directory not scanned: {over}; narrow the path or raise the MCP caps")])
-        res.update(incomplete=True, incompleteReason=over, notes=notes)
+        res.update(incomplete=True, incompleteReason=over, notes=[])
         return res
-    files, manifests, binary_issues = lazaret.collect_files(path, exclude, include_deps=include_deps)
-    issues = list(binary_issues)
-    scanned, stopped = [], None
-    for f in files:
-        ctx.check()
+
+    def should_stop():
+        ctx.check()                      # raises when the call was cancelled
         if ctx.expired():
-            stopped = f"time budget of {ctx.max_seconds:g} s (LAZARET_MCP_MAX_SECONDS) exceeded"
-            break
-        issues.extend(lazaret.scan_file(f["path"], f["content"], f["lang"], dep=f.get("dep", False)))
-        scanned.append(f)
-    if stopped:
-        issues.append(lazaret.truncated_issue(
-            ".", f"{stopped}: {len(files) - len(scanned)} of {len(files)} files not scanned"))
-    for mf in manifests:
-        ctx.check()
-        if os.path.basename(mf["path"]) == "binding.gyp":
-            issues.extend(lazaret.scan_gyp(mf["path"], mf["content"]))
-        else:
-            issues.extend(lazaret.scan_manifest(
-                mf["path"], mf["content"], registry=lazaret.is_dependency_manifest(mf["path"])))
-    issues.extend(lazaret.skipped_tree_issues())
-    flow = getattr(lazaret, "lazaret_flow", None)
-    if flow is not None and not stopped:
-        try:
-            issues.extend(flow.analyze(scanned))
-        except Exception as exc:                                  # noqa: BLE001
-            notes.append(f"interprocedural taint analysis skipped "
-                         f"({type(exc).__name__}: {lazaret.sanitize_term(exc)})")
-    res = lazaret.build_result(path, scanned, issues)
-    lazaret.redact_result(res)
-    res["notes"] = notes
-    if stopped:
-        res.update(incomplete=True, incompleteReason=stopped)
+            return f"time budget of {ctx.max_seconds:g} s (LAZARET_MCP_MAX_SECONDS) exceeded"
+        return None
+
+    try:
+        res = lazaret.scan_project(path, exclude, include_deps=include_deps,
+                                   should_stop=should_stop)
+    except lazaret.ScanTargetError:
+        # an empty directory is a clean (if pointless) scan for a tool caller
+        res = lazaret.build_result(path, [], [])
+        res["warnings"] = []
+    res["notes"] = res.pop("warnings", [])
     return res
 
 
@@ -435,7 +411,7 @@ def tool_scan_files(args):
         read_bytes += len(data)
         # BOM / UTF-16 / PEP 263 coding cookie (UTF-7 → SC-UTF7), like the
         # registry: scan what the interpreter will read.
-        content, extra = lazaret.decode_source(p, data)
+        content, extra = lazaret.decode_member(p, data)
         issues = extra + lazaret.scan_file(p, content, lang)
         files.append({"path": p, "content": content, "lang": lang})
         all_issues.extend(issues)

@@ -1313,7 +1313,7 @@ class _ArtifactScan:
             self.classify(rel, raw, size)
             return
         if base == "package.json":
-            text, extra = lazaret.decode_source(rel, raw)
+            text, extra = lazaret.decode_member(rel, raw)
             self.add_decode_issues(extra, keep_encoding=False)
             self.manifests[rel] = text
             for i in lazaret.scan_manifest(rel, text, registry=True):
@@ -1322,7 +1322,7 @@ class _ArtifactScan:
                 self.issues.append(i)
             return
         if base in ("binding.gyp",) or ext in (".gyp", ".gypi"):
-            text, extra = lazaret.decode_source(rel, raw)
+            text, extra = lazaret.decode_member(rel, raw)
             self.add_decode_issues(extra, keep_encoding=False)
             self.manifests[rel] = text
             for i in lazaret.scan_gyp(rel, text):
@@ -1340,7 +1340,7 @@ class _ArtifactScan:
             return
         lang = lazaret.EXTS.get(ext)
         if lang is not None:
-            text, extra = lazaret.decode_source(rel, raw)
+            text, extra = lazaret.decode_member(rel, raw)
             self.add_decode_issues(extra)
             if any(i["rule"] == "SC-TRUNCATED" for i in extra):
                 self.classify(rel, raw, size)   # an ELF named index.js is still an ELF
@@ -1387,7 +1387,7 @@ class _ArtifactScan:
                 text = raw.decode("utf-8", "replace")
                 self.shell[rel] = text
                 return text
-            text, extra = lazaret.decode_source(rel, raw)
+            text, extra = lazaret.decode_member(rel, raw)
             self.add_decode_issues(extra)
             self.scan_source(rel, text, as_lang)
             return text

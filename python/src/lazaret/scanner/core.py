@@ -1208,47 +1208,7 @@ def _mpeg_ts(header):
     return len(header) >= 377 and header[0] == header[188] == header[376] == 0x47
 
 
-# ---------------- Source decoding (registry, MCP; spec items 1/4/15) ----------------
-_PY_COOKIE_RE = re.compile(rb"^[ \t\f]*#.*?coding[:=][ \t]*([-\w.]+)", re.ASCII)
-_PY_BLANK_RE = re.compile(rb"^[ \t\f]*(?:[#\r\n]|$)", re.ASCII)
-_Q_ENCODING = {
-    "id": "Q-ENCODING", "name": "Non-UTF-8 source encoding", "type": "SMELL", "sev": "INFO",
-    "why": "A non-UTF-8 source read as UTF-8 decodes to mojibake, hiding every "
-           "pattern-based finding — a UTF-16 eval() scans clean.",
-    "fix": "Re-save the file as UTF-8 so tooling reads it as written.",
-    "ref": "Maintainability"}
-_SC_UTF7 = {
-    "id": "SC-UTF7", "name": "UTF-7 source encoding", "type": "HOTSPOT", "sev": "CRITICAL",
-    "msg": "Python source declares UTF-7; code can hide in comments.",
-    "why": ("Under a UTF-7 coding cookie, '+AAo-' decodes to a newline: what looks "
-            "like a comment line to a reviewer, an editor and a UTF-8 scanner is "
-            "executable code to the interpreter. No legitimate project needs it."),
-    "fix": "Treat the package as hostile; review the UTF-7-decoded text (scanned here).",
-    "ref": "CWE-506 · Supply chain"}
-
-
-def _is_utf7(codec):
-    try:
-        import codecs
-        return codecs.lookup(codec).name == "utf-7"
-    except (LookupError, TypeError, ValueError):
-        return False
-
-
-def _python_cookie(data):
-    """PEP 263 coding cookie of Python source bytes, exactly where CPython
-    looks: line 1, or line 2 when line 1 is blank or a comment. -> (codec
-    name as written, line number) or (None, None)."""
-    lines = data.split(b"\n", 2)
-    for idx, line in enumerate(lines[:2]):
-        m = _PY_COOKIE_RE.match(line)
-        if m:
-            return m.group(1).decode("ascii"), idx + 1
-        if idx == 0 and not _PY_BLANK_RE.match(line):
-            break
-    return None, None
-
-
+# ---------------- Source decoding for archive members (registry, MCP) ----------------
 def _text_is_plausible(text):
     """Does a UTF-16 guess (NUL in the first four bytes, no BOM) read as
     text? A UTF-8 file with a NUL near the top (`/*\\0*/eval(…)`) decodes to
@@ -1268,78 +1228,28 @@ def _undecodable_share(text):
     return bad / len(sample)
 
 
-def decode_source(path, data):
-    """Decode a source file's bytes the way its runtime reads it.
-    -> (text, extra_issues).
+def decode_member(path, data):
+    """Decode one archive member (registry) or one file named by an MCP
+    caller the way its runtime reads it. -> (text, extra_issues).
 
-    Order (shared semantics 4 and 15): a BOM decides first (UTF-8-sig,
-    UTF-16 LE/BE); a NUL in the first four bytes suggests BOM-less UTF-16,
-    accepted only when the result reads as text; for .py (and .pyw) files a
-    PEP 263 cookie on line 1/2 names the codec. Any non-plain-UTF-8 case adds
-    Q-ENCODING (INFO); a UTF-7 cookie adds SC-UTF7 (CRITICAL) and the
-    UTF-7-decoded text is what gets scanned. Nothing here raises: an unknown
-    or broken codec falls back to UTF-8 with replacement.
-
-    A file that does not decode to anything text-like (more than 30% invalid
-    bytes or control characters) adds SC-TRUNCATED: it was "scanned" only as
-    mojibake, so the scan of it proves nothing."""
+    Same decoding as a project scan (decode_source: BOM, BOM-less UTF-16
+    only when it reads as text, PEP 263 cookies for Python incl. UTF-7 ->
+    SC-UTF7) and the same Q-ENCODING / SC-UTF7 findings (encoding_issues).
+    One addition for verdict integrity: a member that does not decode to
+    anything text-like (more than 30% invalid bytes or control characters)
+    adds SC-TRUNCATED — it was "scanned" only as mojibake, so the scan of it
+    proves nothing. Never raises on content."""
     data = bytes(data or b"")
     ext = os.path.splitext(path)[1].lower()
-    codec, body, cookie_line = None, data, None
-    if data.startswith(b"\xef\xbb\xbf"):
-        codec, body = "utf-8-sig", data[3:]
-    elif data.startswith(b"\xff\xfe"):
-        codec, body = "utf-16-le", data[2:]
-    elif data.startswith(b"\xfe\xff"):
-        codec, body = "utf-16-be", data[2:]
-    elif b"\x00" in data[:4]:
-        nul = data[:4].index(b"\x00")
-        guess = "utf-16-le" if nul in (1, 3) else "utf-16-be"
-        text = data.decode(guess, "replace")
-        if _text_is_plausible(text):
-            codec = guess
-    label = codec              # what Q-ENCODING reports; None = plain UTF-8
-    if ext in (".py", ".pyw") and codec in (None, "utf-8-sig"):
-        cookie, cookie_line = _python_cookie(body)
-        if cookie:
-            import codecs
-            try:
-                norm = codecs.lookup(cookie).name
-            except LookupError:
-                norm = None
-            if norm is None:
-                label = f"unknown codec {cookie!r}; read as UTF-8"
-            elif norm != "utf-8" and codec is None:
-                codec = label = cookie
-    utf7 = bool(codec) and _is_utf7(codec)
-    decoded = None
-    if codec in (None, "utf-8-sig"):
-        decoded = body.decode("utf-8", "replace")
-    else:
-        try:
-            decoded = body.decode(codec)
-        except (UnicodeDecodeError, LookupError, TypeError, ValueError):
-            try:
-                decoded = body.decode(codec, "replace")
-            except (LookupError, TypeError, ValueError):
-                decoded = None
-    if not isinstance(decoded, str):          # unusable or bytes-to-bytes codec
-        label = f"{codec} (not usable; read as UTF-8)"
-        decoded = body.decode("utf-8", "replace")
-    lines = normalize_newlines(decoded).split("\n")
-    extra = []
-    if label:
-        q = dict(_Q_ENCODING)
-        q["msg"] = f"Source file is not UTF-8 (detected {label}); decoded explicitly."
-        extra.append(mk_issue(q, path, 1, lines))
-    if utf7:
-        extra.append(mk_issue(_SC_UTF7, path, cookie_line or 1, lines))
-    share = _undecodable_share(decoded)
+    lang = "py" if ext in (".py", ".pyw") else EXTS.get(ext)
+    text, info = decode_source(data, lang)
+    extra = encoding_issues(path, text, info)
+    share = _undecodable_share(text)
     if share > _NON_TEXT_SHARE and not (ext == ".ts" and _mpeg_ts(data[:512])):
         extra.append(truncated_issue(
             path, f"content is not decodable as text ({share:.0%} invalid bytes or "
                   f"control characters), so no rule could read it"))
-    return decoded, extra
+    return text, extra
 
 def classify_binary(path, data, size, context):
     """Return a supply-chain issue dict for a suspicious non-source file, or None.
@@ -3645,6 +3555,13 @@ def decode_source(data, lang=None):
     decodes as UTF-8 with replacement. Never raises on content. Line endings
     are normalized to \\n, as text mode reads them."""
     enc = detect_encoding(data[:4])
+    if (enc["reported"] and not enc["bom"] and enc["encoding"].startswith("utf-16")
+            and not _text_is_plausible(data[:4096].decode(enc["encoding"], "replace"))):
+        # A NUL near the top of a UTF-8 file (`/*\0*/eval(…)`) is not UTF-16:
+        # decoded that way the payload turns into CJK-looking garbage that no
+        # rule reads. Accept the BOM-less UTF-16 guess only when it reads as
+        # text (real UTF-16 source is mostly ASCII).
+        enc = {"encoding": "utf-8", "reported": False, "bom": 0}
     codec, body = enc["encoding"], data[enc["bom"]:]
     info = {"encoding": codec, "reported": enc["reported"], "utf7": False, "cookieLine": None}
     if lang == "py" and not enc["reported"]:
@@ -3904,7 +3821,7 @@ def _scan_manifest_entry(mf):
 
 
 def scan_project(root, exclude=(), include_deps=False, taint_config=None,
-                 redact_secrets=True, extra_issues=()):
+                 redact_secrets=True, extra_issues=(), should_stop=None):
     """The complete project scan, shared by the CLI (main) and the MCP server:
     collect -> scan files -> manifests / binding.gyp -> collection findings
     (binary, pyc, encoding, symlink, unreadable, truncated) -> interprocedural
@@ -3926,6 +3843,13 @@ def scan_project(root, exclude=(), include_deps=False, taint_config=None,
                     is restored afterwards)
     extra_issues    findings produced before the scan that belong in the
                     result (e.g. the CLI's Q-TAINT-CONFIG notes)
+    should_stop     optional callable, checked before each file and manifest
+                    (the MCP server's time budget and cancellation). It may
+                    raise to abort the scan, or return a reason string to stop
+                    early: the files not reached are then reported by one
+                    SC-TRUNCATED finding (so a partial scan can never pass the
+                    gate), the cross-file pass is skipped, and the result
+                    carries "incomplete": True and "incompleteReason".
 
     Returns the build_result() dict — project, scannedAt, pass, conditions,
     metrics, counts, ratings, supplyChain, crossFile, perFile, issues — plus
@@ -3959,21 +3883,35 @@ def scan_project(root, exclude=(), include_deps=False, taint_config=None,
                 f"nothing to scan under {_fs_display(root)}: no Python, JavaScript or "
                 f"SQL sources, package manifests or other files to check")
         issues = list(extra_issues) + list(col["issues"])
+        scanned, stopped = [], None
         for f in files:
+            stopped = should_stop() if should_stop is not None else None
+            if stopped:
+                break
             try:
                 issues.extend(scan_file(f["path"], f["content"], f["lang"],
                                         dep=f.get("dep", False)))
             except Exception as exc:        # one file must never kill the run
                 issues.append(scan_error_issue(f["path"], exc))
+            scanned.append(f)
         for mf in manifests:
+            if not stopped and should_stop is not None:
+                stopped = should_stop()
+            if stopped:
+                break
             try:
                 issues.extend(_scan_manifest_entry(mf))
             except Exception as exc:
                 issues.append(scan_error_issue(mf["path"], exc))
+        if stopped:
+            issues.append(truncated_issue(
+                ".", f"{stopped}: {len(files) - len(scanned)} of {len(files)} files "
+                     f"not scanned"))
+            files = scanned
         # G10: skipped-directory accounting — INFO findings make the coverage
         # gap visible instead of silent.
         issues.extend(skipped_tree_issues(col["skipped"]))
-        if lazaret_flow is not None:
+        if lazaret_flow is not None and not stopped:
             # The interprocedural engine can fail on input it does not
             # understand; degrade to the intra-file engine rather than crash
             # mid-scan, and say so instead of hiding it.
@@ -3984,6 +3922,8 @@ def scan_project(root, exclude=(), include_deps=False, taint_config=None,
                                 f"({type(exc).__name__}: {_safe_text(exc)})")
         res = build_result(root, files, issues)
         res["warnings"] = warnings
+        if stopped:
+            res.update(incomplete=True, incompleteReason=stopped)
         # L1: belt-and-braces — no SECRET-rule issue may reach a report or
         # the baseline fingerprinter with its raw flagged line.
         redact_result(res)
