@@ -1937,6 +1937,7 @@ def scan_gyp(path, content):
                                              "binding.gyp action", cmd, suspicious))
     return issues
 
+import codecs as _codecs
 import stat as _stat
 import traceback as _traceback
 
@@ -1966,6 +1967,10 @@ MANIFEST_NAMES = ("package.json", "binding.gyp")
 #: volumes and into tarballs). Starts with a NUL, so it can never be Python or
 #: JavaScript source; it is classified like any other non-source file.
 APPLE_DOUBLE_MAGIC = (b"\x00\x05\x16\x07", b"\x00\x05\x16\x00")
+#: PEP 263 encoding declaration (Python source), on raw bytes.
+_PY_COOKIE_RE = re.compile(rb"^[ \t\f]*#.*?coding[:=][ \t]*([-\w.]+)")
+_PY_BLANK_RE = re.compile(rb"^[ \t\f]*(?:#.*)?$")
+_UTF7_NAMES = frozenset({"utf-7", "utf7", "u7", "unicode-1-1-utf-7"})
 
 
 class ScanTargetError(ValueError):
@@ -2139,17 +2144,66 @@ def detect_encoding(head):
     return {"encoding": "utf-8", "reported": False, "bom": 0}
 
 
+def _python_cookie(data):
+    """PEP 263 encoding declaration of Python source bytes: (name, line_no) or
+    (None, None). Same rule as the interpreter's tokenizer: line 1, or line 2
+    when line 1 is blank or a comment."""
+    lines = re.split(rb"\r\n|\r|\n", data, maxsplit=2)[:2]
+    for idx, line in enumerate(lines):
+        m = _PY_COOKIE_RE.match(line)
+        if m:
+            return m.group(1).decode("ascii"), idx + 1
+        if not _PY_BLANK_RE.match(line):
+            break
+    return None, None
+
+
+def _normal_codec(name):
+    """Codec for a cookie name as the interpreter resolves it (utf-8-* and
+    latin-1-* spellings fold to their base codec), or None if Python has no
+    such text codec."""
+    short = name[:12].lower().replace("_", "-")
+    if short == "utf-8" or short.startswith("utf-8-"):
+        return "utf-8"
+    if short in ("latin-1", "iso-8859-1", "iso-latin-1") or short.startswith(
+            ("latin-1-", "iso-8859-1-", "iso-latin-1-")):
+        return "iso8859-1"
+    try:
+        info = _codecs.lookup(name)
+    except LookupError:
+        return None
+    if not getattr(info, "_is_text_encoding", True):
+        return None                     # rot13, hex, zlib… are not text encodings
+    return info.name
+
+
 def decode_source(data, lang=None):
-    """Decode the bytes of a source file. Returns (text, info):
+    """Decode the bytes of a source file the way its interpreter would read
+    them. Returns (text, info):
 
-      info = {"encoding": codec label, "reported": bool (-> Q-ENCODING)}
+      info = {"encoding": codec label, "reported": bool (-> Q-ENCODING),
+              "utf7": bool (-> SC-UTF7), "cookieLine": n or None}
 
-    FIX-SPEC 4: BOM / NUL sniff (detect_encoding), then a strict decode with
-    an errors="replace" fallback — never raises on content. Line endings are
-    normalized to \\n, as text mode reads them."""
+    FIX-SPEC 4 (BOM / NUL sniff) first; for Python source without a BOM or
+    NUL, FIX-SPEC 15: a PEP 263 cookie naming a codec other than UTF-8 decodes
+    with that codec (Q-ENCODING); UTF-7 additionally sets utf7 (a UTF-7
+    '+AAo-' is a newline, so code can hide inside a comment). An unknown codec
+    decodes as UTF-8 with replacement. Never raises on content. Line endings
+    are normalized to \\n, as text mode reads them."""
     enc = detect_encoding(data[:4])
     codec, body = enc["encoding"], data[enc["bom"]:]
-    info = {"encoding": codec, "reported": enc["reported"]}
+    info = {"encoding": codec, "reported": enc["reported"], "utf7": False, "cookieLine": None}
+    if lang == "py" and not enc["reported"]:
+        name, line_no = _python_cookie(data)
+        if name is not None:
+            real = _normal_codec(name)
+            if real is None:
+                info.update(encoding=name, reported=True, cookieLine=line_no)
+            elif real != "utf-8":
+                codec = real
+                info.update(encoding=real, reported=True, cookieLine=line_no,
+                            utf7=(real == "utf-7"
+                                  or name.lower().replace("_", "-") in _UTF7_NAMES))
     try:
         text = body.decode(codec)
     except Exception:                   # malformed input or a misbehaving codec:
@@ -2161,7 +2215,7 @@ def decode_source(data, lang=None):
 
 
 def encoding_issues(path, text, info):
-    """Q-ENCODING finding for a decoded source file."""
+    """Q-ENCODING (and SC-UTF7) findings for a decoded source file."""
     if not info["reported"]:
         return []
     lines = text.split("\n")
@@ -2173,6 +2227,17 @@ def encoding_issues(path, text, info):
                 "pattern-based finding — a UTF-16 eval() scans clean.",
          "fix": "Re-save the file as UTF-8 so tooling reads it as written.",
          "ref": "Maintainability"}, path, 1, lines)]
+    if info["utf7"]:
+        out.append(mk_issue(
+            {"id": "SC-UTF7", "name": "UTF-7 source encoding", "type": "HOTSPOT",
+             "sev": "CRITICAL",
+             "msg": "Python source declares UTF-7; code can hide in comments.",
+             "why": "In UTF-7, '+AAo-' decodes to a newline: text that every editor, diff "
+                    "and reviewer shows as a comment becomes executable code when Python "
+                    "reads the file. No legitimate project needs a UTF-7 source file.",
+             "fix": "Re-save the file as UTF-8 and review the decoded text (the findings "
+                    "for this file are reported against it).",
+             "ref": "CWE-506 · Supply chain"}, path, info["cookieLine"] or 1, lines))
     return out
 
 
