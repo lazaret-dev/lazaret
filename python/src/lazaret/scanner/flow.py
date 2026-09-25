@@ -34,6 +34,8 @@ import os
 import re
 import sys
 
+from lazaret.scanner import taintspec
+
 MAX_ITERS = 6  # fixpoint safety bound
 
 # ---------------- terminal-control neutralizer (audit H1) ----------------
@@ -725,256 +727,81 @@ _JS_MAX_FILE = 2_000_000      # skip interprocedural JS flow above 2 MB
 # Configurable taint spec (Semgrep-style): add custom sources / sinks /
 # sanitizers without editing the engine. See load_config() for the file format.
 # ======================================================================
-_JS_SOURCE_BASE = _JS_SOURCE_RE.pattern
+def configure(cfg, on_warn=None, allow_sanitizers=True):
+    """Extend the taint model from a config: a parsed config dict (validated
+    here) or a taintspec.TaintSpec the caller already validated. Sections
+    'python' and 'javascript', each with optional 'sources' (regex list),
+    'sinks' ([{pattern, category}]) and 'sanitizers' ({full: [...],
+    partial: {name: [cats]}}).
 
-def configure(cfg, on_warn=None):
-    """Extend the taint model from a parsed config dict. Sections 'python' and
-    'javascript', each with optional 'sources' (regex list), 'sinks'
-    ({pattern, category}), and 'sanitizers' ({full: [...], partial: {name:[cats]}}).
-
-    Invalid rules are never silently dropped: every rejection is reported
-    through on_warn(msg) (file/rule/reason + the valid category list), so a
-    custom sink cannot quietly become inert while the scan still reports
-    PASSED."""
-    global _JS_SOURCE_RE
-    warn = on_warn if callable(on_warn) else None
-    if not isinstance(cfg, dict):
-        if warn:
-            warn(f"top level is {type(cfg).__name__}, not an object — nothing applied")
-        return
-    for key in cfg:
-        if key not in ("python", "javascript") and not str(key).startswith("_"):
-            if warn:
-                warn(f"unknown top-level section {key!r} — expected 'python' or "
-                     f"'javascript'; rule skipped")
-    py = cfg.get("python", {}) or {}
-    if not isinstance(py, dict):
-        if warn:
-            warn(f"section 'python' is {type(py).__name__}, not an object — "
-                 f"section ignored")
-        py = {}
-    for pat in py.get("sources", []):
-        # 48033f94: invalid regex in an auto-loaded config crashed the whole
-        # scan — reject the rule with a warning (same shape as the other
-        # rejections) and keep scanning.
-        try:
-            src_re = re.compile(pat)
-        except re.error as exc:
-            if warn:
-                warn(f"python source pattern {pat!r} is not a valid regex "
-                     f"({exc}) — rule skipped")
-            continue
-        _PY_SOURCE_EXTRA.append(src_re)
-    py_sinks = py.get("sinks", [])
-    if not isinstance(py_sinks, list):
-        if warn:
-            warn(f"python.sinks is {type(py_sinks).__name__}, not a list — "
-                 f"section ignored")
-        py_sinks = []
-    for idx, sk in enumerate(py_sinks, 1):
-        if not isinstance(sk, dict):
-            if warn:
-                warn(f"python sink #{idx} is not an object — rule skipped")
-            continue
-        cat, pattern = sk.get("category"), sk.get("pattern")
-        if not cat:
-            if warn:
-                warn(f"python sink #{idx} (pattern {pattern!r}) has no "
-                     f"'category' — rule skipped; valid categories: "
-                     f"{', '.join(sorted(SINK_META))}")
-            continue
-        if cat not in SINK_META:
-            if warn:
-                warn(f"python sink #{idx} (pattern {pattern!r}) has unknown "
-                     f"category {cat!r} — rule skipped; valid categories: "
-                     f"{', '.join(sorted(SINK_META))}")
-            continue
-        if not pattern:
-            if warn:
-                warn(f"python sink #{idx} (category {cat!r}) has an empty "
-                     f"'pattern' — rule skipped")
-            continue
-        # 48033f94: invalid sink regex — reject the rule instead of crashing.
-        try:
-            sink_re = re.compile(pattern)
-        except re.error as exc:
-            if warn:
-                warn(f"python sink #{idx} (category {cat!r}) pattern "
-                     f"{pattern!r} is not a valid regex ({exc}) — rule skipped")
-            continue
-        _EXTRA_PY_SINKS.append((sink_re, cat))
-    py_san = py.get("sanitizers", {}) or {}
-    if not isinstance(py_san, dict):
-        if warn:
-            warn(f"python.sanitizers is {type(py_san).__name__}, not an "
-                 f"object — section ignored")
-        py_san = {}
-    for name in py_san.get("full", []):
-        FULL_SANITIZERS_PY.add(name)
-    py_partial = py_san.get("partial", {}) or {}
-    if not isinstance(py_partial, dict):
-        if warn:
-            warn(f"python.sanitizers.partial is {type(py_partial).__name__}, "
-                 f"not an object — section ignored")
-        py_partial = {}
-    for name, cats in py_partial.items():
-        if not isinstance(cats, (list, tuple)):
-            if warn:
-                warn(f"python sanitizer {name!r} has {type(cats).__name__} "
-                     f"categories, not a list — rule skipped")
-            continue
-        for c in cats:
-            if c not in SINK_META and warn:
-                warn(f"python sanitizer {name!r} lists unknown category {c!r} — "
-                     f"category ignored; valid categories: "
-                     f"{', '.join(sorted(SINK_META))}")
-        _EXTRA_PARTIAL_PY[name] = {c for c in cats if c in SINK_META}
-
-    js = cfg.get("javascript", {}) or {}
-    if not isinstance(js, dict):
-        if warn:
-            warn(f"section 'javascript' is {type(js).__name__}, not an object — "
-                 f"section ignored")
-        js = {}
-    js_src = js.get("sources", [])
-    if js_src:
-        # 48033f94: any invalid pattern in the joined expression (or a non-str
-        # entry, where "|".join raised TypeError) is rejected with a warning
-        # per entry; the valid ones still apply.
-        joined = []
-        for pat in js_src:
-            try:
-                re.compile(pat)
-            except (re.error, TypeError) as exc:
-                if warn:
-                    warn(f"javascript source pattern {pat!r} is not a valid "
-                         f"regex ({exc}) — rule skipped")
-                continue
-            joined.append(pat)
-        if joined:
-            _JS_SOURCE_RE = re.compile(_JS_SOURCE_BASE + "|" + "|".join(joined))
-    js_sinks = js.get("sinks", [])
-    if not isinstance(js_sinks, list):
-        if warn:
-            warn(f"javascript.sinks is {type(js_sinks).__name__}, not a list — "
-                 f"section ignored")
-        js_sinks = []
-    for idx, sk in enumerate(js_sinks, 1):
-        if not isinstance(sk, dict):
-            if warn:
-                warn(f"javascript sink #{idx} is not an object — rule skipped")
-            continue
-        cat, pattern = sk.get("category"), sk.get("pattern")
-        if not cat:
-            if warn:
-                warn(f"javascript sink #{idx} (pattern {pattern!r}) has no "
-                     f"'category' — rule skipped; valid categories: "
-                     f"{', '.join(sorted(SINK_META))}")
-            continue
-        if cat not in SINK_META:
-            if warn:
-                warn(f"javascript sink #{idx} (pattern {pattern!r}) has unknown "
-                     f"category {cat!r} — rule skipped; valid categories: "
-                     f"{', '.join(sorted(SINK_META))}")
-            continue
-        if not pattern:
-            if warn:
-                warn(f"javascript sink #{idx} (category {cat!r}) has an empty "
-                     f"'pattern' — rule skipped")
-            continue
-        # 48033f94: invalid sink regex — reject the rule instead of crashing.
-        try:
-            sink_re = re.compile(pattern)
-        except re.error as exc:
-            if warn:
-                warn(f"javascript sink #{idx} (category {cat!r}) pattern "
-                     f"{pattern!r} is not a valid regex ({exc}) — rule skipped")
-            continue
-        _JS_SINKS.append((sink_re, cat))
-    js_san = js.get("sanitizers", {}) or {}
-    if not isinstance(js_san, dict):
-        if warn:
-            warn(f"javascript.sanitizers is {type(js_san).__name__}, not an "
-                 f"object — section ignored")
-        js_san = {}
-    for name in js_san.get("full", []):
-        # 48033f94: a non-str entry made re.escape raise TypeError; the
-        # compound pattern could also fail to compile — warn + skip either way.
-        try:
-            globals()["_JS_FULL_SAN_RE"] = re.compile(
-                _JS_FULL_SAN_RE.pattern + "|" + re.escape(name)
-                + r"\s*\([^()]*\)")
-        except (re.error, TypeError) as exc:
-            if warn:
-                warn(f"javascript.sanitizers.full entry {name!r} is not a valid "
-                     f"sanitizer name ({exc}) — rule skipped")
-            continue
-    js_partial = js_san.get("partial", {}) or {}
-    if not isinstance(js_partial, dict):
-        if warn:
-            warn(f"javascript.sanitizers.partial is {type(js_partial).__name__}, "
-                 f"not an object — section ignored")
-        js_partial = {}
-    for name, cats in js_partial.items():
-        if not isinstance(cats, (list, tuple)):
-            if warn:
-                warn(f"javascript sanitizer {name!r} has {type(cats).__name__} "
-                     f"categories, not a list — rule skipped")
-            continue
-        for c in cats:
-            if c not in SINK_META:
-                if warn:
-                    warn(f"javascript sanitizer {name!r} lists unknown category "
-                         f"{c!r} — category ignored; valid categories: "
-                         f"{', '.join(sorted(SINK_META))}")
-                continue
+    Validation is shared with the intra-file engine (lazaret.scanner.
+    taintspec): every field is type-checked, user regexes are guarded
+    (length cap, static backtracking check, bounded match text), and every
+    rejection is reported through on_warn(msg) — a custom sink cannot quietly
+    become inert while the scan still reports PASSED. allow_sanitizers=False
+    (a config from the scanned repository) ignores its sanitizers with a
+    note. Never raises on config content."""
+    global _JS_SOURCE_RE, _JS_FULL_SAN_RE
+    spec = (cfg if isinstance(cfg, taintspec.TaintSpec)
+            else taintspec.validate(cfg, allow_sanitizers=allow_sanitizers))
+    if callable(on_warn):
+        for msg in spec.warnings + spec.notes:
+            on_warn(msg)
+    py = spec.python
+    _PY_SOURCE_EXTRA.extend(py.sources)
+    _EXTRA_PY_SINKS.extend(py.sinks)
+    FULL_SANITIZERS_PY.update(py.full)
+    for name, cats in py.partial.items():
+        _EXTRA_PARTIAL_PY[name] = set(_EXTRA_PARTIAL_PY.get(name, ())) | set(cats)
+    js = spec.javascript
+    _JS_SOURCE_RE = taintspec.extend_pattern(_JS_SOURCE_RE, js.sources)
+    _JS_SINKS.extend(js.sinks)
+    for name in js.full:
+        _JS_FULL_SAN_RE = re.compile(
+            _JS_FULL_SAN_RE.pattern + "|" + re.escape(name) + r"\s*\([^()]*\)")
+    for name, cats in js.partial.items():
+        add = re.escape(name) + r"\s*\([^()]*\)"
+        for c in sorted(cats):
             base = _JS_PARTIAL_SAN.get(c)
-            # 48033f94: re.escape() of a non-str name raised TypeError before
-            # this guard existed — build the pattern and compile it inside
-            # try/except so a bad rule is warned about and skipped.
-            try:
-                add = re.escape(name) + r"\s*\([^()]*\)"
-                _JS_PARTIAL_SAN[c] = re.compile(
-                    (base.pattern + "|" + add) if base else add)
-            except (re.error, TypeError) as exc:
-                if warn:
-                    warn(f"javascript sanitizer {name!r} (category {c!r}) "
-                         f"could not be compiled ({exc}) — rule skipped")
-                continue
+            _JS_PARTIAL_SAN[c] = re.compile((base.pattern + "|" + add) if base else add)
 
 
-def load_config(path):
+def load_config(path, allow_sanitizers=True):
     """Load a JSON taint-config file and apply it. Returns True if applied.
     Rejected rules are reported to stderr (see configure())."""
     warnings = []
-    applied = load_config_quietly(path, warnings)
+    applied = load_config_quietly(path, warnings, allow_sanitizers=allow_sanitizers)
     for msg in warnings:
-        # audit H1: `path` is the auto-loaded <scan-root>/.lazaret-taint.json
-        # (untrusted repo); `msg` embeds rejected-rule names/patterns from its
-        # content. Sanitized via the local twin (see module top).
+        # audit H1: `path` may be repository content; `msg` embeds
+        # rejected-rule names/patterns from it. Sanitized via the local twin.
         print(f"warning: {sanitize_term(path)}: {sanitize_term(msg)}",
               file=sys.stderr)
     return applied
 
 
-def load_config_quietly(path, warnings_out=None):
+_CONFIG_MAX_BYTES = 1_000_000
+
+
+def load_config_quietly(path, warnings_out=None, allow_sanitizers=True):
     """Load a JSON taint-config file and apply it, collecting validation
     warnings in warnings_out (list) instead of printing them. Returns True if
-    applied. A failed read/parse returns False with a single message in
-    warnings_out."""
+    applied. A failed read/parse (unreadable, too large, bad UTF-8, invalid
+    JSON, deep nesting) returns False with a single message."""
     if warnings_out is None:
         warnings_out = []
     try:
-        with open(path, encoding="utf-8") as fh:
-            cfg = json.load(fh)
-    except (OSError, json.JSONDecodeError, RecursionError) as exc:
+        with open(path, "rb") as fh:
+            data = fh.read(_CONFIG_MAX_BYTES + 1)
+        if len(data) > _CONFIG_MAX_BYTES:
+            raise ValueError(f"file exceeds {_CONFIG_MAX_BYTES} bytes")
+        cfg = json.loads(data.decode("utf-8"))
+    except (OSError, ValueError, RecursionError, MemoryError) as exc:
         # 1149e3e5: RecursionError from a deep-nested config (~60KB of '[')
-        # is not a JSONDecodeError — without the guard the RecursionError
-        # escaped and killed the caller. Same warn-and-skip contract as an
-        # unreadable file.
+        # is not a JSONDecodeError; ValueError also covers bad UTF-8 and the
+        # int-digit limit. Same warn-and-skip contract as an unreadable file.
         warnings_out.append(f"could not load taint config {path}: {exc}")
         return False
-    configure(cfg, on_warn=lambda msg: warnings_out.append(msg))
+    configure(cfg, on_warn=warnings_out.append, allow_sanitizers=allow_sanitizers)
     return True
 
 

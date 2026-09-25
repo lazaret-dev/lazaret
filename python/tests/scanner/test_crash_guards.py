@@ -441,7 +441,7 @@ class TestCLIEndToEnd(unittest.TestCase):
     def test_poc1_bad_regex_taint_config(self):
         self.write(".lazaret-taint.json", '{"python":{"sources":["("]}}')
         self.write("a.py", "x = 1\n")
-        p = self.run_cli()
+        p = self.run_cli("--trust-repo-config")  # repo config is opt-in (review finding 5)
         self.assert_no_crash(p, 0)
         self.assertIn("not a valid regex", p.stderr)  # both engines (deduped ≥1)
         self.assertIn("Loaded taint config", p.stdout)
@@ -451,7 +451,7 @@ class TestCLIEndToEnd(unittest.TestCase):
         self.write(".lazaret-taint.json",
                    json.dumps({"python": {"sources": [r"\brequest\.args\b", "("]}}))
         self.write("a.py", APPEAL_PY)
-        p = self.run_cli()
+        p = self.run_cli("--trust-repo-config")  # repo config is opt-in (review finding 5)
         self.assert_no_crash(p, 0)
         self.assertIn("not a valid regex", p.stderr)
         # good rule applied — the custom source still taints (T/X findings fire)

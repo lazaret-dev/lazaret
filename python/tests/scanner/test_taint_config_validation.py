@@ -289,7 +289,7 @@ class TestCLI(unittest.TestCase):
 
     def test_autoloaded_bad_config_warns_and_scan_completes(self):
         cfg = self.write_cfg(self.bad)
-        rc, out, err = self.run_cli()
+        rc, out, err = self.run_cli("--trust-repo-config")  # repo config is opt-in (review finding 5)
         self.assertEqual(rc, 0)
         self.assert_unknown_category_warning(rc, out, err, cfg)
         self.assertIn(f"Loaded taint config: {cfg}", out)
@@ -305,14 +305,14 @@ class TestCLI(unittest.TestCase):
 
     def test_strict_flag_on_autoloaded_config_exits_4(self):
         cfg = self.write_cfg(self.bad)
-        rc, out, err = self.run_cli("--strict-taint-config")
+        rc, out, err = self.run_cli("--strict-taint-config", "--trust-repo-config")  # repo config is opt-in (review finding 5)
         self.assertEqual(rc, 4)
         self.assert_unknown_category_warning(rc, out, err, cfg)
 
     def test_valid_config_fires_t_sql_control(self):
         """Guards against vacuous passes: a VALID category must still work."""
         self.write_cfg(self.good)
-        rc, out, err = self.run_cli()
+        rc, out, err = self.run_cli("--trust-repo-config")  # repo config is opt-in (review finding 5)
         self.assertEqual(rc, 0)
         self.assertEqual(err, "")               # no false warnings
         self.assertIn("T-SQL", out)
@@ -325,7 +325,7 @@ class TestCLI(unittest.TestCase):
 
     def test_dedupe_no_double_warning_from_two_engines(self):
         cfg = self.write_cfg(self.bad)
-        rc, out, err = self.run_cli()
+        rc, out, err = self.run_cli("--trust-repo-config")  # repo config is opt-in (review finding 5)
         n = err.count("has unknown category 'sql'")
         self.assertEqual(n, 1, f"warning printed {n} times:\n{err}")
 

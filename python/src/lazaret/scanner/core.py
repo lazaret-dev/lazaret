@@ -40,6 +40,7 @@ except Exception:  # pragma: no cover
     lazaret_flow = None
 
 from lazaret.scanner import reports as lazaret_report  # report paths: pre-scan validation, atomic writes
+from lazaret.scanner import taintspec  # taint-config validation shared by both taint engines
 
 
 def configure_stdio():
@@ -641,142 +642,159 @@ def _dedupe(msgs):
     return out
 
 
-def apply_taint_config(cfg):
+def apply_taint_config(cfg, allow_sanitizers=True):
     """Extend the intra-file taint model (sources/sinks/sanitizers) from a
-    config dict — the same file consumed by the interprocedural engine.
+    config — the same file consumed by the interprocedural engine.
 
+    *cfg* is a parsed config (validated here) or a taintspec.TaintSpec the
+    caller already validated. Both engines validate through
+    lazaret.scanner.taintspec, so they accept exactly the same rules and
+    report rejections with identical texts (the CLI prints each once).
     Invalid rules are not silently dropped: each one records a warning (see
-    get_taint_config_warnings()) naming the rule and the reason, and listing
-    the valid categories. The CLI prefixes each warning with the config file
-    path. Message texts match lazaret_flow.configure() on purpose, so the
-    CLI can dedupe the two engines' identical rejections.
+    get_taint_config_warnings()) naming the rule and the reason. User regexes
+    are guarded (length cap, static backtracking check, and each match sees
+    at most taintspec.MAX_MATCH_TEXT characters of a line).
+    allow_sanitizers=False (a config from the scanned repository): its
+    sanitizers are ignored, never applied.
     """
     del _TAINT_CONFIG_WARNINGS[:]
-    if not isinstance(cfg, dict):
-        _taint_config_warn(
-            f"top level is {type(cfg).__name__}, not an object — nothing applied")
-        return
-    for key in cfg:
-        if key not in ("python", "javascript") and not str(key).startswith("_"):
-            _taint_config_warn(
-                f"unknown top-level section {key!r} — expected 'python' or "
-                f"'javascript'; rule skipped")
+    spec = (cfg if isinstance(cfg, taintspec.TaintSpec)
+            else taintspec.validate(cfg, allow_sanitizers=allow_sanitizers))
+    _TAINT_CONFIG_WARNINGS.extend(spec.warnings)
     for lang_key, lang in (("python", "py"), ("javascript", "js")):
-        section = cfg.get(lang_key, {}) or {}
-        if not isinstance(section, dict):
-            _taint_config_warn(
-                f"section '{lang_key}' is {type(section).__name__}, "
-                f"not an object — section ignored")
-            continue
-        for pat in section.get("sources", []):
-            # 48033f94: an auto-loaded config from the scanned repo must never
-            # crash the scan (re.PatternError at :643 was a lost-results, exit-1
-            # crash). A source pattern that is not a valid regex is rejected
-            # like any other invalid rule: warning + skip — never applied
-            # uncompiled, never raised.
-            try:
-                new_re = re.compile(TAINT_SOURCES[lang].pattern + "|" + pat)
-            except re.error as exc:
-                _taint_config_warn(
-                    f"{lang_key}.sources pattern {pat!r} is not a valid regex "
-                    f"({exc}) — rule skipped")
-                continue
-            TAINT_SOURCES[lang] = new_re
-        sinks = section.get("sinks", [])
-        if not isinstance(sinks, list):
-            _taint_config_warn(
-                f"{lang_key}.sinks is {type(sinks).__name__}, not a list — "
-                f"section ignored")
-            sinks = []
-        for idx, sk in enumerate(sinks, 1):
-            if not isinstance(sk, dict):
-                _taint_config_warn(
-                    f"{lang_key} sink #{idx} is not an object — rule skipped")
-                continue
-            cat, pattern = sk.get("category"), sk.get("pattern")
-            if not cat:
-                _taint_config_warn(
-                    f"{lang_key} sink #{idx} (pattern {pattern!r}) has no "
-                    f"'category' — rule skipped; valid categories: "
-                    f"{', '.join(VALID_CATEGORIES)}")
-                continue
-            if cat not in _CAT_META:
-                _taint_config_warn(
-                    f"{lang_key} sink #{idx} (pattern {pattern!r}) has unknown "
-                    f"category {cat!r} — rule skipped; valid categories: "
-                    f"{', '.join(VALID_CATEGORIES)}")
-                continue
-            if not pattern:
-                _taint_config_warn(
-                    f"{lang_key} sink #{idx} (category {cat!r}) has an empty "
-                    f"'pattern' — rule skipped")
-                continue
-            suffix = _SUFFIX_BY_CATEGORY[cat]
+        ls = spec.lang(lang_key)
+        if ls.sources:
+            TAINT_SOURCES[lang] = taintspec.extend_pattern(TAINT_SOURCES[lang],
+                                                           ls.sources)
+        for gp, cat in ls.sinks:
             sev, cwe, fix = _CAT_META[cat]
-            # 48033f94: invalid sink regex — reject the rule (warning + skip)
-            # instead of crashing the scan.
-            try:
-                sink_re = re.compile(pattern)
-            except re.error as exc:
-                _taint_config_warn(
-                    f"{lang_key} sink #{idx} (category {cat!r}) pattern "
-                    f"{pattern!r} is not a valid regex ({exc}) — rule skipped")
-                continue
-            TAINT_SINKS[lang].append((suffix, sink_re, cat, sev, cwe, fix))
-        san = section.get("sanitizers", {}) or {}
-        if not isinstance(san, dict):
-            _taint_config_warn(
-                f"{lang_key}.sanitizers is {type(san).__name__}, not an "
-                f"object — section ignored")
-            continue
-        for name in san.get("full", []):
-            # 48033f94: re.escape(name) cannot fail for a str, but a non-str
-            # (int, None) entry previously raised TypeError at re.escape, and
-            # the compound regex could still fail to compile — reject with a
-            # warning instead of crashing.
-            try:
-                new_re = re.compile(
-                    _FULL_SAN[lang].pattern + "|" + re.escape(name)
-                    + r"\s*\(" + _SAN_BODY + r"\)")
-            except (re.error, TypeError) as exc:
-                _taint_config_warn(
-                    f"{lang_key}.sanitizers.full entry {name!r} is not a valid "
-                    f"sanitizer name ({exc}) — rule skipped")
-                continue
-            _FULL_SAN[lang] = new_re
-        partial = san.get("partial", {}) or {}
-        if not isinstance(partial, dict):
-            _taint_config_warn(
-                f"{lang_key}.sanitizers.partial is {type(partial).__name__}, "
-                f"not an object — section ignored")
-            continue
-        for name, cats in partial.items():
-            if not isinstance(cats, (list, tuple)):
-                _taint_config_warn(
-                    f"{lang_key} sanitizer {name!r} has {type(cats).__name__} "
-                    f"categories, not a list — rule skipped")
-                continue
-            for cat in cats:
-                suf = _SUFFIX_BY_CATEGORY.get(cat)
-                if not suf:
-                    _taint_config_warn(
-                        f"{lang_key} sanitizer {name!r} lists unknown category "
-                        f"{cat!r} — category ignored; valid categories: "
-                        f"{', '.join(VALID_CATEGORIES)}")
-                    continue
-                # 48033f94: reject an invalid partial-sanitizer rule (warning
-                # + skip) instead of letting re.compile/re.escape raise —
-                # re.escape() of a non-str name must be inside the try too.
-                try:
-                    add = re.escape(name) + r"\s*\(" + _SAN_BODY + r"\)"
-                    base = _PARTIAL_SAN[lang].get(suf)
-                    new_re = re.compile((base.pattern + "|" + add) if base else add)
-                except (re.error, TypeError) as exc:
-                    _taint_config_warn(
-                        f"{lang_key} sanitizer {name!r} (category {cat!r}) "
-                        f"could not be compiled ({exc}) — rule skipped")
-                    continue
-                _PARTIAL_SAN[lang][suf] = new_re
+            TAINT_SINKS[lang].append((_SUFFIX_BY_CATEGORY[cat], gp, cat, sev, cwe, fix))
+        for name in ls.full:
+            # names are validated call names; re.escape makes them literal
+            _FULL_SAN[lang] = re.compile(
+                _FULL_SAN[lang].pattern + "|" + re.escape(name)
+                + r"\s*\(" + _SAN_BODY + r"\)")
+        for name, cats in ls.partial.items():
+            add = re.escape(name) + r"\s*\(" + _SAN_BODY + r"\)"
+            for cat in sorted(cats):
+                suf = _SUFFIX_BY_CATEGORY[cat]
+                base = _PARTIAL_SAN[lang].get(suf)
+                _PARTIAL_SAN[lang][suf] = re.compile(
+                    (base.pattern + "|" + add) if base else add)
+
+
+#: The scanned repository's own taint config (never auto-trusted).
+REPO_TAINT_CONFIG = ".lazaret-taint.json"
+#: Largest taint-config file read (bytes).
+TAINT_CONFIG_MAX_BYTES = 1_000_000
+
+
+def _read_taint_config(path, from_repo):
+    """(cfg, None) or (None, reason) for a taint-config file.
+
+    Only a regular file is read (a FIFO would hang the open); a repository
+    config must not be a symlink either. Reads are bounded; bad UTF-8,
+    invalid JSON, huge integers and deep nesting are reasons, not crashes."""
+    try:
+        st = os.lstat(path) if from_repo else os.stat(path)
+    except OSError as exc:
+        return None, str(exc.strerror or exc)
+    import stat as _stat
+    if not _stat.S_ISREG(st.st_mode):
+        return None, ("not a regular file (symlinks and special files are "
+                      "not followed)" if from_repo else "not a regular file")
+    if st.st_size > TAINT_CONFIG_MAX_BYTES:
+        return None, (f"{st.st_size} bytes exceeds the "
+                      f"{TAINT_CONFIG_MAX_BYTES}-byte limit")
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read(TAINT_CONFIG_MAX_BYTES + 1)
+        return json.loads(data.decode("utf-8")), None
+    except (OSError, ValueError, RecursionError, MemoryError) as exc:
+        # ValueError covers JSONDecodeError, UnicodeDecodeError and the
+        # int-digit limit. 1149e3e5: RecursionError from a deep-nested config
+        # is not a JSONDecodeError.
+        return None, str(exc)
+
+
+def load_taint_config_for_scan(explicit_path, scan_root, trust_repo=False,
+                               strict=False):
+    """Load the taint config for one CLI scan; return report notes (issues).
+
+    * --taint-config PATH: trusted fully (sources, sinks, sanitizers).
+    * <scan-root>/.lazaret-taint.json: scanned-repository content, so it is
+      loaded only with --trust-repo-config, and then may add sources and
+      sinks but NOT sanitizers (ignored with a note) — a repository must not
+      be able to declare its own code safe. Without the flag a one-line note
+      says it was found and not loaded. A used repository config is recorded
+      in the report as a Q-TAINT-CONFIG INFO note naming the file.
+    Validation is fail-loud: rejected rules print warnings naming the file,
+    the rule and the reason; with an explicit --taint-config (or strict,
+    i.e. --strict-taint-config) rejected rules exit EXIT_TAINT_CONFIG (4).
+    """
+    if explicit_path:
+        path, from_repo = explicit_path, False
+    else:
+        path = os.path.join(scan_root, REPO_TAINT_CONFIG)
+        if not os.path.lexists(path):
+            return []
+        if not trust_repo:
+            # audit H1: the path is under the scanned repo — sanitize.
+            print(f"  note: {sanitize_term(path)} found but not loaded — a "
+                  f"scanned repository's taint config is untrusted; pass "
+                  f"--trust-repo-config to use its sources/sinks")
+            return []
+        from_repo = True
+    cfg, err = _read_taint_config(path, from_repo)
+    if err is not None:
+        # audit H1: both the path and the reason (JSONDecodeError position
+        # text can echo hostile config bytes) are sanitized.
+        print(f"warning: could not load taint config {sanitize_term(path)}: "
+              f"{sanitize_term(err)}", file=sys.stderr)
+        return []
+    spec = taintspec.validate(cfg, allow_sanitizers=not from_repo)
+    apply_taint_config(spec)
+    if lazaret_flow is not None:
+        lazaret_flow.configure(spec)
+    # audit H1: path may be the repo's own config (repo content).
+    print(f"  Loaded taint config: {sanitize_term(path)}"
+          + (" (from the scanned repository: sources and sinks only)"
+             if from_repo else ""))
+    rejected = _dedupe(spec.warnings)
+    for msg in rejected + _dedupe(spec.notes):
+        # audit H1: msg embeds rejected rule names/patterns verbatim.
+        print(f"warning: {sanitize_term(path)}: {sanitize_term(msg)}",
+              file=sys.stderr)
+    if rejected and (not from_repo or strict):
+        print(f"error: {len(rejected)} taint-config rule(s) rejected in "
+              f"{sanitize_term(path)} — fix them (see warnings above) or the "
+              f"custom detection they define will not run", file=sys.stderr)
+        sys.exit(EXIT_TAINT_CONFIG)
+    if not from_repo:
+        return []
+    n = spec.counts()
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            cfg_lines = fh.read(TAINT_CONFIG_MAX_BYTES).split("\n")
+    except OSError:
+        cfg_lines = []
+    note = mk_issue(
+        {"id": "Q-TAINT-CONFIG", "name": "Taint rules loaded from the scanned repository",
+         "type": "HOTSPOT", "sev": "INFO",
+         "msg": (f"Custom taint rules from the repository's own {REPO_TAINT_CONFIG} "
+                 f"were used (--trust-repo-config): {n['sources']} source(s), "
+                 f"{n['sinks']} sink(s)"
+                 + (f"; {spec.ignored_sanitizers} sanitizer rule(s) ignored"
+                    if spec.ignored_sanitizers else "") + "."),
+         "why": "A repository-supplied taint config changes what this scan "
+                "looks for. Sources and sinks from it are applied; sanitizers "
+                "never are, so the repository cannot declare its own code safe.",
+         "fix": "Review the file; to trust it fully (including sanitizers), "
+                "pass it explicitly with --taint-config.",
+         "ref": "Taint configuration provenance"},
+        REPO_TAINT_CONFIG, 1, cfg_lines)
+    return [note]
+
 
 def taint_scan(path, lines, lang):
     if lang not in TAINT_SOURCES:   # SQL and others: pattern rules only, no taint flow
@@ -2542,11 +2560,15 @@ def main():
                     help="Previous JSON report; issues not in it are marked new")
     ap.add_argument("--taint-config", metavar="PATH",
                     help="JSON taint spec adding custom sources/sinks/sanitizers "
-                         "(Semgrep-style). Auto-loads .lazaret-taint.json from the scan root.")
+                         "(Semgrep-style); trusted fully.")
+    ap.add_argument("--trust-repo-config", action="store_true",
+                    help="Load the scanned repository's own .lazaret-taint.json "
+                         "(sources and sinks only — its sanitizers are ignored). "
+                         "Without this flag the file is noted and not loaded.")
     ap.add_argument("--strict-taint-config", action="store_true",
                     help="Treat taint-config rules rejected by validation (unknown "
                          "category, empty pattern) as fatal — exit 4 even for the "
-                         "auto-loaded .lazaret-taint.json. Always on for an "
+                         "repository's .lazaret-taint.json. Always on for an "
                          "explicit --taint-config.")
     ap.add_argument("--ci", action="store_true", help="Exit 1 if the quality gate fails")
     ap.add_argument("--no-redact-secrets", action="store_true",
@@ -2590,55 +2612,13 @@ def main():
         print(f"error: {sanitize_term(exc)}", file=sys.stderr)
         sys.exit(lazaret_report.EXIT_OUTPUT)
 
-    # taint config: explicit flag, else auto-load .lazaret-taint.json from root.
-    # Validation is fail-loud: rules that fail validation (unknown category,
-    # empty pattern, malformed section) produce warnings naming the file, the
-    # rule and the reason — never silently dropped. And when the config came
-    # from an explicit --taint-config, rejected rules make the scan exit 4, so
-    # CI cannot silently lose coverage; --strict-taint-config extends that to
-    # the auto-loaded project config.
-    cfg_path = args.taint_config
-    if not cfg_path:
-        default_cfg = os.path.join(args.directory, ".lazaret-taint.json")
-        cfg_path = default_cfg if os.path.isfile(default_cfg) else None
-    if cfg_path:
-        flow_warnings = []
-        try:
-            with open(cfg_path, encoding="utf-8") as fh:
-                cfg = json.load(fh)
-            apply_taint_config(cfg)
-            if lazaret_flow is not None:
-                lazaret_flow.configure(
-                    cfg, on_warn=lambda msg: flow_warnings.append(msg))
-            # audit H1: cfg_path may be the auto-loaded
-            # <scan-root>/.lazaret-taint.json (repo content).
-            print(f"  Loaded taint config: {sanitize_term(cfg_path)}")
-        except (OSError, json.JSONDecodeError, RecursionError) as exc:
-            # 1149e3e5: the auto-loaded path is scanned-repo content — a
-            # ~60KB deep-nested .lazaret-taint.json raised RecursionError,
-            # which is NOT a JSONDecodeError, crashing the CLI mid-scan
-            # (probe: rc=1 with Traceback before this guard). Treated like
-            # any unreadable config: warn and scan without it.
-            # audit H1: both the path and {exc} (JSONDecodeError position
-            # text can echo hostile config bytes) are sanitized.
-            print(f"warning: could not load taint config {sanitize_term(cfg_path)}: "
-                  f"{sanitize_term(exc)}", file=sys.stderr)
-        # both engines validate the same rules; their messages match on purpose
-        # so the CLI can surface each rejection exactly once, prefixed with
-        # the config file path.
-        rejected = _dedupe(get_taint_config_warnings() + flow_warnings)
-        for msg in rejected:
-            # audit H1: msg embeds rejected rule names/patterns verbatim from
-            # the auto-loaded config = repo content; sanitize both halves.
-            print(f"warning: {sanitize_term(cfg_path)}: {sanitize_term(msg)}", file=sys.stderr)
-        if rejected:
-            strict = bool(args.taint_config) or args.strict_taint_config
-            if strict:
-                # audit H1: sanitize the config path (see above).
-                print(f"error: {len(rejected)} taint-config rule(s) rejected in "
-                      f"{sanitize_term(cfg_path)} — fix them (see warnings above) or the custom "
-                      f"detection they define will not run", file=sys.stderr)
-                sys.exit(EXIT_TAINT_CONFIG)
+    # taint config: --taint-config (trusted), else the repo's own
+    # .lazaret-taint.json only with --trust-repo-config (sources/sinks only).
+    # Fail-loud validation; exit 4 on rejected rules when strict. Returns
+    # the report notes (Q-TAINT-CONFIG) for a used repository config.
+    taint_notes = load_taint_config_for_scan(
+        args.taint_config, args.directory, trust_repo=args.trust_repo_config,
+        strict=args.strict_taint_config)
 
     files, manifests, binary_issues = collect_files(args.directory, args.exclude,
                                                     include_deps=args.deps)
@@ -2646,7 +2626,7 @@ def main():
         print("No Python or JavaScript files found.", file=sys.stderr)
         sys.exit(2)
 
-    issues = list(binary_issues)
+    issues = list(binary_issues) + taint_notes
     for f in files:
         issues.extend(scan_file(f["path"], f["content"], f["lang"], dep=f.get("dep", False)))
     for mf in manifests:

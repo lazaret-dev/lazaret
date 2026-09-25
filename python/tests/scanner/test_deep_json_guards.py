@@ -189,7 +189,7 @@ class CliConfigBaselineTests(unittest.TestCase):
         # scanned-repo content: hostile repo plants .lazaret-taint.json
         with open(os.path.join(self.tmp, ".lazaret-taint.json"), "w") as fh:
             fh.write(DEEP)
-        p = self._cli()
+        p = self._cli("--trust-repo-config")  # repo config is opt-in (review finding 5)
         self.assertNotIn("Traceback", p.stderr)
         self.assertNotIn("Traceback", p.stdout)
         self.assertEqual(p.returncode, 0, (p.returncode, p.stderr[-500:]))
@@ -211,7 +211,7 @@ class CliConfigBaselineTests(unittest.TestCase):
             fh.write(DEEP)
         with open(os.path.join(self.tmp, "a.py"), "w") as fh:
             fh.write(APPEAL_PY)
-        p = self._cli()
+        p = self._cli("--trust-repo-config")  # repo config is opt-in (review finding 5)
         self.assertEqual(p.returncode, 0)
         # remaining work still reported: sibling findings survive
         self.assertIn("S-OSCMD-PY", p.stdout)
@@ -240,7 +240,7 @@ class CliConfigBaselineTests(unittest.TestCase):
             fh.write('{"python":{"sources":["\\\\brequest\\\\.args\\\\b"]}}')
         with open(os.path.join(self.tmp, "a.py"), "w") as fh:
             fh.write(APPEAL_PY)
-        p = self._cli()
+        p = self._cli("--trust-repo-config")  # repo config is opt-in (review finding 5)
         self.assertEqual(p.returncode, 0)
         self.assertIn("Loaded taint config", p.stdout)
         self.assertIn("T-CMD", p.stdout)  # custom source fired

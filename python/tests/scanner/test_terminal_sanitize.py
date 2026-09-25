@@ -338,7 +338,9 @@ class TaintConfigWarningPoc(unittest.TestCase):
             with open(os.path.join(root, ".lazaret-taint.json"), "w",
                       encoding="utf-8") as f:
                 f.write('{"python": {"sources": ["("]}}')
-            proc = run_scanner(root)
+            # the repo's own config is loaded only on request (review 5)
+            proc = run_scanner(root, ("--no-json", "--no-html",
+                                      "--trust-repo-config"))
             out, err = proc.stdout, proc.stderr
             assert_clean(out, "taint-config stdout")
             assert_clean(err, "taint-config stderr")
