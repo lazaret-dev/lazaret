@@ -1,14 +1,17 @@
 // Report assembly — the lazaret report format. Mirrors lazaret.py's build_result:
 // {generatedBy (FIRST key), project, scannedAt, pass, conditions, metrics,
-// counts, ratings, supplyChain, crossFile, perFile, issues}; plus the terminal
-// and HTML renderers.
+// counts, ratings, supplyChain, crossFile, perFile, issues}; plus the terminal,
+// HTML and SARIF renderers.
 
-import { resolve } from "node:path";
+import { resolve, isAbsolute } from "node:path";
+import { readFileSync } from "node:fs";
 import { SEV_ORDER } from "./scanner/rules.js";
 import { computeMetrics, worstSevRating, maintainabilityRating } from "./scanner/metrics.js";
 import { ENGINE_VERSION, ENGINE_MARKER, HTML_ENGINE_MARKER } from "./lib/fs.js";
 import { cmpCodePoints, pyStrip, isPrintable } from "./lib/pycompat.js";
 import { REDACT, SECRET_RULES } from "./lib/redact.js";
+
+const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 
 /** Local time, seconds precision, no zone — datetime.now().isoformat(timespec="seconds"). */
 function localIso(d = new Date()) {
@@ -136,4 +139,51 @@ const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replac
 export function htmlRenderer(res) {
   return `<!doctype html>\n<html lang="en"><head><meta charset="utf-8">\n${HTML_ENGINE_MARKER}\n` +
     `<title>Lazaret report</title></head>\n<body><pre>${esc(jsonRenderer(res))}</pre></body></html>\n`;
+}
+
+// ---- SARIF 2.1.0 (twin of core.sarif_report) ------------------------------------
+const SARIF_LEVEL = { BLOCKER: "error", CRITICAL: "error", MAJOR: "warning", MINOR: "note", INFO: "note" };
+export const SARIF_SRCROOT = "%SRCROOT%";
+export const SARIF_SCHEMA = "https://json.schemastore.org/sarif-2.1.0.json";
+const quoteBytes = (bytes) => {
+  let out = "";
+  for (const b of bytes) {
+    const c = String.fromCharCode(b);
+    out += /[A-Za-z0-9_.~\/-]/.test(c) ? c : "%" + b.toString(16).toUpperCase().padStart(2, "0");
+  }
+  return out;
+};
+/** urllib.parse.quote(path, safe="/") of a report path, '/' separators. */
+export function sarifUri(path) {
+  return quoteBytes(Buffer.from(String(path).replace(/\\/g, "/"), "utf8"));
+}
+function fileUri(absPath) {
+  const p = String(absPath).replace(/\\/g, "/");
+  return "file://" + (p.startsWith("/") ? "" : "/") + quoteBytes(Buffer.from(p, "utf8"));
+}
+export function sarifReport(res, root = null) {
+  const rules = new Map(), results = [];
+  for (const i of res.issues) {
+    if (!rules.has(i.rule)) rules.set(i.rule, { id: i.rule, name: i.name,
+      shortDescription: { text: i.name }, fullDescription: { text: i.why }, help: { text: i.fix } });
+    const file = String(i.file);
+    const loc = isAbsolute(file) ? { uri: fileUri(file) } : { uri: sarifUri(file), uriBaseId: SARIF_SRCROOT };
+    const line = Math.max(1, Math.trunc(Number(i.line)) || 1);
+    results.push({ ruleId: i.rule, ruleIndex: [...rules.keys()].indexOf(i.rule), level: SARIF_LEVEL[i.sev] ?? "note",
+      message: { text: i.msg }, locations: [{ physicalLocation: { artifactLocation: loc, region: { startLine: line } } }] });
+  }
+  let rootUri = fileUri(resolve(root ?? res.project));
+  if (!rootUri.endsWith("/")) rootUri += "/";
+  return {
+    $schema: SARIF_SCHEMA,
+    version: "2.1.0",
+    runs: [{ tool: { driver: { name: "Lazaret", version: pkg.version, informationUri: "https://lazaret.dev",
+      rules: [...rules.values()] } },
+      originalUriBaseIds: { [SARIF_SRCROOT]: { uri: rootUri } },
+      results }],
+  };
+}
+/** SARIF log text with the marker in a top-level property bag, first. */
+export function sarifRenderer(sarif) {
+  return JSON.stringify({ properties: { [ENGINE_MARKER]: ENGINE_VERSION }, ...sarif }, null, 2);
 }

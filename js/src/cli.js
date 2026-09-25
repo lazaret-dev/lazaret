@@ -14,7 +14,8 @@ import { scanFile } from "./scanner/scan.js";
 import { scanManifest, scanGyp } from "./lib/supplychain.js";
 import { redactResult, setRedactSecrets } from "./lib/redact.js";
 import {
-  buildResult, jsonRenderer, htmlRenderer, printReport, sanitizeTerm, setExcerptWidth,
+  buildResult, jsonRenderer, htmlRenderer, printReport, sarifReport, sarifRenderer,
+  sanitizeTerm, setExcerptWidth,
 } from "./report.js";
 import { clipLine } from "./lib/issue.js";
 
@@ -38,6 +39,7 @@ Options:
   --json PATH           JSON report path (default: <out-dir>/lazaret-report.json;
                         relative paths resolve under --out-dir / the scan root)
   --html PATH           HTML report path (default: <out-dir>/lazaret-report.html)
+  --sarif PATH          Also write a SARIF 2.1.0 report (GitHub code scanning)
   --no-json             Do not write the JSON report.
   --no-html             Do not write the HTML report.
   --force-overwrite     Replace an existing report file even if Lazaret did not
@@ -61,6 +63,7 @@ const OPTIONS = [
   { flag: "--out-dir", dest: "outDir", value: true },
   { flag: "--json", dest: "json", value: true },
   { flag: "--html", dest: "html", value: true },
+  { flag: "--sarif", dest: "sarif", value: true },
   { flag: "--excerpt-width", dest: "excerptWidth", value: true, int: true },
   { flag: "--no-json", dest: "noJson" },
   { flag: "--no-html", dest: "noHtml" },
@@ -218,6 +221,7 @@ function runChecked(argv, io) {
       outDir: opts.outDir || null,
       json: opts.noJson ? false : (opts.json || true),
       html: opts.noHtml ? false : (opts.html || true),
+      sarif: opts.sarif || null,
     });
     validateReportPaths(paths, !!opts.force);
   } catch (e) {
@@ -252,6 +256,10 @@ function runChecked(argv, io) {
   // ---- reports (atomic, no-clobber, marker-checked) ----------------------
   const strict = !!opts.force;
   try {
+    if (paths.sarif) {
+      writeReport(paths.sarif, () => sarifRenderer(sarifReport(res, root)), { kind: "sarif", strict });
+      out(`  SARIF report: ${sanitizeTerm(paths.sarif)}`);
+    }
     if (paths.json) {
       writeReport(paths.json, () => jsonRenderer(res), { kind: "json", strict });
       out(`  JSON report: ${sanitizeTerm(paths.json)}`);

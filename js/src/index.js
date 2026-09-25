@@ -13,7 +13,8 @@ export { scanFile, detectLang, taintScan, setScanTimeBudget } from "./scanner/sc
 export { RULES, TEXT_RULES, SEV_ORDER, TYPES } from "./scanner/rules.js";
 export { computeMetrics, worstSevRating, maintainabilityRating } from "./scanner/metrics.js";
 export {
-  buildResult, jsonRenderer, htmlRenderer, printReport, sanitizeTerm, safeExcerpt,
+  buildResult, jsonRenderer, htmlRenderer, printReport, sarifReport, sarifRenderer,
+  sanitizeTerm, safeExcerpt,
 } from "./report.js";
 export { scanManifest, scanGyp, redactResult, setRedactSecrets } from "./lib/supplychain.js";
 export {
