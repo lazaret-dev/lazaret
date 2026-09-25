@@ -16,26 +16,42 @@ from .errors import AuthenticationError
 MAX_ITERATIONS = 1_000_000
 
 
+_PROHIBITED = (
+    stringprep.in_table_c12, stringprep.in_table_c21, stringprep.in_table_c22,
+    stringprep.in_table_c3, stringprep.in_table_c4, stringprep.in_table_c5,
+    stringprep.in_table_c6, stringprep.in_table_c7, stringprep.in_table_c8,
+    stringprep.in_table_c9, stringprep.in_table_a1,
+)
+
+
+def _has_prohibited(s: str) -> bool:
+    return any(check(c) for c in s for check in _PROHIBITED)
+
+
 def saslprep(s: str) -> str | None:
-    """RFC 4013 SASLprep. Returns None if the string is not a valid SASLprep
-    string, in which case PostgreSQL uses the raw password bytes instead."""
+    """RFC 4013 SASLprep, matching PostgreSQL's pg_saslprep(). Returns None if
+    the string is not a valid SASLprep string, in which case PostgreSQL uses
+    the raw password bytes instead (and so does ScramClient).
+
+    Like PostgreSQL, unassigned (in Unicode 3.2, which stringprep is defined
+    against) and prohibited code points are checked on the mapped input BEFORE
+    normalizing as well as after. Otherwise a character that was unassigned in
+    3.2 but has a compatibility mapping today (e.g. U+1F100 DIGIT ZERO FULL
+    STOP) normalizes into an allowed string, while the server rejects it and
+    hashes the raw bytes, so the login fails. The NFKC step itself uses the
+    current Unicode tables, as PostgreSQL does: the five CJK compatibility
+    ideographs fixed by Unicode Corrigendum #4 (e.g. U+2F874) normalize to the
+    corrected characters on the server, not to their Unicode 3.2 mappings."""
     if s.isascii() and all(0x20 <= ord(c) < 0x7F for c in s):
         return s
     mapped = "".join(
         " " if stringprep.in_table_c12(c) else "" if stringprep.in_table_b1(c) else c for c in s
     )
-    norm = unicodedata.normalize("NFKC", mapped)
-    if not norm:
+    if not mapped or _has_prohibited(mapped):
         return None
-    prohibited = (
-        stringprep.in_table_c12, stringprep.in_table_c21, stringprep.in_table_c22,
-        stringprep.in_table_c3, stringprep.in_table_c4, stringprep.in_table_c5,
-        stringprep.in_table_c6, stringprep.in_table_c7, stringprep.in_table_c8,
-        stringprep.in_table_c9, stringprep.in_table_a1,
-    )
-    for c in norm:
-        if any(check(c) for check in prohibited):
-            return None
+    norm = unicodedata.normalize("NFKC", mapped)
+    if not norm or _has_prohibited(norm):
+        return None
     if any(stringprep.in_table_d1(c) for c in norm):
         if any(stringprep.in_table_d2(c) for c in norm):
             return None
@@ -137,7 +153,9 @@ class ScramClient:
     def __init__(self, password: str, *, cbind_data: bytes | None = None,
                  client_supports_cb: bool = False, username: str = "", nonce: str | None = None):
         prepared = saslprep(password)
-        self._password = (prepared if prepared is not None else password).encode("utf-8")
+        # surrogateescape restores the original bytes of a password that came
+        # from a non-UTF-8 environment variable (the server uses raw bytes then).
+        self._password = (prepared if prepared is not None else password).encode("utf-8", "surrogateescape")
         self._cbind_data = cbind_data
         if cbind_data is not None:
             self.mechanism = "SCRAM-SHA-256-PLUS"
