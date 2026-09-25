@@ -13,9 +13,11 @@ b. No root restriction and no budget: LAZARET_MCP_ROOTS limits the paths a
 Also: a registry store failure no longer throws away scan_package's verdict.
 """
 
+import atexit
 import datetime
 import json
 import os
+import shutil
 import tempfile
 import unittest
 from unittest import mock
@@ -32,6 +34,7 @@ CURL_GYP = json.dumps({"targets": [{"target_name": "x", "actions": [
 
 def tree(files):
     root = tempfile.mkdtemp(prefix="lz-mcp-tools-")
+    atexit.register(shutil.rmtree, root, True)
     for rel, body in files.items():
         path = os.path.join(root, rel)
         os.makedirs(os.path.dirname(path), exist_ok=True)

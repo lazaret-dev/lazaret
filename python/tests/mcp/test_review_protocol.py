@@ -16,6 +16,7 @@ import io
 import json
 import os
 import select
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -198,6 +199,7 @@ class WorkerTests(unittest.TestCase):
 class EndToEndCancelTests(unittest.TestCase):
     def test_scan_directory_cancel_and_ping(self):
         tree = tempfile.mkdtemp(prefix="lz-mcp-big-")
+        self.addCleanup(shutil.rmtree, tree, True)
         body = "".join(f"def f{i}(x):\n    y = x + {i}\n    return str(y)\n" for i in range(100))
         for i in range(4000):
             with open(os.path.join(tree, f"m{i}.py"), "w", encoding="utf-8") as fh:
