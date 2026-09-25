@@ -117,11 +117,15 @@ test("issue shape: all fields present, snippet is ±2 lines, snipStart matches",
   assert.equal(i.snippet.length, 5);       // lines 1..5 (max(0,3-3) to 3+2)
 });
 
-test("issue budget: 500-issue cap per file with transparency notice", () => {
+test("findings cap: security findings never capped, low-severity ones capped at 200 + Q-CAPPED", () => {
+  // spec 7 replaces the old 500-issue per-file budget (which silently dropped
+  // every later rule, SC-* included)
   const src = "eval(x)\n".repeat(600);
   const found = scanFile({ name: "t.py", content: src, lang: "py" });
-  assert.ok(found.length >= 500 && found.length <= 501, `got ${found.length}`);
-  assert.ok(found.some((i) => i.rule === "SCAN-BUDGET"));
+  assert.equal(found.filter((i) => i.rule === "S-EVAL-PY").length, 600);
+  const todo = scanFile({ name: "t.py", content: "# TODO\n".repeat(600), lang: "py" });
+  assert.equal(todo.filter((i) => i.rule === "Q-TODO").length, 200);
+  assert.deepEqual(todo.filter((i) => i.rule === "Q-CAPPED").map((i) => i.msg), ["400 more Q-TODO findings omitted"]);
 });
 
 test("computeMetrics: ncloc/comments/dupPct + files/depFiles", () => {

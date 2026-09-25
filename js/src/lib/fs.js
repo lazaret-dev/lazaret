@@ -2,6 +2,7 @@
 
 import { readdirSync, readFileSync, statSync, lstatSync, writeFileSync, renameSync, unlinkSync, existsSync } from "node:fs";
 import { join, relative, extname, sep } from "node:path";
+import { fileIssue } from "./issue.js";
 
 export const EXTS = {
   ".py": "py", ".js": "js", ".jsx": "js", ".ts": "js", ".tsx": "js",
@@ -31,6 +32,15 @@ export const DEP_MARKERS = new Set([
 ]);
 
 export const MAX_FILE_BYTES = 2_000_000;   // files above this are flagged SC-TRUNCATED
+
+/** SC-TRUNCATED: a file that was not (fully) scanned — never a silent skip. */
+export function truncatedIssue(path, detail) {
+  return fileIssue({ id: "SC-TRUNCATED", name: "Scan truncated", type: "HOTSPOT", sev: "CRITICAL",
+    msg: `File not fully scanned: ${detail}.`,
+    why: "Scanning stopped early, so a clean verdict for this file is not evidence of anything — the unscanned bytes are exactly where a hostile artifact would put its payload (audit C2/G16: declared sizes and entry counts are attacker-controlled and were used to skip files with zero signal).",
+    fix: "Review the file manually or raise the limit and re-scan.",
+    ref: "CWE-506 · Supply chain" }, path);
+}
 
 function walk(dir, relDir, out) {
   for (const name of readdirSync(dir)) {
