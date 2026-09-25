@@ -28,7 +28,9 @@ export function buildResult(root, files, issues) {
   ];
   const perFile = {};
   for (const i of issues) perFile[i.file] = (perFile[i.file] ?? 0) + 1;
-  const supply = issues.filter((i) => i.rule.startsWith("SC-")).length;
+  // INFO supply-chain entries are inventory (a project's own prepare hook,
+  // spec 3), not indicators — as the Python engine's build_result.
+  const supply = issues.filter((i) => i.rule.startsWith("SC-") && i.sev !== "INFO").length;
   conds.push({ label: "No supply-chain indicators", ok: supply === 0 });
   const crossFile = issues.filter((i) => i.rule.startsWith("X-")).length;
   conds.push({ label: "No cross-file taint flows", ok: crossFile === 0 });

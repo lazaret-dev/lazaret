@@ -8,6 +8,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { scanFile } from "../src/index.js";
+import { scanManifest } from "../src/lib/supplychain.js";
 
 const AWS = "AKIA" + "ZZZZ9999ZZZZ9999";
 const GH = (p) => `${p}${"a1B2".repeat(9)}`;
@@ -53,4 +54,12 @@ test("an entropy-flagged literal is redacted wherever it appears; URL userinfo t
   assert.ok(!JSON.stringify(r).includes(lit));
   r = scan('u = "https://admin:s3cretPassw0rd@192.0.2.10/db"\neval(u)\n', "py");
   assert.deepEqual(snip(r, "S-EVAL-PY"), ['u = "https://[redacted]@192.0.2.10/db"', "eval(u)", ""]);
+});
+
+test("install-hook msg and cmd are redacted by the library call itself", () => {
+  const manifest = JSON.stringify({ scripts: { postinstall: `node x.js --token ${GH("ghp_")}` } }, null, 2);
+  const [hook] = scanManifest("package.json", manifest);
+  assert.equal(hook.msg, `"postinstall" script runs code at install time: 'node x.js --token [redacted]'.`);
+  assert.equal(hook.cmd, "node x.js --token [redacted]");
+  assert.ok(!JSON.stringify(hook).includes(GH("ghp_")));
 });
