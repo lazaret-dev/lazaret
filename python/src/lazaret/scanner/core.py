@@ -1890,18 +1890,71 @@ def scan_gyp(path, content):
                                              "binding.gyp action", cmd, suspicious))
     return issues
 
+#: AppleDouble / AppleSingle metadata ("._name" files macOS writes on non-HFS
+#: volumes and into tarballs). Starts with a NUL, so it can never be Python or
+#: JavaScript source; it is classified like a binary file, not decoded.
+APPLE_DOUBLE_MAGIC = (b"\x00\x05\x16\x07", b"\x00\x05\x16\x00")
+
+
 def detect_encoding(head):
-    """M17: BOM/UTF-16 sniff. Returns {'encoding': codec or None, 'reported':
-    bool} — reported=True when the file is NOT plain UTF-8 (a UTF-16 BOM, or
-    null bytes that betray UTF-16 without BOM), so the caller decodes with the
-    right codec and emits a Q-ENCODING finding instead of reading mojibake."""
-    if head.startswith(b"\xff\xfe") or head.startswith(b"\xfe\xff"):
-        return {"encoding": "utf-16", "reported": True}
+    """M17 / FIX-SPEC 4: BOM / UTF-16 sniff of a file's first bytes.
+
+    Returns {'encoding': codec, 'reported': bool, 'bom': n}: BOM FF FE ->
+    utf-16-le, FE FF -> utf-16-be, EF BB BF -> utf-8-sig; otherwise a NUL in
+    the first 4 bytes betrays BOM-less UTF-16 (NUL at index 1 or 3 ->
+    utf-16-le, else utf-16-be). reported=True for every non-plain-UTF-8 case
+    (-> Q-ENCODING); bom is the number of BOM bytes to drop before decoding.
+    The old sniff returned the generic 'utf-16' codec for BOM-less input,
+    whose decoder raises UnicodeError ('UTF-16 stream does not start with
+    BOM') — which escaped and killed the whole scan (review item 1)."""
+    if head.startswith(b"\xff\xfe"):
+        return {"encoding": "utf-16-le", "reported": True, "bom": 2}
+    if head.startswith(b"\xfe\xff"):
+        return {"encoding": "utf-16-be", "reported": True, "bom": 2}
     if head.startswith(b"\xef\xbb\xbf"):
-        return {"encoding": "utf-8-sig", "reported": True}
-    if b"\x00" in head:
-        return {"encoding": "utf-16", "reported": True}
-    return {"encoding": "utf-8", "reported": False}
+        return {"encoding": "utf-8-sig", "reported": True, "bom": 0}
+    first = head[:4]
+    if b"\x00" in first:
+        le = first[1:2] == b"\x00" or first[3:4] == b"\x00"
+        return {"encoding": "utf-16-le" if le else "utf-16-be", "reported": True, "bom": 0}
+    return {"encoding": "utf-8", "reported": False, "bom": 0}
+
+
+def decode_source(data, lang=None):
+    """Decode the bytes of a source file. Returns (text, info):
+
+      info = {"encoding": codec label, "reported": bool (-> Q-ENCODING)}
+
+    FIX-SPEC 4: BOM / NUL sniff (detect_encoding), then a strict decode with
+    an errors="replace" fallback — never raises on content. Line endings are
+    normalized to \\n, as text mode reads them."""
+    enc = detect_encoding(data[:4])
+    codec, body = enc["encoding"], data[enc["bom"]:]
+    info = {"encoding": codec, "reported": enc["reported"]}
+    try:
+        text = body.decode(codec)
+    except Exception:                   # malformed input or a misbehaving codec:
+        try:                            # never abort the scan over content
+            text = body.decode(codec, "replace")
+        except Exception:
+            text = body.decode("utf-8", "replace")
+    return normalize_newlines(text), info
+
+
+def encoding_issues(path, text, info):
+    """Q-ENCODING finding for a decoded source file."""
+    if not info["reported"]:
+        return []
+    lines = text.split("\n")
+    out = [mk_issue(
+        {"id": "Q-ENCODING", "name": "Non-UTF-8 source encoding", "type": "SMELL",
+         "sev": "INFO",
+         "msg": f"Source file is not UTF-8 (detected {info['encoding']}); decoded explicitly.",
+         "why": "A non-UTF-8 source read as UTF-8 decodes to mojibake, hiding every "
+                "pattern-based finding — a UTF-16 eval() scans clean.",
+         "fix": "Re-save the file as UTF-8 so tooling reads it as written.",
+         "ref": "Maintainability"}, path, 1, lines)]
+    return out
 
 def collect_files(root, extra_excludes, include_deps=False):
     """Returns (files, manifests, binary_issues). With include_deps, dependency
@@ -1972,34 +2025,20 @@ def collect_files(root, extra_excludes, include_deps=False):
                 continue
             if ext not in EXTS:
                 continue
-            # M17: sniff before reading as UTF-8 — errors="replace" alone turns
-            # a UTF-16 source into mojibake every rule then misses.
+            # M17: sniff before decoding — errors="replace" alone turns a
+            # UTF-16 source into mojibake every rule then misses.
             try:
                 with open(full, "rb") as f:
-                    head = f.read(4)
+                    data = f.read()
             except OSError:
                 continue
-            enc = detect_encoding(head)
-            if enc["encoding"] is None:
+            if data[:4] in APPLE_DOUBLE_MAGIC:
+                bi = classify_binary(rel, data[:512], len(data), "repo")
+                if bi:
+                    binary_issues.append(bi)
                 continue
-            try:
-                with open(full, encoding=enc["encoding"], errors="strict") as f:
-                    content = f.read()
-            except (OSError, LookupError, UnicodeDecodeError):
-                try:
-                    with open(full, encoding=enc["encoding"], errors="replace") as f:
-                        content = f.read()
-                except (OSError, LookupError):
-                    continue
-            if enc["reported"]:
-                binary_issues.append(mk_issue(
-                    {"id": "Q-ENCODING", "name": "Non-UTF-8 source encoding", "type": "SMELL",
-                     "sev": "INFO",
-                     "msg": f"Source file is not UTF-8 (detected {enc['encoding']}); decoded explicitly.",
-                     "why": "A non-UTF-8 source read as UTF-8 decodes to mojibake, hiding every "
-                            "pattern-based finding — a UTF-16 eval() scans clean.",
-                     "fix": "Re-save the file as UTF-8 so tooling reads it as written.",
-                     "ref": "Maintainability"}, rel, 1, content.split("\n")))
+            content, info = decode_source(data, EXTS[ext])
+            binary_issues.extend(encoding_issues(rel, content, info))
             found.append({"path": rel, "content": content, "lang": EXTS[ext], "dep": in_dep})
     return found, manifests, binary_issues
 
