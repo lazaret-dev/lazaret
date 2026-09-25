@@ -56,6 +56,9 @@ class SafeXMLRPCParser(_client.ExpatParser):
         self.options = Options(forbid_dtd, forbid_entities, forbid_external, max_depth, max_bytes,
                                max_attlist_defaults)
         super().__init__(target)
+        # The stdlib's close() deletes self._target before its final Parse(),
+        # which can still report elements (Expat 2.6+ defers small chunks).
+        self._safe_target = target
         self._depth = 0
         self._fed = 0
         self._parser.StartElementHandler = self._start
@@ -69,11 +72,11 @@ class SafeXMLRPCParser(_client.ExpatParser):
             raise depth_exceeded(limit)
         if self._attlist.active:
             self._attlist.check(attrs.values(), self._fed)
-        self._target.start(tag, attrs)
+        self._safe_target.start(tag, attrs)
 
     def _end(self, tag):
         self._depth -= 1
-        self._target.end(tag)
+        self._safe_target.end(tag)
 
     def feed(self, data) -> None:
         self._fed += len(data)
