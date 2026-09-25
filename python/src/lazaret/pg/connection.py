@@ -129,7 +129,8 @@ def _default_notice_handler(notice: Notice) -> None:
 
 
 def connect(dsn: str | None = None, /, *, timeout: float | None = None,
-            allow_cleartext_password: bool = False, **params: Any) -> Connection:
+            allow_cleartext_password: bool = False, allow_md5_over_unverified_tls: bool = False,
+            **params: Any) -> Connection:
     """Open a connection.
 
     dsn: a postgresql:// URL or libpq "key=value" string (optional).
@@ -140,11 +141,22 @@ def connect(dsn: str | None = None, /, *, timeout: float | None = None,
         keepalives_count. Unset values fall back to PG* environment variables.
     timeout: socket timeout in seconds for each network operation after
         connecting. If it expires mid-query, the connection is closed.
-    allow_cleartext_password: permit the server's "password" method (plaintext
-        password) over an unencrypted TCP connection. Off by default.
+    allow_cleartext_password: permit the server's "password" method (the
+        plaintext password) over TCP when the server is not authenticated:
+        without TLS, or with TLS but no certificate verification (sslmode
+        prefer or require). Off by default, because a man-in-the-middle that
+        terminates TLS could otherwise ask for the password and read it.
+        Unix sockets and sslmode verify-ca/verify-full don't need it.
+    allow_md5_over_unverified_tls: permit MD5 password authentication over
+        TLS whose certificate was not verified (sslmode prefer or require). Off
+        by default: an attacker terminating TLS could relay the MD5 response to
+        log in as you, or crack it offline. SCRAM-SHA-256 is unaffected (with
+        channel binding it can't be relayed). MD5 without TLS is still allowed,
+        as before; use require_auth=scram-sha-256 to refuse MD5 everywhere.
     """
     conn = Connection(resolve(dsn, **params), timeout=timeout,
-                      allow_cleartext_password=allow_cleartext_password)
+                      allow_cleartext_password=allow_cleartext_password,
+                      allow_md5_over_unverified_tls=allow_md5_over_unverified_tls)
     conn._connect()
     return conn
 
@@ -178,10 +190,12 @@ class Connection:
     threads, except cancel(), which is designed to be called from another thread."""
 
     def __init__(self, params: ConnectParams, *, timeout: float | None = None,
-                 allow_cleartext_password: bool = False):
+                 allow_cleartext_password: bool = False, allow_md5_over_unverified_tls: bool = False):
         self._params = params
         self._timeout = timeout
         self._allow_cleartext = allow_cleartext_password
+        self._allow_md5_unverified = allow_md5_over_unverified_tls
+        self._tls_verified = False  # the server's certificate chain was checked (verify-ca/full)
         self._sock: socket.socket | None = None
         self._rbuf = bytearray()  # bytes received from the server but not yet parsed
         self._closed = True
@@ -580,6 +594,7 @@ class Connection:
         self._decoder_cache.clear()
         self.parameters = {}
         self.ssl_in_use = False
+        self._tls_verified = False
         self.auth_method = None
         self.channel_binding_used = False
         self._connect()
@@ -666,6 +681,7 @@ class Connection:
             except (ssl.SSLError, OSError) as exc:
                 raise OperationalError(f"TLS handshake failed: {exc}") from exc
             self.ssl_in_use = True
+            self._tls_verified = context.verify_mode == ssl.CERT_REQUIRED
             return wrapped
         if answer == b"N":
             if p.sslmode in ("require", "verify-ca", "verify-full"):
@@ -716,6 +732,11 @@ class Connection:
         negated, methods = rule
         return (method not in methods) if negated else (method in methods)
 
+    def _server_authenticated(self) -> bool:
+        """True if nobody can be between us and the server: a Unix socket, or
+        TLS with a verified certificate chain (verify-ca or verify-full)."""
+        return self._params.is_unix_socket or (self.ssl_in_use and self._tls_verified)
+
     def _password(self) -> str:
         password = self._params.password
         if password is None:
@@ -764,14 +785,23 @@ class Connection:
                                               f"'{method}' authentication, which cannot use it")
 
             if code == 3:
-                if not (self.ssl_in_use or p.is_unix_socket or self._allow_cleartext):
+                if not (self._server_authenticated() or self._allow_cleartext):
+                    where = ("TLS without certificate verification (sslmode=%s)" % p.sslmode
+                             if self.ssl_in_use else "an unencrypted connection")
                     raise AuthenticationError(
-                        "server requested a cleartext password over an unencrypted connection; "
-                        "refusing (use TLS, or pass allow_cleartext_password=True)")
+                        f"server requested a cleartext password over {where}; refusing, since a "
+                        "man-in-the-middle could read it (use sslmode=verify-full or verify-ca with "
+                        "sslrootcert, or pass allow_cleartext_password=True)")
                 self._send(_msg(b"p", _cstr(self._password(), "surrogateescape")))
             elif code == 5:
                 if len(body) != 8:
                     raise _malformed("MD5 authentication request")
+                if self.ssl_in_use and not self._tls_verified and not self._allow_md5_unverified:
+                    raise AuthenticationError(
+                        f"server requested MD5 password authentication over TLS without certificate "
+                        f"verification (sslmode={p.sslmode}); refusing, since a man-in-the-middle "
+                        "could relay or crack it (use sslmode=verify-full or verify-ca with "
+                        "sslrootcert, switch the role to SCRAM, or pass allow_md5_over_unverified_tls=True)")
                 salt = body[4:8]
                 inner = hashlib.md5((self._password() + p.user).encode("utf-8", "surrogateescape")).hexdigest()
                 outer = hashlib.md5(inner.encode("ascii") + salt).hexdigest()
