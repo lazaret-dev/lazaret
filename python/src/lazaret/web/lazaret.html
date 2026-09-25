@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-EUj4iSuAi0/81gydX0yEGXBF7QKJAOk2/MYX9nYVMQc='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-/2Q/ABEeQJwY2zqQfpUnmQ11ZRZYuAf96Yv4+A2+8sU='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
 <title>Lazaret — Security &amp; Quality Review</title>
 <style>
   :root{
@@ -3176,8 +3176,8 @@ $("#files").addEventListener("change", async e=>{
 
 $("#scanBtn").addEventListener("click", ()=>{
   const files = [...uploaded];
-  const pasted = $("#code").value.trim();
-  if(pasted){
+  const pasted = $("#code").value;
+  if(pasted.trim()){           // scanned as pasted (untrimmed), so line numbers match the text box
     let lang = $("#lang").value;
     if(lang==="auto") lang = detectLang("", pasted);
     const ext = {py:"py", js:"js", sql:"sql"}[lang] || "js";

@@ -13,11 +13,13 @@ shared would still fail here. Each case failed on the unported page:
    UTF-7 cookie went unnoticed (no SC-UTF7), no Q-ENCODING notes;
 5  no S-BIDI; `\\u0065val(x)` and fullwidth `ｅval(x)` scanned clean;
 7  Q-CAPPED carried its own why/fix text, not the CLI's;
-12 destructuring and annotated assignments did not taint.
-Runs the page's script in node:vm (see _dashboard_vm.py); all input is
-inert."""
+12 destructuring and annotated assignments did not taint;
+and pasted code was trimmed, so its line numbers were off by its leading
+blank lines. Runs the page's script in node:vm (see _dashboard_vm.py); all
+input is inert."""
 
 import base64
+import json
 import unittest
 
 from tests.scanner import _dashboard_vm as dash
@@ -141,6 +143,16 @@ class CapAndTaintTests(unittest.TestCase):
         self.assertEqual([i["line"] for i in js if i["rule"] == "T-CMD"], [2, 4])
         py = dash.scan("t.py", "import os\ntarget: str = request.args['x']\nos.system(target)\n", lang="py")
         self.assertEqual([i["line"] for i in py if i["rule"] == "T-CMD"], [3])
+
+
+@dash.requires_node
+class PasteTests(unittest.TestCase):
+    def test_pasted_code_keeps_its_line_numbers(self):
+        expr = ("(() => { document.querySelector('#code').value = %s; document.querySelector('#lang').value = 'js';"
+                " for (const fn of document.querySelector('#scanBtn').listeners.click) fn();"
+                " return lastResult.issues.map((i) => [i.rule, i.file, i.line]); })()") % json.dumps("\n\n  eval(x)\n")
+        (issues,) = dash.run([{"op": "eval", "expr": expr}])
+        self.assertEqual(issues, [["S-EVAL-JS", "pasted-code.js", 3]])
 
 
 if __name__ == "__main__":
