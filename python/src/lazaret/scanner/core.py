@@ -865,7 +865,7 @@ def taint_scan(path, lines, lang, ctx=None):
                  "msg": f"Possible {cat}: {what} reaches this sink.",
                  "why": "Data from user input or a decode function flows into a dangerous call "
                         "without visible sanitization (lightweight intra-file taint tracking).",
-                 "fix": fix, "ref": f"{cwe} · Taint analysis"}, path, i + 1, lines))
+                 "fix": fix, "ref": f"{cwe} · Taint analysis"}, path, i + 1, lines, sm.start()))
     return issues
 
 # ---------------- Obfuscation / entropy heuristics ----------------
@@ -1635,10 +1635,40 @@ def _token_has_material(rule_re, line, lines, i):
     return any(_PEM_BODY_RE.search(text) for text in following)
 
 
-def mk_issue(rule_or_dict, path, line_no, lines):
+# ---------------- Snippets (review fix: shared semantics 7) ----------------
+# A finding used to copy its ±2 context lines whole: a 22.5 KB one-line file
+# produced a 34 MB JSON and a 34 MB HTML report. Every snippet line is now
+# clipped to SNIPPET_MAX characters. The flagged line is windowed around the
+# match: the window starts SNIPPET_LEAD characters before the match column
+# (never past the point where it would run off the end), and "…" marks each
+# side that was cut. Other lines keep their start.
+SNIPPET_MAX = 240
+SNIPPET_LEAD = 60
+ELLIPSIS = "\u2026"
+
+
+def clip_snippet_line(text, col=None):
+    """`text` clipped to at most SNIPPET_MAX characters (see above)."""
+    if not isinstance(text, str) or len(text) <= SNIPPET_MAX:
+        return text
+    start = 0 if col is None else max(0, col - SNIPPET_LEAD)
+    start = min(start, len(text) - (SNIPPET_MAX - 1))
+    head = ELLIPSIS if start > 0 else ""
+    end = start + SNIPPET_MAX - len(head)
+    if end < len(text):
+        return head + text[start:end - 1] + ELLIPSIS
+    return head + text[start:]
+
+
+def mk_issue(rule_or_dict, path, line_no, lines, col=None):
+    """Issue dict for rule `rule_or_dict` at 1-based `line_no` of `lines`.
+    `col` (0-based character offset of the match on the flagged line, if
+    known) centres the flagged line's snippet window on the match."""
     r = rule_or_dict
     start = max(0, line_no - 3)
-    snippet = lines[start:min(len(lines), line_no + 2)]
+    stop = min(len(lines), line_no + 2)
+    flag = line_no - 1
+    snippet = []
     # L1 (artifact hygiene): the flagged line of a SECRET-rule finding is
     # redacted at creation time, so EVERY sink — terminal excerpt, JSON/HTML
     # report, SARIF region, the registry Store blob — persists the
@@ -1647,24 +1677,80 @@ def mk_issue(rule_or_dict, path, line_no, lines):
     # Additionally, ANY rule's ±2-line context window is swept for
     # secret-shaped substrings (a snippet around an os.system finding
     # routinely contains the file's actual credentials on adjacent lines).
-    if REDACT_SECRETS and 0 <= line_no - 1 < len(lines):
+    # Redaction runs on the whole line, before clipping, so a clip boundary
+    # can never cut a secret into a no-longer-matching fragment.
+    redact = REDACT_SECRETS and 0 <= flag < len(lines)
+    if redact:
         ctx = _active_ctx(lines)
-        if ctx is not None:
-            flag = line_no - 1 - start if r["id"] in SECRET_RULES else -1
-            snippet = [(REDACT_PLACEHOLDER.replace("{RULE}", r["id"]) + f" ({len(l)} chars)")
-                       if k == flag else ctx.redacted(start + k) if isinstance(l, str) else l
+        if ctx is None and r["id"] in SECRET_RULES:
+            snippet = redact_secret_snippet(r["id"], lines[start:stop], flag - start, lines[flag])
+            snippet = [clip_snippet_line(l, col if start + k == flag else None)
                        for k, l in enumerate(snippet)]
-        elif r["id"] in SECRET_RULES:
-            snippet = redact_secret_snippet(
-                r["id"], snippet, line_no - 1 - start, lines[line_no - 1])
-        else:
-            snippet = [_redact_context_line(l) if isinstance(l, str) else l
-                       for l in snippet]
+    if not snippet:
+        for k in range(start, stop):
+            l = lines[k]
+            if not isinstance(l, str):
+                snippet.append(l)
+                continue
+            if redact:
+                if k == flag and r["id"] in SECRET_RULES:
+                    l = REDACT_PLACEHOLDER.replace("{RULE}", r["id"]) + f" ({len(l)} chars)"
+                elif ctx is not None:
+                    l = ctx.redacted(k)
+                else:
+                    l = _redact_context_line(l)
+            snippet.append(clip_snippet_line(l, col if k == flag else None))
     return {"rule": r["id"], "name": r["name"], "type": r["type"], "sev": r["sev"],
             "msg": r["msg"], "why": r["why"], "fix": r["fix"], "ref": r["ref"],
             "file": path, "line": line_no,
             "snippet": snippet,
             "snipStart": start + 1}
+
+
+# ---------------- Per-file finding cap (review fix: shared semantics 7) ----------------
+# At most CAP_PER_RULE findings per (file, rule) for low-value rules — sev
+# INFO or MINOR, or type SMELL — kept in line order; the rest are replaced by
+# ONE Q-CAPPED INFO finding per capped rule at the first omitted line.
+# Security findings (S-, T-, SC-, X-, SQL- rules) are never capped.
+CAP_PER_RULE = 200
+_NEVER_CAPPED_PREFIXES = ("S-", "T-", "SC-", "X-", "SQL-")
+
+
+def _cappable(issue):
+    rid = str(issue.get("rule", ""))
+    if rid.startswith(_NEVER_CAPPED_PREFIXES):
+        return False
+    return issue.get("sev") in ("INFO", "MINOR") or issue.get("type") == "SMELL"
+
+
+def cap_issues(path, issues, lines):
+    """`issues` (one file's findings) with the per-rule cap applied."""
+    counts, dropped, omitted = {}, set(), {}
+    order = sorted(range(len(issues)), key=lambda k: issues[k].get("line", 0))
+    for k in order:
+        i = issues[k]
+        if not _cappable(i):
+            continue
+        rid = i["rule"]
+        counts[rid] = counts.get(rid, 0) + 1
+        if counts[rid] > CAP_PER_RULE:
+            dropped.add(k)
+            o = omitted.setdefault(rid, [0, i["line"]])
+            o[0] += 1
+    if not dropped:
+        return issues
+    out = [i for k, i in enumerate(issues) if k not in dropped]
+    for rid, (n, first) in omitted.items():
+        out.append(mk_issue(
+            {"id": "Q-CAPPED", "name": "Findings capped", "type": "SMELL", "sev": "INFO",
+             "msg": f"{n} more {rid} findings omitted",
+             "why": "Low-severity findings that repeat hundreds of times in one file are capped "
+                    "so reports stay readable; security findings are never capped.",
+             "fix": f"Fix or deliberately suppress the {rid} pattern in this file, then re-scan "
+                    "to see the remaining occurrences.",
+             "ref": "Maintainability"}, path, first, lines))
+    return out
+
 
 def extract_functions(lines, lang):
     fns = []
@@ -2049,7 +2135,7 @@ def scan_file(path, content, lang, dep=False):
             _scan_file(path, content, lines, lang, dep, ctx, issues)
         except _ScanBudgetExceeded:
             issues.append(truncated_issue(path, "scan time budget exceeded"))
-        return [i for i in issues if not ctx.suppressed(i, dep=dep)]
+        return cap_issues(path, [i for i in issues if not ctx.suppressed(i, dep=dep)], lines)
     finally:
         _TLS.ctx = outer
 
@@ -2076,7 +2162,8 @@ def _scan_file(path, content, lines, lang, dep, ctx, issues):
                 continue
             # equality checks shouldn't match inside string literals
             target = STRING_LIT_RE.sub("\"\"", line) if r["id"] == "B-EQEQ" else line
-            if not r["re"].search(target):
+            m = r["re"].search(target)
+            if not m:
                 continue
             if r["need"] and not r["need"].search(line):
                 continue
@@ -2086,7 +2173,7 @@ def _scan_file(path, content, lines, lang, dep, ctx, issues):
                 continue
             if r["id"] in ("S-TOKEN", "S-SECRET"):
                 secret_lines.add(i)
-            issues.append(mk_issue(r, path, i + 1, lines))
+            issues.append(mk_issue(r, path, i + 1, lines, m.start()))
         if not dep and len(line) > LONG_LINE:
             issues.append(mk_issue(
                 {"id": "Q-LONGLINE", "name": "Line too long", "type": "SMELL", "sev": "MINOR",
@@ -2108,21 +2195,24 @@ def _scan_file(path, content, lines, lang, dep, ctx, issues):
                          + ("names code execution, a download, or a URL." if dangerous
                             else "is readable once decoded.")),
                  "fix": "Decode the string and review what it does.",
-                 "ref": "CWE-506 · Supply chain"}, path, i + 1, lines))
-        if lang == "js" and CHARCODE_RE.search(line) and len(re.findall(r"\b\d{2,3}\b", line)) >= 10:
+                 "ref": "CWE-506 · Supply chain"}, path, i + 1, lines,
+                _HEX_ESCAPE_RE.search(line).start()))
+        cm = CHARCODE_RE.search(line) if lang == "js" else None
+        if cm and len(re.findall(r"\b\d{2,3}\b", line)) >= 10:
             issues.append(mk_issue(
                 {"id": "SC-CHARCODE", "name": "Char-code string building", "type": "HOTSPOT", "sev": "MAJOR",
                  "msg": "String assembled from character codes — obfuscation indicator.",
                  "why": "fromCharCode chains hide payloads from static review.",
                  "fix": "Decode and review what string is being built.",
-                 "ref": "CWE-506 · Supply chain"}, path, i + 1, lines))
-        if B64_BLOB_RE.search(line) and "sourceMappingURL" not in line:
+                 "ref": "CWE-506 · Supply chain"}, path, i + 1, lines, cm.start()))
+        bm = B64_BLOB_RE.search(line)
+        if bm and "sourceMappingURL" not in line:
             issues.append(mk_issue(
                 {"id": "SC-B64", "name": "Large base64 blob", "type": "HOTSPOT", "sev": "MAJOR",
                  "msg": "Base64 blob (200+ chars) embedded in code.",
                  "why": "Embedded encoded blobs can carry second-stage payloads.",
                  "fix": "Decode and verify the content; move legitimate assets to data files.",
-                 "ref": "CWE-506 · Supply chain"}, path, i + 1, lines))
+                 "ref": "CWE-506 · Supply chain"}, path, i + 1, lines, bm.start()))
         # --- entropy-based secret detection ---
         # (review fix: the S-TOKEN/S-SECRET dedupe was an any() over every
         # issue so far, per line — 15.7 s on 20k lines; now a set lookup)
@@ -2134,12 +2224,13 @@ def _scan_file(path, content, lines, lang, dep, ctx, issues):
                      "msg": "High-entropy string literal — possible hardcoded secret.",
                      "why": "Random-looking constants are usually keys or tokens.",
                      "fix": "If it is a secret, rotate it and load it from the environment.",
-                     "ref": "CWE-798 · OWASP A07"}, path, i + 1, lines))
+                     "ref": "CWE-798 · OWASP A07"}, path, i + 1, lines, em.start(1)))
     # file-level: javascript-obfuscator identifier signature
     if lang == "js":
         obf = OBF_IDENT_RE.findall(content)
         if len(set(obf)) >= 5:
-            first_line = content[:content.find(obf[0])].count("\n") + 1
+            first_off = content.find(obf[0])
+            first_line = content[:first_off].count("\n") + 1
             issues.append(mk_issue(
                 {"id": "SC-OBF-IDENT", "name": "Obfuscated identifier pattern", "type": "HOTSPOT",
                  "sev": "CRITICAL",
@@ -2147,7 +2238,8 @@ def _scan_file(path, content, lines, lang, dep, ctx, issues):
                  "why": "This naming pattern is produced by obfuscation tools; in a dependency it is "
                         "a classic indicator of a compromised or malicious package.",
                  "fix": "Diff against the package's published repository; consider removing the dependency.",
-                 "ref": "CWE-506 · Supply chain"}, path, first_line, lines))
+                 "ref": "CWE-506 · Supply chain"}, path, first_line, lines,
+                first_off - content.rfind("\n", 0, first_off) - 1))
     if dep:
         return
     starts = None
@@ -2162,7 +2254,7 @@ def _scan_file(path, content, lines, lang, dep, ctx, issues):
             if starts is None:        # review fix: was content[:pos].count("\n") per match
                 starts = _line_starts(content)
             line_no = bisect.bisect_right(starts, m.start())
-            issues.append(mk_issue(r, path, line_no, lines))
+            issues.append(mk_issue(r, path, line_no, lines, m.start() - starts[line_no - 1]))
     ctx.check_time()
     if lang == "sql":
         try:
@@ -2653,22 +2745,28 @@ def redact_result(res):
       code stays readable.
 
     mk_issue is the primary fix; this is the belt-and-braces pass so a leak
-    requires BOTH mk_issue to miss AND this sweep to miss.
+    requires BOTH mk_issue to miss AND this sweep to miss. The sweep also
+    clips every snippet line to SNIPPET_MAX characters (issues built outside
+    mk_issue, e.g. by the flow engine, get the same size bound).
     """
     for i in res.get("issues", []):
-        if not REDACT_SECRETS:
-            break
         snip = i.get("snippet")
         if not isinstance(snip, list):
+            continue
+        if not REDACT_SECRETS:
+            clipped = [clip_snippet_line(l) for l in snip]
+            if clipped != snip:
+                i["snippet"] = clipped
             continue
         idx = i["line"] - i.get("snipStart", i["line"])
         secret = i.get("rule") in SECRET_RULES
         if secret and 0 <= idx < len(snip) and isinstance(snip[idx], str) \
                 and REDACT_FINGERPRINT not in snip[idx]:
-            i["snippet"] = redact_secret_snippet(i["rule"], snip, idx, snip[idx])
+            i["snippet"] = [clip_snippet_line(l) for l in
+                            redact_secret_snippet(i["rule"], snip, idx, snip[idx])]
             continue
         # non-secret rule (or already-redacted secret): sweep context lines
-        cleaned = [(_redact_context_line(l) if isinstance(l, str) else l)
+        cleaned = [(clip_snippet_line(_redact_context_line(l)) if isinstance(l, str) else l)
                    for l in snip]
         if cleaned != snip:
             i["snippet"] = cleaned
