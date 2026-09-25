@@ -78,6 +78,11 @@ def _msg(kind: bytes, payload: bytes) -> bytes:
     return kind + _I32.pack(len(payload) + 4) + payload
 
 
+# A Parse the server always rejects (syntax error): sent before Sync to make
+# the implicit transaction of a pipelined batch fail rather than commit.
+_ABORT_BATCH = _msg(b"P", b"\x00lazaret.pg: abandon this batch\x00\x00\x00")
+
+
 def _cstr(s: str, errors: str = "strict") -> bytes:
     # errors="surrogateescape" for connection values and passwords: bytes that
     # are not UTF-8 (from a percent-encoded URL or the environment) are sent as is.
@@ -247,8 +252,14 @@ class Connection:
         with self._io():
             self._synced = False
             last_oids = None
-            for start in range(0, len(encoded), EXECUTEMANY_CHUNK):
-                chunk = encoded[start:start + EXECUTEMANY_CHUNK]
+            # The first row goes alone: if the statement turns out to be COPY FROM
+            # STDIN, any message pipelined behind it makes the server drop the
+            # connection ("protocol synchronization was lost").
+            bounds = [0, 1] + list(range(1 + EXECUTEMANY_CHUNK, len(encoded), EXECUTEMANY_CHUNK))
+            for start, stop in zip(bounds, bounds[1:] + [len(encoded)]):
+                if start >= stop:
+                    break
+                chunk = encoded[start:stop]
                 out = bytearray()
                 for oids, formats, values in chunk:
                     if oids != last_oids:  # re-prepare when parameter types change
@@ -271,8 +282,18 @@ class Connection:
                         self._send(_SYNC)
                         self._drain_until_ready()
                         raise error
-                    elif kind in (b"1", b"2", b"n", b"I"):
-                        done += kind == b"I"
+                    elif kind in (b"1", b"2", b"n", b"I", b"T", b"D"):
+                        done += kind == b"I"  # rows (e.g. from RETURNING) are discarded
+                    elif kind in (b"G", b"H", b"W"):
+                        message = self._handle_copy(kind, extended=True)  # CopyIn: CopyFail + Sync
+                        if kind == b"H":
+                            # COPY TO finishes by itself, and the rows pipelined after it would
+                            # still run and commit at Sync: make the batch fail first.
+                            self._send(_ABORT_BATCH + _SYNC)
+                        self._drain_until_ready()
+                        raise InterfaceError(f"{message} (in executemany; nothing was committed)")
+                    elif kind in (b"d", b"c"):
+                        pass
                     elif not self._handle_async(kind, body):
                         self._unexpected(kind)
             self._send(_SYNC)

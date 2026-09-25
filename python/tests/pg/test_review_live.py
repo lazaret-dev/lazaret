@@ -99,5 +99,35 @@ class ParameterTypeTests(LiveCase):
         self.assertIs(c.fetchval("SELECT $1 = ANY($2)", uuid.UUID(u), [uuid.UUID(u)]), True)
 
 
+@_support.requires_env("LAZARET_TEST_PG_DSN")
+class ExecutemanyResultTests(LiveCase):
+    tables = ("lz_rv_em",)
+
+    def setUp(self):
+        super().setUp()
+        self.conn.execute("DROP TABLE IF EXISTS lz_rv_em")
+        self.conn.execute("CREATE TABLE lz_rv_em (id serial PRIMARY KEY, v int)")
+
+    def count(self):
+        return self.conn.fetchval("SELECT count(*) FROM lz_rv_em")
+
+    def test_returning_and_select(self):
+        r = self.conn.executemany("INSERT INTO lz_rv_em (v) VALUES ($1) RETURNING id", [(1,), (2,)])
+        self.assertEqual(r.rowcount, 2)
+        self.assertEqual(self.count(), 2)
+        self.assertEqual(self.conn.executemany("SELECT $1::int", [(1,), (2,), (3,)]).rowcount, 3)
+        self.still_works()
+
+    def test_copy_is_refused_and_nothing_commits(self):
+        for sql, rows in (("COPY lz_rv_em (v) FROM STDIN", [(), ()]),
+                          ("COPY (INSERT INTO lz_rv_em (v) VALUES (1) RETURNING id) TO STDOUT", [(), (), ()])):
+            with self.subTest(sql=sql):
+                with self.assertRaisesRegex(pg.InterfaceError, "COPY"):
+                    self.conn.executemany(sql, rows)
+                self.assertFalse(self.conn.closed)
+                self.assertEqual(self.count(), 0)
+                self.assertFalse(self.conn.in_transaction)
+
+
 if __name__ == "__main__":
     unittest.main()
