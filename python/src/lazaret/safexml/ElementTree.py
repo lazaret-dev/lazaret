@@ -171,7 +171,21 @@ class XMLParser:
         return close()
 
     def flush(self) -> None:
-        """Present for compatibility; data is never buffered beyond Expat itself."""
+        """Make Expat report everything fed so far. Expat 2.6+ may hold back
+        a token until more input arrives (reparse deferral); like the stdlib's
+        flush(), this parses with deferral off once, then restores it."""
+        parser = self.parser
+        try:
+            was_enabled = parser.GetReparseDeferralEnabled()
+        except AttributeError:  # this Python cannot control deferral
+            return
+        try:
+            parser.SetReparseDeferralEnabled(False)
+            parser.Parse(b"", False)
+        except expat.error as exc:
+            self._raise_parse_error(exc)
+        finally:
+            parser.SetReparseDeferralEnabled(was_enabled)
 
     @staticmethod
     def _raise_parse_error(exc: expat.error) -> None:
