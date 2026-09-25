@@ -9,6 +9,8 @@ installing handlers on the Expat parser before any input is read:
 - external entity references raise ExternalReferenceForbidden;
 - DOCTYPE declarations optionally raise DTDForbidden;
 - external DTDs and parameter entities are never loaded, in every API;
+- element content models are never converted to Python (pyexpat does that
+  recursively in C, so a deeply nested model overflows the C stack);
 - nesting depth and input size are bounded.
 """
 
@@ -108,7 +110,8 @@ def _forbid_external(context, base, sysid, pubid):
 
 
 def install_handlers(parser, options: Options) -> None:
-    """Apply the protections to a pyexpat parser. Must run before parsing starts."""
+    """Apply the protections to a pyexpat parser. Must run before parsing
+    starts, after the API has installed its own handlers."""
     # Never read an external DTD subset or external parameter entities. The
     # stdlib SAX reader turns this on; we turn it off everywhere, so a DOCTYPE
     # with a SYSTEM or PUBLIC id is inert in every API.
@@ -120,6 +123,12 @@ def install_handlers(parser, options: Options) -> None:
         parser.UnparsedEntityDeclHandler = _forbid_unparsed_entity
     if options.forbid_external:
         parser.ExternalEntityRefHandler = _forbid_external
+    # With an ElementDeclHandler installed, pyexpat converts every <!ELEMENT>
+    # content model to nested tuples, recursively in C: a model nested a few
+    # hundred thousand deep crashes the interpreter (stack overflow). Without a
+    # handler Expat never builds the model. minidom installs one; nothing it
+    # does by default needs it.
+    parser.ElementDeclHandler = None
 
 
 def depth_exceeded(limit: int) -> LimitExceeded:
