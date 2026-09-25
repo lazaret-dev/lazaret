@@ -27,12 +27,20 @@ make the scan exit 4, so CI cannot silently lose coverage.
 No dependencies — runs on stock python3. Same ruleset as the Lazaret dashboard.
 """
 import argparse
+import bisect
 import datetime
 import html as html_mod
+import io
 import json
+import keyword
 import os
 import re
 import sys
+import threading
+import time
+import tokenize
+import unicodedata
+import warnings
 
 try:
     from lazaret.scanner import flow as lazaret_flow  # interprocedural / cross-file taint (optional)
@@ -778,9 +786,14 @@ def apply_taint_config(cfg):
                     continue
                 _PARTIAL_SAN[lang][suf] = new_re
 
-def taint_scan(path, lines, lang):
+def taint_scan(path, lines, lang, ctx=None):
     if lang not in TAINT_SOURCES:   # SQL and others: pattern rules only, no taint flow
         return []
+    if ctx is None or ctx.lines is not lines:
+        ctx = _FileCtx(lines, lang)
+    # Each line is matched with its comment text removed: `/**/const d =
+    # req.query.x` is an assignment, and `x = 1  // req.query` is not a source.
+    cmask, code_lines = ctx.cmask, ctx.code
     issues = []
     tainted = {}   # var -> (line_no, frozenset(sink suffixes it is sanitized/clean for))
     src = TAINT_SOURCES[lang]
@@ -793,8 +806,8 @@ def taint_scan(path, lines, lang):
                 return True
         return False
 
-    for i, line in enumerate(lines):
-        if is_comment(line, lang):
+    for i, line in enumerate(code_lines):
+        if cmask[i]:
             continue
         m = ASSIGN_RE[lang].match(line)
         if m:
@@ -1168,14 +1181,252 @@ def skipped_tree_issues():
             "file": rel, "line": 1, "snippet": "", "snipStart": 0})
     return out
 
-# ---------------- Scanning ----------------
+# ---------------- Comment lexer (review fix: shared semantics 1) ----------------
+# is_comment() used to be a line-local prefix test: any JS/SQL line starting
+# with "/*" or "*" counted as a comment, so `/**/eval(atob(…))`, a minified
+# bundle opening with a `/*! lib | MIT */` banner, `/* x */ GRANT ALL … TO
+# PUBLIC;` or a `  * eval(…)` continuation line were skipped by every rule.
+# Comment state is now tracked ACROSS lines by a small lexer that knows the
+# language's strings and comments; a line is a comment line only if every
+# non-whitespace character on it is inside a comment. Python uses the real
+# tokenizer where the file tokenizes, and falls back to the lexer otherwise.
+#
+# Lexer semantics (mirrored by the JS engine):
+#   py : '#' to end of line; '…' "…" end at end of line unless the newline is
+#        backslash-escaped; '''…''' """…""" span lines; backslash escapes.
+#   js : '//' to end of line; '/* … */' spans lines; '…' "…" as in py;
+#        `…` template literals span lines (${…} is not re-lexed); a '/' that
+#        starts a regex literal (previous significant code character is
+#        start-of-file or one of ( , = : [ ! & | ? { } ; + - * % < > ~ ^, or
+#        the previous word is return/typeof/instanceof/in/of/new/delete/void/
+#        throw/case/do/else/yield/await) consumes the literal /…/ up to its
+#        closing '/' on the same line (escapes and [classes] honoured); with no
+#        closing '/' on the line it is a plain division.
+#   sql: '--' to end of line; '/* … */' spans lines; '…' and "…" span lines,
+#        no backslash escapes ('' is two adjacent strings, same result).
+#   other/unknown (lang None): '#' and '//' line comments, '/* … */', and
+#        '…' "…" `…` strings ending at end of line.
+# Unterminated block comments and strings run to end of file.
+
+_LEX_NEXT = {
+    "py": re.compile(r"[#'\"]"),
+    "js": re.compile(r"[/'\"`]"),
+    "sql": re.compile(r"--|/\*|['\"]"),
+    None: re.compile(r"#|/[/*]|['\"`]"),
+}
+_LEX_LINE_STR = {q: re.compile(q + r"(?:[^" + q + r"\\\n]|\\.)*" + q + "?", re.S)
+                 for q in ("'", '"', "`")}
+_LEX_STR = {
+    ("py", "'"): _LEX_LINE_STR["'"], ("py", '"'): _LEX_LINE_STR['"'],
+    ("py", "'''"): re.compile(r"'''(?:[^'\\]|\\.|'(?!''))*(?:'''|\Z)", re.S),
+    ("py", '"""'): re.compile(r'"""(?:[^"\\]|\\.|"(?!""))*(?:"""|\Z)', re.S),
+    ("js", "'"): _LEX_LINE_STR["'"], ("js", '"'): _LEX_LINE_STR['"'],
+    ("js", "`"): re.compile(r"`(?:[^`\\]|\\.)*`?", re.S),
+    ("sql", "'"): re.compile(r"'[^']*'?"), ("sql", '"'): re.compile(r'"[^"]*"?'),
+    (None, "'"): _LEX_LINE_STR["'"], (None, '"'): _LEX_LINE_STR['"'],
+    (None, "`"): _LEX_LINE_STR["`"],
+}
+_JS_REGEX_LIT_RE = re.compile(r"/(?![*/])(?:[^/\\\[\n]|\\.|\[(?:[^\]\\\n]|\\.)*\])+/")
+_JS_REGEX_PREV = frozenset("(,=:[!&|?{};+-*%<>~^")
+_JS_REGEX_KEYWORDS = frozenset((
+    "return", "typeof", "instanceof", "in", "of", "new", "delete", "void",
+    "throw", "case", "do", "else", "yield", "await"))
+
+
+def _is_word_char(ch):
+    return ch.isalnum() or ch in "_$"
+
+
+def _js_regex_allowed(prev, tail):
+    """May a '/' after this code start a regex literal? `prev` is the last
+    significant code character ('' at start of file), `tail` the last few
+    code characters ending at it."""
+    if prev == "" or prev in _JS_REGEX_PREV:
+        return True
+    if _is_word_char(prev):
+        k = len(tail)
+        while k > 0 and _is_word_char(tail[k - 1]):
+            k -= 1
+        if k == 0 and len(tail) >= 11:     # word longer than any keyword
+            return False
+        return tail[k:] in _JS_REGEX_KEYWORDS
+    return False
+
+
+def _lex_comment_spans(content, lang):
+    """Absolute (start, end) spans of every comment in `content` (see the
+    lexer semantics above). Linear: a regex finds each next interesting
+    character and strings/comments are consumed with bounded matches."""
+    lang = lang if lang in ("py", "js", "sql") else None
+    nxt = _LEX_NEXT[lang]
+    spans = []
+    n = len(content)
+    pos = 0
+    prev, tail = "", ""        # js: last significant code char / trailing code text
+    while pos < n:
+        m = nxt.search(content, pos)
+        if m is None:
+            break
+        k = m.start()
+        if lang == "js" and k > pos:
+            seg = content[pos:k].rstrip()
+            if seg:
+                prev, tail = seg[-1], seg[-11:]
+        ch = content[k]
+        two = content[k:k + 2]
+        if ((ch == "#" and lang in ("py", None)) or (two == "//" and lang in ("js", None))
+                or (two == "--" and lang == "sql")):
+            e = content.find("\n", k)
+            e = n if e < 0 else e
+            spans.append((k, e))
+            pos = e
+            continue
+        if two == "/*" and lang != "py":
+            e = content.find("*/", k + 2)
+            e = n if e < 0 else e + 2
+            spans.append((k, e))
+            pos = e
+            continue
+        if ch == "/":                      # js only: regex literal or division
+            if _js_regex_allowed(prev, tail):
+                rm = _JS_REGEX_LIT_RE.match(content, k)
+                if rm:
+                    pos = rm.end()
+                    prev, tail = '"', ""
+                    continue
+            pos = k + 1
+            prev, tail = "/", "/"
+            continue
+        key = ch * 3 if lang == "py" and content.startswith(ch * 3, k) else ch
+        sm = _LEX_STR[(lang, key)].match(content, k)
+        pos = max(sm.end() if sm else k + 1, k + 1)
+        prev, tail = '"', ""
+    return spans
+
+
+def _line_starts(content):
+    return [0] + [m.end() for m in re.finditer("\n", content)]
+
+
+def _py_tokenize_comment_spans(content):
+    """Comment spans from Python's own tokenizer, or None if the file does not
+    tokenize (the caller then falls back to the lexer)."""
+    if "#" not in content:
+        return []
+    rows = []
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            for tok in tokenize.generate_tokens(io.StringIO(content).readline):
+                if tok.type == tokenize.COMMENT:
+                    rows.append((tok.start, len(tok.string)))
+    except Exception:          # IndentationError, TokenError, SyntaxError (3.12+), …
+        return None
+    starts = _line_starts(content)
+    return [(starts[r - 1] + c, starts[r - 1] + c + ln) for (r, c), ln in rows]
+
+
+def _comment_spans(content, lang):
+    if lang == "py":
+        spans = _py_tokenize_comment_spans(content)
+        if spans is not None:
+            return spans
+    return _lex_comment_spans(content, lang)
+
+
+def _comment_layout(content, lines, lang):
+    """(mask, spans, code) for the lines of `content`:
+    mask[i]  — line i is a comment line (has non-whitespace, all of it in comments);
+    spans    — {i: [(start, end), …]} comment spans relative to line i;
+    code     — line i with its comment text removed (strings kept)."""
+    n = len(lines)
+    mask = [False] * n
+    by_line = {}
+    spans = _comment_spans(content, lang)
+    if not spans:
+        return mask, by_line, lines
+    starts = _line_starts(content)
+    for s, e in spans:
+        i = bisect.bisect_right(starts, s) - 1
+        while i < n:
+            ls = starts[i]
+            le = ls + len(lines[i])
+            a, b = max(s, ls) - ls, min(e, le) - ls
+            if b > a:
+                by_line.setdefault(i, []).append((a, b))
+            if e <= le + 1:
+                break
+            i += 1
+    code = list(lines)
+    for i, sp in by_line.items():
+        line = lines[i]
+        parts, p = [], 0
+        for a, b in sp:
+            parts.append(line[p:a])
+            p = b
+        parts.append(line[p:])
+        c = "".join(parts)
+        code[i] = c
+        mask[i] = not c.strip() and bool(line.strip())
+    return mask, by_line, code
+
+
+def comment_mask(lines, lang):
+    """Per-line booleans: True for a comment line of this file (comment state
+    carried across lines — see the lexer notes above)."""
+    return _comment_layout("\n".join(lines), lines, lang)[0]
+
+
 def is_comment(line, lang):
+    """Single-line form of comment_mask() for callers without file context:
+    the line is lexed on its own (no block comment or template open at its
+    start). A ` * foo` line is therefore NOT a comment here — only
+    comment_mask() over the whole file knows a block comment is open."""
     t = line.strip()
+    if not t:
+        return False
     if lang == "py":
         return t.startswith("#")
-    if lang == "sql":
-        return t.startswith("--") or t.startswith("/*") or t.startswith("*")
-    return t.startswith("//") or t.startswith("*") or t.startswith("/*")
+    return comment_mask([line], lang)[0]
+
+
+def source_lines(content, lang):
+    """content -> lines exactly as scan_file numbers them: CRLF/CR are
+    normalized to LF, and for JavaScript U+2028/U+2029 (ECMAScript line
+    terminators) also end a line."""
+    content = normalize_newlines(content)
+    if lang == "js" and (" " in content or " " in content):
+        content = content.replace(" ", "\n").replace(" ", "\n")
+    return content.split("\n")
+
+
+class _ScanBudgetExceeded(Exception):
+    """Raised inside scan_file when the per-file time budget is spent."""
+
+
+_TLS = threading.local()      # the scan_file context active on this thread
+
+
+class _FileCtx:
+    """Per-file facts computed once and shared by every rule, the suppression
+    check and mk_issue: the comment layout, the normalized match text of each
+    line, parsed suppression markers and the redaction caches."""
+
+    def __init__(self, lines, lang, content=None, deadline=None):
+        self.lines = lines
+        self.lang = lang
+        self.content = "\n".join(lines) if content is None else content
+        self.cmask, self.cspans, self.code = _comment_layout(self.content, lines, lang)
+        self.deadline = deadline
+
+    def check_time(self):
+        if self.deadline is not None and time.monotonic() > self.deadline:
+            raise _ScanBudgetExceeded()
+
+
+def _active_ctx(lines):
+    ctx = getattr(_TLS, "ctx", None)
+    return ctx if ctx is not None and ctx.lines is lines else None
 
 # Line-level matchers for redacting credentials that appear on CONTEXT lines
 # of a snippet (audit L1: a finding's ±2-line context can carry a DIFFERENT
@@ -1606,9 +1857,20 @@ def normalize_newlines(text):
 def scan_file(path, content, lang, dep=False):
     """Scan one file. dep=True → dependency mode: only supply-chain and
     secret rules run (quality/bug rules would be pure noise in vendored code)."""
-    content = normalize_newlines(content)
+    lines = source_lines(content, lang)
+    content = "\n".join(lines)
+    ctx = _FileCtx(lines, lang, content)
+    outer = getattr(_TLS, "ctx", None)
+    _TLS.ctx = ctx
+    try:
+        return _scan_file(path, content, lines, lang, dep, ctx)
+    finally:
+        _TLS.ctx = outer
+
+
+def _scan_file(path, content, lines, lang, dep, ctx):
     issues = []
-    lines = content.split("\n")
+    cmask = ctx.cmask
     for i, line in enumerate(lines):
         for r in RULES:
             if lang not in r["langs"]:
@@ -1623,7 +1885,7 @@ def scan_file(path, content, lang, dep=False):
                 continue
             if r["skip"] and r["skip"].search(line):
                 continue
-            if is_comment(line, lang) and r["id"] not in ("Q-TODO", "S-TOKEN"):
+            if cmask[i] and r["id"] not in ("Q-TODO", "S-TOKEN"):
                 continue
             if r["id"] == "S-TOKEN" and not _token_has_material(r["re"], line, lines, i):
                 continue
@@ -1665,7 +1927,7 @@ def scan_file(path, content, lang, dep=False):
                  "fix": "Decode and verify the content; move legitimate assets to data files.",
                  "ref": "CWE-506 · Supply chain"}, path, i + 1, lines))
         # --- entropy-based secret detection ---
-        if not is_comment(line, lang) and not SECRET_SKIP_RE.search(line):
+        if not cmask[i] and not SECRET_SKIP_RE.search(line):
             em = ENTROPY_VALUE_RE.search(line)
             if em and entropy_secretish(em.group(1)) and not any(
                     x["line"] == i + 1 and x["rule"] in ("S-TOKEN", "S-SECRET") for x in issues):
@@ -1702,7 +1964,7 @@ def scan_file(path, content, lang, dep=False):
         except Exception:
             pass
     if not dep:
-        issues.extend(taint_scan(path, lines, lang))
+        issues.extend(taint_scan(path, lines, lang, ctx))
     # G12: whole-argument SQL-sink analysis (Python only) — catches
     # execute(sql % x) with no space after %, .format() on a template variable,
     # and execute(name) where name was built by interpolation/concatenation.
@@ -2010,11 +2272,13 @@ def compute_metrics(all_files):
     win_map = {}
     for f in files:
         code = []
-        for i, l in enumerate(f["content"].split("\n")):
+        flines = f["content"].split("\n")
+        cmask = comment_mask(flines, f["lang"])
+        for i, l in enumerate(flines):
             t = l.strip()
             if not t:
                 continue
-            if is_comment(l, f["lang"]):
+            if cmask[i]:
                 comments += 1
                 continue
             ncloc += 1
