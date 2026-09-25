@@ -309,6 +309,17 @@ def default_passfile() -> str:
     return os.path.expanduser("~/.pgpass")
 
 
+def default_ssl_dir() -> str:
+    """Where libpq looks for root.crt, root.crl, postgresql.crt and postgresql.key."""
+    if os.name == "nt":
+        return os.path.join(os.environ.get("APPDATA", ""), "postgresql")
+    return os.path.expanduser("~/.postgresql")
+
+
+def default_root_cert() -> str:
+    return os.path.join(default_ssl_dir(), "root.crt")
+
+
 def _split_pgpass_line(line: str) -> list[str]:
     fields, cur, i = [], [], 0
     while i < len(line):

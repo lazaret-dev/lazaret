@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Iterator, NoReturn, Sequence
 
 from . import _types
-from ._dsn import ConnectParams, lookup_pgpass, resolve
+from ._dsn import ConnectParams, default_root_cert, lookup_pgpass, resolve
 from ._scram import ScramClient, tls_server_end_point
 from .errors import (
     AuthenticationError,
@@ -678,18 +678,20 @@ class Connection:
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         mode = p.sslmode
-        if mode == "require" and p.sslrootcert and p.sslrootcert != "system":
-            mode = "verify-ca"  # libpq: an explicit root cert upgrades require to verify-ca
+        root = p.sslrootcert or default_root_cert()
+        if mode == "require" and root != "system" and (p.sslrootcert or os.path.exists(root)):
+            # libpq: a root certificate (sslrootcert, or the default ~/.postgresql/root.crt
+            # or %APPDATA%\postgresql\root.crt when it exists) upgrades require to verify-ca
+            mode = "verify-ca"
         if mode in ("prefer", "require"):
             ctx.check_hostname = False
             ctx.verify_mode = ssl.CERT_NONE
         else:
             ctx.check_hostname = mode == "verify-full"
             ctx.verify_mode = ssl.CERT_REQUIRED
-            if p.sslrootcert == "system":
+            if root == "system":
                 ctx.load_default_certs()
             else:
-                root = p.sslrootcert or os.path.expanduser("~/.postgresql/root.crt")
                 if not os.path.exists(root):
                     raise OperationalError(
                         f"sslmode={p.sslmode} needs a root certificate: {root} does not exist "
