@@ -261,5 +261,23 @@ class ServerEndedSessionTests(LiveCase):
         self.still_works(c)
 
 
+@_support.requires_env("LAZARET_TEST_PG_DSN")
+class LibpqParameterTests(LiveCase):
+    def test_target_session_attrs_on_a_primary(self):
+        if self.conn.fetchval("SELECT pg_is_in_recovery()"):
+            self.skipTest("the test server is a standby")
+        for attrs in ("any", "read-write", "primary", "prefer-standby"):
+            with self.subTest(attrs=attrs):
+                c = pg.connect(DSN, target_session_attrs=attrs)
+                self.still_works(c)
+                c.close()
+        for attrs, problem in (("standby", "not in hot standby"), ("read-only", "not read-only")):
+            with self.subTest(attrs=attrs), self.assertRaisesRegex(pg.OperationalError, problem):
+                pg.connect(DSN, target_session_attrs=attrs)
+        c = pg.connect(DSN, target_session_attrs="read-only", options="-c default_transaction_read_only=on")
+        self.still_works(c)
+        c.close()
+
+
 if __name__ == "__main__":
     unittest.main()

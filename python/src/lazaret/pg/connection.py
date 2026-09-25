@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Iterator, NoReturn, Sequence
 
 from . import _types
-from ._dsn import ConnectParams, default_root_cert, lookup_pgpass, resolve
+from ._dsn import ConnectParams, default_root_cert, default_ssl_file, lookup_pgpass, resolve
 from ._scram import ScramClient, tls_server_end_point
 from .errors import (
     AuthenticationError,
@@ -134,11 +134,20 @@ def connect(dsn: str | None = None, /, *, timeout: float | None = None,
     """Open a connection.
 
     dsn: a postgresql:// URL or libpq "key=value" string (optional).
-    params: libpq-style keywords that override the DSN: host, port, user,
-        password, dbname (or database), sslmode, sslrootcert, sslcert, sslkey,
-        connect_timeout, application_name, channel_binding, require_auth,
-        options, passfile, keepalives, keepalives_idle, keepalives_interval,
-        keepalives_count. Unset values fall back to PG* environment variables.
+    params: libpq-style keywords that override the DSN: host, hostaddr, port,
+        user, password, dbname (or database), passfile, options,
+        application_name, fallback_application_name, connect_timeout,
+        sslmode, sslrootcert, sslcert, sslkey, sslpassword, sslcertmode,
+        sslcrl, sslcrldir, sslsni, ssl_min_protocol_version,
+        ssl_max_protocol_version, channel_binding, require_auth,
+        target_session_attrs, requirepeer, keepalives, keepalives_idle,
+        keepalives_interval, keepalives_count, tcp_user_timeout (plus
+        client_encoding=UTF8, gssencmode=disable/prefer, requiressl). Other
+        libpq parameters are accepted with a warning and have no effect,
+        except service and replication, which are refused. Unset values fall
+        back to PG* environment variables, and libpq's default files
+        (~/.pgpass, ~/.postgresql/root.crt, root.crl, postgresql.crt/.key;
+        %APPDATA%\\postgresql on Windows) are used when present.
     timeout: socket timeout in seconds for each network operation after
         connecting. If it expires mid-query, the connection is closed.
     allow_cleartext_password: permit the server's "password" method (the
@@ -159,6 +168,21 @@ def connect(dsn: str | None = None, /, *, timeout: float | None = None,
                       allow_md5_over_unverified_tls=allow_md5_over_unverified_tls)
     conn._connect()
     return conn
+
+
+def _check_peer(sock: socket.socket, wanted: str) -> None:
+    """libpq's requirepeer: the Unix-socket server must run as this OS user."""
+    if not hasattr(socket, "SO_PEERCRED"):
+        raise OperationalError("requirepeer is not supported on this platform")
+    import pwd  # POSIX only; SO_PEERCRED exists only there
+    creds = sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+    uid = struct.unpack("3i", creds)[1]
+    try:
+        name = pwd.getpwuid(uid).pw_name
+    except KeyError:
+        raise OperationalError(f"requirepeer: local user with ID {uid} does not exist") from None
+    if name != wanted:
+        raise OperationalError(f"requirepeer specifies \"{wanted}\", but actual peer user name is \"{name}\"")
 
 
 def _set_keepalive(sock: socket.socket, idle: int | None, interval: int | None, count: int | None) -> None:
@@ -638,6 +662,28 @@ class Connection:
         self._authenticate()
         self._drain_until_ready(startup=True)
         sock.settimeout(self._timeout)
+        if p.target_session_attrs not in ("any", "prefer-standby"):  # one host: prefer-standby = any
+            self._check_session_attrs(p.target_session_attrs)
+
+    def _check_session_attrs(self, wanted: str) -> None:
+        """libpq's target_session_attrs for a single host: refuse a server of
+        the wrong kind. PostgreSQL 14+ reports both settings at startup."""
+        read_only = self.parameters.get("default_transaction_read_only")
+        standby = self.parameters.get("in_hot_standby")
+        if standby is None or (wanted in ("read-write", "read-only") and read_only is None):
+            row = self.fetchrow("SELECT pg_catalog.pg_is_in_recovery(), "
+                                "pg_catalog.current_setting('transaction_read_only')")
+            standby = "on" if row[0] else "off"
+            read_only = row[1]
+        problem = {
+            "read-write": "session is read-only" if "on" in (read_only, standby) else None,
+            "read-only": "session is not read-only" if "on" not in (read_only, standby) else None,
+            "primary": "server is in hot standby mode" if standby == "on" else None,
+            "standby": "server is not in hot standby mode" if standby != "on" else None,
+        }[wanted]
+        if problem:
+            self.close()
+            raise OperationalError(f"target_session_attrs={wanted}: {problem}")
 
     def _socket_connect(self) -> socket.socket:
         p = self._params
@@ -647,14 +693,25 @@ class Connection:
                 sock.settimeout(p.connect_timeout)
                 sock.connect(p.unix_socket_path)
             else:
-                sock = socket.create_connection((p.host, p.port), timeout=p.connect_timeout)
+                sock = socket.create_connection((p.hostaddr or p.host, p.port), timeout=p.connect_timeout)
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                 if p.keepalives:
                     sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
                     _set_keepalive(sock, p.keepalives_idle, p.keepalives_interval, p.keepalives_count)
+                if p.tcp_user_timeout:
+                    if hasattr(socket, "TCP_USER_TIMEOUT"):
+                        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_USER_TIMEOUT, p.tcp_user_timeout)
+                    else:
+                        _log.debug("tcp_user_timeout is not supported on this platform")
         except (OSError, ValueError) as exc:  # ValueError: e.g. a host name IDNA can't encode
-            where = p.unix_socket_path if p.is_unix_socket else f"{p.host}:{p.port}"
+            where = p.unix_socket_path if p.is_unix_socket else f"{p.hostaddr or p.host}:{p.port}"
             raise OperationalError(f"could not connect to {where}: {exc}") from exc
+        if p.is_unix_socket and p.requirepeer:
+            try:
+                _check_peer(sock, p.requirepeer)
+            except BaseException:
+                sock.close()
+                raise
         return sock
 
     def _negotiate_ssl(self, sock: socket.socket) -> socket.socket:
@@ -674,8 +731,13 @@ class Connection:
                 raise
             except (OSError, ValueError) as exc:  # missing or unreadable cert/key/CA file
                 raise OperationalError(f"could not set up TLS: {exc}") from exc
+            # SNI and the name to verify. With sslsni=0 no SNI is sent, which
+            # Python can only do when the host name is not being verified.
+            name = p.host if (p.sslsni or context.check_hostname) else None
+            if not p.sslsni and context.check_hostname:
+                _log.warning("sslsni=0 is ignored with sslmode=verify-full: the host name is sent to be verified")
             try:
-                wrapped = context.wrap_socket(sock, server_hostname=p.host)
+                wrapped = context.wrap_socket(sock, server_hostname=name)
             except ssl.SSLCertVerificationError as exc:
                 raise OperationalError(f"server certificate verification failed: {exc.verify_message}") from exc
             except (ssl.SSLError, OSError) as exc:
@@ -692,7 +754,10 @@ class Connection:
     def _ssl_context(self) -> ssl.SSLContext:
         p = self._params
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        versions = {"TLSv1.2": ssl.TLSVersion.TLSv1_2, "TLSv1.3": ssl.TLSVersion.TLSv1_3}
+        ctx.minimum_version = versions[p.ssl_min_protocol_version]
+        if p.ssl_max_protocol_version:
+            ctx.maximum_version = versions.get(p.ssl_max_protocol_version, ssl.TLSVersion.TLSv1_2)
         mode = p.sslmode
         root = p.sslrootcert or default_root_cert()
         if mode == "require" and root != "system" and (p.sslrootcert or os.path.exists(root)):
@@ -716,11 +781,27 @@ class Connection:
                     ctx.load_verify_locations(cafile=root)
                 except (OSError, ValueError) as exc:
                     raise OperationalError(f"could not load root certificate {root}: {exc}") from exc
-        if p.sslcert:
-            try:
-                ctx.load_cert_chain(p.sslcert, p.sslkey)
-            except (OSError, ValueError) as exc:
-                raise OperationalError(f"could not load client certificate {p.sslcert}: {exc}") from exc
+            # Certificate revocation lists, as in libpq: sslcrl / sslcrldir, or ~/.postgresql/root.crl.
+            crl = p.sslcrl or (None if p.sslcrldir else default_ssl_file("root.crl"))
+            if crl or p.sslcrldir:
+                try:
+                    ctx.load_verify_locations(cafile=crl, capath=p.sslcrldir)
+                except (OSError, ValueError) as exc:
+                    raise OperationalError(f"could not load certificate revocation list: {exc}") from exc
+                ctx.verify_flags |= ssl.VERIFY_CRL_CHECK_CHAIN
+        if p.sslcertmode != "disable":
+            # A client certificate: sslcert/sslkey, or libpq's default
+            # ~/.postgresql/postgresql.crt and .key when the certificate exists.
+            cert = p.sslcert or default_ssl_file("postgresql.crt")
+            if cert:
+                key = p.sslkey or default_ssl_file("postgresql.key")
+                if key is None and not p.sslcert:  # an explicit sslcert may hold its key
+                    raise OperationalError(f"certificate present, but not private key file "
+                                           f"(expected next to {cert} as postgresql.key)")
+                try:
+                    ctx.load_cert_chain(cert, key, password=p.sslpassword)
+                except (OSError, ValueError) as exc:
+                    raise OperationalError(f"could not load client certificate {cert}: {exc}") from exc
         return ctx
 
     # --- authentication ----------------------------------------------------------

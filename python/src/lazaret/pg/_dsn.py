@@ -4,10 +4,12 @@ variables, and ~/.pgpass lookup, following libpq conventions."""
 from __future__ import annotations
 
 import getpass
+import ipaddress
 import logging
 import os
 import re
 import stat
+import warnings
 from dataclasses import dataclass, field
 from urllib.parse import unquote
 
@@ -19,19 +21,53 @@ SSLMODES = ("disable", "prefer", "require", "verify-ca", "verify-full")
 CHANNEL_BINDING = ("disable", "prefer", "require")
 AUTH_METHODS = ("password", "md5", "gss", "sspi", "scram-sha-256", "none")
 
+TARGET_SESSION_ATTRS = ("any", "read-write", "read-only", "primary", "standby", "prefer-standby")
+TLS_VERSIONS = ("TLSv1", "TLSv1.1", "TLSv1.2", "TLSv1.3")
+
+# libpq parameters that lazaret.pg implements.
 _KEYS = {
-    "host", "port", "user", "password", "dbname", "sslmode", "sslrootcert", "sslcert", "sslkey",
-    "connect_timeout", "application_name", "channel_binding", "require_auth", "options", "passfile",
-    "keepalives", "keepalives_idle", "keepalives_interval", "keepalives_count",
+    "host", "hostaddr", "port", "user", "password", "dbname", "passfile", "options",
+    "application_name", "fallback_application_name", "client_encoding", "connect_timeout",
+    "sslmode", "requiressl", "sslrootcert", "sslcert", "sslkey", "sslpassword", "sslcertmode",
+    "sslcrl", "sslcrldir", "sslsni", "ssl_min_protocol_version", "ssl_max_protocol_version",
+    "channel_binding", "require_auth", "gssencmode", "target_session_attrs", "requirepeer",
+    "keepalives", "keepalives_idle", "keepalives_interval", "keepalives_count", "tcp_user_timeout",
 }
+# libpq parameters that are accepted but have no effect here (GSSAPI, multiple
+# hosts, newer protocol features). A warning names them unless the value is
+# the no-op default.
+_IGNORED = {
+    "sslcompression": {"0"}, "load_balance_hosts": {"disable"}, "gssdelegation": {"0"},
+    "sslnegotiation": {"postgres"}, "min_protocol_version": {"3.0"}, "max_protocol_version": {"3.0"},
+    "krbsrvname": set(), "gsslib": set(), "sslkeylogfile": set(),
+    "scram_client_key": set(), "scram_server_key": set(),
+    "oauth_issuer": set(), "oauth_client_id": set(), "oauth_client_secret": set(), "oauth_scope": set(),
+}
+# libpq parameters that would change where or how we connect, so ignoring
+# them silently would be wrong: refused unless they are off.
+_REFUSED = {
+    "service": "service files (pg_service.conf) are not supported; give the connection parameters directly",
+    "replication": "replication connections are not supported",
+}
+_KNOWN = _KEYS | set(_IGNORED) | set(_REFUSED)
 _ALIASES = {"database": "dbname"}
 _ENV = {
-    "host": "PGHOST", "port": "PGPORT", "user": "PGUSER", "password": "PGPASSWORD",
-    "dbname": "PGDATABASE", "sslmode": "PGSSLMODE", "sslrootcert": "PGSSLROOTCERT",
-    "sslcert": "PGSSLCERT", "sslkey": "PGSSLKEY", "connect_timeout": "PGCONNECT_TIMEOUT",
+    "host": "PGHOST", "hostaddr": "PGHOSTADDR", "port": "PGPORT", "user": "PGUSER",
+    "password": "PGPASSWORD", "dbname": "PGDATABASE", "sslmode": "PGSSLMODE",
+    "requiressl": "PGREQUIRESSL", "sslrootcert": "PGSSLROOTCERT", "sslcert": "PGSSLCERT",
+    "sslkey": "PGSSLKEY", "sslcertmode": "PGSSLCERTMODE", "sslcrl": "PGSSLCRL",
+    "sslcrldir": "PGSSLCRLDIR", "sslsni": "PGSSLSNI",
+    "ssl_min_protocol_version": "PGSSLMINPROTOCOLVERSION",
+    "ssl_max_protocol_version": "PGSSLMAXPROTOCOLVERSION", "connect_timeout": "PGCONNECT_TIMEOUT",
     "application_name": "PGAPPNAME", "channel_binding": "PGCHANNELBINDING",
     "require_auth": "PGREQUIREAUTH", "options": "PGOPTIONS", "passfile": "PGPASSFILE",
+    "gssencmode": "PGGSSENCMODE", "target_session_attrs": "PGTARGETSESSIONATTRS",
+    "requirepeer": "PGREQUIREPEER",
 }
+# Unix-socket directories that libpq builds use by default (upstream: /tmp;
+# Debian/Ubuntu and Red Hat: /var/run/postgresql). For ~/.pgpass, only these
+# count as "localhost"; any other socket directory matches its own path.
+DEFAULT_SOCKET_DIRS = ("/tmp", "/var/run/postgresql", "/run/postgresql")
 
 
 @dataclass(frozen=True)
@@ -55,10 +91,21 @@ class ConnectParams:
     keepalives_idle: int | None = None      # seconds; None: the system default
     keepalives_interval: int | None = None  # seconds
     keepalives_count: int | None = None
+    tcp_user_timeout: int | None = None     # milliseconds (Linux)
+    hostaddr: str | None = None             # numeric address to connect to; host still names the server
+    sslpassword: str | None = field(default=None, repr=False)
+    sslcertmode: str = "allow"
+    sslcrl: str | None = None
+    sslcrldir: str | None = None
+    sslsni: bool = True
+    ssl_min_protocol_version: str = "TLSv1.2"
+    ssl_max_protocol_version: str | None = None
+    target_session_attrs: str = "any"
+    requirepeer: str | None = None
 
     @property
     def is_unix_socket(self) -> bool:
-        return self.host.startswith("/")
+        return not self.hostaddr and self.host.startswith("/")
 
     @property
     def unix_socket_path(self) -> str:
@@ -197,7 +244,7 @@ def _parse_keyvalue(s: str) -> dict[str, str]:
 
 
 def _check_keys(d: dict[str, str]) -> None:
-    unknown = set(d) - _KEYS
+    unknown = set(d) - _KNOWN
     if unknown:
         if "password" in d:
             # A misquoted password can turn into "keys": don't echo them.
@@ -251,10 +298,18 @@ def resolve(dsn: str | None = None, **kwargs: object) -> ConnectParams:
         merged.update(parse_dsn(dsn))
     for key, value in kwargs.items():
         key = _ALIASES.get(key, key)
-        if key not in _KEYS:
+        if key not in _KNOWN:
             raise InterfaceError(f"unknown connection parameter: {key}")
         if value is not None:
             merged[key] = value if isinstance(value, str) else str(value)
+    for key, default in _IGNORED.items():
+        value = merged.get(key)
+        if value and value not in default:
+            warnings.warn(f"lazaret.pg does not support the connection parameter {key!r}; ignoring it",
+                          stacklevel=3)
+    for key, message in _REFUSED.items():
+        if merged.get(key, "").lower() not in ("", "0", "false", "off", "no"):
+            raise InterfaceError(message)
 
     user = merged.get("user") or _default_user()
     try:
@@ -264,6 +319,11 @@ def resolve(dsn: str | None = None, **kwargs: object) -> ConnectParams:
     except ValueError:
         # The value is not shown: in a malformed URL it can be part of the password.
         raise InterfaceError("invalid port number in connection parameters") from None
+    if "sslmode" not in merged:
+        if merged.get("sslrootcert") == "system":
+            merged["sslmode"] = "verify-full"  # libpq 16: the default with the system CA store
+        elif merged.get("requiressl") == "1":
+            merged["sslmode"] = "require"      # deprecated libpq spelling
     sslmode = merged.get("sslmode", "prefer")
     if sslmode not in SSLMODES:
         raise InterfaceError(f"sslmode must be one of {', '.join(SSLMODES)}")
@@ -272,6 +332,31 @@ def resolve(dsn: str | None = None, **kwargs: object) -> ConnectParams:
         raise InterfaceError(f"channel_binding must be one of {', '.join(CHANNEL_BINDING)}")
     if merged.get("sslrootcert") == "system" and sslmode != "verify-full":
         raise InterfaceError("sslrootcert=system requires sslmode=verify-full")
+    _check_choice(merged, "sslcertmode", ("disable", "allow"),
+                  {"require": "sslcertmode=require is not supported"})
+    _check_choice(merged, "gssencmode", ("disable", "prefer"),
+                  {"require": "gssencmode=require: GSSAPI encryption is not supported"})
+    _check_choice(merged, "target_session_attrs", TARGET_SESSION_ATTRS)
+    _check_choice(merged, "ssl_min_protocol_version", TLS_VERSIONS)
+    _check_choice(merged, "ssl_max_protocol_version", TLS_VERSIONS)
+    _check_choice(merged, "sslsni", ("0", "1"))
+    encoding = merged.get("client_encoding", "UTF8")
+    if encoding.upper().replace("-", "").replace("_", "") not in ("UTF8", "UNICODE", "AUTO"):
+        raise InterfaceError("lazaret.pg only supports client_encoding UTF8")
+    min_tls = merged.get("ssl_min_protocol_version") or "TLSv1.2"
+    if TLS_VERSIONS.index(min_tls) < TLS_VERSIONS.index("TLSv1.2"):
+        warnings.warn("lazaret.pg requires TLS 1.2 or newer; ignoring ssl_min_protocol_version="
+                      f"{min_tls}", stacklevel=2)
+        min_tls = "TLSv1.2"
+    max_tls = merged.get("ssl_max_protocol_version") or None
+    if max_tls and TLS_VERSIONS.index(max_tls) < TLS_VERSIONS.index(min_tls):
+        raise InterfaceError("ssl_max_protocol_version is lower than ssl_min_protocol_version")
+    hostaddr = merged.get("hostaddr") or None
+    if hostaddr:
+        try:
+            ipaddress.ip_address(hostaddr)
+        except ValueError:
+            raise InterfaceError("hostaddr must be a numeric IPv4 or IPv6 address") from None
     timeout = merged.get("connect_timeout")
     try:
         connect_timeout = float(timeout) if timeout else 30.0
@@ -280,8 +365,13 @@ def resolve(dsn: str | None = None, **kwargs: object) -> ConnectParams:
     if connect_timeout <= 0:
         connect_timeout = None
 
+    if "application_name" in merged:
+        application_name = merged["application_name"]
+    else:
+        application_name = merged.get("fallback_application_name") or "lazaret"
+
     return ConnectParams(
-        host=merged.get("host") or "localhost",
+        host=merged.get("host") or hostaddr or "localhost",
         port=port,
         user=user,
         database=merged.get("dbname") or user,
@@ -291,7 +381,7 @@ def resolve(dsn: str | None = None, **kwargs: object) -> ConnectParams:
         sslcert=merged.get("sslcert"),
         sslkey=merged.get("sslkey"),
         connect_timeout=connect_timeout,
-        application_name=merged.get("application_name", "lazaret"),
+        application_name=application_name,
         channel_binding=channel_binding,
         require_auth=_parse_require_auth(merged["require_auth"]) if merged.get("require_auth") else None,
         options=merged.get("options"),
@@ -300,7 +390,28 @@ def resolve(dsn: str | None = None, **kwargs: object) -> ConnectParams:
         keepalives_idle=_nonnegative_int(merged, "keepalives_idle"),
         keepalives_interval=_nonnegative_int(merged, "keepalives_interval"),
         keepalives_count=_nonnegative_int(merged, "keepalives_count"),
+        tcp_user_timeout=_nonnegative_int(merged, "tcp_user_timeout"),
+        hostaddr=hostaddr,
+        sslpassword=merged.get("sslpassword") or None,
+        sslcertmode=merged.get("sslcertmode") or "allow",
+        sslcrl=merged.get("sslcrl") or None,
+        sslcrldir=merged.get("sslcrldir") or None,
+        sslsni=merged.get("sslsni", "1") != "0",
+        ssl_min_protocol_version=min_tls,
+        ssl_max_protocol_version=max_tls,
+        target_session_attrs=merged.get("target_session_attrs") or "any",
+        requirepeer=merged.get("requirepeer") or None,
     )
+
+
+def _check_choice(merged: dict[str, str], key: str, allowed: tuple[str, ...],
+                  refused: dict[str, str] | None = None) -> None:
+    value = merged.get(key)
+    if not value or value in allowed:
+        return
+    if refused and value in refused:
+        raise InterfaceError(refused[value])
+    raise InterfaceError(f"{key} must be one of {', '.join(allowed + tuple(refused or ()))}")
 
 
 def default_passfile() -> str:
@@ -318,6 +429,12 @@ def default_ssl_dir() -> str:
 
 def default_root_cert() -> str:
     return os.path.join(default_ssl_dir(), "root.crt")
+
+
+def default_ssl_file(name: str) -> str | None:
+    """libpq's default root.crl / postgresql.crt / postgresql.key, if it exists."""
+    path = os.path.join(default_ssl_dir(), name)
+    return path if os.path.exists(path) else None
 
 
 def _split_pgpass_line(line: str) -> list[str]:
@@ -351,7 +468,9 @@ def lookup_pgpass(params: ConnectParams) -> str | None:
     if os.name == "posix" and st.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
         _log.warning("password file %s has group or world access; ignoring it (chmod 0600 to fix)", path)
         return None
-    host = "localhost" if params.is_unix_socket else params.host
+    host = params.host
+    if params.is_unix_socket and (host.rstrip("/") or "/") in DEFAULT_SOCKET_DIRS:
+        host = "localhost"  # libpq: only the default socket directory counts as localhost
     wanted = (host, str(params.port), params.database, params.user)
     try:
         with open(path, encoding="utf-8", errors="surrogateescape") as f:
