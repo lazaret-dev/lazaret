@@ -7,13 +7,26 @@ happens to be lying around in a working directory:
   top level     README.md, SECURITY.md, STRUCTURE.md, LICENSE
   trees         .github/, scripts/, examples/, docs/, python/, js/
 
-Inside those trees, prior-run ARTIFACTS rather than source are SKIPPED with a
-notice: reports, SARIF, state DBs, bytecode, AppleDouble files, node_modules,
-build outputs (build/, dist/, *.egg-info), virtualenvs. Anything on the NEVER
-list at the top level is a hard error: stale state that must not ship.
+In a git checkout only files git tracks are bundled (`git ls-files`), so a
+stray untracked file inside a whitelisted tree (scripts/..t.sh, a local
+notes file) stays out; untracked files are listed with a notice. Without git
+(an unpacked bundle, a zip download) the trees are walked instead.
 
-Secrets files (.env, .env.local, ...) are never bundled, anywhere. A
-.env.example template is fine.
+Either way, prior-run ARTIFACTS rather than source are SKIPPED with a notice:
+reports, SARIF, state DBs, bytecode, AppleDouble ._* files, .DS_Store,
+node_modules, .git, build outputs (build/, dist/, *.egg-info), virtualenvs.
+Anything on the NEVER list at the top level is a hard error: stale state that
+must not ship.
+
+Credential files are never bundled, anywhere, tracked or not: .env and its
+variants (a .env.example template is fine), .envrc, .npmrc, .pypirc, .netrc,
+.git-credentials, private keys and certificates (*.pem, *.key, *.p12, *.pfx,
+id_rsa*, id_dsa*, id_ecdsa*, id_ed25519*). .gitignore lists the same names.
+
+The output is deterministic: members sorted, uid/gid 0 with empty names,
+mode 0644 (0755 for executables), every mtime and the gzip header set to
+SOURCE_DATE_EPOCH or 0, and no file name in the gzip header. Two runs over
+the same files give byte-identical archives.
 
 This is the *source* bundle for sharing the repository. What users install is
 the wheel built from python/ (see python/_build/), which contains only the
@@ -27,7 +40,12 @@ Card 27e1dfda: every file whose basename still says 'codeguard' is treated as
 stale pre-rename junk and refused (is_old_name_junk).
 """
 import argparse
+import fnmatch
+import gzip
+import io
 import os
+import stat
+import subprocess
 import sys
 import tarfile
 
@@ -55,6 +73,11 @@ BUILD_ROOTS = {"", "python", "js"}
 NEVER_FILE = {"base.json", "lazaret-registry.db",
               "lazaret-report.json", "lazaret-report.html", "bundle.py"}
 
+# Credential files by name (case-insensitive glob on the basename).
+CREDENTIAL_NAMES = [".envrc", ".npmrc", ".pypirc", ".netrc", "_netrc", ".git-credentials",
+                    "*.pem", "*.key", "*.p12", "*.pfx",
+                    "id_rsa*", "id_dsa*", "id_ecdsa*", "id_ed25519*"]
+
 
 def is_old_name_junk(rel):
     """Card 27e1dfda (rename codeguard -> lazaret): a surviving file whose
@@ -68,8 +91,14 @@ def is_secrets_file(rel):
     return (name == ".env" or name.startswith(".env.")) and not name.endswith(".example")
 
 
+def is_credential_file(rel):
+    """Any file whose name says it holds credentials or a private key."""
+    name = os.path.basename(rel.replace("\\", "/")).lower()
+    return is_secrets_file(rel) or any(fnmatch.fnmatchcase(name, pat) for pat in CREDENTIAL_NAMES)
+
+
 def is_junk(rel):
-    """True if rel is a prior-run artifact, machine cruft, or a secrets file."""
+    """True if rel is a prior-run artifact, machine cruft, or a credential file."""
     parts = rel.replace("\\", "/").split("/")
     if any(p in SKIP_DIRS for p in parts[:-1]):
         return True
@@ -86,7 +115,7 @@ def is_junk(rel):
         return True
     if rel.endswith((("-report.json", "-report.html", ".sarif"))):
         return True
-    if is_secrets_file(rel):
+    if is_credential_file(rel):
         return True
     # NEVER_FILE is TOP-LEVEL only: fixtures/detection_gaps/{dist,skips}/
     # bundle.py and .DS_Store are legitimate G10 fixtures that share a name
@@ -96,9 +125,60 @@ def is_junk(rel):
     return is_old_name_junk(rel)
 
 
-def collect(strict=False, repo=REPO):
-    """Whitelist walk -> sorted list of repo-relative paths to pack."""
-    out, skipped = [], []
+def _in_whitelist(rel):
+    return rel in TOP_FILES or any(rel.startswith(tree + "/") for tree in TREES)
+
+
+def _walk(repo):
+    """{rel: mode} for every regular file under the whitelist (no git)."""
+    found = {}
+    for rel in TOP_FILES:
+        path = os.path.join(repo, rel)
+        if os.path.isfile(path) and not os.path.islink(path):
+            found[rel] = None
+    for tree in TREES:
+        base = os.path.join(repo, tree)
+        if not os.path.isdir(base):
+            continue
+        for root, dirs, files in os.walk(base):
+            dirs[:] = sorted(d for d in dirs if not os.path.islink(os.path.join(root, d)))
+            for name in sorted(files):
+                full = os.path.join(root, name)
+                rel = os.path.relpath(full, repo).replace(os.sep, "/")
+                found[rel] = "symlink" if os.path.islink(full) else None
+    return found
+
+
+def _git_tracked(repo):
+    """{rel: git mode} of the tracked files under the whitelist, or None when
+    repo is not a git checkout (or git isn't available)."""
+    if not os.path.exists(os.path.join(repo, ".git")):
+        return None
+    try:
+        p = subprocess.run(["git", "-C", repo, "ls-files", "-s", "-z"], capture_output=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if p.returncode != 0:
+        return None
+    tracked = {}
+    for entry in p.stdout.split(b"\0"):
+        if not entry:
+            continue
+        meta, path = entry.split(b"\t", 1)
+        rel = os.fsdecode(path)
+        if _in_whitelist(rel):
+            tracked[rel] = meta.split()[0].decode("ascii")      # 100644, 100755, 120000, 160000
+    return tracked
+
+
+def collect(strict=False, repo=REPO, use_git=True):
+    """Whitelist -> sorted list of repo-relative paths to pack."""
+    return [rel for rel, _ in _collect(strict, repo, use_git)]
+
+
+def _collect(strict, repo, use_git):
+    """Sorted [(rel, executable)] to pack."""
+    skipped = []
     for rel in REQUIRED:
         if not os.path.isfile(os.path.join(repo, rel)):
             print(f"error: required file missing: {rel}", file=sys.stderr)
@@ -107,51 +187,86 @@ def collect(strict=False, repo=REPO):
         if name in NEVER_FILE or is_secrets_file(name):
             print(f"error: refusing to bundle a repository containing {name}", file=sys.stderr)
             sys.exit(1)
-    for rel in TOP_FILES:
-        if os.path.isfile(os.path.join(repo, rel)):
-            out.append(rel)
-    for tree in TREES:
-        base = os.path.join(repo, tree)
-        if not os.path.isdir(base):
+    on_disk = _walk(repo)
+    tracked = _git_tracked(repo) if use_git else None
+    if tracked is None:
+        candidates = on_disk
+    else:
+        candidates = {}
+        for rel, mode in tracked.items():
+            if mode == "160000":                       # submodule: not a file
+                continue
+            if not os.path.lexists(os.path.join(repo, rel)):
+                print(f"notice: tracked but missing, not bundled: {rel}", file=sys.stderr)
+                continue
+            candidates[rel] = "symlink" if mode == "120000" else mode
+        for rel in sorted(set(on_disk) - set(tracked)):
+            if not is_junk(rel):
+                print(f"notice: not tracked by git, not bundled: {rel}", file=sys.stderr)
+    out = []
+    for rel in sorted(candidates):
+        full = os.path.join(repo, rel)
+        if candidates[rel] == "symlink" or os.path.islink(full):
+            skipped.append(f"symlink: {rel}")
             continue
-        for root, dirs, files in os.walk(base):
-            dirs[:] = sorted(dirs)
-            for name in sorted(files):
-                rel = os.path.relpath(os.path.join(root, name), repo).replace(os.sep, "/")
-                if is_junk(rel):
-                    skipped.append(rel)
-                    continue
-                out.append(rel)
-    out = sorted(set(out))
-    for rel in skipped:
-        msg = f"skipping prior-run artifact: {rel}"
+        if is_junk(rel):
+            skipped.append(f"prior-run artifact or credential file: {rel}")
+            continue
+        mode = candidates[rel]
+        if mode in ("100644", "100755"):
+            executable = mode == "100755"
+        else:
+            executable = bool(os.stat(full).st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH))
+        out.append((rel, executable))
+    for msg in skipped:
         if strict:
-            print(f"error (strict): {msg}", file=sys.stderr)
+            print(f"error (strict): skipping {msg}", file=sys.stderr)
             sys.exit(1)
-        print(msg, file=sys.stderr)
+        print(f"skipping {msg}", file=sys.stderr)
     return out
 
 
-def _clean(ti):
-    """Sanitize tar member metadata: no uid/gid/uname/gname from the build
-    machine, normalized mtime: deterministic builds."""
-    ti.uid = ti.gid = 0
-    ti.uname = ti.gname = ""
-    ti.mtime = 0
-    return ti
+def _epoch():
+    try:
+        return max(0, int(os.environ.get("SOURCE_DATE_EPOCH", "0")))
+    except ValueError:
+        return 0
 
 
-def main():
+def write_bundle(output, members, repo=REPO):
+    """Deterministic .tgz of members [(rel, executable)] under lazaret/."""
+    mtime = _epoch()
+    raw = io.BytesIO()
+    # filename="" keeps the output's name out of the gzip header
+    with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=mtime) as gz:
+        with tarfile.open(fileobj=gz, mode="w", format=tarfile.USTAR_FORMAT) as tf:
+            for rel, executable in members:
+                with open(os.path.join(repo, rel), "rb") as f:
+                    data = f.read()
+                info = tarfile.TarInfo(f"lazaret/{rel}")
+                info.type = tarfile.REGTYPE
+                info.size = len(data)
+                info.mode = 0o755 if executable else 0o644
+                info.mtime = mtime
+                info.uid = info.gid = 0
+                info.uname = info.gname = ""
+                tf.addfile(info, io.BytesIO(data))
+    with open(output, "wb") as f:
+        f.write(raw.getvalue())
+
+
+def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("output", nargs="?", default=os.path.join(os.path.dirname(REPO), "lazaret.tgz"))
     ap.add_argument("--strict", action="store_true",
                     help="any skipped junk fails the build (for tests)")
-    args = ap.parse_args()
-    rels = collect(strict=args.strict)
-    with tarfile.open(args.output, "w:gz", format=tarfile.USTAR_FORMAT) as tf:
-        for rel in rels:
-            tf.add(os.path.join(REPO, rel), arcname=f"lazaret/{rel}", filter=_clean)
-    print(f"bundle: {args.output} — {len(rels)} files, "
+    ap.add_argument("--repo", default=REPO, help=argparse.SUPPRESS)      # tests
+    ap.add_argument("--no-git", action="store_true",
+                    help="walk the trees instead of asking git which files are tracked")
+    args = ap.parse_args(argv)
+    members = _collect(args.strict, os.path.abspath(args.repo), not args.no_git)
+    write_bundle(args.output, members, os.path.abspath(args.repo))
+    print(f"bundle: {args.output} — {len(members)} files, "
           f"{os.path.getsize(args.output)/1024:.0f} KiB")
 
 
