@@ -199,8 +199,9 @@ DECODERS: dict[int, Callable[[str], Any]] = {
 
 
 def decoder_for(oid: int, decoders: dict[int, Callable[[str], Any]]) -> Callable[[bytes], Any]:
-    """Return a function bytes -> value. Anything that fails to convert comes
-    back as the server's text, so an odd server setting never crashes a query."""
+    """Return a function bytes -> value that never raises. Anything that fails
+    to convert comes back as the server's text (undecodable bytes replaced by
+    U+FFFD), so an odd value or server setting never crashes a query."""
     fn = decoders.get(oid)
     if fn is None and oid in ARRAY_ELEMENT:
         elem = decoders.get(ARRAY_ELEMENT[oid], str)
@@ -209,17 +210,20 @@ def decoder_for(oid: int, decoders: dict[int, Callable[[str], Any]]) -> Callable
         return _decode_text
 
     def decode(raw: bytes, fn=fn) -> Any:
-        text = raw.decode("utf-8")
         try:
-            return fn(text)
-        except (ValueError, IndexError, ArithmeticError):
-            return text
+            return fn(raw.decode("utf-8"))
+        except Exception:
+            # Whatever goes wrong (JSON nested deeper than the recursion limit,
+            # a registered decoder that raises, bytes that are not UTF-8 after
+            # a client_encoding change), the value comes back as text: an
+            # exception here would abort the connection in the middle of a result.
+            return _decode_text(raw)
 
     return decode
 
 
 def _decode_text(raw: bytes) -> str:
-    return raw.decode("utf-8")
+    return raw.decode("utf-8", "replace")
 
 
 # --- encoding (Python -> server) -------------------------------------------------

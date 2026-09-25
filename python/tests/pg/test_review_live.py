@@ -46,5 +46,26 @@ class IntervalStyleTests(LiveCase):
         self.assertEqual(self.conn.fetchval("SELECT $1::interval", values[0]), values[0])
 
 
+@_support.requires_env("LAZARET_TEST_PG_DSN")
+class DecoderFailureTests(LiveCase):
+    def test_deep_jsonb_comes_back_as_text(self):
+        deep = "[" * 3000 + "]" * 3000   # PostgreSQL accepts it; json.loads hits the recursion limit
+        self.assertEqual(self.conn.fetchval("SELECT $1::jsonb", deep), deep)
+        self.assertEqual([r[0] for r in self.conn.iterate("SELECT $1::jsonb FROM generate_series(1, 3)", deep)],
+                         [deep] * 3)
+        self.still_works()
+
+    def test_registered_decoder_that_raises(self):
+        self.conn.register_decoder(25, lambda s: {"a": 1}[s])   # KeyError for anything but "a"
+        self.assertEqual(self.conn.fetch("SELECT 'zzz'::text UNION ALL SELECT 'a'"), [("zzz",), (1,)])
+        self.still_works()
+
+    def test_non_utf8_client_encoding(self):
+        with self.assertLogs("lazaret.pg", "WARNING"):
+            self.conn.execute("SET client_encoding = 'LATIN1'")
+        self.assertEqual(self.conn.fetchval("SELECT 'caf' || chr(233)"), "caf\ufffd")
+        self.still_works()
+
+
 if __name__ == "__main__":
     unittest.main()

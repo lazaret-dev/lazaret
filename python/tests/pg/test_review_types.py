@@ -21,5 +21,34 @@ class IntervalEncodingTests(unittest.TestCase):
                 self.assertEqual(t.encode_param(value), (t.INTERVAL, 0, payload))
 
 
+class DecoderFallbackTests(unittest.TestCase):
+    """Any decoder failure returns the text value instead of raising, because
+    an exception while reading a DataRow aborts the connection."""
+
+    def test_json_deeper_than_the_recursion_limit(self):
+        deep = b"[" * 100_000 + b"]" * 100_000
+        for oid in (t.JSON, t.JSONB):
+            with self.subTest(oid=oid):
+                self.assertEqual(t.decoder_for(oid, t.DECODERS)(deep), deep.decode())
+
+    def test_registered_decoder_that_raises_anything(self):
+        for exc in (KeyError("zzz"), TypeError("x"), RuntimeError("y"), AttributeError("z")):
+            def broken(text, exc=exc):
+                raise exc
+            with self.subTest(exc=type(exc).__name__):
+                self.assertEqual(t.decoder_for(25, {25: broken})(b"zzz"), "zzz")
+
+    def test_non_utf8_bytes(self):
+        self.assertEqual(t.decoder_for(t.INT4, t.DECODERS)(b"4\xff2"), "4\ufffd2")
+        self.assertEqual(t.decoder_for(t.TEXT, t.DECODERS)(b"caf\xe9"), "caf\ufffd")
+        self.assertEqual(t.decoder_for(1009, t.DECODERS)(b"{a,\xe9}"), "{a,\ufffd}")
+
+    def test_keyboard_interrupt_is_not_swallowed(self):
+        def interrupted(text):
+            raise KeyboardInterrupt
+        with self.assertRaises(KeyboardInterrupt):
+            t.decoder_for(25, {25: interrupted})(b"x")
+
+
 if __name__ == "__main__":
     unittest.main()
