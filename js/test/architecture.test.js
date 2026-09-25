@@ -74,6 +74,7 @@ test("architecture: zero dependencies, shipped files only, Apache-2.0", () => {
   const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   assert.equal(pkg.dependencies, undefined);
   assert.equal(pkg.devDependencies, undefined);
-  assert.deepEqual(pkg.files, ["bin/", "src/", "README.md", "LICENSE"]);
+  assert.deepEqual(pkg.files, ["bin/", "src/", "README.md", "LICENSE",
+    "!**/.*", "!**/*.pem", "!**/*.key", "!**/id_rsa*", "!**/id_ed25519*"]);   // never pack dotfiles (.env*, ._*, .DS_Store) or keys
   assert.equal(pkg.license, "Apache-2.0");
 });
