@@ -39,7 +39,11 @@ NAME = "lazaret"
 METADATA = {
     "Summary": "Static security, supply-chain and quality analysis for Python, JavaScript and SQL",
     "Requires-Python": ">=3.10",
-    "License": "Apache-2.0",
+    # PEP 639 (Metadata-Version 2.4): an SPDX expression plus the license
+    # file's path (in the sdist root; in the wheel under .dist-info/licenses/).
+    # No "License ::" classifier: PyPI rejects it next to License-Expression.
+    "License-Expression": "Apache-2.0",
+    "License-File": "LICENSE",
     "Keywords": "security,supply-chain,sast,taint-analysis,sca,pypi,npm",
     "Project-URL": [
         "Homepage, https://lazaret.dev",
@@ -50,10 +54,14 @@ METADATA = {
         "Development Status :: 4 - Beta",
         "Environment :: Console",
         "Intended Audience :: Developers",
-        "License :: OSI Approved :: Apache Software License",
         "Operating System :: OS Independent",
         "Programming Language :: Python :: 3",
         "Programming Language :: Python :: 3 :: Only",
+        "Programming Language :: Python :: 3.10",
+        "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
+        "Programming Language :: Python :: 3.13",
+        "Programming Language :: Python :: 3.14",
         "Topic :: Security",
         "Topic :: Software Development :: Quality Assurance",
     ],
@@ -104,7 +112,7 @@ def _package_files() -> list[pathlib.Path]:
 
 
 def metadata_text() -> str:
-    lines = ["Metadata-Version: 2.1", f"Name: {NAME}", f"Version: {version()}"]
+    lines = ["Metadata-Version: 2.4", f"Name: {NAME}", f"Version: {version()}"]
     for key, value in METADATA.items():
         for item in (value if isinstance(value, list) else [value]):
             lines.append(f"{key}: {item}")

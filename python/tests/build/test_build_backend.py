@@ -71,7 +71,7 @@ class BuildTests(unittest.TestCase):
         meta = read_member(self.wheel, f"lazaret-{self.version}.dist-info/METADATA").decode()
         self.assertIn(f"Version: {self.version}\n", meta)
         self.assertIn("Requires-Python: >=3.10\n", meta)
-        self.assertIn("License: Apache-2.0\n", meta)
+        self.assertIn("License-Expression: Apache-2.0\n", meta)   # PEP 639; was "License:"
         self.assertNotIn("Requires-Dist", meta)
 
     def test_record_hashes_match(self):
