@@ -401,7 +401,7 @@ class HasScanEngineVersionTests(unittest.TestCase):
         self.assertFalse(
             store.has_scan(pid, "1.0.0", "supply-chain", engine_version="2.1.0"))
         # engine version bump makes the old clean verdict stale:
-        self.assertEqual(cr.ENGINE_VERSION, "2.3.0")
+        self.assertEqual(cr.ENGINE_VERSION, "2.4.0")
 
     def test_save_scan_does_not_collide_across_engines(self):
         store = cr.Store(":memory:")
@@ -453,7 +453,7 @@ class SCRuleObjectTests(unittest.TestCase):
         self.assertTrue(lazaret.SECRET_SKIP_RE.search("dummy"))
 
     def test_engine_version_bumped(self):
-        self.assertEqual(cr.ENGINE_VERSION, "2.3.0")
+        self.assertEqual(cr.ENGINE_VERSION, "2.4.0")
 
 
 if __name__ == "__main__":
