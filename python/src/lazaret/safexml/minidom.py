@@ -3,7 +3,9 @@
     from lazaret.safexml import minidom
     doc = minidom.parseString(untrusted_bytes)
 
-Returns ordinary xml.dom.minidom Document objects.
+Returns ordinary xml.dom.minidom Document objects. The signatures match the
+stdlib's (parse(file, parser=None, bufsize=None), parseString(string,
+parser=None)), plus keyword options.
 """
 
 from __future__ import annotations
@@ -12,9 +14,8 @@ import os
 from typing import Any
 from xml.dom import expatbuilder as _expatbuilder  # lazaret-ignore: S-XML (this module is the hardening layer)
 
+from . import pulldom as _pulldom
 from ._common import (
-    DEFAULT_MAX_ATTLIST_DEFAULTS,
-    DEFAULT_MAX_DEPTH,
     LimitedReader,
     Options,
     depth_exceeded,
@@ -76,25 +77,42 @@ def _builder(namespaces: bool, safe: dict[str, Any]):
     return cls(safe=Options(**safe))
 
 
-def parse(file: Any, *, namespaces: bool = True, forbid_dtd: bool = False, forbid_entities: bool = True,
-          forbid_external: bool = True, max_depth: int | None = DEFAULT_MAX_DEPTH,
-          max_bytes: int | None = None, max_attlist_defaults: int | None = DEFAULT_MAX_ATTLIST_DEFAULTS):
-    """Parse a file path or binary file object into a minidom Document."""
-    builder = _builder(namespaces, dict(forbid_dtd=forbid_dtd, forbid_entities=forbid_entities,
-                                        forbid_external=forbid_external, max_depth=max_depth, max_bytes=max_bytes,
-                                        max_attlist_defaults=max_attlist_defaults))
-    if isinstance(file, (str, bytes, os.PathLike)):
-        with open(file, "rb") as fp:
-            return builder.parseFile(fp)
-    return builder.parseFile(file)
+def _pulldom_document(events: Any):
+    # What xml.dom.minidom does when it is given a parser or a bufsize.
+    toktype, root = events.getEvent()
+    events.expandNode(root)
+    events.clear()
+    return root
 
 
-def parseString(string: bytes | str, *, namespaces: bool = True, forbid_dtd: bool = False,
-                forbid_entities: bool = True, forbid_external: bool = True,
-                max_depth: int | None = DEFAULT_MAX_DEPTH, max_bytes: int | None = None,
-                max_attlist_defaults: int | None = DEFAULT_MAX_ATTLIST_DEFAULTS):
-    """Parse a string or bytes into a minidom Document."""
-    builder = _builder(namespaces, dict(forbid_dtd=forbid_dtd, forbid_entities=forbid_entities,
-                                        forbid_external=forbid_external, max_depth=max_depth, max_bytes=max_bytes,
-                                        max_attlist_defaults=max_attlist_defaults))
-    return builder.parseString(string)
+def _check_namespaces(namespaces: bool) -> None:
+    if not namespaces:
+        raise TypeError("namespaces=False needs the default builder; with a parser or bufsize, "
+                        "minidom builds through pulldom, which always processes namespaces")
+
+
+def parse(file: Any, parser: Any = None, bufsize: int | None = None, *, namespaces: bool = True,
+          **options: Any):
+    """Parse a file path or binary file object into a minidom Document.
+
+    Options: forbid_dtd, forbid_entities, forbid_external, max_depth,
+    max_bytes, max_attlist_defaults. As with xml.dom.minidom, a parser or a
+    bufsize makes it build through pulldom; the parser must then come from
+    lazaret.safexml.sax.make_parser(), and the options go there."""
+    if parser is None and not bufsize:
+        builder = _builder(namespaces, options)
+        if isinstance(file, (str, bytes, os.PathLike)):
+            with open(file, "rb") as fp:
+                return builder.parseFile(fp)
+        return builder.parseFile(file)
+    _check_namespaces(namespaces)
+    return _pulldom_document(_pulldom.parse(file, parser, bufsize, **options))
+
+
+def parseString(string: bytes | str, parser: Any = None, *, namespaces: bool = True, **options: Any):
+    """Parse a string or bytes into a minidom Document. Options and the
+    parser argument work as for parse()."""
+    if parser is None:
+        return _builder(namespaces, options).parseString(string)
+    _check_namespaces(namespaces)
+    return _pulldom_document(_pulldom.parseString(string, parser, **options))

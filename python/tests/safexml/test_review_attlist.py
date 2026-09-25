@@ -80,12 +80,13 @@ class AttlistBudgetTests(unittest.TestCase):
     def test_amplification_within_budget_refused(self):
         """60 KB of default is within the declaration budget, but copied onto
         thousands of elements it would be ~100 MB: refused once past 100x the
-        input. minidom never receives defaulted attributes, so it parses."""
+        input. minidom's own builder never receives defaulted attributes, so
+        it parses (minidom with a SAX parser builds through pulldom, which does)."""
         doc = attlist_doc(60_000, 2_000)
         rpc = xmlrpc_attlist_doc(60_000, 2_000)
         for name, api in all_apis().items():
             with self.subTest(api=name):
-                if name.startswith("minidom"):
+                if name in ("minidom.parseString", "minidom.parse"):
                     document = api(doc)
                     self.assertEqual(document.getElementsByTagName("a")[0].getAttribute("x0"), "")
                     continue
@@ -107,10 +108,23 @@ class AttlistBudgetTests(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 sx.Options(max_attlist_defaults=bad)
 
+    @staticmethod
+    def ordinary(repeat):
+        return (b'<!DOCTYPE r [<!ATTLIST a kind CDATA "plain" fixed CDATA #FIXED "f" mode (u|v) "u"'
+                b' note CDATA #IMPLIED><!ATTLIST r xmlns:p CDATA #FIXED "urn:p">]><r>'
+                + b'<a/><a kind="given"/><p:a p:x="1"/>' * repeat + b"</r>")
+
+    def test_many_ordinary_defaults_are_not_refused(self):
+        """Past the 8 MiB threshold (the check is running), but far below
+        100 times the input."""
+        doc = self.ordinary(20_000)
+        self.assertEqual(ET.tostring(ET.fromstring(doc)), StdET.tostring(StdET.fromstring(doc)))
+        handler = Recorder()
+        sax.parseString(doc, handler)
+        self.assertEqual(len(handler.events), 60_001)
+
     def test_ordinary_defaults_match_stdlib(self):
-        doc = (b'<!DOCTYPE r [<!ATTLIST a kind CDATA "plain" fixed CDATA #FIXED "f" mode (u|v) "u"'
-               b' note CDATA #IMPLIED><!ATTLIST r xmlns:p CDATA #FIXED "urn:p">]><r>'
-               + b'<a/><a kind="given"/><p:a p:x="1"/>' * 20_000 + b"</r>")
+        doc = self.ordinary(200)
         self.assertEqual(ET.tostring(ET.fromstring(doc)), StdET.tostring(StdET.fromstring(doc)))
         for namespaces in (False, True):
             with self.subTest(namespaces=namespaces):

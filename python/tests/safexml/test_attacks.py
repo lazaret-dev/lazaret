@@ -115,7 +115,7 @@ class NothingIsFetchedTests(unittest.TestCase):
         self.assertEqual(self.canary.hits, [])
 
     def test_every_api_is_covered(self):
-        self.assertEqual(len(APIS), 10)
+        self.assertEqual(len(APIS), 16)
 
 
 if __name__ == "__main__":

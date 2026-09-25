@@ -4,11 +4,15 @@ HTTP server that records any request a parser makes."""
 import http.server
 import io
 import threading
+import xml.etree.ElementTree as StdET
 import xml.sax.handler
+import xmlrpc.client as rpc_client
 from xml.sax.handler import ContentHandler
 
 from lazaret.safexml import ElementTree as ET
-from lazaret.safexml import minidom, pulldom, sax
+from lazaret.safexml import minidom, pulldom, sax, xmlrpc
+
+ALL_EVENTS = ("start", "end", "start-ns", "end-ns", "comment", "pi")
 
 
 def _feed_in_chunks(data, **o):
@@ -30,6 +34,31 @@ def _pulldom_all(data, **o):
         pass
 
 
+def _pull_parser(data, **o):
+    parser = ET.XMLPullParser(ALL_EVENTS, **o)
+    events = []
+    for i in range(0, len(data), 7):
+        parser.feed(data[i:i + 7])
+        events.extend(parser.read_events())
+    parser.close()
+    events.extend(parser.read_events())
+    return events
+
+
+def _element_tree(data, **o):
+    if not o:
+        return ET.ElementTree(file=io.BytesIO(data))  # the default parser
+    return ET.ElementTree().parse(io.BytesIO(data), ET.XMLParser(**o))
+
+
+def _xmlrpc_parser(data, **o):
+    o.setdefault("forbid_dtd", False)  # XML-RPC refuses any DOCTYPE by default (test_review_attlist)
+    parser = xmlrpc.SafeXMLRPCParser(rpc_client.Unmarshaller(), **o)
+    for i in range(0, len(data), 7):
+        parser.feed(data[i:i + 7])
+    parser.close()
+
+
 # Every way to parse a document with lazaret.safexml. Each parses fully.
 APIS = {
     "ET.fromstring": lambda data, **o: ET.fromstring(data, **o),
@@ -42,6 +71,13 @@ APIS = {
     "sax.parse": lambda data, **o: sax.parse(io.BytesIO(data), ContentHandler(), **o),
     "sax.ns": _sax_ns,
     "pulldom.parse": _pulldom_all,
+    "ET.XMLPullParser": _pull_parser,
+    "ET.ElementTree": _element_tree,
+    "ET.XMLID": lambda data, **o: ET.XMLID(data, **o),
+    "ET.canonicalize": lambda data, **o: ET.canonicalize(data, **o),
+    "stdlib iterparse, safe parser": lambda data, **o: list(
+        StdET.iterparse(io.BytesIO(data), ALL_EVENTS, parser=ET.XMLParser(**o))),
+    "xmlrpc parser": _xmlrpc_parser,
 }
 
 
