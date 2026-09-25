@@ -380,9 +380,16 @@ R("S-SPAWN-SHELL", "child_process with shell:true", "VULN", "CRITICAL", ("js",),
   "Use execFile/spawn with an args array and shell:false.",
   "CWE-78"),
 # ---- Supply-chain / obfuscation indicators ----
+# Review fix (shared semantics 13): execSync and vm.runIn*Context are sinks
+# too, the decoder may be member-prefixed (`globalThis.atob`, `window.atob`,
+# `base64.b64decode`), and bytes.fromhex / unhexlify are decoders. scan_file
+# also matches this rule over a statement split across lines (`eval(\n
+# atob(…))`, `exec(  # comment\n b64decode(…))`); dependency mode adds a
+# decode-to-variable-to-sink flow (see _dep_decode_flow).
 R("SC-EVAL-DECODE", "Decoded payload execution", "VULN", "BLOCKER", ("py", "js"),
-  r"\b(?:eval|exec|Function)\s*\(\s*(?:atob|unescape|decodeURIComponent|Buffer\.from|"
-  r"base64\.b64decode|b64decode|codecs\.decode|zlib\.decompress|marshal\.loads)\s*\(",
+  r"\b(?:eval|exec|execSync|Function|runIn(?:This|New)?Context)\s*\(\s*(?:[\w$]+\s*\.\s*)*"
+  r"(?:atob|unescape|decodeURIComponent|Buffer\s*\.\s*from|b64decode|codecs\s*\.\s*decode|"
+  r"zlib\s*\.\s*decompress|marshal\s*\.\s*loads|fromhex|unhexlify)\s*\(",
   "Code decoded (base64/escape) and immediately executed.",
   "Decode-then-execute is the signature pattern of malware droppers and supply-chain implants.",
   "Treat as hostile until proven otherwise; inspect the decoded payload.",
@@ -2377,6 +2384,121 @@ def scan_file(path, content, lang, dep=False):
 # Rules that also run on comment lines.
 _COMMENT_LINE_RULES = frozenset(("Q-TODO", "S-TOKEN", "S-BIDI"))
 
+# ---------------- Decode -> execute across lines (review fix, shared semantics 13) ----------------
+# SC-EVAL-DECODE is matched per line, so `eval(\n  atob(…))` and
+# `exec(  # nosec\n  base64.b64decode(…))` (the second also dodging the
+# "SC-* is unsuppressible" rule by never producing a finding) were missed.
+# When a line names a sink and leaves parentheses open (or ends with the
+# sink's name), it is joined — comment text removed — with up to
+# SC_JOIN_MAX_LINES following lines until the parentheses balance, and the
+# rule is matched on the joined statement. A match must begin on the first
+# line; the finding is reported there.
+SC_JOIN_MAX_LINES = 8
+SC_JOIN_MAX_CHARS = 4000        # of following-line text added to one join
+_SC_SINK_NAMES = ("eval", "exec", "execSync", "Function",
+                  "runInContext", "runInThisContext", "runInNewContext")
+_SC_SINK_WORD_RE = re.compile(r"\b(?:eval|exec|execSync|Function|runIn(?:This|New)?Context)\b")
+
+
+def _paren_balance(code):
+    t = STRING_LIT_RE.sub("", code)
+    return t.count("(") - t.count(")")
+
+
+def _joined_eval_decode(ctx, i, rule_re):
+    """Column (on line i) of an SC-EVAL-DECODE match over the statement that
+    starts on line i and continues on the next lines, or None."""
+    code = ctx.mcode(i)
+    if not _SC_SINK_WORD_RE.search(code):
+        return None
+    depth = _paren_balance(code)
+    if depth <= 0 and not code.rstrip().endswith(_SC_SINK_NAMES):
+        return None
+    parts, added = [code], 0
+    for k in range(i + 1, min(len(ctx.lines), i + 1 + SC_JOIN_MAX_LINES)):
+        if ctx.cmask[k]:
+            continue
+        nxt = ctx.mcode(k)
+        parts.append(nxt)
+        added += len(nxt)
+        depth += _paren_balance(nxt)
+        if (depth <= 0 and nxt.strip()) or added > SC_JOIN_MAX_CHARS:
+            break
+    m = rule_re.search(" ".join(parts))
+    return m.start() if m and m.start() < len(code) else None
+
+
+# Dependency mode also follows a decoded value through variables: a name
+# assigned from a decode call (atob, Buffer.from(…, 'base64'), b64decode,
+# bytes.fromhex, codecs.decode, unhexlify, zlib.decompress — member prefixes
+# allowed), or from an expression naming such a variable, that later appears
+# in the arguments of eval / exec / execSync / execFile(Sync) / spawn(Sync) /
+# Function / new Function / vm.runIn*Context is SC-EVAL-DECODE at the sink.
+# Statements on one line are processed left to right (`const d = atob(p);
+# eval(d)`). Names are never un-tainted (over-approximation is the safe
+# direction for third-party code). Project mode covers this with T-CODE/T-CMD.
+_DECODE_CALL_RE = re.compile(
+    r"(?:\batob|\bb64decode|\.\s*fromhex|\bunhexlify|\bcodecs\s*\.\s*decode"
+    r"|\bzlib\s*\.\s*decompress)\s*\("
+    r"|\bBuffer\s*\.\s*from\s*\([^;\n]{0,300}?['\"`]base64['\"`]")
+_DECODE_SINK_RE = re.compile(
+    r"\b(?:eval|exec|execSync|execFile|execFileSync|spawn|spawnSync|Function"
+    r"|runIn(?:This|New)?Context)\s*\(")
+_DEP_ASSIGN_RE = re.compile(r"(?<![\w$])([A-Za-z_$][\w$]*)\s*=(?![=>])([^;]*)")
+DEP_SINK_ARGS_MAX = 1000        # chars of a sink's arguments searched for decoded names
+
+
+def _blank_strings(code):
+    """`code` with the contents of its string literals replaced by spaces
+    (same length, quotes kept) so identifiers inside strings do not count."""
+    return STRING_LIT_RE.sub(lambda m: m.group()[0] + " " * (len(m.group()) - 2) + m.group()[-1],
+                             code)
+
+
+def _dep_decode_flow(path, ctx, issues):
+    rule = next(r for r in RULES if r["id"] == "SC-EVAL-DECODE")
+    ident_re = _IDENT_RUN_RE.get(ctx.lang, _IDENT_RUN_RE["js"])
+    have = {i["line"] for i in issues if i["rule"] == "SC-EVAL-DECODE"}
+    decoded = {}                      # name -> line its decoded value came from
+    for i in range(len(ctx.lines)):
+        if ctx.cmask[i]:
+            continue
+        code = ctx.mcode(i)
+        if not code or code.isspace():
+            continue
+        if not i & 63:
+            ctx.check_time()
+        has_decode = _DECODE_CALL_RE.search(code) is not None
+        if not decoded and not has_decode:
+            continue
+        blank = _blank_strings(code)
+        events = [(m.start(), 0, m) for m in _DEP_ASSIGN_RE.finditer(blank)]
+        events += [(m.start(), 1, m) for m in _DECODE_SINK_RE.finditer(blank)]
+        events.sort(key=lambda e: (e[0], e[1]))
+        close = None
+        for _pos, kind, m in events:
+            if kind == 0:
+                a, b = m.span(2)
+                if _DECODE_CALL_RE.search(code, a, b):
+                    decoded.setdefault(m.group(1), i + 1)
+                    continue
+                src = [decoded[v] for v in set(ident_re.findall(blank, a, b)) if v in decoded]
+                if src:
+                    decoded.setdefault(m.group(1), min(src))
+                continue
+            if i + 1 in have:
+                continue
+            if close is None:
+                close = _paren_close_map(blank)
+            end = min(close.get(m.end() - 1, len(blank)), m.end() + DEP_SINK_ARGS_MAX)
+            src = [decoded[v] for v in set(ident_re.findall(blank, m.end(), end)) if v in decoded]
+            if src:
+                have.add(i + 1)
+                issues.append(mk_issue(
+                    dict(rule, msg=f"Decoded payload (assigned at line {min(src)}) "
+                                   f"reaches a code-execution sink."),
+                    path, i + 1, ctx.lines, m.start()))
+
 
 def _scan_file(path, content, lines, lang, dep, ctx, issues):
     cmask, mlines = ctx.cmask, ctx.mlines
@@ -2402,7 +2524,10 @@ def _scan_file(path, content, lines, lang, dep, ctx, issues):
             # equality checks shouldn't match inside string literals
             target = STRING_LIT_RE.sub("\"\"", mline) if r["id"] == "B-EQEQ" else mline
             m = r["re"].search(target)
-            if not m:
+            col = m.start() if m else None
+            if col is None and r["id"] == "SC-EVAL-DECODE" and not cmask[i]:
+                col = _joined_eval_decode(ctx, i, r["re"])
+            if col is None:
                 continue
             if r["need"] and not r["need"].search(mline):
                 continue
@@ -2412,7 +2537,7 @@ def _scan_file(path, content, lines, lang, dep, ctx, issues):
                 continue
             if r["id"] in ("S-TOKEN", "S-SECRET"):
                 secret_lines.add(i)
-            issues.append(mk_issue(r, path, i + 1, lines, m.start()))
+            issues.append(mk_issue(r, path, i + 1, lines, col))
         if not dep and len(line) > LONG_LINE:
             issues.append(mk_issue(
                 {"id": "Q-LONGLINE", "name": "Line too long", "type": "SMELL", "sev": "MINOR",
@@ -2480,6 +2605,7 @@ def _scan_file(path, content, lines, lang, dep, ctx, issues):
                  "ref": "CWE-506 · Supply chain"}, path, first_line, lines,
                 first_off - content.rfind("\n", 0, first_off) - 1))
     if dep:
+        _dep_decode_flow(path, ctx, issues)
         return
     mcontent = content if mlines is lines else "\n".join(mlines)
     starts = None

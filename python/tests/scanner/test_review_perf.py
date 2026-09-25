@@ -66,6 +66,18 @@ class QuadraticHotSpotTests(unittest.TestCase):
                 self.assertNotIn("SC-TRUNCATED", {i["rule"] for i in issues})
 
 
+class DependencyModeFlowPerfTests(unittest.TestCase):
+    """The dep-mode decode->sink flow added with this fix stays linear."""
+
+    def test_long_lines_of_sinks(self):
+        for content in ("const d = atob(x);\n" + "eval(e" * 50000,
+                        "const d = atob(x);\n" + "eval(" * 30000 + "d" + ")" * 30000,
+                        "a=atob(x);" * 40000):
+            t = time.monotonic()
+            core.scan_file("dep.js", content, "js", dep=True)
+            self.assertLess(time.monotonic() - t, PER_CASE_LIMIT)
+
+
 class BackstopTests(unittest.TestCase):
     def setUp(self):
         self._budget = core.SCAN_TIME_BUDGET
