@@ -187,5 +187,34 @@ class ExecutemanyNoticeFloodTests(LiveCase):
         self.assertEqual(c.fetchval("SELECT count(*) FROM lz_rv_flood"), 300)
 
 
+@_support.requires_env("LAZARET_TEST_PG_DSN")
+class OpenIteratorTests(LiveCase):
+    tables = ("lz_rv_iter",)
+
+    def test_close_during_iterate(self):
+        c = pg.connect(DSN)
+        it = c.iterate("SELECT generate_series(1, 10)", batch_size=2)
+        self.assertEqual(next(it)[0], 1)
+        c.close()
+        with self.assertRaisesRegex(pg.InterfaceError, "closed"):
+            list(it)
+
+    def test_exception_in_transaction_rolls_back_with_iterator_open(self):
+        c = self.conn
+        c.execute("DROP TABLE IF EXISTS lz_rv_iter")
+        c.execute("CREATE TABLE lz_rv_iter (v int)")
+        with self.assertRaises(ValueError):
+            with c.transaction():
+                c.execute("INSERT INTO lz_rv_iter VALUES (1)")
+                rows = c.iterate("SELECT generate_series(1, 10)", batch_size=2)
+                for _ in rows:
+                    raise ValueError("app bug")
+        self.assertFalse(c.closed)
+        self.assertEqual(c.fetchval("SELECT count(*) FROM lz_rv_iter"), 0)
+        with self.assertRaisesRegex(pg.InterfaceError, "ended early"):
+            list(rows)
+        self.still_works()
+
+
 if __name__ == "__main__":
     unittest.main()

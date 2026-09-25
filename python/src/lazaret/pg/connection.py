@@ -167,7 +167,7 @@ class Connection:
         self._rbuf = bytearray()  # bytes received from the server but not yet parsed
         self._closed = True
         self._synced = True
-        self._streaming = False
+        self._stream: object | None = None  # the iterate() that owns the connection, if any
         self._tx_status = b"I"
         self._tx_depth = 0
         self._backend_key: tuple[int, bytes] | None = None
@@ -343,65 +343,100 @@ class Connection:
     def iterate(self, sql: str, *args: Any, batch_size: int = 1000) -> Iterator[Any]:
         """Stream rows in batches instead of loading them all into memory.
         No other query can run on this connection until the iterator is
-        exhausted or closed (use it in a for loop, or call .close())."""
+        exhausted or closed (use it in a for loop, or call .close()). Leaving
+        a transaction() block, or closing the connection, ends a stream that is
+        still open; resuming that iterator then raises InterfaceError."""
         if batch_size < 1:
             raise InterfaceError("batch_size must be at least 1")
         oids, formats, values = self._encode_args(args)
         execute = _msg(b"E", b"\x00" + _I32.pack(batch_size))
+        request = (self._parse_msg(_cstr(sql), oids) + self._bind_msg(formats, values)
+                   + _msg(b"D", b"P\x00") + execute + _FLUSH)
+        stream = object()  # identifies this iterate() while it owns the connection
         with self._io():
-            self._streaming = True
             self._synced = False
-            try:
-                self._send(self._parse_msg(_cstr(sql), oids) + self._bind_msg(formats, values)
-                           + _msg(b"D", b"P\x00") + execute + _FLUSH)
-                decode = None
-                while True:
-                    batch, finished = [], False
-                    while True:
-                        kind, body = self._read_message()
-                        if kind == b"D":
-                            batch.append(decode(body))
-                        elif kind == b"T":
-                            _, decode = self._row_decoder(body)
-                        elif kind in (b"C", b"I"):
-                            finished = True
-                            break
-                        elif kind == b"s":  # PortalSuspended: batch complete
-                            break
-                        elif kind == b"E":
-                            error = error_from_fields(_parse_fields(body))
-                            self._send(_SYNC)
-                            self._drain_until_ready()
-                            raise error
-                        elif kind in (b"1", b"2", b"n"):
-                            # NoData: nothing to stream, but keep reading. The server has
-                            # already started executing, and may be entering COPY mode.
-                            pass
-                        elif kind in (b"G", b"H", b"W"):
-                            message = self._handle_copy(kind, extended=True)
-                            if kind == b"H":
-                                self._send(_SYNC)
-                            self._drain_until_ready()
-                            raise InterfaceError(message)
-                        elif not self._handle_async(kind, body):
-                            self._unexpected(kind)
-                    yield from batch
-                    if finished:
-                        break
-                    self._send(execute + _FLUSH)
+            self._stream = stream
+            self._send(request)
+        # The lock is only held while talking to the server, not while the
+        # consumer handles a batch: close() and transaction() can end the stream.
+        try:
+            decode, finished = None, False
+            while not finished:
+                with self._io(stream):
+                    batch, finished, decode = self._read_batch(decode)
+                yield from batch
+                if not finished:
+                    with self._io(stream):
+                        self._send(execute + _FLUSH)
+            with self._io(stream):
+                self._stream = None
                 self._send(_SYNC)  # commits an implicit transaction, which can still fail
                 error = self._drain_until_ready()
+            if error is not None:
+                raise error
+        except GeneratorExit:
+            # The consumer stopped early: end the portal. Sync also commits an
+            # implicit transaction (e.g. an INSERT ... RETURNING), which can fail.
+            if self._stream is stream:
+                error = self._end_stream()
                 if error is not None:
-                    raise error
-            finally:
-                if not self._synced and not self._closed:
-                    # Consumer stopped early or an error occurred: end the portal.
-                    try:
-                        self._send(_SYNC)
-                        self._drain_until_ready()
-                    except Error:
-                        pass
-                self._streaming = False
+                    raise error from None
+            raise
+        finally:
+            if self._stream is stream:
+                try:
+                    self._end_stream()
+                except Error:
+                    pass  # an exception is already propagating
+
+    def _read_batch(self, decode):
+        """Read one batch of an iterate(): (rows, finished, decode)."""
+        batch = []
+        while True:
+            kind, body = self._read_message()
+            if kind == b"D":
+                if decode is None:
+                    raise _malformed("data row before row description")
+                batch.append(decode(body))
+            elif kind == b"T":
+                _, decode = self._row_decoder(body)
+            elif kind in (b"C", b"I"):
+                return batch, True, decode
+            elif kind == b"s":  # PortalSuspended: batch complete
+                return batch, False, decode
+            elif kind == b"E":
+                error = error_from_fields(_parse_fields(body))
+                self._stream = None
+                self._send(_SYNC)
+                self._drain_until_ready()
+                raise error
+            elif kind in (b"1", b"2", b"n"):
+                # NoData: nothing to stream, but keep reading. The server has
+                # already started executing, and may be entering COPY mode.
+                pass
+            elif kind in (b"G", b"H", b"W"):
+                message = self._handle_copy(kind, extended=True)
+                self._stream = None
+                if kind == b"H":
+                    self._send(_SYNC)
+                self._drain_until_ready()
+                raise InterfaceError(message)
+            elif not self._handle_async(kind, body):
+                self._unexpected(kind)
+
+    def _end_stream(self) -> DatabaseError | None:
+        """End an iterate() whose rows were not all read: Sync closes its
+        portal (and commits an implicit transaction). Returns the error the
+        server reported at that point, if any."""
+        stream = self._stream
+        if stream is None or self._closed:
+            return None
+        with self._io(stream):
+            self._stream = None
+            if self._synced:
+                return None
+            self._send(_SYNC)
+            return self._drain_until_ready()
 
     # --- transactions ------------------------------------------------------------
 
@@ -433,6 +468,10 @@ class Connection:
         self._tx_depth += 1
         try:
             yield self
+            # An iterate() still open inside the block ends with it.
+            error = self._end_stream()
+            if error is not None:
+                raise error
         except BaseException:
             self._tx_depth -= 1
             self._rollback(savepoint)
@@ -449,6 +488,7 @@ class Connection:
         if self._closed:
             return
         try:
+            self._end_stream()  # an iterate() left open would block the ROLLBACK
             if savepoint:
                 self.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
                 self.execute(f"RELEASE SAVEPOINT {savepoint}")
@@ -489,11 +529,16 @@ class Connection:
         """Close the connection. Safe to call more than once."""
         if self._closed:
             return
-        try:
-            if self._synced and not self._streaming:
+        # Say goodbye unless another thread is in the middle of a query. A
+        # suspended iterate() is fine: the server is waiting for a message, and
+        # Terminate rolls back its uncommitted work.
+        if self._lock.acquire(blocking=False):
+            try:
                 self._sock.sendall(_TERMINATE)
-        except OSError:
-            pass
+            except OSError:
+                pass
+            finally:
+                self._lock.release()
         self._abort()
 
     # --- connection setup -------------------------------------------------------------
@@ -715,12 +760,16 @@ class Connection:
     # --- protocol plumbing -------------------------------------------------------------
 
     @contextmanager
-    def _io(self) -> Iterator[None]:
+    def _io(self, stream: object | None = None) -> Iterator[None]:
+        """Guard one exchange with the server. stream: the iterate() doing it."""
         if self._closed:
             raise InterfaceError("connection is closed")
-        if self._streaming:
-            raise InterfaceError("an iterate() is still in progress on this connection; "
-                                 "finish or close it first")
+        if self._stream is not stream:
+            if stream is None:
+                raise InterfaceError("an iterate() is still in progress on this connection; "
+                                     "finish or close it first")
+            raise InterfaceError("this iterate() was ended early, by leaving its transaction() block "
+                                 "or by an error")
         if not self._lock.acquire(blocking=False):
             raise InterfaceError("connection is already in use by another thread")
         try:
@@ -1028,6 +1077,7 @@ class Connection:
     def _abort(self) -> None:
         self._closed = True
         self._synced = True
+        self._stream = None
         self._backend_key = None
         if self._sock is not None:
             try:
