@@ -15,6 +15,12 @@ Usage: python3 scripts/make_typosquat_stubs.py [name ...]
 Output: build/typosquats/<name>/python/<name>-0.0.1-py3-none-any.whl
         build/typosquats/<name>/js/{package.json,index.js,README.md}
 Then see docs/RELEASING.md for publishing, yanking, and deprecating them.
+
+       python3 scripts/make_typosquat_stubs.py --check [name ...]
+Asks pypi.org and registry.npmjs.org who holds each name and exits 1 if any
+is unclaimed or held by someone else (a stub of ours says "Reserved
+misspelling of lazaret"). Offline, it warns and exits 0: the check is
+advisory there, the registries are the source of truth.
 """
 import base64
 import hashlib
@@ -22,6 +28,9 @@ import json
 import os
 import re
 import sys
+import urllib.error
+import urllib.parse
+import urllib.request
 import zipfile
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -84,8 +93,69 @@ def build_js_stub(name, out_dir):
     return out_dir
 
 
+STUB_MARKER = "Reserved misspelling of lazaret"
+REGISTRIES = {
+    "PyPI": ("https://pypi.org/pypi/{}/json", lambda d: (d.get("info") or {}).get("summary") or ""),
+    "npm": ("https://registry.npmjs.org/{}", lambda d: d.get("description") or ""),
+}
+
+
+def _fetch_json(url, timeout=10):
+    """(status, parsed JSON or None). Raises OSError when the registry can't be reached."""
+    req = urllib.request.Request(url, headers={"Accept": "application/json",
+                                               "User-Agent": "lazaret-typosquat-check"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:      # fixed https URLs only
+            return resp.status, json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        return exc.code, None
+
+
+def check_names(names, fetch=_fetch_json, out=sys.stdout):
+    """Report who holds each name on each registry. Returns the exit code:
+    1 if any name is unclaimed or not ours, 0 otherwise (and when offline)."""
+    problems, unreachable = [], []
+    for name in names:
+        if not re.fullmatch(r"[a-z][a-z0-9]*", name):
+            raise ValueError(f"unsupported stub name: {name!r}")
+        for registry, (url, describe) in REGISTRIES.items():
+            try:
+                status, data = fetch(url.format(urllib.parse.quote(name)))
+            except (OSError, ValueError) as exc:        # offline, DNS, TLS, bad JSON
+                unreachable.append(f"{registry} ({exc.__class__.__name__}: {exc})")
+                print(f"  ?  {name:<10} {registry:<5} could not check", file=out)
+                continue
+            if status == 404:
+                problems.append(f"{name} is UNCLAIMED on {registry}")
+                print(f"  !  {name:<10} {registry:<5} UNCLAIMED: anyone can publish it", file=out)
+            elif status == 200 and data is not None:
+                summary = describe(data)
+                if STUB_MARKER in summary:
+                    print(f"  ok {name:<10} {registry:<5} reserved by our stub", file=out)
+                else:
+                    problems.append(f"{name} on {registry} is held by someone else: {summary!r}")
+                    print(f"  !! {name:<10} {registry:<5} HELD BY SOMEONE ELSE: {summary!r}", file=out)
+            else:
+                unreachable.append(f"{registry} (HTTP {status})")
+                print(f"  ?  {name:<10} {registry:<5} HTTP {status}", file=out)
+    if unreachable:
+        print("warning: could not reach every registry, so this check is incomplete: "
+              + "; ".join(sorted(set(unreachable))), file=out)
+    if problems:
+        print("\nNot reserved yet. Publish the stubs now (docs/RELEASING.md, step 7):", file=out)
+        for p in problems:
+            print(f"  - {p}", file=out)
+        return 1
+    if not unreachable:
+        print("All misspellings are reserved.", file=out)
+    return 0
+
+
 def main(argv=None):
-    names = (sys.argv[1:] if argv is None else argv) or DEFAULT_NAMES
+    args = sys.argv[1:] if argv is None else list(argv)
+    if args[:1] == ["--check"]:
+        return check_names(args[1:] or DEFAULT_NAMES)
+    names = args or DEFAULT_NAMES
     for name in names:
         base = os.path.join(REPO, "build", "typosquats", name)
         print(build_python_stub(name, os.path.join(base, "python")))
