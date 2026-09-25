@@ -38,7 +38,7 @@ Do these in order. Everything here is one-time.
 5. **Switch both registries to trusted publishing (OIDC from GitHub Actions).**
    - GitHub repo → Settings → Environments → create `pypi` and `npm`. For each, add yourself as a required reviewer and restrict deployments to `v*` tags.
    - PyPI: project `lazaret` → Settings → Publishing → add GitHub publisher: owner `lazaret-dev`, repository `lazaret`, workflow `release.yml`, environment `pypi`.
-   - npm: package `lazaret` → Settings → Trusted publishing → GitHub Actions: organization `lazaret-dev`, repository `lazaret`, workflow `release.yml`, environment `npm`. Then set the package to require 2FA and disallow tokens for publishing.
+   - npm: package `lazaret` → Settings → Trusted publishing → GitHub Actions: organization `lazaret-dev`, repository `lazaret`, workflow `release.yml`, environment `npm`. Leave **Allow npm publish unchecked**: the publisher is then stage-only, and CI can only stage a release, which goes live after you approve it with 2FA. Then set the package to require 2FA and disallow tokens for publishing.
    - Delete any API tokens you created for the first manual releases.
 
 6. **Domain (lazaret.dev).**
@@ -83,9 +83,11 @@ git push origin main v0.0.2
 
 The tag triggers `.github/workflows/release.yml`: it reruns the full test suite, builds the Python wheel and sdist with Lazaret's own stdlib backend (stamped with the tagged commit's time, so rebuilding a tag is byte-identical), and then waits for your approval on the `pypi` and `npm` environments before publishing each one.
 
+PyPI goes live as soon as its job finishes. npm is only *staged*: approve it with 2FA at https://www.npmjs.com/package/lazaret (the **Staged Packages** tab) or with `npm stage approve <stage-id>`. The run's summary page carries a reminder.
+
 ## Notes
 
 - All actions in the workflows are pinned to full commit SHAs, with the version in a comment. Dependabot opens weekly PRs to bump them.
-- The release workflow follows the documented trusted-publishing setups for PyPI and npm but hasn't run for real yet. Expect to adjust it on the first tagged release, which is why which is why the first npm release (step 4) is manual.
+- PyPI trusted publishing has run for real (v0.0.1). The npm job's staged publish runs for the first time on the next release; the first npm release (step 4) was manual because npm only allows a trusted publisher on a package that already exists.
 - npm provenance requires the GitHub repo to be public.
 - `LICENSE` files currently carry the standard Apache-2.0 notice. Paste the full license text from https://www.apache.org/licenses/LICENSE-2.0.txt into `LICENSE`, `python/LICENSE`, and `js/LICENSE` before the first release.

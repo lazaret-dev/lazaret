@@ -67,6 +67,14 @@ jobs:
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
-      - run: npm install -g npm@11   # trusted publishing needs npm >= 11.5.1
+      - run: npm install -g npm@11   # trusted publishing needs npm >= 11.5.1; staged publishing >= 11.15.0
       - working-directory: js
-        run: npm publish
+        # Stage only. The npm trusted publisher allows `npm stage publish` and
+        # nothing else, so this version stays hidden until a maintainer
+        # approves it with 2FA: npmjs.com -> lazaret -> Staged Packages, or
+        # `npm stage approve <stage-id>`.
+        run: npm stage publish
+      - name: Approval reminder
+        run: >-
+          echo "lazaret ${GITHUB_REF_NAME} is staged on npm, not yet public. Approve it with 2FA at
+          https://www.npmjs.com/package/lazaret (Staged Packages) or with npm stage approve." >> "$GITHUB_STEP_SUMMARY"

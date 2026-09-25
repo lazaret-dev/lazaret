@@ -243,7 +243,7 @@ Nothing from `lazaret-samples` ever enters any artifact. `.env` files are refuse
 - **python-integration**: the live-Postgres tests against a throwaway `postgres:17` service container.
 - **js**: `npm test` on Linux, macOS, and Windows × Node 22 and 24.
 
-Nothing is installed in any job. `.github/workflows/release.yml` reruns CI on a `v*` tag, builds with the stdlib backend, and publishes each package after approval on its `pypi` or `npm` environment.
+Nothing is installed in any job. `.github/workflows/release.yml` reruns CI on a `v*` tag, builds with the stdlib backend, and publishes each package after approval on its `pypi` or `npm` environment. npm releases are staged: they go public only after a second approval, with 2FA, on npm itself.
 
 The auth-matrix and samples-corpus tests don't run in CI yet: the first needs a Postgres container with a custom `pg_hba.conf` and TLS certificate, the second a deploy key for the private samples repository.
 
