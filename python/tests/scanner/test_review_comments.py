@@ -38,7 +38,7 @@ class CommentEvasionTests(unittest.TestCase):
         self.assert_flagged("const x = 1\n  * " + PAYLOAD + "\n", 2, dep=True)
 
     def test_unicode_line_separator_ends_js_line_comment(self):
-        for sep in (" ", " "):
+        for sep in ("\u2028", "\u2029"):
             with self.subTest(sep=hex(ord(sep))):
                 self.assert_flagged("// note" + sep + PAYLOAD + "\n", 2)
                 self.assert_flagged("// note" + sep + PAYLOAD + "\n", 2, dep=True)
@@ -115,8 +115,8 @@ class CommentMaskTests(unittest.TestCase):
         self.assertFalse(core.is_comment("", "py"))
 
     def test_source_lines_splits_js_line_terminators_only(self):
-        self.assertEqual(core.source_lines("a b c\r\nd", "js"), ["a", "b", "c", "d"])
-        self.assertEqual(core.source_lines("a b", "py"), ["a b"])
+        self.assertEqual(core.source_lines("a\u2028b\u2029c\r\nd", "js"), ["a", "b", "c", "d"])
+        self.assertEqual(core.source_lines("a\u2028b", "py"), ["a\u2028b"])
 
     def test_metrics_count_jsdoc_as_comments(self):
         files = [{"path": "a.js", "lang": "js", "dep": False,

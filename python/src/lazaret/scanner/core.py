@@ -1543,8 +1543,8 @@ def source_lines(content, lang):
     normalized to LF, and for JavaScript U+2028/U+2029 (ECMAScript line
     terminators) also end a line."""
     content = normalize_newlines(content)
-    if lang == "js" and (" " in content or " " in content):
-        content = content.replace(" ", "\n").replace(" ", "\n")
+    if lang == "js" and ("\u2028" in content or "\u2029" in content):
+        content = content.replace("\u2028", "\n").replace("\u2029", "\n")
     return content.split("\n")
 
 
@@ -1560,7 +1560,6 @@ def source_lines(content, lang):
 #        Python's \s does not match — becomes a space (`eval\ufeff(`).
 # Line numbers never change; snippets still show the original text.
 _JS_UESC_RE = re.compile(r"\\u\{([0-9A-Fa-f]{1,6})\}|\\u([0-9A-Fa-f]{4})")
-_BIDI_CHARS_RE = re.compile("[\u202a-\u202e\u2066-\u2069]")
 
 
 def _js_ident_char(m):
