@@ -147,7 +147,7 @@ Re-point a tag only if **nothing was published from it**. PyPI and npm versions 
    - If a GitHub Release named v0.1.0 was created, deleting the tag turns it into a draft: delete it on the Releases page.
    - GitHub served "Source code (zip / tar.gz)" archives for v0.1.0 generated from `8b63318` (0.0.1 code). They disappear with the tag, and the new tag's archives are generated from the new commit, so anything downloaded before now is not what 0.1.0 is. Don't publish checksums of those archives.
    - The failed release run for the old tag can stay in the Actions history; don't re-run it.
-5. Get the fixed commit onto `main` and tag it:
+5. Get the fixed commit onto `main` and tag it (set up a signing key first if you haven't: see *Signing key*; the release workflow now rejects unsigned tags):
    ```sh
    git switch main && git pull              # main now has the fixes and "Bump version to 0.1.0"
    sh scripts/check-versions.sh HEAD v0.1.0 # expect: python: 0.1.0  npm: 0.1.0 ... tag: v0.1.0 matches
