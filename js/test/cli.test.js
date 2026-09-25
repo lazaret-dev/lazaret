@@ -167,7 +167,8 @@ test("--include-deps scans node_modules content (dep rules only)", () => {
     // supply-chain indicators (SC-*) ARE flagged in dep mode → gate fails → --ci exits 1
     assert.equal(withDeps.code, 1);
     const rep = JSON.parse(readFileSync(join(d, "lazaret-report.json"), "utf8"));
-    const inDeps = rep.issues.filter((i) => i.file === "node_modules/evil-pkg.js");
+    // report paths use the platform's separator (node_modules\\evil-pkg.js on Windows)
+    const inDeps = rep.issues.filter((i) => i.file.replaceAll("\\", "/") === "node_modules/evil-pkg.js");
     assert.ok(inDeps.some((i) => i.rule === "SC-B64"));
     assert.ok(!inDeps.some((i) => i.rule === "S-EVAL-JS"));   // quality rule filtered
     assert.equal(rep.metrics.files, 1);                        // app.py only

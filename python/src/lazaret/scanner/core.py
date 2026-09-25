@@ -2403,7 +2403,10 @@ def fingerprint(issue):
     idx = issue["line"] - issue["snipStart"]
     snippet = issue.get("snippet") or []
     line_text = snippet[idx].strip() if 0 <= idx < len(snippet) else ""
-    return f"{issue['rule']}|{issue['file']}|{line_text}"
+    # Forward slashes, so a baseline written on macOS/Linux still matches a
+    # Windows run (whose report paths use backslashes), and vice versa.
+    path = str(issue["file"]).replace("\\", "/")
+    return f"{issue['rule']}|{path}|{line_text}"
 # NOTE: redaction (audit L1) happens at mk_issue time, BEFORE this
 # fingerprint is computed — the placeholder text is deterministic for a
 # given (rule, secret length), so same-engine baselines still match; a

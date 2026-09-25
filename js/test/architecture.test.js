@@ -8,7 +8,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const PKG_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const SRC = join(PKG_ROOT, "src");
@@ -50,14 +50,14 @@ test("architecture: scanner may import lib (allowed direction), all modules reso
   for (const path of walk(SRC)) {
     if (!path.endsWith(".js") || path.endsWith("cli.js")) continue;
     await assert.doesNotReject(
-      import(path),
+      import(pathToFileURL(path).href),   // a bare "D:\\..." path is not an import specifier on Windows
       `${path} failed to import`,
     );
   }
 });
 
 test("architecture: public export surface (index.js) is importable and has the contract members", async () => {
-  const api = await import(join(SRC, "index.js"));
+  const api = await import(pathToFileURL(join(SRC, "index.js")).href);
   for (const name of [
     "version", "TAGLINE", "run", "scanFile", "detectLang", "RULES", "TEXT_RULES",
     "SEV_ORDER", "TYPES", "computeMetrics", "worstSevRating", "maintainabilityRating",
