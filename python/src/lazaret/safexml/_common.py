@@ -203,17 +203,21 @@ def size_exceeded(limit: int) -> LimitExceeded:
 
 class LimitedReader:
     """Wraps a file object and raises LimitExceeded once more than `limit`
-    bytes (or characters) have been read. Also bounds decompressed streams."""
+    bytes (or characters) have been read. Also bounds compressed streams;
+    `message` replaces the default max_bytes error text."""
 
-    def __init__(self, file, limit: int):
+    def __init__(self, file, limit: int, message: str | None = None):
         self._file = file
         self._limit = limit
+        self._message = message
         self._count = 0
 
     def read(self, size: int = -1):
         data = self._file.read(size)
         self._count += len(data)
         if self._count > self._limit:
+            if self._message is not None:
+                raise LimitExceeded(self._message)
             raise size_exceeded(self._limit)
         return data
 

@@ -5,8 +5,10 @@
 
 Responses are parsed with the safexml protections, and their size is capped
 (max_bytes, 32 MiB by default). The cap applies after gzip decompression, so
-a compressed "zip bomb" response is cut off too. XML-RPC messages never have a
-DOCTYPE, so forbid_dtd defaults to True here.
+a compressed "zip bomb" response is cut off too; gzip responses are
+decompressed as they are read, and their compressed size is capped as well.
+Error replies (non-200) are read only when small, otherwise the connection is
+closed. XML-RPC messages never have a DOCTYPE, so forbid_dtd defaults to True.
 
 monkey_patch() applies the same parser to the stdlib's xmlrpc.client and
 xmlrpc.server globally
@@ -14,6 +16,7 @@ xmlrpc.server globally
 
 from __future__ import annotations
 
+import gzip
 import xmlrpc.client as _client
 from typing import Any
 from urllib.parse import urlsplit
@@ -21,6 +24,7 @@ from urllib.parse import urlsplit
 from ._common import (
     DEFAULT_MAX_ATTLIST_DEFAULTS,
     DEFAULT_MAX_DEPTH,
+    LimitedReader,
     Options,
     depth_exceeded,
     install_handlers,
@@ -31,6 +35,11 @@ __all__ = ["SafeXMLRPCParser", "Transport", "SafeTransport", "ServerProxy", "loa
            "monkey_patch", "unmonkey_patch", "DEFAULT_MAX_BYTES"]
 
 DEFAULT_MAX_BYTES = 32 * 1024 * 1024
+
+# An error reply's body is only read (to keep the connection reusable, as the
+# stdlib does) when it declares at most this length; otherwise the connection
+# is closed without reading it.
+ERROR_BODY_LIMIT = 8 * 1024
 
 _SAFE_KEYS = ("forbid_dtd", "forbid_entities", "forbid_external", "max_depth", "max_bytes",
               "max_attlist_defaults")
@@ -78,9 +87,43 @@ def _split_safe(kwargs: dict[str, Any]) -> dict[str, Any]:
     return {key: kwargs.pop(key) for key in _SAFE_KEYS if key in kwargs}
 
 
-class _SafeParserMixin:
+def _compressed_limit(max_bytes: int) -> int:
+    # Deflate can grow incompressible data very slightly (stored blocks,
+    # gzip header and trailer); anything much larger than max_bytes cannot
+    # decompress to an acceptable response.
+    return max_bytes + max_bytes // 100 + 64 * 1024
+
+
+def _gzip_stream(response: Any, max_bytes: int | None) -> gzip.GzipFile:
+    """Decompress a gzip-encoded response as it is read. The stdlib's
+    GzipDecodedResponse reads the whole compressed body into memory first.
+    The compressed size is capped too: a stream of empty gzip members
+    decompresses to nothing, so the decompressed cap alone never stops it."""
+    source = response
+    if max_bytes is not None:
+        limit = _compressed_limit(max_bytes)
+        source = LimitedReader(response, limit, f"compressed response is larger than {limit} bytes "
+                                                f"(max_bytes={max_bytes})")
+    return gzip.GzipFile(mode="rb", fileobj=source)
+
+
+def _discard_error_body(response: Any) -> bool:
+    """Read a small error body so the connection can be reused. Returns False
+    (the caller closes the connection) when its length is unknown or large."""
+    try:
+        length = int(response.getheader("content-length", ""))
+    except ValueError:
+        return False
+    if not 0 <= length <= ERROR_BODY_LIMIT:
+        return False
+    response.read()
+    return True
+
+
+class _SafeTransportMixin:
     def _init_safe(self, safe: dict[str, Any]) -> None:
-        SafeXMLRPCParser(_client.Unmarshaller(), **safe)  # validate options now, not per request
+        # validate options now, not per request
+        self._safe_options = SafeXMLRPCParser(_client.Unmarshaller(), **safe).options
         self._safe = safe
 
     def getparser(self):
@@ -88,8 +131,48 @@ class _SafeParserMixin:
                                             use_builtin_types=self._use_builtin_types)
         return SafeXMLRPCParser(unmarshaller, **self._safe), unmarshaller
 
+    def single_request(self, host, handler, request_body, verbose=False):
+        # Same as the stdlib's, except for how the body of an error reply is
+        # discarded: the stdlib reads all of it, however large.
+        try:
+            http_conn = self.send_request(host, handler, request_body, verbose)
+            resp = http_conn.getresponse()
+            if resp.status == 200:
+                self.verbose = verbose
+                return self.parse_response(resp)
+        except _client.Fault:
+            raise
+        except Exception:
+            # All unexpected errors leave the connection in a strange state.
+            self.close()
+            raise
+        headers = dict(resp.getheaders())
+        if not _discard_error_body(resp):
+            self.close()
+        raise _client.ProtocolError(host + handler, resp.status, resp.reason, headers)
 
-class Transport(_SafeParserMixin, _client.Transport):
+    def parse_response(self, response):
+        # Same as the stdlib's, except that a gzip body is streamed (see
+        # _gzip_stream). SafeXMLRPCParser.feed() caps the decompressed size.
+        if hasattr(response, "getheader") and response.getheader("Content-Encoding", "") == "gzip":
+            stream = _gzip_stream(response, self._safe_options.max_bytes)
+        else:
+            stream = response
+        p, u = self.getparser()
+        while True:
+            data = stream.read(1024)
+            if not data:
+                break
+            if self.verbose:
+                print("body:", repr(data))
+            p.feed(data)
+        if stream is not response:
+            stream.close()
+        p.close()
+        return u.close()
+
+
+class Transport(_SafeTransportMixin, _client.Transport):
     """HTTP transport that parses responses safely. Accepts the safexml options
     as keywords in addition to the stdlib Transport arguments."""
 
@@ -99,7 +182,7 @@ class Transport(_SafeParserMixin, _client.Transport):
         self._init_safe(safe)
 
 
-class SafeTransport(_SafeParserMixin, _client.SafeTransport):
+class SafeTransport(_SafeTransportMixin, _client.SafeTransport):
     """HTTPS transport that parses responses safely."""
 
     def __init__(self, *args: Any, **kwargs: Any):
