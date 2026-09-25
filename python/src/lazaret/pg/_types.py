@@ -258,7 +258,10 @@ def _scalar(v: Any) -> tuple[int, str]:
         aware = v.tzinfo is not None and v.utcoffset() is not None
         return (TIMETZ if aware else TIME), v.isoformat()
     if isinstance(v, timedelta):
-        return INTERVAL, f"{v.days} days {v.seconds}.{v.microseconds:06d} seconds"
+        # Explicit signs on both fields: under IntervalStyle=sql_standard a
+        # leading "-" applies to every following unsigned field, so
+        # "-1 days 5 seconds" would mean -1 day -5 seconds.
+        return INTERVAL, f"{v.days:+d} days +{v.seconds}.{v.microseconds:06d} seconds"
     if isinstance(v, uuid.UUID):
         return UUID, str(v)
     if isinstance(v, Json):

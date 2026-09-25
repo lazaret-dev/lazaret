@@ -94,7 +94,7 @@ class EncodeTests(unittest.TestCase):
             (datetime(2026, 9, 24, 1, 2, 3), t.TIMESTAMP, b"2026-09-24 01:02:03"),
             (datetime(2026, 9, 24, 1, 2, 3, tzinfo=timezone.utc), t.TIMESTAMPTZ, b"2026-09-24 01:02:03+00:00"),
             (time(1, 2, 3), t.TIME, b"01:02:03"),
-            (timedelta(days=-1, seconds=5), t.INTERVAL, b"-1 days 5.000000 seconds"),
+            (timedelta(days=-1, seconds=5), t.INTERVAL, b"-1 days +5.000000 seconds"),
             (uuid.UUID(int=1), t.UUID, b"00000000-0000-0000-0000-000000000001"),
             ({"a": [1, 2]}, t.JSONB, b'{"a": [1, 2]}'),
             (t.Json([1, "x"]), t.JSONB, b'[1, "x"]'),
