@@ -192,11 +192,15 @@ class VerdictPolicyTests(unittest.TestCase):
         for verdict, bad in (("OK", False), ("WARN", False), ("INCOMPLETE", True), ("SUSPICIOUS", True)):
             with self.subTest(verdict=verdict), tempfile.TemporaryDirectory() as d:
                 store = lazaret_repo.Store(os.path.join(d, "r.db"))
-                res = scan({"index.js": "1;\n"})
-                res["verdict"] = verdict
-                with mock.patch.object(lazaret_repo, "scan_package", return_value=res), \
-                        contextlib.redirect_stdout(open(os.devnull, "w")):
-                    self.assertIs(lazaret_repo.cmd_scan(store, ["npm:x"], False, True), bad)
+                try:
+                    res = scan({"index.js": "1;\n"})
+                    res["verdict"] = verdict
+                    with mock.patch.object(lazaret_repo, "scan_package", return_value=res), \
+                            contextlib.redirect_stdout(io.StringIO()):
+                        self.assertIs(lazaret_repo.cmd_scan(store, ["npm:x"], False, True), bad)
+                finally:
+                    # Windows can't delete the temp dir while the database is open
+                    store.conn.close()
 
     def test_test_path_detection(self):
         for path, expected in [("tests/a.py", True), ("pkg/test cases/x.sh", True), ("meson/unittests/t.py", True),
