@@ -1095,8 +1095,9 @@ _NETWORK_RE = re.compile(
     r"""\brequests\.(?:get|post|put|patch|request|Session)\b|\bimport\s+(?:requests|httpx|aiohttp|urllib3)\b|"""
     r"""\bfrom\s+(?:requests|httpx|aiohttp|urllib3|urllib\.request|http\.client)\s+import\b|"""
     r"""\bhttpx\.\w+\s*\(|\baiohttp\.ClientSession\b|\bsmtplib\b|\bftplib\b"""
-    # shell
-    r"""|(?:^|[\s;|&(`$])(?:curl|wget|nc|ncat|netcat)\s|/dev/tcp/""", re.M)
+    # shell: a download tool pointed at a URL, netcat to a host and port, bash's /dev/tcp
+    r"""|\b(?:curl|wget)\s+(?:-{1,2}[\w-]+(?:[ =](?!https?:)\S+)?\s+)*["']?https?://"""
+    r"""|\b(?:nc|ncat|netcat)\s+(?:-\w+\s+)*[\w.-]+\s+\d{2,5}\b|/dev/tcp/""", re.M)
 _SECRET_SOURCE_RE = re.compile(
     r"""JSON\.stringify\(\s*process\.env|Object\.(?:keys|entries|values)\(\s*process\.env|"""
     r"""\.npmrc|[/\\]\.ssh\b|~/\.ssh\b|id_rsa|id_ed25519|\.aws[/\\]|~/\.aws\b|\.git-credentials|"""
@@ -1105,8 +1106,9 @@ _SECRET_SOURCE_RE = re.compile(
     r"""\bdict\(\s*os\.environ\s*\)|\bos\.environ\.(?:items|keys|values|copy)\(\s*\)|"""
     r"""json\.dumps\(\s*(?:dict\(\s*)?os\.environ|\b(?:str|repr)\(\s*os\.environ\s*\)|"""
     r"""\{\s*\*\*\s*os\.environ|\burlencode\(\s*(?:dict\(\s*)?os\.environ|\bos\.environb\b"""
-    # shell
-    r"""|(?:^|[\s;|&(`])(?:env|printenv)\s*(?:\||>|$)""", re.I | re.M)
+    # shell: the whole environment piped or redirected somewhere
+    r"""|(?:^|[\s;&(`])(?:env|printenv|set)\s*(?:\|(?!\|)|>)|\$\(\s*(?:env|printenv)\s*\)|`\s*(?:env|printenv)\s*`""",
+    re.I | re.M)
 _EXFIL_DEST_RE = re.compile(
     r"""https?://(?:\d{1,3}\.){3}\d{1,3}\b|pastebin\.com|\bngrok|webhook\.site|"""
     r"""discord(?:app)?\.com/api/webhooks|api\.telegram\.org|oastify\.com|burpcollaborator|"""

