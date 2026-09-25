@@ -11,6 +11,9 @@
         ├── TransactionRollbackError class 40 (serialization failure, deadlock): safe to retry
         ├── ProgrammingError        class 42 (syntax error, undefined table, privileges)
         └── QueryCanceledError      57014 (statement timeout or cancel())
+
+All DatabaseError subclasses can be pickled and copied (they carry only the
+server's error fields).
 """
 
 from __future__ import annotations
@@ -50,6 +53,11 @@ class DatabaseError(Error):
         self.column = fields.get("c")
         self.constraint = fields.get("n")
         super().__init__(f"{self.severity}: {self.message} (SQLSTATE {self.sqlstate})")
+
+    def __reduce__(self):
+        # args holds the formatted message, but __init__ takes the fields dict:
+        # rebuild from the fields so pickle and copy work.
+        return (self.__class__, (dict(self.fields),))
 
 
 class DataError(DatabaseError):
