@@ -21,5 +21,6 @@ export {
   collectFiles, reportPaths, writeReport, validateReportPaths, validateOutDir, isOurReport,
   ReportPathError, EXIT_OUTPUT,
 } from "./lib/fs.js";
+export { classifyBinary } from "./lib/binary.js";
 export { applyBaseline, baselineSignature, fingerprint } from "./baseline.js";
 export { run, parseArgs, EXIT_USAGE, EXIT_INTERNAL } from "./cli.js";

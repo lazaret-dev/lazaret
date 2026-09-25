@@ -50,6 +50,7 @@ test("bare `lazaret <dir>`, -q before the directory, --deps alias", () => {
     assert.equal(capture([d, "--deps", "--no-json", "--no-html", "-q"]).code, 0);
     assert.deepEqual(parseArgs(["--deps"]).opts.deps, true);
     assert.deepEqual(parseArgs(["--include-deps"]).opts.deps, true);
+    assert.deepEqual(parseArgs(["--exclude", "a", "--exclude=b"]).opts.exclude, ["a", "b"]);
     assert.deepEqual(parseArgs(["--", "-dir"]).positional, ["-dir"]);
     assert.equal(parseArgs(["--no-h"]).opts.noHtml, true);              // unique prefix, like argparse
   } finally { rmSync(d, { recursive: true, force: true }); }
@@ -86,6 +87,17 @@ test("an empty directory is a usage error (exit 2), like the Python CLI", () => 
     const r = capture(["check", d]);
     assert.equal(r.code, 2);
     assert.match(r.err, /nothing to scan/);
+  } finally { rmSync(d, { recursive: true, force: true }); }
+});
+
+test("--exclude prunes a directory by name and reports it (Q-SKIPPED-TREE)", () => {
+  const d = project({ "keep/a.js": "eval(y)\n", "gen/b.js": "eval(z)\n" });
+  try {
+    const r = capture(["check", d, "--exclude", "gen", "--no-html"]);
+    assert.equal(r.code, 0, r.err);
+    const rep = JSON.parse(readFileSync(join(d, "lazaret-report.json"), "utf8"));
+    assert.deepEqual(rep.issues.map((i) => [i.rule, i.file]).sort(),
+      [["Q-SKIPPED-TREE", "gen"], ["S-EVAL-JS", join("keep", "a.js")]]);
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 

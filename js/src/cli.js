@@ -8,8 +8,9 @@ import { resolve } from "node:path";
 import { statSync, readFileSync } from "node:fs";
 import {
   collectFiles, reportPaths, writeReport, validateReportPaths, validateOutDir,
-  ReportPathError, EXIT_OUTPUT, scanErrorIssue,
+  ReportPathError, EXIT_OUTPUT, ScanTargetError, scanErrorIssue,
 } from "./lib/fs.js";
+import { fsNameToString } from "./lib/encoding.js";
 import { scanFile } from "./scanner/scan.js";
 import { scanManifest, scanGyp } from "./lib/supplychain.js";
 import { redactResult, setRedactSecrets } from "./lib/redact.js";
@@ -49,6 +50,7 @@ Options:
   --deps, --include-deps
                         Also scan dependency directories (node_modules, venv,
                         vendor…) with the supply-chain/secret rules.
+  --exclude NAME        Extra directory name to skip (repeatable).
   --baseline PATH       Previous JSON report; findings not in it are marked new.
                         A baseline inside the scanned tree is trusted only when
                         ${BASELINE_KEY_ENV} is set and its signature verifies.
@@ -69,6 +71,7 @@ const OPTIONS = [
   { flag: "--html", dest: "html", value: true },
   { flag: "--sarif", dest: "sarif", value: true },
   { flag: "--baseline", dest: "baseline", value: true },
+  { flag: "--exclude", dest: "exclude", value: true, append: true },
   { flag: "--excerpt-width", dest: "excerptWidth", value: true, int: true },
   { flag: "--no-json", dest: "noJson" },
   { flag: "--no-html", dest: "noHtml" },
@@ -99,7 +102,7 @@ function findLong(name) {
 }
 
 export function parseArgs(argv) {
-  const opts = {};
+  const opts = { exclude: [] };
   const positional = [];
   let onlyPositional = false;
   const takeValue = (o, inline, i) => {
@@ -236,9 +239,16 @@ function runChecked(argv, io) {
   }
 
   // ---- scan -------------------------------------------------------------
-  const { files, manifests, binaryIssues, skippedIssues = [] } = collectFiles(root, { includeDeps: !!opts.deps });
+  let col;
+  try {
+    col = collectFiles(root, { includeDeps: !!opts.deps, exclude: opts.exclude });
+  } catch (e) {
+    if (e instanceof ScanTargetError) { err(`error: ${sanitizeTerm(e.message)}`); return EXIT_USAGE; }
+    throw e;
+  }
+  const { files, manifests, binaryIssues, skippedIssues } = col;
   if (!files.length && !manifests.length && !binaryIssues.length) {
-    err(`error: ${sanitizeTerm(`nothing to scan under ${root}: no Python, JavaScript or SQL sources, package manifests or other files to check`)}`);
+    err(`error: ${sanitizeTerm(`nothing to scan under ${fsNameToString(Buffer.from(root))}: no Python, JavaScript or SQL sources, package manifests or other files to check`)}`);
     return EXIT_USAGE;
   }
   const issues = [];
@@ -249,10 +259,11 @@ function runChecked(argv, io) {
     catch (e) { issues.push(scanErrorIssue(f.path, e)); }            // one file must never kill the run
   }
   for (const mf of manifests) {
-    // binding.gyp → scanGyp (G11); package.json → scanManifest (the
-    // registry hook set inside a dependency directory).
+    // binding.gyp → scanGyp (G11); package.json → scanManifest, with the
+    // registry hook set inside a detected dependency tree.
     try {
-      add(mf.kind === "binding.gyp" ? scanGyp(mf.path, mf.content) : scanManifest(mf.path, mf.content));
+      add(mf.kind === "binding.gyp" ? scanGyp(mf.path, mf.content)
+        : scanManifest(mf.path, mf.content, { registry: !!mf.dep }));
     } catch (e) { issues.push(scanErrorIssue(mf.path, e)); }
   }
   add(skippedIssues);

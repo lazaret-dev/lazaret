@@ -1,20 +1,25 @@
-// Zero-dependency leaf helpers. Never import from ../scanner/ (RESTRUCTURE.md §5).
+// Directory walking and report-path safety — zero-dependency leaf helpers.
+// Never import from ../scanner/ (RESTRUCTURE.md §5).
+//
+// Twin of lazaret.scanner.core.collect_files (shared semantics specs 4, 8, 9,
+// 11, 15) and lazaret.scanner.reports (validate_out_dir, _validate_path,
+// is_our_report, write_report).
 
 import {
-  readdirSync, readFileSync, statSync, lstatSync, openSync, readSync, closeSync, fstatSync, fsyncSync,
+  readdirSync, lstatSync, statSync, openSync, readSync, closeSync, fstatSync, fsyncSync, readlinkSync,
   writeSync, renameSync, unlinkSync, chmodSync, constants as C,
 } from "node:fs";
 import { join, extname, sep, resolve, dirname, isAbsolute } from "node:path";
 import { randomBytes } from "node:crypto";
-import { fileIssue } from "./issue.js";
+import { decodeSource, fsNameToString } from "./encoding.js";
+import { classifyBinary, HEADER_SAMPLE, PYC_HEADER, pycIssues, pycModule } from "./binary.js";
+import { mkIssue, fileIssue } from "./issue.js";
 
 export const EXTS = {
   ".py": "py", ".js": "js", ".jsx": "js", ".ts": "js", ".tsx": "js",
   ".mjs": "js", ".cjs": "js", ".sql": "sql",
 };
 
-// G10: only .git and __pycache__ are skipped by default (VCS metadata and
-// build cache — never source). Dependency dirs are opt-in via includeDeps.
 /**
  * Line endings as Python's text mode reads them: \r\n and a lone \r both become \n.
  * Without this, a file with Windows line endings leaves "\r" at the end of every
@@ -25,99 +30,51 @@ export function normalizeNewlines(text) {
   return typeof text === "string" && text.includes("\r") ? text.replace(/\r\n?/g, "\n") : text;
 }
 
+// Spec 8: `.git` (exactly that name) is always skipped; dependency trees are
+// pruned unless --deps; __pycache__ is never source-scanned but its .pyc
+// files are checked. Every pruned tree is reported (Q-SKIPPED-TREE).
 export const SKIP_DIRS = new Set([".git", "__pycache__"]);
 export const OPTIN_SKIP_DIRS = [
   "node_modules", "venv", ".venv", "env", "dist", "build", ".next",
   "coverage", "vendor", "site-packages", ".tox", ".mypy_cache",
   ".pytest_cache", "migrations",
 ];
+// Name-based markers (is_dependency_manifest): a manifest under one of these
+// belongs to an installed package.
 export const DEP_MARKERS = new Set([
   "node_modules", "site-packages", "bower_components", "vendor", "venv", ".venv",
 ]);
+const DEP_TREES = new Set(["node_modules", "bower_components", "site-packages"]);
+const VENV_TREES = new Set(["venv", ".venv", "env"]);
 
-export const MAX_FILE_BYTES = 2_000_000;   // files above this are flagged SC-TRUNCATED
-
-/** SC-TRUNCATED: a file that was not (fully) scanned — never a silent skip. */
-export function truncatedIssue(path, detail) {
-  return fileIssue({ id: "SC-TRUNCATED", name: "Scan truncated", type: "HOTSPOT", sev: "CRITICAL",
-    msg: `File not fully scanned: ${detail}.`,
-    why: "Scanning stopped early, so a clean verdict for this file is not evidence of anything — the unscanned bytes are exactly where a hostile artifact would put its payload (audit C2/G16: declared sizes and entry counts are attacker-controlled and were used to skip files with zero signal).",
-    fix: "Review the file manually or raise the limit and re-scan.",
-    ref: "CWE-506 · Supply chain" }, path);
-}
-
-function walk(dir, relDir, out) {
-  for (const name of readdirSync(dir)) {
-    const full = join(dir, name);
-    let st;
-    try {
-      st = lstatSync(full);
-    } catch {
-      continue;                       // unreadable entry: skip, never crash
-    }
-    if (st.isDirectory()) {
-      if (SKIP_DIRS.has(name) || name.startsWith(".git")) continue;
-      walk(full, relDir ? `${relDir}${sep}${name}` : name, out);
-    } else if (st.isFile()) {
-      out.push(relDir ? `${relDir}${sep}${name}` : name);
-    }
-  }
-  return out;
-}
-
-/**
- * Collect the files to scan under `root`.
- * Returns { files, manifests, binaryIssues } — files: [{path, content, lang,
- * dep}], manifests: package.json/binding.gyp entries, binaryIssues:
- * SC-TRUNCATED-style findings for oversize files.
- */
-export function collectFiles(root, { includeDeps = false } = {}) {
-  const rels = walk(root, "", []);
-  const files = [], manifests = [], binaryIssues = [];
-  for (const rel of rels) {
-    const full = join(root, rel);
-    let st;
-    try {
-      st = statSync(full);
-    } catch {
-      continue;
-    }
-    if (st.size > MAX_FILE_BYTES) {
-      // Verdict integrity (audit C2/G16): an oversize file is flagged, not
-      // silently skipped — and NOT added to `files`, so metrics stay honest.
-      binaryIssues.push({
-        rule: "SC-TRUNCATED", name: "Scan truncated", type: "HOTSPOT", sev: "CRITICAL",
-        msg: `File not fully scanned: ${st.size.toLocaleString("en-US")} bytes exceeds the 2,000,000-byte file limit.`,
-        why: "Scanning stopped early, so a clean verdict for this file is not evidence of anything — the unscanned bytes are exactly where a hostile artifact would put its payload (audit C2/G16: declared sizes and entry counts are attacker-controlled and were used to skip files with zero signal).",
-        fix: "Review the file manually or raise the limit and re-scan.",
-        ref: "CWE-506 · Supply chain", file: rel, line: 1, snippet: [], snipStart: 1,
-      });
-      continue;
-    }
-    if (rel === "package.json" || rel.endsWith(`${sep}package.json`)) {
-      manifests.push({ kind: "package.json", path: rel, content: normalizeNewlines(readFileSync(full, "utf8")) });
-      continue;
-    }
-    if (rel === "binding.gyp" || rel.endsWith(`${sep}binding.gyp`)) {
-      // G11: node-gyp actions run at install time (see scanManifests).
-      manifests.push({ kind: "binding.gyp", path: rel, content: normalizeNewlines(readFileSync(full, "utf8")) });
-      continue;
-    }
-    const ext = extname(rel).toLowerCase();
-    const lang = EXTS[ext];
-    if (!lang) continue;
-    const inDep = rel.split(sep).some((p) => DEP_MARKERS.has(p));
-    if (inDep && !includeDeps) continue;   // opt-in only
-    files.push({
-      path: rel, content: normalizeNewlines(readFileSync(full, "utf8")), lang, dep: includeDeps ? inDep : false,
-    });
-  }
-  return { files, manifests, binaryIssues };
-}
+export const MAX_FILE_BYTES = 2_000_000;   // source files/manifests above this: SC-TRUNCATED
 
 const O_NOFOLLOW = C.O_NOFOLLOW ?? 0;
 const O_NONBLOCK = C.O_NONBLOCK ?? 0;
 const O_NOCTTY = C.O_NOCTTY ?? 0;
+const SEP = Buffer.from(sep);
+const APPLE_DOUBLE_MAGIC = [Buffer.from([0x00, 0x05, 0x16, 0x07]), Buffer.from([0x00, 0x05, 0x16, 0x00])];
+
+/** The scan target is missing, not a directory, unreadable or empty: usage error (exit 2). */
+export class ScanTargetError extends Error {}
+
+// strerror() text for the errno codes a walk can meet (Python reports exc.strerror).
+const STRERROR = {
+  EACCES: "Permission denied", EPERM: "Operation not permitted", ENOENT: "No such file or directory",
+  ELOOP: "Too many levels of symbolic links", EIO: "Input/output error", ENOTDIR: "Not a directory",
+  EISDIR: "Is a directory", ENAMETOOLONG: "File name too long", EMFILE: "Too many open files",
+  ENFILE: "Too many open files in system", EBUSY: "Device or resource busy", ENXIO: "No such device or address",
+  ETXTBSY: "Text file busy", EAGAIN: "Resource temporarily unavailable", EINVAL: "Invalid argument",
+  EOVERFLOW: "Value too large for defined data type", ENOMEM: "Cannot allocate memory",
+  EROFS: "Read-only file system", ENODEV: "No such device", ESTALE: "Stale file handle",
+};
+export function strerror(e) {
+  if (e && e.code && STRERROR[e.code]) return STRERROR[e.code];
+  if (e instanceof NotRegularFile) return e.message;
+  const m = /^[A-Z0-9]+: ([^,]+)/.exec(String(e && e.message));
+  if (m) return m[1][0].toUpperCase() + m[1].slice(1);
+  return (e && e.name) || "Error";
+}
 class NotRegularFile extends Error {}
 function specialKind(st) {
   if (st.isFIFO()) return "a named pipe (FIFO)";
@@ -130,6 +87,22 @@ function specialKind(st) {
 const coverage = (rule, name, path, msg, why, fix, ref = "Maintainability") => ({
   rule, name, type: "SMELL", sev: "INFO", msg, why, fix, ref, file: path, line: 1, snippet: [], snipStart: 1,
 });
+export function symlinkIssue(path, target) {
+  target = String(target);
+  if (Array.from(target).length > 200) target = Array.from(target).slice(0, 197).join("") + "...";
+  return coverage("Q-SYMLINK", "Symbolic link (not followed)", path,
+    `Symbolic link ${path} -> ${target} was not followed; its target was not scanned.`,
+    "Following links would let a repository pull files from outside the scanned tree (host credentials, /dev/urandom) into the scan and its reports, or loop forever. The link target is not part of the tree under review.",
+    "If the target belongs to the project, scan it directly.",
+    "CWE-59 · Scan coverage");
+}
+export function unreadableIssue(path, reason) {
+  return coverage("Q-UNREADABLE", "Unreadable entry (not scanned)", path,
+    `${path} could not be read (${reason}); it was not scanned.`,
+    "An entry the scanner cannot read is invisible to every rule. Special files (named pipes, sockets, devices) are never opened: reading one can hang or exhaust the scan.",
+    "Fix the permissions (or remove the special file) and re-scan.",
+    "Scan coverage");
+}
 export function scanErrorIssue(path, err) {
   return coverage("Q-SCAN-ERROR", "File scan failed", path,
     `Scanning ${path} failed (${(err && err.name) || "Error"}); findings for this file are incomplete.`,
@@ -137,6 +110,23 @@ export function scanErrorIssue(path, err) {
     "Review the file manually and report the error (re-run with LAZARET_DEBUG=1 for a traceback).",
     "Scan coverage");
 }
+export function skippedTreeIssue(rel, nFiles, nBytes) {
+  return {
+    rule: "Q-SKIPPED-TREE", name: "Skipped directory (not scanned)", type: "SMELL", sev: "INFO",
+    msg: `Directory ${rel} was skipped (${nFiles} files, ${nBytes} bytes unread).`,
+    why: "Skipped trees are invisible to every rule — the classic hiding places (dist, build, .git) hold published code and committed-then-deleted secrets. Generated trees you own are fine to skip on purpose; unexpected entries here are blind spots.",
+    fix: "Only exclude generated trees you control; remove the exclusion otherwise so the tree is scanned.",
+    ref: "Maintainability", file: rel, line: 1, snippet: [], snipStart: 1,
+  };
+}
+export function truncatedIssue(path, detail) {
+  return fileIssue({ id: "SC-TRUNCATED", name: "Scan truncated", type: "HOTSPOT", sev: "CRITICAL",
+    msg: `File not fully scanned: ${detail}.`,
+    why: "Scanning stopped early, so a clean verdict for this file is not evidence of anything — the unscanned bytes are exactly where a hostile artifact would put its payload (audit C2/G16: declared sizes and entry counts are attacker-controlled and were used to skip files with zero signal).",
+    fix: "Review the file manually or raise the limit and re-scan.",
+    ref: "CWE-506 · Supply chain" }, path);
+}
+
 /** Read at most `limit` bytes of a REGULAR file (never follows links, never blocks on a FIFO). */
 export function readBounded(path, limit) {
   const fd = openSync(path, C.O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY);
@@ -159,6 +149,191 @@ export function readBounded(path, limit) {
 }
 
 function lexists(p) { try { lstatSync(p); return true; } catch { return false; } }
+function childPath(dirBuf, nameBuf) { return Buffer.concat([dirBuf, SEP, nameBuf]); }
+const byName = (a, b) => (a.str < b.str ? -1 : a.str > b.str ? 1 : 0);
+
+function listDir(dirBuf) {
+  return readdirSync(dirBuf, { encoding: "buffer" })
+    .map((nb) => ({ buf: nb, str: fsNameToString(nb) }))
+    .sort(byName);
+}
+function readlinkText(p) {
+  try { return fsNameToString(readlinkSync(p, { encoding: "buffer" })); } catch { return "?"; }
+}
+
+// name → (marker names directly inside, marker suffixes directly inside)
+const DEP_TREE_MARKERS = {
+  venv: [["pyvenv.cfg"], []], ".venv": [["pyvenv.cfg"], []], env: [["pyvenv.cfg"], []],
+  vendor: [["modules.txt", "autoload.php", "package.json"], [".dist-info", ".egg-info"]],
+};
+/** Is directory `name` a dependency tree (always for node_modules & co; vendor/venv only with a marker)? */
+function isDependencyTree(name, dirBuf) {
+  if (DEP_TREES.has(name)) return true;
+  const markers = DEP_TREE_MARKERS[name];
+  if (!markers) return false;
+  const [names, suffixes] = markers;
+  let entries;
+  try { entries = readdirSync(dirBuf, { encoding: "buffer" }); } catch { return false; }
+  return entries.some((nb) => {
+    const n = fsNameToString(nb);
+    return names.includes(n) || suffixes.some((x) => n.endsWith(x));
+  });
+}
+
+/** (file count, byte count) of a pruned tree — iterative, links not followed. */
+function treeStats(dirBuf) {
+  let nFiles = 0, nBytes = 0;
+  const stack = [dirBuf];
+  while (stack.length) {
+    const d = stack.pop();
+    let names;
+    try { names = readdirSync(d, { encoding: "buffer" }); } catch { continue; }
+    for (const nb of names) {
+      const p = childPath(d, nb);
+      let st;
+      try { st = lstatSync(p); } catch { continue; }
+      if (st.isDirectory()) { stack.push(p); continue; }
+      nFiles++;
+      if (st.isFile()) nBytes += st.size;
+    }
+  }
+  return [nFiles, nBytes];
+}
+
+/**
+ * Collect the files to scan under `root` (twin of core._collect).
+ * Returns { files, manifests, binaryIssues, skippedIssues } — files:
+ * [{path, content, lang, dep}], manifests: package.json/binding.gyp entries
+ * [{kind, path, content, dep}], binaryIssues: collection findings (binary
+ * classification, SC-TRUNCATED, Q-ENCODING/SC-UTF7, SC-PYC-*, Q-SYMLINK,
+ * Q-UNREADABLE, Q-SCAN-ERROR), skippedIssues: Q-SKIPPED-TREE per pruned tree.
+ * Throws ScanTargetError when the root itself cannot be listed.
+ */
+export function collectFiles(root, { includeDeps = false, exclude = [] } = {}) {
+  const col = { files: [], manifests: [], binaryIssues: [], skippedIssues: [] };
+  const issues = col.binaryIssues;
+  const excluded = new Set(exclude);
+  const rootBuf = Buffer.from(resolve(root));
+  const seen = new Set();
+  const skipTree = (buf, rel) => { const [n, bytes] = treeStats(buf); col.skippedIssues.push(skippedTreeIssue(rel, n, bytes)); };
+  const stack = [{ buf: rootBuf, rel: "", dep: false }];
+  while (stack.length) {
+    const dir = stack.pop();
+    let entries;
+    try {
+      entries = listDir(dir.buf);
+      if (!dir.rel) { const st = statSync(dir.buf); if (st.ino) seen.add(`${st.dev}:${st.ino}`); }
+    } catch (e) {
+      if (!dir.rel) throw new ScanTargetError(`cannot read directory ${fsNameToString(rootBuf)}: ${strerror(e)}`);
+      issues.push(unreadableIssue(dir.rel, strerror(e)));
+      continue;
+    }
+    const names = new Set(entries.map((e) => e.str));
+    const subdirs = [];
+    for (const ent of entries) {
+      const full = childPath(dir.buf, ent.buf);
+      const rel = dir.rel ? `${dir.rel}${sep}${ent.str}` : ent.str;
+      let st;
+      try { st = lstatSync(full); } catch (e) { issues.push(unreadableIssue(rel, strerror(e))); continue; }
+      if (st.isSymbolicLink()) issues.push(symlinkIssue(rel, readlinkText(full)));
+      else if (st.isDirectory()) subdirs.push({ ent, full, rel, st });
+      else if (!st.isFile()) issues.push(unreadableIssue(rel, specialKind(st)));
+      else {
+        try { collectFile(full, rel, ent.str, st, dir.dep, col); } catch (e) {
+          if (e instanceof NotRegularFile || (e && e.code)) issues.push(unreadableIssue(rel, strerror(e)));
+          else issues.push(scanErrorIssue(rel, e));
+        }
+      }
+    }
+    const push = [];
+    for (const { ent, full, rel, st } of subdirs) {
+      const name = ent.str;
+      if (name === ".git" || excluded.has(name)) { skipTree(full, rel); continue; }
+      if (name === "__pycache__") {
+        try { checkPycache(full, rel, names, issues); } catch (e) { issues.push(scanErrorIssue(rel, e)); }
+        continue;
+      }
+      const key = `${st.dev}:${st.ino}`;
+      if (st.ino && seen.has(key)) { issues.push(unreadableIssue(rel, "directory already visited (filesystem loop)")); continue; }
+      if (st.ino) seen.add(key);
+      const dep = dir.dep || isDependencyTree(name, full);
+      if (dep && !dir.dep && !includeDeps) { skipTree(full, rel); continue; }
+      push.push({ buf: full, rel, dep });
+    }
+    for (let k = push.length - 1; k >= 0; k--) stack.push(push[k]);   // pop order = sorted, depth-first
+  }
+  return col;
+}
+
+function collectFile(full, rel, name, st, dep, col) {
+  const ext = extname(name).toLowerCase();
+  const kind = name === "package.json" || name === "binding.gyp" ? name : null;
+  const lang = kind ? null : EXTS[ext];
+  const size = st.size;
+  if (!kind && !lang) {
+    // spec 9: every other regular file is classified by magic bytes
+    const bi = classifyBinary(rel, readBounded(full, HEADER_SAMPLE), size, "repo");
+    if (bi) col.binaryIssues.push(bi);
+    return;
+  }
+  // spec 9: the size cap applies only to files that would be read whole
+  if (size > MAX_FILE_BYTES) {
+    col.binaryIssues.push(truncatedIssue(rel, `${size.toLocaleString("en-US")} bytes exceeds the 2,000,000-byte file limit`));
+    return;
+  }
+  const data = readBounded(full, MAX_FILE_BYTES + 1);
+  if (data.length > MAX_FILE_BYTES) {                 // grew between the lstat and the read
+    col.binaryIssues.push(truncatedIssue(rel, "read exceeded the 2,000,000-byte file limit"));
+    return;
+  }
+  if (kind) {
+    const content = normalizeNewlines(new TextDecoder("utf-8", { ignoreBOM: true }).decode(data));
+    col.manifests.push({ kind, path: rel, content, dep });
+    return;
+  }
+  if (APPLE_DOUBLE_MAGIC.some((m) => data.subarray(0, 4).equals(m))) {
+    const bi = classifyBinary(rel, data.subarray(0, HEADER_SAMPLE), size, "repo");
+    if (bi) col.binaryIssues.push(bi);
+    return;
+  }
+  const dec = decodeSource(data, { py: lang === "py" });
+  const content = normalizeNewlines(dec.text);
+  if (dec.reported) {
+    const lines = content.split("\n");
+    col.binaryIssues.push(mkIssue({ id: "Q-ENCODING", name: "Non-UTF-8 source encoding",
+      type: "SMELL", sev: "INFO",
+      msg: `Source file is not UTF-8 (detected ${dec.encoding}); decoded explicitly.`,
+      why: "A non-UTF-8 source read as UTF-8 decodes to mojibake, hiding every pattern-based finding — a UTF-16 eval() scans clean.",
+      fix: "Re-save the file as UTF-8 so tooling reads it as written.",
+      ref: "Maintainability" }, rel, 1, lines));
+    if (dec.utf7) col.binaryIssues.push(mkIssue({ id: "SC-UTF7", name: "UTF-7 source encoding",
+      type: "HOTSPOT", sev: "CRITICAL",
+      msg: "Python source declares UTF-7; code can hide in comments.",
+      why: "In UTF-7, '+AAo-' decodes to a newline: text that every editor, diff and reviewer shows as a comment becomes executable code when Python reads the file. No legitimate project needs a UTF-7 source file.",
+      fix: "Re-save the file as UTF-8 and review the decoded text (the findings for this file are reported against it).",
+      ref: "CWE-506 · Supply chain" }, rel, dec.cookieLine || 1, lines));
+  }
+  col.files.push({ path: rel, content, lang, dep });
+}
+
+/** __pycache__ is not source-scanned; every .pyc directly inside is checked. */
+function checkPycache(dirBuf, rel, parentNames, issues) {
+  let entries;
+  try { entries = listDir(dirBuf); } catch (e) { issues.push(unreadableIssue(rel, strerror(e))); return; }
+  for (const ent of entries) {
+    const full = childPath(dirBuf, ent.buf);
+    const prel = `${rel}${sep}${ent.str}`;
+    let st;
+    try { st = lstatSync(full); } catch (e) { issues.push(unreadableIssue(prel, strerror(e))); continue; }
+    if (st.isSymbolicLink()) { issues.push(symlinkIssue(prel, readlinkText(full))); continue; }
+    if (!st.isFile() || !ent.str.endsWith(".pyc")) continue;
+    let header;
+    try { header = readBounded(full, PYC_HEADER); } catch (e) { issues.push(unreadableIssue(prel, strerror(e))); continue; }
+    const module = pycModule(ent.str);
+    const hasSource = parentNames.has(`${module}.py`) || parentNames.has(`${module}.pyw`);
+    for (const i of pycIssues(prel, header, hasSource)) issues.push(i);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Report paths (twin of lazaret.scanner.reports)
