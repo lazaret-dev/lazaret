@@ -1016,7 +1016,7 @@ def load_taint_config_for_scan(explicit_path, scan_root, trust_repo=False,
             return []
         if not trust_repo:
             # audit H1: the path is under the scanned repo — sanitize.
-            print(f"  note: {sanitize_term(path)} found but not loaded — a "
+            print(f"  note: {sanitize_term_line(path)} found but not loaded — a "
                   f"scanned repository's taint config is untrusted; pass "
                   f"--trust-repo-config to use its sources/sinks")
             return []
@@ -1030,7 +1030,7 @@ def load_taint_config_for_scan(explicit_path, scan_root, trust_repo=False,
         # rules); a repository config only warns unless --strict-taint-config.
         fatal = not from_repo or strict
         print(f"{'error' if fatal else 'warning'}: could not load taint config "
-              f"{sanitize_term(path)}: {sanitize_term(err)}", file=sys.stderr)
+              f"{sanitize_term_line(path)}: {sanitize_term_line(err)}", file=sys.stderr)
         if fatal:
             sys.exit(EXIT_TAINT_CONFIG)
         return []
@@ -1039,17 +1039,17 @@ def load_taint_config_for_scan(explicit_path, scan_root, trust_repo=False,
     if lazaret_flow is not None:
         lazaret_flow.configure(spec)
     # audit H1: path may be the repo's own config (repo content).
-    print(f"  Loaded taint config: {sanitize_term(path)}"
+    print(f"  Loaded taint config: {sanitize_term_line(path)}"
           + (" (from the scanned repository: sources and sinks only)"
              if from_repo else ""))
     rejected = _dedupe(spec.warnings)
     for msg in rejected + _dedupe(spec.notes):
         # audit H1: msg embeds rejected rule names/patterns verbatim.
-        print(f"warning: {sanitize_term(path)}: {sanitize_term(msg)}",
+        print(f"warning: {sanitize_term_line(path)}: {sanitize_term_line(msg)}",
               file=sys.stderr)
     if rejected and (not from_repo or strict):
         print(f"error: {len(rejected)} taint-config rule(s) rejected in "
-              f"{sanitize_term(path)} — fix them (see warnings above) or the "
+              f"{sanitize_term_line(path)} — fix them (see warnings above) or the "
               f"custom detection they define will not run", file=sys.stderr)
         sys.exit(EXIT_TAINT_CONFIG)
     if not from_repo:
@@ -4978,6 +4978,22 @@ def sanitize_term(s):
     """
     return str(s).translate(_SANITIZE_TERM_TAB)
 
+
+#: Line breaks sanitize_term keeps (\n) or does not know (U+2028, U+2029);
+#: every other line break (\r, \v, \f, \x1c-\x1e, \x85) is a control
+#: character it already maps.
+_LINE_BREAKS_TAB = str.maketrans({"\n": "·", "\u2028": "·", "\u2029": "·"})
+
+
+def sanitize_term_line(s):
+    """sanitize_term for a value printed inside one line of output — a
+    path, a link target, a finding's message: line breaks become '·' too,
+    so the value cannot start a line of its own (review: a file named
+    `zz\\n\\n  Quality gate:  PASSED \\n::notice::…\\n  x.py` printed a fake
+    "PASSED" line and a GitHub workflow command at column 0). Twin of the
+    npm engine's sanitizeTermLine."""
+    return str(s).translate(_SANITIZE_TERM_TAB).translate(_LINE_BREAKS_TAB)
+
 # Rules whose flagged line reveals a credential. The flagged LINE is redacted
 # in every persistent artifact by default (see redact_secret_snippet — audit
 # L1: the old --redact-secrets flag only sanitized the TERMINAL excerpt while
@@ -5080,7 +5096,7 @@ def redact_result(res):
 def print_report(res, quiet):
     m, ct, rt = res["metrics"], res["counts"], res["ratings"]
     print()
-    print(c("1", f"Lazaret scan — {sanitize_term(res['project'])}"))
+    print(c("1", f"Lazaret scan — {sanitize_term_line(res['project'])}"))
     print(f"  {m['files']} files · {m['ncloc']} lines of code · {m['dupPct']}% duplication")
     print()
     gate = c("42;30", " PASSED ") if res["pass"] else c("41;97", " FAILED ")
@@ -5089,7 +5105,7 @@ def print_report(res, quiet):
         mark = c("32", "✓") if cond["ok"] else c("31", "✗")
         # audit H1: a gate condition label can embed a scanned file path
         # ("Taint analysis incomplete → <file>", build_result) — hostile repo.
-        print(f"    {mark} {sanitize_term(cond['label'])}")
+        print(f"    {mark} {sanitize_term_line(cond['label'])}")
     print()
     print(f"  Vulnerabilities   {ct['VULN']:>4}   Security rating        {rt['security']}")
     print(f"  Security hotspots {ct['HOTSPOT']:>4}")
@@ -5115,7 +5131,7 @@ def print_report(res, quiet):
                 # path, or an archive member name in registry mode). Sanitize
                 # the ARGUMENT of c(), never its result — the SGR wrapper
                 # Lazaret emits must survive.
-                print(f"\n  {c('4', sanitize_term(cur_file))}")
+                print(f"\n  {c('4', sanitize_term_line(cur_file))}")
             sev_txt = f"{i['sev']:<8}"
             prefix = f"    L{i['line']:<5} {sev_txt} [{i['rule']}] "
             # audit H1: i['msg'] is static text for most rules but embeds
@@ -5123,7 +5139,7 @@ def print_report(res, quiet):
             # SC-INSTALL-HOOK {cmd!r}, SCA bundle fields). Sanitized inside
             # the f-string, AFTER the colored severity span — sanitizing the
             # whole colored string would strip c()'s own SGR reset.
-            print(f"    L{i['line']:<5} {c(SEV_COLOR[i['sev']], sev_txt)} [{i['rule']}] {sanitize_term(i['msg'])}")
+            print(f"    L{i['line']:<5} {c(SEV_COLOR[i['sev']], sev_txt)} [{i['rule']}] {sanitize_term_line(i['msg'])}")
             ex = issue_excerpt(i)
             if ex:
                 print(" " * len(prefix) + c('2', '» ' + ex))   # aligned under the message
@@ -5336,7 +5352,7 @@ def _baseline_untrusted(res, baseline_path, reason):
     trusted."""
     # audit H1: baseline_path may resolve inside the scanned repo; the
     # message text is sanitized before it reaches the terminal.
-    print(f"warning: baseline {sanitize_term(baseline_path)} {reason} — "
+    print(f"warning: baseline {sanitize_term_line(baseline_path)} {reason} — "
           f"treating it as untrusted: all current findings are counted "
           f"as new", file=sys.stderr)
     for i in res["issues"]:
@@ -5386,8 +5402,8 @@ def apply_baseline(res, baseline_path, scan_root=None):
         # ValueError covers JSONDecodeError, UnicodeDecodeError, the
         # int-digit limit and JsonTooDeep. audit H1: {exc} can echo hostile baseline content
         # (JSONDecodeError position text); sanitize both interpolations.
-        print(f"warning: could not read baseline {sanitize_term(baseline_path)}: "
-              f"{sanitize_term(exc)}", file=sys.stderr)
+        print(f"warning: could not read baseline {sanitize_term_line(baseline_path)}: "
+              f"{sanitize_term_line(exc)}", file=sys.stderr)
         return
     # 48033f94: validate the baseline's shape before using it. A baseline is
     # attacker-adjacent input (it usually comes from the scanned repo or CI
@@ -5396,14 +5412,14 @@ def apply_baseline(res, baseline_path, scan_root=None):
     # already run — losing every result.
     if not isinstance(prev, dict):
         # audit H1: the baseline path can resolve inside the scanned repo.
-        print(f"warning: baseline {sanitize_term(baseline_path)}: top level is "
+        print(f"warning: baseline {sanitize_term_line(baseline_path)}: top level is "
               f"{type(prev).__name__}, not an object — expected "
               f'{{"issues": [...]}}; baseline ignored', file=sys.stderr)
         return
     issues = prev.get("issues", [])
     if not isinstance(issues, list):
         # audit H1: sanitize the repo-adjacent baseline path before printing.
-        print(f"warning: baseline {sanitize_term(baseline_path)}: 'issues' is "
+        print(f"warning: baseline {sanitize_term_line(baseline_path)}: 'issues' is "
               f"{type(issues).__name__}, not a list — baseline ignored",
               file=sys.stderr)
         return
@@ -5422,7 +5438,7 @@ def apply_baseline(res, baseline_path, scan_root=None):
             skipped += 1
     if skipped:
         # audit H1: sanitize the repo-adjacent baseline path before printing.
-        print(f"warning: baseline {sanitize_term(baseline_path)}: {skipped} malformed "
+        print(f"warning: baseline {sanitize_term_line(baseline_path)}: {skipped} malformed "
               f"issue entrie(s) skipped (expected objects with "
               f"rule/file/line)", file=sys.stderr)
     new_count = 0
@@ -5445,6 +5461,9 @@ EXIT_USAGE = 2
 EXIT_INTERNAL = 5
 
 
+_LINE_BREAKS_SPACE = str.maketrans({"\n": " ", "\u2028": " ", "\u2029": " "})
+
+
 def _internal_error(exc):
     """Report an uncaught exception as `error: internal: …` and exit 5. The
     traceback is printed only with LAZARET_DEBUG=1."""
@@ -5452,7 +5471,7 @@ def _internal_error(exc):
     try:
         if debug:
             _traceback.print_exc()
-        detail = sanitize_term(_safe_text(exc)).replace("\n", " ")
+        detail = sanitize_term(_safe_text(exc)).translate(_LINE_BREAKS_SPACE)
         if len(detail) > 500:
             detail = detail[:497] + "..."
         print(f"error: internal: {type(exc).__name__}" + (f": {detail}" if detail else ""),
@@ -5554,7 +5573,7 @@ def _main(argv=None):
     # Usage errors (exit 2) before anything else: a missing target, a file
     # instead of a directory. (An unreadable or empty directory is reported
     # by scan_project, also exit 2.)
-    target_disp = sanitize_term(_fs_display(args.directory))
+    target_disp = sanitize_term_line(_fs_display(args.directory))
     if not os.path.exists(args.directory):
         print(f"error: {target_disp} does not exist (expected a directory to scan)",
               file=sys.stderr)
@@ -5585,7 +5604,7 @@ def _main(argv=None):
     except lazaret_report.ReportPathError as exc:
         # audit H1: {exc} echoes the operator-supplied path, which may sit
         # under the scanned repo (--out-dir / report names); sanitize it.
-        print(f"error: {sanitize_term(exc)}", file=sys.stderr)
+        print(f"error: {sanitize_term_line(exc)}", file=sys.stderr)
         sys.exit(lazaret_report.EXIT_OUTPUT)
 
     # taint config: --taint-config (trusted), else the repo's own
@@ -5604,12 +5623,12 @@ def _main(argv=None):
         res = scan_project(args.directory, args.exclude, include_deps=args.deps,
                            redact_secrets=REDACT_SECRETS, extra_issues=taint_notes)
     except ScanTargetError as exc:
-        print(f"error: {sanitize_term(exc)}", file=sys.stderr)
+        print(f"error: {sanitize_term_line(exc)}", file=sys.stderr)
         sys.exit(EXIT_USAGE)
     for warning in res.get("warnings", ()):
         # audit H1: a warning can carry content parsed out of scanned files
         # (the flow engine raises on hostile input); sanitize it.
-        print(f"warning: {sanitize_term(warning)}", file=sys.stderr)
+        print(f"warning: {sanitize_term_line(warning)}", file=sys.stderr)
 
     # ---- SEAM (flow-sca): baseline block ---------------------------------
     if args.baseline:
@@ -5625,29 +5644,29 @@ def _main(argv=None):
                 paths["sarif"],
                 lambda: lazaret_report.sarif_renderer(sarif_report(res, root=args.directory)),
                 kind="sarif", strict=args.force_overwrite)
-            print(f"  SARIF report: {sanitize_term(sarif_path)}")
+            print(f"  SARIF report: {sanitize_term_line(sarif_path)}")
         if not args.no_json:
             json_path = lazaret_report.write_report(
                 paths["json"],
                 lambda: lazaret_report.json_renderer(res),
                 kind="json", strict=args.force_overwrite)
-            print(f"  JSON report: {sanitize_term(json_path)}")
+            print(f"  JSON report: {sanitize_term_line(json_path)}")
         if not args.no_html:
             html_path = lazaret_report.write_report(
                 paths["html"],
                 lambda: _html_report_marked(res),
                 kind="html", strict=args.force_overwrite)
-            print(f"  HTML report: {sanitize_term(html_path)}")
+            print(f"  HTML report: {sanitize_term_line(html_path)}")
     except lazaret_report.ReportPathError as exc:
         # Only reachable if the pre-scan checks raced with an external
         # change (TOCTOU); the scan itself already ran and printed above.
         # audit H1: sanitize the echoed path before it reaches the terminal.
-        print(f"error: {sanitize_term(exc)}", file=sys.stderr)
+        print(f"error: {sanitize_term_line(exc)}", file=sys.stderr)
         sys.exit(lazaret_report.EXIT_OUTPUT)
     except OSError as exc:
         # disk full, quota, a directory removed mid-run: an output error (3),
         # not an internal one.
-        print(f"error: could not write a report: {sanitize_term(_safe_text(exc))}",
+        print(f"error: could not write a report: {sanitize_term_line(_safe_text(exc))}",
               file=sys.stderr)
         sys.exit(lazaret_report.EXIT_OUTPUT)
     print()

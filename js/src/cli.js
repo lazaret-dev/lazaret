@@ -17,7 +17,7 @@ import { scanManifest, scanGyp } from "./lib/supplychain.js";
 import { redactResult, setRedactSecrets } from "./lib/redact.js";
 import {
   buildResult, jsonRenderer, htmlRenderer, printReport, sarifReport, sarifRenderer,
-  sanitizeTerm, setExcerptWidth,
+  sanitizeTerm, sanitizeTermLine, setExcerptWidth,
 } from "./report.js";
 import { clipLine } from "./lib/issue.js";
 import { applyBaseline, BASELINE_KEY_ENV } from "./baseline.js";
@@ -184,7 +184,7 @@ export function run(argv, io = {}) {
     const debug = env.LAZARET_DEBUG === "1";
     try {
       if (debug && e && e.stack) err(sanitizeTerm(e.stack));
-      let detail = sanitizeTerm(e && e.message !== undefined ? e.message : String(e)).replace(/\n/g, " ");
+      let detail = sanitizeTerm(e && e.message !== undefined ? e.message : String(e)).replace(/[\n\u2028\u2029]/g, " ");
       if (detail.length > 500) detail = detail.slice(0, 497) + "...";
       err(`error: internal: ${(e && e.name) || "Error"}` + (detail ? `: ${detail}` : ""));
       if (!debug) err("  (this is a Lazaret bug, not a scan result; set LAZARET_DEBUG=1 for a traceback)");
@@ -200,7 +200,7 @@ function runChecked(argv, io) {
   const err = io.err ?? ((s) => console.error(s));
   const env = io.env ?? process.env;
   const usage = (msg) => {
-    err(`error: ${sanitizeTerm(msg)}`);
+    err(`error: ${sanitizeTermLine(msg)}`);
     err("Run 'lazaret --help' for usage.");
     return EXIT_USAGE;
   };
@@ -228,11 +228,11 @@ function runChecked(argv, io) {
   let st = null;
   try { st = statSync(root); } catch { /* missing */ }
   if (!st) {
-    err(`error: ${sanitizeTerm(dirArg)} does not exist (expected a directory to scan)`);
+    err(`error: ${sanitizeTermLine(dirArg)} does not exist (expected a directory to scan)`);
     return EXIT_USAGE;
   }
   if (!st.isDirectory()) {
-    err(`error: ${sanitizeTerm(dirArg)} is not a directory (lazaret scans a project directory)`);
+    err(`error: ${sanitizeTermLine(dirArg)} is not a directory (lazaret scans a project directory)`);
     return EXIT_USAGE;
   }
   if (opts.excerptWidth !== undefined) setExcerptWidth(opts.excerptWidth);
@@ -252,7 +252,7 @@ function runChecked(argv, io) {
     });
     validateReportPaths(paths, !!opts.force);
   } catch (e) {
-    if (e instanceof ReportPathError) { err(`error: ${sanitizeTerm(e.message)}`); return EXIT_OUTPUT; }
+    if (e instanceof ReportPathError) { err(`error: ${sanitizeTermLine(e.message)}`); return EXIT_OUTPUT; }
     throw e;
   }
 
@@ -262,12 +262,12 @@ function runChecked(argv, io) {
     col = collectFiles(root, { includeDeps: !!opts.deps, exclude: opts.exclude,
       maxFileBytes: opts.maxSourceBytes ?? envPositiveInt(env.LAZARET_MAX_SOURCE_BYTES) ?? MAX_FILE_BYTES });
   } catch (e) {
-    if (e instanceof ScanTargetError) { err(`error: ${sanitizeTerm(e.message)}`); return EXIT_USAGE; }
+    if (e instanceof ScanTargetError) { err(`error: ${sanitizeTermLine(e.message)}`); return EXIT_USAGE; }
     throw e;
   }
   const { files, manifests, binaryIssues, skippedIssues } = col;
   if (!files.length && !manifests.length && !col.pth.length && !binaryIssues.length) {
-    err(`error: ${sanitizeTerm(`nothing to scan under ${fsNameToString(Buffer.from(root))}: no Python, JavaScript or SQL sources, package manifests or other files to check`)}`);
+    err(`error: ${sanitizeTermLine(`nothing to scan under ${fsNameToString(Buffer.from(root))}: no Python, JavaScript or SQL sources, package manifests or other files to check`)}`);
     return EXIT_USAGE;
   }
   const issues = [];
@@ -288,7 +288,7 @@ function runChecked(argv, io) {
   add(skippedIssues);
   const res = redactResult(buildResult(root, files, issues), clipLine);
   if (opts.baseline) {
-    applyBaseline(res, opts.baseline, { root, env, warn: (m) => err(sanitizeTerm(m)) });
+    applyBaseline(res, opts.baseline, { root, env, warn: (m) => err(sanitizeTermLine(m)) });
   }
   printReport(res, { out, quiet: !!opts.quiet });
 
@@ -297,21 +297,21 @@ function runChecked(argv, io) {
   try {
     if (paths.sarif) {
       writeReport(paths.sarif, () => sarifRenderer(sarifReport(res, root)), { kind: "sarif", strict });
-      out(`  SARIF report: ${sanitizeTerm(paths.sarif)}`);
+      out(`  SARIF report: ${sanitizeTermLine(paths.sarif)}`);
     }
     if (paths.json) {
       writeReport(paths.json, () => jsonRenderer(res, { key: env[BASELINE_KEY_ENV] }), { kind: "json", strict });
-      out(`  JSON report: ${sanitizeTerm(paths.json)}`);
+      out(`  JSON report: ${sanitizeTermLine(paths.json)}`);
     }
     if (paths.html) {
       writeReport(paths.html, () => htmlRenderer(res), { kind: "html", strict });
-      out(`  HTML report: ${sanitizeTerm(paths.html)}`);
+      out(`  HTML report: ${sanitizeTermLine(paths.html)}`);
     }
   } catch (e) {
     // Any write failure (a race with the pre-scan checks, ENOSPC, EISDIR, …)
     // is a report output error, not an internal one.
-    if (e instanceof ReportPathError) err(`error: ${sanitizeTerm(e.message)}`);
-    else err(`error: could not write a report: ${sanitizeTerm(e && e.message ? e.message : e)}`);
+    if (e instanceof ReportPathError) err(`error: ${sanitizeTermLine(e.message)}`);
+    else err(`error: could not write a report: ${sanitizeTermLine(e && e.message ? e.message : e)}`);
     return EXIT_OUTPUT;
   }
 

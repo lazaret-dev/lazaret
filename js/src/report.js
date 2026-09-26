@@ -88,6 +88,20 @@ const TERM_UNSAFE_RE = /[\x00-\x08\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/
 export function sanitizeTerm(text) {
   return String(text).replace(TERM_UNSAFE_RE, "·");
 }
+// Line breaks sanitizeTerm keeps (LF) or does not know (U+2028, U+2029); the
+// other line breaks (CR, VT, FF, U+001C-U+001E, U+0085) are control
+// characters it already maps.
+const LINE_BREAK_RE = /[\n\u2028\u2029]/g;
+/**
+ * sanitizeTerm for a value printed inside one line of output (a path, a link
+ * target, a message): line breaks become '·' too, so the value cannot start
+ * a line of its own (review: a file named "zz\n\n  Quality gate:  PASSED
+ * \n::notice::…\n  x.py" printed a fake PASSED line and a GitHub workflow
+ * command at column 0). Twin of core.sanitize_term_line.
+ */
+export function sanitizeTermLine(text) {
+  return sanitizeTerm(text).replace(LINE_BREAK_RE, "·");
+}
 
 export let EXCERPT_WIDTH = 100;
 export function setExcerptWidth(n) { EXCERPT_WIDTH = n; }
@@ -117,11 +131,11 @@ export function issueExcerpt(issue, width = EXCERPT_WIDTH) {
 export function printReport(res, { out = console.log, quiet = false } = {}) {
   const m = res.metrics;
   out("");
-  out(`Lazaret scan — ${sanitizeTerm(res.project)}`);
+  out(`Lazaret scan — ${sanitizeTermLine(res.project)}`);
   out(`  ${m.files} files · ${m.ncloc} lines of code · ${m.dupPct}% duplication`);
   out("");
   out(`  Quality gate: ${res.pass ? "PASSED" : "FAILED"}`);
-  for (const cond of res.conditions) out(`  ${cond.ok ? "✓" : "✗"} ${sanitizeTerm(cond.label)}`);
+  for (const cond of res.conditions) out(`  ${cond.ok ? "✓" : "✗"} ${sanitizeTermLine(cond.label)}`);
   out(`  Ratings: security ${res.ratings.security} · reliability ${res.ratings.reliability} · maintainability ${res.ratings.maintainability}`);
   out(`  Issues: ${res.counts.VULN} vulnerabilities · ${res.counts.HOTSPOT} hotspots · ${res.counts.BUG} bugs · ${res.counts.SMELL} smells · ${res.supplyChain} supply-chain`);
   if (m.depFiles) out(`  Dependency files scanned: ${m.depFiles}`);
@@ -129,7 +143,7 @@ export function printReport(res, { out = console.log, quiet = false } = {}) {
   if (!quiet) {
     const shown = res.issues.slice(0, 40);
     for (const i of shown) {
-      out(`  ${i.sev} ${i.rule} ${sanitizeTerm(i.file)}:${i.line} — ${safeExcerpt(i.msg, 90)}`);
+      out(`  ${i.sev} ${i.rule} ${sanitizeTermLine(i.file)}:${i.line} — ${safeExcerpt(i.msg, 90)}`);
       const ex = issueExcerpt(i);
       if (ex) out(`      » ${ex}`);
     }
