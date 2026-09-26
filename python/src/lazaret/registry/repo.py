@@ -68,7 +68,12 @@ def _env_number(var, default, kind=int):
 
 
 USER_AGENT = "Lazaret-registry-scanner/1.0"
-MAX_MEMBER = 1_000_000     # bytes of a text file we will scan as source
+# Bytes of one text file scanned as source; a larger file is SC-TRUNCATED and
+# the verdict INCOMPLETE. Single-file bundles (a CLI's dist/index.js) often
+# pass 1 MB, the old limit (npm:pullfrog 0.1.84 ships two of 7.8 and 8.0 MB),
+# and the scan stays linear: both of those scan in about 5 s each.
+# Env LAZARET_MAX_SOURCE_BYTES / --max-source-bytes.
+MAX_MEMBER = _env_number("LAZARET_MAX_SOURCE_BYTES", 16_000_000)
 MAX_FILES = 20_000         # files per package (numpy's sdist alone has >4,000)
 SAMPLE = 8192              # header/entropy sample read from oversized files
 # 2.4: every PyPI artifact, decode/cookie handling, archive structure checks,
@@ -1084,8 +1089,8 @@ def _iter_zip(data, artifact, budget, anomalies):
 # Detail text for each truncation reason (verdict integrity, audit C2/G16).
 _TRUNC_DETAILS = {
     "member": lambda rel, size: (
-        f"member {rel} decompresses to more than the {MAX_MEMBER:,}-byte "
-        f"source-scan limit ({size:,} real decompressed bytes available)"),
+        f"{rel} is larger than the {MAX_MEMBER:,}-byte source-scan limit, so it was "
+        f"not scanned (raise the limit with --max-source-bytes)"),
     "files": lambda rel, size: (
         f"archive holds more than {MAX_FILES:,} file entries — entry order is "
         f"attacker-controlled (stopped at {rel})"),
@@ -1316,6 +1321,23 @@ def _archive_issue(kind, path, detail):
             "snippet": [], "snipStart": 1}
 
 
+# Files package.json can name that are not run as script text: data (JSON),
+# native code (.node, .wasm), and the assets a package exports for bundlers
+# (stylesheets, source maps, fonts, images). An oversized
+# one is not "code that runs at install/import time". Anything else named as
+# main / bin / exports still counts as code even with an odd extension:
+# require() runs a file with an unknown extension (x.cjs.txt, core.dat) as
+# JavaScript.
+_NOT_RUN_EXTS = frozenset((
+    ".json", ".node", ".wasm", ".css", ".scss", ".sass", ".less", ".styl", ".map",
+    ".svg", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".ico", ".bmp",
+    ".woff", ".woff2", ".ttf", ".otf", ".eot"))
+
+
+def _not_run_as_script(rel):
+    return os.path.splitext(rel)[1].lower() in _NOT_RUN_EXTS
+
+
 class _ArtifactScan:
     """Scan state for one archive: classify members as they stream by, then
     resolve what package.json / setup.py say runs (entry points, install
@@ -1325,6 +1347,7 @@ class _ArtifactScan:
         self.artifact, self.full = artifact, full
         self.issues, self.files_scanned, self.binaries = [], 0, 0
         self.truncated, self.truncated_emitted = 0, 0
+        self.truncated_at = {}     # rel -> its SC-TRUNCATED issue (None past the cap)
         self.sources = {}          # rel -> (text, lang) scanned as source
         self.deferred = {}         # rel -> raw bytes (text, not scanned yet)
         self.deferred_bytes = 0
@@ -1338,10 +1361,22 @@ class _ArtifactScan:
 
     # ---- bookkeeping ----
     def truncate(self, rel, detail):
+        """One SC-TRUNCATED finding, and one "part not fully scanned", per
+        file: another reason for the same file (it also runs at install time,
+        and package.json can name it as main, bin and exports) is added to
+        that finding's message instead of repeating it."""
+        if rel in self.truncated_at:
+            issue = self.truncated_at[rel]
+            if issue is not None and detail not in issue["msg"]:
+                issue["msg"] = f"{issue['msg'][:-1]}; {detail}."
+            return
         self.truncated += 1
+        issue = None
         if self.truncated_emitted < TRUNCATED_FINDING_CAP:
-            self.issues.append(lazaret.truncated_issue(rel, detail))
+            issue = lazaret.truncated_issue(rel, detail)
+            self.issues.append(issue)
             self.truncated_emitted += 1
+        self.truncated_at[rel] = issue
 
     def add_decode_issues(self, extra, keep_encoding=True):
         for i in extra:
@@ -1450,8 +1485,8 @@ class _ArtifactScan:
             return self.sources[rel][0]
         if rel in self.shell:
             return self.shell[rel]
-        if os.path.splitext(rel)[1].lower() in (".json", ".node", ".wasm"):
-            return None          # loaded as data / native code, not run as script text
+        if _not_run_as_script(rel):
+            return None          # data, native code, a stylesheet, an asset: not run as script
         if rel in self.deferred:
             raw = self.deferred.pop(rel)
             if as_lang == "sh" or _shebang_lang(raw[:256].decode("utf-8", "replace")) == "sh":
@@ -1466,9 +1501,10 @@ class _ArtifactScan:
             self.truncate(rel, f"{rel} runs at install/import time but was not kept for "
                                f"scanning (text budget exhausted)")
         elif rel in self.oversize:
-            self.truncate(rel, f"{rel} runs at install/import time but exceeds the "
-                               f"{MAX_MEMBER:,}-byte scan limit")
-        elif rel in self.binary and os.path.splitext(rel)[1].lower() not in (".node", ".wasm", ".json"):
+            self.truncate(rel, "it runs at install/import time" if rel in self.truncated_at
+                          else f"{rel} runs at install/import time but is larger than the "
+                               f"{MAX_MEMBER:,}-byte source-scan limit")
+        elif rel in self.binary:
             self.truncate(rel, f"{rel} runs at install/import time but is not text, so it "
                                f"could not be scanned")
         return None
@@ -2647,7 +2683,7 @@ def _finish_sweep(errors, bad, ci):
 
 
 def main():
-    global SCAN_TIMEOUT, MAX_ARTIFACTS, MAX_PACKAGE_DOWNLOAD_BYTES
+    global SCAN_TIMEOUT, MAX_ARTIFACTS, MAX_PACKAGE_DOWNLOAD_BYTES, MAX_MEMBER
     lazaret.configure_stdio()
     ap = argparse.ArgumentParser(prog="lazaret-registry", description="Lazaret npm/PyPI registry scanner")
     ap.add_argument("command", choices=["add", "scan", "scan-all", "list", "report", "discover"])
@@ -2672,6 +2708,10 @@ def main():
     ap.add_argument("--max-artifacts", type=int, metavar="N",
                     help=f"PyPI files scanned per release (default {MAX_ARTIFACTS}, env "
                          f"LAZARET_MAX_ARTIFACTS); more makes the verdict INCOMPLETE")
+    ap.add_argument("--max-source-bytes", type=int, metavar="BYTES",
+                    help=f"Largest text file scanned as source (default {MAX_MEMBER:,}, env "
+                         f"LAZARET_MAX_SOURCE_BYTES); a larger one is not fully scanned and "
+                         f"the verdict is INCOMPLETE. Re-scan a stored version with --rescan")
     ap.add_argument("--max-download-bytes", type=int, metavar="BYTES",
                     help=f"Total bytes downloaded per package, all release files together "
                          f"(default {MAX_PACKAGE_DOWNLOAD_BYTES} = "
@@ -2700,6 +2740,8 @@ def main():
         MAX_ARTIFACTS = args.max_artifacts
     if args.max_download_bytes and args.max_download_bytes > 0:
         MAX_PACKAGE_DOWNLOAD_BYTES = args.max_download_bytes
+    if args.max_source_bytes and args.max_source_bytes > 0:
+        MAX_MEMBER = args.max_source_bytes
     try:
         store = Store(args.db)
     except RuntimeError as exc:
