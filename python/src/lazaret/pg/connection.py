@@ -991,6 +991,8 @@ class Connection:
         while True:
             kind, body = self._read_message()
             if kind == b"D":
+                if decode is None:       # as in iterate(): never a raw TypeError
+                    raise _malformed("data row before row description")
                 if keep_rows and error is None:
                     rows.append(decode(body))
             elif kind == b"T":
