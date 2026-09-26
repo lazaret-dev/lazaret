@@ -73,13 +73,18 @@ def password_phishing_server(request, tls_context=None):
         if tls_context is not None:
             recv_exact(conn, 8)  # SSLRequest
             conn.sendall(b"S")
+            # wrap_socket takes over the socket: FakeServer's close() of the
+            # plain one is then a no-op, so this one is closed here
             conn = tls_context.wrap_socket(conn, server_side=True)
-        srv.read_startup(conn)
-        conn.sendall(request)
         try:
-            srv.read_message(conn)
-        except OSError:
-            pass
+            srv.read_startup(conn)
+            conn.sendall(request)
+            try:
+                srv.read_message(conn)
+            except OSError:
+                pass
+        finally:
+            conn.close()
     return FakeServer(script)
 
 
@@ -166,15 +171,15 @@ class TlsTerminatingMitmTests(unittest.TestCase):
         def script(conn, srv):
             recv_exact(conn, 8)
             conn.sendall(b"S")
-            conn = self.ctx.wrap_socket(conn, server_side=True)
-            srv.read_startup(conn)
-            conn.sendall(auth(10, b"SCRAM-SHA-256-PLUS\x00SCRAM-SHA-256\x00\x00"))
-            _, body = srv.read_message(conn)
-            seen["mechanism"] = body[:body.index(b"\x00")]
-            first = body[body.index(b"\x00") + 5:].decode()
-            nonce = first.split("r=")[1]
-            conn.sendall(auth(11, f"r={nonce}MITM,s={base64.b64encode(b'salt').decode()},i=4096".encode()))
-            srv.read_message(conn)
+            with self.ctx.wrap_socket(conn, server_side=True) as conn:
+                srv.read_startup(conn)
+                conn.sendall(auth(10, b"SCRAM-SHA-256-PLUS\x00SCRAM-SHA-256\x00\x00"))
+                _, body = srv.read_message(conn)
+                seen["mechanism"] = body[:body.index(b"\x00")]
+                first = body[body.index(b"\x00") + 5:].decode()
+                nonce = first.split("r=")[1]
+                conn.sendall(auth(11, f"r={nonce}MITM,s={base64.b64encode(b'salt').decode()},i=4096".encode()))
+                srv.read_message(conn)
         srv = FakeServer(script)
         with self.assertRaises(pg.Error):   # the fake can't finish SCRAM, but it was attempted
             fake_connect(srv, sslmode="require")

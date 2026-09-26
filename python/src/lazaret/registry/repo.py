@@ -1969,7 +1969,30 @@ class Store:
                 raise StoreConfigError(f"cannot open SQLite database: {exc}") from exc
             self._configure_sqlite()
             self.ph, self.t = "?", ""
-        self._init_schema()
+        try:
+            self._init_schema()
+        except BaseException:
+            self.close()
+            raise
+
+    def close(self):
+        """Close the database connection (idempotent). Every caller closes
+        what it opens: a long-running MCP server must not keep a handle per
+        tool call, and Windows can't delete a database file that is still
+        open (STRUCTURE.md, "Cross-platform rules", rule 3)."""
+        conn = getattr(self, "conn", None)
+        if conn is not None and not getattr(self, "_closed", False):
+            self._closed = True
+            try:
+                conn.close()
+            except Exception:                                  # noqa: BLE001
+                pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        self.close()
 
     def _phs(self, n):
         """n positional placeholders for the ACTIVE backend, in order.
@@ -2684,100 +2707,104 @@ def main():
         # sys.exit — the MCP server dispatches it); here the CLI keeps the
         # exact legacy behavior.
         sys.exit(str(exc))
-    errors = []
-    args._errors = errors
+    try:
+        errors = []
+        args._errors = errors
 
-    if args.command == "add":
-        for spec in args.specs:
+        if args.command == "add":
+            for spec in args.specs:
+                try:
+                    eco, name, _ = parse_spec(spec)
+                except SpecError as exc:
+                    sys.exit(f"error: {lazaret.sanitize_term(exc)}")
+                _, created = store.add_package(eco, name)
+                # audit H1: operator CLI arg; sanitize is a no-op for clean names.
+                print(f"{'added' if created else 'already tracked'}: "
+                      f"{lazaret.sanitize_term(eco)}:{lazaret.sanitize_term(name)}")
+
+        elif args.command == "scan":
+            if not args.specs:
+                sys.exit("scan needs at least one package spec")
+            bad = cmd_scan(store, args.specs, args.full, args.rescan, errors=errors)
+            _finish_sweep(errors, bad, args.ci)
+
+        elif args.command == "scan-all":
+            specs = [f"{eco}:{name}" for _, eco, name in store.packages()]
+            if not specs:
+                sys.exit("no tracked packages — use 'add' first")
+            print(f"Scanning latest versions of {len(specs)} tracked package(s)…")
+            bad = cmd_scan(store, specs, args.full, args.rescan, errors=errors)
+            _finish_sweep(errors, bad, args.ci)
+
+        elif args.command == "discover":
             try:
-                eco, name, _ = parse_spec(spec)
+                bad = cmd_discover(store, args)
+            except ValueError as exc:
+                # CLI boundary: parse_since raises ValueError for a bad --since
+                # (library code must not raise SystemExit — the MCP server
+                # dispatches discover_packages); the CLI keeps the exact legacy
+                # behavior: message on stderr, exit 1.
+                sys.exit(str(exc))
+            _finish_sweep(errors, bad, args.ci)
+
+        elif args.command == "list":
+            rows = store.status()
+            if not rows:
+                print("no tracked packages")
+                return
+            print(f"\n{'package':<40} {'last scan':<22} {'version':<12} {'verdict':<11} issues")
+            for eco, name, ver, profile, at, verdict, n, supply in rows:
+                # audit H1: eco/name/ver come from the stored DB blob (registry
+                # data). Sanitize BEFORE the <40/<12 width padding so the column
+                # alignment is computed on the string that is actually printed
+                # ('·' is one char, so widths stay correct).
+                pkg = lazaret.sanitize_term(f"{eco}:{name}")
+                if ver is None:
+                    print(f"{pkg:<40} {'— never scanned':<22}")
+                else:
+                    # sanitize the ARGUMENT of c(), never its result.
+                    vc = c(VERDICT_COLOR.get(verdict, "0"), lazaret.sanitize_term(verdict))
+                    extra = f" ({supply} supply-chain)" if supply else ""
+                    print(f"{pkg:<40} {at:<22} "
+                          f"{lazaret.sanitize_term(ver):<12} {vc:<11} {n}{extra}")
+
+        elif args.command == "report":
+            if not args.specs:
+                sys.exit("report needs a package spec")
+            try:
+                eco, name, ver = parse_spec(args.specs[0])
             except SpecError as exc:
                 sys.exit(f"error: {lazaret.sanitize_term(exc)}")
-            _, created = store.add_package(eco, name)
-            # audit H1: operator CLI arg; sanitize is a no-op for clean names.
-            print(f"{'added' if created else 'already tracked'}: "
-                  f"{lazaret.sanitize_term(eco)}:{lazaret.sanitize_term(name)}")
+            rep = store.report(eco, name, ver)
+            if not rep:
+                # audit H1: args.specs[0] is echoed before any validation applies
+                # to it on this path (parse_spec accepts a scoped name; a hostile
+                # discovery-fed spec reaches here verbatim).
+                sys.exit(f"no stored scan for {lazaret.sanitize_term(args.specs[0])}")
+            # audit H1: rep[] fields are read back from the stored DB blob, which
+            # was built from registry metadata + package content.
+            print(f"\n{lazaret.sanitize_term(eco)}:{lazaret.sanitize_term(name)}@"
+                  f"{lazaret.sanitize_term(rep['version'])} — "
+                  f"{lazaret.sanitize_term(rep['verdict'])} "
+                  f"(profile {rep['profile']}, scanned {rep['scannedAt']})")
+            for a in rep.get("artifacts") or []:
+                if isinstance(a, dict) and len(rep["artifacts"]) > 1:
+                    print(f"  {lazaret.sanitize_term(a.get('verdict'))!s:<10} "
+                          f"{lazaret.sanitize_term(a.get('filename'))}")
+            for i in rep["issues"]:
+                prefix = f"  {i['sev']:<8} [{i['rule']}] "
+                # audit H1: stored archive member names + rule messages that embed
+                # package content (SC-INSTALL-HOOK cmd, SCA advisory titles).
+                print(f"{prefix}{lazaret.sanitize_term(i['file'])}:{i['line']} — "
+                      f"{lazaret.sanitize_term(i['msg'])}")
+                ex = lazaret.issue_excerpt(i)
+                if ex:
+                    print(" " * len(prefix) + c('2', '» ' + ex))
+            if not rep["issues"]:
+                print("  no findings")
 
-    elif args.command == "scan":
-        if not args.specs:
-            sys.exit("scan needs at least one package spec")
-        bad = cmd_scan(store, args.specs, args.full, args.rescan, errors=errors)
-        _finish_sweep(errors, bad, args.ci)
-
-    elif args.command == "scan-all":
-        specs = [f"{eco}:{name}" for _, eco, name in store.packages()]
-        if not specs:
-            sys.exit("no tracked packages — use 'add' first")
-        print(f"Scanning latest versions of {len(specs)} tracked package(s)…")
-        bad = cmd_scan(store, specs, args.full, args.rescan, errors=errors)
-        _finish_sweep(errors, bad, args.ci)
-
-    elif args.command == "discover":
-        try:
-            bad = cmd_discover(store, args)
-        except ValueError as exc:
-            # CLI boundary: parse_since raises ValueError for a bad --since
-            # (library code must not raise SystemExit — the MCP server
-            # dispatches discover_packages); the CLI keeps the exact legacy
-            # behavior: message on stderr, exit 1.
-            sys.exit(str(exc))
-        _finish_sweep(errors, bad, args.ci)
-
-    elif args.command == "list":
-        rows = store.status()
-        if not rows:
-            print("no tracked packages")
-            return
-        print(f"\n{'package':<40} {'last scan':<22} {'version':<12} {'verdict':<11} issues")
-        for eco, name, ver, profile, at, verdict, n, supply in rows:
-            # audit H1: eco/name/ver come from the stored DB blob (registry
-            # data). Sanitize BEFORE the <40/<12 width padding so the column
-            # alignment is computed on the string that is actually printed
-            # ('·' is one char, so widths stay correct).
-            pkg = lazaret.sanitize_term(f"{eco}:{name}")
-            if ver is None:
-                print(f"{pkg:<40} {'— never scanned':<22}")
-            else:
-                # sanitize the ARGUMENT of c(), never its result.
-                vc = c(VERDICT_COLOR.get(verdict, "0"), lazaret.sanitize_term(verdict))
-                extra = f" ({supply} supply-chain)" if supply else ""
-                print(f"{pkg:<40} {at:<22} "
-                      f"{lazaret.sanitize_term(ver):<12} {vc:<11} {n}{extra}")
-
-    elif args.command == "report":
-        if not args.specs:
-            sys.exit("report needs a package spec")
-        try:
-            eco, name, ver = parse_spec(args.specs[0])
-        except SpecError as exc:
-            sys.exit(f"error: {lazaret.sanitize_term(exc)}")
-        rep = store.report(eco, name, ver)
-        if not rep:
-            # audit H1: args.specs[0] is echoed before any validation applies
-            # to it on this path (parse_spec accepts a scoped name; a hostile
-            # discovery-fed spec reaches here verbatim).
-            sys.exit(f"no stored scan for {lazaret.sanitize_term(args.specs[0])}")
-        # audit H1: rep[] fields are read back from the stored DB blob, which
-        # was built from registry metadata + package content.
-        print(f"\n{lazaret.sanitize_term(eco)}:{lazaret.sanitize_term(name)}@"
-              f"{lazaret.sanitize_term(rep['version'])} — "
-              f"{lazaret.sanitize_term(rep['verdict'])} "
-              f"(profile {rep['profile']}, scanned {rep['scannedAt']})")
-        for a in rep.get("artifacts") or []:
-            if isinstance(a, dict) and len(rep["artifacts"]) > 1:
-                print(f"  {lazaret.sanitize_term(a.get('verdict'))!s:<10} "
-                      f"{lazaret.sanitize_term(a.get('filename'))}")
-        for i in rep["issues"]:
-            prefix = f"  {i['sev']:<8} [{i['rule']}] "
-            # audit H1: stored archive member names + rule messages that embed
-            # package content (SC-INSTALL-HOOK cmd, SCA advisory titles).
-            print(f"{prefix}{lazaret.sanitize_term(i['file'])}:{i['line']} — "
-                  f"{lazaret.sanitize_term(i['msg'])}")
-            ex = lazaret.issue_excerpt(i)
-            if ex:
-                print(" " * len(prefix) + c('2', '» ' + ex))
-        if not rep["issues"]:
-            print("  no findings")
+    finally:
+        store.close()
 
 
 if __name__ == "__main__":

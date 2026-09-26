@@ -489,10 +489,10 @@ def tool_scan_package(args):
     ctx = _ctx()
     eco, name, ver = lazaret_repo.parse_spec(spec)
     # open the state DB first: an unreachable DB is a tool error before any download
-    store = lazaret_repo.Store(REGISTRY_DB)
-    res = lazaret_repo.scan_package(eco, name, ver, full=bool(args.get("full")),
-                                    deadline=ctx.deadline, cancel=ctx.cancelled)
-    store_error = _store_result(store, eco, name, res)
+    with lazaret_repo.Store(REGISTRY_DB) as store:
+        res = lazaret_repo.scan_package(eco, name, ver, full=bool(args.get("full")),
+                                        deadline=ctx.deadline, cancel=ctx.cancelled)
+        store_error = _store_result(store, eco, name, res)
     out = {"package": f"{eco}:{name}@{res['version']}", "artifact": res.get("artifact"),
            "verdict": res["verdict"], "verdictReason": res.get("verdictReason"),
            "profile": res["profile"],
@@ -510,9 +510,10 @@ def tool_scan_package(args):
 def tool_registry_status(args):
     if lazaret_repo is None:
         raise ValueError("Registry scanning unavailable (lazaret.registry not importable).")
-    store = lazaret_repo.Store(REGISTRY_DB)
+    with lazaret_repo.Store(REGISTRY_DB) as store:
+        status = store.status()
     rows = []
-    for eco, name, ver, profile, at, verdict, n, supply in store.status():
+    for eco, name, ver, profile, at, verdict, n, supply in status:
         rows.append({"package": f"{eco}:{name}", "lastVersion": ver, "lastScan": at,
                      "verdict": verdict, "issues": n, "supplyChain": supply})
     return {"tracked": len(rows), "packages": rows}
@@ -542,48 +543,48 @@ def tool_discover_packages(args):
            "packages": [{"ecosystem": e, "name": n, "version": v, "when": w.isoformat()}
                         for e, n, v, w in discovered]}
     if args.get("scan"):
-        store = lazaret_repo.Store(REGISTRY_DB)
-        results, reasons = [], []
-        for i, (e, n, v, _w) in enumerate(discovered):
-            ctx.check()
-            spec = f"{e}:{n}" + (f"@{v}" if v else "")
-            # A discovered package that is not scanned cannot be cleared: it
-            # is listed as INCOMPLETE (so it shows up in `flagged`) and the
-            # call is marked incomplete, never silently dropped.
-            if i >= MAX_DISCOVER_SCANS:
-                why = f"discover_packages scans at most {MAX_DISCOVER_SCANS} packages per call"
-            elif ctx.expired():
-                why = f"time budget of {ctx.max_seconds:g} s (LAZARET_MCP_MAX_SECONDS) exceeded"
-            else:
-                why = None
-            if why:
-                results.append({"package": spec, "verdict": "INCOMPLETE",
-                                "error": f"not scanned: {why}"})
-                if why not in reasons:
-                    reasons.append(why)
-                continue
-            try:
-                # tracked even when the scan fails, so the next sweep retries it
-                store.add_package(e, n)
-            except Exception:                              # noqa: BLE001
-                pass
-            try:
-                res = lazaret_repo.scan_package(e, n, v, deadline=ctx.deadline,
-                                                cancel=ctx.cancelled)
-            except lazaret_repo.ScanCancelled:
-                raise
-            except Exception as exc:                       # noqa: BLE001
-                # a package that could not be scanned cannot be cleared
-                results.append({"package": spec, "verdict": "INCOMPLETE", "error": str(exc)})
-                continue
-            entry = {"package": f"{e}:{n}@{res['version']}", "verdict": res["verdict"],
-                     "verdictReason": res.get("verdictReason"),
-                     "supplyChainIndicators": res["supplyChain"],
-                     "binaryArtifacts": res.get("binaryArtifacts", 0)}
-            store_error = _store_result(store, e, n, res)
-            if store_error:
-                entry["storeError"] = store_error
-            results.append(entry)
+        with lazaret_repo.Store(REGISTRY_DB) as store:
+            results, reasons = [], []
+            for i, (e, n, v, _w) in enumerate(discovered):
+                ctx.check()
+                spec = f"{e}:{n}" + (f"@{v}" if v else "")
+                # A discovered package that is not scanned cannot be cleared: it
+                # is listed as INCOMPLETE (so it shows up in `flagged`) and the
+                # call is marked incomplete, never silently dropped.
+                if i >= MAX_DISCOVER_SCANS:
+                    why = f"discover_packages scans at most {MAX_DISCOVER_SCANS} packages per call"
+                elif ctx.expired():
+                    why = f"time budget of {ctx.max_seconds:g} s (LAZARET_MCP_MAX_SECONDS) exceeded"
+                else:
+                    why = None
+                if why:
+                    results.append({"package": spec, "verdict": "INCOMPLETE",
+                                    "error": f"not scanned: {why}"})
+                    if why not in reasons:
+                        reasons.append(why)
+                    continue
+                try:
+                    # tracked even when the scan fails, so the next sweep retries it
+                    store.add_package(e, n)
+                except Exception:                              # noqa: BLE001
+                    pass
+                try:
+                    res = lazaret_repo.scan_package(e, n, v, deadline=ctx.deadline,
+                                                    cancel=ctx.cancelled)
+                except lazaret_repo.ScanCancelled:
+                    raise
+                except Exception as exc:                       # noqa: BLE001
+                    # a package that could not be scanned cannot be cleared
+                    results.append({"package": spec, "verdict": "INCOMPLETE", "error": str(exc)})
+                    continue
+                entry = {"package": f"{e}:{n}@{res['version']}", "verdict": res["verdict"],
+                         "verdictReason": res.get("verdictReason"),
+                         "supplyChainIndicators": res["supplyChain"],
+                         "binaryArtifacts": res.get("binaryArtifacts", 0)}
+                store_error = _store_result(store, e, n, res)
+                if store_error:
+                    entry["storeError"] = store_error
+                results.append(entry)
         out["scanned"] = results
         out["flagged"] = [r for r in results
                           if r.get("verdict") in ("WARN", "INCOMPLETE", "SUSPICIOUS")]

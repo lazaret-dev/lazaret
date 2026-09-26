@@ -237,7 +237,8 @@ class F11SqlRules(unittest.TestCase):
             if not fn.endswith(".sql"):
                 continue
             p = os.path.join(HERE, "sqlproj", fn)
-            content = open(p, encoding="utf-8", errors="replace").read()
+            with open(p, encoding="utf-8", errors="replace") as fh:
+                content = fh.read()
             for i in lazaret.scan_file(p, content, "sql"):
                 per_rule[i["rule"]] = per_rule.get(i["rule"], 0) + 1
         self.assertEqual(sum(per_rule.values()), 12)
