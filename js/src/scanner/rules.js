@@ -402,8 +402,8 @@ id:"SC-PACKER", name:"Packed JavaScript (p,a,c,k,e,d)", type:"VULN", sev:"CRITIC
 },
 {
 id:"SC-MARSHAL", name:"Marshalled bytecode execution", type:"VULN", sev:"CRITICAL", langs:["py"],
- re:pyRe("\\bmarshal\\s*\\.\\s*loads?\\s*\\(|['\\\"]marshal['\\\"]\\s*\\)\\s*\\.\\s*loads?\\s*\\(|\\b(?:types\\s*\\.\\s*)?CodeType\\s*\\(|\\bimp\\s*\\.\\s*load_compiled\\s*\\(|\\bSourcelessFileLoader\\s*\\(", ""),
- msg:"Loading marshalled bytecode or building a code object by hand.",
+ re:pyRe("\\b(?:exec|eval|FunctionType)\\s*\\(\\s*(?:marshal|__import__\\(\\s*['\\\"]marshal['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]marshal['\\\"]\\s*\\))\\s*\\.\\s*loads?\\s*\\(|\\b(?:marshal|__import__\\(\\s*['\\\"]marshal['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]marshal['\\\"]\\s*\\))\\s*\\.\\s*loads\\s*\\(\\s*(?:b['\\\"]|(?:(?:[\\w$]+|__import__\\(\\s*['\\\"][\\w.]+['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"][\\w.]+['\\\"]\\s*\\))\\s*\\.\\s*)*(?:b64decode|b32decode|b85decode|a85decode|decodebytes|decompress|fromhex|unhexlify|a2b_\\w+|decode)\\s*\\()", ""),
+ msg:"Marshalled bytecode is run, or loaded from bytes embedded or decoded in the code.",
  why:"Bytecode blobs evade source review — a common Python malware technique.",
  fix:"Inspect the blob's origin; refuse opaque executable data in source trees.",
  ref:"CWE-506 · Supply chain",

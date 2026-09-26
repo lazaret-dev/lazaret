@@ -52,9 +52,12 @@ test("exec(compile(source)) is not bytecode; decode -> compile -> exec still is"
   const rules = (src, dep = true) => new Set(scanFile({ path: "x.py", content: src + "\n", lang: "py", dep }).map((i) => i.rule));
   assert.deepEqual([...rules('exec(compile(path.read_bytes(), str(path), "exec"), ns)')], []);
   assert.ok(rules('exec(compile(base64.b64decode(x), "<s>", "exec"))').has("SC-EVAL-DECODE"));
-  for (const src of ["code = marshal.load(fh)", 'exec(__import__("marshal").loads(b))', "c = types.CodeType(0)",
-    'm = imp.load_compiled("x", "x.pyc")'])
+  for (const src of ["exec(marshal.load(fh))", 'exec(__import__("marshal").loads(b))',
+    "f = types.FunctionType(marshal.loads(b), globals())", "code = marshal.loads(zlib.decompress(base64.b64decode(blob)))"])
     assert.ok(rules(src).has("SC-MARSHAL"), src);
+  // bytecode caches and code objects (pytest, setuptools, jinja2: SUSPICIOUS in 0.1.1)
+  for (const src of ["co = marshal.load(fp)", "code = CodeType(", "code = marshal.loads(data)", 'm = imp.load_compiled("x", "x.pyc")'])
+    assert.deepEqual([...rules(src)], [], src);
 });
 
 test("SC-CHARCODE counts the codes inside the call", () => {

@@ -444,20 +444,25 @@ R("SC-PACKER", "Packed JavaScript (p,a,c,k,e,d)", "VULN", "CRITICAL", ("js",),
   "Legitimate modern packages ship minified, not packed; packing hides intent.",
   "Unpack and review the payload before trusting this file.",
   "CWE-506 · Supply chain"),
-# Bytecode only: marshal.load(s) (also through an inline import), a code
-# object built by hand, a .pyc loaded as a module. `exec(compile(src, path,
-# "exec"))` is not here: compile() takes source text, and running a .py file
-# that way (like runpy.run_path) is ordinary harness and plugin code; a
-# decoded payload compiled and run is SC-EVAL-DECODE, and --full still
-# reports exec() itself as S-EVAL-PY.
+# Marshalled bytecode that is run, or that comes from bytes embedded or
+# decoded in the code itself: `exec(marshal.load(f))`,
+# `FunctionType(marshal.loads(b), …)`, `marshal.loads(b"\xe3…")`,
+# `marshal.loads(zlib.decompress(base64.b64decode(…)))`. Loading marshal data
+# on its own is ordinary: pytest's assertion-rewrite cache, jinja2's bytecode
+# cache and setuptools all call marshal.load(f), and jinja2 builds code objects
+# (0.1.1 flagged every one of them, making all three SUSPICIOUS). A payload
+# decoded into a variable, marshalled and run later is the decode flow's
+# SC-EVAL-DECODE; `exec(compile(src, path, "exec"))` runs source text and is
+# not here either (--full still reports exec() as S-EVAL-PY).
 R("SC-MARSHAL", "Marshalled bytecode execution", "VULN", "CRITICAL", ("py",),
-  r"\bmarshal\s*\.\s*loads?\s*\(|['\"]marshal['\"]\s*\)\s*\.\s*loads?\s*\("
-  r"|\b(?:types\s*\.\s*)?CodeType\s*\(|\bimp\s*\.\s*load_compiled\s*\(|\bSourcelessFileLoader\s*\(",
-  "Loading marshalled bytecode or building a code object by hand.",
+  r"\b(?:exec|eval|FunctionType)\s*\(\s*" + _module_ref("marshal") + r"\s*\.\s*loads?\s*\("
+  r"|\b" + _module_ref("marshal") + r"\s*\.\s*loads\s*\(\s*(?:b['\"]|"
+  r"(?:(?:[\w$]+|" + _INLINE_IMPORT + r")\s*\.\s*)*"
+  r"(?:b64decode|b32decode|b85decode|a85decode|decodebytes|decompress|fromhex|unhexlify|a2b_\w+|decode)\s*\()",
+  "Marshalled bytecode is run, or loaded from bytes embedded or decoded in the code.",
   "Bytecode blobs evade source review — a common Python malware technique.",
   "Inspect the blob's origin; refuse opaque executable data in source trees.",
   "CWE-506 · Supply chain"),
-# ---- SQL (.sql scripts, stored procedures, migrations) ----
 R("SQL-XPCMD", "OS command execution via SQL", "VULN", "CRITICAL", ("sql",),
   r"\bxp_cmdshell\b",
   "xp_cmdshell runs operating-system commands from SQL Server.",

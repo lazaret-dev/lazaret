@@ -19,6 +19,11 @@ PyPI releases, and the detections that must survive the fixes.
    6,216 names, and every spawn in the file became a BLOCKER, along with a
    `function exec(…) {` definition. A decode now taints names for
    DEP_FLOW_WINDOW characters, and definitions are not calls.
+5. 0.1.1 made SC-MARSHAL (CRITICAL) fire on any marshal.load(s) call and any
+   code object built by hand, so pytest (its assertion-rewrite cache),
+   setuptools and jinja2 (its bytecode cache) were SUSPICIOUS: three of the
+   most-installed PyPI packages. Now only marshalled bytecode that is run, or
+   that comes from bytes embedded or decoded in the code, is SC-MARSHAL.
 
 The npm engine and the dashboard run the same inputs through
 tests/architecture/test_js_parity.py and test_review_dashboard_parity.py.
@@ -151,15 +156,30 @@ class CompileAndMarshalTests(unittest.TestCase):
             with self.subTest(src=src):
                 self.assertIn("SC-EVAL-DECODE", self.rules(src))
 
-    def test_bytecode_is_still_sc_marshal(self):
-        for src in ("exec(marshal.loads(blob))", "code = marshal.loads(blob)",
-                    "code = marshal.load(fh)", 'exec(__import__("marshal").loads(b))',
+    def test_bytecode_that_runs_or_is_embedded_is_sc_marshal(self):
+        for src in ("exec(marshal.loads(blob))", "exec(marshal.load(fh))",
+                    'exec(__import__("marshal").loads(b))',
                     "f = types.FunctionType(marshal.loads(b), globals())",
-                    'c = types.CodeType(0, 0, 0, 0, 0, 0, b"", (), (), (), "", "", 0, b"")',
-                    'm = imp.load_compiled("x", "x.pyc")',
-                    'loader = SourcelessFileLoader("x", "x.pyc")'):
+                    "code = marshal.loads(b'\\xe3\\x00\\x00')",
+                    "code = marshal.loads(zlib.decompress(base64.b64decode(blob)))",
+                    "code = marshal.loads(bytes.fromhex(h))",
+                    "code = marshal.loads(__import__('zlib').decompress(z))"):
             with self.subTest(src=src):
                 self.assertIn("SC-MARSHAL", self.rules(src))
+
+    def test_bytecode_caches_and_code_objects_are_not(self):
+        # pytest's _pytest/assertion/rewrite.py, setuptools' depends.py and
+        # jinja2's bccache.py / debug.py (all SUSPICIOUS in 0.1.1)
+        for src in ("co = marshal.load(fp)", "code = marshal.load(f)", "self.code = marshal.load(f)",
+                    "code = CodeType(", "code = marshal.loads(data)",
+                    'm = imp.load_compiled("x", "x.pyc")', 'loader = SourcelessFileLoader("x", "x.pyc")',
+                    '"eval/exec called on marshal.loads(...) — code injection via deserialization",'):
+            with self.subTest(src=src):
+                self.assertEqual(self.rules(src), set())
+
+    def test_decoded_bytecode_run_later_is_the_decode_flow(self):
+        src = "d = base64.b64decode(blob)\ncode = marshal.loads(d)\nexec(code)"
+        self.assertEqual(rules_by_line(src + "\n", "py", True, "SC-EVAL-DECODE"), [(3, "SC-EVAL-DECODE")])
 
 
 class CharCodeTests(unittest.TestCase):
