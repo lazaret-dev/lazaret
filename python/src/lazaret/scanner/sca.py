@@ -77,14 +77,17 @@ advisories) / 5 internal error.
 No third-party dependencies — stock python3, same contract as the lazaret CLI.
 """
 import argparse
+import ast
 import collections
 import datetime as _dt
 import importlib
+import io
 import json
 import os
 import re
 import stat
 import sys
+import tokenize
 
 # audit H1: lazaret.sanitize_term() is the canonical terminal-control
 # neutralizer; sca output interpolates inventory names/versions and CVE-bundle
@@ -1373,16 +1376,174 @@ def _scan_pipfile_lock(root, out, warn):
             out.append(("pypi", name, v.strip(), where))
 
 
+# ---- setup.py (read, never run) ----
+class _SetupNames:
+    """Every value bound to each name in setup.py, with a bound on how much
+    resolving work one file may cost (a name defined from itself, `R = R +
+    R`, would otherwise branch exponentially)."""
+
+    def __init__(self):
+        self.values = {}
+        self.budget = 10_000
+
+    def spend(self):
+        self.budget -= 1
+        return self.budget >= 0
+
+
+def _string_value(node, names, depth=0):
+    """A str constant, or a name bound only to one; else None."""
+    if not names.spend() or depth > 16:
+        return None
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.Name) and len(names.values.get(node.id, ())) == 1:
+        return _string_value(names.values[node.id][0], names, depth + 1)
+    return None
+
+
+def _literal_requirements(node, names, depth=0):
+    """Requirement strings of an install_requires value: -> (strings,
+    complete). Literal lists/tuples of strings, a newline-separated string
+    (setuptools accepts one), `+` and `*unpacking` of those, and names bound
+    to them (every binding: `REQS += […]` adds to REQS); anything computed
+    when setup.py runs makes the result incomplete."""
+    if not names.spend() or depth > 16:
+        return [], False
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        lines = (re.sub(r"(^|\s)#.*$", "", ln).strip() for ln in node.value.splitlines())
+        return [ln for ln in lines if ln], True
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        out, complete = [], True
+        for elt in node.elts:
+            if isinstance(elt, ast.Starred):
+                got, ok = _literal_requirements(elt.value, names, depth + 1)
+                out.extend(got)
+                complete = complete and ok
+                continue
+            value = _string_value(elt, names, depth + 1)
+            if value is None:
+                complete = False
+            else:
+                out.append(value)
+        return out, complete
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left, ok_l = _literal_requirements(node.left, names, depth + 1)
+        right, ok_r = _literal_requirements(node.right, names, depth + 1)
+        return left + right, ok_l and ok_r
+    if isinstance(node, ast.Name) and node.id in names.values:
+        out, complete = [], True
+        for value in names.values[node.id]:
+            got, ok = _literal_requirements(value, names, depth + 1)
+            out.extend(got)
+            complete = complete and ok
+        return out, complete
+    return [], False
+
+
+def _setup_py_ast(tree):
+    """install_requires of a parsed setup.py: -> (requirements, complete)."""
+    names, values = _SetupNames(), []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)) and node.value is not None:
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for t in targets:
+                if isinstance(t, ast.Name):
+                    names.values.setdefault(t.id, []).append(node.value)
+                elif (isinstance(t, ast.Subscript) and isinstance(t.slice, ast.Constant)
+                      and t.slice.value == "install_requires"):
+                    values.append(node.value)          # kwargs["install_requires"] = …
+        elif isinstance(node, ast.Call):
+            values.extend(kw.value for kw in node.keywords if kw.arg == "install_requires")
+        elif isinstance(node, ast.Dict):                   # {"install_requires": …}
+            values.extend(v for k, v in zip(node.keys, node.values)
+                          if isinstance(k, ast.Constant) and k.value == "install_requires")
+    reqs, complete = [], True
+    for value in values:
+        got, ok = _literal_requirements(value, names)
+        reqs.extend(got)
+        complete = complete and ok
+    return reqs, complete
+
+
+def _setup_py_tokens(text):
+    """install_requires literal lists of a setup.py that does not parse as
+    Python 3 (a Python 2 print statement), bracket-matched with the
+    tokenizer: -> (requirements, complete)."""
+    toks = []
+    try:
+        for tok in tokenize.generate_tokens(io.StringIO(text).readline):
+            if tok.type not in (tokenize.NL, tokenize.NEWLINE, tokenize.COMMENT,
+                                tokenize.INDENT, tokenize.DEDENT):
+                toks.append(tok)
+    except (tokenize.TokenError, SyntaxError, ValueError):     # incl. IndentationError
+        pass                                                  # use what was read
+    def is_key(tok, nxt):
+        if tok.type == tokenize.NAME:                         # install_requires=…
+            return tok.string == "install_requires" and nxt == "="
+        return (tok.type == tokenize.STRING and nxt == ":"   # {"install_requires": …}
+                and tok.string.strip("'\"") == "install_requires")
+
+    reqs, complete, i = [], True, 0
+    while i < len(toks):
+        if not (i + 1 < len(toks) and is_key(toks[i], toks[i + 1].string)):
+            i += 1
+            continue
+        i += 2
+        if i >= len(toks) or toks[i].string not in ("[", "("):
+            complete = False                                  # a name or a call
+            continue
+        depth = 0
+        while i < len(toks):
+            s = toks[i].string
+            if s in ("[", "(", "{"):
+                depth += 1
+            elif s in ("]", ")", "}"):
+                depth -= 1
+                if depth == 0:
+                    break
+            elif toks[i].type == tokenize.STRING and depth == 1:
+                try:
+                    value = ast.literal_eval(s)
+                except (ValueError, SyntaxError, MemoryError, RecursionError):
+                    value = None
+                if isinstance(value, str):
+                    reqs.append(value)
+                else:
+                    complete = False
+            elif s != "," or depth != 1:
+                complete = False                              # a computed element
+            i += 1
+        if depth:
+            complete = False                                  # unterminated list
+    return reqs, complete
+
+
+def _setup_py_requirements(text):
+    """install_requires of setup.py, read without running it (ast, or the
+    tokenizer when the file is not Python 3): -> (requirements, complete).
+    complete is False when part of the value is computed at run time."""
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError, MemoryError, RecursionError):
+        return _setup_py_tokens(text)
+    try:
+        return _setup_py_ast(tree)
+    except RecursionError:
+        return _setup_py_tokens(text)
+
+
 def _scan_setup_py(root, out, warn):
     path = os.path.join(root, "setup.py")
     text = _read_text(path, cap=5 * 1024 * 1024)
     if text is None:
         _unusable(warn, path)
         return
-    m = re.search(r"install_requires\s*=\s*\[(.*?)\]", text, re.S)
-    if m:
-        for entry in re.findall(r"['\"]([^'\"]+)['\"]", m.group(1)):
-            _add_req(out, entry.strip(), "setup.py")
+    reqs, complete = _setup_py_requirements(text)
+    for entry in reqs:
+        _add_req(out, entry.strip(), "setup.py")
+    if not complete:
+        warn("setup.py install_requires computed at run time (that part not inventoried)")
 
 
 def scan_pypi_declared(root, warn=None):

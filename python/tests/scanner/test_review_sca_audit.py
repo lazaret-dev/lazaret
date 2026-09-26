@@ -10,6 +10,9 @@
    in requirements.txt dropped its first requirement, and a UTF-16
    requirements.txt (PowerShell `pip freeze >`) yielded nothing. A manifest
    that was present but unusable left no warning.
+5  setup.py's install_requires was matched with a regex that stopped at the
+   first ']': ["requests[security]==2.19.0", "django==1.11.0"] gave an
+   empty inventory and no warning.
 
 All fixtures are inert manifest/lock text and synthetic CVE ids.
 """
@@ -180,6 +183,42 @@ class ManifestDecoding(unittest.TestCase):
         except (OSError, NotImplementedError):
             pass                            # Windows without the symlink privilege
         self.assertEqual(inventory(root), ([], want))
+
+
+# ---------------------------------------------------------------------------
+# 5. setup.py install_requires is parsed, not matched up to the first ']'
+# ---------------------------------------------------------------------------
+class SetupPy(unittest.TestCase):
+    def declared(self, text):
+        w = sca._Warnings()
+        inv = sca.scan_pypi_declared(project({"setup.py": text.encode("utf-8")}), w)
+        return sorted((n, v) for e, n, v, where in inv), w.counts
+
+    def test_extras_in_a_literal_list(self):
+        text = ('from setuptools import setup\nsetup(name="demo", install_requires=[\n'
+                '    "requests[security]==2.19.0",\n    "django==1.11.0",\n    "pyyaml==5.1",\n])\n')
+        self.assertEqual(self.declared(text),
+                         ([("django", "1.11.0"), ("pyyaml", "5.1"), ("requests", "2.19.0")], {}))
+
+    def test_names_concatenation_and_kwargs_dicts(self):
+        text = ('BASE = ["six==1.10.0"]\nREQS = BASE + ["idna==2.5"]\nREQS += ["chardet==3.0.4"]\n'
+                'EXTRA = {"install_requires": ["attrs==19.1.0"]}\nsetup(install_requires=REQS)\n'
+                'setup(**EXTRA)\n')
+        self.assertEqual(self.declared(text)[0], [("attrs", "19.1.0"), ("chardet", "3.0.4"),
+                                                  ("idna", "2.5"), ("six", "1.10.0")])
+
+    def test_python2_setup_py(self):
+        text = ('print "building"\nsetup(name="old",\n      install_requires=[\'requests[socks]==2.19.0\',\n'
+                '                        "django==1.11.0"],  # pinned\n)\n')
+        self.assertEqual(self.declared(text),
+                         ([("django", "1.11.0"), ("requests", "2.19.0")], {}))
+
+    def test_a_computed_value_is_warned_about(self):
+        text = ('import io\nsetup(install_requires=io.open("requirements.txt").read().splitlines())\n')
+        inv, warnings = self.declared(text)
+        self.assertEqual(inv, [])
+        self.assertEqual(list(warnings), ["setup.py install_requires computed at run time "
+                                          "(that part not inventoried)"])
 
 
 if __name__ == "__main__":
