@@ -195,10 +195,10 @@ js/
 
 **The two engines must agree.** `python/tests/architecture/test_js_parity.py` runs both CLIs on every fixture tree, on a synthetic project covering the false-positive fixes, and on an adversarial tree generated at test time (BOM, UTF-16 and UTF-7 files, a NUL near the top of a UTF-8 file, `.github/`, `node_modules/` with and without `--deps`, suppression tricks, a 600-issue file, CRLF, Unicode identifiers, bidi characters, `.pyc` files, symlinks, a deep manifest, a large non-source file). It compares every finding as a multiset of (rule, file, line, severity, message), plus metrics, ratings, the gate and the exit code, and fails on any difference other than the listed Python-only features. `python/tests/scanner/test_review_dashboard_parity.py` holds the dashboard to the same standard. When a rule changes in one engine, it changes in the other in the same commit; the JS twins of Python helpers say so in a comment (`Twin of lazaret.scanner.core....`).
 
-Tests needing a service or the samples checkout are gated with an in-test guard and named with a suffix so they're recognizable:
+Tests needing a service or the samples checkout are gated with an in-test guard that skips cleanly when the variable is unset:
 
 ```js
-// test/scanner/detection.corpus.test.js
+// test/corpus.test.js
 const dir = process.env.LAZARET_SAMPLES_DIR;
 test("flags the install-hook corpus", { skip: dir ? false : "LAZARET_SAMPLES_DIR not set" }, () => { /* ... */ });
 ```
@@ -271,7 +271,7 @@ Nothing from `lazaret-samples` ever enters any artifact. Credential files are re
 - **python-integration**: the live-Postgres tests against a throwaway `postgres:17` service container, pinned by digest.
 - **js**: `npm test` on Linux, macOS, and Windows × Node 22 and 24.
 
-Nothing is installed in any job, and tool versions (Python, Node and its bundled npm) are exact. `.github/workflows/release.yml` runs on a `v*` tag: `verify-tag` checks that the tagged commit is on `main` and that both versions match the tag, then CI reruns, `build-python` and `build-npm` build the artifacts (the npm tarball is packed once and published as built), and each package is published after approval on its `pypi` or `npm` environment. Both publish jobs need both builds, so one registry never gets a release the other can't. npm releases are staged: they go public only after a second approval, with 2FA, on npm itself. Dependabot proposes action updates after a 7-day cooldown.
+Nothing is installed in any job. The test matrix uses floating minor versions on purpose (`3.10`…`3.14`, Node `22`/`24`, to catch new patch releases); the release jobs pin exact versions (Python 3.12.14, Node 24.21.0 with its bundled npm 11.19.0). `.github/workflows/release.yml` runs on a `v*` tag: `verify-tag` checks that the tagged commit is on `main` and that both versions match the tag, then CI reruns, `build-python` and `build-npm` build the artifacts (the npm tarball is packed once and published as built), and each package is published after approval on its `pypi` or `npm` environment. Both publish jobs need both builds, so one registry never gets a release the other can't. npm releases are staged: they go public only after a second approval, with 2FA, on npm itself. Dependabot proposes action updates after a 7-day cooldown.
 
 The auth-matrix and samples-corpus tests don't run in CI yet: the first needs a Postgres container with a custom `pg_hba.conf` and TLS certificate, the second a deploy key for the private samples repository.
 

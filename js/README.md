@@ -38,7 +38,9 @@ not already a Lazaret report (unless `--force-overwrite`). Writes are atomic
 
 ## Detection families
 
-- **Injection**: `eval`/`exec`, shell command execution, SQL injection —
+- **Injection**: `eval`/`exec`, shell command execution (`exec`/`execSync` as
+  a free call or on a receiver like `cp.exec` — not on `this.`/`self.`/
+  `super.`, and not method definitions), SQL injection —
   including the flow-sensitive SQL-sink analyzer that catches SQL built into a
   variable and then passed to `execute(q)` (G12).
 - **Taint flows**: request/argv input reaching command/XSS/SQL sinks without
@@ -57,8 +59,9 @@ not already a Lazaret report (unless `--force-overwrite`). Writes are atomic
   though `node -e "require('./local-file')"` is not treated as eval.
   `binding.gyp` actions and command expansions (`<!(cmd)`); an unparseable
   root manifest (`SC-MANIFEST-UNPARSEABLE`); decode-then-execute
-  (`SC-EVAL-DECODE`, also across lines and, in dependencies, across
-  statements); readable text hidden in hex escapes; base64 and char-code
+  (`SC-EVAL-DECODE`, also across lines, through an inline import such as
+  `__import__("base64").b64decode`, and, in dependencies, across statements);
+  executable `.pth` lines (`SC-PTH-EXEC`); readable text hidden in hex escapes; base64 and char-code
   blobs; `javascript-obfuscator` identifier signatures; compiled binaries;
   unchecked or orphaned `.pyc` files; UTF-7 source (`SC-UTF7`).
 - **Unicode evasion**: JS identifier escapes (`\u0065val`) and Python NFKC
@@ -70,10 +73,12 @@ not already a Lazaret report (unless `--force-overwrite`). Writes are atomic
 ## What gets scanned
 
 - `.py`, `.js`/`.jsx`/`.ts`/`.tsx`/`.mjs`/`.cjs` and `.sql` sources, every
-  `package.json` and `binding.gyp`. Every other regular file is classified by
+  `package.json` and `binding.gyp`, and `.pth` files (only the `SC-PTH-EXEC`
+  check runs on them; they are not counted in the metrics; a directory with
+  only a `.pth` file is a valid target). Every other regular file is classified by
   its magic bytes (`SC-BINARY`). Sources and manifests over 2,000,000 bytes
   are `SC-TRUNCATED`, never silently skipped; so is a file whose rules exceed
-  a 30-second time backstop.
+  a 30-second time backstop (checked inside each rule's match loop).
 - Encodings are sniffed (UTF-8/UTF-16 byte-order marks, BOM-less UTF-16, PEP
   263 coding cookies in `.py` files): anything but plain UTF-8 is decoded
   explicitly and reported as `Q-ENCODING`.
@@ -94,8 +99,10 @@ not already a Lazaret report (unless `--force-overwrite`). Writes are atomic
   comment — not a string — on the flagged line or on a comment line directly
   above; `--` comments count in `.sql` files only. `SC-*`/`X-*` findings and
   anything in dependency files are never suppressed.
-- Low-value findings (INFO/MINOR/smells) are capped at 200 per rule and file,
-  with one `Q-CAPPED` note for the rest; security findings are never capped.
+- Findings identical on rule, file, line and message are reported once, and
+  every non-security rule (anything but `S-`, `T-`, `SC-`, `X-`, `SQL-`) is
+  capped at 200 per rule and file, with one `Q-CAPPED` note for the rest;
+  security findings are never capped.
 
 ## CLI
 

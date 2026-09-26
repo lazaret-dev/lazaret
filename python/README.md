@@ -13,7 +13,7 @@ lazaret-mcp                             # MCP server, so an AI assistant can sca
 
 What it finds:
 
-- **Security:** SQL/command/code injection, SSTI, XXE, unsafe deserialization, XSS sinks, weak crypto, disabled TLS verification, hardcoded secrets (provider signatures and entropy), and more, across about 58 rules.
+- **Security:** SQL/command/code injection, SSTI, XXE, unsafe deserialization, XSS sinks, weak crypto, disabled TLS verification, hardcoded secrets (provider signatures and entropy), and more, across 63 pattern rules plus supply-chain and coverage findings.
 - **Taint analysis:** follows untrusted input through assignments, function calls, and across files into sinks, with category-aware sanitizers and a configurable source/sink/sanitizer spec.
 - **Supply chain:** decode-then-execute patterns, packed and obfuscated JavaScript, suspicious install hooks, smuggled binaries and nested archives, both in your tree and in published npm/PyPI packages.
 - **Quality:** bugs, code smells, complexity, duplication, with a quality gate and ratings.
