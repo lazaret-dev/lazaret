@@ -1428,12 +1428,14 @@ class CveBundle:
         self.counts = counts if isinstance(counts, dict) else {}
         self.advisories = []
         self._index = {}
+        self._order = {}            # (id(adv), id(pkg)) -> position in the bundle
         for raw in advisories:
             adv = self._advisory(raw)
             if adv is None:
                 continue
             self.advisories.append(adv)
             for pkg in adv["packages"]:
+                self._order[(id(adv), id(pkg))] = len(self._order)
                 for key in name_variants(pkg["name"], pkg["ecosystem"]):
                     self._index.setdefault(key, []).append((adv, pkg))
 
@@ -1486,15 +1488,15 @@ class CveBundle:
         return adv
 
     def advisories_for(self, name, ecosystem=None):
-        out = []
-        seen = set()
+        """Every (advisory, package entry) pair indexed under one of the
+        name's lookup keys, each once, in bundle order — never in the
+        iteration order of the name_variants() set, which changes with
+        PYTHONHASHSEED."""
+        found = {}
         for key in name_variants(name, ecosystem):
             for pair in self._index.get(key, []):
-                k = (id(pair[0]), id(pair[1]))
-                if k not in seen:
-                    seen.add(k)
-                    out.append(pair)
-        return out
+                found.setdefault((id(pair[0]), id(pair[1])), pair)
+        return [found[k] for k in sorted(found, key=self._order.__getitem__)]
 
     @classmethod
     def load(cls, path):
@@ -1588,47 +1590,66 @@ def fix_hint(adv, pkg, ecosystem=None):
     return "See the advisory references for patched versions"
 
 
+# Verdict of one dependency against one advisory package entry. When several
+# entries of an advisory name the same dependency, the highest one is kept.
+_CLEAR, _UNKNOWN, _AFFECTED = 0, 1, 2
+
+
+def _entry_verdict(version, ecosystem, pkg):
+    """(verdict, detail) of one dependency version against one advisory
+    package entry: (_AFFECTED, matched range), (_UNKNOWN, reason) or
+    (_CLEAR, None) when the version falls outside every range."""
+    if not version:
+        return _UNKNOWN, "no concrete version (range, wildcard or unpinned dependency)"
+    ranges = pkg.get("ranges")
+    if ranges is None:
+        return _UNKNOWN, "the advisory's version ranges are malformed"
+    if not ranges:
+        return _UNKNOWN, "the advisory has no affected-version ranges"
+    undecided = False
+    for r in ranges:
+        verdict = version_in_range(version, r, ecosystem)
+        if verdict is True:
+            return _AFFECTED, r
+        if verdict is None:
+            undecided = True
+    if undecided:
+        return _UNKNOWN, ("version %r cannot be compared with the advisory's range bounds"
+                          % str(version)[:40])
+    return _CLEAR, None
+
+
 def match_inventory(inventory, bundle):
     """-> (matches, unknown). A match = (adv, pkg, dep, matched_range); an
     unknown = (dep, adv, pkg, reason). Unknown covers: no version known for
     the dependency, an advisory without range data, a malformed range, and a
-    version or bound that cannot be compared — never a silent clear."""
-    matches = []
-    unknown = []
-    seen = set()
+    version or bound that cannot be compared — never a silent clear.
+
+    One advisory can list the same product more than once (two CPE vendors,
+    a 'python-foo' and a 'foo' entry, an npm and a pypi entry), each with
+    its own ranges. Every (advisory, package entry) pair that names a
+    dependency is checked, and one result is kept per (CVE, dependency):
+    affected over unknown over clear, so neither the order of the entries
+    nor PYTHONHASHSEED can clear an affected dependency."""
+    best, order = {}, []
     for dep in inventory:
         e, name, version, _where = dep
         for adv, pkg in bundle.advisories_for(name, e):
-            mkey = (adv.get("cve"), normalize_pkg(pkg.get("name"), pkg.get("ecosystem")),
-                    str(version), e)
-            if mkey in seen:
-                continue
-            seen.add(mkey)
-            ranges = pkg.get("ranges")
-            if not version:
-                unknown.append((dep, adv, pkg, "no concrete version (range, wildcard "
-                                                "or unpinned dependency)"))
-                continue
-            if ranges is None:
-                unknown.append((dep, adv, pkg, "the advisory's version ranges are malformed"))
-                continue
-            if not ranges:
-                unknown.append((dep, adv, pkg, "the advisory has no affected-version ranges"))
-                continue
-            hit, undecided = None, False
-            for r in ranges:
-                verdict = version_in_range(version, r, e)
-                if verdict is True:
-                    hit = r
-                    break
-                if verdict is None:
-                    undecided = True
-            if hit is not None:
-                matches.append((adv, pkg, dep, hit))
-            elif undecided:
-                unknown.append((dep, adv, pkg, "version %r cannot be compared with the "
-                                               "advisory's range bounds" % str(version)[:40]))
-            # else: version falls outside every range -> not affected, stay silent
+            verdict, detail = _entry_verdict(version, e, pkg)
+            key = (adv.get("cve"), e, normalize_pkg(name, e), str(version))
+            kept = best.get(key)
+            if kept is None:
+                order.append(key)
+            if kept is None or verdict > kept[0]:
+                best[key] = (verdict, adv, pkg, dep, detail)
+    matches, unknown = [], []
+    for key in order:
+        verdict, adv, pkg, dep, detail = best[key]
+        if verdict == _AFFECTED:
+            matches.append((adv, pkg, dep, detail))
+        elif verdict == _UNKNOWN:
+            unknown.append((dep, adv, pkg, detail))
+        # _CLEAR: outside every range of every entry -> not affected, stay silent
     return matches, unknown
 
 
