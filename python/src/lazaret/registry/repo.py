@@ -1369,6 +1369,10 @@ def _not_run_as_script(rel, exported=False):
     return ext in _DATA_OR_NATIVE_EXTS or (exported and ext in _EXPORTED_ASSET_EXTS)
 
 
+class _OutOfTime(Exception):
+    """Internal: the archive's deadline passed while scanning (recorded)."""
+
+
 class _ArtifactScan:
     """Scan state for one archive: classify members as they stream by, then
     resolve what package.json / setup.py say runs (entry points, install
@@ -1380,6 +1384,7 @@ class _ArtifactScan:
         self.issues, self.files_scanned, self.binaries = [], 0, 0
         self.truncated, self.truncated_emitted = 0, 0
         self.truncated_at = {}     # rel -> its SC-TRUNCATED issue (None past the cap)
+        self.timed_out = False     # the deadline passed (recorded once)
         self.sources = {}          # rel -> (text, lang) scanned as source
         self.deferred = {}         # rel -> raw bytes (text, not scanned yet)
         self.deferred_bytes = 0
@@ -1419,6 +1424,30 @@ class _ArtifactScan:
         return _TRUNC_DETAILS.get(
             reason, lambda r, s: f"archive not fully read ({reason})")(rel, size)
 
+    def out_of_time(self, where):
+        """True once the archive's deadline has passed; the first time, one
+        SC-TRUNCATED finding says where the scan stopped. Checked between
+        files and phases of both passes: the per-archive limit used to be
+        checked only between archive members, so a slow member or the whole
+        second pass (entry points, hook targets, cross-file analysis) ran on
+        past it. Cancellation raises ScanCancelled."""
+        if self.timed_out:
+            return True
+        if self.budget is None:
+            return False
+        try:
+            self.budget.check()
+        except ArchiveLimit as lim:
+            self.timed_out = True
+            self.truncate("(archive)", lim.detail or self.limit_detail(lim.reason, where))
+            return True
+        return False
+
+    def _deadline(self, where):
+        """Stop scanning (_OutOfTime) once the deadline has passed."""
+        if self.out_of_time(where):
+            raise _OutOfTime(where)
+
     def add_decode_issues(self, extra, keep_encoding=True):
         for i in extra:
             if i["rule"] == "SC-TRUNCATED":
@@ -1433,6 +1462,7 @@ class _ArtifactScan:
             self.issues.append(bi)
 
     def scan_source(self, rel, text, lang):
+        self._deadline(rel)                  # not one more file past the deadline
         self.files_scanned += 1
         for i in lazaret.scan_file(rel, text, lang, dep=not self.full):
             if i["rule"] in TRUNCATION_RULES:
@@ -1449,6 +1479,7 @@ class _ArtifactScan:
         rel, size, raw, reason = m
         if reason in ("files", "total", "time", "corrupt"):
             self.truncate(rel, getattr(m, "detail", "") or self.limit_detail(reason, rel, size))
+            self.timed_out = self.timed_out or reason == "time"
             return
         self.members.add(rel)
         base = os.path.basename(rel)
@@ -1468,6 +1499,7 @@ class _ArtifactScan:
             text, extra = lazaret.decode_member(rel, raw)
             self.add_decode_issues(extra, keep_encoding=False)
             self.manifests[rel] = text
+            self._deadline(rel)
             for i in lazaret.scan_manifest(rel, text, registry=True):
                 if i["rule"] == "SC-MANIFEST-UNPARSEABLE":
                     self.truncated += 1
@@ -1477,6 +1509,7 @@ class _ArtifactScan:
             text, extra = lazaret.decode_member(rel, raw)
             self.add_decode_issues(extra, keep_encoding=False)
             self.manifests[rel] = text
+            self._deadline(rel)
             for i in lazaret.scan_gyp(rel, text):
                 if i["rule"] == "SC-MANIFEST-UNPARSEABLE":
                     self.truncated += 1
@@ -1643,6 +1676,7 @@ class _ArtifactScan:
         seen, queue = set(self.entries), list(self.entries)
         while queue and len(seen) < 10_000:
             rel = queue.pop()
+            self._deadline(rel)
             text, lang = self.sources.get(rel, (None, None))
             if not text or lang != "js":
                 continue
@@ -1657,29 +1691,41 @@ class _ArtifactScan:
     def finish(self, anomalies):
         for kind, path, detail in anomalies:
             self.issues.append(_archive_issue(kind, path, detail))
-        for rel, text in list(self.manifests.items()):
-            if os.path.basename(rel) != "package.json":
-                continue
-            data, _problems = lazaret.load_manifest(rel, text)
-            if data is None:
-                continue
-            if rel == "package.json":
-                self._entry_points(rel, data)
-                self._implicit_gyp_hook(rel, data)
-        self._follow_hooks()
-        if self.artifact == "sdist":
-            self._python_install_scripts()
-        reachable = self._reachable()
-        # interprocedural / cross-file taint (full profile only — needs whole source)
-        if self.full and getattr(lazaret, "lazaret_flow", None) is not None:
-            records = [{"path": r, "content": t, "lang": lang}
-                       for r, (t, lang) in self.sources.items()]
-            try:
-                self.issues.extend(lazaret.lazaret_flow.analyze(records))
-            except Exception as exc:                            # noqa: BLE001
-                print(f"warning: interprocedural taint analysis skipped "
-                      f"({type(exc).__name__})", file=sys.stderr)
-        _demote_test_findings(self.issues, reachable)
+        reachable = None
+        # The deadline is checked between these phases and before each file
+        # they scan: past it, the rest is not scanned and the archive is
+        # INCOMPLETE (this pass used to run to the end whatever the time).
+        try:
+            self._deadline("the entry points")
+            for rel, text in list(self.manifests.items()):
+                if os.path.basename(rel) != "package.json":
+                    continue
+                data, _problems = lazaret.load_manifest(rel, text)
+                if data is None:
+                    continue
+                if rel == "package.json":
+                    self._entry_points(rel, data)
+                    self._implicit_gyp_hook(rel, data)
+            self._deadline("the install hooks")
+            self._follow_hooks()
+            if self.artifact == "sdist":
+                self._deadline("the install scripts")
+                self._python_install_scripts()
+            self._deadline("the files the entry points load")
+            reachable = self._reachable()
+            # interprocedural / cross-file taint (full profile only — needs whole source)
+            if self.full and getattr(lazaret, "lazaret_flow", None) is not None:
+                self._deadline("the cross-file analysis")
+                records = [{"path": r, "content": t, "lang": lang}
+                           for r, (t, lang) in self.sources.items()]
+                try:
+                    self.issues.extend(lazaret.lazaret_flow.analyze(records))
+                except Exception as exc:                            # noqa: BLE001
+                    print(f"warning: interprocedural taint analysis skipped "
+                          f"({type(exc).__name__})", file=sys.stderr)
+        except _OutOfTime:
+            pass                              # recorded: the archive is INCOMPLETE
+        _demote_test_findings(self.issues, reachable if reachable is not None else self.entries)
         # F9b: the decompressed sources are no longer needed
         self.sources, self.deferred, self.shell = {}, {}, {}
 
@@ -1726,8 +1772,11 @@ def _scan_artifact(data, container, artifact, full, budget):
     try:
         for m in iter_archive(data, container, artifact, budget=budget, anomalies=anomalies):
             st.member(m)
-            budget.check()
-    except ArchiveLimit as lim:          # deadline hit between members
+            if st.out_of_time("(archive)"):          # between members
+                break
+    except _OutOfTime:
+        pass                             # inside a member: recorded where it stopped
+    except ArchiveLimit as lim:          # (defensive: iter_archive yields its limits)
         st.truncate("(archive)", lim.detail or st.limit_detail(lim.reason, "(archive)"))
     st.finish(anomalies)
     issues = st.issues
