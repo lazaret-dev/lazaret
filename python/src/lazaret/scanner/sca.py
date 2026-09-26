@@ -409,25 +409,46 @@ def _regular_file(path):
 
 
 def _read_text(path, cap=20 * 1024 * 1024):
-    """Text of a regular (non-symlink) file up to cap bytes, else None."""
+    """Text of a regular (non-symlink) file of at most cap bytes, else None.
+
+    Decoded the way the project scan decodes source (core.decode_source): a
+    UTF-8 BOM is dropped, UTF-16 with a BOM — PowerShell's `pip freeze >
+    requirements.txt` — or BOM-less UTF-16 that reads as text is decoded as
+    such, bad bytes become U+FFFD, and line endings are normalized. npm, pip,
+    pipenv and poetry all accept a BOM; the plain UTF-8 read kept it, so a
+    BOM-prefixed lockfile did not parse and a requirements file lost its
+    first line."""
     if not _regular_file(path):
         return None
     try:
-        if os.path.getsize(path) > cap:
-            return None
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            return f.read(cap + 1)
+        # O_NOFOLLOW | O_NONBLOCK, regular files only, bounded
+        data = lazaret._read_prefix(path, cap + 1)
     except OSError:
         return None
+    if len(data) > cap:
+        return None
+    return lazaret.decode_source(data)[0]
 
 
-def _read_json(path, cap=20 * 1024 * 1024):
+def _unusable(warn, path, what="unreadable"):
+    """Count a manifest that is present but could not be used ('unreadable':
+    a symlink or special file, too large, no access; 'unparseable';
+    'malformed'), so it is never silently left out of the inventory."""
+    if warn is not None and os.path.lexists(path):
+        warn("%s %s file(s)" % (what, os.path.basename(path)))
+
+
+def _read_json(path, cap=20 * 1024 * 1024, warn=None):
+    """Parsed JSON of a manifest, else None; with `warn`, a file that is
+    there but can't be read or parsed is counted, never silently ignored."""
     text = _read_text(path, cap)
     if text is None:
+        _unusable(warn, path)
         return None
     try:
         return lazaret.json_loads_bounded(text)
     except (ValueError, MemoryError):   # incl. JsonTooDeep
+        _unusable(warn, path, "unparseable")
         return None
 
 
@@ -547,7 +568,7 @@ def scan_npm_lock(root, warn=None):
     warn = _warn_fn(warn)
     out = Inventory()
     for lock_name in ("package-lock.json", "npm-shrinkwrap.json"):
-        lock = _read_json(os.path.join(root, lock_name))
+        lock = _read_json(os.path.join(root, lock_name), warn=warn)
         if lock is None:
             continue
         if not isinstance(lock, dict):
@@ -714,10 +735,12 @@ def parse_pnpm_lock(text):
 
 def scan_npm_other_locks(root, warn=None):
     """yarn.lock (v1/berry) and pnpm-lock.yaml."""
+    warn = _warn_fn(warn)
     out = Inventory()
     for fname, parser in (("yarn.lock", parse_yarn_lock), ("pnpm-lock.yaml", parse_pnpm_lock)):
         text = _read_text(os.path.join(root, fname))
         if text is None:
+            _unusable(warn, os.path.join(root, fname))
             continue
         for name, v in parser(text):
             out.append(("npm", name, v, fname))
@@ -746,9 +769,13 @@ def _declared_npm(pj, where_prefix, out):
 
 def scan_npm_declared(root, warn=None):
     """package.json dependencies/devDependencies (+ workspaces) — the declared truth."""
+    warn = _warn_fn(warn)
     out = Inventory()
-    pj = _read_json(os.path.join(root, "package.json"))
+    pj_path = os.path.join(root, "package.json")
+    pj = _read_json(pj_path, warn=warn)
     if not isinstance(pj, dict):
+        if pj is not None:
+            _unusable(warn, pj_path, "malformed")
         return out
     _declared_npm(pj, "package.json", out)
     ws = pj.get("workspaces")
@@ -757,7 +784,7 @@ def scan_npm_declared(root, warn=None):
     if isinstance(ws, list):
         for pat in ws[:200]:
             for d in _workspace_dirs(root, pat):
-                wpj = _read_json(os.path.join(d, "package.json"))
+                wpj = _read_json(os.path.join(d, "package.json"), warn=warn)
                 if isinstance(wpj, dict):
                     _declared_npm(wpj, _rel(os.path.join(d, "package.json"), root), out)
     return out
@@ -944,6 +971,7 @@ def _scan_requirements(path, root, out, warn, seen, depth=0):
         return
     text = _read_text(path, cap=5 * 1024 * 1024)
     if text is None:
+        _unusable(warn, path)
         return
     rel = _rel(path, root)
     for line in _req_lines(text):
@@ -1252,6 +1280,7 @@ def _scan_pyproject(root, out, warn):
     path = os.path.join(root, "pyproject.toml")
     text = _read_text(path, cap=5 * 1024 * 1024)
     if text is None:
+        _unusable(warn, path)
         return
     try:
         doc = load_toml(text)
@@ -1292,8 +1321,10 @@ def _scan_pyproject(root, out, warn):
 
 
 def _scan_poetry_lock(root, out, warn):
-    text = _read_text(os.path.join(root, "poetry.lock"))
+    path = os.path.join(root, "poetry.lock")
+    text = _read_text(path)
     if text is None:
+        _unusable(warn, path)
         return
     try:
         doc = load_toml(text)
@@ -1312,8 +1343,11 @@ def _scan_poetry_lock(root, out, warn):
 
 
 def _scan_pipfile_lock(root, out, warn):
-    pl = _read_json(os.path.join(root, "Pipfile.lock"))
+    path = os.path.join(root, "Pipfile.lock")
+    pl = _read_json(path, warn=warn)
     if not isinstance(pl, dict):
+        if pl is not None:
+            _unusable(warn, path, "malformed")
         return
     for section in ("default", "develop"):
         entries = pl.get(section)
@@ -1340,8 +1374,10 @@ def _scan_pipfile_lock(root, out, warn):
 
 
 def _scan_setup_py(root, out, warn):
-    text = _read_text(os.path.join(root, "setup.py"), cap=5 * 1024 * 1024)
+    path = os.path.join(root, "setup.py")
+    text = _read_text(path, cap=5 * 1024 * 1024)
     if text is None:
+        _unusable(warn, path)
         return
     m = re.search(r"install_requires\s*=\s*\[(.*?)\]", text, re.S)
     if m:

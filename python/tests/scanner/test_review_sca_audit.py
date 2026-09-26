@@ -5,13 +5,21 @@
    (a 'python-urllib3' and a 'urllib3' entry, or an npm and a pypi protobuf)
    only the first entry was checked. urllib3 1.24.1 was always cleared, and
    pypi protobuf 4.21.1 was reported or cleared depending on PYTHONHASHSEED.
+4  Manifests were read as plain UTF-8: a BOM-prefixed package-lock.json,
+   package.json, Pipfile.lock or pyproject.toml was silently ignored, a BOM
+   in requirements.txt dropped its first requirement, and a UTF-16
+   requirements.txt (PowerShell `pip freeze >`) yielded nothing. A manifest
+   that was present but unusable left no warning.
 
 All fixtures are inert manifest/lock text and synthetic CVE ids.
 """
+import atexit
 import datetime
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import textwrap
 import unittest
 
@@ -104,6 +112,74 @@ class EveryEntryIsChecked(unittest.TestCase):
         matches, unknown = sca.match_inventory(sca.Inventory(inv), bundle(adv))
         self.assertEqual(unknown, [])
         self.assertEqual([(d[3], sca.format_range(r)) for a, p, d, r in matches], [("a", ">=1.0 <1.9")])
+
+
+# ---------------------------------------------------------------------------
+# 4. manifests are decoded like source files; unusable ones are warned about
+# ---------------------------------------------------------------------------
+BOM = b"\xef\xbb\xbf"
+
+
+def project(files):
+    """A temp project from {relpath: bytes}."""
+    root = tempfile.mkdtemp(prefix="lz-sca-audit-")
+    atexit.register(shutil.rmtree, root, True)
+    for rel, data in files.items():
+        path = os.path.join(root, *rel.split("/"))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as fh:
+            fh.write(data)
+    return root
+
+
+def inventory(root):
+    w = sca._Warnings()
+    return sorted((e, n, v) for e, n, v, where in sca.scan_all(root, None, w)), w.counts
+
+
+class ManifestDecoding(unittest.TestCase):
+    LOCK = (b'{"name": "app", "lockfileVersion": 3, "packages": {"": {"name": "app"},'
+            b' "node_modules/lodash": {"version": "4.17.11"}}}')
+
+    def test_bom_prefixed_manifests(self):
+        cases = {
+            "package-lock.json": (self.LOCK, ("npm", "lodash", "4.17.11")),
+            "package.json": (b'{"dependencies": {"lodash": "4.17.11"}}', ("npm", "lodash", "4.17.11")),
+            "Pipfile.lock": (b'{"default": {"urllib3": {"version": "==1.24.1"}}}',
+                             ("pypi", "urllib3", "1.24.1")),
+            "pyproject.toml": (b'[project]\nname = "x"\ndependencies = ["django==1.11.0"]\n',
+                               ("pypi", "django", "1.11.0")),
+            "poetry.lock": (b'[[package]]\nname = "pyyaml"\nversion = "5.1"\n', ("pypi", "pyyaml", "5.1")),
+            "requirements.txt": (b"urllib3==1.24.1\nrequests==2.19.0\n", ("pypi", "urllib3", "1.24.1")),
+        }
+        for name, (data, want) in cases.items():
+            with self.subTest(name):
+                inv, warnings = inventory(project({name: BOM + data}))
+                self.assertIn(want, inv)
+                self.assertEqual(warnings, {})
+
+    def test_utf16_requirements(self):
+        text = "urllib3==1.24.1\r\nrequests==2.19.0\r\n"          # PowerShell 5 `pip freeze >`
+        for codec in ("utf-16", "utf-16-be"):
+            data = text.encode(codec) if codec == "utf-16" else b"\xfe\xff" + text.encode(codec)
+            with self.subTest(codec):
+                inv, _ = inventory(project({"requirements.txt": data}))
+                self.assertEqual(inv, [("pypi", "requests", "2.19.0"), ("pypi", "urllib3", "1.24.1")])
+
+    def test_present_but_unusable_files_are_warned(self):
+        root = project({"package-lock.json": b"{not json", "Pipfile.lock": b"[1]",
+                        "package.json": b'"just a string"', "real.json": b"{}"})
+        want = {"unparseable package-lock.json file(s)": 1, "malformed Pipfile.lock file(s)": 1,
+                "malformed package.json file(s)": 1}
+        if hasattr(os, "mkfifo"):
+            os.mkfifo(os.path.join(root, "yarn.lock"))
+            want["unreadable yarn.lock file(s)"] = 1
+        try:
+            os.symlink("real.json", os.path.join(root, "npm-shrinkwrap.json"))
+            want["unreadable npm-shrinkwrap.json file(s)"] = 1
+        except (OSError, NotImplementedError):
+            pass                            # Windows without the symlink privilege
+        self.assertEqual(inventory(root), ([], want))
 
 
 if __name__ == "__main__":

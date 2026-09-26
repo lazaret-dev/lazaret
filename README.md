@@ -195,7 +195,7 @@ Honest limits: the cross-file taint engine is summary-based and import-resolved 
 
 ## Dependency CVE scanning (SCA)
 
-`lazaret-sca` inventories the npm and PyPI packages actually installed or pinned in a project — `node_modules` (nested copies included), `package-lock.json` v1–v3 (nested entries, `npm:` aliases, workspaces), `yarn.lock` (v1 and berry), `pnpm-lock.yaml` (v5/v6/v9), virtualenv `site-packages`, `requirements*.txt` and `requirements/*.txt` (following `-r`/`-c`), `pyproject.toml` (PEP 621 dependencies, dependency groups, `tool.poetry`), `Pipfile.lock`, `poetry.lock`, `setup.py` — and matches each `name@version` against a CVE bundle exported from the Redline vulnerability knowledge base (KEV, NVD, Wordfence, EPSS, with affected-version ranges).
+`lazaret-sca` inventories the npm and PyPI packages actually installed or pinned in a project — `node_modules` (nested copies included), `package-lock.json` v1–v3 (nested entries, `npm:` aliases, workspaces), `yarn.lock` (v1 and berry), `pnpm-lock.yaml` (v5/v6/v9), virtualenv `site-packages`, `requirements*.txt` and `requirements/*.txt` (following `-r`/`-c`), `pyproject.toml` (PEP 621 dependencies, dependency groups, `tool.poetry`), `Pipfile.lock`, `poetry.lock`, `setup.py` — and matches each `name@version` against a CVE bundle exported from the Redline vulnerability knowledge base (KEV, NVD, Wordfence, EPSS, with affected-version ranges). Manifests are decoded like source files (a UTF-8 BOM is dropped, UTF-16 is read as such), and one that is there but can't be read or parsed is named in a warning.
 
 ```bash
 lazaret-sca . --bundle cve-bundle.json            # scan and report
