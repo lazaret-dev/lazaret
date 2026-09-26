@@ -118,6 +118,28 @@ ADVERSARIAL = {
     "sup/tricks.sql": "-- nosec\nGRANT ALL ON t TO PUBLIC;\nGRANT SELECT ON t TO PUBLIC;\n",
     "sup/crlf.py": b"eval(a)  # nosec\r\neval(b)\r\n# nosec\r\neval(c)\r\n",
     # hundreds of findings: capped low-value rules, never-capped security rules
+    # false positives from real registry scans (--deps runs the decode flow)
+    "fp/regex.js": ('var t = atob("Y29uc29sZS5sb2coMSk=");\n'
+                    "for (ya.lastIndex = 0; (r = ya.exec(t)) !== null;) { g(r) }\n"
+                    "let q = /[^=]*/.exec(t)[0];\ndb.exec(t);\nmodel.eval(t);\n"
+                    'const cp = require("child_process");\ncp.exec(t);\ncp.exec(wrap(atob(z)));\n'
+                    "window.eval(t);\nnew Function(t);\nworker.spawn(t);\n"),
+    "fp/one-line.js": ('var n=atob("Y29uc29sZS5sb2coMSk=");function Be(e,t){return function(n){let r,s=0,i="";'
+                       'for(;r=e.exec(n);)s!==r.index&&(i+=n.substring(s,r.index));return i}}'
+                       "let t=/[^=]*/.exec(n)[0];eval(n);\n"),
+    "fp/charcode.js": ("n+=String.fromCharCode(255&e),e>>>=8;x=12,y=34,z=56,w=78,v=90,u=11,q=22,r=33,s=44;\n"
+                       "t+=String.fromCharCode(e>>>10&1023|55296);a=[10,20,30,40,50,60,70,80,90,99,11]\n"
+                       "var s=String.fromCharCode(104,116,116,112,115,58,47,47,101,120,97);\n"
+                       "var k=[104,116,116,112,115,58,47,47,101,120,97];x=String.fromCharCode.apply(null,k);\n"),
+    "fp/charcode-table.js": ("var T=[104,116,116,112,115,58,47,47,101,120,97];s+=String.fromCharCode(e>>>10&1023|55296);"
+                             "x=12,y=34,z=56,w=78,v=90,u=11,q=22,r=33,s=44,t=55,o=66;\n"
+                             "var k=[104,116,116,112,115,58,47,47,101,120,97];x=String.fromCharCode(...k.map(c=>c^1));\n"
+                             "o.k=[104,116,116,112,115,58,47,47,101,120,97];x=String.fromCharCode(...k);\n"
+                             'x=String.fromCharCode(f("' + "\U0001F600" * 3000 + '"),104,116,116,112,115,58,47,47,101,120,97);\n'
+                             'x=String.fromCharCode(f("' + "\U0001F600" * 3990 + '"),104,116,116,112,115,58,47,47,101,120,97);\n'),
+    "fp/compile.py": ("d = base64.b64decode(p)\nsession.exec(d)\nexec(compile(d, 'x', 'exec'))\n"
+                      "exec(compile(path.read_bytes(), str(path), 'exec'), ns)\n"
+                      "exec(compile(zlib.decompress(b), 'f', 'exec'))\ncode = marshal.load(fh)\n"),
     "many/many.js": ("// TODO x\n" * 500 + "console.log(a)\n" * 250 + "eval(a)\n" * 600
                      + 'Function(Buffer.from(p,"base64").toString())()\n'),
     "many/long.js": "x = 1; " * 700 + "eval(q);" + " y = 2;" * 700 + "\n",

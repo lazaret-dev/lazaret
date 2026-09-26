@@ -280,16 +280,52 @@ function joinedEvalDecode(ctx, i, ruleRe) {
 // allowed), or from an expression naming such a variable, that later appears
 // in the arguments of eval / exec / execSync / execFile(Sync) / spawn(Sync) /
 // Function / new Function / vm.runIn*Context is SC-EVAL-DECODE at the sink
-// (twin of core._dep_decode_flow).
+// (twin of core._dep_decode_flow). A decode call written directly in a
+// sink's arguments counts too. `exec` / `eval` are sinks only when called
+// bare, on a global object or Python's builtins, or on child_process (the
+// module, a require("child_process") call or a name bound to one); any other
+// method call (RegExp.prototype.exec, a database's .exec) is not code
+// execution. The other sink names count on any receiver.
 const DECODE_CALL_RE = pyRe("(?:\\batob|\\bb64decode|\\.\\s*fromhex|\\bunhexlify|\\b(?:codecs|__import__\\(\\s*['\\\"]codecs['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]codecs['\\\"]\\s*\\))\\s*\\.\\s*decode|\\b(?:zlib|__import__\\(\\s*['\\\"]zlib['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]zlib['\\\"]\\s*\\))\\s*\\.\\s*decompress)\\s*\\(|\\bBuffer\\s*\\.\\s*from\\s*\\([^;\\n]{0,300}?['\\\"`]base64['\\\"`]");
-const DECODE_SINK_RE = pyRe(String.raw`\b(?:eval|exec|execSync|execFile|execFileSync|spawn|spawnSync|Function`
-  + String.raw`|runIn(?:This|New)?Context)\s*\(`, "g");
+const DECODE_SINK_RE = pyRe(String.raw`(?:(require\s*\(\s*['"\x60][ \w:]*['"\x60]\s*\)|[A-Za-z_$][\w$]*)\s*\.\s*)?`
+  + String.raw`(?<![\w$])(eval|exec|execSync|execFile|execFileSync|spawn|spawnSync|Function`
+  + String.raw`|runIn(?:This|New)?Context)\s*\(`, "gd");
+const GLOBAL_EVAL_RECEIVERS = new Set(["window", "globalThis", "self", "global", "top", "parent",
+  "frames", "builtins", "__builtins__"]);
+const CHILD_PROCESS_RE = pyRe(String.raw`['"\x60](?:node:)?child_process['"\x60]`);
+const CP_ALIAS_RE = pyRe(String.raw`(?<![\w$.])([A-Za-z_$][\w$]*)\s*=\s*(?:await\s+)?(?:require|import)\s*\(\s*`
+  + String.raw`['"\x60](?:node:)?child_process['"\x60]\s*\)`
+  + String.raw`|\bimport\s+(?:\*\s*as\s+)?([A-Za-z_$][\w$]*)\s+from\s*['"\x60](?:node:)?child_process['"\x60]`, "g");
+/** Names bound to the child_process module in this file (twin of core._child_process_aliases). */
+function childProcessAliases(content) {
+  const out = new Set();
+  if (!content.includes("child_process")) return out;
+  CP_ALIAS_RE.lastIndex = 0;
+  let m;
+  while ((m = CP_ALIAS_RE.exec(content))) out.add(m[1] ?? m[2]);
+  return out;
+}
+/** Is this DECODE_SINK_RE match a call that runs code? (twin of core._is_code_sink) */
+function isCodeSink(code, m, cpAliases) {
+  const name = m[2];
+  if (name !== "eval" && name !== "exec") return true;
+  if (m[1] === undefined) {
+    let j = m.indices[2][0] - 1;
+    while (j >= 0 && (code[j] === " " || code[j] === "\t")) j--;
+    return j < 0 || code[j] !== ".";
+  }
+  const recv = code.slice(m.indices[1][0], m.indices[1][1]);
+  if (recv.startsWith("require")) return name === "exec" && CHILD_PROCESS_RE.test(recv);
+  if (GLOBAL_EVAL_RECEIVERS.has(recv)) return name === "eval" || recv === "builtins" || recv === "__builtins__";
+  return name === "exec" && (recv === "child_process" || cpAliases.has(recv));
+}
 const DEP_ASSIGN_RE = pyRe(String.raw`(?<![\w$])([A-Za-z_$][\w$]*)\s*=(?![=>])([^;]*)`, "gd");
 const DEP_SINK_ARGS_MAX = 1000;
 const blankStrings = (code) => code.replace(STRING_LIT_RE, (s) => s[0] + " ".repeat(s.length - 2) + s[s.length - 1]);
 function depDecodeFlow(path, ctx, issues, rule) {
   const identRe = IDENT_RUN_RE[ctx.lang] ?? IDENT_RUN_RE.js;
   const have = new Set(issues.filter((i) => i.rule === "SC-EVAL-DECODE").map((i) => i.line));
+  const cpAliases = ctx.lang === "js" ? childProcessAliases(ctx.content) : new Set();
   const decoded = new Map();                 // name -> line its decoded value came from
   const namesIn = (text) => {
     const out = [];
@@ -324,16 +360,17 @@ function depDecodeFlow(path, ctx, issues, rule) {
         if (src.length && !decoded.has(ev[1])) decoded.set(ev[1], Math.min(...src));
         continue;
       }
-      if (have.has(i + 1)) continue;
+      if (have.has(i + 1) || !isCodeSink(code, ev, cpAliases)) continue;
       close ??= parenCloseMap(blank);
       const argStart = ev.index + ev[0].length;
       const end = Math.min(close.get(argStart - 1) ?? blank.length, argStart + DEP_SINK_ARGS_MAX);
       const src = namesIn(blank.slice(argStart, end));
-      if (src.length) {
-        have.add(i + 1);
-        issues.push(mkIssue({ ...rule, msg: `Decoded payload (assigned at line ${Math.min(...src)}) reaches a code-execution sink.` },
-          path, i + 1, ctx.lines, ev.index));
-      }
+      let msg;
+      if (src.length) msg = `Decoded payload (assigned at line ${Math.min(...src)}) reaches a code-execution sink.`;
+      else if (DECODE_CALL_RE.test(code.slice(argStart, end))) msg = "Decoded payload reaches a code-execution sink in the same call.";
+      else continue;
+      have.add(i + 1);
+      issues.push(mkIssue({ ...rule, msg }, path, i + 1, ctx.lines, ev.index));
     }
   }
 }
@@ -469,13 +506,13 @@ function scanLines(path, content, lines, lang, dep, ctx, issues) {
         fix: "Decode the string and review what it does.",
         ref: "CWE-506 · Supply chain" }, path, i + 1, lines, line.search(/\\x[0-9A-Fa-f]{2}/)));
     }
-    const cm = lang === "js" ? CHARCODE_RE.exec(line) : null;
-    if (cm && countMatches(line, CHARCODE_NUM_RE) >= 10)
+    const cmCol = lang === "js" ? charcodeCol(line) : null;
+    if (cmCol !== null)
       issues.push(mkIssue({ id: "SC-CHARCODE", name: "Char-code string building", type: "HOTSPOT", sev: "MAJOR",
         msg: "String assembled from character codes — obfuscation indicator.",
         why: "fromCharCode chains hide payloads from static review.",
         fix: "Decode and review what string is being built.",
-        ref: "CWE-506 · Supply chain" }, path, i + 1, lines, cm.index));
+        ref: "CWE-506 · Supply chain" }, path, i + 1, lines, cmCol));
     const bm = B64_BLOB_RE.exec(line);
     if (bm && !line.includes("sourceMappingURL"))
       issues.push(mkIssue({ id: "SC-B64", name: "Large base64 blob", type: "HOTSPOT", sev: "MAJOR",
@@ -554,4 +591,92 @@ function scanLines(path, content, lines, lang, dep, ctx, issues) {
 }
 
 const CHARCODE_NUM_RE = pyRe(String.raw`\b\d{2,3}\b`, "g");
-function countMatches(s, re) { re.lastIndex = 0; let n = 0; while (re.exec(s)) n++; return n; }
+// SC-CHARCODE (twin of core._charcode_col): String.fromCharCode building text
+// from character codes written in the code: ten or more 2-3 digit numbers
+// inside the call's own parentheses (also through .apply / .call), or a name
+// the call uses that the same line assigns an array of ten or more
+// printable-ASCII codes. Counting numbers anywhere on the line made every
+// fromCharCode on a long minified line fire (binary parsers, UTF-16 surrogate
+// encoders), and so did any such array anywhere on the line.
+const CHARCODE_ALL_RE = /String\.fromCharCode/g;
+const CHARCODE_TABLE_RE = pyRe(
+  String.raw`(?<![\w$.])([A-Za-z_$][\w$]*)\s*=\s*\[((?:\s*[0-9]{2,3}\s*,){9,}\s*[0-9]{2,3})\s*\]`, "g");
+const CHARCODE_NAME_RE = pyRe(String.raw`(?<![\w$])(?:(?<=\.\.\.)|(?<!\.))[A-Za-z_$][\w$]*`, "g");  // a bare name; `...k` is a spread
+const CHARCODE_CALL_TAIL_RE = pyRe(String.raw`\s*(?:\.\s*(?:apply|call)\s*)?\(`, "y");
+const CHARCODE_ARGS_MAX = 4000;
+const CHARCODE_SCAN_BUDGET = 200000;
+/** Index of the ')' closing the '(' at k, or null before `stop` (twin of core._call_args_end). */
+function callArgsEnd(line, k, stop) {
+  let depth = 0, quote = null, j = k;
+  while (j < stop) {
+    const c = line[j];
+    if (quote !== null) {
+      if (c === "\\") { j += 2; continue; }
+      if (c === quote) quote = null;
+    } else if (c === "'" || c === '"' || c === "`") quote = c;
+    else if (c === "(") depth++;
+    else if (c === ")") { depth--; if (depth === 0) return j; }
+    j++;
+  }
+  return null;
+}
+function lowerBound(a, x) {
+  let lo = 0, hi = a.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (a[mid] < x) lo = mid + 1; else hi = mid; }
+  return lo;
+}
+// core indexes lines by code point, this engine by UTF-16 unit; the bounded
+// windows (CHARCODE_ARGS_MAX, DEP_SINK_ARGS_MAX, DEP_FLOW_WINDOW, the scan
+// budget) are counted in code points here too, so both engines cut in the
+// same place when a line holds astral characters.
+const SURROGATE_PAIR_RE = /[\ud800-\udbff][\udc00-\udfff]/g;
+/** UTF-16 offsets of the surrogate pairs in s (empty when there are none). */
+function pairOffsets(s) {
+  const out = [];
+  if (/[\ud800-\udbff]/.test(s)) for (const p of s.matchAll(SURROGATE_PAIR_RE)) out.push(p.index);
+  return out;
+}
+/** Code-point offset of the UTF-16 offset u. */
+const cpAt = (pairs, u) => (pairs.length ? u - lowerBound(pairs, u) : u);
+/** UTF-16 offset of the point n code points after offset k. */
+function cpAdvance(pairs, k, n) {
+  if (!pairs.length) return k + n;
+  const before = lowerBound(pairs, k);
+  for (let u = k + n; ;) {
+    const v = k + n + lowerBound(pairs, u) - before;
+    if (v === u) return u;
+    u = v;
+  }
+}
+function charcodeCol(line) {
+  if (!CHARCODE_RE.test(line)) return null;
+  let m;
+  const nums = [];
+  CHARCODE_NUM_RE.lastIndex = 0;
+  while ((m = CHARCODE_NUM_RE.exec(line))) nums.push(m.index);
+  if (nums.length < 10) return null;                    // a code table has ten too
+  const tables = new Set();
+  CHARCODE_TABLE_RE.lastIndex = 0;
+  while ((m = CHARCODE_TABLE_RE.exec(line)))
+    if (m[2].match(/[0-9]+/g).every((v) => +v >= 32 && +v <= 126)) tables.add(m[1]);
+  const refs = [];
+  if (tables.size) {
+    CHARCODE_NAME_RE.lastIndex = 0;
+    while ((m = CHARCODE_NAME_RE.exec(line))) if (tables.has(m[0])) refs.push(m.index);
+  }
+  const pairs = pairOffsets(line);
+  let budget = CHARCODE_SCAN_BUDGET;
+  CHARCODE_ALL_RE.lastIndex = 0;
+  while ((m = CHARCODE_ALL_RE.exec(line))) {
+    CHARCODE_CALL_TAIL_RE.lastIndex = m.index + m[0].length;
+    const t = CHARCODE_CALL_TAIL_RE.exec(line);
+    if (!t) continue;
+    const k = t.index + t[0].length - 1;                 // the '('
+    const stop = Math.min(line.length, cpAdvance(pairs, k, CHARCODE_ARGS_MAX));
+    const end = budget > 0 ? callArgsEnd(line, k, stop) : null;
+    const e = end === null ? stop : end;
+    budget -= cpAt(pairs, e) - cpAt(pairs, k);
+    if (lowerBound(nums, e) - lowerBound(nums, k) >= 10 || lowerBound(refs, e) > lowerBound(refs, k)) return m.index;
+  }
+  return null;
+}

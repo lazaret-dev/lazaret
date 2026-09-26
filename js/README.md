@@ -61,8 +61,8 @@ not already a Lazaret report (unless `--force-overwrite`). Writes are atomic
   root manifest (`SC-MANIFEST-UNPARSEABLE`); decode-then-execute
   (`SC-EVAL-DECODE`, also across lines, through an inline import such as
   `__import__("base64").b64decode`, and, in dependencies, across statements);
-  executable `.pth` lines (`SC-PTH-EXEC`); readable text hidden in hex escapes; base64 and char-code
-  blobs; `javascript-obfuscator` identifier signatures; compiled binaries;
+  executable `.pth` lines (`SC-PTH-EXEC`); readable text hidden in hex escapes; base64 blobs and
+  strings built from character codes written in the call or in an array it uses; `javascript-obfuscator` identifier signatures; compiled binaries;
   unchecked or orphaned `.pyc` files; UTF-7 source (`SC-UTF7`).
 - **Unicode evasion**: JS identifier escapes (`\u0065val`) and Python NFKC
   spellings are matched as the runtime reads them; bidirectional control

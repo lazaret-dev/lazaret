@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-Rp/cctG4RVwcqo6Nuc3HPecnGP79xTlYcFpGpGa90LY='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-WHoNBNXlhw6nAWLt2a7jOzF+WYTxtVXZLG6uR7tqpmo='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
 <title>Lazaret — Security &amp; Quality Review</title>
 <style>
   :root{
@@ -1691,7 +1691,7 @@ id:"S-SPAWN-SHELL", name:"child_process with shell:true", type:"VULN", sev:"CRIT
 },
 {
 id:"SC-EVAL-DECODE", name:"Decoded payload execution", type:"VULN", sev:"BLOCKER", langs:["py", "js"],
- re:pyRe("\\b(?:eval|exec|execSync|Function|runIn(?:This|New)?Context)\\s*\\(\\s*(?:(?:[\\w$]+|__import__\\(\\s*['\\\"][\\w.]+['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"][\\w.]+['\\\"]\\s*\\))\\s*\\.\\s*)*(?:atob|unescape|decodeURIComponent|Buffer\\s*\\.\\s*from|b64decode|(?:codecs|__import__\\(\\s*['\\\"]codecs['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]codecs['\\\"]\\s*\\))\\s*\\.\\s*decode|(?:zlib|__import__\\(\\s*['\\\"]zlib['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]zlib['\\\"]\\s*\\))\\s*\\.\\s*decompress|(?:marshal|__import__\\(\\s*['\\\"]marshal['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]marshal['\\\"]\\s*\\))\\s*\\.\\s*loads|fromhex|unhexlify)\\s*\\(", ""),
+ re:pyRe("\\b(?:eval|exec|execSync|Function|runIn(?:This|New)?Context)\\s*\\(\\s*(?:compile\\s*\\(\\s*)?(?:(?:[\\w$]+|__import__\\(\\s*['\\\"][\\w.]+['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"][\\w.]+['\\\"]\\s*\\))\\s*\\.\\s*)*(?:atob|unescape|decodeURIComponent|Buffer\\s*\\.\\s*from|b64decode|(?:codecs|__import__\\(\\s*['\\\"]codecs['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]codecs['\\\"]\\s*\\))\\s*\\.\\s*decode|(?:zlib|__import__\\(\\s*['\\\"]zlib['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]zlib['\\\"]\\s*\\))\\s*\\.\\s*decompress|(?:marshal|__import__\\(\\s*['\\\"]marshal['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]marshal['\\\"]\\s*\\))\\s*\\.\\s*loads|fromhex|unhexlify)\\s*\\(", ""),
  msg:"Code decoded (base64/escape) and immediately executed.",
  why:"Decode-then-execute is the signature pattern of malware droppers and supply-chain implants.",
  fix:"Treat as hostile until proven otherwise; inspect the decoded payload.",
@@ -1707,8 +1707,8 @@ id:"SC-PACKER", name:"Packed JavaScript (p,a,c,k,e,d)", type:"VULN", sev:"CRITIC
 },
 {
 id:"SC-MARSHAL", name:"Marshalled bytecode execution", type:"VULN", sev:"CRITICAL", langs:["py"],
- re:pyRe("marshal\\.loads\\s*\\(|exec\\s*\\(\\s*compile\\s*\\(", ""),
- msg:"Executing marshalled/compiled bytecode blobs.",
+ re:pyRe("\\bmarshal\\s*\\.\\s*loads?\\s*\\(|['\\\"]marshal['\\\"]\\s*\\)\\s*\\.\\s*loads?\\s*\\(|\\b(?:types\\s*\\.\\s*)?CodeType\\s*\\(|\\bimp\\s*\\.\\s*load_compiled\\s*\\(|\\bSourcelessFileLoader\\s*\\(", ""),
+ msg:"Loading marshalled bytecode or building a code object by hand.",
  why:"Bytecode blobs evade source review — a common Python malware technique.",
  fix:"Inspect the blob's origin; refuse opaque executable data in source trees.",
  ref:"CWE-506 · Supply chain",
@@ -2945,13 +2945,13 @@ function scanLines(path, content, lines, lang, ctx, issues) {
         fix: "Decode the string and review what it does.",
         ref: "CWE-506 · Supply chain" }, path, i + 1, lines, line.search(/\\x[0-9A-Fa-f]{2}/)));
     }
-    const cm = lang === "js" ? CHARCODE_RE.exec(line) : null;
-    if (cm && countMatches(line, CHARCODE_NUM_RE) >= 10)
+    const cmCol = lang === "js" ? charcodeCol(line) : null;
+    if (cmCol !== null)
       issues.push(mkIssue({ id: "SC-CHARCODE", name: "Char-code string building", type: "HOTSPOT", sev: "MAJOR",
         msg: "String assembled from character codes — obfuscation indicator.",
         why: "fromCharCode chains hide payloads from static review.",
         fix: "Decode and review what string is being built.",
-        ref: "CWE-506 · Supply chain" }, path, i + 1, lines, cm.index));
+        ref: "CWE-506 · Supply chain" }, path, i + 1, lines, cmCol));
     const bm = B64_BLOB_RE.exec(line);
     if (bm && !line.includes("sourceMappingURL"))
       issues.push(mkIssue({ id: "SC-B64", name: "Large base64 blob", type: "HOTSPOT", sev: "MAJOR",
@@ -3026,7 +3026,89 @@ function scanLines(path, content, lines, lang, ctx, issues) {
 }
 
 const CHARCODE_NUM_RE = pyRe(String.raw`\b\d{2,3}\b`, "g");
-function countMatches(s, re) { re.lastIndex = 0; let n = 0; while (re.exec(s)) n++; return n; }
+// SC-CHARCODE (twin of core._charcode_col): String.fromCharCode building text
+// from character codes written in the code: ten or more 2-3 digit numbers
+// inside the call's own parentheses (also through .apply / .call), or a name
+// the call uses that the same line assigns an array of ten or more
+// printable-ASCII codes. Counting numbers anywhere on the line made every
+// fromCharCode on a long minified line fire (binary parsers, UTF-16 surrogate
+// encoders), and so did any such array anywhere on the line.
+const CHARCODE_ALL_RE = /String\.fromCharCode/g;
+const CHARCODE_TABLE_RE = pyRe(
+  String.raw`(?<![\w$.])([A-Za-z_$][\w$]*)\s*=\s*\[((?:\s*[0-9]{2,3}\s*,){9,}\s*[0-9]{2,3})\s*\]`, "g");
+const CHARCODE_NAME_RE = pyRe(String.raw`(?<![\w$])(?:(?<=\.\.\.)|(?<!\.))[A-Za-z_$][\w$]*`, "g");  // a bare name; `...k` is a spread
+const CHARCODE_CALL_TAIL_RE = pyRe(String.raw`\s*(?:\.\s*(?:apply|call)\s*)?\(`, "y");
+const CHARCODE_ARGS_MAX = 4000;
+const CHARCODE_SCAN_BUDGET = 200000;
+/** Index of the ')' closing the '(' at k, or null before `stop` (twin of core._call_args_end). */
+function callArgsEnd(line, k, stop) {
+  let depth = 0, quote = null, j = k;
+  while (j < stop) {
+    const c = line[j];
+    if (quote !== null) {
+      if (c === "\\") { j += 2; continue; }
+      if (c === quote) quote = null;
+    } else if (c === "'" || c === '"' || c === "`") quote = c;
+    else if (c === "(") depth++;
+    else if (c === ")") { depth--; if (depth === 0) return j; }
+    j++;
+  }
+  return null;
+}
+// core indexes lines by code point, this engine by UTF-16 unit;
+// CHARCODE_ARGS_MAX and the scan budget are counted in code points here too,
+// so both engines cut in the same place when a line holds astral characters.
+const SURROGATE_PAIR_RE = /[\ud800-\udbff][\udc00-\udfff]/g;
+/** UTF-16 offsets of the surrogate pairs in s (empty when there are none). */
+function pairOffsets(s) {
+  const out = [];
+  if (/[\ud800-\udbff]/.test(s)) for (const p of s.matchAll(SURROGATE_PAIR_RE)) out.push(p.index);
+  return out;
+}
+/** Code-point offset of the UTF-16 offset u. */
+const cpAt = (pairs, u) => (pairs.length ? u - lowerBound(pairs, u) : u);
+/** UTF-16 offset of the point n code points after offset k. */
+function cpAdvance(pairs, k, n) {
+  if (!pairs.length) return k + n;
+  const before = lowerBound(pairs, k);
+  for (let u = k + n; ;) {
+    const v = k + n + lowerBound(pairs, u) - before;
+    if (v === u) return u;
+    u = v;
+  }
+}
+function charcodeCol(line) {
+  if (!CHARCODE_RE.test(line)) return null;
+  let m;
+  const nums = [];
+  CHARCODE_NUM_RE.lastIndex = 0;
+  while ((m = CHARCODE_NUM_RE.exec(line))) nums.push(m.index);
+  if (nums.length < 10) return null;                    // a code table has ten too
+  const tables = new Set();
+  CHARCODE_TABLE_RE.lastIndex = 0;
+  while ((m = CHARCODE_TABLE_RE.exec(line)))
+    if (m[2].match(/[0-9]+/g).every((v) => +v >= 32 && +v <= 126)) tables.add(m[1]);
+  const refs = [];
+  if (tables.size) {
+    CHARCODE_NAME_RE.lastIndex = 0;
+    while ((m = CHARCODE_NAME_RE.exec(line))) if (tables.has(m[0])) refs.push(m.index);
+  }
+  const pairs = pairOffsets(line);
+  let budget = CHARCODE_SCAN_BUDGET;
+  CHARCODE_ALL_RE.lastIndex = 0;
+  while ((m = CHARCODE_ALL_RE.exec(line))) {
+    CHARCODE_CALL_TAIL_RE.lastIndex = m.index + m[0].length;
+    const t = CHARCODE_CALL_TAIL_RE.exec(line);
+    if (!t) continue;
+    const k = t.index + t[0].length - 1;                 // the '('
+    const stop = Math.min(line.length, cpAdvance(pairs, k, CHARCODE_ARGS_MAX));
+    const end = budget > 0 ? callArgsEnd(line, k, stop) : null;
+    const e = end === null ? stop : end;
+    budget -= cpAt(pairs, e) - cpAt(pairs, k);
+    if (lowerBound(nums, e) - lowerBound(nums, k) >= 10 || lowerBound(refs, e) > lowerBound(refs, k)) return m.index;
+  }
+  return null;
+}
 
 /* ======== scanner/metrics.js ======== */
 // Metrics & ratings — twin of lazaret.scanner.core compute_metrics /

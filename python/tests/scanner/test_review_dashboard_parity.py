@@ -159,6 +159,21 @@ ADVERSARIAL = [
      "eval( // x\n  unescape(y)\n)\n"),
     ("decode.py", "py", "exec(\n    base64.b64decode(s))\nexec(  # nosec\n    codecs.decode(t, 'rot13'))\n"
      "exec(marshal.loads(b))\nexec(compile(src, 'x', 'exec'))\neval(bytes.fromhex(h))\n"),
+    # false positives from real registry scans: char codes counted per call,
+    # exec(compile(<source>)) is not bytecode, decode -> compile -> exec is
+    ("charcode.js", "js", "n+=String.fromCharCode(255&e),e>>>=8;x=12,y=34,z=56,w=78,v=90,u=11,q=22,r=33,s=44;\n"
+     "t+=String.fromCharCode(e>>>10&1023|55296);a=[10,20,30,40,50,60,70,80,90,99,11]\n"
+     "var s=String.fromCharCode(104,116,116,112,115,58,47,47,101,120,97);\n"
+     "var k=[104,116,116,112,115,58,47,47,101,120,97];x=String.fromCharCode.apply(null,k);\n"
+     "a=String.fromCharCode(e);" + "f(x);" * 600 + "b=String.fromCharCode(...[104,116,116,112,115,58,47,47,101,120,97]);\n"),
+    ("charcode-table.js", "js", "var T=[104,116,116,112,115,58,47,47,101,120,97];s+=String.fromCharCode(e>>>10&1023|55296);"
+     "x=12,y=34,z=56,w=78,v=90,u=11,q=22,r=33,s=44,t=55,o=66;\n"
+     "var k=[104,116,116,112,115,58,47,47,101,120,97];x=String.fromCharCode(...k.map(c=>c^1));\n"
+     'x=String.fromCharCode(f("' + "\U0001F600" * 3000 + '"),104,116,116,112,115,58,47,47,101,120,97);\n'),
+    ("compile.py", "py", "exec(compile(path.read_bytes(), str(path), 'exec'), ns)\n"
+     "exec(compile(base64.b64decode(x), '<s>', 'exec'))\nexec(compile(zlib.decompress(b), 'f', 'exec'))\n"
+     "code = marshal.load(fh)\nexec(__import__('marshal').loads(b))\nc = types.CodeType(0)\n"
+     "m = imp.load_compiled('x', 'x.pyc')\n"),
     # taint, sanitizers, the SQL-sink analyzer
     ("taint.py", "py", "import os, shlex\nx = request.args['x']\nos.system(shlex.quote(x))\nos.system(x)\n"
      "n = int(request.args['n'])\ncur.execute('SELECT %s' % n)\nopen(os.path.basename(x))\nredirect(x)\n"
