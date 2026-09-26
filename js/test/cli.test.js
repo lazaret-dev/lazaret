@@ -182,14 +182,15 @@ test("--include-deps scans node_modules content (dep rules only)", () => {
   }
 });
 
-test("oversize file (>2MB) yields SC-TRUNCATED CRITICAL, gate fails, honest metrics", () => {
+test("a file over --max-source-bytes yields SC-TRUNCATED CRITICAL, gate fails, honest metrics", () => {
   const d = mkdtempSync(join(tmpdir(), "lazaret-big-"));
   try {
     writeFileSync(join(d, "big.py"), "x = 1\n" + "#".repeat(2_100_000) + "\n");
     writeFileSync(join(d, "small.py"), "y = 2\n");
-    const r = capture(["check", d, "--no-html", "--quiet"]);
+    const r = capture(["check", d, "--no-html", "--quiet", "--max-source-bytes", "2000000"]);
     assert.equal(r.code, 0);             // spec 10: exit 1 only with --ci (was: forced exit 1)
-    assert.equal(capture(["check", d, "--no-html", "--quiet", "--ci", "--force-overwrite"]).code, 1);
+    assert.equal(capture(["check", d, "--no-html", "--quiet", "--ci", "--force-overwrite",
+      "--max-source-bytes", "2000000"]).code, 1);
     const rep = JSON.parse(readFileSync(join(d, "lazaret-report.json"), "utf8"));
     assert.equal(rep.pass, false);
     const t = rep.issues.find((i) => i.rule === "SC-TRUNCATED");

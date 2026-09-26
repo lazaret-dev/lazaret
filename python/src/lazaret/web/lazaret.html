@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-yl2PGmFGsFlIv+7D9VZhlXa0PhlepXmr/T5g0Y50mRc='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-ShP0eYFWWghmDT0XnCBcZQFSfTr9CcOzZS1sFfMR+IA='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
 <title>Lazaret — Security &amp; Quality Review</title>
 <style>
   :root{
@@ -3211,7 +3211,9 @@ function maintainabilityRating(issues, ncloc) {
 /* ======== dashboard: files, limits, uploads ======== */
 // The CLI's limits (FIX-SPEC items 7, 9, 14; see scanFile / capIssues above):
 // a file over MAX_FILE_BYTES is not scanned but gets one SC-TRUNCATED
-// finding (which fails the gate) instead of freezing the tab; there is no
+// finding (which fails the gate) instead of freezing the tab (the page keeps
+// 2,000,000 bytes, as the CLIs did before their default became 16,000,000:
+// it scans on the tab's main thread); there is no
 // per-file issue budget; findings repeated on (rule, line, message) are
 // reported once, and per (file, rule) at most CAP_PER_RULE findings of any
 // non-security rule, then one Q-CAPPED; snippet lines are

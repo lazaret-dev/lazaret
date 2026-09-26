@@ -48,7 +48,10 @@ export const DEP_MARKERS = new Set([
 const DEP_TREES = new Set(["node_modules", "bower_components", "site-packages"]);
 const VENV_TREES = new Set(["venv", ".venv", "env"]);
 
-export const MAX_FILE_BYTES = 2_000_000;   // source files/manifests above this: SC-TRUNCATED
+// Source files and manifests above this are not read: SC-TRUNCATED (twin of
+// core.SOURCE_SIZE_CAP). The CLI takes --max-source-bytes or
+// LAZARET_MAX_SOURCE_BYTES; collectFiles() takes `maxFileBytes`.
+export const MAX_FILE_BYTES = 16_000_000;
 
 const O_NOFOLLOW = C.O_NOFOLLOW ?? 0;
 const O_NONBLOCK = C.O_NONBLOCK ?? 0;
@@ -225,8 +228,8 @@ function treeStats(dirBuf) {
  * Q-SCAN-ERROR), skippedIssues: Q-SKIPPED-TREE per pruned tree.
  * Throws ScanTargetError when the root itself cannot be listed.
  */
-export function collectFiles(root, { includeDeps = false, exclude = [] } = {}) {
-  const col = { files: [], manifests: [], pth: [], binaryIssues: [], skippedIssues: [] };
+export function collectFiles(root, { includeDeps = false, exclude = [], maxFileBytes = MAX_FILE_BYTES } = {}) {
+  const col = { files: [], manifests: [], pth: [], binaryIssues: [], skippedIssues: [], maxFileBytes };
   const issues = col.binaryIssues;
   const excluded = new Set(exclude);
   const rootBuf = Buffer.from(resolve(root));
@@ -281,6 +284,9 @@ export function collectFiles(root, { includeDeps = false, exclude = [] } = {}) {
   return col;
 }
 
+/** n with thousands separators, as Python's f"{n:,}" writes it. */
+const withCommas = (n) => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+
 function collectFile(full, rel, name, st, dep, col) {
   const ext = extname(name).toLowerCase();
   const kind = name === "package.json" || name === "binding.gyp" ? name : null;
@@ -294,13 +300,14 @@ function collectFile(full, rel, name, st, dep, col) {
     return;
   }
   // spec 9: the size cap applies only to files that would be read whole
-  if (size > MAX_FILE_BYTES) {
-    col.binaryIssues.push(truncatedIssue(rel, `${size.toLocaleString("en-US")} bytes exceeds the 2,000,000-byte file limit`));
+  const cap = col.maxFileBytes;
+  if (size > cap) {
+    col.binaryIssues.push(truncatedIssue(rel, `${withCommas(size)} bytes exceeds the ${withCommas(cap)}-byte file limit`));
     return;
   }
-  const data = readBounded(full, MAX_FILE_BYTES + 1);
-  if (data.length > MAX_FILE_BYTES) {                 // grew between the lstat and the read
-    col.binaryIssues.push(truncatedIssue(rel, "read exceeded the 2,000,000-byte file limit"));
+  const data = readBounded(full, cap + 1);
+  if (data.length > cap) {                            // grew between the lstat and the read
+    col.binaryIssues.push(truncatedIssue(rel, `read exceeded the ${withCommas(cap)}-byte file limit`));
     return;
   }
   if (kind) {

@@ -8,9 +8,10 @@ import { resolve } from "node:path";
 import { statSync, readFileSync } from "node:fs";
 import {
   collectFiles, reportPaths, writeReport, validateReportPaths, validateOutDir,
-  ReportPathError, EXIT_OUTPUT, ScanTargetError, scanErrorIssue,
+  ReportPathError, EXIT_OUTPUT, ScanTargetError, scanErrorIssue, MAX_FILE_BYTES,
 } from "./lib/fs.js";
 import { fsNameToString } from "./lib/encoding.js";
+import { pyStrip } from "./lib/pycompat.js";
 import { scanFile } from "./scanner/scan.js";
 import { scanManifest, scanGyp } from "./lib/supplychain.js";
 import { redactResult, setRedactSecrets } from "./lib/redact.js";
@@ -56,6 +57,9 @@ Options:
                         ${BASELINE_KEY_ENV} is set and its signature verifies.
   --no-redact-secrets   Keep credential lines in reports (default: redacted).
   --excerpt-width N     Characters of the flagged line shown per finding (100).
+  --max-source-bytes N  Largest source file or manifest read (16,000,000, env
+                        LAZARET_MAX_SOURCE_BYTES); a larger one is not scanned
+                        and gets SC-TRUNCATED, which fails the gate.
   -q, --quiet           Only print the summary (no per-issue lines).
   --ci                  Exit 1 when the quality gate fails.
   --version             Print version.
@@ -73,6 +77,7 @@ const OPTIONS = [
   { flag: "--baseline", dest: "baseline", value: true },
   { flag: "--exclude", dest: "exclude", value: true, append: true },
   { flag: "--excerpt-width", dest: "excerptWidth", value: true, int: true },
+  { flag: "--max-source-bytes", dest: "maxSourceBytes", value: true, int: true, positive: true },
   { flag: "--no-json", dest: "noJson" },
   { flag: "--no-html", dest: "noHtml" },
   { flag: "--force-overwrite", dest: "force" },
@@ -88,6 +93,16 @@ const OPTIONS = [
 const PYTHON_ONLY = ["--taint-config", "--strict-taint-config", "--trust-repo-config"];
 
 class UsageError extends Error {}
+
+/** A positive integer environment value, read as Python's int() reads it
+ * (surrounding whitespace, a sign, `_` between digits), else null. */
+function envPositiveInt(v) {
+  if (v === undefined || v === null) return null;
+  const s = pyStrip(String(v));
+  if (!/^[-+]?[0-9]+(?:_[0-9]+)*$/.test(s)) return null;
+  const n = Number(s.replaceAll("_", ""));
+  return n > 0 ? n : null;
+}
 
 function findLong(name) {
   const exact = OPTIONS.find((o) => o.flag === name);
@@ -114,8 +129,11 @@ export function parseArgs(argv) {
   };
   const set = (o, v) => {
     if (o.int) {
-      if (!/^[-+]?\d+$/.test(String(v).trim())) throw new UsageError(`argument ${o.flag}: invalid int value: '${v}'`);
-      v = parseInt(v, 10);
+      const raw = String(v), isInt = /^[-+]?\d+$/.test(raw.trim());
+      if (o.positive && !(isInt && parseInt(raw, 10) > 0))      // as core._positive_int words it
+        throw new UsageError(`argument ${o.flag}: expected a positive number of bytes, got '${raw}'`);
+      if (!isInt) throw new UsageError(`argument ${o.flag}: invalid int value: '${v}'`);
+      v = parseInt(raw, 10);
     }
     if (o.append) opts[o.dest].push(v);
     else opts[o.dest] = o.value ? v : true;
@@ -241,7 +259,8 @@ function runChecked(argv, io) {
   // ---- scan -------------------------------------------------------------
   let col;
   try {
-    col = collectFiles(root, { includeDeps: !!opts.deps, exclude: opts.exclude });
+    col = collectFiles(root, { includeDeps: !!opts.deps, exclude: opts.exclude,
+      maxFileBytes: opts.maxSourceBytes ?? envPositiveInt(env.LAZARET_MAX_SOURCE_BYTES) ?? MAX_FILE_BYTES });
   } catch (e) {
     if (e instanceof ScanTargetError) { err(`error: ${sanitizeTerm(e.message)}`); return EXIT_USAGE; }
     throw e;

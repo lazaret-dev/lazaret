@@ -21,6 +21,8 @@ Environment:
     LAZARET_MCP_MAX_FILES     files one tool call may scan   (default 20000)
     LAZARET_MCP_MAX_BYTES     source bytes one call may read (default 200000000)
     LAZARET_MCP_MAX_SECONDS   wall-clock budget per call     (default 300)
+    LAZARET_MAX_SOURCE_BYTES  largest source file read       (default 16000000,
+                              shared with the lazaret CLI and the registry)
     A call that hits a cap returns what it scanned, marked "incomplete", with
     an SC-TRUNCATED finding for what was left out (scan_files: one per
     unscanned file) or, for packages, an INCOMPLETE entry — never clean.
@@ -257,7 +259,6 @@ def result_summary(res, max_issues):
 
 # ---------------- Project scan (mirrors the CLI pipeline) ----------------
 _MANIFEST_NAMES = ("package.json", "binding.gyp")
-_SOURCE_CAP = 2_000_000          # collect_files' per-file limit
 
 
 def _preflight(root, exclude, include_deps, ctx):
@@ -294,7 +295,7 @@ def _preflight(root, exclude, include_deps, ctx):
                 n_files += 1
                 if source:
                     size = e.stat(follow_symlinks=False).st_size
-                    n_bytes += size if size <= _SOURCE_CAP else 0
+                    n_bytes += size if size <= lazaret.SOURCE_SIZE_CAP else 0   # collect_files' limit
             except OSError:
                 continue
             if n_files > ctx.max_files:
@@ -358,10 +359,9 @@ def tool_scan_directory(args):
 # audit M6/G7 (this card): scan_files read whole files with open().read() —
 # a sparse/huge file (e.g. /proc/kcore-style) allocates unboundedly and
 # kills the single-threaded server (verified: a 512MB sparse file hung it).
-# Same 2,000,000-byte cap as lazaret.collect_files, and the same
-# verdict-integrity rule: a file that was not scanned must leave a signal
-# (SC-TRUNCATED, CRITICAL), never a silent skip.
-MAX_SCAN_FILE_BYTES = 2_000_000
+# The same cap as lazaret.collect_files (core.SOURCE_SIZE_CAP, read when a
+# call runs), and the same verdict-integrity rule: a file that was not scanned
+# must leave a signal (SC-TRUNCATED, CRITICAL), never a silent skip.
 
 
 def tool_scan_files(args):
@@ -405,9 +405,9 @@ def tool_scan_files(args):
         except OSError as exc:
             out[p] = {"error": f"Cannot stat file: {exc}"}
             continue
-        if size > MAX_SCAN_FILE_BYTES:
-            ti = lazaret.truncated_issue(
-                p, f"{size:,} bytes exceeds the {MAX_SCAN_FILE_BYTES:,}-byte file limit")
+        cap = lazaret.SOURCE_SIZE_CAP
+        if size > cap:
+            ti = lazaret.truncated_issue(p, f"{size:,} bytes exceeds the {cap:,}-byte file limit")
             all_issues.append(ti)
             out[p] = {"error": ti["msg"], "rule": ti["rule"], "sev": ti["sev"]}
             continue
@@ -415,13 +415,12 @@ def tool_scan_files(args):
         # (TOCTOU) is still caught, then falls into the truncation path.
         try:
             with open(p, "rb") as fh:
-                data = fh.read(MAX_SCAN_FILE_BYTES + 1)
+                data = fh.read(cap + 1)
         except OSError as exc:
             out[p] = {"error": f"Cannot read file: {exc}"}
             continue
-        if len(data) > MAX_SCAN_FILE_BYTES:
-            ti = lazaret.truncated_issue(
-                p, f"read exceeded the {MAX_SCAN_FILE_BYTES:,}-byte file limit")
+        if len(data) > cap:
+            ti = lazaret.truncated_issue(p, f"read exceeded the {cap:,}-byte file limit")
             all_issues.append(ti)
             out[p] = {"error": ti["msg"], "rule": ti["rule"], "sev": ti["sev"]}
             continue

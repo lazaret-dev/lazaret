@@ -102,7 +102,10 @@ class DashboardTableTests(unittest.TestCase):
             "LONG_LINE": core.LONG_LINE, "FN_LEN_LIMIT": core.FN_LEN_LIMIT, "FN_CX_LIMIT": core.FN_CX_LIMIT,
             "FN_HEADER_SCAN_LIMIT": core.FN_HEADER_SCAN_LIMIT, "SC_JOIN_MAX_LINES": core.SC_JOIN_MAX_LINES,
             "SC_JOIN_MAX_CHARS": core.SC_JOIN_MAX_CHARS, "SQL_CALLS_PER_LINE": core.SQL_CALLS_PER_LINE,
-            "SQL_ARG_MAX": core.SQL_ARG_MAX, "MAX_FILE_BYTES": core.SOURCE_SIZE_CAP,
+            "SQL_ARG_MAX": core.SQL_ARG_MAX,
+            # the page keeps 2,000,000 (it scans on the tab's main thread); the
+            # CLIs default to 16,000,000 (core.SOURCE_SIZE_CAP)
+            "MAX_FILE_BYTES": 2_000_000,
             "SCAN_TIME_BUDGET_MS": int(core.SCAN_TIME_BUDGET * 1000)})
         self.assertEqual(self.page["neverCapped"], list(core._NEVER_CAPPED_PREFIXES))
         self.assertEqual(self.page["sevOrder"], core.SEV_ORDER)

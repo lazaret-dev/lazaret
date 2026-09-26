@@ -16,7 +16,7 @@ On a machine with Node but no Python, the project scanner is also on npm, with t
 npx lazaret check .          # or: npx lazaret .   (or: npm install -g lazaret)
 ```
 
-The npm package is the project scanner only; registry auditing, cross-file taint (`X-*` findings), custom taint specs, SCA and the MCP server come with the Python package. The npm CLI takes the same flags as the Python one (`--deps`, `--exclude`, `--out-dir`, `--html`/`--json`, `--sarif`, `--baseline`, `--ci`, `--force-overwrite`, `--no-redact-secrets`, `-q`) and rejects unknown ones. The two engines are tested to agree exactly — every finding including its severity and message, the metrics, ratings, quality gate and exit code (`tests/architecture/test_js_parity.py`, which also runs an adversarial fixture set) — except for the Python-only cross-file engine's output (`X-*` findings and its Q-FLOW-* coverage notes). The browser dashboard carries a port of the same engine and is held to the same findings (`tests/scanner/test_review_dashboard_parity.py`).
+The npm package is the project scanner only; registry auditing, cross-file taint (`X-*` findings), custom taint specs, SCA and the MCP server come with the Python package. The npm CLI takes the same flags as the Python one (`--deps`, `--exclude`, `--out-dir`, `--html`/`--json`, `--sarif`, `--baseline`, `--ci`, `--force-overwrite`, `--no-redact-secrets`, `--max-source-bytes`, `-q`) and rejects unknown ones. The two engines are tested to agree exactly — every finding including its severity and message, the metrics, ratings, quality gate and exit code (`tests/architecture/test_js_parity.py`, which also runs an adversarial fixture set) — except for the Python-only cross-file engine's output (`X-*` findings and its Q-FLOW-* coverage notes). The browser dashboard carries a port of the same engine and is held to the same findings (`tests/scanner/test_review_dashboard_parity.py`).
 
 From a checkout, `pip install ./python` (or `pip install -e ./python` for development) works with no network access: Lazaret builds with its own standard-library build backend.
 
@@ -43,6 +43,7 @@ lazaret . --out-dir /tmp/cg-reports # write reports elsewhere (must exist and be
 lazaret . --exclude fixtures -q     # skip extra dirs, summary only
 lazaret . --ci                      # exit 1 if quality gate fails (for CI)
 lazaret . --deps                    # also audit node_modules/venv for supply-chain indicators
+lazaret . --max-source-bytes 32000000  # read larger source files (default 16,000,000)
 lazaret . --sarif out.sarif         # SARIF 2.1.0 for GitHub code scanning
 lazaret . --baseline prev.json      # mark issues not in a previous report as new
 lazaret . --no-redact-secrets       # keep credential lines in reports (default: redacted)
@@ -108,8 +109,11 @@ is listed as a Q-SKIPPED-TREE note, so the coverage gap is visible.
 Only regular files are opened: symbolic links are never followed (Q-SYMLINK note — a link can't pull a
 file from outside the repo into your report), FIFOs, sockets and unreadable entries become Q-UNREADABLE
 notes instead of hanging or aborting the scan, and the walk is iterative (no recursion limit on deep
-trees). Source files and manifests over 2,000,000 bytes get SC-TRUNCATED instead of a silent skip; other
-large files are classified from a header sample. Each file also has a 30-second time budget, checked inside each rule's match loop (SC-TRUNCATED
+trees). Source files and manifests over 16,000,000 bytes get SC-TRUNCATED instead of a silent skip
+(`--max-source-bytes` or `LAZARET_MAX_SOURCE_BYTES` changes the limit, for the MCP server and the
+registry scanner too; the browser dashboard keeps 2,000,000); other large files are classified from
+a header sample. Bundles in `node_modules` fit: typescript's `lib/typescript.js` is 9.1 MB and scans in
+a few seconds. Each file also has a 30-second time budget, checked inside each rule's match loop (SC-TRUNCATED
 "scan time budget exceeded" if it is ever hit — a backstop; the rules are linear-time).
 
 **Encodings:** a BOM decides first (UTF-8, UTF-16 LE/BE); a NUL in the first four bytes is read as

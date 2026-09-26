@@ -3614,10 +3614,25 @@ import lazaret as _lazaret_pkg   # __version__ (the package root imports nothing
 #   * paths in findings are root-relative and valid UTF-8 (a non-UTF-8 file
 #     name crashed the HTML writer after the scan).
 
+def _env_int(var, default):
+    """A positive integer from the environment, else `default` (parsed like
+    the registry scanner's LAZARET_* limits)."""
+    try:
+        value = int(os.environ.get(var, default))
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
 #: Files that would be source-scanned or parsed as manifests and are larger
 #: than this are not read: they get an SC-TRUNCATED finding instead. Every
-#: other file is classified from a header sample whatever its size.
-SOURCE_SIZE_CAP = 2_000_000
+#: other file is classified from a header sample whatever its size. The old
+#: 2,000,000 made `--deps` report SC-TRUNCATED (CRITICAL) for ordinary
+#: single-file bundles: typescript's lib/typescript.js (9.1 MB) and _tsc.js
+#: (6.2 MB), @babel/standalone's babel.js (5.3 MB). The scan is linear; an
+#: 8 MB bundle takes about 5 s. Env LAZARET_MAX_SOURCE_BYTES (shared with
+#: lazaret-registry) or --max-source-bytes; the MCP server uses the same value.
+SOURCE_SIZE_CAP = _env_int("LAZARET_MAX_SOURCE_BYTES", 16_000_000)
 #: Bytes read from every non-source regular file for magic-byte classification.
 HEADER_SAMPLE_BYTES = 512
 MANIFEST_NAMES = ("package.json", "binding.gyp")
@@ -4940,8 +4955,19 @@ def main(argv=None):
         _internal_error(exc)
 
 
+def _positive_int(text):
+    """argparse type: an integer above zero."""
+    try:
+        value = int(text)
+    except ValueError:
+        value = 0
+    if value <= 0:
+        raise argparse.ArgumentTypeError(f"expected a positive number of bytes, got {text!r}")
+    return value
+
+
 def _main(argv=None):
-    global REDACT_SECRETS, EXCERPT_WIDTH
+    global REDACT_SECRETS, EXCERPT_WIDTH, SOURCE_SIZE_CAP
     ap = argparse.ArgumentParser(prog="lazaret", description="Lazaret — security & quality scanner for Python/JS projects.")
     ap.add_argument("directory", help="Project directory to scan")
     ap.add_argument("--out-dir", metavar="DIR",
@@ -4990,10 +5016,16 @@ def _main(argv=None):
                          "your own code do not persist credentials into CI artifacts.")
     ap.add_argument("--excerpt-width", type=int, default=EXCERPT_WIDTH, metavar="N",
                     help=f"Chars of the matched line to show under each finding (default {EXCERPT_WIDTH})")
+    ap.add_argument("--max-source-bytes", type=_positive_int, metavar="BYTES",
+                    help=f"Largest source file or manifest read (default {SOURCE_SIZE_CAP:,}, env "
+                         f"LAZARET_MAX_SOURCE_BYTES); a larger one is not scanned and gets "
+                         f"SC-TRUNCATED, which fails the gate")
     ap.add_argument("-q", "--quiet", action="store_true")
     args = ap.parse_args(argv)
     REDACT_SECRETS = not args.no_redact_secrets
     EXCERPT_WIDTH = args.excerpt_width
+    if args.max_source_bytes:
+        SOURCE_SIZE_CAP = args.max_source_bytes
 
     # Usage errors (exit 2) before anything else: a missing target, a file
     # instead of a directory. (An unreadable or empty directory is reported

@@ -51,7 +51,9 @@ test("dependency trees are pruned without --deps and reported root-relative", ()
     assert.equal(r.code, 0, r.err);
     assert.deepEqual(r.keys, ["Q-SKIPPED-TREE node_modules"]);
     assert.equal(r.rep.issues[0].msg, "Directory node_modules was skipped (2 files, 2750072 bytes unread).");
-    r = scan(d, ["--deps"]);
+    r = scan(d, ["--deps"]);                  // 2.75 MB is under the 16,000,000-byte limit: scanned
+    assert.deepEqual(r.keys, [`SC-INSTALL-HOOK ${P("node_modules", "evil", "package.json")}`]);
+    r = scan(d, ["--deps", "--max-source-bytes", "2000000"]);
     assert.deepEqual(r.keys, [
       `SC-INSTALL-HOOK ${P("node_modules", "evil", "package.json")}`,
       `SC-TRUNCATED ${P("node_modules", "typescript", "lib", "typescript.js")}`,

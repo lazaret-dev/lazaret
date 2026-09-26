@@ -82,7 +82,7 @@ test("site-packages .pth files are checked with --deps", () => {
 test("the size cap applies to .pth files", () => {
   const d = tree({ "big.pth": EVIL + "#".repeat(2_000_001) });
   try {
-    const r = scan(d);
+    const r = scan(d, ["--max-source-bytes", "2000000"]);
     assert.deepEqual(pth(r.issues), []);
     assert.deepEqual(r.issues.filter((i) => i.rule === "SC-TRUNCATED").map((i) => i.file), ["big.pth"]);
   } finally { rmSync(d, { recursive: true, force: true }); }
