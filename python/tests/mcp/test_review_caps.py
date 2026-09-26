@@ -163,9 +163,24 @@ class RegistryToolCapTests(unittest.TestCase):
         self.assertIn("at most", out["incompleteReason"])
 
     def test_discover_past_the_deadline(self):
+        # The budget runs out while the registries are walked: what was found
+        # is listed, INCOMPLETE and not scanned. (A budget spent before the
+        # call skips the walks: test_review_mcp_audit.DiscoverArgumentTests.)
         found = [("npm", "a", "1.0.0", NOW), ("npm", "b", None, NOW)]
-        out = self.run_patched(lambda: server.tool_discover_packages({"since": "1d", "scan": True}),
-                               found=found, expired=True)
+        ctx = server.ToolContext()
+
+        def discover_npm(cutoff, limit, notes=None):
+            ctx.deadline = time.monotonic() - 1
+            return list(found)
+
+        def call():
+            server._LOCAL.ctx = ctx
+            try:
+                with mock.patch.object(repo, "discover_npm", side_effect=discover_npm):
+                    return server.tool_discover_packages({"since": "1d", "scan": True})
+            finally:
+                server._LOCAL.ctx = None
+        out = self.run_patched(call)
         self.assertEqual({r["package"]: r["verdict"] for r in out["scanned"]},
                          {"npm:a@1.0.0": "INCOMPLETE", "npm:b": "INCOMPLETE"})
         self.assertTrue(out["incomplete"])

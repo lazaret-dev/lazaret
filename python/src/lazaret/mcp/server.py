@@ -152,7 +152,8 @@ TOOLS = [
                 "since": {"type": "string", "description": "Time window: 7d, 2w, 24h, or an ISO date (default 7d)"},
                 "ecosystem": {"type": "array", "items": {"type": "string", "enum": ["pypi", "npm"]},
                               "description": "Restrict to pypi and/or npm (default both)"},
-                "limit": {"type": "integer", "description": "Max packages to return (default 25, cap 50)"},
+                "limit": {"type": "integer", "minimum": 1,
+                          "description": "Max packages to return (default 25, cap 50)"},
                 "scan": {"type": "boolean", "description": (
                     f"Also scan the discovered packages (at most {MAX_DISCOVER_SCANS}; the "
                     f"rest are listed as INCOMPLETE, not scanned)")},
@@ -606,6 +607,38 @@ def tool_registry_status(args):
     return {"tracked": len(rows), "packages": rows}
 
 
+DISCOVER_ECOSYSTEMS = ("pypi", "npm")
+
+
+def _discover_ecosystems(value):
+    """The registries a discover_packages call asked for, validated: a list
+    drawn from DISCOVER_ECOSYSTEMS (missing or [] = both). Anything else is
+    a tool error — ["PyPI"] used to query nothing and answer "0 packages",
+    and a plain "npm" was iterated character by character."""
+    if value is None or value == []:
+        return list(DISCOVER_ECOSYSTEMS)
+    if not isinstance(value, list) or not all(isinstance(e, str) for e in value) \
+            or not set(value) <= set(DISCOVER_ECOSYSTEMS):
+        raise ValueError("ecosystem must be an array drawn from "
+                         + ", ".join(f'"{e}"' for e in DISCOVER_ECOSYSTEMS)
+                         + f" (got {json.dumps(value)[:80]})")
+    return [e for e in DISCOVER_ECOSYSTEMS if e in value]
+
+
+def _discover_limit(value):
+    if value is None:
+        return 25
+    try:
+        if isinstance(value, bool) or (isinstance(value, float) and not value.is_integer()):
+            raise ValueError
+        limit = int(value)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError("limit must be an integer") from None
+    if limit < 1:
+        raise ValueError("limit must be at least 1")
+    return min(limit, 50)
+
+
 def tool_discover_packages(args):
     if lazaret_repo is None:
         raise ValueError("Registry scanning unavailable (lazaret.registry not importable).")
@@ -614,16 +647,20 @@ def tool_discover_packages(args):
     if not isinstance(since, str):
         raise ValueError("since must be a string like 7d, 2w, 24h or an ISO date")
     cutoff = lazaret_repo.parse_since(since)
-    ecos = args.get("ecosystem") or ["pypi", "npm"]
-    try:
-        limit = min(int(args.get("limit") or 25), 50)
-    except (TypeError, ValueError):
-        raise ValueError("limit must be an integer") from None
+    ecos = _discover_ecosystems(args.get("ecosystem"))
+    limit = _discover_limit(args.get("limit"))
     discovered, notes = [], {}
-    if "pypi" in ecos:
-        discovered += lazaret_repo.discover_pypi(cutoff, limit, notes)
-    if "npm" in ecos:
-        discovered += lazaret_repo.discover_npm(cutoff, limit, notes)
+    # The registry walks themselves can't be interrupted from here; the call's
+    # cancel flag and deadline are honoured before each one.
+    for eco in ecos:
+        ctx.check()
+        if ctx.expired():
+            notes[eco] = (f"not checked: time budget of {ctx.max_seconds:g} s "
+                          f"(LAZARET_MCP_MAX_SECONDS) exceeded")
+            continue
+        find = lazaret_repo.discover_pypi if eco == "pypi" else lazaret_repo.discover_npm
+        discovered += find(cutoff, limit, notes)
+    ctx.check()
     discovered.sort(key=lambda x: x[3], reverse=True)
     discovered = discovered[:limit]
     out = {"since": cutoff.isoformat(), "count": len(discovered),

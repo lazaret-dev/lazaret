@@ -8,10 +8,15 @@
    or .venv and never counted .pth files, while collect reads such a
    directory when it has no marker file and reads .pth files whole: 40 x
    50 KB of .js under vendor/ passed a 100 KB budget and were all read.
+7  discover_packages did not validate `ecosystem` or `limit`: ["PyPI"] or
+   ["NPM"] queried nothing and answered count 0, complete; a plain "npm" was
+   iterated character by character; a negative limit was accepted. Its
+   deadline and cancel flag were not checked before the registry walks.
 
 Fixtures are inert text files.
 """
 import atexit
+import datetime
 import errno
 import json
 import os
@@ -20,10 +25,13 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
+import time
 import unittest
 from unittest import mock
 
 from lazaret.mcp import server
+from lazaret.registry import repo
 from lazaret.scanner import core as lazaret
 from tests import _support
 
@@ -221,6 +229,95 @@ class PreflightBudgetTests(unittest.TestCase):
                           ".venv/pyvenv.cfg": 10, ".venv/lib/x.py": 150_000})
         self.assertFalse(self.refused(self.scan(root, 100_000)))
         self.assertTrue(self.refused(self.scan(root, 100_000, include_deps=True)))
+
+
+# ---------------------------------------------------------------------------
+# 7. discover_packages validates its arguments and honours the call context
+# ---------------------------------------------------------------------------
+NOW = datetime.datetime.now(datetime.timezone.utc)
+
+
+class DiscoverArgumentTests(unittest.TestCase):
+    def setUp(self):
+        self.calls = []
+
+        def fake(eco):
+            def discover(cutoff, limit, notes=None):
+                self.calls.append((eco, limit))
+                return [(eco, f"{eco}-pkg", "1.0.0", NOW)]
+            return discover
+        for eco in ("pypi", "npm"):
+            patcher = mock.patch.object(repo, f"discover_{eco}", side_effect=fake(eco))
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def call(self, **args):
+        return server.tool_discover_packages(dict({"since": "1d"}, **args))
+
+    def test_bad_ecosystems_are_tool_errors(self):
+        for bad in (["PyPI"], ["NPM"], "npm", "npm,pypi", ["npm", 5], ["go"], {"npm": True}):
+            with self.subTest(ecosystem=bad):
+                with self.assertRaisesRegex(ValueError, "ecosystem must be an array"):
+                    self.call(ecosystem=bad)
+        self.assertEqual(self.calls, [])
+
+    def test_good_ecosystems(self):
+        for eco, want in ((["npm"], ["npm"]), (["npm", "pypi"], ["pypi", "npm"]), ([], ["pypi", "npm"]),
+                          (None, ["pypi", "npm"]), (["pypi", "pypi"], ["pypi"])):
+            with self.subTest(ecosystem=eco):
+                self.calls.clear()
+                out = self.call(**({} if eco is None else {"ecosystem": eco}))
+                self.assertEqual([e for e, _ in self.calls], want)
+                self.assertEqual(out["count"], len(want))
+                self.assertNotIn("incomplete", out)
+
+    def test_limit(self):
+        for bad in (-1, 0, True, "x", 2.5, [3]):
+            with self.subTest(limit=bad):
+                with self.assertRaisesRegex(ValueError, "limit must be"):
+                    self.call(limit=bad)
+        self.assertEqual(self.calls, [])
+        for value, want in ((None, 25), (10, 10), ("10", 10), (7.0, 7), (500, 50)):
+            with self.subTest(limit=value):
+                self.calls.clear()
+                self.call(**({} if value is None else {"limit": value}), ecosystem=["npm"])
+                self.assertEqual(self.calls, [("npm", want)])
+
+    def run_in(self, ctx, **args):
+        server._LOCAL.ctx = ctx
+        try:
+            return self.call(**args)
+        finally:
+            server._LOCAL.ctx = None
+
+    def test_deadline_is_checked_before_each_registry(self):
+        ctx = server.ToolContext()
+        ctx.deadline = time.monotonic() - 1
+        out = self.run_in(ctx)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(out["count"], 0)
+        self.assertTrue(out["incomplete"])
+        self.assertEqual(out["incompleteReason"].count("not checked: time budget"), 2)
+
+        ctx = server.ToolContext()
+
+        def slow_pypi(cutoff, limit, notes=None):      # the budget runs out during PyPI
+            self.calls.append(("pypi", limit))
+            ctx.deadline = time.monotonic() - 1
+            return []
+        repo.discover_pypi.side_effect = slow_pypi
+        self.calls.clear()
+        out = self.run_in(ctx)
+        self.assertEqual(self.calls, [("pypi", 25)])
+        self.assertTrue(out["incomplete"])
+        self.assertTrue(out["incompleteReason"].startswith("npm not checked: time budget"))
+
+    def test_cancel_stops_before_any_registry(self):
+        event = threading.Event()
+        event.set()
+        with self.assertRaises(server.ToolCancelled):
+            self.run_in(server.ToolContext(event))
+        self.assertEqual(self.calls, [])
 
 
 class RealPermissionTests(unittest.TestCase):
