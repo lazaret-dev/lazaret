@@ -431,17 +431,22 @@ export function capIssues(path, issues, lines) {
     if (n > CAP_PER_RULE) {
       dropped.add(k);
       const o = omitted.get(i.rule);
-      if (o) o[0]++; else omitted.set(i.rule, [1, i.line]);
+      if (o) o[0]++; else omitted.set(i.rule, [1, i.line, i.type]);
     }
   }
   if (!dropped.size) return issues;
   const out = issues.filter((_, k) => !dropped.has(k));
-  for (const [rid, [n, first]] of omitted) {
-    out.push(mkIssue({ id: "Q-CAPPED", name: "Findings capped", type: "SMELL", sev: "INFO",
+  for (const [rid, [n, first, type]] of omitted) {
+    const note = mkIssue({ id: "Q-CAPPED", name: "Findings capped", type: "SMELL", sev: "INFO",
       msg: `${n} more ${rid} findings omitted`,
       why: "Findings of one rule that repeat hundreds of times in one file are capped so reports stay readable; security findings are never capped.",
       fix: `Fix or deliberately suppress the ${rid} pattern in this file, then re-scan to see the remaining occurrences.`,
-      ref: "Maintainability" }, path, first, lines));
+      ref: "Maintainability" }, path, first, lines);
+    // what the note stands for: the maintainability rating counts the
+    // omitted findings, not the note (metrics.js maintainabilityRating)
+    note.omitted = n;
+    note.omittedType = type;
+    out.push(note);
   }
   return out;
 }

@@ -53,8 +53,19 @@ export function worstSevRating(issues, types) {
  * the maintainability rating (twin of core.COVERAGE_RULES).
  */
 export const COVERAGE_RULES = new Set(["Q-SKIPPED-TREE", "Q-SYMLINK", "Q-UNREADABLE", "Q-SCAN-ERROR"]);
+/**
+ * How many code smells a SMELL finding counts for: one, except a Q-CAPPED
+ * note, which counts the findings it stands for when they are smells (and
+ * nothing when they are bugs), so the rating is what it would be without the
+ * cap (twin of core._rated_smells).
+ */
+function ratedSmells(i) {
+  if (i.rule === "Q-CAPPED" && Number.isInteger(i.omitted)) return i.omittedType === "SMELL" ? i.omitted : 0;
+  return 1;
+}
 export function maintainabilityRating(issues, ncloc) {
-  const smells = issues.filter((i) => i.type === "SMELL" && !COVERAGE_RULES.has(i.rule)).length;
+  let smells = 0;
+  for (const i of issues) if (i.type === "SMELL" && !COVERAGE_RULES.has(i.rule)) smells += ratedSmells(i);
   const per100 = ncloc ? 100 * smells / ncloc : 0;
   return per100 <= 5 ? "A" : per100 <= 10 ? "B" : per100 <= 20 ? "C" : per100 <= 40 ? "D" : "E";
 }

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-tQAQpEV4nGwIu0EDUlaxEpB1RIgORIR/JyjJ8nWdFMs='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-egBzVqBfQiczT+qJBeWOwoRfwTZ7tgGuJ+4hvsOkUE8='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
 <title>Lazaret — Security &amp; Quality Review</title>
 <style>
   :root{
@@ -2891,17 +2891,22 @@ function capIssues(path, issues, lines) {
     if (n > CAP_PER_RULE) {
       dropped.add(k);
       const o = omitted.get(i.rule);
-      if (o) o[0]++; else omitted.set(i.rule, [1, i.line]);
+      if (o) o[0]++; else omitted.set(i.rule, [1, i.line, i.type]);
     }
   }
   if (!dropped.size) return issues;
   const out = issues.filter((_, k) => !dropped.has(k));
-  for (const [rid, [n, first]] of omitted) {
-    out.push(mkIssue({ id: "Q-CAPPED", name: "Findings capped", type: "SMELL", sev: "INFO",
+  for (const [rid, [n, first, type]] of omitted) {
+    const note = mkIssue({ id: "Q-CAPPED", name: "Findings capped", type: "SMELL", sev: "INFO",
       msg: `${n} more ${rid} findings omitted`,
       why: "Findings of one rule that repeat hundreds of times in one file are capped so reports stay readable; security findings are never capped.",
       fix: `Fix or deliberately suppress the ${rid} pattern in this file, then re-scan to see the remaining occurrences.`,
-      ref: "Maintainability" }, path, first, lines));
+      ref: "Maintainability" }, path, first, lines);
+    // what the note stands for: the maintainability rating counts the
+    // omitted findings, not the note (maintainabilityRating)
+    note.omitted = n;
+    note.omittedType = type;
+    out.push(note);
   }
   return out;
 }
@@ -3202,8 +3207,19 @@ function worstSevRating(issues, types) {
  * the maintainability rating (twin of core.COVERAGE_RULES).
  */
 const COVERAGE_RULES = new Set(["Q-SKIPPED-TREE", "Q-SYMLINK", "Q-UNREADABLE", "Q-SCAN-ERROR"]);
+/**
+ * How many code smells a SMELL finding counts for: one, except a Q-CAPPED
+ * note, which counts the findings it stands for when they are smells (and
+ * nothing when they are bugs), so the rating is what it would be without the
+ * cap (twin of core._rated_smells).
+ */
+function ratedSmells(i) {
+  if (i.rule === "Q-CAPPED" && Number.isInteger(i.omitted)) return i.omittedType === "SMELL" ? i.omitted : 0;
+  return 1;
+}
 function maintainabilityRating(issues, ncloc) {
-  const smells = issues.filter((i) => i.type === "SMELL" && !COVERAGE_RULES.has(i.rule)).length;
+  let smells = 0;
+  for (const i of issues) if (i.type === "SMELL" && !COVERAGE_RULES.has(i.rule)) smells += ratedSmells(i);
   const per100 = ncloc ? 100 * smells / ncloc : 0;
   return per100 <= 5 ? "A" : per100 <= 10 ? "B" : per100 <= 20 ? "C" : per100 <= 40 ? "D" : "E";
 }

@@ -110,5 +110,18 @@ class CoreParityTests(unittest.TestCase):
             (todo,) = [i for i in py[1]["issues"] if i["rule"] == "Q-TODO"]
             self.assertEqual(todo["snippet"][1], 'x = "\ufffd"  # TODO marker')
 
+    def test_capped_findings_count_in_the_rating(self):
+        table = "".join(f'value_{n:04d} = "' + f"segment-{n:04d} " * 14 + '"\n' for n in range(2000))
+        catches = "try { f() } catch (e) {}\n" * 300 + "// TODO later\n" * 15
+        for label, files in (("smells", {"table.py": table}), ("bugs", {"c.js": catches}),
+                             ("both", {"table.py": table, "c.js": catches, "t.py": "# TODO x\n" * 260})):
+            with self.subTest(tree=label), tree(files) as root:
+                js, py = parity.both(root, extra=("--ci",))
+                self.assert_same(js, py, label=f"cap rating {label}")
+                capped = lambda r: sorted((i["file"], i["omitted"], i["omittedType"])
+                                          for i in r["issues"] if i["rule"] == "Q-CAPPED")
+                self.assertEqual(capped(js[1]), capped(py[1]))
+                self.assertEqual(py[1]["ratings"]["maintainability"], {"smells": "E", "bugs": "A", "both": "E"}[label])
+
 if __name__ == "__main__":
     unittest.main()

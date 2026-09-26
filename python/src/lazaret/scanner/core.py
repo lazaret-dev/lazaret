@@ -2336,9 +2336,11 @@ def mk_issue(rule_or_dict, path, line_no, lines, col=None, redactor=None):
 # same line, same snippet text. Then at most CAP_PER_RULE findings per (file,
 # rule) are kept, in line order, for every rule that is not a security rule;
 # the rest are replaced by ONE Q-CAPPED INFO finding per capped rule at the
-# first omitted line. Security findings (S-, T-, SC-, X-, SQL- rules) are
-# never capped (but are deduplicated: distinct taint flows on one line keep
-# their distinct messages). Review: the cap used to cover INFO/MINOR/SMELL
+# first omitted line, which carries how many it replaces ("omitted") and
+# their type ("omittedType"; the maintainability rating counts them). Security
+# findings (S-, T-, SC-, X-, SQL- rules) are never capped (but are
+# deduplicated: distinct taint flows on one line keep their distinct
+# messages). Review: the cap used to cover INFO/MINOR/SMELL
 # rules only, so a 1.95 MB one-line `try{}catch(e){}` x 130k file gave 130,001
 # MAJOR B-EMPTY-CATCH findings and an 87.7 MB JSON report (120k lines: 66.7 MB).
 CAP_PER_RULE = 200
@@ -2376,20 +2378,25 @@ def cap_issues(path, issues, lines):
         counts[rid] = counts.get(rid, 0) + 1
         if counts[rid] > CAP_PER_RULE:
             dropped.add(k)
-            o = omitted.setdefault(rid, [0, i["line"]])
+            o = omitted.setdefault(rid, [0, i["line"], i["type"]])
             o[0] += 1
     if not dropped:
         return issues
     out = [i for k, i in enumerate(issues) if k not in dropped]
-    for rid, (n, first) in omitted.items():
-        out.append(mk_issue(
+    for rid, (n, first, typ) in omitted.items():
+        note = mk_issue(
             {"id": "Q-CAPPED", "name": "Findings capped", "type": "SMELL", "sev": "INFO",
              "msg": f"{n} more {rid} findings omitted",
              "why": "Findings of one rule that repeat hundreds of times in one file are capped "
                     "so reports stay readable; security findings are never capped.",
              "fix": f"Fix or deliberately suppress the {rid} pattern in this file, then re-scan "
                     "to see the remaining occurrences.",
-             "ref": "Maintainability"}, path, first, lines))
+             "ref": "Maintainability"}, path, first, lines)
+        # what the note stands for: the maintainability rating counts the
+        # omitted findings, not the note (see maintainability_rating)
+        note["omitted"] = n
+        note["omittedType"] = typ
+        out.append(note)
     return out
 
 
@@ -4815,8 +4822,19 @@ COVERAGE_RULES = frozenset({"Q-SKIPPED-TREE", "Q-SYMLINK", "Q-UNREADABLE", "Q-SC
                             "Q-FLOW-SKIPPED", "Q-FLOW-INCOMPLETE", "Q-FLOW-RECURSION",
                             "Q-TAINT-CONFIG"})
 
+def _rated_smells(issue):
+    """How many code smells a SMELL finding counts for in the rating: one,
+    except a Q-CAPPED note, which counts the findings it stands for when
+    they are smells (and nothing when they are bugs). The rating is then
+    what it would be without the cap (review: 2000 over-long lines listed
+    as 200 Q-LONGLINE + one Q-CAPPED rated C and passed; they are E)."""
+    if issue.get("rule") == "Q-CAPPED" and isinstance(issue.get("omitted"), int):
+        return issue["omitted"] if issue.get("omittedType") == "SMELL" else 0
+    return 1
+
+
 def maintainability_rating(issues, ncloc):
-    smells = sum(1 for i in issues
+    smells = sum(_rated_smells(i) for i in issues
                  if i["type"] == "SMELL" and i.get("rule") not in COVERAGE_RULES)
     per100 = 100 * smells / ncloc if ncloc else 0
     for limit, rating in ((5, "A"), (10, "B"), (20, "C"), (40, "D")):
