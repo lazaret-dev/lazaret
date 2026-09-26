@@ -2081,6 +2081,17 @@ class Store:
             f"AND profile={p3} AND engine_version={p4}",
             (pid, _db_text(version), profile, engine_version)) is not None
 
+    def stored_verdict(self, pid, version, profile, engine_version=ENGINE_VERSION):
+        """Verdict of the stored scan has_scan() matches, or None. A sweep
+        that skips an already-scanned version reports this one, so a known
+        SUSPICIOUS / INCOMPLETE package still fails --ci."""
+        p1, p2, p3, p4 = self._phs(4)
+        row = self._one(
+            f"SELECT verdict FROM {self.t}scans WHERE package_id={p1} AND version={p2} "
+            f"AND profile={p3} AND engine_version={p4}",
+            (pid, _db_text(version), profile, engine_version))
+        return row[0] if row else None
+
     def save_scan(self, pid, res):
         """Persist one scan result as a SINGLE atomic statement (audit G20).
 
@@ -2444,23 +2455,39 @@ def cmd_discover(store, args):
         print(f"  {when.strftime('%Y-%m-%d %H:%M')}  "
               f"{lazaret.sanitize_term(eco)}:{lazaret.sanitize_term(name)}"
               f"{('@' + lazaret.sanitize_term(ver)) if ver else ''}")
+    errors = getattr(args, "_errors", None)
     if args.add or args.scan:
         for eco, name, _ver, _when in discovered:
-            if valid_name(eco, name):
+            if not valid_name(eco, name):
+                continue
+            try:
                 store.add_package(eco, name)
+            except Exception as exc:                                # noqa: BLE001
+                # one package the DB refuses must not end the run (cmd_scan
+                # below reports it again when --scan is set)
+                spec = f"{eco}:{name}"
+                print(f"error adding {lazaret.sanitize_term(spec)} to the watchlist: "
+                      f"{type(exc).__name__}: {lazaret.sanitize_term(exc)}", file=sys.stderr)
+                if errors is not None and not args.scan:
+                    errors.append(spec)
     if args.scan:
         specs = [f"{eco}:{name}" + (f"@{ver}" if ver else "")
                  for eco, name, ver, _ in discovered]
         print(f"\nScanning {len(specs)} discovered package(s)…")
-        return cmd_scan(store, specs, args.full, args.rescan, errors=getattr(args, "_errors", None))
+        return cmd_scan(store, specs, args.full, args.rescan, errors=errors)
     return False
+
+
+BAD_VERDICTS = ("SUSPICIOUS", "INCOMPLETE")
 
 
 def cmd_scan(store, specs, full, rescan, errors=None):
     """Scan each spec; returns True when any result is SUSPICIOUS/INCOMPLETE
+    — including the STORED verdict of a version skipped as already scanned —
     or any spec failed. One package's failure (bad name in the watchlist,
-    network, a store error) never stops the sweep. `errors`, when given,
-    collects store failures (the CLI exits non-zero for them)."""
+    network, digest mismatch, a store error) never stops the sweep.
+    `errors`, when given, collects every spec that failed to scan or to be
+    stored (the CLI exits 1 for them at the end of the sweep)."""
     exit_bad = False
     profile = "full" if full else "supply-chain"
     for spec in specs:
@@ -2476,10 +2503,16 @@ def cmd_scan(store, specs, full, rescan, errors=None):
                     resolved = resolve(eco, name, None)
                     ver = resolved[0]
                 if ver and store.has_scan(pid, ver, profile):
+                    # A skipped version keeps its stored verdict: a sweep
+                    # without --rescan must not turn a known SUSPICIOUS or
+                    # INCOMPLETE package into a passing --ci run.
+                    stored = store.stored_verdict(pid, ver, profile)
                     # audit H1: name/version echo registry- or feed-derived text.
                     print(f"{lazaret.sanitize_term(eco)}:{lazaret.sanitize_term(name)}@"
-                          f"{lazaret.sanitize_term(ver)} already scanned ({profile}); "
+                          f"{lazaret.sanitize_term(ver)} already scanned ({profile}"
+                          f"{', ' + lazaret.sanitize_term(stored) if stored else ''}); "
                           f"use --rescan to redo")
+                    exit_bad |= stored in BAD_VERDICTS
                     continue
             res = scan_package(eco, name, ver, full, resolved=resolved)
         except Exception as exc:
@@ -2489,6 +2522,8 @@ def cmd_scan(store, specs, full, rescan, errors=None):
             print(f"error scanning {lazaret.sanitize_term(spec)}: "
                   f"{lazaret.sanitize_term(exc)}", file=sys.stderr)
             exit_bad = True
+            if errors is not None:
+                errors.append(spec)
             continue
         try:
             if not rescan and store.has_scan(pid, res["version"], profile):
@@ -2507,8 +2542,22 @@ def cmd_scan(store, specs, full, rescan, errors=None):
             if errors is not None:
                 errors.append(spec)
         print_scan(res)
-        exit_bad |= res["verdict"] in ("SUSPICIOUS", "INCOMPLETE")  # a partial scan never passes
+        exit_bad |= res["verdict"] in BAD_VERDICTS  # a partial scan never passes
     return exit_bad
+
+
+def _finish_sweep(errors, bad, ci):
+    """CLI exit for scan / scan-all / discover: every package was attempted;
+    any that failed to scan or store makes the run exit 1 (with or without
+    --ci), after a one-line summary on stderr. --ci also fails on
+    SUSPICIOUS / INCOMPLETE."""
+    if errors:
+        shown = ", ".join(lazaret.sanitize_term(s) for s in errors[:20])
+        more = f", … (+{len(errors) - 20} more)" if len(errors) > 20 else ""
+        print(f"error: {len(errors)} package(s) failed to scan or store: {shown}{more}",
+              file=sys.stderr)
+    if errors or (ci and bad):
+        sys.exit(1)
 
 
 def main():
@@ -2591,8 +2640,7 @@ def main():
         if not args.specs:
             sys.exit("scan needs at least one package spec")
         bad = cmd_scan(store, args.specs, args.full, args.rescan, errors=errors)
-        if errors or (args.ci and bad):
-            sys.exit(1)
+        _finish_sweep(errors, bad, args.ci)
 
     elif args.command == "scan-all":
         specs = [f"{eco}:{name}" for _, eco, name in store.packages()]
@@ -2600,8 +2648,7 @@ def main():
             sys.exit("no tracked packages — use 'add' first")
         print(f"Scanning latest versions of {len(specs)} tracked package(s)…")
         bad = cmd_scan(store, specs, args.full, args.rescan, errors=errors)
-        if errors or (args.ci and bad):
-            sys.exit(1)
+        _finish_sweep(errors, bad, args.ci)
 
     elif args.command == "discover":
         try:
@@ -2612,8 +2659,7 @@ def main():
             # dispatches discover_packages); the CLI keeps the exact legacy
             # behavior: message on stderr, exit 1.
             sys.exit(str(exc))
-        if errors or (args.ci and bad):
-            sys.exit(1)
+        _finish_sweep(errors, bad, args.ci)
 
     elif args.command == "list":
         rows = store.status()
