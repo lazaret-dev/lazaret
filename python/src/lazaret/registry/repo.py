@@ -43,6 +43,7 @@ import lzma
 import os
 import posixpath
 import re
+import struct
 import sys
 import tarfile
 import time
@@ -921,7 +922,77 @@ def _zip_is_symlink(info):
     return (info.external_attr >> 16) & 0o170000 == 0o120000
 
 
+_ZIP_EOCD_SIG, _ZIP64_LOC_SIG, _ZIP64_EOCD_SIG = b"PK\x05\x06", b"PK\x06\x07", b"PK\x06\x06"
+_ZIP_CD_SIG = b"PK\x01\x02"
+_ZIP_EOCD = struct.Struct("<4s4H2LH")            # 22 bytes
+_ZIP64_LOC = struct.Struct("<4sLQL")             # 20 bytes
+_ZIP64_EOCD = struct.Struct("<4sQ2H2L4Q")        # 56 bytes
+# Largest central directory read (bytes). zipfile reads it whole and builds
+# one ZipInfo per record before any file cap can apply; MAX_FILES records
+# with long names fit easily in this.
+MAX_ZIP_CENTRAL_DIR = 64 * 1024 * 1024
+
+
+def _zip_preflight(data):
+    """Refuse a zip whose central directory is too big to parse, BEFORE
+    zipfile.ZipFile() reads it -> None (fine) or the reason.
+
+    zipfile parses the whole central directory — ~340 MB and 4 s for a
+    million records — before MAX_FILES can apply. Read the End Of Central
+    Directory record (and the ZIP64 one) the same way zipfile finds it,
+    and refuse when the declared entry count exceeds MAX_FILES, the
+    declared directory size is implausible, or the directory region holds
+    more than MAX_FILES record signatures (a count field can lie; zipfile
+    parses records until the declared SIZE is consumed). Anything this
+    reader can't make sense of is left to zipfile, which reports it."""
+    if not isinstance(data, (bytes, bytearray)):
+        data = bytes(data)
+    n = len(data)
+    if n >= _ZIP_EOCD.size and data[n - 22:n - 18] == _ZIP_EOCD_SIG and data[n - 2:] == b"\0\0":
+        pos = n - 22
+    else:                                       # an archive comment follows the EOCD
+        pos = data.rfind(_ZIP_EOCD_SIG, max(0, n - 65535 - _ZIP_EOCD.size))
+        if pos < 0 or pos + _ZIP_EOCD.size > n:
+            return None
+    (_sig, _disk, _cd_disk, count_disk, count, cd_size, _cd_offset,
+     _comment) = _ZIP_EOCD.unpack_from(data, pos)
+    counts, sizes, records = [], [], [pos]
+    loc = pos - _ZIP64_LOC.size
+    if loc >= 0 and data[loc:loc + 4] == _ZIP64_LOC_SIG:
+        _sig, _disk, reloff, _disks = _ZIP64_LOC.unpack_from(data, loc)
+        # zipfile reads the record at the offset the locator names or,
+        # depending on the version, right before the locator: check both
+        for rec in {reloff, loc - _ZIP64_EOCD.size}:
+            if 0 <= rec <= n - _ZIP64_EOCD.size and data[rec:rec + 4] == _ZIP64_EOCD_SIG:
+                fields = _ZIP64_EOCD.unpack_from(data, rec)
+                counts += [fields[6], fields[7]]
+                sizes.append(fields[8])
+                records.append(rec)
+    if not sizes:          # no ZIP64 record: the classic fields are the real ones
+        counts, sizes = [count_disk, count], [cd_size]
+    declared = max(counts)
+    if declared > MAX_FILES:
+        return (f"zip central directory declares {declared:,} entries — more than the "
+                f"{MAX_FILES:,}-file limit; the archive was not opened")
+    size = max(sizes)
+    if size > MAX_ZIP_CENTRAL_DIR:
+        return (f"zip central directory declares {size:,} bytes — more than the "
+                f"{MAX_ZIP_CENTRAL_DIR:,}-byte limit; the archive was not opened")
+    # the records zipfile will parse lie in the `size` bytes before the
+    # (ZIP64) end record; count their signatures without copying
+    start = max(0, min(records) - size)
+    found = data.count(_ZIP_CD_SIG, start, pos)
+    if found > MAX_FILES:
+        return (f"zip central directory holds more than {MAX_FILES:,} entries "
+                f"({found:,} records, {declared:,} declared); the archive was not opened")
+    return None
+
+
 def _iter_zip(data, artifact, budget, anomalies):
+    refused = _zip_preflight(data)
+    if refused:
+        yield Member("(archive)", 0, b"", "files", refused)
+        return
     try:
         zf = zipfile.ZipFile(io.BytesIO(data))
         infos = zf.infolist()
