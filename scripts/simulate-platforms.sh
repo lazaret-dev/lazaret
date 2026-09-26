@@ -22,6 +22,8 @@
 #                 so path comparisons that don't resolve both sides fail.
 #   non-root      only when run as root: the suite as an unprivileged user,
 #                 as on CI runners (permission tests skip under root).
+# A run that passes but prints a ResourceWarning (a file, socket or database
+# left open: fine here, a failed delete on Windows) counts as failed too.
 # Exit status: 1 if any run failed.
 set -u
 cd "$(dirname "$0")/../python"
@@ -48,7 +50,14 @@ run() {  # label, command...
   label=$1; shift
   printf '%-34s ' "$label"
   if out=$("$@" -m unittest discover -s tests -t . 2>&1); then
-    echo "ok   $(printf '%s\n' "$out" | grep -E '^Ran ' | tail -n 1)"
+    leaks=$(printf '%s\n' "$out" | grep -E 'ResourceWarning: unclosed' | sed 's/^[.sExF]*//' | cut -c1-160 | sort | uniq -c)
+    if [ -n "$leaks" ]; then
+      failed=1
+      echo "LEAK $(printf '%s\n' "$out" | grep -E '^Ran ' | tail -n 1)"
+      printf '%s\n' "$leaks" | sed 's/^/    /'
+    else
+      echo "ok   $(printf '%s\n' "$out" | grep -E '^Ran ' | tail -n 1)"
+    fi
   else
     failed=1
     echo "FAIL"
