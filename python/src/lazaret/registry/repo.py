@@ -1603,6 +1603,16 @@ class _ArtifactScan:
             self.add_decode_issues(extra)
             self.scan_source(rel, text, as_lang)
             return text
+        if rel in self.manifests:
+            # binding.gyp, a .gyp/.gypi or pyproject.toml was only read as a
+            # manifest; named as a main, bin or hook target, node runs it as
+            # JavaScript (it used to come back as None, scanned by nothing)
+            text = self.manifests[rel]
+            if as_lang == "sh":
+                self.shell[rel] = text
+            else:
+                self.scan_source(rel, text, as_lang)
+            return text
         if rel in self.dropped:
             self.truncate(rel, f"{rel} runs at install/import time but was not kept for "
                                f"scanning (text budget exhausted)")
@@ -1613,6 +1623,10 @@ class _ArtifactScan:
         elif rel in self.binary:
             self.truncate(rel, f"{rel} runs at install/import time but is not text, so it "
                                f"could not be scanned")
+        elif rel in self.members:
+            # every member lands in one of the sets above; should one ever
+            # not, it runs unscanned: never a silent None
+            self.truncate(rel, f"{rel} runs at install/import time but was not scanned")
         return None
 
     def _entry_points(self, manifest_rel, data):
