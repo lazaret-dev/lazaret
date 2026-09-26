@@ -1362,6 +1362,32 @@ def _shebang_lang(text):
 _PTH_EXEC_RE = lazaret._PTH_EXEC_RE
 pth_issues = lazaret.pth_issues
 
+# A wheel's top level (and its .data/purelib|platlib) is installed into
+# site-packages, where site.py imports sitecustomize — and usercustomize,
+# when the user site is enabled — at EVERY interpreter start, like a .pth
+# file's import lines.
+_STARTUP_MODULE_RE = re.compile(
+    r"^(?:[^/]+\.data/(?:purelib|platlib)/)?(sitecustomize|usercustomize)(?:\.py|/__init__\.py)$")
+
+
+def startup_module_issue(rel, text):
+    """SC-SITECUSTOMIZE for a start-up module a wheel installs: MAJOR (a
+    capability to review, like SC-PTH-EXEC), CRITICAL when the code looks
+    hostile by the install-script test (install_script_risk)."""
+    module = _STARTUP_MODULE_RE.match(rel).group(1)
+    reasons = install_script_risk(text)
+    msg = f"{rel} is installed as {module} in site-packages, which Python imports at every start"
+    msg += f", and it {'; and '.join(reasons)}." if reasons else "."
+    return lazaret.mk_issue(
+        {"id": "SC-SITECUSTOMIZE", "name": "Start-up module", "type": "HOTSPOT",
+         "sev": "CRITICAL" if reasons else "MAJOR", "msg": msg,
+         "why": ("site.py imports sitecustomize (and usercustomize, when the user site is "
+                 "enabled) whenever the interpreter starts, whether or not the package is "
+                 "imported — the persistence and execution vector of a .pth file, with no "
+                 "install hook."),
+         "fix": "Find out why the package ships a start-up module; remove it if unexplained.",
+         "ref": "CWE-506 · Supply chain"}, rel, 1, lazaret.normalize_newlines(text).split("\n"))
+
 
 def _archive_issue(kind, path, detail):
     rules = {
@@ -1775,6 +1801,16 @@ class _ArtifactScan:
                      "fix": "Do not install this sdist; report it to the index.",
                      "ref": "CWE-506 · Supply chain"}, rel, 1, lines))
 
+    def _startup_modules(self):
+        """A wheel's sitecustomize / usercustomize (SC-SITECUSTOMIZE): run at
+        every interpreter start like a .pth file, but they used to be only
+        ordinary modules to the scan."""
+        for rel in sorted(self.sources):
+            text, lang = self.sources[rel]
+            if lang == "py" and _STARTUP_MODULE_RE.match(rel):
+                self.entries.add(rel)
+                self.issues.append(startup_module_issue(rel, text))
+
     def _reachable(self):
         """Entry files plus local files they require/import (JS), transitively.
         A file reached this way runs when the package is loaded: one not
@@ -1823,6 +1859,9 @@ class _ArtifactScan:
             if self.artifact == "sdist":
                 self._deadline("the install scripts")
                 self._python_install_scripts()
+            if self.artifact == "wheel":
+                self._deadline("the start-up modules")
+                self._startup_modules()
             self._deadline("the files the entry points load")
             reachable = self._reachable()
             # interprocedural / cross-file taint (full profile only — needs whole source)
