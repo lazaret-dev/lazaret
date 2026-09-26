@@ -335,7 +335,9 @@ class Resolution(tuple):
     """(version, url, container_format, artifact_kind, meta_entry) — the
     primary artifact, unpackable as before — plus .artifacts: every artifact
     to scan, as dicts {url, container, artifact, entry, filename}, and
-    .skipped: files of the release that are not scanned (with the reason)."""
+    .skipped: files of the release that are not scanned, as dicts {filename,
+    packagetype, installable, size, reason}; `installable` means pip may
+    install the file anyway (scan_package counts it as not scanned)."""
 
     def __new__(cls, version, artifacts, skipped=()):
         first = artifacts[0]
@@ -370,7 +372,8 @@ def resolve_npm(name, version):
 
 def pypi_container(filename):
     """Archive format of a PyPI file, from its name (pip decides the same
-    way); None for formats pip does not install."""
+    way: pip 24's ZIP/TAR/BZ2/XZ_EXTENSIONS); None for formats pip does not
+    install."""
     f = (filename or "").lower()
     if f.endswith((".whl", ".zip")):
         return "zip"
@@ -380,6 +383,10 @@ def pypi_container(filename):
         return "tbz2"
     if f.endswith((".tar.xz", ".txz")):
         return "txz"
+    if f.endswith((".tlz", ".tar.lz", ".tar.lzma")):
+        # pip opens these with tarfile's "r:xz" too, i.e. lzma's FORMAT_AUTO:
+        # an .xz stream or a legacy .lzma one (and lzip, where liblzma can)
+        return "tlz"
     if f.endswith(".tar"):
         return "tar"
     return None
@@ -421,7 +428,17 @@ def resolve_pypi(name, version):
         kind = entry.get("packagetype")
         container = pypi_container(filename)
         if kind not in ("sdist", "bdist_wheel") or container is None:
-            skipped.append({"filename": filename, "reason": f"{kind or 'unknown'} is not installed by pip"})
+            # pip goes by the file NAME, not PyPI's packagetype: an archive
+            # it can unpack (a bdist_dumb .tar.gz) is a candidate it may
+            # install, so leaving it unscanned makes the scan INCOMPLETE;
+            # an egg or a Windows installer is never installed by pip
+            installable = container is not None
+            skipped.append({"filename": filename, "packagetype": kind,
+                            "installable": installable, "size": declared_size(entry),
+                            "reason": (f"{kind or 'unknown package type'}: an archive pip may "
+                                       f"install, not scanned" if installable else
+                                       f"{kind or 'unknown package type'}: not a format pip "
+                                       f"installs")})
             continue
         digest = expected_digest(entry)
         key = digest or entry["url"]
@@ -573,7 +590,8 @@ class _Inflater:
     """Read-only, forward-only file object over one compressed tar stream.
 
     Decompresses in bounded chunks with the container's REAL codec (gzip for
-    npm and .tar.gz, bzip2/xz only for .tar.bz2/.tar.xz files), charges every
+    npm and .tar.gz, bzip2/xz only for .tar.bz2/.tar.xz files, lzma's
+    auto-detection for .tlz/.tar.lz/.tar.lzma as pip does), charges every
     produced byte to the budget, follows concatenated streams (gzip allows
     several members; node-tar reads them all), and keeps the last bytes it
     produced for the end-of-archive check. Data after the last stream that
@@ -590,6 +608,8 @@ class _Inflater:
             return zlib.decompressobj(31)
         if self.codec == "bz2":
             return bz2.BZ2Decompressor()
+        if self.codec == "lzma":                  # .tlz / .tar.lz / .tar.lzma, as pip reads them
+            return lzma.LZMADecompressor(format=lzma.FORMAT_AUTO)
         return lzma.LZMADecompressor(format=lzma.FORMAT_XZ)
 
     def readable(self):
@@ -646,8 +666,10 @@ class _Inflater:
             self.data, self.pos = memoryview(rest), 0
             if not rest or not rest.strip(b"\x00"):
                 self.eof = True
-            elif rest.startswith(_CODEC_MAGIC[self.codec]):
-                self.dec = self._decompressor()             # concatenated stream
+            elif self.codec == "lzma" or rest.startswith(_CODEC_MAGIC[self.codec]):
+                # concatenated stream (FORMAT_AUTO has no single magic: the
+                # decoder decides, and data it can't read is corrupt)
+                self.dec = self._decompressor()
             else:
                 raise ArchiveLimit("corrupt", "data after the end of the compressed stream")
 
@@ -722,13 +744,14 @@ def strip_root(path):
 
 
 def _tar_codec(data, container, artifact):
-    """The only codec a container may use -> 'gz' | 'bz2' | 'xz' | 'tar'.
+    """The only codec a container may use -> 'gz' | 'bz2' | 'xz' | 'lzma' | 'tar'.
     Raises ArchiveLimit('corrupt') on a mismatch: a bzip2 or xz stream served
     as an npm .tgz is rejected, not decompressed (pip opens .tar.gz with
-    r:gz; npm auto-detects gzip and otherwise reads plain tar)."""
+    r:gz; npm auto-detects gzip and otherwise reads plain tar). 'lzma' (the
+    .tlz family) is lzma's FORMAT_AUTO, which is what pip's r:xz reads."""
     head = bytes(data[:6])
     is_tar = len(data) >= 262 and bytes(data[257:262]) == b"ustar"
-    want = {"tgz": "gz", "tbz2": "bz2", "txz": "xz", "tar": "tar"}.get(container, "gz")
+    want = {"tgz": "gz", "tbz2": "bz2", "txz": "xz", "tar": "tar", "tlz": "lzma"}.get(container, "gz")
     if want == "gz" and head.startswith(_GZIP_MAGIC):
         return "gz"
     if want == "gz" and artifact in (None, "npm") and (is_tar or not head.startswith(
@@ -736,11 +759,14 @@ def _tar_codec(data, container, artifact):
         return "tar"                   # node-tar reads uncompressed tarballs too
     if want in ("bz2", "xz") and head.startswith(_CODEC_MAGIC[want]):
         return want
+    if want == "lzma" and not head.startswith((_GZIP_MAGIC, _BZ2_MAGIC, b"PK", b"(\xb5/\xfd")):
+        return "lzma"                  # xz or legacy lzma: the decoder tells them apart
     if want == "tar":
         return "tar"
     found = next((k for k, magic in _CODEC_MAGIC.items() if head.startswith(magic)), "unknown")
     raise ArchiveLimit("corrupt", f"{container} artifact is {found}-compressed; "
-                                  f"only {want} is accepted for this format")
+                                  f"only {'xz/lzma' if want == 'lzma' else want} is accepted "
+                                  f"for this format")
 
 
 def _note_member(seen, rel, anomalies):
@@ -1716,7 +1742,7 @@ def declared_size(meta_entry):
 def _skipped_summary(skipped, byte_budget, limit):
     """SC-TRUNCATED issues + a short verdict-reason phrase for release files
     that were not scanned. skipped: [(filename, kind, size)] with kind
-    'artifacts' | 'budget' | 'filesize' | 'time'."""
+    'artifacts' | 'budget' | 'filesize' | 'time' | 'packagetype'."""
     issues, labels = [], []
     groups = {}
     for filename, kind, size in skipped:
@@ -1732,6 +1758,13 @@ def _skipped_summary(skipped, byte_budget, limit):
             "(release)", f"{len(items)} more release file(s) not scanned (limit {limit} "
                          f"artifacts per release; raise --max-artifacts)"))
         labels.append(f"more than {limit} files (--max-artifacts)")
+    if "packagetype" in groups:
+        items = groups["packagetype"]
+        issues.append(lazaret.truncated_issue(
+            "(release)", f"{len(items)} release file(s) not scanned: PyPI lists them as neither an "
+                         f"sdist nor a wheel, but pip may install an archive named like this "
+                         f"({names(items)})"))
+        labels.append("archives of another package type")
     if "filesize" in groups:
         items = groups["filesize"]
         issues.append(lazaret.truncated_issue(
@@ -1775,6 +1808,9 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
     by its DECLARED size (checked before downloading), or reached after the
     deadline — is not downloaded; it is listed in result["skippedArtifacts"],
     an SC-TRUNCATED finding names it, and the verdict is INCOMPLETE at best.
+    Files PyPI lists as neither sdist nor wheel are listed there too: as not
+    scanned (INCOMPLETE) when pip may install them anyway (an archive, by
+    its name), as "not-installable" otherwise (eggs, installers).
 
     resolved: a resolve_npm/resolve_pypi result already fetched (scan-all
     checks the version before downloading). deadline: absolute
@@ -1791,6 +1827,22 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
     byte_budget = max_download_bytes or MAX_PACKAGE_DOWNLOAD_BYTES
     over, refs = refs[limit:], refs[:limit]
     skipped = [(r.get("filename"), "artifacts", declared_size(r.get("entry"))) for r in over]
+    # release files resolve_pypi did not select: one pip may install (an
+    # archive by its name) was not scanned, so the release can't be cleared;
+    # the rest (eggs, installers) are only listed. They used to be dropped
+    # without a word: a lone .tar.lzma sdist left the release "OK".
+    not_installed = []
+    for s in getattr(resolved, "skipped", None) or ():
+        if not isinstance(s, dict):
+            continue
+        size = declared_size(s)
+        installable = s.get("installable")
+        if installable is None:
+            installable = pypi_container(s.get("filename")) is not None
+        if installable:
+            skipped.append((s.get("filename"), "packagetype", size))
+        else:
+            not_installed.append((s.get("filename"), "not-installable", size))
     per, all_issues, truncated = [], [], 0
     multi = len(refs) > 1
     downloaded = 0
@@ -1871,7 +1923,7 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
             "verdict": verdict, "verdictReason": reason, "issues": all_issues,
             "digest": per[0]["digest"] if per else None, "artifacts": per,
             "skippedArtifacts": [{"filename": f, "reason": kind, "declaredBytes": size}
-                                 for f, kind, size in skipped],
+                                 for f, kind, size in skipped + not_installed],
             "scannedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")}
 
 
