@@ -298,6 +298,18 @@ class PypiFeedTests(unittest.TestCase):
             self.assertEqual(call.kwargs.get("max_bytes"), repo.MAX_FEED_BYTES)
             self.assertEqual(call.kwargs.get("timeout"), repo.METADATA_TIMEOUT)
 
+    def test_new_projects_have_no_version(self):
+        # packages.xml titles are "<name> added to PyPI": "added" used to become
+        # the version, and `discover --scan` failed on pypi:<name>@added
+        stamp = b"<pubDate>" + NOW.strftime("%a, %d %b %Y %H:%M:%S GMT").encode() + b"</pubDate>"
+        feeds = {"packages.xml": b"<rss><channel><item><title>fresh-pkg added to PyPI</title>" + stamp
+                                 + b"</item></channel></rss>",
+                 "updates.xml": b"<rss><channel><item><title>old-pkg 2.0</title>" + stamp
+                                + b"</item></channel></rss>"}
+        with mock.patch.object(repo, "_fetch", side_effect=lambda url, **kw: feeds[url.rsplit("/", 1)[1]]):
+            found = repo.discover_pypi(NOW - datetime.timedelta(days=1), 10)
+        self.assertEqual(sorted((n, v) for _, n, v, _ in found), [("fresh-pkg", None), ("old-pkg", "2.0")])
+
     def test_parse_xml_raises_feed_error(self):
         for raw in (b"<rss><channel>", b"not xml", b"<a>&undefined;</a>"):
             with self.subTest(raw=raw):

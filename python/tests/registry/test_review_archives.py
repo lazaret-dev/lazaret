@@ -34,7 +34,7 @@ from unittest import mock
 from lazaret.registry import repo
 from tests.registry._review_support import (
     DECODE_EXEC_JS, DECODE_EXEC_PY, EXFIL_JS, hooks, issues, manifest, rules, scan_bytes,
-    scan_wheel, tar_member)
+    scan_wheel, tar_member, zipball)
 
 HOOKED = hooks(postinstall="node index.js").encode()
 PAYLOAD = DECODE_EXEC_JS.encode()
@@ -209,13 +209,24 @@ class LinkTests(unittest.TestCase):
         res = scan_bytes(gzip.compress(raw))
         self.assertEqual(res["verdict"], "OK", res["issues"])
 
-    def test_zip_symlinks(self):
-        res = scan_wheel({"x/__init__.py": "", "x/notes.txt": DECODE_EXEC_PY},
-                         symlinks={"x/helper.py": "notes.txt"})
+    def test_zip_symlinks_are_the_files_pip_installs(self):
+        # pip ignores a zip entry's symlink mode bits and writes its stored
+        # bytes as a regular file, so those bytes are the file; the entry
+        # used to be read as a link target and skipped when no member had
+        # that name (OK, nothing scanned)
+        res = scan_wheel({"x/__init__.py": ""}, symlinks={"x/helper.py": DECODE_EXEC_PY})
         self.assertEqual(res["verdict"], "SUSPICIOUS")
         self.assertIn("x/helper.py", {i["file"] for i in issues(res, "SC-EVAL-DECODE")})
+        res = scan_wheel({"x/__init__.py": ""}, symlinks={"x.pth": "import os; os.system('true')\n"})
+        self.assertIn("SC-PTH-EXEC", rules(res))
+        sdist = zipball({"x-1.0/PKG-INFO": "Name: x\n"}, symlinks={"x-1.0/setup.py": DECODE_EXEC_PY})
+        res = scan_bytes(sdist, container="zip", artifact="sdist", eco="pypi")
+        self.assertEqual(res["verdict"], "SUSPICIOUS")
+        # the mark itself is reported, weakly: unzip would install a symlink
         res = scan_wheel({"x/__init__.py": ""}, symlinks={"x/helper.py": "../../../etc/passwd"})
-        self.assertIn("SC-ARCHIVE-LINK", rules(res))
+        link = issues(res, "SC-ARCHIVE-LINK")
+        self.assertEqual([(i["file"], i["sev"]) for i in link], [("x/helper.py", "MAJOR")])
+        self.assertIn("Zip entry marked as a symlink", link[0]["msg"])
 
 
 class BudgetTests(unittest.TestCase):
