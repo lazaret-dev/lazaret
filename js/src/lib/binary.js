@@ -3,7 +3,22 @@
 // every non-source regular file in a directory scan (shared semantics spec 9),
 // plus the __pycache__ bytecode checks (spec 8). Zero-dependency leaf.
 
-import { extname } from "node:path";
+
+/**
+ * os.path.splitext(path)[1]: from the base name's last dot, but not when every
+ * dot before it is leading (".bashrc", "..js", "...py" have no extension;
+ * Node's extname says ".js" for "..js"). Separators as os.path uses them here:
+ * "/", and on Windows "\\" too.
+ */
+export function pyExt(path) {
+  const p = String(path);
+  let s = p.lastIndexOf("/");
+  if (process.platform === "win32") s = Math.max(s, p.lastIndexOf("\\"));
+  const dot = p.lastIndexOf(".");
+  if (dot <= s) return "";
+  for (let i = s + 1; i < dot; i++) if (p[i] !== ".") return p.slice(dot);
+  return "";
+}
 
 const b = (s) => Buffer.from(s, "latin1");
 export const EXEC_MAGIC = [
@@ -110,7 +125,7 @@ function fmt1(x) {
  */
 export function classifyBinary(path, data, size, context = "repo") {
   const header = data.subarray(0, 512);
-  const ext = extname(String(path)).toLowerCase();
+  const ext = pyExt(path).toLowerCase();
   const isBin = looksBinary(data.subarray(0, 2048));
   let desc = EXEC_MAGIC.find(([sig]) => startsWith(header, sig))?.[1] ?? null;
   if (desc === null && isBin && startsWith(header, b("MZ"))) desc = "Windows PE executable/DLL";

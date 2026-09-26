@@ -49,6 +49,11 @@ TREE = {
     "enc/palmos.py": b"# coding: palmos\ns = '\x9b'\n",
     "enc/u32.py": "# coding: utf-32\nx = eval(y)\n",
     "enc/uesc.py": "# coding: unicode_escape\n# \\x0aeval(z)\n",
+    # extensions as os.path.splitext reads them: leading dots are no extension
+    "ext/..js": "var a = 1;\nconsole.log(a);\n",
+    "ext/...py": 'import os\nos.system("echo hi")\n',
+    "ext/..so": b"",
+    "ext/.x.js": "var b = 2;\n",
     # the quadratic comment checks, at a size both engines finish quickly
     "perf/escapes.js": "x=1;" + "/**/\\u0061" * 20000 + "\n",
 }
@@ -95,6 +100,7 @@ class LexingParityTests(unittest.TestCase):
                      ("SC-TRUNCATED", "enc/u32.py", 1), ("SC-TRUNCATED", "enc/uesc.py", 1)):
             self.assertIn(want, found)
         self.assertNotIn(("S-EVAL-PY", "enc/ebcdic.py", 3), found)     # decoded as EBCDIC, as Python reads it
+        self.assertEqual({f for _, f, _ in found if f.startswith("ext/")}, {"ext/.x.js"})
 
 
 if __name__ == "__main__":

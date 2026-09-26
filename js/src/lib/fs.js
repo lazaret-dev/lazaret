@@ -9,10 +9,10 @@ import {
   readdirSync, lstatSync, statSync, openSync, readSync, closeSync, fstatSync, fsyncSync, readlinkSync,
   writeSync, renameSync, unlinkSync, chmodSync, realpathSync, constants as C,
 } from "node:fs";
-import { join, extname, sep, resolve, dirname, basename, isAbsolute } from "node:path";
+import { join, sep, resolve, dirname, basename, isAbsolute } from "node:path";
 import { randomBytes } from "node:crypto";
 import { decodeSource, fsNameToString } from "./encoding.js";
-import { classifyBinary, HEADER_SAMPLE, PYC_HEADER, pycIssues, pycModule } from "./binary.js";
+import { classifyBinary, HEADER_SAMPLE, PYC_HEADER, pycIssues, pycModule, pyExt } from "./binary.js";
 import { mkIssue, fileIssue } from "./issue.js";
 import { pthIssues } from "./pth.js";
 import { registerScanContext, SECRET_SKIP_RE } from "./redact.js";
@@ -306,7 +306,7 @@ export function collectFiles(root, { includeDeps = false, exclude = [], maxFileB
 const withCommas = (n) => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 
 function collectFile(full, rel, name, st, dep, col) {
-  const ext = extname(name).toLowerCase();
+  const ext = pyExt(name).toLowerCase();       // os.path.splitext, as core
   const kind = name === "package.json" || name === "binding.gyp" ? name : GYP_EXTS.has(ext) ? "gyp" : null;
   const pth = !kind && ext === ".pth";
   const lang = kind || pth ? null : EXTS[ext];

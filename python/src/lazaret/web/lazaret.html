@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-dKZIsAQLk53gsHgdzEpX61nuVo0j/M9JPJJTkfbqNBk='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-IR7JbPL/8r3dh6fW/bRiSpeUYGuCUNSOk+tveeWFBJw='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
 <title>Lazaret — Security &amp; Quality Review</title>
 <style>
   :root{
@@ -3666,9 +3666,10 @@ function truncatedIssue(path, detail) {
 
 const EXT_LANGS = { ".py": "py", ".pyw": "py", ".js": "js", ".jsx": "js", ".ts": "js", ".tsx": "js",
   ".mjs": "js", ".cjs": "js", ".sql": "sql" };             // core.EXTS
-function langFromName(name) {
-  const m = /\.[^./\\]+$/.exec(String(name));
-  return m ? EXT_LANGS[m[0].toLowerCase()] ?? null : null;
+function langFromName(name) {                   // EXTS[os.path.splitext(name)[1].lower()]
+  const base = String(name).split(/[\\/]/).pop();
+  const dot = base.lastIndexOf(".");
+  return dot > 0 && /[^.]/.test(base.slice(0, dot)) ? EXT_LANGS[base.slice(dot).toLowerCase()] ?? null : null;
 }
 
 /* ---- .pth files (SC-PTH-EXEC) — twin of core.pth_issues ------------------
