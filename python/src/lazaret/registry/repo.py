@@ -1582,11 +1582,15 @@ class _ArtifactScan:
     def _find(self, candidates):
         return next((c for c in candidates if c in self.members), None)
 
-    def _text_of(self, rel, as_lang="js", exported=False):
+    def _text_of(self, rel, as_lang="js", exported=False, imported=False):
         """Text of a member that is run as code, scanning it as `as_lang`
         first when it has not been scanned (non-source extension). None when
         it cannot be read as text — that is counted as INCOMPLETE.
-        `exported`: named only by "exports", where assets are not code."""
+        `exported`: named only by "exports", where assets are not code.
+        `imported`: required or imported by code that runs. Text is code
+        whatever its extension (require() runs lib/core.dat as JavaScript),
+        but a stylesheet, image or font that is not text is a bundler asset
+        (React Native's require('./icon.png')), not code that can't be read."""
         if rel in self.sources:
             return self.sources[rel][0]
         if rel in self.shell:
@@ -1613,6 +1617,8 @@ class _ArtifactScan:
             else:
                 self.scan_source(rel, text, as_lang)
             return text
+        if imported and _not_run_as_script(rel, exported=True):
+            return None          # an image, font or stylesheet a bundler loads
         if rel in self.dropped:
             self.truncate(rel, f"{rel} runs at install/import time but was not kept for "
                                f"scanning (text budget exhausted)")
@@ -1712,7 +1718,11 @@ class _ArtifactScan:
                      "ref": "CWE-506 · Supply chain"}, rel, 1, lines))
 
     def _reachable(self):
-        """Entry files plus local files they require/import (JS), transitively."""
+        """Entry files plus local files they require/import (JS), transitively.
+        A file reached this way runs when the package is loaded: one not
+        scanned yet (index.js requiring ./lib/core.dat) is scanned now as
+        JavaScript, or counted as not scanned. They used to be found and
+        left alone, so a payload one require() away from main was OK."""
         seen, queue = set(self.entries), list(self.entries)
         while queue and len(seen) < 10_000:
             rel = queue.pop()
@@ -1725,6 +1735,7 @@ class _ArtifactScan:
                 dep = self._find(_node_candidates(_rel_join(base, target)))
                 if dep and dep not in seen:
                     seen.add(dep)
+                    self._text_of(dep, "js", imported=True)
                     queue.append(dep)
         return seen
 
