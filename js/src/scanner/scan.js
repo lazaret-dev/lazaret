@@ -287,7 +287,9 @@ function joinedEvalDecode(ctx, i, ruleRe) {
 // method call (RegExp.prototype.exec, a database's .exec) is not code
 // execution. The other sink names count on any receiver.
 const DECODE_CALL_RE = pyRe("(?:\\batob|\\bb64decode|\\.\\s*fromhex|\\bunhexlify|\\b(?:codecs|__import__\\(\\s*['\\\"]codecs['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]codecs['\\\"]\\s*\\))\\s*\\.\\s*decode|\\b(?:zlib|__import__\\(\\s*['\\\"]zlib['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]zlib['\\\"]\\s*\\))\\s*\\.\\s*decompress)\\s*\\(|\\bBuffer\\s*\\.\\s*from\\s*\\([^;\\n]{0,300}?['\\\"`]base64['\\\"`]");
-const DECODE_SINK_RE = pyRe(String.raw`(?:(require\s*\(\s*['"\x60][ \w:]*['"\x60]\s*\)|[A-Za-z_$][\w$]*)\s*\.\s*)?`
+// The receiver starts at an identifier boundary, (?<![\w$]): every position
+// inside a long identifier used to retry the whole rest of it (quadratic).
+const DECODE_SINK_RE = pyRe(String.raw`(?:(?<![\w$])(require\s*\(\s*['"\x60][ \w:]*['"\x60]\s*\)|[A-Za-z_$][\w$]*)\s*\.\s*)?`
   + String.raw`(?<![\w$])(eval|exec|execSync|execFile|execFileSync|spawn|spawnSync|Function`
   + String.raw`|runIn(?:This|New)?Context)\s*\(`, "gd");
 const GLOBAL_EVAL_RECEIVERS = new Set(["window", "globalThis", "self", "global", "top", "parent",

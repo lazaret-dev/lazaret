@@ -145,7 +145,7 @@ export function chmodFind(s) {
 }
 
 // ---- TEXT_RULES over the whole file ----------------------------------------
-// B-EMPTY-CATCH: catch\s*(\([^()]*\))?\s*\{\s*\}   (finditer: non-overlapping)
+// B-EMPTY-CATCH: catch\s*(?:\([^()]*\)\s*)?\{\s*\}   (finditer: non-overlapping)
 export function emptyCatchScan(content) {
   const out = [];
   if (!content.includes("catch")) return out;

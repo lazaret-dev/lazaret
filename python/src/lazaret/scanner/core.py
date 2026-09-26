@@ -254,8 +254,10 @@ R("S-LOCALSTORAGE", "Secret in localStorage", "HOTSPOT", "MAJOR", ("js",),
   "localStorage is readable by any script on the page (XSS steals it).",
   "Prefer httpOnly cookies for session tokens.",
   "CWE-522", flags=re.I),
+# The optional '[' carries its own whitespace: `\s*\[?\s*` let the two \s*
+# split a run of spaces every way ('algorithm=' + 60,000 spaces: 16.7 s).
 R("S-JWT-NONE", "JWT 'none' algorithm", "VULN", "BLOCKER", ("js", "py"),
-  r"algorithms?\s*[:=]\s*\[?\s*[\"']none[\"']",
+  r"algorithms?\s*[:=]\s*(?:\[\s*)?[\"']none[\"']",
   "JWT verification accepts the 'none' algorithm.",
   "Attackers can forge unsigned tokens that pass verification.",
   "Pin an explicit algorithm list, e.g. ['HS256'] or ['RS256'].",
@@ -545,8 +547,11 @@ R("SQL-SELECT-STAR", "SELECT *", "SMELL", "MINOR", ("sql",),
 ]
 
 TEXT_RULES = [
+# linear: the optional parameter list carries its trailing whitespace (the
+# old `\s*(…)?\s*` split a whitespace run every way: 'catch' + 150,000
+# newlines took 21.7 s in one regex call, which the time budget can't stop)
 R("B-EMPTY-CATCH", "Empty catch block", "BUG", "MAJOR", ("js",),
-  r"catch\s*(\([^()]*\))?\s*\{\s*\}",
+  r"catch\s*(?:\([^()]*\)\s*)?\{\s*\}",
   "Exception swallowed by empty catch.",
   "Errors vanish silently, making failures undiagnosable.",
   "Handle the error or at least log it.",
@@ -2782,8 +2787,11 @@ _DECODE_CALL_RE = re.compile(
     r"(?:\batob|\bb64decode|\.\s*fromhex|\bunhexlify|\b" + _module_ref("codecs") + r"\s*\.\s*decode"
     r"|\b" + _module_ref("zlib") + r"\s*\.\s*decompress)\s*\("
     r"|\bBuffer\s*\.\s*from\s*\([^;\n]{0,300}?['\"`]base64['\"`]")
+# The receiver starts at an identifier boundary: without (?<![\w$]) every
+# position inside a long identifier retried the whole rest of it ('a' * 20,000
+# on one line: 4.8 s).
 _DECODE_SINK_RE = re.compile(
-    r"(?:(require\s*\(\s*['\"`][ \w:]*['\"`]\s*\)|[A-Za-z_$][\w$]*)\s*\.\s*)?"
+    r"(?:(?<![\w$])(require\s*\(\s*['\"`][ \w:]*['\"`]\s*\)|[A-Za-z_$][\w$]*)\s*\.\s*)?"
     r"(?<![\w$])(eval|exec|execSync|execFile|execFileSync|spawn|spawnSync|Function"
     r"|runIn(?:This|New)?Context)\s*\(")
 _GLOBAL_EVAL_RECEIVERS = frozenset(("window", "globalThis", "self", "global", "top", "parent",

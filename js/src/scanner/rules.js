@@ -183,7 +183,7 @@ id:"S-LOCALSTORAGE", name:"Secret in localStorage", type:"HOTSPOT", sev:"MAJOR",
 },
 {
 id:"S-JWT-NONE", name:"JWT 'none' algorithm", type:"VULN", sev:"BLOCKER", langs:["js", "py"],
- re:pyRe("algorithms?\\s*[:=]\\s*\\[?\\s*[\\\"']none[\\\"']", "i"),
+ re:pyRe("algorithms?\\s*[:=]\\s*(?:\\[\\s*)?[\\\"']none[\\\"']", "i"),
  msg:"JWT verification accepts the 'none' algorithm.",
  why:"Attackers can forge unsigned tokens that pass verification.",
  fix:"Pin an explicit algorithm list, e.g. ['HS256'] or ['RS256'].",
@@ -503,7 +503,7 @@ id:"SQL-SELECT-STAR", name:"SELECT *", type:"SMELL", sev:"MINOR", langs:["sql"],
 export const TEXT_RULES = [
 {
 id:"B-EMPTY-CATCH", name:"Empty catch block", type:"BUG", sev:"MAJOR", langs:["js"],
- re:pyRe("catch\\s*(\\([^()]*\\))?\\s*\\{\\s*\\}", ""),
+ re:pyRe("catch\\s*(?:\\([^()]*\\)\\s*)?\\{\\s*\\}", ""),
  scan:emptyCatchScan,
  msg:"Exception swallowed by empty catch.",
  why:"Errors vanish silently, making failures undiagnosable.",

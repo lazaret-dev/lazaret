@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-TAQ/tZD00R4tgvDalaBrTKrmtwUymOM1UbUcpasxG4Q='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-3ilg9D8uZ5i1kX5PP5FxB28k8bMgO8I7YtE9Nixdbw4='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
 <title>Lazaret — Security &amp; Quality Review</title>
 <style>
   :root{
@@ -1288,7 +1288,7 @@ function chmodFind(s) {
 }
 
 // ---- TEXT_RULES over the whole file ----------------------------------------
-// B-EMPTY-CATCH: catch\s*(\([^()]*\))?\s*\{\s*\}   (finditer: non-overlapping)
+// B-EMPTY-CATCH: catch\s*(?:\([^()]*\)\s*)?\{\s*\}   (finditer: non-overlapping)
 function emptyCatchScan(content) {
   const out = [];
   if (!content.includes("catch")) return out;
@@ -1526,7 +1526,7 @@ id:"S-LOCALSTORAGE", name:"Secret in localStorage", type:"HOTSPOT", sev:"MAJOR",
 },
 {
 id:"S-JWT-NONE", name:"JWT 'none' algorithm", type:"VULN", sev:"BLOCKER", langs:["js", "py"],
- re:pyRe("algorithms?\\s*[:=]\\s*\\[?\\s*[\\\"']none[\\\"']", "i"),
+ re:pyRe("algorithms?\\s*[:=]\\s*(?:\\[\\s*)?[\\\"']none[\\\"']", "i"),
  msg:"JWT verification accepts the 'none' algorithm.",
  why:"Attackers can forge unsigned tokens that pass verification.",
  fix:"Pin an explicit algorithm list, e.g. ['HS256'] or ['RS256'].",
@@ -1846,7 +1846,7 @@ id:"SQL-SELECT-STAR", name:"SELECT *", type:"SMELL", sev:"MINOR", langs:["sql"],
 const TEXT_RULES = [
 {
 id:"B-EMPTY-CATCH", name:"Empty catch block", type:"BUG", sev:"MAJOR", langs:["js"],
- re:pyRe("catch\\s*(\\([^()]*\\))?\\s*\\{\\s*\\}", ""),
+ re:pyRe("catch\\s*(?:\\([^()]*\\)\\s*)?\\{\\s*\\}", ""),
  scan:emptyCatchScan,
  msg:"Exception swallowed by empty catch.",
  why:"Errors vanish silently, making failures undiagnosable.",
