@@ -266,15 +266,19 @@ class _RegistryOpener(urllib.request.HTTPRedirectHandler):
 _OPENER = urllib.request.build_opener(_RegistryOpener)
 
 
-def _fetch(url, max_bytes=MAX_DOWNLOAD_BYTES, timeout=DOWNLOAD_TIMEOUT, accept=None):
+def _fetch(url, max_bytes=MAX_DOWNLOAD_BYTES, timeout=DOWNLOAD_TIMEOUT, accept=None,
+           data=None, content_type=None):
     """Validated, byte-budgeted fetch (F10 + F9a). Reads in bounded chunks so
     a hostile server cannot OOM the scanner with an unbounded stream (a 300MB
-    response previously pinned ~714MB RSS via bare r.read())."""
+    response previously pinned ~714MB RSS via bare r.read()). With `data`
+    (bytes) the request is a POST of that body (PyPI's XML-RPC API)."""
     _validated_url(url)
     headers = {"User-Agent": USER_AGENT}
     if accept:
         headers["Accept"] = accept
-    req = urllib.request.Request(url, headers=headers)
+    if content_type:
+        headers["Content-Type"] = content_type
+    req = urllib.request.Request(url, data=data, headers=headers)
     try:
         with _OPENER.open(req, timeout=timeout) as r:
             buf = bytearray()
@@ -3004,6 +3008,119 @@ def _note_pypi_reach(notes, cutoff, now, reach):
         _partly(notes, "pypi", f"new projects covered {span(projects)} only; packages.xml "
                                f"holds the latest {projects[0]}" if projects[0]
                 else "the packages.xml feed was empty")
+
+
+# PyPI's XML-RPC API: its mirroring methods (changelog_last_serial,
+# changelog_since_serial) are supported, and rate-limited: discovery makes
+# one call per run. changelog_since_serial answers with at most 50,000
+# journal rows (warehouse's limit), about 15 MB of XML: more than the 5 MB
+# feed cap, so these answers have their own (safexml's XML-RPC default).
+PYPI_XMLRPC_URL = "https://pypi.org/pypi"
+PYPI_XMLRPC_MAX_BYTES = 32 * 1024 * 1024
+PYPI_CHANGELOG_MAX = 50_000
+_SERIAL_MAX = 2 ** 63 - 1
+
+
+def _uint(value):
+    """A non-negative int from a decoded answer (never a bool)."""
+    return isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= _SERIAL_MAX
+
+
+def _pypi_xmlrpc(method, *params):
+    """Call one method of PyPI's XML-RPC API -> its return value. The request
+    goes through _fetch (https to pypi.org only, byte and time limits) and
+    the answer is parsed by lazaret.safexml's XML-RPC parser (no DTD or
+    entities, bounded depth and size). Raises FetchError when PyPI can't be
+    reached or the answer is too large, FeedError for a fault or an answer
+    that isn't a well-formed XML-RPC response."""
+    import xmlrpc.client
+    from lazaret.safexml import xmlrpc as safe_xmlrpc
+    body = xmlrpc.client.dumps(params, method, encoding="utf-8").encode("utf-8")
+    raw = _fetch(PYPI_XMLRPC_URL, max_bytes=PYPI_XMLRPC_MAX_BYTES, timeout=METADATA_TIMEOUT,
+                 data=body, content_type="text/xml")
+    try:
+        result, called = safe_xmlrpc.loads(raw, max_bytes=PYPI_XMLRPC_MAX_BYTES)
+    except xmlrpc.client.Fault as exc:
+        raise FeedError(f"PyPI's XML-RPC {method} failed: fault {exc.faultCode!s:.20}: "
+                        f"{exc.faultString!s:.200}") from None
+    except Exception as exc:                                       # noqa: BLE001
+        # hostile or broken XML: refused by safexml, malformed, or values the
+        # unmarshaller can't decode. The text may echo the answer: not kept.
+        raise FeedError(f"PyPI's XML-RPC {method} answer was rejected "
+                        f"({type(exc).__name__})") from None
+    if called is not None or not isinstance(result, tuple) or len(result) != 1:
+        raise FeedError(f"PyPI's XML-RPC {method} answer is not a method response")
+    return result[0]
+
+
+def _pypi_last_serial():
+    """PyPI's newest changelog serial (changelog_last_serial)."""
+    serial = _pypi_xmlrpc("changelog_last_serial")
+    if not _uint(serial):
+        raise FeedError("PyPI's changelog_last_serial answer is not a serial number")
+    return serial
+
+
+def _pypi_changelog(serial):
+    """PyPI's changelog after `serial` (changelog_since_serial: rows of
+    (name, version, timestamp, action, serial), oldest first). Returns a dict:
+      events: [(serial, name, version or None, datetime)] of the rows that
+              are releases ("new release") or new projects ("create"), in
+              serial order, each (project, version) once; other actions
+              (file uploads, removals, roles) are ignored. A version that
+              isn't a safe token becomes None (scanned at the latest
+              version), as in the RSS feeds, and a new project whose first
+              release is in the answer is listed by that release.
+      rows:   rows in the answer (PyPI sends at most PYPI_CHANGELOG_MAX)
+      last:   (serial, datetime) of the newest row, or None
+      unread: rows that could not be read (wrong shape or types)
+      names:  release rows whose project name is not a valid PyPI name
+    Rows at or before `serial` are ignored. Raises like _pypi_xmlrpc, and
+    FeedError when the answer is not a list."""
+    answer = _pypi_xmlrpc("changelog_since_serial", serial)
+    if not isinstance(answer, list):
+        raise FeedError("PyPI's changelog answer has an unexpected shape")
+    events, last, unread, names = [], None, 0, 0
+    for row in answer:
+        if not isinstance(row, (list, tuple)) or len(row) != 5:
+            unread += 1
+            continue
+        name, version, stamp, action, row_serial = row
+        if not (_uint(row_serial) and _uint(stamp) and isinstance(action, str)):
+            unread += 1
+            continue
+        try:
+            when = datetime.datetime.fromtimestamp(stamp, datetime.timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            unread += 1
+            continue
+        if row_serial <= serial:
+            continue
+        if last is None or row_serial > last[0]:
+            last = (row_serial, when)
+        if action not in ("new release", "create"):
+            continue
+        if not isinstance(name, str) or not valid_name("pypi", name):
+            names += 1                          # G14: names drive downloads
+            continue
+        if action == "create" or not isinstance(version, str) or not _feed_token_ok(version):
+            version = None
+        events.append((row_serial, name, version, when))
+    events.sort(key=lambda e: e[0])
+    released = {_pep503(name) for _s, name, version, _w in events if version is not None}
+    distinct, seen = [], set()
+    for event in events:
+        key = (_pep503(event[1]), event[2])
+        if key not in seen and not (event[2] is None and key[0] in released):
+            seen.add(key)
+            distinct.append(event)
+    return {"events": distinct, "rows": len(answer), "last": last, "unread": unread,
+            "names": names}
+
+
+def _pep503(name):
+    """PyPI's normalized project name (PEP 503)."""
+    return re.sub(r"[-_.]+", "-", name).lower()
 
 
 # npm's replication API (changed 2025: new endpoints from 2025-03-18, the old
