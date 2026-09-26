@@ -28,7 +28,8 @@ State backends (--db or LAZARET_DB env):
 Package specs: npm:<name>[@version]  |  pypi:<name>[@version or ==version]
 Scoped npm packages work: npm:@scope/pkg@1.0.0
 PyPI releases are judged on every file pip may install: the sdist and each
-distinct wheel (up to --max-artifacts); the verdict is the worst of them.
+distinct wheel (up to --max-artifacts files and --max-download-bytes in
+total); the verdict is the worst of them.
 """
 import argparse
 import base64
@@ -93,7 +94,15 @@ DOWNLOAD_TIMEOUT = 60                      # seconds for artifact archives
 SCAN_TIMEOUT = _env_number("LAZARET_SCAN_TIMEOUT", 120.0, float)
 # PyPI: artifacts scanned per release (sdist + distinct wheels). More than
 # this makes the verdict INCOMPLETE. Env LAZARET_MAX_ARTIFACTS / --max-artifacts.
-MAX_ARTIFACTS = _env_number("LAZARET_MAX_ARTIFACTS", 50)
+# Popular binary packages publish 60-90 files per release (numpy, grpcio,
+# pillow); 50 made every one of them permanently INCOMPLETE.
+MAX_ARTIFACTS = _env_number("LAZARET_MAX_ARTIFACTS", 200)
+# Total bytes downloaded for ONE package (all its release files together);
+# checked BEFORE each download against the sizes PyPI's metadata declares, so
+# a release that cannot fit is not fetched at all. Files that don't fit are
+# not scanned and the verdict is INCOMPLETE. Env LAZARET_MAX_DOWNLOAD_BYTES /
+# --max-download-bytes. (MAX_DOWNLOAD_BYTES above is the per-file limit.)
+MAX_PACKAGE_DOWNLOAD_BYTES = _env_number("LAZARET_MAX_DOWNLOAD_BYTES", 2 * 1024 ** 3)
 # Non-source text members kept in memory until package.json says whether
 # they are entry points (main/bin/exports) or hook targets.
 DEFERRED_TEXT_BUDGET = 64 * 1024 * 1024
@@ -1584,8 +1593,70 @@ def _scan_artifact(data, container, artifact, full, budget):
             "strongIndicators": strong, "weakIndicators": weak}
 
 
+def _fmt_bytes(n):
+    """1536 -> '1.5 KiB' (binary units, one decimal)."""
+    value = float(n)
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if value < 1024 or unit == "GiB":
+            return f"{int(value)} B" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} GiB"  # pragma: no cover
+
+
+def declared_size(meta_entry):
+    """Byte size a registry declares for one artifact (PyPI's `size`), or
+    None when it declares none. Used to refuse a download BEFORE it starts."""
+    size = meta_entry.get("size") if isinstance(meta_entry, dict) else None
+    if isinstance(size, int) and not isinstance(size, bool) and size >= 0:
+        return size
+    return None
+
+
+def _skipped_summary(skipped, byte_budget, limit):
+    """SC-TRUNCATED issues + a short verdict-reason phrase for release files
+    that were not scanned. skipped: [(filename, kind, size)] with kind
+    'artifacts' | 'budget' | 'filesize' | 'time'."""
+    issues, labels = [], []
+    groups = {}
+    for filename, kind, size in skipped:
+        groups.setdefault(kind, []).append((filename, size))
+
+    def names(items):
+        shown = ", ".join(str(f) for f, _ in items[:3])
+        return shown + (f", … (+{len(items) - 3})" if len(items) > 3 else "")
+
+    if "artifacts" in groups:
+        items = groups["artifacts"]
+        issues.append(lazaret.truncated_issue(
+            "(release)", f"{len(items)} more release file(s) not scanned (limit {limit} "
+                         f"artifacts per release; raise --max-artifacts)"))
+        labels.append(f"more than {limit} files (--max-artifacts)")
+    if "filesize" in groups:
+        items = groups["filesize"]
+        issues.append(lazaret.truncated_issue(
+            "(release)", f"{len(items)} release file(s) not downloaded: each is larger than "
+                         f"the {_fmt_bytes(MAX_DOWNLOAD_BYTES)} per-file download limit "
+                         f"({names(items)})"))
+        labels.append(f"over the {_fmt_bytes(MAX_DOWNLOAD_BYTES)} per-file limit")
+    if "budget" in groups:
+        items = groups["budget"]
+        issues.append(lazaret.truncated_issue(
+            "(release)", f"{len(items)} release file(s) not downloaded: they would take the "
+                         f"package past its {_fmt_bytes(byte_budget)} download budget "
+                         f"({names(items)}; raise --max-download-bytes / "
+                         f"LAZARET_MAX_DOWNLOAD_BYTES)"))
+        labels.append(f"over the {_fmt_bytes(byte_budget)} download budget (--max-download-bytes)")
+    if "time" in groups:
+        items = groups["time"]
+        issues.append(lazaret.truncated_issue(
+            "(release)", f"{len(items)} release file(s) not downloaded: the scan's time "
+                         f"budget ran out ({names(items)})"))
+        labels.append("time budget exhausted")
+    return issues, "; ".join(labels)
+
+
 def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline=None,
-                 cancel=None, max_artifacts=None):
+                 cancel=None, max_artifacts=None, max_download_bytes=None):
     """Fetch and scan one package version. Returns a result dict.
 
     Every archive member is classified as source or binary. Source files (by
@@ -1596,8 +1667,13 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
     (sdist/npm vs wheel).
 
     PyPI: every file of the release pip may install is scanned (sdist and
-    each distinct wheel, at most max_artifacts); the verdict is the worst
-    one, and result["artifacts"] keeps the per-file detail.
+    each distinct wheel, at most max_artifacts files and max_download_bytes
+    bytes in total); the verdict is the worst one, and result["artifacts"]
+    keeps the per-file detail. A file that does not fit — past the artifact
+    limit, over the per-file download limit or the package's download budget
+    by its DECLARED size (checked before downloading), or reached after the
+    deadline — is not downloaded; it is listed in result["skippedArtifacts"],
+    an SC-TRUNCATED finding names it, and the verdict is INCOMPLETE at best.
 
     resolved: a resolve_npm/resolve_pypi result already fetched (scan-all
     checks the version before downloading). deadline: absolute
@@ -1611,11 +1687,27 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
         {"url": url, "container": container, "artifact": artifact, "entry": meta_entry,
          "filename": url.rsplit("/", 1)[-1] if isinstance(url, str) else None}]
     limit = max_artifacts or MAX_ARTIFACTS
+    byte_budget = max_download_bytes or MAX_PACKAGE_DOWNLOAD_BYTES
     over, refs = refs[limit:], refs[:limit]
+    skipped = [(r.get("filename"), "artifacts", declared_size(r.get("entry"))) for r in over]
     per, all_issues, truncated = [], [], 0
     multi = len(refs) > 1
+    downloaded = 0
     for ref in refs:
+        size = declared_size(ref.get("entry"))
+        if cancel is not None and cancel():
+            raise ScanCancelled("scan cancelled")
+        if deadline is not None and time.monotonic() > deadline:
+            skipped.append((ref.get("filename"), "time", size))
+            continue
+        if size is not None and size > MAX_DOWNLOAD_BYTES:
+            skipped.append((ref.get("filename"), "filesize", size))
+            continue
+        if downloaded >= byte_budget or (size is not None and downloaded + size > byte_budget):
+            skipped.append((ref.get("filename"), "budget", size))
+            continue
         data = http_bytes(ref["url"])
+        downloaded += max(len(data), size or 0)
         # G15: verify the artifact against the registry-published digest BEFORE
         # scanning anything — a mismatch raises and nothing is persisted under
         # this name/version.
@@ -1635,11 +1727,9 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
                     **{k: r[k] for k in ("verdict", "verdictReason", "filesScanned",
                                          "binaryArtifacts", "truncated",
                                          "strongIndicators", "weakIndicators")}})
-    if over:
-        truncated += 1
-        all_issues.append(lazaret.truncated_issue(
-            "(release)", f"{len(over)} more release file(s) not scanned (limit {limit} "
-                         f"artifacts per release; raise --max-artifacts)"))
+    skip_issues, skip_label = _skipped_summary(skipped, byte_budget, limit)
+    truncated += len(skip_issues)
+    all_issues.extend(skip_issues)
     all_issues.sort(key=lambda i: (lazaret.SEV_ORDER[i["sev"]], i["file"], i["line"]))
     sev_counts = {s: 0 for s in lazaret.SEV_ORDER}
     for i in all_issues:
@@ -1648,13 +1738,16 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
     # Verdict integrity: a truncated scan can never be cleared, because the
     # unscanned members are attacker-chosen: it is INCOMPLETE at best.
     verdict, reason, strong, weak = decide_verdict(all_issues, truncated)
-    if multi:
+    if multi and per:
         worst = max(per, key=lambda p: VERDICT_RANK.get(p["verdict"], 0))
         if VERDICT_RANK.get(worst["verdict"], 0) == VERDICT_RANK.get(verdict, 0) \
                 and verdict != "OK":
             reason += f" (worst: {worst['filename']}; {len(per)} release files scanned)"
         else:
             reason += f" ({len(per)} release files scanned)"
+    if skipped:
+        reason += (f"; {len(skipped)} of {len(per) + len(skipped)} release files not "
+                   f"scanned: {skip_label}")
     # L1 (artifact hygiene): redaction is default-on, so the issues this
     # result carries — including the ones persisted as the Store blob via
     # save_scan — already have placeholder/scrubbed snippets from mk_issue.
@@ -1674,6 +1767,8 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
             "weakIndicators": weak, "truncated": truncated,
             "verdict": verdict, "verdictReason": reason, "issues": all_issues,
             "digest": per[0]["digest"] if per else None, "artifacts": per,
+            "skippedArtifacts": [{"filename": f, "reason": kind, "declaredBytes": size}
+                                 for f, kind, size in skipped],
             "scannedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")}
 
 
@@ -2417,7 +2512,7 @@ def cmd_scan(store, specs, full, rescan, errors=None):
 
 
 def main():
-    global SCAN_TIMEOUT, MAX_ARTIFACTS
+    global SCAN_TIMEOUT, MAX_ARTIFACTS, MAX_PACKAGE_DOWNLOAD_BYTES
     lazaret.configure_stdio()
     ap = argparse.ArgumentParser(prog="lazaret-registry", description="Lazaret npm/PyPI registry scanner")
     ap.add_argument("command", choices=["add", "scan", "scan-all", "list", "report", "discover"])
@@ -2442,6 +2537,13 @@ def main():
     ap.add_argument("--max-artifacts", type=int, metavar="N",
                     help=f"PyPI files scanned per release (default {MAX_ARTIFACTS}, env "
                          f"LAZARET_MAX_ARTIFACTS); more makes the verdict INCOMPLETE")
+    ap.add_argument("--max-download-bytes", type=int, metavar="BYTES",
+                    help=f"Total bytes downloaded per package, all release files together "
+                         f"(default {MAX_PACKAGE_DOWNLOAD_BYTES} = "
+                         f"{_fmt_bytes(MAX_PACKAGE_DOWNLOAD_BYTES)}, env "
+                         f"LAZARET_MAX_DOWNLOAD_BYTES); checked against the registry's "
+                         f"declared sizes before downloading — files that don't fit "
+                         f"are not scanned and the verdict is INCOMPLETE")
     # discover options
     ap.add_argument("--since", default="7d",
                     help="discover: time window — 7d, 2w, 24h, or an ISO date (default 7d)")
@@ -2461,6 +2563,8 @@ def main():
         SCAN_TIMEOUT = args.scan_timeout
     if args.max_artifacts and args.max_artifacts > 0:
         MAX_ARTIFACTS = args.max_artifacts
+    if args.max_download_bytes and args.max_download_bytes > 0:
+        MAX_PACKAGE_DOWNLOAD_BYTES = args.max_download_bytes
     try:
         store = Store(args.db)
     except RuntimeError as exc:
