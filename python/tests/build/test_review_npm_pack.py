@@ -55,7 +55,7 @@ class NpmPackTests(unittest.TestCase):
         for rel in PLANTED:
             path = os.path.join(self.root, *rel.split("/"))
             os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, "w") as f:
+            with open(path, "w", encoding="utf-8", newline="\n") as f:
                 f.write("TOKEN=dummy-not-a-secret\n")
         self.assertEqual(packed(self.root), clean)
 

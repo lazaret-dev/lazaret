@@ -195,7 +195,7 @@ class AttlistMemoryTests(unittest.TestCase):
         for api in ("ET", "sax", "pulldom", "xmlrpc"):
             with self.subTest(api=api):
                 proc = subprocess.run([sys.executable, "-c", MEMORY_CHILD, api],
-                                      capture_output=True, text=True, timeout=30)
+                                      capture_output=True, text=True, timeout=30, encoding="utf-8", errors="replace")
                 self.assertEqual(proc.returncode, 0, proc.stderr[-400:])
                 verdict, rss_kib = proc.stdout.split()
                 self.assertEqual(verdict, "refused")

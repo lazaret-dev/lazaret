@@ -206,7 +206,7 @@ class EndToEndCancelTests(unittest.TestCase):
                 fh.write(body)
         env = dict(os.environ, LAZARET_DB=os.path.join(tree, "r.db"))
         p = subprocess.Popen([PY, _support.MCP], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                             stderr=subprocess.DEVNULL, text=True, bufsize=1, env=env)
+                             stderr=subprocess.DEVNULL, text=True, bufsize=1, env=env, encoding="utf-8", errors="replace")
         try:
             def send(line):
                 p.stdin.write(line + "\n")

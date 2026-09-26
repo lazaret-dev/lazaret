@@ -137,7 +137,7 @@ class TestReportsDisabledOnReadOnlyRoot(unittest.TestCase):
     def test_no_html_no_json_allows_read_only_scan_root(self):
         root = tempfile.mkdtemp(prefix="cg-cli-root-")
         self.addCleanup(lambda: __import__("shutil").rmtree(root, True))
-        with open(os.path.join(root, "app.js"), "w") as fh:
+        with open(os.path.join(root, "app.js"), "w", encoding="utf-8", newline="\n") as fh:
             fh.write("var x = 1;\n")
         os.chmod(root, stat.S_IRUSR | stat.S_IXUSR)
         self.addCleanup(lambda: os.chmod(root, 0o755))
@@ -192,7 +192,7 @@ class TestClobberPrevention(CliReportBase):
         mtime2 = os.path.getmtime(os.path.join(root, "lazaret-report.json"))
         self.assertGreaterEqual(mtime2, mtime1)
         # And the JSON is still valid and marker-stamped.
-        with open(os.path.join(root, "lazaret-report.json")) as fh:
+        with open(os.path.join(root, "lazaret-report.json"), encoding="utf-8") as fh:
             data = json.load(fh)
         self.assertEqual(data[cr_ENGINE_MARKER_KEY()], cr_ENGINE_MARKER_VALUE())
 
@@ -239,7 +239,7 @@ class TestOutDirAndExplicitPaths(CliReportBase):
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertTrue(os.path.isfile(os.path.join(root, "my-report.json")))
         self.assertFalse(os.path.exists(os.path.join(cwd, "my-report.json")))
-        with open(os.path.join(cwd, "lazaret-report.json"), "w") as fh:
+        with open(os.path.join(cwd, "lazaret-report.json"), "w", encoding="utf-8", newline="\n") as fh:
             pass            # ensure CWD stayed clean of defaults too
         self.assertEqual([f for f in os.listdir(cwd)
                           if not f.startswith(".")], ["lazaret-report.json"])

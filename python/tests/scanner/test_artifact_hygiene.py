@@ -43,7 +43,7 @@ SECRET_SRC = ("import os\n"
 def write_project(tmp, name="proj"):
     root = os.path.join(tmp, name)
     os.makedirs(root, exist_ok=True)
-    with open(os.path.join(root, "secrets.py"), "w") as fh:
+    with open(os.path.join(root, "secrets.py"), "w", encoding="utf-8", newline="\n") as fh:
         fh.write(SECRET_SRC)
     return root
 
@@ -116,13 +116,13 @@ class TestSecretRedaction(unittest.TestCase):
                      os.path.join(out, "r.json"), "--sarif",
                      os.path.join(out, "r.sarif")])
         self.assertEqual(p.returncode, 1, p.stderr[:400])  # gate fails: secrets
-        jtxt = open(os.path.join(out, "r.json")).read()
+        jtxt = open(os.path.join(out, "r.json"), encoding="utf-8").read()
         self.assertNotIn("hunter2secr3t", jtxt)
         self.assertNotIn("AKIAIOSFODNN7EXAMPLE", jtxt)
         self.assertIn("[redacted: secret rule", jtxt)
         p2 = run_cli([self.root, "--no-json", "--html",
                       os.path.join(out, "r.html")])
-        html = open(os.path.join(out, "r.html")).read()
+        html = open(os.path.join(out, "r.html"), encoding="utf-8").read()
         self.assertNotIn("hunter2secr3t", html)
         self.assertNotIn("AKIAIOSFODNN7EXAMPLE", html)
 
@@ -131,7 +131,7 @@ class TestSecretRedaction(unittest.TestCase):
         os.makedirs(out)
         p = run_cli([self.root, "--no-redact-secrets", "--no-html", "--json",
                      os.path.join(out, "r.json")])
-        jtxt = open(os.path.join(out, "r.json")).read()
+        jtxt = open(os.path.join(out, "r.json"), encoding="utf-8").read()
         self.assertIn("hunter2secr3t", jtxt)
 
     def test_baseline_fingerprint_stable_across_scans(self):
@@ -169,10 +169,10 @@ class TestBaselineTrust(unittest.TestCase):
 
     def test_forged_baseline_is_untrusted(self):
         base = self.scan_json("engine.json")
-        data = json.load(open(base))
+        data = json.load(open(base, encoding="utf-8"))
         # attacker forges the same shape WITHOUT the engine marker
         forged = os.path.join(self.tmp, "forged.json")
-        with open(forged, "w") as fh:
+        with open(forged, "w", encoding="utf-8", newline="\n") as fh:
             json.dump({"issues": data["issues"]}, fh)
         os.utime(forged, (1, 1))
         res = {"issues": [dict(data["issues"][0])]}
@@ -183,7 +183,7 @@ class TestBaselineTrust(unittest.TestCase):
 
     def test_engine_baseline_is_trusted(self):
         base = self.scan_json("engine.json")
-        res = {"issues": [dict(i) for i in json.load(open(base))["issues"]]}
+        res = {"issues": [dict(i) for i in json.load(open(base, encoding="utf-8"))["issues"]]}
         lazaret.apply_baseline(res, base)
         self.assertNotIn("baselineUntrusted", res)
         self.assertEqual(res["newIssues"], 0)
@@ -354,7 +354,7 @@ class TestBundleHygiene(unittest.TestCase):
         self.assertNotIn("S-TOKEN", scan.stdout)
 
     def test_mcp_config_uses_absolute_db_path(self):
-        cfg = json.load(open(os.path.join(_support.EXAMPLES, "mcp-config.json")))
+        cfg = json.load(open(os.path.join(_support.EXAMPLES, "mcp-config.json"), encoding="utf-8"))
         env = cfg["mcpServers"]["lazaret"]["env"]
         self.assertEqual(env["LAZARET_DB"],
                          "/ABSOLUTE/PATH/TO/lazaret-registry.db")

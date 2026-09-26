@@ -123,7 +123,7 @@ class AllowlistTests(unittest.TestCase):
             with self.subTest(planted=rel):
                 path = self.tree.pkg / rel
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text("AWS_SECRET_ACCESS_KEY=dummy-not-a-secret\n")
+                path.write_text("AWS_SECRET_ACCESS_KEY=dummy-not-a-secret\n", encoding="utf-8", newline="\n")
                 try:
                     for build in (self.tree.b.build_wheel, self.tree.b.build_sdist):
                         with self.assertRaises(self.tree.b.UnexpectedFilesError) as cm:
@@ -137,7 +137,7 @@ class AllowlistTests(unittest.TestCase):
 
     def test_error_lists_every_offender(self):
         for rel in (".env", "scanner/._core.py", "x.orig"):
-            (self.tree.pkg / rel).write_text("x\n")
+            (self.tree.pkg / rel).write_text("x\n", encoding="utf-8", newline="\n")
         with self.assertRaises(self.tree.b.UnexpectedFilesError) as cm:
             self.tree.b.build_wheel(str(self.tree.out))
         msg = str(cm.exception)
@@ -147,7 +147,7 @@ class AllowlistTests(unittest.TestCase):
 
     def test_symlinks_fail_the_build(self):
         target = self.tree.root / "outside.txt"
-        target.write_text("not part of the package\n")
+        target.write_text("not part of the package\n", encoding="utf-8", newline="\n")
         link = self.tree.pkg / "linked.py"
         try:
             os.symlink(target, link)
@@ -158,13 +158,13 @@ class AllowlistTests(unittest.TestCase):
         self.assertIn("linked.py", str(cm.exception))
 
     def test_junk_in_build_dir_fails_the_sdist(self):
-        (self.tree.root / "_build" / ".env").write_text("TOKEN=dummy\n")
+        (self.tree.root / "_build" / ".env").write_text("TOKEN=dummy\n", encoding="utf-8", newline="\n")
         with self.assertRaises(self.tree.b.UnexpectedFilesError) as cm:
             self.tree.b.build_sdist(str(self.tree.out))
         self.assertIn("_build/.env", str(cm.exception))
 
     def test_command_line_reports_the_error_without_a_traceback(self):
-        (self.tree.pkg / "registry" / ".env").write_text("DB_PASSWORD=dummy\n")
+        (self.tree.pkg / "registry" / ".env").write_text("DB_PASSWORD=dummy\n", encoding="utf-8", newline="\n")
         p = subprocess.run([sys.executable, str(self.tree.root / "_build" / "lazaret_build.py"),
                             str(self.tree.out)], capture_output=True, encoding="utf-8",
                            errors="replace", timeout=40)

@@ -61,3 +61,21 @@ def unix_newlines(data: bytes) -> bytes:
     """Windows text-mode output ends lines with CRLF. Normalize it so checks for
     a stray carriage return (a terminal-spoofing byte) only see real ones."""
     return data.replace(b"\r\n", b"\n")
+
+
+def require_fs_names(*names):
+    """Skip (never fail) a test whose non-ASCII file names this host can't
+    create as UTF-8 — a Linux locale that isn't UTF-8 (C, Latin-1)
+    (STRUCTURE.md, "Cross-platform rules", rule 5). Windows and macOS always
+    can."""
+    import sys
+    import unittest
+    enc = sys.getfilesystemencoding()
+    for name in names:
+        try:
+            ok = os.fsencode(name) == name.encode("utf-8")
+        except UnicodeEncodeError:
+            ok = False
+        if not ok:
+            raise unittest.SkipTest(f"file name {name!r} can't be created as UTF-8 under "
+                                    f"the filesystem encoding {enc}")

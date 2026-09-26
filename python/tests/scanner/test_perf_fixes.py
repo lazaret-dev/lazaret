@@ -399,7 +399,7 @@ class CliEndToEnd(unittest.TestCase):
         import json
         import tempfile
         with tempfile.TemporaryDirectory() as d:
-            with open(os.path.join(d, "adv.sql"), "w") as f:
+            with open(os.path.join(d, "adv.sql"), "w", encoding="utf-8", newline="\n") as f:
                 f.write(make_sql(n_stmts=4000, size_target=60_000))
                 f.write("\nDELETE FROM sessions;\n")
             t0 = time.perf_counter()
@@ -407,7 +407,7 @@ class CliEndToEnd(unittest.TestCase):
                                capture_output=True, encoding="utf-8", errors="replace", timeout=120)
             dt = time.perf_counter() - t0
             self.assertEqual(r.returncode, 0, r.stderr)
-            with open(os.path.join(d, "lazaret-report.json")) as f:
+            with open(os.path.join(d, "lazaret-report.json"), encoding="utf-8") as f:
                 rep = json.load(f)
             rules = [i["rule"] for i in rep.get("issues", [])]
             self.assertIn("SQL-DELETE-NOWHERE", rules, json.dumps(rules))

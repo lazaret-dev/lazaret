@@ -217,7 +217,7 @@ class TagReleaseTests(RepoCase):
     @unittest.skipIf(sys.platform == "win32", "the fake signer is a shell script")
     def test_signs_the_tag_when_tag_gpgsign_is_on(self):
         signer = os.path.join(self._tmp.name, "fake-gpg")
-        with open(signer, "w", newline="\n") as f:
+        with open(signer, "w", newline="\n", encoding="utf-8") as f:
             f.write(FAKE_SIGNER)
         os.chmod(signer, 0o755)
         self.use_signer(signer)

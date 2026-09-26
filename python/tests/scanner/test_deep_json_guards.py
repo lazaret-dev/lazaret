@@ -176,7 +176,7 @@ class McpDeepFrameTests(unittest.TestCase):
 class CliConfigBaselineTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="cg-cli-")
-        with open(os.path.join(self.tmp, "a.py"), "w") as fh:
+        with open(os.path.join(self.tmp, "a.py"), "w", encoding="utf-8", newline="\n") as fh:
             fh.write("x = 1\n")
 
     def tearDown(self):
@@ -190,7 +190,7 @@ class CliConfigBaselineTests(unittest.TestCase):
 
     def test_autoloaded_deep_taint_config_warns_and_scans(self):
         # scanned-repo content: hostile repo plants .lazaret-taint.json
-        with open(os.path.join(self.tmp, ".lazaret-taint.json"), "w") as fh:
+        with open(os.path.join(self.tmp, ".lazaret-taint.json"), "w", encoding="utf-8", newline="\n") as fh:
             fh.write(DEEP)
         p = self._cli("--trust-repo-config")  # repo config is opt-in (review finding 5)
         self.assertNotIn("Traceback", p.stderr)
@@ -204,7 +204,7 @@ class CliConfigBaselineTests(unittest.TestCase):
         # must not quietly scan without its rules (final review item 2; this
         # test used to expect warn-and-scan, exit 0). Still no traceback.
         cfg = os.path.join(self.tmp, "deep.json")
-        with open(cfg, "w") as fh:
+        with open(cfg, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(DEEP)
         p = self._cli("--taint-config", cfg)
         self.assertNotIn("Traceback", p.stderr)
@@ -213,9 +213,9 @@ class CliConfigBaselineTests(unittest.TestCase):
         self.assertNotIn("Quality gate", p.stdout)
 
     def test_deep_taint_config_does_not_hide_sibling_findings(self):
-        with open(os.path.join(self.tmp, ".lazaret-taint.json"), "w") as fh:
+        with open(os.path.join(self.tmp, ".lazaret-taint.json"), "w", encoding="utf-8", newline="\n") as fh:
             fh.write(DEEP)
-        with open(os.path.join(self.tmp, "a.py"), "w") as fh:
+        with open(os.path.join(self.tmp, "a.py"), "w", encoding="utf-8", newline="\n") as fh:
             fh.write(APPEAL_PY)
         p = self._cli("--trust-repo-config")  # repo config is opt-in (review finding 5)
         self.assertEqual(p.returncode, 0)
@@ -224,7 +224,7 @@ class CliConfigBaselineTests(unittest.TestCase):
 
     def test_deep_baseline_warns_and_ignored(self):
         base = os.path.join(self.tmp, "base.json")
-        with open(base, "w") as fh:
+        with open(base, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(DEEP)
         p = self._cli("--baseline", base)
         self.assertNotIn("Traceback", p.stderr)
@@ -242,9 +242,9 @@ class CliConfigBaselineTests(unittest.TestCase):
 
     def test_valid_taint_config_still_loads(self):
         # vacuity guard: a sane config still applies (no over-blocking)
-        with open(os.path.join(self.tmp, ".lazaret-taint.json"), "w") as fh:
+        with open(os.path.join(self.tmp, ".lazaret-taint.json"), "w", encoding="utf-8", newline="\n") as fh:
             fh.write('{"python":{"sources":["\\\\brequest\\\\.args\\\\b"]}}')
-        with open(os.path.join(self.tmp, "a.py"), "w") as fh:
+        with open(os.path.join(self.tmp, "a.py"), "w", encoding="utf-8", newline="\n") as fh:
             fh.write(APPEAL_PY)
         p = self._cli("--trust-repo-config")  # repo config is opt-in (review finding 5)
         self.assertEqual(p.returncode, 0)
@@ -259,7 +259,7 @@ class FlowLoadConfigTests(unittest.TestCase):
     def test_deep_config_warns_and_returns_false(self):
         from lazaret.scanner import flow as lazaret_flow
         path = os.path.join(tempfile.mkdtemp(prefix="cg-flow-"), "cfg.json")
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(DEEP)
         warns = []
         ok = lazaret_flow.load_config_quietly(path, warns)
@@ -275,7 +275,7 @@ class FlowLoadConfigTests(unittest.TestCase):
         state = _FlowState()
         self.addCleanup(state.restore)
         path = os.path.join(tempfile.mkdtemp(prefix="cg-flow-"), "cfg.json")
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8", newline="\n") as fh:
             fh.write('{"python":{"sources":["\\\\brequest\\\\.args\\\\b"]}}')
         warns = []
         ok = lazaret_flow.load_config_quietly(path, warns)

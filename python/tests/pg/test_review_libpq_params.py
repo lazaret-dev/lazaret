@@ -102,7 +102,7 @@ class PgpassSocketDirectoryTests(CleanEnvCase):
         d = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, d)
         path = os.path.join(d, "pgpass")
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
             f.write("/custom/sock:5432:*:*:right\nlocalhost:5432:*:*:local\n")
         os.chmod(path, 0o600)
         self.assertEqual(lookup_pgpass(resolve(host="/custom/sock", user="u", passfile=path)), "right")
@@ -118,7 +118,7 @@ class DefaultClientCertificateTests(HomeDirCase):
 
     def test_certificate_without_key_is_an_error(self):
         os.makedirs(default_ssl_dir())
-        with open(os.path.join(default_ssl_dir(), "postgresql.crt"), "w") as f:
+        with open(os.path.join(default_ssl_dir(), "postgresql.crt"), "w", encoding="utf-8", newline="\n") as f:
             f.write("placeholder\n")
         with self.assertRaisesRegex(pg.OperationalError, "not private key file"):
             self.context(sslmode="require")
@@ -152,7 +152,7 @@ class DefaultClientCertificateTests(HomeDirCase):
         self.addCleanup(shutil.rmtree, crldir)
         root = os.path.join(self.home, "root.pem")
         from tests.pg.test_scram import CA_PEM
-        with open(root, "w") as f:
+        with open(root, "w", encoding="utf-8", newline="\n") as f:
             f.write(CA_PEM + "\n")
         ctx = self.context(sslmode="verify-ca", sslrootcert=root, sslcrldir=crldir)
         self.assertTrue(ctx.verify_flags & ssl.VERIFY_CRL_CHECK_CHAIN)

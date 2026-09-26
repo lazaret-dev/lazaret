@@ -37,7 +37,7 @@ class HomeDirCase(unittest.TestCase):
     def install_root_cert(self):
         path = default_root_cert()
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
             f.write(CA_PEM + "\n")
         return path
 

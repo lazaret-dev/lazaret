@@ -189,13 +189,13 @@ class DsnTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             dsn = "host=127.0.0.1 port=1 user=app password=S3cret dbname=lazaret connect_timeout=2"
             p = subprocess.run([sys.executable, _support.REGISTRY, "list", "--db", dsn],
-                               capture_output=True, text=True, cwd=d, timeout=40)
+                               capture_output=True, text=True, cwd=d, timeout=40, encoding="utf-8", errors="replace")
             self.assertNotEqual(p.returncode, 0)
             self.assertIn("Postgres backend unreachable", p.stderr)
             self.assertNotIn("S3cret", p.stderr + p.stdout)
             self.assertEqual(os.listdir(d), [])
             p = subprocess.run([sys.executable, _support.REGISTRY, "list", "--db", "db=S3cret"],
-                               capture_output=True, text=True, cwd=d, timeout=40)
+                               capture_output=True, text=True, cwd=d, timeout=40, encoding="utf-8", errors="replace")
             self.assertNotEqual(p.returncode, 0)
             self.assertNotIn("S3cret", p.stderr + p.stdout)
             self.assertEqual(os.listdir(d), [])

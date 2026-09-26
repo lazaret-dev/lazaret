@@ -329,7 +329,7 @@ class TestApplyBaselineCrashGuard(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def write(self, text):
-        with open(self.base, "w") as fh:
+        with open(self.base, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(text)
         return self.base
 
@@ -423,7 +423,7 @@ class TestCLIEndToEnd(unittest.TestCase):
     def write(self, name, content):
         path = os.path.join(self.tmp, name)
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(content)
         return path
 
@@ -505,7 +505,7 @@ class TestCLIEndToEnd(unittest.TestCase):
         outside = tempfile.mkdtemp(prefix="cg-crash-base-")
         self.addCleanup(shutil.rmtree, outside, True)
         base = os.path.join(outside, "base.json")
-        with open(base, "w") as fh:
+        with open(base, "w", encoding="utf-8", newline="\n") as fh:
             fh.write('{"generatedBy": "lazaret-cli-1", "issues": "not-a-list"}')
         p = self.run_cli("--baseline", base)
         self.assert_no_crash(p, 0)

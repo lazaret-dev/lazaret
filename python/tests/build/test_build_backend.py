@@ -46,7 +46,7 @@ class BuildTests(unittest.TestCase):
             return z.namelist()
 
     def test_pyproject_declares_no_requirements(self):
-        text = pathlib.Path(_support.PY_ROOT, "pyproject.toml").read_text()
+        text = pathlib.Path(_support.PY_ROOT, "pyproject.toml").read_text(encoding="utf-8")
         self.assertRegex(text, r"(?m)^requires = \[\]$")
         self.assertNotIn("[project]", text)  # metadata lives in the backend (see its docstring)
         self.assertEqual(self.b.REQUIRES_DIST, [])

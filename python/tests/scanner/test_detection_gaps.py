@@ -73,9 +73,9 @@ def git_dir_project():
     # under fixtures/ (same trick as M17Encoding._utf16_project).
     d = tempfile.mkdtemp(prefix="cg_gitdir_")
     os.makedirs(os.path.join(d, ".git", "objects"), exist_ok=True)
-    with open(os.path.join(d, ".git", "objects", "pack_secret.py"), "w") as f:
+    with open(os.path.join(d, ".git", "objects", "pack_secret.py"), "w", encoding="utf-8", newline="\n") as f:
         f.write('password = "committed-then-deleted-secret"\n')
-    with open(os.path.join(d, "clean.py"), "w") as f:
+    with open(os.path.join(d, "clean.py"), "w", encoding="utf-8", newline="\n") as f:
         f.write("x = 1\n")
     return d
 

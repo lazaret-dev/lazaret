@@ -255,7 +255,7 @@ class TestCLI(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="cg-taint-")
         self.js = os.path.join(self.tmp, "app.js")
-        with open(self.js, "w") as fh:
+        with open(self.js, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(APPEAL_JS)
         self.bad = {"javascript": {"sources": ["getUserInput"],
                                     "sinks": [{"pattern": "dangerous_sink",
@@ -269,7 +269,7 @@ class TestCLI(unittest.TestCase):
 
     def write_cfg(self, cfg, name=".lazaret-taint.json"):
         path = os.path.join(self.tmp, name)
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8", newline="\n") as fh:
             json.dump(cfg, fh)
         return path
 

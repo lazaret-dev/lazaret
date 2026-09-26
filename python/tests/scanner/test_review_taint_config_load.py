@@ -29,7 +29,7 @@ class Base(unittest.TestCase):
         self.out = tempfile.mkdtemp(prefix="tcl-out-")
         self.addCleanup(shutil.rmtree, self.root, True)
         self.addCleanup(shutil.rmtree, self.out, True)
-        with open(os.path.join(self.root, "a.py"), "w") as fh:
+        with open(os.path.join(self.root, "a.py"), "w", encoding="utf-8", newline="\n") as fh:
             fh.write("x = 1\n")
 
     def cfg(self, name, data):

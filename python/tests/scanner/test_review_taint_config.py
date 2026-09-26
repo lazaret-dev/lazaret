@@ -85,9 +85,9 @@ class Project(unittest.TestCase):
         self.write("view.py", VIEW_PY)
         self.write("runner.py", RUNNER_PY)
 
-    def write(self, rel, text, mode="w"):
+    def write(self, rel, text):
         path = os.path.join(self.root, rel)
-        with open(path, mode) as fh:
+        with open(path, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(text)
         return path
 
@@ -141,7 +141,7 @@ class RepoConfigTrust(Project):
 
     def test_explicit_config_is_trusted_fully(self):
         cfg = os.path.join(self.out, "cfg.json")
-        with open(cfg, "w") as fh:
+        with open(cfg, "w", encoding="utf-8", newline="\n") as fh:
             json.dump(STR_IS_SAFE, fh)
         p, rules, _ = self.scan("--taint-config", cfg)
         self.assertEqual(p.returncode, 0, p.stderr)
@@ -151,7 +151,7 @@ class RepoConfigTrust(Project):
     @unittest.skipUnless(hasattr(os, "symlink"), "no symlinks")
     def test_symlinked_repo_config_refused(self):
         target = os.path.join(self.out, "real.json")
-        with open(target, "w") as fh:
+        with open(target, "w", encoding="utf-8", newline="\n") as fh:
             json.dump({"python": {"sources": ["x"]}}, fh)
         try:
             os.symlink(target, os.path.join(self.root, ".lazaret-taint.json"))
@@ -183,7 +183,7 @@ class ConfigTypeValidationCLI(Project):
         for name, text in self.CASES.items():
             with self.subTest(case=name):
                 cfg = os.path.join(self.out, name + ".json")
-                with open(cfg, "w") as fh:
+                with open(cfg, "w", encoding="utf-8", newline="\n") as fh:
                     fh.write(text)
                 t = time.time()
                 p, _, _ = self.scan("--taint-config", cfg)
