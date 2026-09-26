@@ -1596,6 +1596,28 @@ class _ArtifactScan:
     def _find(self, candidates):
         return next((c for c in candidates if c in self.members), None)
 
+    def _resolve(self, path):
+        """The member Node loads for a path it is asked to run or require:
+        the file itself or with an extension, else — for a directory — the
+        file its own package.json's "main" names, else its index file
+        (LOAD_AS_FILE, then LOAD_AS_DIRECTORY). The "main" step was missing:
+        `main: "lib"` with lib/package.json naming core.dat ran core.dat,
+        and it was neither scanned nor counted."""
+        candidates = _node_candidates(path)
+        found = self._find(candidates[:6])                 # the file, .js, .json, ...
+        if found:
+            return found
+        manifest_rel = _rel_join(path.rstrip("/"), "package.json")
+        text = self.manifests.get(manifest_rel)
+        if text is not None:
+            data, _problems = lazaret.load_manifest(manifest_rel, text)
+            main = data.get("main") if isinstance(data, dict) else None
+            if isinstance(main, str) and main.strip():
+                found = self._find(_node_candidates(_rel_join(path.rstrip("/"), main)))
+                if found:
+                    return found
+        return self._find(candidates[6:])                  # index.js, ...
+
     def _text_of(self, rel, as_lang="js", exported=False, imported=False):
         """Text of a member that is run as code, scanning it as `as_lang`
         first when it has not been scanned (non-source extension). None when
@@ -1656,7 +1678,7 @@ class _ArtifactScan:
             if exported and "*" in target:
                 patterns.add(_rel_join(base, target))
                 continue
-            rel = self._find(_node_candidates(_rel_join(base, target)))
+            rel = self._resolve(_rel_join(base, target))
             if rel:
                 self.entries.add(rel)
                 self._text_of(rel, "js", exported)
@@ -1698,7 +1720,7 @@ class _ArtifactScan:
                 continue
             base = posixpath.dirname(issue["file"])
             for target in lazaret.hook_script_targets(issue["cmd"]):
-                rel = self._find(_node_candidates(_rel_join(base, target)))
+                rel = self._resolve(_rel_join(base, target))
                 if rel is None:
                     continue
                 self.entries.add(rel)
@@ -1771,7 +1793,7 @@ class _ArtifactScan:
                 continue
             base = posixpath.dirname(rel)
             for _q, target in _JS_LOCAL_DEP_RE.findall(text):
-                dep = self._find(_node_candidates(_rel_join(base, target)))
+                dep = self._resolve(_rel_join(base, target))
                 if dep and dep not in seen:
                     seen.add(dep)
                     self._text_of(dep, "js", imported=True)

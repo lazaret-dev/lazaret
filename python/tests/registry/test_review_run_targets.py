@@ -15,6 +15,10 @@
   exported code nothing scanned. A pattern target is expanded against the
   archive's members now (Node substitutes the subpath, which may contain
   "/", for every "*"); the exported-asset exemption applies to the matches.
+- A path that names a directory resolved only to its index file, but Node
+  first loads the file the directory's own package.json names as "main":
+  `main: "lib"` with lib/package.json -> core.dat ran core.dat, and it was
+  neither scanned nor counted.
 
 Payloads are the inert DECODE_EXEC_*/EXFIL_JS markers of _review_support.
 """
@@ -165,6 +169,35 @@ class ExportsPatternTests(unittest.TestCase):
                                                            "./y/*": {"default": "./y/*.js"}}})
         self.assertIn(("./y/*.js", True), targets)
         self.assertNotIn(("./lib/*.dat", True), targets)
+
+
+class DirectoryMainTests(unittest.TestCase):
+    def test_a_directory_main_names_the_file(self):
+        inner = manifest(main="core.dat")
+        for label, files in (
+                ("main", {"package.json": manifest(main="lib"), "lib/package.json": inner,
+                          "lib/core.dat": DECODE_EXEC_JS}),
+                ("require", {"package.json": manifest(), "index.js": "require('./lib');\n",
+                             "lib/package.json": inner, "lib/core.dat": DECODE_EXEC_JS}),
+                ("hook", {"package.json": hooks(postinstall="node lib"), "lib/package.json": inner,
+                          "lib/core.dat": EXFIL_JS})):
+            with self.subTest(label):
+                res = scan_npm(files)
+                self.assertEqual(res["verdict"], "SUSPICIOUS", res["verdictReason"])
+
+    def test_a_file_comes_before_the_directory(self):
+        # LOAD_AS_FILE first: lib.js is main, lib/core.dat is never loaded
+        res = scan_npm({"package.json": manifest(main="lib"), "lib.js": "module.exports = 1;\n",
+                        "lib/package.json": manifest(main="core.dat"), "lib/core.dat": DECODE_EXEC_JS})
+        self.assertEqual(res["verdict"], "OK", res["verdictReason"])
+
+    def test_without_a_main_the_index_file(self):
+        # the index file is still the entry point: a weaker finding in it
+        # counts although it sits in a test/ directory
+        blob = "const p = '" + "QUJD" * 150 + "';\n"
+        res = scan_npm({"package.json": manifest(main="test"), "test/package.json": manifest(),
+                        "test/index.js": blob})
+        self.assertEqual(res["verdict"], "WARN", res["verdictReason"])
 
 
 if __name__ == "__main__":
