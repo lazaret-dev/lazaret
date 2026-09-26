@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join, sep, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { run, collectFiles } from "../src/index.js";
+import { isLink } from "../src/lib/fs.js";
 
 const POSIX = process.platform !== "win32";
 const BIN = fileURLToPath(new URL("../bin/lazaret.js", import.meta.url));
@@ -131,6 +132,43 @@ test("symlinks are never followed (Q-SYMLINK); special files are never opened (Q
   } finally { cleanup(d); }
 });
 
+test("links are reported on every OS: a file symlink and a directory link (a junction on Windows)", (t) => {
+  const d = tree({ "mod.py": "x = 1\n", "sub/b.py": "y = 2\n" });
+  try {
+    try {
+      symlinkSync(join(d, "mod.py"), join(d, "link.py"), "file");
+    } catch (e) {
+      t.skip(`this OS or user cannot create symlinks (${e.code}; Windows needs Developer Mode or the privilege)`);
+      return;
+    }
+    symlinkSync(d, join(d, "sub", "loop"), "junction");   // the type is ignored outside Windows
+    const r = scan(d);
+    assert.equal(r.code, 0, r.err);
+    assert.deepEqual(r.keys, ["Q-SYMLINK link.py", `Q-SYMLINK ${P("sub", "loop")}`].sort());
+  } finally { cleanup(d); }
+});
+
+test("a link is decided by the listing's entry type too, not by lstat alone (Windows)", (t) => {
+  // On the windows-latest runners lstat reported a file symlink as a regular
+  // file; the directory listing flags every reparse point. Simulated here
+  // with the stat results that host returned.
+  const d = tree({ "mod.py": "x = 1\n", "sub/b.py": "y = 2\n" });
+  try {
+    try { symlinkSync(join(d, "mod.py"), join(d, "link.py"), "file"); } catch (e) {
+      t.skip(`this OS or user cannot create symlinks (${e.code})`);
+      return;
+    }
+    const asFile = { isSymbolicLink: () => false, isDirectory: () => false };
+    const asDir = { isSymbolicLink: () => false, isDirectory: () => true };
+    assert.equal(isLink({ link: true }, join(d, "link.py"), asFile), true);    // what that lstat said
+    assert.equal(isLink({ link: true }, join(d, "mod.py"), asFile), false);    // dedup/cloud file: no target
+    assert.equal(isLink({ link: true }, join(d, "sub"), asDir), true);         // junction, mount point
+    assert.equal(isLink({ link: false }, join(d, "link.py"), asFile), false);
+    assert.equal(isLink({ link: false }, join(d, "link.py"),
+      { isSymbolicLink: () => true, isDirectory: () => false }), true);
+  } finally { cleanup(d); }
+});
+
 test("unreadable files and directories become Q-UNREADABLE instead of a crash", { skip: !POSIX }, (t) => {
   // was: EACCES from readdirSync/readFileSync crashed the run (exit 1, no report).
   // root reads everything, so run the CLI as an unprivileged user when we are root.
@@ -194,11 +232,19 @@ test("non-source files are classified by magic bytes; the size cap applies to so
   } finally { cleanup(d); }
 });
 
-test("the walk is iterative: a very deep tree is scanned without recursion", () => {
+test("the walk is iterative: a very deep tree is scanned without recursion", (t) => {
   const d = mkdtempSync(join(tmpdir(), "lazaret-deep-"));
   try {
     const parts = Array(600).fill("d");
-    mkdirSync(join(d, ...parts), { recursive: true });
+    try {
+      mkdirSync(join(d, ...parts), { recursive: true });
+    } catch (e) {
+      // macOS caps a path at 1024 bytes (PATH_MAX); Linux allows 4096 and
+      // the Windows runners have long paths enabled
+      if (e.code !== "ENAMETOOLONG") throw e;
+      t.skip("this OS limits paths to fewer bytes than a 600-level tree needs (macOS: 1024)");
+      return;
+    }
     writeFileSync(join(d, ...parts, "x.js"), "eval(y)\n");
     const col = collectFiles(d);
     assert.equal(col.files.length, 1);

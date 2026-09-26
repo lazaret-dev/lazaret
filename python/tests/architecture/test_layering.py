@@ -50,7 +50,7 @@ class LayeringTests(unittest.TestCase):
     def test_dependencies_point_inward(self):
         violations = []
         for component, allowed in ALLOWED.items():
-            for path in sorted((PKG / component).rglob("*.py")):
+            for path in sorted((PKG / component).rglob("*.py"), key=lambda p: p.as_posix()):
                 for target, line in lazaret_imports(path):
                     if target != component and target not in allowed:
                         violations.append(f"{path.relative_to(PKG)}:{line} ({component}) imports lazaret.{target}")
@@ -60,7 +60,7 @@ class LayeringTests(unittest.TestCase):
         """pg and safexml refer to themselves relatively, so a future split
         into lazaret_pg / lazaret_safexml is a rename, not a rewrite."""
         for component in ("pg", "safexml"):
-            for path in sorted((PKG / component).rglob("*.py")):
+            for path in sorted((PKG / component).rglob("*.py"), key=lambda p: p.as_posix()):
                 with self.subTest(file=str(path.relative_to(PKG))):
                     self.assertEqual(list(lazaret_imports(path)), [])
 

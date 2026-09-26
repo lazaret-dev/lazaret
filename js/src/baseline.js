@@ -20,7 +20,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { readFileSync, realpathSync } from "node:fs";
 import { sep } from "node:path";
 import { isOurReport } from "./lib/fs.js";
-import { pyStrip, pyStr, cmpCodePoints } from "./lib/pycompat.js";
+import { pyStrip, pyStr, cmpCodePoints, MAX_JSON_DEPTH } from "./lib/pycompat.js";
 import { pyJsonParse } from "./lib/pyjson.js";
 
 export const BASELINE_KEY_ENV = "LAZARET_BASELINE_KEY";
@@ -147,7 +147,7 @@ export function applyBaseline(res, baselinePath, { root = null, warn = () => {},
   let prev;
   try {
     const r = pyJsonParse(readFileSync(baselinePath, "utf8"));
-    if (r.depth) throw new Error("maximum recursion depth exceeded while decoding a JSON object from a unicode string");
+    if (r.depth) throw new Error(`JSON nested deeper than ${MAX_JSON_DEPTH} levels`);   // core.JsonTooDeep
     if (!r.ok) throw new Error("the baseline is not valid JSON");
     prev = r.value;
   } catch (e) {

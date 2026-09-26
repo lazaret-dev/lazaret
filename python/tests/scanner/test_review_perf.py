@@ -7,7 +7,7 @@ quadratic cost was already several seconds. Before the fix these took from 1.4 s
 to 20+ s at the ORIGINAL size and grow quadratically, so at these sizes they
 would run for minutes; now each finishes in well under a second on a quiet
 machine. The bound per case is deliberately loose (CI machines are slow and
-shared); the whole file stays under ~10 s.
+shared); the whole file stays under ~10 s on a quiet machine.
 """
 import random
 import string
@@ -17,7 +17,11 @@ import unittest
 from tests import _support  # noqa: F401
 from lazaret.scanner import core
 
-PER_CASE_LIMIT = 4.0
+# Loose on purpose (cross-platform rule 7: a bound, not an expectation). The
+# fixed code takes 1-2 s per case on a busy 3.10; the smallest old quadratic
+# cost at these sizes (S-ENTROPY: 15.7 s at 20k lines, so ~24 s at 25k) is
+# still three times the bound.
+PER_CASE_LIMIT = 8.0
 
 
 def _entropy_lines(n):

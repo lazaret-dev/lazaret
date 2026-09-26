@@ -426,8 +426,8 @@ def _read_json(path, cap=20 * 1024 * 1024):
     if text is None:
         return None
     try:
-        return json.loads(text)
-    except (ValueError, RecursionError, MemoryError):
+        return lazaret.json_loads_bounded(text)
+    except (ValueError, MemoryError):   # incl. JsonTooDeep
         return None
 
 
@@ -1500,10 +1500,10 @@ class CveBundle:
     def load(cls, path):
         try:
             with open(path, "rb") as f:
-                doc = json.loads(f.read().decode("utf-8"))
-        except (OSError, ValueError, RecursionError, MemoryError) as e:
-            # RecursionError: a deeply nested bundle; ValueError also covers
-            # bad UTF-8 and the int-digit limit.
+                doc = lazaret.json_loads_bounded(f.read().decode("utf-8"))
+        except (OSError, ValueError, MemoryError) as e:
+            # ValueError covers a deeply nested bundle (JsonTooDeep), bad
+            # UTF-8 and the int-digit limit.
             raise ValueError("cannot read CVE bundle %s: %s" % (path, e)) from None
         return cls(doc)
 

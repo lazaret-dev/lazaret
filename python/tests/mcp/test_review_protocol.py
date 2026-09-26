@@ -147,8 +147,11 @@ class WorkerTests(unittest.TestCase):
         self.started = threading.Event()
 
         def slow(args):
+            # bounded by a deadline, not a count of sleeps: sleep(0.01) takes
+            # far longer than 10 ms on a loaded macOS or Windows runner
             self.started.set()
-            for _ in range(400):
+            end = time.monotonic() + args.get("seconds", 4)
+            while time.monotonic() < end:
                 server._ctx().check()
                 time.sleep(0.01)
             return {"finished": True}
@@ -158,8 +161,8 @@ class WorkerTests(unittest.TestCase):
         self.srv = server.Server()
         self.addCleanup(self.srv.close, 10)
 
-    def call(self, msg_id):
-        self.srv.handle_line(req(msg_id, "tools/call", {"name": "slow", "arguments": {}}))
+    def call(self, msg_id, seconds=4):
+        self.srv.handle_line(req(msg_id, "tools/call", {"name": "slow", "arguments": {"seconds": seconds}}))
 
     def wait_for(self, msg_id, timeout=5):
         end = time.monotonic() + timeout
@@ -188,7 +191,7 @@ class WorkerTests(unittest.TestCase):
         self.assertIsNone(self.wait_for(1, 0.1))
 
     def test_cancel_while_queued(self):
-        self.call(1)
+        self.call(1, seconds=0.5)
         self.call(2)
         self.srv.handle_line(note("notifications/cancelled", {"requestId": 2}))
         self.assertIsNotNone(self.wait_for(1, 10))
@@ -206,7 +209,7 @@ class EndToEndCancelTests(unittest.TestCase):
                 fh.write(body)
         env = dict(os.environ, LAZARET_DB=os.path.join(tree, "r.db"))
         p = subprocess.Popen([PY, _support.MCP], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                             stderr=subprocess.DEVNULL, text=True, bufsize=1, env=env)
+                             stderr=subprocess.DEVNULL, text=True, bufsize=1, env=env, encoding="utf-8", errors="replace")
         try:
             def send(line):
                 p.stdin.write(line + "\n")

@@ -55,7 +55,7 @@ class BundleCase(unittest.TestCase):
         for rel, text in files.items():
             path = os.path.join(self.repo, *rel.split("/"))
             os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, "w", newline="\n") as f:
+            with open(path, "w", newline="\n", encoding="utf-8") as f:
                 f.write(text)
 
     def plant(self, rels):
@@ -111,7 +111,7 @@ class CredentialFileTests(BundleCase):
 
     def test_symlinks_are_not_followed(self):
         target = os.path.join(self._tmp.name, "outside-secret.txt")
-        with open(target, "w") as f:
+        with open(target, "w", encoding="utf-8", newline="\n") as f:
             f.write("not part of the repo\n")
         try:
             os.symlink(target, os.path.join(self.repo, "docs", "linked.md"))

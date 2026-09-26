@@ -182,13 +182,38 @@ def _decimal(s: str) -> Decimal:
     return Decimal(s)
 
 
+# JSON nested deeper than this comes back as text. The limit is ours, not the
+# interpreter's: json.loads runs out of recursion near 1,000 levels on Python
+# 3.10/3.11, near 10,000 on 3.12/3.13 and not at all on 3.14, so the same value
+# would otherwise decode differently depending on the Python version.
+JSON_MAX_DEPTH = 500
+_JSON_STRING_RE = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"?', re.S)   # unterminated: to the end
+_NOT_BRACKET_RE = re.compile(r"[^\[\]{}]+")
+
+
+def decode_json(s: str) -> Any:
+    """json.loads, refusing (ValueError) anything nested deeper than
+    JSON_MAX_DEPTH. Brackets inside JSON strings don't count; the check is
+    linear and only runs when there are more openers than the limit."""
+    if s.count("[") + s.count("{") > JSON_MAX_DEPTH:
+        depth = 0
+        for ch in _NOT_BRACKET_RE.sub("", _JSON_STRING_RE.sub("", s)):
+            if ch in "[{":
+                depth += 1
+                if depth > JSON_MAX_DEPTH:
+                    raise ValueError(f"JSON nested deeper than {JSON_MAX_DEPTH} levels")
+            else:
+                depth -= 1
+    return json.loads(s)
+
+
 DECODERS: dict[int, Callable[[str], Any]] = {
     BOOL: lambda s: s == "t",
     BYTEA: decode_bytea,
     INT2: int, INT4: int, INT8: int, OID: int,
     FLOAT4: float, FLOAT8: float,
     NUMERIC: _decimal,
-    JSON: json.loads, JSONB: json.loads,
+    JSON: decode_json, JSONB: decode_json,
     UUID: uuid.UUID,
     DATE: decode_date,
     TIME: decode_time, TIMETZ: decode_time,
@@ -213,7 +238,7 @@ def decoder_for(oid: int, decoders: dict[int, Callable[[str], Any]]) -> Callable
         try:
             return fn(raw.decode("utf-8"))
         except Exception:
-            # Whatever goes wrong (JSON nested deeper than the recursion limit,
+            # Whatever goes wrong (JSON nested deeper than JSON_MAX_DEPTH,
             # a registered decoder that raises, bytes that are not UTF-8 after
             # a client_encoding change), the value comes back as text: an
             # exception here would abort the connection in the middle of a result.

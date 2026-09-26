@@ -52,6 +52,19 @@ class ConfigureStdioTests(unittest.TestCase):
         out = self.configure("win32", fake_stream("cp1252"), env={"PYTHONIOENCODING": "cp1252"})
         self.assertEqual(out.encoding, "cp1252")
 
+    def test_redirected_output_is_utf8_on_every_platform(self):
+        # Linux/macOS under a bare C locale (ASCII) behave like Windows' code
+        # page: redirected output is written as UTF-8 there too, so a CI log
+        # or a piped report is the same bytes on every OS.
+        for platform, encoding in (("linux", "ascii"), ("darwin", "ascii"), ("win32", "cp1252")):
+            with self.subTest(platform=platform):
+                out = self.configure(platform, fake_stream(encoding))
+                self.assertEqual(out.encoding.lower().replace("-", ""), "utf8")
+
+    def test_a_utf8_terminal_or_pipe_is_left_as_is(self):
+        out = self.configure("linux", fake_stream("utf-8"))
+        self.assertEqual(out.encoding, "utf-8")
+
     def test_unencodable_characters_never_raise_anywhere(self):
         for platform in ("linux", "darwin", "win32"):
             with self.subTest(platform=platform):

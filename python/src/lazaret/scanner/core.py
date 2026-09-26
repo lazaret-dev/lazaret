@@ -59,21 +59,25 @@ from lazaret.scanner import taintspec  # taint-config validation shared by both 
 
 
 def configure_stdio():
-    """Never crash while printing. Reports use characters such as the check
-    and cross marks; a Windows console shows them fine, but redirected output
-    (a pipe, a file, CI logs) defaults to the ANSI code page (e.g. cp1252),
-    which cannot encode them, and print() would raise UnicodeEncodeError
-    mid-report. There, write UTF-8 instead. Everywhere, replace anything a
-    stream can't encode rather than raising. An explicit PYTHONIOENCODING is
-    respected. Called at the start of every CLI entry point."""
+    """Never crash while printing, and print the same bytes on every platform.
+
+    Reports use characters such as the check and cross marks. Redirected
+    output (a pipe, a file, CI logs) otherwise takes its encoding from the
+    host: the ANSI code page on Windows (cp1252, which can't encode them —
+    print() would raise mid-report), and the locale elsewhere (ASCII under a
+    bare C locale). So redirected output is always written as UTF-8, unless
+    PYTHONIOENCODING explicitly asks for something else. A terminal keeps its
+    own encoding (the Windows console is Unicode already). Everywhere,
+    characters a stream can't encode are replaced rather than raised. Called
+    at the start of every CLI entry point."""
+    explicit = bool(os.environ.get("PYTHONIOENCODING"))
     for stream, errors in ((sys.stdout, "replace"), (sys.stderr, "backslashreplace")):
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is None:
             continue
         try:
-            redirected_on_windows = (sys.platform == "win32" and not stream.isatty()
-                                     and not os.environ.get("PYTHONIOENCODING"))
-            if redirected_on_windows:
+            encoding = (getattr(stream, "encoding", None) or "").lower().replace("_", "-")
+            if not explicit and not stream.isatty() and encoding not in ("utf-8", "utf8"):
                 reconfigure(encoding="utf-8", errors=errors)
             else:
                 reconfigure(errors=errors)
@@ -831,11 +835,10 @@ def _read_taint_config(path, from_repo):
     try:
         with open(path, "rb") as fh:
             data = fh.read(TAINT_CONFIG_MAX_BYTES + 1)
-        return json.loads(data.decode("utf-8")), None
-    except (OSError, ValueError, RecursionError, MemoryError) as exc:
-        # ValueError covers JSONDecodeError, UnicodeDecodeError and the
-        # int-digit limit. 1149e3e5: RecursionError from a deep-nested config
-        # is not a JSONDecodeError.
+        return json_loads_bounded(data.decode("utf-8")), None
+    except (OSError, ValueError, MemoryError) as exc:
+        # ValueError covers JSONDecodeError, UnicodeDecodeError, the int-digit
+        # limit and JsonTooDeep (1149e3e5: a deep-nested config).
         return None, str(exc)
 
 
@@ -2980,6 +2983,28 @@ def json_depth_exceeds(text, limit=MAX_MANIFEST_DEPTH):
     return False
 
 
+class JsonTooDeep(ValueError):
+    """A JSON document nested deeper than the limit json_loads_bounded was given."""
+
+
+def json_loads_bounded(text, limit=MAX_MANIFEST_DEPTH, **kwargs):
+    """json.loads for input that may be hostile (scanned-repo content, stored
+    results, registry responses, config files): anything nested deeper than
+    `limit` raises JsonTooDeep (a ValueError) before parsing starts. The limit
+    is ours, not the interpreter's (STRUCTURE.md rule 6): json.loads runs out of
+    recursion near 995 levels on 3.10/3.11, near 10,000 on 3.12/3.13 and, on
+    3.14, only when the C stack does (a different depth on each OS). bytes are
+    decoded the way json.loads decodes them."""
+    if isinstance(text, (bytes, bytearray)):
+        text = bytes(text).decode(json.detect_encoding(text), "surrogatepass")
+    if json_depth_exceeds(text, limit):
+        raise JsonTooDeep(f"JSON nested deeper than {limit} levels")
+    try:
+        return json.loads(text, **kwargs)
+    except RecursionError:              # backstop: the caller's stack was already deep
+        raise JsonTooDeep(f"JSON nested too deeply to parse (limit {limit} levels)") from None
+
+
 def _sc_manifest_depth_issue(path):
     """48033f94: a pathologically deep-nested manifest (e.g. 60k+ '[' bytes)
     blows json.loads' recursion limit. The old code crashed the CLI (exit 1,
@@ -3454,13 +3479,19 @@ class _NotRegularFile(OSError):
 
 
 def _fs_display(path):
-    """A path as valid UTF-8 text. Non-UTF-8 names (surrogate-escaped by
-    os.scandir on POSIX) become backslash escapes, e.g. 'bad\\xff.py'."""
+    """A path as valid UTF-8 text, the same on every host. On POSIX a name is
+    bytes; it is shown as those bytes read as UTF-8, with anything that isn't
+    UTF-8 as a backslash escape ('bad\\xff.py') — never as the host locale
+    would decode it (under a Latin-1 locale os.scandir says 'bad\u00ffy.py'
+    for the same file). Windows names are Unicode already; only unpaired
+    surrogates need escaping there."""
+    if os.name != "nt":
+        return os.fsencode(path).decode("utf-8", "backslashreplace")
     try:
         path.encode("utf-8")
         return path
     except UnicodeEncodeError:
-        return os.fsencode(path).decode("utf-8", "backslashreplace")
+        return path.encode("utf-8", "backslashreplace").decode("utf-8")
 
 
 def _safe_text(s):
@@ -3812,9 +3843,27 @@ def _check_pycache(rel_dir, path, parent_names, out):
 
 def _readlink(path):
     try:
-        return os.readlink(path)
+        target = os.readlink(path)
     except (OSError, ValueError):
         return "?"
+    return link_target_text(target) if os.name == "nt" else target
+
+
+def link_target_text(target):
+    """A Windows link target as the user wrote it. Windows stores an absolute
+    target in the NT namespace (\\??\\C:\\x), and os.readlink returns it as
+    \\\\?\\C:\\x (\\\\?\\UNC\\server\\share\\x for a share); the npm engine
+    (libuv) gives C:\\x and \\\\server\\share\\x. Same undoing as libuv, so
+    both engines name the target the same way (cross-platform rule 2)."""
+    if not isinstance(target, str) or not target.startswith("\\\\?\\"):
+        return target
+    rest = target[4:]
+    if len(rest) >= 2 and rest[0].isascii() and rest[0].isalpha() and rest[1] == ":" \
+            and (len(rest) == 2 or rest[2] == "\\"):
+        return rest                                       # \\?\C:\x -> C:\x
+    if rest[:4].upper() == "UNC\\":
+        return "\\\\" + rest[4:]                             # \\?\UNC\s\sh -> \\s\sh
+    return target
 
 
 def _collect_file(path, rel, st, in_dep, col):
@@ -4631,10 +4680,10 @@ def apply_baseline(res, baseline_path, scan_root=None):
         return
     try:
         with open(baseline_path, encoding="utf-8") as fh:
-            prev = json.load(fh)
-    except (OSError, ValueError, RecursionError, MemoryError) as exc:
-        # ValueError covers JSONDecodeError, UnicodeDecodeError and the
-        # int-digit limit. audit H1: {exc} can echo hostile baseline content
+            prev = json_loads_bounded(fh.read())
+    except (OSError, ValueError, MemoryError) as exc:
+        # ValueError covers JSONDecodeError, UnicodeDecodeError, the
+        # int-digit limit and JsonTooDeep. audit H1: {exc} can echo hostile baseline content
         # (JSONDecodeError position text); sanitize both interpolations.
         print(f"warning: could not read baseline {sanitize_term(baseline_path)}: "
               f"{sanitize_term(exc)}", file=sys.stderr)

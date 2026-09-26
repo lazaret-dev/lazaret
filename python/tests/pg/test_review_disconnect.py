@@ -5,6 +5,7 @@ the connection unexpectedly"; SQLSTATE classes 08 and 53 and 57P01-57P05 are
 OperationalErrors; keepalive settings; Connection.reconnect()."""
 
 import pickle
+import select
 import socket
 import struct
 import threading
@@ -56,6 +57,48 @@ class FatalBeforeCloseTests(unittest.TestCase):
         c = connect(FakeServer(script))
         sent.wait(5)
         with self.assertRaises(pg.OperationalError) as info:
+            c.execute("SELECT 1")
+        self.assertEqual(info.exception.sqlstate, "57P05")
+        self.assertTrue(c.closed)
+
+    def test_idle_timeout_fatal_survives_a_reset_on_send(self):
+        # Windows semantics: once the server has closed, our next send draws a
+        # reset, and the reset discards the unread receive buffer — FATAL
+        # included. The client must read what the server sent before sending.
+        connected, sent = threading.Event(), threading.Event()
+
+        def script(conn, srv):
+            ready_for_query(conn, srv)
+            connected.wait(5)                 # the client is idle, its read buffer empty
+            conn.sendall(fatal("57P05", "terminating connection due to idle-session timeout"))
+            sent.set()
+        c = connect(FakeServer(script))
+        self.assertEqual(bytes(c._rbuf), b"")
+        connected.set()
+        self.assertTrue(sent.wait(5))
+        # bounded wait until the FATAL has reached our receive buffer
+        self.assertTrue(select.select([c._sock], [], [], 5)[0], "the FATAL never arrived")
+
+        class WindowsLikeSocket:
+            """Delegates to the real socket, except that a send after the peer
+            closed resets, and a reset drops whatever was not read yet."""
+            def __init__(self, real):
+                self._real = real
+                self._reset = False
+
+            def sendall(self, data):
+                self._reset = True
+                raise ConnectionResetError(10054, "An existing connection was forcibly closed")
+
+            def recv(self, *args):
+                if self._reset:           # the reset threw the buffered FATAL away
+                    raise ConnectionResetError(10054, "An existing connection was forcibly closed")
+                return self._real.recv(*args)
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+        c._sock = WindowsLikeSocket(c._sock)
+        with self.assertRaises(pg.ServerOperationalError) as info:
             c.execute("SELECT 1")
         self.assertEqual(info.exception.sqlstate, "57P05")
         self.assertTrue(c.closed)

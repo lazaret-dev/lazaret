@@ -94,7 +94,7 @@ class ParseFailuresCostOneFile(unittest.TestCase):
         self.addCleanup(shutil.rmtree, root, True)
         for name, src in (("a.py", self.VIEW), ("b.py", RUNNER),
                           ("gen.py", "x = " + "-" * 6000 + "1\n"), ("c.py", "x = 1  # \0\n")):
-            with open(os.path.join(root, name), "w") as fh:
+            with open(os.path.join(root, name), "w", encoding="utf-8", newline="\n") as fh:
                 fh.write(src)
         p = subprocess.run([PY, _support.CLI, root, "--no-html", "--no-json"],
                            capture_output=True, encoding="utf-8", errors="replace", timeout=40)

@@ -31,7 +31,7 @@ class StubTests(unittest.TestCase):
         stubs = _support.load_script(SCRIPT, "make_typosquat_stubs")
         with tempfile.TemporaryDirectory() as d:
             out = stubs.build_js_stub("lazarat", d)
-            with open(os.path.join(out, "index.js")) as f:
+            with open(os.path.join(out, "index.js"), encoding="utf-8") as f:
                 self.assertIn("throw new Error", f.read())
 
     def test_rejects_odd_names(self):

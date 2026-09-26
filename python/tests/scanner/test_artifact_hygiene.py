@@ -40,10 +40,15 @@ SECRET_SRC = ("import os\n"
               "aws_key = \"AKIAIOSFODNN7EXAMPLE\"\n")
 
 
+def _read(path):
+    with open(path, encoding="utf-8") as fh:
+        return fh.read()
+
+
 def write_project(tmp, name="proj"):
     root = os.path.join(tmp, name)
     os.makedirs(root, exist_ok=True)
-    with open(os.path.join(root, "secrets.py"), "w") as fh:
+    with open(os.path.join(root, "secrets.py"), "w", encoding="utf-8", newline="\n") as fh:
         fh.write(SECRET_SRC)
     return root
 
@@ -116,13 +121,13 @@ class TestSecretRedaction(unittest.TestCase):
                      os.path.join(out, "r.json"), "--sarif",
                      os.path.join(out, "r.sarif")])
         self.assertEqual(p.returncode, 1, p.stderr[:400])  # gate fails: secrets
-        jtxt = open(os.path.join(out, "r.json")).read()
+        jtxt = _read(os.path.join(out, "r.json"))
         self.assertNotIn("hunter2secr3t", jtxt)
         self.assertNotIn("AKIAIOSFODNN7EXAMPLE", jtxt)
         self.assertIn("[redacted: secret rule", jtxt)
         p2 = run_cli([self.root, "--no-json", "--html",
                       os.path.join(out, "r.html")])
-        html = open(os.path.join(out, "r.html")).read()
+        html = _read(os.path.join(out, "r.html"))
         self.assertNotIn("hunter2secr3t", html)
         self.assertNotIn("AKIAIOSFODNN7EXAMPLE", html)
 
@@ -131,7 +136,7 @@ class TestSecretRedaction(unittest.TestCase):
         os.makedirs(out)
         p = run_cli([self.root, "--no-redact-secrets", "--no-html", "--json",
                      os.path.join(out, "r.json")])
-        jtxt = open(os.path.join(out, "r.json")).read()
+        jtxt = _read(os.path.join(out, "r.json"))
         self.assertIn("hunter2secr3t", jtxt)
 
     def test_baseline_fingerprint_stable_across_scans(self):
@@ -169,10 +174,10 @@ class TestBaselineTrust(unittest.TestCase):
 
     def test_forged_baseline_is_untrusted(self):
         base = self.scan_json("engine.json")
-        data = json.load(open(base))
+        data = json.loads(_read(base))
         # attacker forges the same shape WITHOUT the engine marker
         forged = os.path.join(self.tmp, "forged.json")
-        with open(forged, "w") as fh:
+        with open(forged, "w", encoding="utf-8", newline="\n") as fh:
             json.dump({"issues": data["issues"]}, fh)
         os.utime(forged, (1, 1))
         res = {"issues": [dict(data["issues"][0])]}
@@ -183,7 +188,7 @@ class TestBaselineTrust(unittest.TestCase):
 
     def test_engine_baseline_is_trusted(self):
         base = self.scan_json("engine.json")
-        res = {"issues": [dict(i) for i in json.load(open(base))["issues"]]}
+        res = {"issues": [dict(i) for i in json.loads(_read(base))["issues"]]}
         lazaret.apply_baseline(res, base)
         self.assertNotIn("baselineUntrusted", res)
         self.assertEqual(res["newIssues"], 0)
@@ -219,6 +224,12 @@ class TestStoreHygiene(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
+    def store(self):
+        """A Store closed at cleanup, before tearDown removes its directory."""
+        s = lazaret_repo.Store(self.db)
+        self.addCleanup(s.close)
+        return s
+
     def RESULT(self):
         return {"version": "1.0.0", "profile": "supply-chain",
                 "scannedAt": "2026-01-01T00:00:00", "filesScanned": 1,
@@ -227,20 +238,20 @@ class TestStoreHygiene(unittest.TestCase):
                 "supplyChain": 1, "issues": [], "verdict": "SUSPICIOUS"}
 
     def test_wal_and_busy_timeout(self):
-        s = lazaret_repo.Store(self.db)
+        s = self.store()
         self.assertEqual(
             s.conn.execute("PRAGMA journal_mode").fetchone()[0].lower(), "wal")
         self.assertEqual(
             s.conn.execute("PRAGMA busy_timeout").fetchone()[0], 30000)
 
     def test_concurrent_add_package_no_unique_error(self):
-        lazaret_repo.Store(self.db).add_package("npm", "warm")  # schema init
+        self.store().add_package("npm", "warm")  # schema init
         results, errors = [], []
 
         def worker():
             try:
-                st = lazaret_repo.Store(self.db)
-                results.append(st.add_package("npm", "same-pkg"))
+                with lazaret_repo.Store(self.db) as st:
+                    results.append(st.add_package("npm", "same-pkg"))
             except Exception as exc:              # pragma: no cover
                 errors.append(f"{type(exc).__name__}: {exc}")
 
@@ -253,7 +264,7 @@ class TestStoreHygiene(unittest.TestCase):
         self.assertEqual(len({r[0] for r in results}), 1)  # one id, not six
 
     def test_save_scan_is_atomic_upsert(self):
-        s = lazaret_repo.Store(self.db)
+        s = self.store()
         pid, _ = s.add_package("npm", "pkg")
         s.save_scan(pid, self.RESULT())
         s.save_scan(pid, self.RESULT())          # crash-window regression:
@@ -354,7 +365,7 @@ class TestBundleHygiene(unittest.TestCase):
         self.assertNotIn("S-TOKEN", scan.stdout)
 
     def test_mcp_config_uses_absolute_db_path(self):
-        cfg = json.load(open(os.path.join(_support.EXAMPLES, "mcp-config.json")))
+        cfg = json.loads(_read(os.path.join(_support.EXAMPLES, "mcp-config.json")))
         env = cfg["mcpServers"]["lazaret"]["env"]
         self.assertEqual(env["LAZARET_DB"],
                          "/ABSOLUTE/PATH/TO/lazaret-registry.db")

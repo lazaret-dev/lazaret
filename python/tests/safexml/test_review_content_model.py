@@ -84,7 +84,7 @@ class ContentModelTests(unittest.TestCase):
         for api in APIS:
             with self.subTest(api=api):
                 proc = subprocess.run([sys.executable, "-c", CHILD, api, str(DEPTH)],
-                                      capture_output=True, text=True, timeout=30)
+                                      capture_output=True, text=True, timeout=30, encoding="utf-8", errors="replace")
                 self.assertEqual(proc.returncode, 0, f"exit {proc.returncode}: {proc.stderr[-400:]}")
                 self.assertEqual(proc.stdout.strip(), "parsed", proc.stderr[-400:])
 

@@ -421,11 +421,11 @@ class Cli(Tmp):
         self.addCleanup(shutil.rmtree, base, True)
         victim = os.path.join(base, "victim_home", ".bashrc")
         os.makedirs(os.path.dirname(victim))
-        with open(victim, "w") as fh:
+        with open(victim, "w", encoding="utf-8", newline="\n") as fh:
             fh.write("# inert victim file\n")
         repo = os.path.join(base, "repo")
         os.makedirs(repo)
-        with open(os.path.join(repo, "requirements.txt"), "w") as fh:
+        with open(os.path.join(repo, "requirements.txt"), "w", encoding="utf-8", newline="\n") as fh:
             fh.write("requests==2.31.0\n")
         try:
             os.symlink("../victim_home/.bashrc", os.path.join(repo, "lazaret-sca.json"))
@@ -434,7 +434,7 @@ class Cli(Tmp):
         rc, _, err = self.main(repo, "--bundle", self.bundle_file())
         self.assertEqual(rc, 3)
         self.assertIn("symlink", err)
-        with open(victim) as fh:
+        with open(victim, encoding="utf-8") as fh:
             self.assertEqual(fh.read(), "# inert victim file\n")
         rc, _, _ = self.main(repo, "--bundle", self.bundle_file(), "--force-overwrite")
         self.assertEqual(rc, 3)                       # --force-overwrite never follows links
@@ -446,7 +446,7 @@ class Cli(Tmp):
         path = os.path.join(root, sca.SCA_REPORT_NAME)
         self.assertTrue(reports.is_our_report(path, "json"))
         self.assertEqual(self.main(root, "--bundle", self.bundle_file(), "-q")[0], 0)   # re-scan
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8", newline="\n") as fh:
             fh.write('{"not": "ours"}')
         rc, _, err = self.main(root, "--bundle", self.bundle_file(), "-q")
         self.assertEqual(rc, 3)
@@ -460,7 +460,7 @@ class Cli(Tmp):
         self.assertEqual(rc, 0, err)
         for name, kind in ((sca.SCA_REPORT_NAME, "json"), ("r.html", "html"), ("r.sarif", "sarif")):
             self.assertTrue(reports.is_our_report(os.path.join(out, name), kind), name)
-        with open(os.path.join(out, "r.sarif")) as fh:
+        with open(os.path.join(out, "r.sarif"), encoding="utf-8") as fh:
             sarif = json.load(fh)
         self.assertEqual(sarif["runs"][0]["results"][0]["ruleId"], "SCA-CVE")
         self.assertFalse(os.path.exists(os.path.join(root, sca.SCA_REPORT_NAME)))
@@ -474,7 +474,7 @@ class Cli(Tmp):
         rc, stdout, err = self.main(root, "--bundle", self.bundle_file(), "--no-json", "--baseline", base)
         self.assertIn("New issues vs baseline: 0", stdout)
         forged = os.path.join(root, "forged.json")
-        with open(forged, "w") as fh:
+        with open(forged, "w", encoding="utf-8", newline="\n") as fh:
             fh.write('{"generatedBy": "lazaret-cli-1", "issues": []}')
         rc, stdout, err = self.main(root, "--bundle", self.bundle_file(), "--no-json", "--baseline", forged)
         self.assertIn("New issues vs baseline: 1", stdout)

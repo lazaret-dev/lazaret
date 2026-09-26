@@ -106,6 +106,12 @@ def parse(file: Any, parser: Any = None, bufsize: int | None = None, *, namespac
                 return builder.parseFile(fp)
         return builder.parseFile(file)
     _check_namespaces(namespaces)
+    if isinstance(file, (str, bytes, os.PathLike)):
+        # opened (and closed) here: pulldom would leave a file it opens open
+        # until garbage collection, so after a parse error a traceback kept
+        # the file open, and Windows can't delete an open file
+        with open(file, "rb") as fp:
+            return _pulldom_document(_pulldom.parse(fp, parser, bufsize, **options))
     return _pulldom_document(_pulldom.parse(file, parser, bufsize, **options))
 
 

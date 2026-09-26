@@ -62,7 +62,26 @@ def with_hashes(html):
     return html[:m.start(2)] + "; ".join(directives) + html[m.end(2):]
 
 
+
+def _configure_stdio():
+    """Same policy as lazaret.scanner.core.configure_stdio (STRUCTURE.md,
+    "Cross-platform rules"): redirected output is UTF-8 on every platform
+    unless PYTHONIOENCODING says otherwise; nothing ever raises on a
+    character the stream can't encode."""
+    explicit = bool(os.environ.get("PYTHONIOENCODING"))
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            encoding = (getattr(stream, "encoding", None) or "").lower().replace("_", "-")
+            if not explicit and not stream.isatty() and encoding not in ("utf-8", "utf8"):
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            else:
+                stream.reconfigure(errors="replace")
+        except (AttributeError, OSError, ValueError):
+            pass
+
+
 def main(argv=None):
+    _configure_stdio()
     args = sys.argv[1:] if argv is None else list(argv)
     check = "--check" in args
     paths = [a for a in args if a != "--check"] or [DASHBOARD]

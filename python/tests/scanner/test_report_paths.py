@@ -175,7 +175,7 @@ class TestValidatePaths(unittest.TestCase):
 
     def test_existing_empty_file_is_refused(self):
         p = self._path("lazaret-report.json")
-        open(p, "w").close()
+        open(p, "w", encoding="utf-8", newline="\n").close()
         with self.assertRaises(cr.ReportPathError):
             cr.validate_report_paths({"json": p})
 
@@ -189,7 +189,7 @@ class TestValidatePaths(unittest.TestCase):
 
     def test_symlink_destination_refused(self):
         real = self._path("real.json")
-        with open(real, "w") as fh:
+        with open(real, "w", encoding="utf-8", newline="\n") as fh:
             fh.write("data")
         p = self._path("link.json")
         self._symlink(real, p)
@@ -210,14 +210,14 @@ class TestValidatePaths(unittest.TestCase):
         dirlink = os.path.join(self.tmp, "dirlink")
         self._symlink(realdir, dirlink, target_is_directory=True)
         dest = os.path.join(dirlink, "lazaret-report.json")
-        with open(os.path.join(realdir, "lazaret-report.json"), "w") as fh:
+        with open(os.path.join(realdir, "lazaret-report.json"), "w", encoding="utf-8", newline="\n") as fh:
             fh.write("old")
         with self.assertRaises(cr.ReportPathError):
             cr.write_report(dest, lambda: "NEW", kind="json")
 
     def test_force_overwrite_allows_unrelated_file(self):
         p = self._path("lazaret-report.json")
-        with open(p, "w") as fh:
+        with open(p, "w", encoding="utf-8", newline="\n") as fh:
             fh.write("precious data")
         cr.validate_report_paths({"json": p}, strict=True)
         cr.write_report(p, lambda: cr.json_renderer({"pass": True}),
@@ -227,7 +227,7 @@ class TestValidatePaths(unittest.TestCase):
 
     def test_force_overwrite_still_refuses_symlink(self):
         real = self._path("real.json")
-        with open(real, "w") as fh:
+        with open(real, "w", encoding="utf-8", newline="\n") as fh:
             fh.write("data")
         p = self._path("link.json")
         self._symlink(real, p)
@@ -255,7 +255,7 @@ class TestValidatePaths(unittest.TestCase):
 
     def test_html_file_without_marker_refused(self):
         p = self._path("lazaret-report.html")
-        with open(p, "w") as fh:
+        with open(p, "w", encoding="utf-8", newline="\n") as fh:
             fh.write("<html><body>not a lazaret file</body></html>")
         with self.assertRaises(cr.ReportPathError):
             cr.validate_report_paths({"html": p})
@@ -263,7 +263,7 @@ class TestValidatePaths(unittest.TestCase):
     def test_marker_position_is_checked_not_just_presence(self):
         # JSON without our exact marker is not ours.
         p = self._path("lazaret-report.json")
-        with open(p, "w") as fh:
+        with open(p, "w", encoding="utf-8", newline="\n") as fh:
             json.dump({"generatedBy": "something-else"}, fh)
         with self.assertRaises(cr.ReportPathError):
             cr.validate_report_paths({"json": p})
@@ -274,7 +274,7 @@ class TestValidatePaths(unittest.TestCase):
                         kind="sarif")
         cr.validate_report_paths({"sarif": p})     # no error
         # A SARIF-shaped JSON without our property-bag marker is refused.
-        with open(p, "w") as fh:
+        with open(p, "w", encoding="utf-8", newline="\n") as fh:
             json.dump({"$schema": "x", "version": "2.1.0", "runs": []}, fh)
         with self.assertRaises(cr.ReportPathError):
             cr.validate_report_paths({"sarif": p})
@@ -313,14 +313,14 @@ class TestWriteReport(unittest.TestCase):
 
     def test_no_temp_files_on_clobber_refusal(self):
         p = self._path("lazaret-report.json")
-        with open(p, "w") as fh:
+        with open(p, "w", encoding="utf-8", newline="\n") as fh:
             fh.write("precious")
         with self.assertRaises(cr.ReportPathError):
             cr.write_report(p, lambda: "NEW", kind="json")
         leftovers = [f for f in os.listdir(self.tmp)
                      if f.startswith(".lazaret")]
         self.assertEqual(leftovers, [])
-        with open(p) as fh:
+        with open(p, encoding="utf-8") as fh:
             self.assertEqual(fh.read(), "precious")
 
     def test_partial_write_on_crash_leaves_no_target(self):
@@ -340,11 +340,11 @@ class TestWriteReport(unittest.TestCase):
         # TOCTOU: file appears AFTER validation — write refuses.
         p = self._path("lazaret-report.json")
         cr.validate_report_paths({"json": p})
-        with open(p, "w") as fh:                     # the "race"
+        with open(p, "w", encoding="utf-8", newline="\n") as fh:                     # the "race"
             fh.write("precious")
         with self.assertRaises(cr.ReportPathError):
             cr.write_report(p, lambda: "NEW", kind="json")
-        with open(p) as fh:
+        with open(p, encoding="utf-8") as fh:
             self.assertEqual(fh.read(), "precious")
 
 

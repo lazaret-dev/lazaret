@@ -230,8 +230,12 @@ class EngineParityTests(unittest.TestCase):
         py_only = [i for i in py_rep["issues"] if _python_only(i, fixture)]
         js_c = collections.Counter(issue_key(i) for i in js_rep["issues"])
         py_c = collections.Counter(issue_key(i) for i in py_rep["issues"] if not _python_only(i, fixture))
-        self.assertEqual(sorted((js_c - py_c).elements()), [], f"{label}: findings only the JS engine reports")
-        self.assertEqual(sorted((py_c - js_c).elements()), [], f"{label}: findings only the Python engine reports")
+        # both sides in one assertion: a finding the engines word differently
+        # shows up once on each side, and the failure should show both
+        self.assertEqual({"only the JS engine reports": sorted((js_c - py_c).elements()),
+                          "only the Python engine reports": sorted((py_c - js_c).elements())},
+                         {"only the JS engine reports": [], "only the Python engine reports": []},
+                         f"{label}: the engines disagree")
         self.assertEqual(js_rep["metrics"], py_rep["metrics"], f"{label}: metrics")
         if not py_only:        # otherwise the Python-only findings legitimately move these
             for field in DERIVED:

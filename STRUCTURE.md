@@ -31,12 +31,13 @@ lazaret/
 ├── examples/           lazaret-taint.example.json, mcp-config.json
 ├── .gitattributes      LF line endings everywhere (reproducible builds on Windows too)
 ├── scripts/            check-versions.sh, tag-release.sh, make_bundle.py,
-│                       make_typosquat_stubs.py, dashboard_csp.py
+│                       make_typosquat_stubs.py, dashboard_csp.py,
+│                       simulate-platforms.sh
 ├── python/             the PyPI package   (sections 3–4)
 └── js/                 the npm package    (section 5)
 ```
 
-`scripts/check-versions.sh [REF [TAG]]` fails if the Python and npm versions, or a release tag, disagree, so the two packages release in lockstep. Given a ref it reads both version files from that commit (`git show`), so it checks what a tag actually points at; with no ref it reads the working tree and refuses uncommitted changes to either version file. `scripts/tag-release.sh vX.Y.Z` is the only way to cut a tag: it refuses a dirty tree or a commit that isn't on `main`, runs the version check against the tag-to-be, creates an annotated tag, and prints the one-tag push command (see `docs/RELEASING.md`). `scripts/make_bundle.py` builds a source bundle of the repository (for sharing the repo itself, not for installing): only git-tracked files when `.git` exists, never credential files (`.env*`, `.npmrc`, `.pypirc`, `.netrc`, keys, …) or OS junk (`._*`, `.DS_Store`), and byte-for-byte reproducible. Use it (or `git archive`) rather than a plain `tar` of a working tree. `scripts/make_typosquat_stubs.py` builds the defensive stub packages described in `docs/RELEASING.md`; `--check` reports which stub names are still unclaimed. `scripts/dashboard_csp.py` recomputes the dashboard's script hash in its content-security policy (run it after editing the page's script).
+`scripts/check-versions.sh [REF [TAG]]` fails if the Python and npm versions, or a release tag, disagree, so the two packages release in lockstep. Given a ref it reads both version files from that commit (`git show`), so it checks what a tag actually points at; with no ref it reads the working tree and refuses uncommitted changes to either version file. `scripts/tag-release.sh vX.Y.Z` is the only way to cut a tag: it refuses a dirty tree or a commit that isn't on `main`, runs the version check against the tag-to-be, creates an annotated tag, and prints the one-tag push command (see `docs/RELEASING.md`). `scripts/make_bundle.py` builds a source bundle of the repository (for sharing the repo itself, not for installing): only git-tracked files when `.git` exists, never credential files (`.env*`, `.npmrc`, `.pypirc`, `.netrc`, keys, …) or OS junk (`._*`, `.DS_Store`), and byte-for-byte reproducible. Use it (or `git archive`) rather than a plain `tar` of a working tree. `scripts/make_typosquat_stubs.py` builds the defensive stub packages described in `docs/RELEASING.md`; `--check` reports which stub names are still unclaimed. `scripts/dashboard_csp.py` recomputes the dashboard's script hash in its content-security policy (run it after editing the page's script). `scripts/simulate-platforms.sh` runs the Python suite the ways Windows, macOS and a non-root CI runner would see it (section 4, "Cross-platform rules").
 
 ---
 
@@ -160,6 +161,34 @@ LAZARET_SAMPLES_DIR=../../lazaret-samples \
 ```
 
 pytest also runs the suite unchanged, for anyone who prefers it, but nothing requires it.
+
+### Cross-platform rules
+
+**Don't depend on the host's defaults.** Code and tests must behave the same on Linux, macOS and Windows, on every supported Python (and Node) version. Never rely on a platform or interpreter default for correctness; make it explicit.
+
+1. **Encoding.** Never assume stdio or file I/O is UTF-8.
+   - Every CLI (the four console scripts and every `scripts/*.py` with a `main()`) configures stdout/stderr at startup: redirected output is written as UTF-8 on every platform (Windows' ANSI code page and a bare C locale would otherwise break on `✓`), unless `PYTHONIOENCODING` says otherwise; nothing raises on a character a stream can't encode (`errors="replace"`).
+   - Protocols defined as UTF-8 set it explicitly: the MCP server reconfigures stdin/stdout to UTF-8.
+   - Text I/O names its encoding: `open(..., encoding="utf-8")` (plus `newline="\n"` when writing files whose bytes matter), `Path.read_text/write_text(encoding=...)`.
+   - Tests decode subprocess output explicitly: `encoding="utf-8", errors="replace"`, never a bare `text=True`.
+   - File names shown in output are the name's bytes read as UTF-8 (non-UTF-8 bytes as `\xNN` escapes), never whatever the host locale makes of them.
+2. **Paths.**
+   - Compare resolved paths (`os.path.realpath` on both sides): temp dirs may be symlinks (macOS `/var` → `/private/var`).
+   - Build paths with `os.path`/`pathlib`; never hard-code `/tmp/...` or treat `/` as the root; use `tempfile`. Compare relative paths separator-independently.
+   - Expect Windows-specific forms (`\\?\` prefixes, drive letters, another drive than the repo's for the temp dir, 8.3 short names like `RUNNER~1`). `os.readlink` returns an absolute target as `\\?\C:\...` where Node gives `C:\...`; both engines show `C:\...` (`core.link_target_text`, the same undoing as libuv).
+   - Sort path *strings* (`key=lambda p: p.as_posix()`), not `Path` objects: Windows compares `Path`s case-insensitively, so `ElementTree.py` sorts after `__init__.py` there and before it everywhere else.
+   - Paths can be longer than one OS allows: macOS caps a path at 1024 bytes (`ENAMETOOLONG`), so a test that needs a very deep tree skips there (rule 5).
+   - A `file:` URI keeps the drive as-is (`file:///C:/...`) and turns a UNC share into the host (`file://server/share/...`), as `pathlib`'s `as_uri()` does; the npm engine's SARIF writer does the same. Compare URIs by the path they name (`fileURLToPath`), not by text: Node's `pathToFileURL` writes `~` as `%7E` on Windows.
+3. **Resources.** Close every file, archive, socket and DB connection before deleting what contains it (`with`, or close in `finally`/`addCleanup`). Windows can't delete an open file. `registry.Store` is a context manager; the MCP tools and the registry CLI close theirs on every path (`tests/registry/test_review_store_close.py`).
+   - Sockets: on Windows a connection reset discards data that arrived but was not read yet, so a server's last message (PostgreSQL's FATAL before it disconnects) must be read before the next send fails. The pg driver drains whatever is readable before each send.
+4. **Line endings.** Treat `\r\n` as a line ending, not as data, when checking output (Windows' text-mode stdout writes `\r\n`). `.gitattributes` keeps checkouts LF.
+5. **OS capabilities.** A test that needs something a platform lacks (FIFOs, symlinks without privilege, control characters or non-UTF-8 bytes in file names, chmod-restricted dirs, a non-root user, paths longer than 1024 bytes) skips with an explicit reason (`_support.require_fs_names()` for non-ASCII names). It never fails and never silently passes. OS APIs can also disagree with each other: on the Windows runners Node's `lstat` reported a file symlink as a regular file, so the npm walker also trusts the directory listing's entry type (every reparse point), as the Python walker trusts `st_file_attributes`. Windows also caps a command line at 32,767 characters (WinError 206): large input to a child process goes through stdin or a file.
+6. **Interpreter drift.** Correctness must not depend on version-specific behavior (recursion/parser limits, error-message wording, `os.path` semantics). Enforce our own limits explicitly; assert on types and codes, not on the interpreter's message text. JSON is the standing example: `json.loads` runs out of recursion near 995 levels on 3.10/3.11, near 10,000 on 3.12/3.13 and, on 3.14, only when the C stack does (a different depth per OS). So every JSON document a hostile input could shape is depth-checked before it is parsed: manifests by `load_manifest` (SC-MANIFEST-DEPTH), taint configs, baselines, CVE bundles, lockfiles, stored scan results and registry responses by `core.json_loads_bounded()`, which refuses anything deeper than 500 levels with `JsonTooDeep` (a `ValueError`); the MCP server bounds frames at 512, and the pg driver returns JSON deeper than `JSON_MAX_DEPTH` (500) as text.
+7. **Time.** Tests wait on events or on `time.monotonic()` deadlines, never on a count of sleeps: `sleep(0.01)` takes far longer than 10 ms on a loaded macOS or Windows runner. Timeouts are generous upper bounds, not expectations.
+
+`tests/architecture/test_portability.py` enforces what a machine can check: text I/O and subprocess decoding name an encoding, nothing asks the host for its encoding, every CLI configures stdio, the MCP server sets UTF-8, no hard-coded `/tmp`/`/var` paths, no `sorted()` of `glob`/`rglob`/`iterdir` results without a `key=`.
+
+**Verification:** work isn't done until the full OS × Python-version matrix passes in CI. Before pushing, simulate what you can on Linux or macOS with `sh scripts/simulate-platforms.sh`: for every installed `python3.X` it runs the suite under a non-UTF-8 locale (Latin-1 if installed — `localedef -i en_US -f ISO-8859-1 en_US.ISO-8859-1` — else ASCII, standing in for Windows' code page), with `TMPDIR` behind a symlink (macOS), and, when run as root, as an unprivileged user (CI runners aren't root). A run that prints a `ResourceWarning` (something left open, rule 3) counts as failed.
 
 ---
 

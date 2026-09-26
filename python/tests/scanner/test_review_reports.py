@@ -72,6 +72,7 @@ def validate_sarif(test, log):
 
 
 def make_tree(files):
+    _support.require_fs_names(*files)
     root = tempfile.mkdtemp(prefix="lz-review-rep-")
     for rel, data in files.items():
         path = os.path.join(root, rel)

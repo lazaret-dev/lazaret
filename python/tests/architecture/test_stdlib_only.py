@@ -29,7 +29,7 @@ class StdlibOnlyTests(unittest.TestCase):
         offenders = [
             f"{path}:{line} imports {name}"
             for root in ROOTS
-            for path in sorted(root.rglob("*.py"))
+            for path in sorted(root.rglob("*.py"), key=lambda p: p.as_posix())
             for name, line in imported_modules(path)
             if name not in sys.stdlib_module_names and name not in FIRST_PARTY
         ]
@@ -40,7 +40,7 @@ class StdlibOnlyTests(unittest.TestCase):
         import tempfile
         with tempfile.TemporaryDirectory() as d:
             bad = pathlib.Path(d) / "bad.py"
-            bad.write_text("import requests\nfrom yaml import safe_load\n")
+            bad.write_text("import requests\nfrom yaml import safe_load\n", encoding="utf-8", newline="\n")
             names = {name for name, _ in imported_modules(bad)}
         self.assertEqual({n for n in names if n not in sys.stdlib_module_names}, {"requests", "yaml"})
 

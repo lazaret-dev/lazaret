@@ -60,7 +60,7 @@ def _node_tar():
         return None, None
     out = subprocess.run([node, "-e", "console.log(require.resolve('npm/package.json'))"],
                          capture_output=True, text=True, env=dict(os.environ, NODE_PATH=os.path.join(
-                             os.path.dirname(os.path.dirname(os.path.realpath(node))), "lib", "node_modules")))
+                             os.path.dirname(os.path.dirname(os.path.realpath(node))), "lib", "node_modules")), encoding="utf-8", errors="replace")
     if out.returncode != 0:
         return node, None
     tar = os.path.join(os.path.dirname(out.stdout.strip()), "node_modules", "tar")
@@ -129,7 +129,7 @@ class TarStructureTests(unittest.TestCase):
                 out = os.path.join(d, "out")
                 os.mkdir(out)
                 got = subprocess.run([node, "-e", script, tar, path, out], capture_output=True,
-                                     text=True, timeout=30)
+                                     text=True, timeout=30, encoding="utf-8", errors="replace")
                 extracted = set(got.stdout.strip().split(","))
                 seen = {m[0] for m in repo.iter_archive(data, "tgz", "npm") if m[3] is None}
                 self.assertTrue(extracted <= seen, (extracted, seen))

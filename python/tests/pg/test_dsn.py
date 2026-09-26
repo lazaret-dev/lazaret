@@ -64,7 +64,7 @@ class DsnTests(unittest.TestCase):
     def _pgpass(self, content, mode=0o600):
         d = tempfile.mkdtemp(); self.addCleanup(__import__("shutil").rmtree, d)
         path = os.path.join(d, "pgpass")
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
             f.write(content)
         os.chmod(path, mode)
         return path

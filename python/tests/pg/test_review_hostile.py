@@ -105,7 +105,7 @@ class TlsSetupErrorTests(unittest.TestCase):
         d = tempfile.mkdtemp()
         self.addCleanup(__import__("shutil").rmtree, d)
         garbage = os.path.join(d, "garbage.pem")
-        with open(garbage, "w") as f:
+        with open(garbage, "w", encoding="utf-8", newline="\n") as f:
             f.write("not a certificate\n")
         missing = os.path.join(d, "missing.crt")
         cases = [

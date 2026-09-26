@@ -81,7 +81,7 @@ class DefaultsTests(unittest.TestCase):
         out = subprocess.run(
             [sys.executable, "-c", "from lazaret.registry import repo; "
                                    "print(repo.MAX_PACKAGE_DOWNLOAD_BYTES)"],
-            capture_output=True, text=True, env=env, timeout=60)
+            capture_output=True, text=True, env=env, timeout=60, encoding="utf-8", errors="replace")
         self.assertEqual(out.stdout.strip(), "12345", out.stderr)
 
 

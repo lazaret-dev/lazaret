@@ -137,6 +137,12 @@ class ModuleTests(unittest.TestCase):
 
 
 class ParseFunctionTests(unittest.TestCase):
+    def _stdlib_minidom(self, bufsize):
+        # xml.dom.minidom leaves a file it opens itself open (pulldom);
+        # give it an open file instead
+        with open(self.path, "rb") as fh:
+            return xml.dom.minidom.parse(fh, None, bufsize)
+
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.path = os.path.join(self.tmp, "bom.xml")
@@ -201,7 +207,7 @@ class ParseFunctionTests(unittest.TestCase):
         self.assertEqual(minidom.parse(self.path, None).toxml(), expected)
         for ours, theirs in (
                 (minidom.parseString(text, sax.make_parser()), xml.dom.minidom.parseString(text, xml.sax.make_parser())),
-                (minidom.parse(self.path, None, 64), xml.dom.minidom.parse(self.path, None, 64)),
+                (minidom.parse(self.path, None, 64), self._stdlib_minidom(64)),
                 (minidom.parse(io.BytesIO(DOC), sax.make_parser()),
                  xml.dom.minidom.parse(io.BytesIO(DOC), xml.sax.make_parser()))):
             self.assertEqual(ours.toxml(), theirs.toxml())
