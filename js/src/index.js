@@ -22,5 +22,6 @@ export {
   ReportPathError, EXIT_OUTPUT,
 } from "./lib/fs.js";
 export { classifyBinary } from "./lib/binary.js";
+export { pthIssues } from "./lib/pth.js";
 export { applyBaseline, baselineSignature, fingerprint } from "./baseline.js";
 export { run, parseArgs, EXIT_USAGE, EXIT_INTERNAL } from "./cli.js";

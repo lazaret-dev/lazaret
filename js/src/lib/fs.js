@@ -14,6 +14,7 @@ import { randomBytes } from "node:crypto";
 import { decodeSource, fsNameToString } from "./encoding.js";
 import { classifyBinary, HEADER_SAMPLE, PYC_HEADER, pycIssues, pycModule } from "./binary.js";
 import { mkIssue, fileIssue } from "./issue.js";
+import { pthIssues } from "./pth.js";
 
 export const EXTS = {
   ".py": "py", ".js": "js", ".jsx": "js", ".ts": "js", ".tsx": "js",
@@ -202,15 +203,16 @@ function treeStats(dirBuf) {
 
 /**
  * Collect the files to scan under `root` (twin of core._collect).
- * Returns { files, manifests, binaryIssues, skippedIssues } — files:
+ * Returns { files, manifests, pth, binaryIssues, skippedIssues } — files:
  * [{path, content, lang, dep}], manifests: package.json/binding.gyp entries
- * [{kind, path, content, dep}], binaryIssues: collection findings (binary
- * classification, SC-TRUNCATED, Q-ENCODING/SC-UTF7, SC-PYC-*, Q-SYMLINK,
- * Q-UNREADABLE, Q-SCAN-ERROR), skippedIssues: Q-SKIPPED-TREE per pruned tree.
+ * [{kind, path, content, dep}], pth: paths of the .pth files checked,
+ * binaryIssues: collection findings (binary classification, SC-TRUNCATED,
+ * Q-ENCODING/SC-UTF7, SC-PYC-*, SC-PTH-EXEC, Q-SYMLINK, Q-UNREADABLE,
+ * Q-SCAN-ERROR), skippedIssues: Q-SKIPPED-TREE per pruned tree.
  * Throws ScanTargetError when the root itself cannot be listed.
  */
 export function collectFiles(root, { includeDeps = false, exclude = [] } = {}) {
-  const col = { files: [], manifests: [], binaryIssues: [], skippedIssues: [] };
+  const col = { files: [], manifests: [], pth: [], binaryIssues: [], skippedIssues: [] };
   const issues = col.binaryIssues;
   const excluded = new Set(exclude);
   const rootBuf = Buffer.from(resolve(root));
@@ -268,9 +270,10 @@ export function collectFiles(root, { includeDeps = false, exclude = [] } = {}) {
 function collectFile(full, rel, name, st, dep, col) {
   const ext = extname(name).toLowerCase();
   const kind = name === "package.json" || name === "binding.gyp" ? name : null;
-  const lang = kind ? null : EXTS[ext];
+  const pth = !kind && ext === ".pth";
+  const lang = kind || pth ? null : EXTS[ext];
   const size = st.size;
-  if (!kind && !lang) {
+  if (!kind && !pth && !lang) {
     // spec 9: every other regular file is classified by magic bytes
     const bi = classifyBinary(rel, readBounded(full, HEADER_SAMPLE), size, "repo");
     if (bi) col.binaryIssues.push(bi);
@@ -289,6 +292,11 @@ function collectFile(full, rel, name, st, dep, col) {
   if (kind) {
     const content = normalizeNewlines(new TextDecoder("utf-8", { ignoreBOM: true }).decode(data));
     col.manifests.push({ kind, path: rel, content, dep });
+    return;
+  }
+  if (pth) {                // only the .pth check runs on it (decoded as the registry does: utf-8-sig)
+    col.pth.push(rel);
+    for (const i of pthIssues(rel, new TextDecoder("utf-8").decode(data))) col.binaryIssues.push(i);
     return;
   }
   if (APPLE_DOUBLE_MAGIC.some((m) => data.subarray(0, 4).equals(m))) {

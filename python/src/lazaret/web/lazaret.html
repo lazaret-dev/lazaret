@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-6mrQ8MP8A1y0tQXvYhQZOEZmVhRqJ1x1qVHuw2L9CFE='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-Rp/cctG4RVwcqo6Nuc3HPecnGP79xTlYcFpGpGa90LY='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
 <title>Lazaret — Security &amp; Quality Review</title>
 <style>
   :root{
@@ -105,7 +105,7 @@
           <option value="sql">SQL</option>
         </select>
         <label class="filebtn">Upload files (.py .js .ts .sql …)
-          <input type="file" id="files" multiple accept=".py,.js,.ts,.jsx,.tsx,.mjs,.cjs,.sql">
+          <input type="file" id="files" multiple accept=".py,.js,.ts,.jsx,.tsx,.mjs,.cjs,.sql,.pth">
         </label>
         <div class="filelist" id="filelist"></div>
         <button class="primary" id="scanBtn">Scan code</button>
@@ -3129,6 +3129,34 @@ function langFromName(name) {
   return m ? EXT_LANGS[m[0].toLowerCase()] ?? null : null;
 }
 
+/* ---- .pth files (SC-PTH-EXEC) — twin of core.pth_issues ------------------
+   site.py executes every line of a .pth file in site-packages that starts
+   with 'import' at every interpreter start. An uploaded .pth file gets only
+   this check (as in the CLI's project and --deps scans): no other rule runs
+   on it, and it is not counted in the metrics. */
+const PTH_EXEC_RE = pyRe("\\b(?:exec|eval|compile)\\s*\\(|\\b(?:b64decode|b32decode|b85decode|a85decode|fromhex|unhexlify)\\b|\\.decode\\s*\\(|\\bmarshal\\.loads\\b|\\bzlib\\.decompress\\b|\\bcodecs\\.decode\\b|\\\\x[0-9a-fA-F]{2}");
+function isPth(name) {                         // os.path.splitext(name)[1].lower() == ".pth"
+  const base = String(name).split(/[\\/]/).pop();
+  const dot = base.lastIndexOf(".");
+  return dot > 0 && /[^.]/.test(base.slice(0, dot)) && base.slice(dot).toLowerCase() === ".pth";
+}
+function pthIssues(path, text) {
+  const out = [];
+  const lines = normalizeNewlines(text).split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line.startsWith("import ") && !line.startsWith("import\t")) continue;
+    const hostile = PTH_EXEC_RE.test(line);
+    out.push(mkIssue({ id: "SC-PTH-EXEC", name: "Code in a .pth file", type: "HOTSPOT",
+      sev: hostile ? "CRITICAL" : "MAJOR",
+      msg: ".pth line runs code at every Python start" + (hostile ? " and executes or decodes a payload." : "."),
+      why: "site.py executes .pth lines that start with 'import' whenever the interpreter starts, whether or not the package is imported — a persistence and execution vector that needs no install hook.",
+      fix: "Find out why the package ships executable .pth code; remove it if unexplained.",
+      ref: "CWE-506 · Supply chain" }, path, i + 1, lines));
+  }
+  return out;
+}
+
 /**
  * An uploaded file, decoded from its bytes the way the CLI reads a source
  * file (core.decode_source: BOM / UTF-16 sniff, PEP 263 cookie for Python,
@@ -3136,6 +3164,8 @@ function langFromName(name) {
  * and has no `enc`.
  */
 function decodeUpload(name, bytes, size) {
+  if (isPth(name))                                // decoded as the CLI does: utf-8-sig, replacement
+    return { name, content: normalizeNewlines(new TextDecoder("utf-8").decode(bytes)), size, lang: null, pth: true };
   let lang = langFromName(name);
   let dec = decodeSource(bytes, { py: lang === "py" });
   if (!lang) {                                    // no known extension: detect on the text
@@ -3166,6 +3196,12 @@ function encodingIssues(file) {
 
 /** Every finding for one file: its encoding notes, then its scan. */
 function analyzeFile(file) {
+  if (file.pth) {
+    const bytes = fileBytes(file);
+    return bytes > MAX_FILE_BYTES
+      ? [truncatedIssue(file.name, `${withCommas(bytes)} bytes exceeds the ${withCommas(MAX_FILE_BYTES)}-byte file limit`)]
+      : pthIssues(file.name, file.content);
+  }
   return encodingIssues(file).concat(scanFile(file));
 }
 
@@ -3188,7 +3224,7 @@ function buildResult(files) {
   let issues = [];
   for (const f of files) issues = issues.concat(analyzeFile(f));
   issues.sort((a, b) => SEV_ORDER[a.sev] - SEV_ORDER[b.sev] || cmpCodePoints(a.file, b.file) || a.line - b.line);
-  const metrics = computeMetrics(files);
+  const metrics = computeMetrics(files.filter((f) => !f.pth));   // a .pth file is not source
   const counts = { VULN: 0, HOTSPOT: 0, BUG: 0, SMELL: 0 };
   issues.forEach((i) => counts[i.type]++);
   const ratings = { security: worstSevRating(issues, ["VULN"]), reliability: worstSevRating(issues, ["BUG"]),
@@ -3227,7 +3263,7 @@ $("#files").addEventListener("change", async e=>{
     if(r.status === "fulfilled"){
       const f = fileArr[k];
       uploaded.push(r.value === null
-        ? {name:f.name, content:"", size:f.size, lang:langFromName(f.name) || detectLang(f.name, "")}
+        ? {name:f.name, content:"", size:f.size, lang:isPth(f.name) ? null : langFromName(f.name) || detectLang(f.name, ""), pth:isPth(f.name)}
         : decodeUpload(f.name, new Uint8Array(r.value), f.size));
     }else{
       const reason = r.reason && r.reason.message ? r.reason.message : String(r.reason);

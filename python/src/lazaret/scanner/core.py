@@ -3550,6 +3550,45 @@ def _pyc_issue(rid, name, sev, path, msg, why, fix):
             "file": path, "line": 1, "snippet": [], "snipStart": 1}
 
 
+# ---------------- .pth files (SC-PTH-EXEC) ----------------
+# site.py executes every line of a .pth file in site-packages that starts
+# with 'import' at EVERY interpreter start. The registry has checked archive
+# members with this since the beginning; project and --deps scans now run
+# the same check on every .pth file they meet (review: a directory holding
+# only evil.pth exited 2, "nothing to scan"). A .pth file is not a source
+# file: no other rule runs on it, and it is not counted in the metrics.
+PTH_EXT = ".pth"
+_PTH_EXEC_RE = re.compile(
+    r"\b(?:exec|eval|compile)\s*\(|\b(?:b64decode|b32decode|b85decode|a85decode|fromhex|unhexlify)\b"
+    r"|\.decode\s*\(|\bmarshal\.loads\b|\bzlib\.decompress\b|\bcodecs\.decode\b|\\x[0-9a-fA-F]{2}")
+
+
+def pth_issues(path, text):
+    """SC-PTH-EXEC: site.py executes every line of a .pth file in
+    site-packages that starts with 'import' at EVERY interpreter start — no
+    import of the package needed. CRITICAL when the line also executes or
+    decodes code, MAJOR otherwise (setuptools' distutils shim and namespace
+    .pth files are this shape: listed for review). The registry's check
+    (lazaret.registry.repo) and the project walk share this one helper's
+    semantics; the npm engine's twin is js/src/lib/pth.js."""
+    out, lines = [], normalize_newlines(text).split("\n")
+    for i, line in enumerate(lines):
+        if not line.startswith(("import ", "import\t")):
+            continue
+        hostile = bool(_PTH_EXEC_RE.search(line))
+        out.append(mk_issue(
+            {"id": "SC-PTH-EXEC", "name": "Code in a .pth file", "type": "HOTSPOT",
+             "sev": "CRITICAL" if hostile else "MAJOR",
+             "msg": (".pth line runs code at every Python start"
+                     + (" and executes or decodes a payload." if hostile else ".")),
+             "why": ("site.py executes .pth lines that start with 'import' whenever the "
+                     "interpreter starts, whether or not the package is imported — a "
+                     "persistence and execution vector that needs no install hook."),
+             "fix": "Find out why the package ships executable .pth code; remove it if unexplained.",
+             "ref": "CWE-506 · Supply chain"}, path, i + 1, lines))
+    return out
+
+
 def pyc_issues(path, header, has_source):
     """SC-PYC-UNCHECKED / SC-PYC-ORPHAN for one .pyc in a __pycache__ dir.
     `header` is at least the first 8 bytes; `has_source` whether the
@@ -3770,9 +3809,10 @@ def _collect_file(path, rel, st, in_dep, col):
     ext = os.path.splitext(name)[1].lower()
     size = st.st_size
     manifest = name in MANIFEST_NAMES
-    lang = None if manifest else EXTS.get(ext)
+    pth = not manifest and ext == PTH_EXT
+    lang = None if manifest or pth else EXTS.get(ext)
     issues = col["issues"]
-    if not manifest and lang is None:
+    if not manifest and not pth and lang is None:
         # FIX-SPEC 9: every non-source regular file is classified by magic
         # bytes from a header sample (repo mode used to look at a fixed list
         # of extensions only: an ELF named `helper` or `logo.png` passed).
@@ -3797,6 +3837,10 @@ def _collect_file(path, rel, st, in_dep, col):
         col["manifests"].append({"path": disp, "dep": in_dep,
                                  "content": normalize_newlines(data.decode("utf-8", "replace"))})
         return
+    if pth:                # only the .pth check runs on it (decoded as the registry does)
+        col["pth"].append(disp)
+        issues.extend(pth_issues(disp, data.decode("utf-8-sig", "replace")))
+        return
     if data[:4] in APPLE_DOUBLE_MAGIC:
         bi = classify_binary(disp, data[:HEADER_SAMPLE_BYTES], size, "repo")
         if bi:
@@ -3808,15 +3852,16 @@ def _collect_file(path, rel, st, in_dep, col):
 
 
 def _collect(root, excludes=(), include_deps=False):
-    """Walk `root` iteratively. Returns {"files", "manifests", "issues",
+    """Walk `root` iteratively. Returns {"files", "manifests", "pth", "issues",
     "skipped"}: files = [{path, content, lang, dep}], manifests = [{path,
-    content, dep}], issues = collection findings (binary classification,
-    SC-TRUNCATED, Q-ENCODING/SC-UTF7, SC-PYC-*, Q-SYMLINK, Q-UNREADABLE),
-    skipped = [(rel, n_files, n_bytes)] pruned trees. Paths are root-relative
+    content, dep}], pth = paths of the .pth files checked, issues = collection
+    findings (binary classification, SC-TRUNCATED, Q-ENCODING/SC-UTF7,
+    SC-PYC-*, SC-PTH-EXEC, Q-SYMLINK, Q-UNREADABLE), skipped = [(rel,
+    n_files, n_bytes)] pruned trees. Paths are root-relative
     (os.sep separators) and valid UTF-8. Raises ScanTargetError when the root
     itself cannot be listed."""
     excludes = set(excludes or ())
-    col = {"files": [], "manifests": [], "issues": [], "skipped": []}
+    col = {"files": [], "manifests": [], "pth": [], "issues": [], "skipped": []}
     issues = col["issues"]
     seen_dirs = set()
     stack = [("", False)]
@@ -3970,7 +4015,7 @@ def scan_project(root, exclude=(), include_deps=False, taint_config=None,
                             _dedupe(get_taint_config_warnings() + flow_warnings))
         col = _collect(root, exclude, include_deps=include_deps)
         files, manifests = col["files"], col["manifests"]
-        if not files and not manifests and not col["issues"]:
+        if not files and not manifests and not col["pth"] and not col["issues"]:
             raise ScanTargetError(
                 f"nothing to scan under {_fs_display(root)}: no Python, JavaScript or "
                 f"SQL sources, package manifests or other files to check")

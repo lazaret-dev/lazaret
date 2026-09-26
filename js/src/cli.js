@@ -247,7 +247,7 @@ function runChecked(argv, io) {
     throw e;
   }
   const { files, manifests, binaryIssues, skippedIssues } = col;
-  if (!files.length && !manifests.length && !binaryIssues.length) {
+  if (!files.length && !manifests.length && !col.pth.length && !binaryIssues.length) {
     err(`error: ${sanitizeTerm(`nothing to scan under ${fsNameToString(Buffer.from(root))}: no Python, JavaScript or SQL sources, package manifests or other files to check`)}`);
     return EXIT_USAGE;
   }
