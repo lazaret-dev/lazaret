@@ -3137,6 +3137,10 @@ NPM_LOOKUP_WORKERS = 8
 # Feed rows are newest first. After this many packages in a row modified
 # before the window, the rest of the feed is older too: stop looking up.
 NPM_OLDER_STOP = 5
+# `discover --resume` reads the feed forward from the stored sequence
+# number, NPM_CHANGES_MAX rows a page, at most this many pages per run; the
+# rest waits for the next run.
+NPM_RESUME_PAGES = 20
 
 
 def _npm_feed_names(want):
@@ -3160,6 +3164,69 @@ def _npm_feed_names(want):
             continue
         names.append(name)
     return names, rejected, len(results)
+
+
+def _npm_changes_since(seq, pages=None):
+    """npm's replication feed after sequence number `seq`, read forward
+    (since=, limit=NPM_CHANGES_MAX: the only parameters it takes besides
+    doc_ids, descending and last-event-id) a page at a time, until a page
+    comes back short (caught up) or `pages` pages (NPM_RESUME_PAGES) were
+    read. Returns a dict:
+      changes:   [(seq, name)] of the packages that changed, oldest first,
+                 each name once at its newest seq; unpublished (deleted)
+                 and design documents are passed over
+      last:      the highest seq read (where to continue), or None
+      caught_up: a page came back short: nothing more to read yet
+      pages, rows: pages and rows read
+      rejected:  names npm would reject (G14: names drive downloads)
+      error:     the feed problem that ended the walk after the first
+                 page (what was read before it stands), or None
+    Raises FetchError / FeedError when the first page can't be read."""
+    pages = NPM_RESUME_PAGES if pages is None else pages
+    newest, rejected, rows, done = {}, 0, 0, 0
+    since, last, caught_up, error = seq, None, False, None
+    while done < pages:
+        try:
+            data = http_json(f"{NPM_CHANGES_URL}?since={since}&limit={NPM_CHANGES_MAX}")
+            results = data.get("results") if isinstance(data, dict) else None
+            if not isinstance(results, list):
+                raise FeedError("npm changes feed has an unexpected shape")
+        except (FetchError, FeedError) as exc:
+            if not done:
+                raise
+            error = exc
+            break
+        done += 1
+        rows += len(results)
+        page_last = since
+        for row in results:
+            row_seq = row.get("seq") if isinstance(row, dict) else None
+            if not _uint(row_seq) or row_seq <= since:
+                continue
+            page_last = max(page_last, row_seq)
+            name = row.get("id")
+            if row.get("deleted") is True or not isinstance(name, str) or not name \
+                    or name.startswith("_"):
+                continue                               # unpublished; design documents
+            if not valid_name("npm", name):
+                rejected += 1
+                continue
+            newest[name] = max(newest.get(name, 0), row_seq)
+        if len(results) < NPM_CHANGES_MAX:
+            caught_up = True
+        elif page_last == since:
+            # a full page and no row after `since`: asking again returns it again
+            error = FeedError("npm changes feed returned a page with nothing after "
+                              f"sequence number {since}")
+            if done == 1:
+                raise error
+        if page_last > since:
+            since = last = page_last
+        if caught_up or error:
+            break
+    changes = sorted((row_seq, name) for name, row_seq in newest.items())
+    return {"changes": changes, "last": last, "caught_up": caught_up, "pages": done,
+            "rows": rows, "rejected": rejected, "error": error}
 
 
 def _npm_lookups(names):
