@@ -1904,13 +1904,50 @@ class _ScanBudgetExceeded(Exception):
 _TLS = threading.local()      # the scan_file context active on this thread
 
 
-class _FileCtx:
+class _Redactor:
+    """One file's redaction facts, shared by every snippet built from its
+    lines: the lines of its PEM private-key blocks, its entropy literals
+    (_SecretLiterals) and each line as any snippet may show it. scan_file's
+    context is one; encoding_issues and redact_file_issues build their own,
+    so a finding made outside scan_file redacts the file's secrets too."""
+
+    def __init__(self, lines):
+        self.lines = lines
+        self._red = {}
+        self._pem = None
+        self._secrets = None
+
+    def secrets(self):
+        """This file's entropy-flagged literals (see _SecretLiterals)."""
+        if self._secrets is None:
+            self._secrets = _SecretLiterals(self.lines)
+        return self._secrets
+
+    def redacted(self, k):
+        """Line k as any snippet may show it: whole-line [redacted] inside a
+        PEM key block, else with secret patterns and this file's entropy
+        literals replaced. Computed once per line, not once per finding
+        whose snippet shows it (review: 3000 findings on one 45 KB line
+        re-ran the redaction 15000 times)."""
+        r = self._red.get(k)
+        if r is None:
+            if self._pem is None:
+                self._pem = _pem_block_lines(self.lines)
+            if k in self._pem:
+                r = REDACTED
+            else:
+                r = self.secrets().redact(_redact_context_line(self.lines[k]))
+            self._red[k] = r
+        return r
+
+
+class _FileCtx(_Redactor):
     """Per-file facts computed once and shared by every rule, the suppression
     check and mk_issue: the comment layout, the normalized match text of each
     line, parsed suppression markers and the redaction caches."""
 
     def __init__(self, lines, lang, content=None, deadline=None):
-        self.lines = lines
+        super().__init__(lines)
         self.lang = lang
         self.content = "\n".join(lines) if content is None else content
         self._strings = [] if lang == "js" else None      # '…' "…" spans (absolute)
@@ -1918,9 +1955,6 @@ class _FileCtx:
             self.content, lines, lang, self._strings)
         self.deadline = deadline
         self._markers = {}
-        self._red = {}
-        self._pem = None
-        self._secrets = None
         self._mlines = None
         self._mcode = {}
         self._starts = None
@@ -1986,29 +2020,6 @@ class _FileCtx:
             parts.append(line[p:])
             out = "".join(parts)
         return out.replace("\ufeff", " ") if "\ufeff" in out else out
-
-    def secrets(self):
-        """This file's entropy-flagged literals (see _SecretLiterals)."""
-        if self._secrets is None:
-            self._secrets = _SecretLiterals(self.lines)
-        return self._secrets
-
-    def redacted(self, k):
-        """Line k as any snippet may show it: whole-line [redacted] inside a
-        PEM key block, else with secret patterns and this file's entropy
-        literals replaced. Computed once per line, not once per finding
-        whose snippet shows it (review: 3000 findings on one 45 KB line
-        re-ran the redaction 15000 times)."""
-        r = self._red.get(k)
-        if r is None:
-            if self._pem is None:
-                self._pem = _pem_block_lines(self.lines)
-            if k in self._pem:
-                r = REDACTED
-            else:
-                r = self.secrets().redact(_redact_context_line(self.lines[k]))
-            self._red[k] = r
-        return r
 
     def marker(self, k):
         """Parsed suppression marker of line k: _NO_MARKER, None (blanket)
@@ -2265,12 +2276,14 @@ def clip_snippet_line(text, col=None):
     return head + text[start:]
 
 
-def mk_issue(rule_or_dict, path, line_no, lines, col=None, ctx=None):
+def mk_issue(rule_or_dict, path, line_no, lines, col=None, redactor=None):
     """Issue dict for rule `rule_or_dict` at 1-based `line_no` of `lines`.
     `col` (0-based character offset of the match on the flagged line, if
-    known) centres the flagged line's snippet window on the match. `ctx`
-    caches redacted lines for a producer of many findings in one file (see
-    _LineRedactor); scan_file's own context is found without it."""
+    known) centres the flagged line's snippet window on the match.
+    `redactor` (a _Redactor, or scan_gyp's _LineRedactor, over these same
+    `lines`) supplies the file's entropy literals and PEM blocks and caches
+    each redacted line for a producer of many findings in one file; by
+    default the active scan_file context does, when it is scanning `lines`."""
     r = rule_or_dict
     start = max(0, line_no - 3)
     stop = min(len(lines), line_no + 2)
@@ -2290,9 +2303,9 @@ def mk_issue(rule_or_dict, path, line_no, lines, col=None, ctx=None):
     # command line, a hex-decoded preview) — review: a PAT in a `prepare`
     # script reached the terminal, JSON, HTML and SARIF through msg.
     msg = r["msg"]
-    if ctx is None or ctx.lines is not lines:
-        ctx = _active_ctx(lines)
-    ctx = ctx if REDACT_SECRETS else None
+    if redactor is None or redactor.lines is not lines:
+        redactor = _active_ctx(lines)
+    ctx = redactor if REDACT_SECRETS else None
     if REDACT_SECRETS:
         msg = _redact_text(msg, ctx.secrets() if ctx is not None else None)
     redact = REDACT_SECRETS and 0 <= flag < len(lines)
@@ -3926,7 +3939,7 @@ def scan_gyp(path, content):
         issues.append(_sc_install_hook_issue(
             path, line_of(cmd, kind, node), lines,
             "binding.gyp action" if kind == "action" else "binding.gyp command expansion",
-            cmd, suspicious, ctx=redactor))
+            cmd, suspicious, redactor=redactor))
     rest = hooks[GYP_MAX_HOOK_FINDINGS:]
     if rest:
         n_bad = sum(1 for h in rest if h[3])
@@ -3943,7 +3956,7 @@ def scan_gyp(path, content):
              "fix": "Review every action and command expansion in the file; use --ignore-scripts "
                     "in CI if unneeded.",
              "ref": "CWE-506 · Supply chain"},
-            path, line_of(rest[0][0], rest[0][1], rest[0][2]), lines, ctx=redactor))
+            path, line_of(rest[0][0], rest[0][1], rest[0][2]), lines, redactor=redactor))
     if truncated:
         issues.append(truncated_issue(path, truncated))
     return issues
@@ -4297,10 +4310,14 @@ def decode_source(data, lang=None):
 
 
 def encoding_issues(path, text, info):
-    """Q-ENCODING (and SC-UTF7) findings for a decoded source file."""
+    """Q-ENCODING (and SC-UTF7) findings for a decoded source file. Their
+    snippets are redacted with the file's own entropy literals and PEM
+    blocks, as scan_file's are (review: a UTF-8-BOM settings.py showed the
+    SEED literal its S-ENTROPY finding redacted in the Q-ENCODING snippet)."""
     if not info["reported"]:
         return []
     lines = text.split("\n")
+    red = _Redactor(lines)
     out = [mk_issue(
         {"id": "Q-ENCODING", "name": "Non-UTF-8 source encoding", "type": "SMELL",
          "sev": "INFO",
@@ -4308,7 +4325,7 @@ def encoding_issues(path, text, info):
          "why": "A non-UTF-8 source read as UTF-8 decodes to mojibake, hiding every "
                 "pattern-based finding — a UTF-16 eval() scans clean.",
          "fix": "Re-save the file as UTF-8 so tooling reads it as written.",
-         "ref": "Maintainability"}, path, 1, lines)]
+         "ref": "Maintainability"}, path, 1, lines, redactor=red)]
     if info["utf7"]:
         out.append(mk_issue(
             {"id": "SC-UTF7", "name": "UTF-7 source encoding", "type": "HOTSPOT",
@@ -4319,7 +4336,8 @@ def encoding_issues(path, text, info):
                     "reads the file. No legitimate project needs a UTF-7 source file.",
              "fix": "Re-save the file as UTF-8 and review the decoded text (the findings "
                     "for this file are reported against it).",
-             "ref": "CWE-506 · Supply chain"}, path, info["cookieLine"] or 1, lines))
+             "ref": "CWE-506 · Supply chain"}, path, info["cookieLine"] or 1, lines,
+            redactor=red))
     return out
 
 
@@ -4555,6 +4573,54 @@ def _scan_manifest_entry(mf):
     return scan_manifest(mf["path"], mf["content"], registry=dep)
 
 
+def redact_file_issues(issues, files):
+    """Apply each scanned file's redaction to the findings numbered by its
+    scan lines (source_lines: scan_file's and the flow engine's), in place.
+
+    redact_result sweeps snippets with the secret patterns only, and a PEM
+    block only when its BEGIN line is in the same snippet: a finding built
+    from raw lines outside scan_file lacked the file's entropy literals and
+    PEM blocks (review: the X-CMD snippet of a flow showed the `seed = "…"`
+    literal S-ENTROPY redacted, in the JSON and the HTML report). Per file,
+    the literal set and the file-wide PEM set are built once; every snippet
+    line that is still the raw text of its file line becomes that line as
+    mk_issue would show it (a line its builder already redacted or clipped
+    is left alone), and msg / cmd get the file's literals. One file's lines
+    are held at a time."""
+    if not REDACT_SECRETS:
+        return issues
+    by_path = {f["path"]: f for f in files}
+    groups = {}
+    for i in issues:
+        if i.get("file") in by_path:
+            groups.setdefault(i["file"], []).append(i)
+    for path, group in groups.items():
+        f = by_path[path]
+        red = _Redactor(source_lines(f["content"], f.get("lang")))
+        for i in group:
+            for key in ("msg", "cmd"):
+                v = i.get(key)
+                if isinstance(v, str):
+                    nv = _redact_text(v, red.secrets())
+                    if nv != v:
+                        i[key] = nv
+            snip, start = i.get("snippet"), i.get("snipStart")
+            if not isinstance(snip, list) or not isinstance(start, int):
+                continue
+            out = None
+            for k, line in enumerate(snip):
+                j = start - 1 + k
+                if isinstance(line, str) and 0 <= j < len(red.lines) and line == red.lines[j]:
+                    shown = red.redacted(j)
+                    if shown != line:
+                        if out is None:
+                            out = list(snip)
+                        out[k] = shown
+            if out is not None:
+                i["snippet"] = out
+    return issues
+
+
 def scan_project(root, exclude=(), include_deps=False, taint_config=None,
                  redact_secrets=True, extra_issues=(), should_stop=None):
     """The complete project scan, shared by the CLI (main) and the MCP server:
@@ -4618,14 +4684,16 @@ def scan_project(root, exclude=(), include_deps=False, taint_config=None,
                 f"nothing to scan under {_fs_display(root)}: no Python, JavaScript or "
                 f"SQL sources, package manifests or other files to check")
         issues = list(extra_issues) + list(col["issues"])
+        numbered = []       # findings numbered by their file's scan lines (redact_file_issues)
         scanned, stopped = [], None
         for f in files:
             stopped = should_stop() if should_stop is not None else None
             if stopped:
                 break
             try:
-                issues.extend(scan_file(f["path"], f["content"], f["lang"],
-                                        dep=f.get("dep", False)))
+                found = scan_file(f["path"], f["content"], f["lang"], dep=f.get("dep", False))
+                issues.extend(found)
+                numbered.extend(found)
             except Exception as exc:        # one file must never kill the run
                 issues.append(scan_error_issue(f["path"], exc))
             scanned.append(f)
@@ -4651,10 +4719,15 @@ def scan_project(root, exclude=(), include_deps=False, taint_config=None,
             # understand; degrade to the intra-file engine rather than crash
             # mid-scan, and say so instead of hiding it.
             try:
-                issues.extend(lazaret_flow.analyze(files))
+                flows = lazaret_flow.analyze(files)
+                issues.extend(flows)
+                numbered.extend(flows)
             except Exception as exc:
                 warnings.append(f"interprocedural taint analysis skipped "
                                 f"({type(exc).__name__}: {_safe_text(exc)})")
+        # the flow engine copies raw source lines into its snippets: give
+        # them (and every scan_file finding) the file's own redaction
+        redact_file_issues(numbered, files)
         res = build_result(root, files, issues)
         res["warnings"] = warnings
         if stopped:

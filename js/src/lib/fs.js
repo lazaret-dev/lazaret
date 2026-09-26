@@ -15,6 +15,7 @@ import { decodeSource, fsNameToString } from "./encoding.js";
 import { classifyBinary, HEADER_SAMPLE, PYC_HEADER, pycIssues, pycModule } from "./binary.js";
 import { mkIssue, fileIssue } from "./issue.js";
 import { pthIssues } from "./pth.js";
+import { registerScanContext, SECRET_SKIP_RE } from "./redact.js";
 
 export const EXTS = {
   ".py": "py", ".js": "js", ".jsx": "js", ".ts": "js", ".tsx": "js",
@@ -341,6 +342,10 @@ function collectFile(full, rel, name, st, dep, col) {
   const content = normalizeNewlines(dec.text);
   if (dec.reported) {
     const lines = content.split("\n");
+    // the file's own entropy literals and PEM blocks, as scanFile's findings
+    // have (twin of core.encoding_issues): the Q-ENCODING snippet of a
+    // UTF-8-BOM settings.py showed the literal its S-ENTROPY redacted
+    registerScanContext(lines, SECRET_SKIP_RE);
     col.binaryIssues.push(mkIssue({ id: "Q-ENCODING", name: "Non-UTF-8 source encoding",
       type: "SMELL", sev: "INFO",
       msg: `Source file is not UTF-8 (detected ${dec.encoding}); decoded explicitly.`,

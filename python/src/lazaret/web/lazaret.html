@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-3ilg9D8uZ5i1kX5PP5FxB28k8bMgO8I7YtE9Nixdbw4='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-nXGnvovY4ouIvLFqzA153hbMM4z4dhXk/BGiaNTtju0='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
 <title>Lazaret — Security &amp; Quality Review</title>
 <style>
   :root{
@@ -3303,6 +3303,7 @@ function encodingIssues(file) {
   const info = file.enc;
   if (!info || !info.reported) return [];
   const lines = file.content.split("\n");
+  registerScanContext(lines, SECRET_SKIP_RE);   // the file's own entropy literals and PEM blocks
   const out = [mkIssue({ id: "Q-ENCODING", name: "Non-UTF-8 source encoding", type: "SMELL", sev: "INFO",
     msg: `Source file is not UTF-8 (detected ${info.encoding}); decoded explicitly.`,
     why: "A non-UTF-8 source read as UTF-8 decodes to mojibake, hiding every pattern-based finding — a UTF-16 eval() scans clean.",

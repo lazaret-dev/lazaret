@@ -33,6 +33,12 @@ export function shannonEntropy(s) {
 }
 export const ENTROPY_VALUE_RE = pyRe(String.raw`[=:]\s*[\"']([A-Za-z0-9+/=_\-]{20,})[\"']`);
 const ENTROPY_VALUE_G = new RegExp(ENTROPY_VALUE_RE.source, "gu");
+// Lines the entropy heuristic skips (twin of core.SECRET_SKIP_RE). It lives
+// here, not in the scanner, so the walker (./fs.js) can redact a file's
+// literals in the findings it builds; scanner/engine.js re-exports it.
+// Verdict integrity (audit C2/G2): no bare `test`, word-bounded tokens, so
+// `latest` / `attested` / `# example_user` no longer suppress a real secret.
+export const SECRET_SKIP_RE = pyRe(String.raw`environ|process\.env|getenv|\bplaceholder\b|\bexample\b|\bdummy\b|\bsample\b|\bmock\b|\bredacted\b|\bxxxx+\b`, "i");
 
 /** A high-entropy literal that looks like a credential, not a path/identifier. */
 export function entropySecretish(v) {
