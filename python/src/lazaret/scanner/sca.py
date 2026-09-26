@@ -845,23 +845,50 @@ def scan_pypi_installed(root, extra_site_packages=None, warn=None):
                 continue
             site = os.path.join(libdir, entry, "site-packages")
             if os.path.isdir(site):
-                out.extend(_scan_site_packages(site, site))
+                out.extend(_scan_site_packages(site, site, warn=warn))
     # Windows venv layout: <root>/<venv>/Lib/site-packages has no pythonX.Y level
     if os.path.isdir(root):
         for sub in (".venv", "venv", "env"):
             site_win = os.path.join(root, sub, "Lib", "site-packages")
             if os.path.isdir(site_win):
-                out.extend(_scan_site_packages(site_win, site_win))
+                out.extend(_scan_site_packages(site_win, site_win, warn=warn))
     # a site-packages dir passed directly via --site-packages
     for sp in (extra_site_packages or []):
         if sp and os.path.isdir(sp) and os.path.basename(os.path.normpath(sp)) == "site-packages":
-            out.extend(_scan_site_packages(sp, sp))
+            out.extend(_scan_site_packages(sp, sp, warn=warn))
     # project dir itself may contain vendored dist-infos (pip install --target style)
-    out.extend(_scan_site_packages(root, root, shallow=True))
+    out.extend(_scan_site_packages(root, root, shallow=True, warn=warn))
     return out
 
 
-def _scan_site_packages(site, display_root, shallow=False):
+#: Bytes of a METADATA / PKG-INFO file read for its Name and Version headers
+#: (they come first; the header block is at most 200 lines here anyway).
+METADATA_READ_CAP = 256 * 1024
+
+
+def _metadata_headers(path):
+    """(name, version) from the header block of a METADATA / PKG-INFO file.
+    At most METADATA_READ_CAP bytes of a regular file are read, through
+    core's _read_prefix (O_NOFOLLOW | O_NONBLOCK, then fstat): a FIFO used
+    to hang the scan and a symlink to /dev/zero grew memory without bound
+    (one "line" that never ends). Raises OSError."""
+    text = lazaret.normalize_newlines(
+        lazaret._read_prefix(path, METADATA_READ_CAP).decode("utf-8", "replace"))
+    name = version = None
+    for n, line in enumerate(text.split("\n")):
+        if n > 200 or not line.strip():
+            break                                  # headers end at the first blank line
+        if line.startswith("Name:"):
+            name = line.split(":", 1)[1].strip()
+        elif line.startswith("Version:"):
+            version = line.split(":", 1)[1].strip()
+        if name and version:
+            break
+    return name, version
+
+
+def _scan_site_packages(site, display_root, shallow=False, warn=None):
+    warn = _warn_fn(warn)
     out = Inventory()
     try:
         entries = os.listdir(site)
@@ -872,19 +899,13 @@ def _scan_site_packages(site, display_root, shallow=False):
             continue
         d = os.path.join(site, entry)
         meta_file = os.path.join(d, "METADATA") if entry.endswith(".dist-info") else os.path.join(d, "PKG-INFO")
-        name = version = None
         try:
-            with open(meta_file, "r", encoding="utf-8", errors="replace") as f:
-                for n, line in enumerate(f):
-                    if n > 200 or not line.strip():
-                        break                          # headers end at the first blank line
-                    if line.startswith("Name:"):
-                        name = line.split(":", 1)[1].strip()
-                    elif line.startswith("Version:"):
-                        version = line.split(":", 1)[1].strip()
-                    if name and version:
-                        break
+            name, version = _metadata_headers(meta_file)
+        except (FileNotFoundError, NotADirectoryError):
+            continue                                   # no metadata file: nothing to read
         except OSError:
+            # a symlink, FIFO, device or unreadable file: never opened for real
+            warn("unreadable installed-package metadata (METADATA / PKG-INFO) skipped")
             continue
         if name and version:
             where = os.path.relpath(d, display_root) if display_root != d else entry

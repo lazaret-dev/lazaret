@@ -13,6 +13,9 @@
 5  setup.py's install_requires was matched with a regex that stopped at the
    first ']': ["requests[security]==2.19.0", "django==1.11.0"] gave an
    empty inventory and no warning.
+6  _scan_site_packages opened METADATA / PKG-INFO without checking for a
+   regular file: a FIFO hung the scan forever and a symlink to /dev/zero
+   grew memory without bound.
 
 All fixtures are inert manifest/lock text and synthetic CVE ids.
 """
@@ -24,6 +27,8 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
+import tracemalloc
 import unittest
 
 from lazaret.scanner import sca
@@ -219,6 +224,63 @@ class SetupPy(unittest.TestCase):
         self.assertEqual(inv, [])
         self.assertEqual(list(warnings), ["setup.py install_requires computed at run time "
                                           "(that part not inventoried)"])
+
+
+# ---------------------------------------------------------------------------
+# 6. installed-package METADATA is read as a bounded regular file
+# ---------------------------------------------------------------------------
+UNREADABLE_METADATA = "unreadable installed-package metadata (METADATA / PKG-INFO) skipped"
+
+
+class SitePackagesMetadata(unittest.TestCase):
+    def dist_info(self):
+        root = project({"good-2.0.dist-info/METADATA": b"Metadata-Version: 2.1\nName: good\nVersion: 2.0\n\n",
+                        "real/METADATA": b"Name: linked\nVersion: 1.0\n\n"})
+        d = os.path.join(root, "evil-1.0.dist-info")
+        os.mkdir(d)
+        return root, os.path.join(d, "METADATA")
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "needs named pipes")
+    def test_fifo_metadata_does_not_hang(self):
+        root, meta = self.dist_info()
+        os.mkfifo(meta)
+        result = {}
+
+        def run():
+            w = sca._Warnings()
+            result["inv"] = sorted((n, v) for e, n, v, where in sca.scan_all(root, None, w))
+            result["warnings"] = w.counts
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        t.join(10)
+        if t.is_alive():
+            os.close(os.open(meta, os.O_WRONLY | os.O_NONBLOCK))   # let the reader go
+            t.join(5)
+            self.fail("scan_all blocked opening a FIFO named METADATA")
+        self.assertEqual(result, {"inv": [("good", "2.0")], "warnings": {UNREADABLE_METADATA: 1}})
+
+    def test_symlinked_metadata_is_not_followed(self):
+        root, meta = self.dist_info()
+        try:
+            os.symlink(os.path.join(root, "real", "METADATA"), meta)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks unavailable")
+        w = sca._Warnings()
+        inv = sorted((n, v) for e, n, v, where in sca.scan_all(root, None, w))
+        self.assertEqual((inv, w.counts), ([("good", "2.0")], {UNREADABLE_METADATA: 1}))
+
+    def test_read_is_bounded(self):
+        root, meta = self.dist_info()
+        with open(meta, "wb") as fh:
+            fh.truncate(24 * 1024 * 1024)      # sparse: one 24 MB "line" of NULs
+        tracemalloc.start()
+        try:
+            inv = sca.scan_all(root, None, sca._Warnings())
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+        self.assertEqual(sorted((n, v) for e, n, v, where in inv), [("good", "2.0")])
+        self.assertLess(peak, 4 * 1024 * 1024)
 
 
 if __name__ == "__main__":
