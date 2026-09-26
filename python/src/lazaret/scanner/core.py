@@ -36,6 +36,7 @@ No dependencies — runs on stock python3. Same ruleset as the Lazaret dashboard
 import argparse
 import bisect
 import datetime
+import errno
 import html as html_mod
 import io
 import json
@@ -4924,7 +4925,17 @@ def build_result(root, files, issues):
 
 # ---------------- Terminal output ----------------
 def c(code, s):
-    return f"\033[{code}m{s}\033[0m" if sys.stdout.isatty() else str(s)
+    return f"\033[{code}m{s}\033[0m" if _stdout_is_tty() else str(s)
+
+
+def _stdout_is_tty():
+    """sys.stdout is a terminal. False when there is no stdout at all: with
+    file descriptor 1 closed at start (`lazaret dir >&-`) sys.stdout is None,
+    and isatty() raised AttributeError (exit 5, no reports)."""
+    try:
+        return sys.stdout is not None and sys.stdout.isatty()
+    except (AttributeError, OSError, ValueError):
+        return False
 
 SEV_COLOR = {"BLOCKER": "41;97", "CRITICAL": "31", "MAJOR": "33", "MINOR": "36", "INFO": "34"}
 
@@ -5484,18 +5495,86 @@ def _internal_error(exc):
     sys.exit(EXIT_INTERNAL)
 
 
+class _PipeSafeStdout:
+    """sys.stdout while the CLI runs. The terminal report is printed before
+    the reports are written, so a reader that went away turned the scan into
+    `error: internal: BrokenPipeError`, exit 5, and no JSON or HTML report
+    (review: `lazaret --ci dir | head -n 2`). Once a write or flush fails
+    that way, stdout is pointed at the null device (so the flush at exit
+    cannot fail either, which would make the exit status 120) and the rest of
+    the output is dropped; the scan writes its reports and exits with its
+    own code."""
+
+    def __init__(self, stream):
+        self._stream = stream
+        self.gone = False
+
+    def _drop(self):
+        self.gone = True
+        try:
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            try:
+                os.dup2(devnull, self._stream.fileno())
+            finally:
+                os.close(devnull)
+        except (AttributeError, OSError, ValueError, io.UnsupportedOperation):
+            pass
+
+    def _gone_error(self, exc):
+        """The reader went away: EPIPE (BrokenPipeError) on POSIX, EINVAL
+        from Windows for a pipe closed at the other end, or a closed file."""
+        if isinstance(exc, OSError):
+            return exc.errno in (errno.EPIPE, errno.EINVAL)
+        return getattr(self._stream, "closed", False) is True
+
+    def write(self, text):
+        if not self.gone:
+            try:
+                return self._stream.write(text)
+            except (OSError, ValueError) as exc:
+                if not self._gone_error(exc):
+                    raise
+                self._drop()
+        return len(text)
+
+    def flush(self):
+        if not self.gone:
+            try:
+                self._stream.flush()
+            except (OSError, ValueError) as exc:
+                if not self._gone_error(exc):
+                    raise
+                self._drop()
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
 def main(argv=None):
     """`lazaret` console entry point. argv defaults to sys.argv[1:]. Any
     uncaught exception becomes `error: internal: …` with exit 5 (review item
     4: a non-UTF-8 file name crashed the HTML writer with a traceback and
-    exit 1 — indistinguishable from a failed gate)."""
+    exit 1 — indistinguishable from a failed gate). A closed stdout never
+    stops the scan (see _PipeSafeStdout)."""
     configure_stdio()
+    real_stdout = sys.stdout
+    guard = _PipeSafeStdout(real_stdout) if real_stdout is not None else None
+    if guard is not None:
+        sys.stdout = guard
     try:
         return _main(argv)
     except (SystemExit, KeyboardInterrupt):
         raise
     except Exception as exc:
         _internal_error(exc)
+    finally:
+        if guard is not None:
+            try:
+                guard.flush()                # the buffered tail, while it is still guarded
+            except Exception:                # (a full disk: the output is lost, the exit code is not)
+                pass
+            if sys.stdout is guard:
+                sys.stdout = real_stdout
 
 
 def _positive_int(text):

@@ -162,5 +162,27 @@ class CoreParityTests(unittest.TestCase):
                         self.assertNotIn("Lazaret scan", r.stdout)
                     self.assertEqual(os.listdir(out), [])
 
+    def test_a_closed_stdout_changes_nothing(self):
+        many = "import os\n" + "".join(f"os.system(cmd_{n})\n" for n in range(1500))
+
+        def to_closed_pipe(cmd):
+            with tempfile.TemporaryDirectory() as out:
+                r, w = os.pipe()
+                os.close(r)                              # the reader is gone before the first write
+                try:
+                    p = subprocess.run(cmd + ["--out-dir", out, "--ci"], stdout=w, stderr=subprocess.PIPE,
+                                       encoding="utf-8", errors="replace", timeout=parity.CLI_TIMEOUT)
+                finally:
+                    os.close(w)
+                self.assertTrue(os.path.exists(os.path.join(out, "lazaret-report.html")), p.stderr)
+                with open(os.path.join(out, "lazaret-report.json"), encoding="utf-8") as f:
+                    return p.returncode, json.load(f), p.stderr
+
+        with tree({"many.py": many}) as root:
+            js, py = to_closed_pipe(parity.js_cmd(root)), to_closed_pipe(parity.py_cmd(root))
+            self.assert_same(js, py, label="closed stdout")
+            self.assertEqual((js[0], py[0]), (1, 1))
+            self.assert_same(js, parity.run_cli(parity.js_cmd(root), ("--ci",)), label="js, closed or not")
+
 if __name__ == "__main__":
     unittest.main()
