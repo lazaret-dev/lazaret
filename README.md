@@ -85,7 +85,8 @@ checks that every report destination is writable *before* scanning begins (exit 
 message, if not). Pre-existing files at a report path are never silently overwritten: Lazaret re-writes
 its *own* earlier reports (that's the re-scan workflow; any report size) but refuses to replace a file it
 didn't produce — use `--force-overwrite` to override that explicitly. Directory, symlink and special-file
-destinations are always refused, even with `--force-overwrite`. Writes are atomic (temp file + rename), so
+destinations are always refused, even with `--force-overwrite`, and so are two reports resolving to one file
+(`--sarif lazaret-report.json` next to the default JSON report). Writes are atomic (temp file + rename), so
 an interrupted run leaves the previous report intact, and a re-scan keeps the existing report's file
 permissions.
 

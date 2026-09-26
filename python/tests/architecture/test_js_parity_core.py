@@ -12,6 +12,7 @@ import collections
 import contextlib
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 
@@ -144,6 +145,22 @@ class CoreParityTests(unittest.TestCase):
                     want = [("bom/package.json", 7), ("package.json", 7), ("tricky/package.json", 4),
                             ("tricky/package.json", 6)] + ([("node_modules/dep/package.json", 7)] if deps else [])
                     self.assertEqual(lines, sorted(want))
+
+    def test_report_path_collisions_exit_3_before_the_scan(self):
+        with tree({"a.py": "import os\nos.system(cmd)\n"}) as root, tempfile.TemporaryDirectory() as out:
+            cases = [("SARIF on the JSON default", ["--sarif", "lazaret-report.json"]),
+                     ("JSON and HTML", ["--json", "X", "--html", os.path.join(out, "sub", "..", "X")]),
+                     ("HTML and SARIF", ["--no-json", "--html", "r", "--sarif", "./r"])]
+            for label, args in cases:
+                with self.subTest(case=label):
+                    runs = [subprocess.run(cmd + ["--out-dir", out, *args], capture_output=True, encoding="utf-8",
+                                           errors="replace", timeout=parity.CLI_TIMEOUT)
+                            for cmd in (parity.js_cmd(root), parity.py_cmd(root))]
+                    self.assertEqual([r.returncode for r in runs], [3, 3], [r.stderr for r in runs])
+                    for r in runs:
+                        self.assertIn("reports would both be written to", r.stderr)
+                        self.assertNotIn("Lazaret scan", r.stdout)
+                    self.assertEqual(os.listdir(out), [])
 
 if __name__ == "__main__":
     unittest.main()

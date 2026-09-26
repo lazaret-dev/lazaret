@@ -33,7 +33,8 @@ Scans a project directory and writes the **lazaret report format**:
 
 Report paths are checked before the scan starts: a directory, symlink, FIFO
 or device at a report path is refused, and so is an existing file that is
-not already a Lazaret report (unless `--force-overwrite`). Writes are atomic
+not already a Lazaret report (unless `--force-overwrite`), or two reports
+resolving to one file. Writes are atomic
 (temp + rename) and keep an existing report's file mode.
 
 ## Detection families

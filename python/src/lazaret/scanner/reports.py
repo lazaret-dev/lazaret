@@ -372,13 +372,45 @@ def _validate_path(path, kind, strict):
     return path
 
 
+REPORT_LABELS = {"json": "JSON", "html": "HTML", "sarif": "SARIF"}
+
+
+def same_file_key(path):
+    """What two spellings of one report destination have in common: the
+    real path of its directory ('..', relative parts and symlinks resolved)
+    joined with its name, case-folded where paths are (os.path.normcase).
+    Twin of the npm engine's sameFileKey (lib/fs.js)."""
+    parent, name = os.path.split(os.path.abspath(path))
+    return os.path.normcase(os.path.join(os.path.realpath(parent), name))
+
+
+def check_distinct_paths(paths):
+    """Raise ReportPathError when two reports would be written to the same
+    file (review: `--sarif lazaret-report.json` silently replaced the SARIF
+    log with the JSON report while both paths were printed, exit 0; `--json
+    X --html X` failed with exit 3 only after the whole scan)."""
+    seen = {}
+    for kind in ("json", "html", "sarif"):
+        p = paths.get(kind)
+        if not p:
+            continue
+        key = same_file_key(p)
+        if key in seen:
+            raise ReportPathError(
+                f"the {REPORT_LABELS[seen[key]]} and {REPORT_LABELS[kind]} reports would both "
+                f"be written to {p} — give each report its own path")
+        seen[key] = kind
+
+
 def validate_report_paths(paths, strict=False):
     """Validate ALL report destinations before the scan starts.
 
     *paths* is a dict as returned by report_paths(). Raises ReportPathError
-    on the first problem (the CLI turns that into a clear pre-scan failure
+    on the first problem — two reports resolving to one file, then each
+    destination in turn (the CLI turns that into a clear pre-scan failure
     with exit code EXIT_OUTPUT); returns the same dict on success.
     """
+    check_distinct_paths(paths)
     for kind in ("json", "html", "sarif"):
         p = paths.get(kind)
         if p:

@@ -7,9 +7,9 @@
 
 import {
   readdirSync, lstatSync, statSync, openSync, readSync, closeSync, fstatSync, fsyncSync, readlinkSync,
-  writeSync, renameSync, unlinkSync, chmodSync, constants as C,
+  writeSync, renameSync, unlinkSync, chmodSync, realpathSync, constants as C,
 } from "node:fs";
-import { join, extname, sep, resolve, dirname, isAbsolute } from "node:path";
+import { join, extname, sep, resolve, dirname, basename, isAbsolute } from "node:path";
 import { randomBytes } from "node:crypto";
 import { decodeSource, fsNameToString } from "./encoding.js";
 import { classifyBinary, HEADER_SAMPLE, PYC_HEADER, pycIssues, pycModule } from "./binary.js";
@@ -483,8 +483,51 @@ function validatePath(path, kind, strict) {
   return path;
 }
 
-/** Validate ALL report destinations before the scan starts (throws ReportPathError). */
+/** os.path.realpath of a directory: its longest existing ancestor resolved, the rest kept. */
+function realDir(dir) {
+  const tail = [];
+  for (let head = dir; ;) {
+    try { return join(realpathSync(head), ...tail); } catch { /* not there: try its parent */ }
+    const up = dirname(head);
+    if (up === head) return dir;
+    tail.unshift(basename(head));
+    head = up;
+  }
+}
+
+/**
+ * What two spellings of one report destination have in common: the real
+ * path of its directory ('..', relative parts and symlinks resolved) joined
+ * with its name, case-folded on Windows (twin of reports.same_file_key).
+ */
+export function sameFileKey(path) {
+  const abs = resolve(path);
+  const key = join(realDir(dirname(abs)), basename(abs));
+  return process.platform === "win32" ? key.toLowerCase() : key;
+}
+
+const REPORT_LABELS = { json: "JSON", html: "HTML", sarif: "SARIF" };
+/**
+ * Two reports resolving to one file are refused before the scan (review:
+ * `--sarif lazaret-report.json` silently replaced the SARIF log with the JSON
+ * report; `--json X --html X` failed only after the whole scan). Twin of
+ * reports.check_distinct_paths.
+ */
+export function checkDistinctPaths(paths) {
+  const seen = new Map();
+  for (const kind of ["json", "html", "sarif"]) {
+    if (!paths[kind]) continue;
+    const key = sameFileKey(paths[kind]);
+    if (seen.has(key)) {
+      throw new ReportPathError(`the ${REPORT_LABELS[seen.get(key)]} and ${REPORT_LABELS[kind]} reports would both be written to ${paths[kind]} — give each report its own path`);
+    }
+    seen.set(key, kind);
+  }
+}
+
+/** Validate ALL report destinations before the scan starts (throws ReportPathError): distinct files, then each one. */
 export function validateReportPaths(paths, strict = false) {
+  checkDistinctPaths(paths);
   for (const kind of ["json", "html", "sarif"]) if (paths[kind]) validatePath(paths[kind], kind, strict);
   return paths;
 }
