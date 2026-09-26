@@ -3719,6 +3719,49 @@ def hook_script_targets(cmd):
     return out
 
 
+_JSON_TOKEN_RE = re.compile(r'"(?:[^"\\]|\\.)*"|[{}\[\],:]')
+
+
+def _script_key_lines(text):
+    """{script name: 1-based line of its key} for the keys of the top-level
+    "scripts" object of `text`, a JSON document that parsed. Keys are
+    compared decoded (`"post\\u0069nstall"` too), and a repeated key or
+    "scripts" object counts where it last appears, as the parser keeps the
+    last one. Twin of the locator in the npm engine's scanManifest."""
+    found, depth, containers = {}, 0, []
+    top_key, in_scripts, expect_key = None, False, False
+    line, pos = 1, 0
+    for m in _JSON_TOKEN_RE.finditer(text):
+        tok = m.group()
+        if tok[0] == '"':
+            if expect_key and (depth == 1 or (depth == 2 and in_scripts)):
+                key = json.loads(tok)
+                if depth == 1:
+                    top_key = key
+                    if key == "scripts":
+                        found = {}                  # a later "scripts" replaces an earlier one
+                else:
+                    line += text.count("\n", pos, m.start())
+                    pos = m.start()
+                    found[key] = line
+            expect_key = False
+        elif tok in "{[":
+            if depth == 1 and tok == "{":
+                in_scripts = top_key == "scripts"   # at depth 1, "{" is the value of top_key
+            containers.append(tok)
+            depth += 1
+            expect_key = tok == "{"
+        elif tok in "}]":
+            containers.pop()
+            depth -= 1
+            if depth < 2:
+                in_scripts = False
+            expect_key = False
+        elif tok == ",":
+            expect_key = containers[-1] == "{"
+    return found
+
+
 def is_dependency_manifest(path):
     """A manifest inside an installed-dependency directory (node_modules/, ...)
     belongs to a package that came from a registry: only the scripts npm runs
@@ -3750,6 +3793,7 @@ def scan_manifest(path, content, registry=False):
     lines = body.split("\n")
     scripts = data.get("scripts")
     if isinstance(scripts, dict):
+        key_lines = None
         for hook in (NPM_INSTALL_SCRIPTS if registry else NPM_LOCAL_INSTALL_SCRIPTS):
             cmd = scripts.get(hook)
             if not isinstance(cmd, str) or not cmd.strip():
@@ -3757,7 +3801,12 @@ def scan_manifest(path, content, registry=False):
             suspicious = _hook_is_suspicious(cmd)
             sev = "INFO" if (not registry and hook in NPM_PREPARE_SCRIPTS
                              and not suspicious) else None
-            line_no = next((i + 1 for i, l in enumerate(lines) if f'"{hook}"' in l), 1)
+            # the hook's key inside "scripts", not the first line naming it
+            # (review: a dependency called "install" took the finding)
+            if key_lines is None:
+                key_lines = _script_key_lines(body)
+            line_no = key_lines.get(hook) or next(
+                (i + 1 for i, l in enumerate(lines) if f'"{hook}"' in l), 1)
             issues.append(_sc_install_hook_issue(path, line_no, lines, hook, cmd,
                                                  suspicious, sev=sev))
     return issues

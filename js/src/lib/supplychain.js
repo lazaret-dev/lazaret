@@ -192,6 +192,44 @@ export function scanManifest(path, content, { registry = isDependencyManifest(pa
   if (data === null) return issues;
   const body = String(content).startsWith("\ufeff") ? String(content).slice(1) : String(content);
   const lines = body.split("\n");
+  // Where each script's key sits: inside the top-level "scripts" object, not
+  // the first line naming it (review: a dependency called "install" took the
+  // finding). Keys are compared decoded, and a repeated key or "scripts"
+  // object counts where it last appears, as the parser keeps the last one
+  // (twin of core._script_key_lines).
+  const scriptKeyLines = () => {
+    const tokenRe = /"(?:[^"\\]|\\.)*"|[{}[\],:]/g;
+    const containers = [];
+    let found = new Map(), topKey = null, inScripts = false, expectKey = false, line = 1, pos = 0, m;
+    while ((m = tokenRe.exec(body))) {
+      const tok = m[0];
+      const depth = containers.length;
+      if (tok[0] === '"') {
+        if (expectKey && (depth === 1 || (depth === 2 && inScripts))) {
+          const key = JSON.parse(tok);
+          if (depth === 1) {
+            topKey = key;
+            if (key === "scripts") found = new Map();          // a later "scripts" replaces an earlier one
+          } else {
+            for (let k = body.indexOf("\n", pos); k !== -1 && k < m.index; k = body.indexOf("\n", k + 1)) line++;
+            pos = m.index;
+            found.set(key, line);
+          }
+        }
+        expectKey = false;
+      } else if (tok === "{" || tok === "[") {
+        if (depth === 1 && tok === "{") inScripts = topKey === "scripts";   // at depth 1, "{" is topKey's value
+        containers.push(tok);
+        expectKey = tok === "{";
+      } else if (tok === "}" || tok === "]") {
+        containers.pop();
+        if (containers.length < 2) inScripts = false;
+        expectKey = false;
+      } else if (tok === ",") expectKey = containers[containers.length - 1] === "{";
+    }
+    return found;
+  };
+  let keyLines = null;
   const scripts = own(data, "scripts");
   if (scripts && typeof scripts === "object" && !Array.isArray(scripts)) {
     for (const hook of (registry ? NPM_INSTALL_SCRIPTS : NPM_LOCAL_INSTALL_SCRIPTS)) {
@@ -199,7 +237,8 @@ export function scanManifest(path, content, { registry = isDependencyManifest(pa
       if (typeof cmd !== "string" || !pyStrip(cmd)) continue;
       const suspicious = hookIsSuspicious(cmd);
       const sev = !registry && NPM_PREPARE_SCRIPTS.includes(hook) && !suspicious ? "INFO" : null;
-      const lineNo = lines.findIndex((l) => l.includes(`"${hook}"`)) + 1 || 1;
+      keyLines ??= scriptKeyLines();
+      const lineNo = keyLines.get(hook) ?? (lines.findIndex((l) => l.includes(`"${hook}"`)) + 1 || 1);
       issues.push(scInstallHookIssue(path, lineNo, lines, hook, cmd, suspicious, sev));
     }
   }

