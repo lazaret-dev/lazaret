@@ -1829,7 +1829,9 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
                                          "binaryArtifacts", "truncated",
                                          "strongIndicators", "weakIndicators")}})
     skip_issues, skip_label = _skipped_summary(skipped, byte_budget, limit)
-    truncated += len(skip_issues)
+    # one part per release file left out; skip_issues holds one finding per
+    # REASON, and used to be counted instead ("1 part" for 3 skipped files)
+    truncated += len(skipped)
     all_issues.extend(skip_issues)
     all_issues.sort(key=lambda i: (lazaret.SEV_ORDER[i["sev"]], i["file"], i["line"]))
     sev_counts = {s: 0 for s in lazaret.SEV_ORDER}
