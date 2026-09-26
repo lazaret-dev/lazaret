@@ -89,9 +89,137 @@ SEV_ORDER = {"BLOCKER": 0, "CRITICAL": 1, "MAJOR": 2, "MINOR": 3, "INFO": 4}
 TYPE_LABEL = {"VULN": "Vulnerability", "HOTSPOT": "Security Hotspot",
               "BUG": "Bug", "SMELL": "Code Smell"}
 
+# ---- Provider token formats in linear time (S-TOKEN, secret redaction) ----
+# The token pattern's JWT alternative, eyJ[A-Za-z0-9_\-]{10,}\.eyJ…, backtracks
+# quadratically: on a run of "eyJeyJ…" every "eyJ" rescans the run to its end
+# looking for the "." ('//' + 'eyJ' * 60,000: 21.2 s in S-TOKEN and as long
+# again in snippet redaction, one regex call the time budget can't stop). A
+# left boundary would make the regex linear but would stop matching a JWT
+# glued to a preceding [A-Za-z0-9_-] character (an AWS key followed by one,
+# say), so the pattern text stays and _TokenPattern matches exactly its
+# language — the same leftmost matches, the same spans — in linear time, like
+# the npm engine's findSecretToken (js/src/lib/redact.js). The other
+# alternatives are linear as written and run as one regex. A JWT match starts
+# at the first "eyJ" of a [A-Za-z0-9_-] run that is followed by ".eyJ" and ten
+# more run characters, at least 13 characters before the run's end; every
+# later "eyJ" of that run needs the same run end, so runs are examined once
+# each, the candidate runs found by a C-speed look-ahead from each run start.
+# _TokenPattern has the part of re.Pattern the scanner uses (pattern, flags,
+# search, finditer, sub with a literal replacement).
+_JWT_ALT = r"eyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}"
+_JWT_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-")
+_JWT_RUN_RE = re.compile(r"[A-Za-z0-9_\-]*")
+_JWT_CANDIDATE_RE = re.compile(r"(?<![A-Za-z0-9_\-])(?=[A-Za-z0-9_\-]{13,}\.eyJ[A-Za-z0-9_\-]{10})")
+_TOKEN_ALTS = (       # S-TOKEN, in pattern order
+    r"AKIA[0-9A-Z]{16}", r"gh[pousr]_[A-Za-z0-9]{36}", r"xox[baprs]-[A-Za-z0-9-]{10,}",
+    r"sk_live_[A-Za-z0-9]{16,}", r"AIza[0-9A-Za-z_\-]{35}", r"-----BEGIN [A-Z ]*PRIVATE KEY-----", _JWT_ALT)
+_TOKEN_REDACT_ALTS = (    # the redaction list's first pattern (_SECRET_LINE_PATTERNS[0])
+    r"AKIA[0-9A-Z]{16}", r"gh[pousr]_[A-Za-z0-9]{36,}", r"github_pat_[A-Za-z0-9_]{22,}",
+    r"xox[baprs]-[A-Za-z0-9-]{10,}", r"sk_live_[A-Za-z0-9]{16,}", r"AIza[0-9A-Za-z_\-]{35}",
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----(?:.*?-----END [A-Z ]*PRIVATE KEY-----|.*)", _JWT_ALT)
+
+
+def _jwt_in_run(s, start, run_end):
+    """(start, end) of the leftmost JWT-alternative match beginning in
+    s[start:run_end], where run_end ends that [A-Za-z0-9_-] run; else None."""
+    if run_end - start < 13 or not s.startswith(".eyJ", run_end):
+        return None
+    tail = _JWT_RUN_RE.match(s, run_end + 4).end()
+    if tail - (run_end + 4) < 10:
+        return None
+    p = s.find("eyJ", start, run_end - 10)         # the "eyJ" plus ten run characters fit
+    return (p, tail) if p >= 0 else None
+
+
+def _jwt_search(s, pos):
+    """(start, end) of the leftmost JWT-alternative match at or after pos."""
+    if 0 < pos < len(s) and s[pos - 1] in _JWT_CHARS and s[pos] in _JWT_CHARS:
+        run_end = _JWT_RUN_RE.match(s, pos).end()  # pos is inside a run: its rest counts
+        hit = _jwt_in_run(s, pos, run_end)
+        if hit:
+            return hit
+        pos = run_end
+    for m in _JWT_CANDIDATE_RE.finditer(s, pos):
+        hit = _jwt_in_run(s, m.start(), _JWT_RUN_RE.match(s, m.start()).end())
+        if hit:
+            return hit
+    return None
+
+
+class _TokenMatch:
+    __slots__ = ("string", "_span")
+
+    def __init__(self, string, span):
+        self.string, self._span = string, span
+
+    def start(self, group=0):
+        return self._span[0]
+
+    def end(self, group=0):
+        return self._span[1]
+
+    def span(self, group=0):
+        return self._span
+
+    def group(self, group=0):
+        return self.string[self._span[0]:self._span[1]]
+
+    __getitem__ = group
+
+
+class _TokenPattern:
+    """The regex "|".join(alternatives), the last one the JWT alternative,
+    matched in linear time (see above)."""
+
+    def __init__(self, alternatives):
+        assert alternatives[-1] == _JWT_ALT
+        self.pattern = "|".join(alternatives)
+        self.flags = re.compile(self.pattern).flags
+        self._others = re.compile("|".join(alternatives[:-1]))
+
+    def _spans(self, s, pos):
+        # Leftmost-first over both parts; a part's next match is recomputed
+        # only once the scan has passed its start (a match at a position does
+        # not depend on where the search began), so each part scans the
+        # string once. The two never tie: their first characters differ.
+        other = jwt = None
+        fresh_other = fresh_jwt = False
+        while True:
+            if not fresh_other or (other is not None and other[0] < pos):
+                m = self._others.search(s, pos)
+                other, fresh_other = (m.span() if m else None), True
+            if not fresh_jwt or (jwt is not None and jwt[0] < pos):
+                jwt, fresh_jwt = _jwt_search(s, pos), True
+            best = other if jwt is None or (other is not None and other[0] < jwt[0]) else jwt
+            if best is None:
+                return
+            yield best
+            pos = best[1]                          # matches are never empty
+
+    def search(self, string, pos=0):
+        span = next(self._spans(string, pos), None)
+        return None if span is None else _TokenMatch(string, span)
+
+    def finditer(self, string, pos=0):
+        return (_TokenMatch(string, span) for span in self._spans(string, pos))
+
+    def sub(self, repl, string):
+        """re.sub with a literal replacement string."""
+        parts, pos = [], 0
+        for a, b in self._spans(string, 0):
+            parts += (string[pos:a], repl)
+            pos = b
+        return string if not parts else "".join(parts) + string[pos:]
+
+
+_TOKEN_PATTERN = _TokenPattern(_TOKEN_ALTS)
+_TOKEN_REDACT_PATTERN = _TokenPattern(_TOKEN_REDACT_ALTS)
+
+
 def R(id, name, type, sev, langs, pat, msg, why, fix, ref, skip=None, need=None, flags=0):
     return {"id": id, "name": name, "type": type, "sev": sev, "langs": langs,
-            "re": re.compile(pat, flags), "msg": msg, "why": why, "fix": fix, "ref": ref,
+            "re": pat if isinstance(pat, _TokenPattern) else re.compile(pat, flags),
+            "msg": msg, "why": why, "fix": fix, "ref": ref,
             "skip": re.compile(skip, re.I) if skip else None,
             "need": re.compile(need, re.I) if need else None}
 
@@ -318,10 +446,9 @@ R("Q-VAR", "var declaration", "SMELL", "MINOR", ("js",),
   "Use let or const.",
   "Maintainability"),
 # ---- Secret token signatures (Gitleaks-style) ----
+# The pattern (text: _TOKEN_ALTS) runs in linear time; see _TokenPattern.
 R("S-TOKEN", "Known secret token format", "VULN", "BLOCKER", ("py", "js"),
-  r"AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36}|xox[baprs]-[A-Za-z0-9-]{10,}"
-  r"|sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\-]{35}"
-  r"|-----BEGIN [A-Z ]*PRIVATE KEY-----|eyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}",
+  _TOKEN_PATTERN,
   "String matches a known secret format (AWS/GitHub/Slack/Stripe/Google key, private key, or JWT).",
   "Provider-format tokens in source are live credentials until proven otherwise.",
   "Remove it, rotate the credential immediately, and load it from a secrets manager.",
@@ -1916,11 +2043,9 @@ def _active_ctx(lines):
 _SECRET_LINE_PATTERNS = [
     # provider token formats (S-TOKEN's list, plus fine-grained github_pat_);
     # a PEM private-key header is redacted through its END marker or, when
-    # the key continues on later lines, to end of line (see _pem_block_lines)
-    re.compile(r"AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}"
-               r"|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\-]{35}"
-               r"|-----BEGIN [A-Z ]*PRIVATE KEY-----(?:.*?-----END [A-Z ]*PRIVATE KEY-----|.*)"
-               r"|eyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}"),
+    # the key continues on later lines, to end of line (see _pem_block_lines).
+    # Linear-time matcher, text in _TOKEN_REDACT_ALTS (see _TokenPattern).
+    _TOKEN_REDACT_PATTERN,
     # SQL credentials — case-insensitive like the SQL-CRED rule (review fix:
     # lowercase `identified by '…'` leaked through other findings' context)
     re.compile(r"(?:IDENTIFIED\s+BY\s+['\"][^'\"]+['\"]|PASSWORD\s*=?\s*['\"][^'\"]+['\"]"

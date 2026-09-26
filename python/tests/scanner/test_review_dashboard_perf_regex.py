@@ -5,8 +5,11 @@ Before: the page compiled S-JWT-NONE's `\\s*\\[?\\s*` form, so 'algorithm:'
 followed by 200,000 spaces froze the tab for ~20 s in one regex call, which
 the per-file time backstop cannot interrupt. B-EMPTY-CATCH runs through the
 page's linear scan and is kept as a guard. Each input now takes milliseconds
-(the bound is generous) and the page still reports what core reports."""
+(the bound is generous) and the page still reports what core reports. The
+page's linear token matcher (findSecretToken) and core's (_TokenPattern,
+new with this fix) redact the same text."""
 
+import json
 import unittest
 
 from lazaret.scanner import core
@@ -43,6 +46,16 @@ class DashboardLinearPatternTests(unittest.TestCase):
                 self.assertEqual(sorted((i["rule"], i["line"], i["msg"]) for i in page),
                                  sorted((i["rule"], i["line"], i["msg"]) for i in cli))
                 self.assertIn("S-JWT-NONE", {i["rule"] for i in page})
+
+    def test_token_redaction_matches_core(self):
+        """core's linear token matcher (test_review_perf_regex) redacts what the
+        page's findSecretToken redacts, glued tokens included."""
+        jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0"
+        lines = ["x" + jwt, "AKIA" + "Q" * 16 + jwt + ".sig", "ghp_" + "a1B2" * 9 + jwt,
+                 "a.eyJ" + "b" * 10 + " eyJ" * 3, "-" * 20 + "eyJ" + "c" * 10 + ".eyJ" + "d" * 10,
+                 "//" + "eyJ" * 5000]
+        (page,) = dash.run([{"op": "eval", "expr": f"{json.dumps(lines)}.map(redactContextLine)"}])
+        self.assertEqual(page, [core._redact_context_line(line) for line in lines])
 
 
 if __name__ == "__main__":
