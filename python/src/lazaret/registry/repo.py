@@ -3562,6 +3562,7 @@ def _discover_resumed(store, ecos, cutoff, limit, notes):
                                             f"({type(exc).__name__}: {exc})")
             print(f"warning: {eco}: {problem}; {eco} was not checked.", file=sys.stderr)
             notes[eco] = f"not checked: {problem}"
+            covered[eco] = "not checked (see the warning at the end)"
             continue
         if cursor is None:
             found, new = _discover_first_run(eco, cutoff, limit, notes)

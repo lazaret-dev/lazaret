@@ -441,6 +441,7 @@ class CliResumeTests(ResumeCase):
         self.assertEqual(code, 1)
         self.assertIn("warning: pypi: could not read its discovery cursor (OperationalError: "
                       "database is locked); pypi was not checked.", err)
+        self.assertIn("Resuming discovery:\n  pypi: not checked (see the warning at the end)\n", out)
         self.assertEqual(self.pypi.calls, [])
 
     def test_without_resume_the_cursor_is_left_alone(self):
