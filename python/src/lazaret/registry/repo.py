@@ -2488,14 +2488,19 @@ def discover_pypi(cutoff, limit, notes=None):
                 continue
             parts = title.split()
             name = parts[0]
-            version = parts[1] if len(parts) > 1 else None
+            # updates.xml titles are "<name> <version>"; packages.xml (new
+            # projects) titles are "<name> added to PyPI", whose second word
+            # used to become the version: `discover --scan` then asked for
+            # pypi:<name>@added and failed for every new project
+            version = parts[1] if feed.endswith("/updates.xml") and len(parts) == 2 else None
             # G14/F10: feed-derived names drive downloads — validate them
             # against the same rules as CLI specs.
             if not valid_name("pypi", name):
                 continue
             if version is not None and not _feed_token_ok(version):
                 version = None
-            if name not in found or when > found[name][3]:
+            prev = found.get(name)
+            if prev is None or when > prev[3] or (when == prev[3] and version and not prev[2]):
                 found[name] = ("pypi", name, version, when)
     if failed and notes is not None:
         notes["pypi"] = ("not checked: both RSS feeds failed" if len(failed) == 2
