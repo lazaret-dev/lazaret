@@ -60,11 +60,16 @@ for (const [label, readLines] of [["before the first line", 0], ["after two line
   });
 }
 
-test("stdout closed at start", { skip: process.platform === "win32" }, async () => {
+// Node reopens a standard stream that is closed when it starts on the null
+// device (its platform init), so `node … >&-` runs with stdout on /dev/null:
+// the child is started that way directly, without a shell (the test used to
+// go through `/bin/sh -c 'exec "$0" "$@" >&-'`, which CodeQL reported as a
+// shell command built from environment values).
+test("stdout closed at start", async () => {
   const { root, out } = tree();
   try {
     const code = await new Promise((res, rej) => {
-      const child = spawn("/bin/sh", ["-c", 'exec "$0" "$@" >&-', process.execPath, BIN, "check", root, "--ci", "--out-dir", out],
+      const child = spawn(process.execPath, [BIN, "check", root, "--ci", "--out-dir", out],
         { stdio: ["ignore", "ignore", "ignore"] });
       child.on("error", rej);
       child.on("close", res);

@@ -131,7 +131,8 @@ class LexingParityTests(unittest.TestCase):
         tree = {"__proto__": elf, "7": elf, "10": elf, "b.js": "eval(b)\n", "src/a.js": "eval(a)\n"}
         report = self.assert_same(tree, extra=("--max-source-bytes", "2_000_000", "--excerpt-width", "1_00"),
                                   label="integer options")
-        self.assertEqual(list(report["perFile"]), ["b.js", "src/a.js", "10", "7", "__proto__"])
+        self.assertEqual([f.replace("\\", "/") for f in report["perFile"]],     # src\a.js on Windows
+                         ["b.js", "src/a.js", "10", "7", "__proto__"])
         with tempfile.TemporaryDirectory() as root:
             write_tree(root, tree)
             (_, js, _), (_, py, _) = both(root, extra=("--max-source-bytes", "2_000_000"))

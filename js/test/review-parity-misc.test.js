@@ -141,7 +141,7 @@ test("perFile holds every file in Python's order; dupPct is written as a float",
   const elf = Buffer.concat([Buffer.from("\x7fELF\x02\x01\x01\x00", "latin1"), Buffer.alloc(600)]);
   const { text, rep, out } = scanTree({ ["__proto__"]: elf, "7": elf, "10": elf, "b.js": "eval(b)\n", "src/a.js": "eval(a)\n" });
   const block = /\n {2}"perFile": \{\n([\s\S]*?)\n {2}\}/.exec(text)[1];
-  assert.deepEqual(block.split("\n").map((l) => l.trim()),
+  assert.deepEqual(block.split("\n").map((l) => l.trim().replaceAll("\\\\", "/")),    // "src\\a.js" on Windows
     ['"b.js": 1,', '"src/a.js": 1,', '"10": 1,', '"7": 1,', '"__proto__": 1']);
   assert.equal(Object.keys(rep.perFile).length, 5);
   assert.match(text, /\n {4}"dupPct": 0\.0,?\n/);
