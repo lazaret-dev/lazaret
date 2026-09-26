@@ -7,7 +7,8 @@ Responses are parsed with the safexml protections, and their size is capped
 (max_bytes, 32 MiB by default). The cap applies after gzip decompression, so
 a compressed "zip bomb" response is cut off too; gzip responses are
 decompressed as they are read, and their compressed size is capped as well.
-Error replies (non-200) are read only when small, otherwise the connection is
+Error replies (non-200) are read only when small, and never past
+ERROR_BODY_LIMIT whatever their headers say; otherwise the connection is
 closed. XML-RPC messages never have a DOCTYPE, so forbid_dtd defaults to True.
 
 monkey_patch() applies the same parser to the stdlib's xmlrpc.client and
@@ -17,6 +18,7 @@ xmlrpc.server globally
 from __future__ import annotations
 
 import gzip
+import http.client
 import xmlrpc.client as _client
 from typing import Any
 from urllib.parse import urlsplit
@@ -37,8 +39,8 @@ __all__ = ["SafeXMLRPCParser", "Transport", "SafeTransport", "ServerProxy", "loa
 DEFAULT_MAX_BYTES = 32 * 1024 * 1024
 
 # An error reply's body is only read (to keep the connection reusable, as the
-# stdlib does) when it declares at most this length; otherwise the connection
-# is closed without reading it.
+# stdlib does) when it declares at most this length, and then at most this
+# many bytes are read; otherwise the connection is closed.
 ERROR_BODY_LIMIT = 8 * 1024
 
 _SAFE_KEYS = ("forbid_dtd", "forbid_entities", "forbid_external", "max_depth", "max_bytes",
@@ -112,15 +114,24 @@ def _gzip_stream(response: Any, max_bytes: int | None) -> gzip.GzipFile:
 
 def _discard_error_body(response: Any) -> bool:
     """Read a small error body so the connection can be reused. Returns False
-    (the caller closes the connection) when its length is unknown or large."""
+    (the caller closes the connection) when its length is unknown or large.
+
+    At most ERROR_BODY_LIMIT + 1 bytes are read whatever the headers say:
+    http.client ignores Content-Length when the body is chunked, so a reply
+    declaring "Content-Length: 5" with a chunked body used to be read to its
+    end (64 MiB in the audit). The connection is kept only if the whole body
+    fit, i.e. the response is complete after the bounded read."""
     try:
         length = int(response.getheader("content-length", ""))
     except ValueError:
         return False
     if not 0 <= length <= ERROR_BODY_LIMIT:
         return False
-    response.read()
-    return True
+    try:
+        data = response.read(ERROR_BODY_LIMIT + 1)
+    except (OSError, http.client.HTTPException):
+        return False
+    return len(data) <= ERROR_BODY_LIMIT and response.isclosed()
 
 
 class _SafeTransportMixin:
