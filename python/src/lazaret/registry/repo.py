@@ -1975,6 +1975,7 @@ class Store:
     def __init__(self, dsn):
         kind, target = classify_dsn(dsn)
         self.pg = kind == "pg"
+        schema_errors = ()        # errors of the backend that mean "--db is not usable"
         if self.pg:
             from lazaret import pg as lazaret_pg
             # audit H2 (=F3/F4): Store is LIBRARY code — the MCP server
@@ -2008,8 +2009,16 @@ class Store:
                 raise StoreConfigError(f"cannot open SQLite database: {exc}") from exc
             self._configure_sqlite()
             self.ph, self.t = "?", ""
+            # connect() opens any file lazily: a --db that is not a SQLite
+            # database ("file is not a database") first fails here, and used
+            # to escape as a sqlite3.DatabaseError traceback
+            schema_errors = (sqlite3.Error,)
         try:
             self._init_schema()
+        except schema_errors as exc:
+            self.close()
+            raise StoreConfigError(f"cannot use the SQLite database: {exc} "
+                                   f"(check --db / LAZARET_DB)") from exc
         except BaseException:
             self.close()
             raise
