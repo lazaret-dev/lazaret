@@ -220,11 +220,15 @@ class F11SqlRules(unittest.TestCase):
         self.assertEqual(got, [("SQL-DELETE-NOWHERE", 1), ("SQL-UPDATE-NOWHERE", 3)])
 
     def test_multi_statement_line(self):
-        # two statements on one line: both offenders fire, WHERE'd one doesn't
-        content = "DELETE FROM a; DELETE FROM b WHERE x=1; DELETE FROM c;\n"
-        got = [i["line"] for i in lazaret.scan_file("p.sql", content, "sql")
-               if i["rule"] == "SQL-DELETE-NOWHERE"]
-        self.assertEqual(sorted(got), [1, 1])
+        # statements on one line: an offender after a WHERE'd statement still
+        # fires, the WHERE'd one alone doesn't; two offenders on one line are
+        # ONE finding (same rule, line and message: identical in every report)
+        def got(content):
+            return [i["line"] for i in lazaret.scan_file("p.sql", content, "sql")
+                    if i["rule"] == "SQL-DELETE-NOWHERE"]
+        self.assertEqual(got("DELETE FROM a; DELETE FROM b WHERE x=1; DELETE FROM c;\n"), [1])
+        self.assertEqual(got("DELETE FROM b WHERE x=1; DELETE FROM c;\n"), [1])
+        self.assertEqual(got("DELETE FROM b WHERE x=1;\n"), [])
 
     def test_sqlproj_corpus_unchanged(self):
         """The sample SQL corpus reports exactly the pre-fix 12 issues."""

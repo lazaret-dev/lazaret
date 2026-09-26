@@ -89,6 +89,18 @@ def R(id, name, type, sev, langs, pat, msg, why, fix, ref, skip=None, need=None,
             "skip": re.compile(skip, re.I) if skip else None,
             "need": re.compile(need, re.I) if need else None}
 
+# Inline imports that evaluate to a module (SC-EVAL-DECODE prefix grammar):
+# `__import__("mod")` / `importlib.import_module("mod")`.
+_INLINE_IMPORT = (r"__import__\(\s*['\"][\w.]+['\"]\s*\)"
+                  r"|importlib\.import_module\(\s*['\"][\w.]+['\"]\s*\)")
+
+
+def _module_ref(name):
+    """Pattern for module `name` written by name or imported inline."""
+    return (rf"(?:{name}|__import__\(\s*['\"]{name}['\"]\s*\)"
+            rf"|importlib\.import_module\(\s*['\"]{name}['\"]\s*\))")
+
+
 RULES = [
 R("S-EVAL-PY", "Dynamic code execution", "VULN", "CRITICAL", ("py",),
   r"(?<![\w.])(eval|exec)\s*\(",
@@ -136,8 +148,19 @@ R("S-SHELL-TRUE", "subprocess with shell=True", "VULN", "CRITICAL", ("py",),
   "Shell metacharacters in user input become command injection.",
   "Pass args as a list with shell=False.",
   "CWE-78"),
+# Review fix: method names are not child_process calls. A receiver of this. /
+# self. / super. (or a #private name), a definition prefix (async, static,
+# get, set, function) and a definition shape — `name(params) {`, the
+# parameter list followed by a block, as in a class body or an object
+# literal — are excluded (56 false positives, all CRITICAL, in npm's own
+# lib/: `async exec (args) {`, `return this.exec(args)`). Free calls
+# (`exec(cmd)`, a destructured `const { exec } = require('child_process')`)
+# and calls on any other receiver (`cp.exec(…)`, `child_process.exec(…)`,
+# `require('child_process').exec(…)`) are still flagged.
 R("S-EXEC-JS", "Shell exec", "HOTSPOT", "CRITICAL", ("js",),
-  r"\b(exec|execSync)\s*\(\s*(`[^`]*\$\{|[\"'][^\"']*[\"']\s*\+|\w+\s*[,)+])",
+  r"(?<![#$])(?<!\bthis\.)(?<!\bself\.)(?<!\bsuper\.)(?<!\basync\s)(?<!\bstatic\s)(?<!\bget\s)"
+  r"(?<!\bset\s)(?<!\bfunction\s)\b(exec|execSync)\s*\((?![^()]*\)\s*\{)"
+  r"\s*(`[^`]*\$\{|[\"'][^\"']*[\"']\s*\+|\w+\s*[,)+])",
   "child_process exec with dynamic command string.",
   "Dynamic command strings passed to a shell risk command injection.",
   "Use execFile/spawn with an argument array.",
@@ -392,10 +415,17 @@ R("S-SPAWN-SHELL", "child_process with shell:true", "VULN", "CRITICAL", ("js",),
 # also matches this rule over a statement split across lines (`eval(\n
 # atob(…))`, `exec(  # comment\n b64decode(…))`); dependency mode adds a
 # decode-to-variable-to-sink flow (see _dep_decode_flow).
+# A prefix segment may also be an inline import — `__import__("base64").` or
+# `importlib.import_module("zlib").` (review: `exec(__import__("base64")
+# .b64decode("…"))` was missed) — and a module-qualified decoder may name its
+# module that way (`eval(__import__('codecs').decode(…))`). Every segment ends
+# at a '.', so the prefix stays linear-time.
 R("SC-EVAL-DECODE", "Decoded payload execution", "VULN", "BLOCKER", ("py", "js"),
-  r"\b(?:eval|exec|execSync|Function|runIn(?:This|New)?Context)\s*\(\s*(?:[\w$]+\s*\.\s*)*"
-  r"(?:atob|unescape|decodeURIComponent|Buffer\s*\.\s*from|b64decode|codecs\s*\.\s*decode|"
-  r"zlib\s*\.\s*decompress|marshal\s*\.\s*loads|fromhex|unhexlify)\s*\(",
+  r"\b(?:eval|exec|execSync|Function|runIn(?:This|New)?Context)\s*\(\s*"
+  r"(?:(?:[\w$]+|" + _INLINE_IMPORT + r")\s*\.\s*)*"
+  r"(?:atob|unescape|decodeURIComponent|Buffer\s*\.\s*from|b64decode|"
+  + _module_ref("codecs") + r"\s*\.\s*decode|" + _module_ref("zlib") + r"\s*\.\s*decompress|"
+  + _module_ref("marshal") + r"\s*\.\s*loads|fromhex|unhexlify)\s*\(",
   "Code decoded (base64/escape) and immediately executed.",
   "Decode-then-execute is the signature pattern of malware droppers and supply-chain implants.",
   "Treat as hostile until proven otherwise; inspect the decoded payload.",
@@ -2133,23 +2163,41 @@ def mk_issue(rule_or_dict, path, line_no, lines, col=None):
 
 
 # ---------------- Per-file finding cap (review fix: shared semantics 7) ----------------
-# At most CAP_PER_RULE findings per (file, rule) for low-value rules — sev
-# INFO or MINOR, or type SMELL — kept in line order; the rest are replaced by
-# ONE Q-CAPPED INFO finding per capped rule at the first omitted line.
-# Security findings (S-, T-, SC-, X-, SQL- rules) are never capped.
+# Findings identical on (rule, file, line, msg) are reported ONCE (the first,
+# i.e. leftmost, one is kept): they are indistinguishable in every report —
+# same line, same snippet text. Then at most CAP_PER_RULE findings per (file,
+# rule) are kept, in line order, for every rule that is not a security rule;
+# the rest are replaced by ONE Q-CAPPED INFO finding per capped rule at the
+# first omitted line. Security findings (S-, T-, SC-, X-, SQL- rules) are
+# never capped (but are deduplicated: distinct taint flows on one line keep
+# their distinct messages). Review: the cap used to cover INFO/MINOR/SMELL
+# rules only, so a 1.95 MB one-line `try{}catch(e){}` x 130k file gave 130,001
+# MAJOR B-EMPTY-CATCH findings and an 87.7 MB JSON report (120k lines: 66.7 MB).
 CAP_PER_RULE = 200
 _NEVER_CAPPED_PREFIXES = ("S-", "T-", "SC-", "X-", "SQL-")
 
 
 def _cappable(issue):
-    rid = str(issue.get("rule", ""))
-    if rid.startswith(_NEVER_CAPPED_PREFIXES):
-        return False
-    return issue.get("sev") in ("INFO", "MINOR") or issue.get("type") == "SMELL"
+    return not str(issue.get("rule", "")).startswith(_NEVER_CAPPED_PREFIXES)
+
+
+def dedupe_issues(issues):
+    """`issues` without repeats of the same (rule, file, line, msg); the first
+    of each is kept, order is preserved."""
+    seen, out = set(), []
+    for i in issues:
+        key = (i.get("rule"), i.get("file"), i.get("line"), i.get("msg"))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(i)
+    return out
 
 
 def cap_issues(path, issues, lines):
-    """`issues` (one file's findings) with the per-rule cap applied."""
+    """`issues` (one file's findings) deduplicated, then with the per-rule cap
+    applied (see above)."""
+    issues = dedupe_issues(issues)
     counts, dropped, omitted = {}, set(), {}
     order = sorted(range(len(issues)), key=lambda k: issues[k].get("line", 0))
     for k in order:
@@ -2169,7 +2217,7 @@ def cap_issues(path, issues, lines):
         out.append(mk_issue(
             {"id": "Q-CAPPED", "name": "Findings capped", "type": "SMELL", "sev": "INFO",
              "msg": f"{n} more {rid} findings omitted",
-             "why": "Low-severity findings that repeat hundreds of times in one file are capped "
+             "why": "Findings of one rule that repeat hundreds of times in one file are capped "
                     "so reports stay readable; security findings are never capped.",
              "fix": f"Fix or deliberately suppress the {rid} pattern in this file, then re-scan "
                     "to see the remaining occurrences.",
@@ -2622,8 +2670,8 @@ def _joined_eval_decode(ctx, i, rule_re):
 # eval(d)`). Names are never un-tainted (over-approximation is the safe
 # direction for third-party code). Project mode covers this with T-CODE/T-CMD.
 _DECODE_CALL_RE = re.compile(
-    r"(?:\batob|\bb64decode|\.\s*fromhex|\bunhexlify|\bcodecs\s*\.\s*decode"
-    r"|\bzlib\s*\.\s*decompress)\s*\("
+    r"(?:\batob|\bb64decode|\.\s*fromhex|\bunhexlify|\b" + _module_ref("codecs") + r"\s*\.\s*decode"
+    r"|\b" + _module_ref("zlib") + r"\s*\.\s*decompress)\s*\("
     r"|\bBuffer\s*\.\s*from\s*\([^;\n]{0,300}?['\"`]base64['\"`]")
 _DECODE_SINK_RE = re.compile(
     r"\b(?:eval|exec|execSync|execFile|execFileSync|spawn|spawnSync|Function"
@@ -2660,7 +2708,9 @@ def _dep_decode_flow(path, ctx, issues):
         events += [(m.start(), 1, m) for m in _DECODE_SINK_RE.finditer(blank)]
         events.sort(key=lambda e: (e[0], e[1]))
         close = None
-        for _pos, kind, m in events:
+        for n, (_pos, kind, m) in enumerate(events):
+            if n and not n & 255:     # one long line can hold thousands of statements
+                ctx.check_time()
             if kind == 0:
                 a, b = m.span(2)
                 if _DECODE_CALL_RE.search(code, a, b):
@@ -2800,12 +2850,16 @@ def _scan_file(path, content, lines, lang, dep, ctx, issues):
         # not here — their regexes match only the statement head.
         if lang not in r["langs"] or r["id"] in _SQL_NOWHERE_SKIP:
             continue
+        last = None
         for n, m in enumerate(r["re"].finditer(mcontent)):
-            if not n & 255:
+            if not n & 255:           # the time backstop also holds inside one rule
                 ctx.check_time()
             if starts is None:        # review fix: was content[:pos].count("\n") per match
                 starts = _line_starts(mcontent)
             line_no = bisect.bisect_right(starts, m.start())
+            if line_no == last:       # same (rule, line, msg): reported once (cap_issues)
+                continue
+            last = line_no
             issues.append(mk_issue(r, path, line_no, lines, m.start() - starts[line_no - 1]))
     ctx.check_time()
     if lang == "sql":
@@ -3507,6 +3561,45 @@ def _pyc_issue(rid, name, sev, path, msg, why, fix):
             "file": path, "line": 1, "snippet": [], "snipStart": 1}
 
 
+# ---------------- .pth files (SC-PTH-EXEC) ----------------
+# site.py executes every line of a .pth file in site-packages that starts
+# with 'import' at EVERY interpreter start. The registry has checked archive
+# members with this since the beginning; project and --deps scans now run
+# the same check on every .pth file they meet (review: a directory holding
+# only evil.pth exited 2, "nothing to scan"). A .pth file is not a source
+# file: no other rule runs on it, and it is not counted in the metrics.
+PTH_EXT = ".pth"
+_PTH_EXEC_RE = re.compile(
+    r"\b(?:exec|eval|compile)\s*\(|\b(?:b64decode|b32decode|b85decode|a85decode|fromhex|unhexlify)\b"
+    r"|\.decode\s*\(|\bmarshal\.loads\b|\bzlib\.decompress\b|\bcodecs\.decode\b|\\x[0-9a-fA-F]{2}")
+
+
+def pth_issues(path, text):
+    """SC-PTH-EXEC: site.py executes every line of a .pth file in
+    site-packages that starts with 'import' at EVERY interpreter start — no
+    import of the package needed. CRITICAL when the line also executes or
+    decodes code, MAJOR otherwise (setuptools' distutils shim and namespace
+    .pth files are this shape: listed for review). The registry's check
+    (lazaret.registry.repo) and the project walk share this one helper's
+    semantics; the npm engine's twin is js/src/lib/pth.js."""
+    out, lines = [], normalize_newlines(text).split("\n")
+    for i, line in enumerate(lines):
+        if not line.startswith(("import ", "import\t")):
+            continue
+        hostile = bool(_PTH_EXEC_RE.search(line))
+        out.append(mk_issue(
+            {"id": "SC-PTH-EXEC", "name": "Code in a .pth file", "type": "HOTSPOT",
+             "sev": "CRITICAL" if hostile else "MAJOR",
+             "msg": (".pth line runs code at every Python start"
+                     + (" and executes or decodes a payload." if hostile else ".")),
+             "why": ("site.py executes .pth lines that start with 'import' whenever the "
+                     "interpreter starts, whether or not the package is imported — a "
+                     "persistence and execution vector that needs no install hook."),
+             "fix": "Find out why the package ships executable .pth code; remove it if unexplained.",
+             "ref": "CWE-506 · Supply chain"}, path, i + 1, lines))
+    return out
+
+
 def pyc_issues(path, header, has_source):
     """SC-PYC-UNCHECKED / SC-PYC-ORPHAN for one .pyc in a __pycache__ dir.
     `header` is at least the first 8 bytes; `has_source` whether the
@@ -3727,9 +3820,10 @@ def _collect_file(path, rel, st, in_dep, col):
     ext = os.path.splitext(name)[1].lower()
     size = st.st_size
     manifest = name in MANIFEST_NAMES
-    lang = None if manifest else EXTS.get(ext)
+    pth = not manifest and ext == PTH_EXT
+    lang = None if manifest or pth else EXTS.get(ext)
     issues = col["issues"]
-    if not manifest and lang is None:
+    if not manifest and not pth and lang is None:
         # FIX-SPEC 9: every non-source regular file is classified by magic
         # bytes from a header sample (repo mode used to look at a fixed list
         # of extensions only: an ELF named `helper` or `logo.png` passed).
@@ -3754,6 +3848,10 @@ def _collect_file(path, rel, st, in_dep, col):
         col["manifests"].append({"path": disp, "dep": in_dep,
                                  "content": normalize_newlines(data.decode("utf-8", "replace"))})
         return
+    if pth:                # only the .pth check runs on it (decoded as the registry does)
+        col["pth"].append(disp)
+        issues.extend(pth_issues(disp, data.decode("utf-8-sig", "replace")))
+        return
     if data[:4] in APPLE_DOUBLE_MAGIC:
         bi = classify_binary(disp, data[:HEADER_SAMPLE_BYTES], size, "repo")
         if bi:
@@ -3765,15 +3863,16 @@ def _collect_file(path, rel, st, in_dep, col):
 
 
 def _collect(root, excludes=(), include_deps=False):
-    """Walk `root` iteratively. Returns {"files", "manifests", "issues",
+    """Walk `root` iteratively. Returns {"files", "manifests", "pth", "issues",
     "skipped"}: files = [{path, content, lang, dep}], manifests = [{path,
-    content, dep}], issues = collection findings (binary classification,
-    SC-TRUNCATED, Q-ENCODING/SC-UTF7, SC-PYC-*, Q-SYMLINK, Q-UNREADABLE),
-    skipped = [(rel, n_files, n_bytes)] pruned trees. Paths are root-relative
+    content, dep}], pth = paths of the .pth files checked, issues = collection
+    findings (binary classification, SC-TRUNCATED, Q-ENCODING/SC-UTF7,
+    SC-PYC-*, SC-PTH-EXEC, Q-SYMLINK, Q-UNREADABLE), skipped = [(rel,
+    n_files, n_bytes)] pruned trees. Paths are root-relative
     (os.sep separators) and valid UTF-8. Raises ScanTargetError when the root
     itself cannot be listed."""
     excludes = set(excludes or ())
-    col = {"files": [], "manifests": [], "issues": [], "skipped": []}
+    col = {"files": [], "manifests": [], "pth": [], "issues": [], "skipped": []}
     issues = col["issues"]
     seen_dirs = set()
     stack = [("", False)]
@@ -3927,7 +4026,7 @@ def scan_project(root, exclude=(), include_deps=False, taint_config=None,
                             _dedupe(get_taint_config_warnings() + flow_warnings))
         col = _collect(root, exclude, include_deps=include_deps)
         files, manifests = col["files"], col["manifests"]
-        if not files and not manifests and not col["issues"]:
+        if not files and not manifests and not col["pth"] and not col["issues"]:
             raise ScanTargetError(
                 f"nothing to scan under {_fs_display(root)}: no Python, JavaScript or "
                 f"SQL sources, package manifests or other files to check")

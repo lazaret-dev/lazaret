@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-/2Q/ABEeQJwY2zqQfpUnmQ11ZRZYuAf96Yv4+A2+8sU='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-Rp/cctG4RVwcqo6Nuc3HPecnGP79xTlYcFpGpGa90LY='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
 <title>Lazaret — Security &amp; Quality Review</title>
 <style>
   :root{
@@ -105,7 +105,7 @@
           <option value="sql">SQL</option>
         </select>
         <label class="filebtn">Upload files (.py .js .ts .sql …)
-          <input type="file" id="files" multiple accept=".py,.js,.ts,.jsx,.tsx,.mjs,.cjs,.sql">
+          <input type="file" id="files" multiple accept=".py,.js,.ts,.jsx,.tsx,.mjs,.cjs,.sql,.pth">
         </label>
         <div class="filelist" id="filelist"></div>
         <button class="primary" id="scanBtn">Scan code</button>
@@ -993,24 +993,69 @@ const SNIPPET_MAX = 240;      // characters (code points) per snippet line
 const SNIPPET_LEAD = 60;      // context kept before the match on the flagged line
 const ELLIPSIS = "…";
 
+// Code-point offsets (Python's str indexing) into a long line, in O(log n)
+// per finding: clipLine used to build Array.from(line) and mkIssue
+// cpLen(line.slice(0, col)) for EVERY finding, so 10k findings on one 150 KB
+// line took 12.6 s (20k: > 44 s). The view of a line — the UTF-16 offsets of
+// its surrogate pairs, or null when it has none (then code-point and UTF-16
+// offsets coincide) — is computed once and kept for the few most recent long
+// lines; the output is exactly the code-point-based clipping of
+// core.clip_snippet_line.
+const CP_VIEW_CACHE = 8;
+const cpViews = new Map();
+const PAIR_RE = /[\ud800-\udbff][\udc00-\udfff]/g;
+function surrogatePairs(s) {
+  let v = cpViews.get(s);
+  if (v !== undefined) return v;
+  v = null;
+  if (/[\ud800-\udbff]/.test(s)) {
+    const at = [];
+    PAIR_RE.lastIndex = 0;
+    let m;
+    while ((m = PAIR_RE.exec(s))) at.push(m.index);
+    if (at.length) v = at;
+  }
+  if (cpViews.size >= CP_VIEW_CACHE) cpViews.delete(cpViews.keys().next().value);
+  cpViews.set(s, v);
+  return v;
+}
+/** UTF-16 offset of code point `c` (pair j starts at code point pairs[j] - j). */
+function unitAt(pairs, c) {
+  if (!pairs) return c;
+  let lo = 0, hi = pairs.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (pairs[mid] - mid < c) lo = mid + 1; else hi = mid; }
+  return c + lo;
+}
+/** cpIndex(s, off) — the code-point index of UTF-16 offset `off` — for any line length. */
+function cpIndexOf(s, off) {
+  if (s.length <= SNIPPET_MAX || off < 0) return cpIndex(s, off);
+  const u = Math.min(off, s.length);
+  const pairs = surrogatePairs(s);
+  if (!pairs) return u;
+  let lo = 0, hi = pairs.length;                  // pairs wholly before u
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (pairs[mid] + 2 <= u) lo = mid + 1; else hi = mid; }
+  return u - lo;
+}
+
 /**
  * Clip one snippet line to SNIPPET_MAX characters. The flagged line is
  * windowed around the match (`col`, a code-point offset): the window starts
  * SNIPPET_LEAD characters before it (never past the point where it would
  * run off the end) and "…" marks each side that was cut. Other lines keep
- * their start.
+ * their start. O(window) per call once the line's view is cached.
  */
 function clipLine(text, col = null) {
   if (typeof text !== "string" || text.length <= SNIPPET_MAX) return text;
-  const n = cpLen(text);
+  const pairs = surrogatePairs(text);
+  const n = text.length - (pairs ? pairs.length : 0);
   if (n <= SNIPPET_MAX) return text;
-  const cps = Array.from(text);
   let start = col == null ? 0 : Math.max(0, col - SNIPPET_LEAD);
   start = Math.min(start, n - (SNIPPET_MAX - 1));
   const head = start > 0 ? ELLIPSIS : "";
   const end = start + SNIPPET_MAX - head.length;
-  if (end < n) return head + cps.slice(start, end - 1).join("") + ELLIPSIS;
-  return head + cps.slice(start).join("");
+  const from = unitAt(pairs, start);
+  if (end < n) return head + text.slice(from, unitAt(pairs, end - 1)) + ELLIPSIS;
+  return head + text.slice(from);
 }
 
 /**
@@ -1028,7 +1073,7 @@ function mkIssue(rule, file, line, lines, col = null) {
   const msg = REDACT.on ? redactText(rule.msg, ctx ? contextSecrets(ctx) : null) : rule.msg;
   const redact = REDACT.on && flag >= 0 && flag < lines.length;
   const pem = redact && !ctx ? pemBlockLines(lines) : null;
-  const cpCol = col != null && typeof lines[flag] === "string" ? cpIndex(lines[flag], col) : null;
+  const cpCol = col != null && typeof lines[flag] === "string" ? cpIndexOf(lines[flag], col) : null;
   const snippet = [];
   for (let k = start; k < stop; k++) {
     let l = lines[k];
@@ -1336,7 +1381,7 @@ id:"S-SHELL-TRUE", name:"subprocess with shell=True", type:"VULN", sev:"CRITICAL
 },
 {
 id:"S-EXEC-JS", name:"Shell exec", type:"HOTSPOT", sev:"CRITICAL", langs:["js"],
- re:pyRe("\\b(exec|execSync)\\s*\\(\\s*(`[^`]*\\$\\{|[\\\"'][^\\\"']*[\\\"']\\s*\\+|\\w+\\s*[,)+])", ""),
+ re:pyRe("(?<![#$])(?<!\\bthis\\.)(?<!\\bself\\.)(?<!\\bsuper\\.)(?<!\\basync\\s)(?<!\\bstatic\\s)(?<!\\bget\\s)(?<!\\bset\\s)(?<!\\bfunction\\s)\\b(exec|execSync)\\s*\\((?![^()]*\\)\\s*\\{)\\s*(`[^`]*\\$\\{|[\\\"'][^\\\"']*[\\\"']\\s*\\+|\\w+\\s*[,)+])", ""),
  msg:"child_process exec with dynamic command string.",
  why:"Dynamic command strings passed to a shell risk command injection.",
  fix:"Use execFile/spawn with an argument array.",
@@ -1646,7 +1691,7 @@ id:"S-SPAWN-SHELL", name:"child_process with shell:true", type:"VULN", sev:"CRIT
 },
 {
 id:"SC-EVAL-DECODE", name:"Decoded payload execution", type:"VULN", sev:"BLOCKER", langs:["py", "js"],
- re:pyRe("\\b(?:eval|exec|execSync|Function|runIn(?:This|New)?Context)\\s*\\(\\s*(?:[\\w$]+\\s*\\.\\s*)*(?:atob|unescape|decodeURIComponent|Buffer\\s*\\.\\s*from|b64decode|codecs\\s*\\.\\s*decode|zlib\\s*\\.\\s*decompress|marshal\\s*\\.\\s*loads|fromhex|unhexlify)\\s*\\(", ""),
+ re:pyRe("\\b(?:eval|exec|execSync|Function|runIn(?:This|New)?Context)\\s*\\(\\s*(?:(?:[\\w$]+|__import__\\(\\s*['\\\"][\\w.]+['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"][\\w.]+['\\\"]\\s*\\))\\s*\\.\\s*)*(?:atob|unescape|decodeURIComponent|Buffer\\s*\\.\\s*from|b64decode|(?:codecs|__import__\\(\\s*['\\\"]codecs['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]codecs['\\\"]\\s*\\))\\s*\\.\\s*decode|(?:zlib|__import__\\(\\s*['\\\"]zlib['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]zlib['\\\"]\\s*\\))\\s*\\.\\s*decompress|(?:marshal|__import__\\(\\s*['\\\"]marshal['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]marshal['\\\"]\\s*\\))\\s*\\.\\s*loads|fromhex|unhexlify)\\s*\\(", ""),
  msg:"Code decoded (base64/escape) and immediately executed.",
  why:"Decode-then-execute is the signature pattern of malware droppers and supply-chain implants.",
  fix:"Treat as hostile until proven otherwise; inspect the decoded payload.",
@@ -2521,7 +2566,7 @@ function extractFunctions(lines, lang) {
 const LONG_LINE = 160;
 const FN_LEN_LIMIT = 60;
 const FN_CX_LIMIT = 12;
-/** Spec 7: per (file, rule) cap for INFO/MINOR/SMELL findings (security rules are never capped). */
+/** Spec 7: per (file, rule) cap for every non-security rule (S-, T-, SC-, X-, SQL- are never capped). */
 const CAP_PER_RULE = 200;
 const NEVER_CAPPED_PREFIXES = ["S-", "T-", "SC-", "X-", "SQL-"];
 /** Spec 14: per-file backstop for pattern rules (the regexes themselves are linear). */
@@ -2775,12 +2820,29 @@ function joinedEvalDecode(ctx, i, ruleRe) {
 }
 
 // ---- findings cap (spec 7) -------------------------------------------------
+// Findings identical on (rule, file, line, msg) are reported once (the first
+// is kept): same line, same snippet text in every report. Then every rule
+// that is not a security rule (S-, T-, SC-, X-, SQL-) is capped at
+// CAP_PER_RULE findings per file, whatever its severity or type (review: a
+// MAJOR B-EMPTY-CATCH gave 130,001 findings, an 87.7 MB report, for one
+// 1.95 MB line). Twin of core.dedupe_issues / cap_issues.
 function cappable(i) {
-  return !NEVER_CAPPED_PREFIXES.some((p) => String(i.rule).startsWith(p))
-    && (i.sev === "INFO" || i.sev === "MINOR" || i.type === "SMELL");
+  return !NEVER_CAPPED_PREFIXES.some((p) => String(i.rule).startsWith(p));
 }
-/** At most CAP_PER_RULE findings per rule, in line order; one Q-CAPPED per capped rule at its first omitted line. */
+/** `issues` without repeats of the same (rule, file, line, msg); the first of each is kept, in order. */
+function dedupeIssues(issues) {
+  const seen = new Set(), out = [];
+  for (const i of issues) {
+    const key = JSON.stringify([i.rule, i.file, i.line, i.msg]);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(i);
+  }
+  return out;
+}
+/** Deduplicated; then at most CAP_PER_RULE findings per rule, in line order; one Q-CAPPED per capped rule at its first omitted line. */
 function capIssues(path, issues, lines) {
+  issues = dedupeIssues(issues);
   const order = issues.map((_, k) => k).sort((a, b) => (issues[a].line ?? 0) - (issues[b].line ?? 0) || a - b);
   const counts = new Map(), dropped = new Set(), omitted = new Map();
   for (const k of order) {
@@ -2799,7 +2861,7 @@ function capIssues(path, issues, lines) {
   for (const [rid, [n, first]] of omitted) {
     out.push(mkIssue({ id: "Q-CAPPED", name: "Findings capped", type: "SMELL", sev: "INFO",
       msg: `${n} more ${rid} findings omitted`,
-      why: "Low-severity findings that repeat hundreds of times in one file are capped so reports stay readable; security findings are never capped.",
+      why: "Findings of one rule that repeat hundreds of times in one file are capped so reports stay readable; security findings are never capped.",
       fix: `Fix or deliberately suppress the ${rid} pattern in this file, then re-scan to see the remaining occurrences.`,
       ref: "Maintainability" }, path, first, lines));
   }
@@ -2929,9 +2991,13 @@ function scanLines(path, content, lines, lang, ctx, issues) {
   for (const r of TEXT_RULES) {
     // *-NOWHERE SQL rules are fired by scanSqlNowhere() (linear pass)
     if (!r.langs.includes(lang) || !r.scan) continue;
+    let n = 0, last = -1;
     for (const off of r.scan(mcontent)) {
+      if (!(n++ & 255)) ctx.checkTime();     // the time backstop also holds inside one rule
       starts ??= lineStarts(mcontent);
       const lineNo = upperBound(starts, off);
+      if (lineNo === last) continue;         // same (rule, line, msg): reported once (capIssues)
+      last = lineNo;
       issues.push(mkIssue(r, path, lineNo, lines, off - starts[lineNo - 1]));
     }
     ctx.checkTime();
@@ -3026,8 +3092,9 @@ function maintainabilityRating(issues, ncloc) {
 // The CLI's limits (FIX-SPEC items 7, 9, 14; see scanFile / capIssues above):
 // a file over MAX_FILE_BYTES is not scanned but gets one SC-TRUNCATED
 // finding (which fails the gate) instead of freezing the tab; there is no
-// per-file issue budget; per (file, rule) at most CAP_PER_RULE findings of an
-// INFO or MINOR rule or a code smell, then one Q-CAPPED; snippet lines are
+// per-file issue budget; findings repeated on (rule, line, message) are
+// reported once, and per (file, rule) at most CAP_PER_RULE findings of any
+// non-security rule, then one Q-CAPPED; snippet lines are
 // clipped to SNIPPET_MAX characters; a file whose rules run longer than
 // SCAN_TIME_BUDGET_MS stops with SC-TRUNCATED.
 const MAX_FILE_BYTES = 2000000;
@@ -3062,6 +3129,34 @@ function langFromName(name) {
   return m ? EXT_LANGS[m[0].toLowerCase()] ?? null : null;
 }
 
+/* ---- .pth files (SC-PTH-EXEC) — twin of core.pth_issues ------------------
+   site.py executes every line of a .pth file in site-packages that starts
+   with 'import' at every interpreter start. An uploaded .pth file gets only
+   this check (as in the CLI's project and --deps scans): no other rule runs
+   on it, and it is not counted in the metrics. */
+const PTH_EXEC_RE = pyRe("\\b(?:exec|eval|compile)\\s*\\(|\\b(?:b64decode|b32decode|b85decode|a85decode|fromhex|unhexlify)\\b|\\.decode\\s*\\(|\\bmarshal\\.loads\\b|\\bzlib\\.decompress\\b|\\bcodecs\\.decode\\b|\\\\x[0-9a-fA-F]{2}");
+function isPth(name) {                         // os.path.splitext(name)[1].lower() == ".pth"
+  const base = String(name).split(/[\\/]/).pop();
+  const dot = base.lastIndexOf(".");
+  return dot > 0 && /[^.]/.test(base.slice(0, dot)) && base.slice(dot).toLowerCase() === ".pth";
+}
+function pthIssues(path, text) {
+  const out = [];
+  const lines = normalizeNewlines(text).split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line.startsWith("import ") && !line.startsWith("import\t")) continue;
+    const hostile = PTH_EXEC_RE.test(line);
+    out.push(mkIssue({ id: "SC-PTH-EXEC", name: "Code in a .pth file", type: "HOTSPOT",
+      sev: hostile ? "CRITICAL" : "MAJOR",
+      msg: ".pth line runs code at every Python start" + (hostile ? " and executes or decodes a payload." : "."),
+      why: "site.py executes .pth lines that start with 'import' whenever the interpreter starts, whether or not the package is imported — a persistence and execution vector that needs no install hook.",
+      fix: "Find out why the package ships executable .pth code; remove it if unexplained.",
+      ref: "CWE-506 · Supply chain" }, path, i + 1, lines));
+  }
+  return out;
+}
+
 /**
  * An uploaded file, decoded from its bytes the way the CLI reads a source
  * file (core.decode_source: BOM / UTF-16 sniff, PEP 263 cookie for Python,
@@ -3069,6 +3164,8 @@ function langFromName(name) {
  * and has no `enc`.
  */
 function decodeUpload(name, bytes, size) {
+  if (isPth(name))                                // decoded as the CLI does: utf-8-sig, replacement
+    return { name, content: normalizeNewlines(new TextDecoder("utf-8").decode(bytes)), size, lang: null, pth: true };
   let lang = langFromName(name);
   let dec = decodeSource(bytes, { py: lang === "py" });
   if (!lang) {                                    // no known extension: detect on the text
@@ -3099,6 +3196,12 @@ function encodingIssues(file) {
 
 /** Every finding for one file: its encoding notes, then its scan. */
 function analyzeFile(file) {
+  if (file.pth) {
+    const bytes = fileBytes(file);
+    return bytes > MAX_FILE_BYTES
+      ? [truncatedIssue(file.name, `${withCommas(bytes)} bytes exceeds the ${withCommas(MAX_FILE_BYTES)}-byte file limit`)]
+      : pthIssues(file.name, file.content);
+  }
   return encodingIssues(file).concat(scanFile(file));
 }
 
@@ -3121,7 +3224,7 @@ function buildResult(files) {
   let issues = [];
   for (const f of files) issues = issues.concat(analyzeFile(f));
   issues.sort((a, b) => SEV_ORDER[a.sev] - SEV_ORDER[b.sev] || cmpCodePoints(a.file, b.file) || a.line - b.line);
-  const metrics = computeMetrics(files);
+  const metrics = computeMetrics(files.filter((f) => !f.pth));   // a .pth file is not source
   const counts = { VULN: 0, HOTSPOT: 0, BUG: 0, SMELL: 0 };
   issues.forEach((i) => counts[i.type]++);
   const ratings = { security: worstSevRating(issues, ["VULN"]), reliability: worstSevRating(issues, ["BUG"]),
@@ -3160,7 +3263,7 @@ $("#files").addEventListener("change", async e=>{
     if(r.status === "fulfilled"){
       const f = fileArr[k];
       uploaded.push(r.value === null
-        ? {name:f.name, content:"", size:f.size, lang:langFromName(f.name) || detectLang(f.name, "")}
+        ? {name:f.name, content:"", size:f.size, lang:isPth(f.name) ? null : langFromName(f.name) || detectLang(f.name, ""), pth:isPth(f.name)}
         : decodeUpload(f.name, new Uint8Array(r.value), f.size));
     }else{
       const reason = r.reason && r.reason.message ? r.reason.message : String(r.reason);
