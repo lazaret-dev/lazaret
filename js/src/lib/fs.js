@@ -18,9 +18,13 @@ import { pthIssues } from "./pth.js";
 import { registerScanContext, SECRET_SKIP_RE } from "./redact.js";
 
 export const EXTS = {
-  ".py": "py", ".js": "js", ".jsx": "js", ".ts": "js", ".tsx": "js",
+  ".py": "py", ".pyw": "py", ".js": "js", ".jsx": "js", ".ts": "js", ".tsx": "js",
   ".mjs": "js", ".cjs": "js", ".sql": "sql",
 };
+// gyp files, whatever their name (twin of core.GYP_EXTS): binding.gyp pulls
+// others in ('includes': ['build/common.gypi']) and node-gyp runs their
+// actions and command expansions too, so every one goes to scanGyp.
+export const GYP_EXTS = new Set([".gyp", ".gypi"]);
 
 /**
  * Line endings as Python's text mode reads them: \r\n and a lone \r both become \n.
@@ -233,8 +237,9 @@ function treeStats(dirBuf) {
 /**
  * Collect the files to scan under `root` (twin of core._collect).
  * Returns { files, manifests, pth, binaryIssues, skippedIssues } — files:
- * [{path, content, lang, dep}], manifests: package.json/binding.gyp entries
- * [{kind, path, content, dep}], pth: paths of the .pth files checked,
+ * [{path, content, lang, dep}], manifests: package.json and gyp entries
+ * [{kind, path, content, dep}] (kind "package.json", "binding.gyp", or "gyp"
+ * for any other .gyp / .gypi file), pth: paths of the .pth files checked,
  * binaryIssues: collection findings (binary classification, SC-TRUNCATED,
  * Q-ENCODING/SC-UTF7, SC-PYC-*, SC-PTH-EXEC, Q-SYMLINK, Q-UNREADABLE,
  * Q-SCAN-ERROR), skippedIssues: Q-SKIPPED-TREE per pruned tree.
@@ -302,7 +307,7 @@ const withCommas = (n) => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 
 function collectFile(full, rel, name, st, dep, col) {
   const ext = extname(name).toLowerCase();
-  const kind = name === "package.json" || name === "binding.gyp" ? name : null;
+  const kind = name === "package.json" || name === "binding.gyp" ? name : GYP_EXTS.has(ext) ? "gyp" : null;
   const pth = !kind && ext === ".pth";
   const lang = kind || pth ? null : EXTS[ext];
   const size = st.size;

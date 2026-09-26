@@ -95,8 +95,8 @@ missing, non-directory, unreadable or empty target); `3` report output error; `4
 rejected (see "Custom taint config"); `5` internal error (`error: internal: …`; set `LAZARET_DEBUG=1` for
 the traceback). A crash never looks like a failed gate.
 
-**What gets scanned:** `.py .js .jsx .ts .tsx .mjs .cjs .sql` sources, `package.json` and `binding.gyp`
-(install hooks), `.pth` files (their `import` lines run at every Python start: SC-PTH-EXEC), and every other regular file by magic bytes (executables, shared objects, nested
+**What gets scanned:** `.py .pyw .js .jsx .ts .tsx .mjs .cjs .sql` sources, `package.json`, `binding.gyp`
+and every other `.gyp`/`.gypi` file (install hooks), `.pth` files (their `import` lines run at every Python start: SC-PTH-EXEC), and every other regular file by magic bytes (executables, shared objects, nested
 archives, opaque blobs — see Binary artifacts). `.git` is always skipped. `node_modules`,
 `bower_components` and `site-packages` are pruned unless `--deps`; `vendor`, `venv`, `.venv` and `env`
 are pruned only when they look like dependency trees (a `pyvenv.cfg`, `modules.txt`, `autoload.php`,

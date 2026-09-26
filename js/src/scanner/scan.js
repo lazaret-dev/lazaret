@@ -33,7 +33,7 @@ const COMMENT_LINE_RULES = new Set(["Q-TODO", "S-TOKEN", "S-BIDI"]);
 
 /* ---------------- Analyzers ---------------- */
 export function detectLang(name, content) {
-  if (/\.(py)$/i.test(name)) return "py";
+  if (/\.(py|pyw)$/i.test(name)) return "py";
   if (/\.(js|jsx|ts|tsx|mjs|cjs)$/i.test(name)) return "js";
   if (/\.sql$/i.test(name)) return "sql";
   // content heuristic: SQL keywords dominate and no JS/py structure

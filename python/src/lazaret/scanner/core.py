@@ -1539,7 +1539,7 @@ LONG_LINE = 160
 FN_LEN_LIMIT = 60
 FN_CX_LIMIT = 12
 FN_HEADER_SCAN_LIMIT = 2000   # chars of a JS line searched for a function header
-EXTS = {".py": "py", ".js": "js", ".jsx": "js", ".ts": "js", ".tsx": "js",
+EXTS = {".py": "py", ".pyw": "py", ".js": "js", ".jsx": "js", ".ts": "js", ".tsx": "js",
         ".mjs": "js", ".cjs": "js", ".sql": "sql"}
 # G10 + review item 8: what the project walk never source-scans.
 #   * .git (exactly that name) is always pruned — VCS metadata, never
@@ -4006,6 +4006,10 @@ SOURCE_SIZE_CAP = _env_int("LAZARET_MAX_SOURCE_BYTES", 16_000_000)
 #: Bytes read from every non-source regular file for magic-byte classification.
 HEADER_SAMPLE_BYTES = 512
 MANIFEST_NAMES = ("package.json", "binding.gyp")
+#: gyp files, whatever their name: binding.gyp pulls others in ('includes':
+#: ['build/common.gypi']) and node-gyp runs their actions and command
+#: expansions too, so every one is parsed by scan_gyp (as the registry does).
+GYP_EXTS = (".gyp", ".gypi")
 #: AppleDouble / AppleSingle metadata ("._name" files macOS writes on non-HFS
 #: volumes and into tarballs). Starts with a NUL, so it can never be Python or
 #: JavaScript source; it is classified like any other non-source file.
@@ -4424,7 +4428,7 @@ def _collect_file(path, rel, st, in_dep, col):
     disp = _fs_display(rel)
     ext = os.path.splitext(name)[1].lower()
     size = st.st_size
-    manifest = name in MANIFEST_NAMES
+    manifest = name in MANIFEST_NAMES or ext in GYP_EXTS
     pth = not manifest and ext == PTH_EXT
     lang = None if manifest or pth else EXTS.get(ext)
     issues = col["issues"]
@@ -4563,9 +4567,10 @@ def collect_files(root, extra_excludes, include_deps=False):
 
 
 def _scan_manifest_entry(mf):
-    """binding.gyp -> scan_gyp (G11); package.json -> scan_manifest. A
-    manifest inside a detected dependency tree gets the registry hook set."""
-    if os.path.basename(mf["path"]) == "binding.gyp":
+    """binding.gyp and every other .gyp / .gypi file -> scan_gyp (G11);
+    package.json -> scan_manifest. A manifest inside a detected dependency
+    tree gets the registry hook set."""
+    if os.path.splitext(mf["path"])[1].lower() in GYP_EXTS:
         return scan_gyp(mf["path"], mf["content"])
     dep = mf.get("dep")
     if dep is None:

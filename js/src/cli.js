@@ -278,10 +278,10 @@ function runChecked(argv, io) {
     catch (e) { issues.push(scanErrorIssue(f.path, e)); }            // one file must never kill the run
   }
   for (const mf of manifests) {
-    // binding.gyp → scanGyp (G11); package.json → scanManifest, with the
-    // registry hook set inside a detected dependency tree.
+    // binding.gyp and every other .gyp / .gypi → scanGyp (G11); package.json
+    // → scanManifest, with the registry hook set inside a dependency tree.
     try {
-      add(mf.kind === "binding.gyp" ? scanGyp(mf.path, mf.content)
+      add(mf.kind !== "package.json" ? scanGyp(mf.path, mf.content)
         : scanManifest(mf.path, mf.content, { registry: !!mf.dep }));
     } catch (e) { issues.push(scanErrorIssue(mf.path, e)); }
   }

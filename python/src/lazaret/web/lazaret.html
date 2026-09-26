@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-nXGnvovY4ouIvLFqzA153hbMM4z4dhXk/BGiaNTtju0='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-r+IanKlulia+ASVaK5yLrb+iEJEu6Y325dPbgQe4rTg='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
 <title>Lazaret — Security &amp; Quality Review</title>
 <style>
   :root{
@@ -2616,7 +2616,7 @@ const COMMENT_LINE_RULES = new Set(["Q-TODO", "S-TOKEN", "S-BIDI"]);
 
 /* ---------------- Analyzers ---------------- */
 function detectLang(name, content) {
-  if (/\.(py)$/i.test(name)) return "py";
+  if (/\.(py|pyw)$/i.test(name)) return "py";
   if (/\.(js|jsx|ts|tsx|mjs|cjs)$/i.test(name)) return "js";
   if (/\.sql$/i.test(name)) return "sql";
   // content heuristic: SQL keywords dominate and no JS/py structure
@@ -3244,7 +3244,7 @@ function truncatedIssue(path, detail) {
     ref: "CWE-506 · Supply chain" }, path);
 }
 
-const EXT_LANGS = { ".py": "py", ".js": "js", ".jsx": "js", ".ts": "js", ".tsx": "js",
+const EXT_LANGS = { ".py": "py", ".pyw": "py", ".js": "js", ".jsx": "js", ".ts": "js", ".tsx": "js",
   ".mjs": "js", ".cjs": "js", ".sql": "sql" };             // core.EXTS
 function langFromName(name) {
   const m = /\.[^./\\]+$/.exec(String(name));

@@ -74,8 +74,8 @@ not already a Lazaret report (unless `--force-overwrite`). Writes are atomic
 
 ## What gets scanned
 
-- `.py`, `.js`/`.jsx`/`.ts`/`.tsx`/`.mjs`/`.cjs` and `.sql` sources, every
-  `package.json` and `binding.gyp`, and `.pth` files (only the `SC-PTH-EXEC`
+- `.py`/`.pyw`, `.js`/`.jsx`/`.ts`/`.tsx`/`.mjs`/`.cjs` and `.sql` sources, every
+  `package.json`, `binding.gyp` and other `.gyp`/`.gypi` file, and `.pth` files (only the `SC-PTH-EXEC`
   check runs on them; they are not counted in the metrics; a directory with
   only a `.pth` file is a valid target). Every other regular file is classified by
   its magic bytes (`SC-BINARY`). Sources and manifests over 16,000,000 bytes
