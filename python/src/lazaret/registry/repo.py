@@ -988,6 +988,12 @@ def _zip_preflight(data):
     return None
 
 
+# What reading one zip member can raise (bad CRC, broken deflate/bz2/lzma
+# stream, an encrypted or unsupported entry, a bad local header).
+_ZIP_READ_ERRORS = (zipfile.BadZipFile, OSError, EOFError, ValueError, zlib.error,
+                    lzma.LZMAError, NotImplementedError, RuntimeError)
+
+
 def _iter_zip(data, artifact, budget, anomalies):
     refused = _zip_preflight(data)
     if refused:
@@ -1032,8 +1038,7 @@ def _iter_zip(data, artifact, budget, anomalies):
                 last = rel
                 try:
                     raw = read(info, MAX_MEMBER + 1)          # bounded, real bytes
-                except (zipfile.BadZipFile, OSError, EOFError, ValueError, zlib.error,
-                        lzma.LZMAError, NotImplementedError, RuntimeError) as exc:
+                except _ZIP_READ_ERRORS as exc:
                     yield Member(rel, 0, b"", "corrupt",
                                  f"member {rel} could not be read ({type(exc).__name__})")
                     continue
@@ -1045,9 +1050,12 @@ def _iter_zip(data, artifact, budget, anomalies):
                 budget.check()
                 try:
                     linkname = read(info, 4096).decode("utf-8", "replace")
-                except (zipfile.BadZipFile, OSError, EOFError, ValueError, zlib.error,
-                        NotImplementedError, RuntimeError):
-                    linkname = ""
+                except _ZIP_READ_ERRORS as exc:
+                    # where it points is unknown, so what it installs was not
+                    # scanned: INCOMPLETE, not an "outside the archive" WARN
+                    yield Member(rel, 0, b"", "corrupt",
+                                 f"link {rel} could not be read ({type(exc).__name__})")
+                    continue
                 target = _link_target(info.filename, linkname, True) if linkname else None
                 trel = canonical_member_path(target, artifact)[0] if target else None
                 if trel is None:
@@ -1058,7 +1066,13 @@ def _iter_zip(data, artifact, budget, anomalies):
                     continue                                   # dangling inside the archive
                 _note_member(seen, rel, anomalies)
                 last = rel
-                raw = read(tinfo, MAX_MEMBER + 1)
+                try:
+                    raw = read(tinfo, MAX_MEMBER + 1)
+                except _ZIP_READ_ERRORS as exc:
+                    yield Member(rel, 0, b"", "corrupt",
+                                 f"link target {trel} of {rel} could not be read "
+                                 f"({type(exc).__name__})")
+                    continue
                 if len(raw) > MAX_MEMBER:
                     yield Member(rel, SAMPLE, raw[:SAMPLE], "member")
                 else:

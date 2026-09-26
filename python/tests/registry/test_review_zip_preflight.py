@@ -120,5 +120,53 @@ class PreflightTests(unittest.TestCase):
         self.assertTrue(any("not a readable zip archive" in i["msg"] for i in res["issues"]))
 
 
+def zip_with_bad_crc(files, symlinks, bad):
+    """Stored zip; the central-directory CRC of member `bad` is wrong, so
+    reading it raises BadZipFile (what a corrupted download looks like)."""
+    import stat
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as zf:
+        for path, content in files.items():
+            zf.writestr(path, content)
+        for path, target in symlinks.items():
+            info = zipfile.ZipInfo(path)
+            info.external_attr = (stat.S_IFLNK | 0o777) << 16
+            zf.writestr(info, target)
+    data = bytearray(buf.getvalue())
+    pos = 0
+    while True:
+        pos = data.index(b"PK\x01\x02", pos)
+        name_len = struct.unpack_from("<H", data, pos + 28)[0]
+        if bytes(data[pos + 46:pos + 46 + name_len]) == bad.encode():
+            struct.pack_into("<L", data, pos + 16, 0xDEADBEEF)
+            return bytes(data)
+        pos += 4
+
+
+class ZipLinkReadTests(unittest.TestCase):
+    """Final-review item 7 (repo.py audit): a zip symlink whose own entry
+    could not be read was reported as "link to '' points outside the
+    archive" — SC-ARCHIVE-LINK, a WARN — although what it installs was never
+    scanned; and a link whose TARGET could not be read raised out of the
+    archive reader, failing the whole package instead of marking it."""
+
+    def test_unreadable_link_is_incomplete_not_warn(self):
+        data = zip_with_bad_crc({"x-1.0/x/__init__.py": "V = 1\n"},
+                                {"x-1.0/x/run.py": "__init__.py"}, bad="x-1.0/x/run.py")
+        res = scan_bytes(data, container="zip", artifact="sdist", eco="pypi")
+        self.assertEqual(res["verdict"], "INCOMPLETE", res["issues"])
+        self.assertFalse(any(i["rule"] == "SC-ARCHIVE-LINK" for i in res["issues"]))
+        self.assertTrue(any("link x/run.py could not be read" in i["msg"]
+                            for i in res["issues"] if i["rule"] == "SC-TRUNCATED"))
+
+    def test_unreadable_link_target_is_incomplete_not_an_error(self):
+        data = zip_with_bad_crc({"x-1.0/x/__init__.py": "V = 1\n"},
+                                {"x-1.0/x/run.py": "__init__.py"}, bad="x-1.0/x/__init__.py")
+        res = scan_bytes(data, container="zip", artifact="sdist", eco="pypi")
+        self.assertEqual(res["verdict"], "INCOMPLETE")
+        msgs = [i["msg"] for i in res["issues"] if i["rule"] == "SC-TRUNCATED"]
+        self.assertTrue(any("link target x/__init__.py of x/run.py" in m for m in msgs), msgs)
+
+
 if __name__ == "__main__":
     unittest.main()
