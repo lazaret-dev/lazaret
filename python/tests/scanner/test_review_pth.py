@@ -80,7 +80,9 @@ class ProjectScanTests(unittest.TestCase):
             ("venv/lib/python3.11/site-packages/ns.pth", 1, "MAJOR")])
 
     def test_size_cap_applies(self):
-        res = self.scan({"big.pth": EVIL + "#" * (core.SOURCE_SIZE_CAP + 1)})
+        from unittest import mock
+        with mock.patch.object(core, "SOURCE_SIZE_CAP", 10_000):
+            res = self.scan({"big.pth": EVIL + "#" * 10_001})
         self.assertEqual(pth_findings(res), [])
         (t,) = [i for i in res["issues"] if i["rule"] == "SC-TRUNCATED"]
         self.assertEqual(t["file"], "big.pth")

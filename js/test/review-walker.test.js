@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { join, sep, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { run, collectFiles } from "../src/index.js";
-import { isLink } from "../src/lib/fs.js";
+import { isLink, dirKey } from "../src/lib/fs.js";
 
 const POSIX = process.platform !== "win32";
 const BIN = fileURLToPath(new URL("../bin/lazaret.js", import.meta.url));
@@ -51,7 +51,9 @@ test("dependency trees are pruned without --deps and reported root-relative", ()
     assert.equal(r.code, 0, r.err);
     assert.deepEqual(r.keys, ["Q-SKIPPED-TREE node_modules"]);
     assert.equal(r.rep.issues[0].msg, "Directory node_modules was skipped (2 files, 2750072 bytes unread).");
-    r = scan(d, ["--deps"]);
+    r = scan(d, ["--deps"]);                  // 2.75 MB is under the 16,000,000-byte limit: scanned
+    assert.deepEqual(r.keys, [`SC-INSTALL-HOOK ${P("node_modules", "evil", "package.json")}`]);
+    r = scan(d, ["--deps", "--max-source-bytes", "2000000"]);
     assert.deepEqual(r.keys, [
       `SC-INSTALL-HOOK ${P("node_modules", "evil", "package.json")}`,
       `SC-TRUNCATED ${P("node_modules", "typescript", "lib", "typescript.js")}`,
@@ -232,6 +234,17 @@ test("non-source files are classified by magic bytes; the size cap applies to so
   } finally { cleanup(d); }
 });
 
+test("a directory's identity keeps all 64 bits of a Windows file ID", () => {
+  // NTFS file IDs: a 16-bit sequence number above a 48-bit record number.
+  // Records 1000 and 1001 with sequence number 0x1234 are one Number: the
+  // loop check skipped the second directory as "already visited" (the
+  // 600-level tree below found no files on windows-latest).
+  const a = { dev: 7n, ino: (0x1234n << 48n) | 1000n }, b = { dev: 7n, ino: (0x1234n << 48n) | 1001n };
+  assert.equal(Number(a.ino), Number(b.ino));
+  assert.notEqual(dirKey(a), dirKey(b));
+  assert.equal(dirKey({ dev: 7n, ino: 0n }), null);          // no inode numbers: no loop check
+});
+
 test("the walk is iterative: a very deep tree is scanned without recursion", (t) => {
   const d = mkdtempSync(join(tmpdir(), "lazaret-deep-"));
   try {
@@ -247,7 +260,7 @@ test("the walk is iterative: a very deep tree is scanned without recursion", (t)
     }
     writeFileSync(join(d, ...parts, "x.js"), "eval(y)\n");
     const col = collectFiles(d);
-    assert.equal(col.files.length, 1);
+    assert.equal(col.files.length, 1, JSON.stringify(col.binaryIssues.map((i) => i.msg)));
     assert.equal(col.files[0].path, P(...parts, "x.js"));
   } finally { cleanup(d); }
 });

@@ -14,6 +14,9 @@ test_review_core.py.
 """
 
 import unittest
+from unittest import mock
+
+from lazaret.registry import repo
 
 from tests.registry._review_support import (
     DECODE_EXEC_JS, DECODE_EXEC_PY, ELF, hooks, manifest, rules, scan_npm, scan_sdist)
@@ -43,7 +46,8 @@ class RegistryDecodingTests(unittest.TestCase):
 
     def test_oversize_source_starting_with_nuls_is_incomplete(self):
         big = b"\x00" * 4096 + b"// x\n" * 250_000
-        res = scan_npm({"package.json": manifest(), "dist/huge.js": big})
+        with mock.patch.object(repo, "MAX_MEMBER", 1_000_000):
+            res = scan_npm({"package.json": manifest(), "dist/huge.js": big})
         self.assertEqual(res["verdict"], "INCOMPLETE", res["verdictReason"])
         self.assertGreaterEqual(res["truncated"], 1)
 

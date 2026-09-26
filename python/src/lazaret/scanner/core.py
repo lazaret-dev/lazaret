@@ -426,8 +426,10 @@ R("S-SPAWN-SHELL", "child_process with shell:true", "VULN", "CRITICAL", ("js",),
 # .b64decode("…"))` was missed) — and a module-qualified decoder may name its
 # module that way (`eval(__import__('codecs').decode(…))`). Every segment ends
 # at a '.', so the prefix stays linear-time.
+# `exec(compile(b64decode(…), …))` is the same thing with Python's compile()
+# in between; it used to be caught only by SC-MARSHAL's `exec(compile(`.
 R("SC-EVAL-DECODE", "Decoded payload execution", "VULN", "BLOCKER", ("py", "js"),
-  r"\b(?:eval|exec|execSync|Function|runIn(?:This|New)?Context)\s*\(\s*"
+  r"\b(?:eval|exec|execSync|Function|runIn(?:This|New)?Context)\s*\(\s*(?:compile\s*\(\s*)?"
   r"(?:(?:[\w$]+|" + _INLINE_IMPORT + r")\s*\.\s*)*"
   r"(?:atob|unescape|decodeURIComponent|Buffer\s*\.\s*from|b64decode|"
   + _module_ref("codecs") + r"\s*\.\s*decode|" + _module_ref("zlib") + r"\s*\.\s*decompress|"
@@ -442,9 +444,16 @@ R("SC-PACKER", "Packed JavaScript (p,a,c,k,e,d)", "VULN", "CRITICAL", ("js",),
   "Legitimate modern packages ship minified, not packed; packing hides intent.",
   "Unpack and review the payload before trusting this file.",
   "CWE-506 · Supply chain"),
+# Bytecode only: marshal.load(s) (also through an inline import), a code
+# object built by hand, a .pyc loaded as a module. `exec(compile(src, path,
+# "exec"))` is not here: compile() takes source text, and running a .py file
+# that way (like runpy.run_path) is ordinary harness and plugin code; a
+# decoded payload compiled and run is SC-EVAL-DECODE, and --full still
+# reports exec() itself as S-EVAL-PY.
 R("SC-MARSHAL", "Marshalled bytecode execution", "VULN", "CRITICAL", ("py",),
-  r"marshal\.loads\s*\(|exec\s*\(\s*compile\s*\(",
-  "Executing marshalled/compiled bytecode blobs.",
+  r"\bmarshal\s*\.\s*loads?\s*\(|['\"]marshal['\"]\s*\)\s*\.\s*loads?\s*\("
+  r"|\b(?:types\s*\.\s*)?CodeType\s*\(|\bimp\s*\.\s*load_compiled\s*\(|\bSourcelessFileLoader\s*\(",
+  "Loading marshalled bytecode or building a code object by hand.",
   "Bytecode blobs evade source review — a common Python malware technique.",
   "Inspect the blob's origin; refuse opaque executable data in source trees.",
   "CWE-506 · Supply chain"),
@@ -2437,6 +2446,83 @@ SQL_ARG_MAX = 10000
 _PAREN_TOKEN_RE = re.compile(r"[()\"']")
 
 
+# SC-CHARCODE: String.fromCharCode building text from character codes that
+# are written in the code: ten or more 2-3 digit numbers inside the call's
+# own parentheses (`fromCharCode(104,116,116,112,…)`, also through .apply /
+# .call), or a name the call uses that the same line assigns an array of ten
+# or more printable-ASCII codes (`k=[104,116,…];…fromCharCode(...k)`). It
+# used to count numbers anywhere on the line, so every fromCharCode on a long
+# minified line fired: binary parsers (`fromCharCode(255&e)`,
+# `fromCharCode(...u.subarray(0,l))`) and UTF-16 surrogate encoders
+# (`fromCharCode(e>>>10&1023|55296)`); and any such array anywhere on the line
+# (npm:extract-youtube's 98 KB line) counted for every call on it.
+CHARCODE_NUM_RE = re.compile(r"\b\d{2,3}\b")
+_CHARCODE_TABLE_RE = re.compile(
+    r"(?<![\w$.])([A-Za-z_$][\w$]*)\s*=\s*\[((?:\s*[0-9]{2,3}\s*,){9,}\s*[0-9]{2,3})\s*\]")
+# a bare name (not `o.k`; `...k` is a spread)
+_CHARCODE_NAME_RE = re.compile(r"(?<![\w$])(?:(?<=\.\.\.)|(?<!\.))[A-Za-z_$][\w$]*")
+_CHARCODE_CALL_TAIL_RE = re.compile(r"\s*(?:\.\s*(?:apply|call)\s*)?\(")
+CHARCODE_ARGS_MAX = 4000        # chars of one call's arguments searched
+# Chars of argument scanning per line; past it a call's arguments are taken to
+# run CHARCODE_ARGS_MAX chars (over-counting, never under-counting), so a line
+# of 50,000 unclosed calls stays linear.
+CHARCODE_SCAN_BUDGET = 200_000
+
+
+def _call_args_end(line, k, stop):
+    """Index of the ')' that closes the '(' at k, or None before `stop`.
+    Scanned from k itself, skipping ' " ` strings (with backslash escapes):
+    the quote state of a whole minified line is not reliable (a quote in a
+    regex or template literal), but the arguments of one call are short."""
+    depth, quote, j = 0, None, k
+    while j < stop:
+        c = line[j]
+        if quote is not None:
+            if c == "\\":
+                j += 2
+                continue
+            if c == quote:
+                quote = None
+        elif c in "'\"`":
+            quote = c
+        elif c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return j
+        j += 1
+    return None
+
+
+def _charcode_col(line):
+    """Column of the String.fromCharCode call that makes `line` SC-CHARCODE,
+    or None (see above). Linear: one pass over the numbers, bounded argument
+    scans."""
+    if CHARCODE_RE.search(line) is None:
+        return None
+    nums = [m.start() for m in CHARCODE_NUM_RE.finditer(line)]
+    if len(nums) < 10:                                    # a code table has ten too
+        return None
+    tables = {m.group(1) for m in _CHARCODE_TABLE_RE.finditer(line)
+              if all(32 <= int(v) <= 126 for v in re.findall(r"[0-9]+", m.group(2)))}
+    refs = [m.start() for m in _CHARCODE_NAME_RE.finditer(line) if m.group() in tables] if tables else []
+    budget = CHARCODE_SCAN_BUDGET
+    for m in CHARCODE_RE.finditer(line):
+        t = _CHARCODE_CALL_TAIL_RE.match(line, m.end())
+        if t is None:
+            continue
+        k = t.end() - 1                                   # the '('
+        stop = min(len(line), k + CHARCODE_ARGS_MAX)
+        end = _call_args_end(line, k, stop) if budget > 0 else None
+        e = stop if end is None else end
+        budget -= e - k
+        if (bisect.bisect_left(nums, e) - bisect.bisect_left(nums, k) >= 10
+                or bisect.bisect_left(refs, e) > bisect.bisect_left(refs, k)):
+            return m.start()
+    return None
+
+
 def _paren_close_map(line):
     """{index of '(' : index of its matching ')'} for one line, in one pass.
     Quotes are tracked from the start of the line (a '(' inside a string
@@ -2676,13 +2762,58 @@ def _joined_eval_decode(ctx, i, rule_re):
 # Statements on one line are processed left to right (`const d = atob(p);
 # eval(d)`). Names are never un-tainted (over-approximation is the safe
 # direction for third-party code). Project mode covers this with T-CODE/T-CMD.
+# A decode call written directly in a sink's arguments counts too
+# (`cp.exec(atob(p))`, which the per-line rule no longer sees for aliases).
+#
+# `exec` and `eval` are sinks when called bare (`exec(d)`, JavaScript names
+# imported from child_process), on a global object (`window.eval`,
+# `globalThis.eval`), on Python's builtins, or on child_process itself, a
+# require("child_process") call or a name assigned from one. Any other
+# method call is not code execution: `re.exec(t)` / `/…/.exec(t)` is
+# RegExp.prototype.exec (the `for (re.lastIndex = 0; (m = re.exec(t));)`
+# loop of every bundler's output), `session.exec(q)` a database call. The
+# other sink names are distinctive and count on any receiver.
 _DECODE_CALL_RE = re.compile(
     r"(?:\batob|\bb64decode|\.\s*fromhex|\bunhexlify|\b" + _module_ref("codecs") + r"\s*\.\s*decode"
     r"|\b" + _module_ref("zlib") + r"\s*\.\s*decompress)\s*\("
     r"|\bBuffer\s*\.\s*from\s*\([^;\n]{0,300}?['\"`]base64['\"`]")
 _DECODE_SINK_RE = re.compile(
-    r"\b(?:eval|exec|execSync|execFile|execFileSync|spawn|spawnSync|Function"
+    r"(?:(require\s*\(\s*['\"`][ \w:]*['\"`]\s*\)|[A-Za-z_$][\w$]*)\s*\.\s*)?"
+    r"(?<![\w$])(eval|exec|execSync|execFile|execFileSync|spawn|spawnSync|Function"
     r"|runIn(?:This|New)?Context)\s*\(")
+_GLOBAL_EVAL_RECEIVERS = frozenset(("window", "globalThis", "self", "global", "top", "parent",
+                                    "frames", "builtins", "__builtins__"))
+_CHILD_PROCESS_RE = re.compile(r"['\"`](?:node:)?child_process['\"`]")
+_CP_ALIAS_RE = re.compile(
+    r"(?<![\w$.])([A-Za-z_$][\w$]*)\s*=\s*(?:await\s+)?(?:require|import)\s*\(\s*"
+    r"['\"`](?:node:)?child_process['\"`]\s*\)"
+    r"|\bimport\s+(?:\*\s*as\s+)?([A-Za-z_$][\w$]*)\s+from\s*['\"`](?:node:)?child_process['\"`]")
+
+
+def _child_process_aliases(content):
+    """Names bound to the child_process module in this file."""
+    if "child_process" not in content:
+        return frozenset()
+    return frozenset(m.group(1) or m.group(2) for m in _CP_ALIAS_RE.finditer(content))
+
+
+def _is_code_sink(code, m, cp_aliases):
+    """Is this _DECODE_SINK_RE match (found in the string-blanked text of
+    `code`) a call that runs code? See the comment above _DECODE_CALL_RE."""
+    name = m.group(2)
+    if name not in ("eval", "exec"):
+        return True
+    if m.group(1) is None:
+        j = m.start(2) - 1
+        while j >= 0 and code[j] in " \t":
+            j -= 1
+        return j < 0 or code[j] != "."        # `foo().exec(` / `/re/.exec(`: a method
+    recv = code[m.start(1):m.end(1)]
+    if recv.startswith("require"):
+        return name == "exec" and _CHILD_PROCESS_RE.search(recv) is not None
+    if recv in _GLOBAL_EVAL_RECEIVERS:
+        return name == "eval" or recv in ("builtins", "__builtins__")
+    return name == "exec" and (recv == "child_process" or recv in cp_aliases)
 _DEP_ASSIGN_RE = re.compile(r"(?<![\w$])([A-Za-z_$][\w$]*)\s*=(?![=>])([^;]*)")
 DEP_SINK_ARGS_MAX = 1000        # chars of a sink's arguments searched for decoded names
 
@@ -2694,12 +2825,28 @@ def _blank_strings(code):
                              code)
 
 
+# A decoded value taints names for DEP_FLOW_WINDOW characters from the
+# decode (a dropper decodes and runs its payload together). Names are
+# tracked without scopes, so without a bound one ordinary decode in a large
+# bundle spread through helper parameters to thousands of names: npm:pullfrog's
+# 7.8 MB dist/index.js loads undici's WebAssembly parser with
+# `mod = …compile(Buffer.from(…, "base64"))` at line 7310, and esbuild's
+# `__importStar(mod)` helper carried the mark to 6,216 names, every spawn in
+# the file among them.
+DEP_FLOW_WINDOW = 10_000
+# `function exec(`, `function* exec(`, `def exec(`: a definition (on the 24 chars before the name)
+_FN_DEF_BEFORE_RE = re.compile(r"(?:^|[^\w$])(?:function\s*\*?|def)\s*$")
+
+
 def _dep_decode_flow(path, ctx, issues):
     rule = next(r for r in RULES if r["id"] == "SC-EVAL-DECODE")
     ident_re = _IDENT_RUN_RE.get(ctx.lang, _IDENT_RUN_RE["js"])
     have = {i["line"] for i in issues if i["rule"] == "SC-EVAL-DECODE"}
-    decoded = {}                      # name -> line its decoded value came from
+    cp_aliases = _child_process_aliases(ctx.content) if ctx.lang == "js" else frozenset()
+    decoded = {}                      # name -> (line of the decode, its offset in the file)
+    offset = 0                        # offset of line i in the file
     for i in range(len(ctx.lines)):
+        base, offset = offset, offset + len(ctx.lines[i]) + 1
         if ctx.cmask[i]:
             continue
         code = ctx.mcode(i)
@@ -2715,30 +2862,45 @@ def _dep_decode_flow(path, ctx, issues):
         events += [(m.start(), 1, m) for m in _DECODE_SINK_RE.finditer(blank)]
         events.sort(key=lambda e: (e[0], e[1]))
         close = None
-        for n, (_pos, kind, m) in enumerate(events):
+
+        def live(a, b, at):
+            """Decodes behind the decoded names in blank[a:b], still in reach at `at`."""
+            return [decoded[v] for v in set(ident_re.findall(blank, a, b))
+                    if v in decoded and at - decoded[v][1] <= DEP_FLOW_WINDOW]
+
+        for n, (pos, kind, m) in enumerate(events):
             if n and not n & 255:     # one long line can hold thousands of statements
                 ctx.check_time()
+            at = base + pos
             if kind == 0:
                 a, b = m.span(2)
                 if _DECODE_CALL_RE.search(code, a, b):
-                    decoded.setdefault(m.group(1), i + 1)
+                    decoded[m.group(1)] = (i + 1, at)
                     continue
-                src = [decoded[v] for v in set(ident_re.findall(blank, a, b)) if v in decoded]
+                src = live(a, b, at)
                 if src:
-                    decoded.setdefault(m.group(1), min(src))
+                    decoded[m.group(1)] = max(src, key=lambda d: d[1])
                 continue
-            if i + 1 in have:
+            if i + 1 in have or not _is_code_sink(code, m, cp_aliases):
                 continue
+            if _FN_DEF_BEFORE_RE.search(blank[max(0, m.start(2) - 24):m.start(2)]):
+                continue                      # a definition, not a call
             if close is None:
                 close = _paren_close_map(blank)
-            end = min(close.get(m.end() - 1, len(blank)), m.end() + DEP_SINK_ARGS_MAX)
-            src = [decoded[v] for v in set(ident_re.findall(blank, m.end(), end)) if v in decoded]
+            closed = close.get(m.end() - 1)
+            if closed is not None and blank[closed + 1:closed + 2 + DEP_SINK_ARGS_MAX].lstrip()[:1] == "{":
+                continue                      # `exec(a, b) {`: a method definition
+            end = min(len(blank) if closed is None else closed, m.end() + DEP_SINK_ARGS_MAX)
+            src = live(m.end(), end, at)
             if src:
-                have.add(i + 1)
-                issues.append(mk_issue(
-                    dict(rule, msg=f"Decoded payload (assigned at line {min(src)}) "
-                                   f"reaches a code-execution sink."),
-                    path, i + 1, ctx.lines, m.start()))
+                msg = (f"Decoded payload (assigned at line {min(d[0] for d in src)}) "
+                       f"reaches a code-execution sink.")
+            elif _DECODE_CALL_RE.search(code, m.end(), end):
+                msg = "Decoded payload reaches a code-execution sink in the same call."
+            else:
+                continue
+            have.add(i + 1)
+            issues.append(mk_issue(dict(rule, msg=msg), path, i + 1, ctx.lines, m.start()))
 
 
 def _scan_file(path, content, lines, lang, dep, ctx, issues):
@@ -2802,14 +2964,14 @@ def _scan_file(path, content, lines, lang, dep, ctx, issues):
                  "fix": "Decode the string and review what it does.",
                  "ref": "CWE-506 · Supply chain"}, path, i + 1, lines,
                 _HEX_ESCAPE_RE.search(line).start()))
-        cm = CHARCODE_RE.search(line) if lang == "js" else None
-        if cm and len(re.findall(r"\b\d{2,3}\b", line)) >= 10:
+        cm_col = _charcode_col(line) if lang == "js" else None
+        if cm_col is not None:
             issues.append(mk_issue(
                 {"id": "SC-CHARCODE", "name": "Char-code string building", "type": "HOTSPOT", "sev": "MAJOR",
                  "msg": "String assembled from character codes — obfuscation indicator.",
                  "why": "fromCharCode chains hide payloads from static review.",
                  "fix": "Decode and review what string is being built.",
-                 "ref": "CWE-506 · Supply chain"}, path, i + 1, lines, cm.start()))
+                 "ref": "CWE-506 · Supply chain"}, path, i + 1, lines, cm_col))
         bm = B64_BLOB_RE.search(line)
         if bm and "sourceMappingURL" not in line:
             issues.append(mk_issue(
@@ -3452,10 +3614,25 @@ import lazaret as _lazaret_pkg   # __version__ (the package root imports nothing
 #   * paths in findings are root-relative and valid UTF-8 (a non-UTF-8 file
 #     name crashed the HTML writer after the scan).
 
+def _env_int(var, default):
+    """A positive integer from the environment, else `default` (parsed like
+    the registry scanner's LAZARET_* limits)."""
+    try:
+        value = int(os.environ.get(var, default))
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
 #: Files that would be source-scanned or parsed as manifests and are larger
 #: than this are not read: they get an SC-TRUNCATED finding instead. Every
-#: other file is classified from a header sample whatever its size.
-SOURCE_SIZE_CAP = 2_000_000
+#: other file is classified from a header sample whatever its size. The old
+#: 2,000,000 made `--deps` report SC-TRUNCATED (CRITICAL) for ordinary
+#: single-file bundles: typescript's lib/typescript.js (9.1 MB) and _tsc.js
+#: (6.2 MB), @babel/standalone's babel.js (5.3 MB). The scan is linear; an
+#: 8 MB bundle takes about 5 s. Env LAZARET_MAX_SOURCE_BYTES (shared with
+#: lazaret-registry) or --max-source-bytes; the MCP server uses the same value.
+SOURCE_SIZE_CAP = _env_int("LAZARET_MAX_SOURCE_BYTES", 16_000_000)
 #: Bytes read from every non-source regular file for magic-byte classification.
 HEADER_SAMPLE_BYTES = 512
 MANIFEST_NAMES = ("package.json", "binding.gyp")
@@ -4778,8 +4955,19 @@ def main(argv=None):
         _internal_error(exc)
 
 
+def _positive_int(text):
+    """argparse type: an integer above zero."""
+    try:
+        value = int(text)
+    except ValueError:
+        value = 0
+    if value <= 0:
+        raise argparse.ArgumentTypeError(f"expected a positive number of bytes, got {text!r}")
+    return value
+
+
 def _main(argv=None):
-    global REDACT_SECRETS, EXCERPT_WIDTH
+    global REDACT_SECRETS, EXCERPT_WIDTH, SOURCE_SIZE_CAP
     ap = argparse.ArgumentParser(prog="lazaret", description="Lazaret — security & quality scanner for Python/JS projects.")
     ap.add_argument("directory", help="Project directory to scan")
     ap.add_argument("--out-dir", metavar="DIR",
@@ -4828,10 +5016,16 @@ def _main(argv=None):
                          "your own code do not persist credentials into CI artifacts.")
     ap.add_argument("--excerpt-width", type=int, default=EXCERPT_WIDTH, metavar="N",
                     help=f"Chars of the matched line to show under each finding (default {EXCERPT_WIDTH})")
+    ap.add_argument("--max-source-bytes", type=_positive_int, metavar="BYTES",
+                    help=f"Largest source file or manifest read (default {SOURCE_SIZE_CAP:,}, env "
+                         f"LAZARET_MAX_SOURCE_BYTES); a larger one is not scanned and gets "
+                         f"SC-TRUNCATED, which fails the gate")
     ap.add_argument("-q", "--quiet", action="store_true")
     args = ap.parse_args(argv)
     REDACT_SECRETS = not args.no_redact_secrets
     EXCERPT_WIDTH = args.excerpt_width
+    if args.max_source_bytes:
+        SOURCE_SIZE_CAP = args.max_source_bytes
 
     # Usage errors (exit 2) before anything else: a missing target, a file
     # instead of a directory. (An unreadable or empty directory is reported

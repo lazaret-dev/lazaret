@@ -17,6 +17,8 @@ import json
 import os
 import tempfile
 import unittest
+import urllib.error
+import urllib.parse
 from unittest import mock
 
 from lazaret.mcp import server as mcp_server
@@ -64,40 +66,201 @@ class ScopedNameTests(unittest.TestCase):
         self.assertEqual(status["packages"][0]["package"], "npm:@scope/pkg")
 
 
+class FakeNpm:
+    """Stands in for http_json: npm's replication feed (names only, newest
+    first, as npm's 2025 replication API returns them) and the registry's
+    abbreviated documents. `docs` maps a name to its document, or to an
+    exception the lookup raises; a name missing from `docs` is a 404."""
+
+    def __init__(self, feed, docs=None):
+        self.feed, self.docs, self.calls = feed, docs or {}, []
+
+    def __call__(self, url, accept=None):
+        self.calls.append((url, accept))
+        if url.startswith("https://replicate.npmjs.com/"):
+            if isinstance(self.feed, Exception):
+                raise self.feed
+            return self.feed
+        name = urllib.parse.unquote(url[len("https://registry.npmjs.org/"):])
+        doc = self.docs.get(name)
+        if isinstance(doc, Exception):
+            raise doc
+        if doc is None:
+            err = repo.FetchError(f"HTTP 404 fetching {url}")
+            err.status = 404
+            raise err
+        return doc
+
+
+def names(*ids):
+    return {"results": [{"seq": 100 - i, "id": n, "changes": [{"rev": "1-x"}]}
+                        for i, n in enumerate(ids)]}
+
+
+def doc(modified, latest="1.0.0"):
+    return {"name": "x", "dist-tags": {"latest": latest}, "versions": {},
+            "modified": modified.isoformat().replace("+00:00", "Z")}
+
+
 class NpmFeedTests(unittest.TestCase):
-    def feed(self, data):
-        with mock.patch.object(repo, "http_json", return_value=data), \
+    CUTOFF = NOW - datetime.timedelta(days=1)
+
+    def discover(self, fake, limit=50):
+        notes = {}
+        with mock.patch.object(repo, "http_json", side_effect=fake), \
                 contextlib.redirect_stderr(io.StringIO()) as err:
-            return repo.discover_npm(NOW - datetime.timedelta(days=1), 50), err.getvalue()
+            found = repo.discover_npm(self.CUTOFF, limit, notes)
+        return found, err.getvalue(), notes
 
-    def row(self, name, modified=None, latest="1.0.0"):
-        return {"id": name, "doc": {"name": name, "time": {"modified": modified or NOW.isoformat()},
-                                    "dist-tags": {"latest": latest}}}
+    def test_the_feed_is_read_without_include_docs(self):
+        # npm's 2025 replication API rejects include_docs with HTTP 400 (the
+        # 0.1.0 discover never ran); metadata comes from the registry instead
+        real = {"name": "@s/ok", "dist-tags": {"latest": "1.0.0"}, "versions": {},
+                "modified": NOW.strftime("%Y-%m-%dT%H:%M:%S.") + "036Z"}   # npm's own format
+        fake = FakeNpm(names("@s/ok"), {"@s/ok": real})
+        found, _, notes = self.discover(fake)
+        feed_url, accept = fake.calls[0]
+        self.assertEqual(feed_url, "https://replicate.npmjs.com/registry/_changes?descending=true&limit=150")
+        self.assertNotIn("include_docs", feed_url)
+        self.assertIsNone(accept)
+        self.assertEqual(fake.calls[1], ("https://registry.npmjs.org/@s%2Fok", repo.NPM_ABBREVIATED))
+        self.assertEqual([(e, n, v) for e, n, v, _ in found], [("npm", "@s/ok", "1.0.0")])
+        self.assertEqual(notes, {})
 
-    def test_unexpected_shapes_are_skipped_not_fatal(self):
-        data = {"results": [None, [], "x", {"doc": None, "id": "ok-a"},
-                            {"doc": {"name": "t", "time": "yesterday"}},
-                            {"doc": {"name": "u", "time": {"modified": 12}}},
-                            {"doc": {"name": 5}},
-                            {"doc": {"name": "v", "time": {"modified": NOW.isoformat()},
-                                     "dist-tags": ["1"]}},
-                            self.row("good")]}
-        found, _err = self.feed(data)
-        self.assertEqual(sorted((e, n, str(v)) for e, n, v, _ in found),
-                         [("npm", "good", "1.0.0"), ("npm", "v", "None")])
-        for bad in ([], None, "x", {"results": {}}, {"results": None}):
-            with self.subTest(data=bad):
-                self.assertEqual(self.feed(bad)[0], [])
+    def test_the_window_and_the_limit(self):
+        old = NOW - datetime.timedelta(days=3)
+        feed = names("new-a", "new-b", "old-c", "new-d", *[f"old-{i}" for i in range(10)])
+        docs = {"new-a": doc(NOW), "new-b": doc(NOW - datetime.timedelta(hours=2)),
+                "old-c": doc(old), "new-d": doc(NOW - datetime.timedelta(hours=3)),
+                **{f"old-{i}": doc(old) for i in range(10)}}
+        found, _, _ = self.discover(FakeNpm(feed, docs))
+        self.assertEqual([n for _, n, _, _ in found], ["new-a", "new-b", "new-d"])
+        found, _, _ = self.discover(FakeNpm(feed, docs), limit=2)
+        self.assertEqual([n for _, n, _, _ in found], ["new-a", "new-b"])
 
-    def test_names_npm_would_reject_are_skipped(self):
-        found, err = self.feed({"results": [self.row("a" * 120), self.row("x" * 215),
-                                            self.row("../etc"), self.row("@s/ok")]})
+    def test_the_walk_stops_once_the_feed_is_behind_the_window(self):
+        old = NOW - datetime.timedelta(days=3)
+        feed = names("new", *[f"old-{i}" for i in range(200)])
+        fake = FakeNpm(feed, {"new": doc(NOW), **{f"old-{i}": doc(old) for i in range(200)}})
+        found, _, _ = self.discover(fake)
+        self.assertEqual([n for _, n, _, _ in found], ["new"])
+        lookups = len(fake.calls) - 1
+        self.assertLessEqual(lookups, 2 * repo.NPM_LOOKUP_WORKERS)   # one batch, not 150
+
+    def test_a_failed_lookup_is_listed_with_an_estimated_time(self):
+        two_h = NOW - datetime.timedelta(hours=2)
+        feed = names("a", "big", "c", "d")
+        fake = FakeNpm(feed, {"a": doc(NOW), "big": repo.FetchError("response exceeds 5MB budget"),
+                              "c": doc(two_h), "d": {"name": "d"}})     # d: no modified time
+        found, err, notes = self.discover(fake)
+        when = {n: w for _, n, _, w in found}
+        self.assertEqual(sorted(when), ["a", "big", "c", "d"])
+        self.assertEqual(when["c"], two_h)
+        self.assertEqual(when["big"], two_h)               # the nearest older known time
+        self.assertEqual(when["d"], self.CUTOFF)           # nothing older known: the window start
+        self.assertIn("could not read the registry entry of 2 npm package(s)", err)
+        self.assertEqual(notes, {})                        # npm was checked
+
+    def test_feed_rows_that_are_not_packages(self):
+        feed = {"results": [None, [], "x", {"id": 5}, {"id": ""}, {"id": "_design/app"},
+                            {"id": "gone", "deleted": True}, {"id": "ok"}, {"id": "ok"}]}
+        fake = FakeNpm(feed, {"ok": doc(NOW)})
+        found, _, _ = self.discover(fake)
+        self.assertEqual([n for _, n, _, _ in found], ["ok"])
+        self.assertEqual([u for u, _ in fake.calls[1:]], ["https://registry.npmjs.org/ok"])
+
+    def test_names_npm_would_reject_are_never_looked_up(self):
+        feed = names("a" * 120, "x" * 215, "../etc", "@s/ok")
+        fake = FakeNpm(feed, {"a" * 120: doc(NOW), "@s/ok": doc(NOW)})
+        found, err, _ = self.discover(fake)
         self.assertEqual(sorted(n for _, n, _, _ in found), sorted(["a" * 120, "@s/ok"]))
         self.assertIn("skipped 2 npm feed name(s)", err)
+        self.assertFalse([u for u, _ in fake.calls if "etc" in u or "x" * 215 in u])
 
     def test_hostile_version_dropped(self):
-        found, _ = self.feed({"results": [self.row("ok", latest="../../x")]})
+        found, _, _ = self.discover(FakeNpm(names("ok"), {"ok": doc(NOW, latest="../../x")}))
         self.assertEqual(found[0][2], None)
+
+    def test_a_feed_that_cannot_be_read_is_reported_and_noted(self):
+        rejected = repo.FetchError("HTTP 400 fetching https://replicate.npmjs.com/…")
+        rejected.status = 400
+        cases = {
+            "rejected": (rejected, "npm rejected the changes-feed request (HTTP 400; "
+                                   "its replication API may have changed)"),
+            "unreachable": (repo.FetchError("URL error fetching …: timed out"),
+                            "could not reach replicate.npmjs.com"),
+            "shape": ({"results": {}}, "npm changes feed has an unexpected shape"),
+        }
+        for label, (feed, message) in cases.items():
+            with self.subTest(label):
+                found, err, notes = self.discover(FakeNpm(feed))
+                self.assertEqual(found, [])
+                self.assertIn(message, err)
+                self.assertIn("npm was not checked", err)
+                self.assertNotIn("needs access", err)
+                self.assertTrue(notes["npm"].startswith("not checked: "), notes)
+
+    def test_fetch_errors_carry_the_http_status(self):
+        err = urllib.error.HTTPError("https://replicate.npmjs.com/x", 400, "Bad Request", {}, None)
+        with mock.patch.object(repo._OPENER, "open", side_effect=err):
+            with self.assertRaises(repo.FetchError) as caught:
+                repo.http_json("https://replicate.npmjs.com/x")
+        self.assertEqual(caught.exception.status, 400)
+
+
+class DiscoveryGapTests(unittest.TestCase):
+    """A registry that could not be checked must not look like "nothing new":
+    the CLI says so, and --ci fails the run."""
+
+    def run_cli(self, *argv):
+        rejected = repo.FetchError("HTTP 400 fetching …")
+        rejected.status = 400
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(repo, "http_json", side_effect=FakeNpm(rejected)), \
+                mock.patch("sys.argv", ["lazaret-registry", "discover", "--ecosystem", "npm",
+                                        *argv, "--db", os.path.join(d, "r.db")]), \
+                contextlib.redirect_stdout(io.StringIO()) as out, \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            try:
+                repo.main()
+                code = 0
+            except SystemExit as exc:
+                code = exc.code
+        return code, out.getvalue(), err.getvalue()
+
+    def test_cli(self):
+        code, out, err = self.run_cli("--scan")
+        self.assertEqual(code, 0)                           # without --ci: a warning
+        self.assertIn("Nothing was checked.", out)
+        self.assertNotIn("No packages published", out)
+        self.assertIn("discovery incomplete: npm not checked: npm rejected", err)
+        code, _, _ = self.run_cli("--scan", "--ci")
+        self.assertEqual(code, 1)
+
+    def test_a_partly_read_pypi_is_noted(self):
+        rss = (b"<rss><channel><item><title>goodpkg 1.0</title><pubDate>"
+               + NOW.strftime("%a, %d %b %Y %H:%M:%S GMT").encode() + b"</pubDate></item></channel></rss>")
+
+        def fetch(url, **kw):
+            if url.endswith("updates.xml"):
+                raise repo.FetchError("URL error fetching …")
+            return rss
+        notes = {}
+        with mock.patch.object(repo, "_fetch", side_effect=fetch), \
+                contextlib.redirect_stderr(io.StringIO()):
+            found = repo.discover_pypi(NOW - datetime.timedelta(days=1), 10, notes)
+        self.assertEqual([n for _, n, _, _ in found], ["goodpkg"])
+        self.assertEqual(notes, {"pypi": "partly checked: the updates.xml feed failed"})
+
+    def test_mcp_marks_the_call_incomplete(self):
+        rejected = repo.FetchError("HTTP 400 fetching …")
+        rejected.status = 400
+        with mock.patch.object(repo, "http_json", side_effect=FakeNpm(rejected)), \
+                contextlib.redirect_stderr(io.StringIO()):
+            out = mcp_server.tool_discover_packages({"since": "1d", "ecosystem": ["npm"]})
+        self.assertEqual(out["count"], 0)
+        self.assertTrue(out["incomplete"])
+        self.assertIn("npm not checked: npm rejected", out["incompleteReason"])
 
 
 class DiscoverCliTests(unittest.TestCase):

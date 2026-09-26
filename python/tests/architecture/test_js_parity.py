@@ -12,7 +12,7 @@ false-positive fixes, and an ADVERSARIAL tree generated at test time (BOM /
 UTF-16 / UTF-7-cookie sources, a UTF-8 file with a NUL near the top, .github/, node_modules/ scanned with and
 without --deps, suppression tricks, a file with hundreds of findings, CRLF,
 Unicode identifiers, a bidi control, .pyc files, symlinks and special files
-where the OS supports them, files over the 2 MB limit). All fixture content
+where the OS supports them, files over a 2 MB limit). All fixture content
 is inert: nothing is executed, hosts are TEST-NET (192.0.2.x) or .invalid,
 credentials are dummies. Skipped where Node isn't installed.
 
@@ -118,6 +118,32 @@ ADVERSARIAL = {
     "sup/tricks.sql": "-- nosec\nGRANT ALL ON t TO PUBLIC;\nGRANT SELECT ON t TO PUBLIC;\n",
     "sup/crlf.py": b"eval(a)  # nosec\r\neval(b)\r\n# nosec\r\neval(c)\r\n",
     # hundreds of findings: capped low-value rules, never-capped security rules
+    # false positives from real registry scans (--deps runs the decode flow)
+    "fp/regex.js": ('var t = atob("Y29uc29sZS5sb2coMSk=");\n'
+                    "for (ya.lastIndex = 0; (r = ya.exec(t)) !== null;) { g(r) }\n"
+                    "let q = /[^=]*/.exec(t)[0];\ndb.exec(t);\nmodel.eval(t);\n"
+                    'const cp = require("child_process");\ncp.exec(t);\ncp.exec(wrap(atob(z)));\n'
+                    "window.eval(t);\nnew Function(t);\nworker.spawn(t);\n"),
+    "fp/one-line.js": ('var n=atob("Y29uc29sZS5sb2coMSk=");function Be(e,t){return function(n){let r,s=0,i="";'
+                       'for(;r=e.exec(n);)s!==r.index&&(i+=n.substring(s,r.index));return i}}'
+                       "let t=/[^=]*/.exec(n)[0];eval(n);\n"),
+    "fp/charcode.js": ("n+=String.fromCharCode(255&e),e>>>=8;x=12,y=34,z=56,w=78,v=90,u=11,q=22,r=33,s=44;\n"
+                       "t+=String.fromCharCode(e>>>10&1023|55296);a=[10,20,30,40,50,60,70,80,90,99,11]\n"
+                       "var s=String.fromCharCode(104,116,116,112,115,58,47,47,101,120,97);\n"
+                       "var k=[104,116,116,112,115,58,47,47,101,120,97];x=String.fromCharCode.apply(null,k);\n"),
+    "fp/charcode-table.js": ("var T=[104,116,116,112,115,58,47,47,101,120,97];s+=String.fromCharCode(e>>>10&1023|55296);"
+                             "x=12,y=34,z=56,w=78,v=90,u=11,q=22,r=33,s=44,t=55,o=66;\n"
+                             "var k=[104,116,116,112,115,58,47,47,101,120,97];x=String.fromCharCode(...k.map(c=>c^1));\n"
+                             "o.k=[104,116,116,112,115,58,47,47,101,120,97];x=String.fromCharCode(...k);\n"
+                             'x=String.fromCharCode(f("' + "\U0001F600" * 3000 + '"),104,116,116,112,115,58,47,47,101,120,97);\n'
+                             'x=String.fromCharCode(f("' + "\U0001F600" * 3990 + '"),104,116,116,112,115,58,47,47,101,120,97);\n'),
+    "fp/flow-reach.js": ('var t = atob("Y29uc29sZS5sb2coMSk=");\nvar pad = [' + "0," * 5250 + "];\neval(t);\n"
+                         'var d = atob("Y29uc29sZS5sb2coMSk=");\nvar s = "' + "\U0001F600" * 9000 + '";\neval(d);\n'
+                         "function exec(d, e) { return run(d, e); }\nclass A { exec(d) { return 1; } }\n"
+                         "function run(x) { return x; } exec(d);\n"),
+    "fp/compile.py": ("d = base64.b64decode(p)\nsession.exec(d)\nexec(compile(d, 'x', 'exec'))\n"
+                      "exec(compile(path.read_bytes(), str(path), 'exec'), ns)\n"
+                      "exec(compile(zlib.decompress(b), 'f', 'exec'))\ncode = marshal.load(fh)\n"),
     "many/many.js": ("// TODO x\n" * 500 + "console.log(a)\n" * 250 + "eval(a)\n" * 600
                      + 'Function(Buffer.from(p,"base64").toString())()\n'),
     "many/long.js": "x = 1; " * 700 + "eval(q);" + " y = 2;" * 700 + "\n",
@@ -176,7 +202,7 @@ def build_adversarial(root):
 CLI_TIMEOUT = 25          # seconds per CLI run; every tree here scans in a few
 
 
-def run_cli(cmd, extra=(), out_dir=None):
+def run_cli(cmd, extra=(), out_dir=None, env=None):
     """-> (exit code, parsed JSON report or None, stderr); exit code None
     when the run timed out (e.g. an engine that blocks on a FIFO)."""
     with tempfile.TemporaryDirectory() as tmp:
@@ -184,7 +210,7 @@ def run_cli(cmd, extra=(), out_dir=None):
         try:
             p = subprocess.run(list(cmd) + ["--out-dir", out, "--no-html", "--quiet", *extra],
                                capture_output=True, encoding="utf-8", errors="replace",
-                               timeout=CLI_TIMEOUT)
+                               timeout=CLI_TIMEOUT, env=None if env is None else {**os.environ, **env})
         except subprocess.TimeoutExpired:
             return None, None, f"timed out after {CLI_TIMEOUT} s"
         path = os.path.join(out, "lazaret-report.json")
@@ -203,8 +229,8 @@ def py_cmd(root, deps=False):
     return [sys.executable, "-m", "lazaret", root] + (["--deps"] if deps else [])
 
 
-def both(root, deps=False, extra=()):
-    return run_cli(js_cmd(root, deps), extra), run_cli(py_cmd(root, deps), extra)
+def both(root, deps=False, extra=(), env=None):
+    return run_cli(js_cmd(root, deps), extra, env=env), run_cli(py_cmd(root, deps), extra, env=env)
 
 
 def issue_key(issue):
@@ -306,7 +332,9 @@ class EngineParityTests(unittest.TestCase):
     def test_adversarial_tree_agrees(self):
         with tempfile.TemporaryDirectory() as root:
             skipped = build_adversarial(root)
-            for label, deps, extra in (("default", False, ()), ("--deps", True, ()), ("--ci", False, ("--ci",))):
+            limit = ("--max-source-bytes", "2000000")        # the tree's big files are 2.3 MB
+            for label, deps, extra in (("default", False, limit), ("--deps", True, limit),
+                                       ("--ci", False, ("--ci", *limit))):
                 js, py = both(root, deps=deps, extra=extra)
                 if js[0] is None or py[0] is None:     # don't spend the time budget on more modes
                     self.fail(f"adversarial {label}: JS {js[2]!r}, Python {py[2]!r}"[:400])
@@ -323,6 +351,32 @@ class EngineParityTests(unittest.TestCase):
                     self.assertNotIn(("Q-ENCODING", "enc/nul-top.js"), found)
                     self.assertIn(("Q-ENCODING", "enc/le16_nobom.py"), found)
                     self.assertIn(("S-OSCMD-PY", "enc/le16_nobom.py"), found)
+
+    def test_source_limit_agrees(self):
+        """Both engines read sources up to 16,000,000 bytes by default, and
+        --max-source-bytes / LAZARET_MAX_SOURCE_BYTES change the limit the
+        same way (a 2.4 MB bundle with a decode-and-run on its last line)."""
+        bundle = "var a = function (b) { return b + 1; };\n" * 60_000 + 'eval(atob("Y29uc29sZS5sb2coMSk="));\n'
+        with tempfile.TemporaryDirectory() as root:
+            for rel, text in {"a.js": "var x = 1;\n", "node_modules/big/dist/index.js": bundle,
+                              "node_modules/big/package.json": '{"name": "big", "version": "1.0.0"}'}.items():
+                path = os.path.join(root, *rel.split("/"))
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(text)
+            for label, extra, env, want in (
+                    ("default", (), None, "SC-EVAL-DECODE"),
+                    ("option", ("--max-source-bytes", "2000000"), None, "SC-TRUNCATED"),
+                    ("variable", (), {"LAZARET_MAX_SOURCE_BYTES": "2000000"}, "SC-TRUNCATED"),
+                    ("option over variable", ("--max-source-bytes", "3000000"),
+                     {"LAZARET_MAX_SOURCE_BYTES": "2000000"}, "SC-EVAL-DECODE"),
+                    ("bad variable", (), {"LAZARET_MAX_SOURCE_BYTES": "0"}, "SC-EVAL-DECODE")):
+                with self.subTest(label=label):
+                    js, py = both(root, deps=True, extra=extra, env=env)
+                    self.assert_same(js, py, label=f"source limit, {label}")
+                    found = {i["rule"] for i in js[1]["issues"]
+                             if i["file"].replace("\\", "/") == "node_modules/big/dist/index.js"}
+                    self.assertEqual(found, {want})
 
     def test_manifest_depth_limit_agrees(self):
         """Both engines check a manifest's nesting (brackets outside strings)
@@ -384,6 +438,7 @@ class EngineParityTests(unittest.TestCase):
                 ("hostile-depth manifest", [deep, "--no-html", "--out-dir", tmp], 1),
                 ("700-deep manifest", [deep700, "--no-html", "--out-dir", tmp], 1),
                 ("foreign file at the report path", [foreign, "--no-html"], 3),
+                ("zero source limit", [foreign, "--max-source-bytes", "0"], 2),
             ]
             for label, args, want in cases:
                 with self.subTest(case=label):

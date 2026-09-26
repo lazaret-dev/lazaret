@@ -116,6 +116,10 @@ class SizeCap(unittest.TestCase):
         self.assertFalse([i for i in report["issues"] if i["rule"] == "SC-TRUNCATED"])
 
     def test_oversize_source_and_manifest_are_truncated(self):
+        from unittest import mock
+        patch = mock.patch.object(core, "SOURCE_SIZE_CAP", 2_000_000)   # the old default
+        patch.start()
+        self.addCleanup(patch.stop)
         root = make_tree({
             "a.py": "x = 1\n",
             "big.py": "x = 1\n" * 400_000,

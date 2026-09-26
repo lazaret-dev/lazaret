@@ -60,9 +60,10 @@ not already a Lazaret report (unless `--force-overwrite`). Writes are atomic
   `binding.gyp` actions and command expansions (`<!(cmd)`); an unparseable
   root manifest (`SC-MANIFEST-UNPARSEABLE`); decode-then-execute
   (`SC-EVAL-DECODE`, also across lines, through an inline import such as
-  `__import__("base64").b64decode`, and, in dependencies, across statements);
-  executable `.pth` lines (`SC-PTH-EXEC`); readable text hidden in hex escapes; base64 and char-code
-  blobs; `javascript-obfuscator` identifier signatures; compiled binaries;
+  `__import__("base64").b64decode`, and, in dependencies, across statements
+  within 10,000 characters of the decode);
+  executable `.pth` lines (`SC-PTH-EXEC`); readable text hidden in hex escapes; base64 blobs and
+  strings built from character codes written in the call or in an array it uses; `javascript-obfuscator` identifier signatures; compiled binaries;
   unchecked or orphaned `.pyc` files; UTF-7 source (`SC-UTF7`).
 - **Unicode evasion**: JS identifier escapes (`\u0065val`) and Python NFKC
   spellings are matched as the runtime reads them; bidirectional control
@@ -76,8 +77,9 @@ not already a Lazaret report (unless `--force-overwrite`). Writes are atomic
   `package.json` and `binding.gyp`, and `.pth` files (only the `SC-PTH-EXEC`
   check runs on them; they are not counted in the metrics; a directory with
   only a `.pth` file is a valid target). Every other regular file is classified by
-  its magic bytes (`SC-BINARY`). Sources and manifests over 2,000,000 bytes
-  are `SC-TRUNCATED`, never silently skipped; so is a file whose rules exceed
+  its magic bytes (`SC-BINARY`). Sources and manifests over 16,000,000 bytes
+  (`--max-source-bytes`, env `LAZARET_MAX_SOURCE_BYTES`) are `SC-TRUNCATED`,
+  never silently skipped; so is a file whose rules exceed
   a 30-second time backstop (checked inside each rule's match loop).
 - Encodings are sniffed (UTF-8/UTF-16 byte-order marks, BOM-less UTF-16, PEP
   263 coding cookies in `.py` files): anything but plain UTF-8 is decoded
@@ -124,6 +126,8 @@ lazaret <directory> [options]          # the same, like the Python CLI
   --baseline PATH       previous JSON report; findings not in it are marked new
   --no-redact-secrets   keep credential lines in reports (default: redacted)
   --excerpt-width N     characters of the flagged line shown per finding
+  --max-source-bytes N  largest source file or manifest read (16,000,000; env
+                        LAZARET_MAX_SOURCE_BYTES)
   -q, --quiet           only print the summary
   --ci                  exit 1 when the quality gate fails
   --version, -h/--help

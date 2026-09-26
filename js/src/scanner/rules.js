@@ -386,7 +386,7 @@ id:"S-SPAWN-SHELL", name:"child_process with shell:true", type:"VULN", sev:"CRIT
 },
 {
 id:"SC-EVAL-DECODE", name:"Decoded payload execution", type:"VULN", sev:"BLOCKER", langs:["py", "js"],
- re:pyRe("\\b(?:eval|exec|execSync|Function|runIn(?:This|New)?Context)\\s*\\(\\s*(?:(?:[\\w$]+|__import__\\(\\s*['\\\"][\\w.]+['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"][\\w.]+['\\\"]\\s*\\))\\s*\\.\\s*)*(?:atob|unescape|decodeURIComponent|Buffer\\s*\\.\\s*from|b64decode|(?:codecs|__import__\\(\\s*['\\\"]codecs['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]codecs['\\\"]\\s*\\))\\s*\\.\\s*decode|(?:zlib|__import__\\(\\s*['\\\"]zlib['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]zlib['\\\"]\\s*\\))\\s*\\.\\s*decompress|(?:marshal|__import__\\(\\s*['\\\"]marshal['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]marshal['\\\"]\\s*\\))\\s*\\.\\s*loads|fromhex|unhexlify)\\s*\\(", ""),
+ re:pyRe("\\b(?:eval|exec|execSync|Function|runIn(?:This|New)?Context)\\s*\\(\\s*(?:compile\\s*\\(\\s*)?(?:(?:[\\w$]+|__import__\\(\\s*['\\\"][\\w.]+['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"][\\w.]+['\\\"]\\s*\\))\\s*\\.\\s*)*(?:atob|unescape|decodeURIComponent|Buffer\\s*\\.\\s*from|b64decode|(?:codecs|__import__\\(\\s*['\\\"]codecs['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]codecs['\\\"]\\s*\\))\\s*\\.\\s*decode|(?:zlib|__import__\\(\\s*['\\\"]zlib['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]zlib['\\\"]\\s*\\))\\s*\\.\\s*decompress|(?:marshal|__import__\\(\\s*['\\\"]marshal['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]marshal['\\\"]\\s*\\))\\s*\\.\\s*loads|fromhex|unhexlify)\\s*\\(", ""),
  msg:"Code decoded (base64/escape) and immediately executed.",
  why:"Decode-then-execute is the signature pattern of malware droppers and supply-chain implants.",
  fix:"Treat as hostile until proven otherwise; inspect the decoded payload.",
@@ -402,8 +402,8 @@ id:"SC-PACKER", name:"Packed JavaScript (p,a,c,k,e,d)", type:"VULN", sev:"CRITIC
 },
 {
 id:"SC-MARSHAL", name:"Marshalled bytecode execution", type:"VULN", sev:"CRITICAL", langs:["py"],
- re:pyRe("marshal\\.loads\\s*\\(|exec\\s*\\(\\s*compile\\s*\\(", ""),
- msg:"Executing marshalled/compiled bytecode blobs.",
+ re:pyRe("\\bmarshal\\s*\\.\\s*loads?\\s*\\(|['\\\"]marshal['\\\"]\\s*\\)\\s*\\.\\s*loads?\\s*\\(|\\b(?:types\\s*\\.\\s*)?CodeType\\s*\\(|\\bimp\\s*\\.\\s*load_compiled\\s*\\(|\\bSourcelessFileLoader\\s*\\(", ""),
+ msg:"Loading marshalled bytecode or building a code object by hand.",
  why:"Bytecode blobs evade source review — a common Python malware technique.",
  fix:"Inspect the blob's origin; refuse opaque executable data in source trees.",
  ref:"CWE-506 · Supply chain",

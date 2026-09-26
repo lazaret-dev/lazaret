@@ -48,7 +48,10 @@ export const DEP_MARKERS = new Set([
 const DEP_TREES = new Set(["node_modules", "bower_components", "site-packages"]);
 const VENV_TREES = new Set(["venv", ".venv", "env"]);
 
-export const MAX_FILE_BYTES = 2_000_000;   // source files/manifests above this: SC-TRUNCATED
+// Source files and manifests above this are not read: SC-TRUNCATED (twin of
+// core.SOURCE_SIZE_CAP). The CLI takes --max-source-bytes or
+// LAZARET_MAX_SOURCE_BYTES; collectFiles() takes `maxFileBytes`.
+export const MAX_FILE_BYTES = 16_000_000;
 
 const O_NOFOLLOW = C.O_NOFOLLOW ?? 0;
 const O_NONBLOCK = C.O_NONBLOCK ?? 0;
@@ -150,6 +153,17 @@ export function readBounded(path, limit) {
 }
 
 function lexists(p) { try { lstatSync(p); return true; } catch { return false; } }
+/**
+ * A directory's identity for the loop check, from a { bigint: true } stat,
+ * or null when the filesystem has no inode numbers. Number stats are not
+ * enough: a Windows file ID is 64 bits (NTFS: a 16-bit sequence number
+ * above a 48-bit record number), a double keeps 53, and nearby directories
+ * rounded to the same number, so a directory was skipped as "already
+ * visited" (a 600-level test tree on windows-latest found no files).
+ */
+export function dirKey(st) {
+  return st.ino ? `${st.dev}:${st.ino}` : null;
+}
 function childPath(dirBuf, nameBuf) { return Buffer.concat([dirBuf, SEP, nameBuf]); }
 const byName = (a, b) => (a.str < b.str ? -1 : a.str > b.str ? 1 : 0);
 
@@ -225,8 +239,8 @@ function treeStats(dirBuf) {
  * Q-SCAN-ERROR), skippedIssues: Q-SKIPPED-TREE per pruned tree.
  * Throws ScanTargetError when the root itself cannot be listed.
  */
-export function collectFiles(root, { includeDeps = false, exclude = [] } = {}) {
-  const col = { files: [], manifests: [], pth: [], binaryIssues: [], skippedIssues: [] };
+export function collectFiles(root, { includeDeps = false, exclude = [], maxFileBytes = MAX_FILE_BYTES } = {}) {
+  const col = { files: [], manifests: [], pth: [], binaryIssues: [], skippedIssues: [], maxFileBytes };
   const issues = col.binaryIssues;
   const excluded = new Set(exclude);
   const rootBuf = Buffer.from(resolve(root));
@@ -238,7 +252,7 @@ export function collectFiles(root, { includeDeps = false, exclude = [] } = {}) {
     let entries;
     try {
       entries = listDir(dir.buf);
-      if (!dir.rel) { const st = statSync(dir.buf); if (st.ino) seen.add(`${st.dev}:${st.ino}`); }
+      if (!dir.rel) { const key = dirKey(statSync(dir.buf, { bigint: true })); if (key) seen.add(key); }
     } catch (e) {
       if (!dir.rel) throw new ScanTargetError(`cannot read directory ${fsNameToString(rootBuf)}: ${strerror(e)}`);
       issues.push(unreadableIssue(dir.rel, strerror(e)));
@@ -269,9 +283,10 @@ export function collectFiles(root, { includeDeps = false, exclude = [] } = {}) {
         try { checkPycache(full, rel, names, issues); } catch (e) { issues.push(scanErrorIssue(rel, e)); }
         continue;
       }
-      const key = `${st.dev}:${st.ino}`;
-      if (st.ino && seen.has(key)) { issues.push(unreadableIssue(rel, "directory already visited (filesystem loop)")); continue; }
-      if (st.ino) seen.add(key);
+      let key = null;
+      try { key = dirKey(lstatSync(full, { bigint: true })); } catch { /* no identity: walked, not loop-checked */ }
+      if (key && seen.has(key)) { issues.push(unreadableIssue(rel, "directory already visited (filesystem loop)")); continue; }
+      if (key) seen.add(key);
       const dep = dir.dep || isDependencyTree(name, full);
       if (dep && !dir.dep && !includeDeps) { skipTree(full, rel); continue; }
       push.push({ buf: full, rel, dep });
@@ -280,6 +295,9 @@ export function collectFiles(root, { includeDeps = false, exclude = [] } = {}) {
   }
   return col;
 }
+
+/** n with thousands separators, as Python's f"{n:,}" writes it. */
+const withCommas = (n) => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 
 function collectFile(full, rel, name, st, dep, col) {
   const ext = extname(name).toLowerCase();
@@ -294,13 +312,14 @@ function collectFile(full, rel, name, st, dep, col) {
     return;
   }
   // spec 9: the size cap applies only to files that would be read whole
-  if (size > MAX_FILE_BYTES) {
-    col.binaryIssues.push(truncatedIssue(rel, `${size.toLocaleString("en-US")} bytes exceeds the 2,000,000-byte file limit`));
+  const cap = col.maxFileBytes;
+  if (size > cap) {
+    col.binaryIssues.push(truncatedIssue(rel, `${withCommas(size)} bytes exceeds the ${withCommas(cap)}-byte file limit`));
     return;
   }
-  const data = readBounded(full, MAX_FILE_BYTES + 1);
-  if (data.length > MAX_FILE_BYTES) {                 // grew between the lstat and the read
-    col.binaryIssues.push(truncatedIssue(rel, "read exceeded the 2,000,000-byte file limit"));
+  const data = readBounded(full, cap + 1);
+  if (data.length > cap) {                            // grew between the lstat and the read
+    col.binaryIssues.push(truncatedIssue(rel, `read exceeded the ${withCommas(cap)}-byte file limit`));
     return;
   }
   if (kind) {

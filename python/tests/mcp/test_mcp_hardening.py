@@ -319,16 +319,25 @@ class ScanFilesCapTests(unittest.TestCase):
         self.assertIn("issueCount", entry)
         self.assertGreaterEqual(entry["issueCount"], 1)
 
-    def test_cap_matches_collect_files_limit(self):
+    def test_cap_is_collect_files_limit(self):
+        # scan_files uses collect_files' limit (core.SOURCE_SIZE_CAP, which
+        # LAZARET_MAX_SOURCE_BYTES sets), read when the call runs: verdict
+        # integrity across scan_directory and scan_files
         sys.path.insert(0, HERE)
+        from unittest import mock
         from lazaret.mcp import server as lazaret_mcp
         from lazaret.scanner import core as lazaret
-        self.assertEqual(lazaret_mcp.MAX_SCAN_FILE_BYTES, 2_000_000)
-        # collect_files' hardcoded limit must stay in sync (verdict integrity
-        # across scan_directory and scan_files)
-        with open(os.path.join(_support.PKG, "scanner", "core.py"), encoding="utf-8") as fh:
-            src = fh.read()
-        self.assertIn("2_000_000", src)
+        self.assertFalse(hasattr(lazaret_mcp, "MAX_SCAN_FILE_BYTES"))
+        path = os.path.join(tempfile.mkdtemp(prefix="cg-mcph-cap-"), "a.js")
+        with open(path, "wb") as fh:                             # bytes: no \r\n on Windows
+            fh.write(b"var x = 1;\n" * 20)                     # 220 bytes
+        with mock.patch.object(lazaret, "SOURCE_SIZE_CAP", 200):
+            entry = lazaret_mcp.tool_scan_files({"paths": [path]})["files"][path]
+        self.assertEqual(entry["rule"], "SC-TRUNCATED")
+        self.assertIn("220 bytes exceeds the 200-byte file limit", entry["error"])
+        with mock.patch.object(lazaret, "SOURCE_SIZE_CAP", 220):
+            entry = lazaret_mcp.tool_scan_files({"paths": [path]})["files"][path]
+        self.assertNotIn("rule", entry)
 
 
 # ---------------------------------------------------------------------------
