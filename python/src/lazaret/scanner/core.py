@@ -4707,23 +4707,76 @@ def _python_cookie(data):
     return None, None
 
 
+#: Coding-cookie names only newer Pythons know (3.13: windows_31j; 3.14: 874,
+#: ms874, windows_874, cseuckr, iso_8859_8_e, iso_8859_8_i), resolved on every
+#: supported version so a file decodes the same whichever Python scans it
+#: (normalized as encodings.normalize_encoding does, on the lower-cased name).
+CODEC_ALIAS_EXTRAS = {"windows_31j": "cp932", "874": "cp874", "ms874": "cp874",
+                      "windows_874": "cp874", "cseuckr": "euc_kr",
+                      "iso_8859_8_e": "iso8859-8", "iso_8859_8_i": "iso8859-8"}
+#: Codecs that decode with the host's code page (Windows only): unknown here.
+HOST_CODECS = frozenset(("mbcs", "oem"))
+#: Single-byte tables that differ between supported Pythons, as the newest has
+#: them (3.13 maps palmos 0x9B to U+203A; 3.10-3.12 to U+009B).
+CHARMAP_FIXES = {"palmos": {0x9B: "\u203a"}}
+#: Multi-byte codecs the npm engine decodes with the runtime's TextDecoder.
+#: With these, the single-byte codecs (scripts/make_codec_tables.py writes
+#: it Python's tables), UTF-7, Latin-1 and ASCII, both engines decode what a
+#: cookie names; any other codec (UTF-32, unicode-escape, ISO-2022-KR,
+#: Shift_JIS-2004, …) is read as UTF-8 by both, with SC-TRUNCATED.
+_TEXTDECODER_CODECS = frozenset((
+    "utf-16", "utf-16-le", "utf-16-be", "shift_jis", "cp932", "euc_jp", "iso2022_jp",
+    "gbk", "gb2312", "cp936", "gb18030", "big5", "cp950", "euc_kr", "cp949"))
+
+
+def _codec_key(name):
+    """A codec name as encodings.normalize_encoding sees it (lower case)."""
+    return re.sub(r"[^a-z0-9.]+", "_", name.lower()).strip("_")
+
+
 def _normal_codec(name):
     """Codec for a cookie name as the interpreter resolves it (utf-8-* and
     latin-1-* spellings fold to their base codec), or None if Python has no
-    such text codec."""
+    such text codec. The same on every supported Python and host
+    (CODEC_ALIAS_EXTRAS, HOST_CODECS)."""
     short = name[:12].lower().replace("_", "-")
     if short == "utf-8" or short.startswith("utf-8-"):
         return "utf-8"
     if short in ("latin-1", "iso-8859-1", "iso-latin-1") or short.startswith(
             ("latin-1-", "iso-8859-1-", "iso-latin-1-")):
         return "iso8859-1"
+    key = _codec_key(name)
+    extra = CODEC_ALIAS_EXTRAS.get(key) or CODEC_ALIAS_EXTRAS.get(key.replace(".", "_"))
+    if extra:
+        return extra
     try:
         info = _codecs.lookup(name)
     except LookupError:
         return None
     if not getattr(info, "_is_text_encoding", True):
         return None                     # rot13, hex, zlib… are not text encodings
-    return info.name
+    return None if info.name in HOST_CODECS else info.name
+
+
+def charmap_table(codec):
+    """What each byte decodes to in the single-byte (charmap) codec `codec`: a
+    256-character string, U+FFFE for a byte it leaves undefined, as the newest
+    supported Python has it (CHARMAP_FIXES); None for any other codec."""
+    try:
+        info = _codecs.lookup(codec)
+    except LookupError:
+        return None
+    mod = sys.modules.get(getattr(info.incrementaldecoder, "__module__", "") or "")
+    table = getattr(mod, "decoding_table", None)
+    if not isinstance(table, str) or len(table) != 256:
+        return None
+    fix = CHARMAP_FIXES.get(info.name)
+    return table.translate(fix) if fix else table
+
+
+def _decoded_by_both_engines(codec):
+    return (codec in ("utf-7", "ascii", "iso8859-1", "charmap") or codec in _TEXTDECODER_CODECS
+            or charmap_table(codec) is not None)
 
 
 #: A surrogate code point: never text on its own (see decode_source).
@@ -4735,18 +4788,21 @@ def decode_source(data, lang=None):
     them. Returns (text, info):
 
       info = {"encoding": codec label, "reported": bool (-> Q-ENCODING),
-              "utf7": bool (-> SC-UTF7), "cookieLine": n or None}
+              "utf7": bool (-> SC-UTF7), "cookieLine": n or None,
+              "undecoded": True when the codec is not decoded (-> SC-TRUNCATED)}
 
     FIX-SPEC 4 (BOM / NUL sniff) first; for Python source without a BOM or
     NUL, FIX-SPEC 15: a PEP 263 cookie naming a codec other than UTF-8 decodes
     with that codec (Q-ENCODING); UTF-7 additionally sets utf7 (a UTF-7
     '+AAo-' is a newline, so code can hide inside a comment). An unknown codec
-    decodes as UTF-8 with replacement. Never raises on content. Line endings
-    are normalized to \\n, as text mode reads them. A surrogate code point
-    left by the codec (UTF-7 '+2AA-', unicode_escape '\\udc80') becomes
-    U+FFFD, as in the npm engine's decoders: text holding one cannot be
-    written as UTF-8 (review: the HTML report raised UnicodeEncodeError after
-    the JSON was written, exit 5) and the flow engine could not parse it."""
+    decodes as UTF-8 with replacement, and so does a codec the npm engine
+    cannot decode exactly as Python does (undecoded: the file is not fully
+    scanned). Never raises on content. Line endings are normalized to \\n, as
+    text mode reads them. A surrogate code point left by the codec (UTF-7
+    '+2AA-', unicode_escape '\\udc80') becomes U+FFFD, as in the npm engine's
+    decoders: text holding one cannot be written as UTF-8 (review: the HTML
+    report raised UnicodeEncodeError after the JSON was written, exit 5) and
+    the flow engine could not parse it."""
     enc = detect_encoding(data[:4])
     if (enc["reported"] and not enc["bom"] and enc["encoding"].startswith("utf-16")
             and not _text_is_plausible(data[:4096].decode(enc["encoding"], "replace"))):
@@ -4764,10 +4820,13 @@ def decode_source(data, lang=None):
             if real is None:
                 info.update(encoding=name, reported=True, cookieLine=line_no)
             elif real != "utf-8":
-                codec = real
                 info.update(encoding=real, reported=True, cookieLine=line_no,
                             utf7=(real == "utf-7"
                                   or name.lower().replace("_", "-") in _UTF7_NAMES))
+                if _decoded_by_both_engines(real):
+                    codec = real
+                else:           # read as UTF-8, as the npm engine can only read it
+                    info["undecoded"] = True
     try:
         text = body.decode(codec)
     except Exception:                   # malformed input or a misbehaving codec:
@@ -4775,6 +4834,9 @@ def decode_source(data, lang=None):
             text = body.decode(codec, "replace")
         except Exception:
             text = body.decode("utf-8", "replace")
+    fix = CHARMAP_FIXES.get(codec)
+    if fix:
+        text = text.translate(fix)
     if not text.isascii():
         text = _SURROGATE_RE.sub("\ufffd", text)
     return normalize_newlines(text), info
@@ -4809,6 +4871,10 @@ def encoding_issues(path, text, info):
                     "for this file are reported against it).",
              "ref": "CWE-506 · Supply chain"}, path, info["cookieLine"] or 1, lines,
             redactor=red))
+    if info.get("undecoded"):
+        out.append(truncated_issue(
+            path, f"its source encoding ({info['encoding']}) is not decoded by Lazaret; "
+                  f"the file was read as UTF-8"))
     return out
 
 

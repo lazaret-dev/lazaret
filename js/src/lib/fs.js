@@ -363,6 +363,8 @@ function collectFile(full, rel, name, st, dep, col) {
       why: "In UTF-7, '+AAo-' decodes to a newline: text that every editor, diff and reviewer shows as a comment becomes executable code when Python reads the file. No legitimate project needs a UTF-7 source file.",
       fix: "Re-save the file as UTF-8 and review the decoded text (the findings for this file are reported against it).",
       ref: "CWE-506 · Supply chain" }, rel, dec.cookieLine || 1, lines));
+    if (dec.undecoded) col.binaryIssues.push(truncatedIssue(rel,
+      `its source encoding (${dec.encoding}) is not decoded by Lazaret; the file was read as UTF-8`));
   }
   col.files.push({ path: rel, content, lang, dep });
 }

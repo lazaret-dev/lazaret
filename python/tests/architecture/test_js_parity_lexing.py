@@ -40,6 +40,15 @@ TREE = {
     "enc/crlf7.py": b"#!/usr/bin/env python\r\n# coding: utf-7\r\nx = 1 # +AAo-eval(x)\r\n",
     "enc/crlf_latin1.py": b"#!/usr/bin/env python\r\n# coding: latin-1\r\ns = '\xe9'\r\neval(s)\r\n",
     "enc/cr_latin1.py": b"#!/usr/bin/env python\r# coding: latin-1\rs = '\xe9'\r",
+    # codecs: Python's tables for single-byte ones; SC-TRUNCATED for the rest
+    "enc/ebcdic.py": "# coding: cp037\nprint(1)\nx = eval(input())\n",
+    "enc/dos.py": b"# coding: cp437\nx = eval(y)  # \x82t\x82\n",
+    "enc/iso16.py": b"# coding: iso8859_16\ns = '\xa1\xa4'\neval(s)\n",
+    "enc/cp1252.py": b"# coding: cp1252\ns = '\x80\x81\x9f'\n",
+    "enc/win874.py": b"# coding: windows-874\ns = '\x80'\n",
+    "enc/palmos.py": b"# coding: palmos\ns = '\x9b'\n",
+    "enc/u32.py": "# coding: utf-32\nx = eval(y)\n",
+    "enc/uesc.py": "# coding: unicode_escape\n# \\x0aeval(z)\n",
     # the quadratic comment checks, at a size both engines finish quickly
     "perf/escapes.js": "x=1;" + "/**/\\u0061" * 20000 + "\n",
 }
@@ -82,8 +91,10 @@ class LexingParityTests(unittest.TestCase):
         found = {(i["rule"], i["file"].replace("\\", "/"), i["line"]) for i in report["issues"]}
         for want in (("SQL-GRANT-ALL", "mask/dump.sql", 2), ("S-EVAL-JS", "mask/text.jsx", 2),
                      ("S-EVAL-JS", "mask/marker.jsx", 1), ("S-EVAL-PY", "py/unterminated.py", 1),
-                     ("SC-UTF7", "enc/crlf7.py", 2), ("Q-ENCODING", "enc/cr_latin1.py", 1)):
+                     ("SC-UTF7", "enc/crlf7.py", 2), ("Q-ENCODING", "enc/cr_latin1.py", 1),
+                     ("SC-TRUNCATED", "enc/u32.py", 1), ("SC-TRUNCATED", "enc/uesc.py", 1)):
             self.assertIn(want, found)
+        self.assertNotIn(("S-EVAL-PY", "enc/ebcdic.py", 3), found)     # decoded as EBCDIC, as Python reads it
 
 
 if __name__ == "__main__":

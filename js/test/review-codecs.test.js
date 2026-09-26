@@ -41,3 +41,34 @@ test("a coding cookie on line 2 of a CRLF file is found", () => {
     "crlf7.py": latin1("#!/usr/bin/env python\r\n# coding: utf-7\r\nx = 1 # +AAo-eval(x)\r\n"),
   }), ["crlf7.py:1 " + q("utf-7"), "crlf7.py:2 SC-UTF7", "crlf7.py:4 S-EVAL-PY"]);
 });
+
+// 63 codecs Python decodes had no TextDecoder label: the engine said
+// "detected cp037" and then read the file as UTF-8, so the EBCDIC file below
+// gave S-EVAL-PY and T-CODE here and nothing in Python. Single-byte codecs now
+// decode with Python's own tables (src/lib/codecs.js, generated); any codec
+// this engine cannot decode exactly as Python does is read as UTF-8 by both
+// engines with SC-TRUNCATED.
+test("single-byte codecs decode with Python's tables", () => {
+  const got = (cookie, bytes) => decodeSource(Buffer.concat([latin1(`# coding: ${cookie}\n`), Buffer.from(bytes)]), { py: true });
+  assert.equal(got("cp437", [0x82, 0xb0]).text.slice(-2), "é░");
+  assert.equal(got("cp1252", [0x80, 0x81, 0x9f]).text.slice(-3), "€\ufffdŸ");  // 0x81 is undefined in Python
+  assert.equal(got("iso8859_16", [0xa1, 0xa4]).text.slice(-2), "Ą€");         // no TextDecoder label
+  assert.equal(got("cp866", [0x1a, 0x7f]).text.slice(-2), "\x1a\x7f");         // ICU's ibm866 swaps these
+  assert.equal(got("palmos", [0x9b]).text.slice(-1), "\u203a");                // as Python 3.13+
+  const w = got("windows-874", [0x80]);                                         // an alias only 3.14 has
+  assert.deepEqual([w.encoding, w.text.slice(-1)], ["cp874", "€"]);
+});
+
+test("a codec cookie decodes the same as in Python; one no engine decodes is SC-TRUNCATED", () => {
+  assert.deepEqual(scanTree({
+    "ebcdic.py": "# coding: cp037\nprint(1)\nx = eval(input())\n",
+    "dos.py": latin1("# coding: cp437\nx = eval(y)  # \x82t\x82\n"),
+    "u32.py": "# coding: utf-32\nx = eval(y)\n",
+    "uesc.py": "# coding: unicode_escape\n# \\x0aeval(z)\n",
+  }), [
+    "dos.py:1 " + q("cp437"), "dos.py:2 S-EVAL-PY",
+    "ebcdic.py:1 " + q("cp037"),
+    "u32.py:1 " + q("utf-32"), "u32.py:1 SC-TRUNCATED", "u32.py:2 S-EVAL-PY",
+    "uesc.py:1 " + q("unicode-escape"), "uesc.py:1 SC-TRUNCATED",
+  ]);
+});

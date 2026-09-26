@@ -1,7 +1,7 @@
 // Source decoding (shared semantics specs 4 and 15) and file-name decoding
 // (spec 11) — zero-dependency leaf.
 
-import { PY_CODEC_ALIASES } from "./codecs.js";
+import { PY_CODEC_ALIASES, SINGLE_BYTE_CODECS } from "./codecs.js";
 
 // ---- BOM / NUL sniff (spec 4) --------------------------------------------
 /**
@@ -145,24 +145,36 @@ function decodeAscii(buf) {
 const UTF8 = new TextDecoder("utf-8", { fatal: false, ignoreBOM: true });
 const decodeUtf8 = (buf) => UTF8.decode(buf);
 
-// Python codec name → WHATWG TextDecoder label (codecs the runtime can decode).
+// Multi-byte codecs: Python codec name → WHATWG TextDecoder label (twin of
+// core._TEXTDECODER_CODECS). Single-byte codecs decode with Python's own
+// tables (SINGLE_BYTE_CODECS); the TextDecoder's differ (cp1252's undefined
+// bytes, cp866, no ISO-8859-16).
 const WHATWG = {
   "utf-16": "utf-16le", "utf-16-le": "utf-16le", "utf-16-be": "utf-16be",
-  "cp866": "ibm866", "koi8-r": "koi8-r", "koi8-u": "koi8-u", "mac-roman": "macintosh",
-  "mac-cyrillic": "x-mac-cyrillic", "shift_jis": "shift_jis", "cp932": "shift_jis", "euc_jp": "euc-jp",
+  "shift_jis": "shift_jis", "cp932": "shift_jis", "euc_jp": "euc-jp",
   "iso2022_jp": "iso-2022-jp", "gbk": "gbk", "gb2312": "gbk", "cp936": "gbk", "gb18030": "gb18030",
-  "big5": "big5", "cp950": "big5", "euc_kr": "euc-kr", "cp949": "euc-kr", "cp874": "windows-874",
-  "tis-620": "windows-874",
+  "big5": "big5", "cp950": "big5", "euc_kr": "euc-kr", "cp949": "euc-kr",
 };
-for (let n = 1250; n <= 1258; n++) WHATWG[`cp${n}`] = `windows-${n}`;
-for (const n of [2, 3, 4, 5, 6, 7, 8, 10, 13, 14, 15, 16]) WHATWG[`iso8859-${n}`] = `iso-8859-${n}`;
 
-/** Decode `buf` with a Python codec name; null when this runtime cannot. */
+/** Bytes through a single-byte table (128 characters: bytes 0x80..0xFF; else all 256). */
+function decodeSingleByte(table, buf) {
+  const low = table.length === 128 ? 128 : 0;
+  let out = "";
+  for (let k = 0; k < buf.length; k += 8192) {
+    const part = buf.subarray(k, k + 8192);
+    out += String.fromCharCode(...Array.from(part, (b) => (b < low ? b : table.charCodeAt(b - low))));
+  }
+  return out;
+}
+
+/** Decode `buf` with a Python codec name; null when this engine cannot decode it as Python does. */
 function decodeWith(codec, buf) {
   if (codec === "utf-8" || codec === "utf-8-sig") return decodeUtf8(codec === "utf-8-sig" && buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf ? buf.subarray(3) : buf);
   if (codec === "utf-7") return decodeUtf7(buf);
-  if (codec === "iso8859-1") return buf.toString("latin1");
+  if (codec === "iso8859-1" || codec === "charmap") return buf.toString("latin1");
   if (codec === "ascii") return decodeAscii(buf);
+  const table = SINGLE_BYTE_CODECS[codec];
+  if (table !== undefined) return decodeSingleByte(table, buf);
   const label = WHATWG[codec];
   if (!label) return null;
   try { return new TextDecoder(label, { fatal: false, ignoreBOM: codec !== "utf-16" }).decode(buf); } catch { return null; }
@@ -170,13 +182,14 @@ function decodeWith(codec, buf) {
 
 /**
  * Decode a source file's bytes the way its interpreter reads them (twin of
- * core.decode_source). Returns {text, encoding, reported, utf7, cookieLine}:
- * reported → Q-ENCODING ("detected <encoding>"); utf7 → SC-UTF7 at
- * cookieLine. BOM / NUL sniff first (spec 4; a BOM-less UTF-16 guess only
- * when textIsPlausible, else plain UTF-8); for Python source without a
- * BOM or NUL, a PEP 263 cookie naming a codec other than UTF-8 decodes with
- * that codec (spec 15); an unknown codec decodes as UTF-8 with replacement.
- * Never throws on content.
+ * core.decode_source). Returns {text, encoding, reported, utf7, cookieLine,
+ * undecoded}: reported → Q-ENCODING ("detected <encoding>"); utf7 → SC-UTF7
+ * at cookieLine; undecoded → SC-TRUNCATED. BOM / NUL sniff first (spec 4; a
+ * BOM-less UTF-16 guess only when textIsPlausible, else plain UTF-8); for
+ * Python source without a BOM or NUL, a PEP 263 cookie naming a codec other
+ * than UTF-8 decodes with that codec (spec 15); an unknown codec decodes as
+ * UTF-8 with replacement, and so does one this engine cannot decode exactly
+ * as Python does (undecoded: not fully scanned). Never throws on content.
  */
 export function decodeSource(buf, { py = false } = {}) {
   let sniff = sniffEncoding(buf);
@@ -204,7 +217,11 @@ export function decodeSource(buf, { py = false } = {}) {
       }
     }
   }
-  const text = decodeWith(codec, body) ?? decodeUtf8(body);
+  let text = decodeWith(codec, body);
+  if (text === null) {                              // read as UTF-8: not what Python reads
+    text = decodeUtf8(body);
+    info.undecoded = true;
+  }
   return { text, ...info };
 }
 

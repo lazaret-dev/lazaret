@@ -23,10 +23,9 @@ severity, type, name, message, why/fix/ref, snippet, snipStart):
   core.build_result.
 
 Out of scope: what the page doesn't do (manifests, binaries, directory
-walking, dependency mode, the cross-file flow engine). One known difference:
-a cookie naming a codec the browser's TextDecoder lacks (EBCDIC cp037, …)
-is decoded as UTF-8 by the page (as by the npm engine), so only its
-Q-ENCODING note is compared (test_undecodable_codec_is_still_reported).
+walking, dependency mode, the cross-file flow engine). Every codec a cookie
+can name is compared in test_review_codecs (single-byte codecs decode with
+Python's tables; the others the page cannot decode are SC-TRUNCATED in both).
 All content is inert: nothing is executed, hosts are TEST-NET or .invalid,
 credentials are dummies.
 """
