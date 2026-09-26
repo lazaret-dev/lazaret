@@ -1236,11 +1236,13 @@ _SECRET_SOURCE_RE = re.compile(
     # shell: the whole environment piped or redirected somewhere
     r"""|(?:^|[\s;&(`])(?:env|printenv|set)\s*(?:\|(?!\|)|>)|\$\(\s*(?:env|printenv)\s*\)|`\s*(?:env|printenv)\s*`""",
     re.I | re.M)
-_EXFIL_DEST_RE = re.compile(
-    r"""https?://(?:\d{1,3}\.){3}\d{1,3}\b|pastebin\.com|\bngrok|webhook\.site|"""
+_EXFIL_SERVICES = (
+    r"""pastebin\.com|\bngrok|webhook\.site|"""
     r"""discord(?:app)?\.com/api/webhooks|api\.telegram\.org|oastify\.com|burpcollaborator|"""
     r"""\binteract\.sh|\boast\.(?:pro|live|site|online|fun|me)\b|requestbin|pipedream\.net|"""
-    r"""transfer\.sh|\.onion\b""", re.I)
+    r"""transfer\.sh|\.onion\b""")
+_EXFIL_DEST_RE = re.compile(r"""https?://(?:\d{1,3}\.){3}\d{1,3}\b|""" + _EXFIL_SERVICES, re.I)
+_EXFIL_SERVICE_RE = re.compile(_EXFIL_SERVICES, re.I)      # the named ones, no raw IPs
 # `curl … | sh` / `wget … | bash`, read in one left-to-right pass: a pipe into
 # a shell after curl or wget in the same command (no `|`, `;`, `&` or line
 # break between them). The regex it replaces, `\b(?:curl|wget)\b[^\n|;&]*\|…`,
@@ -1276,6 +1278,53 @@ def install_script_risk(text):
     if _pipes_download_to_shell(text):
         reasons.append("pipes a download into a shell")
     return reasons
+
+
+# ---------------- Import-time inspection ----------------
+# Code that runs when a package is loaded — what an npm package's main, bin
+# and exports reach, a wheel's top-level packages and modules — gets a weaker
+# version of the install-script test: a MAJOR finding (a weak indicator,
+# WARN), never CRITICAL, and only on shapes ordinary SDKs don't share.
+# Harvesting means the whole environment serialized, or a credential store
+# read (SSH private keys, git credentials, browser local storage): reading
+# the variables it needs, or listing them (Object.keys(process.env),
+# os.environ.copy() for a subprocess), is everyday SDK and CLI code, and so
+# is reading a tool's own config (.npmrc, .pypirc, .netrc, ~/.aws: npm
+# clients, setuptools, distlib and cloud SDKs do, next to their network
+# code — .pypirc alone fired on 5 of 12,278 installed modules). It counts
+# only next to a network call or a named exfiltration service in the same
+# file. An address alone never counts: cloud SDKs read 169.254.169.254, and
+# Telegram, ngrok or pastebin clients name their own service. A download piped
+# into a shell counts only on a line that hands it to an exec call (a CLI's
+# help text often shows `curl … | sh`).
+_IMPORT_HARVEST_RE = re.compile(
+    r"""JSON\.stringify\(\s*process\.env\s*[,)]|"""
+    r"""\bjson\.dumps\(\s*(?:dict\(\s*)?os\.environ\s*[,)]|\b(?:str|repr)\(\s*os\.environ\s*\)|"""
+    r"""\burlencode\(\s*(?:dict\(\s*)?os\.environ\s*[,)]|"""
+    r"""[/\\]\.ssh[/\\]id_|\bid_(?:rsa|ed25519|ecdsa|dsa)\b(?!\.pub)|\.git-credentials|"""
+    r"""(?i:Local Storage)[/\\]leveldb""")
+_EXEC_CALL_RE = re.compile(
+    r"""\b(?:execSync|exec|execFileSync|execFile|spawnSync|spawn|system|popen|Popen|run|call|"""
+    r"""check_call|check_output|getoutput|getstatusoutput)\s*\(""")
+
+
+def import_time_risk(text):
+    """-> (reasons, line): why code that runs on import looks hostile by
+    the weaker test above ([] if not), and the 1-based line of the first
+    sign. `text` has \\n line endings."""
+    reasons, line = [], None
+    harvest = _IMPORT_HARVEST_RE.search(text)
+    if harvest and (_NETWORK_RE.search(text) or _EXFIL_SERVICE_RE.search(text)):
+        reasons.append("reads credentials or the whole environment and sends data over the network")
+        line = text.count("\n", 0, harvest.start()) + 1
+    if "curl" in text or "wget" in text:
+        for i, row in enumerate(text.split("\n")):
+            if ("curl" in row or "wget" in row) and _EXEC_CALL_RE.search(row) \
+                    and _pipes_download_to_shell(row):
+                reasons.append("runs a downloaded script through a shell")
+                line = line or i + 1
+                break
+    return reasons, line
 
 
 def _node_candidates(rel):
@@ -1368,6 +1417,10 @@ pth_issues = lazaret.pth_issues
 # file's import lines.
 _STARTUP_MODULE_RE = re.compile(
     r"^(?:[^/]+\.data/(?:purelib|platlib)/)?(sitecustomize|usercustomize)(?:\.py|/__init__\.py)$")
+# What `import <name>` runs from a wheel: a top-level package's __init__.py or
+# a top-level module (a single-module distribution)
+_WHEEL_TOP_MODULE_RE = re.compile(
+    r"^(?:[^/]+\.data/(?:purelib|platlib)/)?(?![^/]*\.(?:dist-info|data)/)[^/]+(?:/__init__)?\.py$")
 
 
 def startup_module_issue(rel, text):
@@ -1461,6 +1514,8 @@ class _ArtifactScan:
         self.members = set()
         self.manifests = {}        # rel -> text (package.json, binding.gyp, pyproject.toml)
         self.entries = set()       # rels that run when installed / imported
+        self.install_scripts = set()   # hook targets, setup.py & co (install_script_risk)
+        self.startup = set()       # a wheel's sitecustomize / usercustomize
 
     # ---- bookkeeping ----
     def truncate(self, rel, detail):
@@ -1750,6 +1805,7 @@ class _ArtifactScan:
                 if rel is None:
                     continue
                 self.entries.add(rel)
+                self.install_scripts.add(rel)
                 lang = "sh" if rel.endswith(".sh") else "js"
                 text = self._text_of(rel, lang)
                 reasons = install_script_risk(text) if text else []
@@ -1786,6 +1842,7 @@ class _ArtifactScan:
                     queue.append(rel)
         for rel in scripts:
             self.entries.add(rel)
+            self.install_scripts.add(rel)
             text = self.sources.get(rel, ("", "py"))[0]
             reasons = install_script_risk(text)
             if reasons:
@@ -1809,7 +1866,45 @@ class _ArtifactScan:
             text, lang = self.sources[rel]
             if lang == "py" and _STARTUP_MODULE_RE.match(rel):
                 self.entries.add(rel)
+                self.startup.add(rel)
                 self.issues.append(startup_module_issue(rel, text))
+
+    def _import_time_code(self, reachable):
+        """SC-IMPORT-RISK (MAJOR): the weaker install-script test
+        (import_time_risk) on code that runs when the package is loaded —
+        for npm what the entry points reach, for a wheel its top-level
+        packages and modules. It used to run on install-time scripts only,
+        so an import-time stealer in index.js or x/__init__.py said OK.
+        Install scripts and start-up modules have their own, stronger test."""
+        if self.artifact == "sdist":
+            return
+        if self.artifact == "wheel":
+            files = [rel for rel in self.sources if _WHEEL_TOP_MODULE_RE.match(rel)]
+        else:
+            files = reachable
+        for rel in sorted(files):
+            if rel in self.install_scripts or rel in self.startup:
+                continue
+            text, lang = self.sources.get(rel, (None, None))
+            if not text or lang not in ("js", "py"):
+                continue
+            self._deadline(rel)
+            text = lazaret.normalize_newlines(text)
+            reasons, line = import_time_risk(text)
+            if not reasons:
+                continue
+            self.issues.append(lazaret.mk_issue(
+                {"id": "SC-IMPORT-RISK", "name": "Risky import-time code", "type": "HOTSPOT",
+                 "sev": "MAJOR",
+                 "msg": f"{rel} runs when the package is loaded, and it {'; and '.join(reasons)}.",
+                 "why": ("Code the package's entry points reach (in a wheel, its top-level "
+                         "modules) runs whenever the package is imported or its command runs. "
+                         "Collecting credentials or the whole environment next to a network "
+                         "call is the shape of an import-time stealer; SDKs read the few "
+                         "variables they need. A weaker indicator than the same code in an "
+                         "install script: the file may have a reason."),
+                 "fix": "Read the file: what does it collect, and where does it send it?",
+                 "ref": "CWE-506 · Supply chain"}, rel, line, text.split("\n")))
 
     def _reachable(self):
         """Entry files plus local files they require/import (JS), transitively.
@@ -1864,6 +1959,8 @@ class _ArtifactScan:
                 self._startup_modules()
             self._deadline("the files the entry points load")
             reachable = self._reachable()
+            self._deadline("the import-time code")
+            self._import_time_code(reachable)
             # interprocedural / cross-file taint (full profile only — needs whole source)
             if self.full and getattr(lazaret, "lazaret_flow", None) is not None:
                 self._deadline("the cross-file analysis")
