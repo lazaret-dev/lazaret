@@ -3,7 +3,9 @@
 Each finding copied its ±2 context lines whole, so a 22.5 KB one-line file
 produced a 34 MB JSON and a 34 MB HTML report. Snippet lines are now clipped
 to 240 characters, the flagged line windowed around the match; INFO/MINOR/
-SMELL findings are capped at 200 per (file, rule) with one Q-CAPPED summary.
+SMELL findings are capped at 200 per (file, rule) with one Q-CAPPED summary
+(since the final review: every non-security rule's findings — see
+test_review_dedupe_cap.py).
 """
 import json
 import unittest
@@ -48,11 +50,12 @@ class ScanSnippetTests(unittest.TestCase):
     def test_one_line_file_report_is_bounded(self):
         src = "try{}catch(e){}" * 1500 + "\n"          # the review's 22.5 KB repro
         issues = core.scan_file("m.js", src, "js")
-        self.assertGreaterEqual(len(issues), 1500)
+        # 1500 matches on one line are one finding: same rule, line and message
+        self.assertEqual(sum(i["rule"] == "B-EMPTY-CATCH" for i in issues), 1)
         for i in issues:
             for l in i["snippet"]:
                 self.assertLessEqual(len(l), 240)
-        self.assertLess(len(json.dumps(issues)), 3_000_000)
+        self.assertLess(len(json.dumps(issues)), 20_000)
 
     def test_flagged_line_windowed_on_the_match(self):
         src = "var pad = '" + "x" * 3000 + "'; eval(process.argv[2]);\n"
@@ -107,7 +110,10 @@ class CapTests(unittest.TestCase):
     def test_cappable_predicate(self):
         self.assertTrue(core._cappable({"rule": "Q-FN-LONG", "sev": "MAJOR", "type": "SMELL"}))
         self.assertTrue(core._cappable({"rule": "B-EQEQ", "sev": "MINOR", "type": "BUG"}))
-        self.assertFalse(core._cappable({"rule": "B-EMPTY-CATCH", "sev": "MAJOR", "type": "BUG"}))
+        # every non-security rule, whatever its severity or type (review: MAJOR
+        # B-EMPTY-CATCH was uncapped: 130,001 findings, an 87.7 MB report)
+        self.assertTrue(core._cappable({"rule": "B-EMPTY-CATCH", "sev": "MAJOR", "type": "BUG"}))
+        self.assertTrue(core._cappable({"rule": "Q-FN-CX", "sev": "BLOCKER", "type": "BUG"}))
         for rid in ("S-HTTP", "T-CMD", "SC-B64", "X-SQL", "SQL-NOLOCK"):
             self.assertFalse(core._cappable({"rule": rid, "sev": "MINOR", "type": "SMELL"}))
 

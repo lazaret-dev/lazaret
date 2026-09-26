@@ -19,7 +19,7 @@ export { isComment } from "./engine.js";
 export const LONG_LINE = 160;
 export const FN_LEN_LIMIT = 60;
 export const FN_CX_LIMIT = 12;
-/** Spec 7: per (file, rule) cap for INFO/MINOR/SMELL findings (security rules are never capped). */
+/** Spec 7: per (file, rule) cap for every non-security rule (S-, T-, SC-, X-, SQL- are never capped). */
 export const CAP_PER_RULE = 200;
 export const FINDING_CAP = CAP_PER_RULE;
 const NEVER_CAPPED_PREFIXES = ["S-", "T-", "SC-", "X-", "SQL-"];
@@ -339,12 +339,29 @@ function depDecodeFlow(path, ctx, issues, rule) {
 const SC_EVAL_DECODE = RULES.find((r) => r.id === "SC-EVAL-DECODE");
 
 // ---- findings cap (spec 7) -------------------------------------------------
+// Findings identical on (rule, file, line, msg) are reported once (the first
+// is kept): same line, same snippet text in every report. Then every rule
+// that is not a security rule (S-, T-, SC-, X-, SQL-) is capped at
+// CAP_PER_RULE findings per file, whatever its severity or type (review: a
+// MAJOR B-EMPTY-CATCH gave 130,001 findings, an 87.7 MB report, for one
+// 1.95 MB line). Twin of core.dedupe_issues / cap_issues.
 function cappable(i) {
-  return !NEVER_CAPPED_PREFIXES.some((p) => String(i.rule).startsWith(p))
-    && (i.sev === "INFO" || i.sev === "MINOR" || i.type === "SMELL");
+  return !NEVER_CAPPED_PREFIXES.some((p) => String(i.rule).startsWith(p));
 }
-/** At most CAP_PER_RULE findings per rule, in line order; one Q-CAPPED per capped rule at its first omitted line. */
+/** `issues` without repeats of the same (rule, file, line, msg); the first of each is kept, in order. */
+export function dedupeIssues(issues) {
+  const seen = new Set(), out = [];
+  for (const i of issues) {
+    const key = JSON.stringify([i.rule, i.file, i.line, i.msg]);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(i);
+  }
+  return out;
+}
+/** Deduplicated; then at most CAP_PER_RULE findings per rule, in line order; one Q-CAPPED per capped rule at its first omitted line. */
 export function capIssues(path, issues, lines) {
+  issues = dedupeIssues(issues);
   const order = issues.map((_, k) => k).sort((a, b) => (issues[a].line ?? 0) - (issues[b].line ?? 0) || a - b);
   const counts = new Map(), dropped = new Set(), omitted = new Map();
   for (const k of order) {
@@ -363,7 +380,7 @@ export function capIssues(path, issues, lines) {
   for (const [rid, [n, first]] of omitted) {
     out.push(mkIssue({ id: "Q-CAPPED", name: "Findings capped", type: "SMELL", sev: "INFO",
       msg: `${n} more ${rid} findings omitted`,
-      why: "Low-severity findings that repeat hundreds of times in one file are capped so reports stay readable; security findings are never capped.",
+      why: "Findings of one rule that repeat hundreds of times in one file are capped so reports stay readable; security findings are never capped.",
       fix: `Fix or deliberately suppress the ${rid} pattern in this file, then re-scan to see the remaining occurrences.`,
       ref: "Maintainability" }, path, first, lines));
   }
@@ -501,9 +518,12 @@ function scanLines(path, content, lines, lang, dep, ctx, issues) {
   for (const r of TEXT_RULES) {
     // *-NOWHERE SQL rules are fired by scanSqlNowhere() (linear pass)
     if (!r.langs.includes(lang) || !r.scan) continue;
+    let last = -1;
     for (const off of r.scan(mcontent)) {
       starts ??= lineStarts(mcontent);
       const lineNo = upperBound(starts, off);
+      if (lineNo === last) continue;         // same (rule, line, msg): reported once (capIssues)
+      last = lineNo;
       issues.push(mkIssue(r, path, lineNo, lines, off - starts[lineNo - 1]));
     }
     ctx.checkTime();

@@ -132,7 +132,7 @@ class CapAndTaintTests(unittest.TestCase):
         (capped,) = [i for i in issues if i["rule"] == "Q-CAPPED"]
         self.assertEqual({k: capped[k] for k in ("line", "sev", "type", "msg", "why", "fix", "ref")}, {
             "line": 201, "sev": "INFO", "type": "SMELL", "msg": "10 more Q-TODO findings omitted",
-            "why": "Low-severity findings that repeat hundreds of times in one file are capped so reports "
+            "why": "Findings of one rule that repeat hundreds of times in one file are capped so reports "
                    "stay readable; security findings are never capped.",
             "fix": "Fix or deliberately suppress the Q-TODO pattern in this file, then re-scan to see the "
                    "remaining occurrences.",

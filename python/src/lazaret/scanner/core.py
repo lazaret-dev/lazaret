@@ -2122,23 +2122,41 @@ def mk_issue(rule_or_dict, path, line_no, lines, col=None):
 
 
 # ---------------- Per-file finding cap (review fix: shared semantics 7) ----------------
-# At most CAP_PER_RULE findings per (file, rule) for low-value rules — sev
-# INFO or MINOR, or type SMELL — kept in line order; the rest are replaced by
-# ONE Q-CAPPED INFO finding per capped rule at the first omitted line.
-# Security findings (S-, T-, SC-, X-, SQL- rules) are never capped.
+# Findings identical on (rule, file, line, msg) are reported ONCE (the first,
+# i.e. leftmost, one is kept): they are indistinguishable in every report —
+# same line, same snippet text. Then at most CAP_PER_RULE findings per (file,
+# rule) are kept, in line order, for every rule that is not a security rule;
+# the rest are replaced by ONE Q-CAPPED INFO finding per capped rule at the
+# first omitted line. Security findings (S-, T-, SC-, X-, SQL- rules) are
+# never capped (but are deduplicated: distinct taint flows on one line keep
+# their distinct messages). Review: the cap used to cover INFO/MINOR/SMELL
+# rules only, so a 1.95 MB one-line `try{}catch(e){}` x 130k file gave 130,001
+# MAJOR B-EMPTY-CATCH findings and an 87.7 MB JSON report (120k lines: 66.7 MB).
 CAP_PER_RULE = 200
 _NEVER_CAPPED_PREFIXES = ("S-", "T-", "SC-", "X-", "SQL-")
 
 
 def _cappable(issue):
-    rid = str(issue.get("rule", ""))
-    if rid.startswith(_NEVER_CAPPED_PREFIXES):
-        return False
-    return issue.get("sev") in ("INFO", "MINOR") or issue.get("type") == "SMELL"
+    return not str(issue.get("rule", "")).startswith(_NEVER_CAPPED_PREFIXES)
+
+
+def dedupe_issues(issues):
+    """`issues` without repeats of the same (rule, file, line, msg); the first
+    of each is kept, order is preserved."""
+    seen, out = set(), []
+    for i in issues:
+        key = (i.get("rule"), i.get("file"), i.get("line"), i.get("msg"))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(i)
+    return out
 
 
 def cap_issues(path, issues, lines):
-    """`issues` (one file's findings) with the per-rule cap applied."""
+    """`issues` (one file's findings) deduplicated, then with the per-rule cap
+    applied (see above)."""
+    issues = dedupe_issues(issues)
     counts, dropped, omitted = {}, set(), {}
     order = sorted(range(len(issues)), key=lambda k: issues[k].get("line", 0))
     for k in order:
@@ -2158,7 +2176,7 @@ def cap_issues(path, issues, lines):
         out.append(mk_issue(
             {"id": "Q-CAPPED", "name": "Findings capped", "type": "SMELL", "sev": "INFO",
              "msg": f"{n} more {rid} findings omitted",
-             "why": "Low-severity findings that repeat hundreds of times in one file are capped "
+             "why": "Findings of one rule that repeat hundreds of times in one file are capped "
                     "so reports stay readable; security findings are never capped.",
              "fix": f"Fix or deliberately suppress the {rid} pattern in this file, then re-scan "
                     "to see the remaining occurrences.",
@@ -2789,12 +2807,16 @@ def _scan_file(path, content, lines, lang, dep, ctx, issues):
         # not here — their regexes match only the statement head.
         if lang not in r["langs"] or r["id"] in _SQL_NOWHERE_SKIP:
             continue
+        last = None
         for n, m in enumerate(r["re"].finditer(mcontent)):
             if not n & 255:
                 ctx.check_time()
             if starts is None:        # review fix: was content[:pos].count("\n") per match
                 starts = _line_starts(mcontent)
             line_no = bisect.bisect_right(starts, m.start())
+            if line_no == last:       # same (rule, line, msg): reported once (cap_issues)
+                continue
+            last = line_no
             issues.append(mk_issue(r, path, line_no, lines, m.start() - starts[line_no - 1]))
     ctx.check_time()
     if lang == "sql":
