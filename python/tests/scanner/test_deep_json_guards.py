@@ -199,15 +199,18 @@ class CliConfigBaselineTests(unittest.TestCase):
         self.assertIn("warning: could not load taint config", p.stderr)
         self.assertIn("Quality gate", p.stdout)  # report still produced
 
-    def test_explicit_deep_taint_config_warns_and_scans(self):
+    def test_explicit_deep_taint_config_exits_4(self):
+        # An explicit --taint-config is what CI asked for: failing to load it
+        # must not quietly scan without its rules (final review item 2; this
+        # test used to expect warn-and-scan, exit 0). Still no traceback.
         cfg = os.path.join(self.tmp, "deep.json")
         with open(cfg, "w") as fh:
             fh.write(DEEP)
         p = self._cli("--taint-config", cfg)
         self.assertNotIn("Traceback", p.stderr)
-        self.assertEqual(p.returncode, 0)
-        self.assertIn("warning: could not load taint config", p.stderr)
-        self.assertIn("Quality gate", p.stdout)
+        self.assertEqual(p.returncode, 4, p.stderr[-500:])
+        self.assertIn("error: could not load taint config", p.stderr)
+        self.assertNotIn("Quality gate", p.stdout)
 
     def test_deep_taint_config_does_not_hide_sibling_findings(self):
         with open(os.path.join(self.tmp, ".lazaret-taint.json"), "w") as fh:
