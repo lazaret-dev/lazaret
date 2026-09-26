@@ -557,16 +557,26 @@ class ArchiveLimit(Exception):
 
 
 class Budget:
-    """Decompression and time budget for reading one archive. Every
-    decompressed byte is charged — including member data tarfile skips over
-    rather than returns — and the deadline / cancellation hook is checked
-    between chunks and between members."""
+    """Decompression and time budget for reading and scanning one archive.
+    Every decompressed byte is charged — including member data tarfile skips
+    over rather than returns — and the deadline / cancellation hook is
+    checked between chunks and members while reading, and between files and
+    phases while scanning. `deadline_detail` says which deadline it is (the
+    per-archive --scan-timeout or the caller's, whichever comes first), for
+    the SC-TRUNCATED message when it passes."""
 
-    def __init__(self, total=None, deadline=None, cancel=None):
+    def __init__(self, total=None, deadline=None, cancel=None, deadline_detail=None):
         self.limit = MAX_ARCHIVE_TOTAL if total is None else total
         self.used = 0
         self.deadline = deadline
         self.cancel = cancel
+        self.deadline_detail = deadline_detail
+
+    def time_detail(self, where):
+        """SC-TRUNCATED detail for this budget's deadline, stopped at `where`."""
+        if self.deadline_detail:
+            return f"{self.deadline_detail} (stopped at {where})"
+        return _TRUNC_DETAILS["time"](where, 0)
 
     def charge(self, n):
         self.used += n
@@ -1364,8 +1374,9 @@ class _ArtifactScan:
     resolve what package.json / setup.py say runs (entry points, install
     hooks, build backends) once every member is known."""
 
-    def __init__(self, artifact, full):
+    def __init__(self, artifact, full, budget=None):
         self.artifact, self.full = artifact, full
+        self.budget = budget       # the archive's Budget (its deadline names itself)
         self.issues, self.files_scanned, self.binaries = [], 0, 0
         self.truncated, self.truncated_emitted = 0, 0
         self.truncated_at = {}     # rel -> its SC-TRUNCATED issue (None past the cap)
@@ -1399,6 +1410,15 @@ class _ArtifactScan:
             self.truncated_emitted += 1
         self.truncated_at[rel] = issue
 
+    def limit_detail(self, reason, rel, size=0):
+        """SC-TRUNCATED detail for an archive limit ('files', 'total',
+        'time', ...) reached at `rel`; 'time' names the deadline that
+        passed, which may be the caller's rather than --scan-timeout."""
+        if reason == "time" and self.budget is not None:
+            return self.budget.time_detail(rel)
+        return _TRUNC_DETAILS.get(
+            reason, lambda r, s: f"archive not fully read ({reason})")(rel, size)
+
     def add_decode_issues(self, extra, keep_encoding=True):
         for i in extra:
             if i["rule"] == "SC-TRUNCATED":
@@ -1428,9 +1448,7 @@ class _ArtifactScan:
     def member(self, m):
         rel, size, raw, reason = m
         if reason in ("files", "total", "time", "corrupt"):
-            detail = getattr(m, "detail", "") or _TRUNC_DETAILS.get(
-                reason, lambda r, s: f"archive not fully read ({reason})")(rel, size)
-            self.truncate(rel, detail)
+            self.truncate(rel, getattr(m, "detail", "") or self.limit_detail(reason, rel, size))
             return
         self.members.add(rel)
         base = os.path.basename(rel)
@@ -1703,15 +1721,14 @@ def _pep517_backend(pyproject):
 
 def _scan_artifact(data, container, artifact, full, budget):
     """Scan one archive -> per-artifact result fields (issues, counts, verdict)."""
-    st = _ArtifactScan(artifact, full)
+    st = _ArtifactScan(artifact, full, budget)
     anomalies = []
     try:
         for m in iter_archive(data, container, artifact, budget=budget, anomalies=anomalies):
             st.member(m)
             budget.check()
     except ArchiveLimit as lim:          # deadline hit between members
-        st.truncate("(archive)", lim.detail or _TRUNC_DETAILS.get(
-            lim.reason, lambda r, s: lim.reason)("(archive)", 0))
+        st.truncate("(archive)", lim.detail or st.limit_detail(lim.reason, "(archive)"))
     st.finish(anomalies)
     issues = st.issues
     verdict, reason, strong, weak = decide_verdict(issues, st.truncated)
@@ -1780,12 +1797,12 @@ def _skipped_summary(skipped, byte_budget, limit):
                          f"({names(items)}; raise --max-download-bytes / "
                          f"LAZARET_MAX_DOWNLOAD_BYTES)"))
         labels.append(f"over the {_fmt_bytes(byte_budget)} download budget (--max-download-bytes)")
-    if "time" in groups:
+    if "time" in groups:                   # only the caller's deadline stops downloads
         items = groups["time"]
         issues.append(lazaret.truncated_issue(
-            "(release)", f"{len(items)} release file(s) not downloaded: the scan's time "
-                         f"budget ran out ({names(items)})"))
-        labels.append("time budget exhausted")
+            "(release)", f"{len(items)} release file(s) not downloaded: the caller's time "
+                         f"budget for this package ran out ({names(items)})"))
+        labels.append("the caller's time budget ran out")
     return issues, "; ".join(labels)
 
 
@@ -1817,6 +1834,7 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
     time.monotonic() bound for the whole package (MCP budget); each archive
     also gets SCAN_TIMEOUT. cancel: callable; True stops the scan with
     ScanCancelled."""
+    started = time.monotonic()
     if resolved is None:
         resolved = resolve(eco, name, version)
     version, url, container, artifact, meta_entry = resolved
@@ -1866,7 +1884,14 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
         # this name/version.
         digest = verify_digest(data, ref["entry"], eco, name, version)
         stop = time.monotonic() + SCAN_TIMEOUT
-        budget = Budget(deadline=min(stop, deadline) if deadline else stop, cancel=cancel)
+        if deadline is not None and deadline < stop:
+            # the caller's deadline comes first: say so, not "120 s exceeded"
+            budget = Budget(deadline=deadline, cancel=cancel, deadline_detail=(
+                f"the caller's time budget of {max(0.0, deadline - started):.1f} s for "
+                f"this package ran out"))
+        else:
+            budget = Budget(deadline=stop, cancel=cancel, deadline_detail=(
+                f"scan time budget of {SCAN_TIMEOUT:g} s per archive (--scan-timeout) exceeded"))
         r = _scan_artifact(data, ref["container"], ref["artifact"], full, budget)
         prefix = f"{ref['filename']}/" if multi and ref.get("filename") else ""
         for issue in r["issues"]:
