@@ -238,6 +238,24 @@ class PypiResumeTests(ResumeCase):
                       "https://pypi.org/pypi: timed out); PyPI was not checked.", err)
         self.assertEqual(self.cursor("pypi")[:2], ("1000", "2026-09-26T17:47:30+00:00"))
 
+    def test_an_answer_with_nothing_after_the_position(self):
+        # older rows only: not "no changes" (a silent gap), but not checked
+        self.seed("pypi", 1000)
+        stale = answer([release(990, "old", "1.0", -60)])
+        code, out, err = self.run_cli("--resume", "--ecosystem", "pypi", "--ci", at=later(60),
+                                      patches=[mock.patch.object(repo, "_fetch", return_value=stale)])
+        self.assertEqual(code, 1)
+        self.assertIn("could not read PyPI's changelog (PyPI's changelog answer had no readable row "
+                      "after serial 1000); PyPI was not checked.", err)
+        self.assertNotIn("No new packages", out)
+        self.assertEqual(self.cursor("pypi")[0], "1000")
+        # the row at the position itself, alone: nothing new
+        echo = answer([release(1000, "same", "1.0", 0)])
+        code, out, err = self.run_cli("--resume", "--ecosystem", "pypi", "--ci", at=later(60),
+                                      patches=[mock.patch.object(repo, "_fetch", return_value=echo)])
+        self.assertEqual(code, 0, err)
+        self.assertIn("No new packages in pypi.", out)
+
     def test_a_fault_is_printed_safely(self):
         self.seed("pypi", 1000)
         faulty = xmlrpc.client.dumps(xmlrpc.client.Fault(-32500, "slow down \u202e\u2066gnp.exe"),

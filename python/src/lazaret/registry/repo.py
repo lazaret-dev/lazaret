@@ -3074,13 +3074,14 @@ def _pypi_changelog(serial):
       rows:   rows in the answer (PyPI sends at most PYPI_CHANGELOG_MAX)
       last:   (serial, datetime) of the newest row, or None
       unread: rows that could not be read (wrong shape or types)
+      stale:  rows before `serial` (PyPI never sends them; they are ignored)
       names:  release rows whose project name is not a valid PyPI name
-    Rows at or before `serial` are ignored. Raises like _pypi_xmlrpc, and
+    A row at `serial` itself is ignored too. Raises like _pypi_xmlrpc, and
     FeedError when the answer is not a list."""
     answer = _pypi_xmlrpc("changelog_since_serial", serial)
     if not isinstance(answer, list):
         raise FeedError("PyPI's changelog answer has an unexpected shape")
-    events, last, unread, names = [], None, 0, 0
+    events, last, unread, stale, names = [], None, 0, 0, 0
     for row in answer:
         if not isinstance(row, (list, tuple)) or len(row) != 5:
             unread += 1
@@ -3095,6 +3096,8 @@ def _pypi_changelog(serial):
             unread += 1
             continue
         if row_serial <= serial:
+            if row_serial < serial:
+                stale += 1
             continue
         if last is None or row_serial > last[0]:
             last = (row_serial, when)
@@ -3115,7 +3118,7 @@ def _pypi_changelog(serial):
             seen.add(key)
             distinct.append(event)
     return {"events": distinct, "rows": len(answer), "last": last, "unread": unread,
-            "names": names}
+            "stale": stale, "names": names}
 
 
 def _pep503(name):
@@ -3183,7 +3186,10 @@ def _npm_changes_since(seq, pages=None):
       rejected:  names npm would reject (G14: names drive downloads)
       error:     the feed problem that ended the walk after the first
                  page (what was read before it stands), or None
-    Raises FetchError / FeedError when the first page can't be read."""
+    A page with rows but none after the position is a problem, not "caught
+    up": only an empty page, or one with just the row at the position, is.
+    Raises FetchError / FeedError when the first page can't be read or has
+    that problem."""
     pages = NPM_RESUME_PAGES if pages is None else pages
     newest, rejected, rows, done = {}, 0, 0, 0
     since, last, caught_up, error = seq, None, False, None
@@ -3200,10 +3206,11 @@ def _npm_changes_since(seq, pages=None):
             break
         done += 1
         rows += len(results)
-        page_last = since
+        page_last, echoed = since, False
         for row in results:
             row_seq = row.get("seq") if isinstance(row, dict) else None
             if not _uint(row_seq) or row_seq <= since:
+                echoed = echoed or (_uint(row_seq) and row_seq == since)
                 continue
             page_last = max(page_last, row_seq)
             name = row.get("id")
@@ -3214,14 +3221,16 @@ def _npm_changes_since(seq, pages=None):
                 rejected += 1
                 continue
             newest[name] = max(newest.get(name, 0), row_seq)
-        if len(results) < NPM_CHANGES_MAX:
-            caught_up = True
-        elif page_last == since:
-            # a full page and no row after `since`: asking again returns it again
+        if page_last == since and (len(results) >= NPM_CHANGES_MAX or (results and not echoed)):
+            # rows, and none after `since`: not "nothing new" (and a full page
+            # would come back the same). An empty page, or one repeating only
+            # the row at `since`, is caught up.
             error = FeedError("npm changes feed returned a page with nothing after "
                               f"sequence number {since}")
             if done == 1:
                 raise error
+        elif len(results) < NPM_CHANGES_MAX:
+            caught_up = True
         if page_last > since:
             since = last = page_last
         if caught_up or error:
@@ -3396,8 +3405,9 @@ def discover_pypi_since(cursor, limit, notes=None):
     serial, since_time = cursor
     try:
         log = _pypi_changelog(serial)
-        if log["rows"] and log["unread"] == log["rows"]:
-            raise FeedError("PyPI's changelog answer had no readable rows")
+        if log["last"] is None and (log["unread"] or log["stale"]):
+            # rows, but none readable after the position: not "nothing new"
+            raise FeedError(f"PyPI's changelog answer had no readable row after serial {serial}")
     except (FetchError, FeedError) as exc:
         # audit H1: a fault's text comes from the network
         problem = lazaret.sanitize_term(f"could not read PyPI's changelog ({exc})")

@@ -154,9 +154,10 @@ class ChangelogTests(unittest.TestCase):
     def test_rows_at_or_before_the_serial_are_ignored(self):
         got = changelog(answer([row(99, "old", "1.0"), row(100, "same", "1.0"), row(101, "new", "1.0")]))
         self.assertEqual([e[1] for e in got["events"]], ["new"])
-        self.assertEqual(got["last"][0], 101)
+        self.assertEqual((got["last"][0], got["stale"]), (101, 1))    # the row at 100 isn't stale
         empty = changelog(answer([]))
-        self.assertEqual((empty["events"], empty["rows"], empty["last"]), ([], 0, None))
+        self.assertEqual((empty["events"], empty["rows"], empty["last"], empty["stale"]),
+                         ([], 0, None, 0))
 
     def test_answers_that_are_not_a_changelog(self):
         cases = {

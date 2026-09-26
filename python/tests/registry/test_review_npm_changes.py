@@ -138,6 +138,28 @@ class FailureTests(unittest.TestCase):
         self.assertIsInstance(got["error"], repo.FeedError)
         self.assertEqual((got["last"], got["pages"], got["caught_up"]), (110, 2, False))
 
+    def test_a_page_of_older_rows_is_not_caught_up(self):
+        # rows, none after the position: "nothing new" would be a silent gap
+        stale = {"results": rows(90, 95)}                  # short, all before `since`
+        with self.assertRaisesRegex(repo.FeedError, "nothing after sequence number 100"):
+            changes_since(FakeFeed([], pages={1: stale}))
+        got = changes_since(FakeFeed(rows(101, 125), pages={2: stale}))
+        self.assertIsInstance(got["error"], repo.FeedError)
+        self.assertEqual((got["last"], got["pages"], got["caught_up"]), (110, 2, False))
+        malformed = {"results": [{"id": "no-seq"}, {"seq": "101", "id": "text-seq"}]}
+        with self.assertRaises(repo.FeedError):
+            changes_since(FakeFeed([], pages={1: malformed}))
+
+    def test_the_row_at_the_position_alone_is_caught_up(self):
+        # a feed whose since= includes the row at that position
+        echo = {"results": [{"seq": 100, "id": "pkg-100"}]}
+        got = changes_since(FakeFeed([], pages={1: echo}))
+        self.assertEqual((got["changes"], got["last"], got["caught_up"], got["error"]),
+                         ([], None, True, None))
+        flag = {"results": [{"seq": True, "id": "flag"}]}          # True == 1, but not a seq
+        with self.assertRaises(repo.FeedError):
+            changes_since(FakeFeed([], pages={1: flag}), seq=1)
+
     def test_pages_go_through_the_json_limits(self):
         # http_json: the 5 MB feed cap and the deep-nesting guard
         with mock.patch.object(repo, "_fetch", return_value=b"[" * 100_000) as fetch:
