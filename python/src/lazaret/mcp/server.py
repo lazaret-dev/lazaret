@@ -26,11 +26,15 @@ Environment:
     A call that hits a cap returns what it scanned, marked "incomplete", with
     an SC-TRUNCATED finding for what was left out (scan_files: one per
     unscanned file) or, for packages, an INCOMPLETE entry — never clean.
+    The same goes for a directory with nothing Lazaret can scan and for a
+    file named to scan_files that can't be read; a directory that is missing
+    or can't be listed is a tool error.
 """
 import json
 import os
 import queue
 import re
+import stat
 import sys
 import threading
 import time
@@ -305,6 +309,22 @@ def _preflight(root, exclude, include_deps, ctx):
     return None
 
 
+def _check_scan_target(path):
+    """Tool error (ValueError) unless `path` is a directory this process can
+    list. The CLI exits 2 for such a target; a tool caller must never get an
+    empty clean result for it."""
+    try:
+        with os.scandir(path):
+            pass
+    except FileNotFoundError:
+        raise ValueError(f"Not a directory: {path} (it does not exist)") from None
+    except NotADirectoryError:
+        raise ValueError(f"Not a directory: {path}") from None
+    except OSError as exc:
+        raise ValueError(f"Cannot read directory {path}: "
+                         f"{exc.strerror or type(exc).__name__}") from None
+
+
 def run_project_scan(path, exclude=None, include_deps=False, ctx=None):
     """The CLI's project pipeline for the MCP tools: core.scan_project(), the
     same function `lazaret <dir>` runs (collection, scan_file per file,
@@ -314,9 +334,14 @@ def run_project_scan(path, exclude=None, include_deps=False, ctx=None):
     MCP budget (ctx): caps on files / bytes are enforced before anything is
     read; cancellation and the deadline are checked between files. A call
     that stops early returns what it scanned with "incomplete": true and an
-    SC-TRUNCATED finding, so it can never pass the gate."""
+    SC-TRUNCATED finding, so it can never pass the gate.
+
+    A target that is missing or can't be listed is a tool error (ValueError);
+    one with nothing Lazaret can scan (only Go or Markdown files, or none) is
+    "incomplete" with an SC-TRUNCATED finding — never a clean pass."""
     ctx = ctx or _ctx()
     exclude = list(exclude or [])
+    _check_scan_target(path)
     over = _preflight(path, exclude, include_deps, ctx)
     if over:
         res = lazaret.build_result(path, [], [lazaret.truncated_issue(
@@ -333,10 +358,15 @@ def run_project_scan(path, exclude=None, include_deps=False, ctx=None):
     try:
         res = lazaret.scan_project(path, exclude, include_deps=include_deps,
                                    should_stop=should_stop)
-    except lazaret.ScanTargetError:
-        # an empty directory is a clean (if pointless) scan for a tool caller
-        res = lazaret.build_result(path, [], [])
-        res["warnings"] = []
+    except lazaret.ScanTargetError as exc:
+        _check_scan_target(path)         # it vanished or became unreadable meanwhile
+        # Nothing to scan: the CLI exits 2 ("usage error"). For a tool caller
+        # "no findings" would read as "checked and clean", so the result is
+        # incomplete and fails the gate.
+        reason = str(exc)
+        res = lazaret.build_result(path, [], [lazaret.truncated_issue(
+            ".", f"directory not scanned: {reason}")])
+        res.update(incomplete=True, incompleteReason=reason, warnings=[])
     res["notes"] = res.pop("warnings", [])
     return res
 
@@ -364,6 +394,14 @@ def tool_scan_directory(args):
 # must leave a signal (SC-TRUNCATED, CRITICAL), never a silent skip.
 
 
+def _not_a_regular_file(mode):
+    if stat.S_ISDIR(mode):
+        return "it is a directory, not a regular file"
+    kind = lazaret._special_kind(mode)
+    return "it is not a regular file" if kind == "not a regular file" else \
+        f"it is {kind}, not a regular file"
+
+
 def tool_scan_files(args):
     ctx = _ctx()
     paths = args.get("paths")
@@ -372,7 +410,18 @@ def tool_scan_files(args):
     for p in paths:                      # every path is checked before any is read
         ctx.check_path(p)
     out, all_issues, files = {}, [], []
-    read_bytes, stopped = 0, None
+    read_bytes, stopped, unread = 0, None, 0
+
+    def not_read(p, detail):
+        # a file that is there but could not be read was not scanned: an
+        # SC-TRUNCATED finding (like an oversized file's), and the call is
+        # incomplete — "0 issues" must not stand in for "not looked at"
+        nonlocal unread
+        unread += 1
+        ti = lazaret.truncated_issue(p, detail)
+        all_issues.append(ti)
+        out[p] = {"error": ti["msg"], "rule": ti["rule"], "sev": ti["sev"]}
+
     for idx, p in enumerate(paths):
         ctx.check()
         if idx >= ctx.max_files:
@@ -397,14 +446,18 @@ def tool_scan_files(args):
         if lang is None:
             out[p] = {"error": f"Unsupported extension {ext} (need .py/.js/.ts/.jsx/.tsx)"}
             continue
-        if not os.path.isfile(p):
+        try:
+            st = os.stat(p)
+        except (FileNotFoundError, NotADirectoryError):
             out[p] = {"error": "File not found"}
             continue
-        try:
-            size = os.path.getsize(p)
         except OSError as exc:
-            out[p] = {"error": f"Cannot stat file: {exc}"}
+            not_read(p, f"cannot stat the file ({exc.strerror or type(exc).__name__})")
             continue
+        if not stat.S_ISREG(st.st_mode):
+            not_read(p, _not_a_regular_file(st.st_mode))
+            continue
+        size = st.st_size
         cap = lazaret.SOURCE_SIZE_CAP
         if size > cap:
             ti = lazaret.truncated_issue(p, f"{size:,} bytes exceeds the {cap:,}-byte file limit")
@@ -412,12 +465,16 @@ def tool_scan_files(args):
             out[p] = {"error": ti["msg"], "rule": ti["rule"], "sev": ti["sev"]}
             continue
         # bounded read: read cap+1 so a file that GREW between stat and read
-        # (TOCTOU) is still caught, then falls into the truncation path.
+        # (TOCTOU) is still caught, then falls into the truncation path. The
+        # symlinks were resolved (and checked against the roots) already;
+        # _read_prefix opens with O_NONBLOCK and refuses anything but a
+        # regular file, so a FIFO swapped in after the stat can't hang the call.
         try:
-            with open(p, "rb") as fh:
-                data = fh.read(cap + 1)
+            data = lazaret._read_prefix(os.path.realpath(p), cap + 1)
         except OSError as exc:
-            out[p] = {"error": f"Cannot read file: {exc}"}
+            reason = (str(exc) if isinstance(exc, lazaret._NotRegularFile)
+                      else exc.strerror or type(exc).__name__)
+            not_read(p, f"cannot read the file ({reason})")
             continue
         if len(data) > cap:
             ti = lazaret.truncated_issue(p, f"read exceeded the {cap:,}-byte file limit")
@@ -438,9 +495,11 @@ def tool_scan_files(args):
         "worstSeverity": min((i["sev"] for i in all_issues),
                              key=lambda s: lazaret.SEV_ORDER[s], default=None),
     }
-    if stopped:
+    reasons = ([f"{unread} of {len(paths)} file(s) could not be read"] if unread else []) \
+        + ([stopped] if stopped else [])
+    if reasons:
         summary["incomplete"] = True
-        summary["incompleteReason"] = stopped
+        summary["incompleteReason"] = "; ".join(reasons)
     return summary
 
 
