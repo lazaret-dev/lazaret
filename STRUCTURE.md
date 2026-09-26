@@ -175,10 +175,10 @@ pytest also runs the suite unchanged, for anyone who prefers it, but nothing req
 2. **Paths.**
    - Compare resolved paths (`os.path.realpath` on both sides): temp dirs may be symlinks (macOS `/var` → `/private/var`).
    - Build paths with `os.path`/`pathlib`; never hard-code `/tmp/...` or treat `/` as the root; use `tempfile`. Compare relative paths separator-independently.
-   - Expect Windows-specific forms (`\\?\` prefixes, drive letters, another drive than the repo's for the temp dir).
+   - Expect Windows-specific forms (`\\?\` prefixes, drive letters, another drive than the repo's for the temp dir, 8.3 short names like `RUNNER~1`). `os.readlink` returns an absolute target as `\\?\C:\...` where Node gives `C:\...`; both engines show `C:\...` (`core.link_target_text`, the same undoing as libuv).
    - Sort path *strings* (`key=lambda p: p.as_posix()`), not `Path` objects: Windows compares `Path`s case-insensitively, so `ElementTree.py` sorts after `__init__.py` there and before it everywhere else.
    - Paths can be longer than one OS allows: macOS caps a path at 1024 bytes (`ENAMETOOLONG`), so a test that needs a very deep tree skips there (rule 5).
-   - A `file:` URI keeps the drive as-is (`file:///C:/...`) and turns a UNC share into the host (`file://server/share/...`), as `pathlib`'s `as_uri()` does; the npm engine's SARIF writer does the same.
+   - A `file:` URI keeps the drive as-is (`file:///C:/...`) and turns a UNC share into the host (`file://server/share/...`), as `pathlib`'s `as_uri()` does; the npm engine's SARIF writer does the same. Compare URIs by the path they name (`fileURLToPath`), not by text: Node's `pathToFileURL` writes `~` as `%7E` on Windows.
 3. **Resources.** Close every file, archive, socket and DB connection before deleting what contains it (`with`, or close in `finally`/`addCleanup`). Windows can't delete an open file. `registry.Store` is a context manager; the MCP tools and the registry CLI close theirs on every path (`tests/registry/test_review_store_close.py`).
    - Sockets: on Windows a connection reset discards data that arrived but was not read yet, so a server's last message (PostgreSQL's FATAL before it disconnects) must be read before the next send fails. The pg driver drains whatever is readable before each send.
 4. **Line endings.** Treat `\r\n` as a line ending, not as data, when checking output (Windows' text-mode stdout writes `\r\n`). `.gitattributes` keeps checkouts LF.

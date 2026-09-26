@@ -3843,9 +3843,27 @@ def _check_pycache(rel_dir, path, parent_names, out):
 
 def _readlink(path):
     try:
-        return os.readlink(path)
+        target = os.readlink(path)
     except (OSError, ValueError):
         return "?"
+    return link_target_text(target) if os.name == "nt" else target
+
+
+def link_target_text(target):
+    """A Windows link target as the user wrote it. Windows stores an absolute
+    target in the NT namespace (\\??\\C:\\x), and os.readlink returns it as
+    \\\\?\\C:\\x (\\\\?\\UNC\\server\\share\\x for a share); the npm engine
+    (libuv) gives C:\\x and \\\\server\\share\\x. Same undoing as libuv, so
+    both engines name the target the same way (cross-platform rule 2)."""
+    if not isinstance(target, str) or not target.startswith("\\\\?\\"):
+        return target
+    rest = target[4:]
+    if len(rest) >= 2 and rest[0].isascii() and rest[0].isalpha() and rest[1] == ":" \
+            and (len(rest) == 2 or rest[2] == "\\"):
+        return rest                                       # \\?\C:\x -> C:\x
+    if rest[:4].upper() == "UNC\\":
+        return "\\\\" + rest[4:]                             # \\?\UNC\s\sh -> \\s\sh
+    return target
 
 
 def _collect_file(path, rel, st, in_dep, col):

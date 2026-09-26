@@ -136,6 +136,34 @@ class Symlinks(unittest.TestCase):
         self.assertTrue(report["pass"], "coverage notes must not fail the gate")
 
 
+class WindowsLinkTargets(unittest.TestCase):
+    """os.readlink on Windows returns an absolute target in its \\\\?\\ form;
+    Q-SYMLINK shows it the way the npm engine (libuv) does. Runs on every OS:
+    the conversion is plain text."""
+
+    def test_the_nt_prefix_is_undone_as_libuv_does(self):
+        cases = {
+            r"\\?\C:\Users\RUNNER~1\Temp\mod.py": r"C:\Users\RUNNER~1\Temp\mod.py",
+            r"\\?\c:": "c:",
+            r"\\?\UNC\server\share\x": r"\\server\share\x",
+            r"\\?\unc\server\share": r"\\server\share",
+            r"\\?\Volume{0000}\x": r"\\?\Volume{0000}\x",     # not a drive or a share: as is
+            r"\\?\C:x": r"\\?\C:x",
+            r"..\sibling\mod.py": r"..\sibling\mod.py",       # relative: as written
+            "/etc/passwd": "/etc/passwd",
+        }
+        for raw, shown in cases.items():
+            with self.subTest(target=raw):
+                self.assertEqual(core.link_target_text(raw), shown)
+
+    def test_the_walker_uses_it_on_windows_only(self):
+        with mock.patch.object(core.os, "readlink", return_value=r"\\?\C:\x"):
+            with mock.patch.object(core.os, "name", "nt"):
+                self.assertEqual(core._readlink("link"), r"C:\x")
+            with mock.patch.object(core.os, "name", "posix"):
+                self.assertEqual(core._readlink("link"), r"\\?\C:\x")   # a legal POSIX name
+
+
 class DeepTree(unittest.TestCase):
     DEPTH = 1100
 

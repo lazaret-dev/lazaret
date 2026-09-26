@@ -7,8 +7,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, rmSync, readFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { run, version } from "../src/index.js";
 import { fileUri } from "../src/report.js";
 
@@ -32,9 +32,13 @@ test("SARIF 2.1.0 report: tool identity, %SRCROOT%, encoded URIs, ruleIndex", ()
     const [runObj] = s.runs;
     assert.deepEqual([runObj.tool.driver.name, runObj.tool.driver.version, runObj.tool.driver.informationUri],
       ["Lazaret", version, "https://lazaret.dev"]);
-    let base = pathToFileURL(d).href;
-    if (!base.endsWith("/")) base += "/";
-    assert.equal(runObj.originalUriBaseIds["%SRCROOT%"].uri, base);
+    // the scan root as a file: URI that names this directory. Not compared to
+    // pathToFileURL's text: on Windows it writes "~" as %7E (RUNNER%7E1),
+    // where pathlib's as_uri() and ours keep "~" (an unreserved character,
+    // the same URI); the exact form is checked in the fileUri test below
+    const base = runObj.originalUriBaseIds["%SRCROOT%"].uri;
+    assert.ok(base.startsWith("file:///") && base.endsWith("/"), base);
+    assert.equal(resolve(fileURLToPath(base)), resolve(d));
     const rules = runObj.tool.driver.rules.map((r) => r.id);
     const got = runObj.results.map((r) => {
       const loc = r.locations[0].physicalLocation;
@@ -64,4 +68,5 @@ test("file: URIs follow pathlib's as_uri() for Windows paths, on every OS", () =
   assert.equal(fileUri("d:\\caf\u00e9\\a#1.py"), "file:///d:/caf%C3%A9/a%231.py");
   assert.equal(fileUri("\\\\srv\\share\\a b"), "file://srv/share/a%20b");
   assert.equal(fileUri("/tmp/a b%#"), "file:///tmp/a%20b%25%23");
+  assert.equal(fileUri("/home/u/~x"), "file:///home/u/~x");            // "~" stays, as in as_uri()
 });
