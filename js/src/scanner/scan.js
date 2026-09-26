@@ -315,7 +315,9 @@ function depDecodeFlow(path, ctx, issues, rule) {
     while ((m = DECODE_SINK_RE.exec(blank))) events.push([m.index, 1, m]);
     events.sort((x, y) => x[0] - y[0] || x[1] - y[1]);
     let close = null;
-    for (const [, kind, ev] of events) {
+    for (let n = 0; n < events.length; n++) {
+      if (n && !(n & 255)) ctx.checkTime();  // one long line can hold thousands of statements
+      const [, kind, ev] = events[n];
       if (kind === 0) {
         const [a, b] = ev.indices[2];
         if (DECODE_CALL_RE.test(code.slice(a, b))) { if (!decoded.has(ev[1])) decoded.set(ev[1], i + 1); continue; }
@@ -518,8 +520,9 @@ function scanLines(path, content, lines, lang, dep, ctx, issues) {
   for (const r of TEXT_RULES) {
     // *-NOWHERE SQL rules are fired by scanSqlNowhere() (linear pass)
     if (!r.langs.includes(lang) || !r.scan) continue;
-    let last = -1;
+    let n = 0, last = -1;
     for (const off of r.scan(mcontent)) {
+      if (!(n++ & 255)) ctx.checkTime();     // the time backstop also holds inside one rule
       starts ??= lineStarts(mcontent);
       const lineNo = upperBound(starts, off);
       if (lineNo === last) continue;         // same (rule, line, msg): reported once (capIssues)

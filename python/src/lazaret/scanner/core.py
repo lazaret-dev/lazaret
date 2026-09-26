@@ -2667,7 +2667,9 @@ def _dep_decode_flow(path, ctx, issues):
         events += [(m.start(), 1, m) for m in _DECODE_SINK_RE.finditer(blank)]
         events.sort(key=lambda e: (e[0], e[1]))
         close = None
-        for _pos, kind, m in events:
+        for n, (_pos, kind, m) in enumerate(events):
+            if n and not n & 255:     # one long line can hold thousands of statements
+                ctx.check_time()
             if kind == 0:
                 a, b = m.span(2)
                 if _DECODE_CALL_RE.search(code, a, b):
@@ -2809,7 +2811,7 @@ def _scan_file(path, content, lines, lang, dep, ctx, issues):
             continue
         last = None
         for n, m in enumerate(r["re"].finditer(mcontent)):
-            if not n & 255:
+            if not n & 255:           # the time backstop also holds inside one rule
                 ctx.check_time()
             if starts is None:        # review fix: was content[:pos].count("\n") per match
                 starts = _line_starts(mcontent)
