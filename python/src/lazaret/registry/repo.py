@@ -3145,14 +3145,16 @@ NPM_RESUME_PAGES = 20
 
 def _npm_feed_names(want):
     """-> (package names, newest first, each once; count of names npm would
-    reject; number of feed rows read). Raises FetchError / FeedError when the
-    feed can't be read."""
+    reject; number of feed rows read; the highest sequence number read, or
+    None). Raises FetchError / FeedError when the feed can't be read."""
     data = http_json(f"{NPM_CHANGES_URL}?descending=true&limit={want}")
     results = data.get("results") if isinstance(data, dict) else None
     if not isinstance(results, list):
         raise FeedError("npm changes feed has an unexpected shape")
-    names, seen, rejected = [], set(), 0
+    names, seen, rejected, head = [], set(), 0, None
     for row in results:
+        if isinstance(row, dict) and _uint(row.get("seq")) and (head is None or row["seq"] > head):
+            head = row["seq"]
         if not isinstance(row, dict) or row.get("deleted") is True:
             continue                                  # unpublished: nothing to scan
         name = row.get("id")
@@ -3163,7 +3165,7 @@ def _npm_feed_names(want):
             rejected += 1                             # G14: feed names drive downloads
             continue
         names.append(name)
-    return names, rejected, len(results)
+    return names, rejected, len(results), head
 
 
 def _npm_changes_since(seq, pages=None):
@@ -3274,11 +3276,12 @@ def _npm_feed_problem(exc):
     return f"could not reach replicate.npmjs.com ({exc})"
 
 
-def discover_npm(cutoff, limit, notes=None):
+def discover_npm(cutoff, limit, notes=None, head=None):
     """Recently published or updated npm packages: the newest names from npm's
     replication _changes feed, each checked against the window with one small
     registry lookup (8 at a time), newest first, until `limit` are found or the
-    feed falls behind the window.
+    feed falls behind the window. `head`, a dict, gets head["seq"]: the feed's
+    newest sequence number, where a following `discover --resume` continues.
 
     Best-effort per package, fail-visible per ecosystem: when the feed itself
     can't be read, npm is skipped with a warning and notes["npm"] says so (the
@@ -3292,7 +3295,9 @@ def discover_npm(cutoff, limit, notes=None):
     want = min((limit or 100) * 3, NPM_CHANGES_MAX)
     now = _now()
     try:
-        names, rejected, rows_read = _npm_feed_names(want)
+        names, rejected, rows_read, newest_seq = _npm_feed_names(want)
+        if head is not None and newest_seq is not None:
+            head["seq"] = newest_seq
     except (FetchError, FeedError) as exc:
         # audit H1: the exception text can echo bytes of the network response.
         problem = lazaret.sanitize_term(_npm_feed_problem(exc))
@@ -3362,11 +3367,210 @@ def discover_npm(cutoff, limit, notes=None):
     return res[:limit] if limit else res
 
 
-def cmd_discover(store, args):
-    cutoff = parse_since(args.since)
-    ecos = args.ecosystem or ["pypi", "npm"]
-    limit = args.limit
-    discovered, notes = [], {}
+def _fill_times(rows, start, now):
+    """rows [name, when or None, version] in feed order, oldest first: a
+    failed lookup gets the nearest earlier known time (a lower bound), else
+    `start`, else the first known time, else `now`."""
+    known = start
+    for row in rows:
+        if row[1] is None:
+            row[1] = known
+        else:
+            known = row[1]
+    first = next((row[1] for row in rows if row[1] is not None), now)
+    for row in rows:
+        if row[1] is None:
+            row[1] = first
+
+
+def discover_pypi_since(cursor, limit, notes=None):
+    """Every PyPI release and new project after a stored changelog position,
+    with one changelog_since_serial call. `cursor` is (serial, time of that
+    change or None). -> (found, oldest first; the new cursor, or None to
+    keep the stored one; what was covered, one line).
+
+    PyPI answers with at most PYPI_CHANGELOG_MAX rows. A full answer, or
+    `limit` cutting the list, makes notes["pypi"] "partly checked", and the
+    new cursor is where this run stopped, so the next run continues there. A
+    changelog that can't be read is "not checked" and the cursor stays."""
+    serial, since_time = cursor
+    try:
+        log = _pypi_changelog(serial)
+        if log["rows"] and log["unread"] == log["rows"]:
+            raise FeedError("PyPI's changelog answer had no readable rows")
+    except (FetchError, FeedError) as exc:
+        # audit H1: a fault's text comes from the network
+        problem = lazaret.sanitize_term(f"could not read PyPI's changelog ({exc})")
+        print(f"warning: {problem}; PyPI was not checked.", file=sys.stderr)
+        if notes is not None:
+            notes["pypi"] = f"not checked: {problem}"
+        return [], None, None
+    if log["names"]:
+        print(f"warning: skipped {log['names']} PyPI changelog row(s) whose project name is "
+              f"not valid.", file=sys.stderr)
+    if log["unread"]:
+        _partly(notes, "pypi", f"{log['unread']} changelog row(s) could not be read")
+    events = log["events"]
+    if limit and len(events) > limit:
+        rest, events = len(events) - limit, events[:limit]
+        new = (events[-1][0], events[-1][3])
+        _partly(notes, "pypi", f"stopped at --limit {limit}; {rest} more release(s) are left "
+                               f"for the next --resume run")
+    elif log["last"] is not None:
+        new = log["last"]
+        if log["rows"] >= PYPI_CHANGELOG_MAX:
+            _partly(notes, "pypi", f"covered changes up to {new[1]:%Y-%m-%d %H:%M} UTC only: PyPI's "
+                                   f"changelog answers with at most {PYPI_CHANGELOG_MAX:,} changes "
+                                   f"per call; the next --resume run continues from serial {new[0]}")
+    else:
+        new = (serial, since_time)                         # nothing after it yet
+    if new[0] == serial:
+        covered = f"no changes after changelog serial {serial}"
+    else:
+        span = (_fmt_span(since_time, new[1]) if since_time is not None
+                else f"up to {new[1]:%Y-%m-%d %H:%M} UTC")
+        covered = f"changelog serial {serial} → {new[0]}, {span}"
+    return [("pypi", name, version, when) for _s, name, version, when in events], new, covered
+
+
+def discover_npm_since(cursor, limit, notes=None):
+    """Every npm package changed after a stored replication-feed position:
+    the feed read forward (_npm_changes_since, at most NPM_RESUME_PAGES
+    pages), then each package's latest version and time from its registry
+    entry, as discover_npm does (a failed lookup is still listed). `cursor`
+    is (seq, time or None). -> (found, oldest first; the new cursor, or None
+    to keep the stored one; what was covered, one line).
+
+    A spent page budget, a feed that failed after its first page, or
+    `limit` cutting the list makes notes["npm"] "partly checked", and the
+    new cursor is where this run stopped, so the next run continues there.
+    A feed that can't be read is "not checked" and the cursor stays."""
+    seq, since_time = cursor
+    now = _now()
+    try:
+        walk = _npm_changes_since(seq)
+    except (FetchError, FeedError) as exc:
+        # audit H1: the exception text can echo bytes of the network response.
+        problem = lazaret.sanitize_term(_npm_feed_problem(exc))
+        print(f"warning: {problem}; npm was not checked.", file=sys.stderr)
+        if notes is not None:
+            notes["npm"] = f"not checked: {problem}"
+        return [], None, None
+    if walk["rejected"]:
+        print(f"warning: skipped {walk['rejected']} npm feed name(s) that are not valid package "
+              f"names.", file=sys.stderr)
+    changes = walk["changes"]
+    last = walk["last"] if walk["last"] is not None else seq
+    if limit and len(changes) > limit:
+        rest, changes = len(changes) - limit, changes[:limit]
+        new = (changes[-1][0], None)
+        _partly(notes, "npm", f"stopped at --limit {limit}; {rest} more changed package(s) are "
+                              f"left for the next --resume run")
+    else:
+        new = (last, now if walk["caught_up"] else None)
+        if walk["error"] is not None:
+            problem = lazaret.sanitize_term(_npm_feed_problem(walk["error"]))
+            _partly(notes, "npm", f"its replication feed failed after {walk['pages']} page(s) "
+                                  f"({problem}); the next --resume run continues from change {last}")
+        elif not walk["caught_up"]:
+            _partly(notes, "npm", f"read {walk['pages']} pages ({walk['rows']:,} changes) of its "
+                                  f"replication feed, the most one run reads; the next --resume "
+                                  f"run continues from change {last}")
+    rows = []                                    # [name, when or None, version], oldest first
+    lookups = _npm_lookups([name for _s, name in changes])
+    try:
+        for name, result in lookups:
+            rows.append([name, *(result if result is not None else (None, None))])
+    finally:
+        lookups.close()
+    unknown = sum(1 for row in rows if row[1] is None)
+    if unknown:
+        print(f"warning: could not read the registry entry of {unknown} npm package(s); "
+              f"they are listed with a time estimated from the feed order.", file=sys.stderr)
+    _fill_times(rows, since_time, now)
+    covered = (f"no changes after replication-feed position {seq}" if last == seq else
+               f"replication feed {seq} → {new[0]}, {walk['rows']:,} changes in "
+               f"{walk['pages']} page(s)")
+    return [("npm", name, version, when) for name, when, version in rows], new, covered
+
+
+def _stored_cursor(eco, stored):
+    """A Store.discovery_cursor() row -> (seq, datetime or None), or None
+    when there is none or it isn't a sequence number (a warning: the run
+    starts over from the time window)."""
+    if stored is None:
+        return None
+    seq, seq_time = stored[0], stored[1]
+    if not isinstance(seq, str) or not re.fullmatch(r"[0-9]{1,19}", seq) or not _uint(int(seq)):
+        print(f"warning: the stored {eco} discovery cursor is not a sequence number; this "
+              f"run starts over from the --since window.", file=sys.stderr)
+        return None
+    when = None
+    if isinstance(seq_time, str):
+        try:
+            when = _to_utc(datetime.datetime.fromisoformat(seq_time))
+        except ValueError:
+            pass
+    return int(seq), when
+
+
+def _discover_first_run(eco, cutoff, limit, notes):
+    """The first `discover --resume` of a registry: the --since window, as
+    without --resume, and the feed's current position for the next run.
+    -> (found, (seq, time) or None when the position could not be read)."""
+    now = _now()
+    if eco == "pypi":
+        try:
+            head = _pypi_last_serial()        # before the feeds: nothing in between is missed
+        except (FetchError, FeedError) as exc:
+            print(f"warning: could not read PyPI's changelog position "
+                  f"({lazaret.sanitize_term(exc)}); the next --resume run checks a --since "
+                  f"window again.", file=sys.stderr)
+            head = None
+        found = discover_pypi(cutoff, limit, notes)
+        return found, ((head, now) if head is not None else None)
+    position = {}
+    found = discover_npm(cutoff, limit, notes, head=position)
+    return found, ((position["seq"], now) if "seq" in position else None)
+
+
+def _discover_resumed(store, ecos, cutoff, limit, notes):
+    """discover --resume: each registry continues from its stored cursor
+    or, the first time, checks the --since window and records where its feed
+    is now. -> (discovered, {eco: new cursor}, {eco: what was covered})."""
+    discovered, cursors, covered = [], {}, {}
+    for eco in ("pypi", "npm"):
+        if eco not in ecos:
+            continue
+        try:
+            cursor = _stored_cursor(eco, store.discovery_cursor(eco))
+        except Exception as exc:                                    # noqa: BLE001
+            problem = lazaret.sanitize_term(f"could not read its discovery cursor "
+                                            f"({type(exc).__name__}: {exc})")
+            print(f"warning: {eco}: {problem}; {eco} was not checked.", file=sys.stderr)
+            notes[eco] = f"not checked: {problem}"
+            continue
+        if cursor is None:
+            found, new = _discover_first_run(eco, cutoff, limit, notes)
+            text = f"first --resume run: the window since {cutoff:%Y-%m-%d %H:%M} UTC"
+            if new is not None:
+                text += (f"; the next run continues from "
+                         f"{'changelog serial' if eco == 'pypi' else 'change'} {new[0]}")
+        else:
+            since = discover_pypi_since if eco == "pypi" else discover_npm_since
+            found, new, text = since(cursor, limit, notes)
+        discovered += found
+        if new is not None:
+            cursors[eco] = new
+        covered[eco] = ("not checked (see the warning at the end)"
+                        if notes.get(eco, "").startswith("not checked") else text)
+    return discovered, cursors, covered
+
+
+def _discover_window(ecos, cutoff, limit, notes):
+    """discover without --resume: what the feeds hold from the --since
+    window, newest first, --limit across both registries."""
+    discovered = []
     if "pypi" in ecos:
         # all the feeds hold: --limit applies below, across both registries
         discovered += discover_pypi(cutoff, 0, notes)
@@ -3382,51 +3586,101 @@ def cmd_discover(store, args):
         for eco, count in unlisted.items():
             _partly(notes, eco, f"{count} more not listed (--limit {limit})")
         discovered = discovered[:limit]
-    since = f"{cutoff:%Y-%m-%d %H:%M} UTC"
-    whole = [e for e in ecos if e not in notes]           # checked back to the cutoff
+    return discovered
+
+
+def _save_cursors(store, cursors):
+    """Store the new discovery cursors; False if one could not be (warned:
+    the next --resume run repeats that part, nothing is skipped)."""
+    saved = True
+    for eco, (seq, when) in cursors.items():
+        try:
+            store.save_discovery_cursor(eco, seq, when)
+        except Exception as exc:                                    # noqa: BLE001
+            print(f"warning: could not store the {eco} discovery cursor ({type(exc).__name__}: "
+                  f"{lazaret.sanitize_term(exc)}); the next --resume run repeats this part.",
+                  file=sys.stderr)
+            saved = False
+    return saved
+
+
+def cmd_discover(store, args):
+    """discover: list (and with --add / --scan, track and scan) the packages
+    published or changed in the --since window, or with --resume since the
+    last --resume run. Returns True when --ci should fail the run: a registry
+    not (fully) checked, a SUSPICIOUS / INCOMPLETE scan, or a cursor that
+    could not be stored."""
+    cutoff = parse_since(args.since)
+    ecos = args.ecosystem or ["pypi", "npm"]
+    resume = bool(getattr(args, "resume", False))
+    # --resume lists everything since the last run unless --limit says otherwise
+    limit = args.limit if args.limit is not None else (0 if resume else 50)
+    notes = {}
+    if resume:
+        discovered, cursors, covered = _discover_resumed(store, ecos, cutoff, limit, notes)
+        discovered.sort(key=lambda x: x[3], reverse=True)
+        print("Resuming discovery:")
+        for eco, text in covered.items():
+            print(f"  {eco}: {text}")
+    else:
+        discovered, cursors = _discover_window(ecos, cutoff, limit, notes), {}
+    bad = False
+    whole = [e for e in ecos if e not in notes]           # every change in the range checked
     if not discovered:
         partly = [e for e in ecos if notes.get(e, "").startswith("partly checked")]
         if whole:
-            print(f"No packages published/updated since {since} in {', '.join(whole)}.")
+            print(f"No new packages in {', '.join(whole)}." if resume else
+                  f"No packages published/updated since {cutoff:%Y-%m-%d %H:%M} UTC in "
+                  f"{', '.join(whole)}.")
         if partly:
-            print(f"Nothing found in the part of the window that was checked in "
-                  f"{', '.join(partly)} (see the warning below).")
+            print(f"Nothing found in the part {'' if resume else 'of the window '}that was "
+                  f"checked in {', '.join(partly)} (see the warning below).")
         if not whole and not partly:
             print("Nothing was checked.")
-        return _report_discovery_gaps(ecos, notes)
-    if len(whole) == len(ecos):
-        print(f"\nDiscovered {len(discovered)} package(s) since {since}:")
     else:
-        print(f"\nDiscovered {len(discovered)} package(s) since {since}, but not all of that "
-              f"window was checked (see the warnings at the end):")
-    for eco, name, ver, when in discovered:
-        # audit H1: discovery-feed name/version are raw feed text. Sanitize
-        # before the width-free print (the strftime timestamp is engine-controlled).
-        print(f"  {when.astimezone(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M')}  "
-              f"{lazaret.sanitize_term(eco)}:{lazaret.sanitize_term(name)}"
-              f"{('@' + lazaret.sanitize_term(ver)) if ver else ''}")
-    errors = getattr(args, "_errors", None)
-    if args.add or args.scan:
-        for eco, name, _ver, _when in discovered:
-            if not valid_name(eco, name):
-                continue
-            try:
-                store.add_package(eco, name)
-            except Exception as exc:                                # noqa: BLE001
-                # one package the DB refuses must not end the run (cmd_scan
-                # below reports it again when --scan is set)
-                spec = f"{eco}:{name}"
-                print(f"error adding {lazaret.sanitize_term(spec)} to the watchlist: "
-                      f"{type(exc).__name__}: {lazaret.sanitize_term(exc)}", file=sys.stderr)
-                if errors is not None and not args.scan:
-                    errors.append(spec)
-    if args.scan:
-        specs = [f"{eco}:{name}" + (f"@{ver}" if ver else "")
-                 for eco, name, ver, _ in discovered]
-        print(f"\nScanning {len(specs)} discovered package(s)…")
-        bad = cmd_scan(store, specs, args.full, args.rescan, errors=errors)
-        return _report_discovery_gaps(ecos, notes) or bad
-    return _report_discovery_gaps(ecos, notes)
+        heading = f"Discovered {len(discovered)} package(s)"
+        if not resume:
+            heading += f" since {cutoff:%Y-%m-%d %H:%M} UTC"
+        if len(whole) < len(ecos):
+            heading += (", but not everything was checked" if resume else
+                        ", but not all of that window was checked")
+            heading += " (see the warnings at the end)"
+        print(f"\n{heading}:")
+        for eco, name, ver, when in discovered:
+            # audit H1: discovery-feed name/version are raw feed text. Sanitize
+            # before the width-free print (the strftime timestamp is engine-controlled).
+            print(f"  {when.astimezone(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M')}  "
+                  f"{lazaret.sanitize_term(eco)}:{lazaret.sanitize_term(name)}"
+                  f"{('@' + lazaret.sanitize_term(ver)) if ver else ''}")
+        errors = getattr(args, "_errors", None)
+        if args.add or args.scan:
+            for eco, name, _ver, _when in discovered:
+                if not valid_name(eco, name):
+                    continue
+                try:
+                    store.add_package(eco, name)
+                except Exception as exc:                            # noqa: BLE001
+                    # one package the DB refuses must not end the run (cmd_scan
+                    # below reports it again when --scan is set)
+                    spec = f"{eco}:{name}"
+                    print(f"error adding {lazaret.sanitize_term(spec)} to the watchlist: "
+                          f"{type(exc).__name__}: {lazaret.sanitize_term(exc)}", file=sys.stderr)
+                    if errors is not None and not args.scan:
+                        errors.append(spec)
+        if args.scan:
+            specs = [f"{eco}:{name}" + (f"@{ver}" if ver else "")
+                     for eco, name, ver, _ in discovered]
+            print(f"\nScanning {len(specs)} discovered package(s)…")
+            bad = cmd_scan(store, specs, args.full, args.rescan, errors=errors)
+    # only now, after listing, tracking and scanning: a run that dies on the
+    # way leaves the old cursor, and the next run sees those packages again
+    saved = _save_cursors(store, cursors)
+    gaps = _report_discovery_gaps(ecos, notes)
+    if gaps and not resume and any(n.startswith("partly checked") for n in notes.values()):
+        print("hint: `discover --resume` continues where the previous --resume run stopped, "
+              "so a scheduled run sees every release (README: Discovering new packages).",
+              file=sys.stderr)
+    return gaps or bad or not saved
 
 
 def _report_discovery_gaps(ecos, notes):
@@ -3560,9 +3814,16 @@ def main():
                          f"are not scanned and the verdict is INCOMPLETE")
     # discover options
     ap.add_argument("--since", default="7d",
-                    help="discover: time window — 7d, 2w, 24h, or an ISO date (default 7d)")
-    ap.add_argument("--limit", type=int, default=50,
-                    help="discover: max packages to return (default 50)")
+                    help="discover: time window — 7d, 2w, 24h, or an ISO date (default 7d); "
+                         "with --resume, the window of a registry's first run")
+    ap.add_argument("--resume", action="store_true",
+                    help="discover: continue each registry's change feed where the last "
+                         "--resume run stopped (a cursor per registry, stored in --db), so a "
+                         "scheduled run sees every release in between")
+    ap.add_argument("--limit", type=int, default=None,
+                    help="discover: max packages to return (default 50, 0 for no limit); "
+                         "with --resume, per registry and no limit by default, and the rest "
+                         "is left for the next run")
     ap.add_argument("--ecosystem", action="append", choices=["pypi", "npm"],
                     help="discover: restrict to pypi and/or npm (default both)")
     ap.add_argument("--scan", action="store_true",

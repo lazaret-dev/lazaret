@@ -241,22 +241,33 @@ Package specs: `npm:name`, `npm:@scope/name`, `pypi:name`, each with an optional
 
 Already-scanned versions are skipped unless `--rescan` is passed: `scan-all` resolves each package's latest version first and doesn't download what it has already scanned, so incremental sweeps are cheap. A skipped version's stored verdict still counts: with `--ci`, a version already recorded as SUSPICIOUS or INCOMPLETE fails the run without `--rescan`. In `scan`, `scan-all` and `discover --scan`, a package that fails to scan or store is reported, the sweep continues, and the command exits 1 at the end with a one-line summary of the failed packages on stderr.
 
-### Discovering new packages (time-windowed)
+### Discovering new packages
 
-Instead of a fixed watchlist, you can pull packages **newly published or updated in a recent window** and scan them — useful for supply-chain threat hunting across the ecosystem:
+Instead of a fixed watchlist, you can pull packages **newly published or updated** and scan them — useful for supply-chain threat hunting across the ecosystem:
 
 ```bash
-lazaret-registry discover --since 7d                       # list new PyPI+npm pkgs (last week)
-lazaret-registry discover --since 2w --ecosystem pypi      # PyPI only, last two weeks
-lazaret-registry discover --since 24h --scan --ci          # scan them; exit 1 on SUSPICIOUS or INCOMPLETE
-lazaret-registry discover --since 7d --limit 100 --add     # just add to the watchlist
+lazaret-registry discover --since 1h                       # newest 50 new/updated PyPI+npm packages
+lazaret-registry discover --since 1h --ecosystem npm --limit 0   # every npm package the walk reaches
+lazaret-registry discover --resume --scan --ci             # everything since the last --resume run; exit 1
+                                                           # on SUSPICIOUS, INCOMPLETE or a coverage gap
+lazaret-registry discover --resume --ecosystem pypi --add  # just add PyPI's new releases to the watchlist
 ```
 
 `--since` accepts `7d`, `2w`, `24h`, or an ISO date. PyPI discovery uses the timestamped RSS feeds, which hold only the latest 100 releases (`updates.xml`, about 20 minutes of PyPI) and the latest 40 new projects (`packages.xml`, about an hour). npm discovery reads the newest package names from npm's replication `_changes` feed (`replicate.npmjs.com`; 3 × `--limit` of them, 300 with `--limit 0`), then asks `registry.npmjs.org` when each one last changed and what its latest version is (the feed itself carries neither since npm's 2025 replication API change), newest first, until it has `--limit` packages or reaches the start of the window. `--limit` (default 50, `0` for none) caps the list across both registries. A package whose registry lookup fails is still listed, with its time estimated from the feed order.
 
-Discovery says how much of the window it actually covered. When a feed or the npm walk doesn't reach back to the start of the window, or `--limit` leaves packages out, the heading says not all of the window was checked, a warning at the end names the part that was (`warning: discovery incomplete: pypi partly checked: covered 17:28–17:47 UTC only; its RSS feeds hold the latest 100 updates`), and `--ci` fails the run. If a feed can't be read, that registry is skipped with a warning, the summary says which registry was not (fully) checked, and `--ci` fails the run: a scheduled hunt never passes while checking nothing. Malformed feed rows and invalid package names are skipped with a warning, feeds are fetched under a 5 MB cap, and a package whose scan fails is counted as flagged (INCOMPLETE), never dropped. Full-ecosystem scanning of *every* package isn't offered (npm ≈3M / PyPI ≈600k) — use the window, a watchlist, or `--add` to build one up over time.
+Discovery says how much of the window it actually covered. When a feed or the npm walk doesn't reach back to the start of the window, or `--limit` leaves packages out, the heading says not all of the window was checked, a warning at the end names the part that was (`warning: discovery incomplete: pypi partly checked: covered 17:28–17:47 UTC only; its RSS feeds hold the latest 100 updates`), and `--ci` fails the run. If a feed can't be read, that registry is skipped with a warning, the summary says which registry was not (fully) checked, and `--ci` fails the run: a scheduled hunt never passes while checking nothing. Malformed feed rows and invalid package names are skipped with a warning, feeds are fetched under a 5 MB cap, and a package whose scan fails is counted as flagged (INCOMPLETE), never dropped. Full-ecosystem scanning of *every* package isn't offered (npm ≈3M / PyPI ≈600k) — use `--resume` for what is published from now on, a watchlist, or `--add` to build one up over time.
 
-This pairs naturally with a schedule, to catch newly published malicious packages before they land in your builds — but a time window is only checked as far back as the feeds reach: a daily `discover --since 25h --scan --ci` covers about 20 minutes of PyPI, and says so.
+#### A scheduled hunt: `--resume`
+
+A time window is only checked as far back as the feeds reach: a daily `discover --since 25h --scan --ci` covers about 20 minutes of PyPI (and says so). For a schedule, use `--resume`, e.g. a daily or hourly task running `discover --resume --scan --ci`, to catch newly published malicious packages before they land in your builds. Each registry then continues its change feed where the previous `--resume` run stopped, from a cursor kept in the state database (`--db`, table `discovery_cursors`):
+
+- **PyPI:** one call per run to `changelog_since_serial` (PyPI's XML-RPC mirroring API, which it supports and rate-limits), read through the same host allowlist and time limit as every registry fetch, under a 32 MiB cap, and parsed with `lazaret.safexml`. Every release and new project since the last run is listed, each version: a release that was replaced by a clean one an hour later is still scanned.
+- **npm:** the replication feed paged forward from the stored sequence number (10,000 changes a page, at most 20 pages a run), then one registry lookup per changed package for its latest version and time, as above.
+- **First run:** a registry without a cursor checks the `--since` window as without `--resume` (so it may report partial coverage) and records where its feed is now; every later run covers everything since.
+- **Runs that can't get through everything:** PyPI answers with at most 50,000 changes per call, npm's page budget is 200,000 changes, and `--limit` (with `--resume`: per registry, no limit by default, oldest first) may stop a run early. The run lists what it got, reports the registry as partly checked, `--ci` fails, and the cursor stays where it stopped, so the next run continues there. If that keeps happening, run the job more often.
+- **Failures:** a registry whose feed can't be read is not checked and keeps its cursor. The cursor is stored only after listing, `--add` and `--scan` are done: a run that dies on the way leaves the old one, and the next run sees those packages again (versions already scanned are skipped).
+
+Why a flag rather than using a cursor automatically: `--since` keeps meaning a time window. A one-off `discover --since 2h` neither jumps to a scheduled job's cursor nor moves it, which would make the job skip what the one-off listed; only `--resume` runs read and write the cursors. There is one cursor per registry per database, so run one `--resume` job per database. What it doesn't list: npm reports only each changed package's latest version, so an npm version superseded between two runs is seen only as its package's newest one; and PyPI files added to an existing release later (a new wheel) aren't changes of their own.
 
 ### Binary artifacts
 
