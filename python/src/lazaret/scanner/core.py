@@ -3784,6 +3784,30 @@ def _json_int(text):
     return int(text) if len(text) <= 1000 else float(text)
 
 
+# json.loads' message for the closing bracket after a trailing comma on Python
+# 3.10-3.12 (3.13+ says "Illegal trailing comma" and points at the comma).
+_JSON_TRAILING_COMMA_AT = {"Expecting property name enclosed in double quotes": "}",
+                           "Expecting value": "]"}
+
+
+def json_error_where(exc):
+    """"line L column C" of a json.JSONDecodeError, the same on every Python.
+    3.13+ reports a trailing comma (`{"a": 1,}`, `[1, ]`) at the comma and
+    3.10-3.12 at the bracket after it; this says the comma on every version,
+    as the npm engine's pyjson.js does. Any other error is where json.loads
+    puts it."""
+    doc, pos = exc.doc, exc.pos
+    if doc[pos:pos + 1] == _JSON_TRAILING_COMMA_AT.get(exc.msg):
+        j = pos - 1
+        while j >= 0 and doc[j] in " \t\n\r":
+            j -= 1
+        if j >= 0 and doc[j] == ",":
+            pos = j
+    lineno = doc.count("\n", 0, pos) + 1              # as JSONDecodeError counts them
+    colno = pos - doc.rfind("\n", 0, pos)
+    return f"line {lineno} column {colno}"
+
+
 def load_manifest(path, content, python_literal=False):
     """Parse manifest-shaped, attacker-controlled text the way the package
     manager does. -> (data, issues).
@@ -3827,7 +3851,7 @@ def _load_manifest(path, content, python_literal=False, locate=None):
         return None, [_sc_manifest_depth_issue(path)], {}
     except (ValueError, TypeError) as exc:
         data = None
-        reason = (f"{type(exc).__name__}: line {exc.lineno} column {exc.colno}"
+        reason = (f"{type(exc).__name__}: {json_error_where(exc)}"
                   if isinstance(exc, json.JSONDecodeError) else type(exc).__name__)
     if data is not None and locate is not None:
         where = _json_key_offsets(text, built, locate)

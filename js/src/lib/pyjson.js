@@ -1,7 +1,9 @@
 // Python-compatible parsing of manifest text (zero-dependency leaf):
 //  * pyJsonParse — json.loads semantics: NaN/Infinity accepted, and on
 //    failure the exact error position CPython's decoder reports (so
-//    "JSONDecodeError: line L column C" reads the same in both engines);
+//    "JSONDecodeError: line L column C" reads the same in both engines;
+//    a trailing comma is reported at the comma, as Python 3.13+ does and
+//    core.json_error_where does on every version);
 //    nesting deeper than MAX_JSON_DEPTH is reported as a depth failure
 //    (Python: RecursionError), in document order.
 //  * pyLiteralParse — ast.literal_eval for binding.gyp / .gypi files, which
@@ -121,7 +123,9 @@ export function pyJsonParse(text, { onKey = null, pyValues = false } = {}) {
         i = skip(v2);
         if (i < n && s[i] === "}") break;
         if (i >= n || s[i] !== ",") throw new JsonError(i);               // Expecting ',' delimiter
+        const comma = i;
         i = skip(i + 1);
+        if (i < n && s[i] === "}") throw new JsonError(comma);            // Illegal trailing comma (3.13+'s position)
       }
     }
     return [obj, i + 1];
@@ -136,7 +140,9 @@ export function pyJsonParse(text, { onKey = null, pyValues = false } = {}) {
         i = skip(v2);
         if (i < n && s[i] === "]") break;
         if (i >= n || s[i] !== ",") throw new JsonError(i);
+        const comma = i;
         i = skip(i + 1);
+        if (i < n && s[i] === "]") throw new JsonError(comma);            // Illegal trailing comma (3.13+'s position)
       }
     }
     return [arr, i + 1];

@@ -113,6 +113,14 @@ class LexingParityTests(unittest.TestCase):
         self.assertNotIn(("S-EVAL-PY", "enc/ebcdic.py", 3), found)     # decoded as EBCDIC, as Python reads it
         self.assertEqual({f for _, f, _ in found if f.startswith("ext/")}, {"ext/.x.js"})
 
+    def test_manifest_trailing_comma(self):
+        """The error position is Python 3.13+'s (the comma) on every Python."""
+        report = self.assert_same({"package.json": '{\n  "name": "app",\n  "version": "1.0.0",\n}\n',
+                                   "app.js": "var a = 1;\n"}, label="manifest")
+        self.assertEqual([i["msg"] for i in report["issues"] if i["rule"] == "SC-MANIFEST-UNPARSEABLE"],
+                         ["package.json could not be parsed (JSONDecodeError: line 3 column 21); "
+                          "its install hooks could not be checked."])
+
 
 if __name__ == "__main__":
     unittest.main()
