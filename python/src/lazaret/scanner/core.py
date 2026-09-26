@@ -4281,6 +4281,10 @@ def _normal_codec(name):
     return info.name
 
 
+#: A surrogate code point: never text on its own (see decode_source).
+_SURROGATE_RE = re.compile("[\ud800-\udfff]")
+
+
 def decode_source(data, lang=None):
     """Decode the bytes of a source file the way its interpreter would read
     them. Returns (text, info):
@@ -4293,7 +4297,11 @@ def decode_source(data, lang=None):
     with that codec (Q-ENCODING); UTF-7 additionally sets utf7 (a UTF-7
     '+AAo-' is a newline, so code can hide inside a comment). An unknown codec
     decodes as UTF-8 with replacement. Never raises on content. Line endings
-    are normalized to \\n, as text mode reads them."""
+    are normalized to \\n, as text mode reads them. A surrogate code point
+    left by the codec (UTF-7 '+2AA-', unicode_escape '\\udc80') becomes
+    U+FFFD, as in the npm engine's decoders: text holding one cannot be
+    written as UTF-8 (review: the HTML report raised UnicodeEncodeError after
+    the JSON was written, exit 5) and the flow engine could not parse it."""
     enc = detect_encoding(data[:4])
     if (enc["reported"] and not enc["bom"] and enc["encoding"].startswith("utf-16")
             and not _text_is_plausible(data[:4096].decode(enc["encoding"], "replace"))):
@@ -4322,6 +4330,8 @@ def decode_source(data, lang=None):
             text = body.decode(codec, "replace")
         except Exception:
             text = body.decode("utf-8", "replace")
+    if not text.isascii():
+        text = _SURROGATE_RE.sub("\ufffd", text)
     return normalize_newlines(text), info
 
 

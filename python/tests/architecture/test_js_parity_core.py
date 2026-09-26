@@ -99,5 +99,16 @@ class CoreParityTests(unittest.TestCase):
             self.assertEqual(snippets(js[1]), snippets(py[1]))
             self.assertEqual(len([i for i in py[1]["issues"] if i["rule"] == "SC-PTH-EXEC"]), len(seps) + 4)
 
+    def test_surrogates_left_by_a_utf7_cookie(self):
+        files = {"a.py": b'# -*- coding: utf-7 -*-\nx = "+2AA-"  # TODO marker\n',
+                 "b.py": b"# coding: utf-7\n+2D3eAA- +3gA- +2D3YPQ- +2ADYAA-\nimport os\nos.system(c)\n"}
+        with tree(files) as root:
+            js, py = parity.both(root, extra=("--ci",))
+            self.assert_same(js, py, label="surrogates")
+            self.assertEqual(snippets(js[1]), snippets(py[1]))
+            self.assertEqual((js[0], py[0]), (1, 1))
+            (todo,) = [i for i in py[1]["issues"] if i["rule"] == "Q-TODO"]
+            self.assertEqual(todo["snippet"][1], 'x = "\ufffd"  # TODO marker')
+
 if __name__ == "__main__":
     unittest.main()

@@ -428,6 +428,21 @@ def _fsync_dir(path):
         pass
 
 
+#: A surrogate code point (UTF-8 cannot encode one).
+_SURROGATE_RE = re.compile("[\ud800-\udfff]")
+
+
+def _utf8(text):
+    """*text* as UTF-8 bytes; a surrogate code point, which UTF-8 cannot
+    encode, is written as U+FFFD (what the npm engine's Buffer.from(text,
+    "utf8") does) instead of raising after the scan: the sources are
+    decoded without them (core.decode_source), this is the backstop."""
+    try:
+        return text.encode("utf-8")
+    except UnicodeEncodeError:
+        return _SURROGATE_RE.sub("\ufffd", text).encode("utf-8")
+
+
 def _write_all(fd, data):
     """os.write() may write fewer bytes than asked; loop until done."""
     view = memoryview(data)
@@ -450,7 +465,7 @@ def write_report(path, render, kind, strict=False):
     """
     rendered = render()
     if isinstance(rendered, str):
-        rendered = rendered.encode("utf-8")
+        rendered = _utf8(rendered)
     parent = os.path.dirname(os.path.abspath(path)) or os.curdir
     # A re-scan must keep an existing report's permissions (a 0600 report
     # used to come back 0644); a new report gets the classic 0666 & ~umask
