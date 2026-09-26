@@ -16,6 +16,9 @@
 6  _scan_site_packages opened METADATA / PKG-INFO without checking for a
    regular file: a FIFO hung the scan forever and a symlink to /dev/zero
    grew memory without bound.
+Minor: an attached include value (-rfile, as pip accepts) and a symlinked
+   requirements*.txt were skipped without a warning, and so was a missing
+   include.
 
 All fixtures are inert manifest/lock text and synthetic CVE ids.
 """
@@ -281,6 +284,37 @@ class SitePackagesMetadata(unittest.TestCase):
             tracemalloc.stop()
         self.assertEqual(sorted((n, v) for e, n, v, where in inv), [("good", "2.0")])
         self.assertLess(peak, 4 * 1024 * 1024)
+
+
+# ---------------------------------------------------------------------------
+# minor: requirements includes and symlinked requirements files
+# ---------------------------------------------------------------------------
+class RequirementsIncludes(unittest.TestCase):
+    def declared(self, root):
+        w = sca._Warnings()
+        inv = sca.scan_pypi_declared(root, w)
+        return sorted((n, v) for e, n, v, where in inv), w.counts
+
+    def test_attached_option_values(self):
+        root = project({"requirements.txt": b"-rreqs/base.txt\n-creqs/cons.txt\n",
+                        "reqs/base.txt": b"urllib3==1.24.1\n", "reqs/cons.txt": b"idna==2.5\n"})
+        self.assertEqual(self.declared(root), ([("idna", "2.5"), ("urllib3", "1.24.1")], {}))
+
+    def test_missing_include_is_warned(self):
+        root = project({"requirements.txt": b"-r missing.txt\nsix==1.16.0\n"})
+        self.assertEqual(self.declared(root),
+                         ([("six", "1.16.0")], {"requirements includes not found": 1}))
+
+    def test_symlinked_requirements_files(self):
+        root = project({"reqs/prod.txt": b"django==1.11.0\n"})
+        outside = project({"x.txt": b"flask==0.12\n"})
+        try:
+            os.symlink(os.path.join("reqs", "prod.txt"), os.path.join(root, "requirements-prod.txt"))
+            os.symlink(os.path.join(outside, "x.txt"), os.path.join(root, "requirements-x.txt"))
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks unavailable")
+        self.assertEqual(self.declared(root), ([("django", "1.11.0")], {
+            "requirements files outside the project skipped (symlink or -r/-c target)": 1}))
 
 
 if __name__ == "__main__":

@@ -961,7 +961,10 @@ def _add_req(out, req, where):
         out.append(("pypi", name, "", "%s (range: %s)" % (where, spec) if spec else where))
 
 
-_REQ_INCLUDE_RE = re.compile(r"^(-r|--requirement|-c|--constraint)(?:\s*=\s*|\s+)(\S+)")
+# -r FILE, -rFILE (pip's option parser takes a short option's value attached),
+# --requirement FILE / --requirement=FILE; the same for -c / --constraint.
+_REQ_INCLUDE_RE = re.compile(
+    r"^(?:-[rc]\s*=?\s*|--(?:requirement|constraint)(?:\s*=\s*|\s+))(?P<path>\S+)")
 
 
 def _req_lines(text):
@@ -983,6 +986,10 @@ def _req_lines(text):
 
 
 def _scan_requirements(path, root, out, warn, seen, depth=0):
+    """One requirements file and its -r/-c includes. A symlink (a
+    requirements-prod.txt -> requirements/prod.txt) is followed when it
+    resolves inside the project; anything that is skipped is counted in a
+    warning, never silently dropped."""
     real = os.path.realpath(path)
     if real in seen:
         return
@@ -991,9 +998,12 @@ def _scan_requirements(path, root, out, warn, seen, depth=0):
         warn("requirements includes nested deeper than 5 levels skipped")
         return
     if not lazaret_report.path_is_inside(path, root):
-        warn("requirements includes outside the project skipped")
+        warn("requirements files outside the project skipped (symlink or -r/-c target)")
         return
-    text = _read_text(path, cap=5 * 1024 * 1024)
+    if depth and not os.path.lexists(path):
+        warn("requirements includes not found")
+        return
+    text = _read_text(real, cap=5 * 1024 * 1024)
     if text is None:
         _unusable(warn, path)
         return
@@ -1001,7 +1011,7 @@ def _scan_requirements(path, root, out, warn, seen, depth=0):
     for line in _req_lines(text):
         inc = _REQ_INCLUDE_RE.match(line)
         if inc:
-            target = os.path.join(os.path.dirname(path), inc.group(2))
+            target = os.path.join(os.path.dirname(path), inc.group("path"))
             _scan_requirements(target, root, out, warn, seen, depth + 1)
             continue
         if line.startswith(("-e", "--editable")):
