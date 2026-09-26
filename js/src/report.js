@@ -8,7 +8,7 @@ import { readFileSync } from "node:fs";
 import { SEV_ORDER } from "./scanner/rules.js";
 import { computeMetrics, worstSevRating, maintainabilityRating } from "./scanner/metrics.js";
 import { ENGINE_VERSION, ENGINE_MARKER, HTML_ENGINE_MARKER } from "./lib/fs.js";
-import { cmpCodePoints, pyStrip, isPrintable } from "./lib/pycompat.js";
+import { cmpCodePoints, pyStrip, isPrintable, pyFloatRepr } from "./lib/pycompat.js";
 import { REDACT, SECRET_RULES } from "./lib/redact.js";
 import { reportSignature, SIGNATURE_FIELD } from "./baseline.js";
 
@@ -40,8 +40,14 @@ export function buildResult(root, files, issues) {
     { label: "Duplication < 10%", ok: metrics.dupPct < 10 },
     { label: "Maintainability ≥ C", ok: "ABC".includes(ratings.maintainability) },
   ];
+  // Keys are file names: one named __proto__ is an ordinary key here (an
+  // assignment set the object's prototype instead, losing the count).
   const perFile = {};
-  for (const i of issues) perFile[i.file] = (perFile[i.file] ?? 0) + 1;
+  for (const i of issues) {
+    const f = String(i.file);
+    Object.defineProperty(perFile, f, { value: (Object.hasOwn(perFile, f) ? perFile[f] : 0) + 1,
+      enumerable: true, writable: true, configurable: true });
+  }
   let supply = 0, crossFile = 0;
   // INFO supply-chain entries are inventory (a project's own prepare hook,
   // shared semantics 3), not indicators.
@@ -79,9 +85,10 @@ const indented = (text, level) => (level && text.includes("\n") ? text.replaceAl
 /**
  * JSON.stringify(value, null, 2) as a sequence of strings: arrays and objects
  * down to `depth` levels are split into their members, anything deeper is
- * one piece. `level` is the indentation the value starts at.
+ * one piece. keysOf(object) lists a split object's members (JSON.stringify's
+ * order by default); `level` is the indentation the value starts at.
  */
-export function* jsonChunks(value, depth = 2, level = 0) {
+export function* jsonChunks(value, depth = 2, keysOf = Object.keys, level = 0) {
   if (depth <= 0 || !splittable(value)) {
     const text = JSON.stringify(value, null, 2);
     if (text !== undefined) yield indented(text, level);
@@ -93,7 +100,7 @@ export function* jsonChunks(value, depth = 2, level = 0) {
   const member = function* (prefix, v) {
     if (depth > 1 && splittable(v)) {
       yield (first ? open : ",") + inner + prefix;
-      yield* jsonChunks(v, depth - 1, level + 1);
+      yield* jsonChunks(v, depth - 1, keysOf, level + 1);
     } else {
       const text = JSON.stringify(v, null, 2);
       if (text === undefined && prefix) return;                      // an object member JSON.stringify leaves out
@@ -102,7 +109,7 @@ export function* jsonChunks(value, depth = 2, level = 0) {
     first = false;
   };
   if (Array.isArray(value)) for (let k = 0; k < value.length; k++) yield* member("", value[k]);
-  else for (const key of Object.keys(value)) yield* member(JSON.stringify(key) + ": ", value[key]);
+  else for (const key of keysOf(value)) yield* member(JSON.stringify(key) + ": ", value[key]);
   yield first ? open + close : "\n" + INDENT.repeat(level) + close;
 }
 
@@ -116,7 +123,26 @@ export function* jsonReportChunks(res, { key = null } = {}) {
   const out = { [ENGINE_MARKER]: ENGINE_VERSION };
   if (sig) out[SIGNATURE_FIELD] = sig;
   for (const [k, v] of Object.entries(res)) if (k !== ENGINE_MARKER && k !== SIGNATURE_FIELD) out[k] = v;
-  yield* jsonChunks(out, 2);
+  // As the Python engine writes them: dupPct is a float (0.0, 12.0, not 0,
+  // 12), and perFile lists the files in the order they first appear in the
+  // sorted issues (its dict's order; a JavaScript object puts integer-like
+  // keys, a file named 7, first).
+  const dup = out.metrics?.dupPct;
+  if (typeof dup === "number" && Number.isFinite(dup)) out.metrics = { ...out.metrics, dupPct: JSON.rawJSON(pyFloatRepr(dup)) };
+  yield* jsonChunks(out, 2, (o) => (o === res.perFile ? perFileKeys(res) : Object.keys(o)));
+}
+
+/** res.perFile's keys in the order of the first issue in each file. */
+function perFileKeys(res) {
+  const keys = Object.keys(res.perFile);
+  if (!keys.some((k) => /^(?:0|[1-9][0-9]*)$/.test(k))) return keys;   // no key an object reorders
+  const order = new Set();
+  for (const i of Array.isArray(res.issues) ? res.issues : []) {
+    const f = String(i?.file);
+    if (Object.hasOwn(res.perFile, f)) order.add(f);
+  }
+  for (const k of keys) order.add(k);
+  return [...order];
 }
 
 /** JSON report text (jsonReportChunks joined). */
@@ -159,7 +185,7 @@ export function safeExcerpt(text, width = EXCERPT_WIDTH) {
   if (!text) return "";
   const cps = Array.from(text);
   let out = "";
-  for (const ch of cps.slice(0, Math.max(0, width))) {
+  for (const ch of cps.slice(0, width)) {                       // text[:width], a negative width too
     const o = ch.codePointAt(0);
     out += ch === " " || (o >= 0x20 && o < 0x7f) || (o > 0xa0 && isPrintable(ch) && !/[\u202a-\u202e\u2066-\u2069]/.test(ch)) ? ch : "·";
   }
@@ -179,7 +205,7 @@ export function printReport(res, { out = console.log, quiet = false } = {}) {
   const m = res.metrics;
   out("");
   out(`Lazaret scan — ${sanitizeTermLine(res.project)}`);
-  out(`  ${m.files} files · ${m.ncloc} lines of code · ${m.dupPct}% duplication`);
+  out(`  ${m.files} files · ${m.ncloc} lines of code · ${typeof m.dupPct === "number" ? pyFloatRepr(m.dupPct) : m.dupPct}% duplication`);
   out("");
   out(`  Quality gate: ${res.pass ? "PASSED" : "FAILED"}`);
   for (const cond of res.conditions) out(`  ${cond.ok ? "✓" : "✗"} ${sanitizeTermLine(cond.label)}`);

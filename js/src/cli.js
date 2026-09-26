@@ -11,7 +11,7 @@ import {
   ReportPathError, EXIT_OUTPUT, ScanTargetError, scanErrorIssue, MAX_FILE_BYTES,
 } from "./lib/fs.js";
 import { fsNameToString } from "./lib/encoding.js";
-import { pyStrip } from "./lib/pycompat.js";
+import { pyRepr } from "./lib/pycompat.js";
 import { scanFile } from "./scanner/scan.js";
 import { scanManifest, scanGyp } from "./lib/supplychain.js";
 import { redactResult, setRedactSecrets } from "./lib/redact.js";
@@ -94,13 +94,35 @@ const PYTHON_ONLY = ["--taint-config", "--strict-taint-config", "--trust-repo-co
 
 class UsageError extends Error {}
 
-/** A positive integer environment value, read as Python's int() reads it
- * (surrounding whitespace, a sign, `_` between digits), else null. */
+// Python's int() of a str (argparse's type=int, core._positive_int and
+// core._env_int read the integer options with it): whitespace around it
+// (ASCII, and Unicode's), a sign, decimal digits of any script with single
+// underscores between them, at most 4300 digits (sys.get_int_max_str_digits()).
+const PY_INT_WS = "[\\t\\n\\v\\f\\r \\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]*";
+const PY_INT_RE = new RegExp(`^${PY_INT_WS}([-+]?)(\\p{Nd}+(?:_\\p{Nd}+)*)${PY_INT_WS}$`, "u");
+const DIGIT_RE = /^\p{Nd}$/u;
+function digitValue(ch) {
+  const cp = ch.codePointAt(0);
+  if (cp < 0x80) return cp - 0x30;
+  let zero = cp;                    // each script's digits 0-9 are consecutive code points
+  while (DIGIT_RE.test(String.fromCodePoint(zero - 1))) zero--;
+  return (cp - zero) % 10;
+}
+
+/** int(text) as Python computes it (a number), or null where it raises ValueError. */
+export function pyInt(text) {
+  const m = PY_INT_RE.exec(String(text));
+  if (!m) return null;
+  const digits = Array.from(m[2].replaceAll("_", ""), digitValue);
+  if (digits.length > 4300) return null;
+  const n = Number(digits.join(""));
+  return m[1] === "-" ? 0 - n : n;
+}
+
+/** A positive integer environment value, read as core._env_int reads it, else null. */
 function envPositiveInt(v) {
   if (v === undefined || v === null) return null;
-  const s = pyStrip(String(v));
-  if (!/^[-+]?[0-9]+(?:_[0-9]+)*$/.test(s)) return null;
-  const n = Number(s.replaceAll("_", ""));
+  const n = pyInt(v);
   return n > 0 ? n : null;
 }
 
@@ -129,11 +151,11 @@ export function parseArgs(argv) {
   };
   const set = (o, v) => {
     if (o.int) {
-      const raw = String(v), isInt = /^[-+]?\d+$/.test(raw.trim());
-      if (o.positive && !(isInt && parseInt(raw, 10) > 0))      // as core._positive_int words it
-        throw new UsageError(`argument ${o.flag}: expected a positive number of bytes, got '${raw}'`);
-      if (!isInt) throw new UsageError(`argument ${o.flag}: invalid int value: '${v}'`);
-      v = parseInt(raw, 10);
+      const raw = String(v), n = pyInt(raw);
+      if (o.positive && !(n > 0))                                 // as core._positive_int words it
+        throw new UsageError(`argument ${o.flag}: expected a positive number of bytes, got ${pyRepr(raw)}`);
+      if (n === null) throw new UsageError(`argument ${o.flag}: invalid int value: ${pyRepr(raw)}`);
+      v = n;
     }
     if (o.append) opts[o.dest].push(v);
     else opts[o.dest] = o.value ? v : true;

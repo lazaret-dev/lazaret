@@ -71,7 +71,9 @@ test("jsonChunks is JSON.stringify(value, null, 2), in pieces", () => {
 test("the report renderers' text is what JSON.stringify gave", () => {
   const res = sampleResult();
   assert.ok(res.issues.length >= 4);
-  const out = (extra = {}) => ({ generatedBy: "lazaret-cli-1", ...extra, ...res });
+  // dupPct is written as the Python float it is there (review-parity-misc)
+  const metrics = { ...res.metrics, dupPct: JSON.rawJSON(res.metrics.dupPct.toFixed(1)) };
+  const out = (extra = {}) => ({ generatedBy: "lazaret-cli-1", ...extra, ...res, metrics });
   assert.equal(jsonRenderer(res), JSON.stringify(out(), null, 2));
   const signed = jsonRenderer(res, { key: "k" });
   const sig = JSON.parse(signed).baselineSignature;

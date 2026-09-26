@@ -8,21 +8,23 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
-import { run, scanManifest } from "../src/index.js";
+import { run, scanManifest, buildResult, jsonRenderer } from "../src/index.js";
 import { pyExt } from "../src/lib/binary.js";
 import { pyJsonParse, jsonErrorWhere } from "../src/lib/pyjson.js";
+import { parseArgs, pyInt } from "../src/cli.js";
 
-function scanTree(files, args = []) {
+function scanTree(files, args = [], env = {}) {
   const d = mkdtempSync(join(tmpdir(), "lazaret-parity-"));
   try {
     for (const [name, data] of Object.entries(files)) {
       mkdirSync(dirname(join(d, name)), { recursive: true });
       writeFileSync(join(d, name), data);
     }
-    const code = run(["check", d, "--no-html", ...args], { out: () => {}, err: () => {}, env: {} });
+    const out = [];
+    const code = run(["check", d, "--no-html", ...args], { out: (l) => out.push(l), err: (l) => out.push(l), env });
     const text = readFileSync(join(d, "lazaret-report.json"), "utf8");
     const rep = JSON.parse(text);
-    return { code, text, rep, found: rep.issues.map((i) => `${i.file.replaceAll("\\", "/")}:${i.line} ${i.rule}`).sort() };
+    return { code, out, text, rep, found: rep.issues.map((i) => `${i.file.replaceAll("\\", "/")}:${i.line} ${i.rule}`).sort() };
   } finally { rmSync(d, { recursive: true, force: true }); }
 }
 
@@ -99,4 +101,55 @@ test("a JSON trailing comma is reported at the comma, as Python 3.13+ does", () 
   const r = scanManifest("package.json", '{\n  "name": "app",\n  "version": "1.0.0",\n}\n');
   assert.deepEqual(r.map((i) => [i.rule, i.msg]), [["SC-MANIFEST-UNPARSEABLE",
     "package.json could not be parsed (JSONDecodeError: line 3 column 21); its install hooks could not be checked."]]);
+});
+
+// cli.js read --excerpt-width and --max-source-bytes with /^[-+]?\d+$/ (and
+// LAZARET_MAX_SOURCE_BYTES with an ASCII-only pattern) where the Python
+// engine calls int(): `--max-source-bytes 2_000_000` or `--excerpt-width
+// 1_00` was a usage error (exit 2) here and a scan there. They are read as
+// int() reads them now, and an excerpt is cut as text[:width] also for a
+// negative width (it came out empty here).
+test("integer options are read as Python's int() reads them", () => {
+  for (const [text, want] of [["1_00", 100], [" +1_0\n", 10], ["\u0661\u0660\u0660", 100], ["\uff11\uff12", 12],
+    ["\u{1d7d8}\u{1d7e1}", 9], ["-5", -5], ["007", 7], ["\xa07\u3000", 7], ["1__0", null], ["_1", null], ["1_", null],
+    ["+_1", null], ["- 1", null], ["0x10", null], ["1e3", null], ["1.0", null], ["", null], ["\ufeff1", null],
+    ["1\x1c", null], ["1".repeat(4300) + "_", null], ["1_".repeat(4300) + "1", null]]) {
+    assert.equal(pyInt(text), want, JSON.stringify(text));
+  }
+  assert.ok(pyInt("1".repeat(4300)) > 1e300);                       // the 4300-digit limit is inclusive
+  assert.deepEqual(parseArgs(["d", "--excerpt-width", "1_00", "--max-source-bytes= 2_000_000 "]).opts,
+    { exclude: [], excerptWidth: 100, maxSourceBytes: 2000000 });
+  assert.throws(() => parseArgs(["d", "--max-source-bytes", "-1_0"]), /expected a positive number of bytes, got '-1_0'/);
+  assert.throws(() => parseArgs(["d", "--excerpt-width", "it's"]), /invalid int value: "it's"/);
+
+  const line = "x = eval(y)  # abcdef\n";
+  const r = scanTree({ "a.py": line }, ["--excerpt-width", "1_0", "--max-source-bytes", "2_000_000"]);
+  assert.equal(r.code, 0);
+  assert.ok(r.out.includes("      » x = eval(y…"), r.out.join("\n"));
+  const neg = scanTree({ "a.py": line }, ["--excerpt-width", "-3"]);
+  assert.ok(neg.out.includes("      » x = eval(y)  # abc…"), neg.out.join("\n"));   // Python: line[:-3] + "…"
+  const env = scanTree({ "a.py": line }, [], { LAZARET_MAX_SOURCE_BYTES: "\u0661_\u0660" });   // 10 bytes
+  assert.deepEqual(env.found, ["a.py:1 SC-TRUNCATED"]);
+});
+
+// buildResult counted findings per file with perFile[file] += 1: a file named
+// __proto__ (a root binary, SC-BINARY) set the object's prototype instead and
+// was missing from perFile, and a file named 7 or 10 came first, where the
+// Python engine's dict keeps the order of the sorted findings. metrics.dupPct
+// is a float in Python (0.0, 100.0) and was written as 0 / 100 here.
+test("perFile holds every file in Python's order; dupPct is written as a float", () => {
+  const elf = Buffer.concat([Buffer.from("\x7fELF\x02\x01\x01\x00", "latin1"), Buffer.alloc(600)]);
+  const { text, rep, out } = scanTree({ ["__proto__"]: elf, "7": elf, "10": elf, "b.js": "eval(b)\n", "src/a.js": "eval(a)\n" });
+  const block = /\n {2}"perFile": \{\n([\s\S]*?)\n {2}\}/.exec(text)[1];
+  assert.deepEqual(block.split("\n").map((l) => l.trim()),
+    ['"b.js": 1,', '"src/a.js": 1,', '"10": 1,', '"7": 1,', '"__proto__": 1']);
+  assert.equal(Object.keys(rep.perFile).length, 5);
+  assert.match(text, /\n {4}"dupPct": 0\.0,?\n/);
+  assert.ok(out.includes("  2 files · 2 lines of code · 0.0% duplication"), out.join("\n"));
+  const res = buildResult("/p", [], []);
+  for (const [dup, written] of [[100, "100.0"], [12.5, "12.5"], [33.3, "33.3"], [0, "0.0"]]) {
+    res.metrics.dupPct = dup;
+    assert.equal(JSON.parse(jsonRenderer(res)).metrics.dupPct, dup);
+    assert.match(jsonRenderer(res), new RegExp(`\n {4}"dupPct": ${written.replace(".", "\\.")}\n`));
+  }
 });

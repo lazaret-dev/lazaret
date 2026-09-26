@@ -113,6 +113,27 @@ class LexingParityTests(unittest.TestCase):
         self.assertNotIn(("S-EVAL-PY", "enc/ebcdic.py", 3), found)     # decoded as EBCDIC, as Python reads it
         self.assertEqual({f for _, f, _ in found if f.startswith("ext/")}, {"ext/.x.js"})
 
+    def test_cli_integers_and_report_fields(self):
+        """Integer options and LAZARET_MAX_SOURCE_BYTES read as int() reads
+        them; perFile with a file named __proto__ (and 7, 10) in Python's key
+        order; dupPct written as a float."""
+        elf = b"\x7fELF\x02\x01\x01\x00" + b"\0" * 600
+        tree = {"__proto__": elf, "7": elf, "10": elf, "b.js": "eval(b)\n", "src/a.js": "eval(a)\n"}
+        report = self.assert_same(tree, extra=("--max-source-bytes", "2_000_000", "--excerpt-width", "1_00"),
+                                  label="integer options")
+        self.assertEqual(list(report["perFile"]), ["b.js", "src/a.js", "10", "7", "__proto__"])
+        with tempfile.TemporaryDirectory() as root:
+            write_tree(root, tree)
+            (_, js, _), (_, py, _) = both(root, extra=("--max-source-bytes", "2_000_000"))
+            self.assertEqual(list(js["perFile"]), list(py["perFile"]))
+            self.assertEqual(repr(js["metrics"]["dupPct"]), repr(py["metrics"]["dupPct"]))    # 0.0, not 0
+        with tempfile.TemporaryDirectory() as root:
+            write_tree(root, {"big.js": "var x = 12345678;\n", "s.js": "eval(s)\n"})
+            (_, js, _), (_, py, _) = both(root, env={"LAZARET_MAX_SOURCE_BYTES": "\u0661_\u0660"})   # 10 bytes
+            self.assertEqual(sorted(issue_key(i) for i in js["issues"]), sorted(issue_key(i) for i in py["issues"]))
+            self.assertEqual(sorted((i["rule"], i["file"]) for i in py["issues"]),
+                             [("S-EVAL-JS", "s.js"), ("SC-TRUNCATED", "big.js")])
+
     def test_manifest_trailing_comma(self):
         """The error position is Python 3.13+'s (the comma) on every Python."""
         report = self.assert_same({"package.json": '{\n  "name": "app",\n  "version": "1.0.0",\n}\n',
