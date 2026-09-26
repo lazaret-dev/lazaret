@@ -89,6 +89,18 @@ def R(id, name, type, sev, langs, pat, msg, why, fix, ref, skip=None, need=None,
             "skip": re.compile(skip, re.I) if skip else None,
             "need": re.compile(need, re.I) if need else None}
 
+# Inline imports that evaluate to a module (SC-EVAL-DECODE prefix grammar):
+# `__import__("mod")` / `importlib.import_module("mod")`.
+_INLINE_IMPORT = (r"__import__\(\s*['\"][\w.]+['\"]\s*\)"
+                  r"|importlib\.import_module\(\s*['\"][\w.]+['\"]\s*\)")
+
+
+def _module_ref(name):
+    """Pattern for module `name` written by name or imported inline."""
+    return (rf"(?:{name}|__import__\(\s*['\"]{name}['\"]\s*\)"
+            rf"|importlib\.import_module\(\s*['\"]{name}['\"]\s*\))")
+
+
 RULES = [
 R("S-EVAL-PY", "Dynamic code execution", "VULN", "CRITICAL", ("py",),
   r"(?<![\w.])(eval|exec)\s*\(",
@@ -392,10 +404,17 @@ R("S-SPAWN-SHELL", "child_process with shell:true", "VULN", "CRITICAL", ("js",),
 # also matches this rule over a statement split across lines (`eval(\n
 # atob(…))`, `exec(  # comment\n b64decode(…))`); dependency mode adds a
 # decode-to-variable-to-sink flow (see _dep_decode_flow).
+# A prefix segment may also be an inline import — `__import__("base64").` or
+# `importlib.import_module("zlib").` (review: `exec(__import__("base64")
+# .b64decode("…"))` was missed) — and a module-qualified decoder may name its
+# module that way (`eval(__import__('codecs').decode(…))`). Every segment ends
+# at a '.', so the prefix stays linear-time.
 R("SC-EVAL-DECODE", "Decoded payload execution", "VULN", "BLOCKER", ("py", "js"),
-  r"\b(?:eval|exec|execSync|Function|runIn(?:This|New)?Context)\s*\(\s*(?:[\w$]+\s*\.\s*)*"
-  r"(?:atob|unescape|decodeURIComponent|Buffer\s*\.\s*from|b64decode|codecs\s*\.\s*decode|"
-  r"zlib\s*\.\s*decompress|marshal\s*\.\s*loads|fromhex|unhexlify)\s*\(",
+  r"\b(?:eval|exec|execSync|Function|runIn(?:This|New)?Context)\s*\(\s*"
+  r"(?:(?:[\w$]+|" + _INLINE_IMPORT + r")\s*\.\s*)*"
+  r"(?:atob|unescape|decodeURIComponent|Buffer\s*\.\s*from|b64decode|"
+  + _module_ref("codecs") + r"\s*\.\s*decode|" + _module_ref("zlib") + r"\s*\.\s*decompress|"
+  + _module_ref("marshal") + r"\s*\.\s*loads|fromhex|unhexlify)\s*\(",
   "Code decoded (base64/escape) and immediately executed.",
   "Decode-then-execute is the signature pattern of malware droppers and supply-chain implants.",
   "Treat as hostile until proven otherwise; inspect the decoded payload.",
@@ -2629,8 +2648,8 @@ def _joined_eval_decode(ctx, i, rule_re):
 # eval(d)`). Names are never un-tainted (over-approximation is the safe
 # direction for third-party code). Project mode covers this with T-CODE/T-CMD.
 _DECODE_CALL_RE = re.compile(
-    r"(?:\batob|\bb64decode|\.\s*fromhex|\bunhexlify|\bcodecs\s*\.\s*decode"
-    r"|\bzlib\s*\.\s*decompress)\s*\("
+    r"(?:\batob|\bb64decode|\.\s*fromhex|\bunhexlify|\b" + _module_ref("codecs") + r"\s*\.\s*decode"
+    r"|\b" + _module_ref("zlib") + r"\s*\.\s*decompress)\s*\("
     r"|\bBuffer\s*\.\s*from\s*\([^;\n]{0,300}?['\"`]base64['\"`]")
 _DECODE_SINK_RE = re.compile(
     r"\b(?:eval|exec|execSync|execFile|execFileSync|spawn|spawnSync|Function"

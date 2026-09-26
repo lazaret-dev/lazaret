@@ -281,8 +281,7 @@ function joinedEvalDecode(ctx, i, ruleRe) {
 // in the arguments of eval / exec / execSync / execFile(Sync) / spawn(Sync) /
 // Function / new Function / vm.runIn*Context is SC-EVAL-DECODE at the sink
 // (twin of core._dep_decode_flow).
-const DECODE_CALL_RE = pyRe(String.raw`(?:\batob|\bb64decode|\.\s*fromhex|\bunhexlify|\bcodecs\s*\.\s*decode`
-  + String.raw`|\bzlib\s*\.\s*decompress)\s*\(|\bBuffer\s*\.\s*from\s*\([^;\n]{0,300}?['\"` + "`" + String.raw`]base64['\"` + "`]");
+const DECODE_CALL_RE = pyRe("(?:\\batob|\\bb64decode|\\.\\s*fromhex|\\bunhexlify|\\b(?:codecs|__import__\\(\\s*['\\\"]codecs['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]codecs['\\\"]\\s*\\))\\s*\\.\\s*decode|\\b(?:zlib|__import__\\(\\s*['\\\"]zlib['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]zlib['\\\"]\\s*\\))\\s*\\.\\s*decompress)\\s*\\(|\\bBuffer\\s*\\.\\s*from\\s*\\([^;\\n]{0,300}?['\\\"`]base64['\\\"`]");
 const DECODE_SINK_RE = pyRe(String.raw`\b(?:eval|exec|execSync|execFile|execFileSync|spawn|spawnSync|Function`
   + String.raw`|runIn(?:This|New)?Context)\s*\(`, "g");
 const DEP_ASSIGN_RE = pyRe(String.raw`(?<![\w$])([A-Za-z_$][\w$]*)\s*=(?![=>])([^;]*)`, "gd");
