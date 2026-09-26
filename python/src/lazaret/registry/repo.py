@@ -1290,33 +1290,10 @@ def _shebang_lang(text):
     return None
 
 
-_PTH_EXEC_RE = re.compile(
-    r"\b(?:exec|eval|compile)\s*\(|\b(?:b64decode|b32decode|b85decode|a85decode|fromhex|unhexlify)\b"
-    r"|\.decode\s*\(|\bmarshal\.loads\b|\bzlib\.decompress\b|\bcodecs\.decode\b|\\x[0-9a-fA-F]{2}")
-
-
-def pth_issues(path, text):
-    """SC-PTH-EXEC: site.py executes every line of a .pth file in
-    site-packages that starts with 'import' at EVERY interpreter start — no
-    import of the package needed. CRITICAL when the line also executes or
-    decodes code, MAJOR otherwise (setuptools' distutils shim and namespace
-    .pth files are this shape: listed for review)."""
-    out, lines = [], lazaret.normalize_newlines(text).split("\n")
-    for i, line in enumerate(lines):
-        if not line.startswith(("import ", "import\t")):
-            continue
-        hostile = bool(_PTH_EXEC_RE.search(line))
-        out.append(lazaret.mk_issue(
-            {"id": "SC-PTH-EXEC", "name": "Code in a .pth file", "type": "HOTSPOT",
-             "sev": "CRITICAL" if hostile else "MAJOR",
-             "msg": (".pth line runs code at every Python start"
-                     + (" and executes or decodes a payload." if hostile else ".")),
-             "why": ("site.py executes .pth lines that start with 'import' whenever the "
-                     "interpreter starts, whether or not the package is imported — a "
-                     "persistence and execution vector that needs no install hook."),
-             "fix": "Find out why the package ships executable .pth code; remove it if unexplained.",
-             "ref": "CWE-506 · Supply chain"}, path, i + 1, lines))
-    return out
+# SC-PTH-EXEC lives in the scanner (project and --deps scans check .pth files
+# too); the registry uses the same function, so the two can't drift.
+_PTH_EXEC_RE = lazaret._PTH_EXEC_RE
+pth_issues = lazaret.pth_issues
 
 
 def _archive_issue(kind, path, detail):

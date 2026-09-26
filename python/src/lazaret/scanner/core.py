@@ -24,10 +24,12 @@ working directory; writability and collisions are checked before scanning
 (exit 3 on a problem), and pre-existing files not produced by Lazaret are
 never silently overwritten (--force-overwrite to override).
 
-Taint-config rules that fail validation (unknown category, empty pattern) are
-never silently dropped: each produces a warning naming the file, the rule and
-the reason. With an explicit --taint-config (or --strict-taint-config) they
-make the scan exit 4, so CI cannot silently lose coverage.
+Taint-config rules that fail validation (unknown category, empty pattern,
+wrong type, unsafe regex) are never silently dropped: each produces a warning
+naming the file, the rule and the reason. An explicit --taint-config that has
+rejected rules, or that cannot be loaded at all, makes the scan exit 4, so CI
+cannot silently lose coverage; a repository config (--trust-repo-config) does
+the same only with --strict-taint-config.
 
 No dependencies — runs on stock python3. Same ruleset as the Lazaret dashboard.
 """
@@ -722,9 +724,11 @@ _CAT_META = {  # category -> (severity, cwe, fix) for intra-file sink rows
     "cross-site scripting": ("MAJOR", "CWE-79", "Escape/sanitize before rendering."),
 }
 
-#: Exit code for a taint config passed via --taint-config whose rules failed
-#: validation (unknown category, empty pattern, malformed section). Distinct
-#: from the quality-gate exit 1, argparse's exit 2 and EXIT_OUTPUT's 3.
+#: Exit code for a taint config passed via --taint-config that cannot be
+#: loaded or whose rules failed validation (unknown category, empty pattern,
+#: malformed section, unsafe regex) — or a repository config under
+#: --strict-taint-config. Distinct from the quality-gate exit 1, the usage
+#: exit 2, EXIT_OUTPUT's 3 and the internal-error exit 5.
 EXIT_TAINT_CONFIG = 4
 
 #: The complete set of sink categories a taint config may use (sorted for
