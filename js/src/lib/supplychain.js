@@ -6,7 +6,10 @@
 
 import { mkIssue } from "./issue.js";
 import { DEP_MARKERS, truncatedIssue } from "./fs.js";
-import { pyRe, pyRepr, pyLiteralStr, pyStrip, pyLstrip, cpLen, PyComplex, MAX_JSON_DEPTH, jsonDepthExceeds } from "./pycompat.js";
+import {
+  pyRe, pyRepr, pyLiteralStr, pyEntries, pyStrip, pyLstrip, cpLen, PyComplex, PyBytes, PY_KEYS, MAX_JSON_DEPTH,
+  jsonDepthExceeds,
+} from "./pycompat.js";
 import { pyJsonParse, jsonErrorWhere, pyLiteralParse } from "./pyjson.js";
 import { REDACT, redactText, registerScanContext, SecretLiterals } from "./redact.js";
 
@@ -121,11 +124,12 @@ export function manifestUnparseableIssue(path, reason) {
       ref: "CWE-506 · Supply chain" }, path, 1, []);
 }
 
-// the parsers keep Python's number kinds: an int is a BigInt, a float a number
+// the parsers keep Python's kinds: an int is a BigInt, a float a number (see pycompat.js)
 const pyTypeName = (v) => (v === null ? "NoneType" : Array.isArray(v) ? "list" : typeof v === "string" ? "str"
   : typeof v === "boolean" ? "bool" : typeof v === "bigint" ? "int" : typeof v === "number" ? "float"
-  : v instanceof PyComplex ? "complex" : "dict");
-const isDict = (v) => v !== null && typeof v === "object" && !Array.isArray(v) && !(v instanceof PyComplex);
+  : v instanceof PyComplex ? "complex" : v instanceof PyBytes ? "bytes" : "dict");
+const isDict = (v) => v !== null && typeof v === "object" && !Array.isArray(v)
+  && !(v instanceof PyComplex) && !(v instanceof PyBytes);
 
 /**
  * Parse manifest-shaped, attacker-controlled text the way the package
@@ -157,7 +161,7 @@ function loadManifestWhere(path, content, { pythonLiteral = false, locate = null
   let data = null, reason = null, litType = null, where = new Map();
   const onKey = (base) => (locate === null ? null : (obj, key, at) => { if (key === locate) where.set(obj, base + at); });
   // json.loads(parse_int=_json_int): an integer literal up to 1000 characters is a Python int
-  const r = pyJsonParse(text, { onKey: onKey(0), pyNumbers: true });
+  const r = pyJsonParse(text, { onKey: onKey(0), pyValues: true });
   if (r.depth) return [null, [manifestDepthIssue(path)], new Map()];
   if (r.ok) data = r.value;
   else reason = `JSONDecodeError: ${jsonErrorWhere(text, r.pos)}`;
@@ -251,13 +255,14 @@ function gypCommands(data) {
     if (Array.isArray(node)) {
       for (const x of node) stack.push(x);
     } else if (isDict(node)) {
-      for (const [key, value] of Object.entries(node)) {
-        if (key === "action" && Array.isArray(value)) {
+      const keys = node[PY_KEYS];                                     // keys that are not a str
+      for (const [key, value] of pyEntries(node)) {
+        if (key === "action" && !keys?.has(key) && Array.isArray(value)) {
           const cmd = value.map(pyLiteralStr).join(" ");
           out.push([cmd, "action", node]);
           chars += cpLen(cmd);
         }
-        stack.push(key);
+        stack.push(keys?.has(key) ? keys.get(key) : key);
         stack.push(value);
       }
     } else if (typeof node === "string" && GYP_EXPANSION_ONE.test(node)) {

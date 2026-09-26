@@ -7,7 +7,8 @@
 //  * pyLiteralParse — ast.literal_eval for binding.gyp / .gypi files, which
 //    gyp reads as Python literals (single quotes, comments, trailing commas).
 
-import { MAX_JSON_DEPTH, PyComplex } from "./pycompat.js";
+import { MAX_JSON_DEPTH, PyComplex, PyBytes, PY_TUPLE, PY_SET, PY_KEYS, PY_ORDER, pyLiteralRepr } from "./pycompat.js";
+import { pyCharByName } from "./pynames.js";
 
 class JsonError extends Error { constructor(pos) { super("json"); this.pos = pos; } }
 class DepthError extends Error {}
@@ -17,10 +18,11 @@ const ESC = { '"': '"', "\\": "\\", "/": "/", b: "\b", f: "\f", n: "\n", r: "\r"
 /**
  * json.loads(text) → {ok, value} | {ok: false, depth: true} | {ok: false, pos} (pos in UTF-16 units).
  * onKey(obj, key, pos), if given, is called as each member is stored (pos: its key's opening quote).
- * pyNumbers: numbers keep Python's kinds, as json.loads(parse_int=core._json_int) makes them: an
- * integer literal of up to 1000 characters is an int (a BigInt), anything else a float (a number).
+ * pyValues: values as json.loads(parse_int=core._json_int) makes them: an integer literal of up
+ * to 1000 characters is an int (a BigInt), any other number a float (a number), and an object
+ * keeps its keys' order (PY_ORDER; see pycompat.js).
  */
-export function pyJsonParse(text, { onKey = null, pyNumbers = false } = {}) {
+export function pyJsonParse(text, { onKey = null, pyValues = false } = {}) {
   const s = String(text);
   const n = s.length;
   const skip = (i) => { while (i < n && WS.has(s[i])) i++; return i; };
@@ -78,7 +80,7 @@ export function pyJsonParse(text, { onKey = null, pyNumbers = false } = {}) {
       if (i === d0) i = e0;
     }
     const lit = s.slice(start, i);
-    if (pyNumbers && lit.length <= 1000 && !/[.eE]/.test(lit)) return [BigInt(lit), i];
+    if (pyValues && lit.length <= 1000 && !/[.eE]/.test(lit)) return [BigInt(lit), i];
     return [Number(lit), i];
   }
   function value(i) {                          // scan_once: value at i → [v, next]
@@ -101,6 +103,8 @@ export function pyJsonParse(text, { onKey = null, pyNumbers = false } = {}) {
   }
   function object(i) {
     const obj = {};
+    const order = pyValues ? [] : null;
+    if (order) Object.defineProperty(obj, PY_ORDER, { value: order });
     i = skip(i);
     if (i >= n || s[i] !== "}") {
       for (;;) {
@@ -111,6 +115,7 @@ export function pyJsonParse(text, { onKey = null, pyNumbers = false } = {}) {
         if (i >= n || s[i] !== ":") throw new JsonError(i);               // Expecting ':' delimiter
         i = skip(i + 1);
         const [v, v2] = value(i);
+        if (order && !Object.prototype.hasOwnProperty.call(obj, key)) order.push(key);
         Object.defineProperty(obj, key, { value: v, enumerable: true, writable: true, configurable: true });
         if (onKey) onKey(obj, key, keyAt);
         i = skip(v2);
@@ -164,6 +169,29 @@ const MAX_LITERAL_DEPTH = 200;       // CPython's tokenizer: "too many nested pa
 // Python's number tokens: hex/octal/binary integers; decimal integers,
 // floats (`1.`, `.5`, `1.e5`, `01.5`) and imaginary literals (`2j`, `01j`).
 const NUMBER_RE = /0[xX](?:_?[0-9a-fA-F])+|0[oO](?:_?[0-7])+|0[bB](?:_?[01])+|(?:[0-9](?:_?[0-9])*(?:\.(?:[0-9](?:_?[0-9])*)?)?|\.[0-9](?:_?[0-9])*)(?:[eE][-+]?[0-9](?:_?[0-9])*)?[jJ]?/y;
+// the {NAME} of a \N{NAME} escape: words joined as in Unicode names (" ", "-", " -", "- ")
+const CHAR_NAME_RE = /\{([A-Za-z0-9]+(?:(?: |-| -|- )[A-Za-z0-9]+)*)\}/y;
+const SIMPLE_ESCAPES = { "\\": "\\", "'": "'", '"': '"', a: "\x07", b: "\b", f: "\f", n: "\n", r: "\r", t: "\t", v: "\v" };
+const mark = (arr, kind) => Object.defineProperty(arr, kind, { value: true });
+/**
+ * An id equal for keys Python's dict and set treat as the same (1 == 1.0 ==
+ * True == 1+0j, -0.0 == 0, tuples item by item, str apart from bytes), or
+ * null for an unhashable key (a list, dict or set: literal_eval's TypeError).
+ */
+function pyKeyId(v) {
+  if (typeof v === "string") return "s" + v;
+  if (v === null) return "N";
+  if (typeof v === "boolean") return v ? "n1" : "n0";
+  if (typeof v === "bigint") return "n" + v;
+  if (typeof v === "number") return Number.isInteger(v) ? "n" + BigInt(v) : "f" + v;
+  if (v instanceof PyComplex) return v.im === 0 ? pyKeyId(v.re) : `c${v.re},${v.im}`;
+  if (v instanceof PyBytes) return "b" + v.latin1;
+  if (Array.isArray(v) && v[PY_TUPLE]) {
+    const ids = v.map(pyKeyId);
+    return ids.includes(null) ? null : "t" + JSON.stringify(ids);
+  }
+  return null;
+}
 class LitError extends Error {}
 class LitValueError extends Error {}
 
@@ -174,35 +202,42 @@ class LitValueError extends Error {}
  * hex/octal/binary, underscores; a decimal int of more than 4300 digits is
  * refused, as Python's parser refuses it), a sign on a number literal (not
  * `--1`), a real plus or minus an imaginary literal (`1+2j`),
- * True/False/None, lists, tuples, dicts, sets; comments and trailing commas
- * allowed. Dicts become objects, tuples and sets arrays. Returns
- * {ok, value} or {ok: false}. onKey(obj, key, pos), if
- * given, is called as each string-keyed member is stored (pos: where the
- * key's first string token starts, as ast reports a Constant's position).
+ * True/False/None, lists, tuples, dicts, sets, `set()`; comments and
+ * trailing commas allowed. Read as Python's tokenizer reads source: \r\n and
+ * \r end a line like \n (a comment, a line continuation, a line of a
+ * triple-quoted string, which gets \n), \v is not whitespace, a NUL makes
+ * the text invalid. A string may use \N{name} (see pynames.js); a bytes
+ * literal, ASCII only and never concatenated with a str, is a PyBytes.
+ * Dicts become objects in Python's key order (PY_ORDER), equal keys merged
+ * as in Python, a non-str key under "\0" + its repr() (PY_KEYS); tuples and
+ * sets become marked arrays, a set holding equal items once, in source
+ * order. Returns {ok, value} or {ok: false}. onKey(obj, key, pos), if given,
+ * is called as each string-keyed member is stored (pos: where the key's
+ * first string token starts, as ast reports a Constant's position).
  */
 export function pyLiteralParse(text, onKey = null) {
   const s = String(text);
   const n = s.length;
   let i = 0, depth = 0;
+  // the length of the line break at s[k] (\r\n, \r or \n), else 0
+  const lineBreak = (k) => (s[k] === "\n" ? 1 : s[k] === "\r" ? (s[k + 1] === "\n" ? 2 : 1) : 0);
   const ws = () => {
     for (;;) {
-      while (i < n && " \t\n\r\f\v".includes(s[i])) i++;
-      if (s[i] === "\\" && s[i + 1] === "\n") { i += 2; continue; }
-      if (s[i] === "#") { while (i < n && s[i] !== "\n") i++; continue; }
+      while (i < n && " \t\n\r\f".includes(s[i])) i++;
+      if (s[i] === "\\" && lineBreak(i + 1)) { i += 1 + lineBreak(i + 1); continue; }
+      if (s[i] === "#") { while (i < n && s[i] !== "\n" && s[i] !== "\r") i++; continue; }
       break;
     }
   };
   const fail = () => { throw new LitError(); };
   let nonLiteral = false;              // a name/call where a literal belongs: ValueError once the syntax is fine
-  let topType = null;
   let lastStr = -1;                    // start of the last string literal value() returned
-  function str() {
-    let raw = false, bytes = false;
+  function str() {                     // one string token → [text, isBytes]
     const pm = /^([rRuUbB]{0,2})(['"])/.exec(s.slice(i, i + 3));
     if (!pm) fail();
     const pre = pm[1].toLowerCase();
     if (pre && !["r", "u", "b", "br", "rb"].includes(pre)) fail();
-    raw = pre.includes("r"); bytes = pre.includes("b");
+    const raw = pre.includes("r"), bytes = pre.includes("b");
     i += pre.length;
     const q = s[i];
     const triple = s.startsWith(q + q + q, i);
@@ -213,38 +248,55 @@ export function pyLiteralParse(text, onKey = null) {
       if (i >= n) fail();
       if (s.startsWith(qs, i)) { i += qs.length; break; }
       const c = s[i];
-      if (c === "\n" && !triple) fail();
-      if (c === "\\") {
-        const d = s[i + 1];
-        if (d === undefined) fail();
-        if (raw) { out += c + d; i += 2; continue; }
-        i += 2;
-        const simple = { "\n": "", "\\": "\\", "'": "'", '"': '"', a: "\x07", b: "\b", f: "\f", n: "\n", r: "\r", t: "\t", v: "\v" };
-        if (d in simple) { out += simple[d]; continue; }
-        if (/[0-7]/.test(d)) {
-          let oct = d;
-          while (oct.length < 3 && /[0-7]/.test(s[i])) oct += s[i++];
-          out += String.fromCodePoint(parseInt(oct, 8));
-          continue;
-        }
-        const hexLen = d === "x" ? 2 : !bytes && d === "u" ? 4 : !bytes && d === "U" ? 8 : 0;
-        if (hexLen) {
-          const h = s.slice(i, i + hexLen);
-          if (!new RegExp(`^[0-9a-fA-F]{${hexLen}}$`).test(h)) fail();
-          const cp = parseInt(h, 16);
-          if (cp > 0x10ffff) fail();
-          out += String.fromCodePoint(cp);
-          i += hexLen;
-          continue;
-        }
-        if (!bytes && d === "N") fail();                                 // \N{...}: not needed for gyp
-        out += "\\" + d;                                                 // unknown escape kept
+      const nl = lineBreak(i);
+      if (nl) {                          // a line break, read as \n; only a triple-quoted string spans one
+        if (!triple) fail();
+        out += "\n";
+        i += nl;
         continue;
       }
-      out += c;
-      i++;
+      if (bytes && c.charCodeAt(0) > 0x7f) fail();                      // bytes: ASCII characters only
+      if (c !== "\\") { out += c; i++; continue; }
+      const d = s[i + 1];
+      if (d === undefined) fail();
+      if (bytes && d.charCodeAt(0) > 0x7f) fail();
+      const cont = lineBreak(i + 1);
+      if (raw) {                         // the backslash stays, and the character after it
+        out += cont ? "\\\n" : c + d;
+        i += 1 + (cont || 1);
+        continue;
+      }
+      if (cont) { i += 1 + cont; continue; }                            // backslash-newline: nothing
+      i += 2;
+      if (d in SIMPLE_ESCAPES) { out += SIMPLE_ESCAPES[d]; continue; }
+      if (/[0-7]/.test(d)) {
+        let oct = d;
+        while (oct.length < 3 && /[0-7]/.test(s[i])) oct += s[i++];
+        const code = parseInt(oct, 8);
+        out += bytes ? String.fromCharCode(code & 0xff) : String.fromCodePoint(code);
+        continue;
+      }
+      const hexLen = d === "x" ? 2 : !bytes && d === "u" ? 4 : !bytes && d === "U" ? 8 : 0;
+      if (hexLen) {
+        const h = s.slice(i, i + hexLen);
+        if (!new RegExp(`^[0-9a-fA-F]{${hexLen}}$`).test(h)) fail();
+        const cp = parseInt(h, 16);
+        if (cp > 0x10ffff) fail();
+        out += String.fromCodePoint(cp);
+        i += hexLen;
+        continue;
+      }
+      if (!bytes && d === "N") {         // \N{NAME}: a character by name
+        CHAR_NAME_RE.lastIndex = i;
+        const m = CHAR_NAME_RE.exec(s);
+        if (!m) fail();
+        out += pyCharByName(m[1]);
+        i += m[0].length;
+        continue;
+      }
+      out += "\\" + d;                                                  // unknown escape kept
     }
-    return out;
+    return [out, bytes];
   }
   function num() {                     // one number token, as Python's tokenizer reads it
     NUMBER_RE.lastIndex = i;
@@ -306,7 +358,6 @@ export function pyLiteralParse(text, onKey = null) {
     ws();
     if (i >= n) fail();
     const c = s[i];
-    if (topType === null) topType = c === "(" ? "tuple" : c === "[" ? "list" : c === "{" ? "brace" : "scalar";
     if (c === "(" || c === "[" || c === "{") {
       if (++depth > MAX_LITERAL_DEPTH) fail();
       i++;
@@ -314,12 +365,12 @@ export function pyLiteralParse(text, onKey = null) {
       if (c === "[") v = seq("]")[0];
       else if (c === "(") {
         ws();
-        if (s[i] === ")") { i++; v = []; }
+        if (s[i] === ")") { i++; v = mark([], PY_TUPLE); }
         else {
           const first = value();
           ws();
           if (s[i] === ")") { i++; v = first; }                          // parenthesized expression
-          else if (s[i] === ",") { i++; const [rest] = seq(")"); v = [first, ...rest]; }
+          else if (s[i] === ",") { i++; const [rest] = seq(")"); v = mark([first, ...rest], PY_TUPLE); }
           else fail();
         }
       } else {
@@ -332,8 +383,23 @@ export function pyLiteralParse(text, onKey = null) {
           if (s[i] === ":") {
             i++;
             const obj = {};
+            const names = new Map();                   // pyKeyId → property name
             const put = (key, at, val) => {
-              Object.defineProperty(obj, String(key), { value: val, enumerable: true, writable: true, configurable: true });
+              const id = pyKeyId(key);
+              if (id === null) fail();
+              let name = names.get(id);                // an equal key: its first spelling stays
+              if (name === undefined) {
+                name = key;
+                if (typeof key !== "string") {         // not a str: "\0" + its repr(), see PY_KEYS
+                  name = "\0" + pyLiteralRepr(key);
+                  if (!obj[PY_KEYS]) Object.defineProperty(obj, PY_KEYS, { value: new Map() });
+                  obj[PY_KEYS].set(name, key);
+                }
+                names.set(id, name);
+              }
+              Object.defineProperty(obj, name, { value: val, enumerable: true, writable: true, configurable: true });
+              if (!obj[PY_ORDER]) Object.defineProperty(obj, PY_ORDER, { value: [] });
+              if (obj[PY_ORDER].length < names.size) obj[PY_ORDER].push(name);
               if (onKey && typeof key === "string") onKey(obj, key, at);
             };
             put(k, kAt, value());
@@ -353,12 +419,18 @@ export function pyLiteralParse(text, onKey = null) {
             }
             v = obj;
           } else {
-            const set = [k];
+            const items = [k];
             ws();
-            if (s[i] === ",") { i++; const [rest] = seq("}"); set.push(...rest); }
+            if (s[i] === ",") { i++; const [rest] = seq("}"); items.push(...rest); }
             else if (s[i] === "}") i++;
             else fail();
-            v = set;
+            const seen = new Set();                    // a set holds equal items once
+            v = mark([], PY_SET);
+            for (const x of items) {
+              const id = pyKeyId(x);
+              if (id === null) fail();
+              if (!seen.has(id)) { seen.add(id); v.push(x); }
+            }
           }
         }
       }
@@ -367,11 +439,17 @@ export function pyLiteralParse(text, onKey = null) {
     }
     if (c === "'" || c === '"' || (/[rRuUbB]/.test(c) && /^[rRuUbB]{1,2}['"]/.test(s.slice(i, i + 3)))) {
       const start = i;
-      let out = str();
+      let [out, bytes] = str();
       for (;;) {                                                           // implicit concatenation
         ws();
-        if (s[i] === "'" || s[i] === '"' || /^[rRuUbB]{1,2}['"]/.test(s.slice(i, i + 3))) out += str();
-        else { lastStr = start; return out; }
+        if (s[i] === "'" || s[i] === '"' || /^[rRuUbB]{1,2}['"]/.test(s.slice(i, i + 3))) {
+          const [more, b] = str();
+          if (b !== bytes) fail();                                         // bytes and str never mix
+          out += more;
+        } else {
+          lastStr = start;
+          return bytes ? new PyBytes(out) : out;
+        }
       }
     }
     if (c === "-" || c === "+") {      // a sign applies to a number token only: not `--1`, `-True`, `-(1,)`
@@ -383,6 +461,21 @@ export function pyLiteralParse(text, onKey = null) {
     if (/[0-9.]/.test(c)) return num();
     const w = /^[A-Za-z_]\w*/.exec(s.slice(i, i + 256));
     if (w && ["True", "False", "None"].includes(w[0])) { i += w[0].length; return w[0] === "True" ? true : w[0] === "False" ? false : null; }
+    if (w && w[0] === "set") {                                             // `set()`: an empty set
+      const at = i;
+      i += 3;
+      ws();
+      if (s[i] === "(") {
+        i++;
+        ws();
+        if (s[i] === ")") {
+          i++;
+          ws();
+          if (s[i] !== "." && s[i] !== "(" && s[i] !== "[") return mark([], PY_SET);
+        }
+      }
+      i = at;
+    }
     if (w) {                                                               // name / attribute / call
       nonLiteral = true;
       i += w[0].length;
@@ -398,13 +491,12 @@ export function pyLiteralParse(text, onKey = null) {
   }
   try {
     i = 0;
+    if (s.includes("\0")) fail();                                        // source code cannot hold NUL
     const v = value();
     ws();
     if (i !== n) fail();
     if (nonLiteral) return { ok: false, error: "ValueError" };
-    let type = null;
-    if (topType === "tuple" && Array.isArray(v)) type = "tuple";
-    else if (topType === "brace" && Array.isArray(v)) type = "set";
+    const type = !Array.isArray(v) ? null : v[PY_TUPLE] ? "tuple" : v[PY_SET] ? "set" : null;
     return { ok: true, value: v, type };
   } catch (e) {
     if (e instanceof LitError || e instanceof RangeError) return { ok: false, error: "SyntaxError" };

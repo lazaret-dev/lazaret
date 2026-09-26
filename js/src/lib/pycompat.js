@@ -244,10 +244,45 @@ function pyReprValue(v) {
 }
 
 // ---- Python values of a parsed manifest ------------------------------------
-// pyLiteralParse, and pyJsonParse with pyNumbers, keep Python's number kinds:
+// pyLiteralParse, and pyJsonParse with pyValues, keep Python's number kinds:
 // an int is a BigInt (exact at any size: 12345678901234567890 is not
 // 12345678901234567000), a float is a number (1.0 and -0.0 stay floats), a
-// complex a PyComplex. pyLiteralStr renders such values as Python's str().
+// complex a PyComplex. pyLiteralParse also keeps a bytes literal apart from a
+// str (PyBytes), marks the arrays it makes for tuples and sets (PY_TUPLE,
+// PY_SET), and keeps each dict key that is not a str under "\0" + its repr(),
+// the key itself in the dict's PY_KEYS map. A dict's keys in Python's order
+// are its PY_ORDER (a JS object lists integer-like keys such as "1" first;
+// pyEntries). pyLiteralStr renders such values as Python's str().
+export const PY_TUPLE = Symbol("tuple");
+export const PY_SET = Symbol("set");
+export const PY_KEYS = Symbol("non-str keys");       // Map: property name → the key
+export const PY_ORDER = Symbol("key order");         // property names in insertion order
+
+/** [key, value] pairs of a parsed dict, in Python's order. */
+export function pyEntries(obj) {
+  const order = obj[PY_ORDER];
+  return order ? order.map((k) => [k, obj[k]]) : Object.entries(obj);
+}
+
+/** A Python bytes value; `latin1` holds its bytes as U+0000-U+00FF. */
+export class PyBytes {
+  constructor(latin1) { this.latin1 = latin1; }
+  toString() { return pyBytesRepr(this.latin1); }
+}
+function pyBytesRepr(b) {
+  const quote = b.includes("'") && !b.includes('"') ? '"' : "'";
+  let out = "b" + quote;
+  for (const ch of b) {
+    const c = ch.charCodeAt(0);
+    if (ch === quote || ch === "\\") out += "\\" + ch;
+    else if (ch === "\t") out += "\\t";
+    else if (ch === "\n") out += "\\n";
+    else if (ch === "\r") out += "\\r";
+    else if (c < 0x20 || c >= 0x7f) out += "\\x" + c.toString(16).padStart(2, "0");
+    else out += ch;
+  }
+  return out + quote;
+}
 
 /** A Python complex number (literal_eval accepts `2j`, `-2j`, `1+2j`, `1.5-2j`). */
 export class PyComplex {
@@ -272,11 +307,12 @@ function pyComplexRepr(c) {
   return "(" + complexPart(c.re) + (im.startsWith("-") ? "" : "+") + im + "j)";
 }
 
-/** Python str() of a value from pyLiteralParse / pyJsonParse(…, {pyNumbers: true}). */
+/** Python str() of a value from pyLiteralParse / pyJsonParse(…, {pyValues: true}). */
 export function pyLiteralStr(v) {
   return typeof v === "string" ? v : pyLiteralRepr(v);
 }
-function pyLiteralRepr(v) {
+/** Python repr() of such a value. */
+export function pyLiteralRepr(v) {
   if (v === null || v === undefined) return "None";
   if (v === true) return "True";
   if (v === false) return "False";
@@ -284,8 +320,15 @@ function pyLiteralRepr(v) {
   if (typeof v === "number") return pyFloatRepr(v);
   if (typeof v === "string") return pyRepr(v);
   if (v instanceof PyComplex) return pyComplexRepr(v);
-  if (Array.isArray(v)) return "[" + v.map(pyLiteralRepr).join(", ") + "]";
-  return "{" + Object.entries(v).map(([k, x]) => `${pyRepr(k)}: ${pyLiteralRepr(x)}`).join(", ") + "}";
+  if (v instanceof PyBytes) return pyBytesRepr(v.latin1);
+  if (Array.isArray(v)) {
+    const items = v.map(pyLiteralRepr);
+    if (v[PY_TUPLE]) return items.length === 1 ? `(${items[0]},)` : `(${items.join(", ")})`;
+    if (v[PY_SET]) return items.length ? `{${items.join(", ")}}` : "set()";   // (a set's order is Python's hash order)
+    return `[${items.join(", ")}]`;
+  }
+  const keys = v[PY_KEYS];
+  return "{" + pyEntries(v).map(([k, x]) => `${keys?.has(k) ? pyLiteralRepr(keys.get(k)) : pyRepr(k)}: ${pyLiteralRepr(x)}`).join(", ") + "}";
 }
 
 /** Python round(x, 1): round-half-even on the exact binary value. */

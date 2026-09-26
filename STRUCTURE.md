@@ -209,8 +209,8 @@ js/
 │   └── lib/              leaf helpers: fs (collection, report paths), encoding
 │                         and codecs (BOM/UTF-16/PEP 263), binary (magic
 │                         bytes), redact, issue, supplychain (install hooks),
-│                         pyjson/pycompat (Python-compatible JSON and text);
-│                         never import src/scanner/
+│                         pyjson/pycompat/pynames (Python-compatible JSON,
+│                         literals and text); never import src/scanner/
 └── test/
     ├── cli.test.js            CLI commands, exit codes, report paths, suppression
     ├── report-format.test.js  the report contract (key order, gate math, redaction)
