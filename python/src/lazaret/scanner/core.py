@@ -148,8 +148,19 @@ R("S-SHELL-TRUE", "subprocess with shell=True", "VULN", "CRITICAL", ("py",),
   "Shell metacharacters in user input become command injection.",
   "Pass args as a list with shell=False.",
   "CWE-78"),
+# Review fix: method names are not child_process calls. A receiver of this. /
+# self. / super. (or a #private name), a definition prefix (async, static,
+# get, set, function) and a definition shape — `name(params) {`, the
+# parameter list followed by a block, as in a class body or an object
+# literal — are excluded (56 false positives, all CRITICAL, in npm's own
+# lib/: `async exec (args) {`, `return this.exec(args)`). Free calls
+# (`exec(cmd)`, a destructured `const { exec } = require('child_process')`)
+# and calls on any other receiver (`cp.exec(…)`, `child_process.exec(…)`,
+# `require('child_process').exec(…)`) are still flagged.
 R("S-EXEC-JS", "Shell exec", "HOTSPOT", "CRITICAL", ("js",),
-  r"\b(exec|execSync)\s*\(\s*(`[^`]*\$\{|[\"'][^\"']*[\"']\s*\+|\w+\s*[,)+])",
+  r"(?<![#$])(?<!\bthis\.)(?<!\bself\.)(?<!\bsuper\.)(?<!\basync\s)(?<!\bstatic\s)(?<!\bget\s)"
+  r"(?<!\bset\s)(?<!\bfunction\s)\b(exec|execSync)\s*\((?![^()]*\)\s*\{)"
+  r"\s*(`[^`]*\$\{|[\"'][^\"']*[\"']\s*\+|\w+\s*[,)+])",
   "child_process exec with dynamic command string.",
   "Dynamic command strings passed to a shell risk command injection.",
   "Use execFile/spawn with an argument array.",

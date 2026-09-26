@@ -76,7 +76,7 @@ id:"S-SHELL-TRUE", name:"subprocess with shell=True", type:"VULN", sev:"CRITICAL
 },
 {
 id:"S-EXEC-JS", name:"Shell exec", type:"HOTSPOT", sev:"CRITICAL", langs:["js"],
- re:pyRe("\\b(exec|execSync)\\s*\\(\\s*(`[^`]*\\$\\{|[\\\"'][^\\\"']*[\\\"']\\s*\\+|\\w+\\s*[,)+])", ""),
+ re:pyRe("(?<![#$])(?<!\\bthis\\.)(?<!\\bself\\.)(?<!\\bsuper\\.)(?<!\\basync\\s)(?<!\\bstatic\\s)(?<!\\bget\\s)(?<!\\bset\\s)(?<!\\bfunction\\s)\\b(exec|execSync)\\s*\\((?![^()]*\\)\\s*\\{)\\s*(`[^`]*\\$\\{|[\\\"'][^\\\"']*[\\\"']\\s*\\+|\\w+\\s*[,)+])", ""),
  msg:"child_process exec with dynamic command string.",
  why:"Dynamic command strings passed to a shell risk command injection.",
  fix:"Use execFile/spawn with an argument array.",
