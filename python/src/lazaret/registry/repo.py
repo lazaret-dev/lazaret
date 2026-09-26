@@ -1215,9 +1215,15 @@ _NETWORK_RE = re.compile(
     r"""\brequests\.(?:get|post|put|patch|request|Session)\b|\bimport\s+(?:requests|httpx|aiohttp|urllib3)\b|"""
     r"""\bfrom\s+(?:requests|httpx|aiohttp|urllib3|urllib\.request|http\.client)\s+import\b|"""
     r"""\bhttpx\.\w+\s*\(|\baiohttp\.ClientSession\b|\bsmtplib\b|\bftplib\b"""
-    # shell: a download tool pointed at a URL, netcat to a host and port, bash's /dev/tcp
-    r"""|\b(?:curl|wget)\s+(?:-{1,2}[\w-]+(?:[ =](?!https?:)\S+)?\s+)*["']?https?://"""
-    r"""|\b(?:nc|ncat|netcat)\s+(?:-\w+\s+)*[\w.-]+\s+\d{2,5}\b|/dev/tcp/""", re.M)
+    # shell: a download tool pointed at a URL, netcat to a host and port, bash's /dev/tcp.
+    # Each option is parsed one way only (a value never starts like an option
+    # or the URL) and their number is bounded: the old `(?:-{1,2}[\w-]+(?:[ =]
+    # \S+)?\s+)*` could split `--a-b` and pair values two ways, so 18 options
+    # took over 20 s, and `curl -a ` x 20000 was quadratic — a hostile install
+    # script could hang the scan.
+    r"""|\b(?:curl|wget)\s+(?:-{1,2}\w[\w-]*(?:=\S*|\s+(?!-{1,2}\w)(?!["']?https?:)\S+)?\s+){0,24}"""
+    r"""["']?https?://"""
+    r"""|\b(?:nc|ncat|netcat)\s+(?:-\w+\s+){0,8}[\w.-]+\s+\d{2,5}\b|/dev/tcp/""", re.M)
 _SECRET_SOURCE_RE = re.compile(
     r"""JSON\.stringify\(\s*process\.env|Object\.(?:keys|entries|values)\(\s*process\.env|"""
     r"""\.npmrc|[/\\]\.ssh\b|~/\.ssh\b|id_rsa|id_ed25519|\.aws[/\\]|~/\.aws\b|\.git-credentials|"""
@@ -1234,7 +1240,27 @@ _EXFIL_DEST_RE = re.compile(
     r"""discord(?:app)?\.com/api/webhooks|api\.telegram\.org|oastify\.com|burpcollaborator|"""
     r"""\binteract\.sh|\boast\.(?:pro|live|site|online|fun|me)\b|requestbin|pipedream\.net|"""
     r"""transfer\.sh|\.onion\b""", re.I)
-_PIPE_TO_SHELL_RE = re.compile(r"""\b(?:curl|wget)\b[^\n|;&]*\|\s*(?:sudo\s+)?(?:ba|z|da|k)?sh\b""")
+# `curl … | sh` / `wget … | bash`, read in one left-to-right pass: a pipe into
+# a shell after curl or wget in the same command (no `|`, `;`, `&` or line
+# break between them). The regex it replaces, `\b(?:curl|wget)\b[^\n|;&]*\|…`,
+# rescanned the rest of the command from every `curl`, so a line of 100,000
+# of them never finished.
+_PIPE_SCAN_RE = re.compile(r"""\|\s*(?:sudo\s+)?(?:ba|z|da|k)?sh\b|[\n|;&]|\b(?:curl|wget)\b""")
+
+
+def _pipes_download_to_shell(text):
+    download = False
+    for m in _PIPE_SCAN_RE.finditer(text):
+        token = m.group(0)
+        if token[0] == "|" and len(token) > 1:           # | sh, | sudo bash
+            if download:
+                return True
+            download = False
+        elif token in ("\n", "|", ";", "&"):
+            download = False
+        else:                                            # curl / wget
+            download = True
+    return False
 
 
 def install_script_risk(text):
@@ -1246,7 +1272,7 @@ def install_script_risk(text):
     dest = _EXFIL_DEST_RE.search(text)
     if dest:
         reasons.append(f"contacts an address typical of data exfiltration ({dest.group(0)[:40]})")
-    if _PIPE_TO_SHELL_RE.search(text):
+    if _pipes_download_to_shell(text):
         reasons.append("pipes a download into a shell")
     return reasons
 
