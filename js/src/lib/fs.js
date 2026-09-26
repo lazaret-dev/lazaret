@@ -112,12 +112,19 @@ export function unreadableIssue(path, reason) {
     "Fix the permissions (or remove the special file) and re-scan.",
     "Scan coverage");
 }
+/**
+ * SC-TRUNCATED for a file (or directory) whose scan threw (twin of
+ * core.scan_error_issue): the run goes on without its findings, and like any
+ * file not fully scanned it fails the gate. It was an INFO note
+ * (Q-SCAN-ERROR), so a file whose scan died took its CRITICAL findings with
+ * it and the gate passed (review B3: a 6 MB string line overflowed V8's
+ * regex stack).
+ */
 export function scanErrorIssue(path, err) {
-  return coverage("Q-SCAN-ERROR", "File scan failed", path,
-    `Scanning ${path} failed (${(err && err.name) || "Error"}); findings for this file are incomplete.`,
-    "An internal error while scanning one file is reported here instead of aborting the whole run, so the rest of the project still gets a report. This file's result is not evidence that it is clean.",
-    "Review the file manually and report the error (re-run with LAZARET_DEBUG=1 for a traceback).",
-    "Scan coverage");
+  const issue = truncatedIssue(path, `its scan failed (${(err && err.name) || "Error"}), so its findings are missing`);
+  issue.why = "An internal error stopped this scan; the rest of the project is still scanned and reported, but nothing in this file was checked, so the result can't clear it.";
+  issue.fix = "Review the file manually and report the error (re-run with LAZARET_DEBUG=1 for a traceback).";
+  return issue;
 }
 export function skippedTreeIssue(rel, nFiles, nBytes) {
   return {
@@ -242,7 +249,7 @@ function treeStats(dirBuf) {
  * for any other .gyp / .gypi file), pth: paths of the .pth files checked,
  * binaryIssues: collection findings (binary classification, SC-TRUNCATED,
  * Q-ENCODING/SC-UTF7/SC-ESCAPE-CODEC, SC-PYC-*, SC-PTH-EXEC, Q-SYMLINK, Q-UNREADABLE,
- * Q-SCAN-ERROR), skippedIssues: Q-SKIPPED-TREE per pruned tree.
+ * SC-TRUNCATED), skippedIssues: Q-SKIPPED-TREE per pruned tree.
  * Throws ScanTargetError when the root itself cannot be listed.
  */
 export function collectFiles(root, { includeDeps = false, exclude = [], maxFileBytes = MAX_FILE_BYTES } = {}) {

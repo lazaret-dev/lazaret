@@ -171,7 +171,7 @@ export function hexHiddenText(line) {
 // A "-----BEGIN ... PRIVATE KEY-----" header alone is not a key: libraries keep the
 // header as a constant to recognize key files. Require base64 key material after it,
 // on the same line or the next two. Twin of core._token_has_material.
-const PEM_BODY_RE = /[A-Za-z0-9+/]{40,}={0,2}/;
+const PEM_BODY_RE = /[A-Za-z0-9+/]{40}[A-Za-z0-9+/]*={0,2}/;   // {40}…*, not {40,}: see pycompat AT_LEAST_RE
 function tokenHasMaterial(line, lines, i) {
   const t = findSecretToken(line);
   if (!t || !t.text.startsWith("-----BEGIN")) return true;
@@ -630,8 +630,37 @@ const CHARCODE_NUM_RE = pyRe(String.raw`\b\d{2,3}\b`, "g");
 // fromCharCode on a long minified line fire (binary parsers, UTF-16 surrogate
 // encoders), and so did any such array anywhere on the line.
 const CHARCODE_ALL_RE = /String\.fromCharCode/g;
-const CHARCODE_TABLE_RE = pyRe(
-  String.raw`(?<![\w$.])([A-Za-z_$][\w$]*)\s*=\s*\[((?:\s*[0-9]{2,3}\s*,){9,}\s*[0-9]{2,3})\s*\]`, "g");
+// NAME = [n, n, …] with ten or more numbers of two or three digits: what
+// core._CHARCODE_TABLE_RE finds,
+//   (?<![\w$.])([A-Za-z_$][\w$]*)\s*=\s*\[((?:\s*[0-9]{2,3}\s*,){9,}\s*[0-9]{2,3})\s*\]
+// with the part before '[' matched and the numbers read by a loop: V8
+// overflowed its stack on the repeated group over an array of a few million
+// characters (review B3). -> [[name, numbers], …], as finditer finds them.
+const CHARCODE_TABLE_HEAD_RE = pyRe(String.raw`(?<![\w$.])([A-Za-z_$][\w$]*)\s*=\s*\[`, "g");
+export function charcodeTables(line) {
+  const out = [];
+  const n = line.length;
+  CHARCODE_TABLE_HEAD_RE.lastIndex = 0;
+  let m;
+  while ((m = CHARCODE_TABLE_HEAD_RE.exec(line))) {
+    const nums = [];
+    let i = m.index + m[0].length, end = -1;
+    for (;;) {
+      while (i < n && isPySpace(line[i])) i++;
+      const d = i;
+      while (i < n && line.charCodeAt(i) >= 48 && line.charCodeAt(i) <= 57) i++;
+      if (i - d < 2 || i - d > 3) break;
+      nums.push(+line.slice(d, i));
+      while (i < n && isPySpace(line[i])) i++;
+      if (line[i] === ",") { i++; continue; }
+      if (line[i] === "]" && nums.length >= 10) end = i + 1;
+      break;
+    }
+    if (end >= 0) out.push([m[1], nums]);
+    CHARCODE_TABLE_HEAD_RE.lastIndex = end >= 0 ? end : m.index + 1;
+  }
+  return out;
+}
 const CHARCODE_NAME_RE = pyRe(String.raw`(?<![\w$])(?:(?<=\.\.\.)|(?<!\.))[A-Za-z_$][\w$]*`, "g");  // a bare name; `...k` is a spread
 const CHARCODE_CALL_TAIL_RE = pyRe(String.raw`\s*(?:\.\s*(?:apply|call)\s*)?\(`, "y");
 const CHARCODE_ARGS_MAX = 4000;
@@ -687,9 +716,7 @@ function charcodeCol(line) {
   while ((m = CHARCODE_NUM_RE.exec(line))) nums.push(m.index);
   if (nums.length < 10) return null;                    // a code table has ten too
   const tables = new Set();
-  CHARCODE_TABLE_RE.lastIndex = 0;
-  while ((m = CHARCODE_TABLE_RE.exec(line)))
-    if (m[2].match(/[0-9]+/g).every((v) => +v >= 32 && +v <= 126)) tables.add(m[1]);
+  for (const [name, codes] of charcodeTables(line)) if (codes.every((v) => v >= 32 && v <= 126)) tables.add(name);
   const refs = [];
   if (tables.size) {
     CHARCODE_NAME_RE.lastIndex = 0;

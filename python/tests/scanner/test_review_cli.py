@@ -3,8 +3,9 @@
 4. Uncaught exceptions escaped as a raw traceback with exit 1 — the same
    code as "quality gate failed". Now any internal error prints
    `error: internal: …` and exits 5 (traceback only with LAZARET_DEBUG=1).
-   One file's scan exception becomes an INFO Q-SCAN-ERROR finding instead
-   of killing the run.
+   One file's scan exception becomes a finding instead of killing the run:
+   SC-TRUNCATED (CRITICAL; it was an INFO Q-SCAN-ERROR, which let the gate
+   pass without the file's findings — review B3).
 6. main() exited 1 WITHOUT --ci for any CRITICAL SC-* finding (documented:
    0 without --ci). Only SC-MANIFEST-DEPTH forces exit 1 without --ci now.
 12. Usage errors exit 2 with a clear message: a missing target, a file
@@ -181,11 +182,25 @@ class PerFileErrors(unittest.TestCase):
         with mock.patch.object(core, "scan_file", scan_file), \
                 mock.patch.object(core, "scan_manifest", side_effect=ValueError("bad")):
             res = core.scan_project(root)
-        errs = {i["file"]: i for i in res["issues"] if i["rule"] == "Q-SCAN-ERROR"}
+        errs = {i["file"]: i for i in res["issues"] if i["rule"] == "SC-TRUNCATED"}
         self.assertEqual(set(errs), {"boom.py", "package.json"})
-        self.assertIn("RecursionError", errs["boom.py"]["msg"])
-        self.assertEqual(errs["boom.py"]["sev"], "INFO")
+        self.assertEqual(errs["boom.py"]["msg"], "File not fully scanned: its scan failed (RecursionError), "
+                                                 "so its findings are missing.")
+        self.assertEqual(errs["boom.py"]["sev"], "CRITICAL")
         self.assertIn("S-EVAL-PY", {i["rule"] for i in res["issues"] if i["file"] == "a.py"})
+        self.assertFalse(res["pass"])                   # a file not scanned can't pass
+
+    def test_metrics_survive_a_file_the_lexer_cannot_read(self):
+        real = core.comment_mask
+
+        def comment_mask(lines, lang, jsx=True):
+            if any("z = 3" in l for l in lines):
+                raise RecursionError("maximum recursion depth exceeded")
+            return real(lines, lang, jsx)
+        with mock.patch.object(core, "comment_mask", comment_mask):
+            metrics = core.compute_metrics([{"path": "a.py", "content": "# note\nx = 1\n", "lang": "py"},
+                                            {"path": "boom.py", "content": "# note\ny = 2\nz = 3\n", "lang": "py"}])
+        self.assertEqual((metrics["ncloc"], metrics["comments"]), (4, 1))     # boom.py: every line is code
 
 
 class ScanProjectApi(unittest.TestCase):

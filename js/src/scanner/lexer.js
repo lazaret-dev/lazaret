@@ -49,19 +49,86 @@ const NEXT = {
   sql: /--|\/\*|['"]/g,
   any: /#|\/[/*]|['"`]/g,
 };
-const lineStr = (q) => new RegExp(`${q}(?:[^${q}\\\\\\n]|\\\\[\\s\\S])*${q}?`, "y");
-const LINE_STR = { "'": lineStr("'"), '"': lineStr('"'), "`": lineStr("`") };
+// String and regex literals are measured with the loops below, each the
+// exact match of the regular expression in its comment (the Python engine's
+// twin, core._lex_comment_spans, uses those expressions). V8's backtracking
+// regex engine keeps one stack entry per repetition of an alternation, so a
+// literal of a few million characters threw "Maximum call stack size
+// exceeded": the file's findings were lost, or the whole run (review B3).
+// Each returns the end of the match, or -1 where there is none.
+const BS = 92, NL = 10;
+/** q(?:[^q\\\n]|\\[\s\S])*q? — '…' "…" (and `…` read as "any"): ends at the line's end. */
+export function lineStrEnd(s, k) {
+  const q = s.charCodeAt(k), n = s.length;
+  for (let i = k + 1; i < n;) {
+    const c = s.charCodeAt(i);
+    if (c === q) return i + 1;
+    if (c === NL) return i;
+    if (c === BS) { if (i + 1 >= n) return i; i += 2; } else i++;
+  }
+  return n;
+}
+/** q(?:[^q\\]|\\[\s\S])*q? — a template literal; '…' "…" as MySQL reads them. */
+export function spanStrEnd(s, k) {
+  const q = s.charCodeAt(k), n = s.length;
+  for (let i = k + 1; i < n;) {
+    const c = s.charCodeAt(i);
+    if (c === q) return i + 1;
+    if (c === BS) { if (i + 1 >= n) return i; i += 2; } else i++;
+  }
+  return n;
+}
+/** qqq(?:[^q\\]|\\[\s\S]|q(?!qq))*(?:qqq|$) — Python's '''…''' """…"""; none when a lone backslash ends the text. */
+export function tripleStrEnd(s, k) {
+  const q = s.charCodeAt(k), n = s.length;
+  for (let i = k + 3; i < n;) {
+    const c = s.charCodeAt(i);
+    if (c === q) {
+      if (s.charCodeAt(i + 1) === q && s.charCodeAt(i + 2) === q) return i + 3;
+      i++;
+    } else if (c === BS) { if (i + 1 >= n) return -1; i += 2; } else i++;
+  }
+  return n;
+}
+/** q[^q]*q? — '…' "…" in standard SQL, `…` in MySQL. */
+export function plainStrEnd(s, k) {
+  const e = s.indexOf(s[k], k + 1);
+  return e < 0 ? s.length : e + 1;
+}
+/** \/(?![*\/])(?:[^\/\\[\n]|\\[^\n]|\[(?:[^\]\\\n]|\\[^\n])*\])+\/ — a regex literal. */
+export function jsRegexEnd(s, k) {
+  const n = s.length;
+  let i = k + 1, parts = 0;
+  if (i >= n || s.charCodeAt(i) === 42 || s.charCodeAt(i) === 47) return -1;     // /* and //
+  while (i < n) {
+    const c = s.charCodeAt(i);
+    if (c === 47 || c === NL) break;
+    if (c === BS) {
+      if (i + 1 >= n || s.charCodeAt(i + 1) === NL) break;
+      i += 2;
+    } else if (c === 91) {                                   // [ … ]: a '/' inside is literal
+      let j = i + 1;
+      while (j < n) {
+        const d = s.charCodeAt(j);
+        if (d === 93 || d === NL) break;
+        if (d === BS) { if (j + 1 >= n || s.charCodeAt(j + 1) === NL) { j = n; break; } j += 2; } else j++;
+      }
+      if (j >= n || s.charCodeAt(j) !== 93) break;           // not closed on its line
+      i = j + 1;
+    } else i++;
+    parts++;
+  }
+  return parts > 0 && i < n && s.charCodeAt(i) === 47 ? i + 1 : -1;
+}
 const STR = {
-  py: { "'": LINE_STR["'"], '"': LINE_STR['"'],
-    "'''": /'''(?:[^'\\]|\\[\s\S]|'(?!''))*(?:'''|$)/y, '"""': /"""(?:[^"\\]|\\[\s\S]|"(?!""))*(?:"""|$)/y },
-  js: { "'": LINE_STR["'"], '"': LINE_STR['"'], "`": /`(?:[^`\\]|\\[\s\S])*`?/y },
-  sql: { "'": /'[^']*'?/y, '"': /"[^"]*"?/y },
-  any: LINE_STR,
+  py: { "'": lineStrEnd, '"': lineStrEnd, "'''": tripleStrEnd, '"""': tripleStrEnd },
+  js: { "'": lineStrEnd, '"': lineStrEnd, "`": spanStrEnd },
+  sql: { "'": plainStrEnd, '"': plainStrEnd },
+  any: { "'": lineStrEnd, '"': lineStrEnd, "`": lineStrEnd },
 };
 // SQL as MySQL reads it
 const MYSQL_NEXT = /--|\/\*|['"`]/g;
-const MYSQL_STR = { "'": /'(?:[^'\\]|\\[\s\S])*'?/y, '"': /"(?:[^"\\]|\\[\s\S])*"?/y, "`": /`[^`]*`?/y };
-const JS_REGEX_LIT_RE = /\/(?![*/])(?:[^/\\[\n]|\\[^\n]|\[(?:[^\]\\\n]|\\[^\n])*\])+\//y;
+const MYSQL_STR = { "'": spanStrEnd, '"': spanStrEnd, "`": plainStrEnd };
 const JS_REGEX_PREV = new Set("(,=:[!&|?{};+-*%<>~^");
 const JS_REGEX_KEYWORDS = new Set(["return", "typeof", "instanceof", "in", "of", "new", "delete",
   "void", "throw", "case", "do", "else", "yield", "await"]);
@@ -152,9 +219,8 @@ function lexPass(content, L, strings = null, second = false) {
     }
     if (ch === "/") {                          // js only: regex literal or division
       if (k >= noRegexUntil && jsRegexAllowed(prev, tail)) {
-        JS_REGEX_LIT_RE.lastIndex = k;
-        const rm = JS_REGEX_LIT_RE.exec(content);
-        if (rm) { pos = k + rm[0].length; prev = '"'; tail = ""; continue; }
+        const e = jsRegexEnd(content, k);
+        if (e >= 0) { pos = e; prev = '"'; tail = ""; continue; }
         noRegexUntil = content.indexOf("\n", k);
         if (noRegexUntil < 0) noRegexUntil = n;
       }
@@ -166,12 +232,8 @@ function lexPass(content, L, strings = null, second = false) {
       const [isF, raw] = pyFstringPrefix(content, k);
       if (isF) { pos = pyFstringEnd(content, k, raw); continue; }
     }
-    let re;
-    if (mysql) re = MYSQL_STR[ch];
-    else re = STR[L][L === "py" && content.startsWith(ch + ch + ch, k) ? ch + ch + ch : ch];
-    re.lastIndex = k;
-    const sm = re.exec(content);
-    pos = Math.max(sm ? k + sm[0].length : k + 1, k + 1);
+    const end = mysql ? MYSQL_STR[ch] : STR[L][L === "py" && content.startsWith(ch + ch + ch, k) ? ch + ch + ch : ch];
+    pos = Math.max(end(content, k), k + 1);
     prev = '"'; tail = "";
     if (strings && ch !== "`") strings.push([k, pos]);
   }
@@ -251,10 +313,7 @@ function pyFstringEnd(s, k, raw) {
       const l3 = s.startsWith(c + c + c, i) ? 3 : 1;
       if (isF) { stack.push(["S", c, l3, sraw]); i += l3; }
       else {
-        const re = STR.py[l3 === 3 ? c + c + c : c];
-        re.lastIndex = i;
-        const sm = re.exec(s);
-        i = Math.max(sm ? i + sm[0].length : i + 1, i + 1);
+        i = Math.max(STR.py[l3 === 3 ? c + c + c : c](s, i), i + 1);
       }
     } else if (c === "(" || c === "[" || c === "{") { fr[1]++; i++; }
     else if (c === ")" || c === "]") { fr[1] = Math.max(fr[1] - 1, 0); i++; }
@@ -321,9 +380,8 @@ function lexJsx(content, strings = null) {
       } else if (ch === "/") {
         pos = k + 1;
         if (k >= noRegexUntil && jsRegexAllowed(prev, tail)) {
-          JS_REGEX_LIT_RE.lastIndex = k;
-          const rm = JS_REGEX_LIT_RE.exec(content);
-          if (rm) { pos = k + rm[0].length; prev = '"'; tail = ""; continue; }
+          const e = jsRegexEnd(content, k);
+          if (e >= 0) { pos = e; prev = '"'; tail = ""; continue; }
           noRegexUntil = content.indexOf("\n", k);
           if (noRegexUntil < 0) noRegexUntil = n;
         }
@@ -347,10 +405,7 @@ function lexJsx(content, strings = null) {
           prev = "<"; tail = "<";
         }
       } else {                                                     // a string or template literal
-        const re = STR.js[ch];
-        re.lastIndex = k;
-        const sm = re.exec(content);
-        pos = Math.max(sm ? k + sm[0].length : k + 1, k + 1);
+        pos = Math.max(STR.js[ch](content, k), k + 1);
         prev = '"'; tail = "";
         if (strings && ch !== "`") strings.push([k, pos]);
       }

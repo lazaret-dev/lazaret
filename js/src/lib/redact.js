@@ -173,7 +173,7 @@ export function pemBlockLines(lines) {
   return out;
 }
 
-const SECRET_RUN_RE = /[A-Za-z0-9+/=_-]{20,}/g;
+const SECRET_RUN_RE = /[A-Za-z0-9+/=_-]{20}[A-Za-z0-9+/=_-]*/g;   // {20}…*, not {20,}: see pycompat AT_LEAST_RE
 /**
  * The high-entropy literals S-ENTROPY would flag in one file, redacted as
  * substrings wherever they appear (twin of core._SecretLiterals): literals

@@ -4614,16 +4614,18 @@ def unreadable_issue(path, reason):
 
 
 def scan_error_issue(path, exc):
-    """Q-SCAN-ERROR: one file's scan raised; the run continues without it."""
-    return _coverage_issue(
-        "Q-SCAN-ERROR", "File scan failed", path,
-        f"Scanning {path} failed ({type(exc).__name__}); findings for this file are incomplete.",
-        "An internal error while scanning one file is reported here instead of aborting "
-        "the whole run, so the rest of the project still gets a report. This file's "
-        "result is not evidence that it is clean.",
-        "Review the file manually and report the error (re-run with LAZARET_DEBUG=1 "
-        "for a traceback).",
-        "Scan coverage")
+    """SC-TRUNCATED for a file (or directory) whose scan raised: the run goes
+    on without its findings, and like any file not fully scanned it fails the
+    gate. It was an INFO note (Q-SCAN-ERROR), so a file whose scan died took
+    its CRITICAL findings with it and the gate passed (review B3: a 6 MB
+    string line overflowed the npm engine's regex stack)."""
+    issue = truncated_issue(path, f"its scan failed ({type(exc).__name__}), so its findings are missing")
+    issue["why"] = ("An internal error stopped this scan; the rest of the project is still "
+                    "scanned and reported, but nothing in this file was checked, so the result "
+                    "can't clear it.")
+    issue["fix"] = ("Review the file manually and report the error (re-run with LAZARET_DEBUG=1 "
+                    "for a traceback).")
+    return issue
 
 
 def _pyc_issue(rid, name, sev, path, msg, why, fix):
@@ -5376,12 +5378,15 @@ def compute_metrics(all_files):
     for f in files:
         code = []
         flines = _unicode13.pin(f["content"]).split("\n")
-        cmask = comment_mask(flines, f["lang"], jsx_reading(f["path"]))
+        try:
+            cmask = comment_mask(flines, f["lang"], jsx_reading(f["path"]))
+        except Exception:       # its scan failed the same way (SC-TRUNCATED): count its lines
+            cmask = None        # as code rather than lose the whole report (review B3)
         for i, l in enumerate(flines):
             t = l.strip()
             if not t:
                 continue
-            if cmask[i]:
+            if cmask is not None and cmask[i]:
                 comments += 1
                 continue
             ncloc += 1
@@ -5410,7 +5415,7 @@ def worst_sev_rating(issues, types):
 #: the scanner could not look at, not the code: they do not count toward the
 #: maintainability rating (a single symlink in a small project used to be
 #: enough to fail "Maintainability >= C").
-COVERAGE_RULES = frozenset({"Q-SKIPPED-TREE", "Q-SYMLINK", "Q-UNREADABLE", "Q-SCAN-ERROR",
+COVERAGE_RULES = frozenset({"Q-SKIPPED-TREE", "Q-SYMLINK", "Q-UNREADABLE",
                             # analysis-coverage notes from the flow engine and the
                             # taint-config loader (Python-only; the npm engine has
                             # neither)

@@ -14,12 +14,14 @@ export function computeMetrics(files) {
   for (const f of nonDep) {
     const key = f.path ?? f.name;                // CLI files carry `path`, library callers `name`
     const lines = pinUnicode(normalizeNewlines(String(f.content ?? ""))).split("\n");   // (no U+2028 split: core.compute_metrics)
-    const lex = lexLines(lines, f.lang, null, { jsx: jsxReading(key) });
+    let lex = null;
+    try { lex = lexLines(lines, f.lang, null, { jsx: jsxReading(key) }); }
+    catch { /* its scan failed the same way (SC-TRUNCATED): count its lines as code rather than lose the report (review B3) */ }
     const code = [];
     for (let i = 0; i < lines.length; i++) {
       const t = pyStrip(lines[i]);
       if (!t) continue;
-      if (lex.comment[i]) { comments++; continue; }
+      if (lex && lex.comment[i]) { comments++; continue; }
       ncloc++;
       code.push([t, i]);
     }
@@ -53,7 +55,7 @@ export function worstSevRating(issues, types) {
  * the scanner could not look at, not the code, so they do not count toward
  * the maintainability rating (twin of core.COVERAGE_RULES).
  */
-export const COVERAGE_RULES = new Set(["Q-SKIPPED-TREE", "Q-SYMLINK", "Q-UNREADABLE", "Q-SCAN-ERROR"]);
+export const COVERAGE_RULES = new Set(["Q-SKIPPED-TREE", "Q-SYMLINK", "Q-UNREADABLE"]);
 /**
  * How many code smells a SMELL finding counts for: one, except a Q-CAPPED
  * note, which counts the findings it stands for when they are smells (and

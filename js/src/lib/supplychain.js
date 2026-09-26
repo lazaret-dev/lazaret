@@ -197,22 +197,35 @@ export function scanManifest(path, content, { registry = isDependencyManifest(pa
   // finding). Keys are compared decoded, and a repeated key or "scripts"
   // object counts where it last appears, as the parser keeps the last one
   // (twin of core._script_key_lines).
+  // The document's tokens, /"(?:[^"\\]|\\.)*"|[{}[\],:]/g as core's
+  // _JSON_TOKEN_RE finds them, read with a loop: V8 overflowed its stack on
+  // a string of a few million characters (review B3).
   const scriptKeyLines = () => {
-    const tokenRe = /"(?:[^"\\]|\\.)*"|[{}[\],:]/g;
     const containers = [];
-    let found = new Map(), topKey = null, inScripts = false, expectKey = false, line = 1, pos = 0, m;
-    while ((m = tokenRe.exec(body))) {
-      const tok = m[0];
+    const n = body.length;
+    let found = new Map(), topKey = null, inScripts = false, expectKey = false, line = 1, pos = 0;
+    for (let at = 0; at < n; at++) {
+      const tok = body[at];
+      if (tok !== '"' && !"{}[],:".includes(tok)) continue;
       const depth = containers.length;
-      if (tok[0] === '"') {
+      if (tok === '"') {
+        let e = at + 1;
+        while (e < n && body[e] !== '"') {
+          if (body[e] !== "\\") e++;
+          else if (e + 1 < n && !"\n\r\u2028\u2029".includes(body[e + 1])) e += 2;   // \\. ('.' is no line break)
+          else e = n;
+        }
+        if (e >= n) continue;                                  // no string starts here
+        const start = at;
+        at = e;
         if (expectKey && (depth === 1 || (depth === 2 && inScripts))) {
-          const key = JSON.parse(tok);
+          const key = JSON.parse(body.slice(start, e + 1));
           if (depth === 1) {
             topKey = key;
             if (key === "scripts") found = new Map();          // a later "scripts" replaces an earlier one
           } else {
-            for (let k = body.indexOf("\n", pos); k !== -1 && k < m.index; k = body.indexOf("\n", k + 1)) line++;
-            pos = m.index;
+            for (let k = body.indexOf("\n", pos); k !== -1 && k < start; k = body.indexOf("\n", k + 1)) line++;
+            pos = start;
             found.set(key, line);
           }
         }

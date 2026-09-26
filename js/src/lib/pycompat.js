@@ -60,24 +60,34 @@ const SYNTAX = new Set("^$\\.*+?()[]{}|/");
 const DOTTED_I = "\u0130\u0131";
 const FOLDS_I_RE = /^[iI]$/;
 
+// A class repeated at least N times, `[…]{N,}`, is written `[…]{N}[…]*`: the
+// same matches, but for N above 2 V8 keeps a backtrack entry per repetition
+// and overflowed its stack ("Maximum call stack size exceeded") on runs of a
+// few million characters (review B3: a base64 blob made a file's scan fail).
+const AT_LEAST_RE = /\{(\d+),\}(\??)/y;
+
 /**
  * Translate Python `re` pattern text into JavaScript (u-mode) pattern text.
  * ignoreCase: the pattern runs with re.I (JS flag i).
  */
 export function pyRegexSource(src, { ignoreCase = false } = {}) {
   let out = "";
+  let atom = null;                  // the last thing written, when it is one character class
   for (let i = 0; i < src.length; i++) {
     const ch = src[i];
+    const last = atom;
+    atom = null;
+    if (ch === "{" && last !== null) {
+      AT_LEAST_RE.lastIndex = i;
+      const m = AT_LEAST_RE.exec(src);
+      if (m) { out += `{${m[1]}}${last}*${m[2]}`; i += m[0].length - 1; continue; }
+    }
     if (ch === "\\") {
       const n = src[++i];
       if (n === undefined) { out += "\\\\"; break; }
+      const set = { w: `[${W}]`, W: `[^${W}]`, d: "\\p{Nd}", D: "\\P{Nd}", s: `[${WS}]`, S: `[^${WS}]` }[n];
+      if (set !== undefined) { out += set; atom = set; continue; }
       switch (n) {
-        case "w": out += `[${W}]`; continue;
-        case "W": out += `[^${W}]`; continue;
-        case "d": out += "\\p{Nd}"; continue;
-        case "D": out += "\\P{Nd}"; continue;
-        case "s": out += `[${WS}]`; continue;
-        case "S": out += `[^${WS}]`; continue;
         case "b":
           out += startsWithWordChar(src, i + 1) ? WORD_START : BOUNDARY;
           continue;
@@ -88,8 +98,8 @@ export function pyRegexSource(src, { ignoreCase = false } = {}) {
         default: out += escapeOut(n); continue;
       }
     }
-    if (ch === "[") { const [text, next] = translateClass(src, i, ignoreCase); out += text; i = next; continue; }
-    if (ch === ".") { out += "[^\\n]"; continue; }
+    if (ch === "[") { const [text, next] = translateClass(src, i, ignoreCase); out += text; atom = text; i = next; continue; }
+    if (ch === ".") { out += "[^\\n]"; atom = "[^\\n]"; continue; }
     out += ignoreCase && FOLDS_I_RE.test(ch) ? `[iI${DOTTED_I}]` : ch;
   }
   return out;
