@@ -693,30 +693,51 @@ def parse_yarn_lock(text):
 
 
 _PNPM_V5_RE = re.compile(r"^(@[^@/]+/[^@/]+|[^@/]+)/(\d[^/_]*)(?:_.*)?$")
-_PNPM_V6_RE = re.compile(r"^(@?[^@]+)@([^@]+)$")
+_PNPM_LOCAL = ("link:", "file:", "workspace:")       # first-party: not inventoried
+
+
+def _pnpm_clean(key):
+    k = key.strip().strip("'\"")
+    return k[1:] if k.startswith("/") else k
+
+
+def _pnpm_is_local(key):
+    k = _pnpm_clean(key)
+    return k.startswith(_PNPM_LOCAL) or any("@" + p in k for p in _PNPM_LOCAL)
 
 
 def _pnpm_key(key):
-    k = key.strip().strip("'\"")
-    if k.startswith("/"):
-        k = k[1:]
+    """(name, version) of a pnpm-lock package key: '/name/1.0.0' (v5),
+    '/name@1.0.0(peer@2)' (v6), 'name@1.0.0' (v9). A git or tarball key
+    ('name@https://codeload…/tar.gz/abc', 'name@git+ssh://git@host/…') gives
+    version '' — kept, so a matching advisory is unknown, never cleared.
+    None for a first-party (link:/file:/workspace:) or unparseable key."""
+    if _pnpm_is_local(key):
+        return None
+    k = _pnpm_clean(key)
     m = _PNPM_V5_RE.match(k)
     if m:
         return m.group(1), m.group(2)
     k = k.split("(", 1)[0]                         # v6/v9 peer suffix
-    m = _PNPM_V6_RE.match(k)
-    if m and m.group(2)[:1].isdigit():
-        return m.group(1), m.group(2)
-    return None
+    # name@spec: the name is '@scope/name' or has no '@'; the spec may have one
+    at = k.find("@", k.find("/") + 1) if k.startswith("@") else k.find("@")
+    if at <= 0 or at == len(k) - 1:
+        return None
+    name, spec = k[:at], k[at + 1:]
+    return name, (spec if spec[:1].isdigit() else "")
 
 
 def parse_pnpm_lock(text):
     """[(name, version)] from pnpm-lock.yaml (lockfile v5, v6 and v9): the
     package keys of the 'packages:' and 'snapshots:' sections
     ('/name/1.0.0', '/name@1.0.0(peer@2)', 'name@1.0.0'). Line-based, no
-    YAML dependency; link:/file:/git keys are skipped."""
+    YAML dependency. link:/file:/workspace: keys (first-party) are skipped;
+    git and tarball packages are kept with an unknown version — v9 keys
+    carry their name ('name@https://…'), v5/v6 keys are a URL path
+    ('github.com/user/repo/<sha>') and the entry's own `name:` field names
+    the package."""
     out = []
-    section = None
+    section, unnamed = None, False
     for raw in text.splitlines():
         if not raw.strip() or raw.lstrip().startswith("#"):
             continue
@@ -724,8 +745,17 @@ def parse_pnpm_lock(text):
         if indent == 0:
             section = raw.strip().rstrip(":").strip()
             continue
-        if section not in ("packages", "snapshots") or indent != 2:
+        if section not in ("packages", "snapshots"):
             continue
+        if indent == 4 and unnamed:
+            m = re.match(r"^name:\s*['\"]?([^'\"\s]+)['\"]?\s*$", raw.strip())
+            if m:
+                out.append((m.group(1), ""))
+                unnamed = False
+            continue
+        if indent != 2:
+            continue
+        unnamed = False
         key = raw.strip()
         if not key.endswith(":"):
             continue
@@ -733,6 +763,8 @@ def parse_pnpm_lock(text):
         if nv is not None:
             v, _ = _npm_exact(nv[1])
             out.append((nv[0], v))
+        else:
+            unnamed = not _pnpm_is_local(key[:-1])
     return out
 
 

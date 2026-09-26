@@ -18,7 +18,8 @@
    grew memory without bound.
 Minor: an attached include value (-rfile, as pip accepts) and a symlinked
    requirements*.txt were skipped without a warning, and so was a missing
-   include.
+   include. pnpm git/tarball package keys were dropped instead of kept with
+   an unknown version.
 
 All fixtures are inert manifest/lock text and synthetic CVE ids.
 """
@@ -315,6 +316,66 @@ class RequirementsIncludes(unittest.TestCase):
             self.skipTest("symlinks unavailable")
         self.assertEqual(self.declared(root), ([("django", "1.11.0")], {
             "requirements files outside the project skipped (symlink or -r/-c target)": 1}))
+
+
+# ---------------------------------------------------------------------------
+# minor: pnpm git / tarball packages are kept with an unknown version
+# ---------------------------------------------------------------------------
+PNPM9 = """lockfileVersion: '9.0'
+
+packages:
+
+  lodash@4.17.20:
+    resolution: {integrity: sha512-y}
+
+  foo@https://codeload.github.com/user/foo/tar.gz/abc123:
+    resolution: {tarball: https://codeload.github.com/user/foo/tar.gz/abc123}
+    version: 1.0.0
+
+  bar@git+ssh://git@github.com/user/bar.git#0123abc:
+    resolution: {commit: 0123abc, repo: 'git@github.com:user/bar.git', type: git}
+    version: 2.0.0
+
+  local@file:packages/local:
+    resolution: {directory: packages/local, type: directory}
+
+snapshots:
+
+  foo@https://codeload.github.com/user/foo/tar.gz/abc123: {}
+"""
+PNPM6 = """lockfileVersion: '6.0'
+
+packages:
+
+  /lodash@4.17.20:
+    resolution: {integrity: sha512-y}
+    dev: false
+
+  github.com/user/repo/abc123:
+    resolution: {tarball: https://codeload.github.com/user/repo/tar.gz/abc123}
+    name: repo
+    version: 1.0.0
+    dev: false
+
+  file:../local:
+    resolution: {directory: ../local, type: directory}
+    name: local
+    version: 0.0.1
+"""
+
+
+class PnpmNonRegistryPackages(unittest.TestCase):
+    def test_git_and_tarball_keys_are_kept_unversioned(self):
+        self.assertEqual(sorted(set(sca.parse_pnpm_lock(PNPM9))),
+                         [("bar", ""), ("foo", ""), ("lodash", "4.17.20")])
+        self.assertEqual(sorted(set(sca.parse_pnpm_lock(PNPM6))),
+                         [("lodash", "4.17.20"), ("repo", "")])
+
+    def test_a_matching_advisory_is_unknown_not_dropped(self):
+        root = project({"pnpm-lock.yaml": PNPM9.encode("utf-8")})
+        b = bundle({"cve": "CVE-0000-0006", "cvss": 7.5,
+                    "packages": [entry("foo", "npm", "0.0.1", "9.9.9")]})
+        self.assertEqual(verdicts(sca.scan_all(root), b), ([], [("CVE-0000-0006", "foo", "")]))
 
 
 if __name__ == "__main__":
