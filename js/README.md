@@ -57,7 +57,8 @@ not already a Lazaret report (unless `--force-overwrite`). Writes are atomic
   INFO inventory; publisher-only scripts like `prepack` never run on
   install). A hook is MAJOR; one that fetches or evaluates code is CRITICAL,
   though `node -e "require('./local-file')"` is not treated as eval.
-  `binding.gyp` actions and command expansions (`<!(cmd)`); an unparseable
+  `binding.gyp` actions and command expansions (`<!(cmd)`; at most 100 listed
+  per file, SC-TRUNCATED past 100,000 values); an unparseable
   root manifest (`SC-MANIFEST-UNPARSEABLE`); decode-then-execute
   (`SC-EVAL-DECODE`, also across lines, through an inline import such as
   `__import__("base64").b64decode`, and, in dependencies, across statements

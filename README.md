@@ -114,7 +114,9 @@ trees). Source files and manifests over 16,000,000 bytes get SC-TRUNCATED instea
 registry scanner too; the browser dashboard keeps 2,000,000); other large files are classified from
 a header sample. Bundles in `node_modules` fit: typescript's `lib/typescript.js` is 9.1 MB and scans in
 a few seconds. Each file also has a 30-second time budget, checked inside each rule's match loop (SC-TRUNCATED
-"scan time budget exceeded" if it is ever hit — a backstop; the rules are linear-time).
+"scan time budget exceeded" if it is ever hit — a backstop; the rules are linear-time). A `binding.gyp` lists
+at most 100 install-hook findings (one more sums up the rest, at their highest severity) and is SC-TRUNCATED
+past 100,000 values or 2,000,000 characters of commands.
 
 **Encodings:** a BOM decides first (UTF-8, UTF-16 LE/BE); a NUL in the first four bytes is read as
 BOM-less UTF-16 only when the result is text (otherwise `/*\0*/eval(…)` would hide as UTF-16 garbage);

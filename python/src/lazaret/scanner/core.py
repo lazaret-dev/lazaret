@@ -2265,10 +2265,12 @@ def clip_snippet_line(text, col=None):
     return head + text[start:]
 
 
-def mk_issue(rule_or_dict, path, line_no, lines, col=None):
+def mk_issue(rule_or_dict, path, line_no, lines, col=None, ctx=None):
     """Issue dict for rule `rule_or_dict` at 1-based `line_no` of `lines`.
     `col` (0-based character offset of the match on the flagged line, if
-    known) centres the flagged line's snippet window on the match."""
+    known) centres the flagged line's snippet window on the match. `ctx`
+    caches redacted lines for a producer of many findings in one file (see
+    _LineRedactor); scan_file's own context is found without it."""
     r = rule_or_dict
     start = max(0, line_no - 3)
     stop = min(len(lines), line_no + 2)
@@ -2288,7 +2290,9 @@ def mk_issue(rule_or_dict, path, line_no, lines, col=None):
     # command line, a hex-decoded preview) — review: a PAT in a `prepare`
     # script reached the terminal, JSON, HTML and SARIF through msg.
     msg = r["msg"]
-    ctx = _active_ctx(lines) if REDACT_SECRETS else None
+    if ctx is None or ctx.lines is not lines:
+        ctx = _active_ctx(lines)
+    ctx = ctx if REDACT_SECRETS else None
     if REDACT_SECRETS:
         msg = _redact_text(msg, ctx.secrets() if ctx is not None else None)
     redact = REDACT_SECRETS and 0 <= flag < len(lines)
@@ -3225,7 +3229,7 @@ NPM_LOCAL_INSTALL_SCRIPTS = NPM_INSTALL_SCRIPTS + NPM_PREPARE_SCRIPTS
 NPM_LIFECYCLE_SCRIPTS = NPM_LOCAL_INSTALL_SCRIPTS   # backwards-compatible name
 PY_LIFECYCLE_SECTIONS = ("build-system", "tool.poetry", "project")
 
-def _sc_install_hook_issue(path, line_no, lines, script, cmd, suspicious, sev=None):
+def _sc_install_hook_issue(path, line_no, lines, script, cmd, suspicious, sev=None, ctx=None):
     sev = sev or ("CRITICAL" if suspicious else "MAJOR")
     if suspicious:
         msg = f'"{script}" script runs a network-fetch/eval command at install time.'
@@ -3246,7 +3250,7 @@ def _sc_install_hook_issue(path, line_no, lines, script, cmd, suspicious, sev=No
         {"id": "SC-INSTALL-HOOK", "name": "Install hook", "type": "HOTSPOT",
          "sev": sev, "msg": msg, "why": why,
          "fix": f"Review the {script} script; use --ignore-scripts in CI if unneeded.",
-         "ref": "CWE-506 · Supply chain"}, path, line_no, lines)
+         "ref": "CWE-506 · Supply chain"}, path, line_no, lines, ctx=ctx)
     issue["cmd"] = cmd   # lets the registry follow the hook to the script it runs
     return issue
 
@@ -3370,28 +3374,50 @@ def load_manifest(path, content, python_literal=False):
     python_literal: also accept Python literal syntax (binding.gyp / .gypi:
     gyp reads them as Python, so single quotes, comments and trailing commas
     are normal there)."""
+    data, issues, _ = _load_manifest(path, content, python_literal)
+    return data, issues
+
+
+def _load_manifest(path, content, python_literal=False, locate=None):
+    """load_manifest, plus -> where: with `locate` (a key), for every dict of
+    the result that holds that key, {id(d): (d, offset)} where offset is the
+    position in the BOM-stripped text of the key token the parser kept (the
+    last of equal keys). The parse itself is the same: json.loads (with an
+    object_pairs_hook building the same dicts) or ast.literal_eval of the
+    ast.parse tree."""
     if not isinstance(content, str):
         return None, ([manifest_unparseable_issue(path, "not text")]
-                      if is_root_manifest(path) else [])
+                      if is_root_manifest(path) else []), {}
     text = content[1:] if content.startswith("\ufeff") else content
     if json_depth_exceeds(text):
-        return None, [_sc_manifest_depth_issue(path)]
-    reason = None
+        return None, [_sc_manifest_depth_issue(path)], {}
+    reason, where, built, hook = None, {}, [], None
+    if locate is not None:
+        def hook(pairs):
+            d = dict(pairs)
+            built.append((d, pairs))
+            return d
     try:
-        data = json.loads(text, parse_int=_json_int)
+        data = json.loads(text, parse_int=_json_int, object_pairs_hook=hook)
     except RecursionError:              # backstop: a deep caller stack
-        return None, [_sc_manifest_depth_issue(path)]
+        return None, [_sc_manifest_depth_issue(path)], {}
     except (ValueError, TypeError) as exc:
         data = None
         reason = (f"{type(exc).__name__}: line {exc.lineno} column {exc.colno}"
                   if isinstance(exc, json.JSONDecodeError) else type(exc).__name__)
+    if data is not None and locate is not None:
+        where = _json_key_offsets(text, built, locate)
     if data is None and python_literal:
         import ast
         try:
-            data = ast.literal_eval(text.strip())
+            src = text.strip()
+            tree = ast.parse(src, mode="eval")     # what ast.literal_eval(src) parses
+            data = ast.literal_eval(tree)
             reason = None
+            if locate is not None:
+                where = _ast_key_offsets(tree, data, locate, src, len(text) - len(text.lstrip()))
         except RecursionError:
-            return None, [_sc_manifest_depth_issue(path)]
+            return None, [_sc_manifest_depth_issue(path)], {}
         except (ValueError, TypeError, SyntaxError, MemoryError, OverflowError) as exc:
             data = None
             reason = reason or type(exc).__name__
@@ -3399,8 +3425,77 @@ def load_manifest(path, content, python_literal=False):
         if data is not None:
             reason = f"top level is a {type(data).__name__}, not an object"
         return None, ([manifest_unparseable_issue(path, reason or "unparseable")]
-                      if is_root_manifest(path) else [])
-    return data, []
+                      if is_root_manifest(path) else []), {}
+    return data, [], where
+
+
+_JSON_TOKEN_RE = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"|[{}]', re.S)
+_JSON_COLON_RE = re.compile(r"[ \t\n\r]*:")
+
+
+def _json_key_offsets(text, built, key):
+    """_load_manifest's `where` for a document json.loads parsed: its
+    object_pairs_hook saw every object (`built`: (dict, pairs)) in the order
+    the objects close, and in valid JSON the keys are exactly the strings
+    followed by ':'."""
+    objects, stack = [], []
+    for m in _JSON_TOKEN_RE.finditer(text):
+        c = text[m.start()]
+        if c == "{":
+            stack.append([])
+        elif c == "}":
+            if not stack:
+                return {}
+            objects.append(stack.pop())
+        elif stack and _JSON_COLON_RE.match(text, m.end()):
+            stack[-1].append(m.start())
+    if len(objects) != len(built):
+        return {}                        # not reachable for text json.loads accepted
+    where = {}
+    for (d, pairs), offsets in zip(built, objects):
+        if len(offsets) != len(pairs):
+            return {}
+        last = None
+        for k, (name, _) in enumerate(pairs):
+            if name == key:
+                last = k
+        if last is not None:
+            where[id(d)] = (d, offsets[last])
+    return where
+
+
+_PY_NEWLINE_RE = re.compile(r"\r\n|\r|\n")
+
+
+def _ast_key_offsets(tree, data, key, src, base):
+    """_load_manifest's `where` for a document ast.literal_eval built from
+    `tree` (parsed from src, which starts at offset `base` of the text). The
+    tree is walked alongside the data; a dict keeps the first of equal keys
+    with the last value, so the key token wanted is the last equal one. ast
+    positions are (line, UTF-8 byte column) with \\r\\n, \\r and \\n all
+    ending a line."""
+    import ast
+    starts = [0] + [m.end() for m in _PY_NEWLINE_RE.finditer(src)]
+
+    def offset(node):
+        a = starts[node.lineno - 1]
+        head = src[a:a + node.col_offset].encode("utf-8", "surrogatepass")[:node.col_offset]
+        return base + a + len(head.decode("utf-8", "surrogatepass"))
+
+    where, stack = {}, [(tree.body, data)]
+    while stack:
+        node, value = stack.pop()
+        if isinstance(node, ast.Dict) and isinstance(value, dict):
+            last = {}
+            for k, v in zip(node.keys, node.values):
+                last[ast.literal_eval(k)] = (k, v)
+            for name, (k, v) in last.items():
+                if isinstance(name, str) and name == key:
+                    where[id(value)] = (value, offset(k))
+                stack.append((v, value[name]))
+        elif isinstance(node, (ast.List, ast.Tuple)) and isinstance(value, (list, tuple)):
+            stack.extend(zip(node.elts, value))
+    return where
 
 
 def _json_loads_manifest(path, content):
@@ -3654,44 +3749,93 @@ _GYP_EXPANSION_RE = re.compile(r"[<>]!@?\(")
 # The ubiquitous benign form: print an include path of a dependency.
 _GYP_NODE_REQUIRE_RE = re.compile(
     r"""node\s+-[ep]\s+(?:"|')\s*require\(\s*\\?["'][\w@./-]+\\?["']\s*\)(?:\.[\w$]+)*\s*;?\s*(?:"|')""")
-_GYP_MAX_NODES = 100_000
+# Bounds on one gyp document (review: scan_gyp was quadratic — 8,000 actions
+# took 11.4 s, 4,000 expansions in one 60 KB string 29.5 s — and a document
+# with more values than the walk visits was reported clean). Past either
+# limit the walk stops and the file gets SC-TRUNCATED. Characters are code
+# points, as Python counts them (the npm engine counts the same way).
+_GYP_MAX_NODES = 100_000                 # values visited
+_GYP_MAX_COMMAND_CHARS = 2_000_000       # characters of action/expansion commands examined
+#: SC-INSTALL-HOOK findings listed per gyp file; the rest are summed up in one
+#: more finding at the highest severity among them.
+GYP_MAX_HOOK_FINDINGS = 100
 
 
-def _gyp_expansion_command(text, start):
-    """The command inside the expansion that starts at `start` ('<!(' ...),
-    up to its balanced closing parenthesis (or the end of the string)."""
-    i = text.index("(", start) + 1
-    depth, j = 1, i
-    while j < len(text) and depth:
-        if text[j] == "(":
-            depth += 1
-        elif text[j] == ")":
-            depth -= 1
-        j += 1
-    return text[i:j - 1] if depth == 0 else text[i:]
+def _gyp_expansion_commands(text):
+    """The command of every expansion in `text`, in order: up to its balanced
+    closing parenthesis, or to the end of the string. The closing parenthesis
+    of every '(' is found in one pass (a stack), not by a scan per expansion."""
+    close, opened = {}, []
+    for m in re.finditer(r"[()]", text):
+        if text[m.start()] == "(":
+            opened.append(m.start())
+        elif opened:
+            close[opened.pop()] = m.start()
+    for m in _GYP_EXPANSION_RE.finditer(text):
+        i = m.end() - 1                  # its '('
+        j = close.get(i)
+        yield text[i + 1:] if j is None else text[i + 1:j]
 
 
 def _gyp_commands(data):
-    """(command, kind) for every action/rule command and every command
-    expansion anywhere in a parsed gyp document (targets, conditions,
-    target_defaults, variables ...). Bounded walk, no recursion."""
-    out, stack, seen = [], [data], 0
-    while stack and seen < _GYP_MAX_NODES:
+    """-> (commands, truncated): (command, kind, node) for every action/rule
+    command (node: the dict holding "action") and every command expansion
+    anywhere in a parsed gyp document (targets, conditions, target_defaults,
+    variables ...), and why the walk stopped early (None if it did not).
+    Bounded walk, no recursion."""
+    out, stack, seen, chars = [], [data], 0, 0
+    truncated = None
+    while stack:
+        if seen >= _GYP_MAX_NODES:
+            truncated = f"more than {_GYP_MAX_NODES} values in the gyp document"
+            break
         node = stack.pop()
         seen += 1
         if isinstance(node, dict):
             for key, value in node.items():
                 if key == "action" and isinstance(value, (list, tuple)):
-                    out.append((" ".join(str(a) for a in value), "action"))
+                    cmd = " ".join(str(a) for a in value)
+                    out.append((cmd, "action", node))
+                    chars += len(cmd)
                 stack.append(key)
                 stack.append(value)
         elif isinstance(node, (list, tuple, set, frozenset)):
             stack.extend(node)
         elif isinstance(node, str) and _GYP_EXPANSION_RE.search(node):
-            for m in _GYP_EXPANSION_RE.finditer(node):
-                out.append((_gyp_expansion_command(node, m.start()), "expansion"))
+            for cmd in _gyp_expansion_commands(node):
+                out.append((cmd, "expansion", None))
+                chars += len(cmd)
+                if chars > _GYP_MAX_COMMAND_CHARS:
+                    break
+        if chars > _GYP_MAX_COMMAND_CHARS:
+            truncated = f"more than {_GYP_MAX_COMMAND_CHARS} characters of gyp commands"
+            break
     out.reverse()
-    return out
+    return out, truncated
+
+
+class _LineRedactor:
+    """mk_issue's redaction of one file's lines when no scan context is
+    active (PEM key blocks whole, the secret patterns on other lines, no
+    entropy literals), computed once per line instead of once per finding
+    (review: a gyp file with thousands of actions re-ran it for every one)."""
+
+    def __init__(self, lines):
+        self.lines = lines
+        self._pem = None
+        self._red = {}
+
+    def secrets(self):
+        return None
+
+    def redacted(self, k):
+        r = self._red.get(k)
+        if r is None:
+            if self._pem is None:
+                self._pem = _pem_block_lines(self.lines)
+            r = REDACTED if k in self._pem else _redact_context_line(self.lines[k])
+            self._red[k] = r
+        return r
 
 
 def scan_gyp(path, content):
@@ -3707,26 +3851,68 @@ def scan_gyp(path, content):
     flagged CRITICAL when the command fetches or evaluates code; the usual
     `<!(node -p "require('node-addon-api').include")` and pkg-config calls
     are not findings. An unparseable ROOT binding.gyp is
-    SC-MANIFEST-UNPARSEABLE."""
-    data, issues = load_manifest(path, content, python_literal=True)
+    SC-MANIFEST-UNPARSEABLE.
+
+    An action's finding is on the line of its own "action" key; an
+    expansion's on the first line holding its command. At most
+    GYP_MAX_HOOK_FINDINGS are listed, then one finding sums up the rest; a
+    document past the walk's bounds (_GYP_MAX_NODES values,
+    _GYP_MAX_COMMAND_CHARS of commands) is SC-TRUNCATED, never silently
+    clean. Linear in the size of the file."""
+    data, issues, where = _load_manifest(path, content, python_literal=True, locate="action")
     if data is None:
         return issues
     body = content[1:] if content.startswith("\ufeff") else content
     lines = body.split("\n")
-    for cmd, kind in _gyp_commands(data):
+    commands, truncated = _gyp_commands(data)
+    hooks = []
+    for cmd, kind, node in commands:
         if kind == "action":
             suspicious = bool(INSTALL_HOOK_RE.search(cmd))
         else:
             suspicious = bool(INSTALL_HOOK_RE.search(_GYP_NODE_REQUIRE_RE.sub(" ", cmd)))
             if not suspicious:
                 continue
-        needles = [cmd] if kind == "expansion" else cmd.split(" ")
-        line_no = next((i + 1 for i, l in enumerate(lines)
-                        if any(a and a in l for a in needles)), 1)
+        hooks.append((cmd, kind, node, suspicious))
+    newlines = [m.start() for m in re.finditer("\n", body)] if hooks else []
+    first_line = {}
+
+    def line_of(cmd, kind, node):
+        if kind == "action":
+            at = where.get(id(node))
+            return 1 if at is None else bisect.bisect_left(newlines, at[1]) + 1
+        if not cmd or "\n" in cmd:
+            return 1                     # no single line holds it
+        if cmd not in first_line:
+            at = body.find(cmd)
+            first_line[cmd] = 1 if at < 0 else bisect.bisect_left(newlines, at) + 1
+        return first_line[cmd]
+
+    redactor = _LineRedactor(lines)
+    for cmd, kind, node, suspicious in hooks[:GYP_MAX_HOOK_FINDINGS]:
         issues.append(_sc_install_hook_issue(
-            path, line_no, lines,
+            path, line_of(cmd, kind, node), lines,
             "binding.gyp action" if kind == "action" else "binding.gyp command expansion",
-            cmd, suspicious))
+            cmd, suspicious, ctx=redactor))
+    rest = hooks[GYP_MAX_HOOK_FINDINGS:]
+    if rest:
+        n_bad = sum(1 for h in rest if h[3])
+        issues.append(mk_issue(
+            {"id": "SC-INSTALL-HOOK", "name": "Install hook", "type": "HOTSPOT",
+             "sev": "CRITICAL" if n_bad else "MAJOR",
+             "msg": (f"{len(rest)} more binding.gyp actions and command expansions run code at "
+                     f"install time ({n_bad} of them fetch or evaluate code); only the first "
+                     f"{GYP_MAX_HOOK_FINDINGS} are listed."),
+             "why": ("Each action and command expansion in a binding.gyp runs a command during "
+                     "`node-gyp rebuild` (npm install). A file with this many is listed in part "
+                     "so the report stays readable; this finding carries the highest severity "
+                     "among the ones not listed."),
+             "fix": "Review every action and command expansion in the file; use --ignore-scripts "
+                    "in CI if unneeded.",
+             "ref": "CWE-506 · Supply chain"},
+            path, line_of(rest[0][0], rest[0][1], rest[0][2]), lines, ctx=redactor))
+    if truncated:
+        issues.append(truncated_issue(path, truncated))
     return issues
 
 import codecs as _codecs

@@ -5,10 +5,10 @@
 // import paths.
 
 import { mkIssue } from "./issue.js";
-import { DEP_MARKERS } from "./fs.js";
-import { pyRe, pyRepr, pyStr, pyStrip, MAX_JSON_DEPTH, jsonDepthExceeds } from "./pycompat.js";
+import { DEP_MARKERS, truncatedIssue } from "./fs.js";
+import { pyRe, pyRepr, pyStr, pyStrip, pyLstrip, cpLen, MAX_JSON_DEPTH, jsonDepthExceeds } from "./pycompat.js";
 import { pyJsonParse, jsonErrorWhere, pyLiteralParse } from "./pyjson.js";
-import { REDACT, redactText } from "./redact.js";
+import { REDACT, redactText, registerScanContext, SecretLiterals } from "./redact.js";
 
 export { SECRET_RULES, REDACT_PLACEHOLDER, redactContextLine, redactSecretSnippet, redactResult, setRedactSecrets } from "./redact.js";
 
@@ -136,13 +136,25 @@ const pyTypeName = (v) => (v === null ? "NoneType" : Array.isArray(v) ? "list" :
  * accept Python literal syntax (binding.gyp).
  */
 export function loadManifest(path, content, { pythonLiteral = false } = {}) {
+  const [data, issues] = loadManifestWhere(path, content, { pythonLiteral });
+  return [data, issues];
+}
+
+/**
+ * loadManifest, plus → where: with `locate` (a key), for every object of the
+ * result that holds that key, a Map object → offset (in the BOM-stripped
+ * text) of the key token the parser kept, the last of equal keys (twin of
+ * core._load_manifest).
+ */
+function loadManifestWhere(path, content, { pythonLiteral = false, locate = null } = {}) {
   const root = isRootManifest(path);
-  if (typeof content !== "string") return [null, root ? [manifestUnparseableIssue(path, "not text")] : []];
+  if (typeof content !== "string") return [null, root ? [manifestUnparseableIssue(path, "not text")] : [], new Map()];
   const text = content.startsWith("\ufeff") ? content.slice(1) : content;
-  if (jsonDepthExceeds(text)) return [null, [manifestDepthIssue(path)]];
-  let data = null, reason = null, litType = null;
-  const r = pyJsonParse(text);
-  if (r.depth) return [null, [manifestDepthIssue(path)]];
+  if (jsonDepthExceeds(text)) return [null, [manifestDepthIssue(path)], new Map()];
+  let data = null, reason = null, litType = null, where = new Map();
+  const onKey = (base) => (locate === null ? null : (obj, key, at) => { if (key === locate) where.set(obj, base + at); });
+  const r = pyJsonParse(text, onKey(0));
+  if (r.depth) return [null, [manifestDepthIssue(path)], new Map()];
   if (r.ok) {
     data = r.value;
     // json.loads(parse_int=_json_int): an integer literal up to 1000 characters is a Python int
@@ -152,15 +164,16 @@ export function loadManifest(path, content, { pythonLiteral = false } = {}) {
     }
   } else reason = `JSONDecodeError: ${jsonErrorWhere(text, r.pos)}`;
   if (data === null && pythonLiteral) {
-    const lit = pyLiteralParse(pyStrip(text));
+    where = new Map();                          // nothing from a failed JSON parse
+    const lit = pyLiteralParse(pyStrip(text), onKey(text.length - pyLstrip(text).length));
     if (lit.ok) { data = lit.value; reason = null; litType = lit.type; }
     else reason ||= lit.error;
   }
   if (data === null || typeof data !== "object" || Array.isArray(data)) {
     if (data !== null) reason = `top level is a ${litType ?? pyTypeName(data)}, not an object`;
-    return [null, root ? [manifestUnparseableIssue(path, reason || "unparseable")] : []];
+    return [null, root ? [manifestUnparseableIssue(path, reason || "unparseable")] : [], new Map()];
   }
-  return [data, []];
+  return [data, [], where];
 }
 
 const own = (obj, key) => (Object.prototype.hasOwnProperty.call(obj, key) ? obj[key] : undefined);
@@ -198,67 +211,130 @@ const GYP_EXPANSION_RE = pyRe(GYP_EXPANSION_SRC, "g");
 const GYP_EXPANSION_ONE = pyRe(GYP_EXPANSION_SRC);
 // The ubiquitous benign form: print an include path of a dependency.
 const GYP_NODE_REQUIRE_RE = pyRe(String.raw`node\s+-[ep]\s+(?:"|')\s*require\(\s*\\?["'][\w@./-]+\\?["']\s*\)(?:\.[\w$]+)*\s*;?\s*(?:"|')`, "g");
-const GYP_MAX_NODES = 100_000;
+// Bounds on one gyp document (twins of core's): past either limit the walk
+// stops and the file gets SC-TRUNCATED. Characters are code points.
+const GYP_MAX_NODES = 100_000;                  // values visited
+const GYP_MAX_COMMAND_CHARS = 2_000_000;        // characters of action/expansion commands examined
+/** SC-INSTALL-HOOK findings listed per gyp file; one more finding sums up the rest. */
+export const GYP_MAX_HOOK_FINDINGS = 100;
 
-function gypExpansionCommand(text, start) {
-  const i = text.indexOf("(", start) + 1;
-  let depth = 1, j = i;
-  while (j < text.length && depth) {
-    if (text[j] === "(") depth++;
-    else if (text[j] === ")") depth--;
-    j++;
+/**
+ * The command of every expansion in `text`, in order: up to its balanced
+ * closing parenthesis, or to the end of the string. The closing parenthesis
+ * of every "(" is found in one pass (a stack), not by a scan per expansion.
+ */
+function* gypExpansionCommands(text) {
+  const close = new Map(), opened = [];
+  for (let k = 0; k < text.length; k++) {
+    const c = text.charCodeAt(k);
+    if (c === 40) opened.push(k);
+    else if (c === 41 && opened.length) close.set(opened.pop(), k);
   }
-  return depth === 0 ? text.slice(i, j - 1) : text.slice(i);
+  for (const m of text.matchAll(GYP_EXPANSION_RE)) {
+    const i = m.index + m[0].length - 1;                              // its "("
+    const j = close.get(i);
+    yield j === undefined ? text.slice(i + 1) : text.slice(i + 1, j);
+  }
 }
 
-/** [command, kind] for every action and command expansion anywhere in a parsed gyp document. */
+/**
+ * [commands, truncated]: [command, kind, node] for every action (node: the
+ * object holding "action") and command expansion anywhere in a parsed gyp
+ * document, and why the walk stopped early (null if it did not).
+ */
 function gypCommands(data) {
   const out = [];
   const stack = [data];
-  let seen = 0;
-  while (stack.length && seen < GYP_MAX_NODES) {
+  let seen = 0, chars = 0, truncated = null;
+  while (stack.length) {
+    if (seen >= GYP_MAX_NODES) { truncated = `more than ${GYP_MAX_NODES} values in the gyp document`; break; }
     const node = stack.pop();
     seen++;
-    if (Array.isArray(node)) { for (const x of node) stack.push(x); continue; }
-    if (node && typeof node === "object") {
+    if (Array.isArray(node)) {
+      for (const x of node) stack.push(x);
+    } else if (node && typeof node === "object") {
       for (const [key, value] of Object.entries(node)) {
-        if (key === "action" && Array.isArray(value)) out.push([value.map(pyStr).join(" "), "action"]);
+        if (key === "action" && Array.isArray(value)) {
+          const cmd = value.map(pyStr).join(" ");
+          out.push([cmd, "action", node]);
+          chars += cpLen(cmd);
+        }
         stack.push(key);
         stack.push(value);
       }
-      continue;
+    } else if (typeof node === "string" && GYP_EXPANSION_ONE.test(node)) {
+      for (const cmd of gypExpansionCommands(node)) {
+        out.push([cmd, "expansion", null]);
+        chars += cpLen(cmd);
+        if (chars > GYP_MAX_COMMAND_CHARS) break;
+      }
     }
-    if (typeof node === "string" && GYP_EXPANSION_ONE.test(node)) {
-      GYP_EXPANSION_RE.lastIndex = 0;
-      let m;
-      while ((m = GYP_EXPANSION_RE.exec(node))) out.push([gypExpansionCommand(node, m.index), "expansion"]);
-    }
+    if (chars > GYP_MAX_COMMAND_CHARS) { truncated = `more than ${GYP_MAX_COMMAND_CHARS} characters of gyp commands`; break; }
   }
-  return out.reverse();
+  return [out.reverse(), truncated];
 }
 
 /**
  * binding.gyp custom build actions (G11 policy, same as lifecycle scripts):
  * any action is MAJOR, one matching INSTALL_HOOK_RE is CRITICAL; command
  * expansions ('<!(cmd)') are findings only when suspicious. gyp files are
- * Python literals, so JSON and Python-literal syntax are both accepted.
+ * Python literals, so JSON and Python-literal syntax are both accepted. An
+ * action's finding is on the line of its own "action" key, an expansion's on
+ * the first line holding its command; at most GYP_MAX_HOOK_FINDINGS are
+ * listed and one more sums up the rest; a document past the walk's bounds
+ * is SC-TRUNCATED. Linear in the size of the file (twin of core.scan_gyp).
  */
 export function scanGyp(path, content) {
-  const [data, issues] = loadManifest(path, content, { pythonLiteral: true });
+  const [data, issues, where] = loadManifestWhere(path, content, { pythonLiteral: true, locate: "action" });
   if (data === null) return issues;
   const body = String(content).startsWith("\ufeff") ? String(content).slice(1) : String(content);
   const lines = body.split("\n");
-  for (const [cmd, kind] of gypCommands(data)) {
+  const [commands, truncated] = gypCommands(data);
+  const hooks = [];
+  for (const [cmd, kind, node] of commands) {
     let suspicious;
     if (kind === "action") suspicious = INSTALL_HOOK_RE.test(cmd);
     else {
       suspicious = INSTALL_HOOK_RE.test(cmd.replace(GYP_NODE_REQUIRE_RE, " "));
       if (!suspicious) continue;
     }
-    const needles = kind === "expansion" ? [cmd] : cmd.split(" ");
-    const lineNo = lines.findIndex((l) => needles.some((a) => a && l.includes(a))) + 1 || 1;
-    issues.push(scInstallHookIssue(path, lineNo, lines,
+    hooks.push([cmd, kind, node, suspicious]);
+  }
+  const newlines = [];
+  if (hooks.length) for (let k = body.indexOf("\n"); k !== -1; k = body.indexOf("\n", k + 1)) newlines.push(k);
+  const lineAt = (off) => {                                           // 1 + newlines before off
+    let lo = 0, hi = newlines.length;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (newlines[mid] < off) lo = mid + 1; else hi = mid; }
+    return lo + 1;
+  };
+  const firstLine = new Map();
+  const lineOf = (cmd, kind, node) => {
+    if (kind === "action") { const at = where.get(node); return at === undefined ? 1 : lineAt(at); }
+    if (!cmd || cmd.includes("\n")) return 1;                        // no single line holds it
+    if (!firstLine.has(cmd)) { const at = body.indexOf(cmd); firstLine.set(cmd, at < 0 ? 1 : lineAt(at)); }
+    return firstLine.get(cmd);
+  };
+  // each line redacted once for all findings (mkIssue's context-free
+  // redaction: PEM blocks and secret patterns, no entropy literals)
+  registerScanContext(lines, null).secrets = new SecretLiterals([], null);
+  for (const [cmd, kind, node, suspicious] of hooks.slice(0, GYP_MAX_HOOK_FINDINGS)) {
+    issues.push(scInstallHookIssue(path, lineOf(cmd, kind, node), lines,
       kind === "action" ? "binding.gyp action" : "binding.gyp command expansion", cmd, suspicious));
   }
+  const rest = hooks.slice(GYP_MAX_HOOK_FINDINGS);
+  if (rest.length) {
+    const bad = rest.filter((h) => h[3]).length;
+    issues.push(mkIssue(
+      { id: "SC-INSTALL-HOOK", name: "Install hook", type: "HOTSPOT",
+        sev: bad ? "CRITICAL" : "MAJOR",
+        msg: `${rest.length} more binding.gyp actions and command expansions run code at install time ` +
+          `(${bad} of them fetch or evaluate code); only the first ${GYP_MAX_HOOK_FINDINGS} are listed.`,
+        why: "Each action and command expansion in a binding.gyp runs a command during `node-gyp rebuild` " +
+          "(npm install). A file with this many is listed in part so the report stays readable; this " +
+          "finding carries the highest severity among the ones not listed.",
+        fix: "Review every action and command expansion in the file; use --ignore-scripts in CI if unneeded.",
+        ref: "CWE-506 · Supply chain" }, path, lineOf(rest[0][0], rest[0][1], rest[0][2]), lines));
+  }
+  if (truncated) issues.push(truncatedIssue(path, truncated));
   return issues;
 }

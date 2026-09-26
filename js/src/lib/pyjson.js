@@ -14,8 +14,11 @@ class DepthError extends Error {}
 const WS = new Set([" ", "\t", "\n", "\r"]);
 const ESC = { '"': '"', "\\": "\\", "/": "/", b: "\b", f: "\f", n: "\n", r: "\r", t: "\t" };
 
-/** json.loads(text) → {ok, value} | {ok: false, depth: true} | {ok: false, pos} (pos in UTF-16 units). */
-export function pyJsonParse(text) {
+/**
+ * json.loads(text) → {ok, value} | {ok: false, depth: true} | {ok: false, pos} (pos in UTF-16 units).
+ * onKey(obj, key, pos), if given, is called as each member is stored (pos: its key's opening quote).
+ */
+export function pyJsonParse(text, onKey = null) {
   const s = String(text);
   const n = s.length;
   const skip = (i) => { while (i < n && WS.has(s[i])) i++; return i; };
@@ -98,12 +101,14 @@ export function pyJsonParse(text) {
     if (i >= n || s[i] !== "}") {
       for (;;) {
         if (i >= n || s[i] !== '"') throw new JsonError(i);               // Expecting property name
+        const keyAt = i;
         const [key, k2] = scanString(i + 1);
         i = skip(k2);
         if (i >= n || s[i] !== ":") throw new JsonError(i);               // Expecting ':' delimiter
         i = skip(i + 1);
         const [v, v2] = value(i);
         Object.defineProperty(obj, key, { value: v, enumerable: true, writable: true, configurable: true });
+        if (onKey) onKey(obj, key, keyAt);
         i = skip(v2);
         if (i < n && s[i] === "}") break;
         if (i >= n || s[i] !== ",") throw new JsonError(i);               // Expecting ',' delimiter
@@ -160,9 +165,11 @@ class LitValueError extends Error {}
  * adjacent concatenation, triple quotes), numbers (incl. hex/octal/binary,
  * underscores, unary +/-), True/False/None, lists, tuples, dicts, sets;
  * comments and trailing commas allowed. Dicts become objects, tuples and
- * sets arrays. Returns {ok, value} or {ok: false}.
+ * sets arrays. Returns {ok, value} or {ok: false}. onKey(obj, key, pos), if
+ * given, is called as each string-keyed member is stored (pos: where the
+ * key's first string token starts, as ast reports a Constant's position).
  */
-export function pyLiteralParse(text) {
+export function pyLiteralParse(text, onKey = null) {
   const s = String(text);
   const n = s.length;
   let i = 0, depth = 0;
@@ -177,6 +184,7 @@ export function pyLiteralParse(text) {
   const fail = () => { throw new LitError(); };
   let nonLiteral = false;              // a name/call where a literal belongs: ValueError once the syntax is fine
   let topType = null;
+  let lastStr = -1;                    // start of the last string literal value() returned
   function str() {
     let raw = false, bytes = false;
     const pm = /^([rRuUbB]{0,2})(['"])/.exec(s.slice(i, i + 3));
@@ -277,12 +285,16 @@ export function pyLiteralParse(text) {
         if (s[i] === "}") { i++; v = {}; }
         else {
           const k = value();
+          const kAt = lastStr;
           ws();
           if (s[i] === ":") {
             i++;
             const obj = {};
-            const put = (key, val) => Object.defineProperty(obj, String(key), { value: val, enumerable: true, writable: true, configurable: true });
-            put(k, value());
+            const put = (key, at, val) => {
+              Object.defineProperty(obj, String(key), { value: val, enumerable: true, writable: true, configurable: true });
+              if (onKey && typeof key === "string") onKey(obj, key, at);
+            };
+            put(k, kAt, value());
             for (;;) {
               ws();
               if (s[i] === "}") { i++; break; }
@@ -291,10 +303,11 @@ export function pyLiteralParse(text) {
               ws();
               if (s[i] === "}") { i++; break; }
               const key = value();
+              const at = lastStr;
               ws();
               if (s[i] !== ":") fail();
               i++;
-              put(key, value());
+              put(key, at, value());
             }
             v = obj;
           } else {
@@ -311,11 +324,12 @@ export function pyLiteralParse(text) {
       return v;
     }
     if (c === "'" || c === '"' || (/[rRuUbB]/.test(c) && /^[rRuUbB]{1,2}['"]/.test(s.slice(i, i + 3)))) {
+      const start = i;
       let out = str();
       for (;;) {                                                           // implicit concatenation
         ws();
         if (s[i] === "'" || s[i] === '"' || /^[rRuUbB]{1,2}['"]/.test(s.slice(i, i + 3))) out += str();
-        else return out;
+        else { lastStr = start; return out; }
       }
     }
     if (c === "-" || c === "+") { i++; ws(); const v = value(); if (typeof v !== "number") fail(); return c === "-" ? -v : v; }
