@@ -2347,6 +2347,16 @@ def pg_insecure_auth_options(environ=None):
     return {kw: True for var, kw in PG_INSECURE_AUTH_ENV.items() if env.get(var) == "1"}
 
 
+def _cursor_table(t=""):
+    """DDL of the discovery cursors (the same for SQLite and Postgres): where
+    `discover --resume` continues for each registry. seq is PyPI's changelog
+    serial or npm's replication sequence number, as text; seq_time (the time
+    of that change, when known) and updated_at are ISO 8601 UTC."""
+    return (f"CREATE TABLE IF NOT EXISTS {t}discovery_cursors ("
+            f"ecosystem TEXT PRIMARY KEY, seq TEXT NOT NULL, seq_time TEXT, "
+            f"updated_at TEXT NOT NULL)")
+
+
 class Store:
     def __init__(self, dsn):
         kind, target = classify_dsn(dsn)
@@ -2443,7 +2453,8 @@ class Store:
 
     def _init_schema(self):
         """Create the tables, and migrate older ones in place (idempotent):
-        scans.artifacts holds the per-file detail of multi-artifact scans."""
+        scans.artifacts holds the per-file detail of multi-artifact scans;
+        discovery_cursors is created in databases made before it."""
         if self.pg:
             # Postgres DDL (SERIAL / JSONB): execute_script runs the whole
             # script as ONE implicit transaction via the simple protocol.
@@ -2460,7 +2471,8 @@ class Store:
                 UNIQUE (package_id, version, profile, engine_version));
                 ALTER TABLE {self.t}scans ADD COLUMN IF NOT EXISTS artifacts JSONB;
                 CREATE INDEX IF NOT EXISTS idx_scans_package
-                ON {self.t}scans(package_id, scanned_at DESC)""")
+                ON {self.t}scans(package_id, scanned_at DESC);
+                {_cursor_table(self.t)}""")
             return
         cur = self.conn.cursor()
         serial, jsontype = "INTEGER PRIMARY KEY AUTOINCREMENT", "TEXT"
@@ -2481,6 +2493,7 @@ class Store:
         # G20: WAL already set at connect; index for the status() lateral join
         cur.execute(f"CREATE INDEX IF NOT EXISTS idx_scans_package "
                     f"ON {self.t}scans(package_id, scanned_at DESC)")
+        cur.execute(_cursor_table(self.t))
         self.conn.commit()
 
     def _pg_call(self, run):
@@ -2653,6 +2666,37 @@ class Store:
         try:
             self.conn.execute("BEGIN IMMEDIATE")
             cur.execute(columns + f"VALUES ({','.join([self.ph] * 15)}) {conflict_key}", values)
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def discovery_cursor(self, eco):
+        """Where `discover --resume` continues for one registry, as stored:
+        (seq, seq_time, updated_at) text, seq_time possibly None; None when
+        no cursor was stored yet."""
+        row = self._one(f"SELECT seq, seq_time, updated_at FROM {self.t}discovery_cursors "
+                        f"WHERE ecosystem={self._phs(1)[0]}", (eco,))
+        return tuple(row) if row else None
+
+    def save_discovery_cursor(self, eco, seq, seq_time=None):
+        """Store a registry's discovery cursor: seq (PyPI changelog serial,
+        npm replication sequence number) and the time of that change when
+        known (a datetime, stored as ISO 8601 UTC text). One idempotent
+        upsert, like every Store write, so _pg_call may retry it."""
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+        if seq_time is not None:
+            seq_time = seq_time.astimezone(datetime.timezone.utc).isoformat(timespec="seconds")
+        sql = (f"INSERT INTO {self.t}discovery_cursors (ecosystem,seq,seq_time,updated_at) "
+               f"VALUES ({','.join(self._phs(4))}) ON CONFLICT (ecosystem) DO UPDATE SET "
+               f"seq=excluded.seq, seq_time=excluded.seq_time, updated_at=excluded.updated_at")
+        values = (eco, str(seq), seq_time, now)
+        if self.pg:
+            self._pg_call(lambda: self.conn.execute(sql, *values))
+            return
+        try:
+            self.conn.execute("BEGIN IMMEDIATE")
+            self.conn.execute(sql, values)
             self.conn.commit()
         except Exception:
             self.conn.rollback()

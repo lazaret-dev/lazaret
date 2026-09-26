@@ -56,5 +56,14 @@ ALTER TABLE scans ADD COLUMN IF NOT EXISTS artifacts JSONB;
 CREATE INDEX IF NOT EXISTS idx_scans_package ON scans(package_id, scanned_at DESC);
 CREATE INDEX IF NOT EXISTS idx_scans_verdict ON scans(verdict);
 
-GRANT SELECT, INSERT, UPDATE, DELETE ON packages, scans TO lazaret_app;
+-- `discover --resume`: where each registry's change feed was read up to, so
+-- the next run continues there and sees every release in between
+CREATE TABLE IF NOT EXISTS discovery_cursors (
+    ecosystem  TEXT PRIMARY KEY,         -- 'npm' | 'pypi'
+    seq        TEXT NOT NULL,            -- PyPI changelog serial / npm replication seq
+    seq_time   TEXT,                     -- when that change was made, if known (ISO 8601 UTC)
+    updated_at TEXT NOT NULL             -- when a --resume run last stored it
+);
+
+GRANT SELECT, INSERT, UPDATE, DELETE ON packages, scans, discovery_cursors TO lazaret_app;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO lazaret_app;
