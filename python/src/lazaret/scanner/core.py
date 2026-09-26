@@ -1253,12 +1253,20 @@ def string_literal_mask(line, lang=None):
 
 def _find_marker(line, spans):
     """The first SUPPRESS_RE match on `line` whose introducer lies inside one
-    of the line's comment spans, else None."""
+    of the line's comment spans, else None. `spans` is sorted and
+    non-overlapping, and matches come in order, so one moving index answers
+    every containment test (review: testing every span for every match was
+    O(matches × spans), 20 s for one 200 KB line)."""
     if not spans:
         return None
+    k, n = 0, len(spans)
     for m in SUPPRESS_RE.finditer(line):
         p = m.start()
-        if any(a <= p < b for a, b in spans):
+        while k < n and spans[k][1] <= p:
+            k += 1
+        if k == n:
+            return None
+        if spans[k][0] <= p:
             return m
     return None
 
@@ -1998,8 +2006,11 @@ class _FileCtx(_Redactor):
         base = self._starts[i]
         cuts = list(self.cspans.get(i, ())) if drop_comments else []
         edits = [(a, b, "") for a, b in cuts]
+        c, ncuts = 0, len(cuts)             # cuts are sorted: one moving index
         for m in _JS_UESC_RE.finditer(line):
-            if any(a <= m.start() < b for a, b in cuts):
+            while c < ncuts and cuts[c][1] <= m.start():
+                c += 1
+            if c < ncuts and cuts[c][0] <= m.start():
                 continue
             k = bisect.bisect_right(self._str_starts, base + m.start()) - 1
             if k >= 0 and self._strings[k][1] > base + m.start():

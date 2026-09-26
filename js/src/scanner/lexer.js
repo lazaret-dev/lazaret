@@ -159,7 +159,15 @@ export function lexLines(lines, lang, content = null) {
       comment[j] = pyStrip(c) === "" && pyStrip(line) !== "" ? 1 : 0;
     }
   }
-  const inComment = (j, p) => (spans.get(j) || []).some(([a, b]) => a <= p && p < b);
+  // A line's spans are sorted and disjoint: binary search, not a scan of
+  // every span per query (review: O(markers × spans), seconds on one line).
+  const inComment = (j, p) => {
+    const list = spans.get(j);
+    if (!list) return false;
+    let lo = 0, hi = list.length;                  // first span ending after p
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (list[mid][1] <= p) lo = mid + 1; else hi = mid; }
+    return lo < list.length && list[lo][0] <= p;
+  };
   return { comment, spans, code, strings, starts, content, inComment };
 }
 

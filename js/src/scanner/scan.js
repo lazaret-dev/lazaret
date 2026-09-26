@@ -99,10 +99,11 @@ class FileCtx {
     const cuts = dropComments ? (this.lex.spans.get(i) || []) : [];
     const edits = cuts.map(([a, b]) => [a, b, ""]);
     JS_UESC_RE.lastIndex = 0;
-    let m;
+    let m, c = 0;                                  // cuts are sorted: one moving index
     while ((m = JS_UESC_RE.exec(line))) {
       const at = m.index;
-      if (cuts.some(([a, b]) => a <= at && at < b)) continue;
+      while (c < cuts.length && cuts[c][1] <= at) c++;
+      if (c < cuts.length && cuts[c][0] <= at) continue;
       const k = upperBound(this._strStarts, base + at) - 1;
       if (k >= 0 && this.lex.strings[k][1] > base + at) continue;   // inside a '…' or "…" literal
       const cp = parseInt(m[1] ?? m[2], 16);
