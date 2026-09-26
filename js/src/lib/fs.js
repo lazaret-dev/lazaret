@@ -153,6 +153,17 @@ export function readBounded(path, limit) {
 }
 
 function lexists(p) { try { lstatSync(p); return true; } catch { return false; } }
+/**
+ * A directory's identity for the loop check, from a { bigint: true } stat,
+ * or null when the filesystem has no inode numbers. Number stats are not
+ * enough: a Windows file ID is 64 bits (NTFS: a 16-bit sequence number
+ * above a 48-bit record number), a double keeps 53, and nearby directories
+ * rounded to the same number, so a directory was skipped as "already
+ * visited" (a 600-level test tree on windows-latest found no files).
+ */
+export function dirKey(st) {
+  return st.ino ? `${st.dev}:${st.ino}` : null;
+}
 function childPath(dirBuf, nameBuf) { return Buffer.concat([dirBuf, SEP, nameBuf]); }
 const byName = (a, b) => (a.str < b.str ? -1 : a.str > b.str ? 1 : 0);
 
@@ -241,7 +252,7 @@ export function collectFiles(root, { includeDeps = false, exclude = [], maxFileB
     let entries;
     try {
       entries = listDir(dir.buf);
-      if (!dir.rel) { const st = statSync(dir.buf); if (st.ino) seen.add(`${st.dev}:${st.ino}`); }
+      if (!dir.rel) { const key = dirKey(statSync(dir.buf, { bigint: true })); if (key) seen.add(key); }
     } catch (e) {
       if (!dir.rel) throw new ScanTargetError(`cannot read directory ${fsNameToString(rootBuf)}: ${strerror(e)}`);
       issues.push(unreadableIssue(dir.rel, strerror(e)));
@@ -272,9 +283,10 @@ export function collectFiles(root, { includeDeps = false, exclude = [], maxFileB
         try { checkPycache(full, rel, names, issues); } catch (e) { issues.push(scanErrorIssue(rel, e)); }
         continue;
       }
-      const key = `${st.dev}:${st.ino}`;
-      if (st.ino && seen.has(key)) { issues.push(unreadableIssue(rel, "directory already visited (filesystem loop)")); continue; }
-      if (st.ino) seen.add(key);
+      let key = null;
+      try { key = dirKey(lstatSync(full, { bigint: true })); } catch { /* no identity: walked, not loop-checked */ }
+      if (key && seen.has(key)) { issues.push(unreadableIssue(rel, "directory already visited (filesystem loop)")); continue; }
+      if (key) seen.add(key);
       const dep = dir.dep || isDependencyTree(name, full);
       if (dep && !dir.dep && !includeDeps) { skipTree(full, rel); continue; }
       push.push({ buf: full, rel, dep });
