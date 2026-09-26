@@ -314,7 +314,7 @@ class EngineParityTests(unittest.TestCase):
                                  "SC-PYC-UNCHECKED", "SC-BINARY", "SC-TRUNCATED", "SC-MANIFEST-UNPARSEABLE"):
                         self.assertIn(rule, rules)
                     self.assertEqual("Q-SKIPPED-TREE" in rules, True)
-                    found = {(i["rule"], i["file"]) for i in js[1]["issues"]}
+                    found = {(i["rule"], i["file"].replace("\\", "/")) for i in js[1]["issues"]}
                     self.assertIn(("SC-EVAL-DECODE", "enc/nul-top.js"), found)
                     self.assertNotIn(("Q-ENCODING", "enc/nul-top.js"), found)
                     self.assertIn(("Q-ENCODING", "enc/le16_nobom.py"), found)
@@ -344,7 +344,8 @@ class EngineParityTests(unittest.TestCase):
                     f.write(text)
             js, py = both(root)
             self.assert_same(js, py, label="manifest depth")
-            deep = sorted(i["file"] for i in py[1]["issues"] if i["rule"] == "SC-MANIFEST-DEPTH")
+            deep = sorted(i["file"].replace("\\", "/") for i in py[1]["issues"]
+                          if i["rule"] == "SC-MANIFEST-DEPTH")
             self.assertEqual(deep, ["late/package.json", "native/binding.gyp", "package.json"])
             self.assertEqual((js[0], py[0]), (1, 1))
 

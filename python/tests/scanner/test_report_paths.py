@@ -130,6 +130,13 @@ class TestValidatePaths(unittest.TestCase):
     def _path(self, name):
         return os.path.join(self.tmp, name)
 
+    def _symlink(self, target, link, **kw):
+        # Windows runners without the symlink privilege raise OSError
+        try:
+            os.symlink(target, link, **kw)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"cannot create symlinks here: {exc}")
+
     def test_plain_writable_dir_passes(self):
         p = self._path("lazaret-report.json")
         cr.validate_report_paths({"json": p})
@@ -185,7 +192,7 @@ class TestValidatePaths(unittest.TestCase):
         with open(real, "w") as fh:
             fh.write("data")
         p = self._path("link.json")
-        os.symlink(real, p)
+        self._symlink(real, p)
         for strict in (False, True):
             with self.assertRaises(cr.ReportPathError) as cm:
                 cr.validate_report_paths({"json": p}, strict=strict)
@@ -201,7 +208,7 @@ class TestValidatePaths(unittest.TestCase):
         realdir = os.path.join(self.tmp, "realdir")
         os.makedirs(realdir)
         dirlink = os.path.join(self.tmp, "dirlink")
-        os.symlink(realdir, dirlink)
+        self._symlink(realdir, dirlink, target_is_directory=True)
         dest = os.path.join(dirlink, "lazaret-report.json")
         with open(os.path.join(realdir, "lazaret-report.json"), "w") as fh:
             fh.write("old")
@@ -223,7 +230,7 @@ class TestValidatePaths(unittest.TestCase):
         with open(real, "w") as fh:
             fh.write("data")
         p = self._path("link.json")
-        os.symlink(real, p)
+        self._symlink(real, p)
         with self.assertRaises(cr.ReportPathError):
             cr.validate_report_paths({"json": p}, strict=True)
 

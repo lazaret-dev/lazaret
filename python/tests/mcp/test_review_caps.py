@@ -14,11 +14,13 @@ Fixtures are inert text; the network seam is patched.
 """
 
 import atexit
+import contextlib
 import datetime
 import json
 import os
 import shutil
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -39,6 +41,21 @@ def tree(files):
 
 
 STRONG = ("BLOCKER", "CRITICAL")
+
+
+@contextlib.contextmanager
+def expired_call():
+    """Run a tool with a call context whose deadline has already passed. (A
+    tiny LAZARET_MCP_MAX_SECONDS is not enough: time.monotonic() ticks every
+    ~16 ms on Windows before Python 3.13, so the deadline may not be past
+    yet when the tool checks it.)"""
+    ctx = server.ToolContext()
+    ctx.deadline = time.monotonic() - 1
+    server._LOCAL.ctx = ctx
+    try:
+        yield ctx
+    finally:
+        server._LOCAL.ctx = None
 
 
 class ScanFilesCapTests(unittest.TestCase):
@@ -69,7 +86,7 @@ class ScanFilesCapTests(unittest.TestCase):
         self.check_capped(out, self.paths[1:])
 
     def test_time_cap(self):
-        with mock.patch.dict(os.environ, {"LAZARET_MCP_MAX_SECONDS": "0.000001"}):
+        with expired_call():
             out = server.tool_scan_files({"paths": self.paths})
         self.check_capped(out, self.paths)
         self.assertEqual(out["totalIssues"], 3)
@@ -83,12 +100,13 @@ class ScanFilesCapTests(unittest.TestCase):
 class ProjectToolCapTests(unittest.TestCase):
     CAPS = {"files": {"LAZARET_MCP_MAX_FILES": "2"},
             "bytes": {"LAZARET_MCP_MAX_BYTES": "3"},
-            "time": {"LAZARET_MCP_MAX_SECONDS": "0.000001"}}
+            "time": None}
 
     def test_scan_directory_and_quality_gate(self):
         root = tree({f"m{i}.py": "x = 1\n" for i in range(4)})
         for cap, env in self.CAPS.items():
-            with self.subTest(cap=cap), mock.patch.dict(os.environ, env):
+            with self.subTest(cap=cap), (mock.patch.dict(os.environ, env) if env
+                                         else expired_call()):
                 out = server.tool_scan_directory({"path": root})
                 self.assertTrue(out["incomplete"])
                 self.assertEqual(out["qualityGate"], "FAILED")
@@ -114,21 +132,20 @@ def registry_patches(db, found=()):
 
 
 class RegistryToolCapTests(unittest.TestCase):
-    def run_patched(self, fn, found=(), env=None):
+    def run_patched(self, fn, found=(), expired=False):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
             patches = registry_patches(os.path.join(d, "r.db"), found)
             for p in patches:
                 p.start()
             try:
-                with mock.patch.dict(os.environ, env or {}):
+                with (expired_call() if expired else contextlib.nullcontext()):
                     return fn()
             finally:
                 for p in reversed(patches):
                     p.stop()
 
     def test_scan_package_past_its_deadline(self):
-        out = self.run_patched(lambda: server.tool_scan_package({"spec": "npm:g"}),
-                               env={"LAZARET_MCP_MAX_SECONDS": "0.000001"})
+        out = self.run_patched(lambda: server.tool_scan_package({"spec": "npm:g"}), expired=True)
         self.assertEqual(out["verdict"], "INCOMPLETE")
         self.assertIn("SC-TRUNCATED", {i["rule"] for i in out["issues"]})
 
@@ -148,7 +165,7 @@ class RegistryToolCapTests(unittest.TestCase):
     def test_discover_past_the_deadline(self):
         found = [("npm", "a", "1.0.0", NOW), ("npm", "b", None, NOW)]
         out = self.run_patched(lambda: server.tool_discover_packages({"since": "1d", "scan": True}),
-                               found=found, env={"LAZARET_MCP_MAX_SECONDS": "0.000001"})
+                               found=found, expired=True)
         self.assertEqual({r["package"]: r["verdict"] for r in out["scanned"]},
                          {"npm:a@1.0.0": "INCOMPLETE", "npm:b": "INCOMPLETE"})
         self.assertTrue(out["incomplete"])
