@@ -158,7 +158,9 @@ jobs:
       # nothing else, so this version stays hidden until a maintainer
       # approves it with 2FA: npmjs.com -> lazaret -> Staged Packages, or
       # `npm stage approve <stage-id>`. The tarball is the one build-npm packed.
-      - run: npm stage publish "npm-dist/lazaret-${GITHUB_REF_NAME#v}.tgz"
+      # The leading ./ matters: npm reads "npm-dist/x.tgz" as the GitHub
+      # repository npm-dist/x.tgz and tries to clone it (the v0.1.0 run did).
+      - run: npm stage publish "./npm-dist/lazaret-${GITHUB_REF_NAME#v}.tgz"
       - name: Approval reminder
         run: >-
           echo "lazaret ${GITHUB_REF_NAME} is staged on npm, not yet public. Approve it with 2FA at
