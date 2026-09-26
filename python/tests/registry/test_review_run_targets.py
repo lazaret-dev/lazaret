@@ -11,15 +11,20 @@
   A file reached that way is scanned as JavaScript now (text of any
   extension), or counted as not scanned; an image, font or stylesheet that
   isn't text is a bundler asset (React Native's require('./icon.png')).
+- "exports" targets containing "*" were skipped, so `"./*": "./lib/*.dat"`
+  exported code nothing scanned. A pattern target is expanded against the
+  archive's members now (Node substitutes the subpath, which may contain
+  "/", for every "*"); the exported-asset exemption applies to the matches.
 
 Payloads are the inert DECODE_EXEC_*/EXFIL_JS markers of _review_support.
 """
 
+import gzip
 import unittest
 
 from lazaret.registry import repo
 from tests.registry._review_support import (
-    DECODE_EXEC_JS, EXFIL_JS, hooks, issues, manifest, scan_npm)
+    DECODE_EXEC_JS, EXFIL_JS, hooks, issues, manifest, scan_bytes, scan_npm, tar_member)
 
 PNG = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + b"\x00" * 13 + b"\x00\x00\x00\x00IEND\xaeB`\x82"
 BLOB = bytes((i * 7919) % 256 for i in range(4096))
@@ -103,6 +108,63 @@ class RequiredFilesTests(unittest.TestCase):
                         "index.js": "require('./data.json');\nrequire('./build/addon');\n",
                         "data.json": "{}", "build/addon.node": b"\x7fELF\x02\x01\x01" + b"\0" * 64})
         self.assertNotEqual(res["verdict"], "INCOMPLETE", res["verdictReason"])
+
+
+class ExportsPatternTests(unittest.TestCase):
+    def test_a_pattern_target_is_expanded(self):
+        res = scan_npm({"package.json": manifest(exports={".": "./index.js", "./*": "./lib/*.dat"}),
+                        "index.js": "module.exports = 1;\n", "lib/core.dat": DECODE_EXEC_JS})
+        self.assertEqual(res["verdict"], "SUSPICIOUS", res["verdictReason"])
+        self.assertIn("lib/core.dat", {i["file"] for i in issues(res, "SC-EVAL-DECODE")})
+
+    def test_under_conditions_and_with_nested_subpaths(self):
+        res = scan_npm({"package.json": manifest(exports={
+                            "./features/*": {"import": "./esm/features/*.mjs.txt",
+                                             "require": "./cjs/features/*.cjs.txt"}}),
+                        "cjs/features/a/b.cjs.txt": DECODE_EXEC_JS,
+                        "esm/features/a/b.mjs.txt": "export default 1;\n"})
+        self.assertEqual(res["verdict"], "SUSPICIOUS", res["verdictReason"])
+        self.assertIn("cjs/features/a/b.cjs.txt", {i["file"] for i in issues(res, "SC-EVAL-DECODE")})
+        self.assertEqual(res["filesScanned"], 2)
+
+    def test_every_star_is_the_same_subpath(self):
+        rx = repo._pattern_regex("lib/*/*.dat")
+        self.assertTrue(rx.fullmatch("lib/x/x.dat"))
+        self.assertTrue(rx.fullmatch("lib/a/b/a/b.dat"))
+        self.assertFalse(rx.fullmatch("lib/x/y.dat"))
+        self.assertFalse(repo._pattern_regex("lib/*.dat").fullmatch("lib/.dat"))
+
+    def test_exported_assets_stay_exempt(self):
+        res = scan_npm({"package.json": manifest(exports={".": "./index.js", "./*.css": "./dist/*.css",
+                                                          "./icons/*": "./dist/icons/*.png"}),
+                        "index.js": "module.exports = 1;\n", "dist/a.css": DECODE_EXEC_JS,
+                        "dist/icons/x.png": PNG})
+        self.assertEqual(res["verdict"], "OK", res["verdictReason"])
+
+    def test_a_match_that_is_not_text_is_incomplete(self):
+        res = scan_npm({"package.json": manifest(exports={"./*": "./lib/*"}),
+                        "lib/tool.bin": BLOB, "lib/a.js": "module.exports = 1;\n"})
+        self.assertEqual(res["verdict"], "INCOMPLETE", res["verdictReason"])
+
+    def test_more_than_ten_thousand_exported_files(self):
+        # _reachable() stopped once it had seen 10,000 files, and it starts
+        # from all of them: the files they require were never followed
+        files = {f"lib/m{i:05d}.js": "module.exports = 1;\n" for i in range(10_050)}
+        files["lib/m00007.js"] = "module.exports = require('../data/x.dat');\n"
+        files["data/x.dat"] = DECODE_EXEC_JS
+        files["package.json"] = manifest(exports={"./*": "./lib/*.js"})
+        # (joined once: the shared tarball() helper is quadratic at this size)
+        data = gzip.compress(b"".join(tar_member("package/" + p, c) for p, c in files.items())
+                             + b"\0" * 1024)
+        res = scan_bytes(data)
+        self.assertEqual(res["verdict"], "SUSPICIOUS", res["verdictReason"])
+        self.assertIn("data/x.dat", {i["file"] for i in issues(res, "SC-EVAL-DECODE")})
+
+    def test_a_star_outside_a_pattern_key_is_literal(self):
+        targets = repo._package_entry_targets({"exports": {"./x": "./lib/*.dat",
+                                                           "./y/*": {"default": "./y/*.js"}}})
+        self.assertIn(("./y/*.js", True), targets)
+        self.assertNotIn(("./lib/*.dat", True), targets)
 
 
 if __name__ == "__main__":

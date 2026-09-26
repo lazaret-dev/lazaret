@@ -33,6 +33,7 @@ total); the verdict is the worst of them.
 """
 import argparse
 import base64
+import bisect
 import bz2
 import datetime
 import hashlib
@@ -1294,7 +1295,10 @@ def _rel_join(base, target):
 
 # Entry points declared in package.json: what `require(pkg)`, `import pkg`
 # and the installed command run, as (target, exported) pairs: `exported` for
-# the targets of "exports", which may be assets a bundler loads.
+# the targets of "exports", which may be assets a bundler loads. A target
+# under a subpath-pattern key ("./*": "./lib/*.js") keeps its "*": it stands
+# for any subpath, and _ArtifactScan expands it against the archive (these
+# used to be skipped, so "./*": "./lib/*.dat" exported unscanned code).
 def _package_entry_targets(data):
     targets = []
     main = data.get("main")
@@ -1305,18 +1309,28 @@ def _package_entry_targets(data):
         targets.append((bins, False))
     elif isinstance(bins, dict):
         targets += [(v, False) for v in bins.values() if isinstance(v, str)]
-    stack, nodes = [data.get("exports")], 0
+    stack, nodes = [(data.get("exports"), False)], 0
     while stack and nodes < 10_000:
-        node = stack.pop()
+        node, pattern = stack.pop()
         nodes += 1
         if isinstance(node, str):
-            if node.startswith("./") and "*" not in node:
+            # a "*" outside a pattern key is taken literally by Node: skipped as before
+            if node.startswith("./") and (pattern or "*" not in node):
                 targets.append((node, True))
         elif isinstance(node, dict):
-            stack.extend(node.values())
+            stack.extend((v, pattern or (isinstance(k, str) and "*" in k)) for k, v in node.items())
         elif isinstance(node, list):
-            stack.extend(node)
+            stack.extend((v, pattern) for v in node)
     return targets
+
+
+def _pattern_regex(pattern):
+    """Regex for the members an exports pattern target resolves to: Node puts
+    the matched subpath (non-empty; it may contain '/') in place of every
+    '*' of the target."""
+    head, *tails = pattern.split("*")
+    return re.compile(re.escape(head) + "(.+)" + re.escape(tails[0])
+                      + "".join(r"\1" + re.escape(t) for t in tails[1:]))
 
 
 _JS_LOCAL_DEP_RE = re.compile(
@@ -1637,11 +1651,33 @@ class _ArtifactScan:
 
     def _entry_points(self, manifest_rel, data):
         base = posixpath.dirname(manifest_rel)
+        patterns = set()
         for target, exported in _package_entry_targets(data):
+            if exported and "*" in target:
+                patterns.add(_rel_join(base, target))
+                continue
             rel = self._find(_node_candidates(_rel_join(base, target)))
             if rel:
                 self.entries.add(rel)
                 self._text_of(rel, "js", exported)
+        if patterns:
+            self._exported_patterns(patterns)
+
+    def _exported_patterns(self, patterns):
+        """Every member an exports pattern target can resolve to is exported
+        code (the exported-asset exemption applies): "./*": "./lib/*.dat"
+        exports lib/**/*.dat, which `require('pkg/x')` runs."""
+        members = sorted(self.members)
+        for pattern in sorted(patterns):
+            self._deadline("the exports patterns")
+            head = pattern.split("*", 1)[0]
+            rx = _pattern_regex(pattern)
+            for rel in members[bisect.bisect_left(members, head):]:
+                if not rel.startswith(head):
+                    break
+                if rx.fullmatch(rel):
+                    self.entries.add(rel)
+                    self._text_of(rel, "js", exported=True)
 
     def _implicit_gyp_hook(self, manifest_rel, data):
         """npm runs `node-gyp rebuild` for a root binding.gyp when the package
@@ -1723,8 +1759,11 @@ class _ArtifactScan:
         scanned yet (index.js requiring ./lib/core.dat) is scanned now as
         JavaScript, or counted as not scanned. They used to be found and
         left alone, so a payload one require() away from main was OK."""
+        # `seen` holds archive members only (at most MAX_FILES) and the deadline
+        # is checked per file; the old cap of 10,000 files skipped the walk
+        # altogether once exports patterns made that many files entry points
         seen, queue = set(self.entries), list(self.entries)
-        while queue and len(seen) < 10_000:
+        while queue:
             rel = queue.pop()
             self._deadline(rel)
             text, lang = self.sources.get(rel, (None, None))
