@@ -12,6 +12,7 @@ compared over every code point up to U+2FFF.
 """
 import json
 import os
+import pathlib
 import shutil
 import subprocess
 import unittest
@@ -56,7 +57,8 @@ class SanitizeTermC1Bidi(unittest.TestCase):
 
 _NODE_SCRIPT = r"""
 import { sanitizeTerm, safeExcerpt } from %s;
-const cps = JSON.parse(process.argv[1]);
+import { readFileSync } from "node:fs";
+const cps = JSON.parse(readFileSync(0, "utf8"));   // stdin: 12k code points overflow a Windows command line
 const out = { term: [], excerpt: [] };
 for (const n of cps) {
   const s = "a" + String.fromCodePoint(n) + "b";
@@ -70,9 +72,10 @@ process.stdout.write(JSON.stringify(out));
 @unittest.skipUnless(NODE, "node is not installed")
 class SameAsTheNpmEngine(unittest.TestCase):
     def _js(self, cps):
-        url = "file://" + REPORT_JS.replace(os.sep, "/")
-        p = subprocess.run([NODE, "--input-type=module", "-e", _NODE_SCRIPT % json.dumps(url),
-                            json.dumps(cps)], capture_output=True, encoding="utf-8", timeout=30)
+        url = pathlib.Path(REPORT_JS).resolve().as_uri()   # file:///C:/... on Windows
+        p = subprocess.run([NODE, "--input-type=module", "-e", _NODE_SCRIPT % json.dumps(url)],
+                           input=json.dumps(cps), capture_output=True, encoding="utf-8",
+                           errors="replace", timeout=30)
         self.assertEqual(p.returncode, 0, p.stderr)
         return json.loads(p.stdout)
 

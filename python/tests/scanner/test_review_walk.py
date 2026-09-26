@@ -15,6 +15,7 @@
 
 Fixtures are inert; the "outside" credential is a dummy string.
 """
+import errno
 import json
 import os
 import shutil
@@ -144,7 +145,15 @@ class DeepTree(unittest.TestCase):
         path = root
         for _ in range(self.DEPTH):         # os.makedirs recurses too
             path = os.path.join(path, "d")
-            os.mkdir(path)
+            try:
+                os.mkdir(path)
+            except OSError as exc:
+                # macOS caps a path at 1024 bytes (PATH_MAX); Linux allows 4096
+                # and the Windows runners have long paths enabled
+                if exc.errno != errno.ENAMETOOLONG:
+                    raise
+                self.skipTest(f"this OS limits paths to fewer bytes than a "
+                              f"{self.DEPTH}-level tree needs (macOS: 1024)")
         with open(os.path.join(path, "leaf.py"), "w", encoding="utf-8") as fh:
             fh.write("eval(x)\n")
         with open(os.path.join(root, "a.py"), "w", encoding="utf-8") as fh:

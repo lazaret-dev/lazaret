@@ -29,7 +29,7 @@ class StdlibOnlyTests(unittest.TestCase):
         offenders = [
             f"{path}:{line} imports {name}"
             for root in ROOTS
-            for path in sorted(root.rglob("*.py"))
+            for path in sorted(root.rglob("*.py"), key=lambda p: p.as_posix())
             for name, line in imported_modules(path)
             if name not in sys.stdlib_module_names and name not in FIRST_PARTY
         ]

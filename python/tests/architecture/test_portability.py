@@ -18,6 +18,9 @@ not code we run):
 4. No hard-coded /tmp or /var/... directory is used as a filesystem path
    (they don't exist on Windows, and /var is a symlink on macOS); use
    tempfile.
+5. Paths from glob()/rglob()/iterdir() are not sorted as Path objects without
+   a key=: Windows compares Paths case-insensitively ('ElementTree.py' after
+   '__init__.py'), POSIX by code point. Sort their as_posix() strings.
 """
 
 import ast
@@ -102,6 +105,14 @@ def violations():
                 found.append(f"{where}: {name}() without encoding=")
             elif name in ("getpreferredencoding", "getencoding"):
                 found.append(f"{where}: locale.{name}() (depends on the host)")
+            elif name == "sorted" and owner is None and "key" not in kw and node.args \
+                    and isinstance(node.args[0], ast.Call) \
+                    and call_name(node.args[0])[0] in ("glob", "rglob", "iterdir") \
+                    and call_name(node.args[0])[1] is not None \
+                    and not (isinstance(call_name(node.args[0])[1], ast.Name)
+                             and call_name(node.args[0])[1].id == "glob"):   # glob.glob: strings
+                found.append(f"{where}: sorted() of Path objects is case-insensitive on Windows; "
+                             "pass key=lambda p: p.as_posix()")
             if name in PATH_CALLS and node.args:
                 first = node.args[0]
                 if isinstance(first, ast.Constant) and isinstance(first.value, str) \
@@ -172,9 +183,11 @@ class CrossPlatformRulesTests(unittest.TestCase):
         bad = ('import subprocess, io, locale\n'
                'open("x")\nopen("x", "w")\nio.open("x", "r")\n'
                'subprocess.run(["x"], text=True)\n'
-               'p.read_text()\nlocale.getpreferredencoding()\nopen("/tmp/x", "wb")\n')
+               'p.read_text()\nlocale.getpreferredencoding()\nopen("/tmp/x", "wb")\n'
+               'sorted(p.rglob("*"))\n')
         ok = ('import subprocess\nopen("x", "rb")\nopen("x", encoding="utf-8")\n'
-              'subprocess.run(["x"], text=True, encoding="utf-8")\np.read_text(encoding="utf-8")\n')
+              'subprocess.run(["x"], text=True, encoding="utf-8")\np.read_text(encoding="utf-8")\n'
+              'sorted(p.rglob("*"), key=str)\nsorted(glob.glob("*"))\n')
         import tempfile
         with tempfile.TemporaryDirectory() as d:
             global TREES
@@ -188,7 +201,7 @@ class CrossPlatformRulesTests(unittest.TestCase):
                 got = violations()
             finally:
                 TREES = saved
-        self.assertEqual(len(got), 7, "\n".join(got))
+        self.assertEqual(len(got), 8, "\n".join(got))
         self.assertTrue(all("bad.py" in g for g in got), got)
 
 

@@ -53,13 +53,15 @@ def load_backend(root):
 
 
 def old_package_listing(pkg):
-    """What the pre-fix backend packed: every file except bytecode."""
+    """What the pre-fix backend packed: every file except bytecode, sorted as
+    strings (as the backend sorts): sorted() of Path objects is
+    case-insensitive on Windows, so 'ElementTree.py' would follow '__init__.py'."""
     out = []
-    for path in sorted(pathlib.Path(pkg).rglob("*")):
+    for path in pathlib.Path(pkg).rglob("*"):
         rel = path.relative_to(pkg)
         if path.is_file() and "__pycache__" not in rel.parts and path.suffix not in (".pyc", ".pyo"):
             out.append("lazaret/" + rel.as_posix())
-    return out
+    return sorted(out)
 
 
 class Tree:
