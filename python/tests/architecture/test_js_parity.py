@@ -170,6 +170,12 @@ ADVERSARIAL = {
     "big/huge.js": "var y = 2;\n" * 210000,                          # > 2 MB source
     "dup/a.py": "".join(f"v{i} = compute({i})\n" for i in range(8)),
     "dup/b.py": "".join(f"v{i} = compute({i})\n" for i in range(8)),
+    # scripts by their #! line (no source extension): node / python scanned, shell not
+    "bin/cli": "#!/usr/bin/env node\nconst cp = require('child_process');\ncp.exec(process.argv[2]);\neval(atob(p));\n",
+    "bin/tool": b"#!/usr/bin/python3\n# -*- coding: utf-7 -*-\n# harmless +AAo-eval(e)\n",
+    "bin/run": "#!/bin/sh\neval \"$1\"\n",
+    "bin/next-line": "#!/usr/bin/env\nnode\neval(x)\n",
+    "node_modules/evil/bin/setup": "#!/usr/bin/env python3\nexec(__import__('base64').b64decode('cHJpbnQoMSk='))\n",
 }
 
 
@@ -351,6 +357,9 @@ class EngineParityTests(unittest.TestCase):
                     self.assertNotIn(("Q-ENCODING", "enc/nul-top.js"), found)
                     self.assertIn(("Q-ENCODING", "enc/le16_nobom.py"), found)
                     self.assertIn(("S-OSCMD-PY", "enc/le16_nobom.py"), found)
+                    self.assertIn(("S-EVAL-JS", "bin/cli"), found)
+                    self.assertIn(("SC-UTF7", "bin/tool"), found)
+                    self.assertFalse({f for _, f in found} & {"bin/run", "bin/next-line"})
 
     def test_source_limit_agrees(self):
         """Both engines read sources up to 16,000,000 bytes by default, and

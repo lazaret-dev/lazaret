@@ -12,7 +12,8 @@ import {
 import { join, sep, resolve, dirname, basename, isAbsolute } from "node:path";
 import { randomBytes } from "node:crypto";
 import { decodeSource, fsNameToString } from "./encoding.js";
-import { classifyBinary, HEADER_SAMPLE, PYC_HEADER, pycIssues, pycModule, pyExt } from "./binary.js";
+import { classifyBinary, HEADER_SAMPLE, PYC_HEADER, pycIssues, pycModule, pyExt, looksBinary } from "./binary.js";
+import { shebangLang } from "./hooks.js";
 import { mkIssue, fileIssue } from "./issue.js";
 import { pthIssues } from "./pth.js";
 import { registerScanContext, SECRET_SKIP_RE } from "./redact.js";
@@ -312,17 +313,35 @@ export function collectFiles(root, { includeDeps = false, exclude = [], maxFileB
 /** n with thousands separators, as Python's f"{n:,}" writes it. */
 const withCommas = (n) => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 
+/**
+ * "js" or "py" for a file without a source extension whose leading bytes
+ * make it a JavaScript or Python script by its #! line (bin/cli, a hook's
+ * ./setup): it runs as code, so it is read as source. null otherwise —
+ * shell scripts too. Twin of lazaret.scanner.core.script_source_lang.
+ */
+export function scriptSourceLang(head) {
+  head = head.subarray(0, HEADER_SAMPLE);
+  if (head.length < 2 || head[0] !== 0x23 || head[1] !== 0x21 || looksBinary(head)) return null;
+  const lang = shebangLang(new TextDecoder("utf-8").decode(head));
+  return lang === "js" || lang === "py" ? lang : null;
+}
+
 function collectFile(full, rel, name, st, dep, col) {
   const ext = pyExt(name).toLowerCase();       // os.path.splitext, as core
   const kind = name === "package.json" || name === "binding.gyp" ? name : GYP_EXTS.has(ext) ? "gyp" : null;
   const pth = !kind && ext === ".pth";
-  const lang = kind || pth ? null : EXTS[ext];
+  let lang = kind || pth ? null : EXTS[ext];
   const size = st.size;
   if (!kind && !pth && !lang) {
-    // spec 9: every other regular file is classified by magic bytes
-    const bi = classifyBinary(rel, readBounded(full, HEADER_SAMPLE), size, "repo");
-    if (bi) col.binaryIssues.push(bi);
-    return;
+    // spec 9: every other regular file is classified by magic bytes — unless
+    // its #! line makes it a Node or Python script: then it is source
+    const head = readBounded(full, HEADER_SAMPLE);
+    lang = scriptSourceLang(head);
+    if (!lang) {
+      const bi = classifyBinary(rel, head, size, "repo");
+      if (bi) col.binaryIssues.push(bi);
+      return;
+    }
   }
   // spec 9: the size cap applies only to files that would be read whole
   const cap = col.maxFileBytes;

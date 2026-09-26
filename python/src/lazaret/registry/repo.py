@@ -1275,25 +1275,11 @@ def _pattern_regex(pattern):
 _JS_LOCAL_DEP_RE = re.compile(
     r"""(?:\brequire\s*\(\s*|\bimport\s*\(\s*|\bfrom\s+|^\s*import\s+|\bexport\s+[^'"\n;]*?\bfrom\s+)"""
     r"""(['"])(\.{1,2}/[^'"\n]+)\1""", re.M)
-_SHEBANG_RE = re.compile(r"^#!\s*(\S+)(?:\s+(?:-\S+\s+)*(\S+))?")
 _MANIFEST_NAMES = ("package.json", "binding.gyp", "pyproject.toml")
-
-
-def _shebang_lang(text):
-    """'js' | 'py' | 'sh' | None from a script's #! line."""
-    m = _SHEBANG_RE.match(text)
-    if not m:
-        return None
-    prog = m.group(1).rsplit("/", 1)[-1].lower()
-    if prog == "env" and m.group(2):
-        prog = m.group(2).rsplit("/", 1)[-1].lower()
-    if prog in ("node", "nodejs"):
-        return "js"
-    if lazaret._PYTHON_NAME_RE.match(prog):
-        return "py"
-    if prog in lazaret._SHELL_NAMES:
-        return "sh"
-    return None
+# A script's language by its #! line: the scanner's (project and --deps scans
+# read such scripts as source too).
+_SHEBANG_RE = lazaret._SHEBANG_RE
+_shebang_lang = lazaret.shebang_lang
 
 
 # SC-PTH-EXEC lives in the scanner (project and --deps scans check .pth files
@@ -1552,6 +1538,10 @@ class _ArtifactScan:
             text = raw.decode("utf-8", "replace")
             kind = _shebang_lang(text)
             if kind in ("js", "py"):
+                # decoded as its interpreter reads it: a Python script keeps
+                # its coding cookie (a UTF-7 one hid code in comments)
+                text, extra = lazaret.decode_member(rel, raw, lang=kind)
+                self.add_decode_issues(extra)
                 self.scan_source(rel, text, kind)
                 return
             if kind == "sh":

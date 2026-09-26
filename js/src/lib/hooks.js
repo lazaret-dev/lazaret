@@ -714,6 +714,28 @@ export function nodeCandidates(rel) {
     rel + "/index.js", rel + "/index.cjs", rel + "/index.mjs", rel + "/index.json"];
 }
 
+// ---- Scripts by their #! line ------------------------------------------------
+// core._SHEBANG_RE (the first line only: [ \t], never \s) and _SHEBANG_JS_NAMES
+const SHEBANG_SRC = String.raw`^#![ \t]*(\S+)(?:[ \t]+(?:-\S+[ \t]+)*(\S+))?`;
+const SHEBANG_RE = pyRe(SHEBANG_SRC);
+const SHEBANG_JS_NAMES = new Set(["node", "nodejs", "bun", "deno", "ts-node", "tsx"]);
+const programName = (path) => path.slice(path.lastIndexOf("/") + 1).toLowerCase();
+
+/**
+ * "js" | "py" | "sh" | null: the language a script runs as, by its #! line.
+ * Twin of lazaret.scanner.core.shebang_lang.
+ */
+export function shebangLang(text) {
+  const m = SHEBANG_RE.exec(text);
+  if (!m) return null;
+  let prog = programName(m[1]);
+  if (prog === "env" && m[2]) prog = programName(m[2]);
+  if (SHEBANG_JS_NAMES.has(prog)) return "js";
+  if (PYTHON_NAME_RE.test(pyEnd(prog))) return "py";
+  if (SHELL_NAMES.has(prog)) return "sh";
+  return null;
+}
+
 /**
  * core's pattern text and re flags, and its name sets, for everything above
  * that twins one of core's module-level constants: the Python parity test
@@ -726,13 +748,13 @@ export const PY_TWINS = {
     _NETWORK_RE: [NETWORK_SRC, "m"], _SECRET_SOURCE_RE: [SECRET_SOURCE_SRC, "im"],
     _EXFIL_DEST_RE: [EXFIL_DEST_SRC, "i"], _EXFIL_SERVICE_RE: [EXFIL_SERVICES_SRC, "i"],
     _PIPE_SCAN_RE: [PIPE_SCAN_SRC, ""], _IMPORT_HARVEST_RE: [IMPORT_HARVEST_SRC, ""],
-    _EXEC_CALL_RE: [EXEC_CALL_SRC, ""],
+    _EXEC_CALL_RE: [EXEC_CALL_SRC, ""], _SHEBANG_RE: [SHEBANG_SRC, ""],
   },
   sets: {
     _HOOK_SEPARATORS: [...HOOK_SEPARATORS], _HOOK_REDIRECTS: [...HOOK_REDIRECTS],
     _HOOK_WRAPPERS: [...HOOK_WRAPPERS], _NODE_NAMES: [...NODE_NAMES], _SHELL_NAMES: [...SHELL_NAMES],
     _NODE_CODE_FLAGS: [...NODE_CODE_FLAGS], _NODE_PRELOAD_FLAGS: [...NODE_PRELOAD_FLAGS],
-    _NODE_VALUE_FLAGS: [...NODE_VALUE_FLAGS],
+    _NODE_VALUE_FLAGS: [...NODE_VALUE_FLAGS], _SHEBANG_JS_NAMES: [...SHEBANG_JS_NAMES],
   },
   maps: Object.fromEntries([["_WRAPPER_VALUE_OPTIONS", WRAPPER_VALUE_OPTIONS],
     ["_WRAPPER_CHDIR_OPTIONS", WRAPPER_CHDIR_OPTIONS], ["_WRAPPER_COMMAND_OPTIONS", WRAPPER_COMMAND_OPTIONS]]

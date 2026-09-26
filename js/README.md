@@ -75,7 +75,9 @@ resolving to one file. Writes are atomic
 
 ## What gets scanned
 
-- `.py`/`.pyw`, `.js`/`.jsx`/`.ts`/`.tsx`/`.mjs`/`.cjs` and `.sql` sources, every
+- `.py`/`.pyw`, `.js`/`.jsx`/`.ts`/`.tsx`/`.mjs`/`.cjs` and `.sql` sources, scripts
+  whose `#!` line names Node (or bun, deno, ts-node, tsx) or Python whatever
+  their name (`bin/cli`, a hook's `./setup`; shell scripts are not read), every
   `package.json`, `binding.gyp` and other `.gyp`/`.gypi` file, and `.pth` files (only the `SC-PTH-EXEC`
   check runs on them; they are not counted in the metrics; a directory with
   only a `.pth` file is a valid target). Every other regular file is classified by

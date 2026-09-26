@@ -1434,7 +1434,7 @@ def _undecodable_share(text):
     return bad / len(sample)
 
 
-def decode_member(path, data):
+def decode_member(path, data, lang=None):
     """Decode one archive member (registry) or one file named by an MCP
     caller the way its runtime reads it. -> (text, extra_issues).
 
@@ -1444,10 +1444,13 @@ def decode_member(path, data):
     One addition for verdict integrity: a member that does not decode to
     anything text-like (more than 30% invalid bytes or control characters)
     adds SC-TRUNCATED — it was "scanned" only as mojibake, so the scan of it
-    proves nothing. Never raises on content."""
+    proves nothing. Never raises on content. `lang`: the language the
+    member runs as when its name does not say (a Python script by its #!
+    line keeps its coding cookie); by default, its extension's."""
     data = bytes(data or b"")
     ext = os.path.splitext(path)[1].lower()
-    lang = "py" if ext in (".py", ".pyw") else EXTS.get(ext)
+    if lang is None:
+        lang = "py" if ext in (".py", ".pyw") else EXTS.get(ext)
     text, info = decode_source(data, lang)
     extra = encoding_issues(path, text, info)
     share = _undecodable_share(text)
@@ -4426,6 +4429,49 @@ def node_candidates(rel):
             rel + "/index.js", rel + "/index.cjs", rel + "/index.mjs", rel + "/index.json"]
 
 
+# ---------------- Scripts by their #! line ----------------
+# A file with no source extension still runs as code when its #! line names
+# an interpreter: a package's bin/cli, a hook's ./setup. The line is the
+# first line only (the kernel reads no further): `[ \t]`, never `\s`, which
+# took the interpreter from the next line of `#!/usr/bin/env` + newline.
+_SHEBANG_RE = re.compile(r"^#![ \t]*(\S+)(?:[ \t]+(?:-\S+[ \t]+)*(\S+))?")
+#: Interpreters that run a script as JavaScript (or TypeScript).
+_SHEBANG_JS_NAMES = frozenset({"node", "nodejs", "bun", "deno", "ts-node", "tsx"})
+
+
+def shebang_lang(text):
+    """'js' | 'py' | 'sh' | None: the language a script runs as, by its #!
+    line (`#!/usr/bin/env node`, `#!/usr/bin/env -S deno run`,
+    `#!/usr/bin/python3`, `#!/bin/sh`)."""
+    m = _SHEBANG_RE.match(text)
+    if not m:
+        return None
+    prog = m.group(1).rsplit("/", 1)[-1].lower()
+    if prog == "env" and m.group(2):
+        prog = m.group(2).rsplit("/", 1)[-1].lower()
+    if prog in _SHEBANG_JS_NAMES:
+        return "js"
+    if _PYTHON_NAME_RE.match(prog):
+        return "py"
+    if prog in _SHELL_NAMES:
+        return "sh"
+    return None
+
+
+def script_source_lang(head):
+    """'js' or 'py' for a file without a source extension whose leading
+    bytes `head` make it a JavaScript or Python script by its #! line: it
+    runs as code, so project and --deps scans read it as source (they used
+    to classify it by magic bytes only, so `bin/cli` or a hook's `./setup`
+    was never read). None otherwise — shell scripts too: no rule reads
+    shell."""
+    head = bytes(head[:HEADER_SAMPLE_BYTES])
+    if not head.startswith(b"#!") or looks_binary(head):
+        return None
+    lang = shebang_lang(head.decode("utf-8", "replace"))
+    return lang if lang in ("js", "py") else None
+
+
 _JSON_TOKEN_RE = re.compile(r'"(?:[^"\\]|\\.)*"|[{}\[\],:]')
 
 
@@ -5339,12 +5385,16 @@ def _collect_file(path, rel, st, in_dep, col):
     if not manifest and not pth and lang is None:
         # FIX-SPEC 9: every non-source regular file is classified by magic
         # bytes from a header sample (repo mode used to look at a fixed list
-        # of extensions only: an ELF named `helper` or `logo.png` passed).
+        # of extensions only: an ELF named `helper` or `logo.png` passed) —
+        # unless its #! line makes it a Node or Python script: then it is
+        # source (script_source_lang).
         head = _read_prefix(path, HEADER_SAMPLE_BYTES)
-        bi = classify_binary(disp, head, size, "repo")
-        if bi:
-            issues.append(bi)
-        return
+        lang = script_source_lang(head)
+        if lang is None:
+            bi = classify_binary(disp, head, size, "repo")
+            if bi:
+                issues.append(bi)
+            return
     # FIX-SPEC 9: the size cap applies only to files that would be read whole.
     # Verdict integrity (audit C2/G16): an oversize file is an SC-TRUNCATED
     # finding, never a silent skip, and it is not added to the scanned files.

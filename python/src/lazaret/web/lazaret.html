@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-bvYRkNF0cMkWNJorniYY+qEi0oib994nMDez7+ok5nA='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-vXVqZa9Kglo29C2FMx7na3aaCLcQ6Ss5bPyslEjFAjU='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
 <title>Lazaret — Security &amp; Quality Review</title>
 <style>
   :root{
@@ -3889,6 +3889,21 @@ function langFromName(name) {                   // EXTS[os.path.splitext(name)[1
   const dot = base.lastIndexOf(".");
   return dot > 0 && /[^.]/.test(base.slice(0, dot)) ? EXT_LANGS[base.slice(dot).toLowerCase()] ?? null : null;
 }
+/* An upload without a source extension whose #! line names Node (or bun,
+   deno, ts-node, tsx) or Python is read as that language, as the CLI's walk
+   reads it; anything else is detected on its text. Twin of core.shebang_lang
+   (its first line only; "sh" is left to the text heuristic here). */
+const SHEBANG_RE = pyRe("^#![ \\t]*(\\S+)(?:[ \\t]+(?:-\\S+[ \\t]+)*(\\S+))?");
+const SHEBANG_JS_NAMES = new Set(["node", "nodejs", "bun", "deno", "ts-node", "tsx"]);
+const PYTHON_NAME_RE = pyRe("^(?:python(?:\\d+(?:\\.\\d+)?)?|py)(?:\\.exe)?$", "i");
+function shebangLang(text) {
+  const m = SHEBANG_RE.exec(text);
+  if (!m) return null;
+  const program = (p) => p.slice(p.lastIndexOf("/") + 1).toLowerCase();
+  let prog = program(m[1]);
+  if (prog === "env" && m[2]) prog = program(m[2]);
+  return SHEBANG_JS_NAMES.has(prog) ? "js" : PYTHON_NAME_RE.test(prog) ? "py" : null;
+}
 
 /* ---- .pth files (SC-PTH-EXEC) — twin of core.pth_issues ------------------
    site.py executes every line of a .pth file in site-packages that starts
@@ -3933,8 +3948,8 @@ function decodeUpload(name, bytes, size) {
     return { name, content: normalizeNewlines(new TextDecoder("utf-8").decode(bytes)), size, lang: null, pth: true };
   let lang = langFromName(name);
   let dec = decodeSource(bytes, { py: lang === "py" });
-  if (!lang) {                                    // no known extension: detect on the text
-    lang = detectLang(String(name), dec.text);
+  if (!lang) {                                    // no known extension: its #! line, else detect on the text
+    lang = shebangLang(dec.text) || detectLang(String(name), dec.text);
     if (lang === "py") dec = decodeSource(bytes, { py: true });
   }
   const { text, ...enc } = dec;

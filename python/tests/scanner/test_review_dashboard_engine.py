@@ -165,6 +165,35 @@ class CapAndTaintTests(unittest.TestCase):
 
 
 @dash.requires_node
+class ShebangUploadTests(unittest.TestCase):
+    """An upload without a source extension is read by its #! line when it
+    names Node or Python, as the CLI's walk reads it (core.shebang_lang);
+    anything else is detected on its text (detectLang)."""
+
+    def test_the_language_a_shebang_names(self):
+        (out,) = dash.run([{"op": "upload", "files": [
+            {"name": "cli", "content": "#!/usr/bin/env node\neval(atob(p));\n"},
+            {"name": "tool", "content": "#!/usr/bin/env python3\nprint(1)\n"},        # detectLang: js
+            {"name": "dtool", "content": "#!/usr/bin/env -S deno run\ndef = 1\n"},    # detectLang: py
+            {"name": "next-line", "content": "#!/usr/bin/env\npython\nx = f(1);\n"},
+            {"name": "u7", "b64": base64.b64encode(b"#!/usr/bin/python3\n# coding: utf-7\n# +AAo-eval(e)\n").decode()},
+        ]}])
+        self.assertEqual({f["name"]: f["lang"] for f in out},
+                         {"cli": "js", "tool": "py", "dtool": "js", "next-line": "js", "u7": "py"})
+        (issues,) = upload([("u7", b"#!/usr/bin/python3\n# coding: utf-7\n# +AAo-eval(e)\n")])
+        self.assertEqual(at(issues), [("Q-ENCODING", 1), ("S-EVAL-PY", 4), ("SC-UTF7", 2)])
+
+    def test_tables_are_cores(self):
+        (page,) = dash.run([{"op": "eval", "expr": "[SHEBANG_RE.pySource, SHEBANG_RE.flags, [...SHEBANG_JS_NAMES],"
+                                                     " PYTHON_NAME_RE.pySource, PYTHON_NAME_RE.flags]"}])
+        self.assertEqual(page[0], core._SHEBANG_RE.pattern)
+        self.assertNotIn("i", page[1])
+        self.assertEqual(sorted(page[2]), sorted(core._SHEBANG_JS_NAMES))
+        self.assertEqual(page[3], core._PYTHON_NAME_RE.pattern)
+        self.assertIn("i", page[4])
+
+
+@dash.requires_node
 class PasteTests(unittest.TestCase):
     def test_pasted_code_keeps_its_line_numbers(self):
         expr = ("(() => { document.querySelector('#code').value = %s; document.querySelector('#lang').value = 'js';"
