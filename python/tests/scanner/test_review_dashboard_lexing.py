@@ -62,6 +62,9 @@ MISC = [
     ("fold.sql", "sql", "SELECT a FROM t WİTH (NOLOCK);\nſET @q = 'SELECT 1 ' + @x;\nEXECUTE İMMEDIATE 'x' || y;\n"),
     ("marker.js", "js", "eval(a) // noſec\neval(b) // lazaret-ıgnore\neval(c) // NOSONAR\n"
      "eval(d) // nosec: S-EVAL-JS, ſ-X\neval(e) // nosec: S-EVAL-JS\n"),
+    # source text is read in Unicode 13.0 (later code points are U+FFFD)
+    ("u13.py", "py", "\U00010d4aeval(x)\nexec\U00010d4a(y)\nx = eval(y)  # \U0001fae0 \U0001f600\n"),
+    ("u13.js", "js", "a = 1;\n\\u{10D4A}eval(x)\n\\u200deval(y)\n\\u30fbeval(z)\n"),
 ]
 
 # Uploads: raw bytes through the page's decoder, against core.decode_source.

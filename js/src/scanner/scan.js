@@ -13,6 +13,7 @@ import { extractFunctions } from "./functions.js";
 import { cpLen, pyRe, pyRepr, pyRstrip, pyLstrip, isPySpace } from "../lib/pycompat.js";
 import { findSecretToken, registerScanContext } from "../lib/redact.js";
 import { truncatedIssue } from "../lib/fs.js";
+import { assigned13, pinUnicode } from "../lib/unicode13.js";
 
 export { isComment } from "./engine.js";
 
@@ -56,6 +57,8 @@ const isBlank = (s) => { for (const ch of s) if (!isPySpace(ch)) return false; r
 const NON_ASCII_RE = /[^\x00-\x7f]/;
 const JS_UESC_RE = /\\u\{([0-9A-Fa-f]{1,6})\}|\\u([0-9A-Fa-f]{4})/g;
 const ID_CONTINUE_RE = /^[\p{XID_Continue}$]$/u;
+// identifier characters since Unicode 15.1 only (core._LATER_ID_CONTINUE)
+const LATER_ID_CONTINUE = new Set([0x200c, 0x200d, 0x30fb, 0xff65]);
 const pyMatchText = (t) => (NON_ASCII_RE.test(t) ? t.normalize("NFKC") : t);
 
 class FileCtx {
@@ -109,7 +112,8 @@ class FileCtx {
       const cp = parseInt(m[1] ?? m[2], 16);
       if (cp > 0x10ffff) continue;
       const ch = String.fromCodePoint(cp);
-      if (ch === "$" || ID_CONTINUE_RE.test(ch)) edits.push([at, at + m[0].length, ch]);
+      if (ch === "$" || LATER_ID_CONTINUE.has(cp) || (assigned13(cp) && ID_CONTINUE_RE.test(ch)))
+        edits.push([at, at + m[0].length, ch]);
     }
     let out = plain;
     if (edits.length) {
@@ -467,7 +471,7 @@ export function scanFile(file) {
   const path = file.name ?? file.path;
   const lang = file.lang ?? detectLang(String(path ?? ""), String(file.content ?? ""));
   const dep = !!file.dep;
-  const content = normalizeSource(file.content, lang);
+  const content = pinUnicode(normalizeSource(file.content, lang));   // Unicode 13.0 (core._unicode13)
   const lines = content.split("\n");
   const ctx = new FileCtx(lines, lang, content, Date.now() + timeBudgetMs, jsxReading(path));
   registerScanContext(lines, SECRET_SKIP_RE);

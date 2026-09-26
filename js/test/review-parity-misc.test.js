@@ -66,3 +66,18 @@ test("case folds as Python's re.I; markers are ASCII", () => {
   assert.deepEqual(found, ["d.sql:1 SQL-DYNAMIC", "e.sql:1 SQL-DYNAMIC", "m.js:1 S-EVAL-JS", "m.js:2 S-EVAL-JS",
     "m.js:4 S-EVAL-JS", "n.sql:1 SQL-NOLOCK"]);
 });
+
+// Node's regexes and ICU, and Python's re and unicodedata, classify code
+// points by their own Unicode version: U+10D4A is a letter in Node 22 and
+// on Python 3.14, unassigned on 3.10-3.13, so `\u{10d4a}eval(x)` in a .py
+// file was S-EVAL-PY on 3.11-3.13 only. Both engines now read source text in
+// Unicode 13.0 (Python 3.10's): a later code point is U+FFFD (lib/unicode13.js).
+test("source text is read in Unicode 13.0", () => {
+  const { found, rep } = scanTree({
+    "u.py": "\u{10d4a}eval(x)\nexec\u{10d4a}(y)\n",
+    "u.js": "a = 1;\n\\u{10D4A}eval(x)\n\\u200deval(y)\n\\u30fbeval(z)\n",
+    "s.py": "x = eval(y)  # \u{1fae0} \u{1f600}\n",
+  });
+  assert.deepEqual(found, ["s.py:1 S-EVAL-PY", "u.js:2 S-EVAL-JS", "u.js:3 S-EVAL-JS", "u.js:4 S-EVAL-JS", "u.py:1 S-EVAL-PY"]);
+  assert.equal(rep.issues.find((i) => i.file === "s.py").snippet[0], "x = eval(y)  # \ufffd \u{1f600}");
+});

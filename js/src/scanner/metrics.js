@@ -4,6 +4,7 @@
 import { lexLines, jsxReading } from "./lexer.js";
 import { pyStrip, pyRound1 } from "../lib/pycompat.js";
 import { normalizeNewlines } from "../lib/fs.js";
+import { pinUnicode } from "../lib/unicode13.js";
 
 export function computeMetrics(files) {
   let ncloc = 0, comments = 0;
@@ -12,7 +13,7 @@ export function computeMetrics(files) {
   const winMap = new Map();
   for (const f of nonDep) {
     const key = f.path ?? f.name;                // CLI files carry `path`, library callers `name`
-    const lines = normalizeNewlines(String(f.content ?? "")).split("\n");   // (no U+2028 split: core.compute_metrics)
+    const lines = pinUnicode(normalizeNewlines(String(f.content ?? ""))).split("\n");   // (no U+2028 split: core.compute_metrics)
     const lex = lexLines(lines, f.lang, null, { jsx: jsxReading(key) });
     const code = [];
     for (let i = 0; i < lines.length; i++) {

@@ -59,6 +59,9 @@ TREE = {
     # re.I folding (İ, ı are i; ſ is s) and ASCII-only markers
     "misc/fold.sql": "SELECT a FROM t WİTH (NOLOCK);\nſET @q = 'SELECT 1 ' + @x;\n",
     "misc/marker.js": "eval(a) // noſec\neval(b) // lazaret-ıgnore\neval(c) // NOSONAR\n",
+    # source text is read in Unicode 13.0 (later code points are U+FFFD)
+    "misc/u13.py": "\U00010d4aeval(x)\nexec\U00010d4a(y)\nx = eval(y)  # \U0001fae0\n",
+    "misc/u13.js": "a = 1;\n\\u{10D4A}eval(x)\n\\u200deval(y)\n\\u30fbeval(z)\n",
     # the quadratic comment checks, at a size both engines finish quickly
     "perf/escapes.js": "x=1;" + "/**/\\u0061" * 20000 + "\n",
 }
@@ -104,7 +107,8 @@ class LexingParityTests(unittest.TestCase):
                      ("SC-UTF7", "enc/crlf7.py", 2), ("Q-ENCODING", "enc/cr_latin1.py", 1),
                      ("SC-TRUNCATED", "enc/u32.py", 1), ("SC-TRUNCATED", "enc/uesc.py", 1),
                      ("S-CHMOD", "misc/chmod.py", 1), ("SQL-NOLOCK", "misc/fold.sql", 1),
-                     ("SQL-DYNAMIC", "misc/fold.sql", 2), ("S-EVAL-JS", "misc/marker.js", 2)):
+                     ("SQL-DYNAMIC", "misc/fold.sql", 2), ("S-EVAL-JS", "misc/marker.js", 2),
+                     ("S-EVAL-PY", "misc/u13.py", 1), ("S-EVAL-JS", "misc/u13.js", 2)):
             self.assertIn(want, found)
         self.assertNotIn(("S-EVAL-PY", "enc/ebcdic.py", 3), found)     # decoded as EBCDIC, as Python reads it
         self.assertEqual({f for _, f, _ in found if f.startswith("ext/")}, {"ext/.x.js"})

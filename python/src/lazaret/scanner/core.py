@@ -55,6 +55,7 @@ except Exception:  # pragma: no cover
 
 from lazaret.scanner import reports as lazaret_report  # report paths: pre-scan validation, atomic writes
 from lazaret.scanner import taintspec  # taint-config validation shared by both taint engines
+from lazaret.scanner import _unicode13  # the Unicode every engine reads source text in
 
 
 def configure_stdio():
@@ -2274,12 +2275,21 @@ def source_lines(content, lang):
 _JS_UESC_RE = re.compile(r"\\u\{([0-9A-Fa-f]{1,6})\}|\\u([0-9A-Fa-f]{4})")
 
 
+#: Identifier characters since Unicode 15.1 only (ZWNJ, ZWJ and the two
+#: katakana middle dots): Python 3.13+ and current Node say so, 3.10-3.12 not.
+_LATER_ID_CONTINUE = frozenset((0x200C, 0x200D, 0x30FB, 0xFF65))
+
+
 def _js_ident_char(m):
+    """The identifier character a JS \\u escape denotes, else None: the same
+    on every Python and Node (Unicode 13.0's characters, see _unicode13)."""
     cp = int(m.group(1) or m.group(2), 16)
     if cp > 0x10FFFF:
         return None
     ch = chr(cp)
-    return ch if ch == "$" or ("a" + ch).isidentifier() else None
+    if ch == "$" or cp in _LATER_ID_CONTINUE:
+        return ch
+    return ch if _unicode13.assigned(cp) and ("a" + ch).isidentifier() else None
 
 
 def _py_match_text(text):
@@ -3240,8 +3250,10 @@ SCAN_TIME_BUDGET = 30.0
 
 def scan_file(path, content, lang, dep=False):
     """Scan one file. dep=True → dependency mode: only supply-chain and
-    secret rules run (quality/bug rules would be pure noise in vendored code)."""
-    lines = source_lines(content, lang)
+    secret rules run (quality/bug rules would be pure noise in vendored code).
+    The text is read in Unicode 13.0 on every Python (see _unicode13): a code
+    point it leaves unassigned is scanned, and shown, as U+FFFD."""
+    lines = source_lines(_unicode13.pin(content), lang)
     content = "\n".join(lines)
     ctx = _FileCtx(lines, lang, content, time.monotonic() + SCAN_TIME_BUDGET, jsx_reading(path))
     outer = getattr(_TLS, "ctx", None)
@@ -5287,7 +5299,7 @@ def compute_metrics(all_files):
     win_map = {}
     for f in files:
         code = []
-        flines = f["content"].split("\n")
+        flines = _unicode13.pin(f["content"]).split("\n")
         cmask = comment_mask(flines, f["lang"], jsx_reading(f["path"]))
         for i, l in enumerate(flines):
             t = l.strip()
