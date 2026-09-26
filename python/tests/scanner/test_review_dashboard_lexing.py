@@ -6,13 +6,14 @@ and report exactly what lazaret.scanner.core reports on the new inputs
 (test_review_lexing.py and friends hold the expectations themselves). All
 input is inert: nothing is executed, hosts are TEST-NET or .invalid.
 """
+import base64
 import collections
 import json
 import unittest
 
 from lazaret.scanner import core
 from tests.scanner import _dashboard_vm as dash
-from tests.scanner.test_review_dashboard_parity import issue_key, short
+from tests.scanner.test_review_dashboard_parity import cli_upload, issue_key, short
 
 # Generous (machines differ); before the fix the page took ~20 s per case.
 LIMIT_MS = 4000
@@ -54,6 +55,15 @@ MASKING = [
 ]
 
 
+# Uploads: raw bytes through the page's decoder, against core.decode_source.
+UPLOADS = [
+    # a cookie on line 2 of a CRLF (or CR) file: the page counted \r\n twice
+    ("crlf7.py", b"#!/usr/bin/env python\r\n# coding: utf-7\r\nx = 1 # +AAo-eval(x)\r\n"),
+    ("crlf_latin1.py", b"#!/usr/bin/env python\r\n# coding: latin-1\r\ns = '\xe9'\r\neval(s)\r\n"),
+    ("cr_latin1.py", b"#!/usr/bin/env python\r# coding: latin-1\rs = '\xe9'\r"),
+]
+
+
 @dash.requires_node
 class DashboardLexingTests(unittest.TestCase):
     def assert_same_findings(self, name, cli, page):
@@ -91,6 +101,15 @@ class DashboardLexingTests(unittest.TestCase):
         for want in (("dump.sql", "SQL-GRANT-ALL", 2), ("text.jsx", "S-EVAL-JS", 2),
                      ("marker.jsx", "S-EVAL-JS", 1), ("unterminated.py", "S-EVAL-PY", 1)):
             self.assertIn(want, found)
+
+    def test_uploads(self):
+        (page,) = dash.run([{"op": "uploadScan", "files": [
+            {"name": n, "b64": base64.b64encode(data).decode("ascii")} for n, data in UPLOADS]}])
+        self.assertEqual(len(page), len(UPLOADS))
+        for (name, data), page_issues in zip(UPLOADS, page):
+            with self.subTest(file=name):
+                self.assert_same_findings(name, cli_upload(name, data), page_issues)
+        self.assertIn("SC-UTF7", {i["rule"] for i in page[0]})
 
     def test_metrics_match(self):
         files = [{"name": n, "lang": lang, "content": c} for n, lang, c in MASKING]

@@ -36,6 +36,10 @@ TREE = {
     "py/nested.py": ('x = f"{d["# nosec"]}" + eval(y)\nx = t\'{d[\'# nosec\']}\' + eval(y)\n'
                      'x = f"{v:# nosec}"; eval(y)\n'),
     "py/unterminated.py": "z = eval(x) + 'unterminated  # nosec\n",
+    # a coding cookie on line 2 of a CRLF / CR file
+    "enc/crlf7.py": b"#!/usr/bin/env python\r\n# coding: utf-7\r\nx = 1 # +AAo-eval(x)\r\n",
+    "enc/crlf_latin1.py": b"#!/usr/bin/env python\r\n# coding: latin-1\r\ns = '\xe9'\r\neval(s)\r\n",
+    "enc/cr_latin1.py": b"#!/usr/bin/env python\r# coding: latin-1\rs = '\xe9'\r",
     # the quadratic comment checks, at a size both engines finish quickly
     "perf/escapes.js": "x=1;" + "/**/\\u0061" * 20000 + "\n",
 }
@@ -77,7 +81,8 @@ class LexingParityTests(unittest.TestCase):
         report = self.assert_same(TREE)
         found = {(i["rule"], i["file"].replace("\\", "/"), i["line"]) for i in report["issues"]}
         for want in (("SQL-GRANT-ALL", "mask/dump.sql", 2), ("S-EVAL-JS", "mask/text.jsx", 2),
-                     ("S-EVAL-JS", "mask/marker.jsx", 1), ("S-EVAL-PY", "py/unterminated.py", 1)):
+                     ("S-EVAL-JS", "mask/marker.jsx", 1), ("S-EVAL-PY", "py/unterminated.py", 1),
+                     ("SC-UTF7", "enc/crlf7.py", 2), ("Q-ENCODING", "enc/cr_latin1.py", 1)):
             self.assertIn(want, found)
 
 

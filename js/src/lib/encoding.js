@@ -75,7 +75,11 @@ export const isUtf7Name = (name) => UTF7_NAMES.has(String(name).toLowerCase().re
  */
 export function findCookie(buf) {
   let end = 0, breaks = 0;                            // bytes through the second line break
-  while (end < buf.length && breaks < 2) { const c = buf[end++]; if (c === 10 || c === 13) breaks++; }
+  while (end < buf.length && breaks < 2) {
+    const c = buf[end++];
+    if (c === 13 && buf[end] === 10) end++;           // \r\n is one line break, as in core
+    if (c === 10 || c === 13) breaks++;
+  }
   const lines = buf.subarray(0, end).toString("latin1").split(/\r\n|\r|\n/, 2);
   for (let idx = 0; idx < lines.length; idx++) {
     const m = COOKIE_RE.exec(lines[idx]);

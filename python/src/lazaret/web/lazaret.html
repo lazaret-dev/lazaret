@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-1/0XX2bE+0DrQ0ZNGCgcPM4t5fQYKiXhuhtdJRYPRmc='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-COlJfx4x2LoOr/nxYuR/y4u5xfMfGgt6aQsgEOZvlkI='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
 <title>Lazaret — Security &amp; Quality Review</title>
 <style>
   :root{
@@ -574,7 +574,11 @@ const isUtf7Name = (name) => UTF7_NAMES.has(String(name).toLowerCase().replace(/
  */
 function findCookie(buf) {
   let end = 0, breaks = 0;                            // bytes through the second line break
-  while (end < buf.length && breaks < 2) { const c = buf[end++]; if (c === 10 || c === 13) breaks++; }
+  while (end < buf.length && breaks < 2) {
+    const c = buf[end++];
+    if (c === 13 && buf[end] === 10) end++;           // \r\n is one line break, as in core
+    if (c === 10 || c === 13) breaks++;
+  }
   const lines = decodeLatin1(buf.subarray(0, end)).split(/\r\n|\r|\n/, 2);
   for (let idx = 0; idx < lines.length; idx++) {
     const m = COOKIE_RE.exec(lines[idx]);
