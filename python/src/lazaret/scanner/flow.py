@@ -1966,6 +1966,9 @@ def load_config_quietly(path, warnings_out=None, allow_sanitizers=True):
     warnings in warnings_out (list) instead of printing them. Returns True if
     applied. A failed read/parse (unreadable, too large, bad UTF-8, invalid
     JSON, deep nesting) returns False with a single message."""
+    # the explicit depth limit shared with the CLI's loader (imported here:
+    # core imports this module at load time)
+    from lazaret.scanner.core import json_loads_bounded
     if warnings_out is None:
         warnings_out = []
     try:
@@ -1973,11 +1976,11 @@ def load_config_quietly(path, warnings_out=None, allow_sanitizers=True):
             data = fh.read(_CONFIG_MAX_BYTES + 1)
         if len(data) > _CONFIG_MAX_BYTES:
             raise ValueError(f"file exceeds {_CONFIG_MAX_BYTES} bytes")
-        cfg = json.loads(data.decode("utf-8"))
-    except (OSError, ValueError, RecursionError, MemoryError) as exc:
-        # 1149e3e5: RecursionError from a deep-nested config (~60KB of '[')
-        # is not a JSONDecodeError; ValueError also covers bad UTF-8 and the
-        # int-digit limit. Same warn-and-skip contract as an unreadable file.
+        cfg = json_loads_bounded(data.decode("utf-8"))
+    except (OSError, ValueError, MemoryError) as exc:
+        # 1149e3e5: a deep-nested config (~60KB of '[') is JsonTooDeep, a
+        # ValueError like bad UTF-8, invalid JSON and the int-digit limit.
+        # Same warn-and-skip contract as an unreadable file.
         warnings_out.append(f"could not load taint config {path}: {exc}")
         return False
     configure(cfg, on_warn=warnings_out.append, allow_sanitizers=allow_sanitizers)

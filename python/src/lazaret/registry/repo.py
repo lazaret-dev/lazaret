@@ -302,13 +302,13 @@ def _deep_safe_loads(raw, what):
     'error scanning <spec>' + continuing in cmd_scan (nothing persisted under
     a wrong verdict, remaining work still reported)."""
     try:
-        return json.loads(raw)
+        return lazaret.json_loads_bounded(raw)
+    except lazaret.JsonTooDeep as exc:
+        raise FetchError(
+            f"JSON {what} is too deeply nested to parse ({exc}) — treated as "
+            f"a fetch failure, not a crash") from exc
     except (UnicodeDecodeError, ValueError) as exc:     # JSONDecodeError, int digits
         raise FetchError(f"invalid JSON {what}: {exc}") from exc
-    except RecursionError as exc:
-        raise FetchError(
-            f"JSON {what} is too deeply nested to parse (recursion limit "
-            f"hit) — treated as a fetch failure, not a crash") from exc
 
 
 def http_bytes(url):
@@ -2274,8 +2274,8 @@ class Store:
             # named issue instead of crashing the query; verdict + metrics
             # (rows the JSON blob doesn't feed) stay intact.
             try:
-                issues = json.loads(row[4])
-            except (json.JSONDecodeError, RecursionError, TypeError) as exc:
+                issues = lazaret.json_loads_bounded(row[4])
+            except (ValueError, TypeError) as exc:      # incl. JsonTooDeep
                 what = f"stored scan issues for {eco}:{name}@{row[0]}"
                 # audit H1: `what` interpolates the stored name/version — a
                 # registry-supplied value that never passed NAME_RE on the
@@ -2288,8 +2288,9 @@ class Store:
                      "sev": "CRITICAL",
                      "name": "Hostile nesting depth in stored scan result",
                      "msg": (f"Stored scan result could not be parsed "
-                             f"({exc.__class__.__name__}) — likely nested "
-                             f"beyond CPython's recursion limit."),
+                             f"({exc.__class__.__name__})"
+                             + (f" — nested deeper than {lazaret.MAX_MANIFEST_DEPTH} levels."
+                                if isinstance(exc, lazaret.JsonTooDeep) else ".")),
                      "why": ("A stored issues blob this shape cannot come from "
                              "a normal scan: a 60k-deep document is exactly "
                              "the primitive that crashes or blinds scanners "
@@ -2302,8 +2303,8 @@ class Store:
         artifacts = row[5] if len(row) > 5 else None
         if isinstance(artifacts, str):
             try:
-                artifacts = json.loads(artifacts)
-            except (ValueError, RecursionError):
+                artifacts = lazaret.json_loads_bounded(artifacts)
+            except ValueError:                  # incl. JsonTooDeep
                 artifacts = None
         return {"version": row[0], "profile": row[1], "scannedAt": row[2],
                 "verdict": row[3], "issues": issues,

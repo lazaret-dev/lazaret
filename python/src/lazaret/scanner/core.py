@@ -835,11 +835,10 @@ def _read_taint_config(path, from_repo):
     try:
         with open(path, "rb") as fh:
             data = fh.read(TAINT_CONFIG_MAX_BYTES + 1)
-        return json.loads(data.decode("utf-8")), None
-    except (OSError, ValueError, RecursionError, MemoryError) as exc:
-        # ValueError covers JSONDecodeError, UnicodeDecodeError and the
-        # int-digit limit. 1149e3e5: RecursionError from a deep-nested config
-        # is not a JSONDecodeError.
+        return json_loads_bounded(data.decode("utf-8")), None
+    except (OSError, ValueError, MemoryError) as exc:
+        # ValueError covers JSONDecodeError, UnicodeDecodeError, the int-digit
+        # limit and JsonTooDeep (1149e3e5: a deep-nested config).
         return None, str(exc)
 
 
@@ -2984,6 +2983,28 @@ def json_depth_exceeds(text, limit=MAX_MANIFEST_DEPTH):
     return False
 
 
+class JsonTooDeep(ValueError):
+    """A JSON document nested deeper than the limit json_loads_bounded was given."""
+
+
+def json_loads_bounded(text, limit=MAX_MANIFEST_DEPTH, **kwargs):
+    """json.loads for input that may be hostile (scanned-repo content, stored
+    results, registry responses, config files): anything nested deeper than
+    `limit` raises JsonTooDeep (a ValueError) before parsing starts. The limit
+    is ours, not the interpreter's (STRUCTURE.md rule 6): json.loads runs out of
+    recursion near 995 levels on 3.10/3.11, near 10,000 on 3.12/3.13 and, on
+    3.14, only when the C stack does (a different depth on each OS). bytes are
+    decoded the way json.loads decodes them."""
+    if isinstance(text, (bytes, bytearray)):
+        text = bytes(text).decode(json.detect_encoding(text), "surrogatepass")
+    if json_depth_exceeds(text, limit):
+        raise JsonTooDeep(f"JSON nested deeper than {limit} levels")
+    try:
+        return json.loads(text, **kwargs)
+    except RecursionError:              # backstop: the caller's stack was already deep
+        raise JsonTooDeep(f"JSON nested too deeply to parse (limit {limit} levels)") from None
+
+
 def _sc_manifest_depth_issue(path):
     """48033f94: a pathologically deep-nested manifest (e.g. 60k+ '[' bytes)
     blows json.loads' recursion limit. The old code crashed the CLI (exit 1,
@@ -4641,10 +4662,10 @@ def apply_baseline(res, baseline_path, scan_root=None):
         return
     try:
         with open(baseline_path, encoding="utf-8") as fh:
-            prev = json.load(fh)
-    except (OSError, ValueError, RecursionError, MemoryError) as exc:
-        # ValueError covers JSONDecodeError, UnicodeDecodeError and the
-        # int-digit limit. audit H1: {exc} can echo hostile baseline content
+            prev = json_loads_bounded(fh.read())
+    except (OSError, ValueError, MemoryError) as exc:
+        # ValueError covers JSONDecodeError, UnicodeDecodeError, the
+        # int-digit limit and JsonTooDeep. audit H1: {exc} can echo hostile baseline content
         # (JSONDecodeError position text); sanitize both interpolations.
         print(f"warning: could not read baseline {sanitize_term(baseline_path)}: "
               f"{sanitize_term(exc)}", file=sys.stderr)

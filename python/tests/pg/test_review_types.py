@@ -27,11 +27,25 @@ class DecoderFallbackTests(unittest.TestCase):
     """Any decoder failure returns the text value instead of raising, because
     an exception while reading a DataRow aborts the connection."""
 
-    def test_json_deeper_than_the_recursion_limit(self):
-        deep = b"[" * 100_000 + b"]" * 100_000
-        for oid in (t.JSON, t.JSONB):
-            with self.subTest(oid=oid):
-                self.assertEqual(t.decoder_for(oid, t.DECODERS)(deep), deep.decode())
+    def test_json_deeper_than_the_limit(self):
+        # Text on every Python: 3.14's json.loads no longer runs out of
+        # recursion, so the limit has to be ours (JSON_MAX_DEPTH).
+        for depth in (t.JSON_MAX_DEPTH + 1, 100_000):
+            deep = b"[" * depth + b"]" * depth
+            for oid in (t.JSON, t.JSONB):
+                with self.subTest(depth=depth, oid=oid):
+                    self.assertEqual(t.decoder_for(oid, t.DECODERS)(deep), deep.decode())
+
+    def test_json_at_the_limit_still_decodes(self):
+        at = t.JSON_MAX_DEPTH
+        value = t.decoder_for(t.JSONB, t.DECODERS)(b"[" * at + b"]" * at)
+        for _ in range(at - 1):
+            self.assertEqual(len(value), 1)
+            value = value[0]
+        self.assertEqual(value, [])
+        # brackets inside strings are data, not nesting
+        text = '{"k": "' + "[" * 10_000 + '\\"{"}'
+        self.assertEqual(t.decoder_for(t.JSON, t.DECODERS)(text.encode()), {"k": "[" * 10_000 + '"{'})
 
     def test_registered_decoder_that_raises_anything(self):
         for exc in (KeyError("zzz"), TypeError("x"), RuntimeError("y"), AttributeError("z")):

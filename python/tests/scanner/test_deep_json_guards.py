@@ -42,6 +42,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import shutil
 
 from tests import _support  # noqa: E402
 import sqlite3
@@ -266,9 +267,9 @@ class FlowLoadConfigTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(len(warns), 1)
         self.assertIn("could not load taint config", warns[0])
-        # str() of the RecursionError: 3.14 names the failure mode
-        # ("Stack overflow"); older versions say "maximum recursion depth".
-        self.assertRegex(warns[0], r"Stack overflow|maximum recursion depth")
+        # our own limit and wording, the same on every Python (json.loads'
+        # RecursionError text differs by version, and 3.14 may not raise it)
+        self.assertIn(f"nested deeper than {lazaret.MAX_MANIFEST_DEPTH} levels", warns[0])
 
     def test_valid_config_still_applies(self):
         from lazaret.scanner import flow as lazaret_flow
@@ -312,8 +313,10 @@ class _FlowState:
 # ---------------------------------------------------------------------------
 class StoreReportDeepBlobTests(unittest.TestCase):
     def _store_with_blob(self, blob):
-        db = os.path.join(tempfile.mkdtemp(prefix="cg-store-"), "r.db")
-        st = lazaret_repo.Store(db)
+        d = tempfile.mkdtemp(prefix="cg-store-")
+        self.addCleanup(shutil.rmtree, d, True)
+        st = lazaret_repo.Store(os.path.join(d, "r.db"))
+        self.addCleanup(st.close)            # runs first: closed before the rmtree
         pid, _ = st.add_package("npm", "hostile")
         cur = st.conn.cursor()
         cur.execute(
@@ -335,7 +338,7 @@ class StoreReportDeepBlobTests(unittest.TestCase):
         issue = res["issues"][0]
         self.assertEqual(issue["rule"], "SC-STORED-DEPTH")
         self.assertEqual(issue["sev"], "CRITICAL")
-        self.assertIn("RecursionError", issue["msg"])
+        self.assertIn(f"nested deeper than {lazaret.MAX_MANIFEST_DEPTH} levels", issue["msg"])
 
     def test_valid_stored_blob_still_parses(self):
         good = json.dumps([{"rule": "X", "file": "a.js", "line": 1,
