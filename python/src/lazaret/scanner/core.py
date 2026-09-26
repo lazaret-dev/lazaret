@@ -4013,16 +4013,17 @@ def _local_module(value):
 
 
 def _node_script(args):
-    """-> (script, preloads) for `node [flags] script [args]`."""
+    """-> (script, preloads, code) for `node [flags] script [args]`: code is
+    the inline code of -e / --eval / -p / --print (None when there is none)."""
     preloads, i = [], 0
     while i < len(args):
         a = args[i]
         if a == "--":
-            return (args[i + 1] if i + 1 < len(args) else None), preloads
+            return (args[i + 1] if i + 1 < len(args) else None), preloads, None
         if a.startswith("-") and a != "-":
             name, eq, val = a.partition("=")
             if name in _NODE_CODE_FLAGS:
-                return None, preloads        # inline code: see the -e require scan
+                return None, preloads, (val if eq else (args[i + 1] if i + 1 < len(args) else ""))
             if name in _NODE_VALUE_FLAGS:
                 value = val if eq else (args[i + 1] if i + 1 < len(args) else "")
                 if name in _NODE_PRELOAD_FLAGS and _local_module(value):
@@ -4031,8 +4032,8 @@ def _node_script(args):
                 continue
             i += 1
             continue
-        return a, preloads
-    return None, preloads
+        return a, preloads, None
+    return None, preloads, None
 
 
 def _interpreter_script(args, inline_flags=("-c",)):
@@ -4054,59 +4055,179 @@ def _interpreter_script(args, inline_flags=("-c",)):
     return None, None
 
 
-def _hook_segment_targets(tokens, depth):
-    """Targets of one tokenized command line; tracks `cd` across segments."""
-    targets, cwd, seg = [], "", []
+# Following a hook is bounded (review: a 16 MB hook of `cd a;` took hours, one
+# of `env ` minutes, and one of `cd a && node b.js && …` made gigabytes of
+# targets): a hook longer than HOOK_MAX_CHARS is not followed, at most
+# HOOK_MAX_COMMANDS commands (those in `sh -c` / `env -S` code too) and
+# HOOK_MAX_TARGETS scripts are, and a script path longer than HOOK_MAX_PATH is
+# dropped. follow_hook says when a limit stopped it; the registry then counts
+# the release as not fully scanned (a real hook is a line or two).
+HOOK_MAX_CHARS = 100_000
+HOOK_MAX_COMMANDS = 1000
+HOOK_MAX_TARGETS = 100
+HOOK_MAX_PATH = 4096
+_REDIRECT_TOKEN_RE = re.compile(r"\d?[<>]{1,2}&?\d?")
+_DUP_FD_RE = re.compile(r"&\d$")
+_FD_NUMBER_RE = re.compile(r"[0-9]+")
+# A wrapper's options that take a value (the next word, `--name=value`, or the
+# rest of a short option: `-Cdir`), the ones among them that change the
+# directory the command runs in, and those whose value is a command line.
+_WRAPPER_VALUE_OPTIONS = {
+    "env": frozenset({"-u", "--unset", "-C", "--chdir", "-S", "--split-string"}),
+    "sudo": frozenset({"-u", "--user", "-g", "--group", "-h", "--host", "-p", "--prompt",
+                       "-C", "--close-from", "-D", "--chdir", "-r", "--role", "-t", "--type",
+                       "-T", "--command-timeout", "-U", "--other-user"}),
+    "nice": frozenset({"-n", "--adjustment"}),
+    "exec": frozenset({"-a"}),
+    "time": frozenset({"-f", "--format", "-o", "--output"}),
+    "dotenv": frozenset({"-e", "-v", "-p"}),
+}
+_WRAPPER_CHDIR_OPTIONS = {"env": frozenset({"-C", "--chdir"}), "sudo": frozenset({"-D", "--chdir"})}
+_WRAPPER_COMMAND_OPTIONS = {"env": frozenset({"-S", "--split-string"})}
 
-    def join(path):
+
+class _HookWalk:
+    """What following one hook has used, and whether a limit stopped it."""
+    __slots__ = ("commands", "complete")
+
+    def __init__(self):
+        self.commands, self.complete = 0, True
+
+
+def _apply_path(comps, path):
+    """posixpath.normpath's loop for relative `path`, applied to the list of
+    components kept so far (in place): '' and '.' are dropped, and '..'
+    removes the component before it unless there is none or it is '..' too.
+    normpath(a + '/' + b) is b applied to a's components, so a `cd` costs only
+    its own length (the whole path was normalized again at every one)."""
+    for comp in path.split("/"):
+        if comp in ("", "."):
+            continue
+        if comp != ".." or not comps or comps[-1] == "..":
+            comps.append(comp)
+        else:
+            comps.pop()
+    return comps
+
+
+def _hook_cd(where, dest):
+    """The directory after `cd dest` from `where` ((set, components): set is
+    False while no `cd` has named a directory), or None for a destination
+    the walk cannot follow (~, -, $VAR). An absolute path counts from the
+    package root."""
+    if not dest or dest in ("~", "-") or dest.startswith(("$", "~")):
+        return None
+    dest = dest.replace("\\", "/")
+    if dest.startswith("/"):
+        raw = dest.lstrip("/")
+        return raw not in ("", "."), _apply_path([], raw)
+    comps = _apply_path(list(where[1]), dest)
+    return bool(comps), comps
+
+
+def _hook_segment_targets(tokens, depth, walk):
+    """Targets of one tokenized command line; tracks `cd` across segments."""
+    targets = []
+    state = (False, [])                       # the directory `cd` moved to
+    joined = {}
+
+    def join(path, where=None):
+        """core's normpath(join(cwd, path)) when a `cd` has set a directory
+        (`where`: this command's own, from env -C / sudo -D)."""
         path = path.replace("\\", "/")
-        if not cwd or path.startswith("/"):
+        is_set, comps = where if where is not None else state
+        if not is_set or path.startswith("/"):
             return path
-        import posixpath
-        return posixpath.normpath(posixpath.join(cwd, path))
+        if where is not None:
+            return "/".join(_apply_path(list(comps), path)) or "."
+        if path not in joined:              # (cleared at every cd)
+            joined[path] = "/".join(_apply_path(list(comps), path)) or "."
+        return joined[path]
 
     def flush(seg):
-        nonlocal cwd
+        nonlocal state
         words, skip = [], False
         for tok in seg:
             if skip:
                 skip = False
                 continue
-            if tok in _HOOK_REDIRECTS or re.fullmatch(r"\d?[<>]{1,2}&?\d?", tok):
-                skip = not re.search(r"&\d$", tok)
+            if tok in _HOOK_REDIRECTS or _REDIRECT_TOKEN_RE.fullmatch(tok):
+                skip = not _DUP_FD_RE.search(tok)
+                if words and _FD_NUMBER_RE.fullmatch(words[-1]):
+                    words.pop()                 # 2>/dev/null: the 2 is the redirect's
                 continue
             words.append(tok)
-        while words and (_ENV_ASSIGN_RE.match(words[0]) or
-                         words[0].lower() in _HOOK_WRAPPERS):
-            words.pop(0)
         if not words:
             return
-        head = words[0].replace("\\", "/")
+        if walk.commands >= HOOK_MAX_COMMANDS:
+            walk.complete = False
+            return
+        walk.commands += 1
+        # env assignments and wrappers (with their options) in front
+        i, where = 0, None
+        while i < len(words):
+            word = words[i]
+            if _ENV_ASSIGN_RE.match(word):
+                i += 1
+                continue
+            name = word.lower()
+            if name not in _HOOK_WRAPPERS:
+                break
+            i += 1
+            values = _WRAPPER_VALUE_OPTIONS.get(name, frozenset())
+            while i < len(words) and words[i].startswith("-") and (words[i] != "-" or name == "env"):
+                opt = words[i]
+                i += 1
+                if opt == "--":
+                    break
+                if opt.startswith("--"):
+                    key, eq, value = opt.partition("=")
+                    if key not in values:
+                        continue
+                    if not eq:
+                        value = words[i] if i < len(words) else ""
+                        i += 1
+                elif opt[:2] in values:
+                    key, value = opt[:2], opt[2:]
+                    if not value:
+                        value = words[i] if i < len(words) else ""
+                        i += 1
+                else:
+                    continue
+                if key in _WRAPPER_CHDIR_OPTIONS.get(name, ()):
+                    where = _hook_cd(where or state, value) or where
+                elif key in _WRAPPER_COMMAND_OPTIONS.get(name, ()):
+                    if depth < 2:                   # env -S "node x.js": a command line
+                        targets.extend(join(t, where) for t in _hook_targets(value, depth + 1, walk))
+                    return
+        if i >= len(words):
+            return
+        head = words[i].replace("\\", "/")
         base = head.rsplit("/", 1)[-1].lower()
         if base in ("cd", "pushd"):
-            dest = next((w for w in words[1:] if not w.startswith("-")), "")
-            if dest and dest not in ("~", "-") and not dest.startswith(("$", "~")):
-                import posixpath
-                dest = dest.replace("\\", "/")
-                cwd = dest.lstrip("/") if dest.startswith("/") else \
-                    posixpath.normpath(posixpath.join(cwd or ".", dest))
-                if cwd == ".":
-                    cwd = ""
+            dest = next((w for w in words[i + 1:] if not w.startswith("-")), "")
+            moved = _hook_cd(state, dest)
+            if moved is not None:
+                state = moved
+                joined.clear()
             return
-        script, extra = None, []
+        script, extra, code = None, [], None
         if base in _NODE_NAMES:
-            script, extra = _node_script(words[1:])
+            script, extra, code = _node_script(words[i + 1:])
         elif base in _SHELL_NAMES or _PYTHON_NAME_RE.match(base):
-            script, inline = _interpreter_script(words[1:])
+            script, inline = _interpreter_script(words[i + 1:])
             if inline and depth < 2 and base in _SHELL_NAMES:
-                targets.extend(join(t) for t in _hook_targets(inline, depth + 1))
+                targets.extend(join(t, where) for t in _hook_targets(inline, depth + 1, walk))
         elif head.startswith(("./", "../")) or ("/" in head and not head.startswith("/")) \
                 or _SCRIPT_EXT_RE.search(head):
             script = head                       # executed directly (shebang)
         for t in [script] + extra:
             if t:
-                targets.append(join(t))
+                targets.append(join(t, where))
+        if code:                                # node -e "require('./x')", from this directory
+            targets.extend(join(m.group(1), where) for m in _LOCAL_REQUIRE_RE.finditer(code))
 
+    seg = []
     for tok in tokens:
         if tok in _HOOK_SEPARATORS or (tok and set(tok) <= set(";&|()")):
             flush(seg)
@@ -4117,36 +4238,55 @@ def _hook_segment_targets(tokens, depth):
     return targets
 
 
-def _hook_targets(cmd, depth=0):
+def _hook_targets(cmd, depth=0, walk=None):
+    walk = walk if walk is not None else _HookWalk()
     targets = []
     variants = [cmd]
     if "\\" in cmd:
         variants.append(cmd.replace("\\", "/"))   # cmd.exe: backslash is a path separator
     for variant in variants:
-        targets += _hook_segment_targets(_hook_tokens(variant), depth)
+        targets += _hook_segment_targets(_hook_tokens(variant), depth, walk)
     return targets
 
 
-def hook_script_targets(cmd):
-    """Package-relative files an install hook runs, in order and without
-    duplicates: `node install.js`, `node ./scripts/x.mjs`, `node install`
-    (no extension: resolve like Node), `node --no-warnings x.js`,
-    `node -r ./preload.js x.js`, `cd scripts && node x.js`, `sh ./install.sh`,
-    `./install.sh`, `python setup_helper.py`, `node scripts\\x.js`, and
-    `node -e "require('./postinstall')"`. The command is tokenized like a
-    shell (quotes, && || ; | operators, env assignments, cd)."""
+def follow_hook(cmd):
+    """(targets, complete) for an install hook command: the package-relative
+    files it runs, in order and without duplicates — `node install.js`,
+    `node ./scripts/x.mjs`, `node install` (no extension: resolve like Node),
+    `node --no-warnings x.js`, `node -r ./preload.js x.js`,
+    `cd scripts && node x.js`, `sh ./install.sh`, `./install.sh`,
+    `python setup_helper.py`, `node scripts\\x.js`,
+    `node -e "require('./postinstall')"`, `env -C sub node x.js`,
+    `sudo -u me node x.js`, `2>/dev/null node x.js` — and False for complete
+    when a limit stopped the walk (see HOOK_MAX_CHARS). The command is
+    tokenized like a shell (quotes, && || ; | operators, env assignments,
+    cd, wrappers and their options)."""
     if not isinstance(cmd, str) or not cmd.strip():
-        return []
-    targets = _hook_targets(cmd)
+        return [], True
+    if len(cmd) > HOOK_MAX_CHARS:
+        return [], False
+    walk = _HookWalk()
+    targets = _hook_targets(cmd, 0, walk)
+    # `node -e` anywhere in the command (`npx node -e …` too), as written
     for m in _NODE_E_RE.finditer(cmd):
         code = next(g for g in m.groups() if g is not None)
         targets += _LOCAL_REQUIRE_RE.findall(code)
     seen, out = set(), []
     for t in targets:
         if t and t not in seen and t not in ("-", "."):
+            if len(t) > HOOK_MAX_PATH:
+                walk.complete = False
+                continue
             seen.add(t)
             out.append(t)
-    return out
+    if len(out) > HOOK_MAX_TARGETS:
+        out, walk.complete = out[:HOOK_MAX_TARGETS], False
+    return out, walk.complete
+
+
+def hook_script_targets(cmd):
+    """The files an install hook runs (follow_hook's targets)."""
+    return follow_hook(cmd)[0]
 
 
 # ---------------- Install-script and import-time inspection ----------------

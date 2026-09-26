@@ -1690,7 +1690,13 @@ class _ArtifactScan:
             if issue["rule"] != "SC-INSTALL-HOOK" or not issue.get("cmd"):
                 continue
             base = posixpath.dirname(issue["file"])
-            for target in lazaret.hook_script_targets(issue["cmd"]):
+            targets, complete = lazaret.follow_hook(issue["cmd"])
+            if not complete:            # a limit stopped the walk (core.HOOK_MAX_CHARS)
+                self.truncate(issue["file"], "its install hook is more than Lazaret follows "
+                              f"({lazaret.HOOK_MAX_COMMANDS:,} commands, {lazaret.HOOK_MAX_TARGETS} "
+                              f"scripts, {lazaret.HOOK_MAX_CHARS:,} characters, "
+                              f"{lazaret.HOOK_MAX_PATH:,}-character paths)")
+            for target in targets:
                 rel = self._resolve(_rel_join(base, target))
                 if rel is None:
                     continue

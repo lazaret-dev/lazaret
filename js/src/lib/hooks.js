@@ -225,17 +225,20 @@ function localModule(value) {
     || SCRIPT_EXT_RE.test(pyEnd(value)));
 }
 
-/** twin of core._node_script: [script, preloads] for `node [flags] script [args]` */
+/**
+ * twin of core._node_script: [script, preloads, code] for `node [flags] script
+ * [args]`; code is the inline code of -e / --eval / -p / --print (else null)
+ */
 function nodeScript(args) {
   const preloads = [];
   let i = 0;
   while (i < args.length) {
     const a = args[i];
-    if (a === "--") return [i + 1 < args.length ? args[i + 1] : null, preloads];
+    if (a === "--") return [i + 1 < args.length ? args[i + 1] : null, preloads, null];
     if (a.startsWith("-") && a !== "-") {
       const eq = a.indexOf("=");                                      // a.partition("=")
       const name = eq < 0 ? a : a.slice(0, eq);
-      if (NODE_CODE_FLAGS.has(name)) return [null, preloads];         // inline code: see the -e require scan
+      if (NODE_CODE_FLAGS.has(name)) return [null, preloads, eq >= 0 ? a.slice(eq + 1) : i + 1 < args.length ? args[i + 1] : ""];
       if (NODE_VALUE_FLAGS.has(name)) {
         const value = eq >= 0 ? a.slice(eq + 1) : i + 1 < args.length ? args[i + 1] : "";
         if (NODE_PRELOAD_FLAGS.has(name) && localModule(value)) preloads.push(value);
@@ -245,9 +248,9 @@ function nodeScript(args) {
       i++;
       continue;
     }
-    return [a, preloads];
+    return [a, preloads, null];
   }
-  return [null, preloads];
+  return [null, preloads, null];
 }
 
 /** twin of core._interpreter_script: [script, inlineCode] for `sh|python [flags] script` / `-c code` */
@@ -272,26 +275,82 @@ function onlyOperators(tok) {
   return true;
 }
 
+// Following a hook is bounded (twin of core's HOOK_MAX_* and their comment):
+// a hook longer than HOOK_MAX_CHARS code points is not followed, at most
+// HOOK_MAX_COMMANDS commands (those in `sh -c` / `env -S` code too) and
+// HOOK_MAX_TARGETS scripts are, and a script path longer than HOOK_MAX_PATH
+// is dropped; followHook says when a limit stopped it.
+export const HOOK_MAX_CHARS = 100_000;
+export const HOOK_MAX_COMMANDS = 1000;
+export const HOOK_MAX_TARGETS = 100;
+export const HOOK_MAX_PATH = 4096;
+const FD_NUMBER_RE = /^[0-9]+$/;                                       // core: _FD_NUMBER_RE.fullmatch
+// A wrapper's options that take a value (the next word, `--name=value`, or
+// the rest of a short option: `-Cdir`), those among them that change the
+// directory the command runs in, and those whose value is a command line.
+const WRAPPER_VALUE_OPTIONS = new Map([
+  ["env", new Set(["-u", "--unset", "-C", "--chdir", "-S", "--split-string"])],
+  ["sudo", new Set(["-u", "--user", "-g", "--group", "-h", "--host", "-p", "--prompt", "-C", "--close-from",
+    "-D", "--chdir", "-r", "--role", "-t", "--type", "-T", "--command-timeout", "-U", "--other-user"])],
+  ["nice", new Set(["-n", "--adjustment"])],
+  ["exec", new Set(["-a"])],
+  ["time", new Set(["-f", "--format", "-o", "--output"])],
+  ["dotenv", new Set(["-e", "-v", "-p"])],
+]);
+const WRAPPER_CHDIR_OPTIONS = new Map([["env", new Set(["-C", "--chdir"])], ["sudo", new Set(["-D", "--chdir"])]]);
+const WRAPPER_COMMAND_OPTIONS = new Map([["env", new Set(["-S", "--split-string"])]]);
+const NONE = new Set();
+
+/** More than n code points (Python's len(s) > n)? */
+function cpLongerThan(s, n) {
+  if (s.length <= n) return false;
+  let cps = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c >= 0xdc00 && c <= 0xdfff && i > 0 && (s.charCodeAt(i - 1) & 0xfc00) === 0xd800) continue;   // a pair's low half
+    if (++cps > n) return true;
+  }
+  return false;
+}
+
+/**
+ * twin of core._hook_cd: the directory [set, components] after `cd dest`
+ * from `where` (set is false while no `cd` has named one), or null for a
+ * destination the walk cannot follow (~, -, $VAR). An absolute path counts
+ * from the package root: core keeps it as written (lstrip("/"), not
+ * normalized), so "set" is whether that text is neither "" nor ".".
+ */
+function hookCd(where, dest) {
+  if (!dest || dest === "~" || dest === "-" || dest.startsWith("$") || dest.startsWith("~")) return null;
+  dest = replaceChar(dest, "\\", "/");
+  if (dest.startsWith("/")) {
+    const raw = lstripSlashes(dest);
+    return [raw !== "" && raw !== ".", applyPath([], raw)];
+  }
+  const comps = applyPath(where[1].slice(), dest);
+  return [comps.length > 0, comps];
+}
+
 /**
  * Targets of one tokenized command line; tracks `cd` across segments.
- * Twin of lazaret.scanner.core._hook_segment_targets.
+ * Twin of lazaret.scanner.core._hook_segment_targets. core kept the
+ * directory as a string and normalized cwd + path again at every `cd` and
+ * for every target; both now keep normpath's components (the same for a
+ * path and for its normpath: see applyPath), so a `cd` applies only its
+ * own, and a target is joined once per directory.
  */
-function hookSegmentTargets(tokens, depth) {
+function hookSegmentTargets(tokens, depth, walk) {
   const targets = [];
-  // The directory `cd` moved to. core keeps it as a string and normalizes
-  // cwd + path again at every `cd` and for every target, so a hook of many
-  // `cd a;` took quadratic time. Here it is normpath's components (the same
-  // for a path and for its normpath: see applyPath), so a `cd` applies only
-  // its own; cwdSet says whether core's string is non-empty (a raw
-  // `cd /a/..` is, though nothing is left of it). A target is joined once
-  // per directory.
-  let cwdSet = false, cwd = [], joined = new Map();
+  let state = [false, []];
+  let joined = new Map();
 
-  const join = (path) => {                              // core: normpath(join(cwd, path)) if cwd
+  const join = (path, where = null) => {                // core: normpath(join(cwd, path)) once a cd set cwd
     path = replaceChar(path, "\\", "/");
-    if (!cwdSet || path.startsWith("/")) return path;
+    const [isSet, comps] = where ?? state;
+    if (!isSet || path.startsWith("/")) return path;
+    if (where) return applyPath(comps.slice(), path).join("/") || ".";
     let out = joined.get(path);
-    if (out === undefined) joined.set(path, out = applyPath(cwd.slice(), path).join("/") || ".");
+    if (out === undefined) joined.set(path, out = applyPath(comps.slice(), path).join("/") || ".");
     return out;
   };
 
@@ -302,49 +361,73 @@ function hookSegmentTargets(tokens, depth) {
       if (skip) { skip = false; continue; }
       if (HOOK_REDIRECTS.has(tok) || REDIRECT_RE.test(tok)) {       // a redirect and its target
         skip = !DUP_FD_RE.test(pyEnd(tok));                            // (2>&1 has none)
+        if (words.length && FD_NUMBER_RE.test(words[words.length - 1])) words.pop();   // 2>/dev/null: the 2 is the redirect's
         continue;
       }
       words.push(tok);
     }
-    // env assignments and wrappers in front (core pops words[0]; an index
-    // keeps a line of a million wrappers linear)
-    let w = 0;
-    while (w < words.length && (ENV_ASSIGN_RE.test(words[w]) || HOOK_WRAPPERS.has(words[w].toLowerCase()))) w++;
-    if (w === words.length) return;
-    const head = replaceChar(words[w], "\\", "/");
+    if (!words.length) return;
+    if (walk.commands >= HOOK_MAX_COMMANDS) { walk.complete = false; return; }
+    walk.commands++;
+    // env assignments and wrappers (with their options) in front; an index,
+    // not core's old pop(0), keeps a line of a million wrappers linear
+    let i = 0, where = null;
+    while (i < words.length) {
+      const word = words[i];
+      if (ENV_ASSIGN_RE.test(word)) { i++; continue; }
+      const name = word.toLowerCase();
+      if (!HOOK_WRAPPERS.has(name)) break;
+      i++;
+      const values = WRAPPER_VALUE_OPTIONS.get(name) ?? NONE;
+      while (i < words.length && words[i].startsWith("-") && (words[i] !== "-" || name === "env")) {
+        const opt = words[i++];
+        if (opt === "--") break;
+        let key, value;
+        if (opt.startsWith("--")) {
+          const eq = opt.indexOf("=");
+          key = eq < 0 ? opt : opt.slice(0, eq);
+          if (!values.has(key)) continue;
+          if (eq >= 0) value = opt.slice(eq + 1);
+          else value = i < words.length ? words[i++] : (i++, "");
+        } else if (values.has(opt.slice(0, 2))) {
+          key = opt.slice(0, 2);
+          value = opt.slice(2);
+          if (!value) value = i < words.length ? words[i++] : (i++, "");
+        } else continue;
+        if ((WRAPPER_CHDIR_OPTIONS.get(name) ?? NONE).has(key)) {
+          where = hookCd(where ?? state, value) ?? where;
+        } else if ((WRAPPER_COMMAND_OPTIONS.get(name) ?? NONE).has(key)) {
+          if (depth < 2) for (const t of hookTargets(value, depth + 1, walk)) targets.push(join(t, where));   // env -S "node x.js"
+          return;
+        }
+      }
+    }
+    if (i >= words.length) return;
+    const head = replaceChar(words[i], "\\", "/");
     const base = head.slice(head.lastIndexOf("/") + 1).toLowerCase();
     if (base === "cd" || base === "pushd") {
       let dest = "";
-      for (let k = w + 1; k < words.length; k++) if (!words[k].startsWith("-")) { dest = words[k]; break; }
-      if (dest && dest !== "~" && dest !== "-" && !dest.startsWith("$") && !dest.startsWith("~")) {
-        dest = replaceChar(dest, "\\", "/");
-        if (dest.startsWith("/")) {                     // core: cwd = dest.lstrip("/"), not normalized
-          const raw = lstripSlashes(dest);
-          cwdSet = raw !== "" && raw !== ".";
-          cwd = applyPath([], raw);
-        } else {                                        // core: normpath(join(cwd or ".", dest))
-          applyPath(cwd, dest);
-          cwdSet = cwd.length > 0;                      // (normpath's "." is core's "")
-        }
-        joined = new Map();
-      }
+      for (let k = i + 1; k < words.length; k++) if (!words[k].startsWith("-")) { dest = words[k]; break; }
+      const moved = hookCd(state, dest);
+      if (moved !== null) { state = moved; joined = new Map(); }
       return;
     }
-    let script = null, extra = [];
+    let script = null, extra = [], code = null;
     if (NODE_NAMES.has(base)) {
-      [script, extra] = nodeScript(words.slice(w + 1));
+      [script, extra, code] = nodeScript(words.slice(i + 1));
     } else if (SHELL_NAMES.has(base) || PYTHON_NAME_RE.test(pyEnd(base))) {
       let inline;
-      [script, inline] = interpreterScript(words.slice(w + 1));
+      [script, inline] = interpreterScript(words.slice(i + 1));
       if (inline && depth < 2 && SHELL_NAMES.has(base)) {
-        for (const t of hookTargets(inline, depth + 1)) targets.push(join(t));
+        for (const t of hookTargets(inline, depth + 1, walk)) targets.push(join(t, where));
       }
     } else if (head.startsWith("./") || head.startsWith("../") || (head.includes("/") && !head.startsWith("/"))
         || SCRIPT_EXT_RE.test(pyEnd(head))) {
       script = head;                                                    // executed directly (shebang)
     }
-    if (script) targets.push(join(script));
-    for (const t of extra) if (t) targets.push(join(t));
+    if (script) targets.push(join(script, where));
+    for (const t of extra) if (t) targets.push(join(t, where));
+    if (code) for (const m of code.matchAll(LOCAL_REQUIRE_RE)) targets.push(join(m[1], where));   // node -e "require('./x')"
   };
 
   let seg = [];
@@ -361,12 +444,12 @@ function hookSegmentTargets(tokens, depth) {
 }
 
 /** twin of core._hook_targets */
-function hookTargets(cmd, depth = 0) {
+function hookTargets(cmd, depth = 0, walk = { commands: 0, complete: true }) {
   const targets = [];
   const variants = [cmd];
   if (cmd.includes("\\")) variants.push(replaceChar(cmd, "\\", "/"));   // cmd.exe: backslash is a path separator
   for (const variant of variants) {
-    for (const t of hookSegmentTargets(hookTokens(variant), depth)) targets.push(t);   // (no spread: millions)
+    for (const t of hookSegmentTargets(hookTokens(variant), depth, walk)) targets.push(t);   // (no spread: millions)
   }
   return targets;
 }
@@ -379,13 +462,18 @@ function hookTargets(cmd, depth = 0) {
  * millions of characters.
  */
 export function nodeECodes(cmd) {
-  const codes = [];
+  return nodeEMatches(cmd).map((m) => m[2]);
+}
+
+/** [start, end, code] of each match of core's _NODE_E_RE in `cmd` (finditer's order); see nodeECodes. */
+export function nodeEMatches(cmd) {
+  const found = [];
   for (let from = 0, p; (p = cmd.indexOf("node", from)) !== -1;) {
     const m = nodeEAt(cmd, p);
     if (m === null) from = p + 1;
-    else { codes.push(m[1]); from = m[0]; }
+    else { found.push([p, m[0], m[1]]); from = m[0]; }
   }
-  return codes;
+  return found;
 }
 
 /**
@@ -415,29 +503,41 @@ function nodeEAt(s, p) {
 }
 
 /**
- * Package-relative files an install hook runs, in order and without
- * duplicates: `node install.js`, `node ./scripts/x.mjs`, `node install`
- * (no extension: resolve like Node), `node --no-warnings x.js`,
- * `node -r ./preload.js x.js`, `cd scripts && node x.js`, `sh ./install.sh`,
- * `./install.sh`, `python setup_helper.py`, `node scripts\\x.js`, and
- * `node -e "require('./postinstall')"`. The command is tokenized like a
- * shell (quotes, && || ; | operators, env assignments, cd).
- * Twin of lazaret.scanner.core.hook_script_targets.
+ * [targets, complete] for an install hook command: the package-relative
+ * files it runs, in order and without duplicates — `node install.js`,
+ * `node ./scripts/x.mjs`, `node install` (no extension: resolve like Node),
+ * `node --no-warnings x.js`, `node -r ./preload.js x.js`,
+ * `cd scripts && node x.js`, `sh ./install.sh`, `./install.sh`,
+ * `python setup_helper.py`, `node scripts\\x.js`,
+ * `node -e "require('./postinstall')"`, `env -C sub node x.js`,
+ * `sudo -u me node x.js`, `2>/dev/null node x.js` — and false for complete
+ * when a limit stopped the walk (see HOOK_MAX_CHARS).
+ * Twin of lazaret.scanner.core.follow_hook.
  */
-export function hookScriptTargets(cmd) {
-  if (typeof cmd !== "string" || !pyStrip(cmd)) return [];
-  const targets = hookTargets(cmd);
-  for (const code of nodeECodes(cmd)) {
+export function followHook(cmd) {
+  if (typeof cmd !== "string" || !pyStrip(cmd)) return [[], true];
+  if (cpLongerThan(cmd, HOOK_MAX_CHARS)) return [[], false];
+  const walk = { commands: 0, complete: true };
+  const targets = hookTargets(cmd, 0, walk);
+  for (const code of nodeECodes(cmd)) {                                 // `node -e` anywhere (`npx node -e …`), as written
     for (const m of code.matchAll(LOCAL_REQUIRE_RE)) targets.push(m[1]);
   }
-  const seen = new Set(), out = [];
+  const seen = new Set();
+  let out = [];
   for (const t of targets) {
     if (t && !seen.has(t) && t !== "-" && t !== ".") {
+      if (cpLongerThan(t, HOOK_MAX_PATH)) { walk.complete = false; continue; }
       seen.add(t);
       out.push(t);
     }
   }
-  return out;
+  if (out.length > HOOK_MAX_TARGETS) { out = out.slice(0, HOOK_MAX_TARGETS); walk.complete = false; }
+  return [out, walk.complete];
+}
+
+/** The files an install hook runs (followHook's targets). Twin of core.hook_script_targets. */
+export function hookScriptTargets(cmd) {
+  return followHook(cmd)[0];
 }
 
 // ---- Install-script and import-time inspection ------------------------------
@@ -634,4 +734,8 @@ export const PY_TWINS = {
     _NODE_CODE_FLAGS: [...NODE_CODE_FLAGS], _NODE_PRELOAD_FLAGS: [...NODE_PRELOAD_FLAGS],
     _NODE_VALUE_FLAGS: [...NODE_VALUE_FLAGS],
   },
+  maps: Object.fromEntries([["_WRAPPER_VALUE_OPTIONS", WRAPPER_VALUE_OPTIONS],
+    ["_WRAPPER_CHDIR_OPTIONS", WRAPPER_CHDIR_OPTIONS], ["_WRAPPER_COMMAND_OPTIONS", WRAPPER_COMMAND_OPTIONS]]
+    .map(([name, map]) => [name, Object.fromEntries([...map].map(([k, v]) => [k, [...v].sort()]))])),
+  limits: { HOOK_MAX_CHARS, HOOK_MAX_COMMANDS, HOOK_MAX_TARGETS, HOOK_MAX_PATH },
 };

@@ -1,5 +1,5 @@
 // Install hooks followed like the Python engine: src/lib/hooks.js is the
-// twin of lazaret.scanner.core's hook_script_targets (with _hook_tokens, a
+// twin of lazaret.scanner.core's follow_hook (with _hook_tokens, a
 // shlex tokenizer), install_script_risk, import_time_risk and
 // node_candidates. Every expectation below is core's result on the same
 // text; tests/architecture/test_js_parity_hooks.py compares the two on a
@@ -12,7 +12,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as api from "../src/index.js";
 import {
-  hookScriptTargets, installScriptRisk, importTimeRisk, nodeCandidates, hookTokens, shlexSplit, nodeECodes, NODE_E_RE,
+  followHook, hookScriptTargets, installScriptRisk, importTimeRisk, nodeCandidates, hookTokens, shlexSplit, nodeECodes,
+  NODE_E_RE, HOOK_MAX_CHARS, HOOK_MAX_COMMANDS, HOOK_MAX_TARGETS,
 } from "../src/lib/hooks.js";
 
 test("a hook command is followed to the files it runs", () => {
@@ -41,7 +42,7 @@ test("a hook command is followed to the files it runs", () => {
     ["C:\\tools\\node.exe scripts\\post.js", ["scripts/post.js"]],
     ['node -e "require(\'./postinstall\')"', ["./postinstall"]],
     ['node -e "try{require(\'./postinstall\')}catch(e){}"', ["./postinstall"]],   // core-js
-    ['node -p "require(\'./a\')"', []],
+    ['node -p "require(\'./a\')"', ["./a"]],                      // -p runs its code too
     ["cross-env A=1 node x.js", ["x.js"]],
     ["NODE_ENV=production node build/postinstall.js", ["build/postinstall.js"]],
     ["node x.js 2>&1 > log.txt", ["x.js"]],
@@ -63,7 +64,14 @@ test("a hook command is followed to the files it runs", () => {
     ['"python\n" build.py', ["build.py"]],
     ["node \u212a.js", ["\u212a.js"]],
     ["husky install", []], ["prebuild-install || node-gyp rebuild", []], ["npx some-tool", []],
-    ["env -u X node x.js", []], ["", []], ["  ", []],
+    ["", []], ["  ", []],
+    // wrappers' options, fd numbers, node -e in a directory
+    ["env -u X node x.js", ["x.js"]], ["env -uX node x.js", ["x.js"]], ["env -i node x.js", ["x.js"]],
+    ["sudo -u me node x.js", ["x.js"]], ["sudo -D sub node x.js", ["sub/x.js"]], ["env -C sub node x.js", ["sub/x.js"]],
+    ["cd a && env --chdir=../b node x.js", ["b/x.js"]], ['env -S "node -r ./p.js x.js"', ["x.js", "./p.js"]],
+    ["nice -n 5 node x.js", ["x.js"]], ["time -o f.txt node x.js", ["x.js"]], ["dotenv -e .env -- node x.js", ["x.js"]],
+    ["2>/dev/null node x.js", ["x.js"]], ["1>out node x.js", ["x.js"]],
+    ['cd lib && node -e "require(\'./x\')"', ["lib/x", "./x"]],     // (the second: `node -e` anywhere, as written)
   ];
   for (const [cmd, want] of cases) assert.deepEqual(hookScriptTargets(cmd), want, JSON.stringify(cmd));
   assert.deepEqual(hookScriptTargets(null), []);
@@ -199,19 +207,29 @@ test("inputs of millions of characters: every function returns, in time", () => 
 });
 
 test("inputs of millions of characters: the results are core's", () => {
-  assert.deepEqual(hookScriptTargets(SHAPES["a long quoted node -e"]()), []);
+  // a hook longer than HOOK_MAX_CHARS is not followed, and says so
+  for (const label of ["a long quoted node -e", "a cd chain", "a wrapper chain", "escaped spaces"])
+    assert.deepEqual(followHook(SHAPES[label]()), [[], false], label);
   assert.deepEqual(installScriptRisk(SHAPES["curl … | sh commands"]()), ["pipes a download into a shell"]);
   assert.deepEqual(importTimeRisk(SHAPES["a huge JSON.stringify(process.env) file"]()),
     [["reads credentials or the whole environment and sends data over the network"], 1]);
-  const cds = SHAPES["a cd chain"]();                   // (core itself takes hours here: see hooks.js)
-  const depth = (cds.length - "node x.js".length) / "cd a; ".length;
-  assert.deepEqual(hookScriptTargets(cds), ["a/".repeat(depth) + "x.js"]);
-  assert.deepEqual(hookScriptTargets(SHAPES["a wrapper chain"]()), ["x.js"]);
-  assert.deepEqual(hookScriptTargets('node -e "require(\'./p\')' + " ".repeat(BIG) + '"'), ["./p"]);
 });
 
-test("the package exports the four functions", () => {
-  for (const name of ["hookScriptTargets", "installScriptRisk", "importTimeRisk", "nodeCandidates"])
+test("following a hook is bounded, and says when a limit stopped it", () => {
+  const cds = (n) => "cd a; ".repeat(n) + "node x.js";
+  assert.deepEqual(followHook(cds(HOOK_MAX_COMMANDS - 1)), [["a/".repeat(HOOK_MAX_COMMANDS - 1) + "x.js"], true]);
+  assert.deepEqual(followHook(cds(HOOK_MAX_COMMANDS)), [[], false]);
+  const many = Array.from({ length: HOOK_MAX_TARGETS + 5 }, (_, n) => `node s${n}.js`).join("; ");
+  const [targets, complete] = followHook(many);
+  assert.deepEqual([targets.length, targets[0], complete], [HOOK_MAX_TARGETS, "s0.js", false]);
+  assert.deepEqual(followHook("node " + "a".repeat(5000) + ".js"), [[], false]);        // a path of 5,000 characters
+  assert.deepEqual(followHook("x".repeat(HOOK_MAX_CHARS)), [[], true]);
+  assert.deepEqual(followHook("x".repeat(HOOK_MAX_CHARS + 1)), [[], false]);
+  assert.deepEqual(followHook("\u{1F600}".repeat(HOOK_MAX_CHARS)), [[], true]);       // code points, as Python counts
+});
+
+test("the package exports the functions", () => {
+  for (const name of ["followHook", "hookScriptTargets", "installScriptRisk", "importTimeRisk", "nodeCandidates"])
     assert.equal(typeof api[name], "function", name);
   assert.equal(api.hookScriptTargets, hookScriptTargets);
 });

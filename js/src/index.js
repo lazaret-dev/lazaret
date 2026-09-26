@@ -17,7 +17,7 @@ export {
   jsonReportChunks, htmlReportChunks, sarifChunks, sanitizeTerm, sanitizeTermLine, safeExcerpt,
 } from "./report.js";
 export { scanManifest, scanGyp, redactResult, setRedactSecrets } from "./lib/supplychain.js";
-export { hookScriptTargets, installScriptRisk, importTimeRisk, nodeCandidates } from "./lib/hooks.js";
+export { followHook, hookScriptTargets, installScriptRisk, importTimeRisk, nodeCandidates } from "./lib/hooks.js";
 export {
   collectFiles, reportPaths, writeReport, validateReportPaths, validateOutDir, isOurReport,
   ReportPathError, EXIT_OUTPUT,

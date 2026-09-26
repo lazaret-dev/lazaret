@@ -11,6 +11,7 @@ import {
   jsonDepthExceeds,
 } from "./pycompat.js";
 import { pyJsonParse, jsonErrorWhere, pyLiteralParse } from "./pyjson.js";
+import { nodeEMatches } from "./hooks.js";
 import { REDACT, redactText, registerScanContext, SecretLiterals } from "./redact.js";
 
 export { SECRET_RULES, REDACT_PLACEHOLDER, redactContextLine, redactSecretSnippet, redactResult, setRedactSecrets } from "./redact.js";
@@ -46,8 +47,6 @@ export function isRootManifest(path) {
 export const INSTALL_HOOK_RE =
   pyRe(String.raw`curl|wget|iwr|Invoke-WebRequest|node\s+-e|bash\s+-c|sh\s+-c|powershell|base64|\beval\b`, "i");
 
-const NODE_E_SRC = String.raw`node\s+-e\s+(?:"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'|(\S+))`;
-const NODE_E_RE = pyRe(NODE_E_SRC, "g");
 const LOCAL_REQUIRE_SRC = String.raw`require\(\s*\\?["'](\.{1,2}/[^"'\\]+)\\?["']\s*\)`;
 const LOCAL_REQUIRE_RE = pyRe(LOCAL_REQUIRE_SRC, "g");
 const LOCAL_REQUIRE_ONE = pyRe(LOCAL_REQUIRE_SRC);
@@ -62,11 +61,12 @@ const INLINE_DANGER_RE = pyRe(String.raw`https?|fetch|child_process|exec|spawn|e
 export function hookIsSuspicious(cmd) {
   if (!INSTALL_HOOK_RE.test(cmd)) return false;
   let remainder = cmd;
-  for (const m of cmd.matchAll(NODE_E_RE)) {
-    const code = m[1] ?? m[2] ?? m[3] ?? "";
+  // _NODE_E_RE's matches, found by hooks.js's loop: the pattern overflowed
+  // V8's stack on a quoted string of millions of characters (review B3)
+  for (const [start, end, code] of nodeEMatches(cmd)) {
     const withoutRequires = code.replace(LOCAL_REQUIRE_RE, "");
     if (LOCAL_REQUIRE_ONE.test(code) && !INLINE_DANGER_RE.test(withoutRequires))
-      remainder = remainder.replace(m[0], " ");
+      remainder = remainder.split(cmd.slice(start, end)).join(" ");     // Python's str.replace: every occurrence
   }
   return INSTALL_HOOK_RE.test(remainder);
 }
