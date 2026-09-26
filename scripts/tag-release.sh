@@ -7,8 +7,10 @@
 #   - no tracked file has uncommitted changes (a tag records a commit, not the
 #     working tree: v0.1.0 was once pushed pointing at a commit that still said
 #     0.0.1, because the bump was never committed);
-#   - HEAD is on main as the remote has it (fetched first), so the tag names a
-#     reviewed, pushed commit;
+#   - HEAD is the tip of main as the remote has it (fetched first), so the tag
+#     names a reviewed, pushed commit, and not an older one because the local
+#     main was never pulled after a merge (v0.1.0 was once tagged that way);
+#     RELEASE_NOT_LATEST=1 tags an older commit on main on purpose;
 #   - the Python and npm versions committed at HEAD agree and match the tag
 #     (scripts/check-versions.sh HEAD vX.Y.Z);
 #   - the tag exists neither locally nor on the remote.
@@ -17,7 +19,8 @@
 # you set tag.gpgSign=true in git, the tag is signed as well.
 # Finally prints the command that pushes this one tag and nothing else.
 #
-# Environment: RELEASE_REMOTE (default origin), RELEASE_BRANCH (default main).
+# Environment: RELEASE_REMOTE (default origin), RELEASE_BRANCH (default main),
+# RELEASE_NOT_LATEST=1 (see above).
 # POSIX sh; works with Git for Windows' sh.
 set -eu
 cd "$(dirname "$0")/.."
@@ -58,6 +61,13 @@ if ! git merge-base --is-ancestor "$head" "$base"; then
   fail "HEAD ($(git rev-parse --short HEAD)) is not on $base.
 Release tags only name commits already on $branch: merge and push first, then
 check out that commit (git switch $branch && git pull) and run this again."
+fi
+behind=$(git rev-list --count "$head..$base")
+if [ "$behind" -gt 0 ] && [ "${RELEASE_NOT_LATEST:-}" != 1 ]; then
+  fail "HEAD ($(git rev-parse --short HEAD)) is $behind commit(s) behind $base: your
+$branch was not pulled after the latest merge, so this would tag older code.
+Run git switch $branch && git pull, then this again. (To tag an older commit
+on purpose, run it with RELEASE_NOT_LATEST=1.)"
 fi
 
 # 3. Committed versions agree and match the tag.

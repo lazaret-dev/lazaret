@@ -178,6 +178,21 @@ class TagReleaseTests(RepoCase):
         self.assertEqual(p.returncode, 1)
         self.assertNoTags()
 
+    def test_refuses_a_main_that_was_not_pulled(self):
+        # v0.1.0 was once tagged on the commit before the merged PR, because
+        # the local main was behind origin/main; that commit is "on main" too
+        self.commit(version_files("0.0.1", "0.0.1") | {"notes.txt": "merged work\n"}, "Merged PR")
+        self.git("push", "-q", "origin", "main")
+        self.git("reset", "-q", "--hard", "HEAD~1")        # a clone that never pulled
+        p = self.tag()
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("1 commit(s) behind refs/remotes/origin/main", p.stderr)
+        self.assertIn("git pull", p.stderr)
+        self.assertNoTags()
+        p = self.run_script("tag-release.sh", env={"RELEASE_NOT_LATEST": "1"})   # on purpose
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(self.git("rev-parse", "v0.0.1^{commit}"), self.git("rev-parse", "HEAD"))
+
     def test_refuses_a_tag_that_does_not_match_the_committed_version(self):
         p = self.tag("v0.1.0")
         self.assertEqual(p.returncode, 1)

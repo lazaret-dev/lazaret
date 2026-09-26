@@ -101,7 +101,7 @@ Anything merged through the GitHub web UI reaches GitLab the next time you pull 
    git switch main && git pull
    sh scripts/tag-release.sh                # or: sh scripts/tag-release.sh v0.2.0
    ```
-   The script refuses uncommitted changes, a HEAD that isn't on `origin/main` (it fetches first), committed versions that disagree or don't match the tag (`scripts/check-versions.sh HEAD vX.Y.Z`), and a tag name that already exists locally or on `origin`. It then creates an annotated tag (signed as well if you turned on `tag.gpgSign`; see *Signing tags*). It does not push.
+   The script refuses uncommitted changes, a HEAD that isn't the tip of `origin/main` (it fetches first; a local `main` you didn't pull after merging would tag older code. `RELEASE_NOT_LATEST=1` tags an older commit on `main` on purpose), committed versions that disagree or don't match the tag (`scripts/check-versions.sh HEAD vX.Y.Z`), and a tag name that already exists locally or on `origin`. It then creates an annotated tag (signed as well if you turned on `tag.gpgSign`; see *Signing tags*). It does not push.
 3. Push that one tag, with the command the script printed:
    ```sh
    git push origin refs/tags/v0.2.0         # both push URLs: GitHub and GitLab
@@ -157,6 +157,21 @@ Re-point a tag only if **nothing was published from it**. PyPI and npm versions 
 7. Approve the `pypi` and `npm` environments in the new release run, then approve the staged npm version.
 8. Other clones keep the old tag: `git fetch --tags` never moves an existing tag. On every other machine run `git tag -d v0.1.0 && git fetch origin tag v0.1.0`.
 
+### One registry published, the other failed
+
+A version can't be re-uploaded, so don't re-point the tag once either registry has it (the tag must keep naming what was published). Finish the other registry from the same run instead:
+
+- **npm failed after PyPI published** (v0.1.0: `npm stage publish` read `npm-dist/...tgz` as a GitHub repository; fixed with `./`). If the fix is only in the workflow, publish the tarball that run built, by hand, with 2FA:
+  ```sh
+  gh run download <run-id> -n npm-dist -D npm-dist
+  tar -xOf npm-dist/lazaret-X.Y.Z.tgz package/package.json | grep '"version"'   # X.Y.Z
+  npm publish ./npm-dist/lazaret-X.Y.Z.tgz                                     # asks for your 2FA code
+  ```
+  (Or `npm stage publish ./npm-dist/lazaret-X.Y.Z.tgz` and then `npm stage approve <stage-id>`, if you want to look at the staged version first.)
+  Then merge the workflow fix so the next release stages from CI again.
+- **PyPI failed after npm staged or published**: rerun the failed job (`gh run rerun <run-id> --failed`); it publishes the artifacts that run built.
+- If the package itself is wrong, leave the published version alone and release the next patch version from both.
+
 ### In general
 
 The same steps with your version: confirm nothing was published, lift the tag protection on GitHub and GitLab, `git push origin :refs/tags/vX.Y.Z` and `git tag -d vX.Y.Z`, delete any GitHub Release, fix `main`, `sh scripts/tag-release.sh vX.Y.Z`, `git push origin refs/tags/vX.Y.Z`, restore the protection.
@@ -166,5 +181,5 @@ The same steps with your version: confirm nothing was published, lift the tag pr
 - All actions in the workflows are pinned to full commit SHAs, with the version in a comment. Dependabot opens weekly PRs to bump them, after a 7-day cooldown.
 - The publish jobs install nothing. `publish-npm` uses the npm bundled with an exact Node version (`node-version` in `release.yml`, 24.21.0 with npm 11.19.0) and checks it is at least 11.15.0 (`npm stage`; trusted publishing needs 11.5.1). To move to a newer Node, check its bundled npm first (`deps/npm/package.json` in the nodejs/node repository at that version's tag) and update both places in `release.yml`.
 - `build-python` pins an exact Python (3.12.14): compressed bytes depend on the interpreter's zlib, so a byte-identical rebuild of a tag needs the same Python.
-- PyPI trusted publishing has run for real (v0.0.1). The npm job's staged publish runs for the first time on the next release; the first npm release (step 4) was manual because npm only allows a trusted publisher on a package that already exists.
+- PyPI trusted publishing has run for real (v0.0.1, v0.1.0). The npm job's staged publish has not succeeded yet: v0.1.0's run failed on the tarball path (now `./npm-dist/...`, and `tests/build/test_review_release_workflow.py` checks it), so that version was finished as in *One registry published, the other failed*. The first npm release (step 4) was manual too, because npm only allows a trusted publisher on a package that already exists.
 - npm provenance requires the GitHub repo to be public. So does `verify-tag`, which fetches `main` without credentials.
