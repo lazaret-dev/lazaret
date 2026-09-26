@@ -54,6 +54,8 @@ TREE = {
     "ext/...py": 'import os\nos.system("echo hi")\n',
     "ext/..so": b"",
     "ext/.x.js": "var b = 2;\n",
+    # S-CHMOD's \s* is unbounded
+    "misc/chmod.py": "os.chmod(p," + " " * 80 + "0o777)\n",
     # the quadratic comment checks, at a size both engines finish quickly
     "perf/escapes.js": "x=1;" + "/**/\\u0061" * 20000 + "\n",
 }
@@ -97,7 +99,8 @@ class LexingParityTests(unittest.TestCase):
         for want in (("SQL-GRANT-ALL", "mask/dump.sql", 2), ("S-EVAL-JS", "mask/text.jsx", 2),
                      ("S-EVAL-JS", "mask/marker.jsx", 1), ("S-EVAL-PY", "py/unterminated.py", 1),
                      ("SC-UTF7", "enc/crlf7.py", 2), ("Q-ENCODING", "enc/cr_latin1.py", 1),
-                     ("SC-TRUNCATED", "enc/u32.py", 1), ("SC-TRUNCATED", "enc/uesc.py", 1)):
+                     ("SC-TRUNCATED", "enc/u32.py", 1), ("SC-TRUNCATED", "enc/uesc.py", 1),
+                     ("S-CHMOD", "misc/chmod.py", 1)):
             self.assertIn(want, found)
         self.assertNotIn(("S-EVAL-PY", "enc/ebcdic.py", 3), found)     # decoded as EBCDIC, as Python reads it
         self.assertEqual({f for _, f, _ in found if f.startswith("ext/")}, {"ext/.x.js"})

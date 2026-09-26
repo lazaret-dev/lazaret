@@ -132,14 +132,16 @@ export function yamlLoadFind(s) {
 
 // S-CHMOD: chmod\s*\([^,()]*,\s*0o?7[67]7
 const CHMOD_HEAD = pyRe(String.raw`chmod\s*\(`, "g");
-const CHMOD_TAIL = pyRe(String.raw`^\s*0o?7[67]7`);
+const CHMOD_TAIL = pyRe(String.raw`\s*0o?7[67]7`, "y");     // \s* unbounded, as in Python
 export function chmodFind(s) {
   if (!s.includes("chmod")) return -1;
   const delims = positions(s, /[,()]/g);
   for (const [h, e] of heads(s, CHMOD_HEAD)) {
     const c = firstAtOrAfter(delims, e);
     if (c < 0) break;
-    if (s[c] === "," && CHMOD_TAIL.test(s.slice(c + 1, c + 64))) return h;
+    if (s[c] !== ",") continue;
+    CHMOD_TAIL.lastIndex = c + 1;                 // each comma is some head's first delimiter at most once
+    if (CHMOD_TAIL.test(s)) return h;
   }
   return -1;
 }

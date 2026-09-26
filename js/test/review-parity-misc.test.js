@@ -43,3 +43,10 @@ test("extensions follow os.path.splitext", () => {
   assert.equal(rep.metrics.files, 1);
   assert.equal(rep.pass, true);
 });
+
+// linear.js tested S-CHMOD's tail on the 63 characters after the comma, where
+// the Python pattern's \s* is unbounded: 80 spaces before 0o777 hid it here.
+test("S-CHMOD: any amount of whitespace before the mode", () => {
+  const { found } = scanTree({ "c.py": "os.chmod(p," + " ".repeat(80) + "0o777)\nos.chmod(q,\t\t0o644)\n" });
+  assert.deepEqual(found, ["c.py:1 S-CHMOD"]);
+});

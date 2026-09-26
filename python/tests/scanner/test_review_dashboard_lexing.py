@@ -55,6 +55,11 @@ MASKING = [
 ]
 
 
+# Other places the page read input differently from core.
+MISC = [
+    ("chmod.py", "py", "os.chmod(p," + " " * 80 + "0o777)\nos.chmod(q,\t\t0o644)\n"),
+]
+
 # Uploads: raw bytes through the page's decoder, against core.decode_source.
 UPLOADS = [
     # a cookie on line 2 of a CRLF (or CR) file: the page counted \r\n twice
@@ -101,6 +106,10 @@ class DashboardLexingTests(unittest.TestCase):
         for want in (("dump.sql", "SQL-GRANT-ALL", 2), ("text.jsx", "S-EVAL-JS", 2),
                      ("marker.jsx", "S-EVAL-JS", 1), ("unterminated.py", "S-EVAL-PY", 1)):
             self.assertIn(want, found)
+
+    def test_misc(self):
+        page = self.compare(MISC)
+        self.assertIn("S-CHMOD", {i["rule"] for i in page[0]})
 
     def test_uploads(self):
         (page,) = dash.run([{"op": "uploadScan", "files": [

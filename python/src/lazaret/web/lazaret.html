@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-IR7JbPL/8r3dh6fW/bRiSpeUYGuCUNSOk+tveeWFBJw='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-qJhyeOvNyoPZ9K/E7F0Rd9T6c2o7lCKJ+Zyuu7O/oF8='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
 <title>Lazaret — Security &amp; Quality Review</title>
 <style>
   :root{
@@ -1373,14 +1373,16 @@ function yamlLoadFind(s) {
 
 // S-CHMOD: chmod\s*\([^,()]*,\s*0o?7[67]7
 const CHMOD_HEAD = pyRe(String.raw`chmod\s*\(`, "g");
-const CHMOD_TAIL = pyRe(String.raw`^\s*0o?7[67]7`);
+const CHMOD_TAIL = pyRe(String.raw`\s*0o?7[67]7`, "y");     // \s* unbounded, as in Python
 function chmodFind(s) {
   if (!s.includes("chmod")) return -1;
   const delims = positions(s, /[,()]/g);
   for (const [h, e] of heads(s, CHMOD_HEAD)) {
     const c = firstAtOrAfter(delims, e);
     if (c < 0) break;
-    if (s[c] === "," && CHMOD_TAIL.test(s.slice(c + 1, c + 64))) return h;
+    if (s[c] !== ",") continue;
+    CHMOD_TAIL.lastIndex = c + 1;                 // each comma is some head's first delimiter at most once
+    if (CHMOD_TAIL.test(s)) return h;
   }
   return -1;
 }
