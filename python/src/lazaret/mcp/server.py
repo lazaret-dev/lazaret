@@ -262,46 +262,72 @@ def result_summary(res, max_issues):
 
 
 # ---------------- Project scan (mirrors the CLI pipeline) ----------------
-_MANIFEST_NAMES = ("package.json", "binding.gyp")
+_MANIFEST_NAMES = lazaret.MANIFEST_NAMES
 
 
 def _preflight(root, exclude, include_deps, ctx):
-    """Count what collect_files would read before it reads it; stops at the
+    """Count what scan_project will read before it reads it; stops at the
     caps (and on cancel / deadline) so a huge tree costs a bounded walk.
-    -> None when within budget, else the reason."""
-    skip = set(lazaret.SKIP_DIRS) | set(exclude)
-    deps = set(lazaret.DEP_MARKERS)
-    if include_deps:
-        skip -= deps
+    -> None when within budget, else the reason.
+
+    The walk takes the same decisions as core._collect, or the budget counts
+    a different tree from the one that is read: .git and `exclude` names are
+    pruned, __pycache__ only has its .pyc headers read, symlinks are never
+    followed, and a dependency tree is recognised by core._dep_tree_kind —
+    node_modules / bower_components / site-packages always, vendor / venv /
+    .venv / env only with a marker inside (a vendor/ without one is
+    first-party code, and collect reads it). Sources, manifests and .pth
+    files are read whole, so they count toward the byte budget; compiled
+    artifacts count as files."""
+    prune = set(lazaret.ALWAYS_PRUNE_DIRS) | set(exclude) | {lazaret.PYCACHE_DIR}
     n_files = n_bytes = 0
-    stack = [root]
+    seen = set()
+    try:
+        st = os.stat(root)
+        if st.st_ino:
+            seen.add((st.st_dev, st.st_ino))
+    except OSError:
+        pass
+    stack = [(root, False)]
     while stack:
         ctx.check()
         if ctx.expired():
             return f"time budget of {ctx.max_seconds:g} s spent while listing files"
+        path, in_dep = stack.pop()
         try:
-            with os.scandir(stack.pop()) as it:
+            with os.scandir(path) as it:
                 entries = list(it)
         except OSError:
             continue
         for e in entries:
             try:
-                if e.is_dir(follow_symlinks=False):
-                    if e.name not in skip and (include_deps or e.name not in deps):
-                        stack.append(e.path)
-                    continue
-                if not e.is_file(follow_symlinks=False):
-                    continue
-                ext = os.path.splitext(e.name)[1].lower()
-                source = ext in lazaret.EXTS or e.name in _MANIFEST_NAMES
-                if not source and ext not in lazaret.COMPILED_EXTS:
-                    continue
-                n_files += 1
-                if source:
-                    size = e.stat(follow_symlinks=False).st_size
-                    n_bytes += size if size <= lazaret.SOURCE_SIZE_CAP else 0   # collect_files' limit
+                st = e.stat(follow_symlinks=False)
             except OSError:
                 continue
+            mode = st.st_mode
+            if stat.S_ISLNK(mode) or (stat.S_ISDIR(mode) and lazaret._is_reparse_point(st)):
+                continue                                  # never followed
+            if stat.S_ISDIR(mode):
+                if e.name in prune:
+                    continue
+                if st.st_ino:
+                    if (st.st_dev, st.st_ino) in seen:
+                        continue                          # filesystem loop
+                    seen.add((st.st_dev, st.st_ino))
+                dep = in_dep or lazaret._dep_tree_kind(e.name, e.path)
+                if dep and not in_dep and not include_deps:
+                    continue                              # pruned dependency tree
+                stack.append((e.path, dep))
+                continue
+            if not stat.S_ISREG(mode):
+                continue
+            ext = os.path.splitext(e.name)[1].lower()
+            whole = e.name in _MANIFEST_NAMES or ext == lazaret.PTH_EXT or ext in lazaret.EXTS
+            if not whole and ext not in lazaret.COMPILED_EXTS:
+                continue
+            n_files += 1
+            if whole and st.st_size <= lazaret.SOURCE_SIZE_CAP:   # collect's per-file limit
+                n_bytes += st.st_size
             if n_files > ctx.max_files:
                 return f"more than {ctx.max_files:,} files to scan (LAZARET_MCP_MAX_FILES)"
             if n_bytes > ctx.max_bytes:

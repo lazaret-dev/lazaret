@@ -4,6 +4,10 @@
    listed (chmod 000) or a directory with nothing Lazaret scans gave
    qualityGate PASSED with no incomplete flag (the CLI exits 2 there), and
    scan_files on an unreadable file returned totalIssues 0, not incomplete.
+3  The byte/file budget preflight skipped every directory named vendor, venv
+   or .venv and never counted .pth files, while collect reads such a
+   directory when it has no marker file and reads .pth files whole: 40 x
+   50 KB of .js under vendor/ passed a 100 KB budget and were all read.
 
 Fixtures are inert text files.
 """
@@ -156,6 +160,67 @@ class ScanFilesUnreadableTests(unittest.TestCase):
         self.assertEqual(out["files"][path], {"error": "File not found"})
         self.assertEqual(out["totalIssues"], 0)
         self.assertNotIn("incomplete", out)
+
+
+# ---------------------------------------------------------------------------
+# 3. the budget preflight counts the tree collect reads
+# ---------------------------------------------------------------------------
+def byte_tree(files):
+    root = tempfile.mkdtemp(prefix="lz-mcp-budget-")
+    atexit.register(shutil.rmtree, root, True)
+    for rel, size in files.items():
+        path = os.path.join(root, *rel.split("/"))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as fh:
+            fh.write(b"var x = 1;\n" * (size // 11) + b"/" * (size % 11))
+    return root
+
+
+class PreflightBudgetTests(unittest.TestCase):
+    # whole-file reads: lib/a.js, vendor/b.js (no marker: first-party), x.pth,
+    # package.json = 380 bytes. Pruned unless include_deps: node_modules/ and
+    # env/ (it has a pyvenv.cfg): 700 more. Never counted: README.md (header
+    # sample only), .git/.
+    MIXED = {"lib/a.js": 100, "vendor/b.js": 200, "x.pth": 50, "package.json": 30,
+             "node_modules/dep/c.js": 400, "env/pyvenv.cfg": 20, "env/d.py": 300,
+             "README.md": 5000, ".git/e.js": 5000}
+
+    def scan(self, root, max_bytes, include_deps=False):
+        with mock.patch.dict(os.environ, {"LAZARET_MCP_MAX_BYTES": str(max_bytes)}):
+            return server.tool_scan_directory({"path": root, "include_deps": include_deps})
+
+    def refused(self, out):
+        return bool(out.get("incomplete")) and "LAZARET_MCP_MAX_BYTES" in out["incompleteReason"]
+
+    def test_budget_counts_exactly_the_bytes_collect_reads(self):
+        root = byte_tree(self.MIXED)
+        for include_deps, total in ((False, 380), (True, 1080)):
+            with self.subTest(include_deps=include_deps):
+                self.assertFalse(self.refused(self.scan(root, total, include_deps)))
+                self.assertTrue(self.refused(self.scan(root, total - 1, include_deps)))
+
+    def test_vendor_without_marker_and_pth_files_are_refused_unread(self):
+        read = []
+        real = lazaret._read_prefix
+
+        def counting(path, limit):
+            data = real(path, limit)
+            read.append(len(data))
+            return data
+        for sub, ext in (("vendor", ".js"), ("lib", ".pth")):
+            root = byte_tree({f"{sub}/f{i}{ext}": 50_000 for i in range(3)})
+            with self.subTest(sub=sub, ext=ext), mock.patch.object(lazaret, "_read_prefix", counting):
+                read.clear()
+                out = self.scan(root, 100_000)
+                self.assertTrue(self.refused(out), out.get("incompleteReason"))
+                self.assertEqual(out["qualityGate"], "FAILED")
+                self.assertEqual(sum(read), 0)
+
+    def test_marked_dependency_trees_are_not_counted(self):
+        root = byte_tree({"app.js": 100, "vendor/modules.txt": 10, "vendor/big.js": 150_000,
+                          ".venv/pyvenv.cfg": 10, ".venv/lib/x.py": 150_000})
+        self.assertFalse(self.refused(self.scan(root, 100_000)))
+        self.assertTrue(self.refused(self.scan(root, 100_000, include_deps=True)))
 
 
 class RealPermissionTests(unittest.TestCase):
