@@ -64,17 +64,64 @@ export function buildResult(root, files, issues) {
   };
 }
 
+// ---- JSON, in pieces --------------------------------------------------------------
+// V8 caps a string at about 2^29 characters, so a report with a million or so
+// findings could not be rendered as one string: JSON.stringify threw "Invalid
+// string length" and the scan ended with exit 3 and no report (the Python
+// engine wrote it). The renderers below yield their text in pieces, one per
+// finding, which writeReport writes as they come; joined, the pieces are
+// exactly the text JSON.stringify(value, null, 2) gives.
+const INDENT = "  ";
+const splittable = (v) => v !== null && typeof v === "object" && typeof v.toJSON !== "function" && !JSON.isRawJSON(v)
+  && !(v instanceof Number || v instanceof String || v instanceof Boolean || v instanceof BigInt);
+const indented = (text, level) => (level && text.includes("\n") ? text.replaceAll("\n", "\n" + INDENT.repeat(level)) : text);
+
 /**
- * JSON report text: the result dict with the marker as key #1 and, when a
- * baseline key is given ($LAZARET_BASELINE_KEY), the baseline signature as
+ * JSON.stringify(value, null, 2) as a sequence of strings: arrays and objects
+ * down to `depth` levels are split into their members, anything deeper is
+ * one piece. `level` is the indentation the value starts at.
+ */
+export function* jsonChunks(value, depth = 2, level = 0) {
+  if (depth <= 0 || !splittable(value)) {
+    const text = JSON.stringify(value, null, 2);
+    if (text !== undefined) yield indented(text, level);
+    return;
+  }
+  const inner = "\n" + INDENT.repeat(level + 1);
+  const [open, close] = Array.isArray(value) ? ["[", "]"] : ["{", "}"];
+  let first = true;
+  const member = function* (prefix, v) {
+    if (depth > 1 && splittable(v)) {
+      yield (first ? open : ",") + inner + prefix;
+      yield* jsonChunks(v, depth - 1, level + 1);
+    } else {
+      const text = JSON.stringify(v, null, 2);
+      if (text === undefined && prefix) return;                      // an object member JSON.stringify leaves out
+      yield (first ? open : ",") + inner + prefix + indented(text ?? "null", level + 1);
+    }
+    first = false;
+  };
+  if (Array.isArray(value)) for (let k = 0; k < value.length; k++) yield* member("", value[k]);
+  else for (const key of Object.keys(value)) yield* member(JSON.stringify(key) + ": ", value[key]);
+  yield first ? open + close : "\n" + INDENT.repeat(level) + close;
+}
+
+/**
+ * JSON report, in pieces: the result dict with the marker as key #1 and, when
+ * a baseline key is given ($LAZARET_BASELINE_KEY), the baseline signature as
  * key #2.
  */
-export function jsonRenderer(res, { key = null } = {}) {
+export function* jsonReportChunks(res, { key = null } = {}) {
   const sig = key ? reportSignature(res, key) : null;
   const out = { [ENGINE_MARKER]: ENGINE_VERSION };
   if (sig) out[SIGNATURE_FIELD] = sig;
   for (const [k, v] of Object.entries(res)) if (k !== ENGINE_MARKER && k !== SIGNATURE_FIELD) out[k] = v;
-  return JSON.stringify(out, null, 2);
+  yield* jsonChunks(out, 2);
+}
+
+/** JSON report text (jsonReportChunks joined). */
+export function jsonRenderer(res, opts = {}) {
+  return [...jsonReportChunks(res, opts)].join("");
 }
 
 // ---- terminal ---------------------------------------------------------------
@@ -154,13 +201,20 @@ export function printReport(res, { out = console.log, quiet = false } = {}) {
 }
 
 // ---- HTML ----------------------------------------------------------------------
-const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-  .replace(/"/g, "&quot;").replace(/'/g, "&#x27;");
+const ESC = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#x27;" };
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ESC[c]);
 
-/** HTML report: the JSON report in a minimal page carrying the provenance meta tag. */
+/** HTML report, in pieces: the JSON report in a minimal page carrying the provenance meta tag. */
+export function* htmlReportChunks(res) {
+  yield `<!doctype html>\n<html lang="en"><head><meta charset="utf-8">\n${HTML_ENGINE_MARKER}\n` +
+    `<title>Lazaret report</title></head>\n<body><pre>`;
+  for (const piece of jsonReportChunks(res)) yield esc(piece);      // esc maps single characters: piece by piece is the same
+  yield "</pre></body></html>\n";
+}
+
+/** HTML report text (htmlReportChunks joined). */
 export function htmlRenderer(res) {
-  return `<!doctype html>\n<html lang="en"><head><meta charset="utf-8">\n${HTML_ENGINE_MARKER}\n` +
-    `<title>Lazaret report</title></head>\n<body><pre>${esc(jsonRenderer(res))}</pre></body></html>\n`;
+  return [...htmlReportChunks(res)].join("");
 }
 
 // ---- SARIF 2.1.0 (twin of core.sarif_report) ------------------------------------
@@ -212,7 +266,12 @@ export function sarifReport(res, root = null) {
       results }],
   };
 }
-/** SARIF log text with the marker in a top-level property bag, first. */
+/** SARIF log, in pieces (one per result), with the marker in a top-level property bag, first. */
+export function* sarifChunks(sarif) {
+  yield* jsonChunks({ properties: { [ENGINE_MARKER]: ENGINE_VERSION }, ...sarif }, 4);   // runs[0].results[i]
+}
+
+/** SARIF log text (sarifChunks joined). */
 export function sarifRenderer(sarif) {
-  return JSON.stringify({ properties: { [ENGINE_MARKER]: ENGINE_VERSION }, ...sarif }, null, 2);
+  return [...sarifChunks(sarif)].join("");
 }

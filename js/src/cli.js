@@ -16,7 +16,7 @@ import { scanFile } from "./scanner/scan.js";
 import { scanManifest, scanGyp } from "./lib/supplychain.js";
 import { redactResult, setRedactSecrets } from "./lib/redact.js";
 import {
-  buildResult, jsonRenderer, htmlRenderer, printReport, sarifReport, sarifRenderer,
+  buildResult, jsonReportChunks, htmlReportChunks, printReport, sarifReport, sarifChunks,
   sanitizeTerm, sanitizeTermLine, setExcerptWidth,
 } from "./report.js";
 import { clipLine } from "./lib/issue.js";
@@ -293,18 +293,19 @@ function runChecked(argv, io) {
   printReport(res, { out, quiet: !!opts.quiet });
 
   // ---- reports (atomic, no-clobber, marker-checked) ----------------------
+  // Written in pieces: a report can be too big for one string (report.js).
   const strict = !!opts.force;
   try {
     if (paths.sarif) {
-      writeReport(paths.sarif, () => sarifRenderer(sarifReport(res, root)), { kind: "sarif", strict });
+      writeReport(paths.sarif, () => sarifChunks(sarifReport(res, root)), { kind: "sarif", strict });
       out(`  SARIF report: ${sanitizeTermLine(paths.sarif)}`);
     }
     if (paths.json) {
-      writeReport(paths.json, () => jsonRenderer(res, { key: env[BASELINE_KEY_ENV] }), { kind: "json", strict });
+      writeReport(paths.json, () => jsonReportChunks(res, { key: env[BASELINE_KEY_ENV] }), { kind: "json", strict });
       out(`  JSON report: ${sanitizeTermLine(paths.json)}`);
     }
     if (paths.html) {
-      writeReport(paths.html, () => htmlRenderer(res), { kind: "html", strict });
+      writeReport(paths.html, () => htmlReportChunks(res), { kind: "html", strict });
       out(`  HTML report: ${sanitizeTermLine(paths.html)}`);
     }
   } catch (e) {

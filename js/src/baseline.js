@@ -81,10 +81,13 @@ function jsonAscii(s) {
   return out + '"';
 }
 
-/** Hex HMAC-SHA256 over the canonical serialization of `fps` (see the header). */
+/** Hex HMAC-SHA256 over the canonical serialization of `fps` (see the header),
+ * fed to the HMAC piece by piece: for a big report it is too long for one string. */
 export function signFingerprints(fps, key) {
-  const canon = "[" + [...new Set(fps)].sort(cmpCodePoints).map(jsonAscii).join(",") + "]";
-  return createHmac("sha256", Buffer.from(key, "utf8")).update(Buffer.from(DOMAIN + canon, "utf8")).digest("hex");
+  const mac = createHmac("sha256", Buffer.from(key, "utf8")).update(DOMAIN + "[", "utf8");
+  let sep = "";
+  for (const fp of [...new Set(fps)].sort(cmpCodePoints)) { mac.update(sep + jsonAscii(fp), "utf8"); sep = ","; }
+  return mac.update("]", "utf8").digest("hex");
 }
 
 /** The signature object a JSON report carries when a key is configured (else null). */

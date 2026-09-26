@@ -14,7 +14,7 @@ export { RULES, TEXT_RULES, SEV_ORDER, TYPES } from "./scanner/rules.js";
 export { computeMetrics, worstSevRating, maintainabilityRating } from "./scanner/metrics.js";
 export {
   buildResult, jsonRenderer, htmlRenderer, printReport, sarifReport, sarifRenderer,
-  sanitizeTerm, sanitizeTermLine, safeExcerpt,
+  jsonReportChunks, htmlReportChunks, sarifChunks, sanitizeTerm, sanitizeTermLine, safeExcerpt,
 } from "./report.js";
 export { scanManifest, scanGyp, redactResult, setRedactSecrets } from "./lib/supplychain.js";
 export {

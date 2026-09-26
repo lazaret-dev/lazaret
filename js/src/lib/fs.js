@@ -546,15 +546,34 @@ export function validateOutDir(outDir) {
   return path;
 }
 
+/** Write a string, a Buffer or an iterable of strings to fd as UTF-8, in writes of about 1 MiB. */
+function writeText(fd, text) {
+  const put = (data) => { let off = 0; while (off < data.length) off += writeSync(fd, data, off, data.length - off); };
+  if (Buffer.isBuffer(text) || typeof text === "string" || typeof text?.[Symbol.iterator] !== "function") {
+    put(Buffer.isBuffer(text) ? text : Buffer.from(String(text), "utf8"));
+    return;
+  }
+  let batch = "";
+  for (const piece of text) {
+    batch += piece;
+    if (batch.length >= 1 << 20) {
+      const cut = /[\ud800-\udbff]$/.test(batch) ? batch.length - 1 : batch.length;   // never split a surrogate pair
+      put(Buffer.from(batch.slice(0, cut), "utf8"));
+      batch = batch.slice(cut);
+    }
+  }
+  put(Buffer.from(batch, "utf8"));
+}
+
 /**
  * Write a report atomically (temp file in the destination directory, fsync,
  * rename), re-checking the no-clobber rule at write time. An existing
  * report's file mode is preserved; a new report gets 0666 & ~umask.
- * `render` is the text or a function returning it.
+ * `render` is the text or a function returning it; the text may also be an
+ * iterable of strings (a report too big for one string), written as it comes.
  */
 export function writeReport(path, render, { kind = "json", strict = false } = {}) {
   const text = typeof render === "function" ? render() : render;
-  const data = Buffer.isBuffer(text) ? text : Buffer.from(String(text), "utf8");
   const parent = dirname(resolve(path));
   let prevMode = null;
   try { const st = lstatSync(path); if (st.isFile()) prevMode = st.mode & 0o7777; } catch { /* new file */ }
@@ -567,8 +586,7 @@ export function writeReport(path, render, { kind = "json", strict = false } = {}
     }
   }
   try {
-    let off = 0;
-    while (off < data.length) off += writeSync(fd, data, off, data.length - off);
+    writeText(fd, text);
     fsyncSync(fd);
     closeSync(fd);
     fd = null;
