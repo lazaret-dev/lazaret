@@ -81,6 +81,25 @@ class OneFindingPerFileTests(unittest.TestCase):
         self.assertEqual(res["verdict"], "SUSPICIOUS")
 
 
+class TimeBudgetTests(unittest.TestCase):
+    """A file whose rules run past the per-file time budget is SC-TRUNCATED;
+    it used to be listed while the verdict stayed OK."""
+
+    def test_a_file_past_its_time_budget_makes_the_release_incomplete(self):
+        from lazaret.scanner import core
+        files = {"package.json": manifest(main="index.js"), "index.js": "module.exports = 1;\n" * 50}
+        with mock.patch.object(core, "SCAN_TIME_BUDGET", -1):   # the path a 30 s overrun takes
+            res = scan_npm(files)
+        self.assertEqual(res["verdict"], "INCOMPLETE", res["verdictReason"])
+        self.assertEqual(res["truncated"], 1)
+        (t,) = issues(res, "SC-TRUNCATED")
+        self.assertIn("scan time budget exceeded", t["msg"])
+
+    def test_decide_verdict_counts_a_stray_truncation_finding(self):
+        stray = [{"rule": "SC-TRUNCATED", "file": "a.js", "sev": "CRITICAL"}]
+        self.assertEqual(repo.decide_verdict(stray, 0)[0], "INCOMPLETE")
+
+
 class LimitTests(unittest.TestCase):
     def test_default_fits_a_large_bundle(self):
         self.assertGreaterEqual(repo.MAX_MEMBER, 16_000_000)

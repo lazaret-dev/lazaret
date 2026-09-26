@@ -1143,6 +1143,9 @@ def _demote_test_findings(issues, reachable=frozenset()):
 
 def decide_verdict(issues, truncated):
     """-> (verdict, reason, strong_count, weak_count)."""
+    # a truncation finding always counts, even one that reached `issues`
+    # without going through _ArtifactScan.truncate (verdict integrity)
+    truncated = max(truncated, len({i.get("file") for i in issues if i["rule"] in TRUNCATION_RULES}))
     indicators = [i for i in issues if i["rule"].startswith("SC-")
                   and i["rule"] not in TRUNCATION_RULES and i["sev"] != "INFO"]
     strong = sum(1 for i in indicators if i["sev"] in STRONG_SEVERITIES)
@@ -1385,7 +1388,14 @@ class _ArtifactScan:
 
     def scan_source(self, rel, text, lang):
         self.files_scanned += 1
-        self.issues.extend(lazaret.scan_file(rel, text, lang, dep=not self.full))
+        for i in lazaret.scan_file(rel, text, lang, dep=not self.full):
+            if i["rule"] in TRUNCATION_RULES:
+                # the per-file time budget ran out: part of the file was not
+                # scanned, so the release can't be cleared (it used to be
+                # listed while the verdict stayed OK)
+                self.truncate(rel, i["msg"].removeprefix("File not fully scanned: ").rstrip("."))
+            else:
+                self.issues.append(i)
         self.sources[rel] = (text, lang)
 
     # ---- pass 1: members ----
