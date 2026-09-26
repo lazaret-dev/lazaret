@@ -11,6 +11,7 @@ import collections
 import hashlib
 import logging
 import os
+import select
 import selectors
 import socket
 import ssl
@@ -1169,7 +1170,40 @@ class Connection:
         self._abort()
         raise OperationalError(f"protocol violation: unexpected message type {kind!r}")
 
+    def _pull_before_send(self) -> None:
+        """Read whatever the server already sent, without blocking, before
+        sending more. A server that ended the session while we were idle
+        (idle_session_timeout, an admin shutdown) sent a FATAL ErrorResponse
+        and closed. Our next send draws a reset, and on Windows a reset
+        discards the unread receive buffer, FATAL included: read it first, so
+        the error that surfaces is the server's, with its SQLSTATE, on every
+        platform. Anything else already buffered (a notice, a notification)
+        stays in the read buffer for the normal flow."""
+        sock = self._sock
+        if sock is None:
+            return
+        tls = isinstance(sock, ssl.SSLSocket)
+        try:
+            if not (tls and sock.pending()):
+                if hasattr(select, "poll"):          # no FD_SETSIZE limit
+                    poller = select.poll()
+                    poller.register(sock, select.POLLIN)
+                    if not poller.poll(0):
+                        return
+                elif not select.select([sock], [], [], 0)[0]:
+                    return
+            timeout = sock.gettimeout()
+            sock.setblocking(False)
+            try:
+                self._recv_available(sock, tls)
+            finally:
+                sock.settimeout(timeout)
+        except (OSError, ValueError) as exc:     # the server already closed the session
+            self._salvage_error()
+            self._lost(f"server closed the connection: {exc}", exc)
+
     def _send(self, data: bytes) -> None:
+        self._pull_before_send()
         try:
             self._sock.sendall(data)
         except OSError as exc:
