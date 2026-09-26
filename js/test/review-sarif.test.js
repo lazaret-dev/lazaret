@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { run, version } from "../src/index.js";
+import { fileUri } from "../src/report.js";
 
 test("SARIF 2.1.0 report: tool identity, %SRCROOT%, encoded URIs, ruleIndex", () => {
   const d = mkdtempSync(join(tmpdir(), "lazaret sarif "));
@@ -53,4 +54,14 @@ test("SARIF 2.1.0 report: tool identity, %SRCROOT%, encoded URIs, ruleIndex", ()
     rmSync(d, { recursive: true, force: true });
     rmSync(out, { recursive: true, force: true });
   }
+});
+
+test("file: URIs follow pathlib's as_uri() for Windows paths, on every OS", () => {
+  // checked against pathlib.PureWindowsPath(...).as_uri(); the drive colon
+  // stays literal (the Windows runners saw file:///C%3A/... before)
+  assert.equal(fileUri("C:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\lazaret sarif x"),
+    "file:///C:/Users/RUNNER~1/AppData/Local/Temp/lazaret%20sarif%20x");
+  assert.equal(fileUri("d:\\caf\u00e9\\a#1.py"), "file:///d:/caf%C3%A9/a%231.py");
+  assert.equal(fileUri("\\\\srv\\share\\a b"), "file://srv/share/a%20b");
+  assert.equal(fileUri("/tmp/a b%#"), "file:///tmp/a%20b%25%23");
 });

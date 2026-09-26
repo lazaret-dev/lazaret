@@ -165,9 +165,16 @@ const quoteBytes = (bytes) => {
 export function sarifUri(path) {
   return quoteBytes(Buffer.from(String(path).replace(/\\/g, "/"), "utf8"));
 }
-function fileUri(absPath) {
+/** An absolute path as a file: URI, as pathlib's as_uri() writes it on the
+ * same OS: file:///C:/a%20b (the drive letter and its colon as-is) and
+ * file://server/share/x for a UNC path on Windows, file:///a%20b on POSIX. */
+export function fileUri(absPath) {
   const p = String(absPath).replace(/\\/g, "/");
-  return "file://" + (p.startsWith("/") ? "" : "/") + quoteBytes(Buffer.from(p, "utf8"));
+  const q = (s) => quoteBytes(Buffer.from(s, "utf8"));
+  const drive = /^[A-Za-z]:(?=\/|$)/.exec(p);
+  if (drive) return "file:///" + drive[0] + q(p.slice(2));
+  if (p.startsWith("//")) return "file:" + q(p);
+  return "file://" + (p.startsWith("/") ? "" : "/") + q(p);
 }
 export function sarifReport(res, root = null) {
   const rules = new Map(), results = [];

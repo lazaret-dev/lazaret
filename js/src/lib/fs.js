@@ -153,10 +153,24 @@ function lexists(p) { try { lstatSync(p); return true; } catch { return false; }
 function childPath(dirBuf, nameBuf) { return Buffer.concat([dirBuf, SEP, nameBuf]); }
 const byName = (a, b) => (a.str < b.str ? -1 : a.str > b.str ? 1 : 0);
 
+// `link`: the listing's own entry type says link. On Windows that is every
+// reparse point (symlink, junction, mount point, and also dedup/cloud files),
+// and it is the only reliable signal there: the lstat of a file symlink can
+// come back as a regular file (seen on the windows-latest runners).
 function listDir(dirBuf) {
-  return readdirSync(dirBuf, { encoding: "buffer" })
-    .map((nb) => ({ buf: nb, str: fsNameToString(nb) }))
+  return readdirSync(dirBuf, { encoding: "buffer", withFileTypes: true })
+    .map((d) => ({ buf: d.name, str: fsNameToString(d.name), link: d.isSymbolicLink() }))
     .sort(byName);
+}
+/** A link the walk reports and never follows, as the Python engine decides:
+ * a symlink, or a directory that is a reparse point (junction, mount point).
+ * A file the listing flags counts only if it has a link target, so a Windows
+ * dedup or cloud placeholder file is still scanned as a file. */
+export function isLink(ent, full, st) {
+  if (st.isSymbolicLink()) return true;
+  if (!ent.link) return false;
+  if (st.isDirectory()) return true;
+  try { readlinkSync(full); return true; } catch { return false; }
 }
 function readlinkText(p) {
   try { return fsNameToString(readlinkSync(p, { encoding: "buffer" })); } catch { return "?"; }
@@ -237,7 +251,7 @@ export function collectFiles(root, { includeDeps = false, exclude = [] } = {}) {
       const rel = dir.rel ? `${dir.rel}${sep}${ent.str}` : ent.str;
       let st;
       try { st = lstatSync(full); } catch (e) { issues.push(unreadableIssue(rel, strerror(e))); continue; }
-      if (st.isSymbolicLink()) issues.push(symlinkIssue(rel, readlinkText(full)));
+      if (isLink(ent, full, st)) issues.push(symlinkIssue(rel, readlinkText(full)));
       else if (st.isDirectory()) subdirs.push({ ent, full, rel, st });
       else if (!st.isFile()) issues.push(unreadableIssue(rel, specialKind(st)));
       else {
@@ -333,7 +347,8 @@ function checkPycache(dirBuf, rel, parentNames, issues) {
     const prel = `${rel}${sep}${ent.str}`;
     let st;
     try { st = lstatSync(full); } catch (e) { issues.push(unreadableIssue(prel, strerror(e))); continue; }
-    if (st.isSymbolicLink()) { issues.push(symlinkIssue(prel, readlinkText(full))); continue; }
+    // as core._check_pycache: any reparse point counts, file or directory
+    if (st.isSymbolicLink() || ent.link) { issues.push(symlinkIssue(prel, readlinkText(full))); continue; }
     if (!st.isFile() || !ent.str.endsWith(".pyc")) continue;
     let header;
     try { header = readBounded(full, PYC_HEADER); } catch (e) { issues.push(unreadableIssue(prel, strerror(e))); continue; }
