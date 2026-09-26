@@ -26,7 +26,9 @@ export const CHARCODE_RE = /String\.fromCharCode/;
 // (so `--` works in .sql comments, `#` in Python ones, and nothing inside a
 // string, a template literal or code such as `x --nosec` or a JS `#private`
 // field does). It applies to its own line, or to the next line when it sits
-// on a standalone comment line.
+// on a standalone comment line. The marker is ASCII (Python's re.I would
+// also take `noſec` or `lazaret-ıgnore`; for a marker, matching less fails
+// closed).
 const RULE_ID = String.raw`(?:S|T|SC|X|SQL|B|Q)-[A-Z0-9]+(?:-[A-Z0-9]+)*`;
 export const SUPPRESS_RE = pyRe(String.raw`(?:#|//|--)[ \t]*(?:nosec|NOSONAR|lazaret-ignore)\b`
   + String.raw`(?:[ \t]*:?[ \t]*(` + RULE_ID + String.raw`(?:[ \t]*,[ \t]*` + RULE_ID + String.raw`)*))?`, "gi");
@@ -42,7 +44,7 @@ function markerOn(lines, lex, i) {
   SUPPRESS_RE.lastIndex = 0;
   let m;
   while ((m = SUPPRESS_RE.exec(line))) {
-    if (!lex.inComment(i, m.index)) continue;
+    if (!lex.inComment(i, m.index) || /[^\x00-\x7f]/.test(m[0])) continue;
     return m[1] ? new Set(m[1].split(",").map((x) => x.trim().toUpperCase())) : null;
   }
   return NO_MARKER;

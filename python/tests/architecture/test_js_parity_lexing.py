@@ -56,6 +56,9 @@ TREE = {
     "ext/.x.js": "var b = 2;\n",
     # S-CHMOD's \s* is unbounded
     "misc/chmod.py": "os.chmod(p," + " " * 80 + "0o777)\n",
+    # re.I folding (İ, ı are i; ſ is s) and ASCII-only markers
+    "misc/fold.sql": "SELECT a FROM t WİTH (NOLOCK);\nſET @q = 'SELECT 1 ' + @x;\n",
+    "misc/marker.js": "eval(a) // noſec\neval(b) // lazaret-ıgnore\neval(c) // NOSONAR\n",
     # the quadratic comment checks, at a size both engines finish quickly
     "perf/escapes.js": "x=1;" + "/**/\\u0061" * 20000 + "\n",
 }
@@ -100,7 +103,8 @@ class LexingParityTests(unittest.TestCase):
                      ("S-EVAL-JS", "mask/marker.jsx", 1), ("S-EVAL-PY", "py/unterminated.py", 1),
                      ("SC-UTF7", "enc/crlf7.py", 2), ("Q-ENCODING", "enc/cr_latin1.py", 1),
                      ("SC-TRUNCATED", "enc/u32.py", 1), ("SC-TRUNCATED", "enc/uesc.py", 1),
-                     ("S-CHMOD", "misc/chmod.py", 1)):
+                     ("S-CHMOD", "misc/chmod.py", 1), ("SQL-NOLOCK", "misc/fold.sql", 1),
+                     ("SQL-DYNAMIC", "misc/fold.sql", 2), ("S-EVAL-JS", "misc/marker.js", 2)):
             self.assertIn(want, found)
         self.assertNotIn(("S-EVAL-PY", "enc/ebcdic.py", 3), found)     # decoded as EBCDIC, as Python reads it
         self.assertEqual({f for _, f, _ in found if f.startswith("ext/")}, {"ext/.x.js"})

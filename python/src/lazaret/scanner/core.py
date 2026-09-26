@@ -1199,7 +1199,10 @@ def entropy_secretish(v):
 # comment lexer sees it (so `--` works in .sql comments, `#` in Python ones,
 # and nothing inside a string, a template literal or code such as `x --nosec`
 # or a JS `#private` field does). It applies to its own line, or to the next
-# line when it sits on a standalone comment line.
+# line when it sits on a standalone comment line. The marker is ASCII: re.I
+# would also take `noſec` or `lazaret-ıgnore` (ſ is s and ı is i to it),
+# which the npm engine's case folding does not; for a marker, matching less
+# is what fails closed.
 _RULE_ID_SRC = r"(?:S|T|SC|X|SQL|B|Q)-[A-Z0-9]+(?:-[A-Z0-9]+)*"
 SUPPRESS_RE = re.compile(
     r"(?:#|//|--)[ \t]*(?:nosec|NOSONAR|lazaret-ignore)\b"
@@ -1250,8 +1253,8 @@ def string_literal_mask(line, lang=None):
 
 
 def _find_marker(line, spans):
-    """The first SUPPRESS_RE match on `line` whose introducer lies inside one
-    of the line's comment spans, else None. `spans` is sorted and
+    """The first ASCII SUPPRESS_RE match on `line` whose introducer lies
+    inside one of the line's comment spans, else None. `spans` is sorted and
     non-overlapping, and matches come in order, so one moving index answers
     every containment test (review: testing every span for every match was
     O(matches × spans), 20 s for one 200 KB line)."""
@@ -1264,7 +1267,7 @@ def _find_marker(line, spans):
             k += 1
         if k == n:
             return None
-        if spans[k][0] <= p:
+        if spans[k][0] <= p and m.group().isascii():
             return m
     return None
 

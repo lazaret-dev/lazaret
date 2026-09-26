@@ -50,3 +50,19 @@ test("S-CHMOD: any amount of whitespace before the mode", () => {
   const { found } = scanTree({ "c.py": "os.chmod(p," + " ".repeat(80) + "0o777)\nos.chmod(q,\t\t0o644)\n" });
   assert.deepEqual(found, ["c.py:1 S-CHMOD"]);
 });
+
+// Python's re.I folds İ (U+0130) and ı (U+0131) to i; /iu does not, and two
+// prefilters had no u flag (ſ and K were not s and k): these were
+// Python-only. pyRe now folds as re.I does; a suppression marker must be
+// ASCII in both engines (for a marker, matching less fails closed).
+test("case folds as Python's re.I; markers are ASCII", () => {
+  const { found } = scanTree({
+    "n.sql": "SELECT a FROM t WİTH (NOLOCK);\n",
+    "d.sql": "ſET @q = 'SELECT 1 ' + @x;\n",
+    "e.sql": "EXECUTE İMMEDIATE 'x' || y;\n",
+    "m.js": "eval(a) // noſec\neval(b) // lazaret-ıgnore\neval(c) // NOSONAR\n"
+      + "eval(d) // nosec: S-EVAL-JS, ſ-X\neval(e) // nosec: S-EVAL-JS\n",
+  });
+  assert.deepEqual(found, ["d.sql:1 SQL-DYNAMIC", "e.sql:1 SQL-DYNAMIC", "m.js:1 S-EVAL-JS", "m.js:2 S-EVAL-JS",
+    "m.js:4 S-EVAL-JS", "n.sql:1 SQL-NOLOCK"]);
+});

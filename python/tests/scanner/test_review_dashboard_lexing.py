@@ -58,6 +58,10 @@ MASKING = [
 # Other places the page read input differently from core.
 MISC = [
     ("chmod.py", "py", "os.chmod(p," + " " * 80 + "0o777)\nos.chmod(q,\t\t0o644)\n"),
+    # re.I folding (İ, ı are i; ſ is s) and ASCII-only markers
+    ("fold.sql", "sql", "SELECT a FROM t WİTH (NOLOCK);\nſET @q = 'SELECT 1 ' + @x;\nEXECUTE İMMEDIATE 'x' || y;\n"),
+    ("marker.js", "js", "eval(a) // noſec\neval(b) // lazaret-ıgnore\neval(c) // NOSONAR\n"
+     "eval(d) // nosec: S-EVAL-JS, ſ-X\neval(e) // nosec: S-EVAL-JS\n"),
 ]
 
 # Uploads: raw bytes through the page's decoder, against core.decode_source.
@@ -110,6 +114,7 @@ class DashboardLexingTests(unittest.TestCase):
     def test_misc(self):
         page = self.compare(MISC)
         self.assertIn("S-CHMOD", {i["rule"] for i in page[0]})
+        self.assertEqual(sorted(i["rule"] for i in page[1]), ["SQL-DYNAMIC", "SQL-DYNAMIC", "SQL-NOLOCK"])
 
     def test_uploads(self):
         (page,) = dash.run([{"op": "uploadScan", "files": [

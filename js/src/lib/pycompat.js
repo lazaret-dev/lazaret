@@ -55,8 +55,16 @@ function startsWithWordChar(src, j) {
 }
 const SYNTAX = new Set("^$\\.*+?()[]{}|/");
 
-/** Translate Python `re` pattern text into JavaScript (u-mode) pattern text. */
-export function pyRegexSource(src) {
+// re.I folds U+0130 (İ) and U+0131 (ı) to i, as JavaScript's /iu does not
+// (every other letter folds alike: ſ→s and K→k in both).
+const DOTTED_I = "\u0130\u0131";
+const FOLDS_I_RE = /^[iI]$/;
+
+/**
+ * Translate Python `re` pattern text into JavaScript (u-mode) pattern text.
+ * ignoreCase: the pattern runs with re.I (JS flag i).
+ */
+export function pyRegexSource(src, { ignoreCase = false } = {}) {
   let out = "";
   for (let i = 0; i < src.length; i++) {
     const ch = src[i];
@@ -80,9 +88,9 @@ export function pyRegexSource(src) {
         default: out += escapeOut(n); continue;
       }
     }
-    if (ch === "[") { const [text, next] = translateClass(src, i); out += text; i = next; continue; }
+    if (ch === "[") { const [text, next] = translateClass(src, i, ignoreCase); out += text; i = next; continue; }
     if (ch === ".") { out += "[^\\n]"; continue; }
-    out += ch;
+    out += ignoreCase && FOLDS_I_RE.test(ch) ? `[iI${DOTTED_I}]` : ch;
   }
   return out;
 }
@@ -99,9 +107,10 @@ const CLASS_SETS = { w: W, d: "\\p{Nd}", s: WS };
  * Translate the character class starting at src[i] === "[". Returns
  * [js text, index of the closing "]"]. A negated shorthand inside a class
  * (\S, \W, \D — e.g. `[^\S\n]`) is rewritten with a look-ahead, since the
- * JS shorthands have different contents.
+ * JS shorthands have different contents. ignoreCase: a class holding i or I
+ * also holds İ and ı (re.I).
  */
-function translateClass(src, i) {
+function translateClass(src, i, ignoreCase = false) {
   let j = i + 1;
   let negated = false;
   if (src[j] === "^") { negated = true; j++; }
@@ -124,7 +133,8 @@ function translateClass(src, i) {
     if (ch === "[" || ch === "]") { items.push("\\" + ch); continue; }
     items.push(ch);
   }
-  const rest = items.join("");
+  let rest = items.join("");
+  if (ignoreCase && rest && new RegExp(`[${rest}]`, "iu").test("i")) rest += DOTTED_I;   // holds i or I
   if (!negSets.length) return [`[${negated ? "^" : ""}${rest}]`, j];
   if (negSets.length > 1) throw new Error("pyRe: several negated shorthands in one class are not supported");
   const c = negSets[0];
@@ -141,7 +151,7 @@ function translateClass(src, i) {
  * g (for iteration). The u flag is always added.
  */
 export function pyRe(src, flags = "") {
-  return new RegExp(pyRegexSource(src), [...new Set((flags + "u").split(""))].join(""));
+  return new RegExp(pyRegexSource(src, { ignoreCase: flags.includes("i") }), [...new Set((flags + "u").split(""))].join(""));
 }
 
 // ---- strings -----------------------------------------------------------

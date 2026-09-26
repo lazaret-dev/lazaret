@@ -150,5 +150,27 @@ class PythonCommentsAreVersionIndependentTests(unittest.TestCase):
         self.assertEqual(rules_at(core.scan_file("o.py", src, "py")), [])
 
 
+class CaseFoldingTests(unittest.TestCase):
+    """re.I folds İ (U+0130) and ı (U+0131) to i, JavaScript's /iu does not,
+    and two npm prefilters had no u flag at all (so ſ and K were not s and k
+    there): these were Python-only. The npm engine now folds as re.I does;
+    suppression markers must be ASCII in every engine (matching fewer
+    markers is what fails closed)."""
+
+    def test_rules_fold_like_re_i(self):
+        self.assertEqual(rules_at(core.scan_file("n.sql", "SELECT a FROM t WİTH (NOLOCK);\n", "sql")),
+                         [("SQL-NOLOCK", 1)])
+        self.assertEqual(rules_at(core.scan_file("d.sql", "ſET @q = 'SELECT 1 ' + @x;\n", "sql")),
+                         [("SQL-DYNAMIC", 1)])
+        self.assertEqual(rules_at(core.scan_file("e.sql", "EXECUTE İMMEDIATE 'x' || y;\n", "sql")),
+                         [("SQL-DYNAMIC", 1)])
+
+    def test_a_marker_is_ascii(self):
+        src = ("eval(a) // noſec\neval(b) // lazaret-ıgnore\neval(c) // NOSONAR\n"
+               "eval(d) // nosec: S-EVAL-JS, ſ-X\neval(e) // nosec: S-EVAL-JS\n")
+        self.assertEqual(rules_at(core.scan_file("m.js", src, "js")),
+                         [("S-EVAL-JS", 1), ("S-EVAL-JS", 2), ("S-EVAL-JS", 4)])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-qJhyeOvNyoPZ9K/E7F0Rd9T6c2o7lCKJ+Zyuu7O/oF8='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-NJx8Ew8JoXON3MGdOE9tUQfvuf0x9WgRLy7yh9rokxE='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
 <title>Lazaret — Security &amp; Quality Review</title>
 <style>
   :root{
@@ -211,8 +211,16 @@ function startsWithWordChar(src, j) {
 }
 const SYNTAX = new Set("^$\\.*+?()[]{}|/");
 
-/** Translate Python `re` pattern text into JavaScript (u-mode) pattern text. */
-function pyRegexSource(src) {
+// re.I folds U+0130 (İ) and U+0131 (ı) to i, as JavaScript's /iu does not
+// (every other letter folds alike: ſ→s and K→k in both).
+const DOTTED_I = "\u0130\u0131";
+const FOLDS_I_RE = /^[iI]$/;
+
+/**
+ * Translate Python `re` pattern text into JavaScript (u-mode) pattern text.
+ * ignoreCase: the pattern runs with re.I (JS flag i).
+ */
+function pyRegexSource(src, { ignoreCase = false } = {}) {
   let out = "";
   for (let i = 0; i < src.length; i++) {
     const ch = src[i];
@@ -236,9 +244,9 @@ function pyRegexSource(src) {
         default: out += escapeOut(n); continue;
       }
     }
-    if (ch === "[") { const [text, next] = translateClass(src, i); out += text; i = next; continue; }
+    if (ch === "[") { const [text, next] = translateClass(src, i, ignoreCase); out += text; i = next; continue; }
     if (ch === ".") { out += "[^\\n]"; continue; }
-    out += ch;
+    out += ignoreCase && FOLDS_I_RE.test(ch) ? `[iI${DOTTED_I}]` : ch;
   }
   return out;
 }
@@ -255,9 +263,10 @@ const CLASS_SETS = { w: W, d: "\\p{Nd}", s: WS };
  * Translate the character class starting at src[i] === "[". Returns
  * [js text, index of the closing "]"]. A negated shorthand inside a class
  * (\S, \W, \D — e.g. `[^\S\n]`) is rewritten with a look-ahead, since the
- * JS shorthands have different contents.
+ * JS shorthands have different contents. ignoreCase: a class holding i or I
+ * also holds İ and ı (re.I).
  */
-function translateClass(src, i) {
+function translateClass(src, i, ignoreCase = false) {
   let j = i + 1;
   let negated = false;
   if (src[j] === "^") { negated = true; j++; }
@@ -280,7 +289,8 @@ function translateClass(src, i) {
     if (ch === "[" || ch === "]") { items.push("\\" + ch); continue; }
     items.push(ch);
   }
-  const rest = items.join("");
+  let rest = items.join("");
+  if (ignoreCase && rest && new RegExp(`[${rest}]`, "iu").test("i")) rest += DOTTED_I;   // holds i or I
   if (!negSets.length) return [`[${negated ? "^" : ""}${rest}]`, j];
   if (negSets.length > 1) throw new Error("pyRe: several negated shorthands in one class are not supported");
   const c = negSets[0];
@@ -297,7 +307,7 @@ function translateClass(src, i) {
  * g (for iteration). The u flag is always added.
  */
 function pyRe(src, flags = "") {
-  const re = new RegExp(pyRegexSource(src), [...new Set((flags + "u").split(""))].join(""));
+  const re = new RegExp(pyRegexSource(src, { ignoreCase: flags.includes("i") }), [...new Set((flags + "u").split(""))].join(""));
   re.pySource = src;       // (dashboard) the Python text, for the rule-table drift test
   return re;
 }
@@ -1287,9 +1297,11 @@ const DYN_A3 = pyRe(String.raw`sp_executesql\b`, "gi");
 const DYN_A4 = pyRe(String.raw`EXEC\s*\(\s*['\"]`, "gi");
 const DYN_A5 = pyRe(String.raw`SET\s+@\w+\s*=`, "gi");
 const SET_AT = pyRe(String.raw`SET\s+@`, "gi");
+// fold case as re.I does (ſET is SET): a JS /i without u did not
+const DYN_ANY = pyRe("exec|sp_executesql|set", "i");
 const none = (x) => x < 0 ? Infinity : x;
 function sqlDynamicFind(s) {
-  if (!/exec|sp_executesql|set/i.test(s)) return -1;
+  if (!DYN_ANY.test(s)) return -1;
   let best = -1;
   const take = (i) => { if (i >= 0 && (best < 0 || i < best)) best = i; };
   const m1 = DYN_A1.exec(s);
@@ -2594,7 +2606,9 @@ const SECRET_SKIP_RE = pyRe(String.raw`environ|process\.env|getenv|\bplaceholder
 // (so `--` works in .sql comments, `#` in Python ones, and nothing inside a
 // string, a template literal or code such as `x --nosec` or a JS `#private`
 // field does). It applies to its own line, or to the next line when it sits
-// on a standalone comment line.
+// on a standalone comment line. The marker is ASCII (Python's re.I would
+// also take `noſec` or `lazaret-ıgnore`; for a marker, matching less fails
+// closed).
 const RULE_ID = String.raw`(?:S|T|SC|X|SQL|B|Q)-[A-Z0-9]+(?:-[A-Z0-9]+)*`;
 const SUPPRESS_RE = pyRe(String.raw`(?:#|//|--)[ \t]*(?:nosec|NOSONAR|lazaret-ignore)\b`
   + String.raw`(?:[ \t]*:?[ \t]*(` + RULE_ID + String.raw`(?:[ \t]*,[ \t]*` + RULE_ID + String.raw`)*))?`, "gi");
@@ -2610,7 +2624,7 @@ function markerOn(lines, lex, i) {
   SUPPRESS_RE.lastIndex = 0;
   let m;
   while ((m = SUPPRESS_RE.exec(line))) {
-    if (!lex.inComment(i, m.index)) continue;
+    if (!lex.inComment(i, m.index) || /[^\x00-\x7f]/.test(m[0])) continue;
     return m[1] ? new Set(m[1].split(",").map((x) => x.trim().toUpperCase())) : null;
   }
   return NO_MARKER;

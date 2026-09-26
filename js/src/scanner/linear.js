@@ -46,9 +46,11 @@ const DYN_A3 = pyRe(String.raw`sp_executesql\b`, "gi");
 const DYN_A4 = pyRe(String.raw`EXEC\s*\(\s*['\"]`, "gi");
 const DYN_A5 = pyRe(String.raw`SET\s+@\w+\s*=`, "gi");
 const SET_AT = pyRe(String.raw`SET\s+@`, "gi");
+// fold case as re.I does (ſET is SET): a JS /i without u did not
+const DYN_ANY = pyRe("exec|sp_executesql|set", "i");
 const none = (x) => x < 0 ? Infinity : x;
 export function sqlDynamicFind(s) {
-  if (!/exec|sp_executesql|set/i.test(s)) return -1;
+  if (!DYN_ANY.test(s)) return -1;
   let best = -1;
   const take = (i) => { if (i >= 0 && (best < 0 || i < best)) best = i; };
   const m1 = DYN_A1.exec(s);
