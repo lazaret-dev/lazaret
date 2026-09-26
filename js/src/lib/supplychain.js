@@ -6,7 +6,7 @@
 
 import { mkIssue } from "./issue.js";
 import { DEP_MARKERS } from "./fs.js";
-import { pyRepr, pyStr, pyStrip, MAX_JSON_DEPTH, jsonDepthExceeds } from "./pycompat.js";
+import { pyRe, pyRepr, pyStr, pyStrip, MAX_JSON_DEPTH, jsonDepthExceeds } from "./pycompat.js";
 import { pyJsonParse, jsonErrorWhere, pyLiteralParse } from "./pyjson.js";
 import { REDACT, redactText } from "./redact.js";
 
@@ -35,13 +35,20 @@ export function isRootManifest(path) {
 }
 
 // G11: fetch/eval pattern list. Mere presence of a lifecycle script is MAJOR;
-// matching this list escalates to CRITICAL.
+// matching this list escalates to CRITICAL. This and the patterns below are
+// core's text compiled with Python semantics by pyRe (Unicode \w, \s and \b,
+// Unicode case folding): as plain JS regexes, `baſe64` (U+017F folds to s)
+// was CRITICAL in core but MAJOR here, and `require('./données')` in a gyp
+// expansion was benign in core (\w matches é) but CRITICAL here.
 export const INSTALL_HOOK_RE =
-  /curl|wget|iwr|Invoke-WebRequest|node\s+-e|bash\s+-c|sh\s+-c|powershell|base64|\beval\b/i;
+  pyRe(String.raw`curl|wget|iwr|Invoke-WebRequest|node\s+-e|bash\s+-c|sh\s+-c|powershell|base64|\beval\b`, "i");
 
-const NODE_E_RE = /node\s+-e\s+(?:"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'|(\S+))/g;
-const LOCAL_REQUIRE_RE = /require\(\s*\\?["'](\.{1,2}\/[^"'\\]+)\\?["']\s*\)/g;
-const INLINE_DANGER_RE = /https?|fetch|child_process|exec|spawn|eval|Function|Buffer|atob|base64|net\.|dgram|process\.env/;
+const NODE_E_SRC = String.raw`node\s+-e\s+(?:"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'|(\S+))`;
+const NODE_E_RE = pyRe(NODE_E_SRC, "g");
+const LOCAL_REQUIRE_SRC = String.raw`require\(\s*\\?["'](\.{1,2}/[^"'\\]+)\\?["']\s*\)`;
+const LOCAL_REQUIRE_RE = pyRe(LOCAL_REQUIRE_SRC, "g");
+const LOCAL_REQUIRE_ONE = pyRe(LOCAL_REQUIRE_SRC);
+const INLINE_DANGER_RE = pyRe(String.raw`https?|fetch|child_process|exec|spawn|eval|Function|Buffer|atob|base64|net\.|dgram|process\.env`);
 
 /**
  * Does an install-hook command fetch or evaluate code? `node -e` alone is not
@@ -55,7 +62,7 @@ export function hookIsSuspicious(cmd) {
   for (const m of cmd.matchAll(NODE_E_RE)) {
     const code = m[1] ?? m[2] ?? m[3] ?? "";
     const withoutRequires = code.replace(LOCAL_REQUIRE_RE, "");
-    if (new RegExp(LOCAL_REQUIRE_RE.source).test(code) && !INLINE_DANGER_RE.test(withoutRequires))
+    if (LOCAL_REQUIRE_ONE.test(code) && !INLINE_DANGER_RE.test(withoutRequires))
       remainder = remainder.replace(m[0], " ");
   }
   return INSTALL_HOOK_RE.test(remainder);
@@ -186,9 +193,11 @@ export function scanManifest(path, content, { registry = isDependencyManifest(pa
 
 // gyp command expansions run a shell command while node-gyp configures the
 // build: '<!(cmd)', '<!@(cmd)', '>!(cmd)', '>!@(cmd)'.
-const GYP_EXPANSION_RE = /[<>]!@?\(/g;
+const GYP_EXPANSION_SRC = String.raw`[<>]!@?\(`;
+const GYP_EXPANSION_RE = pyRe(GYP_EXPANSION_SRC, "g");
+const GYP_EXPANSION_ONE = pyRe(GYP_EXPANSION_SRC);
 // The ubiquitous benign form: print an include path of a dependency.
-const GYP_NODE_REQUIRE_RE = /node\s+-[ep]\s+(?:"|')\s*require\(\s*\\?["'][\w@./-]+\\?["']\s*\)(?:\.[\w$]+)*\s*;?\s*(?:"|')/g;
+const GYP_NODE_REQUIRE_RE = pyRe(String.raw`node\s+-[ep]\s+(?:"|')\s*require\(\s*\\?["'][\w@./-]+\\?["']\s*\)(?:\.[\w$]+)*\s*;?\s*(?:"|')`, "g");
 const GYP_MAX_NODES = 100_000;
 
 function gypExpansionCommand(text, start) {
@@ -219,7 +228,7 @@ function gypCommands(data) {
       }
       continue;
     }
-    if (typeof node === "string" && /[<>]!@?\(/.test(node)) {
+    if (typeof node === "string" && GYP_EXPANSION_ONE.test(node)) {
       GYP_EXPANSION_RE.lastIndex = 0;
       let m;
       while ((m = GYP_EXPANSION_RE.exec(node))) out.push([gypExpansionCommand(node, m.index), "expansion"]);
