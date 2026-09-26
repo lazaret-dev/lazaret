@@ -2825,13 +2825,28 @@ def _blank_strings(code):
                              code)
 
 
+# A decoded value taints names for DEP_FLOW_WINDOW characters from the
+# decode (a dropper decodes and runs its payload together). Names are
+# tracked without scopes, so without a bound one ordinary decode in a large
+# bundle spread through helper parameters to thousands of names: npm:pullfrog's
+# 7.8 MB dist/index.js loads undici's WebAssembly parser with
+# `mod = …compile(Buffer.from(…, "base64"))` at line 7310, and esbuild's
+# `__importStar(mod)` helper carried the mark to 6,216 names, every spawn in
+# the file among them.
+DEP_FLOW_WINDOW = 10_000
+# `function exec(`, `function* exec(`, `def exec(`: a definition (on the 24 chars before the name)
+_FN_DEF_BEFORE_RE = re.compile(r"(?:^|[^\w$])(?:function\s*\*?|def)\s*$")
+
+
 def _dep_decode_flow(path, ctx, issues):
     rule = next(r for r in RULES if r["id"] == "SC-EVAL-DECODE")
     ident_re = _IDENT_RUN_RE.get(ctx.lang, _IDENT_RUN_RE["js"])
     have = {i["line"] for i in issues if i["rule"] == "SC-EVAL-DECODE"}
     cp_aliases = _child_process_aliases(ctx.content) if ctx.lang == "js" else frozenset()
-    decoded = {}                      # name -> line its decoded value came from
+    decoded = {}                      # name -> (line of the decode, its offset in the file)
+    offset = 0                        # offset of line i in the file
     for i in range(len(ctx.lines)):
+        base, offset = offset, offset + len(ctx.lines[i]) + 1
         if ctx.cmask[i]:
             continue
         code = ctx.mcode(i)
@@ -2847,26 +2862,39 @@ def _dep_decode_flow(path, ctx, issues):
         events += [(m.start(), 1, m) for m in _DECODE_SINK_RE.finditer(blank)]
         events.sort(key=lambda e: (e[0], e[1]))
         close = None
-        for n, (_pos, kind, m) in enumerate(events):
+
+        def live(a, b, at):
+            """Decodes behind the decoded names in blank[a:b], still in reach at `at`."""
+            return [decoded[v] for v in set(ident_re.findall(blank, a, b))
+                    if v in decoded and at - decoded[v][1] <= DEP_FLOW_WINDOW]
+
+        for n, (pos, kind, m) in enumerate(events):
             if n and not n & 255:     # one long line can hold thousands of statements
                 ctx.check_time()
+            at = base + pos
             if kind == 0:
                 a, b = m.span(2)
                 if _DECODE_CALL_RE.search(code, a, b):
-                    decoded.setdefault(m.group(1), i + 1)
+                    decoded[m.group(1)] = (i + 1, at)
                     continue
-                src = [decoded[v] for v in set(ident_re.findall(blank, a, b)) if v in decoded]
+                src = live(a, b, at)
                 if src:
-                    decoded.setdefault(m.group(1), min(src))
+                    decoded[m.group(1)] = max(src, key=lambda d: d[1])
                 continue
             if i + 1 in have or not _is_code_sink(code, m, cp_aliases):
                 continue
+            if _FN_DEF_BEFORE_RE.search(blank[max(0, m.start(2) - 24):m.start(2)]):
+                continue                      # a definition, not a call
             if close is None:
                 close = _paren_close_map(blank)
-            end = min(close.get(m.end() - 1, len(blank)), m.end() + DEP_SINK_ARGS_MAX)
-            src = [decoded[v] for v in set(ident_re.findall(blank, m.end(), end)) if v in decoded]
+            closed = close.get(m.end() - 1)
+            if closed is not None and blank[closed + 1:closed + 2 + DEP_SINK_ARGS_MAX].lstrip()[:1] == "{":
+                continue                      # `exec(a, b) {`: a method definition
+            end = min(len(blank) if closed is None else closed, m.end() + DEP_SINK_ARGS_MAX)
+            src = live(m.end(), end, at)
             if src:
-                msg = f"Decoded payload (assigned at line {min(src)}) reaches a code-execution sink."
+                msg = (f"Decoded payload (assigned at line {min(d[0] for d in src)}) "
+                       f"reaches a code-execution sink.")
             elif _DECODE_CALL_RE.search(code, m.end(), end):
                 msg = "Decoded payload reaches a code-execution sink in the same call."
             else:

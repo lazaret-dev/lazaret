@@ -60,7 +60,8 @@ not already a Lazaret report (unless `--force-overwrite`). Writes are atomic
   `binding.gyp` actions and command expansions (`<!(cmd)`); an unparseable
   root manifest (`SC-MANIFEST-UNPARSEABLE`); decode-then-execute
   (`SC-EVAL-DECODE`, also across lines, through an inline import such as
-  `__import__("base64").b64decode`, and, in dependencies, across statements);
+  `__import__("base64").b64decode`, and, in dependencies, across statements
+  within 10,000 characters of the decode);
   executable `.pth` lines (`SC-PTH-EXEC`); readable text hidden in hex escapes; base64 blobs and
   strings built from character codes written in the call or in an array it uses; `javascript-obfuscator` identifier signatures; compiled binaries;
   unchecked or orphaned `.pyc` files; UTF-7 source (`SC-UTF7`).

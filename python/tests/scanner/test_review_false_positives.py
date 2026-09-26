@@ -13,6 +13,12 @@ PyPI releases, and the detections that must survive the fixes.
    a long minified line fired: binary parsers, UTF-16 surrogate encoders; and
    any array of printable codes on the line counted for every call on it
    (extract-youtube's 98 KB line).
+4. The decode flow tracks names without scopes: npm:pullfrog's 7.8 MB bundle
+   decodes a WebAssembly module (`mod = …compile(Buffer.from(…, "base64"))`)
+   at line 7310, esbuild's `__importStar(mod)` helper carried the mark to
+   6,216 names, and every spawn in the file became a BLOCKER, along with a
+   `function exec(…) {` definition. A decode now taints names for
+   DEP_FLOW_WINDOW characters, and definitions are not calls.
 
 The npm engine and the dashboard run the same inputs through
 tests/architecture/test_js_parity.py and test_review_dashboard_parity.py.
@@ -86,6 +92,47 @@ class MethodCallSinkTests(unittest.TestCase):
                 'for(;r=e.exec(n);)s!==r.index&&(i+=n.substring(s,r.index));return i}}'
                 'let t=/[^=]*/.exec(n)[0];\n') % B64
         self.assertEqual(flow_lines(line), [])
+
+
+class FlowReachTests(unittest.TestCase):
+    """A decode reaches sinks within DEP_FLOW_WINDOW characters; definitions
+    named exec are not calls."""
+    DECODE = "var t = atob(%s);\n" % B64
+
+    @staticmethod
+    def pad(n):
+        return "var pad = [%s];\n" % ("0," * (n // 2))
+
+    def test_a_sink_far_from_the_decode_is_not_reached(self):
+        far = core.DEP_FLOW_WINDOW + 500
+        self.assertEqual(flow_lines(self.DECODE + self.pad(far) + "eval(t);\n"), [])
+        self.assertEqual(flow_lines(self.DECODE + self.pad(2_000) + "eval(t);\n"), [3])
+
+    def test_propagation_keeps_the_distance_from_the_decode(self):
+        half = core.DEP_FLOW_WINDOW * 2 // 3
+        src = self.DECODE + self.pad(half) + "var u = t;\n" + self.pad(half) + "eval(u);\n"
+        self.assertEqual(flow_lines(src), [])
+        self.assertEqual(flow_lines(self.DECODE + "var u = t;\n" + self.pad(half) + "eval(u);\n"), [4])
+
+    def test_bundle_helpers_far_from_a_wasm_decode(self):
+        # the shape of npm:pullfrog's dist/index.js
+        src = ('var mod = await WebAssembly.compile(Buffer.from("AGFzbQEAAAA=", "base64"));\n'
+               + self.pad(core.DEP_FLOW_WINDOW + 500)
+               + "function __importStar(mod) { var result = {}; result.default = mod; return result; }\n"
+               + 'var cp = __importStar(require("child_process"));\n'
+               + "var r = __importStar(mod); spawn(r.default); cp.spawn(r);\n")
+        self.assertEqual(flow_lines(src), [])
+
+    def test_definitions_named_exec_are_not_calls(self):
+        for line in ("function exec(t, e) { return run(t, e); }", "function* exec(t) { yield t; }",
+                     "var o = { exec(t) { return t; } };", "class A { exec(t, e) { return 1; } }",
+                     "class B { async eval(t) {} }"):
+            with self.subTest(line=line):
+                self.assertEqual(flow_lines(self.DECODE + line + "\n"), [])
+        self.assertEqual(flow_lines("d = base64.b64decode(p)\ndef exec(d):\n    return d\n", "py"), [])
+        # a call is still a call, also next to a definition
+        self.assertEqual(flow_lines(self.DECODE + "function run(x) { return x; } exec(t);\n"), [2])
+        self.assertEqual(flow_lines(self.DECODE + "if (ok) exec(t); { g(); }\n"), [2])
 
 
 class CompileAndMarshalTests(unittest.TestCase):

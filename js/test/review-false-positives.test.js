@@ -5,7 +5,9 @@
 //  - SC-MARSHAL flagged exec(compile(<source>)), and was the only rule that
 //    caught exec(compile(b64decode(…)));
 //  - SC-CHARCODE counted numbers anywhere on a long minified line, and any
-//    array of printable codes on it.
+//    array of printable codes on it;
+//  - the scope-less decode flow reached every sink in a large bundle, and
+//    took `function exec(…) {` for a call.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -29,6 +31,21 @@ test("decode flow: RegExp and other .exec/.eval methods are not code execution",
     .filter((i) => i.rule === "SC-EVAL-DECODE");
   assert.deepEqual(inline.map((i) => [i.line, i.msg]),
     [[2, "Decoded payload reaches a code-execution sink in the same call."]]);
+});
+
+test("decode flow: a decode reaches sinks within 10,000 characters; definitions are not calls", () => {
+  const decode = `var t = atob(${B64});\n`;
+  const pad = (n) => `var pad = [${"0,".repeat(n >> 1)}];\n`;
+  assert.deepEqual(lines(decode + pad(10500) + "eval(t);\n", "js", "SC-EVAL-DECODE"), []);
+  assert.deepEqual(lines(decode + pad(2000) + "eval(t);\n", "js", "SC-EVAL-DECODE"), [3]);
+  assert.deepEqual(lines(decode + pad(6666) + "var u = t;\n" + pad(6666) + "eval(u);\n", "js", "SC-EVAL-DECODE"), []);
+  // astral characters count once, as in the Python engine
+  assert.deepEqual(lines(decode + `var s = "${"\u{1F600}".repeat(9000)}";\n` + "eval(t);\n", "js", "SC-EVAL-DECODE"), [3]);
+  for (const line of ["function exec(t, e) { return run(t, e); }", "function* exec(t) { yield t; }",
+    "var o = { exec(t) { return t; } };", "class A { exec(t, e) { return 1; } }", "class B { async eval(t) {} }"])
+    assert.deepEqual(lines(decode + line + "\n", "js", "SC-EVAL-DECODE"), [], line);
+  assert.deepEqual(lines(decode + "function run(x) { return x; } exec(t);\n", "js", "SC-EVAL-DECODE"), [2]);
+  assert.deepEqual(lines("d = base64.b64decode(p)\ndef exec(d):\n    return d\n", "py", "SC-EVAL-DECODE"), []);
 });
 
 test("exec(compile(source)) is not bytecode; decode -> compile -> exec still is", () => {

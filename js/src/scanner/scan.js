@@ -10,7 +10,7 @@ import {
 } from "./engine.js";
 import { lexLines } from "./lexer.js";
 import { extractFunctions } from "./functions.js";
-import { cpLen, pyRe, pyRepr, pyRstrip, isPySpace } from "../lib/pycompat.js";
+import { cpLen, pyRe, pyRepr, pyRstrip, pyLstrip, isPySpace } from "../lib/pycompat.js";
 import { findSecretToken, registerScanContext } from "../lib/redact.js";
 import { truncatedIssue } from "../lib/fs.js";
 
@@ -322,19 +322,31 @@ function isCodeSink(code, m, cpAliases) {
 const DEP_ASSIGN_RE = pyRe(String.raw`(?<![\w$])([A-Za-z_$][\w$]*)\s*=(?![=>])([^;]*)`, "gd");
 const DEP_SINK_ARGS_MAX = 1000;
 const blankStrings = (code) => code.replace(STRING_LIT_RE, (s) => s[0] + " ".repeat(s.length - 2) + s[s.length - 1]);
+// A decoded value taints names for DEP_FLOW_WINDOW characters from the decode
+// (twin of core.DEP_FLOW_WINDOW: unbounded, one ordinary decode in a large
+// bundle spread through helper parameters to thousands of names).
+const DEP_FLOW_WINDOW = 10000;
+// `function exec(`, `function* exec(`, `def exec(`: a definition (on the 24 chars before the name)
+const FN_DEF_BEFORE_RE = pyRe(String.raw`(?:^|[^\w$])(?:function\s*\*?|def)\s*$`);
 function depDecodeFlow(path, ctx, issues, rule) {
   const identRe = IDENT_RUN_RE[ctx.lang] ?? IDENT_RUN_RE.js;
   const have = new Set(issues.filter((i) => i.rule === "SC-EVAL-DECODE").map((i) => i.line));
   const cpAliases = ctx.lang === "js" ? childProcessAliases(ctx.content) : new Set();
-  const decoded = new Map();                 // name -> line its decoded value came from
-  const namesIn = (text) => {
+  const decoded = new Map();                 // name -> [line of the decode, its offset in the file]
+  const live = (text, at) => {               // decodes behind the decoded names in text, in reach at `at`
     const out = [];
     identRe.lastIndex = 0;
     let m;
-    while ((m = identRe.exec(text))) if (decoded.has(m[0])) out.push(decoded.get(m[0]));
+    while ((m = identRe.exec(text))) {
+      const d = decoded.get(m[0]);
+      if (d && at - d[1] <= DEP_FLOW_WINDOW) out.push(d);
+    }
     return out;
   };
+  let offset = 0;                            // offset of line i in the file, in code points like core
   for (let i = 0; i < ctx.lines.length; i++) {
+    const base = offset;
+    offset += cpLen(ctx.lines[i]) + 1;
     if (ctx.cmask[i]) continue;
     const code = ctx.mcode(i);
     if (!code || isBlank(code)) continue;
@@ -342,6 +354,7 @@ function depDecodeFlow(path, ctx, issues, rule) {
     const hasDecode = DECODE_CALL_RE.test(code);
     if (!decoded.size && !hasDecode) continue;
     const blank = blankStrings(code);
+    const pairs = pairOffsets(code);         // blank keeps code's UTF-16 layout
     const events = [];
     DEP_ASSIGN_RE.lastIndex = 0;
     let m;
@@ -352,21 +365,27 @@ function depDecodeFlow(path, ctx, issues, rule) {
     let close = null;
     for (let n = 0; n < events.length; n++) {
       if (n && !(n & 255)) ctx.checkTime();  // one long line can hold thousands of statements
-      const [, kind, ev] = events[n];
+      const [pos, kind, ev] = events[n];
+      const at = base + cpAt(pairs, pos);
       if (kind === 0) {
         const [a, b] = ev.indices[2];
-        if (DECODE_CALL_RE.test(code.slice(a, b))) { if (!decoded.has(ev[1])) decoded.set(ev[1], i + 1); continue; }
-        const src = namesIn(blank.slice(a, b));
-        if (src.length && !decoded.has(ev[1])) decoded.set(ev[1], Math.min(...src));
+        if (DECODE_CALL_RE.test(code.slice(a, b))) { decoded.set(ev[1], [i + 1, at]); continue; }
+        const src = live(blank.slice(a, b), at);
+        if (src.length) decoded.set(ev[1], src.reduce((x, y) => (y[1] > x[1] ? y : x)));
         continue;
       }
       if (have.has(i + 1) || !isCodeSink(code, ev, cpAliases)) continue;
+      const nameAt = ev.indices[2][0];
+      if (FN_DEF_BEFORE_RE.test(blank.slice(Math.max(0, nameAt - 24), nameAt))) continue;  // a definition
       close ??= parenCloseMap(blank);
       const argStart = ev.index + ev[0].length;
-      const end = Math.min(close.get(argStart - 1) ?? blank.length, argStart + DEP_SINK_ARGS_MAX);
-      const src = namesIn(blank.slice(argStart, end));
+      const closed = close.get(argStart - 1);
+      if (closed !== undefined && pyLstrip(blank.slice(closed + 1, cpAdvance(pairs, closed + 1, DEP_SINK_ARGS_MAX + 1)))
+        .startsWith("{")) continue;          // `exec(a) {`: a method
+      const end = Math.min(closed ?? blank.length, cpAdvance(pairs, argStart, DEP_SINK_ARGS_MAX));
+      const src = live(blank.slice(argStart, end), at);
       let msg;
-      if (src.length) msg = `Decoded payload (assigned at line ${Math.min(...src)}) reaches a code-execution sink.`;
+      if (src.length) msg = `Decoded payload (assigned at line ${Math.min(...src.map((d) => d[0]))}) reaches a code-execution sink.`;
       else if (DECODE_CALL_RE.test(code.slice(argStart, end))) msg = "Decoded payload reaches a code-execution sink in the same call.";
       else continue;
       have.add(i + 1);

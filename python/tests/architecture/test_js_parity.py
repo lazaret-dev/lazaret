@@ -137,6 +137,10 @@ ADVERSARIAL = {
                              "o.k=[104,116,116,112,115,58,47,47,101,120,97];x=String.fromCharCode(...k);\n"
                              'x=String.fromCharCode(f("' + "\U0001F600" * 3000 + '"),104,116,116,112,115,58,47,47,101,120,97);\n'
                              'x=String.fromCharCode(f("' + "\U0001F600" * 3990 + '"),104,116,116,112,115,58,47,47,101,120,97);\n'),
+    "fp/flow-reach.js": ('var t = atob("Y29uc29sZS5sb2coMSk=");\nvar pad = [' + "0," * 5250 + "];\neval(t);\n"
+                         'var d = atob("Y29uc29sZS5sb2coMSk=");\nvar s = "' + "\U0001F600" * 9000 + '";\neval(d);\n'
+                         "function exec(d, e) { return run(d, e); }\nclass A { exec(d) { return 1; } }\n"
+                         "function run(x) { return x; } exec(d);\n"),
     "fp/compile.py": ("d = base64.b64decode(p)\nsession.exec(d)\nexec(compile(d, 'x', 'exec'))\n"
                       "exec(compile(path.read_bytes(), str(path), 'exec'), ns)\n"
                       "exec(compile(zlib.decompress(b), 'f', 'exec'))\ncode = marshal.load(fh)\n"),
