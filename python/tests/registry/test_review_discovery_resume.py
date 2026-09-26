@@ -332,6 +332,26 @@ class NpmResumeTests(ResumeCase):
         code, out, err = self.run_cli("--resume", "--ecosystem", "npm", "--ci", at=later(60))
         self.assertEqual((code, sorted(self.listed(out))), (0, ["npm:p504@1.0.0", "npm:p505@1.0.0"]))
 
+    def test_a_limit_reads_only_the_pages_it_needs(self):
+        # the cursor stops at the limit, so reading on would only be read again
+        self.seed("npm", 500)
+        self.npm.add(501, 545, 10)
+        with mock.patch.object(repo, "NPM_CHANGES_MAX", 10):
+            code, out, err = self.run_cli("--resume", "--ecosystem", "npm", "--limit", "3", "--ci",
+                                          at=later(60))
+            self.assertEqual(code, 1)
+            self.assertEqual(len(self.npm.feed_urls), 1)
+            self.assertEqual(len(self.npm.lookups), 3)
+            self.assertIn("npm partly checked: stopped at --limit 3; more changes are left for the "
+                          "next --resume run", err)
+            self.assertEqual(self.cursor("npm")[0], "503")
+            self.npm.feed_urls.clear()
+            code, out, err = self.run_cli("--resume", "--ecosystem", "npm", "--limit", "3",
+                                          at=later(60))
+        self.assertEqual(urllib.parse.urlsplit(self.npm.feed_urls[0]).query, "since=503&limit=10")
+        self.assertEqual(sorted(self.listed(out)), ["npm:p504@1.0.0", "npm:p505@1.0.0",
+                                                   "npm:p506@1.0.0"])
+
     def test_a_feed_that_fails(self):
         self.seed("npm", 500)
         self.npm.add(501, 530, 10)

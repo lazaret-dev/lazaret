@@ -3171,12 +3171,12 @@ def _npm_feed_names(want):
     return names, rejected, len(results), head
 
 
-def _npm_changes_since(seq, pages=None):
+def _npm_changes_since(seq, pages=None, want=0):
     """npm's replication feed after sequence number `seq`, read forward
     (since=, limit=NPM_CHANGES_MAX: the only parameters it takes besides
     doc_ids, descending and last-event-id) a page at a time, until a page
-    comes back short (caught up) or `pages` pages (NPM_RESUME_PAGES) were
-    read. Returns a dict:
+    comes back short (caught up), `pages` pages (NPM_RESUME_PAGES) were
+    read, or `want` (if set) packages are in hand. Returns a dict:
       changes:   [(seq, name)] of the packages that changed, oldest first,
                  each name once at its newest seq; unpublished (deleted)
                  and design documents are passed over
@@ -3233,7 +3233,7 @@ def _npm_changes_since(seq, pages=None):
             caught_up = True
         if page_last > since:
             since = last = page_last
-        if caught_up or error:
+        if caught_up or error or (want and len(newest) >= want):
             break
     changes = sorted((row_seq, name) for name, row_seq in newest.items())
     return {"changes": changes, "last": last, "caught_up": caught_up, "pages": done,
@@ -3458,7 +3458,9 @@ def discover_npm_since(cursor, limit, notes=None):
     seq, since_time = cursor
     now = _now()
     try:
-        walk = _npm_changes_since(seq)
+        # with a limit, no more pages than it takes: the next run reads on
+        # from where this one stops
+        walk = _npm_changes_since(seq, want=limit)
     except (FetchError, FeedError) as exc:
         # audit H1: the exception text can echo bytes of the network response.
         problem = lazaret.sanitize_term(_npm_feed_problem(exc))
@@ -3471,11 +3473,12 @@ def discover_npm_since(cursor, limit, notes=None):
               f"names.", file=sys.stderr)
     changes = walk["changes"]
     last = walk["last"] if walk["last"] is not None else seq
-    if limit and len(changes) > limit:
+    if limit and (len(changes) > limit or (len(changes) == limit and not walk["caught_up"])):
         rest, changes = len(changes) - limit, changes[:limit]
         new = (changes[-1][0], None)
-        _partly(notes, "npm", f"stopped at --limit {limit}; {rest} more changed package(s) are "
-                              f"left for the next --resume run")
+        more = (f"{rest} more changed package(s) are" if walk["caught_up"]
+                else "more changes are")                # it stopped reading at the limit
+        _partly(notes, "npm", f"stopped at --limit {limit}; {more} left for the next --resume run")
     else:
         new = (last, now if walk["caught_up"] else None)
         if walk["error"] is not None:

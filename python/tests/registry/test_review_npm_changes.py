@@ -48,10 +48,10 @@ class FakeFeed:
         return {"results": page, "last_seq": page[-1]["seq"] if page else since}
 
 
-def changes_since(feed, seq=100, pages=None, page_size=10):
+def changes_since(feed, seq=100, pages=None, page_size=10, want=0):
     with mock.patch.object(repo, "http_json", side_effect=feed), \
             mock.patch.object(repo, "NPM_CHANGES_MAX", page_size):
-        return repo._npm_changes_since(seq, pages)
+        return repo._npm_changes_since(seq, pages, **({"want": want} if want else {}))
 
 
 def since_params(feed):
@@ -93,6 +93,15 @@ class PagingTests(unittest.TestCase):
         self.assertEqual(len(got["changes"]), 20)
         more = changes_since(feed, seq=got["last"], pages=2)              # the next run
         self.assertEqual((more["changes"][0], more["last"]), ((121, "pkg-121"), 140))
+
+    def test_no_more_pages_than_wanted(self):
+        feed = FakeFeed(rows(101, 150))
+        got = changes_since(feed, want=3)
+        self.assertEqual(since_params(feed), ["100"])          # not the whole budget
+        self.assertEqual((len(got["changes"]), got["last"], got["caught_up"]), (10, 110, False))
+        feed = FakeFeed(rows(101, 150))
+        got = changes_since(feed, want=15)
+        self.assertEqual(since_params(feed), ["100", "110"])
 
     def test_each_package_once_at_its_newest_seq(self):
         feed = FakeFeed([{"seq": 101, "id": "a"}, {"seq": 102, "id": "b"}, {"seq": 103, "id": "a"},
