@@ -109,7 +109,8 @@ class RootsTests(unittest.TestCase):
                     call()
 
     def test_no_restriction_by_default(self):
-        with mock.patch.dict(os.environ, {"LAZARET_MCP_ROOTS": ""}):
+        with mock.patch.dict(os.environ):
+            os.environ.pop("LAZARET_MCP_ROOTS", None)   # unset; set but empty is an error
             self.assertEqual(server.allowed_roots(), [])
 
 

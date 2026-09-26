@@ -12,6 +12,8 @@
    ["NPM"] queried nothing and answered count 0, complete; a plain "npm" was
    iterated character by character; a negative limit was accepted. Its
    deadline and cancel flag were not checked before the registry walks.
+9  LAZARET_MCP_ROOTS set but empty ("", ":", " ") meant no path restriction
+   at all; it now refuses every tool call as a configuration error.
 
 Fixtures are inert text files.
 """
@@ -318,6 +320,61 @@ class DiscoverArgumentTests(unittest.TestCase):
         with self.assertRaises(server.ToolCancelled):
             self.run_in(server.ToolContext(event))
         self.assertEqual(self.calls, [])
+
+
+# ---------------------------------------------------------------------------
+# 9. LAZARET_MCP_ROOTS set but empty refuses tools instead of allowing all
+# ---------------------------------------------------------------------------
+EMPTY_ROOTS = ("", os.pathsep, " ", f" {os.pathsep} ")
+
+
+class RootsConfigTests(unittest.TestCase):
+    def test_set_but_empty_refuses_every_tool(self):
+        root = tree({"app.py": "x = 1\n"})
+        calls = [server.allowed_roots, server.ToolContext,
+                 lambda: server.tool_scan_directory({"path": root}),
+                 lambda: server.tool_quality_gate({"path": root}),
+                 lambda: server.tool_scan_files({"paths": [os.path.join(root, "app.py")]})]
+        for raw in EMPTY_ROOTS:
+            for call in calls:
+                with self.subTest(roots=raw), mock.patch.dict(os.environ, {"LAZARET_MCP_ROOTS": raw}):
+                    with self.assertRaisesRegex(ValueError, "LAZARET_MCP_ROOTS is set but names no"):
+                        call()
+
+    def test_the_server_answers_a_tool_error_and_keeps_serving(self):
+        frames = []
+        out = mock.Mock()
+        out.write.side_effect = lambda s: frames.extend(json.loads(l) for l in s.splitlines() if l)
+        srv = server.Server()
+        self.addCleanup(srv.close, 10)
+        with mock.patch.object(server, "_OUT", out), \
+                mock.patch.dict(os.environ, {"LAZARET_MCP_ROOTS": os.pathsep}):
+            srv.handle_line(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                "name": "scan_snippet", "arguments": {"code": "x = 1\n", "language": "py"}}}))
+            srv.handle_line(json.dumps({"jsonrpc": "2.0", "id": 2, "method": "ping"}))
+            deadline = time.monotonic() + 10
+            while len(frames) < 2 and time.monotonic() < deadline:
+                time.sleep(0.01)
+        by_id = {f["id"]: f for f in frames}
+        self.assertEqual(by_id[2]["result"], {})
+        self.assertTrue(by_id[1]["result"]["isError"])
+        self.assertIn("LAZARET_MCP_ROOTS is set but names no directory",
+                      by_id[1]["result"]["content"][0]["text"])
+
+    def test_blank_entries_next_to_real_ones_are_ignored(self):
+        inside, outside = tree({"a.py": "x = 1\n"}), tree({"b.py": "y = 2\n"})
+        raw = f" {os.pathsep}{inside}{os.pathsep}{os.pathsep}"
+        with mock.patch.dict(os.environ, {"LAZARET_MCP_ROOTS": raw}):
+            self.assertEqual(server.allowed_roots(), [os.path.normcase(os.path.realpath(inside))])
+            self.assertIn("qualityGate", server.tool_scan_directory({"path": inside}))
+            with self.assertRaisesRegex(ValueError, "outside the allowed roots"):
+                server.tool_scan_directory({"path": outside})
+
+    def test_unset_is_unrestricted(self):
+        with mock.patch.dict(os.environ):
+            os.environ.pop("LAZARET_MCP_ROOTS", None)
+            self.assertEqual(server.ToolContext().roots, [])
+            self.assertIn("qualityGate", server.tool_scan_directory({"path": tree({"a.py": "x = 1\n"})}))
 
 
 class RealPermissionTests(unittest.TestCase):

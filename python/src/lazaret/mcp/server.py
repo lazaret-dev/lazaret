@@ -17,7 +17,8 @@ answering ping and honors notifications/cancelled while a scan runs.
 Environment:
     LAZARET_DB                registry state DB (see lazaret-registry --db)
     LAZARET_MCP_ROOTS         os.pathsep-separated directories; when set, a
-                              path outside them is a tool error
+                              path outside them is a tool error (set but
+                              empty: every tool call is refused)
     LAZARET_MCP_MAX_FILES     files one tool call may scan   (default 20000)
     LAZARET_MCP_MAX_BYTES     source bytes one call may read (default 200000000)
     LAZARET_MCP_MAX_SECONDS   wall-clock budget per call     (default 300)
@@ -190,14 +191,26 @@ def _env_number(name, default, kind=int):
 
 
 def allowed_roots():
-    """Real paths of LAZARET_MCP_ROOTS entries ([] = no restriction)."""
-    raw = os.environ.get("LAZARET_MCP_ROOTS", "")
-    return [os.path.normcase(os.path.realpath(os.path.expanduser(p.strip())))
-            for p in raw.split(os.pathsep) if p.strip()]
+    """Real paths of the LAZARET_MCP_ROOTS entries; [] when the variable is
+    not set (no restriction). A variable that is set but names no directory
+    ("", ":", " ") raises ValueError: whoever set it meant to restrict the
+    server, and an empty list must never mean "every path"."""
+    raw = os.environ.get("LAZARET_MCP_ROOTS")
+    if raw is None:
+        return []
+    roots = [os.path.normcase(os.path.realpath(os.path.expanduser(p.strip())))
+             for p in raw.split(os.pathsep) if p.strip()]
+    if not roots:
+        raise ValueError(f"LAZARET_MCP_ROOTS is set but names no directory ({raw!r}); "
+                         "refusing to run tools. List the allowed directories, or unset "
+                         "it for no restriction.")
+    return roots
 
 
 class ToolContext:
-    """What one tool call may use. Handlers call check() between files."""
+    """What one tool call may use. Handlers call check() between files.
+    Raises ValueError when LAZARET_MCP_ROOTS is misconfigured (see
+    allowed_roots), so no tool runs without the restriction it asked for."""
 
     def __init__(self, cancel_event=None):
         self.cancel_event = cancel_event if cancel_event is not None else threading.Event()
@@ -904,8 +917,10 @@ class Server:
             try:
                 if event.is_set():
                     continue                    # cancelled while queued: no reply
-                _LOCAL.ctx = ToolContext(event)
                 try:
+                    # a misconfigured LAZARET_MCP_ROOTS is a tool error for every
+                    # tool (ToolContext raises), never an unrestricted call
+                    _LOCAL.ctx = ToolContext(event)
                     result = handler(args)
                 except ToolCancelled:
                     continue
@@ -1045,6 +1060,10 @@ def main():
         except (AttributeError, OSError, ValueError):
             pass
     lazaret.configure_stdio()   # stderr: never crash on a diagnostic
+    try:
+        allowed_roots()
+    except ValueError as exc:   # every tool call will be refused; say so up front
+        print(f"lazaret-mcp: {exc}", file=sys.stderr)
     # stdout carries protocol frames only: anything library code prints
     # goes to stderr instead.
     _OUT = sys.stdout
