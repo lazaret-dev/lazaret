@@ -31,12 +31,13 @@ lazaret/
 ├── examples/           lazaret-taint.example.json, mcp-config.json
 ├── .gitattributes      LF line endings everywhere (reproducible builds on Windows too)
 ├── scripts/            check-versions.sh, tag-release.sh, make_bundle.py,
-│                       make_typosquat_stubs.py, dashboard_csp.py
+│                       make_typosquat_stubs.py, dashboard_csp.py,
+│                       simulate-platforms.sh
 ├── python/             the PyPI package   (sections 3–4)
 └── js/                 the npm package    (section 5)
 ```
 
-`scripts/check-versions.sh [REF [TAG]]` fails if the Python and npm versions, or a release tag, disagree, so the two packages release in lockstep. Given a ref it reads both version files from that commit (`git show`), so it checks what a tag actually points at; with no ref it reads the working tree and refuses uncommitted changes to either version file. `scripts/tag-release.sh vX.Y.Z` is the only way to cut a tag: it refuses a dirty tree or a commit that isn't on `main`, runs the version check against the tag-to-be, creates an annotated tag, and prints the one-tag push command (see `docs/RELEASING.md`). `scripts/make_bundle.py` builds a source bundle of the repository (for sharing the repo itself, not for installing): only git-tracked files when `.git` exists, never credential files (`.env*`, `.npmrc`, `.pypirc`, `.netrc`, keys, …) or OS junk (`._*`, `.DS_Store`), and byte-for-byte reproducible. Use it (or `git archive`) rather than a plain `tar` of a working tree. `scripts/make_typosquat_stubs.py` builds the defensive stub packages described in `docs/RELEASING.md`; `--check` reports which stub names are still unclaimed. `scripts/dashboard_csp.py` recomputes the dashboard's script hash in its content-security policy (run it after editing the page's script).
+`scripts/check-versions.sh [REF [TAG]]` fails if the Python and npm versions, or a release tag, disagree, so the two packages release in lockstep. Given a ref it reads both version files from that commit (`git show`), so it checks what a tag actually points at; with no ref it reads the working tree and refuses uncommitted changes to either version file. `scripts/tag-release.sh vX.Y.Z` is the only way to cut a tag: it refuses a dirty tree or a commit that isn't on `main`, runs the version check against the tag-to-be, creates an annotated tag, and prints the one-tag push command (see `docs/RELEASING.md`). `scripts/make_bundle.py` builds a source bundle of the repository (for sharing the repo itself, not for installing): only git-tracked files when `.git` exists, never credential files (`.env*`, `.npmrc`, `.pypirc`, `.netrc`, keys, …) or OS junk (`._*`, `.DS_Store`), and byte-for-byte reproducible. Use it (or `git archive`) rather than a plain `tar` of a working tree. `scripts/make_typosquat_stubs.py` builds the defensive stub packages described in `docs/RELEASING.md`; `--check` reports which stub names are still unclaimed. `scripts/dashboard_csp.py` recomputes the dashboard's script hash in its content-security policy (run it after editing the page's script). `scripts/simulate-platforms.sh` runs the Python suite the ways Windows, macOS and a non-root CI runner would see it (section 4, "Cross-platform rules").
 
 ---
 
@@ -160,6 +161,29 @@ LAZARET_SAMPLES_DIR=../../lazaret-samples \
 ```
 
 pytest also runs the suite unchanged, for anyone who prefers it, but nothing requires it.
+
+### Cross-platform rules
+
+**Don't depend on the host's defaults.** Code and tests must behave the same on Linux, macOS and Windows, on every supported Python (and Node) version. Never rely on a platform or interpreter default for correctness; make it explicit.
+
+1. **Encoding.** Never assume stdio or file I/O is UTF-8.
+   - Every CLI (the four console scripts and every `scripts/*.py` with a `main()`) configures stdout/stderr at startup: redirected output is written as UTF-8 on every platform (Windows' ANSI code page and a bare C locale would otherwise break on `✓`), unless `PYTHONIOENCODING` says otherwise; nothing raises on a character a stream can't encode (`errors="replace"`).
+   - Protocols defined as UTF-8 set it explicitly: the MCP server reconfigures stdin/stdout to UTF-8.
+   - Text I/O names its encoding: `open(..., encoding="utf-8")` (plus `newline="\n"` when writing files whose bytes matter), `Path.read_text/write_text(encoding=...)`.
+   - Tests decode subprocess output explicitly: `encoding="utf-8", errors="replace"`, never a bare `text=True`.
+   - File names shown in output are the name's bytes read as UTF-8 (non-UTF-8 bytes as `\xNN` escapes), never whatever the host locale makes of them.
+2. **Paths.**
+   - Compare resolved paths (`os.path.realpath` on both sides): temp dirs may be symlinks (macOS `/var` → `/private/var`).
+   - Build paths with `os.path`/`pathlib`; never hard-code `/tmp/...` or treat `/` as the root; use `tempfile`. Compare relative paths separator-independently.
+   - Expect Windows-specific forms (`\\?\` prefixes, drive letters, another drive than the repo's for the temp dir).
+3. **Resources.** Close every file, archive, socket and DB connection before deleting what contains it (`with`, or close in `finally`/`addCleanup`). Windows can't delete an open file.
+4. **Line endings.** Treat `\r\n` as a line ending, not as data, when checking output (Windows' text-mode stdout writes `\r\n`). `.gitattributes` keeps checkouts LF.
+5. **OS capabilities.** A test that needs something a platform lacks (FIFOs, symlinks without privilege, control characters or non-UTF-8 bytes in file names, chmod-restricted dirs, a non-root user) skips with an explicit reason (`_support.require_fs_names()` for non-ASCII names). It never fails and never silently passes.
+6. **Interpreter drift.** Correctness must not depend on version-specific behavior (recursion/parser limits, error-message wording, `os.path` semantics). Enforce our own limits explicitly (e.g. the 500-level manifest depth); assert on types and codes, not on the interpreter's message text.
+
+`tests/architecture/test_portability.py` enforces what a machine can check: text I/O and subprocess decoding name an encoding, nothing asks the host for its encoding, every CLI configures stdio, the MCP server sets UTF-8, no hard-coded `/tmp`/`/var` paths.
+
+**Verification:** work isn't done until the full OS × Python-version matrix passes in CI. Before pushing, simulate what you can on Linux or macOS with `sh scripts/simulate-platforms.sh`: for every installed `python3.X` it runs the suite under a non-UTF-8 locale (Latin-1 if installed — `localedef -i en_US -f ISO-8859-1 en_US.ISO-8859-1` — else ASCII, standing in for Windows' code page), with `TMPDIR` behind a symlink (macOS), and, when run as root, as an unprivileged user (CI runners aren't root).
 
 ---
 
