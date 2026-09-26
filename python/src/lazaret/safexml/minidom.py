@@ -17,6 +17,7 @@ from xml.dom import expatbuilder as _expatbuilder  # lazaret-ignore: S-XML (this
 from . import pulldom as _pulldom
 from ._common import (
     LimitedReader,
+    NotSupportedError,
     Options,
     depth_exceeded,
     install_handlers,
@@ -28,6 +29,17 @@ __all__ = ["parse", "parseString", "SafeExpatBuilder", "SafeExpatBuilderNS"]
 
 class _SafeBuilderMixin:
     def __init__(self, options=None, *, safe: Options):
+        # An xml.dom.xmlbuilder filter makes the stdlib builder rewrite the
+        # Expat handlers while it parses: rejecting the DocumentType sets
+        # EntityDeclHandler to None (so with forbid_entities=True a declared
+        # entity parsed and expanded), a rejected element nulls
+        # ExternalEntityRefHandler for its subtree, and a rejected or skipped
+        # element is never ended in our depth count. The protections can't
+        # be kept under those rewrites, so filters are refused.
+        if options is not None and getattr(options, "filter", None) is not None:
+            raise NotSupportedError(
+                "xml.dom.xmlbuilder filters are not supported by the safe minidom builders "
+                "(the stdlib builder replaces the protective Expat handlers while filtering)")
         self._safe = safe
         super().__init__(options)
 

@@ -395,6 +395,7 @@ Options and exception names match defusedxml (`forbid_dtd`, `forbid_entities`, `
 Differences from defusedxml:
 - It adds `max_depth`, `max_bytes` and `max_attlist_defaults`, and XML-RPC `ServerProxy`/`Transport` classes, in addition to the global `xmlrpc.monkey_patch()`.
 - minidom's `Text.isWhitespaceInElementContent` is always False, because content models are not converted.
+- The minidom builder classes (`SafeExpatBuilder`, `SafeExpatBuilderNS`) refuse `xml.dom.xmlbuilder.Options` with a `filter` (`NotSupportedError`): while it filters, the stdlib builder replaces the handlers that enforce the protections.
 - `forbid_entities=False` is only allowed when the Python's libexpat is 2.4.1 or later, whose built-in amplification limit still stops entity bombs. Otherwise it raises `NotSupportedError`.
 - The stdlib SAX reader asks for external DTDs, so defusedxml's SAX API rejects documents that merely reference one. Here every API behaves the same way: the reference is ignored and nothing is loaded.
 - It has no lxml support and no global `defuse_stdlib()` patching.
