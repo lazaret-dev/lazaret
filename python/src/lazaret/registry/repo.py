@@ -125,7 +125,9 @@ class SpecError(ValueError):
 
 
 class FetchError(ValueError):
-    """A fetch was refused (bad scheme/host) or exceeded a size budget."""
+    """A fetch was refused (bad scheme/host) or exceeded a size budget.
+    `status` is the HTTP status when the server answered with an error."""
+    status = None
 
 
 class DigestError(ValueError):
@@ -263,12 +265,15 @@ class _RegistryOpener(urllib.request.HTTPRedirectHandler):
 _OPENER = urllib.request.build_opener(_RegistryOpener)
 
 
-def _fetch(url, max_bytes=MAX_DOWNLOAD_BYTES, timeout=DOWNLOAD_TIMEOUT):
+def _fetch(url, max_bytes=MAX_DOWNLOAD_BYTES, timeout=DOWNLOAD_TIMEOUT, accept=None):
     """Validated, byte-budgeted fetch (F10 + F9a). Reads in bounded chunks so
     a hostile server cannot OOM the scanner with an unbounded stream (a 300MB
     response previously pinned ~714MB RSS via bare r.read())."""
     _validated_url(url)
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    headers = {"User-Agent": USER_AGENT}
+    if accept:
+        headers["Accept"] = accept
+    req = urllib.request.Request(url, headers=headers)
     try:
         with _OPENER.open(req, timeout=timeout) as r:
             buf = bytearray()
@@ -282,15 +287,18 @@ def _fetch(url, max_bytes=MAX_DOWNLOAD_BYTES, timeout=DOWNLOAD_TIMEOUT):
                         f"response exceeds {max_bytes // (1024 * 1024)}MB budget: {url}")
             return bytes(buf)
     except urllib.error.HTTPError as exc:
-        raise FetchError(f"HTTP {exc.code} fetching {url}") from exc
+        err = FetchError(f"HTTP {exc.code} fetching {url}")
+        err.status = exc.code
+        raise err from exc
     except urllib.error.URLError as exc:
         raise FetchError(f"URL error fetching {url}: {exc.reason}") from exc
     except OSError as exc:                     # includes socket timeouts
         raise FetchError(f"network error fetching {url}: {exc}") from exc
 
 
-def http_json(url):
-    raw = _fetch(url, max_bytes=MAX_FEED_BYTES, timeout=METADATA_TIMEOUT)
+def http_json(url, accept=None):
+    extra = {"accept": accept} if accept else {}
+    raw = _fetch(url, max_bytes=MAX_FEED_BYTES, timeout=METADATA_TIMEOUT, **extra)
     return _deep_safe_loads(raw, f"registry response from {url}")
 
 
@@ -2446,11 +2454,12 @@ def _feed_token_ok(value):
     return value is not None and NAME_RE.fullmatch(value) is not None
 
 
-def discover_pypi(cutoff, limit):
+def discover_pypi(cutoff, limit, notes=None):
     """Recently created + updated PyPI projects via the RSS feeds (timestamped,
-    bounded to the most recent ~100 entries per feed)."""
+    bounded to the most recent ~100 entries per feed). A feed that can't be
+    read is a warning, and notes["pypi"] says what was missed."""
     import email.utils
-    found = {}
+    found, failed = {}, []
     for feed in ("https://pypi.org/rss/packages.xml", "https://pypi.org/rss/updates.xml"):
         try:
             # metadata budget (5 MB) and timeout, not the 200 MB artifact budget
@@ -2460,6 +2469,7 @@ def discover_pypi(cutoff, limit):
             # the network response; `feed` is a constant URL.
             print(f"warning: PyPI feed {feed} failed: "
                   f"{lazaret.sanitize_term(exc)}", file=sys.stderr)
+            failed.append(feed.rsplit("/", 1)[-1])
             continue
         try:
             root = _parse_xml(raw)
@@ -2467,6 +2477,7 @@ def discover_pypi(cutoff, limit):
             # audit H1: an XML ParseError echoes bytes from the hostile feed.
             print(f"warning: PyPI feed {feed} rejected "
                   f"({lazaret.sanitize_term(exc)}).", file=sys.stderr)
+            failed.append(feed.rsplit("/", 1)[-1])
             continue
         for item in root.findall(".//item"):
             title = (item.findtext("title") or "").strip()
@@ -2491,85 +2502,164 @@ def discover_pypi(cutoff, limit):
                 version = None
             if name not in found or when > found[name][3]:
                 found[name] = ("pypi", name, version, when)
+    if failed and notes is not None:
+        notes["pypi"] = ("not checked: both RSS feeds failed" if len(failed) == 2
+                         else f"partly checked: the {failed[0]} feed failed")
     out = sorted(found.values(), key=lambda x: x[3], reverse=True)
     return out[:limit] if limit else out
 
 
-def discover_npm(cutoff, limit):
-    """Recently updated npm packages via the replication _changes feed. Best-effort:
-    the feed requires network access to replicate.npmjs.com; on failure npm
-    discovery is skipped with a warning rather than aborting the run. Rows of
-    an unexpected shape, and names npm itself would not accept, are skipped."""
-    want = (limit or 100) * 3
-    url = (f"https://replicate.npmjs.com/_changes?descending=true"
-           f"&include_docs=true&limit={want}")
-    try:
-        data = http_json(url)
-    except Exception as exc:                                       # noqa: BLE001
-        # audit H1: the npm _changes feed is network-controlled; the exception
-        # text can echo bytes of the hostile response (URLError reason, JSON
-        # parse position). Sanitize before it reaches a terminal/CI log.
-        print(f"warning: npm changes feed unavailable "
-              f"({lazaret.sanitize_term(exc)}); npm discovery skipped "
-              f"(needs access to replicate.npmjs.com).", file=sys.stderr)
-        return []
+# npm's replication API (changed 2025: new endpoints from 2025-03-18, the old
+# ones retired 2025-05-29) accepts only doc_ids, descending, last-event-id,
+# limit (max 10000) and since on _changes. include_docs is gone: a row is a
+# sequence number, a package name and a revision, with no time and no
+# metadata, so each package's publish time and latest version come from the
+# registry itself (the abbreviated "corgi" document: name, dist-tags,
+# versions, modified).
+NPM_CHANGES_URL = "https://replicate.npmjs.com/registry/_changes"
+NPM_CHANGES_MAX = 10000
+NPM_ABBREVIATED = "application/vnd.npm.install-v1+json"
+NPM_LOOKUP_WORKERS = 8
+# Feed rows are newest first. After this many packages in a row modified
+# before the window, the rest of the feed is older too: stop looking up.
+NPM_OLDER_STOP = 5
+
+
+def _npm_feed_names(want):
+    """-> (package names, newest first, each once; count of names npm would
+    reject). Raises FetchError / FeedError when the feed can't be read."""
+    data = http_json(f"{NPM_CHANGES_URL}?descending=true&limit={want}")
     results = data.get("results") if isinstance(data, dict) else None
     if not isinstance(results, list):
-        print("warning: npm changes feed has an unexpected shape; npm discovery skipped.",
-              file=sys.stderr)
-        return []
-    out, rejected = {}, 0
+        raise FeedError("npm changes feed has an unexpected shape")
+    names, seen, rejected = [], set(), 0
     for row in results:
-        if not isinstance(row, dict):
-            continue
-        doc = row.get("doc") if isinstance(row.get("doc"), dict) else {}
-        name = doc.get("name") if isinstance(doc.get("name"), str) else row.get("id")
-        if not isinstance(name, str) or not name or name.startswith("_"):
-            continue
+        if not isinstance(row, dict) or row.get("deleted") is True:
+            continue                                  # unpublished: nothing to scan
+        name = row.get("id")
+        if not isinstance(name, str) or not name or name.startswith("_") or name in seen:
+            continue                                  # design documents, repeats
+        seen.add(name)
         if not valid_name("npm", name):
-            rejected += 1
+            rejected += 1                             # G14: feed names drive downloads
             continue
-        times = doc.get("time") if isinstance(doc.get("time"), dict) else {}
-        modified = times.get("modified")
-        when = None
-        if isinstance(modified, str):
-            try:
-                # G13: 'Z' suffix makes fromisoformat produce aware datetimes on
-                # Python < 3.11; force every parse to UTC-aware either way so
-                # the cutoff comparison never hits naive-vs-aware TypeError.
-                when = _to_utc(datetime.datetime.fromisoformat(
-                    modified.replace("Z", "+00:00")))
-            except ValueError:
-                when = None
-        if when is None or when < cutoff:
-            continue
-        tags = doc.get("dist-tags") if isinstance(doc.get("dist-tags"), dict) else {}
-        version = tags.get("latest") if isinstance(tags.get("latest"), str) else None
-        if version is not None and not _feed_token_ok(version):
-            version = None
-        if name not in out or when > out[name][3]:
-            out[name] = ("npm", name, version, when)
+        names.append(name)
+    return names, rejected
+
+
+def _npm_recent(name):
+    """-> (datetime modified, latest version or None) for one package, from its
+    abbreviated registry document. Raises on any failure."""
+    doc = http_json("https://registry.npmjs.org/" + urllib.parse.quote(name, safe="@"),
+                    accept=NPM_ABBREVIATED)
+    if not isinstance(doc, dict) or not isinstance(doc.get("modified"), str):
+        raise FeedError("no modified time")
+    # G13: always UTC-aware, so the cutoff comparison never mixes naive/aware
+    when = _to_utc(datetime.datetime.fromisoformat(doc["modified"].replace("Z", "+00:00")))
+    tags = doc.get("dist-tags") if isinstance(doc.get("dist-tags"), dict) else {}
+    version = tags.get("latest") if isinstance(tags.get("latest"), str) else None
+    if version is not None and not _feed_token_ok(version):
+        version = None
+    return when, version
+
+
+def _npm_feed_problem(exc):
+    if getattr(exc, "status", None):
+        return (f"npm rejected the changes-feed request (HTTP {exc.status}"
+                + ("; its replication API may have changed" if exc.status in (400, 404, 410) else "")
+                + ")")
+    if isinstance(exc, FeedError):
+        return str(exc)
+    return f"could not reach replicate.npmjs.com ({exc})"
+
+
+def discover_npm(cutoff, limit, notes=None):
+    """Recently published or updated npm packages: the newest names from npm's
+    replication _changes feed, each checked against the window with one small
+    registry lookup (8 at a time), newest first, until `limit` are found or the
+    feed falls behind the window.
+
+    Best-effort per package, fail-visible per ecosystem: when the feed itself
+    can't be read, npm is skipped with a warning and notes["npm"] says so (the
+    CLI's --ci then fails the run: a hunting job must not pass while checking
+    nothing). A package whose registry lookup fails is still listed, because
+    the feed says it just changed: its time is the nearest older time the walk
+    saw (or the window start), and it is counted in a warning."""
+    import concurrent.futures
+    want = min((limit or 100) * 3, NPM_CHANGES_MAX)
+    try:
+        names, rejected = _npm_feed_names(want)
+    except (FetchError, FeedError) as exc:
+        # audit H1: the exception text can echo bytes of the network response.
+        problem = lazaret.sanitize_term(_npm_feed_problem(exc))
+        print(f"warning: {problem}; npm was not checked.", file=sys.stderr)
+        if notes is not None:
+            notes["npm"] = f"not checked: {problem}"
+        return []
     if rejected:
         print(f"warning: skipped {rejected} npm feed name(s) that are not valid package names.",
               file=sys.stderr)
-    res = sorted(out.values(), key=lambda x: x[3], reverse=True)
+    rows, older_run, unknown = [], 0, 0          # rows: [name, when or None, version]
+    batch = NPM_LOOKUP_WORKERS * 2
+    with concurrent.futures.ThreadPoolExecutor(NPM_LOOKUP_WORKERS) as pool:
+        for i in range(0, len(names), batch):
+            chunk = names[i:i + batch]
+            futures = [pool.submit(_npm_recent, n) for n in chunk]
+            done = False
+            for name, fut in zip(chunk, futures):
+                try:
+                    when, version = fut.result()
+                except Exception:                                  # noqa: BLE001
+                    rows.append([name, None, None])
+                    unknown += 1
+                    continue
+                if when < cutoff:
+                    older_run += 1
+                    if older_run >= NPM_OLDER_STOP:
+                        done = True
+                        break
+                    continue
+                older_run = 0
+                rows.append([name, when, version])
+                if limit and len(rows) >= limit:
+                    done = True
+                    break
+            if done:
+                break
+    # a failed lookup sits between known times in feed order: give it the
+    # nearest older known time (a lower bound), or the window start
+    floor = cutoff
+    for row in reversed(rows):
+        if row[1] is None:
+            row[1] = floor
+        else:
+            floor = row[1]
+    if unknown:
+        print(f"warning: could not read the registry entry of {unknown} npm package(s); "
+              f"they are listed with a time estimated from the feed order.", file=sys.stderr)
+    res = [("npm", name, version, when) for name, when, version in rows]
+    res.sort(key=lambda x: x[3], reverse=True)
     return res[:limit] if limit else res
 
 
 def cmd_discover(store, args):
     cutoff = parse_since(args.since)
     ecos = args.ecosystem or ["pypi", "npm"]
-    discovered = []
+    discovered, notes = [], {}
     if "pypi" in ecos:
-        discovered += discover_pypi(cutoff, args.limit)
+        discovered += discover_pypi(cutoff, args.limit, notes)
     if "npm" in ecos:
-        discovered += discover_npm(cutoff, args.limit)
+        discovered += discover_npm(cutoff, args.limit, notes)
     discovered.sort(key=lambda x: x[3], reverse=True)
     if args.limit:
         discovered = discovered[:args.limit]
     if not discovered:
-        print(f"No packages published/updated since {cutoff.isoformat()} in {', '.join(ecos)}.")
-        return False
+        checked = [e for e in ecos if not notes.get(e, "").startswith("not checked")]
+        if checked:
+            print(f"No packages published/updated since {cutoff.isoformat()} in {', '.join(checked)}.")
+        else:
+            print("Nothing was checked.")
+        return _report_discovery_gaps(ecos, notes)
     print(f"\nDiscovered {len(discovered)} package(s) since {cutoff.strftime('%Y-%m-%d %H:%M')} UTC:")
     for eco, name, ver, when in discovered:
         # audit H1: discovery-feed name/version are raw feed text. Sanitize
@@ -2596,8 +2686,19 @@ def cmd_discover(store, args):
         specs = [f"{eco}:{name}" + (f"@{ver}" if ver else "")
                  for eco, name, ver, _ in discovered]
         print(f"\nScanning {len(specs)} discovered package(s)…")
-        return cmd_scan(store, specs, args.full, args.rescan, errors=errors)
-    return False
+        bad = cmd_scan(store, specs, args.full, args.rescan, errors=errors)
+        return _report_discovery_gaps(ecos, notes) or bad
+    return _report_discovery_gaps(ecos, notes)
+
+
+def _report_discovery_gaps(ecos, notes):
+    """At the end of discover: one stderr line per registry that was not
+    (fully) checked; True if any. The CLI's --ci fails such a run, like an
+    INCOMPLETE scan: a scheduled hunt must not pass while checking nothing."""
+    for eco in ecos:
+        if eco in notes:
+            print(f"warning: discovery incomplete: {eco} {notes[eco]}.", file=sys.stderr)
+    return any(eco in notes for eco in ecos)
 
 
 BAD_VERDICTS = ("SUSPICIOUS", "INCOMPLETE")

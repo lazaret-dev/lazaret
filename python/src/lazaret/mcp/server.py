@@ -136,7 +136,10 @@ TOOLS = [
         "name": "discover_packages",
         "description": ("Find npm/PyPI packages newly published or updated within a recent time "
                         "window (supply-chain threat hunting). Optionally scans them. PyPI uses "
-                        "timestamped RSS feeds; npm uses the replication changes feed (best-effort)."),
+                        "timestamped RSS feeds; npm uses the replication changes feed plus one "
+                        "registry lookup per package. A registry that could not be checked makes "
+                        "the result incomplete (incomplete / incompleteReason), so an empty list "
+                        "never stands in for one that was not checked."),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -532,16 +535,22 @@ def tool_discover_packages(args):
         limit = min(int(args.get("limit") or 25), 50)
     except (TypeError, ValueError):
         raise ValueError("limit must be an integer") from None
-    discovered = []
+    discovered, notes = [], {}
     if "pypi" in ecos:
-        discovered += lazaret_repo.discover_pypi(cutoff, limit)
+        discovered += lazaret_repo.discover_pypi(cutoff, limit, notes)
     if "npm" in ecos:
-        discovered += lazaret_repo.discover_npm(cutoff, limit)
+        discovered += lazaret_repo.discover_npm(cutoff, limit, notes)
     discovered.sort(key=lambda x: x[3], reverse=True)
     discovered = discovered[:limit]
     out = {"since": cutoff.isoformat(), "count": len(discovered),
            "packages": [{"ecosystem": e, "name": n, "version": v, "when": w.isoformat()}
                         for e, n, v, w in discovered]}
+    # a registry that could not be (fully) checked makes the call incomplete:
+    # "0 packages" must not read as "nothing new was published"
+    gaps = [f"{e} {notes[e]}" for e in ecos if e in notes]
+    if gaps:
+        out["incomplete"] = True
+        out["incompleteReason"] = "; ".join(gaps)
     if args.get("scan"):
         with lazaret_repo.Store(REGISTRY_DB) as store:
             results, reasons = [], []
@@ -590,7 +599,7 @@ def tool_discover_packages(args):
                           if r.get("verdict") in ("WARN", "INCOMPLETE", "SUSPICIOUS")]
         if reasons:
             out["incomplete"] = True
-            out["incompleteReason"] = "; ".join(reasons)
+            out["incompleteReason"] = "; ".join(gaps + reasons)
     return out
 
 
