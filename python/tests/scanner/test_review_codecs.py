@@ -76,7 +76,8 @@ class GeneratedTablesTests(unittest.TestCase):
 
     def test_resolution_is_the_same_on_every_python(self):
         for name, codec in (("windows-874", "cp874"), ("MS874", "cp874"), ("windows_31j", "cp932"),
-                            ("csEUCKR", "euc_kr"), ("ISO-8859-8-I", "iso8859-8"), ("mbcs", None),
+                            ("csEUCKR", "euc_kr"), ("ISO-8859-8-I", "iso8859-8"), ("cp01140", "cp1140"),
+                            ("IBM00858", "cp858"), ("mbcs", None),
                             ("dbcs", None), ("oem", None)):
             with self.subTest(name=name):
                 self.assertEqual(core._normal_codec(name), codec)

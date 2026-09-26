@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-jQRjBmfRsEpLj9MbbDBXLN5bVbssw+ezgI1vnLzCfQI='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-iMM4lQi1wrjLoIqkjtkALnY41l2yNwJUGqEiZzoH320='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
 <title>Lazaret — Security &amp; Quality Review</title>
 <style>
   :root{
@@ -444,7 +444,7 @@ const PY_CODEC_ALIASES = {
   "cp1006": ["cp1006"],
   "cp1026": ["1026", "cp1026", "csibm1026", "ibm1026"],
   "cp1125": ["1125", "cp1125", "cp866u", "ibm1125", "ruscii"],
-  "cp1140": ["1140", "cp1140", "ibm1140"],
+  "cp1140": ["1140", "cp01140", "cp1140", "csibm01140", "ebcdic_us_37_euro", "ibm01140", "ibm1140"],
   "cp1250": ["1250", "cp1250", "windows_1250"],
   "cp1251": ["1251", "cp1251", "windows_1251"],
   "cp1252": ["1252", "cp1252", "windows_1252"],
@@ -466,7 +466,7 @@ const PY_CODEC_ALIASES = {
   "cp855": ["855", "cp855", "csibm855", "ibm855"],
   "cp856": ["cp856"],
   "cp857": ["857", "cp857", "csibm857", "ibm857"],
-  "cp858": ["858", "cp858", "csibm858", "ibm858"],
+  "cp858": ["858", "cp00858", "cp858", "csibm00858", "csibm858", "ibm00858", "ibm858", "pc_multilingual_850_euro"],
   "cp860": ["860", "cp860", "csibm860", "ibm860"],
   "cp861": ["861", "cp861", "cp_is", "csibm861", "ibm861"],
   "cp862": ["862", "cp862", "cspc862latinhebrew", "ibm862"],

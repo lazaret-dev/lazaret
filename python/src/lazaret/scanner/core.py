@@ -4753,7 +4753,11 @@ def _python_cookie(data):
 #: (normalized as encodings.normalize_encoding does, on the lower-cased name).
 CODEC_ALIAS_EXTRAS = {"windows_31j": "cp932", "874": "cp874", "ms874": "cp874",
                       "windows_874": "cp874", "cseuckr": "euc_kr",
-                      "iso_8859_8_e": "iso8859-8", "iso_8859_8_i": "iso8859-8"}
+                      "iso_8859_8_e": "iso8859-8", "iso_8859_8_i": "iso8859-8",
+                      # 3.14.x patch releases (3.14.7 has them, 3.14.0 does not)
+                      "cp01140": "cp1140", "csibm01140": "cp1140", "ibm01140": "cp1140",
+                      "ebcdic_us_37_euro": "cp1140", "cp00858": "cp858", "csibm00858": "cp858",
+                      "ibm00858": "cp858", "pc_multilingual_850_euro": "cp858"}
 #: Codecs that decode with the host's code page (Windows only): unknown here.
 HOST_CODECS = frozenset(("mbcs", "oem"))
 #: Single-byte tables that differ between supported Pythons, as the newest has
