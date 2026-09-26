@@ -3878,7 +3878,8 @@ def _load_manifest(path, content, python_literal=False, locate=None):
     return data, [], where
 
 
-_JSON_TOKEN_RE = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"|[{}]', re.S)
+# (named apart from _script_key_lines's _JSON_TOKEN_RE, which shadowed it)
+_JSON_OBJ_TOKEN_RE = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"|[{}]', re.S)
 _JSON_COLON_RE = re.compile(r"[ \t\n\r]*:")
 
 
@@ -3888,7 +3889,7 @@ def _json_key_offsets(text, built, key):
     the objects close, and in valid JSON the keys are exactly the strings
     followed by ':'."""
     objects, stack = [], []
-    for m in _JSON_TOKEN_RE.finditer(text):
+    for m in _JSON_OBJ_TOKEN_RE.finditer(text):
         c = text[m.start()]
         if c == "{":
             stack.append([])
@@ -4146,6 +4147,143 @@ def hook_script_targets(cmd):
             seen.add(t)
             out.append(t)
     return out
+
+
+# ---------------- Install-script and import-time inspection ----------------
+# (The registry's tests, here so that --deps project scans run them too.)
+# An install hook is a capability; what makes it hostile is what the script it
+# runs does. Escalate only on the patterns malicious install scripts share:
+# shipping environment/credential data over the network, or talking to
+# throwaway exfiltration endpoints. Downloading a platform binary from the
+# registry (esbuild, puppeteer) is not either. The same test applies to the
+# Python code pip runs at install time (an sdist's setup.py, an in-tree PEP 517
+# backend) and to shell scripts a hook runs.
+_NETWORK_RE = re.compile(
+    r"""\b(?:https?\.(?:get|request)|fetch\s*\(|axios|XMLHttpRequest|net\.connect|dns\.resolve|"""
+    r"""require\(\s*["'](?:node:)?(?:https?|net|dgram|tls)["']\s*\)|"""
+    r"""from\s+["'](?:node:)?(?:https?|net|dgram|tls)["'])"""
+    # Python
+    r"""|\burllib\.request\b|\burlopen\s*\(|\burlretrieve\s*\(|\bhttp\.client\b|"""
+    r"""\bHTTPS?Connection\s*\(|\bsocket\.(?:socket|create_connection)\s*\(|"""
+    r"""\brequests\.(?:get|post|put|patch|request|Session)\b|\bimport\s+(?:requests|httpx|aiohttp|urllib3)\b|"""
+    r"""\bfrom\s+(?:requests|httpx|aiohttp|urllib3|urllib\.request|http\.client)\s+import\b|"""
+    r"""\bhttpx\.\w+\s*\(|\baiohttp\.ClientSession\b|\bsmtplib\b|\bftplib\b"""
+    # shell: a download tool pointed at a URL, netcat to a host and port, bash's /dev/tcp.
+    # Each option is parsed one way only (a value never starts like an option
+    # or the URL) and their number is bounded: the old `(?:-{1,2}[\w-]+(?:[ =]
+    # \S+)?\s+)*` could split `--a-b` and pair values two ways, so 18 options
+    # took over 20 s, and `curl -a ` x 20000 was quadratic — a hostile install
+    # script could hang the scan.
+    r"""|\b(?:curl|wget)\s+(?:-{1,2}\w[\w-]*(?:=\S*|\s+(?!-{1,2}\w)(?!["']?https?:)\S+)?\s+){0,24}"""
+    r"""["']?https?://"""
+    r"""|\b(?:nc|ncat|netcat)\s+(?:-\w+\s+){0,8}[\w.-]+\s+\d{2,5}\b|/dev/tcp/""", re.M)
+_SECRET_SOURCE_RE = re.compile(
+    r"""JSON\.stringify\(\s*process\.env|Object\.(?:keys|entries|values)\(\s*process\.env|"""
+    r"""\.npmrc|[/\\]\.ssh\b|~/\.ssh\b|id_rsa|id_ed25519|\.aws[/\\]|~/\.aws\b|\.git-credentials|"""
+    r"""\.docker[/\\]config\.json|\.kube[/\\]config|Local Storage[/\\]leveldb|\.pypirc|\.netrc\b|"""
+    # Python: the whole environment, not one variable
+    r"""\bdict\(\s*os\.environ\s*\)|\bos\.environ\.(?:items|keys|values|copy)\(\s*\)|"""
+    r"""json\.dumps\(\s*(?:dict\(\s*)?os\.environ|\b(?:str|repr)\(\s*os\.environ\s*\)|"""
+    r"""\{\s*\*\*\s*os\.environ|\burlencode\(\s*(?:dict\(\s*)?os\.environ|\bos\.environb\b"""
+    # shell: the whole environment piped or redirected somewhere
+    r"""|(?:^|[\s;&(`])(?:env|printenv|set)\s*(?:\|(?!\|)|>)|\$\(\s*(?:env|printenv)\s*\)|`\s*(?:env|printenv)\s*`""",
+    re.I | re.M)
+_EXFIL_SERVICES = (
+    r"""pastebin\.com|\bngrok|webhook\.site|"""
+    r"""discord(?:app)?\.com/api/webhooks|api\.telegram\.org|oastify\.com|burpcollaborator|"""
+    r"""\binteract\.sh|\boast\.(?:pro|live|site|online|fun|me)\b|requestbin|pipedream\.net|"""
+    r"""transfer\.sh|\.onion\b""")
+_EXFIL_DEST_RE = re.compile(r"""https?://(?:\d{1,3}\.){3}\d{1,3}\b|""" + _EXFIL_SERVICES, re.I)
+_EXFIL_SERVICE_RE = re.compile(_EXFIL_SERVICES, re.I)      # the named ones, no raw IPs
+# `curl … | sh` / `wget … | bash`, read in one left-to-right pass: a pipe into
+# a shell after curl or wget in the same command (no `|`, `;`, `&` or line
+# break between them). The regex it replaces, `\b(?:curl|wget)\b[^\n|;&]*\|…`,
+# rescanned the rest of the command from every `curl`, so a line of 100,000
+# of them never finished.
+_PIPE_SCAN_RE = re.compile(r"""\|\s*(?:sudo\s+)?(?:ba|z|da|k)?sh\b|[\n|;&]|\b(?:curl|wget)\b""")
+
+
+def _pipes_download_to_shell(text):
+    download = False
+    for m in _PIPE_SCAN_RE.finditer(text):
+        token = m.group(0)
+        if token[0] == "|" and len(token) > 1:           # | sh, | sudo bash
+            if download:
+                return True
+            download = False
+        elif token in ("\n", "|", ";", "&"):
+            download = False
+        else:                                            # curl / wget
+            download = True
+    return False
+
+
+def install_script_risk(text):
+    """Reasons an install-time script looks hostile ([] if none)."""
+    reasons = []
+    network = bool(_NETWORK_RE.search(text))
+    if network and _SECRET_SOURCE_RE.search(text):
+        reasons.append("reads environment variables or credential files and sends data over the network")
+    dest = _EXFIL_DEST_RE.search(text)
+    if dest:
+        reasons.append(f"contacts an address typical of data exfiltration ({dest.group(0)[:40]})")
+    if _pipes_download_to_shell(text):
+        reasons.append("pipes a download into a shell")
+    return reasons
+
+
+# ---------------- Import-time inspection ----------------
+# Code that runs when a package is loaded — what an npm package's main, bin
+# and exports reach, a wheel's top-level packages and modules — gets a weaker
+# version of the install-script test: a MAJOR finding (a weak indicator,
+# WARN), never CRITICAL, and only on shapes ordinary SDKs don't share.
+# Harvesting means the whole environment serialized, or a credential store
+# read (SSH private keys, git credentials, browser local storage): reading
+# the variables it needs, or listing them (Object.keys(process.env),
+# os.environ.copy() for a subprocess), is everyday SDK and CLI code, and so
+# is reading a tool's own config (.npmrc, .pypirc, .netrc, ~/.aws: npm
+# clients, setuptools, distlib and cloud SDKs do, next to their network
+# code — .pypirc alone fired on 5 of 12,278 installed modules). It counts
+# only next to a network call or a named exfiltration service in the same
+# file. An address alone never counts: cloud SDKs read 169.254.169.254, and
+# Telegram, ngrok or pastebin clients name their own service. A download piped
+# into a shell counts only on a line that hands it to an exec call (a CLI's
+# help text often shows `curl … | sh`).
+_IMPORT_HARVEST_RE = re.compile(
+    r"""JSON\.stringify\(\s*process\.env\s*[,)]|"""
+    r"""\bjson\.dumps\(\s*(?:dict\(\s*)?os\.environ\s*[,)]|\b(?:str|repr)\(\s*os\.environ\s*\)|"""
+    r"""\burlencode\(\s*(?:dict\(\s*)?os\.environ\s*[,)]|"""
+    r"""[/\\]\.ssh[/\\]id_|\bid_(?:rsa|ed25519|ecdsa|dsa)\b(?!\.pub)|\.git-credentials|"""
+    r"""(?i:Local Storage)[/\\]leveldb""")
+_EXEC_CALL_RE = re.compile(
+    r"""\b(?:execSync|exec|execFileSync|execFile|spawnSync|spawn|system|popen|Popen|run|call|"""
+    r"""check_call|check_output|getoutput|getstatusoutput)\s*\(""")
+
+
+def import_time_risk(text):
+    """-> (reasons, line): why code that runs on import looks hostile by
+    the weaker test above ([] if not), and the 1-based line of the first
+    sign. `text` has \\n line endings."""
+    reasons, line = [], None
+    harvest = _IMPORT_HARVEST_RE.search(text)
+    if harvest and (_NETWORK_RE.search(text) or _EXFIL_SERVICE_RE.search(text)):
+        reasons.append("reads credentials or the whole environment and sends data over the network")
+        line = text.count("\n", 0, harvest.start()) + 1
+    if "curl" in text or "wget" in text:
+        for i, row in enumerate(text.split("\n")):
+            if ("curl" in row or "wget" in row) and _EXEC_CALL_RE.search(row) \
+                    and _pipes_download_to_shell(row):
+                reasons.append("runs a downloaded script through a shell")
+                line = line or i + 1
+                break
+    return reasons, line
+
+
+def node_candidates(rel):
+    """Files Node tries for a path it is asked to run or load."""
+    rel = rel.rstrip("/")
+    return [rel, rel + ".js", rel + ".cjs", rel + ".mjs", rel + ".json", rel + ".node",
+            rel + "/index.js", rel + "/index.cjs", rel + "/index.mjs", rel + "/index.json"]
 
 
 _JSON_TOKEN_RE = re.compile(r'"(?:[^"\\]|\\.)*"|[{}\[\],:]')
