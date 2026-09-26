@@ -62,8 +62,7 @@ run() {  # label, command...
     failed=1
     echo "FAIL"
     detail=$(printf '%s\n' "$out" | grep -E '^(FAIL|ERROR):|^Ran |^FAILED')
-    # no test summary: the run itself failed (e.g. the interpreter lives under
-    # /root, which the unprivileged user can't read) - show why
+    # no test summary: the run itself failed - show why
     [ -n "$detail" ] || detail=$(printf '%s\n' "$out" | tail -n 5)
     printf '%s\n' "$detail" | sed 's/^/    /'
   fi
@@ -74,6 +73,11 @@ for py in $pythons; do
     env LC_ALL="$winloc" LANG="$winloc" PYTHONUTF8=0 PYTHONCOERCECLOCALE=0 PYTHONIOENCODING= "$py"
   run "$py macos-like (symlinked TMPDIR)" env TMPDIR="$work/link" "$py"
   if [ "$(id -u)" = 0 ] && command -v runuser >/dev/null 2>&1; then
+    if ! runuser -u nobody -- env "$py" -c "" >/dev/null 2>&1; then
+      # e.g. an interpreter installed only under /root (uv, pyenv): not a test failure
+      printf '%-34s skip (the unprivileged user cannot run %s)\n' "$py non-root" "$py"
+      continue
+    fi
     copy="$work/nonroot"
     rm -rf "$copy" && cp -R .. "$copy" && chown -R nobody "$copy" "$work/real" 2>/dev/null
     run "$py non-root" sh -c "cd '$copy/python' && exec runuser -u nobody -- env HOME='$copy' PYTHONDONTWRITEBYTECODE=1 \"\$0\" \"\$@\"" "$py"
