@@ -3653,7 +3653,7 @@ NPM_LOCAL_INSTALL_SCRIPTS = NPM_INSTALL_SCRIPTS + NPM_PREPARE_SCRIPTS
 NPM_LIFECYCLE_SCRIPTS = NPM_LOCAL_INSTALL_SCRIPTS   # backwards-compatible name
 PY_LIFECYCLE_SECTIONS = ("build-system", "tool.poetry", "project")
 
-def _sc_install_hook_issue(path, line_no, lines, script, cmd, suspicious, sev=None, ctx=None):
+def _sc_install_hook_issue(path, line_no, lines, script, cmd, suspicious, sev=None, redactor=None):
     sev = sev or ("CRITICAL" if suspicious else "MAJOR")
     if suspicious:
         msg = f'"{script}" script runs a network-fetch/eval command at install time.'
@@ -3674,7 +3674,7 @@ def _sc_install_hook_issue(path, line_no, lines, script, cmd, suspicious, sev=No
         {"id": "SC-INSTALL-HOOK", "name": "Install hook", "type": "HOTSPOT",
          "sev": sev, "msg": msg, "why": why,
          "fix": f"Review the {script} script; use --ignore-scripts in CI if unneeded.",
-         "ref": "CWE-506 · Supply chain"}, path, line_no, lines, ctx=ctx)
+         "ref": "CWE-506 · Supply chain"}, path, line_no, lines, redactor=redactor)
     issue["cmd"] = cmd   # lets the registry follow the hook to the script it runs
     return issue
 
