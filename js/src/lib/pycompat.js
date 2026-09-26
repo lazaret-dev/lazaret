@@ -17,6 +17,42 @@ const WS = "\\t\\n\\v\\f\\r\\x1c-\\x20\\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u
 export const WORD_CLASS = `[${W}]`;
 const BOUNDARY = `(?:(?<=[${W}])(?![${W}])|(?<![${W}])(?=[${W}]))`;
 const NOT_BOUNDARY = `(?:(?<=[${W}])(?=[${W}])|(?<![${W}])(?![${W}]))`;
+// `\b` right before a literal word character can only be the start of a
+// word, so it is just "no word character before": the same matches, and V8
+// no longer tries two lookarounds at every position of the input
+// (SECRET_SKIP_RE over an 8 MB bundle: 7.1 s -> 0.1 s). The same holds
+// before a `(?:…)` group whose every alternative starts with one. Not when
+// the literal or the group may occur zero times (`\ba?`, `\b(?:a|b)*`).
+const WORD_START = `(?<![${W}])`;
+const WORD_LITERAL_RE = /[A-Za-z0-9_]/;
+const OPTIONAL_RE = /[?*{]/;
+/** Does the pattern at src[j] start with a word character in every match? */
+function startsWithWordChar(src, j) {
+  if (WORD_LITERAL_RE.test(src[j] ?? "")) return !OPTIONAL_RE.test(src[j + 1] ?? "");
+  if (src.slice(j, j + 3) !== "(?:") return false;
+  let depth = 0;
+  for (let k = j + 3, alt = true; k < src.length; k++) {
+    const c = src[k];
+    if (alt) {                                          // the first token of an alternative
+      if (!WORD_LITERAL_RE.test(c) || OPTIONAL_RE.test(src[k + 1] ?? "")) return false;
+      alt = false;
+      continue;
+    }
+    if (c === "\\") { k++; continue; }
+    if (c === "[") {                                    // skip a class: ] first is literal
+      k += src[k + 1] === "^" ? 2 : 1;
+      if (src[k] === "]") k++;
+      while (k < src.length && src[k] !== "]") k += src[k] === "\\" ? 2 : 1;
+      continue;
+    }
+    if (c === "(") depth++;
+    else if (c === ")") {
+      if (depth === 0) return !OPTIONAL_RE.test(src[k + 1] ?? "");
+      depth--;
+    } else if (c === "|" && depth === 0) alt = true;
+  }
+  return false;
+}
 const SYNTAX = new Set("^$\\.*+?()[]{}|/");
 
 /** Translate Python `re` pattern text into JavaScript (u-mode) pattern text. */
@@ -34,7 +70,9 @@ export function pyRegexSource(src) {
         case "D": out += "\\P{Nd}"; continue;
         case "s": out += `[${WS}]`; continue;
         case "S": out += `[^${WS}]`; continue;
-        case "b": out += BOUNDARY; continue;
+        case "b":
+          out += startsWithWordChar(src, i + 1) ? WORD_START : BOUNDARY;
+          continue;
         case "B": out += NOT_BOUNDARY; continue;
         case "A": out += "^"; continue;
         case "Z": out += "$"; continue;
