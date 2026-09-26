@@ -28,7 +28,8 @@ State backends (--db or LAZARET_DB env):
 Package specs: npm:<name>[@version]  |  pypi:<name>[@version or ==version]
 Scoped npm packages work: npm:@scope/pkg@1.0.0
 PyPI releases are judged on every file pip may install: the sdist and each
-distinct wheel (up to --max-artifacts); the verdict is the worst of them.
+distinct wheel (up to --max-artifacts files and --max-download-bytes in
+total); the verdict is the worst of them.
 """
 import argparse
 import base64
@@ -42,6 +43,7 @@ import lzma
 import os
 import posixpath
 import re
+import struct
 import sys
 import tarfile
 import time
@@ -93,7 +95,15 @@ DOWNLOAD_TIMEOUT = 60                      # seconds for artifact archives
 SCAN_TIMEOUT = _env_number("LAZARET_SCAN_TIMEOUT", 120.0, float)
 # PyPI: artifacts scanned per release (sdist + distinct wheels). More than
 # this makes the verdict INCOMPLETE. Env LAZARET_MAX_ARTIFACTS / --max-artifacts.
-MAX_ARTIFACTS = _env_number("LAZARET_MAX_ARTIFACTS", 50)
+# Popular binary packages publish 60-90 files per release (numpy, grpcio,
+# pillow); 50 made every one of them permanently INCOMPLETE.
+MAX_ARTIFACTS = _env_number("LAZARET_MAX_ARTIFACTS", 200)
+# Total bytes downloaded for ONE package (all its release files together);
+# checked BEFORE each download against the sizes PyPI's metadata declares, so
+# a release that cannot fit is not fetched at all. Files that don't fit are
+# not scanned and the verdict is INCOMPLETE. Env LAZARET_MAX_DOWNLOAD_BYTES /
+# --max-download-bytes. (MAX_DOWNLOAD_BYTES above is the per-file limit.)
+MAX_PACKAGE_DOWNLOAD_BYTES = _env_number("LAZARET_MAX_DOWNLOAD_BYTES", 2 * 1024 ** 3)
 # Non-source text members kept in memory until package.json says whether
 # they are entry points (main/bin/exports) or hook targets.
 DEFERRED_TEXT_BUDGET = 64 * 1024 * 1024
@@ -912,7 +922,83 @@ def _zip_is_symlink(info):
     return (info.external_attr >> 16) & 0o170000 == 0o120000
 
 
+_ZIP_EOCD_SIG, _ZIP64_LOC_SIG, _ZIP64_EOCD_SIG = b"PK\x05\x06", b"PK\x06\x07", b"PK\x06\x06"
+_ZIP_CD_SIG = b"PK\x01\x02"
+_ZIP_EOCD = struct.Struct("<4s4H2LH")            # 22 bytes
+_ZIP64_LOC = struct.Struct("<4sLQL")             # 20 bytes
+_ZIP64_EOCD = struct.Struct("<4sQ2H2L4Q")        # 56 bytes
+# Largest central directory read (bytes). zipfile reads it whole and builds
+# one ZipInfo per record before any file cap can apply; MAX_FILES records
+# with long names fit easily in this.
+MAX_ZIP_CENTRAL_DIR = 64 * 1024 * 1024
+
+
+def _zip_preflight(data):
+    """Refuse a zip whose central directory is too big to parse, BEFORE
+    zipfile.ZipFile() reads it -> None (fine) or the reason.
+
+    zipfile parses the whole central directory — ~340 MB and 4 s for a
+    million records — before MAX_FILES can apply. Read the End Of Central
+    Directory record (and the ZIP64 one) the same way zipfile finds it,
+    and refuse when the declared entry count exceeds MAX_FILES, the
+    declared directory size is implausible, or the directory region holds
+    more than MAX_FILES record signatures (a count field can lie; zipfile
+    parses records until the declared SIZE is consumed). Anything this
+    reader can't make sense of is left to zipfile, which reports it."""
+    if not isinstance(data, (bytes, bytearray)):
+        data = bytes(data)
+    n = len(data)
+    if n >= _ZIP_EOCD.size and data[n - 22:n - 18] == _ZIP_EOCD_SIG and data[n - 2:] == b"\0\0":
+        pos = n - 22
+    else:                                       # an archive comment follows the EOCD
+        pos = data.rfind(_ZIP_EOCD_SIG, max(0, n - 65535 - _ZIP_EOCD.size))
+        if pos < 0 or pos + _ZIP_EOCD.size > n:
+            return None
+    (_sig, _disk, _cd_disk, count_disk, count, cd_size, _cd_offset,
+     _comment) = _ZIP_EOCD.unpack_from(data, pos)
+    counts, sizes, records = [], [], [pos]
+    loc = pos - _ZIP64_LOC.size
+    if loc >= 0 and data[loc:loc + 4] == _ZIP64_LOC_SIG:
+        _sig, _disk, reloff, _disks = _ZIP64_LOC.unpack_from(data, loc)
+        # zipfile reads the record at the offset the locator names or,
+        # depending on the version, right before the locator: check both
+        for rec in {reloff, loc - _ZIP64_EOCD.size}:
+            if 0 <= rec <= n - _ZIP64_EOCD.size and data[rec:rec + 4] == _ZIP64_EOCD_SIG:
+                fields = _ZIP64_EOCD.unpack_from(data, rec)
+                counts += [fields[6], fields[7]]
+                sizes.append(fields[8])
+                records.append(rec)
+    if not sizes:          # no ZIP64 record: the classic fields are the real ones
+        counts, sizes = [count_disk, count], [cd_size]
+    declared = max(counts)
+    if declared > MAX_FILES:
+        return (f"zip central directory declares {declared:,} entries — more than the "
+                f"{MAX_FILES:,}-file limit; the archive was not opened")
+    size = max(sizes)
+    if size > MAX_ZIP_CENTRAL_DIR:
+        return (f"zip central directory declares {size:,} bytes — more than the "
+                f"{MAX_ZIP_CENTRAL_DIR:,}-byte limit; the archive was not opened")
+    # the records zipfile will parse lie in the `size` bytes before the
+    # (ZIP64) end record; count their signatures without copying
+    start = max(0, min(records) - size)
+    found = data.count(_ZIP_CD_SIG, start, pos)
+    if found > MAX_FILES:
+        return (f"zip central directory holds more than {MAX_FILES:,} entries "
+                f"({found:,} records, {declared:,} declared); the archive was not opened")
+    return None
+
+
+# What reading one zip member can raise (bad CRC, broken deflate/bz2/lzma
+# stream, an encrypted or unsupported entry, a bad local header).
+_ZIP_READ_ERRORS = (zipfile.BadZipFile, OSError, EOFError, ValueError, zlib.error,
+                    lzma.LZMAError, NotImplementedError, RuntimeError)
+
+
 def _iter_zip(data, artifact, budget, anomalies):
+    refused = _zip_preflight(data)
+    if refused:
+        yield Member("(archive)", 0, b"", "files", refused)
+        return
     try:
         zf = zipfile.ZipFile(io.BytesIO(data))
         infos = zf.infolist()
@@ -952,8 +1038,7 @@ def _iter_zip(data, artifact, budget, anomalies):
                 last = rel
                 try:
                     raw = read(info, MAX_MEMBER + 1)          # bounded, real bytes
-                except (zipfile.BadZipFile, OSError, EOFError, ValueError, zlib.error,
-                        lzma.LZMAError, NotImplementedError, RuntimeError) as exc:
+                except _ZIP_READ_ERRORS as exc:
                     yield Member(rel, 0, b"", "corrupt",
                                  f"member {rel} could not be read ({type(exc).__name__})")
                     continue
@@ -965,9 +1050,12 @@ def _iter_zip(data, artifact, budget, anomalies):
                 budget.check()
                 try:
                     linkname = read(info, 4096).decode("utf-8", "replace")
-                except (zipfile.BadZipFile, OSError, EOFError, ValueError, zlib.error,
-                        NotImplementedError, RuntimeError):
-                    linkname = ""
+                except _ZIP_READ_ERRORS as exc:
+                    # where it points is unknown, so what it installs was not
+                    # scanned: INCOMPLETE, not an "outside the archive" WARN
+                    yield Member(rel, 0, b"", "corrupt",
+                                 f"link {rel} could not be read ({type(exc).__name__})")
+                    continue
                 target = _link_target(info.filename, linkname, True) if linkname else None
                 trel = canonical_member_path(target, artifact)[0] if target else None
                 if trel is None:
@@ -978,7 +1066,13 @@ def _iter_zip(data, artifact, budget, anomalies):
                     continue                                   # dangling inside the archive
                 _note_member(seen, rel, anomalies)
                 last = rel
-                raw = read(tinfo, MAX_MEMBER + 1)
+                try:
+                    raw = read(tinfo, MAX_MEMBER + 1)
+                except _ZIP_READ_ERRORS as exc:
+                    yield Member(rel, 0, b"", "corrupt",
+                                 f"link target {trel} of {rel} could not be read "
+                                 f"({type(exc).__name__})")
+                    continue
                 if len(raw) > MAX_MEMBER:
                     yield Member(rel, SAMPLE, raw[:SAMPLE], "member")
                 else:
@@ -1584,8 +1678,70 @@ def _scan_artifact(data, container, artifact, full, budget):
             "strongIndicators": strong, "weakIndicators": weak}
 
 
+def _fmt_bytes(n):
+    """1536 -> '1.5 KiB' (binary units, one decimal)."""
+    value = float(n)
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if value < 1024 or unit == "GiB":
+            return f"{int(value)} B" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} GiB"  # pragma: no cover
+
+
+def declared_size(meta_entry):
+    """Byte size a registry declares for one artifact (PyPI's `size`), or
+    None when it declares none. Used to refuse a download BEFORE it starts."""
+    size = meta_entry.get("size") if isinstance(meta_entry, dict) else None
+    if isinstance(size, int) and not isinstance(size, bool) and size >= 0:
+        return size
+    return None
+
+
+def _skipped_summary(skipped, byte_budget, limit):
+    """SC-TRUNCATED issues + a short verdict-reason phrase for release files
+    that were not scanned. skipped: [(filename, kind, size)] with kind
+    'artifacts' | 'budget' | 'filesize' | 'time'."""
+    issues, labels = [], []
+    groups = {}
+    for filename, kind, size in skipped:
+        groups.setdefault(kind, []).append((filename, size))
+
+    def names(items):
+        shown = ", ".join(str(f) for f, _ in items[:3])
+        return shown + (f", … (+{len(items) - 3})" if len(items) > 3 else "")
+
+    if "artifacts" in groups:
+        items = groups["artifacts"]
+        issues.append(lazaret.truncated_issue(
+            "(release)", f"{len(items)} more release file(s) not scanned (limit {limit} "
+                         f"artifacts per release; raise --max-artifacts)"))
+        labels.append(f"more than {limit} files (--max-artifacts)")
+    if "filesize" in groups:
+        items = groups["filesize"]
+        issues.append(lazaret.truncated_issue(
+            "(release)", f"{len(items)} release file(s) not downloaded: each is larger than "
+                         f"the {_fmt_bytes(MAX_DOWNLOAD_BYTES)} per-file download limit "
+                         f"({names(items)})"))
+        labels.append(f"over the {_fmt_bytes(MAX_DOWNLOAD_BYTES)} per-file limit")
+    if "budget" in groups:
+        items = groups["budget"]
+        issues.append(lazaret.truncated_issue(
+            "(release)", f"{len(items)} release file(s) not downloaded: they would take the "
+                         f"package past its {_fmt_bytes(byte_budget)} download budget "
+                         f"({names(items)}; raise --max-download-bytes / "
+                         f"LAZARET_MAX_DOWNLOAD_BYTES)"))
+        labels.append(f"over the {_fmt_bytes(byte_budget)} download budget (--max-download-bytes)")
+    if "time" in groups:
+        items = groups["time"]
+        issues.append(lazaret.truncated_issue(
+            "(release)", f"{len(items)} release file(s) not downloaded: the scan's time "
+                         f"budget ran out ({names(items)})"))
+        labels.append("time budget exhausted")
+    return issues, "; ".join(labels)
+
+
 def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline=None,
-                 cancel=None, max_artifacts=None):
+                 cancel=None, max_artifacts=None, max_download_bytes=None):
     """Fetch and scan one package version. Returns a result dict.
 
     Every archive member is classified as source or binary. Source files (by
@@ -1596,8 +1752,13 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
     (sdist/npm vs wheel).
 
     PyPI: every file of the release pip may install is scanned (sdist and
-    each distinct wheel, at most max_artifacts); the verdict is the worst
-    one, and result["artifacts"] keeps the per-file detail.
+    each distinct wheel, at most max_artifacts files and max_download_bytes
+    bytes in total); the verdict is the worst one, and result["artifacts"]
+    keeps the per-file detail. A file that does not fit — past the artifact
+    limit, over the per-file download limit or the package's download budget
+    by its DECLARED size (checked before downloading), or reached after the
+    deadline — is not downloaded; it is listed in result["skippedArtifacts"],
+    an SC-TRUNCATED finding names it, and the verdict is INCOMPLETE at best.
 
     resolved: a resolve_npm/resolve_pypi result already fetched (scan-all
     checks the version before downloading). deadline: absolute
@@ -1611,11 +1772,27 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
         {"url": url, "container": container, "artifact": artifact, "entry": meta_entry,
          "filename": url.rsplit("/", 1)[-1] if isinstance(url, str) else None}]
     limit = max_artifacts or MAX_ARTIFACTS
+    byte_budget = max_download_bytes or MAX_PACKAGE_DOWNLOAD_BYTES
     over, refs = refs[limit:], refs[:limit]
+    skipped = [(r.get("filename"), "artifacts", declared_size(r.get("entry"))) for r in over]
     per, all_issues, truncated = [], [], 0
     multi = len(refs) > 1
+    downloaded = 0
     for ref in refs:
+        size = declared_size(ref.get("entry"))
+        if cancel is not None and cancel():
+            raise ScanCancelled("scan cancelled")
+        if deadline is not None and time.monotonic() > deadline:
+            skipped.append((ref.get("filename"), "time", size))
+            continue
+        if size is not None and size > MAX_DOWNLOAD_BYTES:
+            skipped.append((ref.get("filename"), "filesize", size))
+            continue
+        if downloaded >= byte_budget or (size is not None and downloaded + size > byte_budget):
+            skipped.append((ref.get("filename"), "budget", size))
+            continue
         data = http_bytes(ref["url"])
+        downloaded += max(len(data), size or 0)
         # G15: verify the artifact against the registry-published digest BEFORE
         # scanning anything — a mismatch raises and nothing is persisted under
         # this name/version.
@@ -1635,11 +1812,9 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
                     **{k: r[k] for k in ("verdict", "verdictReason", "filesScanned",
                                          "binaryArtifacts", "truncated",
                                          "strongIndicators", "weakIndicators")}})
-    if over:
-        truncated += 1
-        all_issues.append(lazaret.truncated_issue(
-            "(release)", f"{len(over)} more release file(s) not scanned (limit {limit} "
-                         f"artifacts per release; raise --max-artifacts)"))
+    skip_issues, skip_label = _skipped_summary(skipped, byte_budget, limit)
+    truncated += len(skip_issues)
+    all_issues.extend(skip_issues)
     all_issues.sort(key=lambda i: (lazaret.SEV_ORDER[i["sev"]], i["file"], i["line"]))
     sev_counts = {s: 0 for s in lazaret.SEV_ORDER}
     for i in all_issues:
@@ -1648,13 +1823,16 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
     # Verdict integrity: a truncated scan can never be cleared, because the
     # unscanned members are attacker-chosen: it is INCOMPLETE at best.
     verdict, reason, strong, weak = decide_verdict(all_issues, truncated)
-    if multi:
+    if multi and per:
         worst = max(per, key=lambda p: VERDICT_RANK.get(p["verdict"], 0))
         if VERDICT_RANK.get(worst["verdict"], 0) == VERDICT_RANK.get(verdict, 0) \
                 and verdict != "OK":
             reason += f" (worst: {worst['filename']}; {len(per)} release files scanned)"
         else:
             reason += f" ({len(per)} release files scanned)"
+    if skipped:
+        reason += (f"; {len(skipped)} of {len(per) + len(skipped)} release files not "
+                   f"scanned: {skip_label}")
     # L1 (artifact hygiene): redaction is default-on, so the issues this
     # result carries — including the ones persisted as the Store blob via
     # save_scan — already have placeholder/scrubbed snippets from mk_issue.
@@ -1674,6 +1852,8 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
             "weakIndicators": weak, "truncated": truncated,
             "verdict": verdict, "verdictReason": reason, "issues": all_issues,
             "digest": per[0]["digest"] if per else None, "artifacts": per,
+            "skippedArtifacts": [{"filename": f, "reason": kind, "declaredBytes": size}
+                                 for f, kind, size in skipped],
             "scannedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")}
 
 
@@ -1985,6 +2165,17 @@ class Store:
             f"SELECT id FROM {self.t}scans WHERE package_id={p1} AND version={p2} "
             f"AND profile={p3} AND engine_version={p4}",
             (pid, _db_text(version), profile, engine_version)) is not None
+
+    def stored_verdict(self, pid, version, profile, engine_version=ENGINE_VERSION):
+        """Verdict of the stored scan has_scan() matches, or None. A sweep
+        that skips an already-scanned version reports this one, so a known
+        SUSPICIOUS / INCOMPLETE package still fails --ci."""
+        p1, p2, p3, p4 = self._phs(4)
+        row = self._one(
+            f"SELECT verdict FROM {self.t}scans WHERE package_id={p1} AND version={p2} "
+            f"AND profile={p3} AND engine_version={p4}",
+            (pid, _db_text(version), profile, engine_version))
+        return row[0] if row else None
 
     def save_scan(self, pid, res):
         """Persist one scan result as a SINGLE atomic statement (audit G20).
@@ -2349,23 +2540,39 @@ def cmd_discover(store, args):
         print(f"  {when.strftime('%Y-%m-%d %H:%M')}  "
               f"{lazaret.sanitize_term(eco)}:{lazaret.sanitize_term(name)}"
               f"{('@' + lazaret.sanitize_term(ver)) if ver else ''}")
+    errors = getattr(args, "_errors", None)
     if args.add or args.scan:
         for eco, name, _ver, _when in discovered:
-            if valid_name(eco, name):
+            if not valid_name(eco, name):
+                continue
+            try:
                 store.add_package(eco, name)
+            except Exception as exc:                                # noqa: BLE001
+                # one package the DB refuses must not end the run (cmd_scan
+                # below reports it again when --scan is set)
+                spec = f"{eco}:{name}"
+                print(f"error adding {lazaret.sanitize_term(spec)} to the watchlist: "
+                      f"{type(exc).__name__}: {lazaret.sanitize_term(exc)}", file=sys.stderr)
+                if errors is not None and not args.scan:
+                    errors.append(spec)
     if args.scan:
         specs = [f"{eco}:{name}" + (f"@{ver}" if ver else "")
                  for eco, name, ver, _ in discovered]
         print(f"\nScanning {len(specs)} discovered package(s)…")
-        return cmd_scan(store, specs, args.full, args.rescan, errors=getattr(args, "_errors", None))
+        return cmd_scan(store, specs, args.full, args.rescan, errors=errors)
     return False
+
+
+BAD_VERDICTS = ("SUSPICIOUS", "INCOMPLETE")
 
 
 def cmd_scan(store, specs, full, rescan, errors=None):
     """Scan each spec; returns True when any result is SUSPICIOUS/INCOMPLETE
+    — including the STORED verdict of a version skipped as already scanned —
     or any spec failed. One package's failure (bad name in the watchlist,
-    network, a store error) never stops the sweep. `errors`, when given,
-    collects store failures (the CLI exits non-zero for them)."""
+    network, digest mismatch, a store error) never stops the sweep.
+    `errors`, when given, collects every spec that failed to scan or to be
+    stored (the CLI exits 1 for them at the end of the sweep)."""
     exit_bad = False
     profile = "full" if full else "supply-chain"
     for spec in specs:
@@ -2381,10 +2588,16 @@ def cmd_scan(store, specs, full, rescan, errors=None):
                     resolved = resolve(eco, name, None)
                     ver = resolved[0]
                 if ver and store.has_scan(pid, ver, profile):
+                    # A skipped version keeps its stored verdict: a sweep
+                    # without --rescan must not turn a known SUSPICIOUS or
+                    # INCOMPLETE package into a passing --ci run.
+                    stored = store.stored_verdict(pid, ver, profile)
                     # audit H1: name/version echo registry- or feed-derived text.
                     print(f"{lazaret.sanitize_term(eco)}:{lazaret.sanitize_term(name)}@"
-                          f"{lazaret.sanitize_term(ver)} already scanned ({profile}); "
+                          f"{lazaret.sanitize_term(ver)} already scanned ({profile}"
+                          f"{', ' + lazaret.sanitize_term(stored) if stored else ''}); "
                           f"use --rescan to redo")
+                    exit_bad |= stored in BAD_VERDICTS
                     continue
             res = scan_package(eco, name, ver, full, resolved=resolved)
         except Exception as exc:
@@ -2394,6 +2607,8 @@ def cmd_scan(store, specs, full, rescan, errors=None):
             print(f"error scanning {lazaret.sanitize_term(spec)}: "
                   f"{lazaret.sanitize_term(exc)}", file=sys.stderr)
             exit_bad = True
+            if errors is not None:
+                errors.append(spec)
             continue
         try:
             if not rescan and store.has_scan(pid, res["version"], profile):
@@ -2412,12 +2627,26 @@ def cmd_scan(store, specs, full, rescan, errors=None):
             if errors is not None:
                 errors.append(spec)
         print_scan(res)
-        exit_bad |= res["verdict"] in ("SUSPICIOUS", "INCOMPLETE")  # a partial scan never passes
+        exit_bad |= res["verdict"] in BAD_VERDICTS  # a partial scan never passes
     return exit_bad
 
 
+def _finish_sweep(errors, bad, ci):
+    """CLI exit for scan / scan-all / discover: every package was attempted;
+    any that failed to scan or store makes the run exit 1 (with or without
+    --ci), after a one-line summary on stderr. --ci also fails on
+    SUSPICIOUS / INCOMPLETE."""
+    if errors:
+        shown = ", ".join(lazaret.sanitize_term(s) for s in errors[:20])
+        more = f", … (+{len(errors) - 20} more)" if len(errors) > 20 else ""
+        print(f"error: {len(errors)} package(s) failed to scan or store: {shown}{more}",
+              file=sys.stderr)
+    if errors or (ci and bad):
+        sys.exit(1)
+
+
 def main():
-    global SCAN_TIMEOUT, MAX_ARTIFACTS
+    global SCAN_TIMEOUT, MAX_ARTIFACTS, MAX_PACKAGE_DOWNLOAD_BYTES
     lazaret.configure_stdio()
     ap = argparse.ArgumentParser(prog="lazaret-registry", description="Lazaret npm/PyPI registry scanner")
     ap.add_argument("command", choices=["add", "scan", "scan-all", "list", "report", "discover"])
@@ -2442,6 +2671,13 @@ def main():
     ap.add_argument("--max-artifacts", type=int, metavar="N",
                     help=f"PyPI files scanned per release (default {MAX_ARTIFACTS}, env "
                          f"LAZARET_MAX_ARTIFACTS); more makes the verdict INCOMPLETE")
+    ap.add_argument("--max-download-bytes", type=int, metavar="BYTES",
+                    help=f"Total bytes downloaded per package, all release files together "
+                         f"(default {MAX_PACKAGE_DOWNLOAD_BYTES} = "
+                         f"{_fmt_bytes(MAX_PACKAGE_DOWNLOAD_BYTES)}, env "
+                         f"LAZARET_MAX_DOWNLOAD_BYTES); checked against the registry's "
+                         f"declared sizes before downloading — files that don't fit "
+                         f"are not scanned and the verdict is INCOMPLETE")
     # discover options
     ap.add_argument("--since", default="7d",
                     help="discover: time window — 7d, 2w, 24h, or an ISO date (default 7d)")
@@ -2461,6 +2697,8 @@ def main():
         SCAN_TIMEOUT = args.scan_timeout
     if args.max_artifacts and args.max_artifacts > 0:
         MAX_ARTIFACTS = args.max_artifacts
+    if args.max_download_bytes and args.max_download_bytes > 0:
+        MAX_PACKAGE_DOWNLOAD_BYTES = args.max_download_bytes
     try:
         store = Store(args.db)
     except RuntimeError as exc:
@@ -2487,8 +2725,7 @@ def main():
         if not args.specs:
             sys.exit("scan needs at least one package spec")
         bad = cmd_scan(store, args.specs, args.full, args.rescan, errors=errors)
-        if errors or (args.ci and bad):
-            sys.exit(1)
+        _finish_sweep(errors, bad, args.ci)
 
     elif args.command == "scan-all":
         specs = [f"{eco}:{name}" for _, eco, name in store.packages()]
@@ -2496,8 +2733,7 @@ def main():
             sys.exit("no tracked packages — use 'add' first")
         print(f"Scanning latest versions of {len(specs)} tracked package(s)…")
         bad = cmd_scan(store, specs, args.full, args.rescan, errors=errors)
-        if errors or (args.ci and bad):
-            sys.exit(1)
+        _finish_sweep(errors, bad, args.ci)
 
     elif args.command == "discover":
         try:
@@ -2508,8 +2744,7 @@ def main():
             # dispatches discover_packages); the CLI keeps the exact legacy
             # behavior: message on stderr, exit 1.
             sys.exit(str(exc))
-        if errors or (args.ci and bad):
-            sys.exit(1)
+        _finish_sweep(errors, bad, args.ci)
 
     elif args.command == "list":
         rows = store.status()

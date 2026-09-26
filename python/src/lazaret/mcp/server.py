@@ -21,7 +21,9 @@ Environment:
     LAZARET_MCP_MAX_FILES     files one tool call may scan   (default 20000)
     LAZARET_MCP_MAX_BYTES     source bytes one call may read (default 200000000)
     LAZARET_MCP_MAX_SECONDS   wall-clock budget per call     (default 300)
-    A call that hits a cap returns what it scanned, marked "incomplete".
+    A call that hits a cap returns what it scanned, marked "incomplete", with
+    an SC-TRUNCATED finding for what was left out (scan_files: one per
+    unscanned file) or, for packages, an INCOMPLETE entry — never clean.
 """
 import json
 import os
@@ -56,6 +58,9 @@ if os.environ.get("LAZARET_NO_REDACT") == "1":
 SUPPORTED_PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18", "2024-11-05")
 PROTOCOL_VERSION = "2024-11-05"
 MAX_ISSUES = 200
+# discover_packages(scan=true): packages scanned per call; the rest are
+# listed as INCOMPLETE ("not scanned") and the call is marked incomplete.
+MAX_DISCOVER_SCANS = 15
 
 TOOLS = [
     {
@@ -139,7 +144,9 @@ TOOLS = [
                 "ecosystem": {"type": "array", "items": {"type": "string", "enum": ["pypi", "npm"]},
                               "description": "Restrict to pypi and/or npm (default both)"},
                 "limit": {"type": "integer", "description": "Max packages to return (default 25, cap 50)"},
-                "scan": {"type": "boolean", "description": "Also scan the discovered packages (bounded to 15)"},
+                "scan": {"type": "boolean", "description": (
+                    f"Also scan the discovered packages (at most {MAX_DISCOVER_SCANS}; the "
+                    f"rest are listed as INCOMPLETE, not scanned)")},
             },
         },
     },
@@ -372,8 +379,15 @@ def tool_scan_files(args):
         elif ctx.expired():
             stopped = f"time budget of {ctx.max_seconds:g} s (LAZARET_MCP_MAX_SECONDS) exceeded"
         if stopped:
+            # verdict integrity: every file the cap left out carries an
+            # SC-TRUNCATED finding (same shape as an oversized file's), so a
+            # capped call can never look clean
             for q in paths[idx:]:
-                out.setdefault(q, {"error": f"not scanned: {stopped}"})
+                if q in out:
+                    continue
+                ti = lazaret.truncated_issue(q, f"{stopped}; the file was not read")
+                all_issues.append(ti)
+                out[q] = {"error": f"not scanned: {stopped}", "rule": ti["rule"], "sev": ti["sev"]}
             break
         ext = os.path.splitext(p)[1].lower()
         lang = lazaret.EXTS.get(ext)
@@ -529,12 +543,24 @@ def tool_discover_packages(args):
                         for e, n, v, w in discovered]}
     if args.get("scan"):
         store = lazaret_repo.Store(REGISTRY_DB)
-        results = []
-        for e, n, v, _w in discovered[:15]:
+        results, reasons = [], []
+        for i, (e, n, v, _w) in enumerate(discovered):
             ctx.check()
-            if ctx.expired():
-                results.append({"package": f"{e}:{n}", "verdict": "INCOMPLETE",
-                                "error": "not scanned: MCP time budget exceeded"})
+            spec = f"{e}:{n}" + (f"@{v}" if v else "")
+            # A discovered package that is not scanned cannot be cleared: it
+            # is listed as INCOMPLETE (so it shows up in `flagged`) and the
+            # call is marked incomplete, never silently dropped.
+            if i >= MAX_DISCOVER_SCANS:
+                why = f"discover_packages scans at most {MAX_DISCOVER_SCANS} packages per call"
+            elif ctx.expired():
+                why = f"time budget of {ctx.max_seconds:g} s (LAZARET_MCP_MAX_SECONDS) exceeded"
+            else:
+                why = None
+            if why:
+                results.append({"package": spec, "verdict": "INCOMPLETE",
+                                "error": f"not scanned: {why}"})
+                if why not in reasons:
+                    reasons.append(why)
                 continue
             try:
                 # tracked even when the scan fails, so the next sweep retries it
@@ -548,8 +574,7 @@ def tool_discover_packages(args):
                 raise
             except Exception as exc:                       # noqa: BLE001
                 # a package that could not be scanned cannot be cleared
-                results.append({"package": f"{e}:{n}" + (f"@{v}" if v else ""),
-                                "verdict": "INCOMPLETE", "error": str(exc)})
+                results.append({"package": spec, "verdict": "INCOMPLETE", "error": str(exc)})
                 continue
             entry = {"package": f"{e}:{n}@{res['version']}", "verdict": res["verdict"],
                      "verdictReason": res.get("verdictReason"),
@@ -562,6 +587,9 @@ def tool_discover_packages(args):
         out["scanned"] = results
         out["flagged"] = [r for r in results
                           if r.get("verdict") in ("WARN", "INCOMPLETE", "SUSPICIOUS")]
+        if reasons:
+            out["incomplete"] = True
+            out["incompleteReason"] = "; ".join(reasons)
     return out
 
 

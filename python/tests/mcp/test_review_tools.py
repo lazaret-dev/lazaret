@@ -19,6 +19,7 @@ import json
 import os
 import shutil
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -89,15 +90,21 @@ class RootsTests(unittest.TestCase):
     def test_paths_outside_the_roots_are_tool_errors(self):
         inside = tree({"a.py": "x = 1\n"})
         outside = tree({"b.py": "y = 2\n"})
-        os.symlink(outside, os.path.join(inside, "escape"))
+        escape = os.path.join(inside, "escape")
+        try:
+            os.symlink(outside, escape, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            escape = None                 # e.g. Windows without the symlink privilege
         with mock.patch.dict(os.environ, {"LAZARET_MCP_ROOTS": os.pathsep.join(["/nonexistent", inside])}):
             self.assertIn("qualityGate", server.tool_scan_directory({"path": inside}))
             server.tool_scan_files({"paths": [os.path.join(inside, "a.py")]})
-            for call in (lambda: server.tool_scan_directory({"path": outside}),
-                         lambda: server.tool_quality_gate({"path": outside}),
-                         lambda: server.tool_scan_directory({"path": os.path.join(inside, "escape")}),
-                         lambda: server.tool_scan_files({"paths": [os.path.join(inside, "a.py"),
-                                                                   os.path.join(outside, "b.py")]})):
+            calls = [lambda: server.tool_scan_directory({"path": outside}),
+                     lambda: server.tool_quality_gate({"path": outside}),
+                     lambda: server.tool_scan_files({"paths": [os.path.join(inside, "a.py"),
+                                                               os.path.join(outside, "b.py")]})]
+            if escape:
+                calls.append(lambda: server.tool_scan_directory({"path": escape}))
+            for call in calls:
                 with self.assertRaisesRegex(ValueError, "LAZARET_MCP_ROOTS"):
                     call()
 
@@ -122,8 +129,15 @@ class CapsTests(unittest.TestCase):
 
     def test_time_cap_returns_partial_results(self):
         root = tree({f"m{i}.py": "x = 1\n" for i in range(5)})
-        with mock.patch.dict(os.environ, {"LAZARET_MCP_MAX_SECONDS": "0.000001"}):
+        # a deadline already in the past: a 1 us budget may not have run out
+        # yet on Windows, where time.monotonic() ticks every ~16 ms (< 3.13)
+        ctx = server.ToolContext()
+        ctx.deadline = time.monotonic() - 1
+        server._LOCAL.ctx = ctx
+        try:
             out = server.tool_scan_directory({"path": root})
+        finally:
+            server._LOCAL.ctx = None
         self.assertTrue(out["incomplete"])
         self.assertIn("time budget", out["incompleteReason"])
 

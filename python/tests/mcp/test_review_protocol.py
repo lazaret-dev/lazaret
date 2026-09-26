@@ -15,7 +15,7 @@ e. stdout carries protocol frames only.
 import io
 import json
 import os
-import select
+import queue
 import shutil
 import subprocess
 import sys
@@ -212,9 +212,25 @@ class EndToEndCancelTests(unittest.TestCase):
                 p.stdin.write(line + "\n")
                 p.stdin.flush()
 
+            # a reader thread, not select(): select() takes only sockets on
+            # Windows, where this test failed with WinError 10038
+            lines = queue.Queue()
+
+            def pump():
+                try:
+                    for line in p.stdout:
+                        lines.put(line)
+                except (OSError, ValueError):
+                    pass
+                lines.put(None)                   # EOF
+            threading.Thread(target=pump, daemon=True).start()
+
             def recv(timeout):
-                r, _, _ = select.select([p.stdout], [], [], timeout)
-                return json.loads(p.stdout.readline()) if r else None
+                try:
+                    line = lines.get(timeout=timeout)
+                except queue.Empty:
+                    return None
+                return json.loads(line) if line else None
 
             send(req(1, "tools/call", {"name": "scan_directory", "arguments": {"path": tree}}))
             time.sleep(0.5)
@@ -226,7 +242,13 @@ class EndToEndCancelTests(unittest.TestCase):
             p.stdin.close()                       # the cancelled scan must stop, so we exit fast
             p.wait(timeout=15)
             self.assertLess(time.monotonic() - t, 15)
-            rest = [json.loads(l) for l in p.stdout.read().splitlines() if l.strip()]
+            rest = []
+            while True:
+                line = lines.get(timeout=15)
+                if line is None:
+                    break
+                if line.strip():
+                    rest.append(json.loads(line))
             self.assertEqual(rest, [], "a cancelled request must not be answered")
         finally:
             if p.poll() is None:

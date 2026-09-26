@@ -819,6 +819,11 @@ def load_taint_config_for_scan(explicit_path, scan_root, trust_repo=False,
     Validation is fail-loud: rejected rules print warnings naming the file,
     the rule and the reason; with an explicit --taint-config (or strict,
     i.e. --strict-taint-config) rejected rules exit EXIT_TAINT_CONFIG (4).
+    A config that cannot be loaded at all (missing, unreadable, not a
+    regular file, too large, bad UTF-8, invalid JSON, too deep, an integer
+    past the digit limit) is the same: `error:` and exit 4 for an explicit
+    --taint-config or with strict, a warning for a trusted repository
+    config (the scan then runs with the built-in model only).
     """
     if explicit_path:
         path, from_repo = explicit_path, False
@@ -837,8 +842,14 @@ def load_taint_config_for_scan(explicit_path, scan_root, trust_repo=False,
     if err is not None:
         # audit H1: both the path and the reason (JSONDecodeError position
         # text can echo hostile config bytes) are sanitized.
-        print(f"warning: could not load taint config {sanitize_term(path)}: "
-              f"{sanitize_term(err)}", file=sys.stderr)
+        # An explicit --taint-config that cannot be loaded must not degrade
+        # into a scan without the rules CI asked for (exit 4, like rejected
+        # rules); a repository config only warns unless --strict-taint-config.
+        fatal = not from_repo or strict
+        print(f"{'error' if fatal else 'warning'}: could not load taint config "
+              f"{sanitize_term(path)}: {sanitize_term(err)}", file=sys.stderr)
+        if fatal:
+            sys.exit(EXIT_TAINT_CONFIG)
         return []
     spec = taintspec.validate(cfg, allow_sanitizers=not from_repo)
     apply_taint_config(spec)
@@ -4643,16 +4654,19 @@ def _main(argv=None):
                     help="Previous JSON report; issues not in it are marked new")
     ap.add_argument("--taint-config", metavar="PATH",
                     help="JSON taint spec adding custom sources/sinks/sanitizers "
-                         "(Semgrep-style); trusted fully.")
+                         "(Semgrep-style); trusted fully. A file that can't be "
+                         "loaded (missing, unreadable, invalid JSON, too deep) or "
+                         "has rules rejected by validation exits 4.")
     ap.add_argument("--trust-repo-config", action="store_true",
                     help="Load the scanned repository's own .lazaret-taint.json "
                          "(sources and sinks only — its sanitizers are ignored). "
                          "Without this flag the file is noted and not loaded.")
     ap.add_argument("--strict-taint-config", action="store_true",
                     help="Treat taint-config rules rejected by validation (unknown "
-                         "category, empty pattern) as fatal — exit 4 even for the "
-                         "repository's .lazaret-taint.json. Always on for an "
-                         "explicit --taint-config.")
+                         "category, empty pattern), and a config that can't be "
+                         "loaded, as fatal — exit 4 even for the repository's "
+                         ".lazaret-taint.json. Always on for an explicit "
+                         "--taint-config.")
     ap.add_argument("--ci", action="store_true", help="Exit 1 if the quality gate fails")
     ap.add_argument("--no-redact-secrets", action="store_true",
                     help="Opt OUT of secret redaction in reports: keep the matched line "

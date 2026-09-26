@@ -1760,9 +1760,9 @@ def _js_text(content):
 
 
 def _analyze_js(files, findings):
-    # summary: fname -> set of param names reaching a sink (with category)
-    summaries = {}   # name -> (params, dict(param -> category))
-    fn_defs = {}     # name -> (file, start_line)
+    # summary: fname -> the params reaching a sink, with the sink's category
+    # and the line of the sink call itself (reported in the finding)
+    summaries = {}   # name -> (params, {param: (category, sink line)}, file)
     js_files = [f for f in files if f["lang"] == "js"]
     texts = {id(f): _js_text(f["content"]) for f in js_files}   # U+2028/9 -> \n
     codes = {}       # id(file) -> masked code (_js_mask), computed once
@@ -1799,7 +1799,9 @@ def _analyze_js(files, findings):
         funcs = _js_functions(content, code)
         if not funcs:
             continue
-        fn_defs.update({name: (f["path"], start) for name, _, _, start in funcs})
+        # newline offsets of the (U+2028/9-normalized, masked) code: the line
+        # of a sink match, numbered like every other line in this engine
+        nl = [m.start() for m in re.finditer("\n", code)]
         # Sink attribution, identical in effect to the old per-body
         # finditer (which found exactly the matches inside each copied
         # body — spans give the same set, including sinks inside nested
@@ -1810,7 +1812,7 @@ def _analyze_js(files, findings):
         # span is appended once and removed once — linear per sink, six
         # sinks total (the old code scanned every body six times too).
         spans = [(s, e, fi) for fi, (_, _, (s, e), _) in enumerate(funcs)]
-        span_reach = [dict() for _ in funcs]   # fi -> {param: category}
+        span_reach = [dict() for _ in funcs]   # fi -> {param: (category, line)}
         for sink_re, cat in _JS_SINKS:
             spans_by_start = sorted(spans)
             active = []
@@ -1823,16 +1825,24 @@ def _analyze_js(files, findings):
                 if not active:
                     continue
                 seg = _js_sink_args(code, pos, send)
+                line = None
                 for s, e, fi in active:
                     params = funcs[fi][1]
                     for p in params:
                         if p and _js_param_dangerous(seg, p, cat):
-                            span_reach[fi][p] = cat
+                            # the category a later sink kind sets wins, as
+                            # before; within one category the first sink
+                            # call is the one reported
+                            prev = span_reach[fi].get(p)
+                            if prev is None or prev[0] != cat:
+                                if line is None:
+                                    line = bisect.bisect_left(nl, pos) + 1
+                                span_reach[fi][p] = (cat, line)
         # Build summaries in MATCH order with old last-non-empty-wins
         # semantics for duplicate names (summaries[name] = ... per match).
         for fi, (name, params, _, _) in enumerate(funcs):
             if span_reach[fi]:
-                summaries[name] = (params, span_reach[fi])
+                summaries[name] = (params, span_reach[fi], f["path"])
     if not summaries:
         return
     # scan call sites: a source-derived variable passed into a summarized function
@@ -1871,18 +1881,20 @@ def _analyze_js(files, findings):
                 fname, argstr = cm.group(1), cm.group(2)
                 if fname not in summaries:
                     continue
-                params, reach = summaries[fname]
+                params, reach, sfile = summaries[fname]
                 call_args = [a.strip() for a in argstr.split(",")]
                 for idx, pname in enumerate(params):
                     if pname not in reach or idx >= len(call_args):
                         continue
-                    a = _js_neutralize(call_args[idx], {reach[pname]})  # sink-category sanitizers
+                    cat, sline = reach[pname]
+                    a = _js_neutralize(call_args[idx], {cat})  # sink-category sanitizers
                     if _JS_SOURCE_RE.search(a) or (tainted & set(word_re.findall(a))):
-                        dfile, dline = fn_defs.get(fname, (f["path"], 1))
+                        # the sink's own line (was: the function's first
+                        # line), like the Python engine reports it
                         findings.append(_issue(
-                            reach[pname], f["path"], i + 1, lines,
+                            cat, f["path"], i + 1, lines,
                             source_loc=f"{f['path']}:{i + 1}",
-                            sink_loc=f"{dfile}:{dline} (in {fname}())",
+                            sink_loc=f"{sfile}:{sline} (in {fname}())",
                             chain=f"the call to {fname}()"))
                         break
 

@@ -41,12 +41,12 @@ class FlowLinesMatchCore(unittest.TestCase):
         self.assertEqual(core_line, 4)          # LS and PS each end a line
         x = by_rule[("X-CMD", "app.js")]
         self.assertEqual([i["line"] for i in x], [core_line])
-        # the sink's function is named at the line core reports its exec() on,
-        # minus one (the definition line)
+        # the sink is named at the line core reports its exec() on (final
+        # review item 5: this used to be the function's definition line)
         exec_line = next(i["line"] for i in res["issues"]
                          if i["file"] == "h.js" and i["rule"].startswith(("S-", "T-")))
         self.assertEqual(exec_line, 3)
-        self.assertIn("h.js:2 (in runIt())", x[0]["msg"])
+        self.assertIn(f"h.js:{exec_line} (in runIt())", x[0]["msg"])
         # the snippet is the same text core shows for that line
         self.assertEqual(x[0]["snippet"][core_line - x[0]["snipStart"]],
                          core.source_lines(APP, "js")[core_line - 1])

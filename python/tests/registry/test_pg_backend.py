@@ -237,6 +237,15 @@ class LivePostgresBackendTests(unittest.TestCase):
             self.store.has_scan(pid, "2.0.0", "default"),
             "different package version ⇒ miss")
 
+    def test_stored_verdict_matches_has_scan(self):
+        # a skipped (already scanned) version keeps its stored verdict for --ci
+        pid, _ = self.store.add_package("npm", "cached-verdict")
+        self.assertIsNone(self.store.stored_verdict(pid, "1.0.0", "default"))
+        self.store.save_scan(pid, self._mkresult(verdict="SUSPICIOUS"))
+        self.assertEqual(self.store.stored_verdict(pid, "1.0.0", "default"), "SUSPICIOUS")
+        self.assertIsNone(
+            self.store.stored_verdict(pid, "1.0.0", "default", engine_version="0.0.1"))
+
     # ---- S4/S5: save_scan + JSONB round-trip ----------------------------
 
     def test_save_scan_and_report_roundtrip(self):
