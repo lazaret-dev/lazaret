@@ -9,17 +9,25 @@ import { pyRe } from "./pycompat.js";
 
 export const PTH_EXEC_RE = pyRe("\\b(?:exec|eval|compile)\\s*\\(|\\b(?:b64decode|b32decode|b85decode|a85decode|fromhex|unhexlify)\\b|\\.decode\\s*\\(|\\bmarshal\\.loads\\b|\\bzlib\\.decompress\\b|\\bcodecs\\.decode\\b|\\\\x[0-9a-fA-F]{2}");
 
+// The line boundaries Python's str.splitlines() adds to \n, \r and \r\n.
+const SPLITLINES_BREAK_RE = /[\v\f\x1c-\x1e\x85\u2028\u2029]/;
+const isImport = (s) => s.startsWith("import ") || s.startsWith("import\t");
+
 /**
  * SC-PTH-EXEC for each `import` line of a .pth file: CRITICAL when the line
  * also executes or decodes code, MAJOR otherwise (setuptools' distutils shim
- * and namespace .pth files are this shape: listed for review).
+ * and namespace .pth files are this shape: listed for review). Lines are
+ * taken both ways site.py splits them: at \n, \r and \r\n (Python 3.10,
+ * 3.11, early 3.12), and with str.splitlines() (3.13+, recent 3.12), which
+ * also breaks at \v, \f, \x1c-\x1e, \x85, U+2028 and U+2029. A finding is
+ * reported at the physical (\n) line holding the statement, once per line.
  */
 export function pthIssues(path, text) {
   const out = [];
   const lines = (text.includes("\r") ? text.replace(/\r\n?/g, "\n") : text).split("\n");
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    if (!line.startsWith("import ") && !line.startsWith("import\t")) continue;
+    if (!isImport(line) && !line.split(SPLITLINES_BREAK_RE).some(isImport)) continue;
     const hostile = PTH_EXEC_RE.test(line);
     out.push(mkIssue({ id: "SC-PTH-EXEC", name: "Code in a .pth file", type: "HOTSPOT",
       sev: hostile ? "CRITICAL" : "MAJOR",

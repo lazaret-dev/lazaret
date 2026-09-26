@@ -4160,6 +4160,9 @@ _PTH_EXEC_RE = re.compile(
     r"|\.decode\s*\(|\bmarshal\.loads\b|\bzlib\.decompress\b|\bcodecs\.decode\b|\\x[0-9a-fA-F]{2}")
 
 
+_PTH_IMPORT = ("import ", "import\t")
+
+
 def pth_issues(path, text):
     """SC-PTH-EXEC: site.py executes every line of a .pth file in
     site-packages that starts with 'import' at EVERY interpreter start — no
@@ -4167,10 +4170,19 @@ def pth_issues(path, text):
     decodes code, MAJOR otherwise (setuptools' distutils shim and namespace
     .pth files are this shape: listed for review). The registry's check
     (lazaret.registry.repo) and the project walk share this one helper's
-    semantics; the npm engine's twin is js/src/lib/pth.js."""
+    semantics; the npm engine's twin is js/src/lib/pth.js.
+
+    Lines are taken both ways site.py splits them: at \\n, \\r and \\r\\n
+    (iterating the file: 3.10, 3.11, early 3.12 releases), and with
+    str.splitlines() (3.13+ and recent 3.12 releases), which also breaks at
+    \\v, \\f, \\x1c-\\x1e, \\x85, U+2028 and U+2029 — review: `# path
+    notes\\fimport sys; …` gave no finding while python3.13 ran its import.
+    A finding is reported at the physical (\\n) line holding the statement,
+    once per line."""
     out, lines = [], normalize_newlines(text).split("\n")
     for i, line in enumerate(lines):
-        if not line.startswith(("import ", "import\t")):
+        if not (line.startswith(_PTH_IMPORT)
+                or any(part.startswith(_PTH_IMPORT) for part in line.splitlines())):
             continue
         hostile = bool(_PTH_EXEC_RE.search(line))
         out.append(mk_issue(

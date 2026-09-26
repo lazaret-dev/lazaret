@@ -87,5 +87,17 @@ class CoreParityTests(unittest.TestCase):
                     self.assertEqual((js[0], py[0]), (1, 1))
 
 
+    def test_pth_lines_split_both_ways(self):
+        seps = ["\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"]
+        files = {f"s{n}.pth": f'# path notes{sep}import sys; print("PTH-MARKER-{n}")\n' for n, sep in enumerate(seps)}
+        files["mixed.pth"] = ("./lib\r\nx\x85import zlib; zlib.decompress(b)\n./a\u2028./b\n"
+                              "import os\f./c\n# a\vimport a\x1cimport b\nimports\x1dimportlib\n")
+        files["bom.pth"] = b"\xef\xbb\xbf# x\x0cimport os; exec(s)\r\n"
+        with tree(files) as root:
+            js, py = parity.both(root)
+            self.assert_same(js, py, label="pth")
+            self.assertEqual(snippets(js[1]), snippets(py[1]))
+            self.assertEqual(len([i for i in py[1]["issues"] if i["rule"] == "SC-PTH-EXEC"]), len(seps) + 4)
+
 if __name__ == "__main__":
     unittest.main()

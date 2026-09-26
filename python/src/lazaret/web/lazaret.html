@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-r+IanKlulia+ASVaK5yLrb+iEJEu6Y325dPbgQe4rTg='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-tQAQpEV4nGwIu0EDUlaxEpB1RIgORIR/JyjJ8nWdFMs='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
 <title>Lazaret — Security &amp; Quality Review</title>
 <style>
   :root{
@@ -3262,12 +3262,16 @@ function isPth(name) {                         // os.path.splitext(name)[1].lowe
   const dot = base.lastIndexOf(".");
   return dot > 0 && /[^.]/.test(base.slice(0, dot)) && base.slice(dot).toLowerCase() === ".pth";
 }
+// Lines are taken both ways site.py splits them: at \n, \r and \r\n, and with
+// str.splitlines() (Python 3.13+, recent 3.12), which also breaks at these.
+const SPLITLINES_BREAK_RE = /[\v\f\x1c-\x1e\x85\u2028\u2029]/;
+const isPthImport = (s) => s.startsWith("import ") || s.startsWith("import\t");
 function pthIssues(path, text) {
   const out = [];
   const lines = normalizeNewlines(text).split("\n");
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    if (!line.startsWith("import ") && !line.startsWith("import\t")) continue;
+    if (!isPthImport(line) && !line.split(SPLITLINES_BREAK_RE).some(isPthImport)) continue;
     const hostile = PTH_EXEC_RE.test(line);
     out.push(mkIssue({ id: "SC-PTH-EXEC", name: "Code in a .pth file", type: "HOTSPOT",
       sev: hostile ? "CRITICAL" : "MAJOR",
