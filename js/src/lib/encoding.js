@@ -167,12 +167,80 @@ function decodeSingleByte(table, buf) {
   return out;
 }
 
+// ---- escape codecs (twin of core._decode_escapes) -----------------------
+/** Codecs that decode escape sequences before Python reads the code (SC-ESCAPE-CODEC). */
+export const ESCAPE_CODECS = new Set(["unicode-escape", "raw-unicode-escape"]);
+const hexDigit = (b) => (b >= 0x30 && b <= 0x39 ? b - 0x30 : b >= 0x61 && b <= 0x66 ? b - 0x57
+  : b >= 0x41 && b <= 0x46 ? b - 0x37 : -1);
+const isOctal = (b) => b >= 0x30 && b <= 0x37;
+// \\ \' \" \b \f \t \n \r \v \a
+const SIMPLE_ESCAPES = new Map([[0x5c, "\\"], [0x27, "'"], [0x22, '"'], [0x62, "\b"], [0x66, "\f"],
+  [0x74, "\t"], [0x6e, "\n"], [0x72, "\r"], [0x76, "\v"], [0x61, "\x07"]]);
+function latin1Run(buf, start, end) {
+  let out = "";
+  for (let k = start; k < end; k += 8192) out += String.fromCharCode(...buf.subarray(k, Math.min(k + 8192, end)));
+  return out;
+}
+
+/**
+ * Python's unicode_escape (raw false) or raw_unicode_escape (raw true), as
+ * bytes.decode(codec) decodes: any other byte is Latin-1. null where Python
+ * raises (a short \x, \u or \U, a code point past U+10FFFF, unicode_escape's
+ * backslash at the end: the interpreter would not run the file) and for a
+ * \N{name} escape, which needs Unicode's name table (core._decode_escapes
+ * gives up on it too). A surrogate code point is U+FFFD, as
+ * core.decode_source writes it.
+ */
+export function decodeEscapes(buf, raw) {
+  const parts = [];
+  const n = buf.length;
+  let i = 0, run = 0;
+  while (i < n) {
+    if (buf[i] !== 0x5c) { i++; continue; }
+    if (i + 1 >= n) { if (raw) { i++; continue; } return null; }
+    const e = buf[i + 1];
+    if (raw && e !== 0x75 && e !== 0x55) { i += 2; continue; }   // not an escape: kept as written
+    if (i > run) parts.push(latin1Run(buf, run, i));
+    i += 2;
+    let count = 0;
+    if (e === 0x75) count = 4;                                   // \uXXXX
+    else if (e === 0x55) count = 8;                              // \UXXXXXXXX
+    else if (e === 0x78) count = 2;                              // \xXX
+    else if (e === 0x4e) return null;                            // \N{name}
+    else if (isOctal(e)) {                                       // \o, \oo, \ooo (up to 0o777)
+      let ch = e - 0x30;
+      if (i < n && isOctal(buf[i])) {
+        ch = ch * 8 + buf[i++] - 0x30;
+        if (i < n && isOctal(buf[i])) ch = ch * 8 + buf[i++] - 0x30;
+      }
+      parts.push(String.fromCharCode(ch));
+    } else if (e !== 0x0a) {                                     // backslash-newline is removed
+      const simple = SIMPLE_ESCAPES.get(e);
+      parts.push(simple !== undefined ? simple : "\\" + String.fromCharCode(e));   // unknown: kept
+    }
+    if (count > 0) {
+      let ch = 0;
+      for (; count > 0; count--, i++) {
+        const d = i < n ? hexDigit(buf[i]) : -1;
+        if (d < 0) return null;
+        ch = ch * 16 + d;
+      }
+      if (ch > 0x10ffff) return null;
+      parts.push(ch >= 0xd800 && ch <= 0xdfff ? "\ufffd" : String.fromCodePoint(ch));
+    }
+    run = i;
+  }
+  if (n > run) parts.push(latin1Run(buf, run, n));
+  return parts.join("");
+}
+
 /** Decode `buf` with a Python codec name; null when this engine cannot decode it as Python does. */
 function decodeWith(codec, buf) {
   if (codec === "utf-8" || codec === "utf-8-sig") return decodeUtf8(codec === "utf-8-sig" && buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf ? buf.subarray(3) : buf);
   if (codec === "utf-7") return decodeUtf7(buf);
   if (codec === "iso8859-1" || codec === "charmap") return buf.toString("latin1");
   if (codec === "ascii") return decodeAscii(buf);
+  if (ESCAPE_CODECS.has(codec)) return decodeEscapes(buf, codec === "raw-unicode-escape");
   const table = SINGLE_BYTE_CODECS[codec];
   if (table !== undefined) return decodeSingleByte(table, buf);
   const label = WHATWG[codec];
@@ -183,8 +251,9 @@ function decodeWith(codec, buf) {
 /**
  * Decode a source file's bytes the way its interpreter reads them (twin of
  * core.decode_source). Returns {text, encoding, reported, utf7, cookieLine,
- * undecoded}: reported → Q-ENCODING ("detected <encoding>"); utf7 → SC-UTF7
- * at cookieLine; undecoded → SC-TRUNCATED. BOM / NUL sniff first (spec 4; a
+ * escapes, undecoded}: reported → Q-ENCODING ("detected <encoding>"); utf7 →
+ * SC-UTF7 and escapes → SC-ESCAPE-CODEC at cookieLine; undecoded →
+ * SC-TRUNCATED. BOM / NUL sniff first (spec 4; a
  * BOM-less UTF-16 guess only when textIsPlausible, else plain UTF-8); for
  * Python source without a BOM or NUL, a PEP 263 cookie naming a codec other
  * than UTF-8 decodes with that codec (spec 15); an unknown codec decodes as
@@ -214,6 +283,7 @@ export function decodeSource(buf, { py = false } = {}) {
         codec = real;
         Object.assign(info, { encoding: real, reported: true, cookieLine: cookie.line,
           utf7: real === "utf-7" || isUtf7Name(cookie.name) });
+        if (ESCAPE_CODECS.has(real)) info.escapes = true;
       }
     }
   }

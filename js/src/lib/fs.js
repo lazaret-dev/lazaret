@@ -241,7 +241,7 @@ function treeStats(dirBuf) {
  * [{kind, path, content, dep}] (kind "package.json", "binding.gyp", or "gyp"
  * for any other .gyp / .gypi file), pth: paths of the .pth files checked,
  * binaryIssues: collection findings (binary classification, SC-TRUNCATED,
- * Q-ENCODING/SC-UTF7, SC-PYC-*, SC-PTH-EXEC, Q-SYMLINK, Q-UNREADABLE,
+ * Q-ENCODING/SC-UTF7/SC-ESCAPE-CODEC, SC-PYC-*, SC-PTH-EXEC, Q-SYMLINK, Q-UNREADABLE,
  * Q-SCAN-ERROR), skippedIssues: Q-SKIPPED-TREE per pruned tree.
  * Throws ScanTargetError when the root itself cannot be listed.
  */
@@ -361,6 +361,12 @@ function collectFile(full, rel, name, st, dep, col) {
       type: "HOTSPOT", sev: "CRITICAL",
       msg: "Python source declares UTF-7; code can hide in comments.",
       why: "In UTF-7, '+AAo-' decodes to a newline: text that every editor, diff and reviewer shows as a comment becomes executable code when Python reads the file. No legitimate project needs a UTF-7 source file.",
+      fix: "Re-save the file as UTF-8 and review the decoded text (the findings for this file are reported against it).",
+      ref: "CWE-506 · Supply chain" }, rel, dec.cookieLine || 1, lines));
+    if (dec.escapes) col.binaryIssues.push(mkIssue({ id: "SC-ESCAPE-CODEC", name: "Escape-sequence source encoding",
+      type: "HOTSPOT", sev: "CRITICAL",
+      msg: `Python source declares ${dec.encoding}; code can hide in escape sequences.`,
+      why: "Python decodes this file's escape sequences before it reads the code: '\\u000a' is a newline and '\\u0065' is 'e', so text that every editor, diff and reviewer shows as a comment or a string escape becomes executable code. No legitimate project needs this source encoding.",
       fix: "Re-save the file as UTF-8 and review the decoded text (the findings for this file are reported against it).",
       ref: "CWE-506 · Supply chain" }, rel, dec.cookieLine || 1, lines));
     if (dec.undecoded) col.binaryIssues.push(truncatedIssue(rel,

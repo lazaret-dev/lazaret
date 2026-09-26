@@ -22,6 +22,7 @@ import base64
 import json
 import unittest
 
+from lazaret.scanner import core
 from tests.scanner import _dashboard_vm as dash
 
 
@@ -96,6 +97,24 @@ class UploadEncodingTests(unittest.TestCase):
         self.assertEqual(at(issues), [("Q-ENCODING", 1), ("S-EVAL-PY", 3), ("SC-UTF7", 1)])
         (sc,) = [i for i in issues if i["rule"] == "SC-UTF7"]
         self.assertEqual((sc["sev"], sc["msg"]), ("CRITICAL", "Python source declares UTF-7; code can hide in comments."))
+
+    def test_escape_codec_cookies(self):
+        """unicode_escape / raw_unicode_escape decode as Python decodes them
+        (tests/scanner/test_review_escape_codecs.py); a \\N{name} escape is
+        read as UTF-8 with SC-TRUNCATED."""
+        ue, raw, named = upload([("u.py", b"# coding: unicode_escape\n# \\x0aeval(e)\n"),
+                                 ("r.py", b"# coding: raw_unicode_escape\n# \\u000aeval(e)\n"),
+                                 ("n.py", b"# coding: unicode_escape\n# \\N{X}eval(e)\n")])
+        self.assertEqual(at(ue), [("Q-ENCODING", 1), ("S-EVAL-PY", 3), ("SC-ESCAPE-CODEC", 1)])
+        self.assertEqual(at(raw), [("Q-ENCODING", 1), ("S-EVAL-PY", 3), ("SC-ESCAPE-CODEC", 1)])
+        self.assertEqual(at(named), [("Q-ENCODING", 1), ("SC-ESCAPE-CODEC", 1), ("SC-TRUNCATED", 1)])
+        (sc,) = [i for i in ue if i["rule"] == "SC-ESCAPE-CODEC"]
+        self.assertEqual((sc["sev"], sc["msg"]),
+                         ("CRITICAL", "Python source declares unicode-escape; code can hide in escape sequences."))
+        text, info = core.decode_source(b"# coding: unicode_escape\n# \\x0aeval(e)\n", "py")
+        want = core.encoding_issues("u.py", text, info) + core.scan_file("u.py", text, "py")
+        self.assertEqual(sorted((i["rule"], i["line"], i["msg"]) for i in ue),
+                         sorted((i["rule"], i["line"], i["msg"]) for i in want))
 
     def test_other_cookies(self):
         latin1, unknown, js = upload([("l.py", b"# coding: latin-1\ns = '\xe9'\neval(f)\n"),

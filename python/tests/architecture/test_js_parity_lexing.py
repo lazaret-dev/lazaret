@@ -48,7 +48,12 @@ TREE = {
     "enc/win874.py": b"# coding: windows-874\ns = '\x80'\n",
     "enc/palmos.py": b"# coding: palmos\ns = '\x9b'\n",
     "enc/u32.py": "# coding: utf-32\nx = eval(y)\n",
+    # escape codecs decode in both engines (SC-ESCAPE-CODEC); a \N{name} escape
+    # or one Python rejects is read as UTF-8 by both (SC-TRUNCATED)
     "enc/uesc.py": "# coding: unicode_escape\n# \\x0aeval(z)\n",
+    "enc/ruesc.py": "# coding: raw_unicode_escape\n# \\x0aexec(z)\n# \\u000aeval(z)\n",
+    "enc/uesc_named.py": "# coding: unicode_escape\n# \\N{LATIN SMALL LETTER E}val(z)\n",
+    "enc/uesc_bad.py": "# coding: unicode_escape\nx = '\\x4'\n",
     # extensions as os.path.splitext reads them: leading dots are no extension
     "ext/..js": "var a = 1;\nconsole.log(a);\n",
     "ext/...py": 'import os\nos.system("echo hi")\n',
@@ -105,12 +110,17 @@ class LexingParityTests(unittest.TestCase):
         for want in (("SQL-GRANT-ALL", "mask/dump.sql", 2), ("S-EVAL-JS", "mask/text.jsx", 2),
                      ("S-EVAL-JS", "mask/marker.jsx", 1), ("S-EVAL-PY", "py/unterminated.py", 1),
                      ("SC-UTF7", "enc/crlf7.py", 2), ("Q-ENCODING", "enc/cr_latin1.py", 1),
-                     ("SC-TRUNCATED", "enc/u32.py", 1), ("SC-TRUNCATED", "enc/uesc.py", 1),
+                     ("SC-TRUNCATED", "enc/u32.py", 1), ("SC-ESCAPE-CODEC", "enc/uesc.py", 1),
+                     ("S-EVAL-PY", "enc/uesc.py", 3), ("SC-ESCAPE-CODEC", "enc/ruesc.py", 1),
+                     ("S-EVAL-PY", "enc/ruesc.py", 4), ("SC-ESCAPE-CODEC", "enc/uesc_named.py", 1),
+                     ("SC-TRUNCATED", "enc/uesc_named.py", 1), ("SC-TRUNCATED", "enc/uesc_bad.py", 1),
                      ("S-CHMOD", "misc/chmod.py", 1), ("SQL-NOLOCK", "misc/fold.sql", 1),
                      ("SQL-DYNAMIC", "misc/fold.sql", 2), ("S-EVAL-JS", "misc/marker.js", 2),
                      ("S-EVAL-PY", "misc/u13.py", 1), ("S-EVAL-JS", "misc/u13.js", 2)):
             self.assertIn(want, found)
         self.assertNotIn(("S-EVAL-PY", "enc/ebcdic.py", 3), found)     # decoded as EBCDIC, as Python reads it
+        self.assertNotIn(("S-EVAL-PY", "enc/ruesc.py", 3), found)      # \x is not a raw_unicode_escape escape
+        self.assertNotIn(("SC-TRUNCATED", "enc/uesc.py", 1), found)
         self.assertEqual({f for _, f, _ in found if f.startswith("ext/")}, {"ext/.x.js"})
 
     def test_cli_integers_and_report_fields(self):

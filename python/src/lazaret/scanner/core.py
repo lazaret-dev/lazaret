@@ -47,6 +47,7 @@ import sys
 import threading
 import time
 import unicodedata
+import warnings
 
 try:
     from lazaret.scanner import flow as lazaret_flow  # interprocedural / cross-file taint (optional)
@@ -4760,8 +4761,8 @@ HOST_CODECS = frozenset(("mbcs", "oem"))
 CHARMAP_FIXES = {"palmos": {0x9B: "\u203a"}}
 #: Multi-byte codecs the npm engine decodes with the runtime's TextDecoder.
 #: With these, the single-byte codecs (scripts/make_codec_tables.py writes
-#: it Python's tables), UTF-7, Latin-1 and ASCII, both engines decode what a
-#: cookie names; any other codec (UTF-32, unicode-escape, ISO-2022-KR,
+#: it Python's tables), UTF-7, Latin-1, ASCII and the escape codecs, both
+#: engines decode what a cookie names; any other codec (UTF-32, ISO-2022-KR,
 #: Shift_JIS-2004, …) is read as UTF-8 by both, with SC-TRUNCATED.
 _TEXTDECODER_CODECS = frozenset((
     "utf-16", "utf-16-le", "utf-16-be", "shift_jis", "cp932", "euc_jp", "iso2022_jp",
@@ -4815,7 +4816,32 @@ def charmap_table(codec):
 
 def _decoded_by_both_engines(codec):
     return (codec in ("utf-7", "ascii", "iso8859-1", "charmap") or codec in _TEXTDECODER_CODECS
-            or charmap_table(codec) is not None)
+            or codec in ESCAPE_CODECS or charmap_table(codec) is not None)
+
+
+#: Codecs that decode escape sequences before Python reads the code: in a file
+#: that declares one, '\u000a' in a comment is a newline and '\u0065' is 'e'
+#: (SC-ESCAPE-CODEC). Both engines decode them (_decode_escapes).
+ESCAPE_CODECS = ("unicode-escape", "raw-unicode-escape")
+#: A \N escape: an N after an odd run of backslashes (linear: a run is
+#: tried only from the character before it).
+_NAMED_ESCAPE_RE = re.compile(rb"(?:^|[^\\])(?:\\\\)*\\N")
+
+
+def _decode_escapes(body, codec):
+    """`body` as Python's unicode_escape or raw_unicode_escape decodes it, or
+    None where the npm engine (encoding.js decodeEscapes) cannot decode it
+    exactly as Python does: a \\N{name} escape (it has no Unicode name table)
+    or an escape Python rejects, such as a short \\x or a backslash at the end
+    (the interpreter would not run the file)."""
+    if codec == "unicode-escape" and _NAMED_ESCAPE_RE.search(body):
+        return None
+    with warnings.catch_warnings():     # "invalid escape sequence" (kept as written)
+        warnings.simplefilter("ignore")
+        try:
+            return body.decode(codec)
+        except UnicodeDecodeError:
+            return None
 
 
 #: A surrogate code point: never text on its own (see decode_source).
@@ -4828,12 +4854,14 @@ def decode_source(data, lang=None):
 
       info = {"encoding": codec label, "reported": bool (-> Q-ENCODING),
               "utf7": bool (-> SC-UTF7), "cookieLine": n or None,
+              "escapes": True for an escape codec (-> SC-ESCAPE-CODEC),
               "undecoded": True when the codec is not decoded (-> SC-TRUNCATED)}
 
     FIX-SPEC 4 (BOM / NUL sniff) first; for Python source without a BOM or
     NUL, FIX-SPEC 15: a PEP 263 cookie naming a codec other than UTF-8 decodes
     with that codec (Q-ENCODING); UTF-7 additionally sets utf7 (a UTF-7
-    '+AAo-' is a newline, so code can hide inside a comment). An unknown codec
+    '+AAo-' is a newline, so code can hide inside a comment), and so do the
+    escape codecs ('\\u000a'). An unknown codec
     decodes as UTF-8 with replacement, and so does a codec the npm engine
     cannot decode exactly as Python does (undecoded: the file is not fully
     scanned). Never raises on content. Line endings are normalized to \\n, as
@@ -4862,17 +4890,24 @@ def decode_source(data, lang=None):
                 info.update(encoding=real, reported=True, cookieLine=line_no,
                             utf7=(real == "utf-7"
                                   or name.lower().replace("_", "-") in _UTF7_NAMES))
+                if real in ESCAPE_CODECS:
+                    info["escapes"] = True
                 if _decoded_by_both_engines(real):
                     codec = real
                 else:           # read as UTF-8, as the npm engine can only read it
                     info["undecoded"] = True
-    try:
-        text = body.decode(codec)
-    except Exception:                   # malformed input or a misbehaving codec:
-        try:                            # never abort the scan over content
-            text = body.decode(codec, "replace")
-        except Exception:
-            text = body.decode("utf-8", "replace")
+    text = _decode_escapes(body, codec) if codec in ESCAPE_CODECS else None
+    if codec in ESCAPE_CODECS and text is None:
+        info["undecoded"] = True        # read as UTF-8, as the npm engine can only read it
+        codec = "utf-8"
+    if text is None:
+        try:
+            text = body.decode(codec)
+        except Exception:               # malformed input or a misbehaving codec:
+            try:                        # never abort the scan over content
+                text = body.decode(codec, "replace")
+            except Exception:
+                text = body.decode("utf-8", "replace")
     fix = CHARMAP_FIXES.get(codec)
     if fix:
         text = text.translate(fix)
@@ -4906,6 +4941,19 @@ def encoding_issues(path, text, info):
              "why": "In UTF-7, '+AAo-' decodes to a newline: text that every editor, diff "
                     "and reviewer shows as a comment becomes executable code when Python "
                     "reads the file. No legitimate project needs a UTF-7 source file.",
+             "fix": "Re-save the file as UTF-8 and review the decoded text (the findings "
+                    "for this file are reported against it).",
+             "ref": "CWE-506 · Supply chain"}, path, info["cookieLine"] or 1, lines,
+            redactor=red))
+    if info.get("escapes"):
+        out.append(mk_issue(
+            {"id": "SC-ESCAPE-CODEC", "name": "Escape-sequence source encoding", "type": "HOTSPOT",
+             "sev": "CRITICAL",
+             "msg": f"Python source declares {info['encoding']}; code can hide in escape sequences.",
+             "why": "Python decodes this file's escape sequences before it reads the code: "
+                    "'\\u000a' is a newline and '\\u0065' is 'e', so text that every editor, "
+                    "diff and reviewer shows as a comment or a string escape becomes executable "
+                    "code. No legitimate project needs this source encoding.",
              "fix": "Re-save the file as UTF-8 and review the decoded text (the findings "
                     "for this file are reported against it).",
              "ref": "CWE-506 · Supply chain"}, path, info["cookieLine"] or 1, lines,

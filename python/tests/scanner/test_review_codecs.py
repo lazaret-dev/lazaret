@@ -5,6 +5,8 @@ TextDecoder, which has no label for 63 of the codecs Python decodes (cp037,
 cp500, cp437, cp850, the mac_* family, utf-32, unicode-escape, …): they
 reported "detected cp037" and then read the file as UTF-8, so
 `# coding: cp037` + `x = eval(input())` gave S-EVAL-PY / T-CODE in npm only.
+(unicode-escape and raw-unicode-escape now decode in both engines too: see
+test_review_escape_codecs.py.)
 Where a label existed, its table was not always Python's (cp1252's undefined
 bytes, cp866, tis-620; no ISO-8859-16 at all). Now:
 
@@ -52,12 +54,14 @@ def cookie_file(name):
 def core_view(data):
     text, info = core.decode_source(data, "py")
     return {"text": text, "encoding": info["encoding"], "reported": info["reported"],
-            "utf7": info["utf7"], "cookieLine": info["cookieLine"], "undecoded": bool(info.get("undecoded"))}
+            "utf7": info["utf7"], "cookieLine": info["cookieLine"], "undecoded": bool(info.get("undecoded")),
+            "escapes": bool(info.get("escapes"))}
 
 
 def js_view(r):
     return {"text": core.normalize_newlines(r["text"]), "encoding": r["encoding"], "reported": r["reported"],
-            "utf7": r["utf7"], "cookieLine": r["cookieLine"], "undecoded": bool(r.get("undecoded"))}
+            "utf7": r["utf7"], "cookieLine": r["cookieLine"], "undecoded": bool(r.get("undecoded")),
+            "escapes": bool(r.get("escapes"))}
 
 
 def aliases():
