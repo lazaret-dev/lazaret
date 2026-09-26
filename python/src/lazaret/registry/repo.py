@@ -1019,7 +1019,7 @@ def _iter_zip(data, artifact, budget, anomalies):
             NotImplementedError, RuntimeError) as exc:
         yield Member("(archive)", 0, b"", "corrupt", f"not a readable zip archive ({type(exc).__name__})")
         return
-    seen, by_rel, links, count, last = {}, {}, [], 0, "(archive)"
+    seen, count, last = {}, 0, "(archive)"
 
     def read(info, limit):
         with zf.open(info) as fh:
@@ -1044,9 +1044,14 @@ def _iter_zip(data, artifact, budget, anomalies):
                     yield Member(rel, 0, b"", "files")
                     return
                 if _zip_is_symlink(info):
-                    links.append((info, rel))
-                    continue
-                by_rel[rel] = info
+                    # pip ignores a zip entry's symlink mode bits: it installs
+                    # the stored bytes as a regular file (wheels and zip sdists
+                    # alike), so those bytes are what is scanned. Lazaret used to
+                    # read them as a link target and skip the entry when no
+                    # member had that name: code pip installs went unscanned.
+                    anomalies.append(("ziplink", rel, "pip installs its stored bytes as a regular "
+                                                      "file, which is what was scanned; unzip "
+                                                      "would create a symlink instead"))
                 _note_member(seen, rel, anomalies)
                 last = rel
                 try:
@@ -1059,37 +1064,6 @@ def _iter_zip(data, artifact, budget, anomalies):
                     yield Member(rel, SAMPLE, raw[:SAMPLE], "member")
                     continue
                 yield Member(rel, len(raw), raw, None)
-            for info, rel in links:
-                budget.check()
-                try:
-                    linkname = read(info, 4096).decode("utf-8", "replace")
-                except _ZIP_READ_ERRORS as exc:
-                    # where it points is unknown, so what it installs was not
-                    # scanned: INCOMPLETE, not an "outside the archive" WARN
-                    yield Member(rel, 0, b"", "corrupt",
-                                 f"link {rel} could not be read ({type(exc).__name__})")
-                    continue
-                target = _link_target(info.filename, linkname, True) if linkname else None
-                trel = canonical_member_path(target, artifact)[0] if target else None
-                if trel is None:
-                    anomalies.append(("link", rel, f"link to {linkname!r} points outside the archive"))
-                    continue
-                tinfo = by_rel.get(trel)
-                if tinfo is None:
-                    continue                                   # dangling inside the archive
-                _note_member(seen, rel, anomalies)
-                last = rel
-                try:
-                    raw = read(tinfo, MAX_MEMBER + 1)
-                except _ZIP_READ_ERRORS as exc:
-                    yield Member(rel, 0, b"", "corrupt",
-                                 f"link target {trel} of {rel} could not be read "
-                                 f"({type(exc).__name__})")
-                    continue
-                if len(raw) > MAX_MEMBER:
-                    yield Member(rel, SAMPLE, raw[:SAMPLE], "member")
-                else:
-                    yield Member(rel, len(raw), raw, None)
         except ArchiveLimit as lim:
             yield Member(last, 0, b"", lim.reason, lim.detail)
 
@@ -1318,6 +1292,10 @@ def _archive_issue(kind, path, detail):
         "link": ("SC-ARCHIVE-LINK", "Archive link leaves the package",
                  "A symlink or hardlink pointing outside the extraction directory can make "
                  "the installer read or overwrite files elsewhere on the machine."),
+        "ziplink": ("SC-ARCHIVE-LINK", "Zip entry marked as a symlink",
+                    "pip ignores the mark and installs the entry's bytes as a regular file, "
+                    "while unzip creates a symlink: the same archive installs differently, and "
+                    "no packaging tool produces one."),
         "path": ("SC-ARCHIVE-PATH", "Unsafe archive path",
                  "An entry with '..' in its path tries to escape the extraction directory; "
                  "installers refuse it, and no legitimate package tool produces one."),

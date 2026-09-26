@@ -144,28 +144,26 @@ def zip_with_bad_crc(files, symlinks, bad):
 
 
 class ZipLinkReadTests(unittest.TestCase):
-    """Final-review item 7 (repo.py audit): a zip symlink whose own entry
-    could not be read was reported as "link to '' points outside the
-    archive" — SC-ARCHIVE-LINK, a WARN — although what it installs was never
-    scanned; and a link whose TARGET could not be read raised out of the
-    archive reader, failing the whole package instead of marking it."""
+    """Final-review item 7 (repo.py audit): a zip entry marked as a symlink
+    whose bytes could not be read must make the scan INCOMPLETE, never a clean
+    or WARN verdict, and must not fail the whole package. pip installs such an
+    entry's stored bytes as a regular file, so it is read like any member."""
 
-    def test_unreadable_link_is_incomplete_not_warn(self):
+    def test_unreadable_link_entry_is_incomplete(self):
         data = zip_with_bad_crc({"x-1.0/x/__init__.py": "V = 1\n"},
                                 {"x-1.0/x/run.py": "__init__.py"}, bad="x-1.0/x/run.py")
         res = scan_bytes(data, container="zip", artifact="sdist", eco="pypi")
         self.assertEqual(res["verdict"], "INCOMPLETE", res["issues"])
-        self.assertFalse(any(i["rule"] == "SC-ARCHIVE-LINK" for i in res["issues"]))
-        self.assertTrue(any("link x/run.py could not be read" in i["msg"]
+        self.assertTrue(any("member x/run.py could not be read" in i["msg"]
                             for i in res["issues"] if i["rule"] == "SC-TRUNCATED"))
 
-    def test_unreadable_link_target_is_incomplete_not_an_error(self):
+    def test_an_unreadable_member_next_to_a_link_entry_is_incomplete(self):
         data = zip_with_bad_crc({"x-1.0/x/__init__.py": "V = 1\n"},
                                 {"x-1.0/x/run.py": "__init__.py"}, bad="x-1.0/x/__init__.py")
         res = scan_bytes(data, container="zip", artifact="sdist", eco="pypi")
         self.assertEqual(res["verdict"], "INCOMPLETE")
         msgs = [i["msg"] for i in res["issues"] if i["rule"] == "SC-TRUNCATED"]
-        self.assertTrue(any("link target x/__init__.py of x/run.py" in m for m in msgs), msgs)
+        self.assertTrue(any("member x/__init__.py could not be read" in m for m in msgs), msgs)
 
 
 if __name__ == "__main__":
