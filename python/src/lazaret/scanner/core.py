@@ -59,21 +59,25 @@ from lazaret.scanner import taintspec  # taint-config validation shared by both 
 
 
 def configure_stdio():
-    """Never crash while printing. Reports use characters such as the check
-    and cross marks; a Windows console shows them fine, but redirected output
-    (a pipe, a file, CI logs) defaults to the ANSI code page (e.g. cp1252),
-    which cannot encode them, and print() would raise UnicodeEncodeError
-    mid-report. There, write UTF-8 instead. Everywhere, replace anything a
-    stream can't encode rather than raising. An explicit PYTHONIOENCODING is
-    respected. Called at the start of every CLI entry point."""
+    """Never crash while printing, and print the same bytes on every platform.
+
+    Reports use characters such as the check and cross marks. Redirected
+    output (a pipe, a file, CI logs) otherwise takes its encoding from the
+    host: the ANSI code page on Windows (cp1252, which can't encode them —
+    print() would raise mid-report), and the locale elsewhere (ASCII under a
+    bare C locale). So redirected output is always written as UTF-8, unless
+    PYTHONIOENCODING explicitly asks for something else. A terminal keeps its
+    own encoding (the Windows console is Unicode already). Everywhere,
+    characters a stream can't encode are replaced rather than raised. Called
+    at the start of every CLI entry point."""
+    explicit = bool(os.environ.get("PYTHONIOENCODING"))
     for stream, errors in ((sys.stdout, "replace"), (sys.stderr, "backslashreplace")):
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is None:
             continue
         try:
-            redirected_on_windows = (sys.platform == "win32" and not stream.isatty()
-                                     and not os.environ.get("PYTHONIOENCODING"))
-            if redirected_on_windows:
+            encoding = (getattr(stream, "encoding", None) or "").lower().replace("_", "-")
+            if not explicit and not stream.isatty() and encoding not in ("utf-8", "utf8"):
                 reconfigure(encoding="utf-8", errors=errors)
             else:
                 reconfigure(errors=errors)
@@ -3454,13 +3458,19 @@ class _NotRegularFile(OSError):
 
 
 def _fs_display(path):
-    """A path as valid UTF-8 text. Non-UTF-8 names (surrogate-escaped by
-    os.scandir on POSIX) become backslash escapes, e.g. 'bad\\xff.py'."""
+    """A path as valid UTF-8 text, the same on every host. On POSIX a name is
+    bytes; it is shown as those bytes read as UTF-8, with anything that isn't
+    UTF-8 as a backslash escape ('bad\\xff.py') — never as the host locale
+    would decode it (under a Latin-1 locale os.scandir says 'bad\u00ffy.py'
+    for the same file). Windows names are Unicode already; only unpaired
+    surrogates need escaping there."""
+    if os.name != "nt":
+        return os.fsencode(path).decode("utf-8", "backslashreplace")
     try:
         path.encode("utf-8")
         return path
     except UnicodeEncodeError:
-        return os.fsencode(path).decode("utf-8", "backslashreplace")
+        return path.encode("utf-8", "backslashreplace").decode("utf-8")
 
 
 def _safe_text(s):

@@ -83,12 +83,12 @@ def build_js_stub(name, out_dir):
         "main": "index.js", "files": ["index.js", "README.md"],
         "homepage": HOMEPAGE, "license": "Apache-2.0", "publishConfig": {"access": "public"},
     }
-    with open(os.path.join(out_dir, "package.json"), "w") as f:
+    with open(os.path.join(out_dir, "package.json"), "w", encoding="utf-8", newline="\n") as f:
         json.dump(package, f, indent=2)
         f.write("\n")
-    with open(os.path.join(out_dir, "index.js"), "w") as f:
+    with open(os.path.join(out_dir, "index.js"), "w", encoding="utf-8", newline="\n") as f:
         f.write(f"throw new Error({json.dumps(message(name))});\n")
-    with open(os.path.join(out_dir, "README.md"), "w") as f:
+    with open(os.path.join(out_dir, "README.md"), "w", encoding="utf-8", newline="\n") as f:
         f.write(f"# {name}\n\n{message(name)}\n\n    npm install lazaret\n")
     return out_dir
 
@@ -151,7 +151,26 @@ def check_names(names, fetch=_fetch_json, out=sys.stdout):
     return 0
 
 
+
+def _configure_stdio():
+    """Same policy as lazaret.scanner.core.configure_stdio (STRUCTURE.md,
+    "Cross-platform rules"): redirected output is UTF-8 on every platform
+    unless PYTHONIOENCODING says otherwise; nothing ever raises on a
+    character the stream can't encode."""
+    explicit = bool(os.environ.get("PYTHONIOENCODING"))
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            encoding = (getattr(stream, "encoding", None) or "").lower().replace("_", "-")
+            if not explicit and not stream.isatty() and encoding not in ("utf-8", "utf8"):
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            else:
+                stream.reconfigure(errors="replace")
+        except (AttributeError, OSError, ValueError):
+            pass
+
+
 def main(argv=None):
+    _configure_stdio()
     args = sys.argv[1:] if argv is None else list(argv)
     if args[:1] == ["--check"]:
         return check_names(args[1:] or DEFAULT_NAMES)
