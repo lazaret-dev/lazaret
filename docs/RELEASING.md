@@ -9,7 +9,6 @@ Do these in order. Everything here is one-time.
 1. **Accounts and orgs.** The `lazaret-dev` org exists on GitHub and the `lazaret-dev` group on GitLab.
    - GitHub org → Settings → Authentication security → require two-factor authentication. Do the same for the GitLab group (Settings → General → Permissions).
    - GitHub org → Settings → Verified and approved domains → add `lazaret.dev` (DNS TXT record at your registrar).
-   - Set up a signing key for release tags (see *Signing key* below). `scripts/tag-release.sh` refuses to make an unsigned tag, and the release workflow refuses to publish from one.
 
 2. **Create the repos and push.**
    - Create `lazaret-dev/lazaret` on GitHub (public, empty, no README) and `lazaret-dev/lazaret` on GitLab (empty).
@@ -66,19 +65,17 @@ Do these in order. Everything here is one-time.
 
 8. **Trademark.** Search "LAZARET" in Classes 9 and 42 at tmsearch.uspto.gov. (`github.com/lazaret` belongs to an unrelated archaeology lab in Nice; that's why the org is `lazaret-dev`.)
 
-## Signing key
+## Signing tags (optional)
 
-Release tags are signed. SSH signing (git 2.34 or later) reuses the key you already push with:
+Release tags don't need a signature: the tag ruleset (only maintainers can create `v*` tags), the environment approvals, trusted publishing and npm's 2FA stage approval are what protect a release. If you want tags to show as Verified on GitHub anyway, turn on signing once and `scripts/tag-release.sh` signs automatically. SSH signing (git 2.34 or later) reuses the key you already push with, no GPG needed:
 
 ```sh
 git config --global gpg.format ssh
 git config --global user.signingkey ~/.ssh/id_ed25519.pub
-# lets `git tag -v` verify your own signatures:
-echo "$(git config user.email) $(cat ~/.ssh/id_ed25519.pub)" >> ~/.ssh/allowed_signers
-git config --global gpg.ssh.allowedSignersFile ~/.ssh/allowed_signers
+git config --global tag.gpgSign true
 ```
 
-Add the same public key to GitHub (Settings → SSH and GPG keys → New SSH key → Key type: **Signing Key**) and to GitLab (Preferences → SSH Keys → Usage type: Signing), so the tags show as Verified. A GPG key works too: `git config --global user.signingkey <KEY-ID>`.
+Then add the same public key to GitHub as a **Signing Key** (Settings → SSH and GPG keys → New SSH key → Key type).
 
 ## Mirroring to GitLab
 
@@ -104,13 +101,13 @@ Anything merged through the GitHub web UI reaches GitLab the next time you pull 
    git switch main && git pull
    sh scripts/tag-release.sh                # or: sh scripts/tag-release.sh v0.2.0
    ```
-   The script refuses uncommitted changes, a HEAD that isn't on `origin/main` (it fetches first), committed versions that disagree or don't match the tag (`scripts/check-versions.sh HEAD vX.Y.Z`), and a tag name that already exists locally or on `origin`. It then creates an annotated, signed tag. Without a working signing key it stops; it never makes an unsigned tag. It does not push.
+   The script refuses uncommitted changes, a HEAD that isn't on `origin/main` (it fetches first), committed versions that disagree or don't match the tag (`scripts/check-versions.sh HEAD vX.Y.Z`), and a tag name that already exists locally or on `origin`. It then creates an annotated tag (signed as well if you turned on `tag.gpgSign`; see *Signing tags*). It does not push.
 3. Push that one tag, with the command the script printed:
    ```sh
    git push origin refs/tags/v0.2.0         # both push URLs: GitHub and GitLab
    ```
 4. The tag triggers `.github/workflows/release.yml`:
-   - `verify-tag` fails the release unless the tagged commit is on `main`, the tag is annotated and signed, and the versions committed at the tag match it;
+   - `verify-tag` fails the release unless the tagged commit is on `main`, the tag is annotated (not a lightweight tag), and the versions committed at the tag match it;
    - the full test suite runs (`ci.yml`);
    - `build-python` builds the wheel and sdist with Lazaret's own stdlib backend (stamped with the tagged commit's time, so rebuilding a tag is byte-identical), and `build-npm` packs the npm tarball;
    - only when **both** builds succeed do the publish jobs start, each waiting for your approval on its environment (`pypi`, `npm`).
@@ -147,7 +144,7 @@ Re-point a tag only if **nothing was published from it**. PyPI and npm versions 
    - If a GitHub Release named v0.1.0 was created, deleting the tag turns it into a draft: delete it on the Releases page.
    - GitHub served "Source code (zip / tar.gz)" archives for v0.1.0 generated from `8b63318` (0.0.1 code). They disappear with the tag, and the new tag's archives are generated from the new commit, so anything downloaded before now is not what 0.1.0 is. Don't publish checksums of those archives.
    - The failed release run for the old tag can stay in the Actions history; don't re-run it.
-5. Get the fixed commit onto `main` and tag it (set up a signing key first if you haven't: see *Signing key*; the release workflow now rejects unsigned tags):
+5. Get the fixed commit onto `main` and tag it:
    ```sh
    git switch main && git pull              # main now has the fixes and "Bump version to 0.1.0"
    sh scripts/check-versions.sh HEAD v0.1.0 # expect: python: 0.1.0  npm: 0.1.0 ... tag: v0.1.0 matches

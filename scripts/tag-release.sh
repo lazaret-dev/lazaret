@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# Creates the signed release tag for the commit you are on. It never pushes.
+# Creates the release tag for the commit you are on. It never pushes.
 #
 #   scripts/tag-release.sh [vX.Y.Z]      (default: v<the committed version>)
 #
@@ -12,8 +12,9 @@
 #   - the Python and npm versions committed at HEAD agree and match the tag
 #     (scripts/check-versions.sh HEAD vX.Y.Z);
 #   - the tag exists neither locally nor on the remote.
-# Then creates an annotated tag signed with your git signing key (git tag -s).
-# Without a working key it stops: it never falls back to an unsigned tag.
+# Then creates an annotated tag (it records who tagged, when, and a message;
+# the release workflow refuses lightweight tags). No signing key is needed. If
+# you set tag.gpgSign=true in git, the tag is signed as well.
 # Finally prints the command that pushes this one tag and nothing else.
 #
 # Environment: RELEASE_REMOTE (default origin), RELEASE_BRANCH (default main).
@@ -83,27 +84,20 @@ if git remote get-url "$remote" >/dev/null 2>&1; then
   fi
 fi
 
-# 5. Signed, annotated tag. No key, no tag.
-if ! git tag -s "$tag" -m "Lazaret $tag"; then
+# 5. Annotated tag (signed too if you configured tag.gpgSign).
+if ! git tag -a "$tag" -m "Lazaret $tag"; then
   git tag -d "$tag" >/dev/null 2>&1 || true
-  fail "git could not sign the tag, so no tag was created (release tags are always signed).
-Set up a signing key, then run this again. SSH is simplest:
-    git config --global gpg.format ssh
-    git config --global user.signingkey ~/.ssh/id_ed25519.pub
-or GPG:
-    git config --global user.signingkey <KEY-ID>
-Add the same key to GitHub as a *signing* key so the tag shows as Verified."
+  fail "git could not create the tag $tag, so no tag was created.
+(If you set tag.gpgSign=true, git also needs a working signing key.)"
 fi
-if [ "$(git cat-file -t "$tag")" != "tag" ] \
-   || ! git cat-file tag "$tag" | grep -Eq '^-----BEGIN (PGP|SSH) SIGNATURE-----|^-----BEGIN SIGNED MESSAGE-----'; then
+if [ "$(git cat-file -t "$tag")" != "tag" ]; then
   git tag -d "$tag" >/dev/null
-  fail "the new tag carried no signature, so it was deleted again"
+  fail "the new tag is not an annotated tag, so it was deleted again"
 fi
 
 push_urls=$(git remote get-url --push --all "$remote" 2>/dev/null || true)
 echo
-echo "Created signed tag $tag -> $(git rev-parse --short HEAD) ($(git log -1 --format=%s HEAD))"
-echo "Verify it:  git tag -v $tag"
+echo "Created tag $tag -> $(git rev-parse --short HEAD) ($(git log -1 --format=%s HEAD))"
 echo
 echo "Push this one tag (never --tags, which pushes every local tag):"
 echo "    git push $remote refs/tags/$tag"

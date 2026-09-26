@@ -20,8 +20,8 @@ permissions:
   contents: read
 
 jobs:
-  # The tag must be what scripts/tag-release.sh makes: an annotated, signed
-  # tag on a commit that is on main, whose committed versions match the tag.
+  # The tag must be what scripts/tag-release.sh makes: an annotated tag on a
+  # commit that is on main, whose committed versions match the tag.
   verify-tag:
     runs-on: ubuntu-latest
     steps:
@@ -41,15 +41,10 @@ jobs:
             exit 1
           fi
           echo "${GITHUB_REF_NAME} -> ${commit} is on main"
-      - name: Tag is annotated and signed
+      - name: Tag is annotated
         run: |
           if [ "$(git cat-file -t "refs/tags/${GITHUB_REF_NAME}")" != "tag" ]; then
-            echo "::error::${GITHUB_REF_NAME} is a lightweight tag. Release tags are annotated and signed: use scripts/tag-release.sh."
-            exit 1
-          fi
-          if ! git cat-file tag "refs/tags/${GITHUB_REF_NAME}" \
-               | grep -Eq '^-----BEGIN (PGP|SSH) SIGNATURE-----|^-----BEGIN SIGNED MESSAGE-----'; then
-            echo "::error::${GITHUB_REF_NAME} is not signed. Release tags are signed: use scripts/tag-release.sh."
+            echo "::error::${GITHUB_REF_NAME} is a lightweight tag. Release tags are annotated: use scripts/tag-release.sh."
             exit 1
           fi
       - name: Committed versions match the tag

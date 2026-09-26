@@ -152,8 +152,10 @@ class TagReleaseTests(RepoCase):
         return self.run_script("tag-release.sh", *args)
 
     def use_signer(self, program):
+        """Opt in to signing the way RELEASING.md describes (tag.gpgSign)."""
         self.git("config", "gpg.program", program)
         self.git("config", "user.signingkey", "FAKEKEY")
+        self.git("config", "tag.gpgSign", "true")
 
     def assertNoTags(self):
         self.assertEqual(self.git("tag", "-l"), "")
@@ -185,16 +187,35 @@ class TagReleaseTests(RepoCase):
         self.assertIn("vX.Y.Z", p.stderr)
         self.assertNoTags()
 
-    def test_never_creates_an_unsigned_tag(self):
-        self.use_signer("false")               # a signing program that always fails
+    def test_creates_an_annotated_tag_without_a_signing_key(self):
+        # Release tags need no signature (the tag ruleset, environment
+        # approvals, trusted publishing and npm's 2FA stage approval protect a
+        # release); they must be annotated, which the release workflow checks.
+        self.git("config", "tag.gpgSign", "false")
+        p = self.tag()
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(self.git("cat-file", "-t", "v0.0.1"), "tag")
+        self.assertIn("Lazaret v0.0.1", self.git("cat-file", "tag", "v0.0.1"))
+        self.assertNotIn("SIGNATURE-----", self.git("cat-file", "tag", "v0.0.1"))
+        self.assertEqual(self.git("rev-parse", "v0.0.1^{commit}"), self.git("rev-parse", "HEAD"))
+        self.assertIn("git push origin refs/tags/v0.0.1", p.stdout)
+        self.assertNotIn("--tags\n", p.stdout)
+        self.assertEqual(self.git("ls-remote", "--tags", "origin"), "")   # it never pushes
+        # a second run refuses: the tag exists locally
         p = self.tag()
         self.assertEqual(p.returncode, 1)
-        self.assertIn("could not sign the tag, so no tag was created", p.stderr)
-        self.assertIn("gpg.format ssh", p.stderr)
+        self.assertIn("already exists locally", p.stderr)
+
+    def test_a_failing_opt_in_signer_leaves_no_tag(self):
+        self.use_signer("false")               # tag.gpgSign on, signer always fails
+        p = self.tag()
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("could not create the tag", p.stderr)
+        self.assertIn("tag.gpgSign", p.stderr)
         self.assertNoTags()
 
     @unittest.skipIf(sys.platform == "win32", "the fake signer is a shell script")
-    def test_creates_a_signed_annotated_tag_and_prints_a_single_tag_push(self):
+    def test_signs_the_tag_when_tag_gpgsign_is_on(self):
         signer = os.path.join(self._tmp.name, "fake-gpg")
         with open(signer, "w", newline="\n") as f:
             f.write(FAKE_SIGNER)
@@ -204,14 +225,6 @@ class TagReleaseTests(RepoCase):
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertEqual(self.git("cat-file", "-t", "v0.0.1"), "tag")
         self.assertIn("-----BEGIN PGP SIGNATURE-----", self.git("cat-file", "tag", "v0.0.1"))
-        self.assertEqual(self.git("rev-parse", "v0.0.1^{commit}"), self.git("rev-parse", "HEAD"))
-        self.assertIn("git push origin refs/tags/v0.0.1", p.stdout)
-        self.assertNotIn("--tags\n", p.stdout)
-        self.assertEqual(self.git("ls-remote", "--tags", "origin"), "")   # it never pushes
-        # a second run refuses: the tag exists locally
-        p = self.tag()
-        self.assertEqual(p.returncode, 1)
-        self.assertIn("already exists locally", p.stderr)
 
     def test_refuses_a_tag_that_is_already_on_the_remote(self):
         self.git("tag", "v0.0.1")
