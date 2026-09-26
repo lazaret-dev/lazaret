@@ -219,12 +219,11 @@ export function pyFloatRepr(x) {
   if (Number.isNaN(x)) return "nan";
   if (!Number.isFinite(x)) return x > 0 ? "inf" : "-inf";
   if (x === 0) return Object.is(x, -0) ? "-0.0" : "0.0";
-  const exp = Math.floor(Math.log10(Math.abs(x)));
-  if (exp >= 16 || exp < -4) {
-    let [m, e] = x.toExponential().split("e");
-    const n = parseInt(e, 10);
-    return `${m}e${n < 0 ? "-" : "+"}${String(Math.abs(n)).padStart(2, "0")}`;
-  }
+  // the exponent of the shortest digits themselves (log10 misjudges values
+  // next to a power of ten, e.g. 9999999999999998.0)
+  const [m, e] = x.toExponential().split("e");
+  const n = parseInt(e, 10);
+  if (n >= 16 || n < -4) return `${m}e${n < 0 ? "-" : "+"}${String(Math.abs(n)).padStart(2, "0")}`;
   const s = String(x);
   return /[.e]/.test(s) ? s : s + ".0";
 }
@@ -242,6 +241,51 @@ function pyReprValue(v) {
   if (typeof v === "string") return pyRepr(v);
   if (Array.isArray(v)) return "[" + v.map(pyReprValue).join(", ") + "]";
   return "{" + Object.entries(v).map(([k, x]) => `${pyRepr(k)}: ${pyReprValue(x)}`).join(", ") + "}";
+}
+
+// ---- Python values of a parsed manifest ------------------------------------
+// pyLiteralParse, and pyJsonParse with pyNumbers, keep Python's number kinds:
+// an int is a BigInt (exact at any size: 12345678901234567890 is not
+// 12345678901234567000), a float is a number (1.0 and -0.0 stay floats), a
+// complex a PyComplex. pyLiteralStr renders such values as Python's str().
+
+/** A Python complex number (literal_eval accepts `2j`, `-2j`, `1+2j`, `1.5-2j`). */
+export class PyComplex {
+  constructor(re, im) { this.re = re; this.im = im; }
+  toString() { return pyComplexRepr(this); }
+}
+
+// Python's str() of an int refuses more than 4300 digits (ValueError: core
+// then shows the int in hex, and so does pyIntStr).
+const INT_STR_LIMIT = 10n ** 4300n;
+/** str() of a Python int held as a BigInt. */
+export function pyIntStr(v) {
+  const a = v < 0n ? -v : v;
+  if (a < INT_STR_LIMIT) return v.toString();
+  return (v < 0n ? "-0x" : "0x") + a.toString(16);
+}
+// complex repr formats each part like a float repr without a trailing ".0"
+const complexPart = (x) => { const r = pyFloatRepr(x); return r.endsWith(".0") ? r.slice(0, -2) : r; };
+function pyComplexRepr(c) {
+  if (c.re === 0 && !Object.is(c.re, -0)) return complexPart(c.im) + "j";
+  const im = complexPart(c.im);
+  return "(" + complexPart(c.re) + (im.startsWith("-") ? "" : "+") + im + "j)";
+}
+
+/** Python str() of a value from pyLiteralParse / pyJsonParse(…, {pyNumbers: true}). */
+export function pyLiteralStr(v) {
+  return typeof v === "string" ? v : pyLiteralRepr(v);
+}
+function pyLiteralRepr(v) {
+  if (v === null || v === undefined) return "None";
+  if (v === true) return "True";
+  if (v === false) return "False";
+  if (typeof v === "bigint") return pyIntStr(v);
+  if (typeof v === "number") return pyFloatRepr(v);
+  if (typeof v === "string") return pyRepr(v);
+  if (v instanceof PyComplex) return pyComplexRepr(v);
+  if (Array.isArray(v)) return "[" + v.map(pyLiteralRepr).join(", ") + "]";
+  return "{" + Object.entries(v).map(([k, x]) => `${pyRepr(k)}: ${pyLiteralRepr(x)}`).join(", ") + "}";
 }
 
 /** Python round(x, 1): round-half-even on the exact binary value. */

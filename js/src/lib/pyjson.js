@@ -7,7 +7,7 @@
 //  * pyLiteralParse — ast.literal_eval for binding.gyp / .gypi files, which
 //    gyp reads as Python literals (single quotes, comments, trailing commas).
 
-import { MAX_JSON_DEPTH } from "./pycompat.js";
+import { MAX_JSON_DEPTH, PyComplex } from "./pycompat.js";
 
 class JsonError extends Error { constructor(pos) { super("json"); this.pos = pos; } }
 class DepthError extends Error {}
@@ -17,8 +17,10 @@ const ESC = { '"': '"', "\\": "\\", "/": "/", b: "\b", f: "\f", n: "\n", r: "\r"
 /**
  * json.loads(text) → {ok, value} | {ok: false, depth: true} | {ok: false, pos} (pos in UTF-16 units).
  * onKey(obj, key, pos), if given, is called as each member is stored (pos: its key's opening quote).
+ * pyNumbers: numbers keep Python's kinds, as json.loads(parse_int=core._json_int) makes them: an
+ * integer literal of up to 1000 characters is an int (a BigInt), anything else a float (a number).
  */
-export function pyJsonParse(text, onKey = null) {
+export function pyJsonParse(text, { onKey = null, pyNumbers = false } = {}) {
   const s = String(text);
   const n = s.length;
   const skip = (i) => { while (i < n && WS.has(s[i])) i++; return i; };
@@ -75,7 +77,9 @@ export function pyJsonParse(text, onKey = null) {
       while (i < n && s[i] >= "0" && s[i] <= "9") i++;
       if (i === d0) i = e0;
     }
-    return [Number(s.slice(start, i)), i];
+    const lit = s.slice(start, i);
+    if (pyNumbers && lit.length <= 1000 && !/[.eE]/.test(lit)) return [BigInt(lit), i];
+    return [Number(lit), i];
   }
   function value(i) {                          // scan_once: value at i → [v, next]
     if (i >= n) throw new JsonError(i);
@@ -157,15 +161,22 @@ export function jsonErrorWhere(text, pos) {
 
 // ---- ast.literal_eval (subset: what a gyp file can hold) -----------------------
 const MAX_LITERAL_DEPTH = 200;       // CPython's tokenizer: "too many nested parentheses"
+// Python's number tokens: hex/octal/binary integers; decimal integers,
+// floats (`1.`, `.5`, `1.e5`, `01.5`) and imaginary literals (`2j`, `01j`).
+const NUMBER_RE = /0[xX](?:_?[0-9a-fA-F])+|0[oO](?:_?[0-7])+|0[bB](?:_?[01])+|(?:[0-9](?:_?[0-9])*(?:\.(?:[0-9](?:_?[0-9])*)?)?|\.[0-9](?:_?[0-9])*)(?:[eE][-+]?[0-9](?:_?[0-9])*)?[jJ]?/y;
 class LitError extends Error {}
 class LitValueError extends Error {}
 
 /**
  * ast.literal_eval(text.strip()): strings (all prefixes except f, escapes,
- * adjacent concatenation, triple quotes), numbers (incl. hex/octal/binary,
- * underscores, unary +/-), True/False/None, lists, tuples, dicts, sets;
- * comments and trailing commas allowed. Dicts become objects, tuples and
- * sets arrays. Returns {ok, value} or {ok: false}. onKey(obj, key, pos), if
+ * adjacent concatenation, triple quotes), numbers with Python's kinds and
+ * token grammar (an int is a BigInt, a float a number, `2j` a PyComplex;
+ * hex/octal/binary, underscores; a decimal int of more than 4300 digits is
+ * refused, as Python's parser refuses it), a sign on a number literal (not
+ * `--1`), a real plus or minus an imaginary literal (`1+2j`),
+ * True/False/None, lists, tuples, dicts, sets; comments and trailing commas
+ * allowed. Dicts become objects, tuples and sets arrays. Returns
+ * {ok, value} or {ok: false}. onKey(obj, key, pos), if
  * given, is called as each string-keyed member is stored (pos: where the
  * key's first string token starts, as ast reports a Constant's position).
  */
@@ -235,17 +246,45 @@ export function pyLiteralParse(text, onKey = null) {
     }
     return out;
   }
-  function num() {
-    const m = /^(?:0[xX](?:_?[0-9a-fA-F])+|0[oO](?:_?[0-7])+|0[bB](?:_?[01])+|(?:\d(?:_?\d)*)?\.?\d(?:_?\d)*(?:[eE][-+]?\d(?:_?\d)*)?|\d(?:_?\d)*\.)[jJ]?/.exec(s.slice(i, i + 400));
-    if (!m || !m[0]) fail();
+  function num() {                     // one number token, as Python's tokenizer reads it
+    NUMBER_RE.lastIndex = i;
+    const m = NUMBER_RE.exec(s);
+    if (!m) fail();
     i += m[0].length;
     const t = m[0].replace(/_/g, "");
-    if (/[jJ]$/.test(t)) return Number(t.slice(0, -1));                  // complex: magnitude only
-    if (/^0[xX]/.test(t)) return parseInt(t.slice(2), 16);
-    if (/^0[oO]/.test(t)) return parseInt(t.slice(2), 8);
-    if (/^0[bB]/.test(t)) return parseInt(t.slice(2), 2);
-    if (/^0\d/.test(t) && !/[.eE]/.test(t) && /[1-9]/.test(t)) fail();    // leading zeros
-    return Number(t);
+    if (/[jJ]$/.test(t)) return new PyComplex(0, Number(t.slice(0, -1)));
+    if (/^0[xXoObB]/.test(t)) return BigInt(t);
+    if (/[.eE]/.test(t)) return Number(t);
+    if (/[1-9]/.test(t) && (t[0] === "0" || t.length > 4300)) fail();   // leading zeros; > 4300 digits
+    return BigInt(t);
+  }
+  function numOperand() {              // a number token, possibly parenthesized: what a sign applies to
+    ws();
+    if (s[i] === "(") {
+      if (++depth > MAX_LITERAL_DEPTH) fail();
+      i++;
+      const v = numOperand();
+      ws();
+      if (s[i] !== ")") fail();
+      i++;
+      depth--;
+      return v;
+    }
+    if (!/[0-9.]/.test(s[i] ?? "")) fail();
+    return num();
+  }
+  function complexSum(left) {          // `real + imag` / `real - imag`: a complex (literal_eval's BinOp)
+    ws();
+    const op = s[i];
+    if ((op !== "+" && op !== "-") || (typeof left !== "bigint" && typeof left !== "number")) return left;
+    i++;
+    const right = numOperand();
+    if (!(right instanceof PyComplex)) fail();
+    const re = Number(left);
+    if (!Number.isFinite(re) && typeof left === "bigint") fail();       // int too large to convert to float
+    // the real becomes complex(re, 0.0), then part by part (Python 3.10-3.13;
+    // 3.14 keeps the sign of the zero imaginary part in `x - 0j`)
+    return op === "+" ? new PyComplex(re + right.re, 0 + right.im) : new PyComplex(re - right.re, 0 - right.im);
   }
   function seq(close) {
     const items = [];
@@ -261,6 +300,9 @@ export function pyLiteralParse(text, onKey = null) {
     }
   }
   function value() {
+    return complexSum(atom());
+  }
+  function atom() {
     ws();
     if (i >= n) fail();
     const c = s[i];
@@ -332,7 +374,12 @@ export function pyLiteralParse(text, onKey = null) {
         else { lastStr = start; return out; }
       }
     }
-    if (c === "-" || c === "+") { i++; ws(); const v = value(); if (typeof v !== "number") fail(); return c === "-" ? -v : v; }
+    if (c === "-" || c === "+") {      // a sign applies to a number token only: not `--1`, `-True`, `-(1,)`
+      i++;
+      const v = numOperand();
+      if (c === "+") return v;
+      return v instanceof PyComplex ? new PyComplex(-v.re, -v.im) : -v;
+    }
     if (/[0-9.]/.test(c)) return num();
     const w = /^[A-Za-z_]\w*/.exec(s.slice(i, i + 256));
     if (w && ["True", "False", "None"].includes(w[0])) { i += w[0].length; return w[0] === "True" ? true : w[0] === "False" ? false : null; }

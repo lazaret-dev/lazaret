@@ -12,6 +12,10 @@ inert: commands are strings that are never run.
 * binding.gyp: at most GYP_MAX_HOOK_FINDINGS findings per file plus one
   summing up the rest, SC-TRUNCATED when a bound stops the walk, and an
   action reported on the line of its own "action" key.
+* binding.gyp literals: numbers keep Python's kind and digits (`1.0`,
+  `12345678901234567890`, `-0.0` were `1 12345678901234567000 0` in the npm
+  engine), `--1` is refused and `1+2j` accepted as ast.literal_eval does, and
+  an int past 4300 digits no longer crashes core's scan.
 """
 
 import os
@@ -50,6 +54,17 @@ GYP_TREE = {
     "big/binding.gyp": ("{'targets': [{'actions': [{'action': ['echo', 'marker']}]}],\n 'variables': {'list': ["
                         + "'v', " * 100000 + "]}}\n"),
     "long/binding.gyp": "{'v': '" + "<!(" * 20000 + "curl x'}\n",
+    "index.js": "module.exports = 1;\n",
+}
+
+NUMBER_TREE = {
+    "a/binding.gyp": "{'action': ['echo', 1.0, 12345678901234567890, -0.0]}\n",
+    "b/binding.gyp": "{'action': ['echo', 1.e5, 01.5, 0x_1F, 1e400, 9999999999999998.0, 1e16, 1e-5]}\n",
+    "c/binding.gyp": "{'action': ['echo', 2j, -2j, 1+2j, 1.5-2.5j, -(1), 0x10+1j]}\n",
+    "d/binding.gyp": '{"action": ["echo", 1, -0, 1.0, 2.50, 1E400, ' + "1" * 1200 + "]}\n",
+    "e/binding.gyp": "{'action': ['echo', -0x" + "f" * 5000 + "]}\n",
+    "binding.gyp": "{'targets': [{'actions': [{'action': ['echo', --1]}]}]}\n",       # root: unparseable
+    "f/binding.gyp": "{'action': ['echo', 1+2j+3j]}\n",                                 # nested: nothing
     "index.js": "module.exports = 1;\n",
 }
 
@@ -95,6 +110,18 @@ class SupplyChainParityTests(unittest.TestCase):
         self.assertEqual([i["line"] for i in found("json/binding.gyp")], [7])
         for rel in ("big/binding.gyp", "long/binding.gyp"):
             self.assertEqual(len(found(rel, "SC-TRUNCATED")), 1, rel)
+
+    def test_gyp_number_literals(self):
+        issues = self.scan_both(NUMBER_TREE, "binding.gyp numbers")
+        got = sorted((i["file"].replace("\\", "/"), i["rule"], i.get("cmd")) for i in issues)
+        self.assertEqual(got, [
+            ("a/binding.gyp", "SC-INSTALL-HOOK", "echo 1.0 12345678901234567890 -0.0"),
+            ("b/binding.gyp", "SC-INSTALL-HOOK", "echo 100000.0 1.5 31 inf 9999999999999998.0 1e+16 1e-05"),
+            ("binding.gyp", "SC-MANIFEST-UNPARSEABLE", None),
+            ("c/binding.gyp", "SC-INSTALL-HOOK", "echo 2j (-0-2j) (1+2j) (1.5-2.5j) -1 (16+1j)"),
+            ("d/binding.gyp", "SC-INSTALL-HOOK", "echo 1 0 1.0 2.5 inf inf"),
+            ("e/binding.gyp", "SC-INSTALL-HOOK", "echo -0x" + "f" * 5000),
+        ])
 
 
 if __name__ == "__main__":

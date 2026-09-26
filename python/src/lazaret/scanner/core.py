@@ -3761,6 +3761,39 @@ _GYP_MAX_COMMAND_CHARS = 2_000_000       # characters of action/expansion comman
 GYP_MAX_HOOK_FINDINGS = 100
 
 
+# str() refuses an int of more than 4300 digits (a long hex literal in an
+# action raised ValueError out of scan_gyp); such an int is shown in hex,
+# as the npm engine shows it (pycompat.js pyIntStr).
+_INT_STR_LIMIT = 10 ** 4300
+
+
+def _gyp_str(value):
+    """str(value) for an action argument, never refusing a large int."""
+    try:
+        return str(value)
+    except ValueError:
+        return _gyp_repr(value)
+
+
+def _gyp_repr(value):
+    if isinstance(value, int) and not isinstance(value, bool):
+        if abs(value) < _INT_STR_LIMIT:
+            try:
+                return repr(value)
+            except ValueError:             # a lower sys.set_int_max_str_digits()
+                pass
+        return hex(value)
+    if isinstance(value, list):
+        return "[" + ", ".join(_gyp_repr(v) for v in value) + "]"
+    if isinstance(value, tuple):
+        return "(" + ", ".join(_gyp_repr(v) for v in value) + ("," if len(value) == 1 else "") + ")"
+    if isinstance(value, dict):
+        return "{" + ", ".join(f"{_gyp_repr(k)}: {_gyp_repr(v)}" for k, v in value.items()) + "}"
+    if isinstance(value, (set, frozenset)):
+        return "{" + ", ".join(_gyp_repr(v) for v in value) + "}" if value else "set()"
+    return repr(value)
+
+
 def _gyp_expansion_commands(text):
     """The command of every expansion in `text`, in order: up to its balanced
     closing parenthesis, or to the end of the string. The closing parenthesis
@@ -3794,7 +3827,7 @@ def _gyp_commands(data):
         if isinstance(node, dict):
             for key, value in node.items():
                 if key == "action" and isinstance(value, (list, tuple)):
-                    cmd = " ".join(str(a) for a in value)
+                    cmd = " ".join(_gyp_str(a) for a in value)
                     out.append((cmd, "action", node))
                     chars += len(cmd)
                 stack.append(key)

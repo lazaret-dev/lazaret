@@ -6,7 +6,7 @@
 
 import { mkIssue } from "./issue.js";
 import { DEP_MARKERS, truncatedIssue } from "./fs.js";
-import { pyRe, pyRepr, pyStr, pyStrip, pyLstrip, cpLen, MAX_JSON_DEPTH, jsonDepthExceeds } from "./pycompat.js";
+import { pyRe, pyRepr, pyLiteralStr, pyStrip, pyLstrip, cpLen, PyComplex, MAX_JSON_DEPTH, jsonDepthExceeds } from "./pycompat.js";
 import { pyJsonParse, jsonErrorWhere, pyLiteralParse } from "./pyjson.js";
 import { REDACT, redactText, registerScanContext, SecretLiterals } from "./redact.js";
 
@@ -121,8 +121,11 @@ export function manifestUnparseableIssue(path, reason) {
       ref: "CWE-506 · Supply chain" }, path, 1, []);
 }
 
+// the parsers keep Python's number kinds: an int is a BigInt, a float a number
 const pyTypeName = (v) => (v === null ? "NoneType" : Array.isArray(v) ? "list" : typeof v === "string" ? "str"
-  : typeof v === "boolean" ? "bool" : typeof v === "number" ? (Number.isInteger(v) ? "int" : "float") : "dict");
+  : typeof v === "boolean" ? "bool" : typeof v === "bigint" ? "int" : typeof v === "number" ? "float"
+  : v instanceof PyComplex ? "complex" : "dict");
+const isDict = (v) => v !== null && typeof v === "object" && !Array.isArray(v) && !(v instanceof PyComplex);
 
 /**
  * Parse manifest-shaped, attacker-controlled text the way the package
@@ -153,23 +156,18 @@ function loadManifestWhere(path, content, { pythonLiteral = false, locate = null
   if (jsonDepthExceeds(text)) return [null, [manifestDepthIssue(path)], new Map()];
   let data = null, reason = null, litType = null, where = new Map();
   const onKey = (base) => (locate === null ? null : (obj, key, at) => { if (key === locate) where.set(obj, base + at); });
-  const r = pyJsonParse(text, onKey(0));
+  // json.loads(parse_int=_json_int): an integer literal up to 1000 characters is a Python int
+  const r = pyJsonParse(text, { onKey: onKey(0), pyNumbers: true });
   if (r.depth) return [null, [manifestDepthIssue(path)], new Map()];
-  if (r.ok) {
-    data = r.value;
-    // json.loads(parse_int=_json_int): an integer literal up to 1000 characters is a Python int
-    if (typeof data === "number") {
-      const lit = pyStrip(text);
-      litType = /^-?(?:0|[1-9]\d*)$/.test(lit) && lit.length <= 1000 ? "int" : "float";
-    }
-  } else reason = `JSONDecodeError: ${jsonErrorWhere(text, r.pos)}`;
+  if (r.ok) data = r.value;
+  else reason = `JSONDecodeError: ${jsonErrorWhere(text, r.pos)}`;
   if (data === null && pythonLiteral) {
     where = new Map();                          // nothing from a failed JSON parse
     const lit = pyLiteralParse(pyStrip(text), onKey(text.length - pyLstrip(text).length));
     if (lit.ok) { data = lit.value; reason = null; litType = lit.type; }
     else reason ||= lit.error;
   }
-  if (data === null || typeof data !== "object" || Array.isArray(data)) {
+  if (!isDict(data)) {
     if (data !== null) reason = `top level is a ${litType ?? pyTypeName(data)}, not an object`;
     return [null, root ? [manifestUnparseableIssue(path, reason || "unparseable")] : [], new Map()];
   }
@@ -252,10 +250,10 @@ function gypCommands(data) {
     seen++;
     if (Array.isArray(node)) {
       for (const x of node) stack.push(x);
-    } else if (node && typeof node === "object") {
+    } else if (isDict(node)) {
       for (const [key, value] of Object.entries(node)) {
         if (key === "action" && Array.isArray(value)) {
-          const cmd = value.map(pyStr).join(" ");
+          const cmd = value.map(pyLiteralStr).join(" ");
           out.push([cmd, "action", node]);
           chars += cpLen(cmd);
         }
