@@ -1,7 +1,7 @@
 // Metrics & ratings — twin of lazaret.scanner.core compute_metrics /
 // worst_sev_rating / maintainability_rating.
 
-import { lexLines } from "./lexer.js";
+import { lexLines, jsxReading } from "./lexer.js";
 import { pyStrip, pyRound1 } from "../lib/pycompat.js";
 import { normalizeNewlines } from "../lib/fs.js";
 
@@ -13,7 +13,7 @@ export function computeMetrics(files) {
   for (const f of nonDep) {
     const key = f.path ?? f.name;                // CLI files carry `path`, library callers `name`
     const lines = normalizeNewlines(String(f.content ?? "")).split("\n");   // (no U+2028 split: core.compute_metrics)
-    const lex = lexLines(lines, f.lang);
+    const lex = lexLines(lines, f.lang, null, { jsx: jsxReading(key) });
     const code = [];
     for (let i = 0; i < lines.length; i++) {
       const t = pyStrip(lines[i]);

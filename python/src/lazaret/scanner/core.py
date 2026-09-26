@@ -46,9 +46,7 @@ import re
 import sys
 import threading
 import time
-import tokenize
 import unicodedata
-import warnings
 
 try:
     from lazaret.scanner import flow as lazaret_flow  # interprocedural / cross-file taint (optional)
@@ -1091,7 +1089,7 @@ def taint_scan(path, lines, lang, ctx=None):
     if lang not in TAINT_SOURCES:   # SQL and others: pattern rules only, no taint flow
         return []
     if ctx is None or ctx.lines is not lines:
-        ctx = _FileCtx(lines, lang)
+        ctx = _FileCtx(lines, lang, jsx=jsx_reading(path))
     # Each line is matched with its comment text removed: `/**/const d =
     # req.query.x` is an assignment, and `x = 1  // req.query` is not a source.
     # (Match text: NFKC for Python, decoded identifier escapes for JS.)
@@ -1657,8 +1655,35 @@ def skipped_tree_issues(skipped=None):
 # PUBLIC;` or a `  * eval(…)` continuation line were skipped by every rule.
 # Comment state is now tracked ACROSS lines by a small lexer that knows the
 # language's strings and comments; a line is a comment line only if every
-# non-whitespace character on it is inside a comment. Python uses the real
-# tokenizer where the file tokenizes, and falls back to the lexer otherwise.
+# non-whitespace character on it is inside a comment.
+#
+# Fail closed where the same text reads two ways (review): a character is a
+# comment only if BOTH readings of its language say so, so code that some
+# runtime executes is never hidden as a comment, and a string can never pass
+# for a comment holding a suppression marker. Each file is lexed twice and
+# the comment spans (and, for JavaScript, the '…' "…" string spans) are
+# intersected:
+#   py : the lexer below, and again with f-strings (and t-strings) as
+#        Python 3.12+ reads them (PEP 701): a replacement field may hold
+#        strings in the same quotes, comments and newlines, and nothing in an
+#        f-string is a comment. Python's own tokenizer is not used: it differs
+#        across the supported versions (a comment line in a triple-quoted
+#        f-string's field is a COMMENT on 3.12+ only; an unterminated string
+#        ends a line on 3.10/3.11 and fails the whole file on 3.12+), and the
+#        npm engine cannot run it.
+#   js : the lexer below, and again reading JSX (not in .ts files, where
+#        TypeScript parses none): in element text `//` and `/*` are text
+#        (`<p>see /api/*</p>` opened a block comment that hid the rest of the
+#        file) and attribute strings have no escapes; `{…}` holds code again.
+#        An element starts at `<` + a tag name (or `>`) where an expression may
+#        start: the regex positions below, after `default`, `)` or `]`. Text
+#        no JSX toolchain accepts ends that reading at once (a `>` or `}` in
+#        element text, anything but attributes in a tag), so a TypeScript
+#        `<T>(x: T) => x` is code again at its `=>`.
+#   sql: the lexer below (standard SQL), and again as MySQL reads it:
+#        backslash escapes in '…' and "…", `…` quoted names, and `/*! … */`
+#        (`/*M! … */`) is code MySQL executes (a mysqldump line
+#        `('O\'Brien','src/*.js');` opened a comment that hid the next GRANT).
 #
 # Lexer semantics (mirrored by the JS engine):
 #   py : '#' to end of line; '…' "…" end at end of line unless the newline is
@@ -1675,7 +1700,7 @@ def skipped_tree_issues(skipped=None):
 #   sql: '--' to end of line; '/* … */' spans lines; '…' and "…" span lines,
 #        no backslash escapes ('' is two adjacent strings, same result).
 #   other/unknown (lang None): '#' and '//' line comments, '/* … */', and
-#        '…' "…" `…` strings ending at end of line.
+#        '…' "…" `…` strings ending at end of line (lexed once).
 # Unterminated block comments and strings run to end of file.
 
 _LEX_NEXT = {
@@ -1696,6 +1721,11 @@ _LEX_STR = {
     (None, "'"): _LEX_LINE_STR["'"], (None, '"'): _LEX_LINE_STR['"'],
     (None, "`"): _LEX_LINE_STR["`"],
 }
+# SQL as MySQL reads it
+_LEX_MYSQL_NEXT = re.compile(r"--|/\*|['\"`]")
+_LEX_MYSQL_STR = {"'": re.compile(r"'(?:[^'\\]|\\.)*'?", re.S),
+                  '"': re.compile(r'"(?:[^"\\]|\\.)*"?', re.S),
+                  "`": re.compile(r"`[^`]*`?")}
 _JS_REGEX_LIT_RE = re.compile(r"/(?![*/])(?:[^/\\\[\n]|\\.|\[(?:[^\]\\\n]|\\.)*\])+/")
 _JS_REGEX_PREV = frozenset("(,=:[!&|?{};+-*%<>~^")
 _JS_REGEX_KEYWORDS = frozenset((
@@ -1707,7 +1737,7 @@ def _is_word_char(ch):
     return ch.isalnum() or ch in "_$"
 
 
-def _js_regex_allowed(prev, tail):
+def _js_regex_allowed(prev, tail, keywords=_JS_REGEX_KEYWORDS):
     """May a '/' after this code start a regex literal? `prev` is the last
     significant code character ('' at start of file), `tail` the last few
     code characters ending at it."""
@@ -1719,18 +1749,52 @@ def _js_regex_allowed(prev, tail):
             k -= 1
         if k == 0 and len(tail) >= 11:     # word longer than any keyword
             return False
-        return tail[k:] in _JS_REGEX_KEYWORDS
+        return tail[k:] in keywords
     return False
 
 
-def _lex_comment_spans(content, lang, strings=None):
-    """Absolute (start, end) spans of every comment in `content` (see the
-    lexer semantics above). Linear: a regex finds each next interesting
-    character and strings/comments are consumed with bounded matches.
-    If `strings` is a list, the spans of '…' and "…" literals are appended
-    to it."""
+def _intersect_spans(a, b):
+    """The (start, end) spans covered by both `a` and `b` (each sorted and
+    non-overlapping)."""
+    out = []
+    i = j = 0
+    while i < len(a) and j < len(b):
+        s = max(a[i][0], b[j][0])
+        e = min(a[i][1], b[j][1])
+        if s < e:
+            out.append((s, e))
+        if a[i][1] < b[j][1]:
+            i += 1
+        else:
+            j += 1
+    return out
+
+
+def _lex_comment_spans(content, lang, strings=None, jsx=True):
+    """Absolute (start, end) spans of every comment in `content`: the spans
+    both readings of the language agree on (see the lexer notes above).
+    Linear: each reading finds the next interesting character with a regex
+    and consumes strings and comments with bounded matches. If `strings`
+    is a list, the '…' / "…" literal spans both JavaScript readings agree on
+    are appended to it. jsx=False: a .ts file (no JSX reading)."""
     lang = lang if lang in ("py", "js", "sql") else None
-    nxt = _LEX_NEXT[lang]
+    if lang is None or (lang == "js" and not jsx):
+        return _lex_pass(content, lang, strings)
+    sa = None if strings is None else []
+    sb = None if strings is None else []
+    a = _lex_pass(content, lang, sa)
+    b = _lex_js_jsx(content, sb) if lang == "js" else _lex_pass(content, lang, sb, second=True)
+    if strings is not None:
+        strings.extend(_intersect_spans(sa, sb))
+    return _intersect_spans(a, b)
+
+
+def _lex_pass(content, lang, strings=None, second=False):
+    """One reading of `content`: the lexer above, or with `second` the other
+    reading of Python (PEP 701 f-strings) or SQL (MySQL)."""
+    mysql = second and lang == "sql"
+    nxt = _LEX_MYSQL_NEXT if mysql else _LEX_NEXT[lang]
+    fstrings = second and lang == "py"
     spans = []
     n = len(content)
     pos = 0
@@ -1755,6 +1819,9 @@ def _lex_comment_spans(content, lang, strings=None):
             pos = e
             continue
         if two == "/*" and lang != "py":
+            if mysql and (content.startswith("!", k + 2) or content.startswith("M!", k + 2)):
+                pos = k + 2                # MySQL executes /*! … */: its text is code
+                continue
             e = content.find("*/", k + 2)
             e = n if e < 0 else e + 2
             spans.append((k, e))
@@ -1775,8 +1842,15 @@ def _lex_comment_spans(content, lang, strings=None):
             pos = k + 1
             prev, tail = "/", "/"
             continue
-        key = ch * 3 if lang == "py" and content.startswith(ch * 3, k) else ch
-        sm = _LEX_STR[(lang, key)].match(content, k)
+        fstring, raw = _py_fstring_prefix(content, k) if fstrings else (False, False)
+        if fstring:
+            pos = _py_fstring_end(content, k, raw)
+            continue
+        if mysql:
+            sm = _LEX_MYSQL_STR[ch].match(content, k)
+        else:
+            key = ch * 3 if lang == "py" and content.startswith(ch * 3, k) else ch
+            sm = _LEX_STR[(lang, key)].match(content, k)
         pos = max(sm.end() if sm else k + 1, k + 1)
         prev, tail = '"', ""
         if strings is not None and ch != "`":
@@ -1784,45 +1858,341 @@ def _lex_comment_spans(content, lang, strings=None):
     return spans
 
 
+# ---- Python f-strings as 3.12+ reads them (PEP 701) ----
+_PY_FSTRING_PREFIXES = frozenset(("f", "fr", "rf", "t", "tr", "rt"))
+_FSTR_TEXT_STOP = {q: re.compile("[{}\\\\\n" + q + "]") for q in ("'", '"')}
+_FSTR_FIELD_STOP = re.compile(r"[#'\"(){}\[\]:]")
+
+
+def _py_name_char(ch):
+    """A character that may continue a Python name, for prefix purposes:
+    ASCII letters, digits and '_', and every non-ASCII character."""
+    return ch == "_" or not ch.isascii() or ch.isalnum()
+
+
+def _py_fstring_prefix(s, k):
+    """(is an f-/t-string, raw) for the string literal whose quote is at
+    s[k]: the name characters right before the quote must be exactly a
+    prefix (`if"x"` is a keyword and a plain string)."""
+    j = k
+    while j > 0 and k - j <= 2 and _py_name_char(s[j - 1]):
+        j -= 1
+    if k - j > 2 or (j > 0 and _py_name_char(s[j - 1])):
+        return False, False
+    p = s[j:k].lower()
+    return p in _PY_FSTRING_PREFIXES, "r" in p
+
+
+def _py_fstring_end(s, k, raw):
+    """Index just past the f-string whose opening quote is at s[k], as the
+    3.12+ tokenizer reads it: its replacement fields are code (strings in
+    any quotes, comments, newlines, nested f-strings), a format spec ends at
+    '}' or at the f-string's own closing quote, `{{` `}}` are text, a
+    backslash hides the next character but not a brace, and `\\N{…}` is one
+    escape. A single-quoted f-string also ends, unterminated, at a newline
+    in its text; len(s) when nothing ends it."""
+    n = len(s)
+    q = s[k]
+    ql = 3 if s.startswith(q * 3, k) else 1
+    # frames: ["S", quote, qlen, raw] the text of an f-string; ["P", …] a
+    # format spec (with its f-string's quote); ["F", depth, quote, qlen,
+    # raw] a replacement field's code, depth counting ( [ {
+    stack = [["S", q, ql, raw]]
+    i = k + ql
+    named = False                      # after \N{: the next '}' ends that escape
+    while stack:
+        fr = stack[-1]
+        if fr[0] != "F":
+            q, ql, rw = fr[1], fr[2], fr[3]
+            m = _FSTR_TEXT_STOP[q].search(s, i)
+            if m is None:
+                return n
+            i = m.start()
+            c = s[i]
+            if c == q:
+                if ql == 3 and not s.startswith(q * 3, i):
+                    i += 1
+                    continue
+                i += ql
+                while stack.pop()[0] != "S":        # its fields and specs end with it
+                    pass
+                named = False
+            elif c == "\n":
+                if fr[0] == "P":
+                    stack.pop()                     # a newline ends a format spec
+                elif ql == 1:                       # unterminated: ends at the newline
+                    while stack.pop()[0] != "S":
+                        pass
+                else:
+                    i += 1
+                named = False
+            elif c == "\\":
+                nx = s[i + 1:i + 2]
+                if nx == "{" or nx == "}":
+                    i += 1                          # the brace is read on its own
+                elif not rw and nx == "N" and s.startswith("{", i + 2):
+                    i += 3
+                    named = True
+                else:
+                    i += 2
+            elif c == "{":
+                if fr[0] == "S" and s.startswith("{", i + 1):
+                    i += 2                          # '{{'
+                else:
+                    stack.append(["F", 0, q, ql, rw])
+                    i += 1
+                named = False
+            elif named:                             # '}' closing \N{…}
+                named = False
+                i += 1
+            elif fr[0] == "P":
+                stack.pop()                         # the field reads this '}'
+            else:                                   # '}}', or a stray '}'
+                i += 2 if s.startswith("}", i + 1) else 1
+            continue
+        m = _FSTR_FIELD_STOP.search(s, i)
+        if m is None:
+            return n
+        i = m.start()
+        c = s[i]
+        if c == "#":                                # a comment: to end of line
+            e = s.find("\n", i)
+            if e < 0:
+                return n
+            i = e
+        elif c == "'" or c == '"':
+            is_f, sraw = _py_fstring_prefix(s, i)
+            ql = 3 if s.startswith(c * 3, i) else 1
+            if is_f:
+                stack.append(["S", c, ql, sraw])
+                i += ql
+            else:
+                sm = _LEX_STR[("py", c * ql)].match(s, i)
+                i = max(sm.end() if sm else i + 1, i + 1)
+        elif c in "([{":
+            fr[1] += 1
+            i += 1
+        elif c == ")" or c == "]":
+            fr[1] = max(fr[1] - 1, 0)
+            i += 1
+        elif c == "}":
+            i += 1
+            if fr[1]:
+                fr[1] -= 1
+            else:
+                stack.pop()                         # the field ends
+        else:                                       # ':'
+            if not fr[1]:
+                stack.append(["P", fr[2], fr[3], fr[4]])
+            i += 1
+    return i
+
+
+# ---- JavaScript read as JSX ----
+_JSX_JS_NEXT = re.compile(r"[/'\"`{}<]")
+_JSX_FILE_NEXT = re.compile(r"[/'\"`<]")       # the file's own code: its braces need no count
+_JSX_TEXT_NEXT = re.compile(r"[{}<>]")
+_JSX_WS_RE = re.compile(r"[ \t\n\r\f\v]*")
+_JSX_NAME_RE = re.compile(r"[A-Za-z0-9_$.:\-\x80-\U0010ffff]*")
+_JSX_KEYWORDS = _JS_REGEX_KEYWORDS | {"default"}
+
+
+def _jsx_name_start(ch):
+    return ch.isascii() and (ch.isalpha() or ch in "_$") or not ch.isascii()
+
+
+def _jsx_tag_at(s, j):
+    """Where the tag name (or the '>' of a fragment) starts when a '<' ends
+    just before s[j], else -1."""
+    j = _JSX_WS_RE.match(s, j).end()
+    if j < len(s) and (s[j] == ">" or _jsx_name_start(s[j])):
+        return j
+    return -1
+
+
+def _lex_js_jsx(content, strings=None):
+    """JavaScript comment spans in the JSX reading (see the lexer notes):
+    the base lexer, plus elements, whose text and attribute strings hold
+    no comments and whose `{…}` hold code again."""
+    spans = []
+    n = len(content)
+    pos = 0
+    prev, tail = "", ""
+    no_regex_until = -1
+    # frames: ["js", depth] code (the bottom frame is the file, the others a
+    # `{…}` inside JSX, depth counting its own braces); ["tag"] an opening
+    # tag's attributes; ["text"] an element's children
+    stack = [["js", 0]]
+
+    def element_done():
+        nonlocal prev, tail
+        if stack[-1][0] == "js":
+            prev, tail = '"', ""
+
+    while pos < n:
+        fr = stack[-1]
+        kind = fr[0]
+        if kind == "js":
+            m = (_JSX_JS_NEXT if len(stack) > 1 else _JSX_FILE_NEXT).search(content, pos)
+            if m is None:
+                break
+            k = m.start()
+            if k > pos:
+                seg = content[pos:k].rstrip()
+                if seg:
+                    prev, tail = seg[-1], seg[-11:]
+            ch = content[k]
+            two = content[k:k + 2]
+            if two == "//":
+                e = content.find("\n", k)
+                e = n if e < 0 else e
+                spans.append((k, e))
+                pos = e
+            elif two == "/*":
+                e = content.find("*/", k + 2)
+                e = n if e < 0 else e + 2
+                spans.append((k, e))
+                pos = e
+            elif ch == "/":
+                pos = k + 1
+                if k >= no_regex_until and _js_regex_allowed(prev, tail):
+                    rm = _JS_REGEX_LIT_RE.match(content, k)
+                    if rm:
+                        pos = rm.end()
+                        prev, tail = '"', ""
+                        continue
+                    no_regex_until = content.find("\n", k)
+                    no_regex_until = n if no_regex_until < 0 else no_regex_until
+                prev, tail = "/", "/"
+            elif ch == "{":
+                fr[1] += 1
+                pos = k + 1
+                prev, tail = "{", "{"
+            elif ch == "}":
+                pos = k + 1
+                if fr[1]:
+                    fr[1] -= 1
+                elif len(stack) > 1:
+                    stack.pop()                     # a `{…}` inside JSX ends
+                    continue
+                prev, tail = "}", "}"
+            elif ch == "<":
+                t = -1
+                if prev in (")", "]") or _js_regex_allowed(prev, tail, _JSX_KEYWORDS):
+                    t = _jsx_tag_at(content, k + 1)
+                if t >= 0:
+                    stack.append(["tag"])
+                    pos = _JSX_NAME_RE.match(content, t).end()
+                else:
+                    pos = k + 1
+                    prev, tail = "<", "<"
+            else:                                   # a string or template literal
+                sm = _LEX_STR[("js", ch)].match(content, k)
+                pos = max(sm.end() if sm else k + 1, k + 1)
+                prev, tail = '"', ""
+                if strings is not None and ch != "`":
+                    strings.append((k, pos))
+            continue
+        if kind == "tag":
+            j = _JSX_WS_RE.match(content, pos).end()
+            if j >= n:
+                break
+            c = content[j]
+            two = content[j:j + 2]
+            if two == "/>":
+                stack.pop()
+                pos = j + 2
+                element_done()
+                continue
+            if c == ">":
+                stack[-1] = ["text"]
+                pos = j + 1
+                continue
+            if two == "//" or two == "/*":          # comments may sit between attributes
+                e = content.find("\n" if two == "//" else "*/", j + 2)
+                e = n if e < 0 else (e if two == "//" else e + 2)
+                spans.append((j, e))
+                pos = e
+                continue
+            if c == "{":
+                stack.append(["js", 0])
+                pos = j + 1
+                prev, tail = "{", "{"
+                continue
+            if c == '"' or c == "'":                # no escapes in JSX attribute strings
+                e = content.find(c, j + 1)
+                e = n if e < 0 else e + 1
+                if strings is not None:
+                    strings.append((j, e))
+                pos = e
+                continue
+            if c == "=":
+                pos = j + 1
+                continue
+            if _jsx_name_start(c):
+                pos = _JSX_NAME_RE.match(content, j).end()
+                continue
+            t = _jsx_tag_at(content, j + 1) if c == "<" else -1
+            if t >= 0:                              # an element as an attribute value
+                stack.append(["tag"])
+                pos = _JSX_NAME_RE.match(content, t).end()
+                continue
+            abort = j
+        else:                                       # element text
+            m = _JSX_TEXT_NEXT.search(content, pos)
+            if m is None:
+                break
+            k = m.start()
+            c = content[k]
+            if c == "{":
+                stack.append(["js", 0])
+                pos = k + 1
+                prev, tail = "{", "{"
+                continue
+            if c == "<":
+                j = _JSX_WS_RE.match(content, k + 1).end()
+                if content.startswith("/", j):      # a closing tag
+                    j = _JSX_WS_RE.match(content, j + 1).end()
+                    j = _JSX_NAME_RE.match(content, j).end()
+                    j = _JSX_WS_RE.match(content, j).end()
+                    if content.startswith(">", j):
+                        stack.pop()
+                        pos = j + 1
+                        element_done()
+                        continue
+                else:
+                    t = _jsx_tag_at(content, k + 1)
+                    if t >= 0:
+                        stack.append(["tag"])
+                        pos = _JSX_NAME_RE.match(content, t).end()
+                        continue
+            abort = k
+        # not JSX after all: back to the code around it, from this character
+        while stack[-1][0] != "js":
+            stack.pop()
+        pos = abort
+        prev, tail = "<", "<"
+    return spans
+
+
 def _line_starts(content):
     return [0] + [m.end() for m in re.finditer("\n", content)]
 
 
-def _py_tokenize_comment_spans(content):
-    """Comment spans from Python's own tokenizer, or None if the file does not
-    tokenize (the caller then falls back to the lexer)."""
-    if "#" not in content:
-        return []
-    rows = []
-    try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            for tok in tokenize.generate_tokens(io.StringIO(content).readline):
-                if tok.type == tokenize.COMMENT:
-                    rows.append((tok.start, len(tok.string)))
-    except Exception:          # IndentationError, TokenError, SyntaxError (3.12+), …
-        return None
-    starts = _line_starts(content)
-    return [(starts[r - 1] + c, starts[r - 1] + c + ln) for (r, c), ln in rows]
+def _comment_spans(content, lang, strings=None, jsx=True):
+    return _lex_comment_spans(content, lang, strings, jsx)
 
 
-def _comment_spans(content, lang, strings=None):
-    if lang == "py":
-        spans = _py_tokenize_comment_spans(content)
-        if spans is not None:
-            return spans
-    return _lex_comment_spans(content, lang, strings)
-
-
-def _comment_layout(content, lines, lang, strings=None):
+def _comment_layout(content, lines, lang, strings=None, jsx=True):
     """(mask, spans, code) for the lines of `content`:
     mask[i]  — line i is a comment line (has non-whitespace, all of it in comments);
     spans    — {i: [(start, end), …]} comment spans relative to line i;
-    code     — line i with its comment text removed (strings kept)."""
+    code     — line i with its comment text removed (strings kept).
+    jsx=False: JavaScript without the JSX reading (a .ts file)."""
     n = len(lines)
     mask = [False] * n
     by_line = {}
-    spans = _comment_spans(content, lang, strings)
+    spans = _comment_spans(content, lang, strings, jsx)
     if not spans:
         return mask, by_line, lines
     starts = _line_starts(content)
@@ -1851,10 +2221,17 @@ def _comment_layout(content, lines, lang, strings=None):
     return mask, by_line, code
 
 
-def comment_mask(lines, lang):
+def comment_mask(lines, lang, jsx=True):
     """Per-line booleans: True for a comment line of this file (comment state
-    carried across lines — see the lexer notes above)."""
-    return _comment_layout("\n".join(lines), lines, lang)[0]
+    carried across lines — see the lexer notes above). jsx=False for a .ts
+    file (see jsx_reading)."""
+    return _comment_layout("\n".join(lines), lines, lang, jsx=jsx)[0]
+
+
+def jsx_reading(path):
+    """Is a JavaScript-family file also read as JSX? Every one but .ts:
+    TypeScript parses no JSX there (`<T>x` is a type assertion)."""
+    return not str(path).lower().endswith(".ts")
 
 
 def is_comment(line, lang):
@@ -1955,13 +2332,13 @@ class _FileCtx(_Redactor):
     check and mk_issue: the comment layout, the normalized match text of each
     line, parsed suppression markers and the redaction caches."""
 
-    def __init__(self, lines, lang, content=None, deadline=None):
+    def __init__(self, lines, lang, content=None, deadline=None, jsx=True):
         super().__init__(lines)
         self.lang = lang
         self.content = "\n".join(lines) if content is None else content
         self._strings = [] if lang == "js" else None      # '…' "…" spans (absolute)
         self.cmask, self.cspans, self.code = _comment_layout(
-            self.content, lines, lang, self._strings)
+            self.content, lines, lang, self._strings, jsx)
         self.deadline = deadline
         self._markers = {}
         self._mlines = None
@@ -2863,7 +3240,7 @@ def scan_file(path, content, lang, dep=False):
     secret rules run (quality/bug rules would be pure noise in vendored code)."""
     lines = source_lines(content, lang)
     content = "\n".join(lines)
-    ctx = _FileCtx(lines, lang, content, time.monotonic() + SCAN_TIME_BUDGET)
+    ctx = _FileCtx(lines, lang, content, time.monotonic() + SCAN_TIME_BUDGET, jsx_reading(path))
     outer = getattr(_TLS, "ctx", None)
     _TLS.ctx = ctx
     try:
@@ -4842,7 +5219,7 @@ def compute_metrics(all_files):
     for f in files:
         code = []
         flines = f["content"].split("\n")
-        cmask = comment_mask(flines, f["lang"])
+        cmask = comment_mask(flines, f["lang"], jsx_reading(f["path"]))
         for i, l in enumerate(flines):
             t = l.strip()
             if not t:

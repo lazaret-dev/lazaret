@@ -8,7 +8,7 @@ import {
   B64_BLOB_RE, OBF_IDENT_RE, SECRET_SKIP_RE, CHARCODE_RE, ENTROPY_VALUE_RE, entropySecretish,
   makeSuppressor, mkIssue,
 } from "./engine.js";
-import { lexLines } from "./lexer.js";
+import { lexLines, jsxReading } from "./lexer.js";
 import { extractFunctions } from "./functions.js";
 import { cpLen, pyRe, pyRepr, pyRstrip, pyLstrip, isPySpace } from "../lib/pycompat.js";
 import { findSecretToken, registerScanContext } from "../lib/redact.js";
@@ -59,11 +59,11 @@ const ID_CONTINUE_RE = /^[\p{XID_Continue}$]$/u;
 const pyMatchText = (t) => (NON_ASCII_RE.test(t) ? t.normalize("NFKC") : t);
 
 class FileCtx {
-  constructor(lines, lang, content, deadline) {
+  constructor(lines, lang, content, deadline, jsx = true) {
     this.lines = lines;
     this.lang = lang;
     this.content = content;
-    this.lex = lexLines(lines, lang, content);
+    this.lex = lexLines(lines, lang, content, { jsx });
     this.cmask = this.lex.comment;
     this.deadline = deadline;
     this._mlines = null;
@@ -187,7 +187,7 @@ export function taintScan(file, lines, lang, ctx = null) {
   if (!src) return [];                   // SQL and others: pattern rules only
   if (!ctx || ctx.lines !== lines) {
     const content = lines.join("\n");
-    ctx = new FileCtx(lines, lang, content, Infinity);
+    ctx = new FileCtx(lines, lang, content, Infinity, jsxReading(file));
   }
   const issues = [];
   const tainted = new Map();             // var -> {line, clean:Set(suffix), order}
@@ -469,7 +469,7 @@ export function scanFile(file) {
   const dep = !!file.dep;
   const content = normalizeSource(file.content, lang);
   const lines = content.split("\n");
-  const ctx = new FileCtx(lines, lang, content, Date.now() + timeBudgetMs);
+  const ctx = new FileCtx(lines, lang, content, Date.now() + timeBudgetMs, jsxReading(path));
   registerScanContext(lines, SECRET_SKIP_RE);
   const issues = [];
   try {

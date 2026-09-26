@@ -95,13 +95,13 @@ class CommentMaskTests(unittest.TestCase):
         self.assertEqual(self.mask("SELECT 'a\n/* not';\nGRANT x;", "sql"),
                          [False, False, False])
 
-    def test_python_uses_the_tokenizer(self):
+    def test_python(self):
         src = 'HELP = """Usage:\n# not a comment"""\nx = 1  # trailing\n  # full'
         self.assertEqual(self.mask(src, "py"), [False, False, False, True])
 
-    def test_python_fallback_lexer_when_file_does_not_tokenize(self):
+    def test_python_file_that_does_not_tokenize(self):
+        # the lexer, not Python's tokenizer (which differs across versions)
         src = 'def f(:\n    HELP = """\n# in string\n"""\n  # real'
-        self.assertIsNone(core._py_tokenize_comment_spans(src))
         self.assertEqual(self.mask(src, "py"), [False, False, False, False, True])
 
     def test_is_comment_is_line_local(self):

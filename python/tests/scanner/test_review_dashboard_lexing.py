@@ -25,6 +25,35 @@ TIMED = """(() => {
 })()"""
 
 
+# Comment masking fails closed (a comment only where both readings of the
+# text agree) and Python comments no longer depend on the interpreter.
+MASKING = [
+    ("dump.sql", "sql", "INSERT INTO people VALUES (1,'O\\'Brien','src/*.js');\n"
+     "GRANT ALL PRIVILEGES ON appdb.* TO 'marker_user'@'%';\nSELECT * FROM people;\n"),
+    ("marker.sql", "sql", "SELECT 'it\\'s -- nosec'; GRANT ALL ON t TO u;\n"),
+    ("mysql.sql", "sql", "/*!50000 GRANT ALL PRIVILEGES ON *.* TO 'x'@'%' */;\nSELECT `a/*b` FROM t;\n"
+     "GRANT ALL ON t TO u;\n/* GRANT ALL ON y TO z */\n-- nosec\nGRANT ALL ON v TO w;\n"),
+    ("text.jsx", "js", "const a = <p>Docs at /api/* and https://example.invalid/x</p>;\neval(input)\n// */\n"),
+    ("default.js", "js", "export default <p>/api/*</p>;\neval(input)\n"),
+    ("attr.tsx", "js", "if (x) <a title='/*'>{y}/*</a>;\neval(input)\n"),
+    ("marker.jsx", "js", "const a = <p>// nosec</p>; eval(x)\n"),
+    ("code.jsx", "js", "const a = (\n  <div id=\"x\"\n    // eval(p)\n    title={\n      /* eval(q) */\n      t}>\n"
+     "    {\n      // eval(s)\n    }\n    <br/>\n  </div>\n);\n// eval(u)\n"),
+    ("generic.tsx", "js", "const id = <T,>(x: T) => x;\n// eval(z)\n"),
+    ("generic.ts", "js", "const id = <T>(x: T) => x;\n// eval(z)\n"),
+    ("assert.ts", "js", "const el = <HTMLInputElement>document.body;\n// eval(z)\n"),
+    ("compare.js", "js", "if (a[0] < b) { f() }\n// eval(z)\nif (g(x) < h) {}\n// eval(w)\n"),
+    ("jsx.ts", "js", "const a = <p>x /* </p>;\neval(input)\n*/\n"),
+    ("jsx.tsx", "js", "const a = <p>x /* </p>;\neval(input)\n*/\n"),
+    ("fstring.py", "py", 'x = f"""{\n    # a note\n    1\n}"""\ny = 2\n'),
+    ("nested.py", "py", 'x = f"{d["# nosec"]}" + eval(y)\nx = t\'{d[\'# nosec\']}\' + eval(y)\n'
+     'x = f"{v:# nosec}"; eval(y)\nx = f"""{d["""# nosec"""]}""" + eval(y)\n'),
+    ("unterminated.py", "py", "z = eval(x) + 'unterminated  # nosec\n"),
+    ("ordinary.py", "py", 's = f"{a!r:>{w}}"  # nosec\nt = f"{{# not a field}}"  # c\n  # full\n'
+     'u = rf"\\{x}" "#"  # c\nv = f"\\N{BULLET} {x}"\n# eval(z)\n'),
+]
+
+
 @dash.requires_node
 class DashboardLexingTests(unittest.TestCase):
     def assert_same_findings(self, name, cli, page):
@@ -54,6 +83,20 @@ class DashboardLexingTests(unittest.TestCase):
                 self.assertLess(ms, LIMIT_MS)
                 self.assertNotIn("SC-TRUNCATED@1", rules)
         self.assertIn("S-EVAL-JS@1", rules)
+
+    def test_masking_fails_closed(self):
+        page = self.compare(MASKING)
+        found = {(name, i["rule"], i["line"]) for (name, _, _), issues in zip(MASKING, page) for i in issues}
+        # not vacuous: the cases that used to be masked are reported
+        for want in (("dump.sql", "SQL-GRANT-ALL", 2), ("text.jsx", "S-EVAL-JS", 2),
+                     ("marker.jsx", "S-EVAL-JS", 1), ("unterminated.py", "S-EVAL-PY", 1)):
+            self.assertIn(want, found)
+
+    def test_metrics_match(self):
+        files = [{"name": n, "lang": lang, "content": c} for n, lang, c in MASKING]
+        (page,) = dash.run([{"op": "runScan", "files": files}])
+        cli = core.compute_metrics([{"path": f["name"], "lang": f["lang"], "content": f["content"]} for f in files])
+        self.assertEqual(page["metrics"], cli)
 
 
 if __name__ == "__main__":
