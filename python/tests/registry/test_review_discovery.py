@@ -250,7 +250,11 @@ class DiscoveryGapTests(unittest.TestCase):
                 contextlib.redirect_stderr(io.StringIO()):
             found = repo.discover_pypi(NOW - datetime.timedelta(days=1), 10, notes)
         self.assertEqual([n for _, n, _, _ in found], ["goodpkg"])
-        self.assertEqual(notes, {"pypi": "partly checked: the updates.xml feed failed"})
+        # packages.xml (one item, from now) doesn't reach back a day either
+        self.assertEqual(list(notes), ["pypi"])
+        self.assertTrue(notes["pypi"].startswith("partly checked: the updates.xml feed failed; "
+                                                 "new projects covered "), notes)
+        self.assertTrue(notes["pypi"].endswith(" UTC only; packages.xml holds the latest 1"), notes)
 
     def test_mcp_marks_the_call_incomplete(self):
         rejected = repo.FetchError("HTTP 400 fetching …")

@@ -2782,7 +2782,7 @@ def print_scan(res, top=15):
 def parse_since(s):
     """'7d' / '2w' / '24h' / an ISO date -> a timezone-aware UTC cutoff datetime."""
     s = (s or "").strip().lower()
-    now = datetime.datetime.now(datetime.timezone.utc)
+    now = _now()
     m = re.fullmatch(r"(\d+)\s*([hdw])", s)
     if m:
         hours = int(m.group(1)) * {"h": 1, "d": 24, "w": 168}[m.group(2)]
@@ -2792,7 +2792,9 @@ def parse_since(s):
             raise ValueError(f"bad --since {s!r}; use e.g. 7d, 2w, 24h, or 2026-06-25") from None
     try:
         d = datetime.datetime.fromisoformat(s)
-        return d if d.tzinfo else d.replace(tzinfo=datetime.timezone.utc)
+        # always UTC: the window is printed as "… UTC"
+        return d.astimezone(datetime.timezone.utc) if d.tzinfo \
+            else d.replace(tzinfo=datetime.timezone.utc)
     except ValueError:
         # audit H2 (=F3): this module is LIBRARY code — parse_since is called
         # from the MCP server's tool dispatch (tool_discover_packages), where
@@ -2811,6 +2813,30 @@ def _to_utc(dt):
     if dt.tzinfo is None:
         return dt.replace(tzinfo=datetime.timezone.utc)
     return dt
+
+
+def _now():
+    """The current UTC time (a seam for tests)."""
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+def _fmt_span(start, end):
+    """'17:28–17:47 UTC', with dates when the two ends fall on different days."""
+    start = start.astimezone(datetime.timezone.utc)
+    end = max(end.astimezone(datetime.timezone.utc), start)
+    if start.date() == end.date():
+        return f"{start:%H:%M}–{end:%H:%M} UTC"
+    return f"{start:%Y-%m-%d %H:%M} – {end:%Y-%m-%d %H:%M} UTC"
+
+
+def _partly(notes, eco, text):
+    """Record a coverage gap: notes[eco] becomes (or is extended as)
+    "partly checked: <text>". A registry noted in `notes` was not fully
+    checked; the CLI warns about it and --ci fails the run."""
+    if notes is None:
+        return
+    prev = notes.get(eco)
+    notes[eco] = f"{prev}; {text}" if prev else f"partly checked: {text}"
 
 
 def _parse_xml(raw):
@@ -2835,11 +2861,15 @@ def _feed_token_ok(value):
 
 
 def discover_pypi(cutoff, limit, notes=None):
-    """Recently created + updated PyPI projects via the RSS feeds (timestamped,
-    bounded to the most recent ~100 entries per feed). A feed that can't be
-    read is a warning, and notes["pypi"] says what was missed."""
+    """Recently created + updated PyPI projects via the RSS feeds, newest
+    first. The feeds hold only the latest 100 releases (updates.xml, about 20
+    minutes of PyPI) and the latest 40 new projects (packages.xml, about an
+    hour), so for any longer window notes["pypi"] says which part was covered
+    ("partly checked: covered 17:28–17:47 UTC only; …"). A feed that can't be
+    read is a warning and noted too, and so are releases left out by `limit`."""
     import email.utils
-    found, failed = {}, []
+    now = _now()
+    found, failed, reach = {}, [], {}
     for feed in ("https://pypi.org/rss/packages.xml", "https://pypi.org/rss/updates.xml"):
         try:
             # metadata budget (5 MB) and timeout, not the 200 MB artifact budget
@@ -2859,6 +2889,7 @@ def discover_pypi(cutoff, limit, notes=None):
                   f"({lazaret.sanitize_term(exc)}).", file=sys.stderr)
             failed.append(feed.rsplit("/", 1)[-1])
             continue
+        items, oldest = 0, None        # how far back this feed reaches
         for item in root.findall(".//item"):
             title = (item.findtext("title") or "").strip()
             pub = item.findtext("pubDate")
@@ -2869,6 +2900,9 @@ def discover_pypi(cutoff, limit, notes=None):
             except (TypeError, ValueError, IndexError, OverflowError):
                 continue
             when = _to_utc(when)
+            items += 1
+            if oldest is None or when < oldest:
+                oldest = when
             if when < cutoff:
                 continue
             parts = title.split()
@@ -2887,11 +2921,45 @@ def discover_pypi(cutoff, limit, notes=None):
             prev = found.get(name)
             if prev is None or when > prev[3] or (when == prev[3] and version and not prev[2]):
                 found[name] = ("pypi", name, version, when)
-    if failed and notes is not None:
-        notes["pypi"] = ("not checked: both RSS feeds failed" if len(failed) == 2
-                         else f"partly checked: the {failed[0]} feed failed")
+        reach[feed.rsplit("/", 1)[-1]] = (items, oldest)
     out = sorted(found.values(), key=lambda x: x[3], reverse=True)
+    if notes is not None:
+        if len(failed) == 2:
+            notes["pypi"] = "not checked: both RSS feeds failed"
+        else:
+            for name in failed:
+                _partly(notes, "pypi", f"the {name} feed failed")
+            _note_pypi_reach(notes, cutoff, now, reach)
+            if limit and len(out) > limit:
+                _partly(notes, "pypi", f"{len(out) - limit} more not listed (limit {limit})")
     return out[:limit] if limit else out
+
+
+def _note_pypi_reach(notes, cutoff, now, reach):
+    """A feed covers the window only if it reaches back past the cutoff:
+    PyPI's feeds are the latest N items, and anything older fell off.
+    updates.xml lists every release (a new project's first one too), so its
+    reach is PyPI's; packages.xml may reach further back for new projects."""
+    def covers(feed):
+        return feed[1] is not None and feed[1] < cutoff
+
+    def span(feed):
+        return _fmt_span(feed[1], now) if feed[1] is not None else None
+
+    updates, projects = reach.get("updates.xml"), reach.get("packages.xml")
+    if updates is not None and not covers(updates):
+        text = (f"covered {span(updates)} only; its RSS feeds hold the latest "
+                f"{updates[0]} updates" if updates[0] else "the updates.xml feed was empty")
+        if projects is not None and covers(projects):
+            text += " (new projects: the whole window)"
+        elif projects is not None and projects[1] is not None \
+                and (updates[1] is None or projects[1] < updates[1]):
+            text += f" (new projects: {span(projects)})"
+        _partly(notes, "pypi", text)
+    elif updates is None and projects is not None and not covers(projects):
+        _partly(notes, "pypi", f"new projects covered {span(projects)} only; packages.xml "
+                               f"holds the latest {projects[0]}" if projects[0]
+                else "the packages.xml feed was empty")
 
 
 # npm's replication API (changed 2025: new endpoints from 2025-03-18, the old
@@ -2912,7 +2980,8 @@ NPM_OLDER_STOP = 5
 
 def _npm_feed_names(want):
     """-> (package names, newest first, each once; count of names npm would
-    reject). Raises FetchError / FeedError when the feed can't be read."""
+    reject; number of feed rows read). Raises FetchError / FeedError when the
+    feed can't be read."""
     data = http_json(f"{NPM_CHANGES_URL}?descending=true&limit={want}")
     results = data.get("results") if isinstance(data, dict) else None
     if not isinstance(results, list):
@@ -2929,7 +2998,26 @@ def _npm_feed_names(want):
             rejected += 1                             # G14: feed names drive downloads
             continue
         names.append(name)
-    return names, rejected
+    return names, rejected, len(results)
+
+
+def _npm_lookups(names):
+    """Yield (name, (modified, latest version) or None if the lookup failed)
+    for each name in order, looked up NPM_LOOKUP_WORKERS at a time, a batch
+    at a time, so a caller that stops early leaves the rest unfetched.
+    Close the generator when stopping early."""
+    import concurrent.futures
+    batch = NPM_LOOKUP_WORKERS * 2
+    with concurrent.futures.ThreadPoolExecutor(NPM_LOOKUP_WORKERS) as pool:
+        for i in range(0, len(names), batch):
+            chunk = names[i:i + batch]
+            futures = [pool.submit(_npm_recent, n) for n in chunk]
+            for name, fut in zip(chunk, futures):
+                try:
+                    result = fut.result()
+                except Exception:                                  # noqa: BLE001
+                    result = None
+                yield name, result
 
 
 def _npm_recent(name):
@@ -2967,13 +3055,16 @@ def discover_npm(cutoff, limit, notes=None):
     Best-effort per package, fail-visible per ecosystem: when the feed itself
     can't be read, npm is skipped with a warning and notes["npm"] says so (the
     CLI's --ci then fails the run: a hunting job must not pass while checking
-    nothing). A package whose registry lookup fails is still listed, because
+    nothing). The walk reads at most 3 x `limit` feed rows (300 with no limit):
+    when it stops before reaching the start of the window, because of `limit`
+    or because those rows ran out, notes["npm"] says which part was covered.
+    A package whose registry lookup fails is still listed, because
     the feed says it just changed: its time is the nearest older time the walk
     saw (or the window start), and it is counted in a warning."""
-    import concurrent.futures
     want = min((limit or 100) * 3, NPM_CHANGES_MAX)
+    now = _now()
     try:
-        names, rejected = _npm_feed_names(want)
+        names, rejected, rows_read = _npm_feed_names(want)
     except (FetchError, FeedError) as exc:
         # audit H1: the exception text can echo bytes of the network response.
         problem = lazaret.sanitize_term(_npm_feed_problem(exc))
@@ -2985,32 +3076,48 @@ def discover_npm(cutoff, limit, notes=None):
         print(f"warning: skipped {rejected} npm feed name(s) that are not valid package names.",
               file=sys.stderr)
     rows, older_run, unknown = [], 0, 0          # rows: [name, when or None, version]
-    batch = NPM_LOOKUP_WORKERS * 2
-    with concurrent.futures.ThreadPoolExecutor(NPM_LOOKUP_WORKERS) as pool:
-        for i in range(0, len(names), batch):
-            chunk = names[i:i + batch]
-            futures = [pool.submit(_npm_recent, n) for n in chunk]
-            done = False
-            for name, fut in zip(chunk, futures):
-                try:
-                    when, version = fut.result()
-                except Exception:                                  # noqa: BLE001
-                    rows.append([name, None, None])
-                    unknown += 1
-                    continue
-                if when < cutoff:
-                    older_run += 1
-                    if older_run >= NPM_OLDER_STOP:
-                        done = True
-                        break
-                    continue
-                older_run = 0
-                rows.append([name, when, version])
-                if limit and len(rows) >= limit:
-                    done = True
+    passed_window = False                        # the walk went past the start of the window
+    processed, last_known = 0, None              # names looked up; the last time seen
+    lookups = _npm_lookups(names)
+    try:
+        for name, result in lookups:
+            processed += 1
+            if result is None:
+                rows.append([name, None, None])
+                unknown += 1
+                continue
+            when, version = result
+            last_known = when
+            if when < cutoff:
+                older_run += 1
+                if older_run >= NPM_OLDER_STOP:
+                    passed_window = True
                     break
-            if done:
+                continue
+            older_run = 0
+            rows.append([name, when, version])
+            if limit and len(rows) >= limit:
                 break
+    finally:
+        lookups.close()
+    # The whole window was seen when the walk went past its start, or looked
+    # up every name of a feed shorter than asked for (nothing older exists).
+    # Otherwise it reaches back only to the last time it saw.
+    exhausted = processed == len(names)
+    if exhausted and last_known is not None and last_known < cutoff:
+        passed_window = True
+    if not passed_window and not (exhausted and rows_read < want):
+        if last_known is None:
+            _partly(notes, "npm", f"none of the {len(names)} packages in the newest {rows_read} "
+                                  f"changes of its replication feed could be looked up" if names
+                    else f"the newest {rows_read} changes of its replication feed named no "
+                         f"package to look up")
+        elif not exhausted:
+            _partly(notes, "npm", f"covered {_fmt_span(last_known, now)} only: stopped at "
+                                  f"the limit of {limit} packages")
+        else:
+            _partly(notes, "npm", f"covered {_fmt_span(last_known, now)} only; read the newest "
+                                  f"{rows_read} changes of its replication feed")
     # a failed lookup sits between known times in feed order: give it the
     # nearest older known time (a lower bound), or the window start
     floor = cutoff
@@ -3030,26 +3137,44 @@ def discover_npm(cutoff, limit, notes=None):
 def cmd_discover(store, args):
     cutoff = parse_since(args.since)
     ecos = args.ecosystem or ["pypi", "npm"]
+    limit = args.limit
     discovered, notes = [], {}
     if "pypi" in ecos:
-        discovered += discover_pypi(cutoff, args.limit, notes)
+        # all the feeds hold: --limit applies below, across both registries
+        discovered += discover_pypi(cutoff, 0, notes)
     if "npm" in ecos:
-        discovered += discover_npm(cutoff, args.limit, notes)
+        discovered += discover_npm(cutoff, limit, notes)
     discovered.sort(key=lambda x: x[3], reverse=True)
-    if args.limit:
-        discovered = discovered[:args.limit]
+    if limit and len(discovered) > limit:
+        # what --limit leaves out was not checked either: it is neither listed
+        # nor scanned, so it is a gap like any other
+        unlisted = {}
+        for eco, _name, _ver, _when in discovered[limit:]:
+            unlisted[eco] = unlisted.get(eco, 0) + 1
+        for eco, count in unlisted.items():
+            _partly(notes, eco, f"{count} more not listed (--limit {limit})")
+        discovered = discovered[:limit]
+    since = f"{cutoff:%Y-%m-%d %H:%M} UTC"
+    whole = [e for e in ecos if e not in notes]           # checked back to the cutoff
     if not discovered:
-        checked = [e for e in ecos if not notes.get(e, "").startswith("not checked")]
-        if checked:
-            print(f"No packages published/updated since {cutoff.isoformat()} in {', '.join(checked)}.")
-        else:
+        partly = [e for e in ecos if notes.get(e, "").startswith("partly checked")]
+        if whole:
+            print(f"No packages published/updated since {since} in {', '.join(whole)}.")
+        if partly:
+            print(f"Nothing found in the part of the window that was checked in "
+                  f"{', '.join(partly)} (see the warning below).")
+        if not whole and not partly:
             print("Nothing was checked.")
         return _report_discovery_gaps(ecos, notes)
-    print(f"\nDiscovered {len(discovered)} package(s) since {cutoff.strftime('%Y-%m-%d %H:%M')} UTC:")
+    if len(whole) == len(ecos):
+        print(f"\nDiscovered {len(discovered)} package(s) since {since}:")
+    else:
+        print(f"\nDiscovered {len(discovered)} package(s) since {since}, but not all of that "
+              f"window was checked (see the warnings at the end):")
     for eco, name, ver, when in discovered:
         # audit H1: discovery-feed name/version are raw feed text. Sanitize
         # before the width-free print (the strftime timestamp is engine-controlled).
-        print(f"  {when.strftime('%Y-%m-%d %H:%M')}  "
+        print(f"  {when.astimezone(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M')}  "
               f"{lazaret.sanitize_term(eco)}:{lazaret.sanitize_term(name)}"
               f"{('@' + lazaret.sanitize_term(ver)) if ver else ''}")
     errors = getattr(args, "_errors", None)
