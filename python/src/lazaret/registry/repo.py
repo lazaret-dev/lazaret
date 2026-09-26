@@ -1254,24 +1254,25 @@ def _rel_join(base, target):
 
 
 # Entry points declared in package.json: what `require(pkg)`, `import pkg`
-# and the installed command run.
+# and the installed command run, as (target, exported) pairs: `exported` for
+# the targets of "exports", which may be assets a bundler loads.
 def _package_entry_targets(data):
     targets = []
     main = data.get("main")
     # no main: require(pkg) loads index.js
-    targets.append(main if isinstance(main, str) and main.strip() else "index.js")
+    targets.append((main if isinstance(main, str) and main.strip() else "index.js", False))
     bins = data.get("bin")
     if isinstance(bins, str):
-        targets.append(bins)
+        targets.append((bins, False))
     elif isinstance(bins, dict):
-        targets += [v for v in bins.values() if isinstance(v, str)]
+        targets += [(v, False) for v in bins.values() if isinstance(v, str)]
     stack, nodes = [data.get("exports")], 0
     while stack and nodes < 10_000:
         node = stack.pop()
         nodes += 1
         if isinstance(node, str):
             if node.startswith("./") and "*" not in node:
-                targets.append(node)
+                targets.append((node, True))
         elif isinstance(node, dict):
             stack.extend(node.values())
         elif isinstance(node, list):
@@ -1329,21 +1330,26 @@ def _archive_issue(kind, path, detail):
             "snippet": [], "snipStart": 1}
 
 
-# Files package.json can name that are not run as script text: data (JSON),
-# native code (.node, .wasm), and the assets a package exports for bundlers
-# (stylesheets, source maps, fonts, images). An oversized
-# one is not "code that runs at install/import time". Anything else named as
-# main / bin / exports still counts as code even with an odd extension:
-# require() runs a file with an unknown extension (x.cjs.txt, core.dat) as
-# JavaScript.
-_NOT_RUN_EXTS = frozenset((
-    ".json", ".node", ".wasm", ".css", ".scss", ".sass", ".less", ".styl", ".map",
+# Files that are not run as script text wherever package.json names them:
+# data (JSON) and native code (.node, .wasm). An oversized one is not "code
+# that runs at install/import time". Anything else named as main / bin or run
+# by an install hook counts as code even with an odd extension: require() and
+# `node <file>` run a file with an unknown extension (x.cjs.txt, core.dat,
+# setup.css) as JavaScript.
+_DATA_OR_NATIVE_EXTS = frozenset((".json", ".node", ".wasm"))
+# Assets a package exports for bundlers (stylesheets, source maps, fonts,
+# images): not code when they are "exports" targets. Only there: 0.1.1 also
+# skipped them as main / bin / hook targets, so `postinstall: node setup.css`
+# ran a script that was never scanned.
+_EXPORTED_ASSET_EXTS = frozenset((
+    ".css", ".scss", ".sass", ".less", ".styl", ".map",
     ".svg", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".ico", ".bmp",
     ".woff", ".woff2", ".ttf", ".otf", ".eot"))
 
 
-def _not_run_as_script(rel):
-    return os.path.splitext(rel)[1].lower() in _NOT_RUN_EXTS
+def _not_run_as_script(rel, exported=False):
+    ext = os.path.splitext(rel)[1].lower()
+    return ext in _DATA_OR_NATIVE_EXTS or (exported and ext in _EXPORTED_ASSET_EXTS)
 
 
 class _ArtifactScan:
@@ -1485,16 +1491,17 @@ class _ArtifactScan:
     def _find(self, candidates):
         return next((c for c in candidates if c in self.members), None)
 
-    def _text_of(self, rel, as_lang="js"):
+    def _text_of(self, rel, as_lang="js", exported=False):
         """Text of a member that is run as code, scanning it as `as_lang`
         first when it has not been scanned (non-source extension). None when
-        it cannot be read as text — that is counted as INCOMPLETE."""
+        it cannot be read as text — that is counted as INCOMPLETE.
+        `exported`: named only by "exports", where assets are not code."""
         if rel in self.sources:
             return self.sources[rel][0]
         if rel in self.shell:
             return self.shell[rel]
-        if _not_run_as_script(rel):
-            return None          # data, native code, a stylesheet, an asset: not run as script
+        if _not_run_as_script(rel, exported):
+            return None          # data or native code; an exported asset
         if rel in self.deferred:
             raw = self.deferred.pop(rel)
             if as_lang == "sh" or _shebang_lang(raw[:256].decode("utf-8", "replace")) == "sh":
@@ -1519,11 +1526,11 @@ class _ArtifactScan:
 
     def _entry_points(self, manifest_rel, data):
         base = posixpath.dirname(manifest_rel)
-        for target in _package_entry_targets(data):
+        for target, exported in _package_entry_targets(data):
             rel = self._find(_node_candidates(_rel_join(base, target)))
             if rel:
                 self.entries.add(rel)
-                self._text_of(rel, "js")
+                self._text_of(rel, "js", exported)
 
     def _implicit_gyp_hook(self, manifest_rel, data):
         """npm runs `node-gyp rebuild` for a root binding.gyp when the package

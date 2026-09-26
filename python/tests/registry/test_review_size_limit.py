@@ -64,6 +64,17 @@ class OneFindingPerFileTests(unittest.TestCase):
         self.assertEqual(issues(res, "SC-TRUNCATED"), [])
         self.assertEqual(res["verdict"], "OK", res["verdictReason"])
 
+    def test_asset_extensions_run_by_node_are_code(self):
+        # 0.1.1 skipped these as main / bin / hook targets too: node runs a
+        # file with any extension as JavaScript
+        for pkg, files in (
+                ({"scripts": {"postinstall": "node scripts/setup.css"}}, {"scripts/setup.css": DECODE_EXEC_JS}),
+                ({"main": "dist/app.css"}, {"dist/app.css": DECODE_EXEC_JS}),
+                ({"bin": {"x": "bin/x.png"}}, {"bin/x.png": DECODE_EXEC_JS})):
+            with self.subTest(pkg=pkg):
+                res = self.scan({"package.json": manifest(**pkg), **files})
+                self.assertEqual(res["verdict"], "SUSPICIOUS", res["verdictReason"])
+
     def test_an_odd_extension_named_as_code_still_runs(self):
         res = self.scan({"package.json": manifest(exports={"require": "./dist/x.cjs.txt"}),
                          "dist/x.cjs.txt": DECODE_EXEC_JS})
