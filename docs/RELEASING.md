@@ -116,6 +116,17 @@ Anything merged through the GitHub web UI reaches GitLab the next time you pull 
 
 `sh scripts/check-versions.sh` with no arguments checks the working tree and fails if either version file has uncommitted changes; `sh scripts/check-versions.sh <ref>` checks the files as committed at a tag, branch or commit (`sh scripts/check-versions.sh v0.0.1`).
 
+## Sharing a source tarball
+
+The registries get packages built by the release workflow. To send the source itself (to a reviewer, say), build the archive from what git tracks, never with a plain `tar` of your working tree:
+
+```sh
+python3 scripts/make_bundle.py lazaret-0.1.4.tgz          # tracked files only, reproducible
+git archive --format=tar.gz -o lazaret-0.1.4.tgz v0.1.4   # exactly the tagged tree
+```
+
+`make_bundle.py` also refuses credential files and skips OS junk and build output (see `STRUCTURE.md`). A plain `tar` does neither. On macOS it writes each file's extended attributes as a separate `._name` file (AppleDouble): the tarball reviewed for 0.1.3 carried 117 of them. It also picks up untracked files, build output (`build/`, `npm-dist/`) and caches. If you must use `tar`, run it as `COPYFILE_DISABLE=1 tar --exclude='._*' …`, and check that `tar -tzf lazaret-0.1.4.tgz | grep -E '(^|/)\._'` prints nothing.
+
 ## Recovering from a bad tag
 
 Re-point a tag only if **nothing was published from it**. PyPI and npm versions are immutable: once a version is public (or staged on npm and approved), release the next patch version instead and leave the tag alone.
