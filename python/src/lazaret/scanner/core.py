@@ -4743,6 +4743,27 @@ def _pipes_download_to_shell(text):
     return False
 
 
+# A download handed to a shell or an interpreter without a pipe: through a
+# command substitution (`sh -c "$(curl …)"`, `node -e "$(curl …)"`,
+# `eval "$(wget -qO- …)"`) or a process substitution (`source <(curl …)`,
+# `bash <(curl …)`). Read one row at a time, as a command is; a row with no
+# `$(curl`, `` `curl `` or `<(curl` (or wget) is not searched.
+_DL_SUBST_RE = re.compile(
+    r"""\b(?:(?:ba|z|da|k)?sh|node(?:js)?|bun|python[\d.]*|perl|ruby|php|pwsh|powershell)(?:\.exe)?"""
+    r"""(?:[ \t]+-[\w-]+){0,6}?[ \t]+-(?:c|e|E|p|r|-eval|-print|Command|command)[ \t]+(?:["'][ \t]*)?"""
+    r"""(?:\$\(|`)[ \t]*(?:curl|wget)\b"""
+    r"""|\beval[ \t]+(?:["'][ \t]*)?(?:\$\(|`)[ \t]*(?:curl|wget)\b"""
+    r"""|(?:\b(?:(?:ba|z|da|k)?sh|source|node(?:js)?|python[\d.]*)|(?:^|[ \t;&|(])\.)[ \t]+<\([ \t]*(?:curl|wget)\b""")
+_DL_SUBST_NEEDLE_RE = re.compile(r"""(?:\$\(|`|<\()[ \t]*(?:curl|wget)""")
+
+
+def runs_substituted_download(row):
+    """Does this row hand a download to a shell or an interpreter through a
+    command or process substitution (see above)?"""
+    return (("curl" in row or "wget" in row) and _DL_SUBST_NEEDLE_RE.search(row) is not None
+            and _DL_SUBST_RE.search(row) is not None)
+
+
 def install_script_risk(text):
     """Reasons an install-time script looks hostile ([] if none)."""
     reasons = []
@@ -4754,6 +4775,9 @@ def install_script_risk(text):
         reasons.append(f"contacts an address typical of data exfiltration ({dest.group(0)[:40]})")
     if _pipes_download_to_shell(text):
         reasons.append("pipes a download into a shell")
+    if ((("curl" in text or "wget" in text) and any(runs_substituted_download(row) for row in text.split("\n")))
+            or runs_received_code(text) is not None):
+        reasons.append("runs code it receives over the network")
     return reasons
 
 
@@ -4806,15 +4830,879 @@ def import_time_risk(text):
                 reasons.append("runs a downloaded script through a shell")
                 line = line or i + 1
                 break
+    received = runs_received_code(text)
+    if received is not None:
+        reasons.append("runs code it receives over the network")
+        line = line or received
     return reasons, line
 
 
 def _runs_download_through_shell(row):
-    """Does this line hand a download piped into a shell to an exec call
-    (`execSync("curl … | sh")`, `os.system("wget -qO- … | bash")`)? A CLI's
-    help text showing `curl … | sh` does not."""
+    """Does this line hand a download piped into a shell, or substituted into
+    a shell's or an interpreter's command line, to an exec call
+    (`execSync("curl … | sh")`, `os.system("wget -qO- … | bash")`,
+    `execSync('bash -c "$(curl -fsSL …)"')`)? A CLI's help text showing
+    `curl … | sh` does not."""
     return (("curl" in row or "wget" in row) and _EXEC_CALL_RE.search(row) is not None
-            and _pipes_download_to_shell(row))
+            and (_pipes_download_to_shell(row) or runs_substituted_download(row)))
+
+
+# ---------------- Code that runs what it receives over the network ----------------
+# TrapDoor-style import-time code downloads code and runs it:
+# subprocess.run(['node', '-e', urlopen(u).read().decode()]), exec(requests.get(u)
+# .text), eval(body) after https.get's data events, new Function(await r.text()).
+# The pipe test above sees none of these: no shell, no curl. runs_received_code
+# follows a value received over the network — a download, a socket's or a
+# server's data — through the names it is assigned to, callback parameters,
+# `with … as` and `for` bindings and the functions that return it, to a runner
+# that takes it whole as code: eval / exec / new Function / vm, a shell
+# (os.system, execSync, a shell=True call), or an interpreter's inline code
+# (['node', '-e', code], [sys.executable, '-c', code], `python -c "{code}"`).
+# A value put into a larger string (`npm i pkg@${version}`, '(' + text + ')')
+# is not code received, and neither is a file it was saved to. A string
+# literal's contents are read as code too (a program for `node -e` is written
+# in one, and quotes do not always pair as the language pairs them). Install
+# scripts fail on it (install_script_risk), import-time code gets the weaker
+# SC-IMPORT-RISK (import_time_risk). On 66,000 installed JavaScript and Python
+# files (npm, pnpm, yarn, typescript, webpack, next, jest, the AI SDKs, pip,
+# setuptools, requests, httpx, the CPython library) it found nothing.
+#
+# Bounds: a value is followed for _DL_WINDOW rows; a call's arguments are read
+# for _DL_ARG_SPAN characters, and so is each argument's value (after its
+# leading whitespace, `await`s and parentheses); a row longer than
+# _DL_LONG_ROW is minified code, where only a download written straight into
+# a runner counts (a runner that starts within _DL_LOOKBACK characters before
+# a network name). Only rows near a network name, or naming a value followed,
+# are read. A row is read in one pass over its brackets, and no pattern
+# backtracks more than a bounded amount, so a text costs about one pass over
+# it whatever it holds: a large bundle, or a text built to make the follower
+# work.
+_DL_B, _DL_NOT_MEMBER = r"\b", r"(?<![\w$.])"
+
+
+def _dl_alternatives(pairs, tail=""):
+    """(exact, candidate) regexes from (assertion, body) alternatives. The
+    candidate leaves out the leading assertions, so re skips ahead by the
+    first character (several times faster on a large bundle); an exact match
+    starts where a candidate one does, and _dl_finditer confirms each."""
+    group = "(?:{})" if tail else "{}"
+    return (re.compile(group.format("|".join(a + b for a, b in pairs)) + tail),
+            re.compile(group.format("|".join(b for _a, b in pairs)) + tail))
+
+
+def _dl_finditer(pair, row, pos=0, endpos=None):
+    """The exact regex's matches in `row` that start in [pos, endpos) — as
+    finditer would give them — found through the candidate regex (whose match
+    must end by endpos)."""
+    exact, cand = pair
+    end = len(row) if endpos is None else endpos
+    while True:
+        m = cand.search(row, pos, end)
+        if m is None:
+            return
+        e = exact.match(row, m.start())
+        if e is None:
+            pos = m.start() + 1
+            continue
+        yield e
+        pos = e.end() if e.end() > e.start() else e.start() + 1
+
+
+_DL_NET_MODULES = r"""(?:node:)?(?:https?|net|tls|axios|got|node-fetch|undici|ws)"""
+# a value received over the network, or the client, socket or server receiving it
+_DL_SOURCE = _dl_alternatives([
+    # Python
+    (_DL_B, r"""urlopen\s*\("""), (_DL_B, r"""requests\.(?:get|post|put|request|Session)\s*\("""),
+    (_DL_B, r"""httpx\.(?:get|post|request|stream|Client|AsyncClient)\s*\("""), (_DL_B, r"""urllib3\.PoolManager\s*\("""),
+    (_DL_B, r"""HTTPS?Connection\s*\("""), (_DL_B, r"""aiohttp\.ClientSession\s*\("""),
+    (_DL_B, r"""socket\.(?:socket|create_connection)\s*\("""),
+    # JavaScript
+    (_DL_NOT_MEMBER, r"""fetch\s*\("""), (_DL_B, r"""(?:window|globalThis|self|global)\.fetch\s*\("""),
+    (_DL_B, r"""https?\.(?:get|request|createServer)\s*\("""),
+    (_DL_B, r"""(?:net|tls)\.(?:connect|createConnection|createServer)\s*\("""),
+    (_DL_B, r"""new\s+(?:net\.Socket|WebSocket|XMLHttpRequest)\b"""),
+    (_DL_B, r"""require\(\s*["']""" + _DL_NET_MODULES + r"""["']\s*\)"""),
+    (_DL_B, r"""axios(?:\.(?:get|post|request))?\s*\("""), (_DL_NOT_MEMBER, r"""got(?:\.(?:get|post))?\s*\("""),
+    (_DL_B, r"""undici\.(?:request|fetch)\s*\("""),
+    # a download tool's output, captured
+    (_DL_B, r"""(?:execSync|execFileSync|spawnSync|check_output|getoutput|getstatusoutput|popen|run)"""
+         r"""\s*\(\s*(?:\[\s*)?["'`]\s*(?:curl|wget)\b"""),
+])
+_DL_SOURCE_RE, _DL_SOURCE_CANDIDATE_RE = _DL_SOURCE
+# Every source match, and every import of a network module, holds one of these:
+# only the rows holding one are read (and a text with none is not).
+_DL_NEEDLES = ("urlopen", "requests", "httpx", "urllib", "HTTPConnection", "HTTPSConnection", "aiohttp", "socket",
+               "fetch", "http.", "https.", "net.", "tls.", "WebSocket", "XMLHttpRequest", "'http'", '"http"',
+               "'https'", '"https"', "'net'", '"net"', "'tls'", '"tls"', "'ws'", '"ws"', "node:http", "node:net",
+               "node:tls", "axios", "got", "undici", "curl", "wget")
+_DL_NEEDLE_RE = re.compile("|".join(re.escape(n) for n in sorted(_DL_NEEDLES, key=lambda n: (-len(n), n))))
+# ... and every runner match one of these
+_DL_RUN_NEEDLES = ("eval", "exec", "Function", "runIn", "Script", "compileFunction", "_compile", "system",
+                   "popen", "getoutput", "getstatusoutput", "shell", "-e", "-c", "-p", "-r", "-E", "/c", "/C",
+                   "/k", "/K", "Command", "-enc")
+# a name bound to a network module (const https = require('https')), or to a
+# function (const load = (u) => fetch(u)): it carries the network anywhere
+_DL_MODULE_VALUE_RE = re.compile(
+    r"""\s*(?:await\s+)?(?:require|import)\(\s*["']""" + _DL_NET_MODULES + r"""["']\s*\)\s*(?:;\s*)?$""")
+_DL_FUNCTION_VALUE_RE = re.compile(
+    r"""\s*(?:async\s*)?(?:function\b|\([^()]{0,200}\)\s*=>|[A-Za-z_$][\w$]*\s*=>)""")
+# network modules imported under a name: import requests as rq, import * as https from 'https'
+_DL_IMPORT_RE = re.compile(
+    r"""^[ \t]*import[ \t]+(?P<py>[\w.,]+(?:[ \t]+[\w.,]+)*)[ \t]*$"""
+    r"""|^[ \t]*from[ \t]+(?:requests|httpx|urllib\.request|socket)[ \t]+import[ \t]+(?:\([ \t]*)?"""
+    r"""(?P<pyfrom>[\w,]+(?:[ \t]+[\w,]+)*)[ \t]*\)?[ \t]*$"""
+    r"""|\bimport\s+(?:\*\s+as\s+)?(?P<es>[A-Za-z_$][\w$]*)\s+from\s+["']""" + _DL_NET_MODULES + r"""["']"""
+    r"""|\bimport\s*\{(?P<esn>[^{}]{0,200})\}\s*from\s+["']""" + _DL_NET_MODULES + r"""["']""")
+_DL_PY_NET_MODULES = frozenset({"requests", "httpx", "urllib3", "urllib.request", "http.client", "aiohttp",
+                                "socket"})
+_DL_LONG_ROW = 1000
+_DL_WINDOW = 50
+_DL_ARG_SPAN = 400
+_DL_LOOKBACK = 450
+# names looked up by a search of the text each; the rest from an index of its names
+_DL_NAMED_SEARCHES = 64
+# readings of a row's quotes begun at a call's '(' (see _DlRow)
+_DL_PHASES = 8
+_DL_CHAIN_RE = re.compile(r"""(?<![\w$.])[A-Za-z_$][\w$]*(?:\s*\??\.\s*[A-Za-z_$][\w$]*){0,50}""")
+# a chain's first name, as _DL_CHAIN_RE starts one
+_DL_HEAD_RE = re.compile(r"""(?<![\w$.])[A-Za-z_$][\w$]*""")
+_DL_WORD_RUN_RE = re.compile(r"""[\w$]+""")
+_DL_STR_RE = re.compile(r"""\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`""")
+# what a template literal or an f-string interpolates
+_DL_TEMPLATE_HOLE_RE = re.compile(r"""\$\{([^{}]*)\}""")
+_DL_FSTRING_HOLE_RE = re.compile(r"""(?<!\{)\{([^{}]*)\}""")
+_DL_PREFIX_CHARS = frozenset("rRbBuUfF")
+# what a row binds: an annotated or plain assignment (destructuring too), a
+# `with … as` name, a `for` variable, a `return`
+_DL_BIND_RE = re.compile(
+    r"""(?P<ann>(?<![\w$.])[A-Za-z_$][\w$]*)\s*:\s*[\w$.\[\], |]{1,80}?\s*=(?![=>])"""
+    r"""|(?P<lhs>(?<![\w$.])[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*){0,8}(?:\s*,\s*[A-Za-z_$][\w$]*){0,8}"""
+    r"""|\{[^{}()=;]{0,200}\}|\[[^\[\]()=;]{0,200}\])\s*(?:\+|\|\||\?\?)?=(?![=>])"""
+    r"""|\bas\s+(?P<with>[A-Za-z_]\w*)\s*[:,)]"""
+    r"""|\bfor\s*(?:\(\s*)?(?:(?:const|let|var)\s+)?(?P<for>[A-Za-z_$][\w$]*(?:\s*,\s*[A-Za-z_$][\w$]*){0,8}"""
+    r"""|\{[^{}]{0,200}\}|\[[^\[\]]{0,200}\])\s+(?:of|in)\b"""
+    r"""|\breturn\b(?P<ret>)""")
+# a function's parameters: function (res) {, (res) =>, res =>, lambda res:
+_DL_PARAMS_RE = re.compile(
+    r"""\bfunction\b\s*(?:[\w$]+\s*)?\((?P<fp>[^()]{0,200})\)|\((?P<ap>[^()]{0,200})\)\s*=>"""
+    r"""|(?<![\w$.])(?P<one>[A-Za-z_$][\w$]*)\s*=>|\blambda\b(?P<lp>[^:()]{0,200}):""")
+_DL_FN_HEADER_RE = re.compile(
+    r"""^\s*(?:async\s+)?def\s+(?P<py>\w+)|\bfunction\s*(?:\*\s*)?(?P<js>[A-Za-z_$][\w$]*)\s*\("""
+    r"""|\b(?:const|let|var)\s+(?P<var>[A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?"""
+    r"""(?:function\b|\([^()]{0,200}\)\s*=>|[A-Za-z_$][\w$]*\s*=>)""")
+_DL_NAME_RE = re.compile(r"""[A-Za-z_$][\w$]*""")
+_DL_DEFAULT_RE = re.compile(r"""=[^,]*""")
+_DL_DOT_RE = re.compile(r"""\s*\??\.\s*""")
+_DL_NOT_NAMES = frozenset("""const let var this self await async function return new typeof in of as for
+    with if else true false null None True False undefined str int float bytes bool list dict set tuple
+    object""".split())
+# runners: the argument runs as code or as a shell command
+_DL_RUNNER_PAIRS = [
+    (_DL_NOT_MEMBER, r"""(?:eval|exec|execfile)\s*\("""), (_DL_B, r"""(?:window|globalThis|global|self)\.eval\s*\("""),
+    (_DL_B, r"""new\s+Function\s*\("""), (_DL_NOT_MEMBER, r"""Function\s*\("""),
+    (_DL_B, r"""runIn(?:This|New)?Context\s*\("""), (_DL_B, r"""new\s+vm\.Script\s*\("""),
+    (_DL_B, r"""compileFunction\s*\("""), (r"""(?<=\.)""", r"""_compile\s*\("""), (_DL_B, r"""execSync\s*\("""),
+    (_DL_B, r"""(?:child_process|childProcess|cp)\.exec\s*\("""),
+    (_DL_B, r"""require\(\s*["'](?:node:)?child_process["']\s*\)\.exec\s*\("""),
+    (_DL_B, r"""os\.(?:system|popen)\s*\("""), (_DL_B, r"""__import__\(\s*["']os["']\s*\)\.(?:system|popen)\s*\("""),
+    (_DL_NOT_MEMBER, r"""(?:system|popen)\s*\("""), (_DL_B, r"""(?:subprocess\.)?get(?:status)?output\s*\("""),
+]
+_DL_RUNNER = _dl_alternatives(_DL_RUNNER_PAIRS)
+_DL_RUNNER_RE, _DL_RUNNER_CANDIDATE_RE = _DL_RUNNER
+_DL_SHELL_TRUE_RE = re.compile(r"""\bshell\s*=\s*True\b""")
+# ... and subprocess calls, where the text has shell=True: one counts when a
+# `shell=True` starts within _DL_ARG_SPAN characters after its '('
+_DL_SHELL_CALL = r"""(?:run|call|Popen|check_output|check_call)\s*\("""
+_DL_SHELL_CALL_RE = re.compile(_DL_SHELL_CALL)
+# (`shell` first, and \b after it, so that re skips ahead to one)
+_DL_SHELL_ARG_RE = re.compile(r"""shell(?<!\wshell)\s*=\s*True""")
+_DL_RUNNER_SHELL = _dl_alternatives(_DL_RUNNER_PAIRS + [(_DL_B, _DL_SHELL_CALL)])
+_DL_RUNNER_SHELL_RE, _DL_RUNNER_SHELL_CANDIDATE_RE = _DL_RUNNER_SHELL
+_DL_DEFINING = ("def", "function", "async")
+_DL_INTERPRETERS = (r"""(?:node|nodejs|bun|python[\d.]*|pythonw|(?:ba|z|da|k)?sh|perl|ruby|php|pwsh|"""
+                    r"""powershell|osascript|cmd)(?:\.exe)?""")
+_DL_INLINE_FLAG = r"""(?:-(?:e|E|c|p|r|-eval|-print|Command|command|EncodedCommand|enc)|/[cCkK])"""
+# an interpreter's inline code as argv: ['node', '-e', CODE], [sys.executable, '-c', CODE]
+_DL_INTERP = _dl_alternatives([
+    ("", r"""["'`](?:[\w.:~-]*[/\\]){0,8}""" + _DL_INTERPRETERS + r"""["'`]"""),
+    (_DL_B, r"""process\.(?:execPath|argv\[0\])"""), (_DL_B, r"""sys\.executable"""),
+], r"""\s*,\s*(?:\[\s*)?(?:["'`]-[^"'`\n]{0,40}["'`]\s*,\s*){0,4}?["'`]""" + _DL_INLINE_FLAG
+   + r"""["'`]\s*,\s*""")
+_DL_INTERP_RE, _DL_INTERP_CANDIDATE_RE = _DL_INTERP
+# ... or written into its command line: `node -e ${code}`, 'python -c "%s"' % code
+_DL_EMBED_RE = re.compile(r"""\s*[rRbBuUfF]{0,2}["'`]\s*(?:[\w.:~-]*[/\\]){0,8}""" + _DL_INTERPRETERS
+                          + r"""(?:\s+-[\w-]+){0,6}?\s+""" + _DL_INLINE_FLAG + r"""\b""")
+# (repetitions are bounded: the npm engine's regex engine keeps a backtrack
+# entry per repetition of a group and overflows its stack on millions)
+_DL_LEAD_RE = re.compile(r"""\s*(?:(?:await|yield)\s+|\(\s*){0,50}""")
+_DL_CALLEE_RE = re.compile(
+    r"""(?:new\s+)?(?P<chain>[A-Za-z_$][\w$]*(?:\s*\??\.\s*[A-Za-z_$][\w$]*){0,50})\s*(?P<call>\()?""")
+_DL_CALLEE_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_$.")
+_DL_BRACKET_RE = re.compile(r"""[()\[\]{},]""")
+
+
+def _dl_lhs_names(lhs):
+    """The names an assignment's left side binds (a member chain stays whole)."""
+    lhs = lhs.strip()
+    if lhs[:1] in "{[":
+        return [n for n in _DL_NAME_RE.findall(lhs) if n not in _DL_NOT_NAMES]
+    out = []
+    for part in lhs.split(","):
+        part = _DL_DOT_RE.sub(".", part.strip())
+        if part and part not in _DL_NOT_NAMES:
+            out.append(part)
+    return out
+
+
+def _dl_defined_here(row, i):
+    """Is the call at row[i] the name in a definition: def exec(…),
+    function exec(…), async exec(…)?"""
+    j = i
+    while j > 0 and row[j - 1].isspace():
+        j -= 1
+    if j == i:
+        return False
+    for word in _DL_DEFINING:
+        s = j - len(word)
+        if s >= 0 and row.startswith(word, s) and (s == 0 or not (row[s - 1] == "_" or row[s - 1].isalnum())):
+            return True
+    return False
+
+
+def _dl_any(offsets, lo, hi):
+    """Is one of the sorted offsets in [lo, hi)?"""
+    i = bisect.bisect_left(offsets, lo)
+    return i < len(offsets) and offsets[i] < hi
+
+
+def _dl_within(starts, ends, lo, hi):
+    """Is one of the spans (sorted, not overlapping) inside [lo, hi)?"""
+    i = bisect.bisect_left(starts, lo)
+    return i < len(starts) and ends[i] <= hi
+
+
+class _DlTaint:
+    """The names holding a received value, with the row each was last bound
+    on (followed for _DL_WINDOW rows), and the names that carry the network
+    wherever they are used (network modules, functions returning a received
+    value). `heads` holds their first names: a row naming none of them uses
+    none."""
+
+    def __init__(self, always):
+        self.always = set(always)
+        self.at = {}
+        self.heads = {n.split(".")[0] for n in self.always}
+
+    def name_live(self, name, row):
+        """Is `name` such a name at `row`?"""
+        if name in self.always:
+            return True
+        t = self.at.get(name)
+        return t is not None and row - t <= _DL_WINDOW
+
+    def live(self, chain, row):
+        """Is `chain`, or a chain it is a property of, such a name at `row`?"""
+        acc = None
+        for part in _DL_DOT_RE.split(chain):
+            acc = part if acc is None else acc + "." + part
+            if self.name_live(acc, row):
+                return True
+        return False
+
+
+def _dl_carried(row, i, taint, k):
+    """Does the value at row[i] begin with a received value — a source or a
+    tainted name (None: sources only) — seen through await, parentheses and
+    up to three wrapping calls (compile(code, …), Buffer.from(body, 'base64'))?
+    It is read for _DL_ARG_SPAN characters after the whitespace, `await`s
+    and parentheses it starts with."""
+    i = _DL_LEAD_RE.match(row, i).end()
+    limit = min(len(row), i + _DL_ARG_SPAN)
+    for n in range(4):
+        if n:
+            i = _DL_LEAD_RE.match(row, i, limit).end()
+        m = _DL_CALLEE_RE.match(row, i, limit)
+        if m is None:
+            return False
+        if _DL_SOURCE_RE.search(row, i, m.end()) or (taint is not None and taint.live(m.group("chain"), k)):
+            return True
+        if m.group("call") is None:
+            return False
+        i = m.end()
+    return False
+
+
+class _DlCode:
+    """row[lo:hi] read as code: its text with each string literal's contents
+    blanked (the quotes kept, so offsets hold), and the literals' spans. A
+    literal's contents are read as code too, on demand: quotes do not always
+    pair as the language pairs them (an apostrophe in a comment, a regex
+    literal), and a program for `node -e` is written in one. Each read once,
+    on demand: its brackets matched (each opener's closer, the commas
+    directly inside it, the innermost '(' open at given offsets), its member
+    chains with those a name reaches, and its template literals and f-strings
+    interpolating a live chain. Brackets match whatever their kind; offsets
+    are the row's."""
+    __slots__ = ("row", "lo", "hi", "lit_s", "lit_e", "code", "close", "opener", "commas", "open_paren", "es",
+                 "inner", "by", "live", "holes")
+
+    def __init__(self, row, lo, hi):
+        self.row, self.lo, self.hi = row, lo, hi
+        parts, self.lit_s, self.lit_e, at = [], [], [], lo
+        for m in _DL_STR_RE.finditer(row, lo, hi):
+            s, e = m.span()
+            parts.append(row[at:s + 1])
+            parts.append(" " * (e - s - 2))
+            at = e - 1
+            self.lit_s.append(s)
+            self.lit_e.append(e)
+        parts.append(row[at:hi])
+        self.code = "".join(parts)
+        self.close = self.opener = self.commas = None
+        self.open_paren, self.es, self.inner = {}, {}, {}
+        self.by, self.live, self.holes = None, [], None
+
+    def literal_at(self, p):
+        """The index of the literal whose contents hold offset p, else -1."""
+        i = bisect.bisect_right(self.lit_s, p) - 1
+        return i if i >= 0 and self.lit_s[i] < p < self.lit_e[i] - 1 else -1
+
+    def segment_at(self, p):
+        """The code holding offset p: this, or a literal's contents read as code."""
+        i = self.literal_at(p)
+        if i < 0:
+            return self
+        seg = self.inner.get(i)
+        if seg is None:
+            seg = self.inner[i] = _DlCode(self.row, self.lit_s[i] + 1, self.lit_e[i] - 1)
+        return seg.segment_at(p)
+
+    def brackets(self, queries=()):
+        """Match the brackets, once; `queries`: sorted offsets to find the
+        innermost open '(' at (in open_paren; None where there is none)."""
+        if self.close is not None:
+            return
+        close, opener, commas, answers = {}, {}, {}, self.open_paren
+        stack, parens, qi, lo = [], [], 0, self.lo
+        for m in _DL_BRACKET_RE.finditer(self.code):
+            q, ch = m.start() + lo, m.group()
+            while qi < len(queries) and queries[qi] <= q:
+                answers[queries[qi]] = parens[-1] if parens else None
+                qi += 1
+            if ch == ",":
+                if stack:
+                    commas.setdefault(stack[-1], []).append(q)
+            elif ch in "([{":
+                stack.append(q)
+                if ch == "(":
+                    parens.append(q)
+            elif stack:
+                o = stack.pop()
+                if parens and parens[-1] == o:
+                    parens.pop()
+                close[o] = q
+                opener[q] = o
+        for p in queries[qi:]:
+            answers[p] = parens[-1] if parens else None
+        self.close, self.opener, self.commas = close, opener, commas
+
+    def expr_start(self, j):
+        """Where the expression a '(' at offset j is applied to starts —
+        `https.get` for `https.get(`, `fetch(u).then` for `fetch(u).then(`, a
+        group of brackets skipped whole — or None when that runs into a ')'
+        or ']' without an opener. Each offset is walked once."""
+        memo, code, lo, n = self.es, self.code, self.lo, len(self.code)
+        path, q = [], j
+        while True:
+            res = memo.get(q, memo)
+            if res is not memo:
+                break
+            path.append(q)
+            r = q - lo
+            if r == 0:
+                res = q
+                break
+            ch = code[r - 1]
+            if ch in _DL_CALLEE_CHARS:
+                q -= 1
+            elif ch == ")" or ch == "]":
+                o = self.opener.get(q - 1)
+                if o is None:
+                    res = None
+                    break
+                q = o
+            elif (ch == " " or ch == "\t") and ((r < n and code[r] == ".") or (r >= 2 and code[r - 2] == ".")):
+                q -= 1                                  # `a . b`, a chain's indentation
+            else:
+                res = q
+                break
+        for p in path:
+            memo[p] = res
+        return res
+
+    def index(self, taint, k):
+        """Index the member chains, and find those the taint reaches at row k."""
+        self.by = by = _dl_chain_index(self.code, self.lo)
+        self.live = sorted(s for name, offs in by.items() if taint.name_live(name, k) for s in offs)
+
+    def bound(self, name):
+        """`name` is now live: the chains it starts are too."""
+        for s in self.by.get(name, ()):
+            bisect.insort(self.live, s)
+
+    def live_holes(self, taint, k):
+        """(starts, ends) of the template literals and f-strings that
+        interpolate a chain the taint reaches at row k."""
+        if self.holes is None:
+            starts, ends, row = [], [], self.row
+            for s, e in zip(self.lit_s, self.lit_e):
+                if row[s] == "`":
+                    holes = _DL_TEMPLATE_HOLE_RE.findall(row, s, e)
+                else:
+                    pre = row[max(self.lo, s - 2):s]
+                    while pre and pre[0] not in _DL_PREFIX_CHARS:
+                        pre = pre[1:]
+                    if "f" not in pre and "F" not in pre:
+                        continue
+                    holes = _DL_FSTRING_HOLE_RE.findall(row, s, e)
+                if holes and any(taint.live(c.group(), k) for c in _DL_CHAIN_RE.finditer(" ".join(holes))):
+                    starts.append(s)
+                    ends.append(e)
+            self.holes = (starts, ends)
+        return self.holes
+
+
+def _dl_chain_index(code, lo=0):
+    """The member chains of `code` (strings blanked) by the names they start
+    with — 'r' and 'r.text' for r.text — as {name: [offset, …]}."""
+    by = {}
+    for m in _DL_CHAIN_RE.finditer(code):
+        c, s = m.group(), m.start() + lo
+        if "." not in c:
+            by.setdefault(c, []).append(s)
+            continue
+        acc = None
+        for part in _DL_DOT_RE.split(c):
+            acc = part if acc is None else acc + "." + part
+            by.setdefault(acc, []).append(s)
+    return by
+
+
+class _DlNamed:
+    """The rows where a name stands whole ([\\w$]+ runs are names). The first
+    _DL_NAMED_SEARCHES names are each found by a search of the text; the
+    rest from an index of its names, built once."""
+
+    def __init__(self, text, rows, starts):
+        self.text, self.rows, self.starts = text, rows, starts
+        self.searches, self.index = 0, None
+
+    def find(self, name):
+        head = name.split(".")[0]
+        if _DL_WORD_RUN_RE.fullmatch(head) is None:
+            return ()
+        if self.index is None and self.searches < _DL_NAMED_SEARCHES:
+            self.searches += 1
+            esc = re.escape(head)
+            rx = re.compile(esc + r"(?<![\w$]" + esc + r")(?![\w$])")
+            out, text, starts = [], self.text, self.starts
+            m = rx.search(text)
+            while m is not None:
+                k = bisect.bisect_right(starts, m.start()) - 1
+                out.append(k)
+                if k + 1 >= len(starts):
+                    break
+                m = rx.search(text, starts[k + 1])
+            return out
+        if self.index is None:
+            index = {}
+            for k, row in enumerate(self.rows):
+                for word in set(_DL_WORD_RUN_RE.findall(row)):
+                    index.setdefault(word, []).append(k)
+            self.index = index
+        return self.index.get(head, ())
+
+
+def _dl_import_names(rows, cand):
+    """The names a network module is imported under, on the rows `cand`."""
+    out = set()
+    for k in sorted(cand):
+        row = rows[k]
+        if "import" not in row or len(row) > _DL_LONG_ROW:
+            continue
+        for m in _DL_IMPORT_RE.finditer(row):
+            if m.group("py") is not None:
+                for item in m.group("py").split(","):
+                    parts = item.split()
+                    if parts and parts[0] in _DL_PY_NET_MODULES:
+                        out.add(parts[2] if len(parts) == 3 and parts[1] == "as" else parts[0])
+                continue
+            items = m.group("pyfrom") if m.group("pyfrom") is not None else m.group("esn")
+            if items is None:
+                out.add(m.group("es"))
+                continue
+            for item in items.split(","):
+                parts = item.split()
+                if parts:
+                    out.add(parts[2] if len(parts) == 3 and parts[1] == "as" else parts[0])
+    return out
+
+
+def _dl_header(row):
+    """What a row says about the function a `return` below it belongs to:
+    the function's name on a function header, '' on a minified row (the
+    search stops there), None on any other row."""
+    if len(row) > _DL_LONG_ROW:
+        return ""
+    h = _DL_FN_HEADER_RE.search(row)
+    return None if h is None else (h.group("py") or h.group("js") or h.group("var"))
+
+
+def _dl_row_above(rows, k):
+    """The nearest non-blank row above k (in the window), unless minified."""
+    for j in range(k - 1, max(-1, k - _DL_WINDOW - 1), -1):
+        if rows[j].strip():
+            return j if len(rows[j]) <= _DL_LONG_ROW else None
+    return None
+
+
+class _DlRow:
+    """One row (or a minified row's stretch) as runs_received_code reads it:
+    its code (quotes paired from its start) for what it binds, and for its
+    runners' arguments, quotes paired from each call's '(': the row's own
+    pairing where that is in step, else a reading begun at the '(' (at most
+    _DL_PHASES of those), as a language pairs them wherever the row's
+    earlier quotes are something else (an apostrophe in a comment, a regex
+    literal's quote)."""
+    __slots__ = ("reader", "k", "row", "taint", "hi", "top", "phases", "src_s", "src_e", "dirty", "indexed")
+
+    def __init__(self, reader, k, row, lo, hi, taint, sources, top=True):
+        self.reader, self.k, self.row, self.taint, self.hi = reader, k, row, taint, hi
+        self.top = _DlCode(row, lo, hi) if top else None
+        self.phases = [self.top] if top else []
+        self.src_s = [s for s, _e in sources]            # (start, end) of the sources read, sorted
+        self.src_e = [e for _s, e in sources]
+        self.dirty = False                               # can a chain here be live?
+        self.indexed = []                                # the codes whose chains are indexed
+
+    def live(self, seg):
+        """The sorted offsets of seg's chains the taint reaches (indexed on first use)."""
+        if seg.by is None:
+            seg.index(self.taint, self.k)
+            self.indexed.append(seg)
+        return seg.live
+
+    def bound(self, name):
+        """`name` is now live: the chains it starts are too."""
+        for seg in self.indexed:
+            seg.bound(name)
+
+    def phase_at(self, o):
+        """The code a call's '(' at offset o is read in: one where it is not
+        in a literal, else a reading begun there (None past _DL_PHASES)."""
+        for ph in self.phases:
+            if ph.lo <= o < ph.hi and ph.literal_at(o) < 0:
+                return ph
+        if len(self.phases) - (self.top is not None) >= _DL_PHASES:
+            return None
+        ph = _DlCode(self.row, o, self.hi)
+        self.phases.append(ph)
+        return ph
+
+    def runs(self, r, taint):
+        """Is the runner call `r` handed a received value (taint None: a
+        download only) — as an argument, or written into an interpreter's
+        command line?"""
+        row, k = self.row, self.k
+        if _dl_defined_here(row, r.start()):
+            return False                                # def exec(…), function exec(…)
+        if _DL_SHELL_CALL_RE.fullmatch(r.group()) and not self.reader.shell_within(k, row, r.end()):
+            return False                                # run(…) without shell=True
+        o = r.end() - 1
+        if o >= self.hi:
+            return False                                # its '(' is past what is read
+        ph = self.phase_at(o)
+        if ph is None:
+            return False
+        ph.brackets()
+        end = min(ph.hi, o + 1 + _DL_ARG_SPAN)
+        c = ph.close.get(o)
+        close = c if c is not None and c < end else None
+        if close is not None and row[close + 1:close + 3].lstrip()[:1] == "{":
+            return False                                # a method definition: exec(x) {
+        starts, ends = [o + 1], []
+        for x in ph.commas.get(o, ()):
+            if x >= end:
+                break
+            ends.append(x)
+            starts.append(x + 1)
+        ends.append(end if close is None else close)
+        src_s, src_e = self.src_s, self.src_e
+        if taint is not None and self.dirty:
+            live, holes = self.live(ph), ph.live_holes(taint, k)
+        else:
+            live, holes = (), ((), ())
+        # each argument's value, read to its end, or where the call's are cut, as
+        # _dl_carried reads it; one with nothing received in it is not read
+        last = len(starts) - 1
+        for i, (s, e) in enumerate(zip(starts, ends)):
+            if close is None and i == last:
+                e = min(self.hi, _DL_LEAD_RE.match(row, s).end() + _DL_ARG_SPAN)
+            if (_dl_any(src_s, s, e) or _dl_any(live, s, e)) and _dl_carried(row, s, taint, k):
+                return True
+        s, e = starts[0], ends[0]
+        if _DL_EMBED_RE.match(row, s, e) is None:
+            return False
+        return _dl_within(src_s, src_e, s, e) or _dl_any(live, s, e) or _dl_within(holes[0], holes[1], s, e)
+
+
+class _DlReader:
+    """runs_received_code's pass over the rows: what each row binds, and
+    whether it runs a received value."""
+
+    def __init__(self, text, rows, starts, taint, sources, runners, named, seeds):
+        self.text, self.rows, self.starts, self.taint = text, rows, starts, taint
+        self.sources, self.runners, self.named, self.seeds = sources, runners, named, seeds
+        self.until = -1
+        self.headers = {}                                # row -> _dl_header, as read
+        self.last_top = (-1, None)                       # the row read last, and its code
+        self.shell_row, self.shell = -1, ()              # offsets of `shell=True` on that row
+
+    def shell_within(self, k, row, i):
+        """Does a `shell=True` start within _DL_ARG_SPAN characters after row[i]?"""
+        if self.shell_row != k:
+            self.shell_row, self.shell = k, [m.start() for m in _DL_SHELL_ARG_RE.finditer(row)]
+        return _dl_any(self.shell, i, i + _DL_ARG_SPAN + 1)
+
+    def short_row(self, k, row):
+        """Read a row of ordinary length; True when it runs a received value."""
+        taint, rows = self.taint, self.rows
+        heads = taint.heads
+        found = bool(heads) and not heads.isdisjoint(_DL_HEAD_RE.findall(row))
+        hot = k in self.sources
+        above = _dl_row_above(rows, k) if row.lstrip()[:1] == "." else None
+        if not (hot or found or (above is not None and (above in self.sources or (
+                bool(heads) and not heads.isdisjoint(_DL_HEAD_RE.findall(rows[above])))))):
+            return False                                 # names nothing received: binds and runs none
+        srcs = [m.span() for m in _dl_finditer(_DL_SOURCE, row)] if hot else []
+        rd = _DlRow(self, k, row, 0, len(row), taint, srcs)
+        rd.dirty = found
+        top = rd.top
+        # [kind, lo, hi, match or names, continued, code]: what a fact binds from
+        # row[lo:hi], its sources anywhere there, its chains in the code it is in
+        facts = []
+        semi = -1
+        binds = _DL_BIND_RE.finditer(row) if ("=" in row or "as" in row or "for" in row or "return" in row) else ()
+        for m in binds:
+            seg = top.segment_at(m.start())
+            if m.group("ann") is not None or m.group("lhs") or m.group("ret") is not None:
+                lo = m.end()
+                if semi < lo:
+                    semi = row.find(";", lo)
+                    semi = len(row) if semi < 0 else semi
+                kind, lo, hi = ("return" if m.group("ret") is not None else "bind"), lo, semi
+            elif m.group("with"):
+                kind, lo, hi = "with", 0, m.start()
+            else:
+                kind, lo, hi = "for", m.end(), len(row)
+            facts.append([kind, lo, hi, m, False, seg])
+        params, queries = [], {}
+        for m in (_DL_PARAMS_RE.finditer(row) if ("=>" in row or "function" in row or "lambda" in row) else ()):
+            ps = m.group("fp") or m.group("ap") or m.group("one") or m.group("lp") or ""
+            names = [n for n in _DL_NAME_RE.findall(_DL_DEFAULT_RE.sub("", ps)) if n not in _DL_NOT_NAMES]
+            if names:
+                seg = top.segment_at(m.start())
+                params.append((m.start(), names, seg))
+                queries.setdefault(id(seg), (seg, []))[1].append(m.start())
+        for seg, offsets in queries.values():
+            seg.brackets(offsets)
+        first = len(row) - len(row.lstrip())
+        for p, names, seg in params:
+            j = seg.open_paren.get(p)
+            start = None if j is None else seg.expr_start(j)
+            if start is None:
+                continue
+            continued = seg is top and start <= first < j and row[first] == "."
+            facts.append(["param", start, j, names, continued, seg])
+        # which facts hold a received value; binding their names can feed the others
+        above_by, above_live = None, False
+        if above is not None and any(f[4] for f in facts):
+            if above in self.sources:
+                above_live = True
+            else:
+                j, code = self.last_top
+                if j == above and code.by is not None:
+                    above_by = code.by                   # (read just now: its chains are indexed)
+                else:
+                    a_row = rows[above]
+                    above_by = _dl_chain_index(_DlCode(a_row, 0, len(a_row)).code)
+                above_live = any(taint.name_live(n, k) for n in above_by)
+        added = []
+        pending = facts
+        for _ in range(3):
+            grew = False
+            rest = []
+            for f in pending:
+                lo, hi, seg = f[1], f[2], f[5]
+                if not (_dl_within(rd.src_s, rd.src_e, lo, hi) or (f[4] and above_live)
+                        or (rd.dirty and _dl_any(rd.live(seg), lo, hi))):
+                    rest.append(f)
+                    continue
+                names, how = self._names(f, row, k)
+                for name in names:
+                    if how == "always":
+                        if name in taint.always:
+                            continue
+                        taint.always.add(name)
+                        added.append(name)
+                    elif taint.at.get(name) != k:
+                        taint.at[name] = k
+                        self.until = max(self.until, k + _DL_WINDOW)
+                    else:
+                        continue
+                    grew = rd.dirty = True
+                    taint.heads.add(name.split(".")[0])
+                    rd.bound(name)
+                    if above_by is not None and name in above_by:
+                        above_live = True
+            pending = rest
+            if not grew:
+                break
+        for name in added:
+            for r in self.named.find(name):
+                if r > k:
+                    self.seeds[r] = 1
+        self.last_top = (k, top)
+        # its runners, with what it binds
+        for r in _dl_finditer(self.runners, row):
+            if rd.runs(r, taint):
+                return True
+        for r in _dl_finditer(_DL_INTERP, row):
+            if _dl_carried(row, r.end(), taint, k):
+                return True
+        return False
+
+    def _names(self, f, row, k):
+        """(names, how) a fact that holds a received value binds: how is
+        'value' (followed for _DL_WINDOW rows) or 'always'."""
+        kind = f[0]
+        if kind == "param":
+            return f[3], "value"
+        m = f[3]
+        if kind == "bind":
+            names = [m.group("ann")] if m.group("ann") is not None else _dl_lhs_names(m.group("lhs"))
+            names = [n for n in names if n not in _DL_NOT_NAMES]
+            if len(names) == 1 and "." not in names[0]:
+                lo, hi = f[1], f[2]
+                if _DL_MODULE_VALUE_RE.match(row, lo, hi):
+                    return names, "always"
+                if len(names[0]) >= 3 and _DL_FUNCTION_VALUE_RE.match(row, lo, hi):
+                    return names, "always"             # const load = (u) => fetch(u)
+            return names, "value"
+        if kind == "with":
+            return [m.group("with")], "value"
+        if kind == "for":
+            return _dl_lhs_names(m.group("for")), "value"
+        # return VALUE: the function whose header is nearest above carries it
+        fn = self.function_above(k)
+        return ([fn] if fn and len(fn) >= 3 else []), "always"
+
+    def function_above(self, k):
+        """The function a `return` on row k belongs to: the name on the
+        nearest function header at or above it within _DL_WINDOW rows ('' past
+        a minified row), else None."""
+        headers, rows = self.headers, self.rows
+        for j in range(k, max(-1, k - _DL_WINDOW - 1), -1):
+            h = headers.get(j, headers)
+            if h is headers:
+                h = headers[j] = _dl_header(rows[j])
+            if h is not None:
+                return h
+        return None
+
+    def long_row(self, k, row):
+        """Read a minified row: only a download written straight into a
+        runner's arguments, a runner that starts within _DL_LOOKBACK
+        characters before a network name (the stretches merged: one pass at
+        most). True when one runs."""
+        stretches = []
+        for n in _DL_NEEDLE_RE.finditer(row):
+            lo = max(0, n.start() - _DL_LOOKBACK)
+            if stretches and lo <= stretches[-1][1]:
+                stretches[-1][1] = n.start()
+            else:
+                stretches.append([lo, n.start()])
+        for lo, hi in stretches:
+            end = min(len(row), hi + 3 * _DL_ARG_SPAN)     # a runner's name, its arguments, the last one's value
+            rd = None
+            for r in _dl_finditer(self.runners, row, lo, min(end, hi + _DL_ARG_SPAN)):
+                if r.start() >= hi:
+                    break
+                if rd is None:
+                    rd = _DlRow(self, k, row, lo, end, None,
+                                [m.span() for m in _dl_finditer(_DL_SOURCE, row, lo, end)], top=False)
+                if rd.runs(r, None):
+                    return True
+            for r in _dl_finditer(_DL_INTERP, row, lo, min(end, hi + _DL_ARG_SPAN)):
+                if r.start() >= hi:
+                    break
+                if _dl_carried(row, r.end(), None, k):
+                    return True
+        return False
+
+
+def runs_received_code(text):
+    """The 1-based line where code runs what it received over the network as
+    code or as a shell command (see the section comment), else None. `text`
+    has \\n line endings."""
+    if not any(n in text for n in _DL_NEEDLES) or not any(n in text for n in _DL_RUN_NEEDLES):
+        return None
+    rows = text.split("\n")
+    starts, at = [], 0
+    for row in rows:
+        starts.append(at)
+        at += len(row) + 1
+    near = set()                                        # rows holding a network name
+    m = _DL_NEEDLE_RE.search(text)
+    while m is not None:
+        k = bisect.bisect_right(starts, m.start()) - 1
+        near.add(k)
+        m = _DL_NEEDLE_RE.search(text, starts[k + 1]) if k + 1 < len(starts) else None
+    taint = _DlTaint(_dl_import_names(rows, near) if "import" in text else ())
+    sources = {k for k in near
+               if len(rows[k]) > _DL_LONG_ROW or next(_dl_finditer(_DL_SOURCE, rows[k]), None) is not None}
+    if not taint.always and not sources:
+        return None
+    named = _DlNamed(text, rows, starts)
+    seeds = bytearray(len(rows))                        # rows where a received value can start
+    for r in sources:
+        seeds[r] = 1
+    for name in taint.always:
+        for r in named.find(name):
+            seeds[r] = 1
+    runners = _DL_RUNNER_SHELL if "shell" in text and _DL_SHELL_TRUE_RE.search(text) else _DL_RUNNER
+    reader = _DlReader(text, rows, starts, taint, sources, runners, named, seeds)
+    # Rows are read in order, from a seed on for _DL_WINDOW rows (and as long
+    # as a value is bound): a row outside every such stretch can neither bind
+    # a received value nor run one, so it is skipped.
+    k = seeds.find(1)
+    k = len(rows) if k < 0 else k
+    while k < len(rows):
+        row = rows[k]
+        if len(row) > _DL_LONG_ROW:
+            if reader.long_row(k, row):
+                return k + 1
+        else:
+            if seeds[k]:
+                reader.until = max(reader.until, k + _DL_WINDOW)
+            if reader.short_row(k, row):
+                return k + 1
+        nk = k + 1
+        if nk > reader.until:
+            nk = seeds.find(1, nk)
+            nk = len(rows) if nk < 0 else nk
+        k = nk
+    return None
 
 
 # SC-PIPE-SHELL: a project's own code that runs a download piped into a shell
@@ -5061,9 +5949,18 @@ def scan_manifest(path, content, registry=False):
     return issues
 
 
-# gyp command expansions run a shell command while node-gyp configures the
-# build: '<!(cmd)', '<!@(cmd)', '>!(cmd)', '>!@(cmd)'.
-_GYP_EXPANSION_RE = re.compile(r"[<>]!@?\(")
+# gyp command expansions run a command while node-gyp configures the build:
+# '<!(cmd)', '<!@(cmd)', and the same in gyp's later phases, '>!(cmd)' and
+# '^!(cmd)'; '<!([argv…])' runs an argv list without a shell, and
+# '<!pymod_do_main(module args)' imports `module` from the gyp file's
+# directory and calls its DoMain. (gyp: pylib/gyp/input.py, ExpandVariables.)
+_GYP_EXPANSION_RE = re.compile(r"[<>^]!@?(?:pymod_do_main)?\(")
+# Any expansion or variable reference inside a command — '<(var)',
+# '<!(cmd)', '<@(list)', '<|(file)' — whose value only gyp knows. Following
+# the command, '<(module_root_dir)' and '<(DEPTH)' stand for the directory
+# of the root binding.gyp, and any other one for a path outside the package.
+_GYP_REFERENCE_RE = re.compile(r"[<>^](?:!?@?|\|)?(?:[-a-zA-Z0-9_.]+)?\(")
+_GYP_ROOT_VARIABLES = frozenset({"module_root_dir", "DEPTH"})
 # The ubiquitous benign form: print an include path of a dependency.
 _GYP_NODE_REQUIRE_RE = re.compile(
     r"""node\s+-[ep]\s+(?:"|')\s*require\(\s*\\?["'][\w@./-]+\\?["']\s*\)(?:\.[\w$]+)*\s*;?\s*(?:"|')""")
@@ -5112,28 +6009,78 @@ def _gyp_repr(value):
     return repr(value)
 
 
-def _gyp_expansion_commands(text):
-    """The command of every expansion in `text`, in order: up to its balanced
-    closing parenthesis, or to the end of the string. The closing parenthesis
-    of every '(' is found in one pass (a stack), not by a scan per expansion."""
+def _gyp_closing_parens(text):
+    """{offset of '(': offset of its balanced ')'}, in one pass (a stack)."""
     close, opened = {}, []
     for m in re.finditer(r"[()]", text):
         if text[m.start()] == "(":
             opened.append(m.start())
         elif opened:
             close[opened.pop()] = m.start()
+    return close
+
+
+def _gyp_expansion_commands(text):
+    """(command, is_pymod) for every expansion in `text`, in order: the
+    command up to its balanced closing parenthesis, or to the end of the
+    string. The closing parenthesis of every '(' is found in one pass, not by
+    a scan per expansion."""
+    close = _gyp_closing_parens(text)
     for m in _GYP_EXPANSION_RE.finditer(text):
         i = m.end() - 1                  # its '('
         j = close.get(i)
-        yield text[i + 1:] if j is None else text[i + 1:j]
+        yield (text[i + 1:] if j is None else text[i + 1:j]), "pymod_do_main" in m.group()
+
+
+def _gyp_hook_command(cmd, kind):
+    """The shell command an expansion's `cmd` runs, as follow_hook reads it:
+    the expansions and variables in it replaced ('<(module_root_dir)' and
+    '<(DEPTH)' by '.', any other by '/_', a path outside the package), an
+    argv list ('[…]') joined, and `pymod_do_main(module args)` as
+    `python -m module args`."""
+    close = _gyp_closing_parens(cmd)
+    out, pos = [], 0
+    for m in _GYP_REFERENCE_RE.finditer(cmd):
+        if m.start() < pos:
+            continue                     # inside one replaced already
+        i = m.end() - 1
+        j = close.get(i, len(cmd) - 1)
+        variable = m.group() in ("<(", ">(", "^(")
+        out.append(cmd[pos:m.start()])
+        out.append("." if variable and cmd[i + 1:j].strip() in _GYP_ROOT_VARIABLES else "/_")
+        pos = j + 1
+    out.append(cmd[pos:])
+    flat = "".join(out)
+    if kind == "pymod":
+        return "python -m " + flat
+    if flat.lstrip().startswith("["):
+        import ast
+        import shlex
+        try:
+            argv = ast.literal_eval(flat.strip())
+        except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+            return flat
+        if isinstance(argv, list) and argv and all(isinstance(a, str) for a in argv):
+            return shlex.join(argv)
+    return flat
+
+
+def _gyp_package_files(follow):
+    """The files of the package an expansion's command runs (a script, a
+    `require('./x')`; not a tool, a path outside the package or a JSON file),
+    as a frozenset (empty when none)."""
+    targets, _complete = follow_hook(follow)
+    return frozenset(t for t in targets
+                     if not t.replace("\\", "/").startswith("/") and not t.lower().endswith(".json"))
 
 
 def _gyp_commands(data):
     """-> (commands, truncated): (command, kind, node) for every action/rule
-    command (node: the dict holding "action") and every command expansion
-    anywhere in a parsed gyp document (targets, conditions, target_defaults,
-    variables ...), and why the walk stopped early (None if it did not).
-    Bounded walk, no recursion."""
+    command (kind "action", node: the dict holding "action") and every command
+    expansion (kind "expansion", or "pymod" for pymod_do_main, whose command
+    is its module and arguments; node None) anywhere in a parsed gyp document
+    (targets, conditions, target_defaults, variables ...), and why the walk
+    stopped early (None if it did not). Bounded walk, no recursion."""
     out, stack, seen, chars = [], [data], 0, 0
     truncated = None
     while stack:
@@ -5153,8 +6100,8 @@ def _gyp_commands(data):
         elif isinstance(node, (list, tuple, set, frozenset)):
             stack.extend(node)
         elif isinstance(node, str) and _GYP_EXPANSION_RE.search(node):
-            for cmd in _gyp_expansion_commands(node):
-                out.append((cmd, "expansion", None))
+            for cmd, pymod in _gyp_expansion_commands(node):
+                out.append((cmd, "pymod" if pymod else "expansion", None))
                 chars += len(cmd)
                 if chars > _GYP_MAX_COMMAND_CHARS:
                     break
@@ -5189,6 +6136,13 @@ class _LineRedactor:
         return r
 
 
+_GYP_EXPANSION_FILE_WHY = (
+    "A binding.gyp command expansion runs while node-gyp configures the build, on npm install, with no "
+    "install script needed. This one runs a file of the package: it is listed for inventory, and in a "
+    "dependency Lazaret follows it to that file and checks it like an install script (CRITICAL when it "
+    "ships the environment or credentials off the machine, or runs code it downloads).")
+
+
 def scan_gyp(path, content):
     """G11: binding.gyp custom build actions run arbitrary commands at
     `node-gyp rebuild` (i.e. `npm install` of any native module). Flag each
@@ -5198,8 +6152,15 @@ def scan_gyp(path, content):
     gyp files are Python literals (single quotes, comments, trailing commas),
     so both JSON and Python-literal syntax are accepted. Actions and rules
     are found anywhere in the document (conditions, target_defaults ...).
-    Command expansions ('<!(cmd)') also run at configure time: they are
-    flagged CRITICAL when the command fetches or evaluates code; the usual
+    Command expansions ('<!(cmd)', '>!(cmd)', '^!(cmd)', '<!([argv])',
+    '<!pymod_do_main(module)') also run at configure time: they are flagged
+    CRITICAL when the command fetches or evaluates code, and listed as INFO
+    inventory when it runs a file of the package (`node index.js`,
+    `node -p "require('./lib/x')"`, a pymod_do_main module) — the Miasma
+    trick: a payload run from binding.gyp, with no install script. Such a
+    finding's `cmd` is the command as it runs (see _gyp_hook_command), so
+    a --deps scan and the registry follow it to that file and escalate it to
+    CRITICAL when the file fails the install-script test. The usual
     `<!(node -p "require('node-addon-api').include")` and pkg-config calls
     are not findings. An unparseable ROOT binding.gyp is
     SC-MANIFEST-UNPARSEABLE.
@@ -5216,15 +6177,21 @@ def scan_gyp(path, content):
     body = content[1:] if content.startswith("\ufeff") else content
     lines = body.split("\n")
     commands, truncated = _gyp_commands(data)
-    hooks = []
+    hooks = []                           # (cmd shown, kind, node, suspicious, command followed, sev)
+    listed = set()                       # the files the listed INFO expansions run
     for cmd, kind, node in commands:
         if kind == "action":
-            suspicious = bool(INSTALL_HOOK_RE.search(cmd))
-        else:
-            suspicious = bool(INSTALL_HOOK_RE.search(_GYP_NODE_REQUIRE_RE.sub(" ", cmd)))
-            if not suspicious:
-                continue
-        hooks.append((cmd, kind, node, suspicious))
+            hooks.append((cmd, kind, node, bool(INSTALL_HOOK_RE.search(cmd)), None, None))
+            continue
+        suspicious = bool(INSTALL_HOOK_RE.search(_GYP_NODE_REQUIRE_RE.sub(" ", cmd)))
+        follow = _gyp_hook_command(cmd, kind)
+        if not suspicious:
+            runs = _gyp_package_files(follow)
+            if not runs or runs in listed:
+                continue                 # the usual include-path queries; a file listed already
+            listed.add(runs)
+        shown = f"pymod_do_main({cmd})" if kind == "pymod" else cmd
+        hooks.append((shown, kind, node, suspicious, follow, None if suspicious else "INFO"))
     newlines = [m.start() for m in re.finditer("\n", body)] if hooks else []
     first_line = {}
 
@@ -5236,21 +6203,29 @@ def scan_gyp(path, content):
             return 1                     # no single line holds it
         if cmd not in first_line:
             at = body.find(cmd)
+            if at < 0:                   # written with \' or \" in a quoted string
+                at = next((a for a in (body.find(cmd.replace("'", "\\'")), body.find(cmd.replace('"', '\\"')))
+                           if a >= 0), -1)
             first_line[cmd] = 1 if at < 0 else bisect.bisect_left(newlines, at) + 1
         return first_line[cmd]
 
     redactor = _LineRedactor(lines)
-    for cmd, kind, node, suspicious in hooks[:GYP_MAX_HOOK_FINDINGS]:
-        issues.append(_sc_install_hook_issue(
+    for cmd, kind, node, suspicious, follow, sev in hooks[:GYP_MAX_HOOK_FINDINGS]:
+        issue = _sc_install_hook_issue(
             path, line_of(cmd, kind, node), lines,
             "binding.gyp action" if kind == "action" else "binding.gyp command expansion",
-            cmd, suspicious, redactor=redactor))
+            cmd, suspicious, sev=sev, redactor=redactor)
+        if follow is not None:
+            issue["cmd"] = follow        # what a --deps scan and the registry follow
+        if sev == "INFO":
+            issue["why"] = _GYP_EXPANSION_FILE_WHY
+        issues.append(issue)
     rest = hooks[GYP_MAX_HOOK_FINDINGS:]
     if rest:
         n_bad = sum(1 for h in rest if h[3])
         issues.append(mk_issue(
             {"id": "SC-INSTALL-HOOK", "name": "Install hook", "type": "HOTSPOT",
-             "sev": "CRITICAL" if n_bad else "MAJOR",
+             "sev": "CRITICAL" if n_bad else ("MAJOR" if any(h[5] != "INFO" for h in rest) else "INFO"),
              "msg": (f"{len(rest)} more binding.gyp actions and command expansions run code at "
                      f"install time ({n_bad} of them fetch or evaluate code); only the first "
                      f"{GYP_MAX_HOOK_FINDINGS} are listed."),
@@ -6043,7 +7018,9 @@ def _scan_manifest_entry(mf):
 # its code. An installed package whose postinstall sent the environment to a
 # server, or whose code did so when loaded, passed with an ordinary MAJOR
 # "install hook" finding, or with nothing. Now:
-#   * each install hook of a dependency's manifest is followed to the files
+#   * each install hook of a dependency's manifest — package.json scripts,
+#     binding.gyp actions, and binding.gyp command expansions that run a file
+#     of the package (scan_gyp's INFO findings) — is followed to the files
 #     it runs (follow_hook, then Node's resolution: the file, with an
 #     extension, the directory's package.json "main", its index file), only
 #     to regular files inside the scan root, through no link and nothing an
@@ -6052,6 +7029,10 @@ def _scan_manifest_entry(mf):
 #     did not read as source (node runs lib/install.dat as JavaScript) is
 #     read and scanned as a dependency's JavaScript; a shell script is only
 #     tested; a hook the walk cannot follow to the end is SC-TRUNCATED.
+#   * a dependency whose package root holds a binding.gyp and whose
+#     package.json names no install or preinstall script gets the hook npm
+#     runs for it, `node-gyp rebuild` (MAJOR, _implicit_gyp_hooks), as the
+#     registry lists it.
 #   * every JavaScript or Python file of a dependency that no hook runs gets
 #     import_time_risk: SC-IMPORT-RISK (MAJOR). On a real node_modules of
 #     14,286 JavaScript files (webpack, next, jest, eslint, typescript ...)
@@ -6148,6 +7129,7 @@ def dependency_checks(root, files, manifests, issues, excludes=(), should_stop=N
     dep_manifests = {m["path"] for m in manifests if m.get("dep")}
     out, extra, run = [], [], set()
     followed_to_end = {}                    # manifest -> SC-TRUNCATED issue added for it
+    out.extend(_implicit_gyp_hooks(tree, manifests))
     for issue in issues:
         if issue["rule"] != "SC-INSTALL-HOOK" or not issue.get("cmd") or issue["file"] not in dep_manifests:
             continue
@@ -6176,6 +7158,42 @@ def dependency_checks(root, files, manifests, issues, excludes=(), should_stop=N
         if agent is not None:
             out.append(agent)
     return out, extra, None
+
+
+def _is_package_root(directory):
+    """Is `directory` ('/'-separated) an installed npm package's own root:
+    node_modules/<name> or node_modules/@scope/<name>?"""
+    parts = directory.split("/")
+    return len(parts) >= 2 and (parts[-2] == "node_modules" or (
+        len(parts) >= 3 and parts[-3] == "node_modules" and parts[-2].startswith("@")))
+
+
+def _implicit_gyp_hooks(tree, manifests):
+    """SC-INSTALL-HOOK (MAJOR) for each dependency npm builds with node-gyp:
+    for a package whose root holds a binding.gyp, and whose package.json
+    names no install or preinstall script (and does not set "gypfile":
+    false), npm runs `node-gyp rebuild` on install — the hook the registry
+    lists as "install (implicit)" (_ArtifactScan._implicit_gyp_hook). A
+    package with no install script at all ran its binding.gyp's actions and
+    command expansions without a hook finding."""
+    out = []
+    for m in manifests:
+        rel = m["path"].replace(os.sep, "/")
+        if not m.get("dep") or posixpath.basename(rel) != "package.json":
+            continue
+        base = posixpath.dirname(rel)
+        gyp = posixpath.join(base, "binding.gyp")
+        if not _is_package_root(base) or gyp not in tree.manifests:
+            continue
+        data, _problems = load_manifest(m["path"], m["content"])
+        if not isinstance(data, dict) or data.get("gypfile") is False:
+            continue
+        scripts = data.get("scripts") if isinstance(data.get("scripts"), dict) else {}
+        if any(isinstance(scripts.get(h), str) and scripts[h].strip() for h in ("install", "preinstall")):
+            continue
+        out.append(_sc_install_hook_issue(tree.manifests[gyp]["path"], 1, [], "install (implicit)",
+                                          "node-gyp rebuild", False))
+    return out
 
 
 def _follow_dependency_hook(tree, issue, out, extra, run, followed_to_end):

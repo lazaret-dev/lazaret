@@ -67,8 +67,10 @@ resolving to one file. Writes are atomic
   INFO inventory; publisher-only scripts like `prepack` never run on
   install). A hook is MAJOR; one that fetches or evaluates code is CRITICAL,
   though `node -e "require('./local-file')"` is not treated as eval.
-  `binding.gyp` actions and command expansions (`<!(cmd)`; at most 100 listed
-  per file, SC-TRUNCATED past 100,000 values); an unparseable
+  `binding.gyp` actions and command expansions (`<!(cmd)`, `>!(cmd)`, `^!(cmd)`,
+  an argv list, `<!pymod_do_main(module)`: CRITICAL when one fetches or
+  evaluates code, INFO inventory when it runs a file of the package; at most
+  100 listed per file, SC-TRUNCATED past 100,000 values); an unparseable
   root manifest (`SC-MANIFEST-UNPARSEABLE`); decode-then-execute
   (`SC-EVAL-DECODE`, also across lines, through an inline import such as
   `__import__("base64").b64decode`, and, in dependencies, across statements
@@ -76,7 +78,8 @@ resolving to one file. Writes are atomic
   executable `.pth` lines (`SC-PTH-EXEC`); readable text hidden in hex escapes; base64 blobs and
   strings built from character codes written in the call or in an array it uses; `javascript-obfuscator` identifier signatures; compiled binaries;
   unchecked or orphaned `.pyc` files; UTF-7 source (`SC-UTF7`); your own code
-  running a download piped into a shell (`execSync("curl … | bash")`,
+  running a download piped into a shell or substituted into a command line
+  (`execSync("curl … | bash")`, `execSync('bash -c "$(curl …)"')`,
   `SC-PIPE-SHELL`); and a run of invisible characters carrying hidden bytes
   — variation selectors or tag characters, the GlassWorm carrier
   (`SC-HIDDEN-UNICODE`, CRITICAL when the file also runs code from a string,
@@ -111,13 +114,19 @@ resolving to one file. Writes are atomic
   they look like one (`pyvenv.cfg`; `modules.txt`, `autoload.php`, a
   `package.json` or `*.dist-info`/`*.egg-info` directly inside `vendor`) —
   are pruned unless `--deps` is given; with `--deps` their files get the
-  supply-chain and secret rules only, each install hook of a dependency is
-  followed to the files it runs (a hook that runs a script collecting the
-  environment or credentials for the network, or piping a download into a
-  shell, is CRITICAL; a file it runs that is not a source file is read and
-  scanned as JavaScript), and a dependency's other JavaScript and Python
-  files get the import-time test (`SC-IMPORT-RISK`, MAJOR: the whole
-  environment or a credential store read next to a network call). A
+  supply-chain and secret rules only, each install hook of a dependency —
+  package.json scripts, binding.gyp actions and the command expansions that
+  run a file of the package — is followed to the files it runs (a hook that
+  runs a script collecting the environment or credentials for the network,
+  piping a download into a shell, or running code it receives over the
+  network — a download handed to eval, exec, `new Function`, a shell or an
+  interpreter's inline code — is CRITICAL; a file it runs that is not a
+  source file is read and scanned as JavaScript), a dependency whose package
+  root has a `binding.gyp` and no install script gets npm's implicit
+  `node-gyp rebuild` hook (MAJOR), and a dependency's other JavaScript and
+  Python files get the import-time test (`SC-IMPORT-RISK`, MAJOR: the whole
+  environment or a credential store read next to a network call, a download
+  run through a shell, or code received over the network run). A
   dependency that launches your AI coding agent in an autonomous mode
   (`claude --dangerously-skip-permissions`, `gemini --yolo`, the s1ngularity
   attack) is `SC-AGENT-HIJACK` (CRITICAL).

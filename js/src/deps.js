@@ -5,10 +5,13 @@
 // and the registry's two tests of what runs did not run on them: the
 // install-script test (installScriptRisk) on the scripts a dependency's
 // install hook runs, and the weaker import-time test (importTimeRisk) on
-// its code. Now each install hook of a dependency's manifest is followed to
-// the files it runs (followHook, then Node's resolution), only to regular
-// files inside the scan root, through no link and nothing an exclusion
-// prunes; the hook escalates to CRITICAL when one fails installScriptRisk. A
+// its code. Now each install hook of a dependency's manifest (package.json
+// scripts, binding.gyp actions and the command expansions that run a file of
+// the package) is followed to the files it runs (followHook, then Node's
+// resolution), only to regular files inside the scan root, through no link
+// and nothing an exclusion prunes; the hook escalates to CRITICAL when one
+// fails installScriptRisk. A package root with a binding.gyp and no install
+// script gets npm's implicit `node-gyp rebuild` hook (MAJOR). A
 // file it runs that the walk did not read as source is read and scanned as a
 // dependency's JavaScript (a shell script is only tested), and a hook the
 // walk cannot follow to the end is SC-TRUNCATED. Every JavaScript or Python
@@ -19,7 +22,7 @@ import { join, resolve, sep } from "node:path";
 import { scanFile } from "./scanner/scan.js";
 import { followHook, installScriptRisk, importTimeRisk, agentHijack, agentHijackInCommand, nodeCandidates, shebangLang,
   HOOK_MAX_CHARS, HOOK_MAX_COMMANDS, HOOK_MAX_TARGETS, HOOK_MAX_PATH } from "./lib/hooks.js";
-import { HOOK_COMMANDS, loadManifest } from "./lib/supplychain.js";
+import { HOOK_COMMANDS, loadManifest, scInstallHookIssue } from "./lib/supplychain.js";
 import { readBounded, truncatedIssue, scanErrorIssue, strerror, normalizeNewlines, encodingIssues,
   MAX_FILE_BYTES } from "./lib/fs.js";
 import { looksBinary, HEADER_SAMPLE } from "./lib/binary.js";
@@ -183,6 +186,7 @@ export function dependencyChecks(root, files, manifests, issues, { exclude = [],
   const tree = new DependencyTree(root, files, manifests, exclude, maxFileBytes);
   const depManifests = new Set(manifests.filter((m) => m.dep).map((m) => m.path));
   const out = [], extra = [], run = new Set(), truncated = new Set();
+  for (const i of implicitGypHooks(tree, manifests)) out.push(i);
   for (const issue of issues) {
     const cmd = HOOK_COMMANDS.get(issue);
     if (issue.rule !== "SC-INSTALL-HOOK" || !cmd || !depManifests.has(issue.file)) continue;
@@ -198,6 +202,37 @@ export function dependencyChecks(root, files, manifests, issues, { exclude = [],
     if (agent) out.push(agent);
   }
   return { issues: out, files: extra };
+}
+
+/** Is `directory` ("/"-separated) an installed npm package's root? Twin of core._is_package_root. */
+function isPackageRoot(directory) {
+  const parts = directory.split("/");
+  return parts.length >= 2 && (parts[parts.length - 2] === "node_modules" || (
+    parts.length >= 3 && parts[parts.length - 3] === "node_modules" && parts[parts.length - 2].startsWith("@")));
+}
+
+/**
+ * SC-INSTALL-HOOK (MAJOR) for each dependency npm builds with node-gyp: a
+ * package whose root holds a binding.gyp and whose package.json names no
+ * install or preinstall script (nor sets "gypfile": false) runs
+ * `node-gyp rebuild` on install. Twin of core._implicit_gyp_hooks.
+ */
+function implicitGypHooks(tree, manifests) {
+  const out = [];
+  for (const m of manifests) {
+    const rel = posix(m.path);
+    if (!m.dep || rel.slice(rel.lastIndexOf("/") + 1) !== "package.json") continue;
+    const base = dirname(rel);
+    const gyp = base ? `${base}/binding.gyp` : "binding.gyp";
+    if (!isPackageRoot(base) || !tree.manifests.has(gyp)) continue;
+    const [data] = loadManifest(m.path, m.content);
+    if (!data || typeof data !== "object" || Array.isArray(data) || own(data, "gypfile") === false) continue;
+    const s = own(data, "scripts");
+    const scripts = s && typeof s === "object" && !Array.isArray(s) ? s : {};
+    if (["install", "preinstall"].some((h) => typeof own(scripts, h) === "string" && pyStrip(own(scripts, h)))) continue;
+    out.push(scInstallHookIssue(tree.manifests.get(gyp).path, 1, [], "install (implicit)", "node-gyp rebuild", false));
+  }
+  return out;
 }
 
 function followDependencyHook(tree, issue, cmd, out, extra, run, truncated) {

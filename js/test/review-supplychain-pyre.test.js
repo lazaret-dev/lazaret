@@ -27,7 +27,9 @@ test("a gyp include-path expansion with a non-ASCII module name is the benign fo
   // `[\w@./-]+` in the benign `node -e "require('…')"` pattern: \w matches é in Python
   const gyp = "{'targets': [{'include_dirs': [\"<!(node -e \\\"require('./donn\u00e9es')\\\")\", " +
     "\"<!(node -p \\\"require('caf\u00e9').include\\\")\"]}]}";
-  assert.deepEqual(scanGyp("binding.gyp", gyp), []);
+  // (not CRITICAL; the one requiring ./données runs a file of the package: INFO inventory)
+  assert.deepEqual(scanGyp("binding.gyp", gyp).map((i) => [i.rule, i.sev, i.cmd]),
+    [["SC-INSTALL-HOOK", "INFO", "node -e \"require('./donn\u00e9es')\""]]);
   assert.deepEqual(scanGyp("binding.gyp", gyp.replace("./donn\u00e9es", "./x' + 'y")).map((i) => [i.rule, i.sev]),
     [["SC-INSTALL-HOOK", "CRITICAL"]]);
 });

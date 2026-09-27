@@ -100,13 +100,17 @@ test("--deps: hooks escalate on what they run; import-time code; what cannot be 
       "node_modules/c/package.json": `Install hook runs lib, which ${ENV}.`,
       "node_modules/d/package.json": `Install hook runs ./bin/setup, which ${ENV}.`,
       "node_modules/f/package.json": `Install hook runs ../../scripts/first-party.js, which ${ENV}.`,
-      "node_modules/n/binding.gyp": "Install hook runs gen.sh, which pipes a download into a shell.",
       "node_modules/q/package.json": "Install hook runs ./pre.js, which pipes a download into a shell.",
       "node_modules/r/package.json": '"postinstall" script runs a network-fetch/eval command at install time.',
       "node_modules/t/package.json": "Install hook runs script, which pipes a download into a shell.",
     };
     for (const [manifest, msg] of Object.entries(critical)) assert.deepEqual(hooks[manifest], [["CRITICAL", msg]], manifest);
     assert.deepEqual(hooks["node_modules/k/package.json"], [["CRITICAL", `Install hook runs x.dat, which ${ENV}.`], ["CRITICAL", `Install hook runs x.dat, which ${ENV}.`]]);
+    // n has a binding.gyp and no install script: npm runs `node-gyp rebuild` (the
+    // implicit hook, MAJOR), which runs the action (CRITICAL)
+    assert.deepEqual(hooks["node_modules/n/binding.gyp"], [
+      ["CRITICAL", "Install hook runs gen.sh, which pipes a download into a shell."],
+      ["MAJOR", `"install (implicit)" script runs code at install time: 'node-gyp rebuild'.`]]);
     for (const manifest of ["node_modules/g/package.json", "node_modules/h/package.json", "node_modules/j/package.json",
       "node_modules/l/package.json", "node_modules/o/package.json", "node_modules/u/package.json", "package.json",
       ...(linked ? ["node_modules/e/package.json"] : [])]) {
