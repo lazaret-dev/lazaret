@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-gTw5B2+GmKzBiyeZqcmTXWjTbYE7hN/67dAZS+MZuXs='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-UV2gARvjNKDX/GIShP4BR3tSuCwHfXWYm3CNLjJO4fo='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
 <title>Lazaret — Security &amp; Quality Review</title>
 <style>
   :root{
@@ -3198,11 +3198,13 @@ function extractFunctions(lines, lang) {
 }
 
 /* ======== lib/shellpipe.js ======== */
-// A download piped into a shell (`curl … | sh`, `wget -qO- … | bash`) — twin
-// of lazaret.scanner.core's _PIPE_SCAN_RE / _pipes_download_to_shell,
-// _EXEC_CALL_RE and _runs_download_through_shell. A leaf module: lib/hooks.js
-// (the install-script and import-time tests) and scanner/scan.js
-// (SC-PIPE-SHELL) use it, and the dashboard carries a copy.
+// A download piped into a shell (`curl … | sh`, `wget -qO- … | bash`), or
+// substituted into a shell's or an interpreter's command line (`sh -c
+// "$(curl …)"`, `source <(curl …)`) — twin of lazaret.scanner.core's
+// _PIPE_SCAN_RE / _pipes_download_to_shell, _DL_SUBST_RE /
+// runs_substituted_download, _EXEC_CALL_RE and _runs_download_through_shell.
+// A leaf module: lib/hooks.js (the install-script and import-time tests) and
+// scanner/scan.js (SC-PIPE-SHELL) use it, and the dashboard carries a copy.
 
 
 // `curl … | sh` / `wget … | bash`, read in one left-to-right pass (core's comment)
@@ -3226,17 +3228,37 @@ function pipesDownloadToShell(text) {
   return false;
 }
 
+// A download handed to a shell or an interpreter without a pipe, through a
+// command or process substitution; one row at a time (core's comment)
+const DL_SUBST_SRC =
+  String.raw`\b(?:(?:ba|z|da|k)?sh|node(?:js)?|bun|python[\d.]*|perl|ruby|php|pwsh|powershell)(?:\.exe)?` +
+  String.raw`(?:[ \t]+-[\w-]+){0,6}?[ \t]+-(?:c|e|E|p|r|-eval|-print|Command|command)[ \t]+(?:["'][ \t]*)?` +
+  String.raw`(?:\$\(|${"`"})[ \t]*(?:curl|wget)\b` +
+  String.raw`|\beval[ \t]+(?:["'][ \t]*)?(?:\$\(|${"`"})[ \t]*(?:curl|wget)\b` +
+  String.raw`|(?:\b(?:(?:ba|z|da|k)?sh|source|node(?:js)?|python[\d.]*)|(?:^|[ \t;&|(])\.)[ \t]+<\([ \t]*(?:curl|wget)\b`;
+const DL_SUBST_RE = pyRe(DL_SUBST_SRC);
+const DL_SUBST_NEEDLE_SRC = String.raw`(?:\$\(|${"`"}|<\()[ \t]*(?:curl|wget)`;
+const DL_SUBST_NEEDLE_RE = pyRe(DL_SUBST_NEEDLE_SRC);
+
+/** Does this row hand a download to a shell or an interpreter through a command or process
+ * substitution? Twin of core.runs_substituted_download. */
+function runsSubstitutedDownload(row) {
+  return (row.includes("curl") || row.includes("wget")) && DL_SUBST_NEEDLE_RE.test(row) && DL_SUBST_RE.test(row);
+}
+
 const EXEC_CALL_SRC =
   String.raw`\b(?:execSync|exec|execFileSync|execFile|spawnSync|spawn|system|popen|Popen|run|call|` +
   String.raw`check_call|check_output|getoutput|getstatusoutput)\s*\(`;
 const EXEC_CALL_RE = pyRe(EXEC_CALL_SRC);
 
 /**
- * Does this line hand a download piped into a shell to an exec call? A CLI's
- * help text showing `curl … | sh` does not. Twin of core._runs_download_through_shell.
+ * Does this line hand a download piped into a shell, or substituted into a
+ * shell's or an interpreter's command line, to an exec call? A CLI's help
+ * text showing `curl … | sh` does not. Twin of core._runs_download_through_shell.
  */
 function runsDownloadThroughShell(row) {
-  return (row.includes("curl") || row.includes("wget")) && EXEC_CALL_RE.test(row) && pipesDownloadToShell(row);
+  return (row.includes("curl") || row.includes("wget")) && EXEC_CALL_RE.test(row)
+    && (pipesDownloadToShell(row) || runsSubstitutedDownload(row));
 }
 
 /* ======== scanner/scan.js ======== */

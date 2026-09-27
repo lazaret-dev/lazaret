@@ -15,7 +15,10 @@
 // not, with the same results.
 
 import { pyRe, pyStrip, isPySpace } from "./pycompat.js";
-import { PIPE_SCAN_SRC, EXEC_CALL_SRC, EXEC_CALL_RE, pipesDownloadToShell, runsDownloadThroughShell } from "./shellpipe.js";
+import { PIPE_SCAN_SRC, EXEC_CALL_SRC, EXEC_CALL_RE, DL_SUBST_SRC, DL_SUBST_NEEDLE_SRC, pipesDownloadToShell,
+  runsDownloadThroughShell, runsSubstitutedDownload } from "./shellpipe.js";
+import { runsReceivedCode, RECEIVED_TWINS, DL_NEEDLES, DL_RUN_NEEDLES, DL_PY_NET_MODULES, DL_NOT_NAMES,
+  DL_PREFIX_CHARS, DL_DEFINING, DL_CALLEE_CHARS, DL_LIMITS } from "./received.js";
 
 // ---- Python details the patterns depend on --------------------------------
 
@@ -607,6 +610,10 @@ export function installScriptRisk(text) {
   const dest = EXFIL_DEST_RE.exec(text);
   if (dest) reasons.push(`contacts an address typical of data exfiltration (${cpPrefix(dest[0], 40)})`);
   if (pipesDownloadToShell(text)) reasons.push("pipes a download into a shell");
+  if (((text.includes("curl") || text.includes("wget")) && text.split("\n").some(runsSubstitutedDownload))
+      || runsReceivedCode(text) !== null) {
+    reasons.push("runs code it receives over the network");
+  }
   return reasons;
 }
 
@@ -679,6 +686,11 @@ export function importTimeRisk(text) {
       if (nl === -1) break;
       start = nl + 1;
     }
+  }
+  const received = runsReceivedCode(text);
+  if (received !== null) {
+    reasons.push("runs code it receives over the network");
+    line ??= received;
   }
   return [reasons, line];
 }
@@ -767,6 +779,8 @@ export const PY_TWINS = {
     _PIPE_SCAN_RE: [PIPE_SCAN_SRC, ""], _IMPORT_HARVEST_RE: [IMPORT_HARVEST_SRC, ""],
     _EXEC_CALL_RE: [EXEC_CALL_SRC, ""], _SHEBANG_RE: [SHEBANG_SRC, ""],
     _AGENT_BIN_RE: [AGENT_BIN_SRC, ""], _AGENT_BIN_CMD_RE: [AGENT_BIN_CMD_SRC, ""], _AGENT_FLAG_RE: [AGENT_FLAG_SRC, ""],
+    _DL_SUBST_RE: [DL_SUBST_SRC, ""], _DL_SUBST_NEEDLE_RE: [DL_SUBST_NEEDLE_SRC, ""],
+    ...RECEIVED_TWINS,
   },
   sets: {
     _HOOK_SEPARATORS: [...HOOK_SEPARATORS], _HOOK_REDIRECTS: [...HOOK_REDIRECTS],
@@ -774,9 +788,12 @@ export const PY_TWINS = {
     _NODE_CODE_FLAGS: [...NODE_CODE_FLAGS], _NODE_PRELOAD_FLAGS: [...NODE_PRELOAD_FLAGS],
     _NODE_VALUE_FLAGS: [...NODE_VALUE_FLAGS], _SHEBANG_JS_NAMES: [...SHEBANG_JS_NAMES],
     _IMPORT_HARVEST_NEEDLES: IMPORT_HARVEST_NEEDLES,
+    _DL_NEEDLES: DL_NEEDLES, _DL_RUN_NEEDLES: DL_RUN_NEEDLES, _DL_PY_NET_MODULES: DL_PY_NET_MODULES,
+    _DL_NOT_NAMES: DL_NOT_NAMES, _DL_PREFIX_CHARS: DL_PREFIX_CHARS, _DL_DEFINING: DL_DEFINING,
+    _DL_CALLEE_CHARS: DL_CALLEE_CHARS,
   },
   maps: Object.fromEntries([["_WRAPPER_VALUE_OPTIONS", WRAPPER_VALUE_OPTIONS],
     ["_WRAPPER_CHDIR_OPTIONS", WRAPPER_CHDIR_OPTIONS], ["_WRAPPER_COMMAND_OPTIONS", WRAPPER_COMMAND_OPTIONS]]
     .map(([name, map]) => [name, Object.fromEntries([...map].map(([k, v]) => [k, [...v].sort()]))])),
-  limits: { HOOK_MAX_CHARS, HOOK_MAX_COMMANDS, HOOK_MAX_TARGETS, HOOK_MAX_PATH },
+  limits: { HOOK_MAX_CHARS, HOOK_MAX_COMMANDS, HOOK_MAX_TARGETS, HOOK_MAX_PATH, ...DL_LIMITS },
 };

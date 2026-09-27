@@ -7,11 +7,11 @@
 import { mkIssue } from "./issue.js";
 import { DEP_MARKERS, truncatedIssue } from "./fs.js";
 import {
-  pyRe, pyRepr, pyLiteralStr, pyEntries, pyStrip, pyLstrip, cpLen, PyComplex, PyBytes, PY_KEYS, MAX_JSON_DEPTH,
-  jsonDepthExceeds,
+  pyRe, pyRepr, pyLiteralStr, pyEntries, pyStrip, pyLstrip, cpLen, PyComplex, PyBytes, PY_KEYS, PY_TUPLE, PY_SET,
+  MAX_JSON_DEPTH, jsonDepthExceeds,
 } from "./pycompat.js";
 import { pyJsonParse, jsonErrorWhere, pyLiteralParse } from "./pyjson.js";
-import { nodeEMatches } from "./hooks.js";
+import { nodeEMatches, followHook } from "./hooks.js";
 import { REDACT, redactText, registerScanContext, SecretLiterals } from "./redact.js";
 
 export { SECRET_RULES, REDACT_PLACEHOLDER, redactContextLine, redactSecretSnippet, redactResult, setRedactSecrets } from "./redact.js";
@@ -79,7 +79,7 @@ export function hookIsSuspicious(cmd) {
  */
 export const HOOK_COMMANDS = new WeakMap();
 
-function scInstallHookIssue(path, lineNo, lines, script, cmd, suspicious, sev = null) {
+export function scInstallHookIssue(path, lineNo, lines, script, cmd, suspicious, sev = null) {
   sev = sev || (suspicious ? "CRITICAL" : "MAJOR");
   let msg, why;
   if (suspicious) {
@@ -267,11 +267,20 @@ export function scanManifest(path, content, { registry = isDependencyManifest(pa
   return issues;
 }
 
-// gyp command expansions run a shell command while node-gyp configures the
-// build: '<!(cmd)', '<!@(cmd)', '>!(cmd)', '>!@(cmd)'.
-const GYP_EXPANSION_SRC = String.raw`[<>]!@?\(`;
+// gyp command expansions run a command while node-gyp configures the build:
+// '<!(cmd)', '<!@(cmd)', and the same in gyp's later phases, '>!(cmd)' and
+// '^!(cmd)'; '<!([argv…])' runs an argv list without a shell, and
+// '<!pymod_do_main(module args)' imports `module` from the gyp file's
+// directory and calls its DoMain (core's comment).
+export const GYP_EXPANSION_SRC = String.raw`[<>^]!@?(?:pymod_do_main)?\(`;
 const GYP_EXPANSION_RE = pyRe(GYP_EXPANSION_SRC, "g");
 const GYP_EXPANSION_ONE = pyRe(GYP_EXPANSION_SRC);
+// Any expansion or variable reference inside a command, whose value only gyp
+// knows; '<(module_root_dir)' and '<(DEPTH)' stand for the root binding.gyp's
+// directory, any other one for a path outside the package.
+export const GYP_REFERENCE_SRC = String.raw`[<>^](?:!?@?|\|)?(?:[-a-zA-Z0-9_.]+)?\(`;
+const GYP_REFERENCE_RE = pyRe(GYP_REFERENCE_SRC, "g");
+export const GYP_ROOT_VARIABLES = ["module_root_dir", "DEPTH"];
 // The ubiquitous benign form: print an include path of a dependency.
 const GYP_NODE_REQUIRE_RE = pyRe(String.raw`node\s+-[ep]\s+(?:"|')\s*require\(\s*\\?["'][\w@./-]+\\?["']\s*\)(?:\.[\w$]+)*\s*;?\s*(?:"|')`, "g");
 // Bounds on one gyp document (twins of core's): past either limit the walk
@@ -286,18 +295,68 @@ export const GYP_MAX_HOOK_FINDINGS = 100;
  * closing parenthesis, or to the end of the string. The closing parenthesis
  * of every "(" is found in one pass (a stack), not by a scan per expansion.
  */
-function* gypExpansionCommands(text) {
+function gypClosingParens(text) {
   const close = new Map(), opened = [];
   for (let k = 0; k < text.length; k++) {
     const c = text.charCodeAt(k);
     if (c === 40) opened.push(k);
     else if (c === 41 && opened.length) close.set(opened.pop(), k);
   }
+  return close;
+}
+
+/** [command, isPymod] for every expansion in `text` (core._gyp_expansion_commands). */
+function* gypExpansionCommands(text) {
+  const close = gypClosingParens(text);
   for (const m of text.matchAll(GYP_EXPANSION_RE)) {
     const i = m.index + m[0].length - 1;                              // its "("
     const j = close.get(i);
-    yield j === undefined ? text.slice(i + 1) : text.slice(i + 1, j);
+    yield [j === undefined ? text.slice(i + 1) : text.slice(i + 1, j), m[0].includes("pymod_do_main")];
   }
+}
+
+/** Python's shlex.quote. */
+function shlexQuote(s) {
+  if (!s) return "''";
+  if (!/[^\w@%+=:,./-]/.test(s)) return s;                           // (\w: ASCII, as re.ASCII's)
+  return `'${s.replaceAll("'", `'"'"'`)}'`;
+}
+
+/**
+ * The shell command an expansion's `cmd` runs, as followHook reads it: its
+ * expansions and variables replaced ("." for the root ones, "/_" for any
+ * other), an argv list joined, pymod_do_main(module args) as
+ * `python -m module args`. Twin of core._gyp_hook_command.
+ */
+export function gypHookCommand(cmd, kind) {
+  const close = gypClosingParens(cmd);
+  let out = "", pos = 0;
+  for (const m of cmd.matchAll(GYP_REFERENCE_RE)) {
+    if (m.index < pos) continue;                                      // inside one replaced already
+    const i = m.index + m[0].length - 1;
+    const j = close.has(i) ? close.get(i) : cmd.length - 1;
+    const variable = m[0] === "<(" || m[0] === ">(" || m[0] === "^(";
+    out += cmd.slice(pos, m.index);
+    out += variable && GYP_ROOT_VARIABLES.includes(pyStrip(cmd.slice(i + 1, j))) ? "." : "/_";
+    pos = j + 1;
+  }
+  const flat = out + cmd.slice(pos);
+  if (kind === "pymod") return "python -m " + flat;
+  if (pyLstrip(flat).startsWith("[")) {
+    const lit = pyLiteralParse(pyStrip(flat));
+    const argv = lit.ok ? lit.value : null;
+    if (Array.isArray(argv) && !argv[PY_TUPLE] && !argv[PY_SET] && argv.length && argv.every((a) => typeof a === "string")) {
+      return argv.map(shlexQuote).join(" ");
+    }
+  }
+  return flat;
+}
+
+/** The files of the package an expansion's command runs (core._gyp_package_files), as a sorted key ("" if none). */
+function gypPackageFiles(follow) {
+  const [targets] = followHook(follow);
+  const files = [...new Set(targets.filter((t) => !t.replaceAll("\\", "/").startsWith("/") && !t.toLowerCase().endsWith(".json")))];
+  return files.sort().join("\0");
 }
 
 /**
@@ -327,8 +386,8 @@ function gypCommands(data) {
         stack.push(value);
       }
     } else if (typeof node === "string" && GYP_EXPANSION_ONE.test(node)) {
-      for (const cmd of gypExpansionCommands(node)) {
-        out.push([cmd, "expansion", null]);
+      for (const [cmd, pymod] of gypExpansionCommands(node)) {
+        out.push([cmd, pymod ? "pymod" : "expansion", null]);
         chars += cpLen(cmd);
         if (chars > GYP_MAX_COMMAND_CHARS) break;
       }
@@ -338,15 +397,23 @@ function gypCommands(data) {
   return [out.reverse(), truncated];
 }
 
+const GYP_EXPANSION_FILE_WHY =
+  "A binding.gyp command expansion runs while node-gyp configures the build, on npm install, with no " +
+  "install script needed. This one runs a file of the package: it is listed for inventory, and in a " +
+  "dependency Lazaret follows it to that file and checks it like an install script (CRITICAL when it " +
+  "ships the environment or credentials off the machine, or runs code it downloads).";
+
 /**
  * binding.gyp custom build actions (G11 policy, same as lifecycle scripts):
- * any action is MAJOR, one matching INSTALL_HOOK_RE is CRITICAL; command
- * expansions ('<!(cmd)') are findings only when suspicious. gyp files are
- * Python literals, so JSON and Python-literal syntax are both accepted. An
- * action's finding is on the line of its own "action" key, an expansion's on
- * the first line holding its command; at most GYP_MAX_HOOK_FINDINGS are
- * listed and one more sums up the rest; a document past the walk's bounds
- * is SC-TRUNCATED. Linear in the size of the file (twin of core.scan_gyp).
+ * any action is MAJOR, one matching INSTALL_HOOK_RE is CRITICAL; a command
+ * expansion is CRITICAL when suspicious, INFO inventory when it runs a file
+ * of the package (its `cmd`, the command as it runs, is what a --deps scan
+ * follows), and otherwise not listed. gyp files are Python literals, so
+ * JSON and Python-literal syntax are both accepted. An action's finding is
+ * on the line of its own "action" key, an expansion's on the first line
+ * holding its command; at most GYP_MAX_HOOK_FINDINGS are listed and one more
+ * sums up the rest; a document past the walk's bounds is SC-TRUNCATED.
+ * Linear in the size of the file (twin of core.scan_gyp).
  */
 export function scanGyp(path, content) {
   const [data, issues, where] = loadManifestWhere(path, content, { pythonLiteral: true, locate: "action" });
@@ -354,15 +421,18 @@ export function scanGyp(path, content) {
   const body = String(content).startsWith("\ufeff") ? String(content).slice(1) : String(content);
   const lines = body.split("\n");
   const [commands, truncated] = gypCommands(data);
-  const hooks = [];
+  const hooks = [];                               // [cmd shown, kind, node, suspicious, command followed, sev]
+  const listed = new Set();                       // the files the listed INFO expansions run
   for (const [cmd, kind, node] of commands) {
-    let suspicious;
-    if (kind === "action") suspicious = INSTALL_HOOK_RE.test(cmd);
-    else {
-      suspicious = INSTALL_HOOK_RE.test(cmd.replace(GYP_NODE_REQUIRE_RE, " "));
-      if (!suspicious) continue;
+    if (kind === "action") { hooks.push([cmd, kind, node, INSTALL_HOOK_RE.test(cmd), null, null]); continue; }
+    const suspicious = INSTALL_HOOK_RE.test(cmd.replace(GYP_NODE_REQUIRE_RE, " "));
+    const follow = gypHookCommand(cmd, kind);
+    if (!suspicious) {
+      const runs = gypPackageFiles(follow);
+      if (!runs || listed.has(runs)) continue;    // the usual include-path queries; a file listed already
+      listed.add(runs);
     }
-    hooks.push([cmd, kind, node, suspicious]);
+    hooks.push([kind === "pymod" ? `pymod_do_main(${cmd})` : cmd, kind, node, suspicious, follow, suspicious ? null : "INFO"]);
   }
   const newlines = [];
   if (hooks.length) for (let k = body.indexOf("\n"); k !== -1; k = body.indexOf("\n", k + 1)) newlines.push(k);
@@ -375,22 +445,34 @@ export function scanGyp(path, content) {
   const lineOf = (cmd, kind, node) => {
     if (kind === "action") { const at = where.get(node); return at === undefined ? 1 : lineAt(at); }
     if (!cmd || cmd.includes("\n")) return 1;                        // no single line holds it
-    if (!firstLine.has(cmd)) { const at = body.indexOf(cmd); firstLine.set(cmd, at < 0 ? 1 : lineAt(at)); }
+    if (!firstLine.has(cmd)) {
+      let at = body.indexOf(cmd);
+      if (at < 0) {                                                   // written with \' or \" in a quoted string
+        at = [body.indexOf(cmd.replaceAll("'", "\\'")), body.indexOf(cmd.replaceAll('"', '\\"'))].find((a) => a >= 0) ?? -1;
+      }
+      firstLine.set(cmd, at < 0 ? 1 : lineAt(at));
+    }
     return firstLine.get(cmd);
   };
   // each line redacted once for all findings (mkIssue's context-free
   // redaction: PEM blocks and secret patterns, no entropy literals)
   registerScanContext(lines, null).secrets = new SecretLiterals([], null);
-  for (const [cmd, kind, node, suspicious] of hooks.slice(0, GYP_MAX_HOOK_FINDINGS)) {
-    issues.push(scInstallHookIssue(path, lineOf(cmd, kind, node), lines,
-      kind === "action" ? "binding.gyp action" : "binding.gyp command expansion", cmd, suspicious));
+  for (const [cmd, kind, node, suspicious, follow, sev] of hooks.slice(0, GYP_MAX_HOOK_FINDINGS)) {
+    const issue = scInstallHookIssue(path, lineOf(cmd, kind, node), lines,
+      kind === "action" ? "binding.gyp action" : "binding.gyp command expansion", cmd, suspicious, sev);
+    if (follow !== null) {                                            // what a --deps scan follows
+      issue.cmd = REDACT.on ? redactText(follow) : follow;
+      HOOK_COMMANDS.set(issue, follow);
+    }
+    if (sev === "INFO") issue.why = GYP_EXPANSION_FILE_WHY;
+    issues.push(issue);
   }
   const rest = hooks.slice(GYP_MAX_HOOK_FINDINGS);
   if (rest.length) {
     const bad = rest.filter((h) => h[3]).length;
     issues.push(mkIssue(
       { id: "SC-INSTALL-HOOK", name: "Install hook", type: "HOTSPOT",
-        sev: bad ? "CRITICAL" : "MAJOR",
+        sev: bad ? "CRITICAL" : rest.some((h) => h[5] !== "INFO") ? "MAJOR" : "INFO",
         msg: `${rest.length} more binding.gyp actions and command expansions run code at install time ` +
           `(${bad} of them fetch or evaluate code); only the first ${GYP_MAX_HOOK_FINDINGS} are listed.`,
         why: "Each action and command expansion in a binding.gyp runs a command during `node-gyp rebuild` " +

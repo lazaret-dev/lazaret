@@ -136,7 +136,6 @@ class DependencyCheckTests(unittest.TestCase):
             "node_modules/c/package.json": f"Install hook runs lib, which {env}.",
             "node_modules/d/package.json": f"Install hook runs ./bin/setup, which {env}.",
             "node_modules/f/package.json": f"Install hook runs ../../scripts/first-party.js, which {env}.",
-            "node_modules/n/binding.gyp": "Install hook runs gen.sh, which pipes a download into a shell.",
             "node_modules/q/package.json": "Install hook runs ./pre.js, which pipes a download into a shell.",
             "node_modules/r/package.json": '"postinstall" script runs a network-fetch/eval command at install time.',
             "node_modules/t/package.json": "Install hook runs script, which pipes a download into a shell.",
@@ -146,6 +145,11 @@ class DependencyCheckTests(unittest.TestCase):
                 self.assertEqual(hooks[manifest], [("CRITICAL", msg)])
         self.assertEqual(hooks["node_modules/k/package.json"],
                          [("CRITICAL", f"Install hook runs x.dat, which {env}.")] * 2)
+        # n has a binding.gyp and no install script: npm runs `node-gyp rebuild`
+        # (the implicit hook, MAJOR), which runs the action (CRITICAL)
+        self.assertEqual(hooks["node_modules/n/binding.gyp"],
+                         [("CRITICAL", "Install hook runs gen.sh, which pipes a download into a shell."),
+                          ("MAJOR", '"install (implicit)" script runs code at install time: \'node-gyp rebuild\'.')])
         for manifest in ("node_modules/e/package.json", "node_modules/g/package.json", "node_modules/h/package.json",
                          "node_modules/j/package.json", "node_modules/l/package.json", "node_modules/o/package.json",
                          "node_modules/u/package.json", "package.json"):

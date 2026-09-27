@@ -19,6 +19,8 @@ export {
 } from "./report.js";
 export { scanManifest, scanGyp, redactResult, setRedactSecrets } from "./lib/supplychain.js";
 export { followHook, hookScriptTargets, installScriptRisk, importTimeRisk, nodeCandidates } from "./lib/hooks.js";
+export { runsReceivedCode } from "./lib/received.js";
+export { runsSubstitutedDownload } from "./lib/shellpipe.js";
 export {
   collectFiles, reportPaths, writeReport, validateReportPaths, validateOutDir, isOurReport,
   ReportPathError, EXIT_OUTPUT,
