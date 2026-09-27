@@ -36,6 +36,7 @@ import base64
 import bisect
 import bz2
 import datetime
+import functools
 import hashlib
 import importlib
 import io
@@ -2017,6 +2018,21 @@ def _skipped_summary(skipped, byte_budget, limit):
     return issues, "; ".join(labels)
 
 
+def _always_redacted(fn):
+    """What `fn` returns is stored in the state DB (and read back by
+    `report` and the MCP tools), so it is always redacted: neither the
+    registry CLI's --no-redact-secrets nor the MCP server's LAZARET_NO_REDACT
+    may put a raw credential line in the DB (review P2). The whole scan runs
+    under core.forced_redaction(), because redaction happens as each finding
+    is created, from the whole file."""
+    @functools.wraps(fn)
+    def run(*args, **kwargs):
+        with lazaret.forced_redaction():
+            return fn(*args, **kwargs)
+    return run
+
+
+@_always_redacted
 def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline=None,
                  cancel=None, max_artifacts=None, max_download_bytes=None):
     """Fetch and scan one package version. Returns a result dict.
@@ -3714,9 +3730,9 @@ def main():
     ap.add_argument("--ci", action="store_true",
                     help="Exit 1 if any package is SUSPICIOUS or INCOMPLETE")
     ap.add_argument("--no-redact-secrets", action="store_true",
-                    help="Opt OUT of secret redaction: keep the matched line for "
-                         "credential findings (default: redacted in every artifact, "
-                         "including the DB blob)")
+                    help="No effect, kept so existing scripts keep working: registry "
+                         "results are always redacted, on screen and in the state DB "
+                         "(the scanned archive has the original lines)")
     ap.add_argument("--excerpt-width", type=int, metavar="N",
                     help="Chars of the matched line to show under each finding (default 100)")
     ap.add_argument("--scan-timeout", type=float, metavar="SECONDS",
@@ -3755,7 +3771,11 @@ def main():
     ap.add_argument("--add", action="store_true",
                     help="discover: add discovered packages to the watchlist")
     args = ap.parse_args()
-    lazaret.REDACT_SECRETS = not args.no_redact_secrets
+    if args.no_redact_secrets:
+        # review P2: a raw credential line must never reach the state DB,
+        # which other tools (the MCP server, a shared Postgres) read back
+        print("note: --no-redact-secrets has no effect: registry results are always "
+              "redacted, on screen and in the state DB", file=sys.stderr)
     if args.excerpt_width:
         lazaret.EXCERPT_WIDTH = args.excerpt_width
     if args.scan_timeout and args.scan_timeout > 0:
