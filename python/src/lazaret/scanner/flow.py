@@ -1497,9 +1497,10 @@ _JS_FUNC_RE = re.compile(
     r"|(?:const|let|var)\s+(?P<n3>\w+)\s*=\s*(?:async\s*)?function\s*\((?P<p3>[^)]*)\))")
 _JS_SOURCE_RE = re.compile(
     r"req\.(query|body|params|headers|cookies)|process\.argv|location\.(search|hash|href)")
+_JS_CMD_SINK_RE = re.compile(r"\b(exec|execSync|spawn|spawnSync)\s*\(")   # not on a RegExp (_js_regexp_calls)
 _JS_SINKS = [
     (re.compile(r"\.(query|execute)\s*\("), "SQL injection"),
-    (re.compile(r"\b(exec|execSync|spawn|spawnSync)\s*\("), "command injection"),
+    (_JS_CMD_SINK_RE, "command injection"),
     (re.compile(r"(?<![\w.])eval\s*\(|new\s+Function\s*\("), "code injection"),
     (re.compile(r"\.innerHTML\s*=|document\.write\s*\("), "cross-site scripting"),
     (re.compile(r"\bfetch\s*\(|axios(\.\w+)?\s*\("), "server-side request forgery"),
@@ -2447,6 +2448,209 @@ def _js_node_merge(a, b):
     return a[0] + b[0], a[1] or b[1], a[2] + b[2], a[3] or b[3]
 
 
+# ---- RegExp receivers (review backlog: the regex .exec() sink) ----
+# `pattern.exec(s)` matches the command sink `exec(`, but a RegExp's exec
+# runs no command. A call leaves the sinks only when its receiver is proven
+# to be a RegExp:
+#   * a /…/ literal;
+#   * `new RegExp(…)` / `RegExp(…)`, the global RegExp: the file never
+#     declares, assigns or defines that name (`instanceof RegExp`,
+#     `RegExp.escape(…)` and calls are reads);
+#   * a name the file declares once, as one of those (`const | let | var
+#     name = /…/g`, the whole value), and otherwise only uses for RegExp
+#     members (`name.exec(…)`, `.test(…)`, `.lastIndex`, `.source`, …;
+#     assigning only `.lastIndex`), called inside that declaration's block.
+# Any other receiver stays a sink: a property (`opts.re.exec`), a parameter,
+# a name bound twice, reassigned, passed to a function, destructured or
+# shadowed. A file with a direct eval() or a with statement (either can
+# rebind a name) proves nothing but literals, and one that touches
+# RegExp.prototype nothing at all.
+_JS_REGEXP_DECL_RE = re.compile(
+    r"(?:const|let|var)" + _JS_NOT_AFTER + r"\s+([A-Za-z_$][\w$]*)(?:\s*:\s*RegExp)?\s*=(?![=>])\s*")
+_JS_REGEXP_NEW_RE = re.compile(r"(?:new\s+)?RegExp\s*\(")
+_JS_REBIND_RE = re.compile(r"(?<![\w$.])(?:eval|with)\s*\(")
+_JS_REGEXP_PROTO_RE = re.compile(r"(?<![\w$.])RegExp\s*\.\s*prototype(?![\w$])")
+_JS_IDENT_RE = re.compile(r"(?<![\w$])[A-Za-z_$][\w$]*")     # a whole identifier
+_JS_ASSIGN_AFTER_RE = re.compile(r"\s*" + _JS_ASSIGN_OP + r"(?![=>])")
+_JS_REGEX_FLAGS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+_JS_REGEXP_MEMBERS = frozenset((
+    "exec", "test", "lastIndex", "source", "flags", "global", "ignoreCase", "multiline", "sticky",
+    "unicode", "unicodeSets", "dotAll", "hasIndices", "toString"))
+
+
+def _js_regex_literal(code, p):
+    """Offset of the opening slash of the /…/flags literal (masked: its
+    content is blank) whose last character is at p, or -1."""
+    j = p
+    while j >= 0 and code[j] in _JS_REGEX_FLAGS:
+        j -= 1
+    if j < 1 or code[j] != "/":
+        return -1
+    k = j - 1
+    while k >= 0 and code[k] == " ":
+        k -= 1
+    return k if k >= 0 and code[k] == "/" and k < j - 1 else -1
+
+
+def _js_regexp_value(code, k, pairs):
+    """(end, whether it is the global RegExp's) when a RegExp is written at
+    code[k] — a /…/ literal, `new RegExp(…)`, `RegExp(…)` — else None."""
+    n = len(code)
+    if k < n and code[k] == "/":
+        j = k + 1
+        while j < n and code[j] == " ":
+            j += 1
+        if j < n and code[j] == "/" and j > k + 1:
+            j += 1
+            while j < n and code[j] in _JS_REGEX_FLAGS:
+                j += 1
+            return j, False
+        return None
+    m = _JS_REGEXP_NEW_RE.match(code, k)
+    if m is not None:
+        c = pairs.get(m.end() - 1)
+        if c is not None:
+            return c + 1, True
+    return None
+
+
+def _js_value_ends(code, e):
+    """Does a declarator's value end at e: a `,` `;` `}` or the end of the
+    code next, or a line break before a word that cannot continue it?"""
+    n = len(code)
+    j = e
+    while j < n and code[j] in " \t":
+        j += 1
+    if j >= n or code[j] in ",;}":
+        return True
+    if code[j] not in "\r\n":
+        return False
+    while j < n and code[j] in _JS_BLANK:
+        j += 1
+    if j >= n or code[j] in ";}":
+        return True
+    m = _JS_WORD_RE.match(code, j)
+    return m is not None and m.group() not in ("in", "instanceof")
+
+
+def _js_regexp_member_use(code, e):
+    """Is the name ending at e read as `name.<a RegExp member>` (assigned
+    only through `.lastIndex`)?"""
+    n = len(code)
+    k = e
+    while k < n and code[k] in _JS_BLANK:
+        k += 1
+    if k >= n or code[k] != ".":
+        return False
+    k += 1
+    while k < n and code[k] in _JS_BLANK:
+        k += 1
+    m = _JS_WORD_RE.match(code, k)
+    if m is None or m.group() not in _JS_REGEXP_MEMBERS:
+        return False
+    return m.group() == "lastIndex" or _JS_ASSIGN_AFTER_RE.match(code, m.end()) is None
+
+
+def _js_enclosing(code, positions):
+    """The innermost bracket open around each of the ascending positions
+    (paired as _js_bracket_pairs pairs them), or -1."""
+    out, stack = [], []
+    it = _JS_BRACKET_RE.finditer(code)
+    nxt = next(it, None)
+    for pos in positions:
+        while nxt is not None and nxt.start() < pos:
+            i = nxt.start()
+            if code[i] in "([{":
+                stack.append(i)
+            elif stack:
+                stack.pop()
+            nxt = next(it, None)
+        out.append(stack[-1] if stack else -1)
+    return out
+
+
+def _js_regexp_calls(code, pairs, starts):
+    """The offsets in starts (each where an `exec(` call's name begins) of
+    the calls made on a value proven to be a RegExp (see above)."""
+    if _JS_REGEXP_PROTO_RE.search(code):
+        return ()
+    lits, ctors, named = [], [], {}           # named: receiver name -> its calls
+    opener = None
+    for s in starts:
+        d = _js_back(code, s)
+        if d < 1 or code[d] != "." or code[d - 1] in ".?":
+            continue
+        p = _js_back(code, d)
+        if p < 0:
+            continue
+        if code[p] == ")":
+            if opener is None:
+                opener = {c: o for o, c in pairs.items()}
+            o = opener.get(p)
+            q = _js_back(code, o) if o is not None else -1
+            if q >= 0:
+                ws, word = _js_word_before(code, q)
+                if word == "RegExp" and not _js_member(code, ws):
+                    ctors.append(s)
+        elif _js_regex_literal(code, p) >= 0:
+            lits.append(s)
+        else:
+            ws, word = _js_word_before(code, p)
+            if _JS_PARAM_RE.match(word) and not _js_member(code, ws):
+                named.setdefault(word, []).append(s)
+    proven = set(lits)
+    if not (ctors or named) or _JS_REBIND_RE.search(code):
+        return proven
+    decls = {}                  # name -> (declaration offset, name offset, is the global RegExp's) | None
+    for m in _JS_REGEXP_DECL_RE.finditer(code):
+        name = m.group(1)
+        if name not in named:
+            continue
+        v = _js_regexp_value(code, m.end(), pairs)
+        ok = v is not None and name not in decls and _js_value_ends(code, v[0])
+        decls[name] = (m.start(), m.start(1), v[1]) if ok else None
+    watch = sorted(n for n, d in decls.items() if d is not None)
+    need = bool(ctors) or any(decls[n][2] for n in watch)
+    if need:
+        watch.append("RegExp")
+    bad = set()
+    if watch:
+        watched = frozenset(watch)
+        for m in _JS_IDENT_RE.finditer(code):
+            w = m.group()
+            if w not in watched or w in bad:
+                continue
+            i = m.start()
+            if w == "RegExp":
+                # the global RegExp, read: `new RegExp(`, `RegExp(`, `RegExp.x`, `instanceof RegExp`
+                b = _js_back(code, i)
+                k = m.end()
+                while k < len(code) and code[k] in _JS_BLANK:
+                    k += 1
+                before = _js_word_before(code, b)[1] if b >= 0 else ""
+                if b >= 0 and code[b] == ".":
+                    bad.add(w)                              # globalThis.RegExp = …
+                elif before == "function" or not ((k < len(code) and code[k] in "(.") or before == "instanceof"):
+                    bad.add(w)
+            elif _js_member(code, i):
+                continue                                    # a property: obj.re
+            elif i != decls[w][1] and not _js_regexp_member_use(code, m.end()):
+                bad.add(w)
+    global_ok = need and "RegExp" not in bad
+    if global_ok:
+        proven.update(ctors)
+    names = sorted((decls[n][0], n) for n in watch if n != "RegExp" and n not in bad and (global_ok or not decls[n][2]))
+    for (at, n), o in zip(names, _js_enclosing(code, [at for at, _ in names])):
+        if o == -1:
+            a, b = -1, len(code)
+        elif code[o] == "{":
+            a, b = o, pairs.get(o, len(code))
+        else:
+            continue                                        # declared in a for (…) head or an expression
+        proven.update(s for s in named[n] if a < s < b)
+    return proven
+
+
 class _JsFile:
     """One analyzed JavaScript file: text, masked code and the tables the
     call and return passes read."""
@@ -2504,7 +2708,15 @@ class _JsFile:
         self.top_decl = set()   # the module's
         self.assign_scope = []   # per assignment: the scope it belongs to (None: the module)
         self.call_scope = {}  # offset of a call's name -> the innermost scope around it
-        self.sinks = [(cat, list(_js_sink_matches(sink_re, code))) for sink_re, cat in _JS_SINKS]
+        self.sinks = []
+        for sink_re, cat in _JS_SINKS:
+            matches = list(_js_sink_matches(sink_re, code))
+            if sink_re is _JS_CMD_SINK_RE:         # `re.exec(s)` on a RegExp runs no command
+                calls = [s for s, _ in matches if code.startswith("exec", s) and not code.startswith("execSync", s)]
+                regexp = _js_regexp_calls(code, self.pairs, calls) if calls else ()
+                if regexp:
+                    matches = [(s, e) for s, e in matches if s not in regexp]
+            self.sinks.append((cat, matches))
         self.sink_scopes = []
         # nested code makes the expressions read overlap (a return inside a
         # callback inside a return…): what one file may have read is bounded
