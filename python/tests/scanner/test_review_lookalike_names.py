@@ -7,11 +7,17 @@ ones they are drawn like, invisible U+200C / U+200D dropped, and in
 JavaScript NFKC's compatibility forms read as the letters they stand for) is
 an ASCII name it is not is SC-HOMOGLYPH: CRITICAL when it reads as a
 code-execution or network name, or as another name in the file; MAJOR when
-it mixes ASCII letters with look-alikes. Strings and comments are not names;
-a Cyrillic word, a regex class like [\\u0430-\\u044f], Greek alpha in
-scientific code, and escapes a regex literal keeps are left alone. On 9,019
-installed Python files and 16,908 others (the standard library, a real
-node_modules) it finds nothing.
+it mixes ASCII letters with look-alikes. Names are read where the lexer
+reads code: not in comments, strings (a docstring, a template, an f-string)
+or regex literals, whose escapes are not names either. A Cyrillic word and
+Greek alpha in scientific code are left alone. On 38,752 real files (a real
+node_modules, npm's own packages, date and language libraries with Cyrillic
+and Greek locales, the standard library and installed Python packages) it
+finds nothing. Reading strings line by line and regex literals as code, it
+found 13 names there: ajv's /http[s\\u017F]?/ read as "s\\u017f", date-fns's
+locale patterns (/^\\u0441e[\\u0439]/i, /^(\\d+)[\\u00ba\\u00aao]?/i), and a
+string in a minified bundle whose quotes a line-by-line reading paired
+wrongly.
 
 The npm engine's twin: js/test/review-lookalike-names.test.js;
 tests/architecture/test_js_parity_lookalike.py compares the two. Every such
@@ -74,6 +80,33 @@ class LookalikeTests(unittest.TestCase):
         ]:
             with self.subTest(text=text):
                 self.assertEqual(found(text, lang), [])
+
+    def test_a_regex_literal_holds_no_names(self):
+        for text in [
+            "var re = /^(?:(?:http[s\\u017F]?|ftp):\\/\\/)/i;\n",                     # ajv
+            "const ok = /^[a-zA-Z\u0430-\u044f\u0410-\u042f\u0451\u0401]+$/.test(s);\n",
+            "const m = s.match(/^(\\d+)[\u00ba\u00aao]?/i);\n",                         # date-fns pt-BR
+            "if (ok) {}\n/[a\u0441]/.test(s);\n",
+        ]:
+            with self.subTest(text=text):
+                self.assertEqual(found(text), [])
+        # a '/' the lexer reads as division starts no regex literal
+        self.assertEqual(found("const r = a / v\u0430lue / 2;\n"),
+                         [("MAJOR", 1, "'v\u0430lue' reads as 'value' but is spelled with U+0430 for 'a'.")])
+
+    def test_a_string_is_read_by_the_lexer(self):
+        # a string's other lines (a docstring, a template, a string continued with a
+        # backslash); a template or f-string is one literal, its fields too
+        for lang, text in [("py", 'def f():\n    """\n    v\u0430lue \u0435val(x)\n    """\n'),
+                           ("js", "const t = `\n  v\u0430lue ${\u0435val(x)}\n`;\n"),
+                           ("js", 'const s = "a\\\n\u0435val";\n'), ("py", "x = f'{\u0435val(p)}'\n")]:
+            with self.subTest(text=text):
+                self.assertEqual(found(text, lang), [])
+        # a quote escaped in a string ends nothing
+        for lang, text in [("js", "const s = 'it\\'s' + \u0435val(x) + 'y';\n"),
+                           ("py", "s = 'it\\'s' + \u0435val(x) + 'y'\n")]:
+            with self.subTest(text=text):
+                self.assertEqual(found(text, lang), [("CRITICAL", 1, EVAL_MSG)])
 
     def test_never_suppressed(self):
         self.assertEqual(found("\u0435val(x); // nosec\n"), [("CRITICAL", 1, EVAL_MSG)])

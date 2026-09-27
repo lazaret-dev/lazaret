@@ -67,12 +67,13 @@ class FileCtx {
     this.lines = lines;
     this.lang = lang;
     this.content = content;
-    this.lex = lexLines(lines, lang, content, { jsx });
+    this.lex = lexLines(lines, lang, content, { jsx, literals: true });
     this.cmask = this.lex.comment;
     this.deadline = deadline;
     this._mlines = null;
     this._mcode = new Map();
     this._strStarts = null;
+    this._litEnds = null;
   }
   get mlines() {
     if (this._mlines === null) {
@@ -94,9 +95,38 @@ class FileCtx {
     }
     return v;
   }
-  jsText(i, dropComments) {
+  /**
+   * Line i as names are read in it (SC-HOMOGLYPH; core._FileCtx.names_code):
+   * its match text with its comments removed and every literal blanked, by
+   * the spans both readings of the file agree on: strings of any kind (a
+   * template with its fields), regex literals.
+   */
+  namesCode(i) {
+    const lits = this.lex.literals;
+    if (!lits) return this.mcode(i);
     const line = this.lines[i];
-    const plain = dropComments ? this.lex.code[i] : line;
+    this._litEnds ??= lits.map((s) => s[1]);
+    const base = this.lex.starts[i], end = base + line.length;
+    let k = upperBound(this._litEnds, base);         // the first literal ending after base
+    let out = "", p = 0, any = false;
+    for (; k < lits.length && lits[k][0] < end; k++) {
+      const a = Math.max(lits[k][0], base) - base, b = Math.min(lits[k][1], end) - base;
+      out += line.slice(p, a) + " ".repeat(b - a);
+      p = b;
+      any = true;
+    }
+    if (!any) return this.mcode(i);
+    out += line.slice(p);
+    if (this.lang === "js") return this.jsText(i, true, out);
+    return pyMatchText(cutSpans(out, this.lex.spans.get(i)));
+  }
+  /** Line i's match text; `line`: line i with some of its text blanked (the same length) to read instead. */
+  jsText(i, dropComments, line = null) {
+    let plain;
+    if (line === null) {
+      line = this.lines[i];
+      plain = dropComments ? this.lex.code[i] : line;
+    } else plain = dropComments ? cutSpans(line, this.lex.spans.get(i)) : line;
     if (!line.includes("\\u")) return plain.includes("\ufeff") ? plain.replaceAll("\ufeff", " ") : plain;
     if (this._strStarts === null) this._strStarts = this.lex.strings.map((s) => s[0]);
     const base = this.lex.starts[i];
@@ -133,6 +163,13 @@ class FileCtx {
   checkTime() {
     if (Date.now() > this.deadline) throw new ScanBudgetExceeded();
   }
+}
+/** `line` without the text of `spans` (sorted, disjoint, relative to it); core._cut_spans. */
+function cutSpans(line, spans) {
+  if (!spans || !spans.length) return line;
+  let c = "", p = 0;
+  for (const [a, b] of spans) { c += line.slice(p, a); p = b; }
+  return c + line.slice(p);
 }
 function upperBound(a, x) {
   let lo = 0, hi = a.length;
@@ -253,14 +290,13 @@ const ASCII_WORD_RE = /[A-Za-z0-9_$]+/g;
 const ASCII_LETTER_RE = /[A-Za-z]/;
 const INVISIBLE_IN_NAMES = new Set(["\u200c", "\u200d"]);
 const isAscii = (s) => !/[^\x00-\x7f]/.test(s);
-/** `code` with the contents of its string literals replaced by spaces (core._blank_strings). */
-const blankStrings = (code) => code.replace(STRING_LIT_RE, (s) => s[0] + " ".repeat(s.length - 2) + s[s.length - 1]);
 const hexCp = (ch) => ch.codePointAt(0).toString(16).toUpperCase().padStart(4, "0");
 
 /**
  * [name, readsAs, severity, other, detail, column] for the first name in
- * `code` (comments removed, strings blanked) that reads as an ASCII name it
- * is not, else null. `words()` gives the file's ASCII words.
+ * `code` (a line as FileCtx.namesCode reads it: comments removed, literals
+ * blanked) that reads as an ASCII name it is not, else null. `words()` gives
+ * the file's ASCII words.
  */
 export function lookalikeName(code, lang, words) {
   if (isAscii(code)) return null;
@@ -268,7 +304,7 @@ export function lookalikeName(code, lang, words) {
   let m;
   while ((m = NAME_RUN_RE.exec(code))) {
     const name = m[0];
-    if (isAscii(name) || (m.index && code[m.index - 1] === "\\")) continue;   // an escape a regex literal kept
+    if (isAscii(name) || (m.index && code[m.index - 1] === "\\")) continue;   // after an escape left as written
     const seen = lang === "js" ? name.normalize("NFKC") : name;
     let skeleton = "";
     for (const ch of seen) if (!INVISIBLE_IN_NAMES.has(ch)) skeleton += LOOKALIKES.get(ch) ?? ch;
@@ -474,7 +510,7 @@ function isCodeSink(code, m, cpAliases) {
 }
 const DEP_ASSIGN_RE = pyRe(String.raw`(?<![\w$])([A-Za-z_$][\w$]*)\s*=(?![=>])([^;]*)`, "gd");
 const DEP_SINK_ARGS_MAX = 1000;
-// (blankStrings: see the look-alike names above)
+const blankStrings = (code) => code.replace(STRING_LIT_RE, (s) => s[0] + " ".repeat(s.length - 2) + s[s.length - 1]);
 // A decoded value taints names for DEP_FLOW_WINDOW characters from the decode
 // (twin of core.DEP_FLOW_WINDOW: unbounded, one ordinary decode in a large
 // bundle spread through helper parameters to thousands of names).
@@ -700,7 +736,7 @@ function scanLines(path, content, lines, lang, dep, ctx, issues) {
     if ((lang === "js" || lang === "py") && !cmask[i]) {
       const code = ctx.mcode(i);
       if (!isAscii(code)) {
-        const found = lookalikeName(blankStrings(code), lang, words);
+        const found = lookalikeName(ctx.namesCode(i), lang, words);
         if (found) issues.push(lookalikeIssue(found, path, i + 1, lines));
       }
       if (!dep && runsDownloadThroughShell(code))

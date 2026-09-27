@@ -1701,8 +1701,8 @@ def skipped_tree_issues(skipped=None):
 # comment only if BOTH readings of its language say so, so code that some
 # runtime executes is never hidden as a comment, and a string can never pass
 # for a comment holding a suppression marker. Each file is lexed twice and
-# the comment spans (and, for JavaScript, the '…' "…" string spans) are
-# intersected:
+# the comment spans (and, for JavaScript, the '…' "…" string spans; for
+# SC-HOMOGLYPH, every literal's span) are intersected:
 #   py : the lexer below, and again with f-strings (and t-strings) as
 #        Python 3.12+ reads them (PEP 701): a replacement field may hold
 #        strings in the same quotes, comments and newlines, and nothing in an
@@ -1810,26 +1810,33 @@ def _intersect_spans(a, b):
     return out
 
 
-def _lex_comment_spans(content, lang, strings=None, jsx=True):
+def _lex_comment_spans(content, lang, strings=None, jsx=True, literals=None):
     """Absolute (start, end) spans of every comment in `content`: the spans
     both readings of the language agree on (see the lexer notes above).
     Linear: each reading finds the next interesting character with a regex
     and consumes strings and comments with bounded matches. If `strings`
     is a list, the '…' / "…" literal spans both JavaScript readings agree on
-    are appended to it. jsx=False: a .ts file (no JSX reading)."""
+    are appended to it; if `literals` is, the spans of every literal both
+    readings agree on: strings of any kind (f-strings, templates) and regex
+    literals. jsx=False: a .ts file (no JSX reading)."""
     lang = lang if lang in ("py", "js", "sql") else None
     if lang is None or (lang == "js" and not jsx):
-        return _lex_pass(content, lang, strings)
+        return _lex_pass(content, lang, strings, literals=literals)
     sa = None if strings is None else []
     sb = None if strings is None else []
-    a = _lex_pass(content, lang, sa)
-    b = _lex_js_jsx(content, sb) if lang == "js" else _lex_pass(content, lang, sb, second=True)
+    la = None if literals is None else []
+    lb = None if literals is None else []
+    a = _lex_pass(content, lang, sa, literals=la)
+    b = (_lex_js_jsx(content, sb, lb) if lang == "js"
+         else _lex_pass(content, lang, sb, second=True, literals=lb))
     if strings is not None:
         strings.extend(_intersect_spans(sa, sb))
+    if literals is not None:
+        literals.extend(_intersect_spans(la, lb))
     return _intersect_spans(a, b)
 
 
-def _lex_pass(content, lang, strings=None, second=False):
+def _lex_pass(content, lang, strings=None, second=False, literals=None):
     """One reading of `content`: the lexer above, or with `second` the other
     reading of Python (PEP 701 f-strings) or SQL (MySQL)."""
     mysql = second and lang == "sql"
@@ -1873,6 +1880,8 @@ def _lex_pass(content, lang, strings=None, second=False):
                 if rm:
                     pos = rm.end()
                     prev, tail = '"', ""
+                    if literals is not None:
+                        literals.append((k, pos))
                     continue
                 # no closing '/' on this line: the rest of the line holds no
                 # regex literal either (one failed attempt per line keeps the
@@ -1885,6 +1894,8 @@ def _lex_pass(content, lang, strings=None, second=False):
         fstring, raw = _py_fstring_prefix(content, k) if fstrings else (False, False)
         if fstring:
             pos = _py_fstring_end(content, k, raw)
+            if literals is not None:
+                literals.append((k, pos))
             continue
         if mysql:
             sm = _LEX_MYSQL_STR[ch].match(content, k)
@@ -1895,6 +1906,8 @@ def _lex_pass(content, lang, strings=None, second=False):
         prev, tail = '"', ""
         if strings is not None and ch != "`":
             strings.append((k, pos))
+        if literals is not None:
+            literals.append((k, pos))
     return spans
 
 
@@ -2050,7 +2063,7 @@ def _jsx_tag_at(s, j):
     return -1
 
 
-def _lex_js_jsx(content, strings=None):
+def _lex_js_jsx(content, strings=None, literals=None):
     """JavaScript comment spans in the JSX reading (see the lexer notes):
     the base lexer, plus elements, whose text and attribute strings hold
     no comments and whose `{…}` hold code again."""
@@ -2100,6 +2113,8 @@ def _lex_js_jsx(content, strings=None):
                     if rm:
                         pos = rm.end()
                         prev, tail = '"', ""
+                        if literals is not None:
+                            literals.append((k, pos))
                         continue
                     no_regex_until = content.find("\n", k)
                     no_regex_until = n if no_regex_until < 0 else no_regex_until
@@ -2132,6 +2147,8 @@ def _lex_js_jsx(content, strings=None):
                 prev, tail = '"', ""
                 if strings is not None and ch != "`":
                     strings.append((k, pos))
+                if literals is not None:
+                    literals.append((k, pos))
             continue
         if kind == "tag":
             j = _JSX_WS_RE.match(content, pos).end()
@@ -2164,6 +2181,8 @@ def _lex_js_jsx(content, strings=None):
                 e = n if e < 0 else e + 1
                 if strings is not None:
                     strings.append((j, e))
+                if literals is not None:
+                    literals.append((j, e))
                 pos = e
                 continue
             if c == "=":
@@ -2219,20 +2238,34 @@ def _line_starts(content):
     return [0] + [m.end() for m in re.finditer("\n", content)]
 
 
-def _comment_spans(content, lang, strings=None, jsx=True):
-    return _lex_comment_spans(content, lang, strings, jsx)
+def _comment_spans(content, lang, strings=None, jsx=True, literals=None):
+    return _lex_comment_spans(content, lang, strings, jsx, literals)
 
 
-def _comment_layout(content, lines, lang, strings=None, jsx=True):
+def _cut_spans(line, spans):
+    """`line` without the text of `spans` (sorted, disjoint, relative to it)."""
+    if not spans:
+        return line
+    parts, p = [], 0
+    for a, b in spans:
+        parts.append(line[p:a])
+        p = b
+    parts.append(line[p:])
+    return "".join(parts)
+
+
+def _comment_layout(content, lines, lang, strings=None, jsx=True, literals=None):
     """(mask, spans, code) for the lines of `content`:
     mask[i]  — line i is a comment line (has non-whitespace, all of it in comments);
     spans    — {i: [(start, end), …]} comment spans relative to line i;
     code     — line i with its comment text removed (strings kept).
-    jsx=False: JavaScript without the JSX reading (a .ts file)."""
+    jsx=False: JavaScript without the JSX reading (a .ts file). `strings`,
+    `literals`: lists the lexer's literal spans are appended to (see
+    _lex_comment_spans)."""
     n = len(lines)
     mask = [False] * n
     by_line = {}
-    spans = _comment_spans(content, lang, strings, jsx)
+    spans = _comment_spans(content, lang, strings, jsx, literals)
     if not spans:
         return mask, by_line, lines
     starts = _line_starts(content)
@@ -2386,13 +2419,16 @@ class _FileCtx(_Redactor):
         self.lang = lang
         self.content = "\n".join(lines) if content is None else content
         self._strings = [] if lang == "js" else None      # '…' "…" spans (absolute)
+        self._literals = [] if lang in ("js", "py") else None   # every literal's span (absolute)
         self.cmask, self.cspans, self.code = _comment_layout(
-            self.content, lines, lang, self._strings, jsx)
+            self.content, lines, lang, self._strings, jsx, self._literals)
         self.deadline = deadline
         self._markers = {}
         self._mlines = None
         self._mcode = {}
         self._starts = None
+        self._str_starts = None
+        self._lit_ends = None
 
     @property
     def mlines(self):
@@ -2421,13 +2457,52 @@ class _FileCtx(_Redactor):
             self._mcode[i] = v
         return v
 
-    def _js_text(self, i, drop_comments):
+    def names_code(self, i):
+        """Line i as names are read in it (SC-HOMOGLYPH): its match text
+        with its comments removed and every literal blanked, by the spans
+        both readings of the file agree on: strings of any kind (a template
+        or f-string with its fields), regex literals. So a regex's
+        escapes are not decoded into names (ajv's /http[s\\u017F]?/), a
+        character class like [a-z\\u0430-\\u044f] and a docstring's lines are
+        not names, and a quote escaped in a string ends nothing."""
         line = self.lines[i]
-        plain = self.code[i] if drop_comments else line
+        if self._literals is None:
+            return self.mcode(i)
+        if self._starts is None:
+            self._starts = _line_starts(self.content)
+        if self._lit_ends is None:
+            self._lit_ends = [e for _, e in self._literals]
+        base = self._starts[i]
+        end = base + len(line)
+        k = bisect.bisect_right(self._lit_ends, base)       # the first literal ending after base
+        parts, p = [], 0
+        while k < len(self._literals) and self._literals[k][0] < end:
+            a, b = max(self._literals[k][0], base) - base, min(self._literals[k][1], end) - base
+            parts.append(line[p:a])
+            parts.append(" " * (b - a))
+            p = b
+            k += 1
+        if not parts:
+            return self.mcode(i)
+        parts.append(line[p:])
+        blanked = "".join(parts)
+        if self.lang == "js":
+            return self._js_text(i, True, blanked)
+        return _py_match_text(_cut_spans(blanked, self.cspans.get(i, ())))
+
+    def _js_text(self, i, drop_comments, line=None):
+        """Line i's match text; `line`: line i with some of its text blanked
+        (the same length) to read instead."""
+        if line is None:
+            line = self.lines[i]
+            plain = self.code[i] if drop_comments else line
+        else:
+            plain = _cut_spans(line, self.cspans.get(i, ())) if drop_comments else line
         if "\\u" not in line:
             return plain.replace("\ufeff", " ") if "\ufeff" in plain else plain
         if self._starts is None:
             self._starts = _line_starts(self.content)
+        if self._str_starts is None:
             self._str_starts = [a for a, _ in self._strings]
         base = self._starts[i]
         cuts = list(self.cspans.get(i, ())) if drop_comments else []
@@ -2757,8 +2832,12 @@ def _hidden_name_in(seg, offset):
 # SC-HOMOGLYPH: CRITICAL when it reads as a code-execution or network name
 # (_LOOKALIKE_TARGETS) or as another name in the file (three characters or
 # more), MAJOR when it mixes ASCII letters with look-alikes. Anything else —
-# a Cyrillic word, a regex class like [\u0430-\u044f] — is left alone. (This
-# file writes every such character as an escape.)
+# a Cyrillic word — is left alone. Names are read where the lexer reads code
+# (_FileCtx.names_code): not in comments, strings (a template or f-string
+# whole, fields too) or regex literals, whose escapes are not names either:
+# ajv's /http[s\u017F]?/ holds no name "s\u017f", nor a class like
+# [a-zA-Z\u0430-\u044f] a name "Z\u0430". (This file writes every
+# such character as an escape.)
 _LOOKALIKES = dict(zip(
     "\u0430\u0435\u043e\u0440\u0441\u0443\u0445\u0455\u0456\u0458\u04bb\u0501\u051b\u051d\u04cf"   # Cyrillic
     "\u0410\u0412\u0415\u041a\u041c\u041d\u041e\u0420\u0421\u0422\u0425\u0405\u0406\u0408\u04ae\u051a\u051c\u04c0"
@@ -2781,16 +2860,17 @@ _INVISIBLE_IN_NAMES = frozenset("\u200c\u200d")
 
 
 def lookalike_name(code, lang, words):
-    """(name, reads_as, severity, detail) for the first name in `code` (a
-    line with its comments removed and its strings blanked) that reads as an
-    ASCII name it is not (see above), else None. `words()` gives the file's
-    ASCII words; it is called only when a look-alike name is found."""
+    """(name, reads_as, severity, other, detail, column) for the first name
+    in `code` (a line as _FileCtx.names_code reads it: comments removed,
+    literals blanked) that reads as an ASCII name it is not (see above),
+    else None. `words()` gives the file's ASCII words; it is called only
+    when a look-alike name is found."""
     if code.isascii():
         return None
     for m in _NAME_RUN_RE.finditer(code):
         name = m.group()
         if name.isascii() or (m.start() and code[m.start() - 1] == "\\"):
-            continue                        # after a backslash: an escape a regex literal kept
+            continue                        # after an escape left as written (\uFF07 is no name)
         seen = unicodedata.normalize("NFKC", name) if lang == "js" else name
         skeleton = "".join(_LOOKALIKES.get(ch, ch) for ch in seen if ch not in _INVISIBLE_IN_NAMES)
         if not skeleton or skeleton == name or not skeleton.isascii() or skeleton[0].isdigit():
@@ -3763,7 +3843,7 @@ def _scan_file(path, content, lines, lang, dep, ctx, issues):
         if lang in ("js", "py") and not cmask[i]:
             code = ctx.mcode(i)
             if not code.isascii():
-                found = lookalike_name(_blank_strings(code), lang, words)
+                found = lookalike_name(ctx.names_code(i), lang, words)
                 if found is not None:
                     issues.append(lookalike_issue(found, path, i + 1, lines))
             if not dep and _runs_download_through_shell(code):

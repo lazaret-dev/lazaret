@@ -5,9 +5,14 @@ of names built from ASCII letters, every look-alike letter of the table,
 letters that are not look-alikes (Cyrillic, Greek alpha / nu / rho), NFKC
 compatibility forms (fullwidth, mathematical bold), the invisible U+200C /
 U+200D, digits and punctuation; and the tables themselves. Columns are
-compared in code points (the npm engine's are UTF-16 offsets). The
-expectations are in tests/scanner/test_review_lookalike_names.py. Skipped
-where node is missing. Every such character here is written as an escape.
+compared in code points (the npm engine's are UTF-16 offsets). Then whole
+files: a seeded random corpus of JavaScript, TypeScript and Python built from
+literals of every kind, comments, regex literals and divisions, escapes and
+look-alike names, scanned by core, the npm engine and the dashboard, whose
+SC-HOMOGLYPH findings must agree (the lexer's literal spans and
+names_code / namesCode). The expectations are in
+tests/scanner/test_review_lookalike_names.py. Skipped where node is missing.
+Every such character here is written as an escape.
 """
 import json
 import os
@@ -18,6 +23,7 @@ import unittest
 
 from lazaret.scanner import core
 from tests import _support
+from tests.scanner import _dashboard_vm as dash
 
 NODE = shutil.which("node")
 SCAN_JS = os.path.join(_support.REPO_ROOT, "js", "src", "scanner", "scan.js")
@@ -92,6 +98,71 @@ def corpus(seed=20260928, count=3000):
             code = "".join(rnd.choice(PIECES) for _ in range(rnd.randint(1, 10)))
         cases.append((code, rnd.choice(["js", "py"])))
     return cases
+
+
+# ---- whole files ----
+FILE_PIECES = {
+    "any": [" ", " ", " ", "\n", "\n", "=", "(", ")", "{", "}", ";", ",", "+", "/", "x", "a", "2", "value", "eval",
+            "'", '"', "\\", "\\'", '\\"', "\\\n", "[", "]", "-", ".test(s)"],
+    "js": ["//", "/*", "*/", "/[a-z", "]/", "/x/g", "return /", "`", "${", "=> /", "\\u0435val", "\\u{435}val",
+           "\\u017F", "\\uFF10", "\\u0061", "<b>", "</b>", "<a title='", "i++ /", "} /", "const "],
+    "py": ["#", '"""', "'''", 'f"', "f'", "rb'", "\\N{", ":", "def f():\n    ", "r'"],
+}
+FILE_NON_ASCII = ["\u0430", "\u044f", "\u017f", "\u00ba", "\u00aa", "\u0441e", "\uff45", "\u200d", "\u03b1",
+                  "\u043f\u0440\u0438", "\ufb03", "\u0410-\u042f"]
+
+
+def file_corpus(seed=20260926, count=500):
+    rnd = random.Random(seed)
+    out = []
+    for n in range(count):
+        name = rnd.choice(["x.js", "x.js", "x.ts", "x.py", "x.py"])
+        lang = "py" if name.endswith(".py") else "js"
+        pieces = FILE_PIECES["any"] + FILE_PIECES[lang]
+        parts = []
+        for _ in range(rnd.randint(3, 40)):
+            roll = rnd.random()
+            if roll < 0.12:
+                parts.append(spoof(rnd.choice(TARGETS if rnd.random() < 0.5 else OTHERS), rnd))
+            elif roll < 0.2:
+                parts.append(rnd.choice(FILE_NON_ASCII))
+            else:
+                parts.append(rnd.choice(pieces))
+        out.append((f"f{n}/{name}", lang, "".join(parts)))
+    return out
+
+
+NPM_FILES = """
+import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const { scanFile } = await import(pathToFileURL(process.argv[1]).href);
+const files = JSON.parse(readFileSync(0, "utf8"));
+process.stdout.write(JSON.stringify(files.map(([path, lang, content]) => scanFile({ path, content, lang })
+  .filter((i) => i.rule === "SC-HOMOGLYPH").map((i) => [i.sev, i.line, i.msg]))));
+"""
+
+
+@unittest.skipUnless(NODE, "node is not installed")
+class WholeFileParityTests(unittest.TestCase):
+    maxDiff = None
+
+    def test_core_the_npm_engine_and_the_dashboard_agree(self):
+        files = file_corpus()
+        want = [[[i["sev"], i["line"], i["msg"]] for i in core.scan_file(path, content, lang)
+                 if i["rule"] == "SC-HOMOGLYPH"] for path, lang, content in files]
+        p = subprocess.run([NODE, "--input-type=module", "-e", NPM_FILES,
+                            os.path.join(_support.REPO_ROOT, "js", "src", "index.js")],
+                           input=json.dumps(files), capture_output=True, encoding="utf-8", timeout=60)
+        if p.returncode:
+            raise AssertionError(p.stderr[-2000:])
+        npm = json.loads(p.stdout)
+        page = [[[i["sev"], i["line"], i["msg"]] for i in issues if i["rule"] == "SC-HOMOGLYPH"]
+                for issues in dash.run([{"op": "scanFile", "file": {"name": path, "lang": lang, "content": content}}
+                                        for path, lang, content in files], timeout=60)]
+        diffs = [(f, w, n, g) for f, w, n, g in zip(files, want, npm, page) if not w == n == g]
+        self.assertEqual(diffs[:5], [])
+        self.assertGreater(sum(1 for w in want if w), 150)
+        self.assertGreater(sum(1 for w in want if not w), 100)
 
 
 @unittest.skipUnless(NODE, "node is not installed")

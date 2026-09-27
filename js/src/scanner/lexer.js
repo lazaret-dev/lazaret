@@ -10,7 +10,8 @@
 // comment only if BOTH readings of its language say so, so code some runtime
 // executes is never hidden as a comment and a string never passes for a
 // comment holding a suppression marker. Each file is lexed twice and the
-// comment spans (for JavaScript also the '…' "…" string spans) intersected:
+// comment spans (for JavaScript also the '…' "…" string spans; for
+// SC-HOMOGLYPH every literal's span) intersected:
 //   py : the lexer below, and again with f-strings (and t-strings) as Python
 //        3.12+ reads them (PEP 701): a replacement field may hold strings in
 //        the same quotes, comments and newlines; nothing in an f-string is a
@@ -167,21 +168,25 @@ export function jsxReading(path) {
 /**
  * Absolute [start, end) spans of every comment in `content`: the spans both
  * readings of the language agree on. When `strings` is an array, the '…' /
- * "…" literal spans both JavaScript readings agree on are appended to it.
+ * "…" literal spans both JavaScript readings agree on are appended to it;
+ * when `literals` is, the spans of every literal both readings agree on:
+ * strings of any kind (f-strings, templates) and regex literals.
  * jsx: false for a .ts file (no JSX reading).
  */
-export function commentSpans(content, lang, strings = null, { jsx = true } = {}) {
+export function commentSpans(content, lang, strings = null, { jsx = true, literals = null } = {}) {
   const L = lang === "py" || lang === "js" || lang === "sql" ? lang : "any";
-  if (L === "any" || (L === "js" && !jsx)) return lexPass(content, L, strings);
+  if (L === "any" || (L === "js" && !jsx)) return lexPass(content, L, strings, false, literals);
   const sa = strings ? [] : null, sb = strings ? [] : null;
-  const a = lexPass(content, L, sa);
-  const b = L === "js" ? lexJsx(content, sb) : lexPass(content, L, sb, true);
+  const la = literals ? [] : null, lb = literals ? [] : null;
+  const a = lexPass(content, L, sa, false, la);
+  const b = L === "js" ? lexJsx(content, sb, lb) : lexPass(content, L, sb, true, lb);
   if (strings) for (const s of intersectSpans(sa, sb)) strings.push(s);
+  if (literals) for (const s of intersectSpans(la, lb)) literals.push(s);
   return intersectSpans(a, b);
 }
 
 /** One reading: the lexer above, or with `second` the other reading of Python (PEP 701) or SQL (MySQL). */
-function lexPass(content, L, strings = null, second = false) {
+function lexPass(content, L, strings = null, second = false, literals = null) {
   const mysql = second && L === "sql";
   const fstrings = second && L === "py";
   const next = mysql ? MYSQL_NEXT : NEXT[L];
@@ -221,7 +226,7 @@ function lexPass(content, L, strings = null, second = false) {
     if (ch === "/") {                          // js only: regex literal or division
       if (k >= noRegexUntil && jsRegexAllowed(prev, tail)) {
         const e = jsRegexEnd(content, k);
-        if (e >= 0) { pos = e; prev = '"'; tail = ""; continue; }
+        if (e >= 0) { pos = e; prev = '"'; tail = ""; if (literals) literals.push([k, e]); continue; }
         noRegexUntil = content.indexOf("\n", k);
         if (noRegexUntil < 0) noRegexUntil = n;
       }
@@ -231,12 +236,13 @@ function lexPass(content, L, strings = null, second = false) {
     }
     if (fstrings) {
       const [isF, raw] = pyFstringPrefix(content, k);
-      if (isF) { pos = pyFstringEnd(content, k, raw); continue; }
+      if (isF) { pos = pyFstringEnd(content, k, raw); if (literals) literals.push([k, pos]); continue; }
     }
     const end = mysql ? MYSQL_STR[ch] : STR[L][L === "py" && content.startsWith(ch + ch + ch, k) ? ch + ch + ch : ch];
     pos = Math.max(end(content, k), k + 1);
     prev = '"'; tail = "";
     if (strings && ch !== "`") strings.push([k, pos]);
+    if (literals) literals.push([k, pos]);
   }
   return spans;
 }
@@ -345,7 +351,7 @@ function jsxTagAt(s, j) {
   return j < s.length && (s[j] === ">" || jsxNameStart(s.charCodeAt(j))) ? j : -1;
 }
 
-function lexJsx(content, strings = null) {
+function lexJsx(content, strings = null, literals = null) {
   const spans = [];
   const n = content.length;
   let pos = 0, prev = "", tail = "", noRegexUntil = -1;
@@ -382,7 +388,7 @@ function lexJsx(content, strings = null) {
         pos = k + 1;
         if (k >= noRegexUntil && jsRegexAllowed(prev, tail)) {
           const e = jsRegexEnd(content, k);
-          if (e >= 0) { pos = e; prev = '"'; tail = ""; continue; }
+          if (e >= 0) { pos = e; prev = '"'; tail = ""; if (literals) literals.push([k, e]); continue; }
           noRegexUntil = content.indexOf("\n", k);
           if (noRegexUntil < 0) noRegexUntil = n;
         }
@@ -409,6 +415,7 @@ function lexJsx(content, strings = null) {
         pos = Math.max(STR.js[ch](content, k), k + 1);
         prev = '"'; tail = "";
         if (strings && ch !== "`") strings.push([k, pos]);
+        if (literals) literals.push([k, pos]);
       }
       continue;
     }
@@ -431,6 +438,7 @@ function lexJsx(content, strings = null) {
         let e = content.indexOf(c, j + 1);
         e = e < 0 ? n : e + 1;
         if (strings) strings.push([j, e]);
+        if (literals) literals.push([j, e]);
         pos = e;
         continue;
       }
@@ -479,13 +487,16 @@ export function lineStarts(content) {
  *   spans.get(i) — comment spans of line i, relative to the line;
  *   code[i]   — line i with its comment text removed (strings kept);
  *   strings   — absolute spans of '…' / "…" literals (JavaScript only);
+ *   literals  — with `literals: true`, absolute spans of every literal
+ *               (JavaScript and Python; see commentSpans), else null;
  *   starts    — line start offsets in the joined content.
  * jsx: false for a .ts file (see jsxReading).
  */
-export function lexLines(lines, lang, content = null, { jsx = true } = {}) {
+export function lexLines(lines, lang, content = null, { jsx = true, literals = false } = {}) {
   content ??= lines.join("\n");
   const strings = lang === "js" ? [] : null;
-  const all = commentSpans(content, lang, strings, { jsx });
+  const lits = literals && (lang === "js" || lang === "py") ? [] : null;
+  const all = commentSpans(content, lang, strings, { jsx, literals: lits });
   const n = lines.length;
   const comment = new Uint8Array(n);
   const spans = new Map();
@@ -521,7 +532,7 @@ export function lexLines(lines, lang, content = null, { jsx = true } = {}) {
     while (lo < hi) { const mid = (lo + hi) >> 1; if (list[mid][1] <= p) lo = mid + 1; else hi = mid; }
     return lo < list.length && list[lo][0] <= p;
   };
-  return { comment, spans, code, strings, starts, content, inComment };
+  return { comment, spans, code, strings, literals: lits, starts, content, inComment };
 }
 
 /**

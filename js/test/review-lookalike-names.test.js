@@ -4,7 +4,9 @@
 // invisible U+200C / U+200D, or with NFKC compatibility forms) reads as a name
 // it is not: CRITICAL when that is a code-execution or network name, or
 // another name in the file; MAJOR when it mixes ASCII letters with
-// look-alikes. Every such character here is written as an escape.
+// look-alikes. Names are read where the lexer reads code: not in comments,
+// strings or regex literals (FileCtx.namesCode). Every such character here is
+// written as an escape.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -40,4 +42,27 @@ test("what is not a look-alike name", () => {
     ["js", "const caf\u00e9 = 1;\n"], ["js", "const \u0430 = 1;\n"],
   ]) assert.deepEqual(found(text, lang), [], text);
   assert.deepEqual(found("\u0435val(x); // nosec\n"), [["CRITICAL", 1, EVAL_MSG]]);   // never suppressed
+});
+
+test("a regex literal holds no names", () => {
+  for (const text of [
+    "var re = /^(?:(?:http[s\\u017F]?|ftp):\\/\\/)/i;\n",                          // ajv
+    "const ok = /^[a-zA-Z\u0430-\u044f\u0410-\u042f\u0451\u0401]+$/.test(s);\n",
+    "const m = s.match(/^(\\d+)[\u00ba\u00aao]?/i);\n",                              // date-fns pt-BR
+    "if (ok) {}\n/[a\u0441]/.test(s);\n",
+  ]) assert.deepEqual(found(text), [], text);
+  // a '/' the lexer reads as division starts no regex literal
+  assert.deepEqual(found("const r = a / v\u0430lue / 2;\n"),
+    [["MAJOR", 1, "'v\u0430lue' reads as 'value' but is spelled with U+0430 for 'a'."]]);
+});
+
+test("a string is read by the lexer", () => {
+  // a string's other lines (a docstring, a template, a string continued with a
+  // backslash); a template or f-string is one literal, its fields too
+  for (const [lang, text] of [["py", 'def f():\n    """\n    v\u0430lue \u0435val(x)\n    """\n'],
+    ["js", "const t = `\n  v\u0430lue ${\u0435val(x)}\n`;\n"], ["js", 'const s = "a\\\n\u0435val";\n'],
+    ["py", "x = f'{\u0435val(p)}'\n"]]) assert.deepEqual(found(text, lang), [], text);
+  // a quote escaped in a string ends nothing
+  for (const [lang, text] of [["js", "const s = 'it\\'s' + \u0435val(x) + 'y';\n"],
+    ["py", "s = 'it\\'s' + \u0435val(x) + 'y'\n"]]) assert.deepEqual(found(text, lang), [["CRITICAL", 1, EVAL_MSG]], text);
 });

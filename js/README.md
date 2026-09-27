@@ -75,7 +75,7 @@ resolving to one file. Writes are atomic
   letters from another alphabet (`\u0435val`, a Cyrillic e), an invisible
   U+200C/U+200D or a fullwidth letter, that reads as an ASCII name it is not,
   is `SC-HOMOGLYPH` (CRITICAL when it reads as eval, require & co. or another
-  name in the file).
+  name in the file; names in comments, strings and regex literals do not count).
 - **Quality**: function length/complexity, duplication, empty catches, and
   the rest of the code-smell set.
 

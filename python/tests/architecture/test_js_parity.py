@@ -193,6 +193,10 @@ ADVERSARIAL = {
     "uni/lookalike.js": "const \u0435val = eval;\n\u0435val(x);\nif (isAdm\u0456n) {}\nconst isAdmin = 1;\nconst v\u0430lue = 2;\neva\u200dl(y);\n",
     "uni/lookalike.py": "\u0435val = eval\n\u0435val(input())\n",
     "node_modules/evil/lookalike.js": "\uff45val(atob(p));\n",
+    # ... read where the lexer reads code: a regex literal's text and escapes, a docstring are not names
+    "uni/literals.js": ("var re = /^(?:(?:http[s\\u017F]?|ftp):\\/\\/)/i;\nconst ok = /^[a-z\u0430-\u044f]+$/.test(s);\n"
+                        "const s = 'it\\'s' + \u0435val(x) + 'y';\nconst t = `\n  v\u0430lue\n`;\n"),
+    "uni/literals.py": 'def f():\n    """\n    v\u0430lue\n    """\n    return \u0435val(x)\n',
 }
 
 
@@ -383,6 +387,9 @@ class EngineParityTests(unittest.TestCase):
                                  ("SC-HOMOGLYPH", "uni/lookalike.py")):
                         self.assertIn(want, found)
                     self.assertEqual(("SC-HOMOGLYPH", "node_modules/evil/lookalike.js") in found, label == "--deps")
+                    self.assertEqual(sorted((i["file"].replace("\\", "/"), i["line"]) for i in js[1]["issues"]
+                                            if i["rule"] == "SC-HOMOGLYPH" and "/literals." in i["file"].replace("\\", "/")),
+                                     [("uni/literals.js", 3), ("uni/literals.py", 5)])
                     self.assertIn(("SC-PIPE-SHELL", "bin/helper.js"), found)
                     self.assertIn(("SC-PIPE-SHELL", "tools/fetch.py"), found)
                     self.assertEqual(("SC-IMPORT-RISK", "node_modules/evil/fetch.js") in found, label == "--deps")

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-jcipwVp/Ngy9PrL++jvW+KXzThUXQa45BkIdivFxo9g='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-Mjpj5ZkDHSd8C+IRlyP/1LKUmKHZ4WJnRQFoc5jBjo4='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
 <title>Lazaret — Security &amp; Quality Review</title>
 <style>
   :root{
@@ -2237,7 +2237,8 @@ function neutralize(text, lang, suffix) {
 // comment only if BOTH readings of its language say so, so code some runtime
 // executes is never hidden as a comment and a string never passes for a
 // comment holding a suppression marker. Each file is lexed twice and the
-// comment spans (for JavaScript also the '…' "…" string spans) intersected:
+// comment spans (for JavaScript also the '…' "…" string spans; for
+// SC-HOMOGLYPH every literal's span) intersected:
 //   py : the lexer below, and again with f-strings (and t-strings) as Python
 //        3.12+ reads them (PEP 701): a replacement field may hold strings in
 //        the same quotes, comments and newlines; nothing in an f-string is a
@@ -2384,7 +2385,7 @@ function intersectSpans(a, b) {
   return out;
 }
 
-/** Is a JavaScript-family file also read as JSX? Every one but .ts (core.jsx_reading). */
+/** Is a JavaScript-family file also read as JSX? Every one but .ts, .mts and .cts (core.jsx_reading). */
 function jsxReading(path) {
   const p = String(path ?? "").toLowerCase();
   return !(p.endsWith(".ts") || p.endsWith(".mts") || p.endsWith(".cts"));
@@ -2393,21 +2394,25 @@ function jsxReading(path) {
 /**
  * Absolute [start, end) spans of every comment in `content`: the spans both
  * readings of the language agree on. When `strings` is an array, the '…' /
- * "…" literal spans both JavaScript readings agree on are appended to it.
+ * "…" literal spans both JavaScript readings agree on are appended to it;
+ * when `literals` is, the spans of every literal both readings agree on:
+ * strings of any kind (f-strings, templates) and regex literals.
  * jsx: false for a .ts file (no JSX reading).
  */
-function commentSpans(content, lang, strings = null, { jsx = true } = {}) {
+function commentSpans(content, lang, strings = null, { jsx = true, literals = null } = {}) {
   const L = lang === "py" || lang === "js" || lang === "sql" ? lang : "any";
-  if (L === "any" || (L === "js" && !jsx)) return lexPass(content, L, strings);
+  if (L === "any" || (L === "js" && !jsx)) return lexPass(content, L, strings, false, literals);
   const sa = strings ? [] : null, sb = strings ? [] : null;
-  const a = lexPass(content, L, sa);
-  const b = L === "js" ? lexJsx(content, sb) : lexPass(content, L, sb, true);
+  const la = literals ? [] : null, lb = literals ? [] : null;
+  const a = lexPass(content, L, sa, false, la);
+  const b = L === "js" ? lexJsx(content, sb, lb) : lexPass(content, L, sb, true, lb);
   if (strings) for (const s of intersectSpans(sa, sb)) strings.push(s);
+  if (literals) for (const s of intersectSpans(la, lb)) literals.push(s);
   return intersectSpans(a, b);
 }
 
 /** One reading: the lexer above, or with `second` the other reading of Python (PEP 701) or SQL (MySQL). */
-function lexPass(content, L, strings = null, second = false) {
+function lexPass(content, L, strings = null, second = false, literals = null) {
   const mysql = second && L === "sql";
   const fstrings = second && L === "py";
   const next = mysql ? MYSQL_NEXT : NEXT[L];
@@ -2447,7 +2452,7 @@ function lexPass(content, L, strings = null, second = false) {
     if (ch === "/") {                          // js only: regex literal or division
       if (k >= noRegexUntil && jsRegexAllowed(prev, tail)) {
         const e = jsRegexEnd(content, k);
-        if (e >= 0) { pos = e; prev = '"'; tail = ""; continue; }
+        if (e >= 0) { pos = e; prev = '"'; tail = ""; if (literals) literals.push([k, e]); continue; }
         noRegexUntil = content.indexOf("\n", k);
         if (noRegexUntil < 0) noRegexUntil = n;
       }
@@ -2457,12 +2462,13 @@ function lexPass(content, L, strings = null, second = false) {
     }
     if (fstrings) {
       const [isF, raw] = pyFstringPrefix(content, k);
-      if (isF) { pos = pyFstringEnd(content, k, raw); continue; }
+      if (isF) { pos = pyFstringEnd(content, k, raw); if (literals) literals.push([k, pos]); continue; }
     }
     const end = mysql ? MYSQL_STR[ch] : STR[L][L === "py" && content.startsWith(ch + ch + ch, k) ? ch + ch + ch : ch];
     pos = Math.max(end(content, k), k + 1);
     prev = '"'; tail = "";
     if (strings && ch !== "`") strings.push([k, pos]);
+    if (literals) literals.push([k, pos]);
   }
   return spans;
 }
@@ -2571,7 +2577,7 @@ function jsxTagAt(s, j) {
   return j < s.length && (s[j] === ">" || jsxNameStart(s.charCodeAt(j))) ? j : -1;
 }
 
-function lexJsx(content, strings = null) {
+function lexJsx(content, strings = null, literals = null) {
   const spans = [];
   const n = content.length;
   let pos = 0, prev = "", tail = "", noRegexUntil = -1;
@@ -2608,7 +2614,7 @@ function lexJsx(content, strings = null) {
         pos = k + 1;
         if (k >= noRegexUntil && jsRegexAllowed(prev, tail)) {
           const e = jsRegexEnd(content, k);
-          if (e >= 0) { pos = e; prev = '"'; tail = ""; continue; }
+          if (e >= 0) { pos = e; prev = '"'; tail = ""; if (literals) literals.push([k, e]); continue; }
           noRegexUntil = content.indexOf("\n", k);
           if (noRegexUntil < 0) noRegexUntil = n;
         }
@@ -2635,6 +2641,7 @@ function lexJsx(content, strings = null) {
         pos = Math.max(STR.js[ch](content, k), k + 1);
         prev = '"'; tail = "";
         if (strings && ch !== "`") strings.push([k, pos]);
+        if (literals) literals.push([k, pos]);
       }
       continue;
     }
@@ -2657,6 +2664,7 @@ function lexJsx(content, strings = null) {
         let e = content.indexOf(c, j + 1);
         e = e < 0 ? n : e + 1;
         if (strings) strings.push([j, e]);
+        if (literals) literals.push([j, e]);
         pos = e;
         continue;
       }
@@ -2705,13 +2713,16 @@ function lineStarts(content) {
  *   spans.get(i) — comment spans of line i, relative to the line;
  *   code[i]   — line i with its comment text removed (strings kept);
  *   strings   — absolute spans of '…' / "…" literals (JavaScript only);
+ *   literals  — with `literals: true`, absolute spans of every literal
+ *               (JavaScript and Python; see commentSpans), else null;
  *   starts    — line start offsets in the joined content.
  * jsx: false for a .ts file (see jsxReading).
  */
-function lexLines(lines, lang, content = null, { jsx = true } = {}) {
+function lexLines(lines, lang, content = null, { jsx = true, literals = false } = {}) {
   content ??= lines.join("\n");
   const strings = lang === "js" ? [] : null;
-  const all = commentSpans(content, lang, strings, { jsx });
+  const lits = literals && (lang === "js" || lang === "py") ? [] : null;
+  const all = commentSpans(content, lang, strings, { jsx, literals: lits });
   const n = lines.length;
   const comment = new Uint8Array(n);
   const spans = new Map();
@@ -2747,7 +2758,7 @@ function lexLines(lines, lang, content = null, { jsx = true } = {}) {
     while (lo < hi) { const mid = (lo + hi) >> 1; if (list[mid][1] <= p) lo = mid + 1; else hi = mid; }
     return lo < list.length && list[lo][0] <= p;
   };
-  return { comment, spans, code, strings, starts, content, inComment };
+  return { comment, spans, code, strings, literals: lits, starts, content, inComment };
 }
 
 /* ======== scanner/engine.js ======== */
@@ -3280,12 +3291,13 @@ class FileCtx {
     this.lines = lines;
     this.lang = lang;
     this.content = content;
-    this.lex = lexLines(lines, lang, content, { jsx });
+    this.lex = lexLines(lines, lang, content, { jsx, literals: true });
     this.cmask = this.lex.comment;
     this.deadline = deadline;
     this._mlines = null;
     this._mcode = new Map();
     this._strStarts = null;
+    this._litEnds = null;
   }
   get mlines() {
     if (this._mlines === null) {
@@ -3307,9 +3319,38 @@ class FileCtx {
     }
     return v;
   }
-  jsText(i, dropComments) {
+  /**
+   * Line i as names are read in it (SC-HOMOGLYPH; core._FileCtx.names_code):
+   * its match text with its comments removed and every literal blanked, by
+   * the spans both readings of the file agree on: strings of any kind (a
+   * template with its fields), regex literals.
+   */
+  namesCode(i) {
+    const lits = this.lex.literals;
+    if (!lits) return this.mcode(i);
     const line = this.lines[i];
-    const plain = dropComments ? this.lex.code[i] : line;
+    this._litEnds ??= lits.map((s) => s[1]);
+    const base = this.lex.starts[i], end = base + line.length;
+    let k = upperBound(this._litEnds, base);         // the first literal ending after base
+    let out = "", p = 0, any = false;
+    for (; k < lits.length && lits[k][0] < end; k++) {
+      const a = Math.max(lits[k][0], base) - base, b = Math.min(lits[k][1], end) - base;
+      out += line.slice(p, a) + " ".repeat(b - a);
+      p = b;
+      any = true;
+    }
+    if (!any) return this.mcode(i);
+    out += line.slice(p);
+    if (this.lang === "js") return this.jsText(i, true, out);
+    return pyMatchText(cutSpans(out, this.lex.spans.get(i)));
+  }
+  /** Line i's match text; `line`: line i with some of its text blanked (the same length) to read instead. */
+  jsText(i, dropComments, line = null) {
+    let plain;
+    if (line === null) {
+      line = this.lines[i];
+      plain = dropComments ? this.lex.code[i] : line;
+    } else plain = dropComments ? cutSpans(line, this.lex.spans.get(i)) : line;
     if (!line.includes("\\u")) return plain.includes("\ufeff") ? plain.replaceAll("\ufeff", " ") : plain;
     if (this._strStarts === null) this._strStarts = this.lex.strings.map((s) => s[0]);
     const base = this.lex.starts[i];
@@ -3346,6 +3387,13 @@ class FileCtx {
   checkTime() {
     if (Date.now() > this.deadline) throw new ScanBudgetExceeded();
   }
+}
+/** `line` without the text of `spans` (sorted, disjoint, relative to it); core._cut_spans. */
+function cutSpans(line, spans) {
+  if (!spans || !spans.length) return line;
+  let c = "", p = 0;
+  for (const [a, b] of spans) { c += line.slice(p, a); p = b; }
+  return c + line.slice(p);
 }
 function upperBound(a, x) {
   let lo = 0, hi = a.length;
@@ -3466,14 +3514,13 @@ const ASCII_WORD_RE = /[A-Za-z0-9_$]+/g;
 const ASCII_LETTER_RE = /[A-Za-z]/;
 const INVISIBLE_IN_NAMES = new Set(["\u200c", "\u200d"]);
 const isAscii = (s) => !/[^\x00-\x7f]/.test(s);
-/** `code` with the contents of its string literals replaced by spaces (core._blank_strings). */
-const blankStrings = (code) => code.replace(STRING_LIT_RE, (s) => s[0] + " ".repeat(s.length - 2) + s[s.length - 1]);
 const hexCp = (ch) => ch.codePointAt(0).toString(16).toUpperCase().padStart(4, "0");
 
 /**
  * [name, readsAs, severity, other, detail, column] for the first name in
- * `code` (comments removed, strings blanked) that reads as an ASCII name it
- * is not, else null. `words()` gives the file's ASCII words.
+ * `code` (a line as FileCtx.namesCode reads it: comments removed, literals
+ * blanked) that reads as an ASCII name it is not, else null. `words()` gives
+ * the file's ASCII words.
  */
 function lookalikeName(code, lang, words) {
   if (isAscii(code)) return null;
@@ -3481,7 +3528,7 @@ function lookalikeName(code, lang, words) {
   let m;
   while ((m = NAME_RUN_RE.exec(code))) {
     const name = m[0];
-    if (isAscii(name) || (m.index && code[m.index - 1] === "\\")) continue;   // an escape a regex literal kept
+    if (isAscii(name) || (m.index && code[m.index - 1] === "\\")) continue;   // after an escape left as written
     const seen = lang === "js" ? name.normalize("NFKC") : name;
     let skeleton = "";
     for (const ch of seen) if (!INVISIBLE_IN_NAMES.has(ch)) skeleton += LOOKALIKES.get(ch) ?? ch;
@@ -3776,7 +3823,7 @@ function scanLines(path, content, lines, lang, ctx, issues) {
     if ((lang === "js" || lang === "py") && !cmask[i]) {
       const code = ctx.mcode(i);
       if (!isAscii(code)) {
-        const found = lookalikeName(blankStrings(code), lang, words);
+        const found = lookalikeName(ctx.namesCode(i), lang, words);
         if (found) issues.push(lookalikeIssue(found, path, i + 1, lines));
       }
       if (runsDownloadThroughShell(code))       // (the page scans no dependencies)
