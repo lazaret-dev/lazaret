@@ -32,9 +32,10 @@ lexer/regex heuristic (no JS parser available without dependencies), so JS
 results are best-effort: a call binds to the function its file names through
 relative require()/import, a call it cannot resolve may reach any function
 of that name, functions are summarized by the parameters that reach a sink
-and by what they return, and each file's work is bounded (see "modules,
-calls and returned values"). The npm engine carries a twin of the JavaScript
-half (js/src/scanner/flow.js).
+(directly or through the locals that hold them) and by what they return,
+and each file's work is bounded (see "modules, calls and returned values"
+and "values through local variables"). The npm engine carries a twin of the
+JavaScript half (js/src/scanner/flow.js).
 
 Public entry point: analyze(files) -> list[issue dict] (never raises)
   files: iterable of {"path": str, "content": str, "lang": "py"|"js"}
@@ -1789,14 +1790,23 @@ def _js_neutralize(text, cats):
     return text
 
 
+_JS_PARAM_RES = {}      # (name, sql) -> its compiled pattern (re's own cache holds 512)
+
+
 def _js_param_dangerous(seg, p, cat):
     """Does parameter p reach the sink in a dangerous way within seg?"""
-    pe = re.escape(p)
-    if cat == "SQL injection":
-        # safe if p only appears inside a placeholder array, e.g. query(sql, [p]);
-        # dangerous only when concatenated or interpolated into the query string
-        return bool(re.search(r"\+\s*%s\b|\b%s\s*\+|`[^`]*\$\{[^}]*\b%s\b" % (pe, pe, pe), seg))
-    return re.search(r"\b%s\b" % pe, seg) is not None
+    sql = cat == "SQL injection"
+    rx = _JS_PARAM_RES.get((p, sql))
+    if rx is None:
+        pe = re.escape(p)
+        # SQL: safe if p only appears inside a placeholder array, e.g.
+        # query(sql, [p]); dangerous only when concatenated or interpolated
+        # into the query string
+        rx = re.compile(r"\+\s*%s\b|\b%s\s*\+|`[^`]*\$\{[^}]*\b%s\b" % (pe, pe, pe) if sql else r"\b%s\b" % pe)
+        if len(_JS_PARAM_RES) > 4096:
+            _JS_PARAM_RES.clear()
+        _JS_PARAM_RES[(p, sql)] = rx
+    return rx.search(seg) is not None
 
 
 def _js_text(content):
@@ -1865,9 +1875,11 @@ _JS_MAX_OPEN = 4         # an open call's functions checked at a call site (more
 _JS_MAX_OPEN_EDGES = 8   # an open call orders the fixpoint after its functions when there are this few
 _JS_SCOPE_WALK = 64      # enclosing scopes searched for the declaration of an assigned name
 _JS_MAX_ALIAS = 16       # names assigned to one name that a call through it follows
+_JS_MAX_CARRY = 64       # parameters one value is followed for (the first ones found)
 _JS_ALL = "*"            # in a set of clean categories: no argument reaches the value at all
 _JS_UNIVERSE = frozenset(SINK_META) | {_JS_ALL}
 _JS_EMPTY_NODE = ((), False, (), False)
+_JS_NO_PARAMS = ({}, {})                    # param_map() of the module: no parameters (never written)
 _JS_OPAQUE_NODE = ((), False, (), True)     # an expression not read: never free of data
 _JS_LITERAL_WORDS = frozenset(("true", "false", "null", "undefined", "NaN", "Infinity", "void"))
 _JS_NOT_ALIAS = _JS_LITERAL_WORDS | {"this", "super", "arguments"}
@@ -1912,10 +1924,12 @@ _JS_FUNCTION_HEAD_RE = re.compile(
     r"(?:async\s*)?(?:function(?![\w$])\s*\*?\s*(?:[A-Za-z_$][\w$]*\s*)?(?=\()"
     r"|(\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>)")
 _JS_ASSIGN_OP = r"(?:[-+*/%&|^]|\*\*|<<|>>>?|&&|\|\||\?\?)?="
-# `const a = …`, and `a = …` / `a += …` starting a statement (after ; { or a newline)
+# `const a = …`, and `a = …` / `a += …` starting a statement (after ; { or a
+# newline, or a body without braces: `if (c) a += …`, `else a = …`, `=> a = …`)
 _JS_ASSIGN_RE = re.compile(
     r"(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([^;\n]+)"
-    r"|(?:^|[;{\n]\s*)([A-Za-z_$][\w$]*)\s*" + _JS_ASSIGN_OP + r"(?![=>])\s*([^;\n]+)")
+    r"|(?:^|[;{\n]\s*|\)[ \t]*|=>[ \t]*|(?<![\w$.])else\s+)([A-Za-z_$][\w$]*)\s*"
+    + _JS_ASSIGN_OP + r"(?![=>])\s*([^;\n]+)")
 # any assignment to a name, anywhere (declarations with a value included)
 _JS_WRITE_RE = re.compile(r"(?<![\w$.])([A-Za-z_$][\w$]*)\s*" + _JS_ASSIGN_OP + r"(?![=>])")
 _JS_WORD_RE = re.compile(r"[A-Za-z_$][\w$]*")
@@ -1958,6 +1972,17 @@ _JS_EXPORTS_PROP_RE = re.compile(
     r"\s*\.\s*([A-Za-z_$][\w$]*)\s*=(?!=)\s*(?:"
     r"(?:async\s+)?function(?![\w$])\s*\*?\s*([A-Za-z_$][\w$]*)\s*\("
     r"|([A-Za-z_$][\w$]*)[ \t]*(?![^;,}\n]))")
+# names bound other than by `name = …` (_js_other_bindings): `const { a, b: c } = v`
+# / `let [x] = v`, `for (const x of v)` / `for (let [k, w] of v)` / `for (var k in v)`,
+# and `list.push(v)` / `list.unshift(v)`
+_JS_PATTERN_DECL_RE = re.compile(r"(?:const|let|var)" + _JS_NOT_AFTER + r"(?![\w$])\s*([\[{])")
+_JS_PATTERN_VALUE_RE = re.compile(r"\s*=(?![=>])\s*([^;\n]+)")
+_JS_FOR_HEAD_RE = re.compile(
+    r"for(?<![\w$.]for)\s*(\()\s*(?:const|let|var)(?![\w$])\s*(?:([A-Za-z_$][\w$]*)(?![\w$])|([\[{]))")
+_JS_OF_RE = re.compile(r"\s*(?:of|in)(?![\w$])\s*")
+_JS_PUSH_RE = re.compile(r"(?<![\w$.])([A-Za-z_$][\w$]*)\s*\.\s*(?:push|unshift)\s*\(")
+# joining strings (_js_joins): a `+`, a `${` (in a template literal no tag reads), .join( / .concat(
+_JS_JOIN_RE = re.compile(r"\+(?![+=])|\$\{|\.\s*(?:join|concat)\s*\(")
 # one item of `{ a, b: c = 1 }` (destructuring, an object literal) or `{ a, b as c }`
 _JS_BIND_ITEM_RE = re.compile(r"\A([A-Za-z_$][\w$]*)(?:\s*:\s*([A-Za-z_$][\w$]*))?(?:\s*=[^,]*)?\Z")
 _JS_AS_ITEM_RE = re.compile(r"\A(type\s+)?([A-Za-z_$][\w$]*)(?:\s+as\s+([A-Za-z_$][\w$]*))?\Z")
@@ -2265,6 +2290,158 @@ def _js_binding_names(code, a, b, pairs, statement=False):
     return out
 
 
+# ---- values through local variables (review follow-up) ----
+# A parameter used to reach a sink only where its own name was written in
+# the sink's arguments: `const q = "SELECT …" + id; db.query(q)` was not a
+# flow, and `const { id } = req.body` carried nothing to a call. Now:
+#   * a parameter reaches a sink through the locals of its function (and of
+#     the functions inside it) that hold it: param_map() gives, per scope,
+#     the parameters each name may hold — a scope's own assignments (in
+#     source order) on top of its enclosing scope's names, less the names it
+#     declares itself — and carry() reads an expression against it the way
+#     run() reads request data: sanitizer calls clear their categories, a
+#     definite call keeps its arguments unless no return of it can hold them;
+#   * names are bound by `name = …` (also after `if (…)`, `else` and `=>`
+#     without braces), by patterns (`const { a, b: c } = v`, `let [x] = v`),
+#     by `for (const x of v)` / `for (k in v)` heads, and `list.push(v)`
+#     adds v to list (_js_other_bindings) — for request data as well;
+#   * SQL: the parameter must be joined into the query text — a `+`, a `${…}`
+#     in a template no tag reads, `.join()`, `.concat()`, `+=` (_js_joins) —
+#     in a local's value on the way or in the sink's first argument; the
+#     other arguments are bound, a query passed through whole is the
+#     caller's, and sql`…${x}` is the tag's to quote;
+#   * a pattern parameter (`function f({ id })`) binds its names to its
+#     argument, and parameters come from the whole list (_js_header_params);
+#   * bounds: a value holds at most _JS_MAX_CARRY parameters, a scope that
+#     adds or hides nothing shares its enclosing scope's maps, and copying
+#     maps and reading sinks for locals come out of the file's budget.
+def _js_header_params(code, head, stop, pairs):
+    """[(key, names)] of each parameter of the function whose header spans
+    head, read from its whole parameter list (`(a = f(1, 2), { b, c: d })`
+    is two parameters) when the list closes before stop, else None. key is
+    the name a use spells (_js_param_name), or "{i}" for the i-th parameter
+    when it is a pattern; names are the names it binds."""
+    o = code.find("(", head[0], head[1])
+    if o < 0:
+        return None
+    c = pairs.get(o)
+    if c is None or c >= stop:
+        return None
+    out = []
+    for i, (a, b) in enumerate(_js_split_spans(code, o + 1, c, pairs)):
+        if a < b and code[a] in "[{":
+            out.append(("{%d}" % i, _js_binding_names(code, a, b, pairs)))
+        else:
+            name = _js_param_name(code[a:b])
+            out.append((name, [name] if name else []))
+    return out
+
+
+def _js_other_bindings(code, pairs):
+    """(name, value start, value stop, offset, bare) of each name bound other
+    than by `name = …`: the names of a `const { a, b: c } = v` / `let [x] = v`
+    pattern and of a `for (const x of v)` / `for (let [k, w] of v)` / `for
+    (var k in v)` head, each assigned v; `list.push(v)` / `list.unshift(v)`
+    assign v to list, adding to what it holds (bare). A region (from its
+    offset to the end of its value) starting inside an earlier one is
+    dropped before it is read, so what they read stays linear, like the
+    assignments'."""
+    cands = [(m.start(1), 0, m) for m in _JS_PATTERN_DECL_RE.finditer(code)]
+    cands += [(m.start(2) if m.group(2) else m.start(3), 1, m) for m in _JS_FOR_HEAD_RE.finditer(code)]
+    cands += [(m.start(1), 2, m) for m in _JS_PUSH_RE.finditer(code)]
+    cands.sort(key=lambda t: (t[0], t[1]))
+    out, end = [], -1
+    for off, kind, m in cands:
+        if off < end:
+            continue
+        if kind == 0:                                   # const { a } = v
+            c = pairs.get(off)
+            if c is None:
+                continue
+            vm = _JS_PATTERN_VALUE_RE.match(code, c + 1)
+            if vm is None:
+                continue
+            names, (a, b), bare = _js_binding_names(code, off, c + 1, pairs), vm.span(1), False
+        elif kind == 1:                                 # for (const x of v)
+            close = pairs.get(m.start(1))
+            if close is None:
+                continue
+            if m.group(2):
+                names, k = [m.group(2)], m.end(2)
+            else:
+                c = pairs.get(off)
+                if c is None or c >= close:
+                    continue
+                names, k = _js_binding_names(code, off, c + 1, pairs), c + 1
+            om = _JS_OF_RE.match(code, k, close)
+            if om is None:
+                continue
+            (a, b), bare = _js_trim(code, om.end(), close), False
+        else:                                           # list.push(v)
+            paren = m.end() - 1
+            close = pairs.get(paren)
+            if close is None:
+                continue
+            names, (a, b), bare = [m.group(1)], _js_trim(code, paren + 1, close), True
+        if a >= b:
+            continue
+        end = b
+        for name in names:
+            out.append((name, a, b, off, bare))
+    return out
+
+
+def _js_joins(code, a, b):
+    """Does the expression code[a:b] (masked) join strings: a binary `+`, a
+    `${…}` in a template literal no tag function reads (sql`…${x}` is the
+    tag's to quote), `.join(…)` or `.concat(…)`?"""
+    for m in _JS_JOIN_RE.finditer(code, a, b):
+        i = m.start()
+        ch = code[i]
+        if ch == ".":
+            return True
+        if ch == "+":
+            if i > a and code[i - 1] == "+":
+                continue                                    # `++`
+            p = _js_back(code, i, a)
+            if p >= a and (code[p] in ")]'\"`" or _JS_IDCHAR_RE.match(code[p])):
+                return True                                 # after a value: not a unary +
+            continue
+        t = code.rfind("`", a, i)                           # the template's opening quote
+        if t < 0:
+            return True
+        p = _js_back(code, t, a)
+        if p >= a and (code[p] in ")]" or (_JS_IDCHAR_RE.match(code[p])
+                                           and _js_word_before(code, p, a)[1] not in _JS_REGEX_KEYWORDS)):
+            continue                                        # a tagged template
+        return True
+    return False
+
+
+def _js_member(text, i):
+    """Is the word at text[i] a property name (`a.b`, `a?.b`) rather than a
+    variable (`...b` is one)?"""
+    p = _js_back(text, i)
+    return p >= 0 and text[p] == "." and not (p >= 1 and text[p - 1] == ".")
+
+
+def _js_plus_assign(code, a):
+    """Is the assignment whose value starts at a a `+=`?"""
+    k = _js_back(code, a)
+    return k >= 1 and code[k] == "=" and code[k - 1] == "+"
+
+
+def _js_carry_add(out, pid, built, clean):
+    """Add a path of parameter pid to out {pid: (built, clean)}: built if any
+    path joined it into a string, clean for what every path sanitized. A
+    value holds at most _JS_MAX_CARRY parameters (the first ones added)."""
+    prev = out.get(pid)
+    if prev is not None:
+        out[pid] = (prev[0] or built, prev[1] & clean)
+    elif len(out) < _JS_MAX_CARRY:
+        out[pid] = (built, clean)
+
+
 def _js_node_merge(a, b):
     """One compiled expression for two read together."""
     return a[0] + b[0], a[1] or b[1], a[2] + b[2], a[3] or b[3]
@@ -2290,10 +2467,22 @@ class _JsFile:
         self.writes = {}     # name -> offsets of the assignments to it (declarations included)
         for m in _JS_WRITE_RE.finditer(code):
             self.writes.setdefault(m.group(1), []).append(m.start(1))
-        # (name, value start, value stop, offset, bare) of each assignment
-        self.assigns = [(am.group(1), am.start(2), am.end(2), am.start(1), False) if am.group(1)
-                        else (am.group(3), am.start(4), am.end(4), am.start(3), True)
-                        for am in _JS_ASSIGN_RE.finditer(code)]
+        # (name, value start, value stop, offset, bare) of each assignment, in
+        # source order: `name = …`, then the names bound another way
+        # (patterns, for … of / in heads, push), which are no aliases
+        plain = [(am.group(1), am.start(2), am.end(2), am.start(1), False) if am.group(1)
+                 else (am.group(3), am.start(4), am.end(4), am.start(3), True)
+                 for am in _JS_ASSIGN_RE.finditer(code)]
+        other = _js_other_bindings(code, self.pairs)
+        tagged = sorted([(r[3], 0, r) for r in plain] + [(r[3], 1, r) for r in other],
+                        key=lambda t: (t[0], t[1]))
+        self.assigns = [t[2] for t in tagged]
+        self.other = frozenset(k for k, t in enumerate(tagged) if t[1])
+        # per assignment: does its value join strings (or is it `+=`); is it `+=`
+        self.plus = [bare and k not in self.other and _js_plus_assign(code, a)
+                     for k, (_, a, _, _, bare) in enumerate(self.assigns)]
+        self.joins = [self.plus[k] or _js_joins(code, a, b)
+                      for k, (_, a, b, _, _) in enumerate(self.assigns)]
         self.targets = frozenset(a[0] for a in self.assigns)
         self.alias = {}      # name -> (name assigned to it, assignment number) (`go = runIt`)
         self.const_alias = set()   # names only ever `const x = y`: a call through x is one through y
@@ -2301,6 +2490,7 @@ class _JsFile:
         self.assign_nodes = []
         self.tainted = {}    # variable -> provenance, file-wide (the call-site pass)
         self.fns = []        # fids of the functions defined here
+        self.scope_fns = {}  # scope -> fids of the functions whose body it is
         self.defs = {}       # name -> fids of the functions of that name defined here
         self.defs_at = {}    # (name, scope defining it) -> fid of the last one defined there
         self.heads = {}      # name -> [(start, stop)] of the headers defining one
@@ -2420,7 +2610,9 @@ class _JsFile:
         self._unbind()
         for _ in range(4):
             grew = False
-            for name, a, b, _, _ in self.assigns:
+            for k, (name, a, b, _, _) in enumerate(self.assigns):
+                if k in self.other:
+                    continue
                 m = _JS_ALIAS_RE.fullmatch(code[a:b].strip())
                 if m is None:
                     continue
@@ -2447,7 +2639,7 @@ class _JsFile:
         # any other name assigned a name (`go = runIt`): a call through the
         # same binding may reach that one's functions too
         for k, (name, a, b, _, bare) in enumerate(self.assigns):
-            if name in self.mods or name in self.named:
+            if k in self.other or name in self.mods or name in self.named:
                 continue
             m = _JS_ALIAS_RE.fullmatch(code[a:b].strip())
             if m is None or m.group(2) is not None or m.group(1) == name or m.group(1) in _JS_NOT_ALIAS:
@@ -2506,6 +2698,7 @@ class _JsFunction:
         self.fid, self.rec, self.name, self.params, self.span = fid, rec, name, params, span
         self.expr = expr          # an arrow function whose body is an expression
         self.head = head          # (start, stop) of its header
+        self.pnames = [[p] if p else [] for p in params]   # per parameter: the names it binds
         self.reach = {}           # param -> (category, sink line)
         self.returns = []         # (start, end, line) of each returned expression
         self.return_nodes = []    # (compiled expression, line)
@@ -2523,11 +2716,7 @@ class _JsProgram:
         self.by_name = {}         # name -> fids of the functions of that name, the last defined first
         for fn in reversed(funcs):
             self.by_name.setdefault(fn.name, []).append(fn.fid)
-        self.reach_named = {}     # name -> those with a parameter that reaches a sink
-        for name, fids in self.by_name.items():
-            reach = [fid for fid in fids if funcs[fid].reach]
-            if reach:
-                self.reach_named[name] = reach
+        self.reach_named = {}     # name -> those with a parameter that reaches a sink (index_reach)
         self.clean = [frozenset()] * len(funcs)   # fid -> categories its value is free of its arguments for
         self.ret_src = {}         # fid -> (file, line, function) where the returned data is read
         self.ret_src_clean = {}   # fid -> categories every returned path of it is sanitized for
@@ -2777,8 +2966,9 @@ class _JsProgram:
         else:
             text = code[a:b]
         targets, words, opaque = rec.targets, [], False
-        for w in _JS_WORD_RE.findall(text):
-            if w in targets:
+        for wm in _JS_WORD_RE.finditer(text):
+            w = wm.group()
+            if w in targets and not _js_member(text, wm.start()):
                 words.append(w)
             if not opaque and w not in _JS_LITERAL_WORDS:
                 opaque = True
@@ -2997,6 +3187,94 @@ class _JsProgram:
                 return True
         return False
 
+    def index_reach(self):
+        """reach_named, once every function's reach is known."""
+        for name, fids in self.by_name.items():
+            reach = [fid for fid in fids if self.funcs[fid].reach]
+            if reach:
+                self.reach_named[name] = reach
+
+    # A parameter reaches a sink through its function's local variables too
+    # (`const q = "…" + p; db.query(q)`), read the way request data is:
+    # param_map() gives the parameters the names a scope sees may hold,
+    # carry() those an expression's value may hold.
+    def param_map(self, rec, k, cache):
+        """(parameters, locals) scope k of rec sees: name -> {(fid, index):
+        (built, clean)}, for the parameters of the functions around it. A
+        scope's parameters and its own assignments (a bare one belongs to the
+        scope declaring its name) come on top of its enclosing scope's, whose
+        names it declares itself hide. built: a path joined the parameter
+        into a string (_js_joins, `+=`); clean: the categories every path
+        sanitized. A scope that adds or hides nothing shares its enclosing
+        scope's maps; copying them is read within the file's budget (empty
+        maps once it is spent)."""
+        if rec.over:
+            return _JS_NO_PARAMS
+        chain = []
+        while k is not None and (rec.idx, k) not in cache:
+            chain.append(k)
+            k = rec.parent[k]
+        seeds, locs = cache[(rec.idx, k)] if k is not None else _JS_NO_PARAMS
+        for j in reversed(chain):
+            decl, fids, own = rec.decl[j], rec.scope_fns.get(j, ()), rec.own[j]
+            if not fids and not own and seeds.keys().isdisjoint(decl) and locs.keys().isdisjoint(decl):
+                cache[(rec.idx, j)] = (seeds, locs)
+                continue
+            cost = len(seeds) + len(locs) + 1
+            if cost > rec.budget:
+                rec.over = True
+                return _JS_NO_PARAMS
+            rec.budget -= cost
+            seeds = {n: v for n, v in seeds.items() if n not in decl}
+            locs = {n: v for n, v in locs.items() if n not in decl}
+            for fid in fids:
+                for i, names in enumerate(self.funcs[fid].pnames):
+                    for n in names:
+                        ent = dict(seeds.get(n, ()))
+                        ent[(fid, i)] = (False, frozenset())
+                        seeds[n] = ent
+            for a in own:
+                name = rec.assigns[a][0]
+                val = self.carry(rec.assign_nodes[a], seeds, locs)
+                old = locs.get(name)
+                plus = rec.plus[a]
+                if not val and not (plus and old):
+                    continue
+                ent = {pid: (bt or plus, cl) for pid, (bt, cl) in old.items()} if old else {}
+                joins = rec.joins[a]
+                for pid, (bt, cl) in val.items():
+                    _js_carry_add(ent, pid, bt or joins, cl)
+                locs[name] = ent
+            cache[(rec.idx, j)] = (seeds, locs)
+        return seeds, locs
+
+    def carry(self, node, seeds, locs):
+        """{(fid, index): (built, clean)}: the parameters a compiled
+        expression's value may hold — through the names seeds and locs map
+        (param_map), sanitizer calls (clean for their categories) and project
+        functions' values (their arguments, unless no return of the function
+        can hold them)."""
+        calls, _, words, _ = node
+        out = {}
+        for call in calls:
+            kind = call[0]
+            if kind == "san":
+                for pid, (bt, cl) in self.carry(call[2], seeds, locs).items():
+                    _js_carry_add(out, pid, bt, cl | call[1])
+            elif kind == "fn":
+                clean = frozenset() if call[3] else self.clean[call[1]]
+                if _JS_ALL not in clean:
+                    for arg in call[2]:
+                        for pid, (bt, cl) in self.carry(arg, seeds, locs).items():
+                            _js_carry_add(out, pid, bt, cl | clean)
+        for w in words:
+            for table in (seeds, locs):
+                ent = table.get(w)
+                if ent:
+                    for pid, (bt, cl) in ent.items():
+                        _js_carry_add(out, pid, bt, cl)
+        return out
+
 
 class _JsLayers:
     """Two variable maps read as one: the first's provenance where it has one."""
@@ -3129,6 +3407,78 @@ def _js_innermost(scopes, positions):
     return out
 
 
+def _js_sink_reach(prog, rec):
+    """fn.reach for the functions of rec: each parameter that reaches one of
+    their sinks, with the sink's category and line. A parameter reaches a
+    sink when a name it binds is written in the sink's arguments (for SQL,
+    joined into them: a placeholder array doesn't count), or when a local
+    the sink reads holds it (param_map; for SQL, in the query text — the
+    first argument — and joined into a string on the way or there). A later
+    sink kind's category wins; within one category the first sink call is
+    the one reported. The locals are read within the file's budget."""
+    funcs = prog.funcs
+    mine = [funcs[fid] for fid in rec.fns]
+    if not mine:
+        return
+    code, pairs, cache = rec.code, rec.pairs, {}
+    # Sink attribution, identical in effect to the old per-body finditer
+    # (which found exactly the matches inside each copied body — spans give
+    # the same set, including sinks inside nested closures). Each sink gets
+    # its OWN sweep: spans are walked in start order, become active when
+    # their start precedes the sink position and are retired when their end
+    # precedes it; sink positions advance monotonically within one sink's
+    # scan, so each span is appended once and removed once — linear per sink.
+    spans = [(fn.span[0], fn.span[1], k) for k, fn in enumerate(mine)]
+    for (cat, matches), where in zip(rec.sinks, rec.sink_scopes):
+        spans_by_start = sorted(spans)
+        active = []
+        add_idx = 0
+        for (pos, send), sc in zip(matches, where):
+            while add_idx < len(spans_by_start) and spans_by_start[add_idx][0] <= pos:
+                active.append(spans_by_start[add_idx])
+                add_idx += 1
+            active[:] = [sp for sp in active if sp[1] > pos]
+            if not active:
+                continue
+            a, b = _js_sink_span(code, pos, send, pairs)
+            seg = code[a:b]
+            hits = []
+            for _, _, k in active:
+                fn = mine[k]
+                for i, names in enumerate(fn.pnames):
+                    for p in names:
+                        if _js_param_dangerous(seg, p, cat):
+                            hits.append((fn, fn.params[i]))
+                            break
+            if sc is not None and not rec.over:
+                _, locs = prog.param_map(rec, sc, cache)
+                if locs:
+                    if b - a > rec.budget:
+                        rec.over = True
+                    else:
+                        rec.budget -= b - a
+                        args = _js_split_spans(code, a, b, pairs)
+                        if cat == "SQL injection":
+                            args = args[:1]          # the query text; parameters are bound
+                        if any(w in locs for x, y in args for w in _JS_WORD_RE.findall(code, x, y)):
+                            node = _JS_EMPTY_NODE
+                            for x, y in args:
+                                node = _js_node_merge(node, prog.value(rec, x, y, 0))
+                            joins = cat == "SQL injection" and any(_js_joins(code, x, y) for x, y in args)
+                            for (fid, i), (built, clean) in prog.carry(node, {}, locs).items():
+                                if cat in clean or (cat == "SQL injection" and not (built or joins)):
+                                    continue
+                                hits.append((funcs[fid], funcs[fid].params[i]))
+            if hits:
+                line = rec.line(pos)
+                for fn, key in hits:
+                    # the category a later sink kind sets wins, as before;
+                    # within one category the first sink call is reported
+                    prev = fn.reach.get(key)
+                    if prev is None or prev[0] != cat:
+                        fn.reach[key] = (cat, line)
+
+
 def _analyze_js(files, findings):
     # summary: fname -> the params reaching a sink, with the sink's category
     # and the line of the sink call itself (reported in the finding)
@@ -3173,45 +3523,17 @@ def _analyze_js(files, findings):
         first = len(funcs)
         for (name, params, (s, e), _), head in zip(found, heads):
             fn = _JsFunction(len(funcs), rec, name, params, (s, e), s >= len(code) or code[s] != "{", head)
+            # parameters from the whole list: `(a = f(1, 2), { b })` is two,
+            # the second binding b
+            plist = _js_header_params(code, head, s, pairs)
+            if plist is not None:
+                fn.params = [key for key, _ in plist]
+                fn.pnames = [names for _, names in plist]
             funcs.append(fn)
             rec.fns.append(fn.fid)
         mine = funcs[first:]
-        # Sink attribution, identical in effect to the old per-body
-        # finditer (which found exactly the matches inside each copied
-        # body — spans give the same set, including sinks inside nested
-        # closures). Each sink gets its OWN sweep: spans are walked in
-        # start order, become active when their start precedes the sink
-        # position and are retired when their end precedes it; sink
-        # positions advance monotonically within one sink's scan, so each
-        # span is appended once and removed once — linear per sink, six
-        # sinks total (the old code scanned every body six times too).
-        spans = [(fn.span[0], fn.span[1], k) for k, fn in enumerate(mine)]
-        for cat, matches in rec.sinks:
-            spans_by_start = sorted(spans)
-            active = []
-            add_idx = 0
-            for pos, send in matches:
-                while add_idx < len(spans_by_start) and spans_by_start[add_idx][0] <= pos:
-                    active.append(spans_by_start[add_idx])
-                    add_idx += 1
-                active[:] = [sp for sp in active if sp[1] > pos]
-                if not active:
-                    continue
-                a, b = _js_sink_span(code, pos, send, pairs)
-                seg = code[a:b]
-                line = None
-                for s, e, k in active:
-                    fn = mine[k]
-                    for p in fn.params:
-                        if p and _js_param_dangerous(seg, p, cat):
-                            # the category a later sink kind sets wins, as
-                            # before; within one category the first sink
-                            # call is the one reported
-                            prev = fn.reach.get(p)
-                            if prev is None or prev[0] != cat:
-                                if line is None:
-                                    line = rec.line(pos)
-                                fn.reach[p] = (cat, line)
+        # what an expression holds is read by name: parameters too
+        rec.targets = rec.targets | {n for fn in mine for names in fn.pnames for n in names}
         # what each function returns: the expression of an arrow function,
         # else the `return`s of its own body (not of a function inside it)
         opens, match_close = braces
@@ -3235,6 +3557,7 @@ def _analyze_js(files, findings):
             decl[where[(b, match_close.get(b, len(code)) + 1)]].update(_js_body_params(code, b, opener, pairs))
         for fn in mine:
             fn.scope = where[fn.span]
+            rec.scope_fns.setdefault(fn.scope, []).append(fn.fid)
             if fn.expr:                     # `const f = (a, { b }) => …`: before its `=>`
                 q = _js_back(code, fn.head[1] - 2)
                 o = opener.get(q) if q >= 0 else None
@@ -3299,6 +3622,11 @@ def _analyze_js(files, findings):
         fn.return_nodes = nodes
     order = prog.order()
     prog.settle_clean(order)
+    # which parameters reach a sink: written in its arguments, or held by a
+    # local it reads
+    for rec in recs:
+        _js_sink_reach(prog, rec)
+    prog.index_reach()
     # the call-site pass's file-wide map holds request data read directly
     # (as it always has); what functions return is read through the scopes
     for rec in recs:

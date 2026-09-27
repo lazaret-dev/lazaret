@@ -11,8 +11,9 @@ obfuscation/entropy secret detection. For a project scan, `npx lazaret` and
 to report the same issues (rule, file, line, severity, message), metrics,
 ratings, gate result and exit code. Both run the JavaScript half of the
 cross-file flow engine (`X-*` findings: a request value passed into a
-function, in the same or another file, whose parameter reaches a sink, or a
-helper's returned request value reaching one; calls bind through
+function, in the same or another file, whose parameter reaches a sink —
+directly or through the local variables that hold it — or a helper's
+returned request value reaching one; calls bind through
 `require()`/`import` to the function the file names, and a call it can't
 resolve reaches every project function of that name). The
 Python engine additionally follows flows through Python files and accepts
