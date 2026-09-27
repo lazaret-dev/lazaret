@@ -73,9 +73,10 @@ const JS_FUNC_RE = pyRe(String.raw`(?:function\s+(?<n1>\w+)\s*\((?<p1>[^)]*)\)` 
   String.raw`|(?:const|let|var)\s+(?<n2>\w+)\s*=\s*(?:async\s*)?\((?<p2>[^)]*)\)\s*=>` +
   String.raw`|(?:const|let|var)\s+(?<n3>\w+)\s*=\s*(?:async\s*)?function\s*\((?<p3>[^)]*)\))`, "g");
 const JS_SOURCE_RE = pyRe(String.raw`req\.(query|body|params|headers|cookies)|process\.argv|location\.(search|hash|href)`);
+const CMD_SINK_RE = pyRe(String.raw`\b(exec|execSync|spawn|spawnSync)\s*\(`, "g");   // not on a RegExp (jsRegexpCalls)
 const JS_SINKS = [
   [pyRe(String.raw`\.(query|execute)\s*\(`, "g"), "SQL injection"],
-  [pyRe(String.raw`\b(exec|execSync|spawn|spawnSync)\s*\(`, "g"), "command injection"],
+  [CMD_SINK_RE, "command injection"],
   [pyRe(String.raw`(?<![\w.])eval\s*\(|new\s+Function\s*\(`, "g"), "code injection"],
   [pyRe(String.raw`\.innerHTML\s*=|document\.write\s*\(`, "g"), "cross-site scripting"],
   [pyRe(String.raw`\bfetch\s*\(|axios(\.\w+)?\s*\(`, "g"), "server-side request forgery"],
@@ -922,6 +923,174 @@ function carryAdd(out, key, fid, i, built, clean) {
 
 const nodeMerge = (x, y) => [x[0].concat(y[0]), x[1] || y[1], x[2].concat(y[2]), x[3] || y[3]];
 
+// ---- RegExp receivers (twin of flow.py's section) --------------------------
+// A call leaves the command sinks only when its receiver is proven to be a
+// RegExp: a /…/ literal; `new RegExp(…)` / `RegExp(…)` with the global RegExp
+// never declared, assigned or defined in the file; or a name declared once in
+// the file as one (the whole value) and otherwise only used for RegExp
+// members (assigning only .lastIndex), called inside that declaration's block.
+// A direct eval() or a with statement leaves only literals proven;
+// RegExp.prototype in the file, nothing.
+const REGEXP_DECL_RE = pyRe(String.raw`(?:const|let|var)` + NOT_AFTER + String.raw`\s+([A-Za-z_$][\w$]*)(?:\s*:\s*RegExp)?\s*=(?![=>])\s*`, "dg");
+const REGEXP_NEW_RE = pyRe(String.raw`(?:new\s+)?RegExp\s*\(`, "y");
+const REBIND_RE = pyRe(String.raw`(?<![\w$.])(?:eval|with)\s*\(`);
+const REGEXP_PROTO_RE = pyRe(String.raw`(?<![\w$.])RegExp\s*\.\s*prototype(?![\w$])`);
+const ASSIGN_AFTER_RE = pyRe(String.raw`\s*` + ASSIGN_OP + String.raw`(?![=>])`, "y");
+const WORD_AT_RE = pyRe(String.raw`[A-Za-z_$][\w$]*`, "y");
+const IDENT_RE = pyRe(String.raw`(?<![\w$])[A-Za-z_$][\w$]*`, "g");      // a whole identifier
+const REGEX_FLAGS = new Set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ");
+const REGEXP_MEMBERS = new Set(["exec", "test", "lastIndex", "source", "flags", "global", "ignoreCase", "multiline",
+  "sticky", "unicode", "unicodeSets", "dotAll", "hasIndices", "toString"]);
+const wordAt = (code, k) => { WORD_AT_RE.lastIndex = k; const m = WORD_AT_RE.exec(code); return m === null ? null : m[0]; };
+
+/** Offset of the opening slash of the masked /…/flags literal ending at p, or -1 (twin of flow._js_regex_literal). */
+function jsRegexLiteral(code, p) {
+  let j = p;
+  while (j >= 0 && REGEX_FLAGS.has(code[j])) j--;
+  if (j < 1 || code[j] !== "/") return -1;
+  let k = j - 1;
+  while (k >= 0 && code[k] === " ") k--;
+  return k >= 0 && code[k] === "/" && k < j - 1 ? k : -1;
+}
+
+/** [end, is the global RegExp's] when a RegExp is written at code[k], else null (twin of flow._js_regexp_value). */
+function jsRegexpValue(code, k, pairs) {
+  const n = code.length;
+  if (k < n && code[k] === "/") {
+    let j = k + 1;
+    while (j < n && code[j] === " ") j++;
+    if (j < n && code[j] === "/" && j > k + 1) {
+      j++;
+      while (j < n && REGEX_FLAGS.has(code[j])) j++;
+      return [j, false];
+    }
+    return null;
+  }
+  REGEXP_NEW_RE.lastIndex = k;
+  const m = REGEXP_NEW_RE.exec(code);
+  if (m !== null) {
+    const c = pairs.get(k + m[0].length - 1);
+    if (c !== undefined) return [c + 1, true];
+  }
+  return null;
+}
+
+/** Does a declarator's value end at e (twin of flow._js_value_ends)? */
+function jsValueEnds(code, e) {
+  const n = code.length;
+  let j = e;
+  while (j < n && (code[j] === " " || code[j] === "\t")) j++;
+  if (j >= n || code[j] === "," || code[j] === ";" || code[j] === "}") return true;
+  if (code[j] !== "\r" && code[j] !== "\n") return false;
+  while (j < n && BLANK.has(code[j])) j++;
+  if (j >= n || code[j] === ";" || code[j] === "}") return true;
+  const w = wordAt(code, j);
+  return w !== null && w !== "in" && w !== "instanceof";
+}
+
+/** Is the name ending at e read as `name.<a RegExp member>` (twin of flow._js_regexp_member_use)? */
+function jsRegexpMemberUse(code, e) {
+  const n = code.length;
+  let k = e;
+  while (k < n && BLANK.has(code[k])) k++;
+  if (k >= n || code[k] !== ".") return false;
+  k++;
+  while (k < n && BLANK.has(code[k])) k++;
+  const w = wordAt(code, k);
+  if (w === null || !REGEXP_MEMBERS.has(w)) return false;
+  ASSIGN_AFTER_RE.lastIndex = k + w.length;
+  return w === "lastIndex" || ASSIGN_AFTER_RE.exec(code) === null;
+}
+
+/** The innermost bracket open around each of the ascending positions, or -1 (twin of flow._js_enclosing). */
+function jsEnclosing(code, positions) {
+  const out = [], stack = [];
+  let i = 0;
+  for (const pos of positions) {
+    for (; i < code.length && i < pos; i++) {
+      const ch = code[i];
+      if (ch === "(" || ch === "[" || ch === "{") stack.push(i);
+      else if ((ch === ")" || ch === "]" || ch === "}") && stack.length) stack.pop();
+    }
+    out.push(stack.length ? stack[stack.length - 1] : -1);
+  }
+  return out;
+}
+
+/** The offsets in starts of the `exec(` calls made on a value proven to be a RegExp (twin of flow._js_regexp_calls). */
+function jsRegexpCalls(code, pairs, starts) {
+  const proven = new Set();
+  if (REGEXP_PROTO_RE.test(code)) return proven;
+  const ctors = [], named = new Map();
+  let opener = null;
+  for (const s of starts) {
+    const d = jsBack(code, s);
+    if (d < 1 || code[d] !== "." || code[d - 1] === "." || code[d - 1] === "?") continue;
+    const p = jsBack(code, d);
+    if (p < 0) continue;
+    if (code[p] === ")") {
+      if (opener === null) { opener = new Map(); for (const [o, c] of pairs) opener.set(c, o); }
+      const o = opener.get(p);
+      const q = o !== undefined ? jsBack(code, o) : -1;
+      if (q >= 0) {
+        const [ws, word] = wordBefore(code, q);
+        if (word === "RegExp" && !jsMember(code, ws)) ctors.push(s);
+      }
+    } else if (jsRegexLiteral(code, p) >= 0) proven.add(s);
+    else {
+      const [ws, word] = wordBefore(code, p);
+      if (PARAM_RE.test(word) && !jsMember(code, ws)) {
+        if (!named.has(word)) named.set(word, []);
+        named.get(word).push(s);
+      }
+    }
+  }
+  if (!(ctors.length || named.size) || REBIND_RE.test(code)) return proven;
+  const decls = new Map();   // name -> [declaration offset, name offset, is the global RegExp's] | null
+  for (const m of code.matchAll(REGEXP_DECL_RE)) {
+    const name = m[1];
+    if (!named.has(name)) continue;
+    const v = jsRegexpValue(code, m.index + m[0].length, pairs);
+    const ok = v !== null && !decls.has(name) && jsValueEnds(code, v[0]);
+    decls.set(name, ok ? [m.index, m.indices[1][0], v[1]] : null);
+  }
+  const watch = [...decls].filter(([, d]) => d !== null).map(([n]) => n).sort(cmpCodePoints);
+  const need = ctors.length > 0 || watch.some((n) => decls.get(n)[2]);
+  if (need) watch.push("RegExp");
+  const bad = new Set();
+  if (watch.length) {
+    const watched = new Set(watch);
+    for (const m of code.matchAll(IDENT_RE)) {
+      const w = m[0];
+      if (!watched.has(w) || bad.has(w)) continue;
+      const i = m.index;
+      if (w === "RegExp") {
+        // the global RegExp, read: `new RegExp(`, `RegExp(`, `RegExp.x`, `instanceof RegExp`
+        const b = jsBack(code, i);
+        let k = i + w.length;
+        while (k < code.length && BLANK.has(code[k])) k++;
+        const before = b >= 0 ? wordBefore(code, b)[1] : "";
+        if (b >= 0 && code[b] === ".") bad.add(w);                    // globalThis.RegExp = …
+        else if (before === "function" || !((k < code.length && (code[k] === "(" || code[k] === ".")) || before === "instanceof")) bad.add(w);
+      } else if (jsMember(code, i)) continue;                         // a property: obj.re
+      else if (i !== decls.get(w)[1] && !jsRegexpMemberUse(code, i + w.length)) bad.add(w);
+    }
+  }
+  const globalOk = need && !bad.has("RegExp");
+  if (globalOk) for (const s of ctors) proven.add(s);
+  const names = watch.filter((n) => n !== "RegExp" && !bad.has(n) && (globalOk || !decls.get(n)[2]))
+    .map((n) => [decls.get(n)[0], n]).sort((x, y) => x[0] - y[0]);
+  jsEnclosing(code, names.map(([at]) => at)).forEach((o, k) => {
+    const n = names[k][1];
+    let a, b;
+    if (o === -1) { a = -1; b = code.length; }
+    else if (code[o] === "{") { a = o; b = pairs.get(o) ?? code.length; }
+    else return;                                                     // declared in a for (…) head or an expression
+    for (const s of named.get(n)) if (a < s && s < b) proven.add(s);
+  });
+  return proven;
+}
+
 /** true for a full sanitizer, the categories of a partial one, else null (twin of flow._js_sanitizer). */
 function jsSanitizer(callee) {
   const probe = callee + "()";
@@ -1008,7 +1177,15 @@ class JsFile {
     this.topDecl = new Set();    // the module's
     this.assignScope = [];       // per assignment: the scope it belongs to (null: the module)
     this.callScope = new Map();
-    this.sinks = JS_SINKS.map(([sinkRe, cat]) => [cat, [...code.matchAll(sinkRe)].map((m) => [m.index, m.index + m[0].length])]);
+    this.sinks = JS_SINKS.map(([sinkRe, cat]) => {
+      let matches = [...code.matchAll(sinkRe)].map((m) => [m.index, m.index + m[0].length]);
+      if (sinkRe === CMD_SINK_RE) {             // `re.exec(s)` on a RegExp runs no command
+        const calls = matches.map(([s]) => s).filter((s) => code.startsWith("exec", s) && !code.startsWith("execSync", s));
+        const regexp = calls.length ? jsRegexpCalls(code, this.pairs, calls) : null;
+        if (regexp !== null && regexp.size) matches = matches.filter(([s]) => !regexp.has(s));
+      }
+      return [cat, matches];
+    });
     this.sinkScopes = [];
     this.budget = READ_BUDGET * cpLen(code) + 65536;     // code points of expressions it may read
     this.over = false;

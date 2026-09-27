@@ -13,7 +13,8 @@ ratings, gate result and exit code. Both run the JavaScript half of the
 cross-file flow engine (`X-*` findings: a request value passed into a
 function, in the same or another file, whose parameter reaches a sink —
 directly or through the local variables that hold it — or a helper's
-returned request value reaching one; calls bind through
+returned request value reaching one; a proven RegExp's `exec()` is not a
+command sink; calls bind through
 `require()`/`import` to the function the file names, and a call it can't
 resolve reaches every project function of that name). The
 Python engine additionally follows flows through Python files and accepts

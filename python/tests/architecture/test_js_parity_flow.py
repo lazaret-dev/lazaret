@@ -14,7 +14,8 @@ _js_functions, _analyze_js, analyze).
    the review's JavaScript cases (brace counting, sink lines, modules and
    returned values, calls that can't be resolved and the evidence that binds
    nothing, helpers' values, shadowed sanitizers, values through locals,
-   destructuring, push and loops: tests/scanner/test_review_flow_js*.py),
+   destructuring, push and loops, RegExp receivers of exec():
+   tests/scanner/test_review_flow_js*.py),
    the size cap (code points, not UTF-16 units),
    the sink-argument window around astral characters, the fixpoint's and the
    read budget's notes, and a seeded random corpus of JavaScript-ish text
@@ -262,6 +263,28 @@ def review_cases():
                          ("app.js", "const L = require('./locals');\nconst { " + ", ".join(
                              [f"l{k}" for k in range(len(bodies))] + ["pat", "arrow", "checked", "wide"])
                           + " } = L;\napp.post('/x', (req, res) => {\n" + calls + "});\n")))
+    # RegExp receivers (tests/scanner/test_review_flow_js_regexp.py)
+    from tests.scanner import test_review_flow_js_regexp as rx
+    rx_app = rx.APP
+    for src in [rx.lib("  return /^(\\w+)=(.*)$/.exec(p);"), rx.lib("  return /x/gi\n    .exec(p);"),
+                rx.lib("  return RE.exec(p) && RE.test(p);", "const RE = /x/g;\nRE.lastIndex = 0;\n"),
+                rx.lib("  var m = CRED.exec(p)\n  return m", "var CRED = /^ *(?:[Bb]asic) +(\\S+) *$/\n"),
+                rx.lib("  return new RegExp('^a').exec(p) || RegExp('b').exec(p);"),
+                rx.lib("  return re.exec(p);", "const re: RegExp = new RegExp('^' + prefix, 'i');\n"),
+                rx.lib("  if (p) {\n    let re = /x/\n    return re.exec(p)\n  }"),
+                rx.lib("  const m = /^(\\w+)$/.exec(p);\n  cp.exec('ls ' + p);", "const cp = require('child_process');\n"),
+                rx.lib("  o.re.exec(p);\n  re?.exec(p);", "const o = { re: /x/ };\nconst re = /y/;\n"),
+                rx.lib("  const re = require('child_process');\n  re.exec(p);", "const re = /x/;\n"),
+                rx.lib("  [cp].forEach(re => re.exec(p));\n  try { throw cp; } catch (x) { x.exec(p); }",
+                       "const re = /x/;\nconst x = /y/;\nconst cp = require('child_process');\n"),
+                rx.lib("  re.exec(p);", "const re = /x/;\nre.exec = require('child_process').exec;\n"),
+                rx.lib("  return /x/.exec(p);", "RegExp.prototype.exec = function (c) { return run(c); };\n"),
+                rx.lib("  with (env) { re.exec(p); }\n  return /y/.exec(p);", "const re = /x/;\n"),
+                rx.lib("  eval(code);\n  re.exec(p);", "const re = /x/;\n"),
+                rx.lib("  new RegExp('x').exec(p);", "globalThis.RegExp = function () { return require('child_process'); };\n"),
+                rx.lib("  re.exec(p);", "const re = /x/ && require('child_process');\n"),
+                "function g() {\n  const re = /x/;\n}\n" + rx.lib("  re.exec(p);\n  " + ASTRAL + "/z/.exec(p);")]:
+        sets.append(js_files(("lib.js", src), ("app.js", rx_app)))
     nest = "function pad(a){return g(function(){" * 2500 + "}})" * 2500 + "\n"
     sets.append(js_files(("lib.js", lib), ("app.js", nest + "const { runIt } = require('./lib');\n"
                                                         + route.replace("CALL", "runIt(req.query.q)"))))
@@ -295,7 +318,10 @@ TOKENS = ["'", '"', "`", "${", "}", "{", "(", ")", "[", "]", "/", "*", "\\", "\n
           "if (x) q += ", "else q = ", "=> q = ", ") q = ", "for (const [k, v] of ", "for (let k in ", "for (var x of ",
           "w.push(", "w.unshift(", ".join(", ".concat(", "const { u } = req.body;", "const [a1, b1] = ", "sql`",
           "function f({ a, b }, c = g(1, 2)) {", "const q = 'SELECT ' + a;", "db.query(q);", "db.query(q, [a]);",
-          "q = q + ", "x++ + ", "+x", "`${a}`", "tag`${q}`"]
+          "q = q + ", "x++ + ", "+x", "`${a}`", "tag`${q}`",
+          "/x/g.exec(", "/a b/.exec(", ".exec(", "new RegExp(", "RegExp(", "const re = /x/;", "re.exec(",
+          "let re = new RegExp(q)\n", "re.lastIndex = 0;", "RegExp.prototype", "with (", "catch (re) {", "re?.exec(",
+          "var CRED = /x/i\n", "CRED.exec(", "cp.exec(", "instanceof RegExp", "re = cp;"]
 
 
 def soup(rnd):
