@@ -167,7 +167,9 @@ test("the CLI reports the flow, redacts its snippet, and the gate says Python wa
     const rep = report([]);
     const flows = rep.issues.filter((i) => i.rule.startsWith("X-"));
     assert.deepEqual(flows.map((i) => [i.rule, i.file, i.line]), [["X-CMD", "app.js", 4]]);
-    assert.match(flows[0].msg, /reaches a sink at lib\/h\.js:3 \(in runIt\(\)\) \(cross-file\)/);
+    // the sink path uses the OS separator (native on Windows, like the finding's
+    // `file` field and the Python engine), so normalize it before matching
+    assert.match(flows[0].msg.replaceAll("\\", "/"), /reaches a sink at lib\/h\.js:3 \(in runIt\(\)\) \(cross-file\)/);
     assert.equal(flows[0].snippet[3 - flows[0].snipStart], '  const seed = "[redacted]";');
     assert.ok(!JSON.stringify(rep).includes(SEED));
     assert.equal(rep.crossFile, 1);
