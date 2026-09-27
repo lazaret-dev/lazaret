@@ -42,6 +42,7 @@ import io
 import json
 import keyword
 import os
+import posixpath
 import re
 import sys
 import threading
@@ -4401,6 +4402,11 @@ _IMPORT_HARVEST_RE = re.compile(
 _EXEC_CALL_RE = re.compile(
     r"""\b(?:execSync|exec|execFileSync|execFile|spawnSync|spawn|system|popen|Popen|run|call|"""
     r"""check_call|check_output|getoutput|getstatusoutput)\s*\(""")
+# Every match of _IMPORT_HARVEST_RE contains one of these (the pattern is
+# case-sensitive but for "Local Storage", and its "leveldb" is not): a text
+# with none of them is not searched. The search took 8 of the 60 seconds of a
+# --deps scan of a large node_modules, which runs it on every file.
+_IMPORT_HARVEST_NEEDLES = ("process.env", "os.environ", "id_", ".git-credentials", "leveldb")
 
 
 def import_time_risk(text):
@@ -4408,7 +4414,8 @@ def import_time_risk(text):
     the weaker test above ([] if not), and the 1-based line of the first
     sign. `text` has \\n line endings."""
     reasons, line = [], None
-    harvest = _IMPORT_HARVEST_RE.search(text)
+    harvest = (_IMPORT_HARVEST_RE.search(text)
+               if any(needle in text for needle in _IMPORT_HARVEST_NEEDLES) else None)
     if harvest and (_NETWORK_RE.search(text) or _EXFIL_SERVICE_RE.search(text)):
         reasons.append("reads credentials or the whole environment and sends data over the network")
         line = text.count("\n", 0, harvest.start()) + 1
@@ -5532,6 +5539,223 @@ def _scan_manifest_entry(mf):
     return scan_manifest(mf["path"], mf["content"], registry=dep)
 
 
+# ---------------- --deps: what a dependency runs ----------------
+# A --deps scan read a dependency's files with the supply-chain rules only,
+# and the registry's two tests of what runs did not run on them: the
+# install-script test (install_script_risk) on the scripts a dependency's
+# install hook runs, and the weaker import-time test (import_time_risk) on
+# its code. An installed package whose postinstall sent the environment to a
+# server, or whose code did so when loaded, passed with an ordinary MAJOR
+# "install hook" finding, or with nothing. Now:
+#   * each install hook of a dependency's manifest is followed to the files
+#     it runs (follow_hook, then Node's resolution: the file, with an
+#     extension, the directory's package.json "main", its index file), only
+#     to regular files inside the scan root, through no link and nothing an
+#     exclusion pruned; the hook escalates to CRITICAL when one of them fails
+#     install_script_risk, as in the registry. A file it runs that the walk
+#     did not read as source (node runs lib/install.dat as JavaScript) is
+#     read and scanned as a dependency's JavaScript; a shell script is only
+#     tested; a hook the walk cannot follow to the end is SC-TRUNCATED.
+#   * every JavaScript or Python file of a dependency that no hook runs gets
+#     import_time_risk: SC-IMPORT-RISK (MAJOR). On a real node_modules of
+#     14,286 JavaScript files (webpack, next, jest, eslint, typescript ...)
+#     it found nothing.
+# Twin of the npm engine's js/src/deps.js.
+_DEP_IMPORT_RISK_WHY = (
+    "An installed package's code runs with the application's privileges when it is loaded "
+    "or its command runs. Collecting credentials or the whole environment next to a network "
+    "call is the shape of an import-time stealer; SDKs read the few variables they need. A "
+    "weaker indicator than the same code in an install script: the file may have a reason.")
+_DRIVE_RE = re.compile(r"[A-Za-z]:")
+
+
+def _tree_join(base, target):
+    """A hook's `target` joined with the directory `base` ('/'-separated,
+    relative to the scan root), normalized; None when it is absolute (a file
+    of the machine, not of the tree) or leaves the scan root."""
+    target = target.replace("\\", "/")
+    if target.startswith("/") or _DRIVE_RE.match(target):
+        return None
+    joined = posixpath.normpath(posixpath.join(base or ".", target))
+    if joined in (".", "..") or joined.startswith("../"):
+        return None
+    return joined
+
+
+class _DependencyTree:
+    """What a --deps scan knows of the tree, to follow a dependency's install
+    hook: the files it read (by '/'-separated path) and, for the others, the
+    disk under the scan root — regular files only, reached through no link
+    and no directory an exclusion prunes."""
+
+    def __init__(self, root, files, manifests, excludes):
+        self.root = os.fspath(root)
+        self.sources = {f["path"].replace(os.sep, "/"): f for f in files}
+        self.manifests = {m["path"].replace(os.sep, "/"): m for m in manifests}
+        self.excludes = set(excludes or ()) | ALWAYS_PRUNE_DIRS
+        self.regular = {}                   # rel -> is a regular file (not read as source)
+        self.read = {}                      # rel -> its text, read here (None: not text)
+
+    def is_file(self, rel):
+        if rel in self.sources or rel in self.manifests:
+            return True
+        if rel not in self.regular:
+            self.regular[rel] = self._on_disk(rel)
+        return self.regular[rel]
+
+    def _on_disk(self, rel):
+        parts = rel.split("/")
+        if any(p in self.excludes or p in ("", ".", "..") for p in parts[:-1]):
+            return False
+        path = self.root
+        try:
+            for k, part in enumerate(parts):
+                path = os.path.join(path, part)
+                st = os.lstat(path)
+                if _stat.S_ISLNK(st.st_mode) or _is_reparse_point(st):
+                    return False
+                if k < len(parts) - 1 and not _stat.S_ISDIR(st.st_mode):
+                    return False
+            return _stat.S_ISREG(st.st_mode)
+        except (OSError, ValueError):       # ValueError: a NUL in the name
+            return False
+
+    def resolve(self, path):
+        """The file Node runs for `path` (LOAD_AS_FILE, then LOAD_AS_DIRECTORY:
+        its package.json "main", its index file), or None. Twin of the
+        registry's _ArtifactScan._resolve."""
+        candidates = node_candidates(path)
+        found = next((c for c in candidates[:6] if self.is_file(c)), None)
+        if found:
+            return found
+        manifest = self.manifests.get(posixpath.join(path.rstrip("/"), "package.json"))
+        if manifest is not None:
+            data, _problems = load_manifest(manifest["path"], manifest["content"])
+            main = data.get("main") if isinstance(data, dict) else None
+            if isinstance(main, str) and main.strip():
+                target = _tree_join(path.rstrip("/"), main)
+                if target is not None:
+                    found = next((c for c in node_candidates(target) if self.is_file(c)), None)
+                    if found:
+                        return found
+        return next((c for c in candidates[6:] if self.is_file(c)), None)
+
+
+def dependency_checks(root, files, manifests, issues, excludes=(), should_stop=None):
+    """The --deps checks of what dependencies run (see the section comment),
+    after the files and manifests were scanned: escalates the SC-INSTALL-HOOK
+    findings of dependency manifests in `issues` in place and returns
+    (new_issues, extra_files, stopped): the findings to add, the files read
+    and scanned here (to add to the scanned files), and should_stop's reason
+    when it stopped the checks (None otherwise)."""
+    tree = _DependencyTree(root, files, manifests, excludes)
+    dep_manifests = {m["path"] for m in manifests if m.get("dep")}
+    out, extra, run = [], [], set()
+    followed_to_end = {}                    # manifest -> SC-TRUNCATED issue added for it
+    for issue in issues:
+        if issue["rule"] != "SC-INSTALL-HOOK" or not issue.get("cmd") or issue["file"] not in dep_manifests:
+            continue
+        if should_stop is not None:
+            stopped = should_stop()
+            if stopped:
+                return out, extra, stopped
+        try:
+            _follow_dependency_hook(tree, issue, out, extra, run, followed_to_end)
+        except Exception as exc:            # one manifest must never kill the run
+            out.append(scan_error_issue(issue["file"], exc))
+    for f in files:
+        if not f.get("dep") or f["lang"] not in ("js", "py") or f["path"].replace(os.sep, "/") in run:
+            continue
+        if should_stop is not None:
+            stopped = should_stop()
+            if stopped:
+                return out, extra, stopped
+        try:
+            found = dependency_import_issue(f["path"], f["content"])
+        except Exception as exc:
+            found = scan_error_issue(f["path"], exc)
+        if found is not None:
+            out.append(found)
+    return out, extra, None
+
+
+def _follow_dependency_hook(tree, issue, out, extra, run, followed_to_end):
+    manifest = issue["file"]
+    base = posixpath.dirname(manifest.replace(os.sep, "/"))
+    targets, complete = follow_hook(issue["cmd"])
+    if not complete and manifest not in followed_to_end:
+        followed_to_end[manifest] = True
+        out.append(truncated_issue(manifest, (
+            f"its install hook is more than Lazaret follows ({HOOK_MAX_COMMANDS:,} commands, "
+            f"{HOOK_MAX_TARGETS} scripts, {HOOK_MAX_CHARS:,} characters, "
+            f"{HOOK_MAX_PATH:,}-character paths)")))
+    for target in targets:
+        path = _tree_join(base, target)
+        rel = tree.resolve(path) if path is not None else None
+        if rel is None:
+            continue
+        text = _dependency_script_text(tree, rel, "sh" if rel.endswith(".sh") else "js", out, extra, run)
+        reasons = install_script_risk(text) if text else []
+        if reasons and issue["sev"] not in ("BLOCKER", "CRITICAL"):
+            msg = f"Install hook runs {target}, which {'; and '.join(reasons)}."
+            issue["sev"] = "CRITICAL"
+            issue["msg"] = _redact_text(msg) if REDACT_SECRETS else msg
+
+
+def _dependency_script_text(tree, rel, as_lang, out, extra, run):
+    """Text of a file an install hook runs, or None when it cannot be read
+    as text (an SC-TRUNCATED finding then says why)."""
+    run.add(rel)
+    if rel in tree.sources:
+        return tree.sources[rel]["content"]
+    if rel in tree.manifests:
+        return tree.manifests[rel]["content"]
+    if rel not in tree.read:
+        tree.read[rel] = _read_dependency_script(tree, rel, as_lang, out, extra)
+    return tree.read[rel]
+
+
+def _read_dependency_script(tree, rel, as_lang, out, extra):
+    """A file an install hook runs that the walk did not read as source:
+    read it, and scan it as a dependency's JavaScript (node runs
+    lib/install.dat as JavaScript) unless it is a shell script."""
+    disp = rel.replace("/", os.sep)
+    try:
+        data = _read_prefix(os.path.join(tree.root, *rel.split("/")), SOURCE_SIZE_CAP + 1)
+    except OSError as exc:
+        reason = str(exc) if isinstance(exc, _NotRegularFile) else exc.strerror or type(exc).__name__
+        out.append(truncated_issue(disp, f"it runs at install time but could not be read ({reason})"))
+        return None
+    if len(data) > SOURCE_SIZE_CAP:
+        out.append(truncated_issue(disp, f"it runs at install time but is larger than the "
+                                         f"{SOURCE_SIZE_CAP:,}-byte file limit"))
+        return None
+    if looks_binary(data[:2048]):
+        out.append(truncated_issue(disp, "it runs at install time but is not text, so it could not be scanned"))
+        return None
+    if as_lang == "sh" or shebang_lang(data[:HEADER_SAMPLE_BYTES].decode("utf-8", "replace")) == "sh":
+        return normalize_newlines(data.decode("utf-8", "replace"))
+    text, decode_issues = decode_member(disp, data, lang="js")
+    out.extend(decode_issues)
+    out.extend(scan_file(disp, text, "js", dep=True))
+    extra.append({"path": disp, "content": text, "lang": "js", "dep": True})
+    return text
+
+
+def dependency_import_issue(path, text):
+    """SC-IMPORT-RISK (MAJOR) for a dependency's JavaScript or Python file
+    that fails the import-time test (import_time_risk), else None."""
+    reasons, line = import_time_risk(text)
+    if not reasons:
+        return None
+    lines = text.split("\n")
+    return mk_issue(
+        {"id": "SC-IMPORT-RISK", "name": "Risky import-time code", "type": "HOTSPOT", "sev": "MAJOR",
+         "msg": f"Dependency code {'; and '.join(reasons)}.", "why": _DEP_IMPORT_RISK_WHY,
+         "fix": "Read the file: what does it collect, and where does it send it?",
+         "ref": "CWE-506 · Supply chain"}, path, line, lines, redactor=_Redactor(lines))
+
+
 def redact_file_issues(issues, files):
     """Apply each scanned file's redaction to the findings numbered by its
     scan lines (source_lines: scan_file's and the flow engine's), in place.
@@ -5665,7 +5889,18 @@ def scan_project(root, exclude=(), include_deps=False, taint_config=None,
                 issues.extend(_scan_manifest_entry(mf))
             except Exception as exc:
                 issues.append(scan_error_issue(mf["path"], exc))
-        if stopped:
+        if not stopped:
+            # --deps: what the dependencies run (install hooks, import-time code)
+            found, extra, dep_stopped = dependency_checks(root, files, manifests, issues, exclude, should_stop)
+            issues.extend(found)
+            numbered.extend(found)
+            files.extend(extra)
+            scanned.extend(extra)
+            if dep_stopped:
+                stopped = dep_stopped
+                issues.append(truncated_issue(
+                    ".", f"{stopped}: what the dependencies run was not checked to the end"))
+        else:
             issues.append(truncated_issue(
                 ".", f"{stopped}: {len(files) - len(scanned)} of {len(files)} files "
                      f"not scanned"))

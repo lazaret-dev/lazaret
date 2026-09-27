@@ -361,6 +361,26 @@ class EngineParityTests(unittest.TestCase):
                     self.assertIn(("SC-UTF7", "bin/tool"), found)
                     self.assertFalse({f for _, f in found} & {"bin/run", "bin/next-line"})
 
+    def test_dependency_checks_agree(self):
+        """--deps follows a dependency's install hook to what it runs and
+        tests it; a dependency's code gets the import-time test
+        (tests/scanner/test_review_dependency_checks.py has the tree)."""
+        from tests.scanner import test_review_dependency_checks as deps
+        root = deps.make_tree()
+        try:
+            deps.link_target(root)
+            for extra in (("--exclude", "excluded"), ("--exclude", "excluded", "--max-source-bytes", "10000")):
+                js, py = both(root, deps=True, extra=extra)
+                with self.subTest(extra=extra):
+                    self.assert_same(js, py, label=f"dependency checks {extra}")
+                    rules = collections.Counter(i["rule"] for i in js[1]["issues"])
+                    self.assertEqual(rules["SC-IMPORT-RISK"], 3)
+                    self.assertGreaterEqual(rules["SC-TRUNCATED"], 3)
+                    self.assertEqual(sum(1 for i in js[1]["issues"] if i["rule"] == "SC-INSTALL-HOOK"
+                                         and i["msg"].startswith("Install hook runs ")), 10)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_source_limit_agrees(self):
         """Both engines read sources up to 16,000,000 bytes by default, and
         --max-source-bytes / LAZARET_MAX_SOURCE_BYTES change the limit the

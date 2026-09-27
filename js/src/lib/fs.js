@@ -371,34 +371,45 @@ function collectFile(full, rel, name, st, dep, col) {
   }
   const dec = decodeSource(data, { py: lang === "py" });
   const content = normalizeNewlines(dec.text);
+  for (const i of encodingIssues(rel, content, dec)) col.binaryIssues.push(i);
+  col.files.push({ path: rel, content, lang, dep });
+}
+
+/**
+ * Q-ENCODING (and SC-UTF7, SC-ESCAPE-CODEC, SC-TRUNCATED) for a decoded
+ * source file: `dec` is decodeSource's result, `content` its text with \n
+ * line endings. Twin of lazaret.scanner.core.encoding_issues.
+ */
+export function encodingIssues(rel, content, dec) {
+  const out = [];
   if (dec.reported) {
     const lines = content.split("\n");
     // the file's own entropy literals and PEM blocks, as scanFile's findings
     // have (twin of core.encoding_issues): the Q-ENCODING snippet of a
     // UTF-8-BOM settings.py showed the literal its S-ENTROPY redacted
     registerScanContext(lines, SECRET_SKIP_RE);
-    col.binaryIssues.push(mkIssue({ id: "Q-ENCODING", name: "Non-UTF-8 source encoding",
+    out.push(mkIssue({ id: "Q-ENCODING", name: "Non-UTF-8 source encoding",
       type: "SMELL", sev: "INFO",
       msg: `Source file is not UTF-8 (detected ${dec.encoding}); decoded explicitly.`,
       why: "A non-UTF-8 source read as UTF-8 decodes to mojibake, hiding every pattern-based finding — a UTF-16 eval() scans clean.",
       fix: "Re-save the file as UTF-8 so tooling reads it as written.",
       ref: "Maintainability" }, rel, 1, lines));
-    if (dec.utf7) col.binaryIssues.push(mkIssue({ id: "SC-UTF7", name: "UTF-7 source encoding",
+    if (dec.utf7) out.push(mkIssue({ id: "SC-UTF7", name: "UTF-7 source encoding",
       type: "HOTSPOT", sev: "CRITICAL",
       msg: "Python source declares UTF-7; code can hide in comments.",
       why: "In UTF-7, '+AAo-' decodes to a newline: text that every editor, diff and reviewer shows as a comment becomes executable code when Python reads the file. No legitimate project needs a UTF-7 source file.",
       fix: "Re-save the file as UTF-8 and review the decoded text (the findings for this file are reported against it).",
       ref: "CWE-506 · Supply chain" }, rel, dec.cookieLine || 1, lines));
-    if (dec.escapes) col.binaryIssues.push(mkIssue({ id: "SC-ESCAPE-CODEC", name: "Escape-sequence source encoding",
+    if (dec.escapes) out.push(mkIssue({ id: "SC-ESCAPE-CODEC", name: "Escape-sequence source encoding",
       type: "HOTSPOT", sev: "CRITICAL",
       msg: `Python source declares ${dec.encoding}; code can hide in escape sequences.`,
       why: "Python decodes this file's escape sequences before it reads the code: '\\u000a' is a newline and '\\u0065' is 'e', so text that every editor, diff and reviewer shows as a comment or a string escape becomes executable code. No legitimate project needs this source encoding.",
       fix: "Re-save the file as UTF-8 and review the decoded text (the findings for this file are reported against it).",
       ref: "CWE-506 · Supply chain" }, rel, dec.cookieLine || 1, lines));
-    if (dec.undecoded) col.binaryIssues.push(truncatedIssue(rel,
+    if (dec.undecoded) out.push(truncatedIssue(rel,
       `its source encoding (${dec.encoding}) is not decoded by Lazaret; the file was read as UTF-8`));
   }
-  col.files.push({ path: rel, content, lang, dep });
+  return out;
 }
 
 /** __pycache__ is not source-scanned; every .pyc directly inside is checked. */

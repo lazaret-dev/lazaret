@@ -93,7 +93,14 @@ resolving to one file. Writes are atomic
   they look like one (`pyvenv.cfg`; `modules.txt`, `autoload.php`, a
   `package.json` or `*.dist-info`/`*.egg-info` directly inside `vendor`) —
   are pruned unless `--deps` is given; with `--deps` their files get the
-  supply-chain and secret rules only. `__pycache__` is not source-scanned,
+  supply-chain and secret rules only, each install hook of a dependency is
+  followed to the files it runs (a hook that runs a script collecting the
+  environment or credentials for the network, or piping a download into a
+  shell, is CRITICAL; a file it runs that is not a source file is read and
+  scanned as JavaScript), and a dependency's other JavaScript and Python
+  files get the import-time test (`SC-IMPORT-RISK`, MAJOR: the whole
+  environment or a credential store read next to a network call).
+  `__pycache__` is not source-scanned,
   but its `.pyc` files are checked. Every pruned tree is listed as an INFO
   `Q-SKIPPED-TREE` finding.
 - Symbolic links are never followed (`Q-SYMLINK`); only regular files are

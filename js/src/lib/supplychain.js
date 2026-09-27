@@ -71,6 +71,14 @@ export function hookIsSuspicious(cmd) {
   return INSTALL_HOOK_RE.test(remainder);
 }
 
+/**
+ * The command of each SC-INSTALL-HOOK finding as the manifest writes it
+ * (issue.cmd is redacted): what a --deps scan follows to the files the hook
+ * runs (src/deps.js), as core follows issue["cmd"] before the report is
+ * redacted. Not part of the finding, so never in a report.
+ */
+export const HOOK_COMMANDS = new WeakMap();
+
 function scInstallHookIssue(path, lineNo, lines, script, cmd, suspicious, sev = null) {
   sev = sev || (suspicious ? "CRITICAL" : "MAJOR");
   let msg, why;
@@ -92,6 +100,7 @@ function scInstallHookIssue(path, lineNo, lines, script, cmd, suspicious, sev = 
   // lets a caller follow the hook to the script it runs; redacted here (spec 6:
   // any field copying source text) so library callers never see a credential
   issue.cmd = REDACT.on ? redactText(cmd) : cmd;
+  HOOK_COMMANDS.set(issue, cmd);
   return issue;
 }
 

@@ -21,6 +21,7 @@ import {
 } from "./report.js";
 import { clipLine } from "./lib/issue.js";
 import { applyBaseline, BASELINE_KEY_ENV } from "./baseline.js";
+import { dependencyChecks } from "./deps.js";
 
 // Local copies (NOT imported from index.js — that would be a cycle).
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
@@ -307,6 +308,10 @@ function runChecked(argv, io) {
         : scanManifest(mf.path, mf.content, { registry: !!mf.dep }));
     } catch (e) { issues.push(scanErrorIssue(mf.path, e)); }
   }
+  // --deps: what the dependencies run (install hooks, import-time code)
+  const deps = dependencyChecks(root, files, manifests, issues, { exclude: opts.exclude, maxFileBytes: col.maxFileBytes });
+  add(deps.issues);
+  for (const f of deps.files) files.push(f);
   add(skippedIssues);
   const res = redactResult(buildResult(root, files, issues), clipLine);
   if (opts.baseline) {

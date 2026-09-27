@@ -302,7 +302,7 @@ class HookParityTests(unittest.TestCase):
         self.assertEqual(self.twins["limits"], {k: getattr(core, k) for k in
                                                 ("HOOK_MAX_CHARS", "HOOK_MAX_COMMANDS", "HOOK_MAX_TARGETS", "HOOK_MAX_PATH")})
         self.assertEqual(len(self.twins["patterns"]), 13)
-        self.assertEqual(len(self.twins["sets"]), 9)
+        self.assertEqual(len(self.twins["sets"]), 10)
         self.assertEqual(len(self.twins["maps"]), 3)
 
 if __name__ == "__main__":

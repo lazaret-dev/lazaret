@@ -651,8 +651,13 @@ const EXEC_CALL_SRC =
   String.raw`check_call|check_output|getoutput|getstatusoutput)\s*\(`;
 const EXEC_CALL_RE = pyRe(EXEC_CALL_SRC);
 
+// core._IMPORT_HARVEST_NEEDLES: every match contains one of them, so a text
+// with none is not searched
+const IMPORT_HARVEST_NEEDLES = ["process.env", "os.environ", "id_", ".git-credentials", "leveldb"];
+
 /** Where core's _IMPORT_HARVEST_RE.search(text) starts, or -1. */
 function importHarvestStart(text) {
+  if (!IMPORT_HARVEST_NEEDLES.some((needle) => text.includes(needle))) return -1;
   const rest = IMPORT_HARVEST_REST_RE.exec(text);
   const limit = rest ? rest.index : text.length;
   LOCAL_STORAGE_RE.lastIndex = 0;
@@ -755,6 +760,7 @@ export const PY_TWINS = {
     _HOOK_WRAPPERS: [...HOOK_WRAPPERS], _NODE_NAMES: [...NODE_NAMES], _SHELL_NAMES: [...SHELL_NAMES],
     _NODE_CODE_FLAGS: [...NODE_CODE_FLAGS], _NODE_PRELOAD_FLAGS: [...NODE_PRELOAD_FLAGS],
     _NODE_VALUE_FLAGS: [...NODE_VALUE_FLAGS], _SHEBANG_JS_NAMES: [...SHEBANG_JS_NAMES],
+    _IMPORT_HARVEST_NEEDLES: IMPORT_HARVEST_NEEDLES,
   },
   maps: Object.fromEntries([["_WRAPPER_VALUE_OPTIONS", WRAPPER_VALUE_OPTIONS],
     ["_WRAPPER_CHDIR_OPTIONS", WRAPPER_CHDIR_OPTIONS], ["_WRAPPER_COMMAND_OPTIONS", WRAPPER_COMMAND_OPTIONS]]
