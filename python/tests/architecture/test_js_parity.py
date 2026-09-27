@@ -185,6 +185,10 @@ ADVERSARIAL = {
     "py/inline_os.py": "__import__('os').system(input())\n",
     "hide/names.js": 'var m = global["\\x72\\x65\\x71\\x75\\x69\\x72\\x65"]("child_process");\n',
     "hide/indirect.js": "(0, eval)(atob(p));\nwindow['ev' + 'al'](atob(p));\n",
+    # names spelled with look-alike letters (SC-HOMOGLYPH)
+    "uni/lookalike.js": "const \u0435val = eval;\n\u0435val(x);\nif (isAdm\u0456n) {}\nconst isAdmin = 1;\nconst v\u0430lue = 2;\neva\u200dl(y);\n",
+    "uni/lookalike.py": "\u0435val = eval\n\u0435val(input())\n",
+    "node_modules/evil/lookalike.js": "\uff45val(atob(p));\n",
 }
 
 
@@ -371,8 +375,10 @@ class EngineParityTests(unittest.TestCase):
                     self.assertFalse({f for _, f in found} & {"bin/run", "bin/next-line", "media/clip.mts"})
                     for want in (("S-EVAL-JS", "ts/esm.mts"), ("T-CMD", "ts/cjs.cts"), ("SC-BINARY", "dist/app.jsc"),
                                  ("S-OSCMD-PY", "py/inline_os.py"), ("SC-HEXSTR", "hide/names.js"),
-                                 ("SC-EVAL-DECODE", "hide/indirect.js")):
+                                 ("SC-EVAL-DECODE", "hide/indirect.js"), ("SC-HOMOGLYPH", "uni/lookalike.js"),
+                                 ("SC-HOMOGLYPH", "uni/lookalike.py")):
                         self.assertIn(want, found)
+                    self.assertEqual(("SC-HOMOGLYPH", "node_modules/evil/lookalike.js") in found, label == "--deps")
 
     def test_dependency_checks_agree(self):
         """--deps follows a dependency's install hook to what it runs and

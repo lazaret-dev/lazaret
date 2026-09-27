@@ -69,7 +69,11 @@ resolving to one file. Writes are atomic
   unchecked or orphaned `.pyc` files; UTF-7 source (`SC-UTF7`).
 - **Unicode evasion**: JS identifier escapes (`\u0065val`) and Python NFKC
   spellings are matched as the runtime reads them; bidirectional control
-  characters are `S-BIDI` (Trojan Source).
+  characters are `S-BIDI` (Trojan Source); a name spelled with look-alike
+  letters from another alphabet (`\u0435val`, a Cyrillic e), an invisible
+  U+200C/U+200D or a fullwidth letter, that reads as an ASCII name it is not,
+  is `SC-HOMOGLYPH` (CRITICAL when it reads as eval, require & co. or another
+  name in the file).
 - **Quality**: function length/complexity, duplication, empty catches, and
   the rest of the code-smell set.
 

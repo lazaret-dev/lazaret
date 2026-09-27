@@ -73,10 +73,10 @@ test("the tables", () => {
 test("names hidden in a few escapes", () => {
   const cases = [
     [String.raw`x = "\x65val"`, ["eval", 5]], [String.raw`x = "sy\x73tem"`, ["system", 7]], [String.raw`s = '\145val'`, ["eval", 5]],
-    [String.raw`w["\u{65}val"](x)`, ["eval", 3]], [String.raw`p = "\U00000065xec"`, ["exec", 5]],
+    [String.raw`w["\u{65}v\u0061l"](x)`, ["eval", 3]], [String.raw`p = "\U00000065xec"`, ["exec", 5]],
     [String.raw`k = "\x5f_import__"`, ["__import__", 5]], [String.raw`x = "\\\x65val"`, ["eval", 7]],
     [String.raw`a = '\x00\x00\x00'; b = '\x65val'`, ["eval", 25]],
-    [String.raw`x = "\\x65val"`, null], [String.raw`u = "https://example.invalid"`, null],
+    [String.raw`x = "\\x65val"`, null], [String.raw`u = "https:\u002F\u002Fexample.invalid"`, null], [String.raw`u = "\u0068ttps://example.invalid"`, ["https://", 5]],
     [String.raw`b = b"\x00\x01\x65val"`, null], [String.raw`x = "\x41PI system"`, null], [String.raw`x = "e\x76al_thing"`, null],
     [String.raw`x = "\x65"; y = "val"`, null], [String.raw`x = "a\x2fb"`, null], [String.raw`\x65val`, null],
   ];

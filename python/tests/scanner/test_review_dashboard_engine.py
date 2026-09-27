@@ -194,6 +194,13 @@ class ShebangUploadTests(unittest.TestCase):
 
 
 @dash.requires_node
+class LookalikeTableTests(unittest.TestCase):
+    def test_the_tables_are_cores(self):
+        (page,) = dash.run([{"op": "eval", "expr": "[Object.fromEntries(LOOKALIKES), [...LOOKALIKE_TARGETS].sort(), NAME_RUN_SRC]"}])
+        self.assertEqual(page, [core._LOOKALIKES, sorted(core._LOOKALIKE_TARGETS), core._NAME_RUN_RE.pattern])
+
+
+@dash.requires_node
 class PasteTests(unittest.TestCase):
     def test_pasted_code_keeps_its_line_numbers(self):
         expr = ("(() => { document.querySelector('#code').value = %s; document.querySelector('#lang').value = 'js';"

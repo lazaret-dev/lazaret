@@ -50,7 +50,7 @@ class ShebangLangTests(unittest.TestCase):
             "#!/usr/bin/perl -w\n": None, "#!/usr/bin/env ruby\n": None, "#!\n": None, "#!/usr/bin/env\n": None,
             # the first line only
             "#!/usr/bin/env\nnode x\n": None, "#!\n/usr/bin/node\n": None, "#!/usr/bin/env \npython\n": None,
-            "": None, "node\n": None, " #!/usr/bin/node\n": None, "﻿#!/usr/bin/node\n": None,
+            "": None, "node\n": None, " #!/usr/bin/node\n": None, "\ufeff#!/usr/bin/node\n": None,
         }
         for text, want in cases.items():
             with self.subTest(text=text):

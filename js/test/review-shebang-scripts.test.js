@@ -26,7 +26,7 @@ test("the language a #! line names (the first line only)", () => {
     ["#!/bin/sh\n", "sh"], ["#!/usr/bin/env bash\n", "sh"], ["#!/bin/zsh -f\n", "sh"],
     ["#!/usr/bin/perl -w\n", null], ["#!/usr/bin/env ruby\n", null], ["#!\n", null], ["#!/usr/bin/env\n", null],
     ["#!/usr/bin/env\nnode x\n", null], ["#!\n/usr/bin/node\n", null], ["#!/usr/bin/env \npython\n", null],
-    ["", null], ["node\n", null], [" #!/usr/bin/node\n", null], ["﻿#!/usr/bin/node\n", null],
+    ["", null], ["node\n", null], [" #!/usr/bin/node\n", null], ["\ufeff#!/usr/bin/node\n", null],
   ];
   for (const [text, want] of cases) assert.equal(shebangLang(text), want, JSON.stringify(text));
   const bytes = (s) => Buffer.from(s, "latin1");

@@ -2741,6 +2741,102 @@ def _hidden_name_in(seg, offset):
     return None
 
 
+# ---------------- Look-alike identifiers (SC-HOMOGLYPH) ----------------
+# A name spelled with letters from another alphabet that look like Latin ones
+# reads as a name it is not (the homoglyph half of Trojan Source,
+# CVE-2021-42694): `const \u0435val = eval; \u0435val(x)`, with a Cyrillic e
+# (U+0435), calls eval where no reviewer sees eval called, and isAdm\u0456n
+# (a Cyrillic i) is not isAdmin. _LOOKALIKES maps the letters drawn like a
+# Latin letter in common fonts: Cyrillic, Greek capitals, omicron and lunate
+# sigma, Armenian o and u, Latin alpha and script g. Not every confusable:
+# Greek alpha, nu and rho, the variables of scientific code, are left out.
+# JavaScript also takes NFKC's compatibility forms as names of their own
+# (fullwidth \uff45val is not eval there; Python reads it as eval) and allows
+# the invisible U+200C / U+200D inside a name. A name whose skeleton
+# (look-alikes mapped, invisibles dropped) is an ASCII name it is not is
+# SC-HOMOGLYPH: CRITICAL when it reads as a code-execution or network name
+# (_LOOKALIKE_TARGETS) or as another name in the file (three characters or
+# more), MAJOR when it mixes ASCII letters with look-alikes. Anything else —
+# a Cyrillic word, a regex class like [\u0430-\u044f] — is left alone. (This
+# file writes every such character as an escape.)
+_LOOKALIKES = dict(zip(
+    "\u0430\u0435\u043e\u0440\u0441\u0443\u0445\u0455\u0456\u0458\u04bb\u0501\u051b\u051d\u04cf"   # Cyrillic
+    "\u0410\u0412\u0415\u041a\u041c\u041d\u041e\u0420\u0421\u0422\u0425\u0405\u0406\u0408\u04ae\u051a\u051c\u04c0"
+    "\u0391\u0392\u0395\u0396\u0397\u0399\u039a\u039c\u039d\u039f\u03a1\u03a4\u03a5\u03a7\u03dc"   # Greek
+    "\u03bf\u03f2\u03f3"
+    "\u0585\u057d"                                                                                  # Armenian
+    "\u0251\u0261",                                                                                 # Latin (IPA)
+    "aeopcyxsijhdqwl" "ABEKMHOPCTXSIJYQWI" "ABEZHIKMNOPTYXF" "ocj" "ou" "ag"))
+_LOOKALIKE_TARGETS = frozenset((
+    "eval", "exec", "execSync", "execFile", "execFileSync", "spawn", "spawnSync", "fork", "Function",
+    "require", "import", "__import__", "import_module", "compile", "system", "popen", "Popen",
+    "check_output", "check_call", "getoutput", "child_process", "subprocess", "os", "vm",
+    "runInThisContext", "runInNewContext", "runInContext", "atob", "b64decode", "fromCharCode",
+    "globalThis", "window", "global", "process", "Buffer", "setTimeout", "setInterval", "getattr",
+    "builtins", "__builtins__", "marshal", "pickle", "fetch", "urlopen", "socket"))
+_NAME_RUN_RE = re.compile(r"[\w$\u200c\u200d]+")
+_ASCII_WORD_RE = re.compile(r"[A-Za-z0-9_$]+")
+_ASCII_LETTER_RE = re.compile(r"[A-Za-z]")
+_INVISIBLE_IN_NAMES = frozenset("\u200c\u200d")
+
+
+def lookalike_name(code, lang, words):
+    """(name, reads_as, severity, detail) for the first name in `code` (a
+    line with its comments removed and its strings blanked) that reads as an
+    ASCII name it is not (see above), else None. `words()` gives the file's
+    ASCII words; it is called only when a look-alike name is found."""
+    if code.isascii():
+        return None
+    for m in _NAME_RUN_RE.finditer(code):
+        name = m.group()
+        if name.isascii() or (m.start() and code[m.start() - 1] == "\\"):
+            continue                        # after a backslash: an escape a regex literal kept
+        seen = unicodedata.normalize("NFKC", name) if lang == "js" else name
+        skeleton = "".join(_LOOKALIKES.get(ch, ch) for ch in seen if ch not in _INVISIBLE_IN_NAMES)
+        if not skeleton or skeleton == name or not skeleton.isascii() or skeleton[0].isdigit():
+            continue
+        if skeleton in _LOOKALIKE_TARGETS:
+            severity, other = "CRITICAL", False
+        elif len(skeleton) >= 3 and skeleton in words():
+            severity, other = "CRITICAL", True
+        elif _ASCII_LETTER_RE.search(name):
+            severity, other = "MAJOR", False
+        else:
+            continue
+        parts = []
+        for ch in name:
+            if ch.isascii():
+                continue
+            if ch in _INVISIBLE_IN_NAMES:
+                part = f"an invisible U+{ord(ch):04X}"
+            else:
+                shown = unicodedata.normalize("NFKC", ch) if lang == "js" else ch
+                part = f"U+{ord(ch):04X} for {''.join(_LOOKALIKES.get(c, c) for c in shown)!r}"
+            if part not in parts:
+                parts.append(part)
+        return name, skeleton, severity, other, ", ".join(parts), m.start()
+    return None
+
+
+_LOOKALIKE_WHY = (
+    "A name written with letters from another alphabet that look like Latin ones, or with an "
+    "invisible character inside it, is not the name a reviewer reads: `const eval = eval` with "
+    "a Cyrillic e (U+0435) makes a second eval that runs where no one sees eval called, and an "
+    "isAdmin with a Cyrillic i is not isAdmin (CVE-2021-42694, the homoglyph half of Trojan "
+    "Source).")
+
+
+def lookalike_issue(found, path, line_no, lines):
+    name, skeleton, severity, other, detail, col = found
+    where = ", another name in this file," if other else ""
+    return mk_issue(
+        {"id": "SC-HOMOGLYPH", "name": "Look-alike identifier", "type": "HOTSPOT", "sev": severity,
+         "msg": f"{name!r} reads as {skeleton!r}{where} but is spelled with {detail}.",
+         "why": _LOOKALIKE_WHY,
+         "fix": "Rename it with the letters it appears to have, and find out why it was written this way.",
+         "ref": "CWE-1007 · CVE-2021-42694"}, path, line_no, lines, col)
+
+
 _PEM_BODY_RE = re.compile(r"[A-Za-z0-9+/]{40,}={0,2}")
 
 
@@ -3591,6 +3687,12 @@ def _scan_file(path, content, lines, lang, dep, ctx, issues):
     rules = [r for r in RULES if lang in r["langs"]
              and (not dep or r["id"].startswith(DEP_RULE_PREFIXES))]
     secret_lines = set()          # lines with S-TOKEN / S-SECRET (S-ENTROPY dedupe)
+    file_words = []               # the file's ASCII words, read when a look-alike name needs them
+
+    def words():
+        if not file_words:
+            file_words.append(frozenset(_ASCII_WORD_RE.findall(content)))
+        return file_words[0]
     for i, line in enumerate(lines):
         ctx.check_time()
         if not line or line.isspace():
@@ -3658,6 +3760,12 @@ def _scan_file(path, content, lines, lang, dep, ctx, issues):
                              "names code execution, a download, or a URL."),
                      "fix": "Decode the string and review what it does.",
                      "ref": "CWE-506 · Supply chain"}, path, i + 1, lines, name[1]))
+        if lang in ("js", "py") and not cmask[i]:
+            code = ctx.mcode(i)
+            if not code.isascii():
+                found = lookalike_name(_blank_strings(code), lang, words)
+                if found is not None:
+                    issues.append(lookalike_issue(found, path, i + 1, lines))
         cm_col = _charcode_col(line) if lang == "js" else None
         if cm_col is not None:
             issues.append(mk_issue(

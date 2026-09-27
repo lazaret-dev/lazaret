@@ -54,8 +54,9 @@ class PinnedScanTests(unittest.TestCase):
 
     def test_js_escapes_decode_the_same_everywhere(self):
         src = "a = 1;\n\\u{10D4A}eval(x)\n\\u200deval(y)\n\\u30fbeval(z)\n"
+        # line 3's invisible U+200D glued to eval is also a look-alike name (SC-HOMOGLYPH)
         self.assertEqual(rules_at(core.scan_file("u.js", src, "js")),
-                         [("S-EVAL-JS", 2), ("S-EVAL-JS", 3), ("S-EVAL-JS", 4)])
+                         [("S-EVAL-JS", 2), ("S-EVAL-JS", 3), ("S-EVAL-JS", 4), ("SC-HOMOGLYPH", 3)])
 
     def test_snippets_show_the_replacement_character(self):
         (issue,) = core.scan_file("s.py", "x = eval(y)  # \U0001fae0 \U0001f600\n", "py")

@@ -223,6 +223,80 @@ function hiddenNameIn(seg, offset) {
   return null;
 }
 
+// ---- Look-alike identifiers (SC-HOMOGLYPH); twin of core.lookalike_name ----
+// A name spelled with letters from another alphabet that look like Latin ones
+// reads as a name it is not (`const \u0435val = eval`: a Cyrillic e; see
+// core). The table, the targets and the name pattern are core's (the parity
+// test compares them); every such character is written as an escape.
+const LOOKALIKE_KEYS = "\u0430\u0435\u043e\u0440\u0441\u0443\u0445\u0455\u0456\u0458\u04bb\u0501\u051b\u051d\u04cf\u0410\u0412\u0415\u041a\u041c\u041d\u041e\u0420\u0421\u0422\u0425\u0405\u0406\u0408\u04ae\u051a\u051c\u04c0\u0391\u0392\u0395\u0396\u0397\u0399\u039a\u039c\u039d\u039f\u03a1\u03a4\u03a5\u03a7\u03dc\u03bf\u03f2\u03f3\u0585\u057d\u0251\u0261";
+const LOOKALIKE_VALUES = "aeopcyxsijhdqwlABEKMHOPCTXSIJYQWIABEZHIKMNOPTYXFocjouag";
+export const LOOKALIKES = new Map(Array.from(LOOKALIKE_KEYS, (ch, k) => [ch, LOOKALIKE_VALUES[k]]));
+export const LOOKALIKE_TARGETS = new Set([
+  "Buffer", "Function", "Popen", "__builtins__", "__import__", "atob", "b64decode", "builtins", "check_call",
+  "check_output", "child_process", "compile", "eval", "exec", "execFile", "execFileSync", "execSync", "fetch",
+  "fork", "fromCharCode", "getattr", "getoutput", "global", "globalThis", "import", "import_module", "marshal", "os",
+  "pickle", "popen", "process", "require", "runInContext", "runInNewContext", "runInThisContext", "setInterval",
+  "setTimeout", "socket", "spawn", "spawnSync", "subprocess", "system", "urlopen", "vm", "window"
+]);
+export const NAME_RUN_SRC = String.raw`[\w$\u200c\u200d]+`;
+const NAME_RUN_RE = pyRe(NAME_RUN_SRC, "g");
+const ASCII_WORD_RE = /[A-Za-z0-9_$]+/g;
+const ASCII_LETTER_RE = /[A-Za-z]/;
+const INVISIBLE_IN_NAMES = new Set(["\u200c", "\u200d"]);
+const isAscii = (s) => !/[^\x00-\x7f]/.test(s);
+/** `code` with the contents of its string literals replaced by spaces (core._blank_strings). */
+const blankStrings = (code) => code.replace(STRING_LIT_RE, (s) => s[0] + " ".repeat(s.length - 2) + s[s.length - 1]);
+const hexCp = (ch) => ch.codePointAt(0).toString(16).toUpperCase().padStart(4, "0");
+
+/**
+ * [name, readsAs, severity, other, detail, column] for the first name in
+ * `code` (comments removed, strings blanked) that reads as an ASCII name it
+ * is not, else null. `words()` gives the file's ASCII words.
+ */
+export function lookalikeName(code, lang, words) {
+  if (isAscii(code)) return null;
+  NAME_RUN_RE.lastIndex = 0;
+  let m;
+  while ((m = NAME_RUN_RE.exec(code))) {
+    const name = m[0];
+    if (isAscii(name) || (m.index && code[m.index - 1] === "\\")) continue;   // an escape a regex literal kept
+    const seen = lang === "js" ? name.normalize("NFKC") : name;
+    let skeleton = "";
+    for (const ch of seen) if (!INVISIBLE_IN_NAMES.has(ch)) skeleton += LOOKALIKES.get(ch) ?? ch;
+    if (!skeleton || skeleton === name || !isAscii(skeleton) || /^[0-9]/.test(skeleton)) continue;
+    let severity, other = false;
+    if (LOOKALIKE_TARGETS.has(skeleton)) severity = "CRITICAL";
+    else if (skeleton.length >= 3 && words().has(skeleton)) { severity = "CRITICAL"; other = true; }
+    else if (ASCII_LETTER_RE.test(name)) severity = "MAJOR";
+    else continue;
+    const parts = [];
+    for (const ch of name) {
+      if (ch.codePointAt(0) < 0x80) continue;
+      let part;
+      if (INVISIBLE_IN_NAMES.has(ch)) part = `an invisible U+${hexCp(ch)}`;
+      else {
+        const shown = lang === "js" ? ch.normalize("NFKC") : ch;
+        let mapped = "";
+        for (const c of shown) mapped += LOOKALIKES.get(c) ?? c;
+        part = `U+${hexCp(ch)} for ${pyRepr(mapped)}`;
+      }
+      if (!parts.includes(part)) parts.push(part);
+    }
+    return [name, skeleton, severity, other, parts.join(", "), m.index];
+  }
+  return null;
+}
+
+const LOOKALIKE_WHY = "A name written with letters from another alphabet that look like Latin ones, or with an invisible character inside it, is not the name a reviewer reads: `const eval = eval` with a Cyrillic e (U+0435) makes a second eval that runs where no one sees eval called, and an isAdmin with a Cyrillic i is not isAdmin (CVE-2021-42694, the homoglyph half of Trojan Source).";
+function lookalikeIssue(found, path, lineNo, lines) {
+  const [name, skeleton, severity, other, detail, col] = found;
+  return mkIssue({ id: "SC-HOMOGLYPH", name: "Look-alike identifier", type: "HOTSPOT", sev: severity,
+    msg: `${pyRepr(name)} reads as ${pyRepr(skeleton)}${other ? ", another name in this file," : ""} but is spelled with ${detail}.`,
+    why: LOOKALIKE_WHY,
+    fix: "Rename it with the letters it appears to have, and find out why it was written this way.",
+    ref: "CWE-1007 · CVE-2021-42694" }, path, lineNo, lines, col);
+}
+
 // A "-----BEGIN ... PRIVATE KEY-----" header alone is not a key: libraries keep the
 // header as a constant to recognize key files. Require base64 key material after it,
 // on the same line or the next two. Twin of core._token_has_material.
@@ -391,7 +465,7 @@ function isCodeSink(code, m, cpAliases) {
 }
 const DEP_ASSIGN_RE = pyRe(String.raw`(?<![\w$])([A-Za-z_$][\w$]*)\s*=(?![=>])([^;]*)`, "gd");
 const DEP_SINK_ARGS_MAX = 1000;
-const blankStrings = (code) => code.replace(STRING_LIT_RE, (s) => s[0] + " ".repeat(s.length - 2) + s[s.length - 1]);
+// (blankStrings: see the look-alike names above)
 // A decoded value taints names for DEP_FLOW_WINDOW characters from the decode
 // (twin of core.DEP_FLOW_WINDOW: unbounded, one ordinary decode in a large
 // bundle spread through helper parameters to thousands of names).
@@ -567,6 +641,8 @@ function scanLines(path, content, lines, lang, dep, ctx, issues) {
   const rules = RULES.filter((r) => r.langs.includes(lang)
     && (!dep || DEP_RULE_PREFIXES.some((p) => r.id.startsWith(p))));
   const secretLines = new Set();          // lines with S-TOKEN / S-SECRET (S-ENTROPY dedupe)
+  let fileWords = null;                   // the file's ASCII words, read when a look-alike name needs them
+  const words = () => (fileWords ??= new Set(content.match(ASCII_WORD_RE) ?? []));
   for (let i = 0; i < lines.length; i++) {
     ctx.checkTime();
     const line = lines[i];
@@ -611,6 +687,13 @@ function scanLines(path, content, lines, lang, dep, ctx, issues) {
         why: "Nothing needs to escape a letter of a name like this one: writing it as escape sequences only hides it from review and search, and this one names code execution, a download, or a URL.",
         fix: "Decode the string and review what it does.",
         ref: "CWE-506 · Supply chain" }, path, i + 1, lines, name[1]));
+    }
+    if ((lang === "js" || lang === "py") && !cmask[i]) {
+      const code = ctx.mcode(i);
+      if (!isAscii(code)) {
+        const found = lookalikeName(blankStrings(code), lang, words);
+        if (found) issues.push(lookalikeIssue(found, path, i + 1, lines));
+      }
     }
     const cmCol = lang === "js" ? charcodeCol(line) : null;
     if (cmCol !== null)

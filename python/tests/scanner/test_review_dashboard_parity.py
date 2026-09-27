@@ -76,6 +76,9 @@ ADVERSARIAL = [
     ("inline_os.py", "py", "__import__('os').system(input())\nimportlib.import_module('os').popen(c)\n"),
     ("esm.mts", "js", "const el = <HTMLInputElement>document.body;\n// eval(z)\neval(atob(p));\n"),
     ("cjs.cts", "js", "const el = <T,>(x: T) => x;\n/* eval(z) */ eval(y);\n"),
+    ("lookalike.js", "js", "const \u0435val = eval;\n\u0435val(x);\nif (isAdm\u0456n) {}\nconst isAdmin = 1;\nconst v\u0430lue = 2;\neva\u200dl(y);\n"),
+    ("lookalike.py", "py", "\u0435val = eval\n\u0435val(input())\n"),
+    ("lookalike_regex.js", "js", "const re = /[\\uFF07\\uFF10]/;\nx = /[\u0430-\u044f]/;\n"),
     # FIX-SPEC 1: comment state across lines; U+2028/U+2029 end JS lines
     ("blockcomment.js", "js", "/*\n eval(x)\n*/\n/**/eval(y)\n"),
     ("comments.js", "js", "/* start\n * eval(a)\n */ eval(b)\n  * eval(c)\nconst r = /\\/*/; eval(d)\n"
