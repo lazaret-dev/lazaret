@@ -2917,6 +2917,64 @@ def lookalike_issue(found, path, line_no, lines):
          "ref": "CWE-1007 · CVE-2021-42694"}, path, line_no, lines, col)
 
 
+# ---------------- Invisible-character payload (SC-HIDDEN-UNICODE) ----------------
+# A run of invisible characters carries bytes no reviewer or diff can see:
+# variation selectors (U+FE00-FE0F, U+E0100-E01EF) or tag characters
+# (U+E0000-E007F). GlassWorm (Oct 2025, 150+ repos across npm and VS Code) hid
+# its payload in variation selectors and decoded it with a codePointAt map into
+# eval; tag characters smuggle instructions past a reviewer and an AI reading
+# the file. The only ordinary runs are a flag emoji (a U+1F3F4 base, tag
+# letters, the U+E007F terminator), left alone, and a lone emoji variation
+# selector (U+FE0F), one character and below the run threshold. A run in a file
+# that runs code from a string (eval, Function, exec) is CRITICAL (the GlassWorm
+# shape), else MAJOR.
+_HIDDEN_RUN_RE = re.compile("[\U0000FE00-\U0000FE0F\U000E0000-\U000E01EF]{2,}")
+_FLAG_EMOJI_BASE = "\U0001F3F4"
+_TAG_START = "\U000E0000"
+_TAG_END = "\U000E007F"
+_HIDDEN_EXEC_RE = re.compile(
+    r"(?<![\w$.])(?:eval|Function|execSync|exec|runInThisContext|runInNewContext|runInContext)\s*\(")
+
+
+def _hidden_flag_emoji(line, m):
+    """The run m is a flag emoji's tag sequence (a U+1F3F4 base, tag letters,
+    the U+E007F terminator): an ordinary run, left alone."""
+    run = m.group()
+    return (m.start() > 0 and line[m.start() - 1] == _FLAG_EMOJI_BASE
+            and run.endswith(_TAG_END) and all(_TAG_START <= c <= _TAG_END for c in run))
+
+
+def hidden_unicode_run(line):
+    """(col, run) for the first run of invisible carrier characters in `line`
+    that is not a flag emoji, else None."""
+    for m in _HIDDEN_RUN_RE.finditer(line):
+        if not _hidden_flag_emoji(line, m):
+            return m.start(), m.group()
+    return None
+
+
+_HIDDEN_UNICODE_WHY = (
+    "Invisible characters in source carry bytes that no review or diff shows: a variation selector or a "
+    "tag character has no business in code. GlassWorm hid a payload in variation selectors and decoded it "
+    "into eval; tag characters smuggle instructions past a reviewer and an AI reading the file. Only a flag "
+    "emoji and a single emoji variation selector are ordinary.")
+
+
+def _hidden_unicode_issue(path, line_no, lines, col, run, runs_code):
+    tags = any(_TAG_START <= c <= _TAG_END for c in run)
+    varsel = any(not (_TAG_START <= c <= _TAG_END) for c in run)
+    what = ("variation selectors and tag characters" if tags and varsel
+            else "tag characters" if tags else "variation selectors")
+    return mk_issue(
+        {"id": "SC-HIDDEN-UNICODE", "name": "Invisible-character payload", "type": "HOTSPOT",
+         "sev": "CRITICAL" if runs_code else "MAJOR",
+         "msg": f"A run of {len(run)} invisible {what} carries hidden data in the code"
+                + (", and the file runs code from a string." if runs_code else "."),
+         "why": _HIDDEN_UNICODE_WHY,
+         "fix": "Show the characters as escape sequences and decode what they spell; if it is a payload, do not run the file.",
+         "ref": "CWE-506 · Supply chain"}, path, line_no, lines, col)
+
+
 _PEM_BODY_RE = re.compile(r"[A-Za-z0-9+/]{40,}={0,2}")
 
 
@@ -3773,6 +3831,12 @@ def _scan_file(path, content, lines, lang, dep, ctx, issues):
         if not file_words:
             file_words.append(frozenset(_ASCII_WORD_RE.findall(content)))
         return file_words[0]
+    runs_code = []                # whether the file runs code from a string (SC-HIDDEN-UNICODE severity)
+
+    def file_runs_code():
+        if not runs_code:
+            runs_code.append(_HIDDEN_EXEC_RE.search(content) is not None)
+        return runs_code[0]
     for i, line in enumerate(lines):
         ctx.check_time()
         if not line or line.isspace():
@@ -3848,6 +3912,10 @@ def _scan_file(path, content, lines, lang, dep, ctx, issues):
                     issues.append(lookalike_issue(found, path, i + 1, lines))
             if not dep and _runs_download_through_shell(code):
                 issues.append(mk_issue(_PIPE_SHELL_RULE, path, i + 1, lines, _EXEC_CALL_RE.search(code).start()))
+        if not line.isascii():
+            hrun = hidden_unicode_run(line)
+            if hrun is not None:
+                issues.append(_hidden_unicode_issue(path, i + 1, lines, hrun[0], hrun[1], file_runs_code()))
         cm_col = _charcode_col(line) if lang == "js" else None
         if cm_col is not None:
             issues.append(mk_issue(
@@ -4763,6 +4831,91 @@ _PIPE_SHELL_RULE = {
             "after reading the script; code that runs it hands every run to that server."),
     "fix": "Download a pinned version, check its checksum or signature, and run that file; or drop the download.",
     "ref": "CWE-494 · Supply chain"}
+
+
+# ---------------- Dependency drives your AI agent (SC-AGENT-HIJACK) ----------------
+# A dependency that launches the user's own AI coding agent in an autonomous
+# mode, to do the attacker's bidding, is the s1ngularity / Nx attack (Aug
+# 2025, the first weaponized-AI-agent malware): a postinstall spawned
+# `claude --dangerously-skip-permissions`, `gemini --yolo` and
+# `q --trust-all-tools` with a prompt telling the agent to search the disk for
+# secrets, wallets and SSH keys and write them out. A package has no reason to
+# run your agent, and none at all to run it with the flag that turns off every
+# confirmation. Dependency-only: an install-hook script or import-time code
+# that hands a known agent CLI, with such a flag, to an exec/spawn call (your
+# own automation driving your agent is your business). The bypass FLAG is the
+# signal — on 118k real files only the agent tools themselves name these flags,
+# and never next to an exec call — and a known agent name confirms it.
+_AGENT_NAMES = r"claude|gemini|codex|aider|cline|opencode|cursor-agent|amazon-?q|qchat|q"
+# In code a spawned binary is a string literal (a spawn target, "claude", or a
+# command string, "claude --yolo"): require a quote before it, so a minified
+# variable that happens to be named q is not one (a real false positive:
+# @anthropic-ai/claude-code's minified cli.js packs a `q` variable, the flag
+# string and an exec on one line). An install-hook COMMAND is a bare shell
+# string, so there the binary is a shell token instead.
+_AGENT_BIN_SRC = r"""(?<=["'])(?:""" + _AGENT_NAMES + r""")(?=["'\s])"""
+_AGENT_BIN_CMD_SRC = r"(?<![\w./-])(?:" + _AGENT_NAMES + r")(?![\w./-])"
+_AGENT_FLAG_SRC = (r"--(?:dangerously-skip-permissions|yolo|trust-all-tools"
+                   r"|dangerously-bypass-approvals-and-sandbox|full-auto|yes-always|allow-all-tools)(?![\w-])"
+                   r"|--(?:approval-mode|permission-mode)[=\s]+(?:yolo|bypassPermissions)")
+_AGENT_BIN_RE = re.compile(_AGENT_BIN_SRC)
+_AGENT_BIN_CMD_RE = re.compile(_AGENT_BIN_CMD_SRC)
+_AGENT_FLAG_RE = re.compile(_AGENT_FLAG_SRC)
+
+
+def agent_hijack(text):
+    """-> (agent, flag, line) for the first line of dependency code that hands
+    a known AI-agent CLI, with a flag that turns off its confirmations, to an
+    exec/spawn call (see above), else None. `text` has \\n line endings."""
+    if _AGENT_FLAG_RE.search(text) is None:
+        return None
+    for i, row in enumerate(text.split("\n")):
+        if _EXEC_CALL_RE.search(row) is None:
+            continue
+        flag = _AGENT_FLAG_RE.search(row)
+        binm = _AGENT_BIN_RE.search(row)
+        if flag is not None and binm is not None:
+            return binm.group().strip("'\""), flag.group(), i + 1
+    return None
+
+
+def agent_hijack_in_command(cmd):
+    """-> (agent, flag) when an install-hook COMMAND launches the agent
+    directly (the shell is the exec, so no exec call is needed), else None."""
+    flag = _AGENT_FLAG_RE.search(cmd)
+    binm = _AGENT_BIN_CMD_RE.search(cmd)
+    if flag is not None and binm is not None:
+        return binm.group().strip("'\""), flag.group()
+    return None
+
+
+_AGENT_HIJACK_WHY = (
+    "A dependency that runs your AI coding agent hands the attacker your agent's access to your machine "
+    "and accounts, and a flag like --dangerously-skip-permissions or --yolo runs it with every "
+    "confirmation turned off: the s1ngularity / Nx attack spawned the agent from a postinstall hook to "
+    "search the disk for secrets, wallets and SSH keys and write them out (the first weaponized-AI-agent "
+    "malware). No package needs to launch your agent.")
+
+
+def _agent_hijack_issue(path, line_no, lines, agent, flag, col=None, redactor=None):
+    return mk_issue(
+        {"id": "SC-AGENT-HIJACK", "name": "Dependency drives your AI agent", "type": "HOTSPOT", "sev": "CRITICAL",
+         "msg": f"Dependency launches the {agent!r} AI agent with {flag} — running your coding agent "
+                f"with its confirmations turned off.",
+         "why": _AGENT_HIJACK_WHY,
+         "fix": "Do not install or run this package; read what it tells the agent to do. Report it to the registry.",
+         "ref": "CWE-506 · Supply chain"}, path, line_no, lines, col, redactor)
+
+
+def dependency_agent_issue(path, text):
+    """SC-AGENT-HIJACK (CRITICAL) for a dependency's file that launches an AI
+    agent in an autonomous mode (agent_hijack), else None."""
+    found = agent_hijack(text)
+    if found is None:
+        return None
+    agent, flag, line = found
+    lines = text.split("\n")
+    return _agent_hijack_issue(path, line, lines, agent, flag, redactor=_Redactor(lines))
 
 
 def node_candidates(rel):
@@ -6015,16 +6168,26 @@ def dependency_checks(root, files, manifests, issues, excludes=(), should_stop=N
                 return out, extra, stopped
         try:
             found = dependency_import_issue(f["path"], f["content"])
+            agent = dependency_agent_issue(f["path"], f["content"])
         except Exception as exc:
-            found = scan_error_issue(f["path"], exc)
+            found, agent = scan_error_issue(f["path"], exc), None
         if found is not None:
             out.append(found)
+        if agent is not None:
+            out.append(agent)
     return out, extra, None
 
 
 def _follow_dependency_hook(tree, issue, out, extra, run, followed_to_end):
     manifest = issue["file"]
     base = posixpath.dirname(manifest.replace(os.sep, "/"))
+    direct = agent_hijack_in_command(issue["cmd"])         # the hook runs the agent itself
+    if direct is not None:
+        m = tree.manifests.get(manifest.replace(os.sep, "/"))
+        if m is not None:
+            mlines = m["content"].split("\n")
+            out.append(_agent_hijack_issue(manifest, issue["line"], mlines, direct[0], direct[1],
+                                           redactor=_Redactor(mlines)))
     targets, complete = follow_hook(issue["cmd"])
     if not complete and manifest not in followed_to_end:
         followed_to_end[manifest] = True
@@ -6043,6 +6206,9 @@ def _follow_dependency_hook(tree, issue, out, extra, run, followed_to_end):
             msg = f"Install hook runs {target}, which {'; and '.join(reasons)}."
             issue["sev"] = "CRITICAL"
             issue["msg"] = _redact_text(msg) if REDACT_SECRETS else msg
+        agent = dependency_agent_issue(rel.replace("/", os.sep), text) if text else None
+        if agent is not None:
+            out.append(agent)
 
 
 def _dependency_script_text(tree, rel, as_lang, out, extra, run):

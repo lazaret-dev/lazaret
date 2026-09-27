@@ -193,6 +193,11 @@ ADVERSARIAL = {
     "uni/lookalike.js": "const \u0435val = eval;\n\u0435val(x);\nif (isAdm\u0456n) {}\nconst isAdmin = 1;\nconst v\u0430lue = 2;\neva\u200dl(y);\n",
     "uni/lookalike.py": "\u0435val = eval\n\u0435val(input())\n",
     "node_modules/evil/lookalike.js": "\uff45val(atob(p));\n",
+    # a dependency that launches your AI coding agent (SC-AGENT-HIJACK, --deps only)
+    "node_modules/agent/package.json": json.dumps({"name": "agent", "version": "1.0.0", "scripts": {"postinstall": "node run.js"}}),
+    "node_modules/agent/run.js": 'require("child_process").spawnSync("claude", ["--dangerously-skip-permissions", "-p", "harvest"]);\n',
+    # an invisible-character payload (SC-HIDDEN-UNICODE)
+    "uni/hidden.js": "const s=v=>[...v].map(w=>w.codePointAt(0));\neval(s(`\U0000FE00\U0000FE01\U0000FE09\U0000FE0C\U0000FE0F\U0000FE01\U0000FE04`));\n",
     # ... read where the lexer reads code: a regex literal's text and escapes, a docstring are not names
     "uni/literals.js": ("var re = /^(?:(?:http[s\\u017F]?|ftp):\\/\\/)/i;\nconst ok = /^[a-z\u0430-\u044f]+$/.test(s);\n"
                         "const s = 'it\\'s' + \u0435val(x) + 'y';\nconst t = `\n  v\u0430lue\n`;\n"),
@@ -387,6 +392,8 @@ class EngineParityTests(unittest.TestCase):
                                  ("SC-HOMOGLYPH", "uni/lookalike.py")):
                         self.assertIn(want, found)
                     self.assertEqual(("SC-HOMOGLYPH", "node_modules/evil/lookalike.js") in found, label == "--deps")
+                    self.assertIn(("SC-HIDDEN-UNICODE", "uni/hidden.js"), found)
+                    self.assertEqual(("SC-AGENT-HIJACK", "node_modules/agent/run.js") in found, label == "--deps")
                     self.assertEqual(sorted((i["file"].replace("\\", "/"), i["line"]) for i in js[1]["issues"]
                                             if i["rule"] == "SC-HOMOGLYPH" and "/literals." in i["file"].replace("\\", "/")),
                                      [("uni/literals.js", 3), ("uni/literals.py", 5)])

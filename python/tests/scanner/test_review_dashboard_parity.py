@@ -86,6 +86,9 @@ ADVERSARIAL = [
      "const r = a / v\u0430lue / 2;\n"),
     ("lookalike_strings.js", "js", "const s = 'it\\'s' + \u0435val(x) + 'y';\nconst t = `\n  v\u0430lue ${\u0435val(x)}\n`;\n"
      'const q = "a\\\n\u0435val";\n'),
+    ("hidden_unicode.js", "js", "const s=v=>[...v].map(w=>w.codePointAt(0));\n"
+     "eval(Buffer.from(s(`\U0000FE00\U0000FE01\U0000FE09\U0000FE0C\U0000FE0F\U0000FE01\U0000FE04`)).toString());\n"
+     "const bare = `\U0000FE01\U0000FE02`;\n"),
     ("lookalike_strings.py", "py", 'def f():\n    """\n    v\u0430lue\n    """\n    return \u0435val(x)\n'
      "s = 'it\\'s' + \u0435val(x) + 'y'\nx = f'{\u0435val(p)}'\n"),
     # FIX-SPEC 1: comment state across lines; U+2028/U+2029 end JS lines

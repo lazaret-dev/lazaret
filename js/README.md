@@ -68,7 +68,10 @@ resolving to one file. Writes are atomic
   strings built from character codes written in the call or in an array it uses; `javascript-obfuscator` identifier signatures; compiled binaries;
   unchecked or orphaned `.pyc` files; UTF-7 source (`SC-UTF7`); your own code
   running a download piped into a shell (`execSync("curl … | bash")`,
-  `SC-PIPE-SHELL`).
+  `SC-PIPE-SHELL`); and a run of invisible characters carrying hidden bytes
+  — variation selectors or tag characters, the GlassWorm carrier
+  (`SC-HIDDEN-UNICODE`, CRITICAL when the file also runs code from a string,
+  else MAJOR; a flag emoji is left alone).
 - **Unicode evasion**: JS identifier escapes (`\u0065val`) and Python NFKC
   spellings are matched as the runtime reads them; bidirectional control
   characters are `S-BIDI` (Trojan Source); a name spelled with look-alike
@@ -105,7 +108,10 @@ resolving to one file. Writes are atomic
   shell, is CRITICAL; a file it runs that is not a source file is read and
   scanned as JavaScript), and a dependency's other JavaScript and Python
   files get the import-time test (`SC-IMPORT-RISK`, MAJOR: the whole
-  environment or a credential store read next to a network call).
+  environment or a credential store read next to a network call). A
+  dependency that launches your AI coding agent in an autonomous mode
+  (`claude --dangerously-skip-permissions`, `gemini --yolo`, the s1ngularity
+  attack) is `SC-AGENT-HIJACK` (CRITICAL).
   `__pycache__` is not source-scanned,
   but its `.pyc` files are checked. Every pruned tree is listed as an INFO
   `Q-SKIPPED-TREE` finding.

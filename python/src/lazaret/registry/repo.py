@@ -78,6 +78,9 @@ MAX_MEMBER = _env_number("LAZARET_MAX_SOURCE_BYTES", 16_000_000)
 MAX_FILES = 20_000         # files per package (numpy's sdist alone has >4,000)
 SAMPLE = 8192              # header/entropy sample read from oversized files
 # Stored scans from another engine version are scanned again (has_scan).
+# 2.7: a dependency that launches your AI coding agent in an autonomous mode
+#      (SC-AGENT-HIJACK, the s1ngularity / Nx attack), a run of invisible
+#      characters carrying a payload (SC-HIDDEN-UNICODE, GlassWorm)
 # 2.6: install hooks followed through wrapper options, fd numbers, env -C/-S
 #      (and within limits), #! scripts run by bun/deno/ts-node/tsx and a
 #      Python script's coding cookie, .mts/.cts sources and .jsc bytecode,
@@ -89,7 +92,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.6.0"
+ENGINE_VERSION = "2.7.0"
 
 # ---------------- Trust-chain limits (F9/G14/F10) ----------------
 # Only these hosts may ever be fetched, over https only, and redirects to any
@@ -1685,6 +1688,11 @@ class _ArtifactScan:
             if issue["rule"] != "SC-INSTALL-HOOK" or not issue.get("cmd"):
                 continue
             base = posixpath.dirname(issue["file"])
+            direct = lazaret.agent_hijack_in_command(issue["cmd"])    # the hook runs the agent itself
+            if direct is not None:
+                mtext = lazaret.normalize_newlines(self.manifests.get(issue["file"], ""))
+                self.issues.append(lazaret._agent_hijack_issue(
+                    issue["file"], issue["line"], mtext.split("\n"), direct[0], direct[1]))
             targets, complete = lazaret.follow_hook(issue["cmd"])
             if not complete:            # a limit stopped the walk (core.HOOK_MAX_CHARS)
                 self.truncate(issue["file"], "its install hook is more than Lazaret follows "
@@ -1797,6 +1805,19 @@ class _ArtifactScan:
                  "fix": "Read the file: what does it collect, and where does it send it?",
                  "ref": "CWE-506 · Supply chain"}, rel, line, text.split("\n")))
 
+    def _agent_hijack(self):
+        """SC-AGENT-HIJACK (CRITICAL): a package file that launches an AI
+        coding agent in an autonomous mode (core.agent_hijack). A package is a
+        dependency, so every source file is dependency code."""
+        for rel in sorted(self.sources):
+            text, lang = self.sources.get(rel, (None, None))
+            if not text or lang not in ("js", "py"):
+                continue
+            self._deadline(rel)
+            issue = lazaret.dependency_agent_issue(rel, lazaret.normalize_newlines(text))
+            if issue is not None:
+                self.issues.append(issue)
+
     def _reachable(self):
         """Entry files plus local files they require/import (JS), transitively.
         A file reached this way runs when the package is loaded: one not
@@ -1852,6 +1873,8 @@ class _ArtifactScan:
             reachable = self._reachable()
             self._deadline("the import-time code")
             self._import_time_code(reachable)
+            self._deadline("the agent-hijack check")
+            self._agent_hijack()
             # interprocedural / cross-file taint (full profile only — needs whole source)
             if self.full and getattr(lazaret, "lazaret_flow", None) is not None:
                 self._deadline("the cross-file analysis")

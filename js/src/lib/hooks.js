@@ -15,7 +15,7 @@
 // not, with the same results.
 
 import { pyRe, pyStrip, isPySpace } from "./pycompat.js";
-import { PIPE_SCAN_SRC, EXEC_CALL_SRC, pipesDownloadToShell, runsDownloadThroughShell } from "./shellpipe.js";
+import { PIPE_SCAN_SRC, EXEC_CALL_SRC, EXEC_CALL_RE, pipesDownloadToShell, runsDownloadThroughShell } from "./shellpipe.js";
 
 // ---- Python details the patterns depend on --------------------------------
 
@@ -683,6 +683,42 @@ export function importTimeRisk(text) {
   return [reasons, line];
 }
 
+// SC-AGENT-HIJACK: a dependency that launches the user's own AI coding agent
+// in an autonomous mode (the s1ngularity / Nx attack; see core). Twins of
+// core.agent_hijack / core.agent_hijack_in_command; the tables are core's.
+const AGENT_NAMES = String.raw`claude|gemini|codex|aider|cline|opencode|cursor-agent|amazon-?q|qchat|q`;
+// In code a spawned binary is a string literal (require a quote before it, so a
+// minified variable named q is not one); an install-hook command is a bare
+// shell string, so there the binary is a shell token (see core).
+export const AGENT_BIN_SRC = String.raw`(?<=["'])(?:` + AGENT_NAMES + String.raw`)(?=["'\s])`;
+export const AGENT_BIN_CMD_SRC = String.raw`(?<![\w./-])(?:` + AGENT_NAMES + String.raw`)(?![\w./-])`;
+export const AGENT_FLAG_SRC =
+  String.raw`--(?:dangerously-skip-permissions|yolo|trust-all-tools|dangerously-bypass-approvals-and-sandbox` +
+  String.raw`|full-auto|yes-always|allow-all-tools)(?![\w-])|--(?:approval-mode|permission-mode)[=\s]+(?:yolo|bypassPermissions)`;
+const AGENT_BIN_RE = pyRe(AGENT_BIN_SRC);
+const AGENT_BIN_CMD_RE = pyRe(AGENT_BIN_CMD_SRC);
+const AGENT_FLAG_RE = pyRe(AGENT_FLAG_SRC);
+
+/** [agent, flag, line] for the first line of dependency code that hands a known AI-agent CLI, with a
+ * confirmation-off flag, to an exec/spawn call, else null. Twin of core.agent_hijack. */
+export function agentHijack(text) {
+  if (!AGENT_FLAG_RE.test(text)) return null;
+  const rows = text.split("\n");
+  for (let i = 0; i < rows.length; i++) {
+    if (!EXEC_CALL_RE.test(rows[i])) continue;
+    const flag = AGENT_FLAG_RE.exec(rows[i]), binm = AGENT_BIN_RE.exec(rows[i]);
+    if (flag && binm) return [binm[0].replace(/^['"]|['"]$/g, ""), flag[0], i + 1];
+  }
+  return null;
+}
+
+/** [agent, flag] when an install-hook COMMAND launches the agent itself (the shell is the exec), else null.
+ * Twin of core.agent_hijack_in_command. */
+export function agentHijackInCommand(cmd) {
+  const flag = AGENT_FLAG_RE.exec(cmd), binm = AGENT_BIN_CMD_RE.exec(cmd);
+  return flag && binm ? [binm[0].replace(/^['"]|['"]$/g, ""), flag[0]] : null;
+}
+
 /**
  * Files Node tries for a path it is asked to run or load.
  * Twin of lazaret.scanner.core.node_candidates.
@@ -730,6 +766,7 @@ export const PY_TWINS = {
     _EXFIL_DEST_RE: [EXFIL_DEST_SRC, "i"], _EXFIL_SERVICE_RE: [EXFIL_SERVICES_SRC, "i"],
     _PIPE_SCAN_RE: [PIPE_SCAN_SRC, ""], _IMPORT_HARVEST_RE: [IMPORT_HARVEST_SRC, ""],
     _EXEC_CALL_RE: [EXEC_CALL_SRC, ""], _SHEBANG_RE: [SHEBANG_SRC, ""],
+    _AGENT_BIN_RE: [AGENT_BIN_SRC, ""], _AGENT_BIN_CMD_RE: [AGENT_BIN_CMD_SRC, ""], _AGENT_FLAG_RE: [AGENT_FLAG_SRC, ""],
   },
   sets: {
     _HOOK_SEPARATORS: [...HOOK_SEPARATORS], _HOOK_REDIRECTS: [...HOOK_REDIRECTS],

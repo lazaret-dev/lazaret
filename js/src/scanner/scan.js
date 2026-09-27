@@ -342,6 +342,49 @@ function lookalikeIssue(found, path, lineNo, lines) {
     ref: "CWE-1007 · CVE-2021-42694" }, path, lineNo, lines, col);
 }
 
+
+// ---- Invisible-character payload (SC-HIDDEN-UNICODE); twins of core ----
+// Carrier chars in UTF-16: VS1 (BMP U+FE00-FE0F), or an astral char in
+// U+E0000-E01EF, which all share the high surrogate 0xDB40 with a low
+// surrogate 0xDC00-0xDDEF. Matching code units needs no `u` flag; the run
+// length and columns are counted in code points, to match core.
+const HIDDEN_RUN_RE = /(?:[\uFE00-\uFE0F]|\uDB40[\uDC00-\uDDEF]){2,}/g;
+const FLAG_EMOJI_BASE = String.fromCodePoint(0x1F3F4);
+const HIDDEN_TAG_START = 0xE0000, HIDDEN_TAG_END = 0xE007F;
+const HIDDEN_EXEC_RE = pyRe(String.raw`(?<![\w$.])(?:eval|Function|execSync|exec|runInThisContext|runInNewContext|runInContext)\s*\(`);
+const HIDDEN_UNICODE_WHY = "Invisible characters in source carry bytes that no review or diff shows: a variation selector or a tag character has no business in code. GlassWorm hid a payload in variation selectors and decoded it into eval; tag characters smuggle instructions past a reviewer and an AI reading the file. Only a flag emoji and a single emoji variation selector are ordinary.";
+
+/** Is the run at UTF-16 `index` a flag emoji's tag sequence? Twin of core._hidden_flag_emoji. */
+function hiddenFlagEmoji(line, index, run) {
+  if (!(index >= 2 && line.slice(index - 2, index) === FLAG_EMOJI_BASE)) return false;
+  const cps = [...run], last = cps[cps.length - 1].codePointAt(0);
+  return last === HIDDEN_TAG_END && cps.every((c) => { const o = c.codePointAt(0); return o >= HIDDEN_TAG_START && o <= HIDDEN_TAG_END; });
+}
+
+/** [col, run] (col a UTF-16 index) for the first non-flag-emoji carrier run in `line`, else null. Twin of core.hidden_unicode_run. */
+function hiddenUnicodeRun(line) {
+  HIDDEN_RUN_RE.lastIndex = 0;
+  let m;
+  while ((m = HIDDEN_RUN_RE.exec(line))) {
+    if (!hiddenFlagEmoji(line, m.index, m[0])) return [m.index, m[0]];
+  }
+  return null;
+}
+
+/** SC-HIDDEN-UNICODE at line lineNo. Twin of core._hidden_unicode_issue. */
+function hiddenUnicodeIssue(path, lineNo, lines, col, run, runsCode) {
+  const cps = [...run];
+  const tags = cps.some((c) => { const o = c.codePointAt(0); return o >= HIDDEN_TAG_START && o <= HIDDEN_TAG_END; });
+  const varsel = cps.some((c) => { const o = c.codePointAt(0); return !(o >= HIDDEN_TAG_START && o <= HIDDEN_TAG_END); });
+  const what = tags && varsel ? "variation selectors and tag characters" : tags ? "tag characters" : "variation selectors";
+  return mkIssue({ id: "SC-HIDDEN-UNICODE", name: "Invisible-character payload", type: "HOTSPOT",
+    sev: runsCode ? "CRITICAL" : "MAJOR",
+    msg: `A run of ${cps.length} invisible ${what} carries hidden data in the code` + (runsCode ? ", and the file runs code from a string." : "."),
+    why: HIDDEN_UNICODE_WHY,
+    fix: "Show the characters as escape sequences and decode what they spell; if it is a payload, do not run the file.",
+    ref: "CWE-506 · Supply chain" }, path, lineNo, lines, col);
+}
+
 // A "-----BEGIN ... PRIVATE KEY-----" header alone is not a key: libraries keep the
 // header as a constant to recognize key files. Require base64 key material after it,
 // on the same line or the next two. Twin of core._token_has_material.
@@ -688,6 +731,8 @@ function scanLines(path, content, lines, lang, dep, ctx, issues) {
   const secretLines = new Set();          // lines with S-TOKEN / S-SECRET (S-ENTROPY dedupe)
   let fileWords = null;                   // the file's ASCII words, read when a look-alike name needs them
   const words = () => (fileWords ??= new Set(content.match(ASCII_WORD_RE) ?? []));
+  let runsCodeFlag = null;                 // whether the file runs code from a string (SC-HIDDEN-UNICODE severity)
+  const fileRunsCode = () => (runsCodeFlag ??= HIDDEN_EXEC_RE.test(content));
   for (let i = 0; i < lines.length; i++) {
     ctx.checkTime();
     const line = lines[i];
@@ -741,6 +786,10 @@ function scanLines(path, content, lines, lang, dep, ctx, issues) {
       }
       if (!dep && runsDownloadThroughShell(code))
         issues.push(mkIssue(PIPE_SHELL_RULE, path, i + 1, lines, EXEC_CALL_RE.exec(code).index));
+    }
+    if (!isAscii(line)) {
+      const hrun = hiddenUnicodeRun(line);
+      if (hrun) issues.push(hiddenUnicodeIssue(path, i + 1, lines, hrun[0], hrun[1], fileRunsCode()));
     }
     const cmCol = lang === "js" ? charcodeCol(line) : null;
     if (cmCol !== null)

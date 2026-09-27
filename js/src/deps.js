@@ -17,7 +17,7 @@
 import { lstatSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { scanFile } from "./scanner/scan.js";
-import { followHook, installScriptRisk, importTimeRisk, nodeCandidates, shebangLang,
+import { followHook, installScriptRisk, importTimeRisk, agentHijack, agentHijackInCommand, nodeCandidates, shebangLang,
   HOOK_MAX_CHARS, HOOK_MAX_COMMANDS, HOOK_MAX_TARGETS, HOOK_MAX_PATH } from "./lib/hooks.js";
 import { HOOK_COMMANDS, loadManifest } from "./lib/supplychain.js";
 import { readBounded, truncatedIssue, scanErrorIssue, strerror, normalizeNewlines, encodingIssues,
@@ -26,7 +26,7 @@ import { looksBinary, HEADER_SAMPLE } from "./lib/binary.js";
 import { decodeSource } from "./lib/encoding.js";
 import { mkIssue } from "./lib/issue.js";
 import { REDACT, redactText, registerScanContext, SECRET_SKIP_RE } from "./lib/redact.js";
-import { pyStrip } from "./lib/pycompat.js";
+import { pyStrip, pyRepr } from "./lib/pycompat.js";
 
 const DEP_IMPORT_RISK_WHY = "An installed package's code runs with the application's privileges when it is loaded " +
   "or its command runs. Collecting credentials or the whole environment next to a network call is the shape of an " +
@@ -191,9 +191,11 @@ export function dependencyChecks(root, files, manifests, issues, { exclude = [],
   }
   for (const f of files) {
     if (!f.dep || (f.lang !== "js" && f.lang !== "py") || run.has(posix(f.path))) continue;
-    let found;
-    try { found = dependencyImportIssue(f.path, f.content); } catch (e) { found = scanErrorIssue(f.path, e); }
+    let found, agent;
+    try { found = dependencyImportIssue(f.path, f.content); agent = dependencyAgentIssue(f.path, f.content); }
+    catch (e) { found = scanErrorIssue(f.path, e); agent = null; }
     if (found) out.push(found);
+    if (agent) out.push(agent);
   }
   return { issues: out, files: extra };
 }
@@ -201,6 +203,11 @@ export function dependencyChecks(root, files, manifests, issues, { exclude = [],
 function followDependencyHook(tree, issue, cmd, out, extra, run, truncated) {
   const manifest = issue.file;
   const base = dirname(posix(manifest));
+  const direct = agentHijackInCommand(cmd);              // the hook runs the agent itself
+  if (direct) {
+    const m = tree.manifests.get(posix(manifest));
+    if (m) out.push(agentHijackIssue(manifest, issue.line, m.content.split("\n"), direct[0], direct[1]));
+  }
   const [targets, complete] = followHook(cmd);
   if (!complete && !truncated.has(manifest)) {
     truncated.add(manifest);
@@ -219,6 +226,8 @@ function followDependencyHook(tree, issue, cmd, out, extra, run, truncated) {
       issue.sev = "CRITICAL";
       issue.msg = REDACT.on ? redactText(msg) : msg;
     }
+    const agent = text ? dependencyAgentIssue(native(rel), text) : null;
+    if (agent) out.push(agent);
   }
 }
 
@@ -270,4 +279,29 @@ export function dependencyImportIssue(path, text) {
     msg: `Dependency code ${reasons.join("; and ")}.`, why: DEP_IMPORT_RISK_WHY,
     fix: "Read the file: what does it collect, and where does it send it?",
     ref: "CWE-506 · Supply chain" }, path, line, lines);
+}
+
+const AGENT_HIJACK_WHY = "A dependency that runs your AI coding agent hands the attacker your agent's access to " +
+  "your machine and accounts, and a flag like --dangerously-skip-permissions or --yolo runs it with every " +
+  "confirmation turned off: the s1ngularity / Nx attack spawned the agent from a postinstall hook to search the " +
+  "disk for secrets, wallets and SSH keys and write them out (the first weaponized-AI-agent malware). No package " +
+  "needs to launch your agent.";
+
+/** SC-AGENT-HIJACK (CRITICAL) at line `lineNo` of `lines`. Twin of core._agent_hijack_issue. */
+function agentHijackIssue(path, lineNo, lines, agent, flag, col = null) {
+  registerScanContext(lines, SECRET_SKIP_RE);
+  return mkIssue({ id: "SC-AGENT-HIJACK", name: "Dependency drives your AI agent", type: "HOTSPOT", sev: "CRITICAL",
+    msg: `Dependency launches the ${pyRepr(agent)} AI agent with ${flag} — running your coding agent ` +
+      "with its confirmations turned off.",
+    why: AGENT_HIJACK_WHY,
+    fix: "Do not install or run this package; read what it tells the agent to do. Report it to the registry.",
+    ref: "CWE-506 · Supply chain" }, path, lineNo, lines, col);
+}
+
+/** SC-AGENT-HIJACK (CRITICAL) for a dependency's file that launches an AI agent, else null. Twin of core.dependency_agent_issue. */
+export function dependencyAgentIssue(path, text) {
+  const found = agentHijack(text);
+  if (!found) return null;
+  const [agent, flag, line] = found;
+  return agentHijackIssue(path, line, text.split("\n"), agent, flag);
 }
