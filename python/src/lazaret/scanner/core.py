@@ -237,6 +237,30 @@ def _module_ref(name):
             rf"|importlib\.import_module\(\s*['\"]{name}['\"]\s*\))")
 
 
+# Indirect calls of eval and Function (review of the adversarial analysis:
+# `(0, eval)(atob(p))`, `eval.call(null, atob(p))`, `window['eval'](atob(p))`
+# and `globalThis["ev" + "al"](atob(p))` ran a decoded payload unseen): the
+# comma operator's `(0, eval)(…)`, `eval.call(thisArg, …)`,
+# `eval.apply(thisArg, […])` and `eval.bind(…)(…)`, `Reflect.apply(eval,
+# thisArg, […])`, and a
+# computed member named by a string literal, whole or cut into pieces joined
+# with + (`window['eval']`, `self["Func" + "tion"]`). Each alternative ends
+# where the payload argument begins; SC-EVAL-DECODE and the dependency decode
+# flow take them as sinks.
+_SPLIT_LITERAL = r"(?:['\"`]\s*\+\s*['\"`])?"
+# `(0, window.eval)`: a global object may name them, no other receiver
+# (TypeScript's CommonJS output calls every imported function as
+# `(0, module_1.name)(…)`, and typebox exports one named Function)
+_GLOBAL_OBJECT = r"(?:(?:window|globalThis|self|global|top|parent|frames)\s*\.\s*)?"
+_EVAL_BY_NAME = r"\[\s*['\"`](?:" + _SPLIT_LITERAL.join("eval") + "|" + _SPLIT_LITERAL.join("Function") + r")['\"`]\s*\]"
+_INDIRECT_EVAL = (
+    r"\(\s*(?:void\s+)?[\w$.]+\s*,\s*" + _GLOBAL_OBJECT + r"(?:eval|Function)\s*\)\s*\("
+    r"|\b(?:eval|Function)\s*\.\s*(?:call|apply)\s*\(\s*(?:void\s+)?[\w$.]*\s*,\s*\[?"
+    r"|\b(?:eval|Function)\s*\.\s*bind\s*\([^()]*\)\s*\("
+    r"|\bReflect\s*\.\s*apply\s*\(\s*" + _GLOBAL_OBJECT + r"(?:eval|Function)\s*,\s*(?:void\s+)?[\w$.]*\s*,\s*\["
+    r"|" + _EVAL_BY_NAME + r"\s*\(")
+
+
 RULES = [
 R("S-EVAL-PY", "Dynamic code execution", "VULN", "CRITICAL", ("py",),
   r"(?<![\w.])(eval|exec)\s*\(",
@@ -560,7 +584,8 @@ R("S-SPAWN-SHELL", "child_process with shell:true", "VULN", "CRITICAL", ("js",),
 # `exec(compile(b64decode(…), …))` is the same thing with Python's compile()
 # in between; it used to be caught only by SC-MARSHAL's `exec(compile(`.
 R("SC-EVAL-DECODE", "Decoded payload execution", "VULN", "BLOCKER", ("py", "js"),
-  r"\b(?:eval|exec|execSync|Function|runIn(?:This|New)?Context)\s*\(\s*(?:compile\s*\(\s*)?"
+  r"(?:\b(?:eval|exec|execSync|Function|runIn(?:This|New)?Context)\s*\(|" + _INDIRECT_EVAL + r")"
+  r"\s*(?:compile\s*\(\s*)?"
   r"(?:(?:[\w$]+|" + _INLINE_IMPORT + r")\s*\.\s*)*"
   r"(?:atob|unescape|decodeURIComponent|Buffer\s*\.\s*from|b64decode|"
   + _module_ref("codecs") + r"\s*\.\s*decode|" + _module_ref("zlib") + r"\s*\.\s*decompress|"
@@ -3290,7 +3315,7 @@ SC_JOIN_MAX_LINES = 8
 SC_JOIN_MAX_CHARS = 4000        # of following-line text added to one join
 _SC_SINK_NAMES = ("eval", "exec", "execSync", "Function",
                   "runInContext", "runInThisContext", "runInNewContext")
-_SC_SINK_WORD_RE = re.compile(r"\b(?:eval|exec|execSync|Function|runIn(?:This|New)?Context)\b")
+_SC_SINK_WORD_RE = re.compile(r"\b(?:eval|exec|execSync|Function|runIn(?:This|New)?Context)\b|" + _EVAL_BY_NAME)
 
 
 def _paren_balance(code):
@@ -3354,6 +3379,16 @@ _DECODE_SINK_RE = re.compile(
     r"|runIn(?:This|New)?Context)\s*\(")
 _GLOBAL_EVAL_RECEIVERS = frozenset(("window", "globalThis", "self", "global", "top", "parent",
                                     "frames", "builtins", "__builtins__"))
+# The indirect calls of eval / Function (_INDIRECT_EVAL) as sinks of the
+# flow: each match ends at the call's '(' (a thisArg in the arguments names
+# no decoded value). Matched on the line as written, since a computed
+# member's name is a string literal; a match must start outside one.
+_INDIRECT_SINK_RE = re.compile(
+    r"\(\s*(?:void\s+)?[\w$.]+\s*,\s*" + _GLOBAL_OBJECT + r"(?:eval|Function)\s*\)\s*\("
+    r"|\b(?:eval|Function)\s*\.\s*(?:call|apply)\s*\("
+    r"|\b(?:eval|Function)\s*\.\s*bind\s*\([^()]*\)\s*\("
+    r"|\bReflect\s*\.\s*apply\s*\((?=\s*" + _GLOBAL_OBJECT + r"(?:eval|Function)\s*,)"
+    r"|" + _EVAL_BY_NAME + r"\s*\(")
 _CHILD_PROCESS_RE = re.compile(r"['\"`](?:node:)?child_process['\"`]")
 _CP_ALIAS_RE = re.compile(
     r"(?<![\w$.])([A-Za-z_$][\w$]*)\s*=\s*(?:await\s+)?(?:require|import)\s*\(\s*"
@@ -3431,6 +3466,8 @@ def _dep_decode_flow(path, ctx, issues):
         blank = _blank_strings(code)
         events = [(m.start(), 0, m) for m in _DEP_ASSIGN_RE.finditer(blank)]
         events += [(m.start(), 1, m) for m in _DECODE_SINK_RE.finditer(blank)]
+        events += [(m.start(), 2, m) for m in _INDIRECT_SINK_RE.finditer(code)
+                   if blank[m.start()] == code[m.start()]]
         events.sort(key=lambda e: (e[0], e[1]))
         close = None
 
@@ -3452,10 +3489,13 @@ def _dep_decode_flow(path, ctx, issues):
                 if src:
                     decoded[m.group(1)] = max(src, key=lambda d: d[1])
                 continue
-            if i + 1 in have or not _is_code_sink(code, m, cp_aliases):
+            if i + 1 in have:
                 continue
-            if _FN_DEF_BEFORE_RE.search(blank[max(0, m.start(2) - 24):m.start(2)]):
-                continue                      # a definition, not a call
+            if kind == 1:
+                if not _is_code_sink(code, m, cp_aliases):
+                    continue
+                if _FN_DEF_BEFORE_RE.search(blank[max(0, m.start(2) - 24):m.start(2)]):
+                    continue                  # a definition, not a call
             if close is None:
                 close = _paren_close_map(blank)
             closed = close.get(m.end() - 1)

@@ -252,7 +252,10 @@ export function taintScan(file, lines, lang, ctx = null) {
 const SC_JOIN_MAX_LINES = 8;
 const SC_JOIN_MAX_CHARS = 4000;
 const SC_SINK_NAMES = ["eval", "exec", "execSync", "Function", "runInContext", "runInThisContext", "runInNewContext"];
-const SC_SINK_WORD_RE = pyRe(String.raw`\b(?:eval|exec|execSync|Function|runIn(?:This|New)?Context)\b`);
+// core._EVAL_BY_NAME: a computed member named 'eval' or 'Function' by a string
+// literal, whole or cut into pieces joined with + (`window['eval']`, `self["Func" + "tion"]`)
+const EVAL_BY_NAME = "\\[\\s*['\\\"`](?:e(?:['\\\"`]\\s*\\+\\s*['\\\"`])?v(?:['\\\"`]\\s*\\+\\s*['\\\"`])?a(?:['\\\"`]\\s*\\+\\s*['\\\"`])?l|F(?:['\\\"`]\\s*\\+\\s*['\\\"`])?u(?:['\\\"`]\\s*\\+\\s*['\\\"`])?n(?:['\\\"`]\\s*\\+\\s*['\\\"`])?c(?:['\\\"`]\\s*\\+\\s*['\\\"`])?t(?:['\\\"`]\\s*\\+\\s*['\\\"`])?i(?:['\\\"`]\\s*\\+\\s*['\\\"`])?o(?:['\\\"`]\\s*\\+\\s*['\\\"`])?n)['\\\"`]\\s*\\]";
+const SC_SINK_WORD_RE = pyRe(String.raw`\b(?:eval|exec|execSync|Function|runIn(?:This|New)?Context)\b|` + EVAL_BY_NAME);
 function parenBalance(code) {
   const t = code.replace(STRING_LIT_RE, "");
   let d = 0;
@@ -299,6 +302,11 @@ const DECODE_SINK_RE = pyRe(String.raw`(?:(?<![\w$])(require\s*\(\s*['"\x60][ \w
   + String.raw`|runIn(?:This|New)?Context)\s*\(`, "gd");
 const GLOBAL_EVAL_RECEIVERS = new Set(["window", "globalThis", "self", "global", "top", "parent",
   "frames", "builtins", "__builtins__"]);
+// The indirect calls of eval / Function as sinks of the flow (twin of
+// core._INDIRECT_SINK_RE): each match ends at the call's "(". Matched on the
+// line as written, since a computed member's name is a string literal; a
+// match must start outside one.
+const INDIRECT_SINK_RE = pyRe("\\(\\s*(?:void\\s+)?[\\w$.]+\\s*,\\s*(?:(?:window|globalThis|self|global|top|parent|frames)\\s*\\.\\s*)?(?:eval|Function)\\s*\\)\\s*\\(|\\b(?:eval|Function)\\s*\\.\\s*(?:call|apply)\\s*\\(|\\b(?:eval|Function)\\s*\\.\\s*bind\\s*\\([^()]*\\)\\s*\\(|\\bReflect\\s*\\.\\s*apply\\s*\\((?=\\s*(?:(?:window|globalThis|self|global|top|parent|frames)\\s*\\.\\s*)?(?:eval|Function)\\s*,)|\\[\\s*['\\\"`](?:e(?:['\\\"`]\\s*\\+\\s*['\\\"`])?v(?:['\\\"`]\\s*\\+\\s*['\\\"`])?a(?:['\\\"`]\\s*\\+\\s*['\\\"`])?l|F(?:['\\\"`]\\s*\\+\\s*['\\\"`])?u(?:['\\\"`]\\s*\\+\\s*['\\\"`])?n(?:['\\\"`]\\s*\\+\\s*['\\\"`])?c(?:['\\\"`]\\s*\\+\\s*['\\\"`])?t(?:['\\\"`]\\s*\\+\\s*['\\\"`])?i(?:['\\\"`]\\s*\\+\\s*['\\\"`])?o(?:['\\\"`]\\s*\\+\\s*['\\\"`])?n)['\\\"`]\\s*\\]\\s*\\(", "g");
 const CHILD_PROCESS_RE = pyRe(String.raw`['"\x60](?:node:)?child_process['"\x60]`);
 const CP_ALIAS_RE = pyRe(String.raw`(?<![\w$.])([A-Za-z_$][\w$]*)\s*=\s*(?:await\s+)?(?:require|import)\s*\(\s*`
   + String.raw`['"\x60](?:node:)?child_process['"\x60]\s*\)`
@@ -368,6 +376,8 @@ function depDecodeFlow(path, ctx, issues, rule) {
     while ((m = DEP_ASSIGN_RE.exec(blank))) events.push([m.index, 0, m]);
     DECODE_SINK_RE.lastIndex = 0;
     while ((m = DECODE_SINK_RE.exec(blank))) events.push([m.index, 1, m]);
+    INDIRECT_SINK_RE.lastIndex = 0;
+    while ((m = INDIRECT_SINK_RE.exec(code))) if (blank[m.index] === code[m.index]) events.push([m.index, 2, m]);
     events.sort((x, y) => x[0] - y[0] || x[1] - y[1]);
     let close = null;
     for (let n = 0; n < events.length; n++) {
@@ -381,9 +391,12 @@ function depDecodeFlow(path, ctx, issues, rule) {
         if (src.length) decoded.set(ev[1], src.reduce((x, y) => (y[1] > x[1] ? y : x)));
         continue;
       }
-      if (have.has(i + 1) || !isCodeSink(code, ev, cpAliases)) continue;
-      const nameAt = ev.indices[2][0];
-      if (FN_DEF_BEFORE_RE.test(blank.slice(Math.max(0, nameAt - 24), nameAt))) continue;  // a definition
+      if (have.has(i + 1)) continue;
+      if (kind === 1) {
+        if (!isCodeSink(code, ev, cpAliases)) continue;
+        const nameAt = ev.indices[2][0];
+        if (FN_DEF_BEFORE_RE.test(blank.slice(Math.max(0, nameAt - 24), nameAt))) continue;  // a definition
+      }
       close ??= parenCloseMap(blank);
       const argStart = ev.index + ev[0].length;
       const closed = close.get(argStart - 1);
