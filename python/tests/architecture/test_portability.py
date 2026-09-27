@@ -21,6 +21,9 @@ not code we run):
 5. Paths from glob()/rglob()/iterdir() are not sorted as Path objects without
    a key=: Windows compares Paths case-insensitively ('ElementTree.py' after
    '__init__.py'), POSIX by code point. Sort their as_posix() strings.
+6. re.split()'s maxsplit and re.sub()/re.subn()'s count are passed by
+   keyword: Python 3.13 deprecated passing them (and flags) positionally, and
+   a later version refuses it, so code that runs clean today would break.
 """
 
 import ast
@@ -41,6 +44,8 @@ FIXTURES = os.path.join(PY_ROOT, "tests", "fixtures")
 SUBPROCESS_CALLS = {"run", "Popen", "check_output", "call", "check_call"}
 PATH_CALLS = {"open", "makedirs", "mkdir", "listdir", "scandir", "chdir", "rmtree",
               "TemporaryDirectory", "mkdtemp", "mkstemp", "NamedTemporaryFile", "Path"}
+# re module functions -> how many arguments may be positional (rule 6)
+RE_POSITIONAL = {"split": 2, "sub": 3, "subn": 3}
 
 
 def python_files():
@@ -113,6 +118,10 @@ def violations():
                              and call_name(node.args[0])[1].id == "glob"):   # glob.glob: strings
                 found.append(f"{where}: sorted() of Path objects is case-insensitive on Windows; "
                              "pass key=lambda p: p.as_posix()")
+            elif name in RE_POSITIONAL and isinstance(owner, ast.Name) and owner.id == "re" \
+                    and len(node.args) > RE_POSITIONAL[name]:
+                found.append(f"{where}: re.{name}() with maxsplit/count/flags passed positionally "
+                             "(deprecated since Python 3.13); pass them by keyword")
             if name in PATH_CALLS and node.args:
                 first = node.args[0]
                 if isinstance(first, ast.Constant) and isinstance(first.value, str) \
@@ -184,10 +193,13 @@ class CrossPlatformRulesTests(unittest.TestCase):
                'open("x")\nopen("x", "w")\nio.open("x", "r")\n'
                'subprocess.run(["x"], text=True)\n'
                'p.read_text()\nlocale.getpreferredencoding()\nopen("/tmp/x", "wb")\n'
-               'sorted(p.rglob("*"))\n')
+               'sorted(p.rglob("*"))\n'
+               're.split(",", s, 1)\nre.sub("a", "b", s, 1)\n')
         ok = ('import subprocess\nopen("x", "rb")\nopen("x", encoding="utf-8")\n'
               'subprocess.run(["x"], text=True, encoding="utf-8")\np.read_text(encoding="utf-8")\n'
-              'sorted(p.rglob("*"), key=str)\nsorted(glob.glob("*"))\n')
+              'sorted(p.rglob("*"), key=str)\nsorted(glob.glob("*"))\n'
+              're.split(",", s, maxsplit=1)\nre.sub("a", "b", s, count=1)\ns.split(",", 1)\n'
+              'PATTERN.split(s, 1)\n')
         import tempfile
         with tempfile.TemporaryDirectory() as d:
             global TREES
@@ -201,7 +213,7 @@ class CrossPlatformRulesTests(unittest.TestCase):
                 got = violations()
             finally:
                 TREES = saved
-        self.assertEqual(len(got), 8, "\n".join(got))
+        self.assertEqual(len(got), 10, "\n".join(got))
         self.assertTrue(all("bad.py" in g for g in got), got)
 
 

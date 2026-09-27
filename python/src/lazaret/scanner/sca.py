@@ -1091,7 +1091,7 @@ def _scan_requirements(path, root, out, warn, seen, depth=0):
                 out.append(("pypi", egg.group(1), "", "%s (url)" % rel))
             continue
         # a requirement may carry trailing options (--hash=…)
-        req = re.split(r"\s--?[A-Za-z]", line, 1)[0].strip()
+        req = re.split(r"\s--?[A-Za-z]", line, maxsplit=1)[0].strip()
         _add_req(out, req, rel)
 
 
