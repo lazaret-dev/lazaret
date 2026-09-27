@@ -297,7 +297,7 @@ R("S-SQL-JS", "SQL built from strings", "VULN", "BLOCKER", ("js",),
   "Use placeholders: db.query('SELECT … WHERE id = ?', [id]).",
   "CWE-89 · OWASP A03"),
 R("S-OSCMD-PY", "OS command execution", "VULN", "CRITICAL", ("py",),
-  r"os\.(system|popen)\s*\(",
+  _module_ref("os") + r"\s*\.\s*(system|popen)\s*\(",     # also __import__("os").system(
   "os.system/os.popen runs shell commands.",
   "Any user-influenced portion of the command allows shell injection.",
   "Use subprocess.run([...]) with a list of args and shell=False.",
@@ -1370,7 +1370,8 @@ EXEC_MAGIC = [
 ]
 COMPILED_EXTS = {".so", ".pyd", ".dll", ".dylib", ".node", ".a", ".lib", ".o",
                  ".obj", ".exe", ".pyc", ".pyo", ".class", ".wasm",
-                 ".dex", ".jar", ".msi", ".dmg"}
+                 ".dex", ".jar", ".msi", ".dmg",
+                 ".jsc"}              # V8 bytecode (bytenode): JavaScript no one can read
 # Recognized benign binary assets — data, not code. Not flagged.
 BENIGN_MAGIC = [b"\x89PNG", b"\xff\xd8\xff", b"GIF8", b"RIFF", b"OggS", b"BM",
                 b"\x00\x00\x01\x00", b"wOFF", b"wOF2", b"ID3", b"%PDF",
@@ -1388,12 +1389,17 @@ BENIGN_MAGIC = [b"\x89PNG", b"\xff\xd8\xff", b"GIF8", b"RIFF", b"OggS", b"BM",
 CONTAINER_DOCUMENT_EXTS = {".docx", ".xlsx", ".pptx", ".odt", ".ods", ".odp", ".odg", ".epub",
                            ".dia", ".svgz", ".ora", ".kmz", ".3mf", ".xmind", ".vsdx"}
 FONT_EXTS = {".ttf", ".otf", ".ttc", ".woff", ".woff2", ".eot", ".pfb", ".pcf", ".bdf"}
+#: MPEG transport stream video (a camera's AVCHD .mts): the extensions it shares
+#: with TypeScript (.ts, .mts), and Blu-ray's .m2ts
+MPEG_TS_EXTS = (".ts", ".mts", ".m2ts")
 
 
 def is_benign_media(header, ext):
     if any(header.startswith(sig) for sig in BENIGN_MAGIC) or b"ftyp" in header[:16]:
         return True
     if header[36:40] == b"acsp":                       # ICC color profile
+        return True
+    if ext in MPEG_TS_EXTS and _mpeg_ts(header):        # video
         return True
     return ext in FONT_EXTS and header[:4] in (b"\x00\x01\x00\x00", b"true", b"typ1")
 NESTED_ARCHIVE_MAGIC = [(b"PK\x03\x04", "zip"), (b"\x1f\x8b", "gzip"),
@@ -1435,8 +1441,8 @@ def looks_binary(sample):
 
 
 def _mpeg_ts(header):
-    """MPEG transport stream (.ts video): sync byte every 188 bytes. Shares
-    the .ts extension with TypeScript."""
+    """MPEG transport stream (.ts / .mts video): sync byte every 188 bytes.
+    Shares the .ts and .mts extensions with TypeScript."""
     return len(header) >= 377 and header[0] == header[188] == header[376] == 0x47
 
 
@@ -1480,7 +1486,7 @@ def decode_member(path, data, lang=None):
     text, info = decode_source(data, lang)
     extra = encoding_issues(path, text, info)
     share = _undecodable_share(text)
-    if share > _NON_TEXT_SHARE and not (ext == ".ts" and _mpeg_ts(data[:512])):
+    if share > _NON_TEXT_SHARE and not (ext in MPEG_TS_EXTS and _mpeg_ts(data[:512])):
         extra.append(truncated_issue(
             path, f"content is not decodable as text ({share:.0%} invalid bytes or "
                   f"control characters), so no rule could read it"))
@@ -1581,7 +1587,7 @@ FN_LEN_LIMIT = 60
 FN_CX_LIMIT = 12
 FN_HEADER_SCAN_LIMIT = 2000   # chars of a JS line searched for a function header
 EXTS = {".py": "py", ".pyw": "py", ".js": "js", ".jsx": "js", ".ts": "js", ".tsx": "js",
-        ".mjs": "js", ".cjs": "js", ".sql": "sql"}
+        ".mts": "js", ".cts": "js", ".mjs": "js", ".cjs": "js", ".sql": "sql"}
 # G10 + review item 8: what the project walk never source-scans.
 #   * .git (exactly that name) is always pruned — VCS metadata, never
 #     shippable source (and reported as a Q-SKIPPED-TREE blind spot).
@@ -2263,9 +2269,9 @@ def comment_mask(lines, lang, jsx=True):
 
 
 def jsx_reading(path):
-    """Is a JavaScript-family file also read as JSX? Every one but .ts:
-    TypeScript parses no JSX there (`<T>x` is a type assertion)."""
-    return not str(path).lower().endswith(".ts")
+    """Is a JavaScript-family file also read as JSX? Every one but .ts, .mts
+    and .cts: TypeScript parses no JSX there (`<T>x` is a type assertion)."""
+    return not str(path).lower().endswith((".ts", ".mts", ".cts"))
 
 
 def is_comment(line, lang):
@@ -2667,6 +2673,72 @@ def hex_hidden_text(line):
     if not _LETTER_RUN_RE.search(text) or letters / len(text) < 0.4:
         return None
     return text
+
+
+# Fewer escapes than HEX_MIN_ESCAPES still hide a name when the name is the
+# point (analyst gap): global["\x72\x65\x71\x75\x69\x72\x65"]("child_process")
+# spells require in 7 escapes, "\x65val" eval in one. Nothing needs to escape
+# a letter, digit or "_" of such a name, so a string literal in which a
+# dangerous name (HIDDEN_TEXT_DANGER_RE) has one of those written as an
+# escape — \xNN, \uNNNN, \u{N…}, \UNNNNNNNN or a three-digit octal escape of a
+# printable ASCII character — is SC-HEXSTR, CRITICAL, whatever the count.
+# Punctuation escapes do not count (serializers write "/" as \u002F:
+# "https:\u002F\u002F…" hides no URL), a literal whose escapes are mostly
+# binary data is data (b"\x00\x04\x65xec" is a packet), and an escape after
+# an odd run of backslashes is an escaped backslash and text.
+_NAME_ESCAPE_RE = re.compile(
+    r"\\(?:x([0-9A-Fa-f]{2})|u([0-9A-Fa-f]{4})|u\{([0-9A-Fa-f]{1,6})\}|U([0-9A-Fa-f]{8})|([0-7]{3}))")
+
+
+def hex_hidden_name(line):
+    r"""(name, column) for the first string literal on this line whose
+    escape sequences spell part of a dangerous name ("\x65val",
+    global["\x72\x65\x71…"]), else None: the name as decoded, and the
+    column of its first escaped letter, digit or "_"."""
+    if "\\" not in line:
+        return None
+    for lit in STRING_LIT_RE.finditer(line):
+        if "\\" in lit.group():
+            found = _hidden_name_in(lit.group()[1:-1], lit.start() + 1)
+            if found is not None:
+                return found
+    return None
+
+
+def _hidden_name_in(seg, offset):
+    pieces, esc_at, esc_col = [], [], []
+    pos = size = total = printable = 0
+    for m in _NAME_ESCAPE_RE.finditer(seg):
+        start = run = m.start()
+        while run > 0 and seg[run - 1] == "\\":
+            run -= 1
+        if (start - run) % 2:
+            continue                        # "\\x65": an escaped backslash, then text
+        total += 1
+        digits = m.group(1) or m.group(2) or m.group(3) or m.group(4)
+        code = int(digits, 16) if digits is not None else int(m.group(5), 8)
+        if code > 0x10FFFF:
+            continue                        # no character: left as written
+        ch = chr(code)
+        pieces.append(seg[pos:start])
+        size += start - pos
+        if 0x20 <= code < 0x7F:
+            printable += 1
+            if ch.isalnum() or ch == "_":
+                esc_at.append(size)
+                esc_col.append(offset + start)
+        pieces.append(ch)                   # every escape decoded: b"\x00\x65val" holds the word eval
+        size += 1
+        pos = m.end()
+    if not esc_at or printable / total < HEX_PRINTABLE_SHARE:
+        return None
+    pieces.append(seg[pos:])
+    text = "".join(pieces)
+    for m in HIDDEN_TEXT_DANGER_RE.finditer(text):
+        k = bisect.bisect_left(esc_at, m.start())
+        if k < len(esc_at) and esc_at[k] < m.end():
+            return m.group(), esc_col[k]
+    return None
 
 
 _PEM_BODY_RE = re.compile(r"[A-Za-z0-9+/]{40,}={0,2}")
@@ -3575,6 +3647,17 @@ def _scan_file(path, content, lines, lang, dep, ctx, issues):
                  "fix": "Decode the string and review what it does.",
                  "ref": "CWE-506 · Supply chain"}, path, i + 1, lines,
                 _HEX_ESCAPE_RE.search(line).start()))
+        else:
+            name = hex_hidden_name(line)
+            if name is not None:
+                issues.append(mk_issue(
+                    {"id": "SC-HEXSTR", "name": "Hex-escaped readable text", "type": "HOTSPOT",
+                     "sev": "CRITICAL", "msg": f"Escape sequences hide a name: {name[0]!r}.",
+                     "why": ("Nothing needs to escape a letter of a name like this one: writing it as "
+                             "escape sequences only hides it from review and search, and this one "
+                             "names code execution, a download, or a URL."),
+                     "fix": "Decode the string and review what it does.",
+                     "ref": "CWE-506 · Supply chain"}, path, i + 1, lines, name[1]))
         cm_col = _charcode_col(line) if lang == "js" else None
         if cm_col is not None:
             issues.append(mk_issue(
@@ -5438,6 +5521,13 @@ def _collect_file(path, rel, st, in_dep, col):
         head = _read_prefix(path, HEADER_SAMPLE_BYTES)
         lang = script_source_lang(head)
         if lang is None:
+            bi = classify_binary(disp, head, size, "repo")
+            if bi:
+                issues.append(bi)
+            return
+    if lang is not None and ext in MPEG_TS_EXTS:
+        head = _read_prefix(path, HEADER_SAMPLE_BYTES)
+        if _mpeg_ts(head):                  # a video (a camera's .mts), not TypeScript
             bi = classify_binary(disp, head, size, "repo")
             if bi:
                 issues.append(bi)

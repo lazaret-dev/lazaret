@@ -78,13 +78,17 @@ MAX_MEMBER = _env_number("LAZARET_MAX_SOURCE_BYTES", 16_000_000)
 MAX_FILES = 20_000         # files per package (numpy's sdist alone has >4,000)
 SAMPLE = 8192              # header/entropy sample read from oversized files
 # Stored scans from another engine version are scanned again (has_scan).
+# 2.6: install hooks followed through wrapper options, fd numbers, env -C/-S
+#      (and within limits), #! scripts run by bun/deno/ts-node/tsx and a
+#      Python script's coding cookie, .mts/.cts sources and .jsc bytecode,
+#      decode-then-run through an indirect eval, names hidden in a few escapes
 # 2.5: what runs (exports patterns, required files, start-up and import-time
 #      code), escape codecs, zip links, the time budget
 # 2.4: every PyPI artifact, decode/cookie handling, archive structure checks,
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.5.0"
+ENGINE_VERSION = "2.6.0"
 
 # ---------------- Trust-chain limits (F9/G14/F10) ----------------
 # Only these hosts may ever be fetched, over https only, and redirects to any
@@ -1485,7 +1489,7 @@ class _ArtifactScan:
                       or ext in (".pth", ".gyp", ".gypi"))
         if reason == "member":
             self.oversize.add(rel)
-            if wants_text and not (ext == ".ts" and lazaret._mpeg_ts(raw[:512])):
+            if wants_text and not (ext in lazaret.MPEG_TS_EXTS and lazaret._mpeg_ts(raw[:512])):
                 # Verdict integrity (audit C2/G16): a cut-short scan is a
                 # signal, not a clean verdict — whatever the first bytes look like.
                 self.truncate(rel, _TRUNC_DETAILS["member"](rel, size))

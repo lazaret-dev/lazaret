@@ -176,6 +176,15 @@ ADVERSARIAL = {
     "bin/run": "#!/bin/sh\neval \"$1\"\n",
     "bin/next-line": "#!/usr/bin/env\nnode\neval(x)\n",
     "node_modules/evil/bin/setup": "#!/usr/bin/env python3\nexec(__import__('base64').b64decode('cHJpbnQoMSk='))\n",
+    # .mts / .cts sources (read without JSX) and a camera's .mts video; .jsc bytecode; an
+    # inline os import; a name hidden in a few escapes; decode-then-run through indirect eval
+    "ts/esm.mts": "const el = <HTMLInputElement>document.body;\n// eval(z)\neval(atob(p));\n",
+    "ts/cjs.cts": "const cp = require('child_process');\ncp.exec(process.argv[2]);\n",
+    "media/clip.mts": b"".join(b"\x47" + bytes((k * 7 + n) % 256 for n in range(187)) for k in range(40)),
+    "dist/app.jsc": b"\x00\x01bytenode\x02" * 10,
+    "py/inline_os.py": "__import__('os').system(input())\n",
+    "hide/names.js": 'var m = global["\\x72\\x65\\x71\\x75\\x69\\x72\\x65"]("child_process");\n',
+    "hide/indirect.js": "(0, eval)(atob(p));\nwindow['ev' + 'al'](atob(p));\n",
 }
 
 
@@ -359,7 +368,11 @@ class EngineParityTests(unittest.TestCase):
                     self.assertIn(("S-OSCMD-PY", "enc/le16_nobom.py"), found)
                     self.assertIn(("S-EVAL-JS", "bin/cli"), found)
                     self.assertIn(("SC-UTF7", "bin/tool"), found)
-                    self.assertFalse({f for _, f in found} & {"bin/run", "bin/next-line"})
+                    self.assertFalse({f for _, f in found} & {"bin/run", "bin/next-line", "media/clip.mts"})
+                    for want in (("S-EVAL-JS", "ts/esm.mts"), ("T-CMD", "ts/cjs.cts"), ("SC-BINARY", "dist/app.jsc"),
+                                 ("S-OSCMD-PY", "py/inline_os.py"), ("SC-HEXSTR", "hide/names.js"),
+                                 ("SC-EVAL-DECODE", "hide/indirect.js")):
+                        self.assertIn(want, found)
 
     def test_dependency_checks_agree(self):
         """--deps follows a dependency's install hook to what it runs and

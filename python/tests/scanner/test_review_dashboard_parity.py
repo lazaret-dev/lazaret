@@ -68,6 +68,14 @@ PEM_LINE = "MIIEowIBAAKCAQEAu1SU1LfVLPHCozMxH2Mo4lgOEePzNm0tRgeLezV6ffAt0gun\n"
 
 # (file name, language, content) — text as pasted.
 ADVERSARIAL = [
+    # 0.1.3: indirect eval, names hidden in a few escapes, an inline os import, .mts/.cts
+    ("indirect.js", "js", "(0, eval)(atob(p));\neval.call(null, atob(p));\nwindow['ev' + 'al'](\n  atob(p));\n"
+     "Reflect.apply(globalThis.eval, null, [atob(p)]);\n(0, util_1.Function)(atob(p));\n"),
+    ("names.js", "js", 'var m = global["\\x72\\x65\\x71\\x75\\x69\\x72\\x65"]("child_process");\n'
+     'var u = "https:\\u002F\\u002Fexample.invalid";\nvar b = "\\x00\\x01\\x65val";\nvar e = `\\u{65}v\\x61l`;\n'),
+    ("inline_os.py", "py", "__import__('os').system(input())\nimportlib.import_module('os').popen(c)\n"),
+    ("esm.mts", "js", "const el = <HTMLInputElement>document.body;\n// eval(z)\neval(atob(p));\n"),
+    ("cjs.cts", "js", "const el = <T,>(x: T) => x;\n/* eval(z) */ eval(y);\n"),
     # FIX-SPEC 1: comment state across lines; U+2028/U+2029 end JS lines
     ("blockcomment.js", "js", "/*\n eval(x)\n*/\n/**/eval(y)\n"),
     ("comments.js", "js", "/* start\n * eval(a)\n */ eval(b)\n  * eval(c)\nconst r = /\\/*/; eval(d)\n"

@@ -35,7 +35,7 @@ const COMMENT_LINE_RULES = new Set(["Q-TODO", "S-TOKEN", "S-BIDI"]);
 /* ---------------- Analyzers ---------------- */
 export function detectLang(name, content) {
   if (/\.(py|pyw)$/i.test(name)) return "py";
-  if (/\.(js|jsx|ts|tsx|mjs|cjs)$/i.test(name)) return "js";
+  if (/\.(js|jsx|ts|tsx|mts|cts|mjs|cjs)$/i.test(name)) return "js";
   if (/\.sql$/i.test(name)) return "sql";
   // content heuristic: SQL keywords dominate and no JS/py structure
   if (/\b(SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM|CREATE\s+(TABLE|PROCEDURE|USER)|GRANT|ALTER\s+TABLE)\b/i.test(content)
@@ -166,6 +166,61 @@ export function hexHiddenText(line) {
   if (text.length / total < HEX_PRINTABLE_SHARE) return null;
   if (!LETTER_RUN_RE.test(text) || letters / text.length < 0.4) return null;
   return text;
+}
+
+// Fewer escapes than HEX_MIN_ESCAPES still hide a name when the name is the
+// point: a string literal in which a dangerous name (HIDDEN_TEXT_DANGER_RE)
+// has a letter, digit or "_" written as an escape of a printable ASCII
+// character is SC-HEXSTR, CRITICAL (twin of core.hex_hidden_name; see there).
+const NAME_ESCAPE_RE = /\\(?:x([0-9A-Fa-f]{2})|u([0-9A-Fa-f]{4})|u\{([0-9A-Fa-f]{1,6})\}|U([0-9A-Fa-f]{8})|([0-7]{3}))/g;
+const HIDDEN_TEXT_DANGER_ALL = new RegExp(HIDDEN_TEXT_DANGER_RE.source, HIDDEN_TEXT_DANGER_RE.flags + "g");
+const NAME_CHAR_RE = /^[A-Za-z0-9_]$/;
+
+/** [name, column] for the first string literal hiding part of a dangerous name in escapes, else null. */
+export function hexHiddenName(line) {
+  if (!line.includes("\\")) return null;
+  const lits = new RegExp(STRING_LIT_RE.source, STRING_LIT_RE.flags);
+  for (const lit of line.matchAll(lits)) {
+    if (!lit[0].includes("\\")) continue;
+    const found = hiddenNameIn(lit[0].slice(1, -1), lit.index + 1);
+    if (found) return found;
+  }
+  return null;
+}
+
+function hiddenNameIn(seg, offset) {
+  const escAt = [], escCol = [];
+  let text = "", pos = 0, total = 0, printable = 0;
+  NAME_ESCAPE_RE.lastIndex = 0;
+  let m;
+  while ((m = NAME_ESCAPE_RE.exec(seg))) {
+    const start = m.index;
+    let run = start;
+    while (run > 0 && seg[run - 1] === "\\") run--;
+    if ((start - run) % 2) continue;                 // "\\x65": an escaped backslash, then text
+    total++;
+    const digits = m[1] ?? m[2] ?? m[3] ?? m[4];
+    const code = digits !== undefined ? parseInt(digits, 16) : parseInt(m[5], 8);
+    if (code > 0x10ffff) continue;                   // no character: left as written
+    const ch = String.fromCodePoint(code);
+    text += seg.slice(pos, start);
+    if (code >= 0x20 && code < 0x7f) {
+      printable++;
+      if (NAME_CHAR_RE.test(ch)) { escAt.push(text.length); escCol.push(offset + start); }
+    }
+    text += ch;                                      // every escape decoded
+    pos = start + m[0].length;
+  }
+  if (!escAt.length || printable / total < HEX_PRINTABLE_SHARE) return null;
+  text += seg.slice(pos);
+  HIDDEN_TEXT_DANGER_ALL.lastIndex = 0;
+  while ((m = HIDDEN_TEXT_DANGER_ALL.exec(text))) {
+    let lo = 0, hi = escAt.length;                   // bisect_left(escAt, m.index)
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (escAt[mid] < m.index) lo = mid + 1; else hi = mid; }
+    if (lo < escAt.length && escAt[lo] < m.index + m[0].length) return [m[0], escCol[lo]];
+    if (!m[0]) HIDDEN_TEXT_DANGER_ALL.lastIndex++;
+  }
+  return null;
 }
 
 // A "-----BEGIN ... PRIVATE KEY-----" header alone is not a key: libraries keep the
@@ -549,6 +604,13 @@ function scanLines(path, content, lines, lang, dep, ctx, issues) {
           + (dangerous ? "names code execution, a download, or a URL." : "is readable once decoded."),
         fix: "Decode the string and review what it does.",
         ref: "CWE-506 · Supply chain" }, path, i + 1, lines, line.search(/\\x[0-9A-Fa-f]{2}/)));
+    } else {
+      const name = hexHiddenName(line);
+      if (name) issues.push(mkIssue({ id: "SC-HEXSTR", name: "Hex-escaped readable text", type: "HOTSPOT",
+        sev: "CRITICAL", msg: `Escape sequences hide a name: ${pyRepr(name[0])}.`,
+        why: "Nothing needs to escape a letter of a name like this one: writing it as escape sequences only hides it from review and search, and this one names code execution, a download, or a URL.",
+        fix: "Decode the string and review what it does.",
+        ref: "CWE-506 · Supply chain" }, path, i + 1, lines, name[1]));
     }
     const cmCol = lang === "js" ? charcodeCol(line) : null;
     if (cmCol !== null)

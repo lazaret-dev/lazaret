@@ -158,9 +158,10 @@ function intersectSpans(a, b) {
   return out;
 }
 
-/** Is a JavaScript-family file also read as JSX? Every one but .ts (core.jsx_reading). */
+/** Is a JavaScript-family file also read as JSX? Every one but .ts, .mts and .cts (core.jsx_reading). */
 export function jsxReading(path) {
-  return !String(path ?? "").toLowerCase().endsWith(".ts");
+  const p = String(path ?? "").toLowerCase();
+  return !(p.endsWith(".ts") || p.endsWith(".mts") || p.endsWith(".cts"));
 }
 
 /**

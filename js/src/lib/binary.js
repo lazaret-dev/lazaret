@@ -32,7 +32,8 @@ export const EXEC_MAGIC = [
   [b("dex\n"), "Android DEX bytecode"],
 ];
 export const COMPILED_EXTS = new Set([".so", ".pyd", ".dll", ".dylib", ".node", ".a", ".lib", ".o",
-  ".obj", ".exe", ".pyc", ".pyo", ".class", ".wasm", ".dex", ".jar", ".msi", ".dmg"]);
+  ".obj", ".exe", ".pyc", ".pyo", ".class", ".wasm", ".dex", ".jar", ".msi", ".dmg",
+  ".jsc"]);                                   // V8 bytecode (bytenode): JavaScript no one can read
 const BENIGN_MAGIC = ["\x89PNG", "\xff\xd8\xff", "GIF8", "RIFF", "OggS", "BM", "\x00\x00\x01\x00",
   "wOFF", "wOF2", "ID3", "%PDF", "II*\x00", "MM\x00*", "\x1a\x45\xdf\xa3", "ftyp",
   "\xff\x4f\xff\x51", "\x00\x00\x00\x0cjP  ", "8BPS", "icns", "DDS ", "OTTO", "ttcf", "%!PS",
@@ -41,6 +42,10 @@ const BENIGN_MAGIC = ["\x89PNG", "\xff\xd8\xff", "GIF8", "RIFF", "OggS", "BM", "
 const CONTAINER_DOCUMENT_EXTS = new Set([".docx", ".xlsx", ".pptx", ".odt", ".ods", ".odp", ".odg",
   ".epub", ".dia", ".svgz", ".ora", ".kmz", ".3mf", ".xmind", ".vsdx"]);
 const FONT_EXTS = new Set([".ttf", ".otf", ".ttc", ".woff", ".woff2", ".eot", ".pfb", ".pcf", ".bdf"]);
+/** MPEG transport stream video: the extensions it shares with TypeScript, and .m2ts (core.MPEG_TS_EXTS). */
+export const MPEG_TS_EXTS = new Set([".ts", ".mts", ".m2ts"]);
+/** MPEG transport stream: a sync byte every 188 bytes (core._mpeg_ts). */
+export const mpegTs = (h) => h.length >= 377 && h[0] === 0x47 && h[188] === 0x47 && h[376] === 0x47;
 const NESTED_ARCHIVE_MAGIC = [[b("PK\x03\x04"), "zip"], [b("\x1f\x8b"), "gzip"], [b("BZh"), "bzip2"],
   [b("\xfd7zXZ\x00"), "xz"], [b("7z\xbc\xaf\x27\x1c"), "7-zip"], [b("Rar!"), "rar"]];
 
@@ -52,6 +57,7 @@ const startsWith = (buf, sig) => buf.length >= sig.length && buf.subarray(0, sig
 function isBenignMedia(header, ext) {
   if (BENIGN_MAGIC.some((sig) => startsWith(header, sig)) || header.subarray(0, 16).includes(b("ftyp"))) return true;
   if (header.subarray(36, 40).equals(b("acsp"))) return true;                 // ICC color profile
+  if (MPEG_TS_EXTS.has(ext) && mpegTs(header)) return true;                   // video
   const h4 = header.subarray(0, 4);
   return FONT_EXTS.has(ext) && [b("\x00\x01\x00\x00"), b("true"), b("typ1")].some((s) => h4.equals(s));
 }

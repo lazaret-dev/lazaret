@@ -12,7 +12,7 @@ import {
 import { join, sep, resolve, dirname, basename, isAbsolute } from "node:path";
 import { randomBytes } from "node:crypto";
 import { decodeSource, fsNameToString } from "./encoding.js";
-import { classifyBinary, HEADER_SAMPLE, PYC_HEADER, pycIssues, pycModule, pyExt, looksBinary } from "./binary.js";
+import { classifyBinary, HEADER_SAMPLE, PYC_HEADER, pycIssues, pycModule, pyExt, looksBinary, mpegTs, MPEG_TS_EXTS } from "./binary.js";
 import { shebangLang } from "./hooks.js";
 import { mkIssue, fileIssue } from "./issue.js";
 import { pthIssues } from "./pth.js";
@@ -20,7 +20,7 @@ import { registerScanContext, SECRET_SKIP_RE } from "./redact.js";
 
 export const EXTS = {
   ".py": "py", ".pyw": "py", ".js": "js", ".jsx": "js", ".ts": "js", ".tsx": "js",
-  ".mjs": "js", ".cjs": "js", ".sql": "sql",
+  ".mts": "js", ".cts": "js", ".mjs": "js", ".cjs": "js", ".sql": "sql",
 };
 // gyp files, whatever their name (twin of core.GYP_EXTS): binding.gyp pulls
 // others in ('includes': ['build/common.gypi']) and node-gyp runs their
@@ -338,6 +338,14 @@ function collectFile(full, rel, name, st, dep, col) {
     const head = readBounded(full, HEADER_SAMPLE);
     lang = scriptSourceLang(head);
     if (!lang) {
+      const bi = classifyBinary(rel, head, size, "repo");
+      if (bi) col.binaryIssues.push(bi);
+      return;
+    }
+  }
+  if (lang && MPEG_TS_EXTS.has(ext)) {
+    const head = readBounded(full, HEADER_SAMPLE);
+    if (mpegTs(head)) {                                // a video (a camera's .mts), not TypeScript
       const bi = classifyBinary(rel, head, size, "repo");
       if (bi) col.binaryIssues.push(bi);
       return;

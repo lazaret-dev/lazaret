@@ -60,7 +60,7 @@ id:"S-SQL-JS", name:"SQL built from strings", type:"VULN", sev:"BLOCKER", langs:
 },
 {
 id:"S-OSCMD-PY", name:"OS command execution", type:"VULN", sev:"CRITICAL", langs:["py"],
- re:pyRe("os\\.(system|popen)\\s*\\(", ""),
+ re:pyRe("(?:os|__import__\\(\\s*['\\\"]os['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]os['\\\"]\\s*\\))\\s*\\.\\s*(system|popen)\\s*\\(", ""),
  msg:"os.system/os.popen runs shell commands.",
  why:"Any user-influenced portion of the command allows shell injection.",
  fix:"Use subprocess.run([...]) with a list of args and shell=False.",

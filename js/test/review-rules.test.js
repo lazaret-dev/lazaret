@@ -57,7 +57,8 @@ test("dependency files: no quality/bug text rules, no SQL sink analysis", () => 
 test("Unicode evasion (spec 5): JS identifier escapes, U+FEFF, NFKC, bidi controls", () => {
   assert.deepEqual(rules("\\u0065val(x)\n", "js"), ["S-EVAL-JS@1"]);
   assert.deepEqual(rules("\\u{65}val(x)\n", "js"), ["S-EVAL-JS@1"]);
-  assert.deepEqual(rules("const s = '\\u0065val(x)';\n", "js"), []);          // inside a string: data
+  // inside a string: data, not code; but an escaped letter of eval there is hiding it (SC-HEXSTR)
+  assert.deepEqual(rules("const s = '\\u0065val(x)';\n", "js"), ["SC-HEXSTR@1"]);
   assert.deepEqual(rules("eval\ufeff(x)\n", "js"), ["S-EVAL-JS@1"]);
   assert.deepEqual(rules("\uff45val(x)\n", "py"), ["S-EVAL-PY@1"]);            // fullwidth e → NFKC
   assert.deepEqual(rules("const ok = 1; // \u202e }\n", "js"), ["S-BIDI@1"]);
