@@ -10,7 +10,8 @@
 // dependencies): a small linear lexer blanks the content of strings,
 // comments, regex literals and template text, function headers are found
 // with regexes and their bodies by brace matching, and each function gets a
-// summary of the parameters that reach a sink and of what it returns. A call
+// summary of the parameters that reach a sink (directly or through the locals
+// that hold them) and of what it returns. A call
 // site passing a request-derived value into such a parameter, or a sink fed a
 // value another function read from the request and returned, is a finding.
 // Patterns are the Python engine's source text, compiled with Python
@@ -384,10 +385,13 @@ const MAX_OPEN = 4;             // an open call's functions checked at a call si
 const MAX_OPEN_EDGES = 8;       // an open call orders the fixpoint after its functions when there are this few
 const SCOPE_WALK = 64;          // enclosing scopes searched for a name's binding
 const MAX_ALIAS = 16;           // names assigned to one name that a call through it follows
+const MAX_CARRY = 64;           // parameters one value is followed for (the first ones found)
 const ALL = "*";                // in a set of clean categories: no argument reaches the value at all
 const UNIVERSE = new Set([...Object.keys(SINK_META), ALL]);
 const EMPTY = new Set();
 const EMPTY_NODE = [[], false, [], false];
+const EMPTY_MAP = new Map();
+const NO_PARAMS = [EMPTY_MAP, EMPTY_MAP];      // paramMap() of the module: no parameters (never written)
 const OPAQUE_NODE = [[], false, [], true];   // an expression not read: never free of data
 const LITERAL_WORDS = new Set(["true", "false", "null", "undefined", "NaN", "Infinity", "void"]);
 const NOT_ALIAS = new Set([...LITERAL_WORDS, "this", "super", "arguments"]);
@@ -427,7 +431,8 @@ const FUNCTION_HEAD_RE = pyRe(String.raw`(?:async\s*)?(?:function(?![\w$])\s*\*?
   String.raw`|(\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>)`, "y");
 const ASSIGN_OP = String.raw`(?:[-+*/%&|^]|\*\*|<<|>>>?|&&|\|\||\?\?)?=`;
 const ASSIGN_RE = pyRe(String.raw`(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([^;\n]+)` +
-  String.raw`|(?:^|[;{\n]\s*)([A-Za-z_$][\w$]*)\s*` + ASSIGN_OP + String.raw`(?![=>])\s*([^;\n]+)`, "dg");
+  String.raw`|(?:^|[;{\n]\s*|\)[ \t]*|=>[ \t]*|(?<![\w$.])else\s+)([A-Za-z_$][\w$]*)\s*` + ASSIGN_OP +
+  String.raw`(?![=>])\s*([^;\n]+)`, "dg");
 const WRITE_RE = pyRe(String.raw`(?<![\w$.])([A-Za-z_$][\w$]*)\s*` + ASSIGN_OP + String.raw`(?![=>])`, "dg");
 const WORD_RE = pyRe(String.raw`[A-Za-z_$][\w$]*`, "g");
 // The patterns start with their keyword and check what precedes it after
@@ -455,6 +460,13 @@ const EXPORTS_PROP_RE = pyRe(String.raw`(?:module(?<![\w$.]module)\s*\.\s*export
   String.raw`\s*\.\s*([A-Za-z_$][\w$]*)\s*=(?!=)\s*(?:` +
   String.raw`(?:async\s+)?function(?![\w$])\s*\*?\s*([A-Za-z_$][\w$]*)\s*\(` +
   String.raw`|([A-Za-z_$][\w$]*)[ \t]*(?![^;,}\n]))`, "g");
+// names bound other than by `name = …` (twin of flow._JS_PATTERN_DECL_RE …)
+const PATTERN_DECL_RE = pyRe(String.raw`(?:const|let|var)` + NOT_AFTER + String.raw`(?![\w$])\s*([\[{])`, "dg");
+const PATTERN_VALUE_RE = pyRe(String.raw`\s*=(?![=>])\s*([^;\n]+)`, "dy");
+const FOR_HEAD_RE = pyRe(String.raw`for(?<![\w$.]for)\s*(\()\s*(?:const|let|var)(?![\w$])\s*(?:([A-Za-z_$][\w$]*)(?![\w$])|([\[{]))`, "dg");
+const OF_RE = pyRe(String.raw`\s*(?:of|in)(?![\w$])\s*`, "y");
+const PUSH_RE = pyRe(String.raw`(?<![\w$.])([A-Za-z_$][\w$]*)\s*\.\s*(?:push|unshift)\s*\(`, "dg");
+const JOIN_RE = pyRe(String.raw`\+(?![+=])|\$\{|\.\s*(?:join|concat)\s*\(`, "g");
 const BIND_ITEM_RE = pyRe(String.raw`\A([A-Za-z_$][\w$]*)(?:\s*:\s*([A-Za-z_$][\w$]*))?(?:\s*=[^,]*)?\Z`);
 const AS_ITEM_RE = pyRe(String.raw`\A(type\s+)?([A-Za-z_$][\w$]*)(?:\s+as\s+([A-Za-z_$][\w$]*))?\Z`);
 const PARAM_RE = pyRe(String.raw`\A[A-Za-z_$][\w$]*\Z`);
@@ -780,6 +792,134 @@ function jsBindingNames(code, a, b, pairs, statement = false) {
   return out;
 }
 
+// ---- values through local variables (twin of flow.py's section) ----------
+// A parameter reaches a sink through the locals of its function that hold it
+// (paramMap / carry, read the way request data is), names are bound by
+// assignments (also after `if (…)`, `else`, `=>` without braces), patterns,
+// for … of / in heads and push; for SQL the parameter must be joined into the
+// query text (jsJoins) on the way or in the sink's first argument. Pattern
+// parameters bind their names; parameters come from the whole list. A value
+// holds at most MAX_CARRY parameters; map copies and sink reads are budgeted.
+
+/**
+ * [[key, names]] of each parameter of the function whose header spans head,
+ * read from its whole parameter list when it closes before stop, else null
+ * (twin of flow._js_header_params): key is the name a use spells, or "{i}"
+ * for the i-th parameter when it is a pattern.
+ */
+function jsHeaderParams(code, head, stop, pairs) {
+  const o = code.indexOf("(", head[0]);
+  if (o < 0 || o >= head[1]) return null;
+  const c = pairs.get(o);
+  if (c === undefined || c >= stop) return null;
+  return jsSplitSpans(code, o + 1, c, pairs).map(([a, b], i) => {
+    if (a < b && (code[a] === "[" || code[a] === "{")) return ["{" + i + "}", jsBindingNames(code, a, b, pairs)];
+    const name = jsParamName(code.slice(a, b));
+    return [name, name ? [name] : []];
+  });
+}
+
+/**
+ * [name, value start, value stop, offset, bare] of each name bound other than
+ * by `name = …` (twin of flow._js_other_bindings): pattern declarations and
+ * for … of / in heads (each name assigned the value), list.push(v) /
+ * list.unshift(v) (bare). A region starting inside an earlier one is dropped
+ * before it is read.
+ */
+function jsOtherBindings(code, pairs) {
+  const cands = [];
+  for (const m of code.matchAll(PATTERN_DECL_RE)) cands.push([m.indices[1][0], 0, m]);
+  for (const m of code.matchAll(FOR_HEAD_RE)) cands.push([m[2] !== undefined ? m.indices[2][0] : m.indices[3][0], 1, m]);
+  for (const m of code.matchAll(PUSH_RE)) cands.push([m.indices[1][0], 2, m]);
+  cands.sort((x, y) => x[0] - y[0] || x[1] - y[1]);
+  const out = [];
+  let end = -1;
+  for (const [off, kind, m] of cands) {
+    if (off < end) continue;
+    let names, a, b, bare;
+    if (kind === 0) {                                  // const { a } = v
+      const c = pairs.get(off);
+      if (c === undefined) continue;
+      PATTERN_VALUE_RE.lastIndex = c + 1;
+      const vm = PATTERN_VALUE_RE.exec(code);
+      if (vm === null) continue;
+      names = jsBindingNames(code, off, c + 1, pairs);
+      [a, b] = vm.indices[1];
+      bare = false;
+    } else if (kind === 1) {                           // for (const x of v)
+      const close = pairs.get(m.indices[1][0]);
+      if (close === undefined) continue;
+      let k;
+      if (m[2] !== undefined) { names = [m[2]]; k = m.indices[2][1]; }
+      else {
+        const c = pairs.get(off);
+        if (c === undefined || c >= close) continue;
+        names = jsBindingNames(code, off, c + 1, pairs);
+        k = c + 1;
+      }
+      OF_RE.lastIndex = k;
+      const om = OF_RE.exec(code);
+      if (om === null || k + om[0].length > close) continue;
+      [a, b] = jsTrim(code, k + om[0].length, close);
+      bare = false;
+    } else {                                           // list.push(v)
+      const paren = m.index + m[0].length - 1;
+      const close = pairs.get(paren);
+      if (close === undefined) continue;
+      names = [m[1]];
+      [a, b] = jsTrim(code, paren + 1, close);
+      bare = true;
+    }
+    if (a >= b) continue;
+    end = b;
+    for (const name of names) out.push([name, a, b, off, bare]);
+  }
+  return out;
+}
+
+/** Does the expression code[a, b) join strings (twin of flow._js_joins)? */
+function jsJoins(code, a, b) {
+  for (const m of code.slice(a, b).matchAll(JOIN_RE)) {
+    const i = a + m.index;
+    const ch = code[i];
+    if (ch === ".") return true;
+    if (ch === "+") {
+      if (i > a && code[i - 1] === "+") continue;                  // `++`
+      const p = jsBack(code, i, a);
+      if (p >= a && (")]'\"`".includes(code[p]) || wordBefore(code, p, a)[1] !== "")) return true;
+      continue;
+    }
+    const t = i > a ? code.lastIndexOf("`", i - 1) : -1;          // the template's opening quote
+    if (t < a) return true;
+    const p = jsBack(code, t, a);
+    if (p >= a) {
+      const w = wordBefore(code, p, a)[1];
+      if (")]".includes(code[p]) || (w !== "" && !REGEX_KEYWORDS.has(w))) continue;   // a tagged template
+    }
+    return true;
+  }
+  return false;
+}
+
+/** Is the word at text[i] a property name rather than a variable (twin of flow._js_member)? */
+function jsMember(text, i) {
+  const p = jsBack(text, i);
+  return p >= 0 && text[p] === "." && !(p >= 1 && text[p - 1] === ".");
+}
+
+/** Is the assignment whose value starts at a a `+=` (twin of flow._js_plus_assign)? */
+function jsPlusAssign(code, a) {
+  const k = jsBack(code, a);
+  return k >= 1 && code[k] === "=" && code[k - 1] === "+";
+}
+
+/** Add a path of parameter [fid, i] to out (twin of flow._js_carry_add): at most MAX_CARRY parameters. */
+function carryAdd(out, key, fid, i, built, clean) {
+  const prev = out.get(key);
+  if (prev !== undefined) out.set(key, [fid, i, prev[2] || built, intersection(prev[3], clean)]);
+  else if (out.size < MAX_CARRY) out.set(key, [fid, i, built, clean]);
+}
+
 const nodeMerge = (x, y) => [x[0].concat(y[0]), x[1] || y[1], x[2].concat(y[2]), x[3] || y[3]];
 
 /** true for a full sanitizer, the categories of a partial one, else null (twin of flow._js_sanitizer). */
@@ -832,11 +972,21 @@ class JsFile {
       if (!this.writes.has(m[1])) this.writes.set(m[1], []);
       this.writes.get(m[1]).push(m.indices[1][0]);
     }
-    this.assigns = [];           // [name, value start, value stop, offset, bare]
+    // [name, value start, value stop, offset, bare] of each assignment, in
+    // source order: `name = …`, then the names bound another way (no aliases)
+    const plain = [];
     for (const am of code.matchAll(ASSIGN_RE)) {
-      this.assigns.push(am[1] !== undefined ? [am[1], am.indices[2][0], am.indices[2][1], am.indices[1][0], false]
+      plain.push(am[1] !== undefined ? [am[1], am.indices[2][0], am.indices[2][1], am.indices[1][0], false]
         : [am[3], am.indices[4][0], am.indices[4][1], am.indices[3][0], true]);
     }
+    const tagged = plain.map((r) => [r[3], 0, r]).concat(jsOtherBindings(code, this.pairs).map((r) => [r[3], 1, r]));
+    tagged.sort((x, y) => x[0] - y[0] || x[1] - y[1]);
+    this.assigns = tagged.map((t) => t[2]);
+    this.other = new Set();
+    tagged.forEach((t, k) => { if (t[1]) this.other.add(k); });
+    // per assignment: does its value join strings (or is it `+=`); is it `+=`
+    this.plus = this.assigns.map(([, a, , , bare], k) => bare && !this.other.has(k) && jsPlusAssign(code, a));
+    this.joins = this.assigns.map(([, a, b], k) => this.plus[k] || jsJoins(code, a, b));
     this.targets = new Set(this.assigns.map((a) => a[0]));
     this.alias = new Map();      // name -> [[name assigned to it, assignment number]]
     this.constAlias = new Set();
@@ -844,6 +994,7 @@ class JsFile {
     this.assignNodes = [];
     this.tainted = new Map();    // variable -> provenance, file-wide (the call-site pass)
     this.fns = [];
+    this.scopeFns = new Map();   // scope -> fids of the functions whose body it is
     this.defs = new Map();       // name -> fids of the functions of that name defined here
     this.defsAt = new Map();     // name SEP scope defining it -> fid of the last one defined there
     this.heads = new Map();      // name -> [[start, stop]] of the headers defining one
@@ -944,7 +1095,9 @@ class JsFile {
     this.unbind();
     for (let round = 0; round < 4; round++) {
       let grew = false;
-      for (const [name, a, b] of this.assigns) {
+      for (let k = 0; k < this.assigns.length; k++) {
+        if (this.other.has(k)) continue;
+        const [name, a, b] = this.assigns[k];
         const m = ALIAS_RE.exec(pyStrip(code.slice(a, b)));
         if (m === null) continue;
         const spec = this.mods.get(m[1]);
@@ -965,7 +1118,7 @@ class JsFile {
     }
     this.unbind();
     this.assigns.forEach(([name, a, b, , bare], k) => {
-      if (this.mods.has(name) || this.named.has(name)) return;
+      if (this.other.has(k) || this.mods.has(name) || this.named.has(name)) return;
       const m = ALIAS_RE.exec(pyStrip(code.slice(a, b)));
       if (m === null || m[2] !== undefined || m[1] === name || NOT_ALIAS.has(m[1])) return;
       if (!this.alias.has(name)) this.alias.set(name, []);
@@ -1023,6 +1176,7 @@ class JsFunction {
     this.fid = fid; this.rec = rec; this.name = name; this.params = params; this.span = span;
     this.expr = expr;
     this.head = head;
+    this.pnames = params.map((p) => (p ? [p] : []));   // per parameter: the names it binds
     this.reach = new Map();      // param -> [category, sink line]
     this.returns = [];           // [start, end, line] of each returned expression
     this.returnNodes = [];       // [compiled expression, line]
@@ -1042,11 +1196,7 @@ class JsProgram {
       if (!this.byName.has(fn.name)) this.byName.set(fn.name, []);
       this.byName.get(fn.name).push(fn.fid);
     }
-    this.reachNamed = new Map();
-    for (const [name, fids] of this.byName) {
-      const reach = fids.filter((f) => funcs[f].reach.size);
-      if (reach.length) this.reachNamed.set(name, reach);
-    }
+    this.reachNamed = new Map();   // name -> those with a parameter that reaches a sink (indexReach)
     this.clean = funcs.map(() => EMPTY);
     this.retSrc = new Map();       // fid -> [file, line, function]
     this.retSrcClean = new Map();  // fid -> Set of categories
@@ -1269,8 +1419,9 @@ class JsProgram {
     } else text = code.slice(a, b);
     const words = [];
     let opaque = false;
-    for (const w of text.match(WORD_RE) ?? []) {
-      if (rec.targets.has(w)) words.push(w);
+    for (const m of text.matchAll(WORD_RE)) {
+      const w = m[0];
+      if (rec.targets.has(w) && !jsMember(text, m.index)) words.push(w);
       if (!opaque && !LITERAL_WORDS.has(w)) opaque = true;
     }
     return [calls, JS_SOURCE_RE.test(text), words, opaque];
@@ -1470,6 +1621,95 @@ class JsProgram {
     }
     return false;
   }
+
+  /** reachNamed, once every function's reach is known (twin of flow._JsProgram.index_reach). */
+  indexReach() {
+    for (const [name, fids] of this.byName) {
+      const reach = fids.filter((f) => this.funcs[f].reach.size);
+      if (reach.length) this.reachNamed.set(name, reach);
+    }
+  }
+
+  /**
+   * [parameters, locals] scope k of rec sees: Map name -> Map "fid,index" ->
+   * [fid, index, built, clean] (twin of flow._JsProgram.param_map). A scope
+   * that adds or hides nothing shares its enclosing scope's maps; copying them
+   * is read within the file's budget.
+   */
+  paramMap(rec, k, cache) {
+    if (rec.over) return NO_PARAMS;
+    const chain = [];
+    while (k !== null && !cache.has(k)) { chain.push(k); k = rec.parent[k]; }
+    let [seeds, locs] = k !== null ? cache.get(k) : NO_PARAMS;
+    for (let c = chain.length - 1; c >= 0; c--) {
+      const j = chain[c];
+      const decl = rec.decl[j], fids = rec.scopeFns.get(j) ?? [], own = rec.own[j];
+      if (!fids.length && !own.length && disjoint(seeds, decl) && disjoint(locs, decl)) {
+        cache.set(j, [seeds, locs]);
+        continue;
+      }
+      const cost = seeds.size + locs.size + 1;
+      if (cost > rec.budget) { rec.over = true; return NO_PARAMS; }
+      rec.budget -= cost;
+      seeds = new Map([...seeds].filter(([n]) => !decl.has(n)));
+      locs = new Map([...locs].filter(([n]) => !decl.has(n)));
+      for (const fid of fids) {
+        this.funcs[fid].pnames.forEach((names, i) => {
+          for (const n of names) {
+            const ent = new Map(seeds.get(n) ?? []);
+            ent.set(fid + "," + i, [fid, i, false, EMPTY]);
+            seeds.set(n, ent);
+          }
+        });
+      }
+      for (const a of own) {
+        const name = rec.assigns[a][0];
+        const val = this.carry(rec.assignNodes[a], seeds, locs);
+        const old = locs.get(name);
+        const plus = rec.plus[a];
+        if (!val.size && !(plus && old !== undefined)) continue;
+        const ent = new Map();
+        if (old !== undefined) for (const [key, [f, i, bt, cl]] of old) ent.set(key, [f, i, bt || plus, cl]);
+        const joins = rec.joins[a];
+        for (const [key, [f, i, bt, cl]] of val) carryAdd(ent, key, f, i, bt || joins, cl);
+        locs.set(name, ent);
+      }
+      cache.set(j, [seeds, locs]);
+    }
+    return [seeds, locs];
+  }
+
+  /** Map "fid,index" -> [fid, index, built, clean]: the parameters a compiled expression's value may hold (twin of flow.carry). */
+  carry(node, seeds, locs) {
+    const [calls, , words] = node;
+    const out = new Map();
+    for (const call of calls) {
+      if (call[0] === "san") {
+        for (const [key, [f, i, bt, cl]] of this.carry(call[2], seeds, locs)) carryAdd(out, key, f, i, bt, union(cl, call[1]));
+      } else if (call[0] === "fn") {
+        const clean = call[3] ? EMPTY : this.clean[call[1]];
+        if (!clean.has(ALL)) {
+          for (const arg of call[2]) {
+            for (const [key, [f, i, bt, cl]] of this.carry(arg, seeds, locs)) carryAdd(out, key, f, i, bt, union(cl, clean));
+          }
+        }
+      }
+    }
+    for (const w of words) {
+      for (const table of [seeds, locs]) {
+        const ent = table.get(w);
+        if (ent !== undefined) for (const [key, [f, i, bt, cl]] of ent) carryAdd(out, key, f, i, bt, cl);
+      }
+    }
+    return out;
+  }
+}
+
+/** Do map's names and the set decl share none (iterating the smaller)? */
+function disjoint(map, decl) {
+  if (map.size <= decl.size) { for (const n of map.keys()) if (decl.has(n)) return false; return true; }
+  for (const n of decl) if (map.has(n)) return false;
+  return true;
 }
 
 /** Offsets of the '{' that open a function body (twin of flow._js_function_bodies). */
@@ -1535,6 +1775,73 @@ function jsInnermost(scopes, positions) {
   return out;
 }
 
+/**
+ * fn.reach for the functions of rec (twin of flow._js_sink_reach): a
+ * parameter reaches a sink when a name it binds is written in the sink's
+ * arguments (for SQL, joined into them), or when a local the sink reads holds
+ * it (paramMap; for SQL, in the query text and joined into a string on the way
+ * or there). A later sink kind's category wins; within one category the first
+ * sink call is reported. The locals are read within the file's budget.
+ */
+function jsSinkReach(prog, rec) {
+  const funcs = prog.funcs;
+  const mine = rec.fns.map((fid) => funcs[fid]);
+  if (!mine.length) return;
+  const code = rec.code, table = rec.table, pairs = table.pairs, cache = new Map();
+  const spans = mine.map((fn, k) => [fn.span[0], fn.span[1], k]);
+  rec.sinks.forEach(([cat, matches], c) => {
+    const byStart = [...spans].sort((a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2]);
+    let active = [];
+    let addIdx = 0;
+    matches.forEach(([pos, send], m) => {
+      while (addIdx < byStart.length && byStart[addIdx][0] <= pos) active.push(byStart[addIdx++]);
+      active = active.filter((sp) => sp[1] > pos);
+      if (!active.length) return;
+      const [a, b] = jsSinkSpan(code, pos, send, table);
+      const seg = code.slice(a, b);
+      const hits = [];
+      for (const [, , k] of active) {
+        const fn = mine[k];
+        fn.pnames.forEach((names, i) => {
+          for (const p of names) {
+            if (jsParamDangerous(seg, p, cat)) { hits.push([fn, fn.params[i]]); break; }
+          }
+        });
+      }
+      const sc = rec.sinkScopes[c][m];
+      if (sc !== null && !rec.over) {
+        const locs = prog.paramMap(rec, sc, cache)[1];
+        if (locs.size) {
+          const n = cpSpanOf(code, a, b, table);
+          if (n > rec.budget) rec.over = true;
+          else {
+            rec.budget -= n;
+            let args = jsSplitSpans(code, a, b, pairs);
+            if (cat === "SQL injection") args = args.slice(0, 1);      // the query text; parameters are bound
+            if (args.some(([x, y]) => (code.slice(x, y).match(WORD_RE) ?? []).some((w) => locs.has(w)))) {
+              let node = EMPTY_NODE;
+              for (const [x, y] of args) node = nodeMerge(node, prog.value(rec, x, y, 0));
+              const joins = cat === "SQL injection" && args.some(([x, y]) => jsJoins(code, x, y));
+              for (const [f, i, built, clean] of prog.carry(node, EMPTY_MAP, locs).values()) {
+                if (clean.has(cat) || (cat === "SQL injection" && !(built || joins))) continue;
+                hits.push([funcs[f], funcs[f].params[i]]);
+              }
+            }
+          }
+        }
+      }
+      if (hits.length) {
+        const line = rec.line(pos);
+        for (const [fn, key] of hits) {
+          // a later sink kind's category wins; within one category the first call is reported
+          const prev = fn.reach.get(key);
+          if (prev === undefined || prev[0] !== cat) fn.reach.set(key, [cat, line]);
+        }
+      }
+    });
+  });
+}
+
 function analyzeJs(files, findings) {
   const jsFiles = files.filter((f) => f.lang === "js");
   const recs = [], funcs = [];
@@ -1565,37 +1872,18 @@ function analyzeJs(files, findings) {
     const first = funcs.length;
     found.forEach(([name, params, [s, e]], k) => {
       const fn = new JsFunction(funcs.length, rec, name, params, [s, e], s >= code.length || code[s] !== "{", heads[k]);
+      // parameters from the whole list: `(a = f(1, 2), { b })` is two, the second binding b
+      const plist = jsHeaderParams(code, heads[k], s, pairs);
+      if (plist !== null) {
+        fn.params = plist.map(([key]) => key);
+        fn.pnames = plist.map(([, names]) => names);
+      }
       funcs.push(fn);
       rec.fns.push(fn.fid);
     });
     const mine = funcs.slice(first);
-    const spans = mine.map((fn, k) => [fn.span[0], fn.span[1], k]);
-    for (const [cat, matches] of rec.sinks) {
-      const byStart = [...spans].sort((a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2]);
-      let active = [];
-      let addIdx = 0;
-      for (const [pos, send] of matches) {
-        while (addIdx < byStart.length && byStart[addIdx][0] <= pos) active.push(byStart[addIdx++]);
-        active = active.filter((sp) => sp[1] > pos);
-        if (!active.length) continue;
-        const [a, b] = jsSinkSpan(code, pos, send, table);
-        const seg = code.slice(a, b);
-        let line = null;
-        for (const [, , k] of active) {
-          const fn = mine[k];
-          for (const p of fn.params) {
-            if (p && jsParamDangerous(seg, p, cat)) {
-              // a later sink kind's category wins; within one category the first call is reported
-              const prev = fn.reach.get(p);
-              if (prev === undefined || prev[0] !== cat) {
-                if (line === null) line = rec.line(pos);
-                fn.reach.set(p, [cat, line]);
-              }
-            }
-          }
-        }
-      }
-    }
+    // what an expression holds is read by name: parameters too
+    for (const fn of mine) for (const names of fn.pnames) for (const n of names) rec.targets.add(n);
     // what each function returns: an arrow function's expression, else the
     // `return`s of its own body (not of a function inside it)
     const [opens, matchClose] = braces;
@@ -1623,6 +1911,8 @@ function analyzeJs(files, findings) {
     }
     for (const fn of mine) {
       fn.scope = where.get(fn.span.join(","));
+      if (!rec.scopeFns.has(fn.scope)) rec.scopeFns.set(fn.scope, []);
+      rec.scopeFns.get(fn.scope).push(fn.fid);
       if (fn.expr) {                          // `const f = (a, { b }) => …`: before its `=>`
         const q = jsBack(code, fn.head[1] - 2);
         const o = q >= 0 ? opener.get(q) : undefined;
@@ -1693,6 +1983,9 @@ function analyzeJs(files, findings) {
   }
   const order = prog.order();
   prog.settleClean(order);
+  // which parameters reach a sink: written in its arguments, or held by a local it reads
+  for (const rec of recs) jsSinkReach(prog, rec);
+  prog.indexReach();
   // the call-site pass's file-wide map holds request data read directly;
   // what functions return is read through the scopes
   for (const rec of recs) rec.tainted = prog.taintMap(rec);

@@ -13,8 +13,9 @@ _js_functions, _analyze_js, analyze).
 3. flow.analyze and analyzeFlows compared directly, in one node process, on
    the review's JavaScript cases (brace counting, sink lines, modules and
    returned values, calls that can't be resolved and the evidence that binds
-   nothing, helpers' values, shadowed sanitizers: tests/scanner/
-   test_review_flow_js*.py), the size cap (code points, not UTF-16 units),
+   nothing, helpers' values, shadowed sanitizers, values through locals,
+   destructuring, push and loops: tests/scanner/test_review_flow_js*.py),
+   the size cap (code points, not UTF-16 units),
    the sink-argument window around astral characters, the fixpoint's and the
    read budget's notes, and a seeded random corpus of JavaScript-ish text
    with module syntax, destructuring, aliases and callbacks: every field of
@@ -222,9 +223,50 @@ def review_cases():
         "  const c = t3(req.query.q); runIt(c)\n  const d = new T4(req.query.q); runIt(d)\n"
         "  const e = ok(req.query.q); runIt(e)\n  show(escapeHtml(req.query.q))\n  el.innerHTML = getName(req)\n"
         "  exec(viaClosure(req))\n  viaCb(x => req.query.q)\n  let f\n  f = req.query.q\n  runIt(f)\n})\n"))))
+    # values through locals (tests/scanner/test_review_flow_js_locals.py)
+    bodies = [
+        "const q = 'SELECT * FROM t WHERE a = ' + p;\n  return db.query(q);",
+        "const q =\n    `SELECT * FROM t WHERE a = '${p}'`;\n  return db.query(q)",
+        "let q = 'SELECT 1';\n  if (!p) q = 'SELECT 2';\n  else q += ' WHERE a = ' + p;\n  return db.query(q);",
+        "let q = 'SELECT * FROM t WHERE 1=1';\n  if (p) q += \" AND a = '\" + p + \"'\";\n  return db.query(q);",
+        "const a = p.trim();\n  const q = 'SELECT ' + a;\n  ids.forEach((i) => { db.query(q); });",
+        "let q;\n  [1].forEach(() => { q = 'SELECT ' + p; });\n  return db.query(q);",
+        "const w = [];\n  if (p.name) w.push(\"name = '\" + p.name + \"'\");\n  return db.query('SELECT * WHERE ' + w.join(' AND '));",
+        "const parts = ['SELECT ('];\n  parts.push(p);\n  const q = parts.join('');\n  return db.query(q);",
+        "const { id } = p;\n  const [x] = id;\n  return db.query('SELECT * FROM t WHERE id = ' + x);",
+        "let s = '';\n  for (const [k, v] of Object.entries(p)) {\n    s += k + ' = ' + v;\n  }\n  return db.query('UPDATE ' + s);",
+        "for (const k in p) {\n    exec('echo ' + k);\n  }",
+        "const c = format(p);\n  exec(c);\n  const h = '<b>' + p;\n  el.innerHTML = h;\n  const u = API + p;\n  fetch(u);",
+        "const t = p || '/';\n  res.redirect(t);\n  const s = 'return ' + p;\n  eval(s);",
+        "const params = [p];\n  db.query('SELECT $1', params);\n  const like = '%' + p + '%';\n  db.query('SELECT $1', [like]);",
+        "const q = p;\n  db.query(q);\n  const r = sql`SELECT ${p}`;\n  db.query(r);\n  const n = parseInt(p, 10);\n  exec('kill ' + n);",
+        "const s = escapeHtml(p);\n  el.innerHTML = s;\n  const e = pool.escape(p);\n  pool.query('SELECT ' + e);",
+        "const q = 'SELECT ' + p;\n  items.map(function (q) {\n    return db.query(q + ' LIMIT 1');\n  });",
+    ]
+    locals_lib = "".join(f"function l{k}(p) {{\n  {b}\n}}\n" for k, b in enumerate(bodies))
+    locals_lib += ("function pat({ id, name }, opts = pick(a, b), p) {\n  const q = 'SELECT ' + id;\n  db.query(q);\n"
+                   "  const c = p;\n  exec(c);\n}\nconst arrow = (p) => {\n  const q = 'SELECT ' + p;\n  return db.query(q);\n};\n"
+                   "function isValid(s) {\n  if (s.length > 3) return true;\n  return false;\n}\n"
+                   "function checked(p) {\n  const ok = isValid(p);\n  exec('check ' + ok);\n}\n"
+                   "function wide(" + ", ".join(f"p{i}" for i in range(70)) + ") {\n  const c = "
+                   + " + ".join(f"p{i}" for i in range(70)) + ";\n  exec(c);\n}\n")
+    calls = "".join(f"  l{k}(req.query.q);\n" for k in range(len(bodies)))
+    calls += ("  pat(req.body, 1, req.query.q);\n  arrow(req.query.q);\n  checked(req.query.q);\n"
+              "  wide(" + ", ".join("1" for _ in range(63)) + ", req.query.q);\n"
+              "  wide(" + ", ".join("1" for _ in range(64)) + ", req.query.q);\n"
+              "  const { user, pass: pw } = req.body;\n  l0(user);\n  l3(pw);\n  const [first] = req.body.list;\n"
+              "  l4(first);\n  for (const u of req.body.users) l5(u)\n  let v = 'x';\n  if (req.body.v) v = req.body.v;\n"
+              "  l6(v);\n")
+    sets.append(js_files(("locals.js", locals_lib + "module.exports = { "
+                          + ", ".join([f"l{k}" for k in range(len(bodies))] + ["pat", "arrow", "checked", "wide"]) + " };\n"),
+                         ("app.js", "const L = require('./locals');\nconst { " + ", ".join(
+                             [f"l{k}" for k in range(len(bodies))] + ["pat", "arrow", "checked", "wide"])
+                          + " } = L;\napp.post('/x', (req, res) => {\n" + calls + "});\n")))
     nest = "function pad(a){return g(function(){" * 2500 + "}})" * 2500 + "\n"
     sets.append(js_files(("lib.js", lib), ("app.js", nest + "const { runIt } = require('./lib');\n"
                                                         + route.replace("CALL", "runIt(req.query.q)"))))
+    scopes = "function f0(e0) {" + "".join(f"function f{i}(e{i}) {{ var t{i} = e{i} + t{i - 1};" for i in range(1, 400))
+    sets.append(js_files(("deep.js", scopes + "exec(t399);" + "}" * 400 + "\nf0(req.query.q);\n")))
     sets.append(js_files(("nest.js", "function g(req){return req.query.q}\n" + "exec(" * 20000 + "g(req)" + ")" * 20000 + "\n")))
     sets.append(js_files(("nest.js", "function f(a){return g(function(){" * 5000 + "\U0001F600" * 3000)))
     return sets
@@ -249,7 +291,11 @@ TOKENS = ["'", '"', "`", "${", "}", "{", "(", ")", "[", "]", "/", "*", "\\", "\n
           "go(", "o.f(", "x.replace(", "x => req.query.q", "(a, b) => a", "function () { return req.body.w; }",
           "import { readFile } from 'fs';", "readFile(", "import { g } from '@/lib/g';", "f = g;",
           "function isOk(s) { return true; }", "isOk(", "function escapeHtml(s) { return s; }",
-          "(x: string, y?: T) => {", "e.r(", "t(", "a?.b?.(", "let data\n", "data = req.query.d\n"]
+          "(x: string, y?: T) => {", "e.r(", "t(", "a?.b?.(", "let data\n", "data = req.query.d\n",
+          "if (x) q += ", "else q = ", "=> q = ", ") q = ", "for (const [k, v] of ", "for (let k in ", "for (var x of ",
+          "w.push(", "w.unshift(", ".join(", ".concat(", "const { u } = req.body;", "const [a1, b1] = ", "sql`",
+          "function f({ a, b }, c = g(1, 2)) {", "const q = 'SELECT ' + a;", "db.query(q);", "db.query(q, [a]);",
+          "q = q + ", "x++ + ", "+x", "`${a}`", "tag`${q}`"]
 
 
 def soup(rnd):
