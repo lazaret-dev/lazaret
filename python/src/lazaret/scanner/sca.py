@@ -903,7 +903,12 @@ def _metadata_headers(path):
     At most METADATA_READ_CAP bytes of a regular file are read, through
     core's _read_prefix (O_NOFOLLOW | O_NONBLOCK, then fstat): a FIFO used
     to hang the scan and a symlink to /dev/zero grew memory without bound
-    (one "line" that never ends). Raises OSError."""
+    (one "line" that never ends). O_NOFOLLOW is a no-op on Windows, so an
+    lstat rejects a non-regular file (a symlink above all) before the open
+    would follow it. Raises OSError; a missing file raises FileNotFoundError,
+    which the caller tells apart from an unreadable one."""
+    if not stat.S_ISREG(os.lstat(path).st_mode):
+        raise OSError("not a regular file: %s" % path)
     text = lazaret.normalize_newlines(
         lazaret._read_prefix(path, METADATA_READ_CAP).decode("utf-8", "replace"))
     name = version = None

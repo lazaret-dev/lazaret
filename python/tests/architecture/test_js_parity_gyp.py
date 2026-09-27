@@ -91,7 +91,10 @@ def write_tree(root, files):
     for rel, text in files.items():
         path = os.path.join(root, *rel.split("/"))
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
+        # newline="" writes the bytes as given: these fixtures embed CR and
+        # CRLF on purpose, and text mode would turn every \n into \r\n on
+        # Windows, corrupting them (the c/binding.gyp finding was then lost).
+        with open(path, "w", encoding="utf-8", newline="") as f:
             f.write(text)
 
 
