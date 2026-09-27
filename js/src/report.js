@@ -20,6 +20,19 @@ function localIso(d = new Date()) {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
+/**
+ * The cross-file gate condition's label. This engine's flow pass covers
+ * JavaScript only (flow.js; the Python engine's AST half has no port), so
+ * when the project has Python sources the label says they were not analyzed
+ * rather than vouch for them.
+ */
+export function crossFileLabel(files) {
+  let py = 0;
+  for (const f of files) if (f && f.lang === "py" && !f.dep) py++;
+  return py ? `No cross-file taint flows (JavaScript only: ${py} Python file${py === 1 ? "" : "s"} not analyzed)`
+    : "No cross-file taint flows";
+}
+
 export function buildResult(root, files, issues) {
   issues.sort((a, b) =>
     (SEV_ORDER[a.sev] - SEV_ORDER[b.sev]) ||
@@ -53,7 +66,7 @@ export function buildResult(root, files, issues) {
   // shared semantics 3), not indicators.
   for (const i of issues) { if (i.rule.startsWith("SC-") && i.sev !== "INFO") supply++; if (i.rule.startsWith("X-")) crossFile++; }
   conds.push({ label: "No supply-chain indicators", ok: supply === 0 });
-  conds.push({ label: "No cross-file taint flows", ok: crossFile === 0 });
+  conds.push({ label: crossFileLabel(files), ok: crossFile === 0 });
   return {
     generatedBy: ENGINE_VERSION,
     project: resolve(root),

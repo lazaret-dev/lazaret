@@ -25,6 +25,7 @@ import tempfile
 import unittest
 
 from tests import _support
+from tests.architecture.test_js_parity import _python_only, derived
 
 NODE = shutil.which("node")
 JS_BIN = os.path.join(_support.REPO_ROOT, "js", "bin", "lazaret.js")
@@ -102,14 +103,14 @@ class FinalReviewParityTests(unittest.TestCase):
 
     def assert_same(self, js, py, label):
         (js_exit, js_rep, _), (py_exit, py_rep, _) = js, py
-        py_issues = [i for i in py_rep["issues"] if not i["rule"].startswith("X-") and i["rule"] != "Q-FLOW-SKIPPED"]
+        py_issues = [i for i in py_rep["issues"] if not _python_only(i, project=py_rep["project"])]
         a, b = collections.Counter(map(key, js_rep["issues"])), collections.Counter(map(key, py_issues))
         self.assertEqual(sorted((a - b).elements()), [], f"{label}: only the npm engine reports")
         self.assertEqual(sorted((b - a).elements()), [], f"{label}: only the Python engine reports")
         self.assertEqual(js_rep["metrics"], py_rep["metrics"], f"{label}: metrics")
         if len(py_issues) == len(py_rep["issues"]):
             for field in ("pass", "conditions", "counts", "ratings"):
-                self.assertEqual(js_rep[field], py_rep[field], f"{label}: {field}")
+                self.assertEqual(derived(js_rep, field), derived(py_rep, field), f"{label}: {field}")
             self.assertEqual(js_exit, py_exit, f"{label}: exit code")
 
     def test_tree_agrees(self):

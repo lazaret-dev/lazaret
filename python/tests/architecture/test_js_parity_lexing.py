@@ -13,7 +13,7 @@ import os
 import tempfile
 import unittest
 
-from tests.architecture.test_js_parity import DERIVED, NODE, _python_only, both, issue_key
+from tests.architecture.test_js_parity import DERIVED, NODE, _python_only, both, derived, issue_key
 
 TREE = {
     # comment masking fails closed (a comment only where both readings agree)
@@ -90,7 +90,7 @@ class LexingParityTests(unittest.TestCase):
             (js_exit, js, js_err), (py_exit, py, py_err) = both(root, extra=extra)
         self.assertIsNotNone(js, f"{label}: JS wrote no report (exit {js_exit}): {js_err[-500:]}")
         self.assertIsNotNone(py, f"{label}: Python wrote no report (exit {py_exit}): {py_err[-500:]}")
-        py_only = [i for i in py["issues"] if _python_only(i)]
+        py_only = [i for i in py["issues"] if _python_only(i)]      # (the tree is gone: by extension)
         js_c = collections.Counter(issue_key(i) for i in js["issues"])
         py_c = collections.Counter(issue_key(i) for i in py["issues"] if not _python_only(i))
         self.assertEqual({"only the JS engine reports": sorted((js_c - py_c).elements()),
@@ -100,7 +100,7 @@ class LexingParityTests(unittest.TestCase):
         self.assertEqual(js["metrics"], py["metrics"], f"{label}: metrics")
         if not py_only:        # otherwise the Python-only findings legitimately move these
             for field in DERIVED:
-                self.assertEqual(js[field], py[field], f"{label}: {field}")
+                self.assertEqual(derived(js, field), derived(py, field), f"{label}: {field}")
             self.assertEqual(js_exit, py_exit, f"{label}: exit code")
         return py
 

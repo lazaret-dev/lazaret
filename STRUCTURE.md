@@ -198,7 +198,7 @@ pytest also runs the suite unchanged, for anyone who prefers it, but nothing req
 
 ## 5. JavaScript package
 
-The npm package `lazaret` is a zero-dependency, ES-module port of the project scanner (the same rules, comment lexer, taint-flow and SQL-sink analyzers, encoding handling, and obfuscation/secret detection as `lazaret.scanner`), tested with Node's built-in `node --test` (Node 22+). Registry auditing, cross-file taint, custom taint specs and SCA are Python-only. The browser dashboard (`python/src/lazaret/web/lazaret.html`) carries a single-file port of this engine.
+The npm package `lazaret` is a zero-dependency, ES-module port of the project scanner (the same rules, comment lexer, taint-flow and SQL-sink analyzers, encoding handling, and obfuscation/secret detection as `lazaret.scanner`), tested with Node's built-in `node --test` (Node 22+). Registry auditing, custom taint specs, SCA and the Python half of the cross-file taint engine are Python-only; its JavaScript half is ported (`src/scanner/flow.js`, compared by `python/tests/architecture/test_js_parity_flow.py`). The browser dashboard (`python/src/lazaret/web/lazaret.html`) carries a single-file port of this engine.
 
 ```
 js/
@@ -211,7 +211,8 @@ js/
 │   ├── deps.js           --deps: a dependency's install hooks followed to the
 │   │                     files they run; the import-time test on its code
 │   ├── scanner/          rules, scan loop, comment lexer, linear-time matchers,
-│   │                     taint, SQL sinks, functions, metrics
+│   │                     taint, SQL sinks, functions, metrics, cross-file
+│   │                     flows in JavaScript (flow.js)
 │   └── lib/              leaf helpers: fs (collection, report paths), encoding
 │                         and codecs (BOM/UTF-16/PEP 263), binary (magic
 │                         bytes), redact, issue, supplychain (install hooks),
@@ -231,7 +232,7 @@ js/
     └── scanner/               detection rules, hex decoding, private-key material
 ```
 
-**The two engines must agree.** `python/tests/architecture/test_js_parity.py` runs both CLIs on every fixture tree, on a synthetic project covering the false-positive fixes, and on an adversarial tree generated at test time (BOM, UTF-16 and UTF-7 files, a NUL near the top of a UTF-8 file, `.github/`, `node_modules/` with and without `--deps`, suppression tricks, a 600-issue file, CRLF, Unicode identifiers, bidi characters, `.pyc` files, symlinks, a deep manifest, a large non-source file). It compares every finding as a multiset of (rule, file, line, severity, message), plus metrics, ratings, the gate and the exit code, and fails on any difference other than the listed Python-only features. `python/tests/scanner/test_review_dashboard_parity.py` holds the dashboard to the same standard. When a rule changes in one engine, it changes in the other in the same commit; the JS twins of Python helpers say so in a comment (`Twin of lazaret.scanner.core....`).
+**The two engines must agree.** `python/tests/architecture/test_js_parity.py` runs both CLIs on every fixture tree, on a synthetic project covering the false-positive fixes, and on an adversarial tree generated at test time (BOM, UTF-16 and UTF-7 files, a NUL near the top of a UTF-8 file, `.github/`, `node_modules/` with and without `--deps`, suppression tricks, a 600-issue file, CRLF, Unicode identifiers, bidi characters, `.pyc` files, symlinks, a deep manifest, a large non-source file). It compares every finding as a multiset of (rule, file, line, severity, message), plus metrics, ratings, the gate and the exit code, and fails on any difference other than the listed Python-only features (the Python half of the cross-file engine; the npm gate's cross-file label, which names the Python files it did not analyze, is read as the Python one). `python/tests/scanner/test_review_dashboard_parity.py` holds the dashboard to the same standard. When a rule changes in one engine, it changes in the other in the same commit; the JS twins of Python helpers say so in a comment (`Twin of lazaret.scanner.core....`).
 
 Tests needing a service or the samples checkout are gated with an in-test guard that skips cleanly when the variable is unset:
 
