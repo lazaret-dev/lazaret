@@ -11,10 +11,14 @@ _js_functions, _analyze_js, analyze).
    Python-only, and the npm engine's gate label says the project's Python
    files were not analyzed; with no Python files the labels are identical.
 3. flow.analyze and analyzeFlows compared directly, in one node process, on
-   the review's JavaScript cases, the size cap (code points, not UTF-16
-   units), the sink-argument window around astral characters, and a seeded
-   random corpus of JavaScript-ish text: every field of every finding, the
-   masked text and the function table.
+   the review's JavaScript cases (brace counting, sink lines, modules and
+   returned values, calls that can't be resolved and the evidence that binds
+   nothing, helpers' values, shadowed sanitizers: tests/scanner/
+   test_review_flow_js*.py), the size cap (code points, not UTF-16 units),
+   the sink-argument window around astral characters, the fixpoint's and the
+   read budget's notes, and a seeded random corpus of JavaScript-ish text
+   with module syntax, destructuring, aliases and callbacks: every field of
+   every finding, the masked text and the function table.
 
 All content is inert: nothing is executed, credentials are dummies.
 Skipped where node is missing.
@@ -131,6 +135,98 @@ def review_cases():
                          ("app.js", APP.replace("CALL", "runIt(q)"))))
     sets.append(js_files(("astral.js", "function runIt(c) { exec(c); }\n//" + ASTRAL * 1_000_001),
                          ("app.js", APP.replace("CALL", "runIt(q)"))))
+    # modules and returned values (tests/scanner/test_review_flow_js_modules.py)
+    sets.append(js_files(("lib/input.js", "function getCmd(req) {\n  return req.query.cmd;\n}\n"
+                                          "const getName = (req) => req.body.name;\n"
+                                          "function getSafe(req) { return escapeHtml(req.query.n); }\n"
+                                          "module.exports = { getCmd, getName, getSafe };\n"),
+                         ("app.js", "const { getCmd, getName, getSafe } = require('./lib/input');\n"
+                                    "app.get('/x', (req, res) => {\n  exec(getCmd(req));\n  const c = getCmd(req);\n"
+                                    "  execSync(c);\n  el.innerHTML = getName(req);\n  el.innerHTML = getSafe(req);\n"
+                                    "  exec(getSafe(req));\n  db.query('SELECT ?', [getName(req)]);\n"
+                                    "  db.query('SELECT ' + getName(req));\n  exec(Number(getCmd(req)));\n"
+                                    "  exec(shellQuote(getCmd(req)));\n});\n")))
+    sets.append(js_files(("h.js", "function runIt(cmd) { exec(cmd); }\nfunction wrap(x) { return 'ls ' + x; }\n"
+                                  "function yes(x) { log(x); return true; }\nfunction escape(x) { return escapeHtml(x); }\n"
+                                  "function show(h) { el.innerHTML = h; }\n"
+                                  "module.exports = { runIt, wrap, yes, escape, show };\n"),
+                         ("app.js", "const { runIt, wrap, yes, escape, show } = require('./h');\n"
+                                    "app.get('/x', (req, res) => {\n  const q = req.query.q;\n  runIt(wrap(q));\n"
+                                    "  runIt(yes(q));\n  const w = wrap(q); runIt(w);\n  show(escape(q));\n"
+                                    "  runIt(escape(q));\n});\n")))
+    sets.append(js_files(("safe.js", "function runIt(cmd) { log(cmd); }\nmodule.exports = { runIt };\n"),
+                         ("danger.js", "function runIt(cmd) { exec(cmd); }\nmodule.exports = { runIt };\n"),
+                         ("a.js", "const { runIt } = require('./safe');\napp.get('/', (req) => { runIt(req.query.q); });\n"),
+                         ("b.js", "app.get('/', (req) => { runIt(req.query.q); });\n"),
+                         ("c.js", "const { runIt } = require('some-pkg');\napp.get('/', (req) => { runIt(req.query.q); });\n"),
+                         ("d.js", "const d = require('./danger');\napp.get('/', (req) => { d.runIt(req.query.q); "
+                                  "obj.runIt(req.query.q); this.runIt(req.query.q); });\n")))
+    sets.append(js_files(("src/input.ts", "export function getCmd(req: any): string {\n  return req.query.cmd;\n}\n"
+                                          "export default function getDef(req) { return req.body.x; }\n"),
+                         ("src/index.ts", "export * from './input.js';\nexport { getDef as other } from './input.js';\n"),
+                         ("src/app.ts", "import { getCmd } from './input.js';\nimport * as inp from './input';\n"
+                                        "import g from './input';\nimport { getCmd as gc2, other } from './index';\n"
+                                        "exec(getCmd(req));\nexec(inp.getCmd(req));\nexec(g(req));\nexec(gc2(req));\n"
+                                        "exec(other(req));\n")))
+    sets.append(js_files(("a.js", "module.exports = function getCmd(req) { return req.query.c; };\n"),
+                         ("b.js", "function helper(req) { return req.query.c; }\nmodule.exports = helper;\n"),
+                         ("c.js", "exports.getIt = function getIt(req) { return req.query.c; };\n"),
+                         ("d.js", "module.exports = require('./b');\n"),
+                         ("app.js", "const x = require('./a');\nconst y = require('./b');\nconst { getIt } = require('./c');\n"
+                                    "const z = require('./d');\nexec(x(req));\nexec(y(req));\nexec(getIt(req));\nexec(z(req));\n")))
+    sets.append(js_files(("a.js", "function probe() { var result = typeof win.location.href; return 1; }\n"
+                                  "function make() { var result = compute(); return result; }\n"
+                                  "function use() { el.innerHTML = make(); }\nfunction getQ() { return req.query.q; }\n"
+                                  "app.get('/', function (req, res) {\n  const c = getQ();\n"
+                                  "  db.run(sql, function (err) { exec(c); });\n});\n"
+                                  "const cmd = req.query.c;\nfunction runIt(cmd) { exec(cmd); }\n"
+                                  "const id = (cmd) => cmd;\nid(cmd);\n")))
+    chain = "".join(f"function c{i}(a) {{ return c{i + 1}(a); }}\n" for i in range(40))
+    sets.append(js_files(("chain.js", chain + "function c40(a) { return req.query.q; }\nexec(c0(1));\n")))
+    chain = "".join(f"function c{i}() {{ return v{i + 1}; }}\nvar v{i + 1} = c{i + 1}();\n" for i in range(40))
+    sets.append(js_files(("vchain.js", chain + "function c40() { return req.query.q; }\nexec(c0());\n")))
+    lib = "function runIt(cmd) {\n  exec('ls ' + cmd);\n}\nmodule.exports = { runIt };\n"
+    route = "app.get('/x', (req, res) => {\n  CALL;\n});\n"
+    sets.append(js_files(
+        ("lib/run.js", lib), ("b1.js", "export * from './lib/run';\n"),
+        *[(f"b{i}.js", f"export * from './b{i - 1}';\n") for i in range(2, 6)],
+        ("a1.js", route.replace("CALL", "require('./lib/run').runIt(req.query.q)")),
+        ("a2.js", "const lib = require('./lib/run');\nconst o = lib;\n" + route.replace("CALL", "o.runIt(req.query.q)")),
+        ("a3.js", "import { runIt } from '@/lib/run';\n" + route.replace("CALL", "runIt(req.query.q)")),
+        ("a4.js", "import { runIt } from './b5';\n" + route.replace("CALL", "runIt(req.query.q)")),
+        ("a5.js", "const { runIt } = require('./lib/run');\n" + route.replace("CALL", "const go = runIt; go(req.query.q)")),
+        ("a6.js", "const { runIt: go } = require('./lib/run');\nfunction unrelated() {\n  function go(x) { log(x); }\n}\n"
+                  + route.replace("CALL", "go(req.query.q)")),
+        ("a7.js", "function apply(runIt, q) {\n  runIt(q);\n}\n" + route.replace("CALL", "apply(log, req.query.q)")),
+        ("a8.js", route.replace("CALL", "JSON.parse(req.query.q); const s = req.query.q; s.replace(/a/g, 'b')")),
+        ("a9.js", "const { readFile } = require('node:fs');\n" + route.replace("CALL", "readFile(req.query.q)")),
+        ("h.js", "module.exports = {\n  runIt(cmd) { exec(cmd); },\n  handle(req) { this.runIt(req.query.q); },\n};\n"),
+        ("run.js", "module.exports = function runIt(cmd) { exec(cmd); };\n"),
+        ("a10.js", route.replace("CALL", "require('./run')(req.query.q)")),
+        ("a11.js", "let m = require('./b1');\nm = require('./lib/run');\n" + route.replace("CALL", "m.runIt(req.query.q)")),
+        ("a12.js", "const { runIt } = require('./lib/run');\nfunction tidy(x) { return 'x'; }\ntidy = runIt;\n"
+                   + route.replace("CALL", "tidy(req.query.q)"))))
+    helpers = ("function runIt(cmd) {\n  exec('ls ' + cmd);\n}\n"
+               "function t1(x) {\n  const y = x.trim();\n  return y;\n}\n"
+               "function t2(x) {\n  let s = 'ls ';\n  s += x;\n  return s;\n}\n"
+               "function t3(x) {\n  const a = [];\n  a.push(x);\n  return a.join(' ');\n}\n"
+               "function T4(x) {\n  this.v = x;\n}\nfunction ok(s) {\n  if (s.length > 3) return true;\n  return false;\n}\n"
+               "function escapeHtml(s) { return s; }\nfunction show(h) { el.innerHTML = h; }\n"
+               "function getName(req) { return escapeHtml(req.query.n); }\n"
+               "function viaClosure(req) {\n  let c;\n  [1].forEach(i => { c = req.query.cmd; });\n  return c;\n}\n"
+               "function viaCb(cmd) {\n  exec(cmd());\n}\n"
+               "module.exports = { runIt, t1, t2, t3, T4, ok, escapeHtml, show, getName, viaClosure, viaCb };\n")
+    sets.append(js_files(("h.js", helpers), ("app.js", (
+        "const { runIt, t1, t2, t3, T4, ok, escapeHtml, show, getName, viaClosure, viaCb } = require('./h')\n"
+        "app.get('/x', (req, res) => {\n  const a = t1(req.query.q); runIt(a)\n  const b = t2(req.query.q); runIt(b)\n"
+        "  const c = t3(req.query.q); runIt(c)\n  const d = new T4(req.query.q); runIt(d)\n"
+        "  const e = ok(req.query.q); runIt(e)\n  show(escapeHtml(req.query.q))\n  el.innerHTML = getName(req)\n"
+        "  exec(viaClosure(req))\n  viaCb(x => req.query.q)\n  let f\n  f = req.query.q\n  runIt(f)\n})\n"))))
+    nest = "function pad(a){return g(function(){" * 2500 + "}})" * 2500 + "\n"
+    sets.append(js_files(("lib.js", lib), ("app.js", nest + "const { runIt } = require('./lib');\n"
+                                                        + route.replace("CALL", "runIt(req.query.q)"))))
+    sets.append(js_files(("nest.js", "function g(req){return req.query.q}\n" + "exec(" * 20000 + "g(req)" + ")" * 20000 + "\n")))
+    sets.append(js_files(("nest.js", "function f(a){return g(function(){" * 5000 + "\U0001F600" * 3000)))
     return sets
 
 
@@ -139,7 +235,21 @@ TOKENS = ["'", '"', "`", "${", "}", "{", "(", ")", "[", "]", "/", "*", "\\", "\n
           "<", ">", "~", "^", "%", ".", ASTRAL, "\u00e9", "\u00a0", "\ufeff", "\x85", "//", "/*", "*/", "\r",
           "function f(a, b) {", "const g = (c) => {", "let h = async function (d) {", "exec(", "eval(",
           "req.query.q", "db.query(`", "el.innerHTML = ", "fetch(", "res.redirect(", "f(req.query.x)",
-          "g(t)", "const t = req.body.z;", "h(t, 1)", "new Function(", chr(0x10400), "parseInt(", "quote("]
+          "g(t)", "const t = req.body.z;", "h(t, 1)", "new Function(", chr(0x10400), "parseInt(", "quote(",
+          "return ", "return req.query.r;", "require('./p1')", "import { f, g as h } from './p0';",
+          "export function f(x) {", "module.exports = { f, g };", "exports.h = f;", "export * from './p2';",
+          "export default g;", "const { f, g: k } = require('./p1');", "import * as ns from './p1';", "ns.f(",
+          "obj.g(", "this.h(", "=>", "function* ", "escapeHtml(", "shellQuote(", "Number(", "?.", "getQ(req)",
+          "const getQ = (r) => r.query.x;", "function getQ(r) { return r.body.y; }", "k(", "m.f(",
+          "const m = require('./p3');", "import d from './p2';", "d(", "export { f as g };", "module.exports = f;",
+          "if (", "catch (", ") {", "exec(f(req.query.q));", "el.innerHTML = g(t);",
+          "const { a: b, c } = ", "let [p, , ...q] = ", "for (const {print:c, node:p} of D) {",
+          "var e, t = 1, n = f(1, 2), r;", "let r=(i,s={})=>{", "x += ", "s += req.query.q;", "new Box(",
+          "super.f(", "JSON.parse(", "require('./p1').f(", "require('./p2')(", "const o = m;", "const go = f;",
+          "go(", "o.f(", "x.replace(", "x => req.query.q", "(a, b) => a", "function () { return req.body.w; }",
+          "import { readFile } from 'fs';", "readFile(", "import { g } from '@/lib/g';", "f = g;",
+          "function isOk(s) { return true; }", "isOk(", "function escapeHtml(s) { return s; }",
+          "(x: string, y?: T) => {", "e.r(", "t(", "a?.b?.(", "let data\n", "data = req.query.d\n"]
 
 
 def soup(rnd):
@@ -197,7 +307,7 @@ class FlowParityTests(unittest.TestCase):
                  "`" + "${" * 2000 + "x", "'" * 3000, "/" * 3000, "/*" + "x" * 3000, "`" * 3001]
         sets = review_cases()
         for _ in range(800):
-            sets.append([{"path": f"p{k}.js", "content": soup(rnd) + "\n" + soup(rnd), "lang": "js"}
+            sets.append([{"path": f"p{k}.js", "content": soup(rnd) + "\n" + soup(rnd) + "\n" + soup(rnd), "lang": "js"}
                          for k in range(rnd.randint(1, 4))])
         p = subprocess.run([parity.NODE, "--input-type=module", "-e", NPM_FLOW, FLOW_JS],
                            input=json.dumps({"srcs": srcs, "sets": sets}), capture_output=True,
@@ -215,9 +325,14 @@ class FlowParityTests(unittest.TestCase):
             want = flow.analyze(files)
             total += len(want)
             self.assertEqual(got, want, json.dumps(files)[:300])
-        # not vacuous: the review cases and the corpus produce flows and the skip note
-        rules = {i["rule"] for found in js["flows"] for i in found}
+        # not vacuous: the review cases and the corpus produce flows of both
+        # kinds (a call into a sink, a returned value into one) and each note
+        found = [i for f in js["flows"] for i in f]
+        rules = {i["rule"] for i in found}
         self.assertTrue({"X-CMD", "X-SQL", "X-XSS", "X-CODE", "X-SSRF", "X-REDIR", "X-FLOW-SKIPPED"} <= rules, rules)
+        self.assertEqual({i["name"] for i in found if i["rule"] == "Q-FLOW-INCOMPLETE"},
+                         {"Flow analysis incomplete (iteration cap)", "Flow analysis incomplete (size budget)"})
+        self.assertGreater(sum("the value returned by" in i["why"] for i in found), 50)
         self.assertGreater(total, 100)
 
 
