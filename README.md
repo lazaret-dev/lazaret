@@ -62,7 +62,8 @@ and SQL `IDENTIFIED BY` / `PASSWORD` in any letter case. Finding messages and
 the install-hook `cmd` field are redacted the same way. Baselines keep
 matching because the placeholder is deterministic for a given rule + secret.
 Pass `--no-redact-secrets` when you are auditing a leak and need the exact
-bytes in the report.
+bytes in the report. It applies to project scans only: registry results are
+always redacted, because they are stored (see *Registry scanning*).
 
 **Baselines:** a baseline must be a report this engine wrote, and a hostile
 repo must not be able to supply one (audit G17), because a hand-crafted
@@ -236,6 +237,8 @@ lazaret-registry list                            # tracked packages + last verdi
 lazaret-registry report npm:left-pad@1.3.0       # stored findings for one scan
 ```
 
+Registry results are always redacted, on screen and in the state DB: a secret finding's line is stored as a placeholder naming the rule and the line's length, and credentials on the lines around any finding are masked, because the DB is read back by `report`, the MCP tools and anyone sharing a Postgres database. `--no-redact-secrets` has no effect here (the original lines are in the package's archive); it applies to project scans.
+
 Each scan answers one question, "does this package look malicious?", with a verdict and a one-line reason:
 
 | Verdict | Meaning |
@@ -347,6 +350,7 @@ The MCP client is a model, and a model can be steered by content it has read, so
 
 - **Allowed roots:** set `LAZARET_MCP_ROOTS` (paths separated by `:` — `;` on Windows) and any path outside them is a tool error. Unset, any path the server's user can read is allowed; set but empty (only separators or spaces), every tool call is refused as a configuration error.
 - **Per-call caps:** `LAZARET_MCP_MAX_FILES` (default 20,000), `LAZARET_MCP_MAX_BYTES` (200,000,000) and `LAZARET_MCP_MAX_SECONDS` (300). A call that hits one returns what it scanned, marked `"incomplete": true` with an SC-TRUNCATED finding (in `scan_files`, one for each file left out), so it can never pass the gate. `discover_packages` with `scan` scans at most 15 packages per call; the rest, and any past the deadline, come back as INCOMPLETE "not scanned" entries. A directory that doesn't exist or can't be listed is a tool error; a directory with nothing Lazaret scans, and a `scan_files` path that exists but can't be read, come back incomplete with an SC-TRUNCATED finding, never as a clean pass.
+- **Credentials:** a registry tool (`scan_package`, `discover_packages`) never stores or returns a raw credential line; findings carry a placeholder. `LAZARET_NO_REDACT=1` turns redaction off for the project tools only (`scan_directory`, `scan_files`, `scan_snippet`, `quality_gate`), which read your own code.
 - **Responsiveness:** tool calls run on a worker thread; `ping` is answered while a scan runs, and `notifications/cancelled` stops the scan between files.
 - **Same pipeline as the CLI:** `scan_directory` and `quality_gate` run exactly what `lazaret <dir>` runs (`lazaret.scanner.core.scan_project`), including `binding.gyp` hooks, pruned-tree notes and the cross-file pass.
 - **Protocol:** JSON-RPC 2.0 over stdio; protocol versions 2025-11-25, 2025-06-18 and 2024-11-05 are negotiated; malformed JSON gets a -32700 error, notifications are never answered, and stdout carries protocol frames only.

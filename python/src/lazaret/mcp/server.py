@@ -53,8 +53,12 @@ REGISTRY_DB = os.environ.get("LAZARET_DB", "lazaret-registry.db")
 # hostile or merely sloppy package must not be persisted. mk_issue in
 # lazaret.scanner.core redacts SECRET-rule flagged lines into the placeholder, so
 # the Store blob only ever sees the placeholder; the slim() issue copies
-# the tools return carry no snippet fields at all. Registry scanning is
-# the reason redaction is default-ON there.
+# the tools return carry no snippet fields at all.
+# LAZARET_NO_REDACT=1 turns redaction off for the PROJECT tools only
+# (scan_directory, scan_files, scan_snippet, quality_gate: the user's own
+# code). Registry scans ignore it (review P2): repo.scan_package always
+# redacts, so scan_package / discover_packages never store or return a raw
+# credential line.
 if os.environ.get("LAZARET_NO_REDACT") == "1":
     lazaret.REDACT_SECRETS = False
 

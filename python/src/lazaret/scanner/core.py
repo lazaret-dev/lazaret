@@ -6635,6 +6635,34 @@ def sanitize_term_line(s):
 # secret in the report.
 SECRET_RULES = {"S-SECRET", "S-TOKEN", "SQL-CRED", "S-ENTROPY"}
 REDACT_SECRETS = True
+
+
+class forced_redaction:
+    """Redaction on for the duration of a `with` block, whatever
+    REDACT_SECRETS says, and the old value restored after (review P2).
+
+    For results that are stored: the registry's state DB must never hold a
+    raw credential line, so its scans run under this, and the opt-outs
+    (--no-redact-secrets, LAZARET_NO_REDACT) keep working for project scans
+    only. Redaction happens when each finding is created, from the whole
+    file (PEM blocks, the file's high-entropy literals), which a later sweep
+    over the stored snippets cannot redo; hence forcing it for the whole
+    scan rather than cleaning up afterwards. Scans run one at a time in a
+    process (the MCP server has a single tool thread), so a module-level
+    switch is safe here."""
+
+    def __enter__(self):
+        global REDACT_SECRETS
+        self._saved = REDACT_SECRETS
+        REDACT_SECRETS = True
+        return self
+
+    def __exit__(self, *exc):
+        global REDACT_SECRETS
+        REDACT_SECRETS = self._saved
+        return False
+
+
 REDACT_PLACEHOLDER = "[redacted: secret rule {RULE}]"
 REDACT_FINGERPRINT = "[redacted: secret rule "   # marker of an already-redacted line
 EXCERPT_WIDTH = 100   # overridable via --excerpt-width
