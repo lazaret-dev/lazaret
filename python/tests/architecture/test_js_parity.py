@@ -16,11 +16,14 @@ where the OS supports them, files over a 2 MB limit). All fixture content
 is inert: nothing is executed, hosts are TEST-NET (192.0.2.x) or .invalid,
 credentials are dummies. Skipped where Node isn't installed.
 
-Known, deliberate differences are listed in PYTHON_ONLY*: findings only the
-Python engine produces (its cross-file flow engine). Where Python reports
-one of them, the derived fields (ratings, gate, exit code) are not compared
-for that tree. Any other difference fails this test, so the two
-engines can't drift apart silently.
+Known, deliberate differences: findings only the Python engine produces —
+the Python half of its cross-file flow engine (X-* flows and Q-FLOW-* notes
+on Python files; the JavaScript half is ported and compared like any other
+rule) and PYTHON_ONLY per fixture. Where Python reports one of them, the
+derived fields (ratings, gate, exit code) are not compared for that tree.
+The npm engine's cross-file gate label also says when Python files were not
+analyzed (derived() reads it as the Python label). Any other difference
+fails this test, so the two engines can't drift apart silently.
 """
 
 import collections
@@ -33,16 +36,16 @@ import sys
 import tempfile
 import unittest
 
+from lazaret.scanner import core
 from tests import _support
 
 NODE = shutil.which("node")
 JS_BIN = os.path.join(_support.REPO_ROOT, "js", "bin", "lazaret.js")
 
-# Findings only the Python engine produces: the cross-file flow engine
-# (lazaret.scanner.flow) has no JS port — its X-* flows, and its note for a
-# file it could not parse.
-PYTHON_ONLY_PREFIXES = ("X-",)
-PYTHON_ONLY_RULES = {"Q-FLOW-SKIPPED"}
+# The cross-file flow engine's rules (lazaret.scanner.flow). Its JavaScript
+# half is ported (js/src/scanner/flow.js); its Python half (AST-based) is not,
+# so its X-* flows and Q-FLOW-* notes on Python files are Python-only.
+FLOW_PREFIXES = ("X-", "Q-FLOW-")
 # fixture -> further rules only the Python engine may report there. (cfgproj's
 # .lazaret-taint.json is repository content: the Python engine loads it only
 # with --trust-repo-config, not passed here, so both engines agree on it.)
@@ -269,12 +272,47 @@ def issue_key(issue):
     return (issue["rule"], str(issue["file"]).replace("\\", "/"), issue["line"], issue["sev"], issue["msg"])
 
 
-def _python_only(issue, fixture=None):
-    return (issue["rule"].startswith(PYTHON_ONLY_PREFIXES) or issue["rule"] in PYTHON_ONLY_RULES
-            or issue["rule"] in PYTHON_ONLY.get(fixture, ()))
+def scanned_lang(project, rel):
+    """'py', 'js', 'sql' or None: how the engines read a scanned file — by its
+    extension, else (an extensionless script) by its #! line, read from the
+    scanned tree when it is still there."""
+    rel = str(rel).replace("\\", "/")
+    ext = os.path.splitext(rel)[1].lower()
+    if ext in core.EXTS:
+        return core.EXTS[ext]
+    if project:
+        try:
+            with open(os.path.join(project, *rel.split("/")), "rb") as f:
+                return core.script_source_lang(f.read(core.HEADER_SAMPLE_BYTES))
+        except OSError:
+            pass
+    return None
+
+
+def _python_only(issue, fixture=None, project=None):
+    """A finding only the Python engine produces: a flow finding on a Python
+    file, or one listed in PYTHON_ONLY for the fixture. project is the scanned
+    root (a report's "project"), for extensionless scripts."""
+    if issue["rule"].startswith(FLOW_PREFIXES):
+        return scanned_lang(project, issue["file"]) == "py"
+    return issue["rule"] in PYTHON_ONLY.get(fixture, ())
 
 
 DERIVED = ("pass", "conditions", "counts", "ratings")
+CROSS_FILE = "No cross-file taint flows"
+
+
+def derived(report, field):
+    """A derived report field, compared across engines. The npm engine's
+    cross-file gate label says when the project's Python files were not
+    analyzed ("… (JavaScript only: 2 Python files not analyzed)", report.js
+    crossFileLabel); its condition is the same, so it reads as the Python
+    label here (test_js_parity_flow checks the wording)."""
+    value = report[field]
+    if field == "conditions":
+        value = [dict(c, label=CROSS_FILE) if c["label"].startswith(CROSS_FILE + " (JavaScript only: ") else c
+                 for c in value]
+    return value
 
 
 @unittest.skipUnless(NODE, "node is not installed")
@@ -285,9 +323,10 @@ class EngineParityTests(unittest.TestCase):
         (js_exit, js_rep, js_err), (py_exit, py_rep, py_err) = js, py
         self.assertIsNotNone(js_rep, f"{label}: JS wrote no report (exit {js_exit}): {js_err[-500:]}")
         self.assertIsNotNone(py_rep, f"{label}: Python wrote no report (exit {py_exit}): {py_err[-500:]}")
-        py_only = [i for i in py_rep["issues"] if _python_only(i, fixture)]
+        project = py_rep.get("project")
+        py_only = [i for i in py_rep["issues"] if _python_only(i, fixture, project)]
         js_c = collections.Counter(issue_key(i) for i in js_rep["issues"])
-        py_c = collections.Counter(issue_key(i) for i in py_rep["issues"] if not _python_only(i, fixture))
+        py_c = collections.Counter(issue_key(i) for i in py_rep["issues"] if not _python_only(i, fixture, project))
         # both sides in one assertion: a finding the engines word differently
         # shows up once on each side, and the failure should show both
         self.assertEqual({"only the JS engine reports": sorted((js_c - py_c).elements()),
@@ -297,7 +336,7 @@ class EngineParityTests(unittest.TestCase):
         self.assertEqual(js_rep["metrics"], py_rep["metrics"], f"{label}: metrics")
         if not py_only:        # otherwise the Python-only findings legitimately move these
             for field in DERIVED:
-                self.assertEqual(js_rep[field], py_rep[field], f"{label}: {field}")
+                self.assertEqual(derived(js_rep, field), derived(py_rep, field), f"{label}: {field}")
             self.assertEqual(js_exit, py_exit, f"{label}: exit code")
 
     def test_fixture_trees(self):

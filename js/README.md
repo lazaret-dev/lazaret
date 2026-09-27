@@ -9,9 +9,13 @@ same detection rules, the intra-file taint and SQL-sink analyzers, and the
 obfuscation/entropy secret detection. For a project scan, `npx lazaret` and
 `python -m lazaret` are tested (`python/tests/architecture/test_js_parity.py`)
 to report the same issues (rule, file, line, severity, message), metrics,
-ratings, gate result and exit code. The Python engine additionally runs the
-cross-file flow engine (`X-*` findings) and accepts taint configs; registry
-auditing (`lazaret-registry`) is Python-only.
+ratings, gate result and exit code. Both run the JavaScript half of the
+cross-file flow engine (`X-*` findings: a request value passed into a
+function, in the same or another file, whose parameter reaches a sink). The
+Python engine additionally follows flows through Python files and accepts
+taint configs; registry auditing (`lazaret-registry`) is Python-only. When
+the project has Python files, the gate's cross-file condition says so: `No
+cross-file taint flows (JavaScript only: 3 Python files not analyzed)`.
 
 ```
 npx lazaret check ./my-project

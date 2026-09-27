@@ -37,7 +37,7 @@ def tree(files):
 def snippets(report):
     """Every finding's key with its snippet (the Python-only ones left out)."""
     return collections.Counter(json.dumps([parity.issue_key(i), i["snipStart"], i["snippet"]])
-                               for i in report["issues"] if not parity._python_only(i))
+                               for i in report["issues"] if not parity._python_only(i, project=report["project"]))
 
 
 @unittest.skipUnless(parity.NODE, "node is not installed")

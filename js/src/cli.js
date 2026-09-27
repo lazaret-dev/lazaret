@@ -22,6 +22,7 @@ import {
 import { clipLine } from "./lib/issue.js";
 import { applyBaseline, BASELINE_KEY_ENV } from "./baseline.js";
 import { dependencyChecks } from "./deps.js";
+import { analyzeFlows, redactFlowIssues } from "./scanner/flow.js";
 
 // Local copies (NOT imported from index.js — that would be a cycle).
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
@@ -313,6 +314,10 @@ function runChecked(argv, io) {
   add(deps.issues);
   for (const f of deps.files) files.push(f);
   add(skippedIssues);
+  // Cross-file taint flows in the project's JavaScript (the Python engine's
+  // flow.analyze, JavaScript half; dependency files are not analyzed). The
+  // findings copy raw source lines: they get their file's redaction here.
+  add(redactFlowIssues(analyzeFlows(files), files));
   const res = redactResult(buildResult(root, files, issues), clipLine);
   if (opts.baseline) {
     applyBaseline(res, opts.baseline, { root, env, warn: (m) => err(sanitizeTermLine(m)) });
