@@ -7,6 +7,7 @@ pip install lazaret
 lazaret path/to/project                 # scan; writes lazaret-report.{html,json}
 lazaret . --ci --sarif out.sarif        # quality gate for CI, SARIF for code scanning
 lazaret-registry scan npm:left-pad      # audit a published npm / PyPI package
+lazaret-sca --update-bundle             # download OSV + CISA KEV + EPSS into cve-bundle.json
 lazaret-sca . --bundle cve-bundle.json  # match installed dependencies against CVEs
 lazaret-mcp                             # MCP server, so an AI assistant can scan code
 ```

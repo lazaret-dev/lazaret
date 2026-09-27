@@ -62,7 +62,9 @@ python/
 │   │   ├── flow.py         interprocedural / cross-file taint
 │   │   ├── taintspec.py    taint-config validation (shared by both taint engines)
 │   │   ├── reports.py      safe report paths, report provenance, baseline signing
-│   │   └── sca.py          dependency CVE matching (`lazaret-sca`)
+│   │   ├── sca.py          dependency CVE matching (`lazaret-sca`)
+│   │   └── sca_feeds.py    `lazaret-sca --update-bundle`: the CVE bundle from OSV,
+│   │                       CISA KEV and EPSS
 │   ├── registry/
 │   │   ├── repo.py         npm / PyPI package auditing (`lazaret-registry`)
 │   │   └── schema.sql      PostgreSQL setup for the state DB
@@ -142,6 +144,7 @@ class IntegrationTests(unittest.TestCase):
 | `LAZARET_TEST_PG_MATRIX` | `tests/pg/test_auth_matrix.py`, the live TLS cases in `test_review_tls.py` and `test_review_libpq_params.py` | `"<host> <port> <ca.crt path> <unix socket dir>"` for a server configured as in that file's docstring (a few TLS tests also need the `openssl` command and skip without it) |
 | `LAZARET_SAMPLES_DIR` | `tests/scanner/test_detection_corpus.py` | path to a checkout of `lazaret-samples` |
 | `LAZARET_BENCHMARK` | `tests/registry/test_benchmark.py` | any value; scans 21 real, legitimate npm and PyPI packages over the network and checks none is SUSPICIOUS and each matches its expected verdict |
+| `LAZARET_TEST_FEEDS` | `LiveFeedsTests` in `tests/scanner/test_sca_feeds.py` | any value; downloads the real OSV, CISA KEV and EPSS feeds and checks the bundle built from them (the rest of that file reads local copies, as a mirror would) |
 
 Tests that depend on file permissions skip themselves when run as root, since root ignores directory permissions (the npm suite re-runs them under `unshare -U` where available).
 

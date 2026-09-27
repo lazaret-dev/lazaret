@@ -3,11 +3,13 @@
 
 Given an installed code base (a project directory), inventory the npm and PyPI
 modules that are actually installed/declared there, then match each module@version
-against a CVE bundle exported from the Redline vulnerability knowledge base
-(`export-bundle.ts` on the Redline side: KEV + NVD + Wordfence + EPSS, with
-affected-version ranges) and emit Lazaret-shaped VULN findings.
+against a CVE bundle and emit Lazaret-shaped VULN findings. The bundle is built
+from public feeds by --update-bundle (sca_feeds.py: OSV advisories with
+affected-version ranges, CISA's KEV catalog, FIRST's EPSS scores).
 
+    lazaret-sca --update-bundle [--bundle cve-bundle.json]      # download a fresh bundle
     lazaret-sca <project-dir> --bundle cve-bundle.json [options]
+    lazaret-sca <project-dir> --bundle cve-bundle.json --update-bundle   # both, in order
 
 What "inventory" means (both ecosystems, both direct evidence and declared pins):
   npm   - node_modules/**/package.json (nested node_modules too; the INSTALLED truth)
@@ -27,7 +29,7 @@ What "inventory" means (both ecosystems, both direct evidence and declared pins)
   be read (a range or wildcard specifier, a git/url/file dependency) is kept
   with an empty version, so a matching advisory reports SCA-CVE-UNKNOWN.
 
-Matching (the Redline A06 engine, ported and hardened):
+Matching:
   - Version comparison is ecosystem-aware (compare_versions):
       pypi: PEP 440 — epoch, release with zero padding (1.0 == 1.0.0),
             pre-releases a < b < rc, post-releases, dev releases
@@ -44,20 +46,27 @@ Matching (the Redline A06 engine, ported and hardened):
     2.0 leaves 2.0rc1 affected — the safe direction).
   - Verdicts: affected / not-affected / unknown. NO RANGE DATA, a version
     or bound that cannot be compared ('*', '2.*', git refs), or a malformed
-    range => UNKNOWN, never a false clear — the same discipline as Redline's
-    version-range.ts ("we never wrongly clear a component as patched").
-  - Name normalization: lowercase, PEP 503 separator folding ('_', '.', '-'
-    runs), '@scope/name' folds to 'scope-name' (never to the bare 'name': an
-    @types/lodash is not lodash), 'python-' / 'py-' prefixes and '-python'
-    suffixes stripped for pypi.
-  - Ecosystem hint from the bundle is advisory only: we match on the normalized
-    package NAME, because CPE product names (cryptography, requests, ws,
-    lodash) are how NVD records npm/pypi packages. A pypi 'python-foo' alias
-    normalizes to the same key as an npm 'foo'.
+    range => UNKNOWN, never a false clear: a component is never wrongly
+    cleared as patched.
+  - Two kinds of package entry. An EXACT entry ("exact": true, what
+    --update-bundle writes from OSV) is a package-manager name: it matches
+    only its own ecosystem and its own name (exact_name_key: PEP 503 for
+    pypi, the name as written for npm).
+  - Any other entry is taken as a CPE product name, whose ecosystem is only
+    a hint: it matches on the normalized package NAME in either ecosystem,
+    because CPE product names (cryptography, requests, ws, lodash) are how
+    NVD records npm/pypi packages. Normalization: lowercase, PEP 503
+    separator folding ('_', '.', '-' runs), '@scope/name' folds to
+    'scope-name' (never to the bare 'name': an @types/lodash is not
+    lodash), 'python-' / 'py-' prefixes and '-python' suffixes stripped for
+    pypi, so a pypi 'python-foo' alias normalizes to the same key as an npm
+    'foo'.
 
 Severity mapping (VULN, per Lazaret's BLOCKER..INFO):
   KEV known-exploited  -> BLOCKER   (a registered, actively exploited CVE on an
                                      installed version — the exact case the card asks for)
+  malicious package    -> BLOCKER   (SCA-MALICIOUS: a malicious-package report — the
+                                     release is malware, not merely vulnerable)
   cvss >= 9.0          -> CRITICAL
   cvss >= 7.0          -> MAJOR
   cvss >= 4.0          -> MINOR
@@ -71,8 +80,9 @@ baseline handling. Issue dicts carry the same keys as lazaret.mk_issue plus
 epss, kev).
 
 Exit codes (mirror the lazaret CLI): 0 ok / 1 gate failed (--ci) / 2 usage /
-3 report output error / 4 bundle problem (invalid, unreadable, no
-advisories) / 5 internal error.
+3 report or bundle output error / 4 bundle problem (invalid, unreadable, no
+advisories; with --update-bundle, a feed that can't be downloaded or read) /
+5 internal error.
 
 No third-party dependencies — stock python3, same contract as the lazaret CLI.
 """
@@ -80,6 +90,7 @@ import argparse
 import ast
 import collections
 import datetime as _dt
+import functools
 import importlib
 import io
 import json
@@ -100,9 +111,9 @@ EXIT_INTERNAL = 5
 SCA_REPORT_NAME = "lazaret-sca.json"
 
 # ---------------------------------------------------------------------------
-# Version engine — PEP 440 and semver 2.0 (ported from Redline's
-# version-range.ts and corrected: that port compared everything after the
-# numeric head as a string, so 1.0.post1 < 1.0 and beta.10 < beta.9)
+# Version engine — PEP 440 and semver 2.0 (the first version of this engine
+# compared everything after the numeric head as a string, so 1.0.post1 < 1.0
+# and beta.10 < beta.9; that order survives only as _legacy_compare)
 # ---------------------------------------------------------------------------
 
 _PEP440_RE = re.compile(r"""
@@ -130,6 +141,9 @@ def _release(nums):
     return rel
 
 
+# Both key functions are pure, and a bundle update compares every listed
+# version of an advisory with the same few bounds: memoized (bounded).
+@functools.lru_cache(maxsize=1 << 16, typed=True)
 def _pep440_key(v, ignore_local=False):
     """Sort key of a PEP 440 version (None if it is not one)."""
     s = str(v)
@@ -163,6 +177,7 @@ def _pep440_key(v, ignore_local=False):
             pre_k, post_k, dev_k, local_k)
 
 
+@functools.lru_cache(maxsize=1 << 16, typed=True)
 def _semver_key(v, ignore_local=False):
     """Sort key of a semver version (None if it is not one). Build metadata
     never takes part in precedence (semver §10)."""
@@ -362,6 +377,18 @@ def name_variants(name, ecosystem):
         out.add("py-" + base)
     out.discard("")
     return out
+
+
+def exact_name_key(name, ecosystem):
+    """The identity an EXACT bundle entry (a package-manager name, as OSV
+    records it) matches on: the PEP 503 name for pypi, the name as written
+    for npm. No aliases and no case folding for npm — legacy npm names are
+    case-sensitive (JSONStream and jsonstream are different packages) — and
+    a scoped name is never its unscoped namesake."""
+    n = str(name or "").strip()
+    if ecosystem == "pypi":
+        return re.sub(r"[-_.]+", "-", n).lower()
+    return n
 
 
 # ---------------------------------------------------------------------------
@@ -1648,7 +1675,7 @@ def scan_pypi_declared(root, warn=None):
 
 
 # ---------------------------------------------------------------------------
-# CVE bundle (the Redline export) — loading, validation + index
+# CVE bundle (built by --update-bundle, sca_feeds.py) — loading, validation + index
 # ---------------------------------------------------------------------------
 
 def _num(v):
@@ -1692,7 +1719,8 @@ class CveBundle:
         counts = doc.get("counts")
         self.counts = counts if isinstance(counts, dict) else {}
         self.advisories = []
-        self._index = {}
+        self._index = {}            # loose name key -> [(adv, pkg)] (CPE product names)
+        self._exact = {}            # (ecosystem, exact_name_key) -> [(adv, pkg)]
         self._order = {}            # (id(adv), id(pkg)) -> position in the bundle
         for raw in advisories:
             adv = self._advisory(raw)
@@ -1701,6 +1729,10 @@ class CveBundle:
             self.advisories.append(adv)
             for pkg in adv["packages"]:
                 self._order[(id(adv), id(pkg))] = len(self._order)
+                if pkg["exact"]:
+                    key = (pkg["ecosystem"], exact_name_key(pkg["name"], pkg["ecosystem"]))
+                    self._exact.setdefault(key, []).append((adv, pkg))
+                    continue
                 for key in name_variants(pkg["name"], pkg["ecosystem"]):
                     self._index.setdefault(key, []).append((adv, pkg))
 
@@ -1721,6 +1753,7 @@ class CveBundle:
             "epss": _num(raw.get("epss")),
             "epssPercentile": _num(raw.get("epssPercentile")),
             "knownExploited": raw.get("knownExploited") is True,
+            "malicious": raw.get("malicious") is True,
             "ransomware": raw.get("ransomware") is True,
             "dueDate": raw.get("dueDate") if isinstance(raw.get("dueDate"), str) else None,
             "published": raw.get("published") if isinstance(raw.get("published"), str) else None,
@@ -1742,6 +1775,10 @@ class CveBundle:
                 w("malformed advisory package entries skipped")
                 continue
             eco = p.get("ecosystem") if p.get("ecosystem") in ("npm", "pypi") else None
+            exact = p.get("exact") is True
+            if exact and eco is None:
+                w("exact package entries without an npm/pypi ecosystem (matched by name)")
+                exact = False
             ranges = p.get("ranges")
             if ranges is None:
                 ranges = []
@@ -1749,18 +1786,24 @@ class CveBundle:
                 w("malformed affected-version ranges (verdict: unknown)")
                 ranges = None                      # -> SCA-CVE-UNKNOWN on a name match
             adv["packages"].append({"name": p["name"], "ecosystem": eco, "ranges": ranges,
+                                    "exact": exact,
                                     "vendor": p.get("vendor") if isinstance(p.get("vendor"), str) else None})
         return adv
 
     def advisories_for(self, name, ecosystem=None):
-        """Every (advisory, package entry) pair indexed under one of the
-        name's lookup keys, each once, in bundle order — never in the
-        iteration order of the name_variants() set, which changes with
-        PYTHONHASHSEED."""
+        """Every (advisory, package entry) pair that names this dependency,
+        each once, in bundle order — never in the iteration order of the
+        name_variants() set, which changes with PYTHONHASHSEED. Loose
+        entries match any of the name's lookup keys; exact entries only
+        their own ecosystem and exact name."""
         found = {}
         for key in name_variants(name, ecosystem):
             for pair in self._index.get(key, []):
                 found.setdefault((id(pair[0]), id(pair[1])), pair)
+        if self._exact:
+            for eco in ((ecosystem,) if ecosystem in ("npm", "pypi") else ("npm", "pypi")):
+                for pair in self._exact.get((eco, exact_name_key(name, eco)), []):
+                    found.setdefault((id(pair[0]), id(pair[1])), pair)
         return [found[k] for k in sorted(found, key=self._order.__getitem__)]
 
     @classmethod
@@ -1824,8 +1867,9 @@ def bundle_is_fresh(generated_at, max_age):
 # ---------------------------------------------------------------------------
 
 def severity_of(adv):
-    """KEV first, then CVSS, then the KB severity label. Never INFO — see module docstring."""
-    if adv.get("knownExploited") is True:
+    """KEV or a malicious-package report first, then CVSS, then the
+    advisory's severity label. Never INFO — see module docstring."""
+    if adv.get("knownExploited") is True or adv.get("malicious") is True:
         return "BLOCKER"
     cvss = _num(adv.get("cvss"))
     if cvss is not None:
@@ -1860,13 +1904,23 @@ def fix_hint(adv, pkg, ecosystem=None):
 _CLEAR, _UNKNOWN, _AFFECTED = 0, 1, 2
 
 
+def _all_versions(r):
+    return isinstance(r, dict) and unbounded(r.get("fromVersion", "*")) \
+        and unbounded(r.get("toVersion", "*"))
+
+
 def _entry_verdict(version, ecosystem, pkg):
     """(verdict, detail) of one dependency version against one advisory
     package entry: (_AFFECTED, matched range), (_UNKNOWN, reason) or
-    (_CLEAR, None) when the version falls outside every range."""
+    (_CLEAR, None) when the version falls outside every range. A range
+    covering every version (a malicious package, an unfixed flaw) needs no
+    version: an unpinned or uncomparable one is affected too."""
+    ranges = pkg.get("ranges")
+    for r in ranges or []:
+        if _all_versions(r):
+            return _AFFECTED, r
     if not version:
         return _UNKNOWN, "no concrete version (range, wildcard or unpinned dependency)"
-    ranges = pkg.get("ranges")
     if ranges is None:
         return _UNKNOWN, "the advisory's version ranges are malformed"
     if not ranges:
@@ -1923,7 +1977,7 @@ def match_inventory(inventory, bundle):
 # ---------------------------------------------------------------------------
 
 # A CVE verdict is only as current as the bundle it came from. KEV is updated
-# continuously and EPSS daily, so an export older than this fails a quality-gate
+# continuously and EPSS daily, so a bundle older than this fails a quality-gate
 # freshness condition (override or disable with --max-age).
 BUNDLE_MAX_AGE_DAYS = 7
 
@@ -1936,6 +1990,18 @@ SCA_RULES = {
                             "KEV entry is the highest-confidence supply-chain exposure there is.",
         "fix": "Upgrade the dependency out of the affected range; if that is impossible this " "release, plan a compensating control and an exception with an expiry.",
         "ref": "OWASP A06:2021 — Vulnerable & Outdated Components; CISA KEV",
+    },
+    "SCA-MALICIOUS": {
+        "id": "SCA-MALICIOUS", "name": "Known malicious package version installed",
+        "type": "VULN", "sev": "BLOCKER",
+        "msg": None, "why": "A malicious-package report (OpenSSF's malicious-packages "
+                            "database, published through OSV) lists this package version as "
+                            "malware: a typosquat, a dependency-confusion package or a "
+                            "hijacked release. Installing it ran the attacker's code.",
+        "fix": "Remove the package and pin a clean version or a legitimate replacement. Treat "
+               "every machine that installed it as compromised: rotate the credentials it "
+               "could reach (tokens, SSH keys, cloud keys), from a clean machine.",
+        "ref": "CWE-506 · OWASP A08:2021 — Software and Data Integrity Failures",
     },
     "SCA-CVE": {
         "id": "SCA-CVE", "name": "Vulnerable dependency (CVE in affected range)",
@@ -1951,8 +2017,8 @@ SCA_RULES = {
         "type": "VULN", "sev": "MINOR",
         "msg": None, "why": "The advisory is registered for this module but no affected version "
                             "range could be evaluated against the installed/pinned version. "
-                            "Unknown is reported rather than clear — the Redline KB discipline: "
-                            "never wrongly clear a component as patched.",
+                            "Unknown is reported rather than clear: a component is never "
+                            "wrongly cleared as patched.",
         "fix": "Pin an exact version and re-scan, or check the advisory manually.",
         "ref": "OWASP A06:2021 — Vulnerable & Outdated Components",
     },
@@ -1963,6 +2029,7 @@ def mk_sca_issue(rule, dep, adv, pkg, matched_range=None, fix=None, reason=None)
     e, name, version, where = dep
     cve = adv.get("cve")
     title = adv.get("title") or cve
+    shown = version or "(version not pinned)"
     sev = "BLOCKER" if adv.get("knownExploited") is True else severity_of(adv)
     if rule["id"] == "SCA-CVE-UNKNOWN":
         sev = "MINOR"
@@ -1971,10 +2038,12 @@ def mk_sca_issue(rule, dep, adv, pkg, matched_range=None, fix=None, reason=None)
             msg += " (%s)" % reason
     elif adv.get("knownExploited") is True:
         msg = "%s (%s) affects %s %s — KEV: exploited in the wild%s" % (
-            cve, title, name, version,
+            cve, title, name, shown,
             " (ransomware use known)" if adv.get("ransomware") is True else "")
+    elif adv.get("malicious") is True:
+        msg = "%s (%s): %s %s is a reported malicious package version" % (cve, title, name, shown)
     else:
-        msg = "%s (%s) affects %s %s" % (cve, title, name, version)
+        msg = "%s (%s) affects %s %s" % (cve, title, name, shown)
     issue = {
         "rule": rule["id"], "name": rule["name"], "type": "VULN", "sev": sev,
         "msg": msg, "why": rule["why"], "fix": fix or rule["fix"], "ref": rule["ref"],
@@ -1984,6 +2053,7 @@ def mk_sca_issue(rule, dep, adv, pkg, matched_range=None, fix=None, reason=None)
             "ecosystem": e, "package": name, "installed": version,
             "cve": cve, "cvss": _num(adv.get("cvss")), "severity": adv.get("severity"),
             "cwes": adv.get("cwes") or [], "knownExploited": adv.get("knownExploited") is True,
+            "malicious": adv.get("malicious") is True,
             "ransomware": adv.get("ransomware") is True, "dueDate": adv.get("dueDate"),
             "epss": _num(adv.get("epss")), "epssPercentile": _num(adv.get("epssPercentile")),
             "published": adv.get("published"),
@@ -2000,8 +2070,8 @@ def build_sca_result(root, bundle, issues, inventory, stats, out_dir=None, max_a
     """Lazaret result dict — same keys lazaret.build_result emits, so the
     report renderers, quality gate semantics, baseline diffing and MCP slim()
     all work on an SCA result unchanged. Includes the bundle-freshness gate:
-    a CVE verdict is only as trustworthy as the export it came from — a
-    missing or unparseable export date FAILS it."""
+    a CVE verdict is only as trustworthy as the bundle it came from — a
+    missing or unparseable build date FAILS it."""
     age_days = bundle_age_days(bundle.generated_at)
     counts = {"VULN": 0, "HOTSPOT": 0, "BUG": 0, "SMELL": 0}
     for i in issues:
@@ -2009,6 +2079,8 @@ def build_sca_result(root, bundle, issues, inventory, stats, out_dir=None, max_a
     conds = [
         {"label": "No known-exploited (KEV) dependencies",
          "ok": not any(i["rule"] == "SCA-CVE-KEV" for i in issues)},
+        {"label": "No known malicious packages",
+         "ok": not any(i["rule"] == "SCA-MALICIOUS" for i in issues)},
         {"label": "No critical vulnerable dependencies",
          "ok": not any(i["type"] == "VULN" and i["sev"] in ("CRITICAL", "BLOCKER") for i in issues)},
         {"label": "No vulnerable dependencies",
@@ -2052,13 +2124,21 @@ def build_sca_result(root, bundle, issues, inventory, stats, out_dir=None, max_a
 # CLI
 # ---------------------------------------------------------------------------
 
+DEFAULT_BUNDLE = "cve-bundle.json"
+
+
 def parse_args(argv):
     ap = argparse.ArgumentParser(
         prog="lazaret-sca",
         description="Lazaret SCA — inventory npm/pypi dependencies of an installed code "
-                    "base and match them against a Redline-exported CVE bundle.")
-    ap.add_argument("directory", help="project directory (the installed code base)")
-    ap.add_argument("--bundle", required=True, help="path to cve-bundle.json (Redline export)")
+                    "base and match them against a CVE bundle built from OSV, CISA KEV "
+                    "and EPSS data (--update-bundle downloads a fresh one).")
+    ap.add_argument("directory", nargs="?",
+                    help="project directory (the installed code base); optional with "
+                         "--update-bundle")
+    ap.add_argument("--bundle", metavar="PATH",
+                    help="the CVE bundle (cve-bundle.json) to match against; with "
+                         "--update-bundle, where to write it (default %s)" % DEFAULT_BUNDLE)
     ap.add_argument("--site-packages", action="append", default=[],
                     help="extra site-packages dir to scan for installed pypi modules (repeatable)")
     ap.add_argument("--max-age", type=int, default=BUNDLE_MAX_AGE_DAYS, dest="max_age",
@@ -2081,7 +2161,44 @@ def parse_args(argv):
     ap.add_argument("-q", "--quiet", action="store_true", help="summary only")
     ap.add_argument("--inventory-only", action="store_true",
                     help="print the dependency inventory and exit (no matching)")
-    return ap.parse_args(argv)
+    upd = ap.add_argument_group(
+        "updating the bundle",
+        "Download OSV advisories (npm and PyPI), CISA's KEV catalog and EPSS scores, "
+        "and write a fresh bundle to --bundle. Nothing is written unless every feed "
+        "was read. Given a directory too, the scan runs after the update. The "
+        "locations can be https URLs, file: URLs or local paths (a mirror).")
+    upd.add_argument("--update-bundle", action="store_true",
+                     help="download the feeds and (re)write the bundle")
+    upd.add_argument("--osv-url", metavar="URL",
+                     help="OSV export location; {ecosystem} becomes npm and PyPI "
+                          "(default https://storage.googleapis.com/osv-vulnerabilities/"
+                          "{ecosystem}/all.zip)")
+    upd.add_argument("--kev-url", metavar="URL",
+                     help="KEV catalog location (default: CISA's JSON feed, then CISA's "
+                          "GitHub mirror if the feed can't be reached)")
+    upd.add_argument("--epss-url", metavar="URL",
+                     help="EPSS scores location (default https://epss.empiricalsecurity.com/"
+                          "epss_scores-current.csv.gz)")
+    upd.add_argument("--no-epss", action="store_true",
+                     help="build the bundle without EPSS scores (they are shown with "
+                          "findings and change no severity)")
+    args = ap.parse_args(argv)
+    if args.update_bundle:
+        if args.bundle is None:
+            args.bundle = DEFAULT_BUNDLE
+        if args.no_epss and args.epss_url:
+            ap.error("--epss-url and --no-epss contradict each other")
+    else:
+        given = [flag for flag, value in (("--osv-url", args.osv_url), ("--kev-url", args.kev_url),
+                                          ("--epss-url", args.epss_url), ("--no-epss", args.no_epss))
+                 if value]
+        if given:
+            ap.error("%s only apply with --update-bundle" % ", ".join(given))
+        if args.directory is None:
+            ap.error("the following arguments are required: directory (or --update-bundle)")
+        if args.bundle is None and not args.inventory_only:
+            ap.error("the following arguments are required: --bundle")
+    return args
 
 
 def scan_all(root, extra_site_packages=None, warn=None):
@@ -2129,14 +2246,14 @@ def main(argv=None):
 def _main(argv=None):
     lazaret.configure_stdio()
     args = parse_args(argv if argv is not None else sys.argv[1:])
-    if not os.path.isdir(args.directory):
+    if args.directory is not None and not os.path.isdir(args.directory):
         # audit H1: sanitize the CLI value — no-op for clean paths, uniformity.
         print("error: %s is not a directory" % lazaret.sanitize_term(args.directory),
               file=sys.stderr)
         return 2
 
     paths = {}
-    if not args.inventory_only:
+    if args.directory is not None and not args.inventory_only:
         # Report destinations are validated BEFORE the scan (writability, no
         # symlinks/special files, no clobbering a file that is not one of our
         # reports) — the old plain open() followed a committed
@@ -2150,6 +2267,15 @@ def _main(argv=None):
         except lazaret_report.ReportPathError as exc:
             print("error: %s" % lazaret.sanitize_term(exc), file=sys.stderr)
             return lazaret_report.EXIT_OUTPUT
+
+    if args.update_bundle:
+        # Imported here: only the update needs the download machinery (and
+        # sca_feeds imports this module).
+        from lazaret.scanner import sca_feeds
+        rc = sca_feeds.run_update(args)
+        if rc or args.directory is None:
+            return rc
+        print()
 
     warn = _Warnings()
     inv = scan_all(args.directory, args.site_packages, warn)
@@ -2176,8 +2302,9 @@ def _main(argv=None):
         print("error: %s" % lazaret.sanitize_term(e), file=sys.stderr)
         return EXIT_BUNDLE
     if not bundle.advisories:
-        print("error: bundle %s contains no advisories — export one from Redline first "
-              "(packages/vulndb/src/export-bundle.ts)" % lazaret.sanitize_term(args.bundle),
+        print("error: bundle %s contains no advisories — build one with "
+              "`lazaret-sca --update-bundle --bundle %s`"
+              % (lazaret.sanitize_term(args.bundle), lazaret.sanitize_term(args.bundle)),
               file=sys.stderr)
         return EXIT_BUNDLE
     for line in bundle.warnings.lines():
@@ -2186,8 +2313,14 @@ def _main(argv=None):
     matches, unknown = match_inventory(inv, bundle)
     issues = []
     for adv, pkg, dep, hit in sorted(matches, key=lambda m: (m[0].get("cve") or "")):
-        rule = SCA_RULES["SCA-CVE-KEV" if adv.get("knownExploited") is True else "SCA-CVE"]
-        issues.append(mk_sca_issue(rule, dep, adv, pkg, hit, fix=fix_hint(adv, pkg, dep[0])))
+        if adv.get("knownExploited") is True:
+            rule = SCA_RULES["SCA-CVE-KEV"]
+        elif adv.get("malicious") is True:
+            rule = SCA_RULES["SCA-MALICIOUS"]
+        else:
+            rule = SCA_RULES["SCA-CVE"]
+        fix = None if rule["id"] == "SCA-MALICIOUS" else fix_hint(adv, pkg, dep[0])
+        issues.append(mk_sca_issue(rule, dep, adv, pkg, hit, fix=fix))
     for dep, adv, pkg, reason in sorted(unknown, key=lambda u: (u[1].get("cve") or "",
                                                                  u[2].get("name") or "")):
         issues.append(mk_sca_issue(SCA_RULES["SCA-CVE-UNKNOWN"], dep, adv, pkg, reason=reason))
@@ -2208,9 +2341,10 @@ def _main(argv=None):
               "freshness cannot be established, so the freshness gate fails.",
               file=sys.stderr)
     elif age is not None and args.max_age > 0 and not bundle_is_fresh(bundle.generated_at, args.max_age):
-        print("  WARNING: bundle is %d days old (max %d) — new CVEs/KEV entries since the "
-              "export are invisible to this scan. Re-export from Redline "
-              "(packages/vulndb/src/export-bundle.ts)." % (age, args.max_age), file=sys.stderr)
+        print("  WARNING: bundle is %d days old (max %d) — new CVEs/KEV entries since it "
+              "was built are invisible to this scan. Refresh it with `lazaret-sca "
+              "--update-bundle --bundle %s`."
+              % (age, args.max_age, lazaret.sanitize_term(args.bundle)), file=sys.stderr)
     print("  matches:    %d affected · %d unknown-version" % (len(matches), len(unknown)))
     if "newIssues" in res:
         print("  New issues vs baseline: %d" % res["newIssues"])

@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """Unit tests — Lazaret SCA dependency CVE scanner (card "Identify CVE Scanning
-Features"). Pure-function tests for the version engine (ported from Redline
-version-range.ts), name normalization, the bundle index, the inventory scanners
-and the match/severity machinery — plus an end-to-end scan of a fixture project
-against a synthetic CVE bundle.
+Features"). Pure-function tests for the version engine, name normalization,
+the bundle index, the inventory scanners and the match/severity machinery —
+plus an end-to-end scan of a fixture project against a synthetic CVE bundle.
+Building a bundle from the public feeds is tested in test_sca_feeds.py.
 
 Run:  python3 lazaret/test_sca.py [unittest-args]
 
 Fixtures:
     testproj_sca/           a tiny installed code base (npm + pypi)
-    cve-bundle.test.json    a synthetic Redline export (bundleVersion 1)
+    BUNDLE_DOC              a synthetic CVE bundle (bundleVersion 1), below
 
 Acceptance covered:
     - npm + pypi inventory from node_modules, locks, manifests, dist-info
@@ -41,7 +41,7 @@ def write(path, content):
 
 
 # ---------------------------------------------------------------------------
-# Version engine — parity with redline/packages/core/src/version-range.ts
+# Version engine — PEP 440 and semver 2.0 ordering
 # ---------------------------------------------------------------------------
 
 class TestVersionEngine(unittest.TestCase):
@@ -158,7 +158,7 @@ class TestNormalize(unittest.TestCase):
 
 BUNDLE_DOC = {
     "bundleVersion": 1,
-    "generator": "redline-vulndb-export",
+    "generator": "lazaret-sca-test",
     "generatedAt": None,  # set to "now" at module import (see below) so the
                           # freshness fixture never goes stale with the calendar
     "sources": ["nvd", "cisa-kev"],
