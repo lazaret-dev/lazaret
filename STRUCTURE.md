@@ -205,13 +205,16 @@ js/
 │   ├── cli.js            `lazaret check <dir>`; returns an exit code (testable)
 │   ├── index.js          public exports
 │   ├── report.js         report format (JSON + HTML), terminal output
+│   ├── deps.js           --deps: a dependency's install hooks followed to the
+│   │                     files they run; the import-time test on its code
 │   ├── scanner/          rules, scan loop, comment lexer, linear-time matchers,
 │   │                     taint, SQL sinks, functions, metrics
 │   └── lib/              leaf helpers: fs (collection, report paths), encoding
 │                         and codecs (BOM/UTF-16/PEP 263), binary (magic
 │                         bytes), redact, issue, supplychain (install hooks),
 │                         hooks (the files a hook runs; install-script and
-│                         import-time tests), pyjson/pycompat/pynames
+│                         import-time tests), shellpipe (a download piped
+│                         into a shell), pyjson/pycompat/pynames
 │                         (Python-compatible JSON, literals and text); never
 │                         import src/scanner/
 └── test/

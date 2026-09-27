@@ -15,6 +15,7 @@
 // not, with the same results.
 
 import { pyRe, pyStrip, isPySpace } from "./pycompat.js";
+import { PIPE_SCAN_SRC, EXEC_CALL_SRC, pipesDownloadToShell, runsDownloadThroughShell } from "./shellpipe.js";
 
 // ---- Python details the patterns depend on --------------------------------
 
@@ -583,27 +584,6 @@ const EXFIL_SERVICES_SRC =
 const EXFIL_DEST_SRC = String.raw`https?://(?:\d{1,3}\.){3}\d{1,3}\b|` + EXFIL_SERVICES_SRC;
 const EXFIL_DEST_RE = pyRe(EXFIL_DEST_SRC, "i");
 const EXFIL_SERVICE_RE = pyRe(EXFIL_SERVICES_SRC, "i");              // the named ones, no raw IPs
-// `curl … | sh` / `wget … | bash`, read in one left-to-right pass (core's comment)
-const PIPE_SCAN_SRC = String.raw`\|\s*(?:sudo\s+)?(?:ba|z|da|k)?sh\b|[\n|;&]|\b(?:curl|wget)\b`;
-const PIPE_SCAN_RE = pyRe(PIPE_SCAN_SRC, "g");
-
-/** twin of core._pipes_download_to_shell: a pipe into a shell after curl or wget in the same command */
-function pipesDownloadToShell(text) {
-  let download = false;
-  for (const m of text.matchAll(PIPE_SCAN_RE)) {
-    const token = m[0];
-    if (token[0] === "|" && token.length > 1) {                        // | sh, | sudo bash
-      if (download) return true;
-      download = false;
-    } else if (token === "\n" || token === "|" || token === ";" || token === "&") {
-      download = false;
-    } else {                                                           // curl / wget
-      download = true;
-    }
-  }
-  return false;
-}
-
 /** The first n code points of s (Python's s[:n]). */
 function cpPrefix(s, n) {
   let i = 0;
@@ -646,10 +626,6 @@ const IMPORT_HARVEST_SRC = IMPORT_HARVEST_REST_SRC + `|(?i:${LOCAL_STORAGE_SRC})
 const IMPORT_HARVEST_REST_RE = pyRe(IMPORT_HARVEST_REST_SRC);
 const LOCAL_STORAGE_RE = pyRe(LOCAL_STORAGE_SRC, "gi");
 const LEVELDB_RE = pyRe(LEVELDB_SRC, "y");
-const EXEC_CALL_SRC =
-  String.raw`\b(?:execSync|exec|execFileSync|execFile|spawnSync|spawn|system|popen|Popen|run|call|` +
-  String.raw`check_call|check_output|getoutput|getstatusoutput)\s*\(`;
-const EXEC_CALL_RE = pyRe(EXEC_CALL_SRC);
 
 // core._IMPORT_HARVEST_NEEDLES: every match contains one of them, so a text
 // with none is not searched
@@ -695,7 +671,7 @@ export function importTimeRisk(text) {
     for (let start = 0, i = 0; ; i++) {
       const nl = text.indexOf("\n", start);
       const row = nl === -1 ? text.slice(start) : text.slice(start, nl);
-      if ((row.includes("curl") || row.includes("wget")) && EXEC_CALL_RE.test(row) && pipesDownloadToShell(row)) {
+      if (runsDownloadThroughShell(row)) {
         reasons.push("runs a downloaded script through a shell");
         line ??= i + 1;
         break;

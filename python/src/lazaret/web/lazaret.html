@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-vAl5QpbgHfzPz5jXn+aFaDIAMVE3Hy82GXzT/QWO/FU='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-jcipwVp/Ngy9PrL++jvW+KXzThUXQa45BkIdivFxo9g='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
 <title>Lazaret — Security &amp; Quality Review</title>
 <style>
   :root{
@@ -3186,6 +3186,48 @@ function extractFunctions(lines, lang) {
   return fns;
 }
 
+/* ======== lib/shellpipe.js ======== */
+// A download piped into a shell (`curl … | sh`, `wget -qO- … | bash`) — twin
+// of lazaret.scanner.core's _PIPE_SCAN_RE / _pipes_download_to_shell,
+// _EXEC_CALL_RE and _runs_download_through_shell. A leaf module: lib/hooks.js
+// (the install-script and import-time tests) and scanner/scan.js
+// (SC-PIPE-SHELL) use it, and the dashboard carries a copy.
+
+
+// `curl … | sh` / `wget … | bash`, read in one left-to-right pass (core's comment)
+const PIPE_SCAN_SRC = String.raw`\|\s*(?:sudo\s+)?(?:ba|z|da|k)?sh\b|[\n|;&]|\b(?:curl|wget)\b`;
+const PIPE_SCAN_RE = pyRe(PIPE_SCAN_SRC, "g");
+
+/** twin of core._pipes_download_to_shell: a pipe into a shell after curl or wget in the same command */
+function pipesDownloadToShell(text) {
+  let download = false;
+  for (const m of text.matchAll(PIPE_SCAN_RE)) {
+    const token = m[0];
+    if (token[0] === "|" && token.length > 1) {                        // | sh, | sudo bash
+      if (download) return true;
+      download = false;
+    } else if (token === "\n" || token === "|" || token === ";" || token === "&") {
+      download = false;
+    } else {                                                           // curl / wget
+      download = true;
+    }
+  }
+  return false;
+}
+
+const EXEC_CALL_SRC =
+  String.raw`\b(?:execSync|exec|execFileSync|execFile|spawnSync|spawn|system|popen|Popen|run|call|` +
+  String.raw`check_call|check_output|getoutput|getstatusoutput)\s*\(`;
+const EXEC_CALL_RE = pyRe(EXEC_CALL_SRC);
+
+/**
+ * Does this line hand a download piped into a shell to an exec call? A CLI's
+ * help text showing `curl … | sh` does not. Twin of core._runs_download_through_shell.
+ */
+function runsDownloadThroughShell(row) {
+  return (row.includes("curl") || row.includes("wget")) && EXEC_CALL_RE.test(row) && pipesDownloadToShell(row);
+}
+
 /* ======== scanner/scan.js ======== */
 // scanFile — twin of lazaret.scanner.core.scan_file / _scan_file,
 // implementing the shared semantics (FIX-SPEC items 1, 2, 5, 6, 7, 12, 13, 14).
@@ -3394,6 +3436,14 @@ function hiddenNameIn(seg, offset) {
   }
   return null;
 }
+
+// SC-PIPE-SHELL: a project's own code that runs a download piped into a shell
+// (twin of core._PIPE_SHELL_RULE; a dependency's code gets the import-time test)
+const PIPE_SHELL_RULE = { id: "SC-PIPE-SHELL", name: "Download piped into a shell", type: "HOTSPOT", sev: "MAJOR",
+  msg: "Code runs a downloaded script through a shell.",
+  why: "Piping a download into a shell runs whatever the server sends at that moment, with the program's privileges: nothing pins or checks it, so the server, or anyone who can change what it serves, decides what runs. Installers publish the line for people to paste once, after reading the script; code that runs it hands every run to that server.",
+  fix: "Download a pinned version, check its checksum or signature, and run that file; or drop the download.",
+  ref: "CWE-494 · Supply chain" };
 
 // ---- Look-alike identifiers (SC-HOMOGLYPH); twin of core.lookalike_name ----
 // A name spelled with letters from another alphabet that look like Latin ones
@@ -3729,6 +3779,8 @@ function scanLines(path, content, lines, lang, ctx, issues) {
         const found = lookalikeName(blankStrings(code), lang, words);
         if (found) issues.push(lookalikeIssue(found, path, i + 1, lines));
       }
+      if (runsDownloadThroughShell(code))       // (the page scans no dependencies)
+        issues.push(mkIssue(PIPE_SHELL_RULE, path, i + 1, lines, EXEC_CALL_RE.exec(code).index));
     }
     const cmCol = lang === "js" ? charcodeCol(line) : null;
     if (cmCol !== null)

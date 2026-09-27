@@ -14,6 +14,7 @@ import { cpLen, pyRe, pyRepr, pyRstrip, pyLstrip, isPySpace } from "../lib/pycom
 import { findSecretToken, registerScanContext } from "../lib/redact.js";
 import { truncatedIssue } from "../lib/fs.js";
 import { assigned13, pinUnicode } from "../lib/unicode13.js";
+import { runsDownloadThroughShell, EXEC_CALL_RE } from "../lib/shellpipe.js";
 
 export { isComment } from "./engine.js";
 
@@ -222,6 +223,14 @@ function hiddenNameIn(seg, offset) {
   }
   return null;
 }
+
+// SC-PIPE-SHELL: a project's own code that runs a download piped into a shell
+// (twin of core._PIPE_SHELL_RULE; a dependency's code gets the import-time test)
+const PIPE_SHELL_RULE = { id: "SC-PIPE-SHELL", name: "Download piped into a shell", type: "HOTSPOT", sev: "MAJOR",
+  msg: "Code runs a downloaded script through a shell.",
+  why: "Piping a download into a shell runs whatever the server sends at that moment, with the program's privileges: nothing pins or checks it, so the server, or anyone who can change what it serves, decides what runs. Installers publish the line for people to paste once, after reading the script; code that runs it hands every run to that server.",
+  fix: "Download a pinned version, check its checksum or signature, and run that file; or drop the download.",
+  ref: "CWE-494 · Supply chain" };
 
 // ---- Look-alike identifiers (SC-HOMOGLYPH); twin of core.lookalike_name ----
 // A name spelled with letters from another alphabet that look like Latin ones
@@ -694,6 +703,8 @@ function scanLines(path, content, lines, lang, dep, ctx, issues) {
         const found = lookalikeName(blankStrings(code), lang, words);
         if (found) issues.push(lookalikeIssue(found, path, i + 1, lines));
       }
+      if (!dep && runsDownloadThroughShell(code))
+        issues.push(mkIssue(PIPE_SHELL_RULE, path, i + 1, lines, EXEC_CALL_RE.exec(code).index));
     }
     const cmCol = lang === "js" ? charcodeCol(line) : null;
     if (cmCol !== null)

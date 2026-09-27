@@ -81,7 +81,8 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 # 2.6: install hooks followed through wrapper options, fd numbers, env -C/-S
 #      (and within limits), #! scripts run by bun/deno/ts-node/tsx and a
 #      Python script's coding cookie, .mts/.cts sources and .jsc bytecode,
-#      decode-then-run through an indirect eval, names hidden in a few escapes
+#      decode-then-run through an indirect eval, names hidden in a few escapes,
+#      look-alike names (SC-HOMOGLYPH), a download piped into a shell (full profile)
 # 2.5: what runs (exports patterns, required files, start-up and import-time
 #      code), escape codecs, zip links, the time budget
 # 2.4: every PyPI artifact, decode/cookie handling, archive structure checks,

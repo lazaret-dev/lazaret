@@ -3766,6 +3766,8 @@ def _scan_file(path, content, lines, lang, dep, ctx, issues):
                 found = lookalike_name(_blank_strings(code), lang, words)
                 if found is not None:
                     issues.append(lookalike_issue(found, path, i + 1, lines))
+            if not dep and _runs_download_through_shell(code):
+                issues.append(mk_issue(_PIPE_SHELL_RULE, path, i + 1, lines, _EXEC_CALL_RE.search(code).start()))
         cm_col = _charcode_col(line) if lang == "js" else None
         if cm_col is not None:
             issues.append(mk_issue(
@@ -4652,12 +4654,35 @@ def import_time_risk(text):
         line = text.count("\n", 0, harvest.start()) + 1
     if "curl" in text or "wget" in text:
         for i, row in enumerate(text.split("\n")):
-            if ("curl" in row or "wget" in row) and _EXEC_CALL_RE.search(row) \
-                    and _pipes_download_to_shell(row):
+            if _runs_download_through_shell(row):
                 reasons.append("runs a downloaded script through a shell")
                 line = line or i + 1
                 break
     return reasons, line
+
+
+def _runs_download_through_shell(row):
+    """Does this line hand a download piped into a shell to an exec call
+    (`execSync("curl … | sh")`, `os.system("wget -qO- … | bash")`)? A CLI's
+    help text showing `curl … | sh` does not."""
+    return (("curl" in row or "wget" in row) and _EXEC_CALL_RE.search(row) is not None
+            and _pipes_download_to_shell(row))
+
+
+# SC-PIPE-SHELL: a project's own code that runs a download piped into a shell
+# (analyst gap: a bin script running `curl … | bash` passed a project scan,
+# while the registry's import-time test catches it in a package). The same
+# line test as the import-time one; a dependency's code gets that test
+# instead (SC-IMPORT-RISK), so this rule is for first-party code.
+_PIPE_SHELL_RULE = {
+    "id": "SC-PIPE-SHELL", "name": "Download piped into a shell", "type": "HOTSPOT", "sev": "MAJOR",
+    "msg": "Code runs a downloaded script through a shell.",
+    "why": ("Piping a download into a shell runs whatever the server sends at that moment, with the "
+            "program's privileges: nothing pins or checks it, so the server, or anyone who can change "
+            "what it serves, decides what runs. Installers publish the line for people to paste once, "
+            "after reading the script; code that runs it hands every run to that server."),
+    "fix": "Download a pinned version, check its checksum or signature, and run that file; or drop the download.",
+    "ref": "CWE-494 · Supply chain"}
 
 
 def node_candidates(rel):

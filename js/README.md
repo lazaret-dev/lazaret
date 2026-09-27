@@ -66,7 +66,9 @@ resolving to one file. Writes are atomic
   within 10,000 characters of the decode);
   executable `.pth` lines (`SC-PTH-EXEC`); readable text hidden in hex escapes; base64 blobs and
   strings built from character codes written in the call or in an array it uses; `javascript-obfuscator` identifier signatures; compiled binaries;
-  unchecked or orphaned `.pyc` files; UTF-7 source (`SC-UTF7`).
+  unchecked or orphaned `.pyc` files; UTF-7 source (`SC-UTF7`); your own code
+  running a download piped into a shell (`execSync("curl … | bash")`,
+  `SC-PIPE-SHELL`).
 - **Unicode evasion**: JS identifier escapes (`\u0065val`) and Python NFKC
   spellings are matched as the runtime reads them; bidirectional control
   characters are `S-BIDI` (Trojan Source); a name spelled with look-alike
