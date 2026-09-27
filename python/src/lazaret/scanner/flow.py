@@ -29,7 +29,12 @@ technique):
 
 Python analysis is AST-based (stdlib only). JavaScript uses a bounded
 lexer/regex heuristic (no JS parser available without dependencies), so JS
-results are best-effort and intentionally conservative.
+results are best-effort: a call binds to the function its file names through
+relative require()/import, a call it cannot resolve may reach any function
+of that name, functions are summarized by the parameters that reach a sink
+and by what they return, and each file's work is bounded (see "modules,
+calls and returned values"). The npm engine carries a twin of the JavaScript
+half (js/src/scanner/flow.js).
 
 Public entry point: analyze(files) -> list[issue dict] (never raises)
   files: iterable of {"path": str, "content": str, "lang": "py"|"js"}
@@ -1531,9 +1536,11 @@ _JS_REGEX_KEYWORDS = frozenset((
     "void", "throw", "instanceof", "yield", "await"))
 
 
-def _js_mask(src):
+def _js_mask(src, literals=None):
     """Same-length copy of src with string/template-text/comment/regex
-    CONTENT replaced by spaces (newlines kept, ${…} code kept). Linear."""
+    CONTENT replaced by spaces (newlines kept, ${…} code kept). Linear.
+    literals (a dict), when given, receives the text of every closed '…' /
+    "…" literal by the offset of its opening quote (module specifiers)."""
     out = []
     last_copy = 0
     n = len(src)
@@ -1572,6 +1579,8 @@ def _js_mask(src):
             continue
         if kind in ("sq", "dq"):
             closed = j - i >= 2 and src[j - 1] == src[i]
+            if literals is not None and closed:
+                literals[i] = src[i + 1:j - 1]
             blank(i + 1, j - 1 if closed else j)
             last_sig, last_word = '"', ""
             i = j
@@ -1620,7 +1629,31 @@ def _js_mask(src):
     return "".join(out)
 
 
-def _js_functions(content, code=None):
+def _js_braces(code):
+    """(offsets of every '{', {offset of a '{': offset of its '}'}) of masked
+    code — one stack pass; a '{' never closed has no entry."""
+    opens, match_close, stack = [], {}, []
+    for bm in re.finditer(r"[{}]", code):
+        if bm.group() == "{":
+            opens.append(bm.start())
+            stack.append(bm.start())
+        elif stack:
+            match_close[stack.pop()] = bm.start()
+    return opens, match_close
+
+
+def _js_param_name(p):
+    """A parameter as its uses spell it: without a default (`a = 1`), a
+    TypeScript annotation (`a: string`, `a?: T`) or a rest marker (`...a`)."""
+    name = p.strip().split("=")[0].strip().split(":")[0].strip()
+    if name.endswith("?"):
+        name = name[:-1].strip()
+    if name.startswith("..."):
+        name = name[3:].strip()
+    return name
+
+
+def _js_functions(content, code=None, braces=None, pairs=None, heads=None):
     """Yield (name, params[list], body_span, start_line).
 
     body_span is (start_offset, end_offset) into content — the slice the old
@@ -1633,20 +1666,19 @@ def _js_functions(content, code=None):
     copied and no per-match scan runs. Headers and braces are read from the
     masked code (_js_mask), so braces in strings/comments/regex/template
     text no longer count.
+
+    An arrow function whose body is an expression (`const f = (x) => g(x);`)
+    spans that expression, to the end of its statement; it used to take the
+    next '{' in the file, often another function's body. Parameter names drop
+    TypeScript annotations and rest markers (_js_param_name). heads (a
+    list), when given, receives the (start, stop) of each function's header.
     """
     if code is None:
         code = _js_mask(content)
     matches = list(_JS_FUNC_RE.finditer(code))
     if not matches:
         return []
-    # matching '}' for every '{', plus all '{' offsets — one stack pass
-    opens, match_close, stack = [], {}, []
-    for bm in re.finditer(r"[{}]", code):
-        if bm.group() == "{":
-            opens.append(bm.start())
-            stack.append(bm.start())
-        elif stack:
-            match_close[stack.pop()] = bm.start()
+    opens, match_close = braces if braces is not None else _js_braces(code)
     # newline offsets once, for start_line
     nl = [m.start() for m in re.finditer("\n", code)]
     from bisect import bisect_left
@@ -1654,9 +1686,19 @@ def _js_functions(content, code=None):
     for m in matches:
         name = m.group("n1") or m.group("n2") or m.group("n3")
         params_s = m.group("p1") or m.group("p2") or m.group("p3") or ""
-        params = [p.strip().split("=")[0].strip() for p in params_s.split(",") if p.strip()]
+        params = [_js_param_name(p) for p in params_s.split(",") if p.strip()]
+        if m.group("n2") is not None:
+            b = m.end()
+            while b < len(code) and code[b] in _JS_BLANK:
+                b += 1
+            if b >= len(code) or code[b] != "{":        # an expression body
+                end = _js_arg_end(code, b, True) if pairs is None else _js_arg_end_at(code, b, True, pairs)
+                out.append((name, params, (b, end), bisect_left(nl, m.start()) + 1))
+                if heads is not None:
+                    heads.append(m.span())
+                continue
         # first '{' at/after m.end()-1 (a match may claim a brace inside its
-        # own header, or a later brace for brace-less arrow bodies)
+        # own header)
         k = bisect_left(opens, m.end() - 1)
         if k == len(opens):
             continue
@@ -1664,10 +1706,36 @@ def _js_functions(content, code=None):
         close = match_close.get(brace, len(code))  # EOF if never closed
         start_line = bisect_left(nl, m.start()) + 1
         out.append((name, params, (brace, close + 1), start_line))
+        if heads is not None:
+            heads.append(m.span())
     return out
 
 
 _JS_ARG_SCAN = 4000   # max characters scanned for a sink's argument list
+
+
+_JS_ARG_STOP_RE = re.compile(r"[()\[\]{}]")
+_JS_STATEMENT_STOP_RE = re.compile(r"[()\[\]{};\n]")
+
+
+def _js_arg_end(code, k, statement):
+    """Where an argument list (statement=False) or the rest of a statement
+    (statement=True) that starts at k ends: at the first closing bracket
+    without an opening one after k, or, for a statement, a ';' or newline
+    outside brackets; else _JS_ARG_SCAN characters on."""
+    stop = min(len(code), k + _JS_ARG_SCAN)
+    depth = 0
+    for m in (_JS_STATEMENT_STOP_RE if statement else _JS_ARG_STOP_RE).finditer(code, k, stop):
+        ch = m.group()
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            if depth == 0:
+                return m.start()
+            depth -= 1
+        elif depth == 0:                     # ';' or a newline ends a statement
+            return m.start()
+    return stop
 
 
 def _js_sink_args(code, start, end):
@@ -1684,30 +1752,8 @@ def _js_sink_args(code, start, end):
         if k2 < len(code) and code[k2] == "(":
             k = k2 + 1
         else:
-            stop = min(len(code), end + _JS_ARG_SCAN)
-            depth = 0
-            for idx in range(end, stop):
-                ch = code[idx]
-                if ch in "([{":
-                    depth += 1
-                elif ch in ")]}":
-                    if depth == 0:
-                        return code[end:idx]
-                    depth -= 1
-                elif ch in ";\n" and depth == 0:
-                    return code[end:idx]
-            return code[end:stop]
-    depth = 0
-    stop = min(len(code), k + _JS_ARG_SCAN)
-    for idx in range(k, stop):
-        ch = code[idx]
-        if ch in "([{":
-            depth += 1
-        elif ch in ")]}":
-            if depth == 0:
-                return code[k:idx]
-            depth -= 1
-    return code[k:stop]
+            return code[end:_js_arg_end(code, end, True)]
+    return code[k:_js_arg_end(code, k, False)]
 
 
 def _js_sink_matches(pattern, code):
@@ -1727,6 +1773,11 @@ _JS_PARTIAL_SAN = {
     "path traversal": re.compile(r"path\.basename\s*\([^()]*\)"),
     "command injection": re.compile(r"(?:shellQuote|shell_quote|quote)\s*\([^()]*\)"),
 }
+
+# the built-in tables as they are before a taint config extends them
+_JS_FULL_SAN_RE0 = _JS_FULL_SAN_RE
+_JS_PARTIAL_SAN0 = dict(_JS_PARTIAL_SAN)
+
 
 def _js_neutralize(text, cats):
     """Strip sanitizer call expressions so their sanitized content stops counting
@@ -1759,13 +1810,1329 @@ def _js_text(content):
     return content
 
 
+# ---- modules, calls and returned values (review follow-ups) ----
+# The call-site pass used to bind a call to the last function of that name
+# in the whole project, read a function's own header as a call, see only
+# calls whose arguments held no parentheses, and know nothing of what
+# functions return. It now reads modules, calls and returned values — and
+# where it cannot tell what a call reaches, it assumes the call may reach
+# any function of that name, never that it reaches nothing:
+#   * binding. A call binds to the function its file names: a definition
+#     visible from the call (in its own scope or an enclosing one), else
+#     what a relative require() / import brings in (named, default and
+#     namespace imports, `require('./x').f()`, a module or export copied to
+#     another const, module.exports / exports.x / ESM exports, `export …
+#     from` and `export *` through up to _JS_EXPORT_HOPS modules). Those
+#     bindings are definite. Anything else is open — a package, a path
+#     alias (`@/lib/x`), a workspace package, an export the pass does not
+#     follow, `this.f()`, `obj.f()`, a name the file neither defines nor
+#     imports, a binding assigned more than once: the call may reach any of
+#     the project's functions of that name, and code outside the scan. Only
+#     positive evidence binds nothing: a Node built-in module (`fs`,
+#     `node:child_process`), or a member of a JavaScript global object
+#     (`JSON.parse`, `Math.max`);
+#   * a call's value. A definite call reads as what its function returns:
+#     the request data the function reads and returns, and the call's
+#     arguments — unless no return of the function can hold anything it is
+#     given (literals, full sanitizers, calls to such functions: `isValid(q)`
+#     returning true or false), or every return is sanitized for a category
+#     (`return escapeHtml(s)`). A constructor call (`new f(x)`) keeps its
+#     arguments. An open call keeps its arguments and receiver and adds the
+#     request data any function it may reach returns. A sanitizer is trusted
+#     by name only when no project function has that name (a sanitizer from
+#     the operator's taint config always is): a project's own `escapeHtml`
+#     is read like any other function;
+#   * a function passed as an argument counts through what it returns;
+#   * reports. The call-site pass reports request data passed into a
+#     function whose parameter reaches a sink, for each function the call
+#     may reach; the returned-value pass reports a sink fed by request data
+#     another function read and returned. Request data read in the sink's
+#     own function is the intra-file engine's (T-*) finding, not repeated;
+#   * bounds. Nested code makes the expressions read overlap, so returned
+#     values, returned-value sinks and calls with nested calls or several
+#     statements in their arguments read at most _JS_READ_BUDGET times a
+#     file's size (+64 KiB). Past that, those stop for the file (a
+#     Q-FLOW-INCOMPLETE note), while every call whose arguments hold no
+#     nested call is still checked — all that the name-based pass read.
+_JS_BLANK = " \t\n\r"
+_JS_EXTS = (".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".mts", ".cts")
+_JS_TS_SOURCES = {".js": (".ts", ".tsx"), ".jsx": (".tsx",), ".mjs": (".mts",), ".cjs": (".cts",)}
+_JS_EXPORT_HOPS = 8      # modules followed through `export … from` / `export *` / module.exports = require()
+_JS_EVAL_DEPTH = 4       # calls nested in arguments read as their return values
+_JS_RET_ROUNDS = 16      # rounds of the returned-value fixpoint (a note if they don't settle)
+_JS_READ_BUDGET = 4      # nested expression text read per file, in multiples of its size (+64 KiB)
+_JS_MAX_OPEN = 4         # an open call's functions checked at a call site (more: the last one defined)
+_JS_MAX_OPEN_EDGES = 8   # an open call orders the fixpoint after its functions when there are this few
+_JS_SCOPE_WALK = 64      # enclosing scopes searched for the declaration of an assigned name
+_JS_MAX_ALIAS = 16       # names assigned to one name that a call through it follows
+_JS_ALL = "*"            # in a set of clean categories: no argument reaches the value at all
+_JS_UNIVERSE = frozenset(SINK_META) | {_JS_ALL}
+_JS_EMPTY_NODE = ((), False, (), False)
+_JS_OPAQUE_NODE = ((), False, (), True)     # an expression not read: never free of data
+_JS_LITERAL_WORDS = frozenset(("true", "false", "null", "undefined", "NaN", "Infinity", "void"))
+_JS_NOT_ALIAS = _JS_LITERAL_WORDS | {"this", "super", "arguments"}
+# a member of one of these is the language's or the runtime's, not the project's
+_JS_GLOBAL_OBJECTS = frozenset((
+    "JSON", "Math", "Object", "Array", "Number", "String", "Boolean", "Symbol", "BigInt",
+    "Date", "RegExp", "Error", "Promise", "Reflect", "Proxy", "Intl", "Atomics", "WebAssembly",
+    "console", "Buffer", "process"))
+_JS_NODE_BUILTINS = frozenset((
+    "assert", "async_hooks", "buffer", "child_process", "cluster", "console", "constants",
+    "crypto", "dgram", "diagnostics_channel", "dns", "domain", "events", "fs", "http", "http2",
+    "https", "inspector", "module", "net", "os", "path", "perf_hooks", "process", "punycode",
+    "querystring", "readline", "repl", "stream", "string_decoder", "sys", "timers", "tls",
+    "trace_events", "tty", "url", "util", "v8", "vm", "wasi", "worker_threads", "zlib"))
+# methods of JavaScript's built-in objects and everyday runtime objects: on a
+# receiver the pass cannot identify, `x.replace(…)` is String's, not a
+# project function named replace (the Python engine's _COMMON_METHODS)
+_JS_COMMON_METHODS = frozenset("""
+at charAt charCodeAt codePointAt concat endsWith includes indexOf lastIndexOf
+localeCompare match matchAll normalize padEnd padStart repeat replace
+replaceAll search slice split startsWith substr substring toLowerCase
+toUpperCase toLocaleLowerCase toLocaleUpperCase toString toLocaleString trim
+trimStart trimEnd trimLeft trimRight valueOf copyWithin entries every fill
+filter find findIndex findLast findLastIndex flat flatMap forEach join keys
+map pop push reduce reduceRight reverse shift some sort splice unshift values
+hasOwnProperty isPrototypeOf propertyIsEnumerable apply bind call then catch
+finally get set has delete clear add exec test getTime toISOString toJSON
+parse stringify on once off emit addListener removeListener
+removeAllListeners addEventListener removeEventListener dispatchEvent pipe
+write end read destroy resume pause log debug info warn error trace send json
+status render sendFile sendStatus cookie header type
+""".split())
+_JS_CONTROL_WORDS = frozenset(("if", "for", "while", "switch", "catch", "with", "await"))
+_JS_IDCHAR_RE = re.compile(r"[\w$]")
+_JS_BRACKET_RE = re.compile(r"[()\[\]{}]")
+_JS_HARD_RE = re.compile(r"[();\n]")
+_JS_CALL_RE = re.compile(r"(?<![\w$])(\w[\w$]*)\s*\(")
+_JS_RETURN_RE = re.compile(r"return(?<![\w$.]return)(?![\w$])")
+# the head of a function value: `function name` before its '(' (group 1
+# unset), or the parameters and `=>` of an arrow function (group 1)
+_JS_FUNCTION_HEAD_RE = re.compile(
+    r"(?:async\s*)?(?:function(?![\w$])\s*\*?\s*(?:[A-Za-z_$][\w$]*\s*)?(?=\()"
+    r"|(\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>)")
+_JS_ASSIGN_OP = r"(?:[-+*/%&|^]|\*\*|<<|>>>?|&&|\|\||\?\?)?="
+# `const a = …`, and `a = …` / `a += …` starting a statement (after ; { or a newline)
+_JS_ASSIGN_RE = re.compile(
+    r"(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([^;\n]+)"
+    r"|(?:^|[;{\n]\s*)([A-Za-z_$][\w$]*)\s*" + _JS_ASSIGN_OP + r"(?![=>])\s*([^;\n]+)")
+# any assignment to a name, anywhere (declarations with a value included)
+_JS_WRITE_RE = re.compile(r"(?<![\w$.])([A-Za-z_$][\w$]*)\s*" + _JS_ASSIGN_OP + r"(?![=>])")
+_JS_WORD_RE = re.compile(r"[A-Za-z_$][\w$]*")
+# The patterns start with their keyword and check what precedes it after it
+# (`return(?<![\w$.]return)` rather than `(?<![\w$.])return`): the same
+# matches, but the regex engine can skip ahead to the keyword.
+_JS_NOT_AFTER = r"(?<![\w$.]const)(?<![\w$.]let)(?<![\w$.]var)"
+_JS_DECL_RE = re.compile(r"(?:const|let|var)" + _JS_NOT_AFTER + r"(?![\w$])")
+# imports: const m = require('x') / const f = require('x').g / import m = require('x')
+_JS_REQUIRE_BIND_RE = re.compile(
+    r"(?:const|let|var|import)" + _JS_NOT_AFTER + r"(?<![\w$.]import)"
+    r"\s+([A-Za-z_$][\w$]*)\s*=\s*require\s*\(\s*(['\"]) *\2\s*\)"
+    r"(?:\s*\.\s*([A-Za-z_$][\w$]*))?[ \t]*(?![^;,}\n])")
+# const { a, b: c } = require('x')
+_JS_REQUIRE_DESTRUCTURE_RE = re.compile(
+    r"(?:const|let|var)" + _JS_NOT_AFTER + r"\s*\{([^{}]*)\}\s*=\s*require\s*\(\s*(['\"]) *\2\s*\)[ \t]*(?![^;,}\n])")
+# require('x') anywhere else (`require('./x').f()`, `require('./x')(…)`)
+_JS_INLINE_REQUIRE_RE = re.compile(r"require(?<![\w$.]require)\s*\(\s*(['\"]) *\1\s*\)")
+# a module copied: the value of `const o = lib` / `const f = lib.g`, and `const { g } = lib`
+_JS_ALIAS_RE = re.compile(r"([A-Za-z_$][\w$]*)(?:\s*\.\s*([A-Za-z_$][\w$]*))?")
+_JS_DESTRUCTURE_RE = re.compile(
+    r"(?:const|let|var)" + _JS_NOT_AFTER + r"\s*\{([^{}]*)\}\s*=\s*([A-Za-z_$][\w$]*)[ \t]*(?![^;,}\n])")
+# import d, { a, b as c } from 'x' / import * as m from 'x'
+_JS_IMPORT_RE = re.compile(
+    r"import(?<![\w$.]import)(?![\w$])\s*(?:([A-Za-z_$][\w$]*)\s*,?\s*)?"
+    r"(?:\{([^{}]*)\}|\*\s*as\s+([A-Za-z_$][\w$]*))?\s*from\s*(['\"]) *\4")
+# exports
+_JS_EXPORT_LIST_RE = re.compile(r"export(?<![\w$.]export)(?![\w$])\s*\{([^{}]*)\}(?:\s*from\s*(['\"]) *\2)?")
+_JS_EXPORT_STAR_RE = re.compile(r"export(?<![\w$.]export)(?![\w$])\s*\*\s*from\s*(['\"]) *\1")
+_JS_EXPORT_DEFAULT_RE = re.compile(
+    r"export(?<![\w$.]export)\s+default\s+(?:async\s+)?(?:function(?![\w$])\s*\*?\s*)?([A-Za-z_$][\w$]*)")
+_JS_MODULE_EXPORTS_RE = re.compile(
+    r"module(?<![\w$.]module)\s*\.\s*exports\s*=(?!=)\s*(?:"
+    r"require\s*\(\s*(['\"]) *\1\s*\)[ \t]*(?![^;,}\n])"
+    r"|(?:async\s+)?function(?![\w$])\s*\*?\s*([A-Za-z_$][\w$]*)\s*\("
+    r"|\{([^{}]*)\}"
+    r"|([A-Za-z_$][\w$]*)[ \t]*(?![^;,}\n]))")
+_JS_EXPORTS_PROP_RE = re.compile(
+    r"(?:module(?<![\w$.]module)\s*\.\s*exports|exports(?<![\w$.]exports))"
+    r"\s*\.\s*([A-Za-z_$][\w$]*)\s*=(?!=)\s*(?:"
+    r"(?:async\s+)?function(?![\w$])\s*\*?\s*([A-Za-z_$][\w$]*)\s*\("
+    r"|([A-Za-z_$][\w$]*)[ \t]*(?![^;,}\n]))")
+# one item of `{ a, b: c = 1 }` (destructuring, an object literal) or `{ a, b as c }`
+_JS_BIND_ITEM_RE = re.compile(r"\A([A-Za-z_$][\w$]*)(?:\s*:\s*([A-Za-z_$][\w$]*))?(?:\s*=[^,]*)?\Z")
+_JS_AS_ITEM_RE = re.compile(r"\A(type\s+)?([A-Za-z_$][\w$]*)(?:\s+as\s+([A-Za-z_$][\w$]*))?\Z")
+_JS_PARAM_RE = re.compile(r"\A[A-Za-z_$][\w$]*\Z")
+
+
+def _js_back(code, i, floor=0):
+    """Offset of the last non-blank character before i, or floor - 1."""
+    i -= 1
+    while i >= floor and code[i] in _JS_BLANK:
+        i -= 1
+    return i
+
+
+def _js_word_before(code, i, floor=0):
+    """(start, word) of the identifier characters ending at offset i."""
+    j = i
+    while j >= floor and _JS_IDCHAR_RE.match(code[j]):
+        j -= 1
+    return j + 1, code[j + 1:i + 1]
+
+
+def _js_bracket_pairs(code):
+    """{offset of an opening bracket: offset of the closer that ends it}:
+    any closer ends the innermost open bracket, as _js_arg_end counts."""
+    pairs, stack = {}, []
+    for bm in _JS_BRACKET_RE.finditer(code):
+        i = bm.start()
+        if code[i] in "([{":
+            stack.append(i)
+        elif stack:
+            pairs[stack.pop()] = i
+    return pairs
+
+
+def _js_close(code, paren, pairs):
+    """_js_arg_end(code, paren + 1, False), read from the bracket table."""
+    k = paren + 1
+    c = pairs.get(paren)
+    if c is not None and c - k < _JS_ARG_SCAN:
+        return c
+    return min(len(code), k + _JS_ARG_SCAN)
+
+
+def _js_call_at(code, m, pairs, floor=0):
+    """(name, receiver, start, paren, close) of the call _JS_CALL_RE matched
+    at m, or None: a function header (`function f(`), a method definition
+    (`f(a) {`) and an unterminated call are not calls. receiver is None for
+    a plain call, the name before the dot for `m.f(…)` / `m?.f(…)`, and ''
+    for any other receiver (`a.b.f(…)`, `g().f(…)`). start includes it."""
+    name, start, paren = m.group(1), m.start(1), m.end() - 1
+    close = _js_close(code, paren, pairs)
+    if close >= len(code) or code[close] != ")":
+        return None
+    after = close + 1
+    while after < len(code) and code[after] in _JS_BLANK:
+        after += 1
+    if after < len(code) and code[after] == "{":
+        return None
+    b = _js_back(code, start, floor)
+    if b >= floor and code[b] == ".":
+        d = b - 1
+        if d >= floor and code[d] == "?":
+            d -= 1
+        d = _js_back(code, d + 1, floor)
+        ws, word = _js_word_before(code, d, floor)
+        if not word:
+            return name, "", b, paren, close
+        pb = _js_back(code, ws, floor)
+        if pb >= floor and code[pb] == ".":
+            return name, "", ws, paren, close
+        return name, word, ws, paren, close
+    if b >= floor:
+        if code[b] == "*":
+            b = _js_back(code, b, floor)
+        if b >= floor and _js_word_before(code, b, floor)[1] == "function":
+            return None
+    return name, None, start, paren, close
+
+
+def _js_after_new(code, start, floor):
+    """Is the call that starts at start a constructor call (`new f(…)`)?"""
+    b = _js_back(code, start, floor)
+    return b >= floor and _js_word_before(code, b, floor)[1] == "new"
+
+
+_JS_SPLIT_RE = re.compile(r"[()\[\]{},]")
+_JS_NONBLANK_RE = re.compile(r"\S")
+
+
+def _js_arg_end_at(code, k, statement, pairs):
+    """_js_arg_end(code, k, statement), jumping over bracket groups with the
+    file's bracket table: work in top-level tokens, not characters."""
+    stop = min(len(code), k + _JS_ARG_SCAN)
+    rx = _JS_STATEMENT_STOP_RE if statement else _JS_ARG_STOP_RE
+    pos = k
+    while True:
+        m = rx.search(code, pos, stop)
+        if m is None:
+            return stop
+        i = m.start()
+        if code[i] in "([{":
+            c = pairs.get(i)
+            if c is None or c >= stop:
+                return stop
+            pos = c + 1
+        else:                               # a closer, ';' or a newline at depth 0
+            return i
+
+
+def _js_sink_span(code, start, end, pairs):
+    """(start, stop) of _js_sink_args(code, start, end) in code."""
+    k = end
+    if not (end > start and code[end - 1] == "("):
+        k2 = end
+        while k2 < len(code) and code[k2] in " \t":
+            k2 += 1
+        if k2 < len(code) and code[k2] == "(":
+            k = k2 + 1
+        else:
+            return end, _js_arg_end_at(code, end, True, pairs)
+    return k, _js_arg_end_at(code, k, False, pairs)
+
+
+def _js_split_at(code, k, stop, pairs):
+    """_js_split_args(code[k:stop]) for a span with no unbalanced closer
+    (as _js_arg_end ends one), jumping over bracket groups."""
+    return [code[a:b] for a, b in _js_split_spans(code, k, stop, pairs)]
+
+
+def _js_trim(code, a, b):
+    """(a, b) without the blanks str.strip() takes off either end."""
+    while a < b and code[a].isspace():
+        a += 1
+    while b > a and code[b - 1].isspace():
+        b -= 1
+    return a, b
+
+
+def _js_split_spans(code, k, stop, pairs):
+    """The (start, stop) of each top-level comma-separated argument in
+    code[k:stop], blanks trimmed (see _js_split_at)."""
+    if _JS_NONBLANK_RE.search(code, k, stop) is None:
+        return []
+    out, last, pos = [], k, k
+    while True:
+        m = _JS_SPLIT_RE.search(code, pos, stop)
+        if m is None:
+            break
+        i = m.start()
+        ch = code[i]
+        if ch == ",":
+            out.append(_js_trim(code, last, i))
+            last = pos = i + 1
+        elif ch in "([{":
+            c = pairs.get(i)
+            if c is None or c >= stop:
+                break
+            pos = c + 1
+        else:
+            pos = i + 1
+    out.append(_js_trim(code, last, stop))
+    return out
+
+
+def _js_split_args(text):
+    """The top-level comma-separated arguments in text, stripped."""
+    if not text.strip():
+        return []
+    out, depth, last = [], 0, 0
+    for idx, ch in enumerate(text):
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            if depth:
+                depth -= 1
+        elif ch == "," and depth == 0:
+            out.append(text[last:idx].strip())
+            last = idx + 1
+    out.append(text[last:].strip())
+    return out
+
+
+def _js_items(text, item_re):
+    """The matches of item_re on the comma-separated items of text."""
+    out = []
+    for piece in text.split(","):
+        m = item_re.match(piece.strip())
+        if m:
+            out.append(m)
+    return out
+
+
+def _js_norm_path(path):
+    return path.replace("\\", "/")
+
+
+def _js_builtin(spec):
+    """Is spec a Node built-in module (`fs`, `fs/promises`, `node:path`)?"""
+    return spec.startswith("node:") or spec.split("/")[0] in _JS_NODE_BUILTINS
+
+
+def _js_fn_result(code, a, b, pairs):
+    """None when code[a:b] is not a function value; else the (start, stop)
+    of what it returns: an arrow function's expression, or the returned
+    expressions of its block body (those of functions inside it too)."""
+    m = _JS_FUNCTION_HEAD_RE.match(code, a, b)
+    if m is None:
+        return None
+    k = m.end()
+    if m.group(1) is None:                          # function …(…) {…}
+        close = pairs.get(k)
+        if close is None or close >= b:
+            return []
+        k = close + 1
+    while k < b and code[k] in _JS_BLANK:
+        k += 1
+    if k < b and code[k] == "{":
+        end = pairs.get(k)
+        if end is None or end > b:
+            end = b
+        return [(rm.end(), min(_js_arg_end_at(code, rm.end(), True, pairs), end))
+                for rm in _JS_RETURN_RE.finditer(code, k + 1, end)]
+    if m.group(1) is None:
+        return []
+    return [(k, b)]
+
+
+def _js_body_params(code, brace, opener, pairs):
+    """The names the parameters of the function whose body opens at brace
+    bind (`(a, { b }) => {`, `a => {`, `function f(a) {`, `m(a) {`)."""
+    p = _js_back(code, brace)
+    if p < 0:
+        return []
+    if code[p] == ">":
+        if p < 1 or code[p - 1] != "=":
+            return []
+        q = _js_back(code, p - 1)
+        if q < 0:
+            return []
+        if code[q] != ")":
+            word = _js_word_before(code, q)[1]
+            return [word] if _JS_PARAM_RE.match(word) else []
+        p = q
+    elif code[p] != ")":
+        return []
+    o = opener.get(p)
+    if o is None:
+        return []
+    return _js_binding_names(code, o + 1, p, pairs)
+
+
+_JS_BINDING_RE = re.compile(r"(?:\s|\.\.\.)*(?:([A-Za-z_$][\w$]*)|([\[{]))")
+_JS_BINDING_END_RE = re.compile(r"[()\[\]{};\n,]")
+
+
+def _js_binding_names(code, a, b, pairs, statement=False):
+    """The names that the parameter list or (statement=True) const / let /
+    var declarator list code[a:b] binds: `x`, `...rest`, the locals of the
+    patterns `{ key: local = v, other }` and `[p, q]` (a TypeScript
+    annotation `x: T` is not a key); default values and initializers are
+    skipped. A declarator list ends at a ';', a newline or a closer."""
+    out, todo = [], [(a, b, "decl" if statement else "list")]
+    while todo:
+        i, stop, kind = todo.pop()
+        while i < stop:
+            m = _JS_BINDING_RE.match(code, i, stop)          # an element
+            if m is not None:
+                i = m.end()
+                if m.group(2):                               # a nested pattern
+                    c = pairs.get(i - 1)
+                    if c is None or c >= stop:
+                        break
+                    todo.append((i, c, "obj" if m.group(2) == "{" else "arr"))
+                    i = c + 1
+                else:
+                    j = i
+                    while j < stop and code[j] in _JS_BLANK:
+                        j += 1
+                    if kind == "obj" and j < stop and code[j] == ":":   # key: local
+                        i = j + 1
+                        continue
+                    out.append(m.group(1))
+            while i < stop:                                  # to the next element
+                e = _JS_BINDING_END_RE.search(code, i, stop)
+                if e is None:
+                    i = stop
+                    break
+                i = e.start()
+                ch = code[i]
+                if ch in "([{":
+                    c = pairs.get(i)
+                    if c is None or c >= stop:
+                        i = stop
+                        break
+                    i = c + 1
+                elif ch == ",":
+                    i += 1
+                    break
+                elif kind == "decl" or ch not in "\n;":    # the end of the list
+                    i = stop
+                    break
+                else:
+                    i += 1
+    return out
+
+
+def _js_node_merge(a, b):
+    """One compiled expression for two read together."""
+    return a[0] + b[0], a[1] or b[1], a[2] + b[2], a[3] or b[3]
+
+
+class _JsFile:
+    """One analyzed JavaScript file: text, masked code and the tables the
+    call and return passes read."""
+
+    def __init__(self, f, text, code, literals):
+        self.path, self.text = f["path"], text
+        self.mods = {}       # local name -> module specifier (the module itself)
+        self.named = {}      # local name -> (specifier, exported name)
+        self.exports = {}    # exported name -> ("local", name, offset) | ("from", specifier, name)
+        self.star = []       # `export * from` specifiers
+        self.cjs = None      # module.exports = require(specifier)
+        self._module(code, literals)
+        code = self._inline_requires(code, literals)
+        self.code = code
+        self.nl = [m.start() for m in re.finditer("\n", code)]
+        self.pairs = _js_bracket_pairs(code)
+        self.hard = [m.start() for m in _JS_HARD_RE.finditer(code)]
+        self.writes = {}     # name -> offsets of the assignments to it (declarations included)
+        for m in _JS_WRITE_RE.finditer(code):
+            self.writes.setdefault(m.group(1), []).append(m.start(1))
+        # (name, value start, value stop, offset, bare) of each assignment
+        self.assigns = [(am.group(1), am.start(2), am.end(2), am.start(1), False) if am.group(1)
+                        else (am.group(3), am.start(4), am.end(4), am.start(3), True)
+                        for am in _JS_ASSIGN_RE.finditer(code)]
+        self.targets = frozenset(a[0] for a in self.assigns)
+        self.alias = {}      # name -> (name assigned to it, assignment number) (`go = runIt`)
+        self.const_alias = set()   # names only ever `const x = y`: a call through x is one through y
+        self._aliases(code)
+        self.assign_nodes = []
+        self.tainted = {}    # variable -> provenance, file-wide (the call-site pass)
+        self.fns = []        # fids of the functions defined here
+        self.defs = {}       # name -> fids of the functions of that name defined here
+        self.defs_at = {}    # (name, scope defining it) -> fid of the last one defined there
+        self.heads = {}      # name -> [(start, stop)] of the headers defining one
+        self.reassigned = set()   # (name, scope): a binding assigned other than by its definition
+        self.scopes = []     # (start, stop) of each function body, enclosing ones first
+        self.starts = []     # their starts
+        self.parent = []     # the enclosing scope of each scope, or None (the module)
+        self.top = []        # assignments that belong to the module, then per scope: its own
+        self.own = []
+        self.decl = []       # per scope: the names it declares (parameters, const / let / var)
+        self.top_decl = set()   # the module's
+        self.assign_scope = []   # per assignment: the scope it belongs to (None: the module)
+        self.call_scope = {}  # offset of a call's name -> the innermost scope around it
+        self.sinks = [(cat, list(_js_sink_matches(sink_re, code))) for sink_re, cat in _JS_SINKS]
+        self.sink_scopes = []
+        # nested code makes the expressions read overlap (a return inside a
+        # callback inside a return…): what one file may have read is bounded
+        self.budget = _JS_READ_BUDGET * len(code) + 65536
+        self.over = False
+        self.idx = 0
+
+    def line(self, pos):
+        return bisect.bisect_left(self.nl, pos) + 1
+
+    def _module(self, code, literals):
+        def spec(m, g):
+            return literals.get(m.start(g))
+        for m in _JS_REQUIRE_BIND_RE.finditer(code):
+            s = spec(m, 2)
+            if s is not None:
+                if m.group(3):
+                    self.named[m.group(1)] = (s, m.group(3))
+                else:
+                    self.mods[m.group(1)] = s
+        for m in _JS_REQUIRE_DESTRUCTURE_RE.finditer(code):
+            s = spec(m, 2)
+            if s is not None:
+                for it in _js_items(m.group(1), _JS_BIND_ITEM_RE):
+                    self.named[it.group(2) or it.group(1)] = (s, it.group(1))
+        for m in _JS_IMPORT_RE.finditer(code):
+            s = spec(m, 4)
+            if s is None or m.group(1) == "type":
+                continue
+            if m.group(1):
+                self.mods[m.group(1)] = s
+            if m.group(2) is not None:
+                for it in _js_items(m.group(2), _JS_AS_ITEM_RE):
+                    if not it.group(1):
+                        self.named[it.group(3) or it.group(2)] = (s, it.group(2))
+            if m.group(3):
+                self.mods[m.group(3)] = s
+        for m in _JS_EXPORT_LIST_RE.finditer(code):
+            s = spec(m, 2) if m.group(2) else None
+            if m.group(2) and s is None:
+                continue
+            for it in _js_items(m.group(1), _JS_AS_ITEM_RE):
+                if not it.group(1):
+                    self.exports[it.group(3) or it.group(2)] = (
+                        ("from", s, it.group(2)) if s is not None else ("local", it.group(2), m.start()))
+        for m in _JS_EXPORT_STAR_RE.finditer(code):
+            s = spec(m, 1)
+            if s is not None:
+                self.star.append(s)
+        for m in _JS_EXPORT_DEFAULT_RE.finditer(code):
+            self.exports["default"] = ("local", m.group(1), m.start())
+        for m in _JS_MODULE_EXPORTS_RE.finditer(code):
+            if m.group(1):
+                s = spec(m, 1)
+                if s is not None:
+                    self.cjs = s
+            elif m.group(2):
+                self.exports["default"] = ("local", m.group(2), m.start())
+            elif m.group(3) is not None:
+                for it in _js_items(m.group(3), _JS_BIND_ITEM_RE):
+                    self.exports[it.group(1)] = ("local", it.group(2) or it.group(1), m.start())
+            else:
+                self.exports["default"] = ("local", m.group(4), m.start())
+        for m in _JS_EXPORTS_PROP_RE.finditer(code):
+            self.exports[m.group(1)] = ("local", m.group(2) or m.group(3), m.start())
+
+    def _inline_requires(self, code, literals):
+        """code with each one-line require('spec') replaced by a name of the
+        same length that the module table maps to spec, so
+        `require('./x').f(…)` and `require('./x')(…)` read as calls on that
+        module."""
+        pieces, last, k = [], 0, 0
+        for m in _JS_INLINE_REQUIRE_RE.finditer(code):
+            s = literals.get(m.start(1))
+            a, b = m.span()
+            if s is None or code.find("\n", a, b) >= 0:
+                continue
+            name = "R%d" % k
+            if len(name) > b - a:
+                continue
+            k += 1
+            name += "$" * (b - a - len(name))
+            self.mods[name] = s
+            pieces.append(code[last:a])
+            pieces.append(name)
+            last = b
+        if not pieces:
+            return code
+        pieces.append(code[last:])
+        return "".join(pieces)
+
+    def _unbind(self):
+        """A name assigned more than once is not a module or an import: a
+        call through it may reach anything."""
+        for table in (self.mods, self.named):
+            for name in [n for n in table if len(self.writes.get(n, ())) > 1]:
+                del table[name]
+
+    def _aliases(self, code):
+        """A module or an export copied to another name (`const o = lib`,
+        `const f = lib.g`, `const { g } = lib`) binds like the original; a
+        const copy of any other name (`const go = runIt`) is followed."""
+        self._unbind()
+        for _ in range(4):
+            grew = False
+            for name, a, b, _, _ in self.assigns:
+                m = _JS_ALIAS_RE.fullmatch(code[a:b].strip())
+                if m is None:
+                    continue
+                spec = self.mods.get(m.group(1))
+                if spec is None or name in self.mods or name in self.named:
+                    continue
+                if m.group(2):
+                    self.named[name] = (spec, m.group(2))
+                else:
+                    self.mods[name] = spec
+                grew = True
+            for m in _JS_DESTRUCTURE_RE.finditer(code):
+                spec = self.mods.get(m.group(2))
+                if spec is None:
+                    continue
+                for it in _js_items(m.group(1), _JS_BIND_ITEM_RE):
+                    local = it.group(2) or it.group(1)
+                    if local not in self.named and local not in self.mods:
+                        self.named[local] = (spec, it.group(1))
+                        grew = True
+            if not grew:
+                break
+        self._unbind()
+        # any other name assigned a name (`go = runIt`): a call through the
+        # same binding may reach that one's functions too
+        for k, (name, a, b, _, bare) in enumerate(self.assigns):
+            if name in self.mods or name in self.named:
+                continue
+            m = _JS_ALIAS_RE.fullmatch(code[a:b].strip())
+            if m is None or m.group(2) is not None or m.group(1) == name or m.group(1) in _JS_NOT_ALIAS:
+                continue
+            self.alias.setdefault(name, []).append((m.group(1), k))
+            if not bare and len(self.writes.get(name, ())) == 1:
+                self.const_alias.add(name)
+
+    def scope_at(self, pos):
+        """The innermost scope around pos, or None (the module)."""
+        k = self.call_scope.get(pos, -1)
+        if k != -1:
+            return k
+        k = bisect.bisect_right(self.starts, pos) - 1
+        if k < 0:
+            return None
+        while k is not None and self.scopes[k][1] <= pos:
+            k = self.parent[k]
+        return k
+
+    def bound_at(self, name, pos):
+        """Does a scope around pos (or the module) declare name: a
+        parameter, a const / let / var?"""
+        k, steps = self.scope_at(pos), 0
+        while k is not None and steps <= _JS_SCOPE_WALK:
+            if name in self.decl[k]:
+                return True
+            k = self.parent[k]
+            steps += 1
+        return name in self.top_decl
+
+    def binding_scope(self, name, pos):
+        """The scope whose declaration of name a use at pos refers to: None
+        for the module (or no declaration), -1 when too deep to tell."""
+        k, steps = self.scope_at(pos), 0
+        while k is not None:
+            if name in self.decl[k]:
+                return k
+            steps += 1
+            if steps > _JS_SCOPE_WALK:
+                return -1
+            k = self.parent[k]
+        return None
+
+    def in_head(self, name, p):
+        """Is offset p inside the header of a definition of name?"""
+        heads = self.heads.get(name)
+        if not heads:
+            return False
+        k = bisect.bisect_right(heads, (p, len(self.code) + 1)) - 1
+        return k >= 0 and p < heads[k][1]
+
+
+class _JsFunction:
+    def __init__(self, fid, rec, name, params, span, expr, head):
+        self.fid, self.rec, self.name, self.params, self.span = fid, rec, name, params, span
+        self.expr = expr          # an arrow function whose body is an expression
+        self.head = head          # (start, stop) of its header
+        self.reach = {}           # param -> (category, sink line)
+        self.returns = []         # (start, end, line) of each returned expression
+        self.return_nodes = []    # (compiled expression, line)
+        self.scope = None         # the scope of its body
+
+
+class _JsProgram:
+    """The JavaScript files of a scan, their functions and summaries."""
+
+    def __init__(self, recs, funcs):
+        self.recs, self.funcs = recs, funcs
+        self.index = {}
+        for r in recs:
+            self.index.setdefault(_js_norm_path(r.path), r)
+        self.by_name = {}         # name -> fids of the functions of that name, the last defined first
+        for fn in reversed(funcs):
+            self.by_name.setdefault(fn.name, []).append(fn.fid)
+        self.reach_named = {}     # name -> those with a parameter that reaches a sink
+        for name, fids in self.by_name.items():
+            reach = [fid for fid in fids if funcs[fid].reach]
+            if reach:
+                self.reach_named[name] = reach
+        self.clean = [frozenset()] * len(funcs)   # fid -> categories its value is free of its arguments for
+        self.ret_src = {}         # fid -> (file, line, function) where the returned data is read
+        self.ret_src_clean = {}   # fid -> categories every returned path of it is sanitized for
+        self.ret_named = {}       # name -> fids with a ret_src, the last defined first
+        self.config_san = _js_config_active()
+        self._resolved, self._exported = {}, {}
+
+    def resolve(self, rec, spec):
+        """The analyzed file a relative specifier names from rec, or None."""
+        key = (rec.path, spec)
+        if key in self._resolved:
+            return self._resolved[key]
+        target = None
+        if spec in (".", "..") or spec.startswith(("./", "../")):
+            parts = _js_norm_path(rec.path).split("/")[:-1]
+            ok = True
+            for seg in spec.split("/"):
+                if seg in ("", "."):
+                    continue
+                if seg == "..":
+                    if not parts:
+                        ok = False
+                        break
+                    parts.pop()
+                else:
+                    parts.append(seg)
+            if ok:
+                base = "/".join(parts)
+                cands = [base] + [base + e for e in _JS_EXTS]
+                last = parts[-1] if parts else ""
+                dot = last.rfind(".")
+                ext = last[dot:] if dot > 0 else ""
+                if ext in _JS_TS_SOURCES:
+                    cands += [base[:-len(ext)] + t for t in _JS_TS_SOURCES[ext]]
+                cands += [(base + "/" if base else "") + "index" + e for e in _JS_EXTS]
+                for c in cands:
+                    target = self.index.get(c)
+                    if target is not None:
+                        break
+        self._resolved[key] = target
+        return target
+
+    def visible(self, rec, name, pos):
+        """fid of the function named name that is visible at pos in rec (the
+        innermost, the last defined of a scope), or None."""
+        if name not in rec.defs:
+            return None
+        k, steps = rec.scope_at(pos), 0
+        while k is not None:
+            fid = rec.defs_at.get((name, k))
+            if fid is not None:
+                return fid
+            steps += 1
+            if steps > _JS_SCOPE_WALK:
+                return None
+            k = rec.parent[k]
+        return rec.defs_at.get((name, None))
+
+    def local(self, rec, name, pos):
+        """visible(), unless that binding is also assigned (`runIt = other`)."""
+        fid = self.visible(rec, name, pos)
+        if fid is None:
+            return None
+        scope = rec.parent[self.funcs[fid].scope]
+        if (name, scope) in rec.reassigned or (name, -1) in rec.reassigned:
+            return None
+        return fid
+
+    def exported(self, rec, name):
+        """fid of the function module rec exports as name, or None: its own
+        export, else `export … from`, `export *` and module.exports =
+        require(), breadth-first through up to _JS_EXPORT_HOPS modules."""
+        if rec is None:
+            return None
+        key = (rec.path, name)
+        if key in self._exported:
+            return self._exported[key]
+        found = None
+        level, seen = [(rec, name)], {key}
+        for _ in range(_JS_EXPORT_HOPS + 1):
+            nxt = []
+            for r, n in level:
+                entry = r.exports.get(n)
+                if entry is not None:
+                    if entry[0] == "local":
+                        found = self.local(r, entry[1], entry[2])
+                        if found is not None:
+                            break
+                        continue
+                    targets = [(entry[1], entry[2])]
+                else:
+                    targets = []
+                    if n != "default":
+                        found = self.local(r, n, -1)
+                        if found is not None:
+                            break
+                        targets = [(s, n) for s in r.star]
+                    if r.cjs is not None:
+                        targets.append((r.cjs, n))
+                for s, tn in targets:
+                    t = self.resolve(r, s)
+                    if t is not None and (t.path, tn) not in seen:
+                        seen.add((t.path, tn))
+                        nxt.append((t, tn))
+            if found is not None or not nxt:
+                break
+            level = nxt
+        self._exported[key] = found
+        return found
+
+    def bind(self, rec, name, recv, pos, depth=0):
+        """What a call in rec reaches: (fid, None) when it names exactly that
+        function; (None, names) when it may reach any of the project's
+        functions of those names, and code outside the scan; (None, ())
+        when it reaches no project function (see above)."""
+        if recv is None:
+            fid = self.local(rec, name, pos)
+            if fid is not None:
+                return fid, None
+            imp = rec.named.get(name)
+            if imp is not None:
+                if _js_builtin(imp[0]):
+                    return None, ()
+                fid = self.exported(self.resolve(rec, imp[0]), imp[1])
+                if fid is not None:
+                    return fid, None
+                return None, ((name,) if imp[1] == name else (name, imp[1]))
+            spec = rec.mods.get(name)
+            if spec is not None:
+                if _js_builtin(spec):
+                    return None, ()
+                fid = self.exported(self.resolve(rec, spec), "default")
+                if fid is not None:
+                    return fid, None
+                return None, (name,)
+            # a name a scope around the call binds (a parameter, a variable)
+            # holds what was assigned to it, not a namesake function in
+            # another file: only what it is assigned from is followed
+            out = ([name] if self.visible(rec, name, pos) is not None
+                   or not rec.bound_at(name, pos) else [])
+            targets = rec.alias.get(name)
+            if targets is not None and depth < 4 and len(targets) <= _JS_MAX_ALIAS:
+                scope = rec.binding_scope(name, pos)
+                for t, k in targets:
+                    if scope != -1 and rec.assign_scope[k] != scope:
+                        continue                    # another binding of that name
+                    fid, names = self.bind(rec, t, None, pos, depth + 1)
+                    if fid is not None:
+                        if name in rec.const_alias and name not in rec.defs:
+                            return fid, None
+                        names = (self.funcs[fid].name,)
+                    for n in names:
+                        if n not in out:
+                            out.append(n)
+            return None, tuple(out)
+        if recv:
+            spec = rec.mods.get(recv)
+            if spec is not None:
+                if _js_builtin(spec):
+                    return None, ()
+                fid = self.exported(self.resolve(rec, spec), name)
+                if fid is not None:
+                    return fid, None
+                return None, (name,)
+            if recv in _JS_GLOBAL_OBJECTS and recv not in rec.writes and recv not in rec.named:
+                return None, ()
+            if recv in ("this", "super"):
+                return None, (name,)
+        if name in _JS_COMMON_METHODS:
+            return None, ()
+        return None, (name,)
+
+    def reach_candidates(self, rec, name, recv, pos):
+        """The functions whose sink-reaching parameters a call's arguments
+        are checked against: the one it names, else every function it may
+        reach — the last one defined only, when there are more than
+        _JS_MAX_OPEN (it is the one the name-based pass always checked)."""
+        fid, names = self.bind(rec, name, recv, pos)
+        if fid is not None:
+            return (fid,) if self.funcs[fid].reach else ()
+        out = []
+        for n in names:                     # distinct names: no function twice
+            for f in self.reach_named.get(n, ()):
+                out.append(f)
+                if len(out) > _JS_MAX_OPEN:
+                    return (out[0],)
+        return tuple(out)
+
+    # An expression is read in two steps: compile() finds its structure once
+    # (sanitizer calls, calls to project functions, whether it reads request
+    # data or holds anything but literals, the words that may name a tainted
+    # variable), run() evaluates it against the current summaries, as often
+    # as the fixpoint needs.
+    def compile(self, rec, a, b, depth=0):
+        """The structure of the expression code[a:b] of rec (masked code):
+        (calls, whether it reads request data, its words that may name a
+        tainted variable, whether it holds any name but a literal's). A call
+        to a sanitizer clears what it wraps (numeric coercion) or adds its
+        categories to it; a call bound to a project function reads as that
+        function's value (definite: its arguments compiled; open: its text
+        stays, so its arguments and receiver count); any other call stays
+        text, so its arguments count."""
+        code = rec.code
+        calls, spans = [], []
+        if depth < _JS_EVAL_DEPTH and code.find("(", a, b) >= 0:
+            pairs = rec.pairs
+            pos = a
+            for m in _JS_CALL_RE.finditer(code, a, b):
+                if m.start(1) < pos:
+                    continue
+                call = _js_call_at(code, m, pairs, a)
+                if call is None:
+                    continue
+                name, recv, cstart, paren, close = call
+                if close >= b:
+                    continue
+                callee = name if recv is None else (recv + "." + name if recv else None)
+                san = _js_config_sanitizer(callee) if self.config_san and callee is not None else None
+                fid = names = None
+                if san is None:
+                    fid, names = self.bind(rec, name, recv, m.start(1))
+                    if fid is None:
+                        names = tuple(n for n in names if n in self.by_name)
+                        if not names and callee is not None:
+                            san = _js_sanitizer(callee)
+                if san is not None:
+                    if san is not True:
+                        calls.append(("san", san, self.compile(rec, paren + 1, close, depth + 1)))
+                    spans.append((cstart, close + 1))
+                    pos = close + 1
+                elif fid is not None:
+                    args = tuple(self.value(rec, x, y, depth + 1)
+                                 for x, y in _js_split_spans(code, paren + 1, close, pairs))
+                    calls.append(("fn", fid, args, _js_after_new(code, cstart, a)))
+                    spans.append((cstart, close + 1))
+                    pos = close + 1
+                elif names:
+                    calls.append(("open", names))
+        if spans:
+            pieces, last = [], a
+            for s, e in spans:
+                pieces.append(code[last:s])
+                pieces.append(" ")
+                last = e
+            pieces.append(code[last:b])
+            text = "".join(pieces)
+        else:
+            text = code[a:b]
+        targets, words, opaque = rec.targets, [], False
+        for w in _JS_WORD_RE.findall(text):
+            if w in targets:
+                words.append(w)
+            if not opaque and w not in _JS_LITERAL_WORDS:
+                opaque = True
+        return tuple(calls), _JS_SOURCE_RE.search(text) is not None, tuple(words), opaque
+
+    def value(self, rec, a, b, depth):
+        """compile() of an argument; a function value by what it returns."""
+        res = _js_fn_result(rec.code, a, b, rec.pairs)
+        if res is None:
+            return self.compile(rec, a, b, depth)
+        node = _JS_EMPTY_NODE
+        for x, y in res:
+            node = _js_node_merge(node, self.compile(rec, x, y, depth))
+        return node
+
+    def free(self, node):
+        """The categories (and _JS_ALL) for which the value of a compiled
+        expression holds nothing given to its function: no name but
+        literals', and only sanitizers or calls to functions that are free
+        themselves around the rest."""
+        calls, direct, _, opaque = node
+        if opaque or direct:
+            return frozenset()
+        out = _JS_UNIVERSE
+        for call in calls:
+            if call[0] == "san":
+                out = out & (call[1] | self.free(call[2]))
+            elif call[0] == "fn" and not call[3]:
+                out = out & self.clean[call[1]]
+            else:
+                return frozenset()
+            if not out:
+                break
+        return out
+
+    def run(self, node, rec, tainted, cats):
+        """The provenance of a compiled expression, or None. A provenance is
+        ("direct", clean) for request data read in the expression or held by
+        a variable assigned from it, or ("ret", file, line, function, via,
+        clean) for request data another function read and returned (via:
+        the function called here). clean is the set of sink categories
+        every path of it was sanitized for; a path sanitized for one of cats
+        does not count."""
+        calls, direct, words, _ = node
+        cats = frozenset(cats)
+        provs = []
+
+        def add(prov, extra=frozenset()):
+            clean = prov[-1] | extra
+            if not clean & cats:
+                provs.append(prov[:-1] + (clean,))
+
+        for call in calls:
+            kind = call[0]
+            if kind == "san":
+                sub = self.run(call[2], rec, tainted, cats)
+                if sub is not None:
+                    add(sub, call[1])
+            elif kind == "fn":
+                fid = call[1]
+                src = self.ret_src.get(fid)
+                if src is not None:
+                    add(("ret",) + src + (self.funcs[fid].name, self.ret_src_clean[fid]))
+                clean = frozenset() if call[3] else self.clean[fid]
+                if _JS_ALL not in clean:
+                    for arg in call[2]:
+                        sub = self.run(arg, rec, tainted, cats)
+                        if sub is not None:
+                            add(sub, clean)
+            else:
+                # the functions of those names that return request data: one
+                # sanitized for nothing decides the merge, the rest can't change it
+                done = False
+                for n in call[1]:
+                    for fid in self.ret_named.get(n, ()):
+                        clean = self.ret_src_clean[fid]
+                        if clean & cats:
+                            continue
+                        add(("ret",) + self.ret_src[fid] + (self.funcs[fid].name, clean))
+                        if not clean:
+                            done = True
+                            break
+                    if done:
+                        break
+        if direct:
+            add(("direct", frozenset()))
+        for w in words:
+            prov = tainted.get(w)
+            if prov is not None:
+                add(prov)
+        return _js_merge(provs)
+
+    def _fill(self, rec, tainted, which):
+        """Add the assignments numbered `which` to tainted, in order: the first
+        carrying request data names its origin, later ones narrow what it is
+        sanitized for."""
+        nodes = rec.assign_nodes
+        for k in which:
+            src = self.run(nodes[k], rec, tainted, ())
+            if src is not None:
+                name = rec.assigns[k][0]
+                tainted[name] = _js_merge([tainted[name], src]) if name in tainted else src
+        return tainted
+
+    def taint_map(self, rec):
+        """Variable -> provenance for all of rec's assignments, in source
+        order: the file-wide map the call-site pass has always used."""
+        return self._fill(rec, {}, range(len(rec.assigns)))
+
+    def scope_map(self, rec, k, cache):
+        """The tainted variables scope k of rec sees (None: the module): its
+        own assignments on top of what its enclosing scope sees, the
+        module's at the top. Returned values and sinks read these, so a name
+        tainted in one function doesn't taint its namesake in another."""
+        chain = []
+        while k is not None and (rec.idx, k) not in cache:
+            chain.append(k)
+            k = rec.parent[k]
+        base = cache.get((rec.idx, k))
+        if base is None:                    # k is None: the module, not read yet
+            base = cache[(rec.idx, None)] = self._fill(rec, {}, rec.top)
+        for j in reversed(chain):
+            base = cache[(rec.idx, j)] = self._fill(rec, dict(base), rec.own[j])
+        return base
+
+    def _deps(self, fn):
+        """The functions fn's returns and own assignments call."""
+        out = []
+        stack = [node for node, _ in fn.return_nodes]
+        stack += [fn.rec.assign_nodes[k] for k in fn.rec.own[fn.scope]]
+        while stack:
+            for call in stack.pop()[0]:
+                if call[0] == "san":
+                    stack.append(call[2])
+                elif call[0] == "fn":
+                    out.append(call[1])
+                    stack.extend(call[2])
+                else:
+                    for n in call[1]:
+                        fids = self.by_name.get(n, ())
+                        if len(fids) <= _JS_MAX_OPEN_EDGES:
+                            out.extend(fids)
+        return out
+
+    def order(self):
+        """Every fid, the functions a function calls before it where they
+        don't call each other (depth-first post-order): the fixpoints then
+        settle in a round or two unless functions are recursive."""
+        deps = [self._deps(fn) for fn in self.funcs]
+        order, seen = [], [False] * len(deps)
+        for root in range(len(deps)):
+            if seen[root]:
+                continue
+            seen[root] = True
+            stack = [[root, 0]]
+            while stack:
+                top = stack[-1]
+                f, i = top
+                if i < len(deps[f]):
+                    top[1] = i + 1
+                    g = deps[f][i]
+                    if not seen[g]:
+                        seen[g] = True
+                        stack.append([g, 0])
+                else:
+                    stack.pop()
+                    order.append(f)
+        return order
+
+    def settle_clean(self, order):
+        """self.clean, the least fixpoint: a function's returns are free of
+        its arguments for a category when each of them is (see free())."""
+        funcs = self.funcs
+        for _ in range(_JS_RET_ROUNDS):
+            changed = False
+            for fid in order:
+                c = _JS_UNIVERSE
+                for node, _ in funcs[fid].return_nodes:
+                    c = c & self.free(node)
+                    if not c:
+                        break
+                if c != self.clean[fid]:          # it only grows
+                    self.clean[fid] = c
+                    changed = True
+            if not changed:
+                return
+
+    def settle_returns(self, order):
+        """ret_src, to a fixpoint (it only grows): what each function's
+        returns hold, read with the variables its scope sees. False when
+        _JS_RET_ROUNDS rounds did not settle it."""
+        funcs = self.funcs
+        for _ in range(_JS_RET_ROUNDS):
+            changed = False
+            cache = {}
+            for fid in order:
+                fn = funcs[fid]
+                if not fn.return_nodes:
+                    continue
+                rec = fn.rec
+                tainted = self.scope_map(rec, fn.scope, cache)
+                for node, line in fn.return_nodes:
+                    src = self.run(node, rec, tainted, ())
+                    if src is None:
+                        continue
+                    if fid not in self.ret_src:
+                        self.ret_src[fid] = src[1:4] if src[0] == "ret" else (rec.path, line, fn.name)
+                        self.ret_src_clean[fid] = src[-1]
+                        named = self.ret_named.setdefault(fn.name, [])
+                        named.insert(_js_desc_index(named, fid), fid)
+                        changed = True
+                    elif not self.ret_src_clean[fid] <= src[-1]:
+                        self.ret_src_clean[fid] &= src[-1]
+                        changed = True
+            if not changed:
+                return True
+        return False
+
+
+class _JsLayers:
+    """Two variable maps read as one: the first's provenance where it has one."""
+    __slots__ = ("first", "second")
+
+    def __init__(self, first, second):
+        self.first, self.second = first, second
+
+    def get(self, name):
+        prov = self.first.get(name)
+        return self.second.get(name) if prov is None else prov
+
+
+def _js_desc_index(values, x):
+    """Where x goes in the descending list values."""
+    lo, hi = 0, len(values)
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if values[mid] > x:
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo
+
+
+def _js_merge(provs):
+    """One provenance for several paths: the first returned value's if any
+    path is one (else request data read here), clean for what every path was
+    sanitized for; None for no path."""
+    if not provs:
+        return None
+    clean = frozenset.intersection(*(p[-1] for p in provs))
+    first = next((p for p in provs if p[0] == "ret"), provs[0])
+    return first[:-1] + (clean,)
+
+
+def _js_sanitizer(callee):
+    """True when a call to callee (`f` or `m.f`) is a full sanitizer, the
+    categories it clears when a partial one, else None."""
+    probe = callee + "()"
+    if _JS_FULL_SAN_RE.fullmatch(probe):
+        return True
+    cats = frozenset(c for c, rx in _JS_PARTIAL_SAN.items() if rx.fullmatch(probe))
+    return cats or None
+
+
+def _js_config_active():
+    """Has a taint config added JavaScript sanitizers?"""
+    return _JS_FULL_SAN_RE is not _JS_FULL_SAN_RE0 or _JS_PARTIAL_SAN != _JS_PARTIAL_SAN0
+
+
+def _js_config_sanitizer(callee):
+    """_js_sanitizer(callee) for the sanitizers a taint config added (not
+    the built-in ones): they are trusted even where the project defines a
+    function of that name — the operator named them."""
+    probe = callee + "()"
+    if _JS_FULL_SAN_RE.fullmatch(probe) and not _JS_FULL_SAN_RE0.fullmatch(probe):
+        return True
+    cats = frozenset(c for c, rx in _JS_PARTIAL_SAN.items() if rx.fullmatch(probe)
+                     and not (c in _JS_PARTIAL_SAN0 and _JS_PARTIAL_SAN0[c].fullmatch(probe)))
+    return cats or None
+
+
+def _js_function_bodies(code, opens, opener, named):
+    """Offsets of the '{' that open a function body: the named functions',
+    and every '{' after `=>`, or after `(…)` that follows a name or
+    `function` (not if / for / while / switch / catch / with / await).
+    opener: {offset of a closer: offset of the bracket it closes}."""
+    bodies = set(named)
+    for b in opens:
+        p = _js_back(code, b)
+        if p < 0:
+            continue
+        if code[p] == ">":
+            if p >= 1 and code[p - 1] == "=":
+                bodies.add(b)
+        elif code[p] == ")":
+            o = opener.get(p)
+            if o is None or code[o] != "(":
+                continue
+            q = _js_back(code, o)
+            if q < 0:
+                continue
+            word = _js_word_before(code, q)[1]
+            if word and word not in _JS_CONTROL_WORDS:
+                bodies.add(b)
+    return bodies
+
+
+def _js_returns(code, bodies, match_close, line, pairs):
+    """{body '{': [(start, end, line) of each returned expression]}: a
+    `return` belongs to the innermost function body around it."""
+    order = sorted(bodies)
+    out, stack, k = {}, [], 0
+    for rm in _JS_RETURN_RE.finditer(code):
+        r = rm.start()
+        while k < len(order) and order[k] < r:
+            stack.append(order[k])
+            k += 1
+        while stack and match_close.get(stack[-1], len(code)) < r:
+            stack.pop()
+        if stack:
+            a = rm.end()
+            out.setdefault(stack[-1], []).append((a, _js_arg_end_at(code, a, True, pairs), line(r)))
+    return out
+
+
+def _js_scope_tree(spans):
+    """(scopes sorted outer first, [enclosing scope of each or None])."""
+    scopes = sorted(spans, key=lambda sp: (sp[0], -sp[1]))
+    parent, stack = [], []
+    for k, (a, _) in enumerate(scopes):
+        while stack and scopes[stack[-1]][1] <= a:
+            stack.pop()
+        parent.append(stack[-1] if stack else None)
+        stack.append(k)
+    return scopes, parent
+
+
+def _js_innermost(scopes, positions):
+    """The innermost scope around each of the ascending positions, or None."""
+    out, stack, k = [], [], 0
+    for pos in positions:
+        while k < len(scopes) and scopes[k][0] <= pos:
+            stack.append(k)
+            k += 1
+        while stack and scopes[stack[-1]][1] <= pos:
+            stack.pop()
+        out.append(stack[-1] if stack else None)
+    return out
+
+
 def _analyze_js(files, findings):
     # summary: fname -> the params reaching a sink, with the sink's category
     # and the line of the sink call itself (reported in the finding)
-    summaries = {}   # name -> (params, {param: (category, sink line)}, file)
     js_files = [f for f in files if f["lang"] == "js"]
-    texts = {id(f): _js_text(f["content"]) for f in js_files}   # U+2028/9 -> \n
-    codes = {}       # id(file) -> masked code (_js_mask), computed once
     # G3 fix: the old version was quadratic/memory-explosive on adversarial
     # input — per-match char-by-char brace scans to EOF, whole-body string
     # copies, per-sink-match×param regex passes over each body, and a
@@ -1777,8 +3144,9 @@ def _analyze_js(files, findings):
     # retired once as sink positions advance), and token-set tainted-var
     # propagation. Files above _JS_MAX_FILE are skipped with an INFO
     # finding so the blind spot is visible rather than silent (audit G3).
+    recs, funcs = [], []
     for f in js_files:
-        content = texts[id(f)]
+        content = _js_text(f["content"])              # U+2028/9 -> \n
         if len(content) > _JS_MAX_FILE:
             findings.append({
                 "rule": "X-FLOW-SKIPPED", "name": "JS flow analysis skipped (size)",
@@ -1794,14 +3162,20 @@ def _analyze_js(files, findings):
                 "file": f["path"], "line": 1,
                 "snippet": [], "snipStart": 1})
             continue
-        code = _js_mask(content)
-        codes[id(f)] = code
-        funcs = _js_functions(content, code)
-        if not funcs:
-            continue
-        # newline offsets of the (U+2028/9-normalized, masked) code: the line
-        # of a sink match, numbered like every other line in this engine
-        nl = [m.start() for m in re.finditer("\n", code)]
+        literals = {}
+        rec = _JsFile(f, content, _js_mask(content, literals), literals)
+        rec.idx = len(recs)
+        recs.append(rec)
+        code, pairs = rec.code, rec.pairs
+        braces = _js_braces(code)
+        heads = []
+        found = _js_functions(content, code, braces, pairs, heads)
+        first = len(funcs)
+        for (name, params, (s, e), _), head in zip(found, heads):
+            fn = _JsFunction(len(funcs), rec, name, params, (s, e), s >= len(code) or code[s] != "{", head)
+            funcs.append(fn)
+            rec.fns.append(fn.fid)
+        mine = funcs[first:]
         # Sink attribution, identical in effect to the old per-body
         # finditer (which found exactly the matches inside each copied
         # body — spans give the same set, including sinks inside nested
@@ -1811,92 +3185,220 @@ def _analyze_js(files, findings):
         # positions advance monotonically within one sink's scan, so each
         # span is appended once and removed once — linear per sink, six
         # sinks total (the old code scanned every body six times too).
-        spans = [(s, e, fi) for fi, (_, _, (s, e), _) in enumerate(funcs)]
-        span_reach = [dict() for _ in funcs]   # fi -> {param: (category, line)}
-        for sink_re, cat in _JS_SINKS:
+        spans = [(fn.span[0], fn.span[1], k) for k, fn in enumerate(mine)]
+        for cat, matches in rec.sinks:
             spans_by_start = sorted(spans)
             active = []
             add_idx = 0
-            for pos, send in _js_sink_matches(sink_re, code):
+            for pos, send in matches:
                 while add_idx < len(spans_by_start) and spans_by_start[add_idx][0] <= pos:
                     active.append(spans_by_start[add_idx])
                     add_idx += 1
                 active[:] = [sp for sp in active if sp[1] > pos]
                 if not active:
                     continue
-                seg = _js_sink_args(code, pos, send)
+                a, b = _js_sink_span(code, pos, send, pairs)
+                seg = code[a:b]
                 line = None
-                for s, e, fi in active:
-                    params = funcs[fi][1]
-                    for p in params:
+                for s, e, k in active:
+                    fn = mine[k]
+                    for p in fn.params:
                         if p and _js_param_dangerous(seg, p, cat):
                             # the category a later sink kind sets wins, as
                             # before; within one category the first sink
                             # call is the one reported
-                            prev = span_reach[fi].get(p)
+                            prev = fn.reach.get(p)
                             if prev is None or prev[0] != cat:
                                 if line is None:
-                                    line = bisect.bisect_left(nl, pos) + 1
-                                span_reach[fi][p] = (cat, line)
-        # Build summaries in MATCH order with old last-non-empty-wins
-        # semantics for duplicate names (summaries[name] = ... per match).
-        for fi, (name, params, _, _) in enumerate(funcs):
-            if span_reach[fi]:
-                summaries[name] = (params, span_reach[fi], f["path"])
-    if not summaries:
+                                    line = rec.line(pos)
+                                fn.reach[p] = (cat, line)
+        # what each function returns: the expression of an arrow function,
+        # else the `return`s of its own body (not of a function inside it)
+        opens, match_close = braces
+        opener = {c: o for o, c in pairs.items()}
+        named = {fn.span[0] for fn in mine if not fn.expr}
+        bodies = _js_function_bodies(code, opens, opener, named)
+        owned = _js_returns(code, bodies, match_close, rec.line, pairs)
+        for fn in mine:
+            fn.returns = ([(fn.span[0], fn.span[1], rec.line(fn.span[0]))] if fn.expr
+                          else owned.get(fn.span[0], []))
+        # scopes: every function body. A function is visible in the scope
+        # that defines it; an assignment belongs to the innermost scope
+        # around it — a bare one (`x = …`) to the scope that declares x
+        # (const / let / var, a parameter), else to the module
+        spans = {(b, match_close.get(b, len(code)) + 1) for b in bodies}
+        spans.update(fn.span for fn in mine if fn.expr)
+        rec.scopes, rec.parent = _js_scope_tree(spans)
+        where = {sp: k for k, sp in enumerate(rec.scopes)}
+        decl = [set() for _ in rec.scopes]
+        for b in bodies:
+            decl[where[(b, match_close.get(b, len(code)) + 1)]].update(_js_body_params(code, b, opener, pairs))
+        for fn in mine:
+            fn.scope = where[fn.span]
+            if fn.expr:                     # `const f = (a, { b }) => …`: before its `=>`
+                q = _js_back(code, fn.head[1] - 2)
+                o = opener.get(q) if q >= 0 else None
+                if o is not None:
+                    decl[fn.scope].update(_js_binding_names(code, o + 1, q, pairs))
+            rec.defs.setdefault(fn.name, []).append(fn.fid)
+            rec.defs_at[(fn.name, rec.parent[fn.scope])] = fn.fid
+            rec.heads.setdefault(fn.name, []).append(fn.head)
+        dms = list(_JS_DECL_RE.finditer(code))
+        for dm, sc in zip(dms, _js_innermost(rec.scopes, [dm.start() for dm in dms])):
+            (rec.top_decl if sc is None else decl[sc]).update(_js_binding_names(
+                code, dm.end(), min(len(code), dm.end() + _JS_ARG_SCAN), pairs, True))
+        # an assignment rebinds the definition of its name that it resolves to:
+        # the innermost scope around it that declares the name or defines a
+        # function of that name (-1: too deep to tell)
+        defined = {(fn.name, rec.parent[fn.scope]) for fn in mine}
+        wms = list(_JS_WRITE_RE.finditer(code))
+        for wm, sc in zip(wms, _js_innermost(rec.scopes, [wm.start(1) for wm in wms])):
+            name = wm.group(1)
+            if name not in rec.defs or rec.in_head(name, wm.start(1)):
+                continue
+            steps = 0
+            while sc is not None and name not in decl[sc] and (name, sc) not in defined:
+                steps += 1
+                sc = rec.parent[sc] if steps <= _JS_SCOPE_WALK else -1
+                if sc == -1:
+                    break
+            rec.reassigned.add((name, sc))
+        rec.starts = [sp[0] for sp in rec.scopes]
+        cps = [m.start(1) for m in _JS_CALL_RE.finditer(code)]
+        rec.call_scope = dict(zip(cps, _js_innermost(rec.scopes, cps)))
+        rec.decl = decl
+        rec.own = [[] for _ in rec.scopes]
+        for k, sc in enumerate(_js_innermost(rec.scopes, [a[3] for a in rec.assigns])):
+            name = rec.assigns[k][0]
+            if rec.assigns[k][4]:
+                steps = 0
+                while sc is not None and name not in decl[sc]:
+                    steps += 1
+                    sc = rec.parent[sc] if steps <= _JS_SCOPE_WALK else None
+            (rec.top if sc is None else rec.own[sc]).append(k)
+            rec.assign_scope.append(sc)
+        rec.sink_scopes = [_js_innermost(rec.scopes, [pos for pos, _ in matches])
+                           for _, matches in rec.sinks]
+    if not funcs:
         return
-    # scan call sites: a source-derived variable passed into a summarized function
-    call_re = re.compile(r"\b(\w+)\s*\(([^;()]*)\)")
-    for f in js_files:
-        content = texts[id(f)]
-        if len(content) > _JS_MAX_FILE:
-            continue   # already reported above
-        lines = content.split("\n")
-        code = codes.get(id(f))
-        if code is None:
-            code = _js_mask(content)
-        code_lines = code.split("\n")
-        # per-file tainted-var set. Find variable declarations/assignments
-        # anywhere (not just at line start) so `foo(){ const q=req.query.q; ... }`
-        # is handled. Processed in source order for simple forward transitivity.
-        # G3: the old code ran re.search over the whole file content for every
-        # already-tainted var on every assignment — O(vars × size²) on
-        # adversarial input. One regex pass now extracts the RHS's identifier
-        # tokens; propagation checks the RHS's own tokens (a variable became
-        # tainted via a RHS that *named* it, which is exactly what
-        # \b<var>\b over that RHS matched).
-        tainted = set()
-        assign_re = re.compile(
-            r"(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([^;\n]+)"
-            r"|(?:^|[;{]\s*)([A-Za-z_$][\w$]*)\s*=(?![=>])\s*([^;\n]+)")
-        word_re = re.compile(r"[A-Za-z_$][\w$]*")
-        for am in assign_re.finditer(code):
-            name = am.group(1) or am.group(3)
-            rhs = am.group(2) or am.group(4) or ""
-            rhs = _js_neutralize(rhs, ())   # a value wrapped in parseInt/Number is clean
-            if _JS_SOURCE_RE.search(rhs) or (tainted & set(word_re.findall(rhs))):
-                tainted.add(name)
-        for i, ln in enumerate(code_lines):
-            for cm in call_re.finditer(ln):
-                fname, argstr = cm.group(1), cm.group(2)
-                if fname not in summaries:
+    prog = _JsProgram(recs, funcs)
+    # assignments are always read: they don't overlap, and what is read of
+    # the calls nested in one is bounded by _JS_EVAL_DEPTH
+    for rec in recs:
+        rec.assign_nodes = [prog.compile(rec, a, b) for _, a, b, _, _ in rec.assigns]
+    # returned expressions can overlap: each file's are read within its budget
+    for fn in funcs:
+        rec, nodes = fn.rec, []
+        for a, b, line in fn.returns:
+            if rec.over or b - a > rec.budget:
+                rec.over = True
+                nodes.append((_JS_OPAQUE_NODE, line))
+            else:
+                rec.budget -= b - a
+                nodes.append((prog.compile(rec, a, b), line))
+        fn.return_nodes = nodes
+    order = prog.order()
+    prog.settle_clean(order)
+    # the call-site pass's file-wide map holds request data read directly
+    # (as it always has); what functions return is read through the scopes
+    for rec in recs:
+        rec.tainted = prog.taint_map(rec)
+    settled = prog.settle_returns(order)
+    if not settled:
+        findings.append(_flow_note(
+            "Q-FLOW-INCOMPLETE", "Flow analysis incomplete (iteration cap)",
+            recs[0].path, 1,
+            f"What JavaScript functions return did not settle within "
+            f"{_JS_RET_ROUNDS} rounds; flows through long chains of returned "
+            f"values may be missing.",
+            "Return values are iterated to a fixpoint with a safety cap; "
+            "hitting it means an unusually long chain of functions returning "
+            "each other's values.",
+            "Report the pattern to the Lazaret maintainers."))
+    # scan call sites: request data passed into a function whose parameter
+    # reaches a sink
+    if prog.reach_named:
+        for rec in recs:
+            lines = rec.text.split("\n")
+            code, pairs, hard, cache = rec.code, rec.pairs, rec.hard, {}
+            for m in _JS_CALL_RE.finditer(code):
+                call = _js_call_at(code, m, pairs)
+                if call is None:
                     continue
-                params, reach, sfile = summaries[fname]
-                call_args = [a.strip() for a in argstr.split(",")]
-                for idx, pname in enumerate(params):
-                    if pname not in reach or idx >= len(call_args):
+                name, recv, _, paren, close = call
+                cands = prog.reach_candidates(rec, name, recv, m.start(1))
+                if not cands:
+                    continue
+                if bisect.bisect_left(hard, paren + 1) != bisect.bisect_left(hard, close):
+                    # a nested call or statement in the arguments: arguments
+                    # of nested calls overlap, so they are read in the budget
+                    if rec.over or close - paren - 1 > rec.budget:
+                        rec.over = True
                         continue
-                    cat, sline = reach[pname]
-                    a = _js_neutralize(call_args[idx], {cat})  # sink-category sanitizers
-                    if _JS_SOURCE_RE.search(a) or (tainted & set(word_re.findall(a))):
-                        # the sink's own line (was: the function's first
-                        # line), like the Python engine reports it
-                        findings.append(_issue(
-                            cat, f["path"], i + 1, lines,
-                            source_loc=f"{f['path']}:{i + 1}",
-                            sink_loc=f"{sfile}:{sline} (in {fname}())",
-                            chain=f"the call to {fname}()"))
+                    rec.budget -= close - paren - 1
+                args = _js_split_spans(code, paren + 1, close, pairs)
+                tainted = _JsLayers(prog.scope_map(rec, rec.scope_at(m.start(1)), cache), rec.tainted)
+                hit = False
+                for fid in cands:
+                    fn = funcs[fid]
+                    for idx, pname in enumerate(fn.params):
+                        if pname not in fn.reach or idx >= len(args):
+                            continue
+                        cat, sline = fn.reach[pname]
+                        node = prog.value(rec, args[idx][0], args[idx][1], 0)
+                        if prog.run(node, rec, tainted, (cat,)) is not None:   # sink-category sanitizers
+                            # the sink's own line (was: the function's first
+                            # line), like the Python engine reports it
+                            line = rec.line(m.start(1))
+                            findings.append(_issue(
+                                cat, rec.path, line, lines,
+                                source_loc=f"{rec.path}:{line}",
+                                sink_loc=f"{fn.rec.path}:{sline} (in {fn.name}())",
+                                chain=f"the call to {name}()"))
+                            hit = True
+                            break
+                    if hit:
                         break
+    # sinks fed by a value another function read from the request and returned
+    if prog.ret_src:
+        for rec in recs:
+            lines = rec.text.split("\n")
+            code, pairs, cache = rec.code, rec.pairs, {}
+            for (cat, matches), where in zip(rec.sinks, rec.sink_scopes):
+                for (pos, send), sc in zip(matches, where):
+                    a, b = _js_sink_span(code, pos, send, pairs)
+                    if rec.over or b - a > rec.budget:
+                        rec.over = True
+                        break
+                    rec.budget -= b - a
+                    args = _js_split_spans(code, a, b, pairs)
+                    if cat == "SQL injection":
+                        args = args[:1]              # the query text; parameters are bound
+                    node = _JS_EMPTY_NODE
+                    for x, y in args:
+                        node = _js_node_merge(node, prog.value(rec, x, y, 0))
+                    src = prog.run(node, rec, prog.scope_map(rec, sc, cache), (cat,))
+                    if src is not None and src[0] == "ret":
+                        line = rec.line(pos)
+                        findings.append(_issue(
+                            cat, rec.path, line, lines,
+                            source_loc=f"{src[1]}:{src[2]} (in {src[3]}())",
+                            sink_loc=f"{rec.path}:{line}",
+                            chain=f"the value returned by {src[4]}()"))
+    for rec in recs:
+        if rec.over:
+            findings.append(_flow_note(
+                "Q-FLOW-INCOMPLETE", "Flow analysis incomplete (size budget)",
+                rec.path, 1,
+                f"The JavaScript cross-file pass stopped following returned values "
+                f"and nested calls in {rec.path} after reading {_JS_READ_BUDGET} "
+                f"times its size; calls whose arguments hold no nested call were "
+                f"still checked, but flows through returned values in the rest of "
+                f"it may be missing.",
+                "Deeply nested code makes the expressions the pass reads overlap; "
+                "each file has a budget so a scan cannot run unbounded.",
+                "Split or deminify the file, or exclude it from the scan "
+                "explicitly if the code is generated."))
 
 
 _JS_MAX_FILE = 2_000_000      # skip interprocedural JS flow above 2 MB

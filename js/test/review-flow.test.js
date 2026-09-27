@@ -57,11 +57,16 @@ test("SQL: interpolated into the query is a flow, a placeholder argument is not"
   assert.deepEqual(found("function find(id) {\n  return db.query('SELECT * FROM t WHERE id = ?', [id]);\n}\n", "find(q)"), []);
 });
 
-test("sanitizers: a value assigned through numeric coercion is clean", () => {
-  const helper = "function runIt(cmd) {\n  exec(cmd);\n}\n";
+test("sanitizers: numeric coercion clears every category, a category's sanitizer only its own", () => {
+  const helper = "function runIt(cmd) {\n  exec(cmd);\n}\nfunction show(h) {\n  el.innerHTML = h;\n}\n";
   assert.deepEqual(found(helper, "const n = Number(q); runIt(n)"), []);
   assert.deepEqual(found(helper, "const n = parseInt(q, 10); runIt(n)"), []);
   assert.deepEqual(found(helper, "const s = q.trim(); runIt(s)"), HIT);
+  assert.deepEqual(found(helper, "runIt(Number(q))"), []);
+  assert.deepEqual(found(helper, "runIt(shellQuote(q))"), []);
+  assert.deepEqual(found(helper, "runIt(escapeHtml(q))"), HIT);            // the wrong sanitizer for a shell
+  assert.deepEqual(found(helper, "show(escapeHtml(q))"), []);
+  assert.deepEqual(found(helper, "show(shellQuote(q))"), [["X-XSS", "app.js"]]);
 });
 
 test("the lexer blanks literal and comment content, keeping length, newlines and ${} code", () => {
