@@ -207,7 +207,7 @@ class EndToEndCancelTests(unittest.TestCase):
         for i in range(4000):
             with open(os.path.join(tree, f"m{i}.py"), "w", encoding="utf-8") as fh:
                 fh.write(body)
-        env = dict(os.environ, LAZARET_DB=os.path.join(tree, "r.db"))
+        env = dict(os.environ, LAZARET_DB=os.path.join(tree, "r.db"), LAZARET_MCP_ROOTS=tree)
         p = subprocess.Popen([PY, _support.MCP], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                              stderr=subprocess.DEVNULL, text=True, bufsize=1, env=env, encoding="utf-8", errors="replace")
         try:

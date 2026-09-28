@@ -326,7 +326,12 @@ authentication and TLS included). The scanner uses a separate database so its `p
    server resolves a relative one against whatever directory the client launched it in, so a relative
    path silently creates a NEW empty DB (or finds a different one) instead of the one your `scan-all`
    sweeps write.
-3. Register the server:
+3. Decide what the path tools may read. `scan_directory`, `scan_files` and `quality_gate` read only
+   inside the roots your MCP client shares (Claude Code shares the directory it was started in and any
+   added with `--add-dir`), or inside the directories you list in `LAZARET_MCP_ROOTS` in the `env`
+   block, which take precedence. If the client shares none and the variable is unset, those tools
+   return an error that says so.
+4. Register the server:
    - **Claude Code**: copy the `lazaret` entry into your project's `.mcp.json`
      (or run `claude mcp add lazaret -- lazaret-mcp`)
    - **Claude Desktop**: merge the entry into `claude_desktop_config.json`
@@ -348,7 +353,7 @@ Typical workflow: edit code → `scan_files` on the changed files → fix findin
 
 The MCP client is a model, and a model can be steered by content it has read, so the server bounds what a tool call can do:
 
-- **Allowed roots:** set `LAZARET_MCP_ROOTS` (paths separated by `:` — `;` on Windows) and any path outside them is a tool error. Unset, any path the server's user can read is allowed; set but empty (only separators or spaces), every tool call is refused as a configuration error.
+- **Allowed roots:** the path tools read only inside `LAZARET_MCP_ROOTS` (paths separated by `:` — `;` on Windows) when it is set, and otherwise inside the roots the MCP client shares, asked for with `roots/list` and asked again when the client says they changed. A path outside the roots is a tool error, and with no roots at all every path is refused with an error that says how to allow one. Set but empty (only separators or spaces), every tool call is refused as a configuration error. Before 0.1.7 an unset `LAZARET_MCP_ROOTS` allowed any path the server's user could read.
 - **Per-call caps:** `LAZARET_MCP_MAX_FILES` (default 20,000), `LAZARET_MCP_MAX_BYTES` (200,000,000) and `LAZARET_MCP_MAX_SECONDS` (300). A call that hits one returns what it scanned, marked `"incomplete": true` with an SC-TRUNCATED finding (in `scan_files`, one for each file left out), so it can never pass the gate. `discover_packages` with `scan` scans at most 15 packages per call; the rest, and any past the deadline, come back as INCOMPLETE "not scanned" entries. A directory that doesn't exist or can't be listed is a tool error; a directory with nothing Lazaret scans, and a `scan_files` path that exists but can't be read, come back incomplete with an SC-TRUNCATED finding, never as a clean pass.
 - **Credentials:** a registry tool (`scan_package`, `discover_packages`) never stores or returns a raw credential line; findings carry a placeholder. `LAZARET_NO_REDACT=1` turns redaction off for the project tools only (`scan_directory`, `scan_files`, `scan_snippet`, `quality_gate`), which read your own code.
 - **Responsiveness:** tool calls run on a worker thread; `ping` is answered while a scan runs, and `notifications/cancelled` stops the scan between files.

@@ -20,6 +20,20 @@ project is pre-1.0, so the 0.x API may still change.
   must fit the record budget (the registry's archive reader already worked
   this way). Reachable only through `--epss-url` / `--osv-url` or a compromised
   feed host.
+- **MCP path tools read only inside allowed roots by default (audit I1).**
+  With `LAZARET_MCP_ROOTS` unset, `scan_directory`, `scan_files` and
+  `quality_gate` read any path the server's user could read, at the request of
+  a model that may have been steered by something it read. They now read only
+  inside the roots the MCP client shares: the server asks with `roots/list`
+  after `notifications/initialized` and again on
+  `notifications/roots/list_changed`, and a call waits up to 10 s for the
+  answer (Claude Code shares the directory it was started in and any added with
+  `--add-dir`). A client that shares no roots gets a tool error that says to
+  set `LAZARET_MCP_ROOTS`, which still takes precedence when set. Tools that
+  take no path, and direct calls to `lazaret.mcp.server.tool_*` from Python, are
+  unchanged. MCP 2026-07-28 deprecates Roots in favour of server configuration;
+  the server negotiates 2025-11-25 and earlier, where it is current, and
+  `LAZARET_MCP_ROOTS` remains the setting to rely on.
 
 ## [0.1.6] — 2026-09-28
 
