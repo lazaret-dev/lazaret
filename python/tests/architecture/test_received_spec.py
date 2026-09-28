@@ -36,13 +36,29 @@ class ReceivedSpecTests(unittest.TestCase):
     def test_the_spec_is_valid_and_shaped(self):
         with open(SOURCE, encoding="utf-8") as f:
             spec = json.load(f)
-        self.assertEqual(set(spec) - {"$comment"}, {"arrays", "charstrings", "limits"})
+        self.assertEqual(set(spec) - {"$comment"},
+                         {"arrays", "charstrings", "limits", "patterns", "alternatives"})
         for name, value in spec["arrays"].items():
             self.assertTrue(value and all(isinstance(x, str) for x in value), name)
         for name, value in spec["charstrings"].items():
             self.assertTrue(value and isinstance(value, str), name)
         for name, value in spec["limits"].items():
             self.assertIsInstance(value, int, name)
+        for name, p in spec["patterns"].items():
+            self.assertEqual(set(p) - {"note"}, {"src", "flags"}, name)
+            self.assertTrue(p["src"] and isinstance(p["src"], str), name)
+            self.assertIsInstance(p["flags"], str, name)
+            self.assertLessEqual(set(p["flags"]), set("ims"), name)
+        for name, g in spec["alternatives"].items():
+            self.assertEqual(set(g) - {"note", "tail", "extends"}, {"pairs"}, name)
+            self.assertTrue(g["pairs"], name)
+            for pair in g["pairs"]:
+                self.assertEqual(len(pair), 2, name)
+                self.assertTrue(all(isinstance(x, str) for x in pair), name)
+            if "extends" in g:
+                self.assertIn(g["extends"], spec["alternatives"], name)
+            if "tail" in g:
+                self.assertIsInstance(g["tail"], str, name)
 
     def test_core_uses_the_spec_values(self):
         with open(SOURCE, encoding="utf-8") as f:
@@ -65,6 +81,10 @@ class ReceivedSpecTests(unittest.TestCase):
         # SINK is derived, not stored
         self.assertEqual(list(core._DL_SINK_NEEDLES),
                          a["_DL_RUN_NEEDLES"] + a["_DL_DESERIAL_NEEDLES"] + a["_DL_IMPORT_NEEDLES"])
+        # core compiles each plain pattern's source verbatim from the spec (the
+        # composed group patterns are held to core by test_js_parity_hooks)
+        for name, p in spec["patterns"].items():
+            self.assertEqual(getattr(core, name).pattern, p["src"], name)
 
 
 if __name__ == "__main__":

@@ -10,14 +10,13 @@
 import { readFileSync } from "node:fs";
 import { pyRe, pyStrip, pyLstrip, cpLen, isPySpace, isWordChar } from "./pycompat.js";
 
-// The received-code detector's shared data (name sets, character sets, limits)
-// is authored once in the Python package's received_spec.json and synced here
-// to received-spec.json by scripts/sync-received-spec.py; both engines load it,
-// so a needle or limit is edited in one place. (Patterns are still inline.)
+// The received-code detector's shared data (name sets, character sets, limits,
+// and the patterns) is authored once in the Python package's received_spec.json
+// and synced here to received-spec.json by scripts/sync-received-spec.py; both
+// engines load and compile it, so a needle, limit or pattern is edited in one place.
 const DL_SPEC = JSON.parse(readFileSync(new URL("./received-spec.json", import.meta.url), "utf8"));
 const DL_SPEC_ARRAYS = DL_SPEC.arrays, DL_SPEC_CHARS = DL_SPEC.charstrings, DL_SPEC_LIMITS = DL_SPEC.limits;
 
-const DL_B = String.raw`\b`, DL_NOT_MEMBER = String.raw`(?<![\w$.])`;
 /** pyRe for core's pattern text, whose named groups are Python's (?P<name>…). */
 const pyReNamed = (src, flags = "") => pyRe(src.replaceAll("(?P<", "(?<"), flags);
 
@@ -123,27 +122,29 @@ function within(starts, ends, lo, hi) {
   return i < starts.length && ends[i] <= hi;
 }
 
-export const DL_NET_MODULES_SRC = String.raw`(?:node:)?(?:https?|net|tls|axios|got|node-fetch|undici|ws)`;
-const DL_SOURCE = alternatives([
-  // Python
-  [DL_B, String.raw`urlopen\s*\(`], [DL_B, String.raw`requests\.(?:get|post|put|request|Session)\s*\(`],
-  [DL_B, String.raw`httpx\.(?:get|post|request|stream|Client|AsyncClient)\s*\(`], [DL_B, String.raw`urllib3\.PoolManager\s*\(`],
-  [DL_B, String.raw`HTTPS?Connection\s*\(`], [DL_B, String.raw`aiohttp\.ClientSession\s*\(`],
-  [DL_B, String.raw`socket\.(?:socket|create_connection)\s*\(`],
-  // JavaScript
-  [DL_NOT_MEMBER, String.raw`fetch\s*\(`], [DL_B, String.raw`(?:window|globalThis|self|global)\.fetch\s*\(`],
-  [DL_B, String.raw`https?\.(?:get|request|createServer)\s*\(`],
-  [DL_B, String.raw`(?:net|tls)\.(?:connect|createConnection|createServer)\s*\(`],
-  [DL_B, String.raw`new\s+(?:net\.Socket|WebSocket|XMLHttpRequest)\b`],
-  [DL_B, String.raw`require\(\s*["']` + DL_NET_MODULES_SRC + String.raw`["']\s*\)`],
-  [DL_B, String.raw`axios(?:\.(?:get|post|request))?\s*\(`], [DL_NOT_MEMBER, String.raw`got(?:\.(?:get|post))?\s*\(`],
-  [DL_B, String.raw`undici\.(?:request|fetch)\s*\(`],
-  // a download tool's output, captured
-  [DL_B, String.raw`(?:execSync|execFileSync|spawnSync|check_output|getoutput|getstatusoutput|popen|run)` +
-    String.raw`\s*\(\s*(?:\[\s*)?["'${"`"}]\s*(?:curl|wget)\b`],
-]);
-export const DL_SOURCE_SRC = DL_SOURCE.exactSrc;
-const DL_SOURCE_RE = pyRe(DL_SOURCE_SRC, "g");
+const BT = "`";
+const DL_SPEC_PATTERNS = DL_SPEC.patterns, DL_SPEC_ALTS = DL_SPEC.alternatives;
+
+/** A plain received-code pattern, compiled from the spec. core._dl_re. */
+function dlRe(name, flags = "") {
+  const p = DL_SPEC_PATTERNS[name];
+  return pyRe(p.src, flags + p.flags);
+}
+/** ...whose named groups are Python's (?P<name>…). core._dl_re with named groups. */
+function dlReNamed(name, flags = "") {
+  const p = DL_SPEC_PATTERNS[name];
+  return pyReNamed(p.src, flags + p.flags);
+}
+/** An (exact, candidate) alternative group built from the spec; `extends`
+ * prepends another group's pairs. core._dl_group. */
+function dlGroup(name) {
+  const g = DL_SPEC_ALTS[name];
+  const base = g.extends ? DL_SPEC_ALTS[g.extends].pairs : [];
+  return alternatives([...base, ...g.pairs], g.tail ?? "");
+}
+
+const DL_SOURCE = dlGroup("_DL_SOURCE");            // a value received over the network
+const DL_SOURCE_RE = pyRe(DL_SOURCE.exactSrc, "g");
 export const DL_NEEDLES = DL_SPEC_ARRAYS._DL_NEEDLES;
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
 const DL_NEEDLE_RE = new RegExp([...DL_NEEDLES]
@@ -152,18 +153,9 @@ export const DL_RUN_NEEDLES = DL_SPEC_ARRAYS._DL_RUN_NEEDLES;
 export const DL_DESERIAL_NEEDLES = DL_SPEC_ARRAYS._DL_DESERIAL_NEEDLES;
 export const DL_IMPORT_NEEDLES = DL_SPEC_ARRAYS._DL_IMPORT_NEEDLES;
 export const DL_SINK_NEEDLES = [...DL_RUN_NEEDLES, ...DL_DESERIAL_NEEDLES, ...DL_IMPORT_NEEDLES];
-export const DL_MODULE_VALUE_SRC =
-  String.raw`\s*(?:await\s+)?(?:require|import)\(\s*["']` + DL_NET_MODULES_SRC + String.raw`["']\s*\)\s*(?:;\s*)?$`;
-const DL_MODULE_VALUE_RE = pyRe(DL_MODULE_VALUE_SRC, "y");
-export const DL_FUNCTION_VALUE_SRC = String.raw`\s*(?:async\s*)?(?:function\b|\([^()]{0,200}\)\s*=>|[A-Za-z_$][\w$]*\s*=>)`;
-const DL_FUNCTION_VALUE_RE = pyRe(DL_FUNCTION_VALUE_SRC, "y");
-export const DL_IMPORT_SRC =
-  String.raw`^[ \t]*import[ \t]+(?P<py>[\w.,]+(?:[ \t]+[\w.,]+)*)[ \t]*$` +
-  String.raw`|^[ \t]*from[ \t]+(?:requests|httpx|urllib\.request|socket)[ \t]+import[ \t]+(?:\([ \t]*)?` +
-  String.raw`(?P<pyfrom>[\w,]+(?:[ \t]+[\w,]+)*)[ \t]*\)?[ \t]*$` +
-  String.raw`|\bimport\s+(?:\*\s+as\s+)?(?P<es>[A-Za-z_$][\w$]*)\s+from\s+["']` + DL_NET_MODULES_SRC + String.raw`["']` +
-  String.raw`|\bimport\s*\{(?P<esn>[^{}]{0,200})\}\s*from\s+["']` + DL_NET_MODULES_SRC + String.raw`["']`;
-const DL_IMPORT_RE = pyReNamed(DL_IMPORT_SRC, "g");
+const DL_MODULE_VALUE_RE = dlRe("_DL_MODULE_VALUE_RE", "y");
+const DL_FUNCTION_VALUE_RE = dlRe("_DL_FUNCTION_VALUE_RE", "y");
+const DL_IMPORT_RE = dlReNamed("_DL_IMPORT_RE", "g");
 export const DL_PY_NET_MODULES = DL_SPEC_ARRAYS._DL_PY_NET_MODULES;
 const DL_PY_NET_MODULE_SET = new Set(DL_PY_NET_MODULES);
 export const DL_LIMITS = { _DL_LONG_ROW: DL_SPEC_LIMITS._DL_LONG_ROW, _DL_WINDOW: DL_SPEC_LIMITS._DL_WINDOW,
@@ -171,154 +163,46 @@ export const DL_LIMITS = { _DL_LONG_ROW: DL_SPEC_LIMITS._DL_LONG_ROW, _DL_WINDOW
   _DL_NAMED_SEARCHES: DL_SPEC_LIMITS._DL_NAMED_SEARCHES, _DL_PHASES: DL_SPEC_LIMITS._DL_PHASES };
 const { _DL_LONG_ROW: LONG_ROW, _DL_WINDOW: WINDOW, _DL_ARG_SPAN: ARG_SPAN, _DL_LOOKBACK: LOOKBACK,
   _DL_NAMED_SEARCHES: NAMED_SEARCHES, _DL_PHASES: PHASES } = DL_LIMITS;
-const BT = "`";
-export const DL_CHAIN_SRC = String.raw`(?<![\w$.])[A-Za-z_$][\w$]*(?:\s*\??\.\s*[A-Za-z_$][\w$]*){0,50}`;
-const DL_CHAIN_RE = pyRe(DL_CHAIN_SRC, "g");
-export const DL_HEAD_SRC = String.raw`(?<![\w$.])[A-Za-z_$][\w$]*`;
-const DL_HEAD_RE = pyRe(DL_HEAD_SRC, "g");
-export const DL_WORD_RUN_SRC = String.raw`[\w$]+`;
-const DL_WORD_RUN_RE = pyRe(DL_WORD_RUN_SRC, "g");
-const DL_WORD_RUN_WHOLE_RE = pyRe(`^(?:${DL_WORD_RUN_SRC})$`);
-export const DL_STR_SRC = String.raw`\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|${BT}(?:\\.|[^${BT}\\])*${BT}`;
-const DL_STR_RE = pyRe(DL_STR_SRC, "g");
-export const DL_TEMPLATE_HOLE_SRC = String.raw`\$\{([^{}]*)\}`;
-const DL_TEMPLATE_HOLE_RE = pyRe(DL_TEMPLATE_HOLE_SRC, "g");
-export const DL_FSTRING_HOLE_SRC = String.raw`(?<!\{)\{([^{}]*)\}`;
-const DL_FSTRING_HOLE_RE = pyRe(DL_FSTRING_HOLE_SRC, "g");
+const DL_CHAIN_RE = dlRe("_DL_CHAIN_RE", "g");
+const DL_HEAD_RE = dlRe("_DL_HEAD_RE", "g");
+const DL_WORD_RUN_RE = dlRe("_DL_WORD_RUN_RE", "g");
+const DL_WORD_RUN_WHOLE_RE = pyRe(`^(?:${DL_SPEC_PATTERNS._DL_WORD_RUN_RE.src})$`);
+const DL_STR_RE = dlRe("_DL_STR_RE", "g");
+const DL_TEMPLATE_HOLE_RE = dlRe("_DL_TEMPLATE_HOLE_RE", "g");
+const DL_FSTRING_HOLE_RE = dlRe("_DL_FSTRING_HOLE_RE", "g");
 export const DL_PREFIX_CHARS = [...DL_SPEC_CHARS._DL_PREFIX_CHARS];
 const PREFIX_CHARS = new Set(DL_PREFIX_CHARS);
-export const DL_BIND_SRC =
-  String.raw`(?P<ann>(?<![\w$.])[A-Za-z_$][\w$]*)\s*:\s*[\w$.\[\], |]{1,80}?\s*=(?![=>])` +
-  String.raw`|(?P<lhs>(?<![\w$.])[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*){0,8}(?:\s*,\s*[A-Za-z_$][\w$]*){0,8}` +
-  String.raw`|\{[^{}()=;]{0,200}\}|\[[^\[\]()=;]{0,200}\])\s*(?:\+|\|\||\?\?)?=(?![=>])` +
-  String.raw`|\bas\s+(?P<with>[A-Za-z_]\w*)\s*[:,)]` +
-  String.raw`|\bfor\s*(?:\(\s*)?(?:(?:const|let|var)\s+)?(?P<for>[A-Za-z_$][\w$]*(?:\s*,\s*[A-Za-z_$][\w$]*){0,8}` +
-  String.raw`|\{[^{}]{0,200}\}|\[[^\[\]]{0,200}\])\s+(?:of|in)\b` +
-  String.raw`|\breturn\b(?P<ret>)`;
-const DL_BIND_RE = pyReNamed(DL_BIND_SRC, "g");
-export const DL_PARAMS_SRC =
-  String.raw`\bfunction\b\s*(?:[\w$]+\s*)?\((?P<fp>[^()]{0,200})\)|\((?P<ap>[^()]{0,200})\)\s*=>` +
-  String.raw`|(?<![\w$.])(?P<one>[A-Za-z_$][\w$]*)\s*=>|\blambda\b(?P<lp>[^:()]{0,200}):`;
-const DL_PARAMS_RE = pyReNamed(DL_PARAMS_SRC, "g");
-export const DL_FN_HEADER_SRC =
-  String.raw`^\s*(?:async\s+)?def\s+(?P<py>\w+)|\bfunction\s*(?:\*\s*)?(?P<js>[A-Za-z_$][\w$]*)\s*\(` +
-  String.raw`|\b(?:const|let|var)\s+(?P<var>[A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?` +
-  String.raw`(?:function\b|\([^()]{0,200}\)\s*=>|[A-Za-z_$][\w$]*\s*=>)`;
-const DL_FN_HEADER_RE = pyReNamed(DL_FN_HEADER_SRC);
-export const DL_NAME_SRC = String.raw`[A-Za-z_$][\w$]*`;
-const DL_NAME_RE = pyRe(DL_NAME_SRC, "g");
-export const DL_DEFAULT_SRC = String.raw`=[^,]*`;
-const DL_DEFAULT_RE = pyRe(DL_DEFAULT_SRC, "g");
-export const DL_DOT_SRC = String.raw`\s*\??\.\s*`;
-const DL_DOT_RE = pyRe(DL_DOT_SRC, "g");
+const DL_BIND_RE = dlReNamed("_DL_BIND_RE", "g");
+const DL_PARAMS_RE = dlReNamed("_DL_PARAMS_RE", "g");
+const DL_FN_HEADER_RE = dlReNamed("_DL_FN_HEADER_RE");
+const DL_NAME_RE = dlRe("_DL_NAME_RE", "g");
+const DL_DEFAULT_RE = dlRe("_DL_DEFAULT_RE", "g");
+const DL_DOT_RE = dlRe("_DL_DOT_RE", "g");
 export const DL_NOT_NAMES = DL_SPEC_ARRAYS._DL_NOT_NAMES;
 const NOT_NAMES = new Set(DL_NOT_NAMES);
-// core._GLOBAL_OBJECT and core._EVAL_BY_NAME (an eval/Function named by a
-// computed member, whole or split with +): reused for the indirect-eval runners
-const DL_GLOBAL_OBJECT = String.raw`(?:(?:window|globalThis|self|global|top|parent|frames)\s*\.\s*)?`;
-const DL_Q3 = String.raw`['\"${BT}]`;                                // core's ['"`] (with backslash-quote)
-const DL_SPLIT_LITERAL = String.raw`(?:` + DL_Q3 + String.raw`\s*\+\s*` + DL_Q3 + String.raw`)?`;
-const splitJoin = (s) => [...s].join(DL_SPLIT_LITERAL);
-export const DL_EVAL_BY_NAME_SRC = String.raw`\[\s*` + DL_Q3 + String.raw`(?:` + splitJoin("eval") + "|"
-  + splitJoin("Function") + String.raw`)` + DL_Q3 + String.raw`\s*\]`;
-const DL_RUNNER_PAIRS = [
-  [DL_NOT_MEMBER, String.raw`(?:eval|exec|execfile)\s*\(`], [DL_B, String.raw`(?:window|globalThis|global|self)\.eval\s*\(`],
-  [DL_B, String.raw`new\s+Function\s*\(`], [DL_NOT_MEMBER, String.raw`Function\s*\(`],
-  [DL_B, String.raw`runIn(?:This|New)?Context\s*\(`], [DL_B, String.raw`new\s+vm\.Script\s*\(`],
-  [DL_B, String.raw`compileFunction\s*\(`], [String.raw`(?<=\.)`, String.raw`_compile\s*\(`], [DL_B, String.raw`execSync\s*\(`],
-  [DL_B, String.raw`(?:child_process|childProcess|cp)\.exec\s*\(`],
-  [DL_B, String.raw`require\(\s*["'](?:node:)?child_process["']\s*\)\.exec\s*\(`],
-  [DL_B, String.raw`os\.(?:system|popen)\s*\(`], [DL_B, String.raw`__import__\(\s*["']os["']\s*\)\.(?:system|popen)\s*\(`],
-  [DL_NOT_MEMBER, String.raw`(?:system|popen)\s*\(`], [DL_B, String.raw`(?:subprocess\.)?get(?:status)?output\s*\(`],
-  // eval / Function reached indirectly, each ending at the payload's "("
-  ["", String.raw`\(\s*(?:void\s+)?[\w$.]+\s*,\s*` + DL_GLOBAL_OBJECT + String.raw`(?:eval|Function)\s*\)\s*\(`],
-  [DL_B, String.raw`(?:eval|Function)\s*\.\s*call\s*\(`],
-  [DL_B, String.raw`(?:eval|Function)\s*\.\s*bind\s*\([^()]*\)\s*\(`],
-  ["", DL_EVAL_BY_NAME_SRC + String.raw`\s*\(`],
-];
-const DL_RUNNER = alternatives(DL_RUNNER_PAIRS);
-export const DL_SHELL_TRUE_SRC = String.raw`\bshell\s*=\s*True\b`;
-const DL_SHELL_TRUE_RE = pyRe(DL_SHELL_TRUE_SRC);
-export const DL_SHELL_CALL_SRC = String.raw`(?:run|call|Popen|check_output|check_call)\s*\(`;
-const DL_SHELL_CALL_WHOLE_RE = pyRe(`^(?:${DL_SHELL_CALL_SRC})$`);
-export const DL_SHELL_ARG_SRC = String.raw`shell(?<!\wshell)\s*=\s*True`;
-const DL_SHELL_ARG_RE = pyRe(DL_SHELL_ARG_SRC, "g");
-const DL_RUNNER_SHELL = alternatives([...DL_RUNNER_PAIRS, [DL_B, DL_SHELL_CALL_SRC]]);
-// deserializers that run code embedded in the value handed to them (CWE-502)
-const DL_DESERIAL_PAIRS = [
-  [DL_B, String.raw`(?:pickle|cPickle|_pickle|dill|cloudpickle)\.loads?\s*\(`],
-  [DL_B, String.raw`marshal\.loads?\s*\(`], [DL_B, String.raw`jsonpickle\.decode\s*\(`],
-  [DL_B, String.raw`yaml\.load\s*\((?!(?:[^()]|\([^()]*\)){0,400}?(?:SafeLoader|safe_load))`],
-  [DL_B, String.raw`unserialize\s*\(`],
-];
-const DL_DESERIAL = alternatives(DL_DESERIAL_PAIRS);
-// a module named by a received value, loaded dynamically
-const DL_IMPORT_SINK_PAIRS = [
-  [DL_NOT_MEMBER, String.raw`import\s*\(`], [DL_NOT_MEMBER, String.raw`require\s*\(`],
-  [DL_NOT_MEMBER, String.raw`__import__\s*\(`], [DL_B, String.raw`importlib\.import_module\s*\(`],
-  [DL_NOT_MEMBER, String.raw`import_module\s*\(`],
-];
-const DL_IMPORT_SINK = alternatives(DL_IMPORT_SINK_PAIRS);
-// Python's `from mod import (a, b)` is not import(): the bare import( sink is
-// skipped on a from-import line (core._DL_FROM_IMPORT_RE / _DL_BARE_IMPORT_RE)
-export const DL_FROM_IMPORT_SRC = String.raw`^[ \t]*from[ \t]+[\w.]+[ \t]+import\b`;
-const DL_FROM_IMPORT_RE = pyRe(DL_FROM_IMPORT_SRC);
-export const DL_BARE_IMPORT_SRC = String.raw`import\s*\(`;
-const DL_BARE_IMPORT_WHOLE_RE = pyRe(`^(?:${DL_BARE_IMPORT_SRC})$`);
-// runner aliases (core._DL_RUNNER_REF / _DL_ALIAS_RE): a name bound to a direct
-// code-runner reference, so a later call of it is a runner
-const DL_RUNNER_REF =
-  String.raw`require\(\s*["'](?:node:)?child_process["']\s*\)\s*\.\s*execSync` +
-  String.raw`|require\(\s*["'](?:node:)?child_process["']\s*\)\s*\.\s*exec` +
-  String.raw`|(?:child_process|childProcess|cp)\s*\.\s*execSync` +
-  String.raw`|(?:child_process|childProcess|cp)\s*\.\s*exec` +
-  String.raw`|(?:window|globalThis|global|self)\s*\.\s*eval` +
-  String.raw`|vm\s*\.\s*runInThisContext` +
-  String.raw`|(?:os|subprocess)\s*\.\s*(?:system|popen|getstatusoutput|getoutput)` +
-  String.raw`|execSync|execfile|exec|eval|compileFunction|getstatusoutput|getoutput|Function`;
-export const DL_ALIAS_SRC =
-  String.raw`(?<![\w$.])(?P<alias>[A-Za-z_$][\w$]*)\s*=(?![=>])\s*(?:new\s+)?` +
-  String.raw`(?:` + DL_RUNNER_REF + String.raw`)\s*(?![\w$.(\[])`;
-const DL_ALIAS_RE = pyReNamed(DL_ALIAS_SRC, "g");
+const DL_RUNNER = dlGroup("_DL_RUNNER");            // a call that runs its argument as code
+const DL_SHELL_TRUE_RE = dlRe("_DL_SHELL_TRUE_RE");
+const DL_SHELL_CALL_WHOLE_RE = pyRe(`^(?:${DL_SPEC_PATTERNS._DL_SHELL_CALL_RE.src})$`);
+const DL_SHELL_ARG_RE = dlRe("_DL_SHELL_ARG_RE", "g");
+const DL_RUNNER_SHELL = dlGroup("_DL_RUNNER_SHELL");   // ...plus run-family calls, when the file has shell=True
+const DL_DESERIAL = dlGroup("_DL_DESERIAL");        // a deserializer that runs code embedded in its argument (CWE-502)
+const DL_IMPORT_SINK = dlGroup("_DL_IMPORT_SINK");  // a dynamic import of a received specifier
+const DL_FROM_IMPORT_RE = dlRe("_DL_FROM_IMPORT_RE");   // a Python from-import line: skip the bare import( sink there
+const DL_BARE_IMPORT_WHOLE_RE = pyRe(`^(?:${DL_SPEC_PATTERNS._DL_BARE_IMPORT_RE.src})$`);
+const DL_ALIAS_RE = dlReNamed("_DL_ALIAS_RE", "g");    // a runner-alias definition
 export const DL_ALIAS_NEEDLES = DL_SPEC_ARRAYS._DL_ALIAS_NEEDLES;
 export const DL_ALIAS_MAX = DL_SPEC_LIMITS._DL_ALIAS_MAX;
-// download-to-file, then run the file (core's _DL_FILE_WRITE_RE / _DL_PATHRUN_SINK_RE)
-const DL_PATH_TOK = String.raw`[A-Za-z_$][\w$]*|["'][^"'\n]{1,200}["']`;
-export const DL_FILE_WRITE_SRC =
-  String.raw`\b(?:fs\s*\.\s*)?(?:write|append)File(?:Sync)?\s*\(\s*(?P<p1>` + DL_PATH_TOK + String.raw`)\s*,` +
-  String.raw`|\bcreateWriteStream\s*\(\s*(?P<p2>` + DL_PATH_TOK + String.raw`)` +
-  String.raw`|\bopen\s*\(\s*(?P<p3>` + DL_PATH_TOK + String.raw`)\s*,[^)\n]{0,60}?["'][rbtU]*[wax]\+?[rbtU]*["']` +
-  String.raw`|\burlretrieve\s*\(\s*[^,()\n]{1,300},\s*(?P<p4>` + DL_PATH_TOK + String.raw`)\s*\)`;
-const DL_FILE_WRITE_RE = pyReNamed(DL_FILE_WRITE_SRC, "g");
+const DL_FILE_WRITE_RE = dlReNamed("_DL_FILE_WRITE_RE", "g");   // a received value written to a file
 export const DL_FILE_WRITE_NEEDLES = DL_SPEC_ARRAYS._DL_FILE_WRITE_NEEDLES;
-export const DL_PATHRUN_SINK_SRC =
-  String.raw`\b(?:os\.system|os\.startfile|runpy\.run_path)\s*\(` +
-  String.raw`|\b(?:subprocess\s*\.\s*)?(?:run|Popen|call|check_call|check_output)\s*\(` +
-  String.raw`|\b(?:spawn|spawnSync|execFile|execFileSync|fork)\s*\(` +
-  String.raw`|(?<![\w$.])(?:require|import|execfile)\s*\(` +
-  String.raw`|(?<![\w$.])exec\s*\(\s*open\s*\(`;
-const DL_PATHRUN_SINK_RE = pyRe(DL_PATHRUN_SINK_SRC, "g");
+const DL_PATHRUN_SINK_RE = dlRe("_DL_PATHRUN_SINK_RE", "g");    // the opener of a call that runs a path
 export const DL_PATHRUN_NEEDLES = DL_SPEC_ARRAYS._DL_PATHRUN_NEEDLES;
 export const DL_DEFINING = DL_SPEC_ARRAYS._DL_DEFINING;
-const DL_INTERPRETERS = String.raw`(?:node|nodejs|bun|python[\d.]*|pythonw|(?:ba|z|da|k)?sh|perl|ruby|php|pwsh|` +
-  String.raw`powershell|osascript|cmd)(?:\.exe)?`;
-const DL_INLINE_FLAG = String.raw`(?:-(?:e|E|c|p|r|-eval|-print|Command|command|EncodedCommand|enc)|/[cCkK])`;
-const DL_INTERP = alternatives([
-  ["", String.raw`["'${BT}](?:[\w.:~-]*[/\\]){0,8}` + DL_INTERPRETERS + String.raw`["'${BT}]`],
-  [DL_B, String.raw`process\.(?:execPath|argv\[0\])`], [DL_B, String.raw`sys\.executable`],
-], String.raw`\s*,\s*(?:\[\s*)?(?:["'${BT}]-[^"'${BT}\n]{0,40}["'${BT}]\s*,\s*){0,4}?["'${BT}]` + DL_INLINE_FLAG +
-  String.raw`["'${BT}]\s*,\s*`);
-export const DL_EMBED_SRC = String.raw`\s*[rRbBuUfF]{0,2}["'${BT}]\s*(?:[\w.:~-]*[/\\]){0,8}` + DL_INTERPRETERS +
-  String.raw`(?:\s+-[\w-]+){0,6}?\s+` + DL_INLINE_FLAG + String.raw`\b`;
-const DL_EMBED_RE = pyRe(DL_EMBED_SRC, "y");
-export const DL_LEAD_SRC = String.raw`\s*(?:(?:await|yield)\s+|\(\s*){0,50}`;
-const DL_LEAD_RE = pyRe(DL_LEAD_SRC, "y");
-export const DL_CALLEE_SRC =
-  String.raw`(?:new\s+)?(?P<chain>[A-Za-z_$][\w$]*(?:\s*\??\.\s*[A-Za-z_$][\w$]*){0,50})\s*(?P<call>\()?`;
-const DL_CALLEE_RE = pyReNamed(DL_CALLEE_SRC, "y");
+const DL_INTERP = dlGroup("_DL_INTERP");            // an interpreter given inline code as argv
+const DL_EMBED_RE = dlRe("_DL_EMBED_RE", "y");      // ...or written into its command line
+const DL_LEAD_RE = dlRe("_DL_LEAD_RE", "y");
+const DL_CALLEE_RE = dlReNamed("_DL_CALLEE_RE", "y");
 export const DL_CALLEE_CHARS = [...DL_SPEC_CHARS._DL_CALLEE_CHARS];
 const CALLEE_CHAR_SET = new Set(DL_CALLEE_CHARS);
-export const DL_BRACKET_SRC = String.raw`[()\[\]{},]`;
 
 /** The names an assignment's left side binds (a member chain stays whole). core._dl_lhs_names. */
 function lhsNames(lhs) {
@@ -1095,25 +979,25 @@ export function downloadsAndRunsFile(text) {
   return null;
 }
 
-/** core's pattern text for the twins above (held to core's by tests/architecture/test_js_parity_hooks.py). */
-export const RECEIVED_TWINS = {
-  _DL_SOURCE_RE: [DL_SOURCE_SRC, ""], _DL_SOURCE_CANDIDATE_RE: [DL_SOURCE.candSrc, ""],
-  _DL_RUNNER_RE: [DL_RUNNER.exactSrc, ""], _DL_RUNNER_CANDIDATE_RE: [DL_RUNNER.candSrc, ""],
-  _DL_RUNNER_SHELL_RE: [DL_RUNNER_SHELL.exactSrc, ""], _DL_RUNNER_SHELL_CANDIDATE_RE: [DL_RUNNER_SHELL.candSrc, ""],
-  _DL_INTERP_RE: [DL_INTERP.exactSrc, ""], _DL_INTERP_CANDIDATE_RE: [DL_INTERP.candSrc, ""],
-  _DL_MODULE_VALUE_RE: [DL_MODULE_VALUE_SRC, ""],
-  _DL_FUNCTION_VALUE_RE: [DL_FUNCTION_VALUE_SRC, ""], _DL_IMPORT_RE: [DL_IMPORT_SRC, ""],
-  _DL_CHAIN_RE: [DL_CHAIN_SRC, ""], _DL_HEAD_RE: [DL_HEAD_SRC, ""], _DL_WORD_RUN_RE: [DL_WORD_RUN_SRC, ""],
-  _DL_STR_RE: [DL_STR_SRC, ""],
-  _DL_TEMPLATE_HOLE_RE: [DL_TEMPLATE_HOLE_SRC, ""], _DL_FSTRING_HOLE_RE: [DL_FSTRING_HOLE_SRC, ""],
-  _DL_BIND_RE: [DL_BIND_SRC, ""], _DL_PARAMS_RE: [DL_PARAMS_SRC, ""], _DL_FN_HEADER_RE: [DL_FN_HEADER_SRC, ""],
-  _DL_NAME_RE: [DL_NAME_SRC, ""], _DL_DEFAULT_RE: [DL_DEFAULT_SRC, ""], _DL_DOT_RE: [DL_DOT_SRC, ""],
-  _DL_SHELL_TRUE_RE: [DL_SHELL_TRUE_SRC, ""], _DL_SHELL_CALL_RE: [DL_SHELL_CALL_SRC, ""],
-  _DL_SHELL_ARG_RE: [DL_SHELL_ARG_SRC, ""], _DL_BRACKET_RE: [DL_BRACKET_SRC, ""],
-  _DL_EMBED_RE: [DL_EMBED_SRC, ""], _DL_LEAD_RE: [DL_LEAD_SRC, ""], _DL_CALLEE_RE: [DL_CALLEE_SRC, ""],
-  _DL_DESERIAL_RE: [DL_DESERIAL.exactSrc, ""], _DL_DESERIAL_CANDIDATE_RE: [DL_DESERIAL.candSrc, ""],
-  _DL_IMPORT_SINK_RE: [DL_IMPORT_SINK.exactSrc, ""], _DL_IMPORT_SINK_CANDIDATE_RE: [DL_IMPORT_SINK.candSrc, ""],
-  _DL_ALIAS_RE: [DL_ALIAS_SRC, ""],
-  _DL_FILE_WRITE_RE: [DL_FILE_WRITE_SRC, ""], _DL_PATHRUN_SINK_RE: [DL_PATHRUN_SINK_SRC, ""],
-  _DL_FROM_IMPORT_RE: [DL_FROM_IMPORT_SRC, ""], _DL_BARE_IMPORT_RE: [DL_BARE_IMPORT_SRC, ""],
+/**
+ * core's pattern text for the received-code twins, built from the shared spec:
+ * every plain pattern by name, then each alternative group's exact and candidate
+ * forms (core._DL_<group>_RE / _CANDIDATE_RE). The parity test compiles core's
+ * regex of the same name and compares .pattern and flags exactly, so the source
+ * here is the spec's — the one both engines compile from
+ * (tests/architecture/test_js_parity_hooks.py).
+ */
+const DL_TWIN_FLAGS = (f) => (f.includes("i") ? "i" : "") + (f.includes("m") ? "m" : "");
+const DL_TWIN_GROUPS = {
+  _DL_SOURCE: DL_SOURCE, _DL_RUNNER: DL_RUNNER, _DL_RUNNER_SHELL: DL_RUNNER_SHELL,
+  _DL_DESERIAL: DL_DESERIAL, _DL_IMPORT_SINK: DL_IMPORT_SINK, _DL_INTERP: DL_INTERP,
 };
+export const RECEIVED_TWINS = (() => {
+  const twins = {};
+  for (const [name, p] of Object.entries(DL_SPEC_PATTERNS)) twins[name] = [p.src, DL_TWIN_FLAGS(p.flags || "")];
+  for (const [name, g] of Object.entries(DL_TWIN_GROUPS)) {
+    twins[name + "_RE"] = [g.exactSrc, ""];
+    twins[name + "_CANDIDATE_RE"] = [g.candSrc, ""];
+  }
+  return twins;
+})();

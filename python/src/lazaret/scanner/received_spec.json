@@ -1,5 +1,5 @@
 {
-  "$comment": "Source of truth for the received-code detector's shared data (name sets, character sets, limits), loaded by both the Python core (scanner/core.py) and the npm engine (js/src/lib/received.js). Edit this file, then run scripts/sync-received-spec.py to update the npm copy (js/src/lib/received-spec.json); tests/architecture/test_received_spec.py fails if the copies drift. Patterns are not here yet (slice 2).",
+  "$comment": "Source of truth for the received-code detector's shared data (name sets, character sets, limits, and the patterns: plain regexes and alternative groups built from [assertion, body] pairs), loaded and compiled by both the Python core (scanner/core.py) and the npm engine (js/src/lib/received.js). Edit this file, then run scripts/sync-received-spec.py to update the npm copy (js/src/lib/received-spec.json); tests/architecture/test_received_spec.py fails if the copies drift.",
   "arrays": {
     "_DL_NEEDLES": [
       "urlopen",
@@ -174,5 +174,376 @@
     "_DL_NAMED_SEARCHES": 64,
     "_DL_PHASES": 8,
     "_DL_ALIAS_MAX": 64
+  },
+  "patterns": {
+    "_DL_MODULE_VALUE_RE": {
+      "src": "\\s*(?:await\\s+)?(?:require|import)\\(\\s*[\"'](?:node:)?(?:https?|net|tls|axios|got|node-fetch|undici|ws)[\"']\\s*\\)\\s*(?:;\\s*)?$",
+      "flags": "",
+      "note": "a name bound to a network module (const https = require('https'))"
+    },
+    "_DL_FUNCTION_VALUE_RE": {
+      "src": "\\s*(?:async\\s*)?(?:function\\b|\\([^()]{0,200}\\)\\s*=>|[A-Za-z_$][\\w$]*\\s*=>)",
+      "flags": "",
+      "note": "a name bound to a function value (const load = (u) => fetch(u))"
+    },
+    "_DL_IMPORT_RE": {
+      "src": "^[ \\t]*import[ \\t]+(?P<py>[\\w.,]+(?:[ \\t]+[\\w.,]+)*)[ \\t]*$|^[ \\t]*from[ \\t]+(?:requests|httpx|urllib\\.request|socket)[ \\t]+import[ \\t]+(?:\\([ \\t]*)?(?P<pyfrom>[\\w,]+(?:[ \\t]+[\\w,]+)*)[ \\t]*\\)?[ \\t]*$|\\bimport\\s+(?:\\*\\s+as\\s+)?(?P<es>[A-Za-z_$][\\w$]*)\\s+from\\s+[\"'](?:node:)?(?:https?|net|tls|axios|got|node-fetch|undici|ws)[\"']|\\bimport\\s*\\{(?P<esn>[^{}]{0,200})\\}\\s*from\\s+[\"'](?:node:)?(?:https?|net|tls|axios|got|node-fetch|undici|ws)[\"']",
+      "flags": "",
+      "note": "network modules imported under a name (import requests as rq)"
+    },
+    "_DL_CHAIN_RE": {
+      "src": "(?<![\\w$.])[A-Za-z_$][\\w$]*(?:\\s*\\??\\.\\s*[A-Za-z_$][\\w$]*){0,50}",
+      "flags": "",
+      "note": "a member chain (r, r.text, a.b.c)"
+    },
+    "_DL_HEAD_RE": {
+      "src": "(?<![\\w$.])[A-Za-z_$][\\w$]*",
+      "flags": "",
+      "note": "a chain's first name"
+    },
+    "_DL_WORD_RUN_RE": {
+      "src": "[\\w$]+",
+      "flags": "",
+      "note": "a run of word characters (a name, for the names index)"
+    },
+    "_DL_STR_RE": {
+      "src": "\\\"(?:\\\\.|[^\\\"\\\\])*\\\"|'(?:\\\\.|[^'\\\\])*'|`(?:\\\\.|[^`\\\\])*`",
+      "flags": "",
+      "note": "a string literal (single, double or template)"
+    },
+    "_DL_TEMPLATE_HOLE_RE": {
+      "src": "\\$\\{([^{}]*)\\}",
+      "flags": "",
+      "note": "a template literal's ${...} interpolation"
+    },
+    "_DL_FSTRING_HOLE_RE": {
+      "src": "(?<!\\{)\\{([^{}]*)\\}",
+      "flags": "",
+      "note": "an f-string's {...} interpolation"
+    },
+    "_DL_BIND_RE": {
+      "src": "(?P<ann>(?<![\\w$.])[A-Za-z_$][\\w$]*)\\s*:\\s*[\\w$.\\[\\], |]{1,80}?\\s*=(?![=>])|(?P<lhs>(?<![\\w$.])[A-Za-z_$][\\w$]*(?:\\s*\\.\\s*[A-Za-z_$][\\w$]*){0,8}(?:\\s*,\\s*[A-Za-z_$][\\w$]*){0,8}|\\{[^{}()=;]{0,200}\\}|\\[[^\\[\\]()=;]{0,200}\\])\\s*(?:\\+|\\|\\||\\?\\?)?=(?![=>])|\\bas\\s+(?P<with>[A-Za-z_]\\w*)\\s*[:,)]|\\bfor\\s*(?:\\(\\s*)?(?:(?:const|let|var)\\s+)?(?P<for>[A-Za-z_$][\\w$]*(?:\\s*,\\s*[A-Za-z_$][\\w$]*){0,8}|\\{[^{}]{0,200}\\}|\\[[^\\[\\]]{0,200}\\])\\s+(?:of|in)\\b|\\breturn\\b(?P<ret>)",
+      "flags": "",
+      "note": "what a row binds: assignment, with-as, for, return"
+    },
+    "_DL_PARAMS_RE": {
+      "src": "\\bfunction\\b\\s*(?:[\\w$]+\\s*)?\\((?P<fp>[^()]{0,200})\\)|\\((?P<ap>[^()]{0,200})\\)\\s*=>|(?<![\\w$.])(?P<one>[A-Za-z_$][\\w$]*)\\s*=>|\\blambda\\b(?P<lp>[^:()]{0,200}):",
+      "flags": "",
+      "note": "a function's parameters (function (res) {, (res) =>, lambda res:)"
+    },
+    "_DL_FN_HEADER_RE": {
+      "src": "^\\s*(?:async\\s+)?def\\s+(?P<py>\\w+)|\\bfunction\\s*(?:\\*\\s*)?(?P<js>[A-Za-z_$][\\w$]*)\\s*\\(|\\b(?:const|let|var)\\s+(?P<var>[A-Za-z_$][\\w$]*)\\s*=\\s*(?:async\\s*)?(?:function\\b|\\([^()]{0,200}\\)\\s*=>|[A-Za-z_$][\\w$]*\\s*=>)",
+      "flags": "",
+      "note": "a function header (def name, function name, const name = ...)"
+    },
+    "_DL_NAME_RE": {
+      "src": "[A-Za-z_$][\\w$]*",
+      "flags": "",
+      "note": "an identifier"
+    },
+    "_DL_DEFAULT_RE": {
+      "src": "=[^,]*",
+      "flags": "",
+      "note": "a parameter default (=... up to a comma)"
+    },
+    "_DL_DOT_RE": {
+      "src": "\\s*\\??\\.\\s*",
+      "flags": "",
+      "note": "a member-access dot with optional chaining/space"
+    },
+    "_DL_SHELL_TRUE_RE": {
+      "src": "\\bshell\\s*=\\s*True\\b",
+      "flags": "",
+      "note": "shell=True anywhere"
+    },
+    "_DL_SHELL_CALL_RE": {
+      "src": "(?:run|call|Popen|check_output|check_call)\\s*\\(",
+      "flags": "",
+      "note": "a subprocess run-family call (needs shell=True to fire)"
+    },
+    "_DL_SHELL_ARG_RE": {
+      "src": "shell(?<!\\wshell)\\s*=\\s*True",
+      "flags": "",
+      "note": "a shell=True argument (first 'shell', then a boundary)"
+    },
+    "_DL_BRACKET_RE": {
+      "src": "[()\\[\\]{},]",
+      "flags": "",
+      "note": "any bracket or comma (for the one-pass bracket match)"
+    },
+    "_DL_EMBED_RE": {
+      "src": "\\s*[rRbBuUfF]{0,2}[\"'`]\\s*(?:[\\w.:~-]*[/\\\\]){0,8}(?:node|nodejs|bun|python[\\d.]*|pythonw|(?:ba|z|da|k)?sh|perl|ruby|php|pwsh|powershell|osascript|cmd)(?:\\.exe)?(?:\\s+-[\\w-]+){0,6}?\\s+(?:-(?:e|E|c|p|r|-eval|-print|Command|command|EncodedCommand|enc)|/[cCkK])\\b",
+      "flags": "",
+      "note": "an interpreter with an inline-code flag written into a command line"
+    },
+    "_DL_LEAD_RE": {
+      "src": "\\s*(?:(?:await|yield)\\s+|\\(\\s*){0,50}",
+      "flags": "",
+      "note": "leading whitespace, await/yield and open parens before a value"
+    },
+    "_DL_CALLEE_RE": {
+      "src": "(?:new\\s+)?(?P<chain>[A-Za-z_$][\\w$]*(?:\\s*\\??\\.\\s*[A-Za-z_$][\\w$]*){0,50})\\s*(?P<call>\\()?",
+      "flags": "",
+      "note": "a callee chain, optionally called"
+    },
+    "_DL_ALIAS_RE": {
+      "src": "(?<![\\w$.])(?P<alias>[A-Za-z_$][\\w$]*)\\s*=(?![=>])\\s*(?:new\\s+)?(?:require\\(\\s*[\"'](?:node:)?child_process[\"']\\s*\\)\\s*\\.\\s*execSync|require\\(\\s*[\"'](?:node:)?child_process[\"']\\s*\\)\\s*\\.\\s*exec|(?:child_process|childProcess|cp)\\s*\\.\\s*execSync|(?:child_process|childProcess|cp)\\s*\\.\\s*exec|(?:window|globalThis|global|self)\\s*\\.\\s*eval|vm\\s*\\.\\s*runInThisContext|(?:os|subprocess)\\s*\\.\\s*(?:system|popen|getstatusoutput|getoutput)|execSync|execfile|exec|eval|compileFunction|getstatusoutput|getoutput|Function)\\s*(?![\\w$.(\\[])",
+      "flags": "",
+      "note": "a runner-alias definition (name = a direct code-runner reference)"
+    },
+    "_DL_FILE_WRITE_RE": {
+      "src": "\\b(?:fs\\s*\\.\\s*)?(?:write|append)File(?:Sync)?\\s*\\(\\s*(?P<p1>[A-Za-z_$][\\w$]*|[\"'][^\"'\\n]{1,200}[\"'])\\s*,|\\bcreateWriteStream\\s*\\(\\s*(?P<p2>[A-Za-z_$][\\w$]*|[\"'][^\"'\\n]{1,200}[\"'])|\\bopen\\s*\\(\\s*(?P<p3>[A-Za-z_$][\\w$]*|[\"'][^\"'\\n]{1,200}[\"'])\\s*,[^)\\n]{0,60}?[\"'][rbtU]*[wax]\\+?[rbtU]*[\"']|\\burlretrieve\\s*\\(\\s*[^,()\\n]{1,300},\\s*(?P<p4>[A-Za-z_$][\\w$]*|[\"'][^\"'\\n]{1,200}[\"'])\\s*\\)",
+      "flags": "",
+      "note": "a received value written to a file, naming the path"
+    },
+    "_DL_PATHRUN_SINK_RE": {
+      "src": "\\b(?:os\\.system|os\\.startfile|runpy\\.run_path)\\s*\\(|\\b(?:subprocess\\s*\\.\\s*)?(?:run|Popen|call|check_call|check_output)\\s*\\(|\\b(?:spawn|spawnSync|execFile|execFileSync|fork)\\s*\\(|(?<![\\w$.])(?:require|import|execfile)\\s*\\(|(?<![\\w$.])exec\\s*\\(\\s*open\\s*\\(",
+      "flags": "",
+      "note": "the opener of a call that runs a path"
+    },
+    "_DL_FROM_IMPORT_RE": {
+      "src": "^[ \\t]*from[ \\t]+[\\w.]+[ \\t]+import\\b",
+      "flags": "",
+      "note": "a Python from-import line (excludes the import() sink)"
+    },
+    "_DL_BARE_IMPORT_RE": {
+      "src": "import\\s*\\(",
+      "flags": "",
+      "note": "the bare import( dynamic-import sink"
+    }
+  },
+  "alternatives": {
+    "_DL_SOURCE": {
+      "pairs": [
+        [
+          "\\b",
+          "urlopen\\s*\\("
+        ],
+        [
+          "\\b",
+          "requests\\.(?:get|post|put|request|Session)\\s*\\("
+        ],
+        [
+          "\\b",
+          "httpx\\.(?:get|post|request|stream|Client|AsyncClient)\\s*\\("
+        ],
+        [
+          "\\b",
+          "urllib3\\.PoolManager\\s*\\("
+        ],
+        [
+          "\\b",
+          "HTTPS?Connection\\s*\\("
+        ],
+        [
+          "\\b",
+          "aiohttp\\.ClientSession\\s*\\("
+        ],
+        [
+          "\\b",
+          "socket\\.(?:socket|create_connection)\\s*\\("
+        ],
+        [
+          "(?<![\\w$.])",
+          "fetch\\s*\\("
+        ],
+        [
+          "\\b",
+          "(?:window|globalThis|self|global)\\.fetch\\s*\\("
+        ],
+        [
+          "\\b",
+          "https?\\.(?:get|request|createServer)\\s*\\("
+        ],
+        [
+          "\\b",
+          "(?:net|tls)\\.(?:connect|createConnection|createServer)\\s*\\("
+        ],
+        [
+          "\\b",
+          "new\\s+(?:net\\.Socket|WebSocket|XMLHttpRequest)\\b"
+        ],
+        [
+          "\\b",
+          "require\\(\\s*[\"'](?:node:)?(?:https?|net|tls|axios|got|node-fetch|undici|ws)[\"']\\s*\\)"
+        ],
+        [
+          "\\b",
+          "axios(?:\\.(?:get|post|request))?\\s*\\("
+        ],
+        [
+          "(?<![\\w$.])",
+          "got(?:\\.(?:get|post))?\\s*\\("
+        ],
+        [
+          "\\b",
+          "undici\\.(?:request|fetch)\\s*\\("
+        ],
+        [
+          "\\b",
+          "(?:execSync|execFileSync|spawnSync|check_output|getoutput|getstatusoutput|popen|run)\\s*\\(\\s*(?:\\[\\s*)?[\"'`]\\s*(?:curl|wget)\\b"
+        ]
+      ],
+      "note": "a value received over the network, or the client/socket/server receiving it"
+    },
+    "_DL_RUNNER": {
+      "pairs": [
+        [
+          "(?<![\\w$.])",
+          "(?:eval|exec|execfile)\\s*\\("
+        ],
+        [
+          "\\b",
+          "(?:window|globalThis|global|self)\\.eval\\s*\\("
+        ],
+        [
+          "\\b",
+          "new\\s+Function\\s*\\("
+        ],
+        [
+          "(?<![\\w$.])",
+          "Function\\s*\\("
+        ],
+        [
+          "\\b",
+          "runIn(?:This|New)?Context\\s*\\("
+        ],
+        [
+          "\\b",
+          "new\\s+vm\\.Script\\s*\\("
+        ],
+        [
+          "\\b",
+          "compileFunction\\s*\\("
+        ],
+        [
+          "(?<=\\.)",
+          "_compile\\s*\\("
+        ],
+        [
+          "\\b",
+          "execSync\\s*\\("
+        ],
+        [
+          "\\b",
+          "(?:child_process|childProcess|cp)\\.exec\\s*\\("
+        ],
+        [
+          "\\b",
+          "require\\(\\s*[\"'](?:node:)?child_process[\"']\\s*\\)\\.exec\\s*\\("
+        ],
+        [
+          "\\b",
+          "os\\.(?:system|popen)\\s*\\("
+        ],
+        [
+          "\\b",
+          "__import__\\(\\s*[\"']os[\"']\\s*\\)\\.(?:system|popen)\\s*\\("
+        ],
+        [
+          "(?<![\\w$.])",
+          "(?:system|popen)\\s*\\("
+        ],
+        [
+          "\\b",
+          "(?:subprocess\\.)?get(?:status)?output\\s*\\("
+        ],
+        [
+          "",
+          "\\(\\s*(?:void\\s+)?[\\w$.]+\\s*,\\s*(?:(?:window|globalThis|self|global|top|parent|frames)\\s*\\.\\s*)?(?:eval|Function)\\s*\\)\\s*\\("
+        ],
+        [
+          "\\b",
+          "(?:eval|Function)\\s*\\.\\s*call\\s*\\("
+        ],
+        [
+          "\\b",
+          "(?:eval|Function)\\s*\\.\\s*bind\\s*\\([^()]*\\)\\s*\\("
+        ],
+        [
+          "",
+          "\\[\\s*['\\\"`](?:e(?:['\\\"`]\\s*\\+\\s*['\\\"`])?v(?:['\\\"`]\\s*\\+\\s*['\\\"`])?a(?:['\\\"`]\\s*\\+\\s*['\\\"`])?l|F(?:['\\\"`]\\s*\\+\\s*['\\\"`])?u(?:['\\\"`]\\s*\\+\\s*['\\\"`])?n(?:['\\\"`]\\s*\\+\\s*['\\\"`])?c(?:['\\\"`]\\s*\\+\\s*['\\\"`])?t(?:['\\\"`]\\s*\\+\\s*['\\\"`])?i(?:['\\\"`]\\s*\\+\\s*['\\\"`])?o(?:['\\\"`]\\s*\\+\\s*['\\\"`])?n)['\\\"`]\\s*\\]\\s*\\("
+        ]
+      ],
+      "note": "a call that runs its argument as code (eval/exec/Function/vm/child_process, indirect eval)"
+    },
+    "_DL_RUNNER_SHELL": {
+      "extends": "_DL_RUNNER",
+      "pairs": [
+        [
+          "\\b",
+          "(?:run|call|Popen|check_output|check_call)\\s*\\("
+        ]
+      ],
+      "note": "the runners plus subprocess run-family calls (used when the file has shell=True)"
+    },
+    "_DL_DESERIAL": {
+      "pairs": [
+        [
+          "\\b",
+          "(?:pickle|cPickle|_pickle|dill|cloudpickle)\\.loads?\\s*\\("
+        ],
+        [
+          "\\b",
+          "marshal\\.loads?\\s*\\("
+        ],
+        [
+          "\\b",
+          "jsonpickle\\.decode\\s*\\("
+        ],
+        [
+          "\\b",
+          "yaml\\.load\\s*\\((?!(?:[^()]|\\([^()]*\\)){0,400}?(?:SafeLoader|safe_load))"
+        ],
+        [
+          "\\b",
+          "unserialize\\s*\\("
+        ]
+      ],
+      "note": "a deserializer that runs code embedded in its argument (CWE-502)"
+    },
+    "_DL_IMPORT_SINK": {
+      "pairs": [
+        [
+          "(?<![\\w$.])",
+          "import\\s*\\("
+        ],
+        [
+          "(?<![\\w$.])",
+          "require\\s*\\("
+        ],
+        [
+          "(?<![\\w$.])",
+          "__import__\\s*\\("
+        ],
+        [
+          "\\b",
+          "importlib\\.import_module\\s*\\("
+        ],
+        [
+          "(?<![\\w$.])",
+          "import_module\\s*\\("
+        ]
+      ],
+      "note": "a dynamic import of a received module specifier"
+    },
+    "_DL_INTERP": {
+      "pairs": [
+        [
+          "",
+          "[\"'`](?:[\\w.:~-]*[/\\\\]){0,8}(?:node|nodejs|bun|python[\\d.]*|pythonw|(?:ba|z|da|k)?sh|perl|ruby|php|pwsh|powershell|osascript|cmd)(?:\\.exe)?[\"'`]"
+        ],
+        [
+          "\\b",
+          "process\\.(?:execPath|argv\\[0\\])"
+        ],
+        [
+          "\\b",
+          "sys\\.executable"
+        ]
+      ],
+      "tail": "\\s*,\\s*(?:\\[\\s*)?(?:[\"'`]-[^\"'`\\n]{0,40}[\"'`]\\s*,\\s*){0,4}?[\"'`](?:-(?:e|E|c|p|r|-eval|-print|Command|command|EncodedCommand|enc)|/[cCkK])[\"'`]\\s*,\\s*",
+      "note": "an interpreter given inline code as argv ('node','-e',CODE)"
+    }
   }
 }

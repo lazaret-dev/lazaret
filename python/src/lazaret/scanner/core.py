@@ -4892,8 +4892,8 @@ def _runs_download_through_shell(row):
 # are read. A row is read in one pass over its brackets, and no pattern
 # backtracks more than a bounded amount, so a text costs about one pass over
 # it whatever it holds: a large bundle, or a text built to make the follower
-# work.
-_DL_B, _DL_NOT_MEMBER = r"\b", r"(?<![\w$.])"
+# work. The patterns and name sets live in received_spec.json (see the loader
+# below); the assertions in its alternative pairs are literal (\b, (?<![\w$.])).
 
 
 def _dl_alternatives(pairs, tail=""):
@@ -4933,199 +4933,94 @@ def _dl_finditer(pair, row, pos=0, endpos=None):
 with open(os.path.join(os.path.dirname(__file__), "received_spec.json"), encoding="utf-8") as _dl_spec_f:
     _DL_SPEC = json.load(_dl_spec_f)
 _DL_SPEC_ARRAYS, _DL_SPEC_CHARS, _DL_SPEC_LIMITS = _DL_SPEC["arrays"], _DL_SPEC["charstrings"], _DL_SPEC["limits"]
+_DL_SPEC_PATTERNS, _DL_SPEC_ALTS = _DL_SPEC["patterns"], _DL_SPEC["alternatives"]
+_DL_RE_FLAGS = {"i": re.I, "m": re.M, "s": re.S}
 
-_DL_NET_MODULES = r"""(?:node:)?(?:https?|net|tls|axios|got|node-fetch|undici|ws)"""
-# a value received over the network, or the client, socket or server receiving it
-_DL_SOURCE = _dl_alternatives([
-    # Python
-    (_DL_B, r"""urlopen\s*\("""), (_DL_B, r"""requests\.(?:get|post|put|request|Session)\s*\("""),
-    (_DL_B, r"""httpx\.(?:get|post|request|stream|Client|AsyncClient)\s*\("""), (_DL_B, r"""urllib3\.PoolManager\s*\("""),
-    (_DL_B, r"""HTTPS?Connection\s*\("""), (_DL_B, r"""aiohttp\.ClientSession\s*\("""),
-    (_DL_B, r"""socket\.(?:socket|create_connection)\s*\("""),
-    # JavaScript
-    (_DL_NOT_MEMBER, r"""fetch\s*\("""), (_DL_B, r"""(?:window|globalThis|self|global)\.fetch\s*\("""),
-    (_DL_B, r"""https?\.(?:get|request|createServer)\s*\("""),
-    (_DL_B, r"""(?:net|tls)\.(?:connect|createConnection|createServer)\s*\("""),
-    (_DL_B, r"""new\s+(?:net\.Socket|WebSocket|XMLHttpRequest)\b"""),
-    (_DL_B, r"""require\(\s*["']""" + _DL_NET_MODULES + r"""["']\s*\)"""),
-    (_DL_B, r"""axios(?:\.(?:get|post|request))?\s*\("""), (_DL_NOT_MEMBER, r"""got(?:\.(?:get|post))?\s*\("""),
-    (_DL_B, r"""undici\.(?:request|fetch)\s*\("""),
-    # a download tool's output, captured
-    (_DL_B, r"""(?:execSync|execFileSync|spawnSync|check_output|getoutput|getstatusoutput|popen|run)"""
-         r"""\s*\(\s*(?:\[\s*)?["'`]\s*(?:curl|wget)\b"""),
-])
-_DL_SOURCE_RE, _DL_SOURCE_CANDIDATE_RE = _DL_SOURCE
-# Every source match, and every import of a network module, holds one of these:
-# only the rows holding one are read (and a text with none is not).
+
+def _dl_flags(spec):
+    f = 0
+    for ch in spec:
+        f |= _DL_RE_FLAGS[ch]
+    return f
+
+
+def _dl_re(name):
+    """A plain received-code pattern, compiled from the spec."""
+    p = _DL_SPEC_PATTERNS[name]
+    return re.compile(p["src"], _dl_flags(p["flags"]))
+
+
+def _dl_group(name):
+    """An (exact, candidate) alternative pair built from the spec (see
+    _dl_alternatives); `extends` prepends another group's pairs."""
+    g = _DL_SPEC_ALTS[name]
+    base = _DL_SPEC_ALTS[g["extends"]]["pairs"] if "extends" in g else []
+    pairs = [tuple(pr) for pr in list(base) + g["pairs"]]
+    return _dl_alternatives(pairs, g.get("tail", ""))
+
+
 # Every source match, and every import of a network module, holds a network
 # needle; every runner a run needle; a deserializer a deserial needle
 # (pickle / marshal / a full yaml.load / node-serialize unserialize, CWE-502);
 # a dynamic import an import needle (import(x), require(x), __import__(x),
-# importlib.import_module(x)). Only rows holding one are read (see the spec).
+# importlib.import_module(x)). Only rows holding one are read. The patterns and
+# name sets are the spec's; the notes there say what each matches.
+_DL_SOURCE = _dl_group("_DL_SOURCE")            # a value received over the network
+_DL_SOURCE_RE, _DL_SOURCE_CANDIDATE_RE = _DL_SOURCE
 _DL_NEEDLES = tuple(_DL_SPEC_ARRAYS["_DL_NEEDLES"])
 _DL_NEEDLE_RE = re.compile("|".join(re.escape(n) for n in sorted(_DL_NEEDLES, key=lambda n: (-len(n), n))))
 _DL_RUN_NEEDLES = tuple(_DL_SPEC_ARRAYS["_DL_RUN_NEEDLES"])
 _DL_DESERIAL_NEEDLES = tuple(_DL_SPEC_ARRAYS["_DL_DESERIAL_NEEDLES"])
 _DL_IMPORT_NEEDLES = tuple(_DL_SPEC_ARRAYS["_DL_IMPORT_NEEDLES"])
-# the file-level gate is a network name and any sink needle
-_DL_SINK_NEEDLES = _DL_RUN_NEEDLES + _DL_DESERIAL_NEEDLES + _DL_IMPORT_NEEDLES
-# a name bound to a network module (const https = require('https')), or to a
-# function (const load = (u) => fetch(u)): it carries the network anywhere
-_DL_MODULE_VALUE_RE = re.compile(
-    r"""\s*(?:await\s+)?(?:require|import)\(\s*["']""" + _DL_NET_MODULES + r"""["']\s*\)\s*(?:;\s*)?$""")
-_DL_FUNCTION_VALUE_RE = re.compile(
-    r"""\s*(?:async\s*)?(?:function\b|\([^()]{0,200}\)\s*=>|[A-Za-z_$][\w$]*\s*=>)""")
-# network modules imported under a name: import requests as rq, import * as https from 'https'
-_DL_IMPORT_RE = re.compile(
-    r"""^[ \t]*import[ \t]+(?P<py>[\w.,]+(?:[ \t]+[\w.,]+)*)[ \t]*$"""
-    r"""|^[ \t]*from[ \t]+(?:requests|httpx|urllib\.request|socket)[ \t]+import[ \t]+(?:\([ \t]*)?"""
-    r"""(?P<pyfrom>[\w,]+(?:[ \t]+[\w,]+)*)[ \t]*\)?[ \t]*$"""
-    r"""|\bimport\s+(?:\*\s+as\s+)?(?P<es>[A-Za-z_$][\w$]*)\s+from\s+["']""" + _DL_NET_MODULES + r"""["']"""
-    r"""|\bimport\s*\{(?P<esn>[^{}]{0,200})\}\s*from\s+["']""" + _DL_NET_MODULES + r"""["']""")
+_DL_SINK_NEEDLES = _DL_RUN_NEEDLES + _DL_DESERIAL_NEEDLES + _DL_IMPORT_NEEDLES   # the file-level gate
+_DL_MODULE_VALUE_RE = _dl_re("_DL_MODULE_VALUE_RE")
+_DL_FUNCTION_VALUE_RE = _dl_re("_DL_FUNCTION_VALUE_RE")
+_DL_IMPORT_RE = _dl_re("_DL_IMPORT_RE")
 _DL_PY_NET_MODULES = frozenset(_DL_SPEC_ARRAYS["_DL_PY_NET_MODULES"])
 _DL_LONG_ROW = _DL_SPEC_LIMITS["_DL_LONG_ROW"]
 _DL_WINDOW = _DL_SPEC_LIMITS["_DL_WINDOW"]
 _DL_ARG_SPAN = _DL_SPEC_LIMITS["_DL_ARG_SPAN"]
 _DL_LOOKBACK = _DL_SPEC_LIMITS["_DL_LOOKBACK"]
-# names looked up by a search of the text each; the rest from an index of its names
-_DL_NAMED_SEARCHES = _DL_SPEC_LIMITS["_DL_NAMED_SEARCHES"]
-# readings of a row's quotes begun at a call's '(' (see _DlRow)
-_DL_PHASES = _DL_SPEC_LIMITS["_DL_PHASES"]
-_DL_CHAIN_RE = re.compile(r"""(?<![\w$.])[A-Za-z_$][\w$]*(?:\s*\??\.\s*[A-Za-z_$][\w$]*){0,50}""")
-# a chain's first name, as _DL_CHAIN_RE starts one
-_DL_HEAD_RE = re.compile(r"""(?<![\w$.])[A-Za-z_$][\w$]*""")
-_DL_WORD_RUN_RE = re.compile(r"""[\w$]+""")
-_DL_STR_RE = re.compile(r"""\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`""")
-# what a template literal or an f-string interpolates
-_DL_TEMPLATE_HOLE_RE = re.compile(r"""\$\{([^{}]*)\}""")
-_DL_FSTRING_HOLE_RE = re.compile(r"""(?<!\{)\{([^{}]*)\}""")
+_DL_NAMED_SEARCHES = _DL_SPEC_LIMITS["_DL_NAMED_SEARCHES"]   # names looked up by a search each; the rest via an index
+_DL_PHASES = _DL_SPEC_LIMITS["_DL_PHASES"]                   # readings of a row's quotes begun at a call's '('
+_DL_CHAIN_RE = _dl_re("_DL_CHAIN_RE")
+_DL_HEAD_RE = _dl_re("_DL_HEAD_RE")
+_DL_WORD_RUN_RE = _dl_re("_DL_WORD_RUN_RE")
+_DL_STR_RE = _dl_re("_DL_STR_RE")
+_DL_TEMPLATE_HOLE_RE = _dl_re("_DL_TEMPLATE_HOLE_RE")
+_DL_FSTRING_HOLE_RE = _dl_re("_DL_FSTRING_HOLE_RE")
 _DL_PREFIX_CHARS = frozenset(_DL_SPEC_CHARS["_DL_PREFIX_CHARS"])
-# what a row binds: an annotated or plain assignment (destructuring too), a
-# `with … as` name, a `for` variable, a `return`
-_DL_BIND_RE = re.compile(
-    r"""(?P<ann>(?<![\w$.])[A-Za-z_$][\w$]*)\s*:\s*[\w$.\[\], |]{1,80}?\s*=(?![=>])"""
-    r"""|(?P<lhs>(?<![\w$.])[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*){0,8}(?:\s*,\s*[A-Za-z_$][\w$]*){0,8}"""
-    r"""|\{[^{}()=;]{0,200}\}|\[[^\[\]()=;]{0,200}\])\s*(?:\+|\|\||\?\?)?=(?![=>])"""
-    r"""|\bas\s+(?P<with>[A-Za-z_]\w*)\s*[:,)]"""
-    r"""|\bfor\s*(?:\(\s*)?(?:(?:const|let|var)\s+)?(?P<for>[A-Za-z_$][\w$]*(?:\s*,\s*[A-Za-z_$][\w$]*){0,8}"""
-    r"""|\{[^{}]{0,200}\}|\[[^\[\]]{0,200}\])\s+(?:of|in)\b"""
-    r"""|\breturn\b(?P<ret>)""")
-# a function's parameters: function (res) {, (res) =>, res =>, lambda res:
-_DL_PARAMS_RE = re.compile(
-    r"""\bfunction\b\s*(?:[\w$]+\s*)?\((?P<fp>[^()]{0,200})\)|\((?P<ap>[^()]{0,200})\)\s*=>"""
-    r"""|(?<![\w$.])(?P<one>[A-Za-z_$][\w$]*)\s*=>|\blambda\b(?P<lp>[^:()]{0,200}):""")
-_DL_FN_HEADER_RE = re.compile(
-    r"""^\s*(?:async\s+)?def\s+(?P<py>\w+)|\bfunction\s*(?:\*\s*)?(?P<js>[A-Za-z_$][\w$]*)\s*\("""
-    r"""|\b(?:const|let|var)\s+(?P<var>[A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?"""
-    r"""(?:function\b|\([^()]{0,200}\)\s*=>|[A-Za-z_$][\w$]*\s*=>)""")
-_DL_NAME_RE = re.compile(r"""[A-Za-z_$][\w$]*""")
-_DL_DEFAULT_RE = re.compile(r"""=[^,]*""")
-_DL_DOT_RE = re.compile(r"""\s*\??\.\s*""")
+_DL_BIND_RE = _dl_re("_DL_BIND_RE")
+_DL_PARAMS_RE = _dl_re("_DL_PARAMS_RE")
+_DL_FN_HEADER_RE = _dl_re("_DL_FN_HEADER_RE")
+_DL_NAME_RE = _dl_re("_DL_NAME_RE")
+_DL_DEFAULT_RE = _dl_re("_DL_DEFAULT_RE")
+_DL_DOT_RE = _dl_re("_DL_DOT_RE")
 _DL_NOT_NAMES = frozenset(_DL_SPEC_ARRAYS["_DL_NOT_NAMES"])
-# runners: the argument runs as code or as a shell command
-_DL_RUNNER_PAIRS = [
-    (_DL_NOT_MEMBER, r"""(?:eval|exec|execfile)\s*\("""), (_DL_B, r"""(?:window|globalThis|global|self)\.eval\s*\("""),
-    (_DL_B, r"""new\s+Function\s*\("""), (_DL_NOT_MEMBER, r"""Function\s*\("""),
-    (_DL_B, r"""runIn(?:This|New)?Context\s*\("""), (_DL_B, r"""new\s+vm\.Script\s*\("""),
-    (_DL_B, r"""compileFunction\s*\("""), (r"""(?<=\.)""", r"""_compile\s*\("""), (_DL_B, r"""execSync\s*\("""),
-    (_DL_B, r"""(?:child_process|childProcess|cp)\.exec\s*\("""),
-    (_DL_B, r"""require\(\s*["'](?:node:)?child_process["']\s*\)\.exec\s*\("""),
-    (_DL_B, r"""os\.(?:system|popen)\s*\("""), (_DL_B, r"""__import__\(\s*["']os["']\s*\)\.(?:system|popen)\s*\("""),
-    (_DL_NOT_MEMBER, r"""(?:system|popen)\s*\("""), (_DL_B, r"""(?:subprocess\.)?get(?:status)?output\s*\("""),
-    # eval / Function reached indirectly (the SC-EVAL-DECODE grammar), each
-    # ending at the payload's '(': (0, eval)(code), eval.call(t, code),
-    # eval.bind(t)(code), window['eval'](code), self['ev'+'al'](code)
-    ("", r"""\(\s*(?:void\s+)?[\w$.]+\s*,\s*""" + _GLOBAL_OBJECT + r"""(?:eval|Function)\s*\)\s*\("""),
-    (_DL_B, r"""(?:eval|Function)\s*\.\s*call\s*\("""),
-    (_DL_B, r"""(?:eval|Function)\s*\.\s*bind\s*\([^()]*\)\s*\("""),
-    ("", _EVAL_BY_NAME + r"""\s*\("""),
-]
-_DL_RUNNER = _dl_alternatives(_DL_RUNNER_PAIRS)
+_DL_RUNNER = _dl_group("_DL_RUNNER")            # a call that runs its argument as code
 _DL_RUNNER_RE, _DL_RUNNER_CANDIDATE_RE = _DL_RUNNER
-_DL_SHELL_TRUE_RE = re.compile(r"""\bshell\s*=\s*True\b""")
-# ... and subprocess calls, where the text has shell=True: one counts when a
-# `shell=True` starts within _DL_ARG_SPAN characters after its '('
-_DL_SHELL_CALL = r"""(?:run|call|Popen|check_output|check_call)\s*\("""
-_DL_SHELL_CALL_RE = re.compile(_DL_SHELL_CALL)
-# (`shell` first, and \b after it, so that re skips ahead to one)
-_DL_SHELL_ARG_RE = re.compile(r"""shell(?<!\wshell)\s*=\s*True""")
-_DL_RUNNER_SHELL = _dl_alternatives(_DL_RUNNER_PAIRS + [(_DL_B, _DL_SHELL_CALL)])
+_DL_SHELL_TRUE_RE = _dl_re("_DL_SHELL_TRUE_RE")
+_DL_SHELL_CALL_RE = _dl_re("_DL_SHELL_CALL_RE")
+_DL_SHELL_ARG_RE = _dl_re("_DL_SHELL_ARG_RE")
+_DL_RUNNER_SHELL = _dl_group("_DL_RUNNER_SHELL")   # the runners plus run-family calls (when the file has shell=True)
 _DL_RUNNER_SHELL_RE, _DL_RUNNER_SHELL_CANDIDATE_RE = _DL_RUNNER_SHELL
-# deserializers that run code embedded in the value handed to them (CWE-502):
-# a received value passed whole to one is remote code execution by design. A
-# full yaml.load only (SafeLoader / safe_load within the call is data-only, the
-# S-YAML look-ahead), and node-serialize's unserialize (JSON.parse is not one).
-_DL_DESERIAL_PAIRS = [
-    (_DL_B, r"""(?:pickle|cPickle|_pickle|dill|cloudpickle)\.loads?\s*\("""),
-    (_DL_B, r"""marshal\.loads?\s*\("""), (_DL_B, r"""jsonpickle\.decode\s*\("""),
-    # a full yaml.load: no SafeLoader / safe_load in the call. The scan tolerates
-    # one level of nested parentheses (the received value is usually a call,
-    # requests.get(u).text) and is bounded so it cannot backtrack away.
-    (_DL_B, r"""yaml\.load\s*\((?!(?:[^()]|\([^()]*\)){0,400}?(?:SafeLoader|safe_load))"""),
-    # node-serialize / serialize-to-js: unserialize on any receiver (a bare
-    # name or a module alias), but not a longer word ending in "unserialize"
-    (_DL_B, r"""unserialize\s*\("""),
-]
-_DL_DESERIAL = _dl_alternatives(_DL_DESERIAL_PAIRS)
+_DL_DESERIAL = _dl_group("_DL_DESERIAL")        # a deserializer that runs code embedded in its argument (CWE-502)
 _DL_DESERIAL_RE, _DL_DESERIAL_CANDIDATE_RE = _DL_DESERIAL
-# a module named by a received value, loaded dynamically: the specifier itself
-# is network-controlled (import(name), require(name), __import__(name),
-# importlib.import_module(name)). Fires only when the specifier is received.
-_DL_IMPORT_SINK_PAIRS = [
-    (_DL_NOT_MEMBER, r"""import\s*\("""), (_DL_NOT_MEMBER, r"""require\s*\("""),
-    (_DL_NOT_MEMBER, r"""__import__\s*\("""), (_DL_B, r"""importlib\.import_module\s*\("""),
-    (_DL_NOT_MEMBER, r"""import_module\s*\("""),
-]
-_DL_IMPORT_SINK = _dl_alternatives(_DL_IMPORT_SINK_PAIRS)
+_DL_IMPORT_SINK = _dl_group("_DL_IMPORT_SINK")  # a dynamic import of a received specifier
 _DL_IMPORT_SINK_RE, _DL_IMPORT_SINK_CANDIDATE_RE = _DL_IMPORT_SINK
-# Python's `from mod import (a, b)` is not a dynamic import(): the bare
-# `import(` sink is skipped on a from-import line (the ESM dynamic import it
-# means never appears there).
-_DL_FROM_IMPORT_RE = re.compile(r"""^[ \t]*from[ \t]+[\w.]+[ \t]+import\b""")
-_DL_BARE_IMPORT_RE = re.compile(r"""import\s*\(""")
-# Runner aliases: a name bound to a code-runner reference (no call), so that a
-# later call of the name is a runner — the classic dropper obfuscation
-# `const e = eval; e(payload)`, `s = os.system; s(payload)`, `const ex =
-# require('child_process').execSync`. Only direct runners (a call fires on its
-# own); the shell-command family (run/Popen/call with shell=True) is not
-# aliased. A found alias name is added to this file's runner set and its call
-# rows are seeded, like a network module's import name.
-_DL_RUNNER_REF = (
-    r"""require\(\s*["'](?:node:)?child_process["']\s*\)\s*\.\s*execSync"""
-    r"""|require\(\s*["'](?:node:)?child_process["']\s*\)\s*\.\s*exec"""
-    r"""|(?:child_process|childProcess|cp)\s*\.\s*execSync"""
-    r"""|(?:child_process|childProcess|cp)\s*\.\s*exec"""
-    r"""|(?:window|globalThis|global|self)\s*\.\s*eval"""
-    r"""|vm\s*\.\s*runInThisContext"""
-    r"""|(?:os|subprocess)\s*\.\s*(?:system|popen|getstatusoutput|getoutput)"""
-    r"""|execSync|execfile|exec|eval|compileFunction|getstatusoutput|getoutput|Function""")
-_DL_ALIAS_RE = re.compile(
-    r"""(?<![\w$.])(?P<alias>[A-Za-z_$][\w$]*)\s*=(?![=>])\s*(?:new\s+)?"""
-    r"""(?:""" + _DL_RUNNER_REF + r""")\s*(?![\w$.(\[])""")
-# a runner-alias definition holds one of these; the pre-pass reads no other row
+_DL_FROM_IMPORT_RE = _dl_re("_DL_FROM_IMPORT_RE")   # a Python from-import line: the bare import( sink is skipped there
+_DL_BARE_IMPORT_RE = _dl_re("_DL_BARE_IMPORT_RE")
+_DL_ALIAS_RE = _dl_re("_DL_ALIAS_RE")           # a runner-alias definition (name = a direct code-runner reference)
 _DL_ALIAS_NEEDLES = tuple(_DL_SPEC_ARRAYS["_DL_ALIAS_NEEDLES"])
 _DL_ALIAS_MAX = _DL_SPEC_LIMITS["_DL_ALIAS_MAX"]       # a file's alias names, at most
 _DL_DEFINING = tuple(_DL_SPEC_ARRAYS["_DL_DEFINING"])
-_DL_INTERPRETERS = (r"""(?:node|nodejs|bun|python[\d.]*|pythonw|(?:ba|z|da|k)?sh|perl|ruby|php|pwsh|"""
-                    r"""powershell|osascript|cmd)(?:\.exe)?""")
-_DL_INLINE_FLAG = r"""(?:-(?:e|E|c|p|r|-eval|-print|Command|command|EncodedCommand|enc)|/[cCkK])"""
-# an interpreter's inline code as argv: ['node', '-e', CODE], [sys.executable, '-c', CODE]
-_DL_INTERP = _dl_alternatives([
-    ("", r"""["'`](?:[\w.:~-]*[/\\]){0,8}""" + _DL_INTERPRETERS + r"""["'`]"""),
-    (_DL_B, r"""process\.(?:execPath|argv\[0\])"""), (_DL_B, r"""sys\.executable"""),
-], r"""\s*,\s*(?:\[\s*)?(?:["'`]-[^"'`\n]{0,40}["'`]\s*,\s*){0,4}?["'`]""" + _DL_INLINE_FLAG
-   + r"""["'`]\s*,\s*""")
+_DL_INTERP = _dl_group("_DL_INTERP")            # an interpreter given inline code as argv (['node','-e',CODE])
 _DL_INTERP_RE, _DL_INTERP_CANDIDATE_RE = _DL_INTERP
-# ... or written into its command line: `node -e ${code}`, 'python -c "%s"' % code
-_DL_EMBED_RE = re.compile(r"""\s*[rRbBuUfF]{0,2}["'`]\s*(?:[\w.:~-]*[/\\]){0,8}""" + _DL_INTERPRETERS
-                          + r"""(?:\s+-[\w-]+){0,6}?\s+""" + _DL_INLINE_FLAG + r"""\b""")
-# (repetitions are bounded: the npm engine's regex engine keeps a backtrack
-# entry per repetition of a group and overflows its stack on millions)
-_DL_LEAD_RE = re.compile(r"""\s*(?:(?:await|yield)\s+|\(\s*){0,50}""")
-_DL_CALLEE_RE = re.compile(
-    r"""(?:new\s+)?(?P<chain>[A-Za-z_$][\w$]*(?:\s*\??\.\s*[A-Za-z_$][\w$]*){0,50})\s*(?P<call>\()?""")
+_DL_EMBED_RE = _dl_re("_DL_EMBED_RE")           # ... or written into its command line (`node -e ${code}`)
+_DL_LEAD_RE = _dl_re("_DL_LEAD_RE")
+_DL_CALLEE_RE = _dl_re("_DL_CALLEE_RE")
 _DL_CALLEE_CHARS = frozenset(_DL_SPEC_CHARS["_DL_CALLEE_CHARS"])
-_DL_BRACKET_RE = re.compile(r"""[()\[\]{},]""")
+_DL_BRACKET_RE = _dl_re("_DL_BRACKET_RE")
 
 
 def _dl_lhs_names(lhs):
@@ -5881,24 +5776,14 @@ def runs_received_code(text):
 # a file WRITE naming a path, and a RUN of that same path (a name, or the same
 # string literal) in the window after it. `text` costs one pass: only rows near
 # a write are read, and each search is bounded.
-_DL_PATH_TOK = r"""[A-Za-z_$][\w$]*|["'][^"'\n]{1,200}["']"""
 # a received value written to a file, naming the path (a download-to-file API,
-# or a write whose window holds a source): captures the path token. p4
-# (urlretrieve) is a download-to-file on its own and needs no separate source.
-_DL_FILE_WRITE_RE = re.compile(
-    r"""\b(?:fs\s*\.\s*)?(?:write|append)File(?:Sync)?\s*\(\s*(?P<p1>""" + _DL_PATH_TOK + r""")\s*,"""
-    r"""|\bcreateWriteStream\s*\(\s*(?P<p2>""" + _DL_PATH_TOK + r""")"""
-    r"""|\bopen\s*\(\s*(?P<p3>""" + _DL_PATH_TOK + r""")\s*,[^)\n]{0,60}?["'][rbtU]*[wax]\+?[rbtU]*["']"""
-    r"""|\burlretrieve\s*\(\s*[^,()\n]{1,300},\s*(?P<p4>""" + _DL_PATH_TOK + r""")\s*\)""")
+# or a write whose window holds a source); the run of that path is the opener
+# of an interpreter/exec/require/import/subprocess call. Both patterns and the
+# path-token grammar are in the spec (p4, urlretrieve, is a download-to-file on
+# its own and needs no separate source).
+_DL_FILE_WRITE_RE = _dl_re("_DL_FILE_WRITE_RE")
 _DL_FILE_WRITE_NEEDLES = tuple(_DL_SPEC_ARRAYS["_DL_FILE_WRITE_NEEDLES"])
-# the file is then run: the opener of an interpreter/exec/require/import/
-# subprocess call; the path is looked for among its arguments (_dl_pathrun_after)
-_DL_PATHRUN_SINK_RE = re.compile(
-    r"""\b(?:os\.system|os\.startfile|runpy\.run_path)\s*\("""
-    r"""|\b(?:subprocess\s*\.\s*)?(?:run|Popen|call|check_call|check_output)\s*\("""
-    r"""|\b(?:spawn|spawnSync|execFile|execFileSync|fork)\s*\("""
-    r"""|(?<![\w$.])(?:require|import|execfile)\s*\("""
-    r"""|(?<![\w$.])exec\s*\(\s*open\s*\(""")
+_DL_PATHRUN_SINK_RE = _dl_re("_DL_PATHRUN_SINK_RE")
 _DL_PATHRUN_NEEDLES = tuple(_DL_SPEC_ARRAYS["_DL_PATHRUN_NEEDLES"])
 
 
