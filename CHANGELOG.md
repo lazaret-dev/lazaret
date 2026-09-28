@@ -33,11 +33,17 @@ shared source of truth for both engines.
   a dependency package and run in another — the source and the sink split
   across modules — is now caught under `--deps`, in both Python packages
   (`from ._c2 import pull; exec(pull())`) and npm packages
-  (`const { pull } = require('./fetcher'); pull().then(c => eval(c))`).
-  SC-IMPORT-RISK (MAJOR); the message names the source module. Detection runs
-  only in the Python engine; the npm engine stays single-file with an honest
-  gate, and the finding is excluded from the engine-parity comparison like the
-  cross-file taint engine's `X-*` findings.
+  (`const { pull } = require('./fetcher'); pull().then(c => eval(c))`). The
+  tainted export can be a module-level function or value, or a **class method**
+  called on an instance made in the importing file (`c = Client(); exec(c.pull())`,
+  `const c = new Client(); c.pull().then(eval)`). SC-IMPORT-RISK (MAJOR); the
+  message names the source module. Detection runs only in the Python engine; the
+  npm engine stays single-file with an honest gate, and the finding is excluded
+  from the engine-parity comparison like the cross-file taint engine's `X-*`
+  findings. Export detection masks strings and comments — including a docstring's
+  usage example — so a `requests.get(...)` shown in documentation is not mistaken
+  for a real export, and the pass has its own tight bounds (a smaller body-scan
+  window and hard caps on files, exports and seeds per package).
 
 ### Changed
 - **Shared spec for the received-code detector.** Its data (name sets, character

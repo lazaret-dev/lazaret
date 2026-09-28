@@ -7293,12 +7293,67 @@ class _DependencyTree:
 # severity (SC-IMPORT-RISK, MAJOR, never escalating an install hook). Bounded:
 # one pass per file, exports followed one hop, within one package.
 
+# Bounds for the cross-file pass — tighter than the single-file detector's, and
+# hard caps so a huge package can never blow up.
+_XF_WINDOW = 25                 # rows of a function / method body scanned for a source
+_XF_MAX_FILES = 3000            # dependency files per package the follower groups
+_XF_MAX_EXPORTS = 256           # tainted export names tracked per module
+_XF_MAX_SEEDS = 64              # cross-file seeds fed into one file
+
+_XF_CLASS_RE = re.compile(r"^[ \t]*class[ \t]+(?P<name>[A-Za-z_]\w*)")
 _XF_DEF_RE = re.compile(r"^[ \t]*(?:async[ \t]+)?def[ \t]+(?P<name>[A-Za-z_]\w*)[ \t]*\(")
 _XF_ASSIGN_RE = re.compile(r"^(?P<indent>[ \t]*)(?P<name>[A-Za-z_]\w*)[ \t]*=(?![=])(?P<rhs>.*)$")
 _XF_RETURN_RE = re.compile(r"^[ \t]*return[ \t](?P<expr>.*)$")
 _XF_FROM_RE = re.compile(
     r"^[ \t]*from[ \t]+(?P<mod>\.+[\w.]*|[\w.]+)[ \t]+import[ \t]+(?P<names>\*|\([^()]*\)|.+?)[ \t]*$", re.M)
 _XF_DEP_MARKERS = ("site-packages", "dist-packages", "vendor")
+
+
+def _xf_py_mask(text):
+    """`text`'s rows with string contents blanked and comments cut, so a source
+    call or a tainted name inside a string or comment is not read as code —
+    including a triple-quoted docstring's usage example, which real network
+    libraries carry (`requests.get(...)` in a docstring is not an export). A
+    robustness heuristic, not a full tokenizer: escapes and string prefixes need
+    not be exact, because over- or under-masking only shifts the (sink-gated)
+    export approximation, never a finding on its own."""
+    out, delim = [], None
+    for row in text.split("\n"):
+        chars, i, n = [], 0, len(row)
+        if delim is not None:                       # inside a triple-quoted string
+            end = row.find(delim)
+            if end < 0:
+                out.append("")
+                continue
+            i = end + 3
+            chars.append(" " * i)
+            delim = None
+        while i < n:
+            ch = row[i]
+            if ch == "#":
+                break                               # comment to end of line
+            three = row[i:i + 3]
+            if three == "'''" or three == '"""':
+                end = row.find(three, i + 3)
+                if end < 0:
+                    chars.append(" " * (n - i))
+                    delim = three
+                    i = n
+                    break
+                chars.append(" " * (end + 3 - i))
+                i = end + 3
+                continue
+            if ch == "'" or ch == '"':
+                j = i + 1
+                while j < n and row[j] != ch:
+                    j += 2 if row[j] == "\\" else 1
+                chars.append(ch + " " * max(0, min(j, n) - i - 1) + (ch if j < n else ""))
+                i = j + 1
+                continue
+            chars.append(ch)
+            i += 1
+        out.append("".join(chars))
+    return out
 
 
 def _xf_expr_carries(expr, tainted):
@@ -7310,40 +7365,65 @@ def _xf_expr_carries(expr, tainted):
 
 
 def _xf_tainted_exports(text):
-    """The module-level names of `text` that hold, or are functions that return,
-    a value received over the network. One indentation-aware pass; a function
-    body is followed for _DL_WINDOW rows."""
+    """(values, classes) of `text`: module-level names that hold or return a
+    received value, and {class name: frozenset(method names)} for methods that
+    return one. One indentation-aware pass over masked rows; a function / method
+    body is followed for _XF_WINDOW rows."""
     if not any(n in text for n in _DL_NEEDLES):
-        return frozenset()
-    rows = text.split("\n")
-    exports, module_taint, local = set(), set(), set()
-    fn = None                                   # (name, last body row) of the open top-level def
+        return frozenset(), {}
+    rows = _xf_py_mask(text)
+    values, classes, module_taint, local = set(), {}, set(), set()
+    fn = None                                   # (name, deadline row, def indent, owner class|None)
+    cls = None                                  # the open top-level class name
     for k, row in enumerate(rows):
         stripped = row.strip()
         if not stripped:
             continue
         indent = len(row) - len(row.lstrip())
-        if fn is not None and (indent == 0 or k > fn[1]):
+        if fn is not None and (indent <= fn[2] or k > fn[1]):
             fn, local = None, set()
+        if indent == 0 and cls is not None:
+            cls = None                          # any top-level line ends the class scope
+        cm = _XF_CLASS_RE.match(row)
+        if cm is not None and indent == 0:
+            cls = cm.group("name")
+            classes.setdefault(cls, set())
+            continue
         d = _XF_DEF_RE.match(row)
         if d is not None:
             if indent == 0:
-                fn, local = (d.group("name"), k + _DL_WINDOW), set()
+                fn, local = (d.group("name"), k + _XF_WINDOW, 0, None), set()
+            elif cls is not None:
+                fn, local = (d.group("name"), k + _XF_WINDOW, indent, cls), set()
+            else:
+                fn, local = None, set()
             continue
         if fn is not None:
             r = _XF_RETURN_RE.match(row)
             if r is not None and _xf_expr_carries(r.group("expr"), local | module_taint):
-                exports.add(fn[0])
+                if fn[3] is None:
+                    if len(values) < _XF_MAX_EXPORTS:
+                        values.add(fn[0])
+                else:
+                    classes.setdefault(fn[3], set()).add(fn[0])
+                fn, local = None, set()
                 continue
         a = _XF_ASSIGN_RE.match(row)
         if a is not None and len(a.group("rhs")) <= _DL_LONG_ROW and _xf_expr_carries(
                 a.group("rhs"), module_taint if indent == 0 else local | module_taint):
-            if indent == 0:
+            if indent == 0 and len(values) < _XF_MAX_EXPORTS:
                 module_taint.add(a.group("name"))
-                exports.add(a.group("name"))
+                values.add(a.group("name"))
             elif fn is not None:
                 local.add(a.group("name"))
-    return frozenset(exports)
+    return frozenset(values), {c: frozenset(ms) for c, ms in classes.items() if ms}
+
+
+def _xf_py_instances(text, cname):
+    """Local names assigned an instance of class `cname` (`v = Cname(...)` or
+    `v = mod.Cname(...)`), for seeding `v.method` chains."""
+    rx = re.compile(r"(?<![\w.])(?P<var>[A-Za-z_]\w*)[ \t]*=[ \t]*(?:[\w.]+\.)?" + re.escape(cname) + r"[ \t]*\(")
+    return {m.group("var") for m in rx.finditer(text)}
 
 
 def _xf_py_module(path):
@@ -7378,32 +7458,46 @@ def _xf_resolve(mod_spec, pkg_parts):
 
 
 def _xf_imported_taint(text, module, is_pkg, exports):
-    """{local name: source module} for names this module imports, from a sibling
-    module of the same top package, that are that sibling's tainted exports."""
+    """{local name (or instance.method chain): source module} for names this
+    module imports, from a sibling module of the same top package, that are that
+    sibling's tainted exports — a value/function directly, or a class whose
+    tainted method is called on an instance made here (`c = C(); exec(c.pull())`)."""
     if "import" not in text:
         return {}
+    masked = "\n".join(_xf_py_mask(text))
     pkg_parts = module.split(".") if is_pkg else module.split(".")[:-1]
     top = module.split(".")[0]
     seeds = {}
-    for m in _XF_FROM_RE.finditer(text):
+    imported_classes = {}                       # local class name -> (methods, source module)
+    for m in _XF_FROM_RE.finditer(masked):
         target = _xf_resolve(m.group("mod"), pkg_parts)
         if target is None or target.split(".")[0] != top:
             continue
-        exp = exports.get(target)
-        if not exp:
+        info = exports.get(target)
+        if not info:
             continue
+        values, classes = info
         names = m.group("names").strip()
         if names == "*":
-            for name in exp:
+            for name in values:
                 seeds[name] = target
+            for cname, methods in classes.items():
+                imported_classes[cname] = (methods, target)
             continue
         for item in names.strip("()").split(","):
             parts = item.split()
             if not parts:
                 continue
+            exp = parts[0]
             local = parts[2] if len(parts) == 3 and parts[1] == "as" else parts[0]
-            if parts[0] in exp:
+            if exp in values:
                 seeds[local] = target
+            elif exp in classes:
+                imported_classes[local] = (classes[exp], target)
+    for cname, (methods, target) in imported_classes.items():
+        for var in _xf_py_instances(masked, cname):
+            for meth in methods:
+                seeds[var + "." + meth] = target
     return seeds
 
 
@@ -7430,11 +7524,11 @@ def _xf_python_pass(files, skip):
             groups.setdefault(info[0], []).append((info[1], info[2], f))
     out = []
     for members in groups.values():
-        if len(members) < 2:                    # cross-file needs at least two files
+        if not 2 <= len(members) <= _XF_MAX_FILES:      # needs >= 2; a huge package is skipped
             continue
         try:
             exports = {module: _xf_tainted_exports(f["content"]) for module, _pkg, f in members}
-            if not any(exports.values()):
+            if not any(values or classes for values, classes in exports.values()):
                 continue
             for module, is_pkg, f in members:
                 if f["path"].replace(os.sep, "/") in skip:
@@ -7442,7 +7536,7 @@ def _xf_python_pass(files, skip):
                 seeds = _xf_imported_taint(f["content"], module, is_pkg, exports)
                 if not seeds:
                     continue
-                res = _received_code_kind(f["content"], extra_always=set(seeds))
+                res = _received_code_kind(f["content"], extra_always=set(list(seeds)[:_XF_MAX_SEEDS]))
                 if res is not None:
                     out.append(_xf_issue(f["path"], res[0], f["content"], res[1], sorted(set(seeds.values()))))
         except Exception:                       # one package must never kill the scan
@@ -7459,9 +7553,16 @@ def _xf_python_pass(files, skip):
 # returns received data over its API is not flagged. One hop, within one package.
 _XF_JS_FUNC_RE = re.compile(r"\bfunction[ \t]*\*?[ \t]*(?P<name>[A-Za-z_$][\w$]*)[ \t]*\(")
 _XF_JS_ASSIGN_RE = re.compile(r"\b(?:const|let|var)[ \t]+(?P<name>[A-Za-z_$][\w$]*)[ \t]*=(?![=])(?P<rhs>.*)$")
+_XF_JS_CLASS_RE = re.compile(r"\bclass[ \t]+(?P<name>[A-Za-z_$][\w$]*)")
+# a class method's shorthand header: `pull(args) {`, `async pull(args) {`, `*g(){`, `get x() {`
+_XF_JS_METHOD_RE = re.compile(
+    r"(?:^|[ \t;{}])(?:async[ \t]+)?(?:\*[ \t]*)?(?:(?:get|set)[ \t]+)?(?P<name>[A-Za-z_$][\w$]*)[ \t]*\([^()]*\)[ \t]*\{")
+_XF_JS_KEYWORDS = frozenset({"if", "for", "while", "switch", "catch", "function", "return", "do", "else",
+                             "with", "constructor", "class"})
+_XF_JS_NEW_TMPL = r"(?<![\w$.])(?P<var>[A-Za-z_$][\w$]*)[ \t]*=[ \t]*new[ \t]+(?:[\w$]+\.)*%s[ \t]*\("
 _XF_JS_EXPORT_DECL_RE = re.compile(
     r"\bexport[ \t]+(?:default[ \t]+)?(?:async[ \t]+)?"
-    r"(?:function[ \t]*\*?[ \t]*|(?:const|let|var)[ \t]+)(?P<name>[A-Za-z_$][\w$]*)")
+    r"(?:function[ \t]*\*?[ \t]*|(?:const|let|var)[ \t]+|class[ \t]+)(?P<name>[A-Za-z_$][\w$]*)")
 _XF_JS_EXPORT_LIST_RE = re.compile(r"\bexport[ \t]*\{(?P<names>[^{}]*)\}")
 _XF_JS_MODEXP_OBJ_RE = re.compile(r"\bmodule\s*\.\s*exports[ \t]*=[ \t]*\{(?P<names>[^{}]*)\}")
 _XF_JS_MODEXP_PROP_RE = re.compile(
@@ -7501,57 +7602,101 @@ def _xf_js_destr(names):
     return out
 
 
+def _xf_js_row_classes(rows):
+    """For each masked row, the name of the class whose body encloses it (or
+    None) — a brace-depth pass pairing `class NAME … {` with its `}`."""
+    row_class = [None] * len(rows)
+    depth, stack, pending = 0, [], None         # stack entries: (class name, body depth)
+    for k, row in enumerate(rows):
+        row_class[k] = stack[-1][0] if stack else None
+        events = [(m.start(), "c", m.group("name")) for m in _XF_JS_CLASS_RE.finditer(row)]
+        events += [(m.start(), m.group(), None) for m in re.finditer(r"[{}]", row)]
+        events.sort()
+        for _pos, kind, name in events:
+            if kind == "c":
+                pending = name
+            elif kind == "{":
+                if pending is not None:
+                    stack.append((pending, depth))
+                    pending = None
+                depth += 1
+            else:
+                depth -= 1
+                if stack and stack[-1][1] == depth:
+                    stack.pop()
+    return row_class
+
+
 def _xf_js_tainted_exports(text):
-    """(named exports, default_tainted) of a JS module that hold or return a
-    value received over the network. Liberal by design (the sink side keeps the
-    finding precise). One indexed pass; a function body is read for _DL_WINDOW rows."""
+    """(named values, {class: methods}, default) of a JS module whose functions,
+    consts or class methods hold or return a received value. `default` is False,
+    True (a value) or a frozenset of method names (a default-exported class).
+    Liberal by design; the sink side keeps the finding precise. Bounded: indexed
+    source/return rows, a body read for _XF_WINDOW rows, one brace pass."""
     if not any(n in text for n in _DL_NEEDLES):
-        return frozenset(), False
+        return frozenset(), {}, False
     rows = [_xf_js_mask_line(r) for r in text.split("\n")]
     src_rows = [k for k, r in enumerate(rows) if next(_dl_finditer(_DL_SOURCE, r), None) is not None]
     ret_rows = [k for k, r in enumerate(rows) if "return" in r]
+    row_class = _xf_js_row_classes(rows)
 
     def near(idx, a, b):
         i = bisect.bisect_left(idx, a)
         return i < len(idx) and idx[i] < b
 
-    tainted = set()
+    tainted, classes = set(), {}
     for k, row in enumerate(rows):
-        end = k + _DL_WINDOW
+        end = k + _XF_WINDOW
+        body = near(src_rows, k, end) and near(ret_rows, k, end)
+        cur = row_class[k]
         for m in _XF_JS_FUNC_RE.finditer(row):
-            if near(src_rows, k, end) and near(ret_rows, k, end):
-                tainted.add(m.group("name"))
-        m = _XF_JS_ASSIGN_RE.search(row)
-        if m is not None:
-            rhs = m.group("rhs")
-            rhs_src = next(_dl_finditer(_DL_SOURCE, rhs), None) is not None
-            if "=>" in rhs or rhs.lstrip().startswith(("function", "async")):
-                if rhs_src or (near(src_rows, k, end) and (near(ret_rows, k, end) or "=>" in rhs)):
+            if body:
+                (classes.setdefault(cur, set()).add if cur else tainted.add)(m.group("name"))
+        if cur is not None and body:
+            for m in _XF_JS_METHOD_RE.finditer(row):
+                if m.group("name") not in _XF_JS_KEYWORDS:
+                    classes.setdefault(cur, set()).add(m.group("name"))
+        elif cur is None:
+            m = _XF_JS_ASSIGN_RE.search(row)
+            if m is not None:
+                rhs = m.group("rhs")
+                rhs_src = next(_dl_finditer(_DL_SOURCE, rhs), None) is not None
+                if "=>" in rhs or rhs.lstrip().startswith(("function", "async")):
+                    if rhs_src or (near(src_rows, k, end) and (near(ret_rows, k, end) or "=>" in rhs)):
+                        tainted.add(m.group("name"))
+                elif rhs_src:
                     tainted.add(m.group("name"))
-            elif rhs_src:
-                tainted.add(m.group("name"))
     masked = "\n".join(rows)
-    named, default = set(), False
-    for m in _XF_JS_EXPORT_DECL_RE.finditer(masked):
-        if m.group("name") in tainted:
-            named.add(m.group("name"))
-    for m in _XF_JS_EXPORT_LIST_RE.finditer(masked):
-        for exp, local in _xf_js_destr(m.group("names")):
-            if exp in tainted:                          # export { local as exp }
-                named.add(local)
-    for m in _XF_JS_MODEXP_OBJ_RE.finditer(masked):
-        for exp, local in _xf_js_destr(m.group("names")):
-            if local in tainted:                        # module.exports = { exp: local }
-                named.add(exp)
-    for m in _XF_JS_MODEXP_PROP_RE.finditer(masked):
+    named, named_classes = set(), {}
+
+    def note(exported, local):
+        if local in tainted:
+            named.add(exported)
+        elif local in classes:
+            named_classes[exported] = frozenset(classes[local])
+
+    for m in _XF_JS_EXPORT_DECL_RE.finditer(masked):        # export function/const/class NAME
+        note(m.group("name"), m.group("name"))
+    for m in _XF_JS_EXPORT_LIST_RE.finditer(masked):        # export { local as exported }
+        for local, exported in _xf_js_destr(m.group("names")):
+            note(exported, local)
+    for m in _XF_JS_MODEXP_OBJ_RE.finditer(masked):         # module.exports = { exported: local }
+        for exported, local in _xf_js_destr(m.group("names")):
+            note(exported, local)
+    for m in _XF_JS_MODEXP_PROP_RE.finditer(masked):        # module.exports.NAME = local
         local = m.group("rhs").strip().rstrip(";").strip()
-        if local in tainted or next(_dl_finditer(_DL_SOURCE, m.group("rhs")), None) is not None:
+        if next(_dl_finditer(_DL_SOURCE, m.group("rhs")), None) is not None:
             named.add(m.group("name"))
-    for m in _XF_JS_EXPORT_DEFAULT_RE.finditer(masked):
-        default = default or m.group("name") in tainted
-    for m in _XF_JS_MODEXP_ALL_RE.finditer(masked):
-        default = default or m.group("name") in tainted
-    return frozenset(named), default
+        else:
+            note(m.group("name"), local)
+    default = False
+    for m in list(_XF_JS_EXPORT_DEFAULT_RE.finditer(masked)) + list(_XF_JS_MODEXP_ALL_RE.finditer(masked)):
+        name = m.group("name")
+        if name in tainted:
+            default = True
+        elif name in classes and default is False:
+            default = frozenset(classes[name])
+    return frozenset(named), named_classes, default
 
 
 def _xf_js_package(path):
@@ -7576,40 +7721,59 @@ def _xf_js_norm(rel):
 
 
 def _xf_js_seeds(text, exports_of):
-    """{local name (or ns.member): module spec} seeded from this file's imports of
-    a sibling module's tainted exports. exports_of(spec) -> (named, default)|None.
-    Read on the raw text: the module specifier and imported names are string and
-    identifier tokens the require()/import patterns need whole."""
+    """{local name (or instance.method / ns.member chain): module spec} seeded
+    from this file's imports of a sibling module's tainted exports — a value
+    directly, or a class whose tainted method is called on an instance made here
+    (`const c = new C(); c.pull().then(eval)`). exports_of(spec) -> (values,
+    classes, default)|None. Read on the raw text (module specifiers and imported
+    names are tokens the require()/import patterns need whole)."""
     seeds = {}
-    masked = text
+    imported_classes = {}                       # local class name -> (methods, module spec)
 
     def named_import(mod, pairs):
         info = exports_of(mod)
-        if info is not None:
-            for exp, local in pairs:
-                if exp in info[0]:
-                    seeds[local] = mod
+        if info is None:
+            return
+        values, classes, _default = info
+        for exp, local in pairs:                # exp = name in module, local = local binding
+            if exp in values:
+                seeds[local] = mod
+            elif exp in classes:
+                imported_classes[local] = (classes[exp], mod)
 
     def namespace(mod, ns):
         info = exports_of(mod)
-        if info is not None:
-            for e in info[0]:
-                seeds[ns + "." + e] = mod
-            if info[1]:
-                seeds[ns] = mod
+        if info is None:
+            return
+        values, _classes, default = info
+        for e in values:
+            seeds[ns + "." + e] = mod
+        if default is True:
+            seeds[ns] = mod
+        elif default:                           # a default-exported class bound to `ns`
+            imported_classes[ns] = (default, mod)
 
-    for m in _XF_JS_REQ_DESTR_RE.finditer(masked):
+    for m in _XF_JS_REQ_DESTR_RE.finditer(text):
         named_import(m.group("mod"), _xf_js_destr(m.group("names")))
-    for m in _XF_JS_IMP_NAMED_RE.finditer(masked):
+    for m in _XF_JS_IMP_NAMED_RE.finditer(text):
         named_import(m.group("mod"), _xf_js_destr(m.group("names")))
-    for m in _XF_JS_REQ_NS_RE.finditer(masked):
+    for m in _XF_JS_REQ_NS_RE.finditer(text):
         namespace(m.group("mod"), m.group("ns"))
-    for m in _XF_JS_IMP_NS_RE.finditer(masked):
+    for m in _XF_JS_IMP_NS_RE.finditer(text):
         namespace(m.group("mod"), m.group("ns"))
-    for m in _XF_JS_IMP_DEFAULT_RE.finditer(masked):
+    for m in _XF_JS_IMP_DEFAULT_RE.finditer(text):
         info = exports_of(m.group("mod"))
-        if info is not None and info[1]:
+        if info is None:
+            continue
+        if info[2] is True:
             seeds[m.group("name")] = m.group("mod")
+        elif info[2]:                           # default-exported class
+            imported_classes[m.group("name")] = (info[2], m.group("mod"))
+    for cls_local, (methods, mod) in imported_classes.items():
+        rx = re.compile(_XF_JS_NEW_TMPL % re.escape(cls_local))
+        for im in rx.finditer(text):
+            for meth in methods:
+                seeds[im.group("var") + "." + meth] = mod
     return seeds
 
 
@@ -7631,7 +7795,7 @@ def _xf_js_pass(files, skip):
             for f in members:
                 rel = f["path"].replace(os.sep, "/")[len(root) + 1:]
                 exports[_xf_js_norm(rel)] = _xf_js_tainted_exports(f["content"])
-            if not any(named or default for named, default in exports.values()):
+            if not any(v or c or d for v, c, d in exports.values()):
                 continue
             for f in members:
                 if f["path"].replace(os.sep, "/") in skip:
