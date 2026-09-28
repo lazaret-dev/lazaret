@@ -9,6 +9,21 @@ project is pre-1.0, so the 0.x API may still change.
 
 ## [0.1.7] — unreleased
 
+### Added
+- **`lazaret-sca` reads `uv.lock`, `pylock.toml` and `bun.lock`.** Projects
+  locked with uv or a PEP 751 lock file were inventoried from `pyproject.toml`
+  alone, so their transitive dependencies went unchecked (six advisories
+  missed in the audit benchmark), and Bun's text lockfile was not read at all.
+  All three now count as locked truth, like `poetry.lock` and
+  `pnpm-lock.yaml`: a registry release is matched by its version, a git, URL
+  or local-archive package is kept with an unknown version (a matching
+  advisory is reported unknown, never cleared), and first-party entries (the
+  project, workspace members, local project directories, links) are not
+  inventoried. `pylock.<name>.toml` files are read too. A project with only
+  Bun's binary `bun.lockb` gets a warning naming it. On the benchmark
+  projects all three now match an independent OSV matcher exactly (216 of
+  216 advisory groups for uv and pylock, 104 of 104 for Bun, none extra).
+
 ### Security
 - **Feed decompression is budgeted (`lazaret-sca --update-bundle`).** Only the
   downloaded size of a feed was capped, so a small gzip could expand a
