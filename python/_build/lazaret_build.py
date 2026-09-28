@@ -89,7 +89,8 @@ CONSOLE_SCRIPTS = {
 SDIST_TOP_FILES = ["pyproject.toml", "README.md", "LICENSE"]
 
 # The package allowlist: exactly these kinds of files ship from src/lazaret.
-PACKAGE_SUFFIXES = (".py", ".sql", ".html")
+# .json ships the received-code detector's shared data spec (received_spec.json).
+PACKAGE_SUFFIXES = (".py", ".sql", ".html", ".json")
 PACKAGE_NAMES = frozenset({"py.typed"})
 # Build helpers shipped in the sdist (pip needs them to build from it).
 BUILD_SUFFIXES = (".py",)
@@ -98,7 +99,7 @@ BUILD_SUFFIXES = (".py",)
 _SKIP_DIRS = {"__pycache__"}
 # Files packed with LF line endings whatever the checkout has (a Windows
 # checkout with core.autocrlf would otherwise change every member's bytes).
-_TEXT_SUFFIXES = (".py", ".sql", ".html", ".md", ".toml", ".txt")
+_TEXT_SUFFIXES = (".py", ".sql", ".html", ".md", ".toml", ".txt", ".json")
 _TEXT_NAMES = frozenset({"LICENSE", "PKG-INFO", "py.typed"})
 # Zip "made by" system: 3 = Unix. zipfile defaults to 0 (MS-DOS) on Windows,
 # which would change every central-directory record there.

@@ -7,7 +7,15 @@
 // minified row), so the answer is core's for every text. A leaf module:
 // lib/hooks.js uses it.
 
+import { readFileSync } from "node:fs";
 import { pyRe, pyStrip, pyLstrip, cpLen, isPySpace, isWordChar } from "./pycompat.js";
+
+// The received-code detector's shared data (name sets, character sets, limits)
+// is authored once in the Python package's received_spec.json and synced here
+// to received-spec.json by scripts/sync-received-spec.py; both engines load it,
+// so a needle or limit is edited in one place. (Patterns are still inline.)
+const DL_SPEC = JSON.parse(readFileSync(new URL("./received-spec.json", import.meta.url), "utf8"));
+const DL_SPEC_ARRAYS = DL_SPEC.arrays, DL_SPEC_CHARS = DL_SPEC.charstrings, DL_SPEC_LIMITS = DL_SPEC.limits;
 
 const DL_B = String.raw`\b`, DL_NOT_MEMBER = String.raw`(?<![\w$.])`;
 /** pyRe for core's pattern text, whose named groups are Python's (?P<name>…). */
@@ -136,19 +144,13 @@ const DL_SOURCE = alternatives([
 ]);
 export const DL_SOURCE_SRC = DL_SOURCE.exactSrc;
 const DL_SOURCE_RE = pyRe(DL_SOURCE_SRC, "g");
-export const DL_NEEDLES = ["urlopen", "requests", "httpx", "urllib", "HTTPConnection", "HTTPSConnection", "aiohttp",
-  "socket", "fetch", "http.", "https.", "net.", "tls.", "WebSocket", "XMLHttpRequest", "'http'", '"http"',
-  "'https'", '"https"', "'net'", '"net"', "'tls'", '"tls"', "'ws'", '"ws"', "node:http", "node:net",
-  "node:tls", "axios", "got", "undici", "curl", "wget"];
+export const DL_NEEDLES = DL_SPEC_ARRAYS._DL_NEEDLES;
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
 const DL_NEEDLE_RE = new RegExp([...DL_NEEDLES]
   .sort((a, b) => b.length - a.length || (a < b ? -1 : a > b ? 1 : 0)).map(escapeRe).join("|"), "gu");
-export const DL_RUN_NEEDLES = ["eval", "exec", "Function", "runIn", "Script", "compileFunction", "_compile", "system",
-  "popen", "getoutput", "getstatusoutput", "shell", "-e", "-c", "-p", "-r", "-E", "/c", "/C", "/k", "/K", "Command",
-  "-enc"];
-export const DL_DESERIAL_NEEDLES = ["pickle", "marshal", "yaml.load", "unserialize", "jsonpickle", "dill",
-  "cloudpickle", "cPickle"];
-export const DL_IMPORT_NEEDLES = ["require", "import(", "import (", "__import__", "import_module"];
+export const DL_RUN_NEEDLES = DL_SPEC_ARRAYS._DL_RUN_NEEDLES;
+export const DL_DESERIAL_NEEDLES = DL_SPEC_ARRAYS._DL_DESERIAL_NEEDLES;
+export const DL_IMPORT_NEEDLES = DL_SPEC_ARRAYS._DL_IMPORT_NEEDLES;
 export const DL_SINK_NEEDLES = [...DL_RUN_NEEDLES, ...DL_DESERIAL_NEEDLES, ...DL_IMPORT_NEEDLES];
 export const DL_MODULE_VALUE_SRC =
   String.raw`\s*(?:await\s+)?(?:require|import)\(\s*["']` + DL_NET_MODULES_SRC + String.raw`["']\s*\)\s*(?:;\s*)?$`;
@@ -162,10 +164,11 @@ export const DL_IMPORT_SRC =
   String.raw`|\bimport\s+(?:\*\s+as\s+)?(?P<es>[A-Za-z_$][\w$]*)\s+from\s+["']` + DL_NET_MODULES_SRC + String.raw`["']` +
   String.raw`|\bimport\s*\{(?P<esn>[^{}]{0,200})\}\s*from\s+["']` + DL_NET_MODULES_SRC + String.raw`["']`;
 const DL_IMPORT_RE = pyReNamed(DL_IMPORT_SRC, "g");
-export const DL_PY_NET_MODULES = ["requests", "httpx", "urllib3", "urllib.request", "http.client", "aiohttp", "socket"];
+export const DL_PY_NET_MODULES = DL_SPEC_ARRAYS._DL_PY_NET_MODULES;
 const DL_PY_NET_MODULE_SET = new Set(DL_PY_NET_MODULES);
-export const DL_LIMITS = { _DL_LONG_ROW: 1000, _DL_WINDOW: 50, _DL_ARG_SPAN: 400, _DL_LOOKBACK: 450,
-  _DL_NAMED_SEARCHES: 64, _DL_PHASES: 8 };
+export const DL_LIMITS = { _DL_LONG_ROW: DL_SPEC_LIMITS._DL_LONG_ROW, _DL_WINDOW: DL_SPEC_LIMITS._DL_WINDOW,
+  _DL_ARG_SPAN: DL_SPEC_LIMITS._DL_ARG_SPAN, _DL_LOOKBACK: DL_SPEC_LIMITS._DL_LOOKBACK,
+  _DL_NAMED_SEARCHES: DL_SPEC_LIMITS._DL_NAMED_SEARCHES, _DL_PHASES: DL_SPEC_LIMITS._DL_PHASES };
 const { _DL_LONG_ROW: LONG_ROW, _DL_WINDOW: WINDOW, _DL_ARG_SPAN: ARG_SPAN, _DL_LOOKBACK: LOOKBACK,
   _DL_NAMED_SEARCHES: NAMED_SEARCHES, _DL_PHASES: PHASES } = DL_LIMITS;
 const BT = "`";
@@ -182,7 +185,7 @@ export const DL_TEMPLATE_HOLE_SRC = String.raw`\$\{([^{}]*)\}`;
 const DL_TEMPLATE_HOLE_RE = pyRe(DL_TEMPLATE_HOLE_SRC, "g");
 export const DL_FSTRING_HOLE_SRC = String.raw`(?<!\{)\{([^{}]*)\}`;
 const DL_FSTRING_HOLE_RE = pyRe(DL_FSTRING_HOLE_SRC, "g");
-export const DL_PREFIX_CHARS = [..."rRbBuUfF"];
+export const DL_PREFIX_CHARS = [...DL_SPEC_CHARS._DL_PREFIX_CHARS];
 const PREFIX_CHARS = new Set(DL_PREFIX_CHARS);
 export const DL_BIND_SRC =
   String.raw`(?P<ann>(?<![\w$.])[A-Za-z_$][\w$]*)\s*:\s*[\w$.\[\], |]{1,80}?\s*=(?![=>])` +
@@ -208,9 +211,7 @@ export const DL_DEFAULT_SRC = String.raw`=[^,]*`;
 const DL_DEFAULT_RE = pyRe(DL_DEFAULT_SRC, "g");
 export const DL_DOT_SRC = String.raw`\s*\??\.\s*`;
 const DL_DOT_RE = pyRe(DL_DOT_SRC, "g");
-export const DL_NOT_NAMES = ("const let var this self await async function return new typeof in of as for " +
-  "with if else true false null None True False undefined str int float bytes bool list dict set tuple " +
-  "object").split(" ");
+export const DL_NOT_NAMES = DL_SPEC_ARRAYS._DL_NOT_NAMES;
 const NOT_NAMES = new Set(DL_NOT_NAMES);
 // core._GLOBAL_OBJECT and core._EVAL_BY_NAME (an eval/Function named by a
 // computed member, whole or split with +): reused for the indirect-eval runners
@@ -279,9 +280,8 @@ export const DL_ALIAS_SRC =
   String.raw`(?<![\w$.])(?P<alias>[A-Za-z_$][\w$]*)\s*=(?![=>])\s*(?:new\s+)?` +
   String.raw`(?:` + DL_RUNNER_REF + String.raw`)\s*(?![\w$.(\[])`;
 const DL_ALIAS_RE = pyReNamed(DL_ALIAS_SRC, "g");
-export const DL_ALIAS_NEEDLES = ["eval", "exec", "system", "popen", "Function", "getoutput", "getstatusoutput",
-  "runInThisContext"];
-export const DL_ALIAS_MAX = 64;
+export const DL_ALIAS_NEEDLES = DL_SPEC_ARRAYS._DL_ALIAS_NEEDLES;
+export const DL_ALIAS_MAX = DL_SPEC_LIMITS._DL_ALIAS_MAX;
 // download-to-file, then run the file (core's _DL_FILE_WRITE_RE / _DL_PATHRUN_SINK_RE)
 const DL_PATH_TOK = String.raw`[A-Za-z_$][\w$]*|["'][^"'\n]{1,200}["']`;
 export const DL_FILE_WRITE_SRC =
@@ -290,7 +290,7 @@ export const DL_FILE_WRITE_SRC =
   String.raw`|\bopen\s*\(\s*(?P<p3>` + DL_PATH_TOK + String.raw`)\s*,[^)\n]{0,60}?["'][rbtU]*[wax]\+?[rbtU]*["']` +
   String.raw`|\burlretrieve\s*\(\s*[^,()\n]{1,300},\s*(?P<p4>` + DL_PATH_TOK + String.raw`)\s*\)`;
 const DL_FILE_WRITE_RE = pyReNamed(DL_FILE_WRITE_SRC, "g");
-export const DL_FILE_WRITE_NEEDLES = ["writeFile", "appendFile", "createWriteStream", "open(", "urlretrieve"];
+export const DL_FILE_WRITE_NEEDLES = DL_SPEC_ARRAYS._DL_FILE_WRITE_NEEDLES;
 export const DL_PATHRUN_SINK_SRC =
   String.raw`\b(?:os\.system|os\.startfile|runpy\.run_path)\s*\(` +
   String.raw`|\b(?:subprocess\s*\.\s*)?(?:run|Popen|call|check_call|check_output)\s*\(` +
@@ -298,9 +298,8 @@ export const DL_PATHRUN_SINK_SRC =
   String.raw`|(?<![\w$.])(?:require|import|execfile)\s*\(` +
   String.raw`|(?<![\w$.])exec\s*\(\s*open\s*\(`;
 const DL_PATHRUN_SINK_RE = pyRe(DL_PATHRUN_SINK_SRC, "g");
-export const DL_PATHRUN_NEEDLES = ["system", "startfile", "run_path", "run(", "Popen", "call", "check_", "spawn",
-  "execFile", "fork", "require", "import", "exec"];
-export const DL_DEFINING = ["def", "function", "async"];
+export const DL_PATHRUN_NEEDLES = DL_SPEC_ARRAYS._DL_PATHRUN_NEEDLES;
+export const DL_DEFINING = DL_SPEC_ARRAYS._DL_DEFINING;
 const DL_INTERPRETERS = String.raw`(?:node|nodejs|bun|python[\d.]*|pythonw|(?:ba|z|da|k)?sh|perl|ruby|php|pwsh|` +
   String.raw`powershell|osascript|cmd)(?:\.exe)?`;
 const DL_INLINE_FLAG = String.raw`(?:-(?:e|E|c|p|r|-eval|-print|Command|command|EncodedCommand|enc)|/[cCkK])`;
@@ -317,7 +316,7 @@ const DL_LEAD_RE = pyRe(DL_LEAD_SRC, "y");
 export const DL_CALLEE_SRC =
   String.raw`(?:new\s+)?(?P<chain>[A-Za-z_$][\w$]*(?:\s*\??\.\s*[A-Za-z_$][\w$]*){0,50})\s*(?P<call>\()?`;
 const DL_CALLEE_RE = pyReNamed(DL_CALLEE_SRC, "y");
-export const DL_CALLEE_CHARS = [..."abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_$."];
+export const DL_CALLEE_CHARS = [...DL_SPEC_CHARS._DL_CALLEE_CHARS];
 const CALLEE_CHAR_SET = new Set(DL_CALLEE_CHARS);
 export const DL_BRACKET_SRC = String.raw`[()\[\]{},]`;
 
