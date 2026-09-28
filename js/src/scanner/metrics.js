@@ -1,7 +1,7 @@
 // Metrics & ratings — twin of lazaret.scanner.core compute_metrics /
 // worst_sev_rating / maintainability_rating.
 
-import { lexLines, jsxReading } from "./lexer.js";
+import { lexLines, jsxReading } from "../lib/lexer.js";
 import { pyStrip, pyRound1 } from "../lib/pycompat.js";
 import { normalizeNewlines } from "../lib/fs.js";
 import { pinUnicode } from "../lib/unicode13.js";

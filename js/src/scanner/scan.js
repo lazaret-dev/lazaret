@@ -13,7 +13,7 @@ import {
   B64_BLOB_RE, OBF_IDENT_RE, SECRET_SKIP_RE, CHARCODE_RE, ENTROPY_VALUE_RE, entropySecretish,
   makeSuppressor, mkIssue,
 } from "./engine.js";
-import { lexLines, jsxReading } from "./lexer.js";
+import { lexLines, jsxReading } from "../lib/lexer.js";
 import { extractFunctions } from "./functions.js";
 import { cpLen, pyRe, pyRepr, pyRstrip, pyLstrip, pyStrip, isPySpace } from "../lib/pycompat.js";
 import { findSecretToken, registerScanContext } from "../lib/redact.js";
@@ -624,7 +624,32 @@ function joinedEvalDecode(ctx, i, ruleRe) {
 // module, a require("child_process") call or a name bound to one); any other
 // method call (RegExp.prototype.exec, a database's .exec) is not code
 // execution. The other sink names count on any receiver.
-const DECODE_CALL_RE = pyRe("(?:\\batob|\\bb64decode|\\.\\s*fromhex|\\bunhexlify|\\b(?:codecs|__import__\\(\\s*['\\\"]codecs['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]codecs['\\\"]\\s*\\))\\s*\\.\\s*decode|\\b(?:zlib|__import__\\(\\s*['\\\"]zlib['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]zlib['\\\"]\\s*\\))\\s*\\.\\s*decompress)\\s*\\(|\\bBuffer\\s*\\.\\s*from\\s*\\([^;\\n]{0,300}?['\\\"`]base64['\\\"`]");
+const DECODE_CALL_SRC = "(?:\\batob|\\bb64decode|\\.\\s*fromhex|\\bunhexlify|\\b(?:codecs|__import__\\(\\s*['\\\"]codecs['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]codecs['\\\"]\\s*\\))\\s*\\.\\s*decode|\\b(?:zlib|__import__\\(\\s*['\\\"]zlib['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]zlib['\\\"]\\s*\\))\\s*\\.\\s*decompress|\\.\\s*decrypt)\\s*\\(|\\bBuffer\\s*\\.\\s*from\\s*\\([^;\\n]{0,300}?['\\\"`]base64['\\\"`]";
+const DECODE_CALL_RE = pyRe(DECODE_CALL_SRC);
+// A decoder imported under another name (twin of core._decoder_aliases /
+// _file_decode_re): `from base64 import b64decode as invoke` makes invoke(…)
+// a decode call; `.decrypt(` is one of its own.
+const DECODER_IMPORT_RE = pyRe(String.raw`^[ \t]*from[ \t]+(?:base64|binascii|codecs|zlib|marshal|bz2|lzma|gzip)[ \t]+import[ \t]+([^\n#]{1,300})`, "gm");
+const DECODER_NAMES = new Set(["b64decode", "b32decode", "b85decode", "a85decode", "decodebytes", "standard_b64decode",
+  "urlsafe_b64decode", "unhexlify", "a2b_base64", "a2b_hex", "decode", "decompress", "loads"]);
+const PLAIN_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+function decoderAliases(text) {
+  const out = [];
+  if (!text.includes("import") || !text.includes(" as ")) return out;
+  DECODER_IMPORT_RE.lastIndex = 0;
+  for (let m; (m = DECODER_IMPORT_RE.exec(text)) !== null;) {
+    for (const part of m[1].replaceAll("(", " ").replaceAll(")", " ").split(",")) {
+      const bits = part.split(/[\t\n\x0b\x0c\r \x1c-\x1f\x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+/).filter(Boolean);
+      if (bits.length === 3 && bits[1] === "as" && DECODER_NAMES.has(bits[0]) && PLAIN_NAME_RE.test(bits[2])
+          && !out.includes(bits[2])) out.push(bits[2]);
+    }
+  }
+  return out.slice(0, 20);
+}
+function fileDecodeRe(content) {
+  const aliases = decoderAliases(content);
+  return aliases.length ? pyRe(DECODE_CALL_SRC + String.raw`|(?<![\w.])(?:` + aliases.join("|") + String.raw`)\s*\(`) : DECODE_CALL_RE;
+}
 // The receiver starts at an identifier boundary, (?<![\w$]): every position
 // inside a long identifier used to retry the whole rest of it (quadratic).
 const DECODE_SINK_RE = pyRe(String.raw`(?:(?<![\w$])(require\s*\(\s*['"\x60][ \w:]*['"\x60]\s*\)|[A-Za-z_$][\w$]*)\s*\.\s*)?`
@@ -678,6 +703,7 @@ function depDecodeFlow(path, ctx, issues, rule) {
   const have = new Set(issues.filter((i) => i.rule === "SC-EVAL-DECODE").map((i) => i.line));
   const cpAliases = ctx.lang === "js" ? childProcessAliases(ctx.content) : new Set();
   const decoded = new Map();                 // name -> [line of the decode, its offset in the file]
+  const decodeRe = ctx.lang === "py" ? fileDecodeRe(ctx.content) : DECODE_CALL_RE;
   const live = (text, at) => {               // decodes behind the decoded names in text, in reach at `at`
     const out = [];
     identRe.lastIndex = 0;
@@ -696,7 +722,7 @@ function depDecodeFlow(path, ctx, issues, rule) {
     const code = ctx.mcode(i);
     if (!code || isBlank(code)) continue;
     if (!(i & 63)) ctx.checkTime();
-    const hasDecode = DECODE_CALL_RE.test(code);
+    const hasDecode = decodeRe.test(code);
     if (!decoded.size && !hasDecode) continue;
     const blank = blankStrings(code);
     const pairs = pairOffsets(code);         // blank keeps code's UTF-16 layout
@@ -716,7 +742,7 @@ function depDecodeFlow(path, ctx, issues, rule) {
       const at = base + cpAt(pairs, pos);
       if (kind === 0) {
         const [a, b] = ev.indices[2];
-        if (DECODE_CALL_RE.test(code.slice(a, b))) { decoded.set(ev[1], [i + 1, at]); continue; }
+        if (decodeRe.test(code.slice(a, b))) { decoded.set(ev[1], [i + 1, at]); continue; }
         const src = live(blank.slice(a, b), at);
         if (src.length) decoded.set(ev[1], src.reduce((x, y) => (y[1] > x[1] ? y : x)));
         continue;
@@ -736,7 +762,7 @@ function depDecodeFlow(path, ctx, issues, rule) {
       const src = live(blank.slice(argStart, end), at);
       let msg;
       if (src.length) msg = `Decoded payload (assigned at line ${Math.min(...src.map((d) => d[0]))}) reaches a code-execution sink.`;
-      else if (DECODE_CALL_RE.test(code.slice(argStart, end))) msg = "Decoded payload reaches a code-execution sink in the same call.";
+      else if (decodeRe.test(code.slice(argStart, end))) msg = "Decoded payload reaches a code-execution sink in the same call.";
       else continue;
       have.add(i + 1);
       issues.push(mkIssue({ ...rule, msg }, path, i + 1, ctx.lines, ev.index));

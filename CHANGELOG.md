@@ -77,7 +77,62 @@ project is pre-1.0, so the 0.x API may still change.
   container (`d["k"] = q`, `lst.append(q)`, a ConfigParser), loop variables,
   and branches only constant folding would rule out.
 
+- **Install scripts fail on the PyPI malware shapes they missed (both
+  engines; audit P0).** On the audit's malware corpus Lazaret passed two
+  thirds of the malicious PyPI packages, most of which ran their payload
+  from `setup.py` in ways the install-script test did not read. `setup.py`,
+  an in-tree build backend and the modules they import from the sdist (now
+  also from `src/` and through relative imports), and npm install hooks, now
+  fail (SC-INSTALL-HOOK, CRITICAL) on: PowerShell that hides or fetches what
+  it runs (an `-EncodedCommand` / `-enc` / `-e` argument, decoded and read; a
+  download cradle such as `irm URL | iex` or
+  `IEX (New-Object Net.WebClient).DownloadString(URL)`; a file downloaded
+  and started); a script carried in a string literal that downloads and
+  runs code (a stager written to a temporary file and started); a reverse
+  shell (a socket made a shell's standard streams, `bash -i >& /dev/tcp/…`,
+  `nc -e`); the machine's user or host name, or `whoami` / `ifconfig`
+  output, sent over the network (the dependency-confusion beacon); and, in
+  the code pip runs, a download written to a file and run.
+
+- **Import-time code that no library needs is SUSPICIOUS (both engines;
+  audit P0).** SC-IMPORT-RISK was MAJOR (WARN at most) whatever it found. It
+  is now CRITICAL for code received over the network and run, a download
+  run through a shell or with the Python interpreter, PowerShell that hides
+  or fetches what it runs (as an exec call's argument), a stager string, a
+  reverse shell, credentials or the whole environment sent to a named
+  exfiltration service (a Discord webhook, a Telegram bot), and the user or
+  host name sent to a data-capture service (webhook.site, Burp Collaborator
+  and other OAST hosts, interact.sh, pipedream, requestbin …). What ordinary
+  code can share stays MAJOR: the whole environment next to other network
+  code, a download written to a file and run as a binary.
+
+- **More of a package's import-time code is read (registry review).** A
+  wheel's top-level modules, now an sdist's too (not `setup.py`,
+  `conftest.py` and the like), and the modules they import — `import x.a`,
+  `from x import b`, `from . import c`, `from .m import d`, up to 300
+  modules — get the import-time test. Before, only a wheel's top-level
+  files did, so a payload one import away was never read.
+
+- **The dependency decode flow reads aliased decoders and decrypted
+  payloads (both engines).** `from base64 import b64decode as invoke` then
+  `exec(invoke(…))`, `from zlib import decompress as z`, and
+  `Fernet(key).decrypt(…)` now feed SC-EVAL-DECODE.
+
+  On the audit's malware corpus (945 packages) these four took the share of
+  malicious PyPI packages judged SUSPICIOUS from 34% to 84% (GuardDog, the
+  audit's reference: 88% high risk) and of malicious npm packages from 46%
+  to 50%, with no benign package newly SUSPICIOUS or WARN (429 packages:
+  the top 100 of each registry, 198 more from the top 2,000, and 31 chosen
+  to look risky).
+
 ### Changed
+- **The import-time test reads code, not prose (both engines).** A Python or
+  JavaScript file that fails it is read again without its comments and, in
+  Python, the strings that stand alone as statements (docstrings), unless
+  the file reads its own `__doc__`; and PowerShell counts there only as an
+  argument of an exec call. Once more of a package was read, a docstring
+  naming ``id_rsa`` made paramiko WARN, and a CLI's self-update command
+  shown in a comment and a docstring made huggingface-hub SUSPICIOUS.
 - **Taint reads only what can carry the injection (both engines).** A sink's
   arguments ran to the end of the line, so `exec(cmd); log(location.href)`
   and a minified bundle's later code were read as the sink's input, and every

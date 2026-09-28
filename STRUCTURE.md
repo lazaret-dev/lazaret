@@ -210,12 +210,13 @@ js/
 │   ├── report.js         report format (JSON + HTML), terminal output
 │   ├── deps.js           --deps: a dependency's install hooks followed to the
 │   │                     files they run; the import-time test on its code
-│   ├── scanner/          rules, scan loop, comment lexer, linear-time matchers,
-│   │                     taint, SQL sinks, functions, metrics, cross-file
-│   │                     flows in JavaScript (flow.js)
+│   ├── scanner/          rules, scan loop, linear-time matchers, taint,
+│   │                     SQL sinks, functions, metrics, cross-file flows in
+│   │                     JavaScript (flow.js)
 │   └── lib/              leaf helpers: fs (collection, report paths), encoding
 │                         and codecs (BOM/UTF-16/PEP 263), binary (magic
-│                         bytes), redact, issue, supplychain (install hooks),
+│                         bytes), lexer (the comment lexer), redact, issue,
+│                         supplychain (install hooks),
 │                         hooks (the files a hook runs; install-script and
 │                         import-time tests), shellpipe (a download piped
 │                         into a shell), pyjson/pycompat/pynames

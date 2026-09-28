@@ -20,7 +20,7 @@
 import { lstatSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { scanFile } from "./scanner/scan.js";
-import { followHook, installScriptRisk, importTimeRisk, agentHijack, agentHijackInCommand, nodeCandidates, shebangLang,
+import { followHook, installScriptRisk, importTimeRisk, importTimeSeverity, agentHijack, agentHijackInCommand, nodeCandidates, shebangLang,
   HOOK_MAX_CHARS, HOOK_MAX_COMMANDS, HOOK_MAX_TARGETS, HOOK_MAX_PATH } from "./lib/hooks.js";
 import { HOOK_COMMANDS, loadManifest, scInstallHookIssue } from "./lib/supplychain.js";
 import { readBounded, truncatedIssue, scanErrorIssue, strerror, normalizeNewlines, encodingIssues,
@@ -196,7 +196,7 @@ export function dependencyChecks(root, files, manifests, issues, { exclude = [],
   for (const f of files) {
     if (!f.dep || (f.lang !== "js" && f.lang !== "py") || run.has(posix(f.path))) continue;
     let found, agent;
-    try { found = dependencyImportIssue(f.path, f.content); agent = dependencyAgentIssue(f.path, f.content); }
+    try { found = dependencyImportIssue(f.path, f.content, f.lang); agent = dependencyAgentIssue(f.path, f.content); }
     catch (e) { found = scanErrorIssue(f.path, e); agent = null; }
     if (found) out.push(found);
     if (agent) out.push(agent);
@@ -304,13 +304,14 @@ function readScript(tree, rel, asLang, out, extra) {
   return text;
 }
 
-/** SC-IMPORT-RISK (MAJOR) for a dependency's file that fails the import-time test, else null. */
-export function dependencyImportIssue(path, text) {
-  const [reasons, line] = importTimeRisk(text);
+/** SC-IMPORT-RISK (MAJOR, or CRITICAL: importTimeSeverity) for a dependency's file (`lang` "js" or "py") that fails
+ * the import-time test, else null. Twin of core.dependency_import_issue. */
+export function dependencyImportIssue(path, text, lang = null) {
+  const [reasons, line] = importTimeRisk(text, lang);
   if (!reasons.length) return null;
   const lines = text.split("\n");
   registerScanContext(lines, SECRET_SKIP_RE);     // the file's own entropy literals (core: _Redactor(lines))
-  return mkIssue({ id: "SC-IMPORT-RISK", name: "Risky import-time code", type: "HOTSPOT", sev: "MAJOR",
+  return mkIssue({ id: "SC-IMPORT-RISK", name: "Risky import-time code", type: "HOTSPOT", sev: importTimeSeverity(reasons),
     msg: `Dependency code ${reasons.join("; and ")}.`, why: DEP_IMPORT_RISK_WHY,
     fix: "Read the file: what does it collect, and where does it send it?",
     ref: "CWE-506 · Supply chain" }, path, line, lines);

@@ -74,7 +74,7 @@ function cpForward(s, i, n) {
 }
 
 /** The UTF-16 index `n` code points before index i (at least 0). */
-function cpBack(s, i, n) {
+export function cpBack(s, i, n) {
   for (let k = 0; k < n && i > 0; k++) {
     const c = s.charCodeAt(i - 1);
     i -= c >= 0xdc00 && c <= 0xdfff && i >= 2 && (s.charCodeAt(i - 2) & 0xfc00) === 0xd800 ? 2 : 1;

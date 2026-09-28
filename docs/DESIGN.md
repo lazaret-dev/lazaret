@@ -223,10 +223,22 @@ twin `js/src/lib/received.js`.
   call's arguments and each argument's value are read for `_DL_ARG_SPAN` (400)
   chars; a minified row (`> _DL_LONG_ROW`) is read once. Result: a text costs
   about one pass whatever it holds.
-- **Severity policy.** Import-time code → SC-IMPORT-RISK (MAJOR). An install
-  script that does it → CRITICAL (`install_script_risk`). Download-to-file is
-  MAJOR only and **never** escalates an install hook (it is also the shape of a
-  legitimate prebuilt-binary installer).
+- **Severity policy.** Import-time code → SC-IMPORT-RISK, MAJOR for what
+  ordinary code can share and CRITICAL (`import_time_severity`, 0.1.7) for
+  the shapes no library needs: code received over the network and run, a
+  download run through a shell, hidden or fetching PowerShell, a stager
+  string, a reverse shell, credentials sent to a named exfiltration service,
+  host information sent to a data-capture service, a download run with the
+  Python interpreter. An install script that does any of it → CRITICAL
+  (`install_script_risk`). Download-to-file is MAJOR only in npm hooks and
+  import-time code (it is also the shape of a legitimate prebuilt-binary
+  installer); in the code pip runs to install an sdist it is CRITICAL.
+  The import-time test reads code, not prose: a file that fails it is read
+  again with its comments (and Python's statement strings — docstrings)
+  blanked in place (`_import_code`; line breaks and character counts kept,
+  so lines and pattern bounds are unchanged), and PowerShell counts there
+  only as an argument of an exec call (`_powershell_run_at`). Both keep the
+  lexer off the hot path: it runs only on a file the raw text already fails.
 
 **The shared spec.** The detector's data (name sets, character sets, limits) and
 **all its patterns** (27 plain regexes + 6 alternation groups, ~57 compiled
