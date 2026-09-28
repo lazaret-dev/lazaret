@@ -400,13 +400,16 @@ class Inventory(list):
 
     def dedup(self):
         """One entry per (ecosystem, name, version) — several versions of a
-        package are all kept. An unknown-version entry ('' — a range, a
-        wildcard, a git dependency) is dropped when a concrete version of
-        the same package is known from elsewhere."""
+        package are all kept, and one version spelled two ways (3.2 in a
+        lockfile, 3.2.0 in pyproject.toml) counts once: the first entry is
+        kept. An unknown-version entry ('' — a range, a wildcard, a git
+        dependency) is dropped when a concrete version of the same package is
+        known from elsewhere."""
         known = {(e, normalize_pkg(n, e)) for e, n, v, w in self if v}
         seen, out = set(), Inventory()
         for e, n, v, w in self:
-            key = (e, normalize_pkg(n, e), v)
+            same = version_key(v, e) if v else None     # 3.2 == 3.2.0, as matching sees it
+            key = (e, normalize_pkg(n, e), v if same is None else same)
             if key in seen or (not v and (e, key[1]) in known):
                 continue
             seen.add(key)

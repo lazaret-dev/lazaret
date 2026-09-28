@@ -24,6 +24,15 @@ project is pre-1.0, so the 0.x API may still change.
   projects all three now match an independent OSV matcher exactly (216 of
   216 advisory groups for uv and pylock, 104 of 104 for Bun, none extra).
 
+### Fixed
+- **One finding per dependency version, however it is spelled
+  (`lazaret-sca`).** A version pinned as `3.2.0` in `pyproject.toml` and
+  locked as `3.2` in `poetry.lock` or `uv.lock` was inventoried twice, so
+  every advisory for it was reported twice (37 duplicate findings in a
+  benchmark project). Versions that matching treats as equal (PEP 440 and
+  semver zero padding, a `v` prefix, semver build metadata) now count once;
+  the first entry is kept, as before.
+
 ### Security
 - **Feed decompression is budgeted (`lazaret-sca --update-bundle`).** Only the
   downloaded size of a feed was capped, so a small gzip could expand a

@@ -246,6 +246,18 @@ class NpmInventory(Tmp):
         self.assertEqual(inv.dedup(), [("npm", "lodash", "4.17.21", "a"), ("npm", "lodash", "4.17.11", "b"),
                                        ("npm", "only-range", "", "e")])
 
+    def test_dedup_counts_one_version_spelled_two_ways_once(self):
+        # pyproject.toml pins django==3.2.0 and the lockfile says 3.2: every
+        # advisory was reported twice (37 duplicates in the audit benchmark)
+        inv = sca.Inventory([("pypi", "Django", "3.2.0", "pyproject.toml"), ("pypi", "django", "3.2", "uv.lock"),
+                             ("pypi", "django", "3.2+local", "a"), ("pypi", "django", "3.2.post1", "b"),
+                             ("npm", "ms", "2.0", "c"), ("npm", "ms", "2.0.0", "d"), ("npm", "ms", "v2.0.0", "e"),
+                             ("npm", "ms", "2.0.0-rc.1", "f"), ("npm", "x", "latest", "g"), ("npm", "x", "latest", "h")])
+        self.assertEqual(inv.dedup(), [("pypi", "Django", "3.2.0", "pyproject.toml"),
+                                       ("pypi", "django", "3.2+local", "a"), ("pypi", "django", "3.2.post1", "b"),
+                                       ("npm", "ms", "2.0", "c"), ("npm", "ms", "2.0.0-rc.1", "f"),
+                                       ("npm", "x", "latest", "g")])
+
 
 # ---------------------------------------------------------------------------
 # 17. PyPI inventory
