@@ -126,7 +126,10 @@ resolving to one file. Writes are atomic
   `node-gyp rebuild` hook (MAJOR), and a dependency's other JavaScript and
   Python files get the import-time test (`SC-IMPORT-RISK`, MAJOR: the whole
   environment or a credential store read next to a network call, a download
-  run through a shell, or code received over the network run). A
+  run through a shell, or a value received over the network run as code (also
+  under an alias or an indirect `eval`), deserialized (`pickle.loads`, unsafe
+  `yaml.load`, `unserialize`; CWE-502), used as a dynamically imported module
+  name, or written to a file the same code then runs). A
   dependency that launches your AI coding agent in an autonomous mode
   (`claude --dangerously-skip-permissions`, `gemini --yolo`, the s1ngularity
   attack) is `SC-AGENT-HIJACK` (CRITICAL).

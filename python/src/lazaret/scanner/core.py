@@ -4764,6 +4764,14 @@ def runs_substituted_download(row):
             and _DL_SUBST_RE.search(row) is not None)
 
 
+# the reason each received-code category adds (see _received_code_kind)
+_DL_CATEGORY_REASON = {
+    "run": "runs code it receives over the network",
+    "deserialize": "deserializes data it receives over the network",
+    "import": "loads a module named by data it receives over the network",
+}
+
+
 def install_script_risk(text):
     """Reasons an install-time script looks hostile ([] if none)."""
     reasons = []
@@ -4775,9 +4783,13 @@ def install_script_risk(text):
         reasons.append(f"contacts an address typical of data exfiltration ({dest.group(0)[:40]})")
     if _pipes_download_to_shell(text):
         reasons.append("pipes a download into a shell")
-    if ((("curl" in text or "wget" in text) and any(runs_substituted_download(row) for row in text.split("\n")))
-            or runs_received_code(text) is not None):
-        reasons.append("runs code it receives over the network")
+    substituted = (("curl" in text or "wget" in text)
+                   and any(runs_substituted_download(row) for row in text.split("\n")))
+    received = _received_code_kind(text)
+    if substituted:
+        reasons.append(_DL_CATEGORY_REASON["run"])
+    elif received is not None:
+        reasons.append(_DL_CATEGORY_REASON[received[1]])
     return reasons
 
 
@@ -4830,10 +4842,14 @@ def import_time_risk(text):
                 reasons.append("runs a downloaded script through a shell")
                 line = line or i + 1
                 break
-    received = runs_received_code(text)
+    received = _received_code_kind(text)
     if received is not None:
-        reasons.append("runs code it receives over the network")
-        line = line or received
+        reasons.append(_DL_CATEGORY_REASON[received[1]])
+        line = line or received[0]
+    dropped = _downloads_and_runs_file(text)
+    if dropped is not None:
+        reasons.append("downloads a file and then runs it")
+        line = line or dropped
     return reasons, line
 
 
@@ -4940,6 +4956,16 @@ _DL_NEEDLE_RE = re.compile("|".join(re.escape(n) for n in sorted(_DL_NEEDLES, ke
 _DL_RUN_NEEDLES = ("eval", "exec", "Function", "runIn", "Script", "compileFunction", "_compile", "system",
                    "popen", "getoutput", "getstatusoutput", "shell", "-e", "-c", "-p", "-r", "-E", "/c", "/C",
                    "/k", "/K", "Command", "-enc")
+# a value received over the network handed whole to a deserializer that runs
+# code embedded in it (CWE-502): pickle / marshal / a full yaml.load / a
+# node-serialize unserialize. Each match holds one of these.
+_DL_DESERIAL_NEEDLES = ("pickle", "marshal", "yaml.load", "unserialize", "jsonpickle", "dill", "cloudpickle",
+                        "cPickle")
+# a module named by a received value, loaded dynamically: import(x), require(x),
+# __import__(x), importlib.import_module(x). Each match holds one of these.
+_DL_IMPORT_NEEDLES = ("require", "import(", "import (", "__import__", "import_module")
+# the file-level gate is a network name and any sink needle
+_DL_SINK_NEEDLES = _DL_RUN_NEEDLES + _DL_DESERIAL_NEEDLES + _DL_IMPORT_NEEDLES
 # a name bound to a network module (const https = require('https')), or to a
 # function (const load = (u) => fetch(u)): it carries the network anywhere
 _DL_MODULE_VALUE_RE = re.compile(
@@ -5006,6 +5032,13 @@ _DL_RUNNER_PAIRS = [
     (_DL_B, r"""require\(\s*["'](?:node:)?child_process["']\s*\)\.exec\s*\("""),
     (_DL_B, r"""os\.(?:system|popen)\s*\("""), (_DL_B, r"""__import__\(\s*["']os["']\s*\)\.(?:system|popen)\s*\("""),
     (_DL_NOT_MEMBER, r"""(?:system|popen)\s*\("""), (_DL_B, r"""(?:subprocess\.)?get(?:status)?output\s*\("""),
+    # eval / Function reached indirectly (the SC-EVAL-DECODE grammar), each
+    # ending at the payload's '(': (0, eval)(code), eval.call(t, code),
+    # eval.bind(t)(code), window['eval'](code), self['ev'+'al'](code)
+    ("", r"""\(\s*(?:void\s+)?[\w$.]+\s*,\s*""" + _GLOBAL_OBJECT + r"""(?:eval|Function)\s*\)\s*\("""),
+    (_DL_B, r"""(?:eval|Function)\s*\.\s*call\s*\("""),
+    (_DL_B, r"""(?:eval|Function)\s*\.\s*bind\s*\([^()]*\)\s*\("""),
+    ("", _EVAL_BY_NAME + r"""\s*\("""),
 ]
 _DL_RUNNER = _dl_alternatives(_DL_RUNNER_PAIRS)
 _DL_RUNNER_RE, _DL_RUNNER_CANDIDATE_RE = _DL_RUNNER
@@ -5018,6 +5051,61 @@ _DL_SHELL_CALL_RE = re.compile(_DL_SHELL_CALL)
 _DL_SHELL_ARG_RE = re.compile(r"""shell(?<!\wshell)\s*=\s*True""")
 _DL_RUNNER_SHELL = _dl_alternatives(_DL_RUNNER_PAIRS + [(_DL_B, _DL_SHELL_CALL)])
 _DL_RUNNER_SHELL_RE, _DL_RUNNER_SHELL_CANDIDATE_RE = _DL_RUNNER_SHELL
+# deserializers that run code embedded in the value handed to them (CWE-502):
+# a received value passed whole to one is remote code execution by design. A
+# full yaml.load only (SafeLoader / safe_load within the call is data-only, the
+# S-YAML look-ahead), and node-serialize's unserialize (JSON.parse is not one).
+_DL_DESERIAL_PAIRS = [
+    (_DL_B, r"""(?:pickle|cPickle|_pickle|dill|cloudpickle)\.loads?\s*\("""),
+    (_DL_B, r"""marshal\.loads?\s*\("""), (_DL_B, r"""jsonpickle\.decode\s*\("""),
+    # a full yaml.load: no SafeLoader / safe_load in the call. The scan tolerates
+    # one level of nested parentheses (the received value is usually a call,
+    # requests.get(u).text) and is bounded so it cannot backtrack away.
+    (_DL_B, r"""yaml\.load\s*\((?!(?:[^()]|\([^()]*\)){0,400}?(?:SafeLoader|safe_load))"""),
+    # node-serialize / serialize-to-js: unserialize on any receiver (a bare
+    # name or a module alias), but not a longer word ending in "unserialize"
+    (_DL_B, r"""unserialize\s*\("""),
+]
+_DL_DESERIAL = _dl_alternatives(_DL_DESERIAL_PAIRS)
+_DL_DESERIAL_RE, _DL_DESERIAL_CANDIDATE_RE = _DL_DESERIAL
+# a module named by a received value, loaded dynamically: the specifier itself
+# is network-controlled (import(name), require(name), __import__(name),
+# importlib.import_module(name)). Fires only when the specifier is received.
+_DL_IMPORT_SINK_PAIRS = [
+    (_DL_NOT_MEMBER, r"""import\s*\("""), (_DL_NOT_MEMBER, r"""require\s*\("""),
+    (_DL_NOT_MEMBER, r"""__import__\s*\("""), (_DL_B, r"""importlib\.import_module\s*\("""),
+    (_DL_NOT_MEMBER, r"""import_module\s*\("""),
+]
+_DL_IMPORT_SINK = _dl_alternatives(_DL_IMPORT_SINK_PAIRS)
+_DL_IMPORT_SINK_RE, _DL_IMPORT_SINK_CANDIDATE_RE = _DL_IMPORT_SINK
+# Python's `from mod import (a, b)` is not a dynamic import(): the bare
+# `import(` sink is skipped on a from-import line (the ESM dynamic import it
+# means never appears there).
+_DL_FROM_IMPORT_RE = re.compile(r"""^[ \t]*from[ \t]+[\w.]+[ \t]+import\b""")
+_DL_BARE_IMPORT_RE = re.compile(r"""import\s*\(""")
+# Runner aliases: a name bound to a code-runner reference (no call), so that a
+# later call of the name is a runner — the classic dropper obfuscation
+# `const e = eval; e(payload)`, `s = os.system; s(payload)`, `const ex =
+# require('child_process').execSync`. Only direct runners (a call fires on its
+# own); the shell-command family (run/Popen/call with shell=True) is not
+# aliased. A found alias name is added to this file's runner set and its call
+# rows are seeded, like a network module's import name.
+_DL_RUNNER_REF = (
+    r"""require\(\s*["'](?:node:)?child_process["']\s*\)\s*\.\s*execSync"""
+    r"""|require\(\s*["'](?:node:)?child_process["']\s*\)\s*\.\s*exec"""
+    r"""|(?:child_process|childProcess|cp)\s*\.\s*execSync"""
+    r"""|(?:child_process|childProcess|cp)\s*\.\s*exec"""
+    r"""|(?:window|globalThis|global|self)\s*\.\s*eval"""
+    r"""|vm\s*\.\s*runInThisContext"""
+    r"""|(?:os|subprocess)\s*\.\s*(?:system|popen|getstatusoutput|getoutput)"""
+    r"""|execSync|execfile|exec|eval|compileFunction|getstatusoutput|getoutput|Function""")
+_DL_ALIAS_RE = re.compile(
+    r"""(?<![\w$.])(?P<alias>[A-Za-z_$][\w$]*)\s*=(?![=>])\s*(?:new\s+)?"""
+    r"""(?:""" + _DL_RUNNER_REF + r""")\s*(?![\w$.(\[])""")
+# a runner-alias definition holds one of these; the pre-pass reads no other row
+_DL_ALIAS_NEEDLES = ("eval", "exec", "system", "popen", "Function", "getoutput", "getstatusoutput",
+                     "runInThisContext")
+_DL_ALIAS_MAX = 64                                     # a file's alias names, at most
 _DL_DEFINING = ("def", "function", "async")
 _DL_INTERPRETERS = (r"""(?:node|nodejs|bun|python[\d.]*|pythonw|(?:ba|z|da|k)?sh|perl|ruby|php|pwsh|"""
                     r"""powershell|osascript|cmd)(?:\.exe)?""")
@@ -5460,9 +5548,14 @@ class _DlReader:
     """runs_received_code's pass over the rows: what each row binds, and
     whether it runs a received value."""
 
-    def __init__(self, text, rows, starts, taint, sources, runners, named, seeds):
+    def __init__(self, text, rows, starts, taint, sources, runners, named, seeds, sinks):
         self.text, self.rows, self.starts, self.taint = text, rows, starts, taint
         self.sources, self.runners, self.named, self.seeds = sources, runners, named, seeds
+        # extra sink families to scan, as (category, alternatives): deserialize
+        # and dynamic import, each added only when the file names one
+        self.sinks = sinks
+        self.aliases = {}                                # runner-alias name -> [definition rows]
+        self.alias_call = None                           # a call of any runner alias, or None
         self.until = -1
         self.headers = {}                                # row -> _dl_header, as read
         self.last_top = (-1, None)                       # the row read last, and its code
@@ -5475,7 +5568,8 @@ class _DlReader:
         return _dl_any(self.shell, i, i + _DL_ARG_SPAN + 1)
 
     def short_row(self, k, row):
-        """Read a row of ordinary length; True when it runs a received value."""
+        """Read a row of ordinary length; the category it runs a received value
+        as (see runs_received_code), or None."""
         taint, rows = self.taint, self.rows
         heads = taint.heads
         found = bool(heads) and not heads.isdisjoint(_DL_HEAD_RE.findall(row))
@@ -5483,7 +5577,7 @@ class _DlReader:
         above = _dl_row_above(rows, k) if row.lstrip()[:1] == "." else None
         if not (hot or found or (above is not None and (above in self.sources or (
                 bool(heads) and not heads.isdisjoint(_DL_HEAD_RE.findall(rows[above])))))):
-            return False                                 # names nothing received: binds and runs none
+            return None                                  # names nothing received: binds and runs none
         srcs = [m.span() for m in _dl_finditer(_DL_SOURCE, row)] if hot else []
         rd = _DlRow(self, k, row, 0, len(row), taint, srcs)
         rd.dirty = found
@@ -5576,11 +5670,22 @@ class _DlReader:
         # its runners, with what it binds
         for r in _dl_finditer(self.runners, row):
             if rd.runs(r, taint):
-                return True
+                return "run"
         for r in _dl_finditer(_DL_INTERP, row):
             if _dl_carried(row, r.end(), taint, k):
-                return True
-        return False
+                return "run"
+        from_import = bool(self.sinks) and _DL_FROM_IMPORT_RE.match(row) is not None
+        for cat, sink in self.sinks:                      # deserialize, import
+            for r in _dl_finditer(sink, row):
+                if from_import and _DL_BARE_IMPORT_RE.fullmatch(r.group()):
+                    continue                              # a Python from-import list, not import()
+                if rd.runs(r, taint):
+                    return cat
+        if self.alias_call is not None:                   # a call of a runner alias near its definition
+            for r in self.alias_call.finditer(row):
+                if _dl_alias_near(self.aliases[r.group(1)], k) and rd.runs(r, taint):
+                    return "run"
+        return None
 
     def _names(self, f, row, k):
         """(names, how) a fact that holds a received value binds: how is
@@ -5622,9 +5727,9 @@ class _DlReader:
 
     def long_row(self, k, row):
         """Read a minified row: only a download written straight into a
-        runner's arguments, a runner that starts within _DL_LOOKBACK
-        characters before a network name (the stretches merged: one pass at
-        most). True when one runs."""
+        sink's arguments, a sink that starts within _DL_LOOKBACK characters
+        before a network name (the stretches merged: one pass at most). The
+        category it runs a received value as, or None."""
         stretches = []
         for n in _DL_NEEDLE_RE.finditer(row):
             lo = max(0, n.start() - _DL_LOOKBACK)
@@ -5632,30 +5737,65 @@ class _DlReader:
                 stretches[-1][1] = n.start()
             else:
                 stretches.append([lo, n.start()])
+        families = [("run", self.runners)] + list(self.sinks)
+        from_import = bool(self.sinks) and _DL_FROM_IMPORT_RE.match(row) is not None
         for lo, hi in stretches:
-            end = min(len(row), hi + 3 * _DL_ARG_SPAN)     # a runner's name, its arguments, the last one's value
+            end = min(len(row), hi + 3 * _DL_ARG_SPAN)     # a sink's name, its arguments, the last one's value
             rd = None
-            for r in _dl_finditer(self.runners, row, lo, min(end, hi + _DL_ARG_SPAN)):
-                if r.start() >= hi:
-                    break
-                if rd is None:
-                    rd = _DlRow(self, k, row, lo, end, None,
-                                [m.span() for m in _dl_finditer(_DL_SOURCE, row, lo, end)], top=False)
-                if rd.runs(r, None):
-                    return True
-            for r in _dl_finditer(_DL_INTERP, row, lo, min(end, hi + _DL_ARG_SPAN)):
+            search_end = min(end, hi + _DL_ARG_SPAN)
+            for cat, family in families:
+                for r in _dl_finditer(family, row, lo, search_end):
+                    if r.start() >= hi:
+                        break
+                    if from_import and cat == "import" and _DL_BARE_IMPORT_RE.fullmatch(r.group()):
+                        continue                           # a Python from-import list, not import()
+                    if rd is None:
+                        rd = _DlRow(self, k, row, lo, end, None,
+                                    [m.span() for m in _dl_finditer(_DL_SOURCE, row, lo, end)], top=False)
+                    if rd.runs(r, None):
+                        return cat
+            for r in _dl_finditer(_DL_INTERP, row, lo, search_end):
                 if r.start() >= hi:
                     break
                 if _dl_carried(row, r.end(), None, k):
-                    return True
-        return False
+                    return "run"
+        return None
 
 
-def runs_received_code(text):
-    """The 1-based line where code runs what it received over the network as
-    code or as a shell command (see the section comment), else None. `text`
-    has \\n line endings."""
-    if not any(n in text for n in _DL_NEEDLES) or not any(n in text for n in _DL_RUN_NEEDLES):
+def _dl_runner_aliases(rows):
+    """{name: [definition rows]} for names bound to a direct code-runner
+    reference (see _DL_ALIAS_RE): a call of one within _DL_WINDOW rows below
+    its definition is a runner. Window-scoped like a received value, so a
+    short name reused far away (`const F = Function` in a bundle) is not a
+    runner everywhere. Read from rows naming a runner and holding '='; at
+    most _DL_ALIAS_MAX names are kept."""
+    defs = {}
+    for k, row in enumerate(rows):
+        if "=" not in row or len(row) > _DL_LONG_ROW or not any(nd in row for nd in _DL_ALIAS_NEEDLES):
+            continue
+        for m in _DL_ALIAS_RE.finditer(row):
+            name = m.group("alias")
+            if name in _DL_NOT_NAMES:
+                continue
+            if name not in defs:
+                if len(defs) >= _DL_ALIAS_MAX:
+                    continue
+                defs[name] = []
+            defs[name].append(k)
+    return defs
+
+
+def _dl_alias_near(def_rows, k):
+    """Is a definition row at or within _DL_WINDOW rows above k?"""
+    i = bisect.bisect_right(def_rows, k) - 1
+    return i >= 0 and k - def_rows[i] <= _DL_WINDOW
+
+
+def _received_code_kind(text):
+    """(1-based line, category) for the first place code runs, deserializes or
+    imports a value it received over the network (see runs_received_code), or
+    None. Category is 'run', 'deserialize' or 'import'."""
+    if not any(n in text for n in _DL_NEEDLES) or not any(n in text for n in _DL_SINK_NEEDLES):
         return None
     rows = text.split("\n")
     starts, at = [], 0
@@ -5680,8 +5820,22 @@ def runs_received_code(text):
     for name in taint.always:
         for r in named.find(name):
             seeds[r] = 1
-    runners = _DL_RUNNER_SHELL if "shell" in text and _DL_SHELL_TRUE_RE.search(text) else _DL_RUNNER
-    reader = _DlReader(text, rows, starts, taint, sources, runners, named, seeds)
+    aliases = _dl_runner_aliases(rows) if any(nd in text for nd in _DL_ALIAS_NEEDLES) else {}
+    alias_call = None
+    if aliases:                                         # a call of a runner alias, near its definition, is a runner
+        alias_call = re.compile(r"""(?<![\w$.])(""" + "|".join(re.escape(n) for n in sorted(aliases)) + r""")\s*\(""")
+        for name, def_rows in aliases.items():
+            for r in named.find(name):
+                seeds[r] = 1
+    shell_on = "shell" in text and _DL_SHELL_TRUE_RE.search(text) is not None
+    runners = _DL_RUNNER_SHELL if shell_on else _DL_RUNNER
+    sinks = []                                          # the extra sink families this file names
+    if any(n in text for n in _DL_DESERIAL_NEEDLES):
+        sinks.append(("deserialize", _DL_DESERIAL))
+    if any(n in text for n in _DL_IMPORT_NEEDLES):
+        sinks.append(("import", _DL_IMPORT_SINK))
+    reader = _DlReader(text, rows, starts, taint, sources, runners, named, seeds, sinks)
+    reader.aliases, reader.alias_call = aliases, alias_call
     # Rows are read in order, from a seed on for _DL_WINDOW rows (and as long
     # as a value is bound): a row outside every such stretch can neither bind
     # a received value nor run one, so it is skipped.
@@ -5690,18 +5844,132 @@ def runs_received_code(text):
     while k < len(rows):
         row = rows[k]
         if len(row) > _DL_LONG_ROW:
-            if reader.long_row(k, row):
-                return k + 1
+            cat = reader.long_row(k, row)
+            if cat:
+                return k + 1, cat
         else:
             if seeds[k]:
                 reader.until = max(reader.until, k + _DL_WINDOW)
-            if reader.short_row(k, row):
-                return k + 1
+            cat = reader.short_row(k, row)
+            if cat:
+                return k + 1, cat
         nk = k + 1
         if nk > reader.until:
             nk = seeds.find(1, nk)
             nk = len(rows) if nk < 0 else nk
         k = nk
+    return None
+
+
+def runs_received_code(text):
+    """The 1-based line where code runs, deserializes or dynamically imports a
+    value it received over the network (see the section comment), else None.
+    `text` has \\n line endings."""
+    res = _received_code_kind(text)
+    return res[0] if res is not None else None
+
+
+# ---------------- Download to a file, then run the file ----------------
+# A weaker, MAJOR-only signal (SC-IMPORT-RISK, never CRITICAL, and never
+# escalating an install hook): a received value written to a file, and that
+# same file then run — subprocess.run([sys.executable, dropped]), os.system(p),
+# require(p), spawn('node', [p]). This shape is statically identical to what a
+# prebuilt-binary installer does (node-pre-gyp / prebuild-install /
+# node-gyp-build / esbuild download a platform binary and then run it), so it
+# is deliberately not part of install_script_risk (which escalates a hook to
+# CRITICAL): it is a capability to review, not a verdict.
+# Kept precise by three requirements: a real network source within the window,
+# a file WRITE naming a path, and a RUN of that same path (a name, or the same
+# string literal) in the window after it. `text` costs one pass: only rows near
+# a write are read, and each search is bounded.
+_DL_PATH_TOK = r"""[A-Za-z_$][\w$]*|["'][^"'\n]{1,200}["']"""
+# a received value written to a file, naming the path (a download-to-file API,
+# or a write whose window holds a source): captures the path token. p4
+# (urlretrieve) is a download-to-file on its own and needs no separate source.
+_DL_FILE_WRITE_RE = re.compile(
+    r"""\b(?:fs\s*\.\s*)?(?:write|append)File(?:Sync)?\s*\(\s*(?P<p1>""" + _DL_PATH_TOK + r""")\s*,"""
+    r"""|\bcreateWriteStream\s*\(\s*(?P<p2>""" + _DL_PATH_TOK + r""")"""
+    r"""|\bopen\s*\(\s*(?P<p3>""" + _DL_PATH_TOK + r""")\s*,[^)\n]{0,60}?["'][rbtU]*[wax]\+?[rbtU]*["']"""
+    r"""|\burlretrieve\s*\(\s*[^,()\n]{1,300},\s*(?P<p4>""" + _DL_PATH_TOK + r""")\s*\)""")
+_DL_FILE_WRITE_NEEDLES = ("writeFile", "appendFile", "createWriteStream", "open(", "urlretrieve")
+# the file is then run: the opener of an interpreter/exec/require/import/
+# subprocess call; the path is looked for among its arguments (_dl_pathrun_after)
+_DL_PATHRUN_SINK_RE = re.compile(
+    r"""\b(?:os\.system|os\.startfile|runpy\.run_path)\s*\("""
+    r"""|\b(?:subprocess\s*\.\s*)?(?:run|Popen|call|check_call|check_output)\s*\("""
+    r"""|\b(?:spawn|spawnSync|execFile|execFileSync|fork)\s*\("""
+    r"""|(?<![\w$.])(?:require|import|execfile)\s*\("""
+    r"""|(?<![\w$.])exec\s*\(\s*open\s*\(""")
+_DL_PATHRUN_NEEDLES = ("system", "startfile", "run_path", "run(", "Popen", "call", "check_", "spawn",
+                       "execFile", "fork", "require", "import", "exec")
+
+
+def _dl_norm_path(tok):
+    """A path token with its surrounding quotes and a leading "./" dropped, so
+    a name and the literal that names the same file compare equal."""
+    if tok[:1] in "\"'":
+        tok = tok[1:-1]
+        while tok[:2] == "./":
+            tok = tok[2:]
+    return tok
+
+
+def _dl_path_token(m):
+    """The normalized path token a _DL_FILE_WRITE_RE match names."""
+    return _dl_norm_path(next(g for g in m.groups() if g is not None))
+
+
+def _dl_region_names_path(region, path):
+    """Does `region` (a run sink's arguments) name the file `path` — as the
+    same identifier, or as a string literal for the same file?"""
+    for m in _DL_NAME_RE.finditer(region):
+        if m.group() == path:
+            return True
+    for m in _DL_STR_RE.finditer(region):
+        if _dl_norm_path(m.group()) == path:
+            return True
+    return False
+
+
+def _downloads_and_runs_file(text):
+    """The 1-based line where a received value is written to a file that is then
+    run (see the section comment), else None. MAJOR only."""
+    if (not any(n in text for n in _DL_NEEDLES) or not any(n in text for n in _DL_FILE_WRITE_NEEDLES)
+            or not any(n in text for n in _DL_PATHRUN_NEEDLES)):
+        return None
+    rows = text.split("\n")
+    # rows holding a network source (a plain write must be near a real download;
+    # urlretrieve is a download-to-file on its own)
+    src = sorted(k for k, row in enumerate(rows)
+                 if len(row) <= _DL_LONG_ROW and next(_dl_finditer(_DL_SOURCE, row), None) is not None)
+    for k, row in enumerate(rows):
+        if len(row) > _DL_LONG_ROW or not any(n in row for n in _DL_FILE_WRITE_NEEDLES):
+            continue
+        near_src = _dl_any(src, k - _DL_WINDOW, k + _DL_WINDOW + 1)
+        for wm in _DL_FILE_WRITE_RE.finditer(row):
+            if wm.group("p4") is None and not near_src:
+                continue                                 # a plain write needs a download in its window
+            path = _dl_path_token(wm)
+            if not path:
+                continue
+            hit = _dl_pathrun_after(rows, k, path)
+            if hit is not None:
+                return hit + 1
+    return None
+
+
+def _dl_pathrun_after(rows, k, path):
+    """The row index in [k, k+_DL_WINDOW] that runs the file named `path`
+    (the same name, or the same string literal in a run sink's arguments),
+    else None."""
+    end = min(len(rows), k + _DL_WINDOW + 1)
+    for j in range(k, end):
+        row = rows[j]
+        if len(row) > _DL_LONG_ROW or not any(n in row for n in _DL_PATHRUN_NEEDLES):
+            continue
+        for sm in _DL_PATHRUN_SINK_RE.finditer(row):
+            if _dl_region_names_path(row[sm.end():sm.end() + _DL_ARG_SPAN], path):
+                return j
     return None
 
 

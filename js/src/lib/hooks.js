@@ -17,8 +17,9 @@
 import { pyRe, pyStrip, isPySpace } from "./pycompat.js";
 import { PIPE_SCAN_SRC, EXEC_CALL_SRC, EXEC_CALL_RE, DL_SUBST_SRC, DL_SUBST_NEEDLE_SRC, pipesDownloadToShell,
   runsDownloadThroughShell, runsSubstitutedDownload } from "./shellpipe.js";
-import { runsReceivedCode, RECEIVED_TWINS, DL_NEEDLES, DL_RUN_NEEDLES, DL_PY_NET_MODULES, DL_NOT_NAMES,
-  DL_PREFIX_CHARS, DL_DEFINING, DL_CALLEE_CHARS, DL_LIMITS } from "./received.js";
+import { receivedCodeKind, downloadsAndRunsFile, RECEIVED_TWINS, DL_NEEDLES, DL_RUN_NEEDLES, DL_DESERIAL_NEEDLES,
+  DL_IMPORT_NEEDLES, DL_SINK_NEEDLES, DL_ALIAS_NEEDLES, DL_ALIAS_MAX, DL_FILE_WRITE_NEEDLES, DL_PATHRUN_NEEDLES,
+  DL_PY_NET_MODULES, DL_NOT_NAMES, DL_PREFIX_CHARS, DL_DEFINING, DL_CALLEE_CHARS, DL_LIMITS } from "./received.js";
 
 // ---- Python details the patterns depend on --------------------------------
 
@@ -597,6 +598,13 @@ function cpPrefix(s, n) {
   return s.slice(0, i);
 }
 
+// the reason each received-code category adds (twin of core._DL_CATEGORY_REASON)
+const DL_CATEGORY_REASON = {
+  run: "runs code it receives over the network",
+  deserialize: "deserializes data it receives over the network",
+  import: "loads a module named by data it receives over the network",
+};
+
 /**
  * Reasons an install-time script looks hostile ([] if none).
  * Twin of lazaret.scanner.core.install_script_risk.
@@ -610,10 +618,10 @@ export function installScriptRisk(text) {
   const dest = EXFIL_DEST_RE.exec(text);
   if (dest) reasons.push(`contacts an address typical of data exfiltration (${cpPrefix(dest[0], 40)})`);
   if (pipesDownloadToShell(text)) reasons.push("pipes a download into a shell");
-  if (((text.includes("curl") || text.includes("wget")) && text.split("\n").some(runsSubstitutedDownload))
-      || runsReceivedCode(text) !== null) {
-    reasons.push("runs code it receives over the network");
-  }
+  const substituted = (text.includes("curl") || text.includes("wget")) && text.split("\n").some(runsSubstitutedDownload);
+  const received = receivedCodeKind(text);
+  if (substituted) reasons.push(DL_CATEGORY_REASON.run);
+  else if (received !== null) reasons.push(DL_CATEGORY_REASON[received[1]]);
   return reasons;
 }
 
@@ -687,10 +695,15 @@ export function importTimeRisk(text) {
       start = nl + 1;
     }
   }
-  const received = runsReceivedCode(text);
+  const received = receivedCodeKind(text);
   if (received !== null) {
-    reasons.push("runs code it receives over the network");
-    line ??= received;
+    reasons.push(DL_CATEGORY_REASON[received[1]]);
+    line ??= received[0];
+  }
+  const dropped = downloadsAndRunsFile(text);
+  if (dropped !== null) {
+    reasons.push("downloads a file and then runs it");
+    line ??= dropped;
   }
   return [reasons, line];
 }
@@ -788,12 +801,15 @@ export const PY_TWINS = {
     _NODE_CODE_FLAGS: [...NODE_CODE_FLAGS], _NODE_PRELOAD_FLAGS: [...NODE_PRELOAD_FLAGS],
     _NODE_VALUE_FLAGS: [...NODE_VALUE_FLAGS], _SHEBANG_JS_NAMES: [...SHEBANG_JS_NAMES],
     _IMPORT_HARVEST_NEEDLES: IMPORT_HARVEST_NEEDLES,
-    _DL_NEEDLES: DL_NEEDLES, _DL_RUN_NEEDLES: DL_RUN_NEEDLES, _DL_PY_NET_MODULES: DL_PY_NET_MODULES,
+    _DL_NEEDLES: DL_NEEDLES, _DL_RUN_NEEDLES: DL_RUN_NEEDLES, _DL_DESERIAL_NEEDLES: DL_DESERIAL_NEEDLES,
+    _DL_IMPORT_NEEDLES: DL_IMPORT_NEEDLES, _DL_SINK_NEEDLES: DL_SINK_NEEDLES, _DL_ALIAS_NEEDLES: DL_ALIAS_NEEDLES,
+    _DL_FILE_WRITE_NEEDLES: DL_FILE_WRITE_NEEDLES, _DL_PATHRUN_NEEDLES: DL_PATHRUN_NEEDLES,
+    _DL_PY_NET_MODULES: DL_PY_NET_MODULES,
     _DL_NOT_NAMES: DL_NOT_NAMES, _DL_PREFIX_CHARS: DL_PREFIX_CHARS, _DL_DEFINING: DL_DEFINING,
     _DL_CALLEE_CHARS: DL_CALLEE_CHARS,
   },
   maps: Object.fromEntries([["_WRAPPER_VALUE_OPTIONS", WRAPPER_VALUE_OPTIONS],
     ["_WRAPPER_CHDIR_OPTIONS", WRAPPER_CHDIR_OPTIONS], ["_WRAPPER_COMMAND_OPTIONS", WRAPPER_COMMAND_OPTIONS]]
     .map(([name, map]) => [name, Object.fromEntries([...map].map(([k, v]) => [k, [...v].sort()]))])),
-  limits: { HOOK_MAX_CHARS, HOOK_MAX_COMMANDS, HOOK_MAX_TARGETS, HOOK_MAX_PATH, ...DL_LIMITS },
+  limits: { HOOK_MAX_CHARS, HOOK_MAX_COMMANDS, HOOK_MAX_TARGETS, HOOK_MAX_PATH, ...DL_LIMITS, _DL_ALIAS_MAX: DL_ALIAS_MAX },
 };

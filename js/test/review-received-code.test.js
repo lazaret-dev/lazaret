@@ -74,6 +74,76 @@ test("received code is found on its line, in both tests", () => {
   }
 });
 
+const DESERIAL_REASON = "deserializes data it receives over the network";
+const IMPORT_REASON = "loads a module named by data it receives over the network";
+const DROP_REASON = "downloads a file and then runs it";
+
+test("runner aliases and indirect eval of a received value", () => {
+  const cases = [
+    ["const e = eval;\nconst code = await (await fetch(" + U + ")).text();\ne(code);\n", 3],
+    ["const e = eval; e(await (await fetch(" + U + ")).text());\n", 1],
+    ["import os, requests\ns = os.system\ns(requests.get(" + U + ").text)\n", 3],
+    ["const code = await (await fetch(" + U + ")).text();\n(0, eval)(code);\n", 2],
+    ["const code = await (await fetch(" + U + ")).text();\neval.call(null, code);\n", 2],
+    ["const code = await (await fetch(" + U + ")).text();\nwindow['eval'](code);\n", 2],
+  ];
+  for (const [text, line] of cases) {
+    assert.equal(runsReceivedCode(text), line, text.slice(0, 60));
+    assert.ok(importTimeRisk(text)[0].includes(REASON));
+  }
+  // an alias called far from its definition is not a runner (a short name reused in a bundle)
+  const far = "const F = Function;\n" + "// x\n".repeat(60) + "const code = await (await fetch(u)).text();\nF(code);\n";
+  assert.equal(runsReceivedCode(far), null);
+});
+
+test("deserialization and dynamic import of a received value", () => {
+  const deser = [
+    ["import pickle, requests\npickle.loads(requests.get(" + U + ").content)\n", 2],
+    ["import marshal, requests\nmarshal.loads(requests.get(" + U + ").content)\n", 2],
+    ["import yaml, requests\nyaml.load(requests.get(" + U + ").text)\n", 2],
+    ["const s = require('node-serialize');\ns.unserialize(await (await fetch(" + U + ")).text());\n", 2],
+  ];
+  for (const [text, line] of deser) {
+    assert.equal(runsReceivedCode(text), line, text.slice(0, 60));
+    const [reasons, at] = importTimeRisk(text);
+    assert.ok(reasons.includes(DESERIAL_REASON), text.slice(0, 60));
+    assert.equal(at, line);
+  }
+  // SafeLoader (even past a nested paren) and safe_load are data-only
+  assert.ok(!importTimeRisk("import yaml, requests\nyaml.load(requests.get(u).text, Loader=yaml.SafeLoader)\n")[0]
+    .includes(DESERIAL_REASON));
+  const imp = [
+    ["const name = await (await fetch(" + U + ")).text();\nawait import(name);\n", 2],
+    ["const name = await (await fetch(" + U + ")).text();\nrequire(name);\n", 2],
+    ["import importlib, requests\nmod = requests.get(" + U + ").text\nimportlib.import_module(mod)\n", 3],
+  ];
+  for (const [text, line] of imp) {
+    assert.equal(runsReceivedCode(text), line, text.slice(0, 60));
+    assert.ok(importTimeRisk(text)[0].includes(IMPORT_REASON), text.slice(0, 60));
+  }
+  // a Python from-import list is not a dynamic import()
+  assert.ok(!importTimeRisk("import requests\nfrom urllib import (urlretrieve, quote)\nr = requests.get(u)\n")[0]
+    .includes(IMPORT_REASON));
+});
+
+test("download to a file, then run it, is MAJOR-only", () => {
+  const cases = [
+    ["const body = await (await fetch(" + U + ")).text();\nfs.writeFileSync('m.js', body);\nrequire('./m.js');\n", 3],
+    ["import requests, subprocess, sys\ndata = requests.get(" + U + ").content\n" +
+     "open('x.py', 'wb').write(data)\nsubprocess.run([sys.executable, 'x.py'])\n", 4],
+  ];
+  for (const [text, line] of cases) {
+    const [reasons, at] = importTimeRisk(text);
+    assert.ok(reasons.includes(DROP_REASON), text.slice(0, 60));
+    assert.equal(at, line);
+    assert.deepEqual(installScriptRisk(text), []);        // never escalates an install hook
+  }
+  // written but not run, and run but not downloaded: neither fires
+  assert.ok(!importTimeRisk("const b = await (await fetch(u)).text();\nfs.writeFileSync('c.json', b);\n")[0]
+    .includes(DROP_REASON));
+  assert.ok(!importTimeRisk("fs.writeFileSync('x.js', localData);\nrequire('./x.js');\n")[0].includes(DROP_REASON));
+});
+
 test("texts built to make the follower work cost about one pass", () => {
   // about 200 KB each (python/tests/scanner/test_review_received_code.py has the same)
   const shapes = [

@@ -146,6 +146,10 @@ const DL_NEEDLE_RE = new RegExp([...DL_NEEDLES]
 export const DL_RUN_NEEDLES = ["eval", "exec", "Function", "runIn", "Script", "compileFunction", "_compile", "system",
   "popen", "getoutput", "getstatusoutput", "shell", "-e", "-c", "-p", "-r", "-E", "/c", "/C", "/k", "/K", "Command",
   "-enc"];
+export const DL_DESERIAL_NEEDLES = ["pickle", "marshal", "yaml.load", "unserialize", "jsonpickle", "dill",
+  "cloudpickle", "cPickle"];
+export const DL_IMPORT_NEEDLES = ["require", "import(", "import (", "__import__", "import_module"];
+export const DL_SINK_NEEDLES = [...DL_RUN_NEEDLES, ...DL_DESERIAL_NEEDLES, ...DL_IMPORT_NEEDLES];
 export const DL_MODULE_VALUE_SRC =
   String.raw`\s*(?:await\s+)?(?:require|import)\(\s*["']` + DL_NET_MODULES_SRC + String.raw`["']\s*\)\s*(?:;\s*)?$`;
 const DL_MODULE_VALUE_RE = pyRe(DL_MODULE_VALUE_SRC, "y");
@@ -208,6 +212,14 @@ export const DL_NOT_NAMES = ("const let var this self await async function retur
   "with if else true false null None True False undefined str int float bytes bool list dict set tuple " +
   "object").split(" ");
 const NOT_NAMES = new Set(DL_NOT_NAMES);
+// core._GLOBAL_OBJECT and core._EVAL_BY_NAME (an eval/Function named by a
+// computed member, whole or split with +): reused for the indirect-eval runners
+const DL_GLOBAL_OBJECT = String.raw`(?:(?:window|globalThis|self|global|top|parent|frames)\s*\.\s*)?`;
+const DL_Q3 = String.raw`['\"${BT}]`;                                // core's ['"`] (with backslash-quote)
+const DL_SPLIT_LITERAL = String.raw`(?:` + DL_Q3 + String.raw`\s*\+\s*` + DL_Q3 + String.raw`)?`;
+const splitJoin = (s) => [...s].join(DL_SPLIT_LITERAL);
+export const DL_EVAL_BY_NAME_SRC = String.raw`\[\s*` + DL_Q3 + String.raw`(?:` + splitJoin("eval") + "|"
+  + splitJoin("Function") + String.raw`)` + DL_Q3 + String.raw`\s*\]`;
 const DL_RUNNER_PAIRS = [
   [DL_NOT_MEMBER, String.raw`(?:eval|exec|execfile)\s*\(`], [DL_B, String.raw`(?:window|globalThis|global|self)\.eval\s*\(`],
   [DL_B, String.raw`new\s+Function\s*\(`], [DL_NOT_MEMBER, String.raw`Function\s*\(`],
@@ -217,6 +229,11 @@ const DL_RUNNER_PAIRS = [
   [DL_B, String.raw`require\(\s*["'](?:node:)?child_process["']\s*\)\.exec\s*\(`],
   [DL_B, String.raw`os\.(?:system|popen)\s*\(`], [DL_B, String.raw`__import__\(\s*["']os["']\s*\)\.(?:system|popen)\s*\(`],
   [DL_NOT_MEMBER, String.raw`(?:system|popen)\s*\(`], [DL_B, String.raw`(?:subprocess\.)?get(?:status)?output\s*\(`],
+  // eval / Function reached indirectly, each ending at the payload's "("
+  ["", String.raw`\(\s*(?:void\s+)?[\w$.]+\s*,\s*` + DL_GLOBAL_OBJECT + String.raw`(?:eval|Function)\s*\)\s*\(`],
+  [DL_B, String.raw`(?:eval|Function)\s*\.\s*call\s*\(`],
+  [DL_B, String.raw`(?:eval|Function)\s*\.\s*bind\s*\([^()]*\)\s*\(`],
+  ["", DL_EVAL_BY_NAME_SRC + String.raw`\s*\(`],
 ];
 const DL_RUNNER = alternatives(DL_RUNNER_PAIRS);
 export const DL_SHELL_TRUE_SRC = String.raw`\bshell\s*=\s*True\b`;
@@ -226,6 +243,63 @@ const DL_SHELL_CALL_WHOLE_RE = pyRe(`^(?:${DL_SHELL_CALL_SRC})$`);
 export const DL_SHELL_ARG_SRC = String.raw`shell(?<!\wshell)\s*=\s*True`;
 const DL_SHELL_ARG_RE = pyRe(DL_SHELL_ARG_SRC, "g");
 const DL_RUNNER_SHELL = alternatives([...DL_RUNNER_PAIRS, [DL_B, DL_SHELL_CALL_SRC]]);
+// deserializers that run code embedded in the value handed to them (CWE-502)
+const DL_DESERIAL_PAIRS = [
+  [DL_B, String.raw`(?:pickle|cPickle|_pickle|dill|cloudpickle)\.loads?\s*\(`],
+  [DL_B, String.raw`marshal\.loads?\s*\(`], [DL_B, String.raw`jsonpickle\.decode\s*\(`],
+  [DL_B, String.raw`yaml\.load\s*\((?!(?:[^()]|\([^()]*\)){0,400}?(?:SafeLoader|safe_load))`],
+  [DL_B, String.raw`unserialize\s*\(`],
+];
+const DL_DESERIAL = alternatives(DL_DESERIAL_PAIRS);
+// a module named by a received value, loaded dynamically
+const DL_IMPORT_SINK_PAIRS = [
+  [DL_NOT_MEMBER, String.raw`import\s*\(`], [DL_NOT_MEMBER, String.raw`require\s*\(`],
+  [DL_NOT_MEMBER, String.raw`__import__\s*\(`], [DL_B, String.raw`importlib\.import_module\s*\(`],
+  [DL_NOT_MEMBER, String.raw`import_module\s*\(`],
+];
+const DL_IMPORT_SINK = alternatives(DL_IMPORT_SINK_PAIRS);
+// Python's `from mod import (a, b)` is not import(): the bare import( sink is
+// skipped on a from-import line (core._DL_FROM_IMPORT_RE / _DL_BARE_IMPORT_RE)
+export const DL_FROM_IMPORT_SRC = String.raw`^[ \t]*from[ \t]+[\w.]+[ \t]+import\b`;
+const DL_FROM_IMPORT_RE = pyRe(DL_FROM_IMPORT_SRC);
+export const DL_BARE_IMPORT_SRC = String.raw`import\s*\(`;
+const DL_BARE_IMPORT_WHOLE_RE = pyRe(`^(?:${DL_BARE_IMPORT_SRC})$`);
+// runner aliases (core._DL_RUNNER_REF / _DL_ALIAS_RE): a name bound to a direct
+// code-runner reference, so a later call of it is a runner
+const DL_RUNNER_REF =
+  String.raw`require\(\s*["'](?:node:)?child_process["']\s*\)\s*\.\s*execSync` +
+  String.raw`|require\(\s*["'](?:node:)?child_process["']\s*\)\s*\.\s*exec` +
+  String.raw`|(?:child_process|childProcess|cp)\s*\.\s*execSync` +
+  String.raw`|(?:child_process|childProcess|cp)\s*\.\s*exec` +
+  String.raw`|(?:window|globalThis|global|self)\s*\.\s*eval` +
+  String.raw`|vm\s*\.\s*runInThisContext` +
+  String.raw`|(?:os|subprocess)\s*\.\s*(?:system|popen|getstatusoutput|getoutput)` +
+  String.raw`|execSync|execfile|exec|eval|compileFunction|getstatusoutput|getoutput|Function`;
+export const DL_ALIAS_SRC =
+  String.raw`(?<![\w$.])(?P<alias>[A-Za-z_$][\w$]*)\s*=(?![=>])\s*(?:new\s+)?` +
+  String.raw`(?:` + DL_RUNNER_REF + String.raw`)\s*(?![\w$.(\[])`;
+const DL_ALIAS_RE = pyReNamed(DL_ALIAS_SRC, "g");
+export const DL_ALIAS_NEEDLES = ["eval", "exec", "system", "popen", "Function", "getoutput", "getstatusoutput",
+  "runInThisContext"];
+export const DL_ALIAS_MAX = 64;
+// download-to-file, then run the file (core's _DL_FILE_WRITE_RE / _DL_PATHRUN_SINK_RE)
+const DL_PATH_TOK = String.raw`[A-Za-z_$][\w$]*|["'][^"'\n]{1,200}["']`;
+export const DL_FILE_WRITE_SRC =
+  String.raw`\b(?:fs\s*\.\s*)?(?:write|append)File(?:Sync)?\s*\(\s*(?P<p1>` + DL_PATH_TOK + String.raw`)\s*,` +
+  String.raw`|\bcreateWriteStream\s*\(\s*(?P<p2>` + DL_PATH_TOK + String.raw`)` +
+  String.raw`|\bopen\s*\(\s*(?P<p3>` + DL_PATH_TOK + String.raw`)\s*,[^)\n]{0,60}?["'][rbtU]*[wax]\+?[rbtU]*["']` +
+  String.raw`|\burlretrieve\s*\(\s*[^,()\n]{1,300},\s*(?P<p4>` + DL_PATH_TOK + String.raw`)\s*\)`;
+const DL_FILE_WRITE_RE = pyReNamed(DL_FILE_WRITE_SRC, "g");
+export const DL_FILE_WRITE_NEEDLES = ["writeFile", "appendFile", "createWriteStream", "open(", "urlretrieve"];
+export const DL_PATHRUN_SINK_SRC =
+  String.raw`\b(?:os\.system|os\.startfile|runpy\.run_path)\s*\(` +
+  String.raw`|\b(?:subprocess\s*\.\s*)?(?:run|Popen|call|check_call|check_output)\s*\(` +
+  String.raw`|\b(?:spawn|spawnSync|execFile|execFileSync|fork)\s*\(` +
+  String.raw`|(?<![\w$.])(?:require|import|execfile)\s*\(` +
+  String.raw`|(?<![\w$.])exec\s*\(\s*open\s*\(`;
+const DL_PATHRUN_SINK_RE = pyRe(DL_PATHRUN_SINK_SRC, "g");
+export const DL_PATHRUN_NEEDLES = ["system", "startfile", "run_path", "run(", "Popen", "call", "check_", "spawn",
+  "execFile", "fork", "require", "import", "exec"];
 export const DL_DEFINING = ["def", "function", "async"];
 const DL_INTERPRETERS = String.raw`(?:node|nodejs|bun|python[\d.]*|pythonw|(?:ba|z|da|k)?sh|perl|ruby|php|pwsh|` +
   String.raw`powershell|osascript|cmd)(?:\.exe)?`;
@@ -654,9 +728,12 @@ function rowAbove(rows, k) {
 
 /** runsReceivedCode's pass over the rows. core._DlReader. */
 class Reader {
-  constructor(rows, taint, sources, runners, named, seeds) {
+  constructor(rows, taint, sources, runners, named, seeds, sinks) {
     this.rows = rows; this.taint = taint; this.sources = sources; this.runners = runners;
     this.named = named; this.seeds = seeds;
+    this.sinks = sinks;                                  // extra [category, alternatives] families
+    this.aliases = new Map();                            // runner-alias name -> [definition rows]
+    this.aliasCall = null;                               // a call of any runner alias, or null
     this.until = -1;
     this.headers = new Map();
     this.lastTop = [-1, null];                          // the row read last, and its code
@@ -677,7 +754,7 @@ class Reader {
     const found = namesHead(row, heads);
     const hot = sources.has(k);
     const above = pyLstrip(row).startsWith(".") ? rowAbove(rows, k) : null;
-    if (!(hot || found || (above !== null && (sources.has(above) || namesHead(rows[above], heads))))) return false;
+    if (!(hot || found || (above !== null && (sources.has(above) || namesHead(rows[above], heads))))) return null;
     const srcs = hot ? [...finditer(DL_SOURCE, row)].map((m) => [m.index, m.index + m[0].length]) : [];
     const rd = new Row(this, k, row, 0, row.length, taint, srcs);
     rd.dirty = found;
@@ -766,9 +843,22 @@ class Reader {
     for (const name of added) for (const r of this.named.find(name)) if (r > k) this.seeds[r] = 1;
     this.lastTop = [k, top];
     // its runners, with what it binds
-    for (const r of finditer(this.runners, row)) if (rd.runs(r, taint)) return true;
-    for (const r of finditer(DL_INTERP, row)) if (carried(row, r.index + r[0].length, taint, k)) return true;
-    return false;
+    for (const r of finditer(this.runners, row)) if (rd.runs(r, taint)) return "run";
+    for (const r of finditer(DL_INTERP, row)) if (carried(row, r.index + r[0].length, taint, k)) return "run";
+    const fromImport = this.sinks.length > 0 && DL_FROM_IMPORT_RE.test(row);
+    for (const [cat, sink] of this.sinks) {
+      for (const r of finditer(sink, row)) {
+        if (fromImport && DL_BARE_IMPORT_WHOLE_RE.test(r[0])) continue;   // a Python from-import list
+        if (rd.runs(r, taint)) return cat;
+      }
+    }
+    if (this.aliasCall !== null) {                        // a call of a runner alias near its definition
+      this.aliasCall.lastIndex = 0;
+      for (let r = this.aliasCall.exec(row); r !== null; r = this.aliasCall.exec(row)) {
+        if (aliasNear(this.aliases.get(r[1]), k) && rd.runs(r, taint)) return "run";
+      }
+    }
+    return null;
   }
 
   names(f, row, k) {
@@ -809,34 +899,71 @@ class Reader {
       if (stretches.length && lo <= stretches[stretches.length - 1][1]) stretches[stretches.length - 1][1] = n.index;
       else stretches.push([lo, n.index]);
     }
+    const families = [["run", this.runners], ...this.sinks];
+    const fromImport = this.sinks.length > 0 && DL_FROM_IMPORT_RE.test(row);
     for (const [lo, hi] of stretches) {
-      const end = cpForward(row, hi, 3 * ARG_SPAN);    // a runner's name, its arguments, the last one's value
+      const end = cpForward(row, hi, 3 * ARG_SPAN);    // a sink's name, its arguments, the last one's value
       const searchEnd = Math.min(end, cpForward(row, hi, ARG_SPAN));
       let rd = null;
-      for (const r of finditer(this.runners, row, lo, searchEnd)) {
-        if (r.index >= hi) break;
-        if (rd === null) {
-          rd = new Row(this, k, row, lo, end, null,
-            [...finditer(DL_SOURCE, row, lo, end)].map((m) => [m.index, m.index + m[0].length]), false);
+      for (const [cat, family] of families) {
+        for (const r of finditer(family, row, lo, searchEnd)) {
+          if (r.index >= hi) break;
+          if (fromImport && cat === "import" && DL_BARE_IMPORT_WHOLE_RE.test(r[0])) continue;
+          if (rd === null) {
+            rd = new Row(this, k, row, lo, end, null,
+              [...finditer(DL_SOURCE, row, lo, end)].map((m) => [m.index, m.index + m[0].length]), false);
+          }
+          if (rd.runs(r, null)) return cat;
         }
-        if (rd.runs(r, null)) return true;
       }
       for (const r of finditer(DL_INTERP, row, lo, searchEnd)) {
         if (r.index >= hi) break;
-        if (carried(row, r.index + r[0].length, null, k)) return true;
+        if (carried(row, r.index + r[0].length, null, k)) return "run";
       }
     }
-    return false;
+    return null;
   }
 }
 
 /**
- * The 1-based line where code runs what it received over the network as
- * code or as a shell command, else null. `text` has \n line endings.
- * Twin of lazaret.scanner.core.runs_received_code.
+ * Map name -> [definition rows] for names bound to a direct code-runner
+ * reference (core._dl_runner_aliases): a call within WINDOW rows below a
+ * definition is a runner. Read from rows naming a runner and holding "="; at
+ * most DL_ALIAS_MAX names are kept.
  */
-export function runsReceivedCode(text) {
-  if (!DL_NEEDLES.some((n) => text.includes(n)) || !DL_RUN_NEEDLES.some((n) => text.includes(n))) return null;
+function runnerAliases(rows) {
+  const defs = new Map();
+  for (let k = 0; k < rows.length; k++) {
+    const row = rows[k];
+    if (!row.includes("=") || longer(row, LONG_ROW) || !DL_ALIAS_NEEDLES.some((nd) => row.includes(nd))) continue;
+    DL_ALIAS_RE.lastIndex = 0;
+    for (let m = DL_ALIAS_RE.exec(row); m !== null; m = DL_ALIAS_RE.exec(row)) {
+      const name = m.groups.alias;
+      if (NOT_NAMES.has(name)) continue;
+      let d = defs.get(name);
+      if (d === undefined) {
+        if (defs.size >= DL_ALIAS_MAX) continue;
+        d = []; defs.set(name, d);
+      }
+      d.push(k);
+    }
+  }
+  return defs;
+}
+
+/** Is a definition row at or within WINDOW rows above k? core._dl_alias_near. */
+function aliasNear(defRows, k) {
+  const i = bisectRight(defRows, k) - 1;
+  return i >= 0 && k - defRows[i] <= WINDOW;
+}
+
+/**
+ * [1-based line, category] for the first place code runs, deserializes or
+ * imports a value it received over the network, or null. Category is "run",
+ * "deserialize" or "import". Twin of lazaret.scanner.core._received_code_kind.
+ */
+export function receivedCodeKind(text) {
+  if (!DL_NEEDLES.some((n) => text.includes(n)) || !DL_SINK_NEEDLES.some((n) => text.includes(n))) return null;
   const rows = text.split("\n");
   const starts = new Array(rows.length);
   for (let k = 0, at = 0; k < rows.length; k++) { starts[k] = at; at += rows[k].length + 1; }
@@ -857,17 +984,32 @@ export function runsReceivedCode(text) {
   const seeds = new Uint8Array(rows.length);                          // rows where a received value can start
   for (const r of sources) seeds[r] = 1;
   for (const name of taint.always) for (const r of named.find(name)) seeds[r] = 1;
-  const runners = text.includes("shell") && DL_SHELL_TRUE_RE.test(text) ? DL_RUNNER_SHELL : DL_RUNNER;
-  const reader = new Reader(rows, taint, sources, runners, named, seeds);
+  const aliases = DL_ALIAS_NEEDLES.some((nd) => text.includes(nd)) ? runnerAliases(rows) : new Map();
+  let aliasCall = null;
+  if (aliases.size) {                                                // a call of a runner alias, near its def, is a runner
+    const src = String.raw`(?<![\w$.])(` + [...aliases.keys()].sort().map((n) => n.replaceAll("$", "\\$")).join("|")
+      + String.raw`)\s*\(`;
+    aliasCall = pyRe(src, "g");
+    for (const name of aliases.keys()) for (const r of named.find(name)) seeds[r] = 1;
+  }
+  const shellOn = text.includes("shell") && DL_SHELL_TRUE_RE.test(text);
+  const runners = shellOn ? DL_RUNNER_SHELL : DL_RUNNER;
+  const sinks = [];                                                   // the extra sink families this file names
+  if (DL_DESERIAL_NEEDLES.some((n) => text.includes(n))) sinks.push(["deserialize", DL_DESERIAL]);
+  if (DL_IMPORT_NEEDLES.some((n) => text.includes(n))) sinks.push(["import", DL_IMPORT_SINK]);
+  const reader = new Reader(rows, taint, sources, runners, named, seeds, sinks);
+  reader.aliases = aliases; reader.aliasCall = aliasCall;
   let k = seeds.indexOf(1);
   if (k < 0) k = rows.length;
   while (k < rows.length) {
     const row = rows[k];
     if (longer(row, LONG_ROW)) {
-      if (reader.longRow(k, row)) return k + 1;
+      const cat = reader.longRow(k, row);
+      if (cat) return [k + 1, cat];
     } else {
       if (seeds[k]) reader.until = Math.max(reader.until, k + WINDOW);
-      if (reader.shortRow(k, row)) return k + 1;
+      const cat = reader.shortRow(k, row);
+      if (cat) return [k + 1, cat];
     }
     let nk = k + 1;
     if (nk > reader.until) {
@@ -875,6 +1017,81 @@ export function runsReceivedCode(text) {
       if (nk < 0) nk = rows.length;
     }
     k = nk;
+  }
+  return null;
+}
+
+/**
+ * The 1-based line where code runs, deserializes or dynamically imports a
+ * value it received over the network, else null. `text` has \n line endings.
+ * Twin of lazaret.scanner.core.runs_received_code.
+ */
+export function runsReceivedCode(text) {
+  const res = receivedCodeKind(text);
+  return res === null ? null : res[0];
+}
+
+/** core._dl_norm_path: quotes and a leading "./" dropped. */
+function normPath(tok) {
+  if (tok[0] === '"' || tok[0] === "'") {
+    tok = tok.slice(1, -1);
+    while (tok.startsWith("./")) tok = tok.slice(2);
+  }
+  return tok;
+}
+
+/** The normalized path token a write match names (core._dl_path_token). */
+function pathToken(m) {
+  const g = m.groups;
+  return normPath(g.p1 ?? g.p2 ?? g.p3 ?? g.p4);
+}
+
+/** Does the run sink's argument region name the file `path`? core._dl_region_names_path. */
+function regionNamesPath(region, path) {
+  for (const m of region.matchAll(DL_NAME_RE)) if (m[0] === path) return true;
+  for (const m of region.matchAll(DL_STR_RE)) if (normPath(m[0]) === path) return true;
+  return false;
+}
+
+/** The row in [k, k+WINDOW] that runs the file `path`, else null. core._dl_pathrun_after. */
+function pathrunAfter(rows, k, path) {
+  const end = Math.min(rows.length, k + WINDOW + 1);
+  for (let j = k; j < end; j++) {
+    const row = rows[j];
+    if (longer(row, LONG_ROW) || !DL_PATHRUN_NEEDLES.some((n) => row.includes(n))) continue;
+    DL_PATHRUN_SINK_RE.lastIndex = 0;
+    for (let sm = DL_PATHRUN_SINK_RE.exec(row); sm !== null; sm = DL_PATHRUN_SINK_RE.exec(row)) {
+      const e = sm.index + sm[0].length;
+      if (regionNamesPath(row.slice(e, cpForward(row, e, ARG_SPAN)), path)) return j;
+    }
+  }
+  return null;
+}
+
+/**
+ * The 1-based line where a received value is written to a file that is then
+ * run, else null. MAJOR only. Twin of core._downloads_and_runs_file.
+ */
+export function downloadsAndRunsFile(text) {
+  if (!DL_NEEDLES.some((n) => text.includes(n)) || !DL_FILE_WRITE_NEEDLES.some((n) => text.includes(n))
+      || !DL_PATHRUN_NEEDLES.some((n) => text.includes(n))) return null;
+  const rows = text.split("\n");
+  const src = [];                                                    // rows holding a network source
+  for (let k = 0; k < rows.length; k++) {
+    if (!longer(rows[k], LONG_ROW) && firstMatch(DL_SOURCE, rows[k]) !== null) src.push(k);
+  }
+  for (let k = 0; k < rows.length; k++) {
+    const row = rows[k];
+    if (longer(row, LONG_ROW) || !DL_FILE_WRITE_NEEDLES.some((n) => row.includes(n))) continue;
+    const nearSrc = anyIn(src, k - WINDOW, k + WINDOW + 1);
+    DL_FILE_WRITE_RE.lastIndex = 0;
+    for (let wm = DL_FILE_WRITE_RE.exec(row); wm !== null; wm = DL_FILE_WRITE_RE.exec(row)) {
+      if (wm.groups.p4 === undefined && !nearSrc) continue;         // a plain write needs a download near it
+      const path = pathToken(wm);
+      if (!path) continue;
+      const hit = pathrunAfter(rows, k, path);
+      if (hit !== null) return hit + 1;
+    }
   }
   return null;
 }
@@ -895,4 +1112,9 @@ export const RECEIVED_TWINS = {
   _DL_SHELL_TRUE_RE: [DL_SHELL_TRUE_SRC, ""], _DL_SHELL_CALL_RE: [DL_SHELL_CALL_SRC, ""],
   _DL_SHELL_ARG_RE: [DL_SHELL_ARG_SRC, ""], _DL_BRACKET_RE: [DL_BRACKET_SRC, ""],
   _DL_EMBED_RE: [DL_EMBED_SRC, ""], _DL_LEAD_RE: [DL_LEAD_SRC, ""], _DL_CALLEE_RE: [DL_CALLEE_SRC, ""],
+  _DL_DESERIAL_RE: [DL_DESERIAL.exactSrc, ""], _DL_DESERIAL_CANDIDATE_RE: [DL_DESERIAL.candSrc, ""],
+  _DL_IMPORT_SINK_RE: [DL_IMPORT_SINK.exactSrc, ""], _DL_IMPORT_SINK_CANDIDATE_RE: [DL_IMPORT_SINK.candSrc, ""],
+  _DL_ALIAS_RE: [DL_ALIAS_SRC, ""],
+  _DL_FILE_WRITE_RE: [DL_FILE_WRITE_SRC, ""], _DL_PATHRUN_SINK_RE: [DL_PATHRUN_SINK_SRC, ""],
+  _DL_FROM_IMPORT_RE: [DL_FROM_IMPORT_SRC, ""], _DL_BARE_IMPORT_RE: [DL_BARE_IMPORT_SRC, ""],
 };
