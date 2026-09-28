@@ -5685,11 +5685,20 @@ def _dl_alias_near(def_rows, k):
     return i >= 0 and k - def_rows[i] <= _DL_WINDOW
 
 
-def _received_code_kind(text):
+def _received_code_kind(text, extra_always=()):
     """(1-based line, category) for the first place code runs, deserializes or
     imports a value it received over the network (see runs_received_code), or
-    None. Category is 'run', 'deserialize' or 'import'."""
-    if not any(n in text for n in _DL_NEEDLES) or not any(n in text for n in _DL_SINK_NEEDLES):
+    None. Category is 'run', 'deserialize' or 'import'.
+
+    extra_always: names known from another file of the same package to hold or
+    return a received value (the Python-only cross-file follower,
+    _cross_file_received_issues). They are seeded exactly like this file's own
+    network-module import names, so a sink that runs one fires. Empty by
+    default, so single-file behaviour — and the npm twin, which never passes it
+    — is unchanged, and the parity corpus still agrees."""
+    if not any(n in text for n in _DL_SINK_NEEDLES):
+        return None
+    if not extra_always and not any(n in text for n in _DL_NEEDLES):
         return None
     rows = text.split("\n")
     starts, at = [], 0
@@ -5702,7 +5711,7 @@ def _received_code_kind(text):
         k = bisect.bisect_right(starts, m.start()) - 1
         near.add(k)
         m = _DL_NEEDLE_RE.search(text, starts[k + 1]) if k + 1 < len(starts) else None
-    taint = _DlTaint(_dl_import_names(rows, near) if "import" in text else ())
+    taint = _DlTaint(list(_dl_import_names(rows, near) if "import" in text else ()) + list(extra_always))
     sources = {k for k in near
                if len(rows[k]) > _DL_LONG_ROW or next(_dl_finditer(_DL_SOURCE, rows[k]), None) is not None}
     if not taint.always and not sources:
@@ -7269,6 +7278,182 @@ class _DependencyTree:
         return next((c for c in candidates[6:] if self.is_file(c)), None)
 
 
+# ---------------- Cross-file received code (Python engine only) ----------------
+# A dropper can split the network source and the code-runner across two files of
+# one package, so neither file alone trips the single-file detector:
+#     _net.py:      def pull(): return requests.get(URL).text
+#     __init__.py:  from ._net import pull; exec(pull())
+# This follower runs only in the Python engine, over a package's own dependency
+# files, and is deliberately kept out of the twinned flow.py: the npm engine
+# stays single-file with an honest gate. Per package it collects each module's
+# TAINTED EXPORTS — a module-level name that holds, or a function that returns, a
+# value received over the network — resolves a sibling module's import of one,
+# then re-runs the single-file detector with that name seeded (extra_always). It
+# fires only when the value genuinely came from another file, at the single-file
+# severity (SC-IMPORT-RISK, MAJOR, never escalating an install hook). Bounded:
+# one pass per file, exports followed one hop, within one package.
+
+_XF_DEF_RE = re.compile(r"^[ \t]*(?:async[ \t]+)?def[ \t]+(?P<name>[A-Za-z_]\w*)[ \t]*\(")
+_XF_ASSIGN_RE = re.compile(r"^(?P<indent>[ \t]*)(?P<name>[A-Za-z_]\w*)[ \t]*=(?![=])(?P<rhs>.*)$")
+_XF_RETURN_RE = re.compile(r"^[ \t]*return[ \t](?P<expr>.*)$")
+_XF_FROM_RE = re.compile(
+    r"^[ \t]*from[ \t]+(?P<mod>\.+[\w.]*|[\w.]+)[ \t]+import[ \t]+(?P<names>\*|\([^()]*\)|.+?)[ \t]*$", re.M)
+_XF_DEP_MARKERS = ("site-packages", "dist-packages", "vendor")
+
+
+def _xf_expr_carries(expr, tainted):
+    """Does `expr` hold a received value — a network source, or a name in
+    `tainted` used as the head of a member chain?"""
+    if next(_dl_finditer(_DL_SOURCE, expr), None) is not None:
+        return True
+    return any(m.group() in tainted for m in _DL_HEAD_RE.finditer(expr))
+
+
+def _xf_tainted_exports(text):
+    """The module-level names of `text` that hold, or are functions that return,
+    a value received over the network. One indentation-aware pass; a function
+    body is followed for _DL_WINDOW rows."""
+    if not any(n in text for n in _DL_NEEDLES):
+        return frozenset()
+    rows = text.split("\n")
+    exports, module_taint, local = set(), set(), set()
+    fn = None                                   # (name, last body row) of the open top-level def
+    for k, row in enumerate(rows):
+        stripped = row.strip()
+        if not stripped:
+            continue
+        indent = len(row) - len(row.lstrip())
+        if fn is not None and (indent == 0 or k > fn[1]):
+            fn, local = None, set()
+        d = _XF_DEF_RE.match(row)
+        if d is not None:
+            if indent == 0:
+                fn, local = (d.group("name"), k + _DL_WINDOW), set()
+            continue
+        if fn is not None:
+            r = _XF_RETURN_RE.match(row)
+            if r is not None and _xf_expr_carries(r.group("expr"), local | module_taint):
+                exports.add(fn[0])
+                continue
+        a = _XF_ASSIGN_RE.match(row)
+        if a is not None and len(a.group("rhs")) <= _DL_LONG_ROW and _xf_expr_carries(
+                a.group("rhs"), module_taint if indent == 0 else local | module_taint):
+            if indent == 0:
+                module_taint.add(a.group("name"))
+                exports.add(a.group("name"))
+            elif fn is not None:
+                local.add(a.group("name"))
+    return frozenset(exports)
+
+
+def _xf_py_module(path):
+    """(top package, dotted module, is_package) for a dependency .py file under
+    site-packages / dist-packages / vendor, else None. __init__.py is its own
+    package; another file is <pkg>…<stem>."""
+    parts = path.replace(os.sep, "/").split("/")
+    idx = max((len(parts) - 1 - parts[::-1].index(m) for m in _XF_DEP_MARKERS if m in parts), default=-1)
+    rel = parts[idx + 1:] if 0 <= idx < len(parts) - 1 else []
+    if not rel or not rel[-1].endswith(".py"):
+        return None
+    stem = rel[-1][:-3]
+    is_pkg = stem == "__init__"
+    mod_parts = rel[:-1] if is_pkg else rel[:-1] + [stem]
+    if not mod_parts:
+        return None
+    return rel[0], ".".join(mod_parts), is_pkg
+
+
+def _xf_resolve(mod_spec, pkg_parts):
+    """Resolve an import's module spec (absolute 'a.b', or relative '.a' / '..a')
+    against the importing module's package parts, to a dotted module or None."""
+    dots = len(mod_spec) - len(mod_spec.lstrip("."))
+    rest = mod_spec[dots:]
+    if dots == 0:
+        return rest or None
+    keep = len(pkg_parts) - (dots - 1)
+    if keep < 0:
+        return None
+    target = pkg_parts[:keep] + (rest.split(".") if rest else [])
+    return ".".join(target) or None
+
+
+def _xf_imported_taint(text, module, is_pkg, exports):
+    """{local name: source module} for names this module imports, from a sibling
+    module of the same top package, that are that sibling's tainted exports."""
+    if "import" not in text:
+        return {}
+    pkg_parts = module.split(".") if is_pkg else module.split(".")[:-1]
+    top = module.split(".")[0]
+    seeds = {}
+    for m in _XF_FROM_RE.finditer(text):
+        target = _xf_resolve(m.group("mod"), pkg_parts)
+        if target is None or target.split(".")[0] != top:
+            continue
+        exp = exports.get(target)
+        if not exp:
+            continue
+        names = m.group("names").strip()
+        if names == "*":
+            for name in exp:
+                seeds[name] = target
+            continue
+        for item in names.strip("()").split(","):
+            parts = item.split()
+            if not parts:
+                continue
+            local = parts[2] if len(parts) == 3 and parts[1] == "as" else parts[0]
+            if parts[0] in exp:
+                seeds[local] = target
+    return seeds
+
+
+def _xf_issue(path, line, text, cat, srcs):
+    lines = text.split("\n")
+    where = ", ".join(srcs)
+    msg = (f"Dependency code {_DL_CATEGORY_REASON[cat]}; the value is received in "
+           f"another file of the package ({where}).")
+    return mk_issue(
+        {"id": "SC-IMPORT-RISK", "name": "Risky import-time code", "type": "HOTSPOT", "sev": "MAJOR",
+         "msg": msg, "why": _DEP_IMPORT_RISK_WHY,
+         "fix": f"Read both files: what does {where} receive, and what runs it here?",
+         "ref": "CWE-506 · Supply chain"}, path, line, lines, redactor=_Redactor(lines))
+
+
+def _cross_file_received_issues(files, skip_paths=()):
+    """SC-IMPORT-RISK (MAJOR) for each dependency file that runs a value received
+    over the network in another file of the same package (see the section
+    comment). Python packages only for now (JS is a later slice). Skips files
+    already flagged single-file. Best-effort: a package that raises is skipped."""
+    skip = set(skip_paths)
+    groups = {}
+    for f in files:
+        if not f.get("dep") or f["lang"] != "py":
+            continue
+        info = _xf_py_module(f["path"])
+        if info is not None:
+            groups.setdefault(info[0], []).append((info[1], info[2], f))
+    out = []
+    for members in groups.values():
+        if len(members) < 2:                    # cross-file needs at least two files
+            continue
+        try:
+            exports = {module: _xf_tainted_exports(f["content"]) for module, _pkg, f in members}
+            if not any(exports.values()):
+                continue
+            for module, is_pkg, f in members:
+                if f["path"].replace(os.sep, "/") in skip:
+                    continue
+                seeds = _xf_imported_taint(f["content"], module, is_pkg, exports)
+                if not seeds:
+                    continue
+                res = _received_code_kind(f["content"], extra_always=set(seeds))
+                if res is not None:
+                    out.append(_xf_issue(f["path"], res[0], f["content"], res[1], sorted(set(seeds.values()))))
+        except Exception:                       # one package must never kill the scan
+            continue
+    return out
+
+
 def dependency_checks(root, files, manifests, issues, excludes=(), should_stop=None):
     """The --deps checks of what dependencies run (see the section comment),
     after the files and manifests were scanned: escalates the SC-INSTALL-HOOK
@@ -7308,6 +7493,11 @@ def dependency_checks(root, files, manifests, issues, excludes=(), should_stop=N
             out.append(found)
         if agent is not None:
             out.append(agent)
+    # Cross-file received code (Python engine only): a value received in one file
+    # of a package and run in another. Skips files already flagged single-file.
+    if should_stop is None or not should_stop():
+        flagged = {i["file"].replace(os.sep, "/") for i in out if i["rule"] == "SC-IMPORT-RISK"}
+        out.extend(_cross_file_received_issues(files, flagged))
     return out, extra, None
 
 

@@ -46,6 +46,10 @@ JS_BIN = os.path.join(_support.REPO_ROOT, "js", "bin", "lazaret.js")
 # half is ported (js/src/scanner/flow.js); its Python half (AST-based) is not,
 # so its X-* flows and Q-FLOW-* notes on Python files are Python-only.
 FLOW_PREFIXES = ("X-", "Q-FLOW-")
+# The cross-file received-code follower (core._cross_file_received_issues) runs
+# only in the Python engine: a value received in one file of a package and run
+# in another. Its SC-IMPORT-RISK finding names the source module in the message.
+CROSS_FILE_RECEIVED = "another file of the package"
 # fixture -> further rules only the Python engine may report there. (cfgproj's
 # .lazaret-taint.json is repository content: the Python engine loads it only
 # with --trust-repo-config, not passed here, so both engines agree on it.)
@@ -295,6 +299,8 @@ def _python_only(issue, fixture=None, project=None):
     root (a report's "project"), for extensionless scripts."""
     if issue["rule"].startswith(FLOW_PREFIXES):
         return scanned_lang(project, issue["file"]) == "py"
+    if issue["rule"] == "SC-IMPORT-RISK" and CROSS_FILE_RECEIVED in issue.get("msg", ""):
+        return True
     return issue["rule"] in PYTHON_ONLY.get(fixture, ())
 
 

