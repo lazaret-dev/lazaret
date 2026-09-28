@@ -116,6 +116,12 @@ PARTIAL_SANITIZERS_PY = {
     "os.path.basename": {"path traversal"},
     "basename": {"path traversal"},
     "secure_filename": {"path traversal"},           # werkzeug
+    "safe_join": {"path traversal"},                 # werkzeug / flask
+    "conditional_escape": {"cross-site scripting"},  # django
+    "format_html": {"cross-site scripting"},         # django
+    "render_template": {"cross-site scripting"},     # an autoescaping template
+    "jsonify": {"cross-site scripting"},             # a JSON response
+    "url_for": {"cross-site scripting", "open redirect"},  # a URL on this site
 }
 # Runtime-extensible via load config (see configure()).
 _EXTRA_PARTIAL_PY = {}
@@ -240,8 +246,9 @@ def _dotted(node):
 
 
 _PY_SOURCE_RE = re.compile(
-    r"\brequest\.(args|form|values|json|data|cookies|headers|files)\b"
-    r"|\brequest\.get_json\b|\bsys\.argv\b|\bflask\.request\b")
+    r"\brequest\.(args|form|values|json|data|cookies|headers|files|query_string|stream|full_path"
+    r"|GET|POST|COOKIES|META|FILES|body)\b"
+    r"|\brequest\.(?:get_json|get_data)\b|\bsys\.argv\b|\bflask\.request\b")
 _PY_SOURCE_EXTRA = []    # guarded source patterns (from config)
 _EXTRA_PY_SINKS = []     # (guarded pattern, category) from config
 
@@ -274,13 +281,22 @@ def _py_builtin_sink(callee):
         return "code injection"
     if last == "render_template_string":
         return "template injection"
-    if callee in ("open", "builtins.open") or last in ("send_file", "send_from_directory"):
+    if (callee in ("open", "builtins.open", "codecs.open", "io.open", "os.open")
+            or last in ("send_file", "send_from_directory")
+            or (callee.startswith("shutil.") and last in (
+                "copy", "copy2", "copyfile", "copytree", "move", "rmtree"))
+            or callee in ("os.remove", "os.unlink", "os.rmdir", "os.removedirs", "os.rename",
+                          "os.replace", "os.listdir", "os.scandir")):
         return "path traversal"
     if last == "urlopen" or (callee.startswith("requests.") and last in (
             "get", "post", "put", "delete", "head", "request")):
         return "server-side request forgery"
-    if last == "redirect":
+    if last in ("redirect", "HttpResponseRedirect", "HttpResponsePermanentRedirect"):
         return "open redirect"
+    # a response body built from the value (Flask / Werkzeug, Django), or the
+    # value marked as safe HTML
+    if last in ("make_response", "Response", "HttpResponse", "Markup", "mark_safe"):
+        return "cross-site scripting"
     return None
 
 
@@ -313,6 +329,8 @@ def _py_builtin_sanitizer(*names):
                 return table[callee]
             if last in table:
                 return table[last]
+        if last.startswith("escape"):                # escape_html(), escapejs(), …
+            return {"cross-site scripting"}
     return None
 
 
@@ -1161,8 +1179,13 @@ class _Analyzer:
         canon = res.canon
         recv = self.expr(e.func.value) if isinstance(e.func, ast.Attribute) else EMPTY
         pos, starred, kws, dstar = [], None, [], None
+        body = None      # a response's body, when its first argument is a (body, status/headers) tuple
         for a in e.args:
-            if isinstance(a, ast.Starred):
+            if not pos and starred is None and isinstance(a, ast.Tuple) and a.elts:
+                elts = [self.expr(x) for x in a.elts]      # as self.expr(a), keeping the first
+                body = elts[0]
+                pos.append(_union_all(elts))
+            elif isinstance(a, ast.Starred):
                 v = self.expr(a.value)
                 starred = v if starred is None else starred.union(v)
             elif starred is not None:          # positional after *x: position unknown
@@ -1192,7 +1215,8 @@ class _Analyzer:
         if cat is None and not res.precise:
             cat = _py_builtin_sink(canon) or _py_builtin_sink(raw)
         if cat:
-            first = (pos[0] if pos else starred if starred is not None
+            first = (body if body is not None and cat == "cross-site scripting"
+                     else pos[0] if pos else starred if starred is not None
                      else kws[0][1] if kws else dstar)
             self.sink(cat, first, line)
 

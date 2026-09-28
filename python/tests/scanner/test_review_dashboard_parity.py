@@ -14,7 +14,7 @@ severity, type, name, message, why/fix/ref, snippet, snipStart):
   2 suppression markers, 5 Unicode and S-BIDI, 6 redaction, 7 caps and
   snippets, 12 taint idioms, 13 multi-line decode->execute, the linear
   rewrites of the quadratic SQL / except-pass / function-header patterns,
-  the obfuscation heuristics);
+  the obfuscation heuristics) and every taint case of test_taint_fstrings;
 * UPLOADS: raw bytes through the page's upload path (FIX-SPEC 4 BOM / UTF-16
   sniff with the plausibility check for a BOM-less guess, 15 PEP 263
   cookies incl. UTF-7 -> SC-UTF7) against core.decode_source +
@@ -293,6 +293,16 @@ class DashboardParityTests(unittest.TestCase):
         sources = dash.run([{"op": "eval", "expr": const} for const, _, _ in SAMPLES])
         page = self.compare([(name, lang, src) for (_, name, lang), src in zip(SAMPLES, sources)])
         self.assertTrue(all(len(issues) >= 10 for issues in page))
+
+    def test_taint_cases(self):
+        """Every case of test_taint_fstrings (f-strings and template literals,
+        joined statements, Flask views, sink arguments, guards, scopes)."""
+        from tests.scanner.test_taint_fstrings import QUIET, REPORTED
+        cases = [(f"r{n:02d}.{lang}", lang, src) for n, (lang, src, _) in enumerate(REPORTED)]
+        cases += [(f"q{n:02d}.{lang}", lang, src) for n, (lang, src) in enumerate(QUIET)]
+        page = self.compare(cases)
+        self.assertEqual({i["rule"] for issues in page for i in issues if i["rule"].startswith("T-")},
+                         {"T-CMD", "T-PATH", "T-XSS", "T-REDIR", "T-SQL", "T-SSRF"})
 
     def test_adversarial_inputs(self):
         page = self.compare(ADVERSARIAL)

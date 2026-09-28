@@ -46,7 +46,63 @@ project is pre-1.0, so the 0.x API may still change.
   fixtures, Kubernetes Secret data, private keys, documented default
   passwords), and 476 in the benign package corpus flagged nothing.
 
+- **Taint follows values into f-strings and template literals, and knows
+  Flask's and Django's responses (both engines; audit P0).** The intra-file
+  engine removed every string literal before reading a line, so
+  `open(f"/srv/{name}")` and ``exec(`ls ${dir}`)`` were not flows. It now
+  reads the fields of a Python f-string and of a JavaScript template literal
+  no tag reads (``sql`…${id}` `` is parameterized), a statement over up to 8
+  lines (`subprocess.run(` / `f"echo {q}",` / `shell=True)`), and augmented
+  assignments (`html += f"<li>{q}</li>"`). New sources: Flask's `get_data`,
+  `query_string`, `stream`, `full_path` and Django's `GET`, `POST`,
+  `COOKIES`, `META`, `FILES`, `body`. New sinks: `codecs.open`, `io.open`,
+  `os.open`, `shutil` copies and moves, `os.remove` / `rename` / `listdir`
+  and kin (path traversal); `flask.redirect` and Django's
+  `HttpResponseRedirect` (open redirect); `make_response`, `Response`,
+  `HttpResponse`, `Markup` and `mark_safe` (XSS), and the value a Flask view
+  returns, unless it is a JSON container, a template, a redirect, a file or
+  another function's result. New sanitizers: an autoescaping
+  `render_template`, `jsonify`, `url_for` (XSS and open redirect),
+  `escape…()`, Django's `conditional_escape` / `format_html`, werkzeug's
+  `safe_join`, and Flask's typed `request.args.get(…, type=int)`. The
+  cross-file engine (`X-*`) knows the same sources, sinks and sanitizers. On
+  OWASP BenchmarkPython (Python 3.13) the score of all rules went from
+  +0.10 to +0.19 (true positives 36% → 47%, false positives 27% → 29%;
+  Semgrep CE with its community rules: +0.16), and of the taint findings
+  alone from +0.00 to +0.11 (8% → 22% of real flaws found): XSS 0 → 55%,
+  path traversal 3% → 40%, open redirect 0 → 61%. The benchmark's false
+  positives were used while this was built (they pointed at the cases under
+  Changed below), and the `escape…()` rule also matches its
+  `escape_for_html` helper. Still missed: values that pass through a
+  container (`d["k"] = q`, `lst.append(q)`, a ConfigParser), loop variables,
+  and branches only constant folding would rule out.
+
+### Changed
+- **Taint reads only what can carry the injection (both engines).** A sink's
+  arguments ran to the end of the line, so `exec(cmd); log(location.href)`
+  and a minified bundle's later code were read as the sink's input, and every
+  argument counted: a parameterized query `execute(sql, (q,))`, a response's
+  headers, `requests.post(url, data=d)`, `render_template_string(t, n=q)`.
+  Now a query, a response body, a redirect, a template and `eval` read their
+  first argument (a response's `(body, headers)` tuple its body), commands,
+  paths and SSRF targets their positional arguments, anything else the
+  call's own arguments; a redirect to a path on the same site
+  (`redirect("/user/" + id)`) is not a finding. A path check that leaves the
+  function (`if ".." in name: abort(400)`, `if not p.startswith(BASE):
+  return`, `if (name.includes("..")) return …`) clears path traversal. A
+  taint lives in the function body it was made in (read from indentation:
+  another function's variable of the same name was taken for it), a
+  reassignment in the same block replaces the value (`p =
+  secure_filename(p)` is clean; `name = "fixed"` untaints), and one in a
+  branch adds to it. `new URLSearchParams()` with no argument is not a
+  source. T-* findings on seven open-source web apps (CTFd, Redash,
+  microblog, Flask, djangoproject.com, bakerydemo, Express) went from 65 to
+  27; SQL injection's false-positive rate on BenchmarkPython from 36% to 0.
+
 ### Fixed
+- **`unescape()` is not an XSS sanitizer.** The intra-file engine's `escape(`
+  pattern matched inside `html.unescape(q)`, which makes a value more
+  dangerous, and cleared it for XSS.
 - **One finding per dependency version, however it is spelled
   (`lazaret-sca`).** A version pinned as `3.2.0` in `pyproject.toml` and
   locked as `3.2` in `poetry.lock` or `uv.lock` was inventoried twice, so

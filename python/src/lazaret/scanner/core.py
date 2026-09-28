@@ -35,6 +35,7 @@ No dependencies — runs on stock python3. Same ruleset as the Lazaret dashboard
 """
 import argparse
 import bisect
+import collections
 import datetime
 import errno
 import html as html_mod
@@ -746,10 +747,13 @@ R("SQL-UPDATE-NOWHERE", "UPDATE without WHERE", "BUG", "MAJOR", ("sql",),
 # ---------------- Taint tracking (lightweight, intra-file) ----------------
 # Sources: user input and decode functions. Sinks: dangerous calls.
 TAINT_SOURCES = {
-    "py": re.compile(r"request\.(args|form|values|json|data|cookies|headers|files|get_json)"
+    # Flask / Werkzeug request data (query_string, get_data, stream, full_path
+    # too) and Django's (GET, POST, COOKIES, META, FILES, body)
+    "py": re.compile(r"request\.(args|form|values|json|data|cookies|headers|files|get_json|get_data"
+                     r"|query_string|stream|full_path|GET|POST|COOKIES|META|FILES|body)"
                      r"|input\s*\(|sys\.argv|b64decode\s*\(|zlib\.decompress\s*\("),
     "js": re.compile(r"req\.(query|body|params|headers|cookies)|process\.argv"
-                     r"|location\.(search|hash|href)|document\.URL|new\s+URLSearchParams"
+                     r"|location\.(search|hash|href)|document\.URL|new\s+URLSearchParams(?!\s*\(\s*\))"
                      r"|atob\s*\(|unescape\s*\(|decodeURIComponent\s*\("),
 }
 # (id-suffix, sink regex, category, severity, cwe, fix)
@@ -764,18 +768,28 @@ TAINT_SINKS = {
         ("SQL", re.compile(r"\.(execute|executemany)\s*\("),
          "SQL injection", "BLOCKER", "CWE-89",
          "Use parameterized queries."),
-        ("PATH", re.compile(r"(?<![\w.])open\s*\(|send_file\s*\(|send_from_directory\s*\("),
+        ("PATH", re.compile(r"(?<![\w.])open\s*\(|(?:codecs|io|os)\.open\s*\(|send_file\s*\(|send_from_directory\s*\("
+                            r"|shutil\.(?:copy|copy2|copyfile|copytree|move|rmtree)\s*\("
+                            r"|os\.(?:remove|unlink|rmdir|removedirs|rename|replace|listdir|scandir)\s*\("),
          "path traversal", "MAJOR", "CWE-22",
          "Resolve the path and verify it stays inside an allowed base directory."),
         ("SSRF", re.compile(r"requests\.(get|post|put|delete|head|request)\s*\(|urlopen\s*\("),
          "server-side request forgery", "MAJOR", "CWE-918",
          "Allowlist target hosts and schemes; block internal addresses."),
-        ("REDIR", re.compile(r"(?<![\w.])redirect\s*\("),
+        ("REDIR", re.compile(r"(?<![\w.])redirect\s*\(|flask\.redirect\s*\("
+                             r"|HttpResponse(?:Permanent)?Redirect\s*\("),
          "open redirect", "MAJOR", "CWE-601",
          "Allowlist redirect targets or use relative paths."),
         ("SSTI", re.compile(r"render_template_string\s*\("),
          "template injection", "CRITICAL", "CWE-1336",
          "Pass data as template parameters, never into template source."),
+        # a response body built from the value (Flask / Werkzeug, Django), or
+        # the value marked as safe HTML; a Flask view's own `return` is
+        # checked too (taint_scan)
+        ("XSS", re.compile(r"make_response\s*\(|(?<![\w.])Response\s*\(|(?<![\w.])HttpResponse\s*\("
+                           r"|(?<![\w.])Markup\s*\(|mark_safe\s*\("),
+         "cross-site scripting", "MAJOR", "CWE-79",
+         "Escape the value (or render it through an autoescaping template) before it is returned."),
     ],
     "js": [
         ("CMD", re.compile(r"\b(exec|execSync|spawn|spawnSync)\s*\("),
@@ -806,9 +820,16 @@ TAINT_SINKS = {
 # declaration binds every name in its pattern (_JS_DESTRUCT_RE below) —
 # `target: str = request.args.get("next")` and `const { file } = req.query`
 # used to leave their names untainted.
+# An augmented assignment (`html += f"<p>{q}</p>"`) taints its target too.
 ASSIGN_RE = {
-    "py": re.compile(r"^\s*([A-Za-z_]\w*)\s*(?::[^=\n]*)?=(?![=])\s*(.+)"),
-    "js": re.compile(r"^\s*(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=(?![=>])\s*(.+)"),
+    "py": re.compile(r"^\s*([A-Za-z_]\w*)\s*(?::[^=\n]*|[-+*/%&|^@]|//|\*\*|<<|>>)?=(?![=])\s*(.+)"),
+    "js": re.compile(r"^\s*(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*"
+                     r"(?:[-+*/%&|^]|\*\*|<<|>>>?|&&|\|\||\?\?)?=(?![=>])\s*(.+)"),
+}
+# the augmented forms (`x += y`, `x ||= y`): the target keeps what it held
+_AUG_ASSIGN_RE = {
+    "py": re.compile(r"^\s*[A-Za-z_]\w*\s*(?:[-+*/%&|^@]|//|\*\*|<<|>>)="),
+    "js": re.compile(r"^\s*[A-Za-z_$][\w$]*\s*(?:[-+*/%&|^]|\*\*|<<|>>>?|&&|\|\||\?\?)="),
 }
 # one-level object / array pattern: `{ a, b: c, d = 1, ...e }` / `[a, , b = 2, ...c]`
 _JS_DESTRUCT_RE = re.compile(
@@ -853,6 +874,53 @@ def _assignment(line, lang):
 
 STRING_LIT_RE = re.compile(r"\"[^\"]*\"|'[^']*'|`[^`]*`")
 
+# What taint reads of a text: its string literals removed, except the fields
+# of a Python f-string (`f"/srv/{name}"`, prefix f / rf / fr in either case)
+# and of a JavaScript template literal no tag reads (`ls ${dir}` — a tagged
+# sql`…${x}` template is parameterized): those are code whose value becomes
+# part of the string. A field is the text between one-level braces;
+# `{{` / `}}` in an f-string are literal braces.
+_FIELD_RE = {"py": re.compile(r"\{([^{}]*)\}"), "js": re.compile(r"\$\{([^{}]*)\}")}
+# A Python literal with its prefix (r, b, u, f or a pair of them), which is
+# part of the literal and not a name: `os.system(f"ls {d}")` reads `d`, not a
+# variable called f.
+_PY_LIT_RE = re.compile(r"(?:(?<![A-Za-z0-9_])([rRbBuUfF]{1,2}))?(\"[^\"]*\"|'[^']*'|`[^`]*`)")
+_ASCII_WORD = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_$")
+_JS_TAG_KEYWORDS = frozenset(("return", "typeof", "case", "in", "of", "yield", "await", "throw",
+                              "delete", "void", "else", "do", "new"))
+
+
+def _js_tagged(text, start):
+    """True when the backtick at `start` opens a tagged template (sql`…`)."""
+    j = start
+    while j > 0 and text[j - 1] in " \t":
+        j -= 1
+    if j == 0 or not (text[j - 1] in _ASCII_WORD or text[j - 1] in ")]"):
+        return False
+    k = j
+    while k > 0 and text[k - 1] in _ASCII_WORD:
+        k -= 1
+    return text[k:j] not in _JS_TAG_KEYWORDS
+
+
+def _taint_code(text, lang):
+    """`text` without its string literals, as taint reads it (see above)."""
+    if lang == "py":
+        def py_repl(m):
+            if (m.group(1) or "").lower() not in ("f", "rf", "fr") or m.group(2)[0] == "`":
+                return ""
+            body = m.group(2)[1:-1].replace("{{", "  ").replace("}}", "  ")
+            return " " + " ".join(_FIELD_RE["py"].findall(body)) + " "
+        return _PY_LIT_RE.sub(py_repl, text)
+
+    def js_repl(m):
+        lit = m.group()
+        if lit[0] != "`" or _js_tagged(text, m.start()):
+            return ""
+        return " " + " ".join(_FIELD_RE["js"].findall(lit[1:-1])) + " "
+    return STRING_LIT_RE.sub(js_repl, text)
+
+
 # ---------------- Sanitizer model (SonarQube / Semgrep style) ----------------
 # Values passed through a sanitizer stop being tainted. "full" sanitizers
 # (numeric coercion) cleanse every sink; "partial" sanitizers (keyed by sink
@@ -866,8 +934,14 @@ _FULL_SAN = {
 _PARTIAL_SAN = {
     "py": {
         "CMD": re.compile(r"(?:shlex|pipes)\.quote\s*\(" + _SAN_BODY + r"\)"),
-        "XSS": re.compile(r"(?:html\.escape|markupsafe\.escape|cgi\.escape|bleach\.clean|escape)\s*\(" + _SAN_BODY + r"\)"),
-        "PATH": re.compile(r"(?:os\.path\.basename|basename|secure_filename)\s*\(" + _SAN_BODY + r"\)"),
+        # escape(), escape_html(), …; an autoescaping template and the JSON
+        # and URL builders encode the value too. Not unescape().
+        "XSS": re.compile(r"(?<!\w)(?:html\.escape|markupsafe\.escape|cgi\.escape|escape\w*|bleach\.clean"
+                          r"|conditional_escape|format_html|render_template|jsonify|url_for)\s*\("
+                          + _SAN_BODY + r"\)"),
+        "PATH": re.compile(r"(?:os\.path\.basename|basename|secure_filename|safe_join)\s*\(" + _SAN_BODY + r"\)"),
+        # url_for builds a URL on this site from an endpoint's name
+        "REDIR": re.compile(r"(?<![\w.])(?:flask\.)?url_for\s*\(" + _SAN_BODY + r"\)"),
     },
     "js": {
         "XSS": re.compile(r"(?:DOMPurify\.sanitize|encodeURIComponent|escapeHtml|sanitizeHtml)\s*\(" + _SAN_BODY + r"\)"),
@@ -877,9 +951,21 @@ _PARTIAL_SAN = {
     },
 }
 
+# Flask's typed lookup, `request.args.get("page", 1, type=int)`, returns a
+# number (or the default): a full sanitizer like int(…).
+_TYPED_GET_RE = re.compile(r"(?<![\w.])[A-Za-z_][\w.]*\.get(?:list)?\s*\(([^()]{0,256})\)")
+_TYPED_ARG_RE = re.compile(r"\btype\s*=\s*(?:int|float|bool)\b")
+
+
+def _typed_get(m):
+    return " " if _TYPED_ARG_RE.search(m.group(1)) else m.group()
+
+
 def _neutralize(text, lang, suffix=None):
     """Strip sanitizer calls so their sanitized content stops counting as taint."""
     text = _FULL_SAN[lang].sub(" ", text)
+    if lang == "py" and "type" in text:
+        text = _TYPED_GET_RE.sub(_typed_get, text)
     if suffix and suffix in _PARTIAL_SAN.get(lang, {}):
         text = _PARTIAL_SAN[lang][suffix].sub(" ", text)
     return text
@@ -1114,6 +1200,345 @@ def load_taint_config_for_scan(explicit_path, scan_root, trust_repo=False,
 _IDENT_RUN_RE = {"py": re.compile(r"\w+"), "js": re.compile(r"[\w$]+")}
 
 
+# A statement taint reads may run over several lines: a line whose brackets
+# stay open (`RESPONSE += (` / `subprocess.run(` / `const q = \`…`) is read
+# together with the lines that continue it — at most TAINT_JOIN_MAX_LINES of
+# them and TAINT_JOIN_MAX_CHARS of their text, joined with spaces.
+TAINT_JOIN_MAX_LINES = 8
+TAINT_JOIN_MAX_CHARS = 4000
+_BRACKET_DELTA = {"(": 1, "[": 1, "{": 1, ")": -1, "]": -1, "}": -1}
+
+
+def _bracket_depth(code):
+    """Brackets `code` opens and leaves open (string literals not counted)."""
+    return sum(_BRACKET_DELTA.get(ch, 0) for ch in STRING_LIT_RE.sub("", code))
+
+
+def _arg_end(text, start):
+    """Index of the comma or closing bracket that ends the argument starting
+    at `start` in `text` (len(text) when nothing does); brackets and string
+    literals inside the argument are skipped."""
+    depth, i, n = 0, start, len(text)
+    while i < n:
+        ch = text[i]
+        if ch in "\"'`":
+            j = text.find(ch, i + 1)
+            if j < 0:
+                return n
+            i = j + 1
+            continue
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            if depth == 0:
+                return i
+            depth -= 1
+        elif ch == "," and depth == 0:
+            return i
+        i += 1
+    return n
+
+
+def _call_close(text, start):
+    """Index of the bracket that closes a call whose arguments start at
+    `start` in `text` (len(text) when nothing does)."""
+    while True:
+        end = _arg_end(text, start)
+        if end >= len(text) or text[end] != ",":
+            return end
+        start = end + 1
+
+
+def _first_arg(text):
+    """The first argument of a call whose text after the opening parenthesis
+    is `text`; a parenthesized tuple is read as its first element
+    (`make_response((body, {"X-H": v}))` → `body`)."""
+    arg = text[:_arg_end(text, 0)]
+    s = arg.lstrip()
+    if s.startswith("("):
+        k = _arg_end(s, 1)
+        if k < len(s) and s[k] == ",":
+            return s[1:k]
+    return arg
+
+
+# a keyword argument that names no target (`data=`, `cwd=`, `timeout=`); the
+# ones that do (`url=`, `file=`, `args=`, …) are read like positional ones
+_KWARG_RE = re.compile(r"\s*(?!(?:url|uri|file|filename|path|path_or_file|args|cmd|command|src|dst|source"
+                       r"|destination)\s*=)[A-Za-z_]\w*\s*=(?!=)")
+
+
+def _positional_args(text):
+    """A call's arguments (`text` follows its opening parenthesis) without its
+    keyword arguments (see above): `requests.post(url, data=d)` → `url`."""
+    out, i, n = [], 0, len(text)
+    while True:
+        end = _arg_end(text, i)
+        arg = text[i:end]
+        if not _KWARG_RE.match(arg):
+            out.append(arg)
+        if end >= n or text[end] != ",":
+            return ",".join(out)
+        i = end + 1
+
+
+# Which arguments of a built-in sink carry the injection. Only the first: a
+# query's bound parameters (`execute(sql, (x,))`), a response's status and
+# headers, a redirect's code, a template's context and eval's namespaces are
+# data. Only the positional ones: `requests.post(url, data=d)`,
+# `send_file(f, download_name=n)` and `subprocess.run(cmd, cwd=d)` name no
+# target in their keywords. Other rows (the rest of the JavaScript ones, the
+# rows a taint config adds) read every argument — never the code after the
+# call on the same line (`exec(cmd); log(location.href)`).
+_SINK_ARGS = {row[1]: "first" for row in TAINT_SINKS["py"]
+              if row[0] in ("SQL", "XSS", "REDIR", "SSTI", "CODE")}
+_SINK_ARGS.update({row[1]: "positional" for row in TAINT_SINKS["py"]
+                   if row[0] in ("CMD", "PATH", "SSRF")})
+_SINK_ARGS.update({row[1]: "first" for row in TAINT_SINKS["js"] if row[0] == "SQL"})
+
+
+def _extent(text):
+    """`text` (what follows a sink's match) up to the end of the sink's
+    arguments: the bracket that closes the call, or the end of the statement
+    (a `;` outside brackets) for an assignment sink such as `.innerHTML =`."""
+    depth, i, n = 0, 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch in "\"'`":
+            j = text.find(ch, i + 1)
+            if j < 0:
+                return text
+            i = j + 1
+            continue
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            if depth == 0:
+                return text[:i]
+            depth -= 1
+        elif ch == ";" and depth == 0:
+            return text[:i]
+        i += 1
+    return text
+
+
+# A redirect to a path on this site: an argument that starts with a string
+# literal holding '/' and then neither '/' nor '\\' (`redirect("/user/" +
+# id)`, `res.redirect(f"/search?q={q}")`) cannot change the host.
+_SAME_SITE_RE = re.compile(r"""\s*[rRuUfF]{0,2}["'`]/(?![/\\])""")
+
+
+def _offsite_args(args):
+    """`args` without the arguments that redirect to this site (see above)."""
+    out, i, n = [], 0, len(args)
+    while True:
+        end = _arg_end(args, i)
+        arg = args[i:end]
+        if not _SAME_SITE_RE.match(arg):
+            out.append(arg)
+        if end >= n or args[end] != ",":
+            return ",".join(out)
+        i = end + 1
+
+
+def _sink_args(text, sink_re, lang, suffix):
+    """The part of a sink's arguments (`text` follows the sink's match) that
+    carries the injection (see above)."""
+    mode = _SINK_ARGS.get(sink_re)
+    if mode == "first":
+        args = _first_arg(text)
+    elif mode == "positional":
+        args = _positional_args(text)
+    else:
+        args = _extent(text)
+    return _offsite_args(args) if suffix == "REDIR" else args
+
+
+# Path-traversal guards (barrier guards): a condition that rejects a value
+# holding '..' or checks that it stays under a base directory, on a branch
+# that leaves — `if ".." in name: abort(400)`, `if not path.startswith(BASE):
+# return …`, `if (p.includes("..")) return next(err)`. After one, the value
+# (and what is built from it) no longer carries path traversal. The exit is
+# on the `if` line or starts a line of its block (the lines below it, more
+# indented, at most _GUARD_BLOCK_LINES of them).
+_GUARD_BLOCK_LINES = 12
+_GUARD_IF_RE = {"py": re.compile(r"^\s*(?:el)?if\b"),
+                "js": re.compile(r"^\s*(?:\}\s*)?(?:else\s+)?if\s*\(")}
+_DOTDOT = r"""(?:'\.\.[/\\]{0,2}'|"\.\.[/\\]{0,2}"|`\.\.[/\\]{0,2}`)"""
+_GUARD_VAR_RES = {
+    "py": (re.compile(_DOTDOT + r"\s+(?:not\s+)?in\s+([A-Za-z_]\w*)(?![\w.(\[])"),
+           re.compile(r"(?<![\w.])([A-Za-z_]\w*)\s*\.\s*(?:startswith|is_relative_to)\s*\(\s*(?![\s'\"])"),
+           re.compile(r"(?:realpath|abspath|normpath)\s*\(\s*([A-Za-z_]\w*)\s*\)\s*\.\s*startswith\s*\(\s*(?![\s'\"])")),
+    "js": (re.compile(r"(?<![\w$.])([A-Za-z_$][\w$]*)\s*\.\s*(?:includes|indexOf)\s*\(\s*" + _DOTDOT + r"\s*\)"),
+           re.compile(r"(?<![\w$.])([A-Za-z_$][\w$]*)\s*\.\s*startsWith\s*\(\s*(?![\s'\"`])")),
+}
+# os.path.commonpath([BASE, path]): every name in the list
+_GUARD_COMMONPATH_RE = re.compile(r"commonpath\s*\(\s*[\[(]([^\[\]()]{0,256})[\])]")
+_GUARD_NAME_RE = re.compile(r"^\s*([A-Za-z_]\w*)\s*$")
+_GUARD_EXIT_RE = {
+    "py": re.compile(r"\b(?:return|raise|continue|break)\b|(?<![\w.])(?:abort|flask\.abort|sys\.exit)\s*\("),
+    "js": re.compile(r"\b(?:return|throw|continue|break)\b|(?<![\w$.])process\.exit\s*\("),
+}
+
+
+def _guarded_names(stmt, lang):
+    """Names a path-traversal guard condition in `stmt` checks (see above)."""
+    names = [m.group(1) for r in _GUARD_VAR_RES[lang] for m in r.finditer(stmt)]
+    if lang == "py" and "commonpath" in stmt:
+        for m in _GUARD_COMMONPATH_RE.finditer(stmt):
+            names.extend(n.group(1) for n in map(_GUARD_NAME_RE.match, m.group(1).split(",")) if n)
+    return names
+
+
+def _guard_exits(ctx, i, stmt, lang):
+    """True when the `if` on line i (joined statement `stmt`) leaves: an
+    exit on its own line or at the start of a line of its block."""
+    exit_re = _GUARD_EXIT_RE[lang]
+    if exit_re.search(stmt):
+        return True
+    line = ctx.mcode(i)
+    indent = len(line) - len(line.lstrip())
+    seen, j = 0, i + 1
+    while j < len(ctx.lines) and seen < _GUARD_BLOCK_LINES:
+        if not ctx.cmask[j]:
+            code = ctx.mcode(j)
+            body = code.lstrip()
+            if body:
+                if len(code) - len(body) <= indent:
+                    return False
+                if exit_re.match(body):
+                    return True
+                seen += 1
+        j += 1
+    return False
+
+
+# Flask (or Quart) views: what one returns is the response body, HTML by
+# default. A function decorated with @….route(…) — or @….get / post / put /
+# patch / delete(…) in a file that imports flask or quart — is a view; its own
+# `return` lines (not those of a function nested in it) are XSS sinks unless
+# the value (a returned tuple's first item) is a JSON container, a redirect, a
+# template, a file or a response object: those are read as what they are.
+_FLASK_IMPORT_RE = re.compile(r"^\s*(?:from\s+(?:flask|quart)\b|import\s+(?:flask|quart)\b)")
+_VIEW_DECORATOR_RE = re.compile(r"^\s*@[\w.]+\.(route|get|post|put|patch|delete)\s*\(")
+_DEF_RE = re.compile(r"^\s*(?:async\s+def|def|class)\b")
+_RETURN_RE = re.compile(r"^\s*return\b")
+_VIEW_RETURN_SKIP_RE = re.compile(
+    r"\s*(?:\{|\[|dict\s*\(|(?:[A-Za-z_][\w.]*\.)?(?:redirect|jsonify|url_for|send_file|send_from_directory"
+    r"|send_static_file|abort|render_template)\s*\()")
+
+
+# A view that returns what a function call gives (`return User.to_dict(q)`,
+# `return request.get_json()`) returns that function's value, most often a
+# dict or a response: only the string builders' results are read as the body
+# (`return str(x)`, `return "…".format(x)`, `return ", ".join(xs)`).
+_VIEW_CALL_RE = re.compile(r"\s*([A-Za-z_][\w.]*)\s*\(")
+_STRING_BUILDERS = frozenset((
+    "str", "format", "join", "replace", "strip", "lstrip", "rstrip", "upper", "lower", "title",
+    "capitalize", "casefold", "swapcase", "decode", "zfill", "ljust", "rjust", "center", "expandtabs",
+    "dumps"))
+
+
+def _view_body(value):
+    """False when a view's return value `value` is a call of a function that
+    is not a string builder (see above)."""
+    m = _VIEW_CALL_RE.match(value)
+    if not m or m.group(1).rsplit(".", 1)[-1] in _STRING_BUILDERS:
+        return True
+    end = _call_close(value, m.end())
+    return end >= len(value) or bool(value[end + 1:].strip())
+
+
+def _view_returns(ctx):
+    """Indices of the `return` lines of the file's Flask views (see above)."""
+    code = [("" if ctx.cmask[i] else ctx.mcode(i)) for i in range(len(ctx.lines))]
+    flask = any(_FLASK_IMPORT_RE.match(c) for c in code)
+    out = set()
+    stack = []              # [indent, is_view] of the enclosing defs
+    pending = False         # a view decorator seen, its def not yet
+    open_brackets = 0       # a decorator's arguments still open …
+    continued = 0           # … over this many lines (at most TAINT_JOIN_MAX_LINES)
+    for i, c in enumerate(code):
+        body = c.lstrip()
+        if not body:
+            continue
+        if open_brackets > 0 and continued < TAINT_JOIN_MAX_LINES:
+            open_brackets += _bracket_depth(c)
+            continued += 1
+            continue
+        open_brackets = 0
+        indent = len(c) - len(body)
+        while stack and indent <= stack[-1][0]:
+            stack.pop()
+        if body.startswith("@"):
+            d = _VIEW_DECORATOR_RE.match(c)
+            if d and (d.group(1) == "route" or flask):
+                pending = True
+            open_brackets, continued = _bracket_depth(c), 0
+            continue
+        if _DEF_RE.match(c):
+            stack.append([indent, pending and not body.startswith("class")])
+            pending = False
+            continue
+        pending = False
+        if stack and stack[-1][1] and _RETURN_RE.match(c):
+            out.add(i)
+    return out
+
+
+# Where a taint lives, read from the file's indentation: a name tainted in a
+# function's body (a def or class in Python; in JavaScript a function, method
+# or arrow function whose body is a block) is dropped when that body ends, so
+# another function's variable of the same name is not taken for it. A
+# reassignment that runs whenever the tainting one did — later in the same
+# block, or in a block that encloses it — replaces the value (`path =
+# secure_filename(path)` is clean for path traversal; `name = "fixed"` is
+# clean); one in a nested or sibling block (an if, an else, a case) adds to
+# it: the name stays tainted, and clean only for what both values are clean
+# for. The lines of a multi-line string are not part of the structure, nor
+# in Python the lines that continue a statement's brackets (at most
+# TAINT_JOIN_MAX_LINES of them); JavaScript's braces open blocks, and its
+# lines are read by their indentation alone.
+_JS_FUNCTION_WORD_RE = re.compile(r"\bfunction\b")
+_JS_METHOD_HEAD_RE = re.compile(
+    r"^\s*(?:(?:async|static|get|set)\s+){0,3}(?!(?:if|for|while|switch|catch|with|function|return)\b)"
+    r"[A-Za-z_$][\w$]*\s*\([^()]*\)$")
+
+
+def _scope_opener(code, lang):
+    """True when line `code` opens a function body (see above)."""
+    if lang == "py":
+        return bool(_DEF_RE.match(code))
+    t = code.rstrip()
+    if not t.endswith("{"):
+        return False
+    head = t[:-1].rstrip()
+    if head.endswith("=>"):
+        return True
+    if not head.endswith(")"):
+        return False
+    return bool(_JS_FUNCTION_WORD_RE.search(head) or _JS_METHOD_HEAD_RE.match(head))
+
+
+def _literal_continuations(ctx):
+    """Indices of the lines whose first non-blank character lies inside a
+    string literal that began on an earlier line."""
+    lits = ctx._literals
+    out = set()
+    if not lits:
+        return out
+    starts = _line_starts(ctx.content)
+    k, reach = 0, -1
+    for j, line in enumerate(ctx.lines):
+        p = starts[j] + len(line) - len(line.lstrip())
+        while k < len(lits) and lits[k][0] < p:
+            reach = max(reach, lits[k][1])
+            k += 1
+        if p < reach:
+            out.add(j)
+    return out
+
+
 def taint_scan(path, lines, lang, ctx=None):
     if lang not in TAINT_SOURCES:   # SQL and others: pattern rules only, no taint flow
         return []
@@ -1124,10 +1549,24 @@ def taint_scan(path, lines, lang, ctx=None):
     # (Match text: NFKC for Python, decoded identifier escapes for JS.)
     cmask = ctx.cmask
     issues = []
-    tainted = {}   # var -> (line_no, frozenset(clean sink suffixes), taint order)
+    # var -> [line_no, frozenset(clean sink suffixes), taint order, scope id,
+    #         ((indent, block id), …) of the blocks it was tainted in]
+    tainted = {}
     src = TAINT_SOURCES[lang]
-    partial_cats = list(_PARTIAL_SAN.get(lang, {}))
+    sinks = TAINT_SINKS[lang]
+    partial = _PARTIAL_SAN.get(lang, {})
+    suffixes = list(dict.fromkeys(row[0] for row in sinks))
     ident_re = _IDENT_RUN_RE[lang]
+    views = _view_returns(ctx) if lang == "py" and "@" in ctx.content else ()
+    xss_sink = next((row for row in sinks if row[0] == "XSS"), None)
+    guard_if = _GUARD_IF_RE[lang]
+    inside = _literal_continuations(ctx)
+    levels = []             # open blocks: [indent, block id, scope id or None]
+    ids = [0, 0, 0]         # next block id, scope id, taint order
+    in_scope = collections.defaultdict(list)    # scope id -> names tainted in it
+    opener = None           # (indent, scope id) of a function whose body is not yet seen
+    open_depth = 0          # brackets a statement leaves open …
+    continued = 0           # … over this many continuation lines
 
     def carriers_in(text_code, suf):
         """Tainted vars present in text_code that still pose danger for sink
@@ -1139,6 +1578,38 @@ def taint_scan(path, lines, lang, ctx=None):
         found.sort(key=lambda v: tainted[v][2])
         return found
 
+    def statement(i, line):
+        """Line i's code, joined with the lines that continue its open brackets."""
+        depth = _bracket_depth(line)
+        if depth <= 0:
+            return line
+        parts, total, j = [line], 0, i + 1
+        while depth > 0 and j < len(lines) and j <= i + TAINT_JOIN_MAX_LINES \
+                and total < TAINT_JOIN_MAX_CHARS:
+            if not cmask[j]:
+                nxt = ctx.mcode(j)[:TAINT_JOIN_MAX_CHARS - total]
+                parts.append(nxt)
+                total += len(nxt)
+                depth += _bracket_depth(nxt)
+            j += 1
+        return " ".join(parts)
+
+    def report(suffix, cat, sev, cwe, fix, text, i, col):
+        """A T-* finding when `text` (a sink's arguments, a view's return
+        value) carries untrusted data for sink category `suffix`."""
+        rest_code = _taint_code(_neutralize(text, lang, suffix), lang)
+        carriers = carriers_in(rest_code, suffix)
+        if not carriers and not src.search(rest_code):
+            return
+        what = (f"untrusted data via '{carriers[0]}' (tainted at line {tainted[carriers[0]][0]})"
+                if carriers else "untrusted data")
+        issues.append(mk_issue(
+            {"id": f"T-{suffix}", "name": f"Tainted flow → {cat}", "type": "VULN", "sev": sev,
+             "msg": f"Possible {cat}: {what} reaches this sink.",
+             "why": "Data from user input or a decode function flows into a dangerous call "
+                    "without visible sanitization (lightweight intra-file taint tracking).",
+             "fix": fix, "ref": f"{cwe} · Taint analysis"}, path, i + 1, lines, col))
+
     for i in range(len(lines)):
         if cmask[i]:
             continue
@@ -1147,37 +1618,95 @@ def taint_scan(path, lines, lang, ctx=None):
             continue
         if not i & 63:
             ctx.check_time()
+        # ---- the structure (see "Where a taint lives") ----
+        structural = False
+        if i not in inside:
+            depth = sum(_BRACKET_DELTA.get(ch, 0) for ch in ctx.names_code(i)) if lang == "py" else 0
+            if open_depth > 0 and continued < TAINT_JOIN_MAX_LINES:
+                open_depth = max(0, open_depth + depth)
+                continued += 1
+            else:
+                structural = True
+                open_depth, continued = max(0, depth), 0
+                raw = lines[i]
+                indent = len(raw) - len(raw.lstrip())
+                while levels and levels[-1][0] > indent:
+                    gone = levels.pop()[2]
+                    if gone is not None:         # a function's body ends
+                        for n in in_scope.pop(gone, ()):
+                            if n in tainted and tainted[n][3] == gone:
+                                del tainted[n]
+                if not levels or levels[-1][0] < indent:
+                    scope = opener[1] if opener is not None and indent > opener[0] else None
+                    levels.append([indent, ids[0], scope])
+                    ids[0] += 1
+                opener = None
+                if _scope_opener(line, lang):
+                    opener = (indent, ids[1])
+                    ids[1] += 1
+        stmt = None
         names, rhs = _assignment(line, lang)
         if names:
-            base = STRING_LIT_RE.sub("", _neutralize(rhs, lang))  # full sanitizers stripped
-            is_tainted = bool(src.search(base)) or bool(carriers_in(base, None))
-            if is_tainted:
+            stmt = statement(i, line)
+            joined = _assignment(stmt, lang)
+            if joined[0]:
+                names, rhs = joined
+            base = _taint_code(_neutralize(rhs, lang), lang)   # full sanitizers stripped
+            clean = None
+            if src.search(base) or carriers_in(base, None):
+                # the sink categories the value is clean for: a sanitizer
+                # for the category, or every carrier already clean for it
                 clean = set()
-                for suf in partial_cats:
-                    neut = STRING_LIT_RE.sub("", _neutralize(rhs, lang, suf))
+                for suf in suffixes:
+                    neut = _taint_code(_neutralize(rhs, lang, suf), lang) if suf in partial else base
                     if not src.search(neut) and not carriers_in(neut, suf):
                         clean.add(suf)
-                for name in names:
-                    if name not in tainted:
-                        tainted[name] = (i + 1, frozenset(clean), len(tainted))
-        for suffix, sink_re, cat, sev, cwe, fix in TAINT_SINKS[lang]:
+                # a response object (make_response(…), HttpResponse(…)) or a
+                # value marked safe: the XSS sink reports what it is built from
+                if xss_sink is not None and xss_sink[1].search(rhs):
+                    clean.add("XSS")
+                clean = frozenset(clean)
+            chain = tuple((lv[0], lv[1]) for lv in levels)
+            scope = next((lv[2] for lv in reversed(levels) if lv[2] is not None), None)
+            augmented = bool(_AUG_ASSIGN_RE[lang].match(stmt))
+            for name in names:
+                old = tainted.get(name)
+                replaces = (old is not None and structural and not augmented
+                            and (levels[-1][0], levels[-1][1]) in old[4])
+                if old is None or replaces:
+                    if clean is None:
+                        tainted.pop(name, None)
+                    else:
+                        tainted[name] = [i + 1, clean, ids[2], scope, chain]
+                        ids[2] += 1
+                        if scope is not None:
+                            in_scope[scope].append(name)
+                elif clean is not None:
+                    old[1] = old[1] & clean
+        elif tainted and guard_if.match(line):
+            stmt = statement(i, line)
+            guarded = [n for n in _guarded_names(stmt, lang) if n in tainted]
+            if guarded and _guard_exits(ctx, i, stmt, lang):
+                for n in guarded:
+                    tainted[n][1] = tainted[n][1] | {"PATH"}
+        xss_here = False
+        for suffix, sink_re, cat, sev, cwe, fix in sinks:
             sm = sink_re.search(line)
             if not sm:
                 continue
+            if stmt is None:
+                stmt = statement(i, line)
+            xss_here = xss_here or suffix == "XSS"
             # neutralize full + this-category sanitizers in the sink's arguments
-            rest = _neutralize(line[sm.end():], lang, suffix)
-            rest_code = STRING_LIT_RE.sub("", rest)
-            carriers = carriers_in(rest_code, suffix)
-            if not carriers and not src.search(rest_code):
-                continue
-            what = (f"untrusted data via '{carriers[0]}' (tainted at line {tainted[carriers[0]][0]})"
-                    if carriers else "untrusted data")
-            issues.append(mk_issue(
-                {"id": f"T-{suffix}", "name": f"Tainted flow → {cat}", "type": "VULN", "sev": sev,
-                 "msg": f"Possible {cat}: {what} reaches this sink.",
-                 "why": "Data from user input or a decode function flows into a dangerous call "
-                        "without visible sanitization (lightweight intra-file taint tracking).",
-                 "fix": fix, "ref": f"{cwe} · Taint analysis"}, path, i + 1, lines, sm.start()))
+            args = _sink_args(stmt[sm.end():], sink_re, lang, suffix)
+            report(suffix, cat, sev, cwe, fix, args, i, sm.start())
+        if i in views and not xss_here and xss_sink is not None:
+            if stmt is None:
+                stmt = statement(i, line)
+            rm = _RETURN_RE.match(stmt)
+            value = _first_arg(stmt[rm.end():])
+            if value.strip() and not _VIEW_RETURN_SKIP_RE.match(value) and _view_body(value):
+                report(xss_sink[0], *xss_sink[2:], value, i, rm.end() - 6)
     return issues
 
 # ---------------- Obfuscation / entropy heuristics ----------------

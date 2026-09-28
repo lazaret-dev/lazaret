@@ -2,7 +2,12 @@
 // implementing the shared semantics (FIX-SPEC items 1, 2, 5, 6, 7, 12, 13, 14).
 import { normalizeSource } from "./lines.js";
 import { RULES, TEXT_RULES } from "./rules.js";
-import { STRING_LIT_RE, TAINT_SOURCES, TAINT_SINKS, PARTIAL_SAN, neutralize, parseAssignment } from "./taint.js";
+import {
+  STRING_LIT_RE, TAINT_SOURCES, TAINT_SINKS, PARTIAL_SAN, neutralize, parseAssignment, AUG_ASSIGN_RE, taintCode,
+  TAINT_JOIN_MAX_LINES, TAINT_JOIN_MAX_CHARS, BRACKET_DELTA, bracketDepth, cpHead, firstArg, sinkArgs,
+  GUARD_IF_RE, guardedNames, guardExits, VIEW_RETURN_RE, VIEW_RETURN_SKIP_RE, viewBody, viewReturns, scopeOpener,
+  literalContinuations,
+} from "./taint.js";
 import { sqlSinkScan, scanSqlNowhere, parenCloseMap } from "./sql.js";
 import {
   B64_BLOB_RE, OBF_IDENT_RE, SECRET_SKIP_RE, CHARCODE_RE, ENTROPY_VALUE_RE, entropySecretish,
@@ -10,7 +15,7 @@ import {
 } from "./engine.js";
 import { lexLines, jsxReading } from "./lexer.js";
 import { extractFunctions } from "./functions.js";
-import { cpLen, pyRe, pyRepr, pyRstrip, pyLstrip, isPySpace } from "../lib/pycompat.js";
+import { cpLen, pyRe, pyRepr, pyRstrip, pyLstrip, pyStrip, isPySpace } from "../lib/pycompat.js";
 import { findSecretToken, registerScanContext } from "../lib/redact.js";
 import { truncatedIssue } from "../lib/fs.js";
 import { assigned13, pinUnicode } from "../lib/unicode13.js";
@@ -401,8 +406,13 @@ const IDENT_RUN_RE = { py: /[\p{L}\p{N}_]+/gu, js: /[\p{L}\p{N}_$]+/gu };
 /**
  * Taint tracking (twin of core.taint_scan): each line is matched with its
  * comment text removed; assignments from sources (or from tainted
- * variables) taint every bound name (spec 12); a sink whose arguments carry
- * a tainted variable (or a source) not cleansed for that sink is reported.
+ * variables) taint every bound name (spec 12), read over the lines of the
+ * statement, with f-string and untagged template fields as code; a sink whose
+ * injectable arguments carry a tainted variable (or a source) not cleansed
+ * for that sink is reported, and so is a Flask view's tainted return value.
+ * Taints live in the function body they were made in; a reassignment in the
+ * same block, or an enclosing one, replaces the value, one in a nested or
+ * sibling block adds to it; path guards that leave clear path traversal.
  */
 export function taintScan(file, lines, lang, ctx = null) {
   const src = TAINT_SOURCES[lang];
@@ -412,9 +422,21 @@ export function taintScan(file, lines, lang, ctx = null) {
     ctx = new FileCtx(lines, lang, content, Infinity, jsxReading(file));
   }
   const issues = [];
-  const tainted = new Map();             // var -> {line, clean:Set(suffix), order}
-  const partialCats = Object.keys(PARTIAL_SAN[lang] || {});
+  // var -> {line, clean:Set(suffix), order, scope, chain: [[indent, block id], …]}
+  const tainted = new Map();
+  const sinks = TAINT_SINKS[lang];
+  const partial = PARTIAL_SAN[lang] || {};
+  const suffixes = [...new Set(sinks.map((r) => r[0]))];
   const identRe = IDENT_RUN_RE[lang];
+  const views = lang === "py" && ctx.content.includes("@") ? viewReturns(ctx) : new Set();
+  const xssSink = sinks.find((r) => r[0] === "XSS") ?? null;
+  const guardIf = GUARD_IF_RE[lang];
+  const inside = literalContinuations(ctx);
+  const levels = [];                     // open blocks: [indent, block id, scope id or null]
+  let nextBlock = 0, nextScope = 0, nextOrder = 0;
+  const inScope = new Map();             // scope id -> names tainted in it
+  let opener = null;                     // [indent, scope id] of a function whose body is not yet seen
+  let openDepth = 0, continued = 0;
   const carriers = (code, suf) => {
     if (!tainted.size) return [];
     const found = new Set();
@@ -426,35 +448,125 @@ export function taintScan(file, lines, lang, ctx = null) {
     }
     return [...found].sort((a, b) => tainted.get(a).order - tainted.get(b).order);
   };
+  const statement = (i, line) => {
+    let depth = bracketDepth(line);
+    if (depth <= 0) return line;
+    const parts = [line];
+    let total = 0;
+    for (let j = i + 1; depth > 0 && j < lines.length && j <= i + TAINT_JOIN_MAX_LINES
+         && total < TAINT_JOIN_MAX_CHARS; j++) {
+      if (ctx.cmask[j]) continue;
+      const nxt = cpHead(ctx.mcode(j), TAINT_JOIN_MAX_CHARS - total);
+      parts.push(nxt);
+      total += cpLen(nxt);
+      depth += bracketDepth(nxt);
+    }
+    return parts.join(" ");
+  };
+  const report = (suffix, cat, sev, cwe, fix, text, i, col) => {
+    const restCode = taintCode(neutralize(text, lang, suffix), lang);
+    const found = carriers(restCode, suffix);
+    if (!found.length && !src.test(restCode)) return;
+    const what = found.length ? `untrusted data via '${found[0]}' (tainted at line ${tainted.get(found[0]).line})` : "untrusted data";
+    issues.push(mkIssue({ id: `T-${suffix}`, name: `Tainted flow → ${cat}`, type: "VULN", sev,
+      msg: `Possible ${cat}: ${what} reaches this sink.`,
+      why: "Data from user input or a decode function flows into a dangerous call without visible sanitization (lightweight intra-file taint tracking).",
+      fix, ref: `${cwe} · Taint analysis` }, file, i + 1, lines, col));
+  };
   for (let i = 0; i < lines.length; i++) {
     if (ctx.cmask[i]) continue;
     const line = ctx.mcode(i);
     if (!line || isBlank(line)) continue;
     if (!(i & 63)) ctx.checkTime();
-    const a = parseAssignment(line, lang);
-    if (a) {
-      const base = neutralize(a.rhs, lang).replace(STRING_LIT_RE, "");
-      if (src.test(base) || carriers(base, null).length) {
-        const clean = new Set();
-        for (const suf of partialCats) {
-          const neut = neutralize(a.rhs, lang, suf).replace(STRING_LIT_RE, "");
-          if (!src.test(neut) && !carriers(neut, suf).length) clean.add(suf);
+    // ---- the structure ----
+    let structural = false;
+    if (!inside.has(i)) {
+      let depth = 0;
+      if (lang === "py") for (const ch of ctx.namesCode(i)) depth += BRACKET_DELTA[ch] ?? 0;
+      if (openDepth > 0 && continued < TAINT_JOIN_MAX_LINES) {
+        openDepth = Math.max(0, openDepth + depth);
+        continued++;
+      } else {
+        structural = true;
+        openDepth = Math.max(0, depth);
+        continued = 0;
+        const raw = lines[i];
+        const indent = raw.length - pyLstrip(raw).length;
+        while (levels.length && levels[levels.length - 1][0] > indent) {
+          const gone = levels.pop()[2];
+          if (gone !== null) {             // a function's body ends
+            for (const n of inScope.get(gone) ?? []) if (tainted.get(n)?.scope === gone) tainted.delete(n);
+            inScope.delete(gone);
+          }
         }
-        for (const name of a.names) if (!tainted.has(name)) tainted.set(name, { line: i + 1, clean, order: tainted.size });
+        if (!levels.length || levels[levels.length - 1][0] < indent) {
+          const scope = opener !== null && indent > opener[0] ? opener[1] : null;
+          levels.push([indent, nextBlock++, scope]);
+        }
+        opener = null;
+        if (scopeOpener(line, lang)) opener = [indent, nextScope++];
       }
     }
-    for (const [suffix, sinkRe, cat, sev, cwe, fix] of TAINT_SINKS[lang]) {
+    let stmt = null;
+    let a = parseAssignment(line, lang);
+    if (a) {
+      stmt = statement(i, line);
+      a = parseAssignment(stmt, lang) ?? a;
+      const base = taintCode(neutralize(a.rhs, lang), lang);   // full sanitizers stripped
+      let clean = null;
+      if (src.test(base) || carriers(base, null).length) {
+        clean = new Set();
+        for (const suf of suffixes) {
+          const neut = partial[suf] ? taintCode(neutralize(a.rhs, lang, suf), lang) : base;
+          if (!src.test(neut) && !carriers(neut, suf).length) clean.add(suf);
+        }
+        if (xssSink && xssSink[1].test(a.rhs)) clean.add("XSS");
+      }
+      const chain = levels.map((lv) => [lv[0], lv[1]]);
+      let scope = null;
+      for (let k = levels.length - 1; k >= 0; k--) if (levels[k][2] !== null) { scope = levels[k][2]; break; }
+      const augmented = AUG_ASSIGN_RE[lang].test(stmt);
+      const top = levels[levels.length - 1];
+      for (const name of a.names) {
+        const old = tainted.get(name);
+        const replaces = !!old && structural && !augmented
+          && old.chain.some(([ind, id]) => ind === top[0] && id === top[1]);
+        if (!old || replaces) {
+          if (clean === null) tainted.delete(name);
+          else {
+            tainted.set(name, { line: i + 1, clean, order: nextOrder++, scope, chain });
+            if (scope !== null) {
+              if (!inScope.has(scope)) inScope.set(scope, []);
+              inScope.get(scope).push(name);
+            }
+          }
+        } else if (clean !== null) {
+          old.clean = new Set([...old.clean].filter((c) => clean.has(c)));
+        }
+      }
+    } else if (tainted.size && guardIf.test(line)) {
+      stmt = statement(i, line);
+      const guarded = guardedNames(stmt, lang).filter((n) => tainted.has(n));
+      if (guarded.length && guardExits(ctx, i, stmt, lang)) {
+        for (const n of guarded) tainted.get(n).clean = new Set([...tainted.get(n).clean, "PATH"]);
+      }
+    }
+    let xssHere = false;
+    for (const [suffix, sinkRe, cat, sev, cwe, fix] of sinks) {
       const sm = sinkRe.exec(line);
       if (!sm) continue;
-      const rest = neutralize(line.slice(sm.index + sm[0].length), lang, suffix);
-      const restCode = rest.replace(STRING_LIT_RE, "");
-      const found = carriers(restCode, suffix);
-      if (!found.length && !src.test(restCode)) continue;
-      const what = found.length ? `untrusted data via '${found[0]}' (tainted at line ${tainted.get(found[0]).line})` : "untrusted data";
-      issues.push(mkIssue({ id: `T-${suffix}`, name: `Tainted flow → ${cat}`, type: "VULN", sev,
-        msg: `Possible ${cat}: ${what} reaches this sink.`,
-        why: "Data from user input or a decode function flows into a dangerous call without visible sanitization (lightweight intra-file taint tracking).",
-        fix, ref: `${cwe} · Taint analysis` }, file, i + 1, lines, sm.index));
+      if (stmt === null) stmt = statement(i, line);
+      xssHere = xssHere || suffix === "XSS";
+      const args = sinkArgs(stmt.slice(sm.index + sm[0].length), sinkRe, lang, suffix);
+      report(suffix, cat, sev, cwe, fix, args, i, sm.index);
+    }
+    if (views.has(i) && !xssHere && xssSink) {
+      if (stmt === null) stmt = statement(i, line);
+      const rm = VIEW_RETURN_RE.exec(stmt);
+      const value = firstArg(stmt.slice(rm.index + rm[0].length));
+      if (pyStrip(value) && !VIEW_RETURN_SKIP_RE.test(value) && viewBody(value)) {
+        report(xssSink[0], xssSink[2], xssSink[3], xssSink[4], xssSink[5], value, i, rm.index + rm[0].length - 6);
+      }
     }
   }
   return issues;

@@ -67,7 +67,7 @@ test("Unicode evasion (spec 5): JS identifier escapes, U+FEFF, NFKC, bidi contro
 });
 
 test("decode → execute across lines and statements (spec 13)", () => {
-  assert.deepEqual(rules("eval(\n  atob(x))\n", "js"), ["S-EVAL-JS@1", "SC-EVAL-DECODE@1"]);
+  assert.deepEqual(rules("eval(\n  atob(x))\n", "js"), ["S-EVAL-JS@1", "SC-EVAL-DECODE@1", "T-CODE@1"]);
   assert.deepEqual(rules("eval(globalThis.atob(x))\n", "js"), ["S-EVAL-JS@1", "SC-EVAL-DECODE@1", "T-CODE@1"]);
   const dep = scanFile({ name: "node_modules/x/a.js", content: "const p = atob(s);\nconst q = 1;\neval(p);\n", lang: "js", dep: true });
   assert.deepEqual(dep.map((i) => [i.rule, i.line, i.msg]),

@@ -173,8 +173,13 @@ shared by the CLI and the MCP server. In order it:
 Per-file pattern rules (SQL sinks, obfuscation, secrets, look-alike identifiers,
 hidden Unicode, packed/hex-escape building, `.pth` execution, UTF-7/escape
 codecs, binary artifacts) plus intra-file taint that follows request-shaped
-input (`request.*`, `req.*`, `argv`, decoders) through assignments into sinks
-(SQL, command, code, path traversal, SSRF, open redirect, XSS, SSTI). Comments
+input (`request.*`, `req.*`, `argv`, decoders) through assignments, f-string
+and template-literal fields and multi-line statements into sinks (SQL,
+command, code, path traversal, SSRF, open redirect, XSS — Flask/Django
+responses and a Flask view's return value —, SSTI). Only a sink's injectable
+arguments are read; path guards that leave clear path traversal; a taint is
+scoped to the function body (by indentation) it was made in, and a
+reassignment in the same block replaces it. Comments
 are **lexed, not guessed** — block-comment/string/template state is tracked
 across lines, and a line counts as a comment only if all of it is, and only if
 both readings of ambiguous text agree.
