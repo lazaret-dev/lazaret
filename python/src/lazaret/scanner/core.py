@@ -7698,10 +7698,11 @@ def dependency_checks(root, files, manifests, issues, excludes=(), should_stop=N
         if agent is not None:
             out.append(agent)
     # Cross-file received code (Python engine only): a value received in one file
-    # of a package and run in another. Skips files already flagged single-file.
-    if should_stop is None or not should_stop():
-        flagged = {i["file"].replace(os.sep, "/") for i in out if i["rule"] == "SC-IMPORT-RISK"}
-        out.extend(_cross_file_received_issues(files, flagged))
+    # of a package and run in another. Reached only when the checks above did not
+    # stop (each returns early on should_stop), so no extra should_stop call here —
+    # it is a bounded pass. Skips files already flagged single-file.
+    flagged = {i["file"].replace(os.sep, "/") for i in out if i["rule"] == "SC-IMPORT-RISK"}
+    out.extend(_cross_file_received_issues(files, flagged))
     return out, extra, None
 
 
