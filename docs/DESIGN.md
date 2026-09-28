@@ -239,6 +239,13 @@ twin `js/src/lib/received.js`.
   so lines and pattern bounds are unchanged), and PowerShell counts there
   only as an argument of an exec call (`_powershell_run_at`). Both keep the
   lexer off the hot path: it runs only on a file the raw text already fails.
+  A file that reads its own source (`reads_own_source`: `open(__file__)`,
+  `__doc__`, `readFileSync(__filename)`, a function's `.toString()` …)
+  keeps its prose — the comment may be the payload or the C2 address — and
+  running what it reads back, or what it reads from a data file next to it,
+  is CRITICAL on its own (`runs_own_source_at`; reads, runners and names
+  inside string literals don't count, so a code template in a string is not
+  one).
 
 **The shared spec.** The detector's data (name sets, character sets, limits) and
 **all its patterns** (27 plain regexes + 6 alternation groups, ~57 compiled

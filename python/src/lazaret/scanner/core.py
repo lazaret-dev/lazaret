@@ -5584,6 +5584,150 @@ def sends_host_info(text):
     return bool(_HOST_INFO_RE.search(text) and (_NETWORK_RE.search(text) or _EXFIL_SERVICE_RE.search(text)))
 
 
+# Code read back from the file itself (0.1.7). A payload — or a hint such as
+# a C2 address — can sit in a comment or a docstring of the file that uses
+# it, read back with open(__file__), Path(__file__).read_text(), linecache,
+# __loader__.get_source or __doc__ (in JavaScript readFileSync(__filename),
+# import.meta.url, a function's .toString()). Running what such a read gives —
+# or what a read of a data file shipped next to the code gives (a path built
+# from __file__ / __dirname / import.meta.url that names a file with a
+# non-code extension: .txt, .dat, .png …) — is a sign of its own: a value
+# assigned from the read is followed through the names it is assigned to
+# (_SELF_READ_PASSES levels), to a runner's arguments (at most
+# _SELF_READ_ARG_SPAN characters of each of the first _SELF_READ_MAX_CALLS
+# runners). A .py or .js file read and run is not: setup.py's
+# `exec(open("pkg/version.py").read())` reads a version. The import-time test
+# reads a file that reads its own source with its prose (_import_code).
+_SELF_READ_RE = re.compile(
+    r"\bopen\s*\(\s*(?:os\.path\.(?:abspath|realpath)\s*\(\s*)?__file__\b"
+    r"|\bPath\s*\(\s*__file__\s*\)\s*\.\s*(?:read_text|read_bytes|open)\s*\("
+    r"|\blinecache\.getlines?\s*\(\s*__file__\b|(?<![\w.])__loader__\s*\.\s*get_source\s*\(|(?<![\w.])__doc__\b"
+    r"|\breadFile(?:Sync)?\s*\(\s*(?:__filename\b|(?:new\s+URL\s*\(\s*)?import\.meta\.url"
+    r"|fileURLToPath\s*\(\s*import\.meta\.url)|\barguments\s*\.\s*callee\b|\}\s*\)?\s*\.\s*toString\s*\(\s*\)")
+_DATA_EXT = (r"(?:txt|dat|bin|png|jpe?g|gif|ico|bmp|svg|wav|mp3|mp4|woff2?|ttf|json|md|cfg|ini|log|db|pyc|so|dll"
+             r"|dylib|exe)")
+_SIBLING_DATA_RE = re.compile(
+    r"\b(?:open|read_text|read_bytes|readFileSync|readFile)\s*\([^\n]{0,200}?(?:__file__|__dirname|import\.meta\.url)"
+    r"[^\n]{0,200}?[\"'][^\"'\n]{1,100}\." + _DATA_EXT + r"[\"']"
+    r"|(?:__file__|__dirname)[^\n]{0,200}?[\"'][^\"'\n]{1,100}\." + _DATA_EXT + r"[\"'][^\n]{0,60}?"
+    r"\.\s*(?:read_text|read_bytes)\s*\(")
+_SELF_RUN_RE = re.compile(
+    r"(?<![\w.$])(?:exec|eval|compile)\s*\(|\bnew\s+Function\s*\(|\bvm\s*\.\s*run\w*\s*\("
+    r"|\b(?:execSync|system|popen|Popen|check_output|getoutput)\s*\(|\bsubprocess\s*\.\s*\w+\s*\(")
+_SELF_READ_ASSIGN_RE = re.compile(
+    r"(?<![^\n])[ \t]*(?:(?:const|let|var)[ \t]+)?([A-Za-z_$][\w$]*)[ \t]*(?::[^=\n]*)?=(?![=>])([^\n]*)")
+_IDENT_TOKEN_RE = re.compile(r"(?<![\w$.])[A-Za-z_$][\w$]*")
+_SELF_READ_PASSES = 3            # levels of names followed from a read
+_SELF_READ_MAX_CALLS = 200       # runners examined per text
+_SELF_READ_ARG_SPAN = 2000       # characters of a runner's arguments read
+_SELF_READ_MAX_ASSIGNS = 5000    # assignments examined per text
+
+
+def reads_own_source(text):
+    """Does `text` read its own source (see above)?"""
+    return _SELF_READ_RE.search(text) is not None
+
+
+def _call_args(text):
+    """`text` (what follows a call's '(') up to the bracket that closes the
+    call; string literals are skipped."""
+    depth, i, n = 0, 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch in "\"'`":
+            j = text.find(ch, i + 1)
+            if j < 0:
+                return text
+            i = j + 1
+            continue
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            if depth == 0:
+                return text[:i]
+            depth -= 1
+        i += 1
+    return text
+
+
+_LITERAL_SPANS_MAX = 20000       # literals a text's runners and reads are told apart from
+
+
+def _literal_spans(text):
+    """(start, end) of the string literals of `text`, as _string_literals
+    reads them (at most _LITERAL_SPANS_MAX of them). One pass."""
+    out, i, n = [], 0, len(text)
+    while i < n and len(out) < _LITERAL_SPANS_MAX:
+        ch = text[i]
+        if ch not in "\"'`":
+            i += 1
+            continue
+        if ch != "`" and text.startswith(ch * 3, i):
+            j = text.find(ch * 3, i + 3)
+            end = n if j < 0 else j + 3
+            out.append((i, end))
+            i = end
+            continue
+        j = i + 1
+        while j < n and text[j] != ch and (ch == "`" or text[j] != "\n"):
+            j += 2 if text[j] == "\\" else 1
+        end = min(j + 1, n)
+        out.append((i, end))
+        i = end
+    return out
+
+
+def runs_own_source_at(text):
+    """The offset of a runner that runs code `text` reads from its own
+    source or from a data file shipped next to it (see above), else -1.
+    Runners, reads and names inside string literals do not count (a code
+    template in a string, a list of dunder names)."""
+    if not (_SELF_READ_RE.search(text) or _SIBLING_DATA_RE.search(text)):
+        return -1
+    spans = _literal_spans(text)
+    starts = [s for s, _ in spans]
+
+    def in_literal(pos):
+        k = bisect.bisect_right(starts, pos) - 1
+        return k >= 0 and pos < spans[k][1]
+
+    def reads(lo, hi):
+        part = text[lo:hi]
+        return any(not in_literal(lo + m.start()) for rx in (_SELF_READ_RE, _SIBLING_DATA_RE)
+                   for m in rx.finditer(part))
+
+    def uses(lo, hi, names):
+        return any(m.group() in names and not in_literal(lo + m.start())
+                   for m in _IDENT_TOKEN_RE.finditer(text[lo:hi]))
+
+    if not reads(0, len(text)):
+        return -1
+    assigns = []
+    for k, m in enumerate(_SELF_READ_ASSIGN_RE.finditer(text)):
+        if k >= _SELF_READ_MAX_ASSIGNS:
+            break
+        if not in_literal(m.start(1)):
+            assigns.append((m.group(1), m.start(2), m.end(2)))
+    names = set()
+    for _ in range(_SELF_READ_PASSES):
+        grown = False
+        for name, lo, hi in assigns:
+            if name not in names and (reads(lo, hi) or uses(lo, hi, names)):
+                names.add(name)
+                grown = True
+        if not grown:
+            break
+    for k, m in enumerate(_SELF_RUN_RE.finditer(text)):
+        if k >= _SELF_READ_MAX_CALLS:
+            break
+        if in_literal(m.start()):
+            continue
+        hi = m.end() + len(_call_args(text[m.end():m.end() + _SELF_READ_ARG_SPAN]))
+        if reads(m.end(), hi) or uses(m.end(), hi, names):
+            return m.start()
+    return -1
+
+
 def install_script_risk(text):
     """Reasons an install-time script looks hostile ([] if none)."""
     reasons = []
@@ -5609,6 +5753,8 @@ def install_script_risk(text):
         reasons.append("opens a reverse shell")
     if sends_host_info(text):
         reasons.append("sends the machine's user or host name over the network")
+    if runs_own_source_at(text) >= 0:
+        reasons.append("runs code it reads back from its own file or a data file shipped with it")
     return reasons
 
 
@@ -5660,7 +5806,8 @@ _STRONG_IMPORT_REASONS = (
     "runs code it receives over the network", "runs a downloaded script through a shell",
     "runs an encoded PowerShell command", "runs PowerShell that", "carries a script that downloads and runs code",
     "opens a reverse shell", "reads credentials or the whole environment and sends them to",
-    "sends the machine's user or host name to a data-capture service", "downloads a script and runs it with Python")
+    "sends the machine's user or host name to a data-capture service", "downloads a script and runs it with Python",
+    "runs code it reads back from its own file")
 # Endpoints that exist to capture what is sent to them (out-of-band testing,
 # request inspection): no library reports to one
 _CAPTURE_SERVICE_RE = re.compile(
@@ -5677,7 +5824,8 @@ _PY_RUN_RE = re.compile(
 # (paramiko). A Python or JavaScript file that fails the test is read again
 # with its comments blanked and, in Python, the string literals that stand
 # alone as statements (docstrings, strings used as block comments) — not in
-# a file that reads its own __doc__, which can hand one to exec. The text
+# a file that reads its own source (open(__file__), __doc__ … see
+# _SELF_READ_RE): a comment can hold what it runs, or its C2 address. The text
 # keeps its line breaks and one character per character, so lines and the
 # patterns' bounds are the file's. PowerShell counts at import time only as
 # an argument of an exec call (`os.system('powershell …')`,
@@ -5749,8 +5897,11 @@ def _blank(text, spans):
 
 def _import_code(text, lang):
     """`text` (a Python or JavaScript file) with its prose blanked (see
-    above)."""
-    literals = [] if lang == "py" and "__doc__" not in text else None
+    above) — unchanged when it reads its own source: then its comments and
+    docstrings may be what it runs or where it keeps an address."""
+    if reads_own_source(text):
+        return text
+    literals = [] if lang == "py" else None
     comments = _lex_comment_spans(text, lang, literals=literals)
     spans = list(comments)
     if literals:
@@ -5847,6 +5998,9 @@ def _import_time_risk(text):
         if capture:
             signs.append((host.start(), "sends the machine's user or host name to a data-capture service "
                                         f"({capture.group(0)[:40]})"))
+    at = runs_own_source_at(text)
+    if at >= 0:
+        signs.append((at, "runs code it reads back from its own file or a data file shipped with it"))
     for at, reason in signs:
         reasons.append(reason)
         line = line or text.count("\n", 0, at) + 1

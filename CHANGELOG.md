@@ -128,11 +128,26 @@ project is pre-1.0, so the 0.x API may still change.
 ### Changed
 - **The import-time test reads code, not prose (both engines).** A Python or
   JavaScript file that fails it is read again without its comments and, in
-  Python, the strings that stand alone as statements (docstrings), unless
-  the file reads its own `__doc__`; and PowerShell counts there only as an
-  argument of an exec call. Once more of a package was read, a docstring
-  naming ``id_rsa`` made paramiko WARN, and a CLI's self-update command
-  shown in a comment and a docstring made huggingface-hub SUSPICIOUS.
+  Python, the strings that stand alone as statements (docstrings); and
+  PowerShell counts there only as an argument of an exec call. Once more of
+  a package was read, a docstring naming ``id_rsa`` made paramiko WARN, and
+  a CLI's self-update command shown in a comment and a docstring made
+  huggingface-hub SUSPICIOUS. A file that reads its own source
+  (`open(__file__)`, `Path(__file__).read_text()`, `linecache`,
+  `__loader__.get_source`, `__doc__`; `readFileSync(__filename)`,
+  `import.meta.url`, a function's `.toString()`) keeps its prose: a comment
+  can hold the address it sends to, or the code it runs.
+- **Code read back from the file itself is SUSPICIOUS (both engines).** An
+  install script or import-time code that runs what it reads from its own
+  source — a payload kept in a comment or a docstring
+  (`exec(open(__file__).read().split('"""')[1])`, `exec(__doc__)`,
+  `eval(readFileSync(__filename, 'utf8').split('/*')[1])`, a function's
+  `.toString()` handed to `new Function`) — or from a data file shipped next
+  to it (`exec(open(join(dirname(__file__), "logo.png")).read())`) fails
+  with CRITICAL; the value is followed through the names it is assigned to.
+  Running a `.py` or `.js` file is not flagged: setup.py's
+  `exec(open("pkg/version.py").read())` reads a version. No hit in 10,950
+  installed Python files or 20,456 installed JavaScript files.
 - **Taint reads only what can carry the injection (both engines).** A sink's
   arguments ran to the end of the line, so `exec(cmd); log(location.href)`
   and a minified bundle's later code were read as the sink's input, and every

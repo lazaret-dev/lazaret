@@ -19,7 +19,7 @@ import { PIPE_SCAN_SRC, EXEC_CALL_SRC, EXEC_CALL_RE, DL_SUBST_SRC, DL_SUBST_NEED
   runsDownloadThroughShell, runsSubstitutedDownload } from "./shellpipe.js";
 import { receivedCodeKind, downloadsAndRunsFile, RECEIVED_TWINS, DL_NEEDLES, DL_RUN_NEEDLES, DL_DESERIAL_NEEDLES,
   DL_IMPORT_NEEDLES, DL_SINK_NEEDLES, DL_ALIAS_NEEDLES, DL_ALIAS_MAX, DL_FILE_WRITE_NEEDLES, DL_PATHRUN_NEEDLES,
-  DL_PY_NET_MODULES, DL_NOT_NAMES, DL_PREFIX_CHARS, DL_DEFINING, DL_CALLEE_CHARS, DL_LIMITS, cpBack } from "./received.js";
+  DL_PY_NET_MODULES, DL_NOT_NAMES, DL_PREFIX_CHARS, DL_DEFINING, DL_CALLEE_CHARS, DL_LIMITS, cpBack, cpForward } from "./received.js";
 import { commentSpans } from "./lexer.js";
 
 // ---- Python details the patterns depend on --------------------------------
@@ -739,6 +739,134 @@ export function sendsHostInfo(text) {
   return HOST_INFO_RE.test(text) && (NETWORK_RE.test(text) || EXFIL_SERVICE_RE.test(text));
 }
 
+// Code read back from the file itself (core's comment above _SELF_READ_RE):
+// running what a read of its own source, or of a data file shipped next to
+// it, gives; followed through the names it is assigned to.
+const SELF_READ_SRC = String.raw`\bopen\s*\(\s*(?:os\.path\.(?:abspath|realpath)\s*\(\s*)?__file__\b`
+  + String.raw`|\bPath\s*\(\s*__file__\s*\)\s*\.\s*(?:read_text|read_bytes|open)\s*\(`
+  + String.raw`|\blinecache\.getlines?\s*\(\s*__file__\b|(?<![\w.])__loader__\s*\.\s*get_source\s*\(|(?<![\w.])__doc__\b`
+  + String.raw`|\breadFile(?:Sync)?\s*\(\s*(?:__filename\b|(?:new\s+URL\s*\(\s*)?import\.meta\.url`
+  + String.raw`|fileURLToPath\s*\(\s*import\.meta\.url)|\barguments\s*\.\s*callee\b|\}\s*\)?\s*\.\s*toString\s*\(\s*\)`;
+const DATA_EXT = String.raw`(?:txt|dat|bin|png|jpe?g|gif|ico|bmp|svg|wav|mp3|mp4|woff2?|ttf|json|md|cfg|ini|log|db|pyc|so|dll`
+  + String.raw`|dylib|exe)`;
+const SIBLING_DATA_SRC = String.raw`\b(?:open|read_text|read_bytes|readFileSync|readFile)\s*\([^\n]{0,200}?(?:__file__|__dirname|import\.meta\.url)`
+  + String.raw`[^\n]{0,200}?[\"'][^\"'\n]{1,100}\.` + DATA_EXT + String.raw`[\"']`
+  + String.raw`|(?:__file__|__dirname)[^\n]{0,200}?[\"'][^\"'\n]{1,100}\.` + DATA_EXT + String.raw`[\"'][^\n]{0,60}?`
+  + String.raw`\.\s*(?:read_text|read_bytes)\s*\(`;
+const SELF_RUN_SRC = String.raw`(?<![\w.$])(?:exec|eval|compile)\s*\(|\bnew\s+Function\s*\(|\bvm\s*\.\s*run\w*\s*\(`
+  + String.raw`|\b(?:execSync|system|popen|Popen|check_output|getoutput)\s*\(|\bsubprocess\s*\.\s*\w+\s*\(`;
+const SELF_READ_ASSIGN_SRC = String.raw`(?<![^\n])[ \t]*(?:(?:const|let|var)[ \t]+)?([A-Za-z_$][\w$]*)[ \t]*(?::[^=\n]*)?=(?![=>])([^\n]*)`;
+const IDENT_TOKEN_SRC = String.raw`(?<![\w$.])[A-Za-z_$][\w$]*`;
+const SELF_READ_RE = pyRe(SELF_READ_SRC);
+const SELF_READ_ALL_RE = pyRe(SELF_READ_SRC, "g");
+const SIBLING_DATA_RE = pyRe(SIBLING_DATA_SRC);
+const SIBLING_DATA_ALL_RE = pyRe(SIBLING_DATA_SRC, "g");
+const SELF_RUN_ALL_RE = pyRe(SELF_RUN_SRC, "g");
+const SELF_READ_ASSIGN_ALL_RE = pyRe(SELF_READ_ASSIGN_SRC, "gd");      // d: the groups' offsets
+const IDENT_TOKEN_ALL_RE = pyRe(IDENT_TOKEN_SRC, "g");
+const SELF_READ_PASSES = 3, SELF_READ_MAX_CALLS = 200, SELF_READ_ARG_SPAN = 2000, SELF_READ_MAX_ASSIGNS = 5000;
+const LITERAL_SPANS_MAX = 20000;
+
+/** Does `text` read its own source? (core.reads_own_source) */
+export function readsOwnSource(text) {
+  return SELF_READ_RE.test(text);
+}
+/** `text` (what follows a call's '(') up to the bracket that closes the call (core._call_args). */
+function callArgs(text) {
+  let depth = 0, i = 0;
+  const n = text.length;
+  while (i < n) {
+    const ch = text[i];
+    if (ch === '"' || ch === "'" || ch === "`") {
+      const j = text.indexOf(ch, i + 1);
+      if (j < 0) return text;
+      i = j + 1;
+      continue;
+    }
+    if (ch === "(" || ch === "[" || ch === "{") depth++;
+    else if (ch === ")" || ch === "]" || ch === "}") {
+      if (depth === 0) return text.slice(0, i);
+      depth--;
+    }
+    i++;
+  }
+  return text;
+}
+/** [start, end] of the string literals of `text` (core._literal_spans). */
+function literalSpans(text) {
+  const out = [];
+  const n = text.length;
+  let i = 0;
+  while (i < n && out.length < LITERAL_SPANS_MAX) {
+    const ch = text[i];
+    if (ch !== '"' && ch !== "'" && ch !== "`") { i++; continue; }
+    if (ch !== "`" && text.startsWith(ch.repeat(3), i)) {
+      const j = text.indexOf(ch.repeat(3), i + 3);
+      const end = j < 0 ? n : j + 3;
+      out.push([i, end]);
+      i = end;
+      continue;
+    }
+    let j = i + 1;
+    while (j < n && text[j] !== ch && (ch === "`" || text[j] !== "\n")) j += text[j] === "\\" ? 2 : 1;
+    const end = Math.min(j + 1, n);
+    out.push([i, end]);
+    i = end;
+  }
+  return out;
+}
+/** The offset of a runner that runs code read from the text's own source or a data file next to it, else -1 (core.runs_own_source_at). */
+export function runsOwnSourceAt(text) {
+  if (!SELF_READ_RE.test(text) && !SIBLING_DATA_RE.test(text)) return -1;
+  const spans = literalSpans(text);
+  const inLiteral = (pos) => {
+    let lo = 0, hi = spans.length;               // the last span starting at or before pos
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (spans[mid][0] <= pos) lo = mid + 1; else hi = mid; }
+    return lo > 0 && pos < spans[lo - 1][1];
+  };
+  const reads = (lo, hi) => {
+    const part = text.slice(lo, hi);
+    for (const rx of [SELF_READ_ALL_RE, SIBLING_DATA_ALL_RE]) {
+      rx.lastIndex = 0;
+      for (let m; (m = rx.exec(part)) !== null;) {
+        if (!inLiteral(lo + m.index)) return true;
+        if (m[0] === "") rx.lastIndex++;
+      }
+    }
+    return false;
+  };
+  const uses = (lo, hi, names) => {
+    const part = text.slice(lo, hi);
+    IDENT_TOKEN_ALL_RE.lastIndex = 0;
+    for (let m; (m = IDENT_TOKEN_ALL_RE.exec(part)) !== null;) if (names.has(m[0]) && !inLiteral(lo + m.index)) return true;
+    return false;
+  };
+  if (!reads(0, text.length)) return -1;
+  const assigns = [];
+  SELF_READ_ASSIGN_ALL_RE.lastIndex = 0;
+  for (let m, k = 0; (m = SELF_READ_ASSIGN_ALL_RE.exec(text)) !== null; k++) {
+    if (k >= SELF_READ_MAX_ASSIGNS) break;
+    if (!inLiteral(m.indices[1][0])) assigns.push([m[1], m.indices[2][0], m.indices[2][1]]);
+  }
+  const names = new Set();
+  for (let pass = 0; pass < SELF_READ_PASSES; pass++) {
+    let grown = false;
+    for (const [name, lo, hi] of assigns) {
+      if (!names.has(name) && (reads(lo, hi) || uses(lo, hi, names))) { names.add(name); grown = true; }
+    }
+    if (!grown) break;
+  }
+  SELF_RUN_ALL_RE.lastIndex = 0;
+  for (let m, k = 0; (m = SELF_RUN_ALL_RE.exec(text)) !== null; k++) {
+    if (k >= SELF_READ_MAX_CALLS) break;
+    if (inLiteral(m.index)) continue;
+    const start = m.index + m[0].length;
+    const hi = start + callArgs(text.slice(start, cpForward(text, start, SELF_READ_ARG_SPAN))).length;
+    if (reads(start, hi) || uses(start, hi, names)) return m.index;
+  }
+  return -1;
+}
+
 /**
  * Reasons an install-time script looks hostile ([] if none).
  * Twin of lazaret.scanner.core.install_script_risk.
@@ -762,6 +890,7 @@ export function installScriptRisk(text) {
   }
   if (reverseShellAt(text) >= 0) reasons.push("opens a reverse shell");
   if (sendsHostInfo(text)) reasons.push("sends the machine's user or host name over the network");
+  if (runsOwnSourceAt(text) >= 0) reasons.push("runs code it reads back from its own file or a data file shipped with it");
   return reasons;
 }
 
@@ -813,7 +942,8 @@ const STRONG_IMPORT_REASONS = [
   "runs code it receives over the network", "runs a downloaded script through a shell",
   "runs an encoded PowerShell command", "runs PowerShell that", "carries a script that downloads and runs code",
   "opens a reverse shell", "reads credentials or the whole environment and sends them to",
-  "sends the machine's user or host name to a data-capture service", "downloads a script and runs it with Python"];
+  "sends the machine's user or host name to a data-capture service", "downloads a script and runs it with Python",
+  "runs code it reads back from its own file"];
 const CAPTURE_SERVICE_SRC = String.raw`webhook\.site|typedwebhook\.tools|oastify\.com|burpcollaborator|\binteract\.sh|\boast[\w.-]*\.(?:pro|live|site`
   + String.raw`|online|fun|me|com)\b|pipedream\.net|requestbin|requestcatcher\.com|hookbin\.com|postb\.in|beeceptor\.com`
   + String.raw`|dnslog\.cn|ceye\.io|canarytokens`;
@@ -890,9 +1020,10 @@ function blank(text, spans) {
   return parts.join("");
 }
 
-/** `text` (a Python or JavaScript file) with its prose blanked (core._import_code). */
+/** `text` (a Python or JavaScript file) with its prose blanked, unless it reads its own source (core._import_code). */
 function importCode(text, lang) {
-  const literals = lang === "py" && !text.includes("__doc__") ? [] : null;
+  if (readsOwnSource(text)) return text;
+  const literals = lang === "py" ? [] : null;
   const comments = commentSpans(text, lang, null, { literals });
   let spans = [...comments];
   if (literals && literals.length) {
@@ -997,6 +1128,8 @@ function importTimeRiskOf(text) {
     const capture = CAPTURE_SERVICE_RE.exec(text);
     if (capture) signs.push([host.index, `sends the machine's user or host name to a data-capture service (${cpPrefix(capture[0], 40)})`]);
   }
+  const own = runsOwnSourceAt(text);
+  if (own >= 0) signs.push([own, "runs code it reads back from its own file or a data file shipped with it"]);
   for (const [at, reason] of signs) {
     reasons.push(reason);
     line ??= countNewlines(text, 0, at) + 1;
@@ -1096,6 +1229,8 @@ export const PY_TWINS = {
     _REVSHELL_JS_PIPE_RE: [REVSHELL_JS_PIPE_SRC, ""], _REVSHELL_JS_NET_RE: [REVSHELL_JS_NET_SRC, ""],
     _HOST_INFO_RE: [HOST_INFO_SRC, ""], _CAPTURE_SERVICE_RE: [CAPTURE_SERVICE_SRC, "i"], _PY_RUN_RE: [PY_RUN_SRC, ""],
     _PY_DOC_HEAD_RE: [PY_DOC_HEAD_SRC, ""], _BRACKET_RE: [BRACKET_SRC, ""], _SPACE_TAB_RE: [SPACE_TAB_SRC, ""],
+    _SELF_READ_RE: [SELF_READ_SRC, ""], _SIBLING_DATA_RE: [SIBLING_DATA_SRC, ""], _SELF_RUN_RE: [SELF_RUN_SRC, ""],
+    _SELF_READ_ASSIGN_RE: [SELF_READ_ASSIGN_SRC, ""], _IDENT_TOKEN_RE: [IDENT_TOKEN_SRC, ""],
     ...RECEIVED_TWINS,
   },
   sets: {
@@ -1118,5 +1253,7 @@ export const PY_TWINS = {
     .map(([name, map]) => [name, Object.fromEntries([...map].map(([k, v]) => [k, [...v].sort()]))])),
   limits: { HOOK_MAX_CHARS, HOOK_MAX_COMMANDS, HOOK_MAX_TARGETS, HOOK_MAX_PATH, ...DL_LIMITS, _DL_ALIAS_MAX: DL_ALIAS_MAX,
     _PS_ENCODED_MAX: PS_ENCODED_MAX, _STAGER_MIN: STAGER_MIN, _STAGER_MAX_LITERALS: STAGER_MAX_LITERALS,
-    _PS_EXEC_BACK: PS_EXEC_BACK, _PS_EXEC_MAX_NAMES: PS_EXEC_MAX_NAMES },
+    _PS_EXEC_BACK: PS_EXEC_BACK, _PS_EXEC_MAX_NAMES: PS_EXEC_MAX_NAMES, _SELF_READ_PASSES: SELF_READ_PASSES,
+    _SELF_READ_MAX_CALLS: SELF_READ_MAX_CALLS, _SELF_READ_ARG_SPAN: SELF_READ_ARG_SPAN,
+    _SELF_READ_MAX_ASSIGNS: SELF_READ_MAX_ASSIGNS, _LITERAL_SPANS_MAX: LITERAL_SPANS_MAX },
 };
