@@ -7,7 +7,21 @@ This log starts at 0.1.6; for earlier releases see the git history and tags.
 The format is based on [Keep a Changelog](https://keepachangelog.com); the
 project is pre-1.0, so the 0.x API may still change.
 
-## [0.1.6] — unreleased
+## [0.1.7] — unreleased
+
+### Security
+- **Feed decompression is budgeted (`lazaret-sca --update-bundle`).** Only the
+  downloaded size of a feed was capped, so a small gzip could expand a
+  thousandfold: a 612 KB EPSS file holding one 600 MB line took the reader to
+  1.2 GB of memory before it failed. The EPSS reader now charges every
+  decompressed byte (256 MiB) and refuses a line over 64 KiB, and an OSV
+  export's zip central directory is checked before `zipfile` parses it: its
+  declared record count, its declared size and the records it actually holds
+  must fit the record budget (the registry's archive reader already worked
+  this way). Reachable only through `--epss-url` / `--osv-url` or a compromised
+  feed host.
+
+## [0.1.6] — 2026-09-28
 
 Received-code detection — the check for a value received over the network that
 is then run as code — gained new sink families, cross-file coverage, and a

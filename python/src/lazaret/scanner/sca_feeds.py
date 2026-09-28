@@ -61,6 +61,7 @@ import json
 import os
 import re
 import stat
+import struct
 import sys
 import tempfile
 import urllib.error
@@ -94,11 +95,18 @@ USER_AGENT = "lazaret-sca/%s" % _lazaret_pkg.__version__
 
 # Budgets. The OSV exports and the EPSS file are streamed to temporary files,
 # never held in memory; the KEV catalog (under 2 MB today) is read whole.
+# What a feed decompresses to is budgeted too, not just what was downloaded:
+# a small gzip can expand a thousandfold, so the EPSS reader charges every
+# decompressed byte and caps the length of a line, and an OSV export's zip
+# central directory is checked before zipfile parses it.
 MAX_OSV_ZIP_BYTES = 4 << 30
 MAX_OSV_RECORDS = 5_000_000
 MAX_OSV_RECORD_BYTES = 8 << 20
+MAX_OSV_CENTRAL_DIR = 1 << 30       # declared bytes of an export's zip central directory
 MAX_KEV_BYTES = 64 << 20
 MAX_EPSS_BYTES = 512 << 20
+MAX_EPSS_CSV_BYTES = 256 << 20      # decompressed (the real file is about 15 MB)
+MAX_EPSS_LINE = 64 << 10            # one CSV line (a real one is about 40 bytes)
 MAX_EPSS_ROWS = 20_000_000
 READ_TIMEOUT = 60           # seconds a download may go without receiving data
 MAX_REDIRECTS = 5
@@ -519,12 +527,101 @@ def osv_record(raw, counts=None):
     }
 
 
+_ZIP_EOCD_SIG, _ZIP64_LOC_SIG, _ZIP64_EOCD_SIG = b"PK\x05\x06", b"PK\x06\x07", b"PK\x06\x06"
+_ZIP_CD_SIG = b"PK\x01\x02"
+_ZIP_EOCD = struct.Struct("<4s4H2LH")            # 22 bytes
+_ZIP64_LOC = struct.Struct("<4sLQL")             # 20 bytes
+_ZIP64_EOCD = struct.Struct("<4sQ2H2L4Q")        # 56 bytes
+
+
+def _read_at(fileobj, offset, size):
+    fileobj.seek(offset)
+    return fileobj.read(size)
+
+
+def osv_zip_preflight(fileobj, max_records=MAX_OSV_RECORDS, max_cd_bytes=MAX_OSV_CENTRAL_DIR):
+    """Refuse an export whose zip central directory is too big to parse,
+    BEFORE zipfile.ZipFile() reads it (it parses the whole directory, a few
+    hundred bytes of memory per record, before max_records can apply).
+
+    The file-backed twin of the registry's in-memory `_zip_preflight`: find
+    the End Of Central Directory record (and the ZIP64 one) the way zipfile
+    does, then raise FeedError when the declared record count exceeds
+    `max_records`, the declared directory size exceeds `max_cd_bytes`, or
+    the directory region holds more than `max_records` record signatures (a
+    count field can lie; zipfile parses records until the declared size is
+    used up). Anything it can't make sense of is left to zipfile, which
+    reports it. The file position is restored to the start."""
+    try:
+        fileobj.seek(0, os.SEEK_END)
+        n = fileobj.tell()
+    except (AttributeError, OSError, ValueError):
+        return                                  # not seekable: zipfile will say so
+    try:
+        tail_len = min(n, 65535 + _ZIP_EOCD.size)
+        base = n - tail_len
+        tail = _read_at(fileobj, base, tail_len)
+        t = len(tail)
+        if t >= _ZIP_EOCD.size and tail[t - 22:t - 18] == _ZIP_EOCD_SIG and tail[t - 2:] == b"\0\0":
+            pos = t - 22
+        else:                                   # an archive comment follows the EOCD
+            pos = tail.rfind(_ZIP_EOCD_SIG)
+            if pos < 0 or pos + _ZIP_EOCD.size > t:
+                return
+        (_sig, _disk, _cd_disk, count_disk, count, cd_size, _cd_offset,
+         _comment) = _ZIP_EOCD.unpack_from(tail, pos)
+        eocd = base + pos
+        counts, sizes, records = [], [], [eocd]
+        loc = eocd - _ZIP64_LOC.size
+        raw = _read_at(fileobj, loc, _ZIP64_LOC.size) if loc >= 0 else b""
+        if len(raw) == _ZIP64_LOC.size and raw[:4] == _ZIP64_LOC_SIG:
+            _sig, _disk, reloff, _disks = _ZIP64_LOC.unpack(raw)
+            # zipfile reads the record at the offset the locator names or,
+            # depending on the version, right before the locator: check both
+            for rec in {reloff, loc - _ZIP64_EOCD.size}:
+                if 0 <= rec <= n - _ZIP64_EOCD.size:
+                    data = _read_at(fileobj, rec, _ZIP64_EOCD.size)
+                    if len(data) == _ZIP64_EOCD.size and data[:4] == _ZIP64_EOCD_SIG:
+                        fields = _ZIP64_EOCD.unpack(data)
+                        counts += [fields[6], fields[7]]
+                        sizes.append(fields[8])
+                        records.append(rec)
+        if not sizes:          # no ZIP64 record: the classic fields are the real ones
+            counts, sizes = [count_disk, count], [cd_size]
+        declared, size = max(counts), max(sizes)
+        if declared > max_records:
+            raise FeedError("the archive declares %d records, more than the %d budget"
+                            % (declared, max_records))
+        if size > max_cd_bytes:
+            raise FeedError("the archive's central directory declares %d bytes, more than the "
+                            "%d MiB budget" % (size, max_cd_bytes >> 20))
+        # count the record signatures zipfile will parse, in the `size` bytes
+        # before the (ZIP64) end record, a chunk at a time
+        start = max(0, min(records) - size)
+        fileobj.seek(start)
+        left, carry, found = eocd - start, b"", 0
+        while left > 0:
+            chunk = fileobj.read(min(left, 1 << 20))
+            if not chunk:
+                break
+            left -= len(chunk)
+            found += (carry + chunk).count(_ZIP_CD_SIG)
+            carry = chunk[-(len(_ZIP_CD_SIG) - 1):]  # a signature split across two chunks
+            if found > max_records:
+                raise FeedError("the archive's central directory holds more than %d records "
+                                "(%d declared)" % (max_records, declared))
+    finally:
+        fileobj.seek(0)
+
+
 def read_osv_zip(fileobj, counts=None, max_records=MAX_OSV_RECORDS):
     """Yield (member name, OSV record dict) for every record in an OSV export
     zip. A corrupt archive is a FeedError (a damaged download must not
     become a bundle with advisories missing); an unparseable record is
-    skipped and counted."""
+    skipped and counted. The central directory is checked against the
+    record budget before zipfile parses it (osv_zip_preflight)."""
     counts = counts if counts is not None else Counts()
+    osv_zip_preflight(fileobj, max_records)
     try:
         zf = zipfile.ZipFile(fileobj)
     except (zipfile.BadZipFile, OSError, ValueError, EOFError) as exc:
@@ -602,16 +699,50 @@ def _unit_float(text):
     return x if 0.0 <= x <= 1.0 else None
 
 
+def bounded_lines(stream, max_bytes, max_line, what):
+    """Yield the lines of binary stream `stream` (a decompressing reader)
+    as text, without their line ends, charging every byte that comes out of
+    it. FeedError past `max_bytes` in all, or `max_line` in one line: a
+    TextIOWrapper would buffer a line with no newline whole, however big,
+    before csv's field limit ever saw it (a 600 KB gzip can hold one 600 MB
+    line). Invalid UTF-8 raises UnicodeDecodeError, as TextIOWrapper did."""
+    total, pending = 0, b""
+    while True:
+        chunk = stream.read(1 << 16)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise FeedError("%s decompresses to more than the %d MiB budget"
+                            % (what, max_bytes >> 20))
+        pending += chunk
+        start = 0
+        while True:
+            end = pending.find(b"\n", start)
+            if end < 0:
+                break
+            if end - start > max_line:
+                break
+            yield pending[start:end].decode("utf-8")
+            start = end + 1
+        pending = pending[start:]
+        if len(pending) > max_line:
+            raise FeedError("%s has a line longer than %d KiB" % (what, max_line >> 10))
+    if pending:
+        yield pending.decode("utf-8")
+
+
 def read_epss(fileobj, wanted=None, max_rows=MAX_EPSS_ROWS):
     """{CVE: (epss, percentile)} for the CVEs in `wanted` (every CVE when
     None) and the file's metadata, from the gzipped EPSS scores CSV:
-    `#model_version:…,score_date:…`, then `cve,epss,percentile` rows."""
+    `#model_version:…,score_date:…`, then `cve,epss,percentile` rows.
+    Decompressed bytes and line length are budgeted (bounded_lines)."""
     meta, scores, header, rows = {}, {}, None, 0
     try:
-        # closing these leaves `fileobj` open: GzipFile only closes files it opened
-        with gzip.GzipFile(fileobj=fileobj, mode="rb") as gz, \
-                io.TextIOWrapper(gz, encoding="utf-8", newline="") as text:
-            for row in csv.reader(text):
+        # closing this leaves `fileobj` open: GzipFile only closes files it opened
+        with gzip.GzipFile(fileobj=fileobj, mode="rb") as gz:
+            lines = bounded_lines(gz, MAX_EPSS_CSV_BYTES, MAX_EPSS_LINE, "the EPSS file")
+            for row in csv.reader(lines):
                 if not row:
                     continue
                 if row[0].startswith("#"):
