@@ -51,6 +51,7 @@ import re
 import sys
 import time
 
+from lazaret.scanner import frameworks
 from lazaret.scanner import taintspec
 
 # ---------------- terminal-control neutralizer (audit H1) ----------------
@@ -120,9 +121,19 @@ PARTIAL_SANITIZERS_PY = {
     "conditional_escape": {"cross-site scripting"},  # django
     "format_html": {"cross-site scripting"},         # django
     "render_template": {"cross-site scripting"},     # an autoescaping template
+    "render_to_string": {"cross-site scripting"},    # django: an autoescaping template
+    "TemplateResponse": {"cross-site scripting"},    # starlette / fastapi: an autoescaping template
     "jsonify": {"cross-site scripting"},             # a JSON response
     "url_for": {"cross-site scripting", "open redirect"},  # a URL on this site
+    "reverse": {"open redirect"},                    # django: a URL on this site
+    "reverse_lazy": {"open redirect"},
 }
+# what a call returns that is not request data though its arguments may be:
+# a record looked up by a value (the ORM binds it), a file's content
+FULL_RESULT_PY = {"get_object_or_404", "get_list_or_404", "open", "builtins.open", "io.open", "codecs.open"}
+# … and a query's result: Django's Model.objects…, Flask-SQLAlchemy's
+# Model.query…, SQLAlchemy's session.query / get / scalar(s) / execute
+_ORM_RESULT_RE = re.compile(r"\.objects\.|\.query\.|\bsession\.(?:query|get|scalars?|execute)\b")
 # Runtime-extensible via load config (see configure()).
 _EXTRA_PARTIAL_PY = {}
 
@@ -207,7 +218,20 @@ load loads dump dumps parse render process handle dispatch emit log debug
 info warning warn error exception critical submit result cancel wait put
 get_nowait put_nowait acquire release lock notify notify_all is_set
 setattr getattr delattr register unregister exists makedirs mkdir unlink
+delete create save merge destroy upsert get_one get_all get_by_id get_many
+find find_one find_all first last bulk_create bulk_update refresh
 """.split())
+# The query builders of an ORM (SQLAlchemy's select() / insert() / update() /
+# delete() and their .where / .filter / .filter_by / .values … , Django's
+# QuerySet methods): the value they build binds what it is given as a
+# parameter, so it carries no SQL injection. Raw SQL — text(q), a formatted
+# string — is still read.
+_SQL_BUILDER_FUNCS = frozenset(("select", "insert", "update", "delete", "sqlalchemy.select", "sqlalchemy.insert",
+                                "sqlalchemy.update", "sqlalchemy.delete"))
+_SQL_BUILDER_METHODS = frozenset((
+    "where", "filter", "filter_by", "values", "order_by", "group_by", "having", "join", "outerjoin", "options",
+    "limit", "offset", "returning", "on_conflict_do_update", "on_conflict_do_nothing", "exclude", "annotate",
+    "select_related", "prefetch_related", "values_list", "distinct"))
 
 # External calls whose result carries no attacker-controlled text.
 _CLEAN_RESULT = frozenset("""
@@ -247,8 +271,9 @@ def _dotted(node):
 
 _PY_SOURCE_RE = re.compile(
     r"\brequest\.(args|form|values|json|data|cookies|headers|files|query_string|stream|full_path"
-    r"|GET|POST|COOKIES|META|FILES|body)\b"
-    r"|\brequest\.(?:get_json|get_data)\b|\bsys\.argv\b|\bflask\.request\b")
+    r"|GET|POST|COOKIES|META|FILES|body|query_params|path_params)\b"
+    r"|\brequest\.(?:get_json|get_data)\b|\bsys\.argv\b|\bflask\.request\b"
+    r"|\b(?:websocket|ws)\.receive_(?:text|json|bytes)\b")
 _PY_SOURCE_EXTRA = []    # guarded source patterns (from config)
 _EXTRA_PY_SINKS = []     # (guarded pattern, category) from config
 
@@ -270,32 +295,36 @@ def _py_config_sink(*names):
 
 def _py_builtin_sink(callee):
     last = callee.split(".")[-1]
-    if last in ("execute", "executemany"):
+    if last in ("execute", "executemany", "executescript") or last == "RawSQL" or (
+            last in ("raw", "extra") and ".objects." in f".{callee}"):
         return "SQL injection"
-    if callee in ("os.system", "os.popen"):
+    if callee in ("os.system", "os.popen", "asyncio.create_subprocess_shell"):
         return "command injection"
     if callee.startswith("subprocess.") and last in (
             "run", "call", "check_output", "check_call", "Popen"):
         return "command injection"
     if callee in ("eval", "exec", "builtins.eval", "builtins.exec"):
         return "code injection"
-    if last == "render_template_string":
+    if last == "render_template_string" or callee in (
+            "jinja2.Template", "mako.template.Template", "django.template.Template") or (
+            last == "from_string" and ("env" in callee.lower() or callee.startswith("jinja2."))):
         return "template injection"
     if (callee in ("open", "builtins.open", "codecs.open", "io.open", "os.open")
-            or last in ("send_file", "send_from_directory")
+            or last in ("send_file", "send_from_directory", "FileResponse")
             or (callee.startswith("shutil.") and last in (
                 "copy", "copy2", "copyfile", "copytree", "move", "rmtree"))
             or callee in ("os.remove", "os.unlink", "os.rmdir", "os.removedirs", "os.rename",
                           "os.replace", "os.listdir", "os.scandir")):
         return "path traversal"
     if last == "urlopen" or (callee.startswith("requests.") and last in (
-            "get", "post", "put", "delete", "head", "request")):
+            "get", "post", "put", "delete", "head", "request")) or (callee.startswith("httpx.") and last in (
+            "get", "post", "put", "patch", "delete", "head", "request", "stream")):
         return "server-side request forgery"
-    if last in ("redirect", "HttpResponseRedirect", "HttpResponsePermanentRedirect"):
+    if last in ("redirect", "HttpResponseRedirect", "HttpResponsePermanentRedirect", "RedirectResponse"):
         return "open redirect"
-    # a response body built from the value (Flask / Werkzeug, Django), or the
-    # value marked as safe HTML
-    if last in ("make_response", "Response", "HttpResponse", "Markup", "mark_safe"):
+    # a response body built from the value (Flask / Werkzeug, Django,
+    # Starlette / FastAPI), or the value marked as safe HTML
+    if last in ("make_response", "Response", "HttpResponse", "HTMLResponse", "Markup", "mark_safe", "SafeString"):
         return "cross-site scripting"
     return None
 
@@ -869,6 +898,134 @@ class _PyProject:
                     f.callers.add(fn)
 
 
+# Route handlers (0.1.7): the parameters a web framework fills from the
+# request are concrete sources in the handler (lazaret.scanner.frameworks
+# decides which, for both engines). A flow from one into another function's
+# sink is an X-* finding; one into a sink of the handler itself is the
+# intra-file engine's (T-*).
+_FRAMEWORK_MODULES = {"flask": "flask", "quart": "flask", "fastapi": "fastapi", "django": "django"}
+
+
+def _frameworks_of(mod):
+    """The frameworks module `mod` imports ({'flask', 'fastapi', 'django'})."""
+    got = getattr(mod, "_frameworks", None)
+    if got is None:
+        got = set()
+        for rec in mod.imports.values():
+            base = rec[1] if rec[0] == "import" else (rec[1] if not rec[3] else "")
+            head = (base or "").split(".")[0]
+            if head in _FRAMEWORK_MODULES:
+                got.add(_FRAMEWORK_MODULES[head])
+        mod._frameworks = got
+    return got
+
+
+def _text(node):
+    """The source text of an annotation or default node ('' for None)."""
+    if node is None:
+        return ""
+    try:
+        return ast.unparse(node)
+    except Exception:                          # a node unparse cannot render
+        return ""
+
+
+def _request_params(fn):
+    """The parameters of `fn` a web framework fills from the request, if it
+    is a route handler (see above)."""
+    got = getattr(fn, "_request_params", None)
+    if got is not None:
+        return got
+    got = []
+    if not fn.pseudo:
+        fws = _frameworks_of(fn.mod)
+        a = fn.node.args
+        positional = list(getattr(a, "posonlyargs", [])) + list(a.args)
+        defaults = [None] * (len(positional) - len(a.defaults)) + list(a.defaults)
+        params = ([(x.arg, _text(x.annotation), _text(d)) for x, d in zip(positional, defaults)]
+                  + [(x.arg, _text(x.annotation), _text(d)) for x, d in zip(a.kwonlyargs, a.kw_defaults)])
+        routed = False
+        for d in fn.node.decorator_list:
+            if not (isinstance(d, ast.Call) and isinstance(d.func, ast.Attribute)):
+                continue
+            method = d.func.attr
+            if method == "route" or ("flask" in fws and method in frameworks.FLASK_ROUTE_METHODS):
+                routed = True
+                rule = next((x.value for x in d.args[:1] if isinstance(x, ast.Constant) and isinstance(x.value, str)),
+                            next((k.value.value for k in d.keywords if k.arg == "rule"
+                                  and isinstance(k.value, ast.Constant) and isinstance(k.value.value, str)), ""))
+                free = frameworks.flask_free_vars(rule)
+                got.extend(name for name, _, _ in params if name in free)
+            elif "fastapi" in fws and method in frameworks.FASTAPI_ROUTE_METHODS:
+                routed = True
+                aliases = getattr(fn.mod, "_dep_aliases", None)
+                if aliases is None:
+                    aliases = fn.mod._dep_aliases = frameworks.dep_aliases("\n".join(fn.mod.lines))
+                got.extend(name for name, ann, dflt in params if frameworks.fastapi_param(name, ann, dflt, aliases))
+        if not routed and "django" in fws:
+            names = [name for name, _, _ in params]
+            first = 2 if names[:2] == ["self", "request"] else 1 if names[:1] == ["request"] else 0
+            if first:
+                got.extend(name for name, ann, _ in params[first:] if frameworks.django_param(name, ann))
+            if first and a.vararg is not None:
+                got.append(a.vararg.arg)
+            if first and a.kwarg is not None:
+                got.append(a.kwarg.arg)
+        got = list(dict.fromkeys(got))
+    fn._request_params = got
+    return got
+
+
+# Guards (0.1.7), the intra-file engine's in AST form: a path check —
+# `x.is_relative_to(base)`, `x.startswith(base)`, `os.path.realpath(x)
+# .startswith(base)`, `".." not in x` — or an allowlist check — `x in
+# ALLOWED` against a collection that holds no request data — clears the value
+# in the branch where it passed: inside the body of a positive test, and past
+# an `if` whose body leaves (return, raise, continue, break, abort(),
+# sys.exit()) on a negative one. A path check clears path traversal, an
+# allowlist every category.
+_PATH_CHECKS = frozenset(("is_relative_to", "startswith"))
+_EXIT_CALLS = frozenset(("abort", "flask.abort", "sys.exit", "exit"))
+
+
+def _guard_of(test):
+    """(name, categories, positive, collection node or None) of a guard
+    `test` (see above), else None."""
+    positive = True
+    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+        positive, test = False, test.operand
+    if isinstance(test, ast.Call) and isinstance(test.func, ast.Attribute) and test.func.attr in _PATH_CHECKS \
+            and test.args:
+        target = test.func.value
+        if isinstance(target, ast.Call) and _dotted(target.func).rsplit(".", 1)[-1] in (
+                "realpath", "abspath", "normpath", "resolve") and (target.args or isinstance(target.func, ast.Attribute)):
+            target = target.args[0] if target.args else target.func.value
+        if isinstance(target, ast.Name):
+            return target.id, {"path traversal"}, positive, None
+        return None
+    if isinstance(test, ast.Compare) and len(test.ops) == 1 and isinstance(test.ops[0], (ast.In, ast.NotIn)):
+        left, right = test.left, test.comparators[0]
+        negated = isinstance(test.ops[0], ast.NotIn) != (not positive)
+        if isinstance(left, ast.Constant) and isinstance(left.value, str) and left.value.startswith("..") \
+                and isinstance(right, ast.Name):
+            # `".." in x` fails the check; `".." not in x` passes it
+            return right.id, {"path traversal"}, negated, None
+        if isinstance(left, ast.Name) and not (isinstance(right, ast.Constant) and isinstance(right.value, str)):
+            return left.id, set(ALL_CATS), not negated, right
+    return None
+
+
+def _leaves(body):
+    """Does a block always leave its function or loop at its end?"""
+    if not body:
+        return False
+    last = body[-1]
+    if isinstance(last, (ast.Return, ast.Raise, ast.Continue, ast.Break)):
+        return True
+    return (isinstance(last, ast.Expr) and isinstance(last.value, ast.Call)
+            and _dotted(last.value.func) in _EXIT_CALLS)
+
+
 class _Analyzer:
     """One pass over one function: computes its summary contributions and,
     when emit is set, the findings at its call sites and sinks."""
@@ -879,6 +1036,8 @@ class _Analyzer:
         self.emit = emit
         self.findings = findings
         self.env = {p: _Taint(params={p}) for p in fn.params}
+        for p in _request_params(fn):          # a route handler's: request data
+            self.env[p] = _Taint(source=True, params={p}, origin=self.here(fn.line))
         if fn.receiver:
             self.env[fn.receiver] = EMPTY
         self.sink_adds = []
@@ -957,12 +1116,20 @@ class _Analyzer:
             self.expr(st.value)
         elif isinstance(st, ast.If):
             self.expr(st.test)
+            guard = self.guard(st.test)
             before = self._fork()
+            if guard is not None and guard[2]:            # the value passed the check in the body
+                self.env[guard[0]] = self.name_taint(guard[0]).sanitize(guard[1])
             self.stmts(st.body)
             after_body = self.env
             self.env = before
-            self.stmts(st.orelse)
-            self.env = self._merge(after_body, self.env)
+            if guard is not None and not guard[2] and _leaves(st.body):
+                # the body leaves when the value fails the check: past the if it passed
+                self.env[guard[0]] = self.name_taint(guard[0]).sanitize(guard[1])
+                self.stmts(st.orelse)
+            else:
+                self.stmts(st.orelse)
+                self.env = self._merge(after_body, self.env)
         elif isinstance(st, (ast.For, ast.AsyncFor)):
             it = self.expr(st.iter)
             before = self._fork()
@@ -1033,6 +1200,18 @@ class _Analyzer:
                     self.expr(child)
                 elif isinstance(child, ast.stmt):
                     self.stmt(child)
+
+    def guard(self, test):
+        """(name, categories, positive) when `test` checks a local name's
+        value (see _guard_of), and the collection an allowlist is checked
+        against holds no request data."""
+        g = _guard_of(test)
+        if g is None:
+            return None
+        name, cats, positive, coll = g
+        if coll is not None and self.expr(coll).tainted():
+            return None
+        return name, cats, positive
 
     def bind_pattern(self, pat, t):
         stack = [pat]
@@ -1260,6 +1439,11 @@ class _Analyzer:
         san = _py_builtin_sanitizer(canon, raw)
         if san == "full":
             return EMPTY
+        if canon in FULL_RESULT_PY or raw in FULL_RESULT_PY or _ORM_RESULT_RE.search(f".{raw}"):
+            return EMPTY                       # a looked-up record, a file's content
+        if canon in _SQL_BUILDER_FUNCS or raw in _SQL_BUILDER_FUNCS or (
+                isinstance(e.func, ast.Attribute) and e.func.attr in _SQL_BUILDER_METHODS):
+            return all_args.union(recv).sanitize({"SQL injection"})     # a parameterized query
         if san is not None:
             return all_args.sanitize(san)
         if raw.rsplit(".", 1)[-1] in _CLEAN_RESULT:

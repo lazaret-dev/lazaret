@@ -73,9 +73,81 @@ project is pre-1.0, so the 0.x API may still change.
   path traversal 3% → 40%, open redirect 0 → 61%. The benchmark's false
   positives were used while this was built (they pointed at the cases under
   Changed below), and the `escape…()` rule also matches its
-  `escape_for_html` helper. Still missed: values that pass through a
-  container (`d["k"] = q`, `lst.append(q)`, a ConfigParser), loop variables,
-  and branches only constant folding would rule out.
+  `escape_for_html` helper. Still missed: a ConfigParser, loop variables,
+  and branches only constant folding would rule out (containers: see the
+  next entry).
+
+- **Taint knows Flask's, Django's, FastAPI's and Express's routes (both
+  engines).** A route handler's parameters were not sources, so
+  `def dl(name): return send_file("/srv/" + name)` under
+  `@app.route("/dl/<path:name>")` was no finding. Both taint passes
+  (intra-file T-*, cross-file X-*) now take the parameters a framework fills
+  from the request: a Flask or Quart view's URL variables (not `int`,
+  `float`, `uuid` or `any` converters); a FastAPI path operation's
+  parameters, but not what FastAPI injects (`Depends(…)`, `Security(…)`, an
+  `Annotated[…, Depends(…)]` alias, `Response`, `BackgroundTasks`,
+  `Request`) or validates to no free text (`int`, `bool`, `UUID`, dates,
+  `Decimal`, `Literal[…]`, constrained numbers, an Enum member, also inside
+  `Optional`, `Annotated`, a list or a union with `None`); a Django view's
+  URL parameters after `request` (not `pk`, `id`, `slug`, `year`, `…_id` and
+  the like, nor typed ones). New sources: `request.query_params` /
+  `path_params` (Starlette, FastAPI, Django REST framework), a websocket's
+  messages, Express's `req.url`, `originalUrl`, `path`, `hostname`,
+  `signedCookies`, `files`, `req.get(…)`, and a request object named
+  `request`. New sinks: FastAPI's `HTMLResponse`, `RedirectResponse`,
+  `FileResponse`; Django's `Manager.raw`, `RawSQL`, `QuerySet.extra`,
+  `SafeString`; `executescript`; a jinja2, Mako or Django `Template` (in a
+  file that imports one) and `Environment.from_string`; `httpx`;
+  `asyncio.create_subprocess_shell`; Express's `res.send` / `write` / `end`
+  (a string is sent as HTML; a whole parsed object such as
+  `res.send(req.query)` as JSON), `res.location`, `fs` writes and removals,
+  EJS / Pug / Handlebars / Mustache / Nunjucks / doT / lodash templates
+  compiled from a value, `vm`, knex's and Sequelize's raw SQL, `got`,
+  `needle`. New sanitizers: Django's `render_to_string` and Starlette's
+  `TemplateResponse` (XSS), `reverse()` and the Referer (open redirect), and
+  what an ORM lookup returns (`get_object_or_404`, `Model.objects…`,
+  `Model.query…`, `session.execute(…)`) or a file read gives (not request
+  data). Not sinks: a response with a non-HTML content type
+  (`content_type="text/plain"`, `res.type("text/plain").send(…)`),
+  `send_from_directory`'s file name and Express's `sendFile` / `download`
+  given a `root` (both refuse a path that climbs out), a redirect to a fixed
+  host, an element looked up by a request value (`users[req.params.id]`) or
+  a `slice()` index. In the cross-file engine an ORM query builder
+  (`select(…).where(…)`, `filter_by`, `values`) binds its values, and a
+  CRUD-named method on a receiver it cannot identify (`get_one`, `create`,
+  `delete`, …) no longer binds to every project function of that name.
+
+- **Taint follows values through containers and allowlists (both
+  engines).** A value written into a container taints it (`d["k"] = q`,
+  `xs.append(q)`, `arr.push(q)`), followed by literal key (`d["other"]`
+  stays clean). A check against a collection of the code's own (`if name in
+  ALLOWED:`, `if (allowed.has(name))`) clears the value inside the block,
+  and past a check that leaves when it fails (`if name not in PLUGINS:
+  abort(404)`); the cross-file engine now reads these guards and the path
+  checks the intra-file one already did.
+
+  On OWASP BenchmarkPython (Python 3.13) these two entries took the score of
+  all rules from +0.19 to +0.21 (true positives 47% → 51%, false positives
+  29% → 30%) and of the taint findings alone from +0.11 to +0.16 (22% → 30%
+  of real flaws found: command injection 38% → 77%, path traversal 40% →
+  52%, code injection 60% → 75%). Open redirect lost ground (false positives
+  8 → 11 of 21): a list's elements are not told apart after `pop()`, and a
+  URL checked through `urlparse(…).netloc` is not read as a guard. On 19
+  open-source web apps — the seven above; FastAPI's full-stack template and
+  RealWorld app, mealie, healthchecks, hackathon-starter and the Express
+  RealWorld app; and six deliberately vulnerable apps (vulpy, pygoat, dvna,
+  NodeGoat, python-insecure-app, vfapi) — T-* findings went from 52 to 135:
+  79 new ones are routes in Express's and Flask's own tests and examples
+  that echo a URL variable or a header, 4 are true positives in the
+  vulnerable apps (pygoat's raw SQL, python-insecure-app's template
+  injection), 6 false positives went away, and application code got 5: a
+  FastAPI password-recovery page that renders its `email` query parameter
+  unescaped (for superusers only), and 4 false positives (a registry
+  lookup's result, a version replaced out of a path, an SVG badge another
+  module escapes, a test helper's `req.path`). X-* findings went from 45 to
+  52: vfapi's 4 SQL injections through a helper, and 3 false positives in
+  mealie (a file extension with its dots removed). The npm engine reports
+  the same T-* findings as the Python engine on all 3,748 files.
 
 - **Install scripts fail on the PyPI malware shapes they missed (both
   engines; audit P0).** On the audit's malware corpus Lazaret passed two

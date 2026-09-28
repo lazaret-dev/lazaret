@@ -56,7 +56,7 @@ test("only the injectable arguments are read", () => {
 test("guards and where a taint lives", () => {
   assert.deepEqual(found("js", "const fs = require('fs');\napp.get('/f', (req, res) => {\n  const name = req.query.name;\n"
     + "  if (name.includes('..')) return res.sendStatus(400);\n  res.send(fs.readFileSync(name));\n});\n"), new Set());
-  assert.deepEqual(found("js", "const fs = require('fs');\napp.get('/a', (req, res) => {\n  const f = req.query.f;\n  res.send(f);\n});\n"
+  assert.deepEqual(found("js", "const fs = require('fs');\napp.get('/a', (req, res) => {\n  const f = req.query.f;\n  res.json({ f });\n});\n"
     + "app.get('/b', (req, res) => {\n  const f = '/srv/index.html';\n  res.sendFile(f);\n});\n"), new Set());
   assert.deepEqual(found("js", "const cp = require('child_process');\nfunction outer(req) {\n  const c = req.query.c;\n"
     + "  return function inner() {\n    cp.exec(c);\n  };\n}\n"), new Set(["T-CMD:5"]));

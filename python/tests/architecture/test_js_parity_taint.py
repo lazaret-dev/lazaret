@@ -1,10 +1,12 @@
 """Engine parity for taint (audit P0): the Python CLI and the npm CLI follow
 values into f-strings and template literals, over the lines of a statement and
 through augmented assignments, read the same sink arguments, Flask views and
-guards, keep a taint where it lives — and so report the same T-* findings on
-every case of tests/scanner/test_taint_fstrings.py, each written as a file of
-its own, next to adversarial shapes (unterminated literals, deep brackets,
-astral characters, CRLF, very long lines). Skipped where node is missing.
+guards, keep a taint where it lives, model the same frameworks (route
+parameters, sinks, sanitizers, containers, allowlists) — and so report the
+same T-* findings on every case of tests/scanner/test_taint_fstrings.py and
+test_taint_frameworks.py, each written as a file of its own, next to
+adversarial shapes (unterminated literals, deep brackets, astral characters,
+CRLF, very long lines). Skipped where node is missing.
 """
 import collections
 import tempfile
@@ -13,12 +15,17 @@ import unittest
 from tests.architecture.test_js_parity import DERIVED, NODE, _python_only, both, derived, issue_key
 from tests.architecture.test_js_parity_lexing import write_tree
 from tests.scanner.test_taint_fstrings import QUIET, REPORTED
+from tests.scanner import test_taint_frameworks as frameworks
 
 TREE = {}
 for n, (lang, src, _) in enumerate(REPORTED):
     TREE[f"reported/r{n:02d}.{lang}"] = src
 for n, (lang, src) in enumerate(QUIET):
     TREE[f"quiet/q{n:02d}.{lang}"] = src
+for n, (lang, src, _) in enumerate(frameworks.REPORTED):
+    TREE[f"frameworks/r{n:02d}.{lang}"] = src
+for n, (lang, src) in enumerate(frameworks.QUIET):
+    TREE[f"frameworks/q{n:02d}.{lang}"] = src
 TREE.update({
     "odd/unterminated.py": "import os\nq = input()\nos.system(f'ls {q}\nos.system(\"a\" + q\n",
     "odd/unterminated.js": "const cp = require('child_process');\nconst q = process.argv[2];\ncp.exec(`ls ${q}\n",
@@ -72,7 +79,9 @@ class TaintParityTests(unittest.TestCase):
                 by_file[i["file"].replace("\\", "/")].add((i["rule"], i["line"]))
         for n, (lang, _, want) in enumerate(REPORTED):
             self.assertEqual(by_file[f"reported/r{n:02d}.{lang}"], want, n)
-        self.assertEqual({f for f in by_file if f.startswith("quiet/")}, set())
+        for n, (lang, _, want) in enumerate(frameworks.REPORTED):
+            self.assertEqual(by_file[f"frameworks/r{n:02d}.{lang}"], want, n)
+        self.assertEqual({f for f in by_file if f.startswith(("quiet/", "frameworks/q"))}, set())
 
 
 if __name__ == "__main__":

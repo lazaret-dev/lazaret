@@ -132,7 +132,7 @@ QUIET = [
     ("py", "import os\nfrom werkzeug.utils import secure_filename\np = input()\np = secure_filename(p)\nopen(p)\n"),
     ("py", "import os\nif True:\n    c = input()\nc = 'ls'\nos.system(c)\n"),
     ("py", "import os\nq = input()\nsql = \"\"\"\nSELECT (\n\"\"\"\nq = 'x'\nos.system(q)\n"),
-    ("js", "const fs = require('fs');\napp.get('/a', (req, res) => {\n  const f = req.query.f;\n  res.send(f);\n});\n"
+    ("js", "const fs = require('fs');\napp.get('/a', (req, res) => {\n  const f = req.query.f;\n  res.json({ f });\n});\n"
            "app.get('/b', (req, res) => {\n  const f = '/srv/index.html';\n  res.sendFile(f);\n});\n"),
 ]
 

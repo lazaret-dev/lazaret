@@ -179,7 +179,17 @@ command, code, path traversal, SSRF, open redirect, XSS — Flask/Django
 responses and a Flask view's return value —, SSTI). Only a sink's injectable
 arguments are read; path guards that leave clear path traversal; a taint is
 scoped to the function body (by indentation) it was made in, and a
-reassignment in the same block replaces it. Comments
+reassignment in the same block replaces it. Containers (`d["k"] = q`,
+`xs.append(q)`) take the taint of what is written into them, by literal key;
+allowlist checks clear a value where it passed. Framework models (0.1.7):
+the parameters a route handler gets from the request are sources — a Flask
+view's URL variables, a FastAPI path operation's parameters (not injected
+dependencies, not types that validate to no free text), a Django view's URL
+parameters. The decisions over a parameter's name, annotation and default
+live in `lazaret.scanner.frameworks` and are shared by the intra-file engine
+(which reads a handler's signature from text: `_route_params`, twinned in
+`js/src/scanner/taint.js`) and the flow engine (which reads it from the AST:
+`_request_params`), so both passes agree on what a handler receives. Comments
 are **lexed, not guessed** — block-comment/string/template state is tracked
 across lines, and a line counts as a comment only if all of it is, and only if
 both readings of ambiguous text agree.
@@ -418,6 +428,7 @@ constraint — it overflows its backtrack stack where CPython merely slows.
 |---|---|
 | `python/src/lazaret/scanner/core.py` | The engine: rules, taint, `scan_project`, `--deps`, received-code detector, cross-file follower |
 | `python/src/lazaret/scanner/flow.py` | Interprocedural cross-file taint (Python AST + JS heuristic) |
+| `python/src/lazaret/scanner/frameworks.py` | Which route handler parameters Flask / FastAPI / Django fill from the request (shared by both taint passes; twinned in `js/src/scanner/taint.js`) |
 | `python/src/lazaret/scanner/received_spec.json` | **Source of truth** for the received-code detector's data + patterns |
 | `python/src/lazaret/scanner/sca_feeds.py` | CVE bundle build (OSV/KEV/EPSS) |
 | `python/src/lazaret/{registry,mcp,pg,safexml}/` | Registry auditor, MCP server, Postgres client, safe XML |
