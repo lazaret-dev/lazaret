@@ -43,6 +43,7 @@
 // Unterminated block comments and multi-line strings run to end of file.
 
 import { pyRstrip, pyStrip, isWordChar } from "../lib/pycompat.js";
+import { configCommentSpans } from "../lib/configsecrets.js";
 
 const NEXT = {
   py: /[#'"]/g,
@@ -174,6 +175,7 @@ export function jsxReading(path) {
  * jsx: false for a .ts file (no JSX reading).
  */
 export function commentSpans(content, lang, strings = null, { jsx = true, literals = null } = {}) {
+  if (lang === "cfg") return configCommentSpans(content);          // a config or data file
   const L = lang === "py" || lang === "js" || lang === "sql" ? lang : "any";
   if (L === "any" || (L === "js" && !jsx)) return lexPass(content, L, strings, false, literals);
   const sa = strings ? [] : null, sb = strings ? [] : null;

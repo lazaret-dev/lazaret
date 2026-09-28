@@ -58,6 +58,7 @@ except Exception:  # pragma: no cover
 from lazaret.scanner import reports as lazaret_report  # report paths: pre-scan validation, atomic writes
 from lazaret.scanner import taintspec  # taint-config validation shared by both taint engines
 from lazaret.scanner import _unicode13  # the Unicode every engine reads source text in
+from lazaret.scanner import configsecrets  # config and data files: credentials only
 
 
 def configure_stdio():
@@ -1819,6 +1820,8 @@ def _lex_comment_spans(content, lang, strings=None, jsx=True, literals=None):
     are appended to it; if `literals` is, the spans of every literal both
     readings agree on: strings of any kind (f-strings, templates) and regex
     literals. jsx=False: a .ts file (no JSX reading)."""
+    if lang == "cfg":                       # a config or data file (configsecrets)
+        return configsecrets.comment_spans(content)
     lang = lang if lang in ("py", "js", "sql") else None
     if lang is None or (lang == "js" and not jsx):
         return _lex_pass(content, lang, strings, literals=literals)
@@ -2552,6 +2555,25 @@ class _FileCtx(_Redactor):
     def check_time(self):
         if self.deadline is not None and time.monotonic() > self.deadline:
             raise _ScanBudgetExceeded()
+
+
+class _ConfigCtx(_FileCtx):
+    """A config file's context (scan_config_file): a line any snippet shows
+    also has the value of every credential-named key redacted — a .env's
+    `DB_PASS=hunter2` matches none of the code patterns."""
+
+    def redacted(self, k):
+        r = self._red.get(k)
+        if r is None:
+            if self._pem is None:
+                self._pem = _pem_block_lines(self.lines)
+            if k in self._pem:
+                r = REDACTED
+            else:
+                r = self.secrets().redact(
+                    _redact_context_line(configsecrets.redact_values(self.lines[k])))
+            self._red[k] = r
+        return r
 
 
 def _active_ctx(lines):
@@ -3601,6 +3623,65 @@ def scan_file(path, content, lang, dep=False):
         except _ScanBudgetExceeded:
             issues.append(truncated_issue(path, "scan time budget exceeded"))
         return cap_issues(path, [i for i in issues if not ctx.suppressed(i, dep=dep)], lines)
+    finally:
+        _TLS.ctx = outer
+
+
+# ---------------- Config and data files (credentials only) ----------------
+# .env, JSON, YAML, TOML, INI, .properties, shell, PEM keys, Dockerfiles,
+# .npmrc / .pypirc, Terraform variables (configsecrets.is_config_file): read
+# as text and checked by the two credential rules, never as code.
+_TOKEN_RULE = next(r for r in RULES if r["id"] == "S-TOKEN")
+CONFIG_SECRET_RULE = {
+    "id": "S-SECRET", "name": "Hardcoded credential", "type": "VULN", "sev": "BLOCKER",
+    "msg": "Credential appears to be hardcoded in a config file.",
+    "why": ("Config files are committed, copied into images and shared: a credential in one "
+            "leaks with every copy, and rotating it means finding them all."),
+    "fix": "Reference it instead (${VAR}, a secrets manager), and rotate this one now.",
+    "ref": "CWE-798 · OWASP A07"}
+
+
+def _config_token_col(line, lines, i):
+    """Column of the first S-TOKEN match on a config line that is reported: not
+    a documentation sample, and a private-key header only with key material
+    after it, on the line or the next two (configsecrets.key_material)."""
+    for m in _TOKEN_RULE["re"].finditer(line):
+        text = m.group(0)
+        if configsecrets.documentation_token(text):
+            continue
+        if text.startswith("-----BEGIN") and not any(
+                configsecrets.key_material(t) for t in [line[m.end():]] + lines[i + 1:i + 3]):
+            continue
+        return m.start()
+    return None
+
+
+def scan_config_file(path, content):
+    """Credentials in a config or data file (see configsecrets): S-TOKEN on
+    every line, S-SECRET outside comments. Nothing else runs — it is not
+    code. Suppression markers work in the file's comments, as in code."""
+    lines = source_lines(_unicode13.pin(content), "cfg")
+    content = "\n".join(lines)
+    ctx = _ConfigCtx(lines, "cfg", content, time.monotonic() + SCAN_TIME_BUDGET, False)
+    outer = getattr(_TLS, "ctx", None)
+    _TLS.ctx = ctx
+    try:
+        issues = []
+        try:
+            for i, line in enumerate(lines):
+                ctx.check_time()
+                if not line or line.isspace():
+                    continue
+                col = _config_token_col(line, lines, i)
+                if col is not None:
+                    issues.append(mk_issue(_TOKEN_RULE, path, i + 1, lines, col))
+                if not ctx.cmask[i]:
+                    col = configsecrets.secret_col(ctx.code[i])
+                    if col is not None:
+                        issues.append(mk_issue(CONFIG_SECRET_RULE, path, i + 1, lines, col))
+        except _ScanBudgetExceeded:
+            issues.append(truncated_issue(path, "scan time budget exceeded"))
+        return cap_issues(path, [i for i in issues if not ctx.suppressed(i)], lines)
     finally:
         _TLS.ctx = outer
 
@@ -6568,6 +6649,17 @@ def unreadable_issue(path, reason):
         "Scan coverage")
 
 
+def config_skipped_issue(path, detail):
+    """Q-SKIPPED-CONFIG: a config or data file too large to check for credentials."""
+    return _coverage_issue(
+        "Q-SKIPPED-CONFIG", "Config file not checked (too large)", path,
+        f"{path} was not checked for credentials: {_safe_text(detail)}.",
+        "Config and data files are read only to look for credentials, and one this large is "
+        "data rather than configuration: a credential in it would not be reported.",
+        "Keep credentials out of large data files, and real configuration in files of its own.",
+        "Scan coverage")
+
+
 def scan_error_issue(path, exc):
     """SC-TRUNCATED for a file (or directory) whose scan raised: the run goes
     on without its findings, and like any file not fully scanned it fails the
@@ -7025,6 +7117,9 @@ def _collect_file(path, rel, st, in_dep, col):
             bi = classify_binary(disp, head, size, "repo")
             if bi:
                 issues.append(bi)
+            elif not in_dep and configsecrets.is_config_file(name) and (
+                    head.startswith((b"\xff\xfe", b"\xfe\xff")) or not looks_binary(head)):
+                _collect_config(path, disp, size, col)          # text (UTF-16 with its BOM too)
             return
     if lang is not None and ext in MPEG_TS_EXTS:
         head = _read_prefix(path, HEADER_SAMPLE_BYTES)
@@ -7063,17 +7158,38 @@ def _collect_file(path, rel, st, in_dep, col):
     col["files"].append({"path": disp, "content": text, "lang": lang, "dep": in_dep})
 
 
+def _collect_config(path, disp, size, col):
+    """Read a config or data file for scan_config_file (see configsecrets):
+    decoded like source but without the encoding notes, since it is not
+    code; over CONFIG_SCAN_CAP a Q-SKIPPED-CONFIG note instead."""
+    cap = configsecrets.CONFIG_SCAN_CAP
+    if size > cap:
+        col["issues"].append(config_skipped_issue(
+            disp, f"{size:,} bytes is over the {cap:,}-byte limit for config files"))
+        return
+    data = _read_prefix(path, cap + 1)
+    if len(data) > cap:                  # grew between the lstat and the read
+        col["issues"].append(config_skipped_issue(
+            disp, f"it grew past the {cap:,}-byte limit for config files while it was read"))
+        return
+    text = decode_source(data)[0]
+    if not configsecrets.own_report(text):          # a report of Lazaret's own is not config
+        col["configs"].append({"path": disp, "content": text})
+
+
 def _collect(root, excludes=(), include_deps=False):
     """Walk `root` iteratively. Returns {"files", "manifests", "pth", "issues",
-    "skipped"}: files = [{path, content, lang, dep}], manifests = [{path,
-    content, dep}], pth = paths of the .pth files checked, issues = collection
-    findings (binary classification, SC-TRUNCATED, Q-ENCODING/SC-UTF7,
-    SC-PYC-*, SC-PTH-EXEC, Q-SYMLINK, Q-UNREADABLE), skipped = [(rel,
-    n_files, n_bytes)] pruned trees. Paths are root-relative
-    (os.sep separators) and valid UTF-8. Raises ScanTargetError when the root
-    itself cannot be listed."""
+    "skipped", "configs"}: files = [{path, content, lang, dep}], manifests =
+    [{path, content, dep}], pth = paths of the .pth files checked, issues =
+    collection findings (binary classification, SC-TRUNCATED,
+    Q-ENCODING/SC-UTF7, SC-PYC-*, SC-PTH-EXEC, Q-SYMLINK, Q-UNREADABLE,
+    Q-SKIPPED-CONFIG), skipped = [(rel, n_files, n_bytes)] pruned trees,
+    configs = [{path, content}] config and data files outside dependency
+    trees (scan_config_file). Paths are root-relative (os.sep separators) and
+    valid UTF-8. Raises ScanTargetError when the root itself cannot be
+    listed."""
     excludes = set(excludes or ())
-    col = {"files": [], "manifests": [], "pth": [], "issues": [], "skipped": []}
+    col = {"files": [], "manifests": [], "pth": [], "issues": [], "skipped": [], "configs": []}
     issues = col["issues"]
     seen_dirs = set()
     stack = [("", False)]
@@ -8098,8 +8214,8 @@ def scan_project(root, exclude=(), include_deps=False, taint_config=None,
             warnings.extend(f"taint config: {m}" for m in
                             _dedupe(get_taint_config_warnings() + flow_warnings))
         col = _collect(root, exclude, include_deps=include_deps)
-        files, manifests = col["files"], col["manifests"]
-        if not files and not manifests and not col["pth"] and not col["issues"]:
+        files, manifests, configs = col["files"], col["manifests"], col["configs"]
+        if not files and not manifests and not configs and not col["pth"] and not col["issues"]:
             raise ScanTargetError(
                 f"nothing to scan under {_fs_display(root)}: no Python, JavaScript or "
                 f"SQL sources, package manifests or other files to check")
@@ -8117,6 +8233,17 @@ def scan_project(root, exclude=(), include_deps=False, taint_config=None,
             except Exception as exc:        # one file must never kill the run
                 issues.append(scan_error_issue(f["path"], exc))
             scanned.append(f)
+        checked = 0                         # config and data files: credentials only
+        for cf in configs:
+            if not stopped and should_stop is not None:
+                stopped = should_stop()
+            if stopped:
+                break
+            try:
+                issues.extend(scan_config_file(cf["path"], cf["content"]))
+            except Exception as exc:
+                issues.append(scan_error_issue(cf["path"], exc))
+            checked += 1
         for mf in manifests:
             if not stopped and should_stop is not None:
                 stopped = should_stop()
@@ -8138,8 +8265,9 @@ def scan_project(root, exclude=(), include_deps=False, taint_config=None,
                 issues.append(truncated_issue(
                     ".", f"{stopped}: what the dependencies run was not checked to the end"))
         else:
+            total = len(files) + len(configs)
             issues.append(truncated_issue(
-                ".", f"{stopped}: {len(files) - len(scanned)} of {len(files)} files "
+                ".", f"{stopped}: {total - len(scanned) - checked} of {total} files "
                      f"not scanned"))
             files = scanned
         # G10: skipped-directory accounting — INFO findings make the coverage
@@ -8160,6 +8288,7 @@ def scan_project(root, exclude=(), include_deps=False, taint_config=None,
         # them (and every scan_file finding) the file's own redaction
         redact_file_issues(numbered, files)
         res = build_result(root, files, issues)
+        res["metrics"]["configFiles"] = checked
         res["warnings"] = warnings
         if stopped:
             res.update(incomplete=True, incompleteReason=stopped)
@@ -8215,7 +8344,7 @@ def worst_sev_rating(issues, types):
 #: the scanner could not look at, not the code: they do not count toward the
 #: maintainability rating (a single symlink in a small project used to be
 #: enough to fail "Maintainability >= C").
-COVERAGE_RULES = frozenset({"Q-SKIPPED-TREE", "Q-SYMLINK", "Q-UNREADABLE",
+COVERAGE_RULES = frozenset({"Q-SKIPPED-TREE", "Q-SYMLINK", "Q-UNREADABLE", "Q-SKIPPED-CONFIG",
                             # analysis-coverage notes from the flow engine and the
                             # taint-config loader (Python-only; the npm engine has
                             # neither)
@@ -8486,7 +8615,8 @@ def print_report(res, quiet):
     m, ct, rt = res["metrics"], res["counts"], res["ratings"]
     print()
     print(c("1", f"Lazaret scan — {sanitize_term_line(res['project'])}"))
-    print(f"  {m['files']} files · {m['ncloc']} lines of code · {m['dupPct']}% duplication")
+    configs = f" · {m['configFiles']} config files" if m.get("configFiles") else ""
+    print(f"  {m['files']} files · {m['ncloc']} lines of code · {m['dupPct']}% duplication{configs}")
     print()
     gate = c("42;30", " PASSED ") if res["pass"] else c("41;97", " FAILED ")
     print(f"  Quality gate: {gate}")

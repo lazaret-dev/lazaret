@@ -218,7 +218,8 @@ export function printReport(res, { out = console.log, quiet = false } = {}) {
   const m = res.metrics;
   out("");
   out(`Lazaret scan — ${sanitizeTermLine(res.project)}`);
-  out(`  ${m.files} files · ${m.ncloc} lines of code · ${typeof m.dupPct === "number" ? pyFloatRepr(m.dupPct) : m.dupPct}% duplication`);
+  const configs = m.configFiles ? ` · ${m.configFiles} config files` : "";
+  out(`  ${m.files} files · ${m.ncloc} lines of code · ${typeof m.dupPct === "number" ? pyFloatRepr(m.dupPct) : m.dupPct}% duplication${configs}`);
   out("");
   out(`  Quality gate: ${res.pass ? "PASSED" : "FAILED"}`);
   for (const cond of res.conditions) out(`  ${cond.ok ? "✓" : "✗"} ${sanitizeTermLine(cond.label)}`);

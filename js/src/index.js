@@ -9,7 +9,8 @@ export const version = pkg.version;
 export const TAGLINE = "lazaret: quarantine for your dependencies";
 
 // Product surface
-export { scanFile, detectLang, taintScan, setScanTimeBudget } from "./scanner/scan.js";
+export { scanFile, scanConfigFile, detectLang, taintScan, setScanTimeBudget } from "./scanner/scan.js";
+export { isConfigFile } from "./lib/configsecrets.js";
 export { analyzeFlows, redactFlowIssues } from "./scanner/flow.js";
 export { RULES, TEXT_RULES, SEV_ORDER, TYPES } from "./scanner/rules.js";
 export { computeMetrics, worstSevRating, maintainabilityRating } from "./scanner/metrics.js";

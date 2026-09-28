@@ -100,8 +100,9 @@ TOOLS = [
     {
         "name": "scan_files",
         "description": ("Scan specific Python/JavaScript files (e.g. only the files changed in a "
-                        "diff). Returns issues per file. Use after editing code to verify the "
-                        "changes introduce no new problems."),
+                        "diff), and config files (.env, JSON, YAML, TOML, INI, shell, keys, "
+                        "Dockerfiles), which are checked for credentials only. Returns issues per "
+                        "file. Use after editing to verify the changes introduce no new problems."),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -551,8 +552,11 @@ def tool_scan_files(args):
             break
         ext = os.path.splitext(p)[1].lower()
         lang = lazaret.EXTS.get(ext)
+        if lang is None and lazaret.configsecrets.is_config_file(os.path.basename(p)):
+            lang = "cfg"                 # a config or data file: credentials only
         if lang is None:
-            out[p] = {"error": f"Unsupported extension {ext} (need .py/.js/.ts/.jsx/.tsx)"}
+            out[p] = {"error": f"Unsupported extension {ext} (need .py/.js/.ts/.jsx/.tsx, "
+                               "or a config file such as .env, .json or .yaml)"}
             continue
         try:
             st = os.stat(p)
@@ -566,7 +570,7 @@ def tool_scan_files(args):
             not_read(p, _not_a_regular_file(st.st_mode))
             continue
         size = st.st_size
-        cap = lazaret.SOURCE_SIZE_CAP
+        cap = lazaret.configsecrets.CONFIG_SCAN_CAP if lang == "cfg" else lazaret.SOURCE_SIZE_CAP
         if size > cap:
             ti = lazaret.truncated_issue(p, f"{size:,} bytes exceeds the {cap:,}-byte file limit")
             all_issues.append(ti)
@@ -592,8 +596,12 @@ def tool_scan_files(args):
         read_bytes += len(data)
         # BOM / UTF-16 / PEP 263 coding cookie (UTF-7 → SC-UTF7), like the
         # registry: scan what the interpreter will read.
-        content, extra = lazaret.decode_member(p, data)
-        issues = extra + lazaret.scan_file(p, content, lang)
+        if lang == "cfg":
+            content = lazaret.decode_source(data)[0]
+            issues = lazaret.scan_config_file(p, content)
+        else:
+            content, extra = lazaret.decode_member(p, data)
+            issues = extra + lazaret.scan_file(p, content, lang)
         files.append({"path": p, "content": content, "lang": lang})
         all_issues.extend(issues)
         out[p] = {"issueCount": len(issues), "issues": [slim(i) for i in issues]}

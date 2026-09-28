@@ -55,7 +55,7 @@ export function worstSevRating(issues, types) {
  * the scanner could not look at, not the code, so they do not count toward
  * the maintainability rating (twin of core.COVERAGE_RULES).
  */
-export const COVERAGE_RULES = new Set(["Q-SKIPPED-TREE", "Q-SYMLINK", "Q-UNREADABLE"]);
+export const COVERAGE_RULES = new Set(["Q-SKIPPED-TREE", "Q-SYMLINK", "Q-UNREADABLE", "Q-SKIPPED-CONFIG"]);
 /**
  * How many code smells a SMELL finding counts for: one, except a Q-CAPPED
  * note, which counts the findings it stands for when they are smells (and

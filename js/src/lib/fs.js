@@ -17,6 +17,7 @@ import { shebangLang } from "./hooks.js";
 import { mkIssue, fileIssue } from "./issue.js";
 import { pthIssues } from "./pth.js";
 import { registerScanContext, SECRET_SKIP_RE } from "./redact.js";
+import { isConfigFile, ownReport, CONFIG_SCAN_CAP } from "./configsecrets.js";
 
 export const EXTS = {
   ".py": "py", ".pyw": "py", ".js": "js", ".jsx": "js", ".ts": "js", ".tsx": "js",
@@ -105,6 +106,14 @@ export function symlinkIssue(path, target) {
     "Following links would let a repository pull files from outside the scanned tree (host credentials, /dev/urandom) into the scan and its reports, or loop forever. The link target is not part of the tree under review.",
     "If the target belongs to the project, scan it directly.",
     "CWE-59 · Scan coverage");
+}
+/** Q-SKIPPED-CONFIG: a config or data file too large to check for credentials (core.config_skipped_issue). */
+export function configSkippedIssue(path, detail) {
+  return coverage("Q-SKIPPED-CONFIG", "Config file not checked (too large)", path,
+    `${path} was not checked for credentials: ${detail}.`,
+    "Config and data files are read only to look for credentials, and one this large is data rather than configuration: a credential in it would not be reported.",
+    "Keep credentials out of large data files, and real configuration in files of its own.",
+    "Scan coverage");
 }
 export function unreadableIssue(path, reason) {
   return coverage("Q-UNREADABLE", "Unreadable entry (not scanned)", path,
@@ -244,17 +253,19 @@ function treeStats(dirBuf) {
 
 /**
  * Collect the files to scan under `root` (twin of core._collect).
- * Returns { files, manifests, pth, binaryIssues, skippedIssues } — files:
- * [{path, content, lang, dep}], manifests: package.json and gyp entries
- * [{kind, path, content, dep}] (kind "package.json", "binding.gyp", or "gyp"
- * for any other .gyp / .gypi file), pth: paths of the .pth files checked,
- * binaryIssues: collection findings (binary classification, SC-TRUNCATED,
- * Q-ENCODING/SC-UTF7/SC-ESCAPE-CODEC, SC-PYC-*, SC-PTH-EXEC, Q-SYMLINK, Q-UNREADABLE,
- * SC-TRUNCATED), skippedIssues: Q-SKIPPED-TREE per pruned tree.
+ * Returns { files, manifests, pth, configs, binaryIssues, skippedIssues } —
+ * files: [{path, content, lang, dep}], manifests: package.json and gyp
+ * entries [{kind, path, content, dep}] (kind "package.json", "binding.gyp",
+ * or "gyp" for any other .gyp / .gypi file), pth: paths of the .pth files
+ * checked, configs: [{path, content}] config and data files outside
+ * dependency trees (scanConfigFile), binaryIssues: collection findings
+ * (binary classification, SC-TRUNCATED, Q-ENCODING/SC-UTF7/SC-ESCAPE-CODEC,
+ * SC-PYC-*, SC-PTH-EXEC, Q-SYMLINK, Q-UNREADABLE, Q-SKIPPED-CONFIG),
+ * skippedIssues: Q-SKIPPED-TREE per pruned tree.
  * Throws ScanTargetError when the root itself cannot be listed.
  */
 export function collectFiles(root, { includeDeps = false, exclude = [], maxFileBytes = MAX_FILE_BYTES } = {}) {
-  const col = { files: [], manifests: [], pth: [], binaryIssues: [], skippedIssues: [], maxFileBytes };
+  const col = { files: [], manifests: [], pth: [], configs: [], binaryIssues: [], skippedIssues: [], maxFileBytes };
   const issues = col.binaryIssues;
   const excluded = new Set(exclude);
   const rootBuf = Buffer.from(resolve(root));
@@ -340,6 +351,7 @@ function collectFile(full, rel, name, st, dep, col) {
     if (!lang) {
       const bi = classifyBinary(rel, head, size, "repo");
       if (bi) col.binaryIssues.push(bi);
+      else if (!dep && isConfigFile(name) && (utf16Bom(head) || !looksBinary(head))) collectConfig(full, rel, size, col);
       return;
     }
   }
@@ -381,6 +393,27 @@ function collectFile(full, rel, name, st, dep, col) {
   const content = normalizeNewlines(dec.text);
   for (const i of encodingIssues(rel, content, dec)) col.binaryIssues.push(i);
   col.files.push({ path: rel, content, lang, dep });
+}
+
+/**
+ * Read a config or data file for scanConfigFile (core._collect_config):
+ * decoded like source but without the encoding notes, since it is not code;
+ * over CONFIG_SCAN_CAP a Q-SKIPPED-CONFIG note instead.
+ */
+const utf16Bom = (b) => b.length >= 2 && ((b[0] === 0xff && b[1] === 0xfe) || (b[0] === 0xfe && b[1] === 0xff));
+function collectConfig(full, rel, size, col) {
+  const cap = CONFIG_SCAN_CAP;
+  if (size > cap) {
+    col.binaryIssues.push(configSkippedIssue(rel, `${withCommas(size)} bytes is over the ${withCommas(cap)}-byte limit for config files`));
+    return;
+  }
+  const data = readBounded(full, cap + 1);
+  if (data.length > cap) {                            // grew between the lstat and the read
+    col.binaryIssues.push(configSkippedIssue(rel, `it grew past the ${withCommas(cap)}-byte limit for config files while it was read`));
+    return;
+  }
+  const content = normalizeNewlines(decodeSource(data, { py: false }).text);
+  if (!ownReport(content)) col.configs.push({ path: rel, content });   // a report of Lazaret's own is not config
 }
 
 /**

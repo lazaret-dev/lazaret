@@ -15,6 +15,7 @@ import { findSecretToken, registerScanContext } from "../lib/redact.js";
 import { truncatedIssue } from "../lib/fs.js";
 import { assigned13, pinUnicode } from "../lib/unicode13.js";
 import { runsDownloadThroughShell, EXEC_CALL_RE } from "../lib/shellpipe.js";
+import { documentationToken, keyMaterial, secretCol, redactConfigValues } from "../lib/configsecrets.js";
 
 export { isComment } from "./engine.js";
 
@@ -713,6 +714,65 @@ export function scanFile(file) {
     issues.push(truncatedIssue(path, "scan time budget exceeded"));
   }
   const suppressed = makeSuppressor(lines, lang, { dep, lex: ctx.lex });
+  return capIssues(path, issues.filter((i) => !suppressed(i)), lines);
+}
+
+// ---- config and data files (credentials only; core.scan_config_file) -------
+const TOKEN_RULE = RULES.find((r) => r.id === "S-TOKEN");
+export const CONFIG_SECRET_RULE = {
+  id: "S-SECRET", name: "Hardcoded credential", type: "VULN", sev: "BLOCKER",
+  msg: "Credential appears to be hardcoded in a config file.",
+  why: "Config files are committed, copied into images and shared: a credential in one leaks with every copy, and rotating it means finding them all.",
+  fix: "Reference it instead (${VAR}, a secrets manager), and rotate this one now.",
+  ref: "CWE-798 · OWASP A07",
+};
+
+/**
+ * Column of the first S-TOKEN match on a config line that is reported: not a
+ * documentation sample, and a private-key header only with key material after
+ * it, on the line or the next two (core._config_token_col). -1 if none.
+ */
+function configTokenCol(line, lines, i) {
+  let t, from = 0;
+  while ((t = findSecretToken(line, from))) {
+    from = t.end;
+    if (documentationToken(t.text)) continue;
+    if (t.text.startsWith("-----BEGIN")
+        && ![line.slice(t.end), ...lines.slice(i + 1, i + 3)].some((x) => keyMaterial(x))) continue;
+    return t.index;
+  }
+  return -1;
+}
+
+/**
+ * Credentials in a config or data file (twin of core.scan_config_file):
+ * S-TOKEN on every line, S-SECRET outside comments, nothing else — it is not
+ * code. Suppression markers work in the file's comments, as in code.
+ */
+export function scanConfigFile(path, rawContent) {
+  const content = pinUnicode(normalizeSource(rawContent, "cfg"));
+  const lines = content.split("\n");
+  const lex = lexLines(lines, "cfg", content);
+  registerScanContext(lines, SECRET_SKIP_RE, redactConfigValues);
+  const deadline = Date.now() + timeBudgetMs;
+  const issues = [];
+  try {
+    for (let i = 0; i < lines.length; i++) {
+      if (Date.now() > deadline) throw new ScanBudgetExceeded();
+      const line = lines[i];
+      if (!line || isBlank(line)) continue;
+      let col = configTokenCol(line, lines, i);
+      if (col >= 0) issues.push(mkIssue(TOKEN_RULE, path, i + 1, lines, col));
+      if (!lex.comment[i]) {
+        col = secretCol(lex.code[i]);
+        if (col >= 0) issues.push(mkIssue(CONFIG_SECRET_RULE, path, i + 1, lines, col));
+      }
+    }
+  } catch (e) {
+    if (!(e instanceof ScanBudgetExceeded)) throw e;
+    issues.push(truncatedIssue(path, "scan time budget exceeded"));
+  }
+  const suppressed = makeSuppressor(lines, "cfg", { lex });
   return capIssues(path, issues.filter((i) => !suppressed(i)), lines);
 }
 

@@ -24,6 +24,28 @@ project is pre-1.0, so the 0.x API may still change.
   projects all three now match an independent OSV matcher exactly (216 of
   216 advisory groups for uv and pylock, 104 of 104 for Bun, none extra).
 
+- **Config and data files are checked for credentials (both engines; audit
+  P0).** Only Python, JavaScript and SQL were read, so a credential in a
+  `.env`, JSON, YAML, TOML, INI / `.cfg` / `.conf`, `.properties`, shell
+  script, `.pem` / `.key` or SSH key, Dockerfile, `.npmrc` / `.pypirc` /
+  `.netrc` or `*.tfvars` file was never seen: 19% recall on the audit's
+  labeled corpus. Those files are now read as text (outside dependency trees)
+  and checked by S-TOKEN (not AWS's `AKIA…EXAMPLE` key or jwt.io's sample
+  token; a private-key header only with real key material) and by a config
+  form of S-SECRET: a key named like a credential whose value looks like one,
+  a password in a URL (not on localhost), and Slack / Discord webhook URLs.
+  References (`${VAR}`, `{{ … }}`), paths, names (`root-ca`, `ACCESS_TOKEN`),
+  translations and placeholders are not reported. Lockfiles, Lazaret's own
+  reports and binary files are not read; a config file over 2 MB gets a
+  Q-SKIPPED-CONFIG coverage note. Config files count in no code metric; the
+  report's new `metrics.configFiles` says how many were checked, and the
+  terminal summary lists them. Suppression markers work in their comments.
+  The MCP `scan_files` tool accepts config files too. On the corpus: 94.9%
+  recall (was 19.2%) with no new false positives; a sweep of 11,490 config
+  files in 17 public repositories flagged only committed credentials (test
+  fixtures, Kubernetes Secret data, private keys, documented default
+  passwords), and 476 in the benign package corpus flagged nothing.
+
 ### Fixed
 - **One finding per dependency version, however it is spelled
   (`lazaret-sca`).** A version pinned as `3.2.0` in `pyproject.toml` and

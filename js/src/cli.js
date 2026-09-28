@@ -12,7 +12,7 @@ import {
 } from "./lib/fs.js";
 import { fsNameToString } from "./lib/encoding.js";
 import { pyRepr } from "./lib/pycompat.js";
-import { scanFile } from "./scanner/scan.js";
+import { scanFile, scanConfigFile } from "./scanner/scan.js";
 import { scanManifest, scanGyp } from "./lib/supplychain.js";
 import { redactResult, setRedactSecrets } from "./lib/redact.js";
 import {
@@ -289,8 +289,8 @@ function runChecked(argv, io) {
     if (e instanceof ScanTargetError) { err(`error: ${sanitizeTermLine(e.message)}`); return EXIT_USAGE; }
     throw e;
   }
-  const { files, manifests, binaryIssues, skippedIssues } = col;
-  if (!files.length && !manifests.length && !col.pth.length && !binaryIssues.length) {
+  const { files, manifests, configs, binaryIssues, skippedIssues } = col;
+  if (!files.length && !manifests.length && !configs.length && !col.pth.length && !binaryIssues.length) {
     err(`error: ${sanitizeTermLine(`nothing to scan under ${fsNameToString(Buffer.from(root))}: no Python, JavaScript or SQL sources, package manifests or other files to check`)}`);
     return EXIT_USAGE;
   }
@@ -300,6 +300,9 @@ function runChecked(argv, io) {
   for (const f of files) {
     try { add(scanFile({ name: f.path, path: f.path, content: f.content, lang: f.lang, dep: f.dep })); }
     catch (e) { issues.push(scanErrorIssue(f.path, e)); }            // one file must never kill the run
+  }
+  for (const cf of configs) {                                         // config and data files: credentials only
+    try { add(scanConfigFile(cf.path, cf.content)); } catch (e) { issues.push(scanErrorIssue(cf.path, e)); }
   }
   for (const mf of manifests) {
     // binding.gyp and every other .gyp / .gypi → scanGyp (G11); package.json
@@ -319,6 +322,7 @@ function runChecked(argv, io) {
   // findings copy raw source lines: they get their file's redaction here.
   add(redactFlowIssues(analyzeFlows(files), files));
   const res = redactResult(buildResult(root, files, issues), clipLine);
+  res.metrics.configFiles = configs.length;
   if (opts.baseline) {
     applyBaseline(res, opts.baseline, { root, env, warn: (m) => err(sanitizeTermLine(m)) });
   }

@@ -146,7 +146,10 @@ shared by the CLI and the MCP server. In order it:
 1. **collects** files and manifests (`_collect`, honouring `--deps`, excludes,
    size caps, binary/pyc/symlink/encoding checks);
 2. **scans each file** (`scan_file`) — rules, intra-file taint, SQL sinks,
-   obfuscation/secret detection, per its language;
+   obfuscation/secret detection, per its language — and each config or data
+   file (`scan_config_file`: `.env`, JSON, YAML, TOML, INI, shell, keys,
+   Dockerfiles; `lazaret.scanner.configsecrets` and `js/src/lib/configsecrets.js`)
+   for credentials only; config files are not code and count in no code metric;
 3. **scans manifests** (`package.json`, `binding.gyp`, …);
 4. **runs `--deps` checks** (`dependency_checks`) — what dependencies run at
    install and import time (install hooks followed to the files they run,
