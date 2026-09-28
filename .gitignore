@@ -1,3 +1,6 @@
+# Claude mbox deliveries (not part of the repo)
+/Claude outputs/
+
 # secrets: never commit (scripts/make_bundle.py refuses the same names)
 .env
 .env.*
