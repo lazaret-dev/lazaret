@@ -484,6 +484,25 @@ class VerdictCacheTests(unittest.TestCase):
                 f.write(text)
             self.assertIsNone(guard.VerdictCache(self.path).get("k"))
 
+    def test_a_device_or_a_folder_is_no_cache(self):
+        """LAZARET_GUARD_CACHE=/dev/null (NUL on Windows) turns the cache off:
+        nothing is read from it, and it is never written over (as root, a
+        rename would have replaced /dev/null itself)."""
+        for path in (os.devnull, self.dir):
+            with self.subTest(path=path):
+                cache = guard.VerdictCache(path)
+                cache.put("k", self.HIT, None)
+                with mock.patch.object(guard.tempfile, "mkstemp", side_effect=AssertionError("wrote a cache")):
+                    cache.save()
+                self.assertIsNone(cache.path)
+
+    def test_a_failed_save_leaves_nothing_behind(self):
+        cache = guard.VerdictCache(self.path)
+        cache.put("k", self.HIT, None)
+        with mock.patch.object(guard.os, "replace", side_effect=OSError("denied")):
+            cache.save()
+        self.assertEqual(os.listdir(os.path.dirname(self.path)), [])
+
     def test_the_oldest_are_dropped(self):
         cache = guard.VerdictCache(self.path)
         with mock.patch.object(guard.VerdictCache, "MAX_ENTRIES", 2):

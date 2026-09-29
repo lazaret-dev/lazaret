@@ -285,8 +285,10 @@ project is pre-1.0, so the 0.x API may still change.
     installs nothing; `--block-warn` blocks WARN and INCOMPLETE too;
     `--json` writes every package checked.
   - Verdicts are cached by artifact digest and engine version
-    (`~/.cache/lazaret/guard-verdicts.json`), so a package is fetched and
-    scanned once; scans run in worker processes (`--jobs`). A first guarded
+    (`~/.cache/lazaret/guard-verdicts.json`, or `LAZARET_GUARD_CACHE`;
+    `--no-cache` or `LAZARET_GUARD_CACHE=/dev/null` turns it off), so a
+    package is fetched and scanned once; scans run in worker processes
+    (`--jobs`). A first guarded
     `npm install next react react-dom typescript eslint` takes about 48
     seconds on a 2-core machine, most of it scanning the 42 MB `next`
     tarball; a repeat `npm ci` of `express` takes under a second.

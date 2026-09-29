@@ -319,6 +319,8 @@ class VerdictCache:
     MAX_ENTRIES = 20_000
 
     def __init__(self, path):
+        if path and os.path.exists(path) and not os.path.isfile(path):
+            path = None                     # /dev/null, NUL, a folder: no cache, and never written over
         self.path = path
         self.data = {}
         self.lock = threading.Lock()
@@ -362,11 +364,17 @@ class VerdictCache:
         try:
             os.makedirs(folder, exist_ok=True)
             fd, tmp = tempfile.mkstemp(prefix=".guard-", dir=folder)
+        except OSError:
+            return                                  # a cache that can't be written is only slower
+        try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump({"engine": repo.ENGINE_VERSION, "verdicts": dict(items)}, f)
             os.replace(tmp, self.path)
         except OSError:
-            pass                                    # a cache that can't be written is only slower
+            try:
+                os.unlink(tmp)                      # no half-written file left beside it
+            except OSError:
+                pass
 
 
 def default_cache_path():
