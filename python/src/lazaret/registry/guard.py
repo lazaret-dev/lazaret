@@ -1480,6 +1480,38 @@ def _npm_workspace_of(root, cwd):
                for p in (patterns if isinstance(patterns, list) else []))
 
 
+def npm_prefix(exe, env, cwd, args=()):
+    """The folder npm works in for a command run in cwd, as npm itself says
+    (`npm prefix`, with the command's own --prefix): the nearest folder up
+    from cwd with a package.json or a node_modules folder, or the root of
+    the workspace that folder is one of. None when npm doesn't say.
+
+    A folder with no package.json is not where npm writes: from a checkout
+    whose package.json is in a subfolder, `npm install x` added x to the
+    package.json of the nearest parent that had one (a home folder with a
+    node_modules), and wrote its lockfile there — so the guard found no
+    lockfile where it looked, and --plan left that parent changed."""
+    given = _option_value(list(args), ("--prefix", "-C"))
+    cmd = [exe, "prefix"] + ([f"--prefix={given}"] if given else [])
+    try:
+        proc = subprocess.run(cmd, env=env, cwd=cwd, capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    lines = proc.stdout.strip().splitlines() if proc.returncode == 0 else []
+    path = lines[-1].strip() if lines else ""
+    return os.path.abspath(path) if path and os.path.isdir(path) else None
+
+
+def _same_dir(a, b):
+    """Are a and b the same folder (however each is spelled: a symlinked
+    /var, a Windows short name)?"""
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+
+
 def npm_root(tool, cwd):
     """The folder whose lockfile a command run in cwd writes: pnpm's
     workspace root (pnpm-workspace.yaml), or the root of the npm workspace
@@ -1544,7 +1576,9 @@ def guard_npm(ctx, tool, args):
             with open(os.path.join(scratch, "package.json"), "w", encoding="utf-8") as f:
                 f.write('{"name": "lazaret-guard-plan", "version": "0.0.0", "private": true}\n')
         where = scratch or cwd
-        root = scratch or npm_root(tool, cwd)
+        root = scratch or (npm_prefix(exe, env, cwd, args) if tool == "npm" else None) or npm_root(tool, cwd)
+        if not scratch and not _same_dir(root, cwd):
+            ctx.say(f"lazaret guard: {tool} works in {root}")
         lock_names = ["npm-shrinkwrap.json", "package-lock.json"] if tool == "npm" else ["pnpm-lock.yaml"]
         snap = Snapshot([os.path.join(where, "package.json"), os.path.join(root, "package.json")]
                         + [os.path.join(root, n) for n in lock_names])

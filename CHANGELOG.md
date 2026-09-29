@@ -7,6 +7,18 @@ This log starts at 0.1.6; for earlier releases see the git history and tags.
 The format is based on [Keep a Changelog](https://keepachangelog.com); the
 project is pre-1.0, so the 0.x API may still change.
 
+## [Unreleased]
+
+### Fixed
+- **`lazaret guard` with npm in a folder without a package.json.** npm then
+  works in the nearest folder up that has a package.json or a node_modules
+  folder (a home folder, often); the guard looked for the lockfile in the
+  current folder, said "npm wrote no lockfile to check", and left that
+  folder's package.json and package-lock.json as npm had changed them,
+  even with `--plan`. The guard now asks npm where it works (`npm prefix`,
+  with the command's own `--prefix`), checks and restores the files there,
+  and says which folder that is.
+
 ## [0.1.7] — 2026-09-29
 
 ### Added

@@ -56,6 +56,27 @@ class NpmGuardTests(_RegistryCase):
         self.assertEqual(sorted(os.listdir(d)), ["package.json"])
         self.assertEqual(gs.read(os.path.join(d, "package.json")), before)
 
+    def test_npm_works_in_the_nearest_folder_with_a_package_json(self):
+        """With no package.json here, npm works in the nearest folder up that
+        has one: the guard checks the lockfile npm writes there, says where,
+        and --plan puts that folder's files back (it used to look here, find
+        no lockfile, and leave the parent's package.json changed)."""
+        parent = gs.project(self.tmp)
+        child = os.path.join(parent, "sub", "dir")
+        os.makedirs(child)
+        before = gs.read(os.path.join(parent, "package.json"))
+        code, out = self.guard(child, "--plan", "npm", "install", "good-pkg")
+        self.assertEqual(code, 0, out)
+        said = [line for line in out.splitlines() if line.startswith("lazaret guard: npm works in ")]
+        self.assertEqual(len(said), 1, out)
+        self.assertTrue(os.path.samefile(said[0][len("lazaret guard: npm works in "):], parent), out)
+        self.assertIn("1 package to check (package-lock.json)", out)
+        self.assertIn("nothing blocked (--plan: nothing was installed; package.json and package-lock.json put back)",
+                      out)
+        self.assertEqual(sorted(os.listdir(parent)), ["package.json", "sub"])
+        self.assertEqual(gs.read(os.path.join(parent, "package.json")), before)
+        self.assertEqual(os.listdir(child), [])
+
     def test_plan_installs_nothing(self):
         d = gs.project(self.tmp)
         code, out = self.guard(d, "--plan", "npm", "install", "good-pkg")
