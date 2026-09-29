@@ -34,6 +34,14 @@ from lazaret.scanner import core
 PER_CASE_LIMIT = 8.0
 
 CASES = {
+    # 0.1.8: a blank run that no code follows (SC-OFFSCREEN-CODE's pattern starts only at a run's start),
+    # a long name before the self-publishing needles, a long name before '.dll'
+    "js 'x;' + 200,000 spaces (SC-OFFSCREEN-CODE)": ("x.js", "x;" + " " * 200000, "js", False),
+    "py ')' + 200,000 spaces + code (SC-OFFSCREEN-CODE)": ("x.py", ")" + " " * 200000 + ";exec(1)", "py", False),
+    "js self-publishing needles + 'a' x 200,000 (SC-SELF-PUBLISH)":
+        ("x.js", "exec('npm publish'); w('package.json'); " + "a" * 200000 + ".nam = 1", "js", True),
+    "js 'rundll32 ' + 'a' x 200,000 (install-script DLL test)":
+        ("x.js", "rundll32 " + "a" * 200000 + ".dl", "js", True),
     "js 'catch' + 150,000 newlines (B-EMPTY-CATCH)":
         ("x.js", "try { f() } catch" + "\n" * 150000, "js", False),
     "py 'algorithm=' + 60,000 spaces (S-JWT-NONE)":

@@ -49,11 +49,13 @@ const h = await import(pathToFileURL(process.argv[1]).href);
 const cases = JSON.parse(readFileSync(0, "utf8"));
 const results = cases.map((s) => [h.shlexSplit(s), h.hookTokens(s), h.followHook(s),
   h.installScriptRisk(s), h.importTimeRisk(s), h.nodeCandidates(s), h.nodeECodes(s), h.shebangLang(s),
-  h.importTimeRisk(s, "py"), h.importTimeRisk(s, "js")]);
+  h.importTimeRisk(s, "py"), h.importTimeRisk(s, "js"),
+  ((at) => (at < 0 ? -1 : [...s.slice(0, at)].length))(h.selfPublishAt(s)), h.runsDll(s), h.joinStringPieces(s)]);
 process.stdout.write(JSON.stringify({ twins: h.PY_TWINS, results }));
 """
 FIELDS = ("shlex tokens", "_hook_tokens", "follow_hook", "install_script_risk", "import_time_risk",
-          "node_candidates", "_NODE_E_RE codes", "shebang_lang", "import_time_risk py", "import_time_risk js")
+          "node_candidates", "_NODE_E_RE codes", "shebang_lang", "import_time_risk py", "import_time_risk js",
+          "self_publish_at", "runs_dll", "join_string_pieces")
 
 # Realistic hook commands and install / import-time scripts
 CURATED = [
@@ -390,6 +392,45 @@ PERSIST_CURATED = [
     "const url = `https://github.com/oven-sh/bun/releases/download/bun-v${V}/${asset}.zip`;\nexecFileSync(binPath, [entry]);\n",
     "const w = '.github/workflows/x.yml';\nconst y = `env:\\n  D: ${{ toJSON(secrets) }}`;\n",
 ]
+# code that publishes packages and collects npm tokens (SC-SELF-PUBLISH and the
+# install-script test, 0.1.8), and an install script that runs a DLL: the
+# commands, renames, package.json writes, token reads and split names
+PUBLISH = ["\n", "\n", " ", ";", "(", ")", "'", '"', "`", ",", " + ", "=", "==", "=>", "[", "]", "{", "}", "\\",
+           "exec('npm publish --access public', cb)", "execSync(\"npm publish\")", "spawn('npm', ['publish'])",
+           "spawnSync(\"pnpm\", [\"publish\", \"--no-git-checks\"])", "subprocess.run(['npm', 'publish'])",
+           "os.system('cd pkg && yarn publish')", "exec(`npx npm publish`)", "execa('bun', ['publish'])",
+           "console.log('npm publish')", "npm publish", "publish", "exec(", "system(", "run(", "npm ", "publish ",
+           "packageData.name = ", "pkg[\"name\"] = ", "pkg.name == x", "this.name = ", "p.name =>", "name = ",
+           "`${randomName}-sluey`", "uniqueName", "packageData", "pkg", "JSON.stringify(packageData, null, 2)",
+           "fs.writeFileSync('package.json', ", "writeFile(\"./package.json\", ", "outputJsonSync(pkgPath, ",
+           "with open('package.json', 'w') as f:\n    json.dump(pkg, f)", "json.dump(", "dump(pkg, f)",
+           "write_text(json.dumps(pkg))", "'package.json'", "package.json", "\u00e9", "\U0001d41a", "x" * 300,
+           "path.join(os.homedir(), '.npmrc')", "readFileSync(rcPath, 'utf8')", ".npmrc", "_authToken",
+           "/(?:_authToken\\s*=\\s*|:_authToken=)([^\\s]+)/", "execSync('npm config get //registry.npmjs.org/:_authToken')",
+           "npm config get registry", "NPM_TOKEN", "process.env.NPM_TOKEN",
+           "rundll32", "regsvr32.exe", "RUNDLL32", "rund\u0131ll32", "'rund' + 'll32'", '"regs"+"vr32"',
+           "path.join(__dirname, './node-gyp' + '.dll')", "'node-gyp.dll'", "url.dll,FileProtocolHandler",
+           "shell32.dll,Control_RunDLL", "C:\\Windows\\x.dll", "'.dll'", "\u212aeymgr.dll", "a.DLL",
+           "require('chi'+'ld_pro'+'cess')[\"sp\"+\"awn\"](", ".dll", "32"]
+PUBLISH_CURATED = [
+    "const fs = require('fs');\nconst { exec } = require('child_process');\npackageData.name = `${randomName}-sluey`;\n"
+    "fs.writeFileSync('package.json', JSON.stringify(packageData, null, 2));\n"
+    "exec('npm publish --access public', (error, stdout, stderr) => {});\n",
+    "const packageJson = require('./package.json');\npackageJson.name = uniqueName;\n"
+    "fs.writeFileSync('package.json', JSON.stringify(packageJson, null, 2));\nexecSync('npm publish', { stdio: 'inherit' });\n",
+    "import json, subprocess\npkg = json.load(open('package.json'))\npkg['name'] = new\n"
+    "with open('package.json', 'w') as f:\n    json.dump(pkg, f)\nsubprocess.run(['npm', 'publish'])\n",
+    # a release tool: bumps the version, publishes, never renames
+    "pkg.version = next;\nfs.writeFileSync('package.json', JSON.stringify(pkg));\nexecSync('npm publish');\n",
+    # renames, but writes something else
+    "pkg.name = n;\nfs.writeFileSync('out.json', JSON.stringify(pkg));\nexecSync('npm publish');\n",
+    "const rc = fs.readFileSync(path.join(os.homedir(), '.npmrc'), 'utf8');\n"
+    "const m = rc.match(/:_authToken=([^\\s]+)/);\nspawn(process.execPath, [deploy], { env: { T: m[1] } });\n",
+    "const t = execSync('npm config get //registry.npmjs.org/:_authToken').toString();\n",
+    "require('chi'+'ld_pro'+'cess')[\"sp\"+\"awn\"](\"rund\"+\"ll32\", [path.join(__dirname, './node-gyp' + '.dll') + \",main\"]);\n",
+    "execSync('rundll32 url.dll,FileProtocolHandler https://example.invalid')",
+    "subprocess.run(['regsvr32', '/s', 'C:\\\\x\\\\helper.dll'])",
+]
 SHEBANG = ["#!", " ", " ", "\t", "\n", "\r", "/", "/usr/bin/", "/usr/bin/env", "env", "-S", "-i", "-u", "--",
            "node", "NODE", "nodejs", "deno", "bun", "ts-node", "tsx", "python", "python3.12", "py", "pypy",
            "sh", "bash", "zsh", "perl", "A=1", "\u212a", "\u017f", "\x1c", "\xa0", "\x85", "\u0663", "\U0001F600",
@@ -403,10 +444,10 @@ def corpus(seed=20260926, scale=1):
     character they encode (a Python str could keep the two apart, a
     JavaScript string cannot)."""
     rnd = random.Random(seed)
-    cases = list(CURATED) + SIGN_CURATED + PROSE_CURATED + SELF_CURATED + PERSIST_CURATED
+    cases = list(CURATED) + SIGN_CURATED + PROSE_CURATED + SELF_CURATED + PERSIST_CURATED + PUBLISH_CURATED
     for pieces, count, most in ((MIXED, 2500, 14), (QUOTING, 1500, 16), (CD, 1500, 16), (NODE_E, 1500, 16),
                                 (SCRIPT, 1000, 12), (RECEIVED, 1500, 16), (SIGNS, 2000, 10), (PROSE, 2500, 16),
-                                (SELF, 1500, 14), (PERSIST, 2500, 10)):
+                                (SELF, 1500, 14), (PERSIST, 2500, 10), (PUBLISH, 3000, 12)):
         for _ in range(count * scale):
             cases.append("".join(rnd.choice(pieces) for _ in range(rnd.randint(1, most))))
     for _ in range(1500 * scale):                   # #! lines: an interpreter, then anything
@@ -434,7 +475,8 @@ def core_view(text):
     return [shlex_tokens(text), core._hook_tokens(text), list(core.follow_hook(text)),
             core.install_script_risk(text), list(core.import_time_risk(text)), core.node_candidates(text),
             [next(g for g in m.groups() if g is not None) for m in core._NODE_E_RE.finditer(text)],
-            core.shebang_lang(text), list(core.import_time_risk(text, "py")), list(core.import_time_risk(text, "js"))]
+            core.shebang_lang(text), list(core.import_time_risk(text, "py")), list(core.import_time_risk(text, "js")),
+            core.self_publish_at(text), core.runs_dll(text), core.join_string_pieces(text)]
 
 
 def run_npm(cases):
@@ -478,7 +520,10 @@ class HookParityTests(unittest.TestCase):
         """Guards the comparison against a corpus that stopped exercising
         something: each count is well above zero for this seed."""
         counts = collections.Counter()
-        for tokens, _, (targets, complete), install, (on_import, _), _, codes, lang, py, js in self.views:
+        for view in self.views:
+            tokens, _, (targets, complete), install, (on_import, _), _, codes, lang, py, js = view[:10]
+            counts["self-publishing"] += view[10] >= 0
+            counts["runs a DLL"] += view[11] is not None
             counts["prose read out (py)"] += py[0] != on_import
             counts["prose read out (js)"] += js[0] != on_import
             counts["shlex raises"] += tokens is None
@@ -497,8 +542,9 @@ class HookParityTests(unittest.TestCase):
         # targets, shlex, node -e and completeness counters, and 3 #! languages
         # and the cases where reading a file without its prose (import_time_risk with a language)
         # changes the answer, for Python and for JavaScript, and code read back from the file itself;
-        # and the 6 persistence reasons (0.1.7)
-        self.assertEqual(len(counts), 34, counts)
+        # and the 6 persistence reasons (0.1.7); and (0.1.8) the 3 reasons for publishing, npm tokens and a
+        # DLL run, with the self-publishing and DLL counters
+        self.assertEqual(len(counts), 39, counts)
         # these reasons are rarer in the random stream but present (curated) and well above zero
         rare = {"not followed completely", "deserializes data it receives over the network",
                 "loads a module named by data it receives over the network", "downloads a file and then runs it",
@@ -506,7 +552,7 @@ class HookParityTests(unittest.TestCase):
                 "runs an encoded PowerShell command that downloads and runs code",
                 "runs PowerShell that downloads and runs code",
                 "carries a GitHub Actions workflow that dumps every repository secret",
-                "downloads the Bun runtime from GitHub and runs code with it"}
+                "downloads the Bun runtime from GitHub and runs code with it", "self-publishing"}
         self.assertEqual({k: n for k, n in counts.items() if n < 100 and k not in rare}, {}, counts)
         self.assertGreaterEqual(counts["not followed completely"], 7, counts)   # the curated limit cases
         self.assertGreaterEqual(counts["deserializes data it receives over the network"], 25, counts)
@@ -514,6 +560,7 @@ class HookParityTests(unittest.TestCase):
         self.assertGreaterEqual(counts["downloads a file and then runs it"], 4, counts)
         self.assertGreaterEqual(counts["carries a GitHub Actions workflow that dumps every repository secret"], 30, counts)
         self.assertGreaterEqual(counts["downloads the Bun runtime from GitHub and runs code with it"], 30, counts)
+        self.assertGreaterEqual(counts["self-publishing"], 30, counts)
 
     def test_pattern_text_and_names_are_cores(self):
         """The JS module carries core's pattern text verbatim, with the same
@@ -537,9 +584,10 @@ class HookParityTests(unittest.TestCase):
                                                  "_PS_ENCODED_MAX", "_STAGER_MIN", "_STAGER_MAX_LITERALS",
                                                  "_PS_EXEC_BACK", "_PS_EXEC_MAX_NAMES", "_SELF_READ_PASSES",
                                                  "_SELF_READ_MAX_CALLS", "_SELF_READ_ARG_SPAN", "_SELF_READ_MAX_ASSIGNS",
-                                                 "_LITERAL_SPANS_MAX", "_PERSIST_MAX_LINES")})
-        self.assertEqual(len(self.twins["patterns"]), 92)
-        self.assertEqual(len(self.twins["sets"]), 27)
+                                                 "_LITERAL_SPANS_MAX", "_PERSIST_MAX_LINES", "_SELF_PUB_SPAN",
+                                                 "_SELF_PUB_MAX")})
+        self.assertEqual(len(self.twins["patterns"]), 100)
+        self.assertEqual(len(self.twins["sets"]), 28)
         self.assertEqual(len(self.twins["maps"]), 4)
 
 if __name__ == "__main__":

@@ -146,6 +146,60 @@ class CoreParityTests(unittest.TestCase):
                             ("tricky/package.json", 6)] + ([("node_modules/dep/package.json", 7)] if deps else [])
                     self.assertEqual(lines, sorted(want))
 
+    def test_self_publishing_offscreen_code_and_install_time_publishing(self):
+        """0.1.8: SC-SELF-PUBLISH, SC-OFFSCREEN-CODE, and a dependency's install
+        hook that runs a script publishing, collecting npm tokens or running a
+        DLL (dependency_checks, with --deps)."""
+        spam = ("const fs = require('fs');\nconst { exec } = require('child_process');\nlet packageData = {};\n"
+                "packageData.name = `${pick()}-sluey`;\n"
+                "fs.writeFileSync('package.json', JSON.stringify(packageData, null, 2));\n"
+                "exec('npm publish --access public', () => {});\n")
+        spam_py = ("import json, subprocess\npkg = json.load(open('package.json'))\npkg['name'] = 'x-' + str(n)\n"
+                   "with open('package.json', 'w') as f:\n    json.dump(pkg, f)\nsubprocess.run(['npm', 'publish'])\n")
+        release = ("const fs = require('fs');\nconst { execSync } = require('child_process');\npkg.version = next;\n"
+                   "fs.writeFileSync('package.json', JSON.stringify(pkg));\nexecSync('npm publish');\n")
+        hidden = ("module.exports = 1;\n});" + " " * 300 + "global['r']=require;(function(){r('https')})();\n"
+                  "const a = 2;" + " " * 200 + "a.b = [1, 2];\n")
+        hidden_py = "x = 1\n)" + " " * 515 + ";import base64;exec(base64.b64decode('cHJpbnQoMSk='))\n"
+        worm = ("const rc = require('fs').readFileSync(require('path').join(require('os').homedir(), '.npmrc'), 'utf8');\n"
+                "const m = rc.match(/:_authToken=([^\\s]+)/);\nrequire('child_process').execSync('npm publish');\n")
+        dll = ("require('chi'+'ld_pro'+'cess')[\"sp\"+\"awn\"](\"rund\"+\"ll32\", "
+               "[require('path').join(__dirname, './node-gyp' + '.dll') + \",main\"]);\n")
+        hook = lambda script: json.dumps({"name": "dep", "version": "1.0.0", "scripts": {"postinstall": f"node {script}"}})
+        files = {"package.json": json.dumps({"name": "app", "version": "1.0.0"}), "spam/auto.js": spam,
+                 "tools/publish.py": spam_py, "tools/release.js": release, "lib/index.js": hidden,
+                 "lib/setup_helper.py": hidden_py,
+                 "node_modules/worm/package.json": hook("index.js"), "node_modules/worm/index.js": worm,
+                 "node_modules/dllrun/package.json": hook("install.js"), "node_modules/dllrun/install.js": dll}
+        with tree(files) as root:
+            for deps in (False, True):
+                js, py = parity.both(root, deps=deps)
+                with self.subTest(deps=deps):
+                    self.assert_same(js, py, label=f"0.1.8 rules deps={deps}")
+                    self.assertEqual(snippets(js[1]), snippets(py[1]))
+                    found = sorted((i["rule"], i["file"].replace("\\", "/"), i["line"], i["sev"])
+                                   for i in py[1]["issues"]
+                                   if i["rule"] in ("SC-SELF-PUBLISH", "SC-OFFSCREEN-CODE")
+                                   or (i["rule"] == "SC-INSTALL-HOOK" and i["sev"] == "CRITICAL"))
+                    want = [("SC-OFFSCREEN-CODE", "lib/index.js", 2, "CRITICAL"),
+                            ("SC-OFFSCREEN-CODE", "lib/index.js", 3, "MAJOR"),
+                            ("SC-OFFSCREEN-CODE", "lib/setup_helper.py", 2, "CRITICAL"),
+                            ("SC-SELF-PUBLISH", "spam/auto.js", 6, "CRITICAL"),
+                            ("SC-SELF-PUBLISH", "tools/publish.py", 6, "CRITICAL")]
+                    if deps:
+                        want += [("SC-INSTALL-HOOK", "node_modules/dllrun/package.json", 1, "CRITICAL"),
+                                 ("SC-INSTALL-HOOK", "node_modules/worm/package.json", 1, "CRITICAL")]
+                    self.assertEqual(found, sorted(want))
+                    if deps:
+                        msgs = {i["file"].replace("\\", "/"): i["msg"] for i in py[1]["issues"]
+                                if i["rule"] == "SC-INSTALL-HOOK" and i["sev"] == "CRITICAL"}
+                        self.assertEqual(msgs["node_modules/worm/package.json"],
+                                         "Install hook runs index.js, which publishes a package to a registry "
+                                         "(npm publish); and collects npm access tokens.")
+                        self.assertEqual(msgs["node_modules/dllrun/package.json"],
+                                         "Install hook runs install.js, which runs a DLL with rundll32 or regsvr32 "
+                                         "(node-gyp.dll).")
+
     def test_report_path_collisions_exit_3_before_the_scan(self):
         with tree({"a.py": "import os\nos.system(cmd)\n"}) as root, tempfile.TemporaryDirectory() as out:
             cases = [("SARIF on the JSON default", ["--sarif", "lazaret-report.json"]),

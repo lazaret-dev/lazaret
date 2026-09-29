@@ -5152,6 +5152,10 @@ def _scan_file(path, content, lines, lang, dep, ctx, issues):
                  "why": "Embedded encoded blobs can carry second-stage payloads.",
                  "fix": "Decode and verify the content; move legitimate assets to data files.",
                  "ref": "CWE-506 · Supply chain"}, path, i + 1, lines, bm.start()))
+        if lang in ("js", "py"):
+            off = offscreen_code(line, lang)
+            if off is not None and ctx.names_code(i).strip():
+                issues.append(_offscreen_issue(path, i + 1, lines, off))
         # --- entropy-based secret detection ---
         # (review fix: the S-TOKEN/S-SECRET dedupe was an any() over every
         # issue so far, per line — 15.7 s on 20k lines; now a set lookup)
@@ -5181,6 +5185,11 @@ def _scan_file(path, content, lines, lang, dep, ctx, issues):
                  "fix": "Diff against the package's published repository; consider removing the dependency.",
                  "ref": "CWE-506 · Supply chain"}, path, first_line, lines,
                 first_off - content.rfind("\n", 0, first_off) - 1))
+    if lang in ("js", "py"):
+        at = self_publish_at(content)
+        if at >= 0:
+            issues.append(mk_issue(_SELF_PUBLISH_RULE, path, content.count("\n", 0, at) + 1, lines,
+                                   at - content.rfind("\n", 0, at) - 1))
     if dep:
         _dep_decode_flow(path, ctx, issues)
         return
@@ -6460,6 +6469,216 @@ def persistence_reasons(text):
     return reasons
 
 
+# ---------------- Code that publishes packages (SC-SELF-PUBLISH, 0.1.8) ----------------
+# The 2025-26 registry floods shipped a script that gives the package it sits
+# in a new name — a random one each time — and runs `npm publish` in a loop:
+# IndonesianFoods' auto.js, the generated-name "tea" farms, tens of thousands
+# of packages from a few accounts (39 of the 0.1.7 benchmark's misses).
+# Release tools publish too, but never rename what they publish. So three
+# signs in one file are SC-SELF-PUBLISH, CRITICAL wherever the file is: a
+# publish command an exec call runs (`npm publish`, pnpm, yarn, bun; or
+# `spawn("npm", ["publish"])`), an assignment to an object's `name`, and a
+# write to package.json whose arguments name that object — package.json in
+# the arguments, or in the _SELF_PUB_SPAN characters before the call
+# (Python's `with open("package.json", "w") as f: json.dump(pkg, f)`).
+#
+# The worms' half belongs to the install-script test: a script an install
+# hook runs that publishes a package, or that collects npm access tokens —
+# the @emilgroup releases read ~/.npmrc, NPM_TOKEN and `npm config get
+# //registry.npmjs.org/:_authToken`, then handed the tokens to a detached
+# deploy script. No install script needs either.
+_PUBLISH_CMD_SRC = (
+    r"""\b(?:exec|execSync|execa|execaSync|execFile|execFileSync|spawn|spawnSync|system|popen|Popen|run|call"""
+    r"""|check_call|check_output|getoutput)\s*\(\s*(?:\[\s*)?["'`](?:[^"'`\n]{0,80}?(?:&&|;|\|\|)\s*)?"""
+    r"""(?:npx\s+)?(?:npm|pnpm|yarn|bun)(?:\.cmd)?(?:["'`]\s*,\s*(?:\[\s*)?["'`]|\s+)publish\b""")
+_NAME_ASSIGN_SRC = r"""(?<![\w$.])([A-Za-z_$][\w$]*)\s*(?:\.\s*name|\[\s*["']name["']\s*\])\s*=(?![=>])"""
+_MANIFEST_WRITE_SRC = (
+    r"""\b(?:writeFileSync|writeFile|outputJsonSync|outputJson|writeJsonSync|writeJson|outputFileSync"""
+    r"""|outputFile|write_text|dump)\s*\(""")
+_JS_IDENT_SRC = r"""(?<![\w$.])[A-Za-z_$][\w$]*"""
+_NPM_TOKEN_READ_SRC = (
+    r"""\bnpm\s+config\s+get\s+[^\n"'`;|&]{0,200}?_auth|\.npmrc\b[\s\S]{0,400}?_authToken"""
+    r"""|_authToken[\s\S]{0,400}?\.npmrc\b""")
+_PUBLISH_CMD_RE = re.compile(_PUBLISH_CMD_SRC)
+_NAME_ASSIGN_RE = re.compile(_NAME_ASSIGN_SRC)
+_MANIFEST_WRITE_RE = re.compile(_MANIFEST_WRITE_SRC)
+_JS_IDENT_RE = re.compile(_JS_IDENT_SRC)
+_NPM_TOKEN_READ_RE = re.compile(_NPM_TOKEN_READ_SRC)
+#: Characters of a write call's arguments (and before it) read for package.json and the renamed object
+_SELF_PUB_SPAN = 300
+#: Name assignments and package.json writes examined per text
+_SELF_PUB_MAX = 200
+
+
+def self_publish_at(text):
+    """The offset of the publish command of code that renames its package and
+    publishes it (see above), else -1."""
+    if "publish" not in text or "package.json" not in text:
+        return -1
+    pub = _PUBLISH_CMD_RE.search(text)
+    if pub is None:
+        return -1
+    names = set()
+    for k, m in enumerate(_NAME_ASSIGN_RE.finditer(text)):
+        if k >= _SELF_PUB_MAX:
+            break
+        names.add(m.group(1))
+    if not names:
+        return -1
+    for k, w in enumerate(_MANIFEST_WRITE_RE.finditer(text)):
+        if k >= _SELF_PUB_MAX:
+            break
+        args = text[w.end():w.end() + _SELF_PUB_SPAN]
+        if "package.json" not in args and "package.json" not in text[max(0, w.start() - _SELF_PUB_SPAN):w.start()]:
+            continue
+        if names.intersection(_JS_IDENT_RE.findall(args)):
+            return pub.start()
+    return -1
+
+
+# ---------------- An install script that runs a DLL (0.1.8) ----------------
+# eslint-config-prettier 9.1.1 (July 2025) shipped node-gyp.dll and an
+# install.js that ran it on Windows: require('chi'+'ld_pro'+'cess')["sp"+
+# "awn"]("rund"+"ll32", [path.join(__dirname, './node-gyp' + '.dll') +
+# ",main"]). rundll32 and regsvr32 run a DLL's code; an install script has
+# no reason to call either on a DLL of its own. The text is read again with
+# adjacent string literals joined ('a' + 'b' as 'ab') when the split hid the
+# names. Windows' own DLLs that rundll32 is used with for ordinary things
+# (opening a URL with url.dll, a Control Panel applet with shell32.dll) are
+# not a reason; a DLL of any other name is.
+_DLL_LOADER_SRC = r"""\b(?:rundll32|regsvr32)(?:\.exe)?\b"""
+_DLL_NAME_SRC = r"""(?<![\w.\-])[\w.\-]*\.dll\b"""
+_STRING_JOIN_SRC = r"""["']\s*\+\s*["']"""
+_DLL_LOADER_RE = re.compile(_DLL_LOADER_SRC, re.I)
+_DLL_NAME_RE = re.compile(_DLL_NAME_SRC, re.I)
+_STRING_JOIN_RE = re.compile(_STRING_JOIN_SRC)
+_SYSTEM_DLLS = frozenset(("url.dll", "shell32.dll", "user32.dll", "ieframe.dll", "dfshim.dll", "advpack.dll",
+                          "printui.dll", "keymgr.dll", "powrprof.dll", "zipfldr.dll", "shdocvw.dll", "shimgvw.dll"))
+
+
+def join_string_pieces(text):
+    """`text` with adjacent string literals joined: `'chi' + 'ld'` reads
+    `'child'` (a quote, a plus and a quote taken out)."""
+    return _STRING_JOIN_RE.sub("", text) if "+" in text else text
+
+
+def runs_dll(text):
+    """The DLL `text` runs with rundll32 or regsvr32 (a name, not one of
+    Windows' own ordinary ones), read as written and with its string pieces
+    joined; None when it runs none."""
+    if "32" not in text and "+" not in text:
+        return None
+    for view in (text, join_string_pieces(text)):
+        if _DLL_LOADER_RE.search(view) is None:
+            continue
+        for m in _DLL_NAME_RE.finditer(view):
+            name = m.group().rsplit("/", 1)[-1].rsplit("\\", 1)[-1].lower()
+            if name and name != ".dll" and name not in _SYSTEM_DLLS:
+                return name
+    return None
+
+
+# ---------------- Code hidden off-screen (SC-OFFSCREEN-CODE, 0.1.8) ----------------
+# @react-native-aria/radio 0.2.14 (June 2025) appended its loader to
+# lib/commonjs/index.js after 731 spaces on the last line — past the right
+# edge of every editor, diff and code review, where the interpreter runs it
+# all the same; setup.py droppers do the same after a `;`. No formatter puts
+# code _OFFSCREEN_MIN columns right of other code or of nothing: indentation
+# stays under 100, and runs that long in the 0.1.7 benchmark's 429 popular
+# packages were all prose (a docstring's alignment, a box drawing). So the
+# run must stand in code, not in a string or a comment (_code_prefix: what
+# comes before it on the line closes every quote and comment it opens; the
+# caller also drops a line that is nothing but literals and comments, like a
+# docstring's), and what follows it must read as code: punctuation that code
+# starts with, a declaration, a name followed by . ( [ = ; or a quote, or a
+# keyword that runs or imports. CRITICAL when the hidden text runs or loads
+# code (require, import, eval, exec, Function, child_process, spawn, a
+# decoder, `global[…]`), else MAJOR.
+_OFFSCREEN_SRC = r"""(?<![ \t])[ \t]{150,}(?=\S)"""
+_OFFSCREEN_CODE_SRC = (
+    r"""[;,(){}\[\]]|(?:const|let|var|function|async|class|def)\s+[A-Za-z_$(]|[A-Za-z_$][\w$]*\s*(?:[.(\[=;]|["'`])"""
+    r"""|(?:import|from|exec|eval|require)\b""")
+_OFFSCREEN_EXEC_SRC = (
+    r"""\b(?:require|import|exec|eval|Function|child_process|spawn|execSync|__import__|compile|b64decode"""
+    r"""|fromCharCode|atob)\b|\bglobal\s*\[""")
+_OFFSCREEN_RE = re.compile(_OFFSCREEN_SRC)
+_OFFSCREEN_CODE_RE = re.compile(_OFFSCREEN_CODE_SRC)
+_OFFSCREEN_EXEC_RE = re.compile(_OFFSCREEN_EXEC_SRC)
+#: The shortest run of blanks before code that counts
+_OFFSCREEN_MIN = 150
+#: Characters of the hidden code read for what it runs
+_OFFSCREEN_READ = 4000
+
+
+def _code_prefix(prefix, lang):
+    """Does `prefix` (the start of a line) close every string and comment it
+    opens — quotes with their escapes, and a JavaScript block comment — and
+    open no line comment (# in Python, // in JavaScript)?"""
+    quote, i, n = None, 0, len(prefix)
+    while i < n:
+        ch = prefix[i]
+        if quote is not None:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+        elif ch == '"' or ch == "'" or (ch == "`" and lang == "js"):
+            quote = ch
+        elif lang == "py" and ch == "#":
+            return False
+        elif lang == "js" and ch == "/" and prefix.startswith("//", i):
+            return False
+        elif lang == "js" and ch == "/" and prefix.startswith("/*", i):
+            end = prefix.find("*/", i + 2)
+            if end < 0:
+                return False
+            i = end + 2
+            continue
+        i += 1
+    return quote is None
+
+
+def offscreen_code(line, lang):
+    """-> (column, blanks, hidden text, runs code) for code that starts after a
+    run of at least _OFFSCREEN_MIN blanks on `line`, in code (see above),
+    else None. `lang` is 'js' or 'py'."""
+    if len(line) <= _OFFSCREEN_MIN or " " * 16 not in line and "\t" * 16 not in line:
+        return None
+    m = _OFFSCREEN_RE.search(line)
+    if (m is None or _OFFSCREEN_CODE_RE.match(line, m.end()) is None
+            or not _code_prefix(line[:m.start()], lang)):
+        return None
+    hidden = line[m.end():m.end() + _OFFSCREEN_READ]
+    return m.end(), m.end() - m.start(), hidden, _OFFSCREEN_EXEC_RE.search(hidden) is not None
+
+
+_SELF_PUBLISH_RULE = {
+    "id": "SC-SELF-PUBLISH", "name": "Code that republishes its package", "type": "HOTSPOT", "sev": "CRITICAL",
+    "msg": "Renames its package (package.json's \"name\") and publishes it: the shape of registry spam and of "
+           "packages that spread themselves.",
+    "why": ("The 2025-26 registry floods shipped a script that gives package.json a new, random name and runs "
+            "`npm publish` in a loop, from the account of whoever runs it. Release tools publish too, but never "
+            "rename what they publish."),
+    "fix": "Don't run it; report the package to the registry.",
+    "ref": "CWE-506 · Supply chain"}
+_OFFSCREEN_WHY = ("A long run of blanks pushes code past the right edge of editors, diffs and code review, while "
+                  "the interpreter runs it all the same: @react-native-aria/radio 0.2.14 hid its loader 731 "
+                  "columns right. No formatter puts code there.")
+
+
+def _offscreen_issue(path, line_no, lines, found):
+    col, blanks, hidden, runs = found
+    preview = hidden if len(hidden) <= 60 else hidden[:57] + "..."
+    return mk_issue(
+        {"id": "SC-OFFSCREEN-CODE", "name": "Code hidden off-screen", "type": "HOTSPOT",
+         "sev": "CRITICAL" if runs else "MAJOR",
+         "msg": f"Code after {blanks} blanks on this line, where editors and review don't show it: {preview!r}.",
+         "why": _OFFSCREEN_WHY + (" This code loads or runs more code." if runs else ""),
+         "fix": "Read the whole line (turn on word wrap) and review what it does.",
+         "ref": "CWE-506 · Supply chain"}, path, line_no, lines, col)
+
+
 def install_script_risk(text):
     """Reasons an install-time script looks hostile ([] if none)."""
     reasons = []
@@ -6488,6 +6707,13 @@ def install_script_risk(text):
     if runs_own_source_at(text) >= 0:
         reasons.append("runs code it reads back from its own file or a data file shipped with it")
     reasons.extend(persistence_reasons(text))
+    if _PUBLISH_CMD_RE.search(text) is not None:
+        reasons.append("publishes a package to a registry (npm publish)")
+    if _NPM_TOKEN_READ_RE.search(text) is not None:
+        reasons.append("collects npm access tokens")
+    dll = runs_dll(text)
+    if dll is not None:
+        reasons.append(f"runs a DLL with rundll32 or regsvr32 ({dll[:40]})")
     return reasons
 
 

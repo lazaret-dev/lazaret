@@ -21,6 +21,8 @@ CASES = {
     "S-JWT-NONE 'algorithm:' + 200,000 spaces": ("js", '"opts = {algorithm:" + " ".repeat(200000)'),
     "S-JWT-NONE 'algorithm=' + 200,000 spaces (py)": ("py", '"opts = dict(algorithm=" + " ".repeat(200000)'),
     "B-EMPTY-CATCH 'catch' + 150,000 newlines": ("js", '"try { f() } catch" + "\\n".repeat(150000)'),
+    "SC-OFFSCREEN-CODE 'x;' + 200,000 spaces": ("js", '"x;" + " ".repeat(200000)'),
+    "SC-SELF-PUBLISH needles + 'a' x 200,000": ("js", '"exec(\'npm publish\'); w(\'package.json\'); " + "a".repeat(200000) + ".nam = 1"'),
 }
 SAMPLES = [
     ("a.js", "try { f() } catch (e) {}\ntry { g() } catch\n{\n}\njwt.verify(t, k, {algorithms: [ 'none' ]})\n"),

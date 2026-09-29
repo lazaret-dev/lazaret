@@ -1033,6 +1033,84 @@ export function persistenceReasons(text) {
   return reasons;
 }
 
+// ---- code that publishes packages (SC-SELF-PUBLISH, 0.1.8; core's comment above _PUBLISH_CMD_SRC) ----
+// A publish command an exec call runs, an assignment to an object's name, and
+// a write to package.json that names the object: code that renames its package
+// and publishes it (the registry floods). An install script that publishes, or
+// collects npm access tokens, fails the install-script test (the worms).
+const BT = "`";
+const PUBLISH_CMD_SRC =
+  String.raw`\b(?:exec|execSync|execa|execaSync|execFile|execFileSync|spawn|spawnSync|system|popen|Popen|run|call` +
+  String.raw`|check_call|check_output|getoutput)\s*\(\s*(?:\[\s*)?["'` + BT + String.raw`](?:[^"'` + BT + String.raw`\n]{0,80}?(?:&&|;|\|\|)\s*)?` +
+  String.raw`(?:npx\s+)?(?:npm|pnpm|yarn|bun)(?:\.cmd)?(?:["'` + BT + String.raw`]\s*,\s*(?:\[\s*)?["'` + BT + String.raw`]|\s+)publish\b`;
+const NAME_ASSIGN_SRC = String.raw`(?<![\w$.])([A-Za-z_$][\w$]*)\s*(?:\.\s*name|\[\s*["']name["']\s*\])\s*=(?![=>])`;
+const MANIFEST_WRITE_SRC =
+  String.raw`\b(?:writeFileSync|writeFile|outputJsonSync|outputJson|writeJsonSync|writeJson|outputFileSync` +
+  String.raw`|outputFile|write_text|dump)\s*\(`;
+const JS_IDENT_SRC = String.raw`(?<![\w$.])[A-Za-z_$][\w$]*`;
+const NPM_TOKEN_READ_SRC =
+  String.raw`\bnpm\s+config\s+get\s+[^\n"'` + BT + String.raw`;|&]{0,200}?_auth|\.npmrc\b[\s\S]{0,400}?_authToken` +
+  String.raw`|_authToken[\s\S]{0,400}?\.npmrc\b`;
+const PUBLISH_CMD_RE = pyRe(PUBLISH_CMD_SRC);
+const NAME_ASSIGN_G = pyRe(NAME_ASSIGN_SRC, "g");
+const MANIFEST_WRITE_G = pyRe(MANIFEST_WRITE_SRC, "g");
+const JS_IDENT_G = pyRe(JS_IDENT_SRC, "g");
+const NPM_TOKEN_READ_RE = pyRe(NPM_TOKEN_READ_SRC);
+const SELF_PUB_SPAN = 300, SELF_PUB_MAX = 200;
+
+/** The UTF-16 offset of the publish command of code that renames its package and publishes it, else -1. Twin of core.self_publish_at. */
+export function selfPublishAt(text) {
+  if (!text.includes("publish") || !text.includes("package.json")) return -1;
+  const pub = PUBLISH_CMD_RE.exec(text);
+  if (pub === null) return -1;
+  const names = new Set();
+  let k = 0;
+  for (const m of text.matchAll(NAME_ASSIGN_G)) {
+    if (k++ >= SELF_PUB_MAX) break;
+    names.add(m[1]);
+  }
+  if (!names.size) return -1;
+  k = 0;
+  for (const w of text.matchAll(MANIFEST_WRITE_G)) {
+    if (k++ >= SELF_PUB_MAX) break;
+    const end = w.index + w[0].length;
+    const args = text.slice(end, cpForward(text, end, SELF_PUB_SPAN));
+    if (!args.includes("package.json") && !text.slice(cpBack(text, w.index, SELF_PUB_SPAN), w.index).includes("package.json")) continue;
+    for (const m of args.matchAll(JS_IDENT_G)) if (names.has(m[0])) return pub.index;
+  }
+  return -1;
+}
+
+// ---- an install script that runs a DLL (0.1.8; core's comment above _DLL_LOADER_SRC) ----
+const DLL_LOADER_SRC = String.raw`\b(?:rundll32|regsvr32)(?:\.exe)?\b`;
+const DLL_NAME_SRC = String.raw`(?<![\w.\-])[\w.\-]*\.dll\b`;
+const STRING_JOIN_SRC = String.raw`["']\s*\+\s*["']`;
+const DLL_LOADER_RE = pyRe(DLL_LOADER_SRC, "i");
+const DLL_NAME_G = pyRe(DLL_NAME_SRC, "gi");
+const STRING_JOIN_G = pyRe(STRING_JOIN_SRC, "g");
+const SYSTEM_DLLS = new Set(["url.dll", "shell32.dll", "user32.dll", "ieframe.dll", "dfshim.dll", "advpack.dll",
+  "printui.dll", "keymgr.dll", "powrprof.dll", "zipfldr.dll", "shdocvw.dll", "shimgvw.dll"]);
+
+/** `text` with adjacent string literals joined ('chi' + 'ld' reads 'child'). Twin of core.join_string_pieces. */
+export function joinStringPieces(text) {
+  return text.includes("+") ? text.replace(STRING_JOIN_G, "") : text;
+}
+
+/** The DLL `text` runs with rundll32 or regsvr32 (not one of Windows' own ordinary ones), else null. Twin of core.runs_dll. */
+export function runsDll(text) {
+  if (!text.includes("32") && !text.includes("+")) return null;
+  for (const view of [text, joinStringPieces(text)]) {
+    if (!DLL_LOADER_RE.test(view)) continue;
+    for (const m of view.matchAll(DLL_NAME_G)) {
+      let name = m[0];
+      name = name.slice(name.lastIndexOf("/") + 1);
+      name = name.slice(name.lastIndexOf("\\") + 1).toLowerCase();
+      if (name && name !== ".dll" && !SYSTEM_DLLS.has(name)) return name;
+    }
+  }
+  return null;
+}
+
 /**
  * Reasons an install-time script looks hostile ([] if none).
  * Twin of lazaret.scanner.core.install_script_risk.
@@ -1058,6 +1136,10 @@ export function installScriptRisk(text) {
   if (sendsHostInfo(text)) reasons.push("sends the machine's user or host name over the network");
   if (runsOwnSourceAt(text) >= 0) reasons.push("runs code it reads back from its own file or a data file shipped with it");
   reasons.push(...persistenceReasons(text));
+  if (PUBLISH_CMD_RE.test(text)) reasons.push("publishes a package to a registry (npm publish)");
+  if (NPM_TOKEN_READ_RE.test(text)) reasons.push("collects npm access tokens");
+  const dll = runsDll(text);
+  if (dll !== null) reasons.push(`runs a DLL with rundll32 or regsvr32 (${cpPrefix(dll, 40)})`);
   return reasons;
 }
 
@@ -1408,6 +1490,10 @@ export const PY_TWINS = {
     _PERSIST_RUNNER_RE: [PERSIST_RUNNER_SRC, ""], _PERSIST_RUNNER_CONFIG_RE: [PERSIST_RUNNER_CONFIG_SRC, ""],
     _PERSIST_RUNNER_ARG_RE: [PERSIST_RUNNER_ARG_SRC, ""], _BUN_RELEASES_RE: [BUN_RELEASES_SRC, "i"],
     _SECRETS_DUMP_RE: [SECRETS_DUMP_SRC, "i"],
+    _PUBLISH_CMD_RE: [PUBLISH_CMD_SRC, ""], _NAME_ASSIGN_RE: [NAME_ASSIGN_SRC, ""],
+    _MANIFEST_WRITE_RE: [MANIFEST_WRITE_SRC, ""], _JS_IDENT_RE: [JS_IDENT_SRC, ""],
+    _NPM_TOKEN_READ_RE: [NPM_TOKEN_READ_SRC, ""], _DLL_LOADER_RE: [DLL_LOADER_SRC, "i"],
+    _DLL_NAME_RE: [DLL_NAME_SRC, "i"], _STRING_JOIN_RE: [STRING_JOIN_SRC, ""],
     ...RECEIVED_TWINS,
   },
   sets: {
@@ -1423,7 +1509,7 @@ export const PY_TWINS = {
     _DL_NOT_NAMES: DL_NOT_NAMES, _DL_PREFIX_CHARS: DL_PREFIX_CHARS, _DL_DEFINING: DL_DEFINING,
     _DL_CALLEE_CHARS: DL_CALLEE_CHARS,
     _STAGER_RUN_NEEDLES: STAGER_RUN_NEEDLES, _STAGER_NET_NEEDLES: STAGER_NET_NEEDLES,
-    _STRONG_IMPORT_REASONS: STRONG_IMPORT_REASONS, _PY_JOINS: [...PY_JOINS],
+    _STRONG_IMPORT_REASONS: STRONG_IMPORT_REASONS, _PY_JOINS: [...PY_JOINS], _SYSTEM_DLLS: [...SYSTEM_DLLS],
   },
   maps: Object.fromEntries([["_PERSIST_AGENT_PAIRS", PERSIST_AGENT_PAIRS], ["_WRAPPER_VALUE_OPTIONS", WRAPPER_VALUE_OPTIONS],
     ["_WRAPPER_CHDIR_OPTIONS", WRAPPER_CHDIR_OPTIONS], ["_WRAPPER_COMMAND_OPTIONS", WRAPPER_COMMAND_OPTIONS]]
@@ -1433,5 +1519,5 @@ export const PY_TWINS = {
     _PS_EXEC_BACK: PS_EXEC_BACK, _PS_EXEC_MAX_NAMES: PS_EXEC_MAX_NAMES, _SELF_READ_PASSES: SELF_READ_PASSES,
     _SELF_READ_MAX_CALLS: SELF_READ_MAX_CALLS, _SELF_READ_ARG_SPAN: SELF_READ_ARG_SPAN,
     _SELF_READ_MAX_ASSIGNS: SELF_READ_MAX_ASSIGNS, _LITERAL_SPANS_MAX: LITERAL_SPANS_MAX,
-    _PERSIST_MAX_LINES: PERSIST_MAX_LINES },
+    _PERSIST_MAX_LINES: PERSIST_MAX_LINES, _SELF_PUB_SPAN: SELF_PUB_SPAN, _SELF_PUB_MAX: SELF_PUB_MAX },
 };

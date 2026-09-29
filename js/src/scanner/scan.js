@@ -24,7 +24,8 @@ import { runsDownloadThroughShell, EXEC_CALL_RE } from "../lib/shellpipe.js";
 import { documentationToken, keyMaterial, secretCol, redactConfigValues } from "../lib/configsecrets.js";
 import { configKind, ownerDir, entries as autorunEntries, localCommand } from "../lib/autorun.js";
 import { isWorkflow, findings as workflowFindings } from "../lib/ghworkflow.js";
-import { agentHijackInCommand, installScriptRisk, followHook, treeJoin, nodeCandidates, cpPrefix } from "../lib/hooks.js";
+import { agentHijackInCommand, installScriptRisk, followHook, treeJoin, nodeCandidates, cpPrefix, selfPublishAt } from "../lib/hooks.js";
+import { cpForward } from "../lib/received.js";
 import { normalizeNewlines } from "../lib/fs.js";
 
 export { isComment } from "./engine.js";
@@ -395,6 +396,85 @@ function hiddenUnicodeIssue(path, lineNo, lines, col, run, runsCode) {
     fix: "Show the characters as escape sequences and decode what they spell; if it is a payload, do not run the file.",
     ref: "CWE-506 · Supply chain" }, path, lineNo, lines, col);
 }
+
+// ---- code hidden off-screen (SC-OFFSCREEN-CODE, 0.1.8); twin of core.offscreen_code ----
+// Code after a run of at least OFFSCREEN_MIN blanks, standing in code (not in
+// a string or a comment), that reads as code; CRITICAL when it loads or runs
+// more code. See core's comment above _OFFSCREEN_SRC.
+const OFFSCREEN_SRC = String.raw`(?<![ \t])[ \t]{150,}(?=\S)`;
+const OFFSCREEN_CODE_SRC =
+  String.raw`[;,(){}\[\]]|(?:const|let|var|function|async|class|def)\s+[A-Za-z_$(]|[A-Za-z_$][\w$]*\s*(?:[.(\[=;]|["'` + "`" + String.raw`])` +
+  String.raw`|(?:import|from|exec|eval|require)\b`;
+const OFFSCREEN_EXEC_SRC =
+  String.raw`\b(?:require|import|exec|eval|Function|child_process|spawn|execSync|__import__|compile|b64decode` +
+  String.raw`|fromCharCode|atob)\b|\bglobal\s*\[`;
+const OFFSCREEN_RE = pyRe(OFFSCREEN_SRC);
+const OFFSCREEN_CODE_Y = pyRe(OFFSCREEN_CODE_SRC, "y");
+const OFFSCREEN_EXEC_RE = pyRe(OFFSCREEN_EXEC_SRC);
+const OFFSCREEN_MIN = 150, OFFSCREEN_READ = 4000;
+export const OFFSCREEN_TWINS = {
+  patterns: { _OFFSCREEN_RE: [OFFSCREEN_SRC, ""], _OFFSCREEN_CODE_RE: [OFFSCREEN_CODE_SRC, ""],
+    _OFFSCREEN_EXEC_RE: [OFFSCREEN_EXEC_SRC, ""] },
+  limits: { _OFFSCREEN_MIN: OFFSCREEN_MIN, _OFFSCREEN_READ: OFFSCREEN_READ },
+};
+const OFFSCREEN_WHY = "A long run of blanks pushes code past the right edge of editors, diffs and code review, while " +
+  "the interpreter runs it all the same: @react-native-aria/radio 0.2.14 hid its loader 731 columns right. No formatter puts code there.";
+
+/** Does `prefix` close every string and comment it opens, and open no line comment? Twin of core._code_prefix. */
+function codePrefix(prefix, lang) {
+  let quote = null, i = 0;
+  const n = prefix.length;
+  while (i < n) {
+    const ch = prefix[i];
+    if (quote !== null) {
+      if (ch === "\\") { i += 2; continue; }
+      if (ch === quote) quote = null;
+    } else if (ch === '"' || ch === "'" || (ch === "`" && lang === "js")) {
+      quote = ch;
+    } else if (lang === "py" && ch === "#") {
+      return false;
+    } else if (lang === "js" && ch === "/" && prefix.startsWith("//", i)) {
+      return false;
+    } else if (lang === "js" && ch === "/" && prefix.startsWith("/*", i)) {
+      const end = prefix.indexOf("*/", i + 2);
+      if (end < 0) return false;
+      i = end + 2;
+      continue;
+    }
+    i++;
+  }
+  return quote === null;
+}
+
+/** [UTF-16 column, blanks, hidden text, runs code] for code after a long run of blanks on `line`, else null. Twin of core.offscreen_code. */
+export function offscreenCode(line, lang) {
+  if (cpLen(line) <= OFFSCREEN_MIN || (!line.includes(" ".repeat(16)) && !line.includes("\t".repeat(16)))) return null;
+  const m = OFFSCREEN_RE.exec(line);
+  if (m === null) return null;
+  const end = m.index + m[0].length;
+  OFFSCREEN_CODE_Y.lastIndex = end;
+  if (!OFFSCREEN_CODE_Y.test(line) || !codePrefix(line.slice(0, m.index), lang)) return null;
+  const hidden = line.slice(end, cpForward(line, end, OFFSCREEN_READ));
+  return [end, m[0].length, hidden, OFFSCREEN_EXEC_RE.test(hidden)];
+}
+
+function offscreenIssue(path, lineNo, lines, found) {
+  const [col, blanks, hidden, runs] = found;
+  const preview = cpLen(hidden) <= 60 ? hidden : cpPrefix(hidden, 57) + "...";
+  return mkIssue({ id: "SC-OFFSCREEN-CODE", name: "Code hidden off-screen", type: "HOTSPOT", sev: runs ? "CRITICAL" : "MAJOR",
+    msg: `Code after ${blanks} blanks on this line, where editors and review don't show it: ${pyRepr(preview)}.`,
+    why: OFFSCREEN_WHY + (runs ? " This code loads or runs more code." : ""),
+    fix: "Read the whole line (turn on word wrap) and review what it does.",
+    ref: "CWE-506 · Supply chain" }, path, lineNo, lines, col);
+}
+
+// SC-SELF-PUBLISH (0.1.8): code that renames its package and publishes it (hooks.selfPublishAt; core._SELF_PUBLISH_RULE).
+const SELF_PUBLISH_RULE = { id: "SC-SELF-PUBLISH", name: "Code that republishes its package", type: "HOTSPOT", sev: "CRITICAL",
+  msg: "Renames its package (package.json's \"name\") and publishes it: the shape of registry spam and of packages that spread themselves.",
+  why: "The 2025-26 registry floods shipped a script that gives package.json a new, random name and runs `npm publish` in a loop, " +
+    "from the account of whoever runs it. Release tools publish too, but never rename what they publish.",
+  fix: "Don't run it; report the package to the registry.",
+  ref: "CWE-506 · Supply chain" };
 
 // A "-----BEGIN ... PRIVATE KEY-----" header alone is not a key: libraries keep the
 // header as a constant to recognize key files. Require base64 key material after it,
@@ -1219,6 +1299,10 @@ function scanLines(path, content, lines, lang, dep, ctx, issues) {
         why: "Embedded encoded blobs can carry second-stage payloads.",
         fix: "Decode and verify the content; move legitimate assets to data files.",
         ref: "CWE-506 · Supply chain" }, path, i + 1, lines, bm.index));
+    if (lang === "js" || lang === "py") {
+      const off = offscreenCode(line, lang);
+      if (off !== null && pyStrip(ctx.namesCode(i)) !== "") issues.push(offscreenIssue(path, i + 1, lines, off));
+    }
     // --- entropy-based secret detection ---
     if (!cmask[i] && !secretLines.has(i) && !SECRET_SKIP_RE.test(line)) {
       const em = ENTROPY_VALUE_RE.exec(line);
@@ -1244,6 +1328,14 @@ function scanLines(path, content, lines, lang, dep, ctx, issues) {
         why: "This naming pattern is produced by obfuscation tools; in a dependency it is a classic indicator of a compromised or malicious package.",
         fix: "Diff against the package's published repository; consider removing the dependency.",
         ref: "CWE-506 · Supply chain" }, path, firstLine, lines, firstOff - content.lastIndexOf("\n", firstOff - 1) - 1));
+    }
+  }
+  if (lang === "js" || lang === "py") {
+    const at = selfPublishAt(content);
+    if (at >= 0) {
+      let lineNo = 1;
+      for (let k = content.indexOf("\n"); k !== -1 && k < at; k = content.indexOf("\n", k + 1)) lineNo++;
+      issues.push(mkIssue(SELF_PUBLISH_RULE, path, lineNo, lines, at - content.lastIndexOf("\n", at - 1) - 1));
     }
   }
   if (dep) {
