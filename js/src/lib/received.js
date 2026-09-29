@@ -8,7 +8,7 @@
 // lib/hooks.js uses it.
 
 import { readFileSync } from "node:fs";
-import { pyRe, pyStrip, pyLstrip, cpLen, isPySpace, isWordChar } from "./pycompat.js";
+import { pyRe, pyStrip, pyLstrip, pyRstrip, cpLen, isPySpace, isWordChar, cmpCodePoints } from "./pycompat.js";
 
 // The received-code detector's shared data (name sets, character sets, limits,
 // and the patterns) is authored once in the Python package's received_spec.json
@@ -160,7 +160,9 @@ export const DL_PY_NET_MODULES = DL_SPEC_ARRAYS._DL_PY_NET_MODULES;
 const DL_PY_NET_MODULE_SET = new Set(DL_PY_NET_MODULES);
 export const DL_LIMITS = { _DL_LONG_ROW: DL_SPEC_LIMITS._DL_LONG_ROW, _DL_WINDOW: DL_SPEC_LIMITS._DL_WINDOW,
   _DL_ARG_SPAN: DL_SPEC_LIMITS._DL_ARG_SPAN, _DL_LOOKBACK: DL_SPEC_LIMITS._DL_LOOKBACK,
-  _DL_NAMED_SEARCHES: DL_SPEC_LIMITS._DL_NAMED_SEARCHES, _DL_PHASES: DL_SPEC_LIMITS._DL_PHASES };
+  _DL_NAMED_SEARCHES: DL_SPEC_LIMITS._DL_NAMED_SEARCHES, _DL_PHASES: DL_SPEC_LIMITS._DL_PHASES,
+  _DL_JOIN_ROWS: DL_SPEC_LIMITS._DL_JOIN_ROWS, _DL_JOIN_CHARS: DL_SPEC_LIMITS._DL_JOIN_CHARS,
+  _DL_LOGICAL_MAX_CHARS: DL_SPEC_LIMITS._DL_LOGICAL_MAX_CHARS };
 const { _DL_LONG_ROW: LONG_ROW, _DL_WINDOW: WINDOW, _DL_ARG_SPAN: ARG_SPAN, _DL_LOOKBACK: LOOKBACK,
   _DL_NAMED_SEARCHES: NAMED_SEARCHES, _DL_PHASES: PHASES } = DL_LIMITS;
 const DL_CHAIN_RE = dlRe("_DL_CHAIN_RE", "g");
@@ -203,6 +205,167 @@ const DL_LEAD_RE = dlRe("_DL_LEAD_RE", "y");
 const DL_CALLEE_RE = dlReNamed("_DL_CALLEE_RE", "y");
 export const DL_CALLEE_CHARS = [...DL_SPEC_CHARS._DL_CALLEE_CHARS];
 const CALLEE_CHAR_SET = new Set(DL_CALLEE_CHARS);
+// Statements over several rows, and environment variables by name (0.1.8):
+// the second reading (core._dl_logical; see the comment there).
+const JOIN_ROWS = DL_SPEC_LIMITS._DL_JOIN_ROWS, JOIN_CHARS = DL_SPEC_LIMITS._DL_JOIN_CHARS;
+const DL_JOIN_CHAIN_RE = dlRe("_DL_JOIN_CHAIN_RE", "y");
+const DL_JOIN_COMMENT_RE = dlRe("_DL_JOIN_COMMENT_RE");
+const DL_JOIN_BLOCK_RE = dlRe("_DL_JOIN_BLOCK_RE");
+const DL_ENV_PY_RE = dlReNamed("_DL_ENV_PY_RE", "g");
+const DL_ENV_JS_RE = dlReNamed("_DL_ENV_JS_RE", "g");
+const DL_COMMA_CALL_RE = dlReNamed("_DL_COMMA_CALL_RE", "g");
+// (0.1.8, the follower's adversarial pass) members read by name, and a code
+// runner handed to a call as its last argument (core's comment above _DL_GETATTR_RE)
+const DL_GETATTR_RE = dlReNamed("_DL_GETATTR_RE", "g");
+const DL_MEMBER_RE = dlReNamed("_DL_MEMBER_RE", "g");
+const DL_CALLBACK_RE = dlReNamed("_DL_CALLBACK_RE", "g");
+const DL_CALLBACK_NEEDLES = ["eval", "Function", "exec", "runIn"];
+
+/** How many times `ch` (one UTF-16 unit) is in `s`: str.count. */
+function countOf(s, ch) {
+  let n = 0;
+  for (let i = s.indexOf(ch); i >= 0; i = s.indexOf(ch, i + 1)) n++;
+  return n;
+}
+
+/** A row's code for the bracket count: string contents blanked, a trailing comment cut. core._dl_join_code. */
+function joinCode(row) {
+  const masked = row.includes("'") || row.includes('"') || row.includes("`")
+    ? row.replace(DL_STR_RE, (s) => (s.length >= 2 ? s[0] + " ".repeat(s.length - 2) + s[s.length - 1] : s)) : row;
+  const m = masked.includes("#") || masked.includes("//") ? DL_JOIN_COMMENT_RE.exec(masked) : null;
+  return m === null ? masked : masked.slice(0, m.index);
+}
+
+/** Can a row with this code be part of a joined statement? core._dl_join_plain. */
+function joinPlain(code) {
+  const end = pyRstrip(code);
+  return !DL_JOIN_BLOCK_RE.test(code) && countOf(code, "{") === countOf(code, "}")
+    && !end.endsWith(":") && !end.endsWith("{");
+}
+
+/** [joined, firsts]: the text with multi-row statements joined, and the row each joined row starts on (null if none). core._dl_join_rows. */
+function joinRows(text) {
+  const rows = text.split("\n");
+  const n = rows.length;
+  if (n < 2) return [text, null];
+  const codes = new Map();
+  const code = (j) => { let c = codes.get(j); if (c === undefined) { c = joinCode(rows[j]); codes.set(j, c); } return c; };
+  const size = (j) => cpLen(rows[j]);
+  const opened = (c) => countOf(c, "(") + countOf(c, "[") - countOf(c, ")") - countOf(c, "]");
+  const join = new Uint8Array(n);
+  let k = 0;
+  while (k < n - 1) {
+    const row = rows[k];
+    if (!row.includes("(") && !row.includes("[") && !row.includes("\\")) { k++; continue; }   // it can neither open a call nor continue
+    const c = code(k);
+    if (pyRstrip(c).endsWith("\\") && size(k) + 1 + size(k + 1) <= JOIN_CHARS) { join[k] = 1; k++; continue; }
+    let depth = opened(c);
+    if (depth > 0 && size(k) <= JOIN_CHARS && joinPlain(c)) {
+      let j = k + 1, total = size(k), done = false;
+      while (j < n && j - k < JOIN_ROWS) {
+        const cj = code(j);
+        total += 1 + size(j);
+        if (total > JOIN_CHARS || !joinPlain(cj)) break;
+        depth += opened(cj);
+        if (depth <= 0) { done = true; break; }
+        j++;
+      }
+      if (done) { for (let t = k; t < j; t++) join[t] = 1; k = j; continue; }
+    }
+    k++;
+  }
+  for (let j = 1; j < n; j++) {
+    DL_JOIN_CHAIN_RE.lastIndex = 0;
+    if (join[j - 1] || !DL_JOIN_CHAIN_RE.test(rows[j]) || !pyStrip(code(j - 1))) continue;
+    let first = j - 1, total = size(j - 1) + 1 + size(j);
+    while (first > 0 && join[first - 1] && j - first < JOIN_ROWS) { first--; total += size(first) + 1; }
+    if ((first === 0 || !join[first - 1]) && j - first < JOIN_ROWS && total <= JOIN_CHARS) join[j - 1] = 2;
+  }
+  if (!join.some((v) => v)) return [text, null];
+  const out = [rows[0]], firsts = [0];
+  let pad = 0;
+  for (let k2 = 1; k2 < n; k2++) {
+    const how = join[k2 - 1];
+    if (how === 2) {
+      const row = rows[k2];
+      const body = row.replace(/^[ \t]+/, "");
+      pad += 1 + (row.length - body.length);
+      out.push(body);
+    } else if (how) {
+      out.push(" ", rows[k2]);
+    } else {
+      out.push(" ".repeat(pad) + "\n", rows[k2]);
+      pad = 0;
+      firsts.push(k2);
+    }
+  }
+  out.push(" ".repeat(pad));
+  return [out.join(""), firsts];
+}
+
+/** A name padded with spaces to `n` code points: str.ljust. */
+const ljust = (s, n) => s + " ".repeat(Math.max(0, n - cpLen(s)));
+
+/** Environment variables read or written by name, read as one name. core._dl_env_canonical. */
+function envCanonical(text) {
+  if (text.includes("environ") || text.includes("getenv")) {
+    text = text.replace(DL_ENV_PY_RE, (...args) => {
+      const g = args[args.length - 1];
+      return ljust("environ." + (g.a || g.b || g.c), cpLen(args[0]));
+    });
+  }
+  if (text.includes("process") && text.includes("env")) {
+    text = text.replace(DL_ENV_JS_RE, (...args) => ljust("process.env." + args[args.length - 1].a, cpLen(args[0])));
+  }
+  return text;
+}
+
+/** Calls through a comma expression, (0, ns.fn)(…), read as ns.fn(…). core._dl_comma_calls. */
+function commaCalls(text) {
+  if (!text.includes("(0")) return text;
+  return text.replace(DL_COMMA_CALL_RE, (...args) => ljust(args[args.length - 1].c.replace(/[ \t]+/g, ""), cpLen(args[0])));
+}
+
+/** Members read by name, getattr(o, 'x') and o['x'] as o.x, padded to the length they replace. core._dl_members. */
+function membersOf(text) {
+  if (text.includes("getattr")) {
+    text = text.replace(DL_GETATTR_RE, (...args) => {
+      const g = args[args.length - 1];
+      return ljust(g.o.replace(/[ \t]+/g, "") + "." + (g.a || g.b), cpLen(args[0]));
+    });
+  }
+  if (text.includes("['") || text.includes('["')) {
+    text = text.replace(DL_MEMBER_RE, (...args) => {
+      const g = args[args.length - 1];
+      return ljust("." + (g.a || g.b), cpLen(args[0]));
+    });
+  }
+  return text;
+}
+
+/** A regex source escaping for a name of the follower's (an identifier or a member chain). */
+const escapeName = (n) => n.replace(/[$.]/g, "\\$&");
+
+/** A code runner handed to a call as its last argument, and each of `runners`, read as the call it makes. core._dl_callbacks. */
+function callbacks(text, runners = []) {
+  if (!text.includes(")")) return text;
+  if (DL_CALLBACK_NEEDLES.some((n) => text.includes(n))) {
+    text = text.replace(DL_CALLBACK_RE, (...args) => "(_v)=>" + args[args.length - 1].r.replace(/[ \t]+/g, "") + "(_v)");
+  }
+  const names = runners.filter((n) => text.includes(n));
+  if (names.length) {
+    const rx = pyReNamed(String.raw`(?<=[(,])[ \t]*(?P<r>` + [...names].sort(cmpCodePoints).map(escapeName).join("|")
+      + String.raw`)[ \t]*(?=\)(?![ \t]*\())`, "g");
+    text = text.replace(rx, (...args) => "(_v)=>" + args[args.length - 1].r + "(_v)");
+  }
+  return text;
+}
+
+/** [alt, firsts]: the second reading of a text. core._dl_logical. */
+export function logicalText(text, runners = []) {
+  const [joined, firsts] = joinRows(text);
+  return [commaCalls(callbacks(membersOf(envCanonical(joined)), runners)), firsts];
+}
 
 /** The names an assignment's left side binds (a member chain stays whole). core._dl_lhs_names. */
 function lhsNames(lhs) {
@@ -487,11 +650,11 @@ class Row {
     return ph;
   }
 
-  runs(r, taint) {
+  runs(r, taint, alias = false) {
     const { row, k } = this;
     if (definedHere(row, r.index)) return false;                           // def exec(…), function exec(…)
     const rEnd = r.index + r[0].length;
-    if (DL_SHELL_CALL_WHOLE_RE.test(r[0]) && !this.reader.shellWithin(k, row, rEnd)) return false;
+    if (!alias && DL_SHELL_CALL_WHOLE_RE.test(r[0]) && !this.reader.shellWithin(k, row, rEnd)) return false;
     const o = rEnd - 1;
     if (o >= this.hi) return false;
     const ph = this.phaseAt(o);
@@ -738,7 +901,7 @@ class Reader {
     if (this.aliasCall !== null) {                        // a call of a runner alias near its definition
       this.aliasCall.lastIndex = 0;
       for (let r = this.aliasCall.exec(row); r !== null; r = this.aliasCall.exec(row)) {
-        if (aliasNear(this.aliases.get(r[1]), k) && rd.runs(r, taint)) return "run";
+        if (aliasNear(this.aliases.get(r[1]), k) && rd.runs(r, taint, true)) return "run";
       }
     }
     return null;
@@ -834,8 +997,9 @@ function runnerAliases(rows) {
   return defs;
 }
 
-/** Is a definition row at or within WINDOW rows above k? core._dl_alias_near. */
+/** Is a definition row at or within WINDOW rows above k? (null: another file's runner, near everywhere.) core._dl_alias_near. */
 function aliasNear(defRows, k) {
+  if (defRows === null) return true;
   const i = bisectRight(defRows, k) - 1;
   return i >= 0 && k - defRows[i] <= WINDOW;
 }
@@ -845,8 +1009,20 @@ function aliasNear(defRows, k) {
  * imports a value it received over the network, or null. Category is "run",
  * "deserialize" or "import". Twin of lazaret.scanner.core._received_code_kind.
  */
-export function receivedCodeKind(text) {
-  if (!DL_NEEDLES.some((n) => text.includes(n)) || !DL_SINK_NEEDLES.some((n) => text.includes(n))) return null;
+export function receivedCodeKind(text, extraAlways = [], extraRunners = []) {
+  if (!extraRunners.length && !DL_SINK_NEEDLES.some((n) => text.includes(n))) return null;
+  if (!extraAlways.length && !DL_NEEDLES.some((n) => text.includes(n))) return null;
+  const res = dlKind(text, extraAlways, extraRunners);
+  if (res !== null || longer(text, DL_LIMITS._DL_LOGICAL_MAX_CHARS)) return res;      // a bundle is read once
+  const [alt, firsts] = logicalText(text, extraRunners);
+  if (alt === text) return null;
+  const again = dlKind(alt, extraAlways, extraRunners);
+  if (again === null) return null;
+  return [firsts === null ? again[0] : firsts[again[0] - 1] + 1, again[1]];
+}
+
+/** receivedCodeKind's reading of a text (its gates passed). core._dl_kind. */
+function dlKind(text, extraAlways, extraRunners = []) {
   const rows = text.split("\n");
   const starts = new Array(rows.length);
   for (let k = 0, at = 0; k < rows.length; k++) { starts[k] = at; at += rows[k].length + 1; }
@@ -860,7 +1036,7 @@ export function receivedCodeKind(text) {
     m = DL_NEEDLE_RE.exec(text);
   }
   DL_NEEDLE_RE.lastIndex = 0;                                         // (matchAll starts from it)
-  const taint = new Taint(text.includes("import") ? importNames(rows, near) : []);
+  const taint = new Taint([...(text.includes("import") ? importNames(rows, near) : []), ...extraAlways]);
   const sources = new Set([...near].filter((k) => longer(rows[k], LONG_ROW) || firstMatch(DL_SOURCE, rows[k]) !== null));
   if (!taint.always.size && !sources.size) return null;
   const named = new Named(text, rows, starts);
@@ -868,9 +1044,10 @@ export function receivedCodeKind(text) {
   for (const r of sources) seeds[r] = 1;
   for (const name of taint.always) for (const r of named.find(name)) seeds[r] = 1;
   const aliases = DL_ALIAS_NEEDLES.some((nd) => text.includes(nd)) ? runnerAliases(rows) : new Map();
+  for (const name of extraRunners) aliases.set(name, null);         // another file's runner: a runner everywhere here
   let aliasCall = null;
   if (aliases.size) {                                                // a call of a runner alias, near its def, is a runner
-    const src = String.raw`(?<![\w$.])(` + [...aliases.keys()].sort().map((n) => n.replaceAll("$", "\\$")).join("|")
+    const src = String.raw`(?<![\w$.])(` + [...aliases.keys()].sort(cmpCodePoints).map(escapeName).join("|")
       + String.raw`)\s*\(`;
     aliasCall = pyRe(src, "g");
     for (const name of aliases.keys()) for (const r of named.find(name)) seeds[r] = 1;
@@ -903,6 +1080,35 @@ export function receivedCodeKind(text) {
   }
   return null;
 }
+
+// ---- what the cross-file follower (lib/crossfile.js) reads with these patterns ----
+const DL_NAME_WHOLE_RE = pyRe(`^(?:${DL_SPEC_PATTERNS._DL_NAME_RE.src})$`);
+const PY_SPACE_RUN_RE = pyRe(String.raw`\s+`, "g");
+
+/** Does `expr` carry a network source? core._xf_has_source. */
+export function hasSource(expr) {
+  return firstMatch(DL_SOURCE, expr) !== null;
+}
+
+/** The member chains named in `expr` (a, a.b.c), spaces taken out. core._xf_chains. */
+export function chainsOf(expr) {
+  const out = new Set();
+  for (const m of expr.matchAll(DL_CHAIN_RE)) out.add(m[0].replace(PY_SPACE_RUN_RE, ""));
+  return out;
+}
+
+/**
+ * `row` with each string literal's contents blanked, its quotes kept
+ * (core._xf_js_mask_line). Blanked by UTF-16 unit, so the row keeps its
+ * length in units and offsets into it are the row's; core blanks by code
+ * point — only a count of spaces differs, which no pattern read on it counts.
+ */
+export function maskStrings(row) {
+  return row.replace(DL_STR_RE, (s) => (s.length >= 2 ? s[0] + " ".repeat(s.length - 2) + s[s.length - 1] : s));
+}
+
+/** Is `s` one identifier? (core: _DL_NAME_RE.fullmatch) */
+export const isName = (s) => DL_NAME_WHOLE_RE.test(s);
 
 /**
  * The 1-based line where code runs, deserializes or dynamically imports a
@@ -956,27 +1162,76 @@ function pathrunAfter(rows, k, path) {
  * run, else null. MAJOR only. Twin of core._downloads_and_runs_file.
  */
 export function downloadsAndRunsFile(text) {
-  if (!DL_NEEDLES.some((n) => text.includes(n)) || !DL_FILE_WRITE_NEEDLES.some((n) => text.includes(n))
-      || !DL_PATHRUN_NEEDLES.some((n) => text.includes(n))) return null;
-  const rows = text.split("\n");
-  const src = [];                                                    // rows holding a network source
-  for (let k = 0; k < rows.length; k++) {
-    if (!longer(rows[k], LONG_ROW) && firstMatch(DL_SOURCE, rows[k]) !== null) src.push(k);
-  }
+  const res = downloadsAndRuns(text);
+  return res === null ? null : res[0];
+}
+
+// The shell or interpreter a written file is run with (0.1.8; core's comment
+// above _SCRIPT_INTERP_RE).
+export const SCRIPT_INTERP_SRC = String.raw`(?:^|(?<=[\s\[(,'"` + "`" + String.raw`/\\]))(?P<name>bash|sh|zsh|dash|ksh|node|nodejs|deno|bun|pwsh|powershell|perl|ruby`
+  + String.raw`|php|osascript|cscript|wscript)(?:\.exe)?(?=['"` + "`" + String.raw`\s,\])])`;
+export const SCRIPT_LOAD_SRC = String.raw`\b(?P<fork>fork)\s*\(|\b(?:execfile|run_path)\s*\(|(?<![\w$.])exec\s*\(\s*open\s*\(`;
+const SCRIPT_INTERP_RE = pyReNamed(SCRIPT_INTERP_SRC);
+const SCRIPT_LOAD_RE = pyReNamed(SCRIPT_LOAD_SRC);
+// core._DECODE_CALL_SRC: a decode call (scan.js's decode flow reads it from here too)
+export const DECODE_CALL_SRC = "(?:\\batob|\\bb64decode|\\.\\s*fromhex|\\bunhexlify|\\b(?:codecs|__import__\\(\\s*['\\\"]codecs['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]codecs['\\\"]\\s*\\))\\s*\\.\\s*decode|\\b(?:zlib|__import__\\(\\s*['\\\"]zlib['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]zlib['\\\"]\\s*\\))\\s*\\.\\s*decompress|\\.\\s*decrypt)\\s*\\(|\\bBuffer\\s*\\.\\s*from\\s*\\([^;\\n]{0,300}?['\\\"`]base64['\\\"`]";
+const DECODE_CALL_RE = pyRe(DECODE_CALL_SRC);
+
+/** The shell or interpreter the run on `row` uses, else null. core._dl_run_interp. */
+function runInterp(row) {
+  const m = SCRIPT_INTERP_RE.exec(row);
+  if (m !== null) return m.groups.name;
+  const l = SCRIPT_LOAD_RE.exec(row);
+  if (l === null) return null;
+  return l.groups.fork !== undefined ? "node" : "Python";
+}
+
+/** The row index that runs a file written in the window of a row of `src`, else null. core._dl_written_and_run. */
+function writtenAndRun(rows, isSrc, downloads) {
+  const known = new Map();                                           // row -> is it a source row (looked for near a write only)
+  const src = (j) => {
+    let got = known.get(j);
+    if (got === undefined) { got = !longer(rows[j], LONG_ROW) && isSrc(rows[j]); known.set(j, got); }
+    return got;
+  };
   for (let k = 0; k < rows.length; k++) {
     const row = rows[k];
     if (longer(row, LONG_ROW) || !DL_FILE_WRITE_NEEDLES.some((n) => row.includes(n))) continue;
-    const nearSrc = anyIn(src, k - WINDOW, k + WINDOW + 1);
+    let nearSrc = null;
     DL_FILE_WRITE_RE.lastIndex = 0;
     for (let wm = DL_FILE_WRITE_RE.exec(row); wm !== null; wm = DL_FILE_WRITE_RE.exec(row)) {
-      if (wm.groups.p4 === undefined && !nearSrc) continue;         // a plain write needs a download near it
+      if (wm.groups.p4 === undefined) {
+        if (nearSrc === null) {
+          nearSrc = false;
+          for (let j = Math.max(0, k - WINDOW); j < Math.min(rows.length, k + WINDOW + 1); j++) if (src(j)) { nearSrc = true; break; }
+        }
+        if (!nearSrc) continue;                                      // a plain write needs a source near it
+      } else if (!downloads) continue;
       const path = pathToken(wm);
       if (!path) continue;
       const hit = pathrunAfter(rows, k, path);
-      if (hit !== null) return hit + 1;
+      if (hit !== null) return hit;
     }
   }
   return null;
+}
+
+/** [line, interpreter|null] where a received value is written to a file that is then run, else null. core._downloads_and_runs. */
+export function downloadsAndRuns(text) {
+  if (!DL_NEEDLES.some((n) => text.includes(n)) || !DL_FILE_WRITE_NEEDLES.some((n) => text.includes(n))
+      || !DL_PATHRUN_NEEDLES.some((n) => text.includes(n))) return null;
+  const rows = text.split("\n");
+  const hit = writtenAndRun(rows, (row) => firstMatch(DL_SOURCE, row) !== null, true);   // rows holding a network source
+  return hit === null ? null : [hit + 1, runInterp(rows[hit])];
+}
+
+/** [line, interpreter|null] where a value the file decodes is written to a file that is then run, else null. core._decodes_and_runs. */
+export function decodesAndRuns(text) {
+  if (!DL_FILE_WRITE_NEEDLES.some((n) => text.includes(n)) || !DL_PATHRUN_NEEDLES.some((n) => text.includes(n))
+      || !DECODE_CALL_RE.test(text)) return null;
+  const rows = text.split("\n");
+  const hit = writtenAndRun(rows, (row) => DECODE_CALL_RE.test(row), false);
+  return hit === null ? null : [hit + 1, runInterp(rows[hit])];
 }
 
 /**

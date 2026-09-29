@@ -401,6 +401,14 @@ id:"SC-PACKER", name:"Packed JavaScript (p,a,c,k,e,d)", type:"VULN", sev:"CRITIC
  ref:"CWE-506 · Supply chain",
 },
 {
+id:"SC-EVAL-DECODER", name:"Code decoded by its own function and run", type:"VULN", sev:"CRITICAL", langs:["js"],
+ re:pyRe("\\beval\\s*\\(\\s*\\(?\\s*function\\s*\\([^()]{0,80}\\)\\s*\\{(?:[^{}]|\\{[^{}]{0,2000}\\}){0,2000}\\}\\s*\\)?\\s*\\(\\s*(?:\\[\\s*\\d+(?:\\s*,\\s*\\d+){199}|'[^'\\n]{1000}|\\\"[^\\\"\\n]{1000}|`[^`]{1000})", ""),
+ msg:"eval runs what a function written into the call decodes from a long encoded literal.",
+ why:"An inline decoder over a blob of character codes or text keeps a payload out of sight: the file shows the decoder, never the code it runs.",
+ fix:"Decode the blob and read what it runs; treat the package as hostile until then.",
+ ref:"CWE-506 · Supply chain",
+},
+{
 id:"SC-MARSHAL", name:"Marshalled bytecode execution", type:"VULN", sev:"CRITICAL", langs:["py"],
  re:pyRe("\\b(?:exec|eval|FunctionType)\\s*\\(\\s*(?:marshal|__import__\\(\\s*['\\\"]marshal['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]marshal['\\\"]\\s*\\))\\s*\\.\\s*loads?\\s*\\(|\\b(?:marshal|__import__\\(\\s*['\\\"]marshal['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]marshal['\\\"]\\s*\\))\\s*\\.\\s*loads\\s*\\(\\s*(?:b['\\\"]|(?:(?:[\\w$]+|__import__\\(\\s*['\\\"][\\w.]+['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"][\\w.]+['\\\"]\\s*\\))\\s*\\.\\s*)*(?:b64decode|b32decode|b85decode|a85decode|decodebytes|decompress|fromhex|unhexlify|a2b_\\w+|decode)\\s*\\()", ""),
  msg:"Marshalled bytecode is run, or loaded from bytes embedded or decoded in the code.",

@@ -79,6 +79,13 @@ MAX_MEMBER = _env_number("LAZARET_MAX_SOURCE_BYTES", 16_000_000)
 MAX_FILES = 20_000         # files per package (numpy's sdist alone has >4,000)
 SAMPLE = 8192              # header/entropy sample read from oversized files
 # Stored scans from another engine version are scanned again (has_scan).
+# 2.10: 0.1.8's names and code in strings a file decodes as it runs, eval of
+#      an inline decoder (SC-EVAL-DECODER), a script downloaded or decoded,
+#      written and run with an interpreter, scripts a script starts with node
+#      or python followed, the received-code detector's second reading, and
+#      the cross-file follower on a release (several hops, classes, object
+#      literals, callbacks, caches, environment variables, another file's
+#      runner)
 # 2.9: 0.1.8's code that renames its package and publishes it
 #      (SC-SELF-PUBLISH), code hidden off-screen (SC-OFFSCREEN-CODE), install
 #      scripts that publish, collect npm tokens or run a DLL, the strong
@@ -105,7 +112,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.9.0"
+ENGINE_VERSION = "2.10.0"
 
 # ---------------- Trust-chain limits (F9/G14/F10) ----------------
 # Only these hosts may ever be fetched, over https only, and redirects to any
@@ -1792,6 +1799,42 @@ class _ArtifactScan:
                 if reasons and issue["sev"] not in STRONG_SEVERITIES:
                     issue["sev"] = "CRITICAL"
                     issue["msg"] = f"Install hook runs {target}, which {'; and '.join(reasons)}."
+                # the scripts it starts with node or python (0.1.8, core.spawned_scripts)
+                for started, more in self._started_scripts(rel, text, base, self.install_scripts):
+                    more = install_script_risk(more) if more else []
+                    if more and issue["sev"] not in STRONG_SEVERITIES:
+                        issue["sev"] = "CRITICAL"
+                        issue["msg"] = (f"Install hook runs {target}, which starts {started}, which "
+                                        f"{'; and '.join(more)}.")
+
+    def _started_scripts(self, rel, text, cwd, into):
+        """[(rel, text)] for the package scripts `rel` starts with node or
+        python, and the ones those start (core.spawned_scripts), at most
+        _SPAWN_MAX_DEPTH starts deep and _SPAWN_MAX_FILES files; each is added
+        to the entries and to `into` (the install scripts, or import-time
+        files). `cwd`: the directory the package runs in, for a path written
+        as a plain literal — None at import time, when that is the user's
+        directory, not the package's, and such a path is not followed."""
+        out, seen, queue = [], {rel}, [(rel, text, 0)]
+        while queue and len(seen) <= lazaret._SPAWN_MAX_FILES:
+            cur, cur_text, depth = queue.pop(0)
+            if not cur_text or depth >= lazaret._SPAWN_MAX_DEPTH:
+                continue
+            for where, path in lazaret.spawned_scripts(lazaret.normalize_newlines(cur_text)):
+                if where != "dir" and cwd is None:
+                    continue
+                start = posixpath.dirname(cur) if where == "dir" else cwd
+                nxt = self._resolve(_rel_join(start, path))
+                if nxt is None or nxt in seen or len(seen) > lazaret._SPAWN_MAX_FILES:
+                    continue
+                seen.add(nxt)
+                self.entries.add(nxt)
+                into.add(nxt)
+                lang = "py" if nxt.endswith(".py") else ("sh" if nxt.endswith(".sh") else "js")
+                ntext = self._text_of(nxt, lang)
+                out.append((nxt, ntext))
+                queue.append((nxt, ntext, depth + 1))
+        return out
 
     def _python_install_scripts(self):
         """Python code pip runs to build/install an sdist: setup.py and an
@@ -1832,6 +1875,11 @@ class _ArtifactScan:
                     seen.add(rel)
                     scripts.append(rel)
                     queue.append(rel)
+        for rel in list(scripts):                  # and the scripts they start with python or node (0.1.8)
+            for started, _text in self._started_scripts(rel, self.sources.get(rel, ("", "py"))[0], "",
+                                                        self.install_scripts):
+                if started not in scripts:
+                    scripts.append(started)
         for rel in scripts:
             self.entries.add(rel)
             self.install_scripts.add(rel)
@@ -1840,7 +1888,8 @@ class _ArtifactScan:
             # a download written to a file and run: CRITICAL in the code pip
             # runs to install an sdist (a prebuilt-binary installer's shape
             # keeps it MAJOR-only in npm hooks and import-time code)
-            if lazaret._downloads_and_runs_file(lazaret.normalize_newlines(text)) is not None:
+            if (lazaret._downloads_and_runs_file(lazaret.normalize_newlines(text)) is not None
+                    and not any(r.startswith("downloads a script and runs it with") for r in reasons)):
                 reasons.append("downloads a file and then runs it")
             if reasons:
                 lines = lazaret.normalize_newlines(text).split("\n")
@@ -1930,6 +1979,13 @@ class _ArtifactScan:
                                               and posixpath.basename(rel) not in _SDIST_NOT_MODULES))
         else:
             files = reachable
+        # and the package scripts that code starts with node or python (0.1.8)
+        started = set()
+        for rel in sorted(files):
+            text, lang = self.sources.get(rel, (None, None))
+            if text and lang in ("js", "py") and rel not in self.install_scripts:
+                self._started_scripts(rel, text, None, started)
+        files = set(files) | {rel for rel in started if rel not in self.install_scripts}
         for rel in sorted(files):
             if rel in self.install_scripts or rel in self.startup:
                 continue
@@ -1956,13 +2012,18 @@ class _ArtifactScan:
                  "fix": "Read the file: what does it collect, and where does it send it?",
                  "ref": "CWE-506 · Supply chain"}, rel, line, text.split("\n")))
         self._use_time_code(set(files))
+        self._cross_file_code()
+
+    def _suspicious(self):
+        """Has a strong supply-chain finding made the package SUSPICIOUS already?"""
+        return any(i["rule"].startswith("SC-") and i["rule"] not in TRUNCATION_RULES and i["sev"] in STRONG_SEVERITIES
+                   for i in self.issues)
 
     def _use_time_code(self, loaded):
         """SC-USE-RISK (CRITICAL): the strong import-time shapes in the other
         JavaScript and Python files of the package — code it runs when it is
         used (see USE_RISK_SKIP_DIRS)."""
-        if any(i["rule"].startswith("SC-") and i["rule"] not in TRUNCATION_RULES and i["sev"] in STRONG_SEVERITIES
-               for i in self.issues):
+        if self._suspicious():
             return
         stop = time.monotonic() + USE_RISK_SECONDS
         # smallest first: within the time, as many files as can be read (droppers are small)
@@ -1992,6 +2053,41 @@ class _ArtifactScan:
                          "data-capture service."),
                  "fix": "Don't use the package; report it to the registry.",
                  "ref": "CWE-506 · Supply chain"}, rel, line, text.split("\n")))
+
+    def _cross_file_code(self):
+        """SC-IMPORT-RISK (CRITICAL) for a package file that runs a value
+        another file of the package received over the network
+        (core._cross_file_received_issues, 0.1.8): the dropper split across
+        files — _net.py fetches, __init__.py runs what it returns — that
+        neither file shows alone. The --deps checks ran it on installed
+        dependencies only; a registry or guard scan reads the release before
+        it is installed. The files are SC-USE-RISK's (not once the package is
+        SUSPICIOUS, not those it does not run when used, none over
+        USE_RISK_MAX_CHARS), read as one package: npm files as the package's
+        own, a wheel's or an sdist's modules under their import names (a
+        .data/purelib/ or src/ prefix dropped)."""
+        if self._suspicious():
+            return
+        files, back = [], {}
+        for rel in sorted(self.sources):
+            text, lang = self.sources[rel]
+            if not text or lang not in ("js", "py") or len(text) > USE_RISK_MAX_CHARS or _not_used_code(rel):
+                continue
+            if lang == "js":
+                path = "node_modules/package/" + rel
+            else:
+                base = _PY_BASE_RE.match(rel)
+                path = "site-packages/" + (rel[base.end():] if base else rel)
+            if path in back:
+                continue                            # src/x.py and x.py: the first wins
+            back[path] = rel
+            files.append({"path": path, "lang": lang, "dep": True, "content": lazaret.normalize_newlines(text)})
+        if len(files) < 2:
+            return
+        self._deadline("the cross-file follower")
+        for issue in lazaret._cross_file_received_issues(files, who=lambda path: back[path], one_package=True):
+            issue["file"] = back[issue["file"]]
+            self.issues.append(issue)
 
     def _agent_hijack(self):
         """SC-AGENT-HIJACK (CRITICAL): a package file that launches an AI

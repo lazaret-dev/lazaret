@@ -25,7 +25,7 @@ import { documentationToken, keyMaterial, secretCol, redactConfigValues } from "
 import { configKind, ownerDir, entries as autorunEntries, localCommand } from "../lib/autorun.js";
 import { isWorkflow, findings as workflowFindings } from "../lib/ghworkflow.js";
 import { agentHijackInCommand, installScriptRisk, followHook, treeJoin, nodeCandidates, cpPrefix, selfPublishAt } from "../lib/hooks.js";
-import { cpForward } from "../lib/received.js";
+import { cpForward, DECODE_CALL_SRC } from "../lib/received.js";
 import { normalizeNewlines } from "../lib/fs.js";
 
 export { isComment } from "./engine.js";
@@ -781,7 +781,6 @@ function joinedEvalDecode(ctx, i, ruleRe) {
 // module, a require("child_process") call or a name bound to one); any other
 // method call (RegExp.prototype.exec, a database's .exec) is not code
 // execution. The other sink names count on any receiver.
-const DECODE_CALL_SRC = "(?:\\batob|\\bb64decode|\\.\\s*fromhex|\\bunhexlify|\\b(?:codecs|__import__\\(\\s*['\\\"]codecs['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]codecs['\\\"]\\s*\\))\\s*\\.\\s*decode|\\b(?:zlib|__import__\\(\\s*['\\\"]zlib['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]zlib['\\\"]\\s*\\))\\s*\\.\\s*decompress|\\.\\s*decrypt)\\s*\\(|\\bBuffer\\s*\\.\\s*from\\s*\\([^;\\n]{0,300}?['\\\"`]base64['\\\"`]";
 const DECODE_CALL_RE = pyRe(DECODE_CALL_SRC);
 // A decoder imported under another name (twin of core._decoder_aliases /
 // _file_decode_re): `from base64 import b64decode as invoke` makes invoke(…)

@@ -126,7 +126,7 @@ test("deserialization and dynamic import of a received value", () => {
     .includes(IMPORT_REASON));
 });
 
-test("download to a file, then run it, is MAJOR-only (CRITICAL run with Python)", () => {
+test("download to a file, then run it, is MAJOR (CRITICAL run with a shell or an interpreter)", () => {
   const cases = [
     ["const body = await (await fetch(" + U + ")).text();\nfs.writeFileSync('m.js', body);\nrequire('./m.js');\n", 3,
       DROP_REASON, "MAJOR"],
@@ -139,7 +139,8 @@ test("download to a file, then run it, is MAJOR-only (CRITICAL run with Python)"
     assert.ok(reasons.includes(reason), text.slice(0, 60));
     assert.equal(importTimeSeverity(reasons), sev);
     assert.equal(at, line);
-    assert.deepEqual(installScriptRisk(text), []);        // never escalates an npm install hook
+    // an install-script reason only for a script (0.1.8): a binary's installer does the rest
+    assert.deepEqual(installScriptRisk(text), sev === "CRITICAL" ? [reason] : []);
   }
   // written but not run, and run but not downloaded: neither fires
   assert.ok(!importTimeRisk("const b = await (await fetch(u)).text();\nfs.writeFileSync('c.json', b);\n")[0]

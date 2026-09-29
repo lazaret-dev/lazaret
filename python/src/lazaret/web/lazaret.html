@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-P/5Wy491vgAhOOGptaO+jYPpea3FxAnbBuEZMZ5yamU='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-prO/adQ9oOHZoYm7HHP0o9zFb9A68+tg/RLAs+9vjEg='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
 <title>Lazaret — Security &amp; Quality Review</title>
 <style>
   :root{
@@ -1968,6 +1968,14 @@ id:"SC-PACKER", name:"Packed JavaScript (p,a,c,k,e,d)", type:"VULN", sev:"CRITIC
  msg:"Dean Edwards packer signature — self-decoding packed code.",
  why:"Legitimate modern packages ship minified, not packed; packing hides intent.",
  fix:"Unpack and review the payload before trusting this file.",
+ ref:"CWE-506 · Supply chain",
+},
+{
+id:"SC-EVAL-DECODER", name:"Code decoded by its own function and run", type:"VULN", sev:"CRITICAL", langs:["js"],
+ re:pyRe("\\beval\\s*\\(\\s*\\(?\\s*function\\s*\\([^()]{0,80}\\)\\s*\\{(?:[^{}]|\\{[^{}]{0,2000}\\}){0,2000}\\}\\s*\\)?\\s*\\(\\s*(?:\\[\\s*\\d+(?:\\s*,\\s*\\d+){199}|'[^'\\n]{1000}|\\\"[^\\\"\\n]{1000}|`[^`]{1000})", ""),
+ msg:"eval runs what a function written into the call decodes from a long encoded literal.",
+ why:"An inline decoder over a blob of character codes or text keeps a payload out of sight: the file shows the decoder, never the code it runs.",
+ fix:"Decode the blob and read what it runs; treat the package as hostile until then.",
  ref:"CWE-506 · Supply chain",
 },
 {

