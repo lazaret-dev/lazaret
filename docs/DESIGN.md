@@ -67,18 +67,19 @@ same metrics, ratings, quality gate and exit code.
   requires re-running `scripts/dashboard_csp.py` (its CSP pins the script by
   SHA-256).
 
-### The documented Python-only exceptions
+### The documented Python-only exception
 
-Two capabilities run only in the Python engine, by deliberate design, and the
-parity test excludes them (`_python_only` in `test_js_parity.py`):
+One capability runs only in the Python engine, by deliberate design, and the
+parity test excludes it (`_python_only` in `test_js_parity.py`):
 
-1. **The AST half of the interprocedural flow engine** — `flow.py`'s Python
-   analysis is AST-based and has no JS twin; its `X-*` findings and `Q-FLOW-*`
-   coverage notes on Python files are Python-only. The JavaScript half of the
-   flow engine *is* twinned (`js/src/scanner/flow.js` and `jsflow.js`, on the
-   reader `js/src/lib/jsparse.js`).
-2. **The cross-file received-code follower** — `core._cross_file_received_issues`
-   (SC-IMPORT-RISK whose message contains "another file of the package"). See §5c.
+- **The AST half of the interprocedural flow engine** — `flow.py`'s Python
+  analysis is AST-based and has no JS twin; its `X-*` findings and `Q-FLOW-*`
+  coverage notes on Python files are Python-only. The JavaScript half of the
+  flow engine *is* twinned (`js/src/scanner/flow.js` and `jsflow.js`, on the
+  reader `js/src/lib/jsparse.js`).
+
+(The cross-file received-code follower was the second exception until 0.1.8;
+`js/src/lib/crossfile.js` is its twin now — §5c.)
 
 When the npm engine cannot do something the Python engine can, it must say so
 honestly rather than silently under-report. This is the **honest-gate pattern**:
@@ -281,46 +282,88 @@ twin `js/src/lib/received.js`.
   inside string literals don't count, so a code template in a string is not
   one).
 
+**The second reading (0.1.8).** When the first reading finds nothing, a text of
+up to `_DL_LOGICAL_MAX_CHARS` (1,000,000) characters is read once more as
+`_dl_logical` rewrites it: a statement a formatter spread over several rows
+joined (a call's arguments on the rows below it, a member chain continued on
+the next row, a backslash continuation; `_dl_join_rows`, never through a
+function's or a block's body), an environment variable read or written by name
+read as one name (`environ.P`, `process.env.P`: it carries a value between
+statements), members read by name (`getattr(m, 'x')`, `m['x']` as `m.x`), a
+call through a comma expression (`(0, ns.fn)(…)`) as the call, and a code
+runner handed to a call as its last argument (`p.then(eval)`,
+`res.on('data', eval)`) as the call it makes, `(_v)=>eval(_v)`. Each rewrite
+keeps the row count (lines map back through `firsts`). A longer text (a
+bundle) is read once: the second reading doubled the benign bundles' time and
+found nothing there, and a minified payload is the first reading's long-row
+pass.
+
 **The shared spec.** The detector's data (name sets, character sets, limits) and
-**all its patterns** (27 plain regexes + 6 alternation groups, ~57 compiled
-patterns total) are authored once in
+**all its patterns** (36 plain regexes + 6 alternation groups: 48 compiled
+patterns) are authored once in
 `python/src/lazaret/scanner/received_spec.json` and compiled by both engines.
 `scripts/sync-received-spec.py` copies it to `js/src/lib/received-spec.json`
 (run `--check` in CI); `tests/architecture/test_received_spec.py` fails if the
 copies drift or if core stops matching the spec. `test_js_parity_hooks.py`
-compares the compiled patterns (asserts 57 patterns / 23 sets / 3 maps) and runs
-a 30k+ case agreement corpus plus a reach test. **Edit the spec, not the inline
-patterns; then sync.** The npm engine loads the spec with `readFileSync` at
-import — the build backend ships `.json` from the package so it lands in the
-wheel.
+compares every compiled pattern of `hooks.js` and `received.js` with core's
+(126 patterns / 30 sets / 4 maps) and runs a 30k+ case agreement corpus plus a
+reach test. **Edit the spec, not the inline patterns; then sync.** The npm
+engine loads the spec with `readFileSync` at import — the build backend ships
+`.json` from the package so it lands in the wheel.
 
-**The cross-file follower (Python engine only).** `_cross_file_received_issues`
-catches a value received in one file of a dependency package and run in another
-(source and sink split across modules) — in both Python and npm packages, under
-`--deps`. Design:
+**The cross-file follower (both engines since 0.1.8).**
+`core._cross_file_received_issues` and its twin `crossFileReceivedIssues`
+(`js/src/lib/crossfile.js`) catch a value received in one file of a package and
+run in another — source and sink split across modules — in Python and npm
+packages: a dependency's under `--deps` (both engines), and a release's in the
+registry and the guard (`_ArtifactScan._cross_file_code`: one distribution is
+one package; the files SC-USE-RISK reads; not once the package is SUSPICIOUS).
+Design:
 
-1. Per package, `_xf_tainted_exports` / `_xf_js_tainted_exports` collect each
-   module's **tainted exports** — a module-level function/value that holds or
-   returns a received value, or a class method that returns one. Export
-   detection is deliberately *liberal* (many real HTTP libraries fetch and
-   return data); it is kept precise by the sink side.
-2. Import resolution (`_xf_imported_taint` / `_xf_js_seeds`) resolves a sibling
-   `from .mod import name` / `require('./mod')` / `import … from './mod'`
-   (named, namespace, default; **one hop**, same package) to those exports, and
-   for a tainted class, seeds the `instance.method` chain of instances made in
-   the importing file (`c = C(); exec(c.pull())`).
-3. The importing file is re-run through `_received_code_kind(text,
-   extra_always=<seeds>)` — the seed rides the existing `_DlTaint.always`
-   machinery, so no change to the single-file detector's behavior (default
-   `extra_always=()` keeps the twin and the parity corpus identical). It fires
-   **only** when the value genuinely came from another file; files already
-   flagged single-file are skipped.
+1. **Each module is read** for what it defines — functions, values, classes
+   and their members (static or not; Python class attributes; JS class
+   fields), and object literals (`const api = {…}`, `module.exports = {…}`,
+   `export default {…}`) as classes of static members; what it imports — by
+   name, as a module, by default, `*`; `importlib.import_module` /
+   `__import__` / `import()` of a literal name; `require()` of a path built
+   from `__dirname`; TypeScript's and Babel's `__importDefault(require(…))`;
+   what it exports — `module.exports` and its objects, `exports.x` and
+   `exports['x']`, `export …`, `export … from`, `export * from`,
+   `module.exports = require(…)` / `= class …`, TypeScript's
+   `Object.defineProperty(exports, …)` getters and `exports.default`; the
+   environment variables it sets; and the writes into a module-level name's
+   member (`CACHE['c'] = …`) or an instance's own (`self.data = …`), read like
+   assignments of them. Comments, strings and docstrings are masked first.
+2. **A symbol holds a received value** when what it returns or is assigned
+   carries a network source or names a symbol that holds one — resolved
+   through imports, re-exports and `self.x` / `this.x`, to a fixed point of
+   `_XF_ROUNDS` (4) hops — or when its body receives one and hands it to a
+   callback: a parameter it calls, or a Promise's resolve. **A function runs
+   its parameter** (a runner) when the single-file detector, reading its body
+   with the parameters seeded, finds it run as code.
+3. **Each module is then read** by `_received_code_kind(code,
+   extra_always=<the names that hold a received value in it>,
+   extra_runners=<the names of other files' runners>)`: a function or value
+   imported by name, a module's members (`m.pull`, `pkg._net.pull`), a class's
+   static members (`C.pull`, `api.pull`), an instance's (`c = C(); c.pull()`,
+   `self.c = C(); self.c.pull()`, `C().pull()` rewritten as one name), and an
+   environment variable another file set. Seeds ride `_DlTaint.always`;
+   runners are runner aliases without the window (and are handed to calls
+   like `eval` is, `p.then(execute)`). It fires only when the flow crosses
+   files — a file whose own text shows it is the single-file test's — at the
+   single-file severity, and the message says which way: the value is
+   received in another file, or the function that runs it is.
 
-Robustness: export detection masks strings and comments (including triple-quoted
-docstrings — a `requests.get(…)` in documentation is not an export). Bounds are
-the follower's own (`_XF_WINDOW` = 25, and hard caps `_XF_MAX_FILES` /
-`_XF_MAX_EXPORTS` / `_XF_MAX_SEEDS`), not the single-file detector's. It runs off
-the twinned `flow.py` path; the npm engine stays single-file with an honest gate.
+Export detection is deliberately *liberal* (an HTTP library's functions fetch
+and return data); the sink side keeps it precise. Bounds: `_XF_WINDOW` (25 rows
+of a body), `_XF_MAX_FILES` (3,000 per package), `_XF_MAX_SYMBOLS` (5,000),
+`_XF_MAX_SEEDS` (64 per file), `_XF_OBJECT_ROWS` (400), `_XF_MAX_RUNNERS` (200
+bodies tested), a file over `_XF_MAX_CHARS` (2,000,000) not read for what it
+defines; litellm's 2,471 modules (34 MB) take 3.6 s. Both engines give the same
+answer: `tests/architecture/test_js_parity_crossfile.py` holds the twins'
+patterns and limits to core's and compares the follower's own cases and a
+generated stream of 700 packages finding for finding. What it doesn't follow:
+§12.
 
 ### d. Supply-chain / `--deps`
 
@@ -371,12 +414,17 @@ the files no entry point loads (`_ArtifactScan._use_time_code`) and keeps only
 its CRITICAL shapes — skipping tests, examples, docs, demos, benchmarks and a
 web app's static assets (USE_RISK_SKIP_DIRS), not reading once the archive is
 SUSPICIOUS, smallest files first within USE_RISK_SECONDS. What it doesn't reach
-is not SC-TRUNCATED: the file rules read every file. SC-NEW-DEPENDENCY
+is not SC-TRUNCATED: the file rules read every file. The cross-file follower
+reads the same files as one package (`_cross_file_code`, §5c; its SC-IMPORT-RISK
+names the file), and scripts that install scripts and import-time code start
+with node or python are followed to the package file each runs
+(`_started_scripts`, `core.spawned_scripts`) and tested like the one that
+started them. SC-NEW-DEPENDENCY
 (`new_dependency_issues`, called by `scan_package`) compares a release's
 dependencies with the release published before it and looks up the added
 ones' first publication: live registry data, best effort, no request for a
 release without dependencies. The guard scans each package with
-`_scan_artifact`, so it gets SC-USE-RISK but not the dependency history (it
+`_scan_artifact`, so it gets SC-USE-RISK and the follower but not the dependency history (it
 already scans the new dependency itself, and holds back a release younger
 than --min-age).
 
@@ -487,7 +535,9 @@ The essentials:
   - single-file received-code: ~66,000 installed JS+Python files;
   - the cross-file follower: ~88,000 files (≈12k across 173 installed Python
     packages + ≈76k npm files), scanned as complete packages so cross-file
-    shapes actually appear.
+    shapes actually appear; and since 0.1.8's rework, the benchmark's 429
+    popular packages (35,758 files read as `--deps` groups them, and each
+    release as the registry reads it): no finding.
   These sweeps run the detector directly over file lists / package trees (see
   the scratch tooling used during development; reconstruct equivalents against
   whatever real `site-packages` / `node_modules` are available). Treat any new
@@ -508,6 +558,17 @@ backtracks more than a bounded amount; a minified row is read once. When you add
 anything that scans text, ask "what does this cost on a 50 MB adversarial input?"
 and add a `test_*_bounded` that answers it. The npm regex engine is the tighter
 constraint — it overflows its backtrack stack where CPython merely slows.
+
+Time is a bound too: the registry and the guard scan every file of a release.
+0.1.8's readings are gated so a bundle doesn't pay for them twice — a decoded
+view counts only when something was decoded (literals joined alone are no
+second reading: a bundle joins them everywhere), the second reading stops at
+1 MB (§5c), the row joiner skips rows that can open nothing, the
+download-to-file tests look for sources only around a write, and the
+follower's parse searches from quote to quote and reads a local only when a
+return reaches it. Measure a change on the benchmark's heaviest packages
+(litellm, playwright-core, next) against the previous release, not on a
+fixture.
 
 ---
 
@@ -591,15 +652,25 @@ only)", "Download to a file, then run the file").
 
 ## 12. Current state (0.1.8) and backlog
 
-**In 0.1.8** (from the 0.1.7 benchmark's misses): SC-SELF-PUBLISH (code
-that renames its package and publishes it: the registry floods); install
-scripts that publish, collect npm tokens or run a DLL; SC-OFFSCREEN-CODE
-(code after 150+ blanks on a line); SC-USE-RISK (the strong import-time
-shapes in the files a package runs when used; registry, 3 s per archive);
-SC-NEW-DEPENDENCY (a release that adds a dependency published days before
-it, from another account; registry, live data). On the same benchmark: 76%
-of 516 malicious releases SUSPICIOUS (was 66%), 80% with the dependency
-history, and the same 3 of 429 popular packages, no verdict changed.
+**In 0.1.8** (from the 0.1.7 benchmark's misses, backlog items 1-11):
+SC-SELF-PUBLISH (code that renames its package and publishes it: the registry
+floods); install scripts that publish, collect npm tokens or run a DLL;
+SC-OFFSCREEN-CODE (code after 150+ blanks on a line); SC-USE-RISK (the strong
+import-time shapes in the files a package runs when used; registry, 3 s per
+archive); SC-NEW-DEPENDENCY (a release that adds a dependency published days
+before it, from another account; registry, live data); names and code in
+strings a file decodes as it runs (a second reading of the install-script and
+import-time tests) and SC-EVAL-DECODER; `Function.constructor`, statements
+over several rows, environment variables, members read by name and runners
+handed to a call in the received-code detector; a script downloaded or
+decoded, written and run with an interpreter; scripts a script starts with
+node or python, followed; and the cross-file follower — several hops, class
+members and object literals, callbacks, caches, dynamic imports, environment
+variables between files, another file's runner — in both engines and in
+registry and guard scans, after an adversarial pass. On the same benchmark:
+80% of 516 malicious releases SUSPICIOUS (66% in 0.1.7, 76% after items 1-4),
+84% with the dependency history, and the same 3 of 429 popular packages, no
+verdict changed.
 
 **Shipped in 0.1.7** (the September 2026 audit's P0s, and more): config and
 data files checked for credentials; taint through f-strings and template
@@ -623,32 +694,36 @@ real corpora throughout; full cross-subsystem suite green.
 **Backlog** (candidates, not commitments — the detector is already
 comprehensive, so weigh marginal value against FP risk):
 
-- *Detection, from the 0.1.7 benchmark's misses* (177 of 516 malicious
-  releases not SUSPICIOUS). Items 1-4 are built in 0.1.8 (below); what is
-  left of them:
+- *Detection, from the 0.1.7 benchmark's misses* (items 1-11 are built in
+  0.1.8, above); what is left of them:
+  - **A payload read back from a file of the package asynchronously**:
+    react-thunk-log starts a script that reads the package's LICENSE with
+    `fs.readFile(…, cb)` and runs what it decrypts there (AES) — the
+    self-read test knows `readFileSync` and `open()`, not a callback.
+  - **XOR and other home-made decoders**: react-zutils decodes with a XOR loop
+    the decoded view doesn't know (it reads hex and base64, and a file's own
+    hex or base64 helpers).
   - **Look-alike dependencies.** SC-NEW-DEPENDENCY catches a brand-new one;
     a release that swaps a dependency for a look-alike of it (`dayjs` for
     `easy-day-js`), or adds one named like a popular package, needs a list of
     popular names (or the previous release's dependencies to compare with).
-  - **What SC-USE-RISK can't read yet:** names hidden in hex-decoded strings
-    (`require(g('6178696f73'))` is axios: tailwind-book-icon and two more),
-    `new Function.constructor(…)` as a runner, and a script started with
-    `spawn(process.execPath, [file])` followed as an edge (chai-use-chain and
-    four more) — the decode and staged-download families below.
   - **Services that start at login** as install-time persistence: the
     @emilgroup worm writes a systemd user unit and enables it (launchd,
     cron and Run keys are the same shape).
   - **PyPI owners** for SC-NEW-DEPENDENCY: its JSON API has none, so a new
     requirement from the project's own account counts too.
-- *Extend cross-file:* multi-hop (A→B→C, FP-gated); class-method edge forms
-  (direct `Client().pull()`, namespace `new ns.C()`).
-- *New single-file families:* decoded (base64/hex) payloads executed, staged
-  multi-step downloads, env-driven import specifiers.
-- *Architecture:* whether to port the cross-file follower to the npm engine (the
-  pick-two-of-three tradeoff: npm gets cross-file / PyPI stays pure-stdlib /
-  built once).
-- *Quality:* an adversarial pass on the cross-file follower (evasion + crafted
-  FP), and a durable home for this backlog (a `BACKLOG.md` or issues).
+  - **Nine PyPI samples the benchmark prepared from the wrong file** (the
+    compromised releases' sdist where the payload shipped in the wheel, or
+    the reverse): they count as misses whatever the engine does; prepare them
+    from the artifact that carried the payload before comparing.
+- *What the cross-file follower doesn't follow* (the adversarial pass's known
+  misses, kept as tests): a value handed between files through an event
+  emitter (`bus.emit('code', c)` / `bus.on('code', eval)`), and two top-level
+  modules of site-packages in a `--deps` scan (they may be two distributions;
+  a registry scan reads a release's as one). Nor a name built at run time
+  (`getattr(m, name)`), a runner behind another function (one that hands its
+  parameter to another file's runner), or more than four hops.
+- *Quality:* a durable home for this backlog (a `BACKLOG.md` or issues).
 - *Guard:* registries that need credentials (read them from the tool's own
   settings, for that host only), yarn and Bun, `uv run` / `uvx`; the scan of a
   very large tarball (`next`, 42 MB) dominates a first install.

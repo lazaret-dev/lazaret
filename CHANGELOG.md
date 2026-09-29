@@ -49,6 +49,76 @@ project is pre-1.0, so the 0.x API may still change.
     data, and none of the 429 popular packages at the benchmark's versions.
     One document for the package and one per added dependency (at most five);
     `LAZARET_NO_DEPENDENCY_HISTORY=1` turns it off.
+- **Payloads a file decodes, downloads staged over several steps, and the
+  cross-file follower in both engines (backlog items 5-11).** On the same 516
+  malicious releases, 80% are now SUSPICIOUS (76% after items 1-4, 66% in
+  0.1.7; GuardDog 70%), 84% with the registry's live dependency history: npm
+  77% (was 71%), PyPI 84% (was 83%). Still the same 3 of 429 popular
+  packages, and no popular package's verdict changed. `lazaret guard` blocks
+  232 of the 300 npm samples end to end (214 after items 1-4, 165 in 0.1.7),
+  still 2 of 219 popular ones. A registry scan takes about 7% longer on the
+  benchmark's heaviest packages (the two engines timed one after the other on
+  one machine; litellm, 2,471 modules, 20%).
+  Registry engine 2.10.0, so stored and cached verdicts are redone.
+  - **Names and code in strings a file decodes as it runs** (both engines):
+    the install-script and import-time tests read a file a second time with
+    its encoded strings decoded — `Buffer.from(…, 'hex' | 'base64')
+    .toString()`, `atob`, `bytes.fromhex` / `b64decode` / `unhexlify(…)
+    .decode()`, and the file's own hex or base64 helpers — a constant array of
+    strings read where it is indexed, and a member named by a literal
+    (`process["env"]`) read as one. A reason found only there says so.
+    tailwind-book-icon and five more loggers of one campaign kept every name
+    hex-encoded: `require(g('6178696f73'))` is axios.
+  - **SC-EVAL-DECODER** (both engines and the dashboard, CRITICAL): eval of an
+    inline decoder function applied to 200 or more character codes or a
+    literal of 1,000 or more characters — one campaign's letter-shift
+    obfuscation (12 files; no popular package).
+  - **The received-code test reads more of how a value reaches a runner**
+    (both engines): `Function.constructor(…)`, a statement a formatter spread
+    over several rows (`axios` then `.post(…)` on the next row; a call's
+    arguments on the rows below it), an environment variable that carries a
+    value from one statement to the next (`os.environ['P'] = r.text` …
+    `exec(os.getenv('P'))`), TypeScript's `(0, ns.fn)(…)`, members read by
+    name (`getattr(m, 'x')`, `m['x']`) and a runner handed to a call
+    (`p.then(eval)`, `res.on('data', eval)`) — a second reading of a file of
+    up to 1 MB when the first finds nothing.
+  - **A script downloaded or decoded, written to a file and run** with a shell
+    or an interpreter (`fs.writeFileSync(f, await r.text()); spawn('bash',
+    [f])`; litellm 1.82.7's `proxy_server.py` wrote a base64 payload to
+    `p.py` and ran it with `sys.executable`) is CRITICAL at import time and in
+    an install script: "downloads a script and runs it with bash", "writes
+    code it decodes to a file and runs it with Python". A download run without
+    a named interpreter stays MAJOR (a prebuilt binary's installer).
+  - **Scripts a script starts** with node or python —
+    `spawn(process.execPath, [path.join(__dirname, 'worker/run.js')],
+    { detached: true })`, `fork(…)`, `subprocess.Popen([sys.executable,
+    start])` — are followed to the package file each runs, three starts deep,
+    and tested like the script that started them: from a dependency's install
+    hook with `--deps` (both engines), and in registry scans from install
+    scripts, import-time code and setup.py. react-thunk-log's postinstall did
+    nothing but start another file of the package.
+  - **The cross-file follower reads several hops, classes and objects, and
+    runs in both engines and on releases.** A value received in one file of a
+    package and run in another is followed through wrappers and re-exports up
+    to four files deep (it was one), class methods called directly
+    (`Client().pull()`, `new ns.C()`), static members and object literals'
+    members (`module.exports = { async pull() {…} }`), a callback or a
+    Promise's `resolve` handed what a function received, a module-level cache
+    a function fills, an instance kept on `self` / `this`,
+    `importlib.import_module` / `__import__` / `import()` of a literal name,
+    `require(path.join(__dirname, …))`, TypeScript's `__importDefault` and
+    `exports.default`, and an environment variable set in one file and read
+    in another; the other way round, a function of the package that runs its
+    parameter as code (`def run(c): exec(c)`) called with a value this file
+    received is the same finding, and says so. The npm engine runs it too
+    (`js/src/lib/crossfile.js`; the engines agree on the follower's cases and
+    a generated stream of 700 packages), so it is no longer a Python-only
+    exception; registry and guard scans run it on a release, naming the file
+    (not on tests, docs or examples, and not once the package is SUSPICIOUS).
+  - **An adversarial pass on the follower**: 28 ways to carry the value
+    between files or run it are read (each a test), 8 crafted look-alikes stay
+    quiet, and 2 known misses are documented and tested (an event emitter
+    between files; two top-level modules of site-packages in a `--deps` scan).
 - **`--version` on every Python command** (`lazaret`, `lazaret guard` /
   `lazaret-guard`, `lazaret-registry`, `lazaret-sca`, `lazaret-mcp`). Which
   install was on the PATH could only be told by importing the package, and

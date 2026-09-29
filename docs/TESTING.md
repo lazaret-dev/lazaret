@@ -33,8 +33,11 @@ redeem an earlier red.
    break parity.
 3. **Fuzz / differential, where the area has one.** The received-code parity
    (`test_js_parity_hooks.py`) runs ~30k generated cases through one Node process
-   and diffs every one against Python; the hooks/flow parity suites do the same
-   for their areas. Both engines must agree on *every* case.
+   (while Python reads them: the suite's time is the slower engine's) and diffs
+   every one against Python; the cross-file follower's
+   (`test_js_parity_crossfile.py`) generates 700 packages from the shapes it
+   reads; the hooks/flow parity suites do the same for their areas. Both
+   engines must agree on *every* case.
 4. **False-positive sweep on real code** (§4). The bar is **zero** new findings.
 5. **Bounded-work check** (§5) on an adversarial large input.
 6. **Docs** (`README.md`, this doc / `STRUCTURE.md` / `DESIGN.md` if the
@@ -94,13 +97,15 @@ top, `node_modules/` with and without `--deps`, CRLF, Unicode identifiers, bidi,
 `.pyc`, symlinks, a deep manifest, a large non-source file). It compares findings
 as a **multiset of (rule, file, line, severity, message)** plus metrics, ratings,
 gate and exit code. The `test_js_parity_*` suites compare the lower-level twins
-(received-code patterns, flow, lexing, gyp, hexname, lookalike).
+(received-code patterns, the cross-file follower, flow, lexing, gyp, hexname,
+lookalike).
 
 The only allowed differences are the documented **Python-only** features
 (`_python_only`): the flow engine's AST half (`X-*`, `Q-FLOW-*` on Python
-files), and the cross-file received-code follower (SC-IMPORT-RISK whose message
-contains "another file of the package"). Anything else that differs is a real
-divergence — fix the engine, not the test.
+files). (The cross-file received-code follower was the other until 0.1.8; the
+npm engine runs its twin now, and `test_js_parity_crossfile.py` compares the
+two on the follower's own cases and a generated stream of 700 packages.)
+Anything else that differs is a real divergence — fix the engine, not the test.
 
 ---
 
