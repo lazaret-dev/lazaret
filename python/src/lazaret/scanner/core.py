@@ -12110,22 +12110,33 @@ def dependency_checks(root, files, manifests, issues, excludes=(), should_stop=N
             _follow_dependency_hook(tree, issue, out, extra, run, followed_to_end)
         except Exception as exc:            # one manifest must never kill the run
             out.append(scan_error_issue(issue["file"], exc))
-    for f in files:
-        if not f.get("dep") or f["lang"] not in ("js", "py") or f["path"].replace(os.sep, "/") in run:
-            continue
+    # the import-time test for each dependency file, a batch at a time: the
+    # native engine reads a batch on threads (engine.py); the Python engine
+    # one file at a time, as it always has
+    from lazaret.scanner import engine
+    todo = [f for f in files
+            if f.get("dep") and f["lang"] in ("js", "py") and f["path"].replace(os.sep, "/") not in run]
+    size = engine.BATCH if engine.name() == "rust" else 1
+    for start in range(0, len(todo), size):
         if should_stop is not None:
             stopped = should_stop()
             if stopped:
                 return out, extra, stopped
+        chunk = todo[start:start + size]
         try:
-            found = dependency_import_issue(f["path"], f["content"], f["lang"])
-            agent = dependency_agent_issue(f["path"], f["content"])
-        except Exception as exc:
-            found, agent = scan_error_issue(f["path"], exc), None
-        if found is not None:
-            out.append(found)
-        if agent is not None:
-            out.append(agent)
+            risks = engine.import_time_risks([(f["content"], f["lang"]) for f in chunk])
+        except Exception:                   # each file is then read on its own below
+            risks = [None] * len(chunk)
+        for f, risk in zip(chunk, risks):
+            try:
+                found = dependency_import_issue(f["path"], f["content"], f["lang"], risk=risk)
+                agent = dependency_agent_issue(f["path"], f["content"])
+            except Exception as exc:
+                found, agent = scan_error_issue(f["path"], exc), None
+            if found is not None:
+                out.append(found)
+            if agent is not None:
+                out.append(agent)
     # Cross-file received code (both engines since 0.1.8): a value received in one
     # file of a package and run in another. Reached only when the checks above did
     # not stop (each returns early on should_stop), so no extra should_stop call
@@ -12173,6 +12184,7 @@ def _implicit_gyp_hooks(tree, manifests):
 
 
 def _follow_dependency_hook(tree, issue, out, extra, run, followed_to_end):
+    from lazaret.scanner import engine     # (imported here: engine imports core)
     manifest = issue["file"]
     base = posixpath.dirname(manifest.replace(os.sep, "/"))
     direct = agent_hijack_in_command(issue["cmd"])         # the hook runs the agent itself
@@ -12200,7 +12212,7 @@ def _follow_dependency_hook(tree, issue, out, extra, run, followed_to_end):
         if rel is None:
             continue
         text = _dependency_script_text(tree, rel, "sh" if rel.endswith(".sh") else "js", out, extra, run)
-        reasons = install_script_risk(text) if text else []
+        reasons = engine.install_script_risk(text) if text else []
         if reasons and issue["sev"] not in ("BLOCKER", "CRITICAL"):
             msg = f"Install hook runs {target}, which {'; and '.join(reasons)}."
             issue["sev"] = "CRITICAL"
@@ -12210,7 +12222,7 @@ def _follow_dependency_hook(tree, issue, out, extra, run, followed_to_end):
             out.append(agent)
         # the scripts it starts with node or python (0.1.8, spawned_scripts)
         for started, stext in _started_dependency_scripts(tree, rel, text, base, out, extra, run):
-            more = install_script_risk(stext) if stext else []
+            more = engine.install_script_risk(stext) if stext else []
             if more and issue["sev"] not in ("BLOCKER", "CRITICAL"):
                 shown = started[len(base) + 1:] if base and started.startswith(base + "/") else started
                 msg = f"Install hook runs {target}, which starts {shown}, which {'; and '.join(more)}."
@@ -12281,11 +12293,12 @@ def _read_dependency_script(tree, rel, as_lang, out, extra):
     return text
 
 
-def dependency_import_issue(path, text, lang=None):
+def dependency_import_issue(path, text, lang=None, risk=None):
     """SC-IMPORT-RISK (MAJOR, or CRITICAL: import_time_severity) for a
     dependency's JavaScript or Python file (`lang` 'js' or 'py') that fails
-    the import-time test (import_time_risk), else None."""
-    reasons, line = import_time_risk(text, lang)
+    the import-time test (import_time_risk; `risk`: its answer, when the
+    caller has it already), else None."""
+    reasons, line = risk if risk is not None else import_time_risk(text, lang)
     if not reasons:
         return None
     lines = text.split("\n")
@@ -13288,7 +13301,9 @@ def _positive_int(text):
 def _main(argv=None):
     global REDACT_SECRETS, EXCERPT_WIDTH, SOURCE_SIZE_CAP
     ap = argparse.ArgumentParser(prog="lazaret", description="Lazaret — security & quality scanner for Python/JS projects.")
-    ap.add_argument("--version", action="version", version=f"lazaret {_lazaret_pkg.__version__}")
+    from lazaret.scanner import engine     # (imported here: engine imports core)
+    ap.add_argument("--version", action="version",
+                    version=f"lazaret {_lazaret_pkg.__version__} (engine: {engine.describe()})")
     ap.add_argument("directory", help="Project directory to scan")
     ap.add_argument("--out-dir", metavar="DIR",
                     help="Directory for the default reports (default: the scan root). "
@@ -13340,8 +13355,17 @@ def _main(argv=None):
                     help=f"Largest source file or manifest read (default {SOURCE_SIZE_CAP:,}, env "
                          f"LAZARET_MAX_SOURCE_BYTES); a larger one is not scanned and gets "
                          f"SC-TRUNCATED, which fails the gate")
+    ap.add_argument("--engine", choices=engine.ENGINES, default=None,
+                    help="The engine that runs the supply-chain tests: rust (the native engine, the default "
+                         "where it is installed) or python (the reference engine; env LAZARET_ENGINE). Both "
+                         "give the same findings.")
     ap.add_argument("-q", "--quiet", action="store_true")
     args = ap.parse_args(argv)
+    try:
+        engine.choose(args.engine)
+    except engine.EngineError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(EXIT_USAGE)
     REDACT_SECRETS = not args.no_redact_secrets
     EXCERPT_WIDTH = args.excerpt_width
     if args.max_source_bytes:

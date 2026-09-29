@@ -159,6 +159,30 @@ project is pre-1.0, so the 0.x API may still change.
     (mistralai 2.4.6's `client/__init__.py`); and at install time a raw socket
     to a hard-coded address (as a URL with one already was) and browser
     shortcuts rewritten to load an extension (python-dateuti).
+- **A native engine for the supply-chain tests** (Python package; Rust,
+  `rust/`, `docs/RUST_ENGINE.md`). The install-script and import-time tests
+  and everything they read — the received-code detector, the decoded view,
+  the exfiltration shapes, services at login — run in a library written with
+  no external crates: its own regex engine (a port of CPython's, Python `re`
+  semantics on code points), JSON and Unicode 13.0 tables, with the patterns
+  extracted from `core.py` into a rule pack (`scripts/make_rust_tables.py`;
+  `--check` in CI). `--deps`, registry and guard scans send files to it in
+  batches of 64, read on up to 8 threads, answers in order; a file it can't
+  answer (its work budget spent, an error) is answered by the Python engine,
+  so it never loses a finding. It gives the Python engine's answers exactly:
+  differential tests on every pattern (Python 3.10–3.14) and on ~36,900
+  cases for 15 hook fields and 24 detectors, and the whole Python suite
+  passes with either engine. The import-time test over 678 of litellm's
+  modules takes 5.7 s instead of 15.6 s on one thread, 3.2 s on two; a
+  registry scan of the litellm wheel, 31.5 s instead of 40.5 s (the per-file
+  rules are still Python), with identical findings. `--engine rust|python`
+  and `LAZARET_ENGINE` choose (default: native where installed; `--engine
+  rust` fails when it isn't), and `--version` says which answers:
+  `lazaret 0.1.8 (engine: rust 0.1.8)`. A platform wheel carries it
+  (`LAZARET_NATIVE_LIBRARY` and `LAZARET_WHEEL_PLATFORM` in the build
+  backend); the pure wheel and the npm package run as before. CI builds it
+  on Linux, macOS and Windows and checks that no crate from outside the
+  repository appears (`scripts/check_rust_deps.py`).
 - **`--version` on every Python command** (`lazaret`, `lazaret guard` /
   `lazaret-guard`, `lazaret-registry`, `lazaret-sca`, `lazaret-mcp`). Which
   install was on the PATH could only be told by importing the package, and

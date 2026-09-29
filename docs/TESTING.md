@@ -30,7 +30,10 @@ redeem an earlier red.
    guard that the two engines still agree; treat a parity failure as "one engine
    is now wrong," not as flakiness. A deliberately Python-only feature must be
    registered in `_python_only` (in `test_js_parity.py`) or it will (correctly)
-   break parity.
+   break parity. If you touched the install-script or import-time test (or
+   anything they read), also the native engine's:
+   `python3 scripts/make_rust_tables.py` (then `--check`), build the library,
+   and `test_rust_parity_{regex,hooks,signs}.py` (§3).
 3. **Fuzz / differential, where the area has one.** The received-code parity
    (`test_js_parity_hooks.py`) runs ~30k generated cases through one Node process
    (while Python reads them: the suite's time is the slower engine's) and diffs
@@ -90,6 +93,12 @@ Notes:
   `test_js_parity_limits.py` holds the source-size and CRLF comparisons, split
   from `test_js_parity.py` in 0.1.8 when that module reached 45 s; split a
   module the same way when it nears the limit rather than raising a timeout.
+- The **native engine's parity modules** need the library built
+  (`cd rust && cargo build --release --offline --locked`) and named by
+  `LAZARET_NATIVE_LIB`; without it they skip. `test_rust_parity_hooks.py`
+  (~27 s) runs alone; `_regex` (~1 s) and `_signs` (~8 s) batch. A suite run
+  with `LAZARET_ENGINE=rust` sends every supply-chain test of the scanner and
+  the registry through the native engine; `=python` keeps them in core.
 
 ---
 
@@ -110,6 +119,17 @@ files). (The cross-file received-code follower was the other until 0.1.8; the
 npm engine runs its twin now, and `test_js_parity_crossfile.py` compares the
 two on the follower's own cases and a generated stream of 700 packages.)
 Anything else that differs is a real divergence — fix the engine, not the test.
+
+**The native engine** (Rust, `docs/RUST_ENGINE.md`) has no allowed
+differences at all. `test_rust_parity_regex.py` compares its regex engine
+with `re` on every rule-pack pattern and 126 hand-written probes (search,
+match, fullmatch, finditer, sub, split, with pos/endpos; run it on each
+Python 3.10–3.14); `test_rust_parity_hooks.py` compares the 15 fields of
+`hooks_view` and `test_rust_parity_signs.py` 24 detectors, case by case, on
+`hooks_corpus.py` (~36,900 cases, the corpus `test_js_parity_hooks.py`
+uses). `scripts/make_rust_tables.py --check` fails when the pack no longer
+matches `core.py`, and `scripts/check_rust_deps.py` when a crate from
+outside the workspace appears.
 
 ---
 
@@ -177,7 +197,9 @@ Before tagging, run **every** subsystem green, individually (§2):
 pass is what catches ripple from a change in a widely-imported module like
 `core.py` — it has caught a real regression that per-area tests missed (a
 `--deps` stop-budget accounting bug). Budget for it; it's ~2,400 Python tests +
-~350 JS tests, but each batch is seconds.
+~350 JS tests, but each batch is seconds. With the native library built, run
+the Python batches twice, with `LAZARET_ENGINE=rust` and `=python` (CI's
+`rust` job does the first on Linux).
 
 Then the release gates themselves: `sh scripts/check-versions.sh HEAD` (both
 package versions agree), and CI's own `versions` check runs inside the test
@@ -246,6 +268,8 @@ worth watching for during a release run.
 | Small subsystem | `PYTHONPATH=src:. python3 -m unittest discover -s tests/mcp -t .` |
 | Big subsystem | batch its files (§2), ≤45 s per batch |
 | Engine parity | `PYTHONPATH=src:. python3 -m unittest tests.architecture.test_js_parity` (heavy; run alone) |
+| Native engine parity | build (`cd rust && cargo build --release --offline --locked`), `export LAZARET_NATIVE_LIB=…`, then `tests.architecture.test_rust_parity_hooks` alone, `_regex` + `_signs` together |
+| Rule pack drift | `python3 scripts/make_rust_tables.py --check` (the Unicode table's check needs 3.10) |
 | Spec drift | `python3 scripts/sync-received-spec.py --check` + `tests.architecture.test_received_spec` |
 | One npm file | `cd js && node --test test/review-received-code.test.js` |
 | Simulate other platforms | `sh scripts/simulate-platforms.sh` |

@@ -20,12 +20,14 @@ on the zlib build, so compare artifacts built by the same Python; release CI
 pins one.
 
 What ships is an allowlist, not "whatever is in the directory": the wheel
-holds the package's *.py, *.sql and *.html files (and py.typed, if one is
-added), the sdist adds pyproject.toml, README.md, LICENSE, PKG-INFO and
-_build/*.py. Any other file under src/lazaret or _build (a .env, an editor
-swap file, a macOS ._* twin, a .orig backup, a symlink) stops the build with
-an error listing it, instead of being published. Tests and fixtures never
-ship (see STRUCTURE.md, "What ships to the registries").
+holds the package's *.py, *.sql, *.html and *.json files (and py.typed, if
+one is added) — a platform wheel also the native engine's library, named by
+LAZARET_NATIVE_LIBRARY (see _native_payload) — and the sdist adds
+pyproject.toml, README.md, LICENSE, PKG-INFO and _build/*.py. Any other
+file under src/lazaret or _build (a .env, an editor swap file, a macOS ._*
+twin, a .orig backup, a symlink) stops the build with an error listing it,
+instead of being published. Tests and fixtures never ship (see
+STRUCTURE.md, "What ships to the registries").
 """
 
 from __future__ import annotations
@@ -108,8 +110,46 @@ _ZIP_CREATE_SYSTEM = 3
 _FILE_MODE = 0o644
 
 
+# A platform wheel carries the native engine (rust/crates/lazaret-ffi, built
+# by release CI) as lazaret/_native/<library>, which lazaret.scanner._native
+# loads with ctypes: set LAZARET_NATIVE_LIBRARY to the built library and
+# LAZARET_WHEEL_PLATFORM to the platform tag it was built for
+# (manylinux_2_28_x86_64, macosx_11_0_arm64, win_amd64 …). Without them the
+# wheel is the pure one (py3-none-any), and the scanner runs its Python
+# engine; the sdist never carries the library.
+NATIVE_LIBRARY_ENV = "LAZARET_NATIVE_LIBRARY"
+WHEEL_PLATFORM_ENV = "LAZARET_WHEEL_PLATFORM"
+_PLATFORM_TAG_RE = re.compile(r"[a-z0-9_]+\Z")
+
+
 class UnexpectedFilesError(RuntimeError):
     """Files that are not on the allowlist were found where the build packs from."""
+
+
+def native_library_name(platform: str) -> str:
+    """The file name _native.py loads on a platform, by its wheel tag."""
+    if platform.startswith("win"):
+        return "lazaret_native.dll"
+    if platform.startswith("macosx"):
+        return "liblazaret_native.dylib"
+    return "liblazaret_native.so"
+
+
+def _native_payload() -> tuple[str, dict[str, bytes]]:
+    """(the wheel's platform tag, {arcname: bytes} of the native library) from
+    the environment; ('any', {}) for the pure wheel."""
+    library = os.environ.get(NATIVE_LIBRARY_ENV, "")
+    platform = os.environ.get(WHEEL_PLATFORM_ENV, "")
+    if not library and not platform:
+        return "any", {}
+    if not (library and platform):
+        raise RuntimeError(f"a platform wheel needs both {NATIVE_LIBRARY_ENV} and {WHEEL_PLATFORM_ENV}")
+    if not _PLATFORM_TAG_RE.match(platform) or platform == "any":
+        raise RuntimeError(f"{WHEEL_PLATFORM_ENV}={platform!r} is not a platform tag")
+    path = pathlib.Path(library)
+    if path.is_symlink() or not path.is_file():
+        raise RuntimeError(f"{NATIVE_LIBRARY_ENV}={library!r} is not a regular file")
+    return platform, {f"lazaret/_native/{native_library_name(platform)}": path.read_bytes()}
 
 
 # --- helpers -------------------------------------------------------------------
@@ -235,16 +275,17 @@ class _WheelWriter:
         self._zip.close()
 
 
-def _write_wheel(directory: str, payload: dict[str, bytes]) -> str:
+def _write_wheel(directory: str, payload: dict[str, bytes], platform: str = "any") -> str:
     ver = version()
     dist_info = f"{NAME}-{ver}.dist-info"
-    filename = f"{NAME}-{ver}-py3-none-any.whl"
+    filename = f"{NAME}-{ver}-py3-none-{platform}.whl"
     writer = _WheelWriter(pathlib.Path(directory) / filename)
     for arcname in sorted(payload):
         writer.add(arcname, payload[arcname])
     writer.add(f"{dist_info}/METADATA", metadata_text().encode("utf-8"))
+    purelib = "true" if platform == "any" else "false"
     writer.add(f"{dist_info}/WHEEL", (
-        "Wheel-Version: 1.0\nGenerator: lazaret_build\nRoot-Is-Purelib: true\nTag: py3-none-any\n"
+        f"Wheel-Version: 1.0\nGenerator: lazaret_build\nRoot-Is-Purelib: {purelib}\nTag: py3-none-{platform}\n"
     ).encode("utf-8"))
     writer.add(f"{dist_info}/entry_points.txt", _entry_points_text().encode("utf-8"))
     license_file = ROOT / "LICENSE"
@@ -270,7 +311,9 @@ def get_requires_for_build_editable(config_settings=None):
 
 def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
     payload = {path.relative_to(SRC).as_posix(): path.read_bytes() for path in _package_files()}
-    return _write_wheel(wheel_directory, payload)
+    platform, native = _native_payload()
+    payload.update(native)
+    return _write_wheel(wheel_directory, payload, platform)
 
 
 def build_editable(wheel_directory, config_settings=None, metadata_directory=None):

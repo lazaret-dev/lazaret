@@ -26,6 +26,10 @@ ships as **two independently-installable packages that must behave identically**
   It is the **project scanner only** (`lazaret <dir>`); registry auditing,
   custom taint specs, SCA and the MCP server are Python-only.
 
+A platform wheel of the PyPI package also carries a **native engine** written
+in Rust (`rust/`, no crates), which answers the supply-chain tests faster; the
+Python engine stays the reference it is held to (§2, `docs/RUST_ENGINE.md`).
+
 The name is a quarantine metaphor (a *lazaret* is a quarantine station): you run
 untrusted dependencies past it before letting them in.
 
@@ -66,6 +70,18 @@ same metrics, ratings, quality gate and exit code.
   (`test_review_dashboard_parity.py`). Editing the dashboard's inline script
   requires re-running `scripts/dashboard_csp.py` (its CSP pins the script by
   SHA-256).
+- **The native engine** (`rust/crates/lazaret-engine`, 0.1.8) is a port of
+  core's supply-chain tests — the install-script and import-time tests and
+  everything they read — with Python `re` semantics (its own port of sre) and
+  the patterns extracted from `core.py` into a rule pack. The Python package
+  sends those tests through it where it is installed
+  (`lazaret.scanner.engine`; `--engine rust|python`), and core answers any
+  call it can't (a spent work budget, an error), so it never loses a finding.
+  `test_rust_parity_{regex,hooks,signs}.py` compare it with core on every
+  pack pattern and the 36,900-case hooks corpus: zero differences allowed.
+  A change to those tests is made in core, ported to Rust and the pack
+  regenerated (`scripts/make_rust_tables.py`; `--check` in CI), in the same
+  commit.
 
 ### The documented Python-only exception
 
@@ -504,11 +520,17 @@ This is the working method. Follow it; it is why the tool has stayed trustworthy
 3. **Implement in the Python engine.** Keep it needle-gated and bounded.
 4. **Twin it in the JS engine with exact parity**, in the same commit. Mark the
    twin (`Twin of lazaret.scanner.core…`). For received-code patterns, edit the
-   **shared spec** and sync instead of hand-writing both.
+   **shared spec** and sync instead of hand-writing both. A change to the
+   install-script or import-time test (or anything they read) is also ported
+   to the native engine, with the rule pack regenerated
+   (`python3 scripts/make_rust_tables.py`); a pattern core builds at run time
+   is built from named module-level pieces, so the extractor sees them.
 5. **Verify:**
    - the behavioral suites (both engines);
    - **engine parity** — `test_js_parity*` (the differential corpus + the
-     pattern twins); a Python-only feature goes in `_python_only`;
+     pattern twins); a Python-only feature goes in `_python_only`; and
+     `test_rust_parity_*` with the native library built
+     (`docs/RUST_ENGINE.md` §5);
    - **a fuzz differential** where relevant (the received-code parity runs
      ~33k cases; both engines must agree on every one);
    - **the false-positive sweep** against the real corpora (§7): the bar is 0
@@ -623,6 +645,10 @@ fixture.
 | `js/src/lib/received-spec.json` | Synced copy of the spec (do not edit by hand) |
 | `js/src/lib/hooks.js`, `js/src/scanner/flow.js`, `js/src/index.js` | Install-hook checks, flow twin, npm CLI |
 | `python/tests/architecture/test_js_parity*.py` | The engine-parity guards |
+| `rust/crates/lazaret-engine`, `lazaret-ffi` | The native engine (supply-chain tests, sre port, rule pack) and its C ABI (`docs/RUST_ENGINE.md`) |
+| `python/src/lazaret/scanner/engine.py`, `_native.py` | Which engine answers (`--engine`, `LAZARET_ENGINE`), batching and threads, the Python fallback; the ctypes loader |
+| `python/tests/architecture/test_rust_parity_*.py`, `hooks_corpus.py` | The native engine's parity guards and the corpus they share with `test_js_parity_hooks.py` |
+| `scripts/make_rust_tables.py`, `check_rust_deps.py` | The rule pack from `core.py` (`--check`); no crate from outside the workspace |
 | `python/tests/architecture/test_received_spec.py` | Spec drift + core-uses-spec guard |
 | `scripts/sync-received-spec.py`, `check-versions.sh`, `tag-release.sh` | Sync, version, release tooling |
 
@@ -743,9 +769,11 @@ comprehensive, so weigh marginal value against FP risk):
   a registry scan reads a release's as one). Nor a name built at run time
   (`getattr(m, name)`), a runner behind another function (one that hands its
   parameter to another file's runner), or more than four hops.
-- *Engine:* the Rust scanning engine (`docs/RUST_ENGINE.md`), built
-  separately: integrate it, and hold it to the Python reference with the
-  differential harness before it becomes the default.
+- *Engine:* the native engine answers the supply-chain tests (0.1.8,
+  `docs/RUST_ENGINE.md`); next, release builds of the platform wheels,
+  WebAssembly for the npm package (then the JavaScript twin can go), the
+  per-file rules (`scan_file`), and `core.py` loading the rule pack so it
+  has one source.
 - *Quality:* a durable home for this backlog (a `BACKLOG.md` or issues).
 - *Guard:* registries that need credentials (read them from the tool's own
   settings, for that host only), yarn and Bun, `uv run` / `uvx`; the scan of a

@@ -11,6 +11,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+import unittest.mock
 import zipfile
 
 from tests import _support
@@ -110,8 +111,42 @@ class BuildTests(unittest.TestCase):
                             f"sys.exit({func}())")
                     p = subprocess.run([sys.executable, "-c", code], capture_output=True, encoding="utf-8",
                                        errors="replace", env=env, cwd=target, timeout=60)
-                    self.assertEqual((p.returncode, p.stdout), (0, f"{shown.get(name, name)} {self.version}\n"),
-                                     p.stderr)
+                    # the scanning commands name the engine they run (engine.py): the
+                    # native one where it is installed, else python
+                    self.assertEqual(p.returncode, 0, p.stderr)
+                    self.assertRegex(p.stdout, "^" + re.escape(f"{shown.get(name, name)} {self.version}")
+                                     + (r" \(engine: (?:rust \S+|python)\)" if name in ("lazaret", "lazaret-registry")
+                                        else "") + "\n\\Z")
+
+    def test_a_platform_wheel_carries_the_native_engine(self):
+        """LAZARET_NATIVE_LIBRARY and LAZARET_WHEEL_PLATFORM make a platform
+        wheel with the library where _native.py looks for it; one without
+        the other, or a bad tag, stops the build."""
+        with tempfile.TemporaryDirectory() as d:
+            lib = pathlib.Path(d, "built.so")
+            lib.write_bytes(b"\x7fELF-native-engine")
+            env = {"LAZARET_NATIVE_LIBRARY": str(lib), "LAZARET_WHEEL_PLATFORM": "manylinux_2_28_x86_64"}
+            with unittest.mock.patch.dict(os.environ, env):
+                name = self.b.build_wheel(d)
+            self.assertEqual(name, f"lazaret-{self.version}-py3-none-manylinux_2_28_x86_64.whl")
+            wheel = os.path.join(d, name)
+            self.assertEqual(read_member(wheel, "lazaret/_native/liblazaret_native.so"), b"\x7fELF-native-engine")
+            info = read_member(wheel, f"lazaret-{self.version}.dist-info/WHEEL").decode()
+            self.assertIn("Root-Is-Purelib: false\n", info)
+            self.assertIn("Tag: py3-none-manylinux_2_28_x86_64\n", info)
+            record = read_member(wheel, f"lazaret-{self.version}.dist-info/RECORD").decode()
+            self.assertIn("lazaret/_native/liblazaret_native.so,sha256=", record)
+            self.assertEqual(self.b.native_library_name("win_amd64"), "lazaret_native.dll")
+            self.assertEqual(self.b.native_library_name("macosx_11_0_arm64"), "liblazaret_native.dylib")
+            for bad in ({"LAZARET_NATIVE_LIBRARY": str(lib)}, {"LAZARET_WHEEL_PLATFORM": "win_amd64"},
+                        dict(env, LAZARET_WHEEL_PLATFORM="Linux x86"), dict(env, LAZARET_WHEEL_PLATFORM="any"),
+                        dict(env, LAZARET_NATIVE_LIBRARY=os.path.join(d, "missing.so"))):
+                with self.subTest(env=bad), unittest.mock.patch.dict(os.environ, bad):
+                    with self.assertRaises(RuntimeError):
+                        self.b.build_wheel(d)
+        self.assertNotIn("lazaret/_native/liblazaret_native.so", self.names())      # the pure wheel has none
+        with tarfile.open(self.sdist) as t:
+            self.assertFalse([n for n in t.getnames() if "/_native/" in n])
 
     def test_builds_are_reproducible(self):
         with tempfile.TemporaryDirectory() as d:

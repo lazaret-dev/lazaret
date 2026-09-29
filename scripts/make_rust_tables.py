@@ -352,6 +352,8 @@ def main(argv):
     problems = []
     for key in [k for k in os.environ if k.startswith("LAZARET_")]:
         del os.environ[key]                           # (defaults only: the pack must not depend on the caller)
+    from lazaret.scanner.core import configure_stdio  # (after the environment is cleared: core reads it)
+    configure_stdio()
     pack = render_pack(pack_data())
     if check:
         if not os.path.exists(PACK_OUT) or open(PACK_OUT, encoding="utf-8").read() != pack:

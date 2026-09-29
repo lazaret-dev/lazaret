@@ -26,6 +26,7 @@ From a checkout, `pip install ./python` (or `pip install -e ./python` for develo
 |---|---|
 | `lazaret` (`lazaret.scanner.core`) | CLI: scan a directory tree, produce project reports |
 | `lazaret.scanner.flow` | Interprocedural / cross-file taint engine (used by the CLI, MCP, registry) |
+| `lazaret.scanner.engine`, `rust/` | Native engine (Rust, no crates) for the supply-chain tests, where a platform wheel carries it; `--engine rust\|python` (below) |
 | `lazaret-sca` (`lazaret.scanner.sca`) | Dependency CVE scanner: matches installed npm/PyPI packages against a CVE bundle |
 | `lazaret-registry` (`lazaret.registry`) | Registry scanner: audit npm/PyPI packages, track state in a DB |
 | `lazaret guard`, `lazaret-guard` (`lazaret.registry.guard`) | Install guard: check what npm, pnpm, pip or uv is about to install (resolve, fetch, scan in memory) and block it before it runs |
@@ -49,6 +50,7 @@ lazaret . --sarif out.sarif         # SARIF 2.1.0 for GitHub code scanning
 lazaret . --baseline prev.json      # mark issues not in a previous report as new
 lazaret . --no-redact-secrets       # keep credential lines in reports (default: redacted)
 lazaret . --taint-config taint.json # extend the taint model (see "Custom taint config")
+lazaret . --deps --engine python    # the Python engine for the supply-chain tests (default: native where installed)
 ```
 
 **Secret redaction (on by default):** credentials are replaced with a
@@ -483,6 +485,7 @@ Lazaret is licensed under **Apache-2.0** and has **no external dependencies**, a
 - **Runtime:** only the Python standard library. The Postgres state backend speaks the wire protocol itself (`lazaret.pg`), and registry feeds are parsed with `lazaret.safexml`, so there are no optional extras either.
 - **Build:** `python/pyproject.toml` declares no build requirements; a small standard-library backend in `python/_build/` produces the wheel and sdist. `pip install` works with no network index.
 - **Tests:** plain `unittest`; the whole suite runs on a stock interpreter.
+- **Native engine** (0.1.8): a platform wheel also carries a library built from `rust/`, which answers the install-script and import-time tests (`--deps`, registry and guard scans) about 3× faster per file, and on several threads. It is written with **no external crates** — its own regex engine (a port of CPython's), JSON and Unicode tables — and `scripts/check_rust_deps.py` fails CI if a crate from outside the repository appears. It gives the Python engine's answers exactly (differential tests on every pattern and ~36,900 cases), and any file it can't answer is answered by the Python engine. `--engine python` (or `LAZARET_ENGINE=python`) keeps the Python engine, `--engine rust` fails if the library is missing, and `--version` names the engine in use. The pure wheel runs the Python engine, with the same findings.
 - **Dashboard:** `lazaret.html` is one self-contained file, with no CDN assets, web fonts, or third-party scripts; its content-security policy is `default-src 'none'` and allows only the page's own inline script, by SHA-256 hash (no `'unsafe-inline'`; run `python3 scripts/dashboard_csp.py` after editing the script — `test_dashboard.py` enforces it). Its engine is a port of the npm engine (uploads may include `.pth` files, which get the SC-PTH-EXEC check) and reports the same per-file findings as the CLI (the cross-file pass is the CLI's), redacts secrets the same way, and exports under its own name (`lazaret-dashboard-export.json`, marked `generatedBy: lazaret-dashboard-1`) so an export is never mistaken for a CLI report.
 
 Tests enforce this: `tests/architecture/test_stdlib_only.py` fails on any non-stdlib import in the package or the build backend, and `tests/build/test_build_backend.py` checks that the wheel declares no dependencies. Test fixtures that mention third-party packages (`flask`, `requests`, `evil-pkg` …) are scan *targets*; nothing imports them.
@@ -501,6 +504,11 @@ LAZARET_TEST_PG_DSN=postgresql://user:pw@localhost/lazaret_test \
   python -m unittest tests.pg.test_integration tests.pg.test_review_live tests.registry.test_pg_backend  # live Postgres; user needs CREATEDB
 
 cd ../js && node --test                        # the npm engine
+
+cd ../rust && cargo build --release --offline --locked      # the native engine (no crates to fetch)
+export LAZARET_NATIVE_LIB=$PWD/target/release/liblazaret_native.so   # .dylib on macOS, lazaret_native.dll on Windows
 ```
+
+`docs/RUST_ENGINE.md` covers the native engine: its design, the parity tests that hold it to the Python engine, and building a platform wheel.
 
 `STRUCTURE.md` describes the repository layout, where tests and fixtures live, and what ships to the registries. `docs/RELEASING.md` covers claiming the package names, trusted publishing, and cutting a release. Security reports: see `SECURITY.md`.

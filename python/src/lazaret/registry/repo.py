@@ -59,6 +59,7 @@ from lazaret.scanner import core as lazaret  # noqa: E402
 
 from lazaret import safexml as _safexml                 # noqa: E402
 from lazaret.registry import lookalike as _lookalike    # noqa: E402
+from lazaret.scanner import engine as _engine           # noqa: E402
 from lazaret.safexml import ElementTree as _safe_ET     # noqa: E402
 
 
@@ -1409,7 +1410,7 @@ def startup_module_issue(rel, text):
     capability to review, like SC-PTH-EXEC), CRITICAL when the code looks
     hostile by the install-script test (install_script_risk)."""
     module = _STARTUP_MODULE_RE.match(rel).group(1)
-    reasons = install_script_risk(text)
+    reasons = _engine.install_script_risk(text)
     msg = f"{rel} is installed as {module} in site-packages, which Python imports at every start"
     msg += f", and it {'; and '.join(reasons)}." if reasons else "."
     return lazaret.mk_issue(
@@ -1808,13 +1809,13 @@ class _ArtifactScan:
                 self.install_scripts.add(rel)
                 lang = "sh" if rel.endswith(".sh") else "js"
                 text = self._text_of(rel, lang)
-                reasons = install_script_risk(text) if text else []
+                reasons = _engine.install_script_risk(text) if text else []
                 if reasons and issue["sev"] not in STRONG_SEVERITIES:
                     issue["sev"] = "CRITICAL"
                     issue["msg"] = f"Install hook runs {target}, which {'; and '.join(reasons)}."
                 # the scripts it starts with node or python (0.1.8, core.spawned_scripts)
                 for started, more in self._started_scripts(rel, text, base, self.install_scripts):
-                    more = install_script_risk(more) if more else []
+                    more = _engine.install_script_risk(more) if more else []
                     if more and issue["sev"] not in STRONG_SEVERITIES:
                         issue["sev"] = "CRITICAL"
                         issue["msg"] = (f"Install hook runs {target}, which starts {started}, which "
@@ -1897,7 +1898,7 @@ class _ArtifactScan:
             self.entries.add(rel)
             self.install_scripts.add(rel)
             text = self.sources.get(rel, ("", "py"))[0]
-            reasons = install_script_risk(text)
+            reasons = _engine.install_script_risk(text)
             # a download written to a file and run: CRITICAL in the code pip
             # runs to install an sdist (a prebuilt-binary installer's shape
             # keeps it MAJOR-only in npm hooks and import-time code)
@@ -1999,15 +2000,14 @@ class _ArtifactScan:
             if text and lang in ("js", "py") and rel not in self.install_scripts:
                 self._started_scripts(rel, text, None, started)
         files = set(files) | {rel for rel in started if rel not in self.install_scripts}
+        todo = []
         for rel in sorted(files):
             if rel in self.install_scripts or rel in self.startup:
                 continue
             text, lang = self.sources.get(rel, (None, None))
-            if not text or lang not in ("js", "py"):
-                continue
-            self._deadline(rel)
-            text = lazaret.normalize_newlines(text)
-            reasons, line = import_time_risk(text, lang)
+            if text and lang in ("js", "py"):
+                todo.append((rel, text, lang))
+        for rel, text, lang, (reasons, line) in self._import_time_risks(todo):
             if not reasons:
                 continue
             self.issues.append(lazaret.mk_issue(
@@ -2027,6 +2027,21 @@ class _ArtifactScan:
         self._use_time_code(set(files))
         self._cross_file_code()
 
+    def _import_time_risks(self, todo, stop=None):
+        """(rel, text, lang, import_time_risk's answer) for [(rel, text, lang)]
+        (the text with its newlines normalized), in order, a batch at a time
+        (engine.py: the native engine reads a batch on threads, the Python
+        engine a file at a time); the deadline is checked before each batch,
+        and past `stop` (time.monotonic()) no batch is started."""
+        size = _engine.BATCH if _engine.name() == "rust" else 1
+        for start in range(0, len(todo), size):
+            if stop is not None and time.monotonic() > stop:
+                return
+            chunk = [(rel, lazaret.normalize_newlines(text), lang) for rel, text, lang in todo[start:start + size]]
+            self._deadline(chunk[0][0])
+            for (rel, text, lang), risk in zip(chunk, _engine.import_time_risks([(t, lg) for _r, t, lg in chunk])):
+                yield rel, text, lang, risk
+
     def _suspicious(self):
         """Has a strong supply-chain finding made the package SUSPICIOUS already?"""
         return any(i["rule"].startswith("SC-") and i["rule"] not in TRUNCATION_RULES and i["sev"] in STRONG_SEVERITIES
@@ -2040,17 +2055,14 @@ class _ArtifactScan:
             return
         stop = time.monotonic() + USE_RISK_SECONDS
         # smallest first: within the time, as many files as can be read (droppers are small)
+        todo = []
         for rel in sorted(self.sources, key=lambda r: (len(self.sources[r][0] or ""), r)):
-            if time.monotonic() > stop:
-                break
             if rel in loaded or rel in self.install_scripts or rel in self.startup or _not_used_code(rel):
                 continue
             text, lang = self.sources[rel]
-            if not text or lang not in ("js", "py") or len(text) > USE_RISK_MAX_CHARS:
-                continue
-            self._deadline(rel)
-            text = lazaret.normalize_newlines(text)
-            reasons, line = import_time_risk(text, lang)
+            if text and lang in ("js", "py") and len(text) <= USE_RISK_MAX_CHARS:
+                todo.append((rel, text, lang))
+        for rel, text, lang, (reasons, line) in self._import_time_risks(todo, stop):
             strong = [r for r in reasons if r.startswith(lazaret._STRONG_IMPORT_REASONS)]
             if not strong:
                 continue
@@ -4272,7 +4284,8 @@ def main():
     global SCAN_TIMEOUT, MAX_ARTIFACTS, MAX_PACKAGE_DOWNLOAD_BYTES, MAX_MEMBER
     lazaret.configure_stdio()
     ap = argparse.ArgumentParser(prog="lazaret-registry", description="Lazaret npm/PyPI registry scanner")
-    ap.add_argument("--version", action="version", version=f"lazaret-registry {lazaret.VERSION}")
+    ap.add_argument("--version", action="version",
+                    version=f"lazaret-registry {lazaret.VERSION} (engine: {_engine.describe()})")
     ap.add_argument("command", choices=["add", "scan", "scan-all", "list", "report", "discover"])
     ap.add_argument("specs", nargs="*", help="npm:<name>[@ver] or pypi:<name>[@ver]")
     ap.add_argument("--db", default=os.environ.get("LAZARET_DB", "lazaret-registry.db"),
@@ -4324,7 +4337,16 @@ def main():
                     help="discover: scan the discovered packages (and track them)")
     ap.add_argument("--add", action="store_true",
                     help="discover: add discovered packages to the watchlist")
+    ap.add_argument("--engine", choices=_engine.ENGINES, default=None,
+                    help="The engine that runs the supply-chain tests: rust (the native engine, the default "
+                         "where it is installed) or python (the reference engine; env LAZARET_ENGINE). Both "
+                         "give the same findings.")
     args = ap.parse_args()
+    try:
+        _engine.choose(args.engine)
+    except _engine.EngineError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(2)
     if args.no_redact_secrets:
         # review P2: a raw credential line must never reach the state DB,
         # which other tools (the MCP server, a shared Postgres) read back

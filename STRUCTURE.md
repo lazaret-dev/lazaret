@@ -28,17 +28,23 @@ lazaret/
 ├── LICENSE             Apache-2.0
 ├── .github/            workflows (ci.yml, release.yml) and dependabot.yml
 ├── docs/RELEASING.md   claiming names, trusted publishing, cutting a release
+├── docs/RUST_ENGINE.md the native engine: design, parity contract, building
 ├── examples/           lazaret-taint.example.json, mcp-config.json
 ├── .gitattributes      LF line endings everywhere (reproducible builds on Windows too)
 ├── scripts/            check-versions.sh, tag-release.sh, make_bundle.py,
 │                       make_typosquat_stubs.py, dashboard_csp.py,
 │                       make_codec_tables.py, make_unicode_tables.py,
+│                       make_rust_tables.py, check_rust_deps.py,
+│                       sync-received-spec.py, update-popular-names.py,
 │                       simulate-platforms.sh
 ├── python/             the PyPI package   (sections 3–4)
-└── js/                 the npm package    (section 5)
+├── js/                 the npm package    (section 5)
+└── rust/               the native engine  (Cargo workspace, no external crates)
 ```
 
-`scripts/check-versions.sh [REF [TAG]]` fails if the Python and npm versions, or a release tag, disagree, so the two packages release in lockstep. Given a ref it reads both version files from that commit (`git show`), so it checks what a tag actually points at; with no ref it reads the working tree and refuses uncommitted changes to either version file. `scripts/tag-release.sh vX.Y.Z` is the only way to cut a tag: it refuses a dirty tree or a commit that isn't on `main`, runs the version check against the tag-to-be, creates an annotated tag, and prints the one-tag push command (see `docs/RELEASING.md`). `scripts/make_bundle.py` builds a source bundle of the repository (for sharing the repo itself, not for installing): only git-tracked files when `.git` exists, never credential files (`.env*`, `.npmrc`, `.pypirc`, `.netrc`, keys, …) or OS junk (`._*`, `.DS_Store`), and byte-for-byte reproducible. Use it (or `git archive`) rather than a plain `tar` of a working tree. `scripts/make_typosquat_stubs.py` builds the defensive stub packages described in `docs/RELEASING.md`; `--check` reports which stub names are still unclaimed. `scripts/dashboard_csp.py` recomputes the dashboard's script hash in its content-security policy (run it after editing the page's script). `scripts/make_codec_tables.py` writes `js/src/lib/codecs.js` (and the dashboard's copy) from Python's codecs, so both engines decode a coding cookie's codec the same way; `scripts/make_unicode_tables.py` writes the Unicode 13.0 table (`lazaret/scanner/_unicode13.py` and its JS twins) both engines read source text in, so results do not depend on the Python or Node version's Unicode. `scripts/simulate-platforms.sh` runs the Python suite the ways Windows, macOS and a non-root CI runner would see it (section 4, "Cross-platform rules").
+`scripts/check-versions.sh [REF [TAG]]` fails if the Python and npm versions, or a release tag, disagree, so the two packages release in lockstep. Given a ref it reads both version files from that commit (`git show`), so it checks what a tag actually points at; with no ref it reads the working tree and refuses uncommitted changes to either version file. `scripts/tag-release.sh vX.Y.Z` is the only way to cut a tag: it refuses a dirty tree or a commit that isn't on `main`, runs the version check against the tag-to-be, creates an annotated tag, and prints the one-tag push command (see `docs/RELEASING.md`). `scripts/make_bundle.py` builds a source bundle of the repository (for sharing the repo itself, not for installing): only git-tracked files when `.git` exists, never credential files (`.env*`, `.npmrc`, `.pypirc`, `.netrc`, keys, …) or OS junk (`._*`, `.DS_Store`), and byte-for-byte reproducible. Use it (or `git archive`) rather than a plain `tar` of a working tree. `scripts/make_typosquat_stubs.py` builds the defensive stub packages described in `docs/RELEASING.md`; `--check` reports which stub names are still unclaimed. `scripts/dashboard_csp.py` recomputes the dashboard's script hash in its content-security policy (run it after editing the page's script). `scripts/make_codec_tables.py` writes `js/src/lib/codecs.js` (and the dashboard's copy) from Python's codecs, so both engines decode a coding cookie's codec the same way; `scripts/make_unicode_tables.py` writes the Unicode 13.0 table (`lazaret/scanner/_unicode13.py` and its JS twins) both engines read source text in, so results do not depend on the Python or Node version's Unicode. `scripts/simulate-platforms.sh` runs the Python suite the ways Windows, macOS and a non-root CI runner would see it (section 4, "Cross-platform rules"). `scripts/make_rust_tables.py` writes the native engine's rule pack (`rust/crates/lazaret-engine/rules/lazaret-rules.json`, every module-level pattern, set and limit of `core.py`) and, on Python 3.10, its Unicode 13.0 table; `--check` fails when either no longer matches. `scripts/check_rust_deps.py` fails when `rust/Cargo.lock` or a crate's manifest names anything outside the workspace. `scripts/update-popular-names.py` rebuilds the registry's list of popular package names (`lazaret/registry/popular_names.json`) from its two public sources.
+
+`rust/` holds the native engine (`docs/RUST_ENGINE.md`): `crates/lazaret-engine` (no `unsafe`, no I/O, no dependencies: a port of CPython's regex engine, JSON, the supply-chain tests) and `crates/lazaret-ffi` (the C ABI, loaded by `lazaret/scanner/_native.py` with ctypes). `cargo build --release --offline --locked` needs no registry.
 
 ---
 
@@ -62,6 +68,9 @@ python/
 │   │   │                   project-scan pipeline, shared by the CLI and MCP), the
 │   │   │                   `lazaret` CLI
 │   │   ├── flow.py         interprocedural / cross-file taint
+│   │   ├── engine.py       which engine answers the supply-chain tests (native
+│   │   │                   or Python; `--engine`), batches, the fallback
+│   │   ├── _native.py      the native engine's ctypes loader
 │   │   ├── taintspec.py    taint-config validation (shared by both taint engines)
 │   │   ├── reports.py      safe report paths, report provenance, baseline signing
 │   │   ├── sca.py          dependency CVE matching (`lazaret-sca`)
@@ -297,13 +306,15 @@ Package metadata and the console scripts are defined in that module rather than 
 
 The backend packs from an allowlist (`*.py`, `*.sql`, `*.html`, `py.typed` under `src/lazaret/`) and stops with a list of offenders if anything else is there — a stray `.env`, `._*`, `.DS_Store`, `*.orig` or editor swap file can't reach a wheel or sdist built from a working tree. Metadata is version 2.4 with `License-Expression: Apache-2.0` and `License-File: LICENSE` (PEP 639).
 
+A **platform wheel** adds the native engine: with `LAZARET_NATIVE_LIBRARY` naming the built library (`rust/target/release/liblazaret_native.so`, `.dylib`, or `lazaret_native.dll`) and `LAZARET_WHEEL_PLATFORM` its platform tag (`manylinux_2_28_x86_64`, `macosx_11_0_arm64`, `win_amd64` …), the backend writes `lazaret-<version>-py3-none-<tag>.whl` with the library at `lazaret/_native/`, where `_native.py` loads it. One of the two variables without the other, a malformed tag, or a library that is not a regular file stops the build. Without them the wheel is the pure `py3-none-any` one, which runs the Python engine with the same findings; the sdist never carries a library. A Linux library is built in the manylinux image of its tag, so it needs no newer glibc than the tag promises.
+
 Builds are reproducible: file order, timestamps, permissions and the zip "created on" system are fixed, `.gitattributes` keeps line endings LF on every checkout, and release CI stamps artifacts with the tagged commit's time (`SOURCE_DATE_EPOCH`), so rebuilding a tag gives byte-identical files on any OS. `tests/build/test_build_backend.py` checks this, along with the archive contents, the RECORD hashes, the absence of dependencies, and that the installed wheel runs.
 
 ---
 
 ## 8. What ships to the registries
 
-**PyPI wheel:** only `src/lazaret/` (including `schema.sql` and the dashboard HTML) plus metadata. No tests, no fixtures, no build backend.
+**PyPI wheel:** only `src/lazaret/` (including `schema.sql` and the dashboard HTML) plus metadata. No tests, no fixtures, no build backend. A platform wheel also carries the native engine's library, `lazaret/_native/<library>`, and nothing else from `rust/`.
 
 **PyPI sdist:** `pyproject.toml`, `_build/`, `src/`, `README.md`, `LICENSE`, `PKG-INFO`. Enough to rebuild the wheel, and no tests. Many projects include tests in the sdist so Linux distributions can run them; Lazaret deliberately doesn't, because its fixtures include entity-bomb documents and lookalike-package files that other scanners may flag on a PyPI release. Distribution packagers can use the tagged GitHub release archive, which has everything.
 
@@ -321,6 +332,7 @@ Nothing from `lazaret-samples` ever enters any artifact. Credential files are re
 - **python-unit**: the whole suite on Linux, macOS, and Windows × Python 3.10–3.14. Gated tests skip. The OS matrix matters more than usual: Python bundles different Expat versions on macOS and Windows (which `safexml` depends on), and `pg` has platform-specific paths (Unix sockets, the pgpass permission check, the Windows `APPDATA` location).
 - **python-integration**: the live-Postgres tests against a throwaway `postgres:17` service container, pinned by digest.
 - **js**: `npm test` on Linux, macOS, and Windows × Node 22 and 24.
+- **rust**: on Linux, macOS, and Windows: `check_rust_deps.py`, `make_rust_tables.py --check` (on Python 3.10, which the Unicode table is made with), `cargo test` and the release build (`--offline --locked`: no crate is fetched), the native engine's parity modules against the built library, and on Linux the whole Python suite with `LAZARET_ENGINE=rust`.
 
 Nothing is installed in any job. The test matrix uses floating minor versions on purpose (`3.10`…`3.14`, Node `22`/`24`, to catch new patch releases); the release jobs pin exact versions (Python 3.12.14, Node 24.21.0 with its bundled npm 11.19.0). `.github/workflows/release.yml` runs on a `v*` tag: `verify-tag` checks that the tagged commit is on `main` and that both versions match the tag, then CI reruns, `build-python` and `build-npm` build the artifacts (the npm tarball is packed once and published as built), and each package is published after approval on its `pypi` or `npm` environment. Both publish jobs need both builds, so one registry never gets a release the other can't. npm releases are staged: they go public only after a second approval, with 2FA, on npm itself. Dependabot proposes action updates after a 7-day cooldown.
 
