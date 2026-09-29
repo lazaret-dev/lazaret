@@ -6272,6 +6272,9 @@ _ENV_COPY_RE = re.compile(
     r"(?<![\w$.])([A-Za-z_$][\w$]*)\s{0,40}=\s{0,40}(?:dict\(\s*os\.environ\s*\)|os\.environ\.copy\(\s*\)"
     r"|\{\s*\*\*\s*os\.environ\s*\}|\{\s*\.\.\.\s*process\.env\s*\}|Object\.assign\(\s*\{\s*\}\s*,\s*process\.env\s*\))")
 _ENV_COPY_MAX = 20               # copies examined per text
+# a copy's name serialized: the pattern built around it (the name escaped between)
+_ENV_COPY_USE_HEAD = r"\b(?:urlencode|dumps|stringify|b64encode|str)\(\s*"
+_ENV_COPY_USE_TAIL = r"\s*[,)]"
 # what every copy _ENV_COPY_RE finds contains: a text without it is not read
 # for the (slower) assignment
 _ENV_COPY_ANCHOR_RE = re.compile(
@@ -6352,7 +6355,7 @@ def env_copy_serialized_at(text):
     for k, m in enumerate(_ENV_COPY_RE.finditer(text)):
         if k >= _ENV_COPY_MAX:
             break
-        use = re.compile(r"\b(?:urlencode|dumps|stringify|b64encode|str)\(\s*" + re.escape(m.group(1)) + r"\s*[,)]")
+        use = re.compile(_ENV_COPY_USE_HEAD + re.escape(m.group(1)) + _ENV_COPY_USE_TAIL)
         u = use.search(text, m.end())
         if u:
             return u.start()

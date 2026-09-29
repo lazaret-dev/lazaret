@@ -1591,7 +1591,7 @@ fn written_and_run(p: &Pack, lim: &Lim, rows: &[&[u32]], is_src: &dyn Fn(&[u32])
         }
         let mut near_src: Option<bool> = None;
         for wm in write.finditer(row) {
-            if wm.name("p4").is_none() {
+            if wm.name("p4").is_none() && wm.name("p5").is_none() {
                 if near_src.is_none() {
                     let lo = k.saturating_sub(lim.window);
                     let hi = n.min(k + lim.window + 1);

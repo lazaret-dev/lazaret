@@ -46,7 +46,29 @@ pub const CALLS: &[&str] = &[
     "sends_host_info", "runs_own_source_at", "reads_own_source", "persistence_reasons",
     "dumps_workflow_secrets", "pipes_download_to_shell", "runs_substituted_download", "offscreen_code",
     "lex_comment_spans", "logical_text", "hooks_view", "signs_view",
+    // 0.1.8: the exfiltration shapes, programs started at login or boot
+    "chat_secret_at", "credential_sweep_at", "env_copy_serialized_at", "dns_beacon_at", "miner_at",
+    "raw_ip_connect", "capture_service", "exfil_signs", "service_reasons",
 ];
+
+fn at_reason(v: Option<(usize, PyStr)>) -> Value {
+    match v {
+        Some((at, reason)) => Value::Arr(vec![Value::Int(at as i64), Value::Str(reason)]),
+        None => Value::Null,
+    }
+}
+
+fn sweep(v: Option<(usize, Vec<PyStr>)>) -> Value {
+    match v {
+        Some((at, names)) => Value::Arr(vec![Value::Int(at as i64), strs(&names)]),
+        None => Value::Null,
+    }
+}
+
+fn exfil(p: &Pack, text: &[u32]) -> Value {
+    let host = p.re("_HOST_INFO_RE").search(text).map(|m| m.start());
+    Value::Arr(signs::exfil_signs(p, text, host).into_iter().map(|s| at_reason(Some(s))).collect())
+}
 
 /// Run one call.
 pub fn call(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> {
@@ -234,6 +256,15 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
         "runs_own_source_at" => Value::Int(signs::runs_own_source_at(p, text) as i64),
         "reads_own_source" => Value::Bool(signs::reads_own_source(p, text)),
         "persistence_reasons" => strs(&signs::persistence_reasons(p, text)),
+        "chat_secret_at" => at_reason(signs::chat_secret_at(p, text)),
+        "credential_sweep_at" => sweep(signs::credential_sweep_at(p, text)),
+        "env_copy_serialized_at" => Value::Int(signs::env_copy_serialized_at(p, text) as i64),
+        "dns_beacon_at" => Value::Int(signs::dns_beacon_at(p, text) as i64),
+        "miner_at" => Value::Int(signs::miner_at(p, text) as i64),
+        "raw_ip_connect" => opt_s(signs::raw_ip_connect(p, text)),
+        "capture_service" => opt_s(signs::capture_service(p, text).map(|m| m.group0().to_vec())),
+        "exfil_signs" => exfil(p, text),
+        "service_reasons" => strs(&signs::service_reasons(p, text)),
         "dumps_workflow_secrets" => Value::Bool(signs::dumps_workflow_secrets(p, text)),
         "pipes_download_to_shell" => Value::Bool(signs::pipes_download_to_shell(p, text)),
         "runs_substituted_download" => Value::Bool(signs::runs_substituted_download(p, text)),
@@ -326,6 +357,15 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
                 Value::Bool(signs::runs_substituted_download(p, text)),
                 off("js"),
                 off("py"),
+                at_reason(signs::chat_secret_at(p, text)),
+                sweep(signs::credential_sweep_at(p, text)),
+                Value::Int(signs::env_copy_serialized_at(p, text) as i64),
+                Value::Int(signs::dns_beacon_at(p, text) as i64),
+                Value::Int(signs::miner_at(p, text) as i64),
+                opt_s(signs::raw_ip_connect(p, text)),
+                opt_s(signs::capture_service(p, text).map(|m| m.group0().to_vec())),
+                exfil(p, text),
+                strs(&signs::service_reasons(p, text)),
             ])
         }
         "logical_text" => {

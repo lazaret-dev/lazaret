@@ -266,6 +266,19 @@ pub fn reverse_shell_at(p: &Pack, text: &[u32]) -> isize {
             }
         }
     }
+    // an argument list, or a shell or netcat run with an ngrok TCP address (0.1.8)
+    if any_in(text, p.needles("_REVSHELL_ARGS_NEEDLES")) {
+        if let Some(m) = p.re("_REVSHELL_ARGS_RE").search(text) {
+            return m.start() as isize;
+        }
+    }
+    if has(text, ".ngrok.io") {
+        if let Some(m) = p.re("_REVSHELL_NGROK_TCP_RE").search(text) {
+            if p.re("_REVSHELL_ARG_SHELL_RE").search(text).is_some() && p.re("_EXEC_CALL_RE").search(text).is_some() {
+                return m.start() as isize;
+            }
+        }
+    }
     -1
 }
 
@@ -273,6 +286,270 @@ pub fn reverse_shell_at(p: &Pack, text: &[u32]) -> isize {
 pub fn sends_host_info(p: &Pack, text: &[u32]) -> bool {
     p.re("_HOST_INFO_RE").search(text).is_some()
         && (p.re("_NETWORK_RE").search(text).is_some() || p.re("_EXFIL_SERVICE_RE").search(text).is_some())
+}
+
+// ---------------- exfiltration shapes (0.1.8) ----------------
+
+/// core.capture_service: the first data-capture service the text names,
+/// else an ngrok tunnel's address (searched only where "ngrok" is).
+pub fn capture_service<'s>(p: &'s Pack, text: &'s [u32]) -> Option<crate::pyre::Match<'s>> {
+    if let Some(m) = p.re("_CAPTURE_SERVICE_RE").search(text) {
+        return Some(m);
+    }
+    if has(text, "ngrok") {
+        return p.re("_NGROK_TUNNEL_RE").search(text);
+    }
+    None
+}
+
+/// s.rsplit(sep, maxsplit)
+fn rsplit_char(s: &[u32], sep: u32, maxsplit: usize) -> Vec<&[u32]> {
+    let mut parts: Vec<&[u32]> = Vec::new();
+    let mut end = s.len();
+    let mut splits = 0;
+    let mut i = s.len();
+    while i > 0 && splits < maxsplit {
+        i -= 1;
+        if s[i] == sep {
+            parts.push(&s[i + 1..end]);
+            end = i;
+            splits += 1;
+        }
+    }
+    parts.push(&s[..end]);
+    parts.reverse();
+    parts
+}
+
+/// len(set(s))
+fn distinct(s: &[u32]) -> usize {
+    s.iter().collect::<HashSet<_>>().len()
+}
+
+/// core.chat_secret_at: (offset, reason) of the first chat bot or webhook
+/// secret written in a text that makes network calls.
+pub fn chat_secret_at(p: &Pack, text: &[u32]) -> Option<(usize, PyStr)> {
+    if !has(text, ":AA") && !has(text, "webhooks/") && !has(text, "hooks.slack.com") {
+        return None;
+    }
+    p.re("_NETWORK_RE").search(text)?;
+    let max = p.usize("_CHAT_SECRET_MAX");
+    let min_distinct = p.usize("_CHAT_SECRET_MIN_DISTINCT");
+    for (k, m) in p.re("_CHAT_SECRET_RE").finditer(text).enumerate() {
+        if k >= max {
+            break;
+        }
+        let found = m.group0();
+        if pystr::starts_with(found, "discord") || pystr::starts_with(found, "Discord") {
+            let parts = rsplit_char(found, c('/'), 2);
+            let (hook, secret) = (parts[1], parts[2]);
+            if distinct(secret) >= min_distinct {
+                return Some((
+                    m.start(),
+                    cat(&[&u("sends data to a Discord webhook whose token is written in the code (webhook "), hook, &u(")")]),
+                ));
+            }
+        } else if pystr::starts_with(found, "hooks.") {
+            let parts = rsplit_char(found, c('/'), 3);
+            let (team, secret) = (parts[1], parts[3]);
+            if distinct(secret) >= min_distinct && !pystr::strip_chars(team, "T0").is_empty() {
+                return Some((
+                    m.start(),
+                    cat(&[&u("sends data to a Slack webhook whose key is written in the code ("), team, &u(")")]),
+                ));
+            }
+        } else {
+            let colon = pystr::find_char(found, c(':'), 0).unwrap_or(found.len());
+            let (bot, secret) = (&found[..colon], pystr::from(found, colon + 1));
+            if distinct(secret) >= min_distinct && p.re("_TELEGRAM_API_RE").search(text).is_some() {
+                return Some((
+                    m.start(),
+                    cat(&[&u("sends data to a Telegram bot whose token is written in the code (bot "), bot, &u(")")]),
+                ));
+            }
+        }
+    }
+    None
+}
+
+/// core.credential_sweep_at: (offset, folder names) where the text names
+/// _CRED_SWEEP_MIN distinct credential folders within _CRED_SWEEP_SPAN.
+pub fn credential_sweep_at(p: &Pack, text: &[u32]) -> Option<(usize, Vec<PyStr>)> {
+    let min = p.usize("_CRED_SWEEP_MIN");
+    if p.strs("_CRED_SWEEP_NEEDLES").iter().filter(|nd| pystr::find(text, nd, 0).is_some()).count() < min {
+        return None;
+    }
+    let span = p.usize("_CRED_SWEEP_SPAN");
+    let max = p.usize("_CRED_SWEEP_MAX");
+    let mut found: Vec<(usize, PyStr)> = Vec::new();
+    for (k, m) in p.re("_CRED_DIR_RE").finditer(text).enumerate() {
+        if k >= max {
+            break;
+        }
+        found.push((m.start(), pystr::replace_char(m.group(1).unwrap_or(&[]), c('\\'), c('/'))));
+    }
+    for i in 0..found.len() {
+        let at = found[i].0;
+        let mut names: Vec<PyStr> = Vec::new();
+        for (at2, name) in &found[i..] {
+            if at2 - at > span {
+                break;
+            }
+            if !names.contains(name) {
+                names.push(name.clone());
+            }
+        }
+        if names.len() >= min {
+            return Some((at, names));
+        }
+    }
+    None
+}
+
+/// core.env_copy_serialized_at: where the text serializes a copy of the
+/// whole environment it made, else -1.
+pub fn env_copy_serialized_at(p: &Pack, text: &[u32]) -> isize {
+    if (!has(text, "os.environ") && !has(text, "process.env")) || p.re("_ENV_COPY_ANCHOR_RE").search(text).is_none() {
+        return -1;
+    }
+    let max = p.usize("_ENV_COPY_MAX");
+    let head_src = p.text("_ENV_COPY_USE_HEAD");
+    let tail_src = p.text("_ENV_COPY_USE_TAIL");
+    for (k, m) in p.re("_ENV_COPY_RE").finditer(text).enumerate() {
+        if k >= max {
+            break;
+        }
+        let name = m.group(1).unwrap_or(&[]);
+        let rx = rxutil::dynamic(cat(&[&head_src, &crate::pyre::escape(name), &tail_src]), 0);
+        if let Some(used) = rx.search_at(text, m.end() as isize, text.len() as isize) {
+            return used.start() as isize;
+        }
+    }
+    -1
+}
+
+/// core.dns_beacon_at: the offset of a DNS lookup of a name built from
+/// values, else -1.
+pub fn dns_beacon_at(p: &Pack, text: &[u32]) -> isize {
+    let max = p.usize("_DNS_LOOKUP_MAX");
+    let built = p.re("_DNS_BUILT_NAME_RE");
+    for (k, m) in p.re("_DNS_LOOKUP_RE").finditer(text).enumerate() {
+        if k >= max {
+            break;
+        }
+        if built.search(m.first_group().unwrap_or(&[])).is_some() {
+            return m.start() as isize;
+        }
+    }
+    -1
+}
+
+/// core.miner_at: the offset of the Monero wallet address a miner is run
+/// with, else -1.
+pub fn miner_at(p: &Pack, text: &[u32]) -> isize {
+    if !any_in(text, p.needles("_MINER_ARG_NEEDLES")) || p.re("_MINER_ARG_RE").search(text).is_none() {
+        return -1;
+    }
+    if let Some(m) = p.re("_MONERO_ADDR_RE").search(text) {
+        if p.re("_EXEC_CALL_RE").search(text).is_some() {
+            return m.start() as isize;
+        }
+    }
+    -1
+}
+
+/// core._exfil_signs: (offset, reason) of the exfiltration shapes and a
+/// miner. `host`: where _HOST_INFO_RE matches.
+pub fn exfil_signs(p: &Pack, text: &[u32], host: Option<usize>) -> Vec<(usize, PyStr)> {
+    let mut signs: Vec<(usize, PyStr)> = Vec::new();
+    let at = miner_at(p, text);
+    if at >= 0 {
+        signs.push((at as usize, u("runs a cryptocurrency miner (a Monero wallet address)")));
+    }
+    if let Some(chat) = chat_secret_at(p, text) {
+        signs.push(chat);
+    }
+    let mut net: Option<bool> = None;
+    let mut network = || -> bool {
+        if net.is_none() {
+            net = Some(p.re("_NETWORK_RE").search(text).is_some());
+        }
+        net.unwrap_or(false)
+    };
+    if let Some(ip) = p.re("_PUBLIC_IP_URL_RE").search(text) {
+        if let Some(cred) = p.re("_CRED_FILE_RE").search(text) {
+            if network() {
+                let g = ip.group0();
+                let rest = match pystr::find_str(g, "//", 0) {
+                    Some(i) => pystr::from(g, i + 2),
+                    None => &[][..],
+                };
+                signs.push((cred.start(), cat(&[&u("reads credential files and sends data to an IP address ("), rest, &u(")")])));
+            }
+        }
+    }
+    if let Some((at, names)) = credential_sweep_at(p, text) {
+        if network() {
+            let shown: Vec<PyStr> = names.iter().take(4).map(|n| cat(&[&u("."), n])).collect();
+            let parts: Vec<&[u32]> = shown.iter().map(|x| x.as_slice()).collect();
+            signs.push((
+                at,
+                cat(&[
+                    &u("collects files from several credential folders and sends data over the network ("),
+                    &pystr::join(&u(", "), &parts),
+                    &u(")"),
+                ]),
+            ));
+        }
+    }
+    if let Some(h) = host {
+        if p.re("_B64_URL_LITERAL_RE").search(text).is_some() && network() {
+            signs.push((h, u("sends the machine's user or host name to an address it hides in base64")));
+        }
+        let at = dns_beacon_at(p, text);
+        if at >= 0 {
+            signs.push((at as usize, u("sends the machine's user or host name in a DNS lookup of a name it builds")));
+        }
+    } else if any_in(text, p.needles("_PUBLIC_IP_LOOKUP_NEEDLES")) {
+        if let Some(lookup) = p.re("_PUBLIC_IP_LOOKUP_RE").search(text) {
+            if let Some(capture) = capture_service(p, text) {
+                signs.push((
+                    lookup.start(),
+                    cat(&[
+                        &u("sends the machine's public IP address to a data-capture service ("),
+                        head(capture.group0(), 40),
+                        &u(")"),
+                    ]),
+                ));
+            }
+        }
+    }
+    signs
+}
+
+/// core.raw_ip_connect: the first hard-coded IP address a raw socket is
+/// opened to (install time only), else None.
+pub fn raw_ip_connect(p: &Pack, text: &[u32]) -> Option<PyStr> {
+    if !has(text, "connect") && !has(text, "Socket") {
+        return None;
+    }
+    let max = p.usize("_IP_LITERAL_MAX");
+    let span = p.usize("_RAW_CONNECT_SPAN");
+    let resolvers = p.strs("_PUBLIC_RESOLVERS");
+    let connect = p.re("_RAW_CONNECT_RE");
+    for (k, m) in p.re("_IP_LITERAL_RE").finditer(text).enumerate() {
+        if k >= max {
+            break;
+        }
+        let ip = m.group(1).unwrap_or(&[]);
+        if resolvers.iter().any(|r| r.as_slice() == ip) {
+            continue;
+        }
+        if connect.search_at(text, m.end() as isize, (m.end() + span) as isize).is_some() {
+            return Some(ip.to_vec());
+        }
+    }
+    None
 }
 
 // ---------------- code read back from the file itself ----------------
@@ -348,27 +625,33 @@ fn literal_spans(p: &Pack, text: &[u32]) -> Vec<(usize, usize)> {
 pub fn runs_own_source_at(p: &Pack, text: &[u32]) -> isize {
     let self_read = p.re("_SELF_READ_RE");
     let sibling = p.re("_SIBLING_DATA_RE");
-    if self_read.search(text).is_none() && sibling.search(text).is_none() {
+    let sibling_path = p.re("_SIBLING_PATH_RE");
+    if self_read.search(text).is_none() && sibling.search(text).is_none() && sibling_path.search(text).is_none() {
         return -1;
     }
     let spans = literal_spans(p, text);
     let starts: Vec<usize> = spans.iter().map(|&(s, _)| s).collect();
-    let in_literal = |pos: usize| -> bool {
+    let literal_at = |pos: usize| -> Option<(usize, usize)> {
         let k = starts.partition_point(|&s| s <= pos);
-        k > 0 && pos < spans[k - 1].1
+        if k > 0 && pos < spans[k - 1].1 {
+            Some(spans[k - 1])
+        } else {
+            None
+        }
     };
+    let in_literal = |pos: usize| -> bool { literal_at(pos).is_some() };
     let reads = |lo: usize, hi: usize| -> bool {
         let part = pystr::sub(text, lo, hi);
         [self_read, sibling].iter().any(|rx| rx.finditer(part).any(|m| !in_literal(lo + m.start())))
     };
     let ident = p.re("_IDENT_TOKEN_RE");
     let uses = |lo: usize, hi: usize, names: &HashSet<PyStr>| -> bool {
+        if names.is_empty() {
+            return false;
+        }
         let part = pystr::sub(text, lo, hi);
         ident.finditer(part).any(|m| names.contains(m.group0()) && !in_literal(lo + m.start()))
     };
-    if !reads(0, text.len()) {
-        return -1;
-    }
     let max_assigns = p.usize("_SELF_READ_MAX_ASSIGNS");
     let mut assigns: Vec<(PyStr, usize, usize)> = Vec::new();
     for (k, m) in p.re("_SELF_READ_ASSIGN_RE").finditer(text).enumerate() {
@@ -379,12 +662,91 @@ pub fn runs_own_source_at(p: &Pack, text: &[u32]) -> isize {
             assigns.push((m.group(1).unwrap_or(&[]).to_vec(), m.start_of(2) as usize, m.end_of(2) as usize));
         }
     }
-    let mut names: HashSet<PyStr> = HashSet::new();
+    // names of data files' paths (a template's `${__dirname}` counts)
+    let mut paths: HashSet<PyStr> = HashSet::new();
+    for (name, lo, hi) in &assigns {
+        for m in sibling_path.finditer(pystr::sub(text, *lo, *hi)) {
+            match literal_at(lo + m.start()) {
+                Some((s, _)) if text[s] != c('`') => continue,
+                _ => {
+                    paths.insert(name.clone());
+                    break;
+                }
+            }
+        }
+    }
+    let path_read = p.re("_PATH_READ_RE");
+    let path_reads = |lo: usize, hi: usize| -> bool {
+        if paths.is_empty() {
+            return false;
+        }
+        let part = pystr::sub(text, lo, hi);
+        path_read.finditer(part).any(|m| {
+            let name = m.group(1).filter(|g| !g.is_empty()).or_else(|| m.group(2)).unwrap_or(&[]);
+            paths.contains(name) && !in_literal(lo + m.start())
+        })
+    };
+    if !reads(0, text.len()) && !path_reads(0, text.len()) {
+        return -1;
+    }
+    let mut names: HashSet<PyStr> = HashSet::new(); // values of a read written out: any runner
+    let mut code_names: HashSet<PyStr> = HashSet::new(); // values of a path read by name: code runners only
+    let max_calls = p.usize("_SELF_READ_MAX_CALLS");
+    let span = p.usize("_SELF_READ_ARG_SPAN");
+    let then_span = p.usize("_SELF_READ_THEN_SPAN");
+    let callback = p.re("_READ_CALLBACK_RE");
+    let then_re = p.re("_READ_THEN_RE");
+    for (k, h) in p.re("_READ_HEAD_RE").finditer(text).enumerate() {
+        if k >= max_calls {
+            break;
+        }
+        if in_literal(h.start()) {
+            continue;
+        }
+        let args = pystr::sub(text, h.end(), h.end() + span);
+        let args = &args[..call_args_len(args)];
+        let close = h.end() + args.len(); // the closing bracket, when there is one
+        let into_names = if reads(h.start(), close + 1) {
+            true
+        } else if path_reads(h.start(), close + 1) {
+            false
+        } else {
+            continue;
+        };
+        let mut bound: Vec<PyStr> = Vec::new();
+        if let Some(cb) = callback.search(args) {
+            if !in_literal(h.end() + cb.start()) {
+                bound.push(cb.group(1).unwrap_or(&[]).to_vec());
+            }
+        }
+        if close < text.len() && text[close] == c(')') {
+            if let Some(then) = then_re.match_(pystr::sub(text, close + 1, close + 1 + then_span)) {
+                let g = match then.group(1) {
+                    Some(g) if !g.is_empty() => g,
+                    _ => then.group(2).unwrap_or(&[]),
+                };
+                bound.push(g.to_vec());
+            }
+        }
+        for b in bound {
+            if into_names {
+                names.insert(b);
+            } else {
+                code_names.insert(b);
+            }
+        }
+    }
     for _ in 0..p.usize("_SELF_READ_PASSES") {
         let mut grown = false;
         for (name, lo, hi) in &assigns {
-            if !names.contains(name) && (reads(*lo, *hi) || uses(*lo, *hi, &names)) {
+            if names.contains(name) {
+                continue;
+            }
+            if reads(*lo, *hi) || uses(*lo, *hi, &names) {
                 names.insert(name.clone());
+                grown = true;
+            } else if !code_names.contains(name) && (path_reads(*lo, *hi) || uses(*lo, *hi, &code_names)) {
+                code_names.insert(name.clone());
                 grown = true;
             }
         }
@@ -392,8 +754,7 @@ pub fn runs_own_source_at(p: &Pack, text: &[u32]) -> isize {
             break;
         }
     }
-    let max_calls = p.usize("_SELF_READ_MAX_CALLS");
-    let span = p.usize("_SELF_READ_ARG_SPAN");
+    let shell_runners = p.strs("_SELF_SHELL_RUNNERS");
     for (k, m) in p.re("_SELF_RUN_RE").finditer(text).enumerate() {
         if k >= max_calls {
             break;
@@ -403,6 +764,10 @@ pub fn runs_own_source_at(p: &Pack, text: &[u32]) -> isize {
         }
         let hi = m.end() + call_args_len(pystr::sub(text, m.end(), m.end() + span));
         if reads(m.end(), hi) || uses(m.end(), hi, &names) {
+            return m.start() as isize;
+        }
+        let shell = shell_runners.iter().any(|r| m.group0().starts_with(r));
+        if !shell && (path_reads(m.end(), hi) || uses(m.end(), hi, &code_names)) {
             return m.start() as isize;
         }
     }
@@ -504,6 +869,110 @@ pub fn persistence_reasons(p: &Pack, text: &[u32]) -> Vec<PyStr> {
     }
     if p.re("_BUN_RELEASES_RE").search(text).is_some() && p.re("_EXEC_CALL_RE").search(text).is_some() {
         reasons.push(u("downloads the Bun runtime from GitHub and runs code with it"));
+    }
+    if has(text, "--load-extension") && p.re("_PERSIST_SHORTCUT_RE").search(text).is_some() {
+        reasons.push(u("rewrites browser shortcuts to load an extension"));
+    }
+    reasons.extend(service_reasons(p, text));
+    reasons
+}
+
+// ---------------- programs set to start at login or boot (0.1.8) ----------------
+
+/// core._writes_on_line: a write call or a shell write on a line (of at
+/// most _SVC_LINE_MAX characters) on which `target` matches.
+fn writes_on_line(p: &Pack, text: &[u32], target: &crate::pyre::Regex) -> bool {
+    let write = p.re("_PERSIST_WRITE_RE");
+    let shell_write = p.re("_PERSIST_SHELL_WRITE_RE");
+    let max = p.usize("_PERSIST_MAX_LINES");
+    let line_max = p.usize("_SVC_LINE_MAX");
+    let mut m = target.search(text);
+    let mut lines = 0usize;
+    while let Some(mm) = m {
+        if lines >= max {
+            break;
+        }
+        let start = pystr::rfind_char(text, c('\n'), 0, mm.start()).map(|i| i + 1).unwrap_or(0);
+        let end = pystr::find_char(text, c('\n'), mm.end()).unwrap_or(text.len());
+        if end - start <= line_max
+            && (write.search_at(text, start as isize, end as isize).is_some()
+                || shell_write.search_at(text, start as isize, end as isize).is_some())
+        {
+            return true;
+        }
+        lines += 1;
+        m = target.search_at(text, end as isize, text.len() as isize);
+    }
+    false
+}
+
+/// core._run_key_written: a registry write within _SVC_RUNKEY_SPAN code
+/// points of a Run key.
+fn run_key_written(p: &Pack, text: &[u32]) -> bool {
+    let max = p.usize("_PERSIST_MAX_LINES");
+    let span = p.usize("_SVC_RUNKEY_SPAN");
+    let write = p.re("_SVC_REG_WRITE_RE");
+    for (k, m) in p.re("_SVC_RUNKEY_RE").finditer(text).enumerate() {
+        if k >= max {
+            break;
+        }
+        if write.search(pystr::sub(text, m.start().saturating_sub(span), m.end() + span)).is_some() {
+            return true;
+        }
+    }
+    false
+}
+
+/// core.service_reasons: how the text sets a program to start at login or
+/// boot, in a fixed order.
+pub fn service_reasons(p: &Pack, text: &[u32]) -> Vec<PyStr> {
+    let mut reasons = Vec::new();
+    let mut runs: Option<bool> = None;
+    let mut run_context = || -> bool {
+        if runs.is_none() {
+            runs = Some(p.re("_EXEC_CALL_RE").search(text).is_some() || p.re("_SVC_CMD_START_RE").search(text).is_some());
+        }
+        runs.unwrap_or(false)
+    };
+    let writes = p.re("_PERSIST_WRITE_RE").search(text).is_some();
+    let systemd = p.re("_SVC_SYSTEMD_DIR_RE");
+    if (systemd.search(text).is_some()
+        && ((writes && p.re("_SVC_UNIT_RE").search(text).is_some()) || writes_on_line(p, text, systemd)))
+        || (p.re("_SVC_SYSTEMCTL_RE").search(text).is_some() && run_context())
+    {
+        reasons.push(u("installs a systemd service"));
+    }
+    let launchd = p.re("_SVC_LAUNCHD_DIR_RE");
+    if (launchd.search(text).is_some()
+        && ((writes && p.re("_SVC_PLIST_RE").search(text).is_some()) || writes_on_line(p, text, launchd)))
+        || (p.re("_SVC_LAUNCHCTL_RE").search(text).is_some() && run_context())
+    {
+        reasons.push(u("installs a launchd agent or daemon"));
+    }
+    if (p.re("_SVC_CRONTAB_RE").search(text).is_some() && run_context())
+        || (p.re("_SVC_PYCRON_RE").search(text).is_some() && p.re("_SVC_PYCRON_WRITE_RE").search(text).is_some())
+        || writes_on_line(p, text, p.re("_SVC_CRON_DIR_RE"))
+    {
+        reasons.push(u("adds a cron job"));
+    }
+    if run_key_written(p, text) {
+        reasons.push(u("adds a program to a Windows Run key"));
+    }
+    if (p.re("_SVC_SCHTASKS_RE").search(text).is_some() && run_context())
+        || p.re("_SVC_TASK_API_RE").search(text).is_some()
+        || (p.re("_SVC_TASK_COM_RE").search(text).is_some() && p.re("_SVC_TASK_REGISTER_RE").search(text).is_some())
+    {
+        reasons.push(u("creates a Windows scheduled task"));
+    }
+    let startup = p.re("_SVC_STARTUP_RE");
+    if startup.search(text).is_some()
+        && (writes || p.re("_PERSIST_SHORTCUT_RE").search(text).is_some() || shell_writes(p, text, startup))
+    {
+        reasons.push(u("puts a program in the Windows Startup folder"));
+    }
+    let autostart = p.re("_SVC_AUTOSTART_RE");
+    if autostart.search(text).is_some() && (writes || shell_writes(p, text, autostart)) {
+        reasons.push(u("adds a desktop autostart entry"));
     }
     reasons
 }
@@ -666,6 +1135,118 @@ fn dv_helpers(p: &Pack, text: &[u32]) -> Vec<(PyStr, bool)> {
     out
 }
 
+/// core._dv_bytes: the bytes a literal holds as hex (an even run of hex
+/// digits) or as base64 (padded; or unpadded, but not 4k+1 long).
+fn dv_bytes(p: &Pack, s: &[u32], hex: bool) -> Option<Vec<u8>> {
+    if hex {
+        if s.len() % 2 != 0 || p.re("_DV_HEX_RE").fullmatch(s).is_none() {
+            return None;
+        }
+        return Some(
+            s.chunks(2)
+                .map(|w| {
+                    let v = |x: u32| -> u8 {
+                        (match x {
+                            0x30..=0x39 => x - 0x30,
+                            0x61..=0x66 => x - 0x61 + 10,
+                            _ => x - 0x41 + 10,
+                        }) as u8
+                    };
+                    v(w[0]) << 4 | v(w[1])
+                })
+                .collect(),
+        );
+    }
+    if p.re("_DV_B64_RE").fullmatch(s).is_none() || s.len() % 4 == 1 || (s.contains(&c('=')) && s.len() % 4 != 0) {
+        return None;
+    }
+    let mut padded = s.to_vec();
+    while padded.len() % 4 != 0 {
+        padded.push(c('='));
+    }
+    b64decode_strict(&padded)
+}
+
+/// core._dv_xor_printable: is every byte XORed with the key (repeated) printable ASCII?
+fn dv_xor_printable(data: &[u8], key: &[u8]) -> bool {
+    data.iter().enumerate().all(|(i, &b)| (0x20..=0x7E).contains(&(b ^ key[i % key.len()])))
+}
+
+/// core._dv_xor_decoders: [(name, hex, key)] the view calls as XOR decoders,
+/// in the order of their first calls.
+fn dv_xor_decoders(p: &Pack, view: &[u32]) -> Vec<(PyStr, bool, Vec<u8>)> {
+    let min_calls = p.usize("_DV_XOR_MIN_CALLS");
+    let max_calls = p.usize("_DV_XOR_MAX_CALLS");
+    let min_bytes = p.usize("_DV_XOR_MIN_BYTES");
+    let max_keys = p.usize("_DV_XOR_MAX_KEYS");
+    let max_helpers = p.usize("_DV_MAX_HELPERS");
+    let hex_re = p.re("_DV_HEX_RE");
+    let mut order: Vec<PyStr> = Vec::new();
+    let mut calls: std::collections::HashMap<PyStr, Vec<PyStr>> = std::collections::HashMap::new();
+    for m in p.re("_DV_CALL_RE").finditer(view) {
+        let name = m.name("name").unwrap_or(&[]).to_vec();
+        let lits = calls.entry(name.clone()).or_insert_with(|| {
+            order.push(name);
+            Vec::new()
+        });
+        if lits.len() < max_calls {
+            lits.push(dv_literal(&m).unwrap_or(&[]).to_vec());
+        }
+    }
+    let mut out: Vec<(PyStr, bool, Vec<u8>)> = Vec::new();
+    let mut keys: Option<Vec<Vec<u8>>> = None;
+    for name in order {
+        let lits = &calls[&name];
+        if lits.len() < min_calls {
+            continue;
+        }
+        let hex = lits.iter().all(|x| x.len() % 2 == 0 && hex_re.fullmatch(x).is_some());
+        let data: Vec<Option<Vec<u8>>> = lits.iter().map(|x| dv_bytes(p, x, hex)).collect();
+        let read = data.iter().filter(|d| d.is_some()).count();
+        let bytes: usize = data.iter().map(|d| d.as_ref().map(|v| v.len()).unwrap_or(0)).sum();
+        if read < min_calls || bytes < min_bytes {
+            continue;
+        }
+        let keys = keys.get_or_insert_with(|| {
+            let mut found: Vec<Vec<u8>> = Vec::new();
+            let mut seen: HashSet<PyStr> = HashSet::new();
+            for k in p.re("_DV_KEY_RE").finditer(view) {
+                let key = rxutil::or_groups(&k, &["a", "b", "c"]).unwrap_or(&[]);
+                if seen.contains(key) || !key.iter().all(|&ch| (0x20..=0x7E).contains(&ch)) {
+                    continue;
+                }
+                seen.insert(key.to_vec());
+                found.push(key.iter().map(|&ch| ch as u8).collect());
+                if found.len() >= max_keys {
+                    break;
+                }
+            }
+            found
+        });
+        let allowed = lits.len() / 10; // calls that may stay unread
+        for key in keys.iter() {
+            let mut bad = 0usize;
+            for d in &data {
+                let ok = matches!(d, Some(d) if dv_xor_printable(d, key));
+                if !ok {
+                    bad += 1;
+                    if bad > allowed {
+                        break;
+                    }
+                }
+            }
+            if bad <= allowed {
+                out.push((name.clone(), hex, key.clone()));
+                break;
+            }
+        }
+        if out.len() >= max_helpers {
+            break;
+        }
+    }
+    out
+}
+
 /// core._dv_literal: group a, b or c (c only where the pattern has it).
 fn dv_literal<'s>(m: &crate::pyre::Match<'s>) -> Option<&'s [u32]> {
     rxutil::or_groups(m, &["a", "b", "c"])
@@ -714,6 +1295,30 @@ pub fn decoded_view(p: &Pack, text: &[u32]) -> PyStr {
             let hex = helpers.iter().find(|(n, _)| n.as_slice() == name).map(|(_, h)| *h).unwrap_or(false);
             dv_decode(p, hex, dv_literal(m).unwrap_or(&[]))
         });
+    }
+    if has(&view, "^") {
+        let xors = dv_xor_decoders(p, &view);
+        if !xors.is_empty() {
+            let mut names: Vec<&PyStr> = xors.iter().map(|(n, _, _)| n).collect();
+            names.sort();
+            let alternation: Vec<PyStr> = names.iter().map(|n| crate::pyre::escape(n)).collect();
+            let parts: Vec<&[u32]> = alternation.iter().map(|x| x.as_slice()).collect();
+            let src = cat(&[&p.text("_DV_NAME_HEAD"), &u("(?P<name>"), &pystr::join(&[c('|')], &parts), &p.text("_DV_HELPER_CALL_TAIL")]);
+            let call = rxutil::dynamic(src, 0);
+            view = call.sub_fn(&view, 0, |m| {
+                let name = m.name("name").unwrap_or(&[]);
+                let Some((_, hex, key)) = xors.iter().find(|(n, _, _)| n.as_slice() == name) else {
+                    return m.group0().to_vec();
+                };
+                match dv_bytes(p, dv_literal(m).unwrap_or(&[]), *hex) {
+                    Some(d) if dv_xor_printable(&d, key) => {
+                        let text: PyStr = d.iter().enumerate().map(|(i, &b)| (b ^ key[i % key.len()]) as u32).collect();
+                        dv_quote(&text)
+                    }
+                    _ => m.group0().to_vec(),
+                }
+            });
+        }
     }
     if view == joined {
         return text.to_vec();
@@ -989,7 +1594,8 @@ fn install_script_risk_of(p: &Pack, text: &[u32]) -> Vec<PyStr> {
     if network && p.re("_SECRET_SOURCE_RE").search(text).is_some() {
         reasons.push(u("reads environment variables or credential files and sends data over the network"));
     }
-    if let Some(dest) = p.re("_EXFIL_DEST_RE").search(text) {
+    let dest = p.re("_EXFIL_DEST_RE").search(text);
+    if let Some(dest) = &dest {
         reasons.push(cat(&[&u("contacts an address typical of data exfiltration ("), head(dest.group0(), 40), &u(")")]));
     }
     if pipes_download_to_shell(p, text) {
@@ -1011,8 +1617,19 @@ fn install_script_risk_of(p: &Pack, text: &[u32]) -> Vec<PyStr> {
     if reverse_shell_at(p, text) >= 0 {
         reasons.push(u("opens a reverse shell"));
     }
-    if sends_host_info(p, text) {
+    let host = p.re("_HOST_INFO_RE").search(text).map(|m| m.start());
+    if host.is_some() && (network || p.re("_EXFIL_SERVICE_RE").search(text).is_some()) {
         reasons.push(u("sends the machine's user or host name over the network"));
+    }
+    for (_at, reason) in exfil_signs(p, text, host) {
+        if !reasons.contains(&reason) {
+            reasons.push(reason);
+        }
+    }
+    if dest.is_none() {
+        if let Some(ip) = raw_ip_connect(p, text) {
+            reasons.push(cat(&[&u("contacts an address typical of data exfiltration ("), &ip, &u(")")]));
+        }
     }
     if runs_own_source_at(p, text) >= 0 {
         reasons.push(u("runs code it reads back from its own file or a data file shipped with it"));
@@ -1225,14 +1842,28 @@ fn runs_download_through_shell(p: &Pack, row: &[u32]) -> bool {
         && (pipes_download_to_shell(p, row) || runs_substituted_download(p, row))
 }
 
-fn import_time_risk_of(p: &Pack, text: &[u32]) -> (Vec<PyStr>, Option<usize>) {
-    let mut reasons: Vec<PyStr> = Vec::new();
-    let mut line: Option<usize> = None;
+/// core._import_harvest_at: where the text harvests (_IMPORT_HARVEST_RE), or
+/// serializes a copy of the whole environment it made.
+fn import_harvest_at(p: &Pack, text: &[u32]) -> Option<usize> {
     let harvest = if any_in(text, p.needles("_IMPORT_HARVEST_NEEDLES")) {
         p.re("_IMPORT_HARVEST_RE").search(text).map(|m| m.start())
     } else {
         None
     };
+    harvest.or_else(|| {
+        let at = env_copy_serialized_at(p, text);
+        if at >= 0 {
+            Some(at as usize)
+        } else {
+            None
+        }
+    })
+}
+
+fn import_time_risk_of(p: &Pack, text: &[u32]) -> (Vec<PyStr>, Option<usize>) {
+    let mut reasons: Vec<PyStr> = Vec::new();
+    let mut line: Option<usize> = None;
+    let harvest = import_harvest_at(p, text);
     if let Some(at) = harvest {
         if let Some(service) = p.re("_EXFIL_SERVICE_RE").search(text) {
             reasons.push(cat(&[
@@ -1294,10 +1925,11 @@ fn import_time_risk_of(p: &Pack, text: &[u32]) -> (Vec<PyStr>, Option<usize>) {
     if at >= 0 {
         signs.push((at as usize, u("opens a reverse shell")));
     }
-    if let Some(host) = p.re("_HOST_INFO_RE").search(text) {
-        if let Some(capture) = p.re("_CAPTURE_SERVICE_RE").search(text) {
+    let host = p.re("_HOST_INFO_RE").search(text).map(|m| m.start());
+    if let Some(host) = host {
+        if let Some(capture) = capture_service(p, text) {
             signs.push((
-                host.start(),
+                host,
                 cat(&[
                     &u("sends the machine's user or host name to a data-capture service ("),
                     head(capture.group0(), 40),
@@ -1315,6 +1947,7 @@ fn import_time_risk_of(p: &Pack, text: &[u32]) -> (Vec<PyStr>, Option<usize>) {
             signs.push((m.start(), u("carries a GitHub Actions workflow that dumps every repository secret")));
         }
     }
+    signs.extend(exfil_signs(p, text, host));
     for (at, reason) in signs {
         reasons.push(reason);
         line = line.or(Some(line_of(text, at)));
