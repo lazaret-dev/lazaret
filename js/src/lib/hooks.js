@@ -711,6 +711,13 @@ const REVSHELL_LINE_RE = pyRe(REVSHELL_LINE_SRC);
 const REVSHELL_JS_SPAWN_RE = pyRe(REVSHELL_JS_SPAWN_SRC);
 const REVSHELL_JS_PIPE_RE = pyRe(REVSHELL_JS_PIPE_SRC);
 const REVSHELL_JS_NET_RE = pyRe(REVSHELL_JS_NET_SRC);
+const REVSHELL_NGROK_TCP_SRC = String.raw`\b\d+\.tcp(?:\.[a-z]{2,3})?\.ngrok\.io\b`;
+const REVSHELL_ARG_SHELL_SRC = String.raw`["'](?:nc|ncat|netcat|(?:/bin/)?(?:ba|z|da)?sh|cmd(?:\.exe)?|powershell(?:\.exe)?)["']`;
+const REVSHELL_ARGS_SRC = String.raw`["'](?:nc|ncat|netcat)["'][^\n]{0,160}?["']-[ec]["']\s*,\s*["'](?:/bin/)?(?:ba|z|da)?sh["']`;
+const REVSHELL_NGROK_TCP_RE = pyRe(REVSHELL_NGROK_TCP_SRC, "i");
+const REVSHELL_ARG_SHELL_RE = pyRe(REVSHELL_ARG_SHELL_SRC);
+const REVSHELL_ARGS_RE = pyRe(REVSHELL_ARGS_SRC);
+const REVSHELL_ARGS_NEEDLES = ["'nc'", '"nc"', "'ncat'", '"ncat"', "'netcat'", '"netcat"'];
 /** The offset where `text` opens a reverse shell, else -1 (core.reverse_shell_at). */
 export function reverseShellAt(text) {
   let m = REVSHELL_LINE_RE.exec(text);
@@ -726,6 +733,15 @@ export function reverseShellAt(text) {
     m = REVSHELL_JS_SPAWN_RE.exec(text);
     if (m && REVSHELL_JS_PIPE_RE.test(text) && REVSHELL_JS_NET_RE.test(text)) return m.index;
   }
+  // an argument list, or a shell or netcat run with an ngrok TCP address (0.1.8)
+  if (REVSHELL_ARGS_NEEDLES.some((nd) => text.includes(nd))) {
+    m = REVSHELL_ARGS_RE.exec(text);
+    if (m) return m.index;
+  }
+  if (text.includes(".ngrok.io")) {
+    m = REVSHELL_NGROK_TCP_RE.exec(text);
+    if (m && REVSHELL_ARG_SHELL_RE.test(text) && EXEC_CALL_RE.test(text)) return m.index;
+  }
   return -1;
 }
 
@@ -733,11 +749,224 @@ const HOST_INFO_SRC = String.raw`\b(?:socket\.gethostname|socket\.getfqdn|platfo
   + String.raw`|os\.hostname|os\.userInfo)\s*\(`
   + String.raw`|\b(?:getoutput|check_output|getstatusoutput|execSync|popen)\s*\(\s*\[?\s*["'](?:whoami|hostname|id|uname`
   + String.raw`|ifconfig|ipconfig|systeminfo)\b`
-  + String.raw`|(?:\$\(|` + "`" + String.raw`)\s*(?:whoami|hostname|id|uname|ifconfig|ip\s+a|pwd|ls|cat\s+/etc/passwd|ps)\b`;
+  + String.raw`|(?:\$\(|` + "`" + String.raw`)\s*(?:whoami|hostname|id|uname|ifconfig|ip\s+a|pwd|ls|cat\s+/etc/passwd|ps)\b`
+  + String.raw`|\bos\.(?:hostname|userInfo)\s*[,)]`;
 const HOST_INFO_RE = pyRe(HOST_INFO_SRC);
 /** True when `text` collects the machine's user or host name and sends data over the network (core.sends_host_info). */
 export function sendsHostInfo(text) {
   return HOST_INFO_RE.test(text) && (NETWORK_RE.test(text) || EXFIL_SERVICE_RE.test(text));
+}
+
+// Exfiltration shapes (0.1.8; core's comment above _CHAT_SECRET_RE): a chat
+// bot or webhook whose secret is written in the code, credential files sent
+// to a raw IP address, a sweep of several credential folders, the host name
+// sent to a base64-hidden address or in a DNS name the code builds, the
+// public IP address sent to a data-capture service, a copy of the whole
+// environment serialized, a miner, and (install time only) a raw socket to a
+// hard-coded IP address.
+const CHAT_SECRET_SRC = String.raw`(?<![0-9])\d{8,10}:AA[A-Za-z0-9_-]{33}(?![A-Za-z0-9_-])`
+  + String.raw`|\b[Dd]iscord(?:app)?\.com/api/webhooks/\d{17,20}/[A-Za-z0-9_-]{60,80}`
+  + String.raw`|\bhooks\.slack\.com/services/T[A-Z0-9]{8,12}/B[A-Z0-9]{8,12}/[A-Za-z0-9]{24}(?![A-Za-z0-9])`;
+const TELEGRAM_API_SRC = String.raw`api\.telegram\.org`;
+const CRED_FILE_SRC = String.raw`["'` + "`" + String.raw`](?:~[/\\]|\.[/\\])?\.(?:env|npmrc|pypirc|netrc|git-credentials)["'` + "`" + "]"
+  + String.raw`|\.aws[/\\]credentials\b|[/\\]\.ssh[/\\]id_\w+|\.docker[/\\]config\.json|\.kube[/\\]config\b`;
+const PUBLIC_IP_URL_SRC = String.raw`\b(?:https?|wss?|tcp)://(?!(?:10|127|0)\.)(?!192\.168\.)(?!172\.(?:1[6-9]|2\d|3[01])\.)(?!169\.254\.)`
+  + String.raw`(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)(?![\d.])`;
+const CRED_DIR_SRC = String.raw`["'` + "`" + String.raw`](?:~[/\\]|\$HOME[/\\]|%USERPROFILE%[/\\])?\.(ssh|aws|azure|gnupg|docker|kube|ethereum|electrum|bitcoin`
+  + String.raw`|solana|npmrc|pypirc|netrc|git-credentials|config[/\\]gcloud|password-store|vault-token|terraform\.d)`
+  + String.raw`(?:[/\\][^"'` + "`" + String.raw`\n]{0,60})?["'` + "`" + "]";
+const B64_URL_LITERAL_SRC = String.raw`["'` + "`" + String.raw`]aHR0c[A-Za-z0-9+/]{2,}={0,2}["'` + "`" + "]";
+const DNS_LOOKUP_SRC = String.raw`(?:\b(?:getaddrinfo|gethostbyname(?:_ex)?)|\bdns\.(?:promises\.)?(?:resolve\w*|lookup)`
+  + String.raw`|\bresolver\.(?:resolve|query))\s*\(\s*(?:f"([^"\n]{0,300})"|f'([^'\n]{0,300})'|` + "`" + String.raw`([^` + "`"
+  + String.raw`\n]{0,300})` + "`)";
+const DNS_BUILT_NAME_SRC = String.raw`\{[^}\n]+\}[^\n]*\.[A-Za-z]{2,}\Z`;
+const PUBLIC_IP_LOOKUP_SRC = String.raw`\bapi(?:64)?\.ipify\.org\b|\bip-api\.com\b|\bipinfo\.io\b|\bifconfig\.me\b|\bicanhazip\.com\b`
+  + String.raw`|\bcheckip\.amazonaws\.com\b|\bipapi\.co\b|\bident\.me\b|\bapi\.myip\.com\b|\bwtfismyip\.com\b`;
+const ENV_COPY_SRC = String.raw`(?<![\w$.])([A-Za-z_$][\w$]*)\s{0,40}=\s{0,40}(?:dict\(\s*os\.environ\s*\)|os\.environ\.copy\(\s*\)`
+  + String.raw`|\{\s*\*\*\s*os\.environ\s*\}|\{\s*\.\.\.\s*process\.env\s*\}|Object\.assign\(\s*\{\s*\}\s*,\s*process\.env\s*\))`;
+const IP_LITERAL_SRC = String.raw`["'](?!(?:127|0|255)\.)((?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d))["']`;
+const RAW_CONNECT_SRC = String.raw`\b(?:socket\.create_connection|net\.connect|net\.createConnection|connect(?:_ex)?)\s*\(|\bnew\s+net\.Socket\b`;
+const MONERO_ADDR_SRC = String.raw`(?<![A-Za-z0-9])[48][1-9A-HJ-NP-Za-km-z]{94}(?:[1-9A-HJ-NP-Za-km-z]{11})?(?![A-Za-z0-9])`;
+const MINER_ARG_SRC = String.raw`["'](?:-o|--url)["']|\bstratum\+(?:tcp|ssl|tls)://|--donate-level\b|\b(?:xmrig|XMRig|XMRIG)\b`;
+const MINER_ARG_NEEDLES = ["'-o'", '"-o"', "'--url'", '"--url"', "stratum+", "--donate-level", "xmrig", "XMRig", "XMRIG"];
+const CHAT_SECRET_RE = pyRe(CHAT_SECRET_SRC, "g");
+const TELEGRAM_API_RE = pyRe(TELEGRAM_API_SRC, "i");
+const CRED_FILE_RE = pyRe(CRED_FILE_SRC);
+const PUBLIC_IP_URL_RE = pyRe(PUBLIC_IP_URL_SRC);
+const CRED_DIR_RE = pyRe(CRED_DIR_SRC, "g");
+const B64_URL_LITERAL_RE = pyRe(B64_URL_LITERAL_SRC);
+const DNS_LOOKUP_RE = pyRe(DNS_LOOKUP_SRC, "g");
+const DNS_BUILT_NAME_RE = pyRe(DNS_BUILT_NAME_SRC);
+const DNS_LOOKUP_MAX = 50;
+const PUBLIC_IP_LOOKUP_RE = pyRe(PUBLIC_IP_LOOKUP_SRC);
+const PUBLIC_IP_LOOKUP_NEEDLES = ["ipify.org", "ip-api.com", "ipinfo.io", "ifconfig.me", "icanhazip.com",
+  "checkip.amazonaws.com", "ipapi.co", "ident.me", "api.myip.com", "wtfismyip.com"];
+const ENV_COPY_RE = pyRe(ENV_COPY_SRC, "g");
+const ENV_COPY_ANCHOR_SRC = String.raw`dict\(\s*os\.environ\s*\)|os\.environ\.copy\(\s*\)|\*\*\s*os\.environ|\.\.\.\s*process\.env`
+  + String.raw`|Object\.assign\(\s*\{\s*\}\s*,\s*process\.env`;
+const ENV_COPY_ANCHOR_RE = pyRe(ENV_COPY_ANCHOR_SRC);
+const IP_LITERAL_RE = pyRe(IP_LITERAL_SRC, "g");
+const RAW_CONNECT_RE = pyRe(RAW_CONNECT_SRC);
+const MONERO_ADDR_RE = pyRe(MONERO_ADDR_SRC);
+const MINER_ARG_RE = pyRe(MINER_ARG_SRC);
+const CHAT_SECRET_MAX = 50;
+const CHAT_SECRET_MIN_DISTINCT = 10;
+const CRED_SWEEP_NEEDLES = [".ssh", ".aws", ".azure", ".gnupg", ".docker", ".kube", ".ethereum", ".electrum", ".bitcoin",
+  ".solana", ".npmrc", ".pypirc", ".netrc", ".git-credentials", ".config", ".password-store", ".vault-token", ".terraform.d"];
+const CRED_SWEEP_SPAN = 400;
+const CRED_SWEEP_MIN = 3;
+const CRED_SWEEP_MAX = 200;
+const ENV_COPY_MAX = 20;
+const RAW_CONNECT_SPAN = 600;
+const IP_LITERAL_MAX = 100;
+const PUBLIC_RESOLVERS = new Set(["8.8.8.8", "8.8.4.4", "1.1.1.1", "1.0.0.1", "9.9.9.9", "149.112.112.112",
+  "208.67.222.222", "208.67.220.220"]);
+const distinct = (s) => new Set(s).size;
+
+/** [offset, reason] of the first chat bot or webhook secret of text in a file that makes network calls, else null (core.chat_secret_at). */
+export function chatSecretAt(text) {
+  if (!text.includes(":AA") && !text.includes("webhooks/") && !text.includes("hooks.slack.com")) return null;
+  if (!NETWORK_RE.test(text)) return null;
+  CHAT_SECRET_RE.lastIndex = 0;
+  let k = 0;
+  for (let m; (m = CHAT_SECRET_RE.exec(text)) !== null; k++) {
+    if (k >= CHAT_SECRET_MAX) break;
+    const found = m[0];
+    if (found.startsWith("discord") || found.startsWith("Discord")) {
+      const parts = found.split("/");
+      const [hook, secret] = parts.slice(-2);
+      if (distinct(secret) >= CHAT_SECRET_MIN_DISTINCT) {
+        return [m.index, `sends data to a Discord webhook whose token is written in the code (webhook ${hook})`];
+      }
+    } else if (found.startsWith("hooks.")) {
+      const [team, , secret] = found.split("/").slice(-3);
+      if (distinct(secret) >= CHAT_SECRET_MIN_DISTINCT && team.replace(/^[T0]+|[T0]+$/g, "")) {
+        return [m.index, `sends data to a Slack webhook whose key is written in the code (${team})`];
+      }
+    } else {
+      const colon = found.indexOf(":");
+      const bot = found.slice(0, colon);
+      const secret = found.slice(colon + 1);
+      if (distinct(secret) >= CHAT_SECRET_MIN_DISTINCT && TELEGRAM_API_RE.test(text)) {
+        return [m.index, `sends data to a Telegram bot whose token is written in the code (bot ${bot})`];
+      }
+    }
+  }
+  return null;
+}
+
+/** [offset, names] where text names CRED_SWEEP_MIN or more distinct credential folders within CRED_SWEEP_SPAN code points, else null (core.credential_sweep_at). */
+export function credentialSweepAt(text) {
+  if (CRED_SWEEP_NEEDLES.filter((nd) => text.includes(nd)).length < CRED_SWEEP_MIN) return null;
+  const found = [];                                   // [unit offset, code-point offset, name]
+  CRED_DIR_RE.lastIndex = 0;
+  let cp = 0;
+  let prev = 0;
+  let k = 0;
+  for (let m; (m = CRED_DIR_RE.exec(text)) !== null; k++) {
+    if (k >= CRED_SWEEP_MAX) break;
+    cp += cpLen(text.slice(prev, m.index));
+    prev = m.index;
+    found.push([m.index, cp, m[1].replaceAll("\\", "/")]);
+    if (m[0].length === 0) CRED_DIR_RE.lastIndex++;
+  }
+  for (let i = 0; i < found.length; i++) {
+    const names = [];
+    for (let j = i; j < found.length; j++) {
+      if (found[j][1] - found[i][1] > CRED_SWEEP_SPAN) break;
+      if (!names.includes(found[j][2])) names.push(found[j][2]);
+    }
+    if (names.length >= CRED_SWEEP_MIN) return [found[i][0], names];
+  }
+  return null;
+}
+
+/** Where text serializes a copy of the whole environment it made, else -1 (core.env_copy_serialized_at). */
+export function envCopySerializedAt(text) {
+  if ((!text.includes("os.environ") && !text.includes("process.env")) || !ENV_COPY_ANCHOR_RE.test(text)) return -1;
+  ENV_COPY_RE.lastIndex = 0;
+  let k = 0;
+  for (let m; (m = ENV_COPY_RE.exec(text)) !== null; k++) {
+    if (k >= ENV_COPY_MAX) break;
+    const use = pyRe(String.raw`\b(?:urlencode|dumps|stringify|b64encode|str)\(\s*` + reEscape(m[1]) + String.raw`\s*[,)]`, "g");
+    const u = searchFrom(use, text, m.index + m[0].length);
+    if (u) return u.index;
+  }
+  return -1;
+}
+
+/** The offset of a DNS lookup of a name text builds from values, else -1 (core.dns_beacon_at). */
+export function dnsBeaconAt(text) {
+  DNS_LOOKUP_RE.lastIndex = 0;
+  let k = 0;
+  for (let m; (m = DNS_LOOKUP_RE.exec(text)) !== null; k++) {
+    if (k >= DNS_LOOKUP_MAX) break;
+    const name = m[1] ?? m[2] ?? m[3];
+    if (DNS_BUILT_NAME_RE.test(name)) return m.index;
+  }
+  return -1;
+}
+
+/** The offset of the Monero wallet address text runs a miner with, else -1 (core.miner_at). */
+export function minerAt(text) {
+  if (!MINER_ARG_NEEDLES.some((nd) => text.includes(nd)) || !MINER_ARG_RE.test(text)) return -1;
+  const m = MONERO_ADDR_RE.exec(text);
+  if (m && EXEC_CALL_RE.test(text)) return m.index;
+  return -1;
+}
+
+/** [offset, reason] of the exfiltration shapes, and of a miner, that text shows; host: HOST_INFO_RE.exec(text) (core._exfil_signs). */
+function exfilSigns(text, host) {
+  const signs = [];
+  const at = minerAt(text);
+  if (at >= 0) signs.push([at, "runs a cryptocurrency miner (a Monero wallet address)"]);
+  const chat = chatSecretAt(text);
+  if (chat !== null) signs.push(chat);
+  let net = null;                                     // NETWORK_RE's answer, searched once when needed
+  const network = () => (net === null ? (net = NETWORK_RE.test(text)) : net);
+  const ip = PUBLIC_IP_URL_RE.exec(text);
+  if (ip) {
+    const cred = CRED_FILE_RE.exec(text);
+    if (cred && network()) {
+      signs.push([cred.index, `reads credential files and sends data to an IP address (${ip[0].slice(ip[0].indexOf("//") + 2)})`]);
+    }
+  }
+  const sweep = credentialSweepAt(text);
+  if (sweep !== null && network()) {
+    signs.push([sweep[0], "collects files from several credential folders and sends data over the network "
+      + `(${sweep[1].slice(0, 4).map((n) => "." + n).join(", ")})`]);
+  }
+  if (host) {
+    if (B64_URL_LITERAL_RE.test(text) && network()) {
+      signs.push([host.index, "sends the machine's user or host name to an address it hides in base64"]);
+    }
+    const at = dnsBeaconAt(text);
+    if (at >= 0) signs.push([at, "sends the machine's user or host name in a DNS lookup of a name it builds"]);
+  } else if (PUBLIC_IP_LOOKUP_NEEDLES.some((nd) => text.includes(nd))) {
+    const lookup = PUBLIC_IP_LOOKUP_RE.exec(text);
+    if (lookup) {
+      const capture = captureService(text);
+      if (capture) {
+        signs.push([lookup.index, `sends the machine's public IP address to a data-capture service (${cpPrefix(capture[0], 40)})`]);
+      }
+    }
+  }
+  return signs;
+}
+
+/** The first hard-coded IP address text opens a raw socket to (install time only), else null (core.raw_ip_connect). */
+export function rawIpConnect(text) {
+  if (!text.includes("connect") && !text.includes("Socket")) return null;
+  IP_LITERAL_RE.lastIndex = 0;
+  let k = 0;
+  for (let m; (m = IP_LITERAL_RE.exec(text)) !== null; k++) {
+    if (k >= IP_LITERAL_MAX) break;
+    if (PUBLIC_RESOLVERS.has(m[1])) continue;
+    const end = m.index + m[0].length;
+    const after = text.slice(end);
+    if (RAW_CONNECT_RE.test(cpPrefix(after, RAW_CONNECT_SPAN))) return m[1];
+  }
+  return null;
 }
 
 // Code read back from the file itself (core's comment above _SELF_READ_RE):
@@ -1006,6 +1235,10 @@ export function dumpsWorkflowSecrets(text) {
   return SECRETS_DUMP_RE.test(text) && searchFrom(PERSIST_WORKFLOW_RE, text) !== null;
 }
 
+// A browser's shortcuts rewritten to load an extension (core's comment above _PERSIST_SHORTCUT_RE)
+const PERSIST_SHORTCUT_SRC = String.raw`\bCreateShortcut\b|\.lnk\b`;
+const PERSIST_SHORTCUT_RE = pyRe(PERSIST_SHORTCUT_SRC);
+
 /** The persistence-target reasons of the install-script test. Twin of core.persistence_reasons. */
 export function persistenceReasons(text) {
   const reasons = [];
@@ -1030,6 +1263,9 @@ export function persistenceReasons(text) {
   }
   if (BUN_RELEASES_RE.test(text) && EXEC_CALL_RE.test(text)) {
     reasons.push("downloads the Bun runtime from GitHub and runs code with it");
+  }
+  if (text.includes("--load-extension") && PERSIST_SHORTCUT_RE.test(text)) {
+    reasons.push("rewrites browser shortcuts to load an extension");
   }
   return reasons;
 }
@@ -1368,7 +1604,15 @@ function installScriptRiskOf(text) {
     reasons.push("carries a script that downloads and runs code");
   }
   if (reverseShellAt(text) >= 0) reasons.push("opens a reverse shell");
-  if (sendsHostInfo(text)) reasons.push("sends the machine's user or host name over the network");
+  const host = HOST_INFO_RE.exec(text);
+  if (host && (NETWORK_RE.test(text) || EXFIL_SERVICE_RE.test(text))) {               // sendsHostInfo
+    reasons.push("sends the machine's user or host name over the network");
+  }
+  for (const [, reason] of exfilSigns(text, host)) if (!reasons.includes(reason)) reasons.push(reason);
+  if (dest === null) {
+    const ip = rawIpConnect(text);
+    if (ip !== null) reasons.push(`contacts an address typical of data exfiltration (${ip})`);
+  }
   if (runsOwnSourceAt(text) >= 0) reasons.push("runs code it reads back from its own file or a data file shipped with it");
   reasons.push(...persistenceReasons(text));
   if (PUBLISH_CMD_RE.test(text)) reasons.push("publishes a package to a registry (npm publish)");
@@ -1410,8 +1654,14 @@ const LEVELDB_RE = pyRe(LEVELDB_SRC, "y");
 // with none is not searched
 const IMPORT_HARVEST_NEEDLES = ["process.env", "os.environ", "id_", ".git-credentials", "leveldb"];
 
-/** Where core's _IMPORT_HARVEST_RE.search(text) starts, or -1. */
+/** Where text harvests: core._import_harvest_at (_IMPORT_HARVEST_RE, else a copy of the environment it serializes), or -1. */
 function importHarvestStart(text) {
+  const at = importHarvestReStart(text);
+  return at !== -1 ? at : envCopySerializedAt(text);
+}
+
+/** Where core's _IMPORT_HARVEST_RE.search(text) starts, or -1. */
+function importHarvestReStart(text) {
   if (!IMPORT_HARVEST_NEEDLES.some((needle) => text.includes(needle))) return -1;
   const rest = IMPORT_HARVEST_REST_RE.exec(text);
   const limit = rest ? rest.index : text.length;
@@ -1439,12 +1689,26 @@ const STRONG_IMPORT_REASONS = [
   "opens a reverse shell", "reads credentials or the whole environment and sends them to",
   "sends the machine's user or host name to a data-capture service", "downloads a script and runs it with",
   "writes code it decodes to a file and runs it with", "runs code it reads back from its own file",
-  "carries a GitHub Actions workflow that dumps every repository secret"];
+  "carries a GitHub Actions workflow that dumps every repository secret",
+  "sends data to a Telegram bot whose token", "sends data to a Discord webhook whose token",
+  "sends data to a Slack webhook whose key", "reads credential files and sends data to an IP address",
+  "collects files from several credential folders", "sends the machine's user or host name to an address it hides",
+  "sends the machine's user or host name in a DNS lookup", "sends the machine's public IP address to a data-capture",
+  "runs a cryptocurrency miner"];
 const CAPTURE_SERVICE_SRC = String.raw`webhook\.site|typedwebhook\.tools|oastify\.com|burpcollaborator|\binteract\.sh|\boast[\w.-]*\.(?:pro|live|site`
   + String.raw`|online|fun|me|com)\b|pipedream\.net|requestbin|requestcatcher\.com|hookbin\.com|postb\.in|beeceptor\.com`
   + String.raw`|dnslog\.cn|ceye\.io|canarytokens`;
 const CAPTURE_SERVICE_RE = pyRe(CAPTURE_SERVICE_SRC, "i");
-const PY_RUN_SRC = String.raw`\[\s*(?:sys\.executable|["']python[\d.w]*(?:\.exe)?["'])\s*,|\bstart\s+pythonw?\b`
+// an ngrok tunnel's own address counts as one (0.1.8; core's comment above _NGROK_TUNNEL_RE)
+const NGROK_TUNNEL_SRC = String.raw`\b[a-z0-9][a-z0-9-]{2,62}\.ngrok(?:-free)?\.(?:app|io|dev)\b|\b\d+\.tcp(?:\.[a-z]{2,3})?\.ngrok\.io\b`;
+const NGROK_TUNNEL_RE = pyRe(NGROK_TUNNEL_SRC);
+/** The first data-capture service text names, else an ngrok tunnel's address, else null (core.capture_service). */
+function captureService(text) {
+  let m = CAPTURE_SERVICE_RE.exec(text);
+  if (m === null && text.includes("ngrok")) m = NGROK_TUNNEL_RE.exec(text);
+  return m;
+}
+const PY_RUN_SRC = String.raw`\[\s*(?:\w*sys\.executable|["']python[\d.w]*(?:\.exe)?["'])\s*,|\bstart\s+pythonw?\b`
   + String.raw`|\b(?:system|popen|getoutput|run|call|Popen)\s*\(\s*f?["']python[\d.w]*(?:\.exe)?\s`;
 const PY_RUN_RE = pyRe(PY_RUN_SRC);
 /** 'CRITICAL' when one of importTimeRisk's reasons is a strong one, else 'MAJOR' (core.import_time_severity). */
@@ -1639,7 +1903,7 @@ function importTimeRiskOf(text) {
   if (rs >= 0) signs.push([rs, "opens a reverse shell"]);
   const host = HOST_INFO_RE.exec(text);
   if (host) {
-    const capture = CAPTURE_SERVICE_RE.exec(text);
+    const capture = captureService(text);
     if (capture) signs.push([host.index, `sends the machine's user or host name to a data-capture service (${cpPrefix(capture[0], 40)})`]);
   }
   const own = runsOwnSourceAt(text);
@@ -1647,6 +1911,7 @@ function importTimeRiskOf(text) {
   if (dumpsWorkflowSecrets(text)) {
     signs.push([searchFrom(PERSIST_SECRETS_DUMP_G, text).index, "carries a GitHub Actions workflow that dumps every repository secret"]);
   }
+  signs.push(...exfilSigns(text, host));
   for (const [at, reason] of signs) {
     reasons.push(reason);
     line ??= countNewlines(text, 0, at) + 1;
@@ -1765,6 +2030,16 @@ export const PY_TWINS = {
     _SCRIPT_INTERP_RE: [SCRIPT_INTERP_SRC, ""], _SCRIPT_LOAD_RE: [SCRIPT_LOAD_SRC, ""], _DECODE_CALL_RE: [DECODE_CALL_SRC, ""],
     _SPAWN_CALL_RE: [SPAWN_CALL_SRC, ""], _SPAWN_LIT_RE: [SPAWN_LIT_SRC, ""], _SPAWN_CONCAT_RE: [SPAWN_CONCAT_SRC, ""],
     _SPAWN_DIR_RE: [SPAWN_DIR_SRC, ""], _SPAWN_JOIN_RE: [SPAWN_JOIN_SRC, ""], _SPAWN_NAME_RE: [SPAWN_NAME_SRC, ""],
+    _REVSHELL_NGROK_TCP_RE: [REVSHELL_NGROK_TCP_SRC, "i"], _REVSHELL_ARG_SHELL_RE: [REVSHELL_ARG_SHELL_SRC, ""],
+    _REVSHELL_ARGS_RE: [REVSHELL_ARGS_SRC, ""], _CHAT_SECRET_RE: [CHAT_SECRET_SRC, ""],
+    _TELEGRAM_API_RE: [TELEGRAM_API_SRC, "i"], _CRED_FILE_RE: [CRED_FILE_SRC, ""],
+    _PUBLIC_IP_URL_RE: [PUBLIC_IP_URL_SRC, ""], _CRED_DIR_RE: [CRED_DIR_SRC, ""],
+    _B64_URL_LITERAL_RE: [B64_URL_LITERAL_SRC, ""], _DNS_LOOKUP_RE: [DNS_LOOKUP_SRC, ""],
+    _DNS_BUILT_NAME_RE: [DNS_BUILT_NAME_SRC, ""],
+    _PUBLIC_IP_LOOKUP_RE: [PUBLIC_IP_LOOKUP_SRC, ""], _ENV_COPY_RE: [ENV_COPY_SRC, ""],
+    _IP_LITERAL_RE: [IP_LITERAL_SRC, ""], _RAW_CONNECT_RE: [RAW_CONNECT_SRC, ""], _ENV_COPY_ANCHOR_RE: [ENV_COPY_ANCHOR_SRC, ""],
+    _MONERO_ADDR_RE: [MONERO_ADDR_SRC, ""], _MINER_ARG_RE: [MINER_ARG_SRC, ""], _NGROK_TUNNEL_RE: [NGROK_TUNNEL_SRC, ""],
+    _PERSIST_SHORTCUT_RE: [PERSIST_SHORTCUT_SRC, ""],
     ...RECEIVED_TWINS,
   },
   sets: {
@@ -1782,6 +2057,9 @@ export const PY_TWINS = {
     _STAGER_RUN_NEEDLES: STAGER_RUN_NEEDLES, _STAGER_NET_NEEDLES: STAGER_NET_NEEDLES,
     _STRONG_IMPORT_REASONS: STRONG_IMPORT_REASONS, _PY_JOINS: [...PY_JOINS], _SYSTEM_DLLS: [...SYSTEM_DLLS],
     _SPAWN_NO_SCRIPT_FLAGS: [...SPAWN_NO_SCRIPT_FLAGS], _SPAWN_VALUE_FLAGS: [...SPAWN_VALUE_FLAGS],
+    _CRED_SWEEP_NEEDLES: CRED_SWEEP_NEEDLES, _PUBLIC_RESOLVERS: [...PUBLIC_RESOLVERS],
+    _PUBLIC_IP_LOOKUP_NEEDLES: PUBLIC_IP_LOOKUP_NEEDLES, _MINER_ARG_NEEDLES: MINER_ARG_NEEDLES,
+    _REVSHELL_ARGS_NEEDLES: REVSHELL_ARGS_NEEDLES,
   },
   maps: Object.fromEntries([["_PERSIST_AGENT_PAIRS", PERSIST_AGENT_PAIRS], ["_WRAPPER_VALUE_OPTIONS", WRAPPER_VALUE_OPTIONS],
     ["_WRAPPER_CHDIR_OPTIONS", WRAPPER_CHDIR_OPTIONS], ["_WRAPPER_COMMAND_OPTIONS", WRAPPER_COMMAND_OPTIONS]]
@@ -1794,5 +2072,9 @@ export const PY_TWINS = {
     _PERSIST_MAX_LINES: PERSIST_MAX_LINES, _SELF_PUB_SPAN: SELF_PUB_SPAN, _SELF_PUB_MAX: SELF_PUB_MAX,
     _DV_MAX_LITERAL: DV_MAX_LITERAL, _DV_BODY: DV_BODY, _DV_MAX_HELPERS: DV_MAX_HELPERS, _DV_MAX_ARRAYS: DV_MAX_ARRAYS,
     _DV_MAX_CHARS: DV_MAX_CHARS, _SPAWN_MAX_DEPTH: SPAWN_MAX_DEPTH, _SPAWN_MAX_FILES: SPAWN_MAX_FILES,
-    _SPAWN_NAME_DEPTH: SPAWN_NAME_DEPTH, _SPAWN_MAX_TARGETS: SPAWN_MAX_TARGETS },
+    _SPAWN_NAME_DEPTH: SPAWN_NAME_DEPTH, _SPAWN_MAX_TARGETS: SPAWN_MAX_TARGETS,
+    _CHAT_SECRET_MAX: CHAT_SECRET_MAX, _CHAT_SECRET_MIN_DISTINCT: CHAT_SECRET_MIN_DISTINCT,
+    _CRED_SWEEP_SPAN: CRED_SWEEP_SPAN, _CRED_SWEEP_MIN: CRED_SWEEP_MIN, _CRED_SWEEP_MAX: CRED_SWEEP_MAX,
+    _ENV_COPY_MAX: ENV_COPY_MAX, _RAW_CONNECT_SPAN: RAW_CONNECT_SPAN, _IP_LITERAL_MAX: IP_LITERAL_MAX,
+    _DNS_LOOKUP_MAX: DNS_LOOKUP_MAX },
 };

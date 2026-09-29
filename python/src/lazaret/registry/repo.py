@@ -79,6 +79,13 @@ MAX_MEMBER = _env_number("LAZARET_MAX_SOURCE_BYTES", 16_000_000)
 MAX_FILES = 20_000         # files per package (numpy's sdist alone has >4,000)
 SAMPLE = 8192              # header/entropy sample read from oversized files
 # Stored scans from another engine version are scanned again (has_scan).
+# 2.11: 0.1.8's exfiltration shapes (a chat bot or webhook whose secret is in
+#      the code, credential files sent to an IP address, a sweep of
+#      credential folders, the host name hidden in base64 or sent in a DNS
+#      name, the public IP address sent to a capture service, a copy of the
+#      environment serialized), reverse shells as argument lists, miners, a
+#      raw socket and browser shortcuts at install time, curl or wget
+#      downloading to a file that is then run
 # 2.10: 0.1.8's names and code in strings a file decodes as it runs, eval of
 #      an inline decoder (SC-EVAL-DECODER), a script downloaded or decoded,
 #      written and run with an interpreter, scripts a script starts with node
@@ -112,7 +119,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.10.0"
+ENGINE_VERSION = "2.11.0"
 
 # ---------------- Trust-chain limits (F9/G14/F10) ----------------
 # Only these hosts may ever be fetched, over https only, and redirects to any

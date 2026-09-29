@@ -1132,7 +1132,7 @@ function normPath(tok) {
 /** The normalized path token a write match names (core._dl_path_token). */
 function pathToken(m) {
   const g = m.groups;
-  return normPath(g.p1 ?? g.p2 ?? g.p3 ?? g.p4);
+  return normPath(g.p1 ?? g.p2 ?? g.p3 ?? g.p4 ?? g.p5);
 }
 
 /** Does the run sink's argument region name the file `path`? core._dl_region_names_path. */
@@ -1200,7 +1200,7 @@ function writtenAndRun(rows, isSrc, downloads) {
     let nearSrc = null;
     DL_FILE_WRITE_RE.lastIndex = 0;
     for (let wm = DL_FILE_WRITE_RE.exec(row); wm !== null; wm = DL_FILE_WRITE_RE.exec(row)) {
-      if (wm.groups.p4 === undefined) {
+      if (wm.groups.p4 === undefined && wm.groups.p5 === undefined) {
         if (nearSrc === null) {
           nearSrc = false;
           for (let j = Math.max(0, k - WINDOW); j < Math.min(rows.length, k + WINDOW + 1); j++) if (src(j)) { nearSrc = true; break; }

@@ -94,7 +94,9 @@
       "appendFile",
       "createWriteStream",
       "open(",
-      "urlretrieve"
+      "urlretrieve",
+      "curl",
+      "wget"
     ],
     "_DL_PATHRUN_NEEDLES": [
       "system",
@@ -296,9 +298,9 @@
       "note": "a runner-alias definition (name = a direct code-runner reference)"
     },
     "_DL_FILE_WRITE_RE": {
-      "src": "\\b(?:fs\\s*\\.\\s*)?(?:write|append)File(?:Sync)?\\s*\\(\\s*(?P<p1>[A-Za-z_$][\\w$]*|[\"'][^\"'\\n]{1,200}[\"'])\\s*,|\\bcreateWriteStream\\s*\\(\\s*(?P<p2>[A-Za-z_$][\\w$]*|[\"'][^\"'\\n]{1,200}[\"'])|\\bopen\\s*\\(\\s*(?P<p3>[A-Za-z_$][\\w$]*|[\"'][^\"'\\n]{1,200}[\"'])\\s*,[^)\\n]{0,60}?[\"'][rbtU]*[wax]\\+?[rbtU]*[\"']|\\burlretrieve\\s*\\(\\s*[^,()\\n]{1,300},\\s*(?P<p4>[A-Za-z_$][\\w$]*|[\"'][^\"'\\n]{1,200}[\"'])\\s*\\)",
+      "src": "\\b(?:fs\\s*\\.\\s*)?(?:write|append)File(?:Sync)?\\s*\\(\\s*(?P<p1>[A-Za-z_$][\\w$]*|[\"'][^\"'\\n]{1,200}[\"'])\\s*,|\\bcreateWriteStream\\s*\\(\\s*(?P<p2>[A-Za-z_$][\\w$]*|[\"'][^\"'\\n]{1,200}[\"'])|\\bopen\\s*\\(\\s*(?P<p3>[A-Za-z_$][\\w$]*|[\"'][^\"'\\n]{1,200}[\"'])\\s*,[^)\\n]{0,60}?[\"'][rbtU]*[wax]\\+?[rbtU]*[\"']|\\burlretrieve\\s*\\(\\s*[^,()\\n]{1,300},\\s*(?P<p4>[A-Za-z_$][\\w$]*|[\"'][^\"'\\n]{1,200}[\"'])\\s*\\)|[\"'](?:curl|wget)(?:\\.exe)?[\"']\\s*,\\s*\\[?[^\\]\\n]{0,300}?[\"']-(?:o|O|-output|-output-document)[\"']\\s*,\\s*(?P<p5>[A-Za-z_$][\\w$]*|[\"'][^\"'\\n]{1,200}[\"'])",
       "flags": "",
-      "note": "a received value written to a file, naming the path"
+      "note": "a received value written to a file, naming the path (p4, p5: a download to a file on its own)"
     },
     "_DL_PATHRUN_SINK_RE": {
       "src": "\\b(?:os\\.system|os\\.startfile|runpy\\.run_path)\\s*\\(|\\b(?:subprocess\\s*\\.\\s*)?(?:run|Popen|call|check_call|check_output)\\s*\\(|\\b(?:spawn|spawnSync|execFile|execFileSync|fork)\\s*\\(|(?<![\\w$.])(?:require|import|execfile)\\s*\\(|(?<![\\w$.])exec\\s*\\(\\s*open\\s*\\(",

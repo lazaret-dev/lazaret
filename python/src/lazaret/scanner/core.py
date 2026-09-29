@@ -6167,6 +6167,16 @@ def reverse_shell_at(text):
         m = _REVSHELL_JS_SPAWN_RE.search(text)
         if m and _REVSHELL_JS_PIPE_RE.search(text) and _REVSHELL_JS_NET_RE.search(text):
             return m.start()
+    # an argument list (`spawn('nc', [host, port, '-e', '/bin/sh'])`), or a
+    # shell or netcat run with an ngrok TCP address (0.1.8)
+    if any(nd in text for nd in _REVSHELL_ARGS_NEEDLES):
+        m = _REVSHELL_ARGS_RE.search(text)
+        if m:
+            return m.start()
+    if ".ngrok.io" in text:
+        m = _REVSHELL_NGROK_TCP_RE.search(text)
+        if m and _REVSHELL_ARG_SHELL_RE.search(text) and _EXEC_CALL_RE.search(text):
+            return m.start()
     return -1
 
 
@@ -6175,13 +6185,259 @@ _HOST_INFO_RE = re.compile(
     r"|os\.hostname|os\.userInfo)\s*\("
     r"""|\b(?:getoutput|check_output|getstatusoutput|execSync|popen)\s*\(\s*\[?\s*["'](?:whoami|hostname|id|uname"""
     r"""|ifconfig|ipconfig|systeminfo)\b"""
-    r"|(?:\$\(|`)\s*(?:whoami|hostname|id|uname|ifconfig|ip\s+a|pwd|ls|cat\s+/etc/passwd|ps)\b")
+    r"|(?:\$\(|`)\s*(?:whoami|hostname|id|uname|ifconfig|ip\s+a|pwd|ls|cat\s+/etc/passwd|ps)\b"
+    r"|\bos\.(?:hostname|userInfo)\s*[,)]")
 
 
 def sends_host_info(text):
     """True when `text` collects the machine's user or host name (or runs
     whoami, hostname, ifconfig …) and sends data over the network."""
     return bool(_HOST_INFO_RE.search(text) and (_NETWORK_RE.search(text) or _EXFIL_SERVICE_RE.search(text)))
+
+
+# Exfiltration shapes (0.1.8, from the rerun's misses that GuardDog caught).
+# Each one is strong wherever it is found — in an install script, in code
+# that runs on import, in the files a package runs when used — and none
+# was found in the benchmark's 429 popular packages:
+# - A chat bot or webhook whose secret is written in the code: a Telegram
+#   bot token (next to api.telegram.org), a Discord webhook's token or a
+#   Slack webhook's key, in a file that makes network calls. A library that
+#   talks to these services takes the key from its user; a package that
+#   ships its author's key reports whoever runs it to the author (figlets
+#   zips Exodus wallets and sends them to its bot; requestn uploads every
+#   file in the working folder). Placeholders (T00000000/…/XXXX, a secret of
+#   one repeated letter) are not keys.
+# - Credential files (.env, .npmrc, .pypirc, .netrc, .git-credentials,
+#   ~/.aws/credentials, an SSH private key, Docker's or kubectl's config)
+#   read in a file that sends data to a raw public IP address.
+# - Several credential folders named in one place (.ssh, .aws, .ethereum,
+#   .kube …: three or more within _CRED_SWEEP_SPAN characters) in a file
+#   that makes network calls: a sweep of the home folder for secrets.
+# - The machine's user or host name sent to an address the file keeps
+#   base64-encoded (a literal that decodes to "http…"), or looked up in DNS
+#   inside a name the code builds (the dependency-confusion DNS beacon), and
+#   the machine's public IP address (from ipify, ip-api …) sent to a
+#   data-capture service; an ngrok tunnel's own address counts as one.
+# - The whole environment copied to a variable and serialized
+#   (`d = dict(os.environ)` … `urlencode(d)`): read with the harvest test.
+# - A reverse shell given to an exec call as an argument list, or to an
+#   ngrok TCP address (`spawn('bash', ['-i', 'nc', '2.tcp.eu.ngrok.io', …])`).
+# - At install time only: a raw socket to a hard-coded IP address, as the
+#   test already reads a URL with one (loopback, and the public DNS
+#   resolvers a connectivity check uses, are not one).
+# - A cryptocurrency miner: a Monero wallet address in a file that runs a
+#   program with a mining pool's arguments (`-o pool:port`, stratum+tcp://,
+#   --donate-level, xmrig) — ultralytics 8.3.42 ran XMRig from safe_run().
+_CHAT_SECRET_RE = re.compile(
+    r"(?<![0-9])\d{8,10}:AA[A-Za-z0-9_-]{33}(?![A-Za-z0-9_-])"
+    r"|\b[Dd]iscord(?:app)?\.com/api/webhooks/\d{17,20}/[A-Za-z0-9_-]{60,80}"
+    r"|\bhooks\.slack\.com/services/T[A-Z0-9]{8,12}/B[A-Z0-9]{8,12}/[A-Za-z0-9]{24}(?![A-Za-z0-9])")
+_TELEGRAM_API_RE = re.compile(r"api\.telegram\.org", re.I)
+_CHAT_SECRET_MAX = 50            # matches examined per text
+_CHAT_SECRET_MIN_DISTINCT = 10   # distinct characters a real secret has
+_CRED_FILE_RE = re.compile(
+    r"""["'`](?:~[/\\]|\.[/\\])?\.(?:env|npmrc|pypirc|netrc|git-credentials)["'`]"""
+    r"""|\.aws[/\\]credentials\b|[/\\]\.ssh[/\\]id_\w+|\.docker[/\\]config\.json|\.kube[/\\]config\b""")
+_PUBLIC_IP_URL_RE = re.compile(
+    r"\b(?:https?|wss?|tcp)://(?!(?:10|127|0)\.)(?!192\.168\.)(?!172\.(?:1[6-9]|2\d|3[01])\.)(?!169\.254\.)"
+    r"(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)(?![\d.])")
+_CRED_DIR_RE = re.compile(
+    r"""["'`](?:~[/\\]|\$HOME[/\\]|%USERPROFILE%[/\\])?\.(ssh|aws|azure|gnupg|docker|kube|ethereum|electrum|bitcoin"""
+    r"""|solana|npmrc|pypirc|netrc|git-credentials|config[/\\]gcloud|password-store|vault-token|terraform\.d)"""
+    r"""(?:[/\\][^"'`\n]{0,60})?["'`]""")
+_CRED_SWEEP_NEEDLES = (".ssh", ".aws", ".azure", ".gnupg", ".docker", ".kube", ".ethereum", ".electrum", ".bitcoin",
+                       ".solana", ".npmrc", ".pypirc", ".netrc", ".git-credentials", ".config", ".password-store",
+                       ".vault-token", ".terraform.d")
+_CRED_SWEEP_SPAN = 400           # characters the credential folders are named within
+_CRED_SWEEP_MIN = 3              # distinct credential folders that make a sweep
+_CRED_SWEEP_MAX = 200            # folder names examined per text
+_B64_URL_LITERAL_RE = re.compile(r"""["'`]aHR0c[A-Za-z0-9+/]{2,}={0,2}["'`]""")
+# a DNS lookup of a name built in an f-string or a template literal (the
+# name, at most 300 characters, is read on its own; the first
+# _DNS_LOOKUP_MAX lookups of a text are)
+_DNS_LOOKUP_RE = re.compile(
+    r"""(?:\b(?:getaddrinfo|gethostbyname(?:_ex)?)|\bdns\.(?:promises\.)?(?:resolve\w*|lookup)"""
+    r"""|\bresolver\.(?:resolve|query))\s*\(\s*(?:f"([^"\n]{0,300})"|f'([^'\n]{0,300})'|`([^`\n]{0,300})`)""")
+_DNS_BUILT_NAME_RE = re.compile(r"\{[^}\n]+\}[^\n]*\.[A-Za-z]{2,}\Z")
+_DNS_LOOKUP_MAX = 50
+_PUBLIC_IP_LOOKUP_RE = re.compile(
+    r"\bapi(?:64)?\.ipify\.org\b|\bip-api\.com\b|\bipinfo\.io\b|\bifconfig\.me\b|\bicanhazip\.com\b"
+    r"|\bcheckip\.amazonaws\.com\b|\bipapi\.co\b|\bident\.me\b|\bapi\.myip\.com\b|\bwtfismyip\.com\b")
+_PUBLIC_IP_LOOKUP_NEEDLES = ("ipify.org", "ip-api.com", "ipinfo.io", "ifconfig.me", "icanhazip.com",
+                             "checkip.amazonaws.com", "ipapi.co", "ident.me", "api.myip.com", "wtfismyip.com")
+_ENV_COPY_RE = re.compile(
+    r"(?<![\w$.])([A-Za-z_$][\w$]*)\s{0,40}=\s{0,40}(?:dict\(\s*os\.environ\s*\)|os\.environ\.copy\(\s*\)"
+    r"|\{\s*\*\*\s*os\.environ\s*\}|\{\s*\.\.\.\s*process\.env\s*\}|Object\.assign\(\s*\{\s*\}\s*,\s*process\.env\s*\))")
+_ENV_COPY_MAX = 20               # copies examined per text
+# what every copy _ENV_COPY_RE finds contains: a text without it is not read
+# for the (slower) assignment
+_ENV_COPY_ANCHOR_RE = re.compile(
+    r"dict\(\s*os\.environ\s*\)|os\.environ\.copy\(\s*\)|\*\*\s*os\.environ|\.\.\.\s*process\.env"
+    r"|Object\.assign\(\s*\{\s*\}\s*,\s*process\.env")
+_REVSHELL_NGROK_TCP_RE = re.compile(r"\b\d+\.tcp(?:\.[a-z]{2,3})?\.ngrok\.io\b", re.I)
+_REVSHELL_ARG_SHELL_RE = re.compile(
+    r"""["'](?:nc|ncat|netcat|(?:/bin/)?(?:ba|z|da)?sh|cmd(?:\.exe)?|powershell(?:\.exe)?)["']""")
+_REVSHELL_ARGS_RE = re.compile(
+    r"""["'](?:nc|ncat|netcat)["'][^\n]{0,160}?["']-[ec]["']\s*,\s*["'](?:/bin/)?(?:ba|z|da)?sh["']""")
+_REVSHELL_ARGS_NEEDLES = ("'nc'", '"nc"', "'ncat'", '"ncat"', "'netcat'", '"netcat"')
+_IP_LITERAL_RE = re.compile(
+    r"""["'](?!(?:127|0|255)\.)((?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d))["']""")
+_RAW_CONNECT_RE = re.compile(
+    r"\b(?:socket\.create_connection|net\.connect|net\.createConnection|connect(?:_ex)?)\s*\(|\bnew\s+net\.Socket\b")
+_RAW_CONNECT_SPAN = 600          # characters after an IP literal searched for the connection
+_IP_LITERAL_MAX = 100            # IP literals examined per text
+_MONERO_ADDR_RE = re.compile(r"(?<![A-Za-z0-9])[48][1-9A-HJ-NP-Za-km-z]{94}(?:[1-9A-HJ-NP-Za-km-z]{11})?(?![A-Za-z0-9])")
+_MINER_ARG_RE = re.compile(r"""["'](?:-o|--url)["']|\bstratum\+(?:tcp|ssl|tls)://|--donate-level\b|\b(?:xmrig|XMRig|XMRIG)\b""")
+_MINER_ARG_NEEDLES = ("'-o'", '"-o"', "'--url'", '"--url"', "stratum+", "--donate-level", "xmrig", "XMRig", "XMRIG")
+_PUBLIC_RESOLVERS = frozenset({"8.8.8.8", "8.8.4.4", "1.1.1.1", "1.0.0.1", "9.9.9.9", "149.112.112.112",
+                               "208.67.222.222", "208.67.220.220"})
+
+
+def chat_secret_at(text):
+    """(offset, reason) of the first chat bot or webhook secret of `text`
+    (see above) in a file that makes network calls, else None."""
+    if ":AA" not in text and "webhooks/" not in text and "hooks.slack.com" not in text:
+        return None
+    if not _NETWORK_RE.search(text):
+        return None
+    for k, m in enumerate(_CHAT_SECRET_RE.finditer(text)):
+        if k >= _CHAT_SECRET_MAX:
+            break
+        found = m.group(0)
+        if found.startswith(("discord", "Discord")):
+            hook, secret = found.rsplit("/", 2)[1:]
+            if len(set(secret)) >= _CHAT_SECRET_MIN_DISTINCT:
+                return m.start(), f"sends data to a Discord webhook whose token is written in the code (webhook {hook})"
+        elif found.startswith("hooks."):
+            team, _bot, secret = found.rsplit("/", 3)[1:]
+            if len(set(secret)) >= _CHAT_SECRET_MIN_DISTINCT and team.strip("T0"):
+                return m.start(), f"sends data to a Slack webhook whose key is written in the code ({team})"
+        else:
+            bot, secret = found.split(":", 1)
+            if len(set(secret)) >= _CHAT_SECRET_MIN_DISTINCT and _TELEGRAM_API_RE.search(text):
+                return m.start(), f"sends data to a Telegram bot whose token is written in the code (bot {bot})"
+    return None
+
+
+def credential_sweep_at(text):
+    """(offset, names) where `text` names _CRED_SWEEP_MIN or more distinct
+    credential folders within _CRED_SWEEP_SPAN characters, else None."""
+    if sum(1 for nd in _CRED_SWEEP_NEEDLES if nd in text) < _CRED_SWEEP_MIN:
+        return None
+    found = []
+    for k, m in enumerate(_CRED_DIR_RE.finditer(text)):
+        if k >= _CRED_SWEEP_MAX:
+            break
+        found.append((m.start(), m.group(1).replace("\\", "/")))
+    for i, (at, _name) in enumerate(found):
+        names = []
+        for at2, name in found[i:]:
+            if at2 - at > _CRED_SWEEP_SPAN:
+                break
+            if name not in names:
+                names.append(name)
+        if len(names) >= _CRED_SWEEP_MIN:
+            return at, names
+    return None
+
+
+def env_copy_serialized_at(text):
+    """The offset where `text` serializes a copy of the whole environment
+    it made (`d = dict(os.environ)` … `urlencode(d)`), else -1."""
+    if ("os.environ" not in text and "process.env" not in text) or _ENV_COPY_ANCHOR_RE.search(text) is None:
+        return -1
+    for k, m in enumerate(_ENV_COPY_RE.finditer(text)):
+        if k >= _ENV_COPY_MAX:
+            break
+        use = re.compile(r"\b(?:urlencode|dumps|stringify|b64encode|str)\(\s*" + re.escape(m.group(1)) + r"\s*[,)]")
+        u = use.search(text, m.end())
+        if u:
+            return u.start()
+    return -1
+
+
+def _exfil_signs(text, host):
+    """(offset, reason) of the exfiltration shapes above that `text` shows,
+    and of a miner, for the install-script and import-time tests (the
+    whole-environment copy and the reverse shell are read by those tests'
+    own checks). `host`: _HOST_INFO_RE.search(text)."""
+    signs = []
+    at = miner_at(text)
+    if at >= 0:
+        signs.append((at, "runs a cryptocurrency miner (a Monero wallet address)"))
+    chat = chat_secret_at(text)
+    if chat is not None:
+        signs.append(chat)
+    net = []                          # _NETWORK_RE's answer, searched once when needed
+
+    def network():
+        if not net:
+            net.append(_NETWORK_RE.search(text) is not None)
+        return net[0]
+    ip = _PUBLIC_IP_URL_RE.search(text)
+    if ip:
+        cred = _CRED_FILE_RE.search(text)
+        if cred and network():
+            signs.append((cred.start(), "reads credential files and sends data to an IP address "
+                                        f"({ip.group(0).split('//', 1)[1]})"))
+    sweep = credential_sweep_at(text)
+    if sweep is not None and network():
+        signs.append((sweep[0], "collects files from several credential folders and sends data over the network "
+                                f"({', '.join('.' + n for n in sweep[1][:4])})"))
+    if host:
+        if _B64_URL_LITERAL_RE.search(text) and network():
+            signs.append((host.start(), "sends the machine's user or host name to an address it hides in base64"))
+        at = dns_beacon_at(text)
+        if at >= 0:
+            signs.append((at, "sends the machine's user or host name in a DNS lookup of a name it builds"))
+    elif any(nd in text for nd in _PUBLIC_IP_LOOKUP_NEEDLES):
+        lookup = _PUBLIC_IP_LOOKUP_RE.search(text)
+        if lookup:
+            capture = capture_service(text)
+            if capture:
+                signs.append((lookup.start(), "sends the machine's public IP address to a data-capture service "
+                                              f"({capture.group(0)[:40]})"))
+    return signs
+
+
+def dns_beacon_at(text):
+    """The offset of a DNS lookup of a name `text` builds from values
+    (`getaddrinfo(f"{h}.{u}.x.com")`, `dns.lookup(`${h}.x.com`)`), else -1."""
+    for k, m in enumerate(_DNS_LOOKUP_RE.finditer(text)):
+        if k >= _DNS_LOOKUP_MAX:
+            break
+        name = next(g for g in m.groups() if g is not None)
+        if _DNS_BUILT_NAME_RE.search(name):
+            return m.start()
+    return -1
+
+
+def miner_at(text):
+    """The offset of the Monero wallet address `text` runs a miner with (see
+    above), else -1."""
+    if not any(nd in text for nd in _MINER_ARG_NEEDLES) or _MINER_ARG_RE.search(text) is None:
+        return -1
+    m = _MONERO_ADDR_RE.search(text)
+    if m and _EXEC_CALL_RE.search(text):
+        return m.start()
+    return -1
+
+
+def raw_ip_connect(text):
+    """The first hard-coded IP address `text` opens a raw socket to (a
+    literal with a connection within _RAW_CONNECT_SPAN characters after it;
+    loopback and the public DNS resolvers excepted), else None — install
+    time only."""
+    if "connect" not in text and "Socket" not in text:
+        return None
+    for k, m in enumerate(_IP_LITERAL_RE.finditer(text)):
+        if k >= _IP_LITERAL_MAX:
+            break
+        if m.group(1) in _PUBLIC_RESOLVERS:
+            continue
+        if _RAW_CONNECT_RE.search(text, m.end(), m.end() + _RAW_CONNECT_SPAN):
+            return m.group(1)
+    return None
 
 
 # Code read back from the file itself (0.1.7). A payload — or a hint such as
@@ -6458,6 +6714,14 @@ def dumps_workflow_secrets(text):
     return _SECRETS_DUMP_RE.search(text) is not None and _PERSIST_WORKFLOW_RE.search(text) is not None
 
 
+# A browser's shortcuts rewritten to start it with an extension the script
+# wrote (0.1.8): python-dateuti's setup.py wrote a clipboard-stealing
+# extension to %APPDATA% and added `--load-extension=` to every Chrome, Edge
+# and Brave shortcut (.lnk) it found. Browser automation passes the flag on
+# a command line; it never edits shortcuts.
+_PERSIST_SHORTCUT_RE = re.compile(r"\bCreateShortcut\b|\.lnk\b")
+
+
 def persistence_reasons(text):
     """The persistence-target reasons of the install-script test (see above):
     what `text` makes an AI agent, an editor or GitHub Actions run later, and
@@ -6482,6 +6746,8 @@ def persistence_reasons(text):
         reasons.append("registers the machine as a GitHub Actions self-hosted runner")
     if _BUN_RELEASES_RE.search(text) is not None and _EXEC_CALL_RE.search(text) is not None:
         reasons.append("downloads the Bun runtime from GitHub and runs code with it")
+    if "--load-extension" in text and _PERSIST_SHORTCUT_RE.search(text) is not None:
+        reasons.append("rewrites browser shortcuts to load an extension")
     return reasons
 
 
@@ -7022,8 +7288,16 @@ def _install_script_risk(text):
         reasons.append("carries a script that downloads and runs code")
     if reverse_shell_at(text) >= 0:
         reasons.append("opens a reverse shell")
-    if sends_host_info(text):
+    host = _HOST_INFO_RE.search(text)
+    if host and (_NETWORK_RE.search(text) or _EXFIL_SERVICE_RE.search(text)):        # sends_host_info
         reasons.append("sends the machine's user or host name over the network")
+    for _at, reason in _exfil_signs(text, host):
+        if reason not in reasons:
+            reasons.append(reason)
+    if dest is None:
+        ip = raw_ip_connect(text)
+        if ip is not None:
+            reasons.append(f"contacts an address typical of data exfiltration ({ip})")
     if runs_own_source_at(text) >= 0:
         reasons.append("runs code it reads back from its own file or a data file shipped with it")
     reasons.extend(persistence_reasons(text))
@@ -7101,15 +7375,35 @@ _STRONG_IMPORT_REASONS = (
     "opens a reverse shell", "reads credentials or the whole environment and sends them to",
     "sends the machine's user or host name to a data-capture service", "downloads a script and runs it with",
     "writes code it decodes to a file and runs it with", "runs code it reads back from its own file",
-    "carries a GitHub Actions workflow that dumps every repository secret")
+    "carries a GitHub Actions workflow that dumps every repository secret",
+    "sends data to a Telegram bot whose token", "sends data to a Discord webhook whose token",
+    "sends data to a Slack webhook whose key", "reads credential files and sends data to an IP address",
+    "collects files from several credential folders", "sends the machine's user or host name to an address it hides",
+    "sends the machine's user or host name in a DNS lookup", "sends the machine's public IP address to a data-capture",
+    "runs a cryptocurrency miner")
 # Endpoints that exist to capture what is sent to them (out-of-band testing,
 # request inspection): no library reports to one
 _CAPTURE_SERVICE_RE = re.compile(
     r"webhook\.site|typedwebhook\.tools|oastify\.com|burpcollaborator|\binteract\.sh|\boast[\w.-]*\.(?:pro|live|site"
     r"|online|fun|me|com)\b|pipedream\.net|requestbin|requestcatcher\.com|hookbin\.com|postb\.in|beeceptor\.com"
     r"|dnslog\.cn|ceye\.io|canarytokens", re.I)
+# An ngrok tunnel's own address counts as one (0.1.8): a subdomain someone's
+# laptop answers. Searched only in a text that names ngrok (the pattern can't
+# be found quickly: it starts with any letter); lower case, as a host name
+# is written in code.
+_NGROK_TUNNEL_RE = re.compile(
+    r"\b[a-z0-9][a-z0-9-]{2,62}\.ngrok(?:-free)?\.(?:app|io|dev)\b|\b\d+\.tcp(?:\.[a-z]{2,3})?\.ngrok\.io\b")
+
+
+def capture_service(text):
+    """The first data-capture service `text` names (_CAPTURE_SERVICE_RE), else
+    an ngrok tunnel's address, else None (a match)."""
+    m = _CAPTURE_SERVICE_RE.search(text)
+    if m is None and "ngrok" in text:
+        m = _NGROK_TUNNEL_RE.search(text)
+    return m
 _PY_RUN_RE = re.compile(
-    r"""\[\s*(?:sys\.executable|["']python[\d.w]*(?:\.exe)?["'])\s*,|\bstart\s+pythonw?\b"""
+    r"""\[\s*(?:\w*sys\.executable|["']python[\d.w]*(?:\.exe)?["'])\s*,|\bstart\s+pythonw?\b"""
     r"""|\b(?:system|popen|getoutput|run|call|Popen)\s*\(\s*f?["']python[\d.w]*(?:\.exe)?\s""")
 
 # Prose is not import-time code (0.1.7). On the audit's benign PyPI corpus a
@@ -7259,11 +7553,18 @@ def _import_time_reading(text, lang):
     return reasons, line
 
 
-def _import_time_risk(text):
-    reasons, line = [], None
+def _import_harvest_at(text):
+    """Where `text` harvests (see _IMPORT_HARVEST_RE; also a copy of the
+    whole environment it serializes, 0.1.8), else -1."""
     harvest = (_IMPORT_HARVEST_RE.search(text)
                if any(needle in text for needle in _IMPORT_HARVEST_NEEDLES) else None)
-    if harvest:
+    return harvest.start() if harvest else env_copy_serialized_at(text)
+
+
+def _import_time_risk(text):
+    reasons, line = [], None
+    harvest = _import_harvest_at(text)
+    if harvest >= 0:
         service = _EXFIL_SERVICE_RE.search(text)
         if service:
             reasons.append("reads credentials or the whole environment and sends them to "
@@ -7271,7 +7572,7 @@ def _import_time_risk(text):
         elif _NETWORK_RE.search(text):
             reasons.append("reads credentials or the whole environment and sends data over the network")
         if reasons:
-            line = text.count("\n", 0, harvest.start()) + 1
+            line = text.count("\n", 0, harvest) + 1
     if "curl" in text or "wget" in text:
         for i, row in enumerate(text.split("\n")):
             if _runs_download_through_shell(row):
@@ -7309,7 +7610,7 @@ def _import_time_risk(text):
         signs.append((at, "opens a reverse shell"))
     host = _HOST_INFO_RE.search(text)
     if host:
-        capture = _CAPTURE_SERVICE_RE.search(text)
+        capture = capture_service(text)
         if capture:
             signs.append((host.start(), "sends the machine's user or host name to a data-capture service "
                                         f"({capture.group(0)[:40]})"))
@@ -7319,6 +7620,7 @@ def _import_time_risk(text):
     if dumps_workflow_secrets(text):
         signs.append((_SECRETS_DUMP_RE.search(text).start(),
                       "carries a GitHub Actions workflow that dumps every repository secret"))
+    signs.extend(_exfil_signs(text, host))
     for at, reason in signs:
         reasons.append(reason)
         line = line or text.count("\n", 0, at) + 1
@@ -8490,8 +8792,9 @@ def runs_received_code(text):
 # a received value written to a file, naming the path (a download-to-file API,
 # or a write whose window holds a source); the run of that path is the opener
 # of an interpreter/exec/require/import/subprocess call. Both patterns and the
-# path-token grammar are in the spec (p4, urlretrieve, is a download-to-file on
-# its own and needs no separate source).
+# path-token grammar are in the spec (p4, urlretrieve, and p5, curl or wget
+# given `-o path` in an argument list, 0.1.8, are a download to a file on
+# their own and need no separate source).
 _DL_FILE_WRITE_RE = _dl_re("_DL_FILE_WRITE_RE")
 _DL_FILE_WRITE_NEEDLES = tuple(_DL_SPEC_ARRAYS["_DL_FILE_WRITE_NEEDLES"])
 _DL_PATHRUN_SINK_RE = _dl_re("_DL_PATHRUN_SINK_RE")
@@ -8579,7 +8882,7 @@ def _dl_written_and_run(rows, is_src, downloads):
             continue
         near_src = None
         for wm in _DL_FILE_WRITE_RE.finditer(row):
-            if wm.group("p4") is None:
+            if wm.group("p4") is None and wm.group("p5") is None:
                 if near_src is None:
                     near_src = any(src(j) for j in range(max(0, k - _DL_WINDOW), min(n, k + _DL_WINDOW + 1)))
                 if not near_src:
