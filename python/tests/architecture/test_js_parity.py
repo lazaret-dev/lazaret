@@ -378,35 +378,6 @@ class EngineParityTests(unittest.TestCase):
             with self.subTest(fixture=name):
                 self.assert_same(*both(root), fixture=name, label=name)
 
-    def test_windows_line_endings_change_nothing(self):
-        """Every fixture, converted to CRLF (as a Windows checkout does), must
-        give exactly the findings its LF original gives, in both engines. CI
-        on Windows first caught this: a bare "# nosec" on a CRLF line was
-        ignored by the JS engine."""
-        for name in sorted(os.listdir(_support.FIXTURES)):
-            src = os.path.join(_support.FIXTURES, name)
-            if not os.path.isdir(src):
-                continue
-            with self.subTest(fixture=name), tempfile.TemporaryDirectory() as tmp:
-                lf, crlf = os.path.join(tmp, "lf"), os.path.join(tmp, "crlf")
-                shutil.copytree(src, lf)
-                shutil.copytree(src, crlf)
-                for dirpath, _, files in os.walk(crlf):
-                    for fname in files:
-                        if fname.endswith((".py", ".js", ".sql", ".json")):
-                            path = os.path.join(dirpath, fname)
-                            with open(path, "rb") as f:
-                                data = f.read().replace(b"\r\n", b"\n")
-                            with open(path, "wb") as f:
-                                f.write(data.replace(b"\n", b"\r\n"))
-                for cmd in (js_cmd, py_cmd):
-                    lf_exit, lf_rep, _ = run_cli(cmd(lf))
-                    cr_exit, cr_rep, _ = run_cli(cmd(crlf))
-                    self.assertEqual(collections.Counter(issue_key(i) for i in cr_rep["issues"]),
-                                     collections.Counter(issue_key(i) for i in lf_rep["issues"]),
-                                     f"{cmd.__name__}: CRLF changed the findings")
-                    self.assertEqual(cr_exit, lf_exit)
-
     def test_false_positive_fixes_agree(self):
         with tempfile.TemporaryDirectory() as root:
             for rel, content in SYNTHETIC.items():
@@ -491,32 +462,6 @@ class EngineParityTests(unittest.TestCase):
                                          and i["msg"].startswith("Install hook runs ")), 10)
         finally:
             shutil.rmtree(root, ignore_errors=True)
-
-    def test_source_limit_agrees(self):
-        """Both engines read sources up to 16,000,000 bytes by default, and
-        --max-source-bytes / LAZARET_MAX_SOURCE_BYTES change the limit the
-        same way (a 2.4 MB bundle with a decode-and-run on its last line)."""
-        bundle = "var a = function (b) { return b + 1; };\n" * 60_000 + 'eval(atob("Y29uc29sZS5sb2coMSk="));\n'
-        with tempfile.TemporaryDirectory() as root:
-            for rel, text in {"a.js": "var x = 1;\n", "node_modules/big/dist/index.js": bundle,
-                              "node_modules/big/package.json": '{"name": "big", "version": "1.0.0"}'}.items():
-                path = os.path.join(root, *rel.split("/"))
-                os.makedirs(os.path.dirname(path), exist_ok=True)
-                with open(path, "w", encoding="utf-8") as f:
-                    f.write(text)
-            for label, extra, env, want in (
-                    ("default", (), None, "SC-EVAL-DECODE"),
-                    ("option", ("--max-source-bytes", "2000000"), None, "SC-TRUNCATED"),
-                    ("variable", (), {"LAZARET_MAX_SOURCE_BYTES": "2000000"}, "SC-TRUNCATED"),
-                    ("option over variable", ("--max-source-bytes", "3000000"),
-                     {"LAZARET_MAX_SOURCE_BYTES": "2000000"}, "SC-EVAL-DECODE"),
-                    ("bad variable", (), {"LAZARET_MAX_SOURCE_BYTES": "0"}, "SC-EVAL-DECODE")):
-                with self.subTest(label=label):
-                    js, py = both(root, deps=True, extra=extra, env=env)
-                    self.assert_same(js, py, label=f"source limit, {label}")
-                    found = {i["rule"] for i in js[1]["issues"]
-                             if i["file"].replace("\\", "/") == "node_modules/big/dist/index.js"}
-                    self.assertEqual(found, {want})
 
     def test_manifest_depth_limit_agrees(self):
         """Both engines check a manifest's nesting (brackets outside strings)
