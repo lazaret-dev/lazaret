@@ -719,9 +719,12 @@ class ReportTests(unittest.TestCase):
 
 
 class CommandLineTests(unittest.TestCase):
-    def run_main(self, argv):
+    def run_main(self, argv, path=None):
         err = io.StringIO()
-        with mock.patch("sys.stderr", err), mock.patch.dict(os.environ, {"LAZARET_GUARD_CACHE": os.devnull}):
+        env = {"LAZARET_GUARD_CACHE": os.devnull}
+        if path is not None:
+            env["PATH"] = path
+        with mock.patch("sys.stderr", err), mock.patch.dict(os.environ, env):
             try:
                 code = guard.main(argv)
             except SystemExit as exc:
@@ -729,17 +732,26 @@ class CommandLineTests(unittest.TestCase):
         return code, err.getvalue()
 
     def test_usage_errors(self):
-        for argv, message in ((["--min-age", "soon", "npm", "install"], "--min-age"),
-                              (["npm", "publish"], "wraps npm's install commands"),
-                              (["pnpm", "add", "-g", "x"], "global installs"),
-                              (["uv", "run", "x"], "wraps uv add"),
-                              (["uv", "pip", "compile", "r.in"], "wraps `pip install`"),
-                              (["pip", "install", "-i", "https://x.example/simple", "x"], "serves the index itself"),
-                              (["--jobs", "0", "npm", "install"], "--jobs")):
-            with self.subTest(argv):
-                code, err = self.run_main(argv)
-                self.assertEqual(code, guard.EXIT_USAGE, err)
-                self.assertIn(message, err)
+        """The command line is checked before the package manager is looked
+        for: these hold with none of them installed (CI's runners have no pnpm
+        or uv)."""
+        with tempfile.TemporaryDirectory() as empty:
+            for argv, message in ((["--min-age", "soon", "npm", "install"], "--min-age"),
+                                  (["npm", "publish"], "wraps npm's install commands"),
+                                  (["pnpm", "add", "-g", "x"], "global installs"),
+                                  (["uv", "run", "x"], "wraps uv add"),
+                                  (["uv", "add", "x", "--script", "s.py"], "--script"),
+                                  (["uv", "pip", "compile", "r.in"], "wraps `pip install`"),
+                                  (["pip", "install", "-i", "https://x.example/simple", "x"],
+                                   "serves the index itself"),
+                                  (["--jobs", "0", "npm", "install"], "--jobs"),
+                                  (["npm", "install", "x"], "npm is not on PATH"),
+                                  (["uv", "sync"], "uv is not on PATH"),
+                                  (["pip", "install", "x"], "pip is not on PATH")):
+                with self.subTest(argv):
+                    code, err = self.run_main(argv, path=empty)
+                    self.assertEqual(code, guard.EXIT_USAGE, err)
+                    self.assertIn(message, err)
         code, err = self.run_main(["yarn", "add", "x"])
         self.assertEqual(code, 2)
         self.assertIn("invalid choice", err)
@@ -749,15 +761,17 @@ class CommandLineTests(unittest.TestCase):
         self.assertTrue(_cli.is_guard(["guard", "--plan", "--min-age", "7d", "pip", "install", "x"]))
         self.assertFalse(_cli.is_guard(["."]))
         self.assertFalse(_cli.is_guard(["guarded"]))
+        cwd = os.getcwd()
         with tempfile.TemporaryDirectory() as d:
-            cwd = os.getcwd()
             os.chdir(d)
-            self.addCleanup(os.chdir, cwd)
-            self.assertTrue(_cli.is_guard(["guard"]))                       # guard's usage
-            os.mkdir("guard")
-            self.assertFalse(_cli.is_guard(["guard"]))                      # scan the folder named guard
-            self.assertFalse(_cli.is_guard(["guard", "--json", "out.json"]))
-            self.assertTrue(_cli.is_guard(["guard", "npm", "ci"]))
+            try:
+                self.assertTrue(_cli.is_guard(["guard"]))                   # guard's usage
+                os.mkdir("guard")
+                self.assertFalse(_cli.is_guard(["guard"]))                  # scan the folder named guard
+                self.assertFalse(_cli.is_guard(["guard", "--json", "out.json"]))
+                self.assertTrue(_cli.is_guard(["guard", "npm", "ci"]))
+            finally:
+                os.chdir(cwd)                   # before the folder goes: Windows can't remove a current directory
 
 
 if __name__ == "__main__":

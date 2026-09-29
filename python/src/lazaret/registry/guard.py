@@ -1103,8 +1103,14 @@ class PypiIndex:
         self.numbers = {}         # upstream url -> number
         self.results = {}         # number -> (Check, spooled file or None)
         self.held_back = {}       # project -> {version: upload time}
+        self.errors = []          # what the index could not fetch (for the report, not the tool)
         self.lock = threading.Lock()
         self.number_locks = {}
+
+    def note(self, message):
+        with self.lock:
+            if message not in self.errors and len(self.errors) < 20:
+                self.errors.append(message)
 
     def page(self, project):
         """The project page, as JSON, with the files younger than --min-age
@@ -1320,16 +1326,18 @@ def make_index_server(index):
                     return
                 check, spooled = index.scan(m.group(1))
                 if check.blocked:
-                    self._send(403, ("blocked by lazaret guard: " + "; ".join(check.blocked) + "\n").encode("utf-8"))
+                    self._send(403, b"blocked by lazaret guard (its report says why)\n")
                 elif spooled is None:
                     self._relay(info["url"])                # too large to scan: INCOMPLETE
                 else:
                     self._file(spooled)
             except repo.FetchError as exc:
-                status = getattr(exc, "status", None)
-                self._send(404 if status == 404 else 502, (str(exc) + "\n").encode("utf-8"))
-            except Exception as exc:                       # never let one request kill the server
-                self._send(500, f"lazaret guard: internal error ({type(exc).__name__})\n".encode("utf-8"))
+                # fixed text for the tool; the reason goes in the guard's report
+                index.note(str(exc))
+                self._send(404 if getattr(exc, "status", None) == 404 else 502,
+                           b"lazaret guard could not fetch this from the index it relays\n")
+            except Exception:                              # never let one request kill the server
+                self._send(500, b"lazaret guard: internal error\n")
 
     class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
         daemon_threads = True
@@ -1403,6 +1411,14 @@ class Snapshot:
                 with open(p, "wb") as f:
                     f.write(data)
         return changed
+
+
+def find_tool(name):
+    """The package manager's executable (after the command line was checked)."""
+    exe = shutil.which(name)
+    if exe is None:
+        raise GuardError(f"{name} is not on PATH")
+    return exe
 
 
 def run_tool(argv, env, cwd=None, capture=False):
@@ -1485,12 +1501,10 @@ def guard_npm(ctx, tool, args):
     if sub not in supported:
         raise GuardError(f"lazaret guard wraps {tool}'s install commands ({', '.join(sorted(supported))}); "
                          f"put the command first: lazaret guard {tool} install …")
-    exe = shutil.which(tool)
-    if exe is None:
-        raise GuardError(f"{tool} is not on PATH")
     global_install = any(a in _GLOBAL_FLAGS for a in args)
     if global_install and tool == "pnpm":
         raise GuardError("lazaret guard does not wrap pnpm's global installs; install into a project instead")
+    exe = find_tool(tool)
     cwd = os.getcwd()
     env = dict(os.environ)
     config = tool_config(exe, env, cwd)
@@ -1664,11 +1678,12 @@ def _uv_workspace_root(d):
     return "[tool.uv.workspace]" in text
 
 
-def guard_uv_project(ctx, exe, args):
+def guard_uv_project(ctx, args):
     """uv add / sync / lock: lock first (uv.lock), check what it adds, then run."""
     sub = args[0]
     if "--script" in args or any(a.startswith("--script=") for a in args):
         raise GuardError("lazaret guard does not wrap uv's --script commands")
+    exe = find_tool("uv")
     project = _option_value(args, ("--project", "--directory"))
     root = _find_up(os.path.abspath(project) if project else os.getcwd(), ["pyproject.toml"])
     if root is None:
@@ -1845,10 +1860,8 @@ def guard_pip(ctx, tool, args):
     pip_args = args[1:] if uv else list(args)
     if not pip_args or pip_args[0] not in (("install", "sync") if uv else ("install",)):
         raise GuardError("lazaret guard wraps `pip install`, `uv pip install` and `uv pip sync`")
-    exe = shutil.which("uv" if uv else tool)
-    if exe is None:
-        raise GuardError(f"{'uv' if uv else tool} is not on PATH")
     check_pip_arguments(pip_args[1:])
+    exe = find_tool("uv" if uv else tool)
     upstream = pypi_upstream()
     if not fetchable(upstream):
         raise GuardError(f"LAZARET_GUARD_PYPI_URL must be https (or http on this machine): {upstream}")
@@ -1918,6 +1931,8 @@ def finish(ctx, installed, restored=(), code=None, index=None):
         ctx.say(f"  … and {len(review) - SHOW_REVIEW} more to review"
                 + ("" if ctx.opts.json else " (--json PATH lists them all)"))
     held = index.held_back if index is not None else {}
+    for message in (index.errors[:5] if index is not None else []):
+        ctx.say(f"  index      {message}")
     for project, versions in sorted(held.items()):
         newest = max(versions.values())
         ctx.say(f"  held back  {project}: {plural(len(versions), 'release')} younger than {format_age(ctx.min_age)} "
@@ -2006,10 +2021,7 @@ def main(argv=None):
         if tool in ("npm", "pnpm"):
             return guard_npm(ctx, tool, args)
         if tool == "uv" and args[:1] and args[0] in UV_PROJECT:
-            exe = shutil.which("uv")
-            if exe is None:
-                raise GuardError("uv is not on PATH")
-            return guard_uv_project(ctx, exe, args)
+            return guard_uv_project(ctx, args)
         if tool == "uv" and args[:1] != ["pip"]:
             raise GuardError("lazaret guard wraps uv add, uv sync, uv lock, uv pip install and uv pip sync")
         return guard_pip(ctx, tool, args)
