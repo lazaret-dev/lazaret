@@ -1,3 +1,6 @@
-from lazaret.scanner.core import main
+import sys
 
-main()
+from lazaret._cli import main
+
+if __name__ == "__main__":
+    sys.exit(main())

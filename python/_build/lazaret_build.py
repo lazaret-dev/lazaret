@@ -80,10 +80,11 @@ METADATA = {
 REQUIRES_DIST: list[str] = []
 
 CONSOLE_SCRIPTS = {
-    "lazaret": "lazaret.scanner.core:main",
+    "lazaret": "lazaret._cli:main",
     "lazaret-registry": "lazaret.registry.repo:main",
     "lazaret-mcp": "lazaret.mcp.server:main",
     "lazaret-sca": "lazaret.scanner.sca:main",
+    "lazaret-guard": "lazaret.registry.guard:main",
 }
 
 SDIST_TOP_FILES = ["pyproject.toml", "README.md", "LICENSE"]
