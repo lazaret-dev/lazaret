@@ -334,7 +334,8 @@ class BunLock(Tmp):
     def test_jsonc_work_is_linear(self):
         # every alternative matches to the end of the text rather than fail, so
         # none of these can make the regex rescan: each is ~2 MB
-        for text in ('"' + "\\" * 2_000_000, '"a' * 1_000_000, "/*" * 1_000_000,
+        for text in ('"' + "\\" * 2_000_000, '"' + "\\" * 2_000_001, '"\\' + "!\\" * 1_000_000,
+                     '"a' * 1_000_000, "/*" * 1_000_000,
                      '{"k": "' + "\\\"," * 700_000, "," + " " * 2_000_000 + "x",
                      "[" + ", " * 1_000_000):
             with self.subTest(text=text[:12]):

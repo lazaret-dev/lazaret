@@ -2353,8 +2353,10 @@ def byte_entropy(data):
 
 # Characters that cannot occur in text: bytes of invalid UTF-8 sequences
 # (decoded with surrogateescape to U+DC80..U+DCFF) and C0 controls other than
-# whitespace and ESC, NUL included.
-_NON_TEXT_CHARS_RE = re.compile("[\udc80-\udcff\x00-\x08\x0e-\x1a\x1c-\x1f\x7f]")
+# whitespace and ESC, NUL included. 0x0E..0x1A are listed one by one: the
+# class is the same, and reads as meant rather than as a wide range.
+_NON_TEXT_CHARS_RE = re.compile("[\udc80-\udcff\x00-\x08\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a"
+                                "\x1c-\x1f\x7f]")
 _NON_TEXT_SHARE = 0.30
 
 

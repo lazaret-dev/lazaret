@@ -800,8 +800,11 @@ def parse_pnpm_lock(text):
 
 # bun.lock is JSON with trailing commas (JSONC). Each pattern matches to the
 # end of the text rather than fail, so a hostile file is read in linear time.
-_JSONC_COMMENT_RE = re.compile(r'"(?:[^"\\]|\\[\s\S]?)*(?:"|\Z)|//[^\n]*|/\*(?:[^*]|\*(?!/))*(?:\*/|\Z)')
-_JSONC_COMMA_RE = re.compile(r'"(?:[^"\\]|\\[\s\S]?)*(?:"|\Z)|,(?=\s*[}\]])')
+# In a string, a backslash always takes the next character with it (only one
+# way to read `\\\\`: no backtracking); one left at the very end is taken by
+# the end of the text.
+_JSONC_COMMENT_RE = re.compile(r'"(?:[^"\\]|\\[\s\S])*(?:"|\\?\Z)|//[^\n]*|/\*(?:[^*]|\*(?!/))*(?:\*/|\Z)')
+_JSONC_COMMA_RE = re.compile(r'"(?:[^"\\]|\\[\s\S])*(?:"|\\?\Z)|,(?=\s*[}\]])')
 _BUN_LOCAL = ("workspace:", "link:", "file:", "./", "../", "/")    # first-party: not inventoried
 
 
