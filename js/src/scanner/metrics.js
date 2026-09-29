@@ -53,9 +53,12 @@ export function worstSevRating(issues, types) {
 /**
  * INFO scan-coverage notes: typed SMELL for display, but they describe what
  * the scanner could not look at, not the code, so they do not count toward
- * the maintainability rating (twin of core.COVERAGE_RULES).
+ * the maintainability rating (twin of core.COVERAGE_RULES). The Q-FLOW notes
+ * come from the JavaScript cross-file pass (0.1.7: a file its reader rejects
+ * is one); Q-FLOW-RECURSION and Q-TAINT-CONFIG are only Python's to write.
  */
-export const COVERAGE_RULES = new Set(["Q-SKIPPED-TREE", "Q-SYMLINK", "Q-UNREADABLE", "Q-SKIPPED-CONFIG"]);
+export const COVERAGE_RULES = new Set(["Q-SKIPPED-TREE", "Q-SYMLINK", "Q-UNREADABLE", "Q-SKIPPED-CONFIG",
+  "Q-FLOW-SKIPPED", "Q-FLOW-INCOMPLETE", "Q-FLOW-RECURSION", "Q-TAINT-CONFIG"]);
 /**
  * How many code smells a SMELL finding counts for: one, except a Q-CAPPED
  * note, which counts the findings it stands for when they are smells (and

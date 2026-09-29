@@ -9825,9 +9825,9 @@ def worst_sev_rating(issues, types):
 #: maintainability rating (a single symlink in a small project used to be
 #: enough to fail "Maintainability >= C").
 COVERAGE_RULES = frozenset({"Q-SKIPPED-TREE", "Q-SYMLINK", "Q-UNREADABLE", "Q-SKIPPED-CONFIG",
-                            # analysis-coverage notes from the flow engine and the
-                            # taint-config loader (Python-only; the npm engine has
-                            # neither)
+                            # analysis-coverage notes from the flow engine (the
+                            # npm engine's JavaScript pass writes the Q-FLOW
+                            # notes too) and the taint-config loader (Python's)
                             "Q-FLOW-SKIPPED", "Q-FLOW-INCOMPLETE", "Q-FLOW-RECURSION",
                             "Q-TAINT-CONFIG"})
 

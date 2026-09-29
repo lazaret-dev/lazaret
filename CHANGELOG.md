@@ -198,6 +198,53 @@ project is pre-1.0, so the 0.x API may still change.
   to look risky).
 
 ### Changed
+- **The cross-file JavaScript pass parses the code (both engines).** It read
+  JavaScript and TypeScript with patterns: a function was a line that looked
+  like one, a call any name followed by `(`, and a value flowed wherever its
+  name appeared further on, so a minified bundle's regular expressions were
+  taken for commands and one bundle's functions were bound to another's. On
+  the 19 web apps above it reported 1,035 JavaScript X-* findings and none
+  was a real flow: 1,032 were in vendored or built bundles (jQuery, Swagger
+  UI, Redoc, CTFd's own) and 3 were requests to a fixed host. Both engines
+  now carry a JavaScript reader with no dependency
+  (`lazaret.scanner.jsparse`, `src/lib/jsparse.js`) that reads ES2025 with
+  JSX, TypeScript and Flow annotations into ESTree trees: on 21,295 real
+  files it gives acorn's tree node for node, and in 9,416 TypeScript files
+  it finds every call, function and JSX element TypeScript's own parser
+  finds. It reads in linear time (a single-line minified bundle,
+  TypeScript's ambiguous `f<…>(`, runs of open brackets), and a file nested
+  deeper than 256 levels is not read. The pass on top of it summarizes each
+  function — which parameters reach which sinks, what it returns — callees
+  first, to a fixpoint, so chains of any length are followed. Names resolve
+  through scopes (hoisting, blocks, closures) and calls through `require()`
+  and `import` (ESM and CommonJS, re-exports, `./x.js` naming `x.ts`,
+  `import x = require()`, `export =`), object literals, classes (`this`,
+  `super`, static members, inheritance) and assignments; values are followed
+  through locals per branch, loops, destructuring, spreads, containers,
+  templates, closures, callbacks and a module's exported variables
+  (`export const target = process.argv[2]`). New: an Express-style route
+  handler gets the request and the response whatever their names
+  (`app.get('/p', (rq, rs) => …)`, `router.route('/p').post(…)`,
+  `app.use(…)`, a wrapped `asyncHandler(…)`, an error handler; Koa's `ctx`),
+  and a request's or a response's methods bind to no project function; a
+  call on `$`, `jQuery` or `_` binds nothing; for SQL a value must be joined
+  into the query text (a bound parameter, a whole query passed through or a
+  tagged template is not a finding); a URL that starts with a fixed host or
+  a path on this site is no SSRF or open redirect; a Server-Sent Events
+  frame (`data: …`) is no HTML; a project function named like a sink (its
+  own `exec`) is analyzed, not taken for the sink; React's
+  `dangerouslySetInnerHTML` is an XSS sink. Declaration files (`.d.ts`) are
+  not read. A file the reader rejects is named in a Q-FLOW-SKIPPED note with
+  the line and the reason, and the rest of the project is still analyzed; a
+  work budget proportional to the code's size bounds the pass, and a
+  Q-FLOW-INCOMPLETE note says where it stopped. Coverage notes no longer
+  count as code smells in the npm engine's maintainability rating (they did
+  not in Python's). On the 19 apps the pass reports no JavaScript X-*
+  finding; the npm engine reports exactly the Python engine's findings on
+  the unit tests' 198 projects, the 19 apps, 1,428 installed npm packages
+  and 600 generated projects. It is slower than the pattern pass: the 1,530
+  JavaScript and TypeScript files of the 19 apps take 32 s in the Python
+  engine (were 12 s), most of it CTFd's built bundles.
 - **The import-time test reads code, not prose (both engines).** A Python or
   JavaScript file that fails it is read again without its comments and, in
   Python, the strings that stand alone as statements (docstrings); and

@@ -1,6 +1,6 @@
 """Engine parity for the cross-file flow engine's JavaScript half: the npm
-engine's js/src/scanner/flow.js against lazaret.scanner.flow (_js_mask,
-_js_functions, _analyze_js, analyze).
+engine's js/src/scanner/flow.js and jsflow.js against lazaret.scanner.flow
+and jsflow (_analyze_js, analyze), on parsed trees since 0.1.7.
 
 1. Both CLIs on a tree with JavaScript flows (a command and an SQL sink
    reached from a route in another file, a sanitized and a placeholder call,
@@ -15,12 +15,12 @@ _js_functions, _analyze_js, analyze).
    returned values, calls that can't be resolved and the evidence that binds
    nothing, helpers' values, shadowed sanitizers, values through locals,
    destructuring, push and loops, RegExp receivers of exec():
-   tests/scanner/test_review_flow_js*.py),
-   the size cap (code points, not UTF-16 units),
-   the sink-argument window around astral characters, the fixpoint's and the
-   read budget's notes, and a seeded random corpus of JavaScript-ish text
-   with module syntax, destructuring, aliases and callbacks: every field of
-   every finding, the masked text and the function table.
+   tests/scanner/test_review_flow_js*.py), the engine's own cases
+   (tests/scanner/test_jsflow.py: routes, fixed hosts, classes, exported
+   variables, TypeScript, JSX), the size caps (code points, not UTF-16
+   units), the fixpoint's cap and the work budget, files the reader rejects,
+   seeded generated projects (tests/architecture/jsgen.py) and seeded token
+   soups: every field of every finding, in order.
 
 All content is inert: nothing is executed, credentials are dummies.
 Skipped where node is missing.
@@ -34,6 +34,7 @@ import unittest
 
 from lazaret.scanner import flow
 from tests import _support
+from tests.architecture import jsgen
 from tests.architecture import test_js_parity as parity
 
 FLOW_JS = os.path.join(_support.REPO_ROOT, "js", "src", "scanner", "flow.js")
@@ -67,12 +68,8 @@ NPM_FLOW = """
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 const f = await import(pathToFileURL(process.argv[1]).href);
-const { srcs, sets } = JSON.parse(readFileSync(0, "utf8"));
-process.stdout.write(JSON.stringify({
-  masks: srcs.map((s) => f.jsMask(s)),
-  funcs: srcs.map((s) => { const c = f.jsMask(s); return f.jsFunctions(s, c).map(([n, p, [a, b], l]) => [n, p, c.slice(a, b), l]); }),
-  flows: sets.map((files) => f.analyzeFlows(files)),
-}));
+const { sets } = JSON.parse(readFileSync(0, "utf8"));
+process.stdout.write(JSON.stringify(sets.map((files) => f.analyzeFlows(files))));
 """
 
 
@@ -292,6 +289,40 @@ def review_cases():
     sets.append(js_files(("deep.js", scopes + "exec(t399);" + "}" * 400 + "\nf0(req.query.q);\n")))
     sets.append(js_files(("nest.js", "function g(req){return req.query.q}\n" + "exec(" * 20000 + "g(req)" + ")" * 20000 + "\n")))
     sets.append(js_files(("nest.js", "function f(a){return g(function(){" * 5000 + "\U0001F600" * 3000)))
+    # the fixpoint's cap and the work budget (tests/scanner/test_review_flow_js_modules.py)
+    chain = "".join(f"function c{i}() {{ return v{i + 1}; }}\nvar v{i + 1} = c{i + 1}();\n" for i in range(60))
+    sets.append(js_files(("vchain60.js", chain + "function c60() { return req.query.q; }\nexec(c0());\n")))
+    sets.append(js_files(("budget.js", chain + "function c60() { return req.query.q; }\n" + "x = y + z;\n" * 6000
+                          + "exec(c0());\n")))
+    # the engine's own cases (tests/scanner/test_jsflow.py) and files the reader rejects or skips
+    from tests.scanner import test_jsflow as jf
+    lib, use = jf.LIB, jf.USE
+    for app in ("app.get('/x', (rq, rs) => {\n  runIt(rq.query.a);\n});\n",
+                "router.route('/x').get(ok).post((q, s) => {\n  runIt(q.body.a);\n});\n",
+                "app.use((err, q, s, next) => {\n  runIt(q.query.a);\n  runIt(err.message);\n});\n",
+                "app.post('/x', asyncHandler(async (q, s) => {\n  runIt(q.params.id);\n}));\n",
+                "router.get('/x', async (ctx) => {\n  runIt(ctx.request.body.a);\n});\n",
+                "cache.get('key', (q, s) => {\n  runIt(q.query.a);\n});\n"):
+        sets.append(js_files(("lib.js", lib), ("app.js", use + app)))
+    sets.append(js_files(("lib.js", jf.Urls.LIB), ("app.js", (
+        "const L = require('./lib');\napp.get('/x', (req, res) => {\n  L.get(req.query.a);\n  L.get2(req.query.a);\n"
+        "  L.get3(req.query.b, 1);\n  L.go(res, req.query.a);\n  L.go2(res, req.query.a);\n  L.go3(res, req.query.a);\n"
+        "});\n"))))
+    sets.append(js_files(("cfg.js", "export const target = process.argv[2];\nexport let other = 'x';\n"),
+                         ("run.js", "import { target, other } from './cfg.js';\nexec('ping ' + target);\nexec('ping ' + other);\n")))
+    sets.append(js_files(("repo.js", "class Repo {\n  find(id) {\n    return this.db.query('SELECT * FROM t WHERE id = ' + id);\n"
+                                     "  }\n  static run(c) {\n    exec(c);\n  }\n}\nclass Sub extends Repo {\n  look(id) {\n"
+                                     "    return super.find(id);\n  }\n}\nmodule.exports = { Repo, Sub };\n"),
+                         ("app.js", "const { Repo, Sub } = require('./repo');\napp.get('/x', (req, res) => {\n"
+                                    "  new Repo().find(req.query.id);\n  Repo.run(req.query.c);\n  new Sub().look(req.query.id);\n});\n")))
+    sets.append(js_files(("lib.ts", "namespace N { export function f(x: string) { return x; } }\nenum E { A = 1 }\n"
+                                    "function run(c: string): void { exec(c); }\nexport = run;\n"),
+                         ("app.ts", "import run = require('./lib');\napp.get('/x', (req: any, res: any) => {\n"
+                                    "  run(req.query.c as string);\n});\n"),
+                         ("Html.jsx", "export function Html({ html }) {\n  return <div dangerouslySetInnerHTML={{ __html: html }} />;\n}\n"),
+                         ("page.jsx", "import { Html } from './Html';\nexport const Page = () => Html({ html: location.hash });\n"),
+                         ("types.d.ts", "export declare function f(): void;\n"), ("broken.js", "function (\n"),
+                         ("a.cts", "export = function f(): void;\n")))
     return sets
 
 
@@ -372,40 +403,48 @@ class FlowParityTests(unittest.TestCase):
                               "ok": True})
             self.assertEqual(py[1]["conditions"][-1], {"label": "No cross-file taint flows", "ok": True})
 
-    def test_engines_agree_function_by_function(self):
+    def test_coverage_notes_do_not_rate_the_code(self):
+        """A file the JavaScript reader rejects is a Q-FLOW-SKIPPED note: it
+        says what was not analyzed, not how the code is written, so neither
+        engine counts it as a smell (the npm engine did: its random-junk
+        eval corpus rated E where Python rated A)."""
+        tree = {f"bad{k}.js": "function (\n" for k in range(3)}
+        tree["ok.js"] = "const a = 1;\n"
+        with tempfile.TemporaryDirectory() as root:
+            write_tree(root, tree)
+            js, py = parity.both(root)
+            self.assert_same(js, py, label="coverage notes")
+            for _, report, _ in (js, py):
+                self.assertEqual([i["rule"] for i in report["issues"]], ["Q-FLOW-SKIPPED"] * 3)
+                self.assertEqual(report["ratings"]["maintainability"], "A")
+
+    def test_engines_agree_on_every_finding(self):
         rnd = random.Random(20260927)
-        srcs = [soup(rnd) for _ in range(3000)]
-        srcs += ["const b = \"}\"; exec(cmd);", "x = /}[/]\\//g.test(s);", "y = `t ${ {a:1}.a + `in ${z}` } }` + q;",
-                 "`" + "${" * 2000 + "x", "'" * 3000, "/" * 3000, "/*" + "x" * 3000, "`" * 3001]
         sets = review_cases()
-        for _ in range(800):
+        sets.extend(jsgen.projects(20260928, 150))
+        for _ in range(200):
             sets.append([{"path": f"p{k}.js", "content": soup(rnd) + "\n" + soup(rnd) + "\n" + soup(rnd), "lang": "js"}
                          for k in range(rnd.randint(1, 4))])
         p = subprocess.run([parity.NODE, "--input-type=module", "-e", NPM_FLOW, FLOW_JS],
-                           input=json.dumps({"srcs": srcs, "sets": sets}), capture_output=True,
+                           input=json.dumps({"sets": sets}), capture_output=True,
                            encoding="utf-8", errors="replace", timeout=40)
         self.assertEqual(p.returncode, 0, p.stderr[-2000:])
-        js = json.loads(p.stdout)
-        for src, got in zip(srcs, js["masks"]):
-            self.assertEqual(got, flow._js_mask(src), repr(src)[:200])
-        for src, got in zip(srcs, js["funcs"]):
-            code = flow._js_mask(src)
-            want = [[n, params, code[a:b], line] for n, params, (a, b), line in flow._js_functions(src, code)]
-            self.assertEqual(got, want, repr(src)[:200])
+        got = json.loads(p.stdout)
         total = 0
-        for files, got in zip(sets, js["flows"]):
+        for files, js in zip(sets, got):
             want = flow.analyze(files)
             total += len(want)
-            self.assertEqual(got, want, json.dumps(files)[:300])
-        # not vacuous: the review cases and the corpus produce flows of both
-        # kinds (a call into a sink, a returned value into one) and each note
-        found = [i for f in js["flows"] for i in f]
+            self.assertEqual(js, want, json.dumps(files)[:300])
+        # not vacuous: every sink category, both kinds of flow, each note
+        found = [i for f in got for i in f]
         rules = {i["rule"] for i in found}
-        self.assertTrue({"X-CMD", "X-SQL", "X-XSS", "X-CODE", "X-SSRF", "X-REDIR", "X-FLOW-SKIPPED"} <= rules, rules)
+        self.assertTrue({"X-CMD", "X-SQL", "X-XSS", "X-CODE", "X-SSRF", "X-REDIR", "X-PATH", "X-SSTI", "X-FLOW-SKIPPED",
+                         "Q-FLOW-SKIPPED", "Q-FLOW-INCOMPLETE"} <= rules, rules)
         self.assertEqual({i["name"] for i in found if i["rule"] == "Q-FLOW-INCOMPLETE"},
                          {"Flow analysis incomplete (iteration cap)", "Flow analysis incomplete (size budget)"})
         self.assertGreater(sum("the value returned by" in i["why"] for i in found), 50)
-        self.assertGreater(total, 100)
+        self.assertGreater(sum("imported from" in i["why"] for i in found), 0)
+        self.assertGreater(total, 1000)
 
 
 if __name__ == "__main__":

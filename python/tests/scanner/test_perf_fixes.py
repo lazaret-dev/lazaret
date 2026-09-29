@@ -15,11 +15,10 @@ Acceptance criteria covered:
      adversarial minified shapes (1500 unclosed headers / one 1.5 MB line)
      complete quickly, and outputs match the old window-scan implementation
      on both curated fixtures and randomized inputs (differential).
-  3. G3 — lazaret_flow._js_functions returns spans (no body copies) that
-     slice to the exact old body strings; _analyze_js matches the old
-     implementation on randomized taint fixtures (differential) and
-     completes on adversarial input; files above _JS_MAX_FILE are skipped
-     with a visible INFO finding (X-FLOW-SKIPPED), never silently.
+  3. G3 — the cross-file JavaScript pass completes on adversarial input
+     (since 0.1.7 it reads parsed trees: 1500 unclosed functions on one
+     line are one syntax error, noted); files above _JS_MAX_FILE are
+     skipped with a visible INFO finding (X-FLOW-SKIPPED), never silently.
   4. CLI end-to-end: a project containing the adversarial SQL file scans
      to completion with exit 0 in bounded time and still reports the
      genuine offender.
@@ -110,85 +109,6 @@ def old_extract_functions_js(lines):
         fns.append({"name": name, "line": i + 1, "len": end - i + 1,
                     "cx": 1 + len(_OLD_CX_RE.findall(body))})
     return fns
-
-
-def old_js_functions(content):
-    out = []
-    for m in lazaret_flow._JS_FUNC_RE.finditer(content):
-        name = m.group("n1") or m.group("n2") or m.group("n3")
-        ps = m.group("p1") or m.group("p2") or m.group("p3") or ""
-        params = [p.strip().split("=")[0].strip() for p in ps.split(",") if p.strip()]
-        brace = content.find("{", m.end() - 1)
-        if brace == -1:
-            continue
-        depth, i = 0, brace
-        while i < len(content):
-            if content[i] == "{":
-                depth += 1
-            elif content[i] == "}":
-                depth -= 1
-                if depth == 0:
-                    break
-            i += 1
-        body = content[brace:i + 1]
-        start_line = content[:m.start()].count("\n") + 1
-        out.append((name, params, body, start_line))
-    return out
-
-
-def old_analyze_js(files, findings):
-    """Pre-fix _analyze_js (oracle)."""
-    summaries = {}
-    fn_defs = {}
-    js_files = [f for f in files if f["lang"] == "js"]
-    for f in js_files:
-        for name, params, body, start in old_js_functions(f["content"]):
-            fn_defs[name] = (f["path"], start)
-            reach = {}
-            for sink_re, cat in lazaret_flow._JS_SINKS:
-                for sm in sink_re.finditer(body):
-                    seg = body[sm.start():sm.start() + 200]
-                    for p in params:
-                        if p and lazaret_flow._js_param_dangerous(seg, p, cat):
-                            reach[p] = cat
-            if reach:
-                summaries[name] = (params, reach)
-    if not summaries:
-        return
-    call_re = re.compile(r"\b(\w+)\s*\(([^;()]*)\)")
-    for f in js_files:
-        lines = f["content"].split("\n")
-        tainted = set()
-        assign_re = re.compile(
-            r"(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([^;\n]+)"
-            r"|(?:^|[;{]\s*)([A-Za-z_$][\w$]*)\s*=(?![=>])\s*([^;\n]+)")
-        for am in assign_re.finditer(f["content"]):
-            name = am.group(1) or am.group(3)
-            rhs = am.group(2) or am.group(4) or ""
-            rhs = lazaret_flow._js_neutralize(rhs, ())
-            if lazaret_flow._JS_SOURCE_RE.search(rhs) or any(
-                    re.search(r"\b%s\b" % re.escape(v), rhs) for v in tainted):
-                tainted.add(name)
-        for i, ln in enumerate(lines):
-            for cm in call_re.finditer(ln):
-                fname, argstr = cm.group(1), cm.group(2)
-                if fname not in summaries:
-                    continue
-                params, reach = summaries[fname]
-                call_args = [a.strip() for a in argstr.split(",")]
-                for idx, pname in enumerate(params):
-                    if pname not in reach or idx >= len(call_args):
-                        continue
-                    a = lazaret_flow._js_neutralize(call_args[idx], {reach[pname]})
-                    if lazaret_flow._JS_SOURCE_RE.search(a) or any(
-                            re.search(r"\b%s\b" % re.escape(v), a) for v in tainted):
-                        dfile, dline = fn_defs.get(fname, (f["path"], 1))
-                        findings.append(lazaret_flow._issue(
-                            reach[pname], f["path"], i + 1, lines,
-                            source_loc=f"{f['path']}:{i + 1}",
-                            sink_loc=f"{dfile}:{dline} (in {fname}())",
-                            chain=f"the call to {fname}()"))
-                        break
 
 
 # ---------------------------------------------------------------- tests
@@ -308,32 +228,7 @@ class G4ExtractFunctions(unittest.TestCase):
 
 
 class G3FlowEngine(unittest.TestCase):
-    """_js_functions spans + linear _analyze_js replace per-match EOF scans."""
-
-    def test_js_functions_spans_slice_to_old_bodies(self):
-        import random
-        rng = random.Random(99)
-        vocab = ["function a(x){", "function b(){return 1;}", "const c=(y)=>{",
-                 "x();", "}", "var d=function(z){", "if(1){}", "obj={a:1};",
-                 "e()=>{", "plain; text", "function un(u){", "db.query(",
-                 "}", "x = eval(", "p = req.query.p;"]
-        for _ in range(300):
-            n = rng.randint(1, 30)
-            content = "".join(rng.choice(vocab) for _ in range(n))
-            old = old_js_functions(content)
-            new = lazaret_flow._js_functions(content)
-            self.assertEqual(len(old), len(new), content)
-            for (n1, p1, body, s1), (n2, p2, span, s2) in zip(old, new):
-                self.assertEqual((n1, p1, s1), (n2, p2, s2), content)
-                self.assertEqual(body, content[span[0]:span[1]], content)
-
-    def test_adversarial_js_functions_fast(self):
-        js = make_js_single()
-        t0 = time.perf_counter()
-        fns = lazaret_flow._js_functions(js)
-        dt = time.perf_counter() - t0
-        self.assertEqual(len(fns), 1500)
-        self.assertLess(dt, 10.0, f"G3: _js_functions took {dt:.1f}s")
+    """The cross-file JavaScript pass is linear on adversarial input."""
 
     def test_adversarial_analyze_js_fast(self):
         js = make_js_single()
@@ -343,44 +238,16 @@ class G3FlowEngine(unittest.TestCase):
         lazaret_flow._analyze_js(files, findings)
         dt = time.perf_counter() - t0
         self.assertLess(dt, 10.0, f"G3: _analyze_js took {dt:.1f}s")
+        self.assertEqual([i["rule"] for i in findings], ["Q-FLOW-SKIPPED"])      # never closed: not JavaScript
 
-    def test_analyze_js_differential(self):
-        import random
-        rng = random.Random(4242)
-        frag = [
-            "function sinky(p){ return db.query('SELECT ' + p); }",
-            "function ev(q){ return eval(q); }",
-            "function inner(p){ return setTimeout(function(){ eval(p); }, 1); }",
-            "function clean(p){ return parseInt(p); }",
-            "var t = req.query.t;",
-            "var t2 = t + 'x';",
-            "sink(t);",
-            "sinky(t);",
-            "ev(t2);",
-            "inner(t);",
-            "sink(parseInt(t));",
-            "sink('literal');",
-            "other(x);",
-            "x = 1;",
-            "const y = t2;",
-            "sink(y);",
-            "var noTaint = 'plain';",
-            "sink(noTaint);",
-            "fetch(t);",
-            "exec(t);",
-        ]
-        for trial in range(400):
-            n = rng.randint(1, 16)
-            content = "\n".join(rng.choice(frag) for _ in range(n))
-            files = [{"path": "t.js", "content": content, "lang": "js"}]
-            o, w = [], []
-            old_analyze_js(files, o)
-            lazaret_flow._analyze_js(files, w)
-            ko = sorted((x["rule"], x["line"]) for x in o)
-            kw = sorted((x["rule"], x["line"]) for x in w)
-            if ko != kw:
-                self.fail(f"trial {trial} mismatch\ncontent={content!r}\n"
-                          f"old={ko}\nnew={kw}")
+    def test_adversarial_closed_functions_fast(self):
+        js = make_js_single() + "}" * 1500
+        files = [{"path": "poc.js", "content": js, "lang": "js"}]
+        findings = []
+        t0 = time.perf_counter()
+        lazaret_flow._analyze_js(files, findings)
+        dt = time.perf_counter() - t0
+        self.assertLess(dt, 20.0, f"G3: _analyze_js took {dt:.1f}s")
 
     def test_oversized_file_skip_is_visible(self):
         big = "var x = 1;\n" + "x;\n" * (lazaret_flow._JS_MAX_FILE // 2)

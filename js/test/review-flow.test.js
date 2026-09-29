@@ -1,4 +1,5 @@
-// The cross-file flow engine's JavaScript half (src/scanner/flow.js), twin of
+// The cross-file flow engine's JavaScript half (src/scanner/flow.js and,
+// since 0.1.7, src/scanner/jsflow.js on parsed trees), twin of
 // lazaret.scanner.flow's: a request value passed into a function whose
 // parameter reaches a sink (command, code, SQL, XSS, SSRF, redirect) is an
 // X-* finding at the call site that names the sink's own file and line.
@@ -12,7 +13,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
-import { analyzeFlows, jsMask, jsText } from "../src/scanner/flow.js";
+import { analyzeFlows } from "../src/scanner/flow.js";
 import { run } from "../src/index.js";
 
 const LS = "\u2028", PS = "\u2029";
@@ -69,33 +70,7 @@ test("sanitizers: numeric coercion clears every category, a category's sanitizer
   assert.deepEqual(found(helper, "show(shellQuote(q))"), [["X-XSS", "app.js"]]);
 });
 
-test("the lexer blanks literal and comment content, keeping length, newlines and ${} code", () => {
-  const cases = {
-    'const b = "}"; exec(cmd);': 'const b = " "; exec(cmd);',
-    "a = b / c / d;": "a = b / c / d;",
-    "x = /}[/]\\//g.test(s);": "x = /      /g.test(s);",
-    "return /ab+c/i.exec(s)": "return /    /i.exec(s)",
-    "y = `t ${ {a:1}.a + `in ${z}` } }` + q;": "y = `  ${ {a:1}.a + `   ${z}` }  ` + q;",
-    "// c }\n/* { \n } */ f(x)": "      \n     \n      f(x)",
-    "s = 'it\\'s {';": "s = '       ';",
-    "arr[i] / 2 / x": "arr[i] / 2 / x",
-  };
-  for (const [src, want] of Object.entries(cases)) assert.equal(jsMask(src), want, src);
-  // one space per code point, as Python counts characters
-  assert.equal(jsMask("s = '\u{1F600}';"), "s = ' ';");
-});
-
-test("hostile inputs are linear", () => {
-  for (const src of ["`" + "${".repeat(50000) + "x", "'".repeat(300000), "/".repeat(300000),
-    "/*" + "x".repeat(300000), "`".repeat(300001)]) {
-    const t = Date.now();
-    assert.equal(jsMask(src).length, src.length);
-    assert.ok(Date.now() - t < 5000);
-  }
-});
-
 test("U+2028 / U+2029 end a line: the finding's line, the sink's line", () => {
-  assert.equal(jsText("a" + LS + "b" + PS + "c"), "a\nb\nc");
   const files = js(["h.js", "/* helper */" + LS + "function runIt(cmd) {\n  exec(cmd);\n}\n"],
     ["app.js", "// header" + LS + "const x = 1;" + PS + "const y = 2;\n" +
       "app.get('/x', (req, res) => { const q = req.query.q; runIt(q); eval(q); });\n"]);

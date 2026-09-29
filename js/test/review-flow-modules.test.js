@@ -1,20 +1,22 @@
-// The JavaScript cross-file heuristic follows modules and returned values
-// (twin of tests/scanner/test_review_flow_js_modules.py; the two engines are
-// compared by tests/architecture/test_js_parity_flow.py). A call binds to what
-// its file names — a visible definition, else what a relative require() /
-// import brings in; where the binding can't be resolved (a package, a path
-// alias, `this.f()`, `obj.f()`) the call may reach every project function of
-// that name, and only positive evidence binds nothing (a Node built-in, a
-// global object's member, a built-in method on an unknown receiver, a
-// declared parameter or variable). A definite call keeps its arguments unless
-// no return of the function can hold them; a project function shadows a
-// sanitizer of its name; returned values and sinks read their own scope's
-// variables; the work is bounded, and past the budget every plain call is
-// still checked. Inert text only: nothing is executed.
+// The JavaScript cross-file pass follows modules and returned values (twin of
+// tests/scanner/test_review_flow_js_modules.py; the two engines are compared
+// by tests/architecture/test_js_parity_flow.py). Since 0.1.7 it reads parsed
+// trees (src/lib/jsparse.js, src/scanner/jsflow.js). A call binds to what its
+// file names — a visible definition, else what a relative require() / import
+// brings in; where the binding can't be resolved (a package, a path alias,
+// `obj.f()`) the call may reach every project function of that name, and
+// only positive evidence binds nothing (a Node built-in, a global object's
+// member, a built-in method on an unknown receiver, a declared parameter or
+// variable). A definite call reads as what its function returns; a project
+// function shadows a sanitizer of its name; the fixpoint, the pass's work and
+// one function's reading are bounded, each noting itself; a file nested
+// deeper than the reader follows is skipped with a note. Inert text only:
+// nothing is executed.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { analyzeFlows } from "../src/scanner/flow.js";
+import { LIMITS } from "../src/scanner/jsflow.js";
 
 const dedent = (s) => {
   const lines = s.replace(/^\n/, "").split("\n");
@@ -237,25 +239,57 @@ test("a name tainted in one function doesn't taint its namesake; closures see th
     "  const c = getQ();\n  db.run(sql, function (err) { exec(c); });\n});\n" }), [["X-CMD", "a.js", 4]]);
 });
 
-test("long chains of returns: callees first; through module variables, a note at the cap", () => {
+test("long chains of returns: callees first; through module variables, the cap notes itself", () => {
   let src = "";
   for (let i = 0; i < 40; i++) src += `function c${i}(a) { return c${i + 1}(a); }\n`;
   assert.deepEqual(flows({ "a.js": src + "function c40(a) { return req.query.q; }\nexec(c0(1));\n" }), [["X-CMD", "a.js", 42]]);
-  src = "";
-  for (let i = 0; i < 40; i++) src += `function c${i}() { return v${i + 1}; }\nvar v${i + 1} = c${i + 1}();\n`;
-  const [note, ...rest] = analyze({ "a.js": src + "function c40() { return req.query.q; }\nexec(c0());\n" });
+  const chain = (n) => {
+    let out = "";
+    for (let i = 0; i < n; i++) out += `function c${i}() { return v${i + 1}; }\nvar v${i + 1} = c${i + 1}();\n`;
+    return out + `function c${n}() { return req.query.q; }\nexec(c0());\n`;
+  };
+  assert.deepEqual(flows({ "a.js": chain(40) }), [["X-CMD", "a.js", 82]]);
+  const [note, ...rest] = analyze({ "a.js": chain(60) });
   assert.deepEqual([note.rule, note.name, note.sev, rest.length], ["Q-FLOW-INCOMPLETE", "Flow analysis incomplete (iteration cap)", "INFO", 0]);
+  assert.match(note.msg, /did not converge within 50 re-analyses \(first: the module's own code in 'a\.js'\)/);
 });
 
-test("past the budget every plain call is still checked", () => {
+test("the work budget notes itself", () => {
+  let src = "";
+  for (let i = 0; i < 60; i++) src += `function c${i}() { return v${i + 1}; }\nvar v${i + 1} = c${i + 1}();\n`;
+  src += "function c60() { return req.query.q; }\n" + "x = y + z;\n".repeat(6000) + "exec(c0());\n";
+  const t = Date.now();
+  const got = analyzeFlows([{ path: "a.js", content: src, lang: "js" }]);
+  assert.ok(Date.now() - t < 20000);
+  assert.deepEqual(got.map((i) => [i.rule, i.name, i.file, i.line]),
+    [["Q-FLOW-INCOMPLETE", "Flow analysis incomplete (size budget)", "a.js", 1]]);
+  assert.match(got[0].msg, /stopped following values at the module's own code in 'a\.js'/);
+});
+
+test("one reading's limit notes itself", () => {
+  const files = { "lib.js": "function runIt(list) {\n  for (const c of list) {\n    if (c) exec(c);\n  }\n}\nmodule.exports = { runIt };\n",
+    "app.js": "const { runIt } = require('./lib');\napp.get('/', (req) => {\n  runIt(req.query.q);\n});\n" };
+  assert.deepEqual(flows(files), [["X-CMD", "app.js", 3]]);
+  const saved = { ...LIMITS };
+  try {
+    Object.assign(LIMITS, { RUN_BASE: 0, RUN_PER_NODE: 1 });
+    const got = analyze(files);
+    assert.deepEqual(got.map((i) => [i.rule, i.file, i.line]), [["Q-FLOW-INCOMPLETE", "lib.js", 1]]);
+    assert.match(got[0].msg, /stopped reading runIt\(\) in 'lib\.js' at its limit/);
+  } finally {
+    Object.assign(LIMITS, saved);
+  }
+});
+
+test("nesting deeper than the reader follows skips that file", () => {
   const nest = "function pad(a){return g(function(){".repeat(2500) + "}})".repeat(2500) + "\n";
-  const got = analyze({ "lib.js": "function runIt(cmd) {\n  exec(cmd);\n}\nmodule.exports = { runIt };\n",
-    "app.js": nest + "const { runIt } = require('./lib');\napp.get('/', (req) => {\n  runIt(req.query.q);\n});\n" });
-  assert.deepEqual(got.map((i) => [i.rule, i.line]), [["Q-FLOW-INCOMPLETE", 1], ["X-CMD", 4]]);
-  assert.match(got[0].msg, /calls whose arguments hold no nested call were still checked/);
+  const got = analyze({ "lib.js": "function runIt(cmd) {\n  exec(cmd);\n}\nmodule.exports = { runIt };\n", "gen.js": nest,
+    "app.js": "const { runIt } = require('./lib');\napp.get('/', (req) => {\n  runIt(req.query.q);\n});\n" });
+  assert.deepEqual(got.map((i) => [i.rule, i.file, i.line]), [["X-CMD", "app.js", 3], ["Q-FLOW-SKIPPED", "gen.js", 1]]);
+  assert.equal(got[1].msg, "Cross-file taint analysis skipped 'gen.js': it could not be read as JavaScript (line 1: nesting too deep).");
 });
 
-test("nested code is linear and bounded, with a note", () => {
+test("nested code is linear and bounded", () => {
   const cases = {
     returns: "function f(a){return g(function(){".repeat(30000),
     sinks: "function g(req){return req.query.q}\n" + "exec(".repeat(200000) + "g(req)" + ")".repeat(200000) + "\n",
@@ -266,8 +300,6 @@ test("nested code is linear and bounded, with a note", () => {
     const t = Date.now();
     const got = analyzeFlows([{ path: "a.js", content: src, lang: "js" }]);
     assert.ok(Date.now() - t < 20000, label);
-    if (label !== "calls") {
-      assert.deepEqual(got.filter((i) => i.rule === "Q-FLOW-INCOMPLETE").map((i) => i.name), ["Flow analysis incomplete (size budget)"], label);
-    }
+    assert.deepEqual(got.map((i) => [i.rule, i.msg.includes("nesting too deep")]), [["Q-FLOW-SKIPPED", true]], label);
   }
 });

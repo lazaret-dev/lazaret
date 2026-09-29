@@ -6,8 +6,10 @@ LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR as JavaScript line
 terminators, but flow.py split JS source on "\\n" only: an interprocedural
 X-* finding after such a character reported a line one lower than core's
 findings on the same statement (and the function-definition line in its
-message was off the same way). flow._js_text now maps them to "\\n" before
-masking, function extraction and line splitting. Inert fixtures only.
+message was off the same way). The JavaScript reader (lazaret.scanner.
+jsparse) numbers lines the way the language does — LF, CR, CRLF, U+2028,
+U+2029 — and the flow pass splits snippets the same way. Inert fixtures
+only.
 """
 import os
 import tempfile
@@ -24,10 +26,6 @@ APP = ("// header" + LS + "const x = 1;" + PS + "const y = 2;\n"
 
 
 class FlowLinesMatchCore(unittest.TestCase):
-    def test_js_text_is_same_length(self):
-        self.assertEqual(flow._js_text("a" + LS + "b" + PS + "c"), "a\nb\nc")
-        self.assertEqual(flow._js_text("plain\n"), "plain\n")
-
     def test_x_finding_line_matches_core(self):
         with tempfile.TemporaryDirectory() as root:
             for name, text in (("h.js", HELPER), ("app.js", APP)):

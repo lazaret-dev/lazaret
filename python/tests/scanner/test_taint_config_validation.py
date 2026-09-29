@@ -64,7 +64,7 @@ class _EngineState:
             dict(lazaret_flow._EXTRA_PARTIAL_PY),
             lazaret_flow._JS_SOURCE_RE,
             list(lazaret_flow._JS_SINKS),
-            lazaret_flow._JS_FULL_SAN_RE,
+            set(lazaret_flow._JS_FULL_SAN),
             dict(lazaret_flow._JS_PARTIAL_SAN),
         )
 
@@ -88,7 +88,8 @@ class _EngineState:
         lazaret_flow._EXTRA_PARTIAL_PY.update(epp)
         lazaret_flow._JS_SOURCE_RE = jsrc
         lazaret_flow._JS_SINKS[:] = jsinks
-        lazaret_flow._JS_FULL_SAN_RE = jfull
+        lazaret_flow._JS_FULL_SAN.clear()
+        lazaret_flow._JS_FULL_SAN.update(jfull)
         lazaret_flow._JS_PARTIAL_SAN.clear()
         lazaret_flow._JS_PARTIAL_SAN.update(jpart)
 
