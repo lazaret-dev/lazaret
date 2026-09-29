@@ -9,6 +9,15 @@ project is pre-1.0, so the 0.x API may still change.
 
 ## [Unreleased]
 
+### Added
+- **`--version` on every Python command** (`lazaret`, `lazaret guard` /
+  `lazaret-guard`, `lazaret-registry`, `lazaret-sca`, `lazaret-mcp`). Which
+  install was on the PATH could only be told by importing the package, and
+  an older one earlier on the PATH (0.1.0 in Homebrew's Python ahead of a
+  pipx 0.1.7) answered `lazaret guard …` with the scanner's usage error.
+- **The PyPI description names `lazaret guard`.** It is `python/README.md`,
+  which 0.1.7 did not update; PyPI shows it from the next release.
+
 ### Fixed
 - **`lazaret guard` with npm in a folder without a package.json.** npm then
   works in the nearest folder up that has a package.json or a node_modules

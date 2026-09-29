@@ -8,7 +8,7 @@ Static security & quality analysis for Python, JavaScript, and SQL — a lightwe
 pip install lazaret          # from PyPI: one package, zero dependencies
 ```
 
-This gives five commands: `lazaret` (project scanner, and `lazaret guard`, which checks what npm, pnpm, pip or uv is about to install before it runs), `lazaret-registry` (npm/PyPI package auditing), `lazaret-mcp` (MCP server), `lazaret-sca` (dependency CVE matching) and `lazaret-guard` (`lazaret guard` under its own name). Each also runs as a module, e.g. `python -m lazaret`.
+This gives five commands: `lazaret` (project scanner, and `lazaret guard`, which checks what npm, pnpm, pip or uv is about to install before it runs), `lazaret-registry` (npm/PyPI package auditing), `lazaret-mcp` (MCP server), `lazaret-sca` (dependency CVE matching) and `lazaret-guard` (`lazaret guard` under its own name). Each also runs as a module, e.g. `python -m lazaret`, and prints its version with `--version`; if `lazaret guard` answers with the scanner's usage, an older `lazaret` is earlier on your PATH (`which -a lazaret`).
 
 On a machine with Node but no Python, the project scanner is also on npm, with the same rules and zero dependencies:
 

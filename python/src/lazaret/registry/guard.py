@@ -2018,6 +2018,7 @@ def build_parser():
                     "and block it before it runs when a package is SUSPICIOUS or too new.",
         epilog="Examples: lazaret guard npm install express · lazaret guard pip install -r requirements.txt · "
                "lazaret guard uv add httpx · lazaret guard --min-age 7d pnpm add react")
+    ap.add_argument("--version", action="version", version=f"lazaret guard {lazaret.VERSION}")
     ap.add_argument("--min-age", default="2d", metavar="AGE",
                     help="hold back or block releases younger than this (default 2d; s, m, h, d, w; 0 turns it off)")
     ap.add_argument("--allow-new", action="append", default=[], metavar="NAME",

@@ -94,6 +94,25 @@ class BuildTests(unittest.TestCase):
                 self.assertTrue(callable(getattr(importlib.import_module(module), func)))
         self.assertEqual(len(re.findall(r" = ", ep)), 5)
 
+    def test_every_command_prints_its_version(self):
+        """`--version` on each console script of the installed wheel (the
+        Python commands had none: which lazaret was on the PATH could only be
+        told by importing the package)."""
+        ep = read_member(self.wheel, f"lazaret-{self.version}.dist-info/entry_points.txt").decode()
+        shown = {"lazaret-guard": "lazaret guard"}
+        with tempfile.TemporaryDirectory() as target:
+            with zipfile.ZipFile(self.wheel) as z:
+                z.extractall(target)
+            env = dict(os.environ, PYTHONPATH=target)
+            for name, module, func in re.findall(r"^(\S+) = ([\w.]+):(\w+)$", ep, re.M):
+                with self.subTest(script=name):
+                    code = (f"import sys; from {module} import {func}; sys.argv = [{name!r}, '--version']; "
+                            f"sys.exit({func}())")
+                    p = subprocess.run([sys.executable, "-c", code], capture_output=True, encoding="utf-8",
+                                       errors="replace", env=env, cwd=target, timeout=60)
+                    self.assertEqual((p.returncode, p.stdout), (0, f"{shown.get(name, name)} {self.version}\n"),
+                                     p.stderr)
+
     def test_builds_are_reproducible(self):
         with tempfile.TemporaryDirectory() as d:
             again_wheel = os.path.join(d, self.b.build_wheel(d))

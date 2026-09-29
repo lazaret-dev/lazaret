@@ -7,6 +7,7 @@ pip install lazaret
 lazaret path/to/project                 # scan; writes lazaret-report.{html,json}
 lazaret . --ci --sarif out.sarif        # quality gate for CI, SARIF for code scanning
 lazaret-registry scan npm:left-pad      # audit a published npm / PyPI package
+lazaret guard npm install express       # check what npm, pnpm, pip or uv installs, before it runs
 lazaret-sca --update-bundle             # download OSV + CISA KEV + EPSS into cve-bundle.json
 lazaret-sca . --bundle cve-bundle.json  # match installed dependencies against CVEs
 lazaret-mcp                             # MCP server, so an AI assistant can scan code
@@ -17,6 +18,7 @@ What it finds:
 - **Security:** SQL/command/code injection, SSTI, XXE, unsafe deserialization, XSS sinks, weak crypto, disabled TLS verification, hardcoded secrets (provider signatures and entropy), and more, across 63 pattern rules plus supply-chain and coverage findings.
 - **Taint analysis:** follows untrusted input through assignments, function calls, and across files into sinks, with category-aware sanitizers and a configurable source/sink/sanitizer spec.
 - **Supply chain:** decode-then-execute patterns, packed and obfuscated JavaScript, suspicious install hooks, smuggled binaries and nested archives, both in your tree and in published npm/PyPI packages.
+- **Install guard:** `lazaret guard` in front of `npm install`, `npm ci`, `pnpm add`, `pip install`, `uv add` or `uv sync` resolves what would be installed, fetches and scans every package in memory, and installs nothing if one is SUSPICIOUS, can't be checked, or is younger than `--min-age` (2 days by default). `--plan` checks without installing; verdicts are cached by digest.
 - **Quality:** bugs, code smells, complexity, duplication, with a quality gate and ratings.
 
 Two of its building blocks are usable on their own (provisional APIs until 1.0): `lazaret.pg`, a PostgreSQL client in pure Python with SCRAM-SHA-256, channel binding and TLS; and `lazaret.safexml`, a layer that makes the stdlib XML parsers safe for untrusted input.

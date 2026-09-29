@@ -1253,6 +1253,9 @@ class Server:
 
 def main():
     global _OUT
+    if sys.argv[1:] == ["--version"]:
+        print(f"lazaret-mcp {_lazaret_package.__version__}")
+        return 0
     # MCP messages are UTF-8 by definition. On Windows, stdin/stdout would
     # otherwise use the ANSI code page: a client's non-ASCII text (a code
     # snippet with an accented character) would be misread, or crash the loop.

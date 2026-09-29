@@ -8300,6 +8300,7 @@ import traceback as _traceback
 import urllib.parse as _urlparse
 
 import lazaret as _lazaret_pkg   # __version__ (the package root imports nothing)
+VERSION = _lazaret_pkg.__version__     # what every command's --version prints
 
 # ---------------- File collection (the project walk) ----------------
 # The walk is the attack surface a hostile repository controls completely, so:
@@ -10919,6 +10920,7 @@ def _positive_int(text):
 def _main(argv=None):
     global REDACT_SECRETS, EXCERPT_WIDTH, SOURCE_SIZE_CAP
     ap = argparse.ArgumentParser(prog="lazaret", description="Lazaret — security & quality scanner for Python/JS projects.")
+    ap.add_argument("--version", action="version", version=f"lazaret {_lazaret_pkg.__version__}")
     ap.add_argument("directory", help="Project directory to scan")
     ap.add_argument("--out-dir", metavar="DIR",
                     help="Directory for the default reports (default: the scan root). "

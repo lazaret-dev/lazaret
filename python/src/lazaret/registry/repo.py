@@ -3831,6 +3831,7 @@ def main():
     global SCAN_TIMEOUT, MAX_ARTIFACTS, MAX_PACKAGE_DOWNLOAD_BYTES, MAX_MEMBER
     lazaret.configure_stdio()
     ap = argparse.ArgumentParser(prog="lazaret-registry", description="Lazaret npm/PyPI registry scanner")
+    ap.add_argument("--version", action="version", version=f"lazaret-registry {lazaret.VERSION}")
     ap.add_argument("command", choices=["add", "scan", "scan-all", "list", "report", "discover"])
     ap.add_argument("specs", nargs="*", help="npm:<name>[@ver] or pypi:<name>[@ver]")
     ap.add_argument("--db", default=os.environ.get("LAZARET_DB", "lazaret-registry.db"),
