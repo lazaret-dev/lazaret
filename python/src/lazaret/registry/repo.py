@@ -58,6 +58,7 @@ import urllib.request
 from lazaret.scanner import core as lazaret  # noqa: E402
 
 from lazaret import safexml as _safexml                 # noqa: E402
+from lazaret.registry import lookalike as _lookalike    # noqa: E402
 from lazaret.safexml import ElementTree as _safe_ET     # noqa: E402
 
 
@@ -79,6 +80,11 @@ MAX_MEMBER = _env_number("LAZARET_MAX_SOURCE_BYTES", 16_000_000)
 MAX_FILES = 20_000         # files per package (numpy's sdist alone has >4,000)
 SAMPLE = 8192              # header/entropy sample read from oversized files
 # Stored scans from another engine version are scanned again (has_scan).
+# 2.12: 0.1.8's programs set to start at login or boot (systemd, launchd,
+#      cron, Run keys, scheduled tasks, the Startup folder, XDG autostart),
+#      code read back asynchronously or by a path's name from a licence or
+#      data file shipped with it, a home-made XOR decoder's strings read, and
+#      names like a popular package's (SC-TYPOSQUAT)
 # 2.11: 0.1.8's exfiltration shapes (a chat bot or webhook whose secret is in
 #      the code, credential files sent to an IP address, a sweep of
 #      credential folders, the host name hidden in base64 or sent in a DNS
@@ -119,7 +125,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.11.0"
+ENGINE_VERSION = "2.12.0"
 
 # ---------------- Trust-chain limits (F9/G14/F10) ----------------
 # Only these hosts may ever be fetched, over https only, and redirects to any
@@ -2109,6 +2115,38 @@ class _ArtifactScan:
             if issue is not None:
                 self.issues.append(issue)
 
+    def _lookalike_names(self):
+        """SC-TYPOSQUAT (MAJOR, 0.1.8): the release's own name, or a
+        dependency it declares, one change from a popular package's
+        (registry/lookalike.py). npm: package.json's name, dependencies and
+        optionalDependencies; PyPI: the Name and Requires-Dist (optional
+        extras left out) of a wheel's METADATA or an sdist's PKG-INFO."""
+        if self.artifact == "wheel":
+            rel = next((r for r in sorted(self.deferred) if r.count("/") == 1
+                        and r.endswith(".dist-info/METADATA")), None)
+        elif self.artifact == "sdist":
+            rel = "PKG-INFO" if "PKG-INFO" in self.deferred else None
+        else:
+            text = self.manifests.get("package.json")
+            data, _problems = lazaret.load_manifest("package.json", text) if text else (None, None)
+            if isinstance(data, dict):
+                name = data.get("name")
+                self.issues.extend(_lookalike.issues("npm", name if isinstance(name, str) else None,
+                                                     npm_dependency_names(data), "package.json", text))
+            return
+        if rel is None:
+            return
+        text = self.deferred[rel].decode("utf-8", "replace")
+        name, requires = None, []
+        for line in text.split("\n"):           # the headers, up to the first empty line
+            if not line.strip():
+                break
+            if line.startswith("Name:") and name is None:
+                name = line[5:].strip()
+            elif line.startswith("Requires-Dist:"):
+                requires.append(line[14:].strip())
+        self.issues.extend(_lookalike.issues("pypi", name, pypi_dependency_names(requires), rel, text))
+
     def _reachable(self):
         """Entry files plus local files they require/import (JS), transitively.
         A file reached this way runs when the package is loaded: one not
@@ -2166,6 +2204,8 @@ class _ArtifactScan:
             self._import_time_code(reachable)
             self._deadline("the agent-hijack check")
             self._agent_hijack()
+            self._deadline("the package's names")
+            self._lookalike_names()
             # interprocedural / cross-file taint (full profile only — needs whole source)
             if self.full and getattr(lazaret, "lazaret_flow", None) is not None:
                 self._deadline("the cross-file analysis")
