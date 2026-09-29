@@ -13,8 +13,9 @@ commonest PyPI dropper, nor eval of an https.get body, nor `sh -c "$(curl …)"`
 in an install script. Now a received value (a download, a socket's or a
 server's data) is followed through assignments, callback parameters, `with …
 as` / `for` bindings and returning functions to a runner that takes it whole
-as code or as a shell command: SC-IMPORT-RISK (MAJOR) at import time,
-CRITICAL in install scripts (the reason "runs code it receives over the
+as code or as a shell command: SC-IMPORT-RISK at import time — CRITICAL
+since 0.1.7 (audit P0: fetch-and-run is not an SDK's shape; it was MAJOR) —
+and CRITICAL in install scripts (the reason "runs code it receives over the
 network"). A value written into a larger string (`npm i pkg@${version}`,
 '(' + text + ')'), a RegExp's exec, a file the download was saved to, and
 code that only parses a response are not. A call's arguments are read with
@@ -292,12 +293,13 @@ class ReceivedCodeTests(unittest.TestCase):
     def test_the_trapdoor_replica_is_an_import_time_risk(self):
         text = RECEIVED[0][1]
         issue = core.dependency_import_issue("site-packages/trapdoor_py/__init__.py", text)
-        self.assertEqual((issue["rule"], issue["sev"], issue["line"]), ("SC-IMPORT-RISK", "MAJOR", 3))
+        self.assertEqual((issue["rule"], issue["sev"], issue["line"]), ("SC-IMPORT-RISK", "CRITICAL", 3))
         self.assertEqual(issue["msg"], f"Dependency code {REASON}.")
 
     DESERIAL_REASON = "deserializes data it receives over the network"
     IMPORT_REASON = "loads a module named by data it receives over the network"
     DROP_REASON = "downloads a file and then runs it"
+    PY_DROP_REASON = "downloads a script and runs it with Python"       # CRITICAL (0.1.7)
 
     def test_deserialization_of_a_received_value(self):
         for label, text, line in DESERIALIZE:
@@ -328,9 +330,12 @@ class ReceivedCodeTests(unittest.TestCase):
     def test_download_to_file_is_major_only(self):
         for label, text, line in DOWNLOAD_RUN:
             with self.subTest(label):
-                # a MAJOR import-time signal, on its line
+                # a MAJOR import-time signal, on its line — CRITICAL when the file
+                # is run with the Python interpreter: a script, not a prebuilt binary
                 reasons, at = core.import_time_risk(text)
-                self.assertIn(self.DROP_REASON, reasons)
+                python = "sys.executable" in text or "'python'" in text
+                self.assertIn(self.PY_DROP_REASON if python else self.DROP_REASON, reasons)
+                self.assertEqual(core.import_time_severity(reasons), "CRITICAL" if python else "MAJOR")
                 self.assertEqual(at, line)
                 # and never an install-script escalation, nor a received-code "run"
                 self.assertNotIn(self.DROP_REASON, core.install_script_risk(text))
@@ -467,7 +472,7 @@ class CrossFileReceivedTests(unittest.TestCase):
             "cm/client.py": ("import requests\nclass Client:\n    def pull(self):\n"
                              "        return requests.get(" + U + ").text\n")}))
         self.assertEqual(len(got), 1, got)
-        self.assertEqual(got[0][1], "MAJOR")
+        self.assertEqual(got[0][1], "CRITICAL")
         self.assertIn("cm.client", got[0][3])
         # a benign method call whose result is not run does not fire
         self.assertEqual(self._one(_pkgfiles({
@@ -498,7 +503,7 @@ class CrossFileReceivedTests(unittest.TestCase):
                 got = self._one(_pkgfiles(sink))
                 self.assertEqual(len(got), 1, got)
                 rule, sev, _f, msg = got[0]
-                self.assertEqual((rule, sev), ("SC-IMPORT-RISK", "MAJOR"))
+                self.assertEqual((rule, sev), ("SC-IMPORT-RISK", "CRITICAL"))
                 self.assertIn(REASON, msg)
                 self.assertIn(src_mod.replace("/", ".")[:-3], msg)   # names the source module
 
@@ -548,7 +553,7 @@ class CrossFileReceivedTests(unittest.TestCase):
         xf = [i for i in res["issues"] if i["rule"] == "SC-IMPORT-RISK"
               and "another file of the package" in i["msg"]]
         self.assertEqual(len(xf), 1, [i["msg"] for i in res["issues"] if i["rule"] == "SC-IMPORT-RISK"])
-        self.assertEqual(xf[0]["sev"], "MAJOR")
+        self.assertEqual(xf[0]["sev"], "CRITICAL")
         self.assertTrue(xf[0]["file"].replace("\\", "/").endswith("xdrop/__init__.py"))
 
     def test_bounded(self):
@@ -597,7 +602,7 @@ class CrossFileReceivedJsTests(unittest.TestCase):
             with self.subTest(label):
                 got = self._one(_npmfiles(pkg))
                 self.assertEqual(len(got), 1, got)
-                self.assertEqual(got[0][0], "MAJOR")
+                self.assertEqual(got[0][0], "CRITICAL")
                 self.assertIn(REASON, got[0][1])
                 self.assertIn(src, got[0][1])
 
@@ -641,7 +646,7 @@ class CrossFileReceivedJsTests(unittest.TestCase):
             with self.subTest(label):
                 got = self._one(_npmfiles(pkg))
                 self.assertEqual(len(got), 1, got)
-                self.assertEqual(got[0][0], "MAJOR")
+                self.assertEqual(got[0][0], "CRITICAL")
         # a benign class whose received-returning method is not run stays silent
         self.assertEqual(self._one(_npmfiles({
             "jq/client.js": "class Client {\n  async body() { return (await fetch(" + U + ")).text(); }\n}\n"

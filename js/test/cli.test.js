@@ -37,6 +37,14 @@ test("a bare non-directory argument is a usage error (exit 2)", () => {
   assert.match(capture(["bogus-no-such-dir"]).err, /does not exist/);
 });
 
+test("lazaret guard points to the Python package (exit 2)", () => {
+  for (const argv of [["guard", "npm", "install", "express"], ["guard", "--plan", "pip", "install", "x"]]) {
+    const r = capture(argv);
+    assert.equal(r.code, 2);
+    assert.match(r.err, /lazaret guard comes with the Python package: pip install lazaret/);
+  }
+});
+
 test("check on missing directory exits 2 with error", () => {
   const r = capture(["check", join(tmpdir(), "lazaret-no-such-dir-xyz")]);
   assert.equal(r.code, 2);

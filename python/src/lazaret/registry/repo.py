@@ -79,6 +79,13 @@ MAX_MEMBER = _env_number("LAZARET_MAX_SOURCE_BYTES", 16_000_000)
 MAX_FILES = 20_000         # files per package (numpy's sdist alone has >4,000)
 SAMPLE = 8192              # header/entropy sample read from oversized files
 # Stored scans from another engine version are scanned again (has_scan).
+# 2.8: 0.1.7's install-script and import-time tests (PowerShell, stagers,
+#      reverse shells, host beacons, CRITICAL import-time shapes, code run
+#      from a file's own prose), more import-time reach (an sdist's modules
+#      and their imports), persistence targets (writing an agent's or
+#      editor's auto-run settings, a workflow, an extension, a runner; a
+#      workflow that dumps every secret) and the Bun loader of the 2025-26
+#      worms
 # 2.7: a dependency that launches your AI coding agent in an autonomous mode
 #      (SC-AGENT-HIJACK, the s1ngularity / Nx attack), a run of invisible
 #      characters carrying a payload (SC-HIDDEN-UNICODE, GlassWorm)
@@ -93,7 +100,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.7.0"
+ENGINE_VERSION = "2.8.0"
 
 # ---------------- Trust-chain limits (F9/G14/F10) ----------------
 # Only these hosts may ever be fetched, over https only, and redirects to any
@@ -1306,6 +1313,34 @@ _STARTUP_MODULE_RE = re.compile(
 # a top-level module (a single-module distribution)
 _WHEEL_TOP_MODULE_RE = re.compile(
     r"^(?:[^/]+\.data/(?:purelib|platlib)/)?(?![^/]*\.(?:dist-info|data)/)[^/]+(?:/__init__)?\.py$")
+# What `import <name>` runs from an installed sdist: a top-level package's
+# __init__.py or a top-level module, at the sdist's root or in src/ — not the
+# build and test tooling that ships next to them
+_SDIST_TOP_MODULE_RE = re.compile(
+    r"^(?:src/)?(?!(?:tests?|testing|docs?|examples?|benchmarks?|scripts?|tools|ci|build)/)[^/]+(?:/__init__)?\.py$")
+_SDIST_NOT_MODULES = frozenset((
+    "setup.py", "conftest.py", "noxfile.py", "fabfile.py", "manage.py", "runtests.py", "versioneer.py",
+    "pavement.py", "ez_setup.py", "distribute_setup.py", "bootstrap.py", "tasks.py"))
+# the directory prefix the modules of a root live under (a wheel's
+# .data/purelib/, an sdist's src/), for absolute imports
+_PY_BASE_RE = re.compile(r"^((?:[^/]+\.data/(?:purelib|platlib)|src)/)")
+_PY_REACH_MAX = 300
+# `import a.b`, `from a.b import c, d`, `from .x import (a, b)`, `from . import a`
+_PY_IMPORT_STMT_RE = re.compile(
+    r"^[ \t]*(?:from[ \t]+(?P<dots>\.*)(?P<mod>[A-Za-z_][\w.]*)?[ \t]+import[ \t]+(?P<names>\([^)]{0,2000}\)|[^\n#;]{0,2000})"
+    r"|import[ \t]+(?P<imod>[A-Za-z_][\w.]*))", re.M)
+
+
+def _import_names(names):
+    """The plain names of an import list (`a, b as c`, `(a,\n b)`); not *."""
+    if not names:
+        return []
+    out = []
+    for part in names.strip().strip("()").split(","):
+        name = part.strip().split(" as ")[0].strip()
+        if name.isidentifier():
+            out.append(name)
+    return out[:50]
 
 
 def startup_module_issue(rel, text):
@@ -1694,6 +1729,10 @@ class _ArtifactScan:
                 mtext = lazaret.normalize_newlines(self.manifests.get(issue["file"], ""))
                 self.issues.append(lazaret._agent_hijack_issue(
                     issue["file"], issue["line"], mtext.split("\n"), direct[0], direct[1]))
+            persist = lazaret.persistence_reasons(issue["cmd"])   # the command itself plants something
+            if persist and issue["sev"] not in STRONG_SEVERITIES:
+                issue["sev"] = "CRITICAL"
+                issue["msg"] = f"Install hook command {'; and '.join(persist)}."
             targets, complete = lazaret.follow_hook(issue["cmd"])
             if not complete:            # a limit stopped the walk (core.HOOK_MAX_CHARS)
                 self.truncate(issue["file"], "its install hook is more than Lazaret follows "
@@ -1727,15 +1766,27 @@ class _ArtifactScan:
                 rel = self._find([_rel_join(root, mod + ".py"), _rel_join(root, mod + "/__init__.py")])
                 if rel:
                     scripts.append(rel)
-        # modules they import from the sdist itself run at install time too
+        # modules they import from the sdist itself run at install time too —
+        # in the sdist's root or its src/ directory, or relative to the
+        # importing module (`from .main import x`)
         queue, seen = list(scripts), set(scripts)
         while queue and len(seen) < 200:
-            text, lang = self.sources.get(queue.pop(), ("", None))
+            current = queue.pop()
+            text, lang = self.sources.get(current, ("", None))
             if lang != "py":
                 continue
+            found = []
             for m in _PY_LOCAL_IMPORT_RE.finditer(text):
                 mod = (m.group(1) or m.group(2)).replace(".", "/")
-                rel = self._find([mod + ".py", mod + "/__init__.py"])
+                found.append(self._find([mod + ".py", mod + "/__init__.py",
+                                         "src/" + mod + ".py", "src/" + mod + "/__init__.py"]))
+            for m in _PY_RELATIVE_IMPORT_RE.finditer(text):
+                base = posixpath.dirname(current)
+                for _ in range(len(m.group(1)) - 1):
+                    base = posixpath.dirname(base)
+                mod = _rel_join(base, m.group(2).replace(".", "/"))
+                found.append(self._find([mod + ".py", mod + "/__init__.py"]))
+            for rel in found:
                 if rel and rel not in seen:
                     seen.add(rel)
                     scripts.append(rel)
@@ -1745,6 +1796,11 @@ class _ArtifactScan:
             self.install_scripts.add(rel)
             text = self.sources.get(rel, ("", "py"))[0]
             reasons = install_script_risk(text)
+            # a download written to a file and run: CRITICAL in the code pip
+            # runs to install an sdist (a prebuilt-binary installer's shape
+            # keeps it MAJOR-only in npm hooks and import-time code)
+            if lazaret._downloads_and_runs_file(lazaret.normalize_newlines(text)) is not None:
+                reasons.append("downloads a file and then runs it")
             if reasons:
                 lines = lazaret.normalize_newlines(text).split("\n")
                 self.issues.append(lazaret.mk_issue(
@@ -1769,17 +1825,68 @@ class _ArtifactScan:
                 self.startup.add(rel)
                 self.issues.append(startup_module_issue(rel, text))
 
+    def _python_reach(self, roots):
+        """The Python modules of the archive that `roots` import, roots
+        included: absolute imports of a package the archive holds (at its
+        root, in src/, or in a wheel's .data directory), relative imports,
+        and `from pkg import name` where name is a submodule. At most
+        _PY_REACH_MAX modules."""
+        py = {rel for rel, (_t, lang) in self.sources.items() if lang == "py"}
+        bases = sorted({m.group(1) for m in map(_PY_BASE_RE.match, roots) if m} | {""})
+
+        def module(dotted, base=None):
+            path = dotted.replace(".", "/")
+            for prefix in ([base] if base is not None else bases):
+                for cand in (_rel_join(prefix, path + ".py"), _rel_join(prefix, path + "/__init__.py")):
+                    if cand in py:
+                        return cand
+            return None
+
+        out, queue = list(dict.fromkeys(r for r in roots if r in py)), []
+        queue.extend(out)
+        seen = set(out)
+        while queue and len(seen) < _PY_REACH_MAX:
+            current = queue.pop()
+            text = self.sources[current][0]
+            found = []
+            for m in _PY_IMPORT_STMT_RE.finditer(text):
+                dots, mod, names = m.group("dots"), m.group("mod") or m.group("imod"), m.group("names")
+                if dots:                                  # from .x import a / from . import a
+                    base = posixpath.dirname(current)
+                    for _ in range(len(dots) - 1):
+                        base = posixpath.dirname(base)
+                    target = module(mod, base) if mod else None
+                    found.append(target)
+                    pkg = _rel_join(base, mod.replace(".", "/")) if mod else base
+                    found.extend(module(n, pkg) for n in _import_names(names))
+                elif mod:                                 # import a.b / from a.b import c
+                    parts = mod.split(".")
+                    found.extend(module(".".join(parts[:k])) for k in range(1, len(parts) + 1))
+                    if names is not None:
+                        found.extend(module(mod + "." + n) for n in _import_names(names))
+            for rel in found:
+                if rel and rel not in seen:
+                    seen.add(rel)
+                    out.append(rel)
+                    queue.append(rel)
+        return out
+
     def _import_time_code(self, reachable):
-        """SC-IMPORT-RISK (MAJOR): the weaker install-script test
-        (import_time_risk) on code that runs when the package is loaded —
-        for npm what the entry points reach, for a wheel its top-level
-        packages and modules. It used to run on install-time scripts only,
-        so an import-time stealer in index.js or x/__init__.py said OK.
-        Install scripts and start-up modules have their own, stronger test."""
-        if self.artifact == "sdist":
-            return
+        """SC-IMPORT-RISK: the weaker install-script test (import_time_risk)
+        on code that runs when the package is loaded — for npm what the entry
+        points reach; for a wheel its top-level packages and modules and the
+        modules they import; for an sdist the same, found at its root or in
+        src/ (it used to get no import-time test at all, and a wheel's
+        x/__init__.py was read without the modules it imports). It used to
+        run on install-time scripts only, so an import-time stealer in
+        index.js or x/__init__.py said OK. MAJOR, or CRITICAL for the
+        reasons import_time_severity names. Install scripts and start-up
+        modules have their own, stronger test."""
         if self.artifact == "wheel":
-            files = [rel for rel in self.sources if _WHEEL_TOP_MODULE_RE.match(rel)]
+            files = self._python_reach(sorted(rel for rel in self.sources if _WHEEL_TOP_MODULE_RE.match(rel)))
+        elif self.artifact == "sdist":
+            files = self._python_reach(sorted(rel for rel in self.sources if _SDIST_TOP_MODULE_RE.match(rel)
+                                              and posixpath.basename(rel) not in _SDIST_NOT_MODULES))
         else:
             files = reachable
         for rel in sorted(files):
@@ -1790,19 +1897,21 @@ class _ArtifactScan:
                 continue
             self._deadline(rel)
             text = lazaret.normalize_newlines(text)
-            reasons, line = import_time_risk(text)
+            reasons, line = import_time_risk(text, lang)
             if not reasons:
                 continue
             self.issues.append(lazaret.mk_issue(
                 {"id": "SC-IMPORT-RISK", "name": "Risky import-time code", "type": "HOTSPOT",
-                 "sev": "MAJOR",
+                 "sev": lazaret.import_time_severity(reasons),
                  "msg": f"{rel} runs when the package is loaded, and it {'; and '.join(reasons)}.",
-                 "why": ("Code the package's entry points reach (in a wheel, its top-level "
-                         "modules) runs whenever the package is imported or its command runs. "
-                         "Collecting credentials or the whole environment next to a network "
-                         "call is the shape of an import-time stealer; SDKs read the few "
-                         "variables they need. A weaker indicator than the same code in an "
-                         "install script: the file may have a reason."),
+                 "why": ("Code the package's entry points reach (in a wheel or an sdist, its "
+                         "top-level modules and what they import) runs whenever the package is "
+                         "imported or its command runs. Collecting credentials or the whole "
+                         "environment next to a network call is the shape of an import-time "
+                         "stealer; SDKs read the few variables they need. MAJOR where the file "
+                         "may have a reason; CRITICAL for code no library needs — code fetched "
+                         "and run, a reverse shell, hidden PowerShell, a beacon to a "
+                         "data-capture service."),
                  "fix": "Read the file: what does it collect, and where does it send it?",
                  "ref": "CWE-506 · Supply chain"}, rel, line, text.split("\n")))
 
@@ -1894,6 +2003,9 @@ class _ArtifactScan:
 
 
 _PY_LOCAL_IMPORT_RE = re.compile(r"^\s*(?:from\s+([A-Za-z_][\w.]*)\s+import\b|import\s+([A-Za-z_][\w.]*))", re.M)
+# `from .main import x` / `from ..util import y`: a module of the importing
+# file's own package (or one above it)
+_PY_RELATIVE_IMPORT_RE = re.compile(r"^\s*from\s+(\.+)([A-Za-z_][\w.]*)\s+import\b", re.M)
 _PEP517_SECTION_RE = re.compile(r"^\s*\[build-system\]\s*$(.*?)(?=^\s*\[|\Z)", re.M | re.S)
 
 

@@ -1,9 +1,11 @@
-"""The JavaScript cross-file heuristic follows modules and returned values.
+"""The JavaScript cross-file pass follows modules and returned values.
 
-It used to bind a call to the last function of that name anywhere in the
-project (so commander's `parse()` reached a sink in the `ms` package), read
-a function's own header as a call, saw only calls whose arguments held no
-parentheses, and ignored what functions return. Now:
+The heuristic this pass replaced (0.1.7: it now reads parsed trees,
+lazaret.scanner.jsparse / jsflow) once bound a call to the last function of
+that name anywhere in the project (so commander's `parse()` reached a sink
+in the `ms` package), read a function's own header as a call, saw only calls
+whose arguments held no parentheses, and ignored what functions return.
+Now:
 
 * a call binds to what its file names: a definition visible from the call,
   else what a relative require() / import brings in (named, default and
@@ -11,24 +13,24 @@ parentheses, and ignored what functions return. Now:
   module.exports, exports.x and ESM exports; `export … from` and `export *`
   re-exports; `./x.js` naming `x.ts`) — a definite binding;
 * where it cannot tell (a package, a path alias, a workspace package,
-  `this.f()`, `obj.f()`, an unknown or reassigned name) the call may reach
-  any project function of that name: the name-based pass's coverage is
-  never lost to an unresolved import. Only positive evidence binds nothing:
-  a Node built-in module, a JavaScript global object's member, a built-in
-  method name on an unknown receiver, a parameter or variable a scope around
-  the call declares;
+  `obj.f()`, an unknown or reassigned name) the call may reach any project
+  function of that name: an unresolved import never costs the name-based
+  coverage. Only positive evidence binds nothing: a Node built-in module, a
+  JavaScript global object's member, a built-in method name on an unknown
+  receiver, a parameter or variable a scope around the call declares;
 * a definite call reads as what its function returns: the request data it
-  returns, and its arguments unless no return of it can hold them (or all
-  are sanitized for a category); a constructor keeps its arguments; an open
-  call keeps its arguments and adds what its functions may return. A
-  project function shadows a sanitizer of the same name;
+  returns, and its arguments where a return of it holds them (a sanitizer
+  clears its categories); a constructor keeps its arguments; an open call
+  keeps its arguments and adds what its functions may return. A project
+  function shadows a sanitizer of the same name;
 * a sink holding request data another function returned is a finding at the
-  sink; returned values and sinks read their own scope chain, a bare
-  assignment belonging to the scope that declares its name;
-* the fixpoint and what each file reads are bounded; past the budget, calls
-  whose arguments hold no nested call are still checked, with a note.
+  sink;
+* the fixpoint is bounded: a function is read again at most MAX_ITERS times,
+  the pass has a work budget proportional to the code and one reading of one
+  function a limit of its own, each noting itself when hit; a file nested
+  deeper than the reader follows is skipped with a note.
 
-The npm engine's twin (js/src/scanner/flow.js) must agree:
+The npm engine's twin (js/src/scanner/jsflow.js) must agree:
 tests/architecture/test_js_parity_flow.py. Inert text only.
 """
 import textwrap
@@ -324,54 +326,56 @@ class Scoping(unittest.TestCase):
         self.assertEqual(flows({"a.js": src}), [("X-CMD", "a.js", 4)])
 
 
-class BracketTable(unittest.TestCase):
-    def test_the_table_reads_the_same_spans_as_the_character_scan(self):
-        """_js_arg_end_at / _js_sink_span / _js_split_at jump over bracket
-        groups with the file's bracket table; they must return exactly what
-        the character-by-character _js_arg_end / _js_sink_args /
-        _js_split_args return (window included)."""
-        import random
-        rnd = random.Random(20260927)
-        tokens = ["(", ")", "[", "]", "{", "}", ",", ";", "\n", " ", "a", "exec(", "x.innerHTML = ",
-                  "\U0001F600", "\u00e9", "fetch (", "  "]
-        for _ in range(1500):
-            code = "".join(rnd.choice(tokens) for _ in range(rnd.randint(0, 120)))
-            if rnd.random() < 0.05:
-                code *= 60                               # past the 4,000-character window
-            pairs = flow._js_bracket_pairs(code)
-            for sink_re, _ in flow._JS_SINKS:
-                for m in list(sink_re.finditer(code))[:5]:
-                    a, b = flow._js_sink_span(code, m.start(), m.end(), pairs)
-                    self.assertEqual(code[a:b], flow._js_sink_args(code, m.start(), m.end()), repr(code))
-                    self.assertEqual(flow._js_split_at(code, a, b, pairs), flow._js_split_args(code[a:b]))
-            for _ in range(4):
-                k = rnd.randint(0, len(code))
-                for statement in (True, False):
-                    self.assertEqual(flow._js_arg_end_at(code, k, statement, pairs),
-                                     flow._js_arg_end(code, k, statement), repr(code[k:k + 60]))
-
-
 class Bounds(unittest.TestCase):
     def test_long_chains_of_returns(self):
-        # functions are read callees first: a long chain settles in a round
+        # callees are read first: a long chain of returns settles in a round
         src = "".join(f"function c{i}(a) {{ return c{i + 1}(a); }}\n" for i in range(40))
         src += "function c40(a) { return req.query.q; }\nexec(c0(1));\n"
         self.assertEqual(flows({"a.js": src}), [("X-CMD", "a.js", 42)])
-        # a chain through module variables takes a round a link: the cap notes itself
-        src = "".join(f"function c{i}() {{ return v{i + 1}; }}\nvar v{i + 1} = c{i + 1}();\n" for i in range(40))
-        src += "function c40() { return req.query.q; }\nexec(c0());\n"
-        (note,) = analyze({"a.js": src})
-        self.assertEqual((note["rule"], note["name"]), ("Q-FLOW-INCOMPLETE", "Flow analysis incomplete (iteration cap)"))
-        self.assertEqual(note["sev"], "INFO")
 
-    def test_past_the_budget_every_plain_call_is_still_checked(self):
+        # a chain through module variables takes a reading of the module a link:
+        # forty links settle within the cap, sixty do not and the cap notes itself
+        def chain(n):
+            src = "".join(f"function c{i}() {{ return v{i + 1}; }}\nvar v{i + 1} = c{i + 1}();\n" for i in range(n))
+            return src + f"function c{n}() {{ return req.query.q; }}\nexec(c0());\n"
+        self.assertEqual(flows({"a.js": chain(40)}), [("X-CMD", "a.js", 82)])
+        (note,) = analyze({"a.js": chain(60)})
+        self.assertEqual((note["rule"], note["name"], note["sev"]),
+                         ("Q-FLOW-INCOMPLETE", "Flow analysis incomplete (iteration cap)", "INFO"))
+        self.assertIn("did not converge within 50 re-analyses (first: the module's own code in 'a.js')", note["msg"])
+
+    def test_the_work_budget_notes_itself(self):
+        # the same chain in a large module: re-reading it runs out of steps first
+        src = "".join(f"function c{i}() {{ return v{i + 1}; }}\nvar v{i + 1} = c{i + 1}();\n" for i in range(60))
+        src += "function c60() { return req.query.q; }\n" + "x = y + z;\n" * 6000 + "exec(c0());\n"
+        t = time.perf_counter()
+        (note,) = analyze({"a.js": src})
+        self.assertLess(time.perf_counter() - t, 20)
+        self.assertEqual((note["rule"], note["name"], note["file"], note["line"]),
+                         ("Q-FLOW-INCOMPLETE", "Flow analysis incomplete (size budget)", "a.js", 1))
+        self.assertIn("stopped following values at the module's own code in 'a.js'", note["msg"])
+
+    def test_one_readings_limit_notes_itself(self):
+        from unittest import mock
+        from lazaret.scanner import jsflow
+        files = {"lib.js": "function runIt(list) {\n  for (const c of list) {\n    if (c) exec(c);\n  }\n}\n"
+                           "module.exports = { runIt };\n",
+                 "app.js": "const { runIt } = require('./lib');\napp.get('/', (req) => {\n  runIt(req.query.q);\n});\n"}
+        self.assertEqual(flows(files), [("X-CMD", "app.js", 3)])
+        with mock.patch.object(jsflow, "RUN_BASE", 0), mock.patch.object(jsflow, "RUN_PER_NODE", 1):
+            found = analyze(files)
+        self.assertEqual([(i["rule"], i["file"], i["line"]) for i in found], [("Q-FLOW-INCOMPLETE", "lib.js", 1)])
+        self.assertIn("stopped reading runIt() in 'lib.js' at its limit", found[0]["msg"])
+
+    def test_nesting_deeper_than_the_reader_follows_skips_that_file(self):
         nest = "function pad(a){return g(function(){" * 2500 + "}})" * 2500 + "\n"
         found = analyze({"lib.js": "function runIt(cmd) {\n  exec(cmd);\n}\nmodule.exports = { runIt };\n",
-                         "app.js": nest + "const { runIt } = require('./lib');\n"
-                                          "app.get('/', (req) => {\n  runIt(req.query.q);\n});\n"})
-        self.assertEqual([(i["rule"], i["line"]) for i in found],
-                         [("Q-FLOW-INCOMPLETE", 1), ("X-CMD", 4)])
-        self.assertIn("calls whose arguments hold no nested call were still checked", found[0]["msg"])
+                         "gen.js": nest,
+                         "app.js": "const { runIt } = require('./lib');\napp.get('/', (req) => {\n  runIt(req.query.q);\n});\n"})
+        self.assertEqual([(i["rule"], i["file"], i["line"]) for i in found],
+                         [("X-CMD", "app.js", 3), ("Q-FLOW-SKIPPED", "gen.js", 1)])
+        self.assertEqual(found[1]["msg"], "Cross-file taint analysis skipped 'gen.js': it could not be read as "
+                                          "JavaScript (line 1: nesting too deep).")
 
     def test_nested_code_is_linear_and_bounded(self):
         cases = {
@@ -385,9 +389,7 @@ class Bounds(unittest.TestCase):
                 t = time.perf_counter()
                 found = analyze({"a.js": src})
                 self.assertLess(time.perf_counter() - t, 20)
-                if label != "calls":
-                    notes = [i for i in found if i["rule"] == "Q-FLOW-INCOMPLETE"]
-                    self.assertEqual([i["name"] for i in notes], ["Flow analysis incomplete (size budget)"])
+                self.assertEqual([(i["rule"], "nesting too deep" in i["msg"]) for i in found], [("Q-FLOW-SKIPPED", True)])
 
 
 if __name__ == "__main__":

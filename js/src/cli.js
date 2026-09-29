@@ -12,7 +12,7 @@ import {
 } from "./lib/fs.js";
 import { fsNameToString } from "./lib/encoding.js";
 import { pyRepr } from "./lib/pycompat.js";
-import { scanFile } from "./scanner/scan.js";
+import { scanFile, scanConfigFile, treeReader } from "./scanner/scan.js";
 import { scanManifest, scanGyp } from "./lib/supplychain.js";
 import { redactResult, setRedactSecrets } from "./lib/redact.js";
 import {
@@ -219,6 +219,19 @@ export function run(argv, io = {}) {
   }
 }
 
+const GUARD_TOOLS = ["npm", "pnpm", "pip", "pip3", "uv"];
+
+/** `lazaret guard <tool> …`, the Python package's install guard: a package
+ * manager after `guard`, or only options (or nothing) when no path named
+ * guard is here to scan (lazaret._cli.is_guard). */
+function isGuardCommand(argv) {
+  if (argv[0] !== "guard") return false;
+  const rest = argv.slice(1);
+  if (rest.some((a) => GUARD_TOOLS.includes(a))) return true;
+  if (!rest.every((a) => a.startsWith("-"))) return false;
+  try { statSync("guard"); return false; } catch { return true; }
+}
+
 function runChecked(argv, io) {
   const out = io.out ?? ((s) => console.log(s));
   const err = io.err ?? ((s) => console.error(s));
@@ -229,6 +242,11 @@ function runChecked(argv, io) {
     return EXIT_USAGE;
   };
 
+  if (isGuardCommand(argv)) {
+    err("error: lazaret guard comes with the Python package: pip install lazaret (or pipx install lazaret), "
+      + "then run: lazaret guard npm install …");
+    return EXIT_USAGE;
+  }
   let parsed;
   try {
     if (argv.includes("-h") || argv.includes("--help")) { out(USAGE); return 0; }
@@ -289,8 +307,8 @@ function runChecked(argv, io) {
     if (e instanceof ScanTargetError) { err(`error: ${sanitizeTermLine(e.message)}`); return EXIT_USAGE; }
     throw e;
   }
-  const { files, manifests, binaryIssues, skippedIssues } = col;
-  if (!files.length && !manifests.length && !col.pth.length && !binaryIssues.length) {
+  const { files, manifests, configs, binaryIssues, skippedIssues } = col;
+  if (!files.length && !manifests.length && !configs.length && !col.pth.length && !binaryIssues.length) {
     err(`error: ${sanitizeTermLine(`nothing to scan under ${fsNameToString(Buffer.from(root))}: no Python, JavaScript or SQL sources, package manifests or other files to check`)}`);
     return EXIT_USAGE;
   }
@@ -300,6 +318,10 @@ function runChecked(argv, io) {
   for (const f of files) {
     try { add(scanFile({ name: f.path, path: f.path, content: f.content, lang: f.lang, dep: f.dep })); }
     catch (e) { issues.push(scanErrorIssue(f.path, e)); }            // one file must never kill the run
+  }
+  const read = treeReader(files, configs);                            // what an editor's or agent's settings run
+  for (const cf of configs) {                                         // config and data files: credentials only
+    try { add(scanConfigFile(cf.path, cf.content, read)); } catch (e) { issues.push(scanErrorIssue(cf.path, e)); }
   }
   for (const mf of manifests) {
     // binding.gyp and every other .gyp / .gypi → scanGyp (G11); package.json
@@ -319,6 +341,7 @@ function runChecked(argv, io) {
   // findings copy raw source lines: they get their file's redaction here.
   add(redactFlowIssues(analyzeFlows(files), files));
   const res = redactResult(buildResult(root, files, issues), clipLine);
+  res.metrics.configFiles = configs.length;
   if (opts.baseline) {
     applyBaseline(res, opts.baseline, { root, env, warn: (m) => err(sanitizeTermLine(m)) });
   }

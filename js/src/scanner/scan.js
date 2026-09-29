@@ -2,19 +2,30 @@
 // implementing the shared semantics (FIX-SPEC items 1, 2, 5, 6, 7, 12, 13, 14).
 import { normalizeSource } from "./lines.js";
 import { RULES, TEXT_RULES } from "./rules.js";
-import { STRING_LIT_RE, TAINT_SOURCES, TAINT_SINKS, PARTIAL_SAN, neutralize, parseAssignment } from "./taint.js";
+import {
+  STRING_LIT_RE, TAINT_SOURCES, TAINT_SINKS, PARTIAL_SAN, neutralize, parseAssignment, AUG_ASSIGN_RE, taintCode,
+  TAINT_JOIN_MAX_LINES, TAINT_JOIN_MAX_CHARS, BRACKET_DELTA, bracketDepth, cpHead, firstArg, sinkArgs,
+  GUARD_IF_RE, guardedNames, guardExits, VIEW_RETURN_RE, VIEW_RETURN_SKIP_RE, viewBody, viewReturns, scopeOpener,
+  literalContinuations, routeParams, TEMPLATE_SINK_RE, TEMPLATE_IMPORT_RE, NON_HTML_TYPE_RE, NON_HTML_CHAIN_RE, extent, containerWrite,
+  KEYED_WRITE_RE, keyedReads, SAME_SITE_RE, allowGuard,
+} from "./taint.js";
 import { sqlSinkScan, scanSqlNowhere, parenCloseMap } from "./sql.js";
 import {
   B64_BLOB_RE, OBF_IDENT_RE, SECRET_SKIP_RE, CHARCODE_RE, ENTROPY_VALUE_RE, entropySecretish,
   makeSuppressor, mkIssue,
 } from "./engine.js";
-import { lexLines, jsxReading } from "./lexer.js";
+import { lexLines, jsxReading } from "../lib/lexer.js";
 import { extractFunctions } from "./functions.js";
-import { cpLen, pyRe, pyRepr, pyRstrip, pyLstrip, isPySpace } from "../lib/pycompat.js";
+import { cpLen, pyRe, pyRepr, pyRstrip, pyLstrip, pyStrip, isPySpace } from "../lib/pycompat.js";
 import { findSecretToken, registerScanContext } from "../lib/redact.js";
 import { truncatedIssue } from "../lib/fs.js";
 import { assigned13, pinUnicode } from "../lib/unicode13.js";
 import { runsDownloadThroughShell, EXEC_CALL_RE } from "../lib/shellpipe.js";
+import { documentationToken, keyMaterial, secretCol, redactConfigValues } from "../lib/configsecrets.js";
+import { configKind, ownerDir, entries as autorunEntries, localCommand } from "../lib/autorun.js";
+import { isWorkflow, findings as workflowFindings } from "../lib/ghworkflow.js";
+import { agentHijackInCommand, installScriptRisk, followHook, treeJoin, nodeCandidates, cpPrefix } from "../lib/hooks.js";
+import { normalizeNewlines } from "../lib/fs.js";
 
 export { isComment } from "./engine.js";
 
@@ -400,8 +411,13 @@ const IDENT_RUN_RE = { py: /[\p{L}\p{N}_]+/gu, js: /[\p{L}\p{N}_$]+/gu };
 /**
  * Taint tracking (twin of core.taint_scan): each line is matched with its
  * comment text removed; assignments from sources (or from tainted
- * variables) taint every bound name (spec 12); a sink whose arguments carry
- * a tainted variable (or a source) not cleansed for that sink is reported.
+ * variables) taint every bound name (spec 12), read over the lines of the
+ * statement, with f-string and untagged template fields as code; a sink whose
+ * injectable arguments carry a tainted variable (or a source) not cleansed
+ * for that sink is reported, and so is a Flask view's tainted return value.
+ * Taints live in the function body they were made in; a reassignment in the
+ * same block, or an enclosing one, replaces the value, one in a nested or
+ * sibling block adds to it; path guards that leave clear path traversal.
  */
 export function taintScan(file, lines, lang, ctx = null) {
   const src = TAINT_SOURCES[lang];
@@ -411,9 +427,24 @@ export function taintScan(file, lines, lang, ctx = null) {
     ctx = new FileCtx(lines, lang, content, Infinity, jsxReading(file));
   }
   const issues = [];
-  const tainted = new Map();             // var -> {line, clean:Set(suffix), order}
-  const partialCats = Object.keys(PARTIAL_SAN[lang] || {});
+  // var -> {line, clean:Set(suffix), order, scope, chain: [[indent, block id], …]}
+  const tainted = new Map();
+  let sinks = TAINT_SINKS[lang];
+  if (lang === "py" && !TEMPLATE_IMPORT_RE.test(ctx.content)) sinks = sinks.filter((r) => r[1] !== TEMPLATE_SINK_RE);
+  const partial = PARTIAL_SAN[lang] || {};
+  const suffixes = [...new Set(sinks.map((r) => r[0]))];
   const identRe = IDENT_RUN_RE[lang];
+  const views = lang === "py" && ctx.content.includes("@") ? viewReturns(ctx) : new Set();
+  const routes = lang === "py" && ctx.content.includes("def") ? routeParams(ctx) : new Map();
+  let pending = null;                    // [scope id, names, def line] of a route handler whose body is not yet seen
+  const xssSink = sinks.find((r) => r[0] === "XSS") ?? null;
+  const guardIf = GUARD_IF_RE[lang];
+  const inside = literalContinuations(ctx);
+  const levels = [];                     // open blocks: [indent, block id, scope id or null]
+  let nextBlock = 0, nextScope = 0, nextOrder = 0;
+  const inScope = new Map();             // scope id -> names tainted in it
+  let opener = null;                     // [indent, scope id] of a function whose body is not yet seen
+  let openDepth = 0, continued = 0;
   const carriers = (code, suf) => {
     if (!tainted.size) return [];
     const found = new Set();
@@ -425,35 +456,194 @@ export function taintScan(file, lines, lang, ctx = null) {
     }
     return [...found].sort((a, b) => tainted.get(a).order - tainted.get(b).order);
   };
+  const statement = (i, line) => {
+    let depth = bracketDepth(line);
+    if (depth <= 0) return line;
+    const parts = [line];
+    let total = 0;
+    for (let j = i + 1; depth > 0 && j < lines.length && j <= i + TAINT_JOIN_MAX_LINES
+         && total < TAINT_JOIN_MAX_CHARS; j++) {
+      if (ctx.cmask[j]) continue;
+      const nxt = cpHead(ctx.mcode(j), TAINT_JOIN_MAX_CHARS - total);
+      parts.push(nxt);
+      total += cpLen(nxt);
+      depth += bracketDepth(nxt);
+    }
+    return parts.join(" ");
+  };
+  const keyed = new Map();               // container -> Map(literal key -> clean Set, or null: no untrusted data)
+  const allowed = [];                    // [indent, name, taint order, clean Set before] of the allowlist guards open
+  // null when the value carries no untrusted data, else the sink suffixes it is clean for (core's value_clean)
+  const valueClean = (rhs) => {
+    rhs = keyedReads(rhs, keyed);
+    const base = taintCode(neutralize(rhs, lang), lang);   // full sanitizers stripped
+    if (!src.test(base) && !carriers(base, null).length) return null;
+    const clean = new Set();
+    for (const suf of suffixes) {
+      const neut = partial[suf] ? taintCode(neutralize(rhs, lang, suf), lang) : base;
+      if (!src.test(neut) && !carriers(neut, suf).length) clean.add(suf);
+    }
+    if (xssSink && xssSink[1].test(rhs)) clean.add("XSS");
+    if (SAME_SITE_RE.test(rhs)) clean.add("REDIR");         // a path on this site, or a URL on a fixed host
+    return clean;
+  };
+  const report = (suffix, cat, sev, cwe, fix, text, i, col) => {
+    const restCode = taintCode(neutralize(keyedReads(text, keyed), lang, suffix), lang);
+    const found = carriers(restCode, suffix);
+    if (!found.length && !src.test(restCode)) return;
+    const what = found.length ? `untrusted data via '${found[0]}' (tainted at line ${tainted.get(found[0]).line})` : "untrusted data";
+    issues.push(mkIssue({ id: `T-${suffix}`, name: `Tainted flow → ${cat}`, type: "VULN", sev,
+      msg: `Possible ${cat}: ${what} reaches this sink.`,
+      why: "Data from user input or a decode function flows into a dangerous call without visible sanitization (lightweight intra-file taint tracking).",
+      fix, ref: `${cwe} · Taint analysis` }, file, i + 1, lines, col));
+  };
   for (let i = 0; i < lines.length; i++) {
     if (ctx.cmask[i]) continue;
     const line = ctx.mcode(i);
     if (!line || isBlank(line)) continue;
     if (!(i & 63)) ctx.checkTime();
-    const a = parseAssignment(line, lang);
-    if (a) {
-      const base = neutralize(a.rhs, lang).replace(STRING_LIT_RE, "");
-      if (src.test(base) || carriers(base, null).length) {
-        const clean = new Set();
-        for (const suf of partialCats) {
-          const neut = neutralize(a.rhs, lang, suf).replace(STRING_LIT_RE, "");
-          if (!src.test(neut) && !carriers(neut, suf).length) clean.add(suf);
+    // ---- the structure ----
+    let structural = false;
+    if (!inside.has(i)) {
+      let depth = 0;
+      if (lang === "py") for (const ch of ctx.namesCode(i)) depth += BRACKET_DELTA[ch] ?? 0;
+      if (openDepth > 0 && continued < TAINT_JOIN_MAX_LINES) {
+        openDepth = Math.max(0, openDepth + depth);
+        continued++;
+      } else {
+        structural = true;
+        openDepth = Math.max(0, depth);
+        continued = 0;
+        const raw = lines[i];
+        const indent = raw.length - pyLstrip(raw).length;
+        while (allowed.length && indent <= allowed[allowed.length - 1][0]) {   // an allowlist guard's block ends
+          const [, n, order, before] = allowed.pop();
+          const tn = tainted.get(n);
+          if (tn && tn.order === order) tn.clean = before;
         }
-        for (const name of a.names) if (!tainted.has(name)) tainted.set(name, { line: i + 1, clean, order: tainted.size });
+        while (levels.length && levels[levels.length - 1][0] > indent) {
+          const gone = levels.pop()[2];
+          if (gone !== null) {             // a function's body ends
+            for (const n of inScope.get(gone) ?? []) if (tainted.get(n)?.scope === gone) tainted.delete(n);
+            inScope.delete(gone);
+          }
+        }
+        if (!levels.length || levels[levels.length - 1][0] < indent) {
+          const scope = opener !== null && indent > opener[0] ? opener[1] : null;
+          levels.push([indent, nextBlock++, scope]);
+          if (pending !== null && scope === pending[0]) {
+            // a route handler's body: the parameters it takes from the request
+            const chain = levels.map((lv) => [lv[0], lv[1]]);
+            for (const name of pending[1]) {
+              keyed.delete(name);
+              tainted.set(name, { line: pending[2] + 1, clean: new Set(), order: nextOrder++, scope, chain });
+              if (!inScope.has(scope)) inScope.set(scope, []);
+              inScope.get(scope).push(name);
+            }
+            pending = null;
+          }
+        }
+        opener = null;
+        if (scopeOpener(line, lang)) {
+          pending = routes.has(i) ? [nextScope, routes.get(i), i] : null;
+          opener = [indent, nextScope++];
+        }
       }
     }
-    for (const [suffix, sinkRe, cat, sev, cwe, fix] of TAINT_SINKS[lang]) {
+    let stmt = null;
+    let a = parseAssignment(line, lang);
+    const cw = a ? null : containerWrite(line, lang);
+    if (a) {
+      stmt = statement(i, line);
+      a = parseAssignment(stmt, lang) ?? a;
+      const clean = valueClean(a.rhs);
+      const chain = levels.map((lv) => [lv[0], lv[1]]);
+      let scope = null;
+      for (let k = levels.length - 1; k >= 0; k--) if (levels[k][2] !== null) { scope = levels[k][2]; break; }
+      const augmented = AUG_ASSIGN_RE[lang].test(stmt);
+      const top = levels[levels.length - 1];
+      for (const name of a.names) {
+        if (!augmented) keyed.delete(name);
+        const old = tainted.get(name);
+        const replaces = !!old && structural && !augmented
+          && old.chain.some(([ind, id]) => ind === top[0] && id === top[1]);
+        if (!old || replaces) {
+          if (clean === null) tainted.delete(name);
+          else {
+            tainted.set(name, { line: i + 1, clean, order: nextOrder++, scope, chain });
+            if (scope !== null) {
+              if (!inScope.has(scope)) inScope.set(scope, []);
+              inScope.get(scope).push(name);
+            }
+          }
+        } else if (clean !== null) {
+          old.clean = new Set([...old.clean].filter((c) => clean.has(c)));
+        }
+      }
+    } else if (cw !== null) {
+      stmt = statement(i, line);
+      const [container] = cw;
+      let written = cw[1];
+      const joined = containerWrite(stmt, lang);
+      if (joined !== null && joined[0] === container) written = joined[1];
+      const clean = valueClean(written);
+      const km = KEYED_WRITE_RE.exec(stmt);
+      if (km && km[1] === container) {
+        if (!keyed.has(container)) keyed.set(container, new Map());
+        keyed.get(container).set(km[3], clean);
+      }
+      if (clean !== null) {
+        const old = tainted.get(container);
+        if (old) old.clean = new Set([...old.clean].filter((c) => clean.has(c)));
+        else {
+          let scope = null;
+          for (let k = levels.length - 1; k >= 0; k--) if (levels[k][2] !== null) { scope = levels[k][2]; break; }
+          tainted.set(container, { line: i + 1, clean, order: nextOrder++, scope, chain: levels.map((lv) => [lv[0], lv[1]]) });
+          if (scope !== null) {
+            if (!inScope.has(scope)) inScope.set(scope, []);
+            inScope.get(scope).push(container);
+          }
+        }
+      }
+    } else if (tainted.size && guardIf.test(line)) {
+      stmt = statement(i, line);
+      const guarded = guardedNames(stmt, lang).filter((n) => tainted.has(n));
+      if (guarded.length && guardExits(ctx, i, stmt, lang)) {
+        for (const n of guarded) tainted.get(n).clean = new Set([...tainted.get(n).clean, "PATH"]);
+      }
+      const guard = allowGuard(stmt, lang);
+      if (guard !== null && tainted.has(guard[0])) {
+        const code = taintCode(guard[1], lang);
+        if (!src.test(code) && !carriers(code, null).length) {
+          const entry = tainted.get(guard[0]);
+          if (guard[2]) {                       // leaves when not a member: clean from here on
+            if (guardExits(ctx, i, stmt, lang)) entry.clean = new Set(suffixes);
+          } else {                              // a member inside the block
+            const raw = lines[i];
+            allowed.push([raw.length - pyLstrip(raw).length, guard[0], entry.order, entry.clean]);
+            entry.clean = new Set(suffixes);
+          }
+        }
+      }
+    }
+    let xssHere = false;
+    for (const [suffix, sinkRe, cat, sev, cwe, fix] of sinks) {
       const sm = sinkRe.exec(line);
       if (!sm) continue;
-      const rest = neutralize(line.slice(sm.index + sm[0].length), lang, suffix);
-      const restCode = rest.replace(STRING_LIT_RE, "");
-      const found = carriers(restCode, suffix);
-      if (!found.length && !src.test(restCode)) continue;
-      const what = found.length ? `untrusted data via '${found[0]}' (tainted at line ${tainted.get(found[0]).line})` : "untrusted data";
-      issues.push(mkIssue({ id: `T-${suffix}`, name: `Tainted flow → ${cat}`, type: "VULN", sev,
-        msg: `Possible ${cat}: ${what} reaches this sink.`,
-        why: "Data from user input or a decode function flows into a dangerous call without visible sanitization (lightweight intra-file taint tracking).",
-        fix, ref: `${cwe} · Taint analysis` }, file, i + 1, lines, sm.index));
+      if (stmt === null) stmt = statement(i, line);
+      xssHere = xssHere || suffix === "XSS";
+      if (suffix === "XSS" && (lang === "py" ? NON_HTML_TYPE_RE.test(extent(stmt.slice(sm.index + sm[0].length)))
+        : NON_HTML_CHAIN_RE.test(sm[0]))) continue;
+      const args = sinkArgs(stmt.slice(sm.index + sm[0].length), sinkRe, lang, suffix);
+      report(suffix, cat, sev, cwe, fix, args, i, sm.index);
+    }
+    if (views.has(i) && !xssHere && xssSink) {
+      if (stmt === null) stmt = statement(i, line);
+      const rm = VIEW_RETURN_RE.exec(stmt);
+      const value = firstArg(stmt.slice(rm.index + rm[0].length));
+      if (pyStrip(value) && !VIEW_RETURN_SKIP_RE.test(value) && viewBody(value)) {
+        report(xssSink[0], xssSink[2], xssSink[3], xssSink[4], xssSink[5], value, i, rm.index + rm[0].length - 6);
+      }
     }
   }
   return issues;
@@ -511,7 +701,32 @@ function joinedEvalDecode(ctx, i, ruleRe) {
 // module, a require("child_process") call or a name bound to one); any other
 // method call (RegExp.prototype.exec, a database's .exec) is not code
 // execution. The other sink names count on any receiver.
-const DECODE_CALL_RE = pyRe("(?:\\batob|\\bb64decode|\\.\\s*fromhex|\\bunhexlify|\\b(?:codecs|__import__\\(\\s*['\\\"]codecs['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]codecs['\\\"]\\s*\\))\\s*\\.\\s*decode|\\b(?:zlib|__import__\\(\\s*['\\\"]zlib['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]zlib['\\\"]\\s*\\))\\s*\\.\\s*decompress)\\s*\\(|\\bBuffer\\s*\\.\\s*from\\s*\\([^;\\n]{0,300}?['\\\"`]base64['\\\"`]");
+const DECODE_CALL_SRC = "(?:\\batob|\\bb64decode|\\.\\s*fromhex|\\bunhexlify|\\b(?:codecs|__import__\\(\\s*['\\\"]codecs['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]codecs['\\\"]\\s*\\))\\s*\\.\\s*decode|\\b(?:zlib|__import__\\(\\s*['\\\"]zlib['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]zlib['\\\"]\\s*\\))\\s*\\.\\s*decompress|\\.\\s*decrypt)\\s*\\(|\\bBuffer\\s*\\.\\s*from\\s*\\([^;\\n]{0,300}?['\\\"`]base64['\\\"`]";
+const DECODE_CALL_RE = pyRe(DECODE_CALL_SRC);
+// A decoder imported under another name (twin of core._decoder_aliases /
+// _file_decode_re): `from base64 import b64decode as invoke` makes invoke(…)
+// a decode call; `.decrypt(` is one of its own.
+const DECODER_IMPORT_RE = pyRe(String.raw`^[ \t]*from[ \t]+(?:base64|binascii|codecs|zlib|marshal|bz2|lzma|gzip)[ \t]+import[ \t]+([^\n#]{1,300})`, "gm");
+const DECODER_NAMES = new Set(["b64decode", "b32decode", "b85decode", "a85decode", "decodebytes", "standard_b64decode",
+  "urlsafe_b64decode", "unhexlify", "a2b_base64", "a2b_hex", "decode", "decompress", "loads"]);
+const PLAIN_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+function decoderAliases(text) {
+  const out = [];
+  if (!text.includes("import") || !text.includes(" as ")) return out;
+  DECODER_IMPORT_RE.lastIndex = 0;
+  for (let m; (m = DECODER_IMPORT_RE.exec(text)) !== null;) {
+    for (const part of m[1].replaceAll("(", " ").replaceAll(")", " ").split(",")) {
+      const bits = part.split(/[\t\n\x0b\x0c\r \x1c-\x1f\x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+/).filter(Boolean);
+      if (bits.length === 3 && bits[1] === "as" && DECODER_NAMES.has(bits[0]) && PLAIN_NAME_RE.test(bits[2])
+          && !out.includes(bits[2])) out.push(bits[2]);
+    }
+  }
+  return out.slice(0, 20);
+}
+function fileDecodeRe(content) {
+  const aliases = decoderAliases(content);
+  return aliases.length ? pyRe(DECODE_CALL_SRC + String.raw`|(?<![\w.])(?:` + aliases.join("|") + String.raw`)\s*\(`) : DECODE_CALL_RE;
+}
 // The receiver starts at an identifier boundary, (?<![\w$]): every position
 // inside a long identifier used to retry the whole rest of it (quadratic).
 const DECODE_SINK_RE = pyRe(String.raw`(?:(?<![\w$])(require\s*\(\s*['"\x60][ \w:]*['"\x60]\s*\)|[A-Za-z_$][\w$]*)\s*\.\s*)?`
@@ -565,6 +780,7 @@ function depDecodeFlow(path, ctx, issues, rule) {
   const have = new Set(issues.filter((i) => i.rule === "SC-EVAL-DECODE").map((i) => i.line));
   const cpAliases = ctx.lang === "js" ? childProcessAliases(ctx.content) : new Set();
   const decoded = new Map();                 // name -> [line of the decode, its offset in the file]
+  const decodeRe = ctx.lang === "py" ? fileDecodeRe(ctx.content) : DECODE_CALL_RE;
   const live = (text, at) => {               // decodes behind the decoded names in text, in reach at `at`
     const out = [];
     identRe.lastIndex = 0;
@@ -583,7 +799,7 @@ function depDecodeFlow(path, ctx, issues, rule) {
     const code = ctx.mcode(i);
     if (!code || isBlank(code)) continue;
     if (!(i & 63)) ctx.checkTime();
-    const hasDecode = DECODE_CALL_RE.test(code);
+    const hasDecode = decodeRe.test(code);
     if (!decoded.size && !hasDecode) continue;
     const blank = blankStrings(code);
     const pairs = pairOffsets(code);         // blank keeps code's UTF-16 layout
@@ -603,7 +819,7 @@ function depDecodeFlow(path, ctx, issues, rule) {
       const at = base + cpAt(pairs, pos);
       if (kind === 0) {
         const [a, b] = ev.indices[2];
-        if (DECODE_CALL_RE.test(code.slice(a, b))) { decoded.set(ev[1], [i + 1, at]); continue; }
+        if (decodeRe.test(code.slice(a, b))) { decoded.set(ev[1], [i + 1, at]); continue; }
         const src = live(blank.slice(a, b), at);
         if (src.length) decoded.set(ev[1], src.reduce((x, y) => (y[1] > x[1] ? y : x)));
         continue;
@@ -623,7 +839,7 @@ function depDecodeFlow(path, ctx, issues, rule) {
       const src = live(blank.slice(argStart, end), at);
       let msg;
       if (src.length) msg = `Decoded payload (assigned at line ${Math.min(...src.map((d) => d[0]))}) reaches a code-execution sink.`;
-      else if (DECODE_CALL_RE.test(code.slice(argStart, end))) msg = "Decoded payload reaches a code-execution sink in the same call.";
+      else if (decodeRe.test(code.slice(argStart, end))) msg = "Decoded payload reaches a code-execution sink in the same call.";
       else continue;
       have.add(i + 1);
       issues.push(mkIssue({ ...rule, msg }, path, i + 1, ctx.lines, ev.index));
@@ -713,6 +929,204 @@ export function scanFile(file) {
     issues.push(truncatedIssue(path, "scan time budget exceeded"));
   }
   const suppressed = makeSuppressor(lines, lang, { dep, lex: ctx.lex });
+  return capIssues(path, issues.filter((i) => !suppressed(i)), lines);
+}
+
+// ---- config and data files (credentials only; core.scan_config_file) -------
+const TOKEN_RULE = RULES.find((r) => r.id === "S-TOKEN");
+export const CONFIG_SECRET_RULE = {
+  id: "S-SECRET", name: "Hardcoded credential", type: "VULN", sev: "BLOCKER",
+  msg: "Credential appears to be hardcoded in a config file.",
+  why: "Config files are committed, copied into images and shared: a credential in one leaks with every copy, and rotating it means finding them all.",
+  fix: "Reference it instead (${VAR}, a secrets manager), and rotate this one now.",
+  ref: "CWE-798 · OWASP A07",
+};
+
+/**
+ * Column of the first S-TOKEN match on a config line that is reported: not a
+ * documentation sample, and a private-key header only with key material after
+ * it, on the line or the next two (core._config_token_col). -1 if none.
+ */
+function configTokenCol(line, lines, i) {
+  let t, from = 0;
+  while ((t = findSecretToken(line, from))) {
+    from = t.end;
+    if (documentationToken(t.text)) continue;
+    if (t.text.startsWith("-----BEGIN")
+        && ![line.slice(t.end), ...lines.slice(i + 1, i + 3)].some((x) => keyMaterial(x))) continue;
+    return t.index;
+  }
+  return -1;
+}
+
+// ---- settings that run commands (SC-AUTORUN; core's section comment) ----
+export const AUTORUN_SHOW = 200;           // code points of a command a message shows
+const AUTORUN_WHY =
+  "Editors and AI coding agents run these commands on their own — when the folder is opened, a " +
+  "session starts or the agent uses a tool — with your privileges, without asking each time. The " +
+  "2026 Shai-Hulud worms (Mini Shai-Hulud, the keyv wave) committed a Claude Code SessionStart hook " +
+  "and a VS Code folder-open task to every repository they reached, so opening a checkout ran the " +
+  "worm.";
+
+const autorunRule = (sev, msg, why, fix) => ({
+  id: "SC-AUTORUN", name: "Settings run a command automatically", type: "HOTSPOT", sev, msg, why, fix,
+  ref: "CWE-506 · Supply chain",
+});
+
+const AGENT_SETTINGS_REASON = "writes an AI agent's or editor's auto-run settings";
+/** installScriptRisk for what a settings file runs, but for writing an agent's settings (core._autorun_script_risk). */
+const autorunScriptRisk = (text) => installScriptRisk(text).filter((r) => !r.startsWith(AGENT_SETTINGS_REASON));
+
+/** [reasons, target] for a command a settings file runs (core._autorun_risk). */
+function autorunRisk(command, base, read) {
+  const reasons = [];
+  const hijack = agentHijackInCommand(command);
+  if (hijack !== null) reasons.push(`starts the AI agent "${hijack[0]}" with ${hijack[1]}`);
+  reasons.push(...autorunScriptRisk(command));
+  if (reasons.length || read === null) return [reasons, null];
+  for (const target of followHook(localCommand(command))[0]) {
+    const rel = treeJoin(base, target);
+    const text = rel !== null ? read(rel) : null;
+    if (text === null) continue;
+    const found = autorunScriptRisk(text);
+    OBF_IDENT_RE.lastIndex = 0;
+    if (new Set(text.match(OBF_IDENT_RE) ?? []).size >= 5) found.push("is obfuscated");
+    if (found.length) return [found, target];
+  }
+  return [[], null];
+}
+
+/** SC-AUTORUN findings for an editor's or AI agent's settings file (core.autorun_issues). */
+export function autorunIssues(path, lines, read = null) {
+  const [kind, tool] = configKind(path);
+  const [found, error] = autorunEntries(kind, tool, lines.join("\n"));
+  if (error !== null) {
+    return [mkIssue(autorunRule("MAJOR",
+      `These ${tool} settings could not be read as JSON (line ${error[0]}: ${error[1]}), ` +
+      `but they name commands for ${tool} to run: read them by hand.`,
+      AUTORUN_WHY, "Fix the file so it can be read, and check every command it names."), path, error[0], lines)];
+  }
+  const base = ownerDir(path);
+  const out = [];
+  for (const e of found) {
+    const cmd = e.command;
+    if (cmd === null) {
+      out.push(mkIssue(autorunRule("INFO", `${e.trigger}.`, AUTORUN_WHY + " Listed for inventory.",
+        "Check that you added it."), path, e.line, lines));
+      continue;
+    }
+    const shown = cpLen(cmd) <= AUTORUN_SHOW ? cmd : cpPrefix(cmd, AUTORUN_SHOW) + "…";
+    const [reasons, target] = autorunRisk(cmd, base, read);
+    if (!reasons.length) {
+      out.push(mkIssue(autorunRule("INFO", `${e.trigger}: ${pyRepr(shown)}.`, AUTORUN_WHY + " Listed for inventory.",
+        "Check that you added it, and what it runs."), path, e.line, lines));
+      continue;
+    }
+    const said = reasons.join("; and ");
+    const msg = target === null ? `${e.trigger}: ${pyRepr(shown)} — a command that ${said}.`
+      : `${e.trigger}: ${pyRepr(shown)}, which runs ${target}; that file ${said}.`;
+    out.push(mkIssue(autorunRule("CRITICAL", msg, AUTORUN_WHY + " This one runs code that looks hostile.",
+      "Do not open the folder in the editor or start the agent in it. Remove the entry and what it " +
+      "runs, find the commit that added them, and rotate the credentials this machine holds if it " +
+      "already ran."), path, e.line, lines));
+  }
+  return out;
+}
+
+// ---- workflows the worms planted (SC-WORKFLOW-*; core.workflow_issues) ----
+const WORKFLOW_SECRETS_WHY =
+  "`${{ toJSON(secrets) }}` is every secret of the repository in one value: a job that holds it can " +
+  "leak them all, and a workflow that also sends it out is how the Shai-Hulud worms stole secrets " +
+  "from the repositories they reached (a webhook.site upload, a build artifact).";
+const WORKFLOW_BACKDOOR_WHY =
+  "A `${{ … }}` expression is pasted into the script before it runs, so text from an issue, a " +
+  "discussion or a pull request becomes shell commands; on a self-hosted runner they run on that " +
+  "machine. The second Shai-Hulud wave registered its victims' machines as self-hosted runners and " +
+  "planted exactly this workflow (discussion.yaml): opening a discussion ran commands on the victim's " +
+  "machine.";
+
+/** SC-WORKFLOW-SECRETS / SC-WORKFLOW-BACKDOOR for a GitHub Actions workflow (core.workflow_issues). */
+export function workflowIssues(path, lines) {
+  const out = [];
+  for (const [kind, line, d] of workflowFindings(lines.join("\n"))) {
+    if (kind === "secrets") {
+      const sent = d.how !== null;
+      out.push(mkIssue({
+        id: "SC-WORKFLOW-SECRETS", name: "Workflow hands out every secret", type: "HOTSPOT",
+        sev: sent ? "CRITICAL" : "MAJOR",
+        msg: sent ? `The workflow hands every repository secret to ${d.where} and sends data out ` +
+            `(${d.how}): the Shai-Hulud worms planted workflows like this.`
+          : `The workflow hands every repository secret to ${d.where} (toJSON(secrets)): any ` +
+            "step there can read them all.",
+        why: WORKFLOW_SECRETS_WHY,
+        fix: "Delete the workflow unless you wrote it, then rotate every secret of the repository. " +
+          "A job should get only the secrets it uses, by name (${{ secrets.NAME }}).",
+        ref: "CWE-200 · Supply chain" }, path, line, lines));
+    } else {
+      out.push(mkIssue({
+        id: "SC-WORKFLOW-BACKDOOR", name: "Workflow runs event text on a self-hosted runner",
+        type: "HOTSPOT", sev: "CRITICAL",
+        msg: `The job "${d.job}" puts ${d.expr} into a command on a self-hosted runner, and ` +
+          `${d.event} events start it: anyone who can ${d.act} runs commands on that machine.`,
+        why: WORKFLOW_BACKDOOR_WHY,
+        fix: "Delete the workflow unless you wrote it, and remove any runner you did not register. " +
+          "Otherwise pass the text through an environment variable and quote it in the script.",
+        ref: "CWE-94 · Supply chain" }, path, line, lines));
+    }
+  }
+  return out;
+}
+
+/**
+ * read(rel) for autorunIssues: the text of a scanned source or config file
+ * ('/'-separated, root-relative, resolved as nodeCandidates does), or null
+ * (core.tree_reader).
+ */
+export function treeReader(files, configs) {
+  const texts = new Map();
+  for (const f of [...files, ...configs]) {
+    const key = f.path.replaceAll("\\", "/");
+    if (!texts.has(key)) texts.set(key, f.content);
+  }
+  return (rel) => {
+    for (const cand of nodeCandidates(rel)) if (texts.has(cand)) return normalizeNewlines(texts.get(cand));
+    return null;
+  };
+}
+
+/**
+ * Credentials in a config or data file (twin of core.scan_config_file):
+ * S-TOKEN on every line, S-SECRET outside comments, nothing else — it is not
+ * code. Suppression markers work in the file's comments, as in code. An
+ * editor's or AI agent's settings that run commands also get SC-AUTORUN, and
+ * a GitHub Actions workflow the SC-WORKFLOW-* checks.
+ */
+export function scanConfigFile(path, rawContent, read = null) {
+  const content = pinUnicode(normalizeSource(rawContent, "cfg"));
+  const lines = content.split("\n");
+  const lex = lexLines(lines, "cfg", content);
+  registerScanContext(lines, SECRET_SKIP_RE, redactConfigValues);
+  const deadline = Date.now() + timeBudgetMs;
+  const issues = [];
+  try {
+    if (configKind(path) !== null) issues.push(...autorunIssues(path, lines, read));
+    if (isWorkflow(path)) issues.push(...workflowIssues(path, lines));
+    for (let i = 0; i < lines.length; i++) {
+      if (Date.now() > deadline) throw new ScanBudgetExceeded();
+      const line = lines[i];
+      if (!line || isBlank(line)) continue;
+      let col = configTokenCol(line, lines, i);
+      if (col >= 0) issues.push(mkIssue(TOKEN_RULE, path, i + 1, lines, col));
+      if (!lex.comment[i]) {
+        col = secretCol(lex.code[i]);
+        if (col >= 0) issues.push(mkIssue(CONFIG_SECRET_RULE, path, i + 1, lines, col));
+      }
+    }
+  } catch (e) {
+    if (!(e instanceof ScanBudgetExceeded)) throw e;
+    issues.push(truncatedIssue(path, "scan time budget exceeded"));
+  }
+  const suppressed = makeSuppressor(lines, "cfg", { lex });
   return capIssues(path, issues.filter((i) => !suppressed(i)), lines);
 }
 

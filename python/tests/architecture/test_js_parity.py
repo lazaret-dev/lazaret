@@ -168,6 +168,34 @@ ADVERSARIAL = {
                     'u = "https://admin:s3cretPassw0rd@192.0.2.10/db"\neval(u)\n'),
     "sec/creds.sql": "create user bob identified by 'hunter2hunter2';\nGRANT ALL ON t TO PUBLIC;\n",
     "sec/markup.jsx": '<Input password="hunter2hunter2" />\n',
+    # config and data files: credentials only (configsecrets), never read as code
+    "cfg/.env": ("# service\nDB_PASSWORD=Zq8!vN3pL0wX7r\nAPI_KEY=${API_KEY}\nAWS_KEY=AKIAIOSFODNN7EXAMPLE\n"
+                 "GITHUB_TOKEN=ghp_" + "a1B2" * 9 + "  # nosec\n"
+                 "SAMPLE_JWT=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6Ikpv"
+                 "aG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c\n"
+                 "NPM_TOKEN=npm_Zq8vN3pL0wX7rT2mK9sB4hF6jD1 # lazaret-ignore: S-TOKEN\n"),
+    "cfg/app.yaml": ("db:\n  password: \"Zq8!vN3pL0wX7r\"\n"
+                     "  url: postgres://app:Zq8vN3pL0wX7r2@db.prod.invalid:5432/app\n"
+                     "  secret: root-ca5\n  auth: elastic:${ELASTIC_PASSWORD}\n"
+                     "label:\n  password: Contrase\u00f1a actual\n  token: Palavra-passe\n"
+                     "# token: ghp_" + "c3D4" * 9 + "\n"
+                     "k8s: {password: cGFzc3dvcmQxMjM=}\n"),
+    "cfg/settings.json": ('{\n  "api_key": "d41d8cd98f00b204e9800998ecf8427e",\n  "password": "changeme",\n'
+                          '  "nextPageToken": "Zq8vN3pL0wX7rT2m",\n  "accessKey": "ACCESS_KEY",\n'
+                          '  "private_key": "-----BEGIN PRIVATE KEY-----\\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\\n"\n}\n'),
+    "cfg/deploy.sh": ('#!/bin/sh\nexport SLACK_BOT_TOKEN="xoxb-1234567890-abcdefghijkl"\n'
+                      'mysql --password="$DB_PASSWORD" -e "select 1"\n'),
+    "cfg/key.pem": ("-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA3Bq7" + "Zq8vN3pL0wX7rT2mK9sB" * 2
+                    + "\n-----END RSA PRIVATE KEY-----\n"),
+    "cfg/template.pem": ("-----BEGIN RSA PRIVATE KEY-----\n" + "privatekey" * 6
+                         + "\n-----END RSA PRIVATE KEY-----\n"),
+    "cfg/Dockerfile": "FROM scratch\nENV API_TOKEN=Zq8vN3pL0wX7rT2m\nARG NPM_TOKEN\n",
+    "cfg/.npmrc": "//registry.invalid/:_authToken=Zq8vN3pL0wX7rT2mK9sB4hF6jD1\n",
+    "cfg/package-lock.json": '{"packages": {"": {"token": "ghp_' + "e5F6" * 9 + '"}}}\n',   # a lockfile: not read
+    "cfg/big.json": '{"password": "Zq8!vN3pL0wX7r", "a": "' + "x" * 2_100_000 + '"}\n',  # > 2 MB: a note
+    "cfg/binary.key": b"\x30\x82\x04\xa4\x02\x01\x00\x02\x82\x01\x01\x00" + b"\x00\xff" * 100,
+    "cfg/lazaret-report.json": '{\n  "generatedBy": "lazaret-cli-1",\n  "password": "Zq8!vN3pL0wX7r"\n}\n',
+    "node_modules/evil/.env": "DB_PASSWORD=Zq8!vN3pL0wX7r\n",                        # a dependency's: not read
     # bytecode and binaries (shared semantics 8 and 9)
     "mod.py": "x = 1\n",
     "__pycache__/mod.cpython-311.pyc": _pyc(0),

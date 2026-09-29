@@ -5,11 +5,11 @@
 // lib must never import scanner).
 
 import { pyRe } from "../lib/pycompat.js";
-import { lexLines } from "./lexer.js";
+import { lexLines } from "../lib/lexer.js";
 
 export { shannonEntropy, ENTROPY_VALUE_RE, entropySecretish, SECRET_SKIP_RE } from "../lib/redact.js";
 export { mkIssue } from "../lib/issue.js";
-export { isComment } from "./lexer.js";
+export { isComment } from "../lib/lexer.js";
 
 export const B64_BLOB_RE = pyRe(String.raw`[\"'][A-Za-z0-9+/]{200,}={0,2}[\"']`);
 export const OBF_IDENT_RE = pyRe(String.raw`\b_0x[0-9a-f]{4,}\b`, "g");

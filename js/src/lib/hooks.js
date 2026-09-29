@@ -14,12 +14,13 @@
 // again; wrappers are popped off the front of a list), this module does
 // not, with the same results.
 
-import { pyRe, pyStrip, isPySpace } from "./pycompat.js";
+import { pyRe, pyStrip, pyRstrip, isPySpace, cpLen } from "./pycompat.js";
 import { PIPE_SCAN_SRC, EXEC_CALL_SRC, EXEC_CALL_RE, DL_SUBST_SRC, DL_SUBST_NEEDLE_SRC, pipesDownloadToShell,
   runsDownloadThroughShell, runsSubstitutedDownload } from "./shellpipe.js";
 import { receivedCodeKind, downloadsAndRunsFile, RECEIVED_TWINS, DL_NEEDLES, DL_RUN_NEEDLES, DL_DESERIAL_NEEDLES,
   DL_IMPORT_NEEDLES, DL_SINK_NEEDLES, DL_ALIAS_NEEDLES, DL_ALIAS_MAX, DL_FILE_WRITE_NEEDLES, DL_PATHRUN_NEEDLES,
-  DL_PY_NET_MODULES, DL_NOT_NAMES, DL_PREFIX_CHARS, DL_DEFINING, DL_CALLEE_CHARS, DL_LIMITS } from "./received.js";
+  DL_PY_NET_MODULES, DL_NOT_NAMES, DL_PREFIX_CHARS, DL_DEFINING, DL_CALLEE_CHARS, DL_LIMITS, cpBack, cpForward } from "./received.js";
+import { commentSpans } from "./lexer.js";
 
 // ---- Python details the patterns depend on --------------------------------
 
@@ -589,7 +590,7 @@ const EXFIL_DEST_SRC = String.raw`https?://(?:\d{1,3}\.){3}\d{1,3}\b|` + EXFIL_S
 const EXFIL_DEST_RE = pyRe(EXFIL_DEST_SRC, "i");
 const EXFIL_SERVICE_RE = pyRe(EXFIL_SERVICES_SRC, "i");              // the named ones, no raw IPs
 /** The first n code points of s (Python's s[:n]). */
-function cpPrefix(s, n) {
+export function cpPrefix(s, n) {
   let i = 0;
   for (let k = 0; k < n && i < s.length; k++) {
     const c = s.charCodeAt(i);
@@ -604,6 +605,433 @@ const DL_CATEGORY_REASON = {
   deserialize: "deserializes data it receives over the network",
   import: "loads a module named by data it receives over the network",
 };
+
+// ---- PowerShell, stagers, reverse shells, host information --------------------
+// Twins of core's powershell_risk, string_stager, reverse_shell and
+// sends_host_info (see core's section comment): the install-script blind
+// spots of the audit's PyPI benchmark. Patterns are core's, Python semantics.
+const PS_SRC = String.raw`\b(?:powershell|pwsh)(?:\.exe)?\b`;
+const PS_RE = pyRe(PS_SRC, "i");
+const PS_ALL_RE = pyRe(PS_SRC, "gi");
+const PS_ENCODED_SRC = String.raw`\b(?:powershell|pwsh)(?:\.exe)?\b[^\n]{0,400}?[\s\"',\[(][-/\u2013\u2014]`
+  + String.raw`(?:encodedcommand|encodedcomman|encodedcomma|encodedcomm|encodedcom|encodedco|encodedc|encoded|encode`
+  + String.raw`|encod|enco|enc|en|ec|e)[\s\"',]+([A-Za-z0-9+/]{16}[A-Za-z0-9+/]*={0,2})`;
+const PS_ENCODED_RE = pyRe(PS_ENCODED_SRC, "gi");
+const PS_ENCODED_MAX = 65536;
+const PS_CRADLE_SRC = String.raw`\b(?:iwr|irm|Invoke-WebRequest|Invoke-RestMethod|curl|wget)\b[^\n|;]{0,400}\|\s*(?:iex|Invoke-Expression)\b`
+  + String.raw`|\b(?:iex|Invoke-Expression)\b[\s(]{0,8}(?:New-Object\s+(?:System\.)?Net\.WebClient\s*\)\s*\.\s*DownloadString`
+  + String.raw`|iwr|irm|Invoke-WebRequest|Invoke-RestMethod)\b`
+  + String.raw`|\.DownloadString\s*\([^\n)]{0,400}\)\s*\|\s*(?:iex|Invoke-Expression)\b`;
+const PS_CRADLE_RE = pyRe(PS_CRADLE_SRC, "i");
+const PS_DOWNLOAD_FILE_SRC = String.raw`\b(?:Invoke-WebRequest|iwr|Invoke-RestMethod|irm|curl(?:\.exe)?|wget|Start-BitsTransfer)\b[^\n]{0,400}?`
+  + String.raw`\s-(?:OutFile|Destination|o)\b|\.DownloadFile\s*\(`;
+const PS_DOWNLOAD_FILE_RE = pyRe(PS_DOWNLOAD_FILE_SRC, "i");
+const PS_START_SRC = String.raw`\b(?:Start-Process|saps|Invoke-Item|Invoke-Expression|iex)\b`;
+const PS_START_RE = pyRe(PS_START_SRC, "i");
+
+function powershellScriptRisk(ps) {
+  if (PS_CRADLE_RE.test(ps) || (PS_DOWNLOAD_FILE_RE.test(ps) && PS_START_RE.test(ps))) return "downloads and runs code";
+  return null;
+}
+/** The UTF-16LE text of an -EncodedCommand argument (core._decode_powershell). */
+function decodePowershell(b64) {
+  b64 = b64.slice(0, PS_ENCODED_MAX);
+  b64 = b64.endsWith("=") ? b64.slice(0, b64.length - (b64.length % 4)) : b64 + "=".repeat((4 - (b64.length % 4)) % 4);
+  if (b64.replace(/=+$/, "").length % 4 === 1) return "";      // what base64.b64decode(validate=True) refuses
+  const data = Buffer.from(b64, "base64");
+  return data.subarray(0, data.length & ~1).toString("utf16le");
+}
+/** Reasons PowerShell in `text` looks hostile (core.powershell_risk). */
+export function powershellRisk(text) {
+  if (!PS_RE.test(text)) return [];
+  const reasons = [];
+  PS_ENCODED_RE.lastIndex = 0;
+  const m = PS_ENCODED_RE.exec(text);
+  if (m) {
+    const does = powershellScriptRisk(decodePowershell(m[1]));
+    reasons.push("runs an encoded PowerShell command" + (does ? ` that ${does}` : ""));
+  } else {
+    const does = powershellScriptRisk(text);
+    if (does) reasons.push(`runs PowerShell that ${does}`);
+  }
+  return reasons;
+}
+
+const STAGER_MIN = 24;
+const STAGER_MAX_LITERALS = 2000;
+const STAGER_RUN_NEEDLES = ["exec", "eval", "Function", "system", "popen", "spawn", "-c"];
+const STAGER_NET_NEEDLES = ["urlopen", "requests", "urllib", "http", "fetch", "curl", "wget", "socket"];
+/** [offset, contents] of the string literals of `text` (core._string_literals). */
+function stringLiterals(text) {
+  const out = [];
+  const n = text.length;
+  let i = 0;
+  while (i < n && out.length < STAGER_MAX_LITERALS) {
+    const ch = text[i];
+    if (ch !== '"' && ch !== "'" && ch !== "`") { i++; continue; }
+    if (ch !== "`" && text.startsWith(ch.repeat(3), i)) {
+      const j = text.indexOf(ch.repeat(3), i + 3);
+      const end = j < 0 ? n : j;
+      out.push([i, text.slice(i + 3, end)]);
+      i = end + 3;
+      continue;
+    }
+    let j = i + 1;
+    while (j < n && text[j] !== ch && (ch === "`" || text[j] !== "\n")) j += text[j] === "\\" ? 2 : 1;
+    out.push([i, text.slice(i + 1, Math.min(j, n))]);
+    i = j + 1;
+  }
+  return out;
+}
+/** The offset of a string literal holding a script that downloads and runs code, else -1 (core.stager_at). */
+export function stagerAt(text) {
+  if (!STAGER_NET_NEEDLES.some((nd) => text.includes(nd))) return -1;
+  for (const [at, lit] of stringLiterals(text)) {
+    if (cpLen(lit) >= STAGER_MIN && STAGER_RUN_NEEDLES.some((nd) => lit.includes(nd))
+        && STAGER_NET_NEEDLES.some((nd) => lit.includes(nd))) {
+      const found = receivedCodeKind(lit.replaceAll(";", "\n"));
+      if (found !== null && found[1] === "run") return at;
+    }
+  }
+  return -1;
+}
+
+const REVSHELL_DUP2_SRC = String.raw`\bdup2\s*\(\s*[\w.]+\.fileno\s*\(\s*\)\s*,\s*[012]\s*\)`;
+const REVSHELL_SHELL_SRC = String.raw`["'](?:/bin/(?:ba|z|da|k)?sh|cmd(?:\.exe)?|powershell(?:\.exe)?)["']|\bpty\.spawn\s*\(`;
+const REVSHELL_LINE_SRC = String.raw`\b(?:ba|z|k)?sh\s+-i\b[^\n]{0,80}?[<>]&?\s*/dev/(?:tcp|udp)/`
+  + String.raw`|/dev/(?:tcp|udp)/[\w.\-]+/\d+[^\n]{0,40}?0\s*>\s*&\s*1`
+  + String.raw`|\b(?:nc|ncat|netcat)\b[^\n]{0,120}?\s-[ec]\s+[\"']?(?:/bin/)?(?:ba|z)?sh\b`;
+const REVSHELL_JS_SPAWN_SRC = String.raw`\bspawn\s*\(\s*["'](?:/bin/(?:ba|z)?sh|cmd(?:\.exe)?)["']`;
+const REVSHELL_JS_PIPE_SRC = String.raw`\.pipe\s*\(\s*[\w$.]+\.stdin\s*\)`;
+const REVSHELL_JS_NET_SRC = String.raw`\bnet\s*\.\s*(?:Socket|connect|createConnection)\b|\bnew\s+Socket\s*\(`;
+const REVSHELL_DUP2_RE = pyRe(REVSHELL_DUP2_SRC);
+const REVSHELL_SHELL_RE = pyRe(REVSHELL_SHELL_SRC);
+const REVSHELL_LINE_RE = pyRe(REVSHELL_LINE_SRC);
+const REVSHELL_JS_SPAWN_RE = pyRe(REVSHELL_JS_SPAWN_SRC);
+const REVSHELL_JS_PIPE_RE = pyRe(REVSHELL_JS_PIPE_SRC);
+const REVSHELL_JS_NET_RE = pyRe(REVSHELL_JS_NET_SRC);
+/** The offset where `text` opens a reverse shell, else -1 (core.reverse_shell_at). */
+export function reverseShellAt(text) {
+  let m = REVSHELL_LINE_RE.exec(text);
+  if (m) return m.index;
+  if (text.includes("dup2")) {
+    m = REVSHELL_DUP2_RE.exec(text);
+    if (m && REVSHELL_SHELL_RE.test(text)) return m.index;
+  }
+  if (text.includes("pty") && text.includes("socket") && text.includes("connect") && text.includes("pty.spawn")) {
+    return text.indexOf("pty.spawn");
+  }
+  if (text.includes("spawn")) {
+    m = REVSHELL_JS_SPAWN_RE.exec(text);
+    if (m && REVSHELL_JS_PIPE_RE.test(text) && REVSHELL_JS_NET_RE.test(text)) return m.index;
+  }
+  return -1;
+}
+
+const HOST_INFO_SRC = String.raw`\b(?:socket\.gethostname|socket\.getfqdn|platform\.node|getpass\.getuser|os\.getlogin|pwd\.getpwuid`
+  + String.raw`|os\.hostname|os\.userInfo)\s*\(`
+  + String.raw`|\b(?:getoutput|check_output|getstatusoutput|execSync|popen)\s*\(\s*\[?\s*["'](?:whoami|hostname|id|uname`
+  + String.raw`|ifconfig|ipconfig|systeminfo)\b`
+  + String.raw`|(?:\$\(|` + "`" + String.raw`)\s*(?:whoami|hostname|id|uname|ifconfig|ip\s+a|pwd|ls|cat\s+/etc/passwd|ps)\b`;
+const HOST_INFO_RE = pyRe(HOST_INFO_SRC);
+/** True when `text` collects the machine's user or host name and sends data over the network (core.sends_host_info). */
+export function sendsHostInfo(text) {
+  return HOST_INFO_RE.test(text) && (NETWORK_RE.test(text) || EXFIL_SERVICE_RE.test(text));
+}
+
+// Code read back from the file itself (core's comment above _SELF_READ_RE):
+// running what a read of its own source, or of a data file shipped next to
+// it, gives; followed through the names it is assigned to.
+const SELF_READ_SRC = String.raw`\bopen\s*\(\s*(?:os\.path\.(?:abspath|realpath)\s*\(\s*)?__file__\b`
+  + String.raw`|\bPath\s*\(\s*__file__\s*\)\s*\.\s*(?:read_text|read_bytes|open)\s*\(`
+  + String.raw`|\blinecache\.getlines?\s*\(\s*__file__\b|(?<![\w.])__loader__\s*\.\s*get_source\s*\(|(?<![\w.])__doc__\b`
+  + String.raw`|\breadFile(?:Sync)?\s*\(\s*(?:__filename\b|(?:new\s+URL\s*\(\s*)?import\.meta\.url`
+  + String.raw`|fileURLToPath\s*\(\s*import\.meta\.url)|\barguments\s*\.\s*callee\b|\}\s*\)?\s*\.\s*toString\s*\(\s*\)`;
+const DATA_EXT = String.raw`(?:txt|dat|bin|png|jpe?g|gif|ico|bmp|svg|wav|mp3|mp4|woff2?|ttf|json|md|cfg|ini|log|db|pyc|so|dll`
+  + String.raw`|dylib|exe)`;
+const SIBLING_DATA_SRC = String.raw`\b(?:open|read_text|read_bytes|readFileSync|readFile)\s*\([^\n]{0,200}?(?:__file__|__dirname|import\.meta\.url)`
+  + String.raw`[^\n]{0,200}?[\"'][^\"'\n]{1,100}\.` + DATA_EXT + String.raw`[\"']`
+  + String.raw`|(?:__file__|__dirname)[^\n]{0,200}?[\"'][^\"'\n]{1,100}\.` + DATA_EXT + String.raw`[\"'][^\n]{0,60}?`
+  + String.raw`\.\s*(?:read_text|read_bytes)\s*\(`;
+const SELF_RUN_SRC = String.raw`(?<![\w.$])(?:exec|eval|compile)\s*\(|\bnew\s+Function\s*\(|\bvm\s*\.\s*run\w*\s*\(`
+  + String.raw`|\b(?:execSync|system|popen|Popen|check_output|getoutput)\s*\(|\bsubprocess\s*\.\s*\w+\s*\(`;
+const SELF_READ_ASSIGN_SRC = String.raw`(?<![^\n])[ \t]*(?:(?:const|let|var)[ \t]+)?([A-Za-z_$][\w$]*)[ \t]*(?::[^=\n]*)?=(?![=>])([^\n]*)`;
+const IDENT_TOKEN_SRC = String.raw`(?<![\w$.])[A-Za-z_$][\w$]*`;
+const SELF_READ_RE = pyRe(SELF_READ_SRC);
+const SELF_READ_ALL_RE = pyRe(SELF_READ_SRC, "g");
+const SIBLING_DATA_RE = pyRe(SIBLING_DATA_SRC);
+const SIBLING_DATA_ALL_RE = pyRe(SIBLING_DATA_SRC, "g");
+const SELF_RUN_ALL_RE = pyRe(SELF_RUN_SRC, "g");
+const SELF_READ_ASSIGN_ALL_RE = pyRe(SELF_READ_ASSIGN_SRC, "gd");      // d: the groups' offsets
+const IDENT_TOKEN_ALL_RE = pyRe(IDENT_TOKEN_SRC, "g");
+const SELF_READ_PASSES = 3, SELF_READ_MAX_CALLS = 200, SELF_READ_ARG_SPAN = 2000, SELF_READ_MAX_ASSIGNS = 5000;
+const LITERAL_SPANS_MAX = 20000;
+
+/** Does `text` read its own source? (core.reads_own_source) */
+export function readsOwnSource(text) {
+  return SELF_READ_RE.test(text);
+}
+/** `text` (what follows a call's '(') up to the bracket that closes the call (core._call_args). */
+function callArgs(text) {
+  let depth = 0, i = 0;
+  const n = text.length;
+  while (i < n) {
+    const ch = text[i];
+    if (ch === '"' || ch === "'" || ch === "`") {
+      const j = text.indexOf(ch, i + 1);
+      if (j < 0) return text;
+      i = j + 1;
+      continue;
+    }
+    if (ch === "(" || ch === "[" || ch === "{") depth++;
+    else if (ch === ")" || ch === "]" || ch === "}") {
+      if (depth === 0) return text.slice(0, i);
+      depth--;
+    }
+    i++;
+  }
+  return text;
+}
+/** [start, end] of the string literals of `text` (core._literal_spans). */
+function literalSpans(text) {
+  const out = [];
+  const n = text.length;
+  let i = 0;
+  while (i < n && out.length < LITERAL_SPANS_MAX) {
+    const ch = text[i];
+    if (ch !== '"' && ch !== "'" && ch !== "`") { i++; continue; }
+    if (ch !== "`" && text.startsWith(ch.repeat(3), i)) {
+      const j = text.indexOf(ch.repeat(3), i + 3);
+      const end = j < 0 ? n : j + 3;
+      out.push([i, end]);
+      i = end;
+      continue;
+    }
+    let j = i + 1;
+    while (j < n && text[j] !== ch && (ch === "`" || text[j] !== "\n")) j += text[j] === "\\" ? 2 : 1;
+    const end = Math.min(j + 1, n);
+    out.push([i, end]);
+    i = end;
+  }
+  return out;
+}
+/** The offset of a runner that runs code read from the text's own source or a data file next to it, else -1 (core.runs_own_source_at). */
+export function runsOwnSourceAt(text) {
+  if (!SELF_READ_RE.test(text) && !SIBLING_DATA_RE.test(text)) return -1;
+  const spans = literalSpans(text);
+  const inLiteral = (pos) => {
+    let lo = 0, hi = spans.length;               // the last span starting at or before pos
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (spans[mid][0] <= pos) lo = mid + 1; else hi = mid; }
+    return lo > 0 && pos < spans[lo - 1][1];
+  };
+  const reads = (lo, hi) => {
+    const part = text.slice(lo, hi);
+    for (const rx of [SELF_READ_ALL_RE, SIBLING_DATA_ALL_RE]) {
+      rx.lastIndex = 0;
+      for (let m; (m = rx.exec(part)) !== null;) {
+        if (!inLiteral(lo + m.index)) return true;
+        if (m[0] === "") rx.lastIndex++;
+      }
+    }
+    return false;
+  };
+  const uses = (lo, hi, names) => {
+    const part = text.slice(lo, hi);
+    IDENT_TOKEN_ALL_RE.lastIndex = 0;
+    for (let m; (m = IDENT_TOKEN_ALL_RE.exec(part)) !== null;) if (names.has(m[0]) && !inLiteral(lo + m.index)) return true;
+    return false;
+  };
+  if (!reads(0, text.length)) return -1;
+  const assigns = [];
+  SELF_READ_ASSIGN_ALL_RE.lastIndex = 0;
+  for (let m, k = 0; (m = SELF_READ_ASSIGN_ALL_RE.exec(text)) !== null; k++) {
+    if (k >= SELF_READ_MAX_ASSIGNS) break;
+    if (!inLiteral(m.indices[1][0])) assigns.push([m[1], m.indices[2][0], m.indices[2][1]]);
+  }
+  const names = new Set();
+  for (let pass = 0; pass < SELF_READ_PASSES; pass++) {
+    let grown = false;
+    for (const [name, lo, hi] of assigns) {
+      if (!names.has(name) && (reads(lo, hi) || uses(lo, hi, names))) { names.add(name); grown = true; }
+    }
+    if (!grown) break;
+  }
+  SELF_RUN_ALL_RE.lastIndex = 0;
+  for (let m, k = 0; (m = SELF_RUN_ALL_RE.exec(text)) !== null; k++) {
+    if (k >= SELF_READ_MAX_CALLS) break;
+    if (inLiteral(m.index)) continue;
+    const start = m.index + m[0].length;
+    const hi = start + callArgs(text.slice(start, cpForward(text, start, SELF_READ_ARG_SPAN))).length;
+    if (reads(start, hi) || uses(start, hi, names)) return m.index;
+  }
+  return -1;
+}
+
+// ---- persistence targets (0.1.7; core's comment above _PERSIST_AGENT_SRC) ----
+// Where the 2025-26 worms made themselves stay: an AI agent's or editor's
+// auto-run settings, a GitHub Actions workflow, an editor extension, a
+// self-hosted runner; and the Bun loader of the Shai-Hulud worms. Reasons of
+// the install-script test; a workflow that dumps every secret is one at
+// import time too.
+const PERSIST_AGENT_SRC =
+  String.raw`(?:\.(?:claude|gemini)[/\\]settings(?:\.local)?|\.vscode[/\\](?:tasks|mcp)|\.cursor[/\\](?:hooks|mcp)` +
+  String.raw`|(?<![\w.-])\.(?:mcp|claude))\.json(?![\w.-])`;
+const PERSIST_AGENT_SPLIT_SRC =
+  String.raw`["'` + "`" + String.raw`]\.(claude|gemini|vscode|cursor)["'` + "`" + String.raw`]\s{0,20}[,+/]\s{0,20}["'` + "`" +
+  String.raw`](settings(?:\.local)?|tasks|hooks|mcp)\.json["'` + "`" + String.raw`]`;
+const PERSIST_AGENT_PAIRS = new Map([["claude", ["settings", "settings.local"]], ["gemini", ["settings"]],
+  ["vscode", ["tasks", "mcp"]], ["cursor", ["hooks", "mcp"]]]);
+const PERSIST_WORKFLOW_SRC = String.raw`\.github[/\\]workflows\b|["'` + "`" + String.raw`]\.github["'` + "`" +
+  String.raw`]\s{0,20}[,+/]\s{0,20}["'` + "`" + String.raw`]workflows\b`;
+const EDITOR_DIRS = String.raw`(?:vscode(?:-insiders|-oss|-server)?|cursor|windsurf|vscodium|positron)`;
+const PERSIST_EXT_DIR_SRC =
+  String.raw`[/\\]\.` + EDITOR_DIRS + String.raw`[/\\]extensions\b` +
+  String.raw`|["'` + "`" + String.raw`]\.` + EDITOR_DIRS + String.raw`["'` + "`" + String.raw`]\s{0,20}[,+/]\s{0,20}` +
+  String.raw`["'` + "`" + String.raw`]extensions["'` + "`" + String.raw`]`;
+const PERSIST_WRITE_SRC =
+  String.raw`\b(?:writeFileSync|writeFile|appendFileSync|appendFile|createWriteStream|outputFileSync|outputFile` +
+  String.raw`|outputJsonSync|outputJson|writeJsonSync|writeJson|copyFileSync|copyFile|cpSync|renameSync|symlinkSync` +
+  String.raw`|write_text|write_bytes|createOrUpdateFileContents)\s*\(|\bjson\.dump\s*\(|\bshutil\.(?:copy\w*|move)\s*\(` +
+  String.raw`|\bopen\s*\([^()\n]{0,300}?["'][wax]b?\+?["']`;
+const PERSIST_SHELL_WRITE_SRC =
+  String.raw`>|\b(?:tee|cp|mv|install|ln|copy|xcopy)\s|\b(?:Set-Content|Out-File|Add-Content|Copy-Item|New-Item)\b` +
+  String.raw`|\bgit\s+(?:add|commit)\b`;
+const PERSIST_EXT_INSTALL_SRC = String.raw`--install-extension\b`;
+const PERSIST_EXT_CLI_SRC =
+  String.raw`(?:(?<![^\n])|[;&|(])[ \t]*(?:sudo[ \t]+)?(?:code|code-insiders|codium|cursor|windsurf|positron)(?:\.cmd|\.exe)?` +
+  String.raw`[ \t]`;
+const PERSIST_RUNNER_SRC = String.raw`actions/runner/releases|\bactions-runner-(?:linux|osx|win)-`;
+const PERSIST_RUNNER_CONFIG_SRC = String.raw`\bconfig\.(?:sh|cmd)\b`;
+const PERSIST_RUNNER_ARG_SRC = String.raw`--(?:token|url)\b`;
+const BUN_RELEASES_SRC = String.raw`oven-sh/bun/releases`;
+const SECRETS_DUMP_SRC = String.raw`\btoJSON\s*\(\s*secrets\s*\)`;
+const PERSIST_AGENT_RE = pyRe(PERSIST_AGENT_SRC, "g");
+const PERSIST_AGENT_SPLIT_RE = pyRe(PERSIST_AGENT_SPLIT_SRC, "g");
+const PERSIST_WORKFLOW_RE = pyRe(PERSIST_WORKFLOW_SRC, "g");
+const PERSIST_EXT_DIR_RE = pyRe(PERSIST_EXT_DIR_SRC, "g");
+const PERSIST_WRITE_RE = pyRe(PERSIST_WRITE_SRC);
+const PERSIST_SHELL_WRITE_RE = pyRe(PERSIST_SHELL_WRITE_SRC);
+const PERSIST_EXT_INSTALL_RE = pyRe(PERSIST_EXT_INSTALL_SRC);
+const PERSIST_EXT_CLI_RE = pyRe(PERSIST_EXT_CLI_SRC, "g");
+const PERSIST_RUNNER_RE = pyRe(PERSIST_RUNNER_SRC);
+const PERSIST_RUNNER_CONFIG_RE = pyRe(PERSIST_RUNNER_CONFIG_SRC, "g");
+const PERSIST_RUNNER_ARG_RE = pyRe(PERSIST_RUNNER_ARG_SRC);
+const BUN_RELEASES_RE = pyRe(BUN_RELEASES_SRC, "i");
+const SECRETS_DUMP_RE = pyRe(SECRETS_DUMP_SRC, "i");
+const PERSIST_SECRETS_DUMP_G = pyRe(SECRETS_DUMP_SRC, "gi");
+const PERSIST_MAX_LINES = 100;
+
+/** posixpath.normpath of a relative path. */
+function normpathRel(path) {
+  const comps = [];
+  for (const c of path.split("/")) {
+    if (c === "" || c === ".") continue;
+    if (c !== ".." || !comps.length || comps[comps.length - 1] === "..") comps.push(c);
+    else comps.pop();
+  }
+  return comps.join("/") || ".";
+}
+
+/**
+ * A hook's `target` joined with the directory `base` (relative to the scan
+ * root), normalized; null when it is absolute or leaves the scan root.
+ * Twin of core._tree_join.
+ */
+export function treeJoin(base, target) {
+  target = target.replaceAll("\\", "/");
+  if (target.startsWith("/") || /^[A-Za-z]:/.test(target)) return null;
+  const joined = normpathRel(`${base || "."}/${target}`);
+  if (joined === "." || joined === ".." || joined.startsWith("../")) return null;
+  return joined;
+}
+
+/** re.search(text, pos) of a global pattern: the match at or after pos, or null. */
+function searchFrom(re, text, pos = 0) {
+  re.lastIndex = pos;
+  return re.exec(text);
+}
+
+/** The first AI-agent or editor settings file text names, or null (core._persist_agent_file). */
+function persistAgentFile(text) {
+  const m = searchFrom(PERSIST_AGENT_RE, text);
+  let found = m ? [m.index, m[0].replaceAll("\\", "/")] : null;
+  PERSIST_AGENT_SPLIT_RE.lastIndex = 0;
+  for (let k = 0, s; (s = PERSIST_AGENT_SPLIT_RE.exec(text)) !== null; k++) {
+    if (k >= PERSIST_MAX_LINES || (found !== null && s.index > found[0])) break;
+    if (PERSIST_AGENT_PAIRS.get(s[1]).includes(s[2])) {
+      found = [s.index, `.${s[1]}/${s[2]}.json`];
+      break;
+    }
+  }
+  return found === null ? null : found[1];
+}
+
+/** A shell write on a line on which targetRe matches (core._shell_writes). */
+function shellWrites(text, targetRe) {
+  let m = searchFrom(targetRe, text);
+  for (let lines = 0; m !== null && lines < PERSIST_MAX_LINES; lines++) {
+    const start = text.lastIndexOf("\n", m.index) + 1;
+    let end = text.indexOf("\n", m.index + m[0].length);
+    if (end < 0) end = text.length;
+    if (PERSIST_SHELL_WRITE_RE.test(text.slice(start, end))) return true;
+    m = searchFrom(targetRe, text, end);
+  }
+  return false;
+}
+
+/**
+ * A line on which firstRe matches and thenRe after it (core._after_on_line);
+ * each line is read once. thenRe (no look-behind) is tested on the rest of
+ * the line, as Python's pattern.search(text, pos, endpos) reads it.
+ */
+function afterOnLine(text, firstRe, thenRe) {
+  let m = searchFrom(firstRe, text);
+  while (m !== null) {
+    const from = m.index + m[0].length;
+    let end = text.indexOf("\n", from);
+    if (end < 0) end = text.length;
+    if (thenRe.test(text.slice(from, end))) return true;
+    m = searchFrom(firstRe, text, end);
+  }
+  return false;
+}
+
+/** Does text name a target and write it (core._writes_named)? */
+const writesNamed = (text, targetRe) => searchFrom(targetRe, text) !== null
+  && (PERSIST_WRITE_RE.test(text) || shellWrites(text, targetRe));
+
+/** A GitHub Actions workflow that hands every secret to a job, and the workflows directory (core.dumps_workflow_secrets). */
+export function dumpsWorkflowSecrets(text) {
+  return SECRETS_DUMP_RE.test(text) && searchFrom(PERSIST_WORKFLOW_RE, text) !== null;
+}
+
+/** The persistence-target reasons of the install-script test. Twin of core.persistence_reasons. */
+export function persistenceReasons(text) {
+  const reasons = [];
+  const agent = persistAgentFile(text);
+  if (agent !== null && (PERSIST_WRITE_RE.test(text) || shellWrites(text, PERSIST_AGENT_RE)
+      || shellWrites(text, PERSIST_AGENT_SPLIT_RE))) {
+    reasons.push(`writes an AI agent's or editor's auto-run settings (${agent})`);
+  }
+  if (dumpsWorkflowSecrets(text)) {
+    reasons.push("carries a GitHub Actions workflow that dumps every repository secret");
+  } else if (searchFrom(PERSIST_WORKFLOW_RE, text) !== null
+      && (writesNamed(text, PERSIST_WORKFLOW_RE) || text.includes("/contents/"))) {
+    reasons.push("writes a GitHub Actions workflow");
+  }
+  const install = PERSIST_EXT_INSTALL_RE.test(text);
+  if ((install && (EXEC_CALL_RE.test(text) || afterOnLine(text, PERSIST_EXT_CLI_RE, PERSIST_EXT_INSTALL_RE)))
+      || writesNamed(text, PERSIST_EXT_DIR_RE)) {
+    reasons.push("installs an editor extension");
+  }
+  if (PERSIST_RUNNER_RE.test(text) || afterOnLine(text, PERSIST_RUNNER_CONFIG_RE, PERSIST_RUNNER_ARG_RE)) {
+    reasons.push("registers the machine as a GitHub Actions self-hosted runner");
+  }
+  if (BUN_RELEASES_RE.test(text) && EXEC_CALL_RE.test(text)) {
+    reasons.push("downloads the Bun runtime from GitHub and runs code with it");
+  }
+  return reasons;
+}
 
 /**
  * Reasons an install-time script looks hostile ([] if none).
@@ -622,6 +1050,14 @@ export function installScriptRisk(text) {
   const received = receivedCodeKind(text);
   if (substituted) reasons.push(DL_CATEGORY_REASON.run);
   else if (received !== null) reasons.push(DL_CATEGORY_REASON[received[1]]);
+  reasons.push(...powershellRisk(text));
+  if ((received === null || received[1] !== "run") && !substituted && stagerAt(text) >= 0) {
+    reasons.push("carries a script that downloads and runs code");
+  }
+  if (reverseShellAt(text) >= 0) reasons.push("opens a reverse shell");
+  if (sendsHostInfo(text)) reasons.push("sends the machine's user or host name over the network");
+  if (runsOwnSourceAt(text) >= 0) reasons.push("runs code it reads back from its own file or a data file shipped with it");
+  reasons.push(...persistenceReasons(text));
   return reasons;
 }
 
@@ -667,19 +1103,156 @@ function countNewlines(text, start, end) {
   return count;
 }
 
+// Import-time reasons that are CRITICAL wherever found (core._STRONG_IMPORT_REASONS,
+// import_time_severity), the data-capture services and the Python run of a download.
+const STRONG_IMPORT_REASONS = [
+  "runs code it receives over the network", "runs a downloaded script through a shell",
+  "runs an encoded PowerShell command", "runs PowerShell that", "carries a script that downloads and runs code",
+  "opens a reverse shell", "reads credentials or the whole environment and sends them to",
+  "sends the machine's user or host name to a data-capture service", "downloads a script and runs it with Python",
+  "runs code it reads back from its own file", "carries a GitHub Actions workflow that dumps every repository secret"];
+const CAPTURE_SERVICE_SRC = String.raw`webhook\.site|typedwebhook\.tools|oastify\.com|burpcollaborator|\binteract\.sh|\boast[\w.-]*\.(?:pro|live|site`
+  + String.raw`|online|fun|me|com)\b|pipedream\.net|requestbin|requestcatcher\.com|hookbin\.com|postb\.in|beeceptor\.com`
+  + String.raw`|dnslog\.cn|ceye\.io|canarytokens`;
+const CAPTURE_SERVICE_RE = pyRe(CAPTURE_SERVICE_SRC, "i");
+const PY_RUN_SRC = String.raw`\[\s*(?:sys\.executable|["']python[\d.w]*(?:\.exe)?["'])\s*,|\bstart\s+pythonw?\b`
+  + String.raw`|\b(?:system|popen|getoutput|run|call|Popen)\s*\(\s*f?["']python[\d.w]*(?:\.exe)?\s`;
+const PY_RUN_RE = pyRe(PY_RUN_SRC);
+/** 'CRITICAL' when one of importTimeRisk's reasons is a strong one, else 'MAJOR' (core.import_time_severity). */
+export function importTimeSeverity(reasons) {
+  return reasons.some((r) => STRONG_IMPORT_REASONS.some((p) => r.startsWith(p))) ? "CRITICAL" : "MAJOR";
+}
+
+// Prose is not import-time code, and PowerShell counts at import time only as
+// an argument of an exec call (core's comment above _PY_DOC_HEAD_RE).
+const PY_DOC_HEAD_SRC = String.raw`[ \t]*[rRuUbB]{0,2}\Z`;
+const PY_DOC_HEAD_RE = pyRe(PY_DOC_HEAD_SRC, "y");          // on the head alone, from 0: core's match(text, ls, s)
+const PY_JOINS = "([{,=+-*/%&|^<>~@\\.\"'";
+const BRACKET_SRC = String.raw`[()\[\]{}]`;
+const PS_EXEC_BACK = 300;
+const PS_EXEC_MAX_NAMES = 200;
+const EXEC_CALL_ALL_RE = pyRe(EXEC_CALL_SRC, "g");
+const SPACE_TAB_SRC = String.raw`[ \t]*`;
+const SPACE_TAB_RE = pyRe(SPACE_TAB_SRC, "y");
+
+/** The spans of `literals` that stand alone as statements (core._py_statement_literals). */
+function pyStatementLiterals(text, literals, comments) {
+  const out = [];
+  const marks = [...literals.map(([s, e]) => [s, e, 1]), ...comments.map(([s, e]) => [s, e, 0])]
+    .sort((a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2]);
+  let depth = 0, pos = 0, last = "";
+  for (const [s, e, isLiteral] of marks) {
+    if (s < pos) continue;
+    const k = text.slice(pos, s).lastIndexOf("\n");
+    const ls = k >= 0 ? pos + k + 1 : (pos === 0 ? 0 : -1);   // -1: a mark before it on its line
+    let prior = last;                          // the last code character before the literal's line
+    if (ls > pos) {
+      const code = pyRstrip(text.slice(pos, ls));
+      if (code) prior = code[code.length - 1];
+    }
+    for (let i = pos; i < s; i++) {
+      const c = text.charCodeAt(i);
+      if (c === 40 || c === 91 || c === 123) depth++;
+      else if (c === 41 || c === 93 || c === 125) depth = Math.max(0, depth - 1);
+    }
+    const code = pyRstrip(text.slice(pos, s));
+    if (code) last = code[code.length - 1];
+    pos = e;
+    if (!isLiteral) continue;
+    if (e > s) last = text[e - 1];
+    SPACE_TAB_RE.lastIndex = e;
+    SPACE_TAB_RE.test(text);
+    const j = SPACE_TAB_RE.lastIndex;
+    PY_DOC_HEAD_RE.lastIndex = 0;
+    if (ls >= 0 && depth === 0 && (!prior || !PY_JOINS.includes(prior)) && PY_DOC_HEAD_RE.test(text.slice(ls, s))
+        && !(ls >= 2 && text[ls - 2] === "\\") && (j === text.length || text[j] === "\n" || text[j] === "#")) {
+      out.push([s, e]);
+    }
+  }
+  return out;
+}
+
+/** `text` with the characters of `spans` (sorted, disjoint) made spaces, its line breaks kept (core._blank). */
+function blank(text, spans) {
+  if (!spans.length) return text;
+  const parts = [];
+  let p = 0;
+  for (let [s, e] of spans) {
+    s = Math.max(s, p);
+    if (e <= s) continue;
+    parts.push(text.slice(p, s), text.slice(s, e).split("\n").map((row) => " ".repeat(cpLen(row))).join("\n"));
+    p = e;
+  }
+  parts.push(text.slice(p));
+  return parts.join("");
+}
+
+/** `text` (a Python or JavaScript file) with its prose blanked, unless it reads its own source (core._import_code). */
+function importCode(text, lang) {
+  if (readsOwnSource(text)) return text;
+  const literals = lang === "py" ? [] : null;
+  const comments = commentSpans(text, lang, null, { literals });
+  let spans = [...comments];
+  if (literals && literals.length) {
+    spans = [...spans, ...pyStatementLiterals(text, literals, comments)].sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  }
+  return blank(text, spans);
+}
+
+/** Is a call whose '(' comes just before `rest` still open at its end? (core._call_open) */
+function callOpen(rest) {
+  let depth = 1;
+  for (let i = 0; i < rest.length; i++) {
+    const c = rest.charCodeAt(i);
+    if (c === 40 || c === 91 || c === 123) depth++;
+    else if ((c === 41 || c === 93 || c === 125) && --depth === 0) return false;
+  }
+  return true;
+}
+
+/** The offset of the first PowerShell name that is an argument of an exec call, else -1 (core._powershell_run_at). */
+function powershellRunAt(text) {
+  PS_ALL_RE.lastIndex = 0;
+  for (let m, k = 0; (m = PS_ALL_RE.exec(text)) !== null; k++) {
+    if (k >= PS_EXEC_MAX_NAMES) break;
+    const window = text.slice(cpBack(text, m.index, PS_EXEC_BACK), m.index);
+    EXEC_CALL_ALL_RE.lastIndex = 0;
+    for (let c; (c = EXEC_CALL_ALL_RE.exec(window)) !== null;) {
+      if (callOpen(window.slice(c.index + c[0].length))) return m.index;
+    }
+  }
+  return -1;
+}
+
 /**
  * [reasons, line]: why code that runs on import looks hostile by the weaker
  * test (core's comment above _IMPORT_HARVEST_RE) — [] if not — and the
  * 1-based line of the first sign (null when there is none). `text` has \n
- * line endings. Twin of lazaret.scanner.core.import_time_risk.
+ * line endings; `lang` "py" or "js" reads it without its prose. Twin of
+ * lazaret.scanner.core.import_time_risk.
  */
-export function importTimeRisk(text) {
+export function importTimeRisk(text, lang = null) {
+  let [reasons, line] = importTimeRiskOf(text);
+  if (reasons.length && (lang === "py" || lang === "js")) {
+    const code = importCode(text, lang);
+    if (code !== text) [reasons, line] = importTimeRiskOf(code);
+  }
+  return [reasons, line];
+}
+
+function importTimeRiskOf(text) {
   const reasons = [];
   let line = null;
   const harvest = importHarvestStart(text);
-  if (harvest !== -1 && (NETWORK_RE.test(text) || EXFIL_SERVICE_RE.test(text))) {
-    reasons.push("reads credentials or the whole environment and sends data over the network");
-    line = countNewlines(text, 0, harvest) + 1;
+  if (harvest !== -1) {
+    const service = EXFIL_SERVICE_RE.exec(text);
+    if (service) {
+      reasons.push("reads credentials or the whole environment and sends them to "
+        + `an exfiltration service (${cpPrefix(service[0], 40)})`);
+    } else if (NETWORK_RE.test(text)) {
+      reasons.push("reads credentials or the whole environment and sends data over the network");
+    }
+    if (reasons.length) line = countNewlines(text, 0, harvest) + 1;
   }
   if (text.includes("curl") || text.includes("wget")) {
     // the rows of text.split("\n"), one at a time
@@ -702,8 +1275,34 @@ export function importTimeRisk(text) {
   }
   const dropped = downloadsAndRunsFile(text);
   if (dropped !== null) {
-    reasons.push("downloads a file and then runs it");
+    reasons.push(PY_RUN_RE.test(text) ? "downloads a script and runs it with Python" : "downloads a file and then runs it");
     line ??= dropped;
+  }
+  const signs = [];                          // [offset, reason] of the shapes no library needs
+  const ps = powershellRisk(text);
+  if (ps.length) {
+    const at = powershellRunAt(text);
+    if (at >= 0) signs.push([at, ps[0]]);
+  }
+  if (received === null || received[1] !== "run") {
+    const at = stagerAt(text);
+    if (at >= 0) signs.push([at, "carries a script that downloads and runs code"]);
+  }
+  const rs = reverseShellAt(text);
+  if (rs >= 0) signs.push([rs, "opens a reverse shell"]);
+  const host = HOST_INFO_RE.exec(text);
+  if (host) {
+    const capture = CAPTURE_SERVICE_RE.exec(text);
+    if (capture) signs.push([host.index, `sends the machine's user or host name to a data-capture service (${cpPrefix(capture[0], 40)})`]);
+  }
+  const own = runsOwnSourceAt(text);
+  if (own >= 0) signs.push([own, "runs code it reads back from its own file or a data file shipped with it"]);
+  if (dumpsWorkflowSecrets(text)) {
+    signs.push([searchFrom(PERSIST_SECRETS_DUMP_G, text).index, "carries a GitHub Actions workflow that dumps every repository secret"]);
+  }
+  for (const [at, reason] of signs) {
+    reasons.push(reason);
+    line ??= countNewlines(text, 0, at) + 1;
   }
   return [reasons, line];
 }
@@ -793,6 +1392,22 @@ export const PY_TWINS = {
     _EXEC_CALL_RE: [EXEC_CALL_SRC, ""], _SHEBANG_RE: [SHEBANG_SRC, ""],
     _AGENT_BIN_RE: [AGENT_BIN_SRC, ""], _AGENT_BIN_CMD_RE: [AGENT_BIN_CMD_SRC, ""], _AGENT_FLAG_RE: [AGENT_FLAG_SRC, ""],
     _DL_SUBST_RE: [DL_SUBST_SRC, ""], _DL_SUBST_NEEDLE_RE: [DL_SUBST_NEEDLE_SRC, ""],
+    _PS_RE: [PS_SRC, "i"], _PS_ENCODED_RE: [PS_ENCODED_SRC, "i"], _PS_CRADLE_RE: [PS_CRADLE_SRC, "i"],
+    _PS_DOWNLOAD_FILE_RE: [PS_DOWNLOAD_FILE_SRC, "i"], _PS_START_RE: [PS_START_SRC, "i"],
+    _REVSHELL_DUP2_RE: [REVSHELL_DUP2_SRC, ""], _REVSHELL_SHELL_RE: [REVSHELL_SHELL_SRC, ""],
+    _REVSHELL_LINE_RE: [REVSHELL_LINE_SRC, ""], _REVSHELL_JS_SPAWN_RE: [REVSHELL_JS_SPAWN_SRC, ""],
+    _REVSHELL_JS_PIPE_RE: [REVSHELL_JS_PIPE_SRC, ""], _REVSHELL_JS_NET_RE: [REVSHELL_JS_NET_SRC, ""],
+    _HOST_INFO_RE: [HOST_INFO_SRC, ""], _CAPTURE_SERVICE_RE: [CAPTURE_SERVICE_SRC, "i"], _PY_RUN_RE: [PY_RUN_SRC, ""],
+    _PY_DOC_HEAD_RE: [PY_DOC_HEAD_SRC, ""], _BRACKET_RE: [BRACKET_SRC, ""], _SPACE_TAB_RE: [SPACE_TAB_SRC, ""],
+    _SELF_READ_RE: [SELF_READ_SRC, ""], _SIBLING_DATA_RE: [SIBLING_DATA_SRC, ""], _SELF_RUN_RE: [SELF_RUN_SRC, ""],
+    _SELF_READ_ASSIGN_RE: [SELF_READ_ASSIGN_SRC, ""], _IDENT_TOKEN_RE: [IDENT_TOKEN_SRC, ""],
+    _PERSIST_AGENT_RE: [PERSIST_AGENT_SRC, ""], _PERSIST_AGENT_SPLIT_RE: [PERSIST_AGENT_SPLIT_SRC, ""],
+    _PERSIST_WORKFLOW_RE: [PERSIST_WORKFLOW_SRC, ""], _PERSIST_EXT_DIR_RE: [PERSIST_EXT_DIR_SRC, ""],
+    _PERSIST_WRITE_RE: [PERSIST_WRITE_SRC, ""], _PERSIST_SHELL_WRITE_RE: [PERSIST_SHELL_WRITE_SRC, ""],
+    _PERSIST_EXT_INSTALL_RE: [PERSIST_EXT_INSTALL_SRC, ""], _PERSIST_EXT_CLI_RE: [PERSIST_EXT_CLI_SRC, ""],
+    _PERSIST_RUNNER_RE: [PERSIST_RUNNER_SRC, ""], _PERSIST_RUNNER_CONFIG_RE: [PERSIST_RUNNER_CONFIG_SRC, ""],
+    _PERSIST_RUNNER_ARG_RE: [PERSIST_RUNNER_ARG_SRC, ""], _BUN_RELEASES_RE: [BUN_RELEASES_SRC, "i"],
+    _SECRETS_DUMP_RE: [SECRETS_DUMP_SRC, "i"],
     ...RECEIVED_TWINS,
   },
   sets: {
@@ -807,9 +1422,16 @@ export const PY_TWINS = {
     _DL_PY_NET_MODULES: DL_PY_NET_MODULES,
     _DL_NOT_NAMES: DL_NOT_NAMES, _DL_PREFIX_CHARS: DL_PREFIX_CHARS, _DL_DEFINING: DL_DEFINING,
     _DL_CALLEE_CHARS: DL_CALLEE_CHARS,
+    _STAGER_RUN_NEEDLES: STAGER_RUN_NEEDLES, _STAGER_NET_NEEDLES: STAGER_NET_NEEDLES,
+    _STRONG_IMPORT_REASONS: STRONG_IMPORT_REASONS, _PY_JOINS: [...PY_JOINS],
   },
-  maps: Object.fromEntries([["_WRAPPER_VALUE_OPTIONS", WRAPPER_VALUE_OPTIONS],
+  maps: Object.fromEntries([["_PERSIST_AGENT_PAIRS", PERSIST_AGENT_PAIRS], ["_WRAPPER_VALUE_OPTIONS", WRAPPER_VALUE_OPTIONS],
     ["_WRAPPER_CHDIR_OPTIONS", WRAPPER_CHDIR_OPTIONS], ["_WRAPPER_COMMAND_OPTIONS", WRAPPER_COMMAND_OPTIONS]]
     .map(([name, map]) => [name, Object.fromEntries([...map].map(([k, v]) => [k, [...v].sort()]))])),
-  limits: { HOOK_MAX_CHARS, HOOK_MAX_COMMANDS, HOOK_MAX_TARGETS, HOOK_MAX_PATH, ...DL_LIMITS, _DL_ALIAS_MAX: DL_ALIAS_MAX },
+  limits: { HOOK_MAX_CHARS, HOOK_MAX_COMMANDS, HOOK_MAX_TARGETS, HOOK_MAX_PATH, ...DL_LIMITS, _DL_ALIAS_MAX: DL_ALIAS_MAX,
+    _PS_ENCODED_MAX: PS_ENCODED_MAX, _STAGER_MIN: STAGER_MIN, _STAGER_MAX_LITERALS: STAGER_MAX_LITERALS,
+    _PS_EXEC_BACK: PS_EXEC_BACK, _PS_EXEC_MAX_NAMES: PS_EXEC_MAX_NAMES, _SELF_READ_PASSES: SELF_READ_PASSES,
+    _SELF_READ_MAX_CALLS: SELF_READ_MAX_CALLS, _SELF_READ_ARG_SPAN: SELF_READ_ARG_SPAN,
+    _SELF_READ_MAX_ASSIGNS: SELF_READ_MAX_ASSIGNS, _LITERAL_SPANS_MAX: LITERAL_SPANS_MAX,
+    _PERSIST_MAX_LINES: PERSIST_MAX_LINES },
 };

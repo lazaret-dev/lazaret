@@ -75,7 +75,8 @@ parity test excludes them (`_python_only` in `test_js_parity.py`):
 1. **The AST half of the interprocedural flow engine** — `flow.py`'s Python
    analysis is AST-based and has no JS twin; its `X-*` findings and `Q-FLOW-*`
    coverage notes on Python files are Python-only. The JavaScript half of the
-   flow engine *is* twinned (`js/src/scanner/flow.js`).
+   flow engine *is* twinned (`js/src/scanner/flow.js` and `jsflow.js`, on the
+   reader `js/src/lib/jsparse.js`).
 2. **The cross-file received-code follower** — `core._cross_file_received_issues`
    (SC-IMPORT-RISK whose message contains "another file of the package"). See §5c.
 
@@ -133,6 +134,7 @@ line yourself.
 ```
 lazaret.scanner    rules, taint, cross-file flow, CLI            (lazaret)
 lazaret.registry   npm / PyPI package auditing                   (lazaret-registry)
+lazaret.registry.guard  pre-install guard for npm/pnpm/pip/uv    (lazaret guard, lazaret-guard)
 lazaret.mcp        MCP server                                    (lazaret-mcp)
 lazaret.scanner.sca_feeds / CVE bundle + SCA                     (lazaret-sca)
 lazaret.pg         Postgres wire-protocol client (stdlib only)
@@ -146,7 +148,18 @@ shared by the CLI and the MCP server. In order it:
 1. **collects** files and manifests (`_collect`, honouring `--deps`, excludes,
    size caps, binary/pyc/symlink/encoding checks);
 2. **scans each file** (`scan_file`) — rules, intra-file taint, SQL sinks,
-   obfuscation/secret detection, per its language;
+   obfuscation/secret detection, per its language — and each config or data
+   file (`scan_config_file`: `.env`, JSON, YAML, TOML, INI, shell, keys,
+   Dockerfiles; `lazaret.scanner.configsecrets` and `js/src/lib/configsecrets.js`)
+   for credentials; config files are not code and count in no code metric. Two
+   kinds get more (0.1.7): an editor's or AI agent's settings that run commands
+   on their own (SC-AUTORUN: `lazaret.scanner.autorun`, a JSON-with-comments
+   reader that keeps lines, and what each file makes its tool run; the commands
+   are followed into the files of the tree they run, read by `tree_reader`, and
+   judged by the install-script test), and GitHub Actions workflows
+   (SC-WORKFLOW-*: `lazaret.scanner.ghworkflow`, an outline reader of the YAML a
+   workflow needs, not a YAML parser); twins `js/src/lib/autorun.js`,
+   `js/src/lib/ghworkflow.js`;
 3. **scans manifests** (`package.json`, `binding.gyp`, …);
 4. **runs `--deps` checks** (`dependency_checks`) — what dependencies run at
    install and import time (install hooks followed to the files they run,
@@ -170,8 +183,23 @@ shared by the CLI and the MCP server. In order it:
 Per-file pattern rules (SQL sinks, obfuscation, secrets, look-alike identifiers,
 hidden Unicode, packed/hex-escape building, `.pth` execution, UTF-7/escape
 codecs, binary artifacts) plus intra-file taint that follows request-shaped
-input (`request.*`, `req.*`, `argv`, decoders) through assignments into sinks
-(SQL, command, code, path traversal, SSRF, open redirect, XSS, SSTI). Comments
+input (`request.*`, `req.*`, `argv`, decoders) through assignments, f-string
+and template-literal fields and multi-line statements into sinks (SQL,
+command, code, path traversal, SSRF, open redirect, XSS — Flask/Django
+responses and a Flask view's return value —, SSTI). Only a sink's injectable
+arguments are read; path guards that leave clear path traversal; a taint is
+scoped to the function body (by indentation) it was made in, and a
+reassignment in the same block replaces it. Containers (`d["k"] = q`,
+`xs.append(q)`) take the taint of what is written into them, by literal key;
+allowlist checks clear a value where it passed. Framework models (0.1.7):
+the parameters a route handler gets from the request are sources — a Flask
+view's URL variables, a FastAPI path operation's parameters (not injected
+dependencies, not types that validate to no free text), a Django view's URL
+parameters. The decisions over a parameter's name, annotation and default
+live in `lazaret.scanner.frameworks` and are shared by the intra-file engine
+(which reads a handler's signature from text: `_route_params`, twinned in
+`js/src/scanner/taint.js`) and the flow engine (which reads it from the AST:
+`_request_params`), so both passes agree on what a handler receives. Comments
 are **lexed, not guessed** — block-comment/string/template state is tracked
 across lines, and a line counts as a comment only if all of it is, and only if
 both readings of ambiguous text agree.
@@ -182,8 +210,22 @@ Whole-program analysis that follows untrusted data through function calls and
 across files — a source in one module reaching a sink in another (`X-*`
 findings name both ends). Python analysis is AST-based (import resolution,
 `self`/`cls`, constructors, a worklist fixpoint composing `f → g → sink`
-chains). JavaScript uses a bounded heuristic over a literal-aware lexer. This is
-the engine whose **Python (AST) half is Python-only** (§2). Custom taint specs
+chains). JavaScript and TypeScript are parsed too (0.1.7): `jsparse.py` reads
+ES2025 with JSX, TypeScript and Flow annotations into ESTree trees with every
+node's line (linear: one token at a time, bounded reads ahead, a
+`JsSyntaxError` past `MAX_DEPTH` nesting), and `jsflow.py` follows them with
+the same model — per-function summaries (parameters → sinks, what the
+function returns) to a fixpoint over the call graph callees first, scopes
+and a flow-insensitive points-to for functions, modules, classes and object
+literals, values followed through locals, closures, containers, callbacks
+and exported variables. It is deterministic: no wall clock — a work budget
+per syntax tree node, a limit per reading of one function and a re-analysis
+cap per function bound it, counted identically in both engines. Its twins
+are `js/src/lib/jsparse.js` and `js/src/scanner/jsflow.js`, held node for
+node and step for step by `test_js_parity_parse.py` and
+`test_js_parity_flow.py` (the latter over seeded generated projects,
+`tests/architecture/jsgen.py`). This is the engine whose **Python (AST)
+half is Python-only** (§2). Custom taint specs
 (`--taint-config`, Semgrep-style) feed both the intra-file and cross-file
 passes. A repository's own `.lazaret-taint.json` is loaded only with
 `--trust-repo-config`, and even then its sanitizers are ignored (a repo could
@@ -215,10 +257,29 @@ twin `js/src/lib/received.js`.
   call's arguments and each argument's value are read for `_DL_ARG_SPAN` (400)
   chars; a minified row (`> _DL_LONG_ROW`) is read once. Result: a text costs
   about one pass whatever it holds.
-- **Severity policy.** Import-time code → SC-IMPORT-RISK (MAJOR). An install
-  script that does it → CRITICAL (`install_script_risk`). Download-to-file is
-  MAJOR only and **never** escalates an install hook (it is also the shape of a
-  legitimate prebuilt-binary installer).
+- **Severity policy.** Import-time code → SC-IMPORT-RISK, MAJOR for what
+  ordinary code can share and CRITICAL (`import_time_severity`, 0.1.7) for
+  the shapes no library needs: code received over the network and run, a
+  download run through a shell, hidden or fetching PowerShell, a stager
+  string, a reverse shell, credentials sent to a named exfiltration service,
+  host information sent to a data-capture service, a download run with the
+  Python interpreter. An install script that does any of it → CRITICAL
+  (`install_script_risk`). Download-to-file is MAJOR only in npm hooks and
+  import-time code (it is also the shape of a legitimate prebuilt-binary
+  installer); in the code pip runs to install an sdist it is CRITICAL.
+  The import-time test reads code, not prose: a file that fails it is read
+  again with its comments (and Python's statement strings — docstrings)
+  blanked in place (`_import_code`; line breaks and character counts kept,
+  so lines and pattern bounds are unchanged), and PowerShell counts there
+  only as an argument of an exec call (`_powershell_run_at`). Both keep the
+  lexer off the hot path: it runs only on a file the raw text already fails.
+  A file that reads its own source (`reads_own_source`: `open(__file__)`,
+  `__doc__`, `readFileSync(__filename)`, a function's `.toString()` …)
+  keeps its prose — the comment may be the payload or the C2 address — and
+  running what it reads back, or what it reads from a data file next to it,
+  is CRITICAL on its own (`runs_own_source_at`; reads, runners and names
+  inside string literals don't count, so a code template in a string is not
+  one).
 
 **The shared spec.** The detector's data (name sets, character sets, limits) and
 **all its patterns** (27 plain regexes + 6 alternation groups, ~57 compiled
@@ -273,6 +334,17 @@ autonomous mode (SC-AGENT-HIJACK — the s1ngularity/Nx attack). A package with 
 (MAJOR). Also: look-alike identifiers (SC-HOMOGLYPH), hidden-Unicode carriers
 (SC-HIDDEN-UNICODE), decode-then-execute (SC-EVAL-DECODE, incl. indirect eval).
 
+Persistence targets (0.1.7): the install-script test also fails on what makes
+an AI agent, an editor or GitHub Actions run something later — writing an
+agent's or editor's auto-run settings, a workflow, an editor extension, a
+self-hosted runner — and on the Bun loader of the 2025-26 worms
+(`core.persistence_reasons`, applied to a hook's own command too); at import
+time only a workflow that dumps every secret counts. In the tree, SC-AUTORUN and
+SC-WORKFLOW-* read the planted files themselves (see the pipeline above): the
+worm's pair (a SessionStart hook and a folder-open task running its loader) is
+CRITICAL because the followed loader fails the install-script test; writing
+the agent's own settings is not held against an agent's hook.
+
 ### e. Registry auditing (`lazaret.registry`) and SCA
 
 `lazaret-registry` fetches and audits an npm/PyPI artifact with the same rule
@@ -280,6 +352,58 @@ pack, discovering install hooks and start-up files and running the import-time
 checks. `lazaret-sca --update-bundle` builds a CVE bundle from public feeds
 (OSV, CISA KEV, EPSS) parsed with `lazaret.safexml`; Lazaret ships no
 vulnerability database of its own. The registry always redacts what it stores.
+
+### f. The install guard (`lazaret.registry.guard`, 0.1.7)
+
+`lazaret guard <tool> <command>` runs the registry auditor's in-memory scan
+(`repo._scan_artifact`, same verdicts) on what a package manager is about to
+install, and stops the install when anything is SUSPICIOUS, can't be checked,
+or is younger than `--min-age`. `lazaret._cli` sends `lazaret guard …` there
+(a package manager after `guard`, or only options when no path named `guard`
+exists) and everything else to the scanner; it sits above the layers.
+
+Two strategies, by what the tool offers:
+
+- **Lock, check, install** (npm, pnpm, uv projects). The tool resolves to a
+  lockfile without installing (`--package-lock-only`, `--lockfile-only`,
+  `uv add --no-sync`, `uv lock`; scripts off). What the lockfile adds on this
+  machine — minus what is installed (npm's and pnpm's hidden lockfiles, the
+  venv's `.dist-info`), minus other platforms (npm-install-checks' os/cpu/libc
+  rules, as `node` reports the machine) — is fetched from the URL the tool will
+  use (the `resolved` URL after npm's replace-registry-host rule, a scoped
+  registry from `<tool> config list --json`) and **verified against the
+  lockfile's digest**: the tool accepts only those bytes, so a verdict on them
+  is a verdict on what gets installed, and a cached verdict can be reused
+  without a download. Blocked: the files the resolution touched are restored
+  from a snapshot (also on Ctrl-C or a crash). Not blocked: the user's command
+  runs unchanged (for `uv sync` minus `--upgrade`, already in the lockfile),
+  then the installed set is diffed against what was checked or noted, and
+  anything else fails the run.
+- **A local index** (pip, uv pip). There is no lockfile to read first, so the
+  tool is pointed (`PIP_INDEX_URL`, `UV_DEFAULT_INDEX`) at an HTTP server on
+  127.0.0.1 that relays PyPI's JSON simple API: pages are rewritten to serve
+  files by number, files younger than the cutoff are dropped from them, and a
+  file is fetched, hash-checked against the page, scanned and spooled before it
+  is served (403 when blocked). Since sdists are built during resolution, this
+  is what keeps a malicious `setup.py` from running at all. The dry run (pip's
+  `--report`, uv's `--dry-run` plan) is scanned first so the report comes
+  before any install.
+
+Age: npm and pnpm are given the cutoff themselves (`npm_config_before`,
+`npm_config_minimum_release_age`) so they resolve to older releases instead of
+failing. npm always gets a `before` — the run's start time when there is no
+cutoff — which closes the window between the check and the install. What a
+lockfile already pins is aged by the guard: the tarball's `Last-Modified`
+(a registry sets it when the version is published), confirmed against the
+packument's `time` only when it looks recent; uv.lock's `upload-time`, else
+PyPI's JSON API.
+
+Failure is closed: a package that can't be fetched, verified or scanned
+blocks (a scan crash is a `ScanError`, never a verdict); only a file over the
+200 MiB download cap is INCOMPLETE. The cache (`VerdictCache`) keys verdicts by
+ecosystem, name, version and digest and is discarded when `ENGINE_VERSION`
+changes. Scans run in `spawn` worker processes (`--jobs`), downloads in
+threads; a stuck worker is terminated at exit.
 
 ---
 
@@ -390,10 +514,14 @@ constraint — it overflows its backtrack stack where CPython merely slows.
 | Path | What |
 |---|---|
 | `python/src/lazaret/scanner/core.py` | The engine: rules, taint, `scan_project`, `--deps`, received-code detector, cross-file follower |
-| `python/src/lazaret/scanner/flow.py` | Interprocedural cross-file taint (Python AST + JS heuristic) |
+| `python/src/lazaret/scanner/flow.py` | Interprocedural cross-file taint (Python AST; builds the findings of the JS pass) |
+| `python/src/lazaret/scanner/jsparse.py`, `jsflow.py` | The JavaScript / TypeScript reader and the JS cross-file pass (twins: `js/src/lib/jsparse.js`, `js/src/scanner/jsflow.js`) |
+| `python/src/lazaret/scanner/autorun.py`, `ghworkflow.py` | Editor and AI-agent settings that run commands (SC-AUTORUN) and the workflows the Shai-Hulud worms planted (SC-WORKFLOW-*); twins `js/src/lib/autorun.js`, `ghworkflow.js` |
+| `python/src/lazaret/scanner/frameworks.py` | Which route handler parameters Flask / FastAPI / Django fill from the request (shared by both taint passes; twinned in `js/src/scanner/taint.js`) |
 | `python/src/lazaret/scanner/received_spec.json` | **Source of truth** for the received-code detector's data + patterns |
 | `python/src/lazaret/scanner/sca_feeds.py` | CVE bundle build (OSV/KEV/EPSS) |
 | `python/src/lazaret/{registry,mcp,pg,safexml}/` | Registry auditor, MCP server, Postgres client, safe XML |
+| `python/src/lazaret/registry/guard.py`, `python/src/lazaret/_cli.py` | The install guard (`lazaret guard`) and the `lazaret` command's dispatch |
 | `js/src/lib/received.js` | Twin of the received-code detector |
 | `js/src/lib/received-spec.json` | Synced copy of the spec (do not edit by hand) |
 | `js/src/lib/hooks.js`, `js/src/scanner/flow.js`, `js/src/index.js` | Install-hook checks, flow twin, npm CLI |
@@ -434,7 +562,19 @@ only)", "Download to a file, then run the file").
 
 ---
 
-## 12. Current state (0.1.6) and backlog
+## 12. Current state (0.1.7) and backlog
+
+**Shipped in 0.1.7** (the September 2026 audit's P0s, and more): config and
+data files checked for credentials; taint through f-strings and template
+literals, Flask / Django / FastAPI / Express route models, containers and
+allowlists; the JavaScript and TypeScript cross-file pass on a real parser;
+PyPI install-script blind spots closed and strong import-time signals made
+SUSPICIOUS; SC-AUTORUN and SC-WORKFLOW-* for the persistence the 2025-26 npm
+worms used; uv.lock, pylock.toml and bun.lock in SCA; budgeted feed
+decompression and MCP roots by default; and `lazaret guard`. On the audit's
+benchmark: 66% of 516 real malicious releases SUSPICIOUS (was 45%) with the
+same 0.7% of 429 popular packages; 95% of planted secrets (was 19%);
+OWASP BenchmarkPython +0.22 (was +0.10); SCA 100% on eight lockfile formats.
 
 **Shipped through 0.1.6:** the full received-code arc — the three sink families
 (deserialization/CWE-502, dynamic import, download-to-file) plus aliases and
@@ -455,6 +595,13 @@ comprehensive, so weigh marginal value against FP risk):
   built once).
 - *Quality:* an adversarial pass on the cross-file follower (evasion + crafted
   FP), and a durable home for this backlog (a `BACKLOG.md` or issues).
+- *Guard:* registries that need credentials (read them from the tool's own
+  settings, for that host only), yarn and Bun, `uv run` / `uvx`; the scan of a
+  very large tarball (`next`, 42 MB) dominates a first install.
+- *From the audit (P1/P2):* a GitHub Action and pre-commit hook, a public
+  nightly benchmark, per-rule docs, a coverage gate and parser fuzzing in CI,
+  optional live secret verification, splitting `core.py`, generating the
+  dashboard's script from `js/src`.
 
 Prefer doing detection extensions **reactively** — when a real-world dropper
 uses the pattern — over speculatively. The bar that made this tool good is the

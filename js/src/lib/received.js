@@ -68,13 +68,13 @@ function* finditer(pair, row, pos = 0, endpos = null) {
 const firstMatch = (pair, row) => { for (const m of finditer(pair, row)) return m; return null; };
 
 /** The UTF-16 index `n` code points after index i (at most the end). */
-function cpForward(s, i, n) {
+export function cpForward(s, i, n) {
   for (let k = 0; k < n && i < s.length; k++) i = nextCp(s, i);
   return i;
 }
 
 /** The UTF-16 index `n` code points before index i (at least 0). */
-function cpBack(s, i, n) {
+export function cpBack(s, i, n) {
   for (let k = 0; k < n && i > 0; k++) {
     const c = s.charCodeAt(i - 1);
     i -= c >= 0xdc00 && c <= 0xdfff && i >= 2 && (s.charCodeAt(i - 2) & 0xfc00) === 0xd800 ? 2 : 1;

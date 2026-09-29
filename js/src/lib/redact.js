@@ -227,8 +227,12 @@ export class SecretLiterals {
 // scans (the Python engine's scan context): PEM block lines, the file's
 // entropy literals, and a per-line cache of redacted text.
 const CONTEXTS = new WeakMap();
-export function registerScanContext(lines, skipRe) {
-  const ctx = { pem: null, secrets: null, cache: new Map(), lines, skipRe };
+/**
+ * `values`: a further per-line redaction applied first — a config file's
+ * credential-named values (configsecrets.redactConfigValues; core._ConfigCtx).
+ */
+export function registerScanContext(lines, skipRe, values = null) {
+  const ctx = { pem: null, secrets: null, cache: new Map(), lines, skipRe, values };
   CONTEXTS.set(lines, ctx);
   return ctx;
 }
@@ -244,7 +248,8 @@ export function contextRedacted(ctx, k) {
   let r = ctx.cache.get(k);
   if (r === undefined) {
     ctx.pem ??= pemBlockLines(ctx.lines);
-    r = ctx.pem.has(k) ? REDACTED : contextSecrets(ctx).redact(redactContextLine(ctx.lines[k]));
+    const line = ctx.values ? ctx.values(ctx.lines[k]) : ctx.lines[k];
+    r = ctx.pem.has(k) ? REDACTED : contextSecrets(ctx).redact(redactContextLine(line));
     ctx.cache.set(k, r);
   }
   return r;

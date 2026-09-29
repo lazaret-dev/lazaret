@@ -74,7 +74,7 @@ class _EngineState:
             dict(lazaret_flow._EXTRA_PARTIAL_PY),
             lazaret_flow._JS_SOURCE_RE,
             list(lazaret_flow._JS_SINKS),
-            lazaret_flow._JS_FULL_SAN_RE,
+            set(lazaret_flow._JS_FULL_SAN),
             dict(lazaret_flow._JS_PARTIAL_SAN),
         )
 
@@ -97,7 +97,8 @@ class _EngineState:
         lazaret_flow._EXTRA_PARTIAL_PY.update(epp)
         lazaret_flow._JS_SOURCE_RE = jsrc
         lazaret_flow._JS_SINKS[:] = jsinks
-        lazaret_flow._JS_FULL_SAN_RE = jfull
+        lazaret_flow._JS_FULL_SAN.clear()
+        lazaret_flow._JS_FULL_SAN.update(jfull)
         lazaret_flow._JS_PARTIAL_SAN.clear()
         lazaret_flow._JS_PARTIAL_SAN.update(jpart)
 
@@ -237,10 +238,10 @@ class TestTaintConfigBadRegex(unittest.TestCase):
                         self.warns)
 
     def test_flow_javascript_sanitizer_full_non_str_warns_not_raises(self):
-        before = lazaret_flow._JS_FULL_SAN_RE.pattern
+        before = set(lazaret_flow._JS_FULL_SAN)
         lazaret_flow.configure({"javascript": {"sanitizers": {"full": [5]}}},
                                  on_warn=self.warns.append)
-        self.assertEqual(lazaret_flow._JS_FULL_SAN_RE.pattern, before)
+        self.assertEqual(lazaret_flow._JS_FULL_SAN, before)
         self.assertTrue(any("not a valid sanitizer name" in w for w in self.warns),
                         self.warns)
 

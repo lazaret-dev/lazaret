@@ -51,7 +51,7 @@ class _EngineState:
                       list(lazaret_flow._PY_SOURCE_EXTRA), list(lazaret_flow._EXTRA_PY_SINKS),
                       set(lazaret_flow.FULL_SANITIZERS_PY), dict(lazaret_flow._EXTRA_PARTIAL_PY),
                       lazaret_flow._JS_SOURCE_RE, list(lazaret_flow._JS_SINKS),
-                      lazaret_flow._JS_FULL_SAN_RE, dict(lazaret_flow._JS_PARTIAL_SAN))
+                      set(lazaret_flow._JS_FULL_SAN), dict(lazaret_flow._JS_PARTIAL_SAN))
 
     def restore(self):
         (srcs, sinks, full, part, pse, eps, fsp, epp, jsrc, jsinks, jfull, jpart) = self.saved
@@ -71,7 +71,8 @@ class _EngineState:
         lazaret_flow._EXTRA_PARTIAL_PY.update(epp)
         lazaret_flow._JS_SOURCE_RE = jsrc
         lazaret_flow._JS_SINKS[:] = jsinks
-        lazaret_flow._JS_FULL_SAN_RE = jfull
+        lazaret_flow._JS_FULL_SAN.clear()
+        lazaret_flow._JS_FULL_SAN.update(jfull)
         lazaret_flow._JS_PARTIAL_SAN.clear()
         lazaret_flow._JS_PARTIAL_SAN.update(jpart)
 

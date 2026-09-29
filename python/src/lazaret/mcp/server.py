@@ -16,9 +16,12 @@ answering ping and honors notifications/cancelled while a scan runs.
 
 Environment:
     LAZARET_DB                registry state DB (see lazaret-registry --db)
-    LAZARET_MCP_ROOTS         os.pathsep-separated directories; when set, a
-                              path outside them is a tool error (set but
-                              empty: every tool call is refused)
+    LAZARET_MCP_ROOTS         os.pathsep-separated directories the path tools
+                              (scan_directory, scan_files, quality_gate) may
+                              read; a path outside them is a tool error. Unset:
+                              the roots the MCP client shares (roots/list), and
+                              if it shares none, every path is refused. Set but
+                              empty: every tool call is refused.
     LAZARET_MCP_MAX_FILES     files one tool call may scan   (default 20000)
     LAZARET_MCP_MAX_BYTES     source bytes one call may read (default 200000000)
     LAZARET_MCP_MAX_SECONDS   wall-clock budget per call     (default 300)
@@ -39,6 +42,8 @@ import stat
 import sys
 import threading
 import time
+import urllib.parse
+import urllib.request
 
 import lazaret as _lazaret_package
 from lazaret.scanner import core as lazaret  # noqa: E402
@@ -95,8 +100,11 @@ TOOLS = [
     {
         "name": "scan_files",
         "description": ("Scan specific Python/JavaScript files (e.g. only the files changed in a "
-                        "diff). Returns issues per file. Use after editing code to verify the "
-                        "changes introduce no new problems."),
+                        "diff), and config files (.env, JSON, YAML, TOML, INI, shell, keys, "
+                        "Dockerfiles), which are checked for credentials — and, for editor and AI-agent "
+                        "settings and GitHub Actions workflows, for the commands they run automatically. "
+                        "Returns issues per file. Use after editing to verify the changes introduce no "
+                        "new problems."),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -196,9 +204,11 @@ def _env_number(name, default, kind=int):
 
 def allowed_roots():
     """Real paths of the LAZARET_MCP_ROOTS entries; [] when the variable is
-    not set (no restriction). A variable that is set but names no directory
-    ("", ":", " ") raises ValueError: whoever set it meant to restrict the
-    server, and an empty list must never mean "every path"."""
+    not set (no restriction for a direct, in-process call: the MCP server
+    itself never runs a path tool unrestricted, see Server.resolve_roots).
+    A variable that is set but names no directory ("", ":", " ") raises
+    ValueError: whoever set it meant to restrict the server, and an empty
+    list must never mean "every path"."""
     raw = os.environ.get("LAZARET_MCP_ROOTS")
     if raw is None:
         return []
@@ -207,22 +217,67 @@ def allowed_roots():
     if not roots:
         raise ValueError(f"LAZARET_MCP_ROOTS is set but names no directory ({raw!r}); "
                          "refusing to run tools. List the allowed directories, or unset "
-                         "it for no restriction.")
+                         "it to use the roots your MCP client shares.")
     return roots
+
+
+class RootsRefused:
+    """The server has no roots to allow: every path is refused, with a
+    reason that says how to fix it. Tools that take no path still run."""
+
+    def __init__(self, reason):
+        self.reason = reason
+
+
+ROOTS_HELP = ("Set LAZARET_MCP_ROOTS to the directories Lazaret may scan (separated by "
+              f"'{os.pathsep}'), or use an MCP client that shares its workspace roots.")
+
+
+def root_path_of_uri(uri):
+    """Real path of an MCP root's file: URI; None for any other URI, a
+    relative path, or one too long to be a directory name."""
+    if not isinstance(uri, str) or len(uri) > 8192:
+        return None
+    try:
+        parts = urllib.parse.urlsplit(uri)
+        if parts.scheme.lower() != "file":
+            return None
+        if parts.netloc.lower() in ("", "localhost"):
+            path = urllib.request.url2pathname(parts.path)
+        elif os.name == "nt":                     # file://server/share -> \\server\share
+            path = "\\\\" + parts.netloc + urllib.request.url2pathname(parts.path)
+        else:
+            return None
+    except (OSError, ValueError):                 # an unclosed [ in the host, a bad drive
+        return None
+    if not path or "\x00" in path or not os.path.isabs(path):
+        return None
+    return os.path.normcase(os.path.realpath(path))
 
 
 class ToolContext:
     """What one tool call may use. Handlers call check() between files.
     Raises ValueError when LAZARET_MCP_ROOTS is misconfigured (see
-    allowed_roots), so no tool runs without the restriction it asked for."""
+    allowed_roots), so no tool runs without the restriction it asked for.
 
-    def __init__(self, cancel_event=None):
+    `roots_resolver` (the server passes one) decides the allowed roots the
+    first time a path is checked, so a tool that takes no path never waits
+    on it; it returns a list of real paths or a RootsRefused. Without one
+    (a direct, in-process call), LAZARET_MCP_ROOTS applies as before and an
+    unset variable means no restriction."""
+
+    def __init__(self, cancel_event=None, roots_resolver=None):
         self.cancel_event = cancel_event if cancel_event is not None else threading.Event()
         self.max_files = _env_number("LAZARET_MCP_MAX_FILES", 20_000)
         self.max_bytes = _env_number("LAZARET_MCP_MAX_BYTES", 200_000_000)
         self.max_seconds = _env_number("LAZARET_MCP_MAX_SECONDS", 300.0, float)
         self.deadline = time.monotonic() + self.max_seconds
         self.roots = allowed_roots()
+        self.roots_source = "LAZARET_MCP_ROOTS"
+        self._resolver = None
+        if roots_resolver is not None and os.environ.get("LAZARET_MCP_ROOTS") is None:
+            self._resolver = roots_resolver
+            self.roots = None
 
     def cancelled(self):
         return self.cancel_event.is_set()
@@ -234,20 +289,32 @@ class ToolContext:
     def expired(self):
         return time.monotonic() > self.deadline
 
+    def allowed(self):
+        """The roots this call may use: a list of real paths ([] = no
+        restriction, direct calls only) or a RootsRefused."""
+        if self._resolver is not None:
+            resolver, self._resolver = self._resolver, None
+            self.roots = resolver(self)
+            self.roots_source = "the roots your MCP client shared"
+        return self.roots
+
     def check_path(self, path):
-        """Tool error for a path outside LAZARET_MCP_ROOTS (symlinks resolved)."""
+        """Tool error for a path outside the allowed roots (symlinks resolved)."""
         if not isinstance(path, str) or not path or "\x00" in path:
             raise ValueError("path must be a non-empty string")
-        if not self.roots:
+        roots = self.allowed()
+        if isinstance(roots, RootsRefused):
+            raise ValueError(f"no directory may be scanned: {roots.reason} {ROOTS_HELP}")
+        if not roots:
             return
         real = os.path.normcase(os.path.realpath(path))
-        for root in self.roots:
+        for root in roots:
             try:
                 if os.path.commonpath([real, root]) == root:
                     return
             except ValueError:            # different drives
                 continue
-        raise ValueError(f"path is outside the allowed roots (LAZARET_MCP_ROOTS): {path}")
+        raise ValueError(f"path is outside the allowed roots ({self.roots_source}): {path}")
 
 
 _LOCAL = threading.local()
@@ -487,8 +554,11 @@ def tool_scan_files(args):
             break
         ext = os.path.splitext(p)[1].lower()
         lang = lazaret.EXTS.get(ext)
+        if lang is None and lazaret.configsecrets.is_config_file(os.path.basename(p)):
+            lang = "cfg"                 # a config or data file: credentials only
         if lang is None:
-            out[p] = {"error": f"Unsupported extension {ext} (need .py/.js/.ts/.jsx/.tsx)"}
+            out[p] = {"error": f"Unsupported extension {ext} (need .py/.js/.ts/.jsx/.tsx, "
+                               "or a config file such as .env, .json or .yaml)"}
             continue
         try:
             st = os.stat(p)
@@ -502,7 +572,7 @@ def tool_scan_files(args):
             not_read(p, _not_a_regular_file(st.st_mode))
             continue
         size = st.st_size
-        cap = lazaret.SOURCE_SIZE_CAP
+        cap = lazaret.configsecrets.CONFIG_SCAN_CAP if lang == "cfg" else lazaret.SOURCE_SIZE_CAP
         if size > cap:
             ti = lazaret.truncated_issue(p, f"{size:,} bytes exceeds the {cap:,}-byte file limit")
             all_issues.append(ti)
@@ -528,8 +598,12 @@ def tool_scan_files(args):
         read_bytes += len(data)
         # BOM / UTF-16 / PEP 263 coding cookie (UTF-7 → SC-UTF7), like the
         # registry: scan what the interpreter will read.
-        content, extra = lazaret.decode_member(p, data)
-        issues = extra + lazaret.scan_file(p, content, lang)
+        if lang == "cfg":
+            content = lazaret.decode_source(data)[0]
+            issues = lazaret.scan_config_file(p, content)
+        else:
+            content, extra = lazaret.decode_member(p, data)
+            issues = extra + lazaret.scan_file(p, content, lang)
         files.append({"path": p, "content": content, "lang": lang})
         all_issues.extend(issues)
         out[p] = {"issueCount": len(issues), "issues": [slim(i) for i in issues]}
@@ -895,21 +969,138 @@ def _id_key(msg_id):
     return json.dumps(msg_id)
 
 
+# How long a path tool waits for the client's answer to roots/list.
+ROOTS_WAIT_SECONDS = 10.0
+# Most roots one roots/list answer may name.
+MAX_CLIENT_ROOTS = 1000
+
+
 class Server:
     """Reader loop on the main thread, tool calls on one worker thread.
 
     The reader answers initialize / ping / tools/list itself and queues
     tools/call, so a long scan never blocks ping, and notifications/cancelled
     reaches the running call (its cancel flag is checked between files). Per
-    MCP, a cancelled request gets no response."""
+    MCP, a cancelled request gets no response.
+
+    Allowed roots (audit I1). A tool that takes a path (scan_directory,
+    scan_files, quality_gate) may read only inside:
+      1. LAZARET_MCP_ROOTS, when it is set;
+      2. otherwise the roots the client shares, when it declares the MCP
+         `roots` capability: the server asks with roots/list after
+         notifications/initialized (or at the first path it checks), asks
+         again on notifications/roots/list_changed, and a call waits up to
+         ROOTS_WAIT_SECONDS for the answer;
+      3. otherwise nothing: the call is a tool error that says how to allow
+         a directory.
+    The server never reads an unrestricted filesystem on an agent's behalf.
+    Roots is deprecated as of MCP 2026-07-28 (SEP-2577, kept for at least
+    12 months) in favour of server configuration, i.e. LAZARET_MCP_ROOTS;
+    this server negotiates 2025-11-25 and earlier, where it is current."""
 
     def __init__(self):
         self.jobs = queue.Queue()
         self.lock = threading.Lock()
         self.pending = {}                       # id key -> cancel Event
+        # the client's roots (all guarded by roots_lock)
+        self.roots_lock = threading.Lock()
+        self.client_roots_supported = False     # declared `roots` at initialize
+        self.client_roots = None                # latest answer: real paths; None = none yet
+        self.client_roots_error = None          # why the latest answer allows nothing
+        self.roots_request_id = None            # roots/list awaiting its answer
+        self.roots_ready = threading.Event()    # set once the latest request is answered
+        self.roots_overdue = False              # a call already waited the full time for it
+        self.roots_seq = 0
         self.worker = threading.Thread(target=self._work, name="lazaret-mcp-tools",
                                        daemon=True)
         self.worker.start()
+
+    # ---- the client's roots ----
+    def client_initialized(self, params):
+        """initialize: note whether the client shares roots (a fresh
+        handshake forgets any earlier answer)."""
+        caps = params.get("capabilities")
+        with self.roots_lock:
+            self.client_roots_supported = isinstance(caps, dict) and \
+                isinstance(caps.get("roots"), dict)
+            self.client_roots = self.client_roots_error = self.roots_request_id = None
+            self.roots_ready.clear()
+            self.roots_overdue = False
+
+    def roots_wanted(self):
+        """True when the answer to roots/list would decide anything."""
+        return self.client_roots_supported and os.environ.get("LAZARET_MCP_ROOTS") is None
+
+    def request_roots(self):
+        """Ask the client for its roots (roots/list). The answer arrives on
+        the reader thread (response()); until then a path tool waits."""
+        with self.roots_lock:
+            self.roots_seq += 1
+            self.roots_request_id = f"lazaret-roots-{self.roots_seq}"
+            self.roots_ready.clear()
+            self.roots_overdue = False
+            msg = {"jsonrpc": "2.0", "id": self.roots_request_id, "method": "roots/list"}
+        stream = _OUT if _OUT is not None else sys.stdout
+        try:
+            with _WRITE_LOCK:
+                stream.write(json.dumps(msg) + "\n")
+                stream.flush()
+        except (OSError, ValueError):           # the client has gone: calls time out
+            pass
+
+    def response(self, frame):
+        """A response to a request this server sent. Only the answer to the
+        latest roots/list counts; anything else is ignored. A response is
+        never answered."""
+        with self.roots_lock:
+            if self.roots_request_id is None or frame.get("id") != self.roots_request_id:
+                return
+            self.roots_request_id = None
+            result = frame.get("result")
+            roots = result.get("roots") if isinstance(result, dict) else None
+            if "error" in frame or not isinstance(roots, list):
+                self.client_roots = []
+                self.client_roots_error = ("LAZARET_MCP_ROOTS is not set and the MCP client "
+                                           "answered roots/list with an error.")
+            else:
+                paths = []
+                for root in roots[:MAX_CLIENT_ROOTS]:
+                    path = root_path_of_uri(root.get("uri") if isinstance(root, dict) else None)
+                    if path is not None and path not in paths:
+                        paths.append(path)
+                self.client_roots = paths
+                self.client_roots_error = None if paths else (
+                    "LAZARET_MCP_ROOTS is not set and the MCP client shared no file: roots.")
+            self.roots_ready.set()
+
+    def resolve_roots(self, ctx):
+        """The roots one tool call may use when LAZARET_MCP_ROOTS is unset (the
+        ToolContext resolver): the client's latest answer, or a RootsRefused.
+        Waits for an answer that is on its way; once one call has waited the
+        full time in vain, later calls stop waiting until the client answers
+        or its roots change."""
+        with self.roots_lock:
+            if not self.client_roots_supported:
+                return RootsRefused("LAZARET_MCP_ROOTS is not set and the MCP client does not "
+                                    "share its workspace roots.")
+            ask = self.client_roots is None and self.roots_request_id is None
+            wait = not self.roots_overdue
+        if ask:                                  # no notifications/initialized came
+            self.request_roots()
+        if wait:
+            deadline = time.monotonic() + ROOTS_WAIT_SECONDS
+            while not self.roots_ready.wait(0.05):
+                ctx.check()                      # a cancelled call stops waiting
+                if time.monotonic() >= deadline:
+                    break
+        with self.roots_lock:
+            if not self.roots_ready.is_set():
+                self.roots_overdue = True
+                return RootsRefused("LAZARET_MCP_ROOTS is not set and the MCP client did not "
+                                    f"answer roots/list within {ROOTS_WAIT_SECONDS:g} s.")
+            if not self.client_roots:
+                return RootsRefused(self.client_roots_error)
+            return list(self.client_roots)
 
     # ---- worker ----
     def _work(self):
@@ -924,7 +1115,7 @@ class Server:
                 try:
                     # a misconfigured LAZARET_MCP_ROOTS is a tool error for every
                     # tool (ToolContext raises), never an unrestricted call
-                    _LOCAL.ctx = ToolContext(event)
+                    _LOCAL.ctx = ToolContext(event, roots_resolver=self.resolve_roots)
                     result = handler(args)
                 except ToolCancelled:
                     continue
@@ -996,6 +1187,9 @@ class Server:
             # not JSON / too deep: -32700 with id null (the id is unreadable)
             reply(None, error=frame_error)
             return
+        if isinstance(req, dict) and "method" not in req and ("result" in req or "error" in req):
+            self.response(req)          # the client answering roots/list: never replied to
+            return
         method, msg_id, params, err, is_notification = _validated_request(req)
         if err is not None:
             reply(msg_id, error=err)
@@ -1020,12 +1214,16 @@ class Server:
             request_id = params.get("requestId")
             if isinstance(request_id, (str, int)) and not isinstance(request_id, bool):
                 self.cancel(request_id)
+        elif method in ("notifications/initialized", "notifications/roots/list_changed"):
+            if self.roots_wanted():
+                self.request_roots()
 
     def request(self, method, msg_id, params):
         if method == "initialize":
             # params is a validated dict here — the `{"method":"initialize",
             # "params":null}` frame of the G5 PoC used to crash on
             # params.get(...) BEFORE any try block.
+            self.client_initialized(params)
             reply(msg_id, {
                 "protocolVersion": negotiate_protocol(params.get("protocolVersion")),
                 "capabilities": {"tools": {}},

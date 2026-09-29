@@ -4,11 +4,11 @@ The brace pass counted braces inside strings, comments, regex and template
 literals (`const b = "}"; exec(cmd);` closed the function early and hid the
 sink; `console.log("{" + cmd)` made a function swallow the next one), and the
 200-character window after a sink matched a parameter used in a LATER
-statement. flow._js_mask() now blanks literal/comment content before any
-brace or regex pass, and sink arguments are the sink call's balanced
-argument list. Inert fixtures only.
+statement. The pass first blanked literals and comments; since 0.1.7 it
+reads parsed trees (lazaret.scanner.jsparse), where a sink's arguments are
+its call's own arguments and a brace in a literal is part of the literal.
+These cases stay as regression tests. Inert fixtures only.
 """
-import time
 import unittest
 
 from lazaret.scanner import flow
@@ -76,33 +76,6 @@ class SinkArgumentScope(unittest.TestCase):
         self.assertEqual(js_findings(helper, "find(q)"), [("X-SQL", "app.js")])
         safe = "function find(id) {\n  return db.query('SELECT * FROM t WHERE id = ?', [id]);\n}\n"
         self.assertEqual(js_findings(safe, "find(q)"), [])
-
-
-class Lexer(unittest.TestCase):
-    CASES = {
-        'const b = "}"; exec(cmd);': 'const b = " "; exec(cmd);',
-        "a = b / c / d;": "a = b / c / d;",
-        "x = /}[/]\\//g.test(s);": "x = /      /g.test(s);",
-        "return /ab+c/i.exec(s)": "return /    /i.exec(s)",
-        "y = `t ${ {a:1}.a + `in ${z}` } }` + q;": "y = `  ${ {a:1}.a + `   ${z}` }  ` + q;",
-        "// c }\n/* { \n } */ f(x)": "      \n     \n      f(x)",
-        "s = 'it\\'s {';": "s = '       ';",
-        "arr[i] / 2 / x": "arr[i] / 2 / x",
-    }
-
-    def test_mask(self):
-        for src, want in self.CASES.items():
-            with self.subTest(src=src):
-                got = flow._js_mask(src)
-                self.assertEqual(got, want)
-                self.assertEqual(len(got), len(src))
-
-    def test_unterminated_and_hostile_inputs_are_linear(self):
-        for src in ("`" + "${" * 50000 + "x", "'" * 300000, "/" * 300000,
-                    "/*" + "x" * 300000, "`" * 300001):
-            t = time.time()
-            self.assertEqual(len(flow._js_mask(src)), len(src))
-            self.assertLess(time.time() - t, 5)
 
 
 if __name__ == "__main__":

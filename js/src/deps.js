@@ -20,7 +20,7 @@
 import { lstatSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { scanFile } from "./scanner/scan.js";
-import { followHook, installScriptRisk, importTimeRisk, agentHijack, agentHijackInCommand, nodeCandidates, shebangLang,
+import { followHook, treeJoin, persistenceReasons, installScriptRisk, importTimeRisk, importTimeSeverity, agentHijack, agentHijackInCommand, nodeCandidates, shebangLang,
   HOOK_MAX_CHARS, HOOK_MAX_COMMANDS, HOOK_MAX_TARGETS, HOOK_MAX_PATH } from "./lib/hooks.js";
 import { HOOK_COMMANDS, loadManifest, scInstallHookIssue } from "./lib/supplychain.js";
 import { readBounded, truncatedIssue, scanErrorIssue, strerror, normalizeNewlines, encodingIssues,
@@ -35,23 +35,11 @@ const DEP_IMPORT_RISK_WHY = "An installed package's code runs with the applicati
   "or its command runs. Collecting credentials or the whole environment next to a network call is the shape of an " +
   "import-time stealer; SDKs read the few variables they need. A weaker indicator than the same code in an install " +
   "script: the file may have a reason.";
-const DRIVE_RE = /^[A-Za-z]:/;
 const posix = (p) => (sep === "/" ? p : p.split(sep).join("/"));
 const native = (p) => (sep === "/" ? p : p.split("/").join(sep));
 /** n with thousands separators, as Python's f"{n:,}" writes it. */
 const withCommas = (n) => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 const own = (obj, key) => (obj && Object.prototype.hasOwnProperty.call(obj, key) ? obj[key] : undefined);
-
-/** posixpath.normpath of a relative path. */
-function normpath(path) {
-  const comps = [];
-  for (const c of path.split("/")) {
-    if (c === "" || c === ".") continue;
-    if (c !== ".." || !comps.length || comps[comps.length - 1] === "..") comps.push(c);
-    else comps.pop();
-  }
-  return comps.join("/") || ".";
-}
 
 /** posixpath.dirname */
 function dirname(path) {
@@ -63,18 +51,7 @@ function dirname(path) {
 /** A path without its trailing "/" (Python's p.rstrip("/")). */
 const stripSlashes = (p) => p.replace(/\/+$/, "");
 
-/**
- * A hook's `target` joined with the directory `base` (relative to the scan
- * root), normalized; null when it is absolute or leaves the scan root.
- * Twin of core._tree_join.
- */
-export function treeJoin(base, target) {
-  target = target.replaceAll("\\", "/");
-  if (target.startsWith("/") || DRIVE_RE.test(target)) return null;
-  const joined = normpath(`${base || "."}/${target}`);
-  if (joined === "." || joined === ".." || joined.startsWith("../")) return null;
-  return joined;
-}
+export { treeJoin };
 
 /** Python's f"{x:.0%}": half-even on the exact binary value of x * 100. */
 function percent(x) {
@@ -196,7 +173,7 @@ export function dependencyChecks(root, files, manifests, issues, { exclude = [],
   for (const f of files) {
     if (!f.dep || (f.lang !== "js" && f.lang !== "py") || run.has(posix(f.path))) continue;
     let found, agent;
-    try { found = dependencyImportIssue(f.path, f.content); agent = dependencyAgentIssue(f.path, f.content); }
+    try { found = dependencyImportIssue(f.path, f.content, f.lang); agent = dependencyAgentIssue(f.path, f.content); }
     catch (e) { found = scanErrorIssue(f.path, e); agent = null; }
     if (found) out.push(found);
     if (agent) out.push(agent);
@@ -242,6 +219,12 @@ function followDependencyHook(tree, issue, cmd, out, extra, run, truncated) {
   if (direct) {
     const m = tree.manifests.get(posix(manifest));
     if (m) out.push(agentHijackIssue(manifest, issue.line, m.content.split("\n"), direct[0], direct[1]));
+  }
+  const persist = persistenceReasons(cmd);              // the command itself plants something
+  if (persist.length && issue.sev !== "BLOCKER" && issue.sev !== "CRITICAL") {
+    const msg = `Install hook command ${persist.join("; and ")}.`;
+    issue.sev = "CRITICAL";
+    issue.msg = REDACT.on ? redactText(msg) : msg;
   }
   const [targets, complete] = followHook(cmd);
   if (!complete && !truncated.has(manifest)) {
@@ -304,13 +287,14 @@ function readScript(tree, rel, asLang, out, extra) {
   return text;
 }
 
-/** SC-IMPORT-RISK (MAJOR) for a dependency's file that fails the import-time test, else null. */
-export function dependencyImportIssue(path, text) {
-  const [reasons, line] = importTimeRisk(text);
+/** SC-IMPORT-RISK (MAJOR, or CRITICAL: importTimeSeverity) for a dependency's file (`lang` "js" or "py") that fails
+ * the import-time test, else null. Twin of core.dependency_import_issue. */
+export function dependencyImportIssue(path, text, lang = null) {
+  const [reasons, line] = importTimeRisk(text, lang);
   if (!reasons.length) return null;
   const lines = text.split("\n");
   registerScanContext(lines, SECRET_SKIP_RE);     // the file's own entropy literals (core: _Redactor(lines))
-  return mkIssue({ id: "SC-IMPORT-RISK", name: "Risky import-time code", type: "HOTSPOT", sev: "MAJOR",
+  return mkIssue({ id: "SC-IMPORT-RISK", name: "Risky import-time code", type: "HOTSPOT", sev: importTimeSeverity(reasons),
     msg: `Dependency code ${reasons.join("; and ")}.`, why: DEP_IMPORT_RISK_WHY,
     fix: "Read the file: what does it collect, and where does it send it?",
     ref: "CWE-506 · Supply chain" }, path, line, lines);

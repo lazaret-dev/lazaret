@@ -20,7 +20,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { run, scanFile, scanManifest } from "../src/index.js";
-import { lineStrEnd, spanStrEnd, tripleStrEnd, plainStrEnd, jsRegexEnd } from "../src/scanner/lexer.js";
+import { lineStrEnd, spanStrEnd, tripleStrEnd, plainStrEnd, jsRegexEnd } from "../src/lib/lexer.js";
 import { pyRe } from "../src/lib/pycompat.js";
 
 const lineStr = (q) => new RegExp(`${q}(?:[^${q}\\\\\\n]|\\\\[\\s\\S])*${q}?`, "y");

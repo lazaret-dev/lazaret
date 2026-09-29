@@ -92,7 +92,7 @@ class BuildTests(unittest.TestCase):
         for name, module, func in re.findall(r"^(\S+) = ([\w.]+):(\w+)$", ep, re.M):
             with self.subTest(script=name):
                 self.assertTrue(callable(getattr(importlib.import_module(module), func)))
-        self.assertEqual(len(re.findall(r" = ", ep)), 4)
+        self.assertEqual(len(re.findall(r" = ", ep)), 5)
 
     def test_builds_are_reproducible(self):
         with tempfile.TemporaryDirectory() as d:

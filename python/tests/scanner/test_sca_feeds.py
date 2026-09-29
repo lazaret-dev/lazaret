@@ -409,6 +409,128 @@ class EpssTests(unittest.TestCase):
         with self.assertRaises(sca_feeds.FeedError):
             sca_feeds.read_epss(gz(EPSS_TEXT), max_rows=2)
 
+    def test_crlf_lines(self):
+        scores, _ = sca_feeds.read_epss(gz(EPSS_TEXT.replace("\n", "\r\n")))
+        self.assertEqual(scores["CVE-2099-2001"], (0.97, 0.999))
+
+    def test_a_line_with_no_end_is_refused_early(self):
+        # audit L1: a 600 KB gzip held one 600 MB line, which TextIOWrapper
+        # buffered whole before csv's field limit saw it (1.2 GB of memory)
+        buf = io.BytesIO()
+        with gzip.GzipFile(fileobj=buf, mode="wb", mtime=0) as g:
+            g.write(b"cve,epss,percentile\nCVE-2099-0001,")
+            for _ in range(32):
+                g.write(b"A" * (1 << 20))                  # 32 MiB, no newline
+        buf.seek(0)
+        with self.assertRaises(sca_feeds.FeedError) as cm:
+            sca_feeds.read_epss(buf)
+        self.assertIn("line longer than", str(cm.exception))
+
+    def test_decompressed_bytes_are_budgeted(self):
+        lines = list(sca_feeds.bounded_lines(io.BytesIO(b"a,b\nc,d\n"), 100, 10, "x"))
+        self.assertEqual(lines, ["a,b", "c,d"])
+        self.assertEqual(list(sca_feeds.bounded_lines(io.BytesIO(b"a\nb"), 100, 10, "x")), ["a", "b"])
+        with self.assertRaises(sca_feeds.FeedError) as cm:
+            list(sca_feeds.bounded_lines(io.BytesIO(b"abc\n" * 100), 100, 10, "the file"))
+        self.assertIn("decompresses to more than", str(cm.exception))
+        with self.assertRaises(sca_feeds.FeedError):                   # a whole long line in one chunk
+            list(sca_feeds.bounded_lines(io.BytesIO(b"x" * 50 + b"\n"), 1000, 10, "the file"))
+        head, _, body = EPSS_TEXT.partition("cve,epss,percentile\n")
+        text = head + "cve,epss,percentile\n" + body * 50                     # 200 rows
+        saved = sca_feeds.MAX_EPSS_CSV_BYTES
+        sca_feeds.MAX_EPSS_CSV_BYTES = len(text) - 1
+        try:
+            with self.assertRaises(sca_feeds.FeedError):
+                sca_feeds.read_epss(gz(text))
+        finally:
+            sca_feeds.MAX_EPSS_CSV_BYTES = saved
+        self.assertEqual(sca_feeds.read_epss(gz(text))[1]["rows"], 200)
+
+
+def zip_bytes(n):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for i in range(n):
+            zf.writestr("GHSA-%04d.json" % i, json.dumps(ghsa("GHSA-%04d" % i, [], "p%d" % i,
+                                                               [{"introduced": "0"}])))
+    return buf.getvalue()
+
+
+def patch_eocd(data, **fields):
+    """The zip `data` with End Of Central Directory fields replaced."""
+    raw = bytearray(data)
+    pos = raw.rfind(b"PK\x05\x06")
+    names = ["sig", "disk", "cd_disk", "count_disk", "count", "cd_size", "cd_offset", "comment"]
+    values = dict(zip(names, sca_feeds._ZIP_EOCD.unpack_from(raw, pos)))
+    values.update(fields)
+    sca_feeds._ZIP_EOCD.pack_into(raw, pos, *(values[k] for k in names))
+    return bytes(raw)
+
+
+def as_zip64(data, count=None):
+    """The zip `data` rewritten with a ZIP64 end record and locator, the
+    classic fields saturated, as writers do past 65,535 entries."""
+    pos = data.rfind(b"PK\x05\x06")
+    (_s, _d, _cdd, cnt_disk, cnt, cd_size, cd_off, _c) = sca_feeds._ZIP_EOCD.unpack_from(data, pos)
+    count = cnt if count is None else count
+    z64 = sca_feeds._ZIP64_EOCD.pack(b"PK\x06\x06", 44, 45, 45, 0, 0, count, count, cd_size, cd_off)
+    loc = sca_feeds._ZIP64_LOC.pack(b"PK\x06\x07", 0, pos, 1)
+    eocd = sca_feeds._ZIP_EOCD.pack(b"PK\x05\x06", 0, 0, 0xFFFF, 0xFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0)
+    return data[:pos] + z64 + loc + eocd
+
+
+class OsvZipPreflightTests(unittest.TestCase):
+    """The central directory is checked before zipfile parses it (audit L1:
+    zipfile parses every record before read_osv_zip's budget applied)."""
+
+    def records(self, data, **kw):
+        return list(sca_feeds.read_osv_zip(io.BytesIO(data), **kw))
+
+    def test_ordinary_exports_pass(self):
+        data = zip_bytes(5)
+        fh = io.BytesIO(data)
+        sca_feeds.osv_zip_preflight(fh, 5)
+        self.assertEqual(fh.tell(), 0)
+        self.assertEqual(len(self.records(data, max_records=5)), 5)
+        self.assertEqual(len(self.records(as_zip64(data), max_records=5)), 5)   # zipfile reads it too
+        self.assertEqual(len(self.records(data + b"", max_records=5)), 5)
+
+    def test_declared_count_over_budget(self):
+        with self.assertRaises(sca_feeds.FeedError) as cm:
+            self.records(zip_bytes(5), max_records=3)
+        self.assertIn("declares 5 records", str(cm.exception))
+        with self.assertRaises(sca_feeds.FeedError):
+            self.records(as_zip64(zip_bytes(2), count=10 ** 9), max_records=3)
+
+    def test_a_count_that_lies(self):
+        # the count says 1, the directory holds 5 records: zipfile would parse all 5
+        with self.assertRaises(sca_feeds.FeedError) as cm:
+            self.records(patch_eocd(zip_bytes(5), count=1, count_disk=1), max_records=3)
+        self.assertIn("holds more than 3 records", str(cm.exception))
+
+    def test_declared_directory_size_over_budget(self):
+        data = patch_eocd(zip_bytes(2), cd_size=0xFFFFFFF0)
+        with self.assertRaises(sca_feeds.FeedError) as cm:
+            sca_feeds.osv_zip_preflight(io.BytesIO(data), 10, max_cd_bytes=1 << 20)
+        self.assertIn("central directory declares", str(cm.exception))
+
+    def test_signature_split_across_chunks_counts_once(self):
+        # records straddling the 1 MiB read boundary are counted exactly once
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as zf:
+            for i in range(3000):
+                zf.writestr("R%05d-%s.json" % (i, "x" * 300), b"{}")
+        data = buf.getvalue()
+        sca_feeds.osv_zip_preflight(io.BytesIO(data), 3000)
+        with self.assertRaises(sca_feeds.FeedError):
+            sca_feeds.osv_zip_preflight(io.BytesIO(patch_eocd(data, count=1, count_disk=1)), 2999)
+
+    def test_what_it_cannot_read_is_left_to_zipfile(self):
+        for data in (b"", b"not a zip at all", zip_bytes(2)[:-10]):
+            sca_feeds.osv_zip_preflight(io.BytesIO(data), 3)
+            with self.assertRaises(sca_feeds.FeedError):
+                self.records(data)
+
 
 # ---------------------------------------------------------------------------
 # One advisory per vulnerability

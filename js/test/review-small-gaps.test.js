@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { run, scanFile } from "../src/index.js";
 import { hexHiddenName } from "../src/scanner/scan.js";
-import { jsxReading } from "../src/scanner/lexer.js";
+import { jsxReading } from "../src/lib/lexer.js";
 import { EXTS } from "../src/lib/fs.js";
 
 // an MPEG transport stream: a sync byte (0x47) every 188 bytes

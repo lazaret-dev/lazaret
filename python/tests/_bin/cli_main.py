@@ -1,4 +1,6 @@
 """Test launcher: behaves like the installed console script."""
-from lazaret.scanner.core import main
+import sys
 
-main()
+from lazaret._cli import main
+
+sys.exit(main())

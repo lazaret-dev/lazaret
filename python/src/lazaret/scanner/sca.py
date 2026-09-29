@@ -15,7 +15,7 @@ What "inventory" means (both ecosystems, both direct evidence and declared pins)
   npm   - node_modules/**/package.json (nested node_modules too; the INSTALLED truth)
           package-lock.json / npm-shrinkwrap.json (v1 nested dependencies,
           v2/v3 packages incl. node_modules/a/node_modules/b), yarn.lock (v1
-          and berry), pnpm-lock.yaml                   (the LOCKED truth)
+          and berry), pnpm-lock.yaml, bun.lock         (the LOCKED truth)
           package.json dependencies/devDependencies/optionalDependencies,
           incl. workspaces                             (the DECLARED truth)
   pypi  - <venv>/lib/pythonX.Y/site-packages/<pkg>.dist-info/METADATA
@@ -23,7 +23,7 @@ What "inventory" means (both ecosystems, both direct evidence and declared pins)
            the project dir, e.g. .venv, venv, or a passed --site-packages)
           requirements*.txt and requirements/*.txt (following -r/-c),
           pyproject.toml ([project], [dependency-groups], [tool.poetry]),
-          poetry.lock, Pipfile.lock, setup.py
+          poetry.lock, Pipfile.lock, uv.lock, pylock.toml (PEP 751), setup.py
   Several versions of one package are all kept (a nested lodash@4.17.11 is
   not hidden by a top-level lodash@4.17.21). A package whose version cannot
   be read (a range or wildcard specifier, a git/url/file dependency) is kept
@@ -400,13 +400,16 @@ class Inventory(list):
 
     def dedup(self):
         """One entry per (ecosystem, name, version) — several versions of a
-        package are all kept. An unknown-version entry ('' — a range, a
-        wildcard, a git dependency) is dropped when a concrete version of
-        the same package is known from elsewhere."""
+        package are all kept, and one version spelled two ways (3.2 in a
+        lockfile, 3.2.0 in pyproject.toml) counts once: the first entry is
+        kept. An unknown-version entry ('' — a range, a wildcard, a git
+        dependency) is dropped when a concrete version of the same package is
+        known from elsewhere."""
         known = {(e, normalize_pkg(n, e)) for e, n, v, w in self if v}
         seen, out = set(), Inventory()
         for e, n, v, w in self:
-            key = (e, normalize_pkg(n, e), v)
+            same = version_key(v, e) if v else None     # 3.2 == 3.2.0, as matching sees it
+            key = (e, normalize_pkg(n, e), v if same is None else same)
             if key in seen or (not v and (e, key[1]) in known):
                 continue
             seen.add(key)
@@ -795,8 +798,60 @@ def parse_pnpm_lock(text):
     return out
 
 
+# bun.lock is JSON with trailing commas (JSONC). Each pattern matches to the
+# end of the text rather than fail, so a hostile file is read in linear time.
+# In a string, a backslash always takes the next character with it (only one
+# way to read `\\\\`: no backtracking); one left at the very end is taken by
+# the end of the text.
+_JSONC_COMMENT_RE = re.compile(r'"(?:[^"\\]|\\[\s\S])*(?:"|\\?\Z)|//[^\n]*|/\*(?:[^*]|\*(?!/))*(?:\*/|\Z)')
+_JSONC_COMMA_RE = re.compile(r'"(?:[^"\\]|\\[\s\S])*(?:"|\\?\Z)|,(?=\s*[}\]])')
+_BUN_LOCAL = ("workspace:", "link:", "file:", "./", "../", "/")    # first-party: not inventoried
+
+
+def _jsonc_comment(m):
+    t = m.group()
+    if t[0] == '"' or (t[1] == "*" and (len(t) < 4 or not t.endswith("*/"))):
+        return t                          # a string, or an unclosed comment: left to fail
+    return " "
+
+
+def jsonc_loads(text):
+    """JSON with // and /* */ comments and trailing commas (bun.lock). Raises
+    ValueError on anything else."""
+    text = _JSONC_COMMENT_RE.sub(_jsonc_comment, text)
+    text = _JSONC_COMMA_RE.sub(lambda m: m.group() if m.group()[0] == '"' else "", text)
+    return lazaret.json_loads_bounded(text)
+
+
+def parse_bun_lock(text, warn=None):
+    """[(name, version)] from a text bun.lock (Bun 1.1.39+; 1.2 writes it by
+    default): each value of "packages" is a tuple whose first element is
+    "name@version" — the real name, so an alias key ("old-lodash" ->
+    "lodash@4.17.15") and a nested key ("chalk/supports-color") read right.
+    Workspace, link, file: and local-path packages (first-party) are
+    skipped; git, GitHub and tarball-URL packages are kept with an unknown
+    version. Raises ValueError when the text is not a bun.lock."""
+    warn = _warn_fn(warn)
+    doc = jsonc_loads(text)
+    if not isinstance(doc, dict) or not isinstance(doc.get("packages", {}), dict):
+        raise ValueError("not a bun.lock")
+    out = []
+    for key, entry in doc.get("packages", {}).items():
+        ident = entry[0] if isinstance(entry, list) and entry else None
+        at = ident.find("@", 1) if isinstance(ident, str) else -1
+        if at <= 0:
+            warn("malformed bun.lock entries")
+            continue
+        name, spec = ident[:at], ident[at + 1:]
+        if spec.startswith(_BUN_LOCAL):
+            continue
+        v, _ = _npm_exact(spec)
+        out.append((name, v))
+    return out
+
+
 def scan_npm_other_locks(root, warn=None):
-    """yarn.lock (v1/berry) and pnpm-lock.yaml."""
+    """yarn.lock (v1/berry), pnpm-lock.yaml and bun.lock."""
     warn = _warn_fn(warn)
     out = Inventory()
     for fname, parser in (("yarn.lock", parse_yarn_lock), ("pnpm-lock.yaml", parse_pnpm_lock)):
@@ -806,6 +861,22 @@ def scan_npm_other_locks(root, warn=None):
             continue
         for name, v in parser(text):
             out.append(("npm", name, v, fname))
+    path = os.path.join(root, "bun.lock")
+    text = _read_text(path)
+    if text is not None:
+        try:
+            entries = parse_bun_lock(text, warn)
+        except ValueError:
+            warn("unparseable bun.lock file(s)")
+            entries = []
+        for name, v in entries:
+            out.append(("npm", name, v, "bun.lock"))
+    elif os.path.lexists(path):
+        _unusable(warn, path)
+    elif os.path.lexists(os.path.join(root, "bun.lockb")):
+        # Bun's binary lockfile (the default before 1.2): not read
+        warn("binary bun.lockb file(s) not read (`bun install --save-text-lockfile` "
+             "writes bun.lock)")
     return out
 
 
@@ -1440,6 +1511,90 @@ def _scan_poetry_lock(root, out, warn):
             out.append(("pypi", name, v if isinstance(v, str) else "", "poetry.lock"))
 
 
+def _load_lock_toml(path, warn):
+    """A TOML lockfile's document, else None (a file that is there but can't
+    be read or parsed is warned about)."""
+    text = _read_text(path)
+    if text is None:
+        _unusable(warn, path)
+        return None
+    try:
+        return load_toml(text)
+    except ValueError:
+        _unusable(warn, path, "unparseable")
+        return None
+
+
+def _lock_packages(doc, key, path, warn):
+    """The package tables of a TOML lockfile (`[[package]]` / `[[packages]]`)."""
+    pkgs = doc.get(key, [])
+    if not isinstance(pkgs, list):
+        _unusable(warn, path, "malformed")
+        return []
+    good = [p for p in pkgs if isinstance(p, dict) and isinstance(p.get("name"), str)
+            and p.get("name")]
+    if len(good) < len(pkgs):
+        warn("malformed %s entries" % os.path.basename(path), len(pkgs) - len(good))
+    return good
+
+
+def _scan_uv_lock(root, out, warn):
+    """uv.lock: one [[package]] per locked distribution. The project itself
+    and its workspace members (virtual / editable sources) and local project
+    directories are first-party and not inventoried; a git, URL or local
+    archive source is kept with an unknown version, since only a registry
+    release is the version its advisories name."""
+    path = os.path.join(root, "uv.lock")
+    if not os.path.lexists(path):
+        return
+    doc = _load_lock_toml(path, warn)
+    if doc is None:
+        return
+    for pkg in _lock_packages(doc, "package", path, warn):
+        source = pkg.get("source") if isinstance(pkg.get("source"), dict) else {}
+        if any(k in source for k in ("virtual", "editable", "directory")):
+            continue
+        v = pkg.get("version")
+        v = v.strip() if isinstance(v, str) else ""
+        kind = next((k for k in ("git", "url", "path") if k in source), None)
+        if kind is None:
+            out.append(("pypi", pkg["name"], v, "uv.lock"))
+        else:
+            out.append(("pypi", pkg["name"], "", "uv.lock (%s source)" % kind))
+
+
+_PYLOCK_NAME_RE = re.compile(r"^pylock\.[^.]+\.toml$")
+
+
+def _scan_pylock(root, out, warn):
+    """pylock.toml and pylock.<name>.toml (PEP 751): [[packages]]. A
+    `directory` package (a local source tree, the project itself included)
+    is first-party and not inventoried; a `vcs` or `archive` package is kept
+    with an unknown version; `version` is optional in the format, and a
+    package without one is unknown too."""
+    try:
+        names = ["pylock.toml"] + sorted(fn for fn in os.listdir(root) if _PYLOCK_NAME_RE.match(fn))
+    except OSError:
+        return
+    for fname in names:
+        path = os.path.join(root, fname)
+        if not os.path.lexists(path):
+            continue
+        doc = _load_lock_toml(path, warn)
+        if doc is None:
+            continue
+        for pkg in _lock_packages(doc, "packages", path, warn):
+            if "directory" in pkg:
+                continue
+            v = pkg.get("version")
+            v = v.strip() if isinstance(v, str) else ""
+            kind = next((k for k in ("vcs", "archive") if k in pkg), None)
+            if kind is None:
+                out.append(("pypi", pkg["name"], v, fname))
+            else:
+                out.append(("pypi", pkg["name"], "", "%s (%s)" % (fname, kind)))
+
+
 def _scan_pipfile_lock(root, out, warn):
     path = os.path.join(root, "Pipfile.lock")
     pl = _read_json(path, warn=warn)
@@ -1644,8 +1799,9 @@ def _scan_setup_py(root, out, warn):
 def scan_pypi_declared(root, warn=None):
     """requirements*.txt and requirements/*.txt (following -r/-c),
     pyproject.toml ([project], [dependency-groups], [tool.poetry]),
-    poetry.lock, Pipfile.lock, setup.py. Unpinned names are recorded with
-    version '' (reported as unknown, never cleared)."""
+    poetry.lock, Pipfile.lock, uv.lock, pylock.toml (PEP 751), setup.py.
+    Unpinned names are recorded with version '' (reported as unknown, never
+    cleared)."""
     warn = _warn_fn(warn)
     out = Inventory()
     if not os.path.isdir(root):
@@ -1670,6 +1826,8 @@ def scan_pypi_declared(root, warn=None):
     _scan_pyproject(root, out, warn)
     _scan_pipfile_lock(root, out, warn)
     _scan_poetry_lock(root, out, warn)
+    _scan_uv_lock(root, out, warn)
+    _scan_pylock(root, out, warn)
     _scan_setup_py(root, out, warn)
     return out
 

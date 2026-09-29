@@ -46,6 +46,12 @@ class LooksBinaryTests(unittest.TestCase):
         self.assertTrue(lazaret.looks_binary(bytes((i * 7919) % 256 for i in range(4096))))
         self.assertFalse(lazaret.looks_binary(b""))
 
+    def test_which_ascii_bytes_count(self):
+        """The C0 controls but whitespace (\\t \\n \\v \\f \\r) and ESC, NUL
+        included, and DEL (as binary.js counts them)."""
+        counted = [c for c in range(0x80) if lazaret.looks_binary(bytes([c]) * 10)]
+        self.assertEqual(counted, [*range(0x00, 0x09), *range(0x0E, 0x1B), *range(0x1C, 0x20), 0x7F])
+
 
 class DecodeMemberTests(unittest.TestCase):
     def test_plain_utf8_has_no_extra_issues(self):

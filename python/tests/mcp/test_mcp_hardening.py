@@ -66,9 +66,13 @@ sys.path.insert(0, HERE)  # the lazaret/ dir itself
 from lazaret.registry import repo as lazaret_repo  # noqa: E402
 
 
-def _serve(lines, db=None, timeout=120):
-    """Run the real server over stdio; return the CompletedProcess."""
+def _serve(lines, db=None, timeout=120, roots=None):
+    """Run the real server over stdio; return the CompletedProcess. `roots`
+    sets LAZARET_MCP_ROOTS: a raw stdio session shares no roots, so a path
+    tool needs it (audit I1)."""
     env = dict(os.environ)
+    if roots is not None:
+        env["LAZARET_MCP_ROOTS"] = roots
     if db is not None:
         env["LAZARET_DB"] = db
     else:
@@ -281,7 +285,8 @@ class ScanFilesCapTests(unittest.TestCase):
         call = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                            "params": {"name": "scan_files",
                                       "arguments": {"paths": [huge]}}})
-        p = _serve([call, PING], timeout=120)     # was: unbounded read, hang
+        p = _serve([call, PING], timeout=120,      # was: unbounded read, hang
+                   roots=os.path.dirname(huge))
         self.assertEqual(p.returncode, 0, p.stderr[-800:])
         frames = _by_id(p)
         payload = json.loads(frames[1]["result"]["content"][0]["text"])
