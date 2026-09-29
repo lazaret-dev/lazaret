@@ -79,6 +79,11 @@ MAX_MEMBER = _env_number("LAZARET_MAX_SOURCE_BYTES", 16_000_000)
 MAX_FILES = 20_000         # files per package (numpy's sdist alone has >4,000)
 SAMPLE = 8192              # header/entropy sample read from oversized files
 # Stored scans from another engine version are scanned again (has_scan).
+# 2.9: 0.1.8's code that renames its package and publishes it
+#      (SC-SELF-PUBLISH), code hidden off-screen (SC-OFFSCREEN-CODE), install
+#      scripts that publish, collect npm tokens or run a DLL, the strong
+#      shapes in code a package runs when used (SC-USE-RISK), and a release's
+#      brand-new dependencies (SC-NEW-DEPENDENCY)
 # 2.8: 0.1.7's install-script and import-time tests (PowerShell, stagers,
 #      reverse shells, host beacons, CRITICAL import-time shapes, code run
 #      from a file's own prose), more import-time reach (an sdist's modules
@@ -100,7 +105,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.8.0"
+ENGINE_VERSION = "2.9.0"
 
 # ---------------- Trust-chain limits (F9/G14/F10) ----------------
 # Only these hosts may ever be fetched, over https only, and redirects to any
@@ -365,12 +370,13 @@ class Resolution(tuple):
     packagetype, installable, size, reason}; `installable` means pip may
     install the file anyway (scan_package counts it as not scanned)."""
 
-    def __new__(cls, version, artifacts, skipped=()):
+    def __new__(cls, version, artifacts, skipped=(), info=None):
         first = artifacts[0]
         self = super().__new__(cls, (version, first["url"], first["container"],
                                      first["artifact"], first["entry"]))
         self.artifacts = list(artifacts)
         self.skipped = list(skipped)
+        self.info = info if isinstance(info, dict) else {}      # PyPI: the release's metadata
         return self
 
 
@@ -477,7 +483,7 @@ def resolve_pypi(name, version):
     if not artifacts:
         raise ValueError(f"pypi:{name}@{version} has no downloadable archive")
     artifacts.sort(key=lambda a: (a["artifact"] != "sdist", a["filename"]))
-    return Resolution(version, artifacts, skipped)
+    return Resolution(version, artifacts, skipped, info=info)
 
 
 _PEP440_FINAL_RE = re.compile(r"^(\d+(?:\.\d+)*)(?:\.post(\d+))?$")
@@ -2216,6 +2222,225 @@ def _always_redacted(fn):
     return run
 
 
+# ---------------- A release that adds a new dependency (SC-NEW-DEPENDENCY, 0.1.8) ----------------
+# The @mastra compromise (June 2026) changed no code: each hijacked release
+# gained a dependency on easy-day-js, published by another account 19 hours
+# before, which carried the payload (17 of the 0.1.7 benchmark's misses; the
+# releases themselves read OK). A release rarely depends on a package that
+# did not exist a week earlier, from someone who does not maintain it. So a
+# registry scan compares a release's dependencies with those of the release
+# published before it (npm: the packument's versions and times; PyPI: the
+# project's release files and each release's requires_dist; a prerelease is
+# compared with any version, a release with releases only) and looks up at
+# most NEW_DEP_LOOKUPS added ones: CRITICAL for one first published less than
+# NEW_DEP_CRITICAL before the release, MAJOR for one under NEW_DEP_RECENT.
+# Not counted: a dependency of the package's own npm scope, or one an npm
+# maintainer of the package also maintains; an optional extra's requirement
+# (PyPI); a git, file or URL dependency. Best effort: a document over the
+# metadata budget (an established package's) or a registry that does not
+# answer is not a finding, and a release with no dependencies costs no
+# request. LAZARET_NO_DEPENDENCY_HISTORY=1 turns it off (an offline scan).
+NEW_DEP_CRITICAL = datetime.timedelta(days=7)
+NEW_DEP_RECENT = datetime.timedelta(days=30)
+NEW_DEP_LOOKUPS = 5
+_NPM_NOT_REGISTRY = ("file:", "link:", "workspace:", "portal:", "git:", "git+", "github:", "gitlab:", "bitbucket:",
+                     "http:", "https:")
+_PY_REQ_NAME_RE = re.compile(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
+
+
+def _iso_time(value):
+    """An aware datetime from registry time text ('2026-06-17T02:06:22.156Z'), else None."""
+    if not isinstance(value, str):
+        return None
+    try:
+        return _to_utc(datetime.datetime.fromisoformat(value.strip().replace("Z", "+00:00")))
+    except ValueError:
+        return None
+
+
+def _npm_scope(name):
+    return name.split("/", 1)[0] if name.startswith("@") and "/" in name else None
+
+
+def npm_dependency_names(manifest):
+    """The registry packages a package.json depends on (dependencies and
+    optionalDependencies; an `npm:` alias as the package it names)."""
+    out = set()
+    for field in ("dependencies", "optionalDependencies"):
+        deps = manifest.get(field) if isinstance(manifest, dict) else None
+        if not isinstance(deps, dict):
+            continue
+        for key, spec in deps.items():
+            if not isinstance(key, str) or not key:
+                continue
+            spec = spec.strip() if isinstance(spec, str) else ""
+            if spec.startswith("npm:"):
+                target = spec[4:]
+                at = target.rfind("@")
+                key = target[:at] if at > 0 else target
+            elif spec.startswith(_NPM_NOT_REGISTRY) or ("/" in spec and not spec.startswith("@")):
+                continue                       # a file, link, git or URL dependency; user/repo is GitHub
+            if key:
+                out.add(key)
+    return out
+
+
+def pypi_dependency_names(requires_dist):
+    """The PEP 503 names a release requires, leaving out optional extras'."""
+    out = set()
+    for req in requires_dist if isinstance(requires_dist, list) else ():
+        if not isinstance(req, str) or re.search(r"\bextra\s*==", req):
+            continue
+        m = _PY_REQ_NAME_RE.match(req)
+        if m:
+            out.add(_pep503(m.group(1)))
+    return out
+
+
+def _previous_release(times, version, candidates, prerelease):
+    """(time of `version`, the candidate published last before it) from
+    {version: time text}; a prerelease candidate only when `version` is one.
+    (None, None) when the time of `version` is unknown."""
+    when = _iso_time(times.get(version))
+    if when is None:
+        return None, None
+    best = None
+    for v in candidates:
+        if v == version or (prerelease(v) and not prerelease(version)):
+            continue
+        t = _iso_time(times.get(v))
+        if t is not None and t < when and (best is None or t > best[1]):
+            best = (v, t)
+    return when, best[0] if best else None
+
+
+def _age_text(age):
+    hours = age.total_seconds() / 3600
+    if hours < 48:
+        n = max(1, int(hours))
+        return f"{n} hour{'s' if n != 1 else ''}"
+    n = int(hours // 24)
+    return f"{n} day{'s' if n != 1 else ''}"
+
+
+def _new_dependency_issue(eco, dep, age, previous, owners):
+    sev = "CRITICAL" if age < NEW_DEP_CRITICAL else "MAJOR"
+    by = f" by {', '.join(owners[:3])}" if owners else ""
+    return lazaret.mk_issue(
+        {"id": "SC-NEW-DEPENDENCY", "name": "A release adds a brand-new dependency", "type": "HOTSPOT", "sev": sev,
+         "msg": (f'Adds a dependency on "{dep}", which {previous} did not have: a package first published '
+                 f"{_age_text(age)} before this release{by}"
+                 + (", who does not maintain this one." if eco == "npm" else ".")),
+         "why": ("The @mastra compromise (June 2026) changed no code: each hijacked release gained a dependency on "
+                 "easy-day-js, published by another account 19 hours before, which carried the payload. A release "
+                 "rarely depends on a package that did not exist a week earlier."),
+         "fix": f'Read "{dep}" before installing this release; pin the previous one ({previous}) until you have.',
+         "ref": "CWE-506 · Supply chain"},
+        "package.json" if eco == "npm" else "(release)", 1, [])
+
+
+def npm_new_dependencies(name, version, manifest, fetch=None):
+    """-> (previous version, [(dependency, age, its maintainers)]) for the
+    dependencies an npm release adds that are recent (see above)."""
+    fetch = fetch or http_json
+    mine = npm_dependency_names(manifest)
+    if not mine:
+        return None, []
+    doc = fetch("https://registry.npmjs.org/" + urllib.parse.quote(name, safe="@"))
+    times = doc.get("time") if isinstance(doc, dict) else None
+    versions = doc.get("versions") if isinstance(doc, dict) else None
+    if not isinstance(times, dict) or not isinstance(versions, dict):
+        return None, []
+    when, previous = _previous_release(times, version, versions, lambda v: "-" in v)
+    if previous is None:
+        return None, []
+    added = sorted(mine - npm_dependency_names(versions.get(previous)))
+    owners = {m.get("name") for m in doc.get("maintainers") or () if isinstance(m, dict)}
+    scope, found = _npm_scope(name), []
+    for dep in added:
+        if len(found) >= NEW_DEP_LOOKUPS:
+            break
+        if scope is not None and _npm_scope(dep) == scope:
+            continue
+        try:
+            ddoc = fetch("https://registry.npmjs.org/" + urllib.parse.quote(dep, safe="@"))
+        except FetchError:
+            continue                     # over the budget: an established package; or unreachable
+        created = _iso_time((ddoc.get("time") or {}).get("created") if isinstance(ddoc, dict) else None)
+        if created is None:
+            continue
+        age = max(when - created, datetime.timedelta(0))
+        if age >= NEW_DEP_RECENT:
+            continue
+        theirs = sorted({m.get("name") for m in ddoc.get("maintainers") or ()
+                         if isinstance(m, dict) and isinstance(m.get("name"), str)})
+        if owners & set(theirs):
+            continue
+        found.append((dep, age, theirs))
+    return previous, found
+
+
+def _pypi_first_upload(files):
+    times = [_iso_time(f.get("upload_time_iso_8601")) for f in files or () if isinstance(f, dict)]
+    times = [t for t in times if t is not None]
+    return min(times) if times else None
+
+
+def pypi_new_dependencies(name, version, info, fetch=None):
+    """-> (previous version, [(dependency, age, [])]) for the requirements a
+    PyPI release adds that are recent (see above)."""
+    fetch = fetch or http_json
+    mine = pypi_dependency_names((info or {}).get("requires_dist"))
+    if not mine:
+        return None, []
+    doc = fetch(f"https://pypi.org/pypi/{_quote_seg(name)}/json")
+    releases = doc.get("releases") if isinstance(doc, dict) else None
+    if not isinstance(releases, dict):
+        return None, []
+    times = {}
+    for v, files in releases.items():
+        first = _pypi_first_upload(files)
+        if first is not None:
+            times[v] = first.isoformat()
+    when, previous = _previous_release(times, version, releases, lambda v: not _PEP440_FINAL_RE.match(v))
+    if previous is None:
+        return None, []
+    prev = fetch(f"https://pypi.org/pypi/{_quote_seg(name)}/{_quote_seg(previous)}/json")
+    prev_info = prev.get("info") if isinstance(prev, dict) else None
+    added = sorted(mine - pypi_dependency_names((prev_info or {}).get("requires_dist")))
+    found = []
+    for dep in added:
+        if len(found) >= NEW_DEP_LOOKUPS:
+            break
+        try:
+            ddoc = fetch(f"https://pypi.org/pypi/{_quote_seg(dep)}/json")
+        except FetchError:
+            continue
+        rels = ddoc.get("releases") if isinstance(ddoc, dict) else None
+        firsts = [t for t in (_pypi_first_upload(fs) for fs in (rels or {}).values()) if t is not None]
+        if not firsts:
+            continue
+        age = max(when - min(firsts), datetime.timedelta(0))
+        if age < NEW_DEP_RECENT:
+            found.append((dep, age, []))
+    return previous, found
+
+
+def new_dependency_issues(eco, name, version, resolved):
+    """SC-NEW-DEPENDENCY findings for one release (best effort: [] when the
+    registry can't say)."""
+    if os.environ.get("LAZARET_NO_DEPENDENCY_HISTORY"):
+        return []
+    try:
+        if eco == "npm":
+            previous, found = npm_new_dependencies(name, version, resolved[4])
+        else:
+            previous, found = pypi_new_dependencies(name, version, getattr(resolved, "info", None))
+    except (FetchError, ValueError):
+        return []
+    return [_new_dependency_issue(eco, dep, age, previous, owners) for dep, age, owners in found]
+
+
 @_always_redacted
 def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline=None,
                  cancel=None, max_artifacts=None, max_download_bytes=None):
@@ -2316,6 +2541,7 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
                     **{k: r[k] for k in ("verdict", "verdictReason", "filesScanned",
                                          "binaryArtifacts", "truncated",
                                          "strongIndicators", "weakIndicators")}})
+    all_issues.extend(new_dependency_issues(eco, name, version, resolved))
     skip_issues, skip_label = _skipped_summary(skipped, byte_budget, limit)
     # one part per release file left out; skip_issues holds one finding per
     # REASON, and used to be counted instead ("1 part" for 3 skipped files)
