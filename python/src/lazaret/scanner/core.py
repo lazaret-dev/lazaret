@@ -6454,6 +6454,18 @@ def raw_ip_connect(text):
 # runners). A .py or .js file read and run is not: setup.py's
 # `exec(open("pkg/version.py").read())` reads a version. The import-time test
 # reads a file that reads its own source with its prose (_import_code).
+#
+# (0.1.8) The data file may be a licence or a readme without an extension,
+# which holds no code (react-thunk-log 2.23.2 kept its payload, encrypted, in
+# lib/utils/smtp-connection/LICENSE, next to the script its install hook
+# starts); what a read gives may arrive asynchronously — the second parameter
+# of the read's callback (`fs.readFile(p, 'utf8', (err, data) => …)`), the
+# parameter of a `.then(…)` chained to it, a Python `with open(…) as f`; and
+# the path may be built on a line of its own and read by its name (`const p =
+# path.join(__dirname, 'LICENSE')` … `fs.readFile(p, …)`). A value that comes
+# from a path read by name counts only in a code runner (eval, exec, compile,
+# new Function, vm.run*): a CLI reads its package.json by name and puts the
+# version in a git command.
 _SELF_READ_RE = re.compile(
     r"\bopen\s*\(\s*(?:os\.path\.(?:abspath|realpath)\s*\(\s*)?__file__\b"
     r"|\bPath\s*\(\s*__file__\s*\)\s*\.\s*(?:read_text|read_bytes|open)\s*\("
@@ -6462,21 +6474,43 @@ _SELF_READ_RE = re.compile(
     r"|fileURLToPath\s*\(\s*import\.meta\.url)|\barguments\s*\.\s*callee\b|\}\s*\)?\s*\.\s*toString\s*\(\s*\)")
 _DATA_EXT = (r"(?:txt|dat|bin|png|jpe?g|gif|ico|bmp|svg|wav|mp3|mp4|woff2?|ttf|json|md|cfg|ini|log|db|pyc|so|dll"
              r"|dylib|exe)")
+# a data file's name inside quotes: a data extension, or a licence or readme
+# with or without one (no template's `${…}` in it: a name that runs into one
+# is read again from every delimiter)
+_DATA_FILE = (r"(?:[^\"'`{}$\n]{1,100}\." + _DATA_EXT + r"|(?:[^\"'`{}$\n]{0,100}[/\\])?"
+              r"(?:LICEN[CS]E|COPYING|NOTICE|README|AUTHORS|CHANGELOG|CHANGES|HISTORY|PATENTS)(?:[-.]\w{1,10})?)")
 _SIBLING_DATA_RE = re.compile(
     r"\b(?:open|read_text|read_bytes|readFileSync|readFile)\s*\([^\n]{0,200}?(?:__file__|__dirname|import\.meta\.url)"
-    r"[^\n]{0,200}?[\"'][^\"'\n]{1,100}\." + _DATA_EXT + r"[\"']"
-    r"|(?:__file__|__dirname)[^\n]{0,200}?[\"'][^\"'\n]{1,100}\." + _DATA_EXT + r"[\"'][^\n]{0,60}?"
+    r"[^\n]{0,200}?[\"']" + _DATA_FILE + r"[\"']"
+    r"|(?:__file__|__dirname)[^\n]{0,200}?[\"']" + _DATA_FILE + r"[\"'][^\n]{0,60}?"
     r"\.\s*(?:read_text|read_bytes)\s*\(")
+# a data file's path, assigned to a name: the file named after __file__,
+# __dirname or import.meta.url, in quotes or after a template's `${__dirname}/`
+_SIBLING_PATH_RE = re.compile(
+    r"(?:__file__|__dirname|import\.meta\.url)[^\n]{0,200}?(?:[\"'`]|\}[/\\])" + _DATA_FILE + r"[\"'`]")
+# a read of a path by its name (the name is checked against the data-file
+# paths), a read call's head, the node-style callback in its arguments, and
+# what may follow the call: `.then(x => …)` or Python's `as f`
+_PATH_READ_RE = re.compile(
+    r"\b(?:open|read_text|read_bytes|readFileSync|readFile)\s*\(\s*([A-Za-z_$][\w$]*)\s*[,)]"
+    r"|(?<![\w$.])([A-Za-z_$][\w$]*)\s*\.\s*(?:read_text|read_bytes)\s*\(")
+_READ_HEAD_RE = re.compile(r"\b(?:open|read_text|read_bytes|readFileSync|readFile)\s*\(")
+_READ_CALLBACK_RE = re.compile(r"\(\s*[A-Za-z_$][\w$]*\s*,\s*([A-Za-z_$][\w$]*)\s*\)\s*(?:=>|\{)")
+_READ_THEN_RE = re.compile(
+    r"\s*(?:\.\s*then\s*\(\s*(?:async\s+)?(?:function\b\s*[\w$]*\s*)?\(?\s*([A-Za-z_$][\w$]*)|as\s+([A-Za-z_]\w*))")
 _SELF_RUN_RE = re.compile(
     r"(?<![\w.$])(?:exec|eval|compile)\s*\(|\bnew\s+Function\s*\(|\bvm\s*\.\s*run\w*\s*\("
     r"|\b(?:execSync|system|popen|Popen|check_output|getoutput)\s*\(|\bsubprocess\s*\.\s*\w+\s*\(")
+# the runners that run a shell command, not code
+_SELF_SHELL_RUNNERS = ("execSync", "system", "popen", "Popen", "check_output", "getoutput", "subprocess")
 _SELF_READ_ASSIGN_RE = re.compile(
     r"(?<![^\n])[ \t]*(?:(?:const|let|var)[ \t]+)?([A-Za-z_$][\w$]*)[ \t]*(?::[^=\n]*)?=(?![=>])([^\n]*)")
 _IDENT_TOKEN_RE = re.compile(r"(?<![\w$.])[A-Za-z_$][\w$]*")
 _SELF_READ_PASSES = 3            # levels of names followed from a read
-_SELF_READ_MAX_CALLS = 200       # runners examined per text
-_SELF_READ_ARG_SPAN = 2000       # characters of a runner's arguments read
+_SELF_READ_MAX_CALLS = 200       # runners examined per text, and read calls
+_SELF_READ_ARG_SPAN = 2000       # characters of a runner's or a read's arguments read
 _SELF_READ_MAX_ASSIGNS = 5000    # assignments examined per text
+_SELF_READ_THEN_SPAN = 200       # characters after a read's call searched for .then( or `as`
 
 
 def reads_own_source(text):
@@ -6538,38 +6572,77 @@ def runs_own_source_at(text):
     source or from a data file shipped next to it (see above), else -1.
     Runners, reads and names inside string literals do not count (a code
     template in a string, a list of dunder names)."""
-    if not (_SELF_READ_RE.search(text) or _SIBLING_DATA_RE.search(text)):
+    if not (_SELF_READ_RE.search(text) or _SIBLING_DATA_RE.search(text) or _SIBLING_PATH_RE.search(text)):
         return -1
     spans = _literal_spans(text)
     starts = [s for s, _ in spans]
 
-    def in_literal(pos):
+    def literal_at(pos):
+        """The literal (start, end) that pos is in, or None."""
         k = bisect.bisect_right(starts, pos) - 1
-        return k >= 0 and pos < spans[k][1]
+        return spans[k] if k >= 0 and pos < spans[k][1] else None
+
+    def in_literal(pos):
+        return literal_at(pos) is not None
 
     def reads(lo, hi):
         part = text[lo:hi]
         return any(not in_literal(lo + m.start()) for rx in (_SELF_READ_RE, _SIBLING_DATA_RE)
                    for m in rx.finditer(part))
 
-    def uses(lo, hi, names):
-        return any(m.group() in names and not in_literal(lo + m.start())
-                   for m in _IDENT_TOKEN_RE.finditer(text[lo:hi]))
+    def path_reads(lo, hi):
+        return bool(paths) and any((m.group(1) or m.group(2)) in paths and not in_literal(lo + m.start())
+                                   for m in _PATH_READ_RE.finditer(text[lo:hi]))
 
-    if not reads(0, len(text)):
-        return -1
+    def uses(lo, hi, names):
+        return bool(names) and any(m.group() in names and not in_literal(lo + m.start())
+                                   for m in _IDENT_TOKEN_RE.finditer(text[lo:hi]))
+
     assigns = []
     for k, m in enumerate(_SELF_READ_ASSIGN_RE.finditer(text)):
         if k >= _SELF_READ_MAX_ASSIGNS:
             break
         if not in_literal(m.start(1)):
             assigns.append((m.group(1), m.start(2), m.end(2)))
-    names = set()
+    paths = set()                   # names of data files' paths (a template's `${__dirname}` counts)
+    for name, lo, hi in assigns:
+        for m in _SIBLING_PATH_RE.finditer(text[lo:hi]):
+            lit = literal_at(lo + m.start())
+            if lit is None or text[lit[0]] == "`":
+                paths.add(name)
+                break
+    if not (reads(0, len(text)) or path_reads(0, len(text))):
+        return -1
+    names = set()                   # values of a read written out: any runner
+    code_names = set()              # values of a path read by name: code runners only
+    for k, h in enumerate(_READ_HEAD_RE.finditer(text)):
+        if k >= _SELF_READ_MAX_CALLS:
+            break
+        if in_literal(h.start()):
+            continue
+        args = _call_args(text[h.end():h.end() + _SELF_READ_ARG_SPAN])
+        close = h.end() + len(args)                 # the closing bracket, when there is one
+        into = (names if reads(h.start(), close + 1) else code_names if path_reads(h.start(), close + 1)
+                else None)
+        if into is None:
+            continue
+        cb = _READ_CALLBACK_RE.search(args)
+        if cb is not None and not in_literal(h.end() + cb.start()):
+            into.add(cb.group(1))
+        if close < len(text) and text[close] == ")":
+            then = _READ_THEN_RE.match(text[close + 1:close + 1 + _SELF_READ_THEN_SPAN])
+            if then is not None:
+                into.add(then.group(1) or then.group(2))
     for _ in range(_SELF_READ_PASSES):
         grown = False
         for name, lo, hi in assigns:
-            if name not in names and (reads(lo, hi) or uses(lo, hi, names)):
+            if name in names:
+                continue
+            if reads(lo, hi) or uses(lo, hi, names):
                 names.add(name)
+                grown = True
+            elif name not in code_names and (path_reads(lo, hi) or uses(lo, hi, code_names)):
+                code_names.add(name)
                 grown = True
         if not grown:
             break
@@ -6580,6 +6653,8 @@ def runs_own_source_at(text):
             continue
         hi = m.end() + len(_call_args(text[m.end():m.end() + _SELF_READ_ARG_SPAN]))
         if reads(m.end(), hi) or uses(m.end(), hi, names):
+            return m.start()
+        if not m.group().startswith(_SELF_SHELL_RUNNERS) and (path_reads(m.end(), hi) or uses(m.end(), hi, code_names)):
             return m.start()
     return -1
 
@@ -6721,11 +6796,186 @@ def dumps_workflow_secrets(text):
 # a command line; it never edits shortcuts.
 _PERSIST_SHORTCUT_RE = re.compile(r"\bCreateShortcut\b|\.lnk\b")
 
+# Programs set to start at login or boot (0.1.8). The CanisterWorm releases
+# of @emilgroup's packages and others (March 2026) wrote a systemd user unit
+# that runs a Python payload and enabled it with `systemctl --user enable`,
+# so the payload ran again at every login, long after the install. Malware
+# on every platform does the same through the service managers. No package
+# needs any of this while it is installed: a daemon's `install-service`
+# command and the auto-launch libraries do it when their user or app asks,
+# never at install time, and that code is never read by this test. So each
+# is a reason of the install-script test, never at import time. Shell rc
+# files are left out: installers append PATH lines to them.
+#
+# Each is a place and a way to fill it, both in the text:
+# - systemd: a unit directory named (systemd/user, systemd/system, whole or
+#   as a path join's two literals; not /run/systemd/system, which code reads
+#   to learn whether systemd is running) and written, with a unit's
+#   ExecStart= in the text or the write on a line that names it; or
+#   `systemctl enable` (reenable, link; also as an argument list) run;
+# - launchd: LaunchAgents or LaunchDaemons named and written, with a plist's
+#   keys (RunAtLoad, KeepAlive, ProgramArguments, StartInterval) in the text
+#   or the write on a line that names it; or `launchctl load` (bootstrap,
+#   enable, submit) run;
+# - cron: a crontab installed (piped into `crontab`, `crontab -`, the list
+#   form ['crontab', file]) run, python-crontab's CronTab(...) and .write(),
+#   or a cron directory (/etc/cron.d, /etc/crontab, /var/spool/cron) written
+#   on a line that names it;
+# - a Windows Run key (…\CurrentVersion\Run, RunOnce) named with a registry
+#   write (reg add, New-ItemProperty, SetValueEx, putValue, REG_SZ,
+#   KEY_SET_VALUE …) within _SVC_RUNKEY_SPAN code points of it (a registry
+#   library's docstring names a Run key far from its write calls);
+# - a scheduled task: `schtasks /create` run, Register-ScheduledTask, or the
+#   Task Scheduler's COM object (Schedule.Service) and RegisterTaskDefinition
+#   (alone, an AWS ECS action);
+# - the Startup folder (Start Menu\Programs\Startup, shell:startup,
+#   CSIDL_STARTUP, a path join's 'Programs', 'Startup') named and written,
+#   or a shortcut made;
+# - an XDG autostart directory (~/.config/autostart, /etc/xdg/autostart)
+#   named and written.
+# A command is run when the text has an exec call, or when the command's
+# tool starts a command (a line, or after ; & | or a parenthesis: a hook
+# command or a shell script). A write "on a line that names it" is a write
+# call or a shell write (a redirection, cp, tee …) on a line of at most
+# _SVC_LINE_MAX characters: a minified bundle's one line is not a statement.
+_SVC_SYSTEMD_DIR_SRC = (
+    r"""(?<!/run/)systemd[/\\](?:user|system)(?![\w.-])"""
+    r"""|["'`]systemd["'`]\s{0,20}[,+/]\s{0,20}["'`](?:user|system)["'`]""")
+_SVC_UNIT_SRC = r"""ExecStart\s{0,20}="""
+_SVC_SYSTEMCTL_SRC = (
+    r"""\bsystemctl(?:[ \t]+-{1,2}[\w-]+)*[ \t]+(?:enable|reenable|link)\b"""
+    r"""|["'`]systemctl["'`]\s{0,20},\s{0,20}(?:["'`]-{1,2}[\w-]+["'`]\s{0,20},\s{0,20}){0,4}["'`]"""
+    r"""(?:enable|reenable|link)["'`]""")
+_SVC_LAUNCHD_DIR_SRC = r"""\bLaunch(?:Agents|Daemons)\b"""
+_SVC_PLIST_SRC = r"""\b(?:RunAtLoad|KeepAlive|ProgramArguments|StartInterval)\b"""
+_SVC_LAUNCHCTL_SRC = (
+    r"""\blaunchctl(?:[ \t]+-{1,2}[\w-]+)*[ \t]+(?:load|bootstrap|enable|submit)\b"""
+    r"""|["'`]launchctl["'`]\s{0,20},\s{0,20}(?:["'`]-{1,2}[\w-]+["'`]\s{0,20},\s{0,20}){0,4}["'`]"""
+    r"""(?:load|bootstrap|enable|submit)["'`]""")
+_SVC_CRONTAB_SRC = (
+    r"""\|[ \t]*(?:sudo[ \t]+)?crontab(?:[ \t]+-(?![\w-])|[ \t]*(?![^"'`)\n;&>]))"""
+    r"""|\bcrontab[ \t]+(?:-(?![\w-])|["']?(?:[/~$]|\.\.?/))"""
+    r"""|["'`]crontab["'`]\s{0,20},\s{0,20}(?!["'`]-[lre]["'`])[\w$"'`]""")
+_SVC_PYCRON_SRC = r"""\bCronTab\s{0,20}\("""
+_SVC_PYCRON_WRITE_SRC = r"""\.write\s{0,20}\("""
+_SVC_CRON_DIR_SRC = (
+    r"""/etc/cron\.(?:d|hourly|daily|weekly|monthly)(?![\w.-])|/etc/crontab(?![\w.-])|/var/spool/cron(?![\w.-])""")
+_SVC_RUNKEY_SRC = r"""CurrentVersion(?:\\{1,2}|/)Run(?:Once(?:Ex)?|Services(?:Once)?)?(?!\w)"""
+_SVC_REG_WRITE_SRC = (
+    r"""\breg(?:\.exe)?["'`]?(?:[ \t]+|\s{0,20},\s{0,20}\[?\s{0,20}["'`])add\b|\b(?:New|Set)-ItemProperty\b"""
+    r"""|\bSetValueEx\b|\bSetValue\s{0,20}\(|\bputValue\b|\bRegSetValue|\bREG_(?:EXPAND_)?SZ\b"""
+    r"""|\bKEY_(?:SET_VALUE|WRITE|ALL_ACCESS)\b""")
+_SVC_SCHTASKS_SRC = r"""\bschtasks(?:\.exe)?["'`]?(?:[ \t]+|\s{0,20},\s{0,20}\[?\s{0,20}["'`])[/-]create\b"""
+_SVC_TASK_API_SRC = r"""\bRegister-ScheduledTask\b"""
+_SVC_TASK_COM_SRC = r"""\bSchedule\.Service\b"""
+_SVC_TASK_REGISTER_SRC = r"""\bRegisterTaskDefinition\b"""
+_SVC_STARTUP_SRC = (
+    r"""Start[ ]?Menu[/\\]{1,2}Programs[/\\]{1,2}Startup(?!\w)|\bshell:(?:common[ ]?)?startup\b"""
+    r"""|\bCSIDL_(?:COMMON_)?STARTUP\b|\bSpecialFolder\.(?:Common)?Startup\b|\bwinshell\.startup\s{0,20}\("""
+    r"""|["'`]Programs["'`]\s{0,20}[,+/]\s{0,20}["'`]Startup["'`]""")
+_SVC_AUTOSTART_SRC = (
+    r"""\.config[/\\]autostart(?![\w.-])|/etc/xdg/autostart(?![\w.-])"""
+    r"""|["'`]\.config["'`]\s{0,20}[,+/]\s{0,20}["'`]autostart["'`]""")
+_SVC_CMD_START_SRC = (
+    r"""(?:(?<![^\n])|[;&|(])[ \t]*(?:sudo[ \t]+)?"""
+    r"""(?:systemctl|launchctl|crontab|[Ss][Cc][Hh][Tt][Aa][Ss][Kk][Ss](?:\.[Ee][Xx][Ee])?)(?![\w.-])""")
+_SVC_SYSTEMD_DIR_RE = re.compile(_SVC_SYSTEMD_DIR_SRC)
+_SVC_UNIT_RE = re.compile(_SVC_UNIT_SRC)
+_SVC_SYSTEMCTL_RE = re.compile(_SVC_SYSTEMCTL_SRC)
+_SVC_LAUNCHD_DIR_RE = re.compile(_SVC_LAUNCHD_DIR_SRC)
+_SVC_PLIST_RE = re.compile(_SVC_PLIST_SRC)
+_SVC_LAUNCHCTL_RE = re.compile(_SVC_LAUNCHCTL_SRC)
+_SVC_CRONTAB_RE = re.compile(_SVC_CRONTAB_SRC)
+_SVC_PYCRON_RE = re.compile(_SVC_PYCRON_SRC)
+_SVC_PYCRON_WRITE_RE = re.compile(_SVC_PYCRON_WRITE_SRC)
+_SVC_CRON_DIR_RE = re.compile(_SVC_CRON_DIR_SRC)
+_SVC_RUNKEY_RE = re.compile(_SVC_RUNKEY_SRC, re.I)
+_SVC_REG_WRITE_RE = re.compile(_SVC_REG_WRITE_SRC, re.I)
+_SVC_SCHTASKS_RE = re.compile(_SVC_SCHTASKS_SRC, re.I)
+_SVC_TASK_API_RE = re.compile(_SVC_TASK_API_SRC, re.I)
+_SVC_TASK_COM_RE = re.compile(_SVC_TASK_COM_SRC, re.I)
+_SVC_TASK_REGISTER_RE = re.compile(_SVC_TASK_REGISTER_SRC)
+_SVC_STARTUP_RE = re.compile(_SVC_STARTUP_SRC, re.I)
+_SVC_AUTOSTART_RE = re.compile(_SVC_AUTOSTART_SRC)
+_SVC_CMD_START_RE = re.compile(_SVC_CMD_START_SRC)
+#: The longest line on which a write counts as writing the place it names
+_SVC_LINE_MAX = 1000
+#: Code points around a Run key searched for a registry write, and the Run keys read
+_SVC_RUNKEY_SPAN = 400
+
+
+def _writes_on_line(text, target_re):
+    """Is there a write call or a shell write on a line on which target_re
+    matches? Each line is searched once, and at most _PERSIST_MAX_LINES; a
+    line longer than _SVC_LINE_MAX (minified code) is not a statement."""
+    m, lines = target_re.search(text), 0
+    while m is not None and lines < _PERSIST_MAX_LINES:
+        start = text.rfind("\n", 0, m.start()) + 1
+        end = text.find("\n", m.end())
+        end = len(text) if end < 0 else end
+        if end - start <= _SVC_LINE_MAX and (_PERSIST_WRITE_RE.search(text, start, end)
+                                             or _PERSIST_SHELL_WRITE_RE.search(text, start, end)):
+            return True
+        lines += 1
+        m = target_re.search(text, end)
+    return False
+
+
+def _run_key_written(text):
+    """Is a registry write within _SVC_RUNKEY_SPAN code points of a Run key
+    `text` names? The first _PERSIST_MAX_LINES Run keys are read."""
+    for k, m in enumerate(_SVC_RUNKEY_RE.finditer(text)):
+        if k >= _PERSIST_MAX_LINES:
+            break
+        if _SVC_REG_WRITE_RE.search(text[max(0, m.start() - _SVC_RUNKEY_SPAN):m.end() + _SVC_RUNKEY_SPAN]):
+            return True
+    return False
+
+
+def service_reasons(text):
+    """The reasons `text` sets a program to start at login or boot (see
+    above), in a fixed order: systemd, launchd, cron, a Run key, a
+    scheduled task, the Startup folder, XDG autostart."""
+    reasons = []
+    runs = None
+
+    def run_context():
+        nonlocal runs
+        if runs is None:
+            runs = _EXEC_CALL_RE.search(text) is not None or _SVC_CMD_START_RE.search(text) is not None
+        return runs
+
+    writes = _PERSIST_WRITE_RE.search(text) is not None
+    if ((_SVC_SYSTEMD_DIR_RE.search(text) is not None
+         and ((writes and _SVC_UNIT_RE.search(text) is not None) or _writes_on_line(text, _SVC_SYSTEMD_DIR_RE)))
+            or (_SVC_SYSTEMCTL_RE.search(text) is not None and run_context())):
+        reasons.append("installs a systemd service")
+    if ((_SVC_LAUNCHD_DIR_RE.search(text) is not None
+         and ((writes and _SVC_PLIST_RE.search(text) is not None) or _writes_on_line(text, _SVC_LAUNCHD_DIR_RE)))
+            or (_SVC_LAUNCHCTL_RE.search(text) is not None and run_context())):
+        reasons.append("installs a launchd agent or daemon")
+    if ((_SVC_CRONTAB_RE.search(text) is not None and run_context())
+            or (_SVC_PYCRON_RE.search(text) is not None and _SVC_PYCRON_WRITE_RE.search(text) is not None)
+            or _writes_on_line(text, _SVC_CRON_DIR_RE)):
+        reasons.append("adds a cron job")
+    if _run_key_written(text):
+        reasons.append("adds a program to a Windows Run key")
+    if ((_SVC_SCHTASKS_RE.search(text) is not None and run_context()) or _SVC_TASK_API_RE.search(text) is not None
+            or (_SVC_TASK_COM_RE.search(text) is not None and _SVC_TASK_REGISTER_RE.search(text) is not None)):
+        reasons.append("creates a Windows scheduled task")
+    if _SVC_STARTUP_RE.search(text) is not None and (
+            writes or _PERSIST_SHORTCUT_RE.search(text) is not None or _shell_writes(text, _SVC_STARTUP_RE)):
+        reasons.append("puts a program in the Windows Startup folder")
+    if _SVC_AUTOSTART_RE.search(text) is not None and (writes or _shell_writes(text, _SVC_AUTOSTART_RE)):
+        reasons.append("adds a desktop autostart entry")
+    return reasons
+
 
 def persistence_reasons(text):
     """The persistence-target reasons of the install-script test (see above):
-    what `text` makes an AI agent, an editor or GitHub Actions run later, and
-    the Bun loader the Shai-Hulud worms fetch their payload's runtime with."""
+    what `text` makes an AI agent, an editor, GitHub Actions or the operating
+    system run later, and the Bun loader the Shai-Hulud worms fetch their
+    payload's runtime with."""
     reasons = []
     agent = _persist_agent_file(text)
     if agent is not None and (_PERSIST_WRITE_RE.search(text) is not None or _shell_writes(
@@ -6748,6 +6998,7 @@ def persistence_reasons(text):
         reasons.append("downloads the Bun runtime from GitHub and runs code with it")
     if "--load-extension" in text and _PERSIST_SHORTCUT_RE.search(text) is not None:
         reasons.append("rewrites browser shortcuts to load an extension")
+    reasons.extend(service_reasons(text))
     return reasons
 
 
@@ -6919,6 +7170,30 @@ _DV_HELPER_RE = re.compile(_DV_HELPER_SRC)
 _DV_STR_ITEM_RE = re.compile(_DV_STR_ITEM_SRC)
 _DV_ARRAY_RE = re.compile(_DV_ARRAY_SRC)
 _DV_NEEDLES = ("Buffer", "atob", "fromhex", "unhexlify", "b64decode", "fromCharCode", "hex", "base64")
+# (0.1.8) A home-made XOR decoder: react-zutils 1.0.1, which its preinstall
+# hook starts detached, kept the 83 strings its browser stealer needs —
+# modules, browser paths, SQL, its ngrok address — as base64 of the text
+# XORed with a four-letter key, decoded by a helper of its own:
+#     n=(t,e)=>{let r=Buffer.from(t,"base64");…a[index]=255&(r[index]^e.charCodeAt(3&index))…},
+#     a=t=>n(t,"utf8"), E=a("BgUKUQERVQ")               // "sqlite3"
+# The helper's body is not read. In a text with a ^, a name called with one
+# literal of base64 (padded, or not) or of hex at least _DV_XOR_MIN_CALLS
+# times (its first _DV_XOR_MAX_CALLS calls are tried, holding at least
+# _DV_XOR_MIN_BYTES bytes in all) is such a decoder when one string literal
+# of the text — of the first _DV_XOR_MAX_KEYS distinct ones of 1 to
+# _DV_XOR_KEY_MAX printable ASCII characters — XORed over the bytes, repeated
+# from the first, makes all but a tenth of those calls printable ASCII; its
+# calls are read as that text. A random key does that to a random call with
+# a chance of 95/256 a byte: 32 bytes make a false decoder a chance in 10^13.
+_DV_XOR_MIN_CALLS = 5
+_DV_XOR_MAX_CALLS = 64
+_DV_XOR_MIN_BYTES = 32
+_DV_XOR_MAX_KEYS = 256
+_DV_XOR_KEY_MAX = 32
+_DV_CALL_SRC = r"""(?<![\w$.])(?P<name>[A-Za-z_$][\w$]*)[ \t]*\([ \t]*""" + _DV_LIT + r"""[ \t]*\)"""
+_DV_KEY_SRC = r"""'(?P<a>[^'\\\n]{1,32})'|"(?P<b>[^"\\\n]{1,32})"|`(?P<c>[^`\\\n$]{1,32})`"""
+_DV_CALL_RE = re.compile(_DV_CALL_SRC)
+_DV_KEY_RE = re.compile(_DV_KEY_SRC)
 
 
 def _dv_decode(kind, s):
@@ -6969,6 +7244,80 @@ def _dv_literal(m):
     return m.group("a") or m.group("b") or (m.group("c") if "c" in m.re.groupindex else None)
 
 
+def _dv_bytes(s, kind):
+    """The bytes the literal `s` holds as hex (an even run of hex digits) or
+    as base64 (padded; or unpadded, but for a length of one more than a
+    multiple of 4), else None."""
+    if kind == "hex":
+        return bytes.fromhex(s) if len(s) % 2 == 0 and _DV_HEX_RE.fullmatch(s) else None
+    if _DV_B64_RE.fullmatch(s) is None or len(s) % 4 == 1 or ("=" in s and len(s) % 4):
+        return None
+    return base64.b64decode(s + "=" * (-len(s) % 4))
+
+
+def _dv_xor_printable(data, key):
+    """Is every byte of `data` XORed with `key` (repeated) printable ASCII?"""
+    n = len(key)
+    for i, b in enumerate(data):
+        if not 0x20 <= b ^ key[i % n] <= 0x7e:
+            return False
+    return True
+
+
+def _dv_xor_decoders(view):
+    """{name: (kind, key)}: the names `view` calls as XOR decoders (see
+    above), in the order of their first calls."""
+    calls = {}
+    for m in _DV_CALL_RE.finditer(view):
+        lits = calls.setdefault(m.group("name"), [])
+        if len(lits) < _DV_XOR_MAX_CALLS:
+            lits.append(_dv_literal(m))
+    out, keys = {}, None
+    for name, lits in calls.items():
+        if len(lits) < _DV_XOR_MIN_CALLS:
+            continue
+        kind = "hex" if all(len(x) % 2 == 0 and _DV_HEX_RE.fullmatch(x) for x in lits) else "base64"
+        data = [_dv_bytes(x, kind) for x in lits]
+        if (sum(d is not None for d in data) < _DV_XOR_MIN_CALLS
+                or sum(len(d) for d in data if d is not None) < _DV_XOR_MIN_BYTES):
+            continue
+        if keys is None:
+            keys, seen = [], set()
+            for k in _DV_KEY_RE.finditer(view):
+                key = k.group("a") or k.group("b") or k.group("c")
+                if key not in seen and all(" " <= ch <= "~" for ch in key):
+                    seen.add(key)
+                    keys.append(key.encode("ascii"))
+                    if len(keys) >= _DV_XOR_MAX_KEYS:
+                        break
+        allowed = len(lits) // 10                   # calls that may stay unread
+        for key in keys:
+            bad = 0
+            for d in data:
+                if d is None or not _dv_xor_printable(d, key):
+                    bad += 1
+                    if bad > allowed:
+                        break
+            if bad <= allowed:
+                out[name] = (kind, key)
+                break
+        if len(out) >= _DV_MAX_HELPERS:
+            break
+    return out
+
+
+def _dv_xor_sub(xors):
+    """re.sub's function: a call of an XOR decoder read as its text, when
+    that is printable ASCII."""
+    def sub(m):
+        kind, key = xors[m.group("name")]
+        d = _dv_bytes(_dv_literal(m), kind)
+        if d is None or not _dv_xor_printable(d, key):
+            return m.group()
+        return _dv_quote(bytes(b ^ key[i % len(key)] for i, b in enumerate(d)).decode("ascii"))
+    return sub
+
+
 def decoded_view(text):
     """`text` read the way it reads once the strings it decodes as it runs
     are decoded (see above); `text` itself when there is nothing to decode."""
@@ -6990,6 +7339,12 @@ def decoded_view(text):
                           + r""")[ \t]*\([ \t]*""" + _DV_LIT + r"""[ \t]*\)""")
         view = call.sub(lambda m: (lambda d: m.group() if d is None else _dv_quote(d))(
             _dv_decode(helpers[m.group("name")], _dv_literal(m))), view)
+    if "^" in view:
+        xors = _dv_xor_decoders(view)
+        if xors:
+            call = re.compile(r"""(?<![\w$.])(?P<name>""" + "|".join(re.escape(n) for n in sorted(xors))
+                              + r""")[ \t]*\([ \t]*""" + _DV_LIT + r"""[ \t]*\)""")
+            view = call.sub(_dv_xor_sub(xors), view)
     if view == joined:
         return text                 # nothing decoded: literals joined alone are no reading of their own
     arrays = 0

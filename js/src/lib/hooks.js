@@ -979,10 +979,26 @@ const SELF_READ_SRC = String.raw`\bopen\s*\(\s*(?:os\.path\.(?:abspath|realpath)
   + String.raw`|fileURLToPath\s*\(\s*import\.meta\.url)|\barguments\s*\.\s*callee\b|\}\s*\)?\s*\.\s*toString\s*\(\s*\)`;
 const DATA_EXT = String.raw`(?:txt|dat|bin|png|jpe?g|gif|ico|bmp|svg|wav|mp3|mp4|woff2?|ttf|json|md|cfg|ini|log|db|pyc|so|dll`
   + String.raw`|dylib|exe)`;
+// a data file's name inside quotes: a data extension, or a licence or readme with or without one (0.1.8)
+const NAME_CHAR = String.raw`[^\"'` + "`" + String.raw`{}$\n]`;
+const DATA_FILE = String.raw`(?:` + NAME_CHAR + String.raw`{1,100}\.` + DATA_EXT + String.raw`|(?:` + NAME_CHAR + String.raw`{0,100}[/\\])?`
+  + String.raw`(?:LICEN[CS]E|COPYING|NOTICE|README|AUTHORS|CHANGELOG|CHANGES|HISTORY|PATENTS)(?:[-.]\w{1,10})?)`;
 const SIBLING_DATA_SRC = String.raw`\b(?:open|read_text|read_bytes|readFileSync|readFile)\s*\([^\n]{0,200}?(?:__file__|__dirname|import\.meta\.url)`
-  + String.raw`[^\n]{0,200}?[\"'][^\"'\n]{1,100}\.` + DATA_EXT + String.raw`[\"']`
-  + String.raw`|(?:__file__|__dirname)[^\n]{0,200}?[\"'][^\"'\n]{1,100}\.` + DATA_EXT + String.raw`[\"'][^\n]{0,60}?`
+  + String.raw`[^\n]{0,200}?[\"']` + DATA_FILE + String.raw`[\"']`
+  + String.raw`|(?:__file__|__dirname)[^\n]{0,200}?[\"']` + DATA_FILE + String.raw`[\"'][^\n]{0,60}?`
   + String.raw`\.\s*(?:read_text|read_bytes)\s*\(`;
+// a data file's path assigned to a name, a read of a path by its name, a read
+// call's head, its node-style callback, and `.then(x => …)` or Python's `as f`
+// after it (0.1.8; core's comment above _SELF_READ_RE)
+const SIBLING_PATH_SRC = String.raw`(?:__file__|__dirname|import\.meta\.url)[^\n]{0,200}?(?:[\"'` + "`" + String.raw`]|\}[/\\])`
+  + DATA_FILE + String.raw`[\"'` + "`]";
+const PATH_READ_SRC = String.raw`\b(?:open|read_text|read_bytes|readFileSync|readFile)\s*\(\s*([A-Za-z_$][\w$]*)\s*[,)]`
+  + String.raw`|(?<![\w$.])([A-Za-z_$][\w$]*)\s*\.\s*(?:read_text|read_bytes)\s*\(`;
+const READ_HEAD_SRC = String.raw`\b(?:open|read_text|read_bytes|readFileSync|readFile)\s*\(`;
+const READ_CALLBACK_SRC = String.raw`\(\s*[A-Za-z_$][\w$]*\s*,\s*([A-Za-z_$][\w$]*)\s*\)\s*(?:=>|\{)`;
+const READ_THEN_SRC =
+  String.raw`\s*(?:\.\s*then\s*\(\s*(?:async\s+)?(?:function\b\s*[\w$]*\s*)?\(?\s*([A-Za-z_$][\w$]*)|as\s+([A-Za-z_]\w*))`;
+const SELF_SHELL_RUNNERS = ["execSync", "system", "popen", "Popen", "check_output", "getoutput", "subprocess"];
 const SELF_RUN_SRC = String.raw`(?<![\w.$])(?:exec|eval|compile)\s*\(|\bnew\s+Function\s*\(|\bvm\s*\.\s*run\w*\s*\(`
   + String.raw`|\b(?:execSync|system|popen|Popen|check_output|getoutput)\s*\(|\bsubprocess\s*\.\s*\w+\s*\(`;
 const SELF_READ_ASSIGN_SRC = String.raw`(?<![^\n])[ \t]*(?:(?:const|let|var)[ \t]+)?([A-Za-z_$][\w$]*)[ \t]*(?::[^=\n]*)?=(?![=>])([^\n]*)`;
@@ -992,9 +1008,16 @@ const SELF_READ_ALL_RE = pyRe(SELF_READ_SRC, "g");
 const SIBLING_DATA_RE = pyRe(SIBLING_DATA_SRC);
 const SIBLING_DATA_ALL_RE = pyRe(SIBLING_DATA_SRC, "g");
 const SELF_RUN_ALL_RE = pyRe(SELF_RUN_SRC, "g");
+const SIBLING_PATH_RE = pyRe(SIBLING_PATH_SRC);
+const SIBLING_PATH_ALL_RE = pyRe(SIBLING_PATH_SRC, "g");
+const PATH_READ_ALL_RE = pyRe(PATH_READ_SRC, "g");
+const READ_HEAD_ALL_RE = pyRe(READ_HEAD_SRC, "g");
+const READ_CALLBACK_RE = pyRe(READ_CALLBACK_SRC);
+const READ_THEN_AT_START_RE = pyRe("^(?:" + READ_THEN_SRC + ")");      // Python's match(): at the start
 const SELF_READ_ASSIGN_ALL_RE = pyRe(SELF_READ_ASSIGN_SRC, "gd");      // d: the groups' offsets
 const IDENT_TOKEN_ALL_RE = pyRe(IDENT_TOKEN_SRC, "g");
 const SELF_READ_PASSES = 3, SELF_READ_MAX_CALLS = 200, SELF_READ_ARG_SPAN = 2000, SELF_READ_MAX_ASSIGNS = 5000;
+const SELF_READ_THEN_SPAN = 200;
 const LITERAL_SPANS_MAX = 20000;
 
 /** Does `text` read its own source? (core.reads_own_source) */
@@ -1047,13 +1070,14 @@ function literalSpans(text) {
 }
 /** The offset of a runner that runs code read from the text's own source or a data file next to it, else -1 (core.runs_own_source_at). */
 export function runsOwnSourceAt(text) {
-  if (!SELF_READ_RE.test(text) && !SIBLING_DATA_RE.test(text)) return -1;
+  if (!SELF_READ_RE.test(text) && !SIBLING_DATA_RE.test(text) && !SIBLING_PATH_RE.test(text)) return -1;
   const spans = literalSpans(text);
-  const inLiteral = (pos) => {
+  const literalAt = (pos) => {
     let lo = 0, hi = spans.length;               // the last span starting at or before pos
     while (lo < hi) { const mid = (lo + hi) >> 1; if (spans[mid][0] <= pos) lo = mid + 1; else hi = mid; }
-    return lo > 0 && pos < spans[lo - 1][1];
+    return lo > 0 && pos < spans[lo - 1][1] ? spans[lo - 1] : null;
   };
+  const inLiteral = (pos) => literalAt(pos) !== null;
   const reads = (lo, hi) => {
     const part = text.slice(lo, hi);
     for (const rx of [SELF_READ_ALL_RE, SIBLING_DATA_ALL_RE]) {
@@ -1065,24 +1089,63 @@ export function runsOwnSourceAt(text) {
     }
     return false;
   };
+  const paths = new Set();                         // names of data files' paths
+  const pathReads = (lo, hi) => {
+    if (!paths.size) return false;
+    const part = text.slice(lo, hi);
+    PATH_READ_ALL_RE.lastIndex = 0;
+    for (let m; (m = PATH_READ_ALL_RE.exec(part)) !== null;) {
+      if (paths.has(m[1] !== undefined ? m[1] : m[2]) && !inLiteral(lo + m.index)) return true;
+    }
+    return false;
+  };
   const uses = (lo, hi, names) => {
+    if (!names.size) return false;
     const part = text.slice(lo, hi);
     IDENT_TOKEN_ALL_RE.lastIndex = 0;
     for (let m; (m = IDENT_TOKEN_ALL_RE.exec(part)) !== null;) if (names.has(m[0]) && !inLiteral(lo + m.index)) return true;
     return false;
   };
-  if (!reads(0, text.length)) return -1;
   const assigns = [];
   SELF_READ_ASSIGN_ALL_RE.lastIndex = 0;
   for (let m, k = 0; (m = SELF_READ_ASSIGN_ALL_RE.exec(text)) !== null; k++) {
     if (k >= SELF_READ_MAX_ASSIGNS) break;
     if (!inLiteral(m.indices[1][0])) assigns.push([m[1], m.indices[2][0], m.indices[2][1]]);
   }
-  const names = new Set();
+  for (const [name, lo, hi] of assigns) {           // a template's `${__dirname}` counts
+    const part = text.slice(lo, hi);
+    SIBLING_PATH_ALL_RE.lastIndex = 0;
+    for (let m; (m = SIBLING_PATH_ALL_RE.exec(part)) !== null;) {
+      const lit = literalAt(lo + m.index);
+      if (lit === null || text[lit[0]] === "`") { paths.add(name); break; }
+    }
+  }
+  if (!reads(0, text.length) && !pathReads(0, text.length)) return -1;
+  const names = new Set();                         // values of a read written out: any runner
+  const codeNames = new Set();                     // values of a path read by name: code runners only
+  READ_HEAD_ALL_RE.lastIndex = 0;
+  for (let h, k = 0; (h = READ_HEAD_ALL_RE.exec(text)) !== null; k++) {
+    if (k >= SELF_READ_MAX_CALLS) break;
+    if (inLiteral(h.index)) continue;
+    const start = h.index + h[0].length;
+    const args = callArgs(text.slice(start, cpForward(text, start, SELF_READ_ARG_SPAN)));
+    const close = start + args.length;             // the closing bracket, when there is one
+    const past = cpForward(text, close, 1);
+    const into = reads(h.index, past) ? names : pathReads(h.index, past) ? codeNames : null;
+    if (into === null) continue;
+    const cb = READ_CALLBACK_RE.exec(args);
+    if (cb !== null && !inLiteral(start + cb.index)) into.add(cb[1]);
+    if (close < text.length && text[close] === ")") {
+      const then = READ_THEN_AT_START_RE.exec(text.slice(close + 1, cpForward(text, close + 1, SELF_READ_THEN_SPAN)));
+      if (then !== null) into.add(then[1] !== undefined ? then[1] : then[2]);
+    }
+  }
   for (let pass = 0; pass < SELF_READ_PASSES; pass++) {
     let grown = false;
     for (const [name, lo, hi] of assigns) {
-      if (!names.has(name) && (reads(lo, hi) || uses(lo, hi, names))) { names.add(name); grown = true; }
+      if (names.has(name)) continue;
+      if (reads(lo, hi) || uses(lo, hi, names)) { names.add(name); grown = true; }
+      else if (!codeNames.has(name) && (pathReads(lo, hi) || uses(lo, hi, codeNames))) { codeNames.add(name); grown = true; }
     }
     if (!grown) break;
   }
@@ -1093,6 +1156,9 @@ export function runsOwnSourceAt(text) {
     const start = m.index + m[0].length;
     const hi = start + callArgs(text.slice(start, cpForward(text, start, SELF_READ_ARG_SPAN))).length;
     if (reads(start, hi) || uses(start, hi, names)) return m.index;
+    if (!SELF_SHELL_RUNNERS.some((r) => m[0].startsWith(r)) && (pathReads(start, hi) || uses(start, hi, codeNames))) {
+      return m.index;
+    }
   }
   return -1;
 }
@@ -1239,6 +1305,141 @@ export function dumpsWorkflowSecrets(text) {
 const PERSIST_SHORTCUT_SRC = String.raw`\bCreateShortcut\b|\.lnk\b`;
 const PERSIST_SHORTCUT_RE = pyRe(PERSIST_SHORTCUT_SRC);
 
+// ---- programs set to start at login or boot (0.1.8; core's comment above _SVC_SYSTEMD_DIR_SRC) ----
+// A systemd unit, a launchd agent, a cron job, a Windows Run key, a scheduled
+// task, the Startup folder, an XDG autostart entry: each a place and a way to
+// fill it in one install-time text.
+const Q = "[\"'`]";
+const SVC_SYSTEMD_DIR_SRC =
+  String.raw`(?<!/run/)systemd[/\\](?:user|system)(?![\w.-])` +
+  String.raw`|${Q}systemd${Q}\s{0,20}[,+/]\s{0,20}${Q}(?:user|system)${Q}`;
+const SVC_UNIT_SRC = String.raw`ExecStart\s{0,20}=`;
+const SVC_SYSTEMCTL_SRC =
+  String.raw`\bsystemctl(?:[ \t]+-{1,2}[\w-]+)*[ \t]+(?:enable|reenable|link)\b` +
+  String.raw`|${Q}systemctl${Q}\s{0,20},\s{0,20}(?:${Q}-{1,2}[\w-]+${Q}\s{0,20},\s{0,20}){0,4}${Q}` +
+  String.raw`(?:enable|reenable|link)${Q}`;
+const SVC_LAUNCHD_DIR_SRC = String.raw`\bLaunch(?:Agents|Daemons)\b`;
+const SVC_PLIST_SRC = String.raw`\b(?:RunAtLoad|KeepAlive|ProgramArguments|StartInterval)\b`;
+const SVC_LAUNCHCTL_SRC =
+  String.raw`\blaunchctl(?:[ \t]+-{1,2}[\w-]+)*[ \t]+(?:load|bootstrap|enable|submit)\b` +
+  String.raw`|${Q}launchctl${Q}\s{0,20},\s{0,20}(?:${Q}-{1,2}[\w-]+${Q}\s{0,20},\s{0,20}){0,4}${Q}` +
+  String.raw`(?:load|bootstrap|enable|submit)${Q}`;
+const SVC_CRONTAB_SRC =
+  String.raw`\|[ \t]*(?:sudo[ \t]+)?crontab(?:[ \t]+-(?![\w-])|[ \t]*(?![^"'` + "`" + String.raw`)\n;&>]))` +
+  String.raw`|\bcrontab[ \t]+(?:-(?![\w-])|["']?(?:[/~$]|\.\.?/))` +
+  String.raw`|${Q}crontab${Q}\s{0,20},\s{0,20}(?!${Q}-[lre]${Q})[\w$"'` + "`" + "]";
+const SVC_PYCRON_SRC = String.raw`\bCronTab\s{0,20}\(`;
+const SVC_PYCRON_WRITE_SRC = String.raw`\.write\s{0,20}\(`;
+const SVC_CRON_DIR_SRC =
+  String.raw`/etc/cron\.(?:d|hourly|daily|weekly|monthly)(?![\w.-])|/etc/crontab(?![\w.-])|/var/spool/cron(?![\w.-])`;
+const SVC_RUNKEY_SRC = String.raw`CurrentVersion(?:\\{1,2}|/)Run(?:Once(?:Ex)?|Services(?:Once)?)?(?!\w)`;
+const SVC_REG_WRITE_SRC =
+  String.raw`\breg(?:\.exe)?${Q}?(?:[ \t]+|\s{0,20},\s{0,20}\[?\s{0,20}${Q})add\b|\b(?:New|Set)-ItemProperty\b` +
+  String.raw`|\bSetValueEx\b|\bSetValue\s{0,20}\(|\bputValue\b|\bRegSetValue|\bREG_(?:EXPAND_)?SZ\b` +
+  String.raw`|\bKEY_(?:SET_VALUE|WRITE|ALL_ACCESS)\b`;
+const SVC_SCHTASKS_SRC = String.raw`\bschtasks(?:\.exe)?${Q}?(?:[ \t]+|\s{0,20},\s{0,20}\[?\s{0,20}${Q})[/-]create\b`;
+const SVC_TASK_API_SRC = String.raw`\bRegister-ScheduledTask\b`;
+const SVC_TASK_COM_SRC = String.raw`\bSchedule\.Service\b`;
+const SVC_TASK_REGISTER_SRC = String.raw`\bRegisterTaskDefinition\b`;
+const SVC_STARTUP_SRC =
+  String.raw`Start[ ]?Menu[/\\]{1,2}Programs[/\\]{1,2}Startup(?!\w)|\bshell:(?:common[ ]?)?startup\b` +
+  String.raw`|\bCSIDL_(?:COMMON_)?STARTUP\b|\bSpecialFolder\.(?:Common)?Startup\b|\bwinshell\.startup\s{0,20}\(` +
+  String.raw`|${Q}Programs${Q}\s{0,20}[,+/]\s{0,20}${Q}Startup${Q}`;
+const SVC_AUTOSTART_SRC =
+  String.raw`\.config[/\\]autostart(?![\w.-])|/etc/xdg/autostart(?![\w.-])` +
+  String.raw`|${Q}\.config${Q}\s{0,20}[,+/]\s{0,20}${Q}autostart${Q}`;
+const SVC_CMD_START_SRC =
+  String.raw`(?:(?<![^\n])|[;&|(])[ \t]*(?:sudo[ \t]+)?` +
+  String.raw`(?:systemctl|launchctl|crontab|[Ss][Cc][Hh][Tt][Aa][Ss][Kk][Ss](?:\.[Ee][Xx][Ee])?)(?![\w.-])`;
+const SVC_SYSTEMD_DIR_RE = pyRe(SVC_SYSTEMD_DIR_SRC, "g");
+const SVC_UNIT_RE = pyRe(SVC_UNIT_SRC);
+const SVC_SYSTEMCTL_RE = pyRe(SVC_SYSTEMCTL_SRC);
+const SVC_LAUNCHD_DIR_RE = pyRe(SVC_LAUNCHD_DIR_SRC, "g");
+const SVC_PLIST_RE = pyRe(SVC_PLIST_SRC);
+const SVC_LAUNCHCTL_RE = pyRe(SVC_LAUNCHCTL_SRC);
+const SVC_CRONTAB_RE = pyRe(SVC_CRONTAB_SRC);
+const SVC_PYCRON_RE = pyRe(SVC_PYCRON_SRC);
+const SVC_PYCRON_WRITE_RE = pyRe(SVC_PYCRON_WRITE_SRC);
+const SVC_CRON_DIR_RE = pyRe(SVC_CRON_DIR_SRC, "g");
+const SVC_RUNKEY_RE = pyRe(SVC_RUNKEY_SRC, "gi");
+const SVC_REG_WRITE_RE = pyRe(SVC_REG_WRITE_SRC, "i");
+const SVC_SCHTASKS_RE = pyRe(SVC_SCHTASKS_SRC, "i");
+const SVC_TASK_API_RE = pyRe(SVC_TASK_API_SRC, "i");
+const SVC_TASK_COM_RE = pyRe(SVC_TASK_COM_SRC, "i");
+const SVC_TASK_REGISTER_RE = pyRe(SVC_TASK_REGISTER_SRC);
+const SVC_STARTUP_RE = pyRe(SVC_STARTUP_SRC, "gi");
+const SVC_AUTOSTART_RE = pyRe(SVC_AUTOSTART_SRC, "g");
+const SVC_CMD_START_RE = pyRe(SVC_CMD_START_SRC);
+const SVC_LINE_MAX = 1000;
+const SVC_RUNKEY_SPAN = 400;
+
+/** A write call or a shell write on a short line on which targetRe matches (core._writes_on_line). */
+function writesOnLine(text, targetRe) {
+  let m = searchFrom(targetRe, text);
+  for (let lines = 0; m !== null && lines < PERSIST_MAX_LINES; lines++) {
+    const start = text.lastIndexOf("\n", m.index) + 1;
+    let end = text.indexOf("\n", m.index + m[0].length);
+    if (end < 0) end = text.length;
+    const line = text.slice(start, end);
+    if (!cpLongerThan(line, SVC_LINE_MAX) && (PERSIST_WRITE_RE.test(line) || PERSIST_SHELL_WRITE_RE.test(line))) return true;
+    m = searchFrom(targetRe, text, end);
+  }
+  return false;
+}
+
+/** A registry write within SVC_RUNKEY_SPAN code points of a Run key (core._run_key_written). */
+function runKeyWritten(text) {
+  SVC_RUNKEY_RE.lastIndex = 0;
+  for (let k = 0, m; (m = SVC_RUNKEY_RE.exec(text)) !== null; k++) {
+    if (k >= PERSIST_MAX_LINES) break;
+    const end = m.index + m[0].length;
+    if (SVC_REG_WRITE_RE.test(text.slice(cpBack(text, m.index, SVC_RUNKEY_SPAN), cpForward(text, end, SVC_RUNKEY_SPAN)))) {
+      return true;
+    }
+    if (m[0].length === 0) SVC_RUNKEY_RE.lastIndex++;
+  }
+  return false;
+}
+
+/** The reasons text sets a program to start at login or boot. Twin of core.service_reasons. */
+export function serviceReasons(text) {
+  const reasons = [];
+  let runs = null;
+  const runContext = () => {
+    if (runs === null) runs = EXEC_CALL_RE.test(text) || SVC_CMD_START_RE.test(text);
+    return runs;
+  };
+  const writes = PERSIST_WRITE_RE.test(text);
+  if ((searchFrom(SVC_SYSTEMD_DIR_RE, text) !== null
+       && ((writes && SVC_UNIT_RE.test(text)) || writesOnLine(text, SVC_SYSTEMD_DIR_RE)))
+      || (SVC_SYSTEMCTL_RE.test(text) && runContext())) {
+    reasons.push("installs a systemd service");
+  }
+  if ((searchFrom(SVC_LAUNCHD_DIR_RE, text) !== null
+       && ((writes && SVC_PLIST_RE.test(text)) || writesOnLine(text, SVC_LAUNCHD_DIR_RE)))
+      || (SVC_LAUNCHCTL_RE.test(text) && runContext())) {
+    reasons.push("installs a launchd agent or daemon");
+  }
+  if ((SVC_CRONTAB_RE.test(text) && runContext())
+      || (SVC_PYCRON_RE.test(text) && SVC_PYCRON_WRITE_RE.test(text))
+      || writesOnLine(text, SVC_CRON_DIR_RE)) {
+    reasons.push("adds a cron job");
+  }
+  if (runKeyWritten(text)) reasons.push("adds a program to a Windows Run key");
+  if ((SVC_SCHTASKS_RE.test(text) && runContext()) || SVC_TASK_API_RE.test(text)
+      || (SVC_TASK_COM_RE.test(text) && SVC_TASK_REGISTER_RE.test(text))) {
+    reasons.push("creates a Windows scheduled task");
+  }
+  if (searchFrom(SVC_STARTUP_RE, text) !== null
+      && (writes || PERSIST_SHORTCUT_RE.test(text) || shellWrites(text, SVC_STARTUP_RE))) {
+    reasons.push("puts a program in the Windows Startup folder");
+  }
+  if (searchFrom(SVC_AUTOSTART_RE, text) !== null && (writes || shellWrites(text, SVC_AUTOSTART_RE))) {
+    reasons.push("adds a desktop autostart entry");
+  }
+  return reasons;
+}
+
 /** The persistence-target reasons of the install-script test. Twin of core.persistence_reasons. */
 export function persistenceReasons(text) {
   const reasons = [];
@@ -1267,6 +1468,7 @@ export function persistenceReasons(text) {
   if (text.includes("--load-extension") && PERSIST_SHORTCUT_RE.test(text)) {
     reasons.push("rewrites browser shortcuts to load an extension");
   }
+  reasons.push(...serviceReasons(text));
   return reasons;
 }
 
@@ -1380,6 +1582,14 @@ const DV_MEMBER_G = pyReG(DV_MEMBER_SRC, "g");
 const DV_HEX_WHOLE = /^[0-9A-Fa-f]+$/;
 const DV_B64_WHOLE = /^[A-Za-z0-9+/]+={0,2}$/;
 const DV_NEEDLES = ["Buffer", "atob", "fromhex", "unhexlify", "b64decode", "fromCharCode", "hex", "base64"];
+// home-made XOR decoders (0.1.8; core's comment above _DV_XOR_MIN_CALLS)
+const DV_XOR_MIN_CALLS = 5, DV_XOR_MAX_CALLS = 64, DV_XOR_MIN_BYTES = 32, DV_XOR_MAX_KEYS = 256, DV_XOR_KEY_MAX = 32;
+const DV_CALL_SRC = String.raw`(?<![\w$.])(?P<name>[A-Za-z_$][\w$]*)[ \t]*\([ \t]*` + DV_LIT + String.raw`[ \t]*\)`;
+const DV_KEY_SRC = String.raw`'(?P<a>[^'\\\n]{1,32})'|"(?P<b>[^"\\\n]{1,32})"|` + BT + String.raw`(?P<c>[^` + BT
+  + String.raw`\\\n$]{1,32})` + BT;
+const DV_CALL_G = pyReG(DV_CALL_SRC, "g");
+const DV_KEY_G = pyReG(DV_KEY_SRC, "g");
+const PRINTABLE_ASCII = /^[ -~]+$/;
 const reEscape = (s) => s.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
 
 /** The printable ASCII text a literal decodes to as hex or base64, else null. core._dv_decode. */
@@ -1394,6 +1604,64 @@ function dvDecode(kind, s) {
   }
   if (!data.length || data.some((b) => b < 0x20 || b > 0x7e)) return null;
   return data.toString("latin1");
+}
+
+/** The bytes a literal holds as hex, or as base64 (padded; or unpadded, but not 4k+1 long), else null. core._dv_bytes. */
+function dvBytes(s, kind) {
+  if (kind === "hex") return s.length % 2 === 0 && DV_HEX_WHOLE.test(s) ? Buffer.from(s, "hex") : null;
+  if (!DV_B64_WHOLE.test(s) || s.length % 4 === 1 || (s.includes("=") && s.length % 4)) return null;
+  return Buffer.from(s, "base64");
+}
+
+/** Is every byte of data XORed with key (repeated) printable ASCII? core._dv_xor_printable. */
+function dvXorPrintable(data, key) {
+  for (let i = 0; i < data.length; i++) {
+    const b = data[i] ^ key[i % key.length];
+    if (b < 0x20 || b > 0x7e) return false;
+  }
+  return true;
+}
+
+/** Map name -> [kind, key]: the names view calls as XOR decoders, in the order of their first calls. core._dv_xor_decoders. */
+function dvXorDecoders(view) {
+  const calls = new Map();
+  for (const m of view.matchAll(DV_CALL_G)) {
+    let lits = calls.get(m.groups.name);
+    if (lits === undefined) calls.set(m.groups.name, lits = []);
+    if (lits.length < DV_XOR_MAX_CALLS) lits.push(m.groups.a || m.groups.b || m.groups.c);
+  }
+  const out = new Map();
+  let keys = null;
+  for (const [name, lits] of calls) {
+    if (lits.length < DV_XOR_MIN_CALLS) continue;
+    const kind = lits.every((x) => x.length % 2 === 0 && DV_HEX_WHOLE.test(x)) ? "hex" : "base64";
+    const data = lits.map((x) => dvBytes(x, kind));
+    const read = data.filter((d) => d !== null);
+    if (read.length < DV_XOR_MIN_CALLS || read.reduce((n, d) => n + d.length, 0) < DV_XOR_MIN_BYTES) continue;
+    if (keys === null) {
+      keys = [];
+      const seen = new Set();
+      for (const k of view.matchAll(DV_KEY_G)) {
+        const key = k.groups.a || k.groups.b || k.groups.c;
+        if (seen.has(key) || !PRINTABLE_ASCII.test(key)) continue;
+        seen.add(key);
+        keys.push(Buffer.from(key, "latin1"));
+        if (keys.length >= DV_XOR_MAX_KEYS) break;
+      }
+    }
+    const allowed = Math.floor(lits.length / 10);   // calls that may stay unread
+    for (const key of keys) {
+      let bad = 0;
+      for (const d of data) {
+        if (d === null || !dvXorPrintable(d, key)) {
+          if (++bad > allowed) break;
+        }
+      }
+      if (bad <= allowed) { out.set(name, [kind, key]); break; }
+    }
+    if (out.size >= DV_MAX_HELPERS) break;
+  }
+  return out;
 }
 
 const dvQuote = (s) => "'" + s.replaceAll("\\", "\\\\").replaceAll("'", "\\'") + "'";
@@ -1438,6 +1706,21 @@ export function decodedView(text) {
     const call = pyReG(String.raw`(?<![\w$.])(?P<name>` + names.map(reEscape).join("|") + String.raw`)[ \t]*\([ \t]*`
       + DV_LIT + String.raw`[ \t]*\)`, "g");
     view = view.replace(call, dvReplace((g) => helpers.get(g.name)));
+  }
+  if (view.includes("^")) {
+    const xors = dvXorDecoders(view);
+    if (xors.size) {
+      const names = [...xors.keys()].sort();
+      const call = pyReG(String.raw`(?<![\w$.])(?P<name>` + names.map(reEscape).join("|") + String.raw`)[ \t]*\([ \t]*`
+        + DV_LIT + String.raw`[ \t]*\)`, "g");
+      view = view.replace(call, (...args) => {
+        const g = args[args.length - 1];
+        const [kind, key] = xors.get(g.name);
+        const d = dvBytes(dvLiteral(g), kind);
+        if (d === null || !dvXorPrintable(d, key)) return args[0];
+        return dvQuote(Buffer.from(d.map((b, i) => b ^ key[i % key.length])).toString("latin1"));
+      });
+    }
   }
   if (view === joined) return text;                  // nothing decoded: literals joined alone are no reading of their own
   let arrays = 0;
@@ -2012,6 +2295,8 @@ export const PY_TWINS = {
     _HOST_INFO_RE: [HOST_INFO_SRC, ""], _CAPTURE_SERVICE_RE: [CAPTURE_SERVICE_SRC, "i"], _PY_RUN_RE: [PY_RUN_SRC, ""],
     _PY_DOC_HEAD_RE: [PY_DOC_HEAD_SRC, ""], _BRACKET_RE: [BRACKET_SRC, ""], _SPACE_TAB_RE: [SPACE_TAB_SRC, ""],
     _SELF_READ_RE: [SELF_READ_SRC, ""], _SIBLING_DATA_RE: [SIBLING_DATA_SRC, ""], _SELF_RUN_RE: [SELF_RUN_SRC, ""],
+    _SIBLING_PATH_RE: [SIBLING_PATH_SRC, ""], _PATH_READ_RE: [PATH_READ_SRC, ""], _READ_HEAD_RE: [READ_HEAD_SRC, ""],
+    _READ_CALLBACK_RE: [READ_CALLBACK_SRC, ""], _READ_THEN_RE: [READ_THEN_SRC, ""],
     _SELF_READ_ASSIGN_RE: [SELF_READ_ASSIGN_SRC, ""], _IDENT_TOKEN_RE: [IDENT_TOKEN_SRC, ""],
     _PERSIST_AGENT_RE: [PERSIST_AGENT_SRC, ""], _PERSIST_AGENT_SPLIT_RE: [PERSIST_AGENT_SPLIT_SRC, ""],
     _PERSIST_WORKFLOW_RE: [PERSIST_WORKFLOW_SRC, ""], _PERSIST_EXT_DIR_RE: [PERSIST_EXT_DIR_SRC, ""],
@@ -2027,6 +2312,7 @@ export const PY_TWINS = {
     _DV_JOIN_RE: [DV_JOIN_SRC, ""], _DV_BUFFER_RE: [DV_BUFFER_SRC, ""], _DV_ATOB_RE: [DV_ATOB_SRC, ""],
     _DV_PY_RE: [DV_PY_SRC, ""], _DV_HELPER_RE: [DV_HELPER_SRC, ""], _DV_STR_ITEM_RE: [DV_STR_ITEM_SRC, ""],
     _DV_ARRAY_RE: [DV_ARRAY_SRC, ""], _DV_MEMBER_RE: [DV_MEMBER_SRC, ""],
+    _DV_CALL_RE: [DV_CALL_SRC, ""], _DV_KEY_RE: [DV_KEY_SRC, ""],
     _SCRIPT_INTERP_RE: [SCRIPT_INTERP_SRC, ""], _SCRIPT_LOAD_RE: [SCRIPT_LOAD_SRC, ""], _DECODE_CALL_RE: [DECODE_CALL_SRC, ""],
     _SPAWN_CALL_RE: [SPAWN_CALL_SRC, ""], _SPAWN_LIT_RE: [SPAWN_LIT_SRC, ""], _SPAWN_CONCAT_RE: [SPAWN_CONCAT_SRC, ""],
     _SPAWN_DIR_RE: [SPAWN_DIR_SRC, ""], _SPAWN_JOIN_RE: [SPAWN_JOIN_SRC, ""], _SPAWN_NAME_RE: [SPAWN_NAME_SRC, ""],
@@ -2040,6 +2326,16 @@ export const PY_TWINS = {
     _IP_LITERAL_RE: [IP_LITERAL_SRC, ""], _RAW_CONNECT_RE: [RAW_CONNECT_SRC, ""], _ENV_COPY_ANCHOR_RE: [ENV_COPY_ANCHOR_SRC, ""],
     _MONERO_ADDR_RE: [MONERO_ADDR_SRC, ""], _MINER_ARG_RE: [MINER_ARG_SRC, ""], _NGROK_TUNNEL_RE: [NGROK_TUNNEL_SRC, ""],
     _PERSIST_SHORTCUT_RE: [PERSIST_SHORTCUT_SRC, ""],
+    _SVC_SYSTEMD_DIR_RE: [SVC_SYSTEMD_DIR_SRC, ""], _SVC_UNIT_RE: [SVC_UNIT_SRC, ""],
+    _SVC_SYSTEMCTL_RE: [SVC_SYSTEMCTL_SRC, ""], _SVC_LAUNCHD_DIR_RE: [SVC_LAUNCHD_DIR_SRC, ""],
+    _SVC_PLIST_RE: [SVC_PLIST_SRC, ""], _SVC_LAUNCHCTL_RE: [SVC_LAUNCHCTL_SRC, ""],
+    _SVC_CRONTAB_RE: [SVC_CRONTAB_SRC, ""], _SVC_PYCRON_RE: [SVC_PYCRON_SRC, ""],
+    _SVC_PYCRON_WRITE_RE: [SVC_PYCRON_WRITE_SRC, ""], _SVC_CRON_DIR_RE: [SVC_CRON_DIR_SRC, ""],
+    _SVC_RUNKEY_RE: [SVC_RUNKEY_SRC, "i"], _SVC_REG_WRITE_RE: [SVC_REG_WRITE_SRC, "i"],
+    _SVC_SCHTASKS_RE: [SVC_SCHTASKS_SRC, "i"], _SVC_TASK_API_RE: [SVC_TASK_API_SRC, "i"],
+    _SVC_TASK_COM_RE: [SVC_TASK_COM_SRC, "i"], _SVC_TASK_REGISTER_RE: [SVC_TASK_REGISTER_SRC, ""],
+    _SVC_STARTUP_RE: [SVC_STARTUP_SRC, "i"], _SVC_AUTOSTART_RE: [SVC_AUTOSTART_SRC, ""],
+    _SVC_CMD_START_RE: [SVC_CMD_START_SRC, ""],
     ...RECEIVED_TWINS,
   },
   sets: {
@@ -2059,7 +2355,7 @@ export const PY_TWINS = {
     _SPAWN_NO_SCRIPT_FLAGS: [...SPAWN_NO_SCRIPT_FLAGS], _SPAWN_VALUE_FLAGS: [...SPAWN_VALUE_FLAGS],
     _CRED_SWEEP_NEEDLES: CRED_SWEEP_NEEDLES, _PUBLIC_RESOLVERS: [...PUBLIC_RESOLVERS],
     _PUBLIC_IP_LOOKUP_NEEDLES: PUBLIC_IP_LOOKUP_NEEDLES, _MINER_ARG_NEEDLES: MINER_ARG_NEEDLES,
-    _REVSHELL_ARGS_NEEDLES: REVSHELL_ARGS_NEEDLES,
+    _REVSHELL_ARGS_NEEDLES: REVSHELL_ARGS_NEEDLES, _SELF_SHELL_RUNNERS: SELF_SHELL_RUNNERS,
   },
   maps: Object.fromEntries([["_PERSIST_AGENT_PAIRS", PERSIST_AGENT_PAIRS], ["_WRAPPER_VALUE_OPTIONS", WRAPPER_VALUE_OPTIONS],
     ["_WRAPPER_CHDIR_OPTIONS", WRAPPER_CHDIR_OPTIONS], ["_WRAPPER_COMMAND_OPTIONS", WRAPPER_COMMAND_OPTIONS]]
@@ -2068,10 +2364,13 @@ export const PY_TWINS = {
     _PS_ENCODED_MAX: PS_ENCODED_MAX, _STAGER_MIN: STAGER_MIN, _STAGER_MAX_LITERALS: STAGER_MAX_LITERALS,
     _PS_EXEC_BACK: PS_EXEC_BACK, _PS_EXEC_MAX_NAMES: PS_EXEC_MAX_NAMES, _SELF_READ_PASSES: SELF_READ_PASSES,
     _SELF_READ_MAX_CALLS: SELF_READ_MAX_CALLS, _SELF_READ_ARG_SPAN: SELF_READ_ARG_SPAN,
-    _SELF_READ_MAX_ASSIGNS: SELF_READ_MAX_ASSIGNS, _LITERAL_SPANS_MAX: LITERAL_SPANS_MAX,
-    _PERSIST_MAX_LINES: PERSIST_MAX_LINES, _SELF_PUB_SPAN: SELF_PUB_SPAN, _SELF_PUB_MAX: SELF_PUB_MAX,
+    _SELF_READ_MAX_ASSIGNS: SELF_READ_MAX_ASSIGNS, _SELF_READ_THEN_SPAN: SELF_READ_THEN_SPAN, _LITERAL_SPANS_MAX: LITERAL_SPANS_MAX,
+    _PERSIST_MAX_LINES: PERSIST_MAX_LINES, _SVC_LINE_MAX: SVC_LINE_MAX, _SVC_RUNKEY_SPAN: SVC_RUNKEY_SPAN,
+    _SELF_PUB_SPAN: SELF_PUB_SPAN, _SELF_PUB_MAX: SELF_PUB_MAX,
     _DV_MAX_LITERAL: DV_MAX_LITERAL, _DV_BODY: DV_BODY, _DV_MAX_HELPERS: DV_MAX_HELPERS, _DV_MAX_ARRAYS: DV_MAX_ARRAYS,
-    _DV_MAX_CHARS: DV_MAX_CHARS, _SPAWN_MAX_DEPTH: SPAWN_MAX_DEPTH, _SPAWN_MAX_FILES: SPAWN_MAX_FILES,
+    _DV_MAX_CHARS: DV_MAX_CHARS, _DV_XOR_MIN_CALLS: DV_XOR_MIN_CALLS, _DV_XOR_MAX_CALLS: DV_XOR_MAX_CALLS,
+    _DV_XOR_MIN_BYTES: DV_XOR_MIN_BYTES, _DV_XOR_MAX_KEYS: DV_XOR_MAX_KEYS, _DV_XOR_KEY_MAX: DV_XOR_KEY_MAX,
+    _SPAWN_MAX_DEPTH: SPAWN_MAX_DEPTH, _SPAWN_MAX_FILES: SPAWN_MAX_FILES,
     _SPAWN_NAME_DEPTH: SPAWN_NAME_DEPTH, _SPAWN_MAX_TARGETS: SPAWN_MAX_TARGETS,
     _CHAT_SECRET_MAX: CHAT_SECRET_MAX, _CHAT_SECRET_MIN_DISTINCT: CHAT_SECRET_MIN_DISTINCT,
     _CRED_SWEEP_SPAN: CRED_SWEEP_SPAN, _CRED_SWEEP_MIN: CRED_SWEEP_MIN, _CRED_SWEEP_MAX: CRED_SWEEP_MAX,

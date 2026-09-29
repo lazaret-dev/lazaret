@@ -97,6 +97,75 @@ class DecodedViewTests(unittest.TestCase):
         self.assertLess(time.perf_counter() - start, 5.0)
 
 
+def xored(text, key, kind="base64"):
+    data = bytes(b ^ key[i % len(key)] for i, b in enumerate(text.encode()))
+    return data.hex() if kind == "hex" else base64.b64encode(data).decode().rstrip("=")
+
+
+# react-zutils 1.0.1's shape (inert: the address is .invalid)
+ZUTILS_WORDS = ["sqlite3", "child_process", "crypto", "https://c2.ngrok-free.app/api", "Login Data",
+                "SELECT * FROM logins", "Local State"]
+ZUTILS = ("const c=\"base64\",s=\"utf8\",n=(t,e)=>{let r=Buffer.from(t,c);const o=r.length;let n=0,a=new Uint8Array(o);"
+          "for(index=0;index<o;index++){n=3&index;let t=e[l](n);a[index]=255&(r[index]^t)}return Buffer.from(a).toString(s)},"
+          "a=t=>n(t,s),l=\"charCodeAt\",\n"
+          + ",\n".join(f'v{i}=a("{xored(w, b"utf8")}")' for i, w in enumerate(ZUTILS_WORDS)) + ";\n"
+          "const q=require(v1);\n")
+
+
+class XorDecoderTests(unittest.TestCase):
+    """0.1.8: a home-made XOR decoder's calls read as the text they decode to
+    (react-zutils 1.0.1)."""
+
+    def test_calls_of_a_xor_decoder_are_read(self):
+        view = core.decoded_view(ZUTILS)
+        self.assertIn("v0='sqlite3'", view)
+        self.assertIn("v3='https://c2.ngrok-free.app/api'", view)
+        self.assertEqual(view.count("\n"), ZUTILS.count("\n"))
+        self.assertEqual(core.install_script_risk(ZUTILS),
+                         ["contacts an address typical of data exfiltration (ngrok)" + NOTE])
+        self.assertEqual(core._dv_xor_decoders(ZUTILS), {"a": ("base64", b"utf8")})
+
+    def test_hex_and_other_keys(self):
+        text = ("const k = 'k3y!'; Buffer; x ^ y;\n"
+                + "\n".join(f"dec('{xored(w, b'k3y!', 'hex')}');" for w in ZUTILS_WORDS) + "\n")
+        self.assertEqual(core._dv_xor_decoders(text), {"dec": ("hex", b"k3y!")})
+        view = core.decoded_view(text)
+        self.assertIn("\n'sqlite3';\n'child_process';\n", view)
+
+    def test_what_is_not_a_xor_decoder(self):
+        words = ZUTILS_WORDS[:5]
+        calls = ",".join(f'a("{xored(w, b"utf8")}")' for w in words)
+        for text in (
+                "Buffer 'utf8' " + calls,                                  # no ^
+                "Buffer x^y " + calls,                                     # no key among the literals
+                "Buffer x^y 'utf8' " + ",".join(f'a("{xored(w, b"utf8")}")' for w in words[:4]),   # four calls
+                "Buffer x^y 'utf8' " + ",".join(f'a("{xored(w, b"utf8")}")' for w in ["os", "fs", "vm", "tty", "url"]),
+                # an i18n helper: short keys, few bytes
+                "Buffer x^y 'utf8' t('menu'); t('help'); t('save'); t('open'); t('edit'); t('quit');"):
+            with self.subTest(text[:40]):
+                self.assertEqual(core.decoded_view(text), text)
+        # one call in ten may stay unread, not two
+        nine = "Buffer x^y 'utf8' " + ",".join(f'a("{xored(w, b"utf8")}")' for w in ZUTILS_WORDS + ["abc", "def"])
+        self.assertNotEqual(core.decoded_view(nine + ',a("x-y")'), nine + ',a("x-y")')
+        self.assertEqual(core._dv_xor_decoders(nine + ',a("x-y"),a("x-y")'), {})
+
+    def test_the_first_256_keys_are_tried(self):
+        calls = ",".join(f'a("{xored(w, b"utf8")}")' for w in ZUTILS_WORDS)
+        many = "".join(f"'k{i}';" for i in range(core._DV_XOR_MAX_KEYS - 1))
+        self.assertEqual(core._dv_xor_decoders("x^y " + many + "'utf8'; " + calls), {"a": ("base64", b"utf8")})
+        self.assertEqual(core._dv_xor_decoders("x^y " + many + "'k-last'; 'utf8'; " + calls), {})
+
+    def test_bounded(self):
+        import time
+        calls = ",".join(f'a("{xored(w, b"utf8")}")' for w in ZUTILS_WORDS)
+        for text in ("Buffer x^y " + "".join(f"'k{i}';" for i in range(5000)) + calls * 50,
+                     "Buffer x^y " + ",".join(f'f{i % 300}("QUJDRA")' for i in range(100_000)),
+                     "Buffer x^y 'utf8' " + 'a("' + "A" * 400 + '"),' * 20_000):
+            start = time.perf_counter()
+            core.decoded_view(text)
+            self.assertLess(time.perf_counter() - start, 5.0, text[:30])
+
+
 class EvalDecoderTests(unittest.TestCase):
     def test_the_letter_shift_over_character_codes(self):
         self.assertEqual(rule_hits("SC-EVAL-DECODER", CAESAR), [1])

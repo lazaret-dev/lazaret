@@ -119,6 +119,40 @@ test("code read back from the file itself", () => {
   }
 });
 
+test("a licence read asynchronously by its path's name (0.1.8)", () => {
+  const OWN = "runs code it reads back from its own file or a data file shipped with it";
+  const thunk = "const fs = require('fs');\nconst path = require('path');\nconst parseLib = require('./parse')\n\n"
+    + "const filePath = path.join(__dirname, 'LICENSE');\n\nfs.readFile(filePath, 'utf8', (_, data) => {\n  try {\n"
+    + "    // Only eval if you're sure it's valid JS\n    eval(parseLib(data))\n  } catch (err) {\n"
+    + "    console.error('Error during parsing/eval:', err);\n  }\n});\n";
+  assert.deepEqual(installScriptRisk(thunk), [OWN]);
+  assert.deepEqual(importTimeRisk(thunk, "js"), [[OWN], 10]);
+  for (const text of ["fs.readFile(path.join(__dirname, 'payload.dat'), (err, buf) => { eval(decrypt(buf)); });",
+    "const p = path.join(__dirname, 'data.bin');\nfs.promises.readFile(p).then((b) => eval(b.toString()));",
+    "const p = `${__dirname}/README`;\nconst src = await fsp.readFile(p, 'utf8');\nvm.runInThisContext(xor(src));",
+    "import os\np = os.path.join(os.path.dirname(__file__), 'LICENSE')\nwith open(p) as f:\n    exec(f.read())\n",
+    "p = Path(__file__).parent / 'NOTICE'\nexec(base64.b64decode(p.read_text()))\n",
+    "require('fs').readFile(__filename, 'utf8', (e, s) => eval(s.split('//@')[1]));"]) {
+    assert.ok(runsOwnSourceAt(text) >= 0, text);
+  }
+  // a path read by name gives a value that counts only in a code runner
+  const pkg = "const pkgPath = path.join(__dirname, 'package.json');\n"
+    + "const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));\nexecSync('git tag v' + pkg.version);\n";
+  assert.equal(runsOwnSourceAt(pkg), -1);
+  assert.ok(runsOwnSourceAt(pkg.replace("execSync(", "eval(")) >= 0);
+  for (const text of ["const p = path.join(__dirname, 'LICENSE');\nfs.readFile(p, 'utf8', (e, t) => console.log(t));\n",
+    "const tpl = \"fs.readFile(path.join(__dirname, 'LICENSE'), (e, d) => eval(d))\";\n",
+    "fs.readFile(userFile, (e, d) => eval(d));", "const p = path.join(__dirname, 'lib.js');\nfs.readFile(p, (e, d) => eval(d));"]) {
+    assert.equal(runsOwnSourceAt(text), -1, text);
+  }
+  for (const text of ["p = __dirname + '" + "a/".repeat(100_000) + "\n" + "fs.readFile(p, (e, d) => eval(d));\n".repeat(2_000),
+    "fs.readFile(p, ".repeat(100_000), "`${__dirname}/".repeat(100_000), ("__dirname" + "}/".repeat(100)).repeat(7000)]) {
+    const start = performance.now();
+    runsOwnSourceAt(text);
+    assert.ok(performance.now() - start < 10_000, text.slice(0, 30));
+  }
+});
+
 test("aliased decoders and decrypted payloads in the decode flow", () => {
   const found = (content) => scanFile({ name: "site-packages/x/a.py", content, lang: "py", dep: true })
     .filter((i) => i.rule === "SC-EVAL-DECODE").map((i) => i.line);

