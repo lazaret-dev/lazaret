@@ -189,22 +189,19 @@ Rules that fail validation — unknown `category` (e.g. `"sql"` instead of `"SQL
 
 ## Comparison vs. established scanners
 
-| Capability | Lazaret | SonarQube | Semgrep | Bandit | Gitleaks |
-|---|---|---|---|---|---|
-| Pattern rules (Py/JS) | ✔ | ✔ | ✔ | Py only | — |
-| Taint/dataflow | intra-file + interprocedural | ✔ (commercial) | ✔ (Pro) | — | — |
-| Cross-file / interprocedural taint | ✔ Python, JavaScript, TypeScript (AST) | ✔ (commercial) | ✔ (Pro) | — | — |
-| Category-aware sanitizers | ✔ | ✔ | ✔ | — | — |
-| User-configurable taint spec | ✔ (JSON) | limited | ✔ (YAML) | — | — |
-| Secret signatures + entropy | ✔ | partial | paid | — | ✔ |
-| Obfuscation/supply-chain indicators | ✔ | — | partial | — | — |
-| Quality gate + ratings | ✔ | ✔ | — | — | — |
-| SARIF output | ✔ | ✔ | ✔ | ✔ | ✔ |
-| Baseline / new-code focus | ✔ | ✔ | ✔ | ✔ | ✔ |
-| Registry package auditing (npm/PyPI) | ✔ | — | partial | — | — |
-| Pre-install guard (npm, pnpm, pip, uv) | ✔ (`lazaret guard`) | — | — | — | — |
-| Dependency CVE scanning (SCA) | ✔ (with a CVE bundle) | ✔ | ✔ | — | — |
-| Languages | 3 (Py/JS/SQL) | 30+ | 30+ | 1 | any (secrets) |
+Measured on one shared sample set in September 2026 and rerun for 0.1.7. Every tool read the same samples statically; nothing was installed or run.
+
+| What was measured | Lazaret 0.1.7 | Lazaret 0.1.6 | Other tools on the same samples |
+|---|---|---|---|
+| Real malicious npm and PyPI releases caught at the strictest verdict (516 from DataDog's malicious-packages dataset) | **66%** SUSPICIOUS | 45% | GuardDog 70% high_risk |
+| Popular packages flagged at that verdict (429: top npm and PyPI packages, plus hard cases with install scripts, binaries or obfuscation) | **0.7%** (3) | 0.7% | GuardDog 4.2% (18) |
+| The same, counting the weaker verdict (Lazaret WARN, GuardDog suspicious) | 75% caught, 7.5% flagged | 56%, 7.5% | GuardDog 76%, 5.8% |
+| Fake credentials found (99 of 33 types, in code, `.env`, JSON, YAML, shell and key files) and look-alike decoys flagged (of 72) | **95%**, 6 | 19%, 6 | Gitleaks 94%, 6 · detect-secrets 91%, 30 · TruffleHog 73%, 0 |
+| OWASP BenchmarkPython: true-positive rate minus false-positive rate, averaged over 14 categories (1,230 labeled cases) | **+0.22** (taint findings alone +0.17) | +0.10 (taint +0.00) | Semgrep CE with community rules +0.16 · Bandit +0.08 |
+| Expected advisories matched (1,278 across requirements.txt, poetry.lock, uv.lock, pylock.toml, package-lock.json, yarn.lock, pnpm-lock.yaml and bun.lock) | **100%**, none extra | 97% on uv.lock and pylock.toml (read as pyproject.toml); bun.lock not read | pip-audit and npm audit each miss the one malicious-package advisory |
+| Install-time blocking, end to end (`lazaret guard --plan npm install`, each npm sample served by a local registry) | 165 of 300 malicious npm releases blocked (55%: exactly those judged SUSPICIOUS); 2 of 219 popular npm packages (cypress, jiti) | — | Socket Firewall, Aikido Safe Chain and SafeDep pmg block at install too (not run here: each needs an account or a live service) |
+
+Read with care: DataDog says most of its dataset was found by GuardDog's own rules, which favors GuardDog, and part of the npm set is spam with no payload that no content scanner can catch. Run together, Lazaret and GuardDog catch 79% at their strictest verdicts. Lazaret's three false positives are cypress (look-alike identifiers in bundled code), jiti (`eval` of transpiled code) and inspect-ai (encoded evaluation payloads). TruffleHog's strength, checking keys against their provider, can't apply to fake keys. Lazaret reads Python, JavaScript, TypeScript and SQL, plus config files for credentials; Semgrep, CodeQL and SonarQube cover 30+ languages and model many more frameworks, and CodeQL's whole-program analysis goes deeper than Lazaret's summaries.
 
 Honest limits: the cross-file taint engine is summary-based and import-resolved — one summary per function, not per calling context — and it doesn't model every flow (in Python, constructor-argument → `self.attr` → method flows and dynamic dispatch; in JavaScript, a value stored in an object's field and read by another function (`this.cmd = c` in one method, `exec(this.cmd)` in another), a callback's parameters when an external function calls it (`promise.then(v => exec(v))`), a value set in one function and read in an unrelated one through a module variable, and JSX components' props, which are followed only when a component is called as a function); an object or array holds everything written into it rather than per key, which can over-report; a call on an unknown receiver only matches rare method names, and one it can't resolve matches up to four project functions of that name, which can over-report in bundled or minified code; it is built to catch accidental flows in ordinary code, not code written to evade it (a value routed through dynamically built calls or `eval`); framework modeling covers Flask, Django, FastAPI and Express-style routes; and SCA matches against a CVE bundle you build from public feeds with `lazaret-sca --update-bundle` (Lazaret ships no vulnerability database of its own). For deep dataflow on large or polyglot codebases, consider Semgrep/SonarQube alongside Lazaret.
 

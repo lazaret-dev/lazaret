@@ -562,7 +562,19 @@ only)", "Download to a file, then run the file").
 
 ---
 
-## 12. Current state (0.1.6) and backlog
+## 12. Current state (0.1.7) and backlog
+
+**Shipped in 0.1.7** (the September 2026 audit's P0s, and more): config and
+data files checked for credentials; taint through f-strings and template
+literals, Flask / Django / FastAPI / Express route models, containers and
+allowlists; the JavaScript and TypeScript cross-file pass on a real parser;
+PyPI install-script blind spots closed and strong import-time signals made
+SUSPICIOUS; SC-AUTORUN and SC-WORKFLOW-* for the persistence the 2025-26 npm
+worms used; uv.lock, pylock.toml and bun.lock in SCA; budgeted feed
+decompression and MCP roots by default; and `lazaret guard`. On the audit's
+benchmark: 66% of 516 real malicious releases SUSPICIOUS (was 45%) with the
+same 0.7% of 429 popular packages; 95% of planted secrets (was 19%);
+OWASP BenchmarkPython +0.22 (was +0.10); SCA 100% on eight lockfile formats.
 
 **Shipped through 0.1.6:** the full received-code arc — the three sink families
 (deserialization/CWE-502, dynamic import, download-to-file) plus aliases and
@@ -583,6 +595,13 @@ comprehensive, so weigh marginal value against FP risk):
   built once).
 - *Quality:* an adversarial pass on the cross-file follower (evasion + crafted
   FP), and a durable home for this backlog (a `BACKLOG.md` or issues).
+- *Guard:* registries that need credentials (read them from the tool's own
+  settings, for that host only), yarn and Bun, `uv run` / `uvx`; the scan of a
+  very large tarball (`next`, 42 MB) dominates a first install.
+- *From the audit (P1/P2):* a GitHub Action and pre-commit hook, a public
+  nightly benchmark, per-rule docs, a coverage gate and parser fuzzing in CI,
+  optional live secret verification, splitting `core.py`, generating the
+  dashboard's script from `js/src`.
 
 Prefer doing detection extensions **reactively** — when a real-world dropper
 uses the pattern — over speculatively. The bar that made this tool good is the

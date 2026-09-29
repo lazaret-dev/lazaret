@@ -7,7 +7,7 @@ This log starts at 0.1.6; for earlier releases see the git history and tags.
 The format is based on [Keep a Changelog](https://keepachangelog.com); the
 project is pre-1.0, so the 0.x API may still change.
 
-## [0.1.7] — unreleased
+## [0.1.7] — 2026-09-29
 
 ### Added
 - **`lazaret-sca` reads `uv.lock`, `pylock.toml` and `bun.lock`.** Projects
@@ -294,6 +294,15 @@ project is pre-1.0, so the 0.x API may still change.
     127.0.0.1 (`test_guard_npm.py`, `test_guard_python.py`).
 
 ### Changed
+- **The README compares by measurement (audit P0).** Its capability table
+  (✔ / —, which implied taint on a par with Semgrep's and SonarQube's) is
+  replaced by the audit's benchmark, rerun on 0.1.7: 66% of 516 real
+  malicious releases SUSPICIOUS (0.1.6: 45%; GuardDog 70%) with 0.7% of 429
+  popular packages (GuardDog 4.2%); 95% of planted credentials (19%;
+  Gitleaks 94%); OWASP BenchmarkPython +0.22 (+0.10; Semgrep CE +0.16);
+  every expected advisory on eight lockfile formats; and `lazaret guard`
+  blocking exactly the SUSPICIOUS npm samples end to end (165 of 300, and 2
+  of 219 popular packages).
 - **The cross-file JavaScript pass parses the code (both engines).** It read
   JavaScript and TypeScript with patterns: a function was a line that looked
   like one, a call any name followed by `(`, and a value flowed wherever its
