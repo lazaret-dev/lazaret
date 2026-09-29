@@ -345,6 +345,19 @@ worm's pair (a SessionStart hook and a folder-open task running its loader) is
 CRITICAL because the followed loader fails the install-script test; writing
 the agent's own settings is not held against an agent's hook.
 
+0.1.8, both engines (and the dashboard for the per-file rules): SC-SELF-PUBLISH
+is three signs in one file — a publish command an exec call runs, an assignment
+to an object's `name`, a package.json write whose arguments name that object
+(`core.self_publish_at`, `hooks.selfPublishAt`); SC-OFFSCREEN-CODE is code after
+a run of 150+ blanks that stands in code (`core._code_prefix` closes every quote
+and comment before it; the caller drops lines that are only literals and
+comments) and reads as code (`core.offscreen_code`). Its blank-run pattern
+starts only at a run's start (`(?<![ \t])`): unanchored, 200,000 spaces with no
+code after them were quadratic in both engines. The install-script test gained
+three reasons: `npm publish`, npm tokens collected, a DLL of the package's own
+run with rundll32 / regsvr32 (`core.runs_dll`, which reads the text again with
+adjacent string literals joined).
+
 ### e. Registry auditing (`lazaret.registry`) and SCA
 
 `lazaret-registry` fetches and audits an npm/PyPI artifact with the same rule
@@ -352,6 +365,20 @@ pack, discovering install hooks and start-up files and running the import-time
 checks. `lazaret-sca --update-bundle` builds a CVE bundle from public feeds
 (OSV, CISA KEV, EPSS) parsed with `lazaret.safexml`; Lazaret ships no
 vulnerability database of its own. The registry always redacts what it stores.
+
+Python-only registry checks (0.1.8): SC-USE-RISK runs the import-time test on
+the files no entry point loads (`_ArtifactScan._use_time_code`) and keeps only
+its CRITICAL shapes — skipping tests, examples, docs, demos, benchmarks and a
+web app's static assets (USE_RISK_SKIP_DIRS), not reading once the archive is
+SUSPICIOUS, smallest files first within USE_RISK_SECONDS. What it doesn't reach
+is not SC-TRUNCATED: the file rules read every file. SC-NEW-DEPENDENCY
+(`new_dependency_issues`, called by `scan_package`) compares a release's
+dependencies with the release published before it and looks up the added
+ones' first publication: live registry data, best effort, no request for a
+release without dependencies. The guard scans each package with
+`_scan_artifact`, so it gets SC-USE-RISK but not the dependency history (it
+already scans the new dependency itself, and holds back a release younger
+than --min-age).
 
 ### f. The install guard (`lazaret.registry.guard`, 0.1.7)
 
@@ -562,7 +589,17 @@ only)", "Download to a file, then run the file").
 
 ---
 
-## 12. Current state (0.1.7) and backlog
+## 12. Current state (0.1.8) and backlog
+
+**In 0.1.8** (from the 0.1.7 benchmark's misses): SC-SELF-PUBLISH (code
+that renames its package and publishes it: the registry floods); install
+scripts that publish, collect npm tokens or run a DLL; SC-OFFSCREEN-CODE
+(code after 150+ blanks on a line); SC-USE-RISK (the strong import-time
+shapes in the files a package runs when used; registry, 3 s per archive);
+SC-NEW-DEPENDENCY (a release that adds a dependency published days before
+it, from another account; registry, live data). On the same benchmark: 76%
+of 516 malicious releases SUSPICIOUS (was 66%), 80% with the dependency
+history, and the same 3 of 429 popular packages, no verdict changed.
 
 **Shipped in 0.1.7** (the September 2026 audit's P0s, and more): config and
 data files checked for credentials; taint through f-strings and template
@@ -586,6 +623,23 @@ real corpora throughout; full cross-subsystem suite green.
 **Backlog** (candidates, not commitments — the detector is already
 comprehensive, so weigh marginal value against FP risk):
 
+- *Detection, from the 0.1.7 benchmark's misses* (177 of 516 malicious
+  releases not SUSPICIOUS). Items 1-4 are built in 0.1.8 (below); what is
+  left of them:
+  - **Look-alike dependencies.** SC-NEW-DEPENDENCY catches a brand-new one;
+    a release that swaps a dependency for a look-alike of it (`dayjs` for
+    `easy-day-js`), or adds one named like a popular package, needs a list of
+    popular names (or the previous release's dependencies to compare with).
+  - **What SC-USE-RISK can't read yet:** names hidden in hex-decoded strings
+    (`require(g('6178696f73'))` is axios: tailwind-book-icon and two more),
+    `new Function.constructor(…)` as a runner, and a script started with
+    `spawn(process.execPath, [file])` followed as an edge (chai-use-chain and
+    four more) — the decode and staged-download families below.
+  - **Services that start at login** as install-time persistence: the
+    @emilgroup worm writes a systemd user unit and enables it (launchd,
+    cron and Run keys are the same shape).
+  - **PyPI owners** for SC-NEW-DEPENDENCY: its JSON API has none, so a new
+    requirement from the project's own account counts too.
 - *Extend cross-file:* multi-hop (A→B→C, FP-gated); class-method edge forms
   (direct `Client().pull()`, namespace `new ns.C()`).
 - *New single-file families:* decoded (base64/hex) payloads executed, staged

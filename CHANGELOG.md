@@ -10,6 +10,45 @@ project is pre-1.0, so the 0.x API may still change.
 ## [Unreleased]
 
 ### Added
+- **More of the malware the 0.1.7 benchmark missed (backlog items 1-4, from
+  its 177 misses).** On the same 516 malicious releases, 76% are now
+  SUSPICIOUS (was 66%; GuardDog 70%), and 80% with the registry's live
+  dependency history; the same 3 of 429 popular packages, and no popular
+  package's verdict changed at all. `lazaret guard` blocks 214 of the 300
+  npm samples end to end (was 165), still 2 of 219 popular ones. Registry
+  engine 2.9.0, so stored and cached verdicts are redone.
+  - **SC-SELF-PUBLISH** (both engines, CRITICAL): code that renames its
+    package and publishes it — an assignment to an object's `name`, a write of
+    that object to package.json, and `npm publish` (pnpm, yarn, bun) run by an
+    exec call. The 2025-26 registry floods shipped it as `auto.js`: 39 of the
+    misses, and half of what GuardDog caught that Lazaret didn't. Release
+    tools publish but never rename.
+  - **Install scripts that publish, collect npm tokens or run a DLL** (both
+    engines): three more reasons of the install-script test. A script an
+    install hook runs that calls `npm publish`, reads npm access tokens
+    (`.npmrc`'s `_authToken`, `npm config get …:_authToken`: the @emilgroup
+    worm handed them to a detached deploy script), or runs a DLL of its own
+    with `rundll32` / `regsvr32` (eslint-config-prettier 9.1.1; string pieces
+    are joined first, `"rund"+"ll32"`).
+  - **SC-OFFSCREEN-CODE** (both engines and the dashboard): code after a run of
+    150 or more blanks on a line, in code rather than a string or a comment,
+    where editors and review don't show it — CRITICAL when it loads or runs
+    more code (@react-native-aria/radio 0.2.14 hid its loader 731 columns
+    right), else MAJOR.
+  - **SC-USE-RISK** (registry): the import-time test's CRITICAL shapes in the
+    files a package runs only when it is used — a logger's constructor, a
+    middleware, a script a CLI spawns — not in tests, examples, docs, demos,
+    benchmarks or a web app's static assets. Not read once a package is
+    SUSPICIOUS, smallest files first, within 3 s per archive (a first guarded
+    plan of next, react, react-dom, typescript and eslint: 53 s, 50 s before).
+  - **SC-NEW-DEPENDENCY** (registry): a release that adds a dependency first
+    published less than 7 days before it (MAJOR under 30), outside the
+    package's npm scope, from an account that doesn't maintain the package.
+    The @mastra compromise changed no code, it only added `easy-day-js`, created
+    19 hours before: all 17 releases in the benchmark, with live registry
+    data, and none of the 429 popular packages at the benchmark's versions.
+    One document for the package and one per added dependency (at most five);
+    `LAZARET_NO_DEPENDENCY_HISTORY=1` turns it off.
 - **`--version` on every Python command** (`lazaret`, `lazaret guard` /
   `lazaret-guard`, `lazaret-registry`, `lazaret-sca`, `lazaret-mcp`). Which
   install was on the PATH could only be told by importing the package, and

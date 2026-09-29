@@ -83,7 +83,13 @@ resolving to one file. Writes are atomic
   `SC-PIPE-SHELL`); and a run of invisible characters carrying hidden bytes
   — variation selectors or tag characters, the GlassWorm carrier
   (`SC-HIDDEN-UNICODE`, CRITICAL when the file also runs code from a string,
-  else MAJOR; a flag emoji is left alone).
+  else MAJOR; a flag emoji is left alone). Since 0.1.8: code that renames its
+  package and runs `npm publish`, the registry floods' `auto.js`
+  (`SC-SELF-PUBLISH`, CRITICAL); code after a run of 150 or more blanks on a
+  line, where editors and review don't show it (`SC-OFFSCREEN-CODE`, CRITICAL
+  when it loads or runs more code); and, in a dependency's install hook, a
+  script that runs `npm publish`, collects npm access tokens, or runs a DLL of
+  its own with `rundll32`/`regsvr32`.
 - **Unicode evasion**: JS identifier escapes (`\u0065val`) and Python NFKC
   spellings are matched as the runtime reads them; bidirectional control
   characters are `S-BIDI` (Trojan Source); a name spelled with look-alike
