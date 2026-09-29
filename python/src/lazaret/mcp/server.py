@@ -101,8 +101,10 @@ TOOLS = [
         "name": "scan_files",
         "description": ("Scan specific Python/JavaScript files (e.g. only the files changed in a "
                         "diff), and config files (.env, JSON, YAML, TOML, INI, shell, keys, "
-                        "Dockerfiles), which are checked for credentials only. Returns issues per "
-                        "file. Use after editing to verify the changes introduce no new problems."),
+                        "Dockerfiles), which are checked for credentials — and, for editor and AI-agent "
+                        "settings and GitHub Actions workflows, for the commands they run automatically. "
+                        "Returns issues per file. Use after editing to verify the changes introduce no "
+                        "new problems."),
         "inputSchema": {
             "type": "object",
             "properties": {

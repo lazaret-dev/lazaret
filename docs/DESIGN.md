@@ -150,7 +150,15 @@ shared by the CLI and the MCP server. In order it:
    obfuscation/secret detection, per its language — and each config or data
    file (`scan_config_file`: `.env`, JSON, YAML, TOML, INI, shell, keys,
    Dockerfiles; `lazaret.scanner.configsecrets` and `js/src/lib/configsecrets.js`)
-   for credentials only; config files are not code and count in no code metric;
+   for credentials; config files are not code and count in no code metric. Two
+   kinds get more (0.1.7): an editor's or AI agent's settings that run commands
+   on their own (SC-AUTORUN: `lazaret.scanner.autorun`, a JSON-with-comments
+   reader that keeps lines, and what each file makes its tool run; the commands
+   are followed into the files of the tree they run, read by `tree_reader`, and
+   judged by the install-script test), and GitHub Actions workflows
+   (SC-WORKFLOW-*: `lazaret.scanner.ghworkflow`, an outline reader of the YAML a
+   workflow needs, not a YAML parser); twins `js/src/lib/autorun.js`,
+   `js/src/lib/ghworkflow.js`;
 3. **scans manifests** (`package.json`, `binding.gyp`, …);
 4. **runs `--deps` checks** (`dependency_checks`) — what dependencies run at
    install and import time (install hooks followed to the files they run,
@@ -325,6 +333,17 @@ autonomous mode (SC-AGENT-HIJACK — the s1ngularity/Nx attack). A package with 
 (MAJOR). Also: look-alike identifiers (SC-HOMOGLYPH), hidden-Unicode carriers
 (SC-HIDDEN-UNICODE), decode-then-execute (SC-EVAL-DECODE, incl. indirect eval).
 
+Persistence targets (0.1.7): the install-script test also fails on what makes
+an AI agent, an editor or GitHub Actions run something later — writing an
+agent's or editor's auto-run settings, a workflow, an editor extension, a
+self-hosted runner — and on the Bun loader of the 2025-26 worms
+(`core.persistence_reasons`, applied to a hook's own command too); at import
+time only a workflow that dumps every secret counts. In the tree, SC-AUTORUN and
+SC-WORKFLOW-* read the planted files themselves (see the pipeline above): the
+worm's pair (a SessionStart hook and a folder-open task running its loader) is
+CRITICAL because the followed loader fails the install-script test; writing
+the agent's own settings is not held against an agent's hook.
+
 ### e. Registry auditing (`lazaret.registry`) and SCA
 
 `lazaret-registry` fetches and audits an npm/PyPI artifact with the same rule
@@ -444,6 +463,7 @@ constraint — it overflows its backtrack stack where CPython merely slows.
 | `python/src/lazaret/scanner/core.py` | The engine: rules, taint, `scan_project`, `--deps`, received-code detector, cross-file follower |
 | `python/src/lazaret/scanner/flow.py` | Interprocedural cross-file taint (Python AST; builds the findings of the JS pass) |
 | `python/src/lazaret/scanner/jsparse.py`, `jsflow.py` | The JavaScript / TypeScript reader and the JS cross-file pass (twins: `js/src/lib/jsparse.js`, `js/src/scanner/jsflow.js`) |
+| `python/src/lazaret/scanner/autorun.py`, `ghworkflow.py` | Editor and AI-agent settings that run commands (SC-AUTORUN) and the workflows the Shai-Hulud worms planted (SC-WORKFLOW-*); twins `js/src/lib/autorun.js`, `ghworkflow.js` |
 | `python/src/lazaret/scanner/frameworks.py` | Which route handler parameters Flask / FastAPI / Django fill from the request (shared by both taint passes; twinned in `js/src/scanner/taint.js`) |
 | `python/src/lazaret/scanner/received_spec.json` | **Source of truth** for the received-code detector's data + patterns |
 | `python/src/lazaret/scanner/sca_feeds.py` | CVE bundle build (OSV/KEV/EPSS) |

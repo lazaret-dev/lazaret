@@ -590,7 +590,7 @@ const EXFIL_DEST_SRC = String.raw`https?://(?:\d{1,3}\.){3}\d{1,3}\b|` + EXFIL_S
 const EXFIL_DEST_RE = pyRe(EXFIL_DEST_SRC, "i");
 const EXFIL_SERVICE_RE = pyRe(EXFIL_SERVICES_SRC, "i");              // the named ones, no raw IPs
 /** The first n code points of s (Python's s[:n]). */
-function cpPrefix(s, n) {
+export function cpPrefix(s, n) {
   let i = 0;
   for (let k = 0; k < n && i < s.length; k++) {
     const c = s.charCodeAt(i);
@@ -867,6 +867,172 @@ export function runsOwnSourceAt(text) {
   return -1;
 }
 
+// ---- persistence targets (0.1.7; core's comment above _PERSIST_AGENT_SRC) ----
+// Where the 2025-26 worms made themselves stay: an AI agent's or editor's
+// auto-run settings, a GitHub Actions workflow, an editor extension, a
+// self-hosted runner; and the Bun loader of the Shai-Hulud worms. Reasons of
+// the install-script test; a workflow that dumps every secret is one at
+// import time too.
+const PERSIST_AGENT_SRC =
+  String.raw`(?:\.(?:claude|gemini)[/\\]settings(?:\.local)?|\.vscode[/\\](?:tasks|mcp)|\.cursor[/\\](?:hooks|mcp)` +
+  String.raw`|(?<![\w.-])\.(?:mcp|claude))\.json(?![\w.-])`;
+const PERSIST_AGENT_SPLIT_SRC =
+  String.raw`["'` + "`" + String.raw`]\.(claude|gemini|vscode|cursor)["'` + "`" + String.raw`]\s{0,20}[,+/]\s{0,20}["'` + "`" +
+  String.raw`](settings(?:\.local)?|tasks|hooks|mcp)\.json["'` + "`" + String.raw`]`;
+const PERSIST_AGENT_PAIRS = new Map([["claude", ["settings", "settings.local"]], ["gemini", ["settings"]],
+  ["vscode", ["tasks", "mcp"]], ["cursor", ["hooks", "mcp"]]]);
+const PERSIST_WORKFLOW_SRC = String.raw`\.github[/\\]workflows\b|["'` + "`" + String.raw`]\.github["'` + "`" +
+  String.raw`]\s{0,20}[,+/]\s{0,20}["'` + "`" + String.raw`]workflows\b`;
+const EDITOR_DIRS = String.raw`(?:vscode(?:-insiders|-oss|-server)?|cursor|windsurf|vscodium|positron)`;
+const PERSIST_EXT_DIR_SRC =
+  String.raw`[/\\]\.` + EDITOR_DIRS + String.raw`[/\\]extensions\b` +
+  String.raw`|["'` + "`" + String.raw`]\.` + EDITOR_DIRS + String.raw`["'` + "`" + String.raw`]\s{0,20}[,+/]\s{0,20}` +
+  String.raw`["'` + "`" + String.raw`]extensions["'` + "`" + String.raw`]`;
+const PERSIST_WRITE_SRC =
+  String.raw`\b(?:writeFileSync|writeFile|appendFileSync|appendFile|createWriteStream|outputFileSync|outputFile` +
+  String.raw`|outputJsonSync|outputJson|writeJsonSync|writeJson|copyFileSync|copyFile|cpSync|renameSync|symlinkSync` +
+  String.raw`|write_text|write_bytes|createOrUpdateFileContents)\s*\(|\bjson\.dump\s*\(|\bshutil\.(?:copy\w*|move)\s*\(` +
+  String.raw`|\bopen\s*\([^()\n]{0,300}?["'][wax]b?\+?["']`;
+const PERSIST_SHELL_WRITE_SRC =
+  String.raw`>|\b(?:tee|cp|mv|install|ln|copy|xcopy)\s|\b(?:Set-Content|Out-File|Add-Content|Copy-Item|New-Item)\b` +
+  String.raw`|\bgit\s+(?:add|commit)\b`;
+const PERSIST_EXT_INSTALL_SRC = String.raw`--install-extension\b`;
+const PERSIST_EXT_CLI_SRC =
+  String.raw`(?:(?<![^\n])|[;&|(])[ \t]*(?:sudo[ \t]+)?(?:code|code-insiders|codium|cursor|windsurf|positron)(?:\.cmd|\.exe)?` +
+  String.raw`[ \t]`;
+const PERSIST_RUNNER_SRC = String.raw`actions/runner/releases|\bactions-runner-(?:linux|osx|win)-`;
+const PERSIST_RUNNER_CONFIG_SRC = String.raw`\bconfig\.(?:sh|cmd)\b`;
+const PERSIST_RUNNER_ARG_SRC = String.raw`--(?:token|url)\b`;
+const BUN_RELEASES_SRC = String.raw`oven-sh/bun/releases`;
+const SECRETS_DUMP_SRC = String.raw`\btoJSON\s*\(\s*secrets\s*\)`;
+const PERSIST_AGENT_RE = pyRe(PERSIST_AGENT_SRC, "g");
+const PERSIST_AGENT_SPLIT_RE = pyRe(PERSIST_AGENT_SPLIT_SRC, "g");
+const PERSIST_WORKFLOW_RE = pyRe(PERSIST_WORKFLOW_SRC, "g");
+const PERSIST_EXT_DIR_RE = pyRe(PERSIST_EXT_DIR_SRC, "g");
+const PERSIST_WRITE_RE = pyRe(PERSIST_WRITE_SRC);
+const PERSIST_SHELL_WRITE_RE = pyRe(PERSIST_SHELL_WRITE_SRC);
+const PERSIST_EXT_INSTALL_RE = pyRe(PERSIST_EXT_INSTALL_SRC);
+const PERSIST_EXT_CLI_RE = pyRe(PERSIST_EXT_CLI_SRC, "g");
+const PERSIST_RUNNER_RE = pyRe(PERSIST_RUNNER_SRC);
+const PERSIST_RUNNER_CONFIG_RE = pyRe(PERSIST_RUNNER_CONFIG_SRC, "g");
+const PERSIST_RUNNER_ARG_RE = pyRe(PERSIST_RUNNER_ARG_SRC);
+const BUN_RELEASES_RE = pyRe(BUN_RELEASES_SRC, "i");
+const SECRETS_DUMP_RE = pyRe(SECRETS_DUMP_SRC, "i");
+const PERSIST_SECRETS_DUMP_G = pyRe(SECRETS_DUMP_SRC, "gi");
+const PERSIST_MAX_LINES = 100;
+
+/** posixpath.normpath of a relative path. */
+function normpathRel(path) {
+  const comps = [];
+  for (const c of path.split("/")) {
+    if (c === "" || c === ".") continue;
+    if (c !== ".." || !comps.length || comps[comps.length - 1] === "..") comps.push(c);
+    else comps.pop();
+  }
+  return comps.join("/") || ".";
+}
+
+/**
+ * A hook's `target` joined with the directory `base` (relative to the scan
+ * root), normalized; null when it is absolute or leaves the scan root.
+ * Twin of core._tree_join.
+ */
+export function treeJoin(base, target) {
+  target = target.replaceAll("\\", "/");
+  if (target.startsWith("/") || /^[A-Za-z]:/.test(target)) return null;
+  const joined = normpathRel(`${base || "."}/${target}`);
+  if (joined === "." || joined === ".." || joined.startsWith("../")) return null;
+  return joined;
+}
+
+/** re.search(text, pos) of a global pattern: the match at or after pos, or null. */
+function searchFrom(re, text, pos = 0) {
+  re.lastIndex = pos;
+  return re.exec(text);
+}
+
+/** The first AI-agent or editor settings file text names, or null (core._persist_agent_file). */
+function persistAgentFile(text) {
+  const m = searchFrom(PERSIST_AGENT_RE, text);
+  let found = m ? [m.index, m[0].replaceAll("\\", "/")] : null;
+  PERSIST_AGENT_SPLIT_RE.lastIndex = 0;
+  for (let k = 0, s; (s = PERSIST_AGENT_SPLIT_RE.exec(text)) !== null; k++) {
+    if (k >= PERSIST_MAX_LINES || (found !== null && s.index > found[0])) break;
+    if (PERSIST_AGENT_PAIRS.get(s[1]).includes(s[2])) {
+      found = [s.index, `.${s[1]}/${s[2]}.json`];
+      break;
+    }
+  }
+  return found === null ? null : found[1];
+}
+
+/** A shell write on a line on which targetRe matches (core._shell_writes). */
+function shellWrites(text, targetRe) {
+  let m = searchFrom(targetRe, text);
+  for (let lines = 0; m !== null && lines < PERSIST_MAX_LINES; lines++) {
+    const start = text.lastIndexOf("\n", m.index) + 1;
+    let end = text.indexOf("\n", m.index + m[0].length);
+    if (end < 0) end = text.length;
+    if (PERSIST_SHELL_WRITE_RE.test(text.slice(start, end))) return true;
+    m = searchFrom(targetRe, text, end);
+  }
+  return false;
+}
+
+/**
+ * A line on which firstRe matches and thenRe after it (core._after_on_line);
+ * each line is read once. thenRe (no look-behind) is tested on the rest of
+ * the line, as Python's pattern.search(text, pos, endpos) reads it.
+ */
+function afterOnLine(text, firstRe, thenRe) {
+  let m = searchFrom(firstRe, text);
+  while (m !== null) {
+    const from = m.index + m[0].length;
+    let end = text.indexOf("\n", from);
+    if (end < 0) end = text.length;
+    if (thenRe.test(text.slice(from, end))) return true;
+    m = searchFrom(firstRe, text, end);
+  }
+  return false;
+}
+
+/** Does text name a target and write it (core._writes_named)? */
+const writesNamed = (text, targetRe) => searchFrom(targetRe, text) !== null
+  && (PERSIST_WRITE_RE.test(text) || shellWrites(text, targetRe));
+
+/** A GitHub Actions workflow that hands every secret to a job, and the workflows directory (core.dumps_workflow_secrets). */
+export function dumpsWorkflowSecrets(text) {
+  return SECRETS_DUMP_RE.test(text) && searchFrom(PERSIST_WORKFLOW_RE, text) !== null;
+}
+
+/** The persistence-target reasons of the install-script test. Twin of core.persistence_reasons. */
+export function persistenceReasons(text) {
+  const reasons = [];
+  const agent = persistAgentFile(text);
+  if (agent !== null && (PERSIST_WRITE_RE.test(text) || shellWrites(text, PERSIST_AGENT_RE)
+      || shellWrites(text, PERSIST_AGENT_SPLIT_RE))) {
+    reasons.push(`writes an AI agent's or editor's auto-run settings (${agent})`);
+  }
+  if (dumpsWorkflowSecrets(text)) {
+    reasons.push("carries a GitHub Actions workflow that dumps every repository secret");
+  } else if (searchFrom(PERSIST_WORKFLOW_RE, text) !== null
+      && (writesNamed(text, PERSIST_WORKFLOW_RE) || text.includes("/contents/"))) {
+    reasons.push("writes a GitHub Actions workflow");
+  }
+  const install = PERSIST_EXT_INSTALL_RE.test(text);
+  if ((install && (EXEC_CALL_RE.test(text) || afterOnLine(text, PERSIST_EXT_CLI_RE, PERSIST_EXT_INSTALL_RE)))
+      || writesNamed(text, PERSIST_EXT_DIR_RE)) {
+    reasons.push("installs an editor extension");
+  }
+  if (PERSIST_RUNNER_RE.test(text) || afterOnLine(text, PERSIST_RUNNER_CONFIG_RE, PERSIST_RUNNER_ARG_RE)) {
+    reasons.push("registers the machine as a GitHub Actions self-hosted runner");
+  }
+  if (BUN_RELEASES_RE.test(text) && EXEC_CALL_RE.test(text)) {
+    reasons.push("downloads the Bun runtime from GitHub and runs code with it");
+  }
+  return reasons;
+}
+
 /**
  * Reasons an install-time script looks hostile ([] if none).
  * Twin of lazaret.scanner.core.install_script_risk.
@@ -891,6 +1057,7 @@ export function installScriptRisk(text) {
   if (reverseShellAt(text) >= 0) reasons.push("opens a reverse shell");
   if (sendsHostInfo(text)) reasons.push("sends the machine's user or host name over the network");
   if (runsOwnSourceAt(text) >= 0) reasons.push("runs code it reads back from its own file or a data file shipped with it");
+  reasons.push(...persistenceReasons(text));
   return reasons;
 }
 
@@ -943,7 +1110,7 @@ const STRONG_IMPORT_REASONS = [
   "runs an encoded PowerShell command", "runs PowerShell that", "carries a script that downloads and runs code",
   "opens a reverse shell", "reads credentials or the whole environment and sends them to",
   "sends the machine's user or host name to a data-capture service", "downloads a script and runs it with Python",
-  "runs code it reads back from its own file"];
+  "runs code it reads back from its own file", "carries a GitHub Actions workflow that dumps every repository secret"];
 const CAPTURE_SERVICE_SRC = String.raw`webhook\.site|typedwebhook\.tools|oastify\.com|burpcollaborator|\binteract\.sh|\boast[\w.-]*\.(?:pro|live|site`
   + String.raw`|online|fun|me|com)\b|pipedream\.net|requestbin|requestcatcher\.com|hookbin\.com|postb\.in|beeceptor\.com`
   + String.raw`|dnslog\.cn|ceye\.io|canarytokens`;
@@ -1130,6 +1297,9 @@ function importTimeRiskOf(text) {
   }
   const own = runsOwnSourceAt(text);
   if (own >= 0) signs.push([own, "runs code it reads back from its own file or a data file shipped with it"]);
+  if (dumpsWorkflowSecrets(text)) {
+    signs.push([searchFrom(PERSIST_SECRETS_DUMP_G, text).index, "carries a GitHub Actions workflow that dumps every repository secret"]);
+  }
   for (const [at, reason] of signs) {
     reasons.push(reason);
     line ??= countNewlines(text, 0, at) + 1;
@@ -1231,6 +1401,13 @@ export const PY_TWINS = {
     _PY_DOC_HEAD_RE: [PY_DOC_HEAD_SRC, ""], _BRACKET_RE: [BRACKET_SRC, ""], _SPACE_TAB_RE: [SPACE_TAB_SRC, ""],
     _SELF_READ_RE: [SELF_READ_SRC, ""], _SIBLING_DATA_RE: [SIBLING_DATA_SRC, ""], _SELF_RUN_RE: [SELF_RUN_SRC, ""],
     _SELF_READ_ASSIGN_RE: [SELF_READ_ASSIGN_SRC, ""], _IDENT_TOKEN_RE: [IDENT_TOKEN_SRC, ""],
+    _PERSIST_AGENT_RE: [PERSIST_AGENT_SRC, ""], _PERSIST_AGENT_SPLIT_RE: [PERSIST_AGENT_SPLIT_SRC, ""],
+    _PERSIST_WORKFLOW_RE: [PERSIST_WORKFLOW_SRC, ""], _PERSIST_EXT_DIR_RE: [PERSIST_EXT_DIR_SRC, ""],
+    _PERSIST_WRITE_RE: [PERSIST_WRITE_SRC, ""], _PERSIST_SHELL_WRITE_RE: [PERSIST_SHELL_WRITE_SRC, ""],
+    _PERSIST_EXT_INSTALL_RE: [PERSIST_EXT_INSTALL_SRC, ""], _PERSIST_EXT_CLI_RE: [PERSIST_EXT_CLI_SRC, ""],
+    _PERSIST_RUNNER_RE: [PERSIST_RUNNER_SRC, ""], _PERSIST_RUNNER_CONFIG_RE: [PERSIST_RUNNER_CONFIG_SRC, ""],
+    _PERSIST_RUNNER_ARG_RE: [PERSIST_RUNNER_ARG_SRC, ""], _BUN_RELEASES_RE: [BUN_RELEASES_SRC, "i"],
+    _SECRETS_DUMP_RE: [SECRETS_DUMP_SRC, "i"],
     ...RECEIVED_TWINS,
   },
   sets: {
@@ -1248,12 +1425,13 @@ export const PY_TWINS = {
     _STAGER_RUN_NEEDLES: STAGER_RUN_NEEDLES, _STAGER_NET_NEEDLES: STAGER_NET_NEEDLES,
     _STRONG_IMPORT_REASONS: STRONG_IMPORT_REASONS, _PY_JOINS: [...PY_JOINS],
   },
-  maps: Object.fromEntries([["_WRAPPER_VALUE_OPTIONS", WRAPPER_VALUE_OPTIONS],
+  maps: Object.fromEntries([["_PERSIST_AGENT_PAIRS", PERSIST_AGENT_PAIRS], ["_WRAPPER_VALUE_OPTIONS", WRAPPER_VALUE_OPTIONS],
     ["_WRAPPER_CHDIR_OPTIONS", WRAPPER_CHDIR_OPTIONS], ["_WRAPPER_COMMAND_OPTIONS", WRAPPER_COMMAND_OPTIONS]]
     .map(([name, map]) => [name, Object.fromEntries([...map].map(([k, v]) => [k, [...v].sort()]))])),
   limits: { HOOK_MAX_CHARS, HOOK_MAX_COMMANDS, HOOK_MAX_TARGETS, HOOK_MAX_PATH, ...DL_LIMITS, _DL_ALIAS_MAX: DL_ALIAS_MAX,
     _PS_ENCODED_MAX: PS_ENCODED_MAX, _STAGER_MIN: STAGER_MIN, _STAGER_MAX_LITERALS: STAGER_MAX_LITERALS,
     _PS_EXEC_BACK: PS_EXEC_BACK, _PS_EXEC_MAX_NAMES: PS_EXEC_MAX_NAMES, _SELF_READ_PASSES: SELF_READ_PASSES,
     _SELF_READ_MAX_CALLS: SELF_READ_MAX_CALLS, _SELF_READ_ARG_SPAN: SELF_READ_ARG_SPAN,
-    _SELF_READ_MAX_ASSIGNS: SELF_READ_MAX_ASSIGNS, _LITERAL_SPANS_MAX: LITERAL_SPANS_MAX },
+    _SELF_READ_MAX_ASSIGNS: SELF_READ_MAX_ASSIGNS, _LITERAL_SPANS_MAX: LITERAL_SPANS_MAX,
+    _PERSIST_MAX_LINES: PERSIST_MAX_LINES },
 };

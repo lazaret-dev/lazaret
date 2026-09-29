@@ -12,7 +12,7 @@ import {
 } from "./lib/fs.js";
 import { fsNameToString } from "./lib/encoding.js";
 import { pyRepr } from "./lib/pycompat.js";
-import { scanFile, scanConfigFile } from "./scanner/scan.js";
+import { scanFile, scanConfigFile, treeReader } from "./scanner/scan.js";
 import { scanManifest, scanGyp } from "./lib/supplychain.js";
 import { redactResult, setRedactSecrets } from "./lib/redact.js";
 import {
@@ -301,8 +301,9 @@ function runChecked(argv, io) {
     try { add(scanFile({ name: f.path, path: f.path, content: f.content, lang: f.lang, dep: f.dep })); }
     catch (e) { issues.push(scanErrorIssue(f.path, e)); }            // one file must never kill the run
   }
+  const read = treeReader(files, configs);                            // what an editor's or agent's settings run
   for (const cf of configs) {                                         // config and data files: credentials only
-    try { add(scanConfigFile(cf.path, cf.content)); } catch (e) { issues.push(scanErrorIssue(cf.path, e)); }
+    try { add(scanConfigFile(cf.path, cf.content, read)); } catch (e) { issues.push(scanErrorIssue(cf.path, e)); }
   }
   for (const mf of manifests) {
     // binding.gyp and every other .gyp / .gypi → scanGyp (G11); package.json

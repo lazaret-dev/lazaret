@@ -197,6 +197,61 @@ project is pre-1.0, so the 0.x API may still change.
   the top 100 of each registry, 198 more from the top 2,000, and 31 chosen
   to look risky).
 
+- **Persistence targets: agent and editor settings, workflows, editor
+  extensions (both engines; audit).** The 2025-26 npm worms stayed where no
+  scanner looked. Mini Shai-Hulud (May 2026) and the keyv wave (August)
+  committed a Claude Code SessionStart hook (`.claude/settings.json`) and a
+  VS Code folder-open task (`.vscode/tasks.json`) to every repository they
+  reached, each running a copy of a loader that fetches the Bun runtime to
+  run the payload, so opening a checkout ran the worm; Shai-Hulud planted
+  GitHub Actions workflows that dump every repository secret, and a
+  discussion-triggered one that runs the discussion's text on a self-hosted
+  runner it registered on the victim's machine; GlassWorm installed editor
+  extensions. Now:
+  - **SC-AUTORUN** lists what an editor's or AI agent's settings in the
+    tree run on their own: VS Code folder-open tasks (with the tasks they
+    depend on, each platform's variant and npm tasks), Claude Code's hooks,
+    status line and helper commands (`settings.json`,
+    `settings.local.json`), Cursor's and Gemini CLI's hooks, and the MCP
+    servers `.mcp.json`, `.cursor/mcp.json`, `.vscode/mcp.json` and
+    Gemini's settings start. Each is INFO inventory, which does not fail the
+    gate, and CRITICAL when the command, or a file of the tree it runs
+    (followed like an install hook's, `$CLAUDE_PROJECT_DIR` and
+    `${workspaceFolder}` read as the folder), fails the install-script test
+    or is obfuscated: the worm's pair is CRITICAL twice. A settings file
+    that names commands but cannot be read as JSON is MAJOR (comments and
+    trailing commas are read, as VS Code writes them). Writing the agent's
+    own settings is not held against its hooks (a WorktreeCreate hook
+    copies them).
+  - **SC-WORKFLOW-SECRETS** flags `${{ toJSON(secrets) }}` in a job's
+    environment or a script (not an action's input): MAJOR, and CRITICAL
+    when the workflow also uploads an artifact or runs a network command.
+    **SC-WORKFLOW-BACKDOOR** (CRITICAL) flags text from an issue, a
+    discussion, a comment or a pull request put into a command on a
+    self-hosted runner by a workflow those events start. Workflows are read
+    by a small outline reader (Lazaret has no YAML library).
+  - **The install-script test** (install hooks and now their own command,
+    the code pip runs, what SC-AUTORUN follows) also fails on writing an AI
+    agent's or editor's auto-run settings, a GitHub Actions workflow (a
+    file, `git add`, the contents API), installing an editor extension
+    (`code --install-extension`, a copy into `~/.vscode/extensions`),
+    registering a self-hosted runner, and a Bun release fetched from GitHub
+    and run (the worms' loader). At import time only a workflow that dumps
+    every secret counts (CRITICAL): a CLI's `init` command writes agent
+    hooks, editor tasks, MCP servers and workflows on purpose.
+
+  On the audit's malware corpus the install hooks of the 7 Mini Shai-Hulud
+  releases (`preinstall: node setup.mjs`) are CRITICAL now; before, only
+  the obfuscated payload (and, for one, a truncated scan) made them
+  SUSPICIOUS, which another obfuscator would have avoided. No verdict
+  changed, benign packages included. On 1,426 workflows (50 popular repositories — VS Code,
+  TypeScript, Bun, React, Next.js, Supabase, Gemini CLI, claude-code-action
+  and others — and the earlier corpora, GitHub's starter workflows among
+  them) nothing is flagged; their 66 agent and editor settings files give 55
+  INFO entries and one MAJOR, a `.claude/settings.json` in claude-flow that
+  no JSON reader accepts. The registry's engine version is 2.8.0, so stored
+  scans are redone with 0.1.7's tests.
+
 ### Changed
 - **The cross-file JavaScript pass parses the code (both engines).** It read
   JavaScript and TypeScript with patterns: a function was a line that looked

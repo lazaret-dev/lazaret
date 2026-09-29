@@ -19,7 +19,7 @@ export {
   jsonReportChunks, htmlReportChunks, sarifChunks, sanitizeTerm, sanitizeTermLine, safeExcerpt,
 } from "./report.js";
 export { scanManifest, scanGyp, redactResult, setRedactSecrets } from "./lib/supplychain.js";
-export { followHook, hookScriptTargets, installScriptRisk, importTimeRisk, importTimeSeverity, nodeCandidates } from "./lib/hooks.js";
+export { followHook, hookScriptTargets, installScriptRisk, importTimeRisk, importTimeSeverity, nodeCandidates, persistenceReasons } from "./lib/hooks.js";
 export { runsReceivedCode } from "./lib/received.js";
 export { runsSubstitutedDownload } from "./lib/shellpipe.js";
 export {

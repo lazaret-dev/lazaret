@@ -79,6 +79,13 @@ MAX_MEMBER = _env_number("LAZARET_MAX_SOURCE_BYTES", 16_000_000)
 MAX_FILES = 20_000         # files per package (numpy's sdist alone has >4,000)
 SAMPLE = 8192              # header/entropy sample read from oversized files
 # Stored scans from another engine version are scanned again (has_scan).
+# 2.8: 0.1.7's install-script and import-time tests (PowerShell, stagers,
+#      reverse shells, host beacons, CRITICAL import-time shapes, code run
+#      from a file's own prose), more import-time reach (an sdist's modules
+#      and their imports), persistence targets (writing an agent's or
+#      editor's auto-run settings, a workflow, an extension, a runner; a
+#      workflow that dumps every secret) and the Bun loader of the 2025-26
+#      worms
 # 2.7: a dependency that launches your AI coding agent in an autonomous mode
 #      (SC-AGENT-HIJACK, the s1ngularity / Nx attack), a run of invisible
 #      characters carrying a payload (SC-HIDDEN-UNICODE, GlassWorm)
@@ -93,7 +100,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.7.0"
+ENGINE_VERSION = "2.8.0"
 
 # ---------------- Trust-chain limits (F9/G14/F10) ----------------
 # Only these hosts may ever be fetched, over https only, and redirects to any
@@ -1722,6 +1729,10 @@ class _ArtifactScan:
                 mtext = lazaret.normalize_newlines(self.manifests.get(issue["file"], ""))
                 self.issues.append(lazaret._agent_hijack_issue(
                     issue["file"], issue["line"], mtext.split("\n"), direct[0], direct[1]))
+            persist = lazaret.persistence_reasons(issue["cmd"])   # the command itself plants something
+            if persist and issue["sev"] not in STRONG_SEVERITIES:
+                issue["sev"] = "CRITICAL"
+                issue["msg"] = f"Install hook command {'; and '.join(persist)}."
             targets, complete = lazaret.follow_hook(issue["cmd"])
             if not complete:            # a limit stopped the walk (core.HOOK_MAX_CHARS)
                 self.truncate(issue["file"], "its install hook is more than Lazaret follows "

@@ -61,6 +61,8 @@ from lazaret.scanner import reports as lazaret_report  # report paths: pre-scan 
 from lazaret.scanner import taintspec  # taint-config validation shared by both taint engines
 from lazaret.scanner import _unicode13  # the Unicode every engine reads source text in
 from lazaret.scanner import configsecrets  # config and data files: credentials only
+from lazaret.scanner import autorun  # editor and AI-agent settings that run commands (SC-AUTORUN)
+from lazaret.scanner import ghworkflow  # the workflows the Shai-Hulud worms planted (SC-WORKFLOW-*)
 from lazaret.scanner import frameworks  # web framework models shared by both taint engines
 
 
@@ -4589,10 +4591,174 @@ def _config_token_col(line, lines, i):
     return None
 
 
-def scan_config_file(path, content):
+# ---------------- Settings that run commands (SC-AUTORUN) ----------------
+# An editor's or an AI agent's settings in the tree that make it run a
+# command on its own (autorun: a VS Code folder-open task, a Claude Code,
+# Cursor or Gemini CLI hook, an MCP server): INFO inventory — they run with
+# the user's privileges whenever the folder is opened or the agent works in
+# it — and CRITICAL when the command, or a file of the tree it runs (read
+# like an install hook's: follow_hook, install_script_risk), looks hostile,
+# or that file is obfuscated. Mini Shai-Hulud and the keyv wave committed a
+# SessionStart hook and a folder-open task running the worm's loader
+# (`node .claude/setup.mjs`, which fetches Bun to run the payload) to every
+# repository they reached. A file that cannot be read as JSON but names what
+# its tool runs is MAJOR: the tool may read it more leniently.
+AUTORUN_SHOW = 200                 # code points of a command a message shows
+_AUTORUN_WHY = (
+    "Editors and AI coding agents run these commands on their own — when the folder is opened, a "
+    "session starts or the agent uses a tool — with your privileges, without asking each time. The "
+    "2026 Shai-Hulud worms (Mini Shai-Hulud, the keyv wave) committed a Claude Code SessionStart hook "
+    "and a VS Code folder-open task to every repository they reached, so opening a checkout ran the "
+    "worm.")
+
+
+def _autorun_rule(sev, msg, why, fix):
+    return {"id": "SC-AUTORUN", "name": "Settings run a command automatically", "type": "HOTSPOT",
+            "sev": sev, "msg": msg, "why": why, "fix": fix, "ref": "CWE-506 · Supply chain"}
+
+
+_AGENT_SETTINGS_REASON = "writes an AI agent's or editor's auto-run settings"
+
+
+def _autorun_script_risk(text):
+    """install_script_risk for what a settings file runs, but for writing an
+    agent's or editor's settings: an agent's own hooks manage them (a
+    WorktreeCreate hook copies settings.local.json into the new worktree)."""
+    return [r for r in install_script_risk(text) if not r.startswith(_AGENT_SETTINGS_REASON)]
+
+
+def _autorun_risk(command, base, read):
+    """-> (reasons, target): why a command a settings file runs looks hostile,
+    and the file of the tree it runs that does (None when it is the command
+    itself); ([], None) when nothing does."""
+    reasons = []
+    hijack = agent_hijack_in_command(command)
+    if hijack is not None:
+        reasons.append(f'starts the AI agent "{hijack[0]}" with {hijack[1]}')
+    reasons.extend(_autorun_script_risk(command))
+    if reasons or read is None:
+        return reasons, None
+    for target in follow_hook(autorun.local_command(command))[0]:
+        rel = _tree_join(base, target)
+        text = read(rel) if rel is not None else None
+        if text is None:
+            continue
+        found = _autorun_script_risk(text)
+        if len(set(OBF_IDENT_RE.findall(text))) >= 5:
+            found.append("is obfuscated")
+        if found:
+            return found, target
+    return [], None
+
+
+def autorun_issues(path, lines, read=None):
+    """SC-AUTORUN findings for a settings file (autorun.config_kind(path) is
+    not None) whose text is lines; read(rel) returns the text of a file of
+    the tree ('/'-separated, root-relative) or None, to follow a command into
+    the files it runs (None: the commands alone are judged)."""
+    kind, tool = autorun.config_kind(path)
+    found, error = autorun.entries(kind, tool, "\n".join(lines))
+    if error is not None:
+        return [mk_issue(_autorun_rule(
+            "MAJOR", f"These {tool} settings could not be read as JSON (line {error[0]}: {error[1]}), "
+                     f"but they name commands for {tool} to run: read them by hand.",
+            _AUTORUN_WHY, "Fix the file so it can be read, and check every command it names.",
+        ), path, error[0], lines)]
+    base = autorun.owner_dir(path)
+    out = []
+    for e in found:
+        cmd = e["command"]
+        if cmd is None:
+            out.append(mk_issue(_autorun_rule(
+                "INFO", f"{e['trigger']}.", _AUTORUN_WHY + " Listed for inventory.",
+                "Check that you added it."), path, e["line"], lines))
+            continue
+        shown = cmd if len(cmd) <= AUTORUN_SHOW else cmd[:AUTORUN_SHOW] + "…"
+        reasons, target = _autorun_risk(cmd, base, read)
+        if not reasons:
+            out.append(mk_issue(_autorun_rule(
+                "INFO", f"{e['trigger']}: {shown!r}.", _AUTORUN_WHY + " Listed for inventory.",
+                "Check that you added it, and what it runs."), path, e["line"], lines))
+            continue
+        said = "; and ".join(reasons)
+        msg = (f"{e['trigger']}: {shown!r} — a command that {said}." if target is None else
+               f"{e['trigger']}: {shown!r}, which runs {target}; that file {said}.")
+        out.append(mk_issue(_autorun_rule(
+            "CRITICAL", msg, _AUTORUN_WHY + " This one runs code that looks hostile.",
+            "Do not open the folder in the editor or start the agent in it. Remove the entry and what it "
+            "runs, find the commit that added them, and rotate the credentials this machine holds if it "
+            "already ran."), path, e["line"], lines))
+    return out
+
+
+# ---------------- Workflows the worms planted (SC-WORKFLOW-*) ----------------
+_WORKFLOW_SECRETS_WHY = (
+    "`${{ toJSON(secrets) }}` is every secret of the repository in one value: a job that holds it can "
+    "leak them all, and a workflow that also sends it out is how the Shai-Hulud worms stole secrets "
+    "from the repositories they reached (a webhook.site upload, a build artifact).")
+_WORKFLOW_BACKDOOR_WHY = (
+    "A `${{ … }}` expression is pasted into the script before it runs, so text from an issue, a "
+    "discussion or a pull request becomes shell commands; on a self-hosted runner they run on that "
+    "machine. The second Shai-Hulud wave registered its victims' machines as self-hosted runners and "
+    "planted exactly this workflow (discussion.yaml): opening a discussion ran commands on the victim's "
+    "machine.")
+
+
+def workflow_issues(path, lines):
+    """SC-WORKFLOW-SECRETS / SC-WORKFLOW-BACKDOOR for a GitHub Actions workflow
+    (ghworkflow.is_workflow(path)) whose text is lines."""
+    out = []
+    for kind, line, d in ghworkflow.findings("\n".join(lines)):
+        if kind == "secrets":
+            sent = d["how"] is not None
+            out.append(mk_issue({
+                "id": "SC-WORKFLOW-SECRETS", "name": "Workflow hands out every secret", "type": "HOTSPOT",
+                "sev": "CRITICAL" if sent else "MAJOR",
+                "msg": (f"The workflow hands every repository secret to {d['where']} and sends data out "
+                        f"({d['how']}): the Shai-Hulud worms planted workflows like this." if sent else
+                        f"The workflow hands every repository secret to {d['where']} (toJSON(secrets)): any "
+                        f"step there can read them all."),
+                "why": _WORKFLOW_SECRETS_WHY,
+                "fix": ("Delete the workflow unless you wrote it, then rotate every secret of the repository. "
+                        "A job should get only the secrets it uses, by name (${{ secrets.NAME }})."),
+                "ref": "CWE-200 · Supply chain"}, path, line, lines))
+        else:
+            out.append(mk_issue({
+                "id": "SC-WORKFLOW-BACKDOOR", "name": "Workflow runs event text on a self-hosted runner",
+                "type": "HOTSPOT", "sev": "CRITICAL",
+                "msg": (f"The job \"{d['job']}\" puts {d['expr']} into a command on a self-hosted runner, and "
+                        f"{d['event']} events start it: anyone who can {d['act']} runs commands on that "
+                        f"machine."),
+                "why": _WORKFLOW_BACKDOOR_WHY,
+                "fix": ("Delete the workflow unless you wrote it, and remove any runner you did not register. "
+                        "Otherwise pass the text through an environment variable and quote it in the script."),
+                "ref": "CWE-94 · Supply chain"}, path, line, lines))
+    return out
+
+
+def tree_reader(files, configs):
+    """read(rel) for autorun_issues: the text of a scanned source or config
+    file ('/'-separated, root-relative; a path node would load resolves as
+    node_candidates does), with \\n line endings, or None."""
+    texts = {}
+    for f in list(files) + list(configs):
+        texts.setdefault(f["path"].replace(os.sep, "/"), f["content"])
+
+    def read(rel):
+        for cand in node_candidates(rel):
+            if cand in texts:
+                return normalize_newlines(texts[cand])
+        return None
+    return read
+
+
+def scan_config_file(path, content, read=None):
     """Credentials in a config or data file (see configsecrets): S-TOKEN on
     every line, S-SECRET outside comments. Nothing else runs — it is not
-    code. Suppression markers work in the file's comments, as in code."""
+    code. Suppression markers work in the file's comments, as in code. An
+    editor's or AI agent's settings that run commands also get SC-AUTORUN
+    (read: see autorun_issues), and a GitHub Actions workflow the
+    SC-WORKFLOW-* checks."""
     lines = source_lines(_unicode13.pin(content), "cfg")
     content = "\n".join(lines)
     ctx = _ConfigCtx(lines, "cfg", content, time.monotonic() + SCAN_TIME_BUDGET, False)
@@ -4601,6 +4767,10 @@ def scan_config_file(path, content):
     try:
         issues = []
         try:
+            if autorun.config_kind(path) is not None:
+                issues.extend(autorun_issues(path, lines, read))
+            if ghworkflow.is_workflow(path):
+                issues.extend(workflow_issues(path, lines))
             for i, line in enumerate(lines):
                 ctx.check_time()
                 if not line or line.isspace():
@@ -6131,6 +6301,163 @@ def runs_own_source_at(text):
     return -1
 
 
+# ---------------- Persistence targets (0.1.7) ----------------
+# Where the 2025-26 npm worms made themselves stay. Mini Shai-Hulud and the
+# keyv wave committed a Claude Code SessionStart hook (.claude/settings.json)
+# and a VS Code folder-open task (.vscode/tasks.json) to every repository they
+# reached, each running the other's copy of the loader, so opening a checkout
+# ran the worm; Shai-Hulud planted GitHub Actions workflows that dump every
+# repository secret, and a discussion-triggered one that runs the discussion
+# text on a self-hosted runner it registered on the victim's machine;
+# GlassWorm pushed editor extensions with `code --install-extension`. No
+# package needs to do any of this while it is installed, so each is a reason
+# of the install-script test (CRITICAL in an install hook). Import-time code
+# gets only the workflow that dumps every secret: a CLI's `init` command
+# legitimately writes agent hooks, editor tasks, MCP servers and CI workflows.
+#
+# A settings file is named whole (".claude/settings.json", a template's
+# `${home}/.claude/settings.json`) or as the two literals a path join takes
+# (`path.join(home, ".claude", "settings.json")`, `Path.home() / ".claude" /
+# "settings.json"`); _PERSIST_AGENT_PAIRS says which file each directory's
+# tool runs commands from. The file must also be written: by a write call
+# anywhere in the text (fs, fs-extra, pathlib, json.dump, open(…, "w"),
+# shutil, Octokit's createOrUpdateFileContents), or by a shell write on a line
+# that names it (a redirection, tee, cp, mv, PowerShell's Set-Content …).
+_PERSIST_AGENT_SRC = (
+    r"""(?:\.(?:claude|gemini)[/\\]settings(?:\.local)?|\.vscode[/\\](?:tasks|mcp)|\.cursor[/\\](?:hooks|mcp)"""
+    r"""|(?<![\w.-])\.(?:mcp|claude))\.json(?![\w.-])""")
+_PERSIST_AGENT_SPLIT_SRC = (
+    r"""["'`]\.(claude|gemini|vscode|cursor)["'`]\s{0,20}[,+/]\s{0,20}["'`](settings(?:\.local)?|tasks|hooks|mcp)\.json["'`]""")
+_PERSIST_AGENT_PAIRS = {"claude": ("settings", "settings.local"), "gemini": ("settings",),
+                        "vscode": ("tasks", "mcp"), "cursor": ("hooks", "mcp")}
+_PERSIST_WORKFLOW_SRC = r"""\.github[/\\]workflows\b|["'`]\.github["'`]\s{0,20}[,+/]\s{0,20}["'`]workflows\b"""
+_PERSIST_EXT_DIR_SRC = (
+    r"""[/\\]\.(?:vscode(?:-insiders|-oss|-server)?|cursor|windsurf|vscodium|positron)[/\\]extensions\b"""
+    r"""|["'`]\.(?:vscode(?:-insiders|-oss|-server)?|cursor|windsurf|vscodium|positron)["'`]\s{0,20}[,+/]\s{0,20}"""
+    r"""["'`]extensions["'`]""")
+_PERSIST_WRITE_SRC = (
+    r"""\b(?:writeFileSync|writeFile|appendFileSync|appendFile|createWriteStream|outputFileSync|outputFile"""
+    r"""|outputJsonSync|outputJson|writeJsonSync|writeJson|copyFileSync|copyFile|cpSync|renameSync|symlinkSync"""
+    r"""|write_text|write_bytes|createOrUpdateFileContents)\s*\(|\bjson\.dump\s*\(|\bshutil\.(?:copy\w*|move)\s*\("""
+    r"""|\bopen\s*\([^()\n]{0,300}?["'][wax]b?\+?["']""")
+_PERSIST_SHELL_WRITE_SRC = (
+    r""">|\b(?:tee|cp|mv|install|ln|copy|xcopy)\s|\b(?:Set-Content|Out-File|Add-Content|Copy-Item|New-Item)\b"""
+    r"""|\bgit\s+(?:add|commit)\b""")
+_PERSIST_EXT_INSTALL_SRC = r"""--install-extension\b"""
+# An editor's CLI at a command's start (a line start is written `(?<![^\n])`:
+# under re.M, JavaScript's `^` would also match after \r and \u2028), and a
+# runner's release or its config script. Each is matched once per line with
+# what must follow it later on that line (_after_on_line): a pattern with a
+# gap between the two, `code[^\n]{0,400}?--install-extension`, is searched
+# again from every start, 400 times the text's length.
+_PERSIST_EXT_CLI_SRC = (
+    r"""(?:(?<![^\n])|[;&|(])[ \t]*(?:sudo[ \t]+)?(?:code|code-insiders|codium|cursor|windsurf|positron)(?:\.cmd|\.exe)?"""
+    r"""[ \t]""")
+_PERSIST_RUNNER_SRC = r"""actions/runner/releases|\bactions-runner-(?:linux|osx|win)-"""
+_PERSIST_RUNNER_CONFIG_SRC = r"""\bconfig\.(?:sh|cmd)\b"""
+_PERSIST_RUNNER_ARG_SRC = r"""--(?:token|url)\b"""
+_BUN_RELEASES_SRC = r"""oven-sh/bun/releases"""
+_SECRETS_DUMP_SRC = r"""\btoJSON\s*\(\s*secrets\s*\)"""
+_PERSIST_AGENT_RE = re.compile(_PERSIST_AGENT_SRC)
+_PERSIST_AGENT_SPLIT_RE = re.compile(_PERSIST_AGENT_SPLIT_SRC)
+_PERSIST_WORKFLOW_RE = re.compile(_PERSIST_WORKFLOW_SRC)
+_PERSIST_EXT_DIR_RE = re.compile(_PERSIST_EXT_DIR_SRC)
+_PERSIST_WRITE_RE = re.compile(_PERSIST_WRITE_SRC)
+_PERSIST_SHELL_WRITE_RE = re.compile(_PERSIST_SHELL_WRITE_SRC)
+_PERSIST_EXT_INSTALL_RE = re.compile(_PERSIST_EXT_INSTALL_SRC)
+_PERSIST_EXT_CLI_RE = re.compile(_PERSIST_EXT_CLI_SRC)
+_PERSIST_RUNNER_RE = re.compile(_PERSIST_RUNNER_SRC)
+_PERSIST_RUNNER_CONFIG_RE = re.compile(_PERSIST_RUNNER_CONFIG_SRC)
+_PERSIST_RUNNER_ARG_RE = re.compile(_PERSIST_RUNNER_ARG_SRC)
+_BUN_RELEASES_RE = re.compile(_BUN_RELEASES_SRC, re.I)
+_SECRETS_DUMP_RE = re.compile(_SECRETS_DUMP_SRC, re.I)
+#: Lines naming a persistence target examined for a shell write, per target
+_PERSIST_MAX_LINES = 100
+
+
+def _persist_agent_file(text):
+    """The first AI-agent or editor settings file `text` names ('/'-separated:
+    '.claude/settings.json'), whole or as a path join's two literals, or None."""
+    m = _PERSIST_AGENT_RE.search(text)
+    found = (m.start(), m.group().replace("\\", "/")) if m else None
+    for k, s in enumerate(_PERSIST_AGENT_SPLIT_RE.finditer(text)):
+        if k >= _PERSIST_MAX_LINES or (found is not None and s.start() > found[0]):
+            break
+        if s.group(2) in _PERSIST_AGENT_PAIRS[s.group(1)]:
+            found = (s.start(), f".{s.group(1)}/{s.group(2)}.json")
+            break
+    return None if found is None else found[1]
+
+
+def _shell_writes(text, target_re):
+    """Is there a shell write (a redirection, tee, cp …) on a line on which
+    target_re matches? Each line is searched once, and at most
+    _PERSIST_MAX_LINES lines."""
+    m, lines = target_re.search(text), 0
+    while m is not None and lines < _PERSIST_MAX_LINES:
+        start = text.rfind("\n", 0, m.start()) + 1
+        end = text.find("\n", m.end())
+        end = len(text) if end < 0 else end
+        if _PERSIST_SHELL_WRITE_RE.search(text, start, end):
+            return True
+        lines += 1
+        m = target_re.search(text, end)
+    return False
+
+
+def _after_on_line(text, first_re, then_re):
+    """Is there a line on which first_re matches and then_re matches after it?
+    Each line is read once: its first first_re match, then then_re after it."""
+    m = first_re.search(text)
+    while m is not None:
+        end = text.find("\n", m.end())
+        end = len(text) if end < 0 else end
+        if then_re.search(text, m.end(), end) is not None:
+            return True
+        m = first_re.search(text, end)
+    return False
+
+
+def _writes_named(text, target_re):
+    """Does `text` name a target (target_re) and write it?"""
+    return target_re.search(text) is not None and (
+        _PERSIST_WRITE_RE.search(text) is not None or _shell_writes(text, target_re))
+
+
+def dumps_workflow_secrets(text):
+    """Does `text` carry a GitHub Actions workflow that hands every repository
+    secret to a job (`${{ toJSON(secrets) }}`) and name the workflows
+    directory? The Shai-Hulud worms planted such workflows."""
+    return _SECRETS_DUMP_RE.search(text) is not None and _PERSIST_WORKFLOW_RE.search(text) is not None
+
+
+def persistence_reasons(text):
+    """The persistence-target reasons of the install-script test (see above):
+    what `text` makes an AI agent, an editor or GitHub Actions run later, and
+    the Bun loader the Shai-Hulud worms fetch their payload's runtime with."""
+    reasons = []
+    agent = _persist_agent_file(text)
+    if agent is not None and (_PERSIST_WRITE_RE.search(text) is not None or _shell_writes(
+            text, _PERSIST_AGENT_RE) or _shell_writes(text, _PERSIST_AGENT_SPLIT_RE)):
+        reasons.append(f"writes an AI agent's or editor's auto-run settings ({agent})")
+    if dumps_workflow_secrets(text):
+        reasons.append("carries a GitHub Actions workflow that dumps every repository secret")
+    elif _PERSIST_WORKFLOW_RE.search(text) is not None and (
+            _writes_named(text, _PERSIST_WORKFLOW_RE) or "/contents/" in text):
+        reasons.append("writes a GitHub Actions workflow")
+    install = _PERSIST_EXT_INSTALL_RE.search(text) is not None
+    if ((install and (_EXEC_CALL_RE.search(text) is not None
+                      or _after_on_line(text, _PERSIST_EXT_CLI_RE, _PERSIST_EXT_INSTALL_RE)))
+            or _writes_named(text, _PERSIST_EXT_DIR_RE)):
+        reasons.append("installs an editor extension")
+    if _PERSIST_RUNNER_RE.search(text) is not None or _after_on_line(
+            text, _PERSIST_RUNNER_CONFIG_RE, _PERSIST_RUNNER_ARG_RE):
+        reasons.append("registers the machine as a GitHub Actions self-hosted runner")
+    if _BUN_RELEASES_RE.search(text) is not None and _EXEC_CALL_RE.search(text) is not None:
+        reasons.append("downloads the Bun runtime from GitHub and runs code with it")
+    return reasons
+
+
 def install_script_risk(text):
     """Reasons an install-time script looks hostile ([] if none)."""
     reasons = []
@@ -6158,6 +6485,7 @@ def install_script_risk(text):
         reasons.append("sends the machine's user or host name over the network")
     if runs_own_source_at(text) >= 0:
         reasons.append("runs code it reads back from its own file or a data file shipped with it")
+    reasons.extend(persistence_reasons(text))
     return reasons
 
 
@@ -6203,14 +6531,15 @@ _IMPORT_HARVEST_NEEDLES = ("process.env", "os.environ", "id_", ".git-credentials
 # download run through a shell, PowerShell that hides or fetches what it
 # runs, a stager string, a reverse shell, credentials or the environment
 # sent to a named exfiltration service, the machine's user or host name sent
-# to a data-capture service (the dependency-confusion beacon), and a
-# download run with the Python interpreter (a script, not a binary).
+# to a data-capture service (the dependency-confusion beacon), a download
+# run with the Python interpreter (a script, not a binary), and a GitHub
+# Actions workflow that dumps every repository secret (see persistence targets).
 _STRONG_IMPORT_REASONS = (
     "runs code it receives over the network", "runs a downloaded script through a shell",
     "runs an encoded PowerShell command", "runs PowerShell that", "carries a script that downloads and runs code",
     "opens a reverse shell", "reads credentials or the whole environment and sends them to",
     "sends the machine's user or host name to a data-capture service", "downloads a script and runs it with Python",
-    "runs code it reads back from its own file")
+    "runs code it reads back from its own file", "carries a GitHub Actions workflow that dumps every repository secret")
 # Endpoints that exist to capture what is sent to them (out-of-band testing,
 # request inspection): no library reports to one
 _CAPTURE_SERVICE_RE = re.compile(
@@ -6404,6 +6733,9 @@ def _import_time_risk(text):
     at = runs_own_source_at(text)
     if at >= 0:
         signs.append((at, "runs code it reads back from its own file or a data file shipped with it"))
+    if dumps_workflow_secrets(text):
+        signs.append((_SECRETS_DUMP_RE.search(text).start(),
+                      "carries a GitHub Actions workflow that dumps every repository secret"))
     for at, reason in signs:
         reasons.append(reason)
         line = line or text.count("\n", 0, at) + 1
@@ -9510,6 +9842,11 @@ def _follow_dependency_hook(tree, issue, out, extra, run, followed_to_end):
             mlines = m["content"].split("\n")
             out.append(_agent_hijack_issue(manifest, issue["line"], mlines, direct[0], direct[1],
                                            redactor=_Redactor(mlines)))
+    persist = persistence_reasons(issue["cmd"])            # the command itself plants something
+    if persist and issue["sev"] not in ("BLOCKER", "CRITICAL"):
+        msg = f"Install hook command {'; and '.join(persist)}."
+        issue["sev"] = "CRITICAL"
+        issue["msg"] = _redact_text(msg) if REDACT_SECRETS else msg
     targets, complete = follow_hook(issue["cmd"])
     if not complete and manifest not in followed_to_end:
         followed_to_end[manifest] = True
@@ -9714,13 +10051,14 @@ def scan_project(root, exclude=(), include_deps=False, taint_config=None,
                 issues.append(scan_error_issue(f["path"], exc))
             scanned.append(f)
         checked = 0                         # config and data files: credentials only
+        read = tree_reader(files, configs)  # what an editor's or agent's settings run (SC-AUTORUN)
         for cf in configs:
             if not stopped and should_stop is not None:
                 stopped = should_stop()
             if stopped:
                 break
             try:
-                issues.extend(scan_config_file(cf["path"], cf["content"]))
+                issues.extend(scan_config_file(cf["path"], cf["content"], read))
             except Exception as exc:
                 issues.append(scan_error_issue(cf["path"], exc))
             checked += 1

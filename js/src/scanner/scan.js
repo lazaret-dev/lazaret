@@ -22,6 +22,10 @@ import { truncatedIssue } from "../lib/fs.js";
 import { assigned13, pinUnicode } from "../lib/unicode13.js";
 import { runsDownloadThroughShell, EXEC_CALL_RE } from "../lib/shellpipe.js";
 import { documentationToken, keyMaterial, secretCol, redactConfigValues } from "../lib/configsecrets.js";
+import { configKind, ownerDir, entries as autorunEntries, localCommand } from "../lib/autorun.js";
+import { isWorkflow, findings as workflowFindings } from "../lib/ghworkflow.js";
+import { agentHijackInCommand, installScriptRisk, followHook, treeJoin, nodeCandidates, cpPrefix } from "../lib/hooks.js";
+import { normalizeNewlines } from "../lib/fs.js";
 
 export { isComment } from "./engine.js";
 
@@ -955,12 +959,149 @@ function configTokenCol(line, lines, i) {
   return -1;
 }
 
+// ---- settings that run commands (SC-AUTORUN; core's section comment) ----
+export const AUTORUN_SHOW = 200;           // code points of a command a message shows
+const AUTORUN_WHY =
+  "Editors and AI coding agents run these commands on their own — when the folder is opened, a " +
+  "session starts or the agent uses a tool — with your privileges, without asking each time. The " +
+  "2026 Shai-Hulud worms (Mini Shai-Hulud, the keyv wave) committed a Claude Code SessionStart hook " +
+  "and a VS Code folder-open task to every repository they reached, so opening a checkout ran the " +
+  "worm.";
+
+const autorunRule = (sev, msg, why, fix) => ({
+  id: "SC-AUTORUN", name: "Settings run a command automatically", type: "HOTSPOT", sev, msg, why, fix,
+  ref: "CWE-506 · Supply chain",
+});
+
+const AGENT_SETTINGS_REASON = "writes an AI agent's or editor's auto-run settings";
+/** installScriptRisk for what a settings file runs, but for writing an agent's settings (core._autorun_script_risk). */
+const autorunScriptRisk = (text) => installScriptRisk(text).filter((r) => !r.startsWith(AGENT_SETTINGS_REASON));
+
+/** [reasons, target] for a command a settings file runs (core._autorun_risk). */
+function autorunRisk(command, base, read) {
+  const reasons = [];
+  const hijack = agentHijackInCommand(command);
+  if (hijack !== null) reasons.push(`starts the AI agent "${hijack[0]}" with ${hijack[1]}`);
+  reasons.push(...autorunScriptRisk(command));
+  if (reasons.length || read === null) return [reasons, null];
+  for (const target of followHook(localCommand(command))[0]) {
+    const rel = treeJoin(base, target);
+    const text = rel !== null ? read(rel) : null;
+    if (text === null) continue;
+    const found = autorunScriptRisk(text);
+    OBF_IDENT_RE.lastIndex = 0;
+    if (new Set(text.match(OBF_IDENT_RE) ?? []).size >= 5) found.push("is obfuscated");
+    if (found.length) return [found, target];
+  }
+  return [[], null];
+}
+
+/** SC-AUTORUN findings for an editor's or AI agent's settings file (core.autorun_issues). */
+export function autorunIssues(path, lines, read = null) {
+  const [kind, tool] = configKind(path);
+  const [found, error] = autorunEntries(kind, tool, lines.join("\n"));
+  if (error !== null) {
+    return [mkIssue(autorunRule("MAJOR",
+      `These ${tool} settings could not be read as JSON (line ${error[0]}: ${error[1]}), ` +
+      `but they name commands for ${tool} to run: read them by hand.`,
+      AUTORUN_WHY, "Fix the file so it can be read, and check every command it names."), path, error[0], lines)];
+  }
+  const base = ownerDir(path);
+  const out = [];
+  for (const e of found) {
+    const cmd = e.command;
+    if (cmd === null) {
+      out.push(mkIssue(autorunRule("INFO", `${e.trigger}.`, AUTORUN_WHY + " Listed for inventory.",
+        "Check that you added it."), path, e.line, lines));
+      continue;
+    }
+    const shown = cpLen(cmd) <= AUTORUN_SHOW ? cmd : cpPrefix(cmd, AUTORUN_SHOW) + "…";
+    const [reasons, target] = autorunRisk(cmd, base, read);
+    if (!reasons.length) {
+      out.push(mkIssue(autorunRule("INFO", `${e.trigger}: ${pyRepr(shown)}.`, AUTORUN_WHY + " Listed for inventory.",
+        "Check that you added it, and what it runs."), path, e.line, lines));
+      continue;
+    }
+    const said = reasons.join("; and ");
+    const msg = target === null ? `${e.trigger}: ${pyRepr(shown)} — a command that ${said}.`
+      : `${e.trigger}: ${pyRepr(shown)}, which runs ${target}; that file ${said}.`;
+    out.push(mkIssue(autorunRule("CRITICAL", msg, AUTORUN_WHY + " This one runs code that looks hostile.",
+      "Do not open the folder in the editor or start the agent in it. Remove the entry and what it " +
+      "runs, find the commit that added them, and rotate the credentials this machine holds if it " +
+      "already ran."), path, e.line, lines));
+  }
+  return out;
+}
+
+// ---- workflows the worms planted (SC-WORKFLOW-*; core.workflow_issues) ----
+const WORKFLOW_SECRETS_WHY =
+  "`${{ toJSON(secrets) }}` is every secret of the repository in one value: a job that holds it can " +
+  "leak them all, and a workflow that also sends it out is how the Shai-Hulud worms stole secrets " +
+  "from the repositories they reached (a webhook.site upload, a build artifact).";
+const WORKFLOW_BACKDOOR_WHY =
+  "A `${{ … }}` expression is pasted into the script before it runs, so text from an issue, a " +
+  "discussion or a pull request becomes shell commands; on a self-hosted runner they run on that " +
+  "machine. The second Shai-Hulud wave registered its victims' machines as self-hosted runners and " +
+  "planted exactly this workflow (discussion.yaml): opening a discussion ran commands on the victim's " +
+  "machine.";
+
+/** SC-WORKFLOW-SECRETS / SC-WORKFLOW-BACKDOOR for a GitHub Actions workflow (core.workflow_issues). */
+export function workflowIssues(path, lines) {
+  const out = [];
+  for (const [kind, line, d] of workflowFindings(lines.join("\n"))) {
+    if (kind === "secrets") {
+      const sent = d.how !== null;
+      out.push(mkIssue({
+        id: "SC-WORKFLOW-SECRETS", name: "Workflow hands out every secret", type: "HOTSPOT",
+        sev: sent ? "CRITICAL" : "MAJOR",
+        msg: sent ? `The workflow hands every repository secret to ${d.where} and sends data out ` +
+            `(${d.how}): the Shai-Hulud worms planted workflows like this.`
+          : `The workflow hands every repository secret to ${d.where} (toJSON(secrets)): any ` +
+            "step there can read them all.",
+        why: WORKFLOW_SECRETS_WHY,
+        fix: "Delete the workflow unless you wrote it, then rotate every secret of the repository. " +
+          "A job should get only the secrets it uses, by name (${{ secrets.NAME }}).",
+        ref: "CWE-200 · Supply chain" }, path, line, lines));
+    } else {
+      out.push(mkIssue({
+        id: "SC-WORKFLOW-BACKDOOR", name: "Workflow runs event text on a self-hosted runner",
+        type: "HOTSPOT", sev: "CRITICAL",
+        msg: `The job "${d.job}" puts ${d.expr} into a command on a self-hosted runner, and ` +
+          `${d.event} events start it: anyone who can ${d.act} runs commands on that machine.`,
+        why: WORKFLOW_BACKDOOR_WHY,
+        fix: "Delete the workflow unless you wrote it, and remove any runner you did not register. " +
+          "Otherwise pass the text through an environment variable and quote it in the script.",
+        ref: "CWE-94 · Supply chain" }, path, line, lines));
+    }
+  }
+  return out;
+}
+
+/**
+ * read(rel) for autorunIssues: the text of a scanned source or config file
+ * ('/'-separated, root-relative, resolved as nodeCandidates does), or null
+ * (core.tree_reader).
+ */
+export function treeReader(files, configs) {
+  const texts = new Map();
+  for (const f of [...files, ...configs]) {
+    const key = f.path.replaceAll("\\", "/");
+    if (!texts.has(key)) texts.set(key, f.content);
+  }
+  return (rel) => {
+    for (const cand of nodeCandidates(rel)) if (texts.has(cand)) return normalizeNewlines(texts.get(cand));
+    return null;
+  };
+}
+
 /**
  * Credentials in a config or data file (twin of core.scan_config_file):
  * S-TOKEN on every line, S-SECRET outside comments, nothing else — it is not
- * code. Suppression markers work in the file's comments, as in code.
+ * code. Suppression markers work in the file's comments, as in code. An
+ * editor's or AI agent's settings that run commands also get SC-AUTORUN, and
+ * a GitHub Actions workflow the SC-WORKFLOW-* checks.
  */
-export function scanConfigFile(path, rawContent) {
+export function scanConfigFile(path, rawContent, read = null) {
   const content = pinUnicode(normalizeSource(rawContent, "cfg"));
   const lines = content.split("\n");
   const lex = lexLines(lines, "cfg", content);
@@ -968,6 +1109,8 @@ export function scanConfigFile(path, rawContent) {
   const deadline = Date.now() + timeBudgetMs;
   const issues = [];
   try {
+    if (configKind(path) !== null) issues.push(...autorunIssues(path, lines, read));
+    if (isWorkflow(path)) issues.push(...workflowIssues(path, lines));
     for (let i = 0; i < lines.length; i++) {
       if (Date.now() > deadline) throw new ScanBudgetExceeded();
       const line = lines[i];
