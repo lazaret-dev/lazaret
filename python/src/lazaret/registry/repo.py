@@ -1187,6 +1187,41 @@ def _is_test_dir(name):
     return name in TEST_DIR_NAMES
 
 
+# The strong shapes anywhere in a package (SC-USE-RISK, 0.1.8). The
+# import-time test reads what runs at install and import; a payload in a
+# module the package only runs when it is used — a logger's constructor, a
+# middleware, a script a CLI spawns — was never read by it (about 20 of the
+# 0.1.7 benchmark's 50 decode-or-download-then-run misses, and 11 stealers).
+# Every other JavaScript or Python file the package ships now gets the same
+# test, and counts only for the shapes no library needs (import_time_severity
+# CRITICAL); the weaker ones stay unread there, so the benign rate is the
+# import-time test's. Files that never run in Node or Python when the package
+# is used are left out: tests and fixtures (is_test_path), examples, docs,
+# demos and benchmarks, and a web app's static assets (a Next.js export's
+# _next/static chunks: one minified line held an exec call and a `curl … | sh`
+# string, the only popular package of 429 the test flagged anywhere).
+USE_RISK_SKIP_DIRS = {"example", "examples", "doc", "docs", "demo", "demos", "sample", "samples", "benchmark",
+                      "benchmarks", "bench", "__mocks__", "_next", "static", "public"}
+# The test costs time on every file it reads, so it reads none once the
+# package is SUSPICIOUS anyway (the Shai-Hulud 2.0 releases' 10 MB
+# bun_environment.js took 10 s each, and changed no verdict), no file of more
+# than USE_RISK_MAX_CHARS characters, and stops after USE_RISK_SECONDS per
+# archive, smallest files first: next 15.5 (4,573 files) took 25 s more to
+# read whole; bounded, a first guarded plan of next, react, react-dom,
+# typescript and eslint took 53 s (50 s with 0.1.7), and every sample of the
+# benchmark this test catches was read in time. What it did not read is not
+# "not scanned" — the rules of the file scan read every file — so the verdict
+# is not INCOMPLETE.
+USE_RISK_MAX_CHARS = 8_000_000
+USE_RISK_SECONDS = 3.0
+
+
+def _not_used_code(rel):
+    """Is `rel` a file the package does not run when it is used (see above)?"""
+    parts = rel.replace("\\", "/").split("/")
+    return is_test_path(rel) or any(part.lower() in USE_RISK_SKIP_DIRS for part in parts[:-1])
+
+
 def _demote_test_findings(issues, reachable=frozenset()):
     """Weaker supply-chain findings inside test code become inventory (INFO):
     test fixtures legitimately contain binaries, blobs and escaped bytes, and
@@ -1913,6 +1948,43 @@ class _ArtifactScan:
                          "and run, a reverse shell, hidden PowerShell, a beacon to a "
                          "data-capture service."),
                  "fix": "Read the file: what does it collect, and where does it send it?",
+                 "ref": "CWE-506 · Supply chain"}, rel, line, text.split("\n")))
+        self._use_time_code(set(files))
+
+    def _use_time_code(self, loaded):
+        """SC-USE-RISK (CRITICAL): the strong import-time shapes in the other
+        JavaScript and Python files of the package — code it runs when it is
+        used (see USE_RISK_SKIP_DIRS)."""
+        if any(i["rule"].startswith("SC-") and i["rule"] not in TRUNCATION_RULES and i["sev"] in STRONG_SEVERITIES
+               for i in self.issues):
+            return
+        stop = time.monotonic() + USE_RISK_SECONDS
+        # smallest first: within the time, as many files as can be read (droppers are small)
+        for rel in sorted(self.sources, key=lambda r: (len(self.sources[r][0] or ""), r)):
+            if time.monotonic() > stop:
+                break
+            if rel in loaded or rel in self.install_scripts or rel in self.startup or _not_used_code(rel):
+                continue
+            text, lang = self.sources[rel]
+            if not text or lang not in ("js", "py") or len(text) > USE_RISK_MAX_CHARS:
+                continue
+            self._deadline(rel)
+            text = lazaret.normalize_newlines(text)
+            reasons, line = import_time_risk(text, lang)
+            strong = [r for r in reasons if r.startswith(lazaret._STRONG_IMPORT_REASONS)]
+            if not strong:
+                continue
+            self.issues.append(lazaret.mk_issue(
+                {"id": "SC-USE-RISK", "name": "Hostile code the package runs when used", "type": "HOTSPOT",
+                 "sev": "CRITICAL",
+                 "msg": f"{rel} {'; and '.join(strong)}. Nothing loads it at install or import: it runs when "
+                        f"the package's code calls it.",
+                 "why": ("A payload need not run on install or import to reach you: a logger's constructor, a "
+                         "middleware or a script the package spawns runs it the first time your code uses the "
+                         "package. These are the shapes no library needs: code fetched and run, a reverse shell, "
+                         "hidden PowerShell, credentials sent to an exfiltration service, a beacon to a "
+                         "data-capture service."),
+                 "fix": "Don't use the package; report it to the registry.",
                  "ref": "CWE-506 · Supply chain"}, rel, line, text.split("\n")))
 
     def _agent_hijack(self):
