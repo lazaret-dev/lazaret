@@ -264,7 +264,16 @@ twin `js/src/lib/received.js`.
   download run through a shell, hidden or fetching PowerShell, a stager
   string, a reverse shell, credentials sent to a named exfiltration service,
   host information sent to a data-capture service, a download run with the
-  Python interpreter. An install script that does any of it → CRITICAL
+  Python interpreter; and (0.1.8) a chat bot or webhook whose secret is
+  written in the code (a Telegram bot token, a Discord or Slack webhook) in
+  a file that makes network calls, credential files sent to a raw public IP
+  address, three or more credential folders named in one place (a sweep of
+  the home folder), the host name sent to a base64-hidden address or in a
+  DNS name the code builds, the public IP address sent to a data-capture
+  service (an ngrok tunnel's own address counts as one), a reverse shell as
+  an argument list or to an ngrok TCP address, and a miner (a Monero wallet
+  address with a mining pool's arguments). An install script that does any
+  of it → CRITICAL
   (`install_script_risk`). Download-to-file is MAJOR only in npm hooks and
   import-time code (it is also the shape of a legitimate prebuilt-binary
   installer); in the code pip runs to install an sdist it is CRITICAL.
@@ -670,7 +679,16 @@ variables between files, another file's runner — in both engines and in
 registry and guard scans, after an adversarial pass. On the same benchmark:
 80% of 516 malicious releases SUSPICIOUS (66% in 0.1.7, 76% after items 1-4),
 84% with the dependency history, and the same 3 of 429 popular packages, no
-verdict changed.
+verdict changed. Then, from the releases GuardDog caught and Lazaret didn't:
+a chat bot or webhook whose secret is in the code, credential files sent to
+an IP address, a sweep of credential folders, the host name hidden in base64
+or sent in a DNS name, the public IP address sent to a capture service, a
+copy of the environment serialized, a reverse shell as an argument list, a
+miner, curl or wget downloads run with Python, and at install time a raw
+socket to a hard-coded address and rewritten browser shortcuts. On the
+re-prepared benchmark (each PyPI sample read from its release's own files):
+86% SUSPICIOUS (82% before this round, 68% in 0.1.7; GuardDog 71%), 89% with
+the dependency history, the same 3 popular packages.
 
 **Shipped in 0.1.7** (the September 2026 audit's P0s, and more): config and
 data files checked for credentials; taint through f-strings and template
@@ -712,10 +730,12 @@ comprehensive, so weigh marginal value against FP risk):
     cron and Run keys are the same shape).
   - **PyPI owners** for SC-NEW-DEPENDENCY: its JSON API has none, so a new
     requirement from the project's own account counts too.
-  - **Nine PyPI samples the benchmark prepared from the wrong file** (the
-    compromised releases' sdist where the payload shipped in the wheel, or
-    the reverse): they count as misses whatever the engine does; prepare them
-    from the artifact that carried the payload before comparing.
+  - **What the exfiltration shapes don't read** (the benchmark's remaining
+    misses): an address built from variables for a DNS name
+    (@fnos/app's telemetry runner), a destination fetched at run time with
+    nothing else to show (data-pipeline-check was caught by its credential
+    sweep, not its webhooks), a load-testing flood (poppo213), and a wheel
+    with no code at all (lightgboost).
 - *What the cross-file follower doesn't follow* (the adversarial pass's known
   misses, kept as tests): a value handed between files through an event
   emitter (`bus.emit('code', c)` / `bus.on('code', eval)`), and two top-level
@@ -723,6 +743,9 @@ comprehensive, so weigh marginal value against FP risk):
   a registry scan reads a release's as one). Nor a name built at run time
   (`getattr(m, name)`), a runner behind another function (one that hands its
   parameter to another file's runner), or more than four hops.
+- *Engine:* the Rust scanning engine (`docs/RUST_ENGINE.md`), built
+  separately: integrate it, and hold it to the Python reference with the
+  differential harness before it becomes the default.
 - *Quality:* a durable home for this backlog (a `BACKLOG.md` or issues).
 - *Guard:* registries that need credentials (read them from the tool's own
   settings, for that host only), yarn and Bun, `uv run` / `uvx`; the scan of a

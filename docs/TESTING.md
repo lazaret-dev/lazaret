@@ -84,8 +84,12 @@ Notes:
 - **npm side:** `cd js && node --test test/<file>.test.js`, or batch a slice of
   `test/*.test.js`. Don't forget the subdirectories (`test/lib/`,
   `test/scanner/`) — a bare `test/*.test.js` glob misses them.
-- The **parity suites** each spawn Node and take ~5–30 s; run the heavy one
-  (`test_js_parity.py`, ~30 s) alone and batch the light ones.
+- The **parity suites** each spawn Node and take ~5–30 s; run the heavy ones
+  (`test_js_parity.py` ~20 s, `test_js_parity_limits.py` ~27 s,
+  `test_js_parity_hooks.py` ~27 s) alone and batch the light ones.
+  `test_js_parity_limits.py` holds the source-size and CRLF comparisons, split
+  from `test_js_parity.py` in 0.1.8 when that module reached 45 s; split a
+  module the same way when it nears the limit rather than raising a timeout.
 
 ---
 
@@ -135,6 +139,13 @@ from lazaret.scanner import core
 issues = core._cross_file_received_issues(files)   # files: [{path,content,lang:'py'|'js',dep:True}]
 assert not issues, issues
 ```
+
+- **Install-script and import-time shapes** (0.1.8's exfiltration shapes, and
+  any new strong reason): run `core.import_time_risk` and
+  `core.install_script_risk` over every `.py`/`.js` file of the benchmark's
+  429 popular packages and over installed trees (the 0.1.8 sweep read 37,783
+  files of Python `site-packages`/`dist-packages` and global npm
+  `node_modules`), and list every strong reason. Expect none.
 
 Any hit is a candidate false positive you must **explain** before shipping —
 either it's a real risk (keep it, add a fixture) or the pattern is too loose

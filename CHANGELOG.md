@@ -119,6 +119,46 @@ project is pre-1.0, so the 0.x API may still change.
     between files or run it are read (each a test), 8 crafted look-alikes stay
     quiet, and 2 known misses are documented and tested (an event emitter
     between files; two top-level modules of site-packages in a `--deps` scan).
+- **Data sent to a chat bot, a webhook or a capture service, and the other
+  shapes GuardDog caught that Lazaret didn't.** The benchmark's PyPI samples
+  were re-prepared first (below); on them, 86% of the 516 malicious releases
+  are now SUSPICIOUS (82% after items 1-11, 68% in 0.1.7; GuardDog 71%), 89%
+  with the registry's live dependency history: PyPI's malicious-intent set
+  95% (GuardDog 88%) and all 16 compromised PyPI releases (GuardDog 12).
+  Of the releases GuardDog catches, one is still missed (react-zutils' XOR
+  decoder). `lazaret guard` blocks 238 of the 300 npm samples end to end
+  (232 before). Still the same 3 of 429 popular packages, and no popular
+  package's verdict changed; none of the new shapes fires on the popular
+  packages or on 37,783 files of installed Python and npm packages. Registry
+  engine 2.11.0, so stored and cached verdicts are redone.
+  - **A chat bot or webhook whose secret is written in the code** (both
+    engines, CRITICAL wherever found: install scripts, import-time code, the
+    files a package runs when used): a Telegram bot token next to
+    api.telegram.org, a Discord webhook's token or a Slack webhook's key, in
+    a file that makes network calls. A library for these services takes the
+    key from its user; a package that carries its author's key reports whoever
+    runs it: figlets zipped Exodus wallets and sent them to its bot, requestn
+    uploaded every file in the working folder. Placeholders are not keys.
+  - **Credentials sent out**: credential files (.env, .npmrc, .pypirc, .netrc,
+    .git-credentials, ~/.aws/credentials, SSH keys, Docker's and kubectl's
+    configs) read in a file that sends data to a raw public IP address; three
+    or more credential folders named in one place (.ssh, .aws, .ethereum,
+    .kube …) in a file that makes network calls, a sweep of the home folder
+    (data-pipeline-check and env-loader-cli, one campaign); and a copy of the
+    whole environment serialized (`d = dict(os.environ)` … `urlencode(d)`).
+  - **The machine's names and address sent out**: the user or host name sent
+    to an address the file keeps base64-encoded, or looked up in DNS inside a
+    name the code builds (the dependency-confusion DNS beacon); the public IP
+    address (ipify, ip-api …) sent to a data-capture service. An ngrok
+    tunnel's own address now counts as a capture service, and `os.hostname`
+    handed on as a value as host information.
+  - **And**: a reverse shell given to an exec call as an argument list, or
+    pointed at an ngrok TCP address; a cryptocurrency miner, a Monero wallet
+    address with a mining pool's arguments (ultralytics 8.3.42); curl or wget
+    given `-o path` in an argument list, the file then run with Python
+    (mistralai 2.4.6's `client/__init__.py`); and at install time a raw socket
+    to a hard-coded address (as a URL with one already was) and browser
+    shortcuts rewritten to load an extension (python-dateuti).
 - **`--version` on every Python command** (`lazaret`, `lazaret guard` /
   `lazaret-guard`, `lazaret-registry`, `lazaret-sca`, `lazaret-mcp`). Which
   install was on the PATH could only be told by importing the package, and
@@ -128,6 +168,18 @@ project is pre-1.0, so the 0.x API may still change.
   which 0.1.7 did not update; PyPI shows it from the next release.
 
 ### Fixed
+- **The benchmark read the wrong files for 11 PyPI samples.** For compromised
+  releases the corpus script took the shallowest folder with a setup.py:
+  the upstream source tree the dataset ships next to the release
+  (`sources/<name>`), or a folder inside the package. For litellm and nhmpy
+  it took the shallowest archive: an old litellm_enterprise sdist, and a
+  gzipped pickle of test data. And some samples store each file inside a
+  folder named by its own path, which hid a package's layout. Each sample is
+  now the release's own files (a wheel repacked as a wheel), and
+  every tool was rerun on the 36 that changed: 0.1.7 catches 68% of the 516
+  (66% before), GuardDog 71% (70%), and of the 16 compromised PyPI releases
+  0.1.7 catches 13 (6 before) and GuardDog 12 (7). The numbers above for items
+  1-11 were measured before the correction (on the corrected samples: 82%).
 - **`lazaret guard` with npm in a folder without a package.json.** npm then
   works in the nearest folder up that has a package.json or a node_modules
   folder (a home folder, often); the guard looked for the lockfile in the
