@@ -5625,6 +5625,9 @@ _SCRIPT_EXT_RE = re.compile(r"\.(?:c|m)?js$|\.sh$|\.py$", re.I)
 _ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 
+_HOOK_FALLBACK_TOKEN_RE = re.compile(r"&&|\|\||[;|&()]|[^\s;|&()]+")
+
+
 def _hook_tokens(cmd):
     """Shell-like tokenization of an npm script: quotes respected, operators
     (&& || ; | & parentheses) as their own tokens. Never raises."""
@@ -5635,7 +5638,7 @@ def _hook_tokens(cmd):
         lex.commenters = ""
         return list(lex)
     except ValueError:                     # unbalanced quotes: best effort
-        return re.findall(r"&&|\|\||[;|&()]|[^\s;|&()]+", cmd)
+        return _HOOK_FALLBACK_TOKEN_RE.findall(cmd)
 
 
 def _local_module(value):
@@ -7194,6 +7197,15 @@ _DV_CALL_SRC = r"""(?<![\w$.])(?P<name>[A-Za-z_$][\w$]*)[ \t]*\([ \t]*""" + _DV_
 _DV_KEY_SRC = r"""'(?P<a>[^'\\\n]{1,32})'|"(?P<b>[^"\\\n]{1,32})"|`(?P<c>[^`\\\n$]{1,32})`"""
 _DV_CALL_RE = re.compile(_DV_CALL_SRC)
 _DV_KEY_RE = re.compile(_DV_KEY_SRC)
+# The patterns decoded_view builds around the names a file uses (each name
+# escaped): a call of one of its decoding helpers, and an array read by index
+# (not one the file changes, and assigned once).
+_DV_NAME_HEAD = r"""(?<![\w$.])"""
+_DV_HELPER_CALL_TAIL = r""")[ \t]*\([ \t]*""" + _DV_LIT + r"""[ \t]*\)"""
+_DV_MUTATED_TAIL = (r"""\s*(?:\.\s*(?:push|pop|shift|unshift|splice|reverse|sort|fill"""
+                    r"""|copyWithin|append|insert|extend|remove)\s*\(|\[[^\]\n]{0,80}\]\s*=(?!=))""")
+_DV_ASSIGNED_TAIL = r"\s*=(?![=>])"
+_DV_INDEX_TAIL = r"\s*\[\s*(\d{1,2})\s*\]"
 
 
 def _dv_decode(kind, s):
@@ -7335,15 +7347,15 @@ def decoded_view(text):
             _dv_decode("hex" if (m.group("fh") or m.group("uh")) else "base64", _dv_literal(m))), view)
     helpers = _dv_helpers(view)
     if helpers:
-        call = re.compile(r"""(?<![\w$.])(?P<name>""" + "|".join(re.escape(n) for n in sorted(helpers))
-                          + r""")[ \t]*\([ \t]*""" + _DV_LIT + r"""[ \t]*\)""")
+        call = re.compile(_DV_NAME_HEAD + "(?P<name>" + "|".join(re.escape(n) for n in sorted(helpers))
+                          + _DV_HELPER_CALL_TAIL)
         view = call.sub(lambda m: (lambda d: m.group() if d is None else _dv_quote(d))(
             _dv_decode(helpers[m.group("name")], _dv_literal(m))), view)
     if "^" in view:
         xors = _dv_xor_decoders(view)
         if xors:
-            call = re.compile(r"""(?<![\w$.])(?P<name>""" + "|".join(re.escape(n) for n in sorted(xors))
-                              + r""")[ \t]*\([ \t]*""" + _DV_LIT + r"""[ \t]*\)""")
+            call = re.compile(_DV_NAME_HEAD + "(?P<name>" + "|".join(re.escape(n) for n in sorted(xors))
+                              + _DV_HELPER_CALL_TAIL)
             view = call.sub(_dv_xor_sub(xors), view)
     if view == joined:
         return text                 # nothing decoded: literals joined alone are no reading of their own
@@ -7354,12 +7366,11 @@ def decoded_view(text):
         name = m.group("name")
         items = _DV_STR_ITEM_RE.findall(m.group("items"))
         esc = re.escape(name)
-        if (re.search(r"(?<![\w$.])" + esc + r"""\s*(?:\.\s*(?:push|pop|shift|unshift|splice|reverse|sort|fill"""
-                      r"""|copyWithin|append|insert|extend|remove)\s*\(|\[[^\]\n]{0,80}\]\s*=(?!=))""", view)
-                or len(re.findall(r"(?<![\w$.])" + esc + r"\s*=(?![=>])", view)) != 1):
+        if (re.search(_DV_NAME_HEAD + esc + _DV_MUTATED_TAIL, view)
+                or len(re.findall(_DV_NAME_HEAD + esc + _DV_ASSIGNED_TAIL, view)) != 1):
             continue
         arrays += 1
-        view = re.sub(r"(?<![\w$.])" + esc + r"\s*\[\s*(\d{1,2})\s*\]",
+        view = re.sub(_DV_NAME_HEAD + esc + _DV_INDEX_TAIL,
                       lambda i: items[int(i.group(1))] if int(i.group(1)) < len(items) else i.group(), view)
     return _DV_MEMBER_RE.sub(lambda m: "." + (m.group("a") or m.group("b")), view) if "[" in view else view
 
@@ -7403,6 +7414,9 @@ _SPAWN_CONCAT_SRC = (r"""__dirname\s*\+\s*(?:'/?(?P<a>[^'"`\n$\\]{1,200})'|"/?(?
 _SPAWN_CONCAT_RE = re.compile(_SPAWN_CONCAT_SRC)
 _SPAWN_NAME_SRC = r"""[A-Za-z_$][\w$]*"""
 _SPAWN_NAME_RE = re.compile(_SPAWN_NAME_SRC)
+# a name's assignment, as _spawn_path looks one up (the name escaped between them)
+_SPAWN_ASSIGN_HEAD = r"(?<![\w$.])"
+_SPAWN_ASSIGN_TAIL = r"\s*=(?![=>])\s*(?P<e>[^\n;]{1,300})"
 _SPAWN_NO_SCRIPT_FLAGS = frozenset(("-m", "-c", "-e", "-p", "--eval", "--print"))
 _SPAWN_VALUE_FLAGS = frozenset(("-r", "--require", "--import", "--loader", "--experimental-loader", "-W", "-X"))
 
@@ -7468,7 +7482,7 @@ def _spawn_path(expr, text, names):
             segs.append(lit.group("a") or lit.group("b") or lit.group("c"))
         return (base, "/".join(segs)) if segs else None
     if _SPAWN_NAME_RE.fullmatch(expr) and names > 0:
-        am = re.search(r"(?<![\w$.])" + re.escape(expr) + r"\s*=(?![=>])\s*(?P<e>[^\n;]{1,300})", text)
+        am = re.search(_SPAWN_ASSIGN_HEAD + re.escape(expr) + _SPAWN_ASSIGN_TAIL, text)
         if am is not None:
             value = am.group("e")
             parts = _spawn_args(value + ")", 0)          # its first top-level segment
@@ -8187,6 +8201,15 @@ _DL_MEMBER_RE = _dl_re("_DL_MEMBER_RE")
 _DL_CALLBACK_RE = _dl_re("_DL_CALLBACK_RE")
 _DL_CALLBACK_NEEDLES = ("eval", "Function", "exec", "runIn")
 _DL_SPACE_RE_ANY = re.compile(r"[ \t]+")
+# the patterns built around names at run time (each name escaped): another
+# file's runner handed to a call as its last argument (_dl_callbacks), a name
+# standing whole (_DlNamed), a call of a runner alias (_dl_kind)
+_DL_RUNNER_ARG_HEAD = r"(?<=[(,])[ \t]*(?P<r>"
+_DL_RUNNER_ARG_TAIL = r")[ \t]*(?=\)(?![ \t]*\())"
+_DL_NAMED_MID = r"(?<![\w$]"
+_DL_NAMED_TAIL = r")(?![\w$])"
+_DL_ALIAS_CALL_HEAD = r"""(?<![\w$.])("""
+_DL_ALIAS_CALL_TAIL = r""")\s*\("""
 
 
 def _dl_blank_literal(m):
@@ -8341,8 +8364,7 @@ def _dl_callbacks(text, runners=()):
         text = _DL_CALLBACK_RE.sub(lambda m: "(_v)=>" + _DL_SPACE_RE_ANY.sub("", m.group("r")) + "(_v)", text)
     names = [n for n in runners if n in text]
     if names:
-        rx = re.compile(r"(?<=[(,])[ \t]*(?P<r>" + "|".join(re.escape(n) for n in sorted(names))
-                        + r")[ \t]*(?=\)(?![ \t]*\())")
+        rx = re.compile(_DL_RUNNER_ARG_HEAD + "|".join(re.escape(n) for n in sorted(names)) + _DL_RUNNER_ARG_TAIL)
         text = rx.sub(lambda m: "(_v)=>" + m.group("r") + "(_v)", text)
     return text
 
@@ -8619,7 +8641,7 @@ class _DlNamed:
         if self.index is None and self.searches < _DL_NAMED_SEARCHES:
             self.searches += 1
             esc = re.escape(head)
-            rx = re.compile(esc + r"(?<![\w$]" + esc + r")(?![\w$])")
+            rx = re.compile(esc + _DL_NAMED_MID + esc + _DL_NAMED_TAIL)
             out, text, starts = [], self.text, self.starts
             m = rx.search(text)
             while m is not None:
@@ -9085,7 +9107,8 @@ def _dl_kind(text, extra_always, extra_runners=()):
         aliases[name] = None
     alias_call = None
     if aliases:                                         # a call of a runner alias, near its definition, is a runner
-        alias_call = re.compile(r"""(?<![\w$.])(""" + "|".join(re.escape(n) for n in sorted(aliases)) + r""")\s*\(""")
+        alias_call = re.compile(_DL_ALIAS_CALL_HEAD + "|".join(re.escape(n) for n in sorted(aliases))
+                                + _DL_ALIAS_CALL_TAIL)
         for name, def_rows in aliases.items():
             for r in named.find(name):
                 seeds[r] = 1

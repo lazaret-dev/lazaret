@@ -1,0 +1,18 @@
+[package]
+name = "lazaret-engine"
+description = "Lazaret's scanning engine: bytes in, findings out (no I/O, no unsafe, no dependencies)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+# per-pattern timing for the profiling examples; never in a release build
+stats = []
+
+[dependencies]

@@ -1,0 +1,97 @@
+"""Engine parity for the signs install scripts and import-time code are
+read for, one by one: the Rust engine (crates/lazaret-engine: signs.rs,
+received.rs) against lazaret.scanner.core on the hooks parity corpus
+(hooks_corpus.py), each case's answers compared field by field —
+_received_code_kind, _downloads_and_runs, _decodes_and_runs,
+powershell_risk, stager_at, reverse_shell_at, sends_host_info,
+runs_own_source_at, reads_own_source, persistence_reasons,
+dumps_workflow_secrets, _pipes_download_to_shell, runs_substituted_download
+and offscreen_code (as JavaScript and as Python).
+
+test_rust_parity_hooks.py holds install_script_risk and import_time_risk,
+which read all of these at once; here a difference shows which one.
+The Rust engine runs in a thread while core reads the cases. Skipped where
+the native library is not built.
+"""
+import threading
+import unittest
+
+from lazaret.scanner import _native, core
+from tests.architecture.hooks_corpus import corpus
+
+CHUNK = 1500
+FIELDS = ("received_code_kind", "downloads_and_runs", "decodes_and_runs", "powershell_risk", "stager_at",
+          "reverse_shell_at", "sends_host_info", "runs_own_source_at", "reads_own_source", "persistence_reasons",
+          "dumps_workflow_secrets", "pipes_download_to_shell", "runs_substituted_download",
+          "offscreen_code js", "offscreen_code py")
+
+
+def as_json(v):
+    """A value as JSON carries it (tuples as lists)."""
+    if isinstance(v, (tuple, list)):
+        return [as_json(x) for x in v]
+    return v
+
+
+def core_view(text):
+    """core's answers for one case, in FIELDS order."""
+    return as_json([core._received_code_kind(text), core._downloads_and_runs(text), core._decodes_and_runs(text),
+                    core.powershell_risk(text), core.stager_at(text), core.reverse_shell_at(text),
+                    core.sends_host_info(text), core.runs_own_source_at(text), core.reads_own_source(text),
+                    core.persistence_reasons(text), core.dumps_workflow_secrets(text),
+                    core._pipes_download_to_shell(text), core.runs_substituted_download(text),
+                    core.offscreen_code(text, "js"), core.offscreen_code(text, "py")])
+
+
+def rust_views(cases, box):
+    views = []
+    try:
+        for i in range(0, len(cases), CHUNK):
+            calls = [["signs_view", {}, text] for text in cases[i:i + CHUNK]]
+            for r in _native.call("batch", {"calls": calls}):
+                views.append(r.get("ok", r))
+    except Exception as e:                            # reported by the test, not lost in the thread
+        box["error"] = repr(e)
+    box["views"] = views
+
+
+@unittest.skipUnless(_native.available(), f"native engine not built ({_native.load_error()})")
+class RustSignsParityTests(unittest.TestCase):
+    maxDiff = None
+
+    @classmethod
+    def setUpClass(cls):
+        cls.cases = corpus()
+        box = {}
+        worker = threading.Thread(target=rust_views, args=(cls.cases, box))
+        worker.start()
+        cls.want = [core_view(text) for text in cls.cases]
+        worker.join()
+        cls.error = box.get("error")
+        cls.got = box.get("views", [])
+
+    def test_every_case_agrees(self):
+        self.assertIsNone(self.error)
+        self.assertEqual(len(self.got), len(self.cases))
+        found = []
+        for text, a, b in zip(self.cases, self.want, self.got):
+            if not isinstance(b, list):
+                found.append((text, "(call)", None, b))
+                continue
+            for field, x, y in zip(FIELDS, a, b):
+                if x != y:
+                    found.append((text, field, x, y))
+            if len(found) >= 20:
+                break
+        self.assertEqual(found, [])
+
+    def test_every_field_is_reached(self):
+        """The corpus holds cases where each sign is found (not only its absence)."""
+        quiet = (None, [], -1, False)
+        for k, field in enumerate(FIELDS):
+            with self.subTest(field=field):
+                self.assertTrue(any(v[k] not in quiet for v in self.want), field)
+
+
+if __name__ == "__main__":
+    unittest.main()

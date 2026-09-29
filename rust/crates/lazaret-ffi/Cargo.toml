@@ -1,0 +1,17 @@
+[package]
+name = "lazaret-ffi"
+description = "C ABI over lazaret-engine: loaded by Python's ctypes and, as WebAssembly, by Node"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "lazaret_native"
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[dependencies]
+lazaret-engine = { path = "../lazaret-engine" }
