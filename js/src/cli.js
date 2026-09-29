@@ -219,6 +219,19 @@ export function run(argv, io = {}) {
   }
 }
 
+const GUARD_TOOLS = ["npm", "pnpm", "pip", "pip3", "uv"];
+
+/** `lazaret guard <tool> …`, the Python package's install guard: a package
+ * manager after `guard`, or only options (or nothing) when no path named
+ * guard is here to scan (lazaret._cli.is_guard). */
+function isGuardCommand(argv) {
+  if (argv[0] !== "guard") return false;
+  const rest = argv.slice(1);
+  if (rest.some((a) => GUARD_TOOLS.includes(a))) return true;
+  if (!rest.every((a) => a.startsWith("-"))) return false;
+  try { statSync("guard"); return false; } catch { return true; }
+}
+
 function runChecked(argv, io) {
   const out = io.out ?? ((s) => console.log(s));
   const err = io.err ?? ((s) => console.error(s));
@@ -229,6 +242,11 @@ function runChecked(argv, io) {
     return EXIT_USAGE;
   };
 
+  if (isGuardCommand(argv)) {
+    err("error: lazaret guard comes with the Python package: pip install lazaret (or pipx install lazaret), "
+      + "then run: lazaret guard npm install …");
+    return EXIT_USAGE;
+  }
   let parsed;
   try {
     if (argv.includes("-h") || argv.includes("--help")) { out(USAGE); return 0; }

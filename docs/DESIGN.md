@@ -134,6 +134,7 @@ line yourself.
 ```
 lazaret.scanner    rules, taint, cross-file flow, CLI            (lazaret)
 lazaret.registry   npm / PyPI package auditing                   (lazaret-registry)
+lazaret.registry.guard  pre-install guard for npm/pnpm/pip/uv    (lazaret guard, lazaret-guard)
 lazaret.mcp        MCP server                                    (lazaret-mcp)
 lazaret.scanner.sca_feeds / CVE bundle + SCA                     (lazaret-sca)
 lazaret.pg         Postgres wire-protocol client (stdlib only)
@@ -352,6 +353,58 @@ checks. `lazaret-sca --update-bundle` builds a CVE bundle from public feeds
 (OSV, CISA KEV, EPSS) parsed with `lazaret.safexml`; Lazaret ships no
 vulnerability database of its own. The registry always redacts what it stores.
 
+### f. The install guard (`lazaret.registry.guard`, 0.1.7)
+
+`lazaret guard <tool> <command>` runs the registry auditor's in-memory scan
+(`repo._scan_artifact`, same verdicts) on what a package manager is about to
+install, and stops the install when anything is SUSPICIOUS, can't be checked,
+or is younger than `--min-age`. `lazaret._cli` sends `lazaret guard …` there
+(a package manager after `guard`, or only options when no path named `guard`
+exists) and everything else to the scanner; it sits above the layers.
+
+Two strategies, by what the tool offers:
+
+- **Lock, check, install** (npm, pnpm, uv projects). The tool resolves to a
+  lockfile without installing (`--package-lock-only`, `--lockfile-only`,
+  `uv add --no-sync`, `uv lock`; scripts off). What the lockfile adds on this
+  machine — minus what is installed (npm's and pnpm's hidden lockfiles, the
+  venv's `.dist-info`), minus other platforms (npm-install-checks' os/cpu/libc
+  rules, as `node` reports the machine) — is fetched from the URL the tool will
+  use (the `resolved` URL after npm's replace-registry-host rule, a scoped
+  registry from `<tool> config list --json`) and **verified against the
+  lockfile's digest**: the tool accepts only those bytes, so a verdict on them
+  is a verdict on what gets installed, and a cached verdict can be reused
+  without a download. Blocked: the files the resolution touched are restored
+  from a snapshot (also on Ctrl-C or a crash). Not blocked: the user's command
+  runs unchanged (for `uv sync` minus `--upgrade`, already in the lockfile),
+  then the installed set is diffed against what was checked or noted, and
+  anything else fails the run.
+- **A local index** (pip, uv pip). There is no lockfile to read first, so the
+  tool is pointed (`PIP_INDEX_URL`, `UV_DEFAULT_INDEX`) at an HTTP server on
+  127.0.0.1 that relays PyPI's JSON simple API: pages are rewritten to serve
+  files by number, files younger than the cutoff are dropped from them, and a
+  file is fetched, hash-checked against the page, scanned and spooled before it
+  is served (403 when blocked). Since sdists are built during resolution, this
+  is what keeps a malicious `setup.py` from running at all. The dry run (pip's
+  `--report`, uv's `--dry-run` plan) is scanned first so the report comes
+  before any install.
+
+Age: npm and pnpm are given the cutoff themselves (`npm_config_before`,
+`npm_config_minimum_release_age`) so they resolve to older releases instead of
+failing. npm always gets a `before` — the run's start time when there is no
+cutoff — which closes the window between the check and the install. What a
+lockfile already pins is aged by the guard: the tarball's `Last-Modified`
+(a registry sets it when the version is published), confirmed against the
+packument's `time` only when it looks recent; uv.lock's `upload-time`, else
+PyPI's JSON API.
+
+Failure is closed: a package that can't be fetched, verified or scanned
+blocks (a scan crash is a `ScanError`, never a verdict); only a file over the
+200 MiB download cap is INCOMPLETE. The cache (`VerdictCache`) keys verdicts by
+ecosystem, name, version and digest and is discarded when `ENGINE_VERSION`
+changes. Scans run in `spawn` worker processes (`--jobs`), downloads in
+threads; a stuck worker is terminated at exit.
+
 ---
 
 ## 6. How to add or change a rule — the loop
@@ -468,6 +521,7 @@ constraint — it overflows its backtrack stack where CPython merely slows.
 | `python/src/lazaret/scanner/received_spec.json` | **Source of truth** for the received-code detector's data + patterns |
 | `python/src/lazaret/scanner/sca_feeds.py` | CVE bundle build (OSV/KEV/EPSS) |
 | `python/src/lazaret/{registry,mcp,pg,safexml}/` | Registry auditor, MCP server, Postgres client, safe XML |
+| `python/src/lazaret/registry/guard.py`, `python/src/lazaret/_cli.py` | The install guard (`lazaret guard`) and the `lazaret` command's dispatch |
 | `js/src/lib/received.js` | Twin of the received-code detector |
 | `js/src/lib/received-spec.json` | Synced copy of the spec (do not edit by hand) |
 | `js/src/lib/hooks.js`, `js/src/scanner/flow.js`, `js/src/index.js` | Install-hook checks, flow twin, npm CLI |

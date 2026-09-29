@@ -54,7 +54,9 @@ python/
 ├── LICENSE
 ├── src/lazaret/
 │   ├── __init__.py         __version__ (the single source of the version)
-│   ├── __main__.py         python -m lazaret  →  the scanner CLI
+│   ├── __main__.py         python -m lazaret  →  lazaret._cli
+│   ├── _cli.py             the `lazaret` command: `lazaret guard …` goes to the
+│   │                       install guard, everything else to the scanner CLI
 │   ├── scanner/
 │   │   ├── core.py         rule engine, intra-file taint, scan_project() (the one
 │   │   │                   project-scan pipeline, shared by the CLI and MCP), the
@@ -67,6 +69,8 @@ python/
 │   │                       CISA KEV and EPSS
 │   ├── registry/
 │   │   ├── repo.py         npm / PyPI package auditing (`lazaret-registry`)
+│   │   ├── guard.py        the install guard (`lazaret guard`, `lazaret-guard`):
+│   │   │                   checks what npm / pnpm / pip / uv would install
 │   │   └── schema.sql      PostgreSQL setup for the state DB
 │   ├── mcp/server.py       MCP server (`lazaret-mcp`)
 │   ├── web/lazaret.html    browser dashboard (package data)
@@ -75,7 +79,7 @@ python/
 └── tests/                  (section 4)
 ```
 
-Every CLI works both as an installed command and as a module: `lazaret` / `python -m lazaret`, `lazaret-registry` / `python -m lazaret.registry`, `lazaret-mcp` / `python -m lazaret.mcp`, `lazaret-sca` / `python -m lazaret.scanner.sca`.
+Every CLI works both as an installed command and as a module: `lazaret` / `python -m lazaret`, `lazaret-registry` / `python -m lazaret.registry`, `lazaret-mcp` / `python -m lazaret.mcp`, `lazaret-sca` / `python -m lazaret.scanner.sca`, `lazaret-guard` / `python -m lazaret.registry.guard` (or `lazaret guard`).
 
 ### Layering
 
@@ -84,6 +88,8 @@ Dependencies only point inward:
 ```
 mcp  →  registry  →  scanner  →  pg, safexml
 ```
+
+`lazaret/_cli.py` and `__main__.py` sit above the layers: they hand the command line to the scanner, or to the install guard in the registry, importing only the one they call.
 
 `pg` and `safexml` are leaf libraries: they import nothing else from Lazaret and refer to themselves with relative imports, so either can later become its own distribution with a copy and a rename. Nothing imports upward: the scanner never imports the registry or the MCP server. `tests/architecture/test_layering.py` enforces this, including that every new subpackage is given a place in the layering.
 
@@ -109,7 +115,9 @@ tests/
 ├── build/                 the build backend and the typosquat stubs
 ├── scanner/               the engine, taint, reports, SCA, dashboard, bundle hygiene,
 │                          and the samples-corpus test
-├── registry/              registry crash guards, Postgres state backend
+├── registry/              registry crash guards, Postgres state backend, the install
+│                          guard (the real npm, pnpm, pip and uv against fake registries
+│                          on 127.0.0.1, _guard_support.py; skipped where a tool is missing)
 ├── mcp/                   MCP server hardening
 ├── pg/                    Postgres client: unit, hostile-server, live integration, auth matrix
 └── safexml/               attacks, stdlib compatibility, limits, XML-RPC

@@ -252,6 +252,47 @@ project is pre-1.0, so the 0.x API may still change.
   no JSON reader accepts. The registry's engine version is 2.8.0, so stored
   scans are redone with 0.1.7's tests.
 
+- **`lazaret guard`: check what npm, pnpm, pip or uv is about to install,
+  before it runs.** `lazaret guard npm install express` (also `npm ci`,
+  `npm update`, global installs, `pnpm add` / `install` / `update`,
+  `pip install`, `uv add` / `sync` / `lock`, `uv pip install` / `sync`, and
+  the `lazaret-guard` command) fetches and scans every package the command
+  would install, with the registry auditor's tests, and installs nothing if
+  one is SUSPICIOUS, can't be checked, or is younger than `--min-age`
+  (default 2 days).
+  - npm, pnpm and uv projects resolve first and install nothing
+    (`--package-lock-only`, `--lockfile-only`, `uv add --no-sync`,
+    `uv lock`); each package the new lockfile adds on this machine is
+    fetched from where the tool will fetch it and checked against the
+    lockfile's digest, so the bytes scanned are the bytes it installs. A
+    blocked install puts `package.json`, the lockfile and `pyproject.toml`
+    back. After an install, what was installed is compared with what was
+    checked; anything else fails the run. Packages for other platforms
+    (`os` / `cpu` / `libc`, npm's rules) are left out.
+  - pip and uv pip install through an index on 127.0.0.1 that relays PyPI
+    (`LAZARET_GUARD_PYPI_URL` for a mirror): new files are left out of it,
+    every file is scanned before the tool gets it (an sdist before pip or uv
+    can build it), and the tool's dry run is scanned first. Other indexes
+    and local archives are refused, also in requirement files.
+  - Release age: npm's `before` and pnpm's `minimum-release-age` hold new
+    releases back; what a lockfile already pins is aged by the guard (the
+    tarball's `Last-Modified`, confirmed by the registry; uv.lock's upload
+    time). npm always resolves with `before`, so the install can't pick a
+    release published while the guard checked.
+  - `--allow-new NAME` lets a new release through the age check (still
+    scanned); `--trust NAME` installs what the guard blocks or can't check
+    (a private registry, a reviewed finding; still reported); `--plan`
+    installs nothing; `--block-warn` blocks WARN and INCOMPLETE too;
+    `--json` writes every package checked.
+  - Verdicts are cached by artifact digest and engine version
+    (`~/.cache/lazaret/guard-verdicts.json`), so a package is fetched and
+    scanned once; scans run in worker processes (`--jobs`). A first guarded
+    `npm install next react react-dom typescript eslint` takes about 48
+    seconds on a 2-core machine, most of it scanning the 42 MB `next`
+    tarball; a repeat `npm ci` of `express` takes under a second.
+  - Tested against the real npm, pnpm, pip and uv with fake registries on
+    127.0.0.1 (`test_guard_npm.py`, `test_guard_python.py`).
+
 ### Changed
 - **The cross-file JavaScript pass parses the code (both engines).** It read
   JavaScript and TypeScript with patterns: a function was a line that looked

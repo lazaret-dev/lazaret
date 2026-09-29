@@ -8,7 +8,7 @@ Static security & quality analysis for Python, JavaScript, and SQL — a lightwe
 pip install lazaret          # from PyPI: one package, zero dependencies
 ```
 
-This gives four commands: `lazaret` (project scanner), `lazaret-registry` (npm/PyPI package auditing), `lazaret-mcp` (MCP server), and `lazaret-sca` (dependency CVE matching). Each also runs as a module, e.g. `python -m lazaret`.
+This gives five commands: `lazaret` (project scanner, and `lazaret guard`, which checks what npm, pnpm, pip or uv is about to install before it runs), `lazaret-registry` (npm/PyPI package auditing), `lazaret-mcp` (MCP server), `lazaret-sca` (dependency CVE matching) and `lazaret-guard` (`lazaret guard` under its own name). Each also runs as a module, e.g. `python -m lazaret`.
 
 On a machine with Node but no Python, the project scanner is also on npm, with the same rules and zero dependencies:
 
@@ -16,7 +16,7 @@ On a machine with Node but no Python, the project scanner is also on npm, with t
 npx lazaret check .          # or: npx lazaret .   (or: npm install -g lazaret)
 ```
 
-The npm package is the project scanner only; registry auditing, custom taint specs, SCA and the MCP server come with the Python package. Its cross-file taint pass (`X-*` findings) covers JavaScript: the Python half of that engine is AST-based and runs only in the Python package, so when a project has Python files the npm gate's cross-file condition says how many it did not analyze. The npm CLI takes the same flags as the Python one (`--deps`, `--exclude`, `--out-dir`, `--html`/`--json`, `--sarif`, `--baseline`, `--ci`, `--force-overwrite`, `--no-redact-secrets`, `--max-source-bytes`, `-q`) and rejects unknown ones. The two engines are tested to agree exactly — every finding including its severity and message, the metrics, ratings, quality gate and exit code (`tests/architecture/test_js_parity.py`, which also runs an adversarial fixture set) — except for the Python half of the cross-file engine (its `X-*` findings and Q-FLOW-* coverage notes on Python files) and the cross-file received-code follower (a `--deps` value received in one file of a package and run in another; also Python-only). The browser dashboard carries a port of the same engine and is held to the same findings (`tests/scanner/test_review_dashboard_parity.py`).
+The npm package is the project scanner only; registry auditing, the install guard, custom taint specs, SCA and the MCP server come with the Python package. Its cross-file taint pass (`X-*` findings) covers JavaScript: the Python half of that engine is AST-based and runs only in the Python package, so when a project has Python files the npm gate's cross-file condition says how many it did not analyze. The npm CLI takes the same flags as the Python one (`--deps`, `--exclude`, `--out-dir`, `--html`/`--json`, `--sarif`, `--baseline`, `--ci`, `--force-overwrite`, `--no-redact-secrets`, `--max-source-bytes`, `-q`) and rejects unknown ones. The two engines are tested to agree exactly — every finding including its severity and message, the metrics, ratings, quality gate and exit code (`tests/architecture/test_js_parity.py`, which also runs an adversarial fixture set) — except for the Python half of the cross-file engine (its `X-*` findings and Q-FLOW-* coverage notes on Python files) and the cross-file received-code follower (a `--deps` value received in one file of a package and run in another; also Python-only). The browser dashboard carries a port of the same engine and is held to the same findings (`tests/scanner/test_review_dashboard_parity.py`).
 
 From a checkout, `pip install ./python` (or `pip install -e ./python` for development) works with no network access: Lazaret builds with its own standard-library build backend.
 
@@ -28,6 +28,7 @@ From a checkout, `pip install ./python` (or `pip install -e ./python` for develo
 | `lazaret.scanner.flow` | Interprocedural / cross-file taint engine (used by the CLI, MCP, registry) |
 | `lazaret-sca` (`lazaret.scanner.sca`) | Dependency CVE scanner: matches installed npm/PyPI packages against a CVE bundle |
 | `lazaret-registry` (`lazaret.registry`) | Registry scanner: audit npm/PyPI packages, track state in a DB |
+| `lazaret guard`, `lazaret-guard` (`lazaret.registry.guard`) | Install guard: check what npm, pnpm, pip or uv is about to install (resolve, fetch, scan in memory) and block it before it runs |
 | `lazaret-mcp` (`lazaret.mcp`) | MCP server: lets Claude scan code and changes via tools |
 | `lazaret/web/lazaret.html` | Web dashboard: paste or upload code, scan in the browser |
 | `lazaret.pg` | PostgreSQL client used for the registry state DB (pure stdlib) |
@@ -201,6 +202,7 @@ Rules that fail validation — unknown `category` (e.g. `"sql"` instead of `"SQL
 | SARIF output | ✔ | ✔ | ✔ | ✔ | ✔ |
 | Baseline / new-code focus | ✔ | ✔ | ✔ | ✔ | ✔ |
 | Registry package auditing (npm/PyPI) | ✔ | — | partial | — | — |
+| Pre-install guard (npm, pnpm, pip, uv) | ✔ (`lazaret guard`) | — | — | — | — |
 | Dependency CVE scanning (SCA) | ✔ (with a CVE bundle) | ✔ | ✔ | — | — |
 | Languages | 3 (Py/JS/SQL) | 30+ | 30+ | 1 | any (secrets) |
 
@@ -319,6 +321,35 @@ lazaret-registry scan-all
 No driver install: the Postgres backend speaks the PostgreSQL wire protocol
 directly (`lazaret.pg`, pure Python standard library — SCRAM-SHA-256
 authentication and TLS included). The scanner uses a separate database so its `packages`/`scans` tables never collide with your other data; the same `LAZARET_DB` DSN is read by the MCP server for the `scan_package`/`registry_status` tools. Pair with `mcp__scheduled-tasks` (or cron) to run `scan-all --rescan` nightly across your dependency set.
+
+## Guarding installs (`lazaret guard`)
+
+Put `lazaret guard` in front of an install command. The packages it would install are fetched and scanned first, with the registry auditor's tests, and nothing is installed if one of them is SUSPICIOUS, can't be checked, or was published too recently to trust yet:
+
+```bash
+lazaret guard npm install express               # also: npm ci, npm update, npm install -g …
+lazaret guard pnpm add react                    # also: pnpm install, pnpm update
+lazaret guard pip install -r requirements.txt
+lazaret guard uv add httpx                      # also: uv sync, uv lock, uv pip install, uv pip sync
+lazaret guard --plan npm install next           # resolve, fetch and scan; install nothing
+lazaret guard --min-age 7d pnpm install         # hold back releases younger than a week
+lazaret-guard npm install express               # the same command under its own name
+```
+
+**npm, pnpm and uv projects.** The package manager resolves first and installs nothing — your command with `--package-lock-only` (npm) or `--lockfile-only` (pnpm), `uv add --no-sync`, `uv lock` — with scripts off. Every package the new lockfile installs on this machine that isn't installed yet is fetched from where the package manager will fetch it (the lockfile's `resolved` URL, the scoped registry its settings name), checked against the lockfile's digest — so the bytes scanned are the bytes it will accept — and scanned in memory. If anything is blocked, the files the resolution changed (`package.json`, the lockfile, `pyproject.toml`) are put back and nothing is installed. Otherwise your command runs as you typed it, and what it installed is compared with what was checked: anything else (the registry changed while the guard checked) is named and fails the run. Packages built for another platform (`os`, `cpu` and `libc` in the lockfile, the way npm reads them) are left out, and so are git dependencies, local folders and links, which are listed as not checked.
+
+**pip and uv pip.** They install through an index the guard serves on 127.0.0.1, which relays PyPI (`LAZARET_GUARD_PYPI_URL` names a mirror instead; one that needs credentials isn't supported yet). Every file is scanned before the tool gets it, so an sdist is scanned before pip or uv can build it, which runs its `setup.py`; a blocked file is refused, and pip and uv install nothing unless every download succeeded. The tool's dry run (`pip install --dry-run --report`, `uv pip install --dry-run`) is scanned first. Options that point pip or uv at another index or at local archives (`-i`, `--extra-index-url`, `-f`, `--no-index`, also inside requirement files) are refused, since packages from there wouldn't pass the guard.
+
+**Release age.** Malicious releases of popular packages are usually found and pulled within hours to days of publishing, so waiting a couple of days before taking a new release avoids most of them. `--min-age` (default `2d`; `0` turns it off) holds back releases younger than that where the tool can do it without changing your lockfile — npm's `before` (npm then picks the newest older release), pnpm's `minimum-release-age` (pnpm 10.16+), and for pip and uv pip by leaving new files out of the local index — and blocks them otherwise: a release a lockfile already pins (`npm ci`, `uv.lock`), aged by its tarball's `Last-Modified` confirmed by the registry's publish time, or uv.lock's upload time. npm always resolves with `before` set (to the start of the run when `--min-age` is `0` or `--allow-new` is given), so the install can't pick a release the guard didn't check; a stricter `before` of your own is kept.
+
+**What blocks.** SUSPICIOUS blocks, and so does a package that couldn't be fetched, verified or scanned (the guard fails closed). WARN and INCOMPLETE are listed and don't block unless you pass `--block-warn`; a file over the 200 MiB download limit is INCOMPLETE. Two overrides, each repeatable and taking patterns like `'@corp/*'`:
+
+- `--allow-new NAME` lets NAME's new releases through the age check. They are still scanned.
+- `--trust NAME` installs NAME whatever the guard finds or can't check: a package from a private registry (the guard sends no registry credentials), or a finding you have reviewed. It is still listed in the report.
+
+**Speed.** A verdict is cached by the artifact's digest and the engine version (`~/.cache/lazaret/guard-verdicts.json`, or `$XDG_CACHE_HOME`, or `LAZARET_GUARD_CACHE`; `--no-cache` to skip), so a package is fetched and scanned once, and a repeat `npm ci` downloads nothing. Downloads run in parallel and scans in worker processes (`--jobs`, default up to 4). On a 2-core Linux machine, a first guarded install of `express` (66 packages) takes about 5 seconds; `next`, `react`, `react-dom`, `typescript` and `eslint` (106 packages for that platform) about 48, most of it spent scanning the 42 MB `next` tarball.
+
+`--json PATH` writes every package checked, its verdict, findings, age and digest (`generatedBy: lazaret-guard-1`). Exit codes: 0 installed (or nothing to do), 1 blocked, or installed something it didn't check, 2 usage error, 3 the resolution failed, otherwise the package manager's own. Not wrapped: yarn, Bun, `npx`/`npm exec`, `uv run`, `uvx` and `uv tool`, pnpm's global installs, and `uv --script`.
 
 ## MCP setup (use Lazaret to test changes)
 
