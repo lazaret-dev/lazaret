@@ -15,19 +15,23 @@
 // file it runs that the walk did not read as source is read and scanned as a
 // dependency's JavaScript (a shell script is only tested), and a hook the
 // walk cannot follow to the end is SC-TRUNCATED. Every JavaScript or Python
-// file of a dependency that no hook runs gets importTimeRisk: SC-IMPORT-RISK.
+// file of a dependency that no hook runs gets importTimeRisk: SC-IMPORT-RISK;
+// and a file that runs what another file of its package received over the
+// network, the cross-file follower's SC-IMPORT-RISK (lib/crossfile.js).
 
 import { lstatSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { scanFile } from "./scanner/scan.js";
 import { followHook, treeJoin, persistenceReasons, installScriptRisk, importTimeRisk, importTimeSeverity, agentHijack, agentHijackInCommand, nodeCandidates, shebangLang,
-  HOOK_MAX_CHARS, HOOK_MAX_COMMANDS, HOOK_MAX_TARGETS, HOOK_MAX_PATH } from "./lib/hooks.js";
+  HOOK_MAX_CHARS, HOOK_MAX_COMMANDS, HOOK_MAX_TARGETS, HOOK_MAX_PATH, spawnedScripts, SPAWN_MAX_DEPTH,
+  SPAWN_MAX_FILES } from "./lib/hooks.js";
 import { HOOK_COMMANDS, loadManifest, scInstallHookIssue } from "./lib/supplychain.js";
 import { readBounded, truncatedIssue, scanErrorIssue, strerror, normalizeNewlines, encodingIssues,
   MAX_FILE_BYTES } from "./lib/fs.js";
 import { looksBinary, HEADER_SAMPLE } from "./lib/binary.js";
 import { decodeSource } from "./lib/encoding.js";
 import { mkIssue } from "./lib/issue.js";
+import { crossFileReceivedIssues } from "./lib/crossfile.js";
 import { REDACT, redactText, registerScanContext, SECRET_SKIP_RE } from "./lib/redact.js";
 import { pyStrip, pyRepr } from "./lib/pycompat.js";
 
@@ -178,6 +182,10 @@ export function dependencyChecks(root, files, manifests, issues, { exclude = [],
     if (found) out.push(found);
     if (agent) out.push(agent);
   }
+  // Cross-file received code (both engines since 0.1.8, lib/crossfile.js): a value received in
+  // one file of a package and run in another. Skips the files already flagged CRITICAL single-file.
+  const flagged = new Set(out.filter((i) => i.rule === "SC-IMPORT-RISK" && i.sev === "CRITICAL").map((i) => posix(i.file)));
+  for (const i of crossFileReceivedIssues(files, flagged)) out.push(i);
   return { issues: out, files: extra };
 }
 
@@ -246,7 +254,37 @@ function followDependencyHook(tree, issue, cmd, out, extra, run, truncated) {
     }
     const agent = text ? dependencyAgentIssue(native(rel), text) : null;
     if (agent) out.push(agent);
+    // the scripts it starts with node or python (0.1.8, spawnedScripts)
+    for (const [started, stext] of startedScripts(tree, rel, text, base, out, extra, run)) {
+      const more = stext ? installScriptRisk(stext) : [];
+      if (more.length && issue.sev !== "BLOCKER" && issue.sev !== "CRITICAL") {
+        const shown = base && started.startsWith(base + "/") ? started.slice(base.length + 1) : started;
+        const msg = `Install hook runs ${target}, which starts ${shown}, which ${more.join("; and ")}.`;
+        issue.sev = "CRITICAL";
+        issue.msg = REDACT.on ? redactText(msg) : msg;
+      }
+    }
   }
+}
+
+/** [[rel, text]] for the scripts an install script starts with node or python, and those they start. core._started_dependency_scripts. */
+function startedScripts(tree, rel, text, cwd, out, extra, run) {
+  const found = [], seen = new Set([rel]), queue = [[rel, text, 0]];
+  while (queue.length && seen.size <= SPAWN_MAX_FILES) {
+    const [cur, curText, depth] = queue.shift();
+    if (!curText || depth >= SPAWN_MAX_DEPTH) continue;
+    for (const [where, path] of spawnedScripts(curText)) {
+      const joined = treeJoin(where === "dir" ? dirname(cur) : cwd, path);
+      const nxt = joined === null ? null : tree.resolve(joined);
+      if (nxt === null || seen.has(nxt) || seen.size > SPAWN_MAX_FILES) continue;
+      seen.add(nxt);
+      const lang = nxt.endsWith(".py") ? "py" : nxt.endsWith(".sh") ? "sh" : "js";
+      const ntext = scriptText(tree, nxt, lang, out, extra, run);
+      found.push([nxt, ntext]);
+      queue.push([nxt, ntext, depth + 1]);
+    }
+  }
+  return found;
 }
 
 function scriptText(tree, rel, asLang, out, extra, run) {

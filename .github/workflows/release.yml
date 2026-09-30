@@ -1,15 +1,20 @@
 # Publishes both packages when a v* tag is pushed.
 # The Python artifacts are built by Lazaret's own stdlib backend: no build
-# tools are installed. Publishing uses trusted publishing (OIDC): no registry
-# tokens are stored in GitHub. Each publish job runs in its own environment;
-# add required reviewers to the "pypi" and "npm" environments so nothing ships
-# without your approval.
+# tools are installed. The platform wheels' native engine is built with a
+# pinned Rust toolchain, in PyPA's manylinux images for Linux (wheels.yml).
+# Publishing uses trusted publishing (OIDC): no registry tokens are stored in
+# GitHub. Each publish job runs in its own environment; add required
+# reviewers to the "pypi" and "npm" environments so nothing ships without
+# your approval.
 #
 # Order: verify-tag -> test -> build-python + build-npm -> publish-pypi +
-# publish-npm. Both publish jobs need BOTH builds, so a failure on either
-# side stops both registries (they stay in lockstep). The jobs that hold
-# id-token: write install nothing: they publish the artifacts the build jobs
-# uploaded, with tools pinned to exact versions.
+# publish-npm. build-python is wheels.yml: the native library for each of
+# five platforms, built and tested there; the sdist, the pure wheel and the
+# five platform wheels; and each platform wheel installed with pip on its
+# platform and run. Both publish jobs need BOTH builds, so a failure on
+# either side stops both registries (they stay in lockstep). The jobs that
+# hold id-token: write install nothing: they publish the artifacts the build
+# jobs uploaded, with tools pinned to exact versions.
 name: Release
 
 on:
@@ -54,27 +59,11 @@ jobs:
     needs: verify-tag
     uses: ./.github/workflows/ci.yml
 
+  # The sdist, the pure wheel and the five platform wheels (artifact
+  # python-dist), built, checked and installed by wheels.yml.
   build-python:
     needs: [verify-tag, test]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          # Exact version: the compressed bytes depend on the interpreter's
-          # zlib, so rebuilding a tag byte-for-byte needs the same Python.
-          python-version: "3.12.14"
-      - working-directory: python
-        # Reproducible: stamped with the tagged commit's time, so rebuilding
-        # the same tag gives byte-identical artifacts. The backend refuses to
-        # build if anything outside its allowlist is in the source tree.
-        run: SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)" python _build/lazaret_build.py dist
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: python-dist
-          path: python/dist/
+    uses: ./.github/workflows/wheels.yml
 
   build-npm:
     needs: [verify-tag, test]

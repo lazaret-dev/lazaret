@@ -14,10 +14,11 @@
 // again; wrappers are popped off the front of a list), this module does
 // not, with the same results.
 
-import { pyRe, pyStrip, pyRstrip, isPySpace, cpLen } from "./pycompat.js";
+import { pyRe, pyStrip, pyRstrip, pyStripChars, isPySpace, cpLen } from "./pycompat.js";
 import { PIPE_SCAN_SRC, EXEC_CALL_SRC, EXEC_CALL_RE, DL_SUBST_SRC, DL_SUBST_NEEDLE_SRC, pipesDownloadToShell,
   runsDownloadThroughShell, runsSubstitutedDownload } from "./shellpipe.js";
-import { receivedCodeKind, downloadsAndRunsFile, RECEIVED_TWINS, DL_NEEDLES, DL_RUN_NEEDLES, DL_DESERIAL_NEEDLES,
+import { receivedCodeKind, downloadsAndRunsFile, downloadsAndRuns, decodesAndRuns, SCRIPT_INTERP_SRC, SCRIPT_LOAD_SRC,
+  DECODE_CALL_SRC, RECEIVED_TWINS, DL_NEEDLES, DL_RUN_NEEDLES, DL_DESERIAL_NEEDLES,
   DL_IMPORT_NEEDLES, DL_SINK_NEEDLES, DL_ALIAS_NEEDLES, DL_ALIAS_MAX, DL_FILE_WRITE_NEEDLES, DL_PATHRUN_NEEDLES,
   DL_PY_NET_MODULES, DL_NOT_NAMES, DL_PREFIX_CHARS, DL_DEFINING, DL_CALLEE_CHARS, DL_LIMITS, cpBack, cpForward } from "./received.js";
 import { commentSpans } from "./lexer.js";
@@ -581,11 +582,12 @@ const SECRET_SOURCE_SRC =
 // where re.M's does not; each is in Python's \s, so [\s;&(`] matches one
 // character earlier and a search finds a match exactly when core's does.
 const SECRET_SOURCE_RE = pyRe(SECRET_SOURCE_SRC, "im");
+// RequestBin by its host names only (0.1.8; core's comment above _EXFIL_SERVICES)
 const EXFIL_SERVICES_SRC =
   String.raw`pastebin\.com|\bngrok|webhook\.site|` +
   String.raw`discord(?:app)?\.com/api/webhooks|api\.telegram\.org|oastify\.com|burpcollaborator|` +
-  String.raw`\binteract\.sh|\boast\.(?:pro|live|site|online|fun|me)\b|requestbin|pipedream\.net|` +
-  String.raw`transfer\.sh|\.onion\b`;
+  String.raw`\binteract\.sh|\boast\.(?:pro|live|site|online|fun|me)\b|requestbin\.(?:com|net|io)\b|\brequestb\.in\b|` +
+  String.raw`pipedream\.net|transfer\.sh|\.onion\b`;
 const EXFIL_DEST_SRC = String.raw`https?://(?:\d{1,3}\.){3}\d{1,3}\b|` + EXFIL_SERVICES_SRC;
 const EXFIL_DEST_RE = pyRe(EXFIL_DEST_SRC, "i");
 const EXFIL_SERVICE_RE = pyRe(EXFIL_SERVICES_SRC, "i");              // the named ones, no raw IPs
@@ -600,7 +602,7 @@ export function cpPrefix(s, n) {
 }
 
 // the reason each received-code category adds (twin of core._DL_CATEGORY_REASON)
-const DL_CATEGORY_REASON = {
+export const DL_CATEGORY_REASON = {
   run: "runs code it receives over the network",
   deserialize: "deserializes data it receives over the network",
   import: "loads a module named by data it receives over the network",
@@ -710,6 +712,14 @@ const REVSHELL_LINE_RE = pyRe(REVSHELL_LINE_SRC);
 const REVSHELL_JS_SPAWN_RE = pyRe(REVSHELL_JS_SPAWN_SRC);
 const REVSHELL_JS_PIPE_RE = pyRe(REVSHELL_JS_PIPE_SRC);
 const REVSHELL_JS_NET_RE = pyRe(REVSHELL_JS_NET_SRC);
+const REVSHELL_NGROK_TCP_SRC = String.raw`\b\d+\.tcp(?:\.[a-z]{2,3})?\.ngrok\.io\b`;
+const REVSHELL_ARG_SHELL_SRC = String.raw`["'](?:nc|ncat|netcat|(?:/bin/)?(?:ba|z|da)?sh|cmd(?:\.exe)?|powershell(?:\.exe)?)["']`;
+const REVSHELL_ARGS_SRC = String.raw`["'](?:nc|ncat|netcat)["'][^\n]{0,160}?["']-[ec]["']\s*,\s*["'](?:/bin/)?(?:ba|z|da)?sh["']`;
+const REVSHELL_NGROK_TCP_RE = pyRe(REVSHELL_NGROK_TCP_SRC, "i");
+const REVSHELL_ARG_SHELL_RE = pyRe(REVSHELL_ARG_SHELL_SRC);
+const REVSHELL_ARGS_RE = pyRe(REVSHELL_ARGS_SRC);
+const REVSHELL_ARGS_NEEDLES = ["'nc'", '"nc"', "'ncat'", '"ncat"', "'netcat'", '"netcat"'];
+const REVSHELL_NGROK_NEEDLES = [".ngrok.io"];   // core: needles, which code scanners don't read as a URL check
 /** The offset where `text` opens a reverse shell, else -1 (core.reverse_shell_at). */
 export function reverseShellAt(text) {
   let m = REVSHELL_LINE_RE.exec(text);
@@ -725,6 +735,15 @@ export function reverseShellAt(text) {
     m = REVSHELL_JS_SPAWN_RE.exec(text);
     if (m && REVSHELL_JS_PIPE_RE.test(text) && REVSHELL_JS_NET_RE.test(text)) return m.index;
   }
+  // an argument list, or a shell or netcat run with an ngrok TCP address (0.1.8)
+  if (REVSHELL_ARGS_NEEDLES.some((nd) => text.includes(nd))) {
+    m = REVSHELL_ARGS_RE.exec(text);
+    if (m) return m.index;
+  }
+  if (REVSHELL_NGROK_NEEDLES.some((nd) => text.includes(nd))) {
+    m = REVSHELL_NGROK_TCP_RE.exec(text);
+    if (m && REVSHELL_ARG_SHELL_RE.test(text) && EXEC_CALL_RE.test(text)) return m.index;
+  }
   return -1;
 }
 
@@ -732,11 +751,225 @@ const HOST_INFO_SRC = String.raw`\b(?:socket\.gethostname|socket\.getfqdn|platfo
   + String.raw`|os\.hostname|os\.userInfo)\s*\(`
   + String.raw`|\b(?:getoutput|check_output|getstatusoutput|execSync|popen)\s*\(\s*\[?\s*["'](?:whoami|hostname|id|uname`
   + String.raw`|ifconfig|ipconfig|systeminfo)\b`
-  + String.raw`|(?:\$\(|` + "`" + String.raw`)\s*(?:whoami|hostname|id|uname|ifconfig|ip\s+a|pwd|ls|cat\s+/etc/passwd|ps)\b`;
+  + String.raw`|(?:\$\(|` + "`" + String.raw`)\s*(?:whoami|hostname|id|uname|ifconfig|ip\s+a|pwd|ls|cat\s+/etc/passwd|ps)\b`
+  + String.raw`|\bos\.(?:hostname|userInfo)\s*[,)]`;
 const HOST_INFO_RE = pyRe(HOST_INFO_SRC);
 /** True when `text` collects the machine's user or host name and sends data over the network (core.sends_host_info). */
 export function sendsHostInfo(text) {
   return HOST_INFO_RE.test(text) && (NETWORK_RE.test(text) || EXFIL_SERVICE_RE.test(text));
+}
+
+// Exfiltration shapes (0.1.8; core's comment above _CHAT_SECRET_RE): a chat
+// bot or webhook whose secret is written in the code, credential files sent
+// to a raw IP address, a sweep of several credential folders, the host name
+// sent to a base64-hidden address or in a DNS name the code builds, the
+// public IP address sent to a data-capture service, a copy of the whole
+// environment serialized, a miner, and (install time only) a raw socket to a
+// hard-coded IP address.
+const CHAT_SECRET_SRC = String.raw`(?<![0-9])\d{8,10}:AA[A-Za-z0-9_-]{33}(?![A-Za-z0-9_-])`
+  + String.raw`|\b[Dd]iscord(?:app)?\.com/api/webhooks/\d{17,20}/[A-Za-z0-9_-]{60,80}`
+  + String.raw`|\bhooks\.slack\.com/services/T[A-Z0-9]{8,12}/B[A-Z0-9]{8,12}/[A-Za-z0-9]{24}(?![A-Za-z0-9])`;
+const CHAT_SECRET_NEEDLES = [":AA", "webhooks/", "hooks.slack.com"];   // one is in every match (core's twin)
+const TELEGRAM_API_SRC = String.raw`api\.telegram\.org`;
+const CRED_FILE_SRC = String.raw`["'` + "`" + String.raw`](?:~[/\\]|\.[/\\])?\.(?:env|npmrc|pypirc|netrc|git-credentials)["'` + "`" + "]"
+  + String.raw`|\.aws[/\\]credentials\b|[/\\]\.ssh[/\\]id_\w+|\.docker[/\\]config\.json|\.kube[/\\]config\b`;
+const PUBLIC_IP_URL_SRC = String.raw`\b(?:https?|wss?|tcp)://(?!(?:10|127|0)\.)(?!192\.168\.)(?!172\.(?:1[6-9]|2\d|3[01])\.)(?!169\.254\.)`
+  + String.raw`(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)(?![\d.])`;
+const CRED_DIR_SRC = String.raw`["'` + "`" + String.raw`](?:~[/\\]|\$HOME[/\\]|%USERPROFILE%[/\\])?\.(ssh|aws|azure|gnupg|docker|kube|ethereum|electrum|bitcoin`
+  + String.raw`|solana|npmrc|pypirc|netrc|git-credentials|config[/\\]gcloud|password-store|vault-token|terraform\.d)`
+  + String.raw`(?:[/\\][^"'` + "`" + String.raw`\n]{0,60})?["'` + "`" + "]";
+const B64_URL_LITERAL_SRC = String.raw`["'` + "`" + String.raw`]aHR0c[A-Za-z0-9+/]{2,}={0,2}["'` + "`" + "]";
+const DNS_LOOKUP_SRC = String.raw`(?:\b(?:getaddrinfo|gethostbyname(?:_ex)?)|\bdns\.(?:promises\.)?(?:resolve\w*|lookup)`
+  + String.raw`|\bresolver\.(?:resolve|query))\s*\(\s*(?:f"([^"\n]{0,300})"|f'([^'\n]{0,300})'|` + "`" + String.raw`([^` + "`"
+  + String.raw`\n]{0,300})` + "`)";
+const DNS_BUILT_NAME_SRC = String.raw`\{[^}\n]+\}[^\n]*\.[A-Za-z]{2,}\Z`;
+const PUBLIC_IP_LOOKUP_SRC = String.raw`\bapi(?:64)?\.ipify\.org\b|\bip-api\.com\b|\bipinfo\.io\b|\bifconfig\.me\b|\bicanhazip\.com\b`
+  + String.raw`|\bcheckip\.amazonaws\.com\b|\bipapi\.co\b|\bident\.me\b|\bapi\.myip\.com\b|\bwtfismyip\.com\b`;
+const ENV_COPY_SRC = String.raw`(?<![\w$.])([A-Za-z_$][\w$]*)\s{0,40}=\s{0,40}(?:dict\(\s*os\.environ\s*\)|os\.environ\.copy\(\s*\)`
+  + String.raw`|\{\s*\*\*\s*os\.environ\s*\}|\{\s*\.\.\.\s*process\.env\s*\}|Object\.assign\(\s*\{\s*\}\s*,\s*process\.env\s*\))`;
+const IP_LITERAL_SRC = String.raw`["'](?!(?:127|0|255)\.)((?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d))["']`;
+const RAW_CONNECT_SRC = String.raw`\b(?:socket\.create_connection|net\.connect|net\.createConnection|connect(?:_ex)?)\s*\(|\bnew\s+net\.Socket\b`;
+const MONERO_ADDR_SRC = String.raw`(?<![A-Za-z0-9])[48][1-9A-HJ-NP-Za-km-z]{94}(?:[1-9A-HJ-NP-Za-km-z]{11})?(?![A-Za-z0-9])`;
+const MINER_ARG_SRC = String.raw`["'](?:-o|--url)["']|\bstratum\+(?:tcp|ssl|tls)://|--donate-level\b|\b(?:xmrig|XMRig|XMRIG)\b`;
+const MINER_ARG_NEEDLES = ["'-o'", '"-o"', "'--url'", '"--url"', "stratum+", "--donate-level", "xmrig", "XMRig", "XMRIG"];
+const CHAT_SECRET_RE = pyRe(CHAT_SECRET_SRC, "g");
+const TELEGRAM_API_RE = pyRe(TELEGRAM_API_SRC, "i");
+const CRED_FILE_RE = pyRe(CRED_FILE_SRC);
+const PUBLIC_IP_URL_RE = pyRe(PUBLIC_IP_URL_SRC);
+const CRED_DIR_RE = pyRe(CRED_DIR_SRC, "g");
+const B64_URL_LITERAL_RE = pyRe(B64_URL_LITERAL_SRC);
+const DNS_LOOKUP_RE = pyRe(DNS_LOOKUP_SRC, "g");
+const DNS_BUILT_NAME_RE = pyRe(DNS_BUILT_NAME_SRC);
+const DNS_LOOKUP_MAX = 50;
+const PUBLIC_IP_LOOKUP_RE = pyRe(PUBLIC_IP_LOOKUP_SRC);
+const PUBLIC_IP_LOOKUP_NEEDLES = ["ipify.org", "ip-api.com", "ipinfo.io", "ifconfig.me", "icanhazip.com",
+  "checkip.amazonaws.com", "ipapi.co", "ident.me", "api.myip.com", "wtfismyip.com"];
+const ENV_COPY_RE = pyRe(ENV_COPY_SRC, "g");
+const ENV_COPY_ANCHOR_SRC = String.raw`dict\(\s*os\.environ\s*\)|os\.environ\.copy\(\s*\)|\*\*\s*os\.environ|\.\.\.\s*process\.env`
+  + String.raw`|Object\.assign\(\s*\{\s*\}\s*,\s*process\.env`;
+const ENV_COPY_ANCHOR_RE = pyRe(ENV_COPY_ANCHOR_SRC);
+const IP_LITERAL_RE = pyRe(IP_LITERAL_SRC, "g");
+const RAW_CONNECT_RE = pyRe(RAW_CONNECT_SRC);
+const MONERO_ADDR_RE = pyRe(MONERO_ADDR_SRC);
+const MINER_ARG_RE = pyRe(MINER_ARG_SRC);
+const CHAT_SECRET_MAX = 50;
+const CHAT_SECRET_MIN_DISTINCT = 10;
+const CRED_SWEEP_NEEDLES = [".ssh", ".aws", ".azure", ".gnupg", ".docker", ".kube", ".ethereum", ".electrum", ".bitcoin",
+  ".solana", ".npmrc", ".pypirc", ".netrc", ".git-credentials", ".config", ".password-store", ".vault-token", ".terraform.d"];
+const CRED_SWEEP_SPAN = 400;
+const CRED_SWEEP_MIN = 3;
+const CRED_SWEEP_MAX = 200;
+const ENV_COPY_MAX = 20;
+const RAW_CONNECT_SPAN = 600;
+const IP_LITERAL_MAX = 100;
+const PUBLIC_RESOLVERS = new Set(["8.8.8.8", "8.8.4.4", "1.1.1.1", "1.0.0.1", "9.9.9.9", "149.112.112.112",
+  "208.67.222.222", "208.67.220.220"]);
+const distinct = (s) => new Set(s).size;
+
+/** [offset, reason] of the first chat bot or webhook secret of text in a file that makes network calls, else null (core.chat_secret_at). */
+export function chatSecretAt(text) {
+  if (!CHAT_SECRET_NEEDLES.some((nd) => text.includes(nd))) return null;
+  if (!NETWORK_RE.test(text)) return null;
+  CHAT_SECRET_RE.lastIndex = 0;
+  let k = 0;
+  for (let m; (m = CHAT_SECRET_RE.exec(text)) !== null; k++) {
+    if (k >= CHAT_SECRET_MAX) break;
+    const found = m[0];
+    if (found.startsWith("discord") || found.startsWith("Discord")) {
+      const parts = found.split("/");
+      const [hook, secret] = parts.slice(-2);
+      if (distinct(secret) >= CHAT_SECRET_MIN_DISTINCT) {
+        return [m.index, `sends data to a Discord webhook whose token is written in the code (webhook ${hook})`];
+      }
+    } else if (found.startsWith("hooks.")) {
+      const [team, , secret] = found.split("/").slice(-3);
+      if (distinct(secret) >= CHAT_SECRET_MIN_DISTINCT && pyStripChars(team, "T0")) {
+        return [m.index, `sends data to a Slack webhook whose key is written in the code (${team})`];
+      }
+    } else {
+      const colon = found.indexOf(":");
+      const bot = found.slice(0, colon);
+      const secret = found.slice(colon + 1);
+      if (distinct(secret) >= CHAT_SECRET_MIN_DISTINCT && TELEGRAM_API_RE.test(text)) {
+        return [m.index, `sends data to a Telegram bot whose token is written in the code (bot ${bot})`];
+      }
+    }
+  }
+  return null;
+}
+
+/** [offset, names] where text names CRED_SWEEP_MIN or more distinct credential folders within CRED_SWEEP_SPAN code points, else null (core.credential_sweep_at). */
+export function credentialSweepAt(text) {
+  if (CRED_SWEEP_NEEDLES.filter((nd) => text.includes(nd)).length < CRED_SWEEP_MIN) return null;
+  const found = [];                                   // [unit offset, code-point offset, name]
+  CRED_DIR_RE.lastIndex = 0;
+  let cp = 0;
+  let prev = 0;
+  let k = 0;
+  for (let m; (m = CRED_DIR_RE.exec(text)) !== null; k++) {
+    if (k >= CRED_SWEEP_MAX) break;
+    cp += cpLen(text.slice(prev, m.index));
+    prev = m.index;
+    found.push([m.index, cp, m[1].replaceAll("\\", "/")]);
+    if (m[0].length === 0) CRED_DIR_RE.lastIndex++;
+  }
+  for (let i = 0; i < found.length; i++) {
+    const names = [];
+    for (let j = i; j < found.length; j++) {
+      if (found[j][1] - found[i][1] > CRED_SWEEP_SPAN) break;
+      if (!names.includes(found[j][2])) names.push(found[j][2]);
+    }
+    if (names.length >= CRED_SWEEP_MIN) return [found[i][0], names];
+  }
+  return null;
+}
+
+/** Where text serializes a copy of the whole environment it made, else -1 (core.env_copy_serialized_at). */
+export function envCopySerializedAt(text) {
+  if ((!text.includes("os.environ") && !text.includes("process.env")) || !ENV_COPY_ANCHOR_RE.test(text)) return -1;
+  ENV_COPY_RE.lastIndex = 0;
+  let k = 0;
+  for (let m; (m = ENV_COPY_RE.exec(text)) !== null; k++) {
+    if (k >= ENV_COPY_MAX) break;
+    const use = pyRe(String.raw`\b(?:urlencode|dumps|stringify|b64encode|str)\(\s*` + reEscape(m[1]) + String.raw`\s*[,)]`, "g");
+    const u = searchFrom(use, text, m.index + m[0].length);
+    if (u) return u.index;
+  }
+  return -1;
+}
+
+/** The offset of a DNS lookup of a name text builds from values, else -1 (core.dns_beacon_at). */
+export function dnsBeaconAt(text) {
+  DNS_LOOKUP_RE.lastIndex = 0;
+  let k = 0;
+  for (let m; (m = DNS_LOOKUP_RE.exec(text)) !== null; k++) {
+    if (k >= DNS_LOOKUP_MAX) break;
+    const name = m[1] ?? m[2] ?? m[3];
+    if (DNS_BUILT_NAME_RE.test(name)) return m.index;
+  }
+  return -1;
+}
+
+/** The offset of the Monero wallet address text runs a miner with, else -1 (core.miner_at). */
+export function minerAt(text) {
+  if (!MINER_ARG_NEEDLES.some((nd) => text.includes(nd)) || !MINER_ARG_RE.test(text)) return -1;
+  const m = MONERO_ADDR_RE.exec(text);
+  if (m && EXEC_CALL_RE.test(text)) return m.index;
+  return -1;
+}
+
+/** [offset, reason] of the exfiltration shapes, and of a miner, that text shows; host: HOST_INFO_RE.exec(text) (core._exfil_signs). */
+function exfilSigns(text, host) {
+  const signs = [];
+  const at = minerAt(text);
+  if (at >= 0) signs.push([at, "runs a cryptocurrency miner (a Monero wallet address)"]);
+  const chat = chatSecretAt(text);
+  if (chat !== null) signs.push(chat);
+  let net = null;                                     // NETWORK_RE's answer, searched once when needed
+  const network = () => (net === null ? (net = NETWORK_RE.test(text)) : net);
+  const ip = PUBLIC_IP_URL_RE.exec(text);
+  if (ip) {
+    const cred = CRED_FILE_RE.exec(text);
+    if (cred && network()) {
+      signs.push([cred.index, `reads credential files and sends data to an IP address (${ip[0].slice(ip[0].indexOf("//") + 2)})`]);
+    }
+  }
+  const sweep = credentialSweepAt(text);
+  if (sweep !== null && network()) {
+    signs.push([sweep[0], "collects files from several credential folders and sends data over the network "
+      + `(${sweep[1].slice(0, 4).map((n) => "." + n).join(", ")})`]);
+  }
+  if (host) {
+    if (B64_URL_LITERAL_RE.test(text) && network()) {
+      signs.push([host.index, "sends the machine's user or host name to an address it hides in base64"]);
+    }
+    const at = dnsBeaconAt(text);
+    if (at >= 0) signs.push([at, "sends the machine's user or host name in a DNS lookup of a name it builds"]);
+  } else if (PUBLIC_IP_LOOKUP_NEEDLES.some((nd) => text.includes(nd))) {
+    const lookup = PUBLIC_IP_LOOKUP_RE.exec(text);
+    if (lookup) {
+      const capture = captureService(text);
+      if (capture) {
+        signs.push([lookup.index, `sends the machine's public IP address to a data-capture service (${cpPrefix(capture[0], 40)})`]);
+      }
+    }
+  }
+  return signs;
+}
+
+/** The first hard-coded IP address text opens a raw socket to (install time only), else null (core.raw_ip_connect). */
+export function rawIpConnect(text) {
+  if (!text.includes("connect") && !text.includes("Socket")) return null;
+  IP_LITERAL_RE.lastIndex = 0;
+  let k = 0;
+  for (let m; (m = IP_LITERAL_RE.exec(text)) !== null; k++) {
+    if (k >= IP_LITERAL_MAX) break;
+    if (PUBLIC_RESOLVERS.has(m[1])) continue;
+    const end = m.index + m[0].length;
+    const after = text.slice(end);
+    if (RAW_CONNECT_RE.test(cpPrefix(after, RAW_CONNECT_SPAN))) return m[1];
+  }
+  return null;
 }
 
 // Code read back from the file itself (core's comment above _SELF_READ_RE):
@@ -749,10 +982,26 @@ const SELF_READ_SRC = String.raw`\bopen\s*\(\s*(?:os\.path\.(?:abspath|realpath)
   + String.raw`|fileURLToPath\s*\(\s*import\.meta\.url)|\barguments\s*\.\s*callee\b|\}\s*\)?\s*\.\s*toString\s*\(\s*\)`;
 const DATA_EXT = String.raw`(?:txt|dat|bin|png|jpe?g|gif|ico|bmp|svg|wav|mp3|mp4|woff2?|ttf|json|md|cfg|ini|log|db|pyc|so|dll`
   + String.raw`|dylib|exe)`;
+// a data file's name inside quotes: a data extension, or a licence or readme with or without one (0.1.8)
+const NAME_CHAR = String.raw`[^\"'` + "`" + String.raw`{}$\n]`;
+const DATA_FILE = String.raw`(?:` + NAME_CHAR + String.raw`{1,100}\.` + DATA_EXT + String.raw`|(?:` + NAME_CHAR + String.raw`{0,100}[/\\])?`
+  + String.raw`(?:LICEN[CS]E|COPYING|NOTICE|README|AUTHORS|CHANGELOG|CHANGES|HISTORY|PATENTS)(?:[-.]\w{1,10})?)`;
 const SIBLING_DATA_SRC = String.raw`\b(?:open|read_text|read_bytes|readFileSync|readFile)\s*\([^\n]{0,200}?(?:__file__|__dirname|import\.meta\.url)`
-  + String.raw`[^\n]{0,200}?[\"'][^\"'\n]{1,100}\.` + DATA_EXT + String.raw`[\"']`
-  + String.raw`|(?:__file__|__dirname)[^\n]{0,200}?[\"'][^\"'\n]{1,100}\.` + DATA_EXT + String.raw`[\"'][^\n]{0,60}?`
+  + String.raw`[^\n]{0,200}?[\"']` + DATA_FILE + String.raw`[\"']`
+  + String.raw`|(?:__file__|__dirname)[^\n]{0,200}?[\"']` + DATA_FILE + String.raw`[\"'][^\n]{0,60}?`
   + String.raw`\.\s*(?:read_text|read_bytes)\s*\(`;
+// a data file's path assigned to a name, a read of a path by its name, a read
+// call's head, its node-style callback, and `.then(x => …)` or Python's `as f`
+// after it (0.1.8; core's comment above _SELF_READ_RE)
+const SIBLING_PATH_SRC = String.raw`(?:__file__|__dirname|import\.meta\.url)[^\n]{0,200}?(?:[\"'` + "`" + String.raw`]|\}[/\\])`
+  + DATA_FILE + String.raw`[\"'` + "`]";
+const PATH_READ_SRC = String.raw`\b(?:open|read_text|read_bytes|readFileSync|readFile)\s*\(\s*([A-Za-z_$][\w$]*)\s*[,)]`
+  + String.raw`|(?<![\w$.])([A-Za-z_$][\w$]*)\s*\.\s*(?:read_text|read_bytes)\s*\(`;
+const READ_HEAD_SRC = String.raw`\b(?:open|read_text|read_bytes|readFileSync|readFile)\s*\(`;
+const READ_CALLBACK_SRC = String.raw`\(\s*[A-Za-z_$][\w$]*\s*,\s*([A-Za-z_$][\w$]*)\s*\)\s*(?:=>|\{)`;
+const READ_THEN_SRC =
+  String.raw`\s*(?:\.\s*then\s*\(\s*(?:async\s+)?(?:function\b\s*[\w$]*\s*)?\(?\s*([A-Za-z_$][\w$]*)|as\s+([A-Za-z_]\w*))`;
+const SELF_SHELL_RUNNERS = ["execSync", "system", "popen", "Popen", "check_output", "getoutput", "subprocess"];
 const SELF_RUN_SRC = String.raw`(?<![\w.$])(?:exec|eval|compile)\s*\(|\bnew\s+Function\s*\(|\bvm\s*\.\s*run\w*\s*\(`
   + String.raw`|\b(?:execSync|system|popen|Popen|check_output|getoutput)\s*\(|\bsubprocess\s*\.\s*\w+\s*\(`;
 const SELF_READ_ASSIGN_SRC = String.raw`(?<![^\n])[ \t]*(?:(?:const|let|var)[ \t]+)?([A-Za-z_$][\w$]*)[ \t]*(?::[^=\n]*)?=(?![=>])([^\n]*)`;
@@ -762,9 +1011,16 @@ const SELF_READ_ALL_RE = pyRe(SELF_READ_SRC, "g");
 const SIBLING_DATA_RE = pyRe(SIBLING_DATA_SRC);
 const SIBLING_DATA_ALL_RE = pyRe(SIBLING_DATA_SRC, "g");
 const SELF_RUN_ALL_RE = pyRe(SELF_RUN_SRC, "g");
+const SIBLING_PATH_RE = pyRe(SIBLING_PATH_SRC);
+const SIBLING_PATH_ALL_RE = pyRe(SIBLING_PATH_SRC, "g");
+const PATH_READ_ALL_RE = pyRe(PATH_READ_SRC, "g");
+const READ_HEAD_ALL_RE = pyRe(READ_HEAD_SRC, "g");
+const READ_CALLBACK_RE = pyRe(READ_CALLBACK_SRC);
+const READ_THEN_AT_START_RE = pyRe("^(?:" + READ_THEN_SRC + ")");      // Python's match(): at the start
 const SELF_READ_ASSIGN_ALL_RE = pyRe(SELF_READ_ASSIGN_SRC, "gd");      // d: the groups' offsets
 const IDENT_TOKEN_ALL_RE = pyRe(IDENT_TOKEN_SRC, "g");
 const SELF_READ_PASSES = 3, SELF_READ_MAX_CALLS = 200, SELF_READ_ARG_SPAN = 2000, SELF_READ_MAX_ASSIGNS = 5000;
+const SELF_READ_THEN_SPAN = 200;
 const LITERAL_SPANS_MAX = 20000;
 
 /** Does `text` read its own source? (core.reads_own_source) */
@@ -817,13 +1073,14 @@ function literalSpans(text) {
 }
 /** The offset of a runner that runs code read from the text's own source or a data file next to it, else -1 (core.runs_own_source_at). */
 export function runsOwnSourceAt(text) {
-  if (!SELF_READ_RE.test(text) && !SIBLING_DATA_RE.test(text)) return -1;
+  if (!SELF_READ_RE.test(text) && !SIBLING_DATA_RE.test(text) && !SIBLING_PATH_RE.test(text)) return -1;
   const spans = literalSpans(text);
-  const inLiteral = (pos) => {
+  const literalAt = (pos) => {
     let lo = 0, hi = spans.length;               // the last span starting at or before pos
     while (lo < hi) { const mid = (lo + hi) >> 1; if (spans[mid][0] <= pos) lo = mid + 1; else hi = mid; }
-    return lo > 0 && pos < spans[lo - 1][1];
+    return lo > 0 && pos < spans[lo - 1][1] ? spans[lo - 1] : null;
   };
+  const inLiteral = (pos) => literalAt(pos) !== null;
   const reads = (lo, hi) => {
     const part = text.slice(lo, hi);
     for (const rx of [SELF_READ_ALL_RE, SIBLING_DATA_ALL_RE]) {
@@ -835,24 +1092,63 @@ export function runsOwnSourceAt(text) {
     }
     return false;
   };
+  const paths = new Set();                         // names of data files' paths
+  const pathReads = (lo, hi) => {
+    if (!paths.size) return false;
+    const part = text.slice(lo, hi);
+    PATH_READ_ALL_RE.lastIndex = 0;
+    for (let m; (m = PATH_READ_ALL_RE.exec(part)) !== null;) {
+      if (paths.has(m[1] !== undefined ? m[1] : m[2]) && !inLiteral(lo + m.index)) return true;
+    }
+    return false;
+  };
   const uses = (lo, hi, names) => {
+    if (!names.size) return false;
     const part = text.slice(lo, hi);
     IDENT_TOKEN_ALL_RE.lastIndex = 0;
     for (let m; (m = IDENT_TOKEN_ALL_RE.exec(part)) !== null;) if (names.has(m[0]) && !inLiteral(lo + m.index)) return true;
     return false;
   };
-  if (!reads(0, text.length)) return -1;
   const assigns = [];
   SELF_READ_ASSIGN_ALL_RE.lastIndex = 0;
   for (let m, k = 0; (m = SELF_READ_ASSIGN_ALL_RE.exec(text)) !== null; k++) {
     if (k >= SELF_READ_MAX_ASSIGNS) break;
     if (!inLiteral(m.indices[1][0])) assigns.push([m[1], m.indices[2][0], m.indices[2][1]]);
   }
-  const names = new Set();
+  for (const [name, lo, hi] of assigns) {           // a template's `${__dirname}` counts
+    const part = text.slice(lo, hi);
+    SIBLING_PATH_ALL_RE.lastIndex = 0;
+    for (let m; (m = SIBLING_PATH_ALL_RE.exec(part)) !== null;) {
+      const lit = literalAt(lo + m.index);
+      if (lit === null || text[lit[0]] === "`") { paths.add(name); break; }
+    }
+  }
+  if (!reads(0, text.length) && !pathReads(0, text.length)) return -1;
+  const names = new Set();                         // values of a read written out: any runner
+  const codeNames = new Set();                     // values of a path read by name: code runners only
+  READ_HEAD_ALL_RE.lastIndex = 0;
+  for (let h, k = 0; (h = READ_HEAD_ALL_RE.exec(text)) !== null; k++) {
+    if (k >= SELF_READ_MAX_CALLS) break;
+    if (inLiteral(h.index)) continue;
+    const start = h.index + h[0].length;
+    const args = callArgs(text.slice(start, cpForward(text, start, SELF_READ_ARG_SPAN)));
+    const close = start + args.length;             // the closing bracket, when there is one
+    const past = cpForward(text, close, 1);
+    const into = reads(h.index, past) ? names : pathReads(h.index, past) ? codeNames : null;
+    if (into === null) continue;
+    const cb = READ_CALLBACK_RE.exec(args);
+    if (cb !== null && !inLiteral(start + cb.index)) into.add(cb[1]);
+    if (close < text.length && text[close] === ")") {
+      const then = READ_THEN_AT_START_RE.exec(text.slice(close + 1, cpForward(text, close + 1, SELF_READ_THEN_SPAN)));
+      if (then !== null) into.add(then[1] !== undefined ? then[1] : then[2]);
+    }
+  }
   for (let pass = 0; pass < SELF_READ_PASSES; pass++) {
     let grown = false;
     for (const [name, lo, hi] of assigns) {
-      if (!names.has(name) && (reads(lo, hi) || uses(lo, hi, names))) { names.add(name); grown = true; }
+      if (names.has(name)) continue;
+      if (reads(lo, hi) || uses(lo, hi, names)) { names.add(name); grown = true; }
+      else if (!codeNames.has(name) && (pathReads(lo, hi) || uses(lo, hi, codeNames))) { codeNames.add(name); grown = true; }
     }
     if (!grown) break;
   }
@@ -863,6 +1159,9 @@ export function runsOwnSourceAt(text) {
     const start = m.index + m[0].length;
     const hi = start + callArgs(text.slice(start, cpForward(text, start, SELF_READ_ARG_SPAN))).length;
     if (reads(start, hi) || uses(start, hi, names)) return m.index;
+    if (!SELF_SHELL_RUNNERS.some((r) => m[0].startsWith(r)) && (pathReads(start, hi) || uses(start, hi, codeNames))) {
+      return m.index;
+    }
   }
   return -1;
 }
@@ -1005,6 +1304,145 @@ export function dumpsWorkflowSecrets(text) {
   return SECRETS_DUMP_RE.test(text) && searchFrom(PERSIST_WORKFLOW_RE, text) !== null;
 }
 
+// A browser's shortcuts rewritten to load an extension (core's comment above _PERSIST_SHORTCUT_RE)
+const PERSIST_SHORTCUT_SRC = String.raw`\bCreateShortcut\b|\.lnk\b`;
+const PERSIST_SHORTCUT_RE = pyRe(PERSIST_SHORTCUT_SRC);
+
+// ---- programs set to start at login or boot (0.1.8; core's comment above _SVC_SYSTEMD_DIR_SRC) ----
+// A systemd unit, a launchd agent, a cron job, a Windows Run key, a scheduled
+// task, the Startup folder, an XDG autostart entry: each a place and a way to
+// fill it in one install-time text.
+const Q = "[\"'`]";
+const SVC_SYSTEMD_DIR_SRC =
+  String.raw`(?<!/run/)systemd[/\\](?:user|system)(?![\w.-])` +
+  String.raw`|${Q}systemd${Q}\s{0,20}[,+/]\s{0,20}${Q}(?:user|system)${Q}`;
+const SVC_UNIT_SRC = String.raw`ExecStart\s{0,20}=`;
+const SVC_SYSTEMCTL_SRC =
+  String.raw`\bsystemctl(?:[ \t]+-{1,2}[\w-]+)*[ \t]+(?:enable|reenable|link)\b` +
+  String.raw`|${Q}systemctl${Q}\s{0,20},\s{0,20}(?:${Q}-{1,2}[\w-]+${Q}\s{0,20},\s{0,20}){0,4}${Q}` +
+  String.raw`(?:enable|reenable|link)${Q}`;
+const SVC_LAUNCHD_DIR_SRC = String.raw`\bLaunch(?:Agents|Daemons)\b`;
+const SVC_PLIST_SRC = String.raw`\b(?:RunAtLoad|KeepAlive|ProgramArguments|StartInterval)\b`;
+const SVC_LAUNCHCTL_SRC =
+  String.raw`\blaunchctl(?:[ \t]+-{1,2}[\w-]+)*[ \t]+(?:load|bootstrap|enable|submit)\b` +
+  String.raw`|${Q}launchctl${Q}\s{0,20},\s{0,20}(?:${Q}-{1,2}[\w-]+${Q}\s{0,20},\s{0,20}){0,4}${Q}` +
+  String.raw`(?:load|bootstrap|enable|submit)${Q}`;
+const SVC_CRONTAB_SRC =
+  String.raw`\|[ \t]*(?:sudo[ \t]+)?crontab(?:[ \t]+-(?![\w-])|[ \t]*(?![^"'` + "`" + String.raw`)\n;&>]))` +
+  String.raw`|\bcrontab[ \t]+(?:-(?![\w-])|["']?(?:[/~$]|\.\.?/))` +
+  String.raw`|${Q}crontab${Q}\s{0,20},\s{0,20}(?!${Q}-[lre]${Q})[\w$"'` + "`" + "]";
+const SVC_PYCRON_SRC = String.raw`\bCronTab\s{0,20}\(`;
+const SVC_PYCRON_WRITE_SRC = String.raw`\.write\s{0,20}\(`;
+const SVC_CRON_DIR_SRC =
+  String.raw`/etc/cron\.(?:d|hourly|daily|weekly|monthly)(?![\w.-])|/etc/crontab(?![\w.-])|/var/spool/cron(?![\w.-])`;
+const SVC_RUNKEY_SRC = String.raw`CurrentVersion(?:\\{1,2}|/)Run(?:Once(?:Ex)?|Services(?:Once)?)?(?!\w)`;
+const SVC_REG_WRITE_SRC =
+  String.raw`\breg(?:\.exe)?${Q}?(?:[ \t]+|\s{0,20},\s{0,20}\[?\s{0,20}${Q})add\b|\b(?:New|Set)-ItemProperty\b` +
+  String.raw`|\bSetValueEx\b|\bSetValue\s{0,20}\(|\bputValue\b|\bRegSetValue|\bREG_(?:EXPAND_)?SZ\b` +
+  String.raw`|\bKEY_(?:SET_VALUE|WRITE|ALL_ACCESS)\b`;
+const SVC_SCHTASKS_SRC = String.raw`\bschtasks(?:\.exe)?${Q}?(?:[ \t]+|\s{0,20},\s{0,20}\[?\s{0,20}${Q})[/-]create\b`;
+const SVC_TASK_API_SRC = String.raw`\bRegister-ScheduledTask\b`;
+const SVC_TASK_COM_SRC = String.raw`\bSchedule\.Service\b`;
+const SVC_TASK_REGISTER_SRC = String.raw`\bRegisterTaskDefinition\b`;
+const SVC_STARTUP_SRC =
+  String.raw`Start[ ]?Menu[/\\]{1,2}Programs[/\\]{1,2}Startup(?!\w)|\bshell:(?:common[ ]?)?startup\b` +
+  String.raw`|\bCSIDL_(?:COMMON_)?STARTUP\b|\bSpecialFolder\.(?:Common)?Startup\b|\bwinshell\.startup\s{0,20}\(` +
+  String.raw`|${Q}Programs${Q}\s{0,20}[,+/]\s{0,20}${Q}Startup${Q}`;
+const SVC_AUTOSTART_SRC =
+  String.raw`\.config[/\\]autostart(?![\w.-])|/etc/xdg/autostart(?![\w.-])` +
+  String.raw`|${Q}\.config${Q}\s{0,20}[,+/]\s{0,20}${Q}autostart${Q}`;
+const SVC_CMD_START_SRC =
+  String.raw`(?:(?<![^\n])|[;&|(])[ \t]*(?:sudo[ \t]+)?` +
+  String.raw`(?:systemctl|launchctl|crontab|[Ss][Cc][Hh][Tt][Aa][Ss][Kk][Ss](?:\.[Ee][Xx][Ee])?)(?![\w.-])`;
+const SVC_SYSTEMD_DIR_RE = pyRe(SVC_SYSTEMD_DIR_SRC, "g");
+const SVC_UNIT_RE = pyRe(SVC_UNIT_SRC);
+const SVC_SYSTEMCTL_RE = pyRe(SVC_SYSTEMCTL_SRC);
+const SVC_LAUNCHD_DIR_RE = pyRe(SVC_LAUNCHD_DIR_SRC, "g");
+const SVC_PLIST_RE = pyRe(SVC_PLIST_SRC);
+const SVC_LAUNCHCTL_RE = pyRe(SVC_LAUNCHCTL_SRC);
+const SVC_CRONTAB_RE = pyRe(SVC_CRONTAB_SRC);
+const SVC_PYCRON_RE = pyRe(SVC_PYCRON_SRC);
+const SVC_PYCRON_WRITE_RE = pyRe(SVC_PYCRON_WRITE_SRC);
+const SVC_CRON_DIR_RE = pyRe(SVC_CRON_DIR_SRC, "g");
+const SVC_RUNKEY_RE = pyRe(SVC_RUNKEY_SRC, "gi");
+const SVC_REG_WRITE_RE = pyRe(SVC_REG_WRITE_SRC, "i");
+const SVC_SCHTASKS_RE = pyRe(SVC_SCHTASKS_SRC, "i");
+const SVC_TASK_API_RE = pyRe(SVC_TASK_API_SRC, "i");
+const SVC_TASK_COM_RE = pyRe(SVC_TASK_COM_SRC, "i");
+const SVC_TASK_REGISTER_RE = pyRe(SVC_TASK_REGISTER_SRC);
+const SVC_STARTUP_RE = pyRe(SVC_STARTUP_SRC, "gi");
+const SVC_AUTOSTART_RE = pyRe(SVC_AUTOSTART_SRC, "g");
+const SVC_CMD_START_RE = pyRe(SVC_CMD_START_SRC);
+const SVC_LINE_MAX = 1000;
+const SVC_RUNKEY_SPAN = 400;
+
+/** A write call or a shell write on a short line on which targetRe matches (core._writes_on_line). */
+function writesOnLine(text, targetRe) {
+  let m = searchFrom(targetRe, text);
+  for (let lines = 0; m !== null && lines < PERSIST_MAX_LINES; lines++) {
+    const start = text.lastIndexOf("\n", m.index) + 1;
+    let end = text.indexOf("\n", m.index + m[0].length);
+    if (end < 0) end = text.length;
+    const line = text.slice(start, end);
+    if (!cpLongerThan(line, SVC_LINE_MAX) && (PERSIST_WRITE_RE.test(line) || PERSIST_SHELL_WRITE_RE.test(line))) return true;
+    m = searchFrom(targetRe, text, end);
+  }
+  return false;
+}
+
+/** A registry write within SVC_RUNKEY_SPAN code points of a Run key (core._run_key_written). */
+function runKeyWritten(text) {
+  SVC_RUNKEY_RE.lastIndex = 0;
+  for (let k = 0, m; (m = SVC_RUNKEY_RE.exec(text)) !== null; k++) {
+    if (k >= PERSIST_MAX_LINES) break;
+    const end = m.index + m[0].length;
+    if (SVC_REG_WRITE_RE.test(text.slice(cpBack(text, m.index, SVC_RUNKEY_SPAN), cpForward(text, end, SVC_RUNKEY_SPAN)))) {
+      return true;
+    }
+    if (m[0].length === 0) SVC_RUNKEY_RE.lastIndex++;
+  }
+  return false;
+}
+
+/** The reasons text sets a program to start at login or boot. Twin of core.service_reasons. */
+export function serviceReasons(text) {
+  const reasons = [];
+  let runs = null;
+  const runContext = () => {
+    if (runs === null) runs = EXEC_CALL_RE.test(text) || SVC_CMD_START_RE.test(text);
+    return runs;
+  };
+  const writes = PERSIST_WRITE_RE.test(text);
+  if ((searchFrom(SVC_SYSTEMD_DIR_RE, text) !== null
+       && ((writes && SVC_UNIT_RE.test(text)) || writesOnLine(text, SVC_SYSTEMD_DIR_RE)))
+      || (SVC_SYSTEMCTL_RE.test(text) && runContext())) {
+    reasons.push("installs a systemd service");
+  }
+  if ((searchFrom(SVC_LAUNCHD_DIR_RE, text) !== null
+       && ((writes && SVC_PLIST_RE.test(text)) || writesOnLine(text, SVC_LAUNCHD_DIR_RE)))
+      || (SVC_LAUNCHCTL_RE.test(text) && runContext())) {
+    reasons.push("installs a launchd agent or daemon");
+  }
+  if ((SVC_CRONTAB_RE.test(text) && runContext())
+      || (SVC_PYCRON_RE.test(text) && SVC_PYCRON_WRITE_RE.test(text))
+      || writesOnLine(text, SVC_CRON_DIR_RE)) {
+    reasons.push("adds a cron job");
+  }
+  if (runKeyWritten(text)) reasons.push("adds a program to a Windows Run key");
+  if ((SVC_SCHTASKS_RE.test(text) && runContext()) || SVC_TASK_API_RE.test(text)
+      || (SVC_TASK_COM_RE.test(text) && SVC_TASK_REGISTER_RE.test(text))) {
+    reasons.push("creates a Windows scheduled task");
+  }
+  if (searchFrom(SVC_STARTUP_RE, text) !== null
+      && (writes || PERSIST_SHORTCUT_RE.test(text) || shellWrites(text, SVC_STARTUP_RE))) {
+    reasons.push("puts a program in the Windows Startup folder");
+  }
+  if (searchFrom(SVC_AUTOSTART_RE, text) !== null && (writes || shellWrites(text, SVC_AUTOSTART_RE))) {
+    reasons.push("adds a desktop autostart entry");
+  }
+  return reasons;
+}
+
 /** The persistence-target reasons of the install-script test. Twin of core.persistence_reasons. */
 export function persistenceReasons(text) {
   const reasons = [];
@@ -1030,14 +1468,411 @@ export function persistenceReasons(text) {
   if (BUN_RELEASES_RE.test(text) && EXEC_CALL_RE.test(text)) {
     reasons.push("downloads the Bun runtime from GitHub and runs code with it");
   }
+  if (text.includes("--load-extension") && PERSIST_SHORTCUT_RE.test(text)) {
+    reasons.push("rewrites browser shortcuts to load an extension");
+  }
+  reasons.push(...serviceReasons(text));
   return reasons;
 }
 
+// ---- code that publishes packages (SC-SELF-PUBLISH, 0.1.8; core's comment above _PUBLISH_CMD_SRC) ----
+// A publish command an exec call runs, an assignment to an object's name, and
+// a write to package.json that names the object: code that renames its package
+// and publishes it (the registry floods). An install script that publishes, or
+// collects npm access tokens, fails the install-script test (the worms).
+const BT = "`";
+const PUBLISH_CMD_SRC =
+  String.raw`\b(?:exec|execSync|execa|execaSync|execFile|execFileSync|spawn|spawnSync|system|popen|Popen|run|call` +
+  String.raw`|check_call|check_output|getoutput)\s*\(\s*(?:\[\s*)?["'` + BT + String.raw`](?:[^"'` + BT + String.raw`\n]{0,80}?(?:&&|;|\|\|)\s*)?` +
+  String.raw`(?:npx\s+)?(?:npm|pnpm|yarn|bun)(?:\.cmd)?(?:["'` + BT + String.raw`]\s*,\s*(?:\[\s*)?["'` + BT + String.raw`]|\s+)publish\b`;
+const NAME_ASSIGN_SRC = String.raw`(?<![\w$.])([A-Za-z_$][\w$]*)\s*(?:\.\s*name|\[\s*["']name["']\s*\])\s*=(?![=>])`;
+const MANIFEST_WRITE_SRC =
+  String.raw`\b(?:writeFileSync|writeFile|outputJsonSync|outputJson|writeJsonSync|writeJson|outputFileSync` +
+  String.raw`|outputFile|write_text|dump)\s*\(`;
+const JS_IDENT_SRC = String.raw`(?<![\w$.])[A-Za-z_$][\w$]*`;
+const NPM_TOKEN_READ_SRC =
+  String.raw`\bnpm\s+config\s+get\s+[^\n"'` + BT + String.raw`;|&]{0,200}?_auth|\.npmrc\b[\s\S]{0,400}?_authToken` +
+  String.raw`|_authToken[\s\S]{0,400}?\.npmrc\b`;
+const PUBLISH_CMD_RE = pyRe(PUBLISH_CMD_SRC);
+const NAME_ASSIGN_G = pyRe(NAME_ASSIGN_SRC, "g");
+const MANIFEST_WRITE_G = pyRe(MANIFEST_WRITE_SRC, "g");
+const JS_IDENT_G = pyRe(JS_IDENT_SRC, "g");
+const NPM_TOKEN_READ_RE = pyRe(NPM_TOKEN_READ_SRC);
+const SELF_PUB_SPAN = 300, SELF_PUB_MAX = 200;
+
+/** The UTF-16 offset of the publish command of code that renames its package and publishes it, else -1. Twin of core.self_publish_at. */
+export function selfPublishAt(text) {
+  if (!text.includes("publish") || !text.includes("package.json")) return -1;
+  const pub = PUBLISH_CMD_RE.exec(text);
+  if (pub === null) return -1;
+  const names = new Set();
+  let k = 0;
+  for (const m of text.matchAll(NAME_ASSIGN_G)) {
+    if (k++ >= SELF_PUB_MAX) break;
+    names.add(m[1]);
+  }
+  if (!names.size) return -1;
+  k = 0;
+  for (const w of text.matchAll(MANIFEST_WRITE_G)) {
+    if (k++ >= SELF_PUB_MAX) break;
+    const end = w.index + w[0].length;
+    const args = text.slice(end, cpForward(text, end, SELF_PUB_SPAN));
+    if (!args.includes("package.json") && !text.slice(cpBack(text, w.index, SELF_PUB_SPAN), w.index).includes("package.json")) continue;
+    for (const m of args.matchAll(JS_IDENT_G)) if (names.has(m[0])) return pub.index;
+  }
+  return -1;
+}
+
+// ---- an install script that runs a DLL (0.1.8; core's comment above _DLL_LOADER_SRC) ----
+const DLL_LOADER_SRC = String.raw`\b(?:rundll32|regsvr32)(?:\.exe)?\b`;
+const DLL_NAME_SRC = String.raw`(?<![\w.\-])[\w.\-]*\.dll\b`;
+const STRING_JOIN_SRC = String.raw`["']\s*\+\s*["']`;
+const DLL_LOADER_RE = pyRe(DLL_LOADER_SRC, "i");
+const DLL_NAME_G = pyRe(DLL_NAME_SRC, "gi");
+const STRING_JOIN_G = pyRe(STRING_JOIN_SRC, "g");
+const SYSTEM_DLLS = new Set(["url.dll", "shell32.dll", "user32.dll", "ieframe.dll", "dfshim.dll", "advpack.dll",
+  "printui.dll", "keymgr.dll", "powrprof.dll", "zipfldr.dll", "shdocvw.dll", "shimgvw.dll"]);
+
+/** `text` with adjacent string literals joined ('chi' + 'ld' reads 'child'). Twin of core.join_string_pieces. */
+export function joinStringPieces(text) {
+  return text.includes("+") ? text.replace(STRING_JOIN_G, "") : text;
+}
+
+/** The DLL `text` runs with rundll32 or regsvr32 (not one of Windows' own ordinary ones), else null. Twin of core.runs_dll. */
+export function runsDll(text) {
+  if (!text.includes("32") && !text.includes("+")) return null;
+  for (const view of [text, joinStringPieces(text)]) {
+    if (!DLL_LOADER_RE.test(view)) continue;
+    for (const m of view.matchAll(DLL_NAME_G)) {
+      let name = m[0];
+      name = name.slice(name.lastIndexOf("/") + 1);
+      name = name.slice(name.lastIndexOf("\\") + 1).toLowerCase();
+      if (name && name !== ".dll" && !SYSTEM_DLLS.has(name)) return name;
+    }
+  }
+  return null;
+}
+
+// ---- names in strings a file decodes as it runs (0.1.8; core's comment above _DV_MAX_LITERAL) ----
+const DV_MAX_LITERAL = 400, DV_BODY = 400, DV_MAX_HELPERS = 8, DV_MAX_ARRAYS = 16, DV_MAX_CHARS = 4_000_000;
+const DV_NOTE = " (in strings it decodes as it runs)";
+const DV_LIT = String.raw`(?:'(?P<a>[^'\\\n]{1,400})'|"(?P<b>[^"\\\n]{1,400})"|` + BT + String.raw`(?P<c>[^` + BT + String.raw`\\\n$]{1,400})` + BT + ")";
+const DV_JOIN_SRC = String.raw`'[ \t]*\+[ \t]*'|"[ \t]*\+[ \t]*"`;
+const DV_BUFFER_SRC = String.raw`\bBuffer[ \t]*\.[ \t]*from[ \t]*\([ \t]*` + DV_LIT
+  + String.raw`[ \t]*,[ \t]*['"` + BT + String.raw`](?P<enc>hex|base64)['"` + BT + String.raw`][ \t]*\)[ \t]*\.[ \t]*toString[ \t]*\([ \t]*`
+  + String.raw`(?:['"` + BT + String.raw`](?:utf-?8|ascii|latin1|binary)['"` + BT + String.raw`])?[ \t]*\)`;
+const DV_ATOB_SRC = String.raw`(?<![\w$.])atob[ \t]*\([ \t]*` + DV_LIT + String.raw`[ \t]*\)`;
+const DV_PY_SRC = String.raw`\b(?:(?P<fh>bytes[ \t]*\.[ \t]*fromhex)|(?P<uh>(?:binascii[ \t]*\.[ \t]*)?unhexlify)`
+  + String.raw`|(?:base64[ \t]*\.[ \t]*)?b64decode)[ \t]*\([ \t]*b?(?:'(?P<a>[^'\\\n]{1,400})'|"(?P<b>[^"\\\n]{1,400})")`
+  + String.raw`[ \t]*\)[ \t]*\.[ \t]*decode[ \t]*\([^()\n]{0,20}\)`;
+const DV_HELPER_SRC = String.raw`\bfunction[ \t]+(?P<a>[A-Za-z_$][\w$]*)[ \t]*\([ \t]*[A-Za-z_$][\w$]*[ \t]*\)`
+  + String.raw`|\b(?:const|let|var)[ \t]+(?P<b>[A-Za-z_$][\w$]*)[ \t]*=[ \t]*(?:function[ \t]*\([ \t]*`
+  + String.raw`[A-Za-z_$][\w$]*[ \t]*\)|\(?[ \t]*[A-Za-z_$][\w$]*[ \t]*\)?[ \t]*=>)`
+  + String.raw`|\bdef[ \t]+(?P<c>[A-Za-z_]\w*)[ \t]*\([ \t]*[A-Za-z_]\w*[ \t]*\)[ \t]*:`;
+const DV_STR_ITEM_SRC = String.raw`'[^'\\\n]{0,400}'|"[^"\\\n]{0,400}"`;
+const DV_ARRAY_SRC = String.raw`(?<![\w$.])(?P<name>[A-Za-z_$][\w$]*)[ \t]*=[ \t]*\[(?P<items>(?:\s*(?:` + DV_STR_ITEM_SRC
+  + String.raw`)\s*,){0,63}\s*(?:` + DV_STR_ITEM_SRC + String.raw`)\s*,?\s*)\]`;
+const DV_MEMBER_SRC = String.raw`(?<=[\w$)\]])\[[ \t]*(?:'(?P<a>[A-Za-z_$][\w$]{0,63})'|"(?P<b>[A-Za-z_$][\w$]{0,63})")[ \t]*\]`;
+const pyReG = (src, flags = "") => pyRe(src.replaceAll("(?P<", "(?<"), flags);
+const DV_JOIN_G = pyRe(DV_JOIN_SRC, "g");
+const DV_BUFFER_G = pyReG(DV_BUFFER_SRC, "g");
+const DV_ATOB_G = pyReG(DV_ATOB_SRC, "g");
+const DV_PY_G = pyReG(DV_PY_SRC, "g");
+const DV_HELPER_G = pyReG(DV_HELPER_SRC, "g");
+const DV_STR_ITEM_G = pyRe(DV_STR_ITEM_SRC, "g");
+const DV_ARRAY_G = pyReG(DV_ARRAY_SRC, "g");
+const DV_MEMBER_G = pyReG(DV_MEMBER_SRC, "g");
+const DV_HEX_WHOLE = /^[0-9A-Fa-f]+$/;
+const DV_B64_WHOLE = /^[A-Za-z0-9+/]+={0,2}$/;
+const DV_NEEDLES = ["Buffer", "atob", "fromhex", "unhexlify", "b64decode", "fromCharCode", "hex", "base64"];
+// home-made XOR decoders (0.1.8; core's comment above _DV_XOR_MIN_CALLS)
+const DV_XOR_MIN_CALLS = 5, DV_XOR_MAX_CALLS = 64, DV_XOR_MIN_BYTES = 32, DV_XOR_MAX_KEYS = 256, DV_XOR_KEY_MAX = 32;
+const DV_CALL_SRC = String.raw`(?<![\w$.])(?P<name>[A-Za-z_$][\w$]*)[ \t]*\([ \t]*` + DV_LIT + String.raw`[ \t]*\)`;
+const DV_KEY_SRC = String.raw`'(?P<a>[^'\\\n]{1,32})'|"(?P<b>[^"\\\n]{1,32})"|` + BT + String.raw`(?P<c>[^` + BT
+  + String.raw`\\\n$]{1,32})` + BT;
+const DV_CALL_G = pyReG(DV_CALL_SRC, "g");
+const DV_KEY_G = pyReG(DV_KEY_SRC, "g");
+const PRINTABLE_ASCII = /^[ -~]+$/;
+const reEscape = (s) => s.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+
+/** The printable ASCII text a literal decodes to as hex or base64, else null. core._dv_decode. */
+function dvDecode(kind, s) {
+  let data;
+  if (kind === "hex") {
+    if (s.length % 2 || !DV_HEX_WHOLE.test(s)) return null;
+    data = Buffer.from(s, "hex");
+  } else {
+    if (s.length % 4 || !DV_B64_WHOLE.test(s)) return null;
+    data = Buffer.from(s, "base64");
+  }
+  if (!data.length || data.some((b) => b < 0x20 || b > 0x7e)) return null;
+  return data.toString("latin1");
+}
+
+/** The bytes a literal holds as hex, or as base64 (padded; or unpadded, but not 4k+1 long), else null. core._dv_bytes. */
+function dvBytes(s, kind) {
+  if (kind === "hex") return s.length % 2 === 0 && DV_HEX_WHOLE.test(s) ? Buffer.from(s, "hex") : null;
+  if (!DV_B64_WHOLE.test(s) || s.length % 4 === 1 || (s.includes("=") && s.length % 4)) return null;
+  return Buffer.from(s, "base64");
+}
+
+/** Is every byte of data XORed with key (repeated) printable ASCII? core._dv_xor_printable. */
+function dvXorPrintable(data, key) {
+  for (let i = 0; i < data.length; i++) {
+    const b = data[i] ^ key[i % key.length];
+    if (b < 0x20 || b > 0x7e) return false;
+  }
+  return true;
+}
+
+/** Map name -> [kind, key]: the names view calls as XOR decoders, in the order of their first calls. core._dv_xor_decoders. */
+function dvXorDecoders(view) {
+  const calls = new Map();
+  for (const m of view.matchAll(DV_CALL_G)) {
+    let lits = calls.get(m.groups.name);
+    if (lits === undefined) calls.set(m.groups.name, lits = []);
+    if (lits.length < DV_XOR_MAX_CALLS) lits.push(m.groups.a || m.groups.b || m.groups.c);
+  }
+  const out = new Map();
+  let keys = null;
+  for (const [name, lits] of calls) {
+    if (lits.length < DV_XOR_MIN_CALLS) continue;
+    const kind = lits.every((x) => x.length % 2 === 0 && DV_HEX_WHOLE.test(x)) ? "hex" : "base64";
+    const data = lits.map((x) => dvBytes(x, kind));
+    const read = data.filter((d) => d !== null);
+    if (read.length < DV_XOR_MIN_CALLS || read.reduce((n, d) => n + d.length, 0) < DV_XOR_MIN_BYTES) continue;
+    if (keys === null) {
+      keys = [];
+      const seen = new Set();
+      for (const k of view.matchAll(DV_KEY_G)) {
+        const key = k.groups.a || k.groups.b || k.groups.c;
+        if (seen.has(key) || !PRINTABLE_ASCII.test(key)) continue;
+        seen.add(key);
+        keys.push(Buffer.from(key, "latin1"));
+        if (keys.length >= DV_XOR_MAX_KEYS) break;
+      }
+    }
+    const allowed = Math.floor(lits.length / 10);   // calls that may stay unread
+    for (const key of keys) {
+      let bad = 0;
+      for (const d of data) {
+        if (d === null || !dvXorPrintable(d, key)) {
+          if (++bad > allowed) break;
+        }
+      }
+      if (bad <= allowed) { out.set(name, [kind, key]); break; }
+    }
+    if (out.size >= DV_MAX_HELPERS) break;
+  }
+  return out;
+}
+
+const dvQuote = (s) => "'" + s.replaceAll("\\", "\\\\").replaceAll("'", "\\'") + "'";
+const dvLiteral = (g) => g.a || g.b || g.c;
+const dvReplace = (kindOf) => (...args) => {
+  const g = args[args.length - 1];
+  const d = dvDecode(kindOf(g), dvLiteral(g));
+  return d === null ? args[0] : dvQuote(d);
+};
+
+/** {name: 'hex'|'base64'}: the file's own decoding helpers. core._dv_helpers. */
+function dvHelpers(text) {
+  const out = new Map();
+  for (const m of text.matchAll(DV_HELPER_G)) {
+    const name = m.groups.a || m.groups.b || m.groups.c;
+    if (out.has(name)) continue;
+    const end = m.index + m[0].length;
+    const body = text.slice(end, cpForward(text, end, DV_BODY));
+    if ((body.includes("fromCharCode") && body.includes("parseInt") && body.includes("16")) || body.includes("'hex'")
+        || body.includes('"hex"') || body.includes("fromhex(") || body.includes("unhexlify(")) out.set(name, "hex");
+    else if (body.includes("base64") || body.includes("atob(") || body.includes("b64decode(")) out.set(name, "base64");
+    else continue;
+    if (out.size >= DV_MAX_HELPERS) break;
+  }
+  return out;
+}
+
+/** The text read the way it reads once the strings it decodes as it runs are decoded. Twin of core.decoded_view. */
+export function decodedView(text) {
+  if (text.length > DV_MAX_CHARS && cpLen(text) > DV_MAX_CHARS) return text;
+  if (!DV_NEEDLES.some((n) => text.includes(n))) return text;
+  const joined = text.includes("+") ? text.replace(DV_JOIN_G, "") : text;
+  let view = joined;
+  if (view.includes("Buffer")) view = view.replace(DV_BUFFER_G, dvReplace((g) => g.enc));
+  if (view.includes("atob")) view = view.replace(DV_ATOB_G, dvReplace(() => "base64"));
+  if (view.includes("fromhex") || view.includes("unhexlify") || view.includes("b64decode")) {
+    view = view.replace(DV_PY_G, dvReplace((g) => (g.fh || g.uh ? "hex" : "base64")));
+  }
+  const helpers = dvHelpers(view);
+  if (helpers.size) {
+    const names = [...helpers.keys()].sort();
+    const call = pyReG(String.raw`(?<![\w$.])(?P<name>` + names.map(reEscape).join("|") + String.raw`)[ \t]*\([ \t]*`
+      + DV_LIT + String.raw`[ \t]*\)`, "g");
+    view = view.replace(call, dvReplace((g) => helpers.get(g.name)));
+  }
+  if (view.includes("^")) {
+    const xors = dvXorDecoders(view);
+    if (xors.size) {
+      const names = [...xors.keys()].sort();
+      const call = pyReG(String.raw`(?<![\w$.])(?P<name>` + names.map(reEscape).join("|") + String.raw`)[ \t]*\([ \t]*`
+        + DV_LIT + String.raw`[ \t]*\)`, "g");
+      view = view.replace(call, (...args) => {
+        const g = args[args.length - 1];
+        const [kind, key] = xors.get(g.name);
+        const d = dvBytes(dvLiteral(g), kind);
+        if (d === null || !dvXorPrintable(d, key)) return args[0];
+        return dvQuote(Buffer.from(d.map((b, i) => b ^ key[i % key.length])).toString("latin1"));
+      });
+    }
+  }
+  if (view === joined) return text;                  // nothing decoded: literals joined alone are no reading of their own
+  let arrays = 0;
+  for (const m of [...view.matchAll(DV_ARRAY_G)]) {
+    if (arrays >= DV_MAX_ARRAYS) break;
+    const name = m.groups.name;
+    const items = [...m.groups.items.matchAll(DV_STR_ITEM_G)].map((x) => x[0]);
+    const esc = reEscape(name);
+    const mutated = pyRe(String.raw`(?<![\w$.])` + esc + String.raw`\s*(?:\.\s*(?:push|pop|shift|unshift|splice|reverse|sort|fill`
+      + String.raw`|copyWithin|append|insert|extend|remove)\s*\(|\[[^\]\n]{0,80}\]\s*=(?!=))`).test(view);
+    if (mutated || [...view.matchAll(pyRe(String.raw`(?<![\w$.])` + esc + String.raw`\s*=(?![=>])`, "g"))].length !== 1) continue;
+    arrays++;
+    view = view.replace(pyRe(String.raw`(?<![\w$.])` + esc + String.raw`\s*\[\s*([0-9]{1,2})\s*\]`, "g"),
+      (whole, i) => (Number(i) < items.length ? items[Number(i)] : whole));
+  }
+  return view.includes("[") ? view.replace(DV_MEMBER_G, (...args) => { const g = args[args.length - 1]; return "." + (g.a || g.b); }) : view;
+}
+
+// ---- scripts a script starts with node or python (0.1.8; core's comment above _SPAWN_MAX_DEPTH) ----
+export const SPAWN_MAX_DEPTH = 3, SPAWN_MAX_FILES = 20;
+const SPAWN_NAME_DEPTH = 3, SPAWN_MAX_TARGETS = 8;
+const SPAWN_CALL_SRC = String.raw`\b(?:spawn|spawnSync|execFile|execFileSync)\s*\(\s*(?:process\s*\.\s*execPath|process\s*\.\s*argv\s*\[\s*0\s*\]`
+  + String.raw`|['"` + BT + String.raw`](?:node|nodejs)(?:\.exe)?['"` + BT + String.raw`])\s*,\s*\[|\bfork\s*\(`
+  + String.raw`|\b(?:Popen|run|call|check_call|check_output)\s*\(\s*\[\s*(?:sys\s*\.\s*executable`
+  + String.raw`|['"]python[0-9.]*(?:\.exe)?['"])\s*,`;
+const SPAWN_LIT_SRC = String.raw`'(?P<a>[^'"` + BT + String.raw`\n$\\]{1,200})'|"(?P<b>[^'"` + BT + String.raw`\n$\\]{1,200})"|`
+  + BT + String.raw`(?P<c>[^'"` + BT + String.raw`\n$\\]{1,200})` + BT;
+const SPAWN_CONCAT_SRC = String.raw`__dirname\s*\+\s*(?:'/?(?P<a>[^'"` + BT + String.raw`\n$\\]{1,200})'|"/?(?P<b>[^'"` + BT
+  + String.raw`\n$\\]{1,200})"|` + BT + String.raw`/?(?P<c>[^'"` + BT + String.raw`\n$\\]{1,200})` + BT + String.raw`)|`
+  + BT + String.raw`\$\{\s*__dirname\s*\}/(?P<t>[^` + BT + String.raw`$\n\\]{1,200})` + BT;
+const SPAWN_DIR_SRC = String.raw`__dirname|os\s*\.\s*path\s*\.\s*dirname\s*\(\s*(?:os\s*\.\s*path\s*\.\s*(?:abspath|realpath)`
+  + String.raw`\s*\(\s*)?__file__\s*\)?\s*\)|Path\s*\(\s*__file__\s*\)\s*(?:\.\s*resolve\s*\(\s*\))?\s*\.\s*parent`;
+const SPAWN_JOIN_SRC = String.raw`(?:path\s*\.\s*(?:join|resolve)|os\s*\.\s*path\s*\.\s*join)\s*\(`;
+const SPAWN_NAME_SRC = String.raw`[A-Za-z_$][\w$]*`;
+const SPAWN_CALL_G = pyRe(SPAWN_CALL_SRC, "g");
+const whole = (src) => pyReG(String.raw`^(?:` + src + String.raw`)\Z`);
+const SPAWN_LIT_WHOLE = whole(SPAWN_LIT_SRC);
+const SPAWN_CONCAT_WHOLE = whole(SPAWN_CONCAT_SRC);
+const SPAWN_DIR_WHOLE = whole(SPAWN_DIR_SRC);
+const SPAWN_NAME_WHOLE = whole(SPAWN_NAME_SRC);
+const SPAWN_JOIN_AT = pyRe(SPAWN_JOIN_SRC, "y");
+const SPAWN_NO_SCRIPT_FLAGS = new Set(["-m", "-c", "-e", "-p", "--eval", "--print"]);
+const SPAWN_VALUE_FLAGS = new Set(["-r", "--require", "--import", "--loader", "--experimental-loader", "-W", "-X"]);
+
+/** A call's or a list's arguments from text[i] to what closes it, split at top-level commas; [] if unclosed. core._spawn_args. */
+function spawnArgs(text, i, limit = 400) {
+  const args = [];
+  let depth = 0, start = i, j = i, quote = null;
+  const end = cpForward(text, i, limit);
+  while (j < end) {
+    const ch = text[j];
+    if (quote !== null) {
+      if (ch === "\\") { j += 2; continue; }
+      if (ch === quote) quote = null;
+    } else if (ch === "'" || ch === '"' || ch === "`") quote = ch;
+    else if (ch === "(" || ch === "[" || ch === "{") depth++;
+    else if (ch === ")" || ch === "]" || ch === "}") {
+      if (depth === 0) { args.push(text.slice(start, j)); return args.map((a) => pyStrip(a)); }
+      depth--;
+    } else if (ch === "," && depth === 0) { args.push(text.slice(start, j)); start = j + 1; }
+    // a character outside the BMP is two units here and one in Python: step over its low half
+    j += text.charCodeAt(j) >= 0xd800 && text.charCodeAt(j) <= 0xdbff && j + 1 < text.length ? 2 : 1;
+  }
+  return [];
+}
+
+const litValue = (m) => (m === null ? null : m.groups.a ?? m.groups.b ?? m.groups.c);
+
+/** [base, path] a script argument names ('dir' or 'cwd'), else null. core._spawn_path. */
+function spawnPath(expr, text, names) {
+  expr = pyStrip(expr);
+  const lit = litValue(SPAWN_LIT_WHOLE.exec(expr));
+  if (lit != null) return lit.startsWith("-") ? null : ["cwd", lit];
+  const c = SPAWN_CONCAT_WHOLE.exec(expr);
+  if (c !== null) return ["dir", c.groups.a ?? c.groups.b ?? c.groups.c ?? c.groups.t];
+  SPAWN_JOIN_AT.lastIndex = 0;
+  const j = SPAWN_JOIN_AT.exec(expr);
+  if (j !== null) {
+    const parts = spawnArgs(expr, j[0].length);
+    if (!parts.length || !pyRstrip(expr).endsWith(")")) return null;
+    let base, segs;
+    if (SPAWN_DIR_WHOLE.test(parts[0])) { base = "dir"; segs = []; }
+    else {
+      const head = spawnPath(parts[0], text, names);
+      if (head === null) return null;
+      [base, segs] = [head[0], [head[1]]];
+    }
+    for (const part of parts.slice(1)) {
+      const v = litValue(SPAWN_LIT_WHOLE.exec(part));
+      if (v == null) return null;
+      segs.push(v);
+    }
+    return segs.length ? [base, segs.join("/")] : null;
+  }
+  if (SPAWN_NAME_WHOLE.test(expr) && names > 0) {
+    const am = pyReG(String.raw`(?<![\w$.])` + reEscape(expr) + String.raw`\s*=(?![=>])\s*(?P<e>[^\n;]{1,300})`).exec(text);
+    if (am !== null) {
+      const value = am.groups.e;
+      const parts = spawnArgs(value + ")", 0);
+      return spawnPath(parts.length ? parts[0] : value, text, names - 1);
+    }
+  }
+  return null;
+}
+
+/** [[base, path]]: the package scripts `text` starts with node or python. Twin of core.spawned_scripts. */
+export function spawnedScripts(text) {
+  if (!["spawn", "execFile", "fork", "Popen", "run", "call", "check_"].some((n) => text.includes(n))) return [];
+  const out = [];
+  for (const m of text.matchAll(SPAWN_CALL_G)) {
+    const args = spawnArgs(text, m.index + m[0].length);
+    let skip = false;
+    for (const arg of args.slice(0, 6)) {
+      if (skip) { skip = false; continue; }
+      const value = litValue(SPAWN_LIT_WHOLE.exec(arg));
+      if (value != null && value.startsWith("-")) {
+        const flag = value.split("=")[0];
+        if (SPAWN_NO_SCRIPT_FLAGS.has(flag)) break;
+        skip = SPAWN_VALUE_FLAGS.has(flag) && !value.includes("=");
+        continue;
+      }
+      const target = spawnPath(arg, text, SPAWN_NAME_DEPTH);
+      if (target !== null) {
+        const raw = target[1].replaceAll("\\", "/");
+        if (!raw.startsWith("/")) {
+          const path = normpathRel(raw);
+          if (path !== "." && path !== "" && !out.some(([b, p]) => b === target[0] && p === path)) out.push([target[0], path]);
+        }
+      }
+      break;
+    }
+    if (out.length >= SPAWN_MAX_TARGETS) break;
+  }
+  return out;
+}
+
 /**
- * Reasons an install-time script looks hostile ([] if none).
+ * Reasons an install-time script looks hostile ([] if none): read as written,
+ * and again with the strings it decodes as it runs decoded.
  * Twin of lazaret.scanner.core.install_script_risk.
  */
 export function installScriptRisk(text) {
+  const reasons = installScriptRiskOf(text);
+  const view = decodedView(text);
+  if (view !== text) for (const r of installScriptRiskOf(view)) if (!reasons.includes(r)) reasons.push(r + DV_NOTE);
+  return reasons;
+}
+
+function installScriptRiskOf(text) {
   const reasons = [];
   const network = NETWORK_RE.test(text);
   if (network && SECRET_SOURCE_RE.test(text)) {
@@ -1055,9 +1890,32 @@ export function installScriptRisk(text) {
     reasons.push("carries a script that downloads and runs code");
   }
   if (reverseShellAt(text) >= 0) reasons.push("opens a reverse shell");
-  if (sendsHostInfo(text)) reasons.push("sends the machine's user or host name over the network");
+  const host = HOST_INFO_RE.exec(text);
+  if (host && (NETWORK_RE.test(text) || EXFIL_SERVICE_RE.test(text))) {               // sendsHostInfo
+    reasons.push("sends the machine's user or host name over the network");
+  }
+  for (const [, reason] of exfilSigns(text, host)) if (!reasons.includes(reason)) reasons.push(reason);
+  if (dest === null) {
+    const ip = rawIpConnect(text);
+    if (ip !== null) reasons.push(`contacts an address typical of data exfiltration (${ip})`);
+  }
   if (runsOwnSourceAt(text) >= 0) reasons.push("runs code it reads back from its own file or a data file shipped with it");
   reasons.push(...persistenceReasons(text));
+  if (PUBLISH_CMD_RE.test(text)) reasons.push("publishes a package to a registry (npm publish)");
+  if (NPM_TOKEN_READ_RE.test(text)) reasons.push("collects npm access tokens");
+  const dll = runsDll(text);
+  if (dll !== null) reasons.push(`runs a DLL with rundll32 or regsvr32 (${cpPrefix(dll, 40)})`);
+  // a script it downloads, or decodes, written to a file and run with a shell or an interpreter
+  const dropped = downloadsAndRuns(text);
+  if (dropped !== null) {
+    const interp = PY_RUN_RE.test(text) ? "Python" : dropped[1];
+    if (interp) reasons.push(`downloads a script and runs it with ${interp}`);
+  }
+  const decoded = decodesAndRuns(text);
+  if (decoded !== null) {
+    const interp = PY_RUN_RE.test(text) ? "Python" : decoded[1];
+    reasons.push(interp ? `writes code it decodes to a file and runs it with ${interp}` : "writes a file it decodes and runs it");
+  }
   return reasons;
 }
 
@@ -1082,8 +1940,14 @@ const LEVELDB_RE = pyRe(LEVELDB_SRC, "y");
 // with none is not searched
 const IMPORT_HARVEST_NEEDLES = ["process.env", "os.environ", "id_", ".git-credentials", "leveldb"];
 
-/** Where core's _IMPORT_HARVEST_RE.search(text) starts, or -1. */
+/** Where text harvests: core._import_harvest_at (_IMPORT_HARVEST_RE, else a copy of the environment it serializes), or -1. */
 function importHarvestStart(text) {
+  const at = importHarvestReStart(text);
+  return at !== -1 ? at : envCopySerializedAt(text);
+}
+
+/** Where core's _IMPORT_HARVEST_RE.search(text) starts, or -1. */
+function importHarvestReStart(text) {
   if (!IMPORT_HARVEST_NEEDLES.some((needle) => text.includes(needle))) return -1;
   const rest = IMPORT_HARVEST_REST_RE.exec(text);
   const limit = rest ? rest.index : text.length;
@@ -1109,13 +1973,29 @@ const STRONG_IMPORT_REASONS = [
   "runs code it receives over the network", "runs a downloaded script through a shell",
   "runs an encoded PowerShell command", "runs PowerShell that", "carries a script that downloads and runs code",
   "opens a reverse shell", "reads credentials or the whole environment and sends them to",
-  "sends the machine's user or host name to a data-capture service", "downloads a script and runs it with Python",
-  "runs code it reads back from its own file", "carries a GitHub Actions workflow that dumps every repository secret"];
+  "sends the machine's user or host name to a data-capture service", "downloads a script and runs it with",
+  "writes code it decodes to a file and runs it with", "runs code it reads back from its own file",
+  "carries a GitHub Actions workflow that dumps every repository secret",
+  "sends data to a Telegram bot whose token", "sends data to a Discord webhook whose token",
+  "sends data to a Slack webhook whose key", "reads credential files and sends data to an IP address",
+  "collects files from several credential folders", "sends the machine's user or host name to an address it hides",
+  "sends the machine's user or host name in a DNS lookup", "sends the machine's public IP address to a data-capture",
+  "runs a cryptocurrency miner"];
 const CAPTURE_SERVICE_SRC = String.raw`webhook\.site|typedwebhook\.tools|oastify\.com|burpcollaborator|\binteract\.sh|\boast[\w.-]*\.(?:pro|live|site`
-  + String.raw`|online|fun|me|com)\b|pipedream\.net|requestbin|requestcatcher\.com|hookbin\.com|postb\.in|beeceptor\.com`
+  + String.raw`|online|fun|me|com)\b|pipedream\.net|requestbin\.(?:com|net|io)\b|\brequestb\.in\b|requestcatcher\.com`
+  + String.raw`|hookbin\.com|postb\.in\b|beeceptor\.com`
   + String.raw`|dnslog\.cn|ceye\.io|canarytokens`;
 const CAPTURE_SERVICE_RE = pyRe(CAPTURE_SERVICE_SRC, "i");
-const PY_RUN_SRC = String.raw`\[\s*(?:sys\.executable|["']python[\d.w]*(?:\.exe)?["'])\s*,|\bstart\s+pythonw?\b`
+// an ngrok tunnel's own address counts as one (0.1.8; core's comment above _NGROK_TUNNEL_RE)
+const NGROK_TUNNEL_SRC = String.raw`\b[a-z0-9][a-z0-9-]{2,62}\.ngrok(?:-free)?\.(?:app|io|dev)\b|\b\d+\.tcp(?:\.[a-z]{2,3})?\.ngrok\.io\b`;
+const NGROK_TUNNEL_RE = pyRe(NGROK_TUNNEL_SRC);
+/** The first data-capture service text names, else an ngrok tunnel's address, else null (core.capture_service). */
+function captureService(text) {
+  let m = CAPTURE_SERVICE_RE.exec(text);
+  if (m === null && text.includes("ngrok")) m = NGROK_TUNNEL_RE.exec(text);
+  return m;
+}
+const PY_RUN_SRC = String.raw`\[\s*(?:\w*sys\.executable|["']python[\d.w]*(?:\.exe)?["'])\s*,|\bstart\s+pythonw?\b`
   + String.raw`|\b(?:system|popen|getoutput|run|call|Popen)\s*\(\s*f?["']python[\d.w]*(?:\.exe)?\s`;
 const PY_RUN_RE = pyRe(PY_RUN_SRC);
 /** 'CRITICAL' when one of importTimeRisk's reasons is a strong one, else 'MAJOR' (core.import_time_severity). */
@@ -1188,7 +2068,7 @@ function blank(text, spans) {
 }
 
 /** `text` (a Python or JavaScript file) with its prose blanked, unless it reads its own source (core._import_code). */
-function importCode(text, lang) {
+export function importCode(text, lang) {
   if (readsOwnSource(text)) return text;
   const literals = lang === "py" ? [] : null;
   const comments = commentSpans(text, lang, null, { literals });
@@ -1232,6 +2112,17 @@ function powershellRunAt(text) {
  * lazaret.scanner.core.import_time_risk.
  */
 export function importTimeRisk(text, lang = null) {
+  const [reasons, first] = importTimeReading(text, lang);
+  let line = first;
+  const view = decodedView(text);
+  if (view !== text) {
+    const [more, at] = importTimeReading(view, lang);
+    for (const r of more) if (!reasons.includes(r)) { reasons.push(r + DV_NOTE); line ??= at; }
+  }
+  return [reasons, line];
+}
+
+function importTimeReading(text, lang) {
   let [reasons, line] = importTimeRiskOf(text);
   if (reasons.length && (lang === "py" || lang === "js")) {
     const code = importCode(text, lang);
@@ -1273,10 +2164,17 @@ function importTimeRiskOf(text) {
     reasons.push(DL_CATEGORY_REASON[received[1]]);
     line ??= received[0];
   }
-  const dropped = downloadsAndRunsFile(text);
+  const dropped = downloadsAndRuns(text);
   if (dropped !== null) {
-    reasons.push(PY_RUN_RE.test(text) ? "downloads a script and runs it with Python" : "downloads a file and then runs it");
-    line ??= dropped;
+    const interp = PY_RUN_RE.test(text) ? "Python" : dropped[1];
+    reasons.push(interp ? `downloads a script and runs it with ${interp}` : "downloads a file and then runs it");
+    line ??= dropped[0];
+  }
+  const decoded = decodesAndRuns(text);
+  if (decoded !== null) {
+    const interp = PY_RUN_RE.test(text) ? "Python" : decoded[1];
+    reasons.push(interp ? `writes code it decodes to a file and runs it with ${interp}` : "writes a file it decodes and runs it");
+    line ??= decoded[0];
   }
   const signs = [];                          // [offset, reason] of the shapes no library needs
   const ps = powershellRisk(text);
@@ -1292,7 +2190,7 @@ function importTimeRiskOf(text) {
   if (rs >= 0) signs.push([rs, "opens a reverse shell"]);
   const host = HOST_INFO_RE.exec(text);
   if (host) {
-    const capture = CAPTURE_SERVICE_RE.exec(text);
+    const capture = captureService(text);
     if (capture) signs.push([host.index, `sends the machine's user or host name to a data-capture service (${cpPrefix(capture[0], 40)})`]);
   }
   const own = runsOwnSourceAt(text);
@@ -1300,6 +2198,7 @@ function importTimeRiskOf(text) {
   if (dumpsWorkflowSecrets(text)) {
     signs.push([searchFrom(PERSIST_SECRETS_DUMP_G, text).index, "carries a GitHub Actions workflow that dumps every repository secret"]);
   }
+  signs.push(...exfilSigns(text, host));
   for (const [at, reason] of signs) {
     reasons.push(reason);
     line ??= countNewlines(text, 0, at) + 1;
@@ -1400,6 +2299,8 @@ export const PY_TWINS = {
     _HOST_INFO_RE: [HOST_INFO_SRC, ""], _CAPTURE_SERVICE_RE: [CAPTURE_SERVICE_SRC, "i"], _PY_RUN_RE: [PY_RUN_SRC, ""],
     _PY_DOC_HEAD_RE: [PY_DOC_HEAD_SRC, ""], _BRACKET_RE: [BRACKET_SRC, ""], _SPACE_TAB_RE: [SPACE_TAB_SRC, ""],
     _SELF_READ_RE: [SELF_READ_SRC, ""], _SIBLING_DATA_RE: [SIBLING_DATA_SRC, ""], _SELF_RUN_RE: [SELF_RUN_SRC, ""],
+    _SIBLING_PATH_RE: [SIBLING_PATH_SRC, ""], _PATH_READ_RE: [PATH_READ_SRC, ""], _READ_HEAD_RE: [READ_HEAD_SRC, ""],
+    _READ_CALLBACK_RE: [READ_CALLBACK_SRC, ""], _READ_THEN_RE: [READ_THEN_SRC, ""],
     _SELF_READ_ASSIGN_RE: [SELF_READ_ASSIGN_SRC, ""], _IDENT_TOKEN_RE: [IDENT_TOKEN_SRC, ""],
     _PERSIST_AGENT_RE: [PERSIST_AGENT_SRC, ""], _PERSIST_AGENT_SPLIT_RE: [PERSIST_AGENT_SPLIT_SRC, ""],
     _PERSIST_WORKFLOW_RE: [PERSIST_WORKFLOW_SRC, ""], _PERSIST_EXT_DIR_RE: [PERSIST_EXT_DIR_SRC, ""],
@@ -1408,6 +2309,37 @@ export const PY_TWINS = {
     _PERSIST_RUNNER_RE: [PERSIST_RUNNER_SRC, ""], _PERSIST_RUNNER_CONFIG_RE: [PERSIST_RUNNER_CONFIG_SRC, ""],
     _PERSIST_RUNNER_ARG_RE: [PERSIST_RUNNER_ARG_SRC, ""], _BUN_RELEASES_RE: [BUN_RELEASES_SRC, "i"],
     _SECRETS_DUMP_RE: [SECRETS_DUMP_SRC, "i"],
+    _PUBLISH_CMD_RE: [PUBLISH_CMD_SRC, ""], _NAME_ASSIGN_RE: [NAME_ASSIGN_SRC, ""],
+    _MANIFEST_WRITE_RE: [MANIFEST_WRITE_SRC, ""], _JS_IDENT_RE: [JS_IDENT_SRC, ""],
+    _NPM_TOKEN_READ_RE: [NPM_TOKEN_READ_SRC, ""], _DLL_LOADER_RE: [DLL_LOADER_SRC, "i"],
+    _DLL_NAME_RE: [DLL_NAME_SRC, "i"], _STRING_JOIN_RE: [STRING_JOIN_SRC, ""],
+    _DV_JOIN_RE: [DV_JOIN_SRC, ""], _DV_BUFFER_RE: [DV_BUFFER_SRC, ""], _DV_ATOB_RE: [DV_ATOB_SRC, ""],
+    _DV_PY_RE: [DV_PY_SRC, ""], _DV_HELPER_RE: [DV_HELPER_SRC, ""], _DV_STR_ITEM_RE: [DV_STR_ITEM_SRC, ""],
+    _DV_ARRAY_RE: [DV_ARRAY_SRC, ""], _DV_MEMBER_RE: [DV_MEMBER_SRC, ""],
+    _DV_CALL_RE: [DV_CALL_SRC, ""], _DV_KEY_RE: [DV_KEY_SRC, ""],
+    _SCRIPT_INTERP_RE: [SCRIPT_INTERP_SRC, ""], _SCRIPT_LOAD_RE: [SCRIPT_LOAD_SRC, ""], _DECODE_CALL_RE: [DECODE_CALL_SRC, ""],
+    _SPAWN_CALL_RE: [SPAWN_CALL_SRC, ""], _SPAWN_LIT_RE: [SPAWN_LIT_SRC, ""], _SPAWN_CONCAT_RE: [SPAWN_CONCAT_SRC, ""],
+    _SPAWN_DIR_RE: [SPAWN_DIR_SRC, ""], _SPAWN_JOIN_RE: [SPAWN_JOIN_SRC, ""], _SPAWN_NAME_RE: [SPAWN_NAME_SRC, ""],
+    _REVSHELL_NGROK_TCP_RE: [REVSHELL_NGROK_TCP_SRC, "i"], _REVSHELL_ARG_SHELL_RE: [REVSHELL_ARG_SHELL_SRC, ""],
+    _REVSHELL_ARGS_RE: [REVSHELL_ARGS_SRC, ""], _CHAT_SECRET_RE: [CHAT_SECRET_SRC, ""],
+    _TELEGRAM_API_RE: [TELEGRAM_API_SRC, "i"], _CRED_FILE_RE: [CRED_FILE_SRC, ""],
+    _PUBLIC_IP_URL_RE: [PUBLIC_IP_URL_SRC, ""], _CRED_DIR_RE: [CRED_DIR_SRC, ""],
+    _B64_URL_LITERAL_RE: [B64_URL_LITERAL_SRC, ""], _DNS_LOOKUP_RE: [DNS_LOOKUP_SRC, ""],
+    _DNS_BUILT_NAME_RE: [DNS_BUILT_NAME_SRC, ""],
+    _PUBLIC_IP_LOOKUP_RE: [PUBLIC_IP_LOOKUP_SRC, ""], _ENV_COPY_RE: [ENV_COPY_SRC, ""],
+    _IP_LITERAL_RE: [IP_LITERAL_SRC, ""], _RAW_CONNECT_RE: [RAW_CONNECT_SRC, ""], _ENV_COPY_ANCHOR_RE: [ENV_COPY_ANCHOR_SRC, ""],
+    _MONERO_ADDR_RE: [MONERO_ADDR_SRC, ""], _MINER_ARG_RE: [MINER_ARG_SRC, ""], _NGROK_TUNNEL_RE: [NGROK_TUNNEL_SRC, ""],
+    _PERSIST_SHORTCUT_RE: [PERSIST_SHORTCUT_SRC, ""],
+    _SVC_SYSTEMD_DIR_RE: [SVC_SYSTEMD_DIR_SRC, ""], _SVC_UNIT_RE: [SVC_UNIT_SRC, ""],
+    _SVC_SYSTEMCTL_RE: [SVC_SYSTEMCTL_SRC, ""], _SVC_LAUNCHD_DIR_RE: [SVC_LAUNCHD_DIR_SRC, ""],
+    _SVC_PLIST_RE: [SVC_PLIST_SRC, ""], _SVC_LAUNCHCTL_RE: [SVC_LAUNCHCTL_SRC, ""],
+    _SVC_CRONTAB_RE: [SVC_CRONTAB_SRC, ""], _SVC_PYCRON_RE: [SVC_PYCRON_SRC, ""],
+    _SVC_PYCRON_WRITE_RE: [SVC_PYCRON_WRITE_SRC, ""], _SVC_CRON_DIR_RE: [SVC_CRON_DIR_SRC, ""],
+    _SVC_RUNKEY_RE: [SVC_RUNKEY_SRC, "i"], _SVC_REG_WRITE_RE: [SVC_REG_WRITE_SRC, "i"],
+    _SVC_SCHTASKS_RE: [SVC_SCHTASKS_SRC, "i"], _SVC_TASK_API_RE: [SVC_TASK_API_SRC, "i"],
+    _SVC_TASK_COM_RE: [SVC_TASK_COM_SRC, "i"], _SVC_TASK_REGISTER_RE: [SVC_TASK_REGISTER_SRC, ""],
+    _SVC_STARTUP_RE: [SVC_STARTUP_SRC, "i"], _SVC_AUTOSTART_RE: [SVC_AUTOSTART_SRC, ""],
+    _SVC_CMD_START_RE: [SVC_CMD_START_SRC, ""],
     ...RECEIVED_TWINS,
   },
   sets: {
@@ -1423,7 +2355,11 @@ export const PY_TWINS = {
     _DL_NOT_NAMES: DL_NOT_NAMES, _DL_PREFIX_CHARS: DL_PREFIX_CHARS, _DL_DEFINING: DL_DEFINING,
     _DL_CALLEE_CHARS: DL_CALLEE_CHARS,
     _STAGER_RUN_NEEDLES: STAGER_RUN_NEEDLES, _STAGER_NET_NEEDLES: STAGER_NET_NEEDLES,
-    _STRONG_IMPORT_REASONS: STRONG_IMPORT_REASONS, _PY_JOINS: [...PY_JOINS],
+    _STRONG_IMPORT_REASONS: STRONG_IMPORT_REASONS, _PY_JOINS: [...PY_JOINS], _SYSTEM_DLLS: [...SYSTEM_DLLS],
+    _SPAWN_NO_SCRIPT_FLAGS: [...SPAWN_NO_SCRIPT_FLAGS], _SPAWN_VALUE_FLAGS: [...SPAWN_VALUE_FLAGS],
+    _CRED_SWEEP_NEEDLES: CRED_SWEEP_NEEDLES, _PUBLIC_RESOLVERS: [...PUBLIC_RESOLVERS],
+    _PUBLIC_IP_LOOKUP_NEEDLES: PUBLIC_IP_LOOKUP_NEEDLES, _MINER_ARG_NEEDLES: MINER_ARG_NEEDLES,
+    _REVSHELL_ARGS_NEEDLES: REVSHELL_ARGS_NEEDLES, _SELF_SHELL_RUNNERS: SELF_SHELL_RUNNERS,
   },
   maps: Object.fromEntries([["_PERSIST_AGENT_PAIRS", PERSIST_AGENT_PAIRS], ["_WRAPPER_VALUE_OPTIONS", WRAPPER_VALUE_OPTIONS],
     ["_WRAPPER_CHDIR_OPTIONS", WRAPPER_CHDIR_OPTIONS], ["_WRAPPER_COMMAND_OPTIONS", WRAPPER_COMMAND_OPTIONS]]
@@ -1432,6 +2368,16 @@ export const PY_TWINS = {
     _PS_ENCODED_MAX: PS_ENCODED_MAX, _STAGER_MIN: STAGER_MIN, _STAGER_MAX_LITERALS: STAGER_MAX_LITERALS,
     _PS_EXEC_BACK: PS_EXEC_BACK, _PS_EXEC_MAX_NAMES: PS_EXEC_MAX_NAMES, _SELF_READ_PASSES: SELF_READ_PASSES,
     _SELF_READ_MAX_CALLS: SELF_READ_MAX_CALLS, _SELF_READ_ARG_SPAN: SELF_READ_ARG_SPAN,
-    _SELF_READ_MAX_ASSIGNS: SELF_READ_MAX_ASSIGNS, _LITERAL_SPANS_MAX: LITERAL_SPANS_MAX,
-    _PERSIST_MAX_LINES: PERSIST_MAX_LINES },
+    _SELF_READ_MAX_ASSIGNS: SELF_READ_MAX_ASSIGNS, _SELF_READ_THEN_SPAN: SELF_READ_THEN_SPAN, _LITERAL_SPANS_MAX: LITERAL_SPANS_MAX,
+    _PERSIST_MAX_LINES: PERSIST_MAX_LINES, _SVC_LINE_MAX: SVC_LINE_MAX, _SVC_RUNKEY_SPAN: SVC_RUNKEY_SPAN,
+    _SELF_PUB_SPAN: SELF_PUB_SPAN, _SELF_PUB_MAX: SELF_PUB_MAX,
+    _DV_MAX_LITERAL: DV_MAX_LITERAL, _DV_BODY: DV_BODY, _DV_MAX_HELPERS: DV_MAX_HELPERS, _DV_MAX_ARRAYS: DV_MAX_ARRAYS,
+    _DV_MAX_CHARS: DV_MAX_CHARS, _DV_XOR_MIN_CALLS: DV_XOR_MIN_CALLS, _DV_XOR_MAX_CALLS: DV_XOR_MAX_CALLS,
+    _DV_XOR_MIN_BYTES: DV_XOR_MIN_BYTES, _DV_XOR_MAX_KEYS: DV_XOR_MAX_KEYS, _DV_XOR_KEY_MAX: DV_XOR_KEY_MAX,
+    _SPAWN_MAX_DEPTH: SPAWN_MAX_DEPTH, _SPAWN_MAX_FILES: SPAWN_MAX_FILES,
+    _SPAWN_NAME_DEPTH: SPAWN_NAME_DEPTH, _SPAWN_MAX_TARGETS: SPAWN_MAX_TARGETS,
+    _CHAT_SECRET_MAX: CHAT_SECRET_MAX, _CHAT_SECRET_MIN_DISTINCT: CHAT_SECRET_MIN_DISTINCT,
+    _CRED_SWEEP_SPAN: CRED_SWEEP_SPAN, _CRED_SWEEP_MIN: CRED_SWEEP_MIN, _CRED_SWEEP_MAX: CRED_SWEEP_MAX,
+    _ENV_COPY_MAX: ENV_COPY_MAX, _RAW_CONNECT_SPAN: RAW_CONNECT_SPAN, _IP_LITERAL_MAX: IP_LITERAL_MAX,
+    _DNS_LOOKUP_MAX: DNS_LOOKUP_MAX },
 };

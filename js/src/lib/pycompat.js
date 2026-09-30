@@ -181,6 +181,14 @@ export function pyStrip(s) {
   while (b > a && PY_SPACE_SET.has(s[b - 1])) b--;
   return a === 0 && b === s.length ? s : s.slice(a, b);
 }
+/** Python str.strip(chars): the characters of `chars` (ASCII here) taken off both ends. A loop:
+ * a regex like /^[T0]+|[T0]+$/ takes quadratic time on a long run of them. */
+export function pyStripChars(s, chars) {
+  let a = 0, b = s.length;
+  while (a < b && chars.includes(s[a])) a++;
+  while (b > a && chars.includes(s[b - 1])) b--;
+  return a === 0 && b === s.length ? s : s.slice(a, b);
+}
 export function pyLstrip(s) {
   let a = 0;
   while (a < s.length && PY_SPACE_SET.has(s[a])) a++;

@@ -59,7 +59,8 @@
       "/k",
       "/K",
       "Command",
-      "-enc"
+      "-enc",
+      "constructor"
     ],
     "_DL_DESERIAL_NEEDLES": [
       "pickle",
@@ -93,7 +94,9 @@
       "appendFile",
       "createWriteStream",
       "open(",
-      "urlretrieve"
+      "urlretrieve",
+      "curl",
+      "wget"
     ],
     "_DL_PATHRUN_NEEDLES": [
       "system",
@@ -173,7 +176,10 @@
     "_DL_LOOKBACK": 450,
     "_DL_NAMED_SEARCHES": 64,
     "_DL_PHASES": 8,
-    "_DL_ALIAS_MAX": 64
+    "_DL_ALIAS_MAX": 64,
+    "_DL_JOIN_ROWS": 12,
+    "_DL_JOIN_CHARS": 600,
+    "_DL_LOGICAL_MAX_CHARS": 1000000
   },
   "patterns": {
     "_DL_MODULE_VALUE_RE": {
@@ -292,9 +298,9 @@
       "note": "a runner-alias definition (name = a direct code-runner reference)"
     },
     "_DL_FILE_WRITE_RE": {
-      "src": "\\b(?:fs\\s*\\.\\s*)?(?:write|append)File(?:Sync)?\\s*\\(\\s*(?P<p1>[A-Za-z_$][\\w$]*|[\"'][^\"'\\n]{1,200}[\"'])\\s*,|\\bcreateWriteStream\\s*\\(\\s*(?P<p2>[A-Za-z_$][\\w$]*|[\"'][^\"'\\n]{1,200}[\"'])|\\bopen\\s*\\(\\s*(?P<p3>[A-Za-z_$][\\w$]*|[\"'][^\"'\\n]{1,200}[\"'])\\s*,[^)\\n]{0,60}?[\"'][rbtU]*[wax]\\+?[rbtU]*[\"']|\\burlretrieve\\s*\\(\\s*[^,()\\n]{1,300},\\s*(?P<p4>[A-Za-z_$][\\w$]*|[\"'][^\"'\\n]{1,200}[\"'])\\s*\\)",
+      "src": "\\b(?:fs\\s*\\.\\s*)?(?:write|append)File(?:Sync)?\\s*\\(\\s*(?P<p1>[A-Za-z_$][\\w$]*|[\"'][^\"'\\n]{1,200}[\"'])\\s*,|\\bcreateWriteStream\\s*\\(\\s*(?P<p2>[A-Za-z_$][\\w$]*|[\"'][^\"'\\n]{1,200}[\"'])|\\bopen\\s*\\(\\s*(?P<p3>[A-Za-z_$][\\w$]*|[\"'][^\"'\\n]{1,200}[\"'])\\s*,[^)\\n]{0,60}?[\"'][rbtU]*[wax]\\+?[rbtU]*[\"']|\\burlretrieve\\s*\\(\\s*[^,()\\n]{1,300},\\s*(?P<p4>[A-Za-z_$][\\w$]*|[\"'][^\"'\\n]{1,200}[\"'])\\s*\\)|[\"'](?:curl|wget)(?:\\.exe)?[\"']\\s*,\\s*\\[?[^\\]\\n]{0,300}?[\"']-(?:o|O|-output|-output-document)[\"']\\s*,\\s*(?P<p5>[A-Za-z_$][\\w$]*|[\"'][^\"'\\n]{1,200}[\"'])",
       "flags": "",
-      "note": "a received value written to a file, naming the path"
+      "note": "a received value written to a file, naming the path (p4, p5: a download to a file on its own)"
     },
     "_DL_PATHRUN_SINK_RE": {
       "src": "\\b(?:os\\.system|os\\.startfile|runpy\\.run_path)\\s*\\(|\\b(?:subprocess\\s*\\.\\s*)?(?:run|Popen|call|check_call|check_output)\\s*\\(|\\b(?:spawn|spawnSync|execFile|execFileSync|fork)\\s*\\(|(?<![\\w$.])(?:require|import|execfile)\\s*\\(|(?<![\\w$.])exec\\s*\\(\\s*open\\s*\\(",
@@ -310,6 +316,51 @@
       "src": "import\\s*\\(",
       "flags": "",
       "note": "the bare import( dynamic-import sink"
+    },
+    "_DL_JOIN_CHAIN_RE": {
+      "src": "[ \\t]*\\??\\.[ \\t]*[A-Za-z_$]",
+      "flags": "",
+      "note": "a row that continues a member chain from the row above (.then(...), ?.post(...)), not a spread or a number"
+    },
+    "_DL_JOIN_COMMENT_RE": {
+      "src": "(?:^|(?<=[ \\t]))(?://|#(?![\\w$]))",
+      "flags": "",
+      "note": "a trailing comment, once string contents are blanked (// or #, after a space or at the start)"
+    },
+    "_DL_JOIN_BLOCK_RE": {
+      "src": "=>|\\bfunction\\b|\\blambda\\b|\\bdef\\b|\\bclass\\b",
+      "flags": "",
+      "note": "a row that opens a function or a class, whose body is never joined into a statement"
+    },
+    "_DL_ENV_PY_RE": {
+      "src": "\\b(?:os[ \\t]*\\.[ \\t]*)?(?:environ[ \\t]*\\[[ \\t]*['\"](?P<a>[A-Za-z_][A-Za-z0-9_]{0,63})['\"][ \\t]*\\]|environ[ \\t]*\\.[ \\t]*get[ \\t]*\\([ \\t]*['\"](?P<b>[A-Za-z_][A-Za-z0-9_]{0,63})['\"][ \\t]*(?:,[^()\\n]{0,120})?\\)|getenv[ \\t]*\\([ \\t]*['\"](?P<c>[A-Za-z_][A-Za-z0-9_]{0,63})['\"][ \\t]*(?:,[^()\\n]{0,120})?\\))",
+      "flags": "",
+      "note": "a Python environment variable read or written by name (os.environ['X'], os.environ.get('X'), os.getenv('X')), read as environ.X"
+    },
+    "_DL_ENV_JS_RE": {
+      "src": "\\bprocess[ \\t]*\\.[ \\t]*env[ \\t]*\\[[ \\t]*['\"`](?P<a>[A-Za-z_$][A-Za-z0-9_$]{0,63})['\"`][ \\t]*\\]",
+      "flags": "",
+      "note": "a JavaScript environment variable by name in brackets (process.env['X']), read as process.env.X"
+    },
+    "_DL_COMMA_CALL_RE": {
+      "src": "\\(\\s*0\\s*,\\s*(?P<c>[A-Za-z_$][\\w$]*(?:[ \\t]*\\.[ \\t]*[A-Za-z_$][\\w$]*){0,8})\\s*\\)(?=\\s*\\()",
+      "flags": "",
+      "note": "a call through a comma expression, (0, ns.fn)(...) as TypeScript and Babel write an imported function's call: read as ns.fn(...)"
+    },
+    "_DL_GETATTR_RE": {
+      "src": "\\bgetattr[ \\t]*\\([ \\t]*(?P<o>[A-Za-z_$][\\w$]*(?:[ \\t]*\\.[ \\t]*[A-Za-z_$][\\w$]*){0,8})[ \\t]*,[ \\t]*(?:'(?P<a>[A-Za-z_$][\\w$]{0,63})'|\"(?P<b>[A-Za-z_$][\\w$]{0,63})\")[ \\t]*(?:,[^()\\n]{0,120})?\\)",
+      "flags": "",
+      "note": "getattr(obj, 'name') (and a default), read as obj.name"
+    },
+    "_DL_MEMBER_RE": {
+      "src": "(?<=[\\w$)\\]])\\[(?:'(?P<a>[A-Za-z_$][\\w$]{0,63})'|\"(?P<b>[A-Za-z_$][\\w$]{0,63})\")\\]",
+      "flags": "",
+      "note": "obj['name'] or obj[\"name\"], read as obj.name"
+    },
+    "_DL_CALLBACK_RE": {
+      "src": "(?<=[(,])[ \\t]*(?P<r>eval|Function|execSync|exec|(?:vm[ \\t]*\\.[ \\t]*)?runIn(?:This|New)?Context)[ \\t]*(?=\\)(?![ \\t]*\\())",
+      "flags": "",
+      "note": "a code runner handed to a call as its last argument (p.then(eval), res.on('data', eval)), read as (_v)=>eval(_v)"
     }
   },
   "alternatives": {
@@ -463,9 +514,21 @@
         [
           "",
           "\\[\\s*['\\\"`](?:e(?:['\\\"`]\\s*\\+\\s*['\\\"`])?v(?:['\\\"`]\\s*\\+\\s*['\\\"`])?a(?:['\\\"`]\\s*\\+\\s*['\\\"`])?l|F(?:['\\\"`]\\s*\\+\\s*['\\\"`])?u(?:['\\\"`]\\s*\\+\\s*['\\\"`])?n(?:['\\\"`]\\s*\\+\\s*['\\\"`])?c(?:['\\\"`]\\s*\\+\\s*['\\\"`])?t(?:['\\\"`]\\s*\\+\\s*['\\\"`])?i(?:['\\\"`]\\s*\\+\\s*['\\\"`])?o(?:['\\\"`]\\s*\\+\\s*['\\\"`])?n)['\\\"`]\\s*\\]\\s*\\("
+        ],
+        [
+          "(?<![\\w$.])",
+          "(?:Function|Object|Array|String|Number|Boolean|Promise|Date|RegExp|Error|Symbol)\\s*\\.\\s*constructor\\s*\\("
+        ],
+        [
+          "\\b",
+          "constructor\\s*\\.\\s*constructor\\s*\\("
+        ],
+        [
+          "",
+          "\\[\\s*['\\\"`]constructor['\\\"`]\\s*\\]\\s*\\[\\s*['\\\"`]constructor['\\\"`]\\s*\\]\\s*\\("
         ]
       ],
-      "note": "a call that runs its argument as code (eval/exec/Function/vm/child_process, indirect eval)"
+      "note": "a call that runs its argument as code (eval/exec/Function/vm/child_process, indirect eval) A built-in's constructor is Function: Function.constructor(...), x.constructor.constructor(...) and [\"constructor\"][\"constructor\"](...) run their argument too (0.1.8)."
     },
     "_DL_RUNNER_SHELL": {
       "extends": "_DL_RUNNER",

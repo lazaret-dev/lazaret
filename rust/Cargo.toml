@@ -1,0 +1,23 @@
+# Lazaret's native scanning engine (docs/RUST_ENGINE.md).
+#
+# No external crates: every member depends only on the standard library and
+# on the other members, so Cargo.lock lists nothing but this workspace and a
+# build needs no registry (scripts/check_rust_deps.py fails CI otherwise).
+[workspace]
+resolver = "2"
+members = ["crates/lazaret-engine", "crates/lazaret-ffi"]
+
+[workspace.package]
+version = "0.1.7"
+edition = "2021"
+license = "Apache-2.0 AND Python-2.0.1"
+rust-version = "1.75"
+repository = "https://github.com/lazaret-dev/lazaret"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "unwind"          # the FFI boundary turns a panic into an error, never an abort
+debug = false
+strip = true

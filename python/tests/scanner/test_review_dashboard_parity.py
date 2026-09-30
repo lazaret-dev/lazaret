@@ -69,6 +69,18 @@ PEM_LINE = "MIIEowIBAAKCAQEAu1SU1LfVLPHCozMxH2Mo4lgOEePzNm0tRgeLezV6ffAt0gun\n"
 
 # (file name, language, content) — text as pasted.
 ADVERSARIAL = [
+    # 0.1.8: code hidden off-screen (CRITICAL, MAJOR, and in a string or comment: none) and self-publishing code
+    ("offscreen.js", "js", "module.exports = 1;\n});" + " " * 300 + "global['r']=require;(function(){r('x')})();\n"
+     "const a = 2;" + " " * 200 + "a.b = [1, 2];\nconst s = '" + " " * 200 + "require(1)';\n// " + " " * 200
+     + "eval(x)\n\U0001F600;" + " " * 160 + "atob(q)\n"),
+    ("offscreen.py", "py", "x = 1\n)" + " " * 515 + ";import base64;exec(base64.b64decode('cHJpbnQoMSk='))\n"
+     '"""\n' + " " * 200 + 'import os\n"""\ny = 2  # ' + " " * 200 + "import os\n"),
+    ("auto.js", "js", "const fs = require('fs');\nconst { exec } = require('child_process');\n"
+     "packageData.name = `${pick()}-sluey`;\nfs.writeFileSync('package.json', JSON.stringify(packageData, null, 2));\n"
+     "exec('npm publish --access public', () => {});\n"),
+    ("republish.py", "py", "import json, subprocess\npkg['name'] = 'x-' + str(n)\n"
+     "with open('package.json', 'w') as f:\n    json.dump(pkg, f)\nsubprocess.run(['npm', 'publish'])\n"),
+    ("release.js", "js", "pkg.version = next;\nfs.writeFileSync('package.json', JSON.stringify(pkg));\nexecSync('npm publish');\n"),
     # 0.1.3: indirect eval, names hidden in a few escapes, an inline os import, .mts/.cts
     ("indirect.js", "js", "(0, eval)(atob(p));\neval.call(null, atob(p));\nwindow['ev' + 'al'](\n  atob(p));\n"
      "Reflect.apply(globalThis.eval, null, [atob(p)]);\n(0, util_1.Function)(atob(p));\n"),

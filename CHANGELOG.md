@@ -7,6 +7,310 @@ This log starts at 0.1.6; for earlier releases see the git history and tags.
 The format is based on [Keep a Changelog](https://keepachangelog.com); the
 project is pre-1.0, so the 0.x API may still change.
 
+## [Unreleased]
+
+### Added
+- **More of the malware the 0.1.7 benchmark missed (backlog items 1-4, from
+  its 177 misses).** On the same 516 malicious releases, 76% are now
+  SUSPICIOUS (was 66%; GuardDog 70%), and 80% with the registry's live
+  dependency history; the same 3 of 429 popular packages, and no popular
+  package's verdict changed at all. `lazaret guard` blocks 214 of the 300
+  npm samples end to end (was 165), still 2 of 219 popular ones. Registry
+  engine 2.9.0, so stored and cached verdicts are redone.
+  - **SC-SELF-PUBLISH** (both engines, CRITICAL): code that renames its
+    package and publishes it — an assignment to an object's `name`, a write of
+    that object to package.json, and `npm publish` (pnpm, yarn, bun) run by an
+    exec call. The 2025-26 registry floods shipped it as `auto.js`: 39 of the
+    misses, and half of what GuardDog caught that Lazaret didn't. Release
+    tools publish but never rename.
+  - **Install scripts that publish, collect npm tokens or run a DLL** (both
+    engines): three more reasons of the install-script test. A script an
+    install hook runs that calls `npm publish`, reads npm access tokens
+    (`.npmrc`'s `_authToken`, `npm config get …:_authToken`: the @emilgroup
+    worm handed them to a detached deploy script), or runs a DLL of its own
+    with `rundll32` / `regsvr32` (eslint-config-prettier 9.1.1; string pieces
+    are joined first, `"rund"+"ll32"`).
+  - **SC-OFFSCREEN-CODE** (both engines and the dashboard): code after a run of
+    150 or more blanks on a line, in code rather than a string or a comment,
+    where editors and review don't show it — CRITICAL when it loads or runs
+    more code (@react-native-aria/radio 0.2.14 hid its loader 731 columns
+    right), else MAJOR.
+  - **SC-USE-RISK** (registry): the import-time test's CRITICAL shapes in the
+    files a package runs only when it is used — a logger's constructor, a
+    middleware, a script a CLI spawns — not in tests, examples, docs, demos,
+    benchmarks or a web app's static assets. Not read once a package is
+    SUSPICIOUS, smallest files first, within 3 s per archive (a first guarded
+    plan of next, react, react-dom, typescript and eslint: 53 s, 50 s before).
+  - **SC-NEW-DEPENDENCY** (registry): a release that adds a dependency first
+    published less than 7 days before it (MAJOR under 30), outside the
+    package's npm scope, from an account that doesn't maintain the package.
+    The @mastra compromise changed no code, it only added `easy-day-js`, created
+    19 hours before: all 17 releases in the benchmark, with live registry
+    data, and none of the 429 popular packages at the benchmark's versions.
+    One document for the package and one per added dependency (at most five);
+    `LAZARET_NO_DEPENDENCY_HISTORY=1` turns it off.
+- **Payloads a file decodes, downloads staged over several steps, and the
+  cross-file follower in both engines (backlog items 5-11).** On the same 516
+  malicious releases, 80% are now SUSPICIOUS (76% after items 1-4, 66% in
+  0.1.7; GuardDog 70%), 84% with the registry's live dependency history: npm
+  77% (was 71%), PyPI 84% (was 83%). Still the same 3 of 429 popular
+  packages, and no popular package's verdict changed. `lazaret guard` blocks
+  232 of the 300 npm samples end to end (214 after items 1-4, 165 in 0.1.7),
+  still 2 of 219 popular ones. A registry scan takes about 7% longer on the
+  benchmark's heaviest packages (the two engines timed one after the other on
+  one machine; litellm, 2,471 modules, 20%).
+  Registry engine 2.10.0, so stored and cached verdicts are redone.
+  - **Names and code in strings a file decodes as it runs** (both engines):
+    the install-script and import-time tests read a file a second time with
+    its encoded strings decoded — `Buffer.from(…, 'hex' | 'base64')
+    .toString()`, `atob`, `bytes.fromhex` / `b64decode` / `unhexlify(…)
+    .decode()`, and the file's own hex or base64 helpers — a constant array of
+    strings read where it is indexed, and a member named by a literal
+    (`process["env"]`) read as one. A reason found only there says so.
+    tailwind-book-icon and five more loggers of one campaign kept every name
+    hex-encoded: `require(g('6178696f73'))` is axios.
+  - **SC-EVAL-DECODER** (both engines and the dashboard, CRITICAL): eval of an
+    inline decoder function applied to 200 or more character codes or a
+    literal of 1,000 or more characters — one campaign's letter-shift
+    obfuscation (12 files; no popular package).
+  - **The received-code test reads more of how a value reaches a runner**
+    (both engines): `Function.constructor(…)`, a statement a formatter spread
+    over several rows (`axios` then `.post(…)` on the next row; a call's
+    arguments on the rows below it), an environment variable that carries a
+    value from one statement to the next (`os.environ['P'] = r.text` …
+    `exec(os.getenv('P'))`), TypeScript's `(0, ns.fn)(…)`, members read by
+    name (`getattr(m, 'x')`, `m['x']`) and a runner handed to a call
+    (`p.then(eval)`, `res.on('data', eval)`) — a second reading of a file of
+    up to 1 MB when the first finds nothing.
+  - **A script downloaded or decoded, written to a file and run** with a shell
+    or an interpreter (`fs.writeFileSync(f, await r.text()); spawn('bash',
+    [f])`; litellm 1.82.7's `proxy_server.py` wrote a base64 payload to
+    `p.py` and ran it with `sys.executable`) is CRITICAL at import time and in
+    an install script: "downloads a script and runs it with bash", "writes
+    code it decodes to a file and runs it with Python". A download run without
+    a named interpreter stays MAJOR (a prebuilt binary's installer).
+  - **Scripts a script starts** with node or python —
+    `spawn(process.execPath, [path.join(__dirname, 'worker/run.js')],
+    { detached: true })`, `fork(…)`, `subprocess.Popen([sys.executable,
+    start])` — are followed to the package file each runs, three starts deep,
+    and tested like the script that started them: from a dependency's install
+    hook with `--deps` (both engines), and in registry scans from install
+    scripts, import-time code and setup.py. react-thunk-log's postinstall did
+    nothing but start another file of the package.
+  - **The cross-file follower reads several hops, classes and objects, and
+    runs in both engines and on releases.** A value received in one file of a
+    package and run in another is followed through wrappers and re-exports up
+    to four files deep (it was one), class methods called directly
+    (`Client().pull()`, `new ns.C()`), static members and object literals'
+    members (`module.exports = { async pull() {…} }`), a callback or a
+    Promise's `resolve` handed what a function received, a module-level cache
+    a function fills, an instance kept on `self` / `this`,
+    `importlib.import_module` / `__import__` / `import()` of a literal name,
+    `require(path.join(__dirname, …))`, TypeScript's `__importDefault` and
+    `exports.default`, and an environment variable set in one file and read
+    in another; the other way round, a function of the package that runs its
+    parameter as code (`def run(c): exec(c)`) called with a value this file
+    received is the same finding, and says so. The npm engine runs it too
+    (`js/src/lib/crossfile.js`; the engines agree on the follower's cases and
+    a generated stream of 700 packages), so it is no longer a Python-only
+    exception; registry and guard scans run it on a release, naming the file
+    (not on tests, docs or examples, and not once the package is SUSPICIOUS).
+  - **An adversarial pass on the follower**: 28 ways to carry the value
+    between files or run it are read (each a test), 8 crafted look-alikes stay
+    quiet, and 2 known misses are documented and tested (an event emitter
+    between files; two top-level modules of site-packages in a `--deps` scan).
+- **Data sent to a chat bot, a webhook or a capture service, and the other
+  shapes GuardDog caught that Lazaret didn't.** The benchmark's PyPI samples
+  were re-prepared first (below); on them, 86% of the 516 malicious releases
+  are now SUSPICIOUS (82% after items 1-11, 68% in 0.1.7; GuardDog 71%), 89%
+  with the registry's live dependency history: PyPI's malicious-intent set
+  95% (GuardDog 88%) and all 16 compromised PyPI releases (GuardDog 12).
+  Of the releases GuardDog catches, one was still missed (react-zutils' XOR
+  decoder, caught by the next item). `lazaret guard` blocks 238 of the 300
+  npm samples end to end (232 before). Still the same 3 of 429 popular
+  packages, and no popular package's verdict changed; none of the new
+  shapes fires on the popular packages or on 37,783 files of installed
+  Python and npm packages. Registry engine 2.11.0, so stored and cached
+  verdicts are redone.
+  - **A chat bot or webhook whose secret is written in the code** (both
+    engines, CRITICAL wherever found: install scripts, import-time code, the
+    files a package runs when used): a Telegram bot token next to
+    api.telegram.org, a Discord webhook's token or a Slack webhook's key, in
+    a file that makes network calls. A library for these services takes the
+    key from its user; a package that carries its author's key reports whoever
+    runs it: figlets zipped Exodus wallets and sent them to its bot, requestn
+    uploaded every file in the working folder. Placeholders are not keys.
+  - **Credentials sent out**: credential files (.env, .npmrc, .pypirc, .netrc,
+    .git-credentials, ~/.aws/credentials, SSH keys, Docker's and kubectl's
+    configs) read in a file that sends data to a raw public IP address; three
+    or more credential folders named in one place (.ssh, .aws, .ethereum,
+    .kube …) in a file that makes network calls, a sweep of the home folder
+    (data-pipeline-check and env-loader-cli, one campaign); and a copy of the
+    whole environment serialized (`d = dict(os.environ)` … `urlencode(d)`).
+  - **The machine's names and address sent out**: the user or host name sent
+    to an address the file keeps base64-encoded, or looked up in DNS inside a
+    name the code builds (the dependency-confusion DNS beacon); the public IP
+    address (ipify, ip-api …) sent to a data-capture service. An ngrok
+    tunnel's own address now counts as a capture service, and `os.hostname`
+    handed on as a value as host information.
+  - **And**: a reverse shell given to an exec call as an argument list, or
+    pointed at an ngrok TCP address; a cryptocurrency miner, a Monero wallet
+    address with a mining pool's arguments (ultralytics 8.3.42); curl or wget
+    given `-o path` in an argument list, the file then run with Python
+    (mistralai 2.4.6's `client/__init__.py`); and at install time a raw socket
+    to a hard-coded address (as a URL with one already was) and browser
+    shortcuts rewritten to load an extension (python-dateuti).
+- **Services started at login, payloads read back asynchronously, XOR
+  decoders, and names like a popular package's** (the backlog's last four
+  detection items). On the same 516 malicious releases, 87% are now
+  SUSPICIOUS (447; 86% before), 90% with the registry's live dependency
+  history: npm's compromised releases 82% (was 80%), npm's malicious-intent
+  set 80% (79%). Every release GuardDog catches at its strictest verdict,
+  Lazaret now catches too. `lazaret guard` blocks 242 of the 300 npm
+  samples end to end (238 before), still 2 of 219 popular ones. Still the
+  same 3 of 429 popular packages, and no popular package's verdict changed;
+  none of the new shapes fires on the popular packages or on 37,800
+  installed files. Registry engine 2.12.0, so stored and cached verdicts are
+  redone.
+  - **Programs set to start at login or boot** (both engines, a reason of the
+    install-script test): a systemd unit written or `systemctl enable` run,
+    a launchd agent written or loaded, a crontab installed, a Windows Run key
+    written or a scheduled task created, the Startup folder or an XDG
+    autostart entry written. The CanisterWorm releases of @emilgroup's
+    packages installed a systemd user service from their install script.
+    Never at import time, where a library that manages services is normal;
+    shell rc files are left out.
+  - **Code run from what a file reads back asynchronously** (both engines):
+    a `readFile` callback's data, a `.then()` parameter or Python's
+    `with open(…) as f`, read by a path's name from the file itself or a
+    data file next to it, and run as code. react-thunk-log 2.23.2 started a
+    script that decrypted its own LICENSE and ran it. A value read by a
+    path's name counts only in a code runner.
+  - **Home-made XOR decoders** (both engines): the decoded view reads a
+    file's own XOR helper — a function called five times or more with base64
+    or hex literals, whose calls turn into printable text (nine in ten) with
+    a short key among the file's own strings — so the decoded strings are
+    tested as if they were written in the clear. react-zutils 1.0.1 kept
+    the 83 strings of its browser stealer that way, its ngrok address among
+    them.
+  - **SC-TYPOSQUAT** (registry, MAJOR): a release whose name, or a
+    dependency it declares, is one change from one of the 5,000
+    most-downloaded packages of its registry — a character added, dropped or
+    changed, two swapped, or the separators changed. 13 of the malicious
+    releases carry one (requesxs, python-dateuti, tiketoken, sklearns, nhmpy;
+    @hestjs's packages depend on @hestjs/core, one change from
+    @nestjs/core), and none of the popular packages. A name the popular
+    lists know is never one (mysql2, delegates, fastai), and neither is a
+    name near a popular one under 5 characters or near one in its own npm
+    scope. The lists come from npm-high-impact (MIT) and Top PyPI Packages
+    (CC BY 4.0), with their notices, and `scripts/update-popular-names.py`
+    rebuilds them.
+- **A native engine for the supply-chain tests** (Python package; Rust,
+  `rust/`, `docs/RUST_ENGINE.md`). The install-script and import-time tests
+  and everything they read — the received-code detector, the decoded view,
+  the exfiltration shapes, services at login — run in a library written with
+  no external crates: its own regex engine (a port of CPython's, Python `re`
+  semantics on code points), JSON and Unicode 13.0 tables, with the patterns
+  extracted from `core.py` into a rule pack (`scripts/make_rust_tables.py`;
+  `--check` in CI). `--deps`, registry and guard scans send files to it in
+  batches of 64, read on up to 8 threads, answers in order; a file it can't
+  answer (its work budget spent, an error) is answered by the Python engine,
+  so it never loses a finding. It gives the Python engine's answers exactly:
+  differential tests on every pattern (Python 3.10–3.14) and on ~36,900
+  cases for 15 hook fields and 24 detectors, and the whole Python suite
+  passes with either engine. On real files: the benchmark's 945 registry
+  scans give the same verdicts and findings with both engines, and both
+  tests answer identically file by file on 85,415 files (installed packages
+  and every source file of the benchmark's archives). The 945 scans take
+  853 s instead of 1,097 s (22% less; the 95th percentile 6.2 s instead of
+  9.5 s): the per-file rules, still Python, take most of the rest. The import-time test over 678
+  of litellm's modules takes 5.7 s instead of 15.6 s on one thread, 3.2 s on
+  two; a registry scan of the litellm wheel, 31 s instead of 40 s.
+  `--engine rust|python`
+  and `LAZARET_ENGINE` choose (default: native where installed; `--engine
+  rust` fails when it isn't), and `--version` says which answers:
+  `lazaret 0.1.8 (engine: rust 0.1.8)`. A platform wheel carries it
+  (`LAZARET_NATIVE_LIBRARY` and `LAZARET_WHEEL_PLATFORM` in the build
+  backend); the pure wheel and the npm package run as before. CI builds it
+  on Linux, macOS and Windows and checks that no crate from outside the
+  repository appears (`scripts/check_rust_deps.py`).
+- **Platform wheels with the native engine** (PyPI). A release also
+  publishes five platform wheels: Linux x86-64 and ARM64 (manylinux_2_28,
+  glibc 2.28 or later), macOS arm64 (11.0 or later) and x86-64 (10.12 or
+  later), and Windows x64, each the pure wheel's files plus the library for
+  its platform. pip installs one where it matches and the pure wheel
+  everywhere else (musl, 32-bit, other architectures), with the same
+  findings. Release CI (`.github/workflows/wheels.yml`, which also runs on
+  pull requests that change what goes into a wheel) builds each library on
+  its own platform with a pinned Rust (1.95.0), the Linux ones in PyPA's
+  manylinux_2_28 images pinned by digest and the Windows one with its C
+  runtime linked statically; checks it against its wheel's tag
+  (`scripts/check_native_library.py`: the glibc symbol versions and
+  libraries a manylinux tag allows, the minimum macOS, no Visual C++
+  runtime, the exported functions), loads it and runs the parity modules
+  on that platform; builds the seven files from one checkout and checks
+  them against each other; and installs each platform wheel with pip on its
+  platform and runs it. The build backend takes `--platform TAG=LIBRARY`.
+- **The native engine's notices.** Its regular expression engine, its shell
+  tokenizer and the Final_Sigma rule of `str.lower()` are Rust translations
+  of CPython code (`Lib/re/_parser.py`, `_compiler.py`, `_constants.py`,
+  `Modules/_sre/sre_lib.h` and parts of `sre.c`; `Lib/shlex.py`;
+  `handle_capital_sigma`). `rust/NOTICE` lists them with the originals'
+  Secret Labs and PSF notices and a summary of the changes,
+  `rust/LICENSE-PYTHON` is CPython 3.14.0's LICENSE, each translated file
+  carries its notices, and the crates and the platform wheels declare
+  `Apache-2.0 AND Python-2.0.1` and carry both files
+  (`tests/architecture/test_rust_notices.py`). The pure wheel, the sdist and
+  the npm package hold none of that code.
+- **`--version` on every Python command** (`lazaret`, `lazaret guard` /
+  `lazaret-guard`, `lazaret-registry`, `lazaret-sca`, `lazaret-mcp`). Which
+  install was on the PATH could only be told by importing the package, and
+  an older one earlier on the PATH (0.1.0 in Homebrew's Python ahead of a
+  pipx 0.1.7) answered `lazaret guard …` with the scanner's usage error.
+- **The PyPI description names `lazaret guard`.** It is `python/README.md`,
+  which 0.1.7 did not update; PyPI shows it from the next release.
+
+### Changed
+- **The native engine is released in lockstep with the packages.**
+  `scripts/check-versions.sh` (CI's `versions` job, `tag-release.sh` and the
+  release's `verify-tag`) also reads `rust/Cargo.toml`'s workspace version
+  and `rust/Cargo.lock`'s two entries, so `engine: rust X` in `--version` is
+  the release's own version. The workspace is back at 0.1.7 until the
+  release bump.
+
+### Fixed
+- **chromedriver's installer read as a call to RequestBin** (both engines;
+  in the registry since 0.1.0). The list of addresses typical of exfiltration
+  matched `requestbin` anywhere in the text, and chromedriver's and
+  phantomjs-prebuilt's `install.js` define `requestBinary()` to download
+  their binaries: each install hook was CRITICAL ("contacts an address
+  typical of data exfiltration (requestBin)"), so a `--deps` or registry
+  scan called chromedriver SUSPICIOUS and `lazaret guard` blocked it.
+  RequestBin now counts by its host names (`requestbin.com`, `.net`, `.io`,
+  `requestb.in`); postb.in needs a word boundary after it too. Found by the
+  0.1.8 sweep of every strong reason over installed packages; none of the
+  benchmark's malicious releases relied on the bare word.
+- **The benchmark read the wrong files for 11 PyPI samples.** For compromised
+  releases the corpus script took the shallowest folder with a setup.py:
+  the upstream source tree the dataset ships next to the release
+  (`sources/<name>`), or a folder inside the package. For litellm and nhmpy
+  it took the shallowest archive: an old litellm_enterprise sdist, and a
+  gzipped pickle of test data. And some samples store each file inside a
+  folder named by its own path, which hid a package's layout. Each sample is
+  now the release's own files (a wheel repacked as a wheel), and
+  every tool was rerun on the 36 that changed: 0.1.7 catches 68% of the 516
+  (66% before), GuardDog 71% (70%), and of the 16 compromised PyPI releases
+  0.1.7 catches 13 (6 before) and GuardDog 12 (7). The numbers above for items
+  1-11 were measured before the correction (on the corrected samples: 82%).
+- **`lazaret guard` with npm in a folder without a package.json.** npm then
+  works in the nearest folder up that has a package.json or a node_modules
+  folder (a home folder, often); the guard looked for the lockfile in the
+  current folder, said "npm wrote no lockfile to check", and left that
+  folder's package.json and package-lock.json as npm had changed them,
+  even with `--plan`. The guard now asks npm where it works (`npm prefix`,
+  with the command's own `--prefix`), checks and restores the files there,
+  and says which folder that is.
+
 ## [0.1.7] — 2026-09-29
 
 ### Added

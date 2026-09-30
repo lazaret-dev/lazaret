@@ -11,8 +11,8 @@
 #     names a reviewed, pushed commit, and not an older one because the local
 #     main was never pulled after a merge (v0.1.0 was once tagged that way);
 #     RELEASE_NOT_LATEST=1 tags an older commit on main on purpose;
-#   - the Python and npm versions committed at HEAD agree and match the tag
-#     (scripts/check-versions.sh HEAD vX.Y.Z);
+#   - the Python, npm and native engine versions committed at HEAD agree and
+#     match the tag (scripts/check-versions.sh HEAD vX.Y.Z);
 #   - the tag exists neither locally nor on the remote.
 # Then creates an annotated tag (it records who tagged, when, and a message;
 # the release workflow refuses lightweight tags). No signing key is needed. If

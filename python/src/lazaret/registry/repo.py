@@ -58,6 +58,8 @@ import urllib.request
 from lazaret.scanner import core as lazaret  # noqa: E402
 
 from lazaret import safexml as _safexml                 # noqa: E402
+from lazaret.registry import lookalike as _lookalike    # noqa: E402
+from lazaret.scanner import engine as _engine           # noqa: E402
 from lazaret.safexml import ElementTree as _safe_ET     # noqa: E402
 
 
@@ -79,6 +81,30 @@ MAX_MEMBER = _env_number("LAZARET_MAX_SOURCE_BYTES", 16_000_000)
 MAX_FILES = 20_000         # files per package (numpy's sdist alone has >4,000)
 SAMPLE = 8192              # header/entropy sample read from oversized files
 # Stored scans from another engine version are scanned again (has_scan).
+# 2.12: 0.1.8's programs set to start at login or boot (systemd, launchd,
+#      cron, Run keys, scheduled tasks, the Startup folder, XDG autostart),
+#      code read back asynchronously or by a path's name from a licence or
+#      data file shipped with it, a home-made XOR decoder's strings read, and
+#      names like a popular package's (SC-TYPOSQUAT)
+# 2.11: 0.1.8's exfiltration shapes (a chat bot or webhook whose secret is in
+#      the code, credential files sent to an IP address, a sweep of
+#      credential folders, the host name hidden in base64 or sent in a DNS
+#      name, the public IP address sent to a capture service, a copy of the
+#      environment serialized), reverse shells as argument lists, miners, a
+#      raw socket and browser shortcuts at install time, curl or wget
+#      downloading to a file that is then run
+# 2.10: 0.1.8's names and code in strings a file decodes as it runs, eval of
+#      an inline decoder (SC-EVAL-DECODER), a script downloaded or decoded,
+#      written and run with an interpreter, scripts a script starts with node
+#      or python followed, the received-code detector's second reading, and
+#      the cross-file follower on a release (several hops, classes, object
+#      literals, callbacks, caches, environment variables, another file's
+#      runner)
+# 2.9: 0.1.8's code that renames its package and publishes it
+#      (SC-SELF-PUBLISH), code hidden off-screen (SC-OFFSCREEN-CODE), install
+#      scripts that publish, collect npm tokens or run a DLL, the strong
+#      shapes in code a package runs when used (SC-USE-RISK), and a release's
+#      brand-new dependencies (SC-NEW-DEPENDENCY)
 # 2.8: 0.1.7's install-script and import-time tests (PowerShell, stagers,
 #      reverse shells, host beacons, CRITICAL import-time shapes, code run
 #      from a file's own prose), more import-time reach (an sdist's modules
@@ -100,7 +126,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.8.0"
+ENGINE_VERSION = "2.12.0"
 
 # ---------------- Trust-chain limits (F9/G14/F10) ----------------
 # Only these hosts may ever be fetched, over https only, and redirects to any
@@ -365,12 +391,13 @@ class Resolution(tuple):
     packagetype, installable, size, reason}; `installable` means pip may
     install the file anyway (scan_package counts it as not scanned)."""
 
-    def __new__(cls, version, artifacts, skipped=()):
+    def __new__(cls, version, artifacts, skipped=(), info=None):
         first = artifacts[0]
         self = super().__new__(cls, (version, first["url"], first["container"],
                                      first["artifact"], first["entry"]))
         self.artifacts = list(artifacts)
         self.skipped = list(skipped)
+        self.info = info if isinstance(info, dict) else {}      # PyPI: the release's metadata
         return self
 
 
@@ -477,7 +504,7 @@ def resolve_pypi(name, version):
     if not artifacts:
         raise ValueError(f"pypi:{name}@{version} has no downloadable archive")
     artifacts.sort(key=lambda a: (a["artifact"] != "sdist", a["filename"]))
-    return Resolution(version, artifacts, skipped)
+    return Resolution(version, artifacts, skipped, info=info)
 
 
 _PEP440_FINAL_RE = re.compile(r"^(\d+(?:\.\d+)*)(?:\.post(\d+))?$")
@@ -1187,6 +1214,41 @@ def _is_test_dir(name):
     return name in TEST_DIR_NAMES
 
 
+# The strong shapes anywhere in a package (SC-USE-RISK, 0.1.8). The
+# import-time test reads what runs at install and import; a payload in a
+# module the package only runs when it is used — a logger's constructor, a
+# middleware, a script a CLI spawns — was never read by it (about 20 of the
+# 0.1.7 benchmark's 50 decode-or-download-then-run misses, and 11 stealers).
+# Every other JavaScript or Python file the package ships now gets the same
+# test, and counts only for the shapes no library needs (import_time_severity
+# CRITICAL); the weaker ones stay unread there, so the benign rate is the
+# import-time test's. Files that never run in Node or Python when the package
+# is used are left out: tests and fixtures (is_test_path), examples, docs,
+# demos and benchmarks, and a web app's static assets (a Next.js export's
+# _next/static chunks: one minified line held an exec call and a `curl … | sh`
+# string, the only popular package of 429 the test flagged anywhere).
+USE_RISK_SKIP_DIRS = {"example", "examples", "doc", "docs", "demo", "demos", "sample", "samples", "benchmark",
+                      "benchmarks", "bench", "__mocks__", "_next", "static", "public"}
+# The test costs time on every file it reads, so it reads none once the
+# package is SUSPICIOUS anyway (the Shai-Hulud 2.0 releases' 10 MB
+# bun_environment.js took 10 s each, and changed no verdict), no file of more
+# than USE_RISK_MAX_CHARS characters, and stops after USE_RISK_SECONDS per
+# archive, smallest files first: next 15.5 (4,573 files) took 25 s more to
+# read whole; bounded, a first guarded plan of next, react, react-dom,
+# typescript and eslint took 53 s (50 s with 0.1.7), and every sample of the
+# benchmark this test catches was read in time. What it did not read is not
+# "not scanned" — the rules of the file scan read every file — so the verdict
+# is not INCOMPLETE.
+USE_RISK_MAX_CHARS = 8_000_000
+USE_RISK_SECONDS = 3.0
+
+
+def _not_used_code(rel):
+    """Is `rel` a file the package does not run when it is used (see above)?"""
+    parts = rel.replace("\\", "/").split("/")
+    return is_test_path(rel) or any(part.lower() in USE_RISK_SKIP_DIRS for part in parts[:-1])
+
+
 def _demote_test_findings(issues, reachable=frozenset()):
     """Weaker supply-chain findings inside test code become inventory (INFO):
     test fixtures legitimately contain binaries, blobs and escaped bytes, and
@@ -1348,7 +1410,7 @@ def startup_module_issue(rel, text):
     capability to review, like SC-PTH-EXEC), CRITICAL when the code looks
     hostile by the install-script test (install_script_risk)."""
     module = _STARTUP_MODULE_RE.match(rel).group(1)
-    reasons = install_script_risk(text)
+    reasons = _engine.install_script_risk(text)
     msg = f"{rel} is installed as {module} in site-packages, which Python imports at every start"
     msg += f", and it {'; and '.join(reasons)}." if reasons else "."
     return lazaret.mk_issue(
@@ -1747,10 +1809,46 @@ class _ArtifactScan:
                 self.install_scripts.add(rel)
                 lang = "sh" if rel.endswith(".sh") else "js"
                 text = self._text_of(rel, lang)
-                reasons = install_script_risk(text) if text else []
+                reasons = _engine.install_script_risk(text) if text else []
                 if reasons and issue["sev"] not in STRONG_SEVERITIES:
                     issue["sev"] = "CRITICAL"
                     issue["msg"] = f"Install hook runs {target}, which {'; and '.join(reasons)}."
+                # the scripts it starts with node or python (0.1.8, core.spawned_scripts)
+                for started, more in self._started_scripts(rel, text, base, self.install_scripts):
+                    more = _engine.install_script_risk(more) if more else []
+                    if more and issue["sev"] not in STRONG_SEVERITIES:
+                        issue["sev"] = "CRITICAL"
+                        issue["msg"] = (f"Install hook runs {target}, which starts {started}, which "
+                                        f"{'; and '.join(more)}.")
+
+    def _started_scripts(self, rel, text, cwd, into):
+        """[(rel, text)] for the package scripts `rel` starts with node or
+        python, and the ones those start (core.spawned_scripts), at most
+        _SPAWN_MAX_DEPTH starts deep and _SPAWN_MAX_FILES files; each is added
+        to the entries and to `into` (the install scripts, or import-time
+        files). `cwd`: the directory the package runs in, for a path written
+        as a plain literal — None at import time, when that is the user's
+        directory, not the package's, and such a path is not followed."""
+        out, seen, queue = [], {rel}, [(rel, text, 0)]
+        while queue and len(seen) <= lazaret._SPAWN_MAX_FILES:
+            cur, cur_text, depth = queue.pop(0)
+            if not cur_text or depth >= lazaret._SPAWN_MAX_DEPTH:
+                continue
+            for where, path in lazaret.spawned_scripts(lazaret.normalize_newlines(cur_text)):
+                if where != "dir" and cwd is None:
+                    continue
+                start = posixpath.dirname(cur) if where == "dir" else cwd
+                nxt = self._resolve(_rel_join(start, path))
+                if nxt is None or nxt in seen or len(seen) > lazaret._SPAWN_MAX_FILES:
+                    continue
+                seen.add(nxt)
+                self.entries.add(nxt)
+                into.add(nxt)
+                lang = "py" if nxt.endswith(".py") else ("sh" if nxt.endswith(".sh") else "js")
+                ntext = self._text_of(nxt, lang)
+                out.append((nxt, ntext))
+                queue.append((nxt, ntext, depth + 1))
+        return out
 
     def _python_install_scripts(self):
         """Python code pip runs to build/install an sdist: setup.py and an
@@ -1791,15 +1889,21 @@ class _ArtifactScan:
                     seen.add(rel)
                     scripts.append(rel)
                     queue.append(rel)
+        for rel in list(scripts):                  # and the scripts they start with python or node (0.1.8)
+            for started, _text in self._started_scripts(rel, self.sources.get(rel, ("", "py"))[0], "",
+                                                        self.install_scripts):
+                if started not in scripts:
+                    scripts.append(started)
         for rel in scripts:
             self.entries.add(rel)
             self.install_scripts.add(rel)
             text = self.sources.get(rel, ("", "py"))[0]
-            reasons = install_script_risk(text)
+            reasons = _engine.install_script_risk(text)
             # a download written to a file and run: CRITICAL in the code pip
             # runs to install an sdist (a prebuilt-binary installer's shape
             # keeps it MAJOR-only in npm hooks and import-time code)
-            if lazaret._downloads_and_runs_file(lazaret.normalize_newlines(text)) is not None:
+            if (lazaret._downloads_and_runs_file(lazaret.normalize_newlines(text)) is not None
+                    and not any(r.startswith("downloads a script and runs it with") for r in reasons)):
                 reasons.append("downloads a file and then runs it")
             if reasons:
                 lines = lazaret.normalize_newlines(text).split("\n")
@@ -1889,15 +1993,21 @@ class _ArtifactScan:
                                               and posixpath.basename(rel) not in _SDIST_NOT_MODULES))
         else:
             files = reachable
+        # and the package scripts that code starts with node or python (0.1.8)
+        started = set()
+        for rel in sorted(files):
+            text, lang = self.sources.get(rel, (None, None))
+            if text and lang in ("js", "py") and rel not in self.install_scripts:
+                self._started_scripts(rel, text, None, started)
+        files = set(files) | {rel for rel in started if rel not in self.install_scripts}
+        todo = []
         for rel in sorted(files):
             if rel in self.install_scripts or rel in self.startup:
                 continue
             text, lang = self.sources.get(rel, (None, None))
-            if not text or lang not in ("js", "py"):
-                continue
-            self._deadline(rel)
-            text = lazaret.normalize_newlines(text)
-            reasons, line = import_time_risk(text, lang)
+            if text and lang in ("js", "py"):
+                todo.append((rel, text, lang))
+        for rel, text, lang, (reasons, line) in self._import_time_risks(todo):
             if not reasons:
                 continue
             self.issues.append(lazaret.mk_issue(
@@ -1914,6 +2024,95 @@ class _ArtifactScan:
                          "data-capture service."),
                  "fix": "Read the file: what does it collect, and where does it send it?",
                  "ref": "CWE-506 · Supply chain"}, rel, line, text.split("\n")))
+        self._use_time_code(set(files))
+        self._cross_file_code()
+
+    def _import_time_risks(self, todo, stop=None):
+        """(rel, text, lang, import_time_risk's answer) for [(rel, text, lang)]
+        (the text with its newlines normalized), in order, a batch at a time
+        (engine.py: the native engine reads a batch on threads, the Python
+        engine a file at a time); the deadline is checked before each batch,
+        and past `stop` (time.monotonic()) no batch is started."""
+        size = _engine.BATCH if _engine.name() == "rust" else 1
+        for start in range(0, len(todo), size):
+            if stop is not None and time.monotonic() > stop:
+                return
+            chunk = [(rel, lazaret.normalize_newlines(text), lang) for rel, text, lang in todo[start:start + size]]
+            self._deadline(chunk[0][0])
+            for (rel, text, lang), risk in zip(chunk, _engine.import_time_risks([(t, lg) for _r, t, lg in chunk])):
+                yield rel, text, lang, risk
+
+    def _suspicious(self):
+        """Has a strong supply-chain finding made the package SUSPICIOUS already?"""
+        return any(i["rule"].startswith("SC-") and i["rule"] not in TRUNCATION_RULES and i["sev"] in STRONG_SEVERITIES
+                   for i in self.issues)
+
+    def _use_time_code(self, loaded):
+        """SC-USE-RISK (CRITICAL): the strong import-time shapes in the other
+        JavaScript and Python files of the package — code it runs when it is
+        used (see USE_RISK_SKIP_DIRS)."""
+        if self._suspicious():
+            return
+        stop = time.monotonic() + USE_RISK_SECONDS
+        # smallest first: within the time, as many files as can be read (droppers are small)
+        todo = []
+        for rel in sorted(self.sources, key=lambda r: (len(self.sources[r][0] or ""), r)):
+            if rel in loaded or rel in self.install_scripts or rel in self.startup or _not_used_code(rel):
+                continue
+            text, lang = self.sources[rel]
+            if text and lang in ("js", "py") and len(text) <= USE_RISK_MAX_CHARS:
+                todo.append((rel, text, lang))
+        for rel, text, lang, (reasons, line) in self._import_time_risks(todo, stop):
+            strong = [r for r in reasons if r.startswith(lazaret._STRONG_IMPORT_REASONS)]
+            if not strong:
+                continue
+            self.issues.append(lazaret.mk_issue(
+                {"id": "SC-USE-RISK", "name": "Hostile code the package runs when used", "type": "HOTSPOT",
+                 "sev": "CRITICAL",
+                 "msg": f"{rel} {'; and '.join(strong)}. Nothing loads it at install or import: it runs when "
+                        f"the package's code calls it.",
+                 "why": ("A payload need not run on install or import to reach you: a logger's constructor, a "
+                         "middleware or a script the package spawns runs it the first time your code uses the "
+                         "package. These are the shapes no library needs: code fetched and run, a reverse shell, "
+                         "hidden PowerShell, credentials sent to an exfiltration service, a beacon to a "
+                         "data-capture service."),
+                 "fix": "Don't use the package; report it to the registry.",
+                 "ref": "CWE-506 · Supply chain"}, rel, line, text.split("\n")))
+
+    def _cross_file_code(self):
+        """SC-IMPORT-RISK (CRITICAL) for a package file that runs a value
+        another file of the package received over the network
+        (core._cross_file_received_issues, 0.1.8): the dropper split across
+        files — _net.py fetches, __init__.py runs what it returns — that
+        neither file shows alone. The --deps checks ran it on installed
+        dependencies only; a registry or guard scan reads the release before
+        it is installed. The files are SC-USE-RISK's (not once the package is
+        SUSPICIOUS, not those it does not run when used, none over
+        USE_RISK_MAX_CHARS), read as one package: npm files as the package's
+        own, a wheel's or an sdist's modules under their import names (a
+        .data/purelib/ or src/ prefix dropped)."""
+        if self._suspicious():
+            return
+        files, back = [], {}
+        for rel in sorted(self.sources):
+            text, lang = self.sources[rel]
+            if not text or lang not in ("js", "py") or len(text) > USE_RISK_MAX_CHARS or _not_used_code(rel):
+                continue
+            if lang == "js":
+                path = "node_modules/package/" + rel
+            else:
+                base = _PY_BASE_RE.match(rel)
+                path = "site-packages/" + (rel[base.end():] if base else rel)
+            if path in back:
+                continue                            # src/x.py and x.py: the first wins
+            back[path] = rel
+            files.append({"path": path, "lang": lang, "dep": True, "content": lazaret.normalize_newlines(text)})
+        if len(files) < 2:
+            return
+        self._deadline("the cross-file follower")
+        for issue in lazaret._cross_file_received_issues(files, who=lambda path: back[path], one_package=True):
+            issue["file"] = back[issue["file"]]
+            self.issues.append(issue)
 
     def _agent_hijack(self):
         """SC-AGENT-HIJACK (CRITICAL): a package file that launches an AI
@@ -1927,6 +2126,38 @@ class _ArtifactScan:
             issue = lazaret.dependency_agent_issue(rel, lazaret.normalize_newlines(text))
             if issue is not None:
                 self.issues.append(issue)
+
+    def _lookalike_names(self):
+        """SC-TYPOSQUAT (MAJOR, 0.1.8): the release's own name, or a
+        dependency it declares, one change from a popular package's
+        (registry/lookalike.py). npm: package.json's name, dependencies and
+        optionalDependencies; PyPI: the Name and Requires-Dist (optional
+        extras left out) of a wheel's METADATA or an sdist's PKG-INFO."""
+        if self.artifact == "wheel":
+            rel = next((r for r in sorted(self.deferred) if r.count("/") == 1
+                        and r.endswith(".dist-info/METADATA")), None)
+        elif self.artifact == "sdist":
+            rel = "PKG-INFO" if "PKG-INFO" in self.deferred else None
+        else:
+            text = self.manifests.get("package.json")
+            data, _problems = lazaret.load_manifest("package.json", text) if text else (None, None)
+            if isinstance(data, dict):
+                name = data.get("name")
+                self.issues.extend(_lookalike.issues("npm", name if isinstance(name, str) else None,
+                                                     npm_dependency_names(data), "package.json", text))
+            return
+        if rel is None:
+            return
+        text = self.deferred[rel].decode("utf-8", "replace")
+        name, requires = None, []
+        for line in text.split("\n"):           # the headers, up to the first empty line
+            if not line.strip():
+                break
+            if line.startswith("Name:") and name is None:
+                name = line[5:].strip()
+            elif line.startswith("Requires-Dist:"):
+                requires.append(line[14:].strip())
+        self.issues.extend(_lookalike.issues("pypi", name, pypi_dependency_names(requires), rel, text))
 
     def _reachable(self):
         """Entry files plus local files they require/import (JS), transitively.
@@ -1985,6 +2216,8 @@ class _ArtifactScan:
             self._import_time_code(reachable)
             self._deadline("the agent-hijack check")
             self._agent_hijack()
+            self._deadline("the package's names")
+            self._lookalike_names()
             # interprocedural / cross-file taint (full profile only — needs whole source)
             if self.full and getattr(lazaret, "lazaret_flow", None) is not None:
                 self._deadline("the cross-file analysis")
@@ -2144,6 +2377,225 @@ def _always_redacted(fn):
     return run
 
 
+# ---------------- A release that adds a new dependency (SC-NEW-DEPENDENCY, 0.1.8) ----------------
+# The @mastra compromise (June 2026) changed no code: each hijacked release
+# gained a dependency on easy-day-js, published by another account 19 hours
+# before, which carried the payload (17 of the 0.1.7 benchmark's misses; the
+# releases themselves read OK). A release rarely depends on a package that
+# did not exist a week earlier, from someone who does not maintain it. So a
+# registry scan compares a release's dependencies with those of the release
+# published before it (npm: the packument's versions and times; PyPI: the
+# project's release files and each release's requires_dist; a prerelease is
+# compared with any version, a release with releases only) and looks up at
+# most NEW_DEP_LOOKUPS added ones: CRITICAL for one first published less than
+# NEW_DEP_CRITICAL before the release, MAJOR for one under NEW_DEP_RECENT.
+# Not counted: a dependency of the package's own npm scope, or one an npm
+# maintainer of the package also maintains; an optional extra's requirement
+# (PyPI); a git, file or URL dependency. Best effort: a document over the
+# metadata budget (an established package's) or a registry that does not
+# answer is not a finding, and a release with no dependencies costs no
+# request. LAZARET_NO_DEPENDENCY_HISTORY=1 turns it off (an offline scan).
+NEW_DEP_CRITICAL = datetime.timedelta(days=7)
+NEW_DEP_RECENT = datetime.timedelta(days=30)
+NEW_DEP_LOOKUPS = 5
+_NPM_NOT_REGISTRY = ("file:", "link:", "workspace:", "portal:", "git:", "git+", "github:", "gitlab:", "bitbucket:",
+                     "http:", "https:")
+_PY_REQ_NAME_RE = re.compile(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
+
+
+def _iso_time(value):
+    """An aware datetime from registry time text ('2026-06-17T02:06:22.156Z'), else None."""
+    if not isinstance(value, str):
+        return None
+    try:
+        return _to_utc(datetime.datetime.fromisoformat(value.strip().replace("Z", "+00:00")))
+    except ValueError:
+        return None
+
+
+def _npm_scope(name):
+    return name.split("/", 1)[0] if name.startswith("@") and "/" in name else None
+
+
+def npm_dependency_names(manifest):
+    """The registry packages a package.json depends on (dependencies and
+    optionalDependencies; an `npm:` alias as the package it names)."""
+    out = set()
+    for field in ("dependencies", "optionalDependencies"):
+        deps = manifest.get(field) if isinstance(manifest, dict) else None
+        if not isinstance(deps, dict):
+            continue
+        for key, spec in deps.items():
+            if not isinstance(key, str) or not key:
+                continue
+            spec = spec.strip() if isinstance(spec, str) else ""
+            if spec.startswith("npm:"):
+                target = spec[4:]
+                at = target.rfind("@")
+                key = target[:at] if at > 0 else target
+            elif spec.startswith(_NPM_NOT_REGISTRY) or ("/" in spec and not spec.startswith("@")):
+                continue                       # a file, link, git or URL dependency; user/repo is GitHub
+            if key:
+                out.add(key)
+    return out
+
+
+def pypi_dependency_names(requires_dist):
+    """The PEP 503 names a release requires, leaving out optional extras'."""
+    out = set()
+    for req in requires_dist if isinstance(requires_dist, list) else ():
+        if not isinstance(req, str) or re.search(r"\bextra\s*==", req):
+            continue
+        m = _PY_REQ_NAME_RE.match(req)
+        if m:
+            out.add(_pep503(m.group(1)))
+    return out
+
+
+def _previous_release(times, version, candidates, prerelease):
+    """(time of `version`, the candidate published last before it) from
+    {version: time text}; a prerelease candidate only when `version` is one.
+    (None, None) when the time of `version` is unknown."""
+    when = _iso_time(times.get(version))
+    if when is None:
+        return None, None
+    best = None
+    for v in candidates:
+        if v == version or (prerelease(v) and not prerelease(version)):
+            continue
+        t = _iso_time(times.get(v))
+        if t is not None and t < when and (best is None or t > best[1]):
+            best = (v, t)
+    return when, best[0] if best else None
+
+
+def _age_text(age):
+    hours = age.total_seconds() / 3600
+    if hours < 48:
+        n = max(1, int(hours))
+        return f"{n} hour{'s' if n != 1 else ''}"
+    n = int(hours // 24)
+    return f"{n} day{'s' if n != 1 else ''}"
+
+
+def _new_dependency_issue(eco, dep, age, previous, owners):
+    sev = "CRITICAL" if age < NEW_DEP_CRITICAL else "MAJOR"
+    by = f" by {', '.join(owners[:3])}" if owners else ""
+    return lazaret.mk_issue(
+        {"id": "SC-NEW-DEPENDENCY", "name": "A release adds a brand-new dependency", "type": "HOTSPOT", "sev": sev,
+         "msg": (f'Adds a dependency on "{dep}", which {previous} did not have: a package first published '
+                 f"{_age_text(age)} before this release{by}"
+                 + (", who does not maintain this one." if eco == "npm" else ".")),
+         "why": ("The @mastra compromise (June 2026) changed no code: each hijacked release gained a dependency on "
+                 "easy-day-js, published by another account 19 hours before, which carried the payload. A release "
+                 "rarely depends on a package that did not exist a week earlier."),
+         "fix": f'Read "{dep}" before installing this release; pin the previous one ({previous}) until you have.',
+         "ref": "CWE-506 · Supply chain"},
+        "package.json" if eco == "npm" else "(release)", 1, [])
+
+
+def npm_new_dependencies(name, version, manifest, fetch=None):
+    """-> (previous version, [(dependency, age, its maintainers)]) for the
+    dependencies an npm release adds that are recent (see above)."""
+    fetch = fetch or http_json
+    mine = npm_dependency_names(manifest)
+    if not mine:
+        return None, []
+    doc = fetch("https://registry.npmjs.org/" + urllib.parse.quote(name, safe="@"))
+    times = doc.get("time") if isinstance(doc, dict) else None
+    versions = doc.get("versions") if isinstance(doc, dict) else None
+    if not isinstance(times, dict) or not isinstance(versions, dict):
+        return None, []
+    when, previous = _previous_release(times, version, versions, lambda v: "-" in v)
+    if previous is None:
+        return None, []
+    added = sorted(mine - npm_dependency_names(versions.get(previous)))
+    owners = {m.get("name") for m in doc.get("maintainers") or () if isinstance(m, dict)}
+    scope, found = _npm_scope(name), []
+    for dep in added:
+        if len(found) >= NEW_DEP_LOOKUPS:
+            break
+        if scope is not None and _npm_scope(dep) == scope:
+            continue
+        try:
+            ddoc = fetch("https://registry.npmjs.org/" + urllib.parse.quote(dep, safe="@"))
+        except FetchError:
+            continue                     # over the budget: an established package; or unreachable
+        created = _iso_time((ddoc.get("time") or {}).get("created") if isinstance(ddoc, dict) else None)
+        if created is None:
+            continue
+        age = max(when - created, datetime.timedelta(0))
+        if age >= NEW_DEP_RECENT:
+            continue
+        theirs = sorted({m.get("name") for m in ddoc.get("maintainers") or ()
+                         if isinstance(m, dict) and isinstance(m.get("name"), str)})
+        if owners & set(theirs):
+            continue
+        found.append((dep, age, theirs))
+    return previous, found
+
+
+def _pypi_first_upload(files):
+    times = [_iso_time(f.get("upload_time_iso_8601")) for f in files or () if isinstance(f, dict)]
+    times = [t for t in times if t is not None]
+    return min(times) if times else None
+
+
+def pypi_new_dependencies(name, version, info, fetch=None):
+    """-> (previous version, [(dependency, age, [])]) for the requirements a
+    PyPI release adds that are recent (see above)."""
+    fetch = fetch or http_json
+    mine = pypi_dependency_names((info or {}).get("requires_dist"))
+    if not mine:
+        return None, []
+    doc = fetch(f"https://pypi.org/pypi/{_quote_seg(name)}/json")
+    releases = doc.get("releases") if isinstance(doc, dict) else None
+    if not isinstance(releases, dict):
+        return None, []
+    times = {}
+    for v, files in releases.items():
+        first = _pypi_first_upload(files)
+        if first is not None:
+            times[v] = first.isoformat()
+    when, previous = _previous_release(times, version, releases, lambda v: not _PEP440_FINAL_RE.match(v))
+    if previous is None:
+        return None, []
+    prev = fetch(f"https://pypi.org/pypi/{_quote_seg(name)}/{_quote_seg(previous)}/json")
+    prev_info = prev.get("info") if isinstance(prev, dict) else None
+    added = sorted(mine - pypi_dependency_names((prev_info or {}).get("requires_dist")))
+    found = []
+    for dep in added:
+        if len(found) >= NEW_DEP_LOOKUPS:
+            break
+        try:
+            ddoc = fetch(f"https://pypi.org/pypi/{_quote_seg(dep)}/json")
+        except FetchError:
+            continue
+        rels = ddoc.get("releases") if isinstance(ddoc, dict) else None
+        firsts = [t for t in (_pypi_first_upload(fs) for fs in (rels or {}).values()) if t is not None]
+        if not firsts:
+            continue
+        age = max(when - min(firsts), datetime.timedelta(0))
+        if age < NEW_DEP_RECENT:
+            found.append((dep, age, []))
+    return previous, found
+
+
+def new_dependency_issues(eco, name, version, resolved):
+    """SC-NEW-DEPENDENCY findings for one release (best effort: [] when the
+    registry can't say)."""
+    if os.environ.get("LAZARET_NO_DEPENDENCY_HISTORY"):
+        return []
+    try:
+        if eco == "npm":
+            previous, found = npm_new_dependencies(name, version, resolved[4])
+        else:
+            previous, found = pypi_new_dependencies(name, version, getattr(resolved, "info", None))
+    except (FetchError, ValueError):
+        return []
+    return [_new_dependency_issue(eco, dep, age, previous, owners) for dep, age, owners in found]
+
+
 @_always_redacted
 def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline=None,
                  cancel=None, max_artifacts=None, max_download_bytes=None):
@@ -2244,6 +2696,7 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
                     **{k: r[k] for k in ("verdict", "verdictReason", "filesScanned",
                                          "binaryArtifacts", "truncated",
                                          "strongIndicators", "weakIndicators")}})
+    all_issues.extend(new_dependency_issues(eco, name, version, resolved))
     skip_issues, skip_label = _skipped_summary(skipped, byte_budget, limit)
     # one part per release file left out; skip_issues holds one finding per
     # REASON, and used to be counted instead ("1 part" for 3 skipped files)
@@ -3831,6 +4284,8 @@ def main():
     global SCAN_TIMEOUT, MAX_ARTIFACTS, MAX_PACKAGE_DOWNLOAD_BYTES, MAX_MEMBER
     lazaret.configure_stdio()
     ap = argparse.ArgumentParser(prog="lazaret-registry", description="Lazaret npm/PyPI registry scanner")
+    ap.add_argument("--version", action="version",
+                    version=f"lazaret-registry {lazaret.VERSION} (engine: {_engine.describe()})")
     ap.add_argument("command", choices=["add", "scan", "scan-all", "list", "report", "discover"])
     ap.add_argument("specs", nargs="*", help="npm:<name>[@ver] or pypi:<name>[@ver]")
     ap.add_argument("--db", default=os.environ.get("LAZARET_DB", "lazaret-registry.db"),
@@ -3882,7 +4337,16 @@ def main():
                     help="discover: scan the discovered packages (and track them)")
     ap.add_argument("--add", action="store_true",
                     help="discover: add discovered packages to the watchlist")
+    ap.add_argument("--engine", choices=_engine.ENGINES, default=None,
+                    help="The engine that runs the supply-chain tests: rust (the native engine, the default "
+                         "where it is installed) or python (the reference engine; env LAZARET_ENGINE). Both "
+                         "give the same findings.")
     args = ap.parse_args()
+    try:
+        _engine.choose(args.engine)
+    except _engine.EngineError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(2)
     if args.no_redact_secrets:
         # review P2: a raw credential line must never reach the state DB,
         # which other tools (the MCP server, a shared Postgres) read back

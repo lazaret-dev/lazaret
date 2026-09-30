@@ -2291,6 +2291,7 @@ def parse_args(argv):
         description="Lazaret SCA — inventory npm/pypi dependencies of an installed code "
                     "base and match them against a CVE bundle built from OSV, CISA KEV "
                     "and EPSS data (--update-bundle downloads a fresh one).")
+    ap.add_argument("--version", action="version", version=f"lazaret-sca {lazaret.VERSION}")
     ap.add_argument("directory", nargs="?",
                     help="project directory (the installed code base); optional with "
                          "--update-bundle")

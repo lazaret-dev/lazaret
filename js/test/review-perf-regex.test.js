@@ -18,6 +18,9 @@ const CASES = {
   "S-JWT-NONE: 'algorithm=' + 200,000 spaces (py)": ["py", "opts = dict(algorithm=" + " ".repeat(200000), false],
   "decode flow: a decode, then 'a' x 200,000": ["js", "const d = atob(x);\n" + "a".repeat(200000), true],
   "B-EMPTY-CATCH: 'catch' + 150,000 newlines": ["js", "try { f() } catch" + "\n".repeat(150000), false],
+  "SC-OFFSCREEN-CODE: 'x;' + 200,000 spaces": ["js", "x;" + " ".repeat(200000), false],
+  "SC-OFFSCREEN-CODE: ')' + 200,000 spaces + code (py)": ["py", ")" + " ".repeat(200000) + ";exec(1)", false],
+  "SC-SELF-PUBLISH: needles + 'a' x 200,000": ["js", "exec('npm publish'); w('package.json'); " + "a".repeat(200000) + ".nam = 1", true],
 };
 
 for (const [label, [lang, content, dep]] of Object.entries(CASES)) {

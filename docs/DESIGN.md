@@ -26,6 +26,10 @@ ships as **two independently-installable packages that must behave identically**
   It is the **project scanner only** (`lazaret <dir>`); registry auditing,
   custom taint specs, SCA and the MCP server are Python-only.
 
+A platform wheel of the PyPI package also carries a **native engine** written
+in Rust (`rust/`, no crates), which answers the supply-chain tests faster; the
+Python engine stays the reference it is held to (§2, `docs/RUST_ENGINE.md`).
+
 The name is a quarantine metaphor (a *lazaret* is a quarantine station): you run
 untrusted dependencies past it before letting them in.
 
@@ -66,19 +70,32 @@ same metrics, ratings, quality gate and exit code.
   (`test_review_dashboard_parity.py`). Editing the dashboard's inline script
   requires re-running `scripts/dashboard_csp.py` (its CSP pins the script by
   SHA-256).
+- **The native engine** (`rust/crates/lazaret-engine`, 0.1.8) is a port of
+  core's supply-chain tests — the install-script and import-time tests and
+  everything they read — with Python `re` semantics (its own port of sre) and
+  the patterns extracted from `core.py` into a rule pack. The Python package
+  sends those tests through it where it is installed
+  (`lazaret.scanner.engine`; `--engine rust|python`), and core answers any
+  call it can't (a spent work budget, an error), so it never loses a finding.
+  `test_rust_parity_{regex,hooks,signs}.py` compare it with core on every
+  pack pattern and the 36,900-case hooks corpus: zero differences allowed.
+  A change to those tests is made in core, ported to Rust and the pack
+  regenerated (`scripts/make_rust_tables.py`; `--check` in CI), in the same
+  commit.
 
-### The documented Python-only exceptions
+### The documented Python-only exception
 
-Two capabilities run only in the Python engine, by deliberate design, and the
-parity test excludes them (`_python_only` in `test_js_parity.py`):
+One capability runs only in the Python engine, by deliberate design, and the
+parity test excludes it (`_python_only` in `test_js_parity.py`):
 
-1. **The AST half of the interprocedural flow engine** — `flow.py`'s Python
-   analysis is AST-based and has no JS twin; its `X-*` findings and `Q-FLOW-*`
-   coverage notes on Python files are Python-only. The JavaScript half of the
-   flow engine *is* twinned (`js/src/scanner/flow.js` and `jsflow.js`, on the
-   reader `js/src/lib/jsparse.js`).
-2. **The cross-file received-code follower** — `core._cross_file_received_issues`
-   (SC-IMPORT-RISK whose message contains "another file of the package"). See §5c.
+- **The AST half of the interprocedural flow engine** — `flow.py`'s Python
+  analysis is AST-based and has no JS twin; its `X-*` findings and `Q-FLOW-*`
+  coverage notes on Python files are Python-only. The JavaScript half of the
+  flow engine *is* twinned (`js/src/scanner/flow.js` and `jsflow.js`, on the
+  reader `js/src/lib/jsparse.js`).
+
+(The cross-file received-code follower was the second exception until 0.1.8;
+`js/src/lib/crossfile.js` is its twin now — §5c.)
 
 When the npm engine cannot do something the Python engine can, it must say so
 honestly rather than silently under-report. This is the **honest-gate pattern**:
@@ -263,7 +280,16 @@ twin `js/src/lib/received.js`.
   download run through a shell, hidden or fetching PowerShell, a stager
   string, a reverse shell, credentials sent to a named exfiltration service,
   host information sent to a data-capture service, a download run with the
-  Python interpreter. An install script that does any of it → CRITICAL
+  Python interpreter; and (0.1.8) a chat bot or webhook whose secret is
+  written in the code (a Telegram bot token, a Discord or Slack webhook) in
+  a file that makes network calls, credential files sent to a raw public IP
+  address, three or more credential folders named in one place (a sweep of
+  the home folder), the host name sent to a base64-hidden address or in a
+  DNS name the code builds, the public IP address sent to a data-capture
+  service (an ngrok tunnel's own address counts as one), a reverse shell as
+  an argument list or to an ngrok TCP address, and a miner (a Monero wallet
+  address with a mining pool's arguments). An install script that does any
+  of it → CRITICAL
   (`install_script_risk`). Download-to-file is MAJOR only in npm hooks and
   import-time code (it is also the shape of a legitimate prebuilt-binary
   installer); in the code pip runs to install an sdist it is CRITICAL.
@@ -281,46 +307,88 @@ twin `js/src/lib/received.js`.
   inside string literals don't count, so a code template in a string is not
   one).
 
+**The second reading (0.1.8).** When the first reading finds nothing, a text of
+up to `_DL_LOGICAL_MAX_CHARS` (1,000,000) characters is read once more as
+`_dl_logical` rewrites it: a statement a formatter spread over several rows
+joined (a call's arguments on the rows below it, a member chain continued on
+the next row, a backslash continuation; `_dl_join_rows`, never through a
+function's or a block's body), an environment variable read or written by name
+read as one name (`environ.P`, `process.env.P`: it carries a value between
+statements), members read by name (`getattr(m, 'x')`, `m['x']` as `m.x`), a
+call through a comma expression (`(0, ns.fn)(…)`) as the call, and a code
+runner handed to a call as its last argument (`p.then(eval)`,
+`res.on('data', eval)`) as the call it makes, `(_v)=>eval(_v)`. Each rewrite
+keeps the row count (lines map back through `firsts`). A longer text (a
+bundle) is read once: the second reading doubled the benign bundles' time and
+found nothing there, and a minified payload is the first reading's long-row
+pass.
+
 **The shared spec.** The detector's data (name sets, character sets, limits) and
-**all its patterns** (27 plain regexes + 6 alternation groups, ~57 compiled
-patterns total) are authored once in
+**all its patterns** (36 plain regexes + 6 alternation groups: 48 compiled
+patterns) are authored once in
 `python/src/lazaret/scanner/received_spec.json` and compiled by both engines.
 `scripts/sync-received-spec.py` copies it to `js/src/lib/received-spec.json`
 (run `--check` in CI); `tests/architecture/test_received_spec.py` fails if the
 copies drift or if core stops matching the spec. `test_js_parity_hooks.py`
-compares the compiled patterns (asserts 57 patterns / 23 sets / 3 maps) and runs
-a 30k+ case agreement corpus plus a reach test. **Edit the spec, not the inline
-patterns; then sync.** The npm engine loads the spec with `readFileSync` at
-import — the build backend ships `.json` from the package so it lands in the
-wheel.
+compares every compiled pattern of `hooks.js` and `received.js` with core's
+(126 patterns / 30 sets / 4 maps) and runs a 30k+ case agreement corpus plus a
+reach test. **Edit the spec, not the inline patterns; then sync.** The npm
+engine loads the spec with `readFileSync` at import — the build backend ships
+`.json` from the package so it lands in the wheel.
 
-**The cross-file follower (Python engine only).** `_cross_file_received_issues`
-catches a value received in one file of a dependency package and run in another
-(source and sink split across modules) — in both Python and npm packages, under
-`--deps`. Design:
+**The cross-file follower (both engines since 0.1.8).**
+`core._cross_file_received_issues` and its twin `crossFileReceivedIssues`
+(`js/src/lib/crossfile.js`) catch a value received in one file of a package and
+run in another — source and sink split across modules — in Python and npm
+packages: a dependency's under `--deps` (both engines), and a release's in the
+registry and the guard (`_ArtifactScan._cross_file_code`: one distribution is
+one package; the files SC-USE-RISK reads; not once the package is SUSPICIOUS).
+Design:
 
-1. Per package, `_xf_tainted_exports` / `_xf_js_tainted_exports` collect each
-   module's **tainted exports** — a module-level function/value that holds or
-   returns a received value, or a class method that returns one. Export
-   detection is deliberately *liberal* (many real HTTP libraries fetch and
-   return data); it is kept precise by the sink side.
-2. Import resolution (`_xf_imported_taint` / `_xf_js_seeds`) resolves a sibling
-   `from .mod import name` / `require('./mod')` / `import … from './mod'`
-   (named, namespace, default; **one hop**, same package) to those exports, and
-   for a tainted class, seeds the `instance.method` chain of instances made in
-   the importing file (`c = C(); exec(c.pull())`).
-3. The importing file is re-run through `_received_code_kind(text,
-   extra_always=<seeds>)` — the seed rides the existing `_DlTaint.always`
-   machinery, so no change to the single-file detector's behavior (default
-   `extra_always=()` keeps the twin and the parity corpus identical). It fires
-   **only** when the value genuinely came from another file; files already
-   flagged single-file are skipped.
+1. **Each module is read** for what it defines — functions, values, classes
+   and their members (static or not; Python class attributes; JS class
+   fields), and object literals (`const api = {…}`, `module.exports = {…}`,
+   `export default {…}`) as classes of static members; what it imports — by
+   name, as a module, by default, `*`; `importlib.import_module` /
+   `__import__` / `import()` of a literal name; `require()` of a path built
+   from `__dirname`; TypeScript's and Babel's `__importDefault(require(…))`;
+   what it exports — `module.exports` and its objects, `exports.x` and
+   `exports['x']`, `export …`, `export … from`, `export * from`,
+   `module.exports = require(…)` / `= class …`, TypeScript's
+   `Object.defineProperty(exports, …)` getters and `exports.default`; the
+   environment variables it sets; and the writes into a module-level name's
+   member (`CACHE['c'] = …`) or an instance's own (`self.data = …`), read like
+   assignments of them. Comments, strings and docstrings are masked first.
+2. **A symbol holds a received value** when what it returns or is assigned
+   carries a network source or names a symbol that holds one — resolved
+   through imports, re-exports and `self.x` / `this.x`, to a fixed point of
+   `_XF_ROUNDS` (4) hops — or when its body receives one and hands it to a
+   callback: a parameter it calls, or a Promise's resolve. **A function runs
+   its parameter** (a runner) when the single-file detector, reading its body
+   with the parameters seeded, finds it run as code.
+3. **Each module is then read** by `_received_code_kind(code,
+   extra_always=<the names that hold a received value in it>,
+   extra_runners=<the names of other files' runners>)`: a function or value
+   imported by name, a module's members (`m.pull`, `pkg._net.pull`), a class's
+   static members (`C.pull`, `api.pull`), an instance's (`c = C(); c.pull()`,
+   `self.c = C(); self.c.pull()`, `C().pull()` rewritten as one name), and an
+   environment variable another file set. Seeds ride `_DlTaint.always`;
+   runners are runner aliases without the window (and are handed to calls
+   like `eval` is, `p.then(execute)`). It fires only when the flow crosses
+   files — a file whose own text shows it is the single-file test's — at the
+   single-file severity, and the message says which way: the value is
+   received in another file, or the function that runs it is.
 
-Robustness: export detection masks strings and comments (including triple-quoted
-docstrings — a `requests.get(…)` in documentation is not an export). Bounds are
-the follower's own (`_XF_WINDOW` = 25, and hard caps `_XF_MAX_FILES` /
-`_XF_MAX_EXPORTS` / `_XF_MAX_SEEDS`), not the single-file detector's. It runs off
-the twinned `flow.py` path; the npm engine stays single-file with an honest gate.
+Export detection is deliberately *liberal* (an HTTP library's functions fetch
+and return data); the sink side keeps it precise. Bounds: `_XF_WINDOW` (25 rows
+of a body), `_XF_MAX_FILES` (3,000 per package), `_XF_MAX_SYMBOLS` (5,000),
+`_XF_MAX_SEEDS` (64 per file), `_XF_OBJECT_ROWS` (400), `_XF_MAX_RUNNERS` (200
+bodies tested), a file over `_XF_MAX_CHARS` (2,000,000) not read for what it
+defines; litellm's 2,471 modules (34 MB) take 3.6 s. Both engines give the same
+answer: `tests/architecture/test_js_parity_crossfile.py` holds the twins'
+patterns and limits to core's and compares the follower's own cases and a
+generated stream of 700 packages finding for finding. What it doesn't follow:
+§12.
 
 ### d. Supply-chain / `--deps`
 
@@ -345,6 +413,45 @@ worm's pair (a SessionStart hook and a folder-open task running its loader) is
 CRITICAL because the followed loader fails the install-script test; writing
 the agent's own settings is not held against an agent's hook.
 
+0.1.8, both engines (and the dashboard for the per-file rules): SC-SELF-PUBLISH
+is three signs in one file — a publish command an exec call runs, an assignment
+to an object's `name`, a package.json write whose arguments name that object
+(`core.self_publish_at`, `hooks.selfPublishAt`); SC-OFFSCREEN-CODE is code after
+a run of 150+ blanks that stands in code (`core._code_prefix` closes every quote
+and comment before it; the caller drops lines that are only literals and
+comments) and reads as code (`core.offscreen_code`). Its blank-run pattern
+starts only at a run's start (`(?<![ \t])`): unanchored, 200,000 spaces with no
+code after them were quadratic in both engines. The install-script test gained
+three reasons: `npm publish`, npm tokens collected, a DLL of the package's own
+run with rundll32 / regsvr32 (`core.runs_dll`, which reads the text again with
+adjacent string literals joined).
+
+Also 0.1.8, both engines: programs set to start at login or boot are a reason
+of the install-script test only (`core.service_reasons`, from
+`persistence_reasons`): a systemd unit written (a unit directory and a file
+write, with `ExecStart=` in the text or the write on the directory's line) or
+`systemctl enable` run, a launchd plist written or `launchctl load` run, a
+crontab installed (`crontab file`, a pipe into `crontab -`, python-crontab's
+`write()`, a file written under `/etc/cron.d` …), a Run key written (a
+registry write — `reg add`, `Set-ItemProperty`, `SetValueEx` … — within
+`_SVC_RUNKEY_SPAN` code points of the key's path), a scheduled task
+(`schtasks /create` run, `Register-ScheduledTask`, the Schedule.Service COM
+object's `RegisterTaskDefinition`), the Startup folder or an XDG autostart
+entry written. A line over `_SVC_LINE_MAX` characters (minified code) is not
+read as one statement, so a bundle that names a unit directory in one place
+and writes a file in another is not one; at import time a library that
+manages services is normal, and shell rc files are left out (too many
+installers append a PATH line). The self-read
+test reads a file back asynchronously too: a `readFile` callback's data, a
+`.then()` parameter within `_SELF_READ_THEN_SPAN` of the read, Python's
+`with open(p) as f`, when the path names the file itself or a data file next
+to it and what was read reaches a code runner. And the decoded view learns a
+file's own XOR decoder (`_dv_xor_decoders`): a name called at least
+`_DV_XOR_MIN_CALLS` times with base64 or hex literals, whose calls become
+printable ASCII (nine in ten) when XORed with one of the file's short string
+literals, repeated; the helper's body is never read, and 32 bytes make a false
+decoder a chance in 10^13.
+
 ### e. Registry auditing (`lazaret.registry`) and SCA
 
 `lazaret-registry` fetches and audits an npm/PyPI artifact with the same rule
@@ -352,6 +459,25 @@ pack, discovering install hooks and start-up files and running the import-time
 checks. `lazaret-sca --update-bundle` builds a CVE bundle from public feeds
 (OSV, CISA KEV, EPSS) parsed with `lazaret.safexml`; Lazaret ships no
 vulnerability database of its own. The registry always redacts what it stores.
+
+Python-only registry checks (0.1.8): SC-USE-RISK runs the import-time test on
+the files no entry point loads (`_ArtifactScan._use_time_code`) and keeps only
+its CRITICAL shapes — skipping tests, examples, docs, demos, benchmarks and a
+web app's static assets (USE_RISK_SKIP_DIRS), not reading once the archive is
+SUSPICIOUS, smallest files first within USE_RISK_SECONDS. What it doesn't reach
+is not SC-TRUNCATED: the file rules read every file. The cross-file follower
+reads the same files as one package (`_cross_file_code`, §5c; its SC-IMPORT-RISK
+names the file), and scripts that install scripts and import-time code start
+with node or python are followed to the package file each runs
+(`_started_scripts`, `core.spawned_scripts`) and tested like the one that
+started them. SC-NEW-DEPENDENCY
+(`new_dependency_issues`, called by `scan_package`) compares a release's
+dependencies with the release published before it and looks up the added
+ones' first publication: live registry data, best effort, no request for a
+release without dependencies. The guard scans each package with
+`_scan_artifact`, so it gets SC-USE-RISK and the follower but not the dependency history (it
+already scans the new dependency itself, and holds back a release younger
+than --min-age).
 
 ### f. The install guard (`lazaret.registry.guard`, 0.1.7)
 
@@ -420,11 +546,17 @@ This is the working method. Follow it; it is why the tool has stayed trustworthy
 3. **Implement in the Python engine.** Keep it needle-gated and bounded.
 4. **Twin it in the JS engine with exact parity**, in the same commit. Mark the
    twin (`Twin of lazaret.scanner.core…`). For received-code patterns, edit the
-   **shared spec** and sync instead of hand-writing both.
+   **shared spec** and sync instead of hand-writing both. A change to the
+   install-script or import-time test (or anything they read) is also ported
+   to the native engine, with the rule pack regenerated
+   (`python3 scripts/make_rust_tables.py`); a pattern core builds at run time
+   is built from named module-level pieces, so the extractor sees them.
 5. **Verify:**
    - the behavioral suites (both engines);
    - **engine parity** — `test_js_parity*` (the differential corpus + the
-     pattern twins); a Python-only feature goes in `_python_only`;
+     pattern twins); a Python-only feature goes in `_python_only`; and
+     `test_rust_parity_*` with the native library built
+     (`docs/RUST_ENGINE.md` §5);
    - **a fuzz differential** where relevant (the received-code parity runs
      ~33k cases; both engines must agree on every one);
    - **the false-positive sweep** against the real corpora (§7): the bar is 0
@@ -460,7 +592,9 @@ The essentials:
   - single-file received-code: ~66,000 installed JS+Python files;
   - the cross-file follower: ~88,000 files (≈12k across 173 installed Python
     packages + ≈76k npm files), scanned as complete packages so cross-file
-    shapes actually appear.
+    shapes actually appear; and since 0.1.8's rework, the benchmark's 429
+    popular packages (35,758 files read as `--deps` groups them, and each
+    release as the registry reads it): no finding.
   These sweeps run the detector directly over file lists / package trees (see
   the scratch tooling used during development; reconstruct equivalents against
   whatever real `site-packages` / `node_modules` are available). Treat any new
@@ -482,25 +616,42 @@ anything that scans text, ask "what does this cost on a 50 MB adversarial input?
 and add a `test_*_bounded` that answers it. The npm regex engine is the tighter
 constraint — it overflows its backtrack stack where CPython merely slows.
 
+Time is a bound too: the registry and the guard scan every file of a release.
+0.1.8's readings are gated so a bundle doesn't pay for them twice — a decoded
+view counts only when something was decoded (literals joined alone are no
+second reading: a bundle joins them everywhere), the second reading stops at
+1 MB (§5c), the row joiner skips rows that can open nothing, the
+download-to-file tests look for sources only around a write, and the
+follower's parse searches from quote to quote and reads a local only when a
+return reaches it. Measure a change on the benchmark's heaviest packages
+(litellm, playwright-core, next) against the previous release, not on a
+fixture.
+
 ---
 
 ## 9. Versioning, release and delivery
 
-- **One version, two files, kept in sync:** `__version__` in
-  `python/src/lazaret/__init__.py` and `"version"` in `js/package.json`.
-  `scripts/check-versions.sh` fails if they disagree (and, at a tag, if they
-  don't match the tag). Pre-1.0; the 0.x API may still change.
-- **Release** (`docs/RELEASING.md`): bump both versions in one commit, get it
+- **One version, kept in sync:** `__version__` in
+  `python/src/lazaret/__init__.py`, `"version"` in `js/package.json`, and the
+  native engine's workspace version in `rust/Cargo.toml` (with its two
+  `rust/Cargo.lock` entries). `scripts/check-versions.sh` fails if they
+  disagree (and, at a tag, if they don't match the tag). Pre-1.0; the 0.x API
+  may still change.
+- **Release** (`docs/RELEASING.md`): bump the versions in one commit, get it
   onto `main`, `scripts/tag-release.sh vX.Y.Z` (it refuses uncommitted changes,
   a HEAD not on `origin/main`, mismatched versions, or an existing tag), then
   push the tag. The GitHub Actions workflow runs the suite, then publishes to
-  PyPI and npm via **trusted publishing (OIDC)** — no long-lived tokens.
+  PyPI and npm via **trusted publishing (OIDC)** — no long-lived tokens. The
+  PyPI release has a pure wheel and five platform wheels with the native
+  engine, built, checked and installed on their platforms by `wheels.yml`.
   Published versions are immutable; a mistake means releasing the next patch,
   not re-tagging.
 - **CHANGELOG.md** started at 0.1.6 (Keep a Changelog). Date each entry at
   release.
-- **What ships** is narrow: the wheel/sdist contain only `src/lazaret/`, the npm
-  package only `bin/` and `src/`. `scripts/make_bundle.py` builds a reproducible
+- **What ships** is narrow: the wheel/sdist contain only `src/lazaret/` (a
+  platform wheel adds the native library and its two license files,
+  `rust/LICENSE-PYTHON` and `rust/NOTICE`: part of the engine is a Rust
+  translation of CPython code), the npm package only `bin/` and `src/`. `scripts/make_bundle.py` builds a reproducible
   source tarball from tracked files only and refuses credential files.
 - **Delivery in this project's history** used git-format-patch mailboxes
   (`git am`) applied onto a release branch; a direct contributor just commits to
@@ -526,6 +677,10 @@ constraint — it overflows its backtrack stack where CPython merely slows.
 | `js/src/lib/received-spec.json` | Synced copy of the spec (do not edit by hand) |
 | `js/src/lib/hooks.js`, `js/src/scanner/flow.js`, `js/src/index.js` | Install-hook checks, flow twin, npm CLI |
 | `python/tests/architecture/test_js_parity*.py` | The engine-parity guards |
+| `rust/crates/lazaret-engine`, `lazaret-ffi` | The native engine (supply-chain tests, sre port, rule pack) and its C ABI (`docs/RUST_ENGINE.md`) |
+| `python/src/lazaret/scanner/engine.py`, `_native.py` | Which engine answers (`--engine`, `LAZARET_ENGINE`), batching and threads, the Python fallback; the ctypes loader |
+| `python/tests/architecture/test_rust_parity_*.py`, `hooks_corpus.py` | The native engine's parity guards and the corpus they share with `test_js_parity_hooks.py` |
+| `scripts/make_rust_tables.py`, `check_rust_deps.py` | The rule pack from `core.py` (`--check`); no crate from outside the workspace |
 | `python/tests/architecture/test_received_spec.py` | Spec drift + core-uses-spec guard |
 | `scripts/sync-received-spec.py`, `check-versions.sh`, `tag-release.sh` | Sync, version, release tooling |
 
@@ -562,7 +717,44 @@ only)", "Download to a file, then run the file").
 
 ---
 
-## 12. Current state (0.1.7) and backlog
+## 12. Current state (0.1.8) and backlog
+
+**In 0.1.8** (from the 0.1.7 benchmark's misses, backlog items 1-11):
+SC-SELF-PUBLISH (code that renames its package and publishes it: the registry
+floods); install scripts that publish, collect npm tokens or run a DLL;
+SC-OFFSCREEN-CODE (code after 150+ blanks on a line); SC-USE-RISK (the strong
+import-time shapes in the files a package runs when used; registry, 3 s per
+archive); SC-NEW-DEPENDENCY (a release that adds a dependency published days
+before it, from another account; registry, live data); names and code in
+strings a file decodes as it runs (a second reading of the install-script and
+import-time tests) and SC-EVAL-DECODER; `Function.constructor`, statements
+over several rows, environment variables, members read by name and runners
+handed to a call in the received-code detector; a script downloaded or
+decoded, written and run with an interpreter; scripts a script starts with
+node or python, followed; and the cross-file follower — several hops, class
+members and object literals, callbacks, caches, dynamic imports, environment
+variables between files, another file's runner — in both engines and in
+registry and guard scans, after an adversarial pass. On the same benchmark:
+80% of 516 malicious releases SUSPICIOUS (66% in 0.1.7, 76% after items 1-4),
+84% with the dependency history, and the same 3 of 429 popular packages, no
+verdict changed. Then, from the releases GuardDog caught and Lazaret didn't:
+a chat bot or webhook whose secret is in the code, credential files sent to
+an IP address, a sweep of credential folders, the host name hidden in base64
+or sent in a DNS name, the public IP address sent to a capture service, a
+copy of the environment serialized, a reverse shell as an argument list, a
+miner, curl or wget downloads run with Python, and at install time a raw
+socket to a hard-coded address and rewritten browser shortcuts. On the
+re-prepared benchmark (each PyPI sample read from its release's own files):
+86% SUSPICIOUS (82% before this round, 68% in 0.1.7; GuardDog 71%), 89% with
+the dependency history, the same 3 popular packages. Then the backlog's last
+four items: programs set to start at login or boot, in install scripts; code
+run from what a file reads back asynchronously; a file's own XOR decoder, in
+the decoded view; and SC-TYPOSQUAT, a release's name or a dependency's one
+change from one of the 5,000 most-downloaded packages of its registry. 87%
+SUSPICIOUS, 90% with the dependency history, every release GuardDog catches,
+and the same 3 popular packages. And the native engine (Rust, no crates,
+`docs/RUST_ENGINE.md`) answers the supply-chain tests where it is installed,
+with the Python engine's answers.
 
 **Shipped in 0.1.7** (the September 2026 audit's P0s, and more): config and
 data files checked for credentials; taint through f-strings and template
@@ -586,15 +778,46 @@ real corpora throughout; full cross-subsystem suite green.
 **Backlog** (candidates, not commitments — the detector is already
 comprehensive, so weigh marginal value against FP risk):
 
-- *Extend cross-file:* multi-hop (A→B→C, FP-gated); class-method edge forms
-  (direct `Client().pull()`, namespace `new ns.C()`).
-- *New single-file families:* decoded (base64/hex) payloads executed, staged
-  multi-step downloads, env-driven import specifiers.
-- *Architecture:* whether to port the cross-file follower to the npm engine (the
-  pick-two-of-three tradeoff: npm gets cross-file / PyPI stays pure-stdlib /
-  built once).
-- *Quality:* an adversarial pass on the cross-file follower (evasion + crafted
-  FP), and a durable home for this backlog (a `BACKLOG.md` or issues).
+- *Detection, from the 0.1.7 benchmark's misses* (all built in 0.1.8,
+  above); what is left:
+  - **PyPI owners** for SC-NEW-DEPENDENCY: its JSON API has none, so a new
+    requirement from the project's own account counts too.
+  - **What the exfiltration shapes don't read** (the benchmark's remaining
+    misses): an address built from variables for a DNS name
+    (@fnos/app's telemetry runner), a destination fetched at run time with
+    nothing else to show (data-pipeline-check was caught by its credential
+    sweep, not its webhooks), a load-testing flood (poppo213), and a wheel
+    with no code at all (lightgboost).
+- *`--deps` and browser code:* `--deps` gives every file of a dependency the
+  import-time test, where the registry reads what runs at install, at import
+  and when used (skipping tests, docs and a web app's static files). So a
+  Python package's browser bundle can be a CRITICAL hit: litellm's proxy UI
+  ships a Next.js chunk of guardrail test prompts (one shows `curl … | sh`)
+  that the test reads as code. Tell browser code from code that runs (a
+  `_next/static` or `static/` file no entry point reaches) without letting a
+  `main` pointed into `static/` hide; the deep sweep's wider reading lists
+  such hits.
+- *What the cross-file follower doesn't follow* (the adversarial pass's known
+  misses, kept as tests): a value handed between files through an event
+  emitter (`bus.emit('code', c)` / `bus.on('code', eval)`), and two top-level
+  modules of site-packages in a `--deps` scan (they may be two distributions;
+  a registry scan reads a release's as one). Nor a name built at run time
+  (`getattr(m, name)`), a runner behind another function (one that hands its
+  parameter to another file's runner), or more than four hops.
+- *Engine:* the native engine answers the supply-chain tests (0.1.8,
+  `docs/RUST_ENGINE.md`), and release CI builds it into five platform
+  wheels; next, WebAssembly for the npm package (then the JavaScript twin can
+  go, and the npm package carries `rust/NOTICE` and `rust/LICENSE-PYTHON`),
+  the per-file rules (`scan_file`), and `core.py` loading the rule pack so it
+  has one source.
+- *Notices outside the native engine* (smaller, for a later release): the
+  npm package's shell tokenizer (`js/src/lib/hooks.js`) reimplements the
+  state machine of CPython's `shlex.read_token`, so give it the PSF notice
+  as the Rust one has; and the character and codec tables generated from
+  Python's `unicodedata` and `codecs` (`_unicode13.py` and its JS twins,
+  `codecs.js`, `unicode13.rs`) are Unicode Character Database data, which
+  the Unicode License asks to be credited where it is copied.
+- *Quality:* a durable home for this backlog (a `BACKLOG.md` or issues).
 - *Guard:* registries that need credentials (read them from the tool's own
   settings, for that host only), yarn and Bun, `uv run` / `uvx`; the scan of a
   very large tarball (`next`, 42 MB) dominates a first install.

