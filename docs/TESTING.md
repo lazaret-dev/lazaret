@@ -167,6 +167,13 @@ assert not issues, issues
   files of Python `site-packages`/`dist-packages` and global npm
   `node_modules`), and list every strong reason. Expect none.
 
+List **every** strong reason, not only the ones a change adds: 0.1.8's full
+sweep found chromedriver's and phantomjs-prebuilt's installers, which define
+`requestBinary()`, read as RequestBin (an exfiltration address) since 0.1.0 —
+earlier sweeps had listed only their new reasons. With the native library
+built, the same sweep is also a parity check: compare core's answers with the
+native `batch` call's, file by file.
+
 Any hit is a candidate false positive you must **explain** before shipping —
 either it's a real risk (keep it, add a fixture) or the pattern is too loose
 (tighten the *sink* side, not the liberal export side; see `DESIGN.md` §5c).

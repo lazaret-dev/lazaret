@@ -131,7 +131,12 @@ The differential tests (each module under 45 s, as every module is):
 | `test_rust_parity_signs` | 24 detectors one by one (received code, PowerShell, stagers, reverse shells, self-read, persistence, the exfiltration shapes, services at login …) | the same corpus |
 
 State: zero differences in every field. `hooks_corpus.py` is shared with
-the JavaScript parity test, so a new alphabet there tests both twins. The
+the JavaScript parity test, so a new alphabet there tests both twins. On
+real files too: the benchmark's 945 registry scans give identical verdicts,
+reasons and findings with either engine, and both tests answer identically,
+file by file, on 85,415 files (37,784 of installed Python and npm packages,
+and every `.py`/`.js` file of the benchmark's 945 archives, the 516
+malicious ones included), with no call the native engine couldn't answer. The
 parity modules skip where the library is not built (`_native.available()`),
 so CI builds it first; the whole Python suite also passes with
 `LAZARET_ENGINE=rust` (the fixture trees, `--deps` and registry scans through
@@ -192,10 +197,12 @@ import_time_risk 3×, self-read 8×).
 
 On real files, the import-time test over 678 of litellm's modules (20.7 M
 characters): Python 15.6 s; native 5.7 s on 1 thread (2.7×), 3.2 s on 2
-threads (4.9×); no difference, no fallback. A whole registry scan of the
-litellm wheel (2,643 files, identical findings): Python 40.5 s, native 31.5 s
-on this 2-core machine — most of what is left is phase 2 (`scan_file`), still
-Python.
+threads (4.9×); no difference, no fallback. The benchmark's 945 registry
+scans (516 malicious releases, 429 popular packages; 2 cores, one engine
+after the other): 1,097 s with the Python engine, 853 s with the native one
+(22% less; 95th percentile 9.5 s → 6.2 s; litellm 40.0 s → 30.6 s,
+playwright-core 18.1 s → 10.7 s), with the same verdicts and findings for
+every package. Most of what is left is phase 2 (`scan_file`), still Python.
 
 Where the targets (≥10× on phases 1–2; litellm and `next`'s tarball under
 5 s) need to come from: threads across files (in; a core-count multiplier),
@@ -254,8 +261,9 @@ corpus; json.dump(corpus(), open('cases.json', 'w'))"` from `python/` with
    (`js/src/lib/native.js`), where `wasm32-unknown-unknown` can be installed.
    With them, hold the workspace version to the packages' in
    `scripts/check-versions.sh` (a bump then also rewrites `Cargo.lock`'s
-   two workspace entries). Run the benchmark corpus (945 packages) with
-   each engine, and keep its harness in the repository.
+   two workspace entries). Keep the benchmark harness (outside the
+   repository today) in it, and run the 945 packages with each engine
+   nightly.
 2. Phase 2 (`scan_file`), family by family, each behind the same
    view-and-compare test and each test module under 45 s.
 3. Flip the source of truth: `core.py` loads the pack at import.

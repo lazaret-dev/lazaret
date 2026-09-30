@@ -426,6 +426,32 @@ three reasons: `npm publish`, npm tokens collected, a DLL of the package's own
 run with rundll32 / regsvr32 (`core.runs_dll`, which reads the text again with
 adjacent string literals joined).
 
+Also 0.1.8, both engines: programs set to start at login or boot are a reason
+of the install-script test only (`core.service_reasons`, from
+`persistence_reasons`): a systemd unit written (a unit directory and a file
+write, with `ExecStart=` in the text or the write on the directory's line) or
+`systemctl enable` run, a launchd plist written or `launchctl load` run, a
+crontab installed (`crontab file`, a pipe into `crontab -`, python-crontab's
+`write()`, a file written under `/etc/cron.d` …), a Run key written (a
+registry write — `reg add`, `Set-ItemProperty`, `SetValueEx` … — within
+`_SVC_RUNKEY_SPAN` code points of the key's path), a scheduled task
+(`schtasks /create` run, `Register-ScheduledTask`, the Schedule.Service COM
+object's `RegisterTaskDefinition`), the Startup folder or an XDG autostart
+entry written. A line over `_SVC_LINE_MAX` characters (minified code) is not
+read as one statement, so a bundle that names a unit directory in one place
+and writes a file in another is not one; at import time a library that
+manages services is normal, and shell rc files are left out (too many
+installers append a PATH line). The self-read
+test reads a file back asynchronously too: a `readFile` callback's data, a
+`.then()` parameter within `_SELF_READ_THEN_SPAN` of the read, Python's
+`with open(p) as f`, when the path names the file itself or a data file next
+to it and what was read reaches a code runner. And the decoded view learns a
+file's own XOR decoder (`_dv_xor_decoders`): a name called at least
+`_DV_XOR_MIN_CALLS` times with base64 or hex literals, whose calls become
+printable ASCII (nine in ten) when XORed with one of the file's short string
+literals, repeated; the helper's body is never read, and 32 bytes make a false
+decoder a chance in 10^13.
+
 ### e. Registry auditing (`lazaret.registry`) and SCA
 
 `lazaret-registry` fetches and audits an npm/PyPI artifact with the same rule
@@ -714,7 +740,15 @@ miner, curl or wget downloads run with Python, and at install time a raw
 socket to a hard-coded address and rewritten browser shortcuts. On the
 re-prepared benchmark (each PyPI sample read from its release's own files):
 86% SUSPICIOUS (82% before this round, 68% in 0.1.7; GuardDog 71%), 89% with
-the dependency history, the same 3 popular packages.
+the dependency history, the same 3 popular packages. Then the backlog's last
+four items: programs set to start at login or boot, in install scripts; code
+run from what a file reads back asynchronously; a file's own XOR decoder, in
+the decoded view; and SC-TYPOSQUAT, a release's name or a dependency's one
+change from one of the 5,000 most-downloaded packages of its registry. 87%
+SUSPICIOUS, 90% with the dependency history, every release GuardDog catches,
+and the same 3 popular packages. And the native engine (Rust, no crates,
+`docs/RUST_ENGINE.md`) answers the supply-chain tests where it is installed,
+with the Python engine's answers.
 
 **Shipped in 0.1.7** (the September 2026 audit's P0s, and more): config and
 data files checked for credentials; taint through f-strings and template
@@ -738,22 +772,8 @@ real corpora throughout; full cross-subsystem suite green.
 **Backlog** (candidates, not commitments — the detector is already
 comprehensive, so weigh marginal value against FP risk):
 
-- *Detection, from the 0.1.7 benchmark's misses* (items 1-11 are built in
-  0.1.8, above); what is left of them:
-  - **A payload read back from a file of the package asynchronously**:
-    react-thunk-log starts a script that reads the package's LICENSE with
-    `fs.readFile(…, cb)` and runs what it decrypts there (AES) — the
-    self-read test knows `readFileSync` and `open()`, not a callback.
-  - **XOR and other home-made decoders**: react-zutils decodes with a XOR loop
-    the decoded view doesn't know (it reads hex and base64, and a file's own
-    hex or base64 helpers).
-  - **Look-alike dependencies.** SC-NEW-DEPENDENCY catches a brand-new one;
-    a release that swaps a dependency for a look-alike of it (`dayjs` for
-    `easy-day-js`), or adds one named like a popular package, needs a list of
-    popular names (or the previous release's dependencies to compare with).
-  - **Services that start at login** as install-time persistence: the
-    @emilgroup worm writes a systemd user unit and enables it (launchd,
-    cron and Run keys are the same shape).
+- *Detection, from the 0.1.7 benchmark's misses* (all built in 0.1.8,
+  above); what is left:
   - **PyPI owners** for SC-NEW-DEPENDENCY: its JSON API has none, so a new
     requirement from the project's own account counts too.
   - **What the exfiltration shapes don't read** (the benchmark's remaining
@@ -762,6 +782,15 @@ comprehensive, so weigh marginal value against FP risk):
     nothing else to show (data-pipeline-check was caught by its credential
     sweep, not its webhooks), a load-testing flood (poppo213), and a wheel
     with no code at all (lightgboost).
+- *`--deps` and browser code:* `--deps` gives every file of a dependency the
+  import-time test, where the registry reads what runs at install, at import
+  and when used (skipping tests, docs and a web app's static files). So a
+  Python package's browser bundle can be a CRITICAL hit: litellm's proxy UI
+  ships a Next.js chunk of guardrail test prompts (one shows `curl … | sh`)
+  that the test reads as code. Tell browser code from code that runs (a
+  `_next/static` or `static/` file no entry point reaches) without letting a
+  `main` pointed into `static/` hide; the deep sweep's wider reading lists
+  such hits.
 - *What the cross-file follower doesn't follow* (the adversarial pass's known
   misses, kept as tests): a value handed between files through an event
   emitter (`bus.emit('code', c)` / `bus.on('code', eval)`), and two top-level

@@ -6,6 +6,7 @@ Static security, supply-chain and quality analysis for Python, JavaScript and SQ
 pip install lazaret
 lazaret path/to/project                 # scan; writes lazaret-report.{html,json}
 lazaret . --ci --sarif out.sarif        # quality gate for CI, SARIF for code scanning
+lazaret . --deps                        # also audit node_modules and site-packages
 lazaret-registry scan npm:left-pad      # audit a published npm / PyPI package
 lazaret guard npm install express       # check what npm, pnpm, pip or uv installs, before it runs
 lazaret-sca --update-bundle             # download OSV + CISA KEV + EPSS into cve-bundle.json
@@ -15,12 +16,14 @@ lazaret-mcp                             # MCP server, so an AI assistant can sca
 
 What it finds:
 
-- **Security:** SQL/command/code injection, SSTI, XXE, unsafe deserialization, XSS sinks, weak crypto, disabled TLS verification, hardcoded secrets (provider signatures and entropy), and more, across 63 pattern rules plus supply-chain and coverage findings.
-- **Taint analysis:** follows untrusted input through assignments, function calls, and across files into sinks, with category-aware sanitizers and a configurable source/sink/sanitizer spec.
-- **Supply chain:** decode-then-execute patterns, packed and obfuscated JavaScript, suspicious install hooks, smuggled binaries and nested archives, both in your tree and in published npm/PyPI packages.
+- **Security:** SQL/command/code injection, SSTI, XXE, unsafe deserialization, XSS sinks, weak crypto, disabled TLS verification, hardcoded secrets (provider signatures and entropy, in code and in config files), and more, across 63 pattern rules plus supply-chain and coverage findings.
+- **Taint analysis:** follows untrusted input through assignments, function calls, and across files into sinks, in Python and in JavaScript and TypeScript (read with a real parser), with Flask, Django, FastAPI and Express routes modeled, category-aware sanitizers, and a configurable source/sink/sanitizer spec.
+- **Supply chain,** in your tree, in `--deps` and in published npm and PyPI packages: install hooks followed to the scripts they run and the scripts those start; code that runs at import, and in registry scans the code a package runs only when it is used; the strings a file decodes as it runs (hex, base64, its own decoding or XOR helpers); a value received over the network in one file and run in another; data sent to chat bots, webhooks and capture services; credential sweeps; reverse shells and miners; programs set to start at login; worms that publish themselves; code hidden off-screen; packed and obfuscated JavaScript, smuggled binaries and nested archives; names one change from a popular package's; and a new dependency published days before a release. On 516 real malicious npm and PyPI releases, 87% get the SUSPICIOUS verdict (GuardDog 71%), against 3 of 429 popular packages (GuardDog 18).
 - **Install guard:** `lazaret guard` in front of `npm install`, `npm ci`, `pnpm add`, `pip install`, `uv add` or `uv sync` resolves what would be installed, fetches and scans every package in memory, and installs nothing if one is SUSPICIOUS, can't be checked, or is younger than `--min-age` (2 days by default). `--plan` checks without installing; verdicts are cached by digest.
 - **Quality:** bugs, code smells, complexity, duplication, with a quality gate and ratings.
 
+Every command prints its version with `--version`; the scanners also name the engine that runs their supply-chain tests. Lazaret 0.1.8 adds a native engine for those tests, written in Rust with no external crates and held to the Python engine answer for answer; it runs where it is installed (build it from the repository), and the wheel on PyPI runs the same tests in Python, with the same findings.
+
 Two of its building blocks are usable on their own (provisional APIs until 1.0): `lazaret.pg`, a PostgreSQL client in pure Python with SCRAM-SHA-256, channel binding and TLS; and `lazaret.safexml`, a layer that makes the stdlib XML parsers safe for untrusted input.
 
-Licensed under Apache-2.0. Documentation, source and issue tracker: https://github.com/lazaret-dev/lazaret · https://lazaret.dev
+Licensed under Apache-2.0. Documentation, source and issue tracker: https://github.com/lazaret-dev/lazaret · https://lazaret.dev · Changes: https://github.com/lazaret-dev/lazaret/blob/main/CHANGELOG.md

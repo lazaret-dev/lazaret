@@ -125,12 +125,13 @@ project is pre-1.0, so the 0.x API may still change.
   are now SUSPICIOUS (82% after items 1-11, 68% in 0.1.7; GuardDog 71%), 89%
   with the registry's live dependency history: PyPI's malicious-intent set
   95% (GuardDog 88%) and all 16 compromised PyPI releases (GuardDog 12).
-  Of the releases GuardDog catches, one is still missed (react-zutils' XOR
-  decoder). `lazaret guard` blocks 238 of the 300 npm samples end to end
-  (232 before). Still the same 3 of 429 popular packages, and no popular
-  package's verdict changed; none of the new shapes fires on the popular
-  packages or on 37,783 files of installed Python and npm packages. Registry
-  engine 2.11.0, so stored and cached verdicts are redone.
+  Of the releases GuardDog catches, one was still missed (react-zutils' XOR
+  decoder, caught by the next item). `lazaret guard` blocks 238 of the 300
+  npm samples end to end (232 before). Still the same 3 of 429 popular
+  packages, and no popular package's verdict changed; none of the new
+  shapes fires on the popular packages or on 37,783 files of installed
+  Python and npm packages. Registry engine 2.11.0, so stored and cached
+  verdicts are redone.
   - **A chat bot or webhook whose secret is written in the code** (both
     engines, CRITICAL wherever found: install scripts, import-time code, the
     files a package runs when used): a Telegram bot token next to
@@ -159,6 +160,51 @@ project is pre-1.0, so the 0.x API may still change.
     (mistralai 2.4.6's `client/__init__.py`); and at install time a raw socket
     to a hard-coded address (as a URL with one already was) and browser
     shortcuts rewritten to load an extension (python-dateuti).
+- **Services started at login, payloads read back asynchronously, XOR
+  decoders, and names like a popular package's** (the backlog's last four
+  detection items). On the same 516 malicious releases, 87% are now
+  SUSPICIOUS (447; 86% before), 90% with the registry's live dependency
+  history: npm's compromised releases 82% (was 80%), npm's malicious-intent
+  set 80% (79%). Every release GuardDog catches at its strictest verdict,
+  Lazaret now catches too. `lazaret guard` blocks 242 of the 300 npm
+  samples end to end (238 before), still 2 of 219 popular ones. Still the
+  same 3 of 429 popular packages, and no popular package's verdict changed;
+  none of the new shapes fires on the popular packages or on 37,800
+  installed files. Registry engine 2.12.0, so stored and cached verdicts are
+  redone.
+  - **Programs set to start at login or boot** (both engines, a reason of the
+    install-script test): a systemd unit written or `systemctl enable` run,
+    a launchd agent written or loaded, a crontab installed, a Windows Run key
+    written or a scheduled task created, the Startup folder or an XDG
+    autostart entry written. The CanisterWorm releases of @emilgroup's
+    packages installed a systemd user service from their install script.
+    Never at import time, where a library that manages services is normal;
+    shell rc files are left out.
+  - **Code run from what a file reads back asynchronously** (both engines):
+    a `readFile` callback's data, a `.then()` parameter or Python's
+    `with open(…) as f`, read by a path's name from the file itself or a
+    data file next to it, and run as code. react-thunk-log 2.23.2 started a
+    script that decrypted its own LICENSE and ran it. A value read by a
+    path's name counts only in a code runner.
+  - **Home-made XOR decoders** (both engines): the decoded view reads a
+    file's own XOR helper — a function called five times or more with base64
+    or hex literals, whose calls turn into printable text (nine in ten) with
+    a short key among the file's own strings — so the decoded strings are
+    tested as if they were written in the clear. react-zutils 1.0.1 kept
+    the 83 strings of its browser stealer that way, its ngrok address among
+    them.
+  - **SC-TYPOSQUAT** (registry, MAJOR): a release whose name, or a
+    dependency it declares, is one change from one of the 5,000
+    most-downloaded packages of its registry — a character added, dropped or
+    changed, two swapped, or the separators changed. 13 of the malicious
+    releases carry one (requesxs, python-dateuti, tiketoken, sklearns, nhmpy;
+    @hestjs's packages depend on @hestjs/core, one change from
+    @nestjs/core), and none of the popular packages. A name the popular
+    lists know is never one (mysql2, delegates, fastai), and neither is a
+    name near a popular one under 5 characters or near one in its own npm
+    scope. The lists come from npm-high-impact (MIT) and Top PyPI Packages
+    (CC BY 4.0), with their notices, and `scripts/update-popular-names.py`
+    rebuilds them.
 - **A native engine for the supply-chain tests** (Python package; Rust,
   `rust/`, `docs/RUST_ENGINE.md`). The install-script and import-time tests
   and everything they read — the received-code detector, the decoded view,
@@ -172,10 +218,15 @@ project is pre-1.0, so the 0.x API may still change.
   so it never loses a finding. It gives the Python engine's answers exactly:
   differential tests on every pattern (Python 3.10–3.14) and on ~36,900
   cases for 15 hook fields and 24 detectors, and the whole Python suite
-  passes with either engine. The import-time test over 678 of litellm's
-  modules takes 5.7 s instead of 15.6 s on one thread, 3.2 s on two; a
-  registry scan of the litellm wheel, 31.5 s instead of 40.5 s (the per-file
-  rules are still Python), with identical findings. `--engine rust|python`
+  passes with either engine. On real files: the benchmark's 945 registry
+  scans give the same verdicts and findings with both engines, and both
+  tests answer identically file by file on 85,415 files (installed packages
+  and every source file of the benchmark's archives). The 945 scans take
+  853 s instead of 1,097 s (22% less; the 95th percentile 6.2 s instead of
+  9.5 s): the per-file rules, still Python, take most of the rest. The import-time test over 678
+  of litellm's modules takes 5.7 s instead of 15.6 s on one thread, 3.2 s on
+  two; a registry scan of the litellm wheel, 31 s instead of 40 s.
+  `--engine rust|python`
   and `LAZARET_ENGINE` choose (default: native where installed; `--engine
   rust` fails when it isn't), and `--version` says which answers:
   `lazaret 0.1.8 (engine: rust 0.1.8)`. A platform wheel carries it
@@ -192,6 +243,17 @@ project is pre-1.0, so the 0.x API may still change.
   which 0.1.7 did not update; PyPI shows it from the next release.
 
 ### Fixed
+- **chromedriver's installer read as a call to RequestBin** (both engines;
+  in the registry since 0.1.0). The list of addresses typical of exfiltration
+  matched `requestbin` anywhere in the text, and chromedriver's and
+  phantomjs-prebuilt's `install.js` define `requestBinary()` to download
+  their binaries: each install hook was CRITICAL ("contacts an address
+  typical of data exfiltration (requestBin)"), so a `--deps` or registry
+  scan called chromedriver SUSPICIOUS and `lazaret guard` blocked it.
+  RequestBin now counts by its host names (`requestbin.com`, `.net`, `.io`,
+  `requestb.in`); postb.in needs a word boundary after it too. Found by the
+  0.1.8 sweep of every strong reason over installed packages; none of the
+  benchmark's malicious releases relied on the bare word.
 - **The benchmark read the wrong files for 11 PyPI samples.** For compromised
   releases the corpus script took the shallowest folder with a setup.py:
   the upstream source tree the dataset ships next to the release

@@ -21,6 +21,9 @@ Python engine additionally follows flows through Python files and accepts
 taint configs; registry auditing (`lazaret-registry`) is Python-only. When
 the project has Python files, the gate's cross-file condition says so: `No
 cross-file taint flows (JavaScript only: 3 Python files not analyzed)`.
+Since 0.1.8 the Python package can also run its supply-chain tests on a
+native engine written in Rust; this package runs its JavaScript engine,
+which gives the same findings.
 
 ```
 npx lazaret check ./my-project
@@ -90,8 +93,11 @@ resolving to one file. Writes are atomic
   when it loads or runs more code); eval of an inline decoder applied to
   hundreds of character codes or a long literal (`SC-EVAL-DECODER`,
   CRITICAL); and, in a dependency's install hook, a
-  script that runs `npm publish`, collects npm access tokens, or runs a DLL of
-  its own with `rundll32`/`regsvr32`.
+  script that runs `npm publish`, collects npm access tokens, runs a DLL of
+  its own with `rundll32`/`regsvr32`, or sets a program to start at login or
+  boot (a systemd unit, a launchd agent, a crontab, a Windows Run key or
+  scheduled task, the Startup folder, an XDG autostart entry: the
+  CanisterWorm releases of @emilgroup's packages).
 - **Unicode evasion**: JS identifier escapes (`\u0065val`) and Python NFKC
   spellings are matched as the runtime reads them; bidirectional control
   characters are `S-BIDI` (Trojan Source); a name spelled with look-alike
@@ -137,11 +143,19 @@ resolving to one file. Writes are atomic
   run through a shell, or a value received over the network run as code (also
   under an alias or an indirect `eval`), deserialized (`pickle.loads`, unsafe
   `yaml.load`, `unserialize`; CWE-502), used as a dynamically imported module
-  name, or written to a file the same code then runs). Since 0.1.8 a
-  script a hook runs is followed to the scripts it starts with node or
+  name, or written to a file the same code then runs). Since 0.1.8 both
+  tests also fail on data sent to a chat bot or webhook whose secret is in
+  the code (Telegram, Discord, Slack), credential files sent to a raw IP
+  address, a sweep of three or more credential folders, the host name sent
+  to an address kept base64-encoded or in a DNS name the code builds, the
+  public IP address sent to a data-capture service, a reverse shell, a
+  cryptocurrency miner, and code run from what a file reads back from itself or a data file
+  next to it, at once or asynchronously (a `readFile` callback, `.then()`);
+  a script a hook runs is followed to the scripts it starts with node or
   python (`spawn(process.execPath, [file])`, `fork(file)`), the tests read
   the strings a file decodes as it runs (hex, base64, a file's own decoding
-  helpers), and — as in the Python engine — a package's files are followed
+  helpers, a home-made XOR decoder), and — as in the Python engine — a
+  package's files are followed
   into each other: a value received in one file and run in another, through
   wrappers and re-exports, classes, object literals, callbacks and Promises,
   caches, dynamic imports and environment variables, or a function of the
