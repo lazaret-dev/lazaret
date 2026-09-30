@@ -1698,7 +1698,7 @@
   },
   "_CAPTURE_SERVICE_RE": {
    "flags": "i",
-   "re": "webhook\\.site|typedwebhook\\.tools|oastify\\.com|burpcollaborator|\\binteract\\.sh|\\boast[\\w.-]*\\.(?:pro|live|site|online|fun|me|com)\\b|pipedream\\.net|requestbin|requestcatcher\\.com|hookbin\\.com|postb\\.in|beeceptor\\.com|dnslog\\.cn|ceye\\.io|canarytokens"
+   "re": "webhook\\.site|typedwebhook\\.tools|oastify\\.com|burpcollaborator|\\binteract\\.sh|\\boast[\\w.-]*\\.(?:pro|live|site|online|fun|me|com)\\b|pipedream\\.net|requestbin\\.(?:com|net|io)\\b|\\brequestb\\.in\\b|requestcatcher\\.com|hookbin\\.com|postb\\.in\\b|beeceptor\\.com|dnslog\\.cn|ceye\\.io|canarytokens"
   },
   "_CAT_META": {
    "map": {
@@ -6360,14 +6360,14 @@
   },
   "_EXFIL_DEST_RE": {
    "flags": "i",
-   "re": "https?://(?:\\d{1,3}\\.){3}\\d{1,3}\\b|pastebin\\.com|\\bngrok|webhook\\.site|discord(?:app)?\\.com/api/webhooks|api\\.telegram\\.org|oastify\\.com|burpcollaborator|\\binteract\\.sh|\\boast\\.(?:pro|live|site|online|fun|me)\\b|requestbin|pipedream\\.net|transfer\\.sh|\\.onion\\b"
+   "re": "https?://(?:\\d{1,3}\\.){3}\\d{1,3}\\b|pastebin\\.com|\\bngrok|webhook\\.site|discord(?:app)?\\.com/api/webhooks|api\\.telegram\\.org|oastify\\.com|burpcollaborator|\\binteract\\.sh|\\boast\\.(?:pro|live|site|online|fun|me)\\b|requestbin\\.(?:com|net|io)\\b|\\brequestb\\.in\\b|pipedream\\.net|transfer\\.sh|\\.onion\\b"
   },
   "_EXFIL_SERVICES": {
-   "value": "pastebin\\.com|\\bngrok|webhook\\.site|discord(?:app)?\\.com/api/webhooks|api\\.telegram\\.org|oastify\\.com|burpcollaborator|\\binteract\\.sh|\\boast\\.(?:pro|live|site|online|fun|me)\\b|requestbin|pipedream\\.net|transfer\\.sh|\\.onion\\b"
+   "value": "pastebin\\.com|\\bngrok|webhook\\.site|discord(?:app)?\\.com/api/webhooks|api\\.telegram\\.org|oastify\\.com|burpcollaborator|\\binteract\\.sh|\\boast\\.(?:pro|live|site|online|fun|me)\\b|requestbin\\.(?:com|net|io)\\b|\\brequestb\\.in\\b|pipedream\\.net|transfer\\.sh|\\.onion\\b"
   },
   "_EXFIL_SERVICE_RE": {
    "flags": "i",
-   "re": "pastebin\\.com|\\bngrok|webhook\\.site|discord(?:app)?\\.com/api/webhooks|api\\.telegram\\.org|oastify\\.com|burpcollaborator|\\binteract\\.sh|\\boast\\.(?:pro|live|site|online|fun|me)\\b|requestbin|pipedream\\.net|transfer\\.sh|\\.onion\\b"
+   "re": "pastebin\\.com|\\bngrok|webhook\\.site|discord(?:app)?\\.com/api/webhooks|api\\.telegram\\.org|oastify\\.com|burpcollaborator|\\binteract\\.sh|\\boast\\.(?:pro|live|site|online|fun|me)\\b|requestbin\\.(?:com|net|io)\\b|\\brequestb\\.in\\b|pipedream\\.net|transfer\\.sh|\\.onion\\b"
   },
   "_FASTAPI_IMPORT_RE": {
    "flags": "",

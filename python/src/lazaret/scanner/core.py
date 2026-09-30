@@ -5961,11 +5961,14 @@ _SECRET_SOURCE_RE = re.compile(
     # shell: the whole environment piped or redirected somewhere
     r"""|(?:^|[\s;&(`])(?:env|printenv|set)\s*(?:\|(?!\|)|>)|\$\(\s*(?:env|printenv)\s*\)|`\s*(?:env|printenv)\s*`""",
     re.I | re.M)
+# RequestBin by its host names only (0.1.8): the bare word is also the start
+# of requestBinary(), which chromedriver's and phantomjs-prebuilt's installers
+# define to download their binaries.
 _EXFIL_SERVICES = (
     r"""pastebin\.com|\bngrok|webhook\.site|"""
     r"""discord(?:app)?\.com/api/webhooks|api\.telegram\.org|oastify\.com|burpcollaborator|"""
-    r"""\binteract\.sh|\boast\.(?:pro|live|site|online|fun|me)\b|requestbin|pipedream\.net|"""
-    r"""transfer\.sh|\.onion\b""")
+    r"""\binteract\.sh|\boast\.(?:pro|live|site|online|fun|me)\b|requestbin\.(?:com|net|io)\b|\brequestb\.in\b|"""
+    r"""pipedream\.net|transfer\.sh|\.onion\b""")
 _EXFIL_DEST_RE = re.compile(r"""https?://(?:\d{1,3}\.){3}\d{1,3}\b|""" + _EXFIL_SERVICES, re.I)
 _EXFIL_SERVICE_RE = re.compile(_EXFIL_SERVICES, re.I)      # the named ones, no raw IPs
 # `curl … | sh` / `wget … | bash`, read in one left-to-right pass: a pipe into
@@ -7757,7 +7760,8 @@ _STRONG_IMPORT_REASONS = (
 # request inspection): no library reports to one
 _CAPTURE_SERVICE_RE = re.compile(
     r"webhook\.site|typedwebhook\.tools|oastify\.com|burpcollaborator|\binteract\.sh|\boast[\w.-]*\.(?:pro|live|site"
-    r"|online|fun|me|com)\b|pipedream\.net|requestbin|requestcatcher\.com|hookbin\.com|postb\.in|beeceptor\.com"
+    r"|online|fun|me|com)\b|pipedream\.net|requestbin\.(?:com|net|io)\b|\brequestb\.in\b|requestcatcher\.com"
+    r"|hookbin\.com|postb\.in\b|beeceptor\.com"
     r"|dnslog\.cn|ceye\.io|canarytokens", re.I)
 # An ngrok tunnel's own address counts as one (0.1.8): a subdomain someone's
 # laptop answers. Searched only in a text that names ngrok (the pattern can't

