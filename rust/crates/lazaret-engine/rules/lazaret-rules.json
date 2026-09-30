@@ -1520,9 +1520,6 @@
     }
    ]
   },
-  "VERSION": {
-   "value": "0.1.7"
-  },
   "_AGENT_BIN_CMD_RE": {
    "flags": "",
    "re": "(?<![\\w./-])(?:claude|gemini|codex|aider|cline|opencode|cursor-agent|amazon-?q|qchat|q)(?![\\w./-])"
