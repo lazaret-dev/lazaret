@@ -181,6 +181,7 @@ class _TokenPattern:
 
     def __init__(self, alternatives):
         assert alternatives[-1] == _JWT_ALT
+        self.alternatives = tuple(alternatives)
         self.pattern = "|".join(alternatives)
         self.flags = re.compile(self.pattern).flags
         self._others = re.compile("|".join(alternatives[:-1]))
@@ -3302,7 +3303,7 @@ _JS_UESC_RE = re.compile(r"\\u\{([0-9A-Fa-f]{1,6})\}|\\u([0-9A-Fa-f]{4})")
 
 #: Identifier characters since Unicode 15.1 only (ZWNJ, ZWJ and the two
 #: katakana middle dots): Python 3.13+ and current Node say so, 3.10-3.12 not.
-_LATER_ID_CONTINUE = frozenset((0x200C, 0x200D, 0x30FB, 0xFF65))
+_LATER_ID_CONTINUE = frozenset("\u200c\u200d\u30fb\uff65")
 
 
 def _js_ident_char(m):
@@ -3312,7 +3313,7 @@ def _js_ident_char(m):
     if cp > 0x10FFFF:
         return None
     ch = chr(cp)
-    if ch == "$" or cp in _LATER_ID_CONTINUE:
+    if ch == "$" or ch in _LATER_ID_CONTINUE:
         return ch
     return ch if _unicode13.assigned(cp) and ("a" + ch).isidentifier() else None
 
@@ -3700,6 +3701,7 @@ def redact_secret_snippet(rid, snippet, flagged_idx, raw_line):
 _HEX_ESCAPE_RE = re.compile(r"\\x([0-9A-Fa-f]{2})")
 HEX_MIN_ESCAPES = 8
 HEX_PRINTABLE_SHARE = 0.75
+HEX_LETTER_SHARE = 0.4          # of the decoded text: readable means words
 _LETTER_RUN_RE = re.compile(r"[A-Za-z]{3}")
 HIDDEN_TEXT_DANGER_RE = re.compile(
     r"https?://|\b(?:eval|exec|execSync|compile|__import__|import|require|child_process|"
@@ -3720,7 +3722,7 @@ def hex_hidden_text(line):
     # Readable means words: palette bytes and punctuation tables that happen to
     # fall in the printable range ("-95479:37", "!$*-:=?[]") are data.
     letters = sum(ch.isalpha() for ch in text)
-    if not _LETTER_RUN_RE.search(text) or letters / len(text) < 0.4:
+    if not _LETTER_RUN_RE.search(text) or letters / len(text) < HEX_LETTER_SHARE:
         return None
     return text
 
@@ -3863,10 +3865,11 @@ def lookalike_name(code, lang, words):
             if ch.isascii():
                 continue
             if ch in _INVISIBLE_IN_NAMES:
-                part = f"an invisible U+{ord(ch):04X}"
+                part = _LOOKALIKE_INVISIBLE.format(cp=f"U+{ord(ch):04X}")
             else:
                 shown = unicodedata.normalize("NFKC", ch) if lang == "js" else ch
-                part = f"U+{ord(ch):04X} for {''.join(_LOOKALIKES.get(c, c) for c in shown)!r}"
+                part = _LOOKALIKE_LETTER.format(cp=f"U+{ord(ch):04X}",
+                                                reads=''.join(_LOOKALIKES.get(c, c) for c in shown))
             if part not in parts:
                 parts.append(part)
         return name, skeleton, severity, other, ", ".join(parts), m.start()
@@ -3881,15 +3884,24 @@ _LOOKALIKE_WHY = (
     "Source).")
 
 
+_LOOKALIKE_RULE = {
+    "id": "SC-HOMOGLYPH", "name": "Look-alike identifier", "type": "HOTSPOT", "sev": "CRITICAL",
+    "msg": "{name!r} reads as {skeleton!r}{where} but is spelled with {detail}.",
+    "why": _LOOKALIKE_WHY,
+    "fix": "Rename it with the letters it appears to have, and find out why it was written this way.",
+    "ref": "CWE-1007 · CVE-2021-42694"}
+_LOOKALIKE_OTHER = ", another name in this file,"     # {where}, when it reads as another name of the file
+_LOOKALIKE_INVISIBLE = "an invisible {cp}"            # the parts of {detail}, joined with ", "
+_LOOKALIKE_LETTER = "{cp} for {reads!r}"
+
+
 def lookalike_issue(found, path, line_no, lines):
     name, skeleton, severity, other, detail, col = found
-    where = ", another name in this file," if other else ""
+    where = _LOOKALIKE_OTHER if other else ""
     return mk_issue(
-        {"id": "SC-HOMOGLYPH", "name": "Look-alike identifier", "type": "HOTSPOT", "sev": severity,
-         "msg": f"{name!r} reads as {skeleton!r}{where} but is spelled with {detail}.",
-         "why": _LOOKALIKE_WHY,
-         "fix": "Rename it with the letters it appears to have, and find out why it was written this way.",
-         "ref": "CWE-1007 · CVE-2021-42694"}, path, line_no, lines, col)
+        dict(_LOOKALIKE_RULE, sev=severity,
+             msg=_LOOKALIKE_RULE["msg"].format(name=name, skeleton=skeleton, where=where, detail=detail)),
+        path, line_no, lines, col)
 
 
 # ---------------- Invisible-character payload (SC-HIDDEN-UNICODE) ----------------
@@ -3935,19 +3947,25 @@ _HIDDEN_UNICODE_WHY = (
     "emoji and a single emoji variation selector are ordinary.")
 
 
+_HIDDEN_UNICODE_RULE = {
+    "id": "SC-HIDDEN-UNICODE", "name": "Invisible-character payload", "type": "HOTSPOT", "sev": "MAJOR",
+    "msg": "A run of {n} invisible {what} carries hidden data in the code.",
+    "why": _HIDDEN_UNICODE_WHY,
+    "fix": "Show the characters as escape sequences and decode what they spell; if it is a payload, do not run the file.",
+    "ref": "CWE-506 · Supply chain"}
+# ... CRITICAL, with this message, in a file that runs code from a string
+_HIDDEN_UNICODE_RUNS_MSG = "A run of {n} invisible {what} carries hidden data in the code, and the file runs code from a string."
+_HIDDEN_UNICODE_WHAT = {"both": "variation selectors and tag characters", "tags": "tag characters",
+                        "selectors": "variation selectors"}
+
+
 def _hidden_unicode_issue(path, line_no, lines, col, run, runs_code):
     tags = any(_TAG_START <= c <= _TAG_END for c in run)
     varsel = any(not (_TAG_START <= c <= _TAG_END) for c in run)
-    what = ("variation selectors and tag characters" if tags and varsel
-            else "tag characters" if tags else "variation selectors")
-    return mk_issue(
-        {"id": "SC-HIDDEN-UNICODE", "name": "Invisible-character payload", "type": "HOTSPOT",
-         "sev": "CRITICAL" if runs_code else "MAJOR",
-         "msg": f"A run of {len(run)} invisible {what} carries hidden data in the code"
-                + (", and the file runs code from a string." if runs_code else "."),
-         "why": _HIDDEN_UNICODE_WHY,
-         "fix": "Show the characters as escape sequences and decode what they spell; if it is a payload, do not run the file.",
-         "ref": "CWE-506 · Supply chain"}, path, line_no, lines, col)
+    what = _HIDDEN_UNICODE_WHAT["both" if tags and varsel else "tags" if tags else "selectors"]
+    msg = _HIDDEN_UNICODE_RUNS_MSG if runs_code else _HIDDEN_UNICODE_RULE["msg"]
+    return mk_issue(dict(_HIDDEN_UNICODE_RULE, sev="CRITICAL" if runs_code else "MAJOR",
+                         msg=msg.format(n=len(run), what=what)), path, line_no, lines, col)
 
 
 _PEM_BODY_RE = re.compile(r"[A-Za-z0-9+/]{40,}={0,2}")
@@ -4058,6 +4076,14 @@ def mk_issue(rule_or_dict, path, line_no, lines, col=None, redactor=None):
 # MAJOR B-EMPTY-CATCH findings and an 87.7 MB JSON report (120k lines: 66.7 MB).
 CAP_PER_RULE = 200
 _NEVER_CAPPED_PREFIXES = ("S-", "T-", "SC-", "X-", "SQL-")
+_CAPPED_RULE = {
+    "id": "Q-CAPPED", "name": "Findings capped", "type": "SMELL", "sev": "INFO",
+    "msg": "{n} more {rule} findings omitted",
+    "why": ("Findings of one rule that repeat hundreds of times in one file are capped "
+            "so reports stay readable; security findings are never capped."),
+    "fix": ("Fix or deliberately suppress the {rule} pattern in this file, then re-scan "
+            "to see the remaining occurrences."),
+    "ref": "Maintainability"}
 
 
 def _cappable(issue):
@@ -4097,14 +4123,8 @@ def cap_issues(path, issues, lines):
         return issues
     out = [i for k, i in enumerate(issues) if k not in dropped]
     for rid, (n, first, typ) in omitted.items():
-        note = mk_issue(
-            {"id": "Q-CAPPED", "name": "Findings capped", "type": "SMELL", "sev": "INFO",
-             "msg": f"{n} more {rid} findings omitted",
-             "why": "Findings of one rule that repeat hundreds of times in one file are capped "
-                    "so reports stay readable; security findings are never capped.",
-             "fix": f"Fix or deliberately suppress the {rid} pattern in this file, then re-scan "
-                    "to see the remaining occurrences.",
-             "ref": "Maintainability"}, path, first, lines)
+        note = mk_issue(dict(_CAPPED_RULE, msg=_CAPPED_RULE["msg"].format(n=n, rule=rid),
+                             fix=_CAPPED_RULE["fix"].format(rule=rid)), path, first, lines)
         # what the note stands for: the maintainability rating counts the
         # omitted findings, not the note (see maintainability_rating)
         note["omitted"] = n
@@ -4981,6 +5001,8 @@ def _blank_strings(code):
 # `__importStar(mod)` helper carried the mark to 6,216 names, every spawn in
 # the file among them.
 DEP_FLOW_WINDOW = 10_000
+_DECODE_FLOW_MSG = "Decoded payload (assigned at line {line}) reaches a code-execution sink."
+_DECODE_SAME_CALL_MSG = "Decoded payload reaches a code-execution sink in the same call."
 # `function exec(`, `function* exec(`, `def exec(`: a definition (on the 24 chars before the name)
 _FN_DEF_BEFORE_RE = re.compile(r"(?:^|[^\w$])(?:function\s*\*?|def)\s*$")
 
@@ -5046,14 +5068,83 @@ def _dep_decode_flow(path, ctx, issues):
             end = min(len(blank) if closed is None else closed, m.end() + DEP_SINK_ARGS_MAX)
             src = live(m.end(), end, at)
             if src:
-                msg = (f"Decoded payload (assigned at line {min(d[0] for d in src)}) "
-                       f"reaches a code-execution sink.")
+                msg = _DECODE_FLOW_MSG.format(line=min(d[0] for d in src))
             elif decode_re.search(code, m.end(), end):
-                msg = "Decoded payload reaches a code-execution sink in the same call."
+                msg = _DECODE_SAME_CALL_MSG
             else:
                 continue
             have.add(i + 1)
             issues.append(mk_issue(dict(rule, msg=msg), path, i + 1, ctx.lines, m.start()))
+
+
+# ---------------- The per-line pass's findings ----------------
+# The texts of the findings _scan_file makes, as module-level values, so the
+# rule pack carries them and the native engine builds the same findings from
+# them (docs/RUST_ENGINE.md). A "msg" (or "fix") with {fields} is a
+# str.format template, filled where the finding is made.
+_LONGLINE_RULE = {
+    "id": "Q-LONGLINE", "name": "Line too long", "type": "SMELL", "sev": "MINOR",
+    "msg": f"Line exceeds {LONG_LINE} characters.",
+    "why": "Very long lines hurt readability and reviews.",
+    "fix": "Break the line up for readability.", "ref": "Maintainability"}
+_HEXSTR_TEXT_RULE = {
+    "id": "SC-HEXSTR", "name": "Hex-escaped readable text", "type": "HOTSPOT", "sev": "MAJOR",
+    "msg": "Hex escapes hide readable text: {preview!r}.",
+    "why": ("Escaping ordinary printable characters serves no purpose except hiding "
+            "them from review and search; this text is readable once decoded."),
+    "fix": "Decode the string and review what it does.",
+    "ref": "CWE-506 · Supply chain"}
+# ... CRITICAL, with this "why", when the text names code execution, a download or a URL
+_HEXSTR_DANGER_WHY = ("Escaping ordinary printable characters serves no purpose except hiding "
+                      "them from review and search; this text names code execution, a download, or a URL.")
+_HEXSTR_NAME_RULE = {
+    "id": "SC-HEXSTR", "name": "Hex-escaped readable text", "type": "HOTSPOT", "sev": "CRITICAL",
+    "msg": "Escape sequences hide a name: {name!r}.",
+    "why": ("Nothing needs to escape a letter of a name like this one: writing it as "
+            "escape sequences only hides it from review and search, and this one "
+            "names code execution, a download, or a URL."),
+    "fix": "Decode the string and review what it does.",
+    "ref": "CWE-506 · Supply chain"}
+_CHARCODE_RULE = {
+    "id": "SC-CHARCODE", "name": "Char-code string building", "type": "HOTSPOT", "sev": "MAJOR",
+    "msg": "String assembled from character codes — obfuscation indicator.",
+    "why": "fromCharCode chains hide payloads from static review.",
+    "fix": "Decode and review what string is being built.",
+    "ref": "CWE-506 · Supply chain"}
+_B64_RULE = {
+    "id": "SC-B64", "name": "Large base64 blob", "type": "HOTSPOT", "sev": "MAJOR",
+    "msg": "Base64 blob (200+ chars) embedded in code.",
+    "why": "Embedded encoded blobs can carry second-stage payloads.",
+    "fix": "Decode and verify the content; move legitimate assets to data files.",
+    "ref": "CWE-506 · Supply chain"}
+_ENTROPY_RULE = {
+    "id": "S-ENTROPY", "name": "High-entropy string", "type": "HOTSPOT", "sev": "MAJOR",
+    "msg": "High-entropy string literal — possible hardcoded secret.",
+    "why": "Random-looking constants are usually keys or tokens.",
+    "fix": "If it is a secret, rotate it and load it from the environment.",
+    "ref": "CWE-798 · OWASP A07"}
+_OBF_IDENT_RULE = {
+    "id": "SC-OBF-IDENT", "name": "Obfuscated identifier pattern", "type": "HOTSPOT", "sev": "CRITICAL",
+    "msg": "{n} '_0x…' identifiers — javascript-obfuscator signature.",
+    "why": ("This naming pattern is produced by obfuscation tools; in a dependency it is "
+            "a classic indicator of a compromised or malicious package."),
+    "fix": "Diff against the package's published repository; consider removing the dependency.",
+    "ref": "CWE-506 · Supply chain"}
+OBF_IDENT_MIN = 5              # distinct '_0x…' names that make SC-OBF-IDENT
+PREVIEW_MAX = 60               # characters of decoded or hidden text a message shows
+
+
+def _preview(text):
+    """`text` as a message shows it: at most PREVIEW_MAX characters, "..." marking a cut."""
+    return text if len(text) <= PREVIEW_MAX else text[:PREVIEW_MAX - 3] + "..."
+
+
+def _hexstr_text_rule(hidden):
+    """SC-HEXSTR for the readable text a line's hex escapes hide."""
+    rule = dict(_HEXSTR_TEXT_RULE, msg=_HEXSTR_TEXT_RULE["msg"].format(preview=_preview(hidden)))
+    if HIDDEN_TEXT_DANGER_RE.search(hidden):
+        rule.update(sev="CRITICAL", why=_HEXSTR_DANGER_WHY)
+    return rule
 
 
 def _scan_file(path, content, lines, lang, dep, ctx, issues):
@@ -5078,12 +5169,7 @@ def _scan_file(path, content, lines, lang, dep, ctx, issues):
         if not line or line.isspace():
             # no rule or heuristic matches whitespace alone; only the length rule applies
             if not dep and len(line) > LONG_LINE:
-                issues.append(mk_issue(
-                    {"id": "Q-LONGLINE", "name": "Line too long", "type": "SMELL", "sev": "MINOR",
-                     "msg": f"Line exceeds {LONG_LINE} characters.",
-                     "why": "Very long lines hurt readability and reviews.",
-                     "fix": "Break the line up for readability.", "ref": "Maintainability"},
-                    path, i + 1, lines))
+                issues.append(mk_issue(_LONGLINE_RULE, path, i + 1, lines))
             continue
         mline = mlines[i]
         for r in rules:
@@ -5107,39 +5193,17 @@ def _scan_file(path, content, lines, lang, dep, ctx, issues):
                 secret_lines.add(i)
             issues.append(mk_issue(r, path, i + 1, lines, col))
         if not dep and len(line) > LONG_LINE:
-            issues.append(mk_issue(
-                {"id": "Q-LONGLINE", "name": "Line too long", "type": "SMELL", "sev": "MINOR",
-                 "msg": f"Line exceeds {LONG_LINE} characters.",
-                 "why": "Very long lines hurt readability and reviews.",
-                 "fix": "Break the line up for readability.", "ref": "Maintainability"},
-                path, i + 1, lines))
+            issues.append(mk_issue(_LONGLINE_RULE, path, i + 1, lines))
         # --- obfuscation heuristics (strong supply-chain indicators) ---
         hidden = hex_hidden_text(line)
         if hidden is not None:
-            dangerous = bool(HIDDEN_TEXT_DANGER_RE.search(hidden))
-            preview = hidden if len(hidden) <= 60 else hidden[:57] + "..."
-            issues.append(mk_issue(
-                {"id": "SC-HEXSTR", "name": "Hex-escaped readable text", "type": "HOTSPOT",
-                 "sev": "CRITICAL" if dangerous else "MAJOR",
-                 "msg": f"Hex escapes hide readable text: {preview!r}.",
-                 "why": ("Escaping ordinary printable characters serves no purpose except hiding "
-                         "them from review and search; this text "
-                         + ("names code execution, a download, or a URL." if dangerous
-                            else "is readable once decoded.")),
-                 "fix": "Decode the string and review what it does.",
-                 "ref": "CWE-506 · Supply chain"}, path, i + 1, lines,
-                _HEX_ESCAPE_RE.search(line).start()))
+            issues.append(mk_issue(_hexstr_text_rule(hidden), path, i + 1, lines,
+                                   _HEX_ESCAPE_RE.search(line).start()))
         else:
             name = hex_hidden_name(line)
             if name is not None:
-                issues.append(mk_issue(
-                    {"id": "SC-HEXSTR", "name": "Hex-escaped readable text", "type": "HOTSPOT",
-                     "sev": "CRITICAL", "msg": f"Escape sequences hide a name: {name[0]!r}.",
-                     "why": ("Nothing needs to escape a letter of a name like this one: writing it as "
-                             "escape sequences only hides it from review and search, and this one "
-                             "names code execution, a download, or a URL."),
-                     "fix": "Decode the string and review what it does.",
-                     "ref": "CWE-506 · Supply chain"}, path, i + 1, lines, name[1]))
+                issues.append(mk_issue(dict(_HEXSTR_NAME_RULE, msg=_HEXSTR_NAME_RULE["msg"].format(name=name[0])),
+                                       path, i + 1, lines, name[1]))
         if lang in ("js", "py") and not cmask[i]:
             code = ctx.mcode(i)
             if not code.isascii():
@@ -5154,20 +5218,10 @@ def _scan_file(path, content, lines, lang, dep, ctx, issues):
                 issues.append(_hidden_unicode_issue(path, i + 1, lines, hrun[0], hrun[1], file_runs_code()))
         cm_col = _charcode_col(line) if lang == "js" else None
         if cm_col is not None:
-            issues.append(mk_issue(
-                {"id": "SC-CHARCODE", "name": "Char-code string building", "type": "HOTSPOT", "sev": "MAJOR",
-                 "msg": "String assembled from character codes — obfuscation indicator.",
-                 "why": "fromCharCode chains hide payloads from static review.",
-                 "fix": "Decode and review what string is being built.",
-                 "ref": "CWE-506 · Supply chain"}, path, i + 1, lines, cm_col))
+            issues.append(mk_issue(_CHARCODE_RULE, path, i + 1, lines, cm_col))
         bm = B64_BLOB_RE.search(line)
         if bm and "sourceMappingURL" not in line:
-            issues.append(mk_issue(
-                {"id": "SC-B64", "name": "Large base64 blob", "type": "HOTSPOT", "sev": "MAJOR",
-                 "msg": "Base64 blob (200+ chars) embedded in code.",
-                 "why": "Embedded encoded blobs can carry second-stage payloads.",
-                 "fix": "Decode and verify the content; move legitimate assets to data files.",
-                 "ref": "CWE-506 · Supply chain"}, path, i + 1, lines, bm.start()))
+            issues.append(mk_issue(_B64_RULE, path, i + 1, lines, bm.start()))
         if lang in ("js", "py"):
             off = offscreen_code(line, lang)
             if off is not None and ctx.names_code(i).strip():
@@ -5180,27 +5234,15 @@ def _scan_file(path, content, lines, lang, dep, ctx, issues):
             # the file's literal index holds exactly the entropy_secretish()
             # literals of non-skip lines — computed once, shared with redaction
             if em and em.group(1) in ctx.secrets().lits:
-                issues.append(mk_issue(
-                    {"id": "S-ENTROPY", "name": "High-entropy string", "type": "HOTSPOT", "sev": "MAJOR",
-                     "msg": "High-entropy string literal — possible hardcoded secret.",
-                     "why": "Random-looking constants are usually keys or tokens.",
-                     "fix": "If it is a secret, rotate it and load it from the environment.",
-                     "ref": "CWE-798 · OWASP A07"}, path, i + 1, lines, em.start(1)))
+                issues.append(mk_issue(_ENTROPY_RULE, path, i + 1, lines, em.start(1)))
     # file-level: javascript-obfuscator identifier signature
     if lang == "js":
         obf = OBF_IDENT_RE.findall(content)
-        if len(set(obf)) >= 5:
+        if len(set(obf)) >= OBF_IDENT_MIN:
             first_off = content.find(obf[0])
             first_line = content[:first_off].count("\n") + 1
-            issues.append(mk_issue(
-                {"id": "SC-OBF-IDENT", "name": "Obfuscated identifier pattern", "type": "HOTSPOT",
-                 "sev": "CRITICAL",
-                 "msg": f"{len(set(obf))} '_0x…' identifiers — javascript-obfuscator signature.",
-                 "why": "This naming pattern is produced by obfuscation tools; in a dependency it is "
-                        "a classic indicator of a compromised or malicious package.",
-                 "fix": "Diff against the package's published repository; consider removing the dependency.",
-                 "ref": "CWE-506 · Supply chain"}, path, first_line, lines,
-                first_off - content.rfind("\n", 0, first_off) - 1))
+            issues.append(mk_issue(dict(_OBF_IDENT_RULE, msg=_OBF_IDENT_RULE["msg"].format(n=len(set(obf)))),
+                                   path, first_line, lines, first_off - content.rfind("\n", 0, first_off) - 1))
     if lang in ("js", "py"):
         at = self_publish_at(content)
         if at >= 0:
@@ -7621,16 +7663,21 @@ _OFFSCREEN_WHY = ("A long run of blanks pushes code past the right edge of edito
                   "columns right. No formatter puts code there.")
 
 
+_OFFSCREEN_RULE = {
+    "id": "SC-OFFSCREEN-CODE", "name": "Code hidden off-screen", "type": "HOTSPOT", "sev": "MAJOR",
+    "msg": "Code after {blanks} blanks on this line, where editors and review don't show it: {preview!r}.",
+    "why": _OFFSCREEN_WHY,
+    "fix": "Read the whole line (turn on word wrap) and review what it does.",
+    "ref": "CWE-506 · Supply chain"}
+_OFFSCREEN_RUNS_WHY = _OFFSCREEN_WHY + " This code loads or runs more code."   # ... CRITICAL, when it does
+
+
 def _offscreen_issue(path, line_no, lines, found):
     col, blanks, hidden, runs = found
-    preview = hidden if len(hidden) <= 60 else hidden[:57] + "..."
     return mk_issue(
-        {"id": "SC-OFFSCREEN-CODE", "name": "Code hidden off-screen", "type": "HOTSPOT",
-         "sev": "CRITICAL" if runs else "MAJOR",
-         "msg": f"Code after {blanks} blanks on this line, where editors and review don't show it: {preview!r}.",
-         "why": _OFFSCREEN_WHY + (" This code loads or runs more code." if runs else ""),
-         "fix": "Read the whole line (turn on word wrap) and review what it does.",
-         "ref": "CWE-506 · Supply chain"}, path, line_no, lines, col)
+        dict(_OFFSCREEN_RULE, sev="CRITICAL" if runs else "MAJOR",
+             msg=_OFFSCREEN_RULE["msg"].format(blanks=blanks, preview=_preview(hidden)),
+             why=_OFFSCREEN_RUNS_WHY if runs else _OFFSCREEN_WHY), path, line_no, lines, col)
 
 
 def install_script_risk(text):

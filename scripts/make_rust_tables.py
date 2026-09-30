@@ -280,6 +280,11 @@ def _value(v):
         if not isinstance(v.pattern, str):
             return None                               # (bytes patterns are the file walker's, not text rules)
         return {"re": v.pattern, "flags": _flags(v)}
+    if isinstance(v, _token_pattern_type()):
+        # core's linear-time matcher of "|".join(alternatives), the last one
+        # the JWT alternative (S-TOKEN, secret redaction): its text, and the
+        # alternatives the engine matches the same way
+        return {"re": v.pattern, "flags": _flags(v), "token": list(v.alternatives)}
     if isinstance(v, bool) or v is None:
         return {"value": v}
     if isinstance(v, int) and not -(1 << 63) <= v < (1 << 63):
@@ -311,6 +316,11 @@ def _value(v):
 
 
 _NOT_DATA = object()
+
+
+def _token_pattern_type():
+    from lazaret.scanner import core
+    return core._TokenPattern
 
 
 def _key(k):

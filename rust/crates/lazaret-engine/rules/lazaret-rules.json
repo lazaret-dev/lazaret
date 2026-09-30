@@ -394,6 +394,9 @@
   "HEADER_SAMPLE_BYTES": {
    "value": 512
   },
+  "HEX_LETTER_SHARE": {
+   "value": 0.4
+  },
   "HEX_MIN_ESCAPES": {
    "value": 8
   },
@@ -534,6 +537,9 @@
     }
    ]
   },
+  "OBF_IDENT_MIN": {
+   "value": 5
+  },
   "OBF_IDENT_RE": {
    "flags": "",
    "re": "\\b_0x[0-9a-f]{4,}\\b"
@@ -583,6 +589,9 @@
      "value": "migrations"
     }
    ]
+  },
+  "PREVIEW_MAX": {
+   "value": 60
   },
   "PTH_EXT": {
    "value": ".pth"
@@ -636,6 +645,2759 @@
   },
   "REPO_TAINT_CONFIG": {
    "value": ".lazaret-taint.json"
+  },
+  "RULES": {
+   "list": [
+    {
+     "map": {
+      "fix": {
+       "value": "Replace with safe parsing (ast.literal_eval) or an explicit dispatch table."
+      },
+      "id": {
+       "value": "S-EVAL-PY"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        }
+       ]
+      },
+      "msg": {
+       "value": "Use of eval/exec enables arbitrary code execution."
+      },
+      "name": {
+       "value": "Dynamic code execution"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "(?<![\\w.])(eval|exec)\\s*\\("
+      },
+      "ref": {
+       "value": "CWE-95 \u00b7 OWASP A03: Injection"
+      },
+      "sev": {
+       "value": "CRITICAL"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "If any part of the evaluated string derives from user input, an attacker can run arbitrary code in your process."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Replace with JSON.parse or an explicit dispatch table."
+      },
+      "id": {
+       "value": "S-EVAL-JS"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "js"
+        }
+       ]
+      },
+      "msg": {
+       "value": "Use of eval enables arbitrary code execution."
+      },
+      "name": {
+       "value": "Dynamic code execution"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "(?<![\\w.])eval\\s*\\("
+      },
+      "ref": {
+       "value": "CWE-95 \u00b7 OWASP A03: Injection"
+      },
+      "sev": {
+       "value": "CRITICAL"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "If any part of the evaluated string derives from user input, an attacker can run arbitrary code."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Define functions statically or use a whitelisted dispatch map."
+      },
+      "id": {
+       "value": "S-NEWFUNC"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "js"
+        }
+       ]
+      },
+      "msg": {
+       "value": "new Function() compiles strings into code, equivalent to eval."
+      },
+      "name": {
+       "value": "Function constructor"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "new\\s+Function\\s*\\("
+      },
+      "ref": {
+       "value": "CWE-95 \u00b7 OWASP A03"
+      },
+      "sev": {
+       "value": "CRITICAL"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "String-built functions can execute attacker-controlled input."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Use parameterized queries: cursor.execute(\"SELECT \u2026 WHERE id = %s\", (user_id,))."
+      },
+      "id": {
+       "value": "S-SQL-PY"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        }
+       ]
+      },
+      "msg": {
+       "value": "SQL query built with string formatting/concatenation."
+      },
+      "name": {
+       "value": "SQL built from strings"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "\\.(execute|executemany)\\s*\\(\\s*(f[\\\"']|[\\\"'][^\\\"']*[\\\"']\\s*(%|\\+|\\.format))"
+      },
+      "ref": {
+       "value": "CWE-89 \u00b7 OWASP A03"
+      },
+      "sev": {
+       "value": "BLOCKER"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "Interpolating values into SQL enables SQL injection \u2014 the classic path to full database compromise."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Use placeholders: db.query('SELECT \u2026 WHERE id = ?', [id])."
+      },
+      "id": {
+       "value": "S-SQL-JS"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "js"
+        }
+       ]
+      },
+      "msg": {
+       "value": "SQL query built with template literal or concatenation."
+      },
+      "name": {
+       "value": "SQL built from strings"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "\\.(query|execute)\\s*\\(\\s*(`[^`]*\\$\\{|\\\"[^\\\"]*\\\"\\s*\\+|'[^']*'\\s*\\+|\\w+\\s*\\+\\s*[\\\"'`])"
+      },
+      "ref": {
+       "value": "CWE-89 \u00b7 OWASP A03"
+      },
+      "sev": {
+       "value": "BLOCKER"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "Interpolating values into SQL enables SQL injection."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Use subprocess.run([...]) with a list of args and shell=False."
+      },
+      "id": {
+       "value": "S-OSCMD-PY"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        }
+       ]
+      },
+      "msg": {
+       "value": "os.system/os.popen runs shell commands."
+      },
+      "name": {
+       "value": "OS command execution"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "(?:os|__import__\\(\\s*['\\\"]os['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]os['\\\"]\\s*\\))\\s*\\.\\s*(system|popen)\\s*\\("
+      },
+      "ref": {
+       "value": "CWE-78 \u00b7 OWASP A03"
+      },
+      "sev": {
+       "value": "CRITICAL"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "Any user-influenced portion of the command allows shell injection."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Pass args as a list with shell=False."
+      },
+      "id": {
+       "value": "S-SHELL-TRUE"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        }
+       ]
+      },
+      "msg": {
+       "value": "shell=True passes the command through the shell."
+      },
+      "name": {
+       "value": "subprocess with shell=True"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "shell\\s*=\\s*True"
+      },
+      "ref": {
+       "value": "CWE-78"
+      },
+      "sev": {
+       "value": "CRITICAL"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "Shell metacharacters in user input become command injection."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Use execFile/spawn with an argument array."
+      },
+      "id": {
+       "value": "S-EXEC-JS"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "js"
+        }
+       ]
+      },
+      "msg": {
+       "value": "child_process exec with dynamic command string."
+      },
+      "name": {
+       "value": "Shell exec"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "(?<![#$])(?<!\\bthis\\.)(?<!\\bself\\.)(?<!\\bsuper\\.)(?<!\\basync\\s)(?<!\\bstatic\\s)(?<!\\bget\\s)(?<!\\bset\\s)(?<!\\bfunction\\s)\\b(exec|execSync)\\s*\\((?![^()]*\\)\\s*\\{)\\s*(`[^`]*\\$\\{|[\\\"'][^\\\"']*[\\\"']\\s*\\+|\\w+\\s*[,)+])"
+      },
+      "ref": {
+       "value": "CWE-78 \u00b7 OWASP A03"
+      },
+      "sev": {
+       "value": "CRITICAL"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "HOTSPOT"
+      },
+      "why": {
+       "value": "Dynamic command strings passed to a shell risk command injection."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Use JSON or another data-only format for untrusted input."
+      },
+      "id": {
+       "value": "S-PICKLE"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        }
+       ]
+      },
+      "msg": {
+       "value": "pickle.load(s) executes code embedded in the payload."
+      },
+      "name": {
+       "value": "Unsafe deserialization (pickle)"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "pickle\\.loads?\\s*\\("
+      },
+      "ref": {
+       "value": "CWE-502 \u00b7 OWASP A08"
+      },
+      "sev": {
+       "value": "CRITICAL"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "Unpickling untrusted data is remote code execution by design."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Use yaml.safe_load() or Loader=yaml.SafeLoader."
+      },
+      "id": {
+       "value": "S-YAML"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        }
+       ]
+      },
+      "msg": {
+       "value": "yaml.load without SafeLoader can instantiate arbitrary objects."
+      },
+      "name": {
+       "value": "Unsafe yaml.load"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "yaml\\.load\\s*\\((?!(?:(?!yaml\\.load)[^)])*(?:SafeLoader|safe_load))"
+      },
+      "ref": {
+       "value": "CWE-502"
+      },
+      "sev": {
+       "value": "CRITICAL"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "Full YAML loading executes constructors from the document."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Load secrets from environment variables or a secrets manager, and rotate this one now."
+      },
+      "id": {
+       "value": "S-SECRET"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        },
+        {
+         "value": "js"
+        }
+       ]
+      },
+      "msg": {
+       "value": "Credential appears to be hardcoded in source."
+      },
+      "name": {
+       "value": "Hardcoded credential"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "i",
+       "re": "(password|passwd|pwd|secret|api[_-]?key|access[_-]?key|auth[_-]?token|private[_-]?key)\\s*[:=]\\s*[\\\"'][^\\\"']{4,}[\\\"']"
+      },
+      "ref": {
+       "value": "CWE-798 \u00b7 OWASP A07"
+      },
+      "sev": {
+       "value": "BLOCKER"
+      },
+      "skip": {
+       "flags": "i",
+       "re": "(environ|process\\.env|getenv|config\\[|\\bimport\\b|\\bplaceholder\\b|\\bexample\\b|\\bdummy\\b|\\bsample\\b|\\bmock\\b|\\bmocked\\b|\\bxxxx+\\b|\\{\\{)"
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "Secrets in code leak through version control, logs, and builds; rotation requires a deploy."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Use SHA-256+ for integrity; bcrypt/scrypt/argon2 for passwords."
+      },
+      "id": {
+       "value": "S-WEAKHASH-PY"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        }
+       ]
+      },
+      "msg": {
+       "value": "MD5/SHA-1 are cryptographically broken."
+      },
+      "name": {
+       "value": "Weak hash algorithm"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "hashlib\\.(md5|sha1)\\s*\\("
+      },
+      "ref": {
+       "value": "CWE-327/328"
+      },
+      "sev": {
+       "value": "MAJOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "Collisions are practical; unusable for passwords or signatures."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Use sha256+ for integrity; bcrypt/scrypt/argon2 for passwords."
+      },
+      "id": {
+       "value": "S-WEAKHASH-JS"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "js"
+        }
+       ]
+      },
+      "msg": {
+       "value": "MD5/SHA-1 are cryptographically broken."
+      },
+      "name": {
+       "value": "Weak hash algorithm"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "createHash\\s*\\(\\s*[\\\"'](md5|sha1)[\\\"']"
+      },
+      "ref": {
+       "value": "CWE-327/328"
+      },
+      "sev": {
+       "value": "MAJOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "Collisions are practical; unusable for passwords or signatures."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Keep verify=True; add the internal CA to the trust store instead."
+      },
+      "id": {
+       "value": "S-VERIFY"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        }
+       ]
+      },
+      "msg": {
+       "value": "Certificate verification is disabled."
+      },
+      "name": {
+       "value": "TLS verification disabled"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "verify\\s*=\\s*False|_create_unverified_context"
+      },
+      "ref": {
+       "value": "CWE-295 \u00b7 OWASP A02"
+      },
+      "sev": {
+       "value": "MAJOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "Disabling TLS verification allows trivial man-in-the-middle attacks."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Use https:// unless this is a deliberate local/dev endpoint."
+      },
+      "id": {
+       "value": "S-HTTP"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        },
+        {
+         "value": "js"
+        }
+       ]
+      },
+      "msg": {
+       "value": "URL uses unencrypted http://."
+      },
+      "name": {
+       "value": "Cleartext HTTP URL"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "[\\\"']http://(?!localhost|127\\.0\\.0\\.1|0\\.0\\.0\\.0)"
+      },
+      "ref": {
+       "value": "CWE-319 \u00b7 OWASP A02"
+      },
+      "sev": {
+       "value": "MINOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "HOTSPOT"
+      },
+      "why": {
+       "value": "Data sent over HTTP can be read or altered in transit."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Use secrets module (Python) or crypto.randomBytes / crypto.getRandomValues (JS)."
+      },
+      "id": {
+       "value": "S-RANDOM"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        },
+        {
+         "value": "js"
+        }
+       ]
+      },
+      "msg": {
+       "value": "PRNG used in a security-sensitive value."
+      },
+      "name": {
+       "value": "Non-crypto randomness for secret"
+      },
+      "need": {
+       "flags": "i",
+       "re": "(token|secret|password|otp|nonce|session|key|reset|csrf)"
+      },
+      "re": {
+       "flags": "",
+       "re": "(random\\.(random|randint|choice|randrange|getrandbits)|Math\\.random)\\s*\\("
+      },
+      "ref": {
+       "value": "CWE-338"
+      },
+      "sev": {
+       "value": "MAJOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "HOTSPOT"
+      },
+      "why": {
+       "value": "random/Math.random are predictable; generated tokens can be guessed."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Use textContent, or sanitize with DOMPurify before inserting HTML."
+      },
+      "id": {
+       "value": "S-INNERHTML"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "js"
+        }
+       ]
+      },
+      "msg": {
+       "value": "Assigning raw HTML \u2014 potential XSS sink."
+      },
+      "name": {
+       "value": "HTML injection sink"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "\\.(innerHTML|outerHTML)\\s*=|document\\.write\\s*\\(|insertAdjacentHTML\\s*\\("
+      },
+      "ref": {
+       "value": "CWE-79 \u00b7 OWASP A03"
+      },
+      "sev": {
+       "value": "MAJOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "HOTSPOT"
+      },
+      "why": {
+       "value": "If the value contains user input, scripts can be injected into the page."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Render as text, or sanitize the HTML first."
+      },
+      "id": {
+       "value": "S-DANGER"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "js"
+        }
+       ]
+      },
+      "msg": {
+       "value": "React raw-HTML escape hatch in use."
+      },
+      "name": {
+       "value": "dangerouslySetInnerHTML"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "dangerouslySetInnerHTML"
+      },
+      "ref": {
+       "value": "CWE-79"
+      },
+      "sev": {
+       "value": "MAJOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "HOTSPOT"
+      },
+      "why": {
+       "value": "Bypasses React's XSS protection."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Pass a function reference instead."
+      },
+      "id": {
+       "value": "S-TIMEOUT-STR"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "js"
+        }
+       ]
+      },
+      "msg": {
+       "value": "String argument to setTimeout/setInterval is implied eval."
+      },
+      "name": {
+       "value": "setTimeout with string"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "set(Timeout|Interval)\\s*\\(\\s*[\\\"'`]"
+      },
+      "ref": {
+       "value": "CWE-95"
+      },
+      "sev": {
+       "value": "MAJOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "The string is compiled and executed like eval."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Prefer httpOnly cookies for session tokens."
+      },
+      "id": {
+       "value": "S-LOCALSTORAGE"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "js"
+        }
+       ]
+      },
+      "msg": {
+       "value": "Sensitive value stored in localStorage."
+      },
+      "name": {
+       "value": "Secret in localStorage"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "i",
+       "re": "localStorage\\.setItem\\s*\\(\\s*[\\\"'][^\\\"']*(token|jwt|password|secret|auth)"
+      },
+      "ref": {
+       "value": "CWE-522"
+      },
+      "sev": {
+       "value": "MAJOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "HOTSPOT"
+      },
+      "why": {
+       "value": "localStorage is readable by any script on the page (XSS steals it)."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Pin an explicit algorithm list, e.g. ['HS256'] or ['RS256']."
+      },
+      "id": {
+       "value": "S-JWT-NONE"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "js"
+        },
+        {
+         "value": "py"
+        }
+       ]
+      },
+      "msg": {
+       "value": "JWT verification accepts the 'none' algorithm."
+      },
+      "name": {
+       "value": "JWT 'none' algorithm"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "i",
+       "re": "algorithms?\\s*[:=]\\s*(?:\\[\\s*)?[\\\"']none[\\\"']"
+      },
+      "ref": {
+       "value": "CWE-347"
+      },
+      "sev": {
+       "value": "BLOCKER"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "Attackers can forge unsigned tokens that pass verification."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Whitelist specific origins."
+      },
+      "id": {
+       "value": "S-CORS"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "js"
+        },
+        {
+         "value": "py"
+        }
+       ]
+      },
+      "msg": {
+       "value": "CORS allows all origins."
+      },
+      "name": {
+       "value": "CORS wildcard"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "Access-Control-Allow-Origin[\\\"']?\\s*[,:]\\s*[\\\"']\\*"
+      },
+      "ref": {
+       "value": "OWASP A05"
+      },
+      "sev": {
+       "value": "MAJOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "HOTSPOT"
+      },
+      "why": {
+       "value": "Any website can call this API with the user's credentials context."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Drive debug from an environment variable, defaulting to off."
+      },
+      "id": {
+       "value": "S-DEBUG"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        }
+       ]
+      },
+      "msg": {
+       "value": "debug=True \u2014 never in production."
+      },
+      "name": {
+       "value": "Debug mode enabled"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "debug\\s*=\\s*True"
+      },
+      "ref": {
+       "value": "CWE-489 \u00b7 OWASP A05"
+      },
+      "sev": {
+       "value": "MAJOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "HOTSPOT"
+      },
+      "why": {
+       "value": "Flask/Django debug mode exposes an interactive console and stack traces."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Bind to 127.0.0.1 unless external access is intended."
+      },
+      "id": {
+       "value": "S-BIND-ALL"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        },
+        {
+         "value": "js"
+        }
+       ]
+      },
+      "msg": {
+       "value": "Service binds to 0.0.0.0 (all interfaces)."
+      },
+      "name": {
+       "value": "Binding to all interfaces"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "[\\\"']0\\.0\\.0\\.0[\\\"']"
+      },
+      "ref": {
+       "value": "CWE-668"
+      },
+      "sev": {
+       "value": "MINOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "HOTSPOT"
+      },
+      "why": {
+       "value": "Exposes the service on every network interface, including public ones."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Use tempfile.NamedTemporaryFile or mkstemp."
+      },
+      "id": {
+       "value": "S-MKTEMP"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        }
+       ]
+      },
+      "msg": {
+       "value": "tempfile.mktemp is race-condition prone."
+      },
+      "name": {
+       "value": "Insecure temp file"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "tempfile\\.mktemp\\s*\\("
+      },
+      "ref": {
+       "value": "CWE-377"
+      },
+      "sev": {
+       "value": "MAJOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "The name can be claimed by an attacker between creation and use."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Catch the specific exception types you expect."
+      },
+      "id": {
+       "value": "B-BARE-EXCEPT"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        }
+       ]
+      },
+      "msg": {
+       "value": "Bare except: catches everything, including SystemExit/KeyboardInterrupt."
+      },
+      "name": {
+       "value": "Bare except"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "^\\s*except\\s*:"
+      },
+      "ref": {
+       "value": "Reliability"
+      },
+      "sev": {
+       "value": "MAJOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "BUG"
+      },
+      "why": {
+       "value": "Hides real failures and makes the process unkillable."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Use === and !==."
+      },
+      "id": {
+       "value": "B-EQEQ"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "js"
+        }
+       ]
+      },
+      "msg": {
+       "value": "== / != perform type coercion."
+      },
+      "name": {
+       "value": "Loose equality"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "[^=!<>]==[^=]|[^!]!=[^=]"
+      },
+      "ref": {
+       "value": "Reliability"
+      },
+      "sev": {
+       "value": "MINOR"
+      },
+      "skip": {
+       "flags": "i",
+       "re": "^\\s*(//|\\*|/\\*)"
+      },
+      "type": {
+       "value": "BUG"
+      },
+      "why": {
+       "value": "'' == 0 is true; coercion causes subtle logic bugs."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "File a ticket and link it, or resolve it."
+      },
+      "id": {
+       "value": "Q-TODO"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        },
+        {
+         "value": "js"
+        },
+        {
+         "value": "sql"
+        }
+       ]
+      },
+      "msg": {
+       "value": "Unresolved TODO/FIXME comment."
+      },
+      "name": {
+       "value": "TODO/FIXME marker"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "\\b(TODO|FIXME|XXX|HACK)\\b"
+      },
+      "ref": {
+       "value": "Maintainability"
+      },
+      "sev": {
+       "value": "INFO"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "SMELL"
+      },
+      "why": {
+       "value": "Tracked work living only in comments tends to be forgotten."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Remove, or use a leveled logger."
+      },
+      "id": {
+       "value": "Q-CONSOLE"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "js"
+        }
+       ]
+      },
+      "msg": {
+       "value": "Debug logging left in code."
+      },
+      "name": {
+       "value": "console.log left in code"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "console\\.(log|debug)\\s*\\("
+      },
+      "ref": {
+       "value": "Maintainability"
+      },
+      "sev": {
+       "value": "MINOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "SMELL"
+      },
+      "why": {
+       "value": "Noisy output and possible data leakage in production."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Use let or const."
+      },
+      "id": {
+       "value": "Q-VAR"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "js"
+        }
+       ]
+      },
+      "msg": {
+       "value": "var is function-scoped and hoisted."
+      },
+      "name": {
+       "value": "var declaration"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "\\bvar\\s+[A-Za-z_$]"
+      },
+      "ref": {
+       "value": "Maintainability"
+      },
+      "sev": {
+       "value": "MINOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "SMELL"
+      },
+      "why": {
+       "value": "Block-scoped declarations prevent shadowing bugs."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Remove it, rotate the credential immediately, and load it from a secrets manager."
+      },
+      "id": {
+       "value": "S-TOKEN"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        },
+        {
+         "value": "js"
+        }
+       ]
+      },
+      "msg": {
+       "value": "String matches a known secret format (AWS/GitHub/Slack/Stripe/Google key, private key, or JWT)."
+      },
+      "name": {
+       "value": "Known secret token format"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36}|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\\-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----|eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}",
+       "token": [
+        "AKIA[0-9A-Z]{16}",
+        "gh[pousr]_[A-Za-z0-9]{36}",
+        "xox[baprs]-[A-Za-z0-9-]{10,}",
+        "sk_live_[A-Za-z0-9]{16,}",
+        "AIza[0-9A-Za-z_\\-]{35}",
+        "-----BEGIN [A-Z ]*PRIVATE KEY-----",
+        "eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}"
+       ]
+      },
+      "ref": {
+       "value": "CWE-798 \u00b7 OWASP A07"
+      },
+      "sev": {
+       "value": "BLOCKER"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "Provider-format tokens in source are live credentials until proven otherwise."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Remove the control characters; where a string really needs one, write it as an escape sequence (e.g. \\u202e) so it is visible."
+      },
+      "id": {
+       "value": "S-BIDI"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        },
+        {
+         "value": "js"
+        },
+        {
+         "value": "sql"
+        }
+       ]
+      },
+      "msg": {
+       "value": "Bidirectional control character in source (Trojan Source)"
+      },
+      "name": {
+       "value": "Trojan Source bidi control"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "[\\u202a-\\u202e\\u2066-\\u2069]"
+      },
+      "ref": {
+       "value": "CWE-451 \u00b7 CVE-2021-42574"
+      },
+      "sev": {
+       "value": "CRITICAL"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "Bidi override and isolate characters make code display in a different order than the compiler reads it, so reviewers approve logic that is not what runs (CVE-2021-42574)."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Pass data as template parameters; never build template source from input."
+      },
+      "id": {
+       "value": "S-SSTI"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        }
+       ]
+      },
+      "msg": {
+       "value": "render_template_string with a non-literal template."
+      },
+      "name": {
+       "value": "Template injection risk"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "render_template_string\\s*\\(\\s*(?![\\\"'])"
+      },
+      "ref": {
+       "value": "CWE-1336 \u00b7 OWASP A03"
+      },
+      "sev": {
+       "value": "CRITICAL"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "User input compiled as a Jinja2 template is server-side template injection \u2192 RCE."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Parse untrusted XML with a hardened parser such as defusedxml or lazaret.safexml."
+      },
+      "id": {
+       "value": "S-XML"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        }
+       ]
+      },
+      "msg": {
+       "value": "Stdlib XML parsers are unsafe for untrusted input."
+      },
+      "name": {
+       "value": "XML parsing without a hardened parser"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "(?:^|\\s)(?:import\\s+xml\\.(?:etree|dom|sax)|from\\s+xml\\.(?:etree|dom|sax))"
+      },
+      "ref": {
+       "value": "CWE-611"
+      },
+      "sev": {
+       "value": "MINOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "HOTSPOT"
+      },
+      "why": {
+       "value": "xml.etree/dom/sax are vulnerable to entity-expansion and (historically) XXE attacks."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Escape user data; use format_html for building markup."
+      },
+      "id": {
+       "value": "S-MARKSAFE"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        }
+       ]
+      },
+      "msg": {
+       "value": "mark_safe bypasses Django's HTML escaping."
+      },
+      "name": {
+       "value": "mark_safe usage"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "mark_safe\\s*\\("
+      },
+      "ref": {
+       "value": "CWE-79"
+      },
+      "sev": {
+       "value": "MAJOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "HOTSPOT"
+      },
+      "why": {
+       "value": "If the value contains user input, this is an XSS vector."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Leave autoescape on; mark trusted fragments individually."
+      },
+      "id": {
+       "value": "S-AUTOESCAPE"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        }
+       ]
+      },
+      "msg": {
+       "value": "Template autoescaping is turned off."
+      },
+      "name": {
+       "value": "Template autoescape disabled"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "autoescape\\s*=\\s*False"
+      },
+      "ref": {
+       "value": "CWE-79"
+      },
+      "sev": {
+       "value": "MAJOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "Every rendered variable becomes a potential XSS vector."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Use RejectPolicy with a managed known_hosts file."
+      },
+      "id": {
+       "value": "S-PARAMIKO"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        }
+       ]
+      },
+      "msg": {
+       "value": "SSH host keys accepted without verification."
+      },
+      "name": {
+       "value": "SSH host key verification disabled"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "AutoAddPolicy|WarningPolicy"
+      },
+      "ref": {
+       "value": "CWE-295"
+      },
+      "sev": {
+       "value": "MAJOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "Enables man-in-the-middle attacks on SSH connections."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Use SSH/SFTP (e.g. paramiko) instead."
+      },
+      "id": {
+       "value": "S-CLEARTEXT-PROTO"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        }
+       ]
+      },
+      "msg": {
+       "value": "Telnet/FTP transmit credentials in cleartext."
+      },
+      "name": {
+       "value": "Cleartext protocol module"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "(?:^|\\s)(?:import\\s+(?:telnetlib|ftplib)|from\\s+(?:telnetlib|ftplib))"
+      },
+      "ref": {
+       "value": "CWE-319"
+      },
+      "sev": {
+       "value": "MINOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "HOTSPOT"
+      },
+      "why": {
+       "value": "Anyone on the network path can capture the credentials."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Use the least permissive mode that works (e.g. 0o600/0o644)."
+      },
+      "id": {
+       "value": "S-CHMOD"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        }
+       ]
+      },
+      "msg": {
+       "value": "File made world-writable (777/767)."
+      },
+      "name": {
+       "value": "Overly permissive file mode"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "chmod\\s*\\([^,()]*,\\s*0o?7[67]7"
+      },
+      "ref": {
+       "value": "CWE-732"
+      },
+      "sev": {
+       "value": "MAJOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "Any local user or process can modify the file."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Use AES-GCM (cryptography library, AESGCM)."
+      },
+      "id": {
+       "value": "S-WEAKCIPHER-PY"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        }
+       ]
+      },
+      "msg": {
+       "value": "DES/RC4/Blowfish/ECB are cryptographically weak."
+      },
+      "name": {
+       "value": "Weak cipher or mode"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "\\b(?:DES|DES3|ARC4|Blowfish)\\.new|MODE_ECB"
+      },
+      "ref": {
+       "value": "CWE-327"
+      },
+      "sev": {
+       "value": "MAJOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "These ciphers/modes are breakable or leak plaintext structure."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Use aes-256-gcm."
+      },
+      "id": {
+       "value": "S-WEAKCIPHER-JS"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "js"
+        }
+       ]
+      },
+      "msg": {
+       "value": "DES/RC4/ECB are cryptographically weak."
+      },
+      "name": {
+       "value": "Weak cipher"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "i",
+       "re": "createCipheriv\\s*\\(\\s*[\\\"'](?:des|des-ede3?|rc4|aes-\\d+-ecb)"
+      },
+      "ref": {
+       "value": "CWE-327"
+      },
+      "sev": {
+       "value": "MAJOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "These ciphers/modes are breakable or leak plaintext structure."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Block __proto__/constructor/prototype keys in merges; use Object.create(null) maps."
+      },
+      "id": {
+       "value": "S-PROTO"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "js"
+        }
+       ]
+      },
+      "msg": {
+       "value": "Write access to __proto__/prototype."
+      },
+      "name": {
+       "value": "Prototype pollution sink"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "\\[\\s*[\\\"']__proto__[\\\"']\\s*\\]|\\.__proto__\\s*[=.[]|constructor\\s*\\[\\s*[\\\"']prototype[\\\"']\\s*\\]"
+      },
+      "ref": {
+       "value": "CWE-1321"
+      },
+      "sev": {
+       "value": "MAJOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "Attacker-controlled keys can pollute Object.prototype and change app behavior globally."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Use query operators ($eq, $in, \u2026) instead."
+      },
+      "id": {
+       "value": "S-NOSQL"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "js"
+        }
+       ]
+      },
+      "msg": {
+       "value": "$where evaluates JavaScript inside the database."
+      },
+      "name": {
+       "value": "MongoDB $where operator"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "\\$where"
+      },
+      "ref": {
+       "value": "CWE-943"
+      },
+      "sev": {
+       "value": "MAJOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "User input in $where is NoSQL injection with code execution."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Don't run untrusted code in-process; use isolated workers/containers."
+      },
+      "id": {
+       "value": "S-VM-JS"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "js"
+        }
+       ]
+      },
+      "msg": {
+       "value": "Node vm module is not a security sandbox."
+      },
+      "name": {
+       "value": "vm module code execution"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "vm\\.runIn(?:New|This)?Context|require\\s*\\(\\s*[\\\"']vm[\\\"']"
+      },
+      "ref": {
+       "value": "CWE-94"
+      },
+      "sev": {
+       "value": "MAJOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "HOTSPOT"
+      },
+      "why": {
+       "value": "Code can escape the vm context and reach the host process."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Use execFile/spawn with an args array and shell:false."
+      },
+      "id": {
+       "value": "S-SPAWN-SHELL"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "js"
+        }
+       ]
+      },
+      "msg": {
+       "value": "shell:true routes the command through a shell."
+      },
+      "name": {
+       "value": "child_process with shell:true"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "shell\\s*:\\s*true"
+      },
+      "ref": {
+       "value": "CWE-78"
+      },
+      "sev": {
+       "value": "CRITICAL"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "Shell metacharacters in arguments become command injection."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Treat as hostile until proven otherwise; inspect the decoded payload."
+      },
+      "id": {
+       "value": "SC-EVAL-DECODE"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        },
+        {
+         "value": "js"
+        }
+       ]
+      },
+      "msg": {
+       "value": "Code decoded (base64/escape) and immediately executed."
+      },
+      "name": {
+       "value": "Decoded payload execution"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "(?:\\b(?:eval|exec|execSync|Function|runIn(?:This|New)?Context)\\s*\\(|\\(\\s*(?:void\\s+)?[\\w$.]+\\s*,\\s*(?:(?:window|globalThis|self|global|top|parent|frames)\\s*\\.\\s*)?(?:eval|Function)\\s*\\)\\s*\\(|\\b(?:eval|Function)\\s*\\.\\s*(?:call|apply)\\s*\\(\\s*(?:void\\s+)?[\\w$.]*\\s*,\\s*\\[?|\\b(?:eval|Function)\\s*\\.\\s*bind\\s*\\([^()]*\\)\\s*\\(|\\bReflect\\s*\\.\\s*apply\\s*\\(\\s*(?:(?:window|globalThis|self|global|top|parent|frames)\\s*\\.\\s*)?(?:eval|Function)\\s*,\\s*(?:void\\s+)?[\\w$.]*\\s*,\\s*\\[|\\[\\s*['\\\"`](?:e(?:['\\\"`]\\s*\\+\\s*['\\\"`])?v(?:['\\\"`]\\s*\\+\\s*['\\\"`])?a(?:['\\\"`]\\s*\\+\\s*['\\\"`])?l|F(?:['\\\"`]\\s*\\+\\s*['\\\"`])?u(?:['\\\"`]\\s*\\+\\s*['\\\"`])?n(?:['\\\"`]\\s*\\+\\s*['\\\"`])?c(?:['\\\"`]\\s*\\+\\s*['\\\"`])?t(?:['\\\"`]\\s*\\+\\s*['\\\"`])?i(?:['\\\"`]\\s*\\+\\s*['\\\"`])?o(?:['\\\"`]\\s*\\+\\s*['\\\"`])?n)['\\\"`]\\s*\\]\\s*\\()\\s*(?:compile\\s*\\(\\s*)?(?:(?:[\\w$]+|__import__\\(\\s*['\\\"][\\w.]+['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"][\\w.]+['\\\"]\\s*\\))\\s*\\.\\s*)*(?:atob|unescape|decodeURIComponent|Buffer\\s*\\.\\s*from|b64decode|(?:codecs|__import__\\(\\s*['\\\"]codecs['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]codecs['\\\"]\\s*\\))\\s*\\.\\s*decode|(?:zlib|__import__\\(\\s*['\\\"]zlib['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]zlib['\\\"]\\s*\\))\\s*\\.\\s*decompress|(?:marshal|__import__\\(\\s*['\\\"]marshal['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]marshal['\\\"]\\s*\\))\\s*\\.\\s*loads|fromhex|unhexlify)\\s*\\("
+      },
+      "ref": {
+       "value": "CWE-506 \u00b7 Supply chain"
+      },
+      "sev": {
+       "value": "BLOCKER"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "Decode-then-execute is the signature pattern of malware droppers and supply-chain implants."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Unpack and review the payload before trusting this file."
+      },
+      "id": {
+       "value": "SC-PACKER"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "js"
+        }
+       ]
+      },
+      "msg": {
+       "value": "Dean Edwards packer signature \u2014 self-decoding packed code."
+      },
+      "name": {
+       "value": "Packed JavaScript (p,a,c,k,e,d)"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "eval\\s*\\(\\s*function\\s*\\(\\s*p\\s*,\\s*a\\s*,\\s*c\\s*,\\s*k\\s*,\\s*e"
+      },
+      "ref": {
+       "value": "CWE-506 \u00b7 Supply chain"
+      },
+      "sev": {
+       "value": "CRITICAL"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "Legitimate modern packages ship minified, not packed; packing hides intent."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Decode the blob and read what it runs; treat the package as hostile until then."
+      },
+      "id": {
+       "value": "SC-EVAL-DECODER"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "js"
+        }
+       ]
+      },
+      "msg": {
+       "value": "eval runs what a function written into the call decodes from a long encoded literal."
+      },
+      "name": {
+       "value": "Code decoded by its own function and run"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "\\beval\\s*\\(\\s*\\(?\\s*function\\s*\\([^()]{0,80}\\)\\s*\\{(?:[^{}]|\\{[^{}]{0,2000}\\}){0,2000}\\}\\s*\\)?\\s*\\(\\s*(?:\\[\\s*\\d+(?:\\s*,\\s*\\d+){199}|'[^'\\n]{1000}|\\\"[^\\\"\\n]{1000}|`[^`]{1000})"
+      },
+      "ref": {
+       "value": "CWE-506 \u00b7 Supply chain"
+      },
+      "sev": {
+       "value": "CRITICAL"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "An inline decoder over a blob of character codes or text keeps a payload out of sight: the file shows the decoder, never the code it runs."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Inspect the blob's origin; refuse opaque executable data in source trees."
+      },
+      "id": {
+       "value": "SC-MARSHAL"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        }
+       ]
+      },
+      "msg": {
+       "value": "Marshalled bytecode is run, or loaded from bytes embedded or decoded in the code."
+      },
+      "name": {
+       "value": "Marshalled bytecode execution"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "\\b(?:exec|eval|FunctionType)\\s*\\(\\s*(?:marshal|__import__\\(\\s*['\\\"]marshal['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]marshal['\\\"]\\s*\\))\\s*\\.\\s*loads?\\s*\\(|\\b(?:marshal|__import__\\(\\s*['\\\"]marshal['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]marshal['\\\"]\\s*\\))\\s*\\.\\s*loads\\s*\\(\\s*(?:b['\\\"]|(?:(?:[\\w$]+|__import__\\(\\s*['\\\"][\\w.]+['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"][\\w.]+['\\\"]\\s*\\))\\s*\\.\\s*)*(?:b64decode|b32decode|b85decode|a85decode|decodebytes|decompress|fromhex|unhexlify|a2b_\\w+|decode)\\s*\\()"
+      },
+      "ref": {
+       "value": "CWE-506 \u00b7 Supply chain"
+      },
+      "sev": {
+       "value": "CRITICAL"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "Bytecode blobs evade source review \u2014 a common Python malware technique."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Keep xp_cmdshell disabled; use a vetted, sandboxed job runner instead."
+      },
+      "id": {
+       "value": "SQL-XPCMD"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "sql"
+        }
+       ]
+      },
+      "msg": {
+       "value": "xp_cmdshell runs operating-system commands from SQL Server."
+      },
+      "name": {
+       "value": "OS command execution via SQL"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "i",
+       "re": "\\bxp_cmdshell\\b"
+      },
+      "ref": {
+       "value": "CWE-78 \u00b7 OWASP A03"
+      },
+      "sev": {
+       "value": "CRITICAL"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "Enables full OS command execution from the database; a top post-exploitation target."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Use parameterized dynamic SQL (sp_executesql with @params, or bind variables)."
+      },
+      "id": {
+       "value": "SQL-DYNAMIC"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "sql"
+        }
+       ]
+      },
+      "msg": {
+       "value": "Dynamic SQL built by concatenating variables into the statement."
+      },
+      "name": {
+       "value": "Dynamic SQL from concatenation"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "i",
+       "re": "EXEC(?:UTE)?\\s*\\(\\s*@?\\w+\\s*\\+|EXECUTE\\s+IMMEDIATE\\b(?:(?!EXECUTE\\s+IMMEDIATE\\b)[^;])*\\|\\||sp_executesql\\b(?:(?!sp_executesql\\b)[^;])*\\+|EXEC\\s*\\(\\s*['\\\"][^']*['\\\"]\\s*\\+|SET\\s+@\\w+\\s*=(?:(?!SET\\s+@)[^;'\\\"])*['\\\"](?:(?!SET\\s+@)[^;])*(?:\\+|\\|\\|)"
+      },
+      "ref": {
+       "value": "CWE-89 \u00b7 OWASP A03"
+      },
+      "sev": {
+       "value": "BLOCKER"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "String-built SQL executed with EXEC / EXECUTE IMMEDIATE / sp_executesql is SQL injection inside the database."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Provision credentials out-of-band (secrets manager / vault), not in checked-in SQL."
+      },
+      "id": {
+       "value": "SQL-CRED"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "sql"
+        }
+       ]
+      },
+      "msg": {
+       "value": "Credential embedded in a SQL script."
+      },
+      "name": {
+       "value": "Hardcoded database credential"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "i",
+       "re": "(?:IDENTIFIED\\s+BY\\s+['\\\"][^'\\\"]+['\\\"]|PASSWORD\\s*=?\\s*['\\\"][^'\\\"]+['\\\"]|IDENTIFIED\\s+BY\\s+PASSWORD)"
+      },
+      "ref": {
+       "value": "CWE-798 \u00b7 OWASP A07"
+      },
+      "sev": {
+       "value": "BLOCKER"
+      },
+      "skip": {
+       "flags": "i",
+       "re": "\\bplaceholder\\b|\\bexample\\b|\\bdummy\\b|\\bmock\\b|\\bxxxx+\\b"
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "Passwords in DDL scripts leak through version control and backups."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Grant only the specific privileges the role needs."
+      },
+      "id": {
+       "value": "SQL-GRANT-ALL"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "sql"
+        }
+       ]
+      },
+      "msg": {
+       "value": "GRANT ALL / WITH GRANT OPTION hands over broad privileges."
+      },
+      "name": {
+       "value": "Excessive privilege grant"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "i",
+       "re": "\\bGRANT\\s+ALL\\b|\\bWITH\\s+GRANT\\s+OPTION\\b"
+      },
+      "ref": {
+       "value": "CWE-732 \u00b7 OWASP A01"
+      },
+      "sev": {
+       "value": "MAJOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "HOTSPOT"
+      },
+      "why": {
+       "value": "Violates least privilege; a compromised account inherits everything."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Grant to a specific role instead of PUBLIC."
+      },
+      "id": {
+       "value": "SQL-GRANT-PUBLIC"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "sql"
+        }
+       ]
+      },
+      "msg": {
+       "value": "Privilege granted to PUBLIC (every user)."
+      },
+      "name": {
+       "value": "Grant to PUBLIC"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "i",
+       "re": "\\bGRANT\\b(?:(?!\\bGRANT\\b)[^;])*\\bTO\\s+PUBLIC\\b"
+      },
+      "ref": {
+       "value": "CWE-732 \u00b7 OWASP A01"
+      },
+      "sev": {
+       "value": "MAJOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "HOTSPOT"
+      },
+      "why": {
+       "value": "PUBLIC grants apply to all current and future accounts, including low-trust ones."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Disable FILE privilege; never build these paths from untrusted input."
+      },
+      "id": {
+       "value": "SQL-FILE"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "sql"
+        }
+       ]
+      },
+      "msg": {
+       "value": "SQL reads/writes the server filesystem (OUTFILE / LOAD_FILE)."
+      },
+      "name": {
+       "value": "Filesystem access from SQL"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "i",
+       "re": "\\bINTO\\s+(?:OUTFILE|DUMPFILE)\\b|\\bLOAD_FILE\\s*\\(|\\bLOAD\\s+DATA\\s+INFILE\\b"
+      },
+      "ref": {
+       "value": "CWE-73 \u00b7 OWASP A03"
+      },
+      "sev": {
+       "value": "CRITICAL"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "A classic data-exfiltration and webshell-drop primitive in SQL injection exploitation."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Disable Ad Hoc Distributed Queries; use configured linked servers with least privilege."
+      },
+      "id": {
+       "value": "SQL-OPENROWSET"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "sql"
+        }
+       ]
+      },
+      "msg": {
+       "value": "OPENROWSET/OPENQUERY perform ad-hoc external connections."
+      },
+      "name": {
+       "value": "Ad-hoc remote data access"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "i",
+       "re": "\\b(?:OPENROWSET|OPENQUERY|OPENDATASOURCE)\\s*\\("
+      },
+      "ref": {
+       "value": "CWE-610"
+      },
+      "sev": {
+       "value": "MAJOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "HOTSPOT"
+      },
+      "why": {
+       "value": "Can reach arbitrary hosts/files and is abused for lateral movement."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Re-enable checks immediately after the bulk operation; scope it tightly."
+      },
+      "id": {
+       "value": "SQL-FK-OFF"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "sql"
+        }
+       ]
+      },
+      "msg": {
+       "value": "Referential-integrity enforcement is turned off."
+      },
+      "name": {
+       "value": "Integrity checks disabled"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "i",
+       "re": "SET\\s+FOREIGN_KEY_CHECKS\\s*=\\s*0|NOCHECK\\s+CONSTRAINT|SET\\s+CONSTRAINTS\\s+ALL\\s+DEFERRED"
+      },
+      "ref": {
+       "value": "CWE-20"
+      },
+      "sev": {
+       "value": "MAJOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "HOTSPOT"
+      },
+      "why": {
+       "value": "Disabling constraints allows orphaned/inconsistent data to be written."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Leave TRUSTWORTHY OFF; sign modules instead."
+      },
+      "id": {
+       "value": "SQL-TRUSTWORTHY"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "sql"
+        }
+       ]
+      },
+      "msg": {
+       "value": "TRUSTWORTHY ON enables privilege escalation paths in SQL Server."
+      },
+      "name": {
+       "value": "TRUSTWORTHY database"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "i",
+       "re": "SET\\s+TRUSTWORTHY\\s+ON"
+      },
+      "ref": {
+       "value": "CWE-269"
+      },
+      "sev": {
+       "value": "MAJOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "HOTSPOT"
+      },
+      "why": {
+       "value": "Combined with impersonation it can lead to sysadmin escalation."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Use an appropriate isolation level (e.g. READ COMMITTED SNAPSHOT)."
+      },
+      "id": {
+       "value": "SQL-NOLOCK"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "sql"
+        }
+       ]
+      },
+      "msg": {
+       "value": "NOLOCK / READ UNCOMMITTED permits dirty reads."
+      },
+      "name": {
+       "value": "Dirty-read hint"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "i",
+       "re": "WITH\\s*\\(\\s*NOLOCK\\s*\\)|READ\\s+UNCOMMITTED"
+      },
+      "ref": {
+       "value": "Reliability"
+      },
+      "sev": {
+       "value": "MINOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "SMELL"
+      },
+      "why": {
+       "value": "Returns uncommitted, possibly inconsistent data; a common source of subtle bugs."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "List the columns you actually need."
+      },
+      "id": {
+       "value": "SQL-SELECT-STAR"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "sql"
+        }
+       ]
+      },
+      "msg": {
+       "value": "SELECT * fetches all columns."
+      },
+      "name": {
+       "value": "SELECT *"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "i",
+       "re": "\\bSELECT\\s+\\*"
+      },
+      "ref": {
+       "value": "Maintainability"
+      },
+      "sev": {
+       "value": "MINOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "SMELL"
+      },
+      "why": {
+       "value": "Breaks silently on schema changes and moves unneeded data."
+      }
+     }
+    }
+   ]
   },
   "SARIF_LEVEL": {
    "map": {
@@ -1653,6 +4415,34 @@
   "_AUTORUN_WHY": {
    "value": "Editors and AI coding agents run these commands on their own \u2014 when the folder is opened, a session starts or the agent uses a tool \u2014 with your privileges, without asking each time. The 2026 Shai-Hulud worms (Mini Shai-Hulud, the keyv wave) committed a Claude Code SessionStart hook and a VS Code folder-open task to every repository they reached, so opening a checkout ran the worm."
   },
+  "_B64_RULE": {
+   "map": {
+    "fix": {
+     "value": "Decode and verify the content; move legitimate assets to data files."
+    },
+    "id": {
+     "value": "SC-B64"
+    },
+    "msg": {
+     "value": "Base64 blob (200+ chars) embedded in code."
+    },
+    "name": {
+     "value": "Large base64 blob"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "Embedded encoded blobs can carry second-stage payloads."
+    }
+   }
+  },
   "_B64_URL_LITERAL_RE": {
    "flags": "",
    "re": "[\"'`]aHR0c[A-Za-z0-9+/]{2,}={0,2}[\"'`]"
@@ -1692,6 +4482,34 @@
   },
   "_BUN_RELEASES_SRC": {
    "value": "oven-sh/bun/releases"
+  },
+  "_CAPPED_RULE": {
+   "map": {
+    "fix": {
+     "value": "Fix or deliberately suppress the {rule} pattern in this file, then re-scan to see the remaining occurrences."
+    },
+    "id": {
+     "value": "Q-CAPPED"
+    },
+    "msg": {
+     "value": "{n} more {rule} findings omitted"
+    },
+    "name": {
+     "value": "Findings capped"
+    },
+    "ref": {
+     "value": "Maintainability"
+    },
+    "sev": {
+     "value": "INFO"
+    },
+    "type": {
+     "value": "SMELL"
+    },
+    "why": {
+     "value": "Findings of one rule that repeat hundreds of times in one file are capped so reports stay readable; security findings are never capped."
+    }
+   }
   },
   "_CAPTURE_SERVICE_RE": {
    "flags": "i",
@@ -1812,6 +4630,34 @@
   "_CHARCODE_NAME_RE": {
    "flags": "",
    "re": "(?<![\\w$])(?:(?<=\\.\\.\\.)|(?<!\\.))[A-Za-z_$][\\w$]*"
+  },
+  "_CHARCODE_RULE": {
+   "map": {
+    "fix": {
+     "value": "Decode and review what string is being built."
+    },
+    "id": {
+     "value": "SC-CHARCODE"
+    },
+    "msg": {
+     "value": "String assembled from character codes \u2014 obfuscation indicator."
+    },
+    "name": {
+     "value": "Char-code string building"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "fromCharCode chains hide payloads from static review."
+    }
+   }
   },
   "_CHARCODE_TABLE_RE": {
    "flags": "",
@@ -1975,6 +4821,12 @@
   },
   "_DECODE_CALL_SRC": {
    "value": "(?:\\batob|\\bb64decode|\\.\\s*fromhex|\\bunhexlify|\\b(?:codecs|__import__\\(\\s*['\\\"]codecs['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]codecs['\\\"]\\s*\\))\\s*\\.\\s*decode|\\b(?:zlib|__import__\\(\\s*['\\\"]zlib['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]zlib['\\\"]\\s*\\))\\s*\\.\\s*decompress|\\.\\s*decrypt)\\s*\\(|\\bBuffer\\s*\\.\\s*from\\s*\\([^;\\n]{0,300}?['\\\"`]base64['\\\"`]"
+  },
+  "_DECODE_FLOW_MSG": {
+   "value": "Decoded payload (assigned at line {line}) reaches a code-execution sink."
+  },
+  "_DECODE_SAME_CALL_MSG": {
+   "value": "Decoded payload reaches a code-execution sink in the same call."
   },
   "_DECODE_SINK_RE": {
    "flags": "",
@@ -6340,6 +9192,34 @@
   "_DV_XOR_MIN_CALLS": {
    "value": 5
   },
+  "_ENTROPY_RULE": {
+   "map": {
+    "fix": {
+     "value": "If it is a secret, rotate it and load it from the environment."
+    },
+    "id": {
+     "value": "S-ENTROPY"
+    },
+    "msg": {
+     "value": "High-entropy string literal \u2014 possible hardcoded secret."
+    },
+    "name": {
+     "value": "High-entropy string"
+    },
+    "ref": {
+     "value": "CWE-798 \u00b7 OWASP A07"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "Random-looking constants are usually keys or tokens."
+    }
+   }
+  },
   "_ENV_ASSIGN_RE": {
    "flags": "",
    "re": "^[A-Za-z_][A-Za-z0-9_]*="
@@ -6548,6 +9428,65 @@
     "module_root_dir"
    ]
   },
+  "_HEXSTR_DANGER_WHY": {
+   "value": "Escaping ordinary printable characters serves no purpose except hiding them from review and search; this text names code execution, a download, or a URL."
+  },
+  "_HEXSTR_NAME_RULE": {
+   "map": {
+    "fix": {
+     "value": "Decode the string and review what it does."
+    },
+    "id": {
+     "value": "SC-HEXSTR"
+    },
+    "msg": {
+     "value": "Escape sequences hide a name: {name!r}."
+    },
+    "name": {
+     "value": "Hex-escaped readable text"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "CRITICAL"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "Nothing needs to escape a letter of a name like this one: writing it as escape sequences only hides it from review and search, and this one names code execution, a download, or a URL."
+    }
+   }
+  },
+  "_HEXSTR_TEXT_RULE": {
+   "map": {
+    "fix": {
+     "value": "Decode the string and review what it does."
+    },
+    "id": {
+     "value": "SC-HEXSTR"
+    },
+    "msg": {
+     "value": "Hex escapes hide readable text: {preview!r}."
+    },
+    "name": {
+     "value": "Hex-escaped readable text"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "Escaping ordinary printable characters serves no purpose except hiding them from review and search; this text is readable once decoded."
+    }
+   }
+  },
   "_HEX_ESCAPE_RE": {
    "flags": "",
    "re": "\\\\x([0-9A-Fa-f]{2})"
@@ -6559,6 +9498,50 @@
   "_HIDDEN_RUN_RE": {
    "flags": "",
    "re": "[\ufe00-\ufe0f\udb40\udc00-\udb40\uddef]{2,}"
+  },
+  "_HIDDEN_UNICODE_RULE": {
+   "map": {
+    "fix": {
+     "value": "Show the characters as escape sequences and decode what they spell; if it is a payload, do not run the file."
+    },
+    "id": {
+     "value": "SC-HIDDEN-UNICODE"
+    },
+    "msg": {
+     "value": "A run of {n} invisible {what} carries hidden data in the code."
+    },
+    "name": {
+     "value": "Invisible-character payload"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "Invisible characters in source carry bytes that no review or diff shows: a variation selector or a tag character has no business in code. GlassWorm hid a payload in variation selectors and decoded it into eval; tag characters smuggle instructions past a reviewer and an AI reading the file. Only a flag emoji and a single emoji variation selector are ordinary."
+    }
+   }
+  },
+  "_HIDDEN_UNICODE_RUNS_MSG": {
+   "value": "A run of {n} invisible {what} carries hidden data in the code, and the file runs code from a string."
+  },
+  "_HIDDEN_UNICODE_WHAT": {
+   "map": {
+    "both": {
+     "value": "variation selectors and tag characters"
+    },
+    "selectors": {
+     "value": "variation selectors"
+    },
+    "tags": {
+     "value": "tag characters"
+    }
+   }
   },
   "_HIDDEN_UNICODE_WHY": {
    "value": "Invisible characters in source carry bytes that no review or diff shows: a variation selector or a tag character has no business in code. GlassWorm hid a payload in variation selectors and decoded it into eval; tag characters smuggle instructions past a reviewer and an AI reading the file. Only a flag emoji and a single emoji variation selector are ordinary."
@@ -6930,6 +9913,14 @@
    "flags": "",
    "re": "\\s*(?!(?:url|uri|file|filename|path|path_or_file|args|cmd|command|src|dst|source|destination)\\s*=)[A-Za-z_]\\w*\\s*=(?!=)"
   },
+  "_LATER_ID_CONTINUE": {
+   "set": [
+    "\u200c",
+    "\u200d",
+    "\u30fb",
+    "\uff65"
+   ]
+  },
   "_LETTER_RUN_RE": {
    "flags": "",
    "re": "[A-Za-z]{3}"
@@ -7133,6 +10124,34 @@
    "flags": "",
    "re": "require\\(\\s*\\\\?[\"'](\\.{1,2}/[^\"'\\\\]+)\\\\?[\"']\\s*\\)"
   },
+  "_LONGLINE_RULE": {
+   "map": {
+    "fix": {
+     "value": "Break the line up for readability."
+    },
+    "id": {
+     "value": "Q-LONGLINE"
+    },
+    "msg": {
+     "value": "Line exceeds 160 characters."
+    },
+    "name": {
+     "value": "Line too long"
+    },
+    "ref": {
+     "value": "Maintainability"
+    },
+    "sev": {
+     "value": "MINOR"
+    },
+    "type": {
+     "value": "SMELL"
+    },
+    "why": {
+     "value": "Very long lines hurt readability and reviews."
+    }
+   }
+  },
   "_LOOKALIKES": {
    "map": {
     "\u0251": {
@@ -7299,6 +10318,43 @@
     },
     "\u0585": {
      "value": "o"
+    }
+   }
+  },
+  "_LOOKALIKE_INVISIBLE": {
+   "value": "an invisible {cp}"
+  },
+  "_LOOKALIKE_LETTER": {
+   "value": "{cp} for {reads!r}"
+  },
+  "_LOOKALIKE_OTHER": {
+   "value": ", another name in this file,"
+  },
+  "_LOOKALIKE_RULE": {
+   "map": {
+    "fix": {
+     "value": "Rename it with the letters it appears to have, and find out why it was written this way."
+    },
+    "id": {
+     "value": "SC-HOMOGLYPH"
+    },
+    "msg": {
+     "value": "{name!r} reads as {skeleton!r}{where} but is spelled with {detail}."
+    },
+    "name": {
+     "value": "Look-alike identifier"
+    },
+    "ref": {
+     "value": "CWE-1007 \u00b7 CVE-2021-42694"
+    },
+    "sev": {
+     "value": "CRITICAL"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "A name written with letters from another alphabet that look like Latin ones, or with an invisible character inside it, is not the name a reviewer reads: `const eval = eval` with a Cyrillic e (U+0435) makes a second eval that runs where no one sees eval called, and an isAdmin with a Cyrillic i is not isAdmin (CVE-2021-42694, the homoglyph half of Trojan Source)."
     }
    }
   },
@@ -7552,6 +10608,34 @@
   "_NPM_TOKEN_READ_SRC": {
    "value": "\\bnpm\\s+config\\s+get\\s+[^\\n\"'`;|&]{0,200}?_auth|\\.npmrc\\b[\\s\\S]{0,400}?_authToken|_authToken[\\s\\S]{0,400}?\\.npmrc\\b"
   },
+  "_OBF_IDENT_RULE": {
+   "map": {
+    "fix": {
+     "value": "Diff against the package's published repository; consider removing the dependency."
+    },
+    "id": {
+     "value": "SC-OBF-IDENT"
+    },
+    "msg": {
+     "value": "{n} '_0x\u2026' identifiers \u2014 javascript-obfuscator signature."
+    },
+    "name": {
+     "value": "Obfuscated identifier pattern"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "CRITICAL"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "This naming pattern is produced by obfuscation tools; in a dependency it is a classic indicator of a compromised or malicious package."
+    }
+   }
+  },
   "_OFFSCREEN_CODE_RE": {
    "flags": "",
    "re": "[;,(){}\\[\\]]|(?:const|let|var|function|async|class|def)\\s+[A-Za-z_$(]|[A-Za-z_$][\\w$]*\\s*(?:[.(\\[=;]|[\"'`])|(?:import|from|exec|eval|require)\\b"
@@ -7575,6 +10659,37 @@
   },
   "_OFFSCREEN_READ": {
    "value": 4000
+  },
+  "_OFFSCREEN_RULE": {
+   "map": {
+    "fix": {
+     "value": "Read the whole line (turn on word wrap) and review what it does."
+    },
+    "id": {
+     "value": "SC-OFFSCREEN-CODE"
+    },
+    "msg": {
+     "value": "Code after {blanks} blanks on this line, where editors and review don't show it: {preview!r}."
+    },
+    "name": {
+     "value": "Code hidden off-screen"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "A long run of blanks pushes code past the right edge of editors, diffs and code review, while the interpreter runs it all the same: @react-native-aria/radio 0.2.14 hid its loader 731 columns right. No formatter puts code there."
+    }
+   }
+  },
+  "_OFFSCREEN_RUNS_WHY": {
+   "value": "A long run of blanks pushes code past the right edge of editors, diffs and code review, while the interpreter runs it all the same: @react-native-aria/radio 0.2.14 hid its loader 731 columns right. No formatter puts code there. This code loads or runs more code."
   },
   "_OFFSCREEN_SRC": {
    "value": "(?<![ \\t])[ \\t]{150,}(?=\\S)"
@@ -8112,6 +11227,36 @@
   },
   "_SECRETS_DUMP_SRC": {
    "value": "\\btoJSON\\s*\\(\\s*secrets\\s*\\)"
+  },
+  "_SECRET_LINE_PATTERNS": {
+   "list": [
+    {
+     "flags": "",
+     "re": "AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\\-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----(?:.*?-----END [A-Z ]*PRIVATE KEY-----|.*)|eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}",
+     "token": [
+      "AKIA[0-9A-Z]{16}",
+      "gh[pousr]_[A-Za-z0-9]{36,}",
+      "github_pat_[A-Za-z0-9_]{22,}",
+      "xox[baprs]-[A-Za-z0-9-]{10,}",
+      "sk_live_[A-Za-z0-9]{16,}",
+      "AIza[0-9A-Za-z_\\-]{35}",
+      "-----BEGIN [A-Z ]*PRIVATE KEY-----(?:.*?-----END [A-Z ]*PRIVATE KEY-----|.*)",
+      "eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}"
+     ]
+    },
+    {
+     "flags": "i",
+     "re": "(?:IDENTIFIED\\s+BY\\s+['\\\"][^'\\\"]+['\\\"]|PASSWORD\\s*=?\\s*['\\\"][^'\\\"]+['\\\"]|IDENTIFIED\\s+BY\\s+PASSWORD)"
+    },
+    {
+     "flags": "i",
+     "re": "(?:password|passwd|pwd|secret|api[_-]?key|access[_-]?key|auth[_-]?token|private[_-]?key)\\s*[:=]\\s*[\\\"'][^\\\"']{4,}[\\\"']"
+    },
+    {
+     "flags": "",
+     "re": "(?<=://)[^/\\s@'\\\"]+(?=@)"
+    }
+   ]
   },
   "_SECRET_RUN_RE": {
    "flags": "",
@@ -8852,6 +11997,19 @@
     }
    ]
   },
+  "_TOKEN_PATTERN": {
+   "flags": "",
+   "re": "AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36}|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\\-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----|eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}",
+   "token": [
+    "AKIA[0-9A-Z]{16}",
+    "gh[pousr]_[A-Za-z0-9]{36}",
+    "xox[baprs]-[A-Za-z0-9-]{10,}",
+    "sk_live_[A-Za-z0-9]{16,}",
+    "AIza[0-9A-Za-z_\\-]{35}",
+    "-----BEGIN [A-Z ]*PRIVATE KEY-----",
+    "eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}"
+   ]
+  },
   "_TOKEN_REDACT_ALTS": {
    "list": [
     {
@@ -8879,6 +12037,77 @@
      "value": "eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}"
     }
    ]
+  },
+  "_TOKEN_REDACT_PATTERN": {
+   "flags": "",
+   "re": "AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\\-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----(?:.*?-----END [A-Z ]*PRIVATE KEY-----|.*)|eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}",
+   "token": [
+    "AKIA[0-9A-Z]{16}",
+    "gh[pousr]_[A-Za-z0-9]{36,}",
+    "github_pat_[A-Za-z0-9_]{22,}",
+    "xox[baprs]-[A-Za-z0-9-]{10,}",
+    "sk_live_[A-Za-z0-9]{16,}",
+    "AIza[0-9A-Za-z_\\-]{35}",
+    "-----BEGIN [A-Z ]*PRIVATE KEY-----(?:.*?-----END [A-Z ]*PRIVATE KEY-----|.*)",
+    "eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}"
+   ]
+  },
+  "_TOKEN_RULE": {
+   "map": {
+    "fix": {
+     "value": "Remove it, rotate the credential immediately, and load it from a secrets manager."
+    },
+    "id": {
+     "value": "S-TOKEN"
+    },
+    "langs": {
+     "list": [
+      {
+       "value": "py"
+      },
+      {
+       "value": "js"
+      }
+     ]
+    },
+    "msg": {
+     "value": "String matches a known secret format (AWS/GitHub/Slack/Stripe/Google key, private key, or JWT)."
+    },
+    "name": {
+     "value": "Known secret token format"
+    },
+    "need": {
+     "value": null
+    },
+    "re": {
+     "flags": "",
+     "re": "AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36}|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\\-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----|eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}",
+     "token": [
+      "AKIA[0-9A-Z]{16}",
+      "gh[pousr]_[A-Za-z0-9]{36}",
+      "xox[baprs]-[A-Za-z0-9-]{10,}",
+      "sk_live_[A-Za-z0-9]{16,}",
+      "AIza[0-9A-Za-z_\\-]{35}",
+      "-----BEGIN [A-Z ]*PRIVATE KEY-----",
+      "eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}"
+     ]
+    },
+    "ref": {
+     "value": "CWE-798 \u00b7 OWASP A07"
+    },
+    "sev": {
+     "value": "BLOCKER"
+    },
+    "skip": {
+     "value": null
+    },
+    "type": {
+     "value": "VULN"
+    },
+    "why": {
+     "value": "Provider-format tokens in source are live credentials until proven otherwise."
+    }
+   }
   },
   "_TYPED_ARG_RE": {
    "flags": "",
