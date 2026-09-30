@@ -321,6 +321,16 @@ def _key(k):
     return _NOT_DATA
 
 
+# Values of core that come from the operating system, not from the rules: the
+# pack must be the same on every platform (CI runs --check on Linux, macOS and
+# Windows), and the engine does no I/O. tests/architecture/test_rust_pack.py
+# imports core with the OS's constants changed and fails on any other value
+# that moves with them.
+PLATFORM_VALUES = frozenset({
+    "_OPEN_FLAGS",          # os.open flags: O_NOFOLLOW, O_NONBLOCK, O_CLOEXEC, O_BINARY … differ by OS
+})
+
+
 def pack_data():
     from lazaret.scanner import core
     try:
@@ -329,7 +339,7 @@ def pack_data():
         ENGINE_VERSION = None
     values = {}
     for name in sorted(vars(core)):
-        if name.startswith("__"):
+        if name.startswith("__") or name in PLATFORM_VALUES:
             continue
         v = getattr(core, name)
         if callable(v) and not isinstance(v, re.Pattern):

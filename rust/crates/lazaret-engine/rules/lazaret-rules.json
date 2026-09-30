@@ -7572,9 +7572,6 @@
   "_OFFSCREEN_WHY": {
    "value": "A long run of blanks pushes code past the right edge of editors, diffs and code review, while the interpreter runs it all the same: @react-native-aria/radio 0.2.14 hid its loader 731 columns right. No formatter puts code there."
   },
-  "_OPEN_FLAGS": {
-   "value": 657664
-  },
   "_PARAM_RE": {
    "flags": "",
    "re": "\\s*\\*{0,2}\\s*([A-Za-z_]\\w*)\\s*"
