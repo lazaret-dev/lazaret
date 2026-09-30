@@ -1,3 +1,20 @@
+// SPDX-License-Identifier: Apache-2.0 AND Python-2.0.1
+//
+// A Rust translation of CPython's Lib/re/_parser.py,
+// changed as rust/NOTICE summarizes, and distributed under CPython's
+// license (rust/LICENSE-PYTHON) as well as Lazaret's. The original's
+// notices:
+//
+//   Copyright (c) 1998-2001 by Secret Labs AB.  All rights reserved.
+//   See the __init__.py file for information on usage and redistribution.
+//
+//   (Lib/re/__init__.py:)
+//   This version of the SRE library can be redistributed under CNRI's
+//   Python 1.6 license.  For any other use, please contact Secret Labs
+//   AB (info@pythonware.com).
+//
+//   Copyright (c) 2001 Python Software Foundation; All Rights Reserved
+
 //! Python's `re` pattern parser (re/_parser.py, CPython 3.11-3.14), ported
 //! line for line: the same parse tree, the same branch and set rewrites, the
 //! same widths. Only what str patterns can hold (no LOCALE, no bytes).

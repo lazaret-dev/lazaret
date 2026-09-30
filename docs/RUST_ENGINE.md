@@ -1,8 +1,9 @@
 # Lazaret's native scanning engine (Rust)
 
-Status, September 29, 2026: phase 0 and the phase 1 functions are done,
-current with the Python engine through 0.1.8's detection, and wired into the
-scanner behind `--engine`. The Python engine (`python/src/lazaret/scanner/`)
+Status, September 30, 2026: phase 0 and the phase 1 functions are done,
+current with the Python engine through 0.1.8's detection, wired into the
+scanner behind `--engine`, and built by release CI into platform wheels for
+five platforms (§4). The Python engine (`python/src/lazaret/scanner/`)
 stays: it is the reference every answer of the native engine is held to.
 
 ## 1. What it is
@@ -24,6 +25,7 @@ Decisions (fixed):
 | Rule source | **Extract now, flip later.** `scripts/make_rust_tables.py` extracts every module-level value of `core.py` (patterns, sets, limits, and the pattern pieces core composes at run time) into `rust/crates/lazaret-engine/rules/lazaret-rules.json`; `--check` guards drift. Later, `core.py` itself loads the pack. |
 | Engine shape | Generic engine plus data: declarative rules come from the pack, the algorithms are named Rust functions, ported function for function. |
 | Calls | Whole files, batched: one crossing of the boundary per batch of files, read on threads (`std::thread`), answers in input order. |
+| License | Lazaret's code is Apache-2.0; the translations of CPython code (the regex engine, shlex, the Final_Sigma rule) are also under CPython's license, so the crates and the platform wheels are `Apache-2.0 AND Python-2.0.1` (§11). |
 
 ## 2. Using it
 
@@ -33,8 +35,10 @@ Decisions (fixed):
   rather than scan slowly without saying so. `--version` names the engine:
   `lazaret 0.1.8 (engine: rust 0.1.8)`. The workspace version
   (`rust/Cargo.toml`) is the release the engine ships in.
-- The library is `lazaret/_native/<library>` in a platform wheel, or the
-  file `LAZARET_NATIVE_LIB` names (a development build).
+- The library is `lazaret/_native/<library>` in a platform wheel (Linux
+  x86-64 and ARM64 as manylinux_2_28, macOS arm64 from 11.0 and x86-64 from
+  10.12, Windows x64), or the file `LAZARET_NATIVE_LIB` names (a development
+  build). Other platforms get the pure wheel: the Python engine.
 - `python/src/lazaret/scanner/engine.py` sends the supply-chain tests
   through it: the import-time test of every dependency file (`--deps`), of
   every file a registry scan reaches at import time and of the files it runs
@@ -52,6 +56,7 @@ Decisions (fixed):
 ```
 rust/
   Cargo.toml                 workspace; release: lto, codegen-units=1, panic=unwind, strip
+  NOTICE, LICENSE-PYTHON     what is translated from CPython, its notices, CPython's license (§11)
   crates/lazaret-engine/     #![forbid(unsafe_code)], no dependencies, no I/O
     rules/lazaret-rules.json the rule pack (generated; embedded; `pack.install` can replace it)
     src/api.rs               the calls by name (JSON args + text -> JSON); `batch` on threads
@@ -73,6 +78,8 @@ python/src/lazaret/scanner/engine.py    the engine in use, batching, the Python 
 python/_build/lazaret_build.py          LAZARET_NATIVE_LIBRARY + LAZARET_WHEEL_PLATFORM: a platform wheel
 scripts/make_rust_tables.py             the pack (any Python) and unicode13.rs (3.10); --check
 scripts/check_rust_deps.py              Cargo.lock and the manifests hold only the workspace
+scripts/check_native_library.py         a built library against its wheel's tag; --dist: the release's wheels
+.github/workflows/wheels.yml            the five libraries, the wheels, installed on each platform
 python/tests/architecture/test_rust_parity_{regex,hooks,signs}.py, test_rust_deps.py
 ```
 
@@ -95,20 +102,74 @@ cd rust && cargo build --release --offline --locked      # target/release/liblaz
 export LAZARET_NATIVE_LIB=$(realpath target/release/liblazaret_native.so)
 ```
 
-A platform wheel: `LAZARET_NATIVE_LIBRARY=<built library>
-LAZARET_WHEEL_PLATFORM=<tag> python python/_build/lazaret_build.py dist/`
-gives `lazaret-<v>-py3-none-<tag>.whl` with `lazaret/_native/<library>`
-(`Root-Is-Purelib: false`). Without the two variables the wheel is the pure
-one, and the sdist never carries a library. For Linux, build the library in
-the manylinux image of the tag (`quay.io/pypa/manylinux_2_28_x86_64` for
-`manylinux_2_28_x86_64`) so it needs no newer glibc than the tag promises.
+A platform wheel: `python python/_build/lazaret_build.py dist/ --platform
+<tag>=<built library>` (repeatable; it also writes the sdist and the pure
+wheel), or `LAZARET_NATIVE_LIBRARY` and `LAZARET_WHEEL_PLATFORM` for the
+PEP 517 hook, gives `lazaret-<v>-py3-none-<tag>.whl`: the pure wheel's files,
+`lazaret/_native/<library>`, and `rust/LICENSE-PYTHON` and `rust/NOTICE` as
+license files, with `License-Expression: Apache-2.0 AND Python-2.0.1` and
+`Root-Is-Purelib: false`. The sdist never carries a library.
+
+**Release builds** (`.github/workflows/wheels.yml`, called by `release.yml`
+as `build-python`, and run on pull requests and pushes to main that change
+`rust/`, the build backend, `_native.py`, `engine.py`,
+`scripts/check_native_library.py` or the workflow):
+
+| Tag | Built on | How |
+|---|---|---|
+| `manylinux_2_28_x86_64` | ubuntu-24.04 | in `quay.io/pypa/manylinux_2_28_x86_64`, pinned by digest |
+| `manylinux_2_28_aarch64` | ubuntu-24.04-arm | in `quay.io/pypa/manylinux_2_28_aarch64`, pinned by digest |
+| `macosx_11_0_arm64` | macos-15 | `MACOSX_DEPLOYMENT_TARGET=11.0` |
+| `macosx_10_12_x86_64` | macos-15-intel | `MACOSX_DEPLOYMENT_TARGET=10.12` |
+| `win_amd64` | windows-2025 | `-C target-feature=+crt-static` (no Visual C++ runtime needed) |
+
+Every library is built with Rust `RUST_VERSION` (1.95.0, the compiler of
+the parity runs in §5; the runner's rustup installs it and checks each
+component's published SHA-256), `--release --offline --locked`. The Linux
+jobs mount that toolchain read-only into the image, so the library links
+against the image's glibc 2.28; building on the runner itself would need
+its glibc (2.39). Each library is then checked against its tag
+(`scripts/check_native_library.py LIB TAG --load`: machine, the glibc and
+libgcc_s symbol versions and libraries manylinux allows, no RPATH or
+executable stack; the Mach-O minimum macOS and system-only dylibs; a PE DLL
+with ASLR and DEP and no Visual C++ or MinGW runtime; the three exports;
+then loaded as `_native.py` loads it, reporting the package's version and
+answering one call as the Python engine does), and the three parity
+modules run against it on its platform (the Linux ones inside the image).
+The `dist` job builds the sdist, the pure wheel and the five platform
+wheels from one checkout (Python 3.12.14, `SOURCE_DATE_EPOCH`), and
+`check_native_library.py --dist` holds each platform wheel to the pure
+wheel's files plus its library and license files. The `install` job then
+installs each platform wheel with pip, from those files only, on its
+platform, and runs `python -m lazaret --version` (`lazaret X (engine: rust
+X)`); on Linux x86-64 the pure wheel is installed too and runs the Python
+engine. On Linux a build is reproducible: the same commit, toolchain and
+image give the same library bytes wherever the checkout is (cargo passes
+workspace paths relative). Given the same five libraries, the seven files
+are too; the Windows linker, though, stamps a time into the DLL.
+
+Bumping the pins by hand (Dependabot updates the actions only):
+`RUST_VERSION` in `wheels.yml`, at or above `rust-version` in
+`rust/Cargo.toml`; the two manylinux images, by the newest dated tag's
+digest (`docker buildx imagetools inspect
+quay.io/pypa/manylinux_2_28_x86_64:latest`, or quay.io's tag list). GitHub
+retires its last Intel macOS image (macos-15-intel) in August 2027; after
+that the x86-64 library becomes a cross build on Apple silicon, checked by
+its headers only.
 
 CI (`.github/workflows/ci.yml`, job `rust`, Linux, macOS, Windows):
 `check_rust_deps.py`, `make_rust_tables.py --check` (on 3.10), `cargo test`,
 the build, the three parity modules against the library (they skip where it
-is not built), and on Linux the whole Python suite with `LAZARET_ENGINE=rust`.
-Not yet: release builds of the platform wheels, and WebAssembly (installing
-`wasm32-unknown-unknown` was refused by the sandboxes' network so far).
+is not built, so the job first asserts that it loads), and on Linux the
+whole Python suite with `LAZARET_ENGINE=rust`. Not yet: WebAssembly
+(installing `wasm32-unknown-unknown` was refused by the sandboxes' network
+so far).
+
+Versions: the workspace version is held to the Python and npm packages'
+(`scripts/check-versions.sh` reads `rust/Cargo.toml` and the two entries of
+`rust/Cargo.lock`), so the engine reports the version of the release it
+ships in. A release bump changes all three; `cargo update --workspace
+--offline` in `rust/` rewrites the lock file.
 
 ## 5. The parity contract
 
@@ -256,14 +317,12 @@ corpus; json.dump(corpus(), open('cases.json', 'w'))"` from `python/` with
 
 ## 10. Next
 
-1. Release builds of platform wheels (Linux in the manylinux images, macOS,
-   Windows) with provenance, and WebAssembly for the npm package
-   (`js/src/lib/native.js`), where `wasm32-unknown-unknown` can be installed.
-   With them, hold the workspace version to the packages' in
-   `scripts/check-versions.sh` (a bump then also rewrites `Cargo.lock`'s
-   two workspace entries). Keep the benchmark harness (outside the
-   repository today) in it, and run the 945 packages with each engine
-   nightly.
+1. WebAssembly for the npm package (`js/src/lib/native.js`), where
+   `wasm32-unknown-unknown` can be installed; the npm package then carries
+   `rust/NOTICE` and `rust/LICENSE-PYTHON` too (§11). Keep the benchmark
+   harness (outside the repository today) in it, and run the 945 packages
+   with each engine nightly. (Done: release builds of the five platform
+   wheels, §4, and the version held to the packages'.)
 2. Phase 2 (`scan_file`), family by family, each behind the same
    view-and-compare test and each test module under 45 s.
 3. Flip the source of truth: `core.py` loads the pack at import.
@@ -271,3 +330,40 @@ corpus; json.dump(corpus(), open('cases.json', 'w'))"` from `python/` with
 5. More single-thread speed if still needed: one Aho-Corasick pass over all
    patterns' required strings, a faster hash than SipHash, a cheaper
    `Prog::new` for run-time patterns.
+
+## 11. Licensing
+
+The engine is Lazaret's own work under Apache-2.0, except for its
+translations of CPython code: pyre's parser, compiler, constants and
+matcher (`Lib/re/_parser.py`, `_compiler.py`, `_constants.py`,
+`Modules/_sre/sre_lib.h`), parts of `pyre/mod.rs` (`parse_template` and the
+Pattern methods of `sre.c`), `shlex_split` in `hooks.rs` (`Lib/shlex.py`),
+`capital_sigma` in `unicode.rs` (`handle_capital_sigma` in
+`Objects/unicodeobject.c`), and the `_casefix` table in `unicode13.rs`.
+Those are derivative works of CPython and are distributed under CPython's
+license as well: the PSF License Version 2 and the older licenses of its
+stack, among them CNRI's Python 1.6 license, which the SRE files' Secret
+Labs notices name.
+
+- `rust/NOTICE` lists them, repeats the originals' notices (Secret Labs AB
+  1997-2001 and 1998-2001, the PSF's) and summarizes the changes (section 3
+  of the PSF License asks for that when the work is distributed).
+- `rust/LICENSE-PYTHON` is CPython 3.14.0's LICENSE, unchanged (a test pins
+  its SHA-256; take a newer one whole, never edited).
+- Each translated file starts with `// SPDX-License-Identifier: Apache-2.0
+  AND Python-2.0.1` and its original's notices.
+- `rust/Cargo.toml` declares `Apache-2.0 AND Python-2.0.1`. The platform
+  wheels carry the compiled engine, so they carry both files as license
+  files (`.dist-info/licenses/`) and declare the same expression; the pure
+  wheel, the sdist and the npm package hold none of that code and stay
+  Apache-2.0. `check_native_library.py --dist` checks the wheels before a
+  release.
+
+`tests/architecture/test_rust_notices.py` keeps all of this in place, and
+fails on a Rust file that says it is ported or translated from CPython
+without a notice: a new translation gets a header and a line in
+`rust/NOTICE`. The Secret Labs notices say the SRE library "can be
+redistributed under CNRI's Python 1.6 license. For any other use, please
+contact Secret Labs AB"; Lazaret distributes the translation under
+CPython's own terms with every notice kept, the usual reading, and a
+commercial use may want a lawyer's view of that sentence.

@@ -631,21 +631,27 @@ fixture.
 
 ## 9. Versioning, release and delivery
 
-- **One version, two files, kept in sync:** `__version__` in
-  `python/src/lazaret/__init__.py` and `"version"` in `js/package.json`.
-  `scripts/check-versions.sh` fails if they disagree (and, at a tag, if they
-  don't match the tag). Pre-1.0; the 0.x API may still change.
-- **Release** (`docs/RELEASING.md`): bump both versions in one commit, get it
+- **One version, kept in sync:** `__version__` in
+  `python/src/lazaret/__init__.py`, `"version"` in `js/package.json`, and the
+  native engine's workspace version in `rust/Cargo.toml` (with its two
+  `rust/Cargo.lock` entries). `scripts/check-versions.sh` fails if they
+  disagree (and, at a tag, if they don't match the tag). Pre-1.0; the 0.x API
+  may still change.
+- **Release** (`docs/RELEASING.md`): bump the versions in one commit, get it
   onto `main`, `scripts/tag-release.sh vX.Y.Z` (it refuses uncommitted changes,
   a HEAD not on `origin/main`, mismatched versions, or an existing tag), then
   push the tag. The GitHub Actions workflow runs the suite, then publishes to
-  PyPI and npm via **trusted publishing (OIDC)** — no long-lived tokens.
+  PyPI and npm via **trusted publishing (OIDC)** — no long-lived tokens. The
+  PyPI release has a pure wheel and five platform wheels with the native
+  engine, built, checked and installed on their platforms by `wheels.yml`.
   Published versions are immutable; a mistake means releasing the next patch,
   not re-tagging.
 - **CHANGELOG.md** started at 0.1.6 (Keep a Changelog). Date each entry at
   release.
-- **What ships** is narrow: the wheel/sdist contain only `src/lazaret/`, the npm
-  package only `bin/` and `src/`. `scripts/make_bundle.py` builds a reproducible
+- **What ships** is narrow: the wheel/sdist contain only `src/lazaret/` (a
+  platform wheel adds the native library and its two license files,
+  `rust/LICENSE-PYTHON` and `rust/NOTICE`: part of the engine is a Rust
+  translation of CPython code), the npm package only `bin/` and `src/`. `scripts/make_bundle.py` builds a reproducible
   source tarball from tracked files only and refuses credential files.
 - **Delivery in this project's history** used git-format-patch mailboxes
   (`git am`) applied onto a release branch; a direct contributor just commits to
@@ -799,10 +805,18 @@ comprehensive, so weigh marginal value against FP risk):
   (`getattr(m, name)`), a runner behind another function (one that hands its
   parameter to another file's runner), or more than four hops.
 - *Engine:* the native engine answers the supply-chain tests (0.1.8,
-  `docs/RUST_ENGINE.md`); next, release builds of the platform wheels,
-  WebAssembly for the npm package (then the JavaScript twin can go), the
-  per-file rules (`scan_file`), and `core.py` loading the rule pack so it
+  `docs/RUST_ENGINE.md`), and release CI builds it into five platform
+  wheels; next, WebAssembly for the npm package (then the JavaScript twin can
+  go, and the npm package carries `rust/NOTICE` and `rust/LICENSE-PYTHON`),
+  the per-file rules (`scan_file`), and `core.py` loading the rule pack so it
   has one source.
+- *Notices outside the native engine* (smaller, for a later release): the
+  npm package's shell tokenizer (`js/src/lib/hooks.js`) reimplements the
+  state machine of CPython's `shlex.read_token`, so give it the PSF notice
+  as the Rust one has; and the character and codec tables generated from
+  Python's `unicodedata` and `codecs` (`_unicode13.py` and its JS twins,
+  `codecs.js`, `unicode13.rs`) are Unicode Character Database data, which
+  the Unicode License asks to be credited where it is copied.
 - *Quality:* a durable home for this backlog (a `BACKLOG.md` or issues).
 - *Guard:* registries that need credentials (read them from the tool's own
   settings, for that host only), yarn and Bun, `uv run` / `uvx`; the scan of a

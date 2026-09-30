@@ -148,6 +148,91 @@ class BuildTests(unittest.TestCase):
         with tarfile.open(self.sdist) as t:
             self.assertFalse([n for n in t.getnames() if "/_native/" in n])
 
+    def test_a_platform_wheel_carries_cpythons_license_and_the_notice(self):
+        """Part of the native engine is a Rust translation of CPython code
+        (rust/NOTICE): a platform wheel carries CPython's LICENSE and that
+        notice as license files and declares both licenses. The pure wheel
+        and the sdist hold none of that code, and say Apache-2.0 alone."""
+        dist_info = f"lazaret-{self.version}.dist-info"
+        with tempfile.TemporaryDirectory() as d:
+            lib = pathlib.Path(d, "built.so")
+            lib.write_bytes(b"\x7fELF-native-engine")
+            wheel = os.path.join(d, self.b.build_platform_wheel(d, "manylinux_2_28_x86_64", str(lib)))
+            meta = read_member(wheel, f"{dist_info}/METADATA").decode()
+            self.assertIn("License-Expression: Apache-2.0 AND Python-2.0.1\n", meta)
+            self.assertEqual(re.findall(r"^License-File: (.+)$", meta, re.M), ["LICENSE", "LICENSE-PYTHON", "NOTICE"])
+            for name in ("LICENSE-PYTHON", "NOTICE"):
+                with self.subTest(name=name):
+                    self.assertEqual(read_member(wheel, f"{dist_info}/licenses/{name}"),
+                                     pathlib.Path(_support.REPO_ROOT, "rust", name).read_bytes())
+            self.assertIn(b"Copyright (c) 2001 Python Software Foundation; All Rights Reserved",
+                          read_member(wheel, f"{dist_info}/licenses/LICENSE-PYTHON"))
+            with unittest.mock.patch.dict(self.b.NATIVE_LICENSE_FILES, {"NOTICE": pathlib.Path(d, "missing")}):
+                with self.assertRaises(RuntimeError) as cm:                 # no notices, no platform wheel
+                    self.b.build_platform_wheel(d, "win_amd64", str(lib))
+                self.assertIn("missing", str(cm.exception))
+        pure = read_member(self.wheel, f"{dist_info}/METADATA").decode()
+        self.assertIn("License-Expression: Apache-2.0\n", pure)
+        self.assertEqual(re.findall(r"^License-File: (.+)$", pure, re.M), ["LICENSE"])
+        self.assertFalse([n for n in self.names() if n.endswith(("/LICENSE-PYTHON", "/NOTICE"))])
+        with tarfile.open(self.sdist) as t:
+            self.assertFalse([n for n in t.getnames() if n.endswith(("/LICENSE-PYTHON", "/NOTICE"))])
+            pkg_info = t.extractfile(f"lazaret-{self.version}/PKG-INFO").read().decode()
+        self.assertIn("License-Expression: Apache-2.0\n", pkg_info)
+
+    def test_the_command_line_builds_a_platform_wheel_per_platform(self):
+        """Release CI: `lazaret_build.py dist --platform TAG=LIBRARY …` writes the
+        sdist, the pure wheel, and one platform wheel per --platform, each the
+        pure wheel's files plus its library. A bad --platform stops the build
+        before anything is written."""
+        env = {k: v for k, v in os.environ.items() if k not in ("LAZARET_NATIVE_LIBRARY", "LAZARET_WHEEL_PLATFORM")}
+
+        def build(out, *args):
+            return subprocess.run([sys.executable, BACKEND, out, *args], capture_output=True, encoding="utf-8",
+                                  errors="replace", env=env, timeout=40)
+
+        with tempfile.TemporaryDirectory() as d:
+            so, dll = pathlib.Path(d, "built.so"), pathlib.Path(d, "built.dll")
+            so.write_bytes(b"\x7fELF-linux")
+            dll.write_bytes(b"MZ-windows")
+            out = os.path.join(d, "dist")
+            p = build(out, "--platform", f"manylinux_2_28_x86_64={so}", "--platform", f"win_amd64={dll}")
+            self.assertEqual(p.returncode, 0, p.stderr)
+            v = self.version
+            self.assertEqual(sorted(os.listdir(out)), sorted([
+                f"lazaret-{v}.tar.gz", f"lazaret-{v}-py3-none-any.whl",
+                f"lazaret-{v}-py3-none-manylinux_2_28_x86_64.whl", f"lazaret-{v}-py3-none-win_amd64.whl"]))
+
+            def members(name):
+                with zipfile.ZipFile(os.path.join(out, name)) as z:
+                    return {n: z.read(n) for n in z.namelist()}
+
+            pure = members(f"lazaret-{v}-py3-none-any.whl")
+            dist_info = f"lazaret-{v}.dist-info/"
+            for tag, library, data in (("manylinux_2_28_x86_64", "liblazaret_native.so", b"\x7fELF-linux"),
+                                       ("win_amd64", "lazaret_native.dll", b"MZ-windows")):
+                with self.subTest(tag=tag):
+                    wheel = members(f"lazaret-{v}-py3-none-{tag}.whl")
+                    notices = {dist_info + "licenses/LICENSE-PYTHON", dist_info + "licenses/NOTICE"}
+                    self.assertEqual(set(wheel) - set(pure), {f"lazaret/_native/{library}"} | notices)
+                    self.assertEqual(set(pure) - set(wheel), set())
+                    self.assertEqual(wheel[f"lazaret/_native/{library}"], data)
+                    for name in pure:
+                        if name not in (dist_info + "WHEEL", dist_info + "RECORD", dist_info + "METADATA"):
+                            self.assertEqual(wheel[name], pure[name], name)
+                    self.assertIn(f"Tag: py3-none-{tag}\n", wheel[dist_info + "WHEEL"].decode())
+
+            for args in (["--platform", "manylinux_2_28_x86_64"], ["--platform", f"any={so}"],
+                         ["--platform", f"Linux x86={so}"], ["--platform", f"win_amd64={d}/missing.dll"],
+                         ["--platform", f"win_amd64={dll}", "--platform", f"win_amd64={so}"]):
+                with self.subTest(args=args):
+                    empty = os.path.join(d, "none")
+                    p = build(empty, *args)
+                    self.assertNotEqual(p.returncode, 0)
+                    self.assertIn("--platform", p.stderr)
+                    self.assertNotIn("Traceback", p.stderr)
+                    self.assertFalse(os.path.exists(empty) and os.listdir(empty))
+
     def test_builds_are_reproducible(self):
         with tempfile.TemporaryDirectory() as d:
             again_wheel = os.path.join(d, self.b.build_wheel(d))

@@ -234,6 +234,34 @@ project is pre-1.0, so the 0.x API may still change.
   backend); the pure wheel and the npm package run as before. CI builds it
   on Linux, macOS and Windows and checks that no crate from outside the
   repository appears (`scripts/check_rust_deps.py`).
+- **Platform wheels with the native engine** (PyPI). A release also
+  publishes five platform wheels: Linux x86-64 and ARM64 (manylinux_2_28,
+  glibc 2.28 or later), macOS arm64 (11.0 or later) and x86-64 (10.12 or
+  later), and Windows x64, each the pure wheel's files plus the library for
+  its platform. pip installs one where it matches and the pure wheel
+  everywhere else (musl, 32-bit, other architectures), with the same
+  findings. Release CI (`.github/workflows/wheels.yml`, which also runs on
+  pull requests that change what goes into a wheel) builds each library on
+  its own platform with a pinned Rust (1.95.0), the Linux ones in PyPA's
+  manylinux_2_28 images pinned by digest and the Windows one with its C
+  runtime linked statically; checks it against its wheel's tag
+  (`scripts/check_native_library.py`: the glibc symbol versions and
+  libraries a manylinux tag allows, the minimum macOS, no Visual C++
+  runtime, the exported functions), loads it and runs the parity modules
+  on that platform; builds the seven files from one checkout and checks
+  them against each other; and installs each platform wheel with pip on its
+  platform and runs it. The build backend takes `--platform TAG=LIBRARY`.
+- **The native engine's notices.** Its regular expression engine, its shell
+  tokenizer and the Final_Sigma rule of `str.lower()` are Rust translations
+  of CPython code (`Lib/re/_parser.py`, `_compiler.py`, `_constants.py`,
+  `Modules/_sre/sre_lib.h` and parts of `sre.c`; `Lib/shlex.py`;
+  `handle_capital_sigma`). `rust/NOTICE` lists them with the originals'
+  Secret Labs and PSF notices and a summary of the changes,
+  `rust/LICENSE-PYTHON` is CPython 3.14.0's LICENSE, each translated file
+  carries its notices, and the crates and the platform wheels declare
+  `Apache-2.0 AND Python-2.0.1` and carry both files
+  (`tests/architecture/test_rust_notices.py`). The pure wheel, the sdist and
+  the npm package hold none of that code.
 - **`--version` on every Python command** (`lazaret`, `lazaret guard` /
   `lazaret-guard`, `lazaret-registry`, `lazaret-sca`, `lazaret-mcp`). Which
   install was on the PATH could only be told by importing the package, and
@@ -241,6 +269,14 @@ project is pre-1.0, so the 0.x API may still change.
   pipx 0.1.7) answered `lazaret guard …` with the scanner's usage error.
 - **The PyPI description names `lazaret guard`.** It is `python/README.md`,
   which 0.1.7 did not update; PyPI shows it from the next release.
+
+### Changed
+- **The native engine is released in lockstep with the packages.**
+  `scripts/check-versions.sh` (CI's `versions` job, `tag-release.sh` and the
+  release's `verify-tag`) also reads `rust/Cargo.toml`'s workspace version
+  and `rust/Cargo.lock`'s two entries, so `engine: rust X` in `--version` is
+  the release's own version. The workspace is back at 0.1.7 until the
+  release bump.
 
 ### Fixed
 - **chromedriver's installer read as a call to RequestBin** (both engines;

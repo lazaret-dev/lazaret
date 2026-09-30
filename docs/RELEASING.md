@@ -95,7 +95,7 @@ Anything merged through the GitHub web UI reaches GitLab the next time you pull 
 
 ## Cutting a release
 
-1. Bump `__version__` in `python/src/lazaret/__init__.py` and `"version"` in `js/package.json` in one commit, and get it onto `main` (merge the PR, or push to `main`).
+1. Bump the version in one commit, and get it onto `main` (merge the PR, or push to `main`): `__version__` in `python/src/lazaret/__init__.py`, `"version"` in `js/package.json`, and `version` under `[workspace.package]` in `rust/Cargo.toml`, the native engine's, which ships in the platform wheels; then run `cargo update --workspace --offline` in `rust/`, which rewrites the two workspace entries in `rust/Cargo.lock`, and commit that too. `sh scripts/check-versions.sh HEAD` checks all of them.
 2. Tag the commit on `main`, from a clean checkout of it:
    ```sh
    git switch main && git pull
@@ -109,12 +109,12 @@ Anything merged through the GitHub web UI reaches GitLab the next time you pull 
 4. The tag triggers `.github/workflows/release.yml`:
    - `verify-tag` fails the release unless the tagged commit is on `main`, the tag is annotated (not a lightweight tag), and the versions committed at the tag match it;
    - the full test suite runs (`ci.yml`);
-   - `build-python` builds the wheel and sdist with Lazaret's own stdlib backend (stamped with the tagged commit's time, so rebuilding a tag is byte-identical), and `build-npm` packs the npm tarball;
+   - `build-python` runs `wheels.yml`: the native engine's library for each of five platforms (Linux x86-64 and ARM64 in PyPA's manylinux_2_28 images, macOS arm64 and x86-64, Windows x64), built with a pinned Rust, checked against its wheel's tag and tested against the Python engine on its platform; the sdist, the pure wheel and the five platform wheels, built with Lazaret's own stdlib backend (stamped with the tagged commit's time) and checked against each other; and each platform wheel installed with pip on its platform and run. `build-npm` packs the npm tarball;
    - only when **both** builds succeed do the publish jobs start, each waiting for your approval on its environment (`pypi`, `npm`).
 5. PyPI goes live as soon as its job finishes. npm is only *staged*: approve it with 2FA at https://www.npmjs.com/package/lazaret (the **Staged Packages** tab) or with `npm stage approve <stage-id>`. The run's summary page carries a reminder.
 6. - [ ] `python3 scripts/make_typosquat_stubs.py --check` still exits 0.
 
-`sh scripts/check-versions.sh` with no arguments checks the working tree and fails if either version file has uncommitted changes; `sh scripts/check-versions.sh <ref>` checks the files as committed at a tag, branch or commit (`sh scripts/check-versions.sh v0.0.1`).
+`sh scripts/check-versions.sh` with no arguments checks the working tree and fails if any version file has uncommitted changes; `sh scripts/check-versions.sh <ref>` checks the files as committed at a tag, branch or commit (`sh scripts/check-versions.sh v0.0.1`).
 
 ## Sharing a source tarball
 
@@ -192,5 +192,7 @@ The same steps with your version: confirm nothing was published, lift the tag pr
 - All actions in the workflows are pinned to full commit SHAs, with the version in a comment. Dependabot opens weekly PRs to bump them, after a 7-day cooldown.
 - The publish jobs install nothing. `publish-npm` uses the npm bundled with an exact Node version (`node-version` in `release.yml`, 24.21.0 with npm 11.19.0) and checks it is at least 11.15.0 (`npm stage`; trusted publishing needs 11.5.1). To move to a newer Node, check its bundled npm first (`deps/npm/package.json` in the nodejs/node repository at that version's tag) and update both places in `release.yml`.
 - `build-python` pins an exact Python (3.12.14): compressed bytes depend on the interpreter's zlib, so a byte-identical rebuild of a tag needs the same Python.
+- The native libraries' pins live in `.github/workflows/wheels.yml` and are bumped by hand (Dependabot only updates actions): `RUST_VERSION` (at or above `rust-version` in `rust/Cargo.toml`), and the two manylinux_2_28 images, by digest (`docker buildx imagetools inspect quay.io/pypa/manylinux_2_28_x86_64:latest`, and the same for `_aarch64`). A pull request that changes the workflow runs it, so a bump is tested before a tag needs it. GitHub's last Intel macOS image, `macos-15-intel`, goes away in August 2027; the x86-64 macOS library then has to be cross-built on Apple silicon (`docs/RUST_ENGINE.md`, section 4).
+- The platform wheels are `Apache-2.0 AND Python-2.0.1` and carry `rust/LICENSE-PYTHON` and `rust/NOTICE`: part of the native engine is a translation of CPython code (`docs/RUST_ENGINE.md`, section 11). Translating more CPython code means a notice header in the file and a line in `rust/NOTICE`; `tests/architecture/test_rust_notices.py` fails otherwise.
 - PyPI trusted publishing has run for real (v0.0.1, v0.1.0). The npm job's staged publish has not succeeded yet: v0.1.0's run failed on the tarball path (now `./npm-dist/...`, and `tests/build/test_review_release_workflow.py` checks it), so that version was finished as in *One registry published, the other failed*. The first npm release (step 4) was manual too, because npm only allows a trusted publisher on a package that already exists.
 - npm provenance requires the GitHub repo to be public. So does `verify-tag`, which fetches `main` without credentials.

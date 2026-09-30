@@ -1,3 +1,11 @@
+// SPDX-License-Identifier: Apache-2.0 AND Python-2.0.1
+//
+// In part (shlex_split) a Rust translation of CPython's Lib/shlex.py,
+// changed as rust/NOTICE summarizes, and distributed under CPython's
+// license (rust/LICENSE-PYTHON) as well as Lazaret's. CPython's notice:
+//
+//   Copyright (c) 2001 Python Software Foundation; All Rights Reserved
+
 //! Following an install hook to the files it runs: a port of
 //! lazaret.scanner.core's `_hook_tokens`, `follow_hook` and their helpers
 //! (section "Following a hook command to the files it runs"), with CPython's

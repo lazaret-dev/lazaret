@@ -1,3 +1,20 @@
+// SPDX-License-Identifier: Apache-2.0 AND Python-2.0.1
+//
+// A Rust translation of CPython's Modules/_sre/sre_lib.h,
+// changed as rust/NOTICE summarizes, and distributed under CPython's
+// license (rust/LICENSE-PYTHON) as well as Lazaret's. The original's
+// notices:
+//
+//   Copyright (c) 1997-2001 by Secret Labs AB.  All rights reserved.
+//   See the sre.c file for information on usage and redistribution.
+//
+//   (Modules/_sre/sre.c:)
+//   This version of the SRE library can be redistributed under CNRI's
+//   Python 1.6 license.  For any other use, please contact Secret Labs
+//   AB (info@pythonware.com).
+//
+//   Copyright (c) 2001 Python Software Foundation; All Rights Reserved
+
 //! sre's matching engine (Modules/_sre/sre_lib.h, CPython 3.11-3.14),
 //! ported operation for operation: SRE(match) with its context stack on the
 //! heap (the recursion of a backtracking step is a pushed context, so no

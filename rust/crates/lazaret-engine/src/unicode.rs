@@ -1,3 +1,12 @@
+// SPDX-License-Identifier: Apache-2.0 AND Python-2.0.1
+//
+// In part (capital_sigma) a Rust translation of CPython's
+// Objects/unicodeobject.c (handle_capital_sigma), changed as rust/NOTICE
+// summarizes, and distributed under CPython's license (rust/LICENSE-PYTHON)
+// as well as Lazaret's. CPython's notice:
+//
+//   Copyright (c) 2001 Python Software Foundation; All Rights Reserved
+
 //! Character data as Python 3.10 (Unicode 13.0) reads it.
 //!
 //! Every lookup takes a code point as a `u32`, surrogates included: text is a

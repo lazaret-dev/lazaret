@@ -95,7 +95,10 @@ Notes:
   module the same way when it nears the limit rather than raising a timeout.
 - The **native engine's parity modules** need the library built
   (`cd rust && cargo build --release --offline --locked`) and named by
-  `LAZARET_NATIVE_LIB`; without it they skip. `test_rust_parity_hooks.py`
+  `LAZARET_NATIVE_LIB`; without it they skip (so every CI job that runs them
+  first proves the library loads: `scripts/check_native_library.py LIB TAG
+  --load`, or an assertion; `test_review_release_workflow.py` checks that).
+  `test_rust_parity_hooks.py`
   (~27 s) runs alone; `_regex` (~1 s) and `_signs` (~8 s) batch. A suite run
   with `LAZARET_ENGINE=rust` sends every supply-chain test of the scanner and
   the registry through the native engine; `=python` keeps them in core.
@@ -208,9 +211,14 @@ pass is what catches ripple from a change in a widely-imported module like
 the Python batches twice, with `LAZARET_ENGINE=rust` and `=python` (CI's
 `rust` job does the first on Linux).
 
-Then the release gates themselves: `sh scripts/check-versions.sh HEAD` (both
-package versions agree), and CI's own `versions` check runs inside the test
-stage before any publish job (`docs/RELEASING.md`).
+Then the release gates themselves: `sh scripts/check-versions.sh HEAD` (the
+Python, npm and native engine versions agree), and CI's own `versions` check
+runs inside the test stage before any publish job (`docs/RELEASING.md`). The
+platform wheels are built, checked (`scripts/check_native_library.py`) and
+installed on their five platforms by `wheels.yml`, on any pull request that
+changes what goes into them; locally, `python3 scripts/check_native_library.py
+rust/target/release/liblazaret_native.so manylinux_2_39_x86_64 --load` (the
+tag of the glibc you built on) checks a development build the same way.
 
 ---
 

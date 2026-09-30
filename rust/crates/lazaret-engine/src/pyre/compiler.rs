@@ -1,3 +1,20 @@
+// SPDX-License-Identifier: Apache-2.0 AND Python-2.0.1
+//
+// A Rust translation of CPython's Lib/re/_compiler.py,
+// changed as rust/NOTICE summarizes, and distributed under CPython's
+// license (rust/LICENSE-PYTHON) as well as Lazaret's. The original's
+// notices:
+//
+//   Copyright (c) 1997-2001 by Secret Labs AB.  All rights reserved.
+//   See the __init__.py file for information on usage and redistribution.
+//
+//   (Lib/re/__init__.py:)
+//   This version of the SRE library can be redistributed under CNRI's
+//   Python 1.6 license.  For any other use, please contact Secret Labs
+//   AB (info@pythonware.com).
+//
+//   Copyright (c) 2001 Python Software Foundation; All Rights Reserved
+
 //! Python's `re` compiler (re/_compiler.py, CPython 3.11-3.14), ported line
 //! for line: parse tree to sre's code words, with the same case folding,
 //! set optimizations and INFO block (min width, literal prefix, first

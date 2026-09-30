@@ -5,6 +5,8 @@ requirements and points here via backend-path. pip uses these hooks for
 `pip install .` and `pip install -e .`; release CI calls them directly:
 
     python _build/lazaret_build.py [output-dir]     # writes the wheel and sdist
+    python _build/lazaret_build.py dist --platform manylinux_2_28_x86_64=liblazaret_native.so ...
+                                                    # and a platform wheel per --platform
 
 Package metadata lives in this module (METADATA below) rather than in a
 [project] table: a backend must honor [project] if it exists, and reading TOML
@@ -46,6 +48,7 @@ import zipfile
 ROOT = pathlib.Path(__file__).resolve().parent.parent      # python/
 SRC = ROOT / "src"
 PKG = SRC / "lazaret"
+RUST = ROOT.parent / "rust"                                  # the native engine (a platform wheel's library)
 
 NAME = "lazaret"
 METADATA = {
@@ -81,6 +84,14 @@ METADATA = {
 # Deliberately empty: Lazaret has no runtime dependencies. Tested.
 REQUIRES_DIST: list[str] = []
 
+# A platform wheel carries the native engine, part of which is a Rust
+# translation of CPython's regular expression engine and shlex (rust/NOTICE),
+# distributed under CPython's license: so it also carries CPython's LICENSE
+# and the notice, as license files, and says so in its license expression.
+# The pure wheel and the sdist hold none of that code.
+NATIVE_LICENSE_EXPRESSION = "Apache-2.0 AND Python-2.0.1"
+NATIVE_LICENSE_FILES = {"LICENSE-PYTHON": RUST / "LICENSE-PYTHON", "NOTICE": RUST / "NOTICE"}
+
 CONSOLE_SCRIPTS = {
     "lazaret": "lazaret._cli:main",
     "lazaret-registry": "lazaret.registry.repo:main",
@@ -103,7 +114,7 @@ _SKIP_DIRS = {"__pycache__"}
 # Files packed with LF line endings whatever the checkout has (a Windows
 # checkout with core.autocrlf would otherwise change every member's bytes).
 _TEXT_SUFFIXES = (".py", ".sql", ".html", ".md", ".toml", ".txt", ".json")
-_TEXT_NAMES = frozenset({"LICENSE", "PKG-INFO", "py.typed"})
+_TEXT_NAMES = frozenset({"LICENSE", "LICENSE-PYTHON", "NOTICE", "PKG-INFO", "py.typed"})
 # Zip "made by" system: 3 = Unix. zipfile defaults to 0 (MS-DOS) on Windows,
 # which would change every central-directory record there.
 _ZIP_CREATE_SYSTEM = 3
@@ -135,6 +146,20 @@ def native_library_name(platform: str) -> str:
     return "liblazaret_native.so"
 
 
+def _native_member(platform: str, library: str) -> dict[str, bytes]:
+    """{arcname: bytes} of the native library in a platform wheel."""
+    if not _PLATFORM_TAG_RE.match(platform) or platform == "any":
+        raise RuntimeError(f"{platform!r} is not a platform tag")
+    path = pathlib.Path(library)
+    if path.is_symlink() or not path.is_file():
+        raise RuntimeError(f"{library!r} is not a regular file")
+    missing = [str(p) for p in NATIVE_LICENSE_FILES.values() if p.is_symlink() or not p.is_file()]
+    if missing:
+        raise RuntimeError(f"a platform wheel carries the native engine's notices, and {', '.join(missing)} "
+                           f"is missing")
+    return {f"lazaret/_native/{native_library_name(platform)}": path.read_bytes()}
+
+
 def _native_payload() -> tuple[str, dict[str, bytes]]:
     """(the wheel's platform tag, {arcname: bytes} of the native library) from
     the environment; ('any', {}) for the pure wheel."""
@@ -144,12 +169,10 @@ def _native_payload() -> tuple[str, dict[str, bytes]]:
         return "any", {}
     if not (library and platform):
         raise RuntimeError(f"a platform wheel needs both {NATIVE_LIBRARY_ENV} and {WHEEL_PLATFORM_ENV}")
-    if not _PLATFORM_TAG_RE.match(platform) or platform == "any":
-        raise RuntimeError(f"{WHEEL_PLATFORM_ENV}={platform!r} is not a platform tag")
-    path = pathlib.Path(library)
-    if path.is_symlink() or not path.is_file():
-        raise RuntimeError(f"{NATIVE_LIBRARY_ENV}={library!r} is not a regular file")
-    return platform, {f"lazaret/_native/{native_library_name(platform)}": path.read_bytes()}
+    try:
+        return platform, _native_member(platform, library)
+    except RuntimeError as exc:
+        raise RuntimeError(f"{WHEEL_PLATFORM_ENV}, {NATIVE_LIBRARY_ENV}: {exc}") from None
 
 
 # --- helpers -------------------------------------------------------------------
@@ -227,11 +250,17 @@ def _build_files() -> list[pathlib.Path]:
     return _allowlisted(pathlib.Path(__file__).resolve().parent, BUILD_SUFFIXES, label="_build")
 
 
-def metadata_text() -> str:
+def metadata_text(native: bool = False) -> str:
+    """METADATA (PKG-INFO); `native`: a platform wheel's, which adds the native
+    engine's license files and expression."""
     lines = ["Metadata-Version: 2.4", f"Name: {NAME}", f"Version: {version()}"]
     for key, value in METADATA.items():
+        if native and key == "License-Expression":
+            value = NATIVE_LICENSE_EXPRESSION
         for item in (value if isinstance(value, list) else [value]):
             lines.append(f"{key}: {item}")
+        if native and key == "License-File":
+            lines += [f"License-File: {name}" for name in NATIVE_LICENSE_FILES]
     lines += [f"Requires-Dist: {req}" for req in REQUIRES_DIST]
     readme = ROOT / "README.md"
     if readme.exists():
@@ -282,7 +311,8 @@ def _write_wheel(directory: str, payload: dict[str, bytes], platform: str = "any
     writer = _WheelWriter(pathlib.Path(directory) / filename)
     for arcname in sorted(payload):
         writer.add(arcname, payload[arcname])
-    writer.add(f"{dist_info}/METADATA", metadata_text().encode("utf-8"))
+    native = platform != "any"
+    writer.add(f"{dist_info}/METADATA", metadata_text(native).encode("utf-8"))
     purelib = "true" if platform == "any" else "false"
     writer.add(f"{dist_info}/WHEEL", (
         f"Wheel-Version: 1.0\nGenerator: lazaret_build\nRoot-Is-Purelib: {purelib}\nTag: py3-none-{platform}\n"
@@ -291,6 +321,9 @@ def _write_wheel(directory: str, payload: dict[str, bytes], platform: str = "any
     license_file = ROOT / "LICENSE"
     if license_file.exists():
         writer.add(f"{dist_info}/licenses/LICENSE", license_file.read_bytes())
+    if native:
+        for name, path in NATIVE_LICENSE_FILES.items():
+            writer.add(f"{dist_info}/licenses/{name}", path.read_bytes())
     writer.close(dist_info)
     return filename
 
@@ -309,10 +342,22 @@ def get_requires_for_build_editable(config_settings=None):
     return []
 
 
+def _package_payload() -> dict[str, bytes]:
+    return {path.relative_to(SRC).as_posix(): path.read_bytes() for path in _package_files()}
+
+
 def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
-    payload = {path.relative_to(SRC).as_posix(): path.read_bytes() for path in _package_files()}
+    payload = _package_payload()
     platform, native = _native_payload()
     payload.update(native)
+    return _write_wheel(wheel_directory, payload, platform)
+
+
+def build_platform_wheel(wheel_directory: str, platform: str, library: str) -> str:
+    """The pure wheel's files plus the native library built for `platform`
+    (release CI, through `--platform TAG=LIBRARY`; the environment is not read)."""
+    payload = _package_payload()
+    payload.update(_native_member(platform, library))
     return _write_wheel(wheel_directory, payload, platform)
 
 
@@ -360,13 +405,36 @@ def build_sdist(sdist_directory, config_settings=None):
 
 
 def main(argv=None) -> int:
-    argv = sys.argv[1:] if argv is None else argv
-    out = pathlib.Path(argv[0] if argv else ROOT / "dist")
-    out.mkdir(parents=True, exist_ok=True)
+    import argparse
+    parser = argparse.ArgumentParser(
+        prog="lazaret_build.py", description="Build Lazaret's sdist and pure wheel, and a platform wheel "
+                                             "for each --platform.")
+    parser.add_argument("out", nargs="?", default=str(ROOT / "dist"), help="output directory (default: dist/)")
+    parser.add_argument("--platform", action="append", default=[], metavar="TAG=LIBRARY",
+                        help="also build the platform wheel for TAG, carrying the native library LIBRARY "
+                             "(repeat for each platform)")
+    args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+    platforms = []
+    for item in args.platform:
+        tag, sep, library = item.partition("=")
+        if not (sep and tag and library):
+            parser.error(f"--platform takes TAG=LIBRARY, not {item!r}")
+        if tag in dict(platforms):
+            parser.error(f"--platform {tag} is given twice")
+        platforms.append((tag, library))
+    out = pathlib.Path(args.out)
     try:
+        for tag, library in platforms:          # all of them, before anything is written
+            try:
+                _native_member(tag, library)
+            except RuntimeError as exc:
+                raise RuntimeError(f"--platform {tag}={library}: {exc}") from None
+        out.mkdir(parents=True, exist_ok=True)
         for build in (build_sdist, build_wheel):
             print(out / build(str(out)))
-    except UnexpectedFilesError as exc:
+        for tag, library in platforms:
+            print(out / build_platform_wheel(str(out), tag, library))
+    except RuntimeError as exc:                 # UnexpectedFilesError, or a bad --platform
         print(f"error: {exc}", file=sys.stderr)
         return 1
     return 0
