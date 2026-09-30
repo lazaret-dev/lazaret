@@ -1547,9 +1547,12 @@ fn code_prefix(prefix: &[u32], lang_js: bool) -> bool {
 /// core.offscreen_code: (column, blanks, hidden text, runs code) or None.
 pub fn offscreen_code(p: &Pack, line: &[u32], lang: &str) -> Option<(usize, usize, PyStr, bool)> {
     let min = p.usize("_OFFSCREEN_MIN");
+    if line.len() <= min {
+        return None;
+    }
     let spaces: PyStr = vec![c(' '); 16];
     let tabs: PyStr = vec![c('\t'); 16];
-    if line.len() <= min || (pystr::find(line, &spaces, 0).is_none() && pystr::find(line, &tabs, 0).is_none()) {
+    if pystr::find(line, &spaces, 0).is_none() && pystr::find(line, &tabs, 0).is_none() {
         return None;
     }
     let m = p.re("_OFFSCREEN_RE").search(line)?;

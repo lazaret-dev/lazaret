@@ -92,6 +92,69 @@ pub struct Regex {
     prog: std::sync::Arc<prog::Prog>,
     pub groups: usize,
     groupindex: Vec<(Vec<u32>, usize)>,
+    /// set for a pattern the matcher is not needed for (see Simple)
+    simple: Option<Simple>,
+}
+
+/// A pattern simple enough to answer without the matcher: one character of
+/// a set (`[/'"`]`, a lexer's next interesting character) or the longest run
+/// of them (`[ \t\n]*`), a set of literals and ranges only, with no groups
+/// and no IGNORECASE. search and match give the matcher's answers.
+#[derive(Clone, Debug)]
+enum Simple {
+    One(CharSet),
+    Run(CharSet),
+}
+
+#[derive(Clone, Debug)]
+struct CharSet {
+    ascii: u128,
+    ranges: Vec<(u32, u32)>,
+}
+
+impl CharSet {
+    fn of(items: &[parser::SetItem]) -> Option<CharSet> {
+        let mut set = CharSet { ascii: 0, ranges: Vec::new() };
+        for it in items {
+            let (a, b) = match *it {
+                parser::SetItem::Literal(c) => (c, c),
+                parser::SetItem::Range(a, b) => (a, b),
+                _ => return None, // a category (\w, \s …) or a negated set
+            };
+            for c in a..=b.min(127) {
+                set.ascii |= 1u128 << c;
+            }
+            if b >= 128 {
+                set.ranges.push((a.max(128), b));
+            }
+        }
+        Some(set)
+    }
+
+    #[inline]
+    fn has(&self, c: u32) -> bool {
+        if c < 128 {
+            self.ascii & (1u128 << c) != 0
+        } else {
+            self.ranges.iter().any(|&(a, b)| a <= c && c <= b)
+        }
+    }
+}
+
+fn simple_of(p: &parser::SubPattern, flags: u32, groups: usize) -> Option<Simple> {
+    if groups != 0 || flags & FLAG_IGNORECASE != 0 || p.data.len() != 1 {
+        return None;
+    }
+    match &p.data[0] {
+        parser::Node::In(items) => CharSet::of(items).map(Simple::One),
+        parser::Node::Repeat { kind: parser::RepeatKind::Max, min: 0, max: MAXREPEAT, item } if item.data.len() == 1 => {
+            match &item.data[0] {
+                parser::Node::In(items) => CharSet::of(items).map(Simple::Run),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 impl std::fmt::Debug for prog::Prog {
@@ -122,12 +185,14 @@ impl Regex {
     pub fn new(pattern: &[u32], flags: u32) -> Result<Regex, Error> {
         let (p, state) = parser::parse_pattern(pattern, flags).map_err(|e| Error(format!("{} at {}", e.msg, e.pos)))?;
         let code = compiler::code(&p, &state, flags).map_err(|e| Error(e.0))?;
+        let groups = state.groups() - 1;
         Ok(Regex {
             pattern: pattern.to_vec(),
             flags: state.flags | flags,
             prog: std::sync::Arc::new(prog::Prog::new(code)),
-            groups: state.groups() - 1,
+            groups,
             groupindex: state.groupdict.clone(),
+            simple: simple_of(&p, state.flags | flags, groups),
         })
     }
 
@@ -176,12 +241,47 @@ impl Regex {
         f()
     }
 
+    /// A match of `simple` at [a, b).
+    fn simple_match<'s>(&'s self, s: &'s [u32], a: usize, b: usize, pos: usize, endpos: usize) -> Match<'s> {
+        Match { s, re: self, marks: vec![a as isize, b as isize], pos, endpos, lastindex: -1 }
+    }
+
+    /// (start, end) of the clamped search range, as State::new clamps it.
+    fn clamp(s: &[u32], pos: isize, endpos: isize) -> (usize, usize) {
+        let n = s.len() as isize;
+        (pos.clamp(0, n) as usize, endpos.clamp(0, n) as usize)
+    }
+
     pub fn search_at<'s>(&'s self, s: &'s [u32], pos: isize, endpos: isize) -> Option<Match<'s>> {
+        if let Some(simple) = &self.simple {
+            let (start, end) = Self::clamp(s, pos, endpos);
+            return self.timed(|| match simple {
+                Simple::One(set) => {
+                    (start..end).find(|&i| set.has(s[i])).map(|i| self.simple_match(s, i, i + 1, start, end))
+                }
+                Simple::Run(set) => {
+                    if start > end {
+                        return None;
+                    }
+                    let mut j = start;
+                    while j < end && set.has(s[j]) {
+                        j += 1;
+                    }
+                    Some(self.simple_match(s, start, j, start, end))
+                }
+            });
+        }
         let mut st = State::new(s, self.groups, pos, endpos);
         match self.timed(|| matcher::sre_search(&mut st, &self.prog)) {
             Ok(true) => Some(self.new_match(&st)),
             _ => None,
         }
+    }
+
+    /// The strings one of which every match holds (literal.rs), when the
+    /// pattern has them.
+    pub fn need(&self) -> Option<&literal::Need> {
+        self.prog.need.as_ref()
     }
 
     /// What a search needs the text to hold (literal.rs), for a person.
@@ -200,6 +300,28 @@ impl Regex {
 
     /// pattern.match(s, pos, endpos)
     pub fn match_at<'s>(&'s self, s: &'s [u32], pos: isize, endpos: isize) -> Option<Match<'s>> {
+        if let Some(simple) = &self.simple {
+            let (start, end) = Self::clamp(s, pos, endpos);
+            return self.timed(|| match simple {
+                Simple::One(set) => {
+                    if start < end && set.has(s[start]) {
+                        Some(self.simple_match(s, start, start + 1, start, end))
+                    } else {
+                        None
+                    }
+                }
+                Simple::Run(set) => {
+                    if start > end {
+                        return None;
+                    }
+                    let mut j = start;
+                    while j < end && set.has(s[j]) {
+                        j += 1;
+                    }
+                    Some(self.simple_match(s, start, j, start, end))
+                }
+            });
+        }
         let mut st = State::new(s, self.groups, pos, endpos);
         st.ptr = st.start;
         match self.timed(|| matcher::sre_match(&mut st, &self.prog, 0, true)) {

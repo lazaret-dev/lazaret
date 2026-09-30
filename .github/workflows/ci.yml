@@ -127,7 +127,8 @@ jobs:
           LAZARET_NATIVE_LIB=$(PYTHONPATH=src python -c 'import os; from lazaret.scanner import _native; print(os.path.abspath(os.path.join("..", "rust", "target", "release", _native.library_name())))')
           export LAZARET_NATIVE_LIB
           PYTHONPATH=src python -c "from lazaret.scanner import _native; assert _native.available(), _native.load_error(); print('native engine', _native.version())"
-          python -m unittest tests.architecture.test_rust_parity_regex tests.architecture.test_rust_parity_hooks tests.architecture.test_rust_parity_signs -v
+          python -m unittest tests.architecture.test_rust_parity_regex tests.architecture.test_rust_parity_hooks tests.architecture.test_rust_parity_signs \
+            tests.architecture.test_rust_parity_scanfile tests.architecture.test_rust_parity_lexer -v
       - name: The whole suite, the native engine answering
         if: matrix.os == 'ubuntu-latest'
         working-directory: python

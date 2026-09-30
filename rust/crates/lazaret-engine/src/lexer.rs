@@ -23,8 +23,251 @@ fn lang_key(lang: Option<&str>) -> Value {
     }
 }
 
-fn str_re<'p>(p: &'p Pack, lang: Option<&str>, key: &[u32]) -> &'p Regex {
-    p.item_re("_LEX_STR", &Value::Arr(vec![lang_key(lang), Value::Str(key.to_vec())]))
+// ---- the literals' patterns, matched by hand ----
+// The lexer consumes a literal once per token with one of a few patterns
+// (_LEX_STR, _LEX_MYSQL_STR, _JS_REGEX_LIT_RE). Each is matched here by a
+// loop that gives the pattern's own match (each pattern has one way to
+// match: see the notes at each loop), when the pack's pattern is the text
+// the loop was written for (the text and flags are compared once); any
+// other text runs as a regex.
+
+/// How a string pattern consumes a literal starting at its quote.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StrScan {
+    /// Q(?:[^Q\\\n]|\\.)*Q? with DOTALL; `newlines`: Q(?:[^Q\\]|\\.)*Q?
+    Escaped { q: u32, newlines: bool },
+    /// QQQ(?:[^Q\\]|\\.|Q(?!QQ))*(?:QQQ|\Z) with DOTALL
+    Triple { q: u32 },
+    /// Q[^Q]*Q? without flags
+    Plain { q: u32 },
+}
+
+fn str_scan_of(rx: &Regex) -> Option<StrScan> {
+    let text = pystr::to_string(&rx.pattern);
+    let flags = rx.flags & !crate::pyre::constants::FLAG_UNICODE;
+    let dotall = flags == crate::pyre::DOTALL;
+    for q in ['\'', '"', '`'] {
+        let found = if text == format!(r"{q}(?:[^{q}\\\n]|\\.)*{q}?") && dotall {
+            StrScan::Escaped { q: q as u32, newlines: false }
+        } else if text == format!(r"{q}(?:[^{q}\\]|\\.)*{q}?") && dotall {
+            StrScan::Escaped { q: q as u32, newlines: true }
+        } else if text == format!(r"{q}{q}{q}(?:[^{q}\\]|\\.|{q}(?!{q}{q}))*(?:{q}{q}{q}|\Z)") && dotall {
+            StrScan::Triple { q: q as u32 }
+        } else if text == format!(r"{q}[^{q}]*{q}?") && flags == 0 {
+            StrScan::Plain { q: q as u32 }
+        } else {
+            continue;
+        };
+        return Some(found);
+    }
+    None
+}
+
+impl StrScan {
+    /// The end of the match at k (match_at(s, k, len)), or None.
+    fn end(self, s: &[u32], k: usize) -> Option<usize> {
+        let n = s.len();
+        match self {
+            // The loop takes any character but the quote, a backslash and
+            // (unless `newlines`) a newline, or a backslash and the character
+            // after it; it stops at the quote, a newline, a backslash that
+            // ends the text, or the end. `Q?` then takes a quote there: the
+            // whole always matches, so the greedy loop is never given back.
+            StrScan::Escaped { q, newlines } => {
+                if s.get(k) != Some(&q) {
+                    return None;
+                }
+                let mut i = k + 1;
+                while i < n {
+                    let c = s[i];
+                    if c == q || (!newlines && c == '\n' as u32) {
+                        break;
+                    }
+                    if c == '\\' as u32 {
+                        if i + 1 < n {
+                            i += 2;
+                            continue;
+                        }
+                        break;
+                    }
+                    i += 1;
+                }
+                if i < n && s[i] == q {
+                    i += 1;
+                }
+                Some(i)
+            }
+            // The loop stops at the first QQQ (no alternative takes its first
+            // quote), at a backslash that ends the text, or at the end; QQQ or
+            // \Z must follow, and no shorter loop ends at one (it would have
+            // stopped there), so a backslash at the end is no match.
+            StrScan::Triple { q } => {
+                if s.len() < k + 3 || s[k..k + 3] != [q, q, q] {
+                    return None;
+                }
+                let mut i = k + 3;
+                loop {
+                    if i >= n {
+                        return Some(n);
+                    }
+                    let c = s[i];
+                    if c == '\\' as u32 {
+                        if i + 1 < n {
+                            i += 2;
+                            continue;
+                        }
+                        return None;
+                    }
+                    if c == q && i + 2 < n && s[i + 1] == q && s[i + 2] == q {
+                        return Some(i + 3);
+                    }
+                    i += 1;
+                }
+            }
+            StrScan::Plain { q } => {
+                if s.get(k) != Some(&q) {
+                    return None;
+                }
+                let mut i = k + 1;
+                while i < n && s[i] != q {
+                    i += 1;
+                }
+                Some(if i < n { i + 1 } else { i })
+            }
+        }
+    }
+}
+
+/// A string pattern of the lexer's tables, with its hand matcher when it has one.
+struct LexStr {
+    lang: Value,
+    key: Vec<u32>,
+    rx: Regex,
+    scan: Option<StrScan>,
+}
+
+fn lex_str_table(v: &Value) -> Vec<LexStr> {
+    let compile = |x: &Value| -> Option<Regex> {
+        let src = x.get("re")?.as_str()?;
+        let flags = x.get("flags").and_then(|f| f.as_string()).unwrap_or_default();
+        Regex::new(src, crate::pyre::flags_from_letters(&flags)).ok()
+    };
+    let mut out = Vec::new();
+    if let Some(items) = v.get("items").and_then(|l| l.as_arr()) {
+        for kv in items {
+            let kv = match kv.as_arr() {
+                Some(kv) if kv.len() == 2 => kv,
+                _ => continue,
+            };
+            let key = match kv[0].as_arr() {
+                Some(k) if k.len() == 2 => k,
+                _ => continue,
+            };
+            if let (Some(rx), Some(ks)) = (compile(&kv[1]), key[1].as_str()) {
+                let scan = str_scan_of(&rx);
+                out.push(LexStr { lang: key[0].clone(), key: ks.to_vec(), rx, scan });
+            }
+        }
+    }
+    if let Some(map) = v.get("map").and_then(|m| m.as_obj()) {
+        for (k, x) in map {
+            if let Some(rx) = compile(x) {
+                let scan = str_scan_of(&rx);
+                out.push(LexStr { lang: Value::Null, key: k.clone(), rx, scan });
+            }
+        }
+    }
+    out
+}
+
+/// The end of the literal the lexer's table `table` (_LEX_STR, keyed by
+/// language and quote; _LEX_MYSQL_STR, by quote) matches at k, or None.
+fn str_end(p: &Pack, table: &str, lang: Option<&str>, key: &[u32], s: &[u32], k: usize) -> Option<usize> {
+    let rows = p.derived(table, lex_str_table);
+    let want = if table == "_LEX_STR" { lang_key(lang) } else { Value::Null };
+    match rows.iter().find(|r| r.key == key && r.lang == want) {
+        Some(r) => match r.scan {
+            Some(scan) => scan.end(s, k),
+            None => r.rx.match_at(s, k as isize, s.len() as isize).map(|m| m.end()),
+        },
+        None => panic!("{} has no pattern for {:?}", table, pystr::to_string(key)),
+    }
+}
+
+const JS_REGEX_LIT_TEXT: &str = r"/(?![*/])(?:[^/\\\[\n]|\\.|\[(?:[^\]\\\n]|\\.)*\])+/";
+
+/// The end of the regular-expression literal _JS_REGEX_LIT_RE matches at k
+/// (a '/'), or None. By hand when the pattern is the text this was written
+/// for: after "/" not followed by * or /, the loop takes a character but
+/// / \ [ and a newline, a backslash and the character after it (not a
+/// newline), or a class [ … ] (the same inside, ] ends it); every step
+/// starts at a character no other step takes and none of them is '/', so
+/// the only match ends at the "/" where the loop (of one step at least) stops.
+fn js_regex_end(p: &Pack, rx: &Regex, s: &[u32], k: usize) -> Option<usize> {
+    let hand = *p.derived("_JS_REGEX_LIT_RE", |v| {
+        v.get("re").and_then(|r| r.as_str()) == Some(pystr::u(JS_REGEX_LIT_TEXT).as_slice())
+            && v.get("flags").and_then(|f| f.as_str()).map(|f| f.is_empty()).unwrap_or(false)
+    });
+    if !hand {
+        return rx.match_at(s, k as isize, s.len() as isize).map(|m| m.end());
+    }
+    let n = s.len();
+    let (slash, nl, bs) = ('/' as u32, '\n' as u32, '\\' as u32);
+    if s.get(k) != Some(&slash) || matches!(s.get(k + 1), Some(&c) if c == '*' as u32 || c == slash) {
+        return None;
+    }
+    let mut i = k + 1;
+    let mut steps = 0usize;
+    while i < n {
+        let c = s[i];
+        if c == bs {
+            if i + 1 < n && s[i + 1] != nl {
+                i += 2;
+                steps += 1;
+                continue;
+            }
+            break;
+        }
+        if c == '[' as u32 {
+            let mut j = i + 1;
+            let mut closed = false;
+            while j < n {
+                let d = s[j];
+                if d == ']' as u32 {
+                    closed = true;
+                    j += 1;
+                    break;
+                }
+                if d == nl {
+                    break;
+                }
+                if d == bs {
+                    if j + 1 < n && s[j + 1] != nl {
+                        j += 2;
+                        continue;
+                    }
+                    break;
+                }
+                j += 1;
+            }
+            if !closed {
+                break;
+            }
+            i = j;
+            steps += 1;
+            continue;
+        }
+        if c == slash || c == nl {
+            break;
+        }
+        i += 1;
+        steps += 1;
+    }
+    if steps > 0 && i < n && s[i] == slash {
+        Some(i + 1)
+    } else {
+        None
+    }
 }
 
 fn is_word_char(ch: u32) -> bool {
@@ -192,8 +435,8 @@ fn lex_pass(
         }
         if ch == c('/') {
             if k as isize >= no_regex_until && js_regex_allowed(p, prev, &tail, keywords) {
-                if let Some(rm) = js_regex.match_at(content, k as isize, n as isize) {
-                    pos = rm.end();
+                if let Some(end) = js_regex_end(p, js_regex, content, k) {
+                    pos = end;
                     prev = Some(c('"'));
                     tail.clear();
                     if let Some(l) = literals.as_deref_mut() {
@@ -216,15 +459,15 @@ fn lex_pass(
             }
             continue;
         }
-        let sm = if mysql {
-            p.map_re("_LEX_MYSQL_STR", &pystr::to_string(&[ch])).match_at(content, k as isize, n as isize)
+        let end = if mysql {
+            str_end(p, "_LEX_MYSQL_STR", None, &[ch], content, k)
         } else {
             let triple = [ch, ch, ch];
             let key: &[u32] =
                 if lang == Some("py") && content.len() >= k + 3 && content[k..k + 3] == triple { &triple } else { &triple[..1] };
-            str_re(p, lang, key).match_at(content, k as isize, n as isize)
+            str_end(p, "_LEX_STR", lang, key, content, k)
         };
-        pos = sm.map(|m| m.end()).unwrap_or(k + 1).max(k + 1);
+        pos = end.unwrap_or(k + 1).max(k + 1);
         prev = Some(c('"'));
         tail.clear();
         if ch != c('`') {
@@ -370,8 +613,7 @@ fn py_fstring_end(p: &Pack, s: &[u32], k: usize, raw: bool) -> usize {
                 i += ql2;
             } else {
                 let key: Vec<u32> = vec![ch; ql2];
-                let sm = str_re(p, Some("py"), &key).match_at(s, i as isize, n as isize);
-                i = sm.map(|m| m.end()).unwrap_or(i + 1).max(i + 1);
+                i = str_end(p, "_LEX_STR", Some("py"), &key, s, i).unwrap_or(i + 1).max(i + 1);
             }
         } else if matches!(ch, 0x28 | 0x5B | 0x7B) {
             set_depth(&mut stack, depth + 1);
@@ -476,8 +718,8 @@ fn lex_js_jsx(p: &Pack, content: &[u32], mut strings: Option<&mut Spans>, mut li
                 } else if ch == c('/') {
                     pos = k + 1;
                     if k as isize >= no_regex_until && js_regex_allowed(p, prev, &tail, keywords) {
-                        if let Some(rm) = js_regex.match_at(content, k as isize, n as isize) {
-                            pos = rm.end();
+                        if let Some(end) = js_regex_end(p, js_regex, content, k) {
+                            pos = end;
                             prev = Some(c('"'));
                             tail.clear();
                             if let Some(l) = literals.as_deref_mut() {
@@ -522,8 +764,7 @@ fn lex_js_jsx(p: &Pack, content: &[u32], mut strings: Option<&mut Spans>, mut li
                         tail = vec![c('<')];
                     }
                 } else {
-                    let sm = str_re(p, Some("js"), &[ch]).match_at(content, k as isize, n as isize);
-                    pos = sm.map(|m| m.end()).unwrap_or(k + 1).max(k + 1);
+                    pos = str_end(p, "_LEX_STR", Some("js"), &[ch], content, k).unwrap_or(k + 1).max(k + 1);
                     prev = Some(c('"'));
                     tail.clear();
                     if ch != c('`') {

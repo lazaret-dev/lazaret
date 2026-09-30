@@ -87,6 +87,10 @@ pub struct Need {
     shortest: usize,
     /// for each ASCII character, the strings that can start with it
     by_first: Vec<Vec<u16>>,
+    /// the ASCII characters a string can start with
+    first_ascii: u128,
+    /// can a string start with a character outside ASCII?
+    first_other: bool,
 }
 
 impl Need {
@@ -106,7 +110,38 @@ impl Need {
 
     #[inline]
     fn at(st: &Str, s: &[u32], i: usize, end: usize) -> bool {
-        i + st.len() <= end && st.iter().zip(&s[i..end]).all(|(u, &c)| u.accepts(c))
+        if i + st.len() > end {
+            return false;
+        }
+        let text = &s[i..i + st.len()];
+        for k in 0..st.len() {
+            if !st[k].accepts(text[k]) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// The ASCII characters a string can start with.
+    pub fn first_ascii(&self) -> u128 {
+        self.first_ascii
+    }
+
+    /// Can a string start with a character outside ASCII?
+    pub fn first_other(&self) -> bool {
+        self.first_other
+    }
+
+    /// Does one of the strings start at s[i] and end by `end`?
+    #[inline]
+    pub fn starts_at(&self, s: &[u32], i: usize, end: usize) -> bool {
+        let c = s[i];
+        if c < 128 {
+            self.first_ascii & (1u128 << c) != 0
+                && self.by_first[c as usize].iter().any(|&k| Self::at(&self.strings[k as usize], s, i, end))
+        } else {
+            self.first_other && self.strings.iter().any(|st| Self::at(st, s, i, end))
+        }
     }
 
     /// Does one of the strings occur in s[start..end]?
@@ -115,17 +150,22 @@ impl Need {
             return false;
         }
         let last = end - self.shortest;
-        for i in start..=last {
-            let c = s[i];
+        let window = &s[start..=last];
+        let mut off = 0;
+        while off < window.len() {
+            let c = window[off];
             if c < 128 {
-                for &k in &self.by_first[c as usize] {
-                    if Self::at(&self.strings[k as usize], s, i, end) {
-                        return true;
+                if self.first_ascii & (1u128 << c) != 0 {
+                    for &k in &self.by_first[c as usize] {
+                        if Self::at(&self.strings[k as usize], s, start + off, end) {
+                            return true;
+                        }
                     }
                 }
-            } else if self.strings.iter().any(|st| Self::at(st, s, i, end)) {
+            } else if self.first_other && self.strings.iter().any(|st| Self::at(st, s, start + off, end)) {
                 return true;
             }
+            off += 1;
         }
         false
     }
@@ -147,7 +187,11 @@ pub fn need(code: &[u32]) -> Option<Need> {
             }
         }
     }
-    Some(Need { strings, shortest, by_first })
+    let first_ascii = by_first.iter().enumerate().fold(0u128, |m, (c, l)| if l.is_empty() { m } else { m | (1u128 << c) });
+    // outside ASCII a unit accepts its own characters, and under Unicode
+    // folding whatever sre's lower() maps onto them (K, the Kelvin sign, onto k)
+    let first_other = strings.iter().any(|st| st[0].fold == Fold::Unicode || st[0].chars.iter().any(|&c| c >= 128));
+    Some(Need { strings, shortest, by_first, first_ascii, first_other })
 }
 
 /// Better: a longer shortest string, then fewer strings.

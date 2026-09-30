@@ -101,7 +101,8 @@ jobs:
               "$py" scripts/check_native_library.py "$lib" "$TAG" --load
               cd python
               LAZARET_NATIVE_LIB="$lib" "$py" -m unittest tests.architecture.test_rust_parity_regex \
-                tests.architecture.test_rust_parity_hooks tests.architecture.test_rust_parity_signs'
+                tests.architecture.test_rust_parity_hooks tests.architecture.test_rust_parity_signs \
+                tests.architecture.test_rust_parity_scanfile tests.architecture.test_rust_parity_lexer'
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: native-${{ matrix.tag }}
@@ -166,6 +167,7 @@ jobs:
         run: >-
           python -m unittest tests.architecture.test_rust_parity_regex
           tests.architecture.test_rust_parity_hooks tests.architecture.test_rust_parity_signs
+          tests.architecture.test_rust_parity_scanfile tests.architecture.test_rust_parity_lexer
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: native-${{ matrix.tag }}

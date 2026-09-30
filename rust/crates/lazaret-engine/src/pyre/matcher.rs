@@ -1456,13 +1456,18 @@ pub fn sre_search(st: &mut State, prog: &Prog) -> Result<bool, ()> {
         }
     }
 
+    // A pattern that starts with ^ under MULTILINE matches only where a line
+    // starts (at 0 or after "\n"): no other start is tried (each would fail
+    // at its first operation).
+    let line_starts = code[pc] == AT && code[pc + 1] == AT_BEGINNING_LINE;
+    let line_start = |p: usize| p == 0 || s[p - 1] == 0x0A;
     if let Some(fs) = first {
         // (no match starts where the first character is not one it can take)
         let real_end = st.end;
         let mut p = ptr;
         let mut toplevel = true;
         while p <= end {
-            if p < real_end && fs.accepts(code, s[p]) {
+            if p < real_end && (!line_starts || line_start(p)) && fs.accepts(code, s[p]) {
                 st.lastmark = -1;
                 st.lastindex = -1;
                 st.start = p;
@@ -1491,6 +1496,9 @@ pub fn sre_search(st: &mut State, prog: &Prog) -> Result<bool, ()> {
     }
     while !status && ptr < end {
         ptr += 1;
+        if line_starts && !line_start(ptr) {
+            continue;
+        }
         st.lastmark = -1;
         st.lastindex = -1;
         st.start = ptr;

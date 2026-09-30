@@ -49,6 +49,8 @@ pub const CALLS: &[&str] = &[
     // 0.1.8: the exfiltration shapes, programs started at login or boot
     "chat_secret_at", "credential_sweep_at", "env_copy_serialized_at", "dns_beacon_at", "miner_at",
     "raw_ip_connect", "capture_service", "exfil_signs", "service_reasons",
+    // Phase 2: scan_file, and what it reads
+    "normalize", "scan_file", "file_context",
 ];
 
 fn at_reason(v: Option<(usize, PyStr)>) -> Value {
@@ -199,6 +201,46 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
             ("values", Value::Int(p.names().len() as i64)),
         ]),
         "pyre.escape" => Value::Str(pyre::escape(text)),
+        "scan_file" => {
+            let flag = |k: &str, d: bool| match args.get(k) {
+                Some(Value::Bool(b)) => *b,
+                _ => d,
+            };
+            let opts = crate::scanfile::Options { dep: flag("dep", false), redact: flag("redact", true), neumaier: flag("neumaier", false) };
+            if !opts.dep {
+                return Err(CallError::BadArgs("project mode is not in the native engine yet".into()));
+            }
+            Value::Arr(crate::scanfile::scan_file(p, text, lang, flag("jsx", true), &opts))
+        }
+        "file_context" => {
+            // the parity tests' view of a file's context: per line
+            // [comment line?, comment spans, match text, match text without comments, names]
+            let jsx = !matches!(args.get("jsx"), Some(Value::Bool(false)));
+            let ctx = crate::filectx::FileCtx::new(p, text, crate::filectx::Lang::from(lang), jsx);
+            Value::Arr(
+                (0..ctx.len())
+                    .map(|i| {
+                        Value::Arr(vec![
+                            Value::Bool(ctx.cmask[i]),
+                            spans_value(&ctx.cspans[i]),
+                            Value::Str(ctx.mline(i).to_vec()),
+                            Value::Str(ctx.mcode(i).to_vec()),
+                            Value::Str(ctx.names_code(i)),
+                        ])
+                    })
+                    .collect(),
+            )
+        }
+        "normalize" => {
+            let form = opt_str(args, "form").map(|f| crate::pystr::to_string(&f)).unwrap_or_default();
+            Value::Str(match form.as_str() {
+                "NFC" => crate::normalize::nfc(text),
+                "NFD" => crate::normalize::nfd(text),
+                "NFKC" => crate::normalize::nfkc(text),
+                "NFKD" => crate::normalize::nfkd(text),
+                _ => return Err(CallError::BadArgs(format!("unknown normalization form {:?}", form))),
+            })
+        }
         "pyre.probe" => probe(args, text)?,
         "shlex_split" => match hooks::shlex_split(text) {
             Some(t) => strs(&t),

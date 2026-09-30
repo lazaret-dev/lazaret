@@ -150,7 +150,40 @@ def unicode_data():
             else:
                 decimal_runs.append([ch, ch, v])
     return {"flags": flags, "lower": lower, "upper": upper, "full_lower": full_lower,
-            "full_upper": full_upper, "fixes": case_fixes(), "decimal_runs": decimal_runs}
+            "full_upper": full_upper, "fixes": case_fixes(), "decimal_runs": decimal_runs,
+            **normalization_data()}
+
+
+HANGUL_FIRST, HANGUL_LAST = 0xAC00, 0xD7A3         # syllables: decomposed and composed by arithmetic
+#                                                 # (3.13's unicodedata.decomposition lists them, 3.10's not)
+
+
+def normalization_data():
+    """What unicodedata.normalize reads, from this Python: each code point's
+    decomposition, one level (unicodedata.decomposition: canonical, or a
+    compatibility mapping; Hangul syllables are computed, not listed), the
+    canonical combining classes, and the primary composites (a canonical
+    decomposition into two characters, the first a starter, that is not
+    excluded from composition: NFC gives the character back)."""
+    import unicodedata
+    decomp, ccc_runs = {}, []                      # cp -> (compatibility?, [cp, …]); [first, last, class]
+    for c in range(MAX_CP):
+        ch = chr(c)
+        d = unicodedata.decomposition(ch) if not HANGUL_FIRST <= c <= HANGUL_LAST else ""
+        if d:
+            parts = d.split()
+            compat = parts[0].startswith("<")
+            decomp[c] = (compat, [int(x, 16) for x in (parts[1:] if compat else parts)])
+        k = unicodedata.combining(ch)
+        if k:
+            if ccc_runs and ccc_runs[-1][1] == c - 1 and ccc_runs[-1][2] == k:
+                ccc_runs[-1][1] = c
+            else:
+                ccc_runs.append([c, c, k])
+    compose = sorted((parts[0], parts[1], c) for c, (compat, parts) in decomp.items()
+                     if not compat and len(parts) == 2 and not unicodedata.combining(chr(parts[0]))
+                     and unicodedata.normalize("NFC", chr(c)) == chr(c))
+    return {"decomp": decomp, "ccc_runs": ccc_runs, "compose": compose}
 
 
 def render_unicode(data):
@@ -201,8 +234,39 @@ def render_unicode(data):
     runs = data["decimal_runs"]
     for i in range(0, len(runs), 6):
         out.append("    " + " ".join(f"(0x{a:X}, 0x{b:X}, {v})," for a, b, v in runs[i:i + 6]) + "\n")
-    out.append("];\n")
+    out.append("];\n\n")
+    render_normalization(out, data)
     return "".join(out)
+
+
+def render_normalization(out, data):
+    out.append("/// (first, last, class) of each run of code points with the same canonical combining class\n"
+               "/// (unicodedata.combining), those with a class other than 0.\n")
+    out.append("pub const CCC_RUNS: &[(u32, u32, u8)] = &[\n")
+    runs = data["ccc_runs"]
+    for i in range(0, len(runs), 6):
+        out.append("    " + " ".join(f"(0x{a:X}, 0x{b:X}, {k})," for a, b, k in runs[i:i + 6]) + "\n")
+    out.append("];\n\n")
+    flat, index = [], []
+    for c, (compat, parts) in sorted(data["decomp"].items()):
+        index.append((c, len(flat), len(parts) | (0x80 if compat else 0)))
+        flat.extend(parts)
+    out.append("/// Each decomposition, one level (unicodedata.decomposition; Hangul syllables are computed):\n"
+               "/// (code point, start in DECOMP_DATA, length, + 0x80 for a compatibility mapping).\n")
+    out.append("pub const DECOMP: &[(u32, u16, u8)] = &[\n")
+    for i in range(0, len(index), 6):
+        out.append("    " + " ".join(f"(0x{c:X}, {at}, 0x{n:X})," for c, at, n in index[i:i + 6]) + "\n")
+    out.append("];\n\n")
+    out.append("pub const DECOMP_DATA: &[u32] = &[\n")
+    for i in range(0, len(flat), 10):
+        out.append("    " + " ".join(f"0x{c:X}," for c in flat[i:i + 10]) + "\n")
+    out.append("];\n\n")
+    out.append("/// The primary composites: (first, second, composite), sorted (canonical composition).\n")
+    out.append("pub const COMPOSE: &[(u32, u32, u32)] = &[\n")
+    pairs = data["compose"]
+    for i in range(0, len(pairs), 5):
+        out.append("    " + " ".join(f"(0x{a:X}, 0x{b:X}, 0x{c:X})," for a, b, c in pairs[i:i + 5]) + "\n")
+    out.append("];\n")
 
 
 #: What the scanner's premise covers: for every code point Unicode 13.0
@@ -255,6 +319,43 @@ def check_unicode_here(path):
              for a, b in re.findall(r"\(0x([0-9A-F]+), &\[([^\]]*)\]\)", body)}
     if table != want["fixes"]:
         bad.append("re's extra case equivalences differ")
+    return bad + check_normalization_here(text, want)
+
+
+def check_normalization_here(text, want):
+    """Unicode's normalization stability policy, checked: for every code
+    point Unicode 13.0 assigns, this Python's decomposition, combining class
+    and compositions are the table's (so NFKC of pinned text is the same on
+    every supported Python)."""
+    from lazaret.scanner import _unicode13
+
+    def section(name):
+        return text.split(f"pub const {name}:")[1].split("];")[0]
+
+    ccc = {}
+    for a, b, k in re.findall(r"\(0x([0-9A-F]+), 0x([0-9A-F]+), (\d+)\)", section("CCC_RUNS")):
+        for c in range(int(a, 16), int(b, 16) + 1):
+            ccc[c] = int(k)
+    data = [int(x, 16) for x in re.findall(r"0x([0-9A-F]+)", section("DECOMP_DATA"))]
+    decomp = {int(c, 16): (bool(int(n, 16) & 0x80), data[int(at):int(at) + (int(n, 16) & 0x7F)])
+              for c, at, n in re.findall(r"\(0x([0-9A-F]+), (\d+), 0x([0-9A-F]+)\)", section("DECOMP"))}
+    compose = sorted(tuple(int(x, 16) for x in t)
+                     for t in re.findall(r"\(0x([0-9A-F]+), 0x([0-9A-F]+), 0x([0-9A-F]+)\)", section("COMPOSE")))
+    bad = []
+    here = {c: k for a, b, k in want["ccc_runs"] for c in range(a, b + 1)}
+    for c in range(MAX_CP):
+        if not _unicode13.assigned(c):
+            if c in ccc or c in decomp:
+                bad.append(f"U+{c:04X} is unassigned in Unicode 13.0 but has normalization data in the table")
+        elif here.get(c, 0) != ccc.get(c, 0):
+            bad.append(f"U+{c:04X} combining class differs")
+        elif want["decomp"].get(c) != decomp.get(c) and c in decomp:
+            bad.append(f"U+{c:04X} decomposition differs")
+        if len(bad) > 20:
+            return bad
+    kept = [t for t in want["compose"] if _unicode13.assigned(t[2])]
+    if kept != compose:
+        bad.append("the primary composites differ")
     return bad
 
 

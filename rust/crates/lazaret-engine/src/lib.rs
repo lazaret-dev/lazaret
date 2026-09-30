@@ -9,16 +9,21 @@
 
 pub mod api;
 pub mod budget;
+pub mod filectx;
+pub mod findings;
 pub mod generated;
 pub mod hooks;
 pub mod json;
 pub mod lexer;
+pub mod normalize;
 pub mod pack;
 pub mod pyre;
 pub mod pystr;
 pub mod received;
 pub mod rxutil;
+pub mod scanfile;
 pub mod signs;
+pub mod token;
 pub mod unicode;
 
 /// The engine's version (the workspace's).
