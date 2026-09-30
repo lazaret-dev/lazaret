@@ -15,6 +15,10 @@
 - The parity modules skip where the library does not load, so every job that
   runs them first proves the library loads (a job that built a library the
   tests can't find would otherwise pass without testing it).
+- No `{a, b}` inside double quotes nested in "$(...)": macOS runs `shell:
+  bash` steps with /bin/bash 3.2, which brace-expands it there. CI run 47
+  split a Python dict literal that way into two broken programs, and the
+  macOS parity step failed.
 """
 
 import glob
@@ -187,6 +191,28 @@ class WheelPlatformTests(unittest.TestCase):
                 self.assertRegex(release[job], r"needs: \[build-python, build-npm\]")
         self.assertIn("name: python-dist", release["publish-pypi"])
         self.assertIn("workflow_call:", self.text)
+
+
+# a brace list with a comma, inside a double-quoted string inside "$(...)"
+BASH32_BRACES = re.compile(r'"\$\((?:[^()]|\([^()]*\))*?"[^"]*\{[^{}"]*,[^{}"]*\}[^"]*"')
+
+
+class Bash32Tests(unittest.TestCase):
+    def test_no_brace_lists_in_nested_double_quotes(self):
+        for name, text in workflows().items():
+            for n, line in code_lines(text):
+                with self.subTest(workflow=name, line=n):
+                    self.assertIsNone(BASH32_BRACES.search(line), line.strip())
+
+    def test_the_check_catches_run_47s_line(self):
+        run_47 = ('export LAZARET_NATIVE_LIB="$(python -c "import os, sys; n = {\'win32\': \'x.dll\', '
+                  '\'darwin\': \'x.dylib\'}.get(sys.platform, \'x.so\'); print(n)")"')
+        self.assertIsNotNone(BASH32_BRACES.search(run_47))
+        for fine in ('toolchain="$(rustc +"$RUST_VERSION" --print sysroot)"',
+                     'if [ "$(git cat-file -t "refs/tags/${GITHUB_REF_NAME}")" != "tag" ]; then',
+                     "lib=$(python -c 'n = {\"a\": 1, \"b\": 2}; print(n)')",
+                     '"$py" -c \'print(f"{v}, {w}")\''):
+            self.assertIsNone(BASH32_BRACES.search(fine), fine)
 
 
 class ParityTestsProveTheLibraryLoads(unittest.TestCase):

@@ -119,8 +119,13 @@ jobs:
       - name: The native engine against the Python engine
         working-directory: python
         shell: bash
+        # macOS runs these steps with /bin/bash 3.2, which brace-expands a
+        # {a, b} inside double quotes nested in "$(...)": run 47 split a dict
+        # literal there into two broken programs. The library's name comes
+        # from _native itself, in single quotes.
         run: |
-          export LAZARET_NATIVE_LIB="$(python -c "import os, sys; n = {'win32': 'lazaret_native.dll', 'darwin': 'liblazaret_native.dylib'}.get(sys.platform, 'liblazaret_native.so'); print(os.path.abspath(os.path.join('..', 'rust', 'target', 'release', n)))")"
+          LAZARET_NATIVE_LIB=$(PYTHONPATH=src python -c 'import os; from lazaret.scanner import _native; print(os.path.abspath(os.path.join("..", "rust", "target", "release", _native.library_name())))')
+          export LAZARET_NATIVE_LIB
           PYTHONPATH=src python -c "from lazaret.scanner import _native; assert _native.available(), _native.load_error(); print('native engine', _native.version())"
           python -m unittest tests.architecture.test_rust_parity_regex tests.architecture.test_rust_parity_hooks tests.architecture.test_rust_parity_signs -v
       - name: The whole suite, the native engine answering
