@@ -4,11 +4,11 @@ version = 3
 
 [[package]]
 name = "lazaret-engine"
-version = "0.1.7"
+version = "0.1.8"
 
 [[package]]
 name = "lazaret-ffi"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "lazaret-engine",
 ]

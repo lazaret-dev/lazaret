@@ -329,6 +329,13 @@ def _key(k):
 PLATFORM_VALUES = frozenset({
     "_OPEN_FLAGS",          # os.open flags: O_NOFOLLOW, O_NONBLOCK, O_CLOEXEC, O_BINARY … differ by OS
 })
+# Values that change with every release, not with the rules: a version bump
+# must not make the pack stale (0.1.8's bump failed --check on VERSION). The
+# engine reports its own version (the workspace's, held to the packages' by
+# scripts/check-versions.sh).
+RELEASE_VALUES = frozenset({
+    "VERSION",              # lazaret.__version__, what --version prints
+})
 
 
 def pack_data():
@@ -339,7 +346,7 @@ def pack_data():
         ENGINE_VERSION = None
     values = {}
     for name in sorted(vars(core)):
-        if name.startswith("__") or name in PLATFORM_VALUES:
+        if name.startswith("__") or name in PLATFORM_VALUES or name in RELEASE_VALUES:
             continue
         v = getattr(core, name)
         if callable(v) and not isinstance(v, re.Pattern):

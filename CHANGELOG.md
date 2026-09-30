@@ -7,7 +7,7 @@ This log starts at 0.1.6; for earlier releases see the git history and tags.
 The format is based on [Keep a Changelog](https://keepachangelog.com); the
 project is pre-1.0, so the 0.x API may still change.
 
-## [Unreleased]
+## [0.1.8] — 2026-09-30
 
 ### Added
 - **More of the malware the 0.1.7 benchmark missed (backlog items 1-4, from

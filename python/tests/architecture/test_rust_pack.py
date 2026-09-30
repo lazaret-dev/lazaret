@@ -1,4 +1,5 @@
-"""The native engine's rule pack is the same on every platform.
+"""The native engine's rule pack is the same on every platform, and in every
+release.
 
 scripts/make_rust_tables.py extracts every module-level value of core into
 rust/crates/lazaret-engine/rules/lazaret-rules.json, and CI runs its --check
@@ -9,7 +10,10 @@ did, on 0.1.8's first macOS and Windows runs. Here core is imported, in a
 child process, once as it is and once with every os.O_* flag and errno
 number changed (and O_BINARY added, as on Windows); any pack value that
 moves must be left out of the pack (make_rust_tables.PLATFORM_VALUES) or
-computed another way."""
+computed another way. Likewise with the package's version changed: 0.1.8's
+version bump made the pack stale (core's VERSION was in it), so a release
+would have had to regenerate it; values that move with the version are left
+out (make_rust_tables.RELEASE_VALUES)."""
 
 import json
 import os
@@ -23,6 +27,10 @@ SCRIPT = os.path.join(_support.REPO_ROOT, "scripts", "make_rust_tables.py")
 
 CHILD = r"""
 import errno, importlib.util, json, os, sys
+sys.path.insert(0, sys.argv[2])
+if sys.argv[1] == "release":
+    import lazaret
+    lazaret.__version__ = "99.0.0"          # (core reads it when it is imported, below)
 if sys.argv[1] == "other":
     for name in dir(os):
         if name.startswith("O_") and isinstance(getattr(os, name), int):
@@ -32,11 +40,11 @@ if sys.argv[1] == "other":
     for name in dir(errno):
         if name.isupper() and isinstance(getattr(errno, name), int):
             setattr(errno, name, getattr(errno, name) + 1000)
-sys.path.insert(0, sys.argv[2])
 spec = importlib.util.spec_from_file_location("make_rust_tables", sys.argv[3])
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
-print(json.dumps({"values": mod.pack_data()["values"], "skipped": sorted(mod.PLATFORM_VALUES)}))
+print(json.dumps({"values": mod.pack_data()["values"],
+                  "skipped": sorted(mod.PLATFORM_VALUES | mod.RELEASE_VALUES)}))
 """
 
 
@@ -56,6 +64,13 @@ class RulePackPortabilityTests(unittest.TestCase):
                        if here["values"].get(k) != other["values"].get(k))
         self.assertEqual(moved, [], "these core values depend on the OS: add them to "
                                     "make_rust_tables.PLATFORM_VALUES (the engine must not read them)")
+
+    def test_no_value_moves_with_the_release(self):
+        here, bumped = pack("here"), pack("release")
+        moved = sorted(k for k in set(here["values"]) | set(bumped["values"])
+                       if here["values"].get(k) != bumped["values"].get(k))
+        self.assertEqual(moved, [], "these core values change with the package's version: add them to "
+                                    "make_rust_tables.RELEASE_VALUES, so a version bump leaves the pack as it is")
 
     def test_the_left_out_values_are_not_in_the_pack(self):
         here = pack("here")
