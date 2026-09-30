@@ -32,8 +32,11 @@ from tests.architecture.test_js_parity import NODE
 from tests.scanner import test_cross_file_follower as T
 
 CROSSFILE_JS = os.path.join(_support.REPO_ROOT, "js", "src", "lib", "crossfile.js")
+# the module is imported by its file:// URL, as the other parity tests do: on
+# Windows node refuses a bare absolute path ("Received protocol 'd:'")
 NPM = """
-import { crossFileReceivedIssues, XF_TWINS } from %s;
+import { pathToFileURL } from "node:url";
+const { crossFileReceivedIssues, XF_TWINS } = await import(pathToFileURL(process.argv[1]).href);
 let buf = '';
 process.stdin.on('data', (d) => { buf += d; });
 process.stdin.on('end', () => {
@@ -53,7 +56,7 @@ def view(issues):
 
 
 def run_npm(cases, one_package=False):
-    p = subprocess.run([NODE, "--input-type=module", "-e", NPM % json.dumps(CROSSFILE_JS)],
+    p = subprocess.run([NODE, "--input-type=module", "-e", NPM, CROSSFILE_JS],
                        input=json.dumps({"cases": cases, "onePackage": one_package}),
                        capture_output=True, encoding="utf-8", errors="replace", timeout=60)
     if p.returncode:
