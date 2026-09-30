@@ -1,17 +1,20 @@
-"""Which engine answers the supply-chain tests: the native one (Rust,
-crates/lazaret-engine through _native.py) or the Python reference engine
-(lazaret.scanner.core).
+"""Which engine answers the supply-chain tests and the dependency-mode
+scan of a file: the native one (Rust, crates/lazaret-engine through
+_native.py) or the Python reference engine (lazaret.scanner.core).
 
 The two give the same answers — the differential tests in
 tests/architecture/test_rust_parity_*.py hold the native engine to core on
 every case — so the choice changes the time a scan takes, never its
-findings. The native engine answers where it is installed (a wheel ships it
-as lazaret/_native/<library>; LAZARET_NATIVE_LIB names a development build);
-`--engine python` or LAZARET_ENGINE=python keeps the Python engine, and
-`--engine rust` fails when the native one is missing rather than scan
-slowly without saying so. Wherever the native engine can't answer a call —
-its work budget spent on a hostile file, an internal error — core answers
-that call, so a scan never loses a finding to the native engine.
+findings. scan_file in dependency mode (registry, guard and --deps scans:
+the supply-chain and credential rules) is the native engine's whole; in
+project mode core scans the file. The native engine answers where it is
+installed (a wheel ships it as lazaret/_native/<library>;
+LAZARET_NATIVE_LIB names a development build); `--engine python` or
+LAZARET_ENGINE=python keeps the Python engine, and `--engine rust` fails
+when the native one is missing rather than scan slowly without saying so.
+Wherever the native engine can't answer a call — its work budget spent on a
+hostile file, an internal error — core answers that call, so a scan never
+loses a finding to the native engine.
 
 Files are sent in batches (BATCH files per crossing of the boundary), which
 the native engine reads on threads (THREADS, at most the machine's cores);
@@ -19,6 +22,7 @@ the answers come back in the order asked, so reports are the same whatever
 the thread count.
 """
 import os
+import sys
 
 from lazaret.scanner import _native, core
 
@@ -112,3 +116,52 @@ def install_script_risks(texts):
 def install_script_risk(text):
     """core.install_script_risk, by the engine in use."""
     return install_script_risks([text])[0]
+
+
+_ISSUE_KEYS = ("rule", "name", "type", "sev", "msg", "why", "fix", "ref")
+
+
+def _issues(path, answer):
+    """The native engine's issues as core's dicts (mk_issue's keys, in its order)."""
+    out = []
+    for a in answer:
+        issue = dict(zip(_ISSUE_KEYS, a[:8]))
+        issue.update(file=path, line=a[8], snippet=a[9], snipStart=a[10])
+        if len(a) > 11:                           # a Q-CAPPED note: what it stands for
+            issue.update(omitted=a[11], omittedType=a[12])
+        out.append(issue)
+    return out
+
+
+def scan_files(items):
+    """[(path, content, lang, dep)] -> [issues]: core.scan_file for each, in
+    order. The native engine answers the files in dependency mode; core
+    scans the others, and any file the native engine could not answer."""
+    if not items:
+        return []
+    if name() != "rust":
+        return [core.scan_file(path, content, lang, dep=dep) for path, content, lang, dep in items]
+    native = [k for k, (_p, content, lang, dep) in enumerate(items)
+              if dep and lang in ("py", "js", "sql") and isinstance(content, str)]
+    out = [None] * len(items)
+    if native:
+        base = {"dep": True, "redact": bool(core.REDACT_SECRETS), "neumaier": _NEUMAIER}
+        calls = [(dict(base, lang=items[k][2], jsx=core.jsx_reading(items[k][0])), items[k][1]) for k in native]
+        for k, answer in zip(native, _batch("scan_file", calls, lambda i: None)):
+            if answer is not None:
+                out[k] = _issues(items[k][0], answer)
+    for k, (path, content, lang, dep) in enumerate(items):
+        if out[k] is None:
+            out[k] = core.scan_file(path, content, lang, dep=dep)
+    return out
+
+
+def scan_file(path, content, lang, dep=False):
+    """core.scan_file, by the engine in use."""
+    return scan_files([(path, content, lang, dep)])[0]
+
+
+# sum() adds floats with Neumaier's compensation since Python 3.12, and
+# S-ENTROPY's Shannon entropy is such a sum: the native engine adds as this
+# Python does.
+_NEUMAIER = sys.version_info >= (3, 12)

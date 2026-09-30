@@ -12342,9 +12342,10 @@ def _read_dependency_script(tree, rel, as_lang, out, extra):
         return None
     if as_lang == "sh" or shebang_lang(data[:HEADER_SAMPLE_BYTES].decode("utf-8", "replace")) == "sh":
         return normalize_newlines(data.decode("utf-8", "replace"))
+    from lazaret.scanner import engine     # (imported here: engine imports core)
     text, decode_issues = decode_member(disp, data, lang="js")
     out.extend(decode_issues)
-    out.extend(scan_file(disp, text, "js", dep=True))
+    out.extend(engine.scan_file(disp, text, "js", dep=True))
     extra.append({"path": disp, "content": text, "lang": "js", "dep": True})
     return text
 
@@ -12479,17 +12480,34 @@ def scan_project(root, exclude=(), include_deps=False, taint_config=None,
         issues = list(extra_issues) + list(col["issues"])
         numbered = []       # findings numbered by their file's scan lines (redact_file_issues)
         scanned, stopped = [], None
-        for f in files:
+        # Dependency files a batch at a time (the native engine reads a batch
+        # on threads: engine.py), the project's own files one at a time;
+        # should_stop is checked before each batch.
+        from lazaret.scanner import engine     # (imported here: engine imports core)
+        batch = engine.BATCH if engine.name() == "rust" else 1
+        k = 0
+        while k < len(files):
             stopped = should_stop() if should_stop is not None else None
             if stopped:
                 break
+            chunk = [files[k]]
+            while (chunk[0].get("dep", False) and len(chunk) < batch and k + len(chunk) < len(files)
+                   and files[k + len(chunk)].get("dep", False)):
+                chunk.append(files[k + len(chunk)])
             try:
-                found = scan_file(f["path"], f["content"], f["lang"], dep=f.get("dep", False))
-                issues.extend(found)
-                numbered.extend(found)
-            except Exception as exc:        # one file must never kill the run
-                issues.append(scan_error_issue(f["path"], exc))
-            scanned.append(f)
+                results = engine.scan_files([(f["path"], f["content"], f["lang"], f.get("dep", False)) for f in chunk])
+            except Exception:                   # a file core could not scan: each again, on its own
+                results = None
+            for n, f in enumerate(chunk):
+                try:
+                    found = (results[n] if results is not None
+                             else scan_file(f["path"], f["content"], f["lang"], dep=f.get("dep", False)))
+                    issues.extend(found)
+                    numbered.extend(found)
+                except Exception as exc:        # one file must never kill the run
+                    issues.append(scan_error_issue(f["path"], exc))
+                scanned.append(f)
+            k += len(chunk)
         checked = 0                         # config and data files: credentials only
         read = tree_reader(files, configs)  # what an editor's or agent's settings run (SC-AUTORUN)
         for cf in configs:

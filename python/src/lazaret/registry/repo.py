@@ -1487,6 +1487,8 @@ class _ArtifactScan:
         self.truncated_at = {}     # rel -> its SC-TRUNCATED issue (None past the cap)
         self.timed_out = False     # the deadline passed (recorded once)
         self.sources = {}          # rel -> (text, lang) scanned as source
+        self.pending = []          # source files queued for scan_pending (a batch)
+        self.first_pass = True     # members as they stream by; finish() is the second pass
         self.deferred = {}         # rel -> raw bytes (text, not scanned yet)
         self.deferred_bytes = 0
         self.dropped = set()       # text members not kept (budget)
@@ -1505,6 +1507,7 @@ class _ArtifactScan:
         file: another reason for the same file (it also runs at install time,
         and package.json can name it as main, bin and exports) is added to
         that finding's message instead of repeating it."""
+        self.scan_pending()                   # (the files queued before come first)
         if rel in self.truncated_at:
             issue = self.truncated_at[rel]
             if issue is not None and detail not in issue["msg"]:
@@ -1566,16 +1569,33 @@ class _ArtifactScan:
 
     def scan_source(self, rel, text, lang):
         self._deadline(rel)                  # not one more file past the deadline
-        self.files_scanned += 1
-        for i in lazaret.scan_file(rel, text, lang, dep=not self.full):
-            if i["rule"] in TRUNCATION_RULES:
-                # the per-file time budget ran out: part of the file was not
-                # scanned, so the release can't be cleared (it used to be
-                # listed while the verdict stayed OK)
-                self.truncate(rel, i["msg"].removeprefix("File not fully scanned: ").rstrip("."))
-            else:
-                self.issues.append(i)
         self.sources[rel] = (text, lang)
+        self.pending.append((rel, text, lang))
+        # The native engine reads a batch of the first pass's files on threads
+        # (engine.py); the Python engine, a --full scan (project mode, core's)
+        # and the second pass, whose steps read what they scan, one at a time.
+        batch = _engine.BATCH if self.first_pass and not self.full and _engine.name() == "rust" else 1
+        if len(self.pending) >= batch:
+            self.scan_pending()
+
+    def scan_pending(self):
+        """Scan the source files queued by scan_source, in order. Their
+        findings are the same whenever they are made; a truncation, and the
+        second pass (finish), scan the queue first."""
+        pending, self.pending = self.pending, []
+        if not pending:
+            return
+        found = _engine.scan_files([(rel, text, lang, not self.full) for rel, text, lang in pending])
+        for (rel, _text, _lang), issues in zip(pending, found):
+            self.files_scanned += 1
+            for i in issues:
+                if i["rule"] in TRUNCATION_RULES:
+                    # the per-file time budget ran out: part of the file was not
+                    # scanned, so the release can't be cleared (it used to be
+                    # listed while the verdict stayed OK)
+                    self.truncate(rel, i["msg"].removeprefix("File not fully scanned: ").rstrip("."))
+                else:
+                    self.issues.append(i)
 
     # ---- pass 1: members ----
     def member(self, m):
@@ -2185,6 +2205,8 @@ class _ArtifactScan:
         return seen
 
     def finish(self, anomalies):
+        self.scan_pending()
+        self.first_pass = False
         for kind, path, detail in anomalies:
             self.issues.append(_archive_issue(kind, path, detail))
         reachable = None

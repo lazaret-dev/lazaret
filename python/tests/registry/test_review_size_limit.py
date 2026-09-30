@@ -86,12 +86,25 @@ class TimeBudgetTests(unittest.TestCase):
     it used to be listed while the verdict stayed OK."""
 
     def test_a_file_past_its_time_budget_makes_the_release_incomplete(self):
-        from lazaret.scanner import core
+        from lazaret.scanner import core, engine
         files = {"package.json": manifest(main="index.js"), "index.js": "module.exports = 1;\n" * 50}
-        with mock.patch.object(core, "SCAN_TIME_BUDGET", -1):   # the path a 30 s overrun takes
+        with mock.patch.object(core, "SCAN_TIME_BUDGET", -1), \
+                mock.patch.object(engine, "_choice", "python"):   # the path a 30 s overrun takes
             res = scan_npm(files)
         self.assertEqual(res["verdict"], "INCOMPLETE", res["verdictReason"])
         self.assertEqual(res["truncated"], 1)
+        (t,) = issues(res, "SC-TRUNCATED")
+        self.assertIn("scan time budget exceeded", t["msg"])
+
+    def test_a_file_the_native_engine_gives_up_on_gets_the_time_budget(self):
+        """The native engine has no time budget, only a work budget: past it,
+        core scans the file, under its time budget."""
+        from lazaret.scanner import _native, core, engine
+        files = {"package.json": manifest(main="index.js"), "index.js": "module.exports = 1;\n" * 50}
+        with mock.patch.object(core, "SCAN_TIME_BUDGET", -1), mock.patch.object(engine, "name", lambda: "rust"), \
+                mock.patch.object(_native, "call", side_effect=_native.NativeExhausted("work budget spent")):
+            res = scan_npm(files)
+        self.assertEqual(res["verdict"], "INCOMPLETE", res["verdictReason"])
         (t,) = issues(res, "SC-TRUNCATED")
         self.assertIn("scan time budget exceeded", t["msg"])
 
