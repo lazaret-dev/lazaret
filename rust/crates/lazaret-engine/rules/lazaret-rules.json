@@ -1826,6 +1826,19 @@
   "_CHAT_SECRET_MIN_DISTINCT": {
    "value": 10
   },
+  "_CHAT_SECRET_NEEDLES": {
+   "list": [
+    {
+     "value": ":AA"
+    },
+    {
+     "value": "webhooks/"
+    },
+    {
+     "value": "hooks.slack.com"
+    }
+   ]
+  },
   "_CHAT_SECRET_RE": {
    "flags": "",
    "re": "(?<![0-9])\\d{8,10}:AA[A-Za-z0-9_-]{33}(?![A-Za-z0-9_-])|\\b[Dd]iscord(?:app)?\\.com/api/webhooks/\\d{17,20}/[A-Za-z0-9_-]{60,80}|\\bhooks\\.slack\\.com/services/T[A-Z0-9]{8,12}/B[A-Z0-9]{8,12}/[A-Za-z0-9]{24}(?![A-Za-z0-9])"
@@ -8018,6 +8031,13 @@
   "_REVSHELL_LINE_RE": {
    "flags": "",
    "re": "\\b(?:ba|z|k)?sh\\s+-i\\b[^\\n]{0,80}?[<>]&?\\s*/dev/(?:tcp|udp)/|/dev/(?:tcp|udp)/[\\w.\\-]+/\\d+[^\\n]{0,40}?0\\s*>\\s*&\\s*1|\\b(?:nc|ncat|netcat)\\b[^\\n]{0,120}?\\s-[ec]\\s+[\\\"']?(?:/bin/)?(?:ba|z)?sh\\b"
+  },
+  "_REVSHELL_NGROK_NEEDLES": {
+   "list": [
+    {
+     "value": ".ngrok.io"
+    }
+   ]
   },
   "_REVSHELL_NGROK_TCP_RE": {
    "flags": "i",

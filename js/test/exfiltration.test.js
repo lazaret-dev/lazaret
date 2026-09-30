@@ -16,6 +16,7 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { run, installScriptRisk, importTimeRisk, importTimeSeverity } from "../src/index.js";
 import { chatSecretAt, credentialSweepAt, minerAt, rawIpConnect } from "../src/lib/hooks.js";
+import { pyStripChars } from "../src/lib/pycompat.js";
 
 const TG = "1234567" + "89:AA" + "bC3dE5fG7hJ9kL1mN3pQ5rS7tV9wX1yZ3";
 const SLACK = "hooks.slack.com/services/" + "TABCDEF12/" + "BABCDEF12/" + "aBcDeFgHiJkLmNoPqRsTuVwX";
@@ -93,6 +94,20 @@ test("hostile inputs finish fast", () => {
     installScriptRisk(text);
     assert.ok(performance.now() - start < 5000, label);
   }
+});
+
+test("a Slack team of only T and 0 is no key: str.strip('T0'), in linear time", () => {
+  // core: team.strip("T0"); a regex like /^[T0]+|[T0]+$/ would take quadratic
+  // time on a long run of 0s (CodeQL's js/polynomial-redos)
+  for (const [team, left] of [["T00000000", ""], ["T0000A000", "A"], ["TABCDEF12", "ABCDEF12"], ["", ""]]) {
+    assert.equal(pyStripChars(team, "T0"), left, team);
+  }
+  const start = performance.now();
+  assert.equal(pyStripChars("0".repeat(2_000_000) + "x", "T0"), "x");
+  assert.ok(performance.now() - start < 1000);
+  const zeros = SLACK.replace("TABCDEF12", "T00000000");
+  assert.equal(chatSecretAt("fetch(u);\n" + zeros), null);
+  assert.equal(chatSecretAt("fetch(u);\n" + SLACK)[1], "sends data to a Slack webhook whose key is written in the code (TABCDEF12)");
 });
 
 test("--deps: a dependency whose main posts to a Slack webhook in its code", () => {

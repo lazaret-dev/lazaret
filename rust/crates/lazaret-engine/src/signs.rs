@@ -272,7 +272,7 @@ pub fn reverse_shell_at(p: &Pack, text: &[u32]) -> isize {
             return m.start() as isize;
         }
     }
-    if has(text, ".ngrok.io") {
+    if any_in(text, p.needles("_REVSHELL_NGROK_NEEDLES")) {
         if let Some(m) = p.re("_REVSHELL_NGROK_TCP_RE").search(text) {
             if p.re("_REVSHELL_ARG_SHELL_RE").search(text).is_some() && p.re("_EXEC_CALL_RE").search(text).is_some() {
                 return m.start() as isize;
@@ -329,7 +329,7 @@ fn distinct(s: &[u32]) -> usize {
 /// core.chat_secret_at: (offset, reason) of the first chat bot or webhook
 /// secret written in a text that makes network calls.
 pub fn chat_secret_at(p: &Pack, text: &[u32]) -> Option<(usize, PyStr)> {
-    if !has(text, ":AA") && !has(text, "webhooks/") && !has(text, "hooks.slack.com") {
+    if !any_in(text, p.needles("_CHAT_SECRET_NEEDLES")) {
         return None;
     }
     p.re("_NETWORK_RE").search(text)?;

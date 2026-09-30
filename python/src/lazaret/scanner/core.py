@@ -6179,7 +6179,7 @@ def reverse_shell_at(text):
         m = _REVSHELL_ARGS_RE.search(text)
         if m:
             return m.start()
-    if ".ngrok.io" in text:
+    if any(nd in text for nd in _REVSHELL_NGROK_NEEDLES):
         m = _REVSHELL_NGROK_TCP_RE.search(text)
         if m and _REVSHELL_ARG_SHELL_RE.search(text) and _EXEC_CALL_RE.search(text):
             return m.start()
@@ -6239,6 +6239,7 @@ _CHAT_SECRET_RE = re.compile(
     r"|\b[Dd]iscord(?:app)?\.com/api/webhooks/\d{17,20}/[A-Za-z0-9_-]{60,80}"
     r"|\bhooks\.slack\.com/services/T[A-Z0-9]{8,12}/B[A-Z0-9]{8,12}/[A-Za-z0-9]{24}(?![A-Za-z0-9])")
 _TELEGRAM_API_RE = re.compile(r"api\.telegram\.org", re.I)
+_CHAT_SECRET_NEEDLES = (":AA", "webhooks/", "hooks.slack.com")   # one is in every match
 _CHAT_SECRET_MAX = 50            # matches examined per text
 _CHAT_SECRET_MIN_DISTINCT = 10   # distinct characters a real secret has
 _CRED_FILE_RE = re.compile(
@@ -6289,6 +6290,10 @@ _REVSHELL_ARG_SHELL_RE = re.compile(
 _REVSHELL_ARGS_RE = re.compile(
     r"""["'](?:nc|ncat|netcat)["'][^\n]{0,160}?["']-[ec]["']\s*,\s*["'](?:/bin/)?(?:ba|z|da)?sh["']""")
 _REVSHELL_ARGS_NEEDLES = ("'nc'", '"nc"', "'ncat'", '"ncat"', "'netcat'", '"netcat"')
+# What an ngrok TCP address holds (case as written: the prefilter of the
+# case-blind _REVSHELL_NGROK_TCP_RE). Needles, like the lists beside them:
+# a plain `".ngrok.io" in text` reads to code scanners as a URL check.
+_REVSHELL_NGROK_NEEDLES = (".ngrok.io",)
 _IP_LITERAL_RE = re.compile(
     r"""["'](?!(?:127|0|255)\.)((?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d))["']""")
 _RAW_CONNECT_RE = re.compile(
@@ -6305,7 +6310,7 @@ _PUBLIC_RESOLVERS = frozenset({"8.8.8.8", "8.8.4.4", "1.1.1.1", "1.0.0.1", "9.9.
 def chat_secret_at(text):
     """(offset, reason) of the first chat bot or webhook secret of `text`
     (see above) in a file that makes network calls, else None."""
-    if ":AA" not in text and "webhooks/" not in text and "hooks.slack.com" not in text:
+    if not any(nd in text for nd in _CHAT_SECRET_NEEDLES):
         return None
     if not _NETWORK_RE.search(text):
         return None

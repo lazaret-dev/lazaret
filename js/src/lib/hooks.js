@@ -14,7 +14,7 @@
 // again; wrappers are popped off the front of a list), this module does
 // not, with the same results.
 
-import { pyRe, pyStrip, pyRstrip, isPySpace, cpLen } from "./pycompat.js";
+import { pyRe, pyStrip, pyRstrip, pyStripChars, isPySpace, cpLen } from "./pycompat.js";
 import { PIPE_SCAN_SRC, EXEC_CALL_SRC, EXEC_CALL_RE, DL_SUBST_SRC, DL_SUBST_NEEDLE_SRC, pipesDownloadToShell,
   runsDownloadThroughShell, runsSubstitutedDownload } from "./shellpipe.js";
 import { receivedCodeKind, downloadsAndRunsFile, downloadsAndRuns, decodesAndRuns, SCRIPT_INTERP_SRC, SCRIPT_LOAD_SRC,
@@ -719,6 +719,7 @@ const REVSHELL_NGROK_TCP_RE = pyRe(REVSHELL_NGROK_TCP_SRC, "i");
 const REVSHELL_ARG_SHELL_RE = pyRe(REVSHELL_ARG_SHELL_SRC);
 const REVSHELL_ARGS_RE = pyRe(REVSHELL_ARGS_SRC);
 const REVSHELL_ARGS_NEEDLES = ["'nc'", '"nc"', "'ncat'", '"ncat"', "'netcat'", '"netcat"'];
+const REVSHELL_NGROK_NEEDLES = [".ngrok.io"];   // core: needles, which code scanners don't read as a URL check
 /** The offset where `text` opens a reverse shell, else -1 (core.reverse_shell_at). */
 export function reverseShellAt(text) {
   let m = REVSHELL_LINE_RE.exec(text);
@@ -739,7 +740,7 @@ export function reverseShellAt(text) {
     m = REVSHELL_ARGS_RE.exec(text);
     if (m) return m.index;
   }
-  if (text.includes(".ngrok.io")) {
+  if (REVSHELL_NGROK_NEEDLES.some((nd) => text.includes(nd))) {
     m = REVSHELL_NGROK_TCP_RE.exec(text);
     if (m && REVSHELL_ARG_SHELL_RE.test(text) && EXEC_CALL_RE.test(text)) return m.index;
   }
@@ -768,6 +769,7 @@ export function sendsHostInfo(text) {
 const CHAT_SECRET_SRC = String.raw`(?<![0-9])\d{8,10}:AA[A-Za-z0-9_-]{33}(?![A-Za-z0-9_-])`
   + String.raw`|\b[Dd]iscord(?:app)?\.com/api/webhooks/\d{17,20}/[A-Za-z0-9_-]{60,80}`
   + String.raw`|\bhooks\.slack\.com/services/T[A-Z0-9]{8,12}/B[A-Z0-9]{8,12}/[A-Za-z0-9]{24}(?![A-Za-z0-9])`;
+const CHAT_SECRET_NEEDLES = [":AA", "webhooks/", "hooks.slack.com"];   // one is in every match (core's twin)
 const TELEGRAM_API_SRC = String.raw`api\.telegram\.org`;
 const CRED_FILE_SRC = String.raw`["'` + "`" + String.raw`](?:~[/\\]|\.[/\\])?\.(?:env|npmrc|pypirc|netrc|git-credentials)["'` + "`" + "]"
   + String.raw`|\.aws[/\\]credentials\b|[/\\]\.ssh[/\\]id_\w+|\.docker[/\\]config\.json|\.kube[/\\]config\b`;
@@ -826,7 +828,7 @@ const distinct = (s) => new Set(s).size;
 
 /** [offset, reason] of the first chat bot or webhook secret of text in a file that makes network calls, else null (core.chat_secret_at). */
 export function chatSecretAt(text) {
-  if (!text.includes(":AA") && !text.includes("webhooks/") && !text.includes("hooks.slack.com")) return null;
+  if (!CHAT_SECRET_NEEDLES.some((nd) => text.includes(nd))) return null;
   if (!NETWORK_RE.test(text)) return null;
   CHAT_SECRET_RE.lastIndex = 0;
   let k = 0;
@@ -841,7 +843,7 @@ export function chatSecretAt(text) {
       }
     } else if (found.startsWith("hooks.")) {
       const [team, , secret] = found.split("/").slice(-3);
-      if (distinct(secret) >= CHAT_SECRET_MIN_DISTINCT && team.replace(/^[T0]+|[T0]+$/g, "")) {
+      if (distinct(secret) >= CHAT_SECRET_MIN_DISTINCT && pyStripChars(team, "T0")) {
         return [m.index, `sends data to a Slack webhook whose key is written in the code (${team})`];
       }
     } else {

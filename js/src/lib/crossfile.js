@@ -204,8 +204,8 @@ function newlinesBefore(s, stop) {
   for (let i = s.indexOf("\n"); i >= 0 && i < stop; i = s.indexOf("\n", i + 1)) n++;
   return n;
 }
-/** re.escape for a name of the follower's (an identifier or a member chain). */
-const escapeName = (n) => n.replace(/[$.]/g, "\\$&");
+/** re.escape for a name of the follower's (an identifier or a member chain); a backslash too, as re.escape does. */
+const escapeName = (n) => n.replace(/[\\$.]/g, "\\$&");
 const sortCp = (xs) => [...xs].sort(cmpCodePoints);
 const posix = (p) => (sep === "/" ? p : p.split(sep).join("/"));    // core: path.replace(os.sep, "/")
 

@@ -343,8 +343,8 @@ function membersOf(text) {
   return text;
 }
 
-/** A regex source escaping for a name of the follower's (an identifier or a member chain). */
-const escapeName = (n) => n.replace(/[$.]/g, "\\$&");
+/** A regex source escaping for a name of the follower's (an identifier or a member chain); a backslash too, as re.escape does. */
+const escapeName = (n) => n.replace(/[\\$.]/g, "\\$&");
 
 /** A code runner handed to a call as its last argument, and each of `runners`, read as the call it makes. core._dl_callbacks. */
 function callbacks(text, runners = []) {
