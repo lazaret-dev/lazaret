@@ -3,8 +3,11 @@
 Status, September 30, 2026: phase 0 and the phase 1 functions are done,
 current with the Python engine through 0.1.8's detection, wired into the
 scanner behind `--engine`, and built by release CI into platform wheels for
-five platforms (§4). The Python engine (`python/src/lazaret/scanner/`)
-stays: it is the reference every answer of the native engine is held to.
+five platforms (§4). Phase 2 is done for dependency mode: `scan_file` of a
+registry, guard or `--deps` scan (the supply-chain and credential rules)
+is the native engine's whole, findings included (§8). The Python engine
+(`python/src/lazaret/scanner/`) stays: it is the reference every answer of
+the native engine is held to.
 
 ## 1. What it is
 
@@ -43,13 +46,19 @@ Decisions (fixed):
   through it: the import-time test of every dependency file (`--deps`), of
   every file a registry scan reaches at import time and of the files it runs
   when used (SC-USE-RISK), and the install-script test of hook targets and
-  install scripts. Files go in batches of 64 (`engine.BATCH`: a scan's
-  deadline and `should_stop` are checked between batches), on up to 8
-  threads. **Any call the native engine can't answer** (its work budget
-  spent on a hostile file, an error, a caught panic) **is answered by the
-  Python engine**, so the native engine never loses a finding.
-- The per-file rules (`scan_file`), the lexers and the cross-file follower
-  are still Python (phases 2 and 3 below).
+  install scripts. And `scan_file` in dependency mode (`engine.scan_files`):
+  every source file of a registry or guard scan (the archive's members as
+  they stream by, a batch at a time: `_ArtifactScan.scan_pending`) and every
+  dependency file of a `--deps` scan, each answered with core's issues —
+  rule, texts, line, snippet clipped and redacted — in core's order. Files go
+  in batches of 64 (`engine.BATCH`: a scan's deadline and `should_stop` are
+  checked between batches), on up to 8 threads. **Any call the native engine
+  can't answer** (its work budget spent on a hostile file, an error, a
+  caught panic) **is answered by the Python engine**, so the native engine
+  never loses a finding.
+- `scan_file` in project mode (your own files: the quality and bug rules,
+  `TEXT_RULES`, taint) and the cross-file follower are still Python (phases
+  2 and 3 below).
 
 ## 3. Layout
 
@@ -70,8 +79,15 @@ rust/
                              spawned_scripts, and the detectors they read (exfiltration shapes,
                              services at login, self-read, persistence, publishing …)
     src/received.rs          the received-code detector (spec-driven), downloads/decodes and runs
-    src/lexer.rs             _lex_comment_spans
-    examples/                profiling tools (profile_calls, pattern_times, pattern_stats, show_need)
+    src/lexer.rs             _lex_comment_spans (its literals matched by hand loops, §6)
+    src/filectx.rs           a file as scan_file reads it (_FileCtx): lines, comment layout,
+                             match text (NFKC, JS escapes), names
+    src/scanfile.rs          scan_file in dependency mode, family by family; per-line gates
+    src/findings.rs          mk_issue: texts, snippets, redaction (_SecretLiterals); cap_issues
+    src/token.rs             _TokenPattern (S-TOKEN, redaction): JWTs in linear time
+    src/normalize.rs         NFC / NFD / NFKC / NFKD (UAX #15, Unicode 13.0 data)
+    examples/                profiling tools (profile_calls, profile_scanfile, pattern_times,
+                             pattern_stats, show_need)
   crates/lazaret-ffi/        cdylib liblazaret_native: the only `unsafe` (the C ABI)
 python/src/lazaret/scanner/_native.py   ctypes loader and one call (NativeError, NativeExhausted)
 python/src/lazaret/scanner/engine.py    the engine in use, batching, the Python fallback
@@ -80,7 +96,8 @@ scripts/make_rust_tables.py             the pack (any Python) and unicode13.rs (
 scripts/check_rust_deps.py              Cargo.lock and the manifests hold only the workspace
 scripts/check_native_library.py         a built library against its wheel's tag; --dist: the release's wheels
 .github/workflows/wheels.yml            the five libraries, the wheels, installed on each platform
-python/tests/architecture/test_rust_parity_{regex,hooks,signs}.py, test_rust_deps.py
+python/tests/architecture/test_rust_parity_{regex,hooks,signs,scanfile,lexer}.py, test_rust_deps.py,
+  test_rust_pack.py, scanfile_corpus.py
 ```
 
 FFI protocol: request `[u32 LE name len][name][u32 LE args len][args JSON][text]`
@@ -190,6 +207,8 @@ The differential tests (each module under 45 s, as every module is):
 | `test_rust_parity_regex` | every pack pattern and 126 hand-written probes, search/match/fullmatch/finditer/sub/split with pos/endpos | Python 3.10–3.14 |
 | `test_rust_parity_hooks` | the 15 fields of `hooks_view` (shlex, hooks, both supply-chain tests with and without a language, decoded view, spawned scripts …) | the hooks corpus (`hooks_corpus.py`, 36,900 cases) |
 | `test_rust_parity_signs` | 24 detectors one by one (received code, PowerShell, stagers, reverse shells, self-read, persistence, the exfiltration shapes, services at login …) | the same corpus |
+| `test_rust_parity_scanfile` | `scan_file(dep=True)` finding for finding (rule, texts, line, snippet clipped and redacted), family by family and in core's order, with every family and variant reached; each line's context (comment line, comment spans, match text with and without comments, names); NFC, NFD, NFKC and NFKD | the scan_file corpus (`scanfile_corpus.py`: curated files for each family, the hooks corpus' curated scripts, 4,000 random files), this repository's sources and fixtures, every 12th standard-library module; every code point Unicode 13.0 assigns, and 20,000 sequences of combining marks, pairs and jamo |
+| `test_rust_parity_lexer` | `_lex_comment_spans`: comment spans, '…' / "…" spans, every literal's span | 12,000 dense random texts, read as Python, JavaScript with and without JSX, SQL and an unknown language |
 
 State: zero differences in every field. `hooks_corpus.py` is shared with
 the JavaScript parity test, so a new alphabet there tests both twins. On
@@ -197,11 +216,16 @@ real files too: the benchmark's 945 registry scans give identical verdicts,
 reasons and findings with either engine, and both tests answer identically,
 file by file, on 85,415 files (37,784 of installed Python and npm packages,
 and every `.py`/`.js` file of the benchmark's 945 archives, the 516
-malicious ones included), with no call the native engine couldn't answer. The
-parity modules skip where the library is not built (`_native.available()`),
-so CI builds it first; the whole Python suite also passes with
-`LAZARET_ENGINE=rust` (the fixture trees, `--deps` and registry scans through
-the native engine).
+malicious ones included), with no call the native engine couldn't answer.
+`scan_file` was compared file by file too, both engines in dependency mode:
+on every source file of the benchmark's malicious releases (15,096 files,
+525 findings), on every source member of its 429 popular packages (40,065
+files, 821 findings) and on the 13,568 distinct files the scanner,
+registry, MCP and npm-parity suites hand `scan_file` (25,173 findings,
+every family): no difference. The parity modules skip where the library is
+not built (`_native.available()`), so CI builds it first; the whole Python
+suite also passes with `LAZARET_ENGINE=rust` (the fixture trees, `--deps`
+and registry scans through the native engine).
 
 Verifying locally, each command within 45 s:
 
@@ -212,6 +236,8 @@ cd ../python
 PYTHONPATH=src:. python3 -m unittest tests.architecture.test_rust_parity_regex   # ~1 s; repeat per python3.1x
 PYTHONPATH=src:. python3 -m unittest tests.architecture.test_rust_parity_hooks   # ~27 s
 PYTHONPATH=src:. python3 -m unittest tests.architecture.test_rust_parity_signs   # ~8 s
+PYTHONPATH=src:. python3 -m unittest tests.architecture.test_rust_parity_scanfile  # ~10 s
+PYTHONPATH=src:. python3 -m unittest tests.architecture.test_rust_parity_lexer     # ~1 s
 python3 ../scripts/make_rust_tables.py --check && python3 ../scripts/check_rust_deps.py
 ```
 
@@ -242,8 +268,33 @@ probes in `test_rust_parity_regex` hold it):
   holding none of them has no match. Unused under 2 characters or over 64
   strings; about 170 pack patterns get one
   (`cargo run --release --example show_need -- NAME` prints them);
+- a pattern that starts with `^` under MULTILINE is tried only where a
+  line starts (every other start fails at its first operation);
+- a **set pattern** — one character of a set of literals and ranges
+  (`[/'"`]`, a lexer's next interesting character) or the longest run of
+  them (`[ \t\n]*`), with no groups and no IGNORECASE — is answered without
+  the matcher (`Simple` in `mod.rs`: search and match only);
 - mechanics: the dispatch phase is an inner loop, and matcher buffers are
   pooled per thread.
+
+`Regex::need()` exposes the prefilter's strings: `scan_file` reads them
+for all of a file's per-line patterns in one pass (`Gates`, a bit per
+pattern and line), and a line holding none of a pattern's strings is not
+searched for it (a line whose match text differs from the file's text — NFKC,
+decoded escapes, comments cut out — always is).
+
+Beyond the regex engine, a few patterns core runs on every line or every
+token are matched or prefiltered by hand, each written for one pattern text
+and used only while the pack holds exactly that text and flags (compared
+once per pack; any other text runs as a regex, so a change of the pattern in
+core makes the engine slower, never wrong, until the hand code follows):
+the lexer's literals (`_LEX_STR`, `_LEX_MYSQL_STR`, `_JS_REGEX_LIT_RE`: each
+has one way to match, so a loop gives its match, as each loop's comment
+argues), and three necessary conditions `scan_file` tests before a search —
+`ENTROPY_VALUE_RE` (a quote, then 20 characters of the literal's class),
+`B64_BLOB_RE` (202 characters) and `_SC_SINK_WORD_RE` (a sink's name, or `[`,
+blanks, a quote and an `e` or `F`). `test_rust_parity_lexer` fails when one
+of the loops is changed (checked by mutating them).
 
 It still loses to sre on patterns that could start almost anywhere
 (`_XF_JS_MEMBER_RE`, `_PY_DOC_HEAD_RE`); core only calls those with
@@ -256,19 +307,40 @@ the native engine is 3.8× the Python engine over all measured calls (shlex
 20×, hook tokens 19×, follow_hook 8×, install_script_risk 3.4×,
 import_time_risk 3×, self-read 8×).
 
-On real files, the import-time test over 678 of litellm's modules (20.7 M
-characters): Python 15.6 s; native 5.7 s on 1 thread (2.7×), 3.2 s on 2
-threads (4.9×); no difference, no fallback. The benchmark's 945 registry
-scans (516 malicious releases, 429 popular packages; 2 cores, one engine
-after the other): 1,097 s with the Python engine, 853 s with the native one
-(22% less; 95th percentile 9.5 s → 6.2 s; litellm 40.0 s → 30.6 s,
-playwright-core 18.1 s → 10.7 s), with the same verdicts and findings for
-every package. Most of what is left is phase 2 (`scan_file`), still Python.
+On real files, the import-time test over 678 of litellm's modules
+(20.7 M characters): Python 15.6 s; native 5.7 s on 1 thread (2.7×), 3.2 s
+on 2 threads (4.9×); no difference, no fallback. In 0.1.8, the benchmark's
+945 registry scans (516 malicious releases, 429 popular packages; 2 cores,
+one engine after the other): 1,097 s with the Python engine, 853 s with the
+native one (22% less; 95th percentile 9.5 s → 6.2 s; litellm 40.0 s
+→ 30.6 s, playwright-core 18.1 s → 10.7 s), with the same verdicts and
+findings for every package. Most of what was left was phase 2
+(`scan_file`).
+
+`scan_file` in dependency mode (phase 2), on litellm's 2,643 source files
+(44.8 M characters): the Python engine 21.6 s of its registry scan; the
+native engine 2.7 s on one thread (8×) and 2.1 s in the registry scan, on 2
+threads (10.4×); playwright-core's 39 files (11.7 M characters, bundles)
+0.8 s on one thread. On the benchmark's 40,065 popular-package source
+files, in the sweep that compared them: 195 s with the Python engine,
+18.5 s native (batches of 64 on 2 threads).
+
+With it, the benchmark's 945 registry scans, measured the same way: 1,141 s
+with the Python engine, 299 s with the native one (3.8×; 95th percentile
+9.7 s → 2.6 s; litellm 42.1 s → 11.4 s, playwright-core 18.1 s → 4.0 s),
+with the same verdicts, reasons and findings for every package. In a
+profile, litellm's registry scan went from 31.8 s to 12.2 s: what is left
+is the import-time test (phase 1, 5.4 s: the per-line gates and prefilters
+of `scan_file` are not applied there yet), the cross-file follower (3.4 s,
+phase 3) and reading the archive (0.8 s).
 
 Where the targets (≥10× on phases 1–2; litellm and `next`'s tarball under
-5 s) need to come from: threads across files (in; a core-count multiplier),
-and porting phase 2. Single-thread gains will plateau around 4–6×: a
-backtracking engine that must give sre's exact answers can't skip much more.
+5 s) need to come from now: the same work for the import-time and
+install-script tests (they run about 60 patterns over each whole file, most
+of them searched in full where a gate could skip them), threads across
+files (in), and phase 3. A backtracking engine that must give sre's exact
+answers can't skip much more inside one search: the gains are in not
+searching.
 In `install_script_risk` (callgrind, exclusive) the backtracking core is
 about a third, the literal prefilter's scans a tenth, and the rest is
 needle scans, hashing and allocation: a flat profile, about 60 patterns
@@ -277,12 +349,14 @@ each run once per text.
 Tools (`rust/crates/lazaret-engine/examples/`): `profile_calls CASES.json`
 (time per call), `pattern_times CASES.json [NAME [REPS]]` (per pattern),
 `pattern_stats` (per pattern inside one call; `--features stats`, never
-shipped), `profile_one CASES.json CALL [REPS]` (a loop for callgrind: build
-with `CARGO_PROFILE_RELEASE_DEBUG=true CARGO_PROFILE_RELEASE_STRIP=false`
-into its own `--target-dir`), `show_need NAME…`. `CASES.json` is the hooks
-corpus: `python -c "import json; from tests.architecture.hooks_corpus import
-corpus; json.dump(corpus(), open('cases.json', 'w'))"` from `python/` with
-`PYTHONPATH=src:.`.
+shipped), `profile_scanfile FILES.json [FIRST] [COUNT] [REPS]` (scan_file
+over `[[path, lang, text], …]`, with the per-pattern times under
+`--features stats`), `profile_one CASES.json CALL [REPS]` (a loop for
+callgrind: build with `CARGO_PROFILE_RELEASE_DEBUG=true
+CARGO_PROFILE_RELEASE_STRIP=false` into its own `--target-dir`), `show_need
+NAME…`. `CASES.json` is the hooks corpus: `python -c "import json; from
+tests.architecture.hooks_corpus import corpus; json.dump(corpus(),
+open('cases.json', 'w'))"` from `python/` with `PYTHONPATH=src:.`.
 
 ## 8. Phases
 
@@ -290,7 +364,7 @@ corpus; json.dump(corpus(), open('cases.json', 'w'))"` from `python/` with
 |---|---|---|
 | 0 | Workspace, bindings, regex engine, Unicode 13.0 tables, the pack | Done (source decoding — BOMs, UTF-16, coding cookies — not started) |
 | 1 | The supply-chain tests and what they read | Done, current through 0.1.8; wired in |
-| 2 | Per-file rules (`scan_file`: `RULES`, `TEXT_RULES`, secrets, entropy, homoglyphs, hidden Unicode, off-screen code …), the Python and JS/TS lexers | Only `_lex_comment_spans` |
+| 2 | Per-file rules (`scan_file`: `RULES`, `TEXT_RULES`, secrets, entropy, homoglyphs, hidden Unicode, off-screen code …), the Python and JS/TS lexers | Dependency mode done and wired in (every family, NFKC, the comment lexer, findings with their snippets and redaction); project mode (quality rules, `TEXT_RULES`, the SQL and taint passes it hands to) not started |
 | 3 | The cross-file follower; archive reading for registry scans | Not started |
 | 4 (optional) | The taint flow engines | Only if a Rust parser gives identical results |
 
@@ -303,6 +377,16 @@ corpus; json.dump(corpus(), open('cases.json', 'w'))"` from `python/` with
   (inherited from core): bound it in `core.py`, and the pack follows.
 - The budget (4e9 steps per call) discards an exhausted answer; the Python
   engine then answers, so the budget never changes a finding.
+- The native `scan_file` has no time budget (core's `SCAN_TIME_BUDGET`, 30 s
+  per file, ends in SC-TRUNCATED): a file it scans is scanned whole, and a
+  file that spends its work budget goes to core, under core's time budget.
+- S-ENTROPY's Shannon entropy is a `sum()` of floats, which Python adds with
+  Neumaier's compensation since 3.12: the binding says which way to add
+  (`neumaier`), so a value at 4.0's edge is judged as that Python judges it.
+- The messages of findings come from the pack (core's rule dicts, with
+  `str.format` templates filled as Python fills them, `!r` as `repr()`); a
+  finding text core writes inline is not in the pack, so every text the
+  engine shows is a module-level value of core.
 - JSON joins adjacent surrogate halves: differential tests normalize both
   sides through JSON before comparing.
 - Python 3.10 has no atomic groups or possessive repeats: those regex probes
@@ -323,13 +407,17 @@ corpus; json.dump(corpus(), open('cases.json', 'w'))"` from `python/` with
    harness (outside the repository today) in it, and run the 945 packages
    with each engine nightly. (Done: release builds of the five platform
    wheels, §4, and the version held to the packages'.)
-2. Phase 2 (`scan_file`), family by family, each behind the same
-   view-and-compare test and each test module under 45 s.
-3. Flip the source of truth: `core.py` loads the pack at import.
-4. Record the engine in reports (JSON and SARIF), next to the version.
-5. More single-thread speed if still needed: one Aho-Corasick pass over all
-   patterns' required strings, a faster hash than SipHash, a cheaper
-   `Prog::new` for run-time patterns.
+2. The import-time and install-script tests at `scan_file`'s speed: one
+   pass over a file for the required strings of all their patterns (as
+   `Gates` does per line), and hand prefilters for the patterns without any.
+3. Phase 2 in project mode: the quality and bug rules of `RULES`,
+   `TEXT_RULES`, Q-LONGLINE and SC-PIPE-SHELL, with core's taint, SQL and
+   function passes still reading a context built from the native one's.
+4. Flip the source of truth: `core.py` loads the pack at import.
+5. Record the engine in reports (JSON and SARIF), next to the version.
+6. More single-thread speed if still needed: one pass over a line for the
+   checks `scan_file` makes of each character (ASCII, backslash, quotes),
+   a faster hash than SipHash, a cheaper `Prog::new` for run-time patterns.
 
 ## 11. Licensing
 

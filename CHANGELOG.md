@@ -7,6 +7,47 @@ This log starts at 0.1.6; for earlier releases see the git history and tags.
 The format is based on [Keep a Changelog](https://keepachangelog.com); the
 project is pre-1.0, so the 0.x API may still change.
 
+## [Unreleased]
+
+### Changed
+- **The native engine scans each dependency file itself (phase 2 of
+  `docs/RUST_ENGINE.md`, dependency mode).** Where it is installed, the
+  per-file scan of a registry or guard scan's source files and of a `--deps`
+  scan's dependency files runs in it: the supply-chain and credential rules
+  — the pattern rules and their multi-line join, private-key headers and
+  their key material, JWTs, hex-escaped text and names, look-alike and
+  invisible characters, char codes, base64 blobs, off-screen code,
+  high-entropy literals, obfuscator names, self-publishing, the decode flow
+  — with core's findings, texts, lines and snippets (clipped, secrets
+  redacted), in core's order. On litellm's 2,643 source files that part of
+  its registry scan took 21.6 s with the Python engine and takes 2.1 s (2
+  threads). The benchmark's 945 registry scans take 299 s, against 1,141 s
+  with the Python engine and 853 s with 0.1.8's native engine (litellm
+  11.4 s, 42.1 s and 30.6 s), with the same verdicts and findings. Two new
+  differential modules hold it to the Python engine
+  (`test_rust_parity_scanfile.py`: every family and variant, each line's
+  comment layout and match text, and the four normalization forms;
+  `test_rust_parity_lexer.py`); CI's rust job and the wheel jobs run them.
+  Compared file by file on every source file of the benchmark's 945 releases
+  (55,161 files) and on the 13,568 distinct files the test suites hand
+  `scan_file`, the two engines' findings are the same. The engine gained
+  NFKC (Unicode 13.0's tables, which `make_rust_tables.py --check` holds to
+  each Python's by the normalization stability policy), the token pattern's
+  linear-time JWT search, and hand-written matchers for the lexer's literal
+  patterns, each used only while the pack holds the pattern it was written
+  for.
+- **Registry and guard scans read a batch of source files at a time** (64,
+  on threads, with the native engine; one at a time with the Python engine,
+  as before), as `--deps` now does with a project's dependency files. The
+  deadline is still checked before each file (a batch already queued is
+  scanned first), and `should_stop` between batches.
+- **core's finding texts are module-level values.** Every finding
+  `_scan_file` makes takes its texts from a rule dict of the module
+  (`_HEXSTR_TEXT_RULE`, `_LOOKALIKE_RULE` …; a message with fields is a
+  `str.format` template), so the rule pack carries them, and the pack holds
+  the token pattern (`RULES`' S-TOKEN, the redaction list) as well. The
+  findings are the same.
+
 ## [0.1.8] — 2026-09-30
 
 ### Added

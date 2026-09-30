@@ -72,13 +72,15 @@ same metrics, ratings, quality gate and exit code.
   SHA-256).
 - **The native engine** (`rust/crates/lazaret-engine`, 0.1.8) is a port of
   core's supply-chain tests — the install-script and import-time tests and
-  everything they read — with Python `re` semantics (its own port of sre) and
-  the patterns extracted from `core.py` into a rule pack. The Python package
-  sends those tests through it where it is installed
+  everything they read — and (after 0.1.8) of `scan_file` in dependency mode,
+  findings included, with Python `re` semantics (its own port of sre) and
+  the patterns and finding texts extracted from `core.py` into a rule pack.
+  The Python package sends those through it where it is installed
   (`lazaret.scanner.engine`; `--engine rust|python`), and core answers any
   call it can't (a spent work budget, an error), so it never loses a finding.
-  `test_rust_parity_{regex,hooks,signs}.py` compare it with core on every
-  pack pattern and the 36,900-case hooks corpus: zero differences allowed.
+  `test_rust_parity_{regex,hooks,signs,scanfile,lexer}.py` compare it with
+  core on every pack pattern, the 36,900-case hooks corpus and the scan_file
+  corpus: zero differences allowed.
   A change to those tests is made in core, ported to Rust and the pack
   regenerated (`scripts/make_rust_tables.py`; `--check` in CI), in the same
   commit.
@@ -805,11 +807,13 @@ comprehensive, so weigh marginal value against FP risk):
   (`getattr(m, name)`), a runner behind another function (one that hands its
   parameter to another file's runner), or more than four hops.
 - *Engine:* the native engine answers the supply-chain tests (0.1.8,
-  `docs/RUST_ENGINE.md`), and release CI builds it into five platform
-  wheels; next, WebAssembly for the npm package (then the JavaScript twin can
-  go, and the npm package carries `rust/NOTICE` and `rust/LICENSE-PYTHON`),
-  the per-file rules (`scan_file`), and `core.py` loading the rule pack so it
-  has one source.
+  `docs/RUST_ENGINE.md`) and the dependency-mode scan of each file (after
+  0.1.8), and release CI builds it into five platform wheels; next, the
+  import-time and install-script tests at the per-file scan's speed,
+  WebAssembly for the npm package (then the JavaScript twin can go, and the
+  npm package carries `rust/NOTICE` and `rust/LICENSE-PYTHON`), the per-file
+  rules in project mode, and `core.py` loading the rule pack so it has one
+  source.
 - *Notices outside the native engine* (smaller, for a later release): the
   npm package's shell tokenizer (`js/src/lib/hooks.js`) reimplements the
   state machine of CPython's `shlex.read_token`, so give it the PSF notice

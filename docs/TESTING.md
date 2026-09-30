@@ -31,9 +31,10 @@ redeem an earlier red.
    is now wrong," not as flakiness. A deliberately Python-only feature must be
    registered in `_python_only` (in `test_js_parity.py`) or it will (correctly)
    break parity. If you touched the install-script or import-time test (or
-   anything they read), also the native engine's:
+   anything they read), or a rule or finding of a dependency-mode scan
+   (`_scan_file` and what it reads), also the native engine's:
    `python3 scripts/make_rust_tables.py` (then `--check`), build the library,
-   and `test_rust_parity_{regex,hooks,signs}.py` (§3).
+   and `test_rust_parity_{regex,hooks,signs,scanfile,lexer}.py` (§3).
 3. **Fuzz / differential, where the area has one.** The received-code parity
    (`test_js_parity_hooks.py`) runs ~30k generated cases through one Node process
    (while Python reads them: the suite's time is the slower engine's) and diffs
@@ -99,9 +100,11 @@ Notes:
   first proves the library loads: `scripts/check_native_library.py LIB TAG
   --load`, or an assertion; `test_review_release_workflow.py` checks that).
   `test_rust_parity_hooks.py`
-  (~27 s) runs alone; `_regex` (~1 s) and `_signs` (~8 s) batch. A suite run
-  with `LAZARET_ENGINE=rust` sends every supply-chain test of the scanner and
-  the registry through the native engine; `=python` keeps them in core.
+  (~27 s) runs alone; `_regex` (~1 s), `_signs` (~8 s), `_scanfile` (~10 s)
+  and `_lexer` (~1 s) batch. A suite run with `LAZARET_ENGINE=rust` sends
+  every supply-chain test of the scanner and the registry, and the
+  dependency-mode scan of every file, through the native engine; `=python`
+  keeps them in core.
 
 ---
 
@@ -130,9 +133,14 @@ match, fullmatch, finditer, sub, split, with pos/endpos; run it on each
 Python 3.10–3.14); `test_rust_parity_hooks.py` compares the 15 fields of
 `hooks_view` and `test_rust_parity_signs.py` 24 detectors, case by case, on
 `hooks_corpus.py` (~36,900 cases, the corpus `test_js_parity_hooks.py`
-uses). `scripts/make_rust_tables.py --check` fails when the pack no longer
-matches `core.py`, and `scripts/check_rust_deps.py` when a crate from
-outside the workspace appears.
+uses); `test_rust_parity_scanfile.py` compares `scan_file(dep=True)` finding
+for finding, family by family, and each line's context, on
+`scanfile_corpus.py` and real files, and the four normalization forms on
+every code point; `test_rust_parity_lexer.py` the comment lexer's spans on
+dense random text in every language. `scripts/make_rust_tables.py --check`
+fails when the pack no longer matches `core.py`, and
+`scripts/check_rust_deps.py` when a crate from outside the workspace
+appears.
 
 ---
 
@@ -283,7 +291,7 @@ worth watching for during a release run.
 | Small subsystem | `PYTHONPATH=src:. python3 -m unittest discover -s tests/mcp -t .` |
 | Big subsystem | batch its files (§2), ≤45 s per batch |
 | Engine parity | `PYTHONPATH=src:. python3 -m unittest tests.architecture.test_js_parity` (heavy; run alone) |
-| Native engine parity | build (`cd rust && cargo build --release --offline --locked`), `export LAZARET_NATIVE_LIB=…`, then `tests.architecture.test_rust_parity_hooks` alone, `_regex` + `_signs` together |
+| Native engine parity | build (`cd rust && cargo build --release --offline --locked`), `export LAZARET_NATIVE_LIB=…`, then `tests.architecture.test_rust_parity_hooks` alone, `_regex` + `_signs` + `_scanfile` + `_lexer` together |
 | Rule pack drift | `python3 scripts/make_rust_tables.py --check` (the Unicode table's check needs 3.10) |
 | Spec drift | `python3 scripts/sync-received-spec.py --check` + `tests.architecture.test_received_spec` |
 | One npm file | `cd js && node --test test/review-received-code.test.js` |
