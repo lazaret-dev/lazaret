@@ -83,14 +83,25 @@ Notes:
   path, for subprocesses too.
 - **Environment-gated suites skip cleanly** when their variable is unset
   (`LAZARET_SAMPLES_DIR`, `LAZARET_TEST_PG_DSN`, `LAZARET_TEST_PG_MATRIX`,
-  `LAZARET_BENCHMARK`, `LAZARET_TEST_FEEDS` — see `STRUCTURE.md` §4). A local run
-  showing `skipped=N` is expected, not a problem; CI supplies what it can.
+  `LAZARET_BENCHMARK`, `LAZARET_TEST_FEEDS`, `LAZARET_TEST_YARN_BERRY` — see
+  `STRUCTURE.md` §4). A local run showing `skipped=N` is expected, not a
+  problem; CI supplies what it can. The guard's integration tests run the real
+  package managers against fake registries on 127.0.0.1 and skip a tool that
+  isn't on PATH (CI's runners have npm and yarn 1, not always pnpm, Bun or
+  uv); `test_guard_yarn_bun.py` also covers private registries, each tool
+  reading its token from its own settings.
 - **npm side:** `cd js && node --test test/<file>.test.js`, or batch a slice of
   `test/*.test.js`. Don't forget the subdirectories (`test/lib/`,
   `test/scanner/`) — a bare `test/*.test.js` glob misses them.
 - The **parity suites** each spawn Node and take ~5–30 s; run the heavy ones
-  (`test_js_parity.py` ~20 s, `test_js_parity_limits.py` ~27 s,
-  `test_js_parity_hooks.py` ~27 s) alone and batch the light ones.
+  (`test_js_parity.py` ~20 s, `test_js_parity_limits.py` ~27 s) alone and
+  batch the light ones. The hooks corpus (~44,000 cases since 0.1.8's
+  string arrays and data flows) no longer fits 45 s in one run:
+  `test_js_parity_hooks.py` and `test_rust_parity_hooks.py` read a shard of
+  it with `LAZARET_PARITY_SHARD=k/n` (every n-th case from the k-th; CI reads
+  it whole), so run `k/4` for k = 1…4 (~37 s each for the JavaScript one,
+  which also counts the whole corpus's reach in parallel processes, and ~14
+  s each with `k/3` for the native one).
   `test_js_parity_limits.py` holds the source-size and CRLF comparisons, split
   from `test_js_parity.py` in 0.1.8 when that module reached 45 s; split a
   module the same way when it nears the limit rather than raising a timeout.
@@ -100,8 +111,8 @@ Notes:
   first proves the library loads: `scripts/check_native_library.py LIB TAG
   --load`, or an assertion; `test_review_release_workflow.py` checks that).
   `test_rust_parity_hooks.py`
-  (~27 s) runs alone; `_regex` (~1 s), `_signs` (~8 s), `_scanfile` (~10 s)
-  and `_lexer` (~1 s) batch. A suite run with `LAZARET_ENGINE=rust` sends
+  runs alone, in shards (above); `_regex` (~2 s), `_signs` (~21 s),
+  `_scanfile` (~10 s) and `_lexer` (~1 s) batch. A suite run with `LAZARET_ENGINE=rust` sends
   every supply-chain test of the scanner and the registry, and the
   dependency-mode scan of every file, through the native engine; `=python`
   keeps them in core.
@@ -131,9 +142,10 @@ differences at all. `test_rust_parity_regex.py` compares its regex engine
 with `re` on every rule-pack pattern and 126 hand-written probes (search,
 match, fullmatch, finditer, sub, split, with pos/endpos; run it on each
 Python 3.10–3.14); `test_rust_parity_hooks.py` compares the 15 fields of
-`hooks_view` and `test_rust_parity_signs.py` 24 detectors, case by case, on
-`hooks_corpus.py` (~36,900 cases, the corpus `test_js_parity_hooks.py`
-uses); `test_rust_parity_scanfile.py` compares `scan_file(dep=True)` finding
+`hooks_view` and `test_rust_parity_signs.py` 29 detectors, case by case, on
+`hooks_corpus.py` (~44,000 cases, the corpus `test_js_parity_hooks.py`
+uses: curated cases per area, random texts from each area's pieces, and 600
+generated obfuscated files); `test_rust_parity_scanfile.py` compares `scan_file(dep=True)` finding
 for finding, family by family, and each line's context, on
 `scanfile_corpus.py` and real files, and the four normalization forms on
 every code point; `test_rust_parity_lexer.py` the comment lexer's spans on
@@ -191,6 +203,18 @@ either it's a real risk (keep it, add a fixture) or the pattern is too loose
 
 The corpora also double as timing evidence: the sweeps finish in seconds
 (bounded, linear). If a sweep is slow, a bound is missing (§5).
+
+**What carries over: the holdout.** The malware benchmark's 516 releases were
+read while the detectors were written, so a change measured only on them is
+measured in-sample. Score a detection change on the holdout too (`DESIGN.md`
+§7: 747 other malicious releases of the same dataset, each marked when it
+shares a code file with a benchmark sample), and look at its aggregates only —
+the share SUSPICIOUS, by ecosystem and category, by whether a release shares
+code with the benchmark, and how much of it rests on a behaviour or a generic
+technique rather than a tool's mark or a list. Never open a holdout sample or
+the list of its misses: a rule written from one makes the holdout in-sample.
+A detector that recognizes the samples it was written from shows up there:
+in-sample up, holdout flat.
 
 ---
 

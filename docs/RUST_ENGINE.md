@@ -1,7 +1,9 @@
 # Lazaret's native scanning engine (Rust)
 
 Status, September 30, 2026: phase 0 and the phase 1 functions are done,
-current with the Python engine through 0.1.8's detection, wired into the
+current with the Python engine through 0.1.8's detection (its behaviour
+pass included: hook commands read as programs, local data followed to a
+send, string arrays and proxy objects in the decoded view), wired into the
 scanner behind `--engine`, and built by release CI into platform wheels for
 five platforms (§4). Phase 2 is done for dependency mode: `scan_file` of a
 registry, guard or `--deps` scan (the supply-chain and credential rules)
@@ -28,7 +30,7 @@ Decisions (fixed):
 | Rule source | **Extract now, flip later.** `scripts/make_rust_tables.py` extracts every module-level value of `core.py` (patterns, sets, limits, and the pattern pieces core composes at run time) into `rust/crates/lazaret-engine/rules/lazaret-rules.json`; `--check` guards drift. Later, `core.py` itself loads the pack. |
 | Engine shape | Generic engine plus data: declarative rules come from the pack, the algorithms are named Rust functions, ported function for function. |
 | Calls | Whole files, batched: one crossing of the boundary per batch of files, read on threads (`std::thread`), answers in input order. |
-| License | Lazaret's code is Apache-2.0; the translations of CPython code (the regex engine, shlex, the Final_Sigma rule) are also under CPython's license, so the crates and the platform wheels are `Apache-2.0 AND Python-2.0.1` (§11). |
+| License | Lazaret's code is Apache-2.0; the translations of CPython code (the regex engine, shlex, the Final_Sigma rule) are also under CPython's license, and the Unicode 13.0 tables are Unicode data, under the Unicode License v3, so the crates and the platform wheels are `Apache-2.0 AND Python-2.0.1 AND Unicode-3.0` (§11). |
 
 ## 2. Using it
 
@@ -45,8 +47,10 @@ Decisions (fixed):
 - `python/src/lazaret/scanner/engine.py` sends the supply-chain tests
   through it: the import-time test of every dependency file (`--deps`), of
   every file a registry scan reaches at import time and of the files it runs
-  when used (SC-USE-RISK), and the install-script test of hook targets and
-  install scripts. And `scan_file` in dependency mode (`engine.scan_files`):
+  when used (SC-USE-RISK), the install-script test of hook targets and
+  install scripts, and the scripts those start (`engine.spawned_scripts`,
+  which reads the decoded view: an 11.7 MB obfuscated payload's takes about
+  3 s here and 20 s in Python). And `scan_file` in dependency mode (`engine.scan_files`):
   every source file of a registry or guard scan (the archive's members as
   they stream by, a batch at a time: `_ArtifactScan.scan_pending`) and every
   dependency file of a `--deps` scan, each answered with core's issues —
@@ -66,6 +70,7 @@ Decisions (fixed):
 rust/
   Cargo.toml                 workspace; release: lto, codegen-units=1, panic=unwind, strip
   NOTICE, LICENSE-PYTHON     what is translated from CPython, its notices, CPython's license (§11)
+  LICENSE-UNICODE            the Unicode License v3, for generated/unicode13.rs (§11)
   crates/lazaret-engine/     #![forbid(unsafe_code)], no dependencies, no I/O
     rules/lazaret-rules.json the rule pack (generated; embedded; `pack.install` can replace it)
     src/api.rs               the calls by name (JSON args + text -> JSON); `batch` on threads
@@ -79,6 +84,12 @@ rust/
                              spawned_scripts, and the detectors they read (exfiltration shapes,
                              services at login, self-read, persistence, publishing …)
     src/received.rs          the received-code detector (spec-driven), downloads/decodes and runs
+    src/flow.rs              local data followed to where it is sent (local_data_sent_at), a
+                             webhook's secret in the code (secret_endpoint_at)
+    src/shell.rs             a shell text read as a program (_sh_parse … _sh_reasons), the command
+                             lines a script hands a shell (exec_command_reasons)
+    src/strarr.rs            javascript-obfuscator's string arrays and proxy objects, for the
+                             decoded view
     src/lexer.rs             _lex_comment_spans (its literals matched by hand loops, §6)
     src/filectx.rs           a file as scan_file reads it (_FileCtx): lines, comment layout,
                              match text (NFKC, JS escapes), names
@@ -124,7 +135,8 @@ A platform wheel: `python python/_build/lazaret_build.py dist/ --platform
 wheel), or `LAZARET_NATIVE_LIBRARY` and `LAZARET_WHEEL_PLATFORM` for the
 PEP 517 hook, gives `lazaret-<v>-py3-none-<tag>.whl`: the pure wheel's files,
 `lazaret/_native/<library>`, and `rust/LICENSE-PYTHON` and `rust/NOTICE` as
-license files, with `License-Expression: Apache-2.0 AND Python-2.0.1` and
+license files beside the pure wheel's `LICENSE` and `LICENSE-UNICODE`, with
+`License-Expression: Apache-2.0 AND Python-2.0.1 AND Unicode-3.0` and
 `Root-Is-Purelib: false`. The sdist never carries a library.
 
 **Release builds** (`.github/workflows/wheels.yml`, called by `release.yml`
@@ -332,7 +344,15 @@ with the same verdicts, reasons and findings for every package. In a
 profile, litellm's registry scan went from 31.8 s to 12.2 s: what is left
 is the import-time test (phase 1, 5.4 s: the per-line gates and prefilters
 of `scan_file` are not applied there yet), the cross-file follower (3.4 s,
-phase 3) and reading the archive (0.8 s).
+phase 3) and reading the archive (0.8 s). 0.1.8's detections (the
+exfiltration shapes, in all three engines, and the follower's event
+emitters, read only where a file's `.emit(` and `.on(` calls are) bring the
+945 scans to 306 s (playwright-core 4.5 s). The behaviour pass (data flows, string
+arrays and proxy objects, a hook's command read as a program) costs more on
+large bundles: playwright-core's registry scan 4.7 s → 11.2 s, litellm's
+12.2 s → 16.7 s, next's 10.6 s → 11.0 s (the import-time test of
+playwright's two 3 MB bundles: 1.1 s → 4.1 s, the data flow about 1 s of it,
+and a bundle it finds a reason in is read twice).
 
 Where the targets (≥10× on phases 1–2; litellm and `next`'s tarball under
 5 s) need to come from now: the same work for the import-time and
@@ -401,12 +421,22 @@ open('cases.json', 'w'))"` from `python/` with `PYTHONPATH=src:.`.
 
 ## 10. Next
 
-1. WebAssembly for the npm package (`js/src/lib/native.js`), where
-   `wasm32-unknown-unknown` can be installed; the npm package then carries
-   `rust/NOTICE` and `rust/LICENSE-PYTHON` too (§11). Keep the benchmark
-   harness (outside the repository today) in it, and run the 945 packages
-   with each engine nightly. (Done: release builds of the five platform
-   wheels, §4, and the version held to the packages'.)
+1. **WebAssembly for the npm package: the 0.1.9 milestone** (decided with
+   0.1.8, which keeps the three engines in step). A `wasm32-unknown-unknown`
+   build of `lazaret-engine` with the exports §3 frames, shipped inside the
+   npm package (which stays dependency-free) and loaded by
+   `js/src/lib/native.js`, answers the supply-chain tests and
+   dependency-mode `scan_file` for the npm engine. Then the JavaScript twins
+   of what it answers (`js/src/lib/hooks.js`, `received.js` and the per-file
+   supply-chain rules) are retired, the parity tests compare the native
+   engine with the Python engine alone, and the npm package carries
+   `rust/NOTICE`, `LICENSE-PYTHON` and `LICENSE-UNICODE` (§11). The Python
+   engine stays the reference; the dashboard keeps its own script until it
+   can load the same module. Each detection change then lands twice (Python
+   and Rust) instead of three times. Keep the benchmark harness (outside the
+   repository today) with it, and run the 945 packages with each engine
+   nightly. (Done: release builds of the five platform wheels, §4, and the
+   version held to the packages'.)
 2. The import-time and install-script tests at `scan_file`'s speed: one
    pass over a file for the required strings of all their patterns (as
    `Gates` does per line), and hand prefilters for the patterns without any.
@@ -440,12 +470,19 @@ Labs notices name.
   its SHA-256; take a newer one whole, never edited).
 - Each translated file starts with `// SPDX-License-Identifier: Apache-2.0
   AND Python-2.0.1` and its original's notices.
-- `rust/Cargo.toml` declares `Apache-2.0 AND Python-2.0.1`. The platform
-  wheels carry the compiled engine, so they carry both files as license
-  files (`.dist-info/licenses/`) and declare the same expression; the pure
-  wheel, the sdist and the npm package hold none of that code and stay
-  Apache-2.0. `check_native_library.py --dist` checks the wheels before a
-  release.
+- `generated/unicode13.rs` is Unicode Character Database 13.0 data, under
+  the Unicode License v3 (`rust/LICENSE-UNICODE`, the same text as the
+  Python and npm packages' `LICENSE-UNICODE`); its header carries the
+  notice, and `rust/NOTICE` says so (0.1.8).
+- `rust/Cargo.toml` declares `Apache-2.0 AND Python-2.0.1 AND Unicode-3.0`.
+  The platform wheels carry the compiled engine, so they carry
+  `LICENSE-PYTHON` and `NOTICE` as license files (`.dist-info/licenses/`)
+  beside the pure wheel's `LICENSE` and `LICENSE-UNICODE`, and declare the
+  same expression; the pure wheel and the sdist hold none of the translated
+  code and are `Apache-2.0 AND Unicode-3.0` (their Unicode table); the npm
+  package has its own translation of shlex and its own NOTICE
+  (`Apache-2.0 AND Python-2.0.1 AND Unicode-3.0`).
+  `check_native_library.py --dist` checks the wheels before a release.
 
 `tests/architecture/test_rust_notices.py` keeps all of this in place, and
 fails on a Rust file that says it is ported or translated from CPython

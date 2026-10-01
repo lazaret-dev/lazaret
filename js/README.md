@@ -79,7 +79,7 @@ resolving to one file. Writes are atomic
   `__import__("base64").b64decode`, and, in dependencies, across statements
   within 10,000 characters of the decode);
   executable `.pth` lines (`SC-PTH-EXEC`); readable text hidden in hex escapes; base64 blobs and
-  strings built from character codes written in the call or in an array it uses; `javascript-obfuscator` identifier signatures; compiled binaries;
+  strings built from character codes written in the call or in an array it uses; `javascript-obfuscator` identifier signatures (MAJOR since 0.1.8: what the obfuscated code does is read instead); compiled binaries;
   unchecked or orphaned `.pyc` files; UTF-7 source (`SC-UTF7`); your own code
   running a download piped into a shell or substituted into a command line
   (`execSync("curl … | bash")`, `execSync('bash -c "$(curl …)"')`,
@@ -130,31 +130,34 @@ resolving to one file. Writes are atomic
   are pruned unless `--deps` is given; with `--deps` their files get the
   supply-chain and secret rules only, each install hook of a dependency —
   package.json scripts, binding.gyp actions and the command expansions that
-  run a file of the package — is followed to the files it runs (a hook that
-  runs a script collecting the environment or credentials for the network,
-  piping a download into a shell, or running code it receives over the
-  network — a download handed to eval, exec, `new Function`, a shell or an
-  interpreter's inline code — is CRITICAL; a file it runs that is not a
+  run a file of the package — is read as a program and followed to the
+  files it runs (a hook whose command or script sends data read from the
+  machine over the network, pipes a download into a shell, or runs code it
+  receives over the network — a download handed to eval, exec, `new
+  Function`, a shell or an interpreter's inline code — is CRITICAL; a file
+  it runs that is not a
   source file is read and scanned as JavaScript), a dependency whose package
   root has a `binding.gyp` and no install script gets npm's implicit
   `node-gyp rebuild` hook (MAJOR), and a dependency's other JavaScript and
   Python files get the import-time test (`SC-IMPORT-RISK`, MAJOR: the whole
-  environment or a credential store read next to a network call, a download
+  environment or a credential store read and sent over the network, a download
   run through a shell, or a value received over the network run as code (also
   under an alias or an indirect `eval`), deserialized (`pickle.loads`, unsafe
   `yaml.load`, `unserialize`; CWE-502), used as a dynamically imported module
   name, or written to a file the same code then runs). Since 0.1.8 both
-  tests also fail on data sent to a chat bot or webhook whose secret is in
-  the code (Telegram, Discord, Slack), credential files sent to a raw IP
+  tests also fail on data sent to a webhook or a bot whose secret is in
+  the code (any service's), credential files sent to a raw IP
   address, a sweep of three or more credential folders, the host name sent
   to an address kept base64-encoded or in a DNS name the code builds, the
   public IP address sent to a data-capture service, a reverse shell, a
   cryptocurrency miner, and code run from what a file reads back from itself or a data file
   next to it, at once or asynchronously (a `readFile` callback, `.then()`);
   a script a hook runs is followed to the scripts it starts with node or
-  python (`spawn(process.execPath, [file])`, `fork(file)`), the tests read
-  the strings a file decodes as it runs (hex, base64, a file's own decoding
-  helpers, a home-made XOR decoder), and — as in the Python engine — a
+  python (`spawn(process.execPath, [file])`, `fork(file)`), bun or deno, or
+  any program a variable names given a file of code, the tests read the
+  strings a file decodes as it runs (hex, base64, a file's own decoding
+  helpers, a home-made XOR or character-code decoder, javascript-obfuscator's
+  string arrays and proxy objects), and — as in the Python engine — a
   package's files are followed
   into each other: a value received in one file and run in another, through
   wrappers and re-exports, classes, object literals, callbacks and Promises,
@@ -247,5 +250,11 @@ already redacted; `setRedactSecrets(false)` opts out.
 
 Zero dependencies, ES modules, Node 22+. Tests: `npm test` (built-in
 `node --test` runner).
+
+Licensed under Apache-2.0, with two parts that are not Lazaret's own (see
+`NOTICE`): the shell tokenizer is a translation of CPython's `shlex`, under
+CPython's license (`LICENSE-PYTHON`), and the Unicode 13.0 and codec tables
+are Unicode data, under the Unicode License v3 (`LICENSE-UNICODE`). The
+package's license is `Apache-2.0 AND Python-2.0.1 AND Unicode-3.0`.
 
 Website: https://lazaret.dev · Source: https://github.com/lazaret-dev/lazaret

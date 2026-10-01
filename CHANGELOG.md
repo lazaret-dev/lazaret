@@ -7,50 +7,202 @@ This log starts at 0.1.6; for earlier releases see the git history and tags.
 The format is based on [Keep a Changelog](https://keepachangelog.com); the
 project is pre-1.0, so the 0.x API may still change.
 
-## [Unreleased]
-
-### Changed
-- **The native engine scans each dependency file itself (phase 2 of
-  `docs/RUST_ENGINE.md`, dependency mode).** Where it is installed, the
-  per-file scan of a registry or guard scan's source files and of a `--deps`
-  scan's dependency files runs in it: the supply-chain and credential rules
-  — the pattern rules and their multi-line join, private-key headers and
-  their key material, JWTs, hex-escaped text and names, look-alike and
-  invisible characters, char codes, base64 blobs, off-screen code,
-  high-entropy literals, obfuscator names, self-publishing, the decode flow
-  — with core's findings, texts, lines and snippets (clipped, secrets
-  redacted), in core's order. On litellm's 2,643 source files that part of
-  its registry scan took 21.6 s with the Python engine and takes 2.1 s (2
-  threads). The benchmark's 945 registry scans take 299 s, against 1,141 s
-  with the Python engine and 853 s with 0.1.8's native engine (litellm
-  11.4 s, 42.1 s and 30.6 s), with the same verdicts and findings. Two new
-  differential modules hold it to the Python engine
-  (`test_rust_parity_scanfile.py`: every family and variant, each line's
-  comment layout and match text, and the four normalization forms;
-  `test_rust_parity_lexer.py`); CI's rust job and the wheel jobs run them.
-  Compared file by file on every source file of the benchmark's 945 releases
-  (55,161 files) and on the 13,568 distinct files the test suites hand
-  `scan_file`, the two engines' findings are the same. The engine gained
-  NFKC (Unicode 13.0's tables, which `make_rust_tables.py --check` holds to
-  each Python's by the normalization stability policy), the token pattern's
-  linear-time JWT search, and hand-written matchers for the lexer's literal
-  patterns, each used only while the pack holds the pattern it was written
-  for.
-- **Registry and guard scans read a batch of source files at a time** (64,
-  on threads, with the native engine; one at a time with the Python engine,
-  as before), as `--deps` now does with a project's dependency files. The
-  deadline is still checked before each file (a batch already queued is
-  scanned first), and `should_stop` between batches.
-- **core's finding texts are module-level values.** Every finding
-  `_scan_file` makes takes its texts from a rule dict of the module
-  (`_HEXSTR_TEXT_RULE`, `_LOOKALIKE_RULE` …; a message with fields is a
-  `str.format` template), so the rule pack carries them, and the pack holds
-  the token pattern (`RULES`' S-TOKEN, the redaction list) as well. The
-  findings are the same.
-
 ## [0.1.8] — 2026-09-30
 
+0.1.8 reads malware by what it does. Its last round audited every strong
+detector for whether it names a behaviour or recognizes the samples it was
+written from, and rewrote the second kind (the first four entries under
+Added, and Changed). Every benchmark number in these notes is in-sample: it
+was measured, at the round it names, on the 516 malicious releases and 429
+popular packages read while the detectors were written. So 0.1.8 also
+measures a holdout: 747 other malicious releases of the same dataset that
+no detector was written from, looked at only in aggregate.
+
+| 0.1.8, before and after the last round | Benchmark (516, in-sample) | Holdout (747) |
+| --- | --- | --- |
+| SUSPICIOUS | 87% (448) → 83% (430) | 85% (634) → 78% (583) |
+| SUSPICIOUS on a behaviour or a generic technique | 69% (354) → 82% (424) | 66% (495) → 77% (574) |
+| Share of SUSPICIOUS verdicts resting on one | 79% → 99% | 78% → 98.5% |
+| SUSPICIOUS or WARN | 90% → 90% | 90% → 89% |
+| Holdout releases sharing no code with the benchmark (499): SUSPICIOUS | | 79% → 72% |
+| 0.1.7, for comparison: SUSPICIOUS (on a behaviour or a technique) | 68% | 70% (53%); 74% of the 499 |
+
+The strict verdict now catches less: 19 benchmark releases and 56 holdout
+releases are no longer SUSPICIOUS (most are WARN), while 1 and 5 others
+became so. Of the holdout's 56, 50 rested only on a tool's mark, a list of
+services or a hook's tokens — `_0x` names in 38 (with the Bun loader rule in
+14), a list in 11, tokens in 4 — and 6 on a host name read near a network
+call, which the data flow does not connect. What is SUSPICIOUS now nearly
+always says what the code does. On the 499 holdout releases that share no
+code with the benchmark, 0.1.8 is SUSPICIOUS on 72% and 0.1.7 on 74%:
+0.1.8's gain on the holdout is on campaign siblings of the benchmark's
+samples (91% against 63%), and on new campaigns its verdicts rest on
+behaviour (70% of the 499, against 55%) where 0.1.7's leaned on names and
+tokens. Of the 365 benchmark releases GuardDog calls high_risk, Lazaret
+calls 350 SUSPICIOUS (all 365 before the round; the 15 are among the 19).
+The same 3 of the 429 popular packages are SUSPICIOUS (68% of the 516 in
+0.1.7; GuardDog 71%), and the registry's live dependency history still adds
+the 17 @mastra releases (87% with it). Registry engine 2.14.0, so stored and
+cached verdicts are redone.
+
 ### Added
+- **An install hook's command is read as a program** (all three engines).
+  0.1.7 made a hook CRITICAL when its command merely contained curl, wget,
+  eval, base64, `node -e`, `sh -c` or powershell: tokens a hook that fetches
+  a platform binary shares, and one written with other tools avoids. They are
+  now only a hint in the MAJOR finding's message. What escalates a hook is
+  what its command does (`core.hook_command_risk`): the install-script test
+  on the command; the code it hands an interpreter inline (`node -e` / `-p`,
+  `python -c`, and `sh -c`, `eval` and `cmd /c` command lines, three levels
+  deep), read the same way; and its network commands, parsed as a shell
+  parses them (quotes, escapes, `$(…)` and backquotes, pipes, redirections,
+  `&&`, `||`, `;`): a local file uploaded (`curl -d @file`, `-F`, `-T`,
+  `wget --post-file`, `< file` or `cat file |` into the command), what a
+  command that reports on the machine prints sent (`whoami`, `hostname`,
+  `env`, `ls`, `uname -a` … in `$(…)`, or piped through `base64` or
+  `xargs`), a variable naming the user or the host or holding a secret
+  (`$USER`, `%USERNAME%`, `$NPM_TOKEN` …) sent, the user or host name in the
+  name a lookup resolves, and a beacon: a request whose answer is thrown
+  away, or a lookup, whose only effect is to tell a server the package was
+  installed. A request whose exit status decides what runs next is a
+  connectivity check, and a download that keeps what it gets may name the
+  platform, the version and paths in its address. The command lines a script
+  hands a shell (`os.system`, `execSync`, a shell string to `subprocess`,
+  `sh -c` in an argument list) are read the same way.
+- **Exfiltration is read as a data flow** (all three engines). What an
+  install script sends decides, not where it sends it (a list of
+  exfiltration services does not know a Feishu bot, a new tunnel service or
+  the attacker's own server). Data read from the machine is followed to a
+  send (`core.local_data_sent_at`): an environment variable that names the
+  user or the host or holds a secret, the whole environment copied, listed or
+  serialized (not narrowed to the package's own settings), files and folders
+  outside the package (an absolute path, the home or working folder, a name
+  given one), what a command that reports on the machine prints, the
+  machine's names and addresses, what the cloud's instance metadata service
+  gives (the instance's credentials) and the public IP address a lookup
+  service answers; through assignments, destructuring, loops, `with … as`,
+  `.then()` chains, a read's callbacks, returns and the parameters of the
+  script's own functions; to the data of a request, a socket's or a
+  connection's write, or a command a script runs that holds curl, wget or nc.
+  A request's address and a DNS name count too, for all but the environment,
+  the metadata and the public IP address (a download's address may carry a
+  mirror or a token). A value tested rather than used, the path a read is
+  given, a child process's options and a callback handed to a request are
+  not data sent. The lists of exfiltration and data-capture services now
+  only label where the data goes ("contacts an address typical of data
+  exfiltration (…)"). At import time the same flow is CRITICAL when it goes
+  to a data-capture service or a public IP address, or when the whole
+  environment, the instance's credentials or a credential store go to an
+  exfiltration service. A
+  request to a webhook or a bot whose secret is written in the code is read
+  for any service: a credential in the URL's path (20 to 200 characters
+  mixing upper case, lower case and digits), not only Telegram's, Discord's
+  and Slack's shapes.
+- **Obfuscated JavaScript is read as what it does** (all three engines). The
+  decoded view, which the install-script and import-time tests read a second
+  time, now reads javascript-obfuscator's string arrays (and those of the
+  tools that copy it): the strings kept in one array and read back through an
+  accessor with an offset, undecoded, in base64 over the accessor's own
+  alphabet or in RC4 with the key each call passes; the rotation its
+  checksum loop applies, found by working out the loop's arithmetic as
+  JavaScript does (nothing is run, and nothing is read unless the checksum
+  holds); and calls through aliases, wrapper functions, and indexes written
+  as arithmetic or kept in objects of constants. It reads the proxy objects
+  of its control-flow flattening (`o['oEnxQ'](require, o['OKaPt'])` is
+  `require('child_process')`), and a file's own character-code decoder
+  whatever its arithmetic: a function that builds text with
+  `String.fromCharCode` or `chr` from the codes it walks and its other
+  parameters, worked out by a small evaluator of 32-bit integer arithmetic
+  (@fnos/app XORed every string of its runner with a key that changes with
+  the position). So the tests see what such a file does: the 2026 setup.mjs
+  payloads' 2 MB `router_init.js` now reads as "sends environment variables
+  over the network (the whole environment)", "writes an AI agent's or
+  editor's auto-run settings (.vscode/tasks.json)" and "contacts an address
+  typical of data exfiltration (http://169.254.169.254)".
+- **Programs a hook or a script starts, whatever the runtime** (all three
+  engines). A hook's `bun x.js`, `bun run x.ts`, `deno run -A x.ts`, `tsx`,
+  `ts-node` or `vite-node` is followed to the package file it runs, as
+  `node x.js` is (`bun run build` runs the package's script; `bun install` is
+  a subcommand). A script that starts any program a variable names — a
+  runtime it downloaded — with a file of code is followed to that file
+  (`execFileSync(bun, [path.join(dir, 'router_init.js')])`), and so is a
+  path built from an ES module's folder (`dirname(fileURLToPath(
+  import.meta.url))`, `import.meta.dirname`) or with pathlib's `/`, or one the
+  script decodes as it runs. This replaces the rule for one loader (a Bun
+  release fetched from GitHub and run): what a loader starts is now read and
+  tested, whatever it fetched. SC-AUTORUN follows what a planted setting's
+  command starts too.
+- **DNS names built from values, and addresses fetched at run time** (all
+  three engines). A DNS
+  name built from values outside a template is now read too: a sum ending in
+  a literal domain (`h + '.x.example.com'`), `%` or `.format()`, a name
+  assigned earlier in the file, a lookup command run from code
+  (`os.system('nslookup ' + host + …)`), and in a shell command `$(whoami)`,
+  `` `hostname` ``, `$USER`, `%USERNAME%` or `$env:COMPUTERNAME` in the name
+  `nslookup`, `dig`, `host`, `ping`, `curl`, `wget` or `Resolve-DnsName`
+  resolves — not a reserved domain (`.local`, `.internal`, `.test`, …), and in
+  code only in a file that reads the machine's user or host name. And a
+  destination fetched at run time: the value a fetch of a hard-coded URL
+  gives (a GitHub Pages config, a pastebin, a gist), followed through
+  assignments, destructuring, `for` loops, callbacks, `.then()` chains and
+  returns to a POST, PUT, PATCH or sendBeacon, in a file that reads the host
+  or user name: "sends the machine's user or host name to an address it
+  fetches at run time (from HOST)", CRITICAL. The host name read through
+  `require('os').hostname()`, a destructured `require('os')` or `node:os`
+  import, or `from socket import gethostname` counts as reading it. Compared
+  with the round before on every source file of the benchmark's 945 releases and 29,629
+  installed files, no benign file's answer changed; on the benchmark one
+  more malicious release is SUSPICIOUS (@helpcentre/tesco-help, whose install
+  script posts `require('os').hostname()`), and no popular package's verdict
+  changed. Registry engine 2.13.0, so stored and cached verdicts are redone.
+- **The cross-file follower follows event emitters** (Python and npm
+  engines): a value received over the network in one file and emitted there
+  (`bus.emit('code', data)`) reaches the listeners of that event in other
+  files on the same emitter — a module's export resolved through imports, an
+  imported name, `process`; not `this` or a parameter, which are their own
+  file's — and a listener that runs it (`bus.on('code', c => eval(c))`,
+  `bus.on('code', eval)`) is SC-IMPORT-RISK, CRITICAL, as the other
+  cross-file flows are. An emit or a listener in a comment is not one. It was
+  the adversarial pass's known miss.
+- **`lazaret guard` for yarn, Bun, uvx and uv run.** yarn 2+ resolves with
+  `--mode=update-lockfile` (nothing linked or built) and its registry
+  packages are checked against the integrity the registry publishes (yarn
+  pins a checksum of its own zip, which then keys the cached verdict); yarn 1,
+  which has no lockfile-only mode, resolves in a temporary copy of the
+  project with scripts off, and what that copy installed is checked. Bun
+  resolves with `--lockfile-only`. New releases are held back by yarn's
+  `npmMinimalAgeGate` (yarn 4.10+) and Bun's `--minimum-release-age` (Bun
+  1.3+), as npm's `before` and pnpm's minimum-release-age hold them.
+  `uvx`, `uv tool run` and `uv tool install` go through the guard's local
+  index: the tool's requirements are compiled through it first (every file
+  scanned), then the command runs, every download scanned before uv gets it.
+  `uv run` in a project is guarded as `uv sync` is and then runs with
+  `--frozen`; what else it installs (`--with`, a script's dependencies) comes
+  through the local index.
+- **Private registries and indexes in the guard.** The guard fetches with
+  the credentials the package manager's own settings give (the new
+  `lazaret.registry.pmsettings`): the `.npmrc` keys npm, pnpm, yarn 1 and Bun
+  read (`//host/path/:_authToken`, `_auth`, `username` + `_password`, with
+  `${VAR}`), yarn 2+'s `npmAuthToken` / `npmAuthIdent` (top level,
+  `npmScopes`, `npmRegistries`), Bun's `bunfig.toml`, a Python index URL's
+  `user:password@`, uv's `UV_INDEX_<NAME>_USERNAME` / `_PASSWORD`, and
+  `.netrc`. A credential goes only to the host — for npm's keys, the path —
+  it is set for, over https or to this machine, never over a redirect to
+  another host, and never into the output, the cache or `--json`. pip and uv
+  still talk only to 127.0.0.1, without credentials. The local index now
+  relays the indexes pip and uv are set to use (pip's index-url and
+  extra-index-url, uv's indexes from its environment, `uv.toml` and
+  `pyproject.toml`, and those on the command line, which 0.1.7 refused),
+  reading PEP 503 HTML pages as well as JSON ones.
+- **Notices.** The npm package's shell tokenizer is a translation of
+  CPython's shlex: the package now carries `LICENSE-PYTHON` and a `NOTICE`
+  saying what was translated and changed. The Unicode 13.0 tables
+  (`_unicode13.py`, `unicode13.js`, `unicode13.rs`) and the single-byte codec
+  tables (`codecs.js`, and the dashboard's copies) are Unicode data: each
+  carries the Unicode notice, and every package that ships them carries the
+  Unicode License v3 (`LICENSE-UNICODE`) and declares it — the sdist and the
+  pure wheel `Apache-2.0 AND Unicode-3.0`, the platform wheels, the crates
+  and the npm package `Apache-2.0 AND Python-2.0.1 AND Unicode-3.0`.
 - **More of the malware the 0.1.7 benchmark missed (backlog items 1-4, from
   its 177 misses).** On the same 516 malicious releases, 76% are now
   SUSPICIOUS (was 66%; GuardDog 70%), and 80% with the registry's live
@@ -113,7 +265,8 @@ project is pre-1.0, so the 0.x API may still change.
   - **SC-EVAL-DECODER** (both engines and the dashboard, CRITICAL): eval of an
     inline decoder function applied to 200 or more character codes or a
     literal of 1,000 or more characters — one campaign's letter-shift
-    obfuscation (12 files; no popular package).
+    obfuscation (12 files; no popular package). Any decoder function since
+    the last round (Changed).
   - **The received-code test reads more of how a value reaches a runner**
     (both engines): `Function.constructor(…)`, a statement a formatter spread
     over several rows (`axios` then `.post(…)` on the next row; a call's
@@ -181,6 +334,7 @@ project is pre-1.0, so the 0.x API may still change.
     key from its user; a package that carries its author's key reports whoever
     runs it: figlets zipped Exodus wallets and sent them to its bot, requestn
     uploaded every file in the working folder. Placeholders are not keys.
+    Any service's webhook since the last round (exfiltration as a data flow).
   - **Credentials sent out**: credential files (.env, .npmrc, .pypirc, .netrc,
     .git-credentials, ~/.aws/credentials, SSH keys, Docker's and kubectl's
     configs) read in a file that sends data to a raw public IP address; three
@@ -200,7 +354,8 @@ project is pre-1.0, so the 0.x API may still change.
     given `-o path` in an argument list, the file then run with Python
     (mistralai 2.4.6's `client/__init__.py`); and at install time a raw socket
     to a hard-coded address (as a URL with one already was) and browser
-    shortcuts rewritten to load an extension (python-dateuti).
+    shortcuts rewritten to load an extension (python-dateuti; any program's
+    shortcuts since the last round).
 - **Services started at login, payloads read back asynchronously, XOR
   decoders, and names like a popular package's** (the backlog's last four
   detection items). On the same 516 malicious releases, 87% are now
@@ -312,14 +467,102 @@ project is pre-1.0, so the 0.x API may still change.
   which 0.1.7 did not update; PyPI shows it from the next release.
 
 ### Changed
+- **Detectors written from samples now read the behaviour** (the audit of
+  every strong detector for whether it names what code does or recognizes
+  the samples it was written from). An install hook's download and evaluation tools and the
+  lists of exfiltration services became hints and labels (above). The rule
+  for one loader — a Bun release fetched from GitHub and run — is gone: the
+  runtime it starts, and the file it runs, are followed instead. Browser
+  shortcuts rewritten to load an extension became the shortcuts of any
+  program on the machine rewritten: a search for `.lnk` files,
+  `CreateShortcut`, and a shortcut's `Arguments` or `TargetPath` set,
+  whatever the program now starts. SC-EVAL-DECODER, written for one
+  campaign's letter shift (eval of an inline function), is now eval,
+  `Function` or vm's `runIn…Context` given what any function — written into
+  the call or named — computes from 200 or more character codes or 1,000 or
+  more characters of text. SC-OBF-IDENT (`_0x` names) and SC-PACKER (Dean
+  Edwards' p,a,c,k,e,d) are MAJOR: a tool's mark is not what the code does,
+  and the decoded view reads what javascript-obfuscator hides; a packed
+  payload that runs is SC-EVAL-DECODER's.
+- **Large bundles take longer to scan.** The data flow and the readings of
+  the behaviour pass cost most on big bundles: with the native engine on 2
+  cores, playwright-core's registry scan takes 11.2 s (4.7 s before the
+  pass; 18.1 s with the Python engine), litellm's 16.7 s (12.2 s), next's
+  11.0 s (10.6 s). The flow follows names, so in a 3 MB bundle short names
+  can collide: playwright-core's `utilsBundle.js` gets an import-time MAJOR
+  ("reads credentials or the whole environment and sends data over the
+  network") it doesn't earn; no verdict changed (`docs/DESIGN.md` §12).
+- **The native engine scans each dependency file itself (phase 2 of
+  `docs/RUST_ENGINE.md`, dependency mode).** Where it is installed, the
+  per-file scan of a registry or guard scan's source files and of a `--deps`
+  scan's dependency files runs in it: the supply-chain and credential rules
+  — the pattern rules and their multi-line join, private-key headers and
+  their key material, JWTs, hex-escaped text and names, look-alike and
+  invisible characters, char codes, base64 blobs, off-screen code,
+  high-entropy literals, obfuscator names, self-publishing, the decode flow
+  — with core's findings, texts, lines and snippets (clipped, secrets
+  redacted), in core's order. On litellm's 2,643 source files that part of
+  its registry scan took 21.6 s with the Python engine and takes 2.1 s (2
+  threads). The benchmark's 945 registry scans take 299 s, against 1,141 s
+  with the Python engine and 853 s when the native engine answered only the
+  install-script and import-time tests (litellm 11.4 s, 42.1 s and 30.6 s),
+  with the same verdicts and findings. Two new
+  differential modules hold it to the Python engine
+  (`test_rust_parity_scanfile.py`: every family and variant, each line's
+  comment layout and match text, and the four normalization forms;
+  `test_rust_parity_lexer.py`); CI's rust job and the wheel jobs run them.
+  Compared file by file on every source file of the benchmark's 945 releases
+  (55,161 files) and on the 13,568 distinct files the test suites hand
+  `scan_file`, the two engines' findings are the same. The engine gained
+  NFKC (Unicode 13.0's tables, which `make_rust_tables.py --check` holds to
+  each Python's by the normalization stability policy), the token pattern's
+  linear-time JWT search, and hand-written matchers for the lexer's literal
+  patterns, each used only while the pack holds the pattern it was written
+  for.
+- **Registry and guard scans read a batch of source files at a time** (64,
+  on threads, with the native engine; one at a time with the Python engine,
+  as before), as `--deps` now does with a project's dependency files. The
+  deadline is still checked before each file (a batch already queued is
+  scanned first), and `should_stop` between batches. SC-USE-RISK's batches
+  hold at most 1,000,000 characters (or one file), so its 3 s per archive
+  holds: a batch of truffle's bundles took 20 s.
+- **core's finding texts are module-level values.** Every finding
+  `_scan_file` makes takes its texts from a rule dict of the module
+  (`_HEXSTR_TEXT_RULE`, `_LOOKALIKE_RULE` …; a message with fields is a
+  `str.format` template), so the rule pack carries them, and the pack holds
+  the token pattern (`RULES`' S-TOKEN, the redaction list) as well. The
+  findings are the same.
 - **The native engine is released in lockstep with the packages.**
   `scripts/check-versions.sh` (CI's `versions` job, `tag-release.sh` and the
   release's `verify-tag`) also reads `rust/Cargo.toml`'s workspace version
   and `rust/Cargo.lock`'s two entries, so `engine: rust X` in `--version` is
-  the release's own version. The workspace is back at 0.1.7 until the
-  release bump.
+  the release's own version.
 
 ### Fixed
+- **A program written in a string literal was read as code that runs what it
+  receives** (all three engines; 0.1.7 too). A network call named in a
+  string's text made the value bound to the string a received one:
+  xmlhttprequest 1.8.0 and xmlhttprequest-ssl 2.1.2 — which socket.io's
+  client installs through engine.io-client 6 — write a program for `node -e`
+  that makes a request and saves the response to a file, and registry scans
+  called them SUSPICIOUS ("runs code it receives over the network" at import;
+  a CRITICAL SC-IMPORT-RISK with `--deps`), so `lazaret guard` blocked `npm
+  install socket.io-client`; truffle's bundled copy was SC-USE-RISK. A literal's text
+  is now its own code, read on its own where something in it runs (a program
+  for `node -e` that runs what it fetches still is one); a template
+  literal's or an f-string's interpolation is still the code around it.
+- **uv fetched around the guard from an index in its settings files.** An
+  index in `uv.toml` or `pyproject.toml`'s `[tool.uv]` came before the
+  guard's local index (0.1.7 set only `UV_DEFAULT_INDEX`, uv's last), so
+  `lazaret guard uv pip install` let uv fetch from it directly and install
+  what the guard never scanned. The guard's index is now uv's first
+  (`UV_INDEX`), relays those indexes itself, and answers an empty page for a
+  project none of them has (uv then asks no other); a package uv plans to
+  install that the index didn't serve blocks.
+- **pip and uv with a private index got PyPI.** The guard relayed PyPI
+  whatever pip or uv was set to use, so a package of a private index was
+  looked up on PyPI instead — a failed install, or a public package of the
+  same name. It now relays the tool's own indexes.
 - **chromedriver's installer read as a call to RequestBin** (both engines;
   in the registry since 0.1.0). The list of addresses typical of exfiltration
   matched `requestbin` anywhere in the text, and chromedriver's and
