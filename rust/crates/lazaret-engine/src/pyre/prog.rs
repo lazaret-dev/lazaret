@@ -10,12 +10,15 @@
 //! * for each alternative of a BRANCH, the characters it can start with, so
 //!   an alternative that cannot match here is not tried, as sre already does
 //!   when the alternative starts with a literal or a set;
-//! * for the whole program, the characters a match can start with, and
-//!   sre's own first-character set as a bit table;
-//! * the strings one of which every match holds (literal.rs).
+//! * for the whole program, the characters a match can start with and the
+//!   one-character lookbehinds and position tests made before the first of
+//!   them, and sre's own first-character set as a bit table;
+//! * the strings one of which every match holds (literal.rs), and those
+//!   one of which every match starts with: a search then tries only where
+//!   one of them starts.
 
 use super::constants::*;
-use super::first::{self, FirstSet};
+use super::first::{self, FirstSet, StartSet};
 use super::literal::{self, Need};
 use super::matcher;
 
@@ -27,11 +30,21 @@ pub struct Prog {
     /// BRANCH alternative) -> index into `sets`, u32::MAX for none
     set_at: Vec<u32>,
     sets: Vec<FirstSet>,
-    pub first: Option<FirstSet>,
+    /// where a search's match can start (first.rs: the characters, and the
+    /// zero-width tests made before the first of them)
+    pub first: Option<StartSet>,
     /// sre's INFO charset (a search's first-character scan), for ASCII
     info_ascii: u128,
     /// strings one of which every match holds (literal.rs)
     pub need: Option<Need>,
+    /// strings one of which every match starts with (literal.rs)
+    pub lead: Option<Need>,
+    /// is `need` worth checking before a search? (not when it is `lead`'s
+    /// own strings, which the search scans for anyway)
+    pub check_need: bool,
+    /// (development: characters the need and lead scans read; `stats`)
+    #[cfg(feature = "stats")]
+    pub scanned: [std::sync::atomic::AtomicU64; 4],
 }
 
 /// Every operation's position in code[start..end] (sre's `dis` walk).
@@ -89,9 +102,13 @@ impl Prog {
             in_known: vec![false; n],
             set_at: vec![u32::MAX; n],
             sets: Vec::new(),
-            first: first::first_set(&code),
+            first: first::start_set(&code),
             info_ascii: 0,
             need: literal::need(&code),
+            lead: literal::lead(&code),
+            check_need: true,
+            #[cfg(feature = "stats")]
+            scanned: Default::default(),
             code,
         };
         if prog.code.first() == Some(&INFO) && prog.code.get(2).is_some_and(|f| f & INFO_CHARSET != 0 && f & INFO_PREFIX == 0) {
@@ -100,6 +117,10 @@ impl Prog {
                     prog.info_ascii |= 1u128 << c;
                 }
             }
+        }
+        let prefix = prog.code.first() == Some(&INFO) && prog.code.get(2).is_some_and(|f| f & INFO_PREFIX != 0);
+        if let (Some(need), Some(lead)) = (&prog.need, &prog.lead) {
+            prog.check_need = prefix || !need.same_strings(lead);
         }
         let mut ops = Vec::new();
         if visit(&prog.code, 0, n, &mut ops, 0).is_none() {

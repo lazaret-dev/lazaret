@@ -590,6 +590,52 @@ pub fn local_data_sent_at(p: &Pack, text: &[u32]) -> Option<(usize, &'static str
         }
     }
     let plain = assigns.len(); // (the assignments of a name itself)
+    // the names that hold a path outside the package
+    let path_expr = p.re("_LD_PATH_EXPR_RE");
+    let own_folder = p.re("_LD_OWN_FOLDER_RE");
+    let fs_root = p.re("_LD_FS_ROOT_RE");
+    let home = p.re("_LD_HOME_RE");
+    let mut outside: HashSet<PyStr> = HashSet::new();
+    for (name, lo, hi) in &assigns[..plain] {
+        let value = pystr::strip(pystr::sub(text, *lo, *hi));
+        if path_expr.match_(value).is_some()
+            && own_folder.search(value).is_none()
+            && (fs_root.match_(value).is_some() || home.search(value).is_some())
+        {
+            outside.insert(name.clone());
+        }
+    }
+    let passes = p.usize("_DD_PASSES");
+    for _ in 0..(if outside.is_empty() { 0 } else { passes }) {
+        let mut grown = false;
+        for (name, lo, hi) in &assigns[..plain] {
+            if !outside.contains(name)
+                && path_expr.match_at(text, *lo as isize, *hi as isize).is_some()
+                && own_folder.search_at(text, *lo as isize, *hi as isize).is_none()
+                && ld_names_in(p, text, *lo, *hi, &outside, &lit).is_some()
+            {
+                outside.insert(name.clone());
+                grown = true;
+            }
+        }
+        if !grown {
+            break;
+        }
+    }
+    // (an early answer core does not give, the same answer: with no name
+    // holding a path outside the package, the reads do not depend on the
+    // names assigned or the functions defined; with none of those reads and
+    // no text of the instance's metadata (the strings every match of
+    // _LD_METADATA_RE holds), nothing is followed and nothing is sent, so
+    // the passes below would end in None)
+    let early: Option<Vec<Source>> =
+        if outside.is_empty() { Some(ld_sources(p, text, &lit, &outside, &HashSet::new())) } else { None };
+    if let Some(found) = &early {
+        let metadata_text = p.re("_LD_METADATA_RE").need().map_or(true, |n| n.occurs(text, 0, text.len()));
+        if found.is_empty() && !metadata_text {
+            return None;
+        }
+    }
     let mut options: Vec<(PyStr, usize, usize)> = Vec::new(); // the values given a request's option
     let option_keys = p.strs("_LD_OPTION_KEYS");
     let member = p.re("_LD_MEMBER_RE");
@@ -636,38 +682,6 @@ pub fn local_data_sent_at(p: &Pack, text: &[u32]) -> Option<(usize, &'static str
             loops.push((name, m.start_of(4) as usize, m.end_of(4) as usize));
         }
     }
-    // the names that hold a path outside the package
-    let path_expr = p.re("_LD_PATH_EXPR_RE");
-    let own_folder = p.re("_LD_OWN_FOLDER_RE");
-    let fs_root = p.re("_LD_FS_ROOT_RE");
-    let home = p.re("_LD_HOME_RE");
-    let mut outside: HashSet<PyStr> = HashSet::new();
-    for (name, lo, hi) in &assigns[..plain] {
-        let value = pystr::strip(pystr::sub(text, *lo, *hi));
-        if path_expr.match_(value).is_some()
-            && own_folder.search(value).is_none()
-            && (fs_root.match_(value).is_some() || home.search(value).is_some())
-        {
-            outside.insert(name.clone());
-        }
-    }
-    let passes = p.usize("_DD_PASSES");
-    for _ in 0..(if outside.is_empty() { 0 } else { passes }) {
-        let mut grown = false;
-        for (name, lo, hi) in &assigns[..plain] {
-            if !outside.contains(name)
-                && path_expr.match_at(text, *lo as isize, *hi as isize).is_some()
-                && own_folder.search_at(text, *lo as isize, *hi as isize).is_none()
-                && ld_names_in(p, text, *lo, *hi, &outside, &lit).is_some()
-            {
-                outside.insert(name.clone());
-                grown = true;
-            }
-        }
-        if !grown {
-            break;
-        }
-    }
     let mut funcs: Vec<(usize, PyStr)> = Vec::new(); // (start, name)
     let mut params: HashMap<PyStr, Vec<PyStr>> = HashMap::new();
     let param_re = p.re("_LD_PARAM_RE");
@@ -705,7 +719,12 @@ pub fn local_data_sent_at(p: &Pack, text: &[u32]) -> Option<(usize, &'static str
         ))
     };
     let own: HashSet<PyStr> = funcs.iter().map(|(_, n)| n.clone()).collect();
-    let mut sources = ld_sources(p, text, &lit, &outside, &own);
+    // (with no name outside the package, the reads found above: they do not
+    // depend on `own` then)
+    let mut sources = match early {
+        Some(found) => found,
+        None => ld_sources(p, text, &lit, &outside, &own),
+    };
     sources.sort();
     let metadata_re = p.re("_LD_METADATA_RE");
     let metadata_names: Vec<PyStr> = assigns

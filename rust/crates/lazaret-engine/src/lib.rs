@@ -27,6 +27,7 @@ pub mod scanfile;
 pub mod shell;
 pub mod signs;
 pub mod strarr;
+pub mod textgate;
 pub mod token;
 pub mod unicode;
 

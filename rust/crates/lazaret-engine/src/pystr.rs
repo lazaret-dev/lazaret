@@ -85,6 +85,9 @@ pub fn find_str(h: &[u32], needle: &str, start: usize) -> Option<usize> {
         }
         let first = nb[0] as u32;
         let last_start = h.len().checked_sub(nb.len())?;
+        if gated_out_str(h, start, h.len(), needle) {
+            return None;
+        }
         let mut i = start;
         while i <= last_start {
             match h[i..=last_start].iter().position(|&c| c == first) {
@@ -100,6 +103,15 @@ pub fn find_str(h: &[u32], needle: &str, start: usize) -> Option<usize> {
     } else {
         find(h, &u(needle), start)
     }
+}
+
+/// Does the open gate of the text h is part of say the ASCII string
+/// `needle` is not in h[start..end] (textgate.rs)?
+#[inline]
+fn gated_out_str(h: &[u32], start: usize, end: usize, needle: &str) -> bool {
+    needle.len() >= 2
+        && end >= start + crate::textgate::MIN_RANGE
+        && crate::textgate::ask(h, |p| !p.may_hold_str(needle)).unwrap_or(false)
 }
 
 /// h.find(n, start)
@@ -121,6 +133,9 @@ pub fn find_in(h: &[u32], n: &[u32], start: usize, end: usize) -> Option<usize> 
     }
     let first = n[0];
     let last_start = end - n.len();
+    if end >= start + crate::textgate::MIN_RANGE && n.len() >= 2 && crate::textgate::ask(h, |p| !p.may_hold(n)).unwrap_or(false) {
+        return None; // (the text lacks one of its pairs: textgate.rs)
+    }
     let mut i = start;
     while i <= last_start {
         match h[i..=last_start].iter().position(|&c| c == first) {
@@ -421,6 +436,7 @@ mod tests {
 /// in one pass over `h` instead of one per string.
 pub struct Needles {
     list: Vec<Vec<u32>>,
+
     /// for each ASCII character, the strings that start with it
     by_first: Vec<Vec<u32>>,
     /// the strings that start past ASCII
@@ -447,6 +463,11 @@ impl Needles {
     pub fn any_in(&self, h: &[u32]) -> bool {
         if self.has_empty {
             return true;
+        }
+        if h.len() >= crate::textgate::MIN_RANGE
+            && crate::textgate::ask(h, |p| self.list.iter().all(|n| !p.may_hold(n))).unwrap_or(false)
+        {
+            return false; // (each string has a pair the text lacks: textgate.rs)
         }
         for (i, &c) in h.iter().enumerate() {
             let cands = if c < 128 { &self.by_first[c as usize] } else { &self.other };

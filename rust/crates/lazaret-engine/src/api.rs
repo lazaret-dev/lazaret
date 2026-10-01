@@ -114,6 +114,14 @@ fn exfil(p: &Pack, text: &[u32]) -> Value {
     Value::Arr(signs::exfil_signs(p, text, host).into_iter().map(|s| at_reason(Some(s))).collect())
 }
 
+/// The calls whose text gets a text gate (textgate.rs).
+const GATED: &[&str] = &[
+    "import_time_risk", "install_script_risk", "spawned_scripts", "decoded_view", "received_code_kind",
+    "runs_received_code", "downloads_and_runs", "decodes_and_runs", "local_data_sent_at", "exfil_signs",
+    "secret_endpoint_at", "credential_sweep_at", "persistence_reasons", "service_reasons", "exec_command_reasons",
+    "dead_drop_at", "signs_view", "hooks_view", "follow_hook", "hook_command_risk", "hook_command_view",
+];
+
 /// Run one call. `budget` in the arguments: the steps of the regex matcher
 /// it may take (crate::budget; the default otherwise).
 pub fn call(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> {
@@ -124,6 +132,10 @@ pub fn call(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
         Some(b) if b > 0 => b as u64,
         _ => crate::budget::DEFAULT_STEPS,
     };
+    // (the text's pairs, read once: its searches ask them, textgate.rs; for
+    // the calls that run many searches over the whole text: reading the
+    // pairs costs a pass over it)
+    let _gate = if GATED.contains(&name) { crate::textgate::open(text) } else { None };
     let out = crate::budget::call_with(steps, || dispatch(name, args, text));
     match out {
         Ok(r) => r,
@@ -606,8 +618,11 @@ fn probe(args: &Value, text: &[u32]) -> Result<Value, CallError> {
     };
     let pos = opt_int(args, "pos").unwrap_or(0) as isize;
     let template = opt_str(args, "template");
+    let gated = matches!(args.get("gate"), Some(Value::Bool(true)));
     let mut out = Vec::new();
     for t in &texts {
+        // ("gate": each text's searches ask a text gate, textgate.rs)
+        let _gate = if gated { crate::textgate::open(t) } else { None };
         let endpos = opt_int(args, "endpos").map(|e| e as isize).unwrap_or(t.len() as isize);
         let mut r = vec![
             ("search", opt_match(rx.search_at(t, pos, endpos))),

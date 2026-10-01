@@ -2736,6 +2736,7 @@ pub fn install_script_risk_with(p: &Pack, text: &[u32], shell: bool, command: bo
     let mut reasons = install_script_risk_of(p, text, shell, command);
     let view = decoded_view(p, text);
     if view != text {
+        let _gate = crate::textgate::open(&view);
         let note = p.text("_DV_NOTE");
         for r in install_script_risk_of(p, &view, shell, command) {
             if !reasons.contains(&r) {
@@ -2889,6 +2890,7 @@ pub fn import_time_risk(p: &Pack, text: &[u32], lang: Option<&str>) -> (Vec<PySt
     let (mut reasons, mut line) = import_time_reading(p, text, lang);
     let view = decoded_view(p, text);
     if view != text {
+        let _gate = crate::textgate::open(&view);
         let (more, at) = import_time_reading(p, &view, lang);
         let note = p.text("_DV_NOTE");
         for r in more {
@@ -2907,6 +2909,7 @@ fn import_time_reading(p: &Pack, text: &[u32], lang: Option<&str>) -> (Vec<PyStr
         if let Some(lang) = lang.filter(|l| *l == "py" || *l == "js") {
             let code = import_code(p, text, lang);
             if code != text {
+                let _gate = crate::textgate::open(&code);
                 return import_time_risk_of(p, &code);
             }
         }

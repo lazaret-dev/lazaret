@@ -284,6 +284,24 @@ impl Regex {
         self.prog.need.as_ref()
     }
 
+    /// (development, `stats`: need scans, characters they read, characters
+    /// lead scans read to no start, and to a start)
+    #[cfg(feature = "stats")]
+    pub fn scanned(&self) -> [u64; 4] {
+        let a = &self.prog.scanned;
+        [0, 1, 2, 3].map(|i| a[i].load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    /// Where a search's match can start (first.rs), for a person.
+    pub fn start_text(&self) -> Option<String> {
+        self.prog.first.as_ref().map(|f| f.describe())
+    }
+
+    /// What every match starts with (literal.rs), for a person.
+    pub fn lead_text(&self) -> Option<String> {
+        self.prog.lead.as_ref().map(|n| n.describe())
+    }
+
     /// What a search needs the text to hold (literal.rs), for a person.
     pub fn need_text(&self) -> Option<String> {
         self.prog.need.as_ref().map(|n| n.describe())

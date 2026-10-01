@@ -79,15 +79,18 @@ def py_probe(rx, texts, pos=0, endpos=None, template=None):
     return {"groups": rx.groups, "results": out}
 
 
-def compare(testcase, src, flags, texts, **kw):
+def compare(testcase, src, flags, texts, gate=False, **kw):
     """Assert that both engines answer alike; returns the number of texts.
     The texts travel as JSON, which reads a high surrogate next to a low one
-    as the character they encode: each is compared as JSON leaves it."""
+    as the character they encode: each is compared as JSON leaves it.
+    `gate`: each text's searches ask a text gate (rust/…/src/textgate.rs)."""
     texts = [json.loads(json.dumps(t)) for t in texts]
     rx = re.compile(src, flag_bits(flags))
     want = py_probe(rx, texts, **kw)
     args = {"pattern": src, "flags": flags, "texts": texts}
     args.update({k: v for k, v in kw.items() if v is not None})
+    if gate:
+        args["gate"] = True
     got = _native.call("pyre.probe", args)
     if got != want:
         testcase.assertNotIn("error", got, f"{src!r}: {got.get('error')}")
@@ -131,6 +134,13 @@ HANDWRITTEN = [
     (r"(?:ab|cd)?ef", ""), (r"ab*cd", ""), (r"a[bc]d", ""), (r"a[bB]D", "i"), (r"(?:ab){2}", ""),
     (r"\b(?:nc|ncat|netcat)\s", ""), (r"x(?:y|)z", ""), (r"ab(?:\w|cd)", ""), (r"(?i)Ab(?:[sS]|c)", ""),
     (r"(a)(?(1)bc|de)fg", ""), (r"\bab\b\w*", "a"), (r"(?>ab|c)d", "") if sys.version_info >= (3, 11) else (r"ab", ""),
+    # where a search tries only where a string every match starts with
+    # starts (pyre/literal.rs), or where the zero-width tests a match makes
+    # before its first character hold (pyre/first.rs)
+    (r"(?<![\w$.])foo\(", ""), (r"(?<=[ab])c", ""), (r"(?<![^\n])x=", ""), (r"(?:(?<![^\n])|[;{]|=>)[ \t]*(\w+)=", ""),
+    (r"\b(?:open|read)\(", ""), (r"(?:\$\(|`)\s*id\b", ""), (r"HTTPS?Connection|requests|\"https\"", ""),
+    (r"(?:Foo|bar)baz", "i"), (r"(?:ab|ǆ)c", "i"), (r"(?=ab)(?:ab|ac)", ""), (r"(?<!x)(?:ab|cd)", ""),
+    (r"^\s*(?:ab|cd)", "m"), (r"n(?:c|cat|etcat)\b", ""), (r"(?:\bx|(?<=\.)y)z", ""), (r"(?<=^)ab|(?<![\w])cd", "m"),
 ]
 if sys.version_info >= (3, 11):                 # atomic groups and possessive repeats
     HANDWRITTEN += [(r"(?>a+)b", ""), (r"a++b", ""), (r"a*+", ""), (r"(?:ab|a)*+c", ""), (r"(?>(a)|b)+", "")]
@@ -143,7 +153,10 @@ HANDWRITTEN_TEXTS = ["", "a", "aa", "ab", "abc", "abab", "aab", "b", "c", "bc", 
                      "  \n\t\n", "'x'", '"y" "z"', "abcdefghijj", "x{2,1a}", "x{", "a{,2}", "ab # c",
                      "ΣΣσς", "12x", "ab x", "y", "aaab", "x\ny", "foobar", "٣٤", "\x1c\x85", "KİSS", "kıss", "ſt", "ST", "NGROK", "PasteBin", "xabcdy", "abcd",
                      "foobarqux", "bazqux", "ef", "cdef", "abbbcd", "acd", "AbD", "abab", "abcfg", "adefg", "abd", "cd", "nc ", "ncat x", "netcat\t",
-                     "net cat", "xz", "xyz", "abx", "abcd", "ABS", "abſ", "aBC"]
+                     "net cat", "xz", "xyz", "abx", "abcd", "ABS", "abſ", "aBC",
+                     "foo(", ".foo(", "$foo(", "afoo(", "x=1\ny=2", ";a=1", "{b=2", "=>c=3", "a==b", "open(",
+                     "reopen(", "$(id)", "` id`", "HTTPSConnection HTTPConnection", "requests", '"https"', "FOOBAZ",
+                     "barBaz", "ǅc", "ǆC", "xab", "yab cd", ".yz", "xz", "ncat\n", "xcd"]
 
 
 @unittest.skipUnless(_native.available(), f"native engine not built ({_native.load_error()})")
@@ -159,6 +172,21 @@ class RegexParityTests(unittest.TestCase):
                 n += compare(self, src, flags, texts)
                 n += compare(self, src, flags, texts[:20], pos=1, endpos=6)
         self.assertGreater(n, 30000)
+
+    def test_every_pack_pattern_with_a_text_gate(self):
+        # the searches of a text read once for its pairs and triples of
+        # characters answer as re does (texts of 256 characters or more get
+        # a gate; the pattern's own words make them hold what it needs)
+        rnd = random.Random(20261001)
+        n = 0
+        for name, src, flags in pack_patterns():
+            with self.subTest(pattern=name):
+                words = corpus.texts_for(src, rnd, count=40)
+                texts = [(" ".join(words[i:i + 8]) + "\n") * 6 for i in range(0, len(words), 8)]
+                texts = [t for t in texts if len(t) >= 256] + [("x = 1\n" + " ".join(words)) * 4 + "q" * 300]
+                n += compare(self, src, flags, texts, gate=True)
+                n += compare(self, src, flags, texts, gate=True, pos=7, endpos=290)
+        self.assertGreater(n, 3000)
 
     def test_handwritten(self):
         rnd = random.Random(7)
