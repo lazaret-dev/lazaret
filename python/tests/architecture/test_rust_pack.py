@@ -84,5 +84,16 @@ class RulePackPortabilityTests(unittest.TestCase):
                                                   f"scripts/make_rust_tables.py")
 
 
+class RuleSetTests(unittest.TestCase):
+    def test_the_pack_names_the_registrys_rule_set(self):
+        """The pack says which rule set it holds (the registry's ENGINE_VERSION,
+        which a verdict records): a bump of ENGINE_VERSION regenerates the pack.
+        0.1.8's bump to 2.14.0 left it at 2.13.0, which only CI's --check saw."""
+        from lazaret.registry.repo import ENGINE_VERSION
+        with open(os.path.join(_support.REPO_ROOT, "rust", "crates", "lazaret-engine", "rules",
+                               "lazaret-rules.json"), encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["rule_set"], ENGINE_VERSION, "rerun scripts/make_rust_tables.py")
+
+
 if __name__ == "__main__":
     unittest.main()
