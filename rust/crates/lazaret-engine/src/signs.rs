@@ -529,6 +529,40 @@ pub fn miner_at(p: &Pack, text: &[u32]) -> isize {
     -1
 }
 
+/// core.wallet_swap_at: (offset, where) of the wallet addresses a script
+/// swaps for its own — patterns of two kinds of address or more, the user's
+/// addresses intercepted (the clipboard read and written, or the page's
+/// requests and its wallet), an address written in the code — else None.
+pub fn wallet_swap_at(p: &Pack, text: &[u32]) -> Option<(usize, PyStr)> {
+    if !any_in(text, p.needles("_WS_NEEDLES")) {
+        return None;
+    }
+    let mut kinds: Vec<usize> = Vec::new();
+    let mut first: Option<usize> = None;
+    for (k, m) in p.re("_WS_PATTERN_RE").finditer(text).enumerate() {
+        if k >= p.usize("_WS_MAX") {
+            break;
+        }
+        if let Some(g) = (1..=5).rev().find(|&g| m.group(g).is_some()) {
+            if !kinds.contains(&g) {
+                kinds.push(g);
+            }
+        }
+        first.get_or_insert(m.start());
+    }
+    if kinds.len() < 2 || p.re("_WS_ADDRESS_RE").search(text).is_none() {
+        return None;
+    }
+    let first = first.unwrap_or(0);
+    if p.re("_WS_HOOK_RE").search(text).is_some() {
+        return Some((first, u("the page's requests and its wallet")));
+    }
+    if p.re("_WS_CLIP_READ_RE").search(text).is_some() && p.re("_WS_CLIP_WRITE_RE").search(text).is_some() {
+        return Some((first, u("the clipboard")));
+    }
+    None
+}
+
 /// core._exfil_signs: (offset, reason) of the exfiltration shapes and a
 /// miner. `host`: where _HOST_INFO_RE matches.
 pub fn exfil_signs(p: &Pack, text: &[u32], host: Option<usize>) -> Vec<(usize, PyStr)> {
@@ -536,6 +570,12 @@ pub fn exfil_signs(p: &Pack, text: &[u32], host: Option<usize>) -> Vec<(usize, P
     let at = miner_at(p, text);
     if at >= 0 {
         signs.push((at as usize, u("runs a cryptocurrency miner (a Monero wallet address)")));
+    }
+    if let Some((at, place)) = wallet_swap_at(p, text) {
+        signs.push((
+            at,
+            cat(&[&u("swaps the cryptocurrency wallet addresses its user copies or sends for its own ("), &place, &u(")")]),
+        ));
     }
     if let Some(endpoint) = crate::flow::secret_endpoint_at(p, text) {
         signs.push(endpoint);

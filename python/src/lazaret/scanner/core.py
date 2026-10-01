@@ -7444,6 +7444,10 @@ def _exfil_signs(text, host):
     at = miner_at(text)
     if at >= 0:
         signs.append((at, "runs a cryptocurrency miner (a Monero wallet address)"))
+    swap = wallet_swap_at(text)
+    if swap is not None:
+        signs.append((swap[0], f"swaps the cryptocurrency wallet addresses its user copies or sends for its own "
+                               f"({swap[1]})"))
     endpoint = secret_endpoint_at(text)
     if endpoint is not None:
         signs.append(endpoint)
@@ -7598,6 +7602,70 @@ def miner_at(text):
     if m and _EXEC_CALL_RE.search(text):
         return m.start()
     return -1
+
+
+# ---------------- Cryptocurrency wallet addresses swapped (0.1.8) ----------------
+# A script that puts its own wallet address in place of the one its user
+# copies, sends or signs for (a clipper; a page script that hooks fetch,
+# XMLHttpRequest or the wallet's provider) shows three parts, all needed:
+#   - patterns of wallet addresses of two kinds or more, written as a regex (a
+#     literal or a string): an Ethereum address (0x and 40 hex digits), base58
+#     (Bitcoin, Litecoin, Tron, Solana …: the alphabet's class), bech32 (bc1,
+#     ltc1, bnb1 … or its alphabet), a Tron address, Bitcoin Cash;
+#   - where the user's addresses pass, intercepted: the clipboard read and
+#     written, or the page's requests and its wallet (fetch or
+#     XMLHttpRequest.prototype replaced, the provider wrapped);
+#   - a wallet address written in the code (not the zero address): its own.
+# A validator has the patterns, a wallet's page has the clipboard, a
+# monitoring SDK wraps fetch: none has all three.
+_WS_PATTERN_RE = re.compile(
+    r"(0x\)?\??\[[^\]\n]{2,24}\](?:\{40\}|\{40,40\}))"
+    r"|(\[[^\]\n]{0,12}(?:A-HJ-NP-Z[^\]\n]{0,12}a-km-z|a-km-z[^\]\n]{0,12}A-HJ-NP-Z)[^\]\n]{0,12}\])"
+    r"|((?:bc1|ltc1|bnb1|tb1|addr1)\)?\??\[|qpzry9x8gf2tvdw0s3jn54khce6mua7l)"
+    r"|(\bT\]?\[A-Za-z1-9\]\{33\})"
+    r"|(bitcoincash:)")
+_WS_NEEDLES = ("{40}", "A-HJ-NP-Z", "a-km-z", "qpzry9x8gf2tvdw0s3jn54khce6mua7l", "bitcoincash:", "{33}")
+_WS_ADDRESS_RE = re.compile(
+    r"""["'`](?:0x(?!0{40})[a-fA-F0-9]{40}|(?:bc1|ltc1|tb1)[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{25,62}"""
+    r"""|bnb1[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{38}|[13LM][a-km-zA-HJ-NP-Z1-9]{25,34}|T[1-9A-HJ-NP-Za-km-z]{33})["'`]""")
+_WS_CLIP_READ_RE = re.compile(
+    r"""\bclipboard\s*\.\s*read(?:Text)?\s*\(|\bexecCommand["'\]\s]*\(\s*["']paste["']"""
+    r"""|\b(?:pyperclip|clipboardy|win32clipboard|xerox|klembord)\s*\.\s*(?:paste|readSync|readText|read"""
+    r"""|GetClipboardData|get)\s*\(|\bclipboard_get\s*\(|\bGetClipboardData\b|\bGet-Clipboard\b|\bpbpaste\b"""
+    r"""|\bxclip\b[^\n"'`]{0,40}\s-o\b|\bxsel\b[^\n"'`]{0,40}\s(?:-o|--output)\b""")
+_WS_CLIP_WRITE_RE = re.compile(
+    r"""\bclipboard\s*\.\s*write(?:Text)?\s*\(|\bexecCommand["'\]\s]*\(\s*["']copy["']"""
+    r"""|\b(?:pyperclip|clipboardy|win32clipboard|xerox|klembord)\s*\.\s*(?:copy|writeSync|writeText|write"""
+    r"""|SetClipboardText|SetClipboardData|set)\s*\(|\bclipboard_append\s*\(|\bSetClipboardData\b|\bSet-Clipboard\b"""
+    r"""|\bpbcopy\b|\bxclip\b|\bxsel\b""")
+_WS_HOOK_RE = re.compile(
+    r"""\bXMLHttpRequest\s*\.\s*prototype\s*\.\s*(?:open|send)\s*=(?!=)"""
+    r"""|(?<![\w$.])(?:(?:window|globalThis|self|global)\s*\.\s*)?fetch\s*=\s*(?:async\b|function\b|\()"""
+    r"""|\bethereum\s*\.\s*(?:request|send|sendAsync|enable)\s*=(?!=)|\bProxy\s*\(\s*(?:window\s*\.\s*)?ethereum\b"""
+    r"""|\bdefineProperty\s*\(\s*window\s*,\s*["']ethereum["']""")
+_WS_MAX = 200                    # wallet address patterns examined per text
+
+
+def wallet_swap_at(text):
+    """(offset, where) of the wallet addresses `text` swaps for its own (see
+    above): where the user's addresses pass — "the clipboard", "the page's
+    requests and its wallet" — else None."""
+    if not any(nd in text for nd in _WS_NEEDLES):
+        return None
+    kinds, first = set(), -1
+    for k, m in enumerate(_WS_PATTERN_RE.finditer(text)):
+        if k >= _WS_MAX:
+            break
+        kinds.add(m.lastindex)
+        if first < 0:
+            first = m.start()
+    if len(kinds) < 2 or _WS_ADDRESS_RE.search(text) is None:
+        return None
+    if _WS_HOOK_RE.search(text) is not None:
+        return first, "the page's requests and its wallet"
+    if _WS_CLIP_READ_RE.search(text) is not None and _WS_CLIP_WRITE_RE.search(text) is not None:
+        return first, "the clipboard"
+    return None
 
 
 def raw_ip_connect(text):
@@ -12350,7 +12418,7 @@ _STRONG_IMPORT_REASONS = (
     "collects files from several credential folders", "sends the machine's user or host name to an address it hides",
     "sends the machine's user or host name in a DNS lookup",
     "sends the machine's user or host name to an address it fetches",
-    "runs a cryptocurrency miner")
+    "runs a cryptocurrency miner", "swaps the cryptocurrency wallet addresses")
 # Endpoints that exist to capture what is sent to them (out-of-band testing,
 # request inspection): no library reports to one
 _CAPTURE_SERVICE_RE = re.compile(

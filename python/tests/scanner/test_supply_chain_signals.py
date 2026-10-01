@@ -317,6 +317,47 @@ class FlowShapesTests(unittest.TestCase):
         self.assertEqual(self.kind(with_client), ("identity", "user or host name"))
 
 
+class WalletSwapTests(unittest.TestCase):
+    """The detection round (0.1.8): a script that puts its own wallet address
+    in place of the one its user copies or sends — patterns of two kinds of
+    address, where the user's addresses pass intercepted (the clipboard read
+    and written, the page's requests and its wallet), an address of its own
+    written in the code. Any two of the three are ordinary code."""
+
+    OWN = "OWN = '0x52908400098527886E0F7030069857D2E4169EE7'\n"
+    PATTERNS = "ETH = r'^0x[a-fA-F0-9]{40}$'\nBTC = r'^[13][a-km-zA-HJ-NP-Z1-9]{25,34}$'\n"
+    CLIP = "import pyperclip\nc = pyperclip.paste()\npyperclip.copy(OWN)\n"
+
+    def test_a_clipper(self):
+        self.assertEqual(core.wallet_swap_at(self.OWN + self.PATTERNS + self.CLIP)[1], "the clipboard")
+        reasons = core.install_script_risk(self.OWN + self.PATTERNS + self.CLIP)
+        self.assertIn("swaps the cryptocurrency wallet addresses its user copies or sends for its own (the clipboard)",
+                      reasons)
+        reasons, _ = core.import_time_risk(self.OWN + self.PATTERNS + self.CLIP, "py")
+        self.assertEqual(core.import_time_severity(reasons), "CRITICAL")
+
+    def test_any_two_parts_are_ordinary(self):
+        self.assertIsNone(core.wallet_swap_at(self.PATTERNS + self.CLIP))           # no address of its own
+        self.assertIsNone(core.wallet_swap_at(self.OWN + self.CLIP))                # no patterns
+        self.assertIsNone(core.wallet_swap_at(self.OWN + self.PATTERNS))            # nothing intercepted
+        self.assertIsNone(core.wallet_swap_at(self.OWN + self.PATTERNS.split("\n")[0] + "\n" + self.CLIP))  # one kind
+        copy_only = self.OWN + self.PATTERNS + "import pyperclip\npyperclip.copy(OWN)\n"
+        self.assertIsNone(core.wallet_swap_at(copy_only))                           # a wallet's "copy address"
+        zero = self.PATTERNS + self.CLIP.replace("OWN", "'0x0000000000000000000000000000000000000000'")
+        self.assertIsNone(core.wallet_swap_at(zero))
+
+    def test_a_page_script_that_hooks_requests(self):
+        js = ("const own = ['0x52908400098527886E0F7030069857D2E4169EE7'];\n"
+              "const pats = { eth: /\\b0x[a-fA-F0-9]{40}\\b/g, btc: /\\b(bc1[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{11,71})\\b/g };\n"
+              "%s\n")
+        for hook in ("const f = fetch;\nfetch = async function (...a) { return f(...a); };",
+                     "XMLHttpRequest.prototype.send = function (b) { return send.call(this, b); };",
+                     "window.ethereum.request = async (args) => orig(args);"):
+            with self.subTest(hook=hook):
+                self.assertEqual(core.wallet_swap_at(js % hook)[1], "the page's requests and its wallet")
+        self.assertIsNone(core.wallet_swap_at(js % "const r = await fetch(url);"))
+
+
 class ImportTimeGradingTests(unittest.TestCase):
     def grade(self, text):
         reasons, line = core.import_time_risk(text)
@@ -543,7 +584,8 @@ class BoundsTests(unittest.TestCase):
     def test_linear_time(self):
         for text in ("powershell " * 50_000, "powershell -e " + "A" * 400_000, "'" * 200_000 + "exec http",
                      "dup2(" * 100_000, "$(whoami)" * 50_000, "iwr " * 100_000 + "| iex",
-                     "from base64 import " + "b64decode as a, " * 20_000):
+                     "from base64 import " + "b64decode as a, " * 20_000,
+                     "/0x[a-f0-9]{40}/ '" + "[a-km-zA-HJ-NP-Z1-9]{25,34} '" * 20_000 + "pyperclip.paste("):
             t0 = time.monotonic()
             core.install_script_risk(text)
             core.import_time_risk(text)

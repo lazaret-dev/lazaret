@@ -14388,6 +14388,9 @@
     },
     {
      "value": "runs a cryptocurrency miner"
+    },
+    {
+     "value": "swaps the cryptocurrency wallet addresses"
     }
    ]
   },
@@ -14881,6 +14884,51 @@
      ]
     }
    }
+  },
+  "_WS_ADDRESS_RE": {
+   "flags": "",
+   "re": "[\"'`](?:0x(?!0{40})[a-fA-F0-9]{40}|(?:bc1|ltc1|tb1)[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{25,62}|bnb1[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{38}|[13LM][a-km-zA-HJ-NP-Z1-9]{25,34}|T[1-9A-HJ-NP-Za-km-z]{33})[\"'`]"
+  },
+  "_WS_CLIP_READ_RE": {
+   "flags": "",
+   "re": "\\bclipboard\\s*\\.\\s*read(?:Text)?\\s*\\(|\\bexecCommand[\"'\\]\\s]*\\(\\s*[\"']paste[\"']|\\b(?:pyperclip|clipboardy|win32clipboard|xerox|klembord)\\s*\\.\\s*(?:paste|readSync|readText|read|GetClipboardData|get)\\s*\\(|\\bclipboard_get\\s*\\(|\\bGetClipboardData\\b|\\bGet-Clipboard\\b|\\bpbpaste\\b|\\bxclip\\b[^\\n\"'`]{0,40}\\s-o\\b|\\bxsel\\b[^\\n\"'`]{0,40}\\s(?:-o|--output)\\b"
+  },
+  "_WS_CLIP_WRITE_RE": {
+   "flags": "",
+   "re": "\\bclipboard\\s*\\.\\s*write(?:Text)?\\s*\\(|\\bexecCommand[\"'\\]\\s]*\\(\\s*[\"']copy[\"']|\\b(?:pyperclip|clipboardy|win32clipboard|xerox|klembord)\\s*\\.\\s*(?:copy|writeSync|writeText|write|SetClipboardText|SetClipboardData|set)\\s*\\(|\\bclipboard_append\\s*\\(|\\bSetClipboardData\\b|\\bSet-Clipboard\\b|\\bpbcopy\\b|\\bxclip\\b|\\bxsel\\b"
+  },
+  "_WS_HOOK_RE": {
+   "flags": "",
+   "re": "\\bXMLHttpRequest\\s*\\.\\s*prototype\\s*\\.\\s*(?:open|send)\\s*=(?!=)|(?<![\\w$.])(?:(?:window|globalThis|self|global)\\s*\\.\\s*)?fetch\\s*=\\s*(?:async\\b|function\\b|\\()|\\bethereum\\s*\\.\\s*(?:request|send|sendAsync|enable)\\s*=(?!=)|\\bProxy\\s*\\(\\s*(?:window\\s*\\.\\s*)?ethereum\\b|\\bdefineProperty\\s*\\(\\s*window\\s*,\\s*[\"']ethereum[\"']"
+  },
+  "_WS_MAX": {
+   "value": 200
+  },
+  "_WS_NEEDLES": {
+   "list": [
+    {
+     "value": "{40}"
+    },
+    {
+     "value": "A-HJ-NP-Z"
+    },
+    {
+     "value": "a-km-z"
+    },
+    {
+     "value": "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
+    },
+    {
+     "value": "bitcoincash:"
+    },
+    {
+     "value": "{33}"
+    }
+   ]
+  },
+  "_WS_PATTERN_RE": {
+   "flags": "",
+   "re": "(0x\\)?\\??\\[[^\\]\\n]{2,24}\\](?:\\{40\\}|\\{40,40\\}))|(\\[[^\\]\\n]{0,12}(?:A-HJ-NP-Z[^\\]\\n]{0,12}a-km-z|a-km-z[^\\]\\n]{0,12}A-HJ-NP-Z)[^\\]\\n]{0,12}\\])|((?:bc1|ltc1|bnb1|tb1|addr1)\\)?\\??\\[|qpzry9x8gf2tvdw0s3jn54khce6mua7l)|(\\bT\\]?\\[A-Za-z1-9\\]\\{33\\})|(bitcoincash:)"
   },
   "_XF_ARROW_ONE_RE": {
    "flags": "",

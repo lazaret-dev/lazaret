@@ -48,7 +48,7 @@ pub const CALLS: &[&str] = &[
     "lex_comment_spans", "logical_text", "hooks_view", "signs_view",
     // 0.1.8: the exfiltration shapes, programs started at login or boot
     "secret_endpoint_at", "credential_sweep_at", "exec_command_reasons", "dns_beacon_at", "miner_at",
-    "raw_ip_connect", "capture_service", "exfil_signs", "service_reasons",
+    "raw_ip_connect", "capture_service", "exfil_signs", "service_reasons", "wallet_swap_at",
     // 0.1.8: a shell text read as a program, and the command lines a script hands a shell
     "sh_reasons", "shell_text", "code_text", "sh_literal_value",
     // 0.1.8: the dead drop
@@ -453,6 +453,7 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
             _ => return Err(CallError::BadArgs("import_code needs lang 'py' or 'js'".into())),
         },
         "miner_at" => Value::Int(signs::miner_at(p, text) as i64),
+        "wallet_swap_at" => at_reason(signs::wallet_swap_at(p, text)),
         "raw_ip_connect" => opt_s(signs::raw_ip_connect(p, text)),
         "capture_service" => opt_s(signs::capture_service(p, text).map(|m| m.group0().to_vec())),
         "exfil_signs" => exfil(p, text),
@@ -571,6 +572,8 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
                 Value::Bool(hooks::hook_is_suspicious(p, text)),
                 Value::Str(signs::import_code(p, text, "js")),
                 Value::Str(signs::import_code(p, text, "py")),
+                // the detection round: wallet addresses swapped
+                at_reason(signs::wallet_swap_at(p, text)),
             ])
         }
         "logical_text" => {

