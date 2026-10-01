@@ -16,6 +16,7 @@ pub mod generated;
 pub mod hooks;
 pub mod json;
 pub mod lexer;
+pub mod linear;
 pub mod normalize;
 pub mod pack;
 pub mod pyre;

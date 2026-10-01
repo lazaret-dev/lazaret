@@ -189,7 +189,7 @@ fn partition_eq(s: &[u32]) -> (&[u32], bool, &[u32]) {
 }
 
 /// core._node_script: (script, preloads, code).
-fn node_script(p: &Pack, args: &[PyStr]) -> (Option<PyStr>, Vec<PyStr>, Option<PyStr>) {
+pub(crate) fn node_script(p: &Pack, args: &[PyStr]) -> (Option<PyStr>, Vec<PyStr>, Option<PyStr>) {
     let (at, preloads, code) = node_script_at(p, args);
     (at.map(|k| args[k].clone()), preloads, code)
 }
@@ -251,7 +251,7 @@ fn node_script_at(p: &Pack, args: &[PyStr]) -> (Option<usize>, Vec<PyStr>, Optio
 }
 
 /// core._interpreter_script: (script, inline code).
-fn interpreter_script(args: &[PyStr]) -> (Option<PyStr>, Option<PyStr>) {
+pub(crate) fn interpreter_script(args: &[PyStr]) -> (Option<PyStr>, Option<PyStr>) {
     let mut i = 0;
     while i < args.len() {
         let a = &args[i];
@@ -610,6 +610,27 @@ pub fn follow_hook(p: &Pack, cmd: &[u32]) -> (Vec<PyStr>, bool) {
 /// The code of each `node -e` in a command, as written (the parity tests' view).
 pub fn node_e_codes(p: &Pack, cmd: &[u32]) -> Vec<PyStr> {
     p.re("_NODE_E_RE").finditer(cmd).map(|m| m.first_group().unwrap_or(&[]).to_vec()).collect()
+}
+
+/// core._hook_is_suspicious: does an install hook's command run a download
+/// or evaluation tool (INSTALL_HOOK_RE)? `node -e` code that only loads a
+/// file of the package (`node -e "try{require('./postinstall')}catch(e){}"`)
+/// does not count. A hint in the finding's message, never evidence.
+pub fn hook_is_suspicious(p: &Pack, cmd: &[u32]) -> bool {
+    let hook = p.re("INSTALL_HOOK_RE");
+    if hook.search(cmd).is_none() {
+        return false;
+    }
+    let local = p.re("_LOCAL_REQUIRE_RE");
+    let danger = p.re("_INLINE_DANGER_RE");
+    let mut remainder = cmd.to_vec();
+    for m in p.re("_NODE_E_RE").finditer(cmd) {
+        let code = m.first_group().unwrap_or(&[]);
+        if local.search(code).is_some() && danger.search(&local.sub(code, &[], 0)).is_none() {
+            remainder = pystr::replace(&remainder, m.group0(), &u(" "));
+        }
+    }
+    hook.search(&remainder).is_some()
 }
 
 /// core.node_candidates

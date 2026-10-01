@@ -55,11 +55,28 @@ pub const CALLS: &[&str] = &[
     "dead_drop_at",
     // Phase 2: scan_file, and what it reads
     "normalize", "scan_file", "file_context",
+    // 0.1.9: what the npm package asks (it runs this engine as WebAssembly)
+    "pack.values", "agent_hijack", "agent_hijack_in_command", "hook_command_risk", "hook_is_suspicious",
+    "import_code", "scan_rules", "hook_command_view", "hex_view", "lookalike_view",
 ];
 
 fn dead_drop(v: Option<(usize, PyStr)>) -> Value {
     match v {
         Some((at, host)) => Value::Arr(vec![Value::Int(at as i64), Value::Str(host)]),
+        None => Value::Null,
+    }
+}
+
+fn agent_hijack(v: Option<(PyStr, PyStr, usize)>) -> Value {
+    match v {
+        Some((agent, flag, line)) => Value::Arr(vec![Value::Str(agent), Value::Str(flag), Value::Int(line as i64)]),
+        None => Value::Null,
+    }
+}
+
+fn agent_in_command(v: Option<(PyStr, PyStr)>) -> Value {
+    match v {
+        Some((agent, flag)) => Value::Arr(vec![Value::Str(agent), Value::Str(flag)]),
         None => Value::Null,
     }
 }
@@ -97,12 +114,17 @@ fn exfil(p: &Pack, text: &[u32]) -> Value {
     Value::Arr(signs::exfil_signs(p, text, host).into_iter().map(|s| at_reason(Some(s))).collect())
 }
 
-/// Run one call.
+/// Run one call. `budget` in the arguments: the steps of the regex matcher
+/// it may take (crate::budget; the default otherwise).
 pub fn call(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> {
     if name == "batch" {
         return batch(args);
     }
-    let out = crate::budget::call(|| dispatch(name, args, text));
+    let steps = match args.get("budget").and_then(|b| b.as_i64()) {
+        Some(b) if b > 0 => b as u64,
+        _ => crate::budget::DEFAULT_STEPS,
+    };
+    let out = crate::budget::call_with(steps, || dispatch(name, args, text));
     match out {
         Ok(r) => r,
         Err(_) => Err(CallError::Exhausted),
@@ -225,6 +247,16 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
             ("rule_set", p.rule_set.as_deref().map(Value::str).unwrap_or(Value::Null)),
             ("values", Value::Int(p.names().len() as i64)),
         ]),
+        "pack.values" => {
+            // core's values by name, as the pack holds them (null for a name it lacks)
+            let names = arg_strs(args, "names");
+            Value::Obj(
+                names
+                    .iter()
+                    .map(|n| (n.clone(), p.raw(&crate::pystr::to_string(n)).cloned().unwrap_or(Value::Null)))
+                    .collect(),
+            )
+        }
         "pyre.escape" => Value::Str(pyre::escape(text)),
         "scan_file" => {
             let flag = |k: &str, d: bool| match args.get(k) {
@@ -236,6 +268,34 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
                 return Err(CallError::BadArgs("project mode is not in the native engine yet".into()));
             }
             Value::Arr(crate::scanfile::scan_file(p, text, lang, flag("jsx", true), &opts))
+        }
+        "scan_rules" => {
+            let flag = |k: &str, d: bool| match args.get(k) {
+                Some(Value::Bool(b)) => *b,
+                _ => d,
+            };
+            Value::Arr(crate::scanfile::scan_rules(p, text, lang, flag("jsx", true), flag("redact", true), flag("neumaier", false)))
+        }
+        "hex_view" => {
+            // the parity tests' view of a line's escapes: the name they hide and its column, the text they hide
+            let name = crate::scanfile::hex_hidden_name(p, text)
+                .map(|(n, col)| Value::Arr(vec![Value::Str(n), Value::Int(col as i64)]))
+                .unwrap_or(Value::Null);
+            Value::Arr(vec![name, opt_s(crate::scanfile::hex_hidden_text(p, text))])
+        }
+        "lookalike_view" => {
+            let words = arg_strs(args, "words");
+            match crate::scanfile::lookalike_view(p, text, crate::filectx::Lang::from(lang), &words) {
+                Some((name, skeleton, sev, other, detail, col)) => Value::Arr(vec![
+                    Value::Str(name),
+                    Value::Str(skeleton),
+                    Value::str(sev),
+                    Value::Bool(other),
+                    Value::Str(detail),
+                    Value::Int(col as i64),
+                ]),
+                None => Value::Null,
+            }
         }
         "file_context" => {
             // the parity tests' view of a file's context: per line
@@ -342,6 +402,41 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
             Value::Int(signs::dns_beacon_at(p, text, host) as i64)
         }
         "dead_drop_at" => dead_drop(signs::dead_drop_at(p, text)),
+        "agent_hijack" => agent_hijack(signs::agent_hijack(p, text)),
+        "agent_hijack_in_command" => agent_in_command(signs::agent_hijack_in_command(p, text)),
+        "hook_command_risk" => {
+            let kept = matches!(args.get("output_kept"), Some(Value::Bool(true)));
+            strs(&crate::shell::hook_command_risk(p, text, kept))
+        }
+        "hook_is_suspicious" => Value::Bool(hooks::hook_is_suspicious(p, text)),
+        "hook_command_view" => {
+            // the parity tests' view of a hook command: its reasons (output
+            // thrown away, then kept), its simple commands, its inline code
+            let commands = crate::shell::sh_parse(p, text)
+                .into_iter()
+                .map(|c| {
+                    Value::Arr(vec![
+                        strs(&c.words),
+                        Value::Arr(c.subs.iter().map(|s| strs(s)).collect()),
+                        Value::Arr(c.redirs.iter().map(|(a, b)| strs(&[a.clone(), b.clone()])).collect()),
+                        Value::Bool(c.pipe_in),
+                        Value::Bool(c.pipe_out),
+                        Value::str(c.after),
+                    ])
+                })
+                .collect();
+            let mut walk = crate::shell::HookWalk::new();
+            Value::Arr(vec![
+                strs(&crate::shell::hook_command_risk(p, text, false)),
+                strs(&crate::shell::hook_command_risk(p, text, true)),
+                Value::Arr(commands),
+                strs(&crate::shell::hook_inline_code(p, text, &mut walk, 0)),
+            ])
+        }
+        "import_code" => match lang {
+            Some(l @ ("py" | "js")) => Value::Str(signs::import_code(p, text, l)),
+            _ => return Err(CallError::BadArgs("import_code needs lang 'py' or 'js'".into())),
+        },
         "miner_at" => Value::Int(signs::miner_at(p, text) as i64),
         "raw_ip_connect" => opt_s(signs::raw_ip_connect(p, text)),
         "capture_service" => opt_s(signs::capture_service(p, text).map(|m| m.group0().to_vec())),
@@ -455,6 +550,12 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
                 sh_reasons(p, text),
                 Value::Bool(crate::shell::shell_text(p, text)),
                 Value::Bool(crate::shell::code_text(p, text)),
+                // 0.1.9: what the npm package asks besides
+                agent_hijack(signs::agent_hijack(p, text)),
+                agent_in_command(signs::agent_hijack_in_command(p, text)),
+                Value::Bool(hooks::hook_is_suspicious(p, text)),
+                Value::Str(signs::import_code(p, text, "js")),
+                Value::Str(signs::import_code(p, text, "py")),
             ])
         }
         "logical_text" => {

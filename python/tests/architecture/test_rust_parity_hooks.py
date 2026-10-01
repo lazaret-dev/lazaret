@@ -1,16 +1,19 @@
 """Engine parity for following install hooks and the install-script and
 import-time tests: the Rust engine (crates/lazaret-engine: hooks.rs,
 signs.rs, received.rs, lexer.rs) against lazaret.scanner.core, on the hooks
-parity corpus (hooks_corpus.py: ~29,800 hand-written and seeded cases, the
-same the npm engine is held to), every field of core_view compared case by
-case: shlex's tokens, _hook_tokens, follow_hook, install_script_risk,
-import_time_risk (as written, and read as Python and as JavaScript),
-node_candidates, the `node -e` codes, shebang_lang, self_publish_at,
-runs_dll, join_string_pieces, decoded_view and spawned_scripts.
+parity corpus (hooks_corpus.py: ~44,400 hand-written and seeded cases),
+every field of core_view compared case by case: shlex's tokens,
+_hook_tokens, follow_hook, install_script_risk, import_time_risk (as
+written, and read as Python and as JavaScript), node_candidates, the
+`node -e` codes, shebang_lang, self_publish_at, runs_dll,
+join_string_pieces, decoded_view and spawned_scripts.
 
+This module reads every other case from the first, and
+test_rust_parity_hooks_b.py the rest, so that each module stays under a
+machine's per-run time limit (core reads the whole corpus in about 35 s).
 The Rust engine runs in a thread while core reads the cases (ctypes lets go
-of the GIL during a call), so the suite takes the slower engine's time.
-Skipped where the native library is not built.
+of the GIL during a call), so each takes the slower engine's time. Skipped
+where the native library is not built.
 """
 import threading
 import unittest
@@ -52,10 +55,11 @@ def mismatches(cases, want, got, limit=20):
 @unittest.skipUnless(_native.available(), f"native engine not built ({_native.load_error()})")
 class RustHookParityTests(unittest.TestCase):
     maxDiff = None
+    PART = 0                       # the half of the corpus read here: cases[PART::2]
 
     @classmethod
     def setUpClass(cls):
-        cls.cases = shard(corpus())
+        cls.cases = shard(corpus())[cls.PART::2]
         box = {}
         worker = threading.Thread(target=rust_views, args=(cls.cases, box))
         worker.start()

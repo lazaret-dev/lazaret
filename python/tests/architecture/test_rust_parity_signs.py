@@ -10,7 +10,9 @@ offscreen_code (as JavaScript and as Python), (0.1.8) the exfiltration
 shapes (secret_endpoint_at, credential_sweep_at, exec_command_reasons …
 _exfil_signs, raw_ip_connect, capture_service) and service_reasons, the DNS
 beacon without a read of the identity and the dead drop, and the text read
-as a shell program (_sh_reasons, _shell_text, _code_text).
+as a shell program (_sh_reasons, _shell_text, _code_text); and (0.1.9,
+for the npm package) agent_hijack, agent_hijack_in_command,
+_hook_is_suspicious and _import_code.
 
 test_rust_parity_hooks.py holds install_script_risk and import_time_risk,
 which read all of these at once; here a difference shows which one.
@@ -34,7 +36,9 @@ FIELDS = ("received_code_kind", "downloads_and_runs", "decodes_and_runs", "power
           # the DNS beacon a shell command sends without another read of the identity, the dead drop
           "dns_beacon_at without host", "dead_drop_at",
           # 0.1.8: the text read as a shell program
-          "_sh_reasons", "_shell_text", "_code_text")
+          "_sh_reasons", "_shell_text", "_code_text",
+          # 0.1.9: what the npm package asks besides (hook_command_risk: test_rust_parity_hook_commands)
+          "agent_hijack", "agent_hijack_in_command", "_hook_is_suspicious", "_import_code js", "_import_code py")
 
 
 def as_json(v):
@@ -57,7 +61,9 @@ def core_view(text):
                     (lambda m: m.group(0) if m else None)(core.capture_service(text)),
                     core._exfil_signs(text, core._HOST_INFO_RE.search(text)), core.service_reasons(text),
                     core.dns_beacon_at(text, False), core.dead_drop_at(text),
-                    core._sh_reasons(text, 0, False, core._HookWalk()), core._shell_text(text), core._code_text(text)])
+                    core._sh_reasons(text, 0, False, core._HookWalk()), core._shell_text(text), core._code_text(text),
+                    core.agent_hijack(text), core.agent_hijack_in_command(text), core._hook_is_suspicious(text),
+                    core._import_code(text, "js"), core._import_code(text, "py")])
 
 
 def rust_views(cases, box):

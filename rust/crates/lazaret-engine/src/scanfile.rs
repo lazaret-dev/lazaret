@@ -9,6 +9,13 @@
 //! char-code strings, base64 blobs, off-screen code and high-entropy
 //! literals; then the file's obfuscator identifiers and self-publishing;
 //! then the decode flow across lines. `findings` makes the issues.
+//!
+//! Project mode (your own files) is here as far as core's `_scan_rules`
+//! goes (`scan_rules`): every pattern rule of the language, with Q-LONGLINE
+//! and SC-PIPE-SHELL in their places on each line, the same families, then
+//! the whole-text rules (`TEXT_RULES`). What core does after that — the SQL
+//! statements without WHERE, the taint and SQL-sink passes, the function
+//! metrics — and the suppression markers and the cap are the caller's.
 
 use crate::filectx::{FileCtx, Lang};
 use crate::findings::{self, Arg, Finding, RuleText, Snippets};
@@ -38,6 +45,8 @@ pub struct Options {
 pub enum Matcher {
     Re(Regex),
     Token(TokenPattern),
+    /// SQL-DYNAMIC's pattern, matched by hand in linear time (crate::linear)
+    SqlDynamic(Regex, crate::linear::SqlDynamic),
 }
 
 impl Matcher {
@@ -45,7 +54,13 @@ impl Matcher {
         if v.get("token").is_some() {
             return Matcher::Token(TokenPattern::from_value(v).expect("a token pattern"));
         }
-        Matcher::Re(compile(v).expect("a rule pattern"))
+        let re = compile(v).expect("a rule pattern");
+        let text = v.get("re").and_then(|t| t.as_str()).unwrap_or(&[]);
+        let flags = v.get("flags").and_then(|f| f.as_string()).unwrap_or_default();
+        if pystr::eq(text, crate::linear::SQL_DYNAMIC_TEXT) && flags == crate::linear::SQL_DYNAMIC_FLAGS {
+            return Matcher::SqlDynamic(re, crate::linear::SqlDynamic::new());
+        }
+        Matcher::Re(re)
     }
 
     /// (start, end) of the first match.
@@ -53,6 +68,10 @@ impl Matcher {
         match self {
             Matcher::Re(r) => r.search(s).map(|m| (m.start(), m.end())),
             Matcher::Token(t) => t.search(s, 0),
+            Matcher::SqlDynamic(r, hand) => hand.find(s).map(|a| {
+                let end = r.match_at(s, a as isize, s.len() as isize).map(|m| m.end()).unwrap_or(a);
+                (a, end)
+            }),
         }
     }
 }
@@ -255,7 +274,7 @@ fn need_of(rx: &Regex) -> Option<Vec<&Need>> {
 impl Matcher {
     fn needs(&self) -> Option<Vec<&Need>> {
         match self {
-            Matcher::Re(r) => need_of(r),
+            Matcher::Re(r) | Matcher::SqlDynamic(r, _) => need_of(r),
             // the other alternatives' strings, or a JWT's "eyJ"
             Matcher::Token(t) => match (t.others().need(), TokenPattern::jwt_start().need()) {
                 (Some(a), Some(b)) => Some(vec![a, b]),
@@ -354,7 +373,7 @@ fn token_has_material(ctx: &FileCtx, rule: &Matcher, line: &[u32], i: usize) -> 
 }
 
 /// core.hex_hidden_text: the readable text hidden in a line's \xNN escapes.
-fn hex_hidden_text(p: &Pack, line: &[u32]) -> Option<PyStr> {
+pub fn hex_hidden_text(p: &Pack, line: &[u32]) -> Option<PyStr> {
     let rx = p.re("_HEX_ESCAPE_RE");
     let codes: Vec<u32> = rx
         .finditer(line)
@@ -426,7 +445,7 @@ fn hidden_name_in(p: &Pack, seg: &[u32], offset: usize) -> Option<(PyStr, usize)
 
 /// core.hex_hidden_name: (name, column) for the first string literal whose
 /// escapes spell part of a dangerous name.
-fn hex_hidden_name(p: &Pack, line: &[u32]) -> Option<(PyStr, usize)> {
+pub fn hex_hidden_name(p: &Pack, line: &[u32]) -> Option<(PyStr, usize)> {
     if !line.contains(&('\\' as u32)) {
         return None;
     }
@@ -475,6 +494,16 @@ struct Lookalike {
 
 fn hex4(c: u32) -> PyStr {
     pystr::u(&format!("U+{:04X}", c))
+}
+
+/// core.lookalike_name for the parity tests: (name, reads as, severity,
+/// another name of the file it reads as, detail, column), `words` the file's
+/// ASCII words.
+pub fn lookalike_view(p: &Pack, code: &[u32], lang: Lang, words: &[PyStr]) -> Option<(PyStr, PyStr, &'static str, bool, PyStr, usize)> {
+    let word_in = |w: &[u32]| words.iter().any(|x| x.as_slice() == w);
+    lookalike_name(p, code, lang, &word_in).map(|f| {
+        (f.name, f.skeleton, if f.critical { "CRITICAL" } else { "MAJOR" }, f.other, f.detail, f.col)
+    })
 }
 
 /// core.lookalike_name, on a line as names_code reads it.
@@ -900,6 +929,47 @@ pub fn scan_file(p: &Pack, text: &[u32], lang_name: Option<&str>, jsx: bool, opt
     findings::cap(p, &snippets, found).iter().map(|f| snippets.issue(f)).collect()
 }
 
+/// core._scan_rules in project mode: the findings of the pattern rules and
+/// the families, in core's order, before the passes that follow them, the
+/// suppression markers and the cap (the caller's: see the module docs).
+pub fn scan_rules(p: &Pack, text: &[u32], lang_name: Option<&str>, jsx: bool, redact: bool, neumaier: bool) -> Vec<Value> {
+    let lang = Lang::from(lang_name);
+    let ctx = FileCtx::new(p, text, lang, jsx);
+    let lines: Vec<&[u32]> = (0..ctx.len()).map(|i| ctx.line(i)).collect();
+    let snippets = Snippets::new(p, lines, redact, neumaier);
+    let opts = Options { dep: false, redact, neumaier };
+    findings_of(&ctx, lang_name, &opts, &snippets).iter().map(|f| snippets.issue(f)).collect()
+}
+
+/// core.TEXT_RULES, read once: (the rule, its languages, its pattern).
+fn text_rules(p: &Pack) -> &[(RuleText, Vec<PyStr>, Option<Regex>)] {
+    p.derived("TEXT_RULES", |v| {
+        v.get("list")
+            .and_then(|l| l.as_arr())
+            .unwrap_or(&[])
+            .iter()
+            .map(|r| {
+                let langs = field(r, "langs")
+                    .and_then(|l| l.get("list"))
+                    .and_then(|l| l.as_arr())
+                    .unwrap_or(&[])
+                    .iter()
+                    .filter_map(|x| x.get("value").and_then(|s| s.as_str()).map(|s| s.to_vec()))
+                    .collect();
+                (RuleText::from_value(r), langs, field(r, "re").and_then(compile))
+            })
+            .collect::<Vec<_>>()
+    })
+}
+
+/// core._runs_download_through_shell: does this line hand a download piped
+/// into a shell, or substituted into a command line, to an exec call?
+fn runs_download_through_shell(p: &Pack, row: &[u32]) -> bool {
+    (pystr::contains(row, "curl") || pystr::contains(row, "wget"))
+        && p.re("_EXEC_CALL_RE").search(row).is_some()
+        && (signs::pipes_download_to_shell(p, row) || signs::runs_substituted_download(p, row))
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Plain,
@@ -920,9 +990,6 @@ struct Active<'a> {
 pub fn findings_of(ctx: &FileCtx, lang_name: Option<&str>, opts: &Options, snippets: &Snippets) -> Vec<Finding> {
     let p = ctx.p;
     let lang = ctx.lang;
-    if !opts.dep {
-        panic!("project mode is not in the native engine yet");
-    }
     let content = &ctx.content;
     let prefixes = p.strs("DEP_RULE_PREFIXES");
     let comment_rules = p.strs("_COMMENT_LINE_RULES");
@@ -995,10 +1062,18 @@ pub fn findings_of(ctx: &FileCtx, lang_name: Option<&str>, opts: &Options, snipp
         }
     };
     let js_or_py = matches!(lang, Lang::Js | Lang::Py);
+    let project = !opts.dep;
+    let long_line = p.usize("LONG_LINE");
+    let longline = RuleText::of(p, "_LONGLINE_RULE");
+    let pipe_shell = RuleText::of(p, "_PIPE_SHELL_RULE");
     for i in 0..ctx.len() {
         let line = ctx.line(i);
         if line.is_empty() || is_blank(line) {
-            continue; // (project mode: Q-LONGLINE here)
+            // no rule or family matches blanks alone; only the length rule applies
+            if project && line.len() > long_line {
+                out.push(Finding::new(longline.clone(), i + 1, None));
+            }
+            continue;
         }
         let mline = ctx.mline(i);
         let own_text = ctx.mline_differs(i); // its match text is not a part of the file's text
@@ -1040,6 +1115,9 @@ pub fn findings_of(ctx: &FileCtx, lang_name: Option<&str>, opts: &Options, snipp
             }
             out.push(Finding::new(r.text.clone(), i + 1, Some(col)));
         }
+        if project && line.len() > long_line {
+            out.push(Finding::new(longline.clone(), i + 1, None));
+        }
         // obfuscation
         let hidden_text = if gates.may(i, g_hex) { hex_hidden_text(p, line) } else { None };
         if let Some(h) = hidden_text {
@@ -1077,7 +1155,10 @@ pub fn findings_of(ctx: &FileCtx, lang_name: Option<&str>, opts: &Options, snipp
                     out.push(Finding::new(rule, i + 1, Some(f.col)));
                 }
             }
-            // (project mode: SC-PIPE-SHELL here)
+            if project && runs_download_through_shell(p, code) {
+                let col = p.re("_EXEC_CALL_RE").search(code).map(|m| m.start());
+                out.push(Finding::new(pipe_shell.clone(), i + 1, col));
+            }
         }
         if !pystr::is_ascii(line) {
             if let Some((col, run)) = hidden_unicode_run(p, line) {
@@ -1158,7 +1239,42 @@ pub fn findings_of(ctx: &FileCtx, lang_name: Option<&str>, opts: &Options, snipp
             out.push(Finding::new(RuleText::of(p, "_SELF_PUBLISH_RULE"), line, Some(col)));
         }
     }
-    let eval_decode = rules(p).iter().find(|r| is(&r.text.id, "SC-EVAL-DECODE")).map(|r| r.text.clone()).unwrap_or_default();
-    dep_decode_flow(ctx, &eval_decode, &mut out, &decode, &gates, g_decode);
+    if opts.dep {
+        let eval_decode = rules(p).iter().find(|r| is(&r.text.id, "SC-EVAL-DECODE")).map(|r| r.text.clone()).unwrap_or_default();
+        dep_decode_flow(ctx, &eval_decode, &mut out, &decode, &gates, g_decode);
+        return out;
+    }
+    // project mode: the rules matched against the whole text (match text),
+    // reported once per line; the SQL statements without WHERE are core's
+    // linear pass, not theirs
+    let skip = p.strs("_SQL_NOWHERE_SKIP");
+    let mut mcontent: Option<PyStr> = None;
+    let mut starts: Vec<usize> = Vec::new();
+    for (rule, langs, re) in text_rules(p) {
+        let re = match re {
+            Some(r) => r,
+            None => continue,
+        };
+        if !lang_str.as_ref().map(|l| langs.contains(l)).unwrap_or(false) || skip.contains(&rule.id) {
+            continue;
+        }
+        let text = mcontent.get_or_insert_with(|| {
+            let parts: Vec<&[u32]> = (0..ctx.len()).map(|k| ctx.mline(k)).collect();
+            let joined = pystr::join(&['\n' as u32], &parts);
+            starts = std::iter::once(0)
+                .chain(joined.iter().enumerate().filter(|(_, &ch)| ch == '\n' as u32).map(|(k, _)| k + 1))
+                .collect();
+            joined
+        });
+        let mut last: Option<usize> = None;
+        for m in re.finditer(text) {
+            let line_no = starts.partition_point(|&s| s <= m.start());
+            if last == Some(line_no) {
+                continue;
+            }
+            last = Some(line_no);
+            out.push(Finding::new(rule.clone(), line_no, Some(m.start() - starts[line_no - 1])));
+        }
+    }
     out
 }

@@ -1230,6 +1230,43 @@ pub fn service_reasons(p: &Pack, text: &[u32]) -> Vec<PyStr> {
     reasons
 }
 
+// ---------------- code that drives an AI coding agent ----------------
+
+/// A match's text without the quotes around it (Python's `.strip("'\"")`).
+fn unquoted(s: &[u32]) -> PyStr {
+    pystr::strip_chars(s, "'\"").to_vec()
+}
+
+/// core.agent_hijack: (agent, flag, line) for the first line of dependency
+/// code that hands a known AI-agent CLI, with a flag that turns off its
+/// confirmations, to an exec or spawn call. `text` has \n line endings.
+pub fn agent_hijack(p: &Pack, text: &[u32]) -> Option<(PyStr, PyStr, usize)> {
+    let flag_re = p.re("_AGENT_FLAG_RE");
+    flag_re.search(text)?;
+    let exec = p.re("_EXEC_CALL_RE");
+    let bin = p.re("_AGENT_BIN_RE");
+    for (i, row) in pystr::split_char(text, c('\n')).into_iter().enumerate() {
+        if exec.search(row).is_none() {
+            continue;
+        }
+        if let (Some(flag), Some(binm)) = (flag_re.search(row), bin.search(row)) {
+            return Some((unquoted(binm.group0()), flag.group0().to_vec(), i + 1));
+        }
+    }
+    None
+}
+
+/// core.agent_hijack_in_command: (agent, flag) when an install hook's
+/// command launches the agent itself (the shell is the exec call).
+pub fn agent_hijack_in_command(p: &Pack, cmd: &[u32]) -> Option<(PyStr, PyStr)> {
+    let flag = p.re("_AGENT_FLAG_RE").search(cmd);
+    let binm = p.re("_AGENT_BIN_CMD_RE").search(cmd);
+    match (flag, binm) {
+        (Some(flag), Some(binm)) => Some((unquoted(binm.group0()), flag.group0().to_vec())),
+        _ => None,
+    }
+}
+
 // ---------------- code that publishes packages ----------------
 
 /// core.self_publish_at
@@ -2968,8 +3005,9 @@ pub fn blank(text: &[u32], spans: &[(usize, usize)]) -> PyStr {
     out
 }
 
-/// core._import_code
-fn import_code(p: &Pack, text: &[u32], lang: &str) -> PyStr {
+/// core._import_code: `text` with its prose blanked (comments, and in
+/// Python the string statements), unchanged when it reads its own source.
+pub fn import_code(p: &Pack, text: &[u32], lang: &str) -> PyStr {
     if reads_own_source(p, text) {
         return text.to_vec();
     }

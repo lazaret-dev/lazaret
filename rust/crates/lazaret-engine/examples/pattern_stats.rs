@@ -1,6 +1,7 @@
 //! Time spent in each pattern during one engine call over a JSON list of
 //! texts (a development aid):
 //!     cargo run --release --features stats --example pattern_stats -- cases.json install_script_risk
+//! (texts under 5,000 characters; MAX_CHARS=n reads longer ones too)
 #[cfg(feature = "stats")]
 fn main() {
     use lazaret_engine::{api, json, pack, pyre};
@@ -11,7 +12,8 @@ fn main() {
     let text = std::fs::read_to_string(path).expect("readable");
     let cases = json::parse_str(&text).expect("JSON");
     let cases: Vec<Vec<u32>> = cases.as_arr().unwrap().iter().filter_map(|v| v.as_str().map(|s| s.to_vec())).collect();
-    let small: Vec<&Vec<u32>> = cases.iter().filter(|c| c.len() < 5000).collect();
+    let most: usize = std::env::var("MAX_CHARS").ok().and_then(|v| v.parse().ok()).unwrap_or(5000);
+    let small: Vec<&Vec<u32>> = cases.iter().filter(|c| c.len() < most).collect();
     let t = std::time::Instant::now();
     for c in &small {
         let _ = api::call(&name, &args, c);

@@ -1184,3 +1184,71 @@ pub fn exec_command_reasons(p: &Pack, text: &[u32]) -> Vec<PyStr> {
     }
     reasons
 }
+
+// ---------------- an install hook's command, read as a program ----------------
+
+/// core._hook_inline_code: the code a shell text hands node (-e, --eval, -p,
+/// --print, and the other JavaScript runtimes) or python (-c) inline, also
+/// inside `sh -c`, `eval` and `cmd /c` command lines.
+pub fn hook_inline_code(p: &Pack, text: &[u32], walk: &mut HookWalk, depth: usize) -> Vec<PyStr> {
+    let mut out: Vec<PyStr> = Vec::new();
+    if depth > p.usize("_SH_MAX_DEPTH") {
+        return out;
+    }
+    let max_commands = p.usize("HOOK_MAX_COMMANDS");
+    let runtimes = p.map_strs("_JS_RUNTIMES");
+    for cmd in sh_parse(p, text) {
+        if walk.commands >= max_commands {
+            walk.complete = false;
+            break;
+        }
+        walk.commands += 1;
+        let (pi, name, _status) = sh_program(p, &cmd);
+        let pi = match pi {
+            None => continue,
+            Some(x) => x,
+        };
+        let args = &cmd.words[pi + 1..];
+        if in_set(p.strs("_NODE_NAMES"), &name) || runtimes.iter().any(|(k, _)| *k == name) {
+            if let Some(code) = crate::hooks::node_script(p, args).2 {
+                if !code.is_empty() {
+                    out.push(sh_literal(&code));
+                }
+            }
+        } else if p.re("_PYTHON_NAME_RE").match_(&name).is_some() {
+            if let Some(code) = crate::hooks::interpreter_script(args).1 {
+                if !code.is_empty() {
+                    out.push(sh_literal(&code));
+                }
+            }
+        } else if let Some(code) = sh_code(p, &name, args) {
+            if !code.is_empty() {
+                out.extend(hook_inline_code(p, &code, walk, depth + 1));
+            }
+        }
+    }
+    out
+}
+
+/// core.hook_command_risk: the reasons an install hook's command looks
+/// hostile ([] if none), read as a program: the install-script test's
+/// reasons for the command and for the code it hands an interpreter inline,
+/// then what its network commands do. `output_kept`: what the command
+/// prints is used (a binding.gyp command expansion's value).
+pub fn hook_command_risk(p: &Pack, cmd: &[u32], output_kept: bool) -> Vec<PyStr> {
+    if pystr::strip(cmd).is_empty() || cmd.len() > p.usize("HOOK_MAX_CHARS") {
+        return Vec::new();
+    }
+    let mut reasons = crate::signs::install_script_risk_with(p, cmd, false, true);
+    let mut walk = HookWalk::new();
+    for code in hook_inline_code(p, cmd, &mut walk, 0) {
+        for r in crate::signs::install_script_risk_with(p, &code, false, false) {
+            push_new(&mut reasons, r);
+        }
+    }
+    for r in sh_reasons(p, cmd, 0, output_kept, &mut walk) {
+        push_new(&mut reasons, r);
+    }
+    crate::signs::label_sends(p, cmd, &mut reasons);
+    reasons
+}

@@ -4588,6 +4588,22 @@ def scan_file(path, content, lang, dep=False):
     secret rules run (quality/bug rules would be pure noise in vendored code).
     The text is read in Unicode 13.0 on every Python (see _unicode13): a code
     point it leaves unassigned is scanned, and shown, as U+FFFD."""
+    return _scan_source(path, content, lang, dep, _scan_file)
+
+
+def scan_rules(path, content, lang):
+    """The first part of scan_file in project mode (_scan_rules): the
+    findings of the pattern rules and the families on every line, the
+    file-level ones and the whole-text rules, in scan_file's order, before
+    the passes that follow them, the suppression markers and the cap. The
+    native engine's scan_rules answers the same (the npm package runs that
+    engine and adds the rest itself); the parity tests compare the two."""
+    return _scan_source(path, content, lang, False, _scan_rules, finish=False)
+
+
+def _scan_source(path, content, lang, dep, scan, finish=True):
+    """`scan` (_scan_file or _scan_rules) of one file as scan_file reads it,
+    then, when `finish`, without what a marker suppresses and capped."""
     lines = source_lines(_unicode13.pin(content), lang)
     content = "\n".join(lines)
     ctx = _FileCtx(lines, lang, content, time.monotonic() + SCAN_TIME_BUDGET, jsx_reading(path))
@@ -4596,9 +4612,11 @@ def scan_file(path, content, lang, dep=False):
     try:
         issues = []
         try:
-            _scan_file(path, content, lines, lang, dep, ctx, issues)
+            scan(path, content, lines, lang, dep, ctx, issues)
         except _ScanBudgetExceeded:
             issues.append(truncated_issue(path, "scan time budget exceeded"))
+        if not finish:
+            return issues
         return cap_issues(path, [i for i in issues if not ctx.suppressed(i, dep=dep)], lines)
     finally:
         _TLS.ctx = outer
@@ -5163,6 +5181,52 @@ def _hexstr_text_rule(hidden):
 
 
 def _scan_file(path, content, lines, lang, dep, ctx, issues):
+    _scan_rules(path, content, lines, lang, dep, ctx, issues)
+    if dep:
+        return
+    ctx.check_time()
+    if lang == "sql":
+        try:
+            scan_sql_nowhere(path, content, issues, lines)
+        except Exception:
+            pass
+    ctx.check_time()
+    issues.extend(taint_scan(path, lines, lang, ctx))
+    # G12: whole-argument SQL-sink analysis (Python only) — catches
+    # execute(sql % x) with no space after %, .format() on a template variable,
+    # and execute(name) where name was built by interpolation/concatenation.
+    # (Project mode only, like every non-supply-chain rule; it used to run
+    # in dependency mode too, unlike the JS engine.)
+    if lang == "py":
+        try:
+            sql_sink_analyzer(path, lines, issues, ctx)
+        except _ScanBudgetExceeded:
+            raise
+        except Exception:
+            pass
+    ctx.check_time()
+    for fn in extract_functions(lines, lang):
+        if fn["len"] > FN_LEN_LIMIT:
+            issues.append(mk_issue(
+                {"id": "Q-FN-LONG", "name": "Function too long", "type": "SMELL", "sev": "MAJOR",
+                 "msg": f"Function \"{fn['name']}\" is {fn['len']} lines long (limit {FN_LEN_LIMIT}).",
+                 "why": "Long functions do too much and resist testing and reuse.",
+                 "fix": "Extract cohesive blocks into helper functions.",
+                 "ref": "Maintainability"}, path, fn["line"], lines))
+        if fn["cx"] > FN_CX_LIMIT:
+            issues.append(mk_issue(
+                {"id": "Q-FN-CX", "name": "High cyclomatic complexity", "type": "SMELL", "sev": "MAJOR",
+                 "msg": f"Function \"{fn['name']}\" has complexity ~{fn['cx']} (limit {FN_CX_LIMIT}).",
+                 "why": "Highly branched code is hard to reason about and to cover with tests.",
+                 "fix": "Split branches into smaller functions; use early returns or lookup tables.",
+                 "ref": "Maintainability"}, path, fn["line"], lines))
+
+
+def _scan_rules(path, content, lines, lang, dep, ctx, issues):
+    """The pattern rules and the families of every line, then the file-level
+    ones; then the decode flow across lines (dependency mode) or the
+    whole-text rules (project mode). The native engine runs this part in
+    both modes (its scan_file and scan_rules)."""
     cmask, mlines = ctx.cmask, ctx.mlines
     rules = [r for r in RULES if lang in r["langs"]
              and (not dep or r["id"].startswith(DEP_RULE_PREFIXES))]
@@ -5284,42 +5348,6 @@ def _scan_file(path, content, lines, lang, dep, ctx, issues):
                 continue
             last = line_no
             issues.append(mk_issue(r, path, line_no, lines, m.start() - starts[line_no - 1]))
-    ctx.check_time()
-    if lang == "sql":
-        try:
-            scan_sql_nowhere(path, content, issues, lines)
-        except Exception:
-            pass
-    ctx.check_time()
-    issues.extend(taint_scan(path, lines, lang, ctx))
-    # G12: whole-argument SQL-sink analysis (Python only) — catches
-    # execute(sql % x) with no space after %, .format() on a template variable,
-    # and execute(name) where name was built by interpolation/concatenation.
-    # (Project mode only, like every non-supply-chain rule; it used to run
-    # in dependency mode too, unlike the JS engine.)
-    if lang == "py":
-        try:
-            sql_sink_analyzer(path, lines, issues, ctx)
-        except _ScanBudgetExceeded:
-            raise
-        except Exception:
-            pass
-    ctx.check_time()
-    for fn in extract_functions(lines, lang):
-        if fn["len"] > FN_LEN_LIMIT:
-            issues.append(mk_issue(
-                {"id": "Q-FN-LONG", "name": "Function too long", "type": "SMELL", "sev": "MAJOR",
-                 "msg": f"Function \"{fn['name']}\" is {fn['len']} lines long (limit {FN_LEN_LIMIT}).",
-                 "why": "Long functions do too much and resist testing and reuse.",
-                 "fix": "Extract cohesive blocks into helper functions.",
-                 "ref": "Maintainability"}, path, fn["line"], lines))
-        if fn["cx"] > FN_CX_LIMIT:
-            issues.append(mk_issue(
-                {"id": "Q-FN-CX", "name": "High cyclomatic complexity", "type": "SMELL", "sev": "MAJOR",
-                 "msg": f"Function \"{fn['name']}\" has complexity ~{fn['cx']} (limit {FN_CX_LIMIT}).",
-                 "why": "Highly branched code is hard to reason about and to cover with tests.",
-                 "fix": "Split branches into smaller functions; use early returns or lookup tables.",
-                 "ref": "Maintainability"}, path, fn["line"], lines))
 
 DEP_MARKERS = {"node_modules", "site-packages", "bower_components", "vendor",
                "venv", ".venv"}
