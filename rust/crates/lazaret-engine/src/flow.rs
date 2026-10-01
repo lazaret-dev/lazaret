@@ -38,6 +38,29 @@ fn kind_of(s: &[u32]) -> &'static str {
 type Source = (usize, usize, isize, &'static str, PyStr);
 /// What a name holds: (kind, what, through a parameter).
 type Got = (&'static str, PyStr, bool);
+/// Where each followed name was given what it holds.
+type Origins = HashMap<PyStr, Vec<usize>>;
+
+/// core._local_data_sent_at's near: may what `name` holds reach `pos`? In
+/// a long text, only `span` characters from where it was given it.
+fn near(origins: &Origins, long: bool, span: usize, name: &[u32], pos: usize) -> bool {
+    !long || origins.get(name).map_or(false, |os| os.iter().any(|&o| (pos as isize - o as isize).unsigned_abs() <= span))
+}
+
+/// core._local_data_sent_at's bind: `name` holds `got` from `pos` (in a long
+/// text, also from there): is that new?
+fn bind(followed: &mut HashMap<PyStr, Got>, origins: &mut Origins, long: bool, span: usize, name: &PyStr, got: Got, pos: usize) -> bool {
+    if !followed.contains_key(name) {
+        followed.insert(name.clone(), got);
+        origins.insert(name.clone(), vec![pos]);
+        return true;
+    }
+    if long && !near(origins, long, span, name, pos) {
+        origins.get_mut(name).expect("a followed name has origins").push(pos);
+        return true;
+    }
+    false
+}
 
 /// text[lo:lo+span] clipped, and the length core's _call_args gives it.
 fn args_len(text: &[u32], lo: usize, span: usize) -> usize {
@@ -152,8 +175,12 @@ fn ld_object_spans(p: &Pack, text: &[u32], lo: usize, hi: usize) -> Vec<(usize, 
     let key_re = p.re("_LD_KEY_RE");
     let func_value = p.re("_LD_FUNC_VALUE_RE");
     let mut out = Vec::new();
+    let method = p.re("_LD_METHOD_RE");
     for (a, b) in ld_split_args(pystr::sub(text, lo + 1, close)) {
         let part = pystr::sub(text, lo + 1 + a, lo + 1 + b);
+        if method.match_(part).is_some() {
+            continue; // a method: code, not data
+        }
         match key_re.match_(part) {
             Some(key) => {
                 if func_value.match_at(part, key.end() as isize, part.len() as isize).is_some() {
@@ -168,13 +195,40 @@ fn ld_object_spans(p: &Pack, text: &[u32], lo: usize, hi: usize) -> Vec<(usize, 
     out
 }
 
-/// core._ld_value_spans: an object literal's values, else the value whole.
+/// core._ld_value_spans: an object literal's values, else the value whole
+/// but the bodies of the methods of the object literals in it.
 fn ld_value_spans(p: &Pack, text: &[u32], lo: usize, hi: usize) -> Vec<(usize, usize, bool)> {
     let stripped = pystr::lstrip(pystr::sub(text, lo, hi));
     if pystr::starts_with(stripped, "{") {
         return ld_object_spans(p, text, hi - stripped.len(), hi);
     }
-    vec![(lo, hi, false)]
+    let mut out = Vec::new();
+    let mut pos = lo;
+    for m in p.re("_LD_METHOD_IN_RE").finditer_at(text, lo as isize, hi as isize) {
+        if m.start() < pos {
+            continue;
+        }
+        let body = m.end() + call_args_len(pystr::sub(text, m.end(), hi)) + 1; // (after the '}' that closes it)
+        out.push((pos, m.end(), false));
+        pos = body.min(hi);
+    }
+    out.push((pos, hi, false));
+    out
+}
+
+/// core._ld_key: the name data is followed in for `name` (ending at
+/// text[end]): itself, a receiver's member (`this.x`), or None (a keyword,
+/// a module's exports or the runtime's objects, a computed member).
+fn ld_key(p: &Pack, text: &[u32], name: &[u32], end: usize) -> Option<PyStr> {
+    if in_set(p.strs("_LD_NOT_NAMES"), name) || in_set(p.strs("_LD_NOT_RECEIVERS"), name) {
+        return None;
+    }
+    if !in_set(p.strs("_LD_RECEIVERS"), name) {
+        return Some(name.to_vec());
+    }
+    let m = p.re("_LD_FIRST_MEMBER_RE").match_at(text, end as isize, text.len() as isize)?;
+    let member = m.group(1).filter(|g| !g.is_empty()).or_else(|| m.group(2)).unwrap_or(&[]);
+    Some(pystr::concat(&[name, &u("."), member]))
 }
 
 /// core._ld_arg_spans: a call's arguments text[lo:hi], each an address or data.
@@ -556,13 +610,14 @@ pub fn local_data_sent_at(p: &Pack, text: &[u32]) -> Option<(usize, &'static str
     let max_calls = p.usize("_DD_MAX_CALLS");
     let span = p.usize("_DD_ARG_SPAN");
     let func_value = p.re("_LD_FUNC_VALUE_RE");
+    let not_names = p.strs("_LD_NOT_NAMES");
     let mut assigns: Vec<(PyStr, usize, usize)> = Vec::new(); // (name, start, end) of what is assigned
     let mut arrows: Vec<(PyStr, usize, usize)> = Vec::new(); // what an arrow or a lambda returns
     for (k, m) in p.re("_DD_ASSIGN_RE").finditer(text).enumerate() {
         if k >= max_assigns {
             break;
         }
-        if !lit.at(m.start_of(1) as usize) {
+        if !lit.at(m.start_of(1) as usize) && !in_set(not_names, m.group(1).unwrap_or(&[])) {
             let v = m.start_of(2) as usize;
             let end = ld_statement_end(p, text, v);
             let name = m.group(1).unwrap_or(&[]).to_vec();
@@ -574,18 +629,43 @@ pub fn local_data_sent_at(p: &Pack, text: &[u32]) -> Option<(usize, &'static str
         }
     }
     let destruct_name = p.re("_DD_DESTRUCT_NAME_RE");
-    for (k, m) in p.re("_DD_DESTRUCT_RE").finditer(text).enumerate() {
-        if k >= max_assigns {
-            break;
-        }
-        if lit.at(m.start()) {
-            continue;
-        }
-        let v = m.start_of(2) as usize;
-        let end = ld_statement_end(p, text, v);
-        for part in pystr::split_char(m.group(1).unwrap_or(&[]), c(',')) {
-            if let Some(name) = destruct_name.search(pystr::strip(part)) {
-                assigns.push((name.group(1).unwrap_or(&[]).to_vec(), v, end));
+    for (array, pattern) in [(false, p.re("_DD_DESTRUCT_RE")), (true, p.re("_LD_DESTRUCT_ARRAY_RE"))] {
+        // `{a, b: c} = …`, `[a, , b] = …`
+        for (k, m) in pattern.finditer(text).enumerate() {
+            if k >= max_assigns {
+                break;
+            }
+            if lit.at(m.start()) {
+                continue;
+            }
+            let v = m.start_of(2) as usize;
+            let end = ld_statement_end(p, text, v);
+            // `[a, b] = [x, y]`: a is x, b is y
+            let mut items: Option<Vec<(usize, usize)>> = None;
+            if array {
+                let value = pystr::sub(text, v, end);
+                let stripped = pystr::lstrip(value);
+                if pystr::starts_with(stripped, "[") {
+                    let at = v + value.len() - stripped.len() + 1;
+                    let inner = pystr::sub(text, at, at + call_args_len(pystr::sub(text, at, end)));
+                    items = Some(ld_split_args(inner).into_iter().map(|(a, b)| (at + a, at + b)).collect());
+                }
+            }
+            for (n, part) in pystr::split_char(m.group(1).unwrap_or(&[]), c(',')).into_iter().enumerate() {
+                let name = match destruct_name.search(pystr::strip(part)) {
+                    Some(name) => name.group(1).unwrap_or(&[]).to_vec(),
+                    None => continue,
+                };
+                if in_set(not_names, &name) {
+                    continue;
+                }
+                let rest = pystr::starts_with(pystr::strip(part), "...");
+                match &items {
+                    None => assigns.push((name, v, end)),
+                    Some(items) if n < items.len() && !rest => assigns.push((name, items[n].0, items[n].1)),
+                    Some(items) if rest => assigns.push((name, if n < items.len() { items[n].0 } else { end }, end)),
+                    Some(_) => {}
+                }
             }
         }
     }
@@ -646,6 +726,10 @@ pub fn local_data_sent_at(p: &Pack, text: &[u32]) -> Option<(usize, &'static str
         if lit.at(m.start_of(1) as usize) {
             continue;
         }
+        let name = match ld_key(p, text, m.group(1).unwrap_or(&[]), m.end_of(1) as usize) {
+            Some(name) => name,
+            None => continue,
+        };
         let end = ld_statement_end(p, text, m.end());
         if func_value.match_at(text, m.end() as isize, end as isize).is_some() {
             continue; // (a method: what it returns is its own)
@@ -655,7 +739,6 @@ pub fn local_data_sent_at(p: &Pack, text: &[u32]) -> Option<(usize, &'static str
             let key = mm.group(1).filter(|g| !g.is_empty()).or_else(|| mm.group(2)).unwrap_or(&[]);
             in_set(option_keys, key)
         });
-        let name = m.group(1).unwrap_or(&[]).to_vec();
         if is_option {
             options.push((name, m.end(), end));
         } else {
@@ -667,7 +750,9 @@ pub fn local_data_sent_at(p: &Pack, text: &[u32]) -> Option<(usize, &'static str
             break;
         }
         if !lit.at(m.start_of(1) as usize) {
-            assigns.push((m.group(1).unwrap_or(&[]).to_vec(), m.end(), m.end() + args_len(text, m.end(), span)));
+            if let Some(name) = ld_key(p, text, m.group(1).unwrap_or(&[]), m.end_of(1) as usize) {
+                assigns.push((name, m.end(), m.end() + args_len(text, m.end(), span)));
+            }
         }
     }
     let mut loops: Vec<(PyStr, usize, usize)> = Vec::new();
@@ -676,6 +761,9 @@ pub fn local_data_sent_at(p: &Pack, text: &[u32]) -> Option<(usize, &'static str
             continue;
         }
         let name = m.group(1).filter(|g| !g.is_empty()).or_else(|| m.group(3)).unwrap_or(&[]).to_vec();
+        if in_set(not_names, &name) {
+            continue;
+        }
         if m.group(2).map_or(false, |g| !g.is_empty()) {
             loops.push((name, m.start_of(2) as usize, m.end_of(2) as usize));
         } else {
@@ -684,6 +772,7 @@ pub fn local_data_sent_at(p: &Pack, text: &[u32]) -> Option<(usize, &'static str
     }
     let mut funcs: Vec<(usize, PyStr)> = Vec::new(); // (start, name)
     let mut params: HashMap<PyStr, Vec<PyStr>> = HashMap::new();
+    let mut defined_at: HashMap<PyStr, usize> = HashMap::new(); // where a function is defined
     let param_re = p.re("_LD_PARAM_RE");
     for (k, m) in p.re("_LD_FUNC_RE").finditer(text).enumerate() {
         if k >= max_assigns {
@@ -696,12 +785,13 @@ pub fn local_data_sent_at(p: &Pack, text: &[u32]) -> Option<(usize, &'static str
         for part in pystr::split_char(plist, c(',')) {
             if let Some(pm) = param_re.match_(part) {
                 let pn = pm.group(1).unwrap_or(&[]);
-                if !is(pn, "self") && !is(pn, "cls") {
+                if !is(pn, "self") && !is(pn, "cls") && !in_set(not_names, pn) {
                     names.push(pn.to_vec());
                 }
             }
         }
         if !names.is_empty() && !params.contains_key(&name) && params.len() < max {
+            defined_at.insert(name.clone(), m.start());
             params.insert(name, names);
         }
     }
@@ -727,16 +817,19 @@ pub fn local_data_sent_at(p: &Pack, text: &[u32]) -> Option<(usize, &'static str
     };
     sources.sort();
     let metadata_re = p.re("_LD_METADATA_RE");
-    let metadata_names: Vec<PyStr> = assigns
+    let metadata_names: Vec<(PyStr, usize)> = assigns
         .iter()
         .filter(|(_, lo, hi)| metadata_re.search_at(text, *lo as isize, *hi as isize).is_some())
-        .map(|(n, _, _)| n.clone())
+        .map(|(n, lo, _)| (n.clone(), *lo))
         .collect();
     if sources.is_empty() && metadata_names.is_empty() {
         return None;
     }
     let source_starts: Vec<usize> = sources.iter().map(|s| s.0).collect();
     let mut followed: HashMap<PyStr, Got> = HashMap::new(); // name -> the data it holds
+    let mut origins: Origins = HashMap::new(); // name -> where it was given it
+    let long = text.len() > p.usize("_LD_LONG");
+    let near_span = p.usize("_LD_NEAR");
     let mut called: HashSet<PyStr> = HashSet::new(); // the followed names of functions: their calls hold it
     // the path a read is given, and a program's options: sealed
     let mut spans: Vec<(usize, usize)> = Vec::new();
@@ -780,7 +873,9 @@ pub fn local_data_sent_at(p: &Pack, text: &[u32]) -> Option<(usize, &'static str
     let member_read = p.re("_LD_MEMBER_READ_RE");
     let not_in_addr = |kind: &str| not_in_address.iter().any(|x| is(x, kind));
     // (kind, what, through a parameter) of the first read, or of a followed name, in the spans
-    let read_in = |spans: &[(usize, usize, bool)], loose: bool, followed: &HashMap<PyStr, Got>, called: &HashSet<PyStr>| -> Option<Got> {
+    let receivers = p.strs("_LD_RECEIVERS");
+    let first_member = p.re("_LD_FIRST_MEMBER_RE");
+    let read_in = |spans: &[(usize, usize, bool)], loose: bool, followed: &HashMap<PyStr, Got>, called: &HashSet<PyStr>, origins: &Origins| -> Option<Got> {
         for &(lo, hi, address) in spans {
             let mut k = source_starts.partition_point(|&s| s < lo);
             while k < sources.len() && sources[k].0 < hi {
@@ -792,14 +887,26 @@ pub fn local_data_sent_at(p: &Pack, text: &[u32]) -> Option<(usize, &'static str
             }
             if !followed.is_empty() {
                 for m in ident.finditer_at(text, lo as isize, hi as isize) {
-                    let name = m.group0();
-                    if let Some(got) = followed.get(name) {
-                        if (!address || loose || !not_in_addr(got.0) || got.1 == whole)
+                    let mut name: PyStr = m.group0().to_vec();
+                    let mut end = m.end();
+                    if in_set(receivers, &name) {
+                        // a receiver's member: `this.x`
+                        let member = match first_member.match_at(text, end as isize, text.len() as isize) {
+                            Some(mm) => mm,
+                            None => continue,
+                        };
+                        let key = member.group(1).filter(|g| !g.is_empty()).or_else(|| member.group(2)).unwrap_or(&[]);
+                        name = pystr::concat(&[&name, &u("."), key]);
+                        end = member.end();
+                    }
+                    if let Some(got) = followed.get(&name) {
+                        if near(origins, long, near_span, &name, m.start())
+                            && (!address || loose || !not_in_addr(got.0) || got.1 == whole)
                             && !lit.at(m.start())
                             && !is_sealed(m.start())
-                            && (!called.contains(name) || called_re.match_at(text, m.end() as isize, text.len() as isize).is_some())
-                            && (got.1 != whole || member_read.match_at(text, m.end() as isize, text.len() as isize).is_none())
-                            && !ld_tested(p, text, m.start(), m.end())
+                            && (!called.contains(&name) || called_re.match_at(text, end as isize, text.len() as isize).is_some())
+                            && (got.1 != whole || member_read.match_at(text, end as isize, text.len() as isize).is_none())
+                            && !ld_tested(p, text, m.start(), end)
                         {
                             return Some(got.clone());
                         }
@@ -809,13 +916,13 @@ pub fn local_data_sent_at(p: &Pack, text: &[u32]) -> Option<(usize, &'static str
         }
         None
     };
-    for name in &metadata_names {
-        followed.entry(name.clone()).or_insert(("credentials", u("the instance's metadata"), false));
+    for (name, lo) in &metadata_names {
+        bind(&mut followed, &mut origins, long, near_span, name, ("credentials", u("the instance's metadata"), false), *lo);
     }
     for (name, lo, hi) in &assigns {
-        if !followed.contains_key(name) {
-            if let Some(got) = read_in(&ld_value_spans(p, text, *lo, *hi), false, &followed, &called) {
-                followed.insert(name.clone(), got);
+        if !followed.contains_key(name) || !near(&origins, long, near_span, name, *lo) {
+            if let Some(got) = read_in(&ld_value_spans(p, text, *lo, *hi), false, &followed, &called, &origins) {
+                bind(&mut followed, &mut origins, long, near_span, name, got, *lo);
             }
         }
     }
@@ -835,13 +942,16 @@ pub fn local_data_sent_at(p: &Pack, text: &[u32]) -> Option<(usize, &'static str
         let args = pystr::sub(text, opening, opening + alen);
         for cb in arg_callback.finditer(args) {
             let name = [1usize, 2, 3].iter().find_map(|&g| cb.group(g).filter(|x| !x.is_empty())).unwrap_or(&[]);
-            if !followed.contains_key(name) && !lit.at(opening + cb.start()) {
-                followed.insert(name.to_vec(), (kind, what.clone(), false));
+            if !in_set(not_names, name) && !lit.at(opening + cb.start()) {
+                bind(&mut followed, &mut origins, long, near_span, &name.to_vec(), (kind, what.clone(), false), opening + cb.start());
             }
         }
         let mut pos = opening + alen + 1;
         if let Some(m) = as_re.match_at(text, pos as isize, text.len() as isize) {
-            followed.entry(m.group(1).unwrap_or(&[]).to_vec()).or_insert((kind, what.clone(), false));
+            let name = m.group(1).unwrap_or(&[]);
+            if !in_set(not_names, name) {
+                bind(&mut followed, &mut origins, long, near_span, &name.to_vec(), (kind, what.clone(), false), pos);
+            }
         }
         for _ in 0..then_max {
             let h = match then_head.match_at(text, pos as isize, text.len() as isize) {
@@ -851,7 +961,10 @@ pub fn local_data_sent_at(p: &Pack, text: &[u32]) -> Option<(usize, &'static str
             let tlen = args_len(text, h.end(), span);
             let then_args = pystr::sub(text, h.end(), h.end() + tlen);
             if let Some(param) = dd_param.match_(then_args) {
-                followed.entry(param.group(1).unwrap_or(&[]).to_vec()).or_insert((kind, what.clone(), false));
+                let name = param.group(1).unwrap_or(&[]);
+                if !in_set(not_names, name) {
+                    bind(&mut followed, &mut origins, long, near_span, &name.to_vec(), (kind, what.clone(), false), h.end());
+                }
             }
             pos = h.end() + tlen + 1;
         }
@@ -871,28 +984,34 @@ pub fn local_data_sent_at(p: &Pack, text: &[u32]) -> Option<(usize, &'static str
     // the names given a value composed with a literal
     let quote = p.re("_QUOTE_CHAR_RE");
     let mut composed: HashSet<PyStr> = HashSet::new();
-    let follow = |name: &PyStr, got: Got, lo: usize, hi: usize, followed: &mut HashMap<PyStr, Got>, composed: &mut HashSet<PyStr>| {
-        followed.insert(name.clone(), got);
+    // `name` holds `got`, from text[lo:hi] (`at`: where it is given it instead, a parameter's function): new?
+    let follow = |name: &PyStr, got: Got, lo: usize, hi: usize, at: usize, followed: &mut HashMap<PyStr, Got>, origins: &mut Origins, composed: &mut HashSet<PyStr>| -> bool {
+        if !bind(followed, origins, long, near_span, name, got, at) {
+            return false;
+        }
         if quote.search_at(text, lo as isize, hi as isize).is_some() {
             composed.insert(name.clone());
         }
+        true
     };
     let callback_re = p.re("_DD_CALLBACK_RE");
     for _ in 0..passes {
         let mut grown = false;
         for (name, lo, hi) in assigns.iter().chain(loops.iter()) {
-            if !followed.contains_key(name) {
-                if let Some(got) = read_in(&ld_value_spans(p, text, *lo, *hi), false, &followed, &called) {
-                    follow(name, got, *lo, *hi, &mut followed, &mut composed);
-                    grown = true;
+            if !followed.contains_key(name) || !near(&origins, long, near_span, name, *lo) {
+                if let Some(got) = read_in(&ld_value_spans(p, text, *lo, *hi), false, &followed, &called, &origins) {
+                    if follow(name, got, *lo, *hi, *lo, &mut followed, &mut origins, &mut composed) {
+                        grown = true;
+                    }
                 }
             }
         }
         for (name, lo, hi) in &options {
-            if !followed.contains_key(name) {
-                if let Some(got) = read_in(&[(*lo, *hi, true)], false, &followed, &called) {
-                    follow(name, got, *lo, *hi, &mut followed, &mut composed);
-                    grown = true;
+            if !followed.contains_key(name) || !near(&origins, long, near_span, name, *lo) {
+                if let Some(got) = read_in(&[(*lo, *hi, true)], false, &followed, &called, &origins) {
+                    if follow(name, got, *lo, *hi, *lo, &mut followed, &mut origins, &mut composed) {
+                        grown = true;
+                    }
                 }
             }
         }
@@ -900,21 +1019,26 @@ pub fn local_data_sent_at(p: &Pack, text: &[u32]) -> Option<(usize, &'static str
             if k >= max_calls {
                 break;
             }
-            let obj = m.group(1).unwrap_or(&[]);
+            let on = match ld_key(p, text, m.group(1).unwrap_or(&[]), m.end_of(1) as usize) {
+                Some(on) => on,
+                None => continue,
+            };
             let param = m.group(2).unwrap_or(&[]);
-            if !followed.contains_key(param) && !lit.at(m.start()) {
-                if let Some(got) = followed.get(obj).cloned() {
-                    followed.insert(param.to_vec(), got);
+            if let Some(got) = followed.get(&on).cloned() {
+                if near(&origins, long, near_span, &on, m.start())
+                    && !in_set(not_names, param)
+                    && !lit.at(m.start())
+                    && bind(&mut followed, &mut origins, long, near_span, &param.to_vec(), got, m.start())
+                {
                     grown = true;
                 }
             }
         }
         // (what a function returns from its parameters depends on the call: not followed)
         for (name, lo, hi) in returns.iter().chain(arrows.iter()) {
-            if !followed.contains_key(name) {
-                if let Some(got) = read_in(&ld_value_spans(p, text, *lo, *hi), false, &followed, &called) {
-                    if !got.2 {
-                        follow(name, got, *lo, *hi, &mut followed, &mut composed);
+            if !in_set(not_names, name) && (!followed.contains_key(name) || !near(&origins, long, near_span, name, *lo)) {
+                if let Some(got) = read_in(&ld_value_spans(p, text, *lo, *hi), false, &followed, &called, &origins) {
+                    if !got.2 && follow(name, got, *lo, *hi, *lo, &mut followed, &mut origins, &mut composed) {
                         called.insert(name.clone());
                         grown = true;
                     }
@@ -931,15 +1055,21 @@ pub fn local_data_sent_at(p: &Pack, text: &[u32]) -> Option<(usize, &'static str
                     continue;
                 }
                 let alen = args_len(text, cm.end(), span);
-                let names = match params.get(cm.group(1).unwrap_or(&[])) {
+                let fname = cm.group(1).unwrap_or(&[]);
+                let names = match params.get(fname) {
                     Some(n) => n,
                     None => continue,
                 };
+                let at = defined_at[fname];
                 for (param, lo, hi) in ld_bound(p, text, cm.end(), alen, names) {
-                    if !followed.contains_key(&param) {
-                        if let Some(got) = read_in(&ld_value_spans(p, text, lo, hi), false, &followed, &called) {
-                            follow(&param, (got.0, got.1, true), lo, hi, &mut followed, &mut composed);
-                            grown = true;
+                    if func_value.match_at(text, lo as isize, hi as isize).is_some() {
+                        continue; // (a callback: code run later, not data given)
+                    }
+                    if !followed.contains_key(&param) || !near(&origins, long, near_span, &param, at) {
+                        if let Some(got) = read_in(&ld_value_spans(p, text, lo, hi), false, &followed, &called, &origins) {
+                            if follow(&param, (got.0, got.1, true), lo, hi, at, &mut followed, &mut origins, &mut composed) {
+                                grown = true;
+                            }
                         }
                     }
                 }
@@ -986,12 +1116,12 @@ pub fn local_data_sent_at(p: &Pack, text: &[u32]) -> Option<(usize, &'static str
                 }
             }
             let spans = ld_arg_spans(p, text, s.end(), end, if addresses < 0 { alen + 1 } else { addresses as usize }, process);
-            if let Some(got) = read_in(&spans, false, &followed, &called) {
+            if let Some(got) = read_in(&spans, false, &followed, &called, &origins) {
                 found.push((s.start(), got.0, got.1));
                 return;
             }
             if in_address.is_empty() {
-                if let Some(got) = read_in(&spans, true, &followed, &called) {
+                if let Some(got) = read_in(&spans, true, &followed, &called, &origins) {
                     in_address.push((s.start(), got.0, got.1));
                 }
             }
@@ -1033,7 +1163,7 @@ pub fn local_data_sent_at(p: &Pack, text: &[u32]) -> Option<(usize, &'static str
             4
         };
         let spans = [(m.start_of(g).max(0) as usize, m.end_of(g).max(0) as usize, true)];
-        if let Some(got) = read_in(&spans, false, &followed, &called) {
+        if let Some(got) = read_in(&spans, false, &followed, &called, &origins) {
             found.push((m.start(), got.0, got.1));
             break;
         }
@@ -1051,7 +1181,7 @@ pub fn local_data_sent_at(p: &Pack, text: &[u32]) -> Option<(usize, &'static str
             let close = cm.end() + args_len(text, cm.end(), span);
             if let Some(w) = write_tail.match_at(text, close as isize + 1, text.len() as isize) {
                 let end = w.end() + args_len(text, w.end(), span);
-                if let Some(got) = read_in(&ld_arg_spans(p, text, w.end(), end, 0, false), false, &followed, &called) {
+                if let Some(got) = read_in(&ld_arg_spans(p, text, w.end(), end, 0, false), false, &followed, &called, &origins) {
                     found.push((cm.start(), got.0, got.1));
                 }
             }

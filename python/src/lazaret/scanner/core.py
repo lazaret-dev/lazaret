@@ -8044,7 +8044,15 @@ def dead_drop_at(text):
 #     file's), and so are a program's options: the environment and the
 #     folder a child process is given (`spawn(cmd, args, { env:
 #     __spreadValues({}, process.env) })`) are the program's, and a bundle's
-#     helper that copies them holds no data.
+#     helper that copies them holds no data. A receiver's member is a name
+#     (`this.env`, `self.token`: not the receiver every method shares, nor
+#     a module's exports or the runtime's objects); a keyword is none
+#     (`const [a, b] = [x, y]` gives a x and b y); an object literal's
+#     methods, and a callback a call is given, are code, not data (a
+#     bundle's modules: `require_x = __commonJS({ "x.js"(exports) { … } })`).
+#     In a text longer than _LD_LONG (a bundle, whose modules reuse names),
+#     a name carries the data only _LD_NEAR characters from where it was
+#     given it.
 #   - sent: in the data of a send (a request's, socket's or connection's
 #     write, end, send or request; the arguments after the address of fetch —
 #     bare or the global's, not a cache's `.fetch(key)` — Request, urlopen,
@@ -8176,6 +8184,25 @@ _LD_PARAM_RE = re.compile(r"\s*(?:\.\.\.|\*{1,2})?\s*([A-Za-z_$][\w$]*)")
 _LD_MEMBER_ASSIGN_RE = re.compile(
     r"(?<![\w$.])([A-Za-z_$][\w$]*)((?:\s*\.\s*[A-Za-z_$][\w$]*|\s*\[[^\]\n]{1,200}\]){1,8})[ \t]*\+?=(?![=>])")
 _LD_MEMBER_RE = re.compile(r"""\.\s*([A-Za-z_$][\w$]*)|\[\s*["'`]([^"'`\n]{1,60})["'`]\s*\]""")
+# Words the patterns above can read as a name that name nothing: keywords
+# (`const [a, b] = …` reads as a member assignment of `const`,
+# `.then(function* (x) …)` as a callback's parameter `function`) are never
+# followed. The receivers whose members a script assigns (`this.x = …`,
+# `self.x = …`) hold nothing themselves: the member is followed (`this.x`),
+# not the receiver every method of every class of a bundle shares; a
+# module's exports and the runtime's objects (`module.exports = …`,
+# `process.env.X = …`) are not followed.
+_LD_NOT_NAMES = frozenset({
+    "break", "case", "catch", "class", "const", "continue", "debugger", "default", "delete", "do", "else", "enum",
+    "export", "extends", "false", "finally", "for", "function", "if", "import", "in", "instanceof", "let", "new",
+    "null", "return", "static", "switch", "throw", "true", "try", "typeof", "undefined", "var", "void", "while",
+    "with", "yield", "await", "async", "of", "arguments", "NaN", "Infinity",
+    "and", "as", "assert", "def", "del", "elif", "except", "from", "global", "is", "lambda", "nonlocal", "not",
+    "or", "pass", "raise", "None", "True", "False"})
+_LD_RECEIVERS = frozenset({"this", "self", "cls", "super", "window", "globalThis", "global"})
+_LD_NOT_RECEIVERS = frozenset({"module", "exports", "process", "os", "sys", "document", "navigator", "console"})
+_LD_FIRST_MEMBER_RE = re.compile(r"""\s*(?:\?\.|\.)\s*([A-Za-z_$][\w$]*)(?![\w$])(?!\s*\()|\s*\[\s*["'`]([^"'`\n]{1,60})["'`]\s*\]""")
+_LD_DESTRUCT_ARRAY_RE = re.compile(r"\b(?:const|let|var)\s*\[([^\]\n]{1,200})\]\s*=([^;\n]*)")
 # a value that is a function (its calls give what it returns; an arrow's or a
 # lambda's expression is what it returns)
 _LD_FUNC_VALUE_RE = re.compile(
@@ -8238,6 +8265,8 @@ _LD_METADATA_NEEDLES = ("169.254", "metadata", "Metadata", "100.100.100.200", "f
 _LD_MAX = 200                    # sources, sends, functions and their calls examined per text
 _LD_MAX_CALLS = 10000            # calls examined for a path outside the package
 _LD_STATEMENT_SPAN = 2000        # characters of a statement's value read, over rows
+_LD_LONG = 262144                # a text longer than this (a bundle, whose modules reuse names) …
+_LD_NEAR = 20000                 # … follows a name only this many characters from where it was given data
 _LD_REASONS = {
     "address": "sends the machine's public IP address over the network",
     "environment": "sends environment variables over the network",
@@ -8337,6 +8366,11 @@ _LD_PROCESS_KEYS = frozenset({
     "start_new_session", "user", "group", "umask"})
 _LD_KWARG_RE = re.compile(r"\s*([A-Za-z_]\w*)\s*=(?!=)")
 _LD_KEY_RE = re.compile(r"""\s*(?:["']([^"'\n]{1,60})["']|([A-Za-z_$][\w$]*))\s*:(?!:)""")
+# an object literal's method (`run(x) {`, `"path"(exports) {`, `async *[k]() {`): code, not data
+_LD_METHOD_RE = re.compile(r"""\s*(?:(?:async|get|set|static)\s+)*\*?\s*(?:["'][^"'\n]{1,200}["']|(?!(?:if|for|while"""
+                           r"""|switch|catch|function|with|return)(?![\w$]))[A-Za-z_$][\w$]*|\[[^\]\n]{1,200}\])"""
+                           r"""\s*\([^)\n]{0,300}\)\s*\{""")
+_LD_METHOD_IN_RE = re.compile(r"[{,]" + _LD_METHOD_RE.pattern)
 
 
 def _ld_object_spans(text, lo, hi):
@@ -8346,6 +8380,8 @@ def _ld_object_spans(text, lo, hi):
     out = []
     for a, b in _ld_split_args(text[lo + 1:close]):
         part = text[lo + 1 + a:lo + 1 + b]
+        if _LD_METHOD_RE.match(part) is not None:
+            continue                                # a method: code, not data
         key = _LD_KEY_RE.match(part)
         if key is not None:
             if _LD_FUNC_VALUE_RE.match(part, key.end()) is not None:
@@ -8358,11 +8394,20 @@ def _ld_object_spans(text, lo, hi):
 
 def _ld_value_spans(text, lo, hi):
     """[(start, end, address)] for a value: an object literal's values, else
-    the value whole."""
+    the value whole but the bodies of the methods of the object literals in
+    it (`wrap({ "x.js"(exports) { … } })`: a bundle's module, code)."""
     stripped = text[lo:hi].lstrip()
     if stripped.startswith("{"):
         return _ld_object_spans(text, hi - len(stripped), hi)
-    return [(lo, hi, False)]
+    out, pos = [], lo
+    for m in _LD_METHOD_IN_RE.finditer(text, lo, hi):
+        if m.start() < pos:
+            continue
+        body = m.end() + len(_call_args(text[m.end():hi])) + 1     # (after the '}' that closes it)
+        out.append((pos, m.end(), False))
+        pos = min(body, hi)
+    out.append((pos, hi, False))
+    return out
 
 
 def _ld_arg_spans(text, lo, hi, addresses=0, process=False):
@@ -8611,6 +8656,21 @@ def local_data_sent_at(text):
     return answer
 
 
+def _ld_key(text, name, end):
+    """The name data is followed in for `name` (ending at text[end]): the
+    name itself; a receiver's member (`this.x`, see _LD_RECEIVERS); or None
+    (a keyword, a module's exports or the runtime's objects, a receiver's
+    computed member)."""
+    if name in _LD_NOT_NAMES or name in _LD_NOT_RECEIVERS:
+        return None
+    if name not in _LD_RECEIVERS:
+        return name
+    m = _LD_FIRST_MEMBER_RE.match(text, end)
+    if m is None:
+        return None
+    return name + "." + (m.group(1) or m.group(2))
+
+
 def _local_data_sent_at(text):
     if not any(nd in text for nd in _LD_SEND_NEEDLES) or not any(nd in text for nd in _LD_NEEDLES):
         return None
@@ -8620,7 +8680,7 @@ def _local_data_sent_at(text):
     for k, m in enumerate(_DD_ASSIGN_RE.finditer(text)):
         if k >= _DD_MAX_ASSIGNS:
             break
-        if not in_literal(m.start(1)):
+        if not in_literal(m.start(1)) and m.group(1) not in _LD_NOT_NAMES:
             end = _ld_statement_end(text, m.start(2))
             if _LD_FUNC_VALUE_RE.match(text, m.start(2), end) is None:
                 assigns.append((m.group(1), m.start(2), end))
@@ -8628,16 +8688,30 @@ def _local_data_sent_at(text):
                 body = _LD_ARROW_BODY_RE.match(text, m.start(2), end)
                 if body is not None:
                     arrows.append((m.group(1), body.end(), end))
-    for k, m in enumerate(_DD_DESTRUCT_RE.finditer(text)):
-        if k >= _DD_MAX_ASSIGNS:
-            break
-        if in_literal(m.start()):
-            continue
-        end = _ld_statement_end(text, m.start(2))
-        for part in m.group(1).split(","):
-            name = _DD_DESTRUCT_NAME_RE.search(part.strip())
-            if name is not None:
-                assigns.append((name.group(1), m.start(2), end))
+    for pattern in (_DD_DESTRUCT_RE, _LD_DESTRUCT_ARRAY_RE):    # `{a, b: c} = …`, `[a, , b] = …`
+        for k, m in enumerate(pattern.finditer(text)):
+            if k >= _DD_MAX_ASSIGNS:
+                break
+            if in_literal(m.start()):
+                continue
+            end = _ld_statement_end(text, m.start(2))
+            items = None                            # `[a, b] = [x, y]`: a is x, b is y
+            if pattern is _LD_DESTRUCT_ARRAY_RE:
+                value = text[m.start(2):end]
+                if value.lstrip().startswith("["):
+                    at = m.start(2) + len(value) - len(value.lstrip()) + 1
+                    inner = _call_args(text[at:end])
+                    items = [(at + a, at + b) for a, b in _ld_split_args(inner)]
+            for n, part in enumerate(m.group(1).split(",")):
+                name = _DD_DESTRUCT_NAME_RE.search(part.strip())
+                if name is None or name.group(1) in _LD_NOT_NAMES:
+                    continue
+                if items is None:
+                    assigns.append((name.group(1), m.start(2), end))
+                elif n < len(items) and not part.strip().startswith("..."):
+                    assigns.append((name.group(1), items[n][0], items[n][1]))
+                elif part.strip().startswith("..."):
+                    assigns.append((name.group(1), items[n][0] if n < len(items) else end, end))
     plain = len(assigns)                            # (the assignments of a name itself)
     options = []                                    # the values given a request's option (`opts.headers = …`)
     for k, m in enumerate(_LD_MEMBER_ASSIGN_RE.finditer(text)):
@@ -8645,21 +8719,27 @@ def _local_data_sent_at(text):
             break
         if in_literal(m.start(1)):
             continue
+        name = _ld_key(text, m.group(1), m.end(1))
+        if name is None:
+            continue
         end = _ld_statement_end(text, m.end())
         if _LD_FUNC_VALUE_RE.match(text, m.end(), end) is not None:
             continue                                # (a method: what it returns is its own)
         if any((a or b) in _LD_OPTION_KEYS for a, b in _LD_MEMBER_RE.findall(m.group(2))):
-            options.append((m.group(1), m.end(), end))
+            options.append((name, m.end(), end))
         else:
-            assigns.append((m.group(1), m.end(), end))
+            assigns.append((name, m.end(), end))
     for k, m in enumerate(_LD_COLLECT_RE.finditer(text)):
         if k >= _DD_MAX_ASSIGNS:
             break
         if not in_literal(m.start(1)):
-            assigns.append((m.group(1), m.end(), m.end() + len(_call_args(text[m.end():m.end() + _DD_ARG_SPAN]))))
+            name = _ld_key(text, m.group(1), m.end(1))
+            if name is not None:
+                assigns.append((name, m.end(), m.end() + len(_call_args(text[m.end():m.end() + _DD_ARG_SPAN]))))
     loops = [(m.group(1) or m.group(3), m.start(2) if m.group(2) else m.start(4),
               m.end(2) if m.group(2) else m.end(4))
-             for k, m in zip(range(_DD_MAX_ASSIGNS), _DD_FOR_RE.finditer(text)) if not in_literal(m.start())]
+             for k, m in zip(range(_DD_MAX_ASSIGNS), _DD_FOR_RE.finditer(text))
+             if not in_literal(m.start()) and (m.group(1) or m.group(3)) not in _LD_NOT_NAMES]
     # the names that hold a path outside the package (see above): given one,
     # or a path built on one (a join, a sum, a template)
     outside = set()
@@ -8678,7 +8758,7 @@ def _local_data_sent_at(text):
                 grown = True
         if not grown:
             break
-    funcs, params = [], {}                          # (start, name); name -> [its parameters]
+    funcs, params, defined_at = [], {}, {}          # (start, name); name -> [its parameters], where it is defined
     for k, m in enumerate(_LD_FUNC_RE.finditer(text)):
         if k >= _DD_MAX_ASSIGNS:
             break
@@ -8689,20 +8769,42 @@ def _local_data_sent_at(text):
         names = []
         for part in plist.split(","):
             p = _LD_PARAM_RE.match(part)
-            if p is not None and p.group(1) not in ("self", "cls"):
+            if p is not None and p.group(1) not in ("self", "cls") and p.group(1) not in _LD_NOT_NAMES:
                 names.append(p.group(1))
         if names and name not in params and len(params) < _LD_MAX:
             params[name] = names
+            defined_at[name] = m.start()
     func_starts = [a for a, _ in funcs]
     call_re = (re.compile(_DV_NAME_HEAD + "(" + "|".join(re.escape(n) for n in sorted(params)) + r")\s*\(")
                if params else None)
     sources = sorted(_ld_sources(text, in_literal, outside, {name for _, name in funcs}))
-    metadata_names = [name for name, lo, hi in assigns if _LD_METADATA_RE.search(text, lo, hi) is not None]
+    metadata_names = [(name, lo) for name, lo, hi in assigns if _LD_METADATA_RE.search(text, lo, hi) is not None]
     if not sources and not metadata_names:
         return None
     source_starts = [s[0] for s in sources]
-    followed = {}                                   # name -> (kind, what): the data it holds
+    followed = {}                                   # name -> (kind, what, through a parameter): the data it holds
+    origins = {}                                    # name -> where it was given it
+    long = len(text) > _LD_LONG
     called = set()                                  # the followed names of functions: their calls hold it
+
+    def near(name, pos):
+        """May what `name` holds reach `pos`? In a long text (a bundle, whose
+        modules reuse names: `data`, `cb`, `e`, and are wrapped in calls that
+        hold them: `require_x = __commonJS({…})`), only _LD_NEAR characters
+        from where the name was given it."""
+        return not long or any(abs(pos - o) <= _LD_NEAR for o in origins.get(name, ()))
+
+    def bind(name, got, pos):
+        """`name` holds `got` from `pos` (in a long text, also from there):
+        is that new?"""
+        if name not in followed:
+            followed[name] = got
+            origins[name] = [pos]
+            return True
+        if long and not near(name, pos):
+            origins[name].append(pos)
+            return True
+        return False
     # the path a read is given: what the read gives is the file's, not the
     # path's (a file under a folder named for the user is not the user's name)
     spans = []
@@ -8747,43 +8849,50 @@ def _local_data_sent_at(text):
                 k += 1
             if followed:
                 for m in _IDENT_TOKEN_RE.finditer(text, lo, hi):
-                    got = followed.get(m.group())
-                    if got is not None and (not address or loose or got[0] not in _LD_NOT_IN_ADDRESS
+                    name, end = m.group(), m.end()
+                    if name in _LD_RECEIVERS:       # a receiver's member: `this.x`
+                        member = _LD_FIRST_MEMBER_RE.match(text, end)
+                        if member is None:
+                            continue
+                        name, end = name + "." + (member.group(1) or member.group(2)), member.end()
+                    got = followed.get(name)
+                    if got is not None and near(name, m.start()) \
+                            and (not address or loose or got[0] not in _LD_NOT_IN_ADDRESS
                                             or got[1] == _LD_WHOLE_ENV) \
                             and not in_literal(m.start()) and not is_sealed(m.start()) \
-                            and (m.group() not in called or _LD_CALLED_RE.match(text, m.end()) is not None) \
-                            and (got[1] != _LD_WHOLE_ENV or _LD_MEMBER_READ_RE.match(text, m.end()) is None) \
-                            and not _ld_tested(text, m.start(), m.end()):
+                            and (name not in called or _LD_CALLED_RE.match(text, end) is not None) \
+                            and (got[1] != _LD_WHOLE_ENV or _LD_MEMBER_READ_RE.match(text, end) is None) \
+                            and not _ld_tested(text, m.start(), end):
                         return got
         return None
 
-    for name in metadata_names:
-        followed.setdefault(name, ("credentials", "the instance's metadata", False))
+    for name, lo in metadata_names:
+        bind(name, ("credentials", "the instance's metadata", False), lo)
     for name, lo, hi in assigns:
-        if name not in followed:
+        if name not in followed or not near(name, lo):
             got = read_in(_ld_value_spans(text, lo, hi))
             if got is not None:
-                followed[name] = got
+                bind(name, got, lo)
     for _at, end, opening, kind, what in sources:  # what a read gives: its callback, `with … as`, `.then(…)`
         if opening < 0:
             continue
         args = _call_args(text[opening:opening + _DD_ARG_SPAN])
         for cb in _DD_ARG_CALLBACK_RE.finditer(args):
             name = cb.group(1) or cb.group(2) or cb.group(3)
-            if name not in followed and not in_literal(opening + cb.start()):
-                followed[name] = (kind, what, False)
+            if name not in _LD_NOT_NAMES and not in_literal(opening + cb.start()):
+                bind(name, (kind, what, False), opening + cb.start())
         pos = opening + len(args) + 1
         m = _DD_AS_RE.match(text, pos)
-        if m is not None:
-            followed.setdefault(m.group(1), (kind, what, False))
+        if m is not None and m.group(1) not in _LD_NOT_NAMES:
+            bind(m.group(1), (kind, what, False), pos)
         for _ in range(_DD_THEN_MAX):
             h = _DD_THEN_HEAD_RE.match(text, pos)
             if h is None:
                 break
             then_args = _call_args(text[h.end():h.end() + _DD_ARG_SPAN])
             param = _DD_PARAM_RE.match(then_args)
-            if param is not None:
-                followed.setdefault(param.group(1), (kind, what, False))
+            if param is not None and param.group(1) not in _LD_NOT_NAMES:
+                bind(param.group(1), (kind, what, False), h.end())
             pos = h.end() + len(then_args) + 1
     returns = []                                    # (function, start, end) of what a function returns
     for k, m in enumerate(_DD_RETURN_RE.finditer(text)):
@@ -8797,37 +8906,39 @@ def _local_data_sent_at(text):
     # a DNS lookup of one sends what it holds, a lookup of the machine's own name does not
     composed = set()
 
-    def follow(name, got, lo, hi):
-        followed[name] = got
+    def follow(name, got, lo, hi, at=None):
+        """`name` holds `got`, from text[lo:hi] (`at`: where it is given it
+        instead, a parameter's function): is that new?"""
+        if not bind(name, got, lo if at is None else at):
+            return False
         if _QUOTE_CHAR_RE.search(text, lo, hi) is not None:
             composed.add(name)
+        return True
 
     for _ in range(_DD_PASSES):
         grown = False
         for name, lo, hi in assigns + loops:
-            if name not in followed:
+            if name not in followed or not near(name, lo):
                 got = read_in(_ld_value_spans(text, lo, hi))
-                if got is not None:
-                    follow(name, got, lo, hi)
+                if got is not None and follow(name, got, lo, hi):
                     grown = True
         for name, lo, hi in options:
-            if name not in followed:
+            if name not in followed or not near(name, lo):
                 got = read_in([(lo, hi, True)])
-                if got is not None:
-                    follow(name, got, lo, hi)
+                if got is not None and follow(name, got, lo, hi):
                     grown = True
         for k, m in enumerate(_DD_CALLBACK_RE.finditer(text)):
             if k >= _DD_MAX_CALLS:
                 break
-            if m.group(1) in followed and m.group(2) not in followed and not in_literal(m.start()):
-                followed[m.group(2)] = followed[m.group(1)]
+            on = _ld_key(text, m.group(1), m.end(1))
+            if on in followed and near(on, m.start()) and m.group(2) not in _LD_NOT_NAMES \
+                    and not in_literal(m.start()) and bind(m.group(2), followed[on], m.start()):
                 grown = True
         # (what a function returns from its parameters depends on the call: not followed)
         for name, lo, hi in returns + arrows:
-            if name not in followed:
+            if name not in _LD_NOT_NAMES and (name not in followed or not near(name, lo)):
                 got = read_in(_ld_value_spans(text, lo, hi))
-                if got is not None and not got[2]:
-                    follow(name, got, lo, hi)
+                if got is not None and not got[2] and follow(name, got, lo, hi):
                     called.add(name)
                     grown = True
         if call_re is not None:                     # a function of the script's called with data: its parameters
@@ -8836,12 +8947,14 @@ def _local_data_sent_at(text):
                     break
                 if in_literal(c.start()):
                     continue
+                at = defined_at[c.group(1)]
                 args = _call_args(text[c.end():c.end() + _DD_ARG_SPAN])
                 for param, lo, hi in _ld_bound(text, c.end(), args, params[c.group(1)]):
-                    if param not in followed:
+                    if _LD_FUNC_VALUE_RE.match(text, lo, hi) is not None:
+                        continue                    # (a callback: code run later, not data given)
+                    if param not in followed or not near(param, at):
                         got = read_in(_ld_value_spans(text, lo, hi))
-                        if got is not None:
-                            follow(param, (got[0], got[1], True), lo, hi)
+                        if got is not None and follow(param, (got[0], got[1], True), lo, hi, at):
                             grown = True
         if not grown:
             break

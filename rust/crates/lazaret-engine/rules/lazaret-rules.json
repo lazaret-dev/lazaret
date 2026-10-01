@@ -10587,6 +10587,10 @@
    "flags": "",
    "re": "[fFrRbBuU]{0,2}[\"'`](?:[^\"'`\\n]{0,200}[/\\\\])?\\.(?:env(?:\\.[\\w.-]{1,30})?|npmrc|pypirc|netrc|git-credentials)[\"'`]"
   },
+  "_LD_DESTRUCT_ARRAY_RE": {
+   "flags": "",
+   "re": "\\b(?:const|let|var)\\s*\\[([^\\]\\n]{1,200})\\]\\s*=([^;\\n]*)"
+  },
   "_LD_ENV_ALL_RE": {
    "flags": "",
    "re": "\\bprocess\\s*\\.\\s*env\\b(?!\\s*(?:\\.|\\[|\\?\\.))|\\bos\\s*\\.\\s*environ\\b(?!\\s*(?:\\[|\\.\\s*(?:get|setdefault|pop|update)\\s*\\())|\\bos\\s*\\.\\s*environb\\b"
@@ -10614,6 +10618,10 @@
   "_LD_EXEC_SEND_RE": {
    "flags": "",
    "re": "\\b(?:execSync|exec|spawnSync|spawn|execFileSync|execFile|system|popen|check_output|check_call|call|run|Popen|getoutput)\\s*\\("
+  },
+  "_LD_FIRST_MEMBER_RE": {
+   "flags": "",
+   "re": "\\s*(?:\\?\\.|\\.)\\s*([A-Za-z_$][\\w$]*)(?![\\w$])(?!\\s*\\()|\\s*\\[\\s*[\"'`]([^\"'`\\n]{1,60})[\"'`]\\s*\\]"
   },
   "_LD_FS_ROOT_RE": {
    "flags": "",
@@ -10661,6 +10669,9 @@
   "_LD_KWARG_RE": {
    "flags": "",
    "re": "\\s*([A-Za-z_]\\w*)\\s*=(?!=)"
+  },
+  "_LD_LONG": {
+   "value": 262144
   },
   "_LD_LOOKUP_SEND_RE": {
    "flags": "",
@@ -10717,6 +10728,14 @@
    "flags": "",
    "re": "169\\.254\\.169\\.254|metadata\\.google\\.internal|100\\.100\\.100\\.200|\\bfd00:ec2::254|/computeMetadata/v1|Metadata-Flavor|/latest/meta-data|/metadata/instance|/metadata/identity/oauth2"
   },
+  "_LD_METHOD_IN_RE": {
+   "flags": "",
+   "re": "[{,]\\s*(?:(?:async|get|set|static)\\s+)*\\*?\\s*(?:[\"'][^\"'\\n]{1,200}[\"']|(?!(?:if|for|while|switch|catch|function|with|return)(?![\\w$]))[A-Za-z_$][\\w$]*|\\[[^\\]\\n]{1,200}\\])\\s*\\([^)\\n]{0,300}\\)\\s*\\{"
+  },
+  "_LD_METHOD_RE": {
+   "flags": "",
+   "re": "\\s*(?:(?:async|get|set|static)\\s+)*\\*?\\s*(?:[\"'][^\"'\\n]{1,200}[\"']|(?!(?:if|for|while|switch|catch|function|with|return)(?![\\w$]))[A-Za-z_$][\\w$]*|\\[[^\\]\\n]{1,200}\\])\\s*\\([^)\\n]{0,300}\\)\\s*\\{"
+  },
   "_LD_MODULE_NAMES": {
    "map": {
     "getpass": {
@@ -10769,6 +10788,9 @@
      }
     }
    }
+  },
+  "_LD_NEAR": {
+   "value": 20000
   },
   "_LD_NEEDLES": {
    "list": [
@@ -10908,6 +10930,73 @@
     "environment"
    ]
   },
+  "_LD_NOT_NAMES": {
+   "set": [
+    "False",
+    "Infinity",
+    "NaN",
+    "None",
+    "True",
+    "and",
+    "arguments",
+    "as",
+    "assert",
+    "async",
+    "await",
+    "break",
+    "case",
+    "catch",
+    "class",
+    "const",
+    "continue",
+    "debugger",
+    "def",
+    "default",
+    "del",
+    "delete",
+    "do",
+    "elif",
+    "else",
+    "enum",
+    "except",
+    "export",
+    "extends",
+    "false",
+    "finally",
+    "for",
+    "from",
+    "function",
+    "global",
+    "if",
+    "import",
+    "in",
+    "instanceof",
+    "is",
+    "lambda",
+    "let",
+    "new",
+    "nonlocal",
+    "not",
+    "null",
+    "of",
+    "or",
+    "pass",
+    "raise",
+    "return",
+    "static",
+    "switch",
+    "throw",
+    "true",
+    "try",
+    "typeof",
+    "undefined",
+    "var",
+    "void",
+    "while",
+    "with",
+    "yield"
+   ]
+  },
   "_LD_NOT_READS": {
    "set": [
     "Popen",
@@ -10981,6 +11070,18 @@
     "warn",
     "writeFile",
     "writeFileSync"
+   ]
+  },
+  "_LD_NOT_RECEIVERS": {
+   "set": [
+    "console",
+    "document",
+    "exports",
+    "module",
+    "navigator",
+    "os",
+    "process",
+    "sys"
    ]
   },
   "_LD_OPTIONS_SEND_RE": {
@@ -11132,6 +11233,17 @@
      "value": "sends what local commands report about the machine over the network"
     }
    }
+  },
+  "_LD_RECEIVERS": {
+   "set": [
+    "cls",
+    "global",
+    "globalThis",
+    "self",
+    "super",
+    "this",
+    "window"
+   ]
   },
   "_LD_REQUEST_SEND_RE": {
    "flags": "",

