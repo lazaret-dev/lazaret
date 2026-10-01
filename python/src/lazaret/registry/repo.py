@@ -2437,8 +2437,10 @@ def _always_redacted(fn):
 # most NEW_DEP_LOOKUPS added ones: CRITICAL for one first published less than
 # NEW_DEP_CRITICAL before the release, MAJOR for one under NEW_DEP_RECENT.
 # Not counted: a dependency of the package's own npm scope, or one an npm
-# maintainer of the package also maintains; an optional extra's requirement
-# (PyPI); a git, file or URL dependency. Best effort: a document over the
+# maintainer of the package also maintains; (the detection round) on PyPI
+# one an owner or maintainer of the project also owns or maintains, or its
+# organization owns (the JSON API's "ownership"); an optional extra's
+# requirement (PyPI); a git, file or URL dependency. Best effort: a document over the
 # metadata budget (an established package's) or a registry that does not
 # answer is not a finding, and a release with no dependencies costs no
 # request. LAZARET_NO_DEPENDENCY_HISTORY=1 turns it off (an offline scan).
@@ -2532,7 +2534,7 @@ def _new_dependency_issue(eco, dep, age, previous, owners):
         {"id": "SC-NEW-DEPENDENCY", "name": "A release adds a brand-new dependency", "type": "HOTSPOT", "sev": sev,
          "msg": (f'Adds a dependency on "{dep}", which {previous} did not have: a package first published '
                  f"{_age_text(age)} before this release{by}"
-                 + (", who does not maintain this one." if eco == "npm" else ".")),
+                 + (", who does not maintain this one." if eco == "npm" or owners else ".")),
          "why": ("The @mastra compromise (June 2026) changed no code: each hijacked release gained a dependency on "
                  "easy-day-js, published by another account 19 hours before, which carried the payload. A release "
                  "rarely depends on a package that did not exist a week earlier."),
@@ -2588,9 +2590,20 @@ def _pypi_first_upload(files):
     return min(times) if times else None
 
 
+def _pypi_ownership(doc):
+    """({owner and maintainer usernames}, organization or None) of a PyPI
+    JSON document's "ownership"; empty where it has none."""
+    own = doc.get("ownership") if isinstance(doc, dict) else None
+    if not isinstance(own, dict):
+        return set(), None
+    users = {r.get("user") for r in own.get("roles") or () if isinstance(r, dict) and isinstance(r.get("user"), str)}
+    org = own.get("organization")
+    return users, org if isinstance(org, str) and org else None
+
+
 def pypi_new_dependencies(name, version, info, fetch=None):
-    """-> (previous version, [(dependency, age, [])]) for the requirements a
-    PyPI release adds that are recent (see above)."""
+    """-> (previous version, [(dependency, age, its owners and maintainers)])
+    for the requirements a PyPI release adds that are recent (see above)."""
     fetch = fetch or http_json
     mine = pypi_dependency_names((info or {}).get("requires_dist"))
     if not mine:
@@ -2610,6 +2623,7 @@ def pypi_new_dependencies(name, version, info, fetch=None):
     prev = fetch(f"https://pypi.org/pypi/{_quote_seg(name)}/{_quote_seg(previous)}/json")
     prev_info = prev.get("info") if isinstance(prev, dict) else None
     added = sorted(mine - pypi_dependency_names((prev_info or {}).get("requires_dist")))
+    users, org = _pypi_ownership(doc)
     found = []
     for dep in added:
         if len(found) >= NEW_DEP_LOOKUPS:
@@ -2623,8 +2637,12 @@ def pypi_new_dependencies(name, version, info, fetch=None):
         if not firsts:
             continue
         age = max(when - min(firsts), datetime.timedelta(0))
-        if age < NEW_DEP_RECENT:
-            found.append((dep, age, []))
+        if age >= NEW_DEP_RECENT:
+            continue
+        theirs, their_org = _pypi_ownership(ddoc)
+        if users & theirs or (org is not None and their_org == org):
+            continue                     # the project's own account or organization
+        found.append((dep, age, sorted(theirs)))
     return previous, found
 
 
