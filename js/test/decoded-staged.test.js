@@ -1,4 +1,4 @@
-// 0.1.8 in the npm engine (the native engine since 0.1.9, lib/native.js):
+// 0.1.8 in the npm engine (the native engine's, lib/native.js):
 // names in strings a file decodes as it runs (decodedView), eval of a file's
 // own decoder (SC-EVAL-DECODER), Function.constructor, statements over
 // several rows and environment variables in the received-code detector, and

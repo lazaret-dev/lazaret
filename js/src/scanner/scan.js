@@ -1,6 +1,6 @@
 // scanFile — twin of lazaret.scanner.core.scan_file / _scan_file,
 // implementing the shared semantics (FIX-SPEC items 1, 2, 5, 6, 7, 12, 13, 14).
-// Since 0.1.9 the pattern rules and the supply-chain and credential families
+// Since 0.1.8 the pattern rules and the supply-chain and credential families
 // are the native engine's (../lib/native.js: core.scan_rules in project mode,
 // all of scan_file in dependency mode); this module adds what core does after
 // them in project mode (the SQL statements without WHERE, taint, the SQL-sink

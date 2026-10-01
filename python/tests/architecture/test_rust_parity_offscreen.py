@@ -5,9 +5,9 @@ Python lines: curated lines (the samples it was built from, and prose that
 must not count) and a seeded random corpus built from blank runs around the
 threshold, what may stand before them (code, an open or closed string, a
 comment) and what may follow (code, a declaration, prose, a call that runs
-code). Columns are code points in both. (Until 0.1.9 this held the npm
-engine's JavaScript twin to core.) Skipped where the native library is not
-built.
+code). Columns are code points in both. (Before the npm package ran the
+native engine, this held its JavaScript twin to core.) Skipped where the
+native library is not built.
 
 All text is inert: nothing is executed.
 """

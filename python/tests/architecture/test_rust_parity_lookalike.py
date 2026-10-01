@@ -6,8 +6,8 @@ lines and the seeded random corpus of names of test_js_parity_lookalike.py
 look-alikes, NFKC compatibility forms, the invisible U+200C / U+200D, digits
 and punctuation): the name, what it reads as, the severity, whether another
 name of the file reads so, the detail and the column (code points in both).
-(Until 0.1.9 this held the npm engine's JavaScript twin to core.) Skipped
-where the native library is not built.
+(Before the npm package ran the native engine, this held its JavaScript twin
+to core.) Skipped where the native library is not built.
 """
 import unittest
 

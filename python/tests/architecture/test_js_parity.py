@@ -42,7 +42,7 @@ from tests import _support
 
 NODE = shutil.which("node")
 JS_BIN = os.path.join(_support.REPO_ROOT, "js", "bin", "lazaret.js")
-# The npm package runs the native engine as WebAssembly (0.1.9): a test that
+# The npm package runs the native engine as WebAssembly (0.1.8): a test that
 # scans with it needs that module built (`npm run build` in js/) as well as
 # node; NPM_READY is node's path then, else None.
 NPM_WASM = os.path.join(_support.REPO_ROOT, "js", "native", "lazaret.wasm")

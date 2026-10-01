@@ -55,7 +55,7 @@ pub const CALLS: &[&str] = &[
     "dead_drop_at",
     // Phase 2: scan_file, and what it reads
     "normalize", "scan_file", "file_context",
-    // 0.1.9: what the npm package asks (it runs this engine as WebAssembly)
+    // 0.1.8: what the npm package asks (it runs this engine as WebAssembly)
     "pack.values", "agent_hijack", "agent_hijack_in_command", "hook_command_risk", "hook_is_suspicious",
     "import_code", "scan_rules", "hook_command_view", "hex_view", "lookalike_view",
     // 0.1.8: the cross-file follower, each package on its own budget
@@ -565,7 +565,7 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
                 sh_reasons(p, text),
                 Value::Bool(crate::shell::shell_text(p, text)),
                 Value::Bool(crate::shell::code_text(p, text)),
-                // 0.1.9: what the npm package asks besides
+                // 0.1.8: what the npm package asks besides
                 agent_hijack(signs::agent_hijack(p, text)),
                 agent_in_command(signs::agent_hijack_in_command(p, text)),
                 Value::Bool(hooks::hook_is_suspicious(p, text)),

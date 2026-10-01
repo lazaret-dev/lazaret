@@ -7,105 +7,7 @@ This log starts at 0.1.6; for earlier releases see the git history and tags.
 The format is based on [Keep a Changelog](https://keepachangelog.com); the
 project is pre-1.0, so the 0.x API may still change.
 
-## [Unreleased]
-
-Planned as 0.1.9: the npm package runs Lazaret's native engine, compiled to
-WebAssembly, so a detection lives in Python and Rust, not three times.
-
-### Changed
-- **The npm package runs the native engine, as WebAssembly.** The Rust
-  engine the Python package's platform wheels carry (`rust/`,
-  `docs/RUST_ENGINE.md`) ships in the npm package as `native/lazaret.wasm`
-  (1.8 MB; it imports nothing, and Node's own `WebAssembly` runs it, so the
-  package keeps zero dependencies and needs no native addon). It answers
-  the supply-chain tests — install scripts and the hooks they run,
-  import-time code, received code, the decoded view, spawned scripts,
-  persistence, the exfiltration shapes, a hook's command read as a program,
-  agent hijacking — and `scan_file`: whole in dependency mode, and in
-  project mode its rules part (every pattern rule and family on every line,
-  Q-LONGLINE, SC-PIPE-SHELL, the file-level and whole-text rules), to which
-  the npm package adds the SQL, taint and function passes, the suppression
-  markers and the cap. Same findings: the parity tests hold the engine to
-  the Python engine case by case and the WebAssembly build to the native
-  library byte for byte, and on real trees the CLI before and after reports
-  the same findings in the same order (a `--deps` scan of 1,061 dependency
-  files, a 616-file project, an 11.5 MB bundle). On one core, the project
-  scan takes 4.9 s instead of 5.9 s and the bundle 11.9 s instead of 11.6 s;
-  the `--deps` scan takes 9.2 s instead of 8.1 s, its import-time test being
-  slower in WebAssembly than the JavaScript it replaces (the next item of
-  `docs/RUST_ENGINE.md` §10). `npm run build` makes the module from a
-  checkout (Rust and its `wasm32-unknown-unknown` target; the workspace has
-  no crates to download); release CI builds it with the platform wheels'
-  pinned compiler, runs the npm tests on it, and fails a tarball without it
-  or its notice.
-- **A file that spends the engine's work budget is SC-TRUNCATED** in the npm
-  package (CRITICAL, so it is never cleared: "reading it spent the engine's
-  work budget", or "its scan failed" from a dependency check), as a hostile
-  file is; the Python package's native engine hands such a call to its
-  Python engine instead. No file of the corpora or the benchmark comes near
-  the budget. The npm package's per-file time backstop now bounds only the
-  passes that stay in JavaScript.
-- **The npm CLI refuses to scan without its engine** (a source checkout
-  that has not run `npm run build`): exit 2, naming the missing file, where
-  every file would have been SC-TRUNCATED. `npm pack` and `npm publish` from
-  a checkout check that `native/` holds the engine of the package's version
-  and its notice (`prepack`); nothing runs when the package is installed.
-- **The npm package's notices** are the engine's: `native/NOTICE` is
-  `rust/NOTICE` (the regular expression engine and shell tokenizer
-  translated from CPython, the Unicode 13.0 tables), beside `LICENSE-PYTHON`
-  and `LICENSE-UNICODE`; `NOTICE` points to it. The license expression is
-  unchanged: `Apache-2.0 AND Python-2.0.1 AND Unicode-3.0`.
-
-### Added
-- **The native engine's project-mode rules** (`scan_rules`, phase 2 of
-  `docs/RUST_ENGINE.md` in project mode) and its reference in core
-  (`core.scan_rules`: `scan_file`'s first part, before the passes that
-  follow it, the markers and the cap), held to each other by
-  `test_rust_parity_project.py`. The Python package still runs project mode
-  in Python.
-- **More of core in the engine:** the agent-hijack checks
-  (`agent_hijack`, `agent_hijack_in_command`), a hook's command read as a
-  program (`hook_command_risk`) and what makes a hook suspicious
-  (`hook_is_suspicious`), the import-time code of a JavaScript or Python
-  file (`import_code`), core's values by name (`pack.values`, for what the
-  npm package still reads: limits, the follower's patterns, the S-TOKEN
-  rule), and a work budget per call (`budget`).
-- **SQL-DYNAMIC in linear time.** `re`, and so the engine's port of it, takes
-  quadratic time on a line of many `EXEC("` (14 s for one 120 KB line in
-  Python); the engine matches that pattern by hand in linear time
-  (`linear.rs`), as the npm package's JavaScript did, while the rule pack
-  holds its exact text.
-- **Tests.** `test_wasm_parity.py` and `test_wasm_parity_signs.py` (the
-  WebAssembly build against the native library, call for call, on the hooks
-  corpus, the scan_file corpus and this repository); the comparisons that
-  held the npm package's JavaScript to core now hold the engine to it
-  (`test_rust_parity_hook_commands`, `_hexname`, `_offscreen`,
-  `_lookalike`); the hooks parity reads its corpus (~44,400 cases) in two
-  modules (`test_rust_parity_hooks.py` and `_hooks_b.py`), each well under
-  45 s. Workflow tests check that every module needing the WebAssembly build
-  runs in a job that builds it and every native parity module in each job
-  that builds a library, and the npm pack test that the tarball carries the
-  engine and its notice and nothing else of `native/`. CI's `js` job builds
-  the engine, runs the npm tests and, on Node 24, the CLI-level parity
-  modules; its `rust` job runs the WebAssembly parity.
-
-### Removed
-- **The npm package's JavaScript twins of what the engine answers:**
-  `js/src/lib/hooks.js`, `received.js`, `shellpipe.js` and the synced
-  `received-spec.json`, `js/src/scanner/linear.js`, and the rule loop,
-  families and dependency decode flow of `js/src/scanner/scan.js` (with
-  `scripts/sync-received-spec.py` and `test_js_parity_hooks.py`). The
-  library no longer exports `RULES` and `TEXT_RULES` (the rules live in the
-  engine's rule pack); the supply-chain tests it exports are the engine's.
-
-### Fixed
-- **The rule pack named the previous rule set** (2.13.0, against 0.1.8's
-  2.14.0): 0.1.8's `ENGINE_VERSION` bump didn't regenerate it, so
-  `make_rust_tables.py --check` failed in CI and the engine's `version`
-  reported the old set. Regenerated; `test_rust_pack.py` now checks the
-  pack's rule set against `ENGINE_VERSION` in every suite run.
-
-## [0.1.8] — 2026-09-30
+## [0.1.8] — 2026-10-01
 
 0.1.8 reads malware by what it does. Its last round audited every strong
 detector for whether it names a behaviour or recognizes the samples it was
@@ -143,8 +45,30 @@ The same 3 of the 429 popular packages are SUSPICIOUS (68% of the 516 in
 the 17 @mastra releases (87% with it). Registry engine 2.14.0, so stored and
 cached verdicts are redone.
 
+0.1.8 also runs both packages on the native engine (`docs/RUST_ENGINE.md`):
+the Python package's platform wheels carry it, and the npm package runs it
+compiled to WebAssembly, so a detection lives in Python and Rust instead of
+three times. A final round made scans faster, with the same findings in
+the same order (the last four entries under Changed). On two cores, against
+0.1.8 before that round (the npm package in JavaScript, the Python package
+with the native engine in dependency mode only):
+
+| Two cores; the same findings, in the same order | Before | After |
+| --- | --- | --- |
+| npm CLI, `--deps` over an installed tree (1,155 dependency files) | 7.6 s | 3.5 s (5.1 s on one thread) |
+| npm CLI, a 616-file project | 6.1 s | 4.9 s (5.4 s on one thread) |
+| npm CLI, a tree whose 11.5 MB bundle is most of the scan | 11.8 s | 8.2 s |
+| Python CLI, `--deps` over the same tree | 5.6 s | 2.5 s |
+| Python CLI, the 616-file project | 18.1 s | 14.7 s |
+| Python CLI, BenchmarkPython (1,230 files) | 6.6 s | 5.2 s |
+| The benchmark's 945 registry scans (their scan time) | 547 s | 305 s |
+
+The registry scans give the same verdicts, reasons and findings for every
+package; litellm's takes 10.5 s instead of 16.6 s, playwright-core's 5.8 s
+instead of 10.6 s, next's 8.9 s instead of 10.4 s.
+
 ### Added
-- **An install hook's command is read as a program** (all three engines).
+- **An install hook's command is read as a program** (both engines).
   0.1.7 made a hook CRITICAL when its command merely contained curl, wget,
   eval, base64, `node -e`, `sh -c` or powershell: tokens a hook that fetches
   a platform binary shares, and one written with other tools avoids. They are
@@ -167,7 +91,7 @@ cached verdicts are redone.
   platform, the version and paths in its address. The command lines a script
   hands a shell (`os.system`, `execSync`, a shell string to `subprocess`,
   `sh -c` in an argument list) are read the same way.
-- **Exfiltration is read as a data flow** (all three engines). What an
+- **Exfiltration is read as a data flow** (both engines). What an
   install script sends decides, not where it sends it (a list of
   exfiltration services does not know a Feishu bot, a new tunnel service or
   the attacker's own server). Data read from the machine is followed to a
@@ -196,7 +120,7 @@ cached verdicts are redone.
   for any service: a credential in the URL's path (20 to 200 characters
   mixing upper case, lower case and digits), not only Telegram's, Discord's
   and Slack's shapes.
-- **Obfuscated JavaScript is read as what it does** (all three engines). The
+- **Obfuscated JavaScript is read as what it does** (both engines). The
   decoded view, which the install-script and import-time tests read a second
   time, now reads javascript-obfuscator's string arrays (and those of the
   tools that copy it): the strings kept in one array and read back through an
@@ -230,9 +154,9 @@ cached verdicts are redone.
   release fetched from GitHub and run): what a loader starts is now read and
   tested, whatever it fetched. SC-AUTORUN follows what a planted setting's
   command starts too.
-- **DNS names built from values, and addresses fetched at run time** (all
-  three engines). A DNS
-  name built from values outside a template is now read too: a sum ending in
+- **DNS names built from values, and addresses fetched at run time** (both
+  engines). A DNS name built from values outside a template is now read
+  too: a sum ending in
   a literal domain (`h + '.x.example.com'`), `%` or `.format()`, a name
   assigned earlier in the file, a lookup command run from code
   (`os.system('nslookup ' + host + …)`), and in a shell command `$(whoami)`,
@@ -402,11 +326,12 @@ cached verdicts are redone.
     `exports.default`, and an environment variable set in one file and read
     in another; the other way round, a function of the package that runs its
     parameter as code (`def run(c): exec(c)`) called with a value this file
-    received is the same finding, and says so. The npm engine runs it too
-    (`js/src/lib/crossfile.js`; the engines agree on the follower's cases and
-    a generated stream of 700 packages), so it is no longer a Python-only
-    exception; registry and guard scans run it on a release, naming the file
-    (not on tests, docs or examples, and not once the package is SUSPICIOUS).
+    received is the same finding, and says so. The npm package runs it too
+    (the native engine's `cross_file`, under Changed, which agrees with core
+    on the follower's cases and a generated stream of 700 packages), so it
+    is no longer a Python-only exception; registry and guard scans run it on
+    a release, naming the file (not on tests, docs or examples, and not once
+    the package is SUSPICIOUS).
   - **An adversarial pass on the follower**: 28 ways to carry the value
     between files or run it are read (each a test), 8 crafted look-alikes stay
     quiet, and 2 known misses are documented and tested (an event emitter
@@ -563,6 +488,50 @@ cached verdicts are redone.
   pipx 0.1.7) answered `lazaret guard …` with the scanner's usage error.
 - **The PyPI description names `lazaret guard`.** It is `python/README.md`,
   which 0.1.7 did not update; PyPI shows it from the next release.
+- **The native engine's project-mode rules** (`scan_rules`, phase 2 of
+  `docs/RUST_ENGINE.md` in project mode) and its reference in core
+  (`core.scan_rules`: `scan_file`'s first part, before the passes that
+  follow it, the markers and the cap), held to each other by
+  `test_rust_parity_project.py`. Both packages run it (below).
+- **More of core in the engine:** the agent-hijack checks
+  (`agent_hijack`, `agent_hijack_in_command`), a hook's command read as a
+  program (`hook_command_risk`) and what makes a hook suspicious
+  (`hook_is_suspicious`), the import-time code of a JavaScript or Python
+  file (`import_code`), the cross-file follower (`cross_file`, below),
+  core's values by name (`pack.values`, for what the npm package still
+  reads: limits and the S-TOKEN rule), and a work budget per call
+  (`budget`).
+- **SQL-DYNAMIC in linear time.** `re`, and so the engine's port of it, takes
+  quadratic time on a line of many `EXEC("` (14 s for one 120 KB line in
+  Python); the engine matches that pattern by hand in linear time
+  (`linear.rs`), as the npm package's JavaScript did, while the rule pack
+  holds its exact text.
+- **Tests.** `test_wasm_parity.py` and `test_wasm_parity_signs.py` (the
+  WebAssembly build against the native library, call for call, on the hooks
+  corpus, the scan_file corpus and this repository); the comparisons that
+  held the npm package's JavaScript to core now hold the engine to it
+  (`test_rust_parity_hook_commands`, `_hexname`, `_offscreen`,
+  `_lookalike`); the hooks parity reads its corpus (~44,400 cases) in two
+  modules (`test_rust_parity_hooks.py` and `_hooks_b.py`), each well under
+  45 s. Workflow tests check that every module needing the WebAssembly build
+  runs in a job that builds it and every native parity module in each job
+  that builds a library, and the npm pack test that the tarball carries the
+  engine and its notice and nothing else of `native/`. CI's `js` job builds
+  the engine, runs the npm tests and, on Node 24, the CLI-level parity
+  modules; its `rust` job runs the WebAssembly parity.
+  `test_rust_parity_crossfile.py` holds the engine's follower to core (its
+  own cases and a generated stream of 700 packages, every package of the
+  stream in one call on threads, a registry scan's reading, Windows
+  separators, skipped files, a package that spends its budget read by core)
+  and `test_wasm_parity_crossfile.py` the npm binding to the Python one;
+  `test_rust_parity_project_scan.py` the Python package's project-mode
+  routing (`engine.scan_files`) to `core.scan_file`;
+  `test_engine_cross_file.py` the follower's routing and fallbacks; the
+  regex parity gains patterns for leads and start tests and runs every pack
+  pattern with a text gate open; `test_rust_pack.py` checks the pack's rule
+  set against `ENGINE_VERSION`, so a version bump that doesn't regenerate
+  the pack fails every suite run; `js/test/pool.test.js` the npm CLI's
+  reports with 1, 2 and 3 worker threads.
 
 ### Changed
 - **Detectors written from samples now read the behaviour** (the audit of
@@ -582,14 +551,16 @@ cached verdicts are redone.
   Edwards' p,a,c,k,e,d) are MAJOR: a tool's mark is not what the code does,
   and the decoded view reads what javascript-obfuscator hides; a packed
   payload that runs is SC-EVAL-DECODER's.
-- **Large bundles take longer to scan.** The data flow and the readings of
+- **Large bundles took longer to scan.** The data flow and the readings of
   the behaviour pass cost most on big bundles: with the native engine on 2
-  cores, playwright-core's registry scan takes 11.2 s (4.7 s before the
-  pass; 18.1 s with the Python engine), litellm's 16.7 s (12.2 s), next's
-  11.0 s (10.6 s). The flow follows names, so in a 3 MB bundle short names
-  can collide: playwright-core's `utilsBundle.js` gets an import-time MAJOR
-  ("reads credentials or the whole environment and sends data over the
-  network") it doesn't earn; no verdict changed (`docs/DESIGN.md` §12).
+  cores, playwright-core's registry scan took 11.2 s after the pass (4.7 s
+  before it; 18.1 s with the Python engine), litellm's 16.7 s (12.2 s),
+  next's 11.0 s (10.6 s). The final round's speedups (the last four
+  entries here) bring them to 5.8 s, 10.5 s and 8.9 s. The flow follows
+  names, so in a 3 MB bundle short names can collide: playwright-core's
+  `utilsBundle.js` gets an import-time MAJOR ("reads credentials or the
+  whole environment and sends data over the network") it doesn't earn; no
+  verdict changed (`docs/DESIGN.md` §12).
 - **The native engine scans each dependency file itself (phase 2 of
   `docs/RUST_ENGINE.md`, dependency mode).** Where it is installed, the
   per-file scan of a registry or guard scan's source files and of a `--deps`
@@ -635,10 +606,122 @@ cached verdicts are redone.
   release's `verify-tag`) also reads `rust/Cargo.toml`'s workspace version
   and `rust/Cargo.lock`'s two entries, so `engine: rust X` in `--version` is
   the release's own version.
+- **The npm package runs the native engine, as WebAssembly.** The Rust
+  engine the Python package's platform wheels carry (`rust/`,
+  `docs/RUST_ENGINE.md`) ships in the npm package as `native/lazaret.wasm`
+  (2.1 MB; it imports nothing, and Node's own `WebAssembly` runs it, so the
+  package keeps zero dependencies and needs no native addon). It answers
+  the supply-chain tests — install scripts and the hooks they run,
+  import-time code, received code, the decoded view, spawned scripts,
+  persistence, the exfiltration shapes, a hook's command read as a program,
+  agent hijacking — and `scan_file`: whole in dependency mode, and in
+  project mode its rules part (every pattern rule and family on every line,
+  Q-LONGLINE, SC-PIPE-SHELL, the file-level and whole-text rules), to which
+  the npm package adds the SQL, taint and function passes, the suppression
+  markers and the cap. Same findings: the parity tests hold the engine to
+  the Python engine case by case and the WebAssembly build to the native
+  library byte for byte, and on real trees the CLI before and after reports
+  the same findings in the same order (a `--deps` scan of an installed tree
+  of 1,155 dependency files, a 616-file project, an 11.5 MB bundle). With
+  the speedups below, on one core, the `--deps` scan takes 5.1 s instead of
+  the JavaScript's 7.6 s, the project scan 5.4 s instead of 6.1 s and the
+  bundle 8.2 s instead of 11.8 s. `npm run build` makes the module from a
+  checkout (Rust and its `wasm32-unknown-unknown` target; the workspace has
+  no crates to download); release CI builds it with the platform wheels'
+  pinned compiler, runs the npm tests on it, and fails a tarball without it
+  or its notice.
+- **A file that spends the engine's work budget is SC-TRUNCATED** in the npm
+  package (CRITICAL, so it is never cleared: "reading it spent the engine's
+  work budget", or "its scan failed" from a dependency check), as a hostile
+  file is; the Python package's native engine hands such a call to its
+  Python engine instead. No file of the corpora or the benchmark comes near
+  the budget. The npm package's per-file time backstop now bounds only the
+  passes that stay in JavaScript.
+- **The npm CLI refuses to scan without its engine** (a source checkout
+  that has not run `npm run build`): exit 2, naming the missing file, where
+  every file would have been SC-TRUNCATED. `npm pack` and `npm publish` from
+  a checkout check that `native/` holds the engine of the package's version
+  and its notice (`prepack`); nothing runs when the package is installed.
+- **The npm package's notices** are the engine's: `native/NOTICE` is
+  `rust/NOTICE` (the regular expression engine and shell tokenizer
+  translated from CPython, the Unicode 13.0 tables), beside `LICENSE-PYTHON`
+  and `LICENSE-UNICODE`; `NOTICE` points to it. The license expression is
+  unchanged: `Apache-2.0 AND Python-2.0.1 AND Unicode-3.0`.
+- **Your own files' rules are the native engine's in the Python package
+  too.** With the native engine, the first part of a project file's scan —
+  every pattern rule of its language on every line, with Q-LONGLINE and
+  SC-PIPE-SHELL, the families, the file-level rules and `TEXT_RULES`
+  (`core.scan_rules`) — is the engine's `scan_rules`, read on threads a
+  batch at a time; core runs the passes that follow on the engine's
+  findings (the SQL statements without WHERE, taint, the SQL-sink pass, the
+  function metrics), the suppression markers and the cap
+  (`core.scan_file_after_rules`), and scans any file the engine does not
+  answer. A project scan reads its own files a batch at a time, as it reads
+  dependency files (`should_stop` is checked before each batch). On two
+  cores BenchmarkPython (1,230 files) takes 5.2 s instead of 6.6 s and a
+  616-file project 14.7 s instead of 18.1 s, with the same findings; most of
+  what is left is the taint and flow engines, in Python.
+- **The cross-file follower is the native engine's** (`cross_file`,
+  `crossfile.rs`, ported from core function for function, with core's
+  patterns, limits and finding texts from the rule pack; core's texts moved
+  to module values, `_XF_RULE`, `_XF_TAILS` and `_XF_FIXES`). One call reads
+  every package of a scan, each on its own work budget, on threads in the
+  Python package, and the findings come back in core's order. In the Python
+  package (`engine.cross_file_issues`: `--deps`, registry and guard scans) a
+  package whose budget is spent, or that meets an internal error, is read
+  by the Python engine in its place, and a refused call is answered by it
+  whole. The npm package, which had no follower in 0.1.7, runs it as
+  WebAssembly; there a package whose budget is spent gives no cross-file
+  finding, as a package whose reading raises gives none in core. On one
+  core the follower reads an installed npm tree (41 packages) in 0.60 s
+  instead of core's 1.86 s (0.38 s on two cores), and litellm's 2,471
+  modules, read as one package as a registry scan reads them, in 1.1 s
+  instead of 3.1 s; as WebAssembly in 0.91 s and 1.55 s. On the benchmark's
+  513 malicious and 434 benign releases, read as `--deps` and as a registry
+  scan reads them, the findings are core's.
+- **The import-time and install-script tests skip what cannot match** (the
+  native engine). They run about sixty patterns over each whole file. A
+  search now starts only where its pattern can (the zero-width tests a
+  match makes before its first character, a one-character lookbehind, the
+  strings every match starts with); a text's pairs and triples of
+  characters are read once per call, so a pattern whose strings need one
+  the text lacks answers at once (`textgate.rs`); the data flow answers
+  early when a file reads no local data; and the scans for literal strings
+  (a pattern's required strings and literal prefix, a MULTILINE `^`'s next
+  line, core's `in` and `find`) look for the string's rarest character,
+  sixteen characters at a time (`pyre/scan.rs`). On one core, over an
+  installed npm tree's 1,061 JavaScript files, the import-time test takes
+  0.85 s instead of 2.22 s and the install-script test 0.98 s instead of
+  2.51 s; over litellm's 2,471 modules the import-time test takes 8.0 s
+  instead of 19.3 s. No answer changes: the old and new engines answered the
+  two tests, the data flow and `scan_file` identically on 18,370 files (the
+  npm tree, litellm, the benchmark's malicious samples).
+- **The npm CLI spreads a large scan over worker threads**
+  (`js/src/pool.js`): each file's scan and `--deps`' checks of each
+  dependency file (the import-time and agent checks, the cross-file
+  follower), on workers that each run their own instance of the engine (the
+  module compiled once and handed over) with the main thread's settings.
+  `run()` stays synchronous, and the answers are taken in the order asked,
+  so the findings and their order are the same with any number of threads.
+  By default it starts one worker per core, up to 8, for a scan with a
+  megabyte or more to read besides its largest file; `LAZARET_THREADS` sets
+  how many (`1`: none). A worker that cannot start sends its tasks back to
+  the main thread, and a task with no answer for 120 s (a worker that died)
+  is run there. On two cores the `--deps` scan of an installed tree takes
+  3.5 s instead of 5.1 s.
+
+### Removed
+- **The npm package's JavaScript twins of what the engine answers:**
+  `js/src/lib/hooks.js`, `received.js`, `shellpipe.js` and the synced
+  `received-spec.json`, `js/src/scanner/linear.js`, and the rule loop,
+  families and dependency decode flow of `js/src/scanner/scan.js` (with
+  `scripts/sync-received-spec.py` and `test_js_parity_hooks.py`). The
+  library no longer exports `RULES` and `TEXT_RULES` (the rules live in the
+  engine's rule pack); the supply-chain tests it exports are the engine's.
 
 ### Fixed
 - **A program written in a string literal was read as code that runs what it
-  receives** (all three engines; 0.1.7 too). A network call named in a
+  receives** (both engines; 0.1.7 too). A network call named in a
   string's text made the value bound to the string a received one:
   xmlhttprequest 1.8.0 and xmlhttprequest-ssl 2.1.2 — which socket.io's
   client installs through engine.io-client 6 — write a program for `node -e`

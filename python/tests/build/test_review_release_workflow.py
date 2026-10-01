@@ -16,7 +16,7 @@
   runs them first proves the library loads (a job that built a library the
   tests can't find would otherwise pass without testing it); likewise the
   npm engine's (test_js_parity*, test_wasm_parity*) where its WebAssembly
-  build is missing (0.1.9).
+  build is missing (0.1.8).
 - The npm package's WebAssembly engine is built for a release with the
   compiler of the platform wheels' libraries, and the tarball carries it.
 - No `{a, b}` inside double quotes nested in "$(...)": macOS runs `shell:

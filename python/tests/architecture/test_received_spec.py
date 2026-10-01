@@ -3,8 +3,8 @@
 Name sets, character sets, limits and pattern pieces are authored once in
 python/src/lazaret/scanner/received_spec.json, which core loads; the native
 engine reads core's values from its rule pack (make_rust_tables.py), and
-the npm package runs the native engine (0.1.9; until then it carried a copy
-of the spec, js/src/lib/received-spec.json). These tests hold the spec's
+the npm package runs the native engine (0.1.8; through 0.1.7 it carried a
+copy of the spec, js/src/lib/received-spec.json). These tests hold the spec's
 shape and hold what core uses to the spec it came from; the parity tests
 (test_rust_parity_signs) hold the engines to each other on every input.
 """

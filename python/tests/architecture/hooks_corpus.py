@@ -1334,7 +1334,7 @@ RECEIVED_CURATED = [
 
 
 # A dependency that drives an AI coding agent with its confirmations off
-# (core.agent_hijack, agent_hijack_in_command; 0.1.9 holds the native
+# (core.agent_hijack, agent_hijack_in_command; 0.1.8 holds the native
 # engine to them, which the npm package runs): in exec calls and as a hook's
 # command, and the near misses (a flag with no exec call, the agent without a
 # flag, the two on other lines, a name that only contains an agent's).

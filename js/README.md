@@ -6,27 +6,27 @@ JavaScript projects.
 Its rules run in Lazaret's native engine, written in Rust and compiled to
 WebAssembly (`native/lazaret.wasm`, in the package: nothing to compile at
 install, no native addon, no dependency): every pattern rule, the
-obfuscation, entropy and secret detection, and the supply-chain tests — the
-same engine the Python package's platform wheels carry, held to the Python
-package's `lazaret.scanner` case by case. The intra-file taint and SQL-sink
-analyzers, the cross-file passes and the reports are JavaScript, ported from
-the Python package. For a project scan, `npx lazaret` and
-`python -m lazaret` are tested (`python/tests/architecture/test_js_parity.py`)
-to report the same issues (rule, file, line, severity, message), metrics,
-ratings, gate result and exit code. Both run the JavaScript half of the
-cross-file flow engine (`X-*` findings: a request value passed into a
-function, in the same or another file, whose parameter reaches a sink —
-directly or through the local variables that hold it — or a helper's
-returned request value reaching one; a proven RegExp's `exec()` is not a
-command sink; calls bind through
+obfuscation, entropy and secret detection, the supply-chain tests and the
+cross-file received-code follower — the same engine the Python package's
+platform wheels carry, held to the Python package's `lazaret.scanner` case by
+case. The intra-file taint and SQL-sink analyzers, the cross-file taint pass
+and the reports are JavaScript, ported from the Python package. For a project
+scan, `npx lazaret` and `python -m lazaret` are tested
+(`python/tests/architecture/test_js_parity.py`) to report the same issues
+(rule, file, line, severity, message), metrics, ratings, gate result and exit
+code. Both run the JavaScript half of the cross-file flow engine (`X-*`
+findings: a request value passed into a function, in the same or another
+file, whose parameter reaches a sink — directly or through the local
+variables that hold it — or a helper's returned request value reaching one; a
+proven RegExp's `exec()` is not a command sink; calls bind through
 `require()`/`import` to the function the file names, and a call it can't
-resolve reaches every project function of that name). The
-Python engine additionally follows flows through Python files and accepts
-taint configs; registry auditing (`lazaret-registry`) is Python-only. When
-the project has Python files, the gate's cross-file condition says so: `No
-cross-file taint flows (JavaScript only: 3 Python files not analyzed)`.
-Until 0.1.9 this package ran JavaScript ports of those rules and tests; the
-findings are the same.
+resolve reaches every project function of that name). The Python engine
+additionally follows flows through Python files and accepts taint configs;
+registry auditing (`lazaret-registry`) is Python-only. When the project has
+Python files, the gate's cross-file condition says so: `No cross-file taint
+flows (JavaScript only: 3 Python files not analyzed)`. Through 0.1.7 this
+package ran JavaScript ports of those rules and tests; the findings are the
+same.
 
 ```
 npx lazaret check ./my-project
@@ -258,7 +258,7 @@ import { scanFile, buildResult, run } from "lazaret";
 already redacted; `setRedactSecrets(false)` opts out. The supply-chain tests
 are exported too (`installScriptRisk`, `importTimeRisk`, `followHook`, …),
 answered by the native engine. The rule tables (`RULES`, `TEXT_RULES`) are
-no longer exported since 0.1.9: they live in the engine's rule pack.
+no longer exported since 0.1.8: they live in the engine's rule pack.
 
 Zero dependencies, ES modules, Node 22+. From a source checkout, build the
 engine first: `npm run build` (it needs Rust and `rustup target add

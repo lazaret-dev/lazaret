@@ -60,7 +60,7 @@ class NpmPackTests(unittest.TestCase):
         self.assertEqual(packed(self.root), clean)
 
     def test_the_engine_and_its_notices_are_packed_and_nothing_else_of_native(self):
-        # 0.1.9: the native engine as WebAssembly (npm run build) and its
+        # 0.1.8: the native engine as WebAssembly (npm run build) and its
         # notices; a stray build product or secret in native/ stays out
         for name in ("NOTICE", "LICENSE-PYTHON", "LICENSE-UNICODE"):
             shutil.copy2(os.path.join(JS, name), self.root)

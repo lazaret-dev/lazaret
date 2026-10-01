@@ -9,7 +9,7 @@
 //
 // The 30 s per-file backstop was checked only between rules, so one text
 // rule's per-match loop ran to the end (a 2 s budget: 13.5 s, all 10k
-// findings). Since 0.1.9 the pattern rules are the native engine's, which
+// findings). Since 0.1.8 the pattern rules are the native engine's, which
 // a work budget bounds instead (the steps of its regex matcher): a file that
 // spends it is SC-TRUNCATED, tested below with a small budget.
 
@@ -77,7 +77,7 @@ test("one line of 2.5k-20k `try{}catch(e){}` repeats scans in linear time", () =
 });
 
 test("a file that spends the native engine's work budget is SC-TRUNCATED", () => {
-  // the pattern rules and the families are the native engine's (0.1.9): a work
+  // the pattern rules and the families are the native engine's (0.1.8): a work
   // budget, not the clock, stops it; the file is reported as not fully scanned
   setWorkBudget(2000);           // (the steps of the searches that take thousands: one long line's)
   try {

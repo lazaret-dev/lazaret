@@ -10,7 +10,7 @@ offscreen_code (as JavaScript and as Python), (0.1.8) the exfiltration
 shapes (secret_endpoint_at, credential_sweep_at, exec_command_reasons …
 _exfil_signs, raw_ip_connect, capture_service) and service_reasons, the DNS
 beacon without a read of the identity and the dead drop, and the text read
-as a shell program (_sh_reasons, _shell_text, _code_text); and (0.1.9,
+as a shell program (_sh_reasons, _shell_text, _code_text); and (0.1.8,
 for the npm package) agent_hijack, agent_hijack_in_command,
 _hook_is_suspicious and _import_code.
 
@@ -37,7 +37,7 @@ FIELDS = ("received_code_kind", "downloads_and_runs", "decodes_and_runs", "power
           "dns_beacon_at without host", "dead_drop_at",
           # 0.1.8: the text read as a shell program
           "_sh_reasons", "_shell_text", "_code_text",
-          # 0.1.9: what the npm package asks besides (hook_command_risk: test_rust_parity_hook_commands)
+          # 0.1.8: what the npm package asks besides (hook_command_risk: test_rust_parity_hook_commands)
           "agent_hijack", "agent_hijack_in_command", "_hook_is_suspicious", "_import_code js", "_import_code py")
 
 

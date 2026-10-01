@@ -62,19 +62,19 @@ untrusted dependencies past it before letting them in.
 SQL sink, encoding rule and metric behaves the same in *both* packages, and
 they must agree on every input — the same finding (rule, file, line,
 severity, message), the same metrics, ratings, quality gate and exit code.
-Since 0.1.9 most of that is one engine: the npm package runs the native
-engine (below) as WebAssembly for the supply-chain tests and the rules of
-`scan_file`, and keeps JavaScript twins only for what the native engine does
-not answer yet (source decoding, the comment lexer and the suppression
-markers, the taint, SQL-sink and function passes, the flow engine, the
-cross-file follower, the manifest, workflow and settings checks, config-file
+Since 0.1.8 most of that is one engine: the npm package runs the native
+engine (below) as WebAssembly for the supply-chain tests, the rules of
+`scan_file` and the cross-file follower, and keeps JavaScript twins only for
+what the native engine does not answer yet (source decoding, the comment
+lexer and the suppression markers, the taint, SQL-sink and function passes,
+the flow engine, the manifest, workflow and settings checks, config-file
 credentials).
 
 - **Held by tests.** `python/tests/architecture/test_js_parity.py` runs both
   CLIs on every fixture tree, a synthetic project, and an adversarial tree
   generated at test time, and compares the results as a multiset. The
   `test_js_parity_*.py` files compare the remaining twins (the flow engine,
-  the cross-file follower, parsing, the settings and workflow readers, etc.)
+  parsing, the settings and workflow readers, etc.)
   and the CLIs on each area's trees, often by running thousands of cases
   through one Node process and diffing against the Python answer. They need
   the npm engine built (`cd js && npm run build`).
@@ -91,18 +91,21 @@ credentials).
   SHA-256).
 - **The native engine** (`rust/crates/lazaret-engine`, 0.1.8) is a port of
   core's supply-chain tests — the install-script and import-time tests and
-  everything they read — and of `scan_file` in dependency mode, findings
-  included, and (0.1.9) of its rules part in project mode (`scan_rules`),
-  with Python `re` semantics (its own port of sre) and the patterns and
-  finding texts extracted from `core.py` into a rule pack. The Python
-  package sends the supply-chain tests and dependency-mode `scan_file`
-  through it where it is installed (`lazaret.scanner.engine`; `--engine
-  rust|python`), and core answers any call it can't (a spent work budget, an
-  error), so it never loses a finding. The npm package (0.1.9) runs it as
-  WebAssembly (`js/native/lazaret.wasm`, `js/src/lib/native.js`) for all of
-  them, with no second engine behind it: a spent budget leaves the file
-  SC-TRUNCATED. `test_rust_parity_*.py` compare it with core on every pack
-  pattern, the ~44,000-case hooks corpus and the scan_file corpus, and
+  everything they read — of `scan_file` in dependency mode, findings
+  included, of its rules part in project mode (`scan_rules`) and of the
+  cross-file follower (`cross_file`), with Python `re` semantics (its own
+  port of sre) and the patterns and finding texts extracted from `core.py`
+  into a rule pack. The Python package sends all of them through it where
+  it is installed (`lazaret.scanner.engine`; `--engine rust|python`; in
+  project mode core runs the passes that follow the rules), and core
+  answers any call it can't (a spent work budget, an error; for the
+  follower, the package that spent its budget), so it never loses a
+  finding. The npm package (0.1.8) runs it as WebAssembly
+  (`js/native/lazaret.wasm`, `js/src/lib/native.js`) for all of them, with
+  no second engine behind it: a spent budget leaves the file SC-TRUNCATED
+  (the follower's package, without cross-file findings). `test_rust_parity_*.py`
+  compare it with core on every pack pattern, the ~44,000-case hooks corpus,
+  the scan_file corpus and the follower's generated packages, and
   `test_wasm_parity*.py` the WebAssembly build with the library: zero
   differences allowed. A change to those tests is made in core, ported to
   Rust and the pack regenerated (`scripts/make_rust_tables.py`; `--check` in
@@ -120,7 +123,7 @@ parity test excludes it (`_python_only` in `test_js_parity.py`):
   reader `js/src/lib/jsparse.js`).
 
 (The cross-file received-code follower was the second exception until 0.1.8;
-`js/src/lib/crossfile.js` is its twin now — §5c.)
+both packages run the native engine's now — §5c.)
 
 When the npm engine cannot do something the Python engine can, it must say so
 honestly rather than silently under-report. This is the **honest-gate pattern**:
@@ -281,7 +284,7 @@ Detects code that **runs, deserializes or dynamically imports a value it
 received over the network** — the TrapDoor/dropper shape. Lives in `core.py`
 (section comment "Code that runs what it receives over the network") and the
 native engine's `received.rs` (the npm package runs it as WebAssembly; its
-JavaScript twin, `js/src/lib/received.js`, was retired in 0.1.9).
+JavaScript twin, `js/src/lib/received.js`, was retired in 0.1.8).
 
 - **Single-file entry points.** `runs_received_code(text)` /
   `_received_code_kind(text)` → `(1-based line, category)` where category is
@@ -376,20 +379,22 @@ patterns) are authored once in
 `python/src/lazaret/scanner/received_spec.json`, which core loads (the build
 backend ships `.json` from the package, so it lands in the wheel); the native
 engine reads core's values from its rule pack (`make_rust_tables.py`), and
-the npm package runs the native engine, so nothing is copied any more (until
-0.1.9 the npm engine compiled a synced copy, `js/src/lib/received-spec.json`,
+the npm package runs the native engine, so nothing is copied any more (through
+0.1.7 the npm engine compiled a synced copy, `js/src/lib/received-spec.json`,
 kept by `scripts/sync-received-spec.py`). `tests/architecture/test_received_spec.py`
 fails if core stops matching the spec, and `test_rust_parity_signs.py` holds
 the native engine to core on the ~44,000-case hooks corpus. **Edit the spec,
 not the inline patterns; then regenerate the pack.**
 
-**The cross-file follower (both engines since 0.1.8).**
-`core._cross_file_received_issues` and its twin `crossFileReceivedIssues`
-(`js/src/lib/crossfile.js`) catch a value received in one file of a package and
-run in another — source and sink split across modules — in Python and npm
-packages: a dependency's under `--deps` (both engines), and a release's in the
-registry and the guard (`_ArtifactScan._cross_file_code`: one distribution is
-one package; the files SC-USE-RISK reads; not once the package is SUSPICIOUS).
+**The cross-file follower (both packages since 0.1.8).**
+`core._cross_file_received_issues` and the native engine's port of it
+(`cross_file`, `rust/crates/lazaret-engine/src/crossfile.rs`; one call per scan,
+each package on its own work budget) catch a value received in one file of a
+package and run in another — source and sink split across modules — in Python
+and npm packages: a dependency's under `--deps` (both packages), and a release's
+in the registry and the guard (`_ArtifactScan._cross_file_code`: one
+distribution is one package; the files SC-USE-RISK reads; not once the package
+is SUSPICIOUS).
 Design:
 
 1. **Each module is read** for what it defines — functions, values, classes
@@ -445,11 +450,13 @@ and return data); the sink side keeps it precise. Bounds: `_XF_WINDOW` (25 rows
 of a body), `_XF_MAX_FILES` (3,000 per package), `_XF_MAX_SYMBOLS` (5,000),
 `_XF_MAX_SEEDS` (64 per file), `_XF_OBJECT_ROWS` (400), `_XF_MAX_RUNNERS` (200
 bodies tested), a file over `_XF_MAX_CHARS` (2,000,000) not read for what it
-defines; litellm's 2,471 modules (34 MB) take 3.6 s. Both engines give the same
-answer: `tests/architecture/test_js_parity_crossfile.py` holds the twins'
-patterns and limits to core's and compares the follower's own cases and a
-generated stream of 700 packages finding for finding. What it doesn't follow:
-§12.
+defines; litellm's 2,471 modules (34 MB) take 3.6 s in core and 1.1 s in the
+native engine. Both engines give the same answer:
+`tests/architecture/test_rust_parity_crossfile.py` compares the follower's own
+cases and a generated stream of 700 packages finding for finding (the
+engine's patterns, limits and texts are core's, from the rule pack), and
+`test_wasm_parity_crossfile.py` the npm binding with the Python one. What it
+doesn't follow: §12.
 
 ### d. Supply-chain / `--deps`
 
@@ -705,8 +712,9 @@ This is the working method. Follow it; it is why the tool has stayed trustworthy
    received-code patterns, edit the **shared spec**. The npm package runs the
    native engine, so it follows; where the npm package still has a
    JavaScript twin of what changed (the taint, SQL and flow passes, the
-   cross-file follower, the manifest and settings checks), twin it there too
-   and mark it (`Twin of lazaret.scanner.core…`).
+   manifest and settings checks), twin it there too and mark it (`Twin of
+   lazaret.scanner.core…`). The cross-file follower is ported to the
+   engine's `crossfile.rs`.
 5. **Verify:**
    - the behavioral suites (both packages; `cd js && npm run build` first);
    - **engine parity** — `test_rust_parity_*` with the native library built
@@ -850,9 +858,9 @@ fixture.
 | `python/src/lazaret/registry/guard.py`, `python/src/lazaret/_cli.py` | The install guard (`lazaret guard`) and the `lazaret` command's dispatch |
 | `python/src/lazaret/registry/pmsettings.py` | The package managers' own settings as the guard reads them: registries, indexes, credentials by host |
 | `js/src/lib/native.js`, `js/scripts/build-wasm.js` | The npm package's native engine (WebAssembly: the loader, one call, the pack's values) and its build (`npm run build`) |
-| `js/src/lib/supplychain.js`, `js/src/deps.js`, `js/src/scanner/flow.js`, `js/src/index.js` | Install-hook checks, `--deps`, flow twin, npm CLI |
+| `js/src/lib/supplychain.js`, `js/src/deps.js`, `js/src/scanner/flow.js`, `js/src/index.js`, `js/src/pool.js` | Install-hook checks, `--deps`, flow twin, npm CLI, its worker threads |
 | `python/tests/architecture/test_js_parity*.py` | The package-parity guards (need `npm run build`) |
-| `rust/crates/lazaret-engine`, `lazaret-ffi` | The native engine (supply-chain tests, `scan_file`, sre port, rule pack), its C ABI and its WebAssembly exports (`docs/RUST_ENGINE.md`) |
+| `rust/crates/lazaret-engine`, `lazaret-ffi` | The native engine (supply-chain tests, `scan_file`, the cross-file follower, sre port, rule pack), its C ABI and its WebAssembly exports (`docs/RUST_ENGINE.md`) |
 | `python/src/lazaret/scanner/engine.py`, `_native.py` | Which engine answers (`--engine`, `LAZARET_ENGINE`), batching and threads, the Python fallback; the ctypes loader |
 | `python/tests/architecture/test_rust_parity_*.py`, `test_wasm_parity*.py`, `hooks_corpus.py`, `scanfile_corpus.py` | The native engine's parity guards, the WebAssembly build's, and their corpora |
 | `scripts/make_rust_tables.py`, `check_rust_deps.py` | The rule pack from `core.py` (`--check`); no crate from outside the workspace |
@@ -860,8 +868,8 @@ fixture.
 | `scripts/check-versions.sh`, `tag-release.sh` | Version and release tooling |
 
 To orient in `core.py`, search for the banner comments (e.g. "Code that runs
-what it receives over the network", "Cross-file received code (Python engine
-only)", "Download to a file, then run the file").
+what it receives over the network", "Cross-file received code", "Download to
+a file, then run the file").
 
 ---
 
@@ -1048,13 +1056,13 @@ comprehensive, so weigh marginal value against FP risk):
   (`getattr(m, name)`), a runner behind another function (one that hands its
   parameter to another file's runner), or more than four hops.
 - *Engine:* the native engine answers the supply-chain tests (0.1.8,
-  `docs/RUST_ENGINE.md`) and the dependency-mode scan of each file, release
-  CI builds it into five platform wheels, and the npm package runs it as
-  WebAssembly (0.1.9, its JavaScript twins of those retired); next, the
-  import-time and install-script tests at the per-file scan's speed (the
-  npm package's `--deps` scan is 13% slower than with the twins until
-  then), one call per dependency file, the project-mode rules through the
-  native engine in the Python package too, the cross-file follower in Rust,
+  `docs/RUST_ENGINE.md`), the dependency-mode scan of each file, the rules
+  part of the project-mode scan and the cross-file follower in both
+  packages; release CI builds it into five platform wheels, and the npm
+  package runs it as WebAssembly (its JavaScript twins of those retired) on
+  worker threads for a large scan. Next: the project-mode passes that
+  follow the rules (SQL, taint, function metrics) in the engine, the rest
+  of the npm package's twins (the manifest, workflow and settings checks),
   and `core.py` loading the rule pack so it has one source.
 - *Quality:* a durable home for this backlog (a `BACKLOG.md` or issues).
 - *Guard* (credentials, yarn, Bun, `uv run` and `uvx` were built in 0.1.8):

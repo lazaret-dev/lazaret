@@ -1,7 +1,7 @@
 """The notices of the npm package and of the Unicode data (0.1.8).
 
 The npm package ships the native engine compiled to WebAssembly
-(js/native/lazaret.wasm, 0.1.9), which holds translations of CPython code
+(js/native/lazaret.wasm, 0.1.8), which holds translations of CPython code
 (its regex engine, shlex) and Unicode 13.0 data, so the package carries
 CPython's LICENSE (js/LICENSE-PYTHON, the same file as rust/LICENSE-PYTHON),
 the engine's own NOTICE beside the module (js/native/NOTICE: rust/NOTICE,

@@ -2,7 +2,7 @@
 // pass (sql.js scanSqlNowhere, twin of core.scan_sql_nowhere) fires: their
 // pattern text copied verbatim from lazaret.scanner.core's TEXT_RULES and
 // compiled with Python `re` semantics by pyRe(). Every other rule of core's
-// RULES and TEXT_RULES is the native engine's since 0.1.9 (../lib/native.js
+// RULES and TEXT_RULES is the native engine's since 0.1.8 (../lib/native.js
 // scanRules and scanDependencyFile: the engine's rule pack holds core's own
 // tables).
 

@@ -1,5 +1,5 @@
 """Engine parity for scan_file in project mode, as far as the native engine
-reads it (0.1.9): the native engine's scan_rules (crates/lazaret-engine:
+reads it (0.1.8): the native engine's scan_rules (crates/lazaret-engine:
 scanfile.rs) against core.scan_rules — the pattern rules of every line
 (quality, bug and security rules alike, with Q-LONGLINE and SC-PIPE-SHELL
 in their places), the supply-chain and credential families, the file-level

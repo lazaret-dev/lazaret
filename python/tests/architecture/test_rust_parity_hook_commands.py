@@ -8,8 +8,9 @@ from the pieces the reader looks at: separators, quotes, escapes, $(…) and
 keywords, the commands that report on the machine, environment variables,
 addresses, and non-ASCII text (é, ſ and the Kelvin sign, İ, U+0085, U+00A0,
 a character outside the BMP). Each command is read with its output thrown
-away and kept (a binding.gyp command expansion). (Until 0.1.9 this held the
-npm engine's JavaScript twin, js/src/lib/hooks.js, to core.)
+away and kept (a binding.gyp command expansion). (Before the npm package ran
+the native engine, this held its JavaScript twin, js/src/lib/hooks.js, to
+core.)
 
 All text is inert: hosts are reserved names or private addresses, and
 nothing is executed. The native engine runs in a thread while core reads the

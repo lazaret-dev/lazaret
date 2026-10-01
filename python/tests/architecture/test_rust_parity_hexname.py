@@ -6,8 +6,8 @@ corpus of string literals built from escapes (\\xNN, \\uNNNN, \\u{N…},
 \\UNNNNNNNN, octal), backslash runs, quotes, letters of dangerous names,
 punctuation and non-ASCII text. The expectations are in
 tests/scanner/test_review_hex_names.py. Columns are code points in both.
-(Until 0.1.9 this held the npm engine's JavaScript twin to core.) Skipped
-where the native library is not built.
+(Before the npm package ran the native engine, this held its JavaScript twin
+to core.) Skipped where the native library is not built.
 """
 import json
 import random
