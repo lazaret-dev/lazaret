@@ -15611,8 +15611,23 @@ def _scan_manifest_entry(mf):
 #   * every JavaScript or Python file of a dependency that no hook runs gets
 #     import_time_risk: SC-IMPORT-RISK (MAJOR). On a real node_modules of
 #     14,286 JavaScript files (webpack, next, jest, eslint, typescript ...)
-#     it found nothing.
+#     it found nothing. (The detection round) But not a web app's static
+#     assets, which run in a browser, not in Node or Python: a JavaScript
+#     file in a _next, static or public directory of its package
+#     (_DEPS_WEB_DIRS) that none of its npm package's entry points reach —
+#     main, module, bin and exports, then the local files they require and
+#     import and the scripts they start (_deps_web_assets) — is left out of
+#     the import-time test and the cross-file follower, as the registry
+#     leaves it out of what runs.
+#     litellm's proxy UI ships a Next.js export whose chunk of guardrail test
+#     prompts (one shows `curl … | sh`) the test read as code, CRITICAL; a
+#     package whose main points into static/ is still read.
 # Twin of the npm engine's js/src/deps.js.
+_DEPS_WEB_DIRS = frozenset({"_next", "static", "public"})
+_DEPS_REACH_MAX = 5000          # files an npm package's entry points are followed to, at most
+_DEPS_LOCAL_DEP_RE = re.compile(
+    r"""(?:\brequire\s*\(\s*|\bimport\s*\(\s*|\bfrom\s+|^\s*import\s+|\bexport\s+[^'"\n;]*?\bfrom\s+)"""
+    r"""(['"])(\.{1,2}/[^'"\n]+)\1""", re.M)
 _DEP_IMPORT_RISK_WHY = (
     "An installed package's code runs with the application's privileges when it is loaded "
     "or its command runs. Collecting credentials or the whole environment next to a network "
@@ -17329,8 +17344,10 @@ def dependency_checks(root, files, manifests, issues, excludes=(), should_stop=N
     # native engine reads a batch on threads (engine.py); the Python engine
     # one file at a time, as it always has
     from lazaret.scanner import engine
+    assets = _deps_web_assets(tree, files)
     todo = [f for f in files
-            if f.get("dep") and f["lang"] in ("js", "py") and f["path"].replace(os.sep, "/") not in run]
+            if f.get("dep") and f["lang"] in ("js", "py") and f["path"].replace(os.sep, "/") not in run
+            and f["path"].replace(os.sep, "/") not in assets]
     size = engine.BATCH if engine.name() == "rust" else 1
     for start in range(0, len(todo), size):
         if should_stop is not None:
@@ -17360,8 +17377,81 @@ def dependency_checks(root, files, manifests, issues, excludes=(), should_stop=N
     # Skips the files already flagged CRITICAL single-file (a MAJOR one can
     # still be found running what another file received).
     flagged = {i["file"].replace(os.sep, "/") for i in out if i["rule"] == "SC-IMPORT-RISK" and i["sev"] == "CRITICAL"}
-    out.extend(engine.cross_file_issues(files, flagged, site_groups=_xf_site_groups(tree.root, files)))
+    code = [f for f in files if f["path"].replace(os.sep, "/") not in assets] if assets else files
+    out.extend(engine.cross_file_issues(code, flagged, site_groups=_xf_site_groups(tree.root, code)))
     return out, extra, None
+
+
+def _deps_web_assets(tree, files):
+    """The '/'-separated paths of the dependency JavaScript files that are a
+    web app's static assets (see the section comment): in a _next, static
+    or public directory of their package, and reached from none of its npm
+    package's entry points."""
+    found = {}                              # npm package root (None: not npm's) -> [paths]
+    for f in files:
+        if not f.get("dep") or f["lang"] != "js":
+            continue
+        path = f["path"].replace(os.sep, "/")
+        root = _xf_js_package(path)
+        rel = path[len(root) + 1:] if root is not None else path
+        if any(part.lower() in _DEPS_WEB_DIRS for part in rel.split("/")[:-1]):
+            found.setdefault(root, []).append(path)
+    out = set()
+    for root, paths in found.items():
+        reached = _deps_npm_reach(tree, root) if root is not None else set()
+        out.update(p for p in paths if p not in reached)
+    return out
+
+
+def _deps_npm_entries(data):
+    """The paths an npm package.json's main, module, bin and exports name."""
+    out = []
+    for key in ("main", "module"):
+        if isinstance(data.get(key), str):
+            out.append(data[key])
+    b = data.get("bin")
+    out.extend([b] if isinstance(b, str) else [v for v in b.values() if isinstance(v, str)] if isinstance(b, dict) else [])
+    stack = [data.get("exports")]
+    while stack and len(out) < _DEPS_REACH_MAX:
+        e = stack.pop()
+        if isinstance(e, str):
+            if "*" not in e:
+                out.append(e)
+        elif isinstance(e, dict):
+            stack.extend(reversed(list(e.values())))
+        elif isinstance(e, list):
+            stack.extend(reversed(e))
+    return out
+
+
+def _deps_npm_reach(tree, root):
+    """The files of the npm package at `root` its entry points reach: what
+    Node runs for the package itself and for each entry point, then the
+    local files they require or import and the scripts they start with
+    node (spawned_scripts), transitively (at most _DEPS_REACH_MAX)."""
+    manifest = tree.manifests.get(root + "/package.json")
+    data = None
+    if manifest is not None:
+        data, _problems = load_manifest(manifest["path"], manifest["content"])
+    entries = _deps_npm_entries(data) if isinstance(data, dict) else []
+    queue = [tree.resolve(root)] + [tree.resolve(t) for t in (_tree_join(root, e) for e in entries) if t is not None]
+    seen = set()
+    while queue and len(seen) < _DEPS_REACH_MAX:
+        rel = queue.pop()
+        if rel is None or rel in seen or not rel.startswith(root + "/"):
+            continue
+        seen.add(rel)
+        f = tree.sources.get(rel)
+        if f is None or f.get("lang") != "js":
+            continue
+        base = posixpath.dirname(rel)
+        targets = [(base, t) for _q, t in _DEPS_LOCAL_DEP_RE.findall(f["content"])]
+        targets += [(base if where == "dir" else root, t) for where, t in spawned_scripts(f["content"])]
+        for at, target in targets:
+            joined = _tree_join(at, target)
+            if joined is not None:
+                queue.append(tree.resolve(joined))
+    return seen
 
 
 def _is_package_root(directory):

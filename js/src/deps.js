@@ -33,7 +33,7 @@ import { decodeSource } from "./lib/encoding.js";
 import { mkIssue } from "./lib/issue.js";
 import { REDACT, redactText, registerScanContext, SECRET_SKIP_RE } from "./lib/redact.js";
 import { mapTasks } from "./pool.js";
-import { pyStrip, pyStripChars, pyRepr, cmpCodePoints } from "./lib/pycompat.js";
+import { pyStrip, pyStripChars, pyRepr, cmpCodePoints, pyEntries, pyRe } from "./lib/pycompat.js";
 
 const DEP_IMPORT_RISK_WHY = "An installed package's code runs with the application's privileges when it is loaded " +
   "or its command runs. Collecting credentials or the whole environment next to a network call is the shape of an " +
@@ -157,6 +157,99 @@ class DependencyTree {
   }
 }
 
+/** The npm package root ("/"-separated) a dependency file lives in, innermost, else null. core._xf_js_package */
+function jsPackageRoot(path) {
+  const parts = path.split("/");
+  for (let i = parts.length - 2; i >= 0; i--) {
+    if (parts[i] === "node_modules") {
+      if (parts[i + 1].startsWith("@") && i + 2 < parts.length) return parts.slice(0, i + 3).join("/");
+      return parts.slice(0, i + 2).join("/");
+    }
+  }
+  return null;
+}
+
+/**
+ * The "/"-separated paths of the dependency JavaScript files that are a web app's static assets:
+ * in a _next, static or public directory of their package, and reached from none of its npm
+ * package's entry points. Twin of core._deps_web_assets.
+ */
+export function webAssets(tree, files) {
+  const [webDirs] = packValues("_DEPS_WEB_DIRS");
+  const found = new Map();                     // npm package root (null: not npm's) -> [paths]
+  for (const f of files) {
+    if (!f.dep || f.lang !== "js") continue;
+    const path = posix(f.path);
+    const root = jsPackageRoot(path);
+    const rel = root !== null ? path.slice(root.length + 1) : path;
+    if (rel.split("/").slice(0, -1).some((part) => webDirs.includes(part.toLowerCase()))) {
+      if (!found.has(root)) found.set(root, []);
+      found.get(root).push(path);
+    }
+  }
+  const out = new Set();
+  for (const [root, paths] of found) {
+    const reached = root !== null ? npmReach(tree, root) : new Set();
+    for (const p of paths) if (!reached.has(p)) out.add(p);
+  }
+  return out;
+}
+
+/** The paths an npm package.json's main, module, bin and exports name. core._deps_npm_entries */
+export function npmEntries(data) {
+  const [max] = packValues("_DEPS_REACH_MAX");
+  const isObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+  const out = [];
+  for (const key of ["main", "module"]) {
+    if (typeof own(data, key) === "string") out.push(own(data, key));
+  }
+  const b = own(data, "bin");
+  if (typeof b === "string") out.push(b);
+  else if (isObject(b)) for (const [, v] of pyEntries(b)) if (typeof v === "string") out.push(v);
+  const stack = [own(data, "exports")];
+  while (stack.length && out.length < max) {
+    const e = stack.pop();
+    if (typeof e === "string") {
+      if (!e.includes("*")) out.push(e);
+    } else if (Array.isArray(e)) {
+      stack.push(...[...e].reverse());
+    } else if (isObject(e)) {
+      stack.push(...pyEntries(e).map(([, v]) => v).reverse());
+    }
+  }
+  return out;
+}
+
+/**
+ * The files of the npm package at `root` its entry points reach: what Node runs for the package
+ * itself and for each entry point, then the local files they require or import and the scripts
+ * they start with node (spawnedScripts), transitively. core._deps_npm_reach
+ */
+function npmReach(tree, root) {
+  const [max, localDep] = packValues("_DEPS_REACH_MAX", "_DEPS_LOCAL_DEP_RE");
+  const rx = pyRe(localDep.re, "gm");
+  const manifest = tree.manifests.get(`${root}/package.json`);
+  const data = manifest !== undefined ? loadManifest(manifest.path, manifest.content)[0] : null;
+  const entries = data !== null && typeof data === "object" && !Array.isArray(data) ? npmEntries(data) : [];
+  const queue = [tree.resolve(root), ...entries.map((e) => treeJoin(root, e)).filter((t) => t !== null).map((t) => tree.resolve(t))];
+  const seen = new Set();
+  while (queue.length && seen.size < max) {
+    const rel = queue.pop();
+    if (rel === null || rel === undefined || seen.has(rel) || !rel.startsWith(root + "/")) continue;
+    seen.add(rel);
+    const f = tree.sources.get(rel);
+    if (f === undefined || f.lang !== "js") continue;
+    const base = dirname(rel);
+    const targets = [...String(f.content).matchAll(rx)].map((m) => [base, m[2]]);
+    for (const [where, t] of spawnedScripts(String(f.content))) targets.push([where === "dir" ? base : root, t]);
+    for (const [at, target] of targets) {
+      const joined = treeJoin(at, target);
+      if (joined !== null) queue.push(tree.resolve(joined));
+    }
+  }
+  return seen;
+}
+
 /**
  * {"/"-separated path: group} for the dependency Python files under a site-packages or
  * dist-packages directory of the scan root whose top-level module or package a distribution's
@@ -240,11 +333,15 @@ export function dependencyChecks(root, files, manifests, issues, { exclude = [],
   // The import-time and agent checks of each dependency file no hook runs; with a worker pool
   // (pool.js) on its workers, and with them the cross-file follower (below), the answers taken
   // in order.
-  const checks = files.filter((f) => f.dep && (f.lang === "js" || f.lang === "py") && !run.has(posix(f.path)))
+  // (the detection round) a web app's static assets no entry point reaches are left out (webAssets)
+  const assets = webAssets(tree, files);
+  const checks = files.filter((f) => f.dep && (f.lang === "js" || f.lang === "py") && !run.has(posix(f.path))
+    && !assets.has(posix(f.path)))
     .map((f) => ["dep", [f.path, f.content, f.lang]]);
-  const groups = siteGroups(tree.root, files);
+  const code = assets.size ? files.filter((f) => !assets.has(posix(f.path))) : files;
+  const groups = siteGroups(tree.root, code);
   const follow = ["xf", {
-    files: files.filter((f) => f.dep && (f.lang === "js" || f.lang === "py"))
+    files: code.filter((f) => f.dep && (f.lang === "js" || f.lang === "py"))
       .map((f) => ({ path: f.path, lang: f.lang, dep: true, content: f.content })),
     redact: REDACT.on, siteGroups: groups,
   }];
@@ -262,7 +359,7 @@ export function dependencyChecks(root, files, manifests, issues, { exclude = [],
     for (const i of answers[0]) if (!flagged.has(posix(i.file))) out.push(i);
   } else {
     try {
-      for (const i of crossFileIssues(files, flagged, { redact: REDACT.on, siteGroups: groups })) out.push(i);
+      for (const i of crossFileIssues(code, flagged, { redact: REDACT.on, siteGroups: groups })) out.push(i);
     } catch (e) {
       if (!(e instanceof NativeError)) throw e;        // (the engine stopped: no cross-file findings, as before)
     }
