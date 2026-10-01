@@ -1396,6 +1396,34 @@ pub fn sre_search(st: &mut State, prog: &Prog) -> Result<bool, ()> {
         if prefix_len > end - ptr {
             return Ok(false);
         }
+        if let Some((lit, scan)) = prog.prefix.as_ref().filter(|(lit, _)| lit.len() == prefix_len) {
+            // each place the prefix occurs, in order (overlapping ones too):
+            // the places sre's own scan of it tries
+            let mut from = ptr;
+            loop {
+                let at = match scan.find(s, lit, from, end) {
+                    None => return Ok(false),
+                    Some(at) => at,
+                };
+                // found a potential match
+                if !budget::spend(1) {
+                    st.aborted = true;
+                    return Err(());
+                }
+                st.must_advance = false;
+                st.start = at;
+                st.ptr = at + prefix_skip;
+                if flags & INFO_LITERAL != 0 {
+                    return Ok(true);
+                }
+                if sre_match(st, prog, pc + 2 * prefix_skip, false)? {
+                    return Ok(true);
+                }
+                st.lastmark = -1;
+                st.lastindex = -1;
+                from = at + 1;
+            }
+        }
         while ptr < end {
             let c = code[prefix];
             loop {
@@ -1515,6 +1543,18 @@ pub fn sre_search(st: &mut State, prog: &Prog) -> Result<bool, ()> {
         let mut p = ptr;
         let mut toplevel = true;
         while p <= end {
+            if line_starts && p < real_end && !line_start(p) {
+                // (no match starts before the next line does: on to it)
+                match super::scan::find1(s, p, real_end, 0x0A) {
+                    None => break,
+                    Some(nl) => {
+                        toplevel = false;
+                        st.must_advance = false;
+                        p = nl + 1;
+                        continue;
+                    }
+                }
+            }
             if p < real_end && (!line_starts || line_start(p)) && fs.may_start(code, s, p, real_end) {
                 st.lastmark = -1;
                 st.lastindex = -1;
@@ -1545,6 +1585,11 @@ pub fn sre_search(st: &mut State, prog: &Prog) -> Result<bool, ()> {
     while !status && ptr < end {
         ptr += 1;
         if line_starts && !line_start(ptr) {
+            // (on to where the next line starts: s[ptr - 1] is not "\n")
+            ptr = match super::scan::find1(s, ptr, end, 0x0A) {
+                Some(nl) => nl,
+                None => end,
+            };
             continue;
         }
         st.lastmark = -1;

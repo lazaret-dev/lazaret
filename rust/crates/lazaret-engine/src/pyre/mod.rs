@@ -40,6 +40,7 @@ pub mod literal;
 pub mod matcher;
 pub mod parser;
 pub mod prog;
+pub mod scan;
 
 use constants::*;
 use matcher::State;

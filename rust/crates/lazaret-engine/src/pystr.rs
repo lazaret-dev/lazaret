@@ -76,6 +76,9 @@ pub fn contains_any(h: &[u32], needles: &[&str]) -> bool {
     needles.iter().any(|n| contains(h, n))
 }
 
+/// A text shorter than this is searched character by character.
+const SHORT: usize = 64;
+
 /// h.find(needle, start) for a Rust string needle.
 pub fn find_str(h: &[u32], needle: &str, start: usize) -> Option<usize> {
     if needle.is_ascii() {
@@ -83,21 +86,37 @@ pub fn find_str(h: &[u32], needle: &str, start: usize) -> Option<usize> {
         if nb.is_empty() {
             return if start <= h.len() { Some(start) } else { None };
         }
-        let first = nb[0] as u32;
         let last_start = h.len().checked_sub(nb.len())?;
+        if h.len() < start + SHORT {
+            // (a short text: each place its first character is)
+            let first = nb[0] as u32;
+            let mut i = start;
+            while i <= last_start {
+                match h[i..=last_start].iter().position(|&c| c == first) {
+                    None => return None,
+                    Some(k) => i += k,
+                }
+                if needle_eq(h, i, nb) {
+                    return Some(i);
+                }
+                i += 1;
+            }
+            return None;
+        }
         if gated_out_str(h, start, h.len(), needle) {
             return None;
         }
-        let mut i = start;
-        while i <= last_start {
-            match h[i..=last_start].iter().position(|&c| c == first) {
-                None => return None,
-                Some(k) => i += k,
+        // (each place the needle's rarest character is, in order: pyre/scan.rs)
+        let at = crate::pyre::scan::rarest(nb);
+        let c = nb[at] as u32;
+        let stop = last_start + at + 1;
+        let mut p = start + at;
+        while p < stop {
+            let q = crate::pyre::scan::find1(h, p, stop, c)?;
+            if needle_eq(h, q - at, nb) {
+                return Some(q - at);
             }
-            if needle_eq(h, i, nb) {
-                return Some(i);
-            }
-            i += 1;
+            p = q + 1;
         }
         None
     } else {
@@ -131,23 +150,12 @@ pub fn find_in(h: &[u32], n: &[u32], start: usize, end: usize) -> Option<usize> 
     if n.len() > end - start {
         return None;
     }
-    let first = n[0];
-    let last_start = end - n.len();
     if end >= start + crate::textgate::MIN_RANGE && n.len() >= 2 && crate::textgate::ask(h, |p| !p.may_hold(n)).unwrap_or(false) {
         return None; // (the text lacks one of its pairs: textgate.rs)
     }
-    let mut i = start;
-    while i <= last_start {
-        match h[i..=last_start].iter().position(|&c| c == first) {
-            None => return None,
-            Some(k) => i += k,
-        }
-        if h[i..i + n.len()] == *n {
-            return Some(i);
-        }
-        i += 1;
-    }
-    None
+    // (each place the needle's rarest character is, in order: pyre/scan.rs)
+    let lit = crate::pyre::scan::Literal::new(n);
+    lit.find(h, n, start, end)
 }
 
 /// h.find(c, start)

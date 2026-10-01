@@ -42,6 +42,8 @@ pub struct Prog {
     /// is `need` worth checking before a search? (not when it is `lead`'s
     /// own strings, which the search scans for anyway)
     pub check_need: bool,
+    /// sre's literal prefix (INFO), and how to scan for it (scan.rs)
+    pub prefix: Option<(Vec<u32>, super::scan::Literal)>,
     /// (development: characters the need and lead scans read; `stats`)
     #[cfg(feature = "stats")]
     pub scanned: [std::sync::atomic::AtomicU64; 4],
@@ -107,6 +109,7 @@ impl Prog {
             need: literal::need(&code),
             lead: literal::lead(&code),
             check_need: true,
+            prefix: None,
             #[cfg(feature = "stats")]
             scanned: Default::default(),
             code,
@@ -119,8 +122,22 @@ impl Prog {
             }
         }
         let prefix = prog.code.first() == Some(&INFO) && prog.code.get(2).is_some_and(|f| f & INFO_PREFIX != 0);
+        if prefix {
+            let len = prog.code.get(5).copied().unwrap_or(0) as usize;
+            if let Some(lit) = prog.code.get(7..7 + len) {
+                let lit = lit.to_vec();
+                let scan = super::scan::Literal::new(&lit);
+                prog.prefix = Some((lit, scan));
+            }
+        }
         if let (Some(need), Some(lead)) = (&prog.need, &prog.lead) {
             prog.check_need = prefix || !need.same_strings(lead);
+        }
+        if let (Some(need), Some((lit, _))) = (&prog.need, &prog.prefix) {
+            // (the prefix itself: sre's scan of it finds what the need's would)
+            if need.is_literal(lit) {
+                prog.check_need = false;
+            }
         }
         let mut ops = Vec::new();
         if visit(&prog.code, 0, n, &mut ops, 0).is_none() {

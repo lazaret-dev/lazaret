@@ -16,6 +16,7 @@
 //! can lie outside the match (a lookbehind, before `pos`).
 
 use super::constants::*;
+use super::scan::{self, Chars};
 use crate::unicode;
 
 const MAX_DEPTH: usize = 32;
@@ -99,6 +100,10 @@ pub struct Need {
     /// one character, or of one whose second position can take a character
     /// outside ASCII): most positions are passed on these two characters
     second: Vec<u128>,
+    /// the position of the strings a scan looks for first (all of them take
+    /// only ASCII characters there; the rarest such characters), and those
+    /// characters: a string can start at i only where s[i + at] is one
+    anchor: Option<(usize, Chars)>,
 }
 
 /// The ASCII-only masks of a unit (None: it can take a character outside
@@ -143,7 +148,19 @@ impl Need {
                 }
             }
         }
-        Some(Need { strings, masks, shortest, by_first, first_ascii, first_other, second })
+        let mut anchor = None;
+        let mut best = u32::MAX;
+        for j in 0..shortest {
+            let mask = masks.iter().try_fold(0u128, |m, st| st[j].map(|a| m | a));
+            if let Some(mask) = mask.filter(|&m| m != 0) {
+                let cost = scan::mask_cost(mask);
+                if cost < best {
+                    best = cost;
+                    anchor = Some((j, Chars::of_mask(mask)));
+                }
+            }
+        }
+        Some(Need { strings, masks, shortest, by_first, first_ascii, first_other, second, anchor })
     }
 
     /// Does the open gate of the text `s` is part of say none of the strings
@@ -192,6 +209,13 @@ impl Need {
         }
     }
 
+    /// Is this the one string `lit`, each character compared as it is?
+    pub fn is_literal(&self, lit: &[u32]) -> bool {
+        self.strings.len() == 1
+            && self.strings[0].len() == lit.len()
+            && self.strings[0].iter().zip(lit).all(|(u, &c)| u.fold == Fold::None && u.chars == [c])
+    }
+
     /// Are these the same strings as `other`'s?
     pub fn same_strings(&self, other: &Need) -> bool {
         self.describe() == other.describe()
@@ -227,6 +251,19 @@ impl Need {
             return None;
         }
         let last = end - self.shortest;
+        if let Some((at, chars)) = &self.anchor {
+            // (only where the anchor's characters are: in increasing order, as the plain scan)
+            let stop = last + at + 1;
+            let mut p = start + at;
+            while p < stop {
+                let q = chars.find(s, p, stop)?;
+                if self.starts_at(s, q - at, end) {
+                    return Some(q - at);
+                }
+                p = q + 1;
+            }
+            return None;
+        }
         let mut i = start;
         while i <= last {
             let c = s[i];
@@ -247,6 +284,9 @@ impl Need {
 
     /// Does one of the strings occur in s[start..end]?
     pub fn occurs(&self, s: &[u32], start: usize, end: usize) -> bool {
+        if self.anchor.is_some() {
+            return self.next_start(s, start, end).is_some();
+        }
         if end < start || end - start < self.shortest || self.gated_out(s, start, end) {
             return false;
         }
