@@ -10,7 +10,9 @@ registry, guard or `--deps` scan (the supply-chain and credential rules) is
 the native engine's whole, findings included; in project mode its rules part
 (`scan_rules`) is the engine's, and the Python engine runs the passes that
 follow it. Phase 3's cross-file follower is the engine's too (`cross_file`;
-§8). Since 0.1.8 the npm package runs the same engine compiled to
+§8). The JavaScript parser the detectors are to be rebuilt on is too
+(`js_parse`, §12): jsparse.py's trees, node for node. Since 0.1.8 the npm
+package runs the same engine compiled to
 WebAssembly (`native/lazaret.wasm`): the supply-chain tests, dependency-mode
 `scan_file`, the rules part of project-mode `scan_file` and the cross-file
 follower are the native engine's there, and the JavaScript twins of them are
@@ -165,8 +167,13 @@ rust/
     src/findings.rs          mk_issue: texts, snippets, redaction (_SecretLiterals); cap_issues
     src/token.rs             _TokenPattern (S-TOKEN, redaction): JWTs in linear time
     src/normalize.rs         NFC / NFD / NFKC / NFKD (UAX #15, Unicode 13.0 data)
+    src/jsparse/             the JavaScript parser (jsparse.py's trees: §12): scan.rs (literals,
+                             character classes, the token patterns by hand), parser.rs (tokens,
+                             reads ahead, statements, classes, modules), expr.rs (expressions,
+                             patterns, JSX), types.rs (TypeScript's types), tree.rs (the arena),
+                             out.rs (JSON)
     examples/                profiling tools (profile_calls, profile_scanfile, pattern_times,
-                             pattern_stats, show_need)
+                             pattern_stats, show_need, jsparse_bench)
   crates/lazaret-ffi/        cdylib liblazaret_native: the only `unsafe` (the C ABI; the
                              WebAssembly exports)
   .cargo/config.toml         the WebAssembly build's stack (8 MiB, placed first)
@@ -184,8 +191,8 @@ scripts/check_native_library.py         a built library against its wheel's tag;
 .github/workflows/wheels.yml            the five libraries, the wheels, installed on each platform
 python/tests/architecture/test_rust_parity_{regex,hooks,hooks_b,signs,scanfile,lexer,project,
   project_scan,crossfile,hook_commands,hexname,offscreen,lookalike}.py,
-  test_wasm_parity{,_signs,_crossfile}.py, test_rust_deps.py, test_rust_pack.py, hooks_corpus.py,
-  scanfile_corpus.py
+  test_wasm_parity{,_signs,_crossfile,_jsparse}.py, test_jsparse_native{,_b}.py, test_rust_deps.py,
+  test_rust_pack.py, hooks_corpus.py, scanfile_corpus.py, jsparse_cases.py
 ```
 
 FFI protocol: request `[u32 LE name len][name][u32 LE args len][args JSON][text]`
@@ -219,7 +226,7 @@ cd ../js && npm run build                                # native/lazaret.wasm (
 `npm run build` (`js/scripts/build-wasm.js`) runs `cargo build --profile
 wasm --offline --locked --target wasm32-unknown-unknown -p lazaret-ffi`
 (the release profile, aborting on a panic; an 8 MiB stack placed first in
-memory, so running past it traps) and copies the module (about 2.1 MB) to
+memory, so running past it traps) and copies the module (about 2.4 MB) to
 `js/native/lazaret.wasm` and `rust/NOTICE` to `js/native/NOTICE`. The npm
 tests need it, so CI builds it before them.
 
@@ -332,6 +339,8 @@ The differential tests (each module under 45 s, as every module is):
 | `test_rust_parity_hook_commands` | a hook's command read as a program (`hook_command_risk`, `_sh_parse`, `_hook_inline_code`), output thrown away and kept | realistic hook commands and a seeded corpus of separators, quotes, substitutions, redirections, network commands, wrappers and non-ASCII text |
 | `test_rust_parity_hexname`, `_offscreen`, `_lookalike` | SC-HEXSTR's hidden names and text, SC-OFFSCREEN-CODE, SC-HOMOGLYPH's look-alike names, case by case (columns in code points) | curated lines and seeded random ones (before the npm package ran the engine, these held its JavaScript twins to core) |
 | `test_wasm_parity`, `test_wasm_parity_signs`, `_crossfile` | the WebAssembly build the npm package ships against the platform library, call for call, byte for byte: `hooks_view`, `signs_view`, `scan_file` (dependency mode), `scan_rules`, and the npm binding's `cross_file` against the Python package's | the hooks corpus, the scan_file corpus, this repository's files, the follower's stream |
+| `test_jsparse_native`, `_b` | the JavaScript parser (`js_parse`, `js_parse_file`) against `jsparse.parse`, node for node as JSON text, key for key; spans (§12) | test_js_parity_parse.py's inputs (snippets, this repository's JavaScript, generated projects, soups, mutations, its linearity cases) and jsparse_cases.py's (the budgets' edges, jsparse.py's bugs, every construct that nests around the depth limit, more soups and mutations) |
+| `test_wasm_parity_jsparse` | the parser in the WebAssembly build against the library, byte for byte | the snippets, this repository's JavaScript, soups, every construct that nests at its deepest |
 
 State: zero differences in every field. The WebAssembly parity holds what
 differs between the two builds of one source — 32-bit sizes, one thread,
@@ -389,6 +398,9 @@ PYTHONPATH=src:. python3 -m unittest tests.architecture.test_rust_parity_lexer t
 PYTHONPATH=src:. python3 -m unittest tests.architecture.test_wasm_parity         # ~20 s
 PYTHONPATH=src:. python3 -m unittest tests.architecture.test_wasm_parity_signs   # ~11 s
 PYTHONPATH=src:. python3 -m unittest tests.architecture.test_wasm_parity_crossfile  # ~1 s
+PYTHONPATH=src:. python3 -m unittest tests.architecture.test_jsparse_native      # ~9 s
+PYTHONPATH=src:. python3 -m unittest tests.architecture.test_jsparse_native_b    # ~9 s
+PYTHONPATH=src:. python3 -m unittest tests.architecture.test_wasm_parity_jsparse # ~18 s
 python3 ../scripts/make_rust_tables.py --check && python3 ../scripts/check_rust_deps.py
 ```
 
@@ -582,7 +594,7 @@ open('cases.json', 'w'))"` from `python/` with `PYTHONPATH=src:.`.
 | 1 | The supply-chain tests and what they read | Done, current through 0.1.8; wired into both packages (0.1.8) |
 | 2 | Per-file rules (`scan_file`: `RULES`, `TEXT_RULES`, secrets, entropy, homoglyphs, hidden Unicode, off-screen code …), the Python and JS/TS lexers | Dependency mode done and wired in (every family, NFKC, the comment lexer, findings with their snippets and redaction). Project mode: the rules part done (`scan_rules`: every rule of `RULES` with Q-LONGLINE and SC-PIPE-SHELL, the families, `TEXT_RULES`) and wired into both packages (0.1.8); the SQL, taint and function passes that follow it not started |
 | 3 | The cross-file follower; archive reading for registry scans | The follower done and wired into both packages (`cross_file`, 0.1.8); archive reading not started |
-| 4 (optional) | The taint flow engines | Only if a Rust parser gives identical results |
+| 4 (optional) | The taint flow engines | The JavaScript parser they would read is done (`js_parse`, §12: jsparse.py's trees, node for node); the passes on it (scope resolution, data flow, constant folding of strings) not started |
 
 ## 9. Known issues
 
@@ -670,6 +682,9 @@ cross-file follower in the engine for both packages (`cross_file`, phase
    a faster hash than SipHash, a cheaper `Prog::new` for run-time patterns.
 7. Keep the benchmark harness (outside the repository today) with the
    engine, and run the 945 packages with each engine nightly.
+8. The detectors on the JavaScript parser (§12): scope resolution, data
+   flow and constant folding of strings over its trees, in place of the
+   pattern-and-window readings they rebuild.
 
 ## 11. Licensing
 
@@ -720,3 +735,128 @@ redistributed under CNRI's Python 1.6 license. For any other use, please
 contact Secret Labs AB"; Lazaret distributes the translation under
 CPython's own terms with every notice kept, the usual reading, and a
 commercial use may want a lawyer's view of that sentence.
+
+## 12. The JavaScript parser
+
+`src/jsparse/` is a port of `lazaret.scanner.jsparse` (jsparse.py, 0.1.7's
+reader for the cross-file flow engine): the first piece of the engine's
+Rust-first detectors, whose later passes (scope resolution, data flow,
+constant folding of strings) will walk its trees.
+
+**What it reads.** ECMAScript 2025 with JSX and TypeScript — the syntax of
+.js .mjs .cjs .jsx .ts .tsx .mts .cts files — into ESTree-shaped trees:
+acorn's and acorn-jsx's node types and fields, and jsparse.py's
+TSEnumDeclaration, TSModuleDeclaration, TSImportEquals and
+TSExportAssignment. TypeScript's types, interfaces, aliases, overload
+signatures, abstract members and `declare` statements are read and left
+out; Flow's annotations in a .js file are read as TypeScript's. For every
+input it builds exactly the tree jsparse.py builds — every node type, field,
+value and `line` — or fails with the same JsSyntaxError line and reason.
+
+The calls: `js_parse` (`{"ts": false, "jsx": true}` by default, as
+`jsparse.parse`) and `js_parse_file` (`{"path": …}`: the dialect
+`jsparse.dialect` picks by the file name), each answering the tree as JSON —
+jsparse.py's keys, in its order — or `{"error": {"line": n, "reason":
+"…"}}`; `"spans": true` adds each node's `start` and `end` after its `line`.
+The answer goes out serialized (`json::Value::Raw`): a tree may nest deeper
+than a `Value` should.
+
+**The tree** (`tree.rs`). An arena: `nodes`, a `Vec` of 32-byte `Node`s
+addressed by `u32` ids and renumbered after the parse in document order
+(pre-order: a child's id is above its parent's, the Program is 0), so what
+an abandoned read built (a failed speculative read, a cover grammar's
+expression, the expressions inside a type) is not in it. A node holds its
+`Kind` (ESTree's type, an enum), `line`, `start` and `end` (code points,
+half-open: `start` is where the token its line is taken from starts, so
+`line` is always the line of `start`; `end` is past its last token), a small
+enumeration `op` (an operator, a declaration's, method's, property's or
+literal's kind), boolean `flags`, and four slots. One table,
+`tree::fields(kind)`, gives each kind's fields in jsparse.py's order — key,
+type (a child, a nullable child, a list, a list with holes, a string, a
+flag, an enumeration …) and slot — and drives the JSON writer, `each_child`,
+the accessors by key (`child`, `children_of`, `text_of`, `slot`) and
+`compact`. Lists live in one `Vec<u32>` (a list id is the index of its
+length; list 0 is empty). Strings — names, cooked string values, numbers'
+and regexes' text, templates' raw text — are interned: equal names have
+equal ids, which scope resolution can compare. A string literal's cooked
+value is code points, as the engine's PyStr and jsparse.py's `value`: lone
+surrogates kept, an escaped surrogate pair the one character it encodes.
+A tree can be as deep as its input is long (member and call chains, binary
+operators and `else if` chains are read in loops and nest): walk it with an
+explicit stack, as the writer and `compact` do.
+
+**Limits.** `MAX_DEPTH` 256 (statements, expressions, types, JSX: deeper is
+"nesting too deep"); `SPECULATION_TOKENS` 4096 tokens per read ahead; all of
+a file's reads ahead, peeks included, together `SPECULATION_TOTAL` (16 ×
+4096) plus 2 per code point. The parser makes jsparse.py's reads, peeks and
+speculative reads in jsparse.py's order, so each budget runs out at the
+same token, and what reads differently once it has (a later `let x = 1`
+read as an expression) reads the same. Linear time: one token at a time,
+and a token, comment or blank run of 48 code points or more is scanned once
+and kept by its start, for the reads ahead that cross it again (jsparse.py
+scans it again each time: a 1 MB string behind 2,000 `f<` takes it 2.7 s,
+the engine 0.04 s). Recursion is bounded by the depth limit (the two chains
+jsparse.py recurses on without it are loops here). The deepest stack — a
+253-deep nesting of tagged templates, of the 51 constructs that nest —
+takes 231 KiB natively (release; the crate's test reads every construct at
+its deepest on a 1 MiB thread) and between 64 and 128 KiB in WebAssembly,
+whose stack is 8 MiB (§3). Every input gives a tree or an error, never a
+panic.
+
+**jsparse.py's bugs, reproduced:**
+
+- `(...a, b)` that is not an arrow function's parameter list raises
+  `KeyError: 'line'` (parse_paren_items sets the list's line only when its
+  first item is not a rest element): the engine answers `{"error": {"line":
+  0, "reason": "KeyError: 'line'"}}`, line 0 saying it is not a
+  JsSyntaxError.
+- Flow's `?T` (parse_primary_type) and a JSX closing tag's name
+  (`_jsx_name_text`) recurse once per `?` and per member, without a depth
+  check: a chain of about 13,000 runs out of Python's recursion limit, and
+  parse() answers "nesting too deep" at line 1. The engine reads both in
+  loops and answers so from `PY_CHAIN_LIMIT` (13,222) on, where Python's
+  limit falls for a program's top level parsed from a shallow caller.
+  Python's threshold moves with the frames already in use (22 lower from 20
+  frames deeper), so a chain within a few dozen of it may be read
+  differently: the tests stay clear of that band.
+- The speculative reads' re-scans above: time, not a different answer; the
+  engine keeps the answer and drops the cost.
+
+**Tests.** `cargo test --release` (`jsparse/tests.rs`): every construct
+that nests read at the deepest depth jsparse.py reads and failing one deeper
+(the depths are jsparse.py's), all of them on a 1 MiB stack; the budgets at
+their edges (a generic arrow function of 2,044 parameters is one, of 2,045
+is not; function_type_ahead's 256 tokens; the file's allowance spent);
+the KeyError and recursion-limit answers; spans; interned names; 6,000
+seeded soups of pieces and arbitrary code points (controls, lone
+surrogates, values past U+10FFFF) that must not panic.
+`test_jsparse_native` and `_b` compare `js_parse` with `jsparse.parse` as
+JSON text (jsparse.py's dicts written as `json.dumps` writes them, without
+recursion) on test_js_parity_parse.py's inputs — its snippets, the
+repository's JavaScript, 60 seeded projects, 1,500 soups, 300 mutations,
+and its two linearity cases, which the engine reads in well under a second
+— and on jsparse_cases.py's: 231 more snippets (the budgets' edges, the bugs
+above, surrogates, numbers, escapes, regular expressions, templates, ASI,
+comments, JSX, TypeScript, Flow, an error at every kind of token), every
+construct at 19 depths around the limit, 6,000 soups and 800 mutations;
+and the spans (without `start` and `end` the JSON is the same, and `line` is
+the line of `start`). `test_wasm_parity_jsparse` holds the WebAssembly build
+to the library, byte for byte (a Node script speaking native.js's protocol
+answers each call's SHA-256), on those snippets, sources and soups and on
+every construct at its deepest and one deeper.
+
+On real files: every .js .mjs .cjs .jsx .ts .tsx .mts .cts file of the 20
+npm packages installed on the development machine (24,428 files, 348.8 MB;
+typescript's 9.1 MB `lib/typescript.js` the largest), each read in
+`jsparse.dialect`'s dialect: identical trees for 24,424, identical errors
+for 4 (declaration files' `export = function f(…): T;`, a signature
+jsparse.py reads as a function expression), no difference. jsparse.py took
+250 s; the engine 12.0 s through the Python binding, its JSON included.
+
+**Throughput**, the release build on one thread, best of three, over those
+24,428 files: the parse 62 MB/s (the tree compacted), the parse with its
+JSON 46 MB/s; over ordinary module code (puppeteer-core's 362 ESM files,
+1.9 MB) 70 and 57 MB/s; over typescript's `lib/` (19.8 MB of bundles and
+declaration files) 60 and 50 MB/s (`cargo run --release --example
+jsparse_bench -- throughput DIR…`). jsparse.py reads 1.3 MB/s. The parser
+adds 0.2 MB to the WebAssembly module (2.25 MB → 2.45 MB).

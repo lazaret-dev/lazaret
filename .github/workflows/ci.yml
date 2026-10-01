@@ -159,7 +159,8 @@ jobs:
             tests.architecture.test_rust_parity_project tests.architecture.test_rust_parity_project_scan \
             tests.architecture.test_rust_parity_hook_commands \
             tests.architecture.test_rust_parity_hexname tests.architecture.test_rust_parity_offscreen \
-            tests.architecture.test_rust_parity_lookalike tests.architecture.test_rust_parity_crossfile -v
+            tests.architecture.test_rust_parity_lookalike tests.architecture.test_rust_parity_crossfile \
+            tests.architecture.test_jsparse_native tests.architecture.test_jsparse_native_b -v
       # The WebAssembly build (the npm package's engine) against this library:
       # the same answers for every case of the corpora. Node is on the runners.
       - run: rustup target add wasm32-unknown-unknown
@@ -174,7 +175,7 @@ jobs:
           PYTHONPATH=src python -c "from lazaret.scanner import _native; assert _native.available(), _native.load_error()"
           node -e 'import("../js/src/lib/native.js").then((n) => { if (!n.available()) process.exit(1); console.log("npm engine", n.call("version").version); })'
           python -m unittest tests.architecture.test_wasm_parity tests.architecture.test_wasm_parity_signs \
-            tests.architecture.test_wasm_parity_crossfile -v
+            tests.architecture.test_wasm_parity_crossfile tests.architecture.test_wasm_parity_jsparse -v
       - name: The whole suite, the native engine answering
         if: matrix.os == 'ubuntu-latest'
         working-directory: python
