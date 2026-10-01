@@ -72,7 +72,7 @@ class BuildTests(unittest.TestCase):
         meta = read_member(self.wheel, f"lazaret-{self.version}.dist-info/METADATA").decode()
         self.assertIn(f"Version: {self.version}\n", meta)
         self.assertIn("Requires-Python: >=3.10\n", meta)
-        self.assertIn("License-Expression: Apache-2.0\n", meta)   # PEP 639; was "License:"
+        self.assertIn("License-Expression: Apache-2.0 AND Unicode-3.0\n", meta)   # PEP 639; was "License:"
         self.assertNotIn("Requires-Dist", meta)
 
     def test_record_hashes_match(self):
@@ -152,15 +152,17 @@ class BuildTests(unittest.TestCase):
         """Part of the native engine is a Rust translation of CPython code
         (rust/NOTICE): a platform wheel carries CPython's LICENSE and that
         notice as license files and declares both licenses. The pure wheel
-        and the sdist hold none of that code, and say Apache-2.0 alone."""
+        and the sdist hold none of that code: Apache-2.0, and Unicode-3.0 for
+        the Unicode data they all carry."""
         dist_info = f"lazaret-{self.version}.dist-info"
         with tempfile.TemporaryDirectory() as d:
             lib = pathlib.Path(d, "built.so")
             lib.write_bytes(b"\x7fELF-native-engine")
             wheel = os.path.join(d, self.b.build_platform_wheel(d, "manylinux_2_28_x86_64", str(lib)))
             meta = read_member(wheel, f"{dist_info}/METADATA").decode()
-            self.assertIn("License-Expression: Apache-2.0 AND Python-2.0.1\n", meta)
-            self.assertEqual(re.findall(r"^License-File: (.+)$", meta, re.M), ["LICENSE", "LICENSE-PYTHON", "NOTICE"])
+            self.assertIn("License-Expression: Apache-2.0 AND Python-2.0.1 AND Unicode-3.0\n", meta)
+            self.assertEqual(re.findall(r"^License-File: (.+)$", meta, re.M),
+                             ["LICENSE", "LICENSE-UNICODE", "LICENSE-PYTHON", "NOTICE"])
             for name in ("LICENSE-PYTHON", "NOTICE"):
                 with self.subTest(name=name):
                     self.assertEqual(read_member(wheel, f"{dist_info}/licenses/{name}"),
@@ -172,13 +174,13 @@ class BuildTests(unittest.TestCase):
                     self.b.build_platform_wheel(d, "win_amd64", str(lib))
                 self.assertIn("missing", str(cm.exception))
         pure = read_member(self.wheel, f"{dist_info}/METADATA").decode()
-        self.assertIn("License-Expression: Apache-2.0\n", pure)
-        self.assertEqual(re.findall(r"^License-File: (.+)$", pure, re.M), ["LICENSE"])
+        self.assertIn("License-Expression: Apache-2.0 AND Unicode-3.0\n", pure)
+        self.assertEqual(re.findall(r"^License-File: (.+)$", pure, re.M), ["LICENSE", "LICENSE-UNICODE"])
         self.assertFalse([n for n in self.names() if n.endswith(("/LICENSE-PYTHON", "/NOTICE"))])
         with tarfile.open(self.sdist) as t:
             self.assertFalse([n for n in t.getnames() if n.endswith(("/LICENSE-PYTHON", "/NOTICE"))])
             pkg_info = t.extractfile(f"lazaret-{self.version}/PKG-INFO").read().decode()
-        self.assertIn("License-Expression: Apache-2.0\n", pkg_info)
+        self.assertIn("License-Expression: Apache-2.0 AND Unicode-3.0\n", pkg_info)
 
     def test_the_command_line_builds_a_platform_wheel_per_platform(self):
         """Release CI: `lazaret_build.py dist --platform TAG=LIBRARY …` writes the

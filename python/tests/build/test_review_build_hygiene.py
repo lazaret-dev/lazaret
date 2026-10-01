@@ -34,7 +34,7 @@ TEXT_SUFFIXES = (".py", ".sql", ".html", ".md", ".toml")
 def copy_python_tree(dest):
     """The files the backend reads, copied to dest (no caches)."""
     dest = pathlib.Path(dest)
-    for name in ("pyproject.toml", "README.md", "LICENSE"):
+    for name in ("pyproject.toml", "README.md", "LICENSE", "LICENSE-UNICODE"):
         shutil.copy2(PY_ROOT / name, dest / name)
     ignore = shutil.ignore_patterns("__pycache__", "*.pyc")
     shutil.copytree(PY_ROOT / "_build", dest / "_build", ignore=ignore)
@@ -104,7 +104,7 @@ class AllowlistTests(unittest.TestCase):
         with tarfile.open(self.tree.sdist()) as tf:
             base = f"lazaret-{self.tree.b.version()}/"
             names = sorted(n[len(base):] for n in tf.getnames())
-        self.assertEqual(names, sorted(["LICENSE", "PKG-INFO", "README.md", "pyproject.toml",
+        self.assertEqual(names, sorted(["LICENSE", "LICENSE-UNICODE", "PKG-INFO", "README.md", "pyproject.toml",
                                         "_build/lazaret_build.py"]
                                        + ["src/" + n for n in expected]))
 
@@ -203,7 +203,7 @@ class CrossPlatformBytesTests(unittest.TestCase):
         self.addCleanup(crlf.close)
         converted = 0
         for path in crlf.root.rglob("*"):
-            if path.is_file() and (path.suffix in TEXT_SUFFIXES or path.name == "LICENSE"):
+            if path.is_file() and (path.suffix in TEXT_SUFFIXES or path.name.startswith("LICENSE")):
                 data = path.read_bytes()
                 path.write_bytes(data.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
                 converted += 1
@@ -226,10 +226,12 @@ class MetadataTests(unittest.TestCase):
             cls.meta = z.read(f"{dist_info}/METADATA").decode("utf-8")
             cls.names = z.namelist()
             cls.license = z.read(f"{dist_info}/licenses/LICENSE")
+            cls.unicode_license = z.read(f"{dist_info}/licenses/LICENSE-UNICODE")
         with tarfile.open(cls.tree.sdist()) as tf:
             base = f"lazaret-{cls.version}/"
             cls.pkg_info = tf.extractfile(base + "PKG-INFO").read().decode("utf-8")
             cls.sdist_license = tf.extractfile(base + "LICENSE").read()
+            cls.sdist_unicode_license = tf.extractfile(base + "LICENSE-UNICODE").read()
         cls.headers = cls.meta.split("\n\n", 1)[0].splitlines()
 
     @classmethod
@@ -241,14 +243,17 @@ class MetadataTests(unittest.TestCase):
 
     def test_pep_639_license_fields(self):
         self.assertEqual(self.headers[0], "Metadata-Version: 2.4")
-        self.assertEqual(self.field("License-Expression"), ["Apache-2.0"])
-        self.assertEqual(self.field("License-File"), ["LICENSE"])
+        # the Unicode 13.0 table and the dashboard's Unicode and codec tables are Unicode data (0.1.8)
+        self.assertEqual(self.field("License-Expression"), ["Apache-2.0 AND Unicode-3.0"])
+        self.assertEqual(self.field("License-File"), ["LICENSE", "LICENSE-UNICODE"])
         self.assertEqual(self.field("License"), [])      # superseded by License-Expression
         self.assertEqual([c for c in self.field("Classifier") if c.startswith("License ::")], [])
         # License-File paths resolve in both artifacts
         self.assertIn(f"lazaret-{self.version}.dist-info/licenses/LICENSE", self.names)
         self.assertEqual(self.license, self.sdist_license)
         self.assertIn(b"Apache License", self.license)
+        self.assertEqual(self.unicode_license, self.sdist_unicode_license)
+        self.assertIn("UNICODE LICENSE V3".encode(), self.unicode_license)
 
     def test_python_versions_and_urls(self):
         classifiers = self.field("Classifier")

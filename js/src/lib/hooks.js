@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 AND Python-2.0.1
 // Following an install hook to the files it runs, and the install-script and
 // import-time tests — JS twin of lazaret.scanner.core's hook_script_targets,
 // install_script_risk, import_time_risk and node_candidates. Results are
@@ -72,6 +73,11 @@ function applyPath(comps, path) {
 }
 
 // ---- Tokenizing a hook command: Python's shlex ------------------------------
+// shlexSplit is a translation into JavaScript of the token state machine of
+// CPython's Lib/shlex.py (shlex.read_token), distributed under CPython's
+// license, the PSF License Version 2 (../../LICENSE-PYTHON; what changed:
+// ../../NOTICE):
+//   Copyright (c) 2001 Python Software Foundation; All Rights Reserved
 // core._hook_tokens reads a command with shlex.shlex(cmd, posix=True,
 // punctuation_chars=True), whitespace_split = True and no commenters.
 // shlex.read_token is the same state machine in CPython 3.10 through 3.14;

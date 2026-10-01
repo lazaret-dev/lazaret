@@ -70,11 +70,13 @@ test("architecture: public export surface (index.js) is importable and has the c
 });
 
 
-test("architecture: zero dependencies, shipped files only, Apache-2.0", () => {
+test("architecture: zero dependencies, shipped files only, its licenses", () => {
   const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   assert.equal(pkg.dependencies, undefined);
   assert.equal(pkg.devDependencies, undefined);
-  assert.deepEqual(pkg.files, ["bin/", "src/", "README.md", "LICENSE",
+  assert.deepEqual(pkg.files, ["bin/", "src/", "README.md", "LICENSE", "LICENSE-PYTHON", "LICENSE-UNICODE", "NOTICE",
     "!**/.*", "!**/*.pem", "!**/*.key", "!**/id_rsa*", "!**/id_ed25519*"]);   // never pack dotfiles (.env*, ._*, .DS_Store) or keys
-  assert.equal(pkg.license, "Apache-2.0");
+  // shlexSplit (lib/hooks.js) is a translation of CPython's shlex; lib/unicode13.js and lib/codecs.js hold
+  // Unicode data (NOTICE): the package carries both licenses and declares them
+  assert.equal(pkg.license, "Apache-2.0 AND Python-2.0.1 AND Unicode-3.0");
 });

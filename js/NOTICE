@@ -1,0 +1,52 @@
+Lazaret for npm: notices
+========================
+
+This package is Lazaret's own work, licensed under the Apache License 2.0
+(LICENSE), except for the parts listed below. The package's license is
+Apache-2.0 AND Python-2.0.1 AND Unicode-3.0.
+
+
+A translation of CPython code
+-----------------------------
+
+    src/lib/hooks.js     in part: shlexSplit, from Lib/shlex.py
+                         (shlex.read_token)
+
+shlexSplit is a translation into JavaScript of the token state machine of
+the shlex module of CPython (https://github.com/python/cpython), the
+reference implementation of Python, so that this package splits a hook
+command as Lazaret's Python package does. It is distributed under CPython's
+license: the Python Software Foundation License Version 2 and the older
+licenses of CPython's license stack, in LICENSE-PYTHON (CPython 3.14.0's
+LICENSE file, unchanged; SPDX: Python-2.0.1).
+
+    Copyright (c) 2001 Python Software Foundation; All Rights Reserved
+
+Lib/shlex.py carries no notice of its own; CPython's license covers it.
+
+Summary of the changes (section 3 of the PSF License):
+- Translated from Python into JavaScript, as one loop over the command's
+  UTF-16 code units; a run of ordinary characters is copied as a slice.
+- One configuration of shlex only: posix=True, punctuation_chars=True,
+  whitespace_split=True, no commenters.
+- Where shlex raises ValueError (a quote left open, a backslash at the end)
+  it returns null.
+
+src/lib/codecs.js lists, in PY_CODEC_ALIASES, the codec names CPython's
+encodings package resolves (encodings.aliases and its modules), under the
+same license.
+
+
+Unicode data
+------------
+
+    src/lib/unicode13.js   the code points Unicode 13.0 assigns
+    src/lib/codecs.js      in part: SINGLE_BYTE_CODECS, the characters
+                           each single-byte codec decodes bytes to
+
+These tables are read from Python 3.10's unicodedata and from Python's
+codecs, whose single-byte codecs CPython made for the most part from the
+Unicode Consortium's mapping tables. They are Unicode data, distributed under
+the Unicode License v3 (LICENSE-UNICODE; SPDX: Unicode-3.0):
+
+    Copyright © 1991-2026 Unicode, Inc.

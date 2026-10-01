@@ -37,9 +37,11 @@ lazaret/_native/<name>, which passes the check above for the wheel's tag,
 and the native engine's license files: part of the engine is a translation
 of CPython code (rust/NOTICE), so a platform wheel carries CPython's license
 and that notice (rust/LICENSE-PYTHON, rust/NOTICE) and declares
-"Apache-2.0 AND Python-2.0.1"; its METADATA differs from the pure wheel's in
-those license fields only. Every wheel's RECORD must match its files, and
-every License-File it names must be in it.
+"Apache-2.0 AND Python-2.0.1 AND Unicode-3.0"; its METADATA differs from the
+pure wheel's in those license fields only. The pure wheel declares
+"Apache-2.0 AND Unicode-3.0" (the Unicode data every wheel carries, with
+LICENSE-UNICODE). Every wheel's RECORD must match its files, and every
+License-File it names must be in it.
 
 Standard library only: ELF, Mach-O and PE headers are read here, so one
 Linux job can check the libraries of every platform. Exit status 0 when
@@ -63,7 +65,10 @@ NAME = "lazaret"
 REPO = pathlib.Path(__file__).resolve().parent.parent
 # What a platform wheel adds to the pure wheel's license fields (the build
 # backend's NATIVE_LICENSE_EXPRESSION and NATIVE_LICENSE_FILES).
-NATIVE_LICENSE_EXPRESSION = "Apache-2.0 AND Python-2.0.1"
+NATIVE_LICENSE_EXPRESSION = "Apache-2.0 AND Python-2.0.1 AND Unicode-3.0"
+# The pure wheel's (and the sdist's): the Unicode data it carries (0.1.8).
+PURE_LICENSE_EXPRESSION = "Apache-2.0 AND Unicode-3.0"
+PURE_LICENSE_FILES = ("LICENSE", "LICENSE-UNICODE")
 NATIVE_LICENSE_FILES = ("LICENSE-PYTHON", "NOTICE")
 PSF_NOTICE = "Copyright (c) 2001 Python Software Foundation; All Rights Reserved"
 
@@ -618,7 +623,13 @@ def _license_problems(members, dist_info, metadata, native):
     for name in files:
         if f"{dist_info}/licenses/{name}" not in members:
             problems.append(f"names License-File {name}, which is not in {dist_info}/licenses/")
+    for name in PURE_LICENSE_FILES:
+        if name not in files:
+            problems.append(f"does not name {name} as a License-File")
     if not native:
+        if expressions != [PURE_LICENSE_EXPRESSION]:
+            problems.append(f"its License-Expression is {' '.join(expressions) or 'missing'}, not "
+                            f"{PURE_LICENSE_EXPRESSION}")
         return problems
     if expressions != [NATIVE_LICENSE_EXPRESSION]:
         problems.append(f"its License-Expression is {' '.join(expressions) or 'missing'}, not "

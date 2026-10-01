@@ -18,7 +18,10 @@ from tests import _support
 
 RUST = os.path.join(_support.REPO_ROOT, "rust")
 SRC = os.path.join(RUST, "crates", "lazaret-engine", "src")
-EXPRESSION = "Apache-2.0 AND Python-2.0.1"
+# the crates' and the platform wheels' license (with generated/unicode13.rs's Unicode data, 0.1.8) …
+EXPRESSION = "Apache-2.0 AND Python-2.0.1 AND Unicode-3.0"
+# … and a translated file's
+FILE_EXPRESSION = "Apache-2.0 AND Python-2.0.1"
 PSF = "Copyright (c) 2001 Python Software Foundation; All Rights Reserved"
 # CPython v3.14.0's LICENSE: replace it only with another release's LICENSE, whole.
 LICENSE_PYTHON_SHA256 = "b0e25a78cffb43f4d92de8b61ccfa1f1f98ecbc22330b54b5251e7b6ba010231"
@@ -79,7 +82,7 @@ class NoticeTests(unittest.TestCase):
         for name, lines in TRANSLATED.items():
             with self.subTest(file=name):
                 text = read(SRC, *name.split("/"))
-                self.assertTrue(text.startswith(f"// SPDX-License-Identifier: {EXPRESSION}\n"))
+                self.assertTrue(text.startswith(f"// SPDX-License-Identifier: {FILE_EXPRESSION}\n"))
                 head = header(text)
                 self.assertIn("rust/NOTICE", head)
                 self.assertIn("rust/LICENSE-PYTHON", head)

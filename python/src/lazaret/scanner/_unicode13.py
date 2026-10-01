@@ -6,6 +6,10 @@ before scanning a source file (pin), so a later addition (U+10D4A is a letter
 on Python 3.14 and Node 22, unassigned on 3.10-3.13) reads the same on every
 Python and Node version: for the code points Unicode 13.0 assigns, \\w, \\d,
 \\s and NFKC are the same on all of them.
+
+Data of the Unicode Character Database 13.0 (read from Python 3.10's
+unicodedata), distributed under the Unicode License v3 (LICENSE-UNICODE):
+    Copyright © 1991-2026 Unicode, Inc.
 """
 import bisect
 

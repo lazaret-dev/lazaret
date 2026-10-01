@@ -48,6 +48,12 @@ HEADER = """\
 // SINGLE_BYTE_CODECS: single-byte codec -> the characters bytes 0x80..0xFF
 // decode to (all 256 bytes when 0x00..0x7F are not ASCII); U+FFFD where the
 // codec leaves a byte undefined (Python's errors="replace").
+//
+// SINGLE_BYTE_CODECS is Unicode data — CPython made its single-byte codecs
+// for the most part from the Unicode Consortium's mapping tables —
+// distributed under the Unicode License v3 (LICENSE-UNICODE):
+//   Copyright © 1991-2026 Unicode, Inc.
+// PY_CODEC_ALIASES lists the codec names CPython's encodings package resolves.
 """
 
 

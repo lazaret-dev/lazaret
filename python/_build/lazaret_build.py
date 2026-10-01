@@ -25,7 +25,7 @@ What ships is an allowlist, not "whatever is in the directory": the wheel
 holds the package's *.py, *.sql, *.html and *.json files (and py.typed, if
 one is added) — a platform wheel also the native engine's library, named by
 LAZARET_NATIVE_LIBRARY (see _native_payload) — and the sdist adds
-pyproject.toml, README.md, LICENSE, PKG-INFO and _build/*.py. Any other
+pyproject.toml, README.md, LICENSE, LICENSE-UNICODE, PKG-INFO and _build/*.py. Any other
 file under src/lazaret or _build (a .env, an editor swap file, a macOS ._*
 twin, a .orig backup, a symlink) stops the build with an error listing it,
 instead of being published. Tests and fixtures never ship (see
@@ -55,10 +55,13 @@ METADATA = {
     "Summary": "Static security, supply-chain and quality analysis for Python, JavaScript and SQL",
     "Requires-Python": ">=3.10",
     # PEP 639 (Metadata-Version 2.4): an SPDX expression plus the license
-    # file's path (in the sdist root; in the wheel under .dist-info/licenses/).
+    # files' paths (in the sdist root; in the wheel under .dist-info/licenses/).
     # No "License ::" classifier: PyPI rejects it next to License-Expression.
-    "License-Expression": "Apache-2.0",
-    "License-File": "LICENSE",
+    # Unicode-3.0: the Unicode 13.0 table (scanner/_unicode13.py) and the
+    # dashboard's copies of the npm engine's Unicode and codec tables are
+    # Unicode data (0.1.8).
+    "License-Expression": "Apache-2.0 AND Unicode-3.0",
+    "License-File": ["LICENSE", "LICENSE-UNICODE"],
     "Keywords": "security,supply-chain,sast,taint-analysis,sca,pypi,npm",
     "Project-URL": [
         "Homepage, https://lazaret.dev",
@@ -89,7 +92,7 @@ REQUIRES_DIST: list[str] = []
 # distributed under CPython's license: so it also carries CPython's LICENSE
 # and the notice, as license files, and says so in its license expression.
 # The pure wheel and the sdist hold none of that code.
-NATIVE_LICENSE_EXPRESSION = "Apache-2.0 AND Python-2.0.1"
+NATIVE_LICENSE_EXPRESSION = "Apache-2.0 AND Python-2.0.1 AND Unicode-3.0"
 NATIVE_LICENSE_FILES = {"LICENSE-PYTHON": RUST / "LICENSE-PYTHON", "NOTICE": RUST / "NOTICE"}
 
 CONSOLE_SCRIPTS = {
@@ -100,7 +103,7 @@ CONSOLE_SCRIPTS = {
     "lazaret-guard": "lazaret.registry.guard:main",
 }
 
-SDIST_TOP_FILES = ["pyproject.toml", "README.md", "LICENSE"]
+SDIST_TOP_FILES = ["pyproject.toml", "README.md", "LICENSE", "LICENSE-UNICODE"]
 
 # The package allowlist: exactly these kinds of files ship from src/lazaret.
 # .json ships the received-code detector's shared data spec (received_spec.json).
@@ -114,7 +117,7 @@ _SKIP_DIRS = {"__pycache__"}
 # Files packed with LF line endings whatever the checkout has (a Windows
 # checkout with core.autocrlf would otherwise change every member's bytes).
 _TEXT_SUFFIXES = (".py", ".sql", ".html", ".md", ".toml", ".txt", ".json")
-_TEXT_NAMES = frozenset({"LICENSE", "LICENSE-PYTHON", "NOTICE", "PKG-INFO", "py.typed"})
+_TEXT_NAMES = frozenset({"LICENSE", "LICENSE-PYTHON", "LICENSE-UNICODE", "NOTICE", "PKG-INFO", "py.typed"})
 # Zip "made by" system: 3 = Unix. zipfile defaults to 0 (MS-DOS) on Windows,
 # which would change every central-directory record there.
 _ZIP_CREATE_SYSTEM = 3
@@ -318,9 +321,10 @@ def _write_wheel(directory: str, payload: dict[str, bytes], platform: str = "any
         f"Wheel-Version: 1.0\nGenerator: lazaret_build\nRoot-Is-Purelib: {purelib}\nTag: py3-none-{platform}\n"
     ).encode("utf-8"))
     writer.add(f"{dist_info}/entry_points.txt", _entry_points_text().encode("utf-8"))
-    license_file = ROOT / "LICENSE"
-    if license_file.exists():
-        writer.add(f"{dist_info}/licenses/LICENSE", license_file.read_bytes())
+    for name in METADATA["License-File"]:
+        license_file = ROOT / name
+        if license_file.exists():
+            writer.add(f"{dist_info}/licenses/{name}", license_file.read_bytes())
     if native:
         for name, path in NATIVE_LICENSE_FILES.items():
             writer.add(f"{dist_info}/licenses/{name}", path.read_bytes())
