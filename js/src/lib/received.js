@@ -175,6 +175,30 @@ const DL_FSTRING_HOLE_RE = dlRe("_DL_FSTRING_HOLE_RE", "g");
 export const DL_PREFIX_CHARS = [...DL_SPEC_CHARS._DL_PREFIX_CHARS];
 const PREFIX_CHARS = new Set(DL_PREFIX_CHARS);
 
+/**
+ * Is offset p code where seg reads it: outside its string literals, or in a
+ * template literal's or an f-string's interpolation? A program written in a
+ * string literal is text until something runs it: a network call named in
+ * that text is not a value the code around the literal receives. core._dl_in_code.
+ */
+function inCode(seg, p) {
+  const i = seg.literalAt(p);
+  if (i < 0) return true;
+  const row = seg.row, s = seg.litS[i], e = seg.litE[i];
+  let rx;
+  if (row[s] === BT) rx = DL_TEMPLATE_HOLE_RE;
+  else {
+    let pre = [...row.slice(Math.max(seg.lo, cpBack(row, s, 2)), s)];
+    while (pre.length && !PREFIX_CHARS.has(pre[0])) pre = pre.slice(1);
+    if (!pre.includes("f") && !pre.includes("F")) return false;
+    rx = DL_FSTRING_HOLE_RE;
+  }
+  for (const m of row.slice(s, e).matchAll(rx)) {
+    const a = s + m.index;
+    if (a < p && p < a + m[0].length) return true;
+  }
+  return false;
+}
 const DL_BIND_RE = dlReNamed("_DL_BIND_RE", "g");
 const DL_PARAMS_RE = dlReNamed("_DL_PARAMS_RE", "g");
 const DL_FN_HEADER_RE = dlReNamed("_DL_FN_HEADER_RE");
@@ -647,6 +671,12 @@ class Row {
     for (const seg of this.indexed) seg.bound(name);
   }
 
+  /** Is a source read inside [lo, hi), in seg's code (inCode)? core._DlRow.received_in. */
+  receivedIn(seg, lo, hi) {
+    const { srcS, srcE } = this;
+    for (let i = bisectLeft(srcS, lo); i < srcS.length && srcE[i] <= hi; i++) if (inCode(seg, srcS[i])) return true;
+    return false;
+  }
 
   phaseAt(o) {
     for (const ph of this.phases) if (ph.lo <= o && o < ph.hi && ph.literalAt(o) < 0) return ph;
@@ -677,7 +707,7 @@ class Row {
       starts.push(x + 1);
     }
     ends.push(close === null ? end : close);
-    const { srcS, srcE } = this;
+    const { srcS } = this;
     let live = [], holes = [[], []];
     if (taint !== null && this.dirty) { live = this.live(ph); holes = ph.liveHoles(taint, k); }
     const last = starts.length - 1;
@@ -689,7 +719,7 @@ class Row {
     const s = starts[0], e = ends[0];
     DL_EMBED_RE.lastIndex = 0;
     if (!DL_EMBED_RE.test(row.slice(s, e))) return false;
-    return within(srcS, srcE, s, e) || anyIn(live, s, e) || within(holes[0], holes[1], s, e);
+    return this.receivedIn(ph, s, e) || anyIn(live, s, e) || within(holes[0], holes[1], s, e);
   }
 }
 
@@ -868,7 +898,7 @@ class Reader {
       const rest = [];
       for (const f of pending) {
         const [, lo, hi, , cont, seg] = f;
-        if (!(within(rd.srcS, rd.srcE, lo, hi) || (cont && aboveLive) || (rd.dirty && anyIn(rd.live(seg), lo, hi)))) {
+        if (!(rd.receivedIn(seg, lo, hi) || (cont && aboveLive) || (rd.dirty && anyIn(rd.live(seg), lo, hi)))) {
           rest.push(f);
           continue;
         }

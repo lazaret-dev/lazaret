@@ -605,6 +605,31 @@ impl Code {
     }
 }
 
+/// core._dl_in_code: is offset pos code where `code` reads it — outside its
+/// string literals, or in a template literal's or an f-string's interpolation?
+/// A program written in a string literal is text until something runs it.
+fn in_code(p: &Pack, row: &[u32], code: &Code, pos: usize) -> bool {
+    let i = match code.literal_at(pos) {
+        None => return true,
+        Some(i) => i,
+    };
+    let (s, e) = (code.lit_s[i], code.lit_e[i]);
+    let holes = if row[s] == c('`') {
+        p.re("_DL_TEMPLATE_HOLE_RE")
+    } else {
+        let prefix_chars = p.strs("_DL_PREFIX_CHARS");
+        let mut pre = pystr::sub(row, code.lo.max(s.saturating_sub(2)), s);
+        while !pre.is_empty() && !prefix_chars.iter().any(|x| x.len() == 1 && x[0] == pre[0]) {
+            pre = &pre[1..];
+        }
+        if !pre.contains(&c('f')) && !pre.contains(&c('F')) {
+            return false;
+        }
+        p.re("_DL_FSTRING_HOLE_RE")
+    };
+    holes.finditer_at(row, s as isize, e as isize).any(|m| m.start() < pos && pos < m.end())
+}
+
 /// core._dl_chain_index
 fn chain_index(p: &Pack, code: &[u32], lo: usize) -> HashMap<PyStr, Vec<usize>> {
     let mut by: HashMap<PyStr, Vec<usize>> = HashMap::new();
@@ -920,6 +945,17 @@ impl<'r> Row<'r> {
         }
     }
 
+    /// _DlRow.received_in: is a source read inside [lo, hi), in seg's code (in_code)?
+    fn received_in(&self, p: &Pack, seg: usize, lo: usize, hi: usize) -> bool {
+        let mut i = self.src_s.partition_point(|&x| x < lo);
+        while i < self.src_s.len() && self.src_e[i] <= hi {
+            if in_code(p, self.row, &self.codes.all[seg], self.src_s[i]) {
+                return true;
+            }
+            i += 1;
+        }
+        false
+    }
 
     fn phase_at(&mut self, p: &Pack, lim: &Lim, o: usize) -> Option<usize> {
         for &ph in &self.phases {
@@ -1000,7 +1036,7 @@ impl<'r> Row<'r> {
         if p.re("_DL_EMBED_RE").match_at(row, s as isize, e as isize).is_none() {
             return false;
         }
-        dl_within(&self.src_s, &self.src_e, s, e) || dl_any(&live, s, e) || dl_within(&holes.0, &holes.1, s, e)
+        self.received_in(p, ph, s, e) || dl_any(&live, s, e) || dl_within(&holes.0, &holes.1, s, e)
     }
 }
 
@@ -1191,7 +1227,7 @@ impl<'t, 'p> Reader<'t, 'p> {
             let mut grew = false;
             let mut rest: Vec<Fact> = Vec::new();
             for f in pending {
-                let hit = dl_within(&rd.src_s, &rd.src_e, f.lo, f.hi)
+                let hit = rd.received_in(p, f.seg, f.lo, f.hi)
                     || (f.continued && above_live)
                     || (rd.dirty && rd.live_any(p, f.seg, &self.taint, f.lo, f.hi));
                 if !hit {

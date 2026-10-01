@@ -12470,6 +12470,33 @@ def _dl_within(starts, ends, lo, hi):
     return i < len(starts) and ends[i] <= hi
 
 
+def _dl_in_code(seg, p):
+    """Is offset p code where seg reads it: outside its string literals, or in
+    a template literal's or an f-string's interpolation? A program written in
+    a string literal (for `node -e`, for exec) is text until something runs
+    it, so a network call named in that text is not a value the code around
+    the literal receives (xmlhttprequest spawns `node -e` with a program
+    that makes a request and writes the response to a file). The literal's
+    text is read as code of its own where a binding or a call in it is read
+    (segment_at, phase_at)."""
+    i = seg.literal_at(p)
+    if i < 0:
+        return True
+    row, s, e = seg.row, seg.lit_s[i], seg.lit_e[i]
+    if row[s] == "`":
+        holes = _DL_TEMPLATE_HOLE_RE
+    else:
+        pre = row[max(seg.lo, s - 2):s]
+        while pre and pre[0] not in _DL_PREFIX_CHARS:
+            pre = pre[1:]
+        if "f" not in pre and "F" not in pre:
+            return False
+        holes = _DL_FSTRING_HOLE_RE
+    for m in holes.finditer(row, s, e):
+        if m.start() < p < m.end():
+            return True
+    return False
+
 
 class _DlTaint:
     """The names holding a received value, with the row each was last bound
@@ -12787,6 +12814,15 @@ class _DlRow:
         for seg in self.indexed:
             seg.bound(name)
 
+    def received_in(self, seg, lo, hi):
+        """Is a source read inside [lo, hi), in seg's code (_dl_in_code)?"""
+        src_s, src_e = self.src_s, self.src_e
+        i = bisect.bisect_left(src_s, lo)
+        while i < len(src_s) and src_e[i] <= hi:
+            if _dl_in_code(seg, src_s[i]):
+                return True
+            i += 1
+        return False
 
     def phase_at(self, o):
         """The code a call's '(' at offset o is read in: one where it is not
@@ -12829,7 +12865,7 @@ class _DlRow:
             ends.append(x)
             starts.append(x + 1)
         ends.append(end if close is None else close)
-        src_s, src_e = self.src_s, self.src_e
+        src_s = self.src_s
         if taint is not None and self.dirty:
             live, holes = self.live(ph), ph.live_holes(taint, k)
         else:
@@ -12845,7 +12881,7 @@ class _DlRow:
         s, e = starts[0], ends[0]
         if _DL_EMBED_RE.match(row, s, e) is None:
             return False
-        return _dl_within(src_s, src_e, s, e) or _dl_any(live, s, e) or _dl_within(holes[0], holes[1], s, e)
+        return self.received_in(ph, s, e) or _dl_any(live, s, e) or _dl_within(holes[0], holes[1], s, e)
 
 
 class _DlReader:
@@ -12942,7 +12978,7 @@ class _DlReader:
             rest = []
             for f in pending:
                 lo, hi, seg = f[1], f[2], f[5]
-                if not (_dl_within(rd.src_s, rd.src_e, lo, hi) or (f[4] and above_live)
+                if not (rd.received_in(seg, lo, hi) or (f[4] and above_live)
                         or (rd.dirty and _dl_any(rd.live(seg), lo, hi))):
                     rest.append(f)
                     continue

