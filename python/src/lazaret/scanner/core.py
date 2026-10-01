@@ -4591,6 +4591,16 @@ def scan_file(path, content, lang, dep=False):
     return _scan_source(path, content, lang, dep, _scan_file)
 
 
+def scan_file_after_rules(path, content, lang, rules):
+    """scan_file in project mode with its first part already read: `rules`,
+    the findings scan_rules gives for the file (the native engine's,
+    engine.py), then the passes that follow them, the suppression markers
+    and the cap, as scan_file runs them."""
+    def scan(path, content, lines, lang, dep, ctx, issues):
+        _scan_file(path, content, lines, lang, dep, ctx, issues, rules=rules)
+    return _scan_source(path, content, lang, False, scan)
+
+
 def scan_rules(path, content, lang):
     """The first part of scan_file in project mode (_scan_rules): the
     findings of the pattern rules and the families on every line, the
@@ -5180,8 +5190,11 @@ def _hexstr_text_rule(hidden):
     return rule
 
 
-def _scan_file(path, content, lines, lang, dep, ctx, issues):
-    _scan_rules(path, content, lines, lang, dep, ctx, issues)
+def _scan_file(path, content, lines, lang, dep, ctx, issues, rules=None):
+    if rules is None:
+        _scan_rules(path, content, lines, lang, dep, ctx, issues)
+    else:
+        issues.extend(rules)                # (scan_file_after_rules)
     if dep:
         return
     ctx.check_time()
@@ -16732,8 +16745,9 @@ def scan_project(root, exclude=(), include_deps=False, taint_config=None,
         issues = list(extra_issues) + list(col["issues"])
         numbered = []       # findings numbered by their file's scan lines (redact_file_issues)
         scanned, stopped = [], None
-        # Dependency files a batch at a time (the native engine reads a batch
-        # on threads: engine.py), the project's own files one at a time;
+        # Files a batch at a time with the native engine (it reads a batch on
+        # threads: engine.py; a project file's rules part there, the rest of
+        # its scan in core), one at a time with the Python engine;
         # should_stop is checked before each batch.
         from lazaret.scanner import engine     # (imported here: engine imports core)
         batch = engine.BATCH if engine.name() == "rust" else 1
@@ -16743,8 +16757,8 @@ def scan_project(root, exclude=(), include_deps=False, taint_config=None,
             if stopped:
                 break
             chunk = [files[k]]
-            while (chunk[0].get("dep", False) and len(chunk) < batch and k + len(chunk) < len(files)
-                   and files[k + len(chunk)].get("dep", False)):
+            while (len(chunk) < batch and k + len(chunk) < len(files)
+                   and files[k + len(chunk)].get("dep", False) == chunk[0].get("dep", False)):
                 chunk.append(files[k + len(chunk)])
             try:
                 results = engine.scan_files([(f["path"], f["content"], f["lang"], f.get("dep", False)) for f in chunk])

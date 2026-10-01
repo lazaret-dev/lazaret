@@ -156,7 +156,8 @@ jobs:
           python -m unittest tests.architecture.test_rust_parity_regex tests.architecture.test_rust_parity_hooks \
             tests.architecture.test_rust_parity_hooks_b tests.architecture.test_rust_parity_signs \
             tests.architecture.test_rust_parity_scanfile tests.architecture.test_rust_parity_lexer \
-            tests.architecture.test_rust_parity_project tests.architecture.test_rust_parity_hook_commands \
+            tests.architecture.test_rust_parity_project tests.architecture.test_rust_parity_project_scan \
+            tests.architecture.test_rust_parity_hook_commands \
             tests.architecture.test_rust_parity_hexname tests.architecture.test_rust_parity_offscreen \
             tests.architecture.test_rust_parity_lookalike -v
       # The WebAssembly build (the npm package's engine) against this library:

@@ -3,7 +3,9 @@ that the answer is core.scan_file's whichever engine gives it.
 
 - With the Python engine, core scans every file.
 - With the native engine, it scans the files in dependency mode (Python,
-  JavaScript, SQL); core scans the others (project mode) and every file the
+  JavaScript, SQL), and the first part of the others (project mode: its
+  scan_rules), after which core runs the passes that follow, the markers
+  and the cap (core.scan_file_after_rules); core scans every file the
   native engine does not answer: an error for that file, or a batch it
   refuses (its work budget spent). The answers come back in the order
   asked.
@@ -59,7 +61,7 @@ class FallbackTests(unittest.TestCase):
                 mock.patch.object(_native, "call", side_effect=_native.NativeExhausted("work budget spent")):
             self.assertEqual(engine.scan_files(FILES), core_answers(FILES))
 
-    def test_only_dependency_files_are_sent(self):
+    def test_what_each_file_is_sent_as(self):
         sent = []
 
         def answer(call, args):
@@ -67,10 +69,11 @@ class FallbackTests(unittest.TestCase):
             return [{"error": "internal"} for _ in args["calls"]]
         with mock.patch.object(engine, "name", lambda: "rust"), mock.patch.object(_native, "call", side_effect=answer):
             engine.scan_files(FILES)
-        self.assertEqual([text for _call, _args, text in sent], [f[1] for f in FILES if f[3]])
-        for name, args, _text in sent:
-            self.assertEqual(name, "scan_file")
-            self.assertTrue(args["dep"])
+        self.assertEqual([text for _call, _args, text in sent], [f[1] for f in FILES])
+        for (name, args, _text), (_path, _t, lang, dep) in zip(sent, FILES):
+            self.assertEqual(name, "scan_file" if dep else "scan_rules")
+            self.assertEqual(args["dep"], dep)
+            self.assertEqual(args["lang"], lang)
             self.assertEqual(args["redact"], bool(core.REDACT_SECRETS))
 
 
@@ -85,6 +88,7 @@ class NativeEngineTests(unittest.TestCase):
         self.assertEqual(got, core_answers(FILES))
         self.assertIn("SC-EVAL-DECODE", rules(got)[0])
         self.assertIn("S-TOKEN", rules(got)[1])
+        self.assertEqual(rules(got)[2], ["S-OSCMD-PY", "S-TOKEN", "T-CMD"])   # (project mode: the engine's rules, core's taint)
 
     def test_more_files_than_a_batch(self):
         items = [(f"pkg/{k}.py", f"K{k} = '{AWS}'\n", "py", True) for k in range(engine.BATCH + 3)]

@@ -145,24 +145,49 @@ def _issues(path, answer):
 
 def scan_files(items):
     """[(path, content, lang, dep)] -> [issues]: core.scan_file for each, in
-    order. The native engine answers the files in dependency mode; core
-    scans the others, and any file the native engine could not answer."""
+    order. The native engine answers the files in dependency mode, and the
+    first part of the others (scan_rules: the pattern rules, the families,
+    the whole-text rules), after which core runs the passes that follow
+    (taint, SQL, function length and complexity), the suppression markers
+    and the cap; core scans whatever the native engine could not answer."""
     if not items:
         return []
     if name() != "rust":
         return [core.scan_file(path, content, lang, dep=dep) for path, content, lang, dep in items]
-    native = [k for k, (_p, content, lang, dep) in enumerate(items)
-              if dep and lang in ("py", "js", "sql") and isinstance(content, str)]
+    native = [k for k, (_p, content, lang, _d) in enumerate(items)
+              if lang in ("py", "js", "sql") and isinstance(content, str)]
     out = [None] * len(items)
     if native:
-        base = {"dep": True, "redact": bool(core.REDACT_SECRETS), "neumaier": _NEUMAIER}
-        calls = [(dict(base, lang=items[k][2], jsx=core.jsx_reading(items[k][0])), items[k][1]) for k in native]
-        for k, answer in zip(native, _batch("scan_file", calls, lambda i: None)):
-            if answer is not None:
-                out[k] = _issues(items[k][0], answer)
+        base = {"redact": bool(core.REDACT_SECRETS), "neumaier": _NEUMAIER}
+        calls = [("scan_file" if items[k][3] else "scan_rules",
+                  dict(base, lang=items[k][2], jsx=core.jsx_reading(items[k][0]), dep=bool(items[k][3])), items[k][1])
+                 for k in native]
+        answers = _batch_calls(calls)
+        for k, (call, _a, _t), answer in zip(native, calls, answers):
+            if answer is None:
+                continue
+            path, content, lang, _dep = items[k]
+            if call == "scan_file":
+                out[k] = _issues(path, answer)
+            else:
+                out[k] = core.scan_file_after_rules(path, content, lang, _issues(path, answer))
     for k, (path, content, lang, dep) in enumerate(items):
         if out[k] is None:
             out[k] = core.scan_file(path, content, lang, dep=dep)
+    return out
+
+
+def _batch_calls(calls):
+    """[(call, args, text)] -> answers in order, None where the native engine
+    could not answer (the caller then asks core)."""
+    out = []
+    for start in range(0, len(calls), BATCH):
+        chunk = calls[start:start + BATCH]
+        try:
+            answers = _native.call("batch", {"calls": [list(c) for c in chunk], "threads": THREADS})
+        except _native.NativeError:
+            answers = [None] * len(chunk)
+        out.extend(a["ok"] if isinstance(a, dict) and "ok" in a else None for a in answers)
     return out
 
 
