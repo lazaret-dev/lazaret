@@ -9,9 +9,9 @@ sent over the network. Import-time code (import_time_risk) gets the same
 signs, and import_time_severity makes SC-IMPORT-RISK CRITICAL for the shapes
 no library needs; a download-and-run is CRITICAL in a setup.py and when the
 file is run with Python. The dependency decode flow reads a decoder imported
-under another name and `.decrypt(` calls. The npm engine's twins are held to
-these by js/test/supply-chain-signals.test.js and, on a random corpus, by
-tests/architecture/test_js_parity_hooks.py.
+under another name and `.decrypt(` calls. The native engine (which the npm
+package runs) is held to these by js/test/supply-chain-signals.test.js and,
+on a random corpus, by tests/architecture/test_rust_parity_hooks.py.
 
 Everything is inert text: hosts are .invalid, nothing is decoded into a file
 or executed.

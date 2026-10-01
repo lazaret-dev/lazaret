@@ -9,7 +9,8 @@
 // require('os').
 // Twin of python/tests/scanner/test_exfiltration_shapes.py; on a random
 // corpus the engines are held to each other by
-// tests/architecture/test_js_parity_hooks.py. The secrets are fake and built
+// tests/architecture/test_rust_parity_signs.py (the npm package runs the
+// native engine). The secrets are fake and built
 // here; hosts are .invalid or TEST-NET; nothing is executed.
 
 import { test } from "node:test";
@@ -18,7 +19,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "nod
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { run, installScriptRisk, importTimeRisk, importTimeSeverity } from "../src/index.js";
-import { secretEndpointAt, credentialSweepAt, minerAt, rawIpConnect, dnsBeaconAt, deadDropAt } from "../src/lib/hooks.js";
+import { secretEndpointAt, credentialSweepAt, minerAt, rawIpConnect, dnsBeaconAt, deadDropAt } from "../src/lib/native.js";
 import { pyStripChars } from "../src/lib/pycompat.js";
 
 const TG = "1234567" + "89:AA" + "bC3dE5fG7hJ9kL1mN3pQ5rS7tV9wX1yZ3";

@@ -36,6 +36,8 @@ python/build/
 # node
 node_modules/
 *.tgz
+# the native engine as WebAssembly (js: npm run build)
+js/native/
 
 # os / editor
 .DS_Store

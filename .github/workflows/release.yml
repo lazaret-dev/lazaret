@@ -1,7 +1,8 @@
 # Publishes both packages when a v* tag is pushed.
 # The Python artifacts are built by Lazaret's own stdlib backend: no build
 # tools are installed. The platform wheels' native engine is built with a
-# pinned Rust toolchain, in PyPA's manylinux images for Linux (wheels.yml).
+# pinned Rust toolchain, in PyPA's manylinux images for Linux (wheels.yml),
+# and so is the npm package's (the same engine as WebAssembly, build-npm).
 # Publishing uses trusted publishing (OIDC): no registry tokens are stored in
 # GitHub. Each publish job runs in its own environment; add required
 # reviewers to the "pypi" and "npm" environments so nothing ships without
@@ -23,6 +24,11 @@ on:
 
 permissions:
   contents: read
+
+env:
+  # the npm package's WebAssembly engine is built with the compiler of the
+  # platform wheels' libraries: keep it the same as wheels.yml's RUST_VERSION
+  RUST_VERSION: "1.95.0"
 
 jobs:
   # The tag must be what scripts/tag-release.sh makes: an annotated tag on a
@@ -75,6 +81,20 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "24.21.0"   # exact; bundles npm 11.19.0
+      # The native engine as WebAssembly (native/lazaret.wasm, with its notice):
+      # the pinned compiler, the workspace's lock file, nothing downloaded but
+      # the toolchain. Then the package's tests on what it will publish.
+      - name: Rust ${{ env.RUST_VERSION }} and its WebAssembly target
+        run: rustup toolchain install "$RUST_VERSION" --profile minimal --target wasm32-unknown-unknown --no-self-update
+      - name: Build the native engine as WebAssembly
+        working-directory: js
+        env:
+          RUSTUP_TOOLCHAIN: ${{ env.RUST_VERSION }}
+        run: |
+          npm run build
+          sha256sum native/lazaret.wasm
+      - working-directory: js
+        run: npm test
       - name: Pack
         working-directory: js
         run: |
@@ -88,6 +108,10 @@ jobs:
             echo "::error::the npm tarball contains dotfiles (listed above)"
             exit 1
           fi
+          # the engine and its notice are in it
+          for f in package/native/lazaret.wasm package/native/NOTICE; do
+            tar -tzf "$tarball" | grep -qx "$f" || { echo "::error::the npm tarball lacks $f"; exit 1; }
+          done
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: npm-dist

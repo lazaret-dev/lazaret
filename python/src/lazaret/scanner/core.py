@@ -12148,11 +12148,11 @@ def _dl_finditer(pair, row, pos=0, endpos=None):
 
 
 # The received-code detector's shared data — name sets, character sets and
-# limits — is authored once in received_spec.json and loaded by both engines
-# (the npm engine reads its synced copy, js/src/lib/received-spec.json). A
-# needle or a limit is edited in that one file; scripts/sync-received-spec.py
-# copies it to the npm package and tests/architecture/test_received_spec.py
-# fails if the copies drift. The patterns themselves are still defined below.
+# limits — is authored once in received_spec.json and loaded here; the
+# native engine reads the values core builds from it in its rule pack
+# (make_rust_tables.py), which the npm package runs too (0.1.9; it carried a
+# synced copy of the spec until then). tests/architecture/test_received_spec.py
+# holds core to the spec. The patterns themselves are still defined below.
 with open(os.path.join(os.path.dirname(__file__), "received_spec.json"), encoding="utf-8") as _dl_spec_f:
     _DL_SPEC = json.load(_dl_spec_f)
 _DL_SPEC_ARRAYS, _DL_SPEC_CHARS, _DL_SPEC_LIMITS = _DL_SPEC["arrays"], _DL_SPEC["charstrings"], _DL_SPEC["limits"]

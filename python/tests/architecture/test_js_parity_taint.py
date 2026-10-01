@@ -6,13 +6,13 @@ parameters, sinks, sanitizers, containers, allowlists) — and so report the
 same T-* findings on every case of tests/scanner/test_taint_fstrings.py and
 test_taint_frameworks.py, each written as a file of its own, next to
 adversarial shapes (unterminated literals, deep brackets, astral characters,
-CRLF, very long lines). Skipped where node is missing.
+CRLF, very long lines). Skipped where the npm engine is not built (node, and npm run build in js/).
 """
 import collections
 import tempfile
 import unittest
 
-from tests.architecture.test_js_parity import DERIVED, NODE, _python_only, both, derived, issue_key
+from tests.architecture.test_js_parity import DERIVED, NODE, _python_only, both, derived, issue_key, NPM_READY, NPM_SKIP
 from tests.architecture.test_js_parity_lexing import write_tree
 from tests.scanner.test_taint_fstrings import QUIET, REPORTED
 from tests.scanner import test_taint_frameworks as frameworks
@@ -48,7 +48,7 @@ TREE.update({
 })
 
 
-@unittest.skipUnless(NODE, "node is not installed")
+@unittest.skipUnless(NPM_READY, NPM_SKIP)
 class TaintParityTests(unittest.TestCase):
     maxDiff = None
 

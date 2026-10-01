@@ -1,39 +1,21 @@
-"""Engine parity for SC-OFFSCREEN-CODE (0.1.8): the npm engine's offscreenCode
-(js/src/scanner/scan.js) against core.offscreen_code, case by case, for
-JavaScript and Python lines: curated lines (the samples it was built from,
-and prose that must not count) and a seeded random corpus built from blank
-runs around the threshold, what may stand before them (code, an open or
-closed string, a comment) and what may follow (code, a declaration, prose,
-a call that runs code). Columns are compared in code points (the npm
-engine's are UTF-16 offsets). The JS module's copies of core's pattern text
-and limits are compared too. Skipped where node is missing.
+"""Engine parity for SC-OFFSCREEN-CODE (0.1.8): the native engine's
+offscreen_code (crates/lazaret-engine: signs.rs; the npm package runs it as
+WebAssembly) against core.offscreen_code, case by case, for JavaScript and
+Python lines: curated lines (the samples it was built from, and prose that
+must not count) and a seeded random corpus built from blank runs around the
+threshold, what may stand before them (code, an open or closed string, a
+comment) and what may follow (code, a declaration, prose, a call that runs
+code). Columns are code points in both. (Until 0.1.9 this held the npm
+engine's JavaScript twin to core.) Skipped where the native library is not
+built.
 
 All text is inert: nothing is executed.
 """
 import json
-import os
 import random
-import re
-import shutil
-import subprocess
 import unittest
 
-from lazaret.scanner import core
-from tests import _support
-
-NODE = shutil.which("node")
-SCAN_JS = os.path.join(_support.REPO_ROOT, "js", "src", "scanner", "scan.js")
-NPM = """
-import { readFileSync } from "node:fs";
-import { pathToFileURL } from "node:url";
-const s = await import(pathToFileURL(process.argv[1]).href);
-const cp = (t, i) => [...t.slice(0, i)].length;
-const cases = JSON.parse(readFileSync(0, "utf8"));
-process.stdout.write(JSON.stringify({ twins: s.OFFSCREEN_TWINS, results: cases.map(([t, lang]) => {
-  const f = s.offscreenCode(t, lang);
-  return f && [cp(t, f[0]), f[1], f[2], f[3]];
-}) }));
-"""
+from lazaret.scanner import _native, core
 
 CURATED = [
     ("});" + " " * 731 + "global['_V']='8-npm20';global['r']=require;(function(){var mGB=''", "js"),
@@ -85,19 +67,15 @@ def core_view(case):
     return list(found) if found else None
 
 
-@unittest.skipUnless(NODE, "node is not installed")
+@unittest.skipUnless(_native.available(), f"native engine not built ({_native.load_error()})")
 class OffscreenParityTests(unittest.TestCase):
     maxDiff = None
 
     @classmethod
     def setUpClass(cls):
         cls.cases = corpus()
-        p = subprocess.run([NODE, "--input-type=module", "-e", NPM, SCAN_JS], input=json.dumps(cls.cases),
-                           capture_output=True, encoding="utf-8", errors="replace", timeout=60)
-        if p.returncode:
-            raise AssertionError(f"node exited {p.returncode}: {p.stderr[-2000:]}")
-        out = json.loads(p.stdout)
-        cls.twins, cls.results = out["twins"], out["results"]
+        calls = [["offscreen_code", {"lang": lang}, text] for text, lang in cls.cases]
+        cls.results = [r.get("ok", r) for r in _native.call("batch", {"calls": calls})]
 
     def test_every_case_agrees(self):
         diffs = [(c, core_view(c), r) for c, r in zip(self.cases, self.results) if core_view(c) != r]
@@ -111,14 +89,6 @@ class OffscreenParityTests(unittest.TestCase):
         want = [True, True, True, False, False, False, False, False, False, False, False, False, True, True, False,
                 True, True, True, True, True, True, True]
         self.assertEqual([core.offscreen_code(t, lang) is not None for t, lang in CURATED], want)
-
-    def test_pattern_text_and_limits_are_cores(self):
-        for name, (src, flags) in self.twins["patterns"].items():
-            with self.subTest(pattern=name):
-                rx = getattr(core, name)
-                self.assertEqual(src, rx.pattern)
-                self.assertEqual(flags, ("i" if rx.flags & re.I else "") + ("m" if rx.flags & re.M else ""))
-        self.assertEqual(self.twins["limits"], {k: getattr(core, k) for k in ("_OFFSCREEN_MIN", "_OFFSCREEN_READ")})
 
 
 if __name__ == "__main__":

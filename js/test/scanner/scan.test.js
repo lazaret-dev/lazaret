@@ -1,11 +1,18 @@
 // Hex-escape decoding and private-key material. Mirrors the Python engine's
-// hex_hidden_text / _token_has_material cases (python/tests/registry/test_verdicts.py).
+// hex_hidden_text / _token_has_material cases (python/tests/registry/test_verdicts.py),
+// read through scanFile (the native engine reads the escapes).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { scanFile, hexHiddenText } from "../../src/scanner/scan.js";
+import { scanFile } from "../../src/scanner/scan.js";
 
 const rules = (content, lang = "py") =>
   scanFile({ name: `f.${lang}`, path: `f.${lang}`, content, lang }).map((i) => [i.rule, i.sev]);
+/** The text SC-HEXSTR says a line's hex escapes hide, else null (core.hex_hidden_text, as its message shows it). */
+const hexHiddenText = (line) => {
+  const found = scanFile({ name: "f.py", content: line + "\n", lang: "py" })
+    .find((i) => i.rule === "SC-HEXSTR" && i.msg.startsWith("Hex escapes hide readable text: "));
+  return found ? found.msg.slice("Hex escapes hide readable text: ".length + 1, -2) : null;
+};
 
 test("escaped binary data is not hidden text", () => {
   for (const line of [

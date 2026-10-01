@@ -1,16 +1,12 @@
 """The received-code detector's shared data spec (received_spec.json).
 
-Name sets, character sets and limits are authored once in
-python/src/lazaret/scanner/received_spec.json and synced into the npm package
-at js/src/lib/received-spec.json by scripts/sync-received-spec.py, so a needle
-or a limit is edited in one place. These tests hold the two copies together
-and hold the loaded values to what core actually uses:
-
-  * the two JSON files are byte-identical (the sync is current), and
-  * every set / limit core exposes matches the spec it came from.
-
-The Python↔JavaScript engine comparison (that both compile the same patterns
-and agree on every input) is tests/architecture/test_js_parity_hooks.py.
+Name sets, character sets, limits and pattern pieces are authored once in
+python/src/lazaret/scanner/received_spec.json, which core loads; the native
+engine reads core's values from its rule pack (make_rust_tables.py), and
+the npm package runs the native engine (0.1.9; until then it carried a copy
+of the spec, js/src/lib/received-spec.json). These tests hold the spec's
+shape and hold what core uses to the spec it came from; the parity tests
+(test_rust_parity_signs) hold the engines to each other on every input.
 """
 import json
 import os
@@ -21,18 +17,9 @@ from tests import _support
 
 REPO = _support.REPO_ROOT
 SOURCE = os.path.join(REPO, "python", "src", "lazaret", "scanner", "received_spec.json")
-COPY = os.path.join(REPO, "js", "src", "lib", "received-spec.json")
 
 
 class ReceivedSpecTests(unittest.TestCase):
-    def test_the_two_copies_are_byte_identical(self):
-        with open(SOURCE, "rb") as f:
-            source = f.read()
-        with open(COPY, "rb") as f:
-            copy = f.read()
-        self.assertEqual(source, copy,
-                         "js/src/lib/received-spec.json is stale; run scripts/sync-received-spec.py")
-
     def test_the_spec_is_valid_and_shaped(self):
         with open(SOURCE, encoding="utf-8") as f:
             spec = json.load(f)
@@ -82,8 +69,7 @@ class ReceivedSpecTests(unittest.TestCase):
         # SINK is derived, not stored
         self.assertEqual(list(core._DL_SINK_NEEDLES),
                          a["_DL_RUN_NEEDLES"] + a["_DL_DESERIAL_NEEDLES"] + a["_DL_IMPORT_NEEDLES"])
-        # core compiles each plain pattern's source verbatim from the spec (the
-        # composed group patterns are held to core by test_js_parity_hooks)
+        # core compiles each plain pattern's source verbatim from the spec
         for name, p in spec["patterns"].items():
             self.assertEqual(getattr(core, name).pattern, p["src"], name)
 

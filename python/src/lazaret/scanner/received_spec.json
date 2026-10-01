@@ -1,5 +1,5 @@
 {
-  "$comment": "Source of truth for the received-code detector's shared data (name sets, character sets, limits, and the patterns: plain regexes and alternative groups built from [assertion, body] pairs), loaded and compiled by both the Python core (scanner/core.py) and the npm engine (js/src/lib/received.js). Edit this file, then run scripts/sync-received-spec.py to update the npm copy (js/src/lib/received-spec.json); tests/architecture/test_received_spec.py fails if the copies drift.",
+  "$comment": "Source of truth for the received-code detector's shared data (name sets, character sets, limits, and the patterns: plain regexes and alternative groups built from [assertion, body] pairs), loaded and compiled by the Python core (scanner/core.py); the native engine, which the npm package runs too, reads what core builds from it in its rule pack (scripts/make_rust_tables.py). tests/architecture/test_received_spec.py holds core to this file.",
   "arrays": {
     "_DL_NEEDLES": [
       "urlopen",

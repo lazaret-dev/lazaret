@@ -5,7 +5,7 @@ CLIs scan the same tree and must report the same findings, metrics, ratings,
 gate and exit code. These trees are the review's reproductions; where a fix
 is about what a snippet shows (redaction), the snippets are compared too.
 All content is inert: nothing is executed, hosts are TEST-NET (192.0.2.x) or
-.invalid, credentials are dummies. Skipped where Node isn't installed.
+.invalid, credentials are dummies. Skipped where the npm engine is not built (node, and npm run build in js/).
 """
 
 import collections
@@ -40,7 +40,7 @@ def snippets(report):
                                for i in report["issues"] if not parity._python_only(i, project=report["project"]))
 
 
-@unittest.skipUnless(parity.NODE, "node is not installed")
+@unittest.skipUnless(parity.NPM_READY, parity.NPM_SKIP)
 class CoreParityTests(unittest.TestCase):
     maxDiff = None
     assert_same = parity.EngineParityTests.assert_same

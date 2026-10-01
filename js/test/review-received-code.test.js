@@ -1,13 +1,13 @@
-// Code that runs what it receives over the network (lib/received.js, twin of
-// core.runs_received_code), a download substituted into a command line
-// (lib/shellpipe.js), and binding.gyp command expansions that run a file of
-// the package (lib/supplychain.js scanGyp, src/deps.js). The replica tests
+// Code that runs what it receives over the network (the native engine's
+// runs_received_code, lib/native.js), a download substituted into a command
+// line, and binding.gyp command expansions that run a file of the package
+// (lib/supplychain.js scanGyp, src/deps.js). The replica tests
 // of TrapDoor (import-time code downloading code into `node -e`) and Miasma
 // v2 (a binding.gyp expansion running the payload, no install script) were
 // no finding and a MAJOR; python/tests/scanner/test_review_received_code.py
 // and test_review_gyp_expansions.py have the full cases, and
-// tests/architecture/test_js_parity_hooks.py / test_js_parity_gyp.py compare
-// the engines. Everything is inert text: hosts are .invalid.
+// tests/architecture/test_rust_parity_signs.py / test_js_parity_gyp.py
+// compare the engines. Everything is inert text: hosts are .invalid.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";

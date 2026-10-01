@@ -14,9 +14,9 @@ window.eval)`) but no other receiver: TypeScript's CommonJS output calls
 every imported function as `(0, module_1.name)(…)`, and typebox exports one
 named Function.
 
-The npm engine's twins are in js/src/scanner/rules.js and scan.js
-(js/test/review-indirect-eval.test.js; tests/architecture/
-test_js_parity_eval.py compares the engines). Payloads are inert text.
+The npm engine runs the native engine's scan_file (js/test/
+review-indirect-eval.test.js; tests/architecture/test_js_parity_eval.py
+compares the engines). Payloads are inert text.
 """
 import unittest
 

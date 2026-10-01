@@ -1,6 +1,6 @@
 // A project's own code that runs a download piped into a shell (SC-PIPE-SHELL;
 // twin of python/tests/scanner/test_review_pipe_shell.py). The line test is
-// lib/shellpipe.js runsDownloadThroughShell (core._runs_download_through_shell);
+// core._runs_download_through_shell (the native engine's scan_rules);
 // a dependency's code gets the import-time test instead (SC-IMPORT-RISK).
 // Payloads are inert text: hosts are .invalid.
 

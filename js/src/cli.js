@@ -1,7 +1,8 @@
 // CLI entry: argument handling, returns an exit code (no process.exit —
 // testable). Mirrors the Python CLI's contract (lazaret.scanner.core.main):
 //   0 ok (or gate failed without --ci) · 1 gate failed with --ci, or a
-//   SC-MANIFEST-DEPTH finding · 2 usage error · 3 report output error ·
+//   SC-MANIFEST-DEPTH finding · 2 usage error (or the native engine is
+//   missing: a checkout without `npm run build`) · 3 report output error ·
 //   5 internal error (never a raw stack trace, never mistaken for "gate failed").
 
 import { resolve } from "node:path";
@@ -22,6 +23,7 @@ import {
 import { clipLine } from "./lib/issue.js";
 import { applyBaseline, BASELINE_KEY_ENV } from "./baseline.js";
 import { dependencyChecks } from "./deps.js";
+import { loadError } from "./lib/native.js";
 import { analyzeFlows, redactFlowIssues } from "./scanner/flow.js";
 
 // Local copies (NOT imported from index.js — that would be a cycle).
@@ -275,6 +277,15 @@ function runChecked(argv, io) {
   }
   if (!st.isDirectory()) {
     err(`error: ${sanitizeTermLine(dirArg)} is not a directory (lazaret scans a project directory)`);
+    return EXIT_USAGE;
+  }
+  // The native engine (native/lazaret.wasm) answers every file's rules: a
+  // checkout that has not built it scans nothing (as the Python package's
+  // --engine rust without its library, exit 2), rather than report every file
+  // SC-TRUNCATED.
+  const missing = loadError();
+  if (missing) {
+    err(`error: ${sanitizeTermLine(missing)}`);
     return EXIT_USAGE;
   }
   if (opts.excerptWidth !== undefined) setExcerptWidth(opts.excerptWidth);

@@ -22,11 +22,10 @@
 import { lstatSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { scanFile } from "./scanner/scan.js";
-import { followHook, treeJoin, persistenceReasons, installScriptRisk, importTimeRisk, importTimeSeverity, agentHijack, agentHijackInCommand, nodeCandidates, shebangLang,
-  HOOK_MAX_CHARS, HOOK_MAX_COMMANDS, HOOK_MAX_TARGETS, HOOK_MAX_PATH, spawnedScripts, SPAWN_MAX_DEPTH,
-  SPAWN_MAX_FILES } from "./lib/hooks.js";
+import { followHook, persistenceReasons, installScriptRisk, importTimeRisk, importTimeSeverity, agentHijack,
+  agentHijackInCommand, nodeCandidates, shebangLang, spawnedScripts, packValues } from "./lib/native.js";
 import { HOOK_COMMANDS, loadManifest, scInstallHookIssue } from "./lib/supplychain.js";
-import { readBounded, truncatedIssue, scanErrorIssue, strerror, normalizeNewlines, encodingIssues,
+import { readBounded, truncatedIssue, scanErrorIssue, strerror, normalizeNewlines, encodingIssues, treeJoin,
   MAX_FILE_BYTES } from "./lib/fs.js";
 import { looksBinary, HEADER_SAMPLE } from "./lib/binary.js";
 import { decodeSource } from "./lib/encoding.js";
@@ -237,9 +236,10 @@ function followDependencyHook(tree, issue, cmd, out, extra, run, truncated) {
   const [targets, complete] = followHook(cmd);
   if (!complete && !truncated.has(manifest)) {
     truncated.add(manifest);
-    out.push(truncatedIssue(manifest, `its install hook is more than Lazaret follows (${withCommas(HOOK_MAX_COMMANDS)} ` +
-      `commands, ${HOOK_MAX_TARGETS} scripts, ${withCommas(HOOK_MAX_CHARS)} characters, ` +
-      `${withCommas(HOOK_MAX_PATH)}-character paths)`));
+    const [commands, scripts, chars, path] = packValues("HOOK_MAX_COMMANDS", "HOOK_MAX_TARGETS", "HOOK_MAX_CHARS",
+      "HOOK_MAX_PATH");
+    out.push(truncatedIssue(manifest, `its install hook is more than Lazaret follows (${withCommas(commands)} ` +
+      `commands, ${scripts} scripts, ${withCommas(chars)} characters, ${withCommas(path)}-character paths)`));
   }
   for (const target of targets) {
     const path = treeJoin(base, target);
@@ -269,6 +269,7 @@ function followDependencyHook(tree, issue, cmd, out, extra, run, truncated) {
 
 /** [[rel, text]] for the scripts an install script starts with node or python, and those they start. core._started_dependency_scripts. */
 function startedScripts(tree, rel, text, cwd, out, extra, run) {
+  const [SPAWN_MAX_DEPTH, SPAWN_MAX_FILES] = packValues("_SPAWN_MAX_DEPTH", "_SPAWN_MAX_FILES");
   const found = [], seen = new Set([rel]), queue = [[rel, text, 0]];
   while (queue.length && seen.size <= SPAWN_MAX_FILES) {
     const [cur, curText, depth] = queue.shift();

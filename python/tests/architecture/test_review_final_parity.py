@@ -13,7 +13,7 @@ exit code on a tree exercising each of them, with and without --deps:
    plus a directory holding only a .pth file (a valid target in both).
 
 The dashboard's side of each is checked in tests/scanner/test_review_*.py.
-All content is inert (nothing is executed). Skipped where node is missing.
+All content is inert (nothing is executed). Skipped where the npm engine is not built (node, and npm run build in js/).
 """
 import collections
 import json
@@ -25,7 +25,7 @@ import tempfile
 import unittest
 
 from tests import _support
-from tests.architecture.test_js_parity import _python_only, derived
+from tests.architecture.test_js_parity import _python_only, derived, NPM_READY, NPM_SKIP
 
 NODE = shutil.which("node")
 JS_BIN = os.path.join(_support.REPO_ROOT, "js", "bin", "lazaret.js")
@@ -90,7 +90,7 @@ def key(issue):
     return (issue["rule"], str(issue["file"]).replace("\\", "/"), issue["line"], issue["sev"], issue["msg"])
 
 
-@unittest.skipUnless(NODE, "node is not installed")
+@unittest.skipUnless(NPM_READY, NPM_SKIP)
 class FinalReviewParityTests(unittest.TestCase):
     maxDiff = None
 

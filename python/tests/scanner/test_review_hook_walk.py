@@ -14,8 +14,9 @@ Review of the walk the registry (and --deps project scans) use:
   (`2>/dev/null node x.js`), and in `env -S "…"`; `env -C dir` / `sudo -D
   dir` run the command in dir; `node -e` / `-p` requires were not joined
   with the directory a `cd` moved to.
-The npm engine's twin is js/src/lib/hooks.js (tests/architecture/
-test_js_parity_hooks.py compares them). Commands are inert strings.
+The native engine answers the same (tests/architecture/
+test_rust_parity_hooks.py compares them; the npm package runs it as
+WebAssembly). Commands are inert strings.
 """
 import json
 import time

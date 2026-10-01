@@ -23,7 +23,8 @@ and jsflow (_analyze_js, analyze), on parsed trees since 0.1.7.
    soups: every field of every finding, in order.
 
 All content is inert: nothing is executed, credentials are dummies.
-Skipped where node is missing.
+Skipped where node is missing; the CLI comparisons (1, 2) also where the npm
+engine's WebAssembly build is (npm run build in js/).
 """
 import json
 import os
@@ -364,6 +365,7 @@ class FlowParityTests(unittest.TestCase):
     maxDiff = None
     assert_same = parity.EngineParityTests.assert_same
 
+    @unittest.skipUnless(parity.NPM_READY, parity.NPM_SKIP)
     def test_cli_trees_agree(self):
         for label, tree, deps in (("js", TREE, False), ("js --deps", TREE, True),
                                   ("js+py", {**TREE, **PY_FLOW}, False)):
@@ -391,6 +393,7 @@ class FlowParityTests(unittest.TestCase):
                 else:
                     self.assertEqual(js_gate, py_gate)
 
+    @unittest.skipUnless(parity.NPM_READY, parity.NPM_SKIP)
     def test_label_counts_python_files_not_dependencies(self):
         tree = {"a.py": "x = 1\n", "b/c.py": "y = 2\n", "node_modules/d/e.py": "z = 3\n",
                 "node_modules/d/package.json": '{"name": "d", "version": "1.0.0"}\n', "app.js": "const a = 1;\n"}
@@ -403,6 +406,7 @@ class FlowParityTests(unittest.TestCase):
                               "ok": True})
             self.assertEqual(py[1]["conditions"][-1], {"label": "No cross-file taint flows", "ok": True})
 
+    @unittest.skipUnless(parity.NPM_READY, parity.NPM_SKIP)
     def test_coverage_notes_do_not_rate_the_code(self):
         """A file the JavaScript reader rejects is a Q-FLOW-SKIPPED note: it
         says what was not analyzed, not how the code is written, so neither

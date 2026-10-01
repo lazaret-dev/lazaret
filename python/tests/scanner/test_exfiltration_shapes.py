@@ -35,8 +35,8 @@ import-time code, the files a package runs when used:
 
 Each has crafted look-alikes that stay quiet. The secrets are fake and built
 here rather than written out whole; hosts are .invalid or TEST-NET; nothing
-runs. The npm engine is held to the same answers by
-tests/architecture/test_js_parity_hooks.py.
+runs. The native engine (which the npm package runs) is held to the same
+answers by tests/architecture/test_rust_parity_signs.py.
 """
 import unittest
 

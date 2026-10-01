@@ -207,6 +207,15 @@ export function cpLen(s) {
   return s.length - (s.match(SURROGATE_RE) || []).length;
 }
 /** Code-point index of the UTF-16 offset `off` in s. */
+/** The first n code points of s (Python's s[:n]). */
+export function cpPrefix(s, n) {
+  let i = 0;
+  for (let k = 0; k < n && i < s.length; k++) {
+    const c = s.charCodeAt(i);
+    i += c >= 0xd800 && c <= 0xdbff && i + 1 < s.length && (s.charCodeAt(i + 1) & 0xfc00) === 0xdc00 ? 2 : 1;
+  }
+  return s.slice(0, i);
+}
 export function cpIndex(s, off) {
   return cpLen(s.slice(0, off));
 }

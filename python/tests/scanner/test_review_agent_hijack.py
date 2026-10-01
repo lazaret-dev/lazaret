@@ -10,9 +10,10 @@ SC-AGENT-HIJACK (CRITICAL). Dependency-only: first-party code driving your own
 agent is your automation. The bypass flag is the signal; a known agent name
 confirms it.
 
-The npm engine's twin: js/test/review-agent-hijack.test.js (and
-tests/architecture/test_js_parity_hooks.py compares the tables). Fixtures are
-inert text; the "prompts" are strings, the hosts .invalid.
+The native engine (which the npm package runs): js/test/
+review-agent-hijack.test.js, and tests/architecture/test_rust_parity_signs.py
+compares the engines. Fixtures are inert text; the "prompts" are strings,
+the hosts .invalid.
 """
 import json
 import os

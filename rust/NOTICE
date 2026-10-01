@@ -15,9 +15,11 @@ unchanged; SPDX: Python-2.0.1).
 The engine also holds Unicode data (below), distributed under the Unicode
 License v3 in LICENSE-UNICODE (SPDX: Unicode-3.0).
 
-The compiled engine ships in Lazaret's platform wheels, with LICENSE-PYTHON,
-LICENSE-UNICODE and this file; the crates' license, and the platform
-wheels', is Apache-2.0 AND Python-2.0.1 AND Unicode-3.0.
+The compiled engine ships in Lazaret's platform wheels and, compiled to
+WebAssembly, in the npm package (as native/lazaret.wasm, this file as
+native/NOTICE), each with LICENSE-PYTHON and LICENSE-UNICODE; the crates',
+the platform wheels' and the npm package's license is
+Apache-2.0 AND Python-2.0.1 AND Unicode-3.0.
 
 
 What is translated from CPython

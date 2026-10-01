@@ -1,7 +1,7 @@
 """Engine parity for the supply-chain manifest scanners (package.json hooks,
 binding.gyp), on inputs from the review of the npm engine's twins. Runs
 both CLIs (helpers from test_js_parity) and requires the same findings, and
-checks what both report. Skipped where Node isn't installed. All input is
+checks what both report. Skipped where the npm engine is not built (node, and npm run build in js/). All input is
 inert: commands are strings that are never run.
 
 * Hook commands are judged with Python regex semantics in both engines: the
@@ -144,7 +144,7 @@ def write_tree(root, files):
             f.write(text)
 
 
-@unittest.skipUnless(parity.NODE, "node is not installed")
+@unittest.skipUnless(parity.NPM_READY, parity.NPM_SKIP)
 class SupplyChainParityTests(unittest.TestCase):
     maxDiff = None
 

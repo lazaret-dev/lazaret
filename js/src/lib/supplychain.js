@@ -11,7 +11,7 @@ import {
   MAX_JSON_DEPTH, jsonDepthExceeds,
 } from "./pycompat.js";
 import { pyJsonParse, jsonErrorWhere, pyLiteralParse } from "./pyjson.js";
-import { nodeEMatches, followHook, hookCommandRisk } from "./hooks.js";
+import { followHook, hookCommandRisk, hookIsSuspicious } from "./native.js";
 import { REDACT, redactText, registerScanContext, SecretLiterals } from "./redact.js";
 
 export { SECRET_RULES, REDACT_PLACEHOLDER, redactContextLine, redactSecretSnippet, redactResult, setRedactSecrets } from "./redact.js";
@@ -48,29 +48,7 @@ export function isRootManifest(path) {
 export const INSTALL_HOOK_RE =
   pyRe(String.raw`curl|wget|iwr|Invoke-WebRequest|node\s+-e|bash\s+-c|sh\s+-c|powershell|base64|\beval\b`, "i");
 
-const LOCAL_REQUIRE_SRC = String.raw`require\(\s*\\?["'](\.{1,2}/[^"'\\]+)\\?["']\s*\)`;
-const LOCAL_REQUIRE_RE = pyRe(LOCAL_REQUIRE_SRC, "g");
-const LOCAL_REQUIRE_ONE = pyRe(LOCAL_REQUIRE_SRC);
-const INLINE_DANGER_RE = pyRe(String.raw`https?|fetch|child_process|exec|spawn|eval|Function|Buffer|atob|base64|net\.|dgram|process\.env`);
-
-/**
- * Does an install-hook command fetch or evaluate code? `node -e` alone is not
- * evidence: core-js's `node -e "try{require('./postinstall')}catch(e){}"` only
- * loads a file shipped in the package (which is scanned like any other).
- * Twin of lazaret.scanner.core._hook_is_suspicious.
- */
-export function hookIsSuspicious(cmd) {
-  if (!INSTALL_HOOK_RE.test(cmd)) return false;
-  let remainder = cmd;
-  // _NODE_E_RE's matches, found by hooks.js's loop: the pattern overflowed
-  // V8's stack on a quoted string of millions of characters (review B3)
-  for (const [start, end, code] of nodeEMatches(cmd)) {
-    const withoutRequires = code.replace(LOCAL_REQUIRE_RE, "");
-    if (LOCAL_REQUIRE_ONE.test(code) && !INLINE_DANGER_RE.test(withoutRequires))
-      remainder = remainder.split(cmd.slice(start, end)).join(" ");     // Python's str.replace: every occurrence
-  }
-  return INSTALL_HOOK_RE.test(remainder);
-}
+export { hookIsSuspicious };
 
 /**
  * The command of each SC-INSTALL-HOOK finding as the manifest writes it

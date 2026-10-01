@@ -4,7 +4,7 @@
 // it seeds, the bounds). A dropper can split the download and the code that
 // runs it across two files of a package, so neither file shows the shape
 // alone; the follower reads the package's files as modules and gives the
-// single-file detector (lib/received.js) the names that carry the value
+// single-file detector (the native engine's receivedCodeKind) the names that carry the value
 // from one file into another.
 //
 // Results are core's for every input. The patterns are core's text (the
@@ -17,8 +17,7 @@
 
 import { sep } from "node:path";
 import { pyRe, pyStrip, pyLstrip, cpLen, isPySpace, isWordChar, cmpCodePoints } from "./pycompat.js";
-import { receivedCodeKind, hasSource, chainsOf, maskStrings, isName, DL_NEEDLES, DL_RUN_NEEDLES, DL_LIMITS } from "./received.js";
-import { importCode, readsOwnSource, importTimeSeverity, DL_CATEGORY_REASON } from "./hooks.js";
+import { receivedCodeKind, importCode, readsOwnSource, importTimeSeverity, packValues } from "./native.js";
 import { commentSpans } from "./lexer.js";
 import { mkIssue } from "./issue.js";
 import { registerScanContext, SECRET_SKIP_RE } from "./redact.js";
@@ -93,7 +92,46 @@ const { _XF_WINDOW: WINDOW, _XF_MAX_FILES: MAX_FILES, _XF_MAX_SEEDS: MAX_SEEDS, 
   _XF_MAX_RUNNERS: MAX_RUNNERS, _XF_MAX_CHARS: MAX_CHARS, _XF_EMIT_MAX: EMIT_MAX } = XF_LIMITS;
 const EMIT_NEEDLE = "emit";                                          // a file without it emits nothing
 const EMIT_GLOBALS = new Set(["process"]);                           // the emitters every file shares by name
-const LONG_ROW = DL_LIMITS._DL_LONG_ROW;
+
+// What the follower reads of the received-code detector's data (core's
+// _DL_* values, from the native engine's rule pack; the detector itself,
+// receivedCodeKind, is the engine's), read once, when first needed.
+let dlData = null;
+function DL() {
+  if (dlData === null) {
+    const [source, chain, str, name, space, needles, runNeedles, longRow, reasons] = packValues(
+      "_DL_SOURCE", "_DL_CHAIN_RE", "_DL_STR_RE", "_DL_NAME_RE", "_XF_SPACE_RE", "_DL_NEEDLES", "_DL_RUN_NEEDLES",
+      "_DL_LONG_ROW", "_DL_CATEGORY_REASON");
+    dlData = {
+      source: pyRe(source[0].re, source[0].flags),             // (the exact pattern of core's pair)
+      chain: pyRe(chain.re, chain.flags + "g"),
+      str: pyRe(str.re, str.flags + "g"),
+      name: pyRe(`^(?:${name.re})$`, name.flags),
+      space: pyRe(space.re, space.flags + "g"),
+      needles, runNeedles, longRow, reasons,
+    };
+  }
+  return dlData;
+}
+/** Does `expr` hold a value received over the network? (core._xf_has_source) */
+const hasSource = (expr) => DL().source.test(expr);
+/** The member chains named in `expr` (a, a.b.c), spaces taken out (core._xf_chains). */
+function chainsOf(expr) {
+  const { chain, space } = DL();
+  const out = new Set();
+  for (const m of expr.matchAll(chain)) out.add(m[0].replace(space, ""));
+  return out;
+}
+/**
+ * `row` with each string literal's contents blanked, its quotes kept
+ * (core._xf_js_mask_line). Blanked by UTF-16 unit, so the row keeps its
+ * length in units and offsets into it are the row's; core blanks by code
+ * point — only a count of spaces differs, which no pattern read on it counts.
+ */
+const maskStrings = (row) =>
+  row.replace(DL().str, (s) => (s.length >= 2 ? s[0] + " ".repeat(s.length - 2) + s[s.length - 1] : s));
+/** Is `s` one identifier? (core: _DL_NAME_RE.fullmatch) */
+const isName = (s) => DL().name.test(s);
 const DEP_MARKERS = ["site-packages", "dist-packages", "vendor"];
 const JS_KEYWORDS = new Set(["if", "for", "while", "switch", "catch", "function", "return", "do", "else", "with",
   "constructor", "class"]);
@@ -302,7 +340,7 @@ function follow(exprs, locals) {
 
 /** Does a body that receives a value hand it to a callback: a parameter it calls, or a Promise's resolve? core._xf_delivers. */
 function delivers(body, params) {
-  if (!body.some((row) => DL_NEEDLES.some((n) => row.includes(n)) && hasSource(row))) return false;
+  if (!body.some((row) => DL().needles.some((n) => row.includes(n)) && hasSource(row))) return false;
   const names = new Set(params);
   for (const row of body) {
     if (row.includes("Promise")) for (const m of finditer("_XF_PROMISE_RE", row)) names.add(m.groups.name);
@@ -365,7 +403,7 @@ function member(mod, cls, name, value, isStatic) {
 
 /** Keep a function's body for the runner test when it names a code runner. core._xf_body. */
 function keepBody(mod, sym, params, body) {
-  if (params.length && !mod.bodies.has(sym) && body.some((row) => DL_RUN_NEEDLES.some((n) => row.includes(n)))) {
+  if (params.length && !mod.bodies.has(sym) && body.some((row) => DL().runNeedles.some((n) => row.includes(n)))) {
     mod.bodies.set(sym, [params, body]);
   }
 }
@@ -381,7 +419,7 @@ function writes(mod, masked, orig, rowCls, lang) {
   const found = [];
   for (let k = 0; k < masked.length; k++) {
     const row = masked[k];
-    if (!row.includes("=") || (!row.includes(".") && !row.includes("[")) || longer(orig[k], LONG_ROW)) continue;
+    if (!row.includes("=") || (!row.includes(".") && !row.includes("[")) || longer(orig[k], DL().longRow)) continue;
     for (const m of finditer("_XF_MEMBER_WRITE_RE", row)) {
       const { name, attr, rhs } = m.groups;
       if (name === "self" || name === "this" || name === "cls") {
@@ -398,7 +436,7 @@ function writes(mod, masked, orig, rowCls, lang) {
   const pairs = [];
   for (let k = 0; k < masked.length; k++) {
     const row = masked[k];
-    if (!row.includes("=") || longer(orig[k], LONG_ROW)) continue;
+    if (!row.includes("=") || longer(orig[k], DL().longRow)) continue;
     if (lang === "py") {
       const a = match("_XF_ASSIGN_RE", row);
       if (a !== null) pairs.push([a.groups.name, a.groups.rhs]);
@@ -518,7 +556,7 @@ function pyParse(mod, pkgParts) {
       continue;
     }
     const a = row.includes("=") && (indent === 0 || (cls !== null && indent === bodyIndent)) ? match("_XF_ASSIGN_RE", row) : null;
-    if (a !== null && !longer(orig[k].slice(a.index + a[0].length - a.groups.rhs.length), LONG_ROW)) {
+    if (a !== null && !longer(orig[k].slice(a.index + a[0].length - a.groups.rhs.length), DL().longRow)) {
       const value = [hasSource(a.groups.rhs), chainsOf(a.groups.rhs)];
       if (indent === 0) setdefault(mod.defs, a.groups.name, value);
       else if (cls !== null && indent === bodyIndent) member(mod, cls, a.groups.name, value, true);
@@ -551,7 +589,7 @@ function pyParse(mod, pkgParts) {
   if (code.includes("import_module") || code.includes("__import__")) {
     for (let r = 0; r < orig.length; r++) {
       const row = orig[r];
-      if (!row.includes("import") || longer(row, LONG_ROW)) continue;
+      if (!row.includes("import") || longer(row, DL().longRow)) continue;
       for (const m of finditer("_XF_PY_DYN_IMPORT_RE", row)) {
         if (masked[r][m.index] !== row[m.index]) continue;          // in a comment or a docstring
         const target = resolvePy(m.groups.mod, pkgParts);
@@ -572,7 +610,7 @@ function pyParse(mod, pkgParts) {
   }
   for (let r = 0; r < orig.length; r++) {
     const row = orig[r];
-    if (!row.includes("environ") || longer(row, LONG_ROW)) continue;
+    if (!row.includes("environ") || longer(row, DL().longRow)) continue;
     for (const m of finditerD("_XF_PY_ENV_WRITE_RE", row)) {
       if (masked[r][m.index] !== row[m.index]) continue;            // in a comment or a docstring
       const [a, b] = m.indices.groups.rhs;
@@ -690,7 +728,7 @@ function jsViews(text) {
   const code = [], masked = [];
   let inBlock = false;
   for (const src of text.split("\n")) {
-    if (longer(src, LONG_ROW)) { code.push(""); masked.push(""); continue; }
+    if (longer(src, DL().longRow)) { code.push(""); masked.push(""); continue; }
     let m = src.includes("'") || src.includes('"') || src.includes("`") ? maskStrings(src) : src, row = src;
     if (!inBlock && !m.includes("/")) { code.push(row); masked.push(m); continue; }   // (no comment starts on it)
     const spans = [];
@@ -1311,8 +1349,8 @@ function xfIssue(path, line, text, cat, srcs, who, runner = false) {
   const tail = runner ? `the function that runs it is in another file of the package (${where})`
     : `the value is received in another file of the package (${where})`;
   return mkIssue({ id: "SC-IMPORT-RISK", name: "Risky import-time code", type: "HOTSPOT",
-    sev: importTimeSeverity([DL_CATEGORY_REASON[cat]]),
-    msg: `${who} ${DL_CATEGORY_REASON[cat]}; ${tail}.`, why: XF_WHY,
+    sev: importTimeSeverity([DL().reasons[cat]]),
+    msg: `${who} ${DL().reasons[cat]}; ${tail}.`, why: XF_WHY,
     fix: runner ? `Read both files: what does this file receive, and what does ${where} run?`
       : `Read both files: what does ${where} receive, and what runs it here?`,
     ref: "CWE-506 · Supply chain" }, path, line, lines);
@@ -1437,7 +1475,7 @@ export function crossFileReceivedIssues(files, skipPaths = new Set(), who = "Dep
   for (const [gkey, members] of groups) {
     const lang = gkey.split("\u0000")[0];
     if (members.length < 2 || members.length > MAX_FILES) continue;     // needs >= 2; a huge package is skipped
-    if (!members.some(([, , f]) => DL_NEEDLES.some((n) => f.content.includes(n)))) continue;
+    if (!members.some(([, , f]) => DL().needles.some((n) => f.content.includes(n)))) continue;
     try {
       const mods = new Map();
       for (const [key, extra, f] of members) {

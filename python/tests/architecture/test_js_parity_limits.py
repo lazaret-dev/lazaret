@@ -3,7 +3,7 @@ test_js_parity.py (0.1.8) so each module runs in well under the suite's
 per-module time budget: the source-size limit (a 2.4 MB bundle, five ways,
 in both engines) and every fixture converted to Windows line endings. The
 comparison is test_js_parity's (EngineParityTests.assert_same). Inert
-content; skipped where Node isn't installed.
+content; skipped where the npm engine is not built (node, and npm run build in js/).
 """
 
 import collections
@@ -14,10 +14,10 @@ import unittest
 
 from tests import _support
 from tests.architecture import test_js_parity as base      # (the module: its TestCase is not collected here)
-from tests.architecture.test_js_parity import NODE, both, issue_key, js_cmd, py_cmd, run_cli
+from tests.architecture.test_js_parity import NODE, both, issue_key, js_cmd, py_cmd, run_cli, NPM_READY, NPM_SKIP
 
 
-@unittest.skipUnless(NODE, "node is not installed")
+@unittest.skipUnless(NPM_READY, NPM_SKIP)
 class EngineLimitParityTests(unittest.TestCase):
     maxDiff = None
     assert_same = base.EngineParityTests.assert_same

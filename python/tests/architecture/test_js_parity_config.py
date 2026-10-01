@@ -8,13 +8,13 @@ JSON, a Dockerfile), next to comment, marker and size cases. The expectations
 themselves are in that module and js/test/config-secrets.test.js; this holds
 the engines to each other. All content is inert (hosts are .invalid, every
 credential is made up; the Slack and Discord webhook lines are text, never
-contacted). Skipped where node is missing.
+contacted). Skipped where the npm engine is not built (node, and npm run build in js/).
 """
 import collections
 import tempfile
 import unittest
 
-from tests.architecture.test_js_parity import DERIVED, NODE, both, derived, issue_key
+from tests.architecture.test_js_parity import DERIVED, NODE, both, derived, issue_key, NPM_READY, NPM_SKIP
 from tests.architecture.test_js_parity_lexing import write_tree
 from tests.scanner.test_config_secrets import PASS, QUIET, REPORTED, TOKEN
 
@@ -43,7 +43,7 @@ TREE.update({
 })
 
 
-@unittest.skipUnless(NODE, "node is not installed")
+@unittest.skipUnless(NPM_READY, NPM_SKIP)
 class ConfigParityTests(unittest.TestCase):
     maxDiff = None
 

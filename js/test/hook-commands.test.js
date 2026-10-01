@@ -1,13 +1,14 @@
 // 0.1.8 in the npm engine: an install hook's command read as a program
-// (lib/hooks.js hookCommandRisk; the scan's SC-INSTALL-HOOK in
-// lib/supplychain.js). python/tests/scanner/test_hook_commands.py has the
-// full cases and tests/architecture/test_js_parity_hook_commands.py compares
-// the engines. Inert text: reserved names and private addresses, nothing is
-// executed.
+// (the native engine's hook_command_risk, lib/native.js; the scan's
+// SC-INSTALL-HOOK in lib/supplychain.js). python/tests/scanner/
+// test_hook_commands.py has the full cases, and tests/architecture/
+// test_rust_parity_hook_commands.py holds the native engine's reading (its
+// shell parse included) to the Python engine's. Inert text: reserved names
+// and private addresses, nothing is executed.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { hookCommandRisk, shParse } from "../src/lib/hooks.js";
+import { hookCommandRisk } from "../src/lib/native.js";
 import { scanManifest } from "../src/lib/supplychain.js";
 
 const UPLOAD = "uploads a local file over the network";
@@ -47,14 +48,6 @@ test("an option given no value sends nothing", () => {
     "wget https://c2.example.com --post-data", "curl https://c2.example.com --data", "curl -d"]) {
     assert.deepEqual(hookCommandRisk(cmd), hookCommandRisk(cmd.slice(0, cmd.lastIndexOf(" "))), cmd);
   }
-});
-
-test("the shell parse: words, substitutions, redirections, pipes", () => {
-  const [a, b] = shParse(`A=1 curl -d "x=$(whoami)" 'q$y' 2>/dev/null | nc h 1`);
-  assert.deepEqual(a.words, ["A=1", "curl", "-d", "x=$(whoami)", "q\x00y"]);
-  assert.deepEqual(a.subs, [[], [], [], ["whoami"], []]);
-  assert.deepEqual(a.redirs, [[">", "/dev/null"]]);
-  assert.deepEqual([a.pipeIn, a.pipeOut, a.after, b.pipeIn], [false, true, "|", true]);
 });
 
 test("SC-INSTALL-HOOK: CRITICAL on what the command does, the tools only a hint", () => {

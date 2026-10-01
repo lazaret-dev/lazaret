@@ -3,7 +3,7 @@
 // _PX_MAX_ENTRIES). Inert text only: hosts are .invalid, nothing is executed.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { decodedView, installScriptRisk } from "../src/lib/hooks.js";
+import { decodedView, installScriptRisk } from "../src/lib/native.js";
 
 const NOTE = " (in strings it decodes as it runs)";
 // built by the Python test's obfuscated(): a plain array rotated by its checksum; RC4 with the key each call passes

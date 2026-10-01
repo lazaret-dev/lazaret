@@ -1,16 +1,17 @@
-// 0.1.8 in the npm engine: names in strings a file decodes as it runs
-// (lib/hooks.js decodedView), eval of a file's own decoder (SC-EVAL-DECODER),
-// Function.constructor, statements over several rows and environment
-// variables in the received-code detector (lib/received.js), and a script
-// downloaded or decoded, written and run with a shell or an interpreter.
-// python/tests/scanner/test_decoded_and_staged.py has the full cases and
-// tests/architecture/test_js_parity_hooks.py compares the engines. Inert
-// text: hosts are .invalid, nothing is executed.
+// 0.1.8 in the npm engine (the native engine since 0.1.9, lib/native.js):
+// names in strings a file decodes as it runs (decodedView), eval of a file's
+// own decoder (SC-EVAL-DECODER), Function.constructor, statements over
+// several rows and environment variables in the received-code detector, and
+// a script downloaded or decoded, written and run with a shell or an
+// interpreter. python/tests/scanner/test_decoded_and_staged.py has the full
+// cases and tests/architecture/test_rust_parity_hooks.py compares the
+// engines. Inert text: hosts are .invalid, nothing is executed.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { importTimeRisk, importTimeSeverity, installScriptRisk, runsReceivedCode, RULES } from "../src/index.js";
-import { decodedView, spawnedScripts } from "../src/lib/hooks.js";
+import { importTimeRisk, importTimeSeverity, installScriptRisk, runsReceivedCode } from "../src/index.js";
+import { decodedView, spawnedScripts, packValues } from "../src/lib/native.js";
+import { pyRe } from "../src/lib/pycompat.js";
 
 const NOTE = " (in strings it decodes as it runs)";
 const hex = (s) => Buffer.from(s).toString("hex");
@@ -39,7 +40,8 @@ test("names hidden from the install-script test", () => {
 });
 
 test("SC-EVAL-DECODER: eval of a decoder over a blob of character codes", () => {
-  const rx = RULES.find((r) => r.id === "SC-EVAL-DECODER").re;
+  const rule = packValues("RULES")[0].find((r) => r.id === "SC-EVAL-DECODER").re;   // core's pattern, from the engine's pack
+  const rx = pyRe(rule.re, rule.flags);
   const codes = Array.from({ length: 260 }, (_, k) => 40 + (k % 80)).join(",");
   assert.ok(rx.test("try{eval(function(s,n){return s.replace(/[a-zA-Z]/g,function(c){var b=c<=\"Z\"?65:97;"
     + "return String.fromCharCode((c.charCodeAt(0)-b+n)%26+b)})}([" + codes + "],17))}catch(e){}"));

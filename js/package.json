@@ -10,6 +10,8 @@
   "files": [
     "bin/",
     "src/",
+    "native/lazaret.wasm",
+    "native/NOTICE",
     "README.md",
     "LICENSE",
     "LICENSE-PYTHON",
@@ -25,6 +27,8 @@
     "node": ">=22"
   },
   "scripts": {
+    "build": "node scripts/build-wasm.js",
+    "prepack": "node scripts/build-wasm.js --check",
     "test": "node --test"
   },
   "keywords": [

@@ -16,7 +16,7 @@ every package:
   often enough that flows connect.
 
 All content is inert text: hosts are .invalid, nothing is executed.
-Skipped where Node isn't installed.
+Skipped where the npm engine is not built (node, and npm run build in js/).
 """
 import collections
 import json
@@ -28,7 +28,7 @@ import unittest
 
 from lazaret.scanner import core
 from tests import _support
-from tests.architecture.test_js_parity import NODE
+from tests.architecture.test_js_parity import NODE, NPM_READY, NPM_SKIP
 from tests.scanner import test_cross_file_follower as T
 
 CROSSFILE_JS = os.path.join(_support.REPO_ROOT, "js", "src", "lib", "crossfile.js")
@@ -349,7 +349,7 @@ def curated():
     return cases
 
 
-@unittest.skipUnless(NODE, "node is not installed")
+@unittest.skipUnless(NPM_READY, NPM_SKIP)
 class CrossFileParityTests(unittest.TestCase):
     maxDiff = None
 

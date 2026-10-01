@@ -10,9 +10,9 @@
 * A dangerous name hidden with fewer than eight escapes was not SC-HEXSTR:
   global["\\x72\\x65\\x71\\x75\\x69\\x72\\x65"]("child_process") spells require in 7.
 
-The npm engine's twins: js/test/review-small-gaps.test.js;
+The npm engine: js/test/review-small-gaps.test.js;
 tests/architecture/test_js_parity.py (the adversarial tree) and
-test_js_parity_hexname.py compare the engines. Fixtures are inert text.
+test_rust_parity_hexname.py compare the engines. Fixtures are inert text.
 """
 import json
 import os

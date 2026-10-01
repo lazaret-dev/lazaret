@@ -1,8 +1,9 @@
-"""The hooks parity corpus: the inputs both parity tests of the install-hook
-and supply-chain functions read — the npm engine's (test_js_parity_hooks.py)
-and the Rust engine's (test_rust_parity_hooks.py) — and core's answers for
-one case (core_view), field by field (FIELDS). Not a test: a plain module of
-shared data, so neither test imports the other.
+"""The hooks parity corpus: the inputs the parity tests of the install-hook
+and supply-chain functions read — the Rust engine's against core
+(test_rust_parity_hooks.py and _hooks_b.py, test_rust_parity_signs.py) and
+its WebAssembly build against its platform library (test_wasm_parity*.py) —
+and core's answers for one case (core_view), field by field (FIELDS). Not a
+test: a plain module of shared data.
 
 Realistic hook commands and install / import-time scripts (CURATED and the
 *_CURATED lists), then a seeded random stream of cases built from pieces

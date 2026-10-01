@@ -12,7 +12,8 @@
 # - RUST_VERSION: the compiler every library is built with, installed by the
 #   runner's rustup, which checks each component against the SHA-256 sums
 #   the Rust release publishes. Keep it at or above rust-version in
-#   rust/Cargo.toml. 1.95.0 is the compiler of the parity runs in
+#   rust/Cargo.toml, and the same as release.yml's (the npm package's
+#   WebAssembly build). 1.95.0 is the compiler of the parity runs in
 #   docs/RUST_ENGINE.md.
 # - The manylinux_2_28 images, by digest (see the comment at the matrix).
 # The workspace has no external crates, so every build is --offline and
@@ -101,8 +102,12 @@ jobs:
               "$py" scripts/check_native_library.py "$lib" "$TAG" --load
               cd python
               LAZARET_NATIVE_LIB="$lib" "$py" -m unittest tests.architecture.test_rust_parity_regex \
-                tests.architecture.test_rust_parity_hooks tests.architecture.test_rust_parity_signs \
-                tests.architecture.test_rust_parity_scanfile tests.architecture.test_rust_parity_lexer'
+                tests.architecture.test_rust_parity_hooks tests.architecture.test_rust_parity_hooks_b \
+                tests.architecture.test_rust_parity_signs \
+                tests.architecture.test_rust_parity_scanfile tests.architecture.test_rust_parity_lexer \
+                tests.architecture.test_rust_parity_project tests.architecture.test_rust_parity_hook_commands \
+                tests.architecture.test_rust_parity_hexname tests.architecture.test_rust_parity_offscreen \
+                tests.architecture.test_rust_parity_lookalike'
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: native-${{ matrix.tag }}
@@ -166,8 +171,12 @@ jobs:
         working-directory: python
         run: >-
           python -m unittest tests.architecture.test_rust_parity_regex
-          tests.architecture.test_rust_parity_hooks tests.architecture.test_rust_parity_signs
+          tests.architecture.test_rust_parity_hooks tests.architecture.test_rust_parity_hooks_b
+          tests.architecture.test_rust_parity_signs
           tests.architecture.test_rust_parity_scanfile tests.architecture.test_rust_parity_lexer
+          tests.architecture.test_rust_parity_project tests.architecture.test_rust_parity_hook_commands
+          tests.architecture.test_rust_parity_hexname tests.architecture.test_rust_parity_offscreen
+          tests.architecture.test_rust_parity_lookalike
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: native-${{ matrix.tag }}

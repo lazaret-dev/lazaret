@@ -6,8 +6,8 @@ CanisterWorm releases of @emilgroup's packages (March 2026) wrote a systemd
 user unit that runs a Python payload and enabled it from their postinstall.
 Import-time code never gets these reasons: a daemon's `install-service`
 command and the auto-launch libraries write the same files when asked. The
-npm engine's twin is held to these by js/test/services.test.js and
-tests/architecture/test_js_parity_hooks.py.
+native engine (which the npm package runs) is held to these by
+js/test/services.test.js and tests/architecture/test_rust_parity_signs.py.
 
 Everything is inert text: hosts are .invalid, and nothing is written outside
 a temporary directory or executed.

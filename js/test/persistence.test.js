@@ -15,7 +15,7 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { persistenceReasons, installScriptRisk, importTimeRisk, importTimeSeverity } from "../src/lib/hooks.js";
+import { persistenceReasons, installScriptRisk, importTimeRisk, importTimeSeverity } from "../src/lib/native.js";
 import { parseJsonc, JsoncError, configKind, ownerDir, entries, localCommand } from "../src/lib/autorun.js";
 import { isWorkflow, findings, outline } from "../src/lib/ghworkflow.js";
 import { scanConfigFile } from "../src/scanner/scan.js";

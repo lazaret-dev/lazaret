@@ -2,7 +2,7 @@
 // scan_sql_nowhere (F11), with the Python regex text verbatim.
 import { mkIssue } from "./engine.js";
 import { pyRe, pyStrip, pyLstrip, pyRstrip } from "../lib/pycompat.js";
-import { TEXT_RULES } from "./rules.js";
+import { NOWHERE_RULES } from "./rules.js";
 
 /* ---------------- Flow-sensitive SQL-sink analysis (G12) ----------------
    The S-SQL-PY line rule only sees formatting applied to a literal INSIDE
@@ -138,7 +138,6 @@ function sqlSinkScan(file, lines, issues, snipLines = lines) {
    and is aborted by a WHERE in between; heads before a reported match's ';'
    are consumed (non-overlapping); heads after a WHERE-aborted statement are
    still tried. */
-const NOWHERE_RULES = TEXT_RULES.filter((r) => r.nowhere);
 const WHERE_RE = pyRe(String.raw`\bWHERE\b`, "gi");
 function lowerBound(a, x) {
   let lo = 0, hi = a.length;

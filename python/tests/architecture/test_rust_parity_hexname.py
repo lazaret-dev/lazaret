@@ -1,36 +1,19 @@
-"""Engine parity for SC-HEXSTR's hidden names: the npm engine's hexHiddenName
-(js/src/scanner/scan.js, and the dashboard's copy) against
-core.hex_hidden_name, and hexHiddenText against core.hex_hidden_text, case
-by case on curated lines and a seeded random corpus of string literals built
-from escapes (\\xNN, \\uNNNN, \\u{N…}, \\UNNNNNNNN, octal), backslash runs,
-quotes, letters of dangerous names, punctuation and non-ASCII text. The
-expectations are in tests/scanner/test_review_hex_names.py. Columns are
-compared in code points (the npm engine's are UTF-16 offsets). Skipped where
-node is missing.
+"""Engine parity for SC-HEXSTR's hidden names and text: the native engine's
+hex_hidden_name and hex_hidden_text (crates/lazaret-engine: scanfile.rs;
+the npm package runs it as WebAssembly) against core.hex_hidden_name and
+core.hex_hidden_text, case by case on curated lines and a seeded random
+corpus of string literals built from escapes (\\xNN, \\uNNNN, \\u{N…},
+\\UNNNNNNNN, octal), backslash runs, quotes, letters of dangerous names,
+punctuation and non-ASCII text. The expectations are in
+tests/scanner/test_review_hex_names.py. Columns are code points in both.
+(Until 0.1.9 this held the npm engine's JavaScript twin to core.) Skipped
+where the native library is not built.
 """
 import json
-import os
 import random
-import shutil
-import subprocess
 import unittest
 
-from lazaret.scanner import core
-from tests import _support
-
-NODE = shutil.which("node")
-SCAN_JS = os.path.join(_support.REPO_ROOT, "js", "src", "scanner", "scan.js")
-NPM = """
-import { readFileSync } from "node:fs";
-import { pathToFileURL } from "node:url";
-const s = await import(pathToFileURL(process.argv[1]).href);
-const cp = (t, i) => [...t.slice(0, i)].length;
-const cases = JSON.parse(readFileSync(0, "utf8"));
-process.stdout.write(JSON.stringify(cases.map((t) => {
-  const n = s.hexHiddenName(t);
-  return [n && [n[0], cp(t, n[1])], s.hexHiddenText(t)];
-})));
-"""
+from lazaret.scanner import _native, core
 
 CURATED = [
     'var m = global["\\x72\\x65\\x71\\x75\\x69\\x72\\x65"]("child_process");', 'x = "\\x65val"', 'x = "\\\\x65val"',
@@ -80,17 +63,14 @@ def core_view(text):
     return [list(name) if name else None, core.hex_hidden_text(text)]
 
 
-@unittest.skipUnless(NODE, "node is not installed")
+@unittest.skipUnless(_native.available(), f"native engine not built ({_native.load_error()})")
 class HexNameParityTests(unittest.TestCase):
     maxDiff = None
 
     def test_every_case_agrees(self):
         cases = corpus()
-        p = subprocess.run([NODE, "--input-type=module", "-e", NPM, SCAN_JS], input=json.dumps(cases),
-                           capture_output=True, encoding="utf-8", timeout=60)
-        self.assertEqual(p.returncode, 0, p.stderr[-2000:])
-        npm = json.loads(p.stdout)
-        diffs = [(c, core_view(c), r) for c, r in zip(cases, npm) if core_view(c) != r]
+        native = [r.get("ok", r) for r in _native.call("batch", {"calls": [["hex_view", {}, c] for c in cases]})]
+        diffs = [(c, core_view(c), r) for c, r in zip(cases, native) if core_view(c) != r]
         self.assertEqual(diffs[:10], [])
         found = sum(1 for c in cases if core.hex_hidden_name(c))
         self.assertGreater(found, 300)                  # the corpus reaches the finding

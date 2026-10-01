@@ -14,7 +14,8 @@ without --deps, suppression tricks, a file with hundreds of findings, CRLF,
 Unicode identifiers, a bidi control, .pyc files, symlinks and special files
 where the OS supports them, files over a 2 MB limit). All fixture content
 is inert: nothing is executed, hosts are TEST-NET (192.0.2.x) or .invalid,
-credentials are dummies. Skipped where Node isn't installed.
+credentials are dummies. Skipped where node or the npm engine's WebAssembly build (npm run build in
+js/) is missing.
 
 Known, deliberate differences: findings only the Python engine produces —
 the Python half of its cross-file flow engine (X-* flows and Q-FLOW-* notes
@@ -41,6 +42,12 @@ from tests import _support
 
 NODE = shutil.which("node")
 JS_BIN = os.path.join(_support.REPO_ROOT, "js", "bin", "lazaret.js")
+# The npm package runs the native engine as WebAssembly (0.1.9): a test that
+# scans with it needs that module built (`npm run build` in js/) as well as
+# node; NPM_READY is node's path then, else None.
+NPM_WASM = os.path.join(_support.REPO_ROOT, "js", "native", "lazaret.wasm")
+NPM_READY = NODE if NODE and os.path.isfile(NPM_WASM) else None
+NPM_SKIP = "the npm engine is not ready: node, and js/native/lazaret.wasm (npm run build in js/)"
 
 # The cross-file flow engine's rules (lazaret.scanner.flow). Its JavaScript
 # half is ported (js/src/scanner/flow.js); its Python half (AST-based) is not,
@@ -346,7 +353,7 @@ def derived(report, field):
     return value
 
 
-@unittest.skipUnless(NODE, "node is not installed")
+@unittest.skipUnless(NPM_READY, NPM_SKIP)
 class EngineParityTests(unittest.TestCase):
     maxDiff = None
 

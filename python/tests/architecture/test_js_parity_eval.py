@@ -4,7 +4,7 @@ tests/scanner/test_review_indirect_eval.py and
 js/test/review-indirect-eval.test.js). Both CLIs scan a tree of curated and
 seeded random lines — as first-party files and, with --deps, as a
 dependency's — and must report the same findings, metrics, gate and exit
-code. All content is inert text. Skipped where node is missing.
+code. All content is inert text. Skipped where the npm engine is not built (node, and npm run build in js/).
 """
 import os
 import random
@@ -30,7 +30,7 @@ def corpus(seed=20260927, count=600):
     return cases
 
 
-@unittest.skipUnless(parity.NODE, "node is not installed")
+@unittest.skipUnless(parity.NPM_READY, parity.NPM_SKIP)
 class IndirectEvalParityTests(unittest.TestCase):
     maxDiff = None
     assert_same = parity.EngineParityTests.assert_same
