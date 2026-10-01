@@ -19,6 +19,7 @@
 // that left the memory larger than MEMORY_KEEP.
 
 import { readFileSync } from "node:fs";
+import { sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const WASM = new URL("../../native/lazaret.wasm", import.meta.url);
@@ -103,16 +104,31 @@ function wtf8(s) {
   return out.subarray(0, n);
 }
 
+function concatBytes(parts) {
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let at = 0;
+  for (const p of parts) { out.set(p, at); at += p.length; }
+  return out;
+}
+
+/** The code points of `s` as the engine reads it: a surrogate pair is one, a lone surrogate one. */
+export function codePoints(s) {
+  let n = s.length;
+  for (const _ of s.matchAll(/[\uD800-\uDBFF][\uDC00-\uDFFF]/g)) n--;
+  return n;
+}
+
 /**
  * Run one call of the engine: `name`, its arguments (an object) and, for the
- * calls that read one, the text. Returns the answer (JSON-decoded).
+ * calls that read one, the text (or texts, sent one after another, each
+ * encoded on its own). Returns the answer (JSON-decoded).
  */
 export function call(name, args = {}, text = "") {
   const e = instance();
   if (workBudget !== null && name !== "batch") args = { ...args, budget: workBudget };
   const nameBytes = utf8.encode(name);
   const argBytes = utf8.encode(JSON.stringify(args));   // lone surrogates come out as \u escapes
-  const textBytes = wtf8(String(text));
+  const textBytes = Array.isArray(text) ? concatBytes(text.map((t) => wtf8(String(t)))) : wtf8(String(text));
   const len = 8 + nameBytes.length + argBytes.length + textBytes.length;
   let status, answer;
   try {
@@ -234,6 +250,31 @@ export const minerAt = (text) => call("miner_at", {}, text);
 export const rawIpConnect = (text) => call("raw_ip_connect", {}, text);
 export const dnsBeaconAt = (text, host = true) => call("dns_beacon_at", { host }, text);
 export const deadDropAt = (text) => call("dead_drop_at", {}, text);
+
+// ---- the cross-file follower ----
+
+/**
+ * The cross-file follower (core._cross_file_received_issues): SC-IMPORT-RISK for each dependency
+ * file that runs a value another file of its package received over the network, or hands one to
+ * another file's function that runs it, as core finds them and in core's order. `skipPaths`
+ * ("/"-separated): the files already flagged single-file. The engine reads each package with its own
+ * work budget; one that spends it is skipped, as core skips a package that raises.
+ */
+export function crossFileIssues(files, skipPaths = new Set(), { who = "Dependency code", onePackage = false, redact = true } = {}) {
+  const todo = files.filter((f) => f.dep && (f.lang === "py" || f.lang === "js"));
+  if (todo.length < 2) return [];
+  const texts = todo.map((f) => String(f.content));
+  const args = {
+    files: todo.map((f, k) => [f.path, f.lang, codePoints(texts[k])]), skip: [...skipPaths], who,
+    one_package: onePackage, sep, redact, neumaier: false,
+  };
+  const out = [];
+  for (const pkg of call("cross_file", args, texts)) {
+    if (!pkg.issues) continue;                          // (failed: skipped)
+    for (const [k, a] of pkg.issues) out.push(...issuesOf(todo[k].path, [a]));
+  }
+  return out;
+}
 
 // ---- scan_file ----
 

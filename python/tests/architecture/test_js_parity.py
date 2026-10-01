@@ -54,8 +54,9 @@ NPM_SKIP = "the npm engine is not ready: node, and js/native/lazaret.wasm (npm r
 # so its X-* flows and Q-FLOW-* notes on Python files are Python-only.
 FLOW_PREFIXES = ("X-", "Q-FLOW-")
 # (The cross-file received-code follower, core._cross_file_received_issues, ran
-# only in the Python engine before 0.1.8; js/src/lib/crossfile.js is its twin
-# now, and test_js_parity_crossfile holds the two to one answer.)
+# only in the Python engine before 0.1.8; the npm package runs the native
+# engine's port of it, which test_rust_parity_crossfile holds to core and
+# test_wasm_parity_crossfile holds the npm binding to.)
 # fixture -> further rules only the Python engine may report there. (cfgproj's
 # .lazaret-taint.json is repository content: the Python engine loads it only
 # with --trust-repo-config, not passed here, so both engines agree on it.)

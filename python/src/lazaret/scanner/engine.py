@@ -196,6 +196,41 @@ def scan_file(path, content, lang, dep=False):
     return scan_files([(path, content, lang, dep)])[0]
 
 
+def cross_file_issues(files, skip_paths=(), who="Dependency code", one_package=False):
+    """core._cross_file_received_issues, by the engine in use. The native
+    engine reads the packages in one call (on THREADS threads), each with
+    its own work budget; a package it could not read (the budget spent, an
+    internal error) is read by core, so the findings and their order are
+    core's."""
+    if name() != "rust":
+        return core._cross_file_received_issues(files, skip_paths, who, one_package)
+    todo = [f for f in files if f.get("dep") and f["lang"] in ("py", "js")]
+    if len(todo) < 2:
+        return []
+    args = {"files": [[f["path"], f["lang"], len(f["content"])] for f in todo],
+            "skip": sorted(set(skip_paths)), "one_package": bool(one_package), "sep": os.sep,
+            "redact": bool(core.REDACT_SECRETS), "neumaier": _NEUMAIER, "threads": THREADS}
+    if callable(who):
+        args["whos"] = [who(f["path"]) for f in todo]
+    else:
+        args["who"] = who
+    try:
+        answer = _native.call("cross_file", args, "".join(f["content"] for f in todo))
+    except _native.NativeError:
+        return core._cross_file_received_issues(files, skip_paths, who, one_package)
+    out, groups = [], None
+    for package in answer:
+        if "failed" in package:
+            if groups is None:
+                groups = core._xf_groups(files, one_package)
+            members = groups.get((package["lang"], package["root"]), [])
+            out.extend(core._xf_group_issues(package["lang"], members, set(skip_paths), who))
+            continue
+        for k, issue in package["issues"]:
+            out.extend(_issues(todo[k]["path"], [issue]))
+    return out
+
+
 # sum() adds floats with Neumaier's compensation since Python 3.12, and
 # S-ENTROPY's Shannon entropy is such a sum: the native engine adds as this
 # Python does.

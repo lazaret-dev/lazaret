@@ -58,6 +58,8 @@ pub const CALLS: &[&str] = &[
     // 0.1.9: what the npm package asks (it runs this engine as WebAssembly)
     "pack.values", "agent_hijack", "agent_hijack_in_command", "hook_command_risk", "hook_is_suspicious",
     "import_code", "scan_rules", "hook_command_view", "hex_view", "lookalike_view",
+    // 0.1.8: the cross-file follower, each package on its own budget
+    "cross_file",
 ];
 
 fn dead_drop(v: Option<(usize, PyStr)>) -> Value {
@@ -270,6 +272,7 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
             )
         }
         "pyre.escape" => Value::Str(pyre::escape(text)),
+        "cross_file" => cross_file(p, args, text)?,
         "scan_file" => {
             let flag = |k: &str, d: bool| match args.get(k) {
                 Some(Value::Bool(b)) => *b,
@@ -581,6 +584,53 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
         }
         _ => return Err(CallError::Unknown(name.to_string())),
     })
+}
+
+/// cross_file: {"files": [[path, lang, length], …], "skip": […], "who": …,
+/// "whos": [one per file] | null, "one_package", "sep", "redact", "neumaier",
+/// "threads"} and the files' texts one after another (each `length` code
+/// points) -> core._cross_file_received_issues per package
+/// (crossfile::answer). Each package gets the call's budget.
+fn cross_file(p: &Pack, args: &Value, text: &[u32]) -> Result<Value, CallError> {
+    use crate::crossfile::{self, File, Options};
+    let bad = |m: &str| CallError::BadArgs(format!("cross_file: {}", m));
+    let items = args.get("files").and_then(|f| f.as_arr()).ok_or_else(|| bad("files"))?;
+    let who = opt_str(args, "who").unwrap_or_else(|| u("Dependency code"));
+    let whos = args.get("whos").and_then(|w| w.as_arr());
+    let mut files = Vec::with_capacity(items.len());
+    let mut at = 0usize;
+    for (k, item) in items.iter().enumerate() {
+        let parts = item.as_arr().ok_or_else(|| bad("a file is not [path, lang, length]"))?;
+        let path = parts.first().and_then(|v| v.as_str()).ok_or_else(|| bad("a file's path"))?.to_vec();
+        let lang = parts.get(1).and_then(|v| v.as_str()).ok_or_else(|| bad("a file's lang"))?.to_vec();
+        let len = parts.get(2).and_then(|v| v.as_i64()).filter(|&n| n >= 0).ok_or_else(|| bad("a file's length"))? as usize;
+        if at + len > text.len() {
+            return Err(bad("the files' lengths run past the text"));
+        }
+        let who = whos.and_then(|w| w.get(k)).and_then(|v| v.as_str()).map(|s| s.to_vec()).unwrap_or_else(|| who.clone());
+        files.push(File { path, lang, text: &text[at..at + len], who });
+        at += len;
+    }
+    if at != text.len() {
+        return Err(bad("the files' lengths do not add up to the text"));
+    }
+    let flag = |k: &str, d: bool| match args.get(k) {
+        Some(Value::Bool(b)) => *b,
+        _ => d,
+    };
+    let opts = Options {
+        one_package: flag("one_package", false),
+        sep: opt_str(args, "sep").unwrap_or_else(|| u("/")),
+        redact: flag("redact", true),
+        neumaier: flag("neumaier", false),
+        threads: opt_int(args, "threads").unwrap_or(1).clamp(1, MAX_THREADS as i64) as usize,
+        steps: match opt_int(args, "budget") {
+            Some(b) if b > 0 => b as u64,
+            _ => crate::budget::DEFAULT_STEPS,
+        },
+    };
+    let skip: std::collections::HashSet<PyStr> = arg_strs(args, "skip").into_iter().collect();
+    Ok(crossfile::answer(crossfile::cross_file(p, &files, &skip, &opts)))
 }
 
 fn match_value(m: &pyre::Match) -> Value {

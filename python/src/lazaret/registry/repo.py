@@ -2126,7 +2126,8 @@ class _ArtifactScan:
     def _cross_file_code(self):
         """SC-IMPORT-RISK (CRITICAL) for a package file that runs a value
         another file of the package received over the network
-        (core._cross_file_received_issues, 0.1.8): the dropper split across
+        (core._cross_file_received_issues, 0.1.8, by the engine in use:
+        engine.cross_file_issues): the dropper split across
         files — _net.py fetches, __init__.py runs what it returns — that
         neither file shows alone. The --deps checks ran it on installed
         dependencies only; a registry or guard scan reads the release before
@@ -2154,7 +2155,7 @@ class _ArtifactScan:
         if len(files) < 2:
             return
         self._deadline("the cross-file follower")
-        for issue in lazaret._cross_file_received_issues(files, who=lambda path: back[path], one_package=True):
+        for issue in _engine.cross_file_issues(files, who=lambda path: back[path], one_package=True):
             issue["file"] = back[issue["file"]]
             self.issues.append(issue)
 

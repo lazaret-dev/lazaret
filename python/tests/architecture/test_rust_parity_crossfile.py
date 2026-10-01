@@ -1,51 +1,35 @@
-"""Engine parity for the cross-file received-code follower (0.1.8, item 10).
+"""Engine parity for the cross-file received-code follower: the native
+engine's `cross_file` (rust/crates/lazaret-engine/src/crossfile.rs, which
+the Python package's --deps checks and registry scans run through
+engine.cross_file_issues, and the npm package's --deps checks through
+native.js) against core._cross_file_received_issues, finding for finding —
+file, line, severity, message and snippet — on
 
-core._cross_file_received_issues ran only in the Python engine; its twin is
-js/src/lib/crossfile.js (the npm engine's --deps checks run it). Both must
-report the same findings — file, line, severity, message and snippet — for
-every package:
-
-* the twins' pattern text, flags, name sets and limits are core's;
 * the follower's own tests (tests/scanner/test_cross_file_follower.py: the
   forms, the adversarial pass, the crafted false positives, the known misses);
 * a seeded stream of generated packages, Python and npm, built from the
   shapes the follower reads (definitions, classes, object literals, exports
   and imports in every form it knows, callbacks, caches, environment
-  variables, runners) and the ones it must read past (comments, docstrings,
-  strings, astral characters, rows too long to read), whose names collide
-  often enough that flows connect.
+  variables, runners, event emitters) and the ones it must read past
+  (comments, docstrings, strings, astral characters, rows too long to read),
+  whose names collide often enough that flows connect;
+* every package of the stream in one call, on threads (the order is core's);
+* a registry scan's reading (one distribution, the file named in the
+  message), paths with Windows separators, skipped files, and a package the
+  engine cannot read (its work budget spent: core reads it).
 
 All content is inert text: hosts are .invalid, nothing is executed.
-Skipped where the npm engine is not built (node, and npm run build in js/).
+Skipped where the native library is not built.
 """
 import collections
-import json
+import ntpath
 import os
 import random
-import re
-import subprocess
 import unittest
+from unittest import mock
 
-from lazaret.scanner import core
-from tests import _support
-from tests.architecture.test_js_parity import NODE, NPM_READY, NPM_SKIP
+from lazaret.scanner import _native, core, engine
 from tests.scanner import test_cross_file_follower as T
-
-CROSSFILE_JS = os.path.join(_support.REPO_ROOT, "js", "src", "lib", "crossfile.js")
-# the module is imported by its file:// URL, as the other parity tests do: on
-# Windows node refuses a bare absolute path ("Received protocol 'd:'")
-NPM = """
-import { pathToFileURL } from "node:url";
-const { crossFileReceivedIssues, XF_TWINS } = await import(pathToFileURL(process.argv[1]).href);
-let buf = '';
-process.stdin.on('data', (d) => { buf += d; });
-process.stdin.on('end', () => {
-  const { cases, onePackage } = JSON.parse(buf);
-  const results = cases.map((files) => crossFileReceivedIssues(files, new Set(), 'Dependency code', onePackage)
-    .map((i) => [i.file, i.line, i.sev, i.msg, i.snipStart, i.snippet]));
-  process.stdout.write(JSON.stringify({ twins: XF_TWINS, results }));
-});
-"""
 
 U = "'https://c2.invalid/p'"
 ASTRAL = "\U0001d41a\U0001f600"
@@ -349,7 +333,16 @@ def curated():
     return cases
 
 
-@unittest.skipUnless(NPM_READY, NPM_SKIP)
+def native(files, *args, **kwargs):
+    """engine.cross_file_issues with the native engine."""
+    engine.choose("rust")
+    try:
+        return engine.cross_file_issues(files, *args, **kwargs)
+    finally:
+        engine.choose(None)
+
+
+@unittest.skipUnless(_native.available(), f"native engine not built ({_native.load_error()})")
 class CrossFileParityTests(unittest.TestCase):
     maxDiff = None
 
@@ -357,35 +350,35 @@ class CrossFileParityTests(unittest.TestCase):
     def setUpClass(cls):
         cls.curated = curated()
         cls.stream = generated(20260928, 700)
-        cases = [files for _l, files in cls.curated] + cls.stream
-        cls.want = [view(core._cross_file_received_issues(files)) for files in cases]
-        cls.twins, cls.got = run_npm(cases)
-
-    def test_pattern_text_names_and_limits_are_cores(self):
-        for name, (src, flags) in self.twins["patterns"].items():
-            with self.subTest(pattern=name):
-                rx = getattr(core, name)
-                self.assertEqual(src, rx.pattern)
-                self.assertEqual(flags, ("m" if rx.flags & re.M else "") + ("i" if rx.flags & re.I else ""))
-                self.assertFalse(rx.flags & re.S)
-        core_patterns = {n for n in dir(core) if n.startswith("_XF_") and isinstance(getattr(core, n), re.Pattern)}
-        self.assertEqual(set(self.twins["patterns"]), core_patterns)
-        for name, names in self.twins["sets"].items():
-            with self.subTest(names=name):
-                self.assertEqual(sorted(names), sorted(getattr(core, name)))
-        core_limits = {n: getattr(core, n) for n in dir(core) if n.startswith("_XF_") and type(getattr(core, n)) is int}
-        self.assertEqual(self.twins["limits"], core_limits)
+        cls.cases = [files for _l, files in cls.curated] + cls.stream
+        cls.want = [view(core._cross_file_received_issues(files)) for files in cls.cases]
 
     def test_the_followers_own_cases_agree(self):
         n = len(self.curated)
-        for (label, _files), want, got in zip(self.curated, self.want[:n], self.got[:n]):
+        for (label, files), want in zip(self.curated, self.want[:n]):
             with self.subTest(label):
-                self.assertEqual(got, want)
+                self.assertEqual(view(native(files)), want)
 
     def test_the_generated_packages_agree(self):
         n = len(self.curated)
-        bad = [(k, want, got) for k, (want, got) in enumerate(zip(self.want[n:], self.got[n:])) if want != got]
+        bad = [(k, want, got) for k, (files, want) in enumerate(zip(self.stream, self.want[n:]))
+               for got in [view(native(files))] if got != want]
         self.assertEqual(bad[:3], [])
+
+    def test_every_package_in_one_call(self):
+        """The stream's packages side by side (each under its own directory,
+        a Python one under its own top-level name) in one call, read on
+        threads: core's findings in core's order."""
+        files = []
+        for k, case in enumerate(self.stream):
+            for f in case:
+                path = f["path"].replace("site-packages/pkg/", f"site-packages/pkg{k}/")
+                files.append(dict(f, path=f"case{k}/" + path))
+        want = view(core._cross_file_received_issues(files))
+        self.assertGreater(len(want), 100)
+        self.assertEqual(view(native(files)), want)
+        with mock.patch.object(engine, "THREADS", 1):
+            self.assertEqual(view(native(files)), want)
 
     def test_the_stream_reaches_every_path(self):
         """Guards the comparison against a stream that stopped exercising
@@ -412,12 +405,46 @@ class CrossFileParityTests(unittest.TestCase):
             self.assertGreaterEqual(counts[cat], 5, counts)
 
     def test_one_distribution(self):
-        """A registry scan's reading (one_package): every Python module one package."""
+        """A registry scan's reading (one_package, the file named in the
+        message): every Python module one package."""
         cases = [T.py({"a.py": T.PY_NET, "b.py": "from a import pull\nexec(pull())\n"})] + generated(7, 60)
-        want = [view(core._cross_file_received_issues(files, one_package=True)) for files in cases]
-        _twins, got = run_npm(cases, one_package=True)
-        self.assertEqual(got, want)
-        self.assertTrue(want[0])
+        for files in cases:
+            back = {f["path"]: "rel/" + f["path"].rsplit("/", 1)[-1] for f in files}
+            who = back.__getitem__
+            want = view(core._cross_file_received_issues(files, who=who, one_package=True))
+            self.assertEqual(view(native(files, who=who, one_package=True)), want)
+        self.assertTrue(view(core._cross_file_received_issues(cases[0], one_package=True)))
+
+    def test_skipped_files_and_windows_separators(self):
+        files = T.py({"pkg/_net.py": T.PY_NET, "pkg/run.py": "from ._net import pull\nexec(pull())\n",
+                      "pkg/other.py": "from ._net import pull\neval(pull())\n"})
+        want = view(core._cross_file_received_issues(files))
+        self.assertEqual(len(want), 2)
+        skip = {want[0][0]}
+        self.assertEqual(view(native(files, skip)), view(core._cross_file_received_issues(files, skip)))
+        win = [dict(f, path=f["path"].replace("/", "\\")) for f in files]
+        with mock.patch.object(os, "sep", "\\"), mock.patch.object(os.path, "sep", "\\"):
+            want_win = view(core._cross_file_received_issues(win, skip))      # (skip_paths: '/'-separated)
+            got_win = view(native(win, skip))
+        self.assertEqual(got_win, want_win)
+        self.assertEqual(len(want_win), 1)
+
+    def test_a_package_the_engine_cannot_read_is_read_by_core(self):
+        """A package that spends its work budget comes back failed; the
+        Python package reads it with core. The other packages of the call
+        keep the native engine's findings."""
+        pkg = T.js({"net.js": T.JS_NET + "module.exports = { pull };\n",
+                    "run.js": "const { pull } = require('./net');\npull().then((c) => eval(c));\n"})
+        files = [dict(f, path=where + f["path"]) for where in ("a/", "b/") for f in pkg]
+        texts = "".join(f["content"] for f in files)
+        args = {"files": [[f["path"], f["lang"], len(f["content"])] for f in files], "budget": 1}
+        answer = _native.call("cross_file", args, texts)
+        self.assertEqual([p.get("failed") for p in answer], ["exhausted", "exhausted"])
+        real = _native.call
+        with mock.patch.object(_native, "call", lambda name, a, t: real(name, dict(a, budget=1), t)):
+            got = native(files)
+        self.assertEqual(view(got), view(core._cross_file_received_issues(files)))
+        self.assertEqual(len(got), 2)
 
 
 if __name__ == "__main__":

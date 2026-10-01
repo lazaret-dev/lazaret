@@ -16240,6 +16240,14 @@ _XF_WHY = (
     "package, so neither file shows the shape alone: one fetches, the other runs what the "
     "first returns. Running code a server sends is the shape no library needs — whoever "
     "controls the server chooses what runs.")
+# the finding's texts (module-level, so the native engine's rule pack carries them):
+# {where} is the files the value comes from; the second of each pair is a runner's
+_XF_RULE = {"id": "SC-IMPORT-RISK", "name": "Risky import-time code", "type": "HOTSPOT", "why": _XF_WHY,
+            "ref": "CWE-506 · Supply chain"}
+_XF_TAILS = ("the value is received in another file of the package ({where})",
+             "the function that runs it is in another file of the package ({where})")
+_XF_FIXES = ("Read both files: what does {where} receive, and what runs it here?",
+             "Read both files: what does this file receive, and what does {where} run?")
 
 
 def _xf_issue(path, line, text, cat, srcs, who="Dependency code", runner=False):
@@ -16248,15 +16256,11 @@ def _xf_issue(path, line, text, cat, srcs, who="Dependency code", runner=False):
     here and run by a function of another file."""
     lines = text.split("\n")
     where = ", ".join(srcs)
-    tail = (f"the function that runs it is in another file of the package ({where})" if runner
-            else f"the value is received in another file of the package ({where})")
+    tail = _XF_TAILS[runner].format(where=where)
     return mk_issue(
-        {"id": "SC-IMPORT-RISK", "name": "Risky import-time code", "type": "HOTSPOT",
-         "sev": import_time_severity([_DL_CATEGORY_REASON[cat]]),
-         "msg": f"{who} {_DL_CATEGORY_REASON[cat]}; {tail}.", "why": _XF_WHY,
-         "fix": (f"Read both files: what does this file receive, and what does {where} run?" if runner
-                 else f"Read both files: what does {where} receive, and what runs it here?"),
-         "ref": "CWE-506 · Supply chain"}, path, line, lines, redactor=_Redactor(lines))
+        dict(_XF_RULE, sev=import_time_severity([_DL_CATEGORY_REASON[cat]]),
+             msg=f"{who} {_DL_CATEGORY_REASON[cat]}; {tail}.", fix=_XF_FIXES[runner].format(where=where)),
+        path, line, lines, redactor=_Redactor(lines))
 
 
 def _xf_py_module(path):
@@ -16363,16 +16367,11 @@ def _xf_package_issues(mods, skip, who):
     return out
 
 
-def _cross_file_received_issues(files, skip_paths=(), who="Dependency code", one_package=False):
-    """SC-IMPORT-RISK for each dependency file that runs a value received over
-    the network in another file of the same package, or receives one and
-    hands it to another file's function that runs it (see the section
-    comment), in Python and in npm packages. Skips the files in `skip_paths`
-    (those already flagged single-file). `who(path)` may name the file in the
-    message. A registry scan reads one distribution: `one_package` groups all
-    its Python modules as one package (its top-level packages and modules
-    import each other). Best-effort: a package that raises is skipped."""
-    skip = set(skip_paths)
+def _xf_groups(files, one_package=False):
+    """{(lang, root): [(module key, extra, file)]}: the dependency files the
+    follower reads, by package (see _cross_file_received_issues), each
+    package and its files in the order the files come. `extra`: a Python
+    module's is_package, an npm file's path in its package."""
     groups = {}
     for f in files:
         if not f.get("dep"):
@@ -16386,24 +16385,44 @@ def _cross_file_received_issues(files, skip_paths=(), who="Dependency code", one
             if root is not None:
                 rel = f["path"].replace(os.sep, "/")[len(root) + 1:]
                 groups.setdefault(("js", root), []).append((_xf_js_norm(rel), rel, f))
+    return groups
+
+
+def _xf_group_issues(lang, members, skip, who):
+    """The follower's findings for one package of _xf_groups (`skip`: a set
+    of '/'-separated paths); none for one it does not read, or that raises."""
+    if not 2 <= len(members) <= _XF_MAX_FILES:          # needs >= 2; a huge package is skipped
+        return []
+    if not any(any(n in f["content"] for n in _DL_NEEDLES) for _k, _x, f in members):
+        return []                                       # no network source anywhere: nothing is received
+    try:
+        mods = {}
+        for key, extra, f in members:
+            mod = _XfModule(key, lang, f["path"], f["content"])
+            if lang == "py":
+                _xf_py_parse(mod, key.split(".") if extra else key.split(".")[:-1])
+            else:
+                _xf_js_parse(mod, extra)
+            mods[key] = mod
+        return _xf_package_issues(mods, skip, who)
+    except Exception:                                   # one package must never kill the scan
+        return []
+
+
+def _cross_file_received_issues(files, skip_paths=(), who="Dependency code", one_package=False):
+    """SC-IMPORT-RISK for each dependency file that runs a value received over
+    the network in another file of the same package, or receives one and
+    hands it to another file's function that runs it (see the section
+    comment), in Python and in npm packages. Skips the files in `skip_paths`
+    (those already flagged single-file). `who(path)` may name the file in the
+    message. A registry scan reads one distribution: `one_package` groups all
+    its Python modules as one package (its top-level packages and modules
+    import each other). Best-effort: a package that raises is skipped. The
+    native engine's `cross_file` is this function (engine.cross_file_issues)."""
+    skip = set(skip_paths)
     out = []
-    for (lang, _root), members in groups.items():
-        if not 2 <= len(members) <= _XF_MAX_FILES:      # needs >= 2; a huge package is skipped
-            continue
-        if not any(any(n in f["content"] for n in _DL_NEEDLES) for _k, _x, f in members):
-            continue                                    # no network source anywhere: nothing is received
-        try:
-            mods = {}
-            for key, extra, f in members:
-                mod = _XfModule(key, lang, f["path"], f["content"])
-                if lang == "py":
-                    _xf_py_parse(mod, key.split(".") if extra else key.split(".")[:-1])
-                else:
-                    _xf_js_parse(mod, extra)
-                mods[key] = mod
-            out.extend(_xf_package_issues(mods, skip, who))
-        except Exception:                               # one package must never kill the scan
-            continue
+    for (lang, _root), members in _xf_groups(files, one_package).items():
+        out.extend(_xf_group_issues(lang, members, skip, who))
     return out
 
 
@@ -16458,12 +16477,14 @@ def dependency_checks(root, files, manifests, issues, excludes=(), should_stop=N
             if agent is not None:
                 out.append(agent)
     # Cross-file received code (both engines since 0.1.8): a value received in one
-    # file of a package and run in another. Reached only when the checks above did
-    # not stop (each returns early on should_stop), so no extra should_stop call
-    # here — it is a bounded pass. Skips the files already flagged CRITICAL
-    # single-file (a MAJOR one can still be found running what another file received).
+    # file of a package and run in another, by the engine in use (the native
+    # engine reads the packages on threads: engine.cross_file_issues). Reached
+    # only when the checks above did not stop (each returns early on
+    # should_stop), so no extra should_stop call here — it is a bounded pass.
+    # Skips the files already flagged CRITICAL single-file (a MAJOR one can
+    # still be found running what another file received).
     flagged = {i["file"].replace(os.sep, "/") for i in out if i["rule"] == "SC-IMPORT-RISK" and i["sev"] == "CRITICAL"}
-    out.extend(_cross_file_received_issues(files, flagged))
+    out.extend(engine.cross_file_issues(files, flagged))
     return out, extra, None
 
 

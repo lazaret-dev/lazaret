@@ -99,7 +99,7 @@ impl<'s> Iterator for DlIter<'s> {
     }
 }
 
-fn dl_finditer<'s>(pair: (&'s Regex, &'s Regex), row: &'s [u32], pos: usize, end: Option<usize>) -> DlIter<'s> {
+pub(crate) fn dl_finditer<'s>(pair: (&'s Regex, &'s Regex), row: &'s [u32], pos: usize, end: Option<usize>) -> DlIter<'s> {
     DlIter { exact: pair.0, cand: pair.1, row, pos, end: end.unwrap_or(row.len()), done: false }
 }
 

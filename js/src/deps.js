@@ -17,20 +17,20 @@
 // walk cannot follow to the end is SC-TRUNCATED. Every JavaScript or Python
 // file of a dependency that no hook runs gets importTimeRisk: SC-IMPORT-RISK;
 // and a file that runs what another file of its package received over the
-// network, the cross-file follower's SC-IMPORT-RISK (lib/crossfile.js).
+// network, the cross-file follower's SC-IMPORT-RISK (the native engine's,
+// through lib/native.js crossFileIssues).
 
 import { lstatSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { scanFile } from "./scanner/scan.js";
 import { followHook, persistenceReasons, installScriptRisk, importTimeRisk, importTimeSeverity, agentHijack,
-  agentHijackInCommand, nodeCandidates, shebangLang, spawnedScripts, packValues } from "./lib/native.js";
+  agentHijackInCommand, nodeCandidates, shebangLang, spawnedScripts, packValues, crossFileIssues, NativeError } from "./lib/native.js";
 import { HOOK_COMMANDS, loadManifest, scInstallHookIssue } from "./lib/supplychain.js";
 import { readBounded, truncatedIssue, scanErrorIssue, strerror, normalizeNewlines, encodingIssues, treeJoin,
   MAX_FILE_BYTES } from "./lib/fs.js";
 import { looksBinary, HEADER_SAMPLE } from "./lib/binary.js";
 import { decodeSource } from "./lib/encoding.js";
 import { mkIssue } from "./lib/issue.js";
-import { crossFileReceivedIssues } from "./lib/crossfile.js";
 import { REDACT, redactText, registerScanContext, SECRET_SKIP_RE } from "./lib/redact.js";
 import { pyStrip, pyRepr } from "./lib/pycompat.js";
 
@@ -181,10 +181,15 @@ export function dependencyChecks(root, files, manifests, issues, { exclude = [],
     if (found) out.push(found);
     if (agent) out.push(agent);
   }
-  // Cross-file received code (both engines since 0.1.8, lib/crossfile.js): a value received in
-  // one file of a package and run in another. Skips the files already flagged CRITICAL single-file.
+  // Cross-file received code (both engines since 0.1.8; the native engine's follower, crossfile.rs):
+  // a value received in one file of a package and run in another. Skips the files already flagged
+  // CRITICAL single-file.
   const flagged = new Set(out.filter((i) => i.rule === "SC-IMPORT-RISK" && i.sev === "CRITICAL").map((i) => posix(i.file)));
-  for (const i of crossFileReceivedIssues(files, flagged)) out.push(i);
+  try {
+    for (const i of crossFileIssues(files, flagged, { redact: REDACT.on })) out.push(i);
+  } catch (e) {
+    if (!(e instanceof NativeError)) throw e;          // (the engine stopped: no cross-file findings, as before)
+  }
   return { issues: out, files: extra };
 }
 
