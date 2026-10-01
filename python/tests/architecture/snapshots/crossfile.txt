@@ -1,0 +1,10 @@
+# crossfile: 803 outputs, a hash per 100 (tests/architecture/_snapshots.py)
+e1d6112930fdb3f2
+837924d25bb869dd
+693e2729eff8e119
+ce68e73a708e0407
+92a983f8bfdbafde
+670573beecc74017
+ab0da071d9f4d3eb
+6b4a6a6ead014398
+86ca2e1a1bf5f336

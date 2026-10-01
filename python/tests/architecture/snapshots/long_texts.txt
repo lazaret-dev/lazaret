@@ -1,0 +1,2 @@
+# long_texts: 6 outputs, a hash per 100 (tests/architecture/_snapshots.py)
+fb8c7ae86d7b24eb

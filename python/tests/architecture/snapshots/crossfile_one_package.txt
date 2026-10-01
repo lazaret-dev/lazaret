@@ -1,0 +1,2 @@
+# crossfile_one_package: 61 outputs, a hash per 100 (tests/architecture/_snapshots.py)
+4da1f6ff867df9e0
