@@ -6,9 +6,10 @@ _received_code_kind, _downloads_and_runs, _decodes_and_runs,
 powershell_risk, stager_at, reverse_shell_at, sends_host_info,
 runs_own_source_at, reads_own_source, persistence_reasons,
 dumps_workflow_secrets, _pipes_download_to_shell, runs_substituted_download,
-offscreen_code (as JavaScript and as Python), and (0.1.8) the exfiltration
+offscreen_code (as JavaScript and as Python), (0.1.8) the exfiltration
 shapes (chat_secret_at … _exfil_signs, raw_ip_connect, capture_service) and
-service_reasons.
+service_reasons, and (0.1.8) the DNS beacon without a read of the identity
+and the dead drop.
 
 test_rust_parity_hooks.py holds install_script_risk and import_time_risk,
 which read all of these at once; here a difference shows which one.
@@ -28,7 +29,9 @@ FIELDS = ("received_code_kind", "downloads_and_runs", "decodes_and_runs", "power
           "offscreen_code js", "offscreen_code py",
           # 0.1.8: the exfiltration shapes, programs started at login or boot
           "chat_secret_at", "credential_sweep_at", "env_copy_serialized_at", "dns_beacon_at", "miner_at",
-          "raw_ip_connect", "capture_service", "exfil_signs", "service_reasons")
+          "raw_ip_connect", "capture_service", "exfil_signs", "service_reasons",
+          # 0.1.8: the DNS beacon a shell command sends without another read of the identity, the dead drop
+          "dns_beacon_at without host", "dead_drop_at")
 
 
 def as_json(v):
@@ -49,7 +52,8 @@ def core_view(text):
                     core.chat_secret_at(text), core.credential_sweep_at(text), core.env_copy_serialized_at(text),
                     core.dns_beacon_at(text), core.miner_at(text), core.raw_ip_connect(text),
                     (lambda m: m.group(0) if m else None)(core.capture_service(text)),
-                    core._exfil_signs(text, core._HOST_INFO_RE.search(text)), core.service_reasons(text)])
+                    core._exfil_signs(text, core._HOST_INFO_RE.search(text)), core.service_reasons(text),
+                    core.dns_beacon_at(text, False), core.dead_drop_at(text)])
 
 
 def rust_views(cases, box):

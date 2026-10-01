@@ -150,8 +150,9 @@ class HookParityTests(unittest.TestCase):
         # and (0.1.8, exfiltration) the Telegram, Discord and Slack secrets, credential files sent to an IP
         # address, a credential sweep, the host name hidden in base64 or sent in a DNS name, the public IP
         # address sent to a capture service, a miner and browser shortcuts rewritten; and (0.1.8) the 7
-        # ways a program is set to start at login or boot
-        self.assertEqual(len(counts), 62, counts)
+        # ways a program is set to start at login or boot; and (0.1.8) the host name sent to an address
+        # fetched at run time (a DNS name built from values reads as the 0.1.8 DNS reason)
+        self.assertEqual(len(counts), 63, counts)
         # these reasons are rarer in the random stream but present (curated) and well above zero
         rare = {"not followed completely", "deserializes data it receives over the network",
                 "loads a module named by data it receives over the network", "downloads a file and then runs it",
@@ -209,9 +210,11 @@ class HookParityTests(unittest.TestCase):
                                                  "_CHAT_SECRET_MAX", "_CHAT_SECRET_MIN_DISTINCT", "_CRED_SWEEP_SPAN",
                                                  "_CRED_SWEEP_MIN", "_CRED_SWEEP_MAX", "_ENV_COPY_MAX",
                                                  "_RAW_CONNECT_SPAN", "_IP_LITERAL_MAX", "_DNS_LOOKUP_MAX",
+                                                 "_DNS_ARG_SPAN", "_DNS_ASSIGN_SPAN", "_DNS_SHELL_SPAN", "_DD_PASSES",
+                                                 "_DD_MAX_CALLS", "_DD_ARG_SPAN", "_DD_MAX_ASSIGNS", "_DD_THEN_MAX",
                                                  "_SVC_LINE_MAX", "_SVC_RUNKEY_SPAN")})
-        self.assertEqual(len(self.twins["patterns"]), 172)
-        self.assertEqual(len(self.twins["sets"]), 36)
+        self.assertEqual(len(self.twins["patterns"]), 202)
+        self.assertEqual(len(self.twins["sets"]), 37)
         self.assertEqual(len(self.twins["maps"]), 4)
 
 if __name__ == "__main__":

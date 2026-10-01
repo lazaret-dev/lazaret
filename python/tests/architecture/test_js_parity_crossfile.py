@@ -214,7 +214,19 @@ def _js_flow(r, f, g, P, C, meth, V, E):
                     (f"const {g} = require('{spec}').{f};\n", f"{g}()"), (f"const {{ {f}: {g} }} = require('{spec}');\n", f"{g}()"),
                     (f"const {g} = require(path.join(__dirname, '{P}'));\n", f"{g}.{f}()"),
                     (f"const {g} = __importDefault(require(\"{spec}\"));\n", f"(0, {g}.{f})()")])
-    form = r.randrange(14)
+    form = r.randrange(16)
+    if form >= 14:
+        # an event emitter (0.1.8): the value emitted on a module's emitter or process, a listener in the consumer
+        ev = r.choice(["code", "data", "boot"])
+        send = r.choice([f"fetch({U}).then((r) => r.text()).then((c) => @.emit('{ev}', c));\n",
+                         f"(async () => {{\n  const c = await (await fetch({U})).text();\n  @.emit('{ev}', c);\n}})();\n",
+                         f"/* {ASTRAL} */ fetch({U}).then((r) => r.text()).then((c) => {{ @ . emit('{ev}', c); }});\n",
+                         f"@.emit('{ev}', 'console.log(1)');\nfetch({U});\n",
+                         f"fetch({U}).then((r) => r.text()).then((c) => c);\n// @.emit('{ev}', c);\n"])
+        if form == 15:
+            return send.replace("@", "process"), "", "", f"<listener {ev}>", "process"
+        return ("const EventEmitter = require('events');\n" + f"const {V} = new EventEmitter();\n" + send.replace("@", V)
+                + f"module.exports = {{ {V} }};\n", f"const {{ {V} }} = require('{spec}');\n", "", f"<listener {ev}>", V)
     if form == 0:
         return f"function {f}() {{\n  return {src};\n}}\n" + exp, imp[0], "", imp[1], None
     if form == 1:
@@ -263,6 +275,15 @@ def _consumer(r, lang, imports, pre, expr, name):
         return net + imports + pre + use
     if expr == "<callback>":
         use = f"{name}(lambda c: {sink.format('c')})\n" if lang == "py" else f"{name}((c) => {sink.format('c')});\n"
+        return imports + pre + use
+    if expr.startswith("<listener "):
+        ev = expr[len("<listener "):-1] if r.random() < 0.85 else "other"
+        on = r.choice(["on", "once", "addListener", "prependListener", "prependOnceListener"])
+        use = r.choice([f"{name}.{on}('{ev}', (c) => {sink.format('c')});\n",
+                        f"{name}.{on}('{ev}', async function (c) {{\n  {sink.format('c')};\n}});\n",
+                        f"{name}.{on}('{ev}', eval);\n", f"{name} .{on}( '{ev}' , (x, y) => {sink.format('x')});\n",
+                        f"/* {ASTRAL} */ {name}.{on}('{ev}', c => {{ {sink.format('c')}; }});\n",
+                        f"// {name}.{on}('{ev}', eval);\n", f"/* {name}.{on}('{ev}', (c) => {sink.format('c')}); */\n"])
         return imports + pre + use
     if lang == "py":
         return imports + pre + sink.format(expr) + "\n"
@@ -335,7 +356,7 @@ class CrossFileParityTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.curated = curated()
-        cls.stream = generated(20260929, 700)
+        cls.stream = generated(20260928, 700)
         cases = [files for _l, files in cls.curated] + cls.stream
         cls.want = [view(core._cross_file_received_issues(files)) for files in cases]
         cls.twins, cls.got = run_npm(cases)
@@ -374,6 +395,8 @@ class CrossFileParityTests(unittest.TestCase):
         for files, issues in zip(self.stream, self.want[n:]):
             lang = files[0]["lang"]
             counts[lang + " packages"] += 1
+            if issues and any("emit(" in f["content"] for f in files):
+                counts["js emitter"] += 1
             for i in issues:
                 kind = "runner" if "the function that runs it" in i[3] else "received"
                 cat = i[3].split(";")[0].split(" ", 2)[2]
@@ -383,6 +406,7 @@ class CrossFileParityTests(unittest.TestCase):
         self.assertGreaterEqual(counts["js received"], 40, counts)
         self.assertGreaterEqual(counts["py runner"], 5, counts)
         self.assertGreaterEqual(counts["js runner"], 5, counts)
+        self.assertGreaterEqual(counts["js emitter"], 5, counts)
         for cat in ("runs code it receives over the network", "deserializes data it receives over the network",
                     "loads a module named by data it receives over the network"):
             self.assertGreaterEqual(counts[cat], 5, counts)

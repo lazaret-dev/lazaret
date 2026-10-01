@@ -49,9 +49,18 @@ pub const CALLS: &[&str] = &[
     // 0.1.8: the exfiltration shapes, programs started at login or boot
     "chat_secret_at", "credential_sweep_at", "env_copy_serialized_at", "dns_beacon_at", "miner_at",
     "raw_ip_connect", "capture_service", "exfil_signs", "service_reasons",
+    // 0.1.8: the dead drop
+    "dead_drop_at",
     // Phase 2: scan_file, and what it reads
     "normalize", "scan_file", "file_context",
 ];
+
+fn dead_drop(v: Option<(usize, PyStr)>) -> Value {
+    match v {
+        Some((at, host)) => Value::Arr(vec![Value::Int(at as i64), Value::Str(host)]),
+        None => Value::Null,
+    }
+}
 
 fn at_reason(v: Option<(usize, PyStr)>) -> Value {
     match v {
@@ -301,7 +310,11 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
         "chat_secret_at" => at_reason(signs::chat_secret_at(p, text)),
         "credential_sweep_at" => sweep(signs::credential_sweep_at(p, text)),
         "env_copy_serialized_at" => Value::Int(signs::env_copy_serialized_at(p, text) as i64),
-        "dns_beacon_at" => Value::Int(signs::dns_beacon_at(p, text) as i64),
+        "dns_beacon_at" => {
+            let host = !matches!(args.get("host"), Some(Value::Bool(false)));
+            Value::Int(signs::dns_beacon_at(p, text, host) as i64)
+        }
+        "dead_drop_at" => dead_drop(signs::dead_drop_at(p, text)),
         "miner_at" => Value::Int(signs::miner_at(p, text) as i64),
         "raw_ip_connect" => opt_s(signs::raw_ip_connect(p, text)),
         "capture_service" => opt_s(signs::capture_service(p, text).map(|m| m.group0().to_vec())),
@@ -402,12 +415,15 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
                 at_reason(signs::chat_secret_at(p, text)),
                 sweep(signs::credential_sweep_at(p, text)),
                 Value::Int(signs::env_copy_serialized_at(p, text) as i64),
-                Value::Int(signs::dns_beacon_at(p, text) as i64),
+                Value::Int(signs::dns_beacon_at(p, text, true) as i64),
                 Value::Int(signs::miner_at(p, text) as i64),
                 opt_s(signs::raw_ip_connect(p, text)),
                 opt_s(signs::capture_service(p, text).map(|m| m.group0().to_vec())),
                 exfil(p, text),
                 strs(&signs::service_reasons(p, text)),
+                // 0.1.8: the DNS beacon without a read of the identity, the dead drop
+                Value::Int(signs::dns_beacon_at(p, text, false) as i64),
+                dead_drop(signs::dead_drop_at(p, text)),
             ])
         }
         "logical_text" => {

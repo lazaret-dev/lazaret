@@ -16,9 +16,10 @@
 // read), it is counted in code points on the source row, as core counts it.
 
 import { sep } from "node:path";
-import { pyRe, pyStrip, pyLstrip, cpLen, isPySpace, cmpCodePoints } from "./pycompat.js";
+import { pyRe, pyStrip, pyLstrip, cpLen, isPySpace, isWordChar, cmpCodePoints } from "./pycompat.js";
 import { receivedCodeKind, hasSource, chainsOf, maskStrings, isName, DL_NEEDLES, DL_RUN_NEEDLES, DL_LIMITS } from "./received.js";
-import { importCode, importTimeSeverity, DL_CATEGORY_REASON } from "./hooks.js";
+import { importCode, readsOwnSource, importTimeSeverity, DL_CATEGORY_REASON } from "./hooks.js";
+import { commentSpans } from "./lexer.js";
 import { mkIssue } from "./issue.js";
 import { registerScanContext, SECRET_SKIP_RE } from "./redact.js";
 
@@ -77,15 +78,21 @@ const XF_PATTERNS = {
   _XF_SPACE_RE: ["\\s+", ""],
   _XF_BRACE_RE: ["[{}]", ""],
   _XF_JS_LINE_COMMENT_RE: ["(?:^|(?<=[\\s;,(){}]))//", ""],
+  _XF_EMIT_RE: ["(?<![\\w$.])(?P<obj>[A-Za-z_$][\\w$]*)[ \\t]*\\.[ \\t]*emit[ \\t]*\\([ \\t]*(?P<q>['\\\"`])(?P<event>[^'\\\"`\\n]{1,100})\\2[ \\t]*,", ""],
+  _XF_LISTEN_RE: ["(?<![\\w$.])(?P<obj>[A-Za-z_$][\\w$]*)[ \\t]*\\.[ \\t]*(?:on|once|addListener|prependListener|prependOnceListener)[ \\t]*\\([ \\t]*(?P<q>['\\\"`])(?P<event>[^'\\\"`\\n]{1,100})\\2[ \\t]*,[ \\t]*(?:(?:async[ \\t]+)?(?:function\\b[ \\t]*[\\w$]*[ \\t]*\\([ \\t]*(?P<fp>[A-Za-z_$][\\w$]*)|\\([ \\t]*(?P<ap>[A-Za-z_$][\\w$]*)[^)\\n]*\\)[ \\t]*=>|(?P<bp>[A-Za-z_$][\\w$]*)[ \\t]*=>)|(?P<handler>[A-Za-z_$][\\w$]*(?:[ \\t]*\\.[ \\t]*[A-Za-z_$][\\w$]*){0,3})[ \\t]*[,)])", ""],
+  _XF_EMIT_AT_RE: ["\\.[ \\t]*emit[ \\t]*\\(", ""],
+  _XF_LISTEN_AT_RE: ["\\.[ \\t]*(?:on|once|addListener|prependListener|prependOnceListener)[ \\t]*\\(", ""],
 };
 
 export const XF_LIMITS = {
   _XF_WINDOW: 25, _XF_MAX_FILES: 3000, _XF_MAX_SEEDS: 64, _XF_ROUNDS: 4, _XF_MAX_SYMBOLS: 5000, _XF_MAX_DEPTH: 8,
-  _XF_LOCAL_DEPTH: 3, _XF_OBJECT_ROWS: 400, _XF_MAX_RUNNERS: 200, _XF_MAX_CHARS: 2_000_000,
+  _XF_LOCAL_DEPTH: 3, _XF_OBJECT_ROWS: 400, _XF_MAX_RUNNERS: 200, _XF_MAX_CHARS: 2_000_000, _XF_EMIT_MAX: 50,
 };
 const { _XF_WINDOW: WINDOW, _XF_MAX_FILES: MAX_FILES, _XF_MAX_SEEDS: MAX_SEEDS, _XF_ROUNDS: ROUNDS,
   _XF_MAX_SYMBOLS: MAX_SYMBOLS, _XF_MAX_DEPTH: MAX_DEPTH, _XF_LOCAL_DEPTH: LOCAL_DEPTH, _XF_OBJECT_ROWS: OBJECT_ROWS,
-  _XF_MAX_RUNNERS: MAX_RUNNERS, _XF_MAX_CHARS: MAX_CHARS } = XF_LIMITS;
+  _XF_MAX_RUNNERS: MAX_RUNNERS, _XF_MAX_CHARS: MAX_CHARS, _XF_EMIT_MAX: EMIT_MAX } = XF_LIMITS;
+const EMIT_NEEDLE = "emit";                                          // a file without it emits nothing
+const EMIT_GLOBALS = new Set(["process"]);                           // the emitters every file shares by name
 const LONG_ROW = DL_LIMITS._DL_LONG_ROW;
 const DEP_MARKERS = ["site-packages", "dist-packages", "vendor"];
 const JS_KEYWORDS = new Set(["if", "for", "while", "switch", "catch", "function", "return", "do", "else", "with",
@@ -96,7 +103,8 @@ const OBJECT_WORDS = ["const", "let", "var", "module", "export"];   // what _XF_
 /** The parity test's view of the twins: core's pattern text and flags, name sets and limits. */
 export const XF_TWINS = {
   patterns: XF_PATTERNS,
-  sets: { _XF_DEP_MARKERS: DEP_MARKERS, _XF_JS_KEYWORDS: [...JS_KEYWORDS], _XF_NOT_PARAMS: [...NOT_PARAMS] },
+  sets: { _XF_DEP_MARKERS: DEP_MARKERS, _XF_JS_KEYWORDS: [...JS_KEYWORDS], _XF_NOT_PARAMS: [...NOT_PARAMS],
+    _XF_EMIT_GLOBALS: [...EMIT_GLOBALS] },
   limits: XF_LIMITS,
 };
 
@@ -1172,6 +1180,124 @@ function rewrite(code, direct, lang) {
   return [code, names];
 }
 
+// An event emitter between files (0.1.8): core's comment above _XF_EMIT_RE.
+const reLiteral = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/** What an emitter's name is in mod, the same in every file that names it (core._xf_emitter_of). */
+function emitterOf(pkg, mod, name) {
+  const imp = mod.imports.get(name);
+  if (imp !== undefined) {
+    const got = pkg.resolveImport(imp);
+    return got !== null ? got : ["import", imp[0], imp[1]];
+  }
+  const got = pkg.resolveLocal(mod, name);
+  if (got !== null) return got;
+  return EMIT_GLOBALS.has(name) ? ["global", name] : null;       // this, a parameter: its file's own
+}
+
+const countNewlines = (s) => { let n = 0; for (let i = s.indexOf("\n"); i >= 0; i = s.indexOf("\n", i + 1)) n++; return n; };
+
+/** finditer(name, text) for _XF_EMIT_RE (at: _XF_EMIT_AT_RE) and _XF_LISTEN_RE (_XF_LISTEN_AT_RE), read only where
+ * `at` finds the member call a match makes: it starts where the identifier before that call's "." does, read by code
+ * point as core reads [\w$] (core._xf_calls). */
+function* calls(name, at, text) {
+  let last = 0;
+  for (const a of finditer(at, text)) {
+    let k = a.index;
+    while (k > 0 && (text[k - 1] === " " || text[k - 1] === "\t")) k--;
+    let s = k;
+    while (s > 0) {
+      const c = text.charCodeAt(s - 1);
+      const n = c >= 0xdc00 && c <= 0xdfff && s > 1 && (text.charCodeAt(s - 2) & 0xfc00) === 0xd800 ? 2 : 1;
+      const ch = text.slice(s - n, s);
+      if (ch !== "$" && !isWordChar(ch)) break;
+      s -= n;
+    }
+    if (s === k || s < last) continue;                     // no identifier; inside the last match
+    const m = match(name, text, s);
+    if (m !== null) { last = end(m); yield m; }
+  }
+}
+
+/** Map(module key -> [Map(name -> label), [rows], line]): the listeners given a received value another file emits
+ * (core._xf_emitter_seeds). */
+function emitterSeeds(pkg, tainted, envs) {
+  const emits = new Map(), listens = new Map();
+  for (const mod of pkg.mods.values()) {
+    if (mod.lang !== "js" || !mod.text.includes(EMIT_NEEDLE)) continue;
+    let k = 0;
+    for (const m of calls("_XF_EMIT_RE", "_XF_EMIT_AT_RE", mod.text)) {
+      if (k++ >= EMIT_MAX) break;
+      const emitter = emitterOf(pkg, mod, m.groups.obj);
+      if (emitter === null) continue;
+      const chan = JSON.stringify([emitter, m.groups.event]);
+      if (!emits.has(chan)) emits.set(chan, new Map());
+      const byMod = emits.get(chan);
+      if (!byMod.has(mod.key)) byMod.set(mod.key, []);
+      byMod.get(mod.key).push(m);
+    }
+  }
+  // a listener only matters for an event something emits: a file without any such event's name is not read
+  const events = new Set([...emits.keys()].map((chan) => JSON.parse(chan)[1]));
+  for (const mod of pkg.mods.values()) {
+    if (mod.lang !== "js" || ![...events].some((event) => mod.text.includes(event))) continue;
+    let k = 0;
+    for (const m of calls("_XF_LISTEN_RE", "_XF_LISTEN_AT_RE", mod.text)) {
+      if (k++ >= EMIT_MAX) break;
+      const emitter = emitterOf(pkg, mod, m.groups.obj);
+      if (emitter === null) continue;
+      const chan = JSON.stringify([emitter, m.groups.event]);
+      if (!listens.has(chan)) listens.set(chan, []);
+      listens.get(chan).push([mod.key, m]);
+    }
+  }
+  const comments = new Map(), codes = new Map();
+  /** Is match m of module `key` code, not in a comment? (A file's comments are read once, and only where an emit
+   * meets a listener.) Offsets are the text's own, in UTF-16 units, as its comments' are. */
+  const isCode = (key, m) => {
+    if (!comments.has(key)) {
+      const text = pkg.mods.get(key).text;
+      comments.set(key, readsOwnSource(text) ? [] : commentSpans(text, "js"));
+    }
+    const spans = comments.get(key);
+    const e = end(m);
+    let lo = 0, hi = spans.length;                               // the first comment that starts at or after m's end
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (spans[mid][0] < e) lo = mid + 1; else hi = mid; }
+    return lo === 0 || spans[lo - 1][1] <= m.index;
+  };
+  const out = new Map();
+  for (const [chan, byMod] of emits) {
+    const event = JSON.parse(chan)[1];
+    for (const key of sortCp(byMod.keys())) {
+      let heard = (listens.get(chan) ?? []).filter((one) => one[0] !== key);
+      const objs = heard.length ? new Set(byMod.get(key).filter((m) => isCode(key, m)).map((m) => m.groups.obj)) : new Set();
+      heard = objs.size ? heard.filter(([lkey, m]) => isCode(lkey, m)) : [];
+      if (!heard.length) continue;
+      if (!codes.has(key)) codes.set(key, importCode(pkg.mods.get(key).text, "js"));
+      let code = codes.get(key);
+      for (const obj of sortCp(objs)) {
+        const rx = pyRe(String.raw`(?<![\w$.])` + reLiteral(obj) + String.raw`[ \t]*\.[ \t]*emit[ \t]*\([ \t]*(['"` + "`" + String.raw`])`
+          + reLiteral(event) + String.raw`\1[ \t]*,`, "g");
+        code = code.replace(rx, (whole) => ljust("_xfe(", cpLen(whole)));
+      }
+      const seeds = tainted.size ? seedsOf(pkg, pkg.mods.get(key), tainted, envs)[0] : new Map();
+      const res = receivedCodeKind(code, sortCp(seeds.keys()).slice(0, MAX_SEEDS), ["_xfe"]);
+      if (res === null || res[1] !== "run") continue;
+      for (const [lkey, m] of heard) {
+        const param = m.groups.fp ?? m.groups.ap ?? m.groups.bp ?? null;
+        const handler = m.groups.handler ?? null;
+        const line = countNewlines(pkg.mods.get(lkey).text.slice(0, m.index)) + 1;
+        if (!out.has(lkey)) out.set(lkey, [new Map(), [], line]);
+        const entry = out.get(lkey);
+        if (param !== null) entry[0].set(param, key);
+        else if (handler !== null) { entry[0].set("_xfr", key); entry[1].push(`${handler}(_xfr)`); }
+        entry[2] = Math.min(entry[2], line);
+      }
+    }
+  }
+  return out;
+}
+
 const XF_WHY = "A dropper can split what it downloads and the code that runs it across two files of a " +
   "package, so neither file shows the shape alone: one fetches, the other runs what the " +
   "first returns. Running code a server sends is the shape no library needs — whoever " +
@@ -1235,17 +1361,19 @@ function packageIssues(mods, skip, who) {
   const pkg = new XfPackage(mods);
   const tainted = pkg.tainted();
   const runners = pkg.runners();
-  if (!tainted.size && !runners.size) return [];
   const envs = new Map();
   const envSyms = [...tainted].map((s) => s.split("\u0000")).filter(([, n]) => n.startsWith("<env>."));
   envSyms.sort((a, b) => cmpCodePoints(a[0], b[0]) || cmpCodePoints(a[1], b[1]));
   for (const [key, name] of envSyms) setdefault(envs, name.slice("<env>.".length), key);
+  const heard = emitterSeeds(pkg, tainted, envs);
+  if (!tainted.size && !runners.size && !heard.size) return [];
   const out = [];
   for (const mod of mods.values()) {
     if (skip.has(posix(mod.path))) continue;
     const [seeds, direct] = tainted.size ? seedsOf(pkg, mod, tainted, envs) : [new Map(), []];
     const runSeeds = runners.size ? seedsOf(pkg, mod, runners, new Map())[0] : new Map();
-    if (!seeds.size && !direct.length && !runSeeds.size) continue;
+    const [given, rows, first] = heard.get(mod.key) ?? [new Map(), [], 0];
+    if (!seeds.size && !direct.length && !runSeeds.size && !given.size) continue;
     let code = importCode(mod.text, mod.lang);
     if (receivedCodeKind(code) !== null) continue;       // the file shows it alone: the single-file test's
     let more;
@@ -1257,6 +1385,18 @@ function packageIssues(mods, skip, who) {
     if (res !== null) {
       out.push(xfIssue(mod.path, res[0], mod.text, res[1], sortCp(new Set(names.map((n) => seeds.get(n)))), whoHere));
       continue;
+    }
+    if (given.size) {
+      // the listeners' parameters seeded; a handler given by name called after the file
+      const endLine = countNewlines(code) + 1;
+      const both = new Map([...seeds, ...given]);
+      const bothNames = sortCp(both.keys()).slice(0, MAX_SEEDS);
+      res = receivedCodeKind(code + rows.map((r) => "\n" + r).join(""), bothNames);
+      if (res !== null) {
+        out.push(xfIssue(mod.path, res[0] > endLine ? first : res[0], mod.text, res[1],
+          sortCp(new Set(bothNames.map((n) => both.get(n)))), whoHere));
+        continue;
+      }
     }
     if (runSeeds.size) {
       const runNames = sortCp(runSeeds.keys()).slice(0, MAX_SEEDS);

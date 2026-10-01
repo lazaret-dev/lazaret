@@ -1,6 +1,6 @@
 {
  "format": 1,
- "rule_set": "2.12.0",
+ "rule_set": "2.13.0",
  "source": "lazaret.scanner.core, extracted by scripts/make_rust_tables.py \u2014 do not edit",
  "values": {
   "ALWAYS_PRUNE_DIRS": {
@@ -4794,6 +4794,85 @@
   "_DATA_FILE": {
    "value": "(?:[^\\\"'`{}$\\n]{1,100}\\.(?:txt|dat|bin|png|jpe?g|gif|ico|bmp|svg|wav|mp3|mp4|woff2?|ttf|json|md|cfg|ini|log|db|pyc|so|dll|dylib|exe)|(?:[^\\\"'`{}$\\n]{0,100}[/\\\\])?(?:LICEN[CS]E|COPYING|NOTICE|README|AUTHORS|CHANGELOG|CHANGES|HISTORY|PATENTS)(?:[-.]\\w{1,10})?)"
   },
+  "_DD_ARG_CALLBACK_RE": {
+   "flags": "",
+   "re": ",\\s*(?:async\\s+)?(?:function\\b\\s*[\\w$]*\\s*\\(\\s*([A-Za-z_$][\\w$]*)|\\(\\s*([A-Za-z_$][\\w$]*)[^)\\n]*\\)\\s*=>|([A-Za-z_$][\\w$]*)\\s*=>)"
+  },
+  "_DD_ARG_SPAN": {
+   "value": 2000
+  },
+  "_DD_ASSIGN_RE": {
+   "flags": "",
+   "re": "(?:(?<![^\\n])|[;{]|=>)[ \\t]*(?:(?:const|let|var)[ \\t]+)?([A-Za-z_$][\\w$]*)[ \\t]*\\+?=(?![=>])([^;\\n]*)"
+  },
+  "_DD_AS_RE": {
+   "flags": "",
+   "re": "\\s*as\\s+([A-Za-z_]\\w*)"
+  },
+  "_DD_CALLBACK_RE": {
+   "flags": "",
+   "re": "(?<![\\w$.])([A-Za-z_$][\\w$]*)(?:\\s*\\.\\s*[A-Za-z_$][\\w$]*){0,8}\\s*\\.\\s*(?:on|once|forEach|map|then|each)\\s*\\(\\s*(?:[\"'][^\"'\\n]{0,40}[\"']\\s*,\\s*)?(?:async\\s+)?(?:function\\b\\s*[\\w$]*\\s*)?\\(?\\s*([A-Za-z_$][\\w$]*)"
+  },
+  "_DD_DATA_RE": {
+   "flags": "i",
+   "re": "\\b(?:data|body)\\s*[=:]|\\bjson\\s*=|[\"'](?:POST|PUT|PATCH)[\"']"
+  },
+  "_DD_DESTRUCT_NAME_RE": {
+   "flags": "",
+   "re": "(?:[A-Za-z_$][\\w$]*\\s*:\\s*)?([A-Za-z_$][\\w$]*)\\s*(?:=[^,]*)?\\Z"
+  },
+  "_DD_DESTRUCT_RE": {
+   "flags": "",
+   "re": "\\b(?:const|let|var)\\s*\\{([^}\\n]{1,200})\\}\\s*=([^;\\n]*)"
+  },
+  "_DD_FETCH_RE": {
+   "flags": "",
+   "re": "\\b(?:urlopen|requests\\s*\\.\\s*get|httpx\\s*\\.\\s*get|fetch|axios\\s*\\.\\s*get|https?\\s*\\.\\s*get|got)\\s*\\("
+  },
+  "_DD_FOR_RE": {
+   "flags": "",
+   "re": "\\bfor\\s+([A-Za-z_]\\w*)\\s+in\\s+([^\\n:]{1,200})|\\bfor\\s*\\(\\s*(?:const|let|var)?\\s*([A-Za-z_$][\\w$]*)\\s+(?:of|in)\\s+([^\\n)]{1,200})"
+  },
+  "_DD_FUNC_RE": {
+   "flags": "",
+   "re": "\\bdef\\s+([A-Za-z_]\\w*)\\s*\\(|\\bfunction\\s*\\*?\\s*([A-Za-z_$][\\w$]*)\\s*\\(|(?<![\\w$.])([A-Za-z_$][\\w$]*)\\s*=\\s*(?:async\\s+)?(?:function\\b|\\([^)\\n]{0,200}\\)\\s*=>|[A-Za-z_$][\\w$]*\\s*=>)"
+  },
+  "_DD_MAX_ASSIGNS": {
+   "value": 5000
+  },
+  "_DD_MAX_CALLS": {
+   "value": 100
+  },
+  "_DD_PARAM_RE": {
+   "flags": "",
+   "re": "\\s*(?:async\\s+)?(?:function\\b\\s*[\\w$]*\\s*)?\\(?\\s*([A-Za-z_$][\\w$]*)"
+  },
+  "_DD_PASSES": {
+   "value": 4
+  },
+  "_DD_RETURN_RE": {
+   "flags": "",
+   "re": "\\breturn\\s+([^\\n;]{1,200})"
+  },
+  "_DD_SEND_RE": {
+   "flags": "",
+   "re": "\\b(?:Request|urlopen|fetch|https?\\s*\\.\\s*request|(?:requests|httpx|axios|got|superagent|needle|session|client)\\s*\\.\\s*(post|put|patch)|(sendBeacon))\\s*\\("
+  },
+  "_DD_THEN_HEAD_RE": {
+   "flags": "",
+   "re": "\\s*\\.\\s*then\\s*\\("
+  },
+  "_DD_THEN_MAX": {
+   "value": 4
+  },
+  "_DD_URL_IN_RE": {
+   "flags": "",
+   "re": "[\"'`]https?://([^/\"'`\\s?#]+)"
+  },
+  "_DD_URL_RE": {
+   "flags": "",
+   "re": "\\A[rbfRBF]{0,2}[\"'`]https?://([^/\"'`\\s?#]+)"
+  },
   "_DECODER_IMPORT_RE": {
    "flags": "m",
    "re": "^[ \\t]*from[ \\t]+(?:base64|binascii|codecs|zlib|marshal|bz2|lzma|gzip)[ \\t]+import[ \\t]+([^\\n#]{1,300})"
@@ -9013,16 +9092,104 @@
    "flags": "",
    "re": "[\\w$]+"
   },
+  "_DNS_ARG_SPAN": {
+   "value": 400
+  },
+  "_DNS_ASSIGN_HEAD": {
+   "value": "(?<![^\\n;{])[ \\t]*(?:(?:const|let|var)[ \\t]+)?"
+  },
+  "_DNS_ASSIGN_SPAN": {
+   "value": 5000
+  },
+  "_DNS_ASSIGN_TAIL": {
+   "value": "[ \\t]*=(?![=>])[ \\t]*([^\\n;]*)"
+  },
   "_DNS_BUILT_NAME_RE": {
    "flags": "",
-   "re": "\\{[^}\\n]+\\}[^\\n]*\\.[A-Za-z]{2,}\\Z"
+   "re": "\\{[^}\\n]+\\}[^\\n]*\\.([A-Za-z]{2,})\\Z"
+  },
+  "_DNS_CALL_RE": {
+   "flags": "",
+   "re": "(?:\\b(?:getaddrinfo|gethostbyname(?:_ex)?)|\\bdns\\.(?:promises\\.)?(?:resolve\\w*|lookup)|\\bresolver\\.(?:resolve|query))\\s*\\("
+  },
+  "_DNS_CMD_SUM_RE": {
+   "flags": "",
+   "re": "([\"'`])(?:nslookup|dig|host|ping6?|curl|wget|Resolve-DnsName)\\s[^\"'`\\n]{0,100}\\1\\s*\\+([^\\n;]{1,300})"
+  },
+  "_DNS_CMD_TEMPLATE_RE": {
+   "flags": "",
+   "re": "[\"'`](?:nslookup|dig|host|ping6?|curl|wget|Resolve-DnsName)\\s[^\"'`\\n]{0,200}?\\{[^}\\n]+\\}[^\\s\"'`/:\\n]*\\.([A-Za-z]{2,})(?![\\w.-])"
+  },
+  "_DNS_FORMAT_RE": {
+   "flags": "",
+   "re": "\\A(?:\"[^\"\\n]*(?:%(?:\\([^)\\n]*\\))?[-#0 +]?\\d*[sdirx]|\\{[^}\\n]*\\})[^\"\\n]*\\.([A-Za-z]{2,})\"|'[^'\\n]*(?:%(?:\\([^)\\n]*\\))?[-#0 +]?\\d*[sdirx]|\\{[^}\\n]*\\})[^'\\n]*\\.([A-Za-z]{2,})')\\s*(?:%|\\.\\s*format\\s*\\()"
+  },
+  "_DNS_LITERAL_RE": {
+   "flags": "",
+   "re": "\"[^\"\\n]*\"|'[^'\\n]*'|`[^`$\\n]*`"
+  },
+  "_DNS_LOCAL_TLDS": {
+   "set": [
+    "arpa",
+    "corp",
+    "example",
+    "home",
+    "internal",
+    "intranet",
+    "invalid",
+    "lan",
+    "local",
+    "localdomain",
+    "localhost",
+    "private",
+    "test"
+   ]
   },
   "_DNS_LOOKUP_MAX": {
    "value": 50
   },
-  "_DNS_LOOKUP_RE": {
+  "_DNS_NAME_RE": {
    "flags": "",
-   "re": "(?:\\b(?:getaddrinfo|gethostbyname(?:_ex)?)|\\bdns\\.(?:promises\\.)?(?:resolve\\w*|lookup)|\\bresolver\\.(?:resolve|query))\\s*\\(\\s*(?:f\"([^\"\\n]{0,300})\"|f'([^'\\n]{0,300})'|`([^`\\n]{0,300})`)"
+   "re": "\\A[A-Za-z_$][\\w$]*\\Z"
+  },
+  "_DNS_SHELL_CMD_RE": {
+   "flags": "",
+   "re": "(?<![\\w.$-])(?:nslookup|dig|host|ping6?|curl|wget|Resolve-DnsName)\\s"
+  },
+  "_DNS_SHELL_CUT_RE": {
+   "flags": "",
+   "re": "[\\n|;&]"
+  },
+  "_DNS_SHELL_HOST_RE": {
+   "flags": "",
+   "re": "\\A(?:https?://)?[^\\s/:\"'`|;&<>()]*\\x00[^\\s/:\"'`|;&<>()]*\\.([A-Za-z]{2,})(?![\\w.-])"
+  },
+  "_DNS_SHELL_ID_RE": {
+   "flags": "i",
+   "re": "\\$\\(\\s*(?:whoami|hostname|id\\s+-un|uname\\s+-n)\\s*\\)|`\\s*(?:whoami|hostname|id\\s+-un|uname\\s+-n)\\s*`|\\$\\{?(?:USER|USERNAME|HOSTNAME|LOGNAME)\\b\\}?|%(?:USERNAME|COMPUTERNAME|USERDOMAIN)%|\\$env:(?:USERNAME|COMPUTERNAME|USERDOMAIN)\\b"
+  },
+  "_DNS_SHELL_LEFT_RE": {
+   "flags": "",
+   "re": "[^\\s\"'`(]*\\Z"
+  },
+  "_DNS_SHELL_RIGHT_RE": {
+   "flags": "",
+   "re": "[^\\s\"'`)]*"
+  },
+  "_DNS_SHELL_SPAN": {
+   "value": 300
+  },
+  "_DNS_SUM_RE": {
+   "flags": "",
+   "re": "\\+\\s*(?:\"[^\"\\n]*\\.([A-Za-z]{2,})\"|'[^'\\n]*\\.([A-Za-z]{2,})'|`[^`$\\n]*\\.([A-Za-z]{2,})`)\\s*\\Z"
+  },
+  "_DNS_TEMPLATE_RE": {
+   "flags": "",
+   "re": "\\A(?:f\"([^\"\\n]{0,300})\"|f'([^'\\n]{0,300})'|`([^`\\n]{0,300})`)"
+  },
+  "_DNS_VALUE_RE": {
+   "flags": "",
+   "re": "[A-Za-z_$(]"
   },
   "_DOTDOT": {
    "value": "(?:'\\.\\.[/\\\\]{0,2}'|\"\\.\\.[/\\\\]{0,2}\"|`\\.\\.[/\\\\]{0,2}`)"
@@ -9591,7 +9758,7 @@
   },
   "_HOST_INFO_RE": {
    "flags": "",
-   "re": "\\b(?:socket\\.gethostname|socket\\.getfqdn|platform\\.node|getpass\\.getuser|os\\.getlogin|pwd\\.getpwuid|os\\.hostname|os\\.userInfo)\\s*\\(|\\b(?:getoutput|check_output|getstatusoutput|execSync|popen)\\s*\\(\\s*\\[?\\s*[\"'](?:whoami|hostname|id|uname|ifconfig|ipconfig|systeminfo)\\b|(?:\\$\\(|`)\\s*(?:whoami|hostname|id|uname|ifconfig|ip\\s+a|pwd|ls|cat\\s+/etc/passwd|ps)\\b|\\bos\\.(?:hostname|userInfo)\\s*[,)]"
+   "re": "\\b(?:socket\\.gethostname|socket\\.getfqdn|platform\\.node|getpass\\.getuser|os\\.getlogin|pwd\\.getpwuid|os\\.hostname|os\\.userInfo)\\s*\\(|\\b(?:getoutput|check_output|getstatusoutput|execSync|popen)\\s*\\(\\s*\\[?\\s*[\"'](?:whoami|hostname|id|uname|ifconfig|ipconfig|systeminfo)\\b|(?:\\$\\(|`)\\s*(?:whoami|hostname|id|uname|ifconfig|ip\\s+a|pwd|ls|cat\\s+/etc/passwd|ps)\\b|\\bos\\.(?:hostname|userInfo)\\s*[,)]|\\brequire\\(\\s*[\"'](?:node:)?os[\"']\\s*\\)\\s*\\.\\s*(?:hostname|userInfo)\\b|\\b(?:const|let|var|import)\\s*\\{[^{}\\n]{0,200}\\b(?:hostname|userInfo)\\b[^{}\\n]{0,200}\\}\\s*(?:=\\s*require\\(\\s*|from\\s*)[\"'](?:node:)?os[\"']|\\bfrom\\s+(?:socket|getpass)\\s+import\\s+[^\\n]{0,200}\\b(?:gethostname|getfqdn|getuser)\\b"
   },
   "_HTML_RESPONSE_CLASS_RE": {
    "flags": "",
@@ -11067,6 +11234,10 @@
    "flags": "",
    "re": "\\[\\s*(?:\\w*sys\\.executable|[\"']python[\\d.w]*(?:\\.exe)?[\"'])\\s*,|\\bstart\\s+pythonw?\\b|\\b(?:system|popen|getoutput|run|call|Popen)\\s*\\(\\s*f?[\"']python[\\d.w]*(?:\\.exe)?\\s"
   },
+  "_QUOTE_CHAR_RE": {
+   "flags": "",
+   "re": "[\"'`]"
+  },
   "_RAW_CONNECT_RE": {
    "flags": "",
    "re": "\\b(?:socket\\.create_connection|net\\.connect|net\\.createConnection|connect(?:_ex)?)\\s*\\(|\\bnew\\s+net\\.Socket\\b"
@@ -11734,6 +11905,9 @@
      "value": "sends the machine's public IP address to a data-capture"
     },
     {
+     "value": "sends the machine's user or host name to an address it fetches"
+    },
+    {
      "value": "runs a cryptocurrency miner"
     }
    ]
@@ -12274,6 +12448,25 @@
     }
    ]
   },
+  "_XF_EMIT_AT_RE": {
+   "flags": "",
+   "re": "\\.[ \\t]*emit[ \\t]*\\("
+  },
+  "_XF_EMIT_GLOBALS": {
+   "set": [
+    "process"
+   ]
+  },
+  "_XF_EMIT_MAX": {
+   "value": 50
+  },
+  "_XF_EMIT_NEEDLE": {
+   "value": "emit"
+  },
+  "_XF_EMIT_RE": {
+   "flags": "",
+   "re": "(?<![\\w$.])(?P<obj>[A-Za-z_$][\\w$]*)[ \\t]*\\.[ \\t]*emit[ \\t]*\\([ \\t]*(?P<q>['\\\"`])(?P<event>[^'\\\"`\\n]{1,100})\\2[ \\t]*,"
+  },
   "_XF_FROM_RE": {
    "flags": "m",
    "re": "^[ \\t]*from[ \\t]+(?P<mod>\\.+[\\w.]*|[\\w.]+)[ \\t]+import[ \\t]+(?P<names>\\*|\\([^()]*\\)|.+?)[ \\t]*$"
@@ -12452,6 +12645,14 @@
   "_XF_JS_RETURN_RE": {
    "flags": "",
    "re": "\\breturn\\b[ \\t]*(?P<expr>[^;\\n]*)"
+  },
+  "_XF_LISTEN_AT_RE": {
+   "flags": "",
+   "re": "\\.[ \\t]*(?:on|once|addListener|prependListener|prependOnceListener)[ \\t]*\\("
+  },
+  "_XF_LISTEN_RE": {
+   "flags": "",
+   "re": "(?<![\\w$.])(?P<obj>[A-Za-z_$][\\w$]*)[ \\t]*\\.[ \\t]*(?:on|once|addListener|prependListener|prependOnceListener)[ \\t]*\\([ \\t]*(?P<q>['\\\"`])(?P<event>[^'\\\"`\\n]{1,100})\\2[ \\t]*,[ \\t]*(?:(?:async[ \\t]+)?(?:function\\b[ \\t]*[\\w$]*[ \\t]*\\([ \\t]*(?P<fp>[A-Za-z_$][\\w$]*)|\\([ \\t]*(?P<ap>[A-Za-z_$][\\w$]*)[^)\\n]*\\)[ \\t]*=>|(?P<bp>[A-Za-z_$][\\w$]*)[ \\t]*=>)|(?P<handler>[A-Za-z_$][\\w$]*(?:[ \\t]*\\.[ \\t]*[A-Za-z_$][\\w$]*){0,3})[ \\t]*[,)])"
   },
   "_XF_LOCAL_DEPTH": {
    "value": 3

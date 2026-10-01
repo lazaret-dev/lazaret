@@ -14,7 +14,7 @@
 // again; wrappers are popped off the front of a list), this module does
 // not, with the same results.
 
-import { pyRe, pyStrip, pyRstrip, pyStripChars, isPySpace, cpLen } from "./pycompat.js";
+import { pyRe, pyStrip, pyLstrip, pyRstrip, pyStripChars, isPySpace, cpLen } from "./pycompat.js";
 import { PIPE_SCAN_SRC, EXEC_CALL_SRC, EXEC_CALL_RE, DL_SUBST_SRC, DL_SUBST_NEEDLE_SRC, pipesDownloadToShell,
   runsDownloadThroughShell, runsSubstitutedDownload } from "./shellpipe.js";
 import { receivedCodeKind, downloadsAndRunsFile, downloadsAndRuns, decodesAndRuns, SCRIPT_INTERP_SRC, SCRIPT_LOAD_SRC,
@@ -752,7 +752,12 @@ const HOST_INFO_SRC = String.raw`\b(?:socket\.gethostname|socket\.getfqdn|platfo
   + String.raw`|\b(?:getoutput|check_output|getstatusoutput|execSync|popen)\s*\(\s*\[?\s*["'](?:whoami|hostname|id|uname`
   + String.raw`|ifconfig|ipconfig|systeminfo)\b`
   + String.raw`|(?:\$\(|` + "`" + String.raw`)\s*(?:whoami|hostname|id|uname|ifconfig|ip\s+a|pwd|ls|cat\s+/etc/passwd|ps)\b`
-  + String.raw`|\bos\.(?:hostname|userInfo)\s*[,)]`;
+  + String.raw`|\bos\.(?:hostname|userInfo)\s*[,)]`
+  // (0.1.8) through the module itself or a name taken from it (core's comment)
+  + String.raw`|\brequire\(\s*["'](?:node:)?os["']\s*\)\s*\.\s*(?:hostname|userInfo)\b`
+  + String.raw`|\b(?:const|let|var|import)\s*\{[^{}\n]{0,200}\b(?:hostname|userInfo)\b[^{}\n]{0,200}\}\s*`
+  + String.raw`(?:=\s*require\(\s*|from\s*)["'](?:node:)?os["']`
+  + String.raw`|\bfrom\s+(?:socket|getpass)\s+import\s+[^\n]{0,200}\b(?:gethostname|getfqdn|getuser)\b`;
 const HOST_INFO_RE = pyRe(HOST_INFO_SRC);
 /** True when `text` collects the machine's user or host name and sends data over the network (core.sends_host_info). */
 export function sendsHostInfo(text) {
@@ -779,10 +784,37 @@ const CRED_DIR_SRC = String.raw`["'` + "`" + String.raw`](?:~[/\\]|\$HOME[/\\]|%
   + String.raw`|solana|npmrc|pypirc|netrc|git-credentials|config[/\\]gcloud|password-store|vault-token|terraform\.d)`
   + String.raw`(?:[/\\][^"'` + "`" + String.raw`\n]{0,60})?["'` + "`" + "]";
 const B64_URL_LITERAL_SRC = String.raw`["'` + "`" + String.raw`]aHR0c[A-Za-z0-9+/]{2,}={0,2}["'` + "`" + "]";
-const DNS_LOOKUP_SRC = String.raw`(?:\b(?:getaddrinfo|gethostbyname(?:_ex)?)|\bdns\.(?:promises\.)?(?:resolve\w*|lookup)`
-  + String.raw`|\bresolver\.(?:resolve|query))\s*\(\s*(?:f"([^"\n]{0,300})"|f'([^'\n]{0,300})'|` + "`" + String.raw`([^` + "`"
+// The DNS beacon's name: core's comment above _DNS_CALL_RE.
+const DNS_CALL_SRC = String.raw`(?:\b(?:getaddrinfo|gethostbyname(?:_ex)?)|\bdns\.(?:promises\.)?(?:resolve\w*|lookup)`
+  + String.raw`|\bresolver\.(?:resolve|query))\s*\(`;
+const DNS_TEMPLATE_SRC = String.raw`\A(?:f"([^"\n]{0,300})"|f'([^'\n]{0,300})'|` + "`" + String.raw`([^` + "`"
   + String.raw`\n]{0,300})` + "`)";
-const DNS_BUILT_NAME_SRC = String.raw`\{[^}\n]+\}[^\n]*\.[A-Za-z]{2,}\Z`;
+const DNS_BUILT_NAME_SRC = String.raw`\{[^}\n]+\}[^\n]*\.([A-Za-z]{2,})\Z`;
+const DNS_SUM_SRC = String.raw`\+\s*(?:"[^"\n]*\.([A-Za-z]{2,})"|'[^'\n]*\.([A-Za-z]{2,})'|` + "`" + String.raw`[^` + "`"
+  + String.raw`$\n]*\.([A-Za-z]{2,})` + "`" + String.raw`)\s*\Z`;
+const DNS_FORMAT_SRC = String.raw`\A(?:"[^"\n]*(?:%(?:\([^)\n]*\))?[-#0 +]?\d*[sdirx]|\{[^}\n]*\})[^"\n]*\.([A-Za-z]{2,})"|`
+  + String.raw`'[^'\n]*(?:%(?:\([^)\n]*\))?[-#0 +]?\d*[sdirx]|\{[^}\n]*\})[^'\n]*\.([A-Za-z]{2,})')`
+  + String.raw`\s*(?:%|\.\s*format\s*\()`;
+const DNS_LITERAL_SRC = String.raw`"[^"\n]*"|'[^'\n]*'|` + "`" + String.raw`[^` + "`" + String.raw`$\n]*` + "`";
+const DNS_VALUE_SRC = String.raw`[A-Za-z_$(]`;
+const DNS_NAME_SRC = String.raw`\A[A-Za-z_$][\w$]*\Z`;
+const DNS_ASSIGN_HEAD = String.raw`(?<![^\n;{])[ \t]*(?:(?:const|let|var)[ \t]+)?`;     // core._DNS_ASSIGN_HEAD
+const DNS_ASSIGN_TAIL = String.raw`[ \t]*=(?![=>])[ \t]*([^\n;]*)`;                      // core._DNS_ASSIGN_TAIL
+const DNS_LOCAL_TLDS = new Set(["local", "localhost", "localdomain", "internal", "intranet", "lan", "home", "corp",
+  "private", "test", "example", "invalid", "arpa"]);
+const DNS_SHELL_ID_SRC = String.raw`\$\(\s*(?:whoami|hostname|id\s+-un|uname\s+-n)\s*\)|` + "`" + String.raw`\s*(?:whoami|hostname|id\s+-un|uname\s+-n)\s*` + "`"
+  + String.raw`|\$\{?(?:USER|USERNAME|HOSTNAME|LOGNAME)\b\}?|%(?:USERNAME|COMPUTERNAME|USERDOMAIN)%`
+  + String.raw`|\$env:(?:USERNAME|COMPUTERNAME|USERDOMAIN)\b`;
+const DNS_SHELL_CMD_SRC = String.raw`(?<![\w.$-])(?:nslookup|dig|host|ping6?|curl|wget|Resolve-DnsName)\s`;
+const DNS_CMD_SUM_SRC = String.raw`(["'` + "`" + String.raw`])(?:nslookup|dig|host|ping6?|curl|wget|Resolve-DnsName)\s[^"'` + "`"
+  + String.raw`\n]{0,100}\1\s*\+([^\n;]{1,300})`;
+const DNS_CMD_TEMPLATE_SRC = String.raw`["'` + "`" + String.raw`](?:nslookup|dig|host|ping6?|curl|wget|Resolve-DnsName)\s[^"'` + "`"
+  + String.raw`\n]{0,200}?\{[^}\n]+\}[^\s"'` + "`" + String.raw`/:\n]*\.([A-Za-z]{2,})(?![\w.-])`;
+const DNS_SHELL_CUT_SRC = String.raw`[\n|;&]`;
+const DNS_SHELL_LEFT_SRC = String.raw`[^\s"'` + "`" + String.raw`(]*\Z`;
+const DNS_SHELL_RIGHT_SRC = String.raw`[^\s"'` + "`" + String.raw`)]*`;
+const DNS_SHELL_HOST_SRC = String.raw`\A(?:https?://)?[^\s/:"'` + "`" + String.raw`|;&<>()]*\x00[^\s/:"'` + "`"
+  + String.raw`|;&<>()]*\.([A-Za-z]{2,})(?![\w.-])`;
 const PUBLIC_IP_LOOKUP_SRC = String.raw`\bapi(?:64)?\.ipify\.org\b|\bip-api\.com\b|\bipinfo\.io\b|\bifconfig\.me\b|\bicanhazip\.com\b`
   + String.raw`|\bcheckip\.amazonaws\.com\b|\bipapi\.co\b|\bident\.me\b|\bapi\.myip\.com\b|\bwtfismyip\.com\b`;
 const ENV_COPY_SRC = String.raw`(?<![\w$.])([A-Za-z_$][\w$]*)\s{0,40}=\s{0,40}(?:dict\(\s*os\.environ\s*\)|os\.environ\.copy\(\s*\)`
@@ -798,9 +830,25 @@ const CRED_FILE_RE = pyRe(CRED_FILE_SRC);
 const PUBLIC_IP_URL_RE = pyRe(PUBLIC_IP_URL_SRC);
 const CRED_DIR_RE = pyRe(CRED_DIR_SRC, "g");
 const B64_URL_LITERAL_RE = pyRe(B64_URL_LITERAL_SRC);
-const DNS_LOOKUP_RE = pyRe(DNS_LOOKUP_SRC, "g");
+const DNS_CALL_RE = pyRe(DNS_CALL_SRC, "g");
+const DNS_TEMPLATE_RE = pyRe(DNS_TEMPLATE_SRC);
 const DNS_BUILT_NAME_RE = pyRe(DNS_BUILT_NAME_SRC);
-const DNS_LOOKUP_MAX = 50;
+const DNS_SUM_RE = pyRe(DNS_SUM_SRC);
+const DNS_FORMAT_RE = pyRe(DNS_FORMAT_SRC);
+const DNS_LITERAL_ALL_RE = pyRe(DNS_LITERAL_SRC, "g");
+const DNS_VALUE_RE = pyRe(DNS_VALUE_SRC);
+const DNS_NAME_RE = pyRe(DNS_NAME_SRC);
+const DNS_SHELL_ID_ALL_RE = pyRe(DNS_SHELL_ID_SRC, "gi");
+const DNS_SHELL_ID_SUB_RE = pyRe(DNS_SHELL_ID_SRC, "gi");                  // (replace(): a regex of its own)
+const DNS_SHELL_CMD_RE = pyRe(DNS_SHELL_CMD_SRC);
+const DNS_CMD_SUM_ALL_RE = pyRe(DNS_CMD_SUM_SRC, "g");
+const DNS_CMD_TEMPLATE_ALL_RE = pyRe(DNS_CMD_TEMPLATE_SRC, "g");
+const DNS_SHELL_CUT_RE = pyRe(DNS_SHELL_CUT_SRC);
+const DNS_SHELL_CUT_ALL_RE = pyRe(DNS_SHELL_CUT_SRC, "g");
+const DNS_SHELL_LEFT_RE = pyRe(DNS_SHELL_LEFT_SRC);
+const DNS_SHELL_RIGHT_RE = pyRe("^(?:" + DNS_SHELL_RIGHT_SRC + ")");       // Python's match(): at the start
+const DNS_SHELL_HOST_RE = pyRe(DNS_SHELL_HOST_SRC);
+const DNS_LOOKUP_MAX = 50, DNS_ARG_SPAN = 400, DNS_ASSIGN_SPAN = 5000, DNS_SHELL_SPAN = 300;
 const PUBLIC_IP_LOOKUP_RE = pyRe(PUBLIC_IP_LOOKUP_SRC);
 const PUBLIC_IP_LOOKUP_NEEDLES = ["ipify.org", "ip-api.com", "ipinfo.io", "ifconfig.me", "icanhazip.com",
   "checkip.amazonaws.com", "ipapi.co", "ident.me", "api.myip.com", "wtfismyip.com"];
@@ -898,16 +946,115 @@ export function envCopySerializedAt(text) {
   return -1;
 }
 
-/** The offset of a DNS lookup of a name text builds from values, else -1 (core.dns_beacon_at). */
-export function dnsBeaconAt(text) {
-  DNS_LOOKUP_RE.lastIndex = 0;
-  let k = 0;
-  for (let m; (m = DNS_LOOKUP_RE.exec(text)) !== null; k++) {
+/** A call's first argument: what follows its '(' (as callArgs gives it) up to a comma outside brackets and
+ * string literals, stripped (core._call_first_arg). */
+function firstArg(args) {
+  let depth = 0, i = 0;
+  const n = args.length;
+  while (i < n) {
+    const ch = args[i];
+    if (ch === '"' || ch === "'" || ch === "`") {
+      const j = args.indexOf(ch, i + 1);
+      if (j < 0) break;
+      i = j + 1;
+      continue;
+    }
+    if (ch === "(" || ch === "[" || ch === "{") depth++;
+    else if (ch === ")" || ch === "]" || ch === "}") depth--;
+    else if (ch === "," && depth === 0) return pyStrip(args.slice(0, i));
+    i++;
+  }
+  return pyStrip(args);
+}
+const dnsDomainOk = (tld) => tld !== undefined && tld !== null && !DNS_LOCAL_TLDS.has(tld.toLowerCase());
+const dnsValue = (part) => { DNS_LITERAL_ALL_RE.lastIndex = 0; return DNS_VALUE_RE.test(part.replace(DNS_LITERAL_ALL_RE, "")); };
+
+/** Does the expression build a name from values and a literal domain? (core._dns_built) */
+function dnsBuilt(expr) {
+  let m = DNS_TEMPLATE_RE.exec(expr);
+  if (m !== null) {
+    const built = DNS_BUILT_NAME_RE.exec(m[1] ?? m[2] ?? m[3]);
+    return built !== null && dnsDomainOk(built[1]);
+  }
+  m = DNS_SUM_RE.exec(expr);
+  if (m !== null) return dnsDomainOk(m[1] ?? m[2] ?? m[3]) && dnsValue(expr.slice(0, m.index));
+  m = DNS_FORMAT_RE.exec(expr);
+  return m !== null && dnsDomainOk(m[1] ?? m[2]);
+}
+
+/** The offset of a lookup call of a built name, else -1 (core._dns_call_at). */
+function dnsCallAt(text) {
+  DNS_CALL_RE.lastIndex = 0;
+  for (let m, k = 0; (m = DNS_CALL_RE.exec(text)) !== null; k++) {
     if (k >= DNS_LOOKUP_MAX) break;
-    const name = m[1] ?? m[2] ?? m[3];
-    if (DNS_BUILT_NAME_RE.test(name)) return m.index;
+    const start = m.index + m[0].length;
+    const arg = firstArg(callArgs(text.slice(start, cpForward(text, start, DNS_ARG_SPAN))));
+    if (dnsBuilt(arg)) return m.index;
+    if (DNS_NAME_RE.test(arg)) {
+      const assign = pyRe(DNS_ASSIGN_HEAD + reEscape(arg) + DNS_ASSIGN_TAIL, "g");
+      const part = text.slice(0, m.index);
+      assign.lastIndex = cpBack(text, m.index, DNS_ASSIGN_SPAN);
+      let last = null;
+      for (let a; (a = assign.exec(part)) !== null;) last = a;
+      if (last !== null && dnsBuilt(pyStrip(last[1]))) return m.index;
+    }
   }
   return -1;
+}
+
+/** The offset of a lookup command code writes with a built name, else -1 (core._dns_command_at). */
+function dnsCommandAt(text) {
+  const found = [];
+  DNS_CMD_SUM_ALL_RE.lastIndex = 0;
+  for (let m, k = 0; (m = DNS_CMD_SUM_ALL_RE.exec(text)) !== null; k++) {
+    if (k >= DNS_LOOKUP_MAX) break;
+    const rest = firstArg(callArgs(m[2]));
+    const tail = DNS_SUM_RE.exec("+" + rest);
+    if (tail !== null && dnsDomainOk(tail[1] ?? tail[2] ?? tail[3]) && dnsValue(rest.slice(0, Math.max(0, tail.index - 1)))) {
+      found.push(m.index);
+      break;
+    }
+  }
+  DNS_CMD_TEMPLATE_ALL_RE.lastIndex = 0;
+  for (let m, k = 0; (m = DNS_CMD_TEMPLATE_ALL_RE.exec(text)) !== null; k++) {
+    if (k >= DNS_LOOKUP_MAX) break;
+    if (dnsDomainOk(m[1])) { found.push(m.index); break; }
+  }
+  return found.length ? Math.min(...found) : -1;
+}
+
+/** The offset of a shell command that looks up a name holding the machine's user or host name, else -1 (core._dns_shell_at). */
+function dnsShellAt(text) {
+  DNS_SHELL_ID_ALL_RE.lastIndex = 0;
+  for (let m, k = 0; (m = DNS_SHELL_ID_ALL_RE.exec(text)) !== null; k++) {
+    if (k >= DNS_LOOKUP_MAX) break;
+    let head = text.slice(cpBack(text, m.index, DNS_SHELL_SPAN), m.index);
+    let cutAt = -1;
+    DNS_SHELL_CUT_ALL_RE.lastIndex = 0;
+    for (let c; (c = DNS_SHELL_CUT_ALL_RE.exec(head)) !== null;) cutAt = c.index + c[0].length;
+    if (cutAt >= 0) head = head.slice(cutAt);
+    const cmd = DNS_SHELL_CMD_RE.exec(head);
+    if (cmd === null) continue;
+    const end = m.index + m[0].length;
+    let tail = text.slice(end, cpForward(text, end, DNS_SHELL_SPAN));
+    const cut = DNS_SHELL_CUT_RE.exec(tail);
+    if (cut !== null) tail = tail.slice(0, cut.index);
+    tail = tail.replace(DNS_SHELL_ID_SUB_RE, "\x00");
+    const token = DNS_SHELL_LEFT_RE.exec(head)[0] + "\x00" + DNS_SHELL_RIGHT_RE.exec(tail)[0];
+    const found = DNS_SHELL_HOST_RE.exec(token);
+    if (found !== null && dnsDomainOk(found[1])) return m.index - head.length + cmd.index;
+  }
+  return -1;
+}
+
+/** The offset of a DNS lookup of a name text builds from values and a literal domain, else -1; host: does the
+ * text read the machine's user or host name? Without, only a shell command's name that holds it counts
+ * (core.dns_beacon_at). */
+export function dnsBeaconAt(text, host = true) {
+  const found = (host ? [dnsCallAt(text), dnsCommandAt(text)] : []).filter((at) => at >= 0);
+  const at = dnsShellAt(text);
+  if (at >= 0) found.push(at);
+  return found.length ? Math.min(...found) : -1;
 }
 
 /** The offset of the Monero wallet address text runs a miner with, else -1 (core.miner_at). */
@@ -939,12 +1086,14 @@ function exfilSigns(text, host) {
     signs.push([sweep[0], "collects files from several credential folders and sends data over the network "
       + `(${sweep[1].slice(0, 4).map((n) => "." + n).join(", ")})`]);
   }
+  if (host && B64_URL_LITERAL_RE.test(text) && network()) {
+    signs.push([host.index, "sends the machine's user or host name to an address it hides in base64"]);
+  }
+  const dns = dnsBeaconAt(text, host !== null);
+  if (dns >= 0) signs.push([dns, "sends the machine's user or host name in a DNS lookup of a name it builds"]);
   if (host) {
-    if (B64_URL_LITERAL_RE.test(text) && network()) {
-      signs.push([host.index, "sends the machine's user or host name to an address it hides in base64"]);
-    }
-    const at = dnsBeaconAt(text);
-    if (at >= 0) signs.push([at, "sends the machine's user or host name in a DNS lookup of a name it builds"]);
+    const drop = deadDropAt(text);
+    if (drop !== null) signs.push([drop[0], `sends the machine's user or host name to an address it fetches at run time (from ${drop[1]})`]);
   } else if (PUBLIC_IP_LOOKUP_NEEDLES.some((nd) => text.includes(nd))) {
     const lookup = PUBLIC_IP_LOOKUP_RE.exec(text);
     if (lookup) {
@@ -1164,6 +1313,157 @@ export function runsOwnSourceAt(text) {
     }
   }
   return -1;
+}
+
+// ---- dead drops (0.1.8; core's comment above _DD_FETCH_RE) ----
+const DD_FETCH_SRC = String.raw`\b(?:urlopen|requests\s*\.\s*get|httpx\s*\.\s*get|fetch|axios\s*\.\s*get|https?\s*\.\s*get|got)\s*\(`;
+const DD_SEND_SRC = String.raw`\b(?:Request|urlopen|fetch|https?\s*\.\s*request`
+  + String.raw`|(?:requests|httpx|axios|got|superagent|needle|session|client)\s*\.\s*(post|put|patch)|(sendBeacon))\s*\(`;
+const DD_DATA_SRC = String.raw`\b(?:data|body)\s*[=:]|\bjson\s*=|["'](?:POST|PUT|PATCH)["']`;
+const DD_URL_SRC = String.raw`\A[rbfRBF]{0,2}["'` + "`" + String.raw`]https?://([^/"'` + "`" + String.raw`\s?#]+)`;
+const DD_URL_IN_SRC = String.raw`["'` + "`" + String.raw`]https?://([^/"'` + "`" + String.raw`\s?#]+)`;
+const DD_ASSIGN_SRC = String.raw`(?:(?<![^\n])|[;{]|=>)[ \t]*(?:(?:const|let|var)[ \t]+)?([A-Za-z_$][\w$]*)[ \t]*\+?=(?![=>])([^;\n]*)`;
+const DD_DESTRUCT_SRC = String.raw`\b(?:const|let|var)\s*\{([^}\n]{1,200})\}\s*=([^;\n]*)`;
+const DD_DESTRUCT_NAME_SRC = String.raw`(?:[A-Za-z_$][\w$]*\s*:\s*)?([A-Za-z_$][\w$]*)\s*(?:=[^,]*)?\Z`;
+const DD_FOR_SRC = String.raw`\bfor\s+([A-Za-z_]\w*)\s+in\s+([^\n:]{1,200})`
+  + String.raw`|\bfor\s*\(\s*(?:const|let|var)?\s*([A-Za-z_$][\w$]*)\s+(?:of|in)\s+([^\n)]{1,200})`;
+const DD_CALLBACK_SRC = String.raw`(?<![\w$.])([A-Za-z_$][\w$]*)(?:\s*\.\s*[A-Za-z_$][\w$]*){0,8}\s*\.\s*(?:on|once|forEach|map|then|each)\s*\(`
+  + String.raw`\s*(?:["'][^"'\n]{0,40}["']\s*,\s*)?(?:async\s+)?(?:function\b\s*[\w$]*\s*)?\(?\s*([A-Za-z_$][\w$]*)`;
+const DD_ARG_CALLBACK_SRC = String.raw`,\s*(?:async\s+)?(?:function\b\s*[\w$]*\s*\(\s*([A-Za-z_$][\w$]*)|\(\s*([A-Za-z_$][\w$]*)[^)\n]*\)\s*=>`
+  + String.raw`|([A-Za-z_$][\w$]*)\s*=>)`;
+const DD_THEN_HEAD_SRC = String.raw`\s*\.\s*then\s*\(`;
+const DD_PARAM_SRC = String.raw`\s*(?:async\s+)?(?:function\b\s*[\w$]*\s*)?\(?\s*([A-Za-z_$][\w$]*)`;
+const DD_AS_SRC = String.raw`\s*as\s+([A-Za-z_]\w*)`;
+const DD_RETURN_SRC = String.raw`\breturn\s+([^\n;]{1,200})`;
+const DD_FUNC_SRC = String.raw`\bdef\s+([A-Za-z_]\w*)\s*\(|\bfunction\s*\*?\s*([A-Za-z_$][\w$]*)\s*\(`
+  + String.raw`|(?<![\w$.])([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?(?:function\b|\([^)\n]{0,200}\)\s*=>|[A-Za-z_$][\w$]*\s*=>)`;
+const DD_FETCH_RE = pyRe(DD_FETCH_SRC), DD_FETCH_ALL_RE = pyRe(DD_FETCH_SRC, "g");
+const DD_SEND_RE = pyRe(DD_SEND_SRC), DD_SEND_ALL_RE = pyRe(DD_SEND_SRC, "g");
+const DD_DATA_RE = pyRe(DD_DATA_SRC, "i");
+const DD_URL_RE = pyRe(DD_URL_SRC), DD_URL_IN_RE = pyRe(DD_URL_IN_SRC);
+const DD_ASSIGN_ALL_RE = pyRe(DD_ASSIGN_SRC, "gd"), DD_DESTRUCT_ALL_RE = pyRe(DD_DESTRUCT_SRC, "gd");
+const DD_DESTRUCT_NAME_RE = pyRe(DD_DESTRUCT_NAME_SRC);
+const DD_FOR_ALL_RE = pyRe(DD_FOR_SRC, "gd"), DD_CALLBACK_ALL_RE = pyRe(DD_CALLBACK_SRC, "g");
+const DD_ARG_CALLBACK_RE = pyRe(DD_ARG_CALLBACK_SRC);
+const DD_THEN_HEAD_AT_RE = pyRe(DD_THEN_HEAD_SRC, "y"), DD_AS_AT_RE = pyRe(DD_AS_SRC, "y");
+const DD_PARAM_AT_START_RE = pyRe("^(?:" + DD_PARAM_SRC + ")");       // Python's match(): at the start
+const DD_RETURN_ALL_RE = pyRe(DD_RETURN_SRC, "gd"), DD_FUNC_ALL_RE = pyRe(DD_FUNC_SRC, "g");
+const DD_PASSES = 4, DD_MAX_CALLS = 100, DD_ARG_SPAN = 2000, DD_MAX_ASSIGNS = 5000, DD_THEN_MAX = 4;
+
+/** [offset, host] of a send whose address the text fetched at run time from a literal URL on host, else null
+ * (core.dead_drop_at; the caller checks that the text reads the machine's user or host name). */
+export function deadDropAt(text) {
+  if (!text.includes("http") || !DD_FETCH_RE.test(text) || !DD_SEND_RE.test(text)) return null;
+  const spans = literalSpans(text);
+  const inLiteral = (pos) => {
+    let lo = 0, hi = spans.length;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (spans[mid][0] <= pos) lo = mid + 1; else hi = mid; }
+    return lo > 0 && pos < spans[lo - 1][1];
+  };
+  const uses = (lo, hi, names) => {
+    if (!names.size) return false;
+    const part = text.slice(lo, hi);
+    IDENT_TOKEN_ALL_RE.lastIndex = 0;
+    for (let m; (m = IDENT_TOKEN_ALL_RE.exec(part)) !== null;) if (names.has(m[0]) && !inLiteral(lo + m.index)) return true;
+    return false;
+  };
+  const assigns = [];                               // [name, start, end] of what is assigned
+  const urlNames = new Map();                       // name -> the host of the URL literal assigned to it
+  DD_ASSIGN_ALL_RE.lastIndex = 0;
+  for (let m, k = 0; (m = DD_ASSIGN_ALL_RE.exec(text)) !== null; k++) {
+    if (k >= DD_MAX_ASSIGNS) break;
+    if (inLiteral(m.indices[1][0])) continue;
+    assigns.push([m[1], m.indices[2][0], m.indices[2][1]]);
+    const url = DD_URL_IN_RE.exec(m[2]);
+    if (url !== null && !urlNames.has(m[1])) urlNames.set(m[1], url[1]);
+  }
+  DD_DESTRUCT_ALL_RE.lastIndex = 0;
+  for (let m, k = 0; (m = DD_DESTRUCT_ALL_RE.exec(text)) !== null; k++) {
+    if (k >= DD_MAX_ASSIGNS) break;
+    if (inLiteral(m.index)) continue;
+    for (const part of m[1].split(",")) {
+      const name = DD_DESTRUCT_NAME_RE.exec(pyStrip(part));
+      if (name !== null) assigns.push([name[1], m.indices[2][0], m.indices[2][1]]);
+    }
+  }
+  const followed = new Set();
+  let origin = null;
+  DD_FETCH_ALL_RE.lastIndex = 0;
+  for (let f, k = 0; (f = DD_FETCH_ALL_RE.exec(text)) !== null; k++) {
+    if (k >= DD_MAX_CALLS) break;
+    if (inLiteral(f.index)) continue;
+    const start = f.index + f[0].length;
+    const args = callArgs(text.slice(start, cpForward(text, start, DD_ARG_SPAN)));
+    const first = firstArg(args);
+    const url = DD_URL_RE.exec(first);
+    const host = url !== null ? url[1] : (urlNames.has(first) ? urlNames.get(first) : null);
+    if (host === null) continue;
+    const before = followed.size;
+    for (const [name, lo, hi] of assigns) if (lo <= f.index && f.index < hi) followed.add(name);
+    const cb = DD_ARG_CALLBACK_RE.exec(args);
+    if (cb !== null && !inLiteral(start + cb.index)) followed.add(cb[1] ?? cb[2] ?? cb[3]);
+    let pos = start + args.length + 1;              // after the call's closing bracket
+    DD_AS_AT_RE.lastIndex = pos;
+    const as = DD_AS_AT_RE.exec(text);
+    if (as !== null) followed.add(as[1]);
+    for (let t = 0; t < DD_THEN_MAX; t++) {
+      DD_THEN_HEAD_AT_RE.lastIndex = pos;
+      const h = DD_THEN_HEAD_AT_RE.exec(text);
+      if (h === null) break;
+      const hEnd = h.index + h[0].length;
+      const thenArgs = callArgs(text.slice(hEnd, cpForward(text, hEnd, DD_ARG_SPAN)));
+      const param = DD_PARAM_AT_START_RE.exec(thenArgs);
+      if (param !== null) followed.add(param[1]);
+      pos = hEnd + thenArgs.length + 1;
+    }
+    if (origin === null && followed.size > before) origin = host;
+  }
+  if (!followed.size) return null;
+  const funcs = [];                                 // [start, name] of the functions defined
+  DD_FUNC_ALL_RE.lastIndex = 0;
+  for (let m, k = 0; (m = DD_FUNC_ALL_RE.exec(text)) !== null; k++) {
+    if (k >= DD_MAX_ASSIGNS) break;
+    funcs.push([m.index, m[1] ?? m[2] ?? m[3]]);
+  }
+  const loops = [];
+  DD_FOR_ALL_RE.lastIndex = 0;
+  for (let m, k = 0; (m = DD_FOR_ALL_RE.exec(text)) !== null; k++) {
+    if (k >= DD_MAX_ASSIGNS) break;
+    if (inLiteral(m.index)) continue;
+    loops.push(m[2] !== undefined ? [m[1], m.indices[2][0], m.indices[2][1]] : [m[3], m.indices[4][0], m.indices[4][1]]);
+  }
+  for (let pass = 0; pass < DD_PASSES; pass++) {
+    let grown = false;
+    for (const [name, lo, hi] of [...assigns, ...loops]) {
+      if (!followed.has(name) && uses(lo, hi, followed)) { followed.add(name); grown = true; }
+    }
+    DD_CALLBACK_ALL_RE.lastIndex = 0;
+    for (let m, k = 0; (m = DD_CALLBACK_ALL_RE.exec(text)) !== null; k++) {
+      if (k >= DD_MAX_CALLS) break;
+      if (followed.has(m[1]) && !followed.has(m[2]) && !inLiteral(m.index)) { followed.add(m[2]); grown = true; }
+    }
+    DD_RETURN_ALL_RE.lastIndex = 0;
+    for (let m, k = 0; (m = DD_RETURN_ALL_RE.exec(text)) !== null; k++) {
+      if (k >= DD_MAX_CALLS) break;
+      if (inLiteral(m.index) || !uses(m.indices[1][0], m.indices[1][1], followed)) continue;
+      let lo = 0, hi = funcs.length;                // the last function defined at or before the return
+      while (lo < hi) { const mid = (lo + hi) >> 1; if (funcs[mid][0] <= m.index) lo = mid + 1; else hi = mid; }
+      if (lo > 0 && !followed.has(funcs[lo - 1][1])) { followed.add(funcs[lo - 1][1]); grown = true; }
+    }
+    if (!grown) break;
+  }
+  DD_SEND_ALL_RE.lastIndex = 0;
+  for (let s, k = 0; (s = DD_SEND_ALL_RE.exec(text)) !== null; k++) {
+    if (k >= DD_MAX_CALLS) break;
+    if (inLiteral(s.index)) continue;
+    const start = s.index + s[0].length;
+    const args = callArgs(text.slice(start, cpForward(text, start, DD_ARG_SPAN)));
+    const first = firstArg(args);
+    const lead = args.length - pyLstrip(args).length;
+    if (!uses(start + lead, start + lead + first.length, followed)) continue;
+    if (s[1] !== undefined || s[2] !== undefined || DD_DATA_RE.test(args)) return [s.index, origin];
+  }
+  return null;
 }
 
 // ---- persistence targets (0.1.7; core's comment above _PERSIST_AGENT_SRC) ----
@@ -1980,7 +2280,7 @@ const STRONG_IMPORT_REASONS = [
   "sends data to a Slack webhook whose key", "reads credential files and sends data to an IP address",
   "collects files from several credential folders", "sends the machine's user or host name to an address it hides",
   "sends the machine's user or host name in a DNS lookup", "sends the machine's public IP address to a data-capture",
-  "runs a cryptocurrency miner"];
+  "sends the machine's user or host name to an address it fetches", "runs a cryptocurrency miner"];
 const CAPTURE_SERVICE_SRC = String.raw`webhook\.site|typedwebhook\.tools|oastify\.com|burpcollaborator|\binteract\.sh|\boast[\w.-]*\.(?:pro|live|site`
   + String.raw`|online|fun|me|com)\b|pipedream\.net|requestbin\.(?:com|net|io)\b|\brequestb\.in\b|requestcatcher\.com`
   + String.raw`|hookbin\.com|postb\.in\b|beeceptor\.com`
@@ -2324,8 +2624,19 @@ export const PY_TWINS = {
     _REVSHELL_ARGS_RE: [REVSHELL_ARGS_SRC, ""], _CHAT_SECRET_RE: [CHAT_SECRET_SRC, ""],
     _TELEGRAM_API_RE: [TELEGRAM_API_SRC, "i"], _CRED_FILE_RE: [CRED_FILE_SRC, ""],
     _PUBLIC_IP_URL_RE: [PUBLIC_IP_URL_SRC, ""], _CRED_DIR_RE: [CRED_DIR_SRC, ""],
-    _B64_URL_LITERAL_RE: [B64_URL_LITERAL_SRC, ""], _DNS_LOOKUP_RE: [DNS_LOOKUP_SRC, ""],
-    _DNS_BUILT_NAME_RE: [DNS_BUILT_NAME_SRC, ""],
+    _B64_URL_LITERAL_RE: [B64_URL_LITERAL_SRC, ""], _DNS_CALL_RE: [DNS_CALL_SRC, ""],
+    _DNS_BUILT_NAME_RE: [DNS_BUILT_NAME_SRC, ""], _DNS_TEMPLATE_RE: [DNS_TEMPLATE_SRC, ""], _DNS_SUM_RE: [DNS_SUM_SRC, ""],
+    _DNS_FORMAT_RE: [DNS_FORMAT_SRC, ""], _DNS_LITERAL_RE: [DNS_LITERAL_SRC, ""], _DNS_VALUE_RE: [DNS_VALUE_SRC, ""],
+    _DNS_NAME_RE: [DNS_NAME_SRC, ""], _DNS_SHELL_ID_RE: [DNS_SHELL_ID_SRC, "i"], _DNS_SHELL_CMD_RE: [DNS_SHELL_CMD_SRC, ""],
+    _DNS_CMD_SUM_RE: [DNS_CMD_SUM_SRC, ""], _DNS_CMD_TEMPLATE_RE: [DNS_CMD_TEMPLATE_SRC, ""],
+    _DNS_SHELL_CUT_RE: [DNS_SHELL_CUT_SRC, ""], _DNS_SHELL_LEFT_RE: [DNS_SHELL_LEFT_SRC, ""],
+    _DNS_SHELL_RIGHT_RE: [DNS_SHELL_RIGHT_SRC, ""], _DNS_SHELL_HOST_RE: [DNS_SHELL_HOST_SRC, ""],
+    _DD_FETCH_RE: [DD_FETCH_SRC, ""], _DD_SEND_RE: [DD_SEND_SRC, ""], _DD_DATA_RE: [DD_DATA_SRC, "i"],
+    _DD_URL_RE: [DD_URL_SRC, ""], _DD_URL_IN_RE: [DD_URL_IN_SRC, ""], _DD_ASSIGN_RE: [DD_ASSIGN_SRC, ""],
+    _DD_DESTRUCT_RE: [DD_DESTRUCT_SRC, ""], _DD_DESTRUCT_NAME_RE: [DD_DESTRUCT_NAME_SRC, ""], _DD_FOR_RE: [DD_FOR_SRC, ""],
+    _DD_CALLBACK_RE: [DD_CALLBACK_SRC, ""], _DD_ARG_CALLBACK_RE: [DD_ARG_CALLBACK_SRC, ""],
+    _DD_THEN_HEAD_RE: [DD_THEN_HEAD_SRC, ""], _DD_PARAM_RE: [DD_PARAM_SRC, ""], _DD_AS_RE: [DD_AS_SRC, ""],
+    _DD_RETURN_RE: [DD_RETURN_SRC, ""], _DD_FUNC_RE: [DD_FUNC_SRC, ""],
     _PUBLIC_IP_LOOKUP_RE: [PUBLIC_IP_LOOKUP_SRC, ""], _ENV_COPY_RE: [ENV_COPY_SRC, ""],
     _IP_LITERAL_RE: [IP_LITERAL_SRC, ""], _RAW_CONNECT_RE: [RAW_CONNECT_SRC, ""], _ENV_COPY_ANCHOR_RE: [ENV_COPY_ANCHOR_SRC, ""],
     _MONERO_ADDR_RE: [MONERO_ADDR_SRC, ""], _MINER_ARG_RE: [MINER_ARG_SRC, ""], _NGROK_TUNNEL_RE: [NGROK_TUNNEL_SRC, ""],
@@ -2360,6 +2671,7 @@ export const PY_TWINS = {
     _CRED_SWEEP_NEEDLES: CRED_SWEEP_NEEDLES, _PUBLIC_RESOLVERS: [...PUBLIC_RESOLVERS],
     _PUBLIC_IP_LOOKUP_NEEDLES: PUBLIC_IP_LOOKUP_NEEDLES, _MINER_ARG_NEEDLES: MINER_ARG_NEEDLES,
     _REVSHELL_ARGS_NEEDLES: REVSHELL_ARGS_NEEDLES, _SELF_SHELL_RUNNERS: SELF_SHELL_RUNNERS,
+    _DNS_LOCAL_TLDS: [...DNS_LOCAL_TLDS],
   },
   maps: Object.fromEntries([["_PERSIST_AGENT_PAIRS", PERSIST_AGENT_PAIRS], ["_WRAPPER_VALUE_OPTIONS", WRAPPER_VALUE_OPTIONS],
     ["_WRAPPER_CHDIR_OPTIONS", WRAPPER_CHDIR_OPTIONS], ["_WRAPPER_COMMAND_OPTIONS", WRAPPER_COMMAND_OPTIONS]]
@@ -2379,5 +2691,7 @@ export const PY_TWINS = {
     _CHAT_SECRET_MAX: CHAT_SECRET_MAX, _CHAT_SECRET_MIN_DISTINCT: CHAT_SECRET_MIN_DISTINCT,
     _CRED_SWEEP_SPAN: CRED_SWEEP_SPAN, _CRED_SWEEP_MIN: CRED_SWEEP_MIN, _CRED_SWEEP_MAX: CRED_SWEEP_MAX,
     _ENV_COPY_MAX: ENV_COPY_MAX, _RAW_CONNECT_SPAN: RAW_CONNECT_SPAN, _IP_LITERAL_MAX: IP_LITERAL_MAX,
-    _DNS_LOOKUP_MAX: DNS_LOOKUP_MAX },
+    _DNS_LOOKUP_MAX: DNS_LOOKUP_MAX, _DNS_ARG_SPAN: DNS_ARG_SPAN, _DNS_ASSIGN_SPAN: DNS_ASSIGN_SPAN,
+    _DNS_SHELL_SPAN: DNS_SHELL_SPAN, _DD_PASSES: DD_PASSES, _DD_MAX_CALLS: DD_MAX_CALLS, _DD_ARG_SPAN: DD_ARG_SPAN,
+    _DD_MAX_ASSIGNS: DD_MAX_ASSIGNS, _DD_THEN_MAX: DD_THEN_MAX },
 };
