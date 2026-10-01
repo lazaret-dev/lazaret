@@ -23,7 +23,7 @@ fn any_in(text: &[u32], needles: &pystr::Needles) -> bool {
     needles.any_in(text)
 }
 
-fn cat_reason(p: &Pack, cat: &str) -> PyStr {
+pub(crate) fn cat_reason(p: &Pack, cat: &str) -> PyStr {
     p.map_strs("_DL_CATEGORY_REASON")
         .iter()
         .find(|(k, _)| pystr::eq(k, cat))
@@ -282,12 +282,6 @@ pub fn reverse_shell_at(p: &Pack, text: &[u32]) -> isize {
     -1
 }
 
-/// core.sends_host_info
-pub fn sends_host_info(p: &Pack, text: &[u32]) -> bool {
-    p.re("_HOST_INFO_RE").search(text).is_some()
-        && (p.re("_NETWORK_RE").search(text).is_some() || p.re("_EXFIL_SERVICE_RE").search(text).is_some())
-}
-
 // ---------------- exfiltration shapes (0.1.8) ----------------
 
 /// core.capture_service: the first data-capture service the text names,
@@ -298,76 +292,6 @@ pub fn capture_service<'s>(p: &'s Pack, text: &'s [u32]) -> Option<crate::pyre::
     }
     if has(text, "ngrok") {
         return p.re("_NGROK_TUNNEL_RE").search(text);
-    }
-    None
-}
-
-/// s.rsplit(sep, maxsplit)
-fn rsplit_char(s: &[u32], sep: u32, maxsplit: usize) -> Vec<&[u32]> {
-    let mut parts: Vec<&[u32]> = Vec::new();
-    let mut end = s.len();
-    let mut splits = 0;
-    let mut i = s.len();
-    while i > 0 && splits < maxsplit {
-        i -= 1;
-        if s[i] == sep {
-            parts.push(&s[i + 1..end]);
-            end = i;
-            splits += 1;
-        }
-    }
-    parts.push(&s[..end]);
-    parts.reverse();
-    parts
-}
-
-/// len(set(s))
-fn distinct(s: &[u32]) -> usize {
-    s.iter().collect::<HashSet<_>>().len()
-}
-
-/// core.chat_secret_at: (offset, reason) of the first chat bot or webhook
-/// secret written in a text that makes network calls.
-pub fn chat_secret_at(p: &Pack, text: &[u32]) -> Option<(usize, PyStr)> {
-    if !any_in(text, p.needles("_CHAT_SECRET_NEEDLES")) {
-        return None;
-    }
-    p.re("_NETWORK_RE").search(text)?;
-    let max = p.usize("_CHAT_SECRET_MAX");
-    let min_distinct = p.usize("_CHAT_SECRET_MIN_DISTINCT");
-    for (k, m) in p.re("_CHAT_SECRET_RE").finditer(text).enumerate() {
-        if k >= max {
-            break;
-        }
-        let found = m.group0();
-        if pystr::starts_with(found, "discord") || pystr::starts_with(found, "Discord") {
-            let parts = rsplit_char(found, c('/'), 2);
-            let (hook, secret) = (parts[1], parts[2]);
-            if distinct(secret) >= min_distinct {
-                return Some((
-                    m.start(),
-                    cat(&[&u("sends data to a Discord webhook whose token is written in the code (webhook "), hook, &u(")")]),
-                ));
-            }
-        } else if pystr::starts_with(found, "hooks.") {
-            let parts = rsplit_char(found, c('/'), 3);
-            let (team, secret) = (parts[1], parts[3]);
-            if distinct(secret) >= min_distinct && !pystr::strip_chars(team, "T0").is_empty() {
-                return Some((
-                    m.start(),
-                    cat(&[&u("sends data to a Slack webhook whose key is written in the code ("), team, &u(")")]),
-                ));
-            }
-        } else {
-            let colon = pystr::find_char(found, c(':'), 0).unwrap_or(found.len());
-            let (bot, secret) = (&found[..colon], pystr::from(found, colon + 1));
-            if distinct(secret) >= min_distinct && p.re("_TELEGRAM_API_RE").search(text).is_some() {
-                return Some((
-                    m.start(),
-                    cat(&[&u("sends data to a Telegram bot whose token is written in the code (bot "), bot, &u(")")]),
-                ));
-            }
-        }
     }
     None
 }
@@ -406,32 +330,10 @@ pub fn credential_sweep_at(p: &Pack, text: &[u32]) -> Option<(usize, Vec<PyStr>)
     None
 }
 
-/// core.env_copy_serialized_at: where the text serializes a copy of the
-/// whole environment it made, else -1.
-pub fn env_copy_serialized_at(p: &Pack, text: &[u32]) -> isize {
-    if (!has(text, "os.environ") && !has(text, "process.env")) || p.re("_ENV_COPY_ANCHOR_RE").search(text).is_none() {
-        return -1;
-    }
-    let max = p.usize("_ENV_COPY_MAX");
-    let head_src = p.text("_ENV_COPY_USE_HEAD");
-    let tail_src = p.text("_ENV_COPY_USE_TAIL");
-    for (k, m) in p.re("_ENV_COPY_RE").finditer(text).enumerate() {
-        if k >= max {
-            break;
-        }
-        let name = m.group(1).unwrap_or(&[]);
-        let rx = rxutil::dynamic(cat(&[&head_src, &crate::pyre::escape(name), &tail_src]), 0);
-        if let Some(used) = rx.search_at(text, m.end() as isize, text.len() as isize) {
-            return used.start() as isize;
-        }
-    }
-    -1
-}
-
 /// core._call_first_arg: a call's first argument (what follows its '(', as
 /// _call_args gives it, up to a comma outside brackets and string
 /// literals), stripped.
-fn first_arg(args: &[u32]) -> &[u32] {
+pub(crate) fn first_arg(args: &[u32]) -> &[u32] {
     let n = args.len();
     let mut depth: isize = 0;
     let mut i = 0usize;
@@ -635,8 +537,8 @@ pub fn exfil_signs(p: &Pack, text: &[u32], host: Option<usize>) -> Vec<(usize, P
     if at >= 0 {
         signs.push((at as usize, u("runs a cryptocurrency miner (a Monero wallet address)")));
     }
-    if let Some(chat) = chat_secret_at(p, text) {
-        signs.push(chat);
+    if let Some(endpoint) = crate::flow::secret_endpoint_at(p, text) {
+        signs.push(endpoint);
     }
     let mut net: Option<bool> = None;
     let mut network = || -> bool {
@@ -645,18 +547,6 @@ pub fn exfil_signs(p: &Pack, text: &[u32], host: Option<usize>) -> Vec<(usize, P
         }
         net.unwrap_or(false)
     };
-    if let Some(ip) = p.re("_PUBLIC_IP_URL_RE").search(text) {
-        if let Some(cred) = p.re("_CRED_FILE_RE").search(text) {
-            if network() {
-                let g = ip.group0();
-                let rest = match pystr::find_str(g, "//", 0) {
-                    Some(i) => pystr::from(g, i + 2),
-                    None => &[][..],
-                };
-                signs.push((cred.start(), cat(&[&u("reads credential files and sends data to an IP address ("), rest, &u(")")])));
-            }
-        }
-    }
     if let Some((at, names)) = credential_sweep_at(p, text) {
         if network() {
             let shown: Vec<PyStr> = names.iter().take(4).map(|n| cat(&[&u("."), n])).collect();
@@ -686,19 +576,6 @@ pub fn exfil_signs(p: &Pack, text: &[u32], host: Option<usize>) -> Vec<(usize, P
                 at,
                 cat(&[&u("sends the machine's user or host name to an address it fetches at run time (from "), &origin, &u(")")]),
             ));
-        }
-    } else if any_in(text, p.needles("_PUBLIC_IP_LOOKUP_NEEDLES")) {
-        if let Some(lookup) = p.re("_PUBLIC_IP_LOOKUP_RE").search(text) {
-            if let Some(capture) = capture_service(p, text) {
-                signs.push((
-                    lookup.start(),
-                    cat(&[
-                        &u("sends the machine's public IP address to a data-capture service ("),
-                        head(capture.group0(), 40),
-                        &u(")"),
-                    ]),
-                ));
-            }
         }
     }
     signs
@@ -936,7 +813,7 @@ pub fn reads_own_source(p: &Pack, text: &[u32]) -> bool {
 }
 
 /// len(core._call_args(text))
-fn call_args_len(text: &[u32]) -> usize {
+pub(crate) fn call_args_len(text: &[u32]) -> usize {
     let n = text.len();
     let mut depth = 0usize;
     let mut i = 0usize;
@@ -965,7 +842,7 @@ fn call_args_len(text: &[u32]) -> usize {
 }
 
 /// core._literal_spans
-fn literal_spans(p: &Pack, text: &[u32]) -> Vec<(usize, usize)> {
+pub(crate) fn literal_spans(p: &Pack, text: &[u32]) -> Vec<(usize, usize)> {
     let max = p.usize("_LITERAL_SPANS_MAX");
     let n = text.len();
     let mut out = Vec::new();
@@ -1243,11 +1120,11 @@ pub fn persistence_reasons(p: &Pack, text: &[u32]) -> Vec<PyStr> {
     {
         reasons.push(u("registers the machine as a GitHub Actions self-hosted runner"));
     }
-    if p.re("_BUN_RELEASES_RE").search(text).is_some() && p.re("_EXEC_CALL_RE").search(text).is_some() {
-        reasons.push(u("downloads the Bun runtime from GitHub and runs code with it"));
-    }
-    if has(text, "--load-extension") && p.re("_PERSIST_SHORTCUT_RE").search(text).is_some() {
-        reasons.push(u("rewrites browser shortcuts to load an extension"));
+    if p.re("_SHORTCUT_FOUND_RE").search(text).is_some()
+        && has(text, "CreateShortcut")
+        && p.re("_SHORTCUT_SET_RE").search(text).is_some()
+    {
+        reasons.push(u("rewrites the shortcuts of programs on the machine"));
     }
     reasons.extend(service_reasons(p, text));
     reasons
@@ -1635,14 +1512,787 @@ fn sub_decoded(rx: &crate::pyre::Regex, view: &[u32], f: impl Fn(&crate::pyre::M
     })
 }
 
+// ---------------- character codes (core's comment above _DV_CC_BODY) ----------------
+
+/// A value core's character-code evaluator works with: an integer, a list of
+/// integers, a string (Char: a string of one character, what indexing a
+/// string gives).
+#[derive(Clone)]
+enum CcVal {
+    Int(i64),
+    List(std::rc::Rc<Vec<i64>>),
+    Str(std::rc::Rc<Vec<u32>>),
+    Char(u32),
+}
+
+#[derive(Clone, Copy)]
+enum CcOp {
+    Or,
+    Xor,
+    And,
+    Shl,
+    Shr,
+    Ushr,
+    Add,
+    Sub,
+    Mul,
+    Mod,
+}
+
+/// core._cc_parse's syntax tree; a name is resolved to its slot when a
+/// decoder is made (CcSlot).
+enum CcNode {
+    Num(i64),
+    Var(PyStr),
+    Slot(CcSlot),
+    Neg(Box<CcNode>),
+    Not(Box<CcNode>),
+    Plus(Box<CcNode>),
+    Bin(CcOp, Box<CcNode>, Box<CcNode>),
+    Index(Box<CcNode>, Box<CcNode>),
+    CharCode(Box<CcNode>, Box<CcNode>),
+    Len(Box<CcNode>),
+    Ord(Box<CcNode>),
+}
+
+#[derive(Clone, Copy)]
+enum CcSlot {
+    Param(usize),
+    Elem,
+    Index,
+}
+
+enum CcTok {
+    Num(PyStr),
+    Name(PyStr),
+    Op(PyStr),
+}
+
+/// core._cc_int_literal
+fn cc_int_literal(p: &Pack, s: &[u32]) -> Result<i64, ()> {
+    if p.re("_DV_CC_INT_RE").fullmatch(s).is_none() {
+        return Err(());
+    }
+    let hex = s.len() >= 2 && s[0] == c('0') && (s[1] == c('x') || s[1] == c('X'));
+    let mut v: i64 = 0;
+    for &ch in if hex { &s[2..] } else { s } {
+        let d = match ch {
+            0x30..=0x39 => ch - 0x30,
+            0x61..=0x66 => ch - 0x61 + 10,
+            0x41..=0x46 => ch - 0x41 + 10,
+            _ => return Err(()),
+        } as i64;
+        v = v * if hex { 16 } else { 10 } + d;
+    }
+    if v > p.int("_DV_CC_INT_MAX") {
+        return Err(());
+    }
+    Ok(v)
+}
+
+/// core._cc_ints
+fn cc_ints(p: &Pack, items: &[u32]) -> Result<Vec<i64>, ()> {
+    let mut parts: Vec<&[u32]> = pystr::split_char(items, c(',')).into_iter().map(pystr::strip).collect();
+    if parts.last().is_some_and(|x| x.is_empty()) {
+        parts.pop();
+    }
+    parts.iter().map(|x| cc_int_literal(p, x)).collect()
+}
+
+/// core._cc_parse: the transform's tree, else None.
+fn cc_parse(p: &Pack, expr: &[u32]) -> Option<CcNode> {
+    let token = p.re("_DV_CC_TOKEN_RE");
+    let max_tokens = p.usize("_DV_CC_MAX_TOKENS");
+    let mut toks: Vec<CcTok> = Vec::new();
+    let mut pos = 0usize;
+    while pos < expr.len() {
+        let Some(m) = token.match_at(expr, pos as isize, expr.len() as isize) else {
+            if !pystr::strip_chars(&expr[pos..], " \t").is_empty() {
+                return None;
+            }
+            break;
+        };
+        if let Some(n) = m.name("num") {
+            toks.push(CcTok::Num(n.to_vec()));
+        } else if let Some(n) = m.name("name") {
+            toks.push(CcTok::Name(n.to_vec()));
+        } else {
+            toks.push(CcTok::Op(m.name("op").unwrap_or(&[]).to_vec()));
+        }
+        pos = m.end();
+        if toks.len() > max_tokens {
+            return None;
+        }
+    }
+    let binary: &Vec<(PyStr, i64)> = p.derived("_DV_CC_BINARY", |v| {
+        v.get("map")
+            .and_then(|m| m.as_obj())
+            .unwrap_or(&[])
+            .iter()
+            .map(|(k, x)| (k.clone(), x.get("value").and_then(|y| y.as_i64()).unwrap_or(0)))
+            .collect()
+    });
+    let mut parser = CcParser { p, toks: &toks, at: 0, binary, max_depth: p.usize("_DV_CC_MAX_DEPTH") };
+    let tree = parser.expression(1, 0).ok()?;
+    if parser.at == toks.len() {
+        Some(tree)
+    } else {
+        None
+    }
+}
+
+struct CcParser<'a> {
+    p: &'a Pack,
+    toks: &'a [CcTok],
+    at: usize,
+    binary: &'a [(PyStr, i64)],
+    max_depth: usize,
+}
+
+impl CcParser<'_> {
+    fn peek_op(&self, v: &str) -> bool {
+        matches!(self.toks.get(self.at), Some(CcTok::Op(o)) if pystr::eq(o, v))
+    }
+
+    fn take(&mut self, v: &str) -> Result<(), ()> {
+        if !self.peek_op(v) {
+            return Err(());
+        }
+        self.at += 1;
+        Ok(())
+    }
+
+    fn expression(&mut self, min_prec: i64, depth: usize) -> Result<CcNode, ()> {
+        if depth > self.max_depth {
+            return Err(());
+        }
+        let mut left = self.unary(depth)?;
+        loop {
+            let Some(CcTok::Op(op)) = self.toks.get(self.at) else {
+                return Ok(left);
+            };
+            let Some(prec) = self.binary.iter().find(|(k, _)| k == op).map(|(_, v)| *v) else {
+                return Ok(left);
+            };
+            if prec < min_prec {
+                return Ok(left);
+            }
+            let kind = match crate::pystr::to_string(op).as_str() {
+                "|" => CcOp::Or,
+                "^" => CcOp::Xor,
+                "&" => CcOp::And,
+                "<<" => CcOp::Shl,
+                ">>" => CcOp::Shr,
+                ">>>" => CcOp::Ushr,
+                "+" => CcOp::Add,
+                "-" => CcOp::Sub,
+                "*" => CcOp::Mul,
+                "%" => CcOp::Mod,
+                _ => return Err(()),
+            };
+            self.at += 1;
+            let right = self.expression(prec + 1, depth + 1)?;
+            left = CcNode::Bin(kind, Box::new(left), Box::new(right));
+        }
+    }
+
+    fn unary(&mut self, depth: usize) -> Result<CcNode, ()> {
+        for (op, which) in [("-", 0u8), ("~", 1), ("+", 2)] {
+            if self.peek_op(op) {
+                if depth >= self.max_depth {
+                    return Err(());
+                }
+                self.at += 1;
+                let arg = Box::new(self.unary(depth + 1)?);
+                return Ok(match which {
+                    0 => CcNode::Neg(arg),
+                    1 => CcNode::Not(arg),
+                    _ => CcNode::Plus(arg),
+                });
+            }
+        }
+        self.postfix(depth)
+    }
+
+    fn postfix(&mut self, depth: usize) -> Result<CcNode, ()> {
+        let mut node = self.primary(depth)?;
+        loop {
+            if self.peek_op("[") {
+                self.at += 1;
+                let index = self.expression(1, depth + 1)?;
+                self.take("]")?;
+                node = CcNode::Index(Box::new(node), Box::new(index));
+            } else if self.peek_op(".") {
+                self.at += 1;
+                let length = match self.toks.get(self.at) {
+                    Some(CcTok::Name(n)) if pystr::eq(n, "length") => true,
+                    Some(CcTok::Name(n)) if pystr::eq(n, "charCodeAt") => false,
+                    _ => return Err(()),
+                };
+                self.at += 1;
+                if length {
+                    node = CcNode::Len(Box::new(node));
+                } else {
+                    self.take("(")?;
+                    let arg = if self.peek_op(")") { CcNode::Num(0) } else { self.expression(1, depth + 1)? };
+                    self.take(")")?;
+                    node = CcNode::CharCode(Box::new(node), Box::new(arg));
+                }
+            } else {
+                return Ok(node);
+            }
+        }
+    }
+
+    fn primary(&mut self, depth: usize) -> Result<CcNode, ()> {
+        let tok = self.toks.get(self.at).ok_or(())?;
+        self.at += 1;
+        match tok {
+            CcTok::Num(s) => Ok(CcNode::Num(cc_int_literal(self.p, s)?)),
+            CcTok::Name(n) => {
+                let (ord, len) = (pystr::eq(n, "ord"), pystr::eq(n, "len"));
+                if (ord || len) && self.peek_op("(") {
+                    self.at += 1;
+                    let arg = Box::new(self.expression(1, depth + 1)?);
+                    self.take(")")?;
+                    return Ok(if ord { CcNode::Ord(arg) } else { CcNode::Len(arg) });
+                }
+                Ok(CcNode::Var(n.clone()))
+            }
+            CcTok::Op(o) if pystr::eq(o, "(") => {
+                let inner = self.expression(1, depth + 1)?;
+                self.take(")")?;
+                Ok(inner)
+            }
+            CcTok::Op(_) => Err(()),
+        }
+    }
+}
+
+/// core._cc_names: the names a transform reads.
+fn cc_names(tree: &CcNode, out: &mut HashSet<PyStr>) {
+    match tree {
+        CcNode::Var(n) => {
+            out.insert(n.clone());
+        }
+        CcNode::Num(_) | CcNode::Slot(_) => {}
+        CcNode::Neg(a) | CcNode::Not(a) | CcNode::Plus(a) | CcNode::Len(a) | CcNode::Ord(a) => cc_names(a, out),
+        CcNode::Bin(_, a, b) | CcNode::Index(a, b) | CcNode::CharCode(a, b) => {
+            cc_names(a, out);
+            cc_names(b, out);
+        }
+    }
+}
+
+/// The tree with each name read from its slot (params, then the walk's
+/// element and position: the element's when both have one name, as core's
+/// env gives it).
+fn cc_resolve(tree: CcNode, params: &[PyStr], elem: Option<&PyStr>, index: Option<&PyStr>) -> CcNode {
+    let r = |t: Box<CcNode>| Box::new(cc_resolve(*t, params, elem, index));
+    match tree {
+        CcNode::Var(n) => {
+            if elem == Some(&n) {
+                CcNode::Slot(CcSlot::Elem)
+            } else if index == Some(&n) {
+                CcNode::Slot(CcSlot::Index)
+            } else if let Some(k) = params.iter().position(|x| *x == n) {
+                CcNode::Slot(CcSlot::Param(k))
+            } else {
+                CcNode::Var(n)
+            }
+        }
+        CcNode::Neg(a) => CcNode::Neg(r(a)),
+        CcNode::Not(a) => CcNode::Not(r(a)),
+        CcNode::Plus(a) => CcNode::Plus(r(a)),
+        CcNode::Len(a) => CcNode::Len(r(a)),
+        CcNode::Ord(a) => CcNode::Ord(r(a)),
+        CcNode::Bin(op, a, b) => CcNode::Bin(op, r(a), r(b)),
+        CcNode::Index(a, b) => CcNode::Index(r(a), r(b)),
+        CcNode::CharCode(a, b) => CcNode::CharCode(r(a), r(b)),
+        other => other,
+    }
+}
+
+const CC_INT_MIN: i64 = -2147483648;
+const CC_INT_MAX: i64 = 2147483647;
+
+fn cc_check(v: i64) -> Result<CcVal, ()> {
+    if (CC_INT_MIN..=CC_INT_MAX).contains(&v) {
+        Ok(CcVal::Int(v))
+    } else {
+        Err(())
+    }
+}
+
+fn cc_num(v: CcVal) -> Result<i64, ()> {
+    match v {
+        CcVal::Int(i) => Ok(i),
+        _ => Err(()),
+    }
+}
+
+struct CcEnv<'a> {
+    args: &'a [CcVal],
+    elem: CcVal,
+    index: i64,
+}
+
+/// core._cc_compile's function, worked out for one element.
+fn cc_eval(tree: &CcNode, env: &CcEnv) -> Result<CcVal, ()> {
+    Ok(match tree {
+        CcNode::Num(v) => CcVal::Int(*v),
+        CcNode::Var(_) => return Err(()),
+        CcNode::Slot(CcSlot::Param(k)) => env.args.get(*k).cloned().ok_or(())?,
+        CcNode::Slot(CcSlot::Elem) => env.elem.clone(),
+        CcNode::Slot(CcSlot::Index) => CcVal::Int(env.index),
+        CcNode::Neg(a) => return cc_check(-cc_num(cc_eval(a, env)?)?),
+        CcNode::Not(a) => CcVal::Int(!cc_num(cc_eval(a, env)?)?),
+        CcNode::Plus(a) => CcVal::Int(cc_num(cc_eval(a, env)?)?),
+        CcNode::Bin(op, l, r) => {
+            let a = cc_num(cc_eval(l, env)?)?;
+            let b = cc_num(cc_eval(r, env)?)?;
+            match op {
+                CcOp::Add => return cc_check(a + b),
+                CcOp::Sub => return cc_check(a - b),
+                CcOp::Mul => return cc_check(a * b),
+                CcOp::Mod => {
+                    if a < 0 || b <= 0 {
+                        return Err(());
+                    }
+                    CcVal::Int(a % b)
+                }
+                CcOp::And => CcVal::Int(a & b),
+                CcOp::Or => CcVal::Int(a | b),
+                CcOp::Xor => CcVal::Int(a ^ b),
+                CcOp::Shl | CcOp::Shr | CcOp::Ushr => {
+                    if !(0..=31).contains(&b) {
+                        return Err(());
+                    }
+                    match op {
+                        CcOp::Shl => return cc_check(a << b),
+                        CcOp::Ushr if a < 0 => return Err(()),
+                        _ => CcVal::Int(a >> b),
+                    }
+                }
+            }
+        }
+        CcNode::Index(o, i) | CcNode::CharCode(o, i) => {
+            let chars = matches!(tree, CcNode::CharCode(..));
+            let seq = cc_eval(o, env)?;
+            let k = cc_num(cc_eval(i, env)?)?;
+            let len = match &seq {
+                CcVal::Str(s) => s.len(),
+                CcVal::Char(_) => 1,
+                CcVal::List(l) if !chars => l.len(),
+                _ => return Err(()),
+            } as i64;
+            if !(0..len).contains(&k) {
+                return Err(());
+            }
+            let k = k as usize;
+            match (&seq, chars) {
+                (CcVal::Str(s), true) => CcVal::Int(s[k] as i64),
+                (CcVal::Char(ch), true) => CcVal::Int(*ch as i64),
+                (CcVal::Str(s), false) => CcVal::Char(s[k]),
+                (CcVal::Char(ch), false) => CcVal::Char(*ch),
+                (CcVal::List(l), false) => CcVal::Int(l[k]),
+                _ => return Err(()),
+            }
+        }
+        CcNode::Len(a) => match cc_eval(a, env)? {
+            CcVal::Str(s) => CcVal::Int(s.len() as i64),
+            CcVal::Char(_) => CcVal::Int(1),
+            CcVal::List(l) => CcVal::Int(l.len() as i64),
+            CcVal::Int(_) => return Err(()),
+        },
+        CcNode::Ord(a) => match cc_eval(a, env)? {
+            CcVal::Char(ch) => CcVal::Int(ch as i64),
+            CcVal::Str(s) if s.len() == 1 => CcVal::Int(s[0] as i64),
+            _ => return Err(()),
+        },
+    })
+}
+
+/// core._cc_balanced: (text[i:j], j) up to the ')' that closes the call
+/// opened just before i, else None.
+fn cc_balanced(text: &[u32], i: usize, limit: usize) -> Option<(&[u32], usize)> {
+    let mut depth = 0usize;
+    let mut j = i;
+    let end = text.len().min(i.saturating_add(limit));
+    let mut quote: Option<u32> = None;
+    while j < end {
+        let ch = text[j];
+        if let Some(q) = quote {
+            if ch == c('\\') {
+                j += 2;
+                continue;
+            }
+            if ch == q {
+                quote = None;
+            }
+        } else if matches!(ch, 0x27 | 0x22 | 0x60) {
+            quote = Some(ch);
+        } else if matches!(ch, 0x28 | 0x5B | 0x7B) {
+            depth += 1;
+        } else if matches!(ch, 0x29 | 0x5D | 0x7D) {
+            if depth == 0 {
+                return if ch == c(')') { Some((&text[i..j], j)) } else { None };
+            }
+            depth -= 1;
+        }
+        j += 1;
+    }
+    None
+}
+
+/// core._cc_params
+fn cc_params(p: &Pack, s: &[u32]) -> Option<Vec<PyStr>> {
+    let names: Vec<&[u32]> = if pystr::strip(s).is_empty() {
+        Vec::new()
+    } else {
+        pystr::split_char(s, c(',')).into_iter().map(pystr::strip).collect()
+    };
+    let name_re = p.re("_DV_CC_NAME_RE");
+    if !(1..=p.usize("_DV_CC_MAX_PARAMS")).contains(&names.len()) || names.iter().any(|n| name_re.fullmatch(n).is_none()) {
+        return None;
+    }
+    let unique: HashSet<&[u32]> = names.iter().copied().collect();
+    if unique.len() != names.len() {
+        return None;
+    }
+    Some(names.into_iter().map(|n| n.to_vec()).collect())
+}
+
+/// The first group of `names` that took part (Python's `m.group("a") or
+/// m.group("b")` over groups that never match empty).
+fn cc_group<'s>(m: &crate::pyre::Match<'s>, names: &[&str]) -> Option<&'s [u32]> {
+    names.iter().find_map(|n| if m.regex().has_group(n) { m.name(n) } else { None })
+}
+
+/// A walk over a parameter (core._cc_walks' tuple).
+struct CcWalk {
+    at: usize,
+    data: PyStr,
+    elem: Option<PyStr>,
+    index: Option<PyStr>,
+    split: bool,
+    js_map: bool,
+}
+
+/// core._cc_walks
+fn cc_walks(p: &Pack, body: &[u32]) -> Vec<CcWalk> {
+    let own = |g: Option<&[u32]>| g.map(|x| x.to_vec());
+    let mut out: Vec<CcWalk> = Vec::new();
+    for m in p.re("_DV_CC_FOR_RE").finditer(body) {
+        out.push(CcWalk { at: m.start(), data: m.name("d").unwrap_or(&[]).to_vec(), elem: None,
+                          index: own(m.name("i")), split: false, js_map: false });
+    }
+    for m in p.re("_DV_CC_MAP_RE").finditer(body) {
+        out.push(CcWalk { at: m.start(), data: m.name("d").unwrap_or(&[]).to_vec(), elem: own(cc_group(&m, &["e", "e2", "e3"])),
+                          index: own(cc_group(&m, &["i", "i2"])), split: m.name("split").is_some(), js_map: true });
+    }
+    for m in p.re("_DV_CC_PYFOR_RE").finditer(body) {
+        out.push(CcWalk { at: m.start(), data: m.name("d").unwrap_or(&[]).to_vec(), elem: None,
+                          index: own(m.name("i")), split: false, js_map: false });
+    }
+    for m in p.re("_DV_CC_PYITER_RE").finditer(body) {
+        out.push(CcWalk { at: m.start(), data: cc_group(&m, &["d", "d2"]).unwrap_or(&[]).to_vec(),
+                          elem: own(cc_group(&m, &["e", "e2"])), index: own(m.name("i")), split: false, js_map: false });
+    }
+    out.sort_by_key(|w| w.at);
+    out
+}
+
+/// A decoder of the file's own (core._cc_decoders' tuple).
+struct CcDecoder {
+    params: usize,
+    data_at: usize,
+    elem: bool,
+    index: bool,
+    split: bool,
+    js_map: bool,
+    tree: CcNode,
+}
+
+/// core._cc_decoders: [(name, decoder)] in the order of their transforms.
+fn cc_decoders(p: &Pack, view: &[u32]) -> Vec<(PyStr, CcDecoder)> {
+    let body_len = p.usize("_DV_CC_BODY");
+    let max = p.usize("_DV_CC_MAX_DECODERS");
+    let map_re = p.re("_DV_CC_MAP_RE");
+    let mut out: Vec<(PyStr, CcDecoder)> = Vec::new();
+    let mut heads: Option<Vec<crate::pyre::Match>> = None;
+    for site in p.re("_DV_CC_SITE_RE").finditer(view) {
+        let heads = heads.get_or_insert_with(|| p.re("_DV_CC_FUNC_RE").finditer(view).collect());
+        let k = heads.partition_point(|h| h.end() <= site.start());
+        if k == 0 || site.start() >= heads[k - 1].end() + body_len {
+            continue;
+        }
+        let head = &heads[k - 1];
+        let name = cc_group(head, &["a", "b", "c"]).unwrap_or(&[]).to_vec();
+        let param_list = ["pa", "pb", "pc", "pd"].iter().find_map(|g| head.name(g)).unwrap_or(&[]);
+        let Some(params) = cc_params(p, param_list) else {
+            continue;
+        };
+        if out.iter().any(|(n, _)| *n == name) {
+            continue;
+        }
+        let Some((got, _)) = cc_balanced(view, site.end(), body_len) else {
+            continue;
+        };
+        let arg = pystr::strip(got);
+        let body = pystr::sub(view, head.end(), head.end() + body_len);
+        let (walks, expr): (Vec<CcWalk>, &[u32]) = if pystr::starts_with(arg, "...") {
+            let spread = pystr::lstrip_chars(&arg[3..], " \t");
+            let Some(m) = map_re.match_(spread) else {
+                continue;
+            };
+            if m.name("e").is_some() || !pystr::ends_with(spread, ")") {
+                continue;
+            }
+            let walk = CcWalk { at: 0, data: m.name("d").unwrap_or(&[]).to_vec(),
+                                elem: cc_group(&m, &["e2", "e3"]).map(|x| x.to_vec()),
+                                index: m.name("i2").map(|x| x.to_vec()), split: m.name("split").is_some(), js_map: true };
+            (vec![walk], pystr::sub(spread, m.end(), spread.len() - 1))
+        } else {
+            (cc_walks(p, body), arg)
+        };
+        let Some(tree) = cc_parse(p, expr) else {
+            continue;
+        };
+        let mut names: HashSet<PyStr> = HashSet::new();
+        cc_names(&tree, &mut names);
+        let param_set: HashSet<&PyStr> = params.iter().collect();
+        let mut tree = Some(tree);
+        for w in walks {
+            let bound: HashSet<&PyStr> = [w.elem.as_ref(), w.index.as_ref()].into_iter().flatten().filter(|v| !v.is_empty()).collect();
+            if !param_set.contains(&w.data)
+                || !bound.iter().any(|b| names.contains(*b))
+                || bound.iter().any(|b| param_set.contains(*b))
+                || !names.iter().all(|n| param_set.contains(n) || bound.contains(n))
+            {
+                continue;
+            }
+            let data_at = params.iter().position(|x| *x == w.data).unwrap_or(0);
+            let resolved = cc_resolve(tree.take().unwrap_or(CcNode::Num(0)), &params, w.elem.as_ref(), w.index.as_ref());
+            out.push((name, CcDecoder { params: params.len(), data_at, elem: w.elem.is_some(), index: w.index.is_some(),
+                                        split: w.split, js_map: w.js_map, tree: resolved }));
+            break;
+        }
+        if out.len() >= max {
+            break;
+        }
+    }
+    out
+}
+
+/// core._cc_argument
+fn cc_argument(
+    p: &Pack,
+    s: &[u32],
+    view: &[u32],
+    arrays: &mut std::collections::HashMap<PyStr, Option<std::rc::Rc<Vec<i64>>>>,
+) -> Result<CcVal, ()> {
+    let s = pystr::strip(s);
+    if p.re("_DV_CC_ARG_INT_RE").fullmatch(s).is_some() {
+        return Ok(CcVal::Int(if pystr::starts_with(s, "-") { -cc_int_literal(p, &s[1..])? } else { cc_int_literal(p, s)? }));
+    }
+    if s.len() >= 2 && matches!(s[0], 0x5B | 0x28) && matches!(s[s.len() - 1], 0x5D | 0x29) {
+        let inner = &s[1..s.len() - 1];
+        if pystr::strip(inner).is_empty() {
+            return Err(());
+        }
+        return Ok(CcVal::List(std::rc::Rc::new(cc_ints(p, inner)?)));
+    }
+    if let Some(m) = p.re("_DV_CC_ARG_STR_RE").fullmatch(s) {
+        let v = match m.name("a") {
+            Some(a) => a,
+            None => m.name("b").unwrap_or(&[]),
+        };
+        return Ok(CcVal::Str(std::rc::Rc::new(v.to_vec())));
+    }
+    if p.re("_DV_CC_NAME_RE").fullmatch(s).is_some() {
+        if !arrays.contains_key(s) {
+            let esc = crate::pyre::escape(s);
+            let head_src = p.text("_DV_NAME_HEAD");
+            let array = rxutil::dynamic(cat(&[&head_src, &esc, &p.text("_DV_CC_ARRAY_TAIL")]), 0);
+            let value = match array.search(view) {
+                None => None,
+                Some(a) => {
+                    let mutated = rxutil::dynamic(cat(&[&head_src, &esc, &p.text("_DV_MUTATED_TAIL")]), 0);
+                    let assigned = rxutil::dynamic(cat(&[&head_src, &esc, &p.text("_DV_ASSIGNED_TAIL")]), 0);
+                    if mutated.search(view).is_some() || assigned.finditer(view).count() != 1 {
+                        None
+                    } else {
+                        cc_ints(p, a.name("items").unwrap_or(&[])).ok().map(std::rc::Rc::new)
+                    }
+                }
+            };
+            arrays.insert(s.to_vec(), value);
+        }
+        if let Some(Some(v)) = arrays.get(s) {
+            return Ok(CcVal::List(v.clone()));
+        }
+    }
+    Err(())
+}
+
+/// core._cc_run: the text a decoder gives for a call's arguments; `work`
+/// (codes left) is spent.
+fn cc_run(p: &Pack, d: &CcDecoder, args: &[CcVal], work: &mut usize) -> Result<PyStr, ()> {
+    if args.len() < d.params {
+        return Err(());
+    }
+    let data = &args[d.data_at];
+    let n = match data {
+        CcVal::List(l) if !d.js_map || !d.split => l.len(),
+        CcVal::Str(s) if !d.js_map || d.split => s.len(),
+        _ => return Err(()),
+    };
+    if n == 0 || n > p.usize("_DV_CC_MAX_CODES") || n > *work {
+        return Err(());
+    }
+    *work -= n;
+    let mut env = CcEnv { args: &args[..d.params], elem: CcVal::Int(0), index: 0 };
+    let mut out: PyStr = Vec::with_capacity(n);
+    for k in 0..n {
+        if d.index {
+            env.index = k as i64;
+        }
+        if d.elem {
+            env.elem = match data {
+                CcVal::List(l) => CcVal::Int(l[k]),
+                CcVal::Str(s) => CcVal::Char(s[k]),
+                _ => return Err(()),
+            };
+        }
+        match cc_eval(&d.tree, &env)? {
+            CcVal::Int(v) if (0x20..=0x7E).contains(&v) => out.push(v as u32),
+            _ => return Err(()),
+        }
+    }
+    Ok(out)
+}
+
+/// core._cc_split_args
+fn cc_split_args(s: &[u32]) -> Vec<&[u32]> {
+    let mut parts: Vec<&[u32]> = Vec::new();
+    let mut depth = 0i64;
+    let mut start = 0usize;
+    let mut quote: Option<u32> = None;
+    for (k, &ch) in s.iter().enumerate() {
+        if let Some(q) = quote {
+            if ch == q {
+                quote = None;
+            }
+        } else if ch == c('\'') || ch == c('"') {
+            quote = Some(ch);
+        } else if ch == c('[') || ch == c('(') {
+            depth += 1;
+        } else if ch == c(']') || ch == c(')') {
+            depth -= 1;
+        } else if ch == c(',') && depth == 0 {
+            parts.push(&s[start..k]);
+            start = k + 1;
+        }
+    }
+    parts.push(&s[start..]);
+    parts
+}
+
+/// core._cc_literal_sub
+fn cc_literal_sub(p: &Pack, m: &crate::pyre::Match) -> PyStr {
+    let items = ["a", "b", "c", "d", "e", "f"].iter().find_map(|g| m.name(g)).unwrap_or(&[]);
+    match cc_ints(p, items) {
+        Ok(codes) if !codes.is_empty() && codes.iter().all(|v| (0x20..=0x7E).contains(v)) => {
+            dv_quote(&codes.iter().map(|&v| v as u32).collect::<Vec<u32>>())
+        }
+        _ => m.group0().to_vec(),
+    }
+}
+
+/// core._dv_char_codes: the view with the character codes it holds and the
+/// calls of its own character-code decoders read as their text.
+fn dv_char_codes(p: &Pack, view: &[u32]) -> PyStr {
+    let view = p.re("_DV_CC_LITERAL_RE").sub_fn(view, 0, |m| cc_literal_sub(p, m));
+    let decoders = cc_decoders(p, &view);
+    if decoders.is_empty() {
+        return view;
+    }
+    let mut names: Vec<&PyStr> = decoders.iter().map(|(n, _)| n).collect();
+    names.sort();
+    let alternation: Vec<PyStr> = names.iter().map(|n| crate::pyre::escape(n)).collect();
+    let parts: Vec<&[u32]> = alternation.iter().map(|x| x.as_slice()).collect();
+    let src = cat(&[&p.text("_DV_NAME_HEAD"), &u("(?P<name>"), &pystr::join(&[c('|')], &parts), &u(")"),
+                    &p.text("_DV_CC_CALL_TAIL")]);
+    let call = rxutil::dynamic(src, 0);
+    let max_calls = p.usize("_DV_CC_MAX_CALLS");
+    let mut work = p.usize("_DV_CC_MAX_WORK");
+    let mut calls = 0usize;
+    let mut arrays = std::collections::HashMap::new();
+    call.sub_fn(&view, 0, |m| {
+        if calls >= max_calls {
+            return m.group0().to_vec();
+        }
+        calls += 1;
+        let args: Result<Vec<CcVal>, ()> =
+            cc_split_args(m.name("args").unwrap_or(&[])).iter().map(|a| cc_argument(p, a, &view, &mut arrays)).collect();
+        let name = m.name("name").unwrap_or(&[]);
+        let got = args.and_then(|args| {
+            let (_, d) = decoders.iter().find(|(n, _)| n.as_slice() == name).ok_or(())?;
+            cc_run(p, d, &args, &mut work)
+        });
+        match got {
+            Ok(text) => dv_quote(&text),
+            Err(()) => m.group0().to_vec(),
+        }
+    })
+}
+
+thread_local! {
+    // the last text decoded_view read, and its view (core's _DV_MEMO): the
+    // install-script test, the import-time test and the spawned-script
+    // follower read the same file
+    static DV_MEMO: std::cell::RefCell<Option<(PyStr, PyStr)>> = const { std::cell::RefCell::new(None) };
+}
+
 /// core.decoded_view
 pub fn decoded_view(p: &Pack, text: &[u32]) -> PyStr {
-    if text.len() > p.usize("_DV_MAX_CHARS") || !any_in(text, p.needles("_DV_NEEDLES")) {
+    if let Some(view) = DV_MEMO.with(|m| m.borrow().as_ref().filter(|(t, _)| t.as_slice() == text).map(|(_, v)| v.clone())) {
+        return view;
+    }
+    let view = decoded_view_of(p, text);
+    DV_MEMO.with(|m| *m.borrow_mut() = Some((text.to_vec(), view.clone())));
+    view
+}
+
+fn decoded_view_of(p: &Pack, text: &[u32]) -> PyStr {
+    let arrays = crate::strarr::dv_string_arrays(p, text);
+    let proxies = crate::strarr::dv_proxies(p, arrays.as_deref().unwrap_or(text));
+    let base: PyStr = match (proxies, arrays) {
+        (Some(x), _) => x,
+        (None, Some(a)) => a,
+        (None, None) => text.to_vec(),
+    };
+    let read_any = base.as_slice() != text; // (a string array or a proxy object read)
+    let max = p.usize("_DV_MAX_CHARS");
+    if !read_any && (text.len() > max || !any_in(text, p.needles("_DV_NEEDLES"))) {
         return text.to_vec();
     }
     let joined: PyStr =
-        if text.contains(&c('+')) { p.re("_DV_JOIN_RE").sub(text, &[], 0) } else { text.to_vec() };
+        if base.contains(&c('+')) { p.re("_DV_JOIN_RE").sub(&base, &[], 0) } else { base.clone() };
     let mut view = joined.clone();
+    // (a longer text with a string array: its strings only)
+    if base.len() <= max && any_in(&base, p.needles("_DV_NEEDLES")) {
+        view = dv_decoders(p, view);
+    }
+    if view == joined && !read_any {
+        return text.to_vec();
+    }
+    dv_arrays_and_members(p, view)
+}
+
+/// core._dv_decoders: the decoders' calls on literals read as their text.
+fn dv_decoders(p: &Pack, mut view: PyStr) -> PyStr {
     if has(&view, "Buffer") {
         view = sub_decoded(p.re("_DV_BUFFER_RE"), &view, |m| {
             let enc = m.name("enc").unwrap_or(&[]);
@@ -1696,9 +2346,15 @@ pub fn decoded_view(p: &Pack, text: &[u32]) -> PyStr {
             });
         }
     }
-    if view == joined {
-        return text.to_vec();
+    if has(&view, "fromCharCode") || has(&view, "chr") || has(&view, "byte") {
+        view = dv_char_codes(p, &view);
     }
+    view
+}
+
+/// The last steps of core._decoded_view: constant arrays read where
+/// indexed, members named by literals.
+fn dv_arrays_and_members(p: &Pack, mut view: PyStr) -> PyStr {
     let max_arrays = p.usize("_DV_MAX_ARRAYS");
     let found: Vec<(PyStr, Vec<PyStr>)> = p
         .re("_DV_ARRAY_RE")
@@ -1783,7 +2439,56 @@ fn lit_value<'s>(m: &crate::pyre::Match<'s>) -> Option<&'s [u32]> {
     rxutil::or_groups(m, &["a", "b", "c"])
 }
 
-/// core._spawn_path: (base is 'dir', path) or None.
+/// core._spawn_pieces: the operands of `expr` split at its top-level '/'
+/// (Python's `Path / 'x'`), outside quotes and brackets.
+fn spawn_pieces(expr: &[u32]) -> Vec<PyStr> {
+    let mut pieces: Vec<PyStr> = Vec::new();
+    let (mut depth, mut start, mut j) = (0isize, 0usize, 0usize);
+    let mut quote: Option<u32> = None;
+    while j < expr.len() {
+        let ch = expr[j];
+        if let Some(q) = quote {
+            if ch == c('\\') {
+                j += 2;
+                continue;
+            }
+            if ch == q {
+                quote = None;
+            }
+        } else if matches!(ch, 0x27 | 0x22 | 0x60) {
+            quote = Some(ch);
+        } else if matches!(ch, 0x28 | 0x5B | 0x7B) {
+            depth += 1;
+        } else if matches!(ch, 0x29 | 0x5D | 0x7D) {
+            depth -= 1;
+        } else if ch == c('/') && depth == 0 {
+            pieces.push(pystr::strip(&expr[start..j]).to_vec());
+            start = j + 1;
+        }
+        j += 1;
+    }
+    pieces.push(pystr::strip(&expr[start.min(expr.len())..]).to_vec());
+    pieces
+}
+
+/// core._spawn_join: a path joined from `parts` — a path or the script's own
+/// directory, then literals (or names given one).
+fn spawn_join(p: &Pack, parts: &[PyStr], text: &[u32], names: usize) -> Option<(bool, PyStr)> {
+    let head = spawn_path(p, &parts[0], text, names)?;
+    let mut segs: Vec<PyStr> = vec![head.1];
+    for part in &parts[1..] {
+        let piece = spawn_path(p, part, text, names)?;
+        if piece.0 {
+            return None;
+        }
+        segs.push(piece.1);
+    }
+    let refs: Vec<&[u32]> = segs.iter().map(|s| s.as_slice()).collect();
+    Some((head.0, pystr::join(&[c('/')], &refs)))
+}
+
+/// core._spawn_path: (base is 'dir', path) or None; the script's own
+/// directory is ('dir', '.').
 fn spawn_path(p: &Pack, expr: &[u32], text: &[u32], names: usize) -> Option<(bool, PyStr)> {
     let expr = pystr::strip(expr);
     let lit_re = p.re("_SPAWN_LIT_RE");
@@ -1794,28 +2499,25 @@ fn spawn_path(p: &Pack, expr: &[u32], text: &[u32], names: usize) -> Option<(boo
     if let Some(m) = p.re("_SPAWN_CONCAT_RE").fullmatch(expr) {
         return Some((true, rxutil::or_groups(&m, &["a", "b", "c", "t"]).unwrap_or(&[]).to_vec()));
     }
+    if p.re("_SPAWN_DIR_RE").fullmatch(expr).is_some() {
+        return Some((true, u(".")));
+    }
+    if let Some(m) = p.re("_SPAWN_STR_RE").fullmatch(expr) {
+        let inner = m.group(1).unwrap_or(&[]).to_vec();
+        return spawn_path(p, &inner, text, names);
+    }
     if let Some(m) = p.re("_SPAWN_JOIN_RE").match_(expr) {
         let parts = spawn_args(expr, m.end(), 400);
         if parts.is_empty() || !pystr::ends_with(pystr::rstrip(expr), ")") {
             return None;
         }
-        let first = &parts[0];
-        let rest = &parts[1..];
-        let (base, mut segs): (bool, Vec<PyStr>) = if p.re("_SPAWN_DIR_RE").fullmatch(first).is_some() {
-            (true, Vec::new())
-        } else {
-            let head = spawn_path(p, first, text, names)?;
-            (head.0, vec![head.1])
-        };
-        for part in rest {
-            let lit = lit_re.fullmatch(part)?;
-            segs.push(lit_value(&lit).unwrap_or(&[]).to_vec());
+        return spawn_join(p, &parts, text, names);
+    }
+    if expr.contains(&c('/')) {
+        let pieces = spawn_pieces(expr);
+        if pieces.len() > 1 && pieces.iter().all(|x| !x.is_empty()) {
+            return spawn_join(p, &pieces, text, names);
         }
-        if segs.is_empty() {
-            return None;
-        }
-        let parts: Vec<&[u32]> = segs.iter().map(|s| s.as_slice()).collect();
-        return Some((base, pystr::join(&[c('/')], &parts)));
     }
     if p.re("_SPAWN_NAME_RE").fullmatch(expr).is_some() && names > 0 {
         let src = cat(&[&p.text("_SPAWN_ASSIGN_HEAD"), &crate::pyre::escape(expr), &p.text("_SPAWN_ASSIGN_TAIL")]);
@@ -1832,8 +2534,29 @@ fn spawn_path(p: &Pack, expr: &[u32], text: &[u32], names: usize) -> Option<(boo
     None
 }
 
-/// core.spawned_scripts: [(base, path)], base "dir" or "cwd".
+/// core.spawned_scripts: [(base, path)], base "dir" or "cwd": read as
+/// written, then with the strings it decodes as it runs decoded.
 pub fn spawned_scripts(p: &Pack, text: &[u32]) -> Vec<(&'static str, PyStr)> {
+    let mut out = spawned_scripts_of(p, text);
+    let max = p.usize("_SPAWN_MAX_TARGETS");
+    if out.len() < max {
+        let view = decoded_view(p, text);
+        if view != text {
+            for target in spawned_scripts_of(p, &view) {
+                if !out.contains(&target) {
+                    out.push(target);
+                    if out.len() >= max {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// core._spawned_scripts: spawned_scripts' reading of one text.
+fn spawned_scripts_of(p: &Pack, text: &[u32]) -> Vec<(&'static str, PyStr)> {
     if !["spawn", "execFile", "fork", "Popen", "run", "call", "check_"].iter().any(|n| has(text, n)) {
         return Vec::new();
     }
@@ -1842,10 +2565,26 @@ pub fn spawned_scripts(p: &Pack, text: &[u32]) -> Vec<(&'static str, PyStr)> {
     let value_flags = p.strs("_SPAWN_VALUE_FLAGS");
     let depth = p.usize("_SPAWN_NAME_DEPTH");
     let max = p.usize("_SPAWN_MAX_TARGETS");
+    let max_named = p.usize("_SPAWN_MAX_NAMED");
+    let script_ext = p.re("_SPAWN_SCRIPT_EXT_RE");
+    let runtimes = p.map_strs("_JS_RUNTIMES");
     let mut out: Vec<(&'static str, PyStr)> = Vec::new();
+    let mut named_calls = 0usize;
     for m in p.re("_SPAWN_CALL_RE").finditer(text) {
+        let named = m.name("js").is_some() || m.name("py").is_some();
+        if named {
+            named_calls += 1;
+            if named_calls > max_named {
+                continue;
+            }
+        }
         let args = spawn_args(text, m.end(), 400);
         let mut skip = false;
+        // `bun run x.js`: the runtime's subcommand that runs a file
+        let mut runs: &[PyStr] = match m.name("rt") {
+            Some(rt) => runtimes.iter().find(|(k, _)| k.as_slice() == rt).map(|(_, v)| v.as_slice()).unwrap_or(&[]),
+            None => &[],
+        };
         for arg in args.iter().take(6) {
             if skip {
                 skip = false;
@@ -1864,6 +2603,10 @@ pub fn spawned_scripts(p: &Pack, text: &[u32]) -> Vec<(&'static str, PyStr)> {
                     skip = value_flags.iter().any(|f| f.as_slice() == flag) && !value.contains(&c('='));
                     continue;
                 }
+                if runs.iter().any(|r| r.as_slice() == value.as_slice()) {
+                    runs = &[];
+                    continue;
+                }
             }
             if let Some((is_dir, path)) = spawn_path(p, arg, text, depth) {
                 let path = pystr::normpath(&pystr::replace_char(&path, c('\\'), c('/')));
@@ -1871,6 +2614,7 @@ pub fn spawned_scripts(p: &Pack, text: &[u32]) -> Vec<(&'static str, PyStr)> {
                 if !(pystr::eq(&path, ".") || path.is_empty())
                     && !pystr::starts_with(&path, "/")
                     && !out.iter().any(|(b, q)| *b == base && *q == path)
+                    && (!named || script_ext.search(&path).is_some())
                 {
                     out.push((base, path));
                 }
@@ -1944,13 +2688,19 @@ pub fn offscreen_code(p: &Pack, line: &[u32], lang: &str) -> Option<(usize, usiz
 
 // ---------------- the install-script test ----------------
 
-/// core.install_script_risk
+/// core.install_script_risk (a script: shell=True, command=False)
 pub fn install_script_risk(p: &Pack, text: &[u32]) -> Vec<PyStr> {
-    let mut reasons = install_script_risk_of(p, text);
+    install_script_risk_with(p, text, true, false)
+}
+
+/// core.install_script_risk(text, shell, command): `shell`, read a shell
+/// script with the shell reader; `command`, the text is a hook's command.
+pub fn install_script_risk_with(p: &Pack, text: &[u32], shell: bool, command: bool) -> Vec<PyStr> {
+    let mut reasons = install_script_risk_of(p, text, shell, command);
     let view = decoded_view(p, text);
     if view != text {
         let note = p.text("_DV_NOTE");
-        for r in install_script_risk_of(p, &view) {
+        for r in install_script_risk_of(p, &view, shell, command) {
             if !reasons.contains(&r) {
                 reasons.push(cat(&[&r, &note]));
             }
@@ -1967,28 +2717,55 @@ fn py_run_or<'a>(p: &Pack, text: &[u32], interp: &'a Option<PyStr>) -> Option<Py
     }
 }
 
-fn install_script_risk_of(p: &Pack, text: &[u32]) -> Vec<PyStr> {
+/// core._destination: the data-capture or exfiltration service text names.
+fn destination<'s>(p: &'s Pack, text: &'s [u32]) -> Option<crate::pyre::Match<'s>> {
+    capture_service(p, text).or_else(|| p.re("_EXFIL_SERVICE_RE").search(text))
+}
+
+/// core._label_sends: adds the label of where the data goes, when one of the reasons sends it.
+pub(crate) fn label_sends(p: &Pack, text: &[u32], reasons: &mut Vec<PyStr>) {
+    let sends = p.strs("_SEND_REASONS");
+    if reasons.iter().any(|r| sends.iter().any(|s| r.starts_with(s))) {
+        if let Some(m) = destination(p, text) {
+            let label = cat(&[&u("contacts an address typical of data exfiltration ("), head(m.group0(), 40), &u(")")]);
+            if !reasons.contains(&label) {
+                reasons.push(label);
+            }
+        }
+    }
+}
+
+fn push_new(reasons: &mut Vec<PyStr>, r: PyStr) {
+    if !reasons.contains(&r) {
+        reasons.push(r);
+    }
+}
+
+fn install_script_risk_of(p: &Pack, text: &[u32], shell: bool, command: bool) -> Vec<PyStr> {
     let mut reasons: Vec<PyStr> = Vec::new();
-    let network = p.re("_NETWORK_RE").search(text).is_some();
-    if network && p.re("_SECRET_SOURCE_RE").search(text).is_some() {
-        reasons.push(u("reads environment variables or credential files and sends data over the network"));
-    }
-    let dest = p.re("_EXFIL_DEST_RE").search(text);
-    if let Some(dest) = &dest {
-        reasons.push(cat(&[&u("contacts an address typical of data exfiltration ("), head(dest.group0(), 40), &u(")")]));
-    }
-    if pipes_download_to_shell(p, text) {
+    // a download piped or substituted into a shell, and PowerShell: in code, where an exec call is handed them
+    let code = !command && crate::shell::code_text(p, text);
+    let rows: Vec<&[u32]> = if has(text, "curl") || has(text, "wget") { pystr::split_char(text, c('\n')) } else { Vec::new() };
+    let exec = p.re("_EXEC_CALL_RE");
+    let piped = if code {
+        rows.iter().any(|row| pipes_download_to_shell(p, row) && exec.search(row).is_some())
+    } else {
+        pipes_download_to_shell(p, text)
+    };
+    if piped {
         reasons.push(u("pipes a download into a shell"));
     }
-    let substituted = (has(text, "curl") || has(text, "wget"))
-        && pystr::split_char(text, c('\n')).iter().any(|row| runs_substituted_download(p, row));
+    let substituted = rows.iter().any(|row| runs_substituted_download(p, row) && (!code || exec.search(row).is_some()));
     let received = received::received_code_kind(p, text, &[], &[]);
     if substituted {
         reasons.push(cat_reason(p, "run"));
     } else if let Some((_, kind)) = &received {
         reasons.push(cat_reason(p, kind));
     }
-    reasons.extend(powershell_risk(p, text));
+    let ps = powershell_risk(p, text);
+    if !ps.is_empty() && (!code || powershell_run_at(p, text) >= 0) {
+        reasons.extend(ps);
+    }
     let received_runs = matches!(&received, Some((_, k)) if *k == "run");
     if !received_runs && !substituted && stager_at(p, text) >= 0 {
         reasons.push(u("carries a script that downloads and runs code"));
@@ -1997,22 +2774,41 @@ fn install_script_risk_of(p: &Pack, text: &[u32]) -> Vec<PyStr> {
         reasons.push(u("opens a reverse shell"));
     }
     let host = p.re("_HOST_INFO_RE").search(text).map(|m| m.start());
-    if host.is_some() && (network || p.re("_EXFIL_SERVICE_RE").search(text).is_some()) {
-        reasons.push(u("sends the machine's user or host name over the network"));
-    }
     for (_at, reason) in exfil_signs(p, text, host) {
-        if !reasons.contains(&reason) {
-            reasons.push(reason);
-        }
+        push_new(&mut reasons, reason);
     }
-    if dest.is_none() {
-        if let Some(ip) = raw_ip_connect(p, text) {
-            reasons.push(cat(&[&u("contacts an address typical of data exfiltration ("), &ip, &u(")")]));
-        }
+    let ip: Option<PyStr> = match p.re("_RAW_IP_URL_RE").search(text) {
+        Some(m) => Some(head(m.group0(), 40).to_vec()),
+        None => raw_ip_connect(p, text),
+    };
+    if let Some(ip) = ip {
+        reasons.push(cat(&[&u("contacts an address typical of data exfiltration ("), &ip, &u(")")]));
     }
     if runs_own_source_at(p, text) >= 0 {
         reasons.push(u("runs code it reads back from its own file or a data file shipped with it"));
     }
+    // (0.1.8) data read from the machine and sent, whatever the address; the
+    // commands the script runs, read as programs; where the data goes
+    if let Some((_at, kind, what, in_address)) = crate::flow::local_data_sent_at(p, text) {
+        let sent = p.map_text("_LD_REASONS", kind);
+        let mut reason = sent.clone();
+        if kind == "environment" || kind == "file" || kind == "report" {
+            reason = cat(&[&sent, &u(" ("), head(&what, 60), &u(")")]);
+        }
+        if !reasons.iter().any(|r| r.starts_with(&sent)) && (!in_address || capture_service(p, text).is_some()) {
+            reasons.push(reason);
+        }
+    }
+    for r in crate::shell::exec_command_reasons(p, text) {
+        push_new(&mut reasons, r);
+    }
+    if shell && crate::shell::shell_text(p, text) {
+        let mut walk = crate::shell::HookWalk::new();
+        for r in crate::shell::sh_reasons(p, text, 0, false, &mut walk) {
+            push_new(&mut reasons, r);
+        }
+    }
+    label_sends(p, text, &mut reasons);
     reasons.extend(persistence_reasons(p, text));
     if p.re("_PUBLISH_CMD_RE").search(text).is_some() {
         reasons.push(u("publishes a package to a registry (npm publish)"));
@@ -2212,6 +3008,13 @@ fn powershell_run_at(p: &Pack, text: &[u32]) -> isize {
             return m.start() as isize;
         }
     }
+    // a command line an exec call is handed by a name given it
+    let ps = p.re("_PS_RE");
+    for (at, cmd) in crate::shell::exec_command_lines(p, text) {
+        if ps.search(&cmd).is_some() {
+            return at as isize;
+        }
+    }
     -1
 }
 
@@ -2221,36 +3024,52 @@ fn runs_download_through_shell(p: &Pack, row: &[u32]) -> bool {
         && (pipes_download_to_shell(p, row) || runs_substituted_download(p, row))
 }
 
-/// core._import_harvest_at: where the text harvests (_IMPORT_HARVEST_RE), or
-/// serializes a copy of the whole environment it made.
-fn import_harvest_at(p: &Pack, text: &[u32]) -> Option<usize> {
-    let harvest = if any_in(text, p.needles("_IMPORT_HARVEST_NEEDLES")) {
-        p.re("_IMPORT_HARVEST_RE").search(text).map(|m| m.start())
-    } else {
-        None
-    };
-    harvest.or_else(|| {
-        let at = env_copy_serialized_at(p, text);
-        if at >= 0 {
-            Some(at as usize)
-        } else {
-            None
+/// core._import_flow: (offset, kind, what, in_address) of the first local
+/// data text sends (local_data_sent_at, then the command lines it hands a
+/// shell), else None. `flows`: exec_command_flows(text).
+fn import_flow(p: &Pack, text: &[u32], flows: &[(usize, PyStr)]) -> Option<(usize, &'static str, PyStr, bool)> {
+    if let Some(flow) = crate::flow::local_data_sent_at(p, text) {
+        return Some(flow);
+    }
+    for (at, reason) in flows {
+        for kind in ["identity", "lookup-identity", "environment", "file", "report", "credentials", "address"] {
+            let sent = p.map_text("_SH_DATA_REASONS", kind);
+            if reason.starts_with(&sent) {
+                let what = pystr::slice(reason, sent.len() as isize + 2, -1).to_vec();
+                return Some((*at, if kind == "lookup-identity" { "identity" } else { kind }, what, false));
+            }
         }
-    })
+    }
+    None
 }
 
 fn import_time_risk_of(p: &Pack, text: &[u32]) -> (Vec<PyStr>, Option<usize>) {
     let mut reasons: Vec<PyStr> = Vec::new();
     let mut line: Option<usize> = None;
-    let harvest = import_harvest_at(p, text);
-    if let Some(at) = harvest {
-        if let Some(service) = p.re("_EXFIL_SERVICE_RE").search(text) {
-            reasons.push(cat(&[
-                &u("reads credentials or the whole environment and sends them to an exfiltration service ("),
-                head(service.group0(), 40),
-                &u(")"),
-            ]));
-        } else if p.re("_NETWORK_RE").search(text).is_some() {
+    let flows = crate::shell::exec_command_flows(p, text);
+    if let Some((at, kind, what, in_address)) = import_flow(p, text, &flows) {
+        // a data-capture service for any local data; a service a client talks
+        // to with its user's key for what no client sends: the whole
+        // environment, the instance's credentials, a credential store
+        let whole = p.text("_LD_WHOLE_ENV");
+        let harvest = !in_address
+            && ((kind == "environment" && what == whole)
+                || kind == "credentials"
+                || (kind == "file"
+                    && p.re("_CRED_STORE_RE").search(&what).is_some()
+                    && p.re("_PUBLIC_KEY_FILE_RE").search(&what).is_none()));
+        let dest = capture_service(p, text).or_else(|| if harvest { p.re("_EXFIL_SERVICE_RE").search(text) } else { None });
+        let ip = if dest.is_none() && !in_address { p.re("_PUBLIC_IP_URL_RE").search(text) } else { None };
+        if let Some(dest) = dest {
+            reasons.push(cat(&[&p.map_text("_IMPORT_SENT_REASONS", kind), &u(" ("), head(dest.group0(), 40), &u(")")]));
+        } else if let Some(ip) = ip {
+            let g = ip.group0();
+            let rest = match pystr::find_str(g, "//", 0) {
+                Some(i) => pystr::from(g, i + 2),
+                None => g,
+            };
+            reasons.push(cat(&[&p.map_text("_IMPORT_SENT_IP_REASONS", kind), &u(" ("), rest, &u(")")]));
+        } else if harvest && kind != "credentials" {
             reasons.push(u("reads credentials or the whole environment and sends data over the network"));
         }
         if !reasons.is_empty() {
@@ -2258,11 +3077,24 @@ fn import_time_risk_of(p: &Pack, text: &[u32]) -> (Vec<PyStr>, Option<usize>) {
         }
     }
     if has(text, "curl") || has(text, "wget") {
+        let mut piped = false;
         for (i, row) in pystr::split_char(text, c('\n')).iter().enumerate() {
             if runs_download_through_shell(p, row) {
                 reasons.push(u("runs a downloaded script through a shell"));
                 line = line.or(Some(i + 1));
+                piped = true;
                 break;
+            }
+        }
+        if !piped {
+            // (0.1.8) or a command line built in names, handed to an exec call
+            let run = cat_reason(p, "run");
+            for (at, r) in &flows {
+                if pystr::eq(r, "pipes a download into a shell") || *r == run {
+                    reasons.push(u("runs a downloaded script through a shell"));
+                    line = line.or(Some(line_of(text, *at)));
+                    break;
+                }
             }
         }
     }
@@ -2305,18 +3137,6 @@ fn import_time_risk_of(p: &Pack, text: &[u32]) -> (Vec<PyStr>, Option<usize>) {
         signs.push((at as usize, u("opens a reverse shell")));
     }
     let host = p.re("_HOST_INFO_RE").search(text).map(|m| m.start());
-    if let Some(host) = host {
-        if let Some(capture) = capture_service(p, text) {
-            signs.push((
-                host,
-                cat(&[
-                    &u("sends the machine's user or host name to a data-capture service ("),
-                    head(capture.group0(), 40),
-                    &u(")"),
-                ]),
-            ));
-        }
-    }
     let at = runs_own_source_at(p, text);
     if at >= 0 {
         signs.push((at as usize, u("runs code it reads back from its own file or a data file shipped with it")));

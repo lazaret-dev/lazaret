@@ -104,7 +104,7 @@ test("an install hook's command and the script it runs", () => {
     spawnSync(process.execPath, [CLI, root, "--deps", "--out-dir", out, "-q"], { encoding: "utf8" });
     const rep = JSON.parse(readFileSync(join(out, "lazaret-report.json"), "utf8"));
     assert.deepEqual(rep.issues.filter((i) => i.rule === "SC-INSTALL-HOOK").map((i) => [i.file.replaceAll("\\", "/"), i.sev, i.msg]).sort(), [
-      ["node_modules/p/package.json", "CRITICAL", "Install hook command installs a systemd service."],
+      ["node_modules/p/package.json", "CRITICAL", '"postinstall" script installs a systemd service.'],
       ["node_modules/q/package.json", "CRITICAL", "Install hook runs index.js, which installs a systemd service."]]);
   } finally {
     rmSync(root, { recursive: true, force: true });

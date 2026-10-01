@@ -393,7 +393,7 @@ id:"SC-EVAL-DECODE", name:"Decoded payload execution", type:"VULN", sev:"BLOCKER
  ref:"CWE-506 · Supply chain",
 },
 {
-id:"SC-PACKER", name:"Packed JavaScript (p,a,c,k,e,d)", type:"VULN", sev:"CRITICAL", langs:["js"],
+id:"SC-PACKER", name:"Packed JavaScript (p,a,c,k,e,d)", type:"VULN", sev:"MAJOR", langs:["js"],
  re:pyRe("eval\\s*\\(\\s*function\\s*\\(\\s*p\\s*,\\s*a\\s*,\\s*c\\s*,\\s*k\\s*,\\s*e", ""),
  msg:"Dean Edwards packer signature — self-decoding packed code.",
  why:"Legitimate modern packages ship minified, not packed; packing hides intent.",
@@ -402,9 +402,9 @@ id:"SC-PACKER", name:"Packed JavaScript (p,a,c,k,e,d)", type:"VULN", sev:"CRITIC
 },
 {
 id:"SC-EVAL-DECODER", name:"Code decoded by its own function and run", type:"VULN", sev:"CRITICAL", langs:["js"],
- re:pyRe("\\beval\\s*\\(\\s*\\(?\\s*function\\s*\\([^()]{0,80}\\)\\s*\\{(?:[^{}]|\\{[^{}]{0,2000}\\}){0,2000}\\}\\s*\\)?\\s*\\(\\s*(?:\\[\\s*\\d+(?:\\s*,\\s*\\d+){199}|'[^'\\n]{1000}|\\\"[^\\\"\\n]{1000}|`[^`]{1000})", ""),
- msg:"eval runs what a function written into the call decodes from a long encoded literal.",
- why:"An inline decoder over a blob of character codes or text keeps a payload out of sight: the file shows the decoder, never the code it runs.",
+ re:pyRe("\\b(?:eval|(?:new\\s+)?Function|runIn(?:This|New)?Context)\\s*\\(\\s*(?:\\(?\\s*function\\s*\\([^()]{0,80}\\)\\s*\\{(?:[^{}]|\\{[^{}]{0,2000}\\}){0,2000}\\}\\s*\\)?|[A-Za-z_$][\\w$]*)\\s*\\(\\s*(?:\\[\\s*\\d+(?:\\s*,\\s*\\d+){199}|'[^'\\n]{1000}|\\\"[^\\\"\\n]{1000}|`[^`]{1000})", ""),
+ msg:"Code a function computes from a long literal is run (eval, Function or vm).",
+ why:"A decoder over a blob of character codes or text keeps a payload out of sight: the file shows the decoder, never the code it runs.",
  fix:"Decode the blob and read what it runs; treat the package as hostile until then.",
  ref:"CWE-506 · Supply chain",
 },

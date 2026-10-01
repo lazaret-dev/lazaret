@@ -2798,7 +2798,7 @@
        "value": "CWE-506 \u00b7 Supply chain"
       },
       "sev": {
-       "value": "CRITICAL"
+       "value": "MAJOR"
       },
       "skip": {
        "value": null
@@ -2827,7 +2827,7 @@
        ]
       },
       "msg": {
-       "value": "eval runs what a function written into the call decodes from a long encoded literal."
+       "value": "Code a function computes from a long literal is run (eval, Function or vm)."
       },
       "name": {
        "value": "Code decoded by its own function and run"
@@ -2837,7 +2837,7 @@
       },
       "re": {
        "flags": "",
-       "re": "\\beval\\s*\\(\\s*\\(?\\s*function\\s*\\([^()]{0,80}\\)\\s*\\{(?:[^{}]|\\{[^{}]{0,2000}\\}){0,2000}\\}\\s*\\)?\\s*\\(\\s*(?:\\[\\s*\\d+(?:\\s*,\\s*\\d+){199}|'[^'\\n]{1000}|\\\"[^\\\"\\n]{1000}|`[^`]{1000})"
+       "re": "\\b(?:eval|(?:new\\s+)?Function|runIn(?:This|New)?Context)\\s*\\(\\s*(?:\\(?\\s*function\\s*\\([^()]{0,80}\\)\\s*\\{(?:[^{}]|\\{[^{}]{0,2000}\\}){0,2000}\\}\\s*\\)?|[A-Za-z_$][\\w$]*)\\s*\\(\\s*(?:\\[\\s*\\d+(?:\\s*,\\s*\\d+){199}|'[^'\\n]{1000}|\\\"[^\\\"\\n]{1000}|`[^`]{1000})"
       },
       "ref": {
        "value": "CWE-506 \u00b7 Supply chain"
@@ -2852,7 +2852,7 @@
        "value": "VULN"
       },
       "why": {
-       "value": "An inline decoder over a blob of character codes or text keeps a payload out of sight: the file shows the decoder, never the code it runs."
+       "value": "A decoder over a blob of character codes or text keeps a payload out of sight: the file shows the decoder, never the code it runs."
       }
      }
     },
@@ -4476,13 +4476,6 @@
    "flags": "",
    "re": "[()\\[\\]{}]"
   },
-  "_BUN_RELEASES_RE": {
-   "flags": "i",
-   "re": "oven-sh/bun/releases"
-  },
-  "_BUN_RELEASES_SRC": {
-   "value": "oven-sh/bun/releases"
-  },
   "_CAPPED_RULE": {
    "map": {
     "fix": {
@@ -4663,29 +4656,6 @@
    "flags": "",
    "re": "(?<![\\w$.])([A-Za-z_$][\\w$]*)\\s*=\\s*\\[((?:\\s*[0-9]{2,3}\\s*,){9,}\\s*[0-9]{2,3})\\s*\\]"
   },
-  "_CHAT_SECRET_MAX": {
-   "value": 50
-  },
-  "_CHAT_SECRET_MIN_DISTINCT": {
-   "value": 10
-  },
-  "_CHAT_SECRET_NEEDLES": {
-   "list": [
-    {
-     "value": ":AA"
-    },
-    {
-     "value": "webhooks/"
-    },
-    {
-     "value": "hooks.slack.com"
-    }
-   ]
-  },
-  "_CHAT_SECRET_RE": {
-   "flags": "",
-   "re": "(?<![0-9])\\d{8,10}:AA[A-Za-z0-9_-]{33}(?![A-Za-z0-9_-])|\\b[Dd]iscord(?:app)?\\.com/api/webhooks/\\d{17,20}/[A-Za-z0-9_-]{60,80}|\\bhooks\\.slack\\.com/services/T[A-Z0-9]{8,12}/B[A-Z0-9]{8,12}/[A-Za-z0-9]{24}(?![A-Za-z0-9])"
-  },
   "_CHILD_PROCESS_RE": {
    "flags": "",
    "re": "['\\\"`](?:node:)?child_process['\\\"`]"
@@ -4717,9 +4687,9 @@
    "flags": "",
    "re": "[\"'`](?:~[/\\\\]|\\$HOME[/\\\\]|%USERPROFILE%[/\\\\])?\\.(ssh|aws|azure|gnupg|docker|kube|ethereum|electrum|bitcoin|solana|npmrc|pypirc|netrc|git-credentials|config[/\\\\]gcloud|password-store|vault-token|terraform\\.d)(?:[/\\\\][^\"'`\\n]{0,60})?[\"'`]"
   },
-  "_CRED_FILE_RE": {
-   "flags": "",
-   "re": "[\"'`](?:~[/\\\\]|\\.[/\\\\])?\\.(?:env|npmrc|pypirc|netrc|git-credentials)[\"'`]|\\.aws[/\\\\]credentials\\b|[/\\\\]\\.ssh[/\\\\]id_\\w+|\\.docker[/\\\\]config\\.json|\\.kube[/\\\\]config\\b"
+  "_CRED_STORE_RE": {
+   "flags": "i",
+   "re": "\\.ssh\\b|\\bid_(?:rsa|ed25519|ecdsa|dsa)\\b(?!\\.pub)|\\.git-credentials|Local Storage"
   },
   "_CRED_SWEEP_MAX": {
    "value": 200
@@ -5109,6 +5079,10 @@
   "_DL_CHAIN_RE": {
    "flags": "",
    "re": "(?<![\\w$.])[A-Za-z_$][\\w$]*(?:\\s*\\??\\.\\s*[A-Za-z_$][\\w$]*){0,50}"
+  },
+  "_DL_CMD_TOKEN_RE": {
+   "flags": "",
+   "re": "[|&;\\n]|[^\\s|&;]+"
   },
   "_DL_COMMA_CALL_RE": {
    "flags": "",
@@ -5609,6 +5583,42 @@
      "flags": "",
      "re": "(?:eval|exec|execfile)\\s*\\(|(?:window|globalThis|global|self)\\.eval\\s*\\(|new\\s+Function\\s*\\(|Function\\s*\\(|runIn(?:This|New)?Context\\s*\\(|new\\s+vm\\.Script\\s*\\(|compileFunction\\s*\\(|_compile\\s*\\(|execSync\\s*\\(|(?:child_process|childProcess|cp)\\.exec\\s*\\(|require\\(\\s*[\"'](?:node:)?child_process[\"']\\s*\\)\\.exec\\s*\\(|os\\.(?:system|popen)\\s*\\(|__import__\\(\\s*[\"']os[\"']\\s*\\)\\.(?:system|popen)\\s*\\(|(?:system|popen)\\s*\\(|(?:subprocess\\.)?get(?:status)?output\\s*\\(|\\(\\s*(?:void\\s+)?[\\w$.]+\\s*,\\s*(?:(?:window|globalThis|self|global|top|parent|frames)\\s*\\.\\s*)?(?:eval|Function)\\s*\\)\\s*\\(|(?:eval|Function)\\s*\\.\\s*call\\s*\\(|(?:eval|Function)\\s*\\.\\s*bind\\s*\\([^()]*\\)\\s*\\(|\\[\\s*['\\\"`](?:e(?:['\\\"`]\\s*\\+\\s*['\\\"`])?v(?:['\\\"`]\\s*\\+\\s*['\\\"`])?a(?:['\\\"`]\\s*\\+\\s*['\\\"`])?l|F(?:['\\\"`]\\s*\\+\\s*['\\\"`])?u(?:['\\\"`]\\s*\\+\\s*['\\\"`])?n(?:['\\\"`]\\s*\\+\\s*['\\\"`])?c(?:['\\\"`]\\s*\\+\\s*['\\\"`])?t(?:['\\\"`]\\s*\\+\\s*['\\\"`])?i(?:['\\\"`]\\s*\\+\\s*['\\\"`])?o(?:['\\\"`]\\s*\\+\\s*['\\\"`])?n)['\\\"`]\\s*\\]\\s*\\(|(?:Function|Object|Array|String|Number|Boolean|Promise|Date|RegExp|Error|Symbol)\\s*\\.\\s*constructor\\s*\\(|constructor\\s*\\.\\s*constructor\\s*\\(|\\[\\s*['\\\"`]constructor['\\\"`]\\s*\\]\\s*\\[\\s*['\\\"`]constructor['\\\"`]\\s*\\]\\s*\\("
     }
+   ]
+  },
+  "_DL_RUNNERS": {
+   "set": [
+    ".",
+    "bash",
+    "bun",
+    "call",
+    "cmd",
+    "cmd.exe",
+    "cscript",
+    "dash",
+    "deno",
+    "exec",
+    "ksh",
+    "node",
+    "nodejs",
+    "nohup",
+    "open",
+    "osascript",
+    "perl",
+    "php",
+    "powershell",
+    "powershell.exe",
+    "pwsh",
+    "py",
+    "python",
+    "python3",
+    "pythonw",
+    "ruby",
+    "sh",
+    "source",
+    "start",
+    "wscript",
+    "xdg-open",
+    "zsh"
    ]
   },
   "_DL_RUNNER_ARG_HEAD": {
@@ -6878,6 +6888,106 @@
         }
        ]
       },
+      "_DL_RUNNERS": {
+       "list": [
+        {
+         "value": "start"
+        },
+        {
+         "value": "call"
+        },
+        {
+         "value": "cmd"
+        },
+        {
+         "value": "cmd.exe"
+        },
+        {
+         "value": "sh"
+        },
+        {
+         "value": "bash"
+        },
+        {
+         "value": "zsh"
+        },
+        {
+         "value": "dash"
+        },
+        {
+         "value": "ksh"
+        },
+        {
+         "value": "source"
+        },
+        {
+         "value": "."
+        },
+        {
+         "value": "node"
+        },
+        {
+         "value": "nodejs"
+        },
+        {
+         "value": "bun"
+        },
+        {
+         "value": "deno"
+        },
+        {
+         "value": "python"
+        },
+        {
+         "value": "python3"
+        },
+        {
+         "value": "pythonw"
+        },
+        {
+         "value": "py"
+        },
+        {
+         "value": "perl"
+        },
+        {
+         "value": "ruby"
+        },
+        {
+         "value": "php"
+        },
+        {
+         "value": "pwsh"
+        },
+        {
+         "value": "powershell"
+        },
+        {
+         "value": "powershell.exe"
+        },
+        {
+         "value": "cscript"
+        },
+        {
+         "value": "wscript"
+        },
+        {
+         "value": "osascript"
+        },
+        {
+         "value": "open"
+        },
+        {
+         "value": "xdg-open"
+        },
+        {
+         "value": "nohup"
+        },
+        {
+         "value": "exec"
+        }
+       ]
+      },
       "_DL_RUN_NEEDLES": {
        "list": [
         {
@@ -7090,6 +7200,19 @@
         },
         "src": {
          "value": "(?<![\\w$.])[A-Za-z_$][\\w$]*(?:\\s*\\??\\.\\s*[A-Za-z_$][\\w$]*){0,50}"
+        }
+       }
+      },
+      "_DL_CMD_TOKEN_RE": {
+       "map": {
+        "flags": {
+         "value": ""
+        },
+        "note": {
+         "value": "a command line's tokens: a separator, or a word"
+        },
+        "src": {
+         "value": "[|&;\\n]|[^\\s|&;]+"
         }
        }
       },
@@ -8475,6 +8598,106 @@
       }
      ]
     },
+    "_DL_RUNNERS": {
+     "list": [
+      {
+       "value": "start"
+      },
+      {
+       "value": "call"
+      },
+      {
+       "value": "cmd"
+      },
+      {
+       "value": "cmd.exe"
+      },
+      {
+       "value": "sh"
+      },
+      {
+       "value": "bash"
+      },
+      {
+       "value": "zsh"
+      },
+      {
+       "value": "dash"
+      },
+      {
+       "value": "ksh"
+      },
+      {
+       "value": "source"
+      },
+      {
+       "value": "."
+      },
+      {
+       "value": "node"
+      },
+      {
+       "value": "nodejs"
+      },
+      {
+       "value": "bun"
+      },
+      {
+       "value": "deno"
+      },
+      {
+       "value": "python"
+      },
+      {
+       "value": "python3"
+      },
+      {
+       "value": "pythonw"
+      },
+      {
+       "value": "py"
+      },
+      {
+       "value": "perl"
+      },
+      {
+       "value": "ruby"
+      },
+      {
+       "value": "php"
+      },
+      {
+       "value": "pwsh"
+      },
+      {
+       "value": "powershell"
+      },
+      {
+       "value": "powershell.exe"
+      },
+      {
+       "value": "cscript"
+      },
+      {
+       "value": "wscript"
+      },
+      {
+       "value": "osascript"
+      },
+      {
+       "value": "open"
+      },
+      {
+       "value": "xdg-open"
+      },
+      {
+       "value": "nohup"
+      },
+      {
+       "value": "exec"
+      }
+     ]
+    },
     "_DL_RUN_NEEDLES": {
      "list": [
       {
@@ -8687,6 +8910,19 @@
       },
       "src": {
        "value": "(?<![\\w$.])[A-Za-z_$][\\w$]*(?:\\s*\\??\\.\\s*[A-Za-z_$][\\w$]*){0,50}"
+      }
+     }
+    },
+    "_DL_CMD_TOKEN_RE": {
+     "map": {
+      "flags": {
+       "value": ""
+      },
+      "note": {
+       "value": "a command line's tokens: a separator, or a word"
+      },
+      "src": {
+       "value": "[|&;\\n]|[^\\s|&;]+"
       }
      }
     },
@@ -9240,6 +9476,157 @@
   "_DV_CALL_SRC": {
    "value": "(?<![\\w$.])(?P<name>[A-Za-z_$][\\w$]*)[ \\t]*\\([ \\t]*(?:'(?P<a>[^'\\\\\\n]{1,400})'|\"(?P<b>[^\"\\\\\\n]{1,400})\"|`(?P<c>[^`\\\\\\n$]{1,400})`)[ \\t]*\\)"
   },
+  "_DV_CC_ARG_INT_RE": {
+   "flags": "",
+   "re": "-?(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})"
+  },
+  "_DV_CC_ARG_INT_SRC": {
+   "value": "-?(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})"
+  },
+  "_DV_CC_ARG_STR_RE": {
+   "flags": "",
+   "re": "'(?P<a>[ -&(-\\[\\]-~]{0,400})'|\"(?P<b>[ !#-\\[\\]-~]{0,400})\\\""
+  },
+  "_DV_CC_ARG_STR_SRC": {
+   "value": "'(?P<a>[ -&(-\\[\\]-~]{0,400})'|\"(?P<b>[ !#-\\[\\]-~]{0,400})\\\""
+  },
+  "_DV_CC_ARRAY_TAIL": {
+   "value": "[ \\t]*=[ \\t]*[\\[(]\\s*(?P<items>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:\\s*,\\s*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,4095}\\s*,?)\\s*[\\])]"
+  },
+  "_DV_CC_BINARY": {
+   "map": {
+    "%": {
+     "value": 6
+    },
+    "&": {
+     "value": 3
+    },
+    "*": {
+     "value": 6
+    },
+    "+": {
+     "value": 5
+    },
+    "-": {
+     "value": 5
+    },
+    "<<": {
+     "value": 4
+    },
+    ">>": {
+     "value": 4
+    },
+    ">>>": {
+     "value": 4
+    },
+    "^": {
+     "value": 2
+    },
+    "|": {
+     "value": 1
+    }
+   }
+  },
+  "_DV_CC_BODY": {
+   "value": 600
+  },
+  "_DV_CC_CALL_TAIL": {
+   "value": "[ \\t]*\\((?P<args>(?:[^()'\"\\n]|'[^'\\\\\\n]{0,400}'|\"[^\"\\\\\\n]{0,400}\"){0,20000})\\)"
+  },
+  "_DV_CC_FOR_RE": {
+   "flags": "",
+   "re": "\\bfor[ \\t]*\\([ \\t]*(?:var|let)[ \\t]+(?P<i>[A-Za-z_$][\\w$]*)[ \\t]*=[ \\t]*0[ \\t]*;[ \\t]*\\1[ \\t]*<[ \\t]*(?P<d>[A-Za-z_$][\\w$]*)[ \\t]*\\.[ \\t]*length[ \\t]*;"
+  },
+  "_DV_CC_FOR_SRC": {
+   "value": "\\bfor[ \\t]*\\([ \\t]*(?:var|let)[ \\t]+(?P<i>[A-Za-z_$][\\w$]*)[ \\t]*=[ \\t]*0[ \\t]*;[ \\t]*\\1[ \\t]*<[ \\t]*(?P<d>[A-Za-z_$][\\w$]*)[ \\t]*\\.[ \\t]*length[ \\t]*;"
+  },
+  "_DV_CC_FUNC_RE": {
+   "flags": "",
+   "re": "\\bfunction[ \\t]+(?P<a>[A-Za-z_$][\\w$]*)[ \\t]*\\((?P<pa>[^()\\n]{0,120})\\)[ \\t]*\\{|\\b(?:const|let|var)[ \\t]+(?P<b>[A-Za-z_$][\\w$]*)[ \\t]*=[ \\t]*(?:function\\b[ \\t]*(?:[A-Za-z_$][\\w$]*)?[ \\t]*\\((?P<pb>[^()\\n]{0,120})\\)[ \\t]*\\{|\\((?P<pc>[^()\\n]{0,120})\\)[ \\t]*=>)|\\bdef[ \\t]+(?P<c>[A-Za-z_]\\w*)[ \\t]*\\((?P<pd>[^()\\n]{0,120})\\)[ \\t]*(?:->[^:\\n]{0,80})?:"
+  },
+  "_DV_CC_FUNC_SRC": {
+   "value": "\\bfunction[ \\t]+(?P<a>[A-Za-z_$][\\w$]*)[ \\t]*\\((?P<pa>[^()\\n]{0,120})\\)[ \\t]*\\{|\\b(?:const|let|var)[ \\t]+(?P<b>[A-Za-z_$][\\w$]*)[ \\t]*=[ \\t]*(?:function\\b[ \\t]*(?:[A-Za-z_$][\\w$]*)?[ \\t]*\\((?P<pb>[^()\\n]{0,120})\\)[ \\t]*\\{|\\((?P<pc>[^()\\n]{0,120})\\)[ \\t]*=>)|\\bdef[ \\t]+(?P<c>[A-Za-z_]\\w*)[ \\t]*\\((?P<pd>[^()\\n]{0,120})\\)[ \\t]*(?:->[^:\\n]{0,80})?:"
+  },
+  "_DV_CC_INT": {
+   "value": "(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})"
+  },
+  "_DV_CC_INTS": {
+   "value": "(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?"
+  },
+  "_DV_CC_INT_MAX": {
+   "value": 2147483647
+  },
+  "_DV_CC_INT_RE": {
+   "flags": "",
+   "re": "(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})"
+  },
+  "_DV_CC_LITERAL_RE": {
+   "flags": "",
+   "re": "\\bString[ \\t]*\\.[ \\t]*fromCharCode[ \\t]*(?:\\([ \\t]*(?:\\.\\.\\.[ \\t]*\\[[ \\t]*(?P<a>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?)[ \\t]*\\]|(?P<b>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?))[ \\t]*\\)|\\.[ \\t]*apply[ \\t]*\\([ \\t]*(?:null|undefined|this|String)[ \\t]*,[ \\t]*\\[[ \\t]*(?P<c>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?)[ \\t]*\\][ \\t]*\\))|(?:''|\"\")[ \\t]*\\.[ \\t]*join[ \\t]*\\([ \\t]*(?:map[ \\t]*\\([ \\t]*chr[ \\t]*,[ \\t]*[\\[(][ \\t]*(?P<d>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?)[ \\t]*[\\])][ \\t]*\\)|\\[?[ \\t]*chr[ \\t]*\\([ \\t]*(?P<v>[A-Za-z_]\\w*)[ \\t]*\\)[ \\t]+for[ \\t]+\\5[ \\t]+in[ \\t]+[\\[(][ \\t]*(?P<e>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?)[ \\t]*[\\])][ \\t]*\\]?)[ \\t]*\\)|\\bbyte(?:s|array)[ \\t]*\\([ \\t]*[\\[(][ \\t]*(?P<f>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?)[ \\t]*[\\])][ \\t]*\\)[ \\t]*\\.[ \\t]*decode[ \\t]*\\([^()\\n]{0,20}\\)"
+  },
+  "_DV_CC_LITERAL_SRC": {
+   "value": "\\bString[ \\t]*\\.[ \\t]*fromCharCode[ \\t]*(?:\\([ \\t]*(?:\\.\\.\\.[ \\t]*\\[[ \\t]*(?P<a>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?)[ \\t]*\\]|(?P<b>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?))[ \\t]*\\)|\\.[ \\t]*apply[ \\t]*\\([ \\t]*(?:null|undefined|this|String)[ \\t]*,[ \\t]*\\[[ \\t]*(?P<c>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?)[ \\t]*\\][ \\t]*\\))|(?:''|\"\")[ \\t]*\\.[ \\t]*join[ \\t]*\\([ \\t]*(?:map[ \\t]*\\([ \\t]*chr[ \\t]*,[ \\t]*[\\[(][ \\t]*(?P<d>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?)[ \\t]*[\\])][ \\t]*\\)|\\[?[ \\t]*chr[ \\t]*\\([ \\t]*(?P<v>[A-Za-z_]\\w*)[ \\t]*\\)[ \\t]+for[ \\t]+\\5[ \\t]+in[ \\t]+[\\[(][ \\t]*(?P<e>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?)[ \\t]*[\\])][ \\t]*\\]?)[ \\t]*\\)|\\bbyte(?:s|array)[ \\t]*\\([ \\t]*[\\[(][ \\t]*(?P<f>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?)[ \\t]*[\\])][ \\t]*\\)[ \\t]*\\.[ \\t]*decode[ \\t]*\\([^()\\n]{0,20}\\)"
+  },
+  "_DV_CC_MAP_RE": {
+   "flags": "",
+   "re": "(?<![\\w$.])(?P<d>[A-Za-z_$][\\w$]*)[ \\t]*(?P<split>\\.[ \\t]*split[ \\t]*\\([ \\t]*(?:''|\"\")[ \\t]*\\)[ \\t]*)?\\.[ \\t]*map[ \\t]*\\([ \\t]*(?:function\\b[ \\t]*(?:[A-Za-z_$][\\w$]*)?[ \\t]*\\([ \\t]*(?P<e>[A-Za-z_$][\\w$]*)(?:[ \\t]*,[ \\t]*(?P<i>[A-Za-z_$][\\w$]*))?[ \\t]*\\)[ \\t]*\\{|\\([ \\t]*(?P<e2>[A-Za-z_$][\\w$]*)(?:[ \\t]*,[ \\t]*(?P<i2>[A-Za-z_$][\\w$]*))?[ \\t]*\\)[ \\t]*=>|(?P<e3>[A-Za-z_$][\\w$]*)[ \\t]*=>)"
+  },
+  "_DV_CC_MAP_SRC": {
+   "value": "(?<![\\w$.])(?P<d>[A-Za-z_$][\\w$]*)[ \\t]*(?P<split>\\.[ \\t]*split[ \\t]*\\([ \\t]*(?:''|\"\")[ \\t]*\\)[ \\t]*)?\\.[ \\t]*map[ \\t]*\\([ \\t]*(?:function\\b[ \\t]*(?:[A-Za-z_$][\\w$]*)?[ \\t]*\\([ \\t]*(?P<e>[A-Za-z_$][\\w$]*)(?:[ \\t]*,[ \\t]*(?P<i>[A-Za-z_$][\\w$]*))?[ \\t]*\\)[ \\t]*\\{|\\([ \\t]*(?P<e2>[A-Za-z_$][\\w$]*)(?:[ \\t]*,[ \\t]*(?P<i2>[A-Za-z_$][\\w$]*))?[ \\t]*\\)[ \\t]*=>|(?P<e3>[A-Za-z_$][\\w$]*)[ \\t]*=>)"
+  },
+  "_DV_CC_MAX_CALLS": {
+   "value": 256
+  },
+  "_DV_CC_MAX_CODES": {
+   "value": 4096
+  },
+  "_DV_CC_MAX_DECODERS": {
+   "value": 8
+  },
+  "_DV_CC_MAX_DEPTH": {
+   "value": 16
+  },
+  "_DV_CC_MAX_PARAMS": {
+   "value": 4
+  },
+  "_DV_CC_MAX_TOKENS": {
+   "value": 64
+  },
+  "_DV_CC_MAX_WORK": {
+   "value": 50000
+  },
+  "_DV_CC_NAME_RE": {
+   "flags": "",
+   "re": "[A-Za-z_$][\\w$]*"
+  },
+  "_DV_CC_PYFOR_RE": {
+   "flags": "",
+   "re": "\\bfor[ \\t]+(?P<i>[A-Za-z_]\\w*)[ \\t]+in[ \\t]+range[ \\t]*\\([ \\t]*len[ \\t]*\\([ \\t]*(?P<d>[A-Za-z_]\\w*)[ \\t]*\\)[ \\t]*\\)"
+  },
+  "_DV_CC_PYFOR_SRC": {
+   "value": "\\bfor[ \\t]+(?P<i>[A-Za-z_]\\w*)[ \\t]+in[ \\t]+range[ \\t]*\\([ \\t]*len[ \\t]*\\([ \\t]*(?P<d>[A-Za-z_]\\w*)[ \\t]*\\)[ \\t]*\\)"
+  },
+  "_DV_CC_PYITER_RE": {
+   "flags": "",
+   "re": "\\bfor[ \\t]+(?:(?P<i>[A-Za-z_]\\w*)[ \\t]*,[ \\t]*(?P<e>[A-Za-z_]\\w*)[ \\t]+in[ \\t]+enumerate[ \\t]*\\([ \\t]*(?P<d>[A-Za-z_]\\w*)[ \\t]*\\)|(?P<e2>[A-Za-z_]\\w*)[ \\t]+in[ \\t]+(?P<d2>[A-Za-z_]\\w*)(?![\\w$.(\\[]))"
+  },
+  "_DV_CC_PYITER_SRC": {
+   "value": "\\bfor[ \\t]+(?:(?P<i>[A-Za-z_]\\w*)[ \\t]*,[ \\t]*(?P<e>[A-Za-z_]\\w*)[ \\t]+in[ \\t]+enumerate[ \\t]*\\([ \\t]*(?P<d>[A-Za-z_]\\w*)[ \\t]*\\)|(?P<e2>[A-Za-z_]\\w*)[ \\t]+in[ \\t]+(?P<d2>[A-Za-z_]\\w*)(?![\\w$.(\\[]))"
+  },
+  "_DV_CC_SITE_RE": {
+   "flags": "",
+   "re": "\\bString[ \\t]*\\.[ \\t]*fromCharCode[ \\t]*\\(|(?<![\\w$.])chr[ \\t]*\\("
+  },
+  "_DV_CC_SITE_SRC": {
+   "value": "\\bString[ \\t]*\\.[ \\t]*fromCharCode[ \\t]*\\(|(?<![\\w$.])chr[ \\t]*\\("
+  },
+  "_DV_CC_TOKEN_RE": {
+   "flags": "",
+   "re": "[ \\t]*(?:(?P<num>0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})|(?P<name>[A-Za-z_$][\\w$]*)|(?P<op>>>>|<<|>>|[-+*%&|^~()\\[\\].,]))"
+  },
+  "_DV_CC_TOKEN_SRC": {
+   "value": "[ \\t]*(?:(?P<num>0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})|(?P<name>[A-Za-z_$][\\w$]*)|(?P<op>>>>|<<|>>|[-+*%&|^~()\\[\\].,]))"
+  },
   "_DV_HELPER_CALL_TAIL": {
    "value": ")[ \\t]*\\([ \\t]*(?:'(?P<a>[^'\\\\\\n]{1,400})'|\"(?P<b>[^\"\\\\\\n]{1,400})\"|`(?P<c>[^`\\\\\\n$]{1,400})`)[ \\t]*\\)"
   },
@@ -9255,7 +9642,7 @@
    "re": "[0-9A-Fa-f]+"
   },
   "_DV_INDEX_TAIL": {
-   "value": "\\s*\\[\\s*(\\d{1,2})\\s*\\]"
+   "value": "\\s*\\[\\s*([0-9]{1,2})\\s*\\]"
   },
   "_DV_JOIN_RE": {
    "flags": "",
@@ -9293,6 +9680,16 @@
   "_DV_MEMBER_SRC": {
    "value": "(?<=[\\w$)\\]])\\[[ \\t]*(?:'(?P<a>[A-Za-z_$][\\w$]{0,63})'|\"(?P<b>[A-Za-z_$][\\w$]{0,63})\")[ \\t]*\\]"
   },
+  "_DV_MEMO": {
+   "list": [
+    {
+     "value": null
+    },
+    {
+     "value": null
+    }
+   ]
+  },
   "_DV_MUTATED_TAIL": {
    "value": "\\s*(?:\\.\\s*(?:push|pop|shift|unshift|splice|reverse|sort|fill|copyWithin|append|insert|extend|remove)\\s*\\(|\\[[^\\]\\n]{0,80}\\]\\s*=(?!=))"
   },
@@ -9324,6 +9721,12 @@
     },
     {
      "value": "base64"
+    },
+    {
+     "value": "chr"
+    },
+    {
+     "value": "byte"
     }
    ]
   },
@@ -9391,33 +9794,12 @@
    "flags": "",
    "re": "^[A-Za-z_][A-Za-z0-9_]*="
   },
-  "_ENV_COPY_ANCHOR_RE": {
-   "flags": "",
-   "re": "dict\\(\\s*os\\.environ\\s*\\)|os\\.environ\\.copy\\(\\s*\\)|\\*\\*\\s*os\\.environ|\\.\\.\\.\\s*process\\.env|Object\\.assign\\(\\s*\\{\\s*\\}\\s*,\\s*process\\.env"
-  },
-  "_ENV_COPY_MAX": {
-   "value": 20
-  },
-  "_ENV_COPY_RE": {
-   "flags": "",
-   "re": "(?<![\\w$.])([A-Za-z_$][\\w$]*)\\s{0,40}=\\s{0,40}(?:dict\\(\\s*os\\.environ\\s*\\)|os\\.environ\\.copy\\(\\s*\\)|\\{\\s*\\*\\*\\s*os\\.environ\\s*\\}|\\{\\s*\\.\\.\\.\\s*process\\.env\\s*\\}|Object\\.assign\\(\\s*\\{\\s*\\}\\s*,\\s*process\\.env\\s*\\))"
-  },
-  "_ENV_COPY_USE_HEAD": {
-   "value": "\\b(?:urlencode|dumps|stringify|b64encode|str)\\(\\s*"
-  },
-  "_ENV_COPY_USE_TAIL": {
-   "value": "\\s*[,)]"
-  },
   "_EVAL_BY_NAME": {
    "value": "\\[\\s*['\\\"`](?:e(?:['\\\"`]\\s*\\+\\s*['\\\"`])?v(?:['\\\"`]\\s*\\+\\s*['\\\"`])?a(?:['\\\"`]\\s*\\+\\s*['\\\"`])?l|F(?:['\\\"`]\\s*\\+\\s*['\\\"`])?u(?:['\\\"`]\\s*\\+\\s*['\\\"`])?n(?:['\\\"`]\\s*\\+\\s*['\\\"`])?c(?:['\\\"`]\\s*\\+\\s*['\\\"`])?t(?:['\\\"`]\\s*\\+\\s*['\\\"`])?i(?:['\\\"`]\\s*\\+\\s*['\\\"`])?o(?:['\\\"`]\\s*\\+\\s*['\\\"`])?n)['\\\"`]\\s*\\]"
   },
   "_EXEC_CALL_RE": {
    "flags": "",
    "re": "\\b(?:execSync|exec|execFileSync|execFile|spawnSync|spawn|system|popen|Popen|run|call|check_call|check_output|getoutput|getstatusoutput)\\s*\\("
-  },
-  "_EXFIL_DEST_RE": {
-   "flags": "i",
-   "re": "https?://(?:\\d{1,3}\\.){3}\\d{1,3}\\b|pastebin\\.com|\\bngrok|webhook\\.site|discord(?:app)?\\.com/api/webhooks|api\\.telegram\\.org|oastify\\.com|burpcollaborator|\\binteract\\.sh|\\boast\\.(?:pro|live|site|online|fun|me)\\b|requestbin\\.(?:com|net|io)\\b|\\brequestb\\.in\\b|pipedream\\.net|transfer\\.sh|\\.onion\\b"
   },
   "_EXFIL_SERVICES": {
    "value": "pastebin\\.com|\\bngrok|webhook\\.site|discord(?:app)?\\.com/api/webhooks|api\\.telegram\\.org|oastify\\.com|burpcollaborator|\\binteract\\.sh|\\boast\\.(?:pro|live|site|online|fun|me)\\b|requestbin\\.(?:com|net|io)\\b|\\brequestb\\.in\\b|pipedream\\.net|transfer\\.sh|\\.onion\\b"
@@ -9742,6 +10124,16 @@
     "||"
    ]
   },
+  "_HOOK_SHLEX_MEMO": {
+   "list": [
+    {
+     "value": null
+    },
+    {
+     "value": null
+    }
+   ]
+  },
   "_HOOK_WRAPPERS": {
    "set": [
     "command",
@@ -9758,7 +10150,7 @@
   },
   "_HOST_INFO_RE": {
    "flags": "",
-   "re": "\\b(?:socket\\.gethostname|socket\\.getfqdn|platform\\.node|getpass\\.getuser|os\\.getlogin|pwd\\.getpwuid|os\\.hostname|os\\.userInfo)\\s*\\(|\\b(?:getoutput|check_output|getstatusoutput|execSync|popen)\\s*\\(\\s*\\[?\\s*[\"'](?:whoami|hostname|id|uname|ifconfig|ipconfig|systeminfo)\\b|(?:\\$\\(|`)\\s*(?:whoami|hostname|id|uname|ifconfig|ip\\s+a|pwd|ls|cat\\s+/etc/passwd|ps)\\b|\\bos\\.(?:hostname|userInfo)\\s*[,)]|\\brequire\\(\\s*[\"'](?:node:)?os[\"']\\s*\\)\\s*\\.\\s*(?:hostname|userInfo)\\b|\\b(?:const|let|var|import)\\s*\\{[^{}\\n]{0,200}\\b(?:hostname|userInfo)\\b[^{}\\n]{0,200}\\}\\s*(?:=\\s*require\\(\\s*|from\\s*)[\"'](?:node:)?os[\"']|\\bfrom\\s+(?:socket|getpass)\\s+import\\s+[^\\n]{0,200}\\b(?:gethostname|getfqdn|getuser)\\b"
+   "re": "\\b(?:socket\\.gethostname|socket\\.getfqdn|platform\\.node|getpass\\.getuser|os\\.getlogin|pwd\\.getpwuid|os\\.hostname|os\\.userInfo)\\s*\\(|\\b(?:getoutput|check_output|getstatusoutput|execSync|popen)\\s*\\(\\s*\\[?\\s*[\"'](?:whoami|hostname|id|uname\\s+(?:-[A-Za-z]*[an]|--(?:all|nodename))|ifconfig|ipconfig|systeminfo)\\b|(?:\\$\\(|`)\\s*(?:whoami|hostname|id|uname\\s+(?:-[A-Za-z]*[an]|--(?:all|nodename))|ifconfig|ip\\s+a|pwd|ls|cat\\s+/etc/passwd|ps)\\b|\\bos\\.(?:hostname|userInfo)\\s*[,)]|\\brequire\\(\\s*[\"'](?:node:)?os[\"']\\s*\\)\\s*\\.\\s*(?:hostname|userInfo)\\b|\\b(?:const|let|var|import)\\s*\\{[^{}\\n]{0,200}\\b(?:hostname|userInfo)\\b[^{}\\n]{0,200}\\}\\s*(?:=\\s*require\\(\\s*|from\\s*)[\"'](?:node:)?os[\"']|\\bfrom\\s+(?:socket|getpass)\\s+import\\s+[^\\n]{0,200}\\b(?:gethostname|getfqdn|getuser)\\b"
   },
   "_HTML_RESPONSE_CLASS_RE": {
    "flags": "",
@@ -9780,28 +10172,49 @@
    "flags": "",
    "re": "(?<![\\w$.])[A-Za-z_$][\\w$]*"
   },
-  "_IMPORT_HARVEST_NEEDLES": {
-   "list": [
-    {
-     "value": "process.env"
+  "_IMPORT_SENT_IP_REASONS": {
+   "map": {
+    "address": {
+     "value": "sends the machine's public IP address to an IP address"
     },
-    {
-     "value": "os.environ"
+    "credentials": {
+     "value": "reads credentials or the whole environment and sends them to an IP address"
     },
-    {
-     "value": "id_"
+    "environment": {
+     "value": "reads credentials or the whole environment and sends them to an IP address"
     },
-    {
-     "value": ".git-credentials"
+    "file": {
+     "value": "reads local files and sends them to an IP address"
     },
-    {
-     "value": "leveldb"
+    "identity": {
+     "value": "sends the machine's user or host name to an IP address"
+    },
+    "report": {
+     "value": "sends what local commands report about the machine to an IP address"
     }
-   ]
+   }
   },
-  "_IMPORT_HARVEST_RE": {
-   "flags": "",
-   "re": "JSON\\.stringify\\(\\s*process\\.env\\s*[,)]|\\bjson\\.dumps\\(\\s*(?:dict\\(\\s*)?os\\.environ\\s*[,)]|\\b(?:str|repr)\\(\\s*os\\.environ\\s*\\)|\\burlencode\\(\\s*(?:dict\\(\\s*)?os\\.environ\\s*[,)]|[/\\\\]\\.ssh[/\\\\]id_|\\bid_(?:rsa|ed25519|ecdsa|dsa)\\b(?!\\.pub)|\\.git-credentials|(?i:Local Storage)[/\\\\]leveldb"
+  "_IMPORT_SENT_REASONS": {
+   "map": {
+    "address": {
+     "value": "sends the machine's public IP address to a data-capture service"
+    },
+    "credentials": {
+     "value": "reads credentials or the whole environment and sends them to an exfiltration service"
+    },
+    "environment": {
+     "value": "reads credentials or the whole environment and sends them to an exfiltration service"
+    },
+    "file": {
+     "value": "reads local files and sends them to an exfiltration service"
+    },
+    "identity": {
+     "value": "sends the machine's user or host name to a data-capture service"
+    },
+    "report": {
+     "value": "sends what local commands report about the machine to a data-capture service"
+    }
+   }
   },
   "_INDEX_ARGS_RE": {
    "flags": "",
@@ -9968,6 +10381,48 @@
     "~"
    ]
   },
+  "_JS_RUNTIMES": {
+   "map": {
+    "babel-node": {
+     "set": []
+    },
+    "bun": {
+     "set": [
+      "run"
+     ]
+    },
+    "bun.exe": {
+     "set": [
+      "run"
+     ]
+    },
+    "deno": {
+     "set": [
+      "run"
+     ]
+    },
+    "deno.exe": {
+     "set": [
+      "run"
+     ]
+    },
+    "esno": {
+     "set": []
+    },
+    "ts-node": {
+     "set": []
+    },
+    "ts-node-esm": {
+     "set": []
+    },
+    "tsx": {
+     "set": []
+    },
+    "vite-node": {
+     "set": []
+    }
+   }
+  },
   "_JS_TAG_KEYWORDS": {
    "set": [
     "await",
@@ -10087,6 +10542,708 @@
     "\u30fb",
     "\uff65"
    ]
+  },
+  "_LD_ABSOLUTE_IN_RE": {
+   "flags": "",
+   "re": "[\"'`](?:/(?:etc|proc|home|root|Users|var|opt|flag|tmp|usr|srv|mnt|run|sys|dev|boot|data|app|workspace|secrets?)\\b|~[/\\\\]|[A-Za-z]:[\\\\/]|\\$HOME\\b|\\$\\{HOME\\}|%USERPROFILE%)"
+  },
+  "_LD_ABSOLUTE_RE": {
+   "flags": "",
+   "re": "[fFrRbBuU]{0,2}[\"'`](?:/[\\w.~-]|~[/\\\\]|[A-Za-z]:[\\\\/]|\\$HOME\\b|\\$\\{HOME\\}|%USERPROFILE%)"
+  },
+  "_LD_ADDRESS_SEND_RE": {
+   "flags": "",
+   "re": "\\b(?:https?\\s*\\.\\s*(?:get|request)|axios\\s*\\.\\s*get|got|requests\\s*\\.\\s*get|httpx\\s*\\.\\s*get)\\s*\\(|\\brequire\\s*\\(\\s*[\"'](?:node:)?https?[\"']\\s*\\)\\s*\\.\\s*(?:get|request)\\s*\\("
+  },
+  "_LD_ARGV_ITEM_RE": {
+   "flags": "",
+   "re": "[\"'`]([^\"'`\\n]{0,100})[\"'`]"
+  },
+  "_LD_ARROW_BODY_RE": {
+   "flags": "",
+   "re": "\\s*(?:async\\s+)?(?:\\([^)\\n]{0,300}\\)|[A-Za-z_$][\\w$]*)\\s*=>\\s*(?!\\{)|\\s*lambda\\b[^:\\n]{0,300}:"
+  },
+  "_LD_BODY_RE": {
+   "flags": "",
+   "re": "\\s*\\{"
+  },
+  "_LD_CALLED_RE": {
+   "flags": "",
+   "re": "\\s*\\("
+  },
+  "_LD_CALL_RE": {
+   "flags": "",
+   "re": "(?<![\\w$.])(?:(?:[A-Za-z_$][\\w$]*|require\\s*\\(\\s*[\"'`][^\"'`\\n]{1,60}[\"'`]\\s*\\))\\s*\\.\\s*)*([A-Za-z_$][\\w$]*)\\s*\\(\\s*"
+  },
+  "_LD_COLLECT_RE": {
+   "flags": "",
+   "re": "(?<![\\w$.])([A-Za-z_$][\\w$]*)(?:\\s*\\.\\s*[A-Za-z_$][\\w$]*){0,4}\\s*\\.\\s*(?:push|append|extend|add|update|unshift|insert|setdefault)\\s*\\("
+  },
+  "_LD_CONNECTION_RE": {
+   "flags": "",
+   "re": "\\b(?:https?|http2|net|tls|dgram)\\s*\\.\\s*(?:get|createSocket)\\s*\\(|\\brequire\\s*\\(\\s*[\"'](?:node:)?(?:https?|http2|net|tls|dgram)[\"']\\s*\\)\\s*\\.\\s*(?:request|get|connect|createConnection|createSocket)\\s*\\(|(?<![\\w$])[A-Za-z_$][\\w$]*\\s*\\.\\s*(?:request|connect|createConnection)\\s*\\(|\\bnew\\s+(?:net\\s*\\.\\s*)?(?:Socket|XMLHttpRequest|WebSocket)\\s*\\(|\\bsocket\\s*\\.\\s*(?:socket|create_connection)\\s*\\(|\\bHTTPS?Connection\\s*\\("
+  },
+  "_LD_CRED_FILE_RE": {
+   "flags": "",
+   "re": "[fFrRbBuU]{0,2}[\"'`](?:[^\"'`\\n]{0,200}[/\\\\])?\\.(?:env(?:\\.[\\w.-]{1,30})?|npmrc|pypirc|netrc|git-credentials)[\"'`]"
+  },
+  "_LD_ENV_ALL_RE": {
+   "flags": "",
+   "re": "\\bprocess\\s*\\.\\s*env\\b(?!\\s*(?:\\.|\\[|\\?\\.))|\\bos\\s*\\.\\s*environ\\b(?!\\s*(?:\\[|\\.\\s*(?:get|setdefault|pop|update)\\s*\\())|\\bos\\s*\\.\\s*environb\\b"
+  },
+  "_LD_ENV_QUIET_RE": {
+   "flags": "i",
+   "re": "(?:npm_(?:package|lifecycle|config)_(?![\\w]*(?:auth|token|passw|secret))\\w*|npm_node_execpath|npm_execpath|INIT_CWD|NODE_ENV|CI)\\Z"
+  },
+  "_LD_ENV_RE": {
+   "flags": "",
+   "re": "\\bprocess\\s*\\.\\s*env\\s*(?:\\.\\s*([A-Za-z_$][\\w$]*)|\\[\\s*[\"'`]([^\"'`\\n]{1,100})[\"'`]\\s*\\])|\\bos\\s*\\.\\s*environ\\s*(?:\\[\\s*[rbuRBU]?[\"']([^\"'\\n]{1,100})[\"']\\s*\\]|\\.\\s*get\\s*\\(\\s*[rbuRBU]?[\"']([^\"'\\n]{1,100})[\"'])|\\bos\\s*\\.\\s*getenv\\s*\\(\\s*[rbuRBU]?[\"']([^\"'\\n]{1,100})[\"']"
+  },
+  "_LD_ENV_SELECT_RE": {
+   "flags": "",
+   "re": "(?:\\s*\\))?\\s*\\.\\s*filter\\s*\\(|(?:\\s*\\.\\s*(?:items|keys|values)\\s*\\(\\s*\\))?[ \\t]+if\\b"
+  },
+  "_LD_EXCLUDES_RE": {
+   "flags": "",
+   "re": "!|\\bnot\\b"
+  },
+  "_LD_EXEC_RE": {
+   "flags": "",
+   "re": "\\b(?:execSync|execFileSync|spawnSync|exec|execFile|check_output|getoutput|getstatusoutput|popen|run)\\s*(\\()\\s*(?:\\[\\s*)?[rbuRBU]?[\"'`]([^\"'`\\n]{1,300})[\"'`]((?:\\s*,\\s*[rbuRBU]?[\"'`][^\"'`\\n]{0,100}[\"'`]){0,8})"
+  },
+  "_LD_EXEC_SEND_RE": {
+   "flags": "",
+   "re": "\\b(?:execSync|exec|spawnSync|spawn|execFileSync|execFile|system|popen|check_output|check_call|call|run|Popen|getoutput)\\s*\\("
+  },
+  "_LD_FS_ROOT_RE": {
+   "flags": "",
+   "re": "[fFrRbBuU]{0,2}[\"'`](?:/(?:etc|proc|home|root|Users|var|opt|flag|tmp|usr|srv|mnt|run|sys|dev|boot|data|app|workspace|secrets?)\\b|~[/\\\\]|[A-Za-z]:[\\\\/]|\\$HOME\\b|\\$\\{HOME\\}|%USERPROFILE%)"
+  },
+  "_LD_FS_ROOT_SRC": {
+   "value": "[\"'`](?:/(?:etc|proc|home|root|Users|var|opt|flag|tmp|usr|srv|mnt|run|sys|dev|boot|data|app|workspace|secrets?)\\b|~[/\\\\]|[A-Za-z]:[\\\\/]|\\$HOME\\b|\\$\\{HOME\\}|%USERPROFILE%)"
+  },
+  "_LD_FUNC_RE": {
+   "flags": "",
+   "re": "\\bdef\\s+([A-Za-z_]\\w*)\\s*\\(([^)\\n]{0,300})\\)|\\bfunction\\s*\\*?\\s*([A-Za-z_$][\\w$]*)\\s*\\(([^)\\n]{0,300})\\)|(?<![\\w$])([A-Za-z_$][\\w$]*)\\s*[=:]\\s*(?:async\\s+)?(?:function\\b\\s*\\*?\\s*[\\w$]*\\s*\\(([^)\\n]{0,300})\\)|\\(([^)\\n]{0,300})\\)\\s*=>|([A-Za-z_$][\\w$]*)\\s*=>)|(?<![\\w$.])(?!(?:if|for|while|switch|catch|function|with|return)\\b)(?:async\\s+|static\\s+|get\\s+|set\\s+)*([A-Za-z_$][\\w$]*)\\s*\\(([^)\\n]{0,300})\\)\\s*\\{"
+  },
+  "_LD_FUNC_VALUE_RE": {
+   "flags": "",
+   "re": "\\s*(?:async\\s+)?(?:function\\b|\\([^)\\n]{0,300}\\)\\s*=>|[A-Za-z_$][\\w$]*\\s*=>)|\\s*(?:lambda\\b|class\\b)"
+  },
+  "_LD_HOME_RE": {
+   "flags": "",
+   "re": "\\bhomedir\\s*\\(|\\bexpanduser\\s*\\(|\\bPath\\s*\\.\\s*home\\s*\\(|\\bgetcwd\\s*\\(|\\bprocess\\s*\\.\\s*cwd\\s*\\(|\\bPath\\s*\\.\\s*cwd\\s*\\(|\\bprocess\\s*\\.\\s*env\\s*(?:\\.\\s*|\\[\\s*[\"'`])(?:HOME|USERPROFILE|INIT_CWD|APPDATA|LOCALAPPDATA)\\b|\\b(?:environ\\s*(?:\\[\\s*|\\.\\s*get\\s*\\(\\s*)|getenv\\s*\\(\\s*)[\"'](?:HOME|USERPROFILE|APPDATA|LOCALAPPDATA)[\"']"
+  },
+  "_LD_HOST_BUILT_RE": {
+   "flags": "",
+   "re": "[fFrRbBuU]{0,2}([\"'`])(?:https?|wss?)://[^\"'`/\\s?#]{0,200}?(?:\\1\\s*\\+\\s*([^\\n+;,)]{1,200})|\\$\\{([^}\\n]{1,200})\\}|\\{([^}\\n]{1,200})\\})"
+  },
+  "_LD_IDENTITY_RE": {
+   "flags": "",
+   "re": "(?:\\bos\\s*\\.\\s*|\\brequire\\(\\s*[\"'](?:node:)?os[\"']\\s*\\)\\s*\\.\\s*)(hostname|userInfo|homedir|networkInterfaces)\\b(\\s*\\()?|\\b(?:socket\\s*\\.\\s*(?:gethostname|getfqdn)|platform\\s*\\.\\s*node|getpass\\s*\\.\\s*getuser|os\\s*\\.\\s*getlogin|os\\s*\\.\\s*uname|platform\\s*\\.\\s*uname)\\b(\\s*\\()?"
+  },
+  "_LD_IMPORT_JS_RE": {
+   "flags": "",
+   "re": "\\b(?:(?:const|let|var)\\s*\\{([^{}\\n]{1,300})\\}\\s*=\\s*require\\(\\s*|import\\s*\\{([^{}\\n]{1,300})\\}\\s*from\\s*)[\"'](?:node:)?os[\"']"
+  },
+  "_LD_IMPORT_NAME_RE": {
+   "flags": "",
+   "re": "\\s*([A-Za-z_$][\\w$]*)(?:\\s*(?::|\\bas\\b)\\s*([A-Za-z_$][\\w$]*))?\\s*\\Z"
+  },
+  "_LD_IMPORT_PY_RE": {
+   "flags": "",
+   "re": "\\bfrom\\s+(os|socket|getpass|platform)\\s+import\\s+\\(?([^\\n)]{1,300})"
+  },
+  "_LD_KEY_RE": {
+   "flags": "",
+   "re": "\\s*(?:[\"']([^\"'\\n]{1,60})[\"']|([A-Za-z_$][\\w$]*))\\s*:(?!:)"
+  },
+  "_LD_KWARG_RE": {
+   "flags": "",
+   "re": "\\s*([A-Za-z_]\\w*)\\s*=(?!=)"
+  },
+  "_LD_LOOKUP_SEND_RE": {
+   "flags": "",
+   "re": "\\b(?:dns\\s*\\.\\s*(?:lookup|resolve\\w*)|gethostbyname|getaddrinfo)\\s*\\("
+  },
+  "_LD_MAX": {
+   "value": 200
+  },
+  "_LD_MAX_CALLS": {
+   "value": 10000
+  },
+  "_LD_MEMBER_ASSIGN_RE": {
+   "flags": "",
+   "re": "(?<![\\w$.])([A-Za-z_$][\\w$]*)((?:\\s*\\.\\s*[A-Za-z_$][\\w$]*|\\s*\\[[^\\]\\n]{1,200}\\]){1,8})[ \\t]*\\+?=(?![=>])"
+  },
+  "_LD_MEMBER_RE": {
+   "flags": "",
+   "re": "\\.\\s*([A-Za-z_$][\\w$]*)|\\[\\s*[\"'`]([^\"'`\\n]{1,60})[\"'`]\\s*\\]"
+  },
+  "_LD_MEMBER_READ_RE": {
+   "flags": "",
+   "re": "\\s*(?:\\??\\.\\s*[A-Za-z_$][\\w$]*(?![\\w$])(?!\\s*\\()|\\[)"
+  },
+  "_LD_MEMO": {
+   "list": [
+    {
+     "value": null
+    },
+    {
+     "value": null
+    }
+   ]
+  },
+  "_LD_METADATA_NEEDLES": {
+   "list": [
+    {
+     "value": "169.254"
+    },
+    {
+     "value": "metadata"
+    },
+    {
+     "value": "Metadata"
+    },
+    {
+     "value": "100.100.100.200"
+    },
+    {
+     "value": "fd00:ec2"
+    }
+   ]
+  },
+  "_LD_METADATA_RE": {
+   "flags": "",
+   "re": "169\\.254\\.169\\.254|metadata\\.google\\.internal|100\\.100\\.100\\.200|\\bfd00:ec2::254|/computeMetadata/v1|Metadata-Flavor|/latest/meta-data|/metadata/instance|/metadata/identity/oauth2"
+  },
+  "_LD_MODULE_NAMES": {
+   "map": {
+    "getpass": {
+     "map": {
+      "getuser": {
+       "value": "identity"
+      }
+     }
+    },
+    "os": {
+     "map": {
+      "getlogin": {
+       "value": "identity"
+      },
+      "homedir": {
+       "value": "report"
+      },
+      "hostname": {
+       "value": "identity"
+      },
+      "networkInterfaces": {
+       "value": "report"
+      },
+      "uname": {
+       "value": "identity"
+      },
+      "userInfo": {
+       "value": "identity"
+      }
+     }
+    },
+    "platform": {
+     "map": {
+      "node": {
+       "value": "identity"
+      },
+      "uname": {
+       "value": "identity"
+      }
+     }
+    },
+    "socket": {
+     "map": {
+      "getfqdn": {
+       "value": "identity"
+      },
+      "gethostname": {
+       "value": "identity"
+      }
+     }
+    }
+   }
+  },
+  "_LD_NEEDLES": {
+   "list": [
+    {
+     "value": "env"
+    },
+    {
+     "value": "hostname"
+    },
+    {
+     "value": "userInfo"
+    },
+    {
+     "value": "homedir"
+    },
+    {
+     "value": "networkInterfaces"
+    },
+    {
+     "value": "getuser"
+    },
+    {
+     "value": "getlogin"
+    },
+    {
+     "value": "uname"
+    },
+    {
+     "value": "exec"
+    },
+    {
+     "value": "ipify"
+    },
+    {
+     "value": "ip-api"
+    },
+    {
+     "value": "ipinfo"
+    },
+    {
+     "value": "ifconfig.me"
+    },
+    {
+     "value": "icanhazip"
+    },
+    {
+     "value": "checkip"
+    },
+    {
+     "value": "ipapi"
+    },
+    {
+     "value": "ident.me"
+    },
+    {
+     "value": "myip"
+    },
+    {
+     "value": "wtfismyip"
+    },
+    {
+     "value": "gethostname"
+    },
+    {
+     "value": "getfqdn"
+    },
+    {
+     "value": ".env"
+    },
+    {
+     "value": "npmrc"
+    },
+    {
+     "value": "pypirc"
+    },
+    {
+     "value": "netrc"
+    },
+    {
+     "value": "git-credentials"
+    },
+    {
+     "value": "check_output"
+    },
+    {
+     "value": "getoutput"
+    },
+    {
+     "value": "popen"
+    },
+    {
+     "value": "run"
+    },
+    {
+     "value": "read"
+    },
+    {
+     "value": "open"
+    },
+    {
+     "value": "listdir"
+    },
+    {
+     "value": "scandir"
+    },
+    {
+     "value": "walk"
+    },
+    {
+     "value": "glob"
+    },
+    {
+     "value": "169.254"
+    },
+    {
+     "value": "metadata"
+    },
+    {
+     "value": "Metadata"
+    },
+    {
+     "value": "100.100.100.200"
+    },
+    {
+     "value": "fd00:ec2"
+    }
+   ]
+  },
+  "_LD_NET_PROGRAM_RE": {
+   "flags": "",
+   "re": "(?:[\"'`]|[;&|]\\s*|\\$\\(\\s*)(?:[\\w./-]*/)?(?:curl|wget|nc|ncat|netcat|nslookup|dig|ping|Invoke-WebRequest|iwr|Invoke-RestMethod|irm)\\b"
+  },
+  "_LD_NOT_IN_ADDRESS": {
+   "set": [
+    "address",
+    "credentials",
+    "environment"
+   ]
+  },
+  "_LD_NOT_READS": {
+   "set": [
+    "Popen",
+    "abspath",
+    "add",
+    "append",
+    "appendFileSync",
+    "basename",
+    "call",
+    "chdir",
+    "check_call",
+    "check_output",
+    "chmod",
+    "chmodSync",
+    "copy",
+    "copyFileSync",
+    "copyfile",
+    "debug",
+    "dirname",
+    "endsWith",
+    "error",
+    "exec",
+    "execFile",
+    "execFileSync",
+    "execSync",
+    "exists",
+    "existsSync",
+    "expanduser",
+    "extend",
+    "fork",
+    "import",
+    "includes",
+    "indexOf",
+    "info",
+    "isabs",
+    "isdir",
+    "isfile",
+    "join",
+    "log",
+    "makedirs",
+    "match",
+    "mkdir",
+    "mkdirSync",
+    "move",
+    "normalize",
+    "popen",
+    "print",
+    "push",
+    "realpath",
+    "relative",
+    "remove",
+    "rename",
+    "renameSync",
+    "replace",
+    "require",
+    "resolve",
+    "rmSync",
+    "rmdirSync",
+    "rmtree",
+    "run",
+    "set",
+    "spawn",
+    "spawnSync",
+    "split",
+    "startsWith",
+    "symlinkSync",
+    "system",
+    "test",
+    "unlink",
+    "unlinkSync",
+    "warn",
+    "writeFile",
+    "writeFileSync"
+   ]
+  },
+  "_LD_OPTIONS_SEND_RE": {
+   "flags": "",
+   "re": "\\baxios\\s*\\("
+  },
+  "_LD_OPTION_KEYS": {
+   "set": [
+    "agent",
+    "allow_redirects",
+    "auth",
+    "baseURL",
+    "base_url",
+    "ca",
+    "cache",
+    "cert",
+    "credentials",
+    "decompress",
+    "dispatcher",
+    "encoding",
+    "family",
+    "followRedirect",
+    "follow_redirects",
+    "headers",
+    "hooks",
+    "host",
+    "hostname",
+    "http2",
+    "httpAgent",
+    "https",
+    "httpsAgent",
+    "integrity",
+    "keepalive",
+    "key",
+    "localAddress",
+    "lookup",
+    "maxRedirects",
+    "method",
+    "mode",
+    "path",
+    "port",
+    "protocol",
+    "proxies",
+    "proxy",
+    "redirect",
+    "referrerPolicy",
+    "rejectUnauthorized",
+    "responseType",
+    "retry",
+    "signal",
+    "stream",
+    "throwHttpErrors",
+    "timeout",
+    "timeout_ms",
+    "trust_env",
+    "url",
+    "validateStatus",
+    "verify"
+   ]
+  },
+  "_LD_OWN_FOLDER_RE": {
+   "flags": "",
+   "re": "__dirname|__filename|import\\s*\\.\\s*meta|__file__"
+  },
+  "_LD_PARAM_RE": {
+   "flags": "",
+   "re": "\\s*(?:\\.\\.\\.|\\*{1,2})?\\s*([A-Za-z_$][\\w$]*)"
+  },
+  "_LD_PATH_EXPR_RE": {
+   "flags": "",
+   "re": "\\s*(?:(?:path|os\\s*\\.\\s*path|posixpath|ntpath)\\s*\\.\\s*(?:join|resolve|normalize)\\s*\\(|Path\\s*\\(|[fFrRbBuU]{0,2}[\"'`]|[A-Za-z_$][\\w$]*(?:\\s*\\.\\s*[A-Za-z_$][\\w$]*){0,4}\\s*(?:\\(\\s*(?:[\"'][^\"'\\n]{0,200}[\"'])?\\s*\\))?\\s*(?:[+/]|\\Z))"
+  },
+  "_LD_PLAIN_LITERAL_RE": {
+   "flags": "",
+   "re": "[fFrRbBuU]{0,2}([\"'`])([^\"'`\\n]*)\\1\\Z"
+  },
+  "_LD_PROCESS_KEYS": {
+   "set": [
+    "bufsize",
+    "capture_output",
+    "check",
+    "close_fds",
+    "creationflags",
+    "cwd",
+    "env",
+    "executable",
+    "group",
+    "pass_fds",
+    "preexec_fn",
+    "shell",
+    "start_new_session",
+    "startupinfo",
+    "stderr",
+    "stdin",
+    "stdout",
+    "text",
+    "umask",
+    "universal_newlines",
+    "user"
+   ]
+  },
+  "_LD_PUBLIC_IP_RE": {
+   "flags": "",
+   "re": "\\bapi(?:64)?\\.ipify\\.org\\b|\\bip-api\\.com\\b|\\bipinfo\\.io\\b|\\bifconfig\\.me\\b|\\bicanhazip\\.com\\b|\\bcheckip\\.amazonaws\\.com\\b|\\bipapi\\.co\\b|\\bident\\.me\\b|\\bapi\\.myip\\.com\\b|\\bwtfismyip\\.com\\b"
+  },
+  "_LD_READERS": {
+   "set": [
+    "Path",
+    "createReadStream",
+    "glob",
+    "iglob",
+    "listdir",
+    "open",
+    "opendir",
+    "opendirSync",
+    "readFile",
+    "readFileSync",
+    "read_bytes",
+    "read_text",
+    "readdir",
+    "readdirSync",
+    "readlines",
+    "scandir",
+    "walk"
+   ]
+  },
+  "_LD_READS_RE": {
+   "flags": "",
+   "re": "\\b(?:Path|createReadStream|glob|iglob|listdir|open|opendir|opendirSync|readFile|readFileSync|read_bytes|read_text|readdir|readdirSync|readlines|scandir|walk)\\s*\\("
+  },
+  "_LD_REASONS": {
+   "map": {
+    "address": {
+     "value": "sends the machine's public IP address over the network"
+    },
+    "credentials": {
+     "value": "sends what the cloud's instance metadata service gives it (the machine's credentials) over the network"
+    },
+    "environment": {
+     "value": "sends environment variables over the network"
+    },
+    "file": {
+     "value": "reads files outside the package and sends them over the network"
+    },
+    "identity": {
+     "value": "sends the machine's user or host name over the network"
+    },
+    "report": {
+     "value": "sends what local commands report about the machine over the network"
+    }
+   }
+  },
+  "_LD_REQUEST_SEND_RE": {
+   "flags": "",
+   "re": "\\b(?:requests|httpx|session|client)\\s*\\.\\s*request\\s*\\("
+  },
+  "_LD_SEAL_RE": {
+   "flags": "",
+   "re": "\\b(?:readFileSync|readFile|readdirSync|readdir|createReadStream|opendirSync|opendir|listdir|scandir|walk|glob|iglob|open|existsSync|exists|statSync|lstatSync|isfile|isdir)\\s*\\("
+  },
+  "_LD_SEND_NEEDLES": {
+   "list": [
+    {
+     "value": "request"
+    },
+    {
+     "value": "fetch"
+    },
+    {
+     "value": "post"
+    },
+    {
+     "value": "put"
+    },
+    {
+     "value": "patch"
+    },
+    {
+     "value": "send"
+    },
+    {
+     "value": "write"
+    },
+    {
+     "value": "end("
+    },
+    {
+     "value": "urlopen"
+    },
+    {
+     "value": "Request"
+    },
+    {
+     "value": "get"
+    },
+    {
+     "value": "dns"
+    },
+    {
+     "value": "gethostbyname"
+    },
+    {
+     "value": "getaddrinfo"
+    },
+    {
+     "value": "connect"
+    },
+    {
+     "value": "Socket"
+    },
+    {
+     "value": "socket"
+    },
+    {
+     "value": "curl"
+    },
+    {
+     "value": "wget"
+    },
+    {
+     "value": "nc "
+    },
+    {
+     "value": "nslookup"
+    },
+    {
+     "value": "dig"
+    },
+    {
+     "value": "ping"
+    }
+   ]
+  },
+  "_LD_SEND_RE": {
+   "flags": "",
+   "re": "\\b(?:axios|got|needle|superagent|ky|requests|httpx|session|client|aiohttp)\\s*\\.\\s*(?:post|put|patch)\\s*\\(|\\bsendBeacon\\s*\\(|\\bRequest\\s*\\(|\\burlopen\\s*\\(|(?<![\\w$.])fetch\\s*\\(|\\b(?:globalThis|window|self|global)\\s*\\.\\s*fetch\\s*\\("
+  },
+  "_LD_STATEMENT_SPAN": {
+   "value": 2000
+  },
+  "_LD_TEST_AFTER_RE": {
+   "flags": "",
+   "re": "\\s*(?:[=!]==?|=(?![=>])|&&|\\?(?![.?])|\\b(?:and|is|in|else|instanceof)\\b)"
+  },
+  "_LD_TEST_BEFORE": {
+   "list": [
+    {
+     "value": "typeof"
+    },
+    {
+     "value": "not"
+    }
+   ]
+  },
+  "_LD_WHOLE_ENV": {
+   "value": "the whole environment"
+  },
+  "_LD_WRITE_TAIL": {
+   "value": "\\s*\\.\\s*(?:write|end|send|sendall|sendto|request)\\s*\\("
+  },
+  "_LD_WRITE_TAIL_RE": {
+   "flags": "",
+   "re": "\\s*\\.\\s*(?:write|end|send|sendall|sendto|request)\\s*\\("
   },
   "_LETTER_RUN_RE": {
    "flags": "",
@@ -10793,7 +11950,7 @@
      "value": "CWE-506 \u00b7 Supply chain"
     },
     "sev": {
-     "value": "CRITICAL"
+     "value": "MAJOR"
     },
     "type": {
      "value": "HOTSPOT"
@@ -11140,47 +12297,13 @@
     }
    ]
   },
-  "_PUBLIC_IP_LOOKUP_NEEDLES": {
-   "list": [
-    {
-     "value": "ipify.org"
-    },
-    {
-     "value": "ip-api.com"
-    },
-    {
-     "value": "ipinfo.io"
-    },
-    {
-     "value": "ifconfig.me"
-    },
-    {
-     "value": "icanhazip.com"
-    },
-    {
-     "value": "checkip.amazonaws.com"
-    },
-    {
-     "value": "ipapi.co"
-    },
-    {
-     "value": "ident.me"
-    },
-    {
-     "value": "api.myip.com"
-    },
-    {
-     "value": "wtfismyip.com"
-    }
-   ]
-  },
-  "_PUBLIC_IP_LOOKUP_RE": {
-   "flags": "",
-   "re": "\\bapi(?:64)?\\.ipify\\.org\\b|\\bip-api\\.com\\b|\\bipinfo\\.io\\b|\\bifconfig\\.me\\b|\\bicanhazip\\.com\\b|\\bcheckip\\.amazonaws\\.com\\b|\\bipapi\\.co\\b|\\bident\\.me\\b|\\bapi\\.myip\\.com\\b|\\bwtfismyip\\.com\\b"
-  },
   "_PUBLIC_IP_URL_RE": {
    "flags": "",
    "re": "\\b(?:https?|wss?|tcp)://(?!(?:10|127|0)\\.)(?!192\\.168\\.)(?!172\\.(?:1[6-9]|2\\d|3[01])\\.)(?!169\\.254\\.)(?:(?:25[0-5]|2[0-4]\\d|1?\\d?\\d)\\.){3}(?:25[0-5]|2[0-4]\\d|1?\\d?\\d)(?![\\d.])"
+  },
+  "_PUBLIC_KEY_FILE_RE": {
+   "flags": "i",
+   "re": "\\.pub\\b|known_hosts"
   },
   "_PUBLIC_RESOLVERS": {
    "set": [
@@ -11200,6 +12323,62 @@
   },
   "_PUBLISH_CMD_SRC": {
    "value": "\\b(?:exec|execSync|execa|execaSync|execFile|execFileSync|spawn|spawnSync|system|popen|Popen|run|call|check_call|check_output|getoutput)\\s*\\(\\s*(?:\\[\\s*)?[\"'`](?:[^\"'`\\n]{0,80}?(?:&&|;|\\|\\|)\\s*)?(?:npx\\s+)?(?:npm|pnpm|yarn|bun)(?:\\.cmd)?(?:[\"'`]\\s*,\\s*(?:\\[\\s*)?[\"'`]|\\s+)publish\\b"
+  },
+  "_PX_ARGS": {
+   "value": 4000
+  },
+  "_PX_BINARY_RE": {
+   "flags": "",
+   "re": "\\s*([A-Za-z_$][\\w$]*)(?:\\s*(===|!==|==|!=|<=|>=|<<|>>>|>>|&&|\\|\\||\\*\\*|[-+*/%<>&|^])\\s*|\\s+(instanceof|in)\\s+)([A-Za-z_$][\\w$]*)\\s*"
+  },
+  "_PX_CALL_RE": {
+   "flags": "",
+   "re": "\\s*([A-Za-z_$][\\w$]*)\\s*\\((?P<a>[^()]*)\\)\\s*"
+  },
+  "_PX_DEPTH": {
+   "value": 32
+  },
+  "_PX_END_RE": {
+   "flags": "",
+   "re": "\\s*([,}])"
+  },
+  "_PX_FUNCTION_RE": {
+   "flags": "",
+   "re": "function\\s*(?:[A-Za-z_$][\\w$]*\\s*)?\\((?P<params>[^()]{0,400})\\)\\s*\\{(?:\\s*(?:var|const|let)\\s+[A-Za-z_$][\\w$]*\\s*=\\s*[A-Za-z_$][\\w$]*\\s*;)*\\s*return\\s+(?P<e>[^;{}]{1,400}?)\\s*;?\\s*\\}"
+  },
+  "_PX_KEY_RE": {
+   "flags": "",
+   "re": "\\s*(?:(?P<k>[A-Za-z_$][\\w$]*)|'(?P<k2>[^'\\\\\\n]*)'|\"(?P<k3>[^\"\\\\\\n]*)\")\\s*:\\s*"
+  },
+  "_PX_MAX_ENTRIES": {
+   "value": 256
+  },
+  "_PX_MAX_USES": {
+   "value": 1000000
+  },
+  "_PX_OBJECT_RE": {
+   "flags": "",
+   "re": "(?<![\\w$.])([A-Za-z_$][\\w$]*)\\s*=\\s*\\{"
+  },
+  "_PX_OPEN_RE": {
+   "flags": "",
+   "re": "\\s*\\("
+  },
+  "_PX_REF_CALL_RE": {
+   "flags": "",
+   "re": "\\s*(?P<o>[A-Za-z_$][\\w$]*)\\s*\\[\\s*(?:'(?P<k>[^'\\\\\\n]*)'|\"(?P<k2>[^\"\\\\\\n]*)\")\\s*\\]\\s*\\((?P<a>[^()]*)\\)\\s*"
+  },
+  "_PX_REF_RE": {
+   "flags": "",
+   "re": "(?P<o>[A-Za-z_$][\\w$]*)\\s*\\[\\s*(?:'(?P<k>[^'\\\\\\n]*)'|\"(?P<k2>[^\"\\\\\\n]*)\")\\s*\\]"
+  },
+  "_PX_STRINGS_RE": {
+   "flags": "",
+   "re": "(?:'(?:[^'\\\\\\n]|\\\\[^\\n])*'|\"(?:[^\"\\\\\\n]|\\\\[^\\n])*\")(?:\\s*\\+\\s*(?:'(?:[^'\\\\\\n]|\\\\[^\\n])*'|\"(?:[^\"\\\\\\n]|\\\\[^\\n])*\"))*"
+  },
+  "_PX_USE_RE": {
+   "flags": "",
+   "re": "(?<![\\w$.])([A-Za-z_$][\\w$]*)\\s*\\[\\s*(?:'([^'\\\\\\n]*)'|\"([^\"\\\\\\n]*)\")\\s*\\]"
   },
   "_PYTHON_NAME_RE": {
    "flags": "i",
@@ -11244,6 +12423,10 @@
   },
   "_RAW_CONNECT_SPAN": {
    "value": 600
+  },
+  "_RAW_IP_URL_RE": {
+   "flags": "i",
+   "re": "https?://(?:\\d{1,3}\\.){3}\\d{1,3}\\b"
   },
   "_READ_CALLBACK_RE": {
    "flags": "",
@@ -11341,6 +12524,10 @@
   "_RULE_ID_SRC": {
    "value": "(?:S|T|SC|X|SQL|B|Q)-[A-Z0-9]+(?:-[A-Z0-9]+)*"
   },
+  "_RUNTIME_SCRIPT_RE": {
+   "flags": "i",
+   "re": "\\.(?:[cm]?[jt]s|[jt]sx)$"
+  },
   "_SAME_SITE_RE": {
    "flags": "",
    "re": "\\s*[rRuUfF]{0,2}[\"'`](?:/(?![/\\\\\"'`{$])|https?://[^/\"'`?#\\\\\\s{}$]+/)"
@@ -11350,6 +12537,215 @@
   },
   "_SAN_BODY": {
    "value": "(?:[^()]|\\([^()]*\\))*"
+  },
+  "_SA_ACC_A_HEAD": {
+   "value": "function\\s+(?P<g>[A-Za-z_$][\\w$]*)\\s*\\(\\s*(?P<p>[A-Za-z_$][\\w$]*)\\s*,\\s*[A-Za-z_$][\\w$]*\\s*\\)\\s*\\{\\s*(?P=p)\\s*=\\s*(?P=p)\\s*-\\s*(?P<off>[^;{}]{1,300});\\s*(?:var|const|let)\\s+[A-Za-z_$][\\w$]*\\s*=\\s*"
+  },
+  "_SA_ACC_B_HEAD": {
+   "value": "function\\s+(?P<g>[A-Za-z_$][\\w$]*)\\s*\\(\\s*[A-Za-z_$][\\w$]*\\s*,\\s*[A-Za-z_$][\\w$]*\\s*\\)\\s*\\{\\s*(?:var|const|let)\\s+[A-Za-z_$][\\w$]*\\s*=\\s*"
+  },
+  "_SA_ACC_B_TAIL": {
+   "value": "\\s*\\(\\s*\\)\\s*;\\s*return\\s+(?P=g)\\s*=\\s*function\\s*\\(\\s*(?P<p>[A-Za-z_$][\\w$]*)\\s*,\\s*[A-Za-z_$][\\w$]*\\s*\\)\\s*\\{\\s*(?P=p)\\s*=\\s*(?P=p)\\s*-\\s*(?P<off>[^;{}]{1,300});"
+  },
+  "_SA_ALIAS_RE": {
+   "flags": "",
+   "re": "(?<![\\w$.])([A-Za-z_$][\\w$]*)\\s*=\\s*([A-Za-z_$][\\w$]*)\\s*(?=[,;)\\n}])"
+  },
+  "_SA_ALPHABET_RE": {
+   "flags": "",
+   "re": "['\"]([A-Za-z0-9+/=]{65})['\"]"
+  },
+  "_SA_ARG_UNIT": {
+   "value": "[^()'\"\\n]|'(?:[^'\\\\\\n]|\\\\[^\\n])*'|\"(?:[^\"\\\\\\n]|\\\\[^\\n])*\""
+  },
+  "_SA_ARRAY_FN_RE": {
+   "flags": "",
+   "re": "function\\s+(?P<fn>[A-Za-z_$][\\w$]*)\\s*\\(\\s*\\)\\s*\\{\\s*(?:var|const|let)\\s+(?P<arr>[A-Za-z_$][\\w$]*)\\s*=\\s*\\["
+  },
+  "_SA_BODY": {
+   "value": 3000
+  },
+  "_SA_CALL_RE": {
+   "flags": "",
+   "re": "(?<![\\w$.])([A-Za-z_$][\\w$]*)\\s*\\(((?:[^()'\"\\n]|'(?:[^'\\\\\\n]|\\\\[^\\n])*'|\"(?:[^\"\\\\\\n]|\\\\[^\\n])*\"|\\((?:[^()'\"\\n]|'(?:[^'\\\\\\n]|\\\\[^\\n])*'|\"(?:[^\"\\\\\\n]|\\\\[^\\n])*\")*\\)){1,400})\\)"
+  },
+  "_SA_CALL_TAIL": {
+   "value": "\\s*\\(\\s*\\)"
+  },
+  "_SA_CHECKSUM_RE": {
+   "flags": "",
+   "re": "try\\s*\\{\\s*(?:var|const|let)\\s+(?P<v>[A-Za-z_$][\\w$]*)\\s*=\\s*(?P<e>[^;]{1,6000});\\s*if\\s*\\(\\s*(?P=v)\\s*===\\s*[A-Za-z_$][\\w$]*\\s*\\)\\s*break"
+  },
+  "_SA_DECIMAL_RE": {
+   "flags": "",
+   "re": "[+-]?(?:\\d+\\.?\\d*(?:[eE][+-]?\\d+)?|\\.\\d+(?:[eE][+-]?\\d+)?)"
+  },
+  "_SA_DEC_MAX": {
+   "value": 15
+  },
+  "_SA_DEPTH": {
+   "value": 8
+  },
+  "_SA_ENTRY_RE": {
+   "flags": "",
+   "re": "\\s*(?:(?P<k>[A-Za-z_$][\\w$]*)|'(?P<k2>[^'\\\\\\n]*)'|\"(?P<k3>[^\"\\\\\\n]*)\")\\s*:\\s*(?P<v>-?\\s*(?:0[xX][0-9a-fA-F]+|(?:0|[1-9]\\d*)(?:\\.\\d+)?)|'(?:[^'\\\\\\n]|\\\\[^\\n])*'|\"(?:[^\"\\\\\\n]|\\\\[^\\n])*\")\\s*(?P<end>[,}])"
+  },
+  "_SA_ESCAPES": {
+   "map": {
+    "b": {
+     "value": "\b"
+    },
+    "f": {
+     "value": "\f"
+    },
+    "n": {
+     "value": "\n"
+    },
+    "r": {
+     "value": "\r"
+    },
+    "t": {
+     "value": "\t"
+    },
+    "v": {
+     "value": "\u000b"
+    }
+   }
+  },
+  "_SA_FUNCTION_TAIL_RE": {
+   "flags": "",
+   "re": "function\\s*$"
+  },
+  "_SA_HEX": {
+   "set": [
+    "0",
+    "1",
+    "2",
+    "3",
+    "4",
+    "5",
+    "6",
+    "7",
+    "8",
+    "9",
+    "A",
+    "B",
+    "C",
+    "D",
+    "E",
+    "F",
+    "a",
+    "b",
+    "c",
+    "d",
+    "e",
+    "f"
+   ]
+  },
+  "_SA_HEX_MAX": {
+   "value": 13
+  },
+  "_SA_IDENT": {
+   "value": "[A-Za-z_$][\\w$]*"
+  },
+  "_SA_INVOKE2_HEAD": {
+   "value": "\\}\\s*\\)\\s*\\(\\s*"
+  },
+  "_SA_INVOKE2_TAIL": {
+   "value": "\\s*,\\s*(?P<t>(?:[^;()]|\\([^;()]*\\)){1,200}?)\\)"
+  },
+  "_SA_INVOKE_HEAD": {
+   "value": "\\}\\s*\\(\\s*"
+  },
+  "_SA_INVOKE_TAIL": {
+   "value": "\\s*,\\s*(?P<t>(?:[^;()]|\\([^;()]*\\)){1,200}?)\\)\\s*\\)"
+  },
+  "_SA_JS_SPACE": {
+   "set": [
+    "\t",
+    "\n",
+    "\u000b",
+    "\f",
+    "\r",
+    " ",
+    "\u00a0",
+    "\u1680",
+    "\u2000",
+    "\u2001",
+    "\u2002",
+    "\u2003",
+    "\u2004",
+    "\u2005",
+    "\u2006",
+    "\u2007",
+    "\u2008",
+    "\u2009",
+    "\u200a",
+    "\u2028",
+    "\u2029",
+    "\u202f",
+    "\u205f",
+    "\u3000",
+    "\ufeff"
+   ]
+  },
+  "_SA_LIT_RE": {
+   "flags": "",
+   "re": "'(?:[^'\\\\\\n]|\\\\[^\\n])*'|\"(?:[^\"\\\\\\n]|\\\\[^\\n])*\""
+  },
+  "_SA_LOOP_BACK": {
+   "value": 20000
+  },
+  "_SA_MAX_ARRAYS": {
+   "value": 4
+  },
+  "_SA_MAX_CALLS": {
+   "value": 1000000
+  },
+  "_SA_MAX_CHARS": {
+   "value": 16000000
+  },
+  "_SA_MAX_ITEMS": {
+   "value": 200000
+  },
+  "_SA_OBJECT_RE": {
+   "flags": "",
+   "re": "(?<![\\w$.])([A-Za-z_$][\\w$]*)\\s*=\\s*\\{"
+  },
+  "_SA_OCT_RE": {
+   "flags": "",
+   "re": "[0-3][0-7]{0,2}|[4-7][0-7]?"
+  },
+  "_SA_OFF": {
+   "value": "(?P<off>[^;{}]{1,300})"
+  },
+  "_SA_PARAM_RE": {
+   "flags": "",
+   "re": "\\s*([A-Za-z_$][\\w$]*)\\s*"
+  },
+  "_SA_SPACE_RE": {
+   "flags": "",
+   "re": "\\s*"
+  },
+  "_SA_TAIL_CALL": {
+   "value": "\\s*\\(\\s*\\)\\s*;?\\s*\\}"
+  },
+  "_SA_TAIL_END": {
+   "value": "\\s*;?\\s*\\}\\s*;?\\s*return\\s+"
+  },
+  "_SA_TAIL_HEAD": {
+   "value": "\\s*;?\\s*"
+  },
+  "_SA_TAIL_MID": {
+   "value": "\\s*=\\s*function\\s*\\(\\s*\\)\\s*\\{\\s*return\\s+"
+  },
+  "_SA_TOKEN_RE": {
+   "flags": "",
+   "re": "\\s*(?:(?P<num>0[xX][0-9a-fA-F]+|(?:0|[1-9]\\d*)(?:\\.\\d*)?(?:[eE][-+]?\\d+)?|\\.\\d+(?:[eE][-+]?\\d+)?)(?![\\w$])|(?P<str>'(?:[^'\\\\\\n]|\\\\[^\\n])*'|\"(?:[^\"\\\\\\n]|\\\\[^\\n])*\")|(?P<name>[A-Za-z_$][\\w$]*)|(?P<op>[-+*/()\\[\\].,]))"
+  },
+  "_SA_WRAPPER_RE": {
+   "flags": "",
+   "re": "(?:\\bfunction\\s+(?P<n1>[A-Za-z_$][\\w$]*)|(?<![\\w$.])(?P<n2>[A-Za-z_$][\\w$]*)\\s*=\\s*function(?:\\s+[A-Za-z_$][\\w$]*)?)\\s*\\((?P<params>[^()]{0,400})\\)\\s*\\{\\s*return\\s+(?P<target>[A-Za-z_$][\\w$]*)\\s*\\((?P<args>[^()]{0,400})\\)\\s*;?\\s*\\}"
   },
   "_SCRIPT_EXT_RE": {
    "flags": "i",
@@ -11432,10 +12828,6 @@
   "_SECRET_RUN_RE": {
    "flags": "",
    "re": "[A-Za-z0-9+/=_\\-]{20,}"
-  },
-  "_SECRET_SOURCE_RE": {
-   "flags": "im",
-   "re": "JSON\\.stringify\\(\\s*process\\.env|Object\\.(?:keys|entries|values)\\(\\s*process\\.env|\\.npmrc|[/\\\\]\\.ssh\\b|~/\\.ssh\\b|id_rsa|id_ed25519|\\.aws[/\\\\]|~/\\.aws\\b|\\.git-credentials|\\.docker[/\\\\]config\\.json|\\.kube[/\\\\]config|Local Storage[/\\\\]leveldb|\\.pypirc|\\.netrc\\b|\\bdict\\(\\s*os\\.environ\\s*\\)|\\bos\\.environ\\.(?:items|keys|values|copy)\\(\\s*\\)|json\\.dumps\\(\\s*(?:dict\\(\\s*)?os\\.environ|\\b(?:str|repr)\\(\\s*os\\.environ\\s*\\)|\\{\\s*\\*\\*\\s*os\\.environ|\\burlencode\\(\\s*(?:dict\\(\\s*)?os\\.environ|\\bos\\.environb\\b|(?:^|[\\s;&(`])(?:env|printenv|set)\\s*(?:\\|(?!\\|)|>)|\\$\\(\\s*(?:env|printenv)\\s*\\)|`\\s*(?:env|printenv)\\s*`"
   },
   "_SELF_PUBLISH_RULE": {
    "map": {
@@ -11523,6 +12915,141 @@
     }
    ]
   },
+  "_SEND_REASONS": {
+   "list": [
+    {
+     "value": "sends the machine's public IP address over the network"
+    },
+    {
+     "value": "sends environment variables over the network"
+    },
+    {
+     "value": "reads files outside the package and sends them over the network"
+    },
+    {
+     "value": "sends the machine's user or host name over the network"
+    },
+    {
+     "value": "sends what local commands report about the machine over the network"
+    },
+    {
+     "value": "sends what the cloud's instance metadata service gives it (the machine's credentials) over the network"
+    },
+    {
+     "value": "sends the machine's user or host name over the network"
+    },
+    {
+     "value": "sends the machine's user or host name in a DNS lookup of a name it builds"
+    },
+    {
+     "value": "sends environment variables over the network"
+    },
+    {
+     "value": "uploads a local file over the network"
+    },
+    {
+     "value": "sends what local commands report about the machine over the network"
+    },
+    {
+     "value": "sends what the cloud's instance metadata service gives it (the machine's credentials) over the network"
+    },
+    {
+     "value": "sends the machine's public IP address over the network"
+    },
+    {
+     "value": "tells a server it was installed (a request whose answer it throws away)"
+    },
+    {
+     "value": "sends the machine's user or host name"
+    },
+    {
+     "value": "sends data to a webhook whose secret"
+    },
+    {
+     "value": "collects files from several credential folders"
+    }
+   ]
+  },
+  "_SE_HOLE_RE": {
+   "flags": "",
+   "re": "\\$\\{\\s*([A-Za-z_$][\\w$]*)\\s*\\}|\\{\\s*([A-Za-z_]\\w*)\\s*\\}"
+  },
+  "_SE_MAX": {
+   "value": 200
+  },
+  "_SE_MIN_DISTINCT": {
+   "value": 10
+  },
+  "_SE_NEEDLES": {
+   "list": [
+    {
+     "value": "fetch"
+    },
+    {
+     "value": "urlopen"
+    },
+    {
+     "value": "Request"
+    },
+    {
+     "value": "sendBeacon"
+    },
+    {
+     "value": "axios"
+    },
+    {
+     "value": "got"
+    },
+    {
+     "value": "ky"
+    },
+    {
+     "value": "needle"
+    },
+    {
+     "value": "superagent"
+    },
+    {
+     "value": ".get"
+    },
+    {
+     "value": ".post"
+    },
+    {
+     "value": ".put"
+    },
+    {
+     "value": ".patch"
+    },
+    {
+     "value": ".request"
+    },
+    {
+     "value": ".send"
+    },
+    {
+     "value": ".open"
+    },
+    {
+     "value": "curl"
+    },
+    {
+     "value": "wget"
+    }
+   ]
+  },
+  "_SE_REQUEST_RE": {
+   "flags": "",
+   "re": "\\b(?:fetch|urlopen|Request|sendBeacon|axios|got|ky|needle|superagent)\\s*\\(|\\.\\s*(?:get|post|put|patch|request|send|open)\\s*\\("
+  },
+  "_SE_SEGMENT_RE": {
+   "flags": "",
+   "re": "[A-Za-z0-9_:-]{20,200}"
+  },
+  "_SE_URL_RE": {
+   "flags": "",
+   "re": "https?://([^\\s\"'`<>/?#]{1,300})([^\\s\"'`<>?#]{0,600})"
+  },
   "_SHEBANG_JS_NAMES": {
    "set": [
     "bun",
@@ -11549,6 +13076,710 @@
     "zsh"
    ]
   },
+  "_SHORTCUT_FOUND_RE": {
+   "flags": "i",
+   "re": "['\"`]\\*?\\.lnk['\"`]"
+  },
+  "_SHORTCUT_SET_RE": {
+   "flags": "",
+   "re": "\\.\\s*(?:Arguments|TargetPath)\\s*\\+?=(?!=)"
+  },
+  "_SH_BEACON_REASON": {
+   "value": "tells a server it was installed (a request whose answer it throws away)"
+  },
+  "_SH_CMD": {
+   "set": [
+    "cmd"
+   ]
+  },
+  "_SH_CONCAT_MAX": {
+   "value": 20
+  },
+  "_SH_CURL_DATA": {
+   "set": [
+    "--data",
+    "--data-ascii",
+    "--data-binary",
+    "--data-raw",
+    "--data-urlencode",
+    "--form",
+    "--form-string",
+    "--json",
+    "--url-query",
+    "-F",
+    "-d"
+   ]
+  },
+  "_SH_CURL_LONG_VALUE": {
+   "set": [
+    "--alt-svc",
+    "--aws-sigv4",
+    "--cacert",
+    "--capath",
+    "--cert",
+    "--cert-type",
+    "--ciphers",
+    "--config",
+    "--connect-timeout",
+    "--connect-to",
+    "--continue-at",
+    "--cookie",
+    "--cookie-jar",
+    "--data",
+    "--data-ascii",
+    "--data-binary",
+    "--data-raw",
+    "--data-urlencode",
+    "--dns-servers",
+    "--doh-url",
+    "--dump-header",
+    "--etag-compare",
+    "--etag-save",
+    "--form",
+    "--form-string",
+    "--header",
+    "--hsts",
+    "--interface",
+    "--json",
+    "--key",
+    "--key-type",
+    "--limit-rate",
+    "--local-port",
+    "--mail-from",
+    "--mail-rcpt",
+    "--max-filesize",
+    "--max-redirs",
+    "--max-time",
+    "--netrc-file",
+    "--noproxy",
+    "--oauth2-bearer",
+    "--output",
+    "--output-dir",
+    "--pinnedpubkey",
+    "--proto",
+    "--proto-redir",
+    "--proxy",
+    "--proxy-header",
+    "--proxy-user",
+    "--quote",
+    "--range",
+    "--referer",
+    "--request",
+    "--resolve",
+    "--retry",
+    "--retry-delay",
+    "--retry-max-time",
+    "--socks4",
+    "--socks4a",
+    "--socks5",
+    "--socks5-hostname",
+    "--speed-limit",
+    "--speed-time",
+    "--stderr",
+    "--telnet-option",
+    "--time-cond",
+    "--trace",
+    "--trace-ascii",
+    "--unix-socket",
+    "--upload-file",
+    "--url",
+    "--url-query",
+    "--user",
+    "--user-agent",
+    "--variable",
+    "--write-out"
+   ]
+  },
+  "_SH_CURL_META": {
+   "set": [
+    "--cookie",
+    "--header",
+    "--oauth2-bearer",
+    "--proxy-header",
+    "--referer",
+    "--user",
+    "--user-agent",
+    "-A",
+    "-H",
+    "-b",
+    "-e",
+    "-u"
+   ]
+  },
+  "_SH_CURL_OUTPUT": {
+   "set": [
+    "--output",
+    "-o"
+   ]
+  },
+  "_SH_CURL_REMOTE_NAME": {
+   "set": [
+    "--remote-name",
+    "--remote-name-all",
+    "-O"
+   ]
+  },
+  "_SH_CURL_SHORT_VALUE": {
+   "set": [
+    "A",
+    "C",
+    "D",
+    "E",
+    "F",
+    "H",
+    "K",
+    "P",
+    "Q",
+    "T",
+    "U",
+    "X",
+    "Y",
+    "b",
+    "c",
+    "d",
+    "e",
+    "m",
+    "o",
+    "r",
+    "t",
+    "u",
+    "w",
+    "x",
+    "y",
+    "z"
+   ]
+  },
+  "_SH_CURL_UPLOAD": {
+   "set": [
+    "--upload-file",
+    "-T"
+   ]
+  },
+  "_SH_DATA_REASONS": {
+   "map": {
+    "address": {
+     "value": "sends the machine's public IP address over the network"
+    },
+    "credentials": {
+     "value": "sends what the cloud's instance metadata service gives it (the machine's credentials) over the network"
+    },
+    "environment": {
+     "value": "sends environment variables over the network"
+    },
+    "file": {
+     "value": "uploads a local file over the network"
+    },
+    "identity": {
+     "value": "sends the machine's user or host name over the network"
+    },
+    "lookup-identity": {
+     "value": "sends the machine's user or host name in a DNS lookup of a name it builds"
+    },
+    "report": {
+     "value": "sends what local commands report about the machine over the network"
+    }
+   }
+  },
+  "_SH_DECLARE": {
+   "set": [
+    "declare",
+    "export",
+    "local",
+    "readonly",
+    "typeset"
+   ]
+  },
+  "_SH_ECHO": {
+   "set": [
+    "echo",
+    "printf"
+   ]
+  },
+  "_SH_ENVIRONMENT": {
+   "set": [
+    "declare",
+    "export",
+    "printenv",
+    "set"
+   ]
+  },
+  "_SH_ENV_REF_RE": {
+   "flags": "i",
+   "re": "\\$env:([A-Za-z_][A-Za-z0-9_]*)|\\$\\{?([A-Za-z_][A-Za-z0-9_]*)|%([A-Za-z_][A-Za-z0-9_]*)%"
+  },
+  "_SH_ESCAPES": {
+   "map": {
+    "0": {
+     "value": "\u0000"
+    },
+    "b": {
+     "value": "\b"
+    },
+    "f": {
+     "value": "\f"
+    },
+    "n": {
+     "value": "\n"
+    },
+    "r": {
+     "value": "\r"
+    },
+    "t": {
+     "value": "\t"
+    },
+    "v": {
+     "value": "\u000b"
+    }
+   }
+  },
+  "_SH_EVAL": {
+   "set": [
+    "eval"
+   ]
+  },
+  "_SH_EXEC_LINE_RE": {
+   "flags": "",
+   "re": "\\b(?:system|popen|execSync|exec|getoutput|getstatusoutput|run|call|check_call|check_output|Popen)\\s*\\(\\s*(?=[rbuRBUfF]{0,2}[\"'`]|[A-Za-z_$])|\\b(?:spawn|spawnSync|execFile|execFileSync|run|call|check_call|check_output|Popen)\\s*\\(\\s*[\\[(]?\\s*[\"'](?:/usr)?(?:/bin/)?(?:ba|z|da|k)?sh[\"']\\s*,\\s*[\\[(]?\\s*[\"']-c[\"']\\s*,\\s*(?=[rbuRBUfF]{0,2}[\"'`])"
+  },
+  "_SH_EXEC_MAX": {
+   "value": 50
+  },
+  "_SH_EXEC_MEMO": {
+   "list": [
+    {
+     "value": null
+    },
+    {
+     "value": null
+    }
+   ]
+  },
+  "_SH_EXEC_NEEDLES": {
+   "list": [
+    {
+     "value": "curl"
+    },
+    {
+     "value": "wget"
+    },
+    {
+     "value": "nc "
+    },
+    {
+     "value": "ncat"
+    },
+    {
+     "value": "netcat"
+    },
+    {
+     "value": "socat"
+    },
+    {
+     "value": "telnet"
+    },
+    {
+     "value": "nslookup"
+    },
+    {
+     "value": "dig "
+    },
+    {
+     "value": "host "
+    },
+    {
+     "value": "ping"
+    }
+   ]
+  },
+  "_SH_FILE_READERS": {
+   "set": [
+    "base64",
+    "bzip2",
+    "cat",
+    "cut",
+    "gzip",
+    "head",
+    "less",
+    "more",
+    "nl",
+    "od",
+    "strings",
+    "tac",
+    "tail",
+    "tar",
+    "type",
+    "xxd",
+    "xz",
+    "zip"
+   ]
+  },
+  "_SH_FILTERS": {
+   "set": [
+    "awk",
+    "base64",
+    "bzip2",
+    "cat",
+    "cut",
+    "fold",
+    "grep",
+    "gzip",
+    "head",
+    "jq",
+    "nl",
+    "od",
+    "openssl",
+    "rev",
+    "sed",
+    "sort",
+    "strings",
+    "tac",
+    "tail",
+    "tee",
+    "tr",
+    "uniq",
+    "xxd",
+    "xz"
+   ]
+  },
+  "_SH_FLAG_A_OR_N_RE": {
+   "flags": "",
+   "re": "-[A-Za-z]*[an][A-Za-z]*\\Z"
+  },
+  "_SH_HOST_RE": {
+   "flags": "",
+   "re": "(?:[A-Za-z][A-Za-z0-9+.-]*://)?(?:[^\\s/?#@]*@)?(\\[[^\\]\\s]*\\]|[^\\s/?#:]*)"
+  },
+  "_SH_HTTP": {
+   "set": [
+    "curl",
+    "wget",
+    "wget2"
+   ]
+  },
+  "_SH_IDENTITY": {
+   "set": [
+    "groups",
+    "hostname",
+    "id",
+    "logname",
+    "users",
+    "w",
+    "who",
+    "whoami"
+   ]
+  },
+  "_SH_IDENTITY_VAR_RE": {
+   "flags": "i",
+   "re": "(?:USER|USERNAME|LOGNAME|HOSTNAME|COMPUTERNAME|USERDOMAIN)\\Z"
+  },
+  "_SH_KEYWORDS": {
+   "set": [
+    "!",
+    "do",
+    "elif",
+    "else",
+    "if",
+    "then",
+    "until",
+    "while",
+    "{"
+   ]
+  },
+  "_SH_LINES_MEMO": {
+   "list": [
+    {
+     "value": null
+    },
+    {
+     "value": null
+    }
+   ]
+  },
+  "_SH_LISTINGS": {
+   "set": [
+    "arp",
+    "df",
+    "dir",
+    "du",
+    "find",
+    "ifconfig",
+    "ip",
+    "ipconfig",
+    "last",
+    "ls",
+    "lsblk",
+    "lscpu",
+    "mount",
+    "netstat",
+    "ps",
+    "pwd",
+    "route",
+    "ss",
+    "systeminfo",
+    "tree",
+    "uptime"
+   ]
+  },
+  "_SH_LOOKUP": {
+   "set": [
+    "dig",
+    "host",
+    "nslookup",
+    "ping",
+    "ping6"
+   ]
+  },
+  "_SH_MAX_DEPTH": {
+   "value": 3
+  },
+  "_SH_NOOPS": {
+   "set": [
+    ":",
+    "echo",
+    "exit",
+    "false",
+    "printf",
+    "return",
+    "true"
+   ]
+  },
+  "_SH_NOT_SHELL_RE": {
+   "flags": "",
+   "re": "\\brequire\\s*\\(|(?<![^\\n])[ \\t]*(?:import|from)[ \\t]+[\\w.{*]|\\bdef[ \\t]+\\w+\\s*\\(|=>|(?<![^\\n])[ \\t]*(?:const|let|var|class)[ \\t]+[A-Za-z_$]|\\bconsole\\s*\\.\\s*log\\b|\\bmodule\\s*\\.\\s*exports\\b|\\bprocess\\s*\\.\\s*(?:env|argv|exit)\\b|\\bprint\\s*\\(|\\bos\\s*\\.\\s*(?:system|environ|popen)\\b"
+  },
+  "_SH_NULL": {
+   "set": [
+    "$null",
+    "/dev/null",
+    "nul"
+   ]
+  },
+  "_SH_PATH_VAR_RE": {
+   "flags": "i",
+   "re": "(?:HOME|USERPROFILE|PWD|INIT_CWD)\\Z"
+  },
+  "_SH_PLAIN_RUN_RE": {
+   "flags": "",
+   "re": "[^ \\t\\r\\n;()&|<>\\\\'\"$`]+"
+  },
+  "_SH_RAW": {
+   "set": [
+    "nc",
+    "ncat",
+    "netcat",
+    "socat",
+    "telnet"
+   ]
+  },
+  "_SH_REDIRECT_OPS": {
+   "list": [
+    {
+     "value": "<<<"
+    },
+    {
+     "value": "<<-"
+    },
+    {
+     "value": ">>"
+    },
+    {
+     "value": ">&"
+    },
+    {
+     "value": ">|"
+    },
+    {
+     "value": "<<"
+    },
+    {
+     "value": "<&"
+    },
+    {
+     "value": "<>"
+    },
+    {
+     "value": ">"
+    },
+    {
+     "value": "<"
+    }
+   ]
+  },
+  "_SH_SCRIPTED_FILTERS": {
+   "set": [
+    "awk",
+    "grep",
+    "jq",
+    "sed"
+   ]
+  },
+  "_SH_SCRIPT_MAX_CHARS": {
+   "value": 1000000
+  },
+  "_SH_SECRET_VAR_RE": {
+   "flags": "i",
+   "re": "TOKEN|SECRET|PASSW|API_?KEY|PRIVATE_?KEY|ACCESS_?KEY|CREDENTIAL|AUTH"
+  },
+  "_SH_SHELLS": {
+   "set": [
+    "ash",
+    "bash",
+    "dash",
+    "ksh",
+    "sh",
+    "zsh"
+   ]
+  },
+  "_SH_STATUS_KEYWORDS": {
+   "set": [
+    "!",
+    "elif",
+    "if",
+    "until",
+    "while"
+   ]
+  },
+  "_SH_URL_RE": {
+   "flags": "",
+   "re": "[A-Za-z][A-Za-z0-9+.-]*://[^\\s/?#]|[^\\s/'\"]*\\.[A-Za-z]{2,}(?::[0-9]+)?(?:[/?#]|\\Z)|[0-9]{1,3}(?:\\.[0-9]{1,3}){3}(?::[0-9]+)?(?:[/?#]|\\Z)"
+  },
+  "_SH_VAR_NAME_RE": {
+   "flags": "",
+   "re": "[A-Za-z_][A-Za-z0-9_]*\\Z"
+  },
+  "_SH_WGET_DATA": {
+   "set": [
+    "--body-data",
+    "--post-data"
+   ]
+  },
+  "_SH_WGET_LONG_VALUE": {
+   "set": [
+    "--accept",
+    "--append-output",
+    "--backups",
+    "--base",
+    "--bind-address",
+    "--body-data",
+    "--body-file",
+    "--ca-certificate",
+    "--ca-directory",
+    "--certificate",
+    "--certificate-type",
+    "--config",
+    "--connect-timeout",
+    "--default-page",
+    "--directory-prefix",
+    "--dns-timeout",
+    "--domains",
+    "--exclude-directories",
+    "--execute",
+    "--ftp-password",
+    "--ftp-user",
+    "--header",
+    "--http-password",
+    "--http-user",
+    "--include-directories",
+    "--input-file",
+    "--level",
+    "--limit-rate",
+    "--load-cookies",
+    "--local-encoding",
+    "--method",
+    "--output-document",
+    "--output-file",
+    "--password",
+    "--post-data",
+    "--post-file",
+    "--private-key",
+    "--private-key-type",
+    "--progress",
+    "--proxy-password",
+    "--proxy-user",
+    "--quota",
+    "--read-timeout",
+    "--referer",
+    "--reject",
+    "--remote-encoding",
+    "--restrict-file-names",
+    "--save-cookies",
+    "--secure-protocol",
+    "--timeout",
+    "--tries",
+    "--user",
+    "--user-agent",
+    "--wait",
+    "--waitretry"
+   ]
+  },
+  "_SH_WGET_META": {
+   "set": [
+    "--header",
+    "--http-password",
+    "--http-user",
+    "--password",
+    "--referer",
+    "--user",
+    "--user-agent",
+    "-U"
+   ]
+  },
+  "_SH_WGET_OUTPUT": {
+   "set": [
+    "--output-document",
+    "-O"
+   ]
+  },
+  "_SH_WGET_SHORT_VALUE": {
+   "set": [
+    "A",
+    "B",
+    "D",
+    "I",
+    "O",
+    "P",
+    "Q",
+    "T",
+    "U",
+    "X",
+    "a",
+    "e",
+    "i",
+    "l",
+    "o",
+    "t",
+    "w"
+   ]
+  },
+  "_SH_WGET_UPLOAD": {
+   "set": [
+    "--body-file",
+    "--post-file"
+   ]
+  },
+  "_SH_XARGS_LONG_VALUE": {
+   "set": [
+    "--arg-file",
+    "--delimiter",
+    "--eof",
+    "--max-args",
+    "--max-chars",
+    "--max-lines",
+    "--max-procs",
+    "--process-slot-var"
+   ]
+  },
+  "_SH_XARGS_SHORT_VALUE": {
+   "set": [
+    "I",
+    "L",
+    "P",
+    "a",
+    "d",
+    "n",
+    "s"
+   ]
+  },
   "_SIBLING_DATA_RE": {
    "flags": "",
    "re": "\\b(?:open|read_text|read_bytes|readFileSync|readFile)\\s*\\([^\\n]{0,200}?(?:__file__|__dirname|import\\.meta\\.url)[^\\n]{0,200}?[\\\"'](?:[^\\\"'`{}$\\n]{1,100}\\.(?:txt|dat|bin|png|jpe?g|gif|ico|bmp|svg|wav|mp3|mp4|woff2?|ttf|json|md|cfg|ini|log|db|pyc|so|dll|dylib|exe)|(?:[^\\\"'`{}$\\n]{0,100}[/\\\\])?(?:LICEN[CS]E|COPYING|NOTICE|README|AUTHORS|CHANGELOG|CHANGES|HISTORY|PATENTS)(?:[-.]\\w{1,10})?)[\\\"']|(?:__file__|__dirname)[^\\n]{0,200}?[\\\"'](?:[^\\\"'`{}$\\n]{1,100}\\.(?:txt|dat|bin|png|jpe?g|gif|ico|bmp|svg|wav|mp3|mp4|woff2?|ttf|json|md|cfg|ini|log|db|pyc|so|dll|dylib|exe)|(?:[^\\\"'`{}$\\n]{0,100}[/\\\\])?(?:LICEN[CS]E|COPYING|NOTICE|README|AUTHORS|CHANGELOG|CHANGES|HISTORY|PATENTS)(?:[-.]\\w{1,10})?)[\\\"'][^\\n]{0,60}?\\.\\s*(?:read_text|read_bytes)\\s*\\("
@@ -11572,10 +13803,10 @@
   },
   "_SPAWN_CALL_RE": {
    "flags": "",
-   "re": "\\b(?:spawn|spawnSync|execFile|execFileSync)\\s*\\(\\s*(?:process\\s*\\.\\s*execPath|process\\s*\\.\\s*argv\\s*\\[\\s*0\\s*\\]|['\"`](?:node|nodejs)(?:\\.exe)?['\"`])\\s*,\\s*\\[|\\bfork\\s*\\(|\\b(?:Popen|run|call|check_call|check_output)\\s*\\(\\s*\\[\\s*(?:sys\\s*\\.\\s*executable|['\"]python[0-9.]*(?:\\.exe)?['\"])\\s*,"
+   "re": "\\b(?:spawn|spawnSync|execFile|execFileSync)\\s*\\(\\s*(?:process\\s*\\.\\s*execPath|process\\s*\\.\\s*argv\\s*\\[\\s*0\\s*\\]|['\"`](?:node|nodejs|(?P<rt>bun|deno))(?:\\.exe)?['\"`]|(?P<js>[A-Za-z_$][\\w$]*))\\s*,\\s*\\[|\\bfork\\s*\\(|\\b(?:Popen|run|call|check_call|check_output)\\s*\\(\\s*\\[\\s*(?:sys\\s*\\.\\s*executable|['\"]python[0-9.]*(?:\\.exe)?['\"]|(?P<py>[A-Za-z_]\\w*))\\s*,"
   },
   "_SPAWN_CALL_SRC": {
-   "value": "\\b(?:spawn|spawnSync|execFile|execFileSync)\\s*\\(\\s*(?:process\\s*\\.\\s*execPath|process\\s*\\.\\s*argv\\s*\\[\\s*0\\s*\\]|['\"`](?:node|nodejs)(?:\\.exe)?['\"`])\\s*,\\s*\\[|\\bfork\\s*\\(|\\b(?:Popen|run|call|check_call|check_output)\\s*\\(\\s*\\[\\s*(?:sys\\s*\\.\\s*executable|['\"]python[0-9.]*(?:\\.exe)?['\"])\\s*,"
+   "value": "\\b(?:spawn|spawnSync|execFile|execFileSync)\\s*\\(\\s*(?:process\\s*\\.\\s*execPath|process\\s*\\.\\s*argv\\s*\\[\\s*0\\s*\\]|['\"`](?:node|nodejs|(?P<rt>bun|deno))(?:\\.exe)?['\"`]|(?P<js>[A-Za-z_$][\\w$]*))\\s*,\\s*\\[|\\bfork\\s*\\(|\\b(?:Popen|run|call|check_call|check_output)\\s*\\(\\s*\\[\\s*(?:sys\\s*\\.\\s*executable|['\"]python[0-9.]*(?:\\.exe)?['\"]|(?P<py>[A-Za-z_]\\w*))\\s*,"
   },
   "_SPAWN_CONCAT_RE": {
    "flags": "",
@@ -11586,10 +13817,10 @@
   },
   "_SPAWN_DIR_RE": {
    "flags": "",
-   "re": "__dirname|os\\s*\\.\\s*path\\s*\\.\\s*dirname\\s*\\(\\s*(?:os\\s*\\.\\s*path\\s*\\.\\s*(?:abspath|realpath)\\s*\\(\\s*)?__file__\\s*\\)?\\s*\\)|Path\\s*\\(\\s*__file__\\s*\\)\\s*(?:\\.\\s*resolve\\s*\\(\\s*\\))?\\s*\\.\\s*parent"
+   "re": "__dirname|os\\s*\\.\\s*path\\s*\\.\\s*dirname\\s*\\(\\s*(?:os\\s*\\.\\s*path\\s*\\.\\s*(?:abspath|realpath)\\s*\\(\\s*)?__file__\\s*\\)?\\s*\\)|Path\\s*\\(\\s*__file__\\s*\\)\\s*(?:\\.\\s*resolve\\s*\\(\\s*\\))?\\s*\\.\\s*parent(?:\\s*\\.\\s*resolve\\s*\\(\\s*\\))?|(?:path\\s*\\.\\s*)?dirname\\s*\\(\\s*(?:url\\s*\\.\\s*)?fileURLToPath\\s*\\(\\s*import\\s*\\.\\s*meta\\s*\\.\\s*url\\s*\\)\\s*\\)|import\\s*\\.\\s*meta\\s*\\.\\s*dirname"
   },
   "_SPAWN_DIR_SRC": {
-   "value": "__dirname|os\\s*\\.\\s*path\\s*\\.\\s*dirname\\s*\\(\\s*(?:os\\s*\\.\\s*path\\s*\\.\\s*(?:abspath|realpath)\\s*\\(\\s*)?__file__\\s*\\)?\\s*\\)|Path\\s*\\(\\s*__file__\\s*\\)\\s*(?:\\.\\s*resolve\\s*\\(\\s*\\))?\\s*\\.\\s*parent"
+   "value": "__dirname|os\\s*\\.\\s*path\\s*\\.\\s*dirname\\s*\\(\\s*(?:os\\s*\\.\\s*path\\s*\\.\\s*(?:abspath|realpath)\\s*\\(\\s*)?__file__\\s*\\)?\\s*\\)|Path\\s*\\(\\s*__file__\\s*\\)\\s*(?:\\.\\s*resolve\\s*\\(\\s*\\))?\\s*\\.\\s*parent(?:\\s*\\.\\s*resolve\\s*\\(\\s*\\))?|(?:path\\s*\\.\\s*)?dirname\\s*\\(\\s*(?:url\\s*\\.\\s*)?fileURLToPath\\s*\\(\\s*import\\s*\\.\\s*meta\\s*\\.\\s*url\\s*\\)\\s*\\)|import\\s*\\.\\s*meta\\s*\\.\\s*dirname"
   },
   "_SPAWN_JOIN_RE": {
    "flags": "",
@@ -11610,6 +13841,9 @@
   },
   "_SPAWN_MAX_FILES": {
    "value": 20
+  },
+  "_SPAWN_MAX_NAMED": {
+   "value": 32
   },
   "_SPAWN_MAX_TARGETS": {
    "value": 8
@@ -11633,6 +13867,14 @@
     "-m",
     "-p"
    ]
+  },
+  "_SPAWN_SCRIPT_EXT_RE": {
+   "flags": "i",
+   "re": "\\.(?:[cm]?[jt]s|[jt]sx|py)$"
+  },
+  "_SPAWN_STR_RE": {
+   "flags": "",
+   "re": "str\\s*\\(\\s*([A-Za-z_]\\w*)\\s*\\)"
   },
   "_SPAWN_VALUE_FLAGS": {
    "set": [
@@ -11881,16 +14123,25 @@
      "value": "carries a GitHub Actions workflow that dumps every repository secret"
     },
     {
-     "value": "sends data to a Telegram bot whose token"
+     "value": "sends data to a webhook whose secret is written in the code"
     },
     {
-     "value": "sends data to a Discord webhook whose token"
+     "value": "sends what local commands report about the machine to"
     },
     {
-     "value": "sends data to a Slack webhook whose key"
+     "value": "reads local files and sends them to an exfiltration service"
     },
     {
-     "value": "reads credential files and sends data to an IP address"
+     "value": "sends the machine's public IP address to"
+    },
+    {
+     "value": "sends the machine's user or host name to an IP address"
+    },
+    {
+     "value": "reads credentials or the whole environment and sends them to an IP address"
+    },
+    {
+     "value": "reads local files and sends them to an IP address"
     },
     {
      "value": "collects files from several credential folders"
@@ -11900,9 +14151,6 @@
     },
     {
      "value": "sends the machine's user or host name in a DNS lookup"
-    },
-    {
-     "value": "sends the machine's public IP address to a data-capture"
     },
     {
      "value": "sends the machine's user or host name to an address it fetches"
@@ -12114,10 +14362,6 @@
   },
   "_TAINT_CONFIG_WARNINGS": {
    "list": []
-  },
-  "_TELEGRAM_API_RE": {
-   "flags": "i",
-   "re": "api\\.telegram\\.org"
   },
   "_TEMPLATE_IMPORT_RE": {
    "flags": "",

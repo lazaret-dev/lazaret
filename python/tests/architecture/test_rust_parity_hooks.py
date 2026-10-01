@@ -16,7 +16,7 @@ import threading
 import unittest
 
 from lazaret.scanner import _native
-from tests.architecture.hooks_corpus import FIELDS, core_view, corpus
+from tests.architecture.hooks_corpus import FIELDS, core_view, corpus, shard
 
 CHUNK = 1500                       # cases per call across the boundary
 
@@ -55,7 +55,7 @@ class RustHookParityTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.cases = corpus()
+        cls.cases = shard(corpus())
         box = {}
         worker = threading.Thread(target=rust_views, args=(cls.cases, box))
         worker.start()

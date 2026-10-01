@@ -216,7 +216,7 @@ test("--deps: the Miasma and TrapDoor replicas", () => {
     run(["check", root, "--deps", "--out-dir", out, "--no-html", "--quiet"], { out: () => {}, err: () => {}, env: {} });
     const rep = JSON.parse(readFileSync(join(out, "lazaret-report.json"), "utf8"));
     const got = rep.issues.filter((i) => i.rule.startsWith("SC-")).map((i) => [i.rule, i.file.replaceAll("\\", "/"), i.sev, i.msg]);
-    const env = "reads environment variables or credential files and sends data over the network";
+    const env = "sends environment variables over the network (the whole environment)";
     assert.deepEqual(got.sort(), [
       ["SC-IMPORT-RISK", "venv/lib/python3.12/site-packages/trapdoor_py/__init__.py", "CRITICAL", `Dependency code ${REASON}.`],
       ["SC-INSTALL-HOOK", "node_modules/miasma/binding.gyp", "CRITICAL", `Install hook runs index.js, which ${env}.`],

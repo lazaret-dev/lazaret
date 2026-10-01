@@ -76,10 +76,12 @@ class SameCommandsTests(unittest.TestCase):
                  "echo curl | shasum\n")
 
     def test_network_and_environment(self):
+        # (0.1.8: a shell script is read by the shell reader: what each command sends)
         for text in self.NETWORK_WITH_ENV:
             with self.subTest(text=text[:40]):
-                self.assertIn("reads environment variables or credential files and sends data over "
-                              "the network", repo.install_script_risk(text))
+                self.assertIn("uploads a local file over the network (~/.ssh/id_rsa)" if "id_rsa" in text
+                              else "sends environment variables over the network (the whole environment)",
+                              repo.install_script_risk(text))
 
     def test_download_piped_into_a_shell(self):
         for text in self.PIPES:

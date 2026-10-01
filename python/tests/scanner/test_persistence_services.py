@@ -175,7 +175,7 @@ class ServiceHookTests(unittest.TestCase):
     def test_install_hook_command(self):
         self.assertEqual(self.hooks({"node_modules/p/package.json": json.dumps(
             {"name": "p", "version": "1.0.0", "scripts": {"postinstall": "systemctl --user enable --now p.service"}})}),
-            [("CRITICAL", "Install hook command installs a systemd service.")])
+            [("CRITICAL", '"postinstall" script installs a systemd service.')])
 
     def test_followed_install_script(self):
         self.assertEqual(self.hooks({"node_modules/p/package.json": json.dumps(

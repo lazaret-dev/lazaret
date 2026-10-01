@@ -31,7 +31,7 @@ class GypExpansionVerdictTests(unittest.TestCase):
                         "binding.gyp": "{'targets': [{'target_name': 'stub', "
                                        "'sources': ['<!(node index.js > /dev/null 2>&1 && echo stub.c)']}]}\n",
                         "index.js": EXFIL_JS})
-        env = "reads environment variables or credential files and sends data over the network"
+        env = "sends environment variables over the network (the whole environment)"
         self.assertIn(("binding.gyp", "CRITICAL", f"Install hook runs index.js, which {env}."), hook_findings(res))
         self.assertEqual(res["verdict"], "SUSPICIOUS", res["verdictReason"])
 

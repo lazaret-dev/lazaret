@@ -43,12 +43,14 @@ pub const CALLS: &[&str] = &[
     "install_script_risk", "import_time_risk", "import_time_severity", "decoded_view", "spawned_scripts",
     "self_publish_at", "runs_dll", "join_string_pieces", "received_code_kind", "runs_received_code",
     "downloads_and_runs", "decodes_and_runs", "powershell_risk", "stager_at", "reverse_shell_at",
-    "sends_host_info", "runs_own_source_at", "reads_own_source", "persistence_reasons",
+    "local_data_sent_at", "runs_own_source_at", "reads_own_source", "persistence_reasons",
     "dumps_workflow_secrets", "pipes_download_to_shell", "runs_substituted_download", "offscreen_code",
     "lex_comment_spans", "logical_text", "hooks_view", "signs_view",
     // 0.1.8: the exfiltration shapes, programs started at login or boot
-    "chat_secret_at", "credential_sweep_at", "env_copy_serialized_at", "dns_beacon_at", "miner_at",
+    "secret_endpoint_at", "credential_sweep_at", "exec_command_reasons", "dns_beacon_at", "miner_at",
     "raw_ip_connect", "capture_service", "exfil_signs", "service_reasons",
+    // 0.1.8: a shell text read as a program, and the command lines a script hands a shell
+    "sh_reasons", "shell_text", "code_text", "sh_literal_value",
     // 0.1.8: the dead drop
     "dead_drop_at",
     // Phase 2: scan_file, and what it reads
@@ -74,6 +76,20 @@ fn sweep(v: Option<(usize, Vec<PyStr>)>) -> Value {
         Some((at, names)) => Value::Arr(vec![Value::Int(at as i64), strs(&names)]),
         None => Value::Null,
     }
+}
+
+fn flow(v: Option<(usize, &'static str, PyStr, bool)>) -> Value {
+    match v {
+        Some((at, kind, what, in_address)) => {
+            Value::Arr(vec![Value::Int(at as i64), Value::str(kind), Value::Str(what), Value::Bool(in_address)])
+        }
+        None => Value::Null,
+    }
+}
+
+fn sh_reasons(p: &Pack, text: &[u32]) -> Value {
+    let mut walk = crate::shell::HookWalk::new();
+    strs(&crate::shell::sh_reasons(p, text, 0, false, &mut walk))
 }
 
 fn exfil(p: &Pack, text: &[u32]) -> Value {
@@ -263,7 +279,11 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
         "node_candidates" => strs(&hooks::node_candidates(text)),
         "node_e_codes" => strs(&hooks::node_e_codes(p, text)),
         "shebang_lang" => hooks::shebang_lang(p, text).map(Value::str).unwrap_or(Value::Null),
-        "install_script_risk" => strs(&signs::install_script_risk(p, text)),
+        "install_script_risk" => {
+            let shell = !matches!(args.get("shell"), Some(Value::Bool(false)));
+            let command = matches!(args.get("command"), Some(Value::Bool(true)));
+            strs(&signs::install_script_risk_with(p, text, shell, command))
+        }
         "import_time_risk" => {
             let (reasons, line) = signs::import_time_risk(p, text, lang);
             Value::Arr(vec![strs(&reasons), line.map(|l| Value::Int(l as i64)).unwrap_or(Value::Null)])
@@ -303,13 +323,20 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
         "powershell_risk" => strs(&signs::powershell_risk(p, text)),
         "stager_at" => Value::Int(signs::stager_at(p, text) as i64),
         "reverse_shell_at" => Value::Int(signs::reverse_shell_at(p, text) as i64),
-        "sends_host_info" => Value::Bool(signs::sends_host_info(p, text)),
+        "local_data_sent_at" => flow(crate::flow::local_data_sent_at(p, text)),
         "runs_own_source_at" => Value::Int(signs::runs_own_source_at(p, text) as i64),
         "reads_own_source" => Value::Bool(signs::reads_own_source(p, text)),
         "persistence_reasons" => strs(&signs::persistence_reasons(p, text)),
-        "chat_secret_at" => at_reason(signs::chat_secret_at(p, text)),
+        "secret_endpoint_at" => at_reason(crate::flow::secret_endpoint_at(p, text)),
         "credential_sweep_at" => sweep(signs::credential_sweep_at(p, text)),
-        "env_copy_serialized_at" => Value::Int(signs::env_copy_serialized_at(p, text) as i64),
+        "exec_command_reasons" => strs(&crate::shell::exec_command_reasons(p, text)),
+        "sh_reasons" => sh_reasons(p, text),
+        "shell_text" => Value::Bool(crate::shell::shell_text(p, text)),
+        "code_text" => Value::Bool(crate::shell::code_text(p, text)),
+        "sh_literal_value" => {
+            let at = opt_int(args, "at").unwrap_or(0).max(0) as usize;
+            opt_s(crate::shell::sh_literal_value(p, text, at))
+        }
         "dns_beacon_at" => {
             let host = !matches!(args.get("host"), Some(Value::Bool(false)));
             Value::Int(signs::dns_beacon_at(p, text, host) as i64)
@@ -403,7 +430,7 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
                 strs(&signs::powershell_risk(p, text)),
                 Value::Int(signs::stager_at(p, text) as i64),
                 Value::Int(signs::reverse_shell_at(p, text) as i64),
-                Value::Bool(signs::sends_host_info(p, text)),
+                flow(crate::flow::local_data_sent_at(p, text)),
                 Value::Int(signs::runs_own_source_at(p, text) as i64),
                 Value::Bool(signs::reads_own_source(p, text)),
                 strs(&signs::persistence_reasons(p, text)),
@@ -412,9 +439,9 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
                 Value::Bool(signs::runs_substituted_download(p, text)),
                 off("js"),
                 off("py"),
-                at_reason(signs::chat_secret_at(p, text)),
+                at_reason(crate::flow::secret_endpoint_at(p, text)),
                 sweep(signs::credential_sweep_at(p, text)),
-                Value::Int(signs::env_copy_serialized_at(p, text) as i64),
+                strs(&crate::shell::exec_command_reasons(p, text)),
                 Value::Int(signs::dns_beacon_at(p, text, true) as i64),
                 Value::Int(signs::miner_at(p, text) as i64),
                 opt_s(signs::raw_ip_connect(p, text)),
@@ -424,6 +451,10 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
                 // 0.1.8: the DNS beacon without a read of the identity, the dead drop
                 Value::Int(signs::dns_beacon_at(p, text, false) as i64),
                 dead_drop(signs::dead_drop_at(p, text)),
+                // 0.1.8: the text read as a shell program
+                sh_reasons(p, text),
+                Value::Bool(crate::shell::shell_text(p, text)),
+                Value::Bool(crate::shell::code_text(p, text)),
             ])
         }
         "logical_text" => {

@@ -86,7 +86,7 @@ function scan(root, ...extra) {
   }
 }
 const slash = (p) => p.replaceAll("\\", "/");
-const ENV = "reads environment variables or credential files and sends data over the network";
+const ENV = "sends environment variables over the network (the whole environment)";
 
 test("--deps: hooks escalate on what they run; import-time code; what cannot be followed", () => {
   const { root, linked } = tree();
@@ -101,7 +101,7 @@ test("--deps: hooks escalate on what they run; import-time code; what cannot be 
       "node_modules/d/package.json": `Install hook runs ./bin/setup, which ${ENV}.`,
       "node_modules/f/package.json": `Install hook runs ../../scripts/first-party.js, which ${ENV}.`,
       "node_modules/q/package.json": "Install hook runs ./pre.js, which pipes a download into a shell.",
-      "node_modules/r/package.json": '"postinstall" script runs a network-fetch/eval command at install time.',
+      "node_modules/r/package.json": '"postinstall" script pipes a download into a shell.',
       "node_modules/t/package.json": "Install hook runs script, which pipes a download into a shell.",
     };
     for (const [manifest, msg] of Object.entries(critical)) assert.deepEqual(hooks[manifest], [["CRITICAL", msg]], manifest);

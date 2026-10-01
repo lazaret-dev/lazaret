@@ -601,25 +601,29 @@ R("SC-EVAL-DECODE", "Decoded payload execution", "VULN", "BLOCKER", ("py", "js")
   "Decode-then-execute is the signature pattern of malware droppers and supply-chain implants.",
   "Treat as hostile until proven otherwise; inspect the decoded payload.",
   "CWE-506 · Supply chain"),
-R("SC-PACKER", "Packed JavaScript (p,a,c,k,e,d)", "VULN", "CRITICAL", ("js",),
+# (0.1.8: MAJOR, a tool's mark; a packed payload that runs is SC-EVAL-DECODER's)
+R("SC-PACKER", "Packed JavaScript (p,a,c,k,e,d)", "VULN", "MAJOR", ("js",),
   r"eval\s*\(\s*function\s*\(\s*p\s*,\s*a\s*,\s*c\s*,\s*k\s*,\s*e",
   "Dean Edwards packer signature — self-decoding packed code.",
   "Legitimate modern packages ship minified, not packed; packing hides intent.",
   "Unpack and review the payload before trusting this file.",
   "CWE-506 · Supply chain"),
-# eval of what a function written into the call decodes from a long encoded
-# literal (0.1.8): the 2026 wave that compromised awaitly, executable-stories-
-# vitest and three @redhat-cloud-services packages shipped a 4 MB index.js of
-# `try{eval(function(s,n){…String.fromCharCode((c.charCodeAt(0)-b+n)%26+b)…}
-# ([40,107,99,…], n))}catch(e){}` — a letter shift over character codes, run
-# as the package loads or installs. SC-PACKER's general case: any decoder
-# function, over at least 200 character codes or 1,000 characters of text.
-# None of the benchmark's 429 popular packages has one.
+# Code a function computes from a long literal, run (0.1.8): eval, Function or
+# vm's runIn…Context handed what a function — written into the call, or
+# named — returns for a blob of at least 200 character codes or 1,000
+# characters of text. The 2026 wave that compromised awaitly, executable-
+# stories-vitest and three @redhat-cloud-services packages shipped a 4 MB
+# index.js of `try{eval(function(s,n){…String.fromCharCode((c.charCodeAt(0)-
+# b+n)%26+b)…}([40,107,99,…], n))}catch(e){}`; Dean Edwards' packer is
+# eval(function(p,a,c,k,e,d){…}('<payload>', …)). Whatever the decoder, the
+# file shows it, never the code it runs. None of the benchmark's 429
+# popular packages has one.
 R("SC-EVAL-DECODER", "Code decoded by its own function and run", "VULN", "CRITICAL", ("js",),
-  r"\beval\s*\(\s*\(?\s*function\s*\([^()]{0,80}\)\s*\{(?:[^{}]|\{[^{}]{0,2000}\}){0,2000}\}\s*\)?\s*\(\s*"
+  r"\b(?:eval|(?:new\s+)?Function|runIn(?:This|New)?Context)\s*\(\s*(?:\(?\s*function\s*\([^()]{0,80}\)\s*\{"
+  r"(?:[^{}]|\{[^{}]{0,2000}\}){0,2000}\}\s*\)?|[A-Za-z_$][\w$]*)\s*\(\s*"
   r"(?:\[\s*\d+(?:\s*,\s*\d+){199}|'[^'\n]{1000}|\"[^\"\n]{1000}|`[^`]{1000})",
-  "eval runs what a function written into the call decodes from a long encoded literal.",
-  "An inline decoder over a blob of character codes or text keeps a payload out of sight: the file shows the "
+  "Code a function computes from a long literal is run (eval, Function or vm).",
+  "A decoder over a blob of character codes or text keeps a payload out of sight: the file shows the "
   "decoder, never the code it runs.",
   "Decode the blob and read what it runs; treat the package as hostile until then.",
   "CWE-506 · Supply chain"),
@@ -4686,6 +4690,14 @@ def _autorun_risk(command, base, read):
             found.append("is obfuscated")
         if found:
             return found, target
+        # (0.1.8) the scripts it starts (spawned_scripts): a loader that fetches
+        # a runtime and runs a file of the tree with it
+        for where, path in spawned_scripts(normalize_newlines(text)):
+            srel = _tree_join(posixpath.dirname(rel) if where == "dir" else base, path)
+            stext = read(srel) if srel is not None else None
+            more = _autorun_script_risk(stext) if stext else []
+            if more:
+                return [f"starts {srel}, which {'; and '.join(more)}"], target
     return [], None
 
 
@@ -5123,8 +5135,11 @@ _ENTROPY_RULE = {
     "why": "Random-looking constants are usually keys or tokens.",
     "fix": "If it is a secret, rotate it and load it from the environment.",
     "ref": "CWE-798 · OWASP A07"}
+# (0.1.8: MAJOR. The names are one tool's mark, not what the code does: the
+# string arrays and proxy objects that tool writes are read in the decoded
+# view, where the install-script and import-time tests see the behaviour.)
 _OBF_IDENT_RULE = {
-    "id": "SC-OBF-IDENT", "name": "Obfuscated identifier pattern", "type": "HOTSPOT", "sev": "CRITICAL",
+    "id": "SC-OBF-IDENT", "name": "Obfuscated identifier pattern", "type": "HOTSPOT", "sev": "MAJOR",
     "msg": "{n} '_0x…' identifiers — javascript-obfuscator signature.",
     "why": ("This naming pattern is produced by obfuscation tools; in a dependency it is "
             "a classic indicator of a compromised or malicious package."),
@@ -5314,7 +5329,8 @@ INSTALL_HOOK_RE = re.compile(
 # (`npx --yes evil`, `node ./scripts/payload.js`, `git clone … && make` contain
 # none of those tokens). Presence of *any* install-time script is itself worth
 # a finding: it runs with user privileges on `npm install` before the package
-# is reviewed. The pattern list is only a severity escalator.
+# is reviewed. Since 0.1.8 the list is only a hint in that MAJOR finding's
+# message; what escalates a hook is what its command does (hook_command_risk).
 # Scripts npm runs when a package is installed as a dependency. Publisher-side
 # scripts (prepack, prepublishOnly, postpublish, ...) only ever run on the
 # maintainer's machine while packaging a release, so they are not install hooks.
@@ -5326,15 +5342,20 @@ NPM_LOCAL_INSTALL_SCRIPTS = NPM_INSTALL_SCRIPTS + NPM_PREPARE_SCRIPTS
 NPM_LIFECYCLE_SCRIPTS = NPM_LOCAL_INSTALL_SCRIPTS   # backwards-compatible name
 PY_LIFECYCLE_SECTIONS = ("build-system", "tool.poetry", "project")
 
-def _sc_install_hook_issue(path, line_no, lines, script, cmd, suspicious, sev=None, redactor=None):
-    sev = sev or ("CRITICAL" if suspicious else "MAJOR")
-    if suspicious:
-        msg = f'"{script}" script runs a network-fetch/eval command at install time.'
+def _sc_install_hook_issue(path, line_no, lines, script, cmd, reasons, sev=None, redactor=None, hint=False):
+    """SC-INSTALL-HOOK for an install hook's command: CRITICAL with the
+    reasons it looks hostile (hook_command_risk), else MAJOR (or `sev`);
+    `hint`: the command runs a download or evaluation tool (INSTALL_HOOK_RE),
+    worth reading, not evidence (0.1.8)."""
+    sev = sev or ("CRITICAL" if reasons else "MAJOR")
+    if reasons:
+        msg = f'"{script}" script {"; and ".join(reasons)}.'
         why = ("Install hooks execute automatically on npm install — the most common "
-               "supply-chain compromise vector — and this one fetches or executes "
-               "remote code.")
+               "supply-chain compromise vector — and this command does what malicious "
+               "install hooks do.")
     else:
-        msg = f'"{script}" script runs code at install time: {cmd!r}.'
+        msg = (f'"{script}" script runs a download or evaluation command at install time: {cmd!r}.' if hint
+               else f'"{script}" script runs code at install time: {cmd!r}.')
         why = ("Install hooks run automatically with user privileges on npm install, "
                "before anyone reviews the package. Many legitimate packages use one "
                "(to fetch a platform binary, for example), so on its own this is a "
@@ -5342,7 +5363,7 @@ def _sc_install_hook_issue(path, line_no, lines, script, cmd, suspicious, sev=No
         if sev == "INFO":
             why = ("A prepare-family script runs on `npm install` in this checkout; it "
                    "is the project's own build step (husky, patch-package, a compile), "
-                   "listed for inventory. Suspicious commands here stay CRITICAL.")
+                   "listed for inventory. Hostile commands here stay CRITICAL.")
     issue = mk_issue(
         {"id": "SC-INSTALL-HOOK", "name": "Install hook", "type": "HOTSPOT",
          "sev": sev, "msg": msg, "why": why,
@@ -5655,6 +5676,16 @@ _HOOK_REDIRECTS = {">", ">>", "<", "<<", ">&", "<&", "&>", ">|"}
 _HOOK_WRAPPERS = {"env", "cross-env", "exec", "command", "nohup", "time", "nice", "sudo",
                   "cross-env-shell", "dotenv"}
 _NODE_NAMES = {"node", "nodejs", "node.exe"}
+# Other JavaScript runtimes run a file the way node does (0.1.8): `bun x.js`,
+# `bun run x.ts`, `deno run -A x.ts`, `tsx x.ts` (a name maps to the
+# subcommands that run a file, skipped). What follows is a file of the
+# package only when it is a path or a script's name: `bun run build` runs
+# the package's build script, `bun install` is a subcommand.
+_JS_RUNTIMES = {"bun": frozenset({"run"}), "bun.exe": frozenset({"run"}), "deno": frozenset({"run"}),
+                "deno.exe": frozenset({"run"}), "tsx": frozenset(), "ts-node": frozenset(),
+                "ts-node-esm": frozenset(), "esno": frozenset(), "babel-node": frozenset(),
+                "vite-node": frozenset()}
+_RUNTIME_SCRIPT_RE = re.compile(r"\.(?:[cm]?[jt]s|[jt]sx)$", re.I)
 _SHELL_NAMES = {"sh", "bash", "dash", "zsh", "ksh", "ash", "sh.exe", "bash.exe"}
 _PYTHON_NAME_RE = re.compile(r"^(?:python(?:\d+(?:\.\d+)?)?|py)(?:\.exe)?$", re.I)
 _NODE_CODE_FLAGS = {"-e", "--eval", "-p", "--print"}
@@ -5670,31 +5701,53 @@ _ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _HOOK_FALLBACK_TOKEN_RE = re.compile(r"&&|\|\||[;|&()]|[^\s;|&()]+")
 
 
-def _hook_tokens(cmd):
-    """Shell-like tokenization of an npm script: quotes respected, operators
-    (&& || ; | & parentheses) as their own tokens. Never raises."""
+_HOOK_SHLEX_MEMO = (None, None)        # the last command shlex read, and its tokens
+
+
+def _hook_shlex(cmd):
+    """shlex's tokens of an npm script (posix, punctuation_chars,
+    whitespace_split, no commenters), or None where shlex raises (unbalanced
+    quotes). The last command's tokens are kept (a copy is returned): the
+    hook follower and the tests ask for the same command more than once, and
+    shlex is the slowest part of reading one."""
+    global _HOOK_SHLEX_MEMO
+    memo = _HOOK_SHLEX_MEMO
+    if memo[0] is cmd:
+        return None if memo[1] is None else list(memo[1])
     import shlex
     try:
         lex = shlex.shlex(cmd, posix=True, punctuation_chars=True)
         lex.whitespace_split = True
         lex.commenters = ""
-        return list(lex)
-    except ValueError:                     # unbalanced quotes: best effort
+        tokens = list(lex)
+    except ValueError:
+        tokens = None
+    _HOOK_SHLEX_MEMO = (cmd, tokens)
+    return None if tokens is None else list(tokens)
+
+
+def _hook_tokens(cmd):
+    """Shell-like tokenization of an npm script: quotes respected, operators
+    (&& || ; | & parentheses) as their own tokens. Never raises."""
+    tokens = _hook_shlex(cmd)
+    if tokens is None:                     # unbalanced quotes: best effort
         return _HOOK_FALLBACK_TOKEN_RE.findall(cmd)
+    return tokens
 
 
 def _local_module(value):
     return bool(value) and (value.startswith(("./", "../", "/")) or bool(_SCRIPT_EXT_RE.search(value)))
 
 
-def _node_script(args):
-    """-> (script, preloads, code) for `node [flags] script [args]`: code is
-    the inline code of -e / --eval / -p / --print (None when there is none)."""
+def _node_script_at(args):
+    """-> (index of the script, preloads, code) for `node [flags] script
+    [args]`: code is the inline code of -e / --eval / -p / --print (None when
+    there is none); the index is None when there is no script."""
     preloads, i = [], 0
     while i < len(args):
         a = args[i]
         if a == "--":
-            return (args[i + 1] if i + 1 < len(args) else None), preloads, None
+            return (i + 1 if i + 1 < len(args) else None), preloads, None
         if a.startswith("-") and a != "-":
             name, eq, val = a.partition("=")
             if name in _NODE_CODE_FLAGS:
@@ -5707,8 +5760,30 @@ def _node_script(args):
                 continue
             i += 1
             continue
-        return a, preloads, None
+        return i, preloads, None
     return None, preloads, None
+
+
+def _node_script(args):
+    """-> (script, preloads, code) for `node [flags] script [args]` (see
+    _node_script_at)."""
+    at, preloads, code = _node_script_at(args)
+    return (None if at is None else args[at]), preloads, code
+
+
+def _runtime_script(args, runs):
+    """-> (script, preloads, code) for a JavaScript runtime other than node
+    (_JS_RUNTIMES): node's reading of its words, a subcommand in `runs`
+    skipped, the script kept only when it names a file."""
+    at, preloads, code = _node_script_at(args)
+    if at is not None and args[at] in runs:
+        more_at, more, code = _node_script_at(args[at + 1:])
+        preloads = preloads + more
+        at = None if more_at is None else at + 1 + more_at
+    script = None if at is None else args[at]
+    if script is not None and not (script.startswith(("./", "../", "/")) or _RUNTIME_SCRIPT_RE.search(script)):
+        script = None
+    return script, preloads, code
 
 
 def _interpreter_script(args, inline_flags=("-c",)):
@@ -5889,6 +5964,8 @@ def _hook_segment_targets(tokens, depth, walk):
         script, extra, code = None, [], None
         if base in _NODE_NAMES:
             script, extra, code = _node_script(words[i + 1:])
+        elif base in _JS_RUNTIMES:
+            script, extra, code = _runtime_script(words[i + 1:], _JS_RUNTIMES[base])
         elif base in _SHELL_NAMES or _PYTHON_NAME_RE.match(base):
             script, inline = _interpreter_script(words[i + 1:])
             if inline and depth < 2 and base in _SHELL_NAMES:
@@ -5932,7 +6009,8 @@ def follow_hook(cmd):
     `cd scripts && node x.js`, `sh ./install.sh`, `./install.sh`,
     `python setup_helper.py`, `node scripts\\x.js`,
     `node -e "require('./postinstall')"`, `env -C sub node x.js`,
-    `sudo -u me node x.js`, `2>/dev/null node x.js` — and False for complete
+    `sudo -u me node x.js`, `2>/dev/null node x.js`, `bun run x.js`,
+    `deno run -A x.ts`, `tsx x.ts` — and False for complete
     when a limit stopped the walk (see HOOK_MAX_CHARS). The command is
     tokenized like a shell (quotes, && || ; | operators, env assignments,
     cd, wrappers and their options)."""
@@ -5964,13 +6042,811 @@ def hook_script_targets(cmd):
     return follow_hook(cmd)[0]
 
 
+# ---------------- An install hook's command read as a program (0.1.8) ----------------
+# A hook command is a shell program: what it does is read, not the tools it
+# names. (0.1.7 made a hook CRITICAL when it merely contained curl, wget,
+# eval, base64, `node -e`, `sh -c` or powershell — tokens a hook that only
+# fetches a platform binary shares, and one written with other tools avoids;
+# they are now only a MAJOR hint.) hook_command_risk reads the command
+#   * as a script, by the install-script test (install_script_risk: a
+#     download piped into or substituted into a shell, the environment or
+#     credentials sent, encoded PowerShell, a reverse shell, persistence …);
+#   * through the code it hands an interpreter inline, read the same way:
+#     `node -e/-p` and `python -c` code, and `sh -c`, `eval` and `cmd /c`
+#     command lines (_SH_MAX_DEPTH deep);
+#   * through its network commands, parsed as a shell parses them
+#     (_sh_parse: quotes, escapes, $(…) and `…`, pipes, redirections,
+#     && || ; &, and `if`/`while`/`!` in front):
+#     - local data sent (_SH_DATA_REASONS): a file uploaded (curl
+#       -d/--data*/--json/-F with @file or <file, -T/--upload-file, wget
+#       --post-file/--body-file, `< file` or `cat file |` into the command);
+#       what a command that reports on the machine prints (whoami, hostname,
+#       id, uname -a/-n, env, printenv, cat, ls, pwd, ps, ifconfig …, in
+#       $(…) or `…` in the request, or piped into it through filters such
+#       as base64); an environment variable naming the user or the host
+#       ($USER, $HOSTNAME, %USERNAME%, $env:COMPUTERNAME …) or a secret
+#       ($NPM_TOKEN, $AWS_SECRET_ACCESS_KEY …). A request that keeps what it
+#       downloads (to a file, a pipe, a substitution) may name platform
+#       selectors, versions and paths in its address ($(uname -s),
+#       $npm_package_version, $HOME) and a secret in its headers (a token
+#       for a private download): of those, only the user or host name
+#       counts.
+#     - a beacon (_SH_BEACON_REASON): a request whose answer is thrown away
+#       (to /dev/null: -o, -O, >; wget --spider; or to the terminal an
+#       install runs without) or a lookup of a name (nslookup, dig, host,
+#       ping): its only effect is to tell a server the package was
+#       installed, and where. A request whose exit status decides what runs
+#       next (`curl -sf URL >/dev/null && node dl.js || node build.js`) is a
+#       connectivity check; `|| true`, `|| :`, `&& echo …` decide nothing.
+#       Loopback addresses and reserved names (localhost, .local, .test,
+#       .invalid …: _DNS_LOCAL_TLDS) are not a server elsewhere.
+_SH_MAX_DEPTH = 3                # substitutions and inline shell code read inside one another
+_SH_HTTP = frozenset({"curl", "wget", "wget2"})
+_SH_RAW = frozenset({"nc", "ncat", "netcat", "socat", "telnet"})
+_SH_LOOKUP = frozenset({"nslookup", "dig", "host", "ping", "ping6"})
+_SH_SHELLS = frozenset({"sh", "bash", "dash", "zsh", "ksh", "ash"})
+_SH_EVAL = frozenset({"eval"})
+_SH_CMD = frozenset({"cmd"})
+# what a command reports about the machine, when its output is sent
+_SH_IDENTITY = frozenset({"whoami", "id", "hostname", "logname", "users", "groups", "who", "w"})
+_SH_ENVIRONMENT = frozenset({"printenv", "set", "export", "declare"})
+_SH_FILE_READERS = frozenset({"cat", "head", "tail", "base64", "xxd", "od", "strings", "gzip", "bzip2", "xz", "tar",
+                              "zip", "type", "more", "less", "tac", "nl", "cut"})
+_SH_LISTINGS = frozenset({"ls", "dir", "find", "tree", "du", "pwd", "ps", "ifconfig", "ipconfig", "ip", "netstat",
+                          "ss", "arp", "route", "systeminfo", "uptime", "df", "mount", "lsblk", "lscpu", "last"})
+# filters a pipe carries data through (a file argument of theirs is the source instead)
+_SH_FILTERS = frozenset({"base64", "gzip", "bzip2", "xz", "xxd", "od", "tr", "sed", "awk", "cut", "sort", "uniq",
+                         "head", "tail", "grep", "jq", "openssl", "rev", "fold", "tee", "cat", "tac", "nl", "strings"})
+_SH_SCRIPTED_FILTERS = frozenset({"sed", "awk", "grep", "jq"})     # their first argument is a script, not a file
+_SH_ECHO = frozenset({"echo", "printf"})
+# xargs' options that take a value (-i and -e take theirs attached, if any)
+_SH_XARGS_SHORT_VALUE = frozenset("IndLPsa")
+_SH_XARGS_LONG_VALUE = frozenset({"--max-args", "--max-lines", "--delimiter", "--max-procs", "--max-chars",
+                                  "--arg-file", "--eof", "--process-slot-var"})
+_SH_NOOPS = frozenset({"true", ":", "false", "exit", "echo", "printf", "return"})
+_SH_KEYWORDS = frozenset({"if", "then", "else", "elif", "while", "until", "do", "!", "{"})
+_SH_STATUS_KEYWORDS = frozenset({"if", "elif", "while", "until", "!"})
+# curl's and wget's options that take a value (the next word, `--name=value`,
+# or the rest of a short option: -o/dev/null), and what the value is
+_SH_CURL_SHORT_VALUE = frozenset("AbcCdDeEFHKmoPQrtTuUwxXyYz")
+_SH_CURL_LONG_VALUE = frozenset({
+    "--data", "--data-ascii", "--data-binary", "--data-raw", "--data-urlencode", "--json", "--form", "--form-string",
+    "--header", "--user-agent", "--referer", "--cookie", "--cookie-jar", "--output", "--output-dir", "--upload-file",
+    "--url", "--url-query", "--request", "--user", "--proxy", "--proxy-user", "--proxy-header", "--write-out",
+    "--max-time", "--connect-timeout", "--retry", "--retry-delay", "--retry-max-time", "--config", "--cacert",
+    "--capath", "--cert", "--cert-type", "--key", "--key-type", "--dump-header", "--range", "--continue-at",
+    "--resolve", "--connect-to", "--interface", "--limit-rate", "--max-filesize", "--max-redirs", "--oauth2-bearer",
+    "--proto", "--proto-redir", "--time-cond", "--trace", "--trace-ascii", "--stderr", "--unix-socket",
+    "--dns-servers", "--doh-url", "--variable", "--ciphers", "--local-port", "--speed-limit", "--speed-time",
+    "--mail-from", "--mail-rcpt", "--quote", "--telnet-option", "--socks4", "--socks4a", "--socks5",
+    "--socks5-hostname", "--noproxy", "--pinnedpubkey", "--netrc-file", "--etag-save", "--etag-compare",
+    "--alt-svc", "--hsts", "--aws-sigv4"})
+_SH_CURL_DATA = frozenset({"-d", "--data", "--data-ascii", "--data-binary", "--data-raw", "--data-urlencode",
+                           "--json", "-F", "--form", "--form-string", "--url-query"})
+_SH_CURL_META = frozenset({"-H", "--header", "-A", "--user-agent", "-e", "--referer", "-b", "--cookie", "-u",
+                           "--user", "--oauth2-bearer", "--proxy-header"})
+_SH_CURL_UPLOAD = frozenset({"-T", "--upload-file"})
+_SH_CURL_OUTPUT = frozenset({"-o", "--output"})
+_SH_CURL_REMOTE_NAME = frozenset({"-O", "--remote-name", "--remote-name-all"})
+_SH_WGET_SHORT_VALUE = frozenset("OoaPUtTweiBlADXIQ")
+_SH_WGET_LONG_VALUE = frozenset({
+    "--output-document", "--output-file", "--append-output", "--directory-prefix", "--user-agent", "--header",
+    "--post-data", "--post-file", "--body-data", "--body-file", "--method", "--tries", "--timeout", "--wait",
+    "--user", "--password", "--http-user", "--http-password", "--referer", "--input-file", "--load-cookies",
+    "--save-cookies", "--execute", "--limit-rate", "--ca-certificate", "--certificate", "--private-key",
+    "--bind-address", "--dns-timeout", "--connect-timeout", "--read-timeout", "--level", "--accept", "--reject",
+    "--domains", "--quota", "--restrict-file-names", "--progress", "--backups", "--config", "--default-page",
+    "--local-encoding", "--remote-encoding", "--base", "--waitretry", "--exclude-directories",
+    "--include-directories", "--ca-directory", "--certificate-type", "--private-key-type", "--secure-protocol",
+    "--proxy-user", "--proxy-password", "--ftp-user", "--ftp-password"})
+_SH_WGET_DATA = frozenset({"--post-data", "--body-data"})
+_SH_WGET_META = frozenset({"--header", "-U", "--user-agent", "--referer", "--user", "--http-user", "--password",
+                           "--http-password"})
+_SH_WGET_UPLOAD = frozenset({"--post-file", "--body-file"})
+_SH_WGET_OUTPUT = frozenset({"-O", "--output-document"})
+_SH_NULL = frozenset({"/dev/null", "nul", "$null"})
+# an environment variable a word names: $NAME, ${NAME}, %NAME%, $env:NAME
+_SH_ENV_REF_RE = re.compile(r"\$env:([A-Za-z_][A-Za-z0-9_]*)|\$\{?([A-Za-z_][A-Za-z0-9_]*)|%([A-Za-z_][A-Za-z0-9_]*)%",
+                            re.I)
+_SH_IDENTITY_VAR_RE = re.compile(r"(?:USER|USERNAME|LOGNAME|HOSTNAME|COMPUTERNAME|USERDOMAIN)\Z", re.I)
+_SH_PATH_VAR_RE = re.compile(r"(?:HOME|USERPROFILE|PWD|INIT_CWD)\Z", re.I)
+_SH_SECRET_VAR_RE = re.compile(r"TOKEN|SECRET|PASSW|API_?KEY|PRIVATE_?KEY|ACCESS_?KEY|CREDENTIAL|AUTH", re.I)
+# a word that addresses a server: a URL, a host name, an address; its host
+_SH_URL_RE = re.compile(
+    r"""[A-Za-z][A-Za-z0-9+.-]*://[^\s/?#]|[^\s/'"]*\.[A-Za-z]{2,}(?::[0-9]+)?(?:[/?#]|\Z)"""
+    r"""|[0-9]{1,3}(?:\.[0-9]{1,3}){3}(?::[0-9]+)?(?:[/?#]|\Z)""")
+_SH_HOST_RE = re.compile(r"(?:[A-Za-z][A-Za-z0-9+.-]*://)?(?:[^\s/?#@]*@)?(\[[^\]\s]*\]|[^\s/?#:]*)")
+_SH_FLAG_A_OR_N_RE = re.compile(r"-[A-Za-z]*[an][A-Za-z]*\Z")
+_SH_BEACON_REASON = "tells a server it was installed (a request whose answer it throws away)"
+_SH_DATA_REASONS = {
+    "identity": "sends the machine's user or host name over the network",
+    "lookup-identity": "sends the machine's user or host name in a DNS lookup of a name it builds",
+    "environment": "sends environment variables over the network",
+    "file": "uploads a local file over the network",
+    "report": "sends what local commands report about the machine over the network",
+    "credentials": "sends what the cloud's instance metadata service gives it (the machine's credentials) over the network",
+    "address": "sends the machine's public IP address over the network",
+}
+# commands that assign a shell variable given as their argument (`export T=$(…)`)
+_SH_DECLARE = frozenset({"export", "declare", "local", "readonly", "typeset"})
+_SH_VAR_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+
+
+class _ShCommand:
+    """One simple command of a shell text: its words (quotes removed; a `$`
+    that expands nothing is \\x00, such a backtick \\x01), the command substitutions
+    each word holds ($(…), `…`: their text, a tuple per word), its
+    redirections [(op, target)], whether a pipe feeds it (pipe_in) and
+    whether it pipes into the next command (pipe_out), and the operator after
+    it (after: '&&', '||', '|', or '' for ; & a line break and the end)."""
+    __slots__ = ("words", "subs", "redirs", "pipe_in", "pipe_out", "after")
+
+    def __init__(self, words, subs, redirs, pipe_in, after):
+        self.words, self.subs, self.redirs = words, subs, redirs
+        self.pipe_in, self.pipe_out, self.after = pipe_in, after == "|", after
+
+
+def _sh_subst_end(text, i):
+    """The index of the `)` that closes the $( opened just before i (else the
+    text's length): quotes, escapes and nested parentheses respected."""
+    depth, quote, n = 0, None, len(text)
+    while i < n:
+        ch = text[i]
+        if quote is not None:
+            if ch == "\\" and quote == '"':
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+        elif ch == "\\":
+            i += 2
+            continue
+        elif ch == "'" or ch == '"':
+            quote = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            if depth == 0:
+                return i
+            depth -= 1
+        i += 1
+    return n
+
+
+def _sh_tick_end(text, i):
+    """The index of the backtick that closes the one opened just before i
+    (else the text's length)."""
+    n = len(text)
+    while i < n:
+        if text[i] == "\\":
+            i += 2
+            continue
+        if text[i] == "`":
+            return i
+        i += 1
+    return n
+
+
+_SH_REDIRECT_OPS = ("<<<", "<<-", ">>", ">&", ">|", "<<", "<&", "<>", ">", "<")
+_SH_PLAIN_RUN_RE = re.compile(r"""[^ \t\r\n;()&|<>\\'"$`]+""")
+
+
+def _sh_parse(text):
+    """The simple commands of a shell text, in order ([_ShCommand], see
+    above): `&& || ; & ( )` and line breaks end a command, `|` and `|&` pipe
+    it into the next, `< > >> >| &> &>> <> <<< n> >&n` redirect (a
+    here-document's text is not read)."""
+    out = []
+    words, subs, redirs = [], [], []
+    state = {"cur": None, "cur_subs": [], "redir": None, "pipe_in": False}
+
+    def end_word():
+        cur = state["cur"]
+        if cur is None:
+            return
+        if state["redir"] is not None:
+            redirs.append((state["redir"], cur))
+            state["redir"] = None
+        else:
+            words.append(cur)
+            subs.append(tuple(state["cur_subs"]))
+        state["cur"], state["cur_subs"] = None, []
+
+    def end_command(after):
+        end_word()
+        state["redir"] = None
+        if words or redirs:
+            out.append(_ShCommand(list(words), list(subs), list(redirs), state["pipe_in"], after))
+            state["pipe_in"] = after == "|"
+        else:
+            state["pipe_in"] = False
+        words.clear()
+        subs.clear()
+        redirs.clear()
+
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch in " \t\r":
+            end_word()
+            i += 1
+        elif ch in "\n;()":
+            end_command("")
+            i += 1
+        elif ch == "&":
+            if text.startswith("&&", i):
+                end_command("&&")
+                i += 2
+            elif text.startswith("&>", i):
+                end_word()
+                state["redir"] = "&>>" if text.startswith("&>>", i) else "&>"
+                i += len(state["redir"])
+            else:
+                end_command("")
+                i += 1
+        elif ch == "|":
+            if text.startswith("||", i):
+                end_command("||")
+                i += 2
+            else:
+                end_command("|")
+                i += 2 if text.startswith("|&", i) else 1
+        elif ch == "<" or ch == ">":
+            cur = state["cur"]
+            if cur is not None and cur.isdigit() and cur.isascii() and not state["cur_subs"]:
+                state["cur"], state["cur_subs"] = None, []      # 2>/dev/null: the fd number is the redirect's
+            else:
+                end_word()
+            op = next(o for o in _SH_REDIRECT_OPS if text.startswith(o, i))
+            state["redir"] = op
+            i += len(op)
+        else:
+            if state["cur"] is None:
+                state["cur"] = ""
+            plain = _SH_PLAIN_RUN_RE.match(text, i)     # (a run of characters that are themselves: at once)
+            if plain is not None:
+                state["cur"] += plain.group()
+                i = plain.end()
+            else:
+                i = _sh_word_part(text, i, state)
+    end_command("")
+    return out
+
+
+def _sh_word_part(text, i, state):
+    """Adds the part of a word at text[i] (a character, an escape, a quoted
+    string, a substitution) to state["cur"]; returns the index after it."""
+    n, ch = len(text), text[i]
+    if ch == "\\":
+        if i + 1 < n and text[i + 1] != "\n":
+            state["cur"] += _sh_quiet(text[i + 1])
+        return i + 2
+    if ch == "'":
+        j = text.find("'", i + 1)
+        j = n if j < 0 else j
+        state["cur"] += text[i + 1:j].replace("$", "\x00").replace("`", "\x01")
+        return j + 1
+    if ch == '"':
+        i += 1
+        while i < n and text[i] != '"':
+            c2 = text[i]
+            if c2 == "\\" and i + 1 < n and text[i + 1] in '$`"\\\n':
+                nxt = text[i + 1]
+                state["cur"] += "" if nxt == "\n" else _sh_quiet(nxt)
+                i += 2
+            elif c2 == "$" and text.startswith("$(", i) or c2 == "`":
+                i = _sh_substitution(text, i, state)
+            else:
+                state["cur"] += c2
+                i += 1
+        return i + 1
+    if ch == "$" and text.startswith("$(", i) or ch == "`":
+        return _sh_substitution(text, i, state)
+    state["cur"] += ch
+    return i + 1
+
+
+def _sh_quiet(ch):
+    """A character as a word keeps it where it expands nothing: `$` is \\x00,
+    a backtick \\x01 (_sh_literal gives them back)."""
+    return "\x00" if ch == "$" else ("\x01" if ch == "`" else ch)
+
+
+def _sh_literal(word):
+    """A word as the text it is: what the shell hands a program (`sh -c`,
+    `eval`, `node -e` code … read again, where `$` does expand)."""
+    return word.replace("\x00", "$").replace("\x01", "`")
+
+
+def _sh_substitution(text, i, state):
+    """Adds the substitution at text[i] ($(…) or `…`) to the word and its
+    text to the word's substitutions; returns the index after it."""
+    if text[i] == "`":
+        j = _sh_tick_end(text, i + 1)
+        state["cur_subs"].append(text[i + 1:j])
+    else:
+        j = _sh_subst_end(text, i + 2)
+        state["cur_subs"].append(text[i + 2:j])
+    state["cur"] += text[i:j + 1]
+    return j + 1
+
+
+def _sh_name(word):
+    """A program's name as a word gives it: lower case, no directory, no .exe."""
+    name = word.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    return name[:-4] if name.endswith(".exe") and len(name) > 4 else name
+
+
+def _sh_xargs_command(args):
+    """The index in xargs' arguments of the command it runs, else None."""
+    k = 0
+    while k < len(args):
+        a = args[k]
+        if a == "--":
+            return k + 1 if k + 1 < len(args) else None
+        if not a.startswith("-") or a == "-":
+            return k
+        if a.startswith("--"):
+            k += 2 if a in _SH_XARGS_LONG_VALUE else 1
+            continue
+        letter = a[1:2]
+        k += 2 if letter in _SH_XARGS_SHORT_VALUE and len(a) == 2 else 1
+    return None
+
+
+def _sh_program(cmd):
+    """(index of the program word or None, its name: lower case, no
+    directory, no .exe, whether a keyword in front uses its exit status) of
+    a simple command, past environment assignments, `if`/`while`/`!` and
+    wrappers (env, sudo, nohup … and their options). A wrapper with no
+    command after it is the program (`env` alone prints the environment)."""
+    words, i, status, last = cmd.words, 0, False, None
+    while i < len(words):
+        word = words[i]
+        if _ENV_ASSIGN_RE.match(word):
+            i += 1
+            continue
+        if word in _SH_KEYWORDS:
+            status = status or word in _SH_STATUS_KEYWORDS
+            i += 1
+            continue
+        name = _sh_name(word)
+        if name not in _HOOK_WRAPPERS:
+            return i, name, status
+        last = (i, name)
+        i += 1
+        values = _WRAPPER_VALUE_OPTIONS.get(name, frozenset())
+        while i < len(words) and words[i].startswith("-") and (words[i] != "-" or name == "env"):
+            opt = words[i]
+            i += 1
+            if opt == "--":
+                break
+            if opt.startswith("--"):
+                if opt.partition("=")[0] in values and "=" not in opt:
+                    i += 1
+            elif opt[:2] in values and len(opt) == 2:
+                i += 1
+    if last is not None:
+        return last[0], last[1], status
+    return None, "", status
+
+
+def _sh_options(args, short_value, long_value):
+    """([(option, value or None, index of the word holding the value)],
+    [(positional, index)]) of a command's arguments: `--name value`,
+    `--name=value`, `-x value`, `-xvalue` and grouped flags (`-sSLo file`:
+    a value option ends the group)."""
+    opts, pos, k = [], [], 0
+    while k < len(args):
+        a = args[k]
+        if a == "--":
+            pos.extend((x, j) for j, x in enumerate(args[k + 1:], k + 1))
+            break
+        if a.startswith("--") and len(a) > 2:
+            name, eq, value = a.partition("=")
+            if name in long_value and not eq:
+                opts.append((name, args[k + 1] if k + 1 < len(args) else "", k + 1))
+                k += 2
+                continue
+            opts.append((name, value if eq else None, k))
+        elif a.startswith("-") and len(a) > 1:
+            for j in range(1, len(a)):
+                letter = a[j]
+                if letter in short_value:
+                    if j + 1 < len(a):
+                        opts.append(("-" + letter, a[j + 1:], k))
+                    else:
+                        opts.append(("-" + letter, args[k + 1] if k + 1 < len(args) else "", k + 1))
+                        k += 1
+                    break
+                opts.append(("-" + letter, None, k))
+        else:
+            pos.append((a, k))
+        k += 1
+    return opts, pos
+
+
+def _sh_code(name, args):
+    """The command line a program hands a shell to read again (`sh -c CODE`,
+    `eval ARGS`, `cmd /c ARGS`), as its text, else None."""
+    if name in _SH_SHELLS:
+        code = _sh_c_code(args)
+    elif name in _SH_EVAL:
+        code = " ".join(args)
+    elif name in _SH_CMD and args and args[0].lower() in ("/c", "/k"):
+        code = " ".join(args[1:])
+    else:
+        return None
+    return None if code is None else _sh_literal(code)
+
+
+def _sh_c_code(args):
+    """The command line of `sh -c CODE` (flags may be grouped: -ec, -lc), else None."""
+    for k, a in enumerate(args):
+        if a.startswith("-") and not a.startswith("--") and "c" in a[1:]:
+            return args[k + 1] if k + 1 < len(args) else ""
+        if not a.startswith("-"):
+            return None
+    return None
+
+
+def _sh_word_data(word, subs, depth, download, shvars=None):
+    """[(kind, what)]: the local data a word of a request sends (see above):
+    what its substitutions print, and the environment variables it names.
+    `download`: the word is the address, or a header, of a request that
+    keeps its answer, where only the user or host name counts. `shvars`:
+    the local data the shell variables the text assigned hold."""
+    out = []
+    for sub in subs:
+        for kind, what in _sh_output_data(sub, depth + 1):
+            if not download or kind == "identity":
+                out.append((kind, what))
+    for m in _SH_ENV_REF_RE.finditer(word):
+        name = m.group(1) or m.group(2) or m.group(3)
+        if shvars and name in shvars:
+            out.extend((kind, what) for kind, what in shvars[name] if not download or kind == "identity")
+        elif _SH_IDENTITY_VAR_RE.match(name):
+            out.append(("identity", "$" + name))
+        elif download:
+            continue
+        elif _SH_PATH_VAR_RE.match(name):
+            out.append(("report", "$" + name))
+        elif _SH_SECRET_VAR_RE.search(name):
+            out.append(("environment", "$" + name))
+    return out
+
+
+def _sh_output_data(text, depth, shvars=None):
+    """[(kind, what)]: the local data shell text prints (the text of a
+    substitution: what each of its pipelines prints — `$(hostname; whoami)`
+    — back through the filters its last command is piped into)."""
+    if depth > _SH_MAX_DEPTH:
+        return []
+    cmds = _sh_parse(text)
+    out = []
+    for k, cmd in enumerate(cmds):
+        if not cmd.pipe_out:
+            out.extend(_sh_piped_data(cmds, k + 1, depth, shvars))
+    return out
+
+
+def _sh_piped_data(cmds, at, depth, shvars=None):
+    """[(kind, what)]: the local data piped into cmds[at] (at == len(cmds):
+    what the last command prints), back through filters."""
+    k = at - 1
+    while k >= 0:
+        cmd = cmds[k]
+        if k < at - 1 and not cmd.pipe_out:
+            return []
+        found = _sh_command_data(cmd, depth, shvars)
+        if found is not None:
+            return found
+        if not cmd.pipe_in:
+            return []
+        k -= 1
+    return []
+
+
+def _sh_command_data(cmd, depth, shvars=None):
+    """[(kind, what)]: the local data one command prints; None for a filter
+    whose output is what is piped into it. `shvars`: the shell variables
+    the text assigned local data (what `echo $V` prints)."""
+    p, name, _status = _sh_program(cmd)
+    if p is None:
+        return []
+    args = cmd.words[p + 1:]
+    positional = [a for a in args if a and a[0] != "-"]
+    if name == "uname":
+        return [("identity", "uname")] if any(a in ("--all", "--nodename") or _SH_FLAG_A_OR_N_RE.match(a)
+                                             for a in args) else []
+    if name in _SH_IDENTITY:
+        return [("identity", name)]
+    if name == "env" or name == "printenv" or name in _SH_ENVIRONMENT and not positional:
+        return [("environment", _LD_WHOLE_ENV)]
+    for op, target in cmd.redirs:
+        if op == "<" or op == "<>":
+            return [("file", target)]
+    if name in _SH_FILE_READERS or name in _SH_FILTERS:
+        files = positional[1:] if name in _SH_SCRIPTED_FILTERS else ([] if name in ("tr", "openssl") else positional)
+        if files:
+            return [("file", files[-1])]
+        return None if name in _SH_FILTERS else []
+    if name in _SH_LISTINGS:
+        return [("report", name)]
+    if name in _SH_ECHO:
+        out = []
+        for word, subs in zip(cmd.words[p + 1:], cmd.subs[p + 1:]):
+            out.extend(_sh_word_data(word, subs, depth, False, shvars))
+        return out
+    if name in _SH_HTTP:                            # what the cloud gives the machine; its public IP address
+        if any(_LD_METADATA_RE.search(a) is not None for a in args):
+            return [("credentials", "the instance's metadata")]
+        if any(_LD_PUBLIC_IP_RE.search(a) is not None for a in args):
+            return [("address", "the machine's public IP address")]
+    return []
+
+
+def _sh_assignments(cmd, depth, shvars):
+    """Records in `shvars` the local data the shell variables a command
+    assigns hold (`T=$(…)` alone or in front of a command, `export T=$(…)`):
+    what the substitutions of the value print, and the variables it names."""
+    words, k = cmd.words, 0
+    while k < len(words) and _ENV_ASSIGN_RE.match(words[k]):
+        k += 1
+    at = list(range(k))
+    if k < len(words) and _sh_name(words[k]) in _SH_DECLARE:
+        at.extend(j for j in range(k + 1, len(words)) if _ENV_ASSIGN_RE.match(words[j]))
+    for j in at:
+        name, _eq, value = words[j].partition("=")
+        data = []
+        for sub in cmd.subs[j]:
+            data.extend(_sh_output_data(sub, depth + 1, shvars))
+        data.extend(_sh_word_data(value, (), depth, False, shvars))
+        if data:
+            shvars[name] = data
+        else:
+            shvars.pop(name, None)
+
+
+def _sh_remote(address):
+    """Is an address a server elsewhere (not loopback, not a reserved name)?"""
+    host = _SH_HOST_RE.match(address).group(1).strip("[]").lower().rstrip(".")
+    if host in ("", "localhost", "0.0.0.0", "::1") or host.startswith("127."):
+        return False
+    return host.rsplit(".", 1)[-1] not in _DNS_LOCAL_TLDS
+
+
+def _sh_request(name, args):
+    """What a curl or wget command sends, and where its answer goes: ([(word
+    index, 'data' or 'meta')], [uploaded paths], reads its standard input,
+    disposition 'file', 'stdout' or 'discard', [(address, word index)])."""
+    curl = name == "curl"
+    opts, pos = _sh_options(args, _SH_CURL_SHORT_VALUE if curl else _SH_WGET_SHORT_VALUE,
+                            _SH_CURL_LONG_VALUE if curl else _SH_WGET_LONG_VALUE)
+    sent, uploads, stdin = [], [], False
+    disposition = "stdout" if curl else "file"
+    writes_out = False
+    addresses = [(a, k) for a, k in pos if _SH_URL_RE.match(a)]
+    for opt, value, k in opts:
+        if value is None:
+            if curl and opt in _SH_CURL_REMOTE_NAME:
+                disposition = "file"
+            elif not curl and opt == "--spider":
+                disposition = "discard"
+            continue
+        if curl and opt == "--url":
+            if _SH_URL_RE.match(value):
+                addresses.append((value, k))
+        elif curl and opt in _SH_CURL_DATA:
+            body = value.split("=", 1)[1] if opt in ("-F", "--form") and "=" in value else value
+            name_part, at, named = body.partition("@")      # --data-urlencode name@file
+            named = opt == "--data-urlencode" and bool(at) and "=" not in name_part
+            if named or body[:1] in ("@", "<") and opt not in ("--form-string", "--data-raw", "--url-query"):
+                path = body.partition("@")[2] if named else body[1:]
+                path = path.split(";", 1)[0]
+                if path in ("-", ""):
+                    stdin = True
+                else:
+                    uploads.append(path)
+            else:
+                sent.append((k, "data"))
+        elif not curl and opt in _SH_WGET_DATA:
+            sent.append((k, "data"))
+        elif curl and opt in _SH_CURL_META or not curl and opt in _SH_WGET_META:
+            sent.append((k, "meta"))
+        elif curl and opt in _SH_CURL_UPLOAD or not curl and opt in _SH_WGET_UPLOAD:
+            if value in ("-", "."):
+                stdin = True
+            else:
+                uploads.append(value)
+        elif curl and opt in _SH_CURL_OUTPUT or not curl and opt in _SH_WGET_OUTPUT:
+            if value.lower() in _SH_NULL:
+                disposition = "discard"
+            elif value == "-":
+                disposition = "stdout"
+            else:
+                disposition = "file"
+        elif curl and opt in ("-w", "--write-out"):
+            writes_out = True
+    if disposition == "discard" and writes_out:
+        disposition = "stdout"          # what -w writes (the status code …) is the output
+    return sent, uploads, stdin, disposition, addresses
+
+
+def _sh_kept(cmd, in_subst):
+    """Is what a command writes to its standard output kept: written to a
+    file (not /dev/null), piped on, or the value of a substitution?"""
+    for op, target in cmd.redirs:
+        if op in (">", ">>", ">|", "&>", "&>>"):
+            return target.lower() not in _SH_NULL
+    return cmd.pipe_out or in_subst
+
+
+def _sh_status_used(cmds, k, status):
+    """Does what runs next depend on cmds[k]'s exit status (see above)?"""
+    if status:
+        return True
+    cmd = cmds[k]
+    if cmd.after not in ("&&", "||") or k + 1 >= len(cmds):
+        return False
+    return _sh_program(cmds[k + 1])[1] not in _SH_NOOPS
+
+
+def _sh_reasons(text, depth, in_subst, walk):
+    """The reasons a shell text's network commands give (see above)."""
+    reasons = []
+    if depth > _SH_MAX_DEPTH or not text:
+        return reasons
+    cmds = _sh_parse(text)
+    shvars = {}                         # the shell variables the text assigns local data
+    for k, cmd in enumerate(cmds):
+        if walk.commands >= HOOK_MAX_COMMANDS:
+            walk.complete = False
+            break
+        walk.commands += 1
+        for word_subs in cmd.subs:
+            for sub in word_subs:
+                for r in _sh_reasons(sub, depth + 1, True, walk):
+                    if r not in reasons:
+                        reasons.append(r)
+        _sh_assignments(cmd, depth, shvars)
+        p, name, status = _sh_program(cmd)
+        if p is None:
+            continue
+        args, arg_subs = cmd.words[p + 1:], cmd.subs[p + 1:]
+        if name == "read":                          # `… | while read V`: V holds what is piped in
+            data = _sh_piped_data(cmds, k, depth, shvars) if cmd.pipe_in else []
+            for a in args:
+                if _SH_VAR_NAME_RE.match(a):
+                    if data:
+                        shvars[a] = data
+                    else:
+                        shvars.pop(a, None)
+            continue
+        code = _sh_code(name, args)
+        if code is not None:
+            for r in _sh_reasons(code, depth + 1, in_subst or _sh_kept(cmd, in_subst), walk):
+                if r not in reasons:
+                    reasons.append(r)
+            continue
+        piped = []                      # what xargs hands the command as arguments
+        if name == "xargs":
+            inner = _sh_xargs_command(args)
+            if inner is None:
+                continue
+            if cmd.pipe_in:
+                piped = _sh_piped_data(cmds, k, depth, shvars)
+            args, arg_subs = args[inner + 1:], arg_subs[inner + 1:]
+            name = _sh_name(cmd.words[p + 1 + inner])
+        data, beacon = [], False
+        if name in _SH_HTTP:
+            sent, uploads, stdin, disposition, addresses = _sh_request(name, args)
+            if not addresses:
+                continue
+            kept = disposition == "file" or disposition == "stdout" and _sh_kept(cmd, in_subst)
+            for idx, what in sent:
+                if idx < len(args):                 # (an option given no value sends nothing)
+                    data.extend(_sh_word_data(args[idx], arg_subs[idx], depth, kept and what == "meta", shvars))
+            for address, idx in addresses:
+                data.extend(_sh_word_data(address, arg_subs[idx], depth, kept, shvars))
+            data.extend(("file", path) for path in uploads)
+            if stdin and cmd.pipe_in and not piped:
+                data.extend(_sh_piped_data(cmds, k, depth, shvars))
+            data.extend((kind, what) for kind, what in piped if not kept or kind == "identity")
+            beacon = (not kept and not _sh_status_used(cmds, k, status)
+                      and any(_sh_remote(address) for address, _idx in addresses))
+        elif name in _SH_RAW:
+            if cmd.pipe_in:
+                data.extend(piped or _sh_piped_data(cmds, k, depth, shvars))
+            data.extend(("file", target) for op, target in cmd.redirs if op == "<" or op == "<>")
+            hosts = [(a, s) for a, s in zip(args, arg_subs) if a and a[0] != "-" and _SH_URL_RE.match(a)]
+            for word, subs in hosts:
+                data.extend(_sh_word_data(word, subs, depth, False, shvars))
+            beacon = (not _sh_status_used(cmds, k, status) and not _sh_kept(cmd, in_subst)
+                      and any(_sh_remote(a) for a, _s in hosts))
+        elif name in _SH_LOOKUP:
+            data.extend(("lookup-identity" if kind == "identity" else kind, what) for kind, what in piped)
+            names = [(a, s) for a, s in zip(args, arg_subs) if a and a[0] != "-" and _SH_URL_RE.match(a)]
+            for word, subs in names:
+                data.extend(("lookup-identity" if kind == "identity" else kind, what)
+                            for kind, what in _sh_word_data(word, subs, depth, False, shvars))
+            beacon = (not _sh_status_used(cmds, k, status) and not _sh_kept(cmd, in_subst)
+                      and any(_sh_remote(a) for a, _s in names))
+        else:
+            continue
+        for kind, what in data:
+            reason = _SH_DATA_REASONS[kind]
+            if kind in ("file", "report", "environment"):
+                reason += " (" + _sh_literal(what)[:40] + ")"
+            if reason not in reasons:
+                reasons.append(reason)
+        if beacon and not data and _SH_BEACON_REASON not in reasons:
+            reasons.append(_SH_BEACON_REASON)
+    return reasons
+
+
+def _hook_inline_code(text, walk, depth=0):
+    """The code a shell text hands node (-e, --eval, -p, --print) or python
+    (-c) inline, also inside `sh -c`, `eval` and `cmd /c` command lines."""
+    out = []
+    if depth > _SH_MAX_DEPTH:
+        return out
+    for cmd in _sh_parse(text):
+        if walk.commands >= HOOK_MAX_COMMANDS:
+            walk.complete = False
+            break
+        walk.commands += 1
+        p, name, _status = _sh_program(cmd)
+        if p is None:
+            continue
+        args = cmd.words[p + 1:]
+        if name in _NODE_NAMES or name in _JS_RUNTIMES:
+            code = _node_script(args)[2]
+            if code:
+                out.append(_sh_literal(code))
+        elif _PYTHON_NAME_RE.match(name):
+            code = _interpreter_script(args)[1]
+            if code:
+                out.append(_sh_literal(code))
+        else:
+            code = _sh_code(name, args)
+            if code:
+                out.extend(_hook_inline_code(code, walk, depth + 1))
+    return out
+
+
+def hook_command_risk(cmd, output_kept=False):
+    """Reasons an install hook's command looks hostile ([] if none), read as
+    a program (see above): the install-script test's reasons for the
+    command and for the code it hands an interpreter inline, then what its
+    network commands do. `output_kept`: what the command prints is used (a
+    binding.gyp command expansion's value), so a request it prints is not
+    thrown away."""
+    if not isinstance(cmd, str) or not cmd.strip() or len(cmd) > HOOK_MAX_CHARS:
+        return []
+    reasons = install_script_risk(cmd, False, True)
+    walk = _HookWalk()
+    for code in _hook_inline_code(cmd, walk):
+        for r in install_script_risk(code, False):
+            if r not in reasons:
+                reasons.append(r)
+    for r in _sh_reasons(cmd, 0, output_kept, walk):
+        if r not in reasons:
+            reasons.append(r)
+    _label_sends(cmd, reasons)
+    return reasons
+
+
 # ---------------- Install-script and import-time inspection ----------------
 # (The registry's tests, here so that --deps project scans run them too.)
 # An install hook is a capability; what makes it hostile is what the script it
 # runs does. Escalate only on the patterns malicious install scripts share:
-# shipping environment/credential data over the network, or talking to
-# throwaway exfiltration endpoints. Downloading a platform binary from the
-# registry (esbuild, puppeteer) is not either. The same test applies to the
+# data read from the machine sent over the network (0.1.8: read as a flow;
+# a throwaway exfiltration endpoint the script names labels where it goes),
+# code fetched and run, a reverse shell, persistence. Downloading a platform
+# binary from the registry (esbuild, puppeteer) is none of these, and in
+# JavaScript or Python a command is what an exec call is handed (a CLI's
+# help text or an error message that shows `curl … | sh` runs nothing). The same test applies to the
 # Python code pip runs at install time (an sdist's setup.py, an in-tree PEP 517
 # backend) and to shell scripts a hook runs.
 _NETWORK_RE = re.compile(
@@ -5992,17 +6868,6 @@ _NETWORK_RE = re.compile(
     r"""|\b(?:curl|wget)\s+(?:-{1,2}\w[\w-]*(?:=\S*|\s+(?!-{1,2}\w)(?!["']?https?:)\S+)?\s+){0,24}"""
     r"""["']?https?://"""
     r"""|\b(?:nc|ncat|netcat)\s+(?:-\w+\s+){0,8}[\w.-]+\s+\d{2,5}\b|/dev/tcp/""", re.M)
-_SECRET_SOURCE_RE = re.compile(
-    r"""JSON\.stringify\(\s*process\.env|Object\.(?:keys|entries|values)\(\s*process\.env|"""
-    r"""\.npmrc|[/\\]\.ssh\b|~/\.ssh\b|id_rsa|id_ed25519|\.aws[/\\]|~/\.aws\b|\.git-credentials|"""
-    r"""\.docker[/\\]config\.json|\.kube[/\\]config|Local Storage[/\\]leveldb|\.pypirc|\.netrc\b|"""
-    # Python: the whole environment, not one variable
-    r"""\bdict\(\s*os\.environ\s*\)|\bos\.environ\.(?:items|keys|values|copy)\(\s*\)|"""
-    r"""json\.dumps\(\s*(?:dict\(\s*)?os\.environ|\b(?:str|repr)\(\s*os\.environ\s*\)|"""
-    r"""\{\s*\*\*\s*os\.environ|\burlencode\(\s*(?:dict\(\s*)?os\.environ|\bos\.environb\b"""
-    # shell: the whole environment piped or redirected somewhere
-    r"""|(?:^|[\s;&(`])(?:env|printenv|set)\s*(?:\|(?!\|)|>)|\$\(\s*(?:env|printenv)\s*\)|`\s*(?:env|printenv)\s*`""",
-    re.I | re.M)
 # RequestBin by its host names only (0.1.8): the bare word is also the start
 # of requestBinary(), which chromedriver's and phantomjs-prebuilt's installers
 # define to download their binaries.
@@ -6011,7 +6876,6 @@ _EXFIL_SERVICES = (
     r"""discord(?:app)?\.com/api/webhooks|api\.telegram\.org|oastify\.com|burpcollaborator|"""
     r"""\binteract\.sh|\boast\.(?:pro|live|site|online|fun|me)\b|requestbin\.(?:com|net|io)\b|\brequestb\.in\b|"""
     r"""pipedream\.net|transfer\.sh|\.onion\b""")
-_EXFIL_DEST_RE = re.compile(r"""https?://(?:\d{1,3}\.){3}\d{1,3}\b|""" + _EXFIL_SERVICES, re.I)
 _EXFIL_SERVICE_RE = re.compile(_EXFIL_SERVICES, re.I)      # the named ones, no raw IPs
 # `curl … | sh` / `wget … | bash`, read in one left-to-right pass: a pipe into
 # a shell after curl or wget in the same command (no `|`, `;`, `&` or line
@@ -6231,10 +7095,13 @@ def reverse_shell_at(text):
 _HOST_INFO_RE = re.compile(
     r"\b(?:socket\.gethostname|socket\.getfqdn|platform\.node|getpass\.getuser|os\.getlogin|pwd\.getpwuid"
     r"|os\.hostname|os\.userInfo)\s*\("
-    r"""|\b(?:getoutput|check_output|getstatusoutput|execSync|popen)\s*\(\s*\[?\s*["'](?:whoami|hostname|id|uname"""
-    r"""|ifconfig|ipconfig|systeminfo)\b"""
-    r"|(?:\$\(|`)\s*(?:whoami|hostname|id|uname|ifconfig|ip\s+a|pwd|ls|cat\s+/etc/passwd|ps)\b"
+    r"""|\b(?:getoutput|check_output|getstatusoutput|execSync|popen)\s*\(\s*\[?\s*["'](?:whoami|hostname|id"""
+    r"""|uname\s+(?:-[A-Za-z]*[an]|--(?:all|nodename))|ifconfig|ipconfig|systeminfo)\b"""
+    r"|(?:\$\(|`)\s*(?:whoami|hostname|id|uname\s+(?:-[A-Za-z]*[an]|--(?:all|nodename))|ifconfig|ip\s+a|pwd|ls"
+    r"|cat\s+/etc/passwd|ps)\b"
     r"|\bos\.(?:hostname|userInfo)\s*[,)]"
+    # (uname counts with -a or -n, which print the host name: a bare uname,
+    # -s or -m names the platform a download is chosen for, 0.1.8)
     # (0.1.8) read through the module itself or a name taken from it:
     # require('os').hostname(), const { hostname } = require('os'),
     # import { userInfo } from 'node:os', from socket import gethostname
@@ -6244,37 +7111,27 @@ _HOST_INFO_RE = re.compile(
     r"|\bfrom\s+(?:socket|getpass)\s+import\s+[^\n]{0,200}\b(?:gethostname|getfqdn|getuser)\b")
 
 
-def sends_host_info(text):
-    """True when `text` collects the machine's user or host name (or runs
-    whoami, hostname, ifconfig …) and sends data over the network."""
-    return bool(_HOST_INFO_RE.search(text) and (_NETWORK_RE.search(text) or _EXFIL_SERVICE_RE.search(text)))
-
-
 # Exfiltration shapes (0.1.8, from the rerun's misses that GuardDog caught).
 # Each one is strong wherever it is found — in an install script, in code
 # that runs on import, in the files a package runs when used — and none
 # was found in the benchmark's 429 popular packages:
-# - A chat bot or webhook whose secret is written in the code: a Telegram
-#   bot token (next to api.telegram.org), a Discord webhook's token or a
-#   Slack webhook's key, in a file that makes network calls. A library that
-#   talks to these services takes the key from its user; a package that
-#   ships its author's key reports whoever runs it to the author (figlets
-#   zips Exodus wallets and sends them to its bot; requestn uploads every
-#   file in the working folder). Placeholders (T00000000/…/XXXX, a secret of
-#   one repeated letter) are not keys.
-# - Credential files (.env, .npmrc, .pypirc, .netrc, .git-credentials,
-#   ~/.aws/credentials, an SSH private key, Docker's or kubectl's config)
-#   read in a file that sends data to a raw public IP address.
+# - A request to a webhook whose secret is written in the code
+#   (secret_endpoint_at, 0.1.8 for any service; 0.1.7 knew Telegram's,
+#   Discord's and Slack's shapes). A library that talks to such a service
+#   takes the key from its user; a package that ships its author's key
+#   reports whoever runs it to the author (figlets zips Exodus wallets and
+#   sends them to its bot; requestn uploads every file in the working
+#   folder).
 # - Several credential folders named in one place (.ssh, .aws, .ethereum,
 #   .kube …: three or more within _CRED_SWEEP_SPAN characters) in a file
 #   that makes network calls: a sweep of the home folder for secrets.
 # - The machine's user or host name sent to an address the file keeps
 #   base64-encoded (a literal that decodes to "http…"), or looked up in DNS
-#   inside a name the code builds (the dependency-confusion DNS beacon), and
-#   the machine's public IP address (from ipify, ip-api …) sent to a
-#   data-capture service; an ngrok tunnel's own address counts as one.
-# - The whole environment copied to a variable and serialized
-#   (`d = dict(os.environ)` … `urlencode(d)`): read with the harvest test.
+#   inside a name the code builds (the dependency-confusion DNS beacon).
+# (0.1.8: an address a list names — a data-capture or exfiltration service,
+# ipify's answer sent to one — is where data goes, not a sign it goes: the
+# local data's flow is read, local_data_sent_at, and the list names the
+# destination.)
 # - A reverse shell given to an exec call as an argument list, or to an
 #   ngrok TCP address (`spawn('bash', ['-i', 'nc', '2.tcp.eu.ngrok.io', …])`).
 # - At install time only: a raw socket to a hard-coded IP address, as the
@@ -6283,20 +7140,28 @@ def sends_host_info(text):
 # - A cryptocurrency miner: a Monero wallet address in a file that runs a
 #   program with a mining pool's arguments (`-o pool:port`, stratum+tcp://,
 #   --donate-level, xmrig) — ultralytics 8.3.42 ran XMRig from safe_run().
-_CHAT_SECRET_RE = re.compile(
-    r"(?<![0-9])\d{8,10}:AA[A-Za-z0-9_-]{33}(?![A-Za-z0-9_-])"
-    r"|\b[Dd]iscord(?:app)?\.com/api/webhooks/\d{17,20}/[A-Za-z0-9_-]{60,80}"
-    r"|\bhooks\.slack\.com/services/T[A-Z0-9]{8,12}/B[A-Z0-9]{8,12}/[A-Za-z0-9]{24}(?![A-Za-z0-9])")
-_TELEGRAM_API_RE = re.compile(r"api\.telegram\.org", re.I)
-_CHAT_SECRET_NEEDLES = (":AA", "webhooks/", "hooks.slack.com")   # one is in every match
-_CHAT_SECRET_MAX = 50            # matches examined per text
-_CHAT_SECRET_MIN_DISTINCT = 10   # distinct characters a real secret has
-_CRED_FILE_RE = re.compile(
-    r"""["'`](?:~[/\\]|\.[/\\])?\.(?:env|npmrc|pypirc|netrc|git-credentials)["'`]"""
-    r"""|\.aws[/\\]credentials\b|[/\\]\.ssh[/\\]id_\w+|\.docker[/\\]config\.json|\.kube[/\\]config\b""")
-_PUBLIC_IP_URL_RE = re.compile(
-    r"\b(?:https?|wss?|tcp)://(?!(?:10|127|0)\.)(?!192\.168\.)(?!172\.(?:1[6-9]|2\d|3[01])\.)(?!169\.254\.)"
-    r"(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)(?![\d.])")
+# A webhook whose secret is written in the code (0.1.8): an http(s) URL in
+# a string literal whose path carries a credential — a segment of 20 to
+# 200 letters, digits, '_', '-' and ':' that mixes upper case, lower case
+# and digits and uses _SE_MIN_DISTINCT distinct characters (a bot's token,
+# a webhook's key; a content hash is hex, a slug lower case, an id digits),
+# a template's or an f-string's hole in it read as the literal its name is
+# given (`bot{TOKEN}`). A request given
+# the address, or a name given it (followed as local data is: assignments,
+# the parameters of the script's own functions), sends data to whoever
+# holds the credential: fetch, urlopen, Request, axios, got, sendBeacon, a
+# client's get/post/put/patch/request/send, an XMLHttpRequest's open, or a
+# command a script runs that holds curl or wget.
+_SE_URL_RE = re.compile(r"""https?://([^\s"'`<>/?#]{1,300})([^\s"'`<>?#]{0,600})""")
+_SE_SEGMENT_RE = re.compile(r"[A-Za-z0-9_:-]{20,200}")
+_SE_HOLE_RE = re.compile(r"\$\{\s*([A-Za-z_$][\w$]*)\s*\}|\{\s*([A-Za-z_]\w*)\s*\}")
+_SE_REQUEST_RE = re.compile(
+    r"\b(?:fetch|urlopen|Request|sendBeacon|axios|got|ky|needle|superagent)\s*\("
+    r"|\.\s*(?:get|post|put|patch|request|send|open)\s*\(")
+_SE_NEEDLES = ("fetch", "urlopen", "Request", "sendBeacon", "axios", "got", "ky", "needle", "superagent", ".get",
+               ".post", ".put", ".patch", ".request", ".send", ".open", "curl", "wget")
+_SE_MIN_DISTINCT = 10            # distinct characters a real secret has
+_SE_MAX = 200                    # literals, names and requests examined per text
 _CRED_DIR_RE = re.compile(
     r"""["'`](?:~[/\\]|\$HOME[/\\]|%USERPROFILE%[/\\])?\.(ssh|aws|azure|gnupg|docker|kube|ethereum|electrum|bitcoin"""
     r"""|solana|npmrc|pypirc|netrc|git-credentials|config[/\\]gcloud|password-store|vault-token|terraform\.d)"""
@@ -6368,23 +7233,6 @@ _DNS_LOOKUP_MAX = 50             # lookups, and identities in shell commands, re
 _DNS_ARG_SPAN = 400              # characters of a lookup's arguments read
 _DNS_ASSIGN_SPAN = 5000          # characters before a lookup searched for its name's assignment
 _DNS_SHELL_SPAN = 300            # characters of a shell command read each side of the identity
-_PUBLIC_IP_LOOKUP_RE = re.compile(
-    r"\bapi(?:64)?\.ipify\.org\b|\bip-api\.com\b|\bipinfo\.io\b|\bifconfig\.me\b|\bicanhazip\.com\b"
-    r"|\bcheckip\.amazonaws\.com\b|\bipapi\.co\b|\bident\.me\b|\bapi\.myip\.com\b|\bwtfismyip\.com\b")
-_PUBLIC_IP_LOOKUP_NEEDLES = ("ipify.org", "ip-api.com", "ipinfo.io", "ifconfig.me", "icanhazip.com",
-                             "checkip.amazonaws.com", "ipapi.co", "ident.me", "api.myip.com", "wtfismyip.com")
-_ENV_COPY_RE = re.compile(
-    r"(?<![\w$.])([A-Za-z_$][\w$]*)\s{0,40}=\s{0,40}(?:dict\(\s*os\.environ\s*\)|os\.environ\.copy\(\s*\)"
-    r"|\{\s*\*\*\s*os\.environ\s*\}|\{\s*\.\.\.\s*process\.env\s*\}|Object\.assign\(\s*\{\s*\}\s*,\s*process\.env\s*\))")
-_ENV_COPY_MAX = 20               # copies examined per text
-# a copy's name serialized: the pattern built around it (the name escaped between)
-_ENV_COPY_USE_HEAD = r"\b(?:urlencode|dumps|stringify|b64encode|str)\(\s*"
-_ENV_COPY_USE_TAIL = r"\s*[,)]"
-# what every copy _ENV_COPY_RE finds contains: a text without it is not read
-# for the (slower) assignment
-_ENV_COPY_ANCHOR_RE = re.compile(
-    r"dict\(\s*os\.environ\s*\)|os\.environ\.copy\(\s*\)|\*\*\s*os\.environ|\.\.\.\s*process\.env"
-    r"|Object\.assign\(\s*\{\s*\}\s*,\s*process\.env")
 _REVSHELL_NGROK_TCP_RE = re.compile(r"\b\d+\.tcp(?:\.[a-z]{2,3})?\.ngrok\.io\b", re.I)
 _REVSHELL_ARG_SHELL_RE = re.compile(
     r"""["'](?:nc|ncat|netcat|(?:/bin/)?(?:ba|z|da)?sh|cmd(?:\.exe)?|powershell(?:\.exe)?)["']""")
@@ -6408,30 +7256,120 @@ _PUBLIC_RESOLVERS = frozenset({"8.8.8.8", "8.8.4.4", "1.1.1.1", "1.0.0.1", "9.9.
                                "208.67.222.222", "208.67.220.220"})
 
 
-def chat_secret_at(text):
-    """(offset, reason) of the first chat bot or webhook secret of `text`
-    (see above) in a file that makes network calls, else None."""
-    if not any(nd in text for nd in _CHAT_SECRET_NEEDLES):
+def _se_secret(segment):
+    """Is a path segment a credential (see above)?"""
+    return (_SE_SEGMENT_RE.fullmatch(segment) is not None and len(set(segment)) >= _SE_MIN_DISTINCT
+            and any(c.isupper() for c in segment) and any(c.islower() for c in segment)
+            and any(c.isdigit() for c in segment))
+
+
+def _se_url_secret(url, values):
+    """Does a URL (an _SE_URL_RE match) carry a credential in its path (see
+    above)? `values`: the literals names are given, for the holes of a
+    template or an f-string."""
+    for segment in url.group(2).split("/"):
+        if "{" in segment:
+            segment = _SE_HOLE_RE.sub(lambda h: values.get(h.group(1) or h.group(2), "{"), segment)
+        if _se_secret(segment):
+            return True
+    return False
+
+
+def secret_endpoint_at(text):
+    """(offset, reason) of the first request to a webhook whose secret is
+    written in `text` (see above), else None."""
+    if "http" not in text or not any(nd in text for nd in _SE_NEEDLES):
         return None
-    if not _NETWORK_RE.search(text):
-        return None
-    for k, m in enumerate(_CHAT_SECRET_RE.finditer(text)):
-        if k >= _CHAT_SECRET_MAX:
+    values = {}                                     # name -> the plain literal it is given
+    assigns = []                                    # (name, start, end) of what is assigned
+    for k, m in enumerate(_DD_ASSIGN_RE.finditer(text)):
+        if k >= _DD_MAX_ASSIGNS:
             break
-        found = m.group(0)
-        if found.startswith(("discord", "Discord")):
-            hook, secret = found.rsplit("/", 2)[1:]
-            if len(set(secret)) >= _CHAT_SECRET_MIN_DISTINCT:
-                return m.start(), f"sends data to a Discord webhook whose token is written in the code (webhook {hook})"
-        elif found.startswith("hooks."):
-            team, _bot, secret = found.rsplit("/", 3)[1:]
-            if len(set(secret)) >= _CHAT_SECRET_MIN_DISTINCT and team.strip("T0"):
-                return m.start(), f"sends data to a Slack webhook whose key is written in the code ({team})"
-        else:
-            bot, secret = found.split(":", 1)
-            if len(set(secret)) >= _CHAT_SECRET_MIN_DISTINCT and _TELEGRAM_API_RE.search(text):
-                return m.start(), f"sends data to a Telegram bot whose token is written in the code (bot {bot})"
-    return None
+        lit = _LD_PLAIN_LITERAL_RE.match(m.group(2).strip())
+        if lit is not None:
+            values.setdefault(m.group(1), lit.group(2))
+        assigns.append((m.group(1), m.start(2), _ld_statement_end(text, m.start(2))))
+    endpoints = []                                  # (start, host) of the literals that hold one
+    for a, b in _literal_spans(text):
+        if len(endpoints) >= _SE_MAX:
+            break
+        if text.find("http", a, b) < 0:
+            continue
+        for url in _SE_URL_RE.finditer(text, a, b):
+            if _se_url_secret(url, values):
+                endpoints.append((a, url.group(1).rsplit("@", 1)[-1][:60]))
+                break
+    if not endpoints:
+        return None
+    starts = [a for a, _ in endpoints]
+    in_literal = _ld_literal_test(text)
+    held = {}                                       # name -> the host of the endpoint it holds
+
+    def holds(lo, hi):
+        """The host of an endpoint written, or held by a name, in text[lo:hi], else None."""
+        k = bisect.bisect_left(starts, lo)
+        if k < len(starts) and starts[k] < hi:
+            return endpoints[k][1]
+        if held:
+            for m in _IDENT_TOKEN_RE.finditer(text, lo, hi):
+                if m.group() in held and not in_literal(m.start()):
+                    return held[m.group()]
+        return None
+
+    params = {}                                     # the script's own functions -> their parameters
+    for k, m in enumerate(_LD_FUNC_RE.finditer(text)):
+        if k >= _DD_MAX_ASSIGNS:
+            break
+        name = m.group(1) or m.group(3) or m.group(5) or m.group(9)
+        plist = next((g for g in (m.group(2), m.group(4), m.group(6), m.group(7), m.group(8), m.group(10))
+                      if g is not None), "")
+        names = [p.group(1) for p in map(_LD_PARAM_RE.match, plist.split(","))
+                 if p is not None and p.group(1) not in ("self", "cls")]
+        if names and name not in params and len(params) < _SE_MAX:
+            params[name] = names
+    call_re = (re.compile(_DV_NAME_HEAD + "(" + "|".join(re.escape(n) for n in sorted(params)) + r")\s*\(")
+               if params else None)
+    for _ in range(_DD_PASSES):
+        grown = False
+        for name, lo, hi in assigns:
+            if name not in held:
+                host = holds(lo, hi)
+                if host is not None:
+                    held[name] = host
+                    grown = True
+        if call_re is not None:
+            for k, c in enumerate(call_re.finditer(text)):
+                if k >= _SE_MAX:
+                    break
+                if in_literal(c.start()):
+                    continue
+                args = _call_args(text[c.end():c.end() + _DD_ARG_SPAN])
+                for param, lo, hi in _ld_bound(text, c.end(), args, params[c.group(1)]):
+                    if param not in held:
+                        host = holds(lo, hi)
+                        if host is not None:
+                            held[param] = host
+                            grown = True
+        if not grown:
+            break
+    found = []
+    for pattern, where in ((_SE_REQUEST_RE, None), (_LD_EXEC_SEND_RE, _LD_NET_PROGRAM_RE)):
+        for k, r in enumerate(pattern.finditer(text)):
+            if k >= _SE_MAX:
+                break
+            if in_literal(r.start()):
+                continue
+            args = _call_args(text[r.end():r.end() + _DD_ARG_SPAN])
+            if where is not None and where.search(args) is None:
+                continue
+            host = holds(r.end(), r.end() + len(args))
+            if host is not None:
+                found.append((r.start(), host))
+                break
+    if not found:
+        return None
+    at, host = min(found)
+    return at, f"sends data to a webhook whose secret is written in the code ({host})"
 
 
 def credential_sweep_at(text):
@@ -6456,21 +7394,6 @@ def credential_sweep_at(text):
     return None
 
 
-def env_copy_serialized_at(text):
-    """The offset where `text` serializes a copy of the whole environment
-    it made (`d = dict(os.environ)` … `urlencode(d)`), else -1."""
-    if ("os.environ" not in text and "process.env" not in text) or _ENV_COPY_ANCHOR_RE.search(text) is None:
-        return -1
-    for k, m in enumerate(_ENV_COPY_RE.finditer(text)):
-        if k >= _ENV_COPY_MAX:
-            break
-        use = re.compile(_ENV_COPY_USE_HEAD + re.escape(m.group(1)) + _ENV_COPY_USE_TAIL)
-        u = use.search(text, m.end())
-        if u:
-            return u.start()
-    return -1
-
-
 def _exfil_signs(text, host):
     """(offset, reason) of the exfiltration shapes above that `text` shows,
     and of a miner, for the install-script and import-time tests (the
@@ -6480,21 +7403,15 @@ def _exfil_signs(text, host):
     at = miner_at(text)
     if at >= 0:
         signs.append((at, "runs a cryptocurrency miner (a Monero wallet address)"))
-    chat = chat_secret_at(text)
-    if chat is not None:
-        signs.append(chat)
+    endpoint = secret_endpoint_at(text)
+    if endpoint is not None:
+        signs.append(endpoint)
     net = []                          # _NETWORK_RE's answer, searched once when needed
 
     def network():
         if not net:
             net.append(_NETWORK_RE.search(text) is not None)
         return net[0]
-    ip = _PUBLIC_IP_URL_RE.search(text)
-    if ip:
-        cred = _CRED_FILE_RE.search(text)
-        if cred and network():
-            signs.append((cred.start(), "reads credential files and sends data to an IP address "
-                                        f"({ip.group(0).split('//', 1)[1]})"))
     sweep = credential_sweep_at(text)
     if sweep is not None and network():
         signs.append((sweep[0], "collects files from several credential folders and sends data over the network "
@@ -6509,13 +7426,6 @@ def _exfil_signs(text, host):
         if drop is not None:
             signs.append((drop[0], f"sends the machine's user or host name to an address it fetches at run time "
                                    f"(from {drop[1]})"))
-    elif any(nd in text for nd in _PUBLIC_IP_LOOKUP_NEEDLES):
-        lookup = _PUBLIC_IP_LOOKUP_RE.search(text)
-        if lookup:
-            capture = capture_service(text)
-            if capture:
-                signs.append((lookup.start(), "sends the machine's public IP address to a data-capture service "
-                                              f"({capture.group(0)[:40]})"))
     return signs
 
 
@@ -7054,6 +7964,1080 @@ def dead_drop_at(text):
     return None
 
 
+# ---------------- Local data sent (0.1.8) ----------------
+# What an install script sends matters, not where it sends it: a script that
+# reads data from the machine and sends it is exfiltrating, whatever the
+# host (a list of exfiltration services does not know a Feishu bot, a new
+# tunnel service or the attacker's own server). local_data_sent_at follows
+# data from where the script reads it to where it sends it:
+#   - read (_ld_sources): an environment variable that names the user or
+#     the host, or holds a secret (…TOKEN, …SECRET, …PASSWORD, …API_KEY …;
+#     not npm's own), and the whole environment (process.env, os.environ
+#     copied, listed or serialized; not narrowed by a condition that picks
+#     the package's own settings: `.filter(([k]) => k.startsWith('X_'))`);
+#     a value tested rather than used is not read (`typeof process.env`,
+#     `process.env && …`, `x ? … : …`, `!x`: _ld_tested); a file or folder
+#     outside the package — read or listed by a path that is absolute, in
+#     the home or working folder (homedir(), expanduser, Path.home(), $HOME,
+#     %USERPROFILE%, INIT_CWD, cwd()) or held by a name given one (`const
+#     ROOT = '/home/node/app'` … `path.join(ROOT, f)`), and not built on the
+#     script's own folder (__dirname, __file__), or given as such a path to
+#     any call of a script that reads files (fs.readFileSync(
+#     `/proc/${pid}/environ`), open("/flag.txt"), readDirRecursive("/opt"),
+#     require('fs').readFileSync(p)); what a command prints when it reports
+#     on the machine (execSync, check_output, getoutput, popen … of whoami,
+#     id, env, cat, ls …, read as the shell reads it: _sh_output_data); the
+#     machine's names and addresses (os.hostname(), os.userInfo(),
+#     os.homedir(), os.networkInterfaces(), socket.gethostname(),
+#     getpass.getuser() …); what the cloud's instance metadata service gives
+#     (169.254.169.254, metadata.google.internal …: the instance's
+#     credentials); the public IP address a lookup service answers (ipify,
+#     ifconfig.me …). Code in a template literal's or an f-string's text
+#     counts as code.
+#   - followed through the names given it (the dead drop's reading,
+#     _DD_PASSES levels: assignments — a statement's value read to its end,
+#     over rows — destructuring, loops, `with … as`, `.then(…)` and the
+#     parameters of a read's callback and of callbacks on a name followed,
+#     returns, and the parameters of the script's own functions called with
+#     one). The path a read is given is sealed (what the read gives is the
+#     file's), and so are a program's options: the environment and the
+#     folder a child process is given (`spawn(cmd, args, { env:
+#     __spreadValues({}, process.env) })`) are the program's, and a bundle's
+#     helper that copies them holds no data.
+#   - sent: in the data of a send (a request's, socket's or connection's
+#     write, end, send or request; the arguments after the address of fetch —
+#     bare or the global's, not a cache's `.fetch(key)` — Request, urlopen,
+#     sendBeacon, axios, got, requests, httpx … .post/.put/.patch; a command
+#     a script runs that holds curl, wget, nc …; not a function's definition
+#     that shares a send's name: `async fetch(t, e) {`), or — what is not the
+#     environment, the instance's metadata or the public IP address — in a
+#     request's address (a GET's URL: `https.get('https://x/?h=' + host)`, a
+#     DNS lookup's name): a download's address may carry environment
+#     variables (a mirror, a proxy, a token for a private download); those
+#     count where the address is a data-capture service's.
+# Install time only: a CLI reads the environment and posts to its own API
+# when it is used.
+_LD_ENV_RE = re.compile(
+    r"""\bprocess\s*\.\s*env\s*(?:\.\s*([A-Za-z_$][\w$]*)|\[\s*["'`]([^"'`\n]{1,100})["'`]\s*\])"""
+    r"""|\bos\s*\.\s*environ\s*(?:\[\s*[rbuRBU]?["']([^"'\n]{1,100})["']\s*\]"""
+    r"""|\.\s*get\s*\(\s*[rbuRBU]?["']([^"'\n]{1,100})["'])"""
+    r"""|\bos\s*\.\s*getenv\s*\(\s*[rbuRBU]?["']([^"'\n]{1,100})["']""")
+# npm's own variables (the package, the lifecycle, the configuration but
+# its credentials; INIT_CWD: the folder the install runs in) describe the
+# install: their values are not data sent
+# the whole environment: `process.env` itself (copied, listed, serialized),
+# os.environ copied, listed or printed (not a variable read by its name, not
+# one written)
+_LD_ENV_ALL_RE = re.compile(
+    r"""\bprocess\s*\.\s*env\b(?!\s*(?:\.|\[|\?\.))"""
+    r"""|\bos\s*\.\s*environ\b(?!\s*(?:\[|\.\s*(?:get|setdefault|pop|update)\s*\())|\bos\s*\.\s*environb\b""")
+_LD_WHOLE_ENV = "the whole environment"
+# the whole environment narrowed to the variables a condition selects
+# (`Object.entries(process.env).filter(([k]) => k.startsWith('X_'))`, `{k: v
+# for k, v in os.environ.items() if k.startswith('X_')}`) is the package's
+# own settings, as a variable read by its name is; not when the condition
+# excludes (`!k.startsWith('npm_')`: the rest is the environment) or picks
+# secrets (`/TOKEN|KEY/.test(k)`)
+_LD_ENV_SELECT_RE = re.compile(r"(?:\s*\))?\s*\.\s*filter\s*\(|(?:\s*\.\s*(?:items|keys|values)\s*\(\s*\))?[ \t]+if\b")
+_LD_EXCLUDES_RE = re.compile(r"!|\bnot\b")
+# a value tested, not used: compared, a guard (`x && …`, `x ? … : …`, `… if x
+# else …`), assigned to, or after typeof, `!` or `not` (a bundle's `typeof
+# process.env == "object" && process.env && process.env.DEBUG` reads no
+# variable but DEBUG)
+_LD_TEST_AFTER_RE = re.compile(r"\s*(?:[=!]==?|=(?![=>])|&&|\?(?![.?])|\b(?:and|is|in|else|instanceof)\b)")
+_LD_TEST_BEFORE = ("typeof", "not")
+# a member of a name that holds the whole environment: one variable, read by
+# the name's property (a method's call, `data.encode()`, is the data's)
+_LD_MEMBER_READ_RE = re.compile(r"\s*(?:\??\.\s*[A-Za-z_$][\w$]*(?![\w$])(?!\s*\()|\[)")
+_LD_ENV_QUIET_RE = re.compile(
+    r"(?:npm_(?:package|lifecycle|config)_(?![\w]*(?:auth|token|passw|secret))\w*|npm_node_execpath|npm_execpath"
+    r"|INIT_CWD|NODE_ENV|CI)\Z", re.I)
+# (called, or handed to code that calls it: `tryGet(os.hostname)`)
+_LD_IDENTITY_RE = re.compile(
+    r"""(?:\bos\s*\.\s*|\brequire\(\s*["'](?:node:)?os["']\s*\)\s*\.\s*)(hostname|userInfo|homedir|networkInterfaces)\b"""
+    r"""(\s*\()?|\b(?:socket\s*\.\s*(?:gethostname|getfqdn)|platform\s*\.\s*node|getpass\s*\.\s*getuser"""
+    r"""|os\s*\.\s*getlogin|os\s*\.\s*uname|platform\s*\.\s*uname)\b(\s*\()?""")
+# the machine's names taken from their module by name (`const { hostname } =
+# require('os')`, `import { userInfo } from 'node:os'`, `from socket import
+# gethostname as gh`): a call of the name reads what the module's would
+_LD_IMPORT_JS_RE = re.compile(
+    r"""\b(?:(?:const|let|var)\s*\{([^{}\n]{1,300})\}\s*=\s*require\(\s*|import\s*\{([^{}\n]{1,300})\}\s*from\s*)"""
+    r"""["'](?:node:)?os["']""")
+_LD_IMPORT_PY_RE = re.compile(r"\bfrom\s+(os|socket|getpass|platform)\s+import\s+\(?([^\n)]{1,300})")
+_LD_IMPORT_NAME_RE = re.compile(r"\s*([A-Za-z_$][\w$]*)(?:\s*(?::|\bas\b)\s*([A-Za-z_$][\w$]*))?\s*\Z")
+_LD_MODULE_NAMES = {
+    "os": {"hostname": "identity", "userInfo": "identity", "homedir": "report", "networkInterfaces": "report",
+           "getlogin": "identity", "uname": "identity"},
+    "socket": {"gethostname": "identity", "getfqdn": "identity"},
+    "getpass": {"getuser": "identity"},
+    "platform": {"node": "identity", "uname": "identity"}}
+# services whose answer is the caller's public IP address
+_LD_PUBLIC_IP_RE = re.compile(
+    r"\bapi(?:64)?\.ipify\.org\b|\bip-api\.com\b|\bipinfo\.io\b|\bifconfig\.me\b|\bicanhazip\.com\b"
+    r"|\bcheckip\.amazonaws\.com\b|\bipapi\.co\b|\bident\.me\b|\bapi\.myip\.com\b|\bwtfismyip\.com\b")
+# a call and its first argument's start (after the '(')
+# (a module required in place is a receiver too: `require('fs').readFileSync(p)`)
+_LD_CALL_RE = re.compile(r"""(?<![\w$.])(?:(?:[A-Za-z_$][\w$]*|require\s*\(\s*["'`][^"'`\n]{1,60}["'`]\s*\))\s*\.\s*)*"""
+                         r"([A-Za-z_$][\w$]*)\s*\(\s*")
+_LD_READERS = frozenset({"readFileSync", "readFile", "readdirSync", "readdir", "createReadStream", "opendirSync",
+                         "opendir", "read_text", "read_bytes", "listdir", "scandir", "walk", "glob", "iglob", "open",
+                         "Path", "readlines"})
+_LD_READS_RE = re.compile(r"\b(?:" + "|".join(sorted(_LD_READERS)) + r")\s*\(")
+_LD_NOT_READS = frozenset({"require", "import", "join", "resolve", "normalize", "dirname", "basename", "relative",
+                           "mkdirSync", "mkdir", "makedirs", "writeFileSync", "writeFile", "appendFileSync",
+                           "existsSync", "exists", "chdir", "spawn", "spawnSync", "execFile", "execFileSync", "fork",
+                           "exec", "execSync", "unlinkSync", "unlink", "rmSync", "rmdirSync", "remove", "rmtree",
+                           "chmodSync", "chmod", "symlinkSync", "copyFileSync", "copyfile", "copy", "move", "rename",
+                           "renameSync", "isfile", "isdir", "isabs", "abspath", "realpath", "expanduser", "log",
+                           "print", "error", "warn", "info", "debug", "system", "popen", "run", "call", "check_call",
+                           "check_output", "Popen", "startsWith", "endsWith", "includes", "test", "match", "replace",
+                           "split", "indexOf", "push", "append", "extend", "set", "add"})
+_LD_ABSOLUTE_RE = re.compile(r"""[fFrRbBuU]{0,2}["'`](?:/[\w.~-]|~[/\\]|[A-Za-z]:[\\/]|\$HOME\b|\$\{HOME\}|%USERPROFILE%)""")
+# a path in the file system's own folders, the home folder or a drive (a
+# path like /api/v1 is a URL's): what any call given one reads is local
+_LD_FS_ROOT_SRC = (r"""["'`](?:/(?:etc|proc|home|root|Users|var|opt|flag|tmp|usr|srv|mnt|run|sys|dev|boot|data"""
+                   r"""|app|workspace|secrets?)\b|~[/\\]|[A-Za-z]:[\\/]|\$HOME\b|\$\{HOME\}|%USERPROFILE%)""")
+_LD_ABSOLUTE_IN_RE = re.compile(_LD_FS_ROOT_SRC)
+_LD_FS_ROOT_RE = re.compile(r"[fFrRbBuU]{0,2}" + _LD_FS_ROOT_SRC)
+_LD_HOME_RE = re.compile(
+    r"""\bhomedir\s*\(|\bexpanduser\s*\(|\bPath\s*\.\s*home\s*\(|\bgetcwd\s*\(|\bprocess\s*\.\s*cwd\s*\("""
+    r"""|\bPath\s*\.\s*cwd\s*\(|\bprocess\s*\.\s*env\s*(?:\.\s*|\[\s*["'`])(?:HOME|USERPROFILE|INIT_CWD|APPDATA|LOCALAPPDATA)\b"""
+    r"""|\b(?:environ\s*(?:\[\s*|\.\s*get\s*\(\s*)|getenv\s*\(\s*)["'](?:HOME|USERPROFILE|APPDATA|LOCALAPPDATA)["']""")
+_LD_OWN_FOLDER_RE = re.compile(r"__dirname|__filename|import\s*\.\s*meta|__file__")
+# a credential file named by a relative path: code a package runs on import
+# runs in its user's project folder
+_LD_CRED_FILE_RE = re.compile(
+    r"""[fFrRbBuU]{0,2}["'`](?:[^"'`\n]{0,200}[/\\])?\.(?:env(?:\.[\w.-]{1,30})?|npmrc|pypirc|netrc|git-credentials)["'`]""")
+_LD_PLAIN_LITERAL_RE = re.compile(r"""[fFrRbBuU]{0,2}(["'`])([^"'`\n]*)\1\Z""")
+# a value that builds a path: a join, a Path, a literal, a template, a name, a sum of them
+_LD_PATH_EXPR_RE = re.compile(
+    r"""\s*(?:(?:path|os\s*\.\s*path|posixpath|ntpath)\s*\.\s*(?:join|resolve|normalize)\s*\(|Path\s*\("""
+    r"""|[fFrRbBuU]{0,2}["'`]|[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*){0,4}"""
+    r"""\s*(?:\(\s*(?:["'][^"'\n]{0,200}["'])?\s*\))?\s*(?:[+/]|\Z))""")
+_LD_EXEC_RE = re.compile(
+    r"\b(?:execSync|execFileSync|spawnSync|exec|execFile|check_output|getoutput|getstatusoutput|popen|run)\s*(\()\s*"
+    r"""(?:\[\s*)?[rbuRBU]?["'`]([^"'`\n]{1,300})["'`]((?:\s*,\s*[rbuRBU]?["'`][^"'`\n]{0,100}["'`]){0,8})""")
+_LD_ARGV_ITEM_RE = re.compile(r"""["'`]([^"'`\n]{0,100})["'`]""")
+# the cloud's instance metadata service: what a request to it gives is the machine's credentials
+_LD_METADATA_RE = re.compile(
+    r"169\.254\.169\.254|metadata\.google\.internal|100\.100\.100\.200|\bfd00:ec2::254|/computeMetadata/v1"
+    r"|Metadata-Flavor|/latest/meta-data|/metadata/instance|/metadata/identity/oauth2")
+# a function's parameters, and the names in a parameter list
+_LD_FUNC_RE = re.compile(
+    r"\bdef\s+([A-Za-z_]\w*)\s*\(([^)\n]{0,300})\)|\bfunction\s*\*?\s*([A-Za-z_$][\w$]*)\s*\(([^)\n]{0,300})\)"
+    r"|(?<![\w$])([A-Za-z_$][\w$]*)\s*[=:]\s*(?:async\s+)?(?:function\b\s*\*?\s*[\w$]*\s*\(([^)\n]{0,300})\)"
+    r"|\(([^)\n]{0,300})\)\s*=>|([A-Za-z_$][\w$]*)\s*=>)"
+    r"|(?<![\w$.])(?!(?:if|for|while|switch|catch|function|with|return)\b)(?:async\s+|static\s+|get\s+|set\s+)*"
+    r"([A-Za-z_$][\w$]*)\s*\(([^)\n]{0,300})\)\s*\{")
+_LD_PARAM_RE = re.compile(r"\s*(?:\.\.\.|\*{1,2})?\s*([A-Za-z_$][\w$]*)")
+# a member of a name given a value (`payload.files = …`, `o[k] = …`), and a
+# value added to a name's collection (`list.push(…)`): the name holds it
+_LD_MEMBER_ASSIGN_RE = re.compile(
+    r"(?<![\w$.])([A-Za-z_$][\w$]*)((?:\s*\.\s*[A-Za-z_$][\w$]*|\s*\[[^\]\n]{1,200}\]){1,8})[ \t]*\+?=(?![=>])")
+_LD_MEMBER_RE = re.compile(r"""\.\s*([A-Za-z_$][\w$]*)|\[\s*["'`]([^"'`\n]{1,60})["'`]\s*\]""")
+# a value that is a function (its calls give what it returns; an arrow's or a
+# lambda's expression is what it returns)
+_LD_FUNC_VALUE_RE = re.compile(
+    r"\s*(?:async\s+)?(?:function\b|\([^)\n]{0,300}\)\s*=>|[A-Za-z_$][\w$]*\s*=>)|\s*(?:lambda\b|class\b)")
+_LD_ARROW_BODY_RE = re.compile(
+    r"\s*(?:async\s+)?(?:\([^)\n]{0,300}\)|[A-Za-z_$][\w$]*)\s*=>\s*(?!\{)|\s*lambda\b[^:\n]{0,300}:")
+_LD_CALLED_RE = re.compile(r"\s*\(")
+# reads given a path (sealed: what they give is not their path's)
+_LD_SEAL_RE = re.compile(
+    r"\b(?:readFileSync|readFile|readdirSync|readdir|createReadStream|opendirSync|opendir|listdir|scandir|walk|glob"
+    r"|iglob|open|existsSync|exists|statSync|lstatSync|isfile|isdir)\s*\(")
+_LD_COLLECT_RE = re.compile(
+    r"(?<![\w$.])([A-Za-z_$][\w$]*)(?:\s*\.\s*[A-Za-z_$][\w$]*){0,4}\s*\.\s*"
+    r"(?:push|append|extend|add|update|unshift|insert|setdefault)\s*\(")
+# a request, a socket or a connection assigned to a name: its write, end, send … is a send
+_LD_CONNECTION_RE = re.compile(
+    r"\b(?:https?|http2|net|tls|dgram)\s*\.\s*(?:get|createSocket)\s*\("
+    r"""|\brequire\s*\(\s*["'](?:node:)?(?:https?|http2|net|tls|dgram)["']\s*\)\s*\.\s*"""
+    r"(?:request|get|connect|createConnection|createSocket)\s*\("
+    r"|(?<![\w$])[A-Za-z_$][\w$]*\s*\.\s*(?:request|connect|createConnection)\s*\("
+    r"|\bnew\s+(?:net\s*\.\s*)?(?:Socket|XMLHttpRequest|WebSocket)\s*\("
+    r"|\bsocket\s*\.\s*(?:socket|create_connection)\s*\(|\bHTTPS?Connection\s*\(")
+_LD_WRITE_TAIL = r"\s*\.\s*(?:write|end|send|sendall|sendto|request)\s*\("
+_LD_BODY_RE = re.compile(r"\s*\{")
+_LD_WRITE_TAIL_RE = re.compile(_LD_WRITE_TAIL)
+# an address whose host name the script builds from a value (`'https://' + h +
+# '.x.invalid'`, `https://${h}.x.invalid`): resolving it sends the value
+_LD_HOST_BUILT_RE = re.compile(
+    r"""[fFrRbBuU]{0,2}(["'`])(?:https?|wss?)://[^"'`/\s?#]{0,200}?"""
+    r"""(?:\1\s*\+\s*([^\n+;,)]{1,200})|\$\{([^}\n]{1,200})\}|\{([^}\n]{1,200})\})""")
+# sends: an address first (the environment does not count there), then data
+_LD_SEND_RE = re.compile(
+    r"\b(?:axios|got|needle|superagent|ky|requests|httpx|session|client|aiohttp)\s*\.\s*(?:post|put|patch)\s*\("
+    r"|\bsendBeacon\s*\(|\bRequest\s*\(|\burlopen\s*\(|(?<![\w$.])fetch\s*\("
+    r"|\b(?:globalThis|window|self|global)\s*\.\s*fetch\s*\(")
+# sends given an options object, or a method and an address first; a command
+# a script runs that sends
+_LD_OPTIONS_SEND_RE = re.compile(r"\baxios\s*\(")
+_LD_REQUEST_SEND_RE = re.compile(r"\b(?:requests|httpx|session|client)\s*\.\s*request\s*\(")
+_LD_EXEC_SEND_RE = re.compile(
+    r"\b(?:execSync|exec|spawnSync|spawn|execFileSync|execFile|system|popen|check_output|check_call|call|run"
+    r"|Popen|getoutput)\s*\(")
+_LD_NET_PROGRAM_RE = re.compile(r"""(?:["'`]|[;&|]\s*|\$\(\s*)(?:[\w./-]*/)?(?:curl|wget|nc|ncat|netcat|nslookup|dig"""
+                                r"""|ping|Invoke-WebRequest|iwr|Invoke-RestMethod|irm)\b""")
+# requests whose arguments are an address, and lookups of a name (one
+# written with a literal: a lookup of the machine's own name is none)
+_LD_ADDRESS_SEND_RE = re.compile(
+    r"\b(?:https?\s*\.\s*(?:get|request)|axios\s*\.\s*get|got|requests\s*\.\s*get|httpx\s*\.\s*get)\s*\("
+    r"""|\brequire\s*\(\s*["'](?:node:)?https?["']\s*\)\s*\.\s*(?:get|request)\s*\(""")
+_LD_LOOKUP_SEND_RE = re.compile(r"\b(?:dns\s*\.\s*(?:lookup|resolve\w*)|gethostbyname|getaddrinfo)\s*\(")
+_LD_NEEDLES = ("env", "hostname", "userInfo", "homedir", "networkInterfaces", "getuser", "getlogin", "uname", "exec",
+               "ipify", "ip-api", "ipinfo", "ifconfig.me", "icanhazip", "checkip", "ipapi", "ident.me", "myip",
+               "wtfismyip", "gethostname", "getfqdn", ".env", "npmrc", "pypirc", "netrc", "git-credentials",
+               "check_output", "getoutput", "popen", "run", "read", "open", "listdir", "scandir", "walk", "glob",
+               "169.254", "metadata", "Metadata", "100.100.100.200", "fd00:ec2")
+_LD_SEND_NEEDLES = ("request", "fetch", "post", "put", "patch", "send", "write", "end(", "urlopen", "Request", "get",
+                    "dns", "gethostbyname", "getaddrinfo", "connect", "Socket", "socket", "curl", "wget", "nc ",
+                    "nslookup", "dig", "ping")
+_LD_METADATA_NEEDLES = ("169.254", "metadata", "Metadata", "100.100.100.200", "fd00:ec2")
+_LD_MAX = 200                    # sources, sends, functions and their calls examined per text
+_LD_MAX_CALLS = 10000            # calls examined for a path outside the package
+_LD_STATEMENT_SPAN = 2000        # characters of a statement's value read, over rows
+_LD_REASONS = {
+    "address": "sends the machine's public IP address over the network",
+    "environment": "sends environment variables over the network",
+    "file": "reads files outside the package and sends them over the network",
+    "identity": "sends the machine's user or host name over the network",
+    "report": "sends what local commands report about the machine over the network",
+    "credentials": "sends what the cloud's instance metadata service gives it (the machine's credentials) over the network",
+}
+_LD_NOT_IN_ADDRESS = frozenset({"environment", "credentials", "address"})
+
+
+def _ld_statement_end(text, i):
+    """The end of the statement whose value starts at i: the first `;` or
+    line break outside brackets and string literals, or a bracket that
+    closes one opened before i (at most _LD_STATEMENT_SPAN characters on)."""
+    depth, n = 0, min(len(text), i + _LD_STATEMENT_SPAN)
+    while i < n:
+        ch = text[i]
+        if ch in "\"'`":
+            if ch != "`" and text.startswith(ch * 3, i):
+                j = text.find(ch * 3, i + 3)
+                if j < 0 or j + 3 > n:
+                    return n
+                i = j + 3
+                continue
+            j = i + 1
+            while j < n and text[j] != ch:
+                j += 2 if text[j] == "\\" else 1
+            if j >= n:
+                return n
+            i = j + 1
+            continue
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            if depth == 0:
+                return i
+            depth -= 1
+        elif depth == 0 and ch in ";\n":
+            return i
+        i += 1
+    return n
+
+
+def _ld_literal_test(text):
+    """in_literal(pos) for `text`: is pos in a string literal? A template
+    literal's or an f-string's text is code here (its holes are)."""
+    spans = [(a, b) for a, b in _literal_spans(text)
+             if text[a] != "`" and not (a > 0 and text[a - 1] in "fF")
+             and not (a > 1 and text[a - 2] in "fF" and text[a - 1] in "rRbB")]
+    starts = [a for a, _ in spans]
+
+    def in_literal(pos):
+        k = bisect.bisect_right(starts, pos) - 1
+        return k >= 0 and pos < spans[k][1]
+    return in_literal
+
+
+def _ld_split_args(args):
+    """[(start, end)] of a call's arguments in `args` (what follows its '('
+    up to the bracket that closes it): split at commas outside brackets and
+    string literals."""
+    out, depth, start, i, n = [], 0, 0, 0, len(args)
+    while i < n:
+        ch = args[i]
+        if ch in "\"'`":
+            j = args.find(ch, i + 1)
+            if j < 0:
+                break
+            i = j + 1
+            continue
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            out.append((start, i))
+            start = i + 1
+        i += 1
+    out.append((start, n))
+    return out
+
+
+# a request's options: their values are an address, not data (a proxy, a
+# token for a private download, the host): the environment does not count
+_LD_OPTION_KEYS = frozenset({
+    "headers", "agent", "httpsAgent", "httpAgent", "proxy", "proxies", "auth", "signal", "timeout", "method",
+    "dispatcher", "cert", "key", "ca", "rejectUnauthorized", "verify", "credentials", "mode", "cache", "redirect",
+    "allow_redirects", "follow_redirects", "stream", "keepalive", "integrity", "referrerPolicy", "responseType",
+    "maxRedirects", "validateStatus", "url", "baseURL", "base_url", "hostname", "host", "port", "path", "protocol",
+    "family", "localAddress", "lookup", "retry", "hooks", "https", "http2", "decompress", "followRedirect",
+    "throwHttpErrors", "encoding", "trust_env", "timeout_ms"})
+# a process's options (subprocess's keyword arguments)
+_LD_PROCESS_KEYS = frozenset({
+    "env", "cwd", "shell", "stdin", "stdout", "stderr", "capture_output", "text", "check", "close_fds",
+    "creationflags", "startupinfo", "universal_newlines", "bufsize", "executable", "preexec_fn", "pass_fds",
+    "start_new_session", "user", "group", "umask"})
+_LD_KWARG_RE = re.compile(r"\s*([A-Za-z_]\w*)\s*=(?!=)")
+_LD_KEY_RE = re.compile(r"""\s*(?:["']([^"'\n]{1,60})["']|([A-Za-z_$][\w$]*))\s*:(?!:)""")
+
+
+def _ld_object_spans(text, lo, hi):
+    """[(start, end, address)] for the values of the object literal whose
+    '{' is at lo (an option's value is an address, see above)."""
+    close = lo + 1 + len(_call_args(text[lo + 1:hi]))
+    out = []
+    for a, b in _ld_split_args(text[lo + 1:close]):
+        part = text[lo + 1 + a:lo + 1 + b]
+        key = _LD_KEY_RE.match(part)
+        if key is not None:
+            if _LD_FUNC_VALUE_RE.match(part, key.end()) is not None:
+                continue                            # a function (a callback): code, not data
+            out.append((lo + 1 + a + key.end(), lo + 1 + b, (key.group(1) or key.group(2)) in _LD_OPTION_KEYS))
+        else:
+            out.append((lo + 1 + a, lo + 1 + b, part.strip() in _LD_OPTION_KEYS))
+    return out
+
+
+def _ld_value_spans(text, lo, hi):
+    """[(start, end, address)] for a value: an object literal's values, else
+    the value whole."""
+    stripped = text[lo:hi].lstrip()
+    if stripped.startswith("{"):
+        return _ld_object_spans(text, hi - len(stripped), hi)
+    return [(lo, hi, False)]
+
+
+def _ld_arg_spans(text, lo, hi, addresses=0, process=False):
+    """[(start, end, address)] for a call's arguments text[lo:hi]: the first
+    `addresses` are addresses, a keyword argument's or an object literal's
+    value is an address when it is an option (see above). `process`: the
+    call starts a program — its options object, and its keyword arguments
+    that are a process's options (env=, cwd= …), are not data sent."""
+    out = []
+    for k, (a, b) in enumerate(_ld_split_args(text[lo:hi])):
+        a, b = lo + a, lo + b
+        if _LD_FUNC_VALUE_RE.match(text, a, b) is not None:
+            continue                                # a callback: code run later, not data sent
+        if k < addresses:
+            out.append((a, b, True))
+            continue
+        kw = _LD_KWARG_RE.match(text, a, b)
+        if kw is not None:
+            out.append((kw.end(), b, kw.group(1) in _LD_OPTION_KEYS or process and kw.group(1) in _LD_PROCESS_KEYS))
+        elif process and text[a:b].lstrip().startswith("{"):
+            out.append((a, b, True))
+        else:
+            out.extend(_ld_value_spans(text, a, b))
+    return out
+
+
+def _ld_process_options(text, lo, hi):
+    """[(start, end)] of the values of a process's options (env, cwd …: a
+    keyword argument, or a key of an object literal) in a call's arguments
+    text[lo:hi]."""
+    out = []
+    for a, b in _ld_split_args(text[lo:hi]):
+        a, b = lo + a, lo + b
+        kw = _LD_KWARG_RE.match(text, a, b)
+        if kw is not None:
+            if kw.group(1) in _LD_PROCESS_KEYS:
+                out.append((kw.end(), b))
+            continue
+        stripped = text[a:b].lstrip()
+        if stripped.startswith("{"):
+            start = b - len(stripped)
+            close = start + 1 + len(_call_args(text[start + 1:b]))
+            for c, d in _ld_split_args(text[start + 1:close]):
+                key = _LD_KEY_RE.match(text, start + 1 + c, start + 1 + d)
+                if key is not None and (key.group(1) or key.group(2)) in _LD_PROCESS_KEYS:
+                    out.append((key.end(), start + 1 + d))
+    return out
+
+
+def _ld_bound(text, at, args, names):
+    """[(parameter, start, end)]: the arguments `args` (a call's, at `at`)
+    give a function whose parameters are `names`: by position, or by the
+    keyword that names one (`send(url, data=d)`)."""
+    out = []
+    for k, (a, b) in enumerate(_ld_split_args(args)):
+        a, b = at + a, at + b
+        kw = _LD_KWARG_RE.match(text, a, b)
+        if kw is not None and kw.group(1) in names:
+            out.append((kw.group(1), kw.end(), b))
+        elif k < len(names):
+            out.append((names[k], a, b))
+    return out
+
+
+def _ld_word_before(text, i):
+    """The index of the first character of the run of spaces before text[i]'s
+    (i itself when there is none)."""
+    while i > 0 and text[i - 1] in " \t\n":
+        i -= 1
+    return i
+
+
+def _ld_ident_char(c):
+    return c.isascii() and (c.isalnum() or c in "_$")
+
+
+def _ld_tested(text, start, end):
+    """Is the value text[start:end] tested rather than used (see above)?"""
+    if _LD_TEST_AFTER_RE.match(text, end) is not None:
+        return True
+    j = _ld_word_before(text, start)
+    if j > 0 and text[j - 1] == "!":
+        return True
+    for word in _LD_TEST_BEFORE:
+        k = j - len(word)
+        if k >= 0 and text.startswith(word, k) and (k == 0 or not _ld_ident_char(text[k - 1])):
+            return True
+    return False
+
+
+def _ld_defined(text, start, end):
+    """Is the call text[start:end] (to its ')') a function's definition — `def
+    f(…)`, `function f(…)`, a method's `f(…) {`?"""
+    if text.startswith(")", end) and _LD_BODY_RE.match(text, end + 1) is not None:
+        return True
+    j = _ld_word_before(text, start)
+    for word in ("def", "function"):
+        k = j - len(word)
+        if k >= 0 and text.startswith(word, k) and (k == 0 or not _ld_ident_char(text[k - 1])):
+            return True
+    return False
+
+
+def _ld_names_in(text, lo, hi, names, in_literal):
+    """The first name of `names` used in text[lo:hi] (not in a literal), else None."""
+    for m in _IDENT_TOKEN_RE.finditer(text, lo, hi):
+        if m.group() in names and not in_literal(m.start()):
+            return m.group()
+    return None
+
+
+def _ld_outside(text, lo, hi, reader, outside, in_literal):
+    """Does text[lo:hi], a call's first argument, name a path outside the
+    package (see above)? `reader`: the call reads or lists what it names;
+    `outside`: the names that hold such a path."""
+    first = text[lo:hi]
+    if _LD_OWN_FOLDER_RE.search(first) is not None:
+        return False
+    if _LD_FS_ROOT_RE.match(first) is not None:
+        return True
+    if reader and (_LD_ABSOLUTE_RE.match(first) is not None or _LD_HOME_RE.search(first) is not None
+                   or _LD_ABSOLUTE_IN_RE.search(first) is not None or _LD_CRED_FILE_RE.match(first) is not None):
+        return True
+    # (a name that holds one, in a path built on it: not a callback's code that uses it)
+    return bool(outside) and _LD_PATH_EXPR_RE.match(first) is not None \
+        and _ld_names_in(text, lo, hi, outside, in_literal) is not None
+
+
+def _ld_sources(text, in_literal, outside, own):
+    """[(offset, end, open, kind, what)]: where `text` reads local data (see
+    above); `open` is the index after a read's '(' (for its callback), else -1.
+    `own`: the names of the script's own functions (a path a name holds
+    counts in a read, or in a call of one of them: not in a method's call)."""
+    out = []
+    for k, m in enumerate(_LD_ENV_RE.finditer(text)):
+        if k >= _LD_MAX:
+            break
+        if in_literal(m.start()):
+            continue
+        name = next((g for g in m.groups() if g is not None), None)
+        end = m.end()
+        if m.group(4) is not None or m.group(5) is not None:        # a call's value: after the call
+            end += len(_call_args(text[end:end + _DD_ARG_SPAN])) + 1
+        if name is None or _ld_tested(text, m.start(), end):
+            continue
+        if _SH_IDENTITY_VAR_RE.match(name):
+            out.append((m.start(), m.end(), -1, "identity", name))
+        elif _SH_SECRET_VAR_RE.search(name) is not None and not _LD_ENV_QUIET_RE.match(name):
+            out.append((m.start(), m.end(), -1, "environment", name))
+    for k, m in enumerate(_LD_ENV_ALL_RE.finditer(text)):
+        if k >= _LD_MAX:
+            break
+        if in_literal(m.start()) or _ld_tested(text, m.start(), m.end()):
+            continue
+        s = _LD_ENV_SELECT_RE.match(text, m.end())
+        if s is not None:
+            cond = _call_args(text[s.end():s.end() + _DD_ARG_SPAN])
+            if _LD_EXCLUDES_RE.search(cond) is None and _SH_SECRET_VAR_RE.search(cond) is None:
+                continue
+        out.append((m.start(), m.end(), -1, "environment", _LD_WHOLE_ENV))
+    for k, m in enumerate(_LD_IDENTITY_RE.finditer(text)):
+        if k >= _LD_MAX:
+            break
+        if not in_literal(m.start()):
+            kind = "report" if m.group(1) in ("homedir", "networkInterfaces") else "identity"
+            called = m.group(2) is not None or m.group(3) is not None
+            out.append((m.start(), m.end(), m.end() if called else -1, kind, m.group(1) or "user or host name"))
+    imported = {}                   # local name -> (kind, the module's name for it)
+    if "os" in text:
+        for pattern, module in ((_LD_IMPORT_JS_RE, None), (_LD_IMPORT_PY_RE, "")):
+            for k, m in enumerate(pattern.finditer(text)):
+                if k >= _LD_MAX:
+                    break
+                mod, names = ("os", m.group(1) or m.group(2)) if module is None else (m.group(1), m.group(2))
+                for part in names.split(","):
+                    n = _LD_IMPORT_NAME_RE.match(part)
+                    if n is not None and n.group(1) in _LD_MODULE_NAMES[mod]:
+                        imported.setdefault(n.group(2) or n.group(1), (_LD_MODULE_NAMES[mod][n.group(1)], n.group(1)))
+    if imported:
+        uses = re.compile(_DV_NAME_HEAD + "(" + "|".join(re.escape(n) for n in sorted(imported)) + r")\b(\s*\()?")
+        for k, m in enumerate(uses.finditer(text)):
+            if k >= _LD_MAX:
+                break
+            if not in_literal(m.start()):
+                kind, what = imported[m.group(1)]
+                out.append((m.start(), m.end(), m.end() if m.group(2) else -1, kind,
+                            what if kind == "report" else "user or host name"))
+    if _LD_READS_RE.search(text) is not None:
+        for k, m in enumerate(_LD_CALL_RE.finditer(text)):
+            if k >= _LD_MAX_CALLS or len(out) >= _LD_MAX * 3:
+                break
+            name = m.group(1)
+            if name in _LD_NOT_READS or in_literal(m.start()):
+                continue
+            reader = name in _LD_READERS
+            names = outside if reader or (m.start(1) == m.start() and name in own) else ()
+            if not reader and not names and _LD_FS_ROOT_RE.match(text, m.end()) is None:
+                continue
+            args = _call_args(text[m.end():m.end() + _DD_ARG_SPAN])
+            first = _call_first_arg(args)
+            lead = len(args) - len(args.lstrip())
+            if _ld_outside(text, m.end() + lead, m.end() + lead + len(first), reader, names, in_literal):
+                plain = _LD_PLAIN_LITERAL_RE.match(first)
+                what = plain.group(2) if plain is not None else first
+                out.append((m.start(), m.end() + len(args), m.end(), "file",
+                            (what if reader else f"{name}({first})")[:60]))
+    for k, m in enumerate(_LD_EXEC_RE.finditer(text)):
+        if k >= _LD_MAX:
+            break
+        if in_literal(m.start()):
+            continue
+        argv = [m.group(2)] + _LD_ARGV_ITEM_RE.findall(m.group(3))
+        for kind, what in _sh_output_data(" ".join(argv), 0):
+            out.append((m.start(), m.end(), m.end(1), kind, what))
+            break
+    metadata = any(nd in text for nd in _LD_METADATA_NEEDLES)
+    if metadata or _LD_PUBLIC_IP_RE.search(text) is not None:
+        for k, f in enumerate(_DD_FETCH_RE.finditer(text)):
+            if k >= _LD_MAX:
+                break
+            if in_literal(f.start()):
+                continue
+            args = _call_args(text[f.end():f.end() + _DD_ARG_SPAN])
+            if metadata and _LD_METADATA_RE.search(args) is not None:
+                out.append((f.start(), f.end() + len(args), f.end(), "credentials", "the instance's metadata"))
+            elif _LD_PUBLIC_IP_RE.search(args) is not None:
+                out.append((f.start(), f.end() + len(args), f.end(), "address", "the machine's public IP address"))
+    return out
+
+
+_LD_MEMO = (None, None)          # (text, answer): the install-script and import-time tests read a text alike
+
+
+def local_data_sent_at(text):
+    """(offset, kind, what, in_address) of the first send of data `text` reads
+    from the machine (see above), else None. `in_address`: no send's data
+    holds it, but a request's address holds a variable of the environment,
+    the instance's metadata or the public IP address (a download's address
+    may hold a token: it counts where the address is a capture service's)."""
+    global _LD_MEMO
+    memo = _LD_MEMO
+    if memo[0] is text:
+        return memo[1]
+    answer = _local_data_sent_at(text)
+    _LD_MEMO = (text, answer)
+    return answer
+
+
+def _local_data_sent_at(text):
+    if not any(nd in text for nd in _LD_SEND_NEEDLES) or not any(nd in text for nd in _LD_NEEDLES):
+        return None
+    in_literal = _ld_literal_test(text)
+    assigns = []                                    # (name, start, end) of what is assigned
+    arrows = []                                     # (name, start, end) of what an arrow or a lambda returns
+    for k, m in enumerate(_DD_ASSIGN_RE.finditer(text)):
+        if k >= _DD_MAX_ASSIGNS:
+            break
+        if not in_literal(m.start(1)):
+            end = _ld_statement_end(text, m.start(2))
+            if _LD_FUNC_VALUE_RE.match(text, m.start(2), end) is None:
+                assigns.append((m.group(1), m.start(2), end))
+            else:
+                body = _LD_ARROW_BODY_RE.match(text, m.start(2), end)
+                if body is not None:
+                    arrows.append((m.group(1), body.end(), end))
+    for k, m in enumerate(_DD_DESTRUCT_RE.finditer(text)):
+        if k >= _DD_MAX_ASSIGNS:
+            break
+        if in_literal(m.start()):
+            continue
+        end = _ld_statement_end(text, m.start(2))
+        for part in m.group(1).split(","):
+            name = _DD_DESTRUCT_NAME_RE.search(part.strip())
+            if name is not None:
+                assigns.append((name.group(1), m.start(2), end))
+    plain = len(assigns)                            # (the assignments of a name itself)
+    options = []                                    # the values given a request's option (`opts.headers = …`)
+    for k, m in enumerate(_LD_MEMBER_ASSIGN_RE.finditer(text)):
+        if k >= _DD_MAX_ASSIGNS:
+            break
+        if in_literal(m.start(1)):
+            continue
+        end = _ld_statement_end(text, m.end())
+        if _LD_FUNC_VALUE_RE.match(text, m.end(), end) is not None:
+            continue                                # (a method: what it returns is its own)
+        if any((a or b) in _LD_OPTION_KEYS for a, b in _LD_MEMBER_RE.findall(m.group(2))):
+            options.append((m.group(1), m.end(), end))
+        else:
+            assigns.append((m.group(1), m.end(), end))
+    for k, m in enumerate(_LD_COLLECT_RE.finditer(text)):
+        if k >= _DD_MAX_ASSIGNS:
+            break
+        if not in_literal(m.start(1)):
+            assigns.append((m.group(1), m.end(), m.end() + len(_call_args(text[m.end():m.end() + _DD_ARG_SPAN]))))
+    loops = [(m.group(1) or m.group(3), m.start(2) if m.group(2) else m.start(4),
+              m.end(2) if m.group(2) else m.end(4))
+             for k, m in zip(range(_DD_MAX_ASSIGNS), _DD_FOR_RE.finditer(text)) if not in_literal(m.start())]
+    # the names that hold a path outside the package (see above): given one,
+    # or a path built on one (a join, a sum, a template)
+    outside = set()
+    for name, lo, hi in assigns[:plain]:
+        value = text[lo:hi].strip()
+        if _LD_PATH_EXPR_RE.match(value) is not None and _LD_OWN_FOLDER_RE.search(value) is None \
+                and (_LD_FS_ROOT_RE.match(value) is not None or _LD_HOME_RE.search(value) is not None):
+            outside.add(name)
+    for _ in range(_DD_PASSES if outside else 0):
+        grown = False
+        for name, lo, hi in assigns[:plain]:
+            if name not in outside and _LD_PATH_EXPR_RE.match(text, lo, hi) is not None \
+                    and _LD_OWN_FOLDER_RE.search(text, lo, hi) is None \
+                    and _ld_names_in(text, lo, hi, outside, in_literal) is not None:
+                outside.add(name)
+                grown = True
+        if not grown:
+            break
+    funcs, params = [], {}                          # (start, name); name -> [its parameters]
+    for k, m in enumerate(_LD_FUNC_RE.finditer(text)):
+        if k >= _DD_MAX_ASSIGNS:
+            break
+        name = m.group(1) or m.group(3) or m.group(5) or m.group(9)
+        funcs.append((m.start(), name))
+        plist = next((g for g in (m.group(2), m.group(4), m.group(6), m.group(7), m.group(8), m.group(10))
+                      if g is not None), "")
+        names = []
+        for part in plist.split(","):
+            p = _LD_PARAM_RE.match(part)
+            if p is not None and p.group(1) not in ("self", "cls"):
+                names.append(p.group(1))
+        if names and name not in params and len(params) < _LD_MAX:
+            params[name] = names
+    func_starts = [a for a, _ in funcs]
+    call_re = (re.compile(_DV_NAME_HEAD + "(" + "|".join(re.escape(n) for n in sorted(params)) + r")\s*\(")
+               if params else None)
+    sources = sorted(_ld_sources(text, in_literal, outside, {name for _, name in funcs}))
+    metadata_names = [name for name, lo, hi in assigns if _LD_METADATA_RE.search(text, lo, hi) is not None]
+    if not sources and not metadata_names:
+        return None
+    source_starts = [s[0] for s in sources]
+    followed = {}                                   # name -> (kind, what): the data it holds
+    called = set()                                  # the followed names of functions: their calls hold it
+    # the path a read is given: what the read gives is the file's, not the
+    # path's (a file under a folder named for the user is not the user's name)
+    spans = []
+    for k, m in enumerate(_LD_SEAL_RE.finditer(text)):
+        if k >= _LD_MAX:
+            break
+        first = _call_first_arg(_call_args(text[m.end():m.end() + _DD_ARG_SPAN]))
+        if first.strip():
+            spans.append((m.end(), m.end() + len(first)))
+    # and a program's options: the environment and the folder a child process
+    # is given are the program's, not data (`spawn(cmd, args, { env:
+    # __spreadValues({}, process.env) })` gives a bundle's helper no data)
+    for k, m in enumerate(_LD_EXEC_SEND_RE.finditer(text)):
+        if k >= _LD_MAX:
+            break
+        if not in_literal(m.start()):
+            args = _call_args(text[m.end():m.end() + _DD_ARG_SPAN])
+            spans.extend(_ld_process_options(text, m.end(), m.end() + len(args)))
+    sealed = []
+    for a, b in sorted(spans):
+        if sealed and a <= sealed[-1][1]:
+            sealed[-1] = (sealed[-1][0], max(sealed[-1][1], b))
+        else:
+            sealed.append((a, b))
+    sealed_starts = [a for a, _ in sealed]
+
+    def is_sealed(pos):
+        k = bisect.bisect_right(sealed_starts, pos) - 1
+        return k >= 0 and pos < sealed[k][1]
+
+    def read_in(spans, loose=False):
+        """(kind, what, through a parameter) of the first read, or of a
+        followed name, in the spans (in an address, not of a variable of the
+        environment, the instance's metadata or the public IP address, but
+        `loose`)."""
+        for lo, hi, address in spans:
+            k = bisect.bisect_left(source_starts, lo)
+            while k < len(sources) and sources[k][0] < hi:
+                if (not address or loose or sources[k][3] not in _LD_NOT_IN_ADDRESS or sources[k][4] == _LD_WHOLE_ENV) \
+                        and not is_sealed(sources[k][0]):
+                    return sources[k][3], sources[k][4], False
+                k += 1
+            if followed:
+                for m in _IDENT_TOKEN_RE.finditer(text, lo, hi):
+                    got = followed.get(m.group())
+                    if got is not None and (not address or loose or got[0] not in _LD_NOT_IN_ADDRESS
+                                            or got[1] == _LD_WHOLE_ENV) \
+                            and not in_literal(m.start()) and not is_sealed(m.start()) \
+                            and (m.group() not in called or _LD_CALLED_RE.match(text, m.end()) is not None) \
+                            and (got[1] != _LD_WHOLE_ENV or _LD_MEMBER_READ_RE.match(text, m.end()) is None) \
+                            and not _ld_tested(text, m.start(), m.end()):
+                        return got
+        return None
+
+    for name in metadata_names:
+        followed.setdefault(name, ("credentials", "the instance's metadata", False))
+    for name, lo, hi in assigns:
+        if name not in followed:
+            got = read_in(_ld_value_spans(text, lo, hi))
+            if got is not None:
+                followed[name] = got
+    for _at, end, opening, kind, what in sources:  # what a read gives: its callback, `with … as`, `.then(…)`
+        if opening < 0:
+            continue
+        args = _call_args(text[opening:opening + _DD_ARG_SPAN])
+        for cb in _DD_ARG_CALLBACK_RE.finditer(args):
+            name = cb.group(1) or cb.group(2) or cb.group(3)
+            if name not in followed and not in_literal(opening + cb.start()):
+                followed[name] = (kind, what, False)
+        pos = opening + len(args) + 1
+        m = _DD_AS_RE.match(text, pos)
+        if m is not None:
+            followed.setdefault(m.group(1), (kind, what, False))
+        for _ in range(_DD_THEN_MAX):
+            h = _DD_THEN_HEAD_RE.match(text, pos)
+            if h is None:
+                break
+            then_args = _call_args(text[h.end():h.end() + _DD_ARG_SPAN])
+            param = _DD_PARAM_RE.match(then_args)
+            if param is not None:
+                followed.setdefault(param.group(1), (kind, what, False))
+            pos = h.end() + len(then_args) + 1
+    returns = []                                    # (function, start, end) of what a function returns
+    for k, m in enumerate(_DD_RETURN_RE.finditer(text)):
+        if k >= _DD_MAX_CALLS:
+            break
+        end = _ld_statement_end(text, m.start(1))   # (read over rows, as an assignment's value is)
+        at = bisect.bisect_right(func_starts, m.start()) - 1
+        if not in_literal(m.start()) and at >= 0 and _LD_FUNC_VALUE_RE.match(text, m.start(1), end) is None:
+            returns.append((funcs[at][1], m.start(1), end))
+    # the names given a value composed with a literal (`label + '.' + domain`):
+    # a DNS lookup of one sends what it holds, a lookup of the machine's own name does not
+    composed = set()
+
+    def follow(name, got, lo, hi):
+        followed[name] = got
+        if _QUOTE_CHAR_RE.search(text, lo, hi) is not None:
+            composed.add(name)
+
+    for _ in range(_DD_PASSES):
+        grown = False
+        for name, lo, hi in assigns + loops:
+            if name not in followed:
+                got = read_in(_ld_value_spans(text, lo, hi))
+                if got is not None:
+                    follow(name, got, lo, hi)
+                    grown = True
+        for name, lo, hi in options:
+            if name not in followed:
+                got = read_in([(lo, hi, True)])
+                if got is not None:
+                    follow(name, got, lo, hi)
+                    grown = True
+        for k, m in enumerate(_DD_CALLBACK_RE.finditer(text)):
+            if k >= _DD_MAX_CALLS:
+                break
+            if m.group(1) in followed and m.group(2) not in followed and not in_literal(m.start()):
+                followed[m.group(2)] = followed[m.group(1)]
+                grown = True
+        # (what a function returns from its parameters depends on the call: not followed)
+        for name, lo, hi in returns + arrows:
+            if name not in followed:
+                got = read_in(_ld_value_spans(text, lo, hi))
+                if got is not None and not got[2]:
+                    follow(name, got, lo, hi)
+                    called.add(name)
+                    grown = True
+        if call_re is not None:                     # a function of the script's called with data: its parameters
+            for k, c in enumerate(call_re.finditer(text)):
+                if k >= _LD_MAX:
+                    break
+                if in_literal(c.start()):
+                    continue
+                args = _call_args(text[c.end():c.end() + _DD_ARG_SPAN])
+                for param, lo, hi in _ld_bound(text, c.end(), args, params[c.group(1)]):
+                    if param not in followed:
+                        got = read_in(_ld_value_spans(text, lo, hi))
+                        if got is not None:
+                            follow(param, (got[0], got[1], True), lo, hi)
+                            grown = True
+        if not grown:
+            break
+
+    found, in_address = [], []                      # sends of data; sends of what an address may hold
+
+    def first_send(pattern, addresses, where=None, process=False):
+        """A send `pattern` finds whose data holds what the script read:
+        its first `addresses` arguments are addresses (-1: all of them);
+        `where`: what its arguments hold (_QUOTE_CHAR_RE: a literal, or a name
+        given a value composed with one)."""
+        for k, s in enumerate(pattern.finditer(text)):
+            if k >= _LD_MAX:
+                return
+            if in_literal(s.start()):
+                continue
+            args = _call_args(text[s.end():s.end() + _DD_ARG_SPAN])
+            end = s.end() + len(args)
+            if _ld_defined(text, s.start(), end):
+                continue
+            if where is not None and where.search(args) is None \
+                    and not (where is _QUOTE_CHAR_RE
+                             and _ld_names_in(text, s.end(), end, composed, in_literal) is not None):
+                continue
+            spans = _ld_arg_spans(text, s.end(), end, len(args) + 1 if addresses < 0 else addresses, process)
+            got = read_in(spans)
+            if got is not None:
+                found.append((s.start(), got[0], got[1]))
+                return
+            if not in_address:
+                got = read_in(spans, True)
+                if got is not None:
+                    in_address.append((s.start(), got[0], got[1]))
+
+    first_send(_LD_SEND_RE, 1)
+    first_send(_LD_OPTIONS_SEND_RE, 0)
+    first_send(_LD_REQUEST_SEND_RE, 2)
+    first_send(_LD_ADDRESS_SEND_RE, -1)
+    first_send(_LD_LOOKUP_SEND_RE, -1, _QUOTE_CHAR_RE)
+    first_send(_LD_EXEC_SEND_RE, 0, _LD_NET_PROGRAM_RE, True)
+    connections = sorted({name for name, lo, hi in assigns[:plain]
+                          if _LD_CONNECTION_RE.search(text, lo, min(hi, lo + 300)) is not None})
+    if connections:
+        first_send(re.compile(_DV_NAME_HEAD + "(?:" + "|".join(re.escape(n) for n in connections) + ")"
+                              + _LD_WRITE_TAIL), 0)
+    for k, m in enumerate(_LD_HOST_BUILT_RE.finditer(text)):  # data resolved in a host name: sent
+        if k >= _LD_MAX:
+            break
+        g = 2 if m.group(2) is not None else (3 if m.group(3) is not None else 4)
+        got = read_in([(m.start(g), m.end(g), True)])
+        if got is not None:
+            found.append((m.start(), got[0], got[1]))
+            break
+    if not found:                                   # a connection written to as it is made: https.request(o).end(d)
+        for k, c in enumerate(_LD_CONNECTION_RE.finditer(text)):
+            if k >= _LD_MAX or found:
+                break
+            if in_literal(c.start()):
+                continue
+            close = c.end() + len(_call_args(text[c.end():c.end() + _DD_ARG_SPAN]))
+            w = _LD_WRITE_TAIL_RE.match(text, close + 1)
+            if w is not None:
+                end = w.end() + len(_call_args(text[w.end():w.end() + _DD_ARG_SPAN]))
+                got = read_in(_ld_arg_spans(text, w.end(), end))
+                if got is not None:
+                    found.append((c.start(), got[0], got[1]))
+    if found:
+        at, kind, what = min(found)
+        return at, kind, what, False
+    if in_address:
+        at, kind, what = min(in_address)
+        return at, kind, what, True
+    return None
+
+
+# ---------------- Commands a script runs, read as programs (0.1.8) ----------------
+# The command line a script hands a shell — os.system("…"), os.popen,
+# subprocess.* given a string, child_process.exec/execSync, or `sh -c "…"`
+# in an argument list — is read as a hook command's is (_sh_reasons): what it
+# sends, uploads or looks up (a beacon is not read here: a script that runs a
+# command may keep what it prints). The string's escapes are decoded; a hole
+# of a template literal or an f-string is a character that names nothing.
+_SH_EXEC_LINE_RE = re.compile(
+    r"\b(?:system|popen|execSync|exec|getoutput|getstatusoutput|run|call|check_call|check_output|Popen)\s*\(\s*"
+    r"""(?=[rbuRBUfF]{0,2}["'`]|[A-Za-z_$])"""
+    r"""|\b(?:spawn|spawnSync|execFile|execFileSync|run|call|check_call|check_output|Popen)\s*\(\s*[\[(]?\s*"""
+    r"""["'](?:/usr)?(?:/bin/)?(?:ba|z|da|k)?sh["']\s*,\s*[\[(]?\s*["']-c["']\s*,\s*(?=[rbuRBUfF]{0,2}["'`])""")
+_SH_EXEC_MAX = 50                # command lines read per text
+_SH_CONCAT_MAX = 20              # pieces of a command line joined with +
+_SH_EXEC_NEEDLES = ("curl", "wget", "nc ", "ncat", "netcat", "socat", "telnet", "nslookup", "dig ", "host ", "ping")
+_SH_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "0": "\x00", "v": "\v", "f": "\f", "b": "\b"}
+
+
+def _sh_literal_value(text, i):
+    """The value of the string literal at text[i] (after its prefix letters),
+    escapes decoded and a template's or f-string's holes made \\x02, else None."""
+    got = _sh_literal_at(text, i)
+    return None if got is None else got[0]
+
+
+def _sh_literal_at(text, i):
+    """(value, end) of the string literal at text[i] (see _sh_literal_value), else None."""
+    j = i
+    while j < len(text) and j - i < 2 and text[j] in "rbuRBUfF":
+        j += 1
+    prefix, i = text[i:j].lower(), j
+    if i >= len(text) or text[i] not in "\"'`":
+        return None
+    q = text[i]
+    triple = q != "`" and text.startswith(q * 3, i)
+    close = q * 3 if triple else q
+    raw, fmt, tpl = "r" in prefix, "f" in prefix, q == "`"
+    out, k, n = [], i + len(close), min(len(text), i + HOOK_MAX_CHARS)
+    while k < n:
+        if text.startswith(close, k):
+            return "".join(out), k + len(close)
+        ch = text[k]
+        if ch == "\n" and not triple and not tpl:
+            return None
+        if ch == "\\" and k + 1 < n:
+            nxt = text[k + 1]
+            out.append("\\" + nxt if raw else ("" if nxt == "\n" else _SH_ESCAPES.get(nxt, nxt)))
+            k += 2
+            continue
+        if tpl and text.startswith("${", k) or fmt and ch == "{" and not text.startswith("{{", k):
+            depth, k = 1, k + (2 if tpl else 1)
+            while k < n and depth:
+                depth += {"{": 1, "}": -1}.get(text[k], 0)
+                k += 1
+            out.append("\x02")
+            continue
+        if fmt and (text.startswith("{{", k) or text.startswith("}}", k)):
+            out.append(ch)
+            k += 2
+            continue
+        out.append(ch)
+        k += 1
+    return None
+
+
+def exec_command_reasons(text):
+    """The reasons the command lines `text` hands a shell give (see above)."""
+    reasons = []
+    for _at, r in _exec_command_flows(text):
+        if r not in reasons:
+            reasons.append(r)
+    return reasons
+
+
+def _sh_command_value(text, i, values):
+    """The command line an exec call's argument at text[i] builds: string
+    literals and names given one (`values`), joined with + (a name given
+    none, or anything else, is a character that names nothing), else None."""
+    parts, n = [], len(text)
+    while len(parts) < _SH_CONCAT_MAX:
+        while i < n and text[i] in " \t\n":
+            i += 1
+        got = _sh_literal_at(text, i)
+        if got is not None:
+            parts.append(got[0])
+            i = got[1]
+        else:
+            name = _IDENT_TOKEN_RE.match(text, i)
+            if name is None:
+                break
+            value = values.get(name.group())
+            if value is None and not parts:
+                return None
+            parts.append("\x02" if value is None else value)
+            i = name.end()
+        while i < n and text[i] in " \t\n":
+            i += 1
+        if i >= n or text[i] != "+":
+            break
+        i += 1
+    return "".join(parts) or None
+
+
+_SH_EXEC_MEMO = (None, None)     # (text, answer), as _LD_MEMO
+
+
+def _exec_command_flows(text):
+    """[(offset, reason)]: the reasons each command line `text` hands a shell
+    gives, and where it is handed over."""
+    global _SH_EXEC_MEMO
+    memo = _SH_EXEC_MEMO
+    if memo[0] is text:
+        return list(memo[1])
+    answer = _exec_command_flows_of(text)
+    _SH_EXEC_MEMO = (text, answer)
+    return list(answer)
+
+
+def _exec_command_flows_of(text):
+    if not any(nd in text for nd in _SH_EXEC_NEEDLES):
+        return []
+    out, walk = [], _HookWalk()
+    for at, cmd in _exec_command_lines(text):
+        if _pipes_download_to_shell(cmd):           # (a hook's command reads these as the install test does)
+            out.append((at, "pipes a download into a shell"))
+        if any(runs_substituted_download(row) for row in cmd.split("\n")):
+            out.append((at, _DL_CATEGORY_REASON["run"]))
+        out.extend((at, r) for r in _sh_reasons(cmd, 0, True, walk))
+    return out
+
+
+_SH_LINES_MEMO = (None, None)    # (text, answer), as _LD_MEMO
+
+
+def _exec_command_lines(text):
+    """[(offset, command line)]: what each exec call of `text` is handed as
+    a command line (a string literal, a name given one, or such pieces
+    joined; _sh_command_value), and where; at most _SH_EXEC_MAX."""
+    global _SH_LINES_MEMO
+    memo = _SH_LINES_MEMO
+    if memo[0] is text:
+        return memo[1]
+    out, values = [], None                          # values: name -> the string literal it is given
+    for m in _SH_EXEC_LINE_RE.finditer(text):
+        if len(out) >= _SH_EXEC_MAX:
+            break
+        if values is None:
+            values = {}
+            for k, a in enumerate(_DD_ASSIGN_RE.finditer(text)):
+                if k >= _DD_MAX_ASSIGNS:
+                    break
+                got = _sh_literal_at(text, a.start(2) + len(a.group(2)) - len(a.group(2).lstrip()))
+                if got is not None and a.group(1) not in values:
+                    values[a.group(1)] = got[0]
+        cmd = _sh_command_value(text, m.end(), values)
+        if cmd:
+            out.append((m.start(), cmd))
+    out = tuple(out)
+    _SH_LINES_MEMO = (text, out)
+    return out
+
+
 # ---------------- Persistence targets (0.1.7) ----------------
 # Where the 2025-26 npm worms made themselves stay. Mini Shai-Hulud and the
 # keyv wave committed a Claude Code SessionStart hook (.claude/settings.json)
@@ -7109,7 +9093,6 @@ _PERSIST_EXT_CLI_SRC = (
 _PERSIST_RUNNER_SRC = r"""actions/runner/releases|\bactions-runner-(?:linux|osx|win)-"""
 _PERSIST_RUNNER_CONFIG_SRC = r"""\bconfig\.(?:sh|cmd)\b"""
 _PERSIST_RUNNER_ARG_SRC = r"""--(?:token|url)\b"""
-_BUN_RELEASES_SRC = r"""oven-sh/bun/releases"""
 _SECRETS_DUMP_SRC = r"""\btoJSON\s*\(\s*secrets\s*\)"""
 _PERSIST_AGENT_RE = re.compile(_PERSIST_AGENT_SRC)
 _PERSIST_AGENT_SPLIT_RE = re.compile(_PERSIST_AGENT_SPLIT_SRC)
@@ -7122,7 +9105,6 @@ _PERSIST_EXT_CLI_RE = re.compile(_PERSIST_EXT_CLI_SRC)
 _PERSIST_RUNNER_RE = re.compile(_PERSIST_RUNNER_SRC)
 _PERSIST_RUNNER_CONFIG_RE = re.compile(_PERSIST_RUNNER_CONFIG_SRC)
 _PERSIST_RUNNER_ARG_RE = re.compile(_PERSIST_RUNNER_ARG_SRC)
-_BUN_RELEASES_RE = re.compile(_BUN_RELEASES_SRC, re.I)
 _SECRETS_DUMP_RE = re.compile(_SECRETS_DUMP_SRC, re.I)
 #: Lines naming a persistence target examined for a shell write, per target
 _PERSIST_MAX_LINES = 100
@@ -7184,12 +9166,18 @@ def dumps_workflow_secrets(text):
     return _SECRETS_DUMP_RE.search(text) is not None and _PERSIST_WORKFLOW_RE.search(text) is not None
 
 
-# A browser's shortcuts rewritten to start it with an extension the script
-# wrote (0.1.8): python-dateuti's setup.py wrote a clipboard-stealing
-# extension to %APPDATA% and added `--load-extension=` to every Chrome, Edge
-# and Brave shortcut (.lnk) it found. Browser automation passes the flag on
-# a command line; it never edits shortcuts.
+# The shortcuts of programs on the machine rewritten (0.1.8): python-dateuti's
+# setup.py wrote a clipboard-stealing extension to %APPDATA%, then looked
+# for every .lnk shortcut, opened each with WScript.Shell's CreateShortcut
+# and set its Arguments (`--load-extension=` for Chrome, Edge and Brave).
+# Whatever a rewritten shortcut starts, the program the user clicks now
+# starts something else. An installer that makes its own shortcut names
+# the file; it does not search for .lnk files to change: the reason is a
+# shortcut suffix searched for ('.lnk', '*.lnk'), CreateShortcut, and a
+# shortcut's Arguments or TargetPath set.
 _PERSIST_SHORTCUT_RE = re.compile(r"\bCreateShortcut\b|\.lnk\b")
+_SHORTCUT_FOUND_RE = re.compile(r"""['"`]\*?\.lnk['"`]""", re.I)
+_SHORTCUT_SET_RE = re.compile(r"\.\s*(?:Arguments|TargetPath)\s*\+?=(?!=)")
 
 # Programs set to start at login or boot (0.1.8). The CanisterWorm releases
 # of @emilgroup's packages and others (March 2026) wrote a systemd user unit
@@ -7369,8 +9357,10 @@ def service_reasons(text):
 def persistence_reasons(text):
     """The persistence-target reasons of the install-script test (see above):
     what `text` makes an AI agent, an editor, GitHub Actions or the operating
-    system run later, and the Bun loader the Shai-Hulud worms fetch their
-    payload's runtime with."""
+    system run later, and the programs' shortcuts it rewrites. (0.1.7's Bun
+    loader rule — Bun fetched from GitHub's releases and an exec call — is
+    gone: the file the loader runs with it is followed and read instead,
+    spawned_scripts.)"""
     reasons = []
     agent = _persist_agent_file(text)
     if agent is not None and (_PERSIST_WRITE_RE.search(text) is not None or _shell_writes(
@@ -7389,10 +9379,9 @@ def persistence_reasons(text):
     if _PERSIST_RUNNER_RE.search(text) is not None or _after_on_line(
             text, _PERSIST_RUNNER_CONFIG_RE, _PERSIST_RUNNER_ARG_RE):
         reasons.append("registers the machine as a GitHub Actions self-hosted runner")
-    if _BUN_RELEASES_RE.search(text) is not None and _EXEC_CALL_RE.search(text) is not None:
-        reasons.append("downloads the Bun runtime from GitHub and runs code with it")
-    if "--load-extension" in text and _PERSIST_SHORTCUT_RE.search(text) is not None:
-        reasons.append("rewrites browser shortcuts to load an extension")
+    if _SHORTCUT_FOUND_RE.search(text) is not None and "CreateShortcut" in text \
+            and _SHORTCUT_SET_RE.search(text) is not None:
+        reasons.append("rewrites the shortcuts of programs on the machine")
     reasons.extend(service_reasons(text))
     return reasons
 
@@ -7564,7 +9553,7 @@ _DV_PY_RE = re.compile(_DV_PY_SRC)
 _DV_HELPER_RE = re.compile(_DV_HELPER_SRC)
 _DV_STR_ITEM_RE = re.compile(_DV_STR_ITEM_SRC)
 _DV_ARRAY_RE = re.compile(_DV_ARRAY_SRC)
-_DV_NEEDLES = ("Buffer", "atob", "fromhex", "unhexlify", "b64decode", "fromCharCode", "hex", "base64")
+_DV_NEEDLES = ("Buffer", "atob", "fromhex", "unhexlify", "b64decode", "fromCharCode", "hex", "base64", "chr", "byte")
 # (0.1.8) A home-made XOR decoder: react-zutils 1.0.1, which its preinstall
 # hook starts detached, kept the 83 strings its browser stealer needs —
 # modules, browser paths, SQL, its ngrok address — as base64 of the text
@@ -7597,7 +9586,7 @@ _DV_HELPER_CALL_TAIL = r""")[ \t]*\([ \t]*""" + _DV_LIT + r"""[ \t]*\)"""
 _DV_MUTATED_TAIL = (r"""\s*(?:\.\s*(?:push|pop|shift|unshift|splice|reverse|sort|fill"""
                     r"""|copyWithin|append|insert|extend|remove)\s*\(|\[[^\]\n]{0,80}\]\s*=(?!=))""")
 _DV_ASSIGNED_TAIL = r"\s*=(?![=>])"
-_DV_INDEX_TAIL = r"\s*\[\s*(\d{1,2})\s*\]"
+_DV_INDEX_TAIL = r"\s*\[\s*([0-9]{1,2})\s*\]"
 
 
 def _dv_decode(kind, s):
@@ -7722,12 +9711,1450 @@ def _dv_xor_sub(xors):
     return sub
 
 
+# (0.1.8) Character codes. Text a file keeps as numbers is read as the text
+# it is: String.fromCharCode(…) of integer literals (also `...[…]` and
+# `.apply(null, […])`), Python's ''.join(map(chr, […])), ''.join(chr(c) for c
+# in […]) and bytes([…]).decode(…). And text a function of the file computes
+# from character codes, position by position, whatever its key: @fnos/app's
+# install script started the file
+#     path.join(__dirname, decodeBuffer(_workerDir, 7), decodeBuffer(_workerFile, 3))
+# with every string of its runner kept as an array of codes and decoded by
+#     function decodeBuffer(buffer, bias) {
+#       var assembled = '';
+#       for (var pos = 0; pos < buffer.length; pos++)
+#         assembled += String.fromCharCode(buffer[pos] ^ ((pos + bias) * 13 + 7 & 0xff));
+#       return assembled;
+#     }
+# — no key is written as a string, so there is none to try (the XOR decoder
+# above): the function's own arithmetic is the key. Such a decoder is a
+# function (function f(…) {, f = function (…) {, f = (…) =>, def f(…):) of
+# one to _DV_CC_MAX_PARAMS plain parameters whose first _DV_CC_BODY
+# characters hold a transform — String.fromCharCode(E) or chr(E) of one
+# expression, or String.fromCharCode(...d.map((c, i) => E)) — and a walk over
+# the parameter it decodes: for (var|let i = 0; i < d.length; …), d.map((c,
+# i) => …) or d.split('').map(…), and in Python for i in range(len(d)), for c
+# in d or for i, c in enumerate(d) (a statement, a comprehension or a
+# generator). E is arithmetic — integers, + - * % & | ^ << >> >>> ~ and
+# parentheses — over the walk's position and element (d[i], c,
+# d.charCodeAt(i), c.charCodeAt(0), ord(c)) and the other parameters (a
+# number, or a string read with k.charCodeAt(…), ord(k[…]), k.length or
+# len(k)). A call of it whose arguments are literals — integers, arrays of
+# integers (or a name assigned one once and never changed), strings of
+# printable ASCII — is worked out by a small evaluator of that arithmetic
+# (nothing is run) and read as its text when all of it is printable ASCII.
+# Every value stays a 32-bit integer or the call is not read (% and >>> of
+# non-negative numbers, shifts by 0 to 31), so the arithmetic is the one both
+# languages do. Bounds: _DV_CC_MAX_DECODERS decoders, the first
+# _DV_CC_MAX_CALLS calls, _DV_CC_MAX_CODES codes an argument and
+# _DV_CC_MAX_WORK codes worked out per text; a transform of at most
+# _DV_CC_MAX_TOKENS tokens, _DV_CC_MAX_DEPTH deep.
+_DV_CC_BODY = 600
+_DV_CC_MAX_PARAMS = 4
+_DV_CC_MAX_DECODERS = 8
+_DV_CC_MAX_CALLS = 256
+_DV_CC_MAX_CODES = 4096
+_DV_CC_MAX_WORK = 50_000
+_DV_CC_MAX_TOKENS = 64
+_DV_CC_MAX_DEPTH = 16
+_DV_CC_INT_MAX = 2147483647
+_DV_CC_INT = r"(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})"
+_DV_CC_INTS = _DV_CC_INT + r"(?:[ \t]*,[ \t]*" + _DV_CC_INT + r"){0,399}[ \t]*,?"
+_DV_CC_LITERAL_SRC = (
+    r"""\bString[ \t]*\.[ \t]*fromCharCode[ \t]*(?:\([ \t]*(?:\.\.\.[ \t]*\[[ \t]*(?P<a>""" + _DV_CC_INTS
+    + r""")[ \t]*\]|(?P<b>""" + _DV_CC_INTS + r"""))[ \t]*\)|\.[ \t]*apply[ \t]*\([ \t]*(?:null|undefined|this|String)"""
+    r"""[ \t]*,[ \t]*\[[ \t]*(?P<c>""" + _DV_CC_INTS + r""")[ \t]*\][ \t]*\))"""
+    r"""|(?:''|"")[ \t]*\.[ \t]*join[ \t]*\([ \t]*(?:map[ \t]*\([ \t]*chr[ \t]*,[ \t]*[\[(][ \t]*(?P<d>"""
+    + _DV_CC_INTS + r""")[ \t]*[\])][ \t]*\)|\[?[ \t]*chr[ \t]*\([ \t]*(?P<v>[A-Za-z_]\w*)[ \t]*\)[ \t]+for[ \t]+\5"""
+    r"""[ \t]+in[ \t]+[\[(][ \t]*(?P<e>""" + _DV_CC_INTS + r""")[ \t]*[\])][ \t]*\]?)[ \t]*\)"""
+    r"""|\bbyte(?:s|array)[ \t]*\([ \t]*[\[(][ \t]*(?P<f>""" + _DV_CC_INTS + r""")[ \t]*[\])][ \t]*\)[ \t]*\.[ \t]*decode"""
+    r"""[ \t]*\([^()\n]{0,20}\)""")
+_DV_CC_FUNC_SRC = (
+    r"""\bfunction[ \t]+(?P<a>[A-Za-z_$][\w$]*)[ \t]*\((?P<pa>[^()\n]{0,120})\)[ \t]*\{"""
+    r"""|\b(?:const|let|var)[ \t]+(?P<b>[A-Za-z_$][\w$]*)[ \t]*=[ \t]*(?:function\b[ \t]*(?:[A-Za-z_$][\w$]*)?[ \t]*"""
+    r"""\((?P<pb>[^()\n]{0,120})\)[ \t]*\{|\((?P<pc>[^()\n]{0,120})\)[ \t]*=>)"""
+    r"""|\bdef[ \t]+(?P<c>[A-Za-z_]\w*)[ \t]*\((?P<pd>[^()\n]{0,120})\)[ \t]*(?:->[^:\n]{0,80})?:""")
+_DV_CC_SITE_SRC = r"""\bString[ \t]*\.[ \t]*fromCharCode[ \t]*\(|(?<![\w$.])chr[ \t]*\("""
+_DV_CC_FOR_SRC = (r"""\bfor[ \t]*\([ \t]*(?:var|let)[ \t]+(?P<i>[A-Za-z_$][\w$]*)[ \t]*=[ \t]*0[ \t]*;[ \t]*\1[ \t]*<"""
+                  r"""[ \t]*(?P<d>[A-Za-z_$][\w$]*)[ \t]*\.[ \t]*length[ \t]*;""")
+_DV_CC_MAP_SRC = (r"""(?<![\w$.])(?P<d>[A-Za-z_$][\w$]*)[ \t]*(?P<split>\.[ \t]*split[ \t]*\([ \t]*(?:''|"")[ \t]*\)"""
+                  r"""[ \t]*)?\.[ \t]*map[ \t]*\([ \t]*(?:function\b[ \t]*(?:[A-Za-z_$][\w$]*)?[ \t]*\([ \t]*"""
+                  r"""(?P<e>[A-Za-z_$][\w$]*)(?:[ \t]*,[ \t]*(?P<i>[A-Za-z_$][\w$]*))?[ \t]*\)[ \t]*\{"""
+                  r"""|\([ \t]*(?P<e2>[A-Za-z_$][\w$]*)(?:[ \t]*,[ \t]*(?P<i2>[A-Za-z_$][\w$]*))?[ \t]*\)[ \t]*=>"""
+                  r"""|(?P<e3>[A-Za-z_$][\w$]*)[ \t]*=>)""")
+_DV_CC_PYFOR_SRC = (r"""\bfor[ \t]+(?P<i>[A-Za-z_]\w*)[ \t]+in[ \t]+range[ \t]*\([ \t]*len[ \t]*\([ \t]*"""
+                    r"""(?P<d>[A-Za-z_]\w*)[ \t]*\)[ \t]*\)""")
+_DV_CC_PYITER_SRC = (r"""\bfor[ \t]+(?:(?P<i>[A-Za-z_]\w*)[ \t]*,[ \t]*(?P<e>[A-Za-z_]\w*)[ \t]+in[ \t]+enumerate[ \t]*"""
+                     r"""\([ \t]*(?P<d>[A-Za-z_]\w*)[ \t]*\)|(?P<e2>[A-Za-z_]\w*)[ \t]+in[ \t]+(?P<d2>[A-Za-z_]\w*)"""
+                     r"""(?![\w$.(\[]))""")
+_DV_CC_TOKEN_SRC = r"""[ \t]*(?:(?P<num>0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})|(?P<name>[A-Za-z_$][\w$]*)|(?P<op>>>>|<<|>>|[-+*%&|^~()\[\].,]))"""
+_DV_CC_ARG_INT_SRC = r"""-?""" + _DV_CC_INT
+_DV_CC_ARG_STR_SRC = r"""'(?P<a>[ -&(-\[\]-~]{0,400})'|"(?P<b>[ !#-\[\]-~]{0,400})\""""
+_DV_CC_CALL_TAIL = r"""[ \t]*\((?P<args>(?:[^()'"\n]|'[^'\\\n]{0,400}'|"[^"\\\n]{0,400}"){0,20000})\)"""
+# a name assigned an array of integers (the name escaped before it)
+_DV_CC_ARRAY_TAIL = (r"""[ \t]*=[ \t]*[\[(]\s*(?P<items>""" + _DV_CC_INT + r"""(?:\s*,\s*""" + _DV_CC_INT
+                     + r"""){0,4095}\s*,?)\s*[\])]""")
+_DV_CC_LITERAL_RE = re.compile(_DV_CC_LITERAL_SRC)
+_DV_CC_FUNC_RE = re.compile(_DV_CC_FUNC_SRC)
+_DV_CC_SITE_RE = re.compile(_DV_CC_SITE_SRC)
+_DV_CC_FOR_RE = re.compile(_DV_CC_FOR_SRC)
+_DV_CC_MAP_RE = re.compile(_DV_CC_MAP_SRC)
+_DV_CC_PYFOR_RE = re.compile(_DV_CC_PYFOR_SRC)
+_DV_CC_PYITER_RE = re.compile(_DV_CC_PYITER_SRC)
+_DV_CC_TOKEN_RE = re.compile(_DV_CC_TOKEN_SRC)
+_DV_CC_ARG_INT_RE = re.compile(_DV_CC_ARG_INT_SRC)
+_DV_CC_ARG_STR_RE = re.compile(_DV_CC_ARG_STR_SRC)
+_DV_CC_NAME_RE = re.compile(r"""[A-Za-z_$][\w$]*""")
+_DV_CC_INT_RE = re.compile(_DV_CC_INT)
+_DV_CC_BINARY = {"|": 1, "^": 2, "&": 3, "<<": 4, ">>": 4, ">>>": 4, "+": 5, "-": 5, "*": 6, "%": 6}
+
+
+class _CcFail(Exception):
+    """A decoder's arithmetic, or a call's arguments, left what the evaluator reads."""
+
+
+def _cc_int_literal(s):
+    """The value of an integer literal (decimal or 0x…), at most
+    _DV_CC_INT_MAX; else _CcFail."""
+    if _DV_CC_INT_RE.fullmatch(s) is None:
+        raise _CcFail
+    v = int(s[2:], 16) if s[:2] in ("0x", "0X") else int(s)
+    if v > _DV_CC_INT_MAX:
+        raise _CcFail
+    return v
+
+
+def _cc_ints(items):
+    """The integers of a comma-separated list (a trailing comma allowed)."""
+    parts = [p.strip() for p in items.split(",")]
+    if parts and parts[-1] == "":
+        parts.pop()
+    return [_cc_int_literal(p) for p in parts]
+
+
+def _cc_parse(expr):
+    """The syntax tree of a transform (see above), else None: ('n', int),
+    ('v', name), ('u', op, e), ('b', op, l, r), ('i', e, e) (an index),
+    ('c', e, e) (.charCodeAt), ('l', e) (.length, len), ('o', e) (ord)."""
+    toks, pos, n = [], 0, len(expr)
+    while pos < n:
+        m = _DV_CC_TOKEN_RE.match(expr, pos)
+        if m is None:
+            if expr[pos:].strip(" \t"):
+                return None
+            break
+        if m.group("num") is not None:
+            toks.append(("n", m.group("num")))
+        elif m.group("name") is not None:
+            toks.append(("v", m.group("name")))
+        else:
+            toks.append(("o", m.group("op")))
+        pos = m.end()
+        if len(toks) > _DV_CC_MAX_TOKENS:
+            return None
+    at = [0]
+
+    def peek(value=None):
+        if at[0] >= len(toks):
+            return None
+        tok = toks[at[0]]
+        return tok if value is None or (tok[0] == "o" and tok[1] == value) else None
+
+    def take(value):
+        if peek(value) is None:
+            raise _CcFail
+        at[0] += 1
+
+    def expression(min_prec, depth):
+        if depth > _DV_CC_MAX_DEPTH:
+            raise _CcFail
+        left = unary(depth)
+        while True:
+            tok = peek()
+            if tok is None or tok[0] != "o" or tok[1] not in _DV_CC_BINARY or _DV_CC_BINARY[tok[1]] < min_prec:
+                return left
+            at[0] += 1
+            left = ("b", tok[1], left, expression(_DV_CC_BINARY[tok[1]] + 1, depth + 1))
+
+    def unary(depth):
+        tok = peek()
+        if tok is not None and tok[0] == "o" and tok[1] in ("-", "~", "+"):
+            if depth >= _DV_CC_MAX_DEPTH:
+                raise _CcFail
+            at[0] += 1
+            return ("u", tok[1], unary(depth + 1))
+        return postfix(depth)
+
+    def postfix(depth):
+        node = primary(depth)
+        while True:
+            if peek("[") is not None:
+                at[0] += 1
+                node = ("i", node, expression(1, depth + 1))
+                take("]")
+            elif peek(".") is not None:
+                at[0] += 1
+                tok = peek()
+                if tok is None or tok[0] != "v" or tok[1] not in ("charCodeAt", "length"):
+                    raise _CcFail
+                at[0] += 1
+                if tok[1] == "length":
+                    node = ("l", node)
+                else:
+                    take("(")
+                    node = ("c", node, ("n", 0) if peek(")") is not None else expression(1, depth + 1))
+                    take(")")
+            else:
+                return node
+
+    def primary(depth):
+        tok = peek()
+        if tok is None:
+            raise _CcFail
+        at[0] += 1
+        if tok[0] == "n":
+            return ("n", _cc_int_literal(tok[1]))
+        if tok[0] == "v":
+            if tok[1] in ("ord", "len") and peek("(") is not None:
+                at[0] += 1
+                arg = expression(1, depth + 1)
+                take(")")
+                return ("o" if tok[1] == "ord" else "l", arg)
+            return ("v", tok[1])
+        if tok[1] == "(":
+            inner = expression(1, depth + 1)
+            take(")")
+            return inner
+        raise _CcFail
+
+    try:
+        tree = expression(1, 0)
+    except _CcFail:
+        return None
+    return tree if at[0] == len(toks) else None
+
+
+def _cc_names(tree, out):
+    """The names a transform reads (`out`, a set), returned."""
+    if tree[0] == "v":
+        out.add(tree[1])
+    elif tree[0] in ("u",):
+        _cc_names(tree[2], out)
+    elif tree[0] == "b":
+        _cc_names(tree[2], out)
+        _cc_names(tree[3], out)
+    elif tree[0] in ("i", "c"):
+        _cc_names(tree[1], out)
+        _cc_names(tree[2], out)
+    elif tree[0] in ("l", "o"):
+        _cc_names(tree[1], out)
+    return out
+
+
+def _cc_check(v):
+    if not -_DV_CC_INT_MAX - 1 <= v <= _DV_CC_INT_MAX:
+        raise _CcFail
+    return v
+
+
+def _cc_num(v):
+    if type(v) is not int:
+        raise _CcFail
+    return v
+
+
+def _cc_compile(tree):
+    """A function of the names' values that works a transform out (see above):
+    an integer, or _CcFail."""
+    kind = tree[0]
+    if kind == "n":
+        value = tree[1]
+        return lambda env: value
+    if kind == "v":
+        name = tree[1]
+
+        def var(env):
+            if name not in env:
+                raise _CcFail
+            return env[name]
+        return var
+    if kind == "u":
+        op, arg = tree[1], _cc_compile(tree[2])
+        if op == "-":
+            return lambda env: _cc_check(-_cc_num(arg(env)))
+        if op == "~":
+            return lambda env: ~_cc_num(arg(env))
+        return lambda env: _cc_num(arg(env))
+    if kind == "b":
+        op, left, right = tree[1], _cc_compile(tree[2]), _cc_compile(tree[3])
+
+        def binary(env):
+            a, b = _cc_num(left(env)), _cc_num(right(env))
+            if op == "+":
+                return _cc_check(a + b)
+            if op == "-":
+                return _cc_check(a - b)
+            if op == "*":
+                return _cc_check(a * b)
+            if op == "%":
+                if a < 0 or b <= 0:
+                    raise _CcFail
+                return a % b
+            if op == "&":
+                return a & b
+            if op == "|":
+                return a | b
+            if op == "^":
+                return a ^ b
+            if not 0 <= b <= 31:
+                raise _CcFail
+            if op == "<<":
+                return _cc_check(a << b)
+            if op == ">>>" and a < 0:
+                raise _CcFail
+            return a >> b
+        return binary
+    if kind in ("i", "c"):
+        obj, index = _cc_compile(tree[1]), _cc_compile(tree[2])
+        chars = kind == "c"
+
+        def item(env):
+            seq, k = obj(env), _cc_num(index(env))
+            if chars and type(seq) is not str or not chars and type(seq) not in (list, str):
+                raise _CcFail
+            if not 0 <= k < len(seq):
+                raise _CcFail
+            return ord(seq[k]) if chars else seq[k]
+        return item
+    if kind == "l":
+        obj = _cc_compile(tree[1])
+
+        def length(env):
+            seq = obj(env)
+            if type(seq) not in (list, str):
+                raise _CcFail
+            return len(seq)
+        return length
+    arg = _cc_compile(tree[1])                              # "o": ord
+
+    def code(env):
+        ch = arg(env)
+        if type(ch) is not str or len(ch) != 1:
+            raise _CcFail
+        return ord(ch)
+    return code
+
+
+def _cc_balanced(text, i, limit):
+    """text[i:j] up to the ')' that closes the call opened just before i, and
+    j, else None (a quote-aware pass over at most `limit` characters)."""
+    depth, j, end, quote = 0, i, min(len(text), i + limit), None
+    while j < end:
+        ch = text[j]
+        if quote is not None:
+            if ch == "\\":
+                j += 2
+                continue
+            if ch == quote:
+                quote = None
+        elif ch in "'\"`":
+            quote = ch
+        elif ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            if depth == 0:
+                return (text[i:j], j) if ch == ")" else None
+            depth -= 1
+        j += 1
+    return None
+
+
+def _cc_params(s):
+    """The plain parameter names of a parameter list, else None."""
+    names = [p.strip() for p in s.split(",")] if s.strip() else []
+    if not 1 <= len(names) <= _DV_CC_MAX_PARAMS or any(not _DV_CC_NAME_RE.fullmatch(p) for p in names):
+        return None
+    return names if len(set(names)) == len(names) else None
+
+
+def _cc_walks(body):
+    """[(offset, data, element, index, split, js_map)]: the walks over a
+    parameter a decoder's body holds (see above), in their order."""
+    out = []
+    for m in _DV_CC_FOR_RE.finditer(body):
+        out.append((m.start(), m.group("d"), None, m.group("i"), False, False))
+    for m in _DV_CC_MAP_RE.finditer(body):
+        out.append((m.start(), m.group("d"), m.group("e") or m.group("e2") or m.group("e3"),
+                    m.group("i") or m.group("i2"), m.group("split") is not None, True))
+    for m in _DV_CC_PYFOR_RE.finditer(body):
+        out.append((m.start(), m.group("d"), None, m.group("i"), False, False))
+    for m in _DV_CC_PYITER_RE.finditer(body):
+        out.append((m.start(), m.group("d") or m.group("d2"), m.group("e") or m.group("e2"), m.group("i"),
+                    False, False))
+    out.sort(key=lambda w: w[0])
+    return out
+
+
+def _cc_decoders(view):
+    """{name: decoder} for the file's own character-code decoders (see above),
+    in the order of their transforms; a decoder is (params, data index,
+    element, index, split, js_map, compiled transform)."""
+    out, heads, ends = {}, None, None
+    for site in _DV_CC_SITE_RE.finditer(view):
+        if heads is None:
+            heads = list(_DV_CC_FUNC_RE.finditer(view))
+            ends = [h.end() for h in heads]
+        k = bisect.bisect_right(ends, site.start()) - 1     # the last function header before the transform
+        if k < 0 or site.start() >= ends[k] + _DV_CC_BODY:
+            continue
+        head = heads[k]
+        name = head.group("a") or head.group("b") or head.group("c")
+        params = _cc_params(next(p for p in (head.group("pa"), head.group("pb"), head.group("pc"), head.group("pd"))
+                                 if p is not None))
+        if name in out or params is None:
+            continue
+        got = _cc_balanced(view, site.end(), _DV_CC_BODY)
+        if got is None:
+            continue
+        arg = got[0].strip()
+        body = view[head.end():head.end() + _DV_CC_BODY]
+        if arg.startswith("..."):
+            spread = arg[3:].lstrip(" \t")
+            m = _DV_CC_MAP_RE.match(spread)
+            if m is None or m.group("e") is not None or not spread.endswith(")"):
+                continue
+            walks = [(0, m.group("d"), m.group("e2") or m.group("e3"), m.group("i2"), m.group("split") is not None,
+                      True)]
+            expr = spread[m.end():-1]
+        else:
+            walks, expr = _cc_walks(body), arg
+        tree = _cc_parse(expr)
+        if tree is None:
+            continue
+        names = _cc_names(tree, set())
+        for _at, data, elem, index, split, js_map in walks:
+            bound = {v for v in (elem, index) if v}
+            if (data not in params or not bound & names or bound & set(params)
+                    or not names <= set(params) | bound):
+                continue
+            out[name] = (params, params.index(data), elem, index, split, js_map, _cc_compile(tree))
+            break
+        if len(out) >= _DV_CC_MAX_DECODERS:
+            break
+    return out
+
+
+def _cc_argument(s, view, arrays):
+    """A call's literal argument: an integer, a list of integers (written, or
+    a name assigned one once and never changed), a string of printable
+    ASCII; else _CcFail."""
+    s = s.strip()
+    if _DV_CC_ARG_INT_RE.fullmatch(s):
+        return -_cc_int_literal(s[1:]) if s.startswith("-") else _cc_int_literal(s)
+    if len(s) >= 2 and s[0] in "[(" and s[-1] in "])":
+        if s[1:-1].strip() == "":
+            raise _CcFail
+        return _cc_ints(s[1:-1])
+    m = _DV_CC_ARG_STR_RE.fullmatch(s)
+    if m is not None:
+        return m.group("a") if m.group("a") is not None else m.group("b")
+    if _DV_CC_NAME_RE.fullmatch(s):
+        if s not in arrays:
+            esc = re.escape(s)
+            a = re.search(_DV_NAME_HEAD + esc + _DV_CC_ARRAY_TAIL, view)
+            arrays[s] = (None if a is None or re.search(_DV_NAME_HEAD + esc + _DV_MUTATED_TAIL, view)
+                         or len(re.findall(_DV_NAME_HEAD + esc + _DV_ASSIGNED_TAIL, view)) != 1
+                         else _cc_ints(a.group("items")))
+        if arrays[s] is not None:
+            return arrays[s]
+    raise _CcFail
+
+
+def _cc_run(decoder, args, work):
+    """The text a decoder gives for a call's arguments (see above), else
+    _CcFail; `work` ([codes left]) is spent."""
+    params, data_at, elem, index, split, js_map, fn = decoder
+    if len(args) < len(params):
+        raise _CcFail
+    data = args[data_at]
+    if type(data) not in (list, str) or (js_map and (type(data) is str) != split) or not data:
+        raise _CcFail
+    if len(data) > _DV_CC_MAX_CODES or len(data) > work[0]:
+        raise _CcFail
+    work[0] -= len(data)
+    env = dict(zip(params, args))
+    out = []
+    for k, item in enumerate(data):
+        if index:
+            env[index] = k
+        if elem:
+            env[elem] = item
+        c = fn(env)
+        if type(c) is not int or not 0x20 <= c <= 0x7e:
+            raise _CcFail
+        out.append(chr(c))
+    return "".join(out)
+
+
+def _cc_split_args(s):
+    """A call's arguments split at their top-level commas (not in brackets
+    or quotes)."""
+    parts, depth, start, quote = [], 0, 0, None
+    for k, ch in enumerate(s):
+        if quote is not None:
+            if ch == quote:
+                quote = None
+        elif ch in "'\"":
+            quote = ch
+        elif ch in "[(":
+            depth += 1
+        elif ch in "])":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            parts.append(s[start:k])
+            start = k + 1
+    parts.append(s[start:])
+    return parts
+
+
+def _cc_literal_sub(m):
+    """re.sub's function: literal character codes read as their text, when
+    it is printable ASCII."""
+    items = next(g for g in (m.group("a"), m.group("b"), m.group("c"), m.group("d"), m.group("e"), m.group("f"))
+                 if g is not None)
+    try:
+        codes = _cc_ints(items)
+    except _CcFail:
+        return m.group()
+    if not codes or any(not 0x20 <= c <= 0x7e for c in codes):
+        return m.group()
+    return _dv_quote("".join(map(chr, codes)))
+
+
+def _dv_char_codes(view):
+    """`view` with the character codes it holds and the calls of its own
+    character-code decoders read as their text (see above)."""
+    view = _DV_CC_LITERAL_RE.sub(_cc_literal_sub, view)
+    decoders = _cc_decoders(view)
+    if not decoders:
+        return view
+    call = re.compile(_DV_NAME_HEAD + "(?P<name>" + "|".join(re.escape(n) for n in sorted(decoders))
+                      + ")" + _DV_CC_CALL_TAIL)
+    arrays, work, calls = {}, [_DV_CC_MAX_WORK], [0]
+
+    def sub(m):
+        if calls[0] >= _DV_CC_MAX_CALLS:
+            return m.group()
+        calls[0] += 1
+        try:
+            args = [_cc_argument(a, view, arrays) for a in _cc_split_args(m.group("args"))]
+            return _dv_quote(_cc_run(decoders[m.group("name")], args, work))
+        except _CcFail:
+            return m.group()
+    return call.sub(sub, view)
+
+
+# (0.1.8) String arrays. javascript-obfuscator, and the obfuscators that
+# copy it, move every string of a file into one array and read each back
+# through a function; SC-OBF-IDENT saw only the tool's `_0x` names, not
+# what the code does (the @antv compromises, the 2026 setup.mjs payloads,
+# the benchmark's obfuscated installers and stealers). The shape is the
+# technique, whatever the names:
+#     function A(){const a=['…', …];A=function(){return a;};return A();}
+#     function G(i,k){i=i-OFFSET;const a=A();let s=a[i];… s decoded …;return s;}
+#     (function(f,T){const g=G,a=f();while(!![]){try{const v=-parseInt(g(0x1a))/1+…;
+#         if(v===T)break;else a['push'](a['shift']());}catch(e){a['push'](a['shift']());}}}(A,0x3f1c2));
+# (or G reading A() once and replacing itself: `return G=function(i,k){…}`),
+# called as G(0x1a4) directly, through aliases (`const g=G`), through
+# wrapper functions (`function w(a,b,c){return G(c- -0x2e,a);}`), with an
+# index written as arithmetic or kept in an object of constants
+# (`{_0x1:0x1a4}`). It is read without running anything: the strings; the
+# accessor's offset and decoding — none, its base64 over the alphabet the
+# accessor holds, or RC4 over that base64 with the key a call passes; and
+# the rotation the checksum loop applies — the one for which the loop's
+# JavaScript arithmetic (doubles, parseInt, strings read as numbers) gives
+# its target, with the decoding that gives it. Nothing is read unless the
+# checksum holds (a file without a checksum loop: unrotated). Each call of
+# the accessor, an alias or a wrapper whose arguments are constants then
+# reads as the string it returns (on its row: a string that holds a line
+# break is written with an escape). A decoded string past U+FFFF or with a
+# lone surrogate is not read (JavaScript and Python count those
+# differently). At most _SA_MAX_ARRAYS arrays a file, _SA_MAX_ITEMS
+# strings each, _SA_MAX_CALLS calls read; a text of more than _SA_MAX_CHARS
+# is not read.
+_SA_MAX_CHARS = 16_000_000
+_SA_MAX_ARRAYS = 4
+_SA_MAX_ITEMS = 200_000
+_SA_MAX_CALLS = 1_000_000
+_SA_DEPTH = 8                   # aliases and wrappers followed to the accessor, at most
+_SA_BODY = 3000                 # characters of an accessor read for its alphabet
+_SA_LOOP_BACK = 20000           # characters before the checksum call its loop may start
+_SA_HEX_MAX = 13                # hex digits read as a number (more: NaN, as for _SA_DEC_MAX)
+_SA_DEC_MAX = 15                # decimal digits parseInt reads (more: NaN)
+_SA_IDENT = r"[A-Za-z_$][\w$]*"
+_SA_ARRAY_FN_RE = re.compile(r"function\s+(?P<fn>" + _SA_IDENT + r")\s*\(\s*\)\s*\{\s*(?:var|const|let)\s+(?P<arr>"
+                             + _SA_IDENT + r")\s*=\s*\[")
+_SA_LIT_RE = re.compile(r"""'(?:[^'\\\n]|\\[^\n])*'|"(?:[^"\\\n]|\\[^\n])*""" + '"')
+_SA_SPACE_RE = re.compile(r"\s*")
+_SA_OCT_RE = re.compile(r"[0-3][0-7]{0,2}|[4-7][0-7]?")
+# (the array function's end, the accessor's two forms and the checksum call:
+# with the array function's name, escaped, between the head and the tail)
+_SA_TAIL_HEAD = r"\s*;?\s*"
+_SA_TAIL_MID = r"\s*=\s*function\s*\(\s*\)\s*\{\s*return\s+"
+_SA_TAIL_END = r"\s*;?\s*\}\s*;?\s*return\s+"
+_SA_TAIL_CALL = r"\s*\(\s*\)\s*;?\s*\}"
+_SA_OFF = r"(?P<off>[^;{}]{1,300})"
+_SA_ACC_A_HEAD = (r"function\s+(?P<g>" + _SA_IDENT + r")\s*\(\s*(?P<p>" + _SA_IDENT + r")\s*,\s*" + _SA_IDENT
+                  + r"\s*\)\s*\{\s*(?P=p)\s*=\s*(?P=p)\s*-\s*" + _SA_OFF + r";\s*(?:var|const|let)\s+" + _SA_IDENT
+                  + r"\s*=\s*")
+_SA_ACC_B_HEAD = (r"function\s+(?P<g>" + _SA_IDENT + r")\s*\(\s*" + _SA_IDENT + r"\s*,\s*" + _SA_IDENT
+                  + r"\s*\)\s*\{\s*(?:var|const|let)\s+" + _SA_IDENT + r"\s*=\s*")
+_SA_ACC_B_TAIL = (r"\s*\(\s*\)\s*;\s*return\s+(?P=g)\s*=\s*function\s*\(\s*(?P<p>" + _SA_IDENT + r")\s*,\s*"
+                  + _SA_IDENT + r"\s*\)\s*\{\s*(?P=p)\s*=\s*(?P=p)\s*-\s*" + _SA_OFF + r";")
+_SA_CALL_TAIL = r"\s*\(\s*\)"
+_SA_INVOKE_HEAD = r"\}\s*\(\s*"
+_SA_INVOKE_TAIL = r"\s*,\s*(?P<t>(?:[^;()]|\([^;()]*\)){1,200}?)\)\s*\)"
+_SA_INVOKE2_HEAD = r"\}\s*\)\s*\(\s*"
+_SA_INVOKE2_TAIL = r"\s*,\s*(?P<t>(?:[^;()]|\([^;()]*\)){1,200}?)\)"
+_SA_CHECKSUM_RE = re.compile(r"try\s*\{\s*(?:var|const|let)\s+(?P<v>" + _SA_IDENT + r")\s*=\s*(?P<e>[^;]{1,6000});\s*"
+                             r"if\s*\(\s*(?P=v)\s*===\s*" + _SA_IDENT + r"\s*\)\s*break")
+_SA_ALPHABET_RE = re.compile(r"""['"]([A-Za-z0-9+/=]{65})['"]""")
+_SA_ALIAS_RE = re.compile(r"(?<![\w$.])(" + _SA_IDENT + r")\s*=\s*(" + _SA_IDENT + r")\s*(?=[,;)\n}])")
+_SA_WRAPPER_RE = re.compile(r"(?:\bfunction\s+(?P<n1>" + _SA_IDENT + r")|(?<![\w$.])(?P<n2>" + _SA_IDENT
+                            + r")\s*=\s*function(?:\s+" + _SA_IDENT + r")?)\s*\((?P<params>[^()]{0,400})\)\s*\{\s*"
+                            r"return\s+(?P<target>" + _SA_IDENT + r")\s*\((?P<args>[^()]{0,400})\)\s*;?\s*\}")
+_SA_PARAM_RE = re.compile(r"\s*(" + _SA_IDENT + r")\s*")
+_SA_OBJECT_RE = re.compile(r"(?<![\w$.])(" + _SA_IDENT + r")\s*=\s*\{")
+_SA_ENTRY_RE = re.compile(r"""\s*(?:(?P<k>""" + _SA_IDENT + r""")|'(?P<k2>[^'\\\n]*)'|"(?P<k3>[^"\\\n]*)")\s*:\s*"""
+                          r"""(?P<v>-?\s*(?:0[xX][0-9a-fA-F]+|(?:0|[1-9]\d*)(?:\.\d+)?)|'(?:[^'\\\n]|\\[^\n])*'"""
+                          r"""|"(?:[^"\\\n]|\\[^\n])*")\s*(?P<end>[,}])""")
+_SA_TOKEN_RE = re.compile(r"""\s*(?:(?P<num>0[xX][0-9a-fA-F]+|(?:0|[1-9]\d*)(?:\.\d*)?(?:[eE][-+]?\d+)?|\.\d+(?:[eE][-+]?\d+)?)"""
+                          r"""(?![\w$])|(?P<str>'(?:[^'\\\n]|\\[^\n])*'|"(?:[^"\\\n]|\\[^\n])*")|(?P<name>"""
+                          + _SA_IDENT + r""")|(?P<op>[-+*/()\[\].,]))""")
+# a call's arguments: characters, string literals and parenthesized groups of them
+_SA_ARG_UNIT = r"""[^()'"\n]|'(?:[^'\\\n]|\\[^\n])*'|"(?:[^"\\\n]|\\[^\n])*""" + '"'
+_SA_CALL_RE = re.compile(r"(?<![\w$.])(" + _SA_IDENT + r")\s*\(((?:" + _SA_ARG_UNIT + r"|\((?:" + _SA_ARG_UNIT
+                         + r")*\)){1,400})\)")
+_SA_FUNCTION_TAIL_RE = re.compile(r"function\s*$")
+_SA_DECIMAL_RE = re.compile(r"[+-]?(?:\d+\.?\d*(?:[eE][+-]?\d+)?|\.\d+(?:[eE][+-]?\d+)?)")
+_SA_HEX = frozenset("0123456789abcdefABCDEF")
+_SA_ESCAPES = {"n": "\n", "r": "\r", "t": "\t", "b": "\b", "f": "\f", "v": "\v"}
+# JavaScript's white space and line terminators (what parseInt and Number skip)
+_SA_JS_SPACE = frozenset("\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009"
+                         "\u200a\u2028\u2029\u202f\u205f\u3000\ufeff")
+
+
+class _SaStop(Exception):
+    """What the string-array reader cannot read: nothing is decoded there."""
+
+
+def _sa_string(body):
+    """The value of a JavaScript string literal's body (between its quotes),
+    else None (a malformed escape)."""
+    if "\\" not in body:
+        return body
+    out, i, n = [], 0, len(body)
+    while i < n:
+        ch = body[i]
+        if ch != "\\":
+            out.append(ch)
+            i += 1
+            continue
+        if i + 1 >= n:
+            return None
+        e = body[i + 1]
+        if e == "x":
+            h = body[i + 2:i + 4]
+            if len(h) != 2 or not set(h) <= _SA_HEX:
+                return None
+            out.append(chr(int(h, 16)))
+            i += 4
+        elif e == "u":
+            if body[i + 2:i + 3] == "{":
+                k = body.find("}", i + 3)
+                h = body[i + 3:k] if k > 0 else ""
+                if not h or len(h) > 6 or not set(h) <= _SA_HEX or int(h, 16) > 0x10FFFF:
+                    return None
+                out.append(chr(int(h, 16)))
+                i = k + 1
+            else:
+                h = body[i + 2:i + 6]
+                if len(h) != 4 or not set(h) <= _SA_HEX:
+                    return None
+                out.append(chr(int(h, 16)))
+                i += 6
+        elif e in _SA_ESCAPES:
+            out.append(_SA_ESCAPES[e])
+            i += 2
+        elif "0" <= e <= "7":
+            m = _SA_OCT_RE.match(body, i + 1)
+            out.append(chr(int(m.group(), 8)))
+            i = m.end()
+        else:
+            out.append(e)
+            i += 2
+    return "".join(out)
+
+
+def _sa_strings(text, i):
+    """(values, end) of the string literals of the array literal whose '['
+    ends at text[i], at most _SA_MAX_ITEMS; None when an item is not one."""
+    items, n = [], len(text)
+    while True:
+        i = _SA_SPACE_RE.match(text, i).end()
+        if i >= n:
+            return None
+        if text[i] == "]" and not items:
+            return items, i + 1
+        m = _SA_LIT_RE.match(text, i)
+        if m is None or len(items) >= _SA_MAX_ITEMS:
+            return None
+        v = _sa_string(m.group()[1:-1])
+        if v is None:
+            return None
+        items.append(v)
+        i = _SA_SPACE_RE.match(text, m.end()).end()
+        if i < n and text[i] == ",":
+            i += 1
+            continue
+        if i < n and text[i] == "]":
+            return items, i + 1
+        return None
+
+
+def _sa_number(s):
+    """A number literal's value (hex, or decimal), NaN past _SA_HEX_MAX hex digits."""
+    if s[:2] in ("0x", "0X"):
+        return float(int(s[2:], 16)) if len(s) - 2 <= _SA_HEX_MAX else math.nan
+    return float(s)
+
+
+def _sa_to_number(v):
+    """JavaScript's ToNumber of a number or a string (StringToNumber:
+    white space trimmed, "" 0, hex 0x…, binary 0b…, octal 0o…, decimal,
+    Infinity, else NaN)."""
+    if isinstance(v, float):
+        return v
+    i, j = 0, len(v)
+    while i < j and v[i] in _SA_JS_SPACE:
+        i += 1
+    while j > i and v[j - 1] in _SA_JS_SPACE:
+        j -= 1
+    s = v[i:j]
+    if not s:
+        return 0.0
+    if s[:2] in ("0x", "0X", "0b", "0B", "0o", "0O") and len(s) > 2:
+        digits = {"x": _SA_HEX, "b": frozenset("01"), "o": frozenset("01234567")}[s[1].lower()]
+        if not set(s[2:]) <= digits or len(s) - 2 > _SA_HEX_MAX:
+            return math.nan
+        return float(int(s[2:], {"x": 16, "b": 2, "o": 8}[s[1].lower()]))
+    if s in ("Infinity", "+Infinity"):
+        return math.inf
+    if s == "-Infinity":
+        return -math.inf
+    if s.isascii() and _SA_DECIMAL_RE.fullmatch(s) is not None:
+        return float(s)
+    return math.nan
+
+
+def _sa_to_string(v):
+    """JavaScript's ToString of a string, or of a number that is an integer
+    under 1e21 (other numbers are not read)."""
+    if isinstance(v, str):
+        return v
+    if v == v and abs(v) < 1e21 and v == int(v):
+        return str(int(v))
+    raise _SaStop("number text")
+
+
+def _sa_div(a, b):
+    """a / b as JavaScript divides doubles."""
+    if b == 0:
+        if a == 0 or a != a:
+            return math.nan
+        return math.copysign(math.inf, a) * math.copysign(1.0, b)
+    return a / b
+
+
+def _sa_parse_int(v):
+    """JavaScript's parseInt(v) for a string (radix 10, or 16 after 0x),
+    NaN for anything else and past _SA_DEC_MAX digits (_SA_HEX_MAX hex)."""
+    if not isinstance(v, str):
+        return math.nan
+    i, n = 0, len(v)
+    while i < n and v[i] in _SA_JS_SPACE:
+        i += 1
+    sign = 1.0
+    if i < n and v[i] in "+-":
+        sign = -1.0 if v[i] == "-" else 1.0
+        i += 1
+    radix = 10
+    if v[i:i + 2] in ("0x", "0X"):
+        radix, i = 16, i + 2
+    j = i
+    while j < n and ("0" <= v[j] <= "9" or radix == 16 and v[j] in _SA_HEX):
+        j += 1
+    if j == i or j - i > (_SA_HEX_MAX if radix == 16 else _SA_DEC_MAX):
+        return math.nan
+    return sign * float(int(v[i:j], radix))
+
+
+def _sa_tokens(src):
+    """The tokens of an expression: ('n', number) ('s', string) ('i', name) ('o', operator)."""
+    out, i, n = [], 0, len(src)
+    while i < n:
+        m = _SA_TOKEN_RE.match(src, i)
+        if m is None or m.end() == i:
+            if src[i:].strip() == "":
+                break
+            raise _SaStop("token")
+        if m.group("num") is not None:
+            out.append(("n", _sa_number(m.group("num"))))
+        elif m.group("str") is not None:
+            v = _sa_string(m.group("str")[1:-1])
+            if v is None:
+                raise _SaStop("string")
+            out.append(("s", v))
+        elif m.group("name") is not None:
+            out.append(("i", m.group("name")))
+        else:
+            out.append(("o", m.group("op")))
+        i = m.end()
+    return out
+
+
+def _sa_parse(toks, consts, many=False):
+    """The tree of an expression (a list of them, comma-separated: `many`):
+    ('n', v) ('s', v) ('var', name) ('neg', x) ('pos', x) (op, a, b)
+    ('call', name, [args]) ('pi', name, [args]) — a constant of an object
+    of constants (NAME.key, NAME['key']) read as its value."""
+    pos = [0]
+
+    def peek():
+        return toks[pos[0]] if pos[0] < len(toks) else None
+
+    def take(want=None):
+        t = peek()
+        if t is None or (want is not None and t != want):
+            raise _SaStop("syntax")
+        pos[0] += 1
+        return t
+
+    def const(name, key):
+        table = consts.get(name)
+        if table is None or key not in table:
+            raise _SaStop("constant")
+        return table[key]
+
+    def primary():
+        t = take()
+        if t[0] in ("n", "s"):
+            return t
+        if t == ("o", "("):
+            v = additive()
+            take(("o", ")"))
+            return v
+        if t[0] != "i":
+            raise _SaStop("primary")
+        nxt = peek()
+        if nxt == ("o", "."):
+            take()
+            key = take()
+            if key[0] != "i":
+                raise _SaStop("key")
+            return const(t[1], key[1])
+        if nxt == ("o", "["):
+            take()
+            key = take()
+            take(("o", "]"))
+            if key[0] != "s":
+                raise _SaStop("key")
+            return const(t[1], key[1])
+        if nxt == ("o", "("):
+            take()
+            args = []
+            if peek() != ("o", ")"):
+                while True:
+                    args.append(additive())
+                    if peek() != ("o", ","):
+                        break
+                    take()
+            take(("o", ")"))
+            if t[1] == "parseInt":
+                if len(args) != 1 or args[0][0] != "call":
+                    raise _SaStop("parseInt")
+                return ("pi", args[0][1], args[0][2])
+            return ("call", t[1], args)
+        return ("var", t[1])
+
+    def unary():
+        t = peek()
+        if t == ("o", "-"):
+            take()
+            return ("neg", unary())
+        if t == ("o", "+"):
+            take()
+            return ("pos", unary())
+        return primary()
+
+    def mult():
+        v = unary()
+        while peek() in (("o", "*"), ("o", "/")):
+            v = (take()[1], v, unary())
+        return v
+
+    def additive():
+        v = mult()
+        while peek() in (("o", "+"), ("o", "-")):
+            v = (take()[1], v, mult())
+        return v
+
+    if many:
+        out = []
+        if toks:
+            while True:
+                out.append(additive())
+                if peek() != ("o", ","):
+                    break
+                take()
+    else:
+        out = additive()
+    if pos[0] != len(toks):
+        raise _SaStop("rest")
+    return out
+
+
+def _sa_value(tree, env, call):
+    """The JavaScript value (a float or a str) of a tree: `env` gives names
+    their values, `call(name, args)` a call's."""
+    k = tree[0]
+    if k in ("n", "s"):
+        return tree[1]
+    if k == "var":
+        if tree[1] not in env:
+            raise _SaStop("free name")
+        return env[tree[1]]
+    if k == "neg":
+        return -_sa_to_number(_sa_value(tree[1], env, call))
+    if k == "pos":
+        return _sa_to_number(_sa_value(tree[1], env, call))
+    if k == "+":
+        a, b = _sa_value(tree[1], env, call), _sa_value(tree[2], env, call)
+        if isinstance(a, str) or isinstance(b, str):
+            return _sa_to_string(a) + _sa_to_string(b)
+        return a + b
+    if k in ("-", "*", "/"):
+        a = _sa_to_number(_sa_value(tree[1], env, call))
+        b = _sa_to_number(_sa_value(tree[2], env, call))
+        return a - b if k == "-" else a * b if k == "*" else _sa_div(a, b)
+    if call is None:
+        raise _SaStop("call")
+    got = call(tree[1], [_sa_value(a, env, call) for a in tree[2]])
+    return _sa_parse_int(got) if k == "pi" else got
+
+
+def _sa_atob(s, alphabet):
+    """The accessor's base64 (its own alphabet, as its loop reads it: a
+    character outside the alphabet skipped) read as UTF-8, as its
+    decodeURIComponent does; None where that throws or holds a character
+    past U+FFFF."""
+    out, bc, bs = bytearray(), 0, 0
+    for ch in s:
+        v = alphabet.find(ch)
+        if v < 0:
+            continue
+        bs = bs * 64 + v if bc % 4 else v
+        bc += 1
+        if (bc - 1) % 4:
+            out.append(255 & (bs >> ((-2 * bc) & 6)))
+    try:
+        text = out.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    return None if any(ord(ch) > 0xFFFF for ch in text) else text
+
+
+def _sa_rc4(s, key, alphabet):
+    """The accessor's RC4 with `key` over its base64 (_sa_atob), else None."""
+    data = _sa_atob(s, alphabet)
+    if data is None or not isinstance(key, str) or not key or any(
+            0xD800 <= ord(ch) <= 0xDFFF or ord(ch) > 0xFFFF for ch in key):
+        return None
+    box, j = list(range(256)), 0
+    for i in range(256):
+        j = (j + box[i] + ord(key[i % len(key)])) % 256
+        box[i], box[j] = box[j], box[i]
+    i = j = 0
+    out = []
+    for ch in data:
+        i = (i + 1) % 256
+        j = (j + box[i]) % 256
+        box[i], box[j] = box[j], box[i]
+        out.append(chr(ord(ch) ^ box[(box[i] + box[j]) % 256]))
+    text = "".join(out)
+    return None if any(0xD800 <= ord(ch) <= 0xDFFF for ch in text) else text
+
+
+def _sa_consts(text):
+    """{name: {key: ('n', v) | ('s', v)}}: the objects of number and string
+    constants `text` assigns (a name assigned two is none of them)."""
+    out = {}
+    for m in _SA_OBJECT_RE.finditer(text):
+        i, table = m.end(), {}
+        while True:
+            e = _SA_ENTRY_RE.match(text, i)
+            if e is None:
+                table = None
+                break
+            key = e.group("k") or e.group("k2") or e.group("k3") or ""
+            v = e.group("v")
+            if v[0] in "'\"":
+                val = _sa_string(v[1:-1])
+                if val is None:
+                    table = None
+                    break
+                table[key] = ("s", val)
+            else:
+                neg = v.startswith("-")
+                num = _sa_number(v.lstrip("-").strip())
+                table[key] = ("n", -num if neg else num)
+            i = e.end()
+            if e.group("end") == "}":
+                break
+        if table:
+            name = m.group(1)
+            out[name] = None if name in out else table
+    return {k: v for k, v in out.items() if v is not None}
+
+
+class _SaAccessor:
+    """A string array's accessor: its strings, offset and alphabet, and the
+    decoding and rotation the checksum gave."""
+    __slots__ = ("fn", "items", "off", "alphabet", "kind", "rot", "memo")
+
+    def __init__(self, fn, items, off, alphabet):
+        self.fn, self.items, self.off, self.alphabet = fn, items, off, alphabet
+        self.kind, self.rot, self.memo = "plain", 0, {}
+
+    def read(self, idx, key, kind=None, rot=None):
+        """The string a call with index `idx` (and `key`) returns, else None."""
+        if idx is None:
+            return None
+        kind = self.kind if kind is None else kind
+        rot = self.rot if rot is None else rot
+        n = len(self.items)
+        i = _sa_to_number(idx) - self.off
+        if i != i or not 0 <= i < n or i != int(i):
+            return None
+        k = (int(i) + rot) % n
+        got = self.memo.get((k, key, kind), self)
+        if got is self:
+            s = self.items[k]
+            got = (s if kind == "plain" else _sa_atob(s, self.alphabet) if kind == "base64"
+                   else _sa_rc4(s, key, self.alphabet))
+            self.memo[(k, key, kind)] = got
+        return got
+
+
+def _sa_quote(s):
+    """A single-quoted literal of `s` on one row."""
+    return "'" + (s.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n").replace("\r", "\\r")
+                  .replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")) + "'"
+
+
+def _dv_string_arrays(text):
+    """`text` with the calls that read a string array (see above) read as
+    their strings; `text` itself when it has none."""
+    if len(text) > _SA_MAX_CHARS or "function" not in text:
+        return text
+    arrays = []
+    for m in _SA_ARRAY_FN_RE.finditer(text):
+        got = _sa_strings(text, m.end())
+        if got is None or not got[0]:
+            continue
+        fn, arr = re.escape(m.group("fn")), re.escape(m.group("arr"))
+        tail = re.compile(_SA_TAIL_HEAD + fn + _SA_TAIL_MID + arr + _SA_TAIL_END + fn + _SA_TAIL_CALL)
+        if tail.match(text, got[1]) is None:
+            continue
+        arrays.append((m.group("fn"), got[0]))
+        if len(arrays) >= _SA_MAX_ARRAYS:
+            break
+    if not arrays:
+        return text
+    consts = _sa_consts(text)
+    accessors = {}
+    for fn, items in arrays:
+        esc = re.escape(fn)
+        for rx in (re.compile(_SA_ACC_A_HEAD + esc + _SA_CALL_TAIL), re.compile(_SA_ACC_B_HEAD + esc + _SA_ACC_B_TAIL)):
+            for m in rx.finditer(text):
+                try:
+                    off = _sa_to_number(_sa_value(_sa_parse(_sa_tokens(m.group("off")), consts), {}, None))
+                except _SaStop:
+                    continue
+                if off != off or abs(off) == math.inf or off != int(off):
+                    continue
+                a = _SA_ALPHABET_RE.search(text, m.end(), m.end() + _SA_BODY)
+                accessors[m.group("g")] = _SaAccessor(fn, items, int(off), a.group(1) if a else None)
+    if not accessors:
+        return text
+    aliases, wrappers = {}, {}                      # name -> {names it is given}; name -> [(params, target, args)]
+    for m in _SA_ALIAS_RE.finditer(text):
+        aliases.setdefault(m.group(1), set()).add(m.group(2))
+    for m in _SA_WRAPPER_RE.finditer(text):
+        params = [p.group(1) for p in (_SA_PARAM_RE.fullmatch(x) for x in m.group("params").split(","))
+                  if p is not None] if m.group("params").strip() else []
+        try:
+            if len(params) != (len(m.group("params").split(",")) if m.group("params").strip() else 0):
+                raise _SaStop("parameters")
+            args = _sa_parse(_sa_tokens(m.group("args")), consts, many=True)
+        except _SaStop:
+            continue
+        wrappers.setdefault(m.group("n1") or m.group("n2"), []).append((params, m.group("target"), args))
+
+    def resolve(name, args, depth=0):
+        """(accessor, index, key) a call of `name` with `args` reads."""
+        if depth > _SA_DEPTH:
+            raise _SaStop("deep")
+        acc = accessors.get(name)
+        if acc is not None:
+            return acc, (args[0] if args else None), (args[1] if len(args) > 1 else None)
+        given, wraps = aliases.get(name, ()), wrappers.get(name, ())
+        if len(given) + len(wraps) != 1:
+            raise _SaStop("not one")
+        if given:
+            return resolve(next(iter(given)), args, depth + 1)
+        params, target, targs = wraps[0]
+        if len(args) < len(params):
+            raise _SaStop("arity")
+        env = dict(zip(params, args))
+        return resolve(target, [_sa_value(a, env, None) for a in targs], depth + 1)
+
+    for name, acc in list(accessors.items()):
+        fn = re.escape(acc.fn)
+        inv = (re.compile(_SA_INVOKE_HEAD + fn + _SA_INVOKE_TAIL).search(text)
+               or re.compile(_SA_INVOKE2_HEAD + fn + _SA_INVOKE2_TAIL).search(text))
+        if inv is None:
+            acc.kind = "base64" if acc.alphabet else "plain"
+            continue
+        loop = None
+        for loop in _SA_CHECKSUM_RE.finditer(text, max(0, inv.start() - _SA_LOOP_BACK), inv.start()):
+            pass
+        try:
+            if loop is None:
+                raise _SaStop("no checksum")
+            target = _sa_to_number(_sa_value(_sa_parse(_sa_tokens(inv.group("t")), consts), {}, None))
+            tree = _sa_parse(_sa_tokens(loop.group("e")), consts)
+            terms = []                               # (term, index, key): the parseInt calls, resolved once
+
+            def collect(t):
+                if t[0] == "pi":
+                    got = resolve(t[1], [_sa_value(a, {}, None) for a in t[2]])
+                    if got[0] is not acc:
+                        raise _SaStop("another accessor")
+                    terms.append((t, got[1], got[2]))
+                elif t[0] in ("neg", "pos"):
+                    collect(t[1])
+                elif t[0] in ("+", "-", "*", "/"):
+                    collect(t[1])
+                    collect(t[2])
+                elif t[0] != "n":
+                    raise _SaStop("term")
+            collect(tree)
+        except _SaStop:
+            del accessors[name]
+            continue
+        chosen = None
+        for kind in (("plain", "base64", "rc4") if acc.alphabet else ("plain",)):
+            for rot in range(len(acc.items)):
+                vals = {}
+                for t, idx, key in terms:           # (a term that is NaN makes the checksum NaN)
+                    v = _sa_parse_int(acc.read(idx, key, kind, rot))
+                    if v != v:
+                        break
+                    vals[id(t)] = v
+                if len(vals) < len(terms):
+                    continue
+
+                def num(t):
+                    k = t[0]
+                    if k == "n":
+                        return t[1]
+                    if k == "pi":
+                        return vals[id(t)]
+                    if k == "neg":
+                        return -num(t[1])
+                    if k == "pos":
+                        return num(t[1])
+                    a, b = num(t[1]), num(t[2])
+                    return a + b if k == "+" else a - b if k == "-" else a * b if k == "*" else _sa_div(a, b)
+                if num(tree) == target:
+                    chosen = (kind, rot)
+                    break
+            if chosen is not None:
+                break
+        if chosen is None:
+            del accessors[name]
+        else:
+            acc.kind, acc.rot = chosen
+    if not accessors:
+        return text
+    callers, queue, given_to = set(accessors), list(accessors), {}   # every name that reaches an accessor
+    for name, given in aliases.items():
+        if len(given) == 1 and name not in wrappers:
+            given_to.setdefault(next(iter(given)), []).append(name)
+    for name, wraps in wrappers.items():
+        if len(wraps) == 1 and name not in aliases:
+            given_to.setdefault(wraps[0][1], []).append(name)
+    while queue:
+        for name in given_to.get(queue.pop(), ()):
+            if name not in callers:
+                callers.add(name)
+                queue.append(name)
+    out, pos, read = [], 0, 0
+    while read < _SA_MAX_CALLS:
+        m = _SA_CALL_RE.search(text, pos)
+        if m is None:
+            break
+        s = None
+        if m.group(1) in callers and _SA_FUNCTION_TAIL_RE.search(text, max(0, m.start() - 9), m.start()) is None:
+            try:
+                args = [_sa_value(a, {}, None) for a in _sa_parse(_sa_tokens(m.group(2)), consts, many=True)]
+                acc, idx, key = resolve(m.group(1), args)
+                s = acc.read(idx, key)
+            except _SaStop:
+                pass
+        if s is None:                               # (the calls in its arguments are read on)
+            out.append(text[pos:m.end(1)])
+            pos = m.end(1)
+            continue
+        out.append(text[pos:m.start()])
+        out.append(_sa_quote(s))
+        pos = m.end()
+        read += 1
+    out.append(text[pos:])
+    return "".join(out)
+
+
+# (0.1.8) Proxy objects. javascript-obfuscator's control-flow flattening
+# moves calls, operators and strings into objects of functions and read
+# back through them:
+#     const o = {'oEnxQ': function (f, a) { return f(a); },
+#                'rqVFD': function (a, b) { return a >= b; }, 'OKaPt': 'child_proc' + 'ess'};
+#     o['oEnxQ'](require, o['OKaPt'])['execSync'](…)
+# which is require('child_process').execSync(…). An object whose every
+# entry is such a function (it calls its first parameter with the others,
+# applies an operator to its two parameters, or hands its parameters to
+# another such entry), a string (literals joined with +) or another such
+# object's entry, is read as what it stands for: a call of an entry read
+# as the call or the operation it makes (its arguments read the same way),
+# a string entry as its literal. A name given two objects is neither. At
+# most _PX_MAX_ENTRIES entries an object, _PX_MAX_USES uses read, calls
+# nested _PX_DEPTH deep.
+_PX_MAX_ENTRIES = 256
+_PX_MAX_USES = 1_000_000
+_PX_DEPTH = 32
+_PX_ARGS = 4000                 # characters of a call's arguments read, at most
+_PX_OBJECT_RE = re.compile(r"(?<![\w$.])(" + _SA_IDENT + r")\s*=\s*\{")
+_PX_KEY_RE = re.compile(r"""\s*(?:(?P<k>""" + _SA_IDENT + r""")|'(?P<k2>[^'\\\n]*)'|"(?P<k3>[^"\\\n]*)")\s*:\s*""")
+_PX_FUNCTION_RE = re.compile(r"function\s*(?:" + _SA_IDENT + r"\s*)?\((?P<params>[^()]{0,400})\)\s*\{"
+                             r"(?:\s*(?:var|const|let)\s+" + _SA_IDENT + r"\s*=\s*" + _SA_IDENT + r"\s*;)*"
+                             r"\s*return\s+(?P<e>[^;{}]{1,400}?)\s*;?\s*\}")
+_PX_BINARY_RE = re.compile(r"\s*(" + _SA_IDENT + r")(?:\s*(===|!==|==|!=|<=|>=|<<|>>>|>>|&&|\|\||\*\*|[-+*/%<>&|^])\s*"
+                           r"|\s+(instanceof|in)\s+)(" + _SA_IDENT + r")\s*")
+_PX_CALL_RE = re.compile(r"\s*(" + _SA_IDENT + r")\s*\((?P<a>[^()]*)\)\s*")
+_PX_REF_CALL_RE = re.compile(r"""\s*(?P<o>""" + _SA_IDENT + r""")\s*\[\s*(?:'(?P<k>[^'\\\n]*)'|"(?P<k2>[^"\\\n]*)")\s*\]"""
+                             r"""\s*\((?P<a>[^()]*)\)\s*""")
+_PX_REF_RE = re.compile(r"""(?P<o>""" + _SA_IDENT + r""")\s*\[\s*(?:'(?P<k>[^'\\\n]*)'|"(?P<k2>[^"\\\n]*)")\s*\]""")
+_PX_STRINGS_RE = re.compile(r"""(?:'(?:[^'\\\n]|\\[^\n])*'|"(?:[^"\\\n]|\\[^\n])*")"""
+                            r"""(?:\s*\+\s*(?:'(?:[^'\\\n]|\\[^\n])*'|"(?:[^"\\\n]|\\[^\n])*"))*""")
+_PX_END_RE = re.compile(r"\s*([,}])")
+_PX_USE_RE = re.compile(r"""(?<![\w$.])(""" + _SA_IDENT + r""")\s*\[\s*(?:'([^'\\\n]*)'|"([^"\\\n]*)")\s*\]""")
+_PX_OPEN_RE = re.compile(r"\s*\(")
+
+
+def _px_params(src):
+    """The parameter names of a parameter list, else None."""
+    if not src.strip():
+        return []
+    names = [_SA_PARAM_RE.fullmatch(p) for p in src.split(",")]
+    return None if any(n is None for n in names) else [n.group(1) for n in names]
+
+
+def _px_entries(text, i):
+    """{key: entry} of the object literal whose '{' ends at text[i] when
+    every entry is a proxy (see above), else None. An entry: ('call', n)
+    calls its first parameter with the n others; ('op', op); ('str', s);
+    ('ref', object, key); ('refcall', object, key, n)."""
+    out = {}
+    while True:
+        k = _PX_KEY_RE.match(text, i)
+        if k is None or len(out) >= _PX_MAX_ENTRIES:
+            return None
+        key = k.group("k") or k.group("k2") or k.group("k3") or ""
+        i = k.end()
+        f = _PX_FUNCTION_RE.match(text, i)
+        s = _PX_STRINGS_RE.match(text, i) if f is None else None
+        r = _PX_REF_RE.match(text, i) if f is None and s is None else None
+        if f is not None:
+            params, body = _px_params(f.group("params")), f.group("e")
+            if params is None or len(set(params)) != len(params):
+                return None
+            b = _PX_BINARY_RE.fullmatch(body)
+            c = _PX_CALL_RE.fullmatch(body)
+            rc = _PX_REF_CALL_RE.fullmatch(body)
+            if b is not None and len(params) == 2 and [b.group(1), b.group(4)] == params:
+                entry = ("op", b.group(2) or b.group(3))
+            elif c is not None and params and c.group(1) == params[0] and _px_params(c.group("a")) == params[1:]:
+                entry = ("call", len(params) - 1)
+            elif rc is not None and _px_params(rc.group("a")) == params:
+                entry = ("refcall", rc.group("o"), rc.group("k") if rc.group("k") is not None else rc.group("k2"),
+                         len(params))
+            else:
+                return None
+            i = f.end()
+        elif s is not None:
+            parts = [_sa_string(x.group()[1:-1]) for x in _SA_LIT_RE.finditer(s.group())]
+            if any(p is None for p in parts):
+                return None
+            entry = ("str", "".join(parts))
+            i = s.end()
+        elif r is not None:
+            entry = ("ref", r.group("o"), r.group("k") if r.group("k") is not None else r.group("k2"))
+            i = r.end()
+        else:
+            return None
+        out[key] = entry
+        e = _PX_END_RE.match(text, i)
+        if e is None:
+            return None
+        i = e.end()
+        if e.group(1) == "}":
+            return out
+
+
+def _px_args(text, i, hi):
+    """(end, [(start, end)]) of the arguments of the call whose '(' ends at
+    text[i]: the ')' that closes it (quote-aware, within _PX_ARGS
+    characters and `hi`) and its top-level arguments; None when it does not close."""
+    parts, depth, start, j, quote = [], 0, i, i, None
+    end = min(hi, i + _PX_ARGS)
+    while j < end:
+        ch = text[j]
+        if quote is not None:
+            if ch == "\\":
+                j += 2
+                continue
+            if ch == quote:
+                quote = None
+        elif ch in "'\"`":
+            quote = ch
+        elif ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            if depth == 0:
+                if ch != ")":
+                    return None
+                if text[start:j].strip() or parts:
+                    parts.append((start, j))
+                return j, parts
+            depth -= 1
+        elif ch == "," and depth == 0:
+            parts.append((start, j))
+            start = j + 1
+        j += 1
+    return None
+
+
+def _dv_proxies(text):
+    """`text` with the proxy objects' uses (see above) read as what they
+    stand for; `text` itself when it has none."""
+    if "function" not in text or "[" not in text:
+        return text
+    objects = {}
+    for m in _PX_OBJECT_RE.finditer(text):
+        entries = _px_entries(text, m.end())
+        if entries:
+            objects[m.group(1)] = None if m.group(1) in objects else entries
+    objects = {k: v for k, v in objects.items() if v is not None}
+    if not objects:
+        return text
+
+    def final(entry, depth=0):
+        """An entry with the entries it refers to followed: ('call', n) ('op', op) ('str', s), or None."""
+        while entry is not None and entry[0] in ("ref", "refcall") and depth <= _PX_DEPTH:
+            target = objects.get(entry[1], {}).get(entry[2])
+            if target is None:
+                return None
+            if entry[0] == "refcall":
+                if target[0] == "str" or (target[0] == "call" and target[1] + 1 != entry[3]) \
+                        or (target[0] == "op" and entry[3] != 2):
+                    return None
+            entry, depth = target, depth + 1
+        return entry if entry is not None and entry[0] in ("call", "op", "str") else None
+
+    uses = [0]
+
+    def rewrite(lo, hi, depth):
+        out, pos = [], lo
+        while uses[0] < _PX_MAX_USES:
+            m = _PX_USE_RE.search(text, pos, hi)
+            if m is None:
+                break
+            entry = objects.get(m.group(1), {}).get(m.group(2) if m.group(2) is not None else m.group(3))
+            entry = final(entry) if entry is not None else None
+            if entry is None:
+                out.append(text[pos:m.end()])
+                pos = m.end()
+                continue
+            if entry[0] == "str":
+                out.append(text[pos:m.start()])
+                out.append(_sa_quote(entry[1]))
+                pos = m.end()
+                uses[0] += 1
+                continue
+            o = _PX_OPEN_RE.match(text, m.end(), hi)
+            got = _px_args(text, o.end(), hi) if o is not None and depth < _PX_DEPTH else None
+            want = entry[1] + 1 if entry[0] == "call" else 2
+            if got is None or len(got[1]) != want:
+                out.append(text[pos:m.end()])
+                pos = m.end()
+                continue
+            args = [rewrite(a, b, depth + 1).strip() for a, b in got[1]]
+            out.append(text[pos:m.start()])
+            if entry[0] == "call":
+                read = args[0] + "(" + ", ".join(args[1:]) + ")"
+            else:
+                read = "(" + args[0] + " " + entry[1] + " " + args[1] + ")"
+            out.append(read)
+            out.append("\n" * (text.count("\n", m.start(), got[0] + 1) - read.count("\n")))   # (rows kept)
+            pos = got[0] + 1
+            uses[0] += 1
+        out.append(text[pos:hi])
+        return "".join(out)
+
+    return rewrite(0, len(text), 0)
+
+
+_DV_MEMO = (None, None)                # the last text decoded_view read, and its view
+
+
 def decoded_view(text):
     """`text` read the way it reads once the strings it decodes as it runs
-    are decoded (see above); `text` itself when there is nothing to decode."""
-    if len(text) > _DV_MAX_CHARS or not any(n in text for n in _DV_NEEDLES):
-        return text
-    joined = view = _DV_JOIN_RE.sub("", text) if "+" in text else text
+    are decoded (see above); `text` itself when there is nothing to decode.
+    The last text's view is kept: the install-script test, the spawned-script
+    follower and the import-time test read the same file."""
+    global _DV_MEMO
+    memo = _DV_MEMO
+    if memo[0] is text:
+        return memo[1]
+    view = _decoded_view(text)
+    _DV_MEMO = (text, view)
+    return view
+
+
+def _dv_decoders(view):
+    """`view` with the decoders' calls on literals read as their text (see
+    above): Buffer.from, atob, Python's hex and base64, the file's own
+    helpers and XOR decoders, character codes."""
     if "Buffer" in view:
         view = _DV_BUFFER_RE.sub(lambda m: (lambda d: m.group() if d is None else _dv_quote(d))(
             _dv_decode(m.group("enc"), _dv_literal(m))), view)
@@ -7749,7 +11176,22 @@ def decoded_view(text):
             call = re.compile(_DV_NAME_HEAD + "(?P<name>" + "|".join(re.escape(n) for n in sorted(xors))
                               + _DV_HELPER_CALL_TAIL)
             view = call.sub(_dv_xor_sub(xors), view)
-    if view == joined:
+    if "fromCharCode" in view or "chr" in view or "byte" in view:
+        view = _dv_char_codes(view)
+    return view
+
+
+def _decoded_view(text):
+    """decoded_view's reading of a text."""
+    base = _dv_proxies(_dv_string_arrays(text))
+    if base == text:                                # (no string array or proxy object read)
+        base = text
+        if len(text) > _DV_MAX_CHARS or not any(n in text for n in _DV_NEEDLES):
+            return text
+    joined = view = _DV_JOIN_RE.sub("", base) if "+" in base else base
+    if len(base) <= _DV_MAX_CHARS and any(n in base for n in _DV_NEEDLES):
+        view = _dv_decoders(view)                   # (a longer text with a string array: its strings only)
+    if view == joined and base is text:
         return text                 # nothing decoded: literals joined alone are no reading of their own
     arrays = 0
     for m in list(_DV_ARRAY_RE.finditer(view)):
@@ -7775,29 +11217,45 @@ def decoded_view(text):
 # 2026 lightning release's __init__.py started _runtime/start.py with
 # sys.executable. The install-script and import-time tests follow such a
 # start to the package file it runs (spawned_scripts): node started by
-# spawn / execFile (process.execPath, process.argv[0], 'node') or by fork,
-# Python by Popen / run / call (sys.executable, 'python…'); the script is
-# the first argument that is not a flag, written as a literal (relative to
-# the directory the package runs in), a path.join / path.resolve /
-# os.path.join from the script's own directory (__dirname,
-# os.path.dirname(__file__)) or of literals, `__dirname + '/x'`, or a name
-# assigned one of those in the file (followed _SPAWN_NAME_DEPTH names deep).
+# spawn / execFile (process.execPath, process.argv[0], 'node'; or 'bun' and
+# 'deno', their `run` skipped) or by fork, Python by Popen / run / call
+# (sys.executable, 'python…'); and any program a variable names — a runtime
+# the script fetched: the 2026 setup.mjs loaders downloaded Bun and ran
+# execFileSync(bun, [path.join(dir, 'router_init.js')]) — when what it is
+# given is a file of code (_SPAWN_SCRIPT_EXT_RE; _SPAWN_MAX_NAMED such
+# starts a file). The script is the first argument that is not a flag,
+# written as a literal (relative to the directory the package runs in), a
+# path.join / path.resolve / os.path.join or a pathlib `/` from the
+# script's own directory (__dirname, os.path.dirname(__file__),
+# Path(__file__).parent, dirname(fileURLToPath(import.meta.url)),
+# import.meta.dirname) or of literals, `__dirname + '/x'`, str() of one, or
+# a name assigned one of those in the file (followed _SPAWN_NAME_DEPTH names
+# deep).
 # The started file is then read like the one that started it,
 # _SPAWN_MAX_DEPTH starts deep and _SPAWN_MAX_FILES files per hook at most.
+# A path the file decodes as it runs is read too: the starts are read again
+# in the decoded view (@fnos/app kept its runner's path as character codes).
 _SPAWN_MAX_DEPTH = 3
 _SPAWN_MAX_FILES = 20
 _SPAWN_NAME_DEPTH = 3
 _SPAWN_MAX_TARGETS = 8          # started scripts read from one file, at most
+_SPAWN_MAX_NAMED = 32           # starts of a program a variable names read from one file, at most
 _SPAWN_CALL_SRC = (
     r"""\b(?:spawn|spawnSync|execFile|execFileSync)\s*\(\s*(?:process\s*\.\s*execPath|process\s*\.\s*argv\s*\[\s*0\s*\]"""
-    r"""|['"`](?:node|nodejs)(?:\.exe)?['"`])\s*,\s*\[|\bfork\s*\("""
+    r"""|['"`](?:node|nodejs|(?P<rt>bun|deno))(?:\.exe)?['"`]|(?P<js>[A-Za-z_$][\w$]*))\s*,\s*\[|\bfork\s*\("""
     r"""|\b(?:Popen|run|call|check_call|check_output)\s*\(\s*\[\s*(?:sys\s*\.\s*executable"""
-    r"""|['"]python[0-9.]*(?:\.exe)?['"])\s*,""")
+    r"""|['"]python[0-9.]*(?:\.exe)?['"]|(?P<py>[A-Za-z_]\w*))\s*,""")
 _SPAWN_CALL_RE = re.compile(_SPAWN_CALL_SRC)
+# a script a program named by a variable is given: a file of code
+_SPAWN_SCRIPT_EXT_RE = re.compile(r"\.(?:[cm]?[jt]s|[jt]sx|py)$", re.I)
+# str(p): the path p (Python)
+_SPAWN_STR_RE = re.compile(r"str\s*\(\s*([A-Za-z_]\w*)\s*\)")
 _SPAWN_LIT_SRC = (r"""'(?P<a>[^'"`\n$\\]{1,200})'|"(?P<b>[^'"`\n$\\]{1,200})"|`(?P<c>[^'"`\n$\\]{1,200})`""")
 _SPAWN_LIT_RE = re.compile(_SPAWN_LIT_SRC)
 _SPAWN_DIR_SRC = (r"""__dirname|os\s*\.\s*path\s*\.\s*dirname\s*\(\s*(?:os\s*\.\s*path\s*\.\s*(?:abspath|realpath)"""
-                  r"""\s*\(\s*)?__file__\s*\)?\s*\)|Path\s*\(\s*__file__\s*\)\s*(?:\.\s*resolve\s*\(\s*\))?\s*\.\s*parent""")
+                  r"""\s*\(\s*)?__file__\s*\)?\s*\)|Path\s*\(\s*__file__\s*\)\s*(?:\.\s*resolve\s*\(\s*\))?\s*\.\s*parent"""
+                  r"""(?:\s*\.\s*resolve\s*\(\s*\))?|(?:path\s*\.\s*)?dirname\s*\(\s*(?:url\s*\.\s*)?fileURLToPath\s*\("""
+                  r"""\s*import\s*\.\s*meta\s*\.\s*url\s*\)\s*\)|import\s*\.\s*meta\s*\.\s*dirname""")
 _SPAWN_DIR_RE = re.compile(_SPAWN_DIR_SRC)
 _SPAWN_JOIN_SRC = r"""(?:path\s*\.\s*(?:join|resolve)|os\s*\.\s*path\s*\.\s*join)\s*\("""
 _SPAWN_JOIN_RE = re.compile(_SPAWN_JOIN_SRC)
@@ -7843,9 +11301,51 @@ def _spawn_args(text, i, limit=400):
     return []
 
 
+def _spawn_pieces(expr):
+    """The operands of `expr` split at its top-level '/' (Python's `Path /
+    'x'`), outside quotes and brackets."""
+    pieces, depth, start, quote, j = [], 0, 0, None, 0
+    while j < len(expr):
+        ch = expr[j]
+        if quote is not None:
+            if ch == "\\":
+                j += 2
+                continue
+            if ch == quote:
+                quote = None
+        elif ch in "'\"`":
+            quote = ch
+        elif ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif ch == "/" and depth == 0:
+            pieces.append(expr[start:j].strip())
+            start = j + 1
+        j += 1
+    pieces.append(expr[start:].strip())
+    return pieces
+
+
+def _spawn_join(parts, text, names):
+    """(base, path) of a path joined from `parts`: the first a path or the
+    script's own directory, the others literals (or names given one)."""
+    head = _spawn_path(parts[0], text, names)
+    if head is None:
+        return None
+    base, segs = head[0], [head[1]]
+    for part in parts[1:]:
+        piece = _spawn_path(part, text, names)
+        if piece is None or piece[0] != "cwd":
+            return None
+        segs.append(piece[1])
+    return base, "/".join(segs)
+
+
 def _spawn_path(expr, text, names):
     """(base, path) a script argument names — base 'dir' (the script's own
-    directory) or 'cwd' (the directory the package runs in) — else None."""
+    directory: its path '.') or 'cwd' (the directory the package runs in) —
+    else None."""
     expr = expr.strip()
     m = _SPAWN_LIT_RE.fullmatch(expr)
     if m is not None:
@@ -7854,25 +11354,21 @@ def _spawn_path(expr, text, names):
     m = _SPAWN_CONCAT_RE.fullmatch(expr)
     if m is not None:
         return "dir", m.group("a") or m.group("b") or m.group("c") or m.group("t")
+    if _SPAWN_DIR_RE.fullmatch(expr):
+        return "dir", "."
+    m = _SPAWN_STR_RE.fullmatch(expr)
+    if m is not None:
+        return _spawn_path(m.group(1), text, names)
     m = _SPAWN_JOIN_RE.match(expr)
     if m is not None:
         parts = _spawn_args(expr, m.end())
         if not parts or not expr.rstrip().endswith(")"):
             return None
-        first, rest = parts[0], parts[1:]
-        if _SPAWN_DIR_RE.fullmatch(first):
-            base, segs = "dir", []
-        else:
-            head = _spawn_path(first, text, names)
-            if head is None:
-                return None
-            base, segs = head[0], [head[1]]
-        for part in rest:
-            lit = _SPAWN_LIT_RE.fullmatch(part)
-            if lit is None:
-                return None
-            segs.append(lit.group("a") or lit.group("b") or lit.group("c"))
-        return (base, "/".join(segs)) if segs else None
+        return _spawn_join(parts, text, names)
+    if "/" in expr:
+        pieces = _spawn_pieces(expr)
+        if len(pieces) > 1 and all(pieces):
+            return _spawn_join(pieces, text, names)
     if _SPAWN_NAME_RE.fullmatch(expr) and names > 0:
         am = re.search(_SPAWN_ASSIGN_HEAD + re.escape(expr) + _SPAWN_ASSIGN_TAIL, text)
         if am is not None:
@@ -7884,12 +11380,34 @@ def _spawn_path(expr, text, names):
 
 def spawned_scripts(text):
     """[(base, path)]: the package scripts `text` starts with node or python
-    (see above), base 'dir' or 'cwd', at most _SPAWN_MAX_TARGETS."""
+    (see above), base 'dir' or 'cwd', at most _SPAWN_MAX_TARGETS: read as
+    written, then with the strings it decodes as it runs decoded
+    (decoded_view), so a path it hides is followed too."""
+    out = _spawned_scripts(text)
+    if len(out) < _SPAWN_MAX_TARGETS:
+        view = decoded_view(text)
+        if view != text:
+            for target in _spawned_scripts(view):
+                if target not in out:
+                    out.append(target)
+                    if len(out) >= _SPAWN_MAX_TARGETS:
+                        break
+    return out
+
+
+def _spawned_scripts(text):
+    """spawned_scripts' reading of one text."""
     if not any(n in text for n in ("spawn", "execFile", "fork", "Popen", "run", "call", "check_")):
         return []
-    out = []
+    out, named_calls = [], 0
     for m in _SPAWN_CALL_RE.finditer(text):
+        named = m.group("js") is not None or m.group("py") is not None
+        if named:
+            named_calls += 1
+            if named_calls > _SPAWN_MAX_NAMED:
+                continue
         args, skip = _spawn_args(text, m.end()), False
+        runs = _JS_RUNTIMES.get(m.group("rt") or "", frozenset())   # `bun run x.js`
         for arg in args[:6]:
             if skip:
                 skip = False
@@ -7902,10 +11420,14 @@ def spawned_scripts(text):
                     break                                 # inline code or a module: no script file
                 skip = flag in _SPAWN_VALUE_FLAGS and "=" not in value
                 continue
+            if value is not None and value in runs:
+                runs = frozenset()
+                continue
             target = _spawn_path(arg, text, _SPAWN_NAME_DEPTH)
             if target is not None:
                 path = posixpath.normpath(target[1].replace("\\", "/"))
-                if path not in (".", "") and not path.startswith("/") and (target[0], path) not in out:
+                if path not in (".", "") and not path.startswith("/") and (target[0], path) not in out \
+                        and (not named or _SPAWN_SCRIPT_EXT_RE.search(path)):
                     out.append((target[0], path))
             break
         if len(out) >= _SPAWN_MAX_TARGETS:
@@ -8019,53 +11541,139 @@ def _offscreen_issue(path, line_no, lines, found):
              why=_OFFSCREEN_RUNS_WHY if runs else _OFFSCREEN_WHY), path, line_no, lines, col)
 
 
-def install_script_risk(text):
+def install_script_risk(text, shell=True, command=False):
     """Reasons an install-time script looks hostile ([] if none): read as
     written, and again with the strings it decodes as it runs decoded
-    (decoded_view; a reason found only there says so)."""
-    reasons = _install_script_risk(text)
+    (decoded_view; a reason found only there says so). A shell script is
+    read as a program too (_shell_text; `shell`: False for a hook's command
+    and the code it hands an interpreter, which hook_command_risk reads
+    itself; `command`: the text is a hook's command, shell whatever it
+    holds)."""
+    reasons = _install_script_risk(text, shell, command)
     view = decoded_view(text)
     if view != text:
-        for r in _install_script_risk(view):
+        for r in _install_script_risk(view, shell, command):
             if r not in reasons:
                 reasons.append(r + _DV_NOTE)
     return reasons
 
 
-def _install_script_risk(text):
+# A shell script (0.1.8): its #! line names a shell, or, without one, nothing
+# in it is JavaScript or Python (require, import, def, =>, const …): the
+# install script a hook runs (install.sh) is read by the shell reader
+# (_sh_reasons), as a hook's command is. Up to _SH_SCRIPT_MAX_CHARS.
+_SH_NOT_SHELL_RE = re.compile(
+    r"\brequire\s*\(|(?<![^\n])[ \t]*(?:import|from)[ \t]+[\w.{*]|\bdef[ \t]+\w+\s*\(|=>"
+    r"|(?<![^\n])[ \t]*(?:const|let|var|class)[ \t]+[A-Za-z_$]|\bconsole\s*\.\s*log\b|\bmodule\s*\.\s*exports\b"
+    r"|\bprocess\s*\.\s*(?:env|argv|exit)\b|\bprint\s*\(|\bos\s*\.\s*(?:system|environ|popen)\b")
+_SH_SCRIPT_MAX_CHARS = 1_000_000
+
+
+def _code_text(text):
+    """Is `text` JavaScript or Python rather than shell (its #! line, or what
+    _SH_NOT_SHELL_RE finds)? A command written in code runs when it is
+    handed to an exec call (0.1.8: a CLI's help text or an error message
+    that shows `curl … | sh` or `irm … | iex` runs nothing)."""
+    if text.startswith("#!"):
+        lang = shebang_lang(text)
+        if lang is not None:
+            return lang != "sh"
+    return _SH_NOT_SHELL_RE.search(text) is not None
+
+
+def _shell_text(text):
+    """Is `text` a shell script (see above)?"""
+    if len(text) > _SH_SCRIPT_MAX_CHARS:
+        return False
+    if text.startswith("#!"):
+        return shebang_lang(text) == "sh"
+    return _SH_NOT_SHELL_RE.search(text) is None
+
+
+# (0.1.8) What an install script sends is read as a flow (local_data_sent_at,
+# exec_command_reasons; a hook's command by _sh_reasons): 0.1.7 made a script
+# CRITICAL when it merely named the environment or a credential file, or
+# the user or host name, anywhere in a file that used the network anywhere,
+# or when it named a data-capture or exfiltration service. A service a list
+# names is now where the data goes — a label on a send the flow found
+# (_destination_label) — and a raw IP address a script connects to is still
+# a sign of its own.
+_SEND_REASONS = (tuple(_LD_REASONS.values()) + tuple(_SH_DATA_REASONS.values())
+                 + (_SH_BEACON_REASON, "sends the machine's user or host name", "sends data to a webhook whose secret",
+                    "collects files from several credential folders"))
+_RAW_IP_URL_RE = re.compile(r"https?://(?:\d{1,3}\.){3}\d{1,3}\b", re.I)
+
+
+def _destination(text):
+    """The data-capture or exfiltration service `text` names (a match), else None."""
+    return capture_service(text) or _EXFIL_SERVICE_RE.search(text)
+
+
+def _destination_label(text):
+    """The label of where a script that sends data sends it (see above): a
+    data-capture or exfiltration service it names, else None."""
+    m = _destination(text)
+    return None if m is None else f"contacts an address typical of data exfiltration ({m.group(0)[:40]})"
+
+
+def _label_sends(text, reasons):
+    """Adds to `reasons` the label of where the data goes, when one of them sends it."""
+    if any(r.startswith(_SEND_REASONS) for r in reasons):
+        label = _destination_label(text)
+        if label is not None and label not in reasons:
+            reasons.append(label)
+
+
+def _install_script_risk(text, shell=True, command=False):
     reasons = []
-    network = bool(_NETWORK_RE.search(text))
-    if network and _SECRET_SOURCE_RE.search(text):
-        reasons.append("reads environment variables or credential files and sends data over the network")
-    dest = _EXFIL_DEST_RE.search(text)
-    if dest:
-        reasons.append(f"contacts an address typical of data exfiltration ({dest.group(0)[:40]})")
-    if _pipes_download_to_shell(text):
+    # a download piped or substituted into a shell, and PowerShell: in code,
+    # where an exec call is handed them (as at import time: _code_text)
+    code = not command and _code_text(text)
+    rows = text.split("\n") if "curl" in text or "wget" in text else ()
+    if (any(_pipes_download_to_shell(row) and _EXEC_CALL_RE.search(row) is not None for row in rows) if code
+            else _pipes_download_to_shell(text)):
         reasons.append("pipes a download into a shell")
-    substituted = (("curl" in text or "wget" in text)
-                   and any(runs_substituted_download(row) for row in text.split("\n")))
+    substituted = any(runs_substituted_download(row) and (not code or _EXEC_CALL_RE.search(row) is not None)
+                      for row in rows)
     received = _received_code_kind(text)
     if substituted:
         reasons.append(_DL_CATEGORY_REASON["run"])
     elif received is not None:
         reasons.append(_DL_CATEGORY_REASON[received[1]])
-    reasons.extend(powershell_risk(text))
+    ps = powershell_risk(text)
+    if ps and (not code or _powershell_run_at(text) >= 0):
+        reasons.extend(ps)
     if (received is None or received[1] != "run") and not substituted and stager_at(text) >= 0:
         reasons.append("carries a script that downloads and runs code")
     if reverse_shell_at(text) >= 0:
         reasons.append("opens a reverse shell")
     host = _HOST_INFO_RE.search(text)
-    if host and (_NETWORK_RE.search(text) or _EXFIL_SERVICE_RE.search(text)):        # sends_host_info
-        reasons.append("sends the machine's user or host name over the network")
     for _at, reason in _exfil_signs(text, host):
         if reason not in reasons:
             reasons.append(reason)
-    if dest is None:
-        ip = raw_ip_connect(text)
-        if ip is not None:
-            reasons.append(f"contacts an address typical of data exfiltration ({ip})")
+    ip = _RAW_IP_URL_RE.search(text)
+    ip = ip.group(0)[:40] if ip is not None else raw_ip_connect(text)
+    if ip is not None:
+        reasons.append(f"contacts an address typical of data exfiltration ({ip})")
     if runs_own_source_at(text) >= 0:
         reasons.append("runs code it reads back from its own file or a data file shipped with it")
+    # (0.1.8) data read from the machine and sent, whatever the address; the
+    # commands the script runs, read as programs; where the data goes
+    flow = local_data_sent_at(text)
+    if flow is not None:
+        _at, kind, what, in_address = flow
+        reason = _LD_REASONS[kind] + (f" ({what[:60]})" if kind in ("environment", "file", "report") else "")
+        if not any(r.startswith(_LD_REASONS[kind]) for r in reasons) \
+                and (not in_address or capture_service(text) is not None):
+            reasons.append(reason)
+    for r in exec_command_reasons(text):
+        if r not in reasons:
+            reasons.append(r)
+    if shell and _shell_text(text):
+        for r in _sh_reasons(text, 0, False, _HookWalk()):
+            if r not in reasons:
+                reasons.append(r)
+    _label_sends(text, reasons)
     reasons.extend(persistence_reasons(text))
     if _PUBLISH_CMD_RE.search(text) is not None:
         reasons.append("publishes a package to a registry (npm publish)")
@@ -8095,32 +11703,48 @@ def _install_script_risk(text):
 # and exports reach, a wheel's top-level packages and modules — gets a weaker
 # version of the install-script test: a MAJOR finding (a weak indicator,
 # WARN), never CRITICAL, and only on shapes ordinary SDKs don't share.
-# Harvesting means the whole environment serialized, or a credential store
-# read (SSH private keys, git credentials, browser local storage): reading
-# the variables it needs, or listing them (Object.keys(process.env),
-# os.environ.copy() for a subprocess), is everyday SDK and CLI code, and so
-# is reading a tool's own config (.npmrc, .pypirc, .netrc, ~/.aws: npm
-# clients, setuptools, distlib and cloud SDKs do, next to their network
-# code — .pypirc alone fired on 5 of 12,278 installed modules). It counts
-# only next to a network call or a named exfiltration service in the same
-# file. An address alone never counts: cloud SDKs read 169.254.169.254, and
-# Telegram, ngrok or pastebin clients name their own service. A download piped
-# into a shell counts only on a line that hands it to an exec call (a CLI's
+# (0.1.8) What it sends is read as a flow (local_data_sent_at, and the
+# command lines it hands a shell: _import_flow). Local data sent to a
+# data-capture service (webhook.site, an ngrok tunnel's address …) or to a
+# public IP address is CRITICAL, whatever the data; what no client sends —
+# the whole environment, the instance's credentials, a credential store (an
+# SSH private key, not its .pub; git's credentials; a browser's local
+# storage) — is CRITICAL sent to an exfiltration service a list names
+# (Telegram, Discord, pastebin …: a client talks to those with its user's
+# key) and MAJOR sent anywhere else. The list is where the data goes; a
+# library reports to its own API, so the variables it needs, or a tool's own
+# config (.npmrc, .pypirc, ~/.aws), sent there are everyday SDK code, and an
+# address alone never counts (cloud SDKs read 169.254.169.254; Telegram,
+# ngrok or pastebin clients name their own service). What a request's
+# address holds (in_address) counts only where the address is a capture
+# service's. A download piped into a shell counts only on a line that hands
+# it to an exec call, or in a command line an exec call is handed (a CLI's
 # help text often shows `curl … | sh`).
-_IMPORT_HARVEST_RE = re.compile(
-    r"""JSON\.stringify\(\s*process\.env\s*[,)]|"""
-    r"""\bjson\.dumps\(\s*(?:dict\(\s*)?os\.environ\s*[,)]|\b(?:str|repr)\(\s*os\.environ\s*\)|"""
-    r"""\burlencode\(\s*(?:dict\(\s*)?os\.environ\s*[,)]|"""
-    r"""[/\\]\.ssh[/\\]id_|\bid_(?:rsa|ed25519|ecdsa|dsa)\b(?!\.pub)|\.git-credentials|"""
-    r"""(?i:Local Storage)[/\\]leveldb""")
+_IMPORT_SENT_REASONS = {
+    "address": "sends the machine's public IP address to a data-capture service",
+    "identity": "sends the machine's user or host name to a data-capture service",
+    "report": "sends what local commands report about the machine to a data-capture service",
+    "environment": "reads credentials or the whole environment and sends them to an exfiltration service",
+    "credentials": "reads credentials or the whole environment and sends them to an exfiltration service",
+    "file": "reads local files and sends them to an exfiltration service",
+}
+_IMPORT_SENT_IP_REASONS = {
+    "address": "sends the machine's public IP address to an IP address",
+    "identity": "sends the machine's user or host name to an IP address",
+    "report": "sends what local commands report about the machine to an IP address",
+    "environment": "reads credentials or the whole environment and sends them to an IP address",
+    "credentials": "reads credentials or the whole environment and sends them to an IP address",
+    "file": "reads local files and sends them to an IP address",
+}
+# a public IP address in a URL (not a private, loopback or link-local one)
+_PUBLIC_IP_URL_RE = re.compile(
+    r"\b(?:https?|wss?|tcp)://(?!(?:10|127|0)\.)(?!192\.168\.)(?!172\.(?:1[6-9]|2\d|3[01])\.)(?!169\.254\.)"
+    r"(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)(?![\d.])")
+_CRED_STORE_RE = re.compile(r"""\.ssh\b|\bid_(?:rsa|ed25519|ecdsa|dsa)\b(?!\.pub)|\.git-credentials|Local Storage""", re.I)
+_PUBLIC_KEY_FILE_RE = re.compile(r"\.pub\b|known_hosts", re.I)      # what .ssh holds that is no secret
 _EXEC_CALL_RE = re.compile(
     r"""\b(?:execSync|exec|execFileSync|execFile|spawnSync|spawn|system|popen|Popen|run|call|"""
     r"""check_call|check_output|getoutput|getstatusoutput)\s*\(""")
-# Every match of _IMPORT_HARVEST_RE contains one of these (the pattern is
-# case-sensitive but for "Local Storage", and its "leveldb" is not): a text
-# with none of them is not searched. The search took 8 of the 60 seconds of a
-# --deps scan of a large node_modules, which runs it on every file.
-_IMPORT_HARVEST_NEEDLES = ("process.env", "os.environ", "id_", ".git-credentials", "leveldb")
 
 
 # Import-time code that is SUSPICIOUS on its own (audit P0, 0.1.7): the
@@ -8130,11 +11754,14 @@ _IMPORT_HARVEST_NEEDLES = ("process.env", "os.environ", "id_", ".git-credentials
 # they are found — fetch-and-run and the other shapes install_script_risk
 # names that no library needs: code received over the network and run, a
 # download run through a shell, PowerShell that hides or fetches what it
-# runs, a stager string, a reverse shell, credentials or the environment
-# sent to a named exfiltration service, the machine's user or host name sent
-# to a data-capture service (the dependency-confusion beacon), a download
-# run with the Python interpreter (a script, not a binary), and a GitHub
-# Actions workflow that dumps every repository secret (see persistence targets).
+# runs, a stager string, a reverse shell, local data sent to a data-capture
+# service or a public IP address (the dependency-confusion beacon), what no
+# client sends sent to an exfiltration service, a webhook whose secret is
+# written in the code, a sweep of credential folders, the host name hidden
+# in base64, in a DNS name or sent to an address fetched at run time, a
+# miner, a download run with the Python interpreter (a script, not a
+# binary), and a GitHub Actions workflow that dumps every repository secret
+# (see persistence targets).
 _STRONG_IMPORT_REASONS = (
     "runs code it receives over the network", "runs a downloaded script through a shell",
     "runs an encoded PowerShell command", "runs PowerShell that", "carries a script that downloads and runs code",
@@ -8142,10 +11769,13 @@ _STRONG_IMPORT_REASONS = (
     "sends the machine's user or host name to a data-capture service", "downloads a script and runs it with",
     "writes code it decodes to a file and runs it with", "runs code it reads back from its own file",
     "carries a GitHub Actions workflow that dumps every repository secret",
-    "sends data to a Telegram bot whose token", "sends data to a Discord webhook whose token",
-    "sends data to a Slack webhook whose key", "reads credential files and sends data to an IP address",
+    "sends data to a webhook whose secret is written in the code",
+    "sends what local commands report about the machine to", "reads local files and sends them to an exfiltration service",
+    "sends the machine's public IP address to", "sends the machine's user or host name to an IP address",
+    "reads credentials or the whole environment and sends them to an IP address",
+    "reads local files and sends them to an IP address",
     "collects files from several credential folders", "sends the machine's user or host name to an address it hides",
-    "sends the machine's user or host name in a DNS lookup", "sends the machine's public IP address to a data-capture",
+    "sends the machine's user or host name in a DNS lookup",
     "sends the machine's user or host name to an address it fetches",
     "runs a cryptocurrency miner")
 # Endpoints that exist to capture what is sent to them (out-of-band testing,
@@ -8277,14 +11907,19 @@ def _call_open(rest):
 
 def _powershell_run_at(text):
     """The offset of the first PowerShell name of `text` that is an argument
-    of an exec call opened at most _PS_EXEC_BACK characters before it, else
-    -1 (at most _PS_EXEC_MAX_NAMES names are examined)."""
+    of an exec call opened at most _PS_EXEC_BACK characters before it (at
+    most _PS_EXEC_MAX_NAMES names are examined), else of the first exec call
+    handed a command line that names PowerShell (a name given one: `cmd =
+    f"powershell …"; subprocess.run(cmd, shell=True)`), else -1."""
     for k, m in enumerate(_PS_RE.finditer(text)):
         if k >= _PS_EXEC_MAX_NAMES:
             break
         window = text[max(0, m.start() - _PS_EXEC_BACK):m.start()]
         if any(_call_open(window[c.end():]) for c in _EXEC_CALL_RE.finditer(window)):
             return m.start()
+    for at, cmd in _exec_command_lines(text):
+        if _PS_RE.search(cmd) is not None:
+            return at
     return -1
 
 
@@ -8321,32 +11956,55 @@ def _import_time_reading(text, lang):
     return reasons, line
 
 
-def _import_harvest_at(text):
-    """Where `text` harvests (see _IMPORT_HARVEST_RE; also a copy of the
-    whole environment it serializes, 0.1.8), else -1."""
-    harvest = (_IMPORT_HARVEST_RE.search(text)
-               if any(needle in text for needle in _IMPORT_HARVEST_NEEDLES) else None)
-    return harvest.start() if harvest else env_copy_serialized_at(text)
+def _import_flow(text):
+    """(offset, kind, what, in_address) of the first local data `text` sends
+    (local_data_sent_at, then the command lines it hands a shell), else None."""
+    flow = local_data_sent_at(text)
+    if flow is not None:
+        return flow
+    for at, reason in _exec_command_flows(text):
+        for kind, sent in _SH_DATA_REASONS.items():
+            if reason.startswith(sent):
+                return at, "identity" if kind == "lookup-identity" else kind, reason[len(sent) + 2:-1], False
+    return None
 
 
 def _import_time_risk(text):
     reasons, line = [], None
-    harvest = _import_harvest_at(text)
-    if harvest >= 0:
-        service = _EXFIL_SERVICE_RE.search(text)
-        if service:
-            reasons.append("reads credentials or the whole environment and sends them to "
-                           f"an exfiltration service ({service.group(0)[:40]})")
-        elif _NETWORK_RE.search(text):
+    flow = _import_flow(text)
+    if flow is not None:
+        at, kind, what, in_address = flow
+        # a data-capture service for any local data; a service a client talks
+        # to with its user's key (Telegram, Discord, pastebin …) for what no
+        # client sends: the whole environment, the instance's credentials, a
+        # credential store
+        harvest = (not in_address and (kind == "environment" and what == _LD_WHOLE_ENV or kind == "credentials"
+                                       or kind == "file" and _CRED_STORE_RE.search(what) is not None
+                                       and _PUBLIC_KEY_FILE_RE.search(what) is None))
+        dest = capture_service(text) or (_EXFIL_SERVICE_RE.search(text) if harvest else None)
+        ip = _PUBLIC_IP_URL_RE.search(text) if dest is None and not in_address else None
+        if dest is not None:
+            reasons.append(f"{_IMPORT_SENT_REASONS[kind]} ({dest.group(0)[:40]})")
+        elif ip is not None:
+            reasons.append(f"{_IMPORT_SENT_IP_REASONS[kind]} ({ip.group(0).split('//', 1)[1]})")
+        elif harvest and kind != "credentials":
             reasons.append("reads credentials or the whole environment and sends data over the network")
         if reasons:
-            line = text.count("\n", 0, harvest) + 1
+            line = text.count("\n", 0, at) + 1
     if "curl" in text or "wget" in text:
+        piped = False
         for i, row in enumerate(text.split("\n")):
             if _runs_download_through_shell(row):
                 reasons.append("runs a downloaded script through a shell")
                 line = line or i + 1
+                piped = True
                 break
+        if not piped:                   # (0.1.8) or a command line built in names, handed to an exec call
+            for at, r in _exec_command_flows(text):
+                if r == "pipes a download into a shell" or r == _DL_CATEGORY_REASON["run"]:
+                    reasons.append("runs a downloaded script through a shell")
+                    line = line or text.count("\n", 0, at) + 1
+                    break
     received = _received_code_kind(text)
     if received is not None:
         reasons.append(_DL_CATEGORY_REASON[received[1]])
@@ -8377,11 +12035,6 @@ def _import_time_risk(text):
     if at >= 0:
         signs.append((at, "opens a reverse shell"))
     host = _HOST_INFO_RE.search(text)
-    if host:
-        capture = capture_service(text)
-        if capture:
-            signs.append((host.start(), "sends the machine's user or host name to a data-capture service "
-                                        f"({capture.group(0)[:40]})"))
     at = runs_own_source_at(text)
     if at >= 0:
         signs.append((at, "runs code it reads back from its own file or a data file shipped with it"))
@@ -8817,6 +12470,7 @@ def _dl_within(starts, ends, lo, hi):
     return i < len(starts) and ends[i] <= hi
 
 
+
 class _DlTaint:
     """The names holding a received value, with the row each was last bound
     on (followed for _DL_WINDOW rows), and the names that carry the network
@@ -9132,6 +12786,7 @@ class _DlRow:
         """`name` is now live: the chains it starts are too."""
         for seg in self.indexed:
             seg.bound(name)
+
 
     def phase_at(self, o):
         """The code a call's '(' at offset o is read in: one where it is not
@@ -9576,6 +13231,12 @@ _DL_FILE_WRITE_RE = _dl_re("_DL_FILE_WRITE_RE")
 _DL_FILE_WRITE_NEEDLES = tuple(_DL_SPEC_ARRAYS["_DL_FILE_WRITE_NEEDLES"])
 _DL_PATHRUN_SINK_RE = _dl_re("_DL_PATHRUN_SINK_RE")
 _DL_PATHRUN_NEEDLES = tuple(_DL_SPEC_ARRAYS["_DL_PATHRUN_NEEDLES"])
+# (0.1.8) a command line in a string literal runs the file when it is a
+# command's program (`./x.sh`) or what a program that runs its argument is
+# given (`start install.bat`, `cmd /c x.bat`, `sh x.sh`: _DL_RUNNERS); a
+# command before a | ; & or line break is one of its own
+_DL_RUNNERS = frozenset(_DL_SPEC_ARRAYS["_DL_RUNNERS"])
+_DL_CMD_TOKEN_RE = _dl_re("_DL_CMD_TOKEN_RE")
 
 
 def _dl_norm_path(tok):
@@ -9595,12 +13256,36 @@ def _dl_path_token(m):
 
 def _dl_region_names_path(region, path):
     """Does `region` (a run sink's arguments) name the file `path` — as the
-    same identifier, or as a string literal for the same file?"""
+    same identifier, as a string literal for the same file, or in a command
+    line a literal holds that runs it (see above)?"""
     for m in _DL_NAME_RE.finditer(region):
         if m.group() == path:
             return True
     for m in _DL_STR_RE.finditer(region):
-        if _dl_norm_path(m.group()) == path:
+        if _dl_norm_path(m.group()) == path or _dl_command_runs(m.group()[1:-1], path):
+            return True
+    return False
+
+
+def _dl_command_runs(line, path):
+    """Does the command line `line` run the file `path` (see above)?"""
+    first, runner = True, False
+    for m in _DL_CMD_TOKEN_RE.finditer(line):
+        tok = m.group()
+        if tok in ("|", "&", ";", "\n"):
+            first, runner = True, False
+            continue
+        word = tok.strip("\"'")
+        if first:
+            if "=" in word:                        # an assignment before the command
+                continue
+            first = False
+            runner = (word.lower() if word.isascii() else word) in _DL_RUNNERS
+        elif not runner:
+            continue
+        while word[:2] == "./":
+            word = word[2:]
+        if word == path:
             return True
     return False
 
@@ -9926,17 +13611,19 @@ def scan_manifest(path, content, registry=False):
     supply-chain attack vector.
 
     G11: mere *presence* of a lifecycle script is flagged (MAJOR); a hook whose
-    command matches the fetch/eval pattern list escalates to CRITICAL. The old
-    behavior (pattern-only) was a denylist every `npx evil-pkg` or
-    `node ./scripts/payload.js` sailed through. Also covers setup.py and
-    binding.gyp via scan_file()/scan_gyp() (see collect_files).
+    command does what malicious hooks do, read as a program
+    (hook_command_risk, 0.1.8), escalates to CRITICAL. The command's download
+    and evaluation tools (INSTALL_HOOK_RE) are only a hint in the MAJOR
+    finding's message: tokens a binary installer shares. Also covers setup.py
+    and binding.gyp via scan_file()/scan_gyp() (see collect_files).
 
     Shared semantics 3: a leading BOM is stripped before parsing; an
     unparseable ROOT manifest is SC-MANIFEST-UNPARSEABLE (MAJOR). registry /
     dependency manifests count preinstall, install, postinstall; a project
     checkout also counts preprepare, prepare, postprepare, and there a
-    prepare-family hook that is not suspicious is INFO (the project's own
-    build step, e.g. `husky install`), while a suspicious one stays CRITICAL."""
+    prepare-family hook with neither a reason nor a hint is INFO (the
+    project's own build step, e.g. `husky install`), while a hostile one
+    stays CRITICAL."""
     data, issues = load_manifest(path, content)
     if data is None:
         return issues
@@ -9949,9 +13636,10 @@ def scan_manifest(path, content, registry=False):
             cmd = scripts.get(hook)
             if not isinstance(cmd, str) or not cmd.strip():
                 continue
-            suspicious = _hook_is_suspicious(cmd)
+            reasons = hook_command_risk(cmd)
+            hint = not reasons and _hook_is_suspicious(cmd)
             sev = "INFO" if (not registry and hook in NPM_PREPARE_SCRIPTS
-                             and not suspicious) else None
+                             and not reasons and not hint) else None
             # the hook's key inside "scripts", not the first line naming it
             # (review: a dependency called "install" took the finding)
             if key_lines is None:
@@ -9959,7 +13647,7 @@ def scan_manifest(path, content, registry=False):
             line_no = key_lines.get(hook) or next(
                 (i + 1 for i, l in enumerate(lines) if f'"{hook}"' in l), 1)
             issues.append(_sc_install_hook_issue(path, line_no, lines, hook, cmd,
-                                                 suspicious, sev=sev))
+                                                 reasons, sev=sev, hint=hint))
     return issues
 
 
@@ -10160,15 +13848,18 @@ _GYP_EXPANSION_FILE_WHY = (
 def scan_gyp(path, content):
     """G11: binding.gyp custom build actions run arbitrary commands at
     `node-gyp rebuild` (i.e. `npm install` of any native module). Flag each
-    action whose command matches the fetch/eval patterns, and any action at
-    all as MAJOR — same policy as package.json lifecycle scripts.
+    action whose command looks hostile read as a program (hook_command_risk)
+    CRITICAL, and any action at all as MAJOR — same policy as package.json
+    lifecycle scripts.
 
     gyp files are Python literals (single quotes, comments, trailing commas),
     so both JSON and Python-literal syntax are accepted. Actions and rules
     are found anywhere in the document (conditions, target_defaults ...).
     Command expansions ('<!(cmd)', '>!(cmd)', '^!(cmd)', '<!([argv])',
     '<!pymod_do_main(module)') also run at configure time: they are flagged
-    CRITICAL when the command fetches or evaluates code, and listed as INFO
+    CRITICAL when the command looks hostile (its value is what it prints,
+    so a request it prints is kept), MAJOR when it runs a download or
+    evaluation tool (INSTALL_HOOK_RE: a hint), and listed as INFO
     inventory when it runs a file of the package (`node index.js`,
     `node -p "require('./lib/x')"`, a pymod_do_main module) — the Miasma
     trick: a payload run from binding.gyp, with no install script. Such a
@@ -10191,21 +13882,24 @@ def scan_gyp(path, content):
     body = content[1:] if content.startswith("\ufeff") else content
     lines = body.split("\n")
     commands, truncated = _gyp_commands(data)
-    hooks = []                           # (cmd shown, kind, node, suspicious, command followed, sev)
+    hooks = []                           # (cmd shown, kind, node, reasons, command followed, sev, hint)
     listed = set()                       # the files the listed INFO expansions run
     for cmd, kind, node in commands:
         if kind == "action":
-            hooks.append((cmd, kind, node, bool(INSTALL_HOOK_RE.search(cmd)), None, None))
+            reasons = hook_command_risk(cmd)
+            hooks.append((cmd, kind, node, reasons, None, None, not reasons and bool(INSTALL_HOOK_RE.search(cmd))))
             continue
-        suspicious = bool(INSTALL_HOOK_RE.search(_GYP_NODE_REQUIRE_RE.sub(" ", cmd)))
         follow = _gyp_hook_command(cmd, kind)
-        if not suspicious:
+        # an expansion's output is its value: a request it prints is kept
+        reasons = hook_command_risk(follow, output_kept=True)
+        hint = not reasons and bool(INSTALL_HOOK_RE.search(_GYP_NODE_REQUIRE_RE.sub(" ", cmd)))
+        if not reasons and not hint:
             runs = _gyp_package_files(follow)
             if not runs or runs in listed:
                 continue                 # the usual include-path queries; a file listed already
             listed.add(runs)
         shown = f"pymod_do_main({cmd})" if kind == "pymod" else cmd
-        hooks.append((shown, kind, node, suspicious, follow, None if suspicious else "INFO"))
+        hooks.append((shown, kind, node, reasons, follow, None if reasons or hint else "INFO", hint))
     newlines = [m.start() for m in re.finditer("\n", body)] if hooks else []
     first_line = {}
 
@@ -10224,11 +13918,11 @@ def scan_gyp(path, content):
         return first_line[cmd]
 
     redactor = _LineRedactor(lines)
-    for cmd, kind, node, suspicious, follow, sev in hooks[:GYP_MAX_HOOK_FINDINGS]:
+    for cmd, kind, node, reasons, follow, sev, hint in hooks[:GYP_MAX_HOOK_FINDINGS]:
         issue = _sc_install_hook_issue(
             path, line_of(cmd, kind, node), lines,
             "binding.gyp action" if kind == "action" else "binding.gyp command expansion",
-            cmd, suspicious, sev=sev, redactor=redactor)
+            cmd, reasons, sev=sev, redactor=redactor, hint=hint)
         if follow is not None:
             issue["cmd"] = follow        # what a --deps scan and the registry follow
         if sev == "INFO":
@@ -10241,7 +13935,7 @@ def scan_gyp(path, content):
             {"id": "SC-INSTALL-HOOK", "name": "Install hook", "type": "HOTSPOT",
              "sev": "CRITICAL" if n_bad else ("MAJOR" if any(h[5] != "INFO" for h in rest) else "INFO"),
              "msg": (f"{len(rest)} more binding.gyp actions and command expansions run code at "
-                     f"install time ({n_bad} of them fetch or evaluate code); only the first "
+                     f"install time ({n_bad} of them look hostile); only the first "
                      f"{GYP_MAX_HOOK_FINDINGS} are listed."),
              "why": ("Each action and command expansion in a binding.gyp runs a command during "
                      "`node-gyp rebuild` (npm install). A file with this many is listed in part "

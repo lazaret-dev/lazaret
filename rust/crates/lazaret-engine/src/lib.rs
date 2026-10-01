@@ -11,6 +11,7 @@ pub mod api;
 pub mod budget;
 pub mod filectx;
 pub mod findings;
+pub mod flow;
 pub mod generated;
 pub mod hooks;
 pub mod json;
@@ -22,7 +23,9 @@ pub mod pystr;
 pub mod received;
 pub mod rxutil;
 pub mod scanfile;
+pub mod shell;
 pub mod signs;
+pub mod strarr;
 pub mod token;
 pub mod unicode;
 

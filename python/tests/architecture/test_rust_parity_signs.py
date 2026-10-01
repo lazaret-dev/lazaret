@@ -3,13 +3,14 @@ read for, one by one: the Rust engine (crates/lazaret-engine: signs.rs,
 received.rs) against lazaret.scanner.core on the hooks parity corpus
 (hooks_corpus.py), each case's answers compared field by field —
 _received_code_kind, _downloads_and_runs, _decodes_and_runs,
-powershell_risk, stager_at, reverse_shell_at, sends_host_info,
+powershell_risk, stager_at, reverse_shell_at, (0.1.8) local_data_sent_at,
 runs_own_source_at, reads_own_source, persistence_reasons,
 dumps_workflow_secrets, _pipes_download_to_shell, runs_substituted_download,
 offscreen_code (as JavaScript and as Python), (0.1.8) the exfiltration
-shapes (chat_secret_at … _exfil_signs, raw_ip_connect, capture_service) and
-service_reasons, and (0.1.8) the DNS beacon without a read of the identity
-and the dead drop.
+shapes (secret_endpoint_at, credential_sweep_at, exec_command_reasons …
+_exfil_signs, raw_ip_connect, capture_service) and service_reasons, the DNS
+beacon without a read of the identity and the dead drop, and the text read
+as a shell program (_sh_reasons, _shell_text, _code_text).
 
 test_rust_parity_hooks.py holds install_script_risk and import_time_risk,
 which read all of these at once; here a difference shows which one.
@@ -24,14 +25,16 @@ from tests.architecture.hooks_corpus import corpus
 
 CHUNK = 1500
 FIELDS = ("received_code_kind", "downloads_and_runs", "decodes_and_runs", "powershell_risk", "stager_at",
-          "reverse_shell_at", "sends_host_info", "runs_own_source_at", "reads_own_source", "persistence_reasons",
+          "reverse_shell_at", "local_data_sent_at", "runs_own_source_at", "reads_own_source", "persistence_reasons",
           "dumps_workflow_secrets", "pipes_download_to_shell", "runs_substituted_download",
           "offscreen_code js", "offscreen_code py",
           # 0.1.8: the exfiltration shapes, programs started at login or boot
-          "chat_secret_at", "credential_sweep_at", "env_copy_serialized_at", "dns_beacon_at", "miner_at",
+          "secret_endpoint_at", "credential_sweep_at", "exec_command_reasons", "dns_beacon_at", "miner_at",
           "raw_ip_connect", "capture_service", "exfil_signs", "service_reasons",
-          # 0.1.8: the DNS beacon a shell command sends without another read of the identity, the dead drop
-          "dns_beacon_at without host", "dead_drop_at")
+          # the DNS beacon a shell command sends without another read of the identity, the dead drop
+          "dns_beacon_at without host", "dead_drop_at",
+          # 0.1.8: the text read as a shell program
+          "_sh_reasons", "_shell_text", "_code_text")
 
 
 def as_json(v):
@@ -45,15 +48,16 @@ def core_view(text):
     """core's answers for one case, in FIELDS order."""
     return as_json([core._received_code_kind(text), core._downloads_and_runs(text), core._decodes_and_runs(text),
                     core.powershell_risk(text), core.stager_at(text), core.reverse_shell_at(text),
-                    core.sends_host_info(text), core.runs_own_source_at(text), core.reads_own_source(text),
+                    core.local_data_sent_at(text), core.runs_own_source_at(text), core.reads_own_source(text),
                     core.persistence_reasons(text), core.dumps_workflow_secrets(text),
                     core._pipes_download_to_shell(text), core.runs_substituted_download(text),
                     core.offscreen_code(text, "js"), core.offscreen_code(text, "py"),
-                    core.chat_secret_at(text), core.credential_sweep_at(text), core.env_copy_serialized_at(text),
+                    core.secret_endpoint_at(text), core.credential_sweep_at(text), core.exec_command_reasons(text),
                     core.dns_beacon_at(text), core.miner_at(text), core.raw_ip_connect(text),
                     (lambda m: m.group(0) if m else None)(core.capture_service(text)),
                     core._exfil_signs(text, core._HOST_INFO_RE.search(text)), core.service_reasons(text),
-                    core.dns_beacon_at(text, False), core.dead_drop_at(text)])
+                    core.dns_beacon_at(text, False), core.dead_drop_at(text),
+                    core._sh_reasons(text, 0, False, core._HookWalk()), core._shell_text(text), core._code_text(text)])
 
 
 def rust_views(cases, box):

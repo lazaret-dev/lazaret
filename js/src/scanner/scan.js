@@ -24,7 +24,8 @@ import { runsDownloadThroughShell, EXEC_CALL_RE } from "../lib/shellpipe.js";
 import { documentationToken, keyMaterial, secretCol, redactConfigValues } from "../lib/configsecrets.js";
 import { configKind, ownerDir, entries as autorunEntries, localCommand } from "../lib/autorun.js";
 import { isWorkflow, findings as workflowFindings } from "../lib/ghworkflow.js";
-import { agentHijackInCommand, installScriptRisk, followHook, treeJoin, nodeCandidates, cpPrefix, selfPublishAt } from "../lib/hooks.js";
+import { agentHijackInCommand, installScriptRisk, followHook, treeJoin, nodeCandidates, cpPrefix, selfPublishAt,
+  spawnedScripts } from "../lib/hooks.js";
 import { cpForward, DECODE_CALL_SRC } from "../lib/received.js";
 import { normalizeNewlines } from "../lib/fs.js";
 
@@ -1071,6 +1072,13 @@ function autorunRisk(command, base, read) {
     OBF_IDENT_RE.lastIndex = 0;
     if (new Set(text.match(OBF_IDENT_RE) ?? []).size >= 5) found.push("is obfuscated");
     if (found.length) return [found, target];
+    // (0.1.8) the scripts it starts (spawnedScripts): a loader that fetches a runtime and runs a file of the tree with it
+    for (const [where, path] of spawnedScripts(normalizeNewlines(text))) {
+      const srel = treeJoin(where === "dir" ? (rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : "") : base, path);
+      const stext = srel !== null ? read(srel) : null;
+      const more = stext ? autorunScriptRisk(stext) : [];
+      if (more.length) return [[`starts ${srel}, which ${more.join("; and ")}`], target];
+    }
   }
   return [[], null];
 }
@@ -1322,7 +1330,7 @@ function scanLines(path, content, lines, lang, dep, ctx, issues) {
       const firstOff = content.indexOf(obf[0]);
       let firstLine = 1;
       for (let k = content.indexOf("\n"); k !== -1 && k < firstOff; k = content.indexOf("\n", k + 1)) firstLine++;
-      issues.push(mkIssue({ id: "SC-OBF-IDENT", name: "Obfuscated identifier pattern", type: "HOTSPOT", sev: "CRITICAL",
+      issues.push(mkIssue({ id: "SC-OBF-IDENT", name: "Obfuscated identifier pattern", type: "HOTSPOT", sev: "MAJOR",
         msg: `${uniq.size} '_0x…' identifiers — javascript-obfuscator signature.`,
         why: "This naming pattern is produced by obfuscation tools; in a dependency it is a classic indicator of a compromised or malicious package.",
         fix: "Diff against the package's published repository; consider removing the dependency.",

@@ -129,7 +129,7 @@ class DependencyCheckTests(unittest.TestCase):
         for i in self.res["issues"]:
             if i["rule"] == "SC-INSTALL-HOOK":
                 hooks.setdefault(i["file"].replace(os.sep, "/"), []).append((i["sev"], i["msg"]))
-        env = "reads environment variables or credential files and sends data over the network"
+        env = "sends environment variables over the network (the whole environment)"
         want_critical = {
             "node_modules/a/package.json": f"Install hook runs install.dat, which {env}.",
             "node_modules/b/package.json": f"Install hook runs ./install.sh, which {env}.",
@@ -137,7 +137,7 @@ class DependencyCheckTests(unittest.TestCase):
             "node_modules/d/package.json": f"Install hook runs ./bin/setup, which {env}.",
             "node_modules/f/package.json": f"Install hook runs ../../scripts/first-party.js, which {env}.",
             "node_modules/q/package.json": "Install hook runs ./pre.js, which pipes a download into a shell.",
-            "node_modules/r/package.json": '"postinstall" script runs a network-fetch/eval command at install time.',
+            "node_modules/r/package.json": '"postinstall" script pipes a download into a shell.',
             "node_modules/t/package.json": "Install hook runs script, which pipes a download into a shell.",
         }
         for manifest, msg in want_critical.items():
@@ -222,16 +222,6 @@ class HelperTests(unittest.TestCase):
         for (base, target), want in cases.items():
             with self.subTest(base=base, target=target):
                 self.assertEqual(core._tree_join(base, target), want)
-
-    def test_import_risk_needles_hold_every_match(self):
-        """The pre-check never hides a match: every alternative of the
-        pattern needs one of the needles."""
-        for text in ("JSON.stringify( process.env)", "json.dumps(dict(os.environ))", "str(os.environ)",
-                     "urlencode(os.environ,", "/.ssh/id_x", "id_ecdsa", "a.git-credentials",
-                     "local storage/leveldb", "LOCAL STORAGE\\leveldb"):
-            with self.subTest(text=text):
-                self.assertTrue(core._IMPORT_HARVEST_RE.search(text))
-                self.assertTrue(any(n in text for n in core._IMPORT_HARVEST_NEEDLES))
 
 
 if __name__ == "__main__":

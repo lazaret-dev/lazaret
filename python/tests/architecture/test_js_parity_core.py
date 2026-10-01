@@ -250,8 +250,8 @@ class CoreParityTests(unittest.TestCase):
                         msgs = {i["file"].replace("\\", "/"): i["msg"] for i in py[1]["issues"]
                                 if i["rule"] == "SC-INSTALL-HOOK" and i["sev"] == "CRITICAL"}
                         self.assertEqual(msgs["node_modules/starter/package.json"],
-                                         "Install hook runs lib/start.js, which starts lib/worker/run.js, which reads "
-                                         "environment variables or credential files and sends data over the network.")
+                                         "Install hook runs lib/start.js, which starts lib/worker/run.js, which sends "
+                                         "environment variables over the network (the whole environment).")
                         self.assertEqual(msgs["node_modules/dropper/package.json"],
                                          "Install hook runs i.js, which downloads a script and runs it with bash.")
                         self.assertTrue(msgs["node_modules/metrics/package.json"].endswith(

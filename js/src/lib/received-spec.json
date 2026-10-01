@@ -163,6 +163,40 @@
       "def",
       "function",
       "async"
+    ],
+    "_DL_RUNNERS": [
+      "start",
+      "call",
+      "cmd",
+      "cmd.exe",
+      "sh",
+      "bash",
+      "zsh",
+      "dash",
+      "ksh",
+      "source",
+      ".",
+      "node",
+      "nodejs",
+      "bun",
+      "deno",
+      "python",
+      "python3",
+      "pythonw",
+      "py",
+      "perl",
+      "ruby",
+      "php",
+      "pwsh",
+      "powershell",
+      "powershell.exe",
+      "cscript",
+      "wscript",
+      "osascript",
+      "open",
+      "xdg-open",
+      "nohup",
+      "exec"
     ]
   },
   "charstrings": {
@@ -361,6 +395,11 @@
       "src": "(?<=[(,])[ \\t]*(?P<r>eval|Function|execSync|exec|(?:vm[ \\t]*\\.[ \\t]*)?runIn(?:This|New)?Context)[ \\t]*(?=\\)(?![ \\t]*\\())",
       "flags": "",
       "note": "a code runner handed to a call as its last argument (p.then(eval), res.on('data', eval)), read as (_v)=>eval(_v)"
+    },
+    "_DL_CMD_TOKEN_RE": {
+      "src": "[|&;\\n]|[^\\s|&;]+",
+      "flags": "",
+      "note": "a command line's tokens: a separator, or a word"
     }
   },
   "alternatives": {

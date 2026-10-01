@@ -160,7 +160,8 @@ class SupplyChainParityTests(unittest.TestCase):
         hooks = sorted((i["file"].replace("\\", "/"), i["line"], i["sev"]) for i in issues
                        if i["rule"] == "SC-INSTALL-HOOK")
         # the expansion requiring ./données runs a file of the package: INFO inventory in both
-        self.assertEqual(hooks, [("a/package.json", 1, "CRITICAL"), ("b/package.json", 1, "CRITICAL"),
+        # (0.1.8: the tools are a hint in the MAJOR finding's message, read with Python's semantics in both)
+        self.assertEqual(hooks, [("a/package.json", 1, "MAJOR"), ("b/package.json", 1, "MAJOR"),
                                  ("c/package.json", 1, "MAJOR"), ("native/binding.gyp", 2, "INFO"),
                                  ("native/binding.gyp", 4, "MAJOR")])
 
@@ -227,7 +228,7 @@ class SupplyChainParityTests(unittest.TestCase):
         self.assertEqual(got, [
             ("a/binding.gyp", "SC-INSTALL-HOOK", "MAJOR",
              "caf\N{LATIN SMALL LETTER E WITH ACUTE} a x y \N{KELVIN SIGN}"),
-            ("b/binding.gyp", "SC-INSTALL-HOOK", "CRITICAL", "curl x"),
+            ("b/binding.gyp", "SC-INSTALL-HOOK", "MAJOR", "curl x"),
             ("binding.gyp", "SC-MANIFEST-UNPARSEABLE", "MAJOR", None),
             ("c/binding.gyp", "SC-INSTALL-HOOK", "MAJOR", "echo x a\nb ab"),
             ("d/binding.gyp", "SC-INSTALL-HOOK", "MAJOR", "echo b'x' b'\\xff' (1,) () set() {1: 'a', (2,): b'x'}"),

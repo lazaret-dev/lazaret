@@ -8,7 +8,7 @@
 // lib/hooks.js uses it.
 
 import { readFileSync } from "node:fs";
-import { pyRe, pyStrip, pyLstrip, pyRstrip, cpLen, isPySpace, isWordChar, cmpCodePoints } from "./pycompat.js";
+import { pyRe, pyStrip, pyLstrip, pyRstrip, pyStripChars, cpLen, isPySpace, isWordChar, cmpCodePoints } from "./pycompat.js";
 
 // The received-code detector's shared data (name sets, character sets, limits,
 // and the patterns) is authored once in the Python package's received_spec.json
@@ -174,6 +174,7 @@ const DL_TEMPLATE_HOLE_RE = dlRe("_DL_TEMPLATE_HOLE_RE", "g");
 const DL_FSTRING_HOLE_RE = dlRe("_DL_FSTRING_HOLE_RE", "g");
 export const DL_PREFIX_CHARS = [...DL_SPEC_CHARS._DL_PREFIX_CHARS];
 const PREFIX_CHARS = new Set(DL_PREFIX_CHARS);
+
 const DL_BIND_RE = dlReNamed("_DL_BIND_RE", "g");
 const DL_PARAMS_RE = dlReNamed("_DL_PARAMS_RE", "g");
 const DL_FN_HEADER_RE = dlReNamed("_DL_FN_HEADER_RE");
@@ -198,6 +199,10 @@ const DL_FILE_WRITE_RE = dlReNamed("_DL_FILE_WRITE_RE", "g");   // a received va
 export const DL_FILE_WRITE_NEEDLES = DL_SPEC_ARRAYS._DL_FILE_WRITE_NEEDLES;
 const DL_PATHRUN_SINK_RE = dlRe("_DL_PATHRUN_SINK_RE", "g");    // the opener of a call that runs a path
 export const DL_PATHRUN_NEEDLES = DL_SPEC_ARRAYS._DL_PATHRUN_NEEDLES;
+// (0.1.8) a command line in a string literal runs the file as a command's program or as what a program that runs
+// its argument is given (core's comment above _DL_RUNNERS)
+const DL_RUNNERS = new Set(DL_SPEC_ARRAYS._DL_RUNNERS);
+const DL_CMD_TOKEN_RE = dlRe("_DL_CMD_TOKEN_RE", "g");
 export const DL_DEFINING = DL_SPEC_ARRAYS._DL_DEFINING;
 const DL_INTERP = dlGroup("_DL_INTERP");            // an interpreter given inline code as argv
 const DL_EMBED_RE = dlRe("_DL_EMBED_RE", "y");      // ...or written into its command line
@@ -641,6 +646,7 @@ class Row {
   bound(name) {
     for (const seg of this.indexed) seg.bound(name);
   }
+
 
   phaseAt(o) {
     for (const ph of this.phases) if (ph.lo <= o && o < ph.hi && ph.literalAt(o) < 0) return ph;
@@ -1138,7 +1144,29 @@ function pathToken(m) {
 /** Does the run sink's argument region name the file `path`? core._dl_region_names_path. */
 function regionNamesPath(region, path) {
   for (const m of region.matchAll(DL_NAME_RE)) if (m[0] === path) return true;
-  for (const m of region.matchAll(DL_STR_RE)) if (normPath(m[0]) === path) return true;
+  for (const m of region.matchAll(DL_STR_RE)) if (normPath(m[0]) === path || commandRuns(m[0].slice(1, -1), path)) return true;
+  return false;
+}
+
+/** Does the command line `line` run the file `path`? core._dl_command_runs. */
+function commandRuns(line, path) {
+  let first = true, runner = false;
+  for (const m of line.matchAll(DL_CMD_TOKEN_RE)) {
+    const tok = m[0];
+    if (tok === "|" || tok === "&" || tok === ";" || tok === "\n") {
+      first = true;
+      runner = false;
+      continue;
+    }
+    let word = pyStripChars(tok, "\"'");
+    if (first) {
+      if (word.includes("=")) continue;                // an assignment before the command
+      first = false;
+      runner = DL_RUNNERS.has(/^[\x00-\x7f]*$/.test(word) ? word.toLowerCase() : word);
+    } else if (!runner) continue;
+    while (word.startsWith("./")) word = word.slice(2);
+    if (word === path) return true;
+  }
   return false;
 }
 

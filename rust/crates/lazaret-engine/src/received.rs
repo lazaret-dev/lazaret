@@ -920,6 +920,7 @@ impl<'r> Row<'r> {
         }
     }
 
+
     fn phase_at(&mut self, p: &Pack, lim: &Lim, o: usize) -> Option<usize> {
         for &ph in &self.phases {
             let code = &self.codes.all[ph];
@@ -1551,7 +1552,45 @@ fn region_names_path(p: &Pack, region: &[u32], path: &[u32]) -> bool {
     if p.re("_DL_NAME_RE").finditer(region).any(|m| m.group0() == path) {
         return true;
     }
-    p.re("_DL_STR_RE").finditer(region).any(|m| norm_path(m.group0()) == path)
+    p.re("_DL_STR_RE").finditer(region).any(|m| {
+        let lit = m.group0();
+        norm_path(lit) == path || command_runs(p, pystr::slice(lit, 1, -1), path)
+    })
+}
+
+/// core._dl_command_runs: does the command line `line` (a string literal's
+/// text) run the file `path` — as a command's program, or as what a program
+/// that runs its argument is given (_DL_RUNNERS)?
+fn command_runs(p: &Pack, line: &[u32], path: &[u32]) -> bool {
+    let runners = p.strs("_DL_RUNNERS");
+    let mut first = true;
+    let mut runner = false;
+    for m in p.re("_DL_CMD_TOKEN_RE").finditer(line) {
+        let tok = m.group0();
+        if tok.len() == 1 && matches!(tok[0], 0x7C | 0x26 | 0x3B | 0x0A) {
+            first = true;
+            runner = false;
+            continue;
+        }
+        let mut word: &[u32] = pystr::strip_chars(tok, "\"'");
+        if first {
+            if word.contains(&c('=')) {
+                continue; // an assignment before the command
+            }
+            first = false;
+            let key: PyStr = if pystr::is_ascii(word) { pystr::lower(word) } else { word.to_vec() };
+            runner = runners.iter().any(|r| *r == key);
+        } else if !runner {
+            continue;
+        }
+        while pystr::starts_with(word, "./") {
+            word = &word[2..];
+        }
+        if word == path {
+            return true;
+        }
+    }
+    false
 }
 
 fn run_interp(p: &Pack, row: &[u32]) -> Option<PyStr> {

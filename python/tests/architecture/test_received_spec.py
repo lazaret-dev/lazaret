@@ -74,6 +74,7 @@ class ReceivedSpecTests(unittest.TestCase):
         self.assertEqual(sorted(core._DL_PY_NET_MODULES), sorted(a["_DL_PY_NET_MODULES"]))
         self.assertEqual(sorted(core._DL_NOT_NAMES), sorted(a["_DL_NOT_NAMES"]))
         self.assertEqual(list(core._DL_DEFINING), a["_DL_DEFINING"])
+        self.assertEqual(core._DL_RUNNERS, frozenset(a["_DL_RUNNERS"]))
         self.assertEqual(core._DL_PREFIX_CHARS, frozenset(spec["charstrings"]["_DL_PREFIX_CHARS"]))
         self.assertEqual(core._DL_CALLEE_CHARS, frozenset(spec["charstrings"]["_DL_CALLEE_CHARS"]))
         for name, value in spec["limits"].items():
