@@ -35,7 +35,7 @@ lazaret/
 │                       make_typosquat_stubs.py, dashboard_csp.py,
 │                       make_codec_tables.py, make_unicode_tables.py,
 │                       make_rust_tables.py, check_rust_deps.py,
-│                       sync-received-spec.py, update-popular-names.py,
+│                       update-popular-names.py,
 │                       check_native_library.py, simulate-platforms.sh
 ├── python/             the PyPI package   (sections 3–4)
 ├── js/                 the npm package    (section 5)
@@ -219,28 +219,33 @@ pytest also runs the suite unchanged, for anyone who prefers it, but nothing req
 
 ## 5. JavaScript package
 
-The npm package `lazaret` is a zero-dependency, ES-module port of the project scanner (the same rules, comment lexer, taint-flow and SQL-sink analyzers, encoding handling, and obfuscation/secret detection as `lazaret.scanner`), tested with Node's built-in `node --test` (Node 22+). Registry auditing, custom taint specs, SCA and the Python half of the cross-file taint engine are Python-only; its JavaScript half is ported (`src/scanner/flow.js`, compared by `python/tests/architecture/test_js_parity_flow.py`). The browser dashboard (`python/src/lazaret/web/lazaret.html`) carries a single-file port of this engine.
+The npm package `lazaret` is a zero-dependency, ES-module project scanner with the same rules and results as `lazaret.scanner`, tested with Node's built-in `node --test` (Node 22+). Since 0.1.9 its rules run in the native engine (`rust/`) compiled to WebAssembly: `native/lazaret.wasm`, built by `npm run build` (`scripts/build-wasm.js`; it needs Rust and its `wasm32-unknown-unknown` target) and loaded by `src/lib/native.js` — the supply-chain tests, `scan_file` in dependency mode and the rules part of project mode (see `docs/RUST_ENGINE.md`). JavaScript keeps the orchestration and what the native engine does not answer yet: the taint-flow and SQL-sink analyzers, the function metrics, the cross-file follower, the manifest, workflow and settings checks, config-file credentials, encoding handling and the reports. Registry auditing, custom taint specs, SCA and the Python half of the cross-file taint engine are Python-only; its JavaScript half is ported (`src/scanner/flow.js`, compared by `python/tests/architecture/test_js_parity_flow.py`). The browser dashboard (`python/src/lazaret/web/lazaret.html`) carries its own single-file port of the project scanner in JavaScript (no dependency mode or supply-chain tests), held to the Python engine by `test_review_dashboard_parity.py`, until it can load the same module.
 
 ```
 js/
-├── package.json          "files": bin/, src/, README.md, LICENSE (tests never ship)
+├── package.json          "files": bin/, src/, native/lazaret.wasm, native/NOTICE,
+│                         README.md, LICENSE, LICENSE-PYTHON, LICENSE-UNICODE,
+│                         NOTICE (tests never ship)
 ├── bin/lazaret.js        executable shim only
+├── native/               built, not committed: lazaret.wasm (the native engine)
+│                         and its NOTICE (rust/NOTICE)
+├── scripts/build-wasm.js `npm run build`: native/ from ../rust
 ├── src/
 │   ├── cli.js            `lazaret check <dir>`; returns an exit code (testable)
 │   ├── index.js          public exports
 │   ├── report.js         report format (JSON + HTML), terminal output
 │   ├── deps.js           --deps: a dependency's install hooks followed to the
 │   │                     files they run; the import-time test on its code
-│   ├── scanner/          rules, scan loop, linear-time matchers, taint,
-│   │                     SQL sinks, functions, metrics, cross-file flows in
-│   │                     JavaScript (flow.js)
-│   └── lib/              leaf helpers: fs (collection, report paths), encoding
-│                         and codecs (BOM/UTF-16/PEP 263), binary (magic
-│                         bytes), lexer (the comment lexer), redact, issue,
-│                         supplychain (install hooks),
-│                         hooks (the files a hook runs; install-script and
-│                         import-time tests), shellpipe (a download piped
-│                         into a shell), autorun and ghworkflow (editor and
+│   ├── scanner/          the scan loop (the native engine's rules, then the
+│   │                     passes it hands to), taint, SQL sinks, functions,
+│   │                     metrics, cross-file flows in JavaScript (flow.js)
+│   └── lib/              leaf helpers: native (the WebAssembly engine: its
+│                         loader, one call, the rule pack's values), fs
+│                         (collection, report paths), encoding and codecs
+│                         (BOM/UTF-16/PEP 263), binary (magic bytes), lexer
+│                         (the comment lexer), redact, issue, supplychain
+│                         (install hooks), crossfile (received code followed
+│                         across files), autorun and ghworkflow (editor and
 │                         agent settings that run commands; the workflows
 │                         the worms planted), jsparse (the JavaScript
 │                         reader), pyjson/pycompat/pynames
@@ -257,7 +262,7 @@ js/
     └── scanner/               detection rules, hex decoding, private-key material
 ```
 
-**The two engines must agree.** `python/tests/architecture/test_js_parity.py` runs both CLIs on every fixture tree, on a synthetic project covering the false-positive fixes, and on an adversarial tree generated at test time (BOM, UTF-16 and UTF-7 files, a NUL near the top of a UTF-8 file, `.github/`, `node_modules/` with and without `--deps`, suppression tricks, a 600-issue file, CRLF, Unicode identifiers, bidi characters, `.pyc` files, symlinks, a deep manifest, a large non-source file). It compares every finding as a multiset of (rule, file, line, severity, message), plus metrics, ratings, the gate and the exit code, and fails on any difference other than the listed Python-only feature: the Python half of the cross-file taint engine (its `X-*` flows and `Q-FLOW-*` notes on Python files; the npm gate's cross-file label, which names the Python files it did not analyze, is read as the Python one). The cross-file received-code follower runs in both engines since 0.1.8 (`js/src/lib/crossfile.js`, held to core by `test_js_parity_crossfile.py`). `python/tests/scanner/test_review_dashboard_parity.py` holds the dashboard to the same standard. When a rule changes in one engine, it changes in the other in the same commit; the JS twins of Python helpers say so in a comment (`Twin of lazaret.scanner.core....`).
+**The two packages must agree.** `python/tests/architecture/test_js_parity.py` runs both CLIs on every fixture tree, on a synthetic project covering the false-positive fixes, and on an adversarial tree generated at test time (BOM, UTF-16 and UTF-7 files, a NUL near the top of a UTF-8 file, `.github/`, `node_modules/` with and without `--deps`, suppression tricks, a 600-issue file, CRLF, Unicode identifiers, bidi characters, `.pyc` files, symlinks, a deep manifest, a large non-source file). It compares every finding as a multiset of (rule, file, line, severity, message), plus metrics, ratings, the gate and the exit code, and fails on any difference other than the listed Python-only feature: the Python half of the cross-file taint engine (its `X-*` flows and `Q-FLOW-*` notes on Python files; the npm gate's cross-file label, which names the Python files it did not analyze, is read as the Python one). The cross-file received-code follower runs in both packages since 0.1.8 (`js/src/lib/crossfile.js`, held to core by `test_js_parity_crossfile.py`). `python/tests/scanner/test_review_dashboard_parity.py` holds the dashboard to the same standard. These modules need the WebAssembly build (`npm run build`) and skip without it (`NPM_READY`), so CI's `js` job builds it and names each of them. What the native engine answers is held to core by the Rust parity modules (`test_rust_parity_*`, `test_wasm_parity*`; `docs/RUST_ENGINE.md` §5). When a rule changes, it changes in `core.py` and in the native engine (`rust/`, then `make_rust_tables.py`) in the same commit, and in a JavaScript twin where the npm package still has one; the JS twins of Python helpers say so in a comment (`Twin of lazaret.scanner.core....`).
 
 Tests needing a service or the samples checkout are gated with an in-test guard that skips cleanly when the variable is unset:
 

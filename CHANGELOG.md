@@ -7,6 +7,104 @@ This log starts at 0.1.6; for earlier releases see the git history and tags.
 The format is based on [Keep a Changelog](https://keepachangelog.com); the
 project is pre-1.0, so the 0.x API may still change.
 
+## [Unreleased]
+
+Planned as 0.1.9: the npm package runs Lazaret's native engine, compiled to
+WebAssembly, so a detection lives in Python and Rust, not three times.
+
+### Changed
+- **The npm package runs the native engine, as WebAssembly.** The Rust
+  engine the Python package's platform wheels carry (`rust/`,
+  `docs/RUST_ENGINE.md`) ships in the npm package as `native/lazaret.wasm`
+  (1.8 MB; it imports nothing, and Node's own `WebAssembly` runs it, so the
+  package keeps zero dependencies and needs no native addon). It answers
+  the supply-chain tests — install scripts and the hooks they run,
+  import-time code, received code, the decoded view, spawned scripts,
+  persistence, the exfiltration shapes, a hook's command read as a program,
+  agent hijacking — and `scan_file`: whole in dependency mode, and in
+  project mode its rules part (every pattern rule and family on every line,
+  Q-LONGLINE, SC-PIPE-SHELL, the file-level and whole-text rules), to which
+  the npm package adds the SQL, taint and function passes, the suppression
+  markers and the cap. Same findings: the parity tests hold the engine to
+  the Python engine case by case and the WebAssembly build to the native
+  library byte for byte, and on real trees the CLI before and after reports
+  the same findings in the same order (a `--deps` scan of 1,061 dependency
+  files, a 616-file project, an 11.5 MB bundle). On one core, the project
+  scan takes 4.9 s instead of 5.9 s and the bundle 11.9 s instead of 11.6 s;
+  the `--deps` scan takes 9.2 s instead of 8.1 s, its import-time test being
+  slower in WebAssembly than the JavaScript it replaces (the next item of
+  `docs/RUST_ENGINE.md` §10). `npm run build` makes the module from a
+  checkout (Rust and its `wasm32-unknown-unknown` target; the workspace has
+  no crates to download); release CI builds it with the platform wheels'
+  pinned compiler, runs the npm tests on it, and fails a tarball without it
+  or its notice.
+- **A file that spends the engine's work budget is SC-TRUNCATED** in the npm
+  package (CRITICAL, so it is never cleared: "reading it spent the engine's
+  work budget", or "its scan failed" from a dependency check), as a hostile
+  file is; the Python package's native engine hands such a call to its
+  Python engine instead. No file of the corpora or the benchmark comes near
+  the budget. The npm package's per-file time backstop now bounds only the
+  passes that stay in JavaScript.
+- **The npm CLI refuses to scan without its engine** (a source checkout
+  that has not run `npm run build`): exit 2, naming the missing file, where
+  every file would have been SC-TRUNCATED. `npm pack` and `npm publish` from
+  a checkout check that `native/` holds the engine of the package's version
+  and its notice (`prepack`); nothing runs when the package is installed.
+- **The npm package's notices** are the engine's: `native/NOTICE` is
+  `rust/NOTICE` (the regular expression engine and shell tokenizer
+  translated from CPython, the Unicode 13.0 tables), beside `LICENSE-PYTHON`
+  and `LICENSE-UNICODE`; `NOTICE` points to it. The license expression is
+  unchanged: `Apache-2.0 AND Python-2.0.1 AND Unicode-3.0`.
+
+### Added
+- **The native engine's project-mode rules** (`scan_rules`, phase 2 of
+  `docs/RUST_ENGINE.md` in project mode) and its reference in core
+  (`core.scan_rules`: `scan_file`'s first part, before the passes that
+  follow it, the markers and the cap), held to each other by
+  `test_rust_parity_project.py`. The Python package still runs project mode
+  in Python.
+- **More of core in the engine:** the agent-hijack checks
+  (`agent_hijack`, `agent_hijack_in_command`), a hook's command read as a
+  program (`hook_command_risk`) and what makes a hook suspicious
+  (`hook_is_suspicious`), the import-time code of a JavaScript or Python
+  file (`import_code`), core's values by name (`pack.values`, for what the
+  npm package still reads: limits, the follower's patterns, the S-TOKEN
+  rule), and a work budget per call (`budget`).
+- **SQL-DYNAMIC in linear time.** `re`, and so the engine's port of it, takes
+  quadratic time on a line of many `EXEC("` (14 s for one 120 KB line in
+  Python); the engine matches that pattern by hand in linear time
+  (`linear.rs`), as the npm package's JavaScript did, while the rule pack
+  holds its exact text.
+- **Tests.** `test_wasm_parity.py` and `test_wasm_parity_signs.py` (the
+  WebAssembly build against the native library, call for call, on the hooks
+  corpus, the scan_file corpus and this repository); the comparisons that
+  held the npm package's JavaScript to core now hold the engine to it
+  (`test_rust_parity_hook_commands`, `_hexname`, `_offscreen`,
+  `_lookalike`); the hooks parity reads its corpus (~44,400 cases) in two
+  modules (`test_rust_parity_hooks.py` and `_hooks_b.py`), each well under
+  45 s. Workflow tests check that every module needing the WebAssembly build
+  runs in a job that builds it and every native parity module in each job
+  that builds a library, and the npm pack test that the tarball carries the
+  engine and its notice and nothing else of `native/`. CI's `js` job builds
+  the engine, runs the npm tests and, on Node 24, the CLI-level parity
+  modules; its `rust` job runs the WebAssembly parity.
+
+### Removed
+- **The npm package's JavaScript twins of what the engine answers:**
+  `js/src/lib/hooks.js`, `received.js`, `shellpipe.js` and the synced
+  `received-spec.json`, `js/src/scanner/linear.js`, and the rule loop,
+  families and dependency decode flow of `js/src/scanner/scan.js` (with
+  `scripts/sync-received-spec.py` and `test_js_parity_hooks.py`). The
+  library no longer exports `RULES` and `TEXT_RULES` (the rules live in the
+  engine's rule pack); the supply-chain tests it exports are the engine's.
+
+### Fixed
+- **The rule pack named the previous rule set** (2.13.0, against 0.1.8's
+  2.14.0): 0.1.8's `ENGINE_VERSION` bump didn't regenerate it, so
+  `make_rust_tables.py --check` failed in CI and the engine's `version`
+  reported the old set. Regenerated; `test_rust_pack.py` now checks the
+  pack's rule set against `ENGINE_VERSION` in every suite run.
+
 ## [0.1.8] — 2026-09-30
 
 0.1.8 reads malware by what it does. Its last round audited every strong

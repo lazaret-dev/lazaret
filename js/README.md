@@ -3,10 +3,14 @@
 Quarantine for your dependencies: security & quality scanner for Python and
 JavaScript projects.
 
-The JavaScript engine is a port of Lazaret's scanner (the Python package's
-`lazaret.scanner` and the browser dashboard, `lazaret/web/lazaret.html`): the
-same detection rules, the intra-file taint and SQL-sink analyzers, and the
-obfuscation/entropy secret detection. For a project scan, `npx lazaret` and
+Its rules run in Lazaret's native engine, written in Rust and compiled to
+WebAssembly (`native/lazaret.wasm`, in the package: nothing to compile at
+install, no native addon, no dependency): every pattern rule, the
+obfuscation, entropy and secret detection, and the supply-chain tests — the
+same engine the Python package's platform wheels carry, held to the Python
+package's `lazaret.scanner` case by case. The intra-file taint and SQL-sink
+analyzers, the cross-file passes and the reports are JavaScript, ported from
+the Python package. For a project scan, `npx lazaret` and
 `python -m lazaret` are tested (`python/tests/architecture/test_js_parity.py`)
 to report the same issues (rule, file, line, severity, message), metrics,
 ratings, gate result and exit code. Both run the JavaScript half of the
@@ -21,9 +25,8 @@ Python engine additionally follows flows through Python files and accepts
 taint configs; registry auditing (`lazaret-registry`) is Python-only. When
 the project has Python files, the gate's cross-file condition says so: `No
 cross-file taint flows (JavaScript only: 3 Python files not analyzed)`.
-Since 0.1.8 the Python package can also run its supply-chain tests on a
-native engine written in Rust; this package runs its JavaScript engine,
-which gives the same findings.
+Until 0.1.9 this package ran JavaScript ports of those rules and tests; the
+findings are the same.
 
 ```
 npx lazaret check ./my-project
@@ -220,7 +223,8 @@ Exit codes: `0` ok (also a failed gate without `--ci`) · `1` gate failed
 with `--ci`, or a hostile-depth manifest (`SC-MANIFEST-DEPTH`: `package.json`
 or `binding.gyp` nested deeper than 500 levels, the same limit as the Python
 engine on every Python version) · `2` usage
-error (unknown option; missing, non-directory or empty target) · `3` report
+error (unknown option; missing, non-directory or empty target; in a source
+checkout, the WebAssembly engine not built yet) · `3` report
 output error (unsafe or unwritable report path, checked before the scan) ·
 `5` internal error (`error: internal: …`; set `LAZARET_DEBUG=1` for a stack
 trace). Exit `4` (rejected taint config) exists only in the Python CLI.
@@ -246,15 +250,21 @@ import { scanFile, buildResult, run } from "lazaret";
 ```
 
 `scanFile({ name, content, lang, dep })` returns issues with credentials
-already redacted; `setRedactSecrets(false)` opts out.
+already redacted; `setRedactSecrets(false)` opts out. The supply-chain tests
+are exported too (`installScriptRisk`, `importTimeRisk`, `followHook`, …),
+answered by the native engine. The rule tables (`RULES`, `TEXT_RULES`) are
+no longer exported since 0.1.9: they live in the engine's rule pack.
 
-Zero dependencies, ES modules, Node 22+. Tests: `npm test` (built-in
-`node --test` runner).
+Zero dependencies, ES modules, Node 22+. From a source checkout, build the
+engine first: `npm run build` (it needs Rust and `rustup target add
+wasm32-unknown-unknown`, and writes `native/lazaret.wasm` from the
+repository's `rust/`), then `npm test` (built-in `node --test` runner).
 
 Licensed under Apache-2.0, with two parts that are not Lazaret's own (see
-`NOTICE`): the shell tokenizer is a translation of CPython's `shlex`, under
-CPython's license (`LICENSE-PYTHON`), and the Unicode 13.0 and codec tables
-are Unicode data, under the Unicode License v3 (`LICENSE-UNICODE`). The
+`NOTICE`): the native engine's regular expression engine and shell tokenizer
+are translations of CPython's (`native/NOTICE` lists them), under CPython's
+license (`LICENSE-PYTHON`), and the Unicode 13.0 and codec tables are
+Unicode data, under the Unicode License v3 (`LICENSE-UNICODE`). The
 package's license is `Apache-2.0 AND Python-2.0.1 AND Unicode-3.0`.
 
 Website: https://lazaret.dev · Source: https://github.com/lazaret-dev/lazaret

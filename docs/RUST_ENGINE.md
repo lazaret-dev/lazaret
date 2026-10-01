@@ -7,7 +7,11 @@ send, string arrays and proxy objects in the decoded view), wired into the
 scanner behind `--engine`, and built by release CI into platform wheels for
 five platforms (§4). Phase 2 is done for dependency mode: `scan_file` of a
 registry, guard or `--deps` scan (the supply-chain and credential rules)
-is the native engine's whole, findings included (§8). The Python engine
+is the native engine's whole, findings included (§8). Since 0.1.9 the npm
+package runs the same engine compiled to WebAssembly (`native/lazaret.wasm`):
+the supply-chain tests, dependency-mode `scan_file` and the rules part of
+project-mode `scan_file` (`scan_rules`) are the native engine's there, and
+the JavaScript twins of them are retired. The Python engine
 (`python/src/lazaret/scanner/`) stays: it is the reference every answer of
 the native engine is held to.
 
@@ -17,20 +21,25 @@ One native engine, written in Rust, used by both distributions as the
 default where it is installed. The Python engine stays as the **reference
 implementation**: readable, complete, selectable at run time
 (`--engine python`), so anyone can audit a verdict by reproducing it in plain
-Python. The two give identical answers, proven by differential tests. Once
-the npm package runs the native engine (as WebAssembly), the JavaScript twin
-(`js/src/lib/*.js`) can be retired.
+Python. The two give identical answers, proven by differential tests. The
+npm package runs the native engine as WebAssembly (0.1.9), so what it
+answers there has no JavaScript twin any more: a detection change lands in
+Python and Rust, not three times. What the npm package still does in
+JavaScript (source decoding, the comment lexer and the suppression markers,
+the cross-file follower, the manifest and workflow checks, the taint, SQL
+and function passes of project mode, reporting) is held to the Python
+engine by the CLI-level parity tests (`test_js_parity*`).
 
 Decisions (fixed):
 
 | Topic | Decision |
 |---|---|
 | Dependencies | **No external crates.** Own regex engine (a port of CPython's sre), JSON, Unicode tables. `Cargo.lock` lists only the workspace; `scripts/check_rust_deps.py` fails CI otherwise. |
-| Bindings | **C ABI + ctypes** for Python (no compiled extension, one library per platform serves every Python version); **WebAssembly** for Node. |
+| Bindings | **C ABI + ctypes** for Python (no compiled extension, one library per platform serves every Python version); **WebAssembly** for Node (Node's own `WebAssembly`, no imports, no npm dependency). |
 | Rule source | **Extract now, flip later.** `scripts/make_rust_tables.py` extracts every module-level value of `core.py` (patterns, sets, limits, and the pattern pieces core composes at run time) into `rust/crates/lazaret-engine/rules/lazaret-rules.json`; `--check` guards drift. Later, `core.py` itself loads the pack. |
 | Engine shape | Generic engine plus data: declarative rules come from the pack, the algorithms are named Rust functions, ported function for function. |
 | Calls | Whole files, batched: one crossing of the boundary per batch of files, read on threads (`std::thread`), answers in input order. |
-| License | Lazaret's code is Apache-2.0; the translations of CPython code (the regex engine, shlex, the Final_Sigma rule) are also under CPython's license, and the Unicode 13.0 tables are Unicode data, under the Unicode License v3, so the crates and the platform wheels are `Apache-2.0 AND Python-2.0.1 AND Unicode-3.0` (§11). |
+| License | Lazaret's code is Apache-2.0; the translations of CPython code (the regex engine, shlex, the Final_Sigma rule) are also under CPython's license, and the Unicode 13.0 tables are Unicode data, under the Unicode License v3, so the crates, the platform wheels and the npm package are `Apache-2.0 AND Python-2.0.1 AND Unicode-3.0` (§11). |
 
 ## 2. Using it
 
@@ -61,20 +70,42 @@ Decisions (fixed):
   caught panic) **is answered by the Python engine**, so the native engine
   never loses a finding.
 - `scan_file` in project mode (your own files: the quality and bug rules,
-  `TEXT_RULES`, taint) and the cross-file follower are still Python (phases
-  2 and 3 below).
+  `TEXT_RULES`, taint) and the cross-file follower are still Python in the
+  Python package (phases 2 and 3 below).
+- **The npm package** (0.1.9) loads `native/lazaret.wasm` with
+  `js/src/lib/native.js` (`npm run build` makes it from `rust/`; the
+  published package carries it). Everything the supply-chain tests answer —
+  install scripts and the hooks they run, import-time code, received code,
+  the decoded view, spawned scripts, persistence, the exfiltration shapes, a
+  hook command read as a program — is the engine's, and so is `scan_file`:
+  in dependency mode whole (`scan_file`, findings capped as core caps them),
+  in project mode its rules part (`scan_rules`: every pattern rule and
+  family on every line, the file-level rules and `TEXT_RULES`, uncapped and
+  unsuppressed), to which the npm engine adds the SQL, taint and function
+  passes, the suppression markers and the cap. Core's tables the JavaScript
+  side still reads (limits, the follower's patterns, `RULES` for S-TOKEN)
+  come from the pack too (`packValues`). There is no second engine to fall
+  back on: a call that spends its work budget (a hostile input) leaves its
+  file SC-TRUNCATED, CRITICAL and so never cleared ("reading it spent the
+  engine's work budget" from `scan_file`; "its scan failed" from a
+  dependency check), where the Python package would ask its Python engine.
+  Without the module (a checkout that has not run `npm run build`) the CLI
+  scans nothing: it exits 2 and says what is missing.
 
 ## 3. Layout
 
 ```
 rust/
-  Cargo.toml                 workspace; release: lto, codegen-units=1, panic=unwind, strip
+  Cargo.toml                 workspace; release: lto, codegen-units=1, panic=unwind, strip;
+                             wasm: release with panic=abort (the WebAssembly build)
   NOTICE, LICENSE-PYTHON     what is translated from CPython, its notices, CPython's license (§11)
   LICENSE-UNICODE            the Unicode License v3, for generated/unicode13.rs (§11)
   crates/lazaret-engine/     #![forbid(unsafe_code)], no dependencies, no I/O
     rules/lazaret-rules.json the rule pack (generated; embedded; `pack.install` can replace it)
-    src/api.rs               the calls by name (JSON args + text -> JSON); `batch` on threads
-    src/budget.rs            per-call work budget -> Exhausted (the caller uses Python)
+    src/api.rs               the calls by name (JSON args + text -> JSON; `budget`); `batch` on
+                             threads; `pack.values` (core's values, for the npm engine)
+    src/budget.rs            per-call work budget -> Exhausted (Python: the Python engine
+                             answers; npm: SC-TRUNCATED)
     src/pack.rs              the pack: values by core's names, patterns compiled on first use
     src/json.rs, pystr.rs    JSON; Python str semantics on code points ([u32])
     src/unicode.rs           Python 3.10 / Unicode 13.0 predicates (generated/unicode13.rs)
@@ -93,30 +124,47 @@ rust/
     src/lexer.rs             _lex_comment_spans (its literals matched by hand loops, §6)
     src/filectx.rs           a file as scan_file reads it (_FileCtx): lines, comment layout,
                              match text (NFKC, JS escapes), names
-    src/scanfile.rs          scan_file in dependency mode, family by family; per-line gates
+    src/scanfile.rs          scan_file in dependency mode, scan_rules (project mode's rules
+                             part), family by family; per-line gates
+    src/linear.rs            rule patterns sre runs in more than linear time on some lines,
+                             matched by hand in linear time (SQL-DYNAMIC)
     src/findings.rs          mk_issue: texts, snippets, redaction (_SecretLiterals); cap_issues
     src/token.rs             _TokenPattern (S-TOKEN, redaction): JWTs in linear time
     src/normalize.rs         NFC / NFD / NFKC / NFKD (UAX #15, Unicode 13.0 data)
     examples/                profiling tools (profile_calls, profile_scanfile, pattern_times,
                              pattern_stats, show_need)
-  crates/lazaret-ffi/        cdylib liblazaret_native: the only `unsafe` (the C ABI)
+  crates/lazaret-ffi/        cdylib liblazaret_native: the only `unsafe` (the C ABI; the
+                             WebAssembly exports)
+  .cargo/config.toml         the WebAssembly build's stack (8 MiB, placed first)
 python/src/lazaret/scanner/_native.py   ctypes loader and one call (NativeError, NativeExhausted)
+js/src/lib/native.js                    the npm package's loader: WebAssembly, one call, the pack's
+                                        values, a wrapper per call the npm engine makes
+js/scripts/build-wasm.js                `npm run build`: native/lazaret.wasm and native/NOTICE
+                                        (js/native/ is built, not committed)
 python/src/lazaret/scanner/engine.py    the engine in use, batching, the Python fallback
 python/_build/lazaret_build.py          LAZARET_NATIVE_LIBRARY + LAZARET_WHEEL_PLATFORM: a platform wheel
 scripts/make_rust_tables.py             the pack (any Python) and unicode13.rs (3.10); --check
 scripts/check_rust_deps.py              Cargo.lock and the manifests hold only the workspace
 scripts/check_native_library.py         a built library against its wheel's tag; --dist: the release's wheels
 .github/workflows/wheels.yml            the five libraries, the wheels, installed on each platform
-python/tests/architecture/test_rust_parity_{regex,hooks,signs,scanfile,lexer}.py, test_rust_deps.py,
-  test_rust_pack.py, scanfile_corpus.py
+python/tests/architecture/test_rust_parity_{regex,hooks,signs,scanfile,lexer,project,hook_commands,
+  hexname,offscreen,lookalike}.py, test_wasm_parity{,_signs}.py, test_rust_deps.py,
+  test_rust_pack.py, hooks_corpus.py, scanfile_corpus.py
 ```
 
 FFI protocol: request `[u32 LE name len][name][u32 LE args len][args JSON][text]`
 (the text is the rest: a Python str as UTF-8 with surrogates passed through);
 answer: JSON in an engine-owned buffer, freed with `lazaret_engine_free`.
 Status 0 ok, 1 error, 2 exhausted, 3 panic (caught). The WebAssembly build
-exports `lazaret_alloc`, `lazaret_free` and `lazaret_call` with the same
-framing (written, not yet compiled). `batch`:
+(no imports) exports its `memory`, `lazaret_alloc(len)`, `lazaret_call(req,
+len)` (it takes the request back) and `lazaret_free(ptr, len)`, with the same
+request; the answer is `[u32 LE status][u32 LE length][JSON]`, released with
+`lazaret_free(ptr, 8 + length)`. A JavaScript string goes in as WTF-8 (a
+lone surrogate as its three bytes), so the engine reads it as Python reads
+the same str. The module is built with `panic = "abort"`: a panic traps,
+and `native.js` answers it as an error and starts a fresh instance (as it
+does after a call that left the memory above 512 MB). Every call may carry
+`"budget"` (steps; the default is about 4e9). `batch`:
 `{"calls": [[name, args, text], …], "threads": n}` →
 `[{"ok": v} | {"error": …, "exhausted"?, "panic"?}]` in input order. Threads
 take the next item from an atomic counter; each item has its own budget and
@@ -128,7 +176,16 @@ WebAssembly a batch runs on one thread.
 ```bash
 cd rust && cargo build --release --offline --locked      # target/release/liblazaret_native.{so,dylib} / lazaret_native.dll
 export LAZARET_NATIVE_LIB=$(realpath target/release/liblazaret_native.so)
+rustup target add wasm32-unknown-unknown                 # once
+cd ../js && npm run build                                # native/lazaret.wasm (and native/NOTICE)
 ```
+
+`npm run build` (`js/scripts/build-wasm.js`) runs `cargo build --profile
+wasm --offline --locked --target wasm32-unknown-unknown -p lazaret-ffi`
+(the release profile, aborting on a panic; an 8 MiB stack placed first in
+memory, so running past it traps) and copies the module (about 1.8 MB) to
+`js/native/lazaret.wasm` and `rust/NOTICE` to `js/native/NOTICE`. The npm
+tests need it, so CI builds it before them.
 
 A platform wheel: `python python/_build/lazaret_build.py dist/ --platform
 <tag>=<built library>` (repeatable; it also writes the sdist and the pure
@@ -177,9 +234,18 @@ image give the same library bytes wherever the checkout is (cargo passes
 workspace paths relative). Given the same five libraries, the seven files
 are too; the Windows linker, though, stamps a time into the DLL.
 
+The npm package's module is built the same way in `release.yml`'s
+`build-npm` job: Rust `RUST_VERSION` with its `wasm32-unknown-unknown`
+target (rustup checks the published SHA-256 sums), `npm run build`, its
+SHA-256 printed in the log, the npm tests run on it, and the packed tarball
+checked to hold `package/native/lazaret.wasm` and `package/native/NOTICE`.
+The module imports nothing (an npm test holds it so); built from two
+checkout paths with the same commit and toolchain, it came out byte for
+byte the same.
+
 Bumping the pins by hand (Dependabot updates the actions only):
-`RUST_VERSION` in `wheels.yml`, at or above `rust-version` in
-`rust/Cargo.toml`; the two manylinux images, by the newest dated tag's
+`RUST_VERSION` in `wheels.yml` and `release.yml` (the same version), at or
+above `rust-version` in `rust/Cargo.toml`; the two manylinux images, by the newest dated tag's
 digest (`docker buildx imagetools inspect
 quay.io/pypa/manylinux_2_28_x86_64:latest`, or quay.io's tag list). GitHub
 retires its last Intel macOS image (macos-15-intel) in August 2027; after
@@ -188,11 +254,14 @@ its headers only.
 
 CI (`.github/workflows/ci.yml`, job `rust`, Linux, macOS, Windows):
 `check_rust_deps.py`, `make_rust_tables.py --check` (on 3.10), `cargo test`,
-the build, the three parity modules against the library (they skip where it
-is not built, so the job first asserts that it loads), and on Linux the
-whole Python suite with `LAZARET_ENGINE=rust`. Not yet: WebAssembly
-(installing `wasm32-unknown-unknown` was refused by the sandboxes' network
-so far).
+the build, the parity modules against the library (they skip where it
+is not built, so the job first asserts that it loads), the WebAssembly
+build against the library (`test_wasm_parity`, `test_wasm_parity_signs`),
+and on Linux the whole Python suite with `LAZARET_ENGINE=rust`. Job `js`
+(Node 22 and 24 on the three systems) builds the module with the runner's
+Rust, runs `npm test`, and on Node 24 the CLI-level parity modules
+(`test_js_parity*`, the npm engine against the Python engine; they too skip
+without the module, so the step first asserts that it loads).
 
 Versions: the workspace version is held to the Python and npm packages'
 (`scripts/check-versions.sh` reads `rust/Cargo.toml` and the two entries of
@@ -221,9 +290,17 @@ The differential tests (each module under 45 s, as every module is):
 | `test_rust_parity_signs` | 24 detectors one by one (received code, PowerShell, stagers, reverse shells, self-read, persistence, the exfiltration shapes, services at login …) | the same corpus |
 | `test_rust_parity_scanfile` | `scan_file(dep=True)` finding for finding (rule, texts, line, snippet clipped and redacted), family by family and in core's order, with every family and variant reached; each line's context (comment line, comment spans, match text with and without comments, names); NFC, NFD, NFKC and NFKD | the scan_file corpus (`scanfile_corpus.py`: curated files for each family, the hooks corpus' curated scripts, 4,000 random files), this repository's sources and fixtures, every 12th standard-library module; every code point Unicode 13.0 assigns, and 20,000 sequences of combining marks, pairs and jamo |
 | `test_rust_parity_lexer` | `_lex_comment_spans`: comment spans, '…' / "…" spans, every literal's span | 12,000 dense random texts, read as Python, JavaScript with and without JSX, SQL and an unknown language |
+| `test_rust_parity_project` | `scan_rules` (project mode's rules part, 0.1.9) against `core.scan_rules`, finding for finding and in core's order | the scan_file corpus, this repository's sources and fixtures, a sample of the standard library, read as your own files |
+| `test_rust_parity_hook_commands` | a hook's command read as a program (`hook_command_risk`, `_sh_parse`, `_hook_inline_code`), output thrown away and kept | realistic hook commands and a seeded corpus of separators, quotes, substitutions, redirections, network commands, wrappers and non-ASCII text |
+| `test_rust_parity_hexname`, `_offscreen`, `_lookalike` | SC-HEXSTR's hidden names and text, SC-OFFSCREEN-CODE, SC-HOMOGLYPH's look-alike names, case by case (columns in code points) | curated lines and seeded random ones (until 0.1.9 these held the npm engine's JavaScript twins to core) |
+| `test_wasm_parity`, `test_wasm_parity_signs` | the WebAssembly build the npm package ships against the platform library, call for call, byte for byte: `hooks_view`, `signs_view`, `scan_file` (dependency mode) and `scan_rules` | the hooks corpus, the scan_file corpus and this repository's files |
 
-State: zero differences in every field. `hooks_corpus.py` is shared with
-the JavaScript parity test, so a new alphabet there tests both twins. On
+State: zero differences in every field. The WebAssembly parity holds what
+differs between the two builds of one source — 32-bit sizes, one thread,
+an abort on a panic, and the npm binding (a JavaScript string read as
+Python reads the same str, lone surrogates included); with it, the npm
+engine answers as the Python reference does. The CLI-level parity modules
+(`test_js_parity*`) then compare the two packages' whole reports. On
 real files too: the benchmark's 945 registry scans give identical verdicts,
 reasons and findings with either engine, and both tests answer identically,
 file by file, on 85,415 files (37,784 of installed Python and npm packages,
@@ -235,21 +312,35 @@ on every source file of the benchmark's malicious releases (15,096 files,
 files, 821 findings) and on the 13,568 distinct files the scanner,
 registry, MCP and npm-parity suites hand `scan_file` (25,173 findings,
 every family): no difference. The parity modules skip where the library is
-not built (`_native.available()`), so CI builds it first; the whole Python
-suite also passes with `LAZARET_ENGINE=rust` (the fixture trees, `--deps`
-and registry scans through the native engine).
+not built (`_native.available()`), and the WebAssembly and CLI-level ones
+where `js/native/lazaret.wasm` is not (`NPM_READY`), so CI builds both
+first (a workflow test holds every such module to a job that builds the
+module); the whole Python suite also passes with `LAZARET_ENGINE=rust` (the
+fixture trees, `--deps` and registry scans through the native engine).
+
+The npm package's switch to the engine was checked on real trees too
+(0.1.9, the CLI before and after, JSON reports compared): a `--deps` scan of
+an installed tree (1,061 JavaScript files), a project of 616 of the
+repository's own source and test files, and an 11.5 MB bundle gave the same
+findings in the same order.
 
 Verifying locally, each command within 45 s:
 
 ```bash
 cd rust && cargo build --release --offline --locked && cargo test --release --offline --locked
 export LAZARET_NATIVE_LIB=$(realpath target/release/liblazaret_native.so)
+(cd ../js && npm run build)                                  # the WebAssembly build
 cd ../python
 PYTHONPATH=src:. python3 -m unittest tests.architecture.test_rust_parity_regex   # ~1 s; repeat per python3.1x
-PYTHONPATH=src:. python3 -m unittest tests.architecture.test_rust_parity_hooks   # ~27 s
-PYTHONPATH=src:. python3 -m unittest tests.architecture.test_rust_parity_signs   # ~8 s
-PYTHONPATH=src:. python3 -m unittest tests.architecture.test_rust_parity_scanfile  # ~10 s
-PYTHONPATH=src:. python3 -m unittest tests.architecture.test_rust_parity_lexer     # ~1 s
+PYTHONPATH=src:. python3 -m unittest tests.architecture.test_rust_parity_hooks   # ~35 s
+PYTHONPATH=src:. python3 -m unittest tests.architecture.test_rust_parity_signs   # ~20 s
+PYTHONPATH=src:. python3 -m unittest tests.architecture.test_rust_parity_scanfile  # ~8 s
+PYTHONPATH=src:. python3 -m unittest tests.architecture.test_rust_parity_project   # ~6 s
+PYTHONPATH=src:. python3 -m unittest tests.architecture.test_rust_parity_hook_commands  # ~7 s
+PYTHONPATH=src:. python3 -m unittest tests.architecture.test_rust_parity_lexer tests.architecture.test_rust_parity_hexname \
+  tests.architecture.test_rust_parity_offscreen tests.architecture.test_rust_parity_lookalike   # ~3 s
+PYTHONPATH=src:. python3 -m unittest tests.architecture.test_wasm_parity         # ~20 s
+PYTHONPATH=src:. python3 -m unittest tests.architecture.test_wasm_parity_signs   # ~11 s
 python3 ../scripts/make_rust_tables.py --check && python3 ../scripts/check_rust_deps.py
 ```
 
@@ -366,6 +457,19 @@ about a third, the literal prefilter's scans a tenth, and the rest is
 needle scans, hashing and allocation: a flat profile, about 60 patterns
 each run once per text.
 
+**The npm package (WebAssembly, 0.1.9).** The same calls take 1.4–1.9×
+the native library's time under Node 22's WebAssembly (one thread;
+compiling and instantiating the 1.8 MB module takes about 8 ms, once per
+process). Against the JavaScript twins it replaced, on one core, the CLI's
+whole run: a `--deps` scan of an installed tree (1,061 JavaScript files)
+8.1 s → 9.2 s; a project of 616 source and test files 5.9 s → 4.9 s; an
+11.5 MB bundle 11.6 s → 11.9 s. The `--deps` difference is the import-time
+test (1,061 files: 3.5 s in WebAssembly, 2.5 s native, 1.9 s for the old
+twin, whose regexes V8 compiles to native code): §10's item on that test's
+gates is the way back. SQL-DYNAMIC, which `re` and pyre run in quadratic
+time on a line of many `EXEC("` (13.9 s for one such file), is matched by
+hand in linear time (`linear.rs`), as the twin did (`linear.js`).
+
 Tools (`rust/crates/lazaret-engine/examples/`): `profile_calls CASES.json`
 (time per call), `pattern_times CASES.json [NAME [REPS]]` (per pattern),
 `pattern_stats` (per pattern inside one call; `--features stats`, never
@@ -383,8 +487,8 @@ open('cases.json', 'w'))"` from `python/` with `PYTHONPATH=src:.`.
 | Phase | What moves to Rust | State |
 |---|---|---|
 | 0 | Workspace, bindings, regex engine, Unicode 13.0 tables, the pack | Done (source decoding — BOMs, UTF-16, coding cookies — not started) |
-| 1 | The supply-chain tests and what they read | Done, current through 0.1.8; wired in |
-| 2 | Per-file rules (`scan_file`: `RULES`, `TEXT_RULES`, secrets, entropy, homoglyphs, hidden Unicode, off-screen code …), the Python and JS/TS lexers | Dependency mode done and wired in (every family, NFKC, the comment lexer, findings with their snippets and redaction); project mode (quality rules, `TEXT_RULES`, the SQL and taint passes it hands to) not started |
+| 1 | The supply-chain tests and what they read | Done, current through 0.1.8; wired in (the Python package since 0.1.8, the npm package since 0.1.9) |
+| 2 | Per-file rules (`scan_file`: `RULES`, `TEXT_RULES`, secrets, entropy, homoglyphs, hidden Unicode, off-screen code …), the Python and JS/TS lexers | Dependency mode done and wired in (every family, NFKC, the comment lexer, findings with their snippets and redaction). Project mode: the rules part done (`scan_rules`: every rule of `RULES` with Q-LONGLINE and SC-PIPE-SHELL, the families, `TEXT_RULES`), used by the npm package (0.1.9); the SQL, taint and function passes that follow it, and wiring it into the Python package, not started |
 | 3 | The cross-file follower; archive reading for registry scans | Not started |
 | 4 (optional) | The taint flow engines | Only if a Rust parser gives identical results |
 
@@ -396,7 +500,23 @@ open('cases.json', 'w'))"` from `python/` with `PYTHONPATH=src:.`.
 - `_XF_ARROW_ONE_RE` is quadratic on `"x" * 100001` in both engines
   (inherited from core): bound it in `core.py`, and the pack follows.
 - The budget (4e9 steps per call) discards an exhausted answer; the Python
-  engine then answers, so the budget never changes a finding.
+  engine then answers, so the budget never changes a finding in the Python
+  package. The npm package has no Python engine: there an exhausted call
+  leaves its file SC-TRUNCATED (CRITICAL), on hostile input only (no file of
+  the corpora or the benchmark comes near the budget). Steps are charged in
+  batches of 4,096 per search, so short searches cost nothing against it;
+  a call's `budget` argument sets another (the npm tests use a small one).
+- The WebAssembly build runs on one thread (a `batch` too), and its memory
+  only grows: `native.js` starts a fresh instance after a call that left it
+  above 512 MB. A panic traps instead of unwinding (the call is an error,
+  and the next one gets a fresh instance).
+- Core's SQL-DYNAMIC pattern is quadratic under `re` on a line of many
+  `EXEC("` (Python: 0.9 s for a 30 KB line, 14 s for 120 KB; core's 30 s
+  time budget is checked between lines, so one search is not cut short).
+  It is a project-mode rule of `.sql` files. The native engine matches the
+  pattern by hand in linear time (`linear.rs`) while the pack holds its
+  exact text and flags; bound the pattern in `core.py` and the hand matcher
+  can go.
 - The native `scan_file` has no time budget (core's `SCAN_TIME_BUDGET`, 30 s
   per file, ends in SC-TRUNCATED): a file it scans is scanned whole, and a
   file that spends its work budget goes to core, under core's time budget.
@@ -421,33 +541,39 @@ open('cases.json', 'w'))"` from `python/` with `PYTHONPATH=src:.`.
 
 ## 10. Next
 
-1. **WebAssembly for the npm package: the 0.1.9 milestone** (decided with
-   0.1.8, which keeps the three engines in step). A `wasm32-unknown-unknown`
-   build of `lazaret-engine` with the exports §3 frames, shipped inside the
-   npm package (which stays dependency-free) and loaded by
-   `js/src/lib/native.js`, answers the supply-chain tests and
-   dependency-mode `scan_file` for the npm engine. Then the JavaScript twins
-   of what it answers (`js/src/lib/hooks.js`, `received.js` and the per-file
-   supply-chain rules) are retired, the parity tests compare the native
-   engine with the Python engine alone, and the npm package carries
-   `rust/NOTICE`, `LICENSE-PYTHON` and `LICENSE-UNICODE` (§11). The Python
-   engine stays the reference; the dashboard keeps its own script until it
-   can load the same module. Each detection change then lands twice (Python
-   and Rust) instead of three times. Keep the benchmark harness (outside the
-   repository today) with it, and run the 945 packages with each engine
-   nightly. (Done: release builds of the five platform wheels, §4, and the
-   version held to the packages'.)
-2. The import-time and install-script tests at `scan_file`'s speed: one
+Done in 0.1.9: **WebAssembly for the npm package** (§2–§5). The npm
+package runs the native engine (`native/lazaret.wasm`, dependency-free,
+built in release CI with the wheels' compiler); the JavaScript twins of
+what it answers are retired (`js/src/lib/hooks.js`, `received.js`,
+`shellpipe.js`, `received-spec.json`, `js/src/scanner/linear.js`, the
+per-line rules, the families and the dependency decode flow of
+`scan.js`); the parity tests compare the native engine with the Python
+engine and the WebAssembly build with the native library; the npm package
+carries `rust/NOTICE`, `LICENSE-PYTHON` and `LICENSE-UNICODE` (§11). Each
+detection change now lands twice (Python and Rust) instead of three times.
+
+1. The import-time and install-script tests at `scan_file`'s speed: one
    pass over a file for the required strings of all their patterns (as
-   `Gates` does per line), and hand prefilters for the patterns without any.
-3. Phase 2 in project mode: the quality and bug rules of `RULES`,
-   `TEXT_RULES`, Q-LONGLINE and SC-PIPE-SHELL, with core's taint, SQL and
-   function passes still reading a context built from the native one's.
+   `Gates` does per line), and hand prefilters for the patterns without any
+   (`_LD_FUNC_RE`, `_DD_ASSIGN_RE`, `_LD_MEMBER_ASSIGN_RE`, `_LD_COLLECT_RE`,
+   `_HOST_INFO_RE` lead a flat profile). It is what makes the npm
+   package's `--deps` scan 13% slower than with the twins (§7).
+2. Phase 2 in project mode for the Python package: `scan_file` through
+   `scan_rules`, with core's taint, SQL and function passes reading a
+   context built from the native one's (as the npm engine does); then those
+   passes, and the npm engine's twins of them (`js/src/scanner/`).
+3. The rest of the npm engine's twins: the cross-file follower
+   (`crossfile.js`, phase 3), the manifest, workflow and settings checks
+   (`supplychain.js`, `ghworkflow.js`, `autorun.js`), the config-file
+   credentials; the dashboard keeps its own script until it can load the
+   same module.
 4. Flip the source of truth: `core.py` loads the pack at import.
 5. Record the engine in reports (JSON and SARIF), next to the version.
 6. More single-thread speed if still needed: one pass over a line for the
    checks `scan_file` makes of each character (ASCII, backslash, quotes),
    a faster hash than SipHash, a cheaper `Prog::new` for run-time patterns.
+7. Keep the benchmark harness (outside the repository today) with the
+   engine, and run the 945 packages with each engine nightly.
 
 ## 11. Licensing
 
@@ -479,10 +605,16 @@ Labs notices name.
   `LICENSE-PYTHON` and `NOTICE` as license files (`.dist-info/licenses/`)
   beside the pure wheel's `LICENSE` and `LICENSE-UNICODE`, and declare the
   same expression; the pure wheel and the sdist hold none of the translated
-  code and are `Apache-2.0 AND Unicode-3.0` (their Unicode table); the npm
-  package has its own translation of shlex and its own NOTICE
-  (`Apache-2.0 AND Python-2.0.1 AND Unicode-3.0`).
+  code and are `Apache-2.0 AND Unicode-3.0` (their Unicode table).
   `check_native_library.py --dist` checks the wheels before a release.
+- The npm package (0.1.9) carries the compiled engine as
+  `native/lazaret.wasm`, with `rust/NOTICE` as `native/NOTICE` (both written
+  by `npm run build`), `LICENSE-PYTHON` and `LICENSE-UNICODE`; its own
+  `NOTICE` points to them (and names the CPython codec names and Unicode
+  tables of its JavaScript), and it declares `Apache-2.0 AND Python-2.0.1 AND
+  Unicode-3.0`. Its shlex is the engine's since the JavaScript translation
+  (`hooks.js`) was retired. `release.yml` fails a tarball without
+  `native/lazaret.wasm` or `native/NOTICE`.
 
 `tests/architecture/test_rust_notices.py` keeps all of this in place, and
 fails on a Rust file that says it is ported or translated from CPython

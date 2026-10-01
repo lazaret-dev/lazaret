@@ -59,20 +59,31 @@ untrusted dependencies past it before letting them in.
 ## 2. The prime directive: two engines, one behavior
 
 **The single most important invariant.** Every rule, lexer quirk, taint step,
-SQL sink, encoding rule and metric exists in *both* engines and they must agree
-on every input — the same finding (rule, file, line, severity, message), the
-same metrics, ratings, quality gate and exit code.
+SQL sink, encoding rule and metric behaves the same in *both* packages, and
+they must agree on every input — the same finding (rule, file, line,
+severity, message), the same metrics, ratings, quality gate and exit code.
+Since 0.1.9 most of that is one engine: the npm package runs the native
+engine (below) as WebAssembly for the supply-chain tests and the rules of
+`scan_file`, and keeps JavaScript twins only for what the native engine does
+not answer yet (source decoding, the comment lexer and the suppression
+markers, the taint, SQL-sink and function passes, the flow engine, the
+cross-file follower, the manifest, workflow and settings checks, config-file
+credentials).
 
 - **Held by tests.** `python/tests/architecture/test_js_parity.py` runs both
   CLIs on every fixture tree, a synthetic project, and an adversarial tree
   generated at test time, and compares the results as a multiset. The
-  `test_js_parity_*.py` files compare the lower-level twins (the received-code
-  detector, the flow engine, lexing, gyp, etc.), often by running thousands of
-  cases through one Node process and diffing against the Python answer.
-- **When you change one engine, change the twin in the same commit.** The JS
-  twin of a Python helper says so in a comment (`Twin of
-  lazaret.scanner.core…`). Parity failing is not a flaky test; it means the
-  engines have diverged and one of them is now wrong.
+  `test_js_parity_*.py` files compare the remaining twins (the flow engine,
+  the cross-file follower, parsing, the settings and workflow readers, etc.)
+  and the CLIs on each area's trees, often by running thousands of cases
+  through one Node process and diffing against the Python answer. They need
+  the npm engine built (`cd js && npm run build`).
+- **When you change one engine, change the other in the same commit:** core
+  and the native engine (`rust/`, then the pack: `make_rust_tables.py`), and
+  a JavaScript twin where one remains. The JS twin of a Python helper says so
+  in a comment (`Twin of lazaret.scanner.core…`). Parity failing is not a
+  flaky test; it means the engines have diverged and one of them is now
+  wrong.
 - **The browser dashboard** (`python/src/lazaret/web/lazaret.html`) carries a
   third port of the engine and is held to the same findings
   (`test_review_dashboard_parity.py`). Editing the dashboard's inline script
@@ -80,18 +91,22 @@ same metrics, ratings, quality gate and exit code.
   SHA-256).
 - **The native engine** (`rust/crates/lazaret-engine`, 0.1.8) is a port of
   core's supply-chain tests — the install-script and import-time tests and
-  everything they read — and of `scan_file` in dependency mode,
-  findings included, with Python `re` semantics (its own port of sre) and
-  the patterns and finding texts extracted from `core.py` into a rule pack.
-  The Python package sends those through it where it is installed
-  (`lazaret.scanner.engine`; `--engine rust|python`), and core answers any
-  call it can't (a spent work budget, an error), so it never loses a finding.
-  `test_rust_parity_{regex,hooks,signs,scanfile,lexer}.py` compare it with
-  core on every pack pattern, the 36,900-case hooks corpus and the scan_file
-  corpus: zero differences allowed.
-  A change to those tests is made in core, ported to Rust and the pack
-  regenerated (`scripts/make_rust_tables.py`; `--check` in CI), in the same
-  commit.
+  everything they read — and of `scan_file` in dependency mode, findings
+  included, and (0.1.9) of its rules part in project mode (`scan_rules`),
+  with Python `re` semantics (its own port of sre) and the patterns and
+  finding texts extracted from `core.py` into a rule pack. The Python
+  package sends the supply-chain tests and dependency-mode `scan_file`
+  through it where it is installed (`lazaret.scanner.engine`; `--engine
+  rust|python`), and core answers any call it can't (a spent work budget, an
+  error), so it never loses a finding. The npm package (0.1.9) runs it as
+  WebAssembly (`js/native/lazaret.wasm`, `js/src/lib/native.js`) for all of
+  them, with no second engine behind it: a spent budget leaves the file
+  SC-TRUNCATED. `test_rust_parity_*.py` compare it with core on every pack
+  pattern, the ~44,000-case hooks corpus and the scan_file corpus, and
+  `test_wasm_parity*.py` the WebAssembly build with the library: zero
+  differences allowed. A change to those tests is made in core, ported to
+  Rust and the pack regenerated (`scripts/make_rust_tables.py`; `--check` in
+  CI), in the same commit.
 
 ### The documented Python-only exception
 
@@ -169,8 +184,9 @@ lazaret.pg         Postgres wire-protocol client (stdlib only)
 lazaret.safexml    safe XML parsing (stdlib only)
 ```
 
-The heart is `lazaret.scanner.core` (a large single module) and its npm twin
-under `js/src/`. The project-scan pipeline is `core.scan_project(root, …)`,
+The heart is `lazaret.scanner.core` (a large single module), the native
+engine ported from it (`rust/`), and the npm package under `js/src/`, which
+runs that engine as WebAssembly and twins the rest. The project-scan pipeline is `core.scan_project(root, …)`,
 shared by the CLI and the MCP server. In order it:
 
 1. **collects** files and manifests (`_collect`, honouring `--deps`, excludes,
@@ -263,8 +279,9 @@ silence real findings by declaring `str` a sanitizer).
 
 Detects code that **runs, deserializes or dynamically imports a value it
 received over the network** — the TrapDoor/dropper shape. Lives in `core.py`
-(section comment "Code that runs what it receives over the network") and its
-twin `js/src/lib/received.js`.
+(section comment "Code that runs what it receives over the network") and the
+native engine's `received.rs` (the npm package runs it as WebAssembly; its
+JavaScript twin, `js/src/lib/received.js`, was retired in 0.1.9).
 
 - **Single-file entry points.** `runs_received_code(text)` /
   `_received_code_kind(text)` → `(1-based line, category)` where category is
@@ -356,15 +373,15 @@ pass.
 **The shared spec.** The detector's data (name sets, character sets, limits) and
 **all its patterns** (36 plain regexes + 6 alternation groups: 48 compiled
 patterns) are authored once in
-`python/src/lazaret/scanner/received_spec.json` and compiled by both engines.
-`scripts/sync-received-spec.py` copies it to `js/src/lib/received-spec.json`
-(run `--check` in CI); `tests/architecture/test_received_spec.py` fails if the
-copies drift or if core stops matching the spec. `test_js_parity_hooks.py`
-compares every compiled pattern of `hooks.js` and `received.js` with core's
-(126 patterns / 30 sets / 4 maps) and runs a 30k+ case agreement corpus plus a
-reach test. **Edit the spec, not the inline patterns; then sync.** The npm
-engine loads the spec with `readFileSync` at import — the build backend ships
-`.json` from the package so it lands in the wheel.
+`python/src/lazaret/scanner/received_spec.json`, which core loads (the build
+backend ships `.json` from the package, so it lands in the wheel); the native
+engine reads core's values from its rule pack (`make_rust_tables.py`), and
+the npm package runs the native engine, so nothing is copied any more (until
+0.1.9 the npm engine compiled a synced copy, `js/src/lib/received-spec.json`,
+kept by `scripts/sync-received-spec.py`). `tests/architecture/test_received_spec.py`
+fails if core stops matching the spec, and `test_rust_parity_signs.py` holds
+the native engine to core on the ~44,000-case hooks corpus. **Edit the spec,
+not the inline patterns; then regenerate the pack.**
 
 **The cross-file follower (both engines since 0.1.8).**
 `core._cross_file_received_issues` and its twin `crossFileReceivedIssues`
@@ -680,21 +697,24 @@ This is the working method. Follow it; it is why the tool has stayed trustworthy
    nothing executed) and **confirm the current engine misses it.** A test that
    never failed on the old code proves nothing.
 3. **Implement in the Python engine.** Keep it needle-gated and bounded.
-4. **Twin it in the JS engine with exact parity**, in the same commit. Mark the
-   twin (`Twin of lazaret.scanner.core…`). For received-code patterns, edit the
-   **shared spec** and sync instead of hand-writing both. A change to the
-   install-script or import-time test (or anything they read) is also ported
-   to the native engine, with the rule pack regenerated
+4. **Port it to the native engine with exact parity**, in the same commit:
+   a change to the supply-chain tests or to a rule of `scan_file` (or
+   anything they read) is ported to `rust/`, with the rule pack regenerated
    (`python3 scripts/make_rust_tables.py`); a pattern core builds at run time
-   is built from named module-level pieces, so the extractor sees them.
+   is built from named module-level pieces, so the extractor sees them. For
+   received-code patterns, edit the **shared spec**. The npm package runs the
+   native engine, so it follows; where the npm package still has a
+   JavaScript twin of what changed (the taint, SQL and flow passes, the
+   cross-file follower, the manifest and settings checks), twin it there too
+   and mark it (`Twin of lazaret.scanner.core…`).
 5. **Verify:**
-   - the behavioral suites (both engines);
-   - **engine parity** — `test_js_parity*` (the differential corpus + the
-     pattern twins); a Python-only feature goes in `_python_only`; and
-     `test_rust_parity_*` with the native library built
-     (`docs/RUST_ENGINE.md` §5);
-   - **a fuzz differential** where relevant (the received-code parity runs
-     ~33k cases; both engines must agree on every one);
+   - the behavioral suites (both packages; `cd js && npm run build` first);
+   - **engine parity** — `test_rust_parity_*` with the native library built
+     and `test_wasm_parity*` with the WebAssembly build
+     (`docs/RUST_ENGINE.md` §5), and `test_js_parity*` (the two CLIs and
+     the remaining twins); a Python-only feature goes in `_python_only`;
+   - **a fuzz differential** where relevant (the hooks corpus runs ~44,000
+     cases; the engines must agree on every one);
    - **the false-positive sweep** against the real corpora (§7): the bar is 0
      new findings;
    - **bounded work** on an adversarial ~100 KB–1 MB input.
@@ -787,7 +807,9 @@ fixture.
   push the tag. The GitHub Actions workflow runs the suite, then publishes to
   PyPI and npm via **trusted publishing (OIDC)** — no long-lived tokens. The
   PyPI release has a pure wheel and five platform wheels with the native
-  engine, built, checked and installed on their platforms by `wheels.yml`.
+  engine, built, checked and installed on their platforms by `wheels.yml`;
+  the npm package carries the same engine as WebAssembly, built by
+  `release.yml` with the same pinned compiler.
   Published versions are immutable; a mistake means releasing the next patch,
   not re-tagging.
 - **CHANGELOG.md** started at 0.1.6 (Keep a Changelog). Date each entry at
@@ -798,15 +820,17 @@ fixture.
   Unicode-3.0`); a platform wheel adds the native library and two more,
   `rust/LICENSE-PYTHON` and `rust/NOTICE` (part of the engine is a Rust
   translation of CPython code: `Apache-2.0 AND Python-2.0.1 AND
-  Unicode-3.0`); the npm package only `bin/`, `src/` and its license files
-  (`LICENSE-PYTHON` and `NOTICE` for its translation of CPython's shlex,
-  `LICENSE-UNICODE`: `Apache-2.0 AND Python-2.0.1 AND Unicode-3.0`).
+  Unicode-3.0`); the npm package only `bin/`, `src/`, the engine
+  (`native/lazaret.wasm` and its `native/NOTICE`, `rust/NOTICE`) and its
+  license files (`LICENSE-PYTHON` and `NOTICE` for the engine's translations
+  of CPython code, `LICENSE-UNICODE`: `Apache-2.0 AND Python-2.0.1 AND
+  Unicode-3.0`).
   `tests/architecture/test_notices.py` and `test_rust_notices.py` hold the
   notices to the code. `scripts/make_bundle.py` builds a reproducible
   source tarball from tracked files only and refuses credential files.
 - **Delivery in this project's history** used git-format-patch mailboxes
   (`git am`) applied onto a release branch; a direct contributor just commits to
-  a branch and opens a PR. Either way, one logical change per commit, both
+  a branch and opens a PR. Either way, one logical change per commit, the
   engines together.
 
 ---
@@ -825,16 +849,15 @@ fixture.
 | `python/src/lazaret/{registry,mcp,pg,safexml}/` | Registry auditor, MCP server, Postgres client, safe XML |
 | `python/src/lazaret/registry/guard.py`, `python/src/lazaret/_cli.py` | The install guard (`lazaret guard`) and the `lazaret` command's dispatch |
 | `python/src/lazaret/registry/pmsettings.py` | The package managers' own settings as the guard reads them: registries, indexes, credentials by host |
-| `js/src/lib/received.js` | Twin of the received-code detector |
-| `js/src/lib/received-spec.json` | Synced copy of the spec (do not edit by hand) |
-| `js/src/lib/hooks.js`, `js/src/scanner/flow.js`, `js/src/index.js` | Install-hook checks, flow twin, npm CLI |
-| `python/tests/architecture/test_js_parity*.py` | The engine-parity guards |
-| `rust/crates/lazaret-engine`, `lazaret-ffi` | The native engine (supply-chain tests, sre port, rule pack) and its C ABI (`docs/RUST_ENGINE.md`) |
+| `js/src/lib/native.js`, `js/scripts/build-wasm.js` | The npm package's native engine (WebAssembly: the loader, one call, the pack's values) and its build (`npm run build`) |
+| `js/src/lib/supplychain.js`, `js/src/deps.js`, `js/src/scanner/flow.js`, `js/src/index.js` | Install-hook checks, `--deps`, flow twin, npm CLI |
+| `python/tests/architecture/test_js_parity*.py` | The package-parity guards (need `npm run build`) |
+| `rust/crates/lazaret-engine`, `lazaret-ffi` | The native engine (supply-chain tests, `scan_file`, sre port, rule pack), its C ABI and its WebAssembly exports (`docs/RUST_ENGINE.md`) |
 | `python/src/lazaret/scanner/engine.py`, `_native.py` | Which engine answers (`--engine`, `LAZARET_ENGINE`), batching and threads, the Python fallback; the ctypes loader |
-| `python/tests/architecture/test_rust_parity_*.py`, `hooks_corpus.py` | The native engine's parity guards and the corpus they share with `test_js_parity_hooks.py` |
+| `python/tests/architecture/test_rust_parity_*.py`, `test_wasm_parity*.py`, `hooks_corpus.py`, `scanfile_corpus.py` | The native engine's parity guards, the WebAssembly build's, and their corpora |
 | `scripts/make_rust_tables.py`, `check_rust_deps.py` | The rule pack from `core.py` (`--check`); no crate from outside the workspace |
-| `python/tests/architecture/test_received_spec.py` | Spec drift + core-uses-spec guard |
-| `scripts/sync-received-spec.py`, `check-versions.sh`, `tag-release.sh` | Sync, version, release tooling |
+| `python/tests/architecture/test_received_spec.py` | Core-uses-spec guard |
+| `scripts/check-versions.sh`, `tag-release.sh` | Version and release tooling |
 
 To orient in `core.py`, search for the banner comments (e.g. "Code that runs
 what it receives over the network", "Cross-file received code (Python engine
@@ -845,12 +868,12 @@ only)", "Download to a file, then run the file").
 ## 11. Gotchas and hard-won lessons
 
 - **Parity is sacred.** The most common way to break Lazaret is to change one
-  engine and forget the twin. Run a parity suite before you believe a
+  engine and forget the other: core without the native engine (or the pack),
+  or a remaining JavaScript twin. Run the parity suites before you believe a
   received-code or flow change is done.
 - **Edit the spec, not the patterns.** A received-code pattern change made
-  directly in `core.py` or `received.js` will drift; the drift test will fail,
-  or worse, one engine will silently diverge. Author in `received_spec.json`,
-  sync.
+  directly in `core.py` drifts from the spec; the spec test will fail. Author
+  in `received_spec.json`, then regenerate the pack.
 - **Liberal detection + precise sinks.** The cross-file follower over-approximates
   what counts as a tainted export on purpose; it stays at 0 FP because a finding
   requires the value to actually reach a *runner*. Don't try to make export
@@ -1025,13 +1048,14 @@ comprehensive, so weigh marginal value against FP risk):
   (`getattr(m, name)`), a runner behind another function (one that hands its
   parameter to another file's runner), or more than four hops.
 - *Engine:* the native engine answers the supply-chain tests (0.1.8,
-  `docs/RUST_ENGINE.md`) and the dependency-mode scan of each file (after
-  0.1.8), and release CI builds it into five platform wheels; next, the
-  import-time and install-script tests at the per-file scan's speed,
-  WebAssembly for the npm package (then the JavaScript twin can go, and the
-  npm package's NOTICE lists the engine's translations too), the per-file
-  rules in project mode, and `core.py` loading the rule pack so it has one
-  source.
+  `docs/RUST_ENGINE.md`) and the dependency-mode scan of each file, release
+  CI builds it into five platform wheels, and the npm package runs it as
+  WebAssembly (0.1.9, its JavaScript twins of those retired); next, the
+  import-time and install-script tests at the per-file scan's speed (the
+  npm package's `--deps` scan is 13% slower than with the twins until
+  then), one call per dependency file, the project-mode rules through the
+  native engine in the Python package too, the cross-file follower in Rust,
+  and `core.py` loading the rule pack so it has one source.
 - *Quality:* a durable home for this backlog (a `BACKLOG.md` or issues).
 - *Guard* (credentials, yarn, Bun, `uv run` and `uvx` were built in 0.1.8):
   `npx` / `npm exec`, `pnpm dlx`, `yarn dlx` and `bunx`, which run a package
