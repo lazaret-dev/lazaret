@@ -602,6 +602,7 @@ fn cross_file(p: &Pack, args: &Value, text: &[u32]) -> Result<Value, CallError> 
     let items = args.get("files").and_then(|f| f.as_arr()).ok_or_else(|| bad("files"))?;
     let who = opt_str(args, "who").unwrap_or_else(|| u("Dependency code"));
     let whos = args.get("whos").and_then(|w| w.as_arr());
+    let groups = args.get("groups").and_then(|g| g.as_arr());
     let mut files = Vec::with_capacity(items.len());
     let mut at = 0usize;
     for (k, item) in items.iter().enumerate() {
@@ -613,7 +614,8 @@ fn cross_file(p: &Pack, args: &Value, text: &[u32]) -> Result<Value, CallError> 
             return Err(bad("the files' lengths run past the text"));
         }
         let who = whos.and_then(|w| w.get(k)).and_then(|v| v.as_str()).map(|s| s.to_vec()).unwrap_or_else(|| who.clone());
-        files.push(File { path, lang, text: &text[at..at + len], who });
+        let group = groups.and_then(|g| g.get(k)).and_then(|v| v.as_str()).map(|s| s.to_vec());
+        files.push(File { path, lang, text: &text[at..at + len], who, group });
         at += len;
     }
     if at != text.len() {

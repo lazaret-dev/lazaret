@@ -196,20 +196,22 @@ def scan_file(path, content, lang, dep=False):
     return scan_files([(path, content, lang, dep)])[0]
 
 
-def cross_file_issues(files, skip_paths=(), who="Dependency code", one_package=False):
+def cross_file_issues(files, skip_paths=(), who="Dependency code", one_package=False, site_groups=None):
     """core._cross_file_received_issues, by the engine in use. The native
     engine reads the packages in one call (on THREADS threads), each with
     its own work budget; a package it could not read (the budget spent, an
     internal error) is read by core, so the findings and their order are
     core's."""
     if name() != "rust":
-        return core._cross_file_received_issues(files, skip_paths, who, one_package)
+        return core._cross_file_received_issues(files, skip_paths, who, one_package, site_groups)
     todo = [f for f in files if f.get("dep") and f["lang"] in ("py", "js")]
     if len(todo) < 2:
         return []
     args = {"files": [[f["path"], f["lang"], len(f["content"])] for f in todo],
             "skip": sorted(set(skip_paths)), "one_package": bool(one_package), "sep": os.sep,
             "redact": bool(core.REDACT_SECRETS), "neumaier": _NEUMAIER, "threads": THREADS}
+    if site_groups:
+        args["groups"] = [site_groups.get(f["path"].replace(os.sep, "/")) for f in todo]
     if callable(who):
         args["whos"] = [who(f["path"]) for f in todo]
     else:
@@ -217,12 +219,12 @@ def cross_file_issues(files, skip_paths=(), who="Dependency code", one_package=F
     try:
         answer = _native.call("cross_file", args, "".join(f["content"] for f in todo))
     except _native.NativeError:
-        return core._cross_file_received_issues(files, skip_paths, who, one_package)
+        return core._cross_file_received_issues(files, skip_paths, who, one_package, site_groups)
     out, groups = [], None
     for package in answer:
         if "failed" in package:
             if groups is None:
-                groups = core._xf_groups(files, one_package)
+                groups = core._xf_groups(files, one_package, site_groups)
             members = groups.get((package["lang"], package["root"]), [])
             out.extend(core._xf_group_issues(package["lang"], members, set(skip_paths), who))
             continue

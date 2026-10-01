@@ -12975,6 +12975,23 @@ _DL_COMMA_CALL_RE = _dl_re("_DL_COMMA_CALL_RE")
 _DL_GETATTR_RE = _dl_re("_DL_GETATTR_RE")
 _DL_MEMBER_RE = _dl_re("_DL_MEMBER_RE")
 _DL_CALLBACK_RE = _dl_re("_DL_CALLBACK_RE")
+# (the detection round) and getattr(m, …) whose name is built of what the
+# file holds — literals joined with +, names given such a value on a row of
+# their own and given nothing else anywhere — as m.name too: a dropper that
+# writes the member it calls in pieces or keeps it in a constant
+# (NAME = 'pu' + 'll' … getattr(_net, NAME)()). The names of at most
+# _DL_GETATTR_NAMES are read a file.
+_DL_GETATTR_EXPR_RE = _dl_re("_DL_GETATTR_EXPR_RE")
+_DL_CONST_RE = _dl_re("_DL_CONST_RE")
+_DL_STR_PIECE_RE = _dl_re("_DL_STR_PIECE_RE")
+_DL_NAME_FULL_RE = _dl_re("_DL_NAME_FULL_RE")
+# A runner named through the builtins or the global object
+# (getattr(builtins, 'exec'), __builtins__.__dict__['eval'], globalThis.eval)
+# reads as the runner itself once its member is read.
+_DL_BUILTINS_RE = _dl_re("_DL_BUILTINS_RE")
+_DL_GIVEN_HEAD = r"(?<![\w$.])"
+_DL_GIVEN_TAIL = r"[ \t]*(?:[-+*/%&|^@]|\*\*|//|<<|>>)?=(?!=)"
+_DL_GETATTR_NAMES = 16
 _DL_CALLBACK_NEEDLES = ("eval", "Function", "exec", "runIn")
 _DL_SPACE_RE_ANY = re.compile(r"[ \t]+")
 # the patterns built around names at run time (each name escaped): another
@@ -13120,13 +13137,67 @@ def _dl_comma_calls(text):
 def _dl_members(text):
     """`text` with each member read by name as a dotted member (see above):
     getattr(obj, 'name') and obj['name'] as obj.name, padded with spaces to
-    the length they replace."""
+    the length they replace; a getattr whose name the file builds of what
+    it holds too (_dl_getattr_names); and a runner named through the
+    builtins or the global object as the runner."""
     if "getattr" in text:
         text = _DL_GETATTR_RE.sub(lambda m: (_DL_SPACE_RE_ANY.sub("", m.group("o")) + "."
                                              + (m.group("a") or m.group("b"))).ljust(len(m.group())), text)
+        if "getattr" in text:
+            text = _dl_getattr_names(text)
     if "['" in text or '["' in text:
         text = _DL_MEMBER_RE.sub(lambda m: ("." + (m.group("a") or m.group("b"))).ljust(len(m.group())), text)
+    if "builtins" in text or "global" in text or "window" in text:
+        text = _DL_BUILTINS_RE.sub(lambda m: " " * len(m.group()), text)
     return text
+
+
+def _dl_getattr_names(text):
+    """`text` with each getattr(obj, …) whose name is literals joined with +
+    and names the file gives such a value (see above) read as obj.name."""
+    found = _DL_GETATTR_EXPR_RE.findall(text)
+    if not found:
+        return text
+    wanted = sorted({p.group("n") for _o, e in found for p in _DL_STR_PIECE_RE.finditer(e)
+                     if p.group("n") is not None})[:_DL_GETATTR_NAMES]
+    consts = _dl_constants(text, wanted) if wanted else {}
+
+    def sub(m):
+        value = _dl_joined(m.group("e"), consts)
+        if value is None or _DL_NAME_FULL_RE.fullmatch(value) is None:
+            return m.group()
+        return (_DL_SPACE_RE_ANY.sub("", m.group("o")) + "." + value).ljust(len(m.group()))
+    return _DL_GETATTR_EXPR_RE.sub(sub, text)
+
+
+def _dl_constants(text, names):
+    """{name: value} of `names` that `text` gives a string on a row of its
+    own and gives nothing else (see above)."""
+    values = {}
+    for m in _DL_CONST_RE.finditer(text):
+        if m.group("n") in names:
+            values.setdefault(m.group("n"), []).append(m.group("v"))
+    out = {}
+    for name, given in values.items():
+        if len(given) == 1 and len(re.findall(_DL_GIVEN_HEAD + re.escape(name) + _DL_GIVEN_TAIL, text)) == 1:
+            value = _dl_joined(given[0], {})
+            if value is not None:
+                out[name] = value
+    return out
+
+
+def _dl_joined(expr, consts):
+    """The string `expr` (literals and names joined with +) is, the names
+    read in `consts`; None where a name is not one of them."""
+    out = []
+    for p in _DL_STR_PIECE_RE.finditer(expr):
+        if p.group("n") is not None:
+            if p.group("n") not in consts:
+                return None
+            out.append(consts[p.group("n")])
+        else:
+            out.append(p.group("a") if p.group("a") is not None else p.group("b"))
+    return "".join(out)
 
 
 def _dl_callbacks(text, runners=()):
@@ -15652,7 +15723,9 @@ class _DependencyTree:
 # to a received value. The other way round, a function of the package that
 # runs its parameter as code (def execute(c): exec(c)) is a runner in every
 # file that imports it (extra_runners): the value is received there and run
-# by the other file's function.
+# by the other file's function; (the detection round) so is a function that
+# hands its parameter to a runner of the package (def go(c): execute(c)),
+# up to _XF_ROUNDS hops.
 # It fires only when the flow crosses files — a file whose own text shows it
 # is the single-file test's — at the single-file severity (SC-IMPORT-RISK,
 # CRITICAL for running what was received); comments and docstrings are read
@@ -15666,7 +15739,7 @@ class _DependencyTree:
 _XF_WINDOW = 25                 # rows of a function / method body read
 _XF_MAX_FILES = 3000            # files per package the follower groups
 _XF_MAX_SEEDS = 64              # cross-file seeds fed into one file
-_XF_ROUNDS = 4                  # hops followed through wrappers and re-exports
+_XF_ROUNDS = 16                 # hops followed through wrappers, re-exports and runners
 _XF_MAX_SYMBOLS = 5000          # symbols per package
 _XF_MAX_DEPTH = 8               # re-exports followed to what they name
 _XF_LOCAL_DEPTH = 3             # a body's locals followed to its return
@@ -15961,7 +16034,7 @@ class _XfModule:
     """What the follower reads of one module (see the section comment)."""
 
     __slots__ = ("key", "lang", "path", "text", "defs", "classes", "imports", "exports", "reexports", "stars",
-                 "default", "default_module", "env", "bodies")
+                 "default", "default_module", "env", "bodies", "relays")
 
     def __init__(self, key, lang, path, text):
         self.key, self.lang, self.path, self.text = key, lang, path, text
@@ -15975,6 +16048,7 @@ class _XfModule:
         self.default_module = None   # npm: module.exports = require(…)'s module key
         self.env = {}             # environment variable -> (source, refs) of what it is set to
         self.bodies = {}          # symbol -> (parameters, body rows) of a function that names a code runner
+        self.relays = {}          # symbol -> (parameters, body rows) of another function with parameters
 
 
 def _xf_merge(old, new):
@@ -15992,11 +16066,14 @@ def _xf_member(mod, cls, name, ret, static):
 
 
 def _xf_body(mod, sym, params, body):
-    """Keep a function's body for the runner test when it names a code runner."""
+    """Keep a function's body for the runner test when it names a code
+    runner, else as a relay (it may hand a parameter to a runner)."""
     if params and sym not in mod.bodies:
         joined = "\n".join(body)
         if any(n in joined for n in _DL_RUN_NEEDLES):
             mod.bodies[sym] = (params, body)
+        elif sym not in mod.relays:
+            mod.relays[sym] = (params, body)
 
 
 def _xf_writes(mod, masked, row_cls, lang):
@@ -16660,7 +16737,45 @@ class _XfPackage:
     def runners(self):
         """The functions that run a parameter as code (def execute(c):
         exec(c)): their body read by the single-file detector with the
-        parameters seeded. At most _XF_MAX_RUNNERS bodies are read."""
+        parameters seeded. At most _XF_MAX_RUNNERS bodies are read. (The
+        detection round) Then a function that hands a parameter to one of
+        them — the runner in another file or in its own (def go(c):
+        execute(c)) — runs it too, up to _XF_ROUNDS hops: a relay's body is
+        read with its parameters seeded and the names that name a runner in
+        its module as runners, at most _XF_MAX_RUNNERS a round."""
+        out = self.direct_runners()
+        relays = []                                 # (a body that names a runner may still only hand it on)
+        for mod in self.mods.values():
+            for sym, (params, body) in list(mod.bodies.items()) + list(mod.relays.items()):
+                names = sorted(set(params) - _XF_NOT_PARAMS)
+                if names and (mod.key, sym) not in out:
+                    relays.append((mod, sym, names, "\n".join(body)))
+        for _ in range(_XF_ROUNDS):
+            if not out or not relays:
+                break
+            running, seeds_of, grew, read = _xf_marked_members(self, out), {}, set(), 0
+            for mod, sym, names, text in relays:
+                if (mod.key, sym) in out:
+                    continue
+                if mod.key not in seeds_of:
+                    seeds = set(_xf_seeds(self, mod, out, {}, running)[0])
+                    seeds_of[mod.key] = sorted(seeds | {n for k, n in out if k == mod.key and "." not in n})
+                found = [n for n in seeds_of[mod.key] if n in text][:_XF_MAX_SEEDS]
+                if not found:
+                    continue
+                read += 1
+                if read > _XF_MAX_RUNNERS:
+                    break
+                res = _received_code_kind(text, extra_always=names, extra_runners=found)
+                if res is not None and res[1] == "run":
+                    grew.add((mod.key, sym))
+            if not grew:
+                break
+            out |= grew
+        return out
+
+    def direct_runners(self):
+        """The functions whose own body runs a parameter (see runners)."""
         out, count = set(), 0
         for mod in self.mods.values():
             for sym, (params, body) in mod.bodies.items():
@@ -17050,19 +17165,95 @@ def _xf_package_issues(mods, skip, who):
     return out
 
 
-def _xf_groups(files, one_package=False):
+# (the detection round) The top-level modules and packages one distribution
+# installs into site-packages are one package to the follower in a --deps
+# scan too, as a registry scan reads a release (one_package): the
+# distribution's .dist-info/RECORD lists them (_xf_site_groups). Top-level
+# names no RECORD lists together stay packages of their own (two
+# distributions). At most _XF_RECORD_BYTES of a RECORD are read.
+_XF_RECORD_BYTES = 4 << 20
+_XF_SITE_MARKERS = ("site-packages", "dist-packages")
+
+
+def _xf_site_groups(root, files):
+    """{'/'-separated path: group} for the dependency Python files under a
+    site-packages or dist-packages directory of the scan root `root` whose
+    top-level module or package a distribution's RECORD lists with another
+    (see above): the group is that directory and the first such
+    .dist-info's name, by name."""
+    sites = {}                                      # site dir -> {top-level name: [paths]}
+    for f in files:
+        if not f.get("dep") or f["lang"] != "py":
+            continue
+        path = f["path"].replace(os.sep, "/")
+        parts = path.split("/")
+        idx = max((len(parts) - 1 - parts[::-1].index(m) for m in _XF_DEP_MARKERS if m in parts), default=-1)
+        if idx < 0 or idx >= len(parts) - 1 or parts[idx] not in _XF_SITE_MARKERS:
+            continue
+        sites.setdefault("/".join(parts[:idx + 1]), {}).setdefault(parts[idx + 1], []).append(path)
+    out = {}
+    for site, tops in sites.items():
+        if len(tops) < 2:
+            continue
+        where = os.path.join(root, *site.split("/"))
+        try:
+            names = sorted(n for n in os.listdir(where) if n.endswith(".dist-info"))
+        except OSError:
+            continue
+        label = {}                                  # top-level name -> its group's .dist-info
+        for name in names:
+            try:                                    # (a real directory: no link is followed)
+                st = os.lstat(os.path.join(where, name))
+            except OSError:
+                continue
+            if not _stat.S_ISDIR(st.st_mode) or _is_reparse_point(st):
+                continue
+            listed = sorted({t for t in _xf_record_tops(os.path.join(where, name, "RECORD")) if t in tops})
+            if len(listed) < 2:
+                continue
+            joined = {name} | {label[t] for t in listed if t in label}
+            first = min(joined)
+            for t in [t for t, g in label.items() if g in joined] + listed:
+                label[t] = first
+        for top, group in label.items():
+            for path in tops[top]:
+                out[path] = site + "/" + group
+    return out
+
+
+def _xf_record_tops(path):
+    """The top-level names a RECORD lists (its rows' first path parts), none
+    when it cannot be read as one (not a regular file, too large, not text)."""
+    try:
+        data = _read_prefix(path, _XF_RECORD_BYTES + 1)
+    except (OSError, ValueError):
+        return set()
+    if len(data) > _XF_RECORD_BYTES:
+        return set()
+    out = set()
+    for row in data.decode("utf-8", "replace").split("\n"):
+        entry = row.split(",", 1)[0].strip().strip('"').replace("\\", "/")
+        top = entry.split("/", 1)[0]
+        if top and top not in (".", "..") and ":" not in top:
+            out.add(top)
+    return out
+
+
+def _xf_groups(files, one_package=False, site_groups=None):
     """{(lang, root): [(module key, extra, file)]}: the dependency files the
     follower reads, by package (see _cross_file_received_issues), each
     package and its files in the order the files come. `extra`: a Python
-    module's is_package, an npm file's path in its package."""
-    groups = {}
+    module's is_package, an npm file's path in its package. `site_groups`:
+    _xf_site_groups' answer, the packages a distribution's modules make."""
+    groups, site_groups = {}, site_groups or {}
     for f in files:
         if not f.get("dep"):
             continue
         if f["lang"] == "py":
             info = _xf_py_module(f["path"])
             if info is not None:
-                groups.setdefault(("py", "" if one_package else info[0]), []).append((info[1], info[2], f))
+                root = "" if one_package else site_groups.get(f["path"].replace(os.sep, "/"), info[0])
+                groups.setdefault(("py", root), []).append((info[1], info[2], f))
         elif f["lang"] == "js":
             root = _xf_js_package(f["path"])
             if root is not None:
@@ -17092,7 +17283,7 @@ def _xf_group_issues(lang, members, skip, who):
         return []
 
 
-def _cross_file_received_issues(files, skip_paths=(), who="Dependency code", one_package=False):
+def _cross_file_received_issues(files, skip_paths=(), who="Dependency code", one_package=False, site_groups=None):
     """SC-IMPORT-RISK for each dependency file that runs a value received over
     the network in another file of the same package, or receives one and
     hands it to another file's function that runs it (see the section
@@ -17100,11 +17291,13 @@ def _cross_file_received_issues(files, skip_paths=(), who="Dependency code", one
     (those already flagged single-file). `who(path)` may name the file in the
     message. A registry scan reads one distribution: `one_package` groups all
     its Python modules as one package (its top-level packages and modules
-    import each other). Best-effort: a package that raises is skipped. The
-    native engine's `cross_file` is this function (engine.cross_file_issues)."""
+    import each other); a --deps scan, the modules a distribution's RECORD
+    lists (`site_groups`: _xf_site_groups). Best-effort: a package that
+    raises is skipped. The native engine's `cross_file` is this function
+    (engine.cross_file_issues)."""
     skip = set(skip_paths)
     out = []
-    for (lang, _root), members in _xf_groups(files, one_package).items():
+    for (lang, _root), members in _xf_groups(files, one_package, site_groups).items():
         out.extend(_xf_group_issues(lang, members, skip, who))
     return out
 
@@ -17167,7 +17360,7 @@ def dependency_checks(root, files, manifests, issues, excludes=(), should_stop=N
     # Skips the files already flagged CRITICAL single-file (a MAJOR one can
     # still be found running what another file received).
     flagged = {i["file"].replace(os.sep, "/") for i in out if i["rule"] == "SC-IMPORT-RISK" and i["sev"] == "CRITICAL"}
-    out.extend(engine.cross_file_issues(files, flagged))
+    out.extend(engine.cross_file_issues(files, flagged, site_groups=_xf_site_groups(tree.root, files)))
     return out, extra, None
 
 

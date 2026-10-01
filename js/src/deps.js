@@ -20,7 +20,7 @@
 // network, the cross-file follower's SC-IMPORT-RISK (the native engine's,
 // through lib/native.js crossFileIssues).
 
-import { lstatSync } from "node:fs";
+import { lstatSync, readdirSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { scanFile } from "./scanner/scan.js";
 import { followHook, persistenceReasons, installScriptRisk, importTimeRisk, importTimeSeverity, agentHijack,
@@ -33,7 +33,7 @@ import { decodeSource } from "./lib/encoding.js";
 import { mkIssue } from "./lib/issue.js";
 import { REDACT, redactText, registerScanContext, SECRET_SKIP_RE } from "./lib/redact.js";
 import { mapTasks } from "./pool.js";
-import { pyStrip, pyRepr } from "./lib/pycompat.js";
+import { pyStrip, pyStripChars, pyRepr, cmpCodePoints } from "./lib/pycompat.js";
 
 const DEP_IMPORT_RISK_WHY = "An installed package's code runs with the application's privileges when it is loaded " +
   "or its command runs. Collecting credentials or the whole environment next to a network call is the shape of an " +
@@ -158,6 +158,69 @@ class DependencyTree {
 }
 
 /**
+ * {"/"-separated path: group} for the dependency Python files under a site-packages or
+ * dist-packages directory of the scan root whose top-level module or package a distribution's
+ * .dist-info/RECORD lists with another: the cross-file follower reads them as one package (the
+ * group is that directory and the first such .dist-info's name, by name). Twin of
+ * core._xf_site_groups.
+ */
+export function siteGroups(root, files) {
+  const [depMarkers, siteMarkers] = packValues("_XF_DEP_MARKERS", "_XF_SITE_MARKERS");
+  const sites = new Map();                     // site dir -> Map(top-level name -> [paths])
+  for (const f of files) {
+    if (!f.dep || f.lang !== "py") continue;
+    const path = posix(f.path);
+    const parts = path.split("/");
+    let idx = -1;
+    for (const m of depMarkers) idx = Math.max(idx, parts.lastIndexOf(m));
+    if (idx < 0 || idx >= parts.length - 1 || !siteMarkers.includes(parts[idx])) continue;
+    const site = parts.slice(0, idx + 1).join("/");
+    if (!sites.has(site)) sites.set(site, new Map());
+    const tops = sites.get(site);
+    if (!tops.has(parts[idx + 1])) tops.set(parts[idx + 1], []);
+    tops.get(parts[idx + 1]).push(path);
+  }
+  const out = {};
+  for (const [site, tops] of sites) {
+    if (tops.size < 2) continue;
+    const where = join(resolve(root), ...site.split("/"));
+    let names;
+    try {
+      names = readdirSync(where).filter((n) => n.endsWith(".dist-info")).sort(cmpCodePoints);
+    } catch { continue; }
+    const label = new Map();                   // top-level name -> its group's .dist-info
+    for (const name of names) {
+      try {                                    // (a real directory: no link is followed)
+        const st = lstatSync(join(where, name));
+        if (!st.isDirectory() || st.isSymbolicLink()) continue;
+      } catch { continue; }
+      const listed = [...recordTops(join(where, name, "RECORD"))].filter((t) => tops.has(t)).sort(cmpCodePoints);
+      if (listed.length < 2) continue;
+      const joined = new Set([name, ...listed.filter((t) => label.has(t)).map((t) => label.get(t))]);
+      const first = [...joined].sort(cmpCodePoints)[0];
+      for (const t of [...[...label].filter(([, g]) => joined.has(g)).map(([t]) => t), ...listed]) label.set(t, first);
+    }
+    for (const [top, group] of label) for (const path of tops.get(top)) out[path] = `${site}/${group}`;
+  }
+  return out;
+}
+
+/** The top-level names a RECORD lists (its rows' first path parts); none when it cannot be read. core._xf_record_tops */
+function recordTops(path) {
+  const [limit] = packValues("_XF_RECORD_BYTES");
+  let data;
+  try { data = readBounded(path, limit + 1); } catch { return new Set(); }
+  if (data.length > limit) return new Set();
+  const out = new Set();
+  for (const row of data.toString("utf8").split("\n")) {
+    const entry = pyStripChars(pyStrip(row.split(",", 1)[0]), '"').replace(/\\/g, "/");
+    const top = entry.split("/", 1)[0];
+    if (top && top !== "." && top !== ".." && !top.includes(":")) out.add(top);
+  }
+  return out;
+}
+
+/**
  * The --deps checks of what dependencies run, after the files and manifests
  * were scanned: escalates the SC-INSTALL-HOOK findings of dependency
  * manifests in `issues` in place and returns { issues, files }: the findings
@@ -179,10 +242,11 @@ export function dependencyChecks(root, files, manifests, issues, { exclude = [],
   // in order.
   const checks = files.filter((f) => f.dep && (f.lang === "js" || f.lang === "py") && !run.has(posix(f.path)))
     .map((f) => ["dep", [f.path, f.content, f.lang]]);
+  const groups = siteGroups(tree.root, files);
   const follow = ["xf", {
     files: files.filter((f) => f.dep && (f.lang === "js" || f.lang === "py"))
       .map((f) => ({ path: f.path, lang: f.lang, dep: true, content: f.content })),
-    redact: REDACT.on,
+    redact: REDACT.on, siteGroups: groups,
   }];
   const answers = mapTasks(pool, pool ? [follow, ...checks] : checks, dependencyTask, dependencyTaskError);
   for (const [found, agent] of pool ? answers.slice(1) : answers) {
@@ -198,7 +262,7 @@ export function dependencyChecks(root, files, manifests, issues, { exclude = [],
     for (const i of answers[0]) if (!flagged.has(posix(i.file))) out.push(i);
   } else {
     try {
-      for (const i of crossFileIssues(files, flagged, { redact: REDACT.on })) out.push(i);
+      for (const i of crossFileIssues(files, flagged, { redact: REDACT.on, siteGroups: groups })) out.push(i);
     } catch (e) {
       if (!(e instanceof NativeError)) throw e;        // (the engine stopped: no cross-file findings, as before)
     }
@@ -212,7 +276,7 @@ function dependencyTask([kind, args]) {
     const [path, content, lang] = args;
     return [dependencyImportIssue(path, content, lang), dependencyAgentIssue(path, content)];
   }
-  return crossFileIssues(args.files, new Set(), { redact: args.redact });
+  return crossFileIssues(args.files, new Set(), { redact: args.redact, siteGroups: args.siteGroups });
 }
 
 /** What a task of dependencyChecks that threw stands for (`error`: an Error, or a worker's {name, message}). */

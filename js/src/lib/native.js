@@ -271,10 +271,12 @@ export const deadDropAt = (text) => call("dead_drop_at", {}, text);
  * The cross-file follower (core._cross_file_received_issues): SC-IMPORT-RISK for each dependency
  * file that runs a value another file of its package received over the network, or hands one to
  * another file's function that runs it, as core finds them and in core's order. `skipPaths`
- * ("/"-separated): the files already flagged single-file. The engine reads each package with its own
- * work budget; one that spends it is skipped, as core skips a package that raises.
+ * ("/"-separated): the files already flagged single-file. `siteGroups`: deps.js siteGroups' answer
+ * (core's site_groups), the packages a distribution's top-level modules make. The engine reads each
+ * package with its own work budget; one that spends it is skipped, as core skips a package that raises.
  */
-export function crossFileIssues(files, skipPaths = new Set(), { who = "Dependency code", onePackage = false, redact = true } = {}) {
+export function crossFileIssues(files, skipPaths = new Set(), { who = "Dependency code", onePackage = false, redact = true,
+  siteGroups = null } = {}) {
   const todo = files.filter((f) => f.dep && (f.lang === "py" || f.lang === "js"));
   if (todo.length < 2) return [];
   const texts = todo.map((f) => String(f.content));
@@ -282,6 +284,9 @@ export function crossFileIssues(files, skipPaths = new Set(), { who = "Dependenc
     files: todo.map((f, k) => [f.path, f.lang, codePoints(texts[k])]), skip: [...skipPaths], who,
     one_package: onePackage, sep, redact, neumaier: false,
   };
+  if (siteGroups && Object.keys(siteGroups).length) {
+    args.groups = todo.map((f) => siteGroups[sep === "/" ? f.path : f.path.split(sep).join("/")] ?? null);
+  }
   const out = [];
   for (const pkg of call("cross_file", args, texts)) {
     if (!pkg.issues) continue;                          // (failed: skipped)

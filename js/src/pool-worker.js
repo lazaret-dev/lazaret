@@ -52,6 +52,6 @@ async function setUp(module, config) {
     /** a dependency file's import-time and agent checks (deps.js): [import issue, agent issue] */
     dep: ([path, content, lang]) => [dependencyImportIssue(path, content, lang), dependencyAgentIssue(path, content)],
     /** the cross-file follower over a scan's dependency files, no file skipped (deps.js) */
-    xf: ({ files, redact }) => native.crossFileIssues(files, new Set(), { redact }),
+    xf: ({ files, redact, siteGroups }) => native.crossFileIssues(files, new Set(), { redact, siteGroups }),
   };
 }

@@ -151,7 +151,12 @@ JS_FILES = ["index.js", "net.js", "api.js", "util.js", "client.js", "run.js", "l
 def _py_flow(r, f, g, P, C, meth, V, E):
     """(producer text, consumer imports, consumer pre-statements, the expression holding the value, a runner or None)."""
     src = r.choice(PY_SRC)
-    form = r.randrange(16)
+    form = r.randrange(18)
+    if form == 16:      # (the detection round) a getattr whose name the file builds: a constant, or pieces
+        name = r.choice([f"'{f}'", f"'{f[:1]}' + '{f[1:]}'"])
+        return f"def {f}():\n    return {src}\n", f"from . import {P}\nNAME = {name}\n", "", f"getattr({P}, NAME)()", None
+    if form == 17:
+        return f"def {f}():\n    return {src}\n", f"from . import {P}\n", "", f"getattr({P}, '{f[:2]}' + \"{f[2:]}\")()", None
     if form == 0:
         return f"def {f}():\n    return {src}\n", f"from .{P} import {f}\n", "", f"{f}()", None
     if form == 1:
@@ -181,7 +186,10 @@ def _py_flow(r, f, g, P, C, meth, V, E):
     if form == 11:
         return f"def {f}(cb):\n    cb({src})\n", f"from .{P} import {f}\n", "", "<callback>", f
     if form == 12:
-        return f"def {f}(code):\n    {r.choice(PY_SINK).format('code')}\n", f"from .{P} import {f}\n", "", "<runner>", f
+        runner = f"def {f}(code):\n    {r.choice(PY_SINK).format('code')}\n"
+        if r.random() < 0.4:            # (the detection round) the runner behind another function of the file
+            runner = f"def {g}_run(code):\n    {r.choice(PY_SINK).format('code')}\n\ndef {f}(c):\n    return {g}_run(c)\n"
+        return runner, f"from .{P} import {f}\n", "", "<runner>", f
     if form == 13:
         return f"def {f}():\n    return {src}\n", f"import importlib\n{g} = importlib.import_module('pkg.{P}')\n", "", f"{g}.{f}()", None
     if form == 14:
@@ -245,7 +253,11 @@ def _js_flow(r, f, g, P, C, meth, V, E):
         return (f"const https = require('https');\nfunction {f}() {{\n  return new Promise((resolve) => {{\n"
                 f"    https.get({U}, (res) => resolve(res));\n  }});\n}}\n" + exp, imp[0], "", imp[1], None)
     if form == 12:
-        return (f"function {f}(code) {{\n  return {r.choice(JS_SINK).format('code')};\n}}\n" + exp, imp[0], "", "<runner>", imp[1][:-2])
+        runner = f"function {f}(code) {{\n  return {r.choice(JS_SINK).format('code')};\n}}\n"
+        if r.random() < 0.4:            # (the detection round) the runner behind another function of the file
+            runner = (f"function {g}Run(code) {{\n  return {r.choice(JS_SINK).format('code')};\n}}\n"
+                      f"function {f}(c) {{\n  return {g}Run(c);\n}}\n")
+        return runner + exp, imp[0], "", "<runner>", imp[1][:-2]
     return (f"export const {f} = async () => {src};\n", f"const {{ {f} }} = await import('{spec}');\n", "", f"{f}()", None)
 
 
@@ -414,6 +426,19 @@ class CrossFileParityTests(unittest.TestCase):
             want = view(core._cross_file_received_issues(files, who=who, one_package=True))
             self.assertEqual(view(native(files, who=who, one_package=True)), want)
         self.assertTrue(view(core._cross_file_received_issues(cases[0], one_package=True)))
+
+    def test_a_distributions_modules(self):
+        """site_groups (the detection round, _xf_site_groups): the modules a
+        distribution's RECORD lists read as one package."""
+        cases = [T.py({"a.py": T.PY_NET, "b.py": "from a import pull\nexec(pull())\n"})] + generated(11, 80)[::2]
+        found = 0
+        for k, files in enumerate(cases):
+            groups = {f["path"]: "site-packages/x-1.dist-info" if k == 0 else
+                      "venv/lib/python3.12/site-packages/d" + str(len(f["path"]) % 2) + ".dist-info" for f in files}
+            want = view(core._cross_file_received_issues(files, site_groups=groups))
+            found += bool(want)
+            self.assertEqual(view(native(files, site_groups=groups)), want)
+        self.assertGreater(found, 5)
 
     def test_skipped_files_and_windows_separators(self):
         files = T.py({"pkg/_net.py": T.PY_NET, "pkg/run.py": "from ._net import pull\nexec(pull())\n",

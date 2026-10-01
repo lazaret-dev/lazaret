@@ -386,6 +386,31 @@
       "flags": "",
       "note": "getattr(obj, 'name') (and a default), read as obj.name"
     },
+    "_DL_GETATTR_EXPR_RE": {
+      "src": "\\bgetattr[ \\t]*\\([ \\t]*(?P<o>[A-Za-z_$][\\w$]*(?:[ \\t]*\\.[ \\t]*[A-Za-z_$][\\w$]*){0,8})[ \\t]*,[ \\t]*(?P<e>(?:'[^'\\\\\\n]{0,64}'|\"[^\"\\\\\\n]{0,64}\"|[A-Za-z_$][\\w$]*)(?:[ \\t]*\\+[ \\t]*(?:'[^'\\\\\\n]{0,64}'|\"[^\"\\\\\\n]{0,64}\"|[A-Za-z_$][\\w$]*)){0,8})[ \\t]*(?:,[^()\\n]{0,120})?\\)",
+      "flags": "",
+      "note": "getattr(obj, …) whose name is literals joined with + or names given such a value (the detection round), read as obj.name when that is known"
+    },
+    "_DL_CONST_RE": {
+      "src": "^[ \\t]*(?:(?:const|let|var)[ \\t]+)?(?P<n>[A-Za-z_$][\\w$]*)[ \\t]*=[ \\t]*(?P<v>(?:'[^'\\\\\\n]{0,64}'|\"[^\"\\\\\\n]{0,64}\")(?:[ \\t]*\\+[ \\t]*(?:'[^'\\\\\\n]{0,64}'|\"[^\"\\\\\\n]{0,64}\")){0,8})[ \\t]*;?[ \\t]*$",
+      "flags": "m",
+      "note": "a name given a string on a row of its own (literals joined with +): a constant where it is given nothing else"
+    },
+    "_DL_STR_PIECE_RE": {
+      "src": "'(?P<a>[^'\\\\\\n]*)'|\"(?P<b>[^\"\\\\\\n]*)\"|(?P<n>[A-Za-z_$][\\w$]*)",
+      "flags": "",
+      "note": "a piece of a joined name: a literal, or a name"
+    },
+    "_DL_NAME_FULL_RE": {
+      "src": "[A-Za-z_$][\\w$]{0,63}",
+      "flags": "",
+      "note": "a member's name"
+    },
+    "_DL_BUILTINS_RE": {
+      "src": "(?<![\\w$.])(?:builtins|__builtins__|globalThis|window|global)(?:[ \\t]*\\.[ \\t]*__dict__)?[ \\t]*\\.[ \\t]*(?=(?:exec|eval|compile|__import__|Function)(?![\\w$]))",
+      "flags": "",
+      "note": "a code runner named through the builtins or the global object (builtins.exec, __builtins__.__dict__['eval'] once read as a member, globalThis.eval): read as the runner itself (the detection round)"
+    },
     "_DL_MEMBER_RE": {
       "src": "(?<=[\\w$)\\]])\\[(?:'(?P<a>[A-Za-z_$][\\w$]{0,63})'|\"(?P<b>[A-Za-z_$][\\w$]{0,63})\")\\]",
       "flags": "",
