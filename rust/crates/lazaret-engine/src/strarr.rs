@@ -794,11 +794,18 @@ fn value_of(p: &Pack, src: &[u32], consts: &Consts) -> R<Val> {
 /// core._dv_string_arrays: `text` with the calls that read a string array
 /// read as their strings; None when it reads none.
 pub fn dv_string_arrays(p: &Pack, text: &[u32]) -> Option<PyStr> {
+    sa_read(p, text).map(|(view, _)| view)
+}
+
+/// core._sa_read: (dv_string_arrays' reading of `text`, the offset of the
+/// first string array whose calls it read); None when it reads none.
+pub fn sa_read(p: &Pack, text: &[u32]) -> Option<(PyStr, usize)> {
     if text.len() > p.usize("_SA_MAX_CHARS") || !pystr::contains(text, "function") {
         return None;
     }
     let max_arrays = p.usize("_SA_MAX_ARRAYS");
     let mut arrays: Vec<(PyStr, std::rc::Rc<Vec<PyStr>>)> = Vec::new();
+    let mut starts: HashMap<PyStr, usize> = HashMap::new();
     for m in p.re("_SA_ARRAY_FN_RE").finditer(text) {
         let got = match sa_strings(p, text, m.end()) {
             Some(g) if !g.0.is_empty() => g,
@@ -815,6 +822,7 @@ pub fn dv_string_arrays(p: &Pack, text: &[u32]) -> Option<PyStr> {
             continue;
         }
         arrays.push((fn_name.to_vec(), std::rc::Rc::new(got.0)));
+        starts.entry(fn_name.to_vec()).or_insert(m.start());
         if arrays.len() >= max_arrays {
             break;
         }
@@ -1021,6 +1029,7 @@ pub fn dv_string_arrays(p: &Pack, text: &[u32]) -> Option<PyStr> {
     let call_re = p.re("_SA_CALL_RE");
     let mut out: PyStr = Vec::with_capacity(text.len());
     let (mut pos, mut read) = (0usize, 0usize);
+    let mut first = usize::MAX;
     while read < max_calls {
         let m = match call_re.search_at(text, pos as isize, text.len() as isize) {
             Some(m) => m,
@@ -1028,11 +1037,11 @@ pub fn dv_string_arrays(p: &Pack, text: &[u32]) -> Option<PyStr> {
         };
         let name = m.group(1).unwrap_or(&[]);
         let name_end = m.end_of(1) as usize;
-        let mut got: Option<PyStr> = None;
+        let mut got: Option<(PyStr, usize)> = None;
         if callers.contains(name)
             && tail_re.search_at(text, m.start().saturating_sub(9) as isize, m.start() as isize).is_none()
         {
-            let r: R<Option<PyStr>> = (|| {
+            let r: R<Option<(PyStr, usize)>> = (|| {
                 let trees = sa_parse_many(&sa_tokens(p, m.group(2).unwrap_or(&[]))?, &consts)?;
                 let mut args = Vec::new();
                 for t in &trees {
@@ -1040,7 +1049,7 @@ pub fn dv_string_arrays(p: &Pack, text: &[u32]) -> Option<PyStr> {
                 }
                 let (k, idx, key) = rd.resolve(name, args, 0)?;
                 let (kind, rot) = (rd.accessors[k].kind, rd.accessors[k].rot);
-                Ok(rd.accessors[k].read(p, idx.as_ref(), key.as_ref(), kind, rot))
+                Ok(rd.accessors[k].read(p, idx.as_ref(), key.as_ref(), kind, rot).map(|s| (s, k)))
             })();
             got = r.ok().flatten();
         }
@@ -1050,20 +1059,20 @@ pub fn dv_string_arrays(p: &Pack, text: &[u32]) -> Option<PyStr> {
                 out.extend_from_slice(&text[pos..name_end]);
                 pos = name_end;
             }
-            Some(s) => {
+            Some((s, k)) => {
                 out.extend_from_slice(&text[pos..m.start()]);
                 out.extend(sa_quote(&s));
                 pos = m.end();
                 read += 1;
+                first = first.min(starts.get(&rd.accessors[k].fn_name).copied().unwrap_or(usize::MAX));
             }
         }
     }
-    out.extend_from_slice(&text[pos..]);
-    if out == text {
-        None
-    } else {
-        Some(out)
+    if read == 0 {
+        return None;
     }
+    out.extend_from_slice(&text[pos..]);
+    Some((out, first))
 }
 
 // ---------------- proxy objects ----------------
@@ -1199,16 +1208,31 @@ fn px_args(p: &Pack, text: &[u32], i: usize, hi: usize) -> Option<(usize, Vec<(u
     None
 }
 
+/// The objects a name is given, in order: (start, its entries when it is a proxy).
+type Objects = HashMap<PyStr, Vec<(usize, Option<HashMap<PyStr, Entry>>)>>;
+
 struct Proxies<'a> {
     p: &'a Pack,
     text: &'a [u32],
-    objects: HashMap<PyStr, HashMap<PyStr, Entry>>,
+    objects: Objects,
     uses: usize,
 }
 
 impl<'a> Proxies<'a> {
+    /// The entries of the object `name` was last given before pos (core's
+    /// lookup: a name an obfuscator reuses in each function holds that
+    /// function's object), else None.
+    fn lookup(&self, name: &[u32], pos: usize) -> Option<&HashMap<PyStr, Entry>> {
+        let given = self.objects.get(name)?;
+        let k = given.partition_point(|(a, _)| *a < pos);
+        if k == 0 {
+            return None;
+        }
+        given[k - 1].1.as_ref()
+    }
+
     /// An entry with the entries it refers to followed.
-    fn final_entry(&self, entry: &Entry) -> Option<Entry> {
+    fn final_entry(&self, entry: &Entry, pos: usize) -> Option<Entry> {
         let max = self.p.usize("_PX_DEPTH");
         let mut e = entry.clone();
         let mut depth = 0usize;
@@ -1217,7 +1241,7 @@ impl<'a> Proxies<'a> {
                 Entry::Ref(o, k) | Entry::RefCall(o, k, _) => (o.clone(), k.clone()),
                 _ => unreachable!(),
             };
-            let target = self.objects.get(&o).and_then(|t| t.get(&k))?.clone();
+            let target = self.lookup(&o, pos).and_then(|t| t.get(&k))?.clone();
             if let Entry::RefCall(_, _, n) = e {
                 match &target {
                     Entry::Str(_) => return None,
@@ -1250,8 +1274,8 @@ impl<'a> Proxies<'a> {
             };
             let (ms, me) = (m.start(), m.end());
             let key = m.group(2).or(m.group(3)).unwrap_or(&[]).to_vec();
-            let found = self.objects.get(m.group(1).unwrap_or(&[])).and_then(|t| t.get(&key)).cloned();
-            let entry = found.and_then(|e| self.final_entry(&e));
+            let found = self.lookup(m.group(1).unwrap_or(&[]), ms).and_then(|t| t.get(&key)).cloned();
+            let entry = found.and_then(|e| self.final_entry(&e, ms));
             let entry = match entry {
                 Some(e) => e,
                 None => {
@@ -1318,20 +1342,12 @@ pub fn dv_proxies(p: &Pack, text: &[u32]) -> Option<PyStr> {
     if !pystr::contains(text, "function") || !text.contains(&c('[')) {
         return None;
     }
-    let mut objects: HashMap<PyStr, Option<HashMap<PyStr, Entry>>> = HashMap::new();
+    let mut found: Objects = HashMap::new();
     for m in p.re("_PX_OBJECT_RE").finditer(text) {
-        if let Some(entries) = px_entries(p, text, m.end()) {
-            if !entries.is_empty() {
-                let name = m.group(1).unwrap_or(&[]).to_vec();
-                if objects.contains_key(&name) {
-                    objects.insert(name, None);
-                } else {
-                    objects.insert(name, Some(entries));
-                }
-            }
-        }
+        let entries = px_entries(p, text, m.end()).filter(|e| !e.is_empty());
+        found.entry(m.group(1).unwrap_or(&[]).to_vec()).or_default().push((m.start(), entries));
     }
-    let objects: HashMap<PyStr, HashMap<PyStr, Entry>> = objects.into_iter().filter_map(|(k, v)| v.map(|v| (k, v))).collect();
+    let objects: Objects = found.into_iter().filter(|(_, v)| v.iter().any(|(_, e)| e.is_some())).collect();
     if objects.is_empty() {
         return None;
     }

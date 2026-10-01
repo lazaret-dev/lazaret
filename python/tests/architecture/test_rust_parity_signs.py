@@ -12,7 +12,8 @@ _exfil_signs, raw_ip_connect, capture_service) and service_reasons, the DNS
 beacon without a read of the identity and the dead drop, and the text read
 as a shell program (_sh_reasons, _shell_text, _code_text); and (0.1.8,
 for the npm package) agent_hijack, agent_hijack_in_command,
-_hook_is_suspicious and _import_code; and wallet_swap_at.
+_hook_is_suspicious and _import_code; and wallet_swap_at and
+string_array_line.
 
 test_rust_parity_hooks.py holds install_script_risk and import_time_risk,
 which read all of these at once; here a difference shows which one.
@@ -39,8 +40,8 @@ FIELDS = ("received_code_kind", "downloads_and_runs", "decodes_and_runs", "power
           "_sh_reasons", "_shell_text", "_code_text",
           # 0.1.8: what the npm package asks besides (hook_command_risk: test_rust_parity_hook_commands)
           "agent_hijack", "agent_hijack_in_command", "_hook_is_suspicious", "_import_code js", "_import_code py",
-          # the detection round: wallet addresses swapped
-          "wallet_swap_at")
+          # the detection round: wallet addresses swapped; code built around a string array
+          "wallet_swap_at", "string_array_line")
 
 
 def as_json(v):
@@ -66,7 +67,7 @@ def core_view(text):
                     core._sh_reasons(text, 0, False, core._HookWalk()), core._shell_text(text), core._code_text(text),
                     core.agent_hijack(text), core.agent_hijack_in_command(text), core._hook_is_suspicious(text),
                     core._import_code(text, "js"), core._import_code(text, "py"),
-                    core.wallet_swap_at(text)])
+                    core.wallet_swap_at(text), core.string_array_line(text)])
 
 
 def rust_views(cases, box):

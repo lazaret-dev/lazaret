@@ -48,7 +48,7 @@ pub const CALLS: &[&str] = &[
     "lex_comment_spans", "logical_text", "hooks_view", "signs_view",
     // 0.1.8: the exfiltration shapes, programs started at login or boot
     "secret_endpoint_at", "credential_sweep_at", "exec_command_reasons", "dns_beacon_at", "miner_at",
-    "raw_ip_connect", "capture_service", "exfil_signs", "service_reasons", "wallet_swap_at",
+    "raw_ip_connect", "capture_service", "exfil_signs", "service_reasons", "wallet_swap_at", "string_array_line",
     // 0.1.8: a shell text read as a program, and the command lines a script hands a shell
     "sh_reasons", "shell_text", "code_text", "sh_literal_value",
     // 0.1.8: the dead drop
@@ -118,7 +118,7 @@ fn exfil(p: &Pack, text: &[u32]) -> Value {
 
 /// The calls whose text gets a text gate (textgate.rs).
 const GATED: &[&str] = &[
-    "import_time_risk", "install_script_risk", "spawned_scripts", "decoded_view", "received_code_kind",
+    "import_time_risk", "install_script_risk", "spawned_scripts", "decoded_view", "string_array_line", "received_code_kind",
     "runs_received_code", "downloads_and_runs", "decodes_and_runs", "local_data_sent_at", "exfil_signs",
     "secret_endpoint_at", "credential_sweep_at", "persistence_reasons", "service_reasons", "exec_command_reasons",
     "dead_drop_at", "signs_view", "hooks_view", "follow_hook", "hook_command_risk", "hook_command_view",
@@ -365,6 +365,7 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
         }
         "import_time_severity" => Value::str(signs::import_time_severity(p, &arg_strs(args, "reasons"))),
         "decoded_view" => Value::Str(signs::decoded_view(p, text)),
+        "string_array_line" => signs::string_array_line(p, text).map(|n| Value::Int(n as i64)).unwrap_or(Value::Null),
         "spawned_scripts" => Value::Arr(
             signs::spawned_scripts(p, text)
                 .into_iter()
@@ -572,8 +573,9 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
                 Value::Bool(hooks::hook_is_suspicious(p, text)),
                 Value::Str(signs::import_code(p, text, "js")),
                 Value::Str(signs::import_code(p, text, "py")),
-                // the detection round: wallet addresses swapped
+                // the detection round: wallet addresses swapped; code built around a string array
                 at_reason(signs::wallet_swap_at(p, text)),
+                signs::string_array_line(p, text).map(|n| Value::Int(n as i64)).unwrap_or(Value::Null),
             ])
         }
         "logical_text" => {

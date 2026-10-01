@@ -2325,35 +2325,90 @@ fn dv_char_codes(p: &Pack, view: &[u32]) -> PyStr {
     })
 }
 
+/// A text's decoded view and the line of the string array it reads.
+type Reading = (PyStr, Option<usize>);
+
 thread_local! {
-    // the last text decoded_view read, and its view (core's _DV_MEMO): the
-    // install-script test, the import-time test and the spawned-script
-    // follower read the same file
-    static DV_MEMO: std::cell::RefCell<Option<(PyStr, PyStr)>> = const { std::cell::RefCell::new(None) };
+    // the last text decoded_view read, its view and its string array's line
+    // (core's _DV_MEMO): the install-script test, the import-time test and
+    // the spawned-script follower read the same file
+    static DV_MEMO: std::cell::RefCell<Option<(PyStr, Reading)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// core._dv_reading: decoded_view's reading of `text` and the line of the
+/// string array it reads, the last text's kept.
+fn dv_reading(p: &Pack, text: &[u32]) -> Reading {
+    if let Some(r) = DV_MEMO.with(|m| m.borrow().as_ref().filter(|(t, _)| t.as_slice() == text).map(|(_, r)| r.clone())) {
+        return r;
+    }
+    let r = decoded_view_of(p, text);
+    DV_MEMO.with(|m| *m.borrow_mut() = Some((text.to_vec(), r.clone())));
+    r
 }
 
 /// core.decoded_view
 pub fn decoded_view(p: &Pack, text: &[u32]) -> PyStr {
-    if let Some(view) = DV_MEMO.with(|m| m.borrow().as_ref().filter(|(t, _)| t.as_slice() == text).map(|(_, v)| v.clone())) {
-        return view;
-    }
-    let view = decoded_view_of(p, text);
-    DV_MEMO.with(|m| *m.borrow_mut() = Some((text.to_vec(), view.clone())));
-    view
+    dv_reading(p, text).0
 }
 
-fn decoded_view_of(p: &Pack, text: &[u32]) -> PyStr {
-    let arrays = crate::strarr::dv_string_arrays(p, text);
-    let proxies = crate::strarr::dv_proxies(p, arrays.as_deref().unwrap_or(text));
+/// core.string_array_line: the 1-based line of the string array `text` is
+/// built around (one whose calls decoded_view reads), else None.
+pub fn string_array_line(p: &Pack, text: &[u32]) -> Option<usize> {
+    dv_reading(p, text).1
+}
+
+/// core._dv_unescape: `text` with its string literals written wholly in
+/// \\x and \\u escapes, three or more, read as their text where that is
+/// printable ASCII without a quote or a backslash; None when there is none.
+fn dv_unescape(p: &Pack, text: &[u32]) -> Option<PyStr> {
+    if !pystr::contains(text, "\\x") && !pystr::contains(text, "\\u") {
+        return None;
+    }
+    let escape = p.re("_DV_ESCAPE_RE");
+    let out = p.re("_DV_ESCAPED_LITERAL_RE").sub_fn(text, 0, |m| {
+        let body = m.group(2).unwrap_or(&[]);
+        let mut s: PyStr = Vec::with_capacity(body.len());
+        let mut pos = 0usize;
+        for e in escape.finditer(body) {
+            s.extend_from_slice(&body[pos..e.start()]);
+            let hex = e.group(1).or_else(|| e.group(2)).unwrap_or(&[]);
+            s.push(hex.iter().fold(0u32, |acc, &d| acc * 16 + char::from_u32(d).and_then(|ch| ch.to_digit(16)).unwrap_or(0)));
+            pos = e.end();
+        }
+        s.extend_from_slice(&body[pos..]);
+        if s.iter().any(|&ch| !(c(' ')..=c('~')).contains(&ch) || ch == c('\'') || ch == c('"') || ch == c('\\')) {
+            return m.group0().to_vec();
+        }
+        let q = m.group(1).unwrap_or(&[]);
+        cat(&[q, &s, q])
+    });
+    if out == text {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+/// core._dv_read: (decoded_view's reading of a text, the 1-based line of
+/// the string array it reads).
+fn decoded_view_of(p: &Pack, text: &[u32]) -> Reading {
+    let unescaped = dv_unescape(p, text);
+    let source: &[u32] = unescaped.as_deref().unwrap_or(text);
+    let (arrays, line) = match crate::strarr::sa_read(p, source) {
+        // (unescaping keeps the rows)
+        Some((view, at)) => (Some(view), Some(1 + source[..at.min(source.len())].iter().filter(|&&ch| ch == c('\n')).count())),
+        None => (None, None),
+    };
+    let proxies = crate::strarr::dv_proxies(p, arrays.as_deref().unwrap_or(source));
     let base: PyStr = match (proxies, arrays) {
         (Some(x), _) => x,
         (None, Some(a)) => a,
-        (None, None) => text.to_vec(),
+        (None, None) => source.to_vec(),
     };
     let read_any = base.as_slice() != text; // (a string array or a proxy object read)
     let max = p.usize("_DV_MAX_CHARS");
     if !read_any && (text.len() > max || !any_in(text, p.needles("_DV_NEEDLES"))) {
-        return text.to_vec();
+        return (text.to_vec(), None);
     }
     let joined: PyStr =
         if base.contains(&c('+')) { p.re("_DV_JOIN_RE").sub(&base, &[], 0) } else { base.clone() };
@@ -2363,9 +2418,9 @@ fn decoded_view_of(p: &Pack, text: &[u32]) -> PyStr {
         view = dv_decoders(p, view);
     }
     if view == joined && !read_any {
-        return text.to_vec();
+        return (text.to_vec(), None);
     }
-    dv_arrays_and_members(p, view)
+    (dv_arrays_and_members(p, view), line)
 }
 
 /// core._dv_decoders: the decoders' calls on literals read as their text.
@@ -2784,6 +2839,9 @@ pub fn install_script_risk_with(p: &Pack, text: &[u32], shell: bool, command: bo
             }
         }
     }
+    if string_array_line(p, text).is_some() {
+        reasons.push(p.text("_SA_TECHNIQUE_REASON"));
+    }
     reasons
 }
 
@@ -2939,6 +2997,10 @@ pub fn import_time_risk(p: &Pack, text: &[u32], lang: Option<&str>) -> (Vec<PySt
                 line = line.or(at);
             }
         }
+    }
+    if let Some(sa) = string_array_line(p, text) {
+        reasons.push(p.text("_SA_TECHNIQUE_REASON"));
+        line = line.or(Some(sa));
     }
     (reasons, line)
 }

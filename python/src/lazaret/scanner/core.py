@@ -10922,6 +10922,15 @@ def _dv_char_codes(view):
 # differently). At most _SA_MAX_ARRAYS arrays a file, _SA_MAX_ITEMS
 # strings each, _SA_MAX_CALLS calls read; a text of more than _SA_MAX_CHARS
 # is not read.
+# (the detection round) The technique is a sign of its own: install-time code
+# (a hook's script, the scripts it starts) and import-time code built
+# around a string array — one whose calls are read as above — says so
+# (string_array_line), CRITICAL however little of what it decodes the
+# other tests understand (an obfuscated payload often runs what they miss:
+# a wrapper that downloads, a native addon it starts). No benign package of
+# the benchmark, and none of the ~60,000 files of popular packages read for
+# it, ships code built that way.
+_SA_TECHNIQUE_REASON = "hides its code in a string array it decodes as it runs (an obfuscator's technique)"
 _SA_MAX_CHARS = 16_000_000
 _SA_MAX_ARRAYS = 4
 _SA_MAX_ITEMS = 200_000
@@ -11405,9 +11414,15 @@ def _sa_quote(s):
 def _dv_string_arrays(text):
     """`text` with the calls that read a string array (see above) read as
     their strings; `text` itself when it has none."""
+    return _sa_read(text)[0]
+
+
+def _sa_read(text):
+    """(_dv_string_arrays' reading of `text`, the offset of the first string
+    array whose calls it read, else None)."""
     if len(text) > _SA_MAX_CHARS or "function" not in text:
-        return text
-    arrays = []
+        return text, None
+    arrays, starts = [], {}
     for m in _SA_ARRAY_FN_RE.finditer(text):
         got = _sa_strings(text, m.end())
         if got is None or not got[0]:
@@ -11417,10 +11432,11 @@ def _dv_string_arrays(text):
         if tail.match(text, got[1]) is None:
             continue
         arrays.append((m.group("fn"), got[0]))
+        starts.setdefault(m.group("fn"), m.start())
         if len(arrays) >= _SA_MAX_ARRAYS:
             break
     if not arrays:
-        return text
+        return text, None
     consts = _sa_consts(text)
     accessors = {}
     for fn, items in arrays:
@@ -11436,7 +11452,7 @@ def _dv_string_arrays(text):
                 a = _SA_ALPHABET_RE.search(text, m.end(), m.end() + _SA_BODY)
                 accessors[m.group("g")] = _SaAccessor(fn, items, int(off), a.group(1) if a else None)
     if not accessors:
-        return text
+        return text, None
     aliases, wrappers = {}, {}                      # name -> {names it is given}; name -> [(params, target, args)]
     for m in _SA_ALIAS_RE.finditer(text):
         aliases.setdefault(m.group(1), set()).add(m.group(2))
@@ -11537,7 +11553,7 @@ def _dv_string_arrays(text):
         else:
             acc.kind, acc.rot = chosen
     if not accessors:
-        return text
+        return text, None
     callers, queue, given_to = set(accessors), list(accessors), {}   # every name that reaches an accessor
     for name, given in aliases.items():
         if len(given) == 1 and name not in wrappers:
@@ -11550,7 +11566,7 @@ def _dv_string_arrays(text):
             if name not in callers:
                 callers.add(name)
                 queue.append(name)
-    out, pos, read = [], 0, 0
+    out, pos, read, first = [], 0, 0, None
     while read < _SA_MAX_CALLS:
         m = _SA_CALL_RE.search(text, pos)
         if m is None:
@@ -11571,8 +11587,11 @@ def _dv_string_arrays(text):
         out.append(_sa_quote(s))
         pos = m.end()
         read += 1
+        first = starts[acc.fn] if first is None else min(first, starts[acc.fn])
+    if not read:
+        return text, None
     out.append(text[pos:])
-    return "".join(out)
+    return "".join(out), first
 
 
 # (0.1.8) Proxy objects. javascript-obfuscator's control-flow flattening
@@ -11587,9 +11606,11 @@ def _dv_string_arrays(text):
 # another such entry), a string (literals joined with +) or another such
 # object's entry, is read as what it stands for: a call of an entry read
 # as the call or the operation it makes (its arguments read the same way),
-# a string entry as its literal. A name given two objects is neither. At
-# most _PX_MAX_ENTRIES entries an object, _PX_MAX_USES uses read, calls
-# nested _PX_DEPTH deep.
+# a string entry as its literal. A name given several objects (an
+# obfuscator reuses a short name in each function) is read at each use as
+# the object it was last given before it, and not where that one is no
+# proxy. At most _PX_MAX_ENTRIES entries an object, _PX_MAX_USES uses
+# read, calls nested _PX_DEPTH deep.
 _PX_MAX_ENTRIES = 256
 _PX_MAX_USES = 1_000_000
 _PX_DEPTH = 32
@@ -11710,19 +11731,25 @@ def _dv_proxies(text):
     stand for; `text` itself when it has none."""
     if "function" not in text or "[" not in text:
         return text
-    objects = {}
+    found = {}                                      # name -> [(start, entries or None)], in order
     for m in _PX_OBJECT_RE.finditer(text):
-        entries = _px_entries(text, m.end())
-        if entries:
-            objects[m.group(1)] = None if m.group(1) in objects else entries
-    objects = {k: v for k, v in objects.items() if v is not None}
+        found.setdefault(m.group(1), []).append((m.start(), _px_entries(text, m.end())))
+    objects = {k: v for k, v in found.items() if any(e for _, e in v)}
     if not objects:
         return text
+    starts = {k: [a for a, _ in v] for k, v in objects.items()}
 
-    def final(entry, depth=0):
+    def lookup(name, pos):
+        """The entries of the object `name` was last given before pos (a
+        name an obfuscator reuses in each function holds that function's
+        object), else {}."""
+        k = bisect.bisect_left(starts.get(name, ()), pos) - 1
+        return (objects[name][k][1] or {}) if k >= 0 else {}
+
+    def final(entry, pos, depth=0):
         """An entry with the entries it refers to followed: ('call', n) ('op', op) ('str', s), or None."""
         while entry is not None and entry[0] in ("ref", "refcall") and depth <= _PX_DEPTH:
-            target = objects.get(entry[1], {}).get(entry[2])
+            target = lookup(entry[1], pos).get(entry[2])
             if target is None:
                 return None
             if entry[0] == "refcall":
@@ -11740,8 +11767,8 @@ def _dv_proxies(text):
             m = _PX_USE_RE.search(text, pos, hi)
             if m is None:
                 break
-            entry = objects.get(m.group(1), {}).get(m.group(2) if m.group(2) is not None else m.group(3))
-            entry = final(entry) if entry is not None else None
+            entry = lookup(m.group(1), m.start()).get(m.group(2) if m.group(2) is not None else m.group(3))
+            entry = final(entry, m.start()) if entry is not None else None
             if entry is None:
                 out.append(text[pos:m.end()])
                 pos = m.end()
@@ -11775,21 +11802,32 @@ def _dv_proxies(text):
     return rewrite(0, len(text), 0)
 
 
-_DV_MEMO = (None, None)                # the last text decoded_view read, and its view
+_DV_MEMO = (None, None, None)          # the last text decoded_view read, its view, its string array's line
+
+
+def _dv_reading(text):
+    """(text, decoded_view's reading of it, the line of the string array it
+    reads or None). The last text's is kept: the install-script test, the
+    spawned-script follower and the import-time test read the same file."""
+    global _DV_MEMO
+    memo = _DV_MEMO
+    if memo[0] is not text:
+        memo = (text,) + _dv_read(text)
+        _DV_MEMO = memo
+    return memo
 
 
 def decoded_view(text):
     """`text` read the way it reads once the strings it decodes as it runs
-    are decoded (see above); `text` itself when there is nothing to decode.
-    The last text's view is kept: the install-script test, the spawned-script
-    follower and the import-time test read the same file."""
-    global _DV_MEMO
-    memo = _DV_MEMO
-    if memo[0] is text:
-        return memo[1]
-    view = _decoded_view(text)
-    _DV_MEMO = (text, view)
-    return view
+    are decoded (see above); `text` itself when there is nothing to decode."""
+    return _dv_reading(text)[1]
+
+
+def string_array_line(text):
+    """The 1-based line of the string array `text` is built around — one
+    whose calls decoded_view reads: javascript-obfuscator's technique (see
+    _SA_TECHNIQUE_REASON) — else None."""
+    return _dv_reading(text)[2]
 
 
 def _dv_decoders(view):
@@ -11822,18 +11860,54 @@ def _dv_decoders(view):
     return view
 
 
+# (the detection round) A string literal written wholly in \x and \u
+# escapes, three or more (javascript-obfuscator's unicodeEscapeSequence:
+# '\x63\x68\x69\x6c\x64…'), reads as its text when that is printable ASCII
+# without a quote or a backslash: a proxy object's key, a member's name, a
+# module's name read as written. Code that escapes a character or two
+# ('\x20', "<\x2fscript>") is left as written, and so is a raw, bytes or
+# f-string literal (a letter before its quote) and a quote a backslash
+# escapes. Linear: an escape is one way to read its characters.
+_DV_ESCAPED_LITERAL_RE = re.compile(r"""(?<![\w$\\])(['"])((?:\\x[0-9A-Fa-f]{2}|\\u[0-9A-Fa-f]{4}){3,})\1""")
+_DV_ESCAPE_RE = re.compile(r"\\(?:x([0-9A-Fa-f]{2})|u([0-9A-Fa-f]{4}))")
+
+
+def _dv_unescape_sub(m):
+    s = _DV_ESCAPE_RE.sub(lambda e: chr(int(e.group(1) or e.group(2), 16)), m.group(2))
+    if any(not " " <= ch <= "~" or ch in "'\"\\" for ch in s):
+        return m.group()
+    return m.group(1) + s + m.group(1)
+
+
+def _dv_unescape(text):
+    """`text` with its string literals written in escapes read as their
+    text (see above)."""
+    if "\\x" not in text and "\\u" not in text:
+        return text
+    return _DV_ESCAPED_LITERAL_RE.sub(_dv_unescape_sub, text)
+
+
 def _decoded_view(text):
     """decoded_view's reading of a text."""
-    base = _dv_proxies(_dv_string_arrays(text))
+    return _dv_read(text)[0]
+
+
+def _dv_read(text):
+    """(decoded_view's reading of a text, the 1-based line of the string
+    array it reads, else None)."""
+    source = _dv_unescape(text)
+    arrays, at = _sa_read(source)
+    line = None if at is None else source.count("\n", 0, at) + 1     # (unescaping keeps the rows)
+    base = _dv_proxies(arrays)
     if base == text:                                # (no string array or proxy object read)
         base = text
         if len(text) > _DV_MAX_CHARS or not any(n in text for n in _DV_NEEDLES):
-            return text
+            return text, None
     joined = view = _DV_JOIN_RE.sub("", base) if "+" in base else base
     if len(base) <= _DV_MAX_CHARS and any(n in base for n in _DV_NEEDLES):
         view = _dv_decoders(view)                   # (a longer text with a string array: its strings only)
     if view == joined and base is text:
-        return text                 # nothing decoded: literals joined alone are no reading of their own
+        return text, None           # nothing decoded: literals joined alone are no reading of their own
     arrays = 0
     for m in list(_DV_ARRAY_RE.finditer(view)):
         if arrays >= _DV_MAX_ARRAYS:
@@ -11847,7 +11921,7 @@ def _decoded_view(text):
         arrays += 1
         view = re.sub(_DV_NAME_HEAD + esc + _DV_INDEX_TAIL,
                       lambda i: items[int(i.group(1))] if int(i.group(1)) < len(items) else i.group(), view)
-    return _DV_MEMBER_RE.sub(lambda m: "." + (m.group("a") or m.group("b")), view) if "[" in view else view
+    return (_DV_MEMBER_RE.sub(lambda m: "." + (m.group("a") or m.group("b")), view) if "[" in view else view), line
 
 
 # ---------------- Scripts a script starts with node or python (0.1.8) ----------------
@@ -12189,13 +12263,15 @@ def install_script_risk(text, shell=True, command=False):
     read as a program too (_shell_text; `shell`: False for a hook's command
     and the code it hands an interpreter, which hook_command_risk reads
     itself; `command`: the text is a hook's command, shell whatever it
-    holds)."""
+    holds). Code built around a string array says so (_SA_TECHNIQUE_REASON)."""
     reasons = _install_script_risk(text, shell, command)
     view = decoded_view(text)
     if view != text:
         for r in _install_script_risk(view, shell, command):
             if r not in reasons:
                 reasons.append(r + _DV_NOTE)
+    if string_array_line(text) is not None:
+        reasons.append(_SA_TECHNIQUE_REASON)
     return reasons
 
 
@@ -12401,8 +12477,9 @@ _EXEC_CALL_RE = re.compile(
 # written in the code, a sweep of credential folders, the host name hidden
 # in base64, in a DNS name or sent to an address fetched at run time, a
 # miner, a download run with the Python interpreter (a script, not a
-# binary), and a GitHub Actions workflow that dumps every repository secret
-# (see persistence targets).
+# binary), a GitHub Actions workflow that dumps every repository secret
+# (see persistence targets), wallet addresses swapped, and code built around
+# a string array (_SA_TECHNIQUE_REASON).
 _STRONG_IMPORT_REASONS = (
     "runs code it receives over the network", "runs a downloaded script through a shell",
     "runs an encoded PowerShell command", "runs PowerShell that", "carries a script that downloads and runs code",
@@ -12418,7 +12495,8 @@ _STRONG_IMPORT_REASONS = (
     "collects files from several credential folders", "sends the machine's user or host name to an address it hides",
     "sends the machine's user or host name in a DNS lookup",
     "sends the machine's user or host name to an address it fetches",
-    "runs a cryptocurrency miner", "swaps the cryptocurrency wallet addresses")
+    "runs a cryptocurrency miner", "swaps the cryptocurrency wallet addresses",
+    "hides its code in a string array")
 # Endpoints that exist to capture what is sent to them (out-of-band testing,
 # request inspection): no library reports to one
 _CAPTURE_SERVICE_RE = re.compile(
@@ -12576,7 +12654,8 @@ def import_time_risk(text, lang=None):
     sign. `text` has \\n line endings; `lang` 'py' or 'js' reads it without
     its prose (see _import_code). It is read again with the strings it
     decodes as it runs decoded (decoded_view; a reason found only there says
-    so). import_time_severity grades them."""
+    so), and code built around a string array says so (_SA_TECHNIQUE_REASON).
+    import_time_severity grades them."""
     reasons, line = _import_time_reading(text, lang)
     view = decoded_view(text)
     if view != text:
@@ -12585,6 +12664,10 @@ def import_time_risk(text, lang=None):
             if r not in reasons:
                 reasons.append(r + _DV_NOTE)
                 line = line or at
+    sa = string_array_line(text)
+    if sa is not None:
+        reasons.append(_SA_TECHNIQUE_REASON)
+        line = line or sa
     return reasons, line
 
 

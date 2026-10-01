@@ -9627,6 +9627,14 @@
   "_DV_CC_TOKEN_SRC": {
    "value": "[ \\t]*(?:(?P<num>0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})|(?P<name>[A-Za-z_$][\\w$]*)|(?P<op>>>>|<<|>>|[-+*%&|^~()\\[\\].,]))"
   },
+  "_DV_ESCAPED_LITERAL_RE": {
+   "flags": "",
+   "re": "(?<![\\w$\\\\])(['\"])((?:\\\\x[0-9A-Fa-f]{2}|\\\\u[0-9A-Fa-f]{4}){3,})\\1"
+  },
+  "_DV_ESCAPE_RE": {
+   "flags": "",
+   "re": "\\\\(?:x([0-9A-Fa-f]{2})|u([0-9A-Fa-f]{4}))"
+  },
   "_DV_HELPER_CALL_TAIL": {
    "value": ")[ \\t]*\\([ \\t]*(?:'(?P<a>[^'\\\\\\n]{1,400})'|\"(?P<b>[^\"\\\\\\n]{1,400})\"|`(?P<c>[^`\\\\\\n$]{1,400})`)[ \\t]*\\)"
   },
@@ -9682,6 +9690,9 @@
   },
   "_DV_MEMO": {
    "list": [
+    {
+     "value": null
+    },
     {
      "value": null
     },
@@ -12970,6 +12981,9 @@
   "_SA_TAIL_MID": {
    "value": "\\s*=\\s*function\\s*\\(\\s*\\)\\s*\\{\\s*return\\s+"
   },
+  "_SA_TECHNIQUE_REASON": {
+   "value": "hides its code in a string array it decodes as it runs (an obfuscator's technique)"
+  },
   "_SA_TOKEN_RE": {
    "flags": "",
    "re": "\\s*(?:(?P<num>0[xX][0-9a-fA-F]+|(?:0|[1-9]\\d*)(?:\\.\\d*)?(?:[eE][-+]?\\d+)?|\\.\\d+(?:[eE][-+]?\\d+)?)(?![\\w$])|(?P<str>'(?:[^'\\\\\\n]|\\\\[^\\n])*'|\"(?:[^\"\\\\\\n]|\\\\[^\\n])*\")|(?P<name>[A-Za-z_$][\\w$]*)|(?P<op>[-+*/()\\[\\].,]))"
@@ -14391,6 +14405,9 @@
     },
     {
      "value": "swaps the cryptocurrency wallet addresses"
+    },
+    {
+     "value": "hides its code in a string array"
     }
    ]
   },

