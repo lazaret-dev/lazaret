@@ -2,6 +2,7 @@
 127.0.0.1 (tests/registry/_guard_support.py): what is installed, what is
 blocked and put back, what is held back as too new, and what is left out as
 built for another platform. Skipped where npm or pnpm is not installed.
+(yarn, Bun and private registries: test_guard_yarn_bun.py.)
 
 The tools run with scripts off (npm_config_ignore_scripts), so no package
 code runs, blocked or not."""

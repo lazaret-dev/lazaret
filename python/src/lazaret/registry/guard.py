@@ -2,32 +2,42 @@
 
     lazaret guard npm install express
     lazaret guard pnpm add react
+    lazaret guard yarn add lodash         (yarn 1 and yarn 2+)
+    lazaret guard bun add zod
     lazaret guard pip install requests
-    lazaret guard uv add httpx            (also: uv sync, uv lock, uv pip install, uv pip sync)
+    lazaret guard uv add httpx            (also: uv sync, uv lock, uv run, uv pip install, uv pip sync)
+    lazaret guard uvx ruff check .        (also: uv tool run, uv tool install)
     lazaret-guard …                       (the same command under its own name)
 
-npm, pnpm and uv's project commands: the tool resolves first, installing
-nothing (npm --package-lock-only, pnpm --lockfile-only, uv add --no-sync,
-uv lock). Every package the new lockfile installs on this machine that is not
-installed yet is then fetched from where the tool will fetch it, checked
-against the lockfile's digest (the bytes the tool will accept), and scanned in
-memory with the registry auditor's tests (lazaret.registry.repo). Releases
-younger than --min-age are held back where the tool can do it without writing
-the cutoff into the lockfile (npm's `before`, pnpm's minimum-release-age), and
-blocked where it can't. A SUSPICIOUS package, one that could not be checked,
-or one younger than --min-age blocks the install: the files the resolution
-changed (package.json, the lockfile, pyproject.toml) are put back and nothing
-is installed. Otherwise the command runs as given, and what it installed is
-compared with what was checked.
+npm, pnpm, yarn, Bun and uv's project commands: the tool resolves first,
+installing nothing (npm --package-lock-only, pnpm --lockfile-only, yarn 2+
+--mode=update-lockfile, bun --lockfile-only, uv add --no-sync, uv lock; yarn
+1, which has no such mode, resolves in a temporary copy of the project with
+scripts off). Every package the new lockfile installs on this machine that is
+not installed yet is then fetched from where the tool will fetch it, checked
+against the lockfile's digest (the bytes the tool will accept; yarn 2+ pins
+its own zip's, so the registry's), and scanned in memory with the registry
+auditor's tests (lazaret.registry.repo). Releases younger than --min-age are
+held back where the tool can do it without writing the cutoff into the
+lockfile (npm's `before`, pnpm's minimum-release-age, yarn's
+npmMinimalAgeGate, bun's --minimum-release-age), and blocked where it can't.
+A SUSPICIOUS package, one that could not be checked, or one younger than
+--min-age blocks the install: the files the resolution changed (package.json,
+the lockfile, pyproject.toml) are put back and nothing is installed.
+Otherwise the command runs as given, and what it installed is compared with
+what was checked.
 
-pip and uv pip: the tool runs against an index on 127.0.0.1 that relays PyPI.
-Releases younger than --min-age are left out of it, and every file the tool
-downloads is scanned before it is handed over: a SUSPICIOUS one is refused,
-and pip and uv install nothing unless every download succeeded (an sdist is
-scanned before pip or uv can build it, which runs its code). The tool resolves
-first (a dry run) and the files of its plan are scanned before anything is
-installed.
+pip, uv pip and uvx (uv tool run, uv tool install; what uv run installs
+beside its project): the tool runs against an index on 127.0.0.1 that relays
+the indexes the tool is set to use. Releases younger than --min-age are left
+out of it, and every file the tool downloads is scanned before it is handed
+over: a SUSPICIOUS one is refused, and pip and uv install nothing unless
+every download succeeded (an sdist is scanned before pip or uv can build it,
+which runs its code). The tool resolves first (a dry run, a compile) and the
+files of its plan are scanned before anything is installed.
 
+A private registry or index is used with the credentials the tool's own
+settings give for it (lazaret.registry.pmsettings), sent to that host only.
 Nothing is sent anywhere but the registries the packages come from. Verdicts
 are kept in a local cache keyed by the artifact's digest (--no-cache to skip),
 so a package is fetched and scanned once.
@@ -41,6 +51,8 @@ import fnmatch
 import glob
 import hashlib
 import html
+import html.parser
+import http.client
 import http.server
 import ipaddress
 import json
@@ -61,13 +73,13 @@ import urllib.request
 
 from lazaret.scanner import core as lazaret
 from lazaret.scanner import sca
-from lazaret.registry import repo
+from lazaret.registry import pmsettings, repo
 
 #: Releases younger than this are held back or blocked (--min-age).
 DEFAULT_MIN_AGE = 2 * 86400
 EXIT_OK, EXIT_BLOCKED, EXIT_USAGE, EXIT_RESOLVE = 0, 1, 2, 3
-NPM_REGISTRY = "https://registry.npmjs.org/"
-PYPI_SIMPLE = "https://pypi.org/simple/"
+NPM_REGISTRY = pmsettings.NPM_REGISTRY
+PYPI_SIMPLE = pmsettings.PYPI_SIMPLE
 PYPI_JSON = "https://pypi.org/pypi/"
 #: Bytes of one registry document (a PyPI project page, an npm packument)
 MAX_DOCUMENT = 64 * 1024 * 1024
@@ -78,7 +90,7 @@ DEFAULT_JOBS = max(1, min(4, os.cpu_count() or 1))
 #: Seconds a tool may wait on the local index while a file is scanned
 TOOL_TIMEOUT = 600
 USER_AGENT = "lazaret-guard/1.0"
-TOOLS = ("npm", "pnpm", "pip", "pip3", "uv")
+TOOLS = ("npm", "pnpm", "yarn", "bun", "pip", "pip3", "uv", "uvx")
 
 _DURATION_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([smhdw]?)\s*$", re.I)
 _UNITS = {"": 86400, "s": 1, "m": 60, "h": 3600, "d": 86400, "w": 7 * 86400}
@@ -159,14 +171,7 @@ def pep503(name):
 
 
 # ---------------- Fetching ----------------
-def _is_loopback(host):
-    host = (host or "").strip("[]").lower()
-    if host == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
+_is_loopback = pmsettings.is_loopback
 
 
 def fetchable(url):
@@ -180,7 +185,7 @@ def fetchable(url):
 
 def netloc(url):
     try:
-        return urllib.parse.urlsplit(url).netloc.lower()
+        return urllib.parse.urlsplit(url).netloc.rpartition("@")[2].lower()
     except ValueError:
         return ""
 
@@ -190,11 +195,19 @@ class Fetcher:
     host (a registry served on this machine) or to a host the package
     manager's own settings name as a registry (http_hosts; what comes from
     there is checked against a digest). Redirects are held to the same rule;
-    every response is read in chunks against a byte budget."""
+    every response is read in chunks against a byte budget.
 
-    def __init__(self, hosts, http_hosts=()):
+    `auth` (pmsettings.Credentials) holds the credentials the package
+    manager's settings give for its registries: a request carries those of
+    its own URL only — a redirect gets those of where it leads, if any — and
+    none go over plain http to another machine. A URL's own user:password@
+    is taken out of it and sent to its host alone; messages show URLs
+    without it."""
+
+    def __init__(self, hosts, http_hosts=(), auth=None):
         self.hosts = {h.lower() for h in hosts if h}
         self.http_hosts = {h.lower() for h in http_hosts if h}
+        self.auth = auth if auth is not None else pmsettings.Credentials()
         self.lock = threading.Lock()
 
     def allow(self, url):
@@ -207,17 +220,28 @@ class Fetcher:
     def check(self, url):
         try:
             parts = urllib.parse.urlsplit(url)
-            host, loc = (parts.hostname or "").lower(), parts.netloc.lower()
+            host, loc = (parts.hostname or "").lower(), parts.netloc.rpartition("@")[2].lower()
         except ValueError as exc:
-            raise repo.FetchError(f"unparseable URL {url!r}") from exc
+            raise repo.FetchError(f"unparseable URL {pmsettings.shown(url)!r}") from exc
         plain_ok = parts.scheme == "http" and (_is_loopback(host) or loc in self.http_hosts or host in self.http_hosts)
         if parts.scheme != "https" and not plain_ok:
-            raise repo.FetchError(f"only https is fetched (or http on this machine): {url}")
+            raise repo.FetchError(f"only https is fetched (or http on this machine): {pmsettings.shown(url)}")
         with self.lock:
             known = loc in self.hosts or host in self.hosts
         if not known:
             raise repo.FetchError(f"host not allowed for this install: {loc!r}")
         return url
+
+    def request(self, url, accept=None):
+        """-> (a Request for url, url as shown): the guard's User-Agent, the
+        credentials for url (not carried over a redirect)."""
+        clean, inline = pmsettings.split_userinfo(url)
+        req = urllib.request.Request(clean, headers={"User-Agent": USER_AGENT, **({"Accept": accept} if accept else {})})
+        header = pmsettings.basic(*inline) if inline and (clean.startswith("https:") or _is_loopback(
+            urllib.parse.urlsplit(clean).hostname)) else self.auth.header(clean)
+        if header:
+            req.add_unredirected_header("Authorization", header)
+        return req, clean
 
     def _opener(self, url):
         fetcher = self
@@ -230,23 +254,45 @@ class Fetcher:
                     fetcher.check(newurl)
                 except repo.FetchError as exc:
                     raise urllib.error.URLError(f"redirect blocked: {exc}")
-                return super().redirect_request(req, fp, code, msg, headers, newurl)
+                new = super().redirect_request(req, fp, code, msg, headers, newurl)
+                header = fetcher.auth.header(newurl) if new is not None else None
+                if header:                                  # (the request's own was not carried over)
+                    new.add_unredirected_header("Authorization", header)
+                return new
 
         handlers = [Redirects]
         if _is_loopback(urllib.parse.urlsplit(url).hostname):
             handlers.append(urllib.request.ProxyHandler({}))      # never through a proxy
         return urllib.request.build_opener(*handlers)
 
+    def open(self, url, accept=None, timeout=repo.DOWNLOAD_TIMEOUT):
+        """The open response for url (the caller closes it); FetchError."""
+        self.check(url)
+        req, clean = self.request(url, accept)
+        try:
+            return self._opener(clean).open(req, timeout=timeout)
+        except urllib.error.HTTPError as exc:
+            exc.close()
+            hint = ""
+            if exc.code in (401, 403):
+                if self.auth.withheld(clean):
+                    hint = " (its credentials are sent over https only)"
+                elif not req.has_header("Authorization"):
+                    hint = " (the package manager's settings give no credentials for this registry)"
+            err = repo.FetchError(f"HTTP {exc.code} fetching {clean}{hint}")
+            err.status = exc.code
+            raise err from None
+        except urllib.error.URLError as exc:
+            raise repo.FetchError(f"URL error fetching {clean}: {exc.reason}") from exc
+        except OSError as exc:
+            raise repo.FetchError(f"network error fetching {clean}: {exc}") from exc
+
     def fetch(self, url, max_bytes=repo.MAX_DOWNLOAD_BYTES, accept=None, timeout=repo.DOWNLOAD_TIMEOUT):
         """-> (body, response headers)."""
-        self.check(url)
-        headers = {"User-Agent": USER_AGENT}
-        if accept:
-            headers["Accept"] = accept
-        req = urllib.request.Request(url, headers=headers)
-        too_big = f"response over {max_bytes // (1024 * 1024)}MB: {url}"
-        try:
-            with self._opener(url).open(req, timeout=timeout) as r:
+        clean = pmsettings.shown(url)
+        too_big = f"response over {max_bytes // (1024 * 1024)}MB: {clean}"
+        with self.open(url, accept, timeout) as r:
+            try:
                 length = r.headers.get("Content-Length")
                 if length and length.isdigit() and int(length) > max_bytes:
                     raise repo.FetchError(too_big)
@@ -259,21 +305,15 @@ class Fetcher:
                     if len(buf) > max_bytes:
                         raise repo.FetchError(too_big)
                 return bytes(buf), r.headers
-        except urllib.error.HTTPError as exc:
-            exc.close()
-            err = repo.FetchError(f"HTTP {exc.code} fetching {url}")
-            err.status = exc.code
-            raise err from None
-        except urllib.error.URLError as exc:
-            raise repo.FetchError(f"URL error fetching {url}: {exc.reason}") from exc
-        except OSError as exc:
-            raise repo.FetchError(f"network error fetching {url}: {exc}") from exc
+            except (OSError, http.client.HTTPException) as exc:
+                raise repo.FetchError(f"network error fetching {clean}: {exc}") from exc
 
     def get(self, url, max_bytes=repo.MAX_DOWNLOAD_BYTES, accept=None, timeout=repo.DOWNLOAD_TIMEOUT):
         return self.fetch(url, max_bytes, accept, timeout)[0]
 
     def json(self, url, accept="application/json"):
-        return repo._deep_safe_loads(self.get(url, MAX_DOCUMENT, accept, repo.METADATA_TIMEOUT), f"from {url}")
+        return repo._deep_safe_loads(self.get(url, MAX_DOCUMENT, accept, repo.METADATA_TIMEOUT),
+                                     f"from {pmsettings.shown(url)}")
 
 
 # ---------------- Verdicts ----------------
@@ -933,37 +973,21 @@ def verify_installed(ctx, new, eco):
     ctx.unchecked = sorted(f"{n}@{v}" for n, v in new if (_name_key(eco, n), v) not in expected)
 
 
-# ---------------- npm and pnpm packages ----------------
+# ---------------- npm, pnpm, yarn and Bun packages ----------------
 def tool_config(exe, env, cwd):
     """The package manager's settings (`<tool> config list --json`); {} when
     it can't say."""
-    try:
-        out = subprocess.run([exe, "config", "list", "--json"], env=env, cwd=cwd, capture_output=True,
-                             text=True, encoding="utf-8", errors="replace", timeout=60).stdout
-        doc = json.loads(out)
-    except (OSError, ValueError, subprocess.SubprocessError):
-        return {}
+    doc = pmsettings.run_json([exe, "config", "list", "--json"], env, cwd)
     return doc if isinstance(doc, dict) else {}
 
 
-def _registry_url(value):
-    if not isinstance(value, str) or not value.startswith(("https://", "http://")):
-        return None
-    return value if value.endswith("/") else value + "/"
+_registry_url = pmsettings.registry_url
 
 
-class Registries:
+class Registries(pmsettings.NpmSettings):
     """The default npm registry and the scoped ones (@scope:registry), from
-    the package manager's settings."""
-
-    def __init__(self, config):
-        self.default = _registry_url(config.get("registry")) or NPM_REGISTRY
-        self.scoped = {}
-        for k, v in config.items():
-            url = _registry_url(v)
-            if url and isinstance(k, str) and k.startswith("@") and k.endswith(":registry"):
-                self.scoped[k[:-len(":registry")]] = url
-        self.replace_npmjs = config.get("replace-registry-host") != "never"
+    the package manager's settings, with the credentials those give
+    (pmsettings)."""
 
     def for_name(self, name):
         if name.startswith("@"):
@@ -1002,41 +1026,98 @@ def npm_publish_time(fetcher, registry, name, version):
 
 def check_npm_package(ctx, fetcher, pkg):
     """Check one npm package: pkg is {name, version, tarball, integrity,
-    registry}. The tarball is fetched from where the package manager will
-    fetch it and checked against the lockfile's integrity (the bytes the
-    package manager will accept) — or the registry's, when the lockfile has
-    none — then scanned. Its publish time comes from the download
-    (Last-Modified), confirmed by the registry when it looks recent."""
+    registry, lock_digest}. The tarball is fetched from where the package
+    manager will fetch it and checked against the lockfile's integrity (the
+    bytes the package manager will accept) — or the registry's, when the
+    lockfile has none — then scanned. Its publish time comes from the
+    download (Last-Modified), confirmed by the registry when it looks
+    recent.
+
+    yarn 2+ pins the checksum of the zip it makes of the tarball, not the
+    tarball's: its lock_digest keys the verdict in the cache too, so a
+    package checked once is known again without a download."""
     name, version = pkg["name"], pkg["version"]
     check = ctx.add(Check("npm", name, version, "registry"))
     try:
         repo._check_name("npm", name)
-        want, tarball = sri_best(pkg["integrity"]), pkg["tarball"]
-        if want is None:
-            manifest = fetcher.json(pkg["registry"] + urllib.parse.quote(name, safe="@") + "/"
-                                    + urllib.parse.quote(version, safe=""))
-            want = registry_digest(manifest)
-            if want is None:
-                raise repo.FetchError("neither the lockfile nor the registry gives a digest to check it against")
-        check.digest = f"{want[0]}-{want[1]}"
-        key = VerdictCache.key("npm", name, version, check.digest)
-        hit = ctx.scanner.cached(key)
+        alt = VerdictCache.key("npm", name, version, "yarn:" + pkg["lock_digest"]) if pkg.get("lock_digest") else None
+        hit, key = ctx.scanner.cached(alt), None
         published = parse_time(hit.get("published")) if hit else None
-        if hit is None:
-            data, headers = fetcher.fetch(tarball)
-            if not sri_matches(data, want):
-                ctx.block(check, f"its {want[0]} digest is not the lockfile's")
-                return check
-            published = parse_http_date(headers.get("Last-Modified"))
-            hit = ctx.scanner.scan(data, "tgz", "npm")
+        if hit is not None:
+            check.digest = "yarn:" + pkg["lock_digest"]
+        else:
+            want, tarball = sri_best(pkg["integrity"]), pkg["tarball"]
+            if want is None:
+                manifest = fetcher.json(pkg["registry"] + urllib.parse.quote(name, safe="@") + "/"
+                                        + urllib.parse.quote(version, safe=""))
+                want = registry_digest(manifest)
+                if want is None:
+                    raise repo.FetchError("neither the lockfile nor the registry gives a digest to check it against")
+            check.digest = f"{want[0]}-{want[1]}"
+            key = VerdictCache.key("npm", name, version, check.digest)
+            hit = ctx.scanner.cached(key)
+            published = parse_time(hit.get("published")) if hit else None
+            if hit is None:
+                data, headers = fetcher.fetch(tarball)
+                if not sri_matches(data, want):
+                    ctx.block(check, f"its {want[0]} digest is not the "
+                                     + ("lockfile's" if pkg["integrity"] else "registry's"))
+                    return check
+                published = parse_http_date(headers.get("Last-Modified"))
+                hit = ctx.scanner.scan(data, "tgz", "npm")
         if ctx.cutoff is not None and (published is None or published > ctx.cutoff):
             published = npm_publish_time(fetcher, pkg["registry"], name, version) or published
         ctx.scanner.remember(key, hit, published)
+        ctx.scanner.remember(alt, hit, published)
         ctx.apply(check, hit)
         ctx.age_check(check, published)
     except (repo.FetchError, repo.SpecError, ValueError) as exc:
         ctx.not_checked(check, exc)
     return check
+
+
+def check_lock_entries(ctx, entries, registries, installed, label, env=None, rewrite=True):
+    """Check what a lockfile adds on this machine. entries: [{name, version,
+    resolved, integrity, os, cpu, libc, lock_digest}] (resolved: a URL, or
+    '' for the registry's own). Other platforms and what is installed are
+    left out; git, local and digest-less tarball sources are noted, not
+    checked. rewrite: npm's replace-registry-host rule applies to resolved
+    URLs (npm, pnpm). -> EXIT_BLOCKED, EXIT_OK (--plan), or None to go on."""
+    here = node_platform(env)
+    http_hosts = registries.http_hosts()
+    todo = {}
+    for e in entries:
+        key = (e["name"], e["version"])
+        if not platform_ok(e, here):
+            ctx.skipped_platform += 1
+            continue
+        ctx.expected.add((_name_key("npm", e["name"]), e["version"]))
+        if key in installed or key in todo:
+            continue
+        if e["resolved"]:
+            url = registries.resolved(e["name"], e["resolved"]) if rewrite else e["resolved"]
+        else:
+            url = registries.tarball(e["name"], e["version"]) if e["version"] else ""
+        if not url or not (fetchable(url) or (url.startswith("http://") and netloc(url) in http_hosts)):
+            ctx.add(Check("npm", e["name"], e["version"], pmsettings.shown(e["resolved"]) or "unknown source")
+                    ).notes.append("not from a registry (git, a local file or a link): not checked")
+            continue
+        if sri_best(e["integrity"]) is None and not e.get("lock_digest") \
+                and (not e["version"] or "/-/" not in urllib.parse.urlsplit(url).path):
+            ctx.add(Check("npm", e["name"], e["version"], pmsettings.shown(url))).notes.append(
+                "a tarball URL with no digest in the lockfile (like a git dependency): not checked")
+            continue
+        todo[key] = {"name": e["name"], "version": e["version"], "tarball": url, "integrity": e["integrity"],
+                     "registry": registries.for_name(e["name"]), "lock_digest": e.get("lock_digest")}
+    fetcher = Fetcher({netloc(u) for u in registries.all()} | {netloc(p["tarball"]) for p in todo.values()},
+                      http_hosts=http_hosts, auth=registries.creds)
+    other = f"; {plural(ctx.skipped_platform, 'package')} for other platforms left out" \
+        if ctx.skipped_platform else ""
+    ctx.say(f"lazaret guard: {plural(len(todo), 'package')} to check ({label}{other})")
+    run_all([lambda p=p: check_npm_package(ctx, fetcher, p) for p in todo.values()])
+    if ctx.blocked():
+        return EXIT_BLOCKED
+    return EXIT_OK if ctx.opts.plan else None
 
 
 # ---------------- PyPI files ----------------
@@ -1097,16 +1178,82 @@ def pypi_upstream():
     return url if url.endswith("/") else url + "/"
 
 
+_SIMPLE_ACCEPT = f"{_SIMPLE_JSON}, text/html;q=0.1"
+#: Links read from one PEP 503 (HTML) project page
+MAX_PAGE_LINKS = 100_000
+
+
+class _SimpleLinks(html.parser.HTMLParser):
+    """The files of a PEP 503 project page, as PEP 691 lists them: the
+    link's text as the filename, its #sha256= fragment as the hash,
+    data-requires-python, data-core-metadata (data-dist-info-metadata) and
+    data-yanked."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.files, self._open = [], None
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "a":
+            self._open = (dict(attrs), [])
+
+    def handle_data(self, data):
+        if self._open is not None:
+            self._open[1].append(data)
+
+    def handle_endtag(self, tag):
+        if tag != "a" or self._open is None:
+            return
+        attrs, text = self._open
+        self._open = None
+        href = attrs.get("href")
+        if not href or len(self.files) >= MAX_PAGE_LINKS:
+            return
+        url, _, frag = href.partition("#")
+        alg, _, digest = frag.partition("=")
+        f = {"filename": "".join(text).strip() or urllib.parse.unquote(url.rsplit("/", 1)[-1]), "url": url,
+             "hashes": {"sha256": digest.lower()} if alg == "sha256" and re.fullmatch(r"[0-9a-fA-F]{64}", digest)
+             else {}}
+        if attrs.get("data-requires-python") is not None:
+            f["requires-python"] = attrs["data-requires-python"]
+        meta = attrs.get("data-core-metadata", attrs.get("data-dist-info-metadata"))
+        if meta is not None:
+            f["core-metadata"] = {"sha256": meta[7:]} if meta.startswith("sha256=") else True
+        if "data-yanked" in attrs:
+            f["yanked"] = attrs["data-yanked"] or True
+        self.files.append(f)
+
+
+def parse_simple_html(text, project):
+    """A PEP 503 (HTML) project page as a PEP 691 (JSON) one."""
+    parser = _SimpleLinks()
+    try:
+        parser.feed(text)
+        parser.close()
+    except (ValueError, AssertionError):
+        pass
+    return {"meta": {"api-version": "1.0"}, "name": project, "files": parser.files}
+
+
 class PypiIndex:
     """What the local index knows: the project pages it served (their files,
     by a number) and the files it scanned, kept on disk (spool) until the
-    tool has them."""
+    tool has them.
 
-    def __init__(self, ctx, fetcher, spool, upstream=None):
+    It relays the indexes the tool is set to use (0.1.8: the tool's own
+    settings; LAZARET_GUARD_PYPI_URL names one instead; PyPI by default) —
+    all of them at once (merge: pip's rule) or the first that has the
+    project (uv's) — reading their JSON pages or their PEP 503 HTML ones.
+    A project none of them has gets an empty page, not a 404, so that the
+    tool never goes on to an index the guard does not relay."""
+
+    def __init__(self, ctx, fetcher, spool, upstream=None, indexes=None, merge=False):
         self.ctx = ctx
         self.fetcher = fetcher
         self.spool = spool
-        self.simple = upstream or pypi_upstream()
+        self.indexes = list(indexes) if indexes else [pmsettings.Index(upstream or pypi_upstream(), default=True)]
+        self.simple = self.indexes[0].url
+        self.merge = merge
         self.files = {}           # number -> {url, project, filename, version, sha256, published, size}
         self.numbers = {}         # upstream url -> number
         self.results = {}         # number -> (Check, spooled file or None)
@@ -1120,45 +1267,80 @@ class PypiIndex:
             if message not in self.errors and len(self.errors) < 20:
                 self.errors.append(message)
 
+    def _project_page(self, url, project):
+        """An index's page for a project (JSON, or HTML read as JSON)."""
+        body, headers = self.fetcher.fetch(url, MAX_DOCUMENT, _SIMPLE_ACCEPT, repo.METADATA_TIMEOUT)
+        ctype = (headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        if ctype.endswith("json"):
+            doc = repo._deep_safe_loads(body, f"from {pmsettings.shown(url)}")
+        else:
+            doc = parse_simple_html(body.decode("utf-8", errors="replace"), project)
+        if not isinstance(doc, dict) or not isinstance(doc.get("files"), list):
+            raise repo.FetchError(f"no project page for {project} at {pmsettings.shown(url)}")
+        return doc
+
+    def _usable(self, url):
+        return fetchable(url) or (url.startswith("http://") and netloc(url) in self.fetcher.http_hosts)
+
     def page(self, project):
         """The project page, as JSON, with the files younger than --min-age
         left out and the URLs pointing here."""
-        doc = self.fetcher.json(self.simple + project + "/", accept=_SIMPLE_JSON)
-        if not isinstance(doc, dict) or not isinstance(doc.get("files"), list):
-            raise repo.FetchError(f"no project page for {project}")
-        name = doc.get("name") if isinstance(doc.get("name"), str) else project
-        kept, dropped_versions, kept_versions = [], set(), set()
-        for f in doc["files"]:
-            if not isinstance(f, dict) or not isinstance(f.get("url"), str) or not isinstance(f.get("filename"), str):
-                continue
-            filename = f["filename"]
-            upstream = urllib.parse.urljoin(self.simple + project + "/", f["url"]).split("#", 1)[0]
-            if not fetchable(upstream) or "/" in filename or "\\" in filename or filename in (".", ".."):
-                continue
-            version = file_version(filename)
-            published = parse_time(f.get("upload-time"))
-            if (self.ctx.cutoff is not None and published is not None and published > self.ctx.cutoff
-                    and not self.ctx.matches(self.ctx.opts.allow_new, "pypi", name)):
+        docs = []
+        for index in self.indexes:
+            url = index.url + project + "/"
+            try:
+                doc = self._project_page(url, project)
+            except repo.FetchError as exc:
+                if getattr(exc, "status", None) == 404 or "HTTP 404" in str(exc):
+                    continue                        # not on this index
+                raise
+            docs.append((url, doc))
+            if not self.merge:
+                break
+        name = next((d["name"] for _, d in docs if isinstance(d.get("name"), str)), project)
+        kept, dropped_versions, kept_versions, seen = [], set(), set(), set()
+        undated = False
+        for page_url, doc in docs:
+            for f in doc["files"]:
+                if not isinstance(f, dict) or not isinstance(f.get("url"), str) \
+                        or not isinstance(f.get("filename"), str):
+                    continue
+                filename = f["filename"]
+                upstream = urllib.parse.urljoin(page_url, f["url"]).split("#", 1)[0]
+                if not self._usable(upstream) or "/" in filename or "\\" in filename \
+                        or filename in (".", "..") or filename in seen:
+                    continue
+                seen.add(filename)
+                version = file_version(filename)
+                published = parse_time(f.get("upload-time"))
+                undated = undated or published is None
+                if (self.ctx.cutoff is not None and published is not None and published > self.ctx.cutoff
+                        and not self.ctx.matches(self.ctx.opts.allow_new, "pypi", name)):
+                    with self.lock:
+                        self.held_back.setdefault(name, {})[version or filename] = published
+                    dropped_versions.add(version)
+                    continue
+                kept_versions.add(version)
+                hashes = f.get("hashes") if isinstance(f.get("hashes"), dict) else {}
+                sha = hashes.get("sha256") if isinstance(hashes.get("sha256"), str) else ""
                 with self.lock:
-                    self.held_back.setdefault(name, {})[version or filename] = published
-                dropped_versions.add(version)
-                continue
-            kept_versions.add(version)
-            hashes = f.get("hashes") if isinstance(f.get("hashes"), dict) else {}
-            sha = hashes.get("sha256") if isinstance(hashes.get("sha256"), str) else ""
-            with self.lock:
-                number = self.numbers.setdefault(upstream, str(len(self.numbers) + 1))
-                self.files[number] = {"url": upstream, "project": name, "filename": filename, "version": version,
-                                      "sha256": sha.lower(), "published": published,
-                                      "size": f.get("size") if isinstance(f.get("size"), int) else None}
-            self.fetcher.allow(upstream)
-            g = dict(f)
-            g["url"] = f"/files/{number}/{urllib.parse.quote(filename)}"
-            kept.append(g)
-        out = dict(doc)
+                    number = self.numbers.setdefault(upstream, str(len(self.numbers) + 1))
+                    self.files[number] = {"url": upstream, "project": name, "filename": filename,
+                                          "version": version, "sha256": sha.lower(), "published": published,
+                                          "size": f.get("size") if isinstance(f.get("size"), int) else None}
+                self.fetcher.allow(upstream)
+                g = dict(f)
+                g["url"] = f"/files/{number}/{urllib.parse.quote(filename)}"
+                kept.append(g)
+        if undated and self.ctx.cutoff is not None:
+            self.note(f"{project}: the index gives no upload times, so --min-age could not hold back its "
+                      f"new releases")
+        out = dict(docs[0][1]) if len(docs) == 1 else {"meta": {"api-version": "1.1"}}
+        out["name"] = name
         out["files"] = kept
-        if isinstance(doc.get("versions"), list):
-            out["versions"] = [v for v in doc["versions"] if v not in dropped_versions or v in kept_versions]
+        versions = [v for _, d in docs for v in (d.get("versions") if isinstance(d.get("versions"), list) else [])]
+        if versions:
+            out["versions"] = [v for v in dict.fromkeys(versions) if v not in dropped_versions or v in kept_versions]
         return out
 
     def release_files(self, name, version):
@@ -1534,26 +1716,14 @@ def installed_npm(tool, root):
     return None if text is None else set(pnpm_lock_packages(text))
 
 
-def guard_npm(ctx, tool, args):
-    """npm and pnpm: resolve to a lockfile, check what it adds, then install."""
-    sub = args[0] if args else ""
-    supported = (NPM_INSTALL | NPM_CI) if tool == "npm" else PNPM_CMDS
-    if sub not in supported:
-        raise GuardError(f"lazaret guard wraps {tool}'s install commands ({', '.join(sorted(supported))}); "
-                         f"put the command first: lazaret guard {tool} install …")
-    global_install = any(a in _GLOBAL_FLAGS for a in args)
-    if global_install and tool == "pnpm":
-        raise GuardError("lazaret guard does not wrap pnpm's global installs; install into a project instead")
-    exe = find_tool(tool)
-    cwd = os.getcwd()
-    env = dict(os.environ)
-    config = tool_config(exe, env, cwd)
-    registries = Registries(config)
+def _npm_age(ctx, tool, exe, env, config):
+    """Give npm and pnpm the cutoff themselves (they then resolve to older
+    releases): npm's `before` — always set, to the start of this run when
+    there is no cutoff, so the install can't pick a release this run did not
+    check (a stricter `before` of the user's own stays) — and pnpm's
+    minimum-release-age (pnpm 10.16+)."""
     native = ctx.cutoff is not None and not ctx.opts.allow_new
     if tool == "npm":
-        # npm resolves nothing published after `before`: the cutoff, or the
-        # start of this run, so that the install can't pick a release this
-        # run did not check. A stricter `before` of the user's own stays.
         before = ctx.cutoff if native else ctx.started
         own = parse_time(config.get("before")) if isinstance(config.get("before"), str) else None
         env["npm_config_before"] = iso(min(before, own) if own else before)
@@ -1570,6 +1740,21 @@ def guard_npm(ctx, tool, args):
             env["npm_config_minimum_release_age"] = str(minutes)
         ctx.say(f"lazaret guard: releases younger than {format_age(ctx.min_age)} are held back "
                 f"(pnpm minimum-release-age)")
+
+
+def guard_npm(ctx, tool, args):
+    """npm and pnpm: resolve to a lockfile, check what it adds, then install."""
+    sub = args[0] if args else ""
+    supported = (NPM_INSTALL | NPM_CI) if tool == "npm" else PNPM_CMDS
+    if sub not in supported:
+        raise GuardError(f"lazaret guard wraps {tool}'s install commands ({', '.join(sorted(supported))}); "
+                         f"put the command first: lazaret guard {tool} install …")
+    global_install = any(a in _GLOBAL_FLAGS for a in args)
+    if global_install and tool == "pnpm":
+        raise GuardError("lazaret guard does not wrap pnpm's global installs; install into a project instead")
+    exe = find_tool(tool)
+    cwd = os.getcwd()
+    env = dict(os.environ)
     scratch = tempfile.mkdtemp(prefix="lazaret-guard-") if global_install else None
     try:
         if scratch:
@@ -1579,6 +1764,9 @@ def guard_npm(ctx, tool, args):
         root = scratch or (npm_prefix(exe, env, cwd, args) if tool == "npm" else None) or npm_root(tool, cwd)
         if not scratch and not _same_dir(root, cwd):
             ctx.say(f"lazaret guard: {tool} works in {root}")
+        config = pmsettings.npm_tool_settings(tool, exe, env, cwd, root)
+        registries = Registries(config)
+        _npm_age(ctx, tool, exe, env, config)
         lock_names = ["npm-shrinkwrap.json", "package-lock.json"] if tool == "npm" else ["pnpm-lock.yaml"]
         snap = Snapshot([os.path.join(where, "package.json"), os.path.join(root, "package.json")]
                         + [os.path.join(root, n) for n in lock_names])
@@ -1623,40 +1811,426 @@ def _check_npm(ctx, tool, exe, sub, args, env, where, root, lock_names, registri
         entries = npm_lock_packages(text)
     else:
         entries = [dict(e, name=n, version=v, resolved=e["tarball"]) for (n, v), e in pnpm_lock_packages(text).items()]
-    here = node_platform(env)
-    http_hosts = registries.http_hosts()
-    todo = {}
-    for e in entries:
-        key = (e["name"], e["version"])
-        if not platform_ok(e, here):
-            ctx.skipped_platform += 1
+    return check_lock_entries(ctx, entries, registries, installed, os.path.basename(lock_path), env)
+
+
+# ---------------- yarn and Bun (0.1.8) ----------------
+YARN_CLASSIC_CMDS = frozenset(("install", "add", "upgrade", "remove"))
+YARN_BERRY_CMDS = frozenset(("install", "add", "up", "remove", "dedupe"))
+BUN_CMDS = frozenset(("install", "i", "add", "a", "update", "remove", "rm"))
+_YARN_LOCAL = ("file:", "link:", "portal:", "workspace:")
+_BERRY_NPM_RE = re.compile(r"^(@?[^@]+)@npm:([^:]+)(?:::(.*))?$")
+_BERRY_CONDITION_RE = re.compile(r"\b(os|cpu|libc)=([!\w.-]+)")
+
+
+def _lock_key_specs(line):
+    key = line.rstrip()
+    key = key[:-1] if key.endswith(":") else key
+    return [p.strip().strip('"').strip("'") for p in key.split(",") if p.strip()]
+
+
+def yarn_classic_lock(text):
+    """{(name, version): {name, version, resolved, integrity}} of a yarn 1
+    lockfile: one per package (an entry lists the ranges it satisfies; an
+    alias is read as its real name). resolved is the URL yarn fetches; its
+    #sha1 stands in for a missing integrity. Local folders, links and
+    workspaces are left out."""
+    out, cur = {}, None
+
+    def flush():
+        if cur and cur["name"] and cur["version"] and not cur["local"]:
+            url, _, frag = cur["resolved"].partition("#")
+            integrity = cur["integrity"]
+            if not integrity and re.fullmatch(r"[0-9a-fA-F]{40}", frag):
+                integrity = "sha1-" + base64.b64encode(bytes.fromhex(frag)).decode("ascii")
+            out.setdefault((cur["name"], cur["version"]), {"name": cur["name"], "version": cur["version"],
+                                                           "resolved": url, "integrity": integrity,
+                                                           "os": [], "cpu": [], "libc": []})
+
+    for raw in (text or "").splitlines():
+        if not raw.strip() or raw.lstrip().startswith("#"):
             continue
-        ctx.expected.add((_name_key("npm", e["name"]), e["version"]))
-        if key in installed or key in todo:
+        if not raw[0].isspace():
+            flush()
+            specs = _lock_key_specs(raw)
+            name, rest = sca._yarn_spec_name(specs[0]) if specs else ("", "")
+            cur = {"name": name, "version": "", "resolved": "", "integrity": "", "local": rest.startswith(_YARN_LOCAL)}
             continue
-        if e["resolved"]:
-            url = registries.resolved(e["name"], e["resolved"])
+        if cur is None or not raw.startswith("  ") or raw.startswith("   "):
+            continue
+        key, _, value = raw.strip().partition(" ")
+        value = value.strip().strip('"')
+        if key in ("version", "resolved", "integrity"):
+            cur[key] = value
+        if key == "resolved" and value.startswith(_YARN_LOCAL):
+            cur["local"] = True
+    flush()
+    return out
+
+
+def yarn_berry_lock(text):
+    """[{name, version, resolved, integrity, lock_digest, os, cpu, libc}] of
+    a yarn 2+ lockfile. An npm package (resolution `name@npm:version`) is
+    fetched from its registry (resolved ''), or from the tarball URL yarn
+    recorded when that is not the registry's usual one (`::__archiveUrl=`);
+    yarn's checksum is of its own zip of the tarball, so it is lock_digest,
+    not integrity. Its `conditions` give os / cpu / libc. Other sources (git,
+    a tarball URL) come without a digest; workspaces, links, portals, local
+    files and patches (whose package is an entry of its own) are left
+    out."""
+    out, cur = [], None
+
+    def flush():
+        if not cur or not cur.get("resolution"):
+            return
+        res = cur["resolution"]
+        m = _BERRY_NPM_RE.match(res)
+        conditions = {"os": [], "cpu": [], "libc": []}
+        for k, v in _BERRY_CONDITION_RE.findall(cur.get("conditions", "")):
+            conditions[k].append(v)
+        if m is not None:
+            params = urllib.parse.parse_qs(m.group(3) or "")
+            archive = (params.get("__archiveUrl") or [""])[0]
+            checksum = cur.get("checksum", "")
+            out.append(dict(conditions, name=m.group(1), version=cur.get("version") or m.group(2), resolved=archive,
+                            integrity="", lock_digest=checksum or None))
+            return
+        at = res.find("@", 1)
+        name, source = (res[:at], res[at + 1:]) if at > 0 else (res, "")
+        if source.startswith(_YARN_LOCAL + ("patch:", "exec:")):
+            return
+        out.append(dict(conditions, name=name, version=cur.get("version", ""), resolved=source, integrity="",
+                        lock_digest=None))
+
+    for raw in (text or "").splitlines():
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        if not raw[0].isspace():
+            flush()
+            cur = None if raw.startswith("__metadata") else {}
+            continue
+        if cur is None or not raw.startswith("  ") or raw.startswith("   "):
+            continue
+        key, _, value = raw.strip().partition(":")
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] == '"':
+            value = value[1:-1]
+        if key in ("version", "resolution", "checksum", "conditions"):
+            cur[key] = value
+    flush()
+    return out
+
+
+def bun_lock_entries(text):
+    """[{name, version, resolved, integrity, os, cpu, libc}] of a text
+    bun.lock (Bun 1.2+): an npm package is ["name@version", its tarball URL
+    or '' for the registry's own, {…, os, cpu}, integrity]; git, GitHub and
+    tarball-URL packages come without a digest; workspaces, links and local
+    folders are left out. ValueError when it is not a bun.lock."""
+    doc = sca.jsonc_loads(text or "")
+    pkgs = doc.get("packages") if isinstance(doc, dict) else None
+    if not isinstance(pkgs, dict):
+        raise ValueError("not a bun.lock")
+    out = []
+    for entry in pkgs.values():
+        if not isinstance(entry, list) or not entry or not isinstance(entry[0], str):
+            continue
+        at = entry[0].find("@", 1)
+        if at <= 0:
+            continue
+        name, spec = entry[0][:at], entry[0][at + 1:]
+        if spec.startswith(sca._BUN_LOCAL):
+            continue
+        info = next((x for x in entry[1:] if isinstance(x, dict)), {})
+        platform = {k: _strings(info.get(k)) for k in ("os", "cpu", "libc")}
+        if spec[:1].isdigit():
+            url = entry[1] if len(entry) > 1 and isinstance(entry[1], str) else ""
+            integrity = entry[3] if len(entry) > 3 and isinstance(entry[3], str) else ""
+            out.append(dict(platform, name=name, version=spec, resolved=url, integrity=integrity))
         else:
-            url = registries.tarball(e["name"], e["version"]) if e["version"] else ""
-        if not url or not (fetchable(url) or (url.startswith("http://") and netloc(url) in http_hosts)):
-            ctx.add(Check("npm", e["name"], e["version"], e["resolved"] or "unknown source")).notes.append(
-                "not from a registry (git, a local file or a link): not checked")
-            continue
-        if not e["version"] and sri_best(e["integrity"]) is None:
-            ctx.add(Check("npm", e["name"], "", url)).notes.append(
-                "a tarball URL with no digest in the lockfile (like a git dependency): not checked")
-            continue
-        todo[key] = {"name": e["name"], "version": e["version"], "tarball": url, "integrity": e["integrity"],
-                     "registry": registries.for_name(e["name"])}
-    fetcher = Fetcher({netloc(u) for u in registries.all()} | {netloc(p["tarball"]) for p in todo.values()},
-                      http_hosts=http_hosts)
-    other = f"; {plural(ctx.skipped_platform, 'package')} for other platforms left out" \
-        if ctx.skipped_platform else ""
-    ctx.say(f"lazaret guard: {plural(len(todo), 'package')} to check ({os.path.basename(lock_path)}{other})")
-    run_all([lambda p=p: check_npm_package(ctx, fetcher, p) for p in todo.values()])
-    if ctx.blocked():
-        return EXIT_BLOCKED
-    return EXIT_OK if ctx.opts.plan else None
+            out.append(dict(platform, name=name, version="", resolved=spec, integrity=""))
+    return out
+
+
+def node_modules_installed(root):
+    """{(name, version)} of the packages in root's node_modules and those
+    nested in it (sca's walk; links and dot folders are not followed)."""
+    return {(n, v) for _eco, n, v, _where in sca.scan_npm_installed(root) if v}
+
+
+def verify_locked(ctx, entries, env):
+    """After the install: the lockfile's packages for this machine the guard
+    neither checked nor noted fail the run (verify_installed)."""
+    here = node_platform(env)
+    verify_installed(ctx, {(e["name"], e["version"]) for e in entries
+                           if e["version"] and platform_ok(e, here)}, "npm")
+
+
+def yarn_major(exe, env, cwd):
+    """The major version of the yarn that runs in cwd (a project's yarnPath
+    or packageManager field can make it yarn 2+)."""
+    try:
+        out = subprocess.run([exe, "--version"], env=env, cwd=cwd, capture_output=True, text=True, encoding="utf-8",
+                             errors="replace", timeout=120).stdout.strip()
+        return int(out.split(".")[0])
+    except (OSError, ValueError, subprocess.SubprocessError):
+        raise GuardError("could not tell which yarn runs here (yarn --version failed)") from None
+
+
+def guard_yarn(ctx, args):
+    """yarn 1 and yarn 2+: resolve, check what the lockfile adds, then
+    install."""
+    sub = args[0] if args and not args[0].startswith("-") else "install"
+    if sub == "global":
+        raise GuardError("lazaret guard does not wrap `yarn global`; install into a project instead")
+    exe = find_tool("yarn")
+    cwd = os.getcwd()
+    env = dict(os.environ)
+    if yarn_major(exe, env, cwd) < 2:
+        return guard_yarn_classic(ctx, exe, env, cwd, sub, list(args))
+    return guard_yarn_berry(ctx, exe, env, cwd, sub, list(args))
+
+
+def _yarn_workspaces(root):
+    """The workspace folders root's package.json lists (its patterns)."""
+    try:
+        with open(os.path.join(root, "package.json"), encoding="utf-8") as f:
+            spec = json.load(f).get("workspaces")
+    except (OSError, ValueError, AttributeError):
+        return []
+    patterns = spec.get("packages") if isinstance(spec, dict) else spec
+    out = []
+    for p in patterns if isinstance(patterns, list) else []:
+        if isinstance(p, str) and not os.path.isabs(p) and ".." not in p.replace("\\", "/").split("/"):
+            out += [d for d in sorted(glob.glob(os.path.join(root, p))) if os.path.isfile(os.path.join(d, "package.json"))]
+    return out[:5000]
+
+
+def _yarn_classic_root(cwd):
+    """The workspace root cwd belongs to (a package.json up from it whose
+    workspaces list it), else cwd."""
+    d = os.path.dirname(os.path.abspath(cwd))
+    while True:
+        if os.path.isfile(os.path.join(d, "package.json")) and any(
+                _same_dir(w, cwd) for w in _yarn_workspaces(d)):
+            return d
+        parent = os.path.dirname(d)
+        if parent == d:
+            return cwd
+        d = parent
+
+
+_YARNRC_PATH_KEYS = ("yarn-path", "yarn-offline-mirror", "cache-folder", "global-folder")
+
+
+def _copy_yarn_project(root, cwd, dest):
+    """The files yarn 1 resolves from, copied into dest: the package.json
+    files (the root's, its workspaces'), yarn.lock, and the .npmrc and
+    .yarnrc of the root and of cwd (a relative path in .yarnrc made
+    absolute)."""
+    dirs = [root] + [w for w in _yarn_workspaces(root) if not _same_dir(w, root)]
+    for d in dirs:
+        rel = os.path.relpath(d, root)
+        os.makedirs(os.path.join(dest, rel), exist_ok=True)
+        shutil.copyfile(os.path.join(d, "package.json"), os.path.join(dest, rel, "package.json"))
+    for d in dict.fromkeys([root, cwd]):
+        rel = os.path.relpath(d, root)
+        os.makedirs(os.path.join(dest, rel), exist_ok=True)
+        names = [".npmrc", ".yarnrc"] + (["yarn.lock"] if d == root else [])
+        for name in names:
+            src = os.path.join(d, name)
+            if not os.path.isfile(src):
+                continue
+            if name != ".yarnrc":
+                shutil.copyfile(src, os.path.join(dest, rel, name))
+                continue
+            lines = []
+            for line in (read_text(src) or "").splitlines():
+                key, _, value = line.strip().partition(" ")
+                value = value.strip().strip('"')
+                if key.strip('"') in _YARNRC_PATH_KEYS and value and not os.path.isabs(value):
+                    line = f'{key} {json.dumps(os.path.normpath(os.path.join(d, value)))}'
+                lines.append(line)
+            with open(os.path.join(dest, rel, name), "w", encoding="utf-8") as f:
+                f.write("\n".join(lines) + "\n")
+
+
+def guard_yarn_classic(ctx, exe, env, cwd, sub, args):
+    """yarn 1 has no lockfile-only mode: it resolves and installs in a
+    temporary copy of the project with scripts off (nothing of a package
+    runs), and what that copy installed is checked against its yarn.lock.
+    Then the command runs as given."""
+    if sub not in YARN_CLASSIC_CMDS:
+        raise GuardError(f"lazaret guard wraps yarn 1's install commands ({', '.join(sorted(YARN_CLASSIC_CMDS))}); "
+                         f"`yarn global` is not wrapped: install into a project")
+    if not os.path.isfile(os.path.join(cwd, "package.json")):
+        raise GuardError("no package.json here: run it in the project")
+    root = _yarn_classic_root(cwd)
+    if not _same_dir(root, cwd):
+        ctx.say(f"lazaret guard: yarn works in {root}")
+    registries = Registries(pmsettings.yarn_classic_settings(exe, env, cwd), default=pmsettings.YARN_REGISTRY,
+                            replace_npmjs=False)
+    if ctx.cutoff is not None:
+        ctx.say(f"lazaret guard: releases younger than {format_age(ctx.min_age)} are blocked "
+                f"(yarn 1 has no setting to hold them back)")
+    before_install = node_modules_installed(root)
+    scratch = tempfile.mkdtemp(prefix="lazaret-guard-yarn-")
+    try:
+        _copy_yarn_project(root, cwd, scratch)
+        where = os.path.normpath(os.path.join(scratch, os.path.relpath(cwd, root)))
+        resolve = [exe] + (args if args and not args[0].startswith("-") else ["install"] + args) \
+            + ["--ignore-scripts", "--non-interactive"]
+        proc = run_tool(resolve, dict(env, npm_config_ignore_scripts="true"), cwd=where, capture=True)
+        if proc.returncode != 0:
+            show_failure(ctx, f"resolving (yarn {sub}, in a copy of the project)", proc)
+            code = EXIT_RESOLVE
+        else:
+            lock = yarn_classic_lock(read_text(os.path.join(scratch, "yarn.lock")) or "")
+            planned = node_modules_installed(scratch)
+            entries = [lock[k] for k in sorted(planned) if k in lock]
+            # a package with no entry of its own came inside another's tarball (bundled): checked with it
+            ctx.expected |= {(_name_key("npm", n), v) for n, v in planned}
+            code = check_lock_entries(ctx, entries, registries, before_install, "yarn.lock", env, rewrite=False)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    if code is not None:
+        return finish(ctx, installed=False, code=code)
+    proc = run_tool([exe] + args, env, cwd=cwd)
+    if proc.returncode == 0:
+        verify_installed(ctx, node_modules_installed(root) - before_install, "npm")
+    return finish(ctx, installed=proc.returncode == 0, code=proc.returncode)
+
+
+def _berry_age_gate(exe, env, cwd):
+    """yarn 2+'s npmMinimalAgeGate in minutes (yarn 4.10+), else None."""
+    got = pmsettings.run_json([exe, "config", "get", "npmMinimalAgeGate", "--json"], env, cwd)
+    return got if isinstance(got, int) and not isinstance(got, bool) else None
+
+
+def guard_yarn_berry(ctx, exe, env, cwd, sub, args):
+    """yarn 2+: `--mode=update-lockfile` resolves (fetching what it adds
+    into yarn's cache, linking and building nothing); the lockfile's new
+    packages are checked; then the command runs as given."""
+    if sub not in YARN_BERRY_CMDS:
+        raise GuardError(f"lazaret guard wraps yarn's install commands ({', '.join(sorted(YARN_BERRY_CMDS))})")
+    root = _find_up(cwd, ["yarn.lock"]) or cwd
+    settings, creds = pmsettings.berry_settings(exe, env, cwd)
+    registries = Registries(settings, default=pmsettings.YARN_REGISTRY, creds=creds, replace_npmjs=False)
+    if ctx.cutoff is not None and not ctx.opts.allow_new:
+        own = _berry_age_gate(exe, env, cwd)
+        if own is not None:
+            minutes = max(1, -(-ctx.min_age // 60))
+            if own < minutes:
+                env["YARN_NPM_MINIMAL_AGE_GATE"] = str(minutes)
+            ctx.say(f"lazaret guard: releases younger than {format_age(ctx.min_age)} are held back "
+                    f"(yarn npmMinimalAgeGate)")
+    lock = os.path.join(root, "yarn.lock")
+    snap = Snapshot([os.path.join(cwd, "package.json"), os.path.join(root, "package.json"), lock,
+                     os.path.join(root, ".yarn", "install-state.gz")])
+    yarn_dir, cache = os.path.join(root, ".yarn"), os.path.join(root, ".yarn", "cache")
+    had_yarn_dir = os.path.isdir(yarn_dir)
+    cached_before = set(os.listdir(cache)) if os.path.isdir(cache) else set()
+    before_install = node_modules_installed(root) \
+        if os.path.exists(os.path.join(root, "node_modules", ".yarn-state.yml")) else set()
+    try:
+        resolve = [exe] + (args if args and not args[0].startswith("-") else ["install"] + args) \
+            + ["--mode=update-lockfile"]
+        proc = run_tool(resolve, dict(env, YARN_ENABLE_SCRIPTS="false"), cwd=cwd, capture=True)
+        if proc.returncode != 0:
+            show_failure(ctx, f"resolving (yarn {sub} --mode=update-lockfile)", proc)
+            code = EXIT_RESOLVE
+        else:
+            entries = yarn_berry_lock(read_text(lock) or "")
+            code = check_lock_entries(ctx, entries, registries, before_install, "yarn.lock", env, rewrite=False)
+    except BaseException:
+        snap.restore()
+        raise
+    if code is not None:
+        restored = snap.restore()
+        if not had_yarn_dir and os.path.isdir(yarn_dir):
+            shutil.rmtree(yarn_dir, ignore_errors=True)         # all of it came from the resolution
+            restored.append(".yarn")
+        elif os.path.isdir(cache):
+            added = sorted(set(os.listdir(cache)) - cached_before)
+            for name in added:                     # what the resolution fetched into the project's cache
+                try:
+                    os.remove(os.path.join(cache, name))
+                except OSError:
+                    pass
+            if added:
+                restored.append(f".yarn/cache ({plural(len(added), 'file')})")
+        return finish(ctx, installed=False, restored=restored, code=code)
+    proc = run_tool([exe] + args, env, cwd=cwd)
+    if proc.returncode == 0:
+        verify_locked(ctx, yarn_berry_lock(read_text(lock) or ""), env)
+    return finish(ctx, installed=proc.returncode == 0, code=proc.returncode)
+
+
+def _bun_age_flag(exe, env):
+    """Does this bun take --minimum-release-age (Bun 1.3+)?"""
+    try:
+        out = subprocess.run([exe, "install", "--help"], env=env, capture_output=True, text=True, encoding="utf-8",
+                             errors="replace", timeout=60).stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return "--minimum-release-age" in out
+
+
+def guard_bun(ctx, args):
+    """Bun: `--lockfile-only` resolves (installing nothing, scripts off);
+    what bun.lock adds is checked; then the command runs as given."""
+    sub = args[0] if args and not args[0].startswith("-") else "install"
+    if sub not in BUN_CMDS:
+        raise GuardError(f"lazaret guard wraps bun's install commands ({', '.join(sorted(BUN_CMDS))})")
+    if any(a in _GLOBAL_FLAGS for a in args):
+        raise GuardError("lazaret guard does not wrap bun's global installs; install into a project instead")
+    if "--no-verify" in args:
+        raise GuardError("--no-verify: bun would not check the packages' digests, so the guard's check "
+                         "would say nothing about what it installs")
+    exe = find_tool("bun")
+    cwd = os.getcwd()
+    env = dict(os.environ)
+    root = _find_up(cwd, ["bun.lock", "bun.lockb"]) or cwd
+    lock = os.path.join(root, "bun.lock")
+    if os.path.exists(os.path.join(root, "bun.lockb")) and not os.path.exists(lock):
+        raise GuardError("the guard reads bun.lock (Bun 1.2+), not bun.lockb: convert it first with "
+                         "`bun install --save-text-lockfile --lockfile-only`")
+    settings, creds = pmsettings.bun_settings(env, cwd)
+    registries = Registries(settings, creds=creds, replace_npmjs=False)
+    args = list(args)
+    if ctx.cutoff is not None and not ctx.opts.allow_new and sub in ("install", "i", "add", "a", "update") \
+            and _bun_age_flag(exe, env):
+        if not any(a.startswith("--minimum-release-age") for a in args):
+            args.append(f"--minimum-release-age={ctx.min_age}")
+        ctx.say(f"lazaret guard: releases younger than {format_age(ctx.min_age)} are held back "
+                f"(bun --minimum-release-age)")
+    snap = Snapshot([os.path.join(cwd, "package.json"), os.path.join(root, "package.json"), lock])
+    before_install = node_modules_installed(root)
+    try:
+        resolve = [exe] + (args if args and not args[0].startswith("-") else ["install"] + args) \
+            + ["--lockfile-only", "--ignore-scripts"]
+        proc = run_tool(resolve, env, cwd=cwd, capture=True)
+        if proc.returncode != 0:
+            show_failure(ctx, f"resolving (bun {sub} --lockfile-only)", proc)
+            code = EXIT_RESOLVE
+        else:
+            try:
+                entries = bun_lock_entries(read_text(lock) or "")
+            except ValueError:
+                raise GuardError(f"bun wrote no bun.lock to check (looked in {root})") from None
+            code = check_lock_entries(ctx, entries, registries, before_install, "bun.lock", env, rewrite=False)
+    except BaseException:
+        snap.restore()
+        raise
+    if code is not None:
+        return finish(ctx, installed=False, restored=snap.restore(), code=code)
+    proc = run_tool([exe] + args, env, cwd=cwd)
+    if proc.returncode == 0:
+        try:
+            verify_locked(ctx, bun_lock_entries(read_text(lock) or ""), env)
+        except ValueError:
+            pass
+    return finish(ctx, installed=proc.returncode == 0, code=proc.returncode)
 
 
 def uv_lock_args(args):
@@ -1781,7 +2355,12 @@ def _check_uv(ctx, exe, sub, args, env, root, lock, installed):
     info = interpreter_info(uv_python(exe, args, env, root))
     ctx.expected |= {(pep503(p["name"]), p["version"]) for p in new}
     todo = [p for p in new if p["source"] != "local" and (pep503(p["name"]), p["version"]) not in baseline]
-    fetcher = Fetcher({"pypi.org"})
+    # the indexes of uv's settings give the credentials for their hosts (and .netrc for any)
+    indexes = pmsettings.uv_indexes(env, root)
+    urls = [f["url"] for p in todo for f in ([p["sdist"]] if p["sdist"] else []) + p["wheels"]]
+    creds = pmsettings.index_credentials(indexes, env, hosts=urls)
+    http_hosts = {netloc(i.url) for i in indexes if i.url.startswith("http://")}
+    fetcher = Fetcher({"pypi.org"}, http_hosts=http_hosts, auth=creds)
     jobs = []
     for p in todo:
         if p["source"] != "registry":
@@ -1789,9 +2368,9 @@ def _check_uv(ctx, exe, sub, args, env, root, lock, installed):
                 "not from a registry (git, a URL or a local file): not checked")
             continue
         for f in pick_artifacts(([p["sdist"]] if p["sdist"] else []) + p["wheels"], info):
-            if not fetchable(f["url"]):
+            if not (fetchable(f["url"]) or netloc(f["url"]) in http_hosts):
                 ctx.block(ctx.add(Check("pypi", p["name"], p["version"], f["filename"])),
-                          f"could not be checked: not fetched over https ({f['url'][:80]})")
+                          f"could not be checked: not fetched over https ({pmsettings.shown(f['url'])[:80]})")
                 continue
             fetcher.allow(f["url"])
             jobs.append(lambda p=p, f=f: check_file(ctx, fetcher, p["name"], p["version"], f))
@@ -1816,14 +2395,16 @@ def _requirement_files(args):
 
 
 def check_pip_arguments(args, base=None, depth=0):
-    """Refuse options that point pip or uv at another index or at local
-    archives — packages from there would not pass the guard — on the command
-    line and in the requirement files it names (and those they include)."""
+    """Refuse options that point pip or uv at local archives or at no index
+    (-f, --no-index), and index options inside the requirement files it
+    names (and those they include): pip would use those itself, and packages
+    from there would not pass the guard. (Index options on the command line
+    are the guard's to relay: take_index_options.)"""
     for a in args:
         if a in PIP_INDEX_OPTIONS or a.startswith(tuple(o + "=" for o in PIP_INDEX_OPTIONS if o.startswith("--"))) \
                 or (a.startswith(("-i", "-f")) and not a.startswith("--") and len(a) > 2):
-            raise GuardError(f"{a.split('=')[0]}: lazaret guard serves the index itself (PyPI, checked); "
-                             f"install without another index or local archives")
+            raise GuardError(f"{a.split('=')[0]}: lazaret guard serves the packages itself, from the indexes "
+                             f"the tool is set to use; install without local archives")
     if depth > 5:
         return
     for req in _requirement_files(args):
@@ -1834,10 +2415,130 @@ def check_pip_arguments(args, base=None, depth=0):
         for line in text.splitlines():
             if _PIP_REQ_OPTION_RE.match(line):
                 raise GuardError(f"{req}: {line.strip()[:80]} — lazaret guard serves the index itself; "
-                                 f"remove index options from the requirements")
+                                 f"move index options to the command line or the tool's settings")
             m = _PIP_REQ_INCLUDE_RE.match(line)
             if m:
                 check_pip_arguments(["-r", m.group(1)], os.path.dirname(path), depth + 1)
+
+
+#: Index options of the command line the guard relays: pip's, and uv's too
+_PIP_TAKE = {"-i": "default", "--index-url": "default", "--extra-index-url": "extra"}
+_UV_TAKE = dict(_PIP_TAKE, **{"--default-index": "default", "--index": "index", "--index-strategy": "strategy"})
+
+
+def take_index_options(args, uv=False):
+    """(args without their index options, the default index they name or
+    None, the other indexes they name, uv's --index-strategy or None): the
+    guard relays these indexes itself."""
+    take = _UV_TAKE if uv else _PIP_TAKE
+    out, default, extras, strategy = [], None, [], None
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            out += args[i:]
+            break
+        name, eq, value = a.partition("=") if a.startswith("--") else (a, "", "")
+        if a.startswith("-i") and not a.startswith("--") and len(a) > 2:
+            name, eq, value = "-i", "=", a[2:]
+        kind = take.get(name)
+        if kind is None or (not eq and i + 1 >= len(args)):
+            out.append(a)
+            i += 1
+            continue
+        if not eq:
+            value = args[i + 1]
+            i += 1
+        i += 1
+        if kind == "default":
+            default = pmsettings.Index(value, default=True)
+        elif kind == "extra":
+            extras.append(pmsettings.Index(value))
+        elif kind == "index":
+            extras.append(pmsettings._uv_index_value(value))
+        else:
+            strategy = value
+    return out, default, extras, strategy
+
+
+def python_indexes(kind, exe, env, cwd, cli_default=None, cli_extras=(), cli_strategy=None):
+    """(the indexes to relay, in the tool's order; merge them (pip's rule,
+    or uv's unsafe strategies) or take the first that has a project (uv's
+    first-index); their Credentials). kind: 'pip', 'uv-pip' or 'uv'. The
+    command line's index options come first; LAZARET_GUARD_PYPI_URL stands
+    for the tool's settings."""
+    explicit = os.environ.get("LAZARET_GUARD_PYPI_URL")
+    explicit = [pmsettings.Index(explicit, default=True)] if explicit else None
+    if kind == "pip":
+        found = explicit or pmsettings.pip_indexes(exe, env, cwd)
+        indexes, merge = [cli_default or found[0]] + found[1:] + list(cli_extras), True
+    else:
+        found = explicit or pmsettings.uv_indexes(env, cwd, pip=kind == "uv-pip")
+        indexes = list(cli_extras) + found[:-1] + [cli_default or found[-1]]
+        strategy = cli_strategy or pmsettings.uv_index_strategy(env, cwd, pip=kind == "uv-pip")
+        merge = strategy != "first-index"
+    seen, unique = set(), []
+    for index in indexes:
+        key = pmsettings.shown(index.url)
+        if key not in seen:
+            seen.add(key)
+            unique.append(index)
+    creds = pmsettings.index_credentials(unique, env)
+    for index in unique:
+        if not (fetchable(index.url) or index.url.startswith("http://")):
+            raise GuardError(f"{pmsettings.shown(index.url)}: lazaret guard relays https indexes "
+                             f"(or http ones in the tool's settings)")
+    return unique, merge, creds
+
+
+class LocalIndex:
+    """The local index (PypiIndex behind make_index_server) for one command:
+    `with LocalIndex(ctx, indexes, merge, creds) as li:` — li.index,
+    li.base (http://127.0.0.1:port), li.tool_env(env, uv)."""
+
+    def __init__(self, ctx, indexes, merge, creds):
+        self.spool = tempfile.mkdtemp(prefix="lazaret-guard-")
+        http_hosts = {netloc(i.url) for i in indexes if i.url.startswith("http://")}
+        fetcher = Fetcher({netloc(i.url) for i in indexes}, http_hosts=http_hosts, auth=creds)
+        self.index = PypiIndex(ctx, fetcher, self.spool, indexes=indexes, merge=merge)
+        self.server = make_index_server(self.index)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.port = self.server.server_address[1]
+        self.base = f"http://127.0.0.1:{self.port}"
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.server.shutdown()
+        self.server.server_close()
+        shutil.rmtree(self.spool, ignore_errors=True)
+
+    def tool_env(self, env, uv):
+        """The tool's environment, pointed at this index alone. uv: as its
+        first index (UV_INDEX, which comes before any in its settings files,
+        and this index answers every project, so uv asks no other) and as its
+        default; pip: its index-url (an extra-index-url in its settings files
+        is still read by pip, and a file it takes from there blocks the
+        install: _pip_plan)."""
+        env = dict(env)
+        if uv:
+            for k in ("UV_INDEX", "UV_EXTRA_INDEX_URL", "UV_FIND_LINKS", "UV_NO_INDEX", "UV_DEFAULT_INDEX",
+                      "UV_INDEX_URL", "UV_INDEX_STRATEGY"):
+                env.pop(k, None)
+            env.update(UV_INDEX=f"lazaret-guard={self.base}/simple", UV_DEFAULT_INDEX=self.base + "/simple",
+                       UV_INDEX_STRATEGY="first-index", UV_HTTP_TIMEOUT=str(TOOL_TIMEOUT))
+        else:
+            for k in ("PIP_EXTRA_INDEX_URL", "PIP_FIND_LINKS", "PIP_NO_INDEX"):
+                env.pop(k, None)
+            env.update(PIP_INDEX_URL=self.base + "/simple/", PIP_TRUSTED_HOST=f"127.0.0.1:{self.port}",
+                       PIP_DEFAULT_TIMEOUT=str(TOOL_TIMEOUT))
+        return env
+
+
+def _say_indexes(ctx, indexes):
+    if len(indexes) > 1 or indexes[0].url != PYPI_SIMPLE:
+        ctx.say("lazaret guard: relaying " + ", ".join(pmsettings.shown(i.url) for i in indexes))
 
 
 def _pip_plan(ctx, index, base, exe, pip_args, env):
@@ -1865,14 +2566,37 @@ def _pip_plan(ctx, index, base, exe, pip_args, env):
         if m is not None and m.group(1) in index.files:
             jobs.append(lambda n=m.group(1): index.scan(n))
             continue
-        c = ctx.add(Check("pypi", str(meta.get("name", url)), str(meta.get("version", "")), url))
+        c = ctx.add(Check("pypi", str(meta.get("name", url)), str(meta.get("version", "")), pmsettings.shown(url)))
         if isinstance(info, dict) and ("vcs_info" in info or "dir_info" in info or url.startswith("file:")):
             c.notes.append("a local or version-control source: not checked")
         else:
-            ctx.block(c, "not downloaded through lazaret guard's index, so not checked")
+            ctx.block(c, "not downloaded through lazaret guard's index (an extra-index-url or find-links in "
+                         "pip's configuration files?), so not checked")
     ctx.say(f"lazaret guard: {plural(len(items), 'package')} to check (pip's plan)")
     run_all(jobs)
     return None
+
+
+_UV_PLAN_URL_RE = re.compile(r"^\s*\+\s+([A-Za-z0-9][A-Za-z0-9._-]*)\s+@\s+(\S+)")
+
+
+def _uv_plan_jobs(ctx, index, planned, urls, info):
+    """Scan jobs for a uv plan: the files the index served for each
+    name==version (those a uv here may install); a package it did not serve
+    came from elsewhere and blocks; a URL, path or git source is noted."""
+    jobs = []
+    for name, version in planned:
+        files = index.release_files(name, version)
+        if not files:
+            ctx.block(ctx.add(Check("pypi", name, version, "")),
+                      "not served by lazaret guard's index, so not checked")
+            continue
+        picked = {f["filename"] for f in pick_artifacts([i for _, i in files], info)}
+        jobs += [lambda n=n: index.scan(n) for n, i in files if i["filename"] in picked]
+    for name, url in urls:
+        ctx.add(Check("pypi", name, "", pmsettings.shown(url))).notes.append(
+            "a local, URL or version-control source: not checked")
+    return jobs
 
 
 def _uv_pip_plan(ctx, index, exe, pip_args, env):
@@ -1884,13 +2608,11 @@ def _uv_pip_plan(ctx, index, exe, pip_args, env):
             return EXIT_BLOCKED
         show_failure(ctx, f"resolving (uv pip {pip_args[0]} --dry-run)", proc)
         return EXIT_RESOLVE
-    planned = [(m.group(1), m.group(2)) for m in map(_UV_PLAN_LINE_RE.match, (proc.stdout or "").splitlines()) if m]
+    lines = (proc.stdout or "").splitlines()
+    planned = [(m.group(1), m.group(2)) for m in map(_UV_PLAN_LINE_RE.match, lines) if m]
+    urls = [(m.group(1), m.group(2)) for m in map(_UV_PLAN_URL_RE.match, lines) if m]
     info = interpreter_info(uv_python(exe, pip_args, env, os.getcwd()))
-    jobs = []
-    for name, version in planned:
-        files = index.release_files(name, version)
-        picked = {f["filename"] for f in pick_artifacts([i for _, i in files], info)}
-        jobs += [lambda n=n: index.scan(n) for n, i in files if i["filename"] in picked]
+    jobs = _uv_plan_jobs(ctx, index, planned, urls, info)
     ctx.say(f"lazaret guard: {plural(len(planned), 'package')} to check (uv's plan)")
     run_all(jobs)
     return None
@@ -1902,51 +2624,267 @@ def guard_pip(ctx, tool, args):
     pip_args = args[1:] if uv else list(args)
     if not pip_args or pip_args[0] not in (("install", "sync") if uv else ("install",)):
         raise GuardError("lazaret guard wraps `pip install`, `uv pip install` and `uv pip sync`")
-    check_pip_arguments(pip_args[1:])
+    rest, cli_default, cli_extras, cli_strategy = take_index_options(pip_args[1:], uv)
+    check_pip_arguments(rest)
+    pip_args = [pip_args[0]] + rest
     exe = find_tool("uv" if uv else tool)
-    upstream = pypi_upstream()
-    if not fetchable(upstream):
-        raise GuardError(f"LAZARET_GUARD_PYPI_URL must be https (or http on this machine): {upstream}")
-    spool = tempfile.mkdtemp(prefix="lazaret-guard-")
-    fetcher = Fetcher({netloc(upstream), "pypi.org", "files.pythonhosted.org"})
-    index = PypiIndex(ctx, fetcher, spool, upstream)
-    server = make_index_server(index)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    base = f"http://127.0.0.1:{server.server_address[1]}"
+    cwd = os.getcwd()
     env = dict(os.environ)
-    if uv:
-        for k in ("UV_INDEX", "UV_EXTRA_INDEX_URL", "UV_FIND_LINKS", "UV_NO_INDEX"):
-            env.pop(k, None)
-        env.update(UV_DEFAULT_INDEX=base + "/simple", UV_INDEX_URL=base + "/simple", UV_HTTP_TIMEOUT=str(TOOL_TIMEOUT))
-    else:
-        for k in ("PIP_EXTRA_INDEX_URL", "PIP_FIND_LINKS", "PIP_NO_INDEX"):
-            env.pop(k, None)
-        env.update(PIP_INDEX_URL=base + "/simple/", PIP_TRUSTED_HOST=f"127.0.0.1:{server.server_address[1]}",
-                   PIP_DEFAULT_TIMEOUT=str(TOOL_TIMEOUT))
-    if ctx.cutoff is not None:
-        ctx.say(f"lazaret guard: files uploaded less than {format_age(ctx.min_age)} ago are left out of the index")
-    try:
-        code = _uv_pip_plan(ctx, index, exe, pip_args, env) if uv else _pip_plan(ctx, index, base, exe, pip_args, env)
+    indexes, merge, creds = python_indexes("uv-pip" if uv else "pip", exe, env, cwd, cli_default, cli_extras,
+                                           cli_strategy)
+    with LocalIndex(ctx, indexes, merge, creds) as li:
+        _say_indexes(ctx, indexes)
+        env = li.tool_env(env, uv)
+        if ctx.cutoff is not None:
+            ctx.say(f"lazaret guard: files uploaded less than {format_age(ctx.min_age)} ago are left out of "
+                    f"the index")
+        code = _uv_pip_plan(ctx, li.index, exe, pip_args, env) if uv \
+            else _pip_plan(ctx, li.index, li.base, exe, pip_args, env)
         if code is None and ctx.blocked():
             code = EXIT_BLOCKED
         if code is None and ctx.opts.plan:
             code = EXIT_OK
         if code is not None:
-            return finish(ctx, installed=False, index=index, code=code)
+            return finish(ctx, installed=False, index=li.index, code=code)
         proc = run_tool(([exe, "pip"] if uv else [exe]) + pip_args, env)
         blocked = bool(ctx.blocked())
-        return finish(ctx, installed=proc.returncode == 0 and not blocked, index=index,
+        return finish(ctx, installed=proc.returncode == 0 and not blocked, index=li.index,
                       code=EXIT_BLOCKED if blocked else proc.returncode)
-    finally:
-        server.shutdown()
-        server.server_close()
-        shutil.rmtree(spool, ignore_errors=True)
+
+
+# ---------------- uvx, uv tool and uv run (0.1.8) ----------------
+#: Options of `uv tool run` / `uv tool install` / `uv run` that take a value
+_UV_VALUE_OPTIONS = frozenset((
+    "--from", "-w", "--with", "--with-editable", "--with-requirements", "-c", "--constraints", "-b",
+    "--build-constraints", "--overrides", "--env-file", "--python-platform", "--index", "--default-index", "-i",
+    "--index-url", "--extra-index-url", "-f", "--find-links", "--index-strategy", "--keyring-provider", "-P",
+    "--upgrade-package", "--resolution", "--prerelease", "--fork-strategy", "--exclude-newer",
+    "--exclude-newer-package", "--reinstall-package", "--link-mode", "-C", "--config-setting",
+    "--config-settings-package", "--no-build-isolation-package", "--no-build-package", "--no-binary-package",
+    "--cache-dir", "--refresh-package", "-p", "--python", "--color", "--allow-insecure-host", "--directory",
+    "--project", "--config-file", "--torch-backend", "--with-executables-from", "--extra", "--group",
+    "--only-group", "--no-group", "--package", "--no-extra", "--python-preference", "-e", "--editable",
+    "--no-dev", "--script",
+))
+#: ... of these, the flags (no value): --no-dev, --script and -e/--editable take none in some commands
+_UV_FLAG_LIKE = frozenset(("--no-dev", "--script", "-e", "--editable"))
+_UV_SHORT_VALUE = ("-w", "-c", "-b", "-i", "-f", "-P", "-C", "-p")
+_PYTHON_COMMAND_RE = re.compile(r"^python(?:\d+(?:\.\d+)*)?(?:\.exe)?$")
+
+
+def split_uv_args(args, flags=_UV_FLAG_LIKE):
+    """(options before the first positional argument, the positional, what
+    follows it) of a uv command line (clap's trailing arguments)."""
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            return args[:i], (args[i + 1] if i + 1 < len(args) else None), args[i + 2:]
+        if not a.startswith("-") or a == "-":
+            return args[:i], a, args[i + 1:]
+        if a in _UV_VALUE_OPTIONS and a not in flags:
+            i += 2
+            continue
+        i += 1
+    return args, None, []
+
+
+def _option_values(opts, names):
+    """Every value the options `names` take in opts."""
+    out = []
+    for k, a in enumerate(opts):
+        if a in names and k + 1 < len(opts):
+            out.append(opts[k + 1])
+        for n in names:
+            if n.startswith("--") and a.startswith(n + "="):
+                out.append(a.split("=", 1)[1])
+            elif not n.startswith("--") and a.startswith(n) and len(a) > len(n) and a not in _UV_VALUE_OPTIONS:
+                out.append(a[len(n):])
+    return out
+
+
+def _split_with(value):
+    """uv's --with a,b (not the commas inside an extras list)."""
+    parts, depth, cur = [], 0, ""
+    for ch in value:
+        depth += ch == "["
+        depth -= ch == "]"
+        if ch == "," and depth <= 0:
+            parts.append(cur.strip())
+            cur = ""
+        else:
+            cur += ch
+    parts.append(cur.strip())
+    return [p for p in parts if p]
+
+
+# a requirement that is a path, a URL or a git source (PEP 508's `name @ url` too, not uvx's `name@1.2`)
+_REQ_LOCAL_RE = re.compile(r"(?:^[.~/\\]|^[A-Za-z]:[\\/]|://|^git\+|@\s*(?:[A-Za-z][A-Za-z0-9+.-]*:|[.~/\\]))")
+
+
+def _tool_requirements(opts, command, install):
+    """(registry requirements, local / URL / git ones) of a uv tool command:
+    --from, or the command itself (`name@version` pins it; `python` is no
+    package), --with (commas), --with-requirements files."""
+    reqs = []
+    source = _option_values(opts, ("--from",))
+    if source:
+        reqs.append(source[-1])
+    elif command and (install or not _PYTHON_COMMAND_RE.match(command)):
+        name, at, version = command.partition("@")
+        if _REQ_LOCAL_RE.search(command) or not at:
+            reqs.append(command)
+        else:
+            reqs.append(name if version == "latest" else f"{name}=={version}")
+    for value in _option_values(opts, ("-w", "--with")):
+        reqs += _split_with(value)
+    for path in _option_values(opts, ("--with-requirements",)):
+        check_pip_arguments(["-r", path])
+        for line in (read_text(path) or "").splitlines():
+            line = line.split(" #", 1)[0].strip()
+            if line and not line.startswith(("#", "-")):
+                reqs.append(line)
+    local = [r for r in reqs if _REQ_LOCAL_RE.search(r)] + _option_values(opts, ("--with-editable",))
+    return [r for r in reqs if not _REQ_LOCAL_RE.search(r)], local
+
+
+_UV_COMPILE_PASS = ("-c", "--constraints", "--overrides", "-b", "--build-constraints", "--prerelease",
+                    "--resolution", "--fork-strategy", "--exclude-newer", "--exclude-newer-package",
+                    "--python-platform", "--no-build-package", "--no-binary-package", "-C", "--config-setting")
+_UV_COMPILE_FLAGS = ("--no-build", "--no-binary", "--no-sources", "--pre")
+
+
+def _uv_tool_plan(ctx, li, exe, env, opts, reqs, python):
+    """Resolve the tool's requirements through the local index (`uv pip
+    compile`: metadata only, and every file it downloads is scanned first)
+    and scan the files of the plan. -> an exit code, or None to go on."""
+    work = tempfile.mkdtemp(prefix="lazaret-guard-plan-", dir=li.spool)
+    req_path, out_path = os.path.join(work, "requirements.in"), os.path.join(work, "plan.txt")
+    with open(req_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(reqs) + "\n")
+    passed = []
+    for k, a in enumerate(opts):
+        if a in _UV_COMPILE_PASS and k + 1 < len(opts):
+            passed += [a, opts[k + 1]]
+        elif a.split("=", 1)[0] in _UV_COMPILE_PASS and "=" in a or a in _UV_COMPILE_FLAGS:
+            passed.append(a)
+    cmd = [exe, "pip", "compile", req_path, "-o", out_path, "--quiet", "--no-header", "--no-annotate"] + passed \
+        + (["--python", python] if python else [])
+    proc = run_tool(cmd, env, capture=True)
+    if proc.returncode != 0:
+        if ctx.blocked():
+            return EXIT_BLOCKED
+        show_failure(ctx, "resolving (uv pip compile)", proc)
+        return EXIT_RESOLVE
+    lines = (read_text(out_path) or "").splitlines()
+    planned = [(m.group(1), m.group(2)) for m in (re.match(r"^([A-Za-z0-9][A-Za-z0-9._-]*)==(\S+)", ln)
+                                                  for ln in lines) if m]
+    jobs = _uv_plan_jobs(ctx, li.index, planned, [], interpreter_info(python))
+    ctx.say(f"lazaret guard: {plural(len(planned), 'package')} to check (uv's plan)")
+    run_all(jobs)
+    return None
+
+
+def guard_uv_tool(ctx, args, via_uvx):
+    """uvx / uv tool run / uv tool install, through the local index: the
+    tool's requirements are resolved and their files scanned first (a
+    plan), then the command runs as given with every download served —
+    scanned — by the guard's index. `uvx python` and a tool installed
+    already download nothing."""
+    install = not via_uvx and args[1] == "install"
+    rest = list(args if via_uvx else args[2:])
+    opts, command, trailing = split_uv_args(rest)
+    if install:
+        opts, trailing = opts + trailing, []                   # (install: options may follow the package)
+    kept, cli_default, cli_extras, cli_strategy = take_index_options(opts, uv=True)
+    check_pip_arguments(kept)
+    exe = find_tool("uv")
+    cwd = os.getcwd()
+    env = dict(os.environ)
+    if command is None:
+        raise GuardError("name the tool to run or install: lazaret guard uvx ruff …")
+    reqs, local = _tool_requirements(kept, command, install)
+    indexes, merge, creds = python_indexes("uv", exe, env, cwd, cli_default, cli_extras, cli_strategy)
+    with LocalIndex(ctx, indexes, merge, creds) as li:
+        _say_indexes(ctx, indexes)
+        env = li.tool_env(env, uv=True)
+        for r in local:
+            ctx.add(Check("pypi", r, "", r)).notes.append("a local, URL or version-control source: not checked")
+        code = None
+        if reqs:
+            python = uv_python(exe, kept, env, cwd)
+            code = _uv_tool_plan(ctx, li, exe, env, kept, reqs, python)
+        if code is None and ctx.blocked():
+            code = EXIT_BLOCKED
+        if code is None and ctx.opts.plan:
+            code = EXIT_OK
+        if code is not None:
+            return finish(ctx, installed=False, index=li.index, code=code)
+        head = ["tool", "install"] if install else ["tool", "run"]
+        proc = run_tool([exe] + head + kept + [command] + trailing, env, cwd=cwd)
+        blocked = bool(ctx.blocked())
+        return finish(ctx, installed=proc.returncode == 0 and not blocked, index=li.index,
+                      code=EXIT_BLOCKED if blocked else proc.returncode)
+
+
+def guard_uv_run(ctx, args):
+    """uv run: in a project, its environment is synced from uv.lock first —
+    checked as `uv sync` is — and the command then runs with --frozen (the
+    lockfile just checked); what else it installs (--with, a script's own
+    dependencies) comes through the local index, scanned before uv gets it."""
+    opts, command, trailing = split_uv_args(list(args[1:]))
+    kept, cli_default, cli_extras, cli_strategy = take_index_options(opts, uv=True)
+    check_pip_arguments(kept)
+    exe = find_tool("uv")
+    cwd = os.getcwd()
+    env = dict(os.environ)
+    project_dir = _option_value(kept, ("--project", "--directory"))
+    script = "--script" in kept or ((command or "").endswith(".py") and "# /// script" in (read_text(command) or ""))
+    found = _find_up(os.path.abspath(project_dir) if project_dir else cwd, ["pyproject.toml"])
+    in_project = not script and "--no-project" not in kept and "--isolated" not in kept and found is not None \
+        and re.search(r"(?m)^\[(?:project|tool\.uv\.workspace)\]", read_text(os.path.join(found, "pyproject.toml"))
+                      or "") is not None
+    frozen = any(a in ("--frozen", "--locked") for a in kept)
+    run_opts = list(kept)
+    if in_project and "--no-sync" not in kept:
+        root = found
+        lock_dir = root if os.path.exists(os.path.join(root, "uv.lock")) else \
+            (_find_up(os.path.dirname(root), ["pyproject.toml"], _uv_workspace_root) or root)
+        lock = os.path.join(lock_dir, "uv.lock")
+        venv = os.environ.get("UV_PROJECT_ENVIRONMENT") or ".venv"
+        venv = venv if os.path.isabs(venv) else os.path.join(lock_dir, venv)
+        snap = Snapshot([os.path.join(root, "pyproject.toml"), lock])
+        try:
+            code, _new = _check_uv(ctx, exe, "sync", ["sync"] + kept, env, root, lock,
+                                   installed_python(venv_site_dirs(venv)))
+        except BaseException:
+            snap.restore()
+            raise
+        if code is not None:
+            return finish(ctx, installed=False, restored=snap.restore(), code=code)
+        if not frozen:
+            run_opts.append("--frozen")
+    indexes, merge, creds = python_indexes("uv", exe, env, cwd, cli_default, cli_extras, cli_strategy)
+    with LocalIndex(ctx, indexes, merge, creds) as li:
+        env = li.tool_env(env, uv=True)
+        if ctx.opts.plan:
+            return finish(ctx, installed=False, index=li.index, code=EXIT_OK)
+        proc = run_tool([exe, "run"] + run_opts + ([command] if command else []) + trailing, env, cwd=cwd)
+        blocked = bool(ctx.blocked())
+        return finish(ctx, installed=proc.returncode == 0 and not blocked, index=li.index,
+                      code=EXIT_BLOCKED if blocked else proc.returncode)
 
 
 # ---------------- Reporting ----------------
 _VERDICT_ORDER = {"SUSPICIOUS": 0, "INCOMPLETE": 1, "WARN": 2, None: 3, "OK": 4}
 #: Packages to review listed one per line; the rest are counted (--json lists them all)
 SHOW_REVIEW = 15
+
+
+def _and(items):
+    """'a', 'a and b', 'a, b and c'."""
+    items = list(items)
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
 
 
 def finish(ctx, installed, restored=(), code=None, index=None):
@@ -1985,12 +2923,12 @@ def finish(ctx, installed, restored=(), code=None, index=None):
                 + " — the registry changed while the guard checked; run it again, or remove them")
     exit_code = EXIT_OK if code is None else code
     if blocked:
-        tail = f"; {' and '.join(restored)} put back" if restored else ""
+        tail = f"; {_and(restored)} put back" if restored else ""
         ctx.say(f"lazaret guard: {len(blocked)} blocked — nothing was installed{tail}")
         exit_code = EXIT_BLOCKED
     elif ctx.opts.plan and not installed and exit_code == EXIT_OK:
         ctx.say("lazaret guard: nothing blocked (--plan: nothing was installed"
-                + (f"; {' and '.join(restored)} put back" if restored else "") + ")")
+                + (f"; {_and(restored)} put back" if restored else "") + ")")
     elif ctx.unchecked and exit_code == EXIT_OK:
         exit_code = EXIT_BLOCKED
     if ctx.cache is not None:
@@ -2014,10 +2952,11 @@ def finish(ctx, installed, restored=(), code=None, index=None):
 def build_parser():
     ap = argparse.ArgumentParser(
         prog="lazaret guard",
-        description="Check what npm, pnpm, pip or uv is about to install — resolve, fetch, scan in memory — "
-                    "and block it before it runs when a package is SUSPICIOUS or too new.",
+        description="Check what npm, pnpm, yarn, Bun, pip or uv is about to install — resolve, fetch, scan in "
+                    "memory — and block it before it runs when a package is SUSPICIOUS or too new.",
         epilog="Examples: lazaret guard npm install express · lazaret guard pip install -r requirements.txt · "
-               "lazaret guard uv add httpx · lazaret guard --min-age 7d pnpm add react")
+               "lazaret guard uv add httpx · lazaret guard yarn add lodash · lazaret guard uvx ruff check . · "
+               "lazaret guard --min-age 7d pnpm add react")
     ap.add_argument("--version", action="version", version=f"lazaret guard {lazaret.VERSION}")
     ap.add_argument("--min-age", default="2d", metavar="AGE",
                     help="hold back or block releases younger than this (default 2d; s, m, h, d, w; 0 turns it off)")
@@ -2025,8 +2964,8 @@ def build_parser():
                     help="let NAME's new releases through the --min-age check; they are still scanned "
                          "(repeatable; patterns like '@types/*' work)")
     ap.add_argument("--trust", action="append", default=[], metavar="NAME",
-                    help="install NAME whatever the guard finds or can't check — a package from a private "
-                         "registry, a finding you reviewed; it is still reported (repeatable; patterns work)")
+                    help="install NAME whatever the guard finds or can't check — a finding you reviewed, a "
+                         "package it can't fetch; it is still reported (repeatable; patterns work)")
     ap.add_argument("--block-warn", action="store_true",
                     help="block packages judged WARN or INCOMPLETE too (default: SUSPICIOUS only)")
     ap.add_argument("--plan", action="store_true",
@@ -2063,10 +3002,19 @@ def main(argv=None):
         ctx.say(f"lazaret guard: {tool} {' '.join(args)}".rstrip())
         if tool in ("npm", "pnpm"):
             return guard_npm(ctx, tool, args)
+        if tool == "yarn":
+            return guard_yarn(ctx, args)
+        if tool == "bun":
+            return guard_bun(ctx, args)
         if tool == "uv" and args[:1] and args[0] in UV_PROJECT:
             return guard_uv_project(ctx, args)
+        if tool == "uvx" or (tool == "uv" and args[:1] == ["tool"] and args[1:2] in (["run"], ["install"])):
+            return guard_uv_tool(ctx, args, via_uvx=tool == "uvx")
+        if tool == "uv" and args[:1] == ["run"]:
+            return guard_uv_run(ctx, args)
         if tool == "uv" and args[:1] != ["pip"]:
-            raise GuardError("lazaret guard wraps uv add, uv sync, uv lock, uv pip install and uv pip sync")
+            raise GuardError("lazaret guard wraps uv add, uv sync, uv lock, uv run, uv tool run, uv tool install, "
+                             "uv pip install and uv pip sync (and uvx)")
         return guard_pip(ctx, tool, args)
     except GuardError as exc:
         print(f"lazaret guard: {lazaret.sanitize_term_line(str(exc))}", file=sys.stderr)
