@@ -364,7 +364,11 @@ joined (a call's arguments on the rows below it, a member chain continued on
 the next row, a backslash continuation; `_dl_join_rows`, never through a
 function's or a block's body), an environment variable read or written by name
 read as one name (`environ.P`, `process.env.P`: it carries a value between
-statements), members read by name (`getattr(m, 'x')`, `m['x']` as `m.x`), a
+statements), members read by name (`getattr(m, 'x')`, `m['x']` as `m.x`;
+the detection round: a `getattr` whose name the file builds of literals
+joined with `+` and names given such a value once, `_dl_getattr_names`, and a
+runner named through the builtins or the global object, `builtins.exec`,
+`globalThis.eval`, as the runner), a
 call through a comma expression (`(0, ns.fn)(…)`) as the call, and a code
 runner handed to a call as its last argument (`p.then(eval)`,
 `res.on('data', eval)`) as the call it makes, `(_v)=>eval(_v)`. Each rewrite
@@ -391,7 +395,9 @@ not the inline patterns; then regenerate the pack.**
 (`cross_file`, `rust/crates/lazaret-engine/src/crossfile.rs`; one call per scan,
 each package on its own work budget) catch a value received in one file of a
 package and run in another — source and sink split across modules — in Python
-and npm packages: a dependency's under `--deps` (both packages), and a release's
+and npm packages: a dependency's under `--deps` (both packages; the top-level
+modules and packages a distribution's `.dist-info/RECORD` lists together are
+one package, `_xf_site_groups` / deps.js `siteGroups`), and a release's
 in the registry and the guard (`_ArtifactScan._cross_file_code`: one
 distribution is one package; the files SC-USE-RISK reads; not once the package
 is SUSPICIOUS).
@@ -414,10 +420,14 @@ Design:
 2. **A symbol holds a received value** when what it returns or is assigned
    carries a network source or names a symbol that holds one — resolved
    through imports, re-exports and `self.x` / `this.x`, to a fixed point of
-   `_XF_ROUNDS` (4) hops — or when its body receives one and hands it to a
+   `_XF_ROUNDS` (16) hops — or when its body receives one and hands it to a
    callback: a parameter it calls, or a Promise's resolve. **A function runs
    its parameter** (a runner) when the single-file detector, reading its body
-   with the parameters seeded, finds it run as code.
+   with the parameters seeded, finds it run as code; and (the detection
+   round) a function that hands a parameter to a runner of the package — a
+   relay, in another file or its own (`def go(c): execute(c)`) — is one too:
+   each function with parameters is read again with the names that name a
+   runner in its module as runners, a round per hop (`_XfPackage.runners`).
 3. **Each module is then read** by `_received_code_kind(code,
    extra_always=<the names that hold a received value in it>,
    extra_runners=<the names of other files' runners>)`: a function or value
@@ -470,6 +480,12 @@ s1ngularity/Nx attack). A package with a
 `binding.gyp` and no install script gets the implicit `node-gyp rebuild` hook
 (MAJOR). Also: look-alike identifiers (SC-HOMOGLYPH), hidden-Unicode carriers
 (SC-HIDDEN-UNICODE), decode-then-execute (SC-EVAL-DECODE, incl. indirect eval).
+Every other JavaScript and Python file of a dependency gets the import-time
+test, but (the detection round) not a web app's static assets: a JavaScript
+file in a `_next`, `static` or `public` directory of its package that none of
+its npm package's entry points reach — main, module, bin and exports, then
+what they require, import or start with node (`_deps_web_assets`; deps.js
+`webAssets`) — is left out of it and of the follower (litellm's proxy UI).
 
 Persistence targets (0.1.7): the install-script test also fails on what makes
 an AI agent, an editor or GitHub Actions run something later — writing an
@@ -572,6 +588,25 @@ shortcuts rewritten); SC-EVAL-DECODER's one inline letter shift (now any
 function computing code from a long literal); `_0x` names and the packer as
 verdicts (MAJOR). The holdout (§7) measures what carried over.
 
+**The detection round (0.1.8).** What the behaviour pass left at WARN or did
+not connect, read further, in both engines: the data flow follows a spread
+name, a function's own return (`_ld_func_end`: the innermost body that holds
+it), a receiver's method and the `.then()` after a call of a function that
+returns data, callbacks, constructors (`_LD_CONSTRUCTORS`), threads, merges,
+destructured loops and tuples, the machine's modules and HTTP clients under
+the script's own names (`_LD_ALIAS_*`, `_LD_CLIENT_*`), and command runners,
+`%APPDATA%` files, databases and copies as sources; a parameter holds data
+only in its function (scopes), and in a text over `_LD_LONG` a name only
+`_LD_NEAR` characters from where it was given it. A wallet swap is a behaviour
+(`wallet_swap_at`: wallet patterns of two kinds, the clipboard or the page's
+requests intercepted, an address in the code). The decoded view reads
+literals written wholly in escapes (`_dv_unescape`) and a proxy name reused
+per function (`_dv_proxies`' position lookup), and code built around a
+string array the view reads is a sign of its own (`string_array_line`,
+`_SA_TECHNIQUE_REASON`: CRITICAL at install, a strong import-time reason) —
+the technique, whatever the tool's names. It won back 41 of the holdout's
+56 lost verdicts (§12).
+
 ### e. Registry auditing (`lazaret.registry`) and SCA
 
 `lazaret-registry` fetches and audits an npm/PyPI artifact with the same rule
@@ -594,7 +629,9 @@ started them. SC-NEW-DEPENDENCY
 (`new_dependency_issues`, called by `scan_package`) compares a release's
 dependencies with the release published before it and looks up the added
 ones' first publication: live registry data, best effort, no request for a
-release without dependencies. The guard scans each package with
+release without dependencies; one the package's own people publish does not
+count (npm's maintainers; PyPI's owners, maintainers and organization, from
+the JSON API's `ownership`). The guard scans each package with
 `_scan_artifact`, so it gets SC-USE-RISK and the follower but not the dependency history (it
 already scans the new dependency itself, and holds back a release younger
 than --min-age).
@@ -902,7 +939,27 @@ a file, then run the file").
 
 ## 12. Current state (0.1.8) and backlog
 
-**In 0.1.8, its last round: behaviour, not names.** An audit of every strong
+**In 0.1.8, its last round: detection and data flow.** What the behaviour
+pass (below) left at WARN or did not connect, read further (§5d, "The
+detection round"): the data flow's shapes and sources, scoped names, a
+wallet swap as a behaviour, literals written in escapes and reused proxy
+names in the decoded view, code built around a string array as a sign of
+its own, the cross-file follower's known misses (relays, 16 hops, `getattr`
+names a file builds, a distribution's top-level modules), a web app's static
+assets out of `--deps`'s import-time test, and PyPI's owners for
+SC-NEW-DEPENDENCY. On the benchmark (in-sample) 86% of the 516 malicious
+releases are SUSPICIOUS (83% before the round), 85% on a behaviour or a
+technique (82%); on the holdout 84% (78%), 83% on such evidence (77%), 98.6%
+of its SUSPICIOUS verdicts. 41 of the 56 holdout verdicts the behaviour pass
+lost are back — the 38 `_0x` ones on the string-array technique, 3 on a
+host name the flow now follows to its send — and 13 of the benchmark's 19;
+none was lost. On the holdout's 499 releases that share no code with the
+benchmark, 77% (0.1.7 74%), 76% on behaviour or a technique (55%). The same 3
+of 429 popular packages; no benign answer of the received-code test changed
+on about 32,600 files, and the string-array technique is in none of the
+~60,000 files of popular packages read for it.
+
+**Before that in 0.1.8: behaviour, not names.** An audit of every strong
 detector — does it name what code does, or recognize the samples it was
 written from? — found 94 of the benchmark's 448 catches resting only on a
 hook's tokens, lists of services, javascript-obfuscator's `_0x` names or
@@ -1004,57 +1061,41 @@ comprehensive, so weigh marginal value against FP risk):
 
 - *Detection, from the 0.1.7 benchmark's misses* (all built in 0.1.8,
   above); what is left:
-  - **PyPI owners** for SC-NEW-DEPENDENCY: its JSON API has none, so a new
-    requirement from the project's own account counts too.
   - **What the exfiltration shapes don't read** (the benchmark's remaining
     misses, after the DNS names built from values and the dead drops):
     a load-testing flood (poppo213) and a wheel with no code at all
     (lightgboost). (@fnos/app's runner is read since the character-code
     decoder: decoded, it sends the machine's host name over the network.)
-- *What the holdout shows* (0.1.8's behaviour pass; read its aggregates
-  only, §7):
-  - **Obfuscated payloads whose behaviour stays hidden**: 38 holdout
-    releases the `_0x` names made SUSPICIOUS are WARN now. Candidates, each
-    by structure, not by a tool's names: javascript-obfuscator's older
-    string arrays (a `var` array rotated by `while(--n)`), other tools'
-    encodings, and — a technique signal rather than a mark — an install
-    hook or import-time code that runs a file built around a string array
-    (any tool's), measured on the popular packages first (licensing
-    installers ship obfuscated code).
-  - **Flows the data-flow reading does not connect**: 6 host-name sends the
-    0.1.7 co-occurrence test caught. Find them on the benchmark's own
-    co-occurrences (a host name read and a network call in one file, no
-    flow), never on the holdout's samples.
-  - **Sources and sinks it does not model** (seen in the benchmark):
-    `util.promisify(exec)`, a browser profile's files (Login Data, Cookies)
-    under `%LOCALAPPDATA%` / `%APPDATA%`, a wallet address swapped in the
-    clipboard.
-  - **The data flow in a bundle**: it follows names, and in a 3 MB bundle
-    short names collide. playwright-core's `lib/utilsBundle.js` gets an
-    import-time MAJOR "reads credentials or the whole environment and sends
-    data over the network" that is such a collision (no verdict changes:
-    MAJOR, and the package was WARN already); the same reading in an
-    install script would be CRITICAL. Scope names by function, or require
-    the read and the send to be near, in long files. It also costs: the
-    import-time test of large bundles reads them twice when it finds a
-    reason (the second time without comments), and playwright-core's
-    registry scan went from 4.7 s to 11.2 s with the behaviour pass (litellm
-    12 s → 17 s, next 10.6 s → 11.0 s; native engine, 2 cores).
-- *`--deps` and browser code:* `--deps` gives every file of a dependency the
-  import-time test, where the registry reads what runs at install, at import
-  and when used (skipping tests, docs and a web app's static files). So a
-  Python package's browser bundle can be a CRITICAL hit: litellm's proxy UI
-  ships a Next.js chunk of guardrail test prompts (one shows `curl … | sh`)
-  that the test reads as code. Tell browser code from code that runs (a
-  `_next/static` or `static/` file no entry point reaches) without letting a
-  `main` pointed into `static/` hide; the deep sweep's wider reading lists
-  such hits.
+  - **Members read through constants**: react-zutils 1.0.1's stealer, once
+    its XOR strings are decoded, calls everything through names its comma
+    declarations give strings (`R='copyFile'` … `p[R](a, l)`, `U[f](l)` for
+    `new sqlite3.Database(l)`), and the same short names hold other strings
+    in other functions; the flow cannot follow what it reads. It and
+    cycalculator-ye51 (an oastify.com address) rested on a list of services,
+    now a label: WARN since the behaviour pass. Read a constant member by the
+    declaration that last gave its name a string before it (as proxy objects
+    are), then let the flow follow.
+  - **Padding past the window**: in a text over `_LD_LONG` the flow
+    follows a name only `_LD_NEAR` characters from where it was given data,
+    and reads only `_DD_MAX_ASSIGNS` assignments, so a script padded past
+    either parts its read from its send. Following a name the text gives a
+    value in one place only was tried in the detection round and left out:
+    the quote-pairing reader misreads a nested template literal (`${ …
+    `inner` … }`), and in tailwindcss's bundle the words of 1.1 MB of
+    strings then carried data across the file. The engine's lexer and
+    scope resolution, under way, replace both the window and the reader.
+- *What the holdout shows* (0.1.8's behaviour pass and detection round; read
+  its aggregates only, §7): 15 of the 56 verdicts the behaviour pass lost are
+  still WARN (10) or OK (5): 3 rested on a host name read near a network call
+  that the flow still does not connect, 12 on a list of services or a hook's
+  tokens. Look for such shapes on the benchmark's own files, never on the
+  holdout's samples.
 - *What the cross-file follower doesn't follow* (the adversarial pass's known
-  misses, kept as tests; the event emitter was built in 0.1.8): two top-level
-  modules of site-packages in a `--deps` scan (they may be two distributions;
-  a registry scan reads a release's as one). Nor a name built at run time
-  (`getattr(m, name)`), a runner behind another function (one that hands its
-  parameter to another file's runner), or more than four hops.
+  misses, kept as tests; the event emitter, relays, 16 hops, `getattr` names
+  a file builds and a distribution's modules were built in 0.1.8): a name
+  built at run time from data (`getattr(m, name)` with `name` read or
+  computed), and top-level modules of site-packages no RECORD lists together
+  (they may be two distributions; a registry scan reads a release's as one).
 - *Engine:* the native engine answers the supply-chain tests (0.1.8,
   `docs/RUST_ENGINE.md`), the dependency-mode scan of each file, the rules
   part of the project-mode scan and the cross-file follower in both

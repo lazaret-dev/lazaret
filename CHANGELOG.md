@@ -9,49 +9,60 @@ project is pre-1.0, so the 0.x API may still change.
 
 ## [0.1.8] — 2026-10-01
 
-0.1.8 reads malware by what it does. Its last round audited every strong
-detector for whether it names a behaviour or recognizes the samples it was
-written from, and rewrote the second kind (the first four entries under
-Added, and Changed). Every benchmark number in these notes is in-sample: it
-was measured, at the round it names, on the 516 malicious releases and 429
-popular packages read while the detectors were written. So 0.1.8 also
-measures a holdout: 747 other malicious releases of the same dataset that
-no detector was written from, looked at only in aggregate.
+0.1.8 reads malware by what it does. A round late in its cycle audited
+every strong detector for whether it names a behaviour or recognizes the
+samples it was written from, and rewrote the second kind (the behaviour
+pass: the first four entries under Added, and Changed); its last round read
+further into what that pass left at WARN or did not connect (the detection
+round: data flows it did not connect, code built around an obfuscator's
+string array, wallet addresses swapped, the cross-file follower's known
+misses; the entries marked so). Every benchmark number in these notes is
+in-sample: it was measured, at the round it names, on the 516 malicious
+releases and 429 popular packages read while the detectors were written.
+So 0.1.8 also measures a holdout: 747 other malicious releases of the same
+dataset that no detector was written from, looked at only in aggregate.
 
-| 0.1.8, before and after the last round | Benchmark (516, in-sample) | Holdout (747) |
+| 0.1.8: before the behaviour pass → after it → after the detection round | Benchmark (516, in-sample) | Holdout (747) |
 | --- | --- | --- |
-| SUSPICIOUS | 87% (448) → 83% (430) | 85% (634) → 78% (583) |
-| SUSPICIOUS on a behaviour or a generic technique | 69% (354) → 82% (424) | 66% (495) → 77% (574) |
-| Share of SUSPICIOUS verdicts resting on one | 79% → 99% | 78% → 98.5% |
-| SUSPICIOUS or WARN | 90% → 90% | 90% → 89% |
-| Holdout releases sharing no code with the benchmark (499): SUSPICIOUS | | 79% → 72% |
+| SUSPICIOUS | 87% (448) → 83% (430) → 86% (445) | 85% (634) → 78% (583) → 84% (626) |
+| SUSPICIOUS on a behaviour or a generic technique | 69% (354) → 82% (424) → 85% (439) | 66% (495) → 77% (574) → 83% (617) |
+| Share of SUSPICIOUS verdicts resting on one | 79% → 99% → 99% | 78% → 98.5% → 98.6% |
+| SUSPICIOUS or WARN | 90% → 90% → 90% | 90% → 89% → 89% |
+| Holdout releases sharing no code with the benchmark (499): SUSPICIOUS | | 79% → 72% → 77% |
 | 0.1.7, for comparison: SUSPICIOUS (on a behaviour or a technique) | 68% | 70% (53%); 74% of the 499 |
 
-The strict verdict now catches less: 19 benchmark releases and 56 holdout
-releases are no longer SUSPICIOUS (most are WARN), while 1 and 5 others
-became so. Of the holdout's 56, 50 rested only on a tool's mark, a list of
-services or a hook's tokens — `_0x` names in 38 (with the Bun loader rule in
-14), a list in 11, tokens in 4 — and 6 on a host name read near a network
-call, which the data flow does not connect. What is SUSPICIOUS now nearly
-always says what the code does. On the 499 holdout releases that share no
-code with the benchmark, 0.1.8 is SUSPICIOUS on 72% and 0.1.7 on 74%:
-0.1.8's gain on the holdout is on campaign siblings of the benchmark's
-samples (91% against 63%), and on new campaigns its verdicts rest on
-behaviour (70% of the 499, against 55%) where 0.1.7's leaned on names and
-tokens. Of the 365 benchmark releases GuardDog calls high_risk, Lazaret
-calls 350 SUSPICIOUS (all 365 before the round; the 15 are among the 19).
-The same 3 of the 429 popular packages are SUSPICIOUS (68% of the 516 in
-0.1.7; GuardDog 71%), and the registry's live dependency history still adds
-the 17 @mastra releases (87% with it). Registry engine 2.14.0, so stored and
-cached verdicts are redone.
+The behaviour pass made the strict verdict catch less: 19 benchmark
+releases and 56 holdout releases were no longer SUSPICIOUS (most became
+WARN), while 1 and 5 others became so. Of the holdout's 56, 50 had rested
+only on a tool's mark, a list of services or a hook's tokens — `_0x` names
+in 38 (with the Bun loader rule in 14), a list in 11, tokens in 4 — and 6 on
+a host name read near a network call, which the data flow did not connect.
+The detection round won most of them back on what the code does: 41 of the
+holdout's 56 are SUSPICIOUS again — the 38 javascript-obfuscator releases on
+the technique itself (install-time or import-time code built around a
+string array), 3 on a host name the data flow now follows to its send — and
+13 of the benchmark's 19; it catches 2 holdout and 2 benchmark releases that
+were never SUSPICIOUS, and loses none. What is SUSPICIOUS still nearly always
+says what the code does. On the 499 holdout releases that share no code with
+the benchmark, 0.1.8 is SUSPICIOUS on 77% and 0.1.7 on 74%, and 0.1.8's
+verdicts there rest on a behaviour or a technique for 76% of the 499 (0.1.7:
+55%); on the 248 campaign siblings of the benchmark's samples, 97% (0.1.7:
+63%). Of the 365 benchmark releases GuardDog calls high_risk, Lazaret calls
+363 SUSPICIOUS (all 365 before the behaviour pass, 350 after it; the other 2
+rested on a list of services, now only a label). The same 3 of the 429
+popular packages are SUSPICIOUS (68% of the 516 in 0.1.7; GuardDog 71%), and
+the registry's live dependency history still adds the 17 @mastra releases
+(89.5% with it). Registry engine 2.15.0, so stored and cached verdicts are
+redone.
 
 0.1.8 also runs both packages on the native engine (`docs/RUST_ENGINE.md`):
 the Python package's platform wheels carry it, and the npm package runs it
 compiled to WebAssembly, so a detection lives in Python and Rust instead of
-three times. A final round made scans faster, with the same findings in
-the same order (the last four entries under Changed). On two cores, against
-0.1.8 before that round (the npm package in JavaScript, the Python package
-with the native engine in dependency mode only):
+three times. A performance round, before the detection round, made scans
+faster with the same findings in the same order (the last four entries under
+Changed). On two cores, against 0.1.8 before it (the npm package in
+JavaScript, the Python package with the native engine in dependency mode
+only):
 
 | Two cores; the same findings, in the same order | Before | After |
 | --- | --- | --- |
@@ -186,6 +197,97 @@ instead of 10.6 s, next's 8.9 s instead of 10.4 s.
   `bus.on('code', eval)`) is SC-IMPORT-RISK, CRITICAL, as the other
   cross-file flows are. An emit or a listener in a comment is not one. It was
   the adversarial pass's known miss.
+- **The data flow connects what it did not** (both engines; the detection
+  round). The flow that replaced a host name read near a network call did
+  not connect 6 of the holdout's verdicts, nor some shapes of the
+  benchmark's own files. It now follows a name spread whole (`{...info}`,
+  `f(...args)`); a function's own return (the innermost function whose body
+  holds it, not the last one defined before it); a method called on a
+  receiver (`this.info()`) and the `.then()` after a call of a function that
+  returns data; a callback the script's own function calls with data
+  (`collect((info) => …)`); a constructor's parameters by its class
+  (`new C(x)`) and a thread's target's by its `args`; merges
+  (`Object.assign`), destructured loops and callback parameters, and Python
+  tuples (`out, err = p.communicate()`); the machine's modules under another
+  name (`const o = require('os')`, `import socket as s`, `platform.node()`);
+  and HTTP clients under the script's own names (node-fetch, request,
+  undici, got; `axios.create()`, `requests.Session()`,
+  `with httpx.Client() as c`). New sources: command runners under the
+  script's own names (`util.promisify(exec)`, execa,
+  `asyncio.create_subprocess_shell`), files under `%APPDATA%` and
+  `%LOCALAPPDATA%`, a database opened from outside the package
+  (`sqlite3.connect`, `new Database(p)`: a browser's Login Data), and a file
+  copied from outside the package and read from its copy. And it connects
+  less that only shares a name: a parameter holds what it is given only in
+  its function; a receiver's member is the name (`this.env`, not `this`,
+  which every method shares); keywords, an object literal's methods and a
+  callback handed to a call name no data; in a text over 256 KB (a bundle,
+  whose modules reuse `data`, `cb`, `e`) a name carries data only 20,000
+  characters from where it was given it; the environment handed to a call
+  as `env=` is the program's that runs with it. On the benchmark three more malicious releases' host-name
+  sends are connected (an MCP server's telemetry among them), and the flows
+  read in playwright-core's, cypress's and paramiko's files are gone (no
+  verdict rested on them); on the holdout, 3 of the 6 verdicts are back.
+- **Wallet addresses swapped for the script's own** (both engines; the
+  detection round). A clipper or a page script that hooks the wallet shows
+  three parts, all needed (`core.wallet_swap_at`): patterns of wallet
+  addresses of two kinds or more, written as a regex (an Ethereum address,
+  base58, bech32, a Tron address, Bitcoin Cash); where the user's addresses
+  pass, intercepted — the clipboard read and written (`navigator.clipboard`,
+  `execCommand('paste'|'copy')`, pyperclip, clipboardy, win32clipboard,
+  pbpaste/pbcopy, xclip …), or the page's requests and its wallet (`fetch`
+  or `XMLHttpRequest.prototype` replaced, `window.ethereum.request`
+  wrapped); and a wallet address written in the code. A validator has the
+  patterns, a wallet's page the clipboard, a monitoring SDK wraps fetch: none
+  has all three. "Swaps the cryptocurrency wallet addresses its user copies
+  or sends for its own" is an exfiltration shape: CRITICAL in an install
+  script and a strong import-time reason, read in the decoded view too.
+  error-ex 1.3.3 and @coveops/abi 2.0.1 (the September 2025 compromise's
+  hooked fetch and XMLHttpRequest) were WARN; no benign release of the
+  benchmark, nor 50 wallet and web3 packages (ethers, viem, wagmi, web3,
+  MetaMask's and Coinbase's SDKs, multicoin-address-validator, web3.py,
+  pyperclip …: about 30,000 files), has the three.
+- **Code built around a string array is a sign of its own, and more of the
+  obfuscator is read** (both engines; the detection round). An install
+  script, a script it starts, or import-time code built around a string
+  array whose calls the decoded view reads says "hides its code in a string
+  array it decodes as it runs (an obfuscator's technique)": CRITICAL at
+  install time and a strong import-time reason, however little of what it
+  decodes the other tests understand — an obfuscated payload often runs
+  what they miss (a wrapper that downloads, a native addon it starts). No
+  benign release of the benchmark, nor any of the ~60,000 files of popular
+  packages read for it (installed trees, the 172 popular packages with
+  install hooks, 50 web3 packages), is built that way; 14 benchmark
+  releases and 38 holdout releases are SUSPICIOUS on it now (WARN or
+  INCOMPLETE before). The decoded view also reads a string literal written
+  wholly in `\x` and `\u` escapes, three or more (the unicodeEscapeSequence
+  option: `'\x63\x68\x69\x6c\x64…'`), as its text when that is printable
+  ASCII without a quote or a backslash, before string arrays and proxy
+  objects are read (escaped module and member names, proxy keys, an
+  accessor's alphabet: nanoid-js 1.0.1's setup.js was not decoded); a
+  character or two escaped (`'\x20'`, `"<\x2fscript>"`) is left as written,
+  and so are raw, bytes and f-string literals. And a proxy object's name the
+  obfuscator reuses in each function is read at each use as the object it
+  was last given before it (a name given two objects was not read at all).
+- **The cross-file follower's known misses** (both engines; the detection
+  round). A function that hands its parameter to a runner of the package —
+  in another file or its own (`def go(c): execute(c)`) — runs it too: each
+  function with parameters is read with them seeded and the names that
+  name a runner in its module as runners, a round per hop. Wrappers,
+  re-exports and such relays are followed 16 hops deep (4 before). A
+  `getattr` whose name the file builds of what it holds — literals joined
+  with `+` (`getattr(m, 'pu' + 'll')`), a name given such a value on a row
+  of its own and nothing else anywhere (`NAME = 'pull'`) — reads as `m.pull`
+  in the received-code test, and a runner named through the builtins or the
+  global object (`getattr(builtins, 'exec')`, `__builtins__.__dict__['eval']`,
+  `globalThis.eval`, `window.Function`) as the runner itself. And in a
+  `--deps` scan the top-level modules and packages one distribution installs
+  into site-packages are one package to the follower, as a registry scan
+  reads a release: its `.dist-info/RECORD` lists them (a real directory, at
+  most 4 MB, no link followed); top-level names no RECORD lists together
+  stay apart. Nothing changed on the installed trees' 1,760 npm packages
+  and 179 Python packages (170 once their RECORDs join them), nor in the
+  received-code test's answer on about 32,600 benign files and archives.
 - **`lazaret guard` for yarn, Bun, uvx and uv run.** yarn 2+ resolves with
   `--mode=update-lockfile` (nothing linked or built) and its registry
   packages are checked against the integrity the registry publishes (yarn
@@ -263,7 +365,13 @@ instead of 10.6 s, next's 8.9 s instead of 10.4 s.
     19 hours before: all 17 releases in the benchmark, with live registry
     data, and none of the 429 popular packages at the benchmark's versions.
     One document for the package and one per added dependency (at most five);
-    `LAZARET_NO_DEPENDENCY_HISTORY=1` turns it off.
+    `LAZARET_NO_DEPENDENCY_HISTORY=1` turns it off. (The detection round)
+    PyPI's owners count too: its JSON API now carries `ownership` (the
+    project's owners and maintainers by username, and its organization), so
+    a requirement one of the project's own accounts or its organization
+    publishes (a project splitting off `acme-core`) no longer counts, and
+    another account's names its owners, as on npm; a document without it (a
+    mirror) changes nothing.
 - **Payloads a file decodes, downloads staged over several steps, and the
   cross-file follower in both engines (backlog items 5-11).** On the same 516
   malicious releases, 80% are now SUSPICIOUS (76% after items 1-4, 66% in
@@ -720,6 +828,20 @@ instead of 10.6 s, next's 8.9 s instead of 10.4 s.
   engine's rule pack); the supply-chain tests it exports are the engine's.
 
 ### Fixed
+- **A Python package's browser bundle was import-time code to `--deps`** (both
+  packages; the detection round). `--deps` gives every JavaScript and Python
+  file of a dependency the import-time test, where the registry reads what
+  runs; litellm's proxy UI ships a Next.js export whose chunk of guardrail
+  test prompts (one shows `curl … | sh`) the test read as code, so a `--deps`
+  scan of the litellm wheel was CRITICAL. A dependency's JavaScript file in a
+  `_next`, `static` or `public` directory of its package is now left out of
+  the import-time test and the cross-file follower unless its npm package's
+  entry points reach it — what Node runs for the package, its main, module,
+  bin and exports, then the local files they require or import and the
+  scripts they start with node — so a main, a bin or an export that points
+  into `static/` is still read, and a Python package's browser code never is
+  (its Python is). The litellm wheel's `--deps` scan finds nothing there now
+  (12.6 s → 10.7 s).
 - **A program written in a string literal was read as code that runs what it
   receives** (both engines; 0.1.7 too). A network call named in a
   string's text made the value bound to the string a received one:

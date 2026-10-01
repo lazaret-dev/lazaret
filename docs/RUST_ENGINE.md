@@ -82,7 +82,9 @@ Decisions (fixed):
 - The cross-file follower (`engine.cross_file_issues`, for `--deps`,
   registry and guard scans) is one `cross_file` call per scan: the
   dependency files one after another in the text (`[path, lang, length]`
-  each in the arguments), each package on its own work budget, on up to 8
+  each in the arguments; `groups`, the package a Python file of a `--deps`
+  scan is read in when a distribution's RECORD joins top-level modules:
+  `core._xf_site_groups`), each package on its own work budget, on up to 8
   threads, the findings in core's order. A package the engine reports as
   failed (its budget spent, an internal error) is read by core in its place
   (`core._xf_group_issues`), and a refused call by core whole.
@@ -137,9 +139,10 @@ rust/
     src/unicode.rs           Python 3.10 / Unicode 13.0 predicates (generated/unicode13.rs)
     src/pyre/                CPython's sre: parser, compiler, matcher (see §6)
     src/hooks.rs             shlex, _hook_tokens, follow_hook, node_candidates, node -e, #!
-    src/signs.rs             install_script_risk, import_time_risk(+severity), decoded_view,
-                             spawned_scripts, and the detectors they read (exfiltration shapes,
-                             services at login, self-read, persistence, publishing …)
+    src/signs.rs             install_script_risk, import_time_risk(+severity), decoded_view
+                             (and string_array_line), spawned_scripts, and the detectors they
+                             read (exfiltration shapes, wallet swaps, services at login,
+                             self-read, persistence, publishing …)
     src/received.rs          the received-code detector (spec-driven), downloads/decodes and runs
     src/crossfile.rs         the cross-file follower (_cross_file_received_issues): what each
                              module defines, imports, exports, sets in the environment, emits
@@ -320,7 +323,7 @@ The differential tests (each module under 45 s, as every module is):
 |---|---|---|
 | `test_rust_parity_regex` | every pack pattern and 126 hand-written probes, search/match/fullmatch/finditer/sub/split with pos/endpos | Python 3.10–3.14 |
 | `test_rust_parity_hooks`, `_hooks_b` | the 15 fields of `hooks_view` (shlex, hooks, both supply-chain tests with and without a language, decoded view, spawned scripts …) | the hooks corpus (`hooks_corpus.py`, ~44,400 cases, every other one in each module) |
-| `test_rust_parity_signs` | 24 detectors one by one (received code, PowerShell, stagers, reverse shells, self-read, persistence, the exfiltration shapes, services at login …) | the same corpus |
+| `test_rust_parity_signs` | the detectors one by one (received code, PowerShell, stagers, reverse shells, self-read, persistence, the exfiltration shapes, services at login, wallet swaps, the string-array technique …) and the data flow on long texts | the same corpus |
 | `test_rust_parity_scanfile` | `scan_file(dep=True)` finding for finding (rule, texts, line, snippet clipped and redacted), family by family and in core's order, with every family and variant reached; each line's context (comment line, comment spans, match text with and without comments, names); NFC, NFD, NFKC and NFKD | the scan_file corpus (`scanfile_corpus.py`: curated files for each family, the hooks corpus' curated scripts, 4,000 random files), this repository's sources and fixtures, every 12th standard-library module; every code point Unicode 13.0 assigns, and 20,000 sequences of combining marks, pairs and jamo |
 | `test_rust_parity_lexer` | `_lex_comment_spans`: comment spans, '…' / "…" spans, every literal's span | 12,000 dense random texts, read as Python, JavaScript with and without JSX, SQL and an unknown language |
 | `test_rust_parity_project` | `scan_rules` (project mode's rules part) against `core.scan_rules`, finding for finding and in core's order | the scan_file corpus, this repository's sources and fixtures, a sample of the standard library, read as your own files |

