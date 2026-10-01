@@ -81,6 +81,14 @@ MAX_MEMBER = _env_number("LAZARET_MAX_SOURCE_BYTES", 16_000_000)
 MAX_FILES = 20_000         # files per package (numpy's sdist alone has >4,000)
 SAMPLE = 8192              # header/entropy sample read from oversized files
 # Stored scans from another engine version are scanned again (has_scan).
+# 2.14: 0.1.8's behaviour pass: an install hook's command read as a program,
+#      local data followed to where it is sent (service lists only label
+#      where it goes; any webhook whose secret is in the code), string arrays,
+#      proxy objects and character-code decoders read in the decoded view,
+#      programs started by any runtime followed, a program's shortcuts
+#      rewritten, SC-EVAL-DECODER for any decoder, `_0x` names and the packer
+#      MAJOR, the Bun loader rule retired, and a program in a string literal
+#      no longer received code
 # 2.13: 0.1.8's DNS names built from values (in code and in shell commands),
 #      the host name sent to an address fetched at run time (a dead drop),
 #      the host name read through require('os') or a destructured import,
@@ -130,7 +138,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.13.0"
+ENGINE_VERSION = "2.14.0"
 
 # ---------------- Trust-chain limits (F9/G14/F10) ----------------
 # Only these hosts may ever be fetched, over https only, and redirects to any
@@ -1245,6 +1253,11 @@ USE_RISK_SKIP_DIRS = {"example", "examples", "doc", "docs", "demo", "demos", "sa
 # is not INCOMPLETE.
 USE_RISK_MAX_CHARS = 8_000_000
 USE_RISK_SECONDS = 3.0
+# The native engine reads a batch of files at a time, and the time is checked
+# between batches: a batch holds at most USE_RISK_BATCH_CHARS characters
+# (or one file), or a batch of large bundles overran the time many times over
+# (truffle's: 20 s).
+USE_RISK_BATCH_CHARS = 1_000_000
 
 
 def _not_used_code(rel):
@@ -1855,7 +1868,7 @@ class _ArtifactScan:
             cur, cur_text, depth = queue.pop(0)
             if not cur_text or depth >= lazaret._SPAWN_MAX_DEPTH:
                 continue
-            for where, path in lazaret.spawned_scripts(lazaret.normalize_newlines(cur_text)):
+            for where, path in _engine.spawned_scripts(lazaret.normalize_newlines(cur_text)):
                 if where != "dir" and cwd is None:
                     continue
                 start = posixpath.dirname(cur) if where == "dir" else cwd
@@ -2053,12 +2066,22 @@ class _ArtifactScan:
         (the text with its newlines normalized), in order, a batch at a time
         (engine.py: the native engine reads a batch on threads, the Python
         engine a file at a time); the deadline is checked before each batch,
-        and past `stop` (time.monotonic()) no batch is started."""
+        and past `stop` (time.monotonic()) no batch is started — with a stop,
+        a batch holds at most USE_RISK_BATCH_CHARS characters, or one file."""
         size = _engine.BATCH if _engine.name() == "rust" else 1
-        for start in range(0, len(todo), size):
+        start = 0
+        while start < len(todo):
             if stop is not None and time.monotonic() > stop:
                 return
-            chunk = [(rel, lazaret.normalize_newlines(text), lang) for rel, text, lang in todo[start:start + size]]
+            end, chars = start + 1, len(todo[start][1] or "")
+            while end < len(todo) and end - start < size:
+                more = len(todo[end][1] or "")
+                if stop is not None and chars + more > USE_RISK_BATCH_CHARS:
+                    break                   # (stop is checked between batches: keep one short)
+                chars += more
+                end += 1
+            chunk = [(rel, lazaret.normalize_newlines(text), lang) for rel, text, lang in todo[start:end]]
+            start = end
             self._deadline(chunk[0][0])
             for (rel, text, lang), risk in zip(chunk, _engine.import_time_risks([(t, lg) for _r, t, lg in chunk])):
                 yield rel, text, lang, risk

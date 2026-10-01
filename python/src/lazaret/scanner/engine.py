@@ -118,6 +118,16 @@ def install_script_risk(text):
     return install_script_risks([text])[0]
 
 
+def spawned_scripts(text):
+    """core.spawned_scripts, by the engine in use: [(base, path)] for the
+    package scripts `text` starts. The native engine reads the decoded view
+    too (an 11.7 MB obfuscated payload: 3 s there, 20 s in Python)."""
+    if name() != "rust":
+        return core.spawned_scripts(text)
+    answer = _batch("spawned_scripts", [({}, text)], lambda i: core.spawned_scripts(text))[0]
+    return [tuple(x) for x in answer]
+
+
 _ISSUE_KEYS = ("rule", "name", "type", "sev", "msg", "why", "fix", "ref")
 
 

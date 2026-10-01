@@ -16514,12 +16514,13 @@ def _started_dependency_scripts(tree, rel, text, cwd, out, extra, run):
     starts with node or python, and those they start (spawned_scripts), at
     most _SPAWN_MAX_DEPTH starts deep and _SPAWN_MAX_FILES files. `cwd`: the
     package's directory, where a plain literal path is read from."""
+    from lazaret.scanner import engine     # (imported here: engine imports core)
     found, seen, queue = [], {rel}, [(rel, text, 0)]
     while queue and len(seen) <= _SPAWN_MAX_FILES:
         cur, cur_text, depth = queue.pop(0)
         if not cur_text or depth >= _SPAWN_MAX_DEPTH:
             continue
-        for where, path in spawned_scripts(cur_text):
+        for where, path in engine.spawned_scripts(cur_text):
             joined = _tree_join(posixpath.dirname(cur) if where == "dir" else cwd, path)
             nxt = tree.resolve(joined) if joined is not None else None
             if nxt is None or nxt in seen or len(seen) > _SPAWN_MAX_FILES:
