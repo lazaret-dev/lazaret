@@ -60,6 +60,8 @@ pub const CALLS: &[&str] = &[
     "import_code", "scan_rules", "hook_command_view", "hex_view", "lookalike_view",
     // 0.1.8: the cross-file follower, each package on its own budget
     "cross_file",
+    // the JavaScript parser (jsparse.py's trees)
+    "js_parse", "js_parse_file",
 ];
 
 fn dead_drop(v: Option<(usize, PyStr)>) -> Value {
@@ -273,6 +275,21 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
         }
         "pyre.escape" => Value::Str(pyre::escape(text)),
         "cross_file" => cross_file(p, args, text)?,
+        "js_parse" | "js_parse_file" => {
+            // jsparse.parse(text, ts, jsx) / jsparse.parse_file(path, text): the
+            // tree as JSON, or {"error": {"line": n, "reason": …}}; "spans": each
+            // node's start and end (code points) too
+            let flag = |k: &str, d: bool| match args.get(k) {
+                Some(Value::Bool(b)) => *b,
+                _ => d,
+            };
+            let (ts, jsx) = if name == "js_parse_file" {
+                crate::jsparse::dialect(&arg_str(args, "path")?)
+            } else {
+                (flag("ts", false), flag("jsx", true))
+            };
+            Value::Raw(crate::jsparse::to_json(text, ts, jsx, flag("spans", false)))
+        }
         "scan_file" => {
             let flag = |k: &str, d: bool| match args.get(k) {
                 Some(Value::Bool(b)) => *b,
