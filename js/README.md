@@ -214,6 +214,11 @@ lazaret <directory> [options]          # the same, like the Python CLI
   --version, -h/--help
 ```
 
+A scan with much to read (a megabyte of source or more besides its largest
+file) spreads the files over worker threads, one per core up to 8, each with
+its own instance of the engine; `LAZARET_THREADS` sets how many (`1`: none).
+The findings and their order are the same whatever the number.
+
 Options are parsed like the Python CLI's: `--opt=value` and unique prefixes
 work, `--` ends the options, and an unknown option is a usage error. The
 Python-only options (`--taint-config`, `--strict-taint-config`,

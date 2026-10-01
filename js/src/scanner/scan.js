@@ -40,6 +40,8 @@ const NEVER_CAPPED_PREFIXES = ["S-", "T-", "SC-", "X-", "SQL-"];
 export const SCAN_TIME_BUDGET_MS = 30_000;
 let timeBudgetMs = SCAN_TIME_BUDGET_MS;
 export function setScanTimeBudget(ms) { timeBudgetMs = ms ?? SCAN_TIME_BUDGET_MS; }
+/** The time each project file's scan may take (ms). */
+export function scanTimeBudget() { return timeBudgetMs; }
 
 
 /* ---------------- Analyzers ---------------- */

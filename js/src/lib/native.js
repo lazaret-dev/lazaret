@@ -43,7 +43,7 @@ export function setWorkBudget(steps = null) {
 }
 
 /** The compiled module; throws NativeError when native/lazaret.wasm is missing. */
-function wasmModule() {
+export function wasmModule() {
   if (compiled) return compiled;
   let bytes;
   try {
@@ -54,6 +54,20 @@ function wasmModule() {
   }
   compiled = new WebAssembly.Module(bytes);
   return compiled;
+}
+
+/**
+ * Use `module` (a WebAssembly.Module of native/lazaret.wasm, compiled in
+ * another thread: pool.js hands its own to each worker) rather than
+ * compile the file again.
+ */
+export function useModule(module) {
+  if (!compiled && module instanceof WebAssembly.Module) compiled = module;
+}
+
+/** The work budget each call is given (null: the engine's default). */
+export function workBudgetSteps() {
+  return workBudget;
 }
 
 function instance() {

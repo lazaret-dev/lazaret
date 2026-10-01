@@ -24,6 +24,7 @@ import { clipLine } from "./lib/issue.js";
 import { applyBaseline, BASELINE_KEY_ENV } from "./baseline.js";
 import { dependencyChecks } from "./deps.js";
 import { loadError } from "./lib/native.js";
+import { Pool, threadsFor, mapTasks } from "./pool.js";
 import { analyzeFlows, redactFlowIssues } from "./scanner/flow.js";
 
 // Local copies (NOT imported from index.js — that would be a cycle).
@@ -68,6 +69,9 @@ Options:
   --ci                  Exit 1 when the quality gate fails.
   --version             Print version.
   -h, --help            Show this help.
+
+A scan with much to read uses worker threads, one per core (at most 8);
+env LAZARET_THREADS sets how many (1: none). The report is the same.
 
 Exit codes: 0 ok (or gate failed without --ci) · 1 gate failed with --ci, or a
 hostile-depth manifest · 2 usage error · 3 report output error · 5 internal error.`;
@@ -326,65 +330,82 @@ function runChecked(argv, io) {
   const issues = [];
   const add = (list) => { for (const i of list) issues.push(i); };   // never push(...big)
   add(binaryIssues);
-  for (const f of files) {
-    try { add(scanFile({ name: f.path, path: f.path, content: f.content, lang: f.lang, dep: f.dep })); }
-    catch (e) { issues.push(scanErrorIssue(f.path, e)); }            // one file must never kill the run
+  // Each file's scan, and --deps' checks of each dependency file: on worker threads for a scan
+  // with enough to read (pool.js; LAZARET_THREADS), the findings in the same order.
+  const threads = threadsFor(env, files.reduce((n, f) => n + f.content.length, 0),
+    files.reduce((n, f) => Math.max(n, f.content.length), 0));
+  let pool = null;
+  if (threads > 1) {
+    try { pool = new Pool(threads); } catch { pool = null; }        // (no workers here: one thread does it all)
   }
-  const read = treeReader(files, configs);                            // what an editor's or agent's settings run
-  for (const cf of configs) {                                         // config and data files: credentials only
-    try { add(scanConfigFile(cf.path, cf.content, read)); } catch (e) { issues.push(scanErrorIssue(cf.path, e)); }
-  }
-  for (const mf of manifests) {
-    // binding.gyp and every other .gyp / .gypi → scanGyp (G11); package.json
-    // → scanManifest, with the registry hook set inside a dependency tree.
-    try {
-      add(mf.kind !== "package.json" ? scanGyp(mf.path, mf.content)
-        : scanManifest(mf.path, mf.content, { registry: !!mf.dep }));
-    } catch (e) { issues.push(scanErrorIssue(mf.path, e)); }
-  }
-  // --deps: what the dependencies run (install hooks, import-time code)
-  const deps = dependencyChecks(root, files, manifests, issues, { exclude: opts.exclude, maxFileBytes: col.maxFileBytes });
-  add(deps.issues);
-  for (const f of deps.files) files.push(f);
-  add(skippedIssues);
-  // Cross-file taint flows in the project's JavaScript (the Python engine's
-  // flow.analyze, JavaScript half; dependency files are not analyzed). The
-  // findings copy raw source lines: they get their file's redaction here.
-  add(redactFlowIssues(analyzeFlows(files), files));
-  const res = redactResult(buildResult(root, files, issues), clipLine);
-  res.metrics.configFiles = configs.length;
-  if (opts.baseline) {
-    applyBaseline(res, opts.baseline, { root, env, warn: (m) => err(sanitizeTermLine(m)) });
-  }
-  printReport(res, { out, quiet: !!opts.quiet });
-
-  // ---- reports (atomic, no-clobber, marker-checked) ----------------------
-  // Written in pieces: a report can be too big for one string (report.js).
-  const strict = !!opts.force;
   try {
-    if (paths.sarif) {
-      writeReport(paths.sarif, () => sarifChunks(sarifReport(res, root)), { kind: "sarif", strict });
-      out(`  SARIF report: ${sanitizeTermLine(paths.sarif)}`);
-    }
-    if (paths.json) {
-      writeReport(paths.json, () => jsonReportChunks(res, { key: env[BASELINE_KEY_ENV] }), { kind: "json", strict });
-      out(`  JSON report: ${sanitizeTermLine(paths.json)}`);
-    }
-    if (paths.html) {
-      writeReport(paths.html, () => htmlReportChunks(res), { kind: "html", strict });
-      out(`  HTML report: ${sanitizeTermLine(paths.html)}`);
-    }
-  } catch (e) {
-    // Any write failure (a race with the pre-scan checks, ENOSPC, EISDIR, …)
-    // is a report output error, not an internal one.
-    if (e instanceof ReportPathError) err(`error: ${sanitizeTermLine(e.message)}`);
-    else err(`error: could not write a report: ${sanitizeTermLine(e && e.message ? e.message : e)}`);
-    return EXIT_OUTPUT;
+    return scanAndReport(pool);
+  } finally {
+    if (pool) pool.close();
   }
 
-  if (opts.ci && !res.pass) return 1;
-  // 48033f94: a hostile-depth manifest is the one finding that forces a
-  // non-zero exit without --ci (spec 10).
-  if (res.issues.some((i) => i.rule === "SC-MANIFEST-DEPTH")) return 1;
-  return 0;
+  function scanAndReport(pool) {
+    const scans = mapTasks(pool,
+      files.map((f) => ["scan", { name: f.path, path: f.path, content: f.content, lang: f.lang, dep: f.dep }]),
+      ([, file]) => scanFile(file),
+      ([, file], e) => [scanErrorIssue(file.path, e)]);                  // one file must never kill the run
+    for (const found of scans) add(found);
+    const read = treeReader(files, configs);                            // what an editor's or agent's settings run
+    for (const cf of configs) {                                         // config and data files: credentials only
+      try { add(scanConfigFile(cf.path, cf.content, read)); } catch (e) { issues.push(scanErrorIssue(cf.path, e)); }
+    }
+    for (const mf of manifests) {
+      // binding.gyp and every other .gyp / .gypi → scanGyp (G11); package.json
+      // → scanManifest, with the registry hook set inside a dependency tree.
+      try {
+        add(mf.kind !== "package.json" ? scanGyp(mf.path, mf.content)
+          : scanManifest(mf.path, mf.content, { registry: !!mf.dep }));
+      } catch (e) { issues.push(scanErrorIssue(mf.path, e)); }
+    }
+    // --deps: what the dependencies run (install hooks, import-time code)
+    const deps = dependencyChecks(root, files, manifests, issues, { exclude: opts.exclude, maxFileBytes: col.maxFileBytes, pool });
+    add(deps.issues);
+    for (const f of deps.files) files.push(f);
+    add(skippedIssues);
+    // Cross-file taint flows in the project's JavaScript (the Python engine's
+    // flow.analyze, JavaScript half; dependency files are not analyzed). The
+    // findings copy raw source lines: they get their file's redaction here.
+    add(redactFlowIssues(analyzeFlows(files), files));
+    const res = redactResult(buildResult(root, files, issues), clipLine);
+    res.metrics.configFiles = configs.length;
+    if (opts.baseline) {
+      applyBaseline(res, opts.baseline, { root, env, warn: (m) => err(sanitizeTermLine(m)) });
+    }
+    printReport(res, { out, quiet: !!opts.quiet });
+
+    // ---- reports (atomic, no-clobber, marker-checked) ----------------------
+    // Written in pieces: a report can be too big for one string (report.js).
+    const strict = !!opts.force;
+    try {
+      if (paths.sarif) {
+        writeReport(paths.sarif, () => sarifChunks(sarifReport(res, root)), { kind: "sarif", strict });
+        out(`  SARIF report: ${sanitizeTermLine(paths.sarif)}`);
+      }
+      if (paths.json) {
+        writeReport(paths.json, () => jsonReportChunks(res, { key: env[BASELINE_KEY_ENV] }), { kind: "json", strict });
+        out(`  JSON report: ${sanitizeTermLine(paths.json)}`);
+      }
+      if (paths.html) {
+        writeReport(paths.html, () => htmlReportChunks(res), { kind: "html", strict });
+        out(`  HTML report: ${sanitizeTermLine(paths.html)}`);
+      }
+    } catch (e) {
+      // Any write failure (a race with the pre-scan checks, ENOSPC, EISDIR, …)
+      // is a report output error, not an internal one.
+      if (e instanceof ReportPathError) err(`error: ${sanitizeTermLine(e.message)}`);
+      else err(`error: could not write a report: ${sanitizeTermLine(e && e.message ? e.message : e)}`);
+      return EXIT_OUTPUT;
+    }
+
+    if (opts.ci && !res.pass) return 1;
+    // 48033f94: a hostile-depth manifest is the one finding that forces a
+    // non-zero exit without --ci (spec 10).
+    if (res.issues.some((i) => i.rule === "SC-MANIFEST-DEPTH")) return 1;
+    return 0;
+  }
 }

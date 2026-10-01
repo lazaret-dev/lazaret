@@ -32,6 +32,7 @@ import { looksBinary, HEADER_SAMPLE } from "./lib/binary.js";
 import { decodeSource } from "./lib/encoding.js";
 import { mkIssue } from "./lib/issue.js";
 import { REDACT, redactText, registerScanContext, SECRET_SKIP_RE } from "./lib/redact.js";
+import { mapTasks } from "./pool.js";
 import { pyStrip, pyRepr } from "./lib/pycompat.js";
 
 const DEP_IMPORT_RISK_WHY = "An installed package's code runs with the application's privileges when it is loaded " +
@@ -162,7 +163,7 @@ class DependencyTree {
  * manifests in `issues` in place and returns { issues, files }: the findings
  * to add and the files read and scanned here. Twin of core.dependency_checks.
  */
-export function dependencyChecks(root, files, manifests, issues, { exclude = [], maxFileBytes = MAX_FILE_BYTES } = {}) {
+export function dependencyChecks(root, files, manifests, issues, { exclude = [], maxFileBytes = MAX_FILE_BYTES, pool = null } = {}) {
   const tree = new DependencyTree(root, files, manifests, exclude, maxFileBytes);
   const depManifests = new Set(manifests.filter((m) => m.dep).map((m) => m.path));
   const out = [], extra = [], run = new Set(), truncated = new Set();
@@ -173,24 +174,52 @@ export function dependencyChecks(root, files, manifests, issues, { exclude = [],
     try { followDependencyHook(tree, issue, cmd, out, extra, run, truncated); }
     catch (e) { out.push(scanErrorIssue(issue.file, e)); }       // one manifest must never kill the run
   }
-  for (const f of files) {
-    if (!f.dep || (f.lang !== "js" && f.lang !== "py") || run.has(posix(f.path))) continue;
-    let found, agent;
-    try { found = dependencyImportIssue(f.path, f.content, f.lang); agent = dependencyAgentIssue(f.path, f.content); }
-    catch (e) { found = scanErrorIssue(f.path, e); agent = null; }
+  // The import-time and agent checks of each dependency file no hook runs; with a worker pool
+  // (pool.js) on its workers, and with them the cross-file follower (below), the answers taken
+  // in order.
+  const checks = files.filter((f) => f.dep && (f.lang === "js" || f.lang === "py") && !run.has(posix(f.path)))
+    .map((f) => ["dep", [f.path, f.content, f.lang]]);
+  const follow = ["xf", {
+    files: files.filter((f) => f.dep && (f.lang === "js" || f.lang === "py"))
+      .map((f) => ({ path: f.path, lang: f.lang, dep: true, content: f.content })),
+    redact: REDACT.on,
+  }];
+  const answers = mapTasks(pool, pool ? [follow, ...checks] : checks, dependencyTask, dependencyTaskError);
+  for (const [found, agent] of pool ? answers.slice(1) : answers) {
     if (found) out.push(found);
     if (agent) out.push(agent);
   }
   // Cross-file received code (both engines since 0.1.8; the native engine's follower, crossfile.rs):
   // a value received in one file of a package and run in another. Skips the files already flagged
-  // CRITICAL single-file.
+  // CRITICAL single-file (on a worker the follower skipped none: a skipped file's findings are
+  // left out after, which is the same, as the follower reads each file of a package on its own).
   const flagged = new Set(out.filter((i) => i.rule === "SC-IMPORT-RISK" && i.sev === "CRITICAL").map((i) => posix(i.file)));
-  try {
-    for (const i of crossFileIssues(files, flagged, { redact: REDACT.on })) out.push(i);
-  } catch (e) {
-    if (!(e instanceof NativeError)) throw e;          // (the engine stopped: no cross-file findings, as before)
+  if (pool) {
+    for (const i of answers[0]) if (!flagged.has(posix(i.file))) out.push(i);
+  } else {
+    try {
+      for (const i of crossFileIssues(files, flagged, { redact: REDACT.on })) out.push(i);
+    } catch (e) {
+      if (!(e instanceof NativeError)) throw e;        // (the engine stopped: no cross-file findings, as before)
+    }
   }
   return { issues: out, files: extra };
+}
+
+/** A task of dependencyChecks, as a worker of pool.js runs it (pool-worker.js), run here. */
+function dependencyTask([kind, args]) {
+  if (kind === "dep") {
+    const [path, content, lang] = args;
+    return [dependencyImportIssue(path, content, lang), dependencyAgentIssue(path, content)];
+  }
+  return crossFileIssues(args.files, new Set(), { redact: args.redact });
+}
+
+/** What a task of dependencyChecks that threw stands for (`error`: an Error, or a worker's {name, message}). */
+function dependencyTaskError([kind, args], error) {
+  if (kind === "dep") return [scanErrorIssue(args[0], error), null];
+  if (error instanceof NativeError || (error && /^Native(Error|Exhausted)$/.test(error.name))) return [];
+  throw error instanceof Error ? error : new Error(`${error && error.name}: ${error && error.message}`);
 }
 
 /** Is `directory` ("/"-separated) an installed npm package's root? Twin of core._is_package_root. */
