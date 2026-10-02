@@ -100,6 +100,8 @@ pub struct Config {
     /// of it (RUN_BASE, RUN_PER_NODE unless lowered: with_run_limit)
     pub run_base: u64,
     pub run_per_node: u64,
+    /// the supply-chain model (supply.rs) instead of project mode's
+    pub supply: Option<Rc<super::supply::Supply>>,
     source: Rc<Regex>,
     sinks: Vec<Rc<Regex>>,
     fixed: Rc<Regex>,
@@ -126,6 +128,7 @@ impl Config {
             partial: part,
             run_base: RUN_BASE,
             run_per_node: RUN_PER_NODE,
+            supply: None,
             source: rx(SOURCE_RE),
             sinks: SINKS.iter().map(|(p, _, _)| rx(p)).collect(),
             fixed: rx(FIXED_PREFIX_RE),
@@ -189,6 +192,10 @@ pub enum Out {
     /// location, the sink's, the way it came)
     Issue { cat: u8, path: PyStr, file: u32, line: u32, source: PyStr, sink: PyStr, via: PyStr },
     Note { rule: &'static str, name: &'static str, path: PyStr, line: u32, msg: PyStr, why: &'static str, fix: &'static str },
+    /// the supply-chain model: local data reaching a network send (the
+    /// send's offset, the kind of data, what was read, whether only an
+    /// address held it)
+    Send { at: u32, kind: &'static str, what: PyStr, in_address: bool },
 }
 
 fn commas(n: u64) -> String {
@@ -376,7 +383,7 @@ pub fn analyze(files: &[(PyStr, Option<PyStr>)], cfg: Config) -> Vec<Out> {
 }
 
 /// Summaries to a fixpoint, then the reporting pass; the notes.
-fn fixpoint(prog: &mut Program, findings: &mut Vec<Out>) -> Vec<Out> {
+pub(super) fn fixpoint(prog: &mut Program, findings: &mut Vec<Out>) -> Vec<Out> {
     let mut notes = Vec::new();
     let order = prog.order();
     let n = prog.fns.len();

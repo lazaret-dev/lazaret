@@ -2984,12 +2984,12 @@ pub fn install_script_risk(p: &Pack, text: &[u32], lang: Option<&str>) -> Vec<Py
 /// command; `lang`, the script's language when known ("js", "py": its
 /// strings are read as its runtime reads them).
 pub fn install_script_risk_with(p: &Pack, text: &[u32], shell: bool, command: bool, lang: Option<&str>) -> Vec<PyStr> {
-    let mut reasons = install_script_risk_of(p, text, shell, command);
+    let mut reasons = install_script_risk_of(p, text, shell, command, lang);
     let view = decoded_view(p, text, lang);
     if view != text {
         let _gate = crate::textgate::open(&view);
         let note = p.text("_DV_NOTE");
-        for r in install_script_risk_of(p, &view, shell, command) {
+        for r in install_script_risk_of(p, &view, shell, command, lang) {
             if !reasons.contains(&r) {
                 reasons.push(cat(&[&r, &note]));
             }
@@ -3033,7 +3033,22 @@ fn push_new(reasons: &mut Vec<PyStr>, r: PyStr) {
     }
 }
 
-fn install_script_risk_of(p: &Pack, text: &[u32], shell: bool, command: bool) -> Vec<PyStr> {
+/// The data flow: local data a text sends (offset, kind, what, whether only
+/// an address held it). JavaScript is read on its tree (the supply-chain
+/// model of jsflow, phase 3 step 3), unless it doesn't parse or passes the
+/// pass's bounds; any other text, and those, by the text follower.
+pub(crate) fn local_data_sent(p: &Pack, text: &[u32], lang: Option<&str>) -> Option<(usize, &'static str, PyStr, bool)> {
+    if lang == Some("js") {
+        match crate::jsflow::supply::local_data_sent(text) {
+            crate::jsflow::supply::Answer::Found(at, kind, what, in_address) => return Some((at, kind, what, in_address)),
+            crate::jsflow::supply::Answer::Nothing => return None,
+            crate::jsflow::supply::Answer::Unread => {}
+        }
+    }
+    crate::flow::local_data_sent_at(p, text)
+}
+
+fn install_script_risk_of(p: &Pack, text: &[u32], shell: bool, command: bool, lang: Option<&str>) -> Vec<PyStr> {
     let mut reasons: Vec<PyStr> = Vec::new();
     // a download piped or substituted into a shell, and PowerShell: in code, where an exec call is handed them
     let code = !command && crate::shell::code_text(p, text);
@@ -3081,7 +3096,7 @@ fn install_script_risk_of(p: &Pack, text: &[u32], shell: bool, command: bool) ->
     }
     // (0.1.8) data read from the machine and sent, whatever the address; the
     // commands the script runs, read as programs; where the data goes
-    if let Some((_at, kind, what, in_address)) = crate::flow::local_data_sent_at(p, text) {
+    if let Some((_at, kind, what, in_address)) = local_data_sent(p, text, lang) {
         let sent = p.map_text("_LD_REASONS", kind);
         let mut reason = sent.clone();
         if kind == "environment" || kind == "file" || kind == "report" {
@@ -3326,8 +3341,8 @@ fn runs_download_through_shell(p: &Pack, row: &[u32]) -> bool {
 /// core._import_flow: (offset, kind, what, in_address) of the first local
 /// data text sends (local_data_sent_at, then the command lines it hands a
 /// shell), else None. `flows`: exec_command_flows(text).
-fn import_flow(p: &Pack, text: &[u32], flows: &[(usize, PyStr)]) -> Option<(usize, &'static str, PyStr, bool)> {
-    if let Some(flow) = crate::flow::local_data_sent_at(p, text) {
+fn import_flow(p: &Pack, text: &[u32], flows: &[(usize, PyStr)], lang: Option<&str>) -> Option<(usize, &'static str, PyStr, bool)> {
+    if let Some(flow) = local_data_sent(p, text, lang) {
         return Some(flow);
     }
     for (at, reason) in flows {
@@ -3346,7 +3361,7 @@ fn import_time_risk_of(p: &Pack, text: &[u32], lang: Option<&str>) -> (Vec<PyStr
     let mut reasons: Vec<PyStr> = Vec::new();
     let mut line: Option<usize> = None;
     let flows = crate::shell::exec_command_flows(p, text);
-    if let Some((at, kind, what, in_address)) = import_flow(p, text, &flows) {
+    if let Some((at, kind, what, in_address)) = import_flow(p, text, &flows, lang) {
         // a data-capture service for any local data; a service a client talks
         // to with its user's key for what no client sends: the whole
         // environment, the instance's credentials, a credential store

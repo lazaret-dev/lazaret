@@ -24,6 +24,7 @@
 pub mod descs;
 pub mod driver;
 pub mod eval;
+pub mod supply;
 #[cfg(test)]
 mod tests;
 
@@ -194,7 +195,10 @@ pub(crate) fn join(base: &[u32], rel: &[u32]) -> Option<PyStr> {
 /// being read or of functions around it (`params`: keys), the sink
 /// categories it is sanitized for (`clean`, a bit set), whether it was
 /// joined into a string (`built`), and `kind`: bit 1 a request object, bit
-/// 2 a response object.
+/// 2 a response object (the supply-chain model's marks: `supply::OBJ_*`).
+/// With the supply-chain model (`supply.rs`) the source is local data, and
+/// `sc` says which kinds the value holds and which read came first; project
+/// mode never sets it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct V {
     pub src: bool,
@@ -207,6 +211,57 @@ pub struct V {
     pub clean: u8,
     pub built: bool,
     pub kind: u8,
+    pub sc: Option<Rc<Sc>>,
+}
+
+/// The supply-chain model's source facts of a value: the first read (by its
+/// offset in the text) of each kind of local data it holds — (the kind's
+/// index in `supply::KIND_NAMES`, what it read: an environment variable's
+/// name, a path, a command; the offset) — in the kinds' order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Sc {
+    pub kinds: u16,
+    pub firsts: Vec<(u8, Rc<PyStr>, u32)>,
+}
+
+/// Both values' source facts: the kinds of both, each kind's earlier read.
+pub fn sc_union(a: &Option<Rc<Sc>>, b: &Option<Rc<Sc>>) -> Option<Rc<Sc>> {
+    match (a, b) {
+        (None, None) => None,
+        (Some(x), None) => Some(x.clone()),
+        (None, Some(y)) => Some(y.clone()),
+        (Some(x), Some(y)) => {
+            if Rc::ptr_eq(x, y) || x == y {
+                return Some(x.clone());
+            }
+            let mut firsts: Vec<(u8, Rc<PyStr>, u32)> = Vec::with_capacity(x.firsts.len() + y.firsts.len());
+            let (mut i, mut j) = (0, 0);
+            while i < x.firsts.len() || j < y.firsts.len() {
+                let take_x = j >= y.firsts.len() || (i < x.firsts.len() && x.firsts[i].0 < y.firsts[j].0);
+                let take_y = i >= x.firsts.len() || (j < y.firsts.len() && y.firsts[j].0 < x.firsts[i].0);
+                if take_x {
+                    firsts.push(x.firsts[i].clone());
+                    i += 1;
+                } else if take_y {
+                    firsts.push(y.firsts[j].clone());
+                    j += 1;
+                } else {
+                    // the same kind in both: the earlier read
+                    firsts.push(if y.firsts[j].2 < x.firsts[i].2 { y.firsts[j].clone() } else { x.firsts[i].clone() });
+                    i += 1;
+                    j += 1;
+                }
+            }
+            let out = Sc { kinds: x.kinds | y.kinds, firsts };
+            if out == **x {
+                return Some(x.clone());
+            }
+            if out == **y {
+                return Some(y.clone());
+            }
+            Some(Rc::new(out))
+        }
+    }
 }
 
 thread_local! {
@@ -238,12 +293,20 @@ impl V {
             clean,
             built,
             kind,
+            sc: None,
         }
+    }
+
+    /// The value with the supply-chain model's source facts (kept only for
+    /// a source's value, like `origin`).
+    pub fn with_sc(mut self, sc: Option<Rc<Sc>>) -> V {
+        self.sc = if self.src { sc } else { None };
+        self
     }
 
     /// EMPTY: nothing, clean for every category.
     pub fn empty() -> V {
-        V { src: false, origin: None, fname: None, via: None, params: no_params(), clean: ALL, built: false, kind: 0 }
+        V { src: false, origin: None, fname: None, via: None, params: no_params(), clean: ALL, built: false, kind: 0, sc: None }
     }
 
     /// A value holding one parameter key.
@@ -294,6 +357,7 @@ impl V {
             Rc::from(all)
         };
         V::new(self.src || o.src, s.origin, s.fname.clone(), s.via.clone(), params, self.clean & o.clean, self.built || o.built, self.kind | o.kind)
+            .with_sc(sc_union(&self.sc, &o.sc))
     }
 
     pub fn sanitize(&self, bits: u8) -> V {
@@ -301,6 +365,7 @@ impl V {
             return V::empty();
         }
         V::new(self.src, self.origin, self.fname.clone(), self.via.clone(), self.params.clone(), self.clean | bits, self.built, 0)
+            .with_sc(self.sc.clone())
     }
 
     pub fn with_built(&self) -> V {
@@ -308,10 +373,12 @@ impl V {
             return self.clone();
         }
         V::new(self.src, self.origin, self.fname.clone(), self.via.clone(), self.params.clone(), self.clean, true, self.kind)
+            .with_sc(self.sc.clone())
     }
 
     pub fn with_via(&self, via: Rc<PyStr>) -> V {
         V::new(self.src, self.origin, self.fname.clone(), Some(via), self.params.clone(), self.clean, self.built, self.kind)
+            .with_sc(self.sc.clone())
     }
 
     /// The value with only the parameters of functions `fids`.
@@ -327,6 +394,7 @@ impl V {
             return V::empty();
         }
         V::new(self.src, self.origin, self.fname.clone(), self.via.clone(), Rc::from(params), self.clean, self.built, self.kind)
+            .with_sc(self.sc.clone())
     }
 
     /// The value without a request or response object's mark.
@@ -338,6 +406,7 @@ impl V {
             return V::empty();
         }
         V::new(self.src, self.origin, self.fname.clone(), self.via.clone(), self.params.clone(), self.clean, self.built, 0)
+            .with_sc(self.sc.clone())
     }
 }
 
@@ -464,6 +533,9 @@ pub struct Func {
     pub ret_src: Option<V>,
     /// key of an enclosing function's parameter it returns -> (clean, built)
     pub ret_outer: BTreeMap<u64, (u8, bool)>,
+    /// param index -> the closure variables it is written to (the
+    /// supply-chain model's: `res.on('data', d => body += d)`)
+    pub param_writes: BTreeMap<usize, BTreeSet<BindId>>,
     /// fid -> the parameters it passed tainted values in its last reading
     pub callers: BTreeMap<FnId, BTreeSet<usize>>,
     pub runs: u32,
@@ -969,6 +1041,9 @@ pub struct Program {
     pub budget: u64,
     pub nodes: u64,
     pub anc: HashMap<FnId, Rc<BTreeSet<FnId>>>,
+    /// (the supply-chain model) a member of `this` — (class or object
+    /// literal, its id, the member's name) — as a binding of its own
+    pub sc_props: HashMap<(u8, u32, PyStr), BindId>,
 }
 
 impl Program {
@@ -991,6 +1066,7 @@ impl Program {
             budget: WORK_BASE,
             nodes: 0,
             anc: HashMap::new(),
+            sc_props: HashMap::new(),
         }
     }
 
@@ -1074,6 +1150,7 @@ impl Program {
             ret_params: BTreeMap::new(),
             ret_src: None,
             ret_outer: BTreeMap::new(),
+            param_writes: BTreeMap::new(),
             callers: BTreeMap::new(),
             runs: 0,
             calls: Vec::new(),
@@ -1551,6 +1628,7 @@ impl Program {
             ret_params: BTreeMap::new(),
             ret_src: None,
             ret_outer: BTreeMap::new(),
+            param_writes: BTreeMap::new(),
             callers: BTreeMap::new(),
             runs: 0,
             calls: Vec::new(),

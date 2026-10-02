@@ -202,7 +202,9 @@ rust/
     src/jsflow/              project mode's cross-file JavaScript taint (a port of jsflow.py, §16):
                              mod.rs (values, scopes, bindings, declaration and resolution),
                              descs.rs (points-to, call targets, routes, order), eval.rs (one
-                             reading of a function), driver.rs (the fixpoint, the output)
+                             reading of a function), driver.rs (the fixpoint, the output);
+                             supply.rs (its supply-chain model: local data followed to a
+                             network send in an install script or a dependency's code, §18)
     src/pyflow/              project mode's cross-file Python taint (a port of flow.py's Python
                              pass, §17): mod.rs (the model: modules, functions, classes, names,
                              imports, resolution, the frames), eval.rs (one reading of a
@@ -695,7 +697,7 @@ benchmark:
 | 0 | Baseline: the detection round committed (rule set 2.15.0), the engine's outputs recorded on the benchmark's files and on installed packages | Done (tag `rust-first-baseline`) |
 | 1 | The Rust engine is the reference: the Python engine, `--engine` and the pure wheel retired; the recorded outputs (§5); the pack as the source of the rules; every wheel a platform wheel, the sdist compiled by pip where none fits; an unanswered file SC-TRUNCATED in both packages | Done |
 | 2 | Decoding, lexers and bytes in the engine: source decoding (BOMs, UTF-16, coding cookies), one token substrate for the detectors | Done (tag `rust-first-phase2`): the lexers (§15: every caller's comments and literals, both packages), the self-read on them, the decoded view on string values (§15). Moved: the data flow, the dead drop, the secret endpoints and received code to phase 3 (they follow names: scopes); bytes to phase 4 (with linre over bytes); source decoding to after phase 3 (the packages' decoders already agree, held by their parity tests, and owning the CJK codecs would put their tables in the WebAssembly module) |
-| 3 | Parsers, scopes and flow: the detectors on bindings over the JavaScript and Python trees (§12, §13), constant folding of strings, the cross-file follower on them, project mode's passes (taint, SQL, function metrics) in the engine; the npm package's twins of them retired | The parsers done; project mode's JavaScript taint ported onto `js_parse`'s trees (§16: `js_flow`), both packages ask the engine for it, and jsflow.py, jsflow.js and the readers they used are retired (11,357 lines); Python's taint ported onto `py_parse`'s trees (§17: `py_flow`), both packages ask the engine for it (the npm package had no port of it), and flow.py's own pass is retired (1,505 lines); the passes and the parser held to their recorded outputs. Next: the supply-chain detectors on the same scopes, benchmark-gated |
+| 3 | Parsers, scopes and flow: the detectors on bindings over the JavaScript and Python trees (§12, §13), constant folding of strings, the cross-file follower on them, project mode's passes (taint, SQL, function metrics) in the engine; the npm package's twins of them retired | The parsers done; project mode's JavaScript taint ported onto `js_parse`'s trees (§16: `js_flow`), both packages ask the engine for it, and jsflow.py, jsflow.js and the readers they used are retired (11,357 lines); Python's taint ported onto `py_parse`'s trees (§17: `py_flow`), both packages ask the engine for it (the npm package had no port of it), and flow.py's own pass is retired (1,505 lines); the passes and the parser held to their recorded outputs; the supply-chain data flow on JavaScript's trees (§18: local data sent, reported by the strongest send), benchmark-gated. Next: received code, the dead drop, the secret endpoints and the self-read on the same scopes, then Python's data flow on its trees |
 | 4 | Linear-time matching: the pack's patterns on linre (§14), pyre and the shlex port retired, current Unicode | Every pattern linre accepts runs on it (616 of the pack's 657; done first, as no answer changes); the 41 others, pyre and the shlex port not started |
 | 5 | One call per file, a content cache (SHA-256), the guard's scan in a child process that fails closed, archive ambiguity checks | Not started |
 
@@ -1836,3 +1838,95 @@ with the default model and with one that makes `os.environ`, `kwargs`,
 `config` and the like sources (54 and 676 outputs). On those 455 the
 engine took 6.2 s where flow.py's pass took 55 s; on the generated
 projects, 0.55 s (the parse included, 6.5 MB/s) where it took 7.7 s.
+
+## 18. The data flow on the JavaScript tree
+
+`src/jsflow/supply.rs` is the JavaScript taint pass's second model: the
+supply-chain detectors' data flow — local data a script reads from the
+machine, followed to a network send — on `js_parse`'s trees, with names
+resolved by scope (phase 3's third step, §8). The install-script and
+import-time tests ask it for every JavaScript text (`signs::local_data_sent`,
+for the text and its decoded view): it answers what the text follower
+(`flow::local_data_sent_at`) answers — the first send, the kind of data,
+what was read, whether only an address held it — and the reasons, their
+grading and the destinations are the tests' as before. A text the parser
+doesn't read (a fragment, TypeScript it can't, a file over 2 MB) or a
+reading past the pass's budget is the text follower's to answer; so is any
+text not handed as JavaScript (Python's data flow is next).
+
+**Why.** The text follower followed names in a window of text: a quote in a
+regular expression or a backtick in a comment opened a string over the
+code after it, a name that meant two things in a bundle joined two flows
+(playwright's bundle had a "whole environment sent" it didn't earn), 20,000
+characters of padding or 5,000 assignments before the payload hid it, and a
+name kept for a module (`const r = module.require; r('http')`) was not that
+module. On the tree a name is its binding: none of these happen, and code
+in a string, or a local object named `process`, is not what it looks like.
+
+**The model.** The pass is jsflow's (§16) with values that carry kinds of
+local data instead of request data (`Sc`: the first read of each kind, in
+the text follower's names — identity, environment, file, report,
+credentials, address), and three object marks: a connection or a request
+being written (its `write`, `end`, `send` send), a client the script made
+(`axios.create()`: its calls send), and `process.env` itself (a member of it
+is one variable). Sources and sends are the text follower's, from the same
+tables of the rule pack: an environment variable by its name, the whole
+environment (a selection of it by a test that names no secret is not), the
+os module's names, a read of a path outside the package (`flow::ld_outside`,
+and a path passed in: `dump('/etc')`), what a command prints
+(`shell::sh_output_data`), the instance's metadata and a public-IP lookup;
+the sends of `_LD_SEND_RE` and its siblings, with the arguments they count
+as addresses, resolved by binding (`require`, `import`, `node:` names,
+`require` and `module.require` kept under another name, a module's name no
+declaration binds), and a URL literal whose host the data continues
+(`'https://' + host + '.x.example'`: resolved, so sent). What the pass adds
+to follow them: a callback of anything but the script's own functions gets
+what the call holds (a read's callback what was read: `exec(c, (e, out) =>
+…)`); a parameter written to a closure's variable is in the function's
+summary (`res.on('data', d => body += d)`); `this.x` and a name no
+declaration binds are bindings of their own; the script's own wrappers of
+exec, of a read and of `process.env[name]` are summaries too
+(`run('whoami')`, `getEnv('AWS_SECRET_ACCESS_KEY')`). A child process
+doesn't hold what it was given, nor a length the data it measures.
+
+**The strongest send.** A value keeps the first read of each kind, and a
+credential store (`_CRED_STORE_RE`, not a public key) apart from other
+files. A send is reported by the strongest data it carries — the
+instance's credentials, the whole environment or a credential store,
+which the import-time test grades as a harvest — over what was read
+before it, and of several sends the one carrying such data, else the
+first. The text follower answered the first read in the payload's text,
+so a payload's field order decided its grade: `{ host: os.hostname(), env:
+process.env }` was a host name, and psdimporter's report, which runs
+`whoami` before it asks the instance's metadata, had no import-time
+reason at all.
+
+**Held to** the text follower on real code before it replaced it: on the
+benchmark's 20,066 in-sample JavaScript files and 28,125 files of installed
+npm packages, the two answer alike except where the text follower was
+wrong — a local `process`, code in a template string, a test of a logger —
+or the tree reads more: a flow through a closure, a callback, a wrapper,
+`this` or an implicit global (the differences, file by file, are reviewed in
+the phase's audit). `jsflow::supply::tests` hold each piece; the
+`test_supply_chain_signals` case the lexers couldn't pass (a quote in a
+regular expression) passes. Of the hooks corpus's 44,893 recorded outputs
+two moved: a whole environment sent through a module the code names in hex
+is found in the text itself, no longer only in its decoded view; and a
+Python snippet handed as JavaScript (the view asks every case as both) is
+read as JavaScript, where it sends nothing.
+
+On real files: of the 330,924 outputs recorded on the benchmark's files,
+48 import-time answers moved, all of malicious samples. 25 point at the
+send itself (`req.write(data)`) instead of the request it writes to; 12
+find the flow in the text where the text follower found it only in the
+decoded view, or the reverse (an obfuscated payload whose module names
+are in its string array); 6 name another kind: the whole environment
+for three, where the text follower had the host name of the payload's
+first field (osae, slack-astra-app), and another kind of local data for
+three; 4 gain a reason they lacked (the whole environment sent by a
+postinstall, a flattened telemetry runner and a compromised library's
+`env-compat.cjs`; react-milton's file sent to an IP address); one loses
+one: a React component that shows the payload's code in a `<pre>` block,
+which the text follower read as code (its package is still caught by its
+`index.js`). None of the 230,400 outputs recorded on installed packages
+moved.

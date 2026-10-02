@@ -44,6 +44,8 @@ pub const CALLS: &[&str] = &[
     "self_publish_at", "runs_dll", "join_string_pieces", "received_code_kind", "runs_received_code",
     "downloads_and_runs", "decodes_and_runs", "powershell_risk", "stager_at", "reverse_shell_at",
     "local_data_sent_at", "runs_own_source_at", "reads_own_source", "persistence_reasons",
+    // phase 3 step 3: the data flow on the JavaScript tree (the supply-chain model)
+    "local_data_sent_tree",
     "dumps_workflow_secrets", "pipes_download_to_shell", "runs_substituted_download", "offscreen_code",
     "lex_comment_spans", "logical_text", "hooks_view", "signs_view",
     // 0.1.8: the exfiltration shapes, programs started at login or boot
@@ -230,7 +232,7 @@ pub const OWN_STACK: usize = if cfg!(debug_assertions) { 64 << 20 } else { 8 << 
 /// made per call would compile them again each time), ending when the
 /// calling thread does; inline if no thread can be made, and in
 /// WebAssembly.
-fn on_own_stack<T: Send + 'static, F: FnOnce() -> T + Send + 'static>(f: F) -> T {
+pub(crate) fn on_own_stack<T: Send + 'static, F: FnOnce() -> T + Send + 'static>(f: F) -> T {
     #[cfg(not(target_arch = "wasm32"))]
     {
         own_stack::run(f)
@@ -551,6 +553,11 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
         "stager_at" => Value::Int(signs::stager_at(p, text) as i64),
         "reverse_shell_at" => Value::Int(signs::reverse_shell_at(p, text) as i64),
         "local_data_sent_at" => flow(crate::flow::local_data_sent_at(p, text)),
+        "local_data_sent_tree" => match crate::jsflow::supply::local_data_sent(text) {
+            crate::jsflow::supply::Answer::Found(at, kind, what, in_address) => flow(Some((at, kind, what, in_address))),
+            crate::jsflow::supply::Answer::Nothing => Value::Null,
+            crate::jsflow::supply::Answer::Unread => Value::str("unread"),
+        },
         "runs_own_source_at" => Value::Int(signs::runs_own_source_at(p, text, lang) as i64),
         "reads_own_source" => Value::Bool(signs::reads_own_source(p, text)),
         "persistence_reasons" => strs(&signs::persistence_reasons(p, text)),
@@ -914,6 +921,8 @@ fn js_flow(args: &Value, text: &[u32]) -> Result<Value, CallError> {
                     Value::str(why),
                     Value::str(fix),
                 ]),
+                // (the supply-chain model's; project mode never gives one)
+                Out::Send { .. } => Value::Null,
             })
             .collect(),
     ))
@@ -1011,6 +1020,8 @@ fn flow_out(out: Vec<crate::jsflow::Out>, max_file: usize) -> Value {
                     Value::str(why),
                     Value::str(fix),
                 ]),
+                // (the supply-chain model's; project mode never gives one)
+                Out::Send { .. } => Value::Null,
             })
             .collect(),
     )

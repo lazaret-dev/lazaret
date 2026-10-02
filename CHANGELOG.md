@@ -175,6 +175,30 @@ before the release.
   Python 3.13 reads them, on every Python the package runs on (flow.py read
   them with the running Python's `ast`, so on 3.10 and 3.11 a file using
   newer syntax was a Q-FLOW-SKIPPED note).
+- **The supply-chain data flow reads JavaScript on its tree.** Whether a
+  script sends what it reads from the machine — the install-script and
+  import-time tests' "sends … over the network" reasons — is answered on
+  the JavaScript parser's tree for every JavaScript text and its decoded
+  view (`docs/RUST_ENGINE.md` §18), with names resolved by scope where the
+  text follower followed them by name within a window of text. A quote in a
+  regular expression or a backtick in a comment, padding or thousands of
+  assignments before the payload, a name that means two things in a bundle,
+  and a module kept under another name (`const r = module.require;
+  r('http')`) no longer decide the answer; code in a string (a React
+  component that shows a payload's code) and a local object named
+  `process` are not what they look like. The tree also follows what the
+  text follower missed: closures, callbacks (`exec('whoami', (e, out) =>
+  …)`), accumulators (`res.on('data', d => body += d)`), `this.x`, implicit
+  globals, and the script's own wrappers of exec, of a read and of
+  `process.env[name]`. A send carrying several kinds of local data is
+  reported by its strongest — the instance's credentials, the whole
+  environment, a credential store — so a payload's field order no longer
+  decides its grade. A text the parser doesn't read, or that passes the
+  pass's work budget, keeps the text follower, as does Python for now. On
+  the benchmark's files 48 import-time answers moved, all of malicious
+  samples (four gained a reason, one lost one: a React component that only
+  displays the code; its package is still caught); on installed packages
+  none moved.
 
 ### Added
 

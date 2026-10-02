@@ -13,7 +13,7 @@ pub enum Halt {
     Cut,
 }
 
-type R<T> = Result<T, Halt>;
+pub(super) type R<T> = Result<T, Halt>;
 
 /// An environment: what each of the function's own bindings holds.
 type Env = HashMap<BindId, V>;
@@ -37,6 +37,9 @@ pub struct Eval<'p> {
     pub uses: BTreeMap<FnId, BTreeSet<usize>>,
     pub limit: u64,
     pub ancestors: BTreeSet<FnId>,
+    /// (the supply-chain model) (key of this function's parameter, the
+    /// closure variable it was written to)
+    pub pw_adds: Vec<(u64, BindId)>,
 }
 
 /// The changes a reading made to summaries: fid -> (returned request data
@@ -70,16 +73,17 @@ impl<'p> Eval<'p> {
             uses: BTreeMap::new(),
             limit,
             ancestors,
+            pw_adds: Vec::new(),
         }
     }
 
     #[inline]
-    fn a(&self) -> Ast<'_> {
+    pub(super) fn a(&self) -> Ast<'_> {
         Ast(&self.p.mods[self.m as usize].tree)
     }
 
     // ---- budget ----
-    fn tick(&mut self, n: u64) -> R<()> {
+    pub(super) fn tick(&mut self, n: u64) -> R<()> {
         self.p.work += n;
         if self.p.work > self.p.budget {
             return Err(Halt::Stop);
@@ -91,7 +95,7 @@ impl<'p> Eval<'p> {
     }
 
     // ---- bindings ----
-    fn read(&mut self, b: BindId) -> V {
+    pub(super) fn read(&mut self, b: BindId) -> V {
         let bind = &self.p.binds[b as usize];
         if bind.kind == BindKind::Import {
             let targets = bind.targets.clone().unwrap_or_default();
@@ -131,7 +135,7 @@ impl<'p> Eval<'p> {
         v
     }
 
-    fn write(&mut self, b: BindId, v: V, strong: bool) {
+    pub(super) fn write(&mut self, b: BindId, v: V, strong: bool) {
         let (bfid, shared) = (self.p.binds[b as usize].fid, self.p.binds[b as usize].shared);
         if bfid == self.fid {
             let old = self.env.get(&b);
@@ -145,6 +149,15 @@ impl<'p> Eval<'p> {
             }
         }
         if shared {
+            if self.p.cfg.supply.is_some() {
+                // (the supply-chain model: a parameter written to a closure's
+                // variable is in the function's summary, for its callers)
+                for &key in v.params.iter() {
+                    if (key / PARAM_BASE) as FnId == self.fid && bfid != self.fid {
+                        self.pw_adds.push((key, b));
+                    }
+                }
+            }
             // a closure's variable carries the parameters of the function
             // that declares it and of the functions around that one
             let fids = self.p.scope_fns(bfid);
@@ -530,7 +543,7 @@ impl<'p> Eval<'p> {
     }
 
     // ---- patterns ----
-    fn bind(&self, ident: NodeId, scope: ScopeId) -> Option<BindId> {
+    pub(super) fn bind(&self, ident: NodeId, scope: ScopeId) -> Option<BindId> {
         let b = self.p.mods[self.m as usize].bind_at[ident as usize];
         if b == UNSET {
             let name = self.a().name(ident).to_vec();
@@ -551,7 +564,10 @@ impl<'p> Eval<'p> {
                 Some(b) => b,
             };
             let first_is_request_prop = matches!(path.first(), Some(Some(n)) if is_in(REQUEST_PROPS, n));
-            let val = if !path.is_empty() && v.kind & 1 != 0 && first_is_request_prop {
+            let narrowed = if self.p.cfg.supply.is_some() { self.sc_pattern_value(&v, &path, ident) } else { None };
+            let val = if let Some(nv) = narrowed {
+                nv
+            } else if !path.is_empty() && v.kind & 1 != 0 && first_is_request_prop {
                 let line = self.a().line(ident);
                 self.source(line).union(&v.plain())
             } else if !path.is_empty() {
@@ -625,6 +641,9 @@ impl<'p> Eval<'p> {
         if t == Kind::Identifier {
             if let Some(b) = self.bind(pat, scope) {
                 self.write(b, v, true);
+            } else if self.p.cfg.supply.is_some() {
+                let b = self.sc_global_bind(pat);
+                self.write(b, v, false);
             }
             return Ok(());
         }
@@ -653,6 +672,23 @@ impl<'p> Eval<'p> {
 
     /// `o.x = v`: the container o holds v too (a weak update).
     fn member_write(&mut self, target: NodeId, v: &V, scope: ScopeId) {
+        if self.p.cfg.supply.is_some() {
+            // (the supply-chain model: `this.x = v`, `this.x.y = v` hold v in this.x;
+            // a connection or a client too)
+            let mut m = target;
+            let mut seen = 0;
+            while self.a().kind(self.a().at(m, jt::A)) == Kind::MemberExpression && seen < ALIAS_DEPTH {
+                m = self.a().at(m, jt::A);
+                seen += 1;
+            }
+            if let Some(b) = self.sc_this_member(m, scope) {
+                if v.tainted() || v.kind & super::supply::MARKS != 0 {
+                    let val = if m == target { v.clone() } else { v.plain() };
+                    self.write(b, val, false);
+                }
+                return;
+            }
+        }
         if !v.tainted() {
             return;
         }
@@ -683,7 +719,7 @@ impl<'p> Eval<'p> {
     }
 
     // ---- expressions ----
-    fn expr(&mut self, e: Option<NodeId>, scope: ScopeId) -> R<V> {
+    pub(super) fn expr(&mut self, e: Option<NodeId>, scope: ScopeId) -> R<V> {
         use jt::{A, B, C};
         let e = match e {
             None => return Ok(V::empty()),
@@ -693,15 +729,24 @@ impl<'p> Eval<'p> {
         let t = self.a().kind(e);
         match t {
             Kind::Identifier => match self.bind(e, scope) {
+                None if self.p.cfg.supply.is_some() => {
+                    let b = self.sc_global_bind(e);
+                    Ok(self.read(b))
+                }
                 None => Ok(V::empty()),
                 Some(b) => Ok(self.read(b)),
             },
+            Kind::Literal if self.p.cfg.supply.is_some() => Ok(self.sc_literal(e)),
             Kind::Literal | Kind::ThisExpression | Kind::Super | Kind::MetaProperty => Ok(V::empty()),
             Kind::TemplateLiteral => {
                 let exprs = self.a().list(e, B).to_vec();
                 let mut out = V::empty();
-                for x in exprs {
-                    out = out.union(&self.expr(Some(x), scope)?.plain());
+                for (k, x) in exprs.into_iter().enumerate() {
+                    let xv = self.expr(Some(x), scope)?.plain();
+                    if k == 0 && self.p.cfg.supply.is_some() {
+                        self.sc_host_built(e, &xv);
+                    }
+                    out = out.union(&xv);
                 }
                 out = out.with_built();
                 if out.tainted() {
@@ -837,16 +882,26 @@ impl<'p> Eval<'p> {
             }
             None => false,
         };
+        let mut prev = n;
         for &node in chain.iter().rev() {
             self.tick(1)?;
             let op = self.a().operator(node);
             let right = self.a().at(node, B);
             let r = self.expr(Some(right), scope)?;
+            if op == "+" && self.p.cfg.supply.is_some() {
+                // ('https://' + host …: the host name is resolved)
+                self.sc_host_built(prev, &r.plain());
+            }
+            prev = right;
             if op == "+" {
                 v = v.plain().union(&r.plain()).with_built();
                 if fixed && v.tainted() {
                     v = v.sanitize(FIXED_HOST);
                 }
+            } else if op == "&&" && self.p.cfg.supply.is_some() {
+                // (`a && b` is b where a holds: a test, then the value)
+                v = r;
+                fixed = false;
             } else if op == "||" || op == "&&" || op == "??" {
                 v = v.union(&r);
                 fixed = false;
@@ -868,6 +923,9 @@ impl<'p> Eval<'p> {
             if lk == Kind::Identifier {
                 if let Some(b) = self.bind(left, scope) {
                     self.write(b, v.clone(), true);
+                } else if self.p.cfg.supply.is_some() {
+                    let b = self.sc_global_bind(left);
+                    self.write(b, v.clone(), false);
                 }
             } else if lk == Kind::MemberExpression {
                 let obj = self.a().at(left, A);
@@ -876,7 +934,9 @@ impl<'p> Eval<'p> {
                     let prop = self.a().at(left, B);
                     self.expr(Some(prop), scope)?;
                 }
-                self.sink_assignment(left, &v);
+                if self.p.cfg.supply.is_none() {
+                    self.sink_assignment(left, &v);
+                }
                 self.member_write(left, &v, scope);
             } else {
                 self.assign_pattern(left, v.clone(), scope)?;
@@ -896,9 +956,14 @@ impl<'p> Eval<'p> {
         if lk == Kind::Identifier {
             if let Some(b) = self.bind(left, scope) {
                 self.write(b, nv.clone(), true);
+            } else if self.p.cfg.supply.is_some() {
+                let b = self.sc_global_bind(left);
+                self.write(b, nv.clone(), false);
             }
         } else if lk == Kind::MemberExpression {
-            self.sink_assignment(left, &nv);
+            if self.p.cfg.supply.is_none() {
+                self.sink_assignment(left, &nv);
+            }
             self.member_write(left, &nv, scope);
         }
         Ok(nv)
@@ -962,9 +1027,19 @@ impl<'p> Eval<'p> {
 
     fn member(&mut self, node: NodeId, obj: &V, scope: ScopeId) -> R<V> {
         use jt::B;
+        let mut key = V::empty();
         if self.a().computed(node) {
             let prop = self.a().at(node, B);
-            self.expr(Some(prop), scope)?;
+            key = self.expr(Some(prop), scope)?;
+        }
+        if self.p.cfg.supply.is_some() {
+            if let Some(v) = self.sc_member(node, obj, &key, scope) {
+                return Ok(v);
+            }
+            if self.a().prop_name(node).as_deref().is_some_and(|n| eq(n, "length")) {
+                return Ok(V::empty());
+            }
+            return Ok(if obj.kind != 0 { obj.plain() } else { obj.clone() });
         }
         let name = self.a().prop_name(node);
         let line = if self.a().computed(node) { self.a().line(node) } else { self.a().line(self.a().at(node, B)) };
@@ -1011,6 +1086,15 @@ impl<'p> Eval<'p> {
             self.expr(Some(callee), scope)?;
         }
         let (args, spread) = self.args_of(node, scope)?;
+        if self.p.cfg.supply.is_some() {
+            let v = self.sc_new(node, &args, spread, scope);
+            let tg = self.p.call_targets(self.m, node, scope);
+            if !tg.0.is_empty() {
+                let line = self.a().line(node);
+                self.apply(node, &tg.0, &args, spread, line, true);
+            }
+            return Ok(v);
+        }
         let mut text = u("new ");
         text.extend_from_slice(&self.p.text(self.m, callee));
         text.push(0x28);
@@ -1051,7 +1135,7 @@ impl<'p> Eval<'p> {
         Ok(union_all(&args))
     }
 
-    fn call_line(&self, node: NodeId) -> u32 {
+    pub(super) fn call_line(&self, node: NodeId) -> u32 {
         let callee = self.a().unwrap(self.a().at(node, jt::A));
         if self.a().kind(callee) == Kind::MemberExpression && !self.a().computed(callee) {
             return self.a().line(self.a().at(callee, jt::B));
@@ -1062,6 +1146,9 @@ impl<'p> Eval<'p> {
     /// A call: its sources and sinks, the functions it reaches, its value.
     fn call(&mut self, node: NodeId, recv: &V, callee_val: &V, scope: ScopeId) -> R<V> {
         let (args, spread) = self.args_of(node, scope)?;
+        if self.p.cfg.supply.is_some() {
+            return self.sc_call(node, recv, callee_val, &args, spread, scope);
+        }
         let callee = self.a().unwrap(self.a().at(node, jt::A));
         let member = self.a().kind(callee) == Kind::MemberExpression;
         let ctext = self.p.text(self.m, callee);
@@ -1387,8 +1474,10 @@ impl<'p> Eval<'p> {
     /// The functions a call reaches: their parameters' sinks (a finding
     /// when request data arrives; the reach of the caller's parameters when
     /// they do) and what they return.
-    fn apply(&mut self, node: NodeId, fids: &[FnId], args: &[V], spread: isize, line: u32, ctor: bool) -> V {
+    pub(super) fn apply(&mut self, node: NodeId, fids: &[FnId], args: &[V], spread: isize, line: u32, ctor: bool) -> V {
         let mut out = V::empty();
+        // (the supply-chain model: what the script's wrappers of exec print)
+        let mut wrapped = V::empty();
         let mut reported: u8 = 0;
         let name = self.callee_name(node);
         for &fid in fids {
@@ -1416,6 +1505,20 @@ impl<'p> Eval<'p> {
             for (i, table) in reach {
                 let t = bound(args, spread, rest, i);
                 if !t.tainted() {
+                    // (the supply-chain model: a constant command line given the script's
+                    // wrapper of exec, a constant name its getEnv())
+                    if self.p.cfg.supply.is_some() {
+                        if table.contains_key(&super::supply::EXEC_CMD) {
+                            if let Some(src) = self.sc_wrapper_output(node, i) {
+                                wrapped = wrapped.union(&src);
+                            }
+                        }
+                        if table.contains_key(&super::supply::ENV_NAME) {
+                            if let Some(src) = self.sc_wrapper_read(node, super::supply::ENV_NAME, &t, i) {
+                                wrapped = wrapped.union(&src);
+                            }
+                        }
+                    }
                     continue;
                 }
                 for cat in 0..CATS.len() as u8 {
@@ -1424,6 +1527,34 @@ impl<'p> Eval<'p> {
                         _ => continue,
                     };
                     let needs = entry.3 && !t.built;
+                    if self.p.cfg.supply.is_some() {
+                        if cat == super::supply::EXEC_CMD || cat == super::supply::READ_PATH || cat == super::supply::ENV_NAME {
+                            // (the script's wrappers: of exec given a command line, of a
+                            // read given a path outside the package, of getEnv given a name)
+                            let src = if cat == super::supply::EXEC_CMD {
+                                self.sc_wrapper_output(node, i)
+                            } else {
+                                self.sc_wrapper_read(node, cat, &t, i)
+                            };
+                            if let Some(src) = src {
+                                wrapped = wrapped.union(&src);
+                            }
+                            for &key in t.params.iter() {
+                                self.reach_adds.push((key, cat, (entry.0, entry.1, entry.2.clone(), false)));
+                            }
+                            continue;
+                        }
+                        // (the supply-chain model: local data at a send the callee reaches)
+                        if t.src && self.emit {
+                            if let Some(sc) = t.sc.clone() {
+                                self.sc_emit(&sc, cat == super::supply::SEND_ADDR, entry.1);
+                            }
+                        }
+                        for &key in t.params.iter() {
+                            self.reach_adds.push((key, cat, (entry.0, entry.1, entry.2.clone(), false)));
+                        }
+                        continue;
+                    }
                     if t.src && self.emit && !needs && reported & bit(cat) == 0 {
                         let path = self.p.mods[self.m as usize].path.clone();
                         let mut here = path.clone();
@@ -1445,6 +1576,17 @@ impl<'p> Eval<'p> {
                     }
                 }
             }
+            // (the supply-chain model) the closure variables a parameter is written to
+            let writes: Vec<(usize, Vec<BindId>)> =
+                self.p.fns[fid as usize].param_writes.iter().map(|(&i, bs)| (i, bs.iter().copied().collect())).collect();
+            for (i, binds) in writes {
+                let t = bound(args, spread, rest, i);
+                if t.tainted() {
+                    for b in binds {
+                        self.write(b, t.plain(), false);
+                    }
+                }
+            }
             if ctor {
                 continue;
             }
@@ -1456,7 +1598,10 @@ impl<'p> Eval<'p> {
                     _ => via.extend(u("an anonymous function")),
                 }
                 via.extend(u("()"));
-                out = out.union(&V::new(true, rs.origin, rs.fname.clone(), Some(Rc::new(via)), V::empty().params, rs.clean, rs.built, 0));
+                out = out.union(
+                    &V::new(true, rs.origin, rs.fname.clone(), Some(Rc::new(via)), V::empty().params, rs.clean, rs.built, 0)
+                        .with_sc(rs.sc.clone()),
+                );
             }
             let ret_params: Vec<(usize, (u8, bool))> = f.ret_params.iter().map(|(&i, &x)| (i, x)).collect();
             let ret_outer: Vec<(u64, (u8, bool))> = f.ret_outer.iter().map(|(&k, &x)| (k, x)).collect();
@@ -1476,7 +1621,7 @@ impl<'p> Eval<'p> {
                 }
             }
         }
-        out
+        out.union(&wrapped)
     }
 
     fn callee_name(&self, node: NodeId) -> PyStr {
@@ -1583,8 +1728,15 @@ impl<'p> Eval<'p> {
     /// (monotone). Returns the functions whose summaries changed, each with
     /// what changed, and the bindings whose value grew.
     pub fn commit(self) -> (Changes, Vec<BindId>) {
-        let Eval { p, fid, emit, reach_adds, ret_val, shared_writes, reads, uses, .. } = self;
+        let Eval { p, fid, emit, reach_adds, ret_val, shared_writes, reads, uses, pw_adds, .. } = self;
         let mut changes: Changes = BTreeMap::new();
+        for (key, b) in pw_adds {
+            let owner = (key / PARAM_BASE) as FnId;
+            let i = (key % PARAM_BASE) as usize;
+            if p.fns[owner as usize].param_writes.entry(i).or_default().insert(b) {
+                changes.entry(owner).or_default().1.insert(i);
+            }
+        }
         for (key, cat, entry) in reach_adds {
             let owner = (key / PARAM_BASE) as FnId;
             let i = (key % PARAM_BASE) as usize;
@@ -1605,14 +1757,21 @@ impl<'p> Eval<'p> {
                     let f = &mut p.fns[fid as usize];
                     match &f.ret_src {
                         None => {
-                            f.ret_src = Some(V::new(true, rv.origin, rv.fname.clone(), None, V::empty().params, rv.clean, rv.built, 0));
+                            f.ret_src = Some(
+                                V::new(true, rv.origin, rv.fname.clone(), None, V::empty().params, rv.clean, rv.built, 0)
+                                    .with_sc(rv.sc.clone()),
+                            );
                             changes.entry(fid).or_default().0 = true;
                         }
                         Some(old) => {
                             let clean = old.clean & rv.clean;
                             let built = old.built || rv.built;
-                            if clean != old.clean || built != old.built {
-                                f.ret_src = Some(V::new(true, old.origin, old.fname.clone(), None, V::empty().params, clean, built, 0));
+                            let sc = sc_union(&old.sc, &rv.sc);
+                            if clean != old.clean || built != old.built || sc != old.sc {
+                                f.ret_src = Some(
+                                    V::new(true, old.origin, old.fname.clone(), None, V::empty().params, clean, built, 0)
+                                        .with_sc(sc),
+                                );
                                 changes.entry(fid).or_default().0 = true;
                             }
                         }
@@ -1649,8 +1808,11 @@ impl<'p> Eval<'p> {
             }
         }
         let mut grown = Vec::new();
+        let marks = if p.cfg.supply.is_some() { super::supply::MARKS } else { 0 };
         for (bid, v) in shared_writes {
-            if !v.tainted() {
+            // (the supply-chain model keeps what a value is, a connection
+            // or a client, in a closure's variable too)
+            if !v.tainted() && v.kind & marks == 0 {
                 continue;
             }
             let old = p.shared.get(&bid);

@@ -526,7 +526,7 @@ fn ld_names_in(p: &Pack, text: &[u32], lo: usize, hi: usize, names: &HashSet<PyS
 }
 
 /// core._ld_outside: does text[lo:hi], a call's first argument, name a path outside the package?
-fn ld_outside(p: &Pack, text: &[u32], lo: usize, hi: usize, reader: bool, outside: &HashSet<PyStr>, lit: &LiteralTest) -> bool {
+pub(crate) fn ld_outside(p: &Pack, text: &[u32], lo: usize, hi: usize, reader: bool, outside: &HashSet<PyStr>, lit: &LiteralTest) -> bool {
     let first = pystr::sub(text, lo, hi);
     if p.re("_LD_OWN_FOLDER_RE").search(first).is_some() {
         return false;
@@ -546,7 +546,7 @@ fn ld_outside(p: &Pack, text: &[u32], lo: usize, hi: usize, reader: bool, outsid
 }
 
 /// The module's names for the machine's names (core._LD_MODULE_NAMES[module]): (name, kind) pairs.
-fn module_names(p: &Pack, module: &[u32]) -> Vec<(PyStr, &'static str)> {
+pub(crate) fn module_names(p: &Pack, module: &[u32]) -> Vec<(PyStr, &'static str)> {
     let raw = match p.raw("_LD_MODULE_NAMES") {
         Some(v) => v,
         None => return Vec::new(),
