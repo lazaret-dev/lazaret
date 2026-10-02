@@ -396,7 +396,7 @@ pack's `rule_set`) is bumped with any change to what a verdict records.
 
 | Module | Records | On |
 |---|---|---|
-| `test_snapshot_hooks` | the 15 fields of `hooks_view` (shlex, hooks, both supply-chain tests with and without a language, decoded view, spawned scripts …) | the hooks corpus (`hooks_corpus.py`, ~44,400 cases) |
+| `test_snapshot_hooks` | the 17 fields of `hooks_view` (shlex, hooks, both supply-chain tests with and without a language, the decoded view with no language and in JavaScript and Python, spawned scripts …) | the hooks corpus (`hooks_corpus.py`, ~44,400 cases) |
 | `test_snapshot_signs` | the detectors one by one (`signs_view`: received code, PowerShell, stagers, reverse shells, self-read, persistence, the exfiltration shapes, services at login, wallet swaps, the string-array technique …), every field reached; the data flow on long texts | the hooks corpus; six long texts |
 | `test_snapshot_scanfile` | `scan_file` in dependency mode and `scan_rules` (project mode's rules part), finding for finding, every family and variant reached; each line's context (`file_context`) | the scan_file corpus (`scanfile_corpus.py`), this repository's fixtures |
 | `test_snapshot_lexer` | `lex_comment_spans`: comments, strings, every literal (the lexers', §15, for JavaScript and Python) | dense random texts in each language |
@@ -671,8 +671,8 @@ benchmark:
 |---|---|---|
 | 0 | Baseline: the detection round committed (rule set 2.15.0), the engine's outputs recorded on the benchmark's files and on installed packages | Done (tag `rust-first-baseline`) |
 | 1 | The Rust engine is the reference: the Python engine, `--engine` and the pure wheel retired; the recorded outputs (§5); the pack as the source of the rules; every wheel a platform wheel, the sdist compiled by pip where none fits; an unanswered file SC-TRUNCATED in both packages | Done |
-| 2 | Decoding, lexers and bytes in the engine: source decoding (BOMs, UTF-16, coding cookies), one token substrate for the detectors | The lexers done (§15: every caller's comments and literals, both packages); the self-read on them (the data flow, the dead drop and the secret endpoints wait for scopes, phase 3); the decoded view and string arrays on tokens, source decoding and bytes not started |
-| 3 | Parsers, scopes and flow: the detectors on bindings over the JavaScript and Python trees (§12, §13), constant folding of strings, the cross-file follower on them, project mode's passes (taint, SQL, function metrics) in the engine; the npm package's twins of them retired | The parsers done |
+| 2 | Decoding, lexers and bytes in the engine: source decoding (BOMs, UTF-16, coding cookies), one token substrate for the detectors | Done (tag `rust-first-phase2`): the lexers (§15: every caller's comments and literals, both packages), the self-read on them, the decoded view on string values (§15). Moved: the data flow, the dead drop, the secret endpoints and received code to phase 3 (they follow names: scopes); bytes to phase 4 (with linre over bytes); source decoding to after phase 3 (the packages' decoders already agree, held by their parity tests, and owning the CJK codecs would put their tables in the WebAssembly module) |
+| 3 | Parsers, scopes and flow: the detectors on bindings over the JavaScript and Python trees (§12, §13), constant folding of strings, the cross-file follower on them, project mode's passes (taint, SQL, function metrics) in the engine; the npm package's twins of them retired | The parsers done. Next, in order: project mode's JavaScript taint (jsflow.py: scopes, bindings, points-to, summaries) ported onto `js_parse`'s trees and held to jsflow.py, jsflow.js retired; Python's (flow.py) onto `py_parse`'s; then the supply-chain detectors on the same scopes, benchmark-gated |
 | 4 | Linear-time matching: the pack's patterns on linre (§14), pyre and the shlex port retired, current Unicode | Every pattern linre accepts runs on it (616 of the pack's 657; done first, as no answer changes); the 41 others, pyre and the shlex port not started |
 | 5 | One call per file, a content cache (SHA-256), the guard's scan in a child process that fails closed, archive ambiguity checks | Not started |
 
@@ -1562,6 +1562,55 @@ outputs two moved, both gains: two releases of a compromised
 `@emilgroup` package now show the self-read the pairing missed (they decode
 a payload from their own `package.json` into a script a systemd user
 service runs); the benchmark's and the holdout's counts are unchanged.
+
+**String values, and the decoded view on them.** `value.rs` reads a
+literal's value as its runtime does: a JavaScript string or hole-less
+template by jsparse's cooking (every escape, line continuations, a pair of
+surrogate escapes the one character it encodes), a Python string or bytes
+literal by pyparse's reading of its body (prefixes, raw strings, `\N{…}`);
+an f-string or a t-string is not a constant. It also finds the runs of
+literals a runtime joins into one string: `+` between literals where
+nothing binds tighter on either side (`x * 'a' + 'b'` joins only `'b'`,
+`'a' + 'b'.trim()` nothing, a tagged template is a call), and Python's
+adjacent literals, which its tokenizer joins before any operator (lines
+apart only inside brackets or after a backslash; str and bytes never).
+The decoded view of a JavaScript or Python text begins there
+(`signs::dv_literals`): a literal holding a code escape (`\x41`, `\u0041`,
+`\u{41}`, `\101`, Python's `\U…` and `\N{…}`: what obfuscation hides a
+name with, not `\n` or `\'`) is written as its value, and a run as one
+literal, where the value is printable ASCII without a quote or a
+backslash; the line breaks a run spans follow it on its line, so the lines
+after it keep their numbers. Where a JavaScript file may hold JSX, only
+the runs both readings find. Before, the view unescaped only literals
+written wholly in `\x` and `\u` escapes, three or more
+(`'child_pro\x63ess'` stayed as written), and joined same-quote literals
+on one line by a pattern, inside a string's own text too
+(`"it' + 'x"`). As before, joining alone decodes nothing: the view is the
+text itself unless an escape, a decoder's call, a string array or a proxy
+object is read. Every caller that knows a text's language passes it, in
+both packages: the import-time test, an install hook's targets and the
+scripts they start (`engine.script_lang`: `.py` Python, `.sh` none, the
+rest what node runs), a start-up module, the code a hook's command hands
+`node -e` or `python -c`; a text of no known language (a hook's command, a
+settings file's) keeps the patterns' reading.
+
+What it changed: on the recorded outputs' corpora, 13 import-time answers
+of the hooks corpus's generated cases, all gains (string arrays whose
+accessor's base64 alphabet is a literal partly written in escapes, now read;
+a `curl` written in escapes); the two new fields of `hooks_view` hold the
+views. On real files none of the 561,324 recorded outputs moved; with each
+file's language, the decoded view's text changed on 293 files (132 of the
+benchmark's, 161 installed: an escape such as `"\x20"` read, members then
+named by literals read as members) and the install-script test's reasons,
+the scripts a file starts and the string array's line on none. The
+benchmark's and the holdout's counts are unchanged. The review found and
+fixed, before committing: a literal with an escape JavaScript refuses
+(`'\x2'`) read leniently as jsparse's cooking reads it, which let a
+generated file's second, broken string array displace its first; and past
+a token Python's tokenizer refuses, strings read plainly (no punctuators
+known) taken for adjacent ones, which joined a string array's items into
+one: Python's gaps are now read character by character (blanks, comments,
+continuations).
 
 On the benchmark one release moved: num2words 0.5.15, SUSPICIOUS to
 INCOMPLETE. Its `_build.py` is a Windows executable (an `MZ` header) named

@@ -1189,9 +1189,10 @@ pub fn exec_command_reasons(p: &Pack, text: &[u32]) -> Vec<PyStr> {
 
 /// core._hook_inline_code: the code a shell text hands node (-e, --eval, -p,
 /// --print, and the other JavaScript runtimes) or python (-c) inline, also
-/// inside `sh -c`, `eval` and `cmd /c` command lines.
-pub fn hook_inline_code(p: &Pack, text: &[u32], walk: &mut HookWalk, depth: usize) -> Vec<PyStr> {
-    let mut out: Vec<PyStr> = Vec::new();
+/// inside `sh -c`, `eval` and `cmd /c` command lines: (its language, "js"
+/// or "py", the code).
+pub fn hook_inline_code(p: &Pack, text: &[u32], walk: &mut HookWalk, depth: usize) -> Vec<(&'static str, PyStr)> {
+    let mut out: Vec<(&'static str, PyStr)> = Vec::new();
     if depth > p.usize("_SH_MAX_DEPTH") {
         return out;
     }
@@ -1212,13 +1213,13 @@ pub fn hook_inline_code(p: &Pack, text: &[u32], walk: &mut HookWalk, depth: usiz
         if in_set(p.strs("_NODE_NAMES"), &name) || runtimes.iter().any(|(k, _)| *k == name) {
             if let Some(code) = crate::hooks::node_script(p, args).2 {
                 if !code.is_empty() {
-                    out.push(sh_literal(&code));
+                    out.push(("js", sh_literal(&code)));
                 }
             }
         } else if p.re("_PYTHON_NAME_RE").match_(&name).is_some() {
             if let Some(code) = crate::hooks::interpreter_script(args).1 {
                 if !code.is_empty() {
-                    out.push(sh_literal(&code));
+                    out.push(("py", sh_literal(&code)));
                 }
             }
         } else if let Some(code) = sh_code(p, &name, args) {
@@ -1239,10 +1240,10 @@ pub fn hook_command_risk(p: &Pack, cmd: &[u32], output_kept: bool) -> Vec<PyStr>
     if pystr::strip(cmd).is_empty() || cmd.len() > p.usize("HOOK_MAX_CHARS") {
         return Vec::new();
     }
-    let mut reasons = crate::signs::install_script_risk_with(p, cmd, false, true);
+    let mut reasons = crate::signs::install_script_risk_with(p, cmd, false, true, None);
     let mut walk = HookWalk::new();
-    for code in hook_inline_code(p, cmd, &mut walk, 0) {
-        for r in crate::signs::install_script_risk_with(p, &code, false, false) {
+    for (lang, code) in hook_inline_code(p, cmd, &mut walk, 0) {
+        for r in crate::signs::install_script_risk_with(p, &code, false, false, Some(lang)) {
             push_new(&mut reasons, r);
         }
     }

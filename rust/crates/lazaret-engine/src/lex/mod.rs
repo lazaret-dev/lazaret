@@ -23,6 +23,7 @@
 
 pub mod js;
 pub mod py;
+pub mod value;
 
 /// A token's kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

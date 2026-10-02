@@ -203,9 +203,13 @@ export function packValues(...names) {
 // ---- the supply-chain tests (core's functions of the same names) ----
 
 /** Reasons an install-time script looks hostile ([] if none). `shell`: read a shell script as a program
- * too; `command`: the text is a hook's command. core.install_script_risk */
-export const installScriptRisk = (text, shell = true, command = false) =>
-  call("install_script_risk", { shell, command }, text);
+ * too; `command`: the text is a hook's command; `lang`: the script's language when known ("js", "py": its
+ * strings are read as its runtime reads them). core.install_script_risk */
+export const installScriptRisk = (text, shell = true, command = false, lang = null) =>
+  call("install_script_risk", lang ? { shell, command, lang } : { shell, command }, text);
+/** The language a script runs in, for the tests that read its strings: "py" for a .py file, null for a
+ * shell script (.sh), "js" for the rest (what node runs). core's engine.script_lang */
+export const scriptLang = (path) => (path.endsWith(".py") ? "py" : path.endsWith(".sh") ? null : "js");
 /** [reasons, line] of the weaker import-time test ([] and null if none); `lang` "py", "js" or null. */
 export const importTimeRisk = (text, lang = null) => call("import_time_risk", lang ? { lang } : {}, text);
 /** "CRITICAL" when one of importTimeRisk's reasons is a strong one, else "MAJOR". */
@@ -225,8 +229,9 @@ export const nodeECodes = (cmd) => call("node_e_codes", {}, cmd);
 export const nodeCandidates = (path) => call("node_candidates", {}, path);
 /** "js", "py" or "sh" from a file's #! line, else null. */
 export const shebangLang = (text) => call("shebang_lang", {}, text);
-/** [[base, path]]: the package scripts `text` starts with node or python ("dir": its directory, "cwd"). */
-export const spawnedScripts = (text) => call("spawned_scripts", {}, text);
+/** [[base, path]]: the package scripts `text` (in `lang`, when known) starts with node or python ("dir": its
+ * directory, "cwd"). */
+export const spawnedScripts = (text, lang = null) => call("spawned_scripts", lang ? { lang } : {}, text);
 /** What a text plants to run again (a login item, a cron job, a shell profile …). */
 export const persistenceReasons = (text) => call("persistence_reasons", {}, text);
 /** [agent, flag, line] when dependency code hands an AI agent's CLI a flag that turns off its confirmations
@@ -250,8 +255,9 @@ export const runsReceivedCode = (text) => call("runs_received_code", {}, text);
 export const readsOwnSource = (text) => call("reads_own_source", {}, text);
 /** Does this row hand a download to a shell or an interpreter through a substitution? */
 export const runsSubstitutedDownload = (text) => call("runs_substituted_download", {}, text);
-/** The text with the strings it decodes as it runs decoded (the reading install and import-time tests add). */
-export const decodedView = (text) => call("decoded_view", {}, text);
+/** The text with the strings it decodes as it runs decoded (the reading install and import-time tests add);
+ * `lang` "js" or "py": its literals read as the runtime reads them. */
+export const decodedView = (text, lang = null) => call("decoded_view", lang ? { lang } : {}, text);
 
 // The detectors those tests read, one by one (offsets in code points; -1 or null: none found)
 export const powershellRisk = (text) => call("powershell_risk", {}, text);

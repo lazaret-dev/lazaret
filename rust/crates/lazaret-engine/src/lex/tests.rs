@@ -185,3 +185,110 @@ fn structure_intersects_the_python_readings() {
     // (the f-string's start, its texts, its end: its hole `{y}` is code)
     assert_eq!(st.literals, vec![(4, 7), (17, 19), (19, 20), (23, 24), (24, 25)]);
 }
+
+fn s(v: &[u32]) -> String {
+    v.iter().map(|&x| char::from_u32(x).unwrap_or('\u{FFFD}')).collect()
+}
+
+#[test]
+fn string_values_as_the_runtimes_read_them() {
+    // JavaScript: every escape, a line continuation, a surrogate pair
+    assert_eq!(value::js(&u(r"'child_pro\x63ess'")).map(|v| s(&v)), Some("child_process".into()));
+    assert_eq!(value::js(&u("'a\\\nb\\u{41}\\101\\0'")).map(|v| s(&v)), Some("abAA\0".into()));
+    assert_eq!(value::js(&u(r"'😀'")).map(|v| s(&v)), Some("😀".into()));
+    assert_eq!(value::js(&u("`a\r\nb`")).map(|v| s(&v)), Some("a\nb".into()));
+    // not closed, or its quote escaped
+    assert_eq!(value::js(&u("'abc")), None);
+    assert_eq!(value::js(&u(r"'abc\'")), None);
+    // an escape JavaScript refuses: no value (jsparse's cooking would read one)
+    assert_eq!(value::js(&u(r"'12ab\x2'")), None);
+    assert_eq!(value::js(&u(r"'\u12'")), None);
+    assert_eq!(value::js(&u(r"'\u{110000}'")), None);
+    assert_eq!(value::js(&u(r"`\1`")), None);
+    assert_eq!(value::js(&u(r"`\01`")), None);
+    // a string's legacy octal escapes and \8 are sloppy mode's; a template's \0
+    assert_eq!(value::js(&u(r"'\1\8'")).map(|v| s(&v)), Some("\u{1}8".into()));
+    assert_eq!(value::js(&u(r"`\0`")).map(|v| s(&v)), Some("\0".into()));
+    assert_eq!(value::js(&u(r"'\u{0000041}'")).map(|v| s(&v)), Some("A".into()));
+    // Python: prefixes, raw strings, bytes, \N{…}, triple quotes
+    let py = |x: &str| value::py(&u(x)).map(|v| (s(&v.chars), v.bytes));
+    assert_eq!(py(r"'os.sys\x74em'"), Some(("os.system".into(), false)));
+    assert_eq!(py(r"b'\x63url'"), Some(("curl".into(), true)));
+    assert_eq!(py(r"R'\x63'"), Some((r"\x63".into(), false)));
+    assert_eq!(py(r"'\N{LATIN SMALL LETTER E}val'"), Some(("eval".into(), false)));
+    assert_eq!(py("'''a\nb'''"), Some(("a\nb".into(), false)));
+    assert_eq!(py("u'x'"), Some(("x".into(), false)));
+    // not constants, or refused
+    assert_eq!(py("f'x'"), None);
+    assert_eq!(py("'abc"), None);
+    assert_eq!(py(r"'\x6'"), None);
+    assert_eq!(py("b'é'"), None);
+    assert_eq!(py("'a\nb'"), None);
+}
+
+#[test]
+fn code_escapes_are_the_ones_that_hide_characters() {
+    assert!(value::has_code_escape(&u(r"'a\x41'"), "js"));
+    assert!(value::has_code_escape(&u(r"'\u{41}'"), "js"));
+    assert!(value::has_code_escape(&u(r"'\101'"), "js"));
+    assert!(value::has_code_escape(&u(r"'\N{BULLET}'"), "py"));
+    assert!(!value::has_code_escape(&u(r"'a\nb\'c\\'"), "js"));
+    assert!(!value::has_code_escape(&u(r"'a\0'"), "js"));
+    assert!(!value::has_code_escape(&u(r"r'\x41'"), "py"));
+    assert!(!value::has_code_escape(&u(r"'\\x41'"), "js"));
+}
+
+/// (text of each run, its value, its literal count, its code escape)
+fn runs(src: &str, lang: &str) -> Vec<(String, String, usize, bool)> {
+    let text = u(src);
+    let toks = if lang == "py" { py::tokens(&text) } else { js::tokens(&text, false) };
+    value::runs(&text, &toks, lang, 4000)
+        .into_iter()
+        .map(|r| (s(&text[r.start..r.end]), s(&r.value.chars), r.literals, r.code_escape))
+        .collect()
+}
+
+fn run(text: &str, value: &str, literals: usize, escape: bool) -> (String, String, usize, bool) {
+    (text.to_string(), value.to_string(), literals, escape)
+}
+
+#[test]
+fn literals_joined_as_the_runtime_joins_them() {
+    // quotes of every kind, a comment and lines between
+    assert_eq!(
+        runs("require('child_' + /* x */ \"pro\" +\n `cess`)", "js"),
+        vec![run("'child_' + /* x */ \"pro\" +\n `cess`", "child_process", 3, false)]
+    );
+    // one literal: only with a code escape
+    assert_eq!(runs("x = 'a\\x62' ; y = 'cd'", "js"), vec![run("'a\\x62'", "ab", 1, true)]);
+    // what binds tighter takes its literal
+    assert_eq!(runs("x * 'a' + 'b' + 'c'", "js"), vec![run("'b' + 'c'", "bc", 2, false)]);
+    assert_eq!(runs("'a' + 'b' + 'c'.length", "js"), vec![run("'a' + 'b'", "ab", 2, false)]);
+    assert_eq!(runs("'a' + 'b'[0]", "js"), vec![]);
+    assert_eq!(runs("x - 'a' + 'b'", "js"), vec![]);
+    assert_eq!(runs("f(+'a' + 'b')", "js"), vec![]);
+    assert_eq!(runs("x + 'a' + 'b'", "js"), vec![run("'a' + 'b'", "ab", 2, false)]);
+    assert_eq!(runs("typeof 'a' + 'b'", "js"), vec![]);
+    // a tagged template is a call
+    assert_eq!(runs("'a' + tag`b`", "js"), vec![]);
+    // a template with holes is not a constant
+    assert_eq!(runs("'a' + `b${c}`", "js"), vec![]);
+    // Python: adjacent literals join before any operator, lines apart in brackets
+    assert_eq!(runs("x = ('chi'\n  \"ld\")", "py"), vec![run("'chi'\n  \"ld\"", "child", 2, false)]);
+    assert_eq!(runs("'a' 'b'.join(x)", "py"), vec![run("'a' 'b'", "ab", 2, false)]);
+    assert_eq!(runs("x * 'a' 'b' + 'c'", "py"), vec![]);
+    // at the top level a line break ends the statement
+    assert_eq!(runs("'a'\n'b'", "py"), vec![]);
+    // a comment between; past a token Python refuses, strings with code
+    // between them (read plainly, no punctuator known) are not adjacent
+    assert_eq!(runs("f(x, 'a' # c\n 'b')", "py"), vec![run("'a' # c\n 'b'", "ab", 2, false)]);
+    assert_eq!(runs("f(x ? 'a', 'b')", "py"), vec![]);
+    assert_eq!(runs("f(x ? 'a' 'b')", "py"), vec![run("'a' 'b'", "ab", 2, false)]);
+    assert_eq!(runs("x = 'a' \\\n 'b'", "py"), vec![run("'a' \\\n 'b'", "ab", 2, false)]);
+    // str and bytes do not join; % formats its literal
+    assert_eq!(runs("b'a' + 'b'", "py"), vec![]);
+    assert_eq!(runs("'a' + 'b%s' % x", "py"), vec![]);
+    assert_eq!(runs("os.system('cu' + 'rl ' + u)", "py"), vec![run("'cu' + 'rl '", "curl ", 2, false)]);
+    // an f-string is not a constant
+    assert_eq!(runs("'a' + f'b'", "py"), vec![]);
+}

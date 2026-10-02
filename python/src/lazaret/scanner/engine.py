@@ -166,29 +166,44 @@ def import_time_risk(text, lang=None):
     return answer[0], answer[1]
 
 
-def install_script_risks(texts):
-    """[text] -> the install-script test's reasons for each, in order (an
-    item the engine could not answer: the _native.NativeError it stands for)."""
-    if not texts:
+def install_script_risks(items):
+    """[(text, lang)] -> the install-script test's reasons for each, in order
+    (an item the engine could not answer: the _native.NativeError it stands
+    for)."""
+    if not items:
         return []
-    return _batch("install_script_risk", [({}, text) for text in texts])
+    return _batch("install_script_risk", [({"lang": lang} if lang else {}, text) for text, lang in items])
 
 
-def install_script_risk(text, shell=True, command=False):
+def install_script_risk(text, shell=True, command=False, lang=None):
     """The install-script test's reasons (raises _native.NativeError when the
-    engine could not answer)."""
+    engine could not answer). `lang`: the script's language when known
+    ("js", "py"): its strings are read as its runtime reads them."""
     args = {}
     if not shell:
         args["shell"] = False
     if command:
         args["command"] = True
+    if lang:
+        args["lang"] = lang
     return _native.call("install_script_risk", args, text)
 
 
-def spawned_scripts(text):
-    """[(base, path)] of the package scripts `text` starts (raises
-    _native.NativeError when the engine could not answer)."""
-    return [tuple(x) for x in _native.call("spawned_scripts", {}, text)]
+def spawned_scripts(text, lang=None):
+    """[(base, path)] of the package scripts `text` (in `lang`, when known)
+    starts (raises _native.NativeError when the engine could not answer)."""
+    return [tuple(x) for x in _native.call("spawned_scripts", {"lang": lang} if lang else {}, text)]
+
+
+def script_lang(path):
+    """The language a script runs in, for the tests that read its strings:
+    "py" for a .py file, None for a shell script (.sh), "js" for the rest
+    (what node runs: a hook's target, a script it starts)."""
+    if path.endswith(".py"):
+        return "py"
+    if path.endswith(".sh"):
+        return None
+    return "js"
 
 
 _ISSUE_KEYS = ("rule", "name", "type", "sev", "msg", "why", "fix", "ref")

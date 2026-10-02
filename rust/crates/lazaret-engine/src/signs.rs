@@ -2378,37 +2378,124 @@ fn dv_char_codes(p: &Pack, view: &[u32]) -> PyStr {
 /// A text's decoded view and the line of the string array it reads.
 type Reading = (PyStr, Option<usize>);
 
+/// The language a decoded view reads its literals in: JavaScript or Python
+/// (with the lexers), else none (the patterns: a shell script, a command).
+fn dv_lang(lang: Option<&str>) -> Option<&'static str> {
+    match lang {
+        Some("js") => Some("js"),
+        Some("py") => Some("py"),
+        _ => None,
+    }
+}
+
 thread_local! {
-    // the last text decoded_view read, its view and its string array's line
-    // (core's _DV_MEMO): the install-script test, the import-time test and
-    // the spawned-script follower read the same file
-    static DV_MEMO: std::cell::RefCell<Option<(PyStr, Reading)>> = const { std::cell::RefCell::new(None) };
+    // the last text decoded_view read (in its language), its view and its
+    // string array's line (core's _DV_MEMO): the install-script test, the
+    // import-time test and the spawned-script follower read the same file
+    static DV_MEMO: std::cell::RefCell<Option<(PyStr, Option<&'static str>, Reading)>> = const { std::cell::RefCell::new(None) };
 }
 
 /// core._dv_reading: decoded_view's reading of `text` and the line of the
 /// string array it reads, the last text's kept.
-fn dv_reading(p: &Pack, text: &[u32]) -> Reading {
-    if let Some(r) = DV_MEMO.with(|m| m.borrow().as_ref().filter(|(t, _)| t.as_slice() == text).map(|(_, r)| r.clone())) {
+fn dv_reading(p: &Pack, text: &[u32], lang: Option<&str>) -> Reading {
+    let lang = dv_lang(lang);
+    if let Some(r) = DV_MEMO
+        .with(|m| m.borrow().as_ref().filter(|(t, l, _)| *l == lang && t.as_slice() == text).map(|(_, _, r)| r.clone()))
+    {
         return r;
     }
-    let r = decoded_view_of(p, text);
+    let r = decoded_view_of(p, text, lang);
     // (a reading the work budget cut short is no answer: the call fails,
     // and a later call must not be given it)
     if !crate::budget::exhausted() {
-        DV_MEMO.with(|m| *m.borrow_mut() = Some((text.to_vec(), r.clone())));
+        DV_MEMO.with(|m| *m.borrow_mut() = Some((text.to_vec(), lang, r.clone())));
     }
     r
 }
 
-/// core.decoded_view
-pub fn decoded_view(p: &Pack, text: &[u32]) -> PyStr {
-    dv_reading(p, text).0
+/// core.decoded_view: `text` (in `lang`, "js" or "py", when known) with the
+/// strings it decodes as it runs written as their text; `text` itself when
+/// it decodes none.
+pub fn decoded_view(p: &Pack, text: &[u32], lang: Option<&str>) -> PyStr {
+    dv_reading(p, text, lang).0
 }
 
 /// core.string_array_line: the 1-based line of the string array `text` is
 /// built around (one whose calls decoded_view reads), else None.
-pub fn string_array_line(p: &Pack, text: &[u32]) -> Option<usize> {
-    dv_reading(p, text).1
+pub fn string_array_line(p: &Pack, text: &[u32], lang: Option<&str>) -> Option<usize> {
+    dv_reading(p, text, lang).1
+}
+
+/// Is a string value one the decoded view writes as a literal: printable
+/// ASCII without a quote or a backslash (what its patterns read)?
+fn dv_plain(v: &[u32]) -> bool {
+    v.iter().all(|&ch| (c(' ')..=c('~')).contains(&ch) && ch != c('\'') && ch != c('"') && ch != c('\\'))
+}
+
+/// The decoded view's first step for JavaScript or Python (phase 2): the
+/// text's string literals read as its runtime reads them (lex/value.rs) —
+/// a literal that writes characters by their codes (`'child_pro\x63ess'`,
+/// `'\N{…}'`) as its value, a run of literals the runtime joins (`'chi' +
+/// "ld_" + `process``, Python's adjacent `'a' 'b'`) as one —, each written
+/// as a literal where its value is printable ASCII without a quote or a
+/// backslash. Where JavaScript may hold JSX, only what both readings agree
+/// on. The line breaks a run spans follow it on its line, so that the
+/// lines after it keep their numbers. (view, whether a code escape was
+/// read: joins alone decode nothing.)
+fn dv_literals(p: &Pack, text: &[u32], lang: &'static str) -> (PyStr, bool) {
+    // (a run's value is never longer than its text: the view never grows)
+    let max = p.usize("_DV_MAX_CHARS");
+    let found = if lang == "py" {
+        crate::lex::value::runs(text, &crate::lex::py::tokens(text), "py", max)
+    } else {
+        let plain = crate::lex::value::runs(text, &crate::lex::js::tokens(text, false), "js", max);
+        if plain.is_empty() {
+            plain
+        } else {
+            let jsx = crate::lex::value::runs(text, &crate::lex::js::tokens(text, true), "js", max);
+            plain.into_iter().filter(|r| jsx.contains(r)).collect()
+        }
+    };
+    let mut out: PyStr = Vec::with_capacity(text.len());
+    let mut pos = 0usize;
+    let mut pending = 0usize; // line breaks to write at the next one
+    let mut decoded = false;
+    let copy = |out: &mut PyStr, part: &[u32], pending: &mut usize| {
+        if *pending > 0 {
+            if let Some(k) = part.iter().position(|&ch| ch == c('\n')) {
+                out.extend_from_slice(&part[..k]);
+                out.extend(std::iter::repeat(c('\n')).take(*pending));
+                *pending = 0;
+                out.extend_from_slice(&part[k..]);
+                return;
+            }
+        }
+        out.extend_from_slice(part);
+    };
+    for r in found {
+        if r.start < pos || !dv_plain(&r.value.chars) {
+            continue;
+        }
+        copy(&mut out, &text[pos..r.start], &mut pending);
+        if r.value.bytes {
+            out.push(c('b'));
+        }
+        // its first literal's quote ('…' for a template)
+        let q = text[r.start..r.end].iter().copied().find(|&ch| ch == c('\'') || ch == c('"') || ch == c('`'));
+        let q = if q == Some(c('"')) { c('"') } else { c('\'') };
+        out.push(q);
+        out.extend_from_slice(&r.value.chars);
+        out.push(q);
+        pending += text[r.start..r.end].iter().filter(|&&ch| ch == c('\n')).count();
+        decoded |= r.code_escape;
+        pos = r.end;
+    }
+    if pos == 0 {
+        return (text.to_vec(), false);
+    }
+    copy(&mut out, &text[pos..], &mut pending);
+    out.extend(std::iter::repeat(c('\n')).take(pending));
+    (out, decoded)
 }
 
 /// core._dv_unescape: `text` with its string literals written wholly in
@@ -2444,28 +2531,41 @@ fn dv_unescape(p: &Pack, text: &[u32]) -> Option<PyStr> {
 }
 
 /// core._dv_read: (decoded_view's reading of a text, the 1-based line of
-/// the string array it reads).
-fn decoded_view_of(p: &Pack, text: &[u32]) -> Reading {
-    let unescaped = dv_unescape(p, text);
-    let source: &[u32] = unescaped.as_deref().unwrap_or(text);
-    let (arrays, line) = match crate::strarr::sa_read(p, source) {
-        // (unescaping keeps the rows)
+/// the string array it reads). In JavaScript and Python its literals are
+/// read with the lexers first (dv_literals); in another language (or none
+/// known) literals written wholly in \\x and \\u escapes are (dv_unescape).
+fn decoded_view_of(p: &Pack, text: &[u32], lang: Option<&'static str>) -> Reading {
+    let (source, unescaped): (PyStr, bool) = match lang {
+        Some(l) => dv_literals(p, text, l),
+        None => match dv_unescape(p, text) {
+            Some(v) => (v, true),
+            None => (text.to_vec(), false),
+        },
+    };
+    let (arrays, line) = match crate::strarr::sa_read(p, &source) {
+        // (unescaping and joining keep the rows)
         Some((view, at)) => (Some(view), Some(1 + source[..at.min(source.len())].iter().filter(|&&ch| ch == c('\n')).count())),
         None => (None, None),
     };
-    let proxies = crate::strarr::dv_proxies(p, arrays.as_deref().unwrap_or(source));
+    let proxies = crate::strarr::dv_proxies(p, arrays.as_deref().unwrap_or(&source));
     let base: PyStr = match (proxies, arrays) {
         (Some(x), _) => x,
         (None, Some(a)) => a,
-        (None, None) => source.to_vec(),
+        (None, None) => source.clone(),
     };
-    let read_any = base.as_slice() != text; // (a string array or a proxy object read)
+    // (an escape read, a string array or a proxy object read)
+    let read_any = unescaped || base != source;
     let max = p.usize("_DV_MAX_CHARS");
     if !read_any && (text.len() > max || !any_in(text, p.needles("_DV_NEEDLES"))) {
         return (text.to_vec(), None);
     }
-    let joined: PyStr =
-        if base.contains(&c('+')) { p.re("_DV_JOIN_RE").sub(&base, &[], 0) } else { base.clone() };
+    let joined: PyStr = match lang {
+        // (the literals a string array or a proxy object was read as, joined)
+        Some(l) if base != source => dv_literals(p, &base, l).0,
+        Some(_) => base.clone(),
+        None if base.contains(&c('+')) => p.re("_DV_JOIN_RE").sub(&base, &[], 0),
+        None => base.clone(),
+    };
     let mut view = joined.clone();
     // (a longer text with a string array: its strings only)
     if base.len() <= max && any_in(&base, p.needles("_DV_NEEDLES")) {
@@ -2722,11 +2822,11 @@ fn spawn_path(p: &Pack, expr: &[u32], text: &[u32], names: usize) -> Option<(boo
 
 /// core.spawned_scripts: [(base, path)], base "dir" or "cwd": read as
 /// written, then with the strings it decodes as it runs decoded.
-pub fn spawned_scripts(p: &Pack, text: &[u32]) -> Vec<(&'static str, PyStr)> {
+pub fn spawned_scripts(p: &Pack, text: &[u32], lang: Option<&str>) -> Vec<(&'static str, PyStr)> {
     let mut out = spawned_scripts_of(p, text);
     let max = p.usize("_SPAWN_MAX_TARGETS");
     if out.len() < max {
-        let view = decoded_view(p, text);
+        let view = decoded_view(p, text, lang);
         if view != text {
             for target in spawned_scripts_of(p, &view) {
                 if !out.contains(&target) {
@@ -2875,15 +2975,17 @@ pub fn offscreen_code(p: &Pack, line: &[u32], lang: &str) -> Option<(usize, usiz
 // ---------------- the install-script test ----------------
 
 /// core.install_script_risk (a script: shell=True, command=False)
-pub fn install_script_risk(p: &Pack, text: &[u32]) -> Vec<PyStr> {
-    install_script_risk_with(p, text, true, false)
+pub fn install_script_risk(p: &Pack, text: &[u32], lang: Option<&str>) -> Vec<PyStr> {
+    install_script_risk_with(p, text, true, false, lang)
 }
 
-/// core.install_script_risk(text, shell, command): `shell`, read a shell
-/// script with the shell reader; `command`, the text is a hook's command.
-pub fn install_script_risk_with(p: &Pack, text: &[u32], shell: bool, command: bool) -> Vec<PyStr> {
+/// core.install_script_risk(text, shell, command, lang): `shell`, read a
+/// shell script with the shell reader; `command`, the text is a hook's
+/// command; `lang`, the script's language when known ("js", "py": its
+/// strings are read as its runtime reads them).
+pub fn install_script_risk_with(p: &Pack, text: &[u32], shell: bool, command: bool, lang: Option<&str>) -> Vec<PyStr> {
     let mut reasons = install_script_risk_of(p, text, shell, command);
-    let view = decoded_view(p, text);
+    let view = decoded_view(p, text, lang);
     if view != text {
         let _gate = crate::textgate::open(&view);
         let note = p.text("_DV_NOTE");
@@ -2893,7 +2995,7 @@ pub fn install_script_risk_with(p: &Pack, text: &[u32], shell: bool, command: bo
             }
         }
     }
-    if string_array_line(p, text).is_some() {
+    if string_array_line(p, text, lang).is_some() {
         reasons.push(p.text("_SA_TECHNIQUE_REASON"));
     }
     reasons
@@ -3040,7 +3142,7 @@ pub fn import_time_severity(p: &Pack, reasons: &[PyStr]) -> &'static str {
 /// core.import_time_risk: (reasons, 1-based line of the first sign).
 pub fn import_time_risk(p: &Pack, text: &[u32], lang: Option<&str>) -> (Vec<PyStr>, Option<usize>) {
     let (mut reasons, mut line) = import_time_reading(p, text, lang);
-    let view = decoded_view(p, text);
+    let view = decoded_view(p, text, lang);
     if view != text {
         let _gate = crate::textgate::open(&view);
         let (more, at) = import_time_reading(p, &view, lang);
@@ -3052,7 +3154,7 @@ pub fn import_time_risk(p: &Pack, text: &[u32], lang: Option<&str>) -> (Vec<PySt
             }
         }
     }
-    if let Some(sa) = string_array_line(p, text) {
+    if let Some(sa) = string_array_line(p, text, lang) {
         reasons.push(p.text("_SA_TECHNIQUE_REASON"));
         line = line.or(Some(sa));
     }

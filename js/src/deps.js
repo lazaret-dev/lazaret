@@ -24,7 +24,8 @@ import { lstatSync, readdirSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { scanFile } from "./scanner/scan.js";
 import { followHook, persistenceReasons, installScriptRisk, importTimeRisk, importTimeSeverity, agentHijack,
-  agentHijackInCommand, nodeCandidates, shebangLang, spawnedScripts, packValues, crossFileIssues, NativeError } from "./lib/native.js";
+  agentHijackInCommand, nodeCandidates, shebangLang, spawnedScripts, scriptLang, packValues, crossFileIssues,
+  NativeError } from "./lib/native.js";
 import { HOOK_COMMANDS, loadManifest, scInstallHookIssue } from "./lib/supplychain.js";
 import { readBounded, truncatedIssue, scanErrorIssue, strerror, normalizeNewlines, encodingIssues, treeJoin,
   MAX_FILE_BYTES } from "./lib/fs.js";
@@ -241,7 +242,7 @@ function npmReach(tree, root) {
     if (f === undefined || f.lang !== "js") continue;
     const base = dirname(rel);
     const targets = [...String(f.content).matchAll(rx)].map((m) => [base, m[2]]);
-    for (const [where, t] of spawnedScripts(String(f.content))) targets.push([where === "dir" ? base : root, t]);
+    for (const [where, t] of spawnedScripts(String(f.content), "js")) targets.push([where === "dir" ? base : root, t]);
     for (const [at, target] of targets) {
       const joined = treeJoin(at, target);
       if (joined !== null) queue.push(tree.resolve(joined));
@@ -441,7 +442,7 @@ function followDependencyHook(tree, issue, cmd, out, extra, run, truncated) {
     const rel = path === null ? null : tree.resolve(path);
     if (rel === null) continue;
     const text = scriptText(tree, rel, rel.endsWith(".sh") ? "sh" : "js", out, extra, run);
-    const reasons = text ? installScriptRisk(text) : [];
+    const reasons = text ? installScriptRisk(text, true, false, scriptLang(rel)) : [];
     if (reasons.length && issue.sev !== "BLOCKER" && issue.sev !== "CRITICAL") {
       const msg = `Install hook runs ${target}, which ${reasons.join("; and ")}.`;
       issue.sev = "CRITICAL";
@@ -451,7 +452,7 @@ function followDependencyHook(tree, issue, cmd, out, extra, run, truncated) {
     if (agent) out.push(agent);
     // the scripts it starts with node or python (0.1.8, spawnedScripts)
     for (const [started, stext] of startedScripts(tree, rel, text, base, out, extra, run)) {
-      const more = stext ? installScriptRisk(stext) : [];
+      const more = stext ? installScriptRisk(stext, true, false, scriptLang(started)) : [];
       if (more.length && issue.sev !== "BLOCKER" && issue.sev !== "CRITICAL") {
         const shown = base && started.startsWith(base + "/") ? started.slice(base.length + 1) : started;
         const msg = `Install hook runs ${target}, which starts ${shown}, which ${more.join("; and ")}.`;
@@ -469,7 +470,7 @@ function startedScripts(tree, rel, text, cwd, out, extra, run) {
   while (queue.length && seen.size <= SPAWN_MAX_FILES) {
     const [cur, curText, depth] = queue.shift();
     if (!curText || depth >= SPAWN_MAX_DEPTH) continue;
-    for (const [where, path] of spawnedScripts(curText)) {
+    for (const [where, path] of spawnedScripts(curText, scriptLang(cur))) {
       const joined = treeJoin(where === "dir" ? dirname(cur) : cwd, path);
       const nxt = joined === null ? null : tree.resolve(joined);
       if (nxt === null || seen.has(nxt) || seen.size > SPAWN_MAX_FILES) continue;

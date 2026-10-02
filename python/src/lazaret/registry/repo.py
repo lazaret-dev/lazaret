@@ -1437,7 +1437,7 @@ def startup_module_issue(rel, text):
     capability to review, like SC-PTH-EXEC), CRITICAL when the code looks
     hostile by the install-script test (install_script_risk)."""
     module = _STARTUP_MODULE_RE.match(rel).group(1)
-    reasons = _engine.install_script_risk(text)
+    reasons = _engine.install_script_risk(text, lang="py")
     msg = f"{rel} is installed as {module} in site-packages, which Python imports at every start"
     msg += f", and it {'; and '.join(reasons)}." if reasons else "."
     return lazaret.mk_issue(
@@ -1883,13 +1883,13 @@ class _ArtifactScan:
                 self.install_scripts.add(rel)
                 lang = "sh" if rel.endswith(".sh") else "js"
                 text = self._text_of(rel, lang)
-                reasons = _engine.install_script_risk(text) if text else []
+                reasons = _engine.install_script_risk(text, lang=_engine.script_lang(rel)) if text else []
                 if reasons and issue["sev"] not in STRONG_SEVERITIES:
                     issue["sev"] = "CRITICAL"
                     issue["msg"] = f"Install hook runs {target}, which {'; and '.join(reasons)}."
                 # the scripts it starts with node or python (0.1.8, core.spawned_scripts)
                 for started, more in self._started_scripts(rel, text, base, self.install_scripts):
-                    more = _engine.install_script_risk(more) if more else []
+                    more = _engine.install_script_risk(more, lang=_engine.script_lang(started)) if more else []
                     if more and issue["sev"] not in STRONG_SEVERITIES:
                         issue["sev"] = "CRITICAL"
                         issue["msg"] = (f"Install hook runs {target}, which starts {started}, which "
@@ -1908,7 +1908,7 @@ class _ArtifactScan:
             cur, cur_text, depth = queue.pop(0)
             if not cur_text or depth >= lazaret._SPAWN_MAX_DEPTH:
                 continue
-            for where, path in _engine.spawned_scripts(lazaret.normalize_newlines(cur_text)):
+            for where, path in _engine.spawned_scripts(lazaret.normalize_newlines(cur_text), _engine.script_lang(cur)):
                 if where != "dir" and cwd is None:
                     continue
                 start = posixpath.dirname(cur) if where == "dir" else cwd
@@ -1972,7 +1972,7 @@ class _ArtifactScan:
             self.entries.add(rel)
             self.install_scripts.add(rel)
             text = self.sources.get(rel, ("", "py"))[0]
-            reasons = _engine.install_script_risk(text)
+            reasons = _engine.install_script_risk(text, lang=_engine.script_lang(rel))
             # a download written to a file and run: CRITICAL in the code pip
             # runs to install an sdist (a prebuilt-binary installer's shape
             # keeps it MAJOR-only in npm hooks and import-time code)

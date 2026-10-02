@@ -24,7 +24,7 @@ import { assigned13, pinUnicode } from "../lib/unicode13.js";
 import { documentationToken, keyMaterial, secretCol, redactConfigValues } from "../lib/configsecrets.js";
 import { configKind, ownerDir, entries as autorunEntries, localCommand } from "../lib/autorun.js";
 import { isWorkflow, findings as workflowFindings } from "../lib/ghworkflow.js";
-import { agentHijackInCommand, installScriptRisk, followHook, nodeCandidates, spawnedScripts, packValues,
+import { agentHijackInCommand, installScriptRisk, followHook, nodeCandidates, spawnedScripts, scriptLang, packValues,
   scanDependencyFile, scanRules, NativeExhausted } from "../lib/native.js";
 
 export { isComment } from "./engine.js";
@@ -600,7 +600,8 @@ const autorunRule = (sev, msg, why, fix) => ({
 
 const AGENT_SETTINGS_REASON = "writes an AI agent's or editor's auto-run settings";
 /** installScriptRisk for what a settings file runs, but for writing an agent's settings (core._autorun_script_risk). */
-const autorunScriptRisk = (text) => installScriptRisk(text).filter((r) => !r.startsWith(AGENT_SETTINGS_REASON));
+const autorunScriptRisk = (text, lang = null) =>
+  installScriptRisk(text, true, false, lang).filter((r) => !r.startsWith(AGENT_SETTINGS_REASON));
 
 /** [reasons, target] for a command a settings file runs (core._autorun_risk). */
 function autorunRisk(command, base, read) {
@@ -613,15 +614,15 @@ function autorunRisk(command, base, read) {
     const rel = treeJoin(base, target);
     const text = rel !== null ? read(rel) : null;
     if (text === null) continue;
-    const found = autorunScriptRisk(text);
+    const found = autorunScriptRisk(text, scriptLang(rel));
     OBF_IDENT_RE.lastIndex = 0;
     if (new Set(text.match(OBF_IDENT_RE) ?? []).size >= 5) found.push("is obfuscated");
     if (found.length) return [found, target];
     // (0.1.8) the scripts it starts (spawnedScripts): a loader that fetches a runtime and runs a file of the tree with it
-    for (const [where, path] of spawnedScripts(normalizeNewlines(text))) {
+    for (const [where, path] of spawnedScripts(normalizeNewlines(text), scriptLang(rel))) {
       const srel = treeJoin(where === "dir" ? (rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : "") : base, path);
       const stext = srel !== null ? read(srel) : null;
-      const more = stext ? autorunScriptRisk(stext) : [];
+      const more = stext ? autorunScriptRisk(stext, scriptLang(srel)) : [];
       if (more.length) return [[`starts ${srel}, which ${more.join("; and ")}`], target];
     }
   }

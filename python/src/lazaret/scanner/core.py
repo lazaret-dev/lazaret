@@ -87,10 +87,11 @@ def _tuple(value):
     return None if value is None else tuple(value)
 
 
-def install_script_risk(text, shell=True, command=False):
+def install_script_risk(text, shell=True, command=False, lang=None):
     """The reasons an install script is risky (read as a shell program too
-    unless `shell` is false; `command`: a hook's command line)."""
-    return engine.install_script_risk(text, shell, command)
+    unless `shell` is false; `command`: a hook's command line; `lang`: the
+    script's language when known, "js" or "py")."""
+    return engine.install_script_risk(text, shell, command, lang)
 
 
 def import_time_risk(text, lang=None):
@@ -130,20 +131,21 @@ def shebang_lang(text):
     return _ask("shebang_lang", text)
 
 
-def decoded_view(text):
+def decoded_view(text, lang=None):
     """`text` with what it decodes as it runs written out (hex, base64, char
-    codes, string arrays, its own decoders)."""
-    return _ask("decoded_view", text)
+    codes, string arrays, its own decoders; in JavaScript and Python, `lang`,
+    its literals read as the runtime reads them)."""
+    return _ask("decoded_view", text, **({"lang": lang} if lang else {}))
 
 
-def string_array_line(text):
+def string_array_line(text, lang=None):
     """The line of the string array the decoded view read, else None."""
-    return _ask("string_array_line", text)
+    return _ask("string_array_line", text, **({"lang": lang} if lang else {}))
 
 
-def spawned_scripts(text):
+def spawned_scripts(text, lang=None):
     """[(base, path)] of the package scripts `text` starts with node or python."""
-    return engine.spawned_scripts(text)
+    return engine.spawned_scripts(text, lang)
 
 
 def self_publish_at(text):
@@ -4118,11 +4120,12 @@ def _autorun_rule(sev, msg, why, fix):
 _AGENT_SETTINGS_REASON = "writes an AI agent's or editor's auto-run settings"
 
 
-def _autorun_script_risk(text):
+def _autorun_script_risk(text, lang=None):
     """install_script_risk for what a settings file runs, but for writing an
     agent's or editor's settings: an agent's own hooks manage them (a
-    WorktreeCreate hook copies settings.local.json into the new worktree)."""
-    return [r for r in install_script_risk(text) if not r.startswith(_AGENT_SETTINGS_REASON)]
+    WorktreeCreate hook copies settings.local.json into the new worktree).
+    `lang`: a script's language, when known."""
+    return [r for r in install_script_risk(text, lang=lang) if not r.startswith(_AGENT_SETTINGS_REASON)]
 
 
 def _autorun_risk(command, base, read):
@@ -4141,17 +4144,17 @@ def _autorun_risk(command, base, read):
         text = read(rel) if rel is not None else None
         if text is None:
             continue
-        found = _autorun_script_risk(text)
+        found = _autorun_script_risk(text, engine.script_lang(rel))
         if len(set(OBF_IDENT_RE.findall(text))) >= 5:
             found.append("is obfuscated")
         if found:
             return found, target
         # (0.1.8) the scripts it starts (spawned_scripts): a loader that fetches
         # a runtime and runs a file of the tree with it
-        for where, path in spawned_scripts(normalize_newlines(text)):
+        for where, path in spawned_scripts(normalize_newlines(text), engine.script_lang(rel)):
             srel = _tree_join(posixpath.dirname(rel) if where == "dir" else base, path)
             stext = read(srel) if srel is not None else None
-            more = _autorun_script_risk(stext) if stext else []
+            more = _autorun_script_risk(stext, engine.script_lang(srel)) if stext else []
             if more:
                 return [f"starts {srel}, which {'; and '.join(more)}"], target
     return [], None
@@ -6370,7 +6373,7 @@ def _deps_npm_reach(tree, root):
             continue
         base = posixpath.dirname(rel)
         targets = [(base, t) for _q, t in _DEPS_LOCAL_DEP_RE.findall(f["content"])]
-        targets += [(base if where == "dir" else root, t) for where, t in spawned_scripts(f["content"])]
+        targets += [(base if where == "dir" else root, t) for where, t in spawned_scripts(f["content"], "js")]
         for at, target in targets:
             joined = _tree_join(at, target)
             if joined is not None:
@@ -6442,7 +6445,7 @@ def _follow_dependency_hook(tree, issue, out, extra, run, followed_to_end):
         if rel is None:
             continue
         text = _dependency_script_text(tree, rel, "sh" if rel.endswith(".sh") else "js", out, extra, run)
-        reasons = engine.install_script_risk(text) if text else []
+        reasons = engine.install_script_risk(text, lang=engine.script_lang(rel)) if text else []
         if reasons and issue["sev"] not in ("BLOCKER", "CRITICAL"):
             msg = f"Install hook runs {target}, which {'; and '.join(reasons)}."
             issue["sev"] = "CRITICAL"
@@ -6452,7 +6455,7 @@ def _follow_dependency_hook(tree, issue, out, extra, run, followed_to_end):
             out.append(agent)
         # the scripts it starts with node or python (0.1.8, spawned_scripts)
         for started, stext in _started_dependency_scripts(tree, rel, text, base, out, extra, run):
-            more = engine.install_script_risk(stext) if stext else []
+            more = engine.install_script_risk(stext, lang=engine.script_lang(started)) if stext else []
             if more and issue["sev"] not in ("BLOCKER", "CRITICAL"):
                 shown = started[len(base) + 1:] if base and started.startswith(base + "/") else started
                 msg = f"Install hook runs {target}, which starts {shown}, which {'; and '.join(more)}."
@@ -6470,7 +6473,7 @@ def _started_dependency_scripts(tree, rel, text, cwd, out, extra, run):
         cur, cur_text, depth = queue.pop(0)
         if not cur_text or depth >= _SPAWN_MAX_DEPTH:
             continue
-        for where, path in engine.spawned_scripts(cur_text):
+        for where, path in engine.spawned_scripts(cur_text, engine.script_lang(cur)):
             joined = _tree_join(posixpath.dirname(cur) if where == "dir" else cwd, path)
             nxt = tree.resolve(joined) if joined is not None else None
             if nxt is None or nxt in seen or len(seen) > _SPAWN_MAX_FILES:

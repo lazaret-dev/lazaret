@@ -417,17 +417,17 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
         "install_script_risk" => {
             let shell = !matches!(args.get("shell"), Some(Value::Bool(false)));
             let command = matches!(args.get("command"), Some(Value::Bool(true)));
-            strs(&signs::install_script_risk_with(p, text, shell, command))
+            strs(&signs::install_script_risk_with(p, text, shell, command, lang))
         }
         "import_time_risk" => {
             let (reasons, line) = signs::import_time_risk(p, text, lang);
             Value::Arr(vec![strs(&reasons), line.map(|l| Value::Int(l as i64)).unwrap_or(Value::Null)])
         }
         "import_time_severity" => Value::str(signs::import_time_severity(p, &arg_strs(args, "reasons"))),
-        "decoded_view" => Value::Str(signs::decoded_view(p, text)),
-        "string_array_line" => signs::string_array_line(p, text).map(|n| Value::Int(n as i64)).unwrap_or(Value::Null),
+        "decoded_view" => Value::Str(signs::decoded_view(p, text, lang)),
+        "string_array_line" => signs::string_array_line(p, text, lang).map(|n| Value::Int(n as i64)).unwrap_or(Value::Null),
         "spawned_scripts" => Value::Arr(
-            signs::spawned_scripts(p, text)
+            signs::spawned_scripts(p, text, lang)
                 .into_iter()
                 .map(|(b, path)| Value::Arr(vec![Value::str(b), Value::Str(path)]))
                 .collect(),
@@ -531,7 +531,7 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
                 strs(&crate::shell::hook_command_risk(p, text, false)),
                 strs(&crate::shell::hook_command_risk(p, text, true)),
                 Value::Arr(commands),
-                strs(&crate::shell::hook_inline_code(p, text, &mut walk, 0)),
+                strs(&crate::shell::hook_inline_code(p, text, &mut walk, 0).into_iter().map(|(_, code)| code).collect::<Vec<_>>()),
             ])
         }
         "import_code" => match lang {
@@ -586,7 +586,7 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
                 },
                 strs(&hooks::hook_tokens(p, text)),
                 Value::Arr(vec![strs(&targets), Value::Bool(complete)]),
-                strs(&signs::install_script_risk(p, text)),
+                strs(&signs::install_script_risk(p, text, None)),
                 itr(None),
                 strs(&hooks::node_candidates(text)),
                 strs(&hooks::node_e_codes(p, text)),
@@ -596,13 +596,17 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
                 Value::Int(signs::self_publish_at(p, text) as i64),
                 opt_s(signs::runs_dll(p, text)),
                 Value::Str(signs::join_string_pieces(p, text)),
-                Value::Str(signs::decoded_view(p, text)),
+                Value::Str(signs::decoded_view(p, text, None)),
                 Value::Arr(
-                    signs::spawned_scripts(p, text)
+                    signs::spawned_scripts(p, text, None)
                         .into_iter()
                         .map(|(b, path)| Value::Arr(vec![Value::str(b), Value::Str(path)]))
                         .collect(),
                 ),
+                // phase 2: the decoded view of JavaScript and of Python (their
+                // literals read with the lexers)
+                Value::Str(signs::decoded_view(p, text, Some("js"))),
+                Value::Str(signs::decoded_view(p, text, Some("py"))),
             ])
         }
         "signs_view" => {
@@ -660,7 +664,7 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
                 Value::Str(signs::import_code(p, text, "py")),
                 // the detection round: wallet addresses swapped; code built around a string array
                 at_reason(signs::wallet_swap_at(p, text)),
-                signs::string_array_line(p, text).map(|n| Value::Int(n as i64)).unwrap_or(Value::Null),
+                signs::string_array_line(p, text, None).map(|n| Value::Int(n as i64)).unwrap_or(Value::Null),
             ])
         }
         "logical_text" => {

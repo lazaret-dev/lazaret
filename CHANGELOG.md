@@ -118,6 +118,23 @@ before the release.
   one. The data flow and the dead drop still pair quotes as they come
   until they run on scopes.
 
+- **The decoded view reads JavaScript's and Python's strings as their
+  runtimes do.** A literal with some of its characters written as escapes
+  (`'child_pro\x63ess'`, `'\u{63}url'`, Python's `'\N{…}'`) is read as its
+  text; before, only a literal written wholly in `\x` and `\u` escapes was.
+  Literals the runtime joins are joined across lines, quote kinds,
+  templates and comments, and Python's adjacent literals (`'cu' 'rl'`),
+  where nothing binds tighter (`'a' + 'b'.trim()` is not `'ab'.trim()`);
+  never inside a string's own text, as the old pattern could. A literal
+  with an escape the runtime refuses has no value. The install-script test
+  is given the language of each script it reads (`install_script_risk`,
+  `spawned_scripts` and `decoded_view` take `lang`, in both packages: an
+  install hook's targets and the scripts they start, a start-up module, a
+  hook command's `node -e` and `python -c` code); a text of no known
+  language keeps the old reading. On real files no finding moved (the
+  benchmark's and installed packages' files; the holdout's counts); in the
+  recorded outputs' generated cases 13 import-time answers gained a reason.
+
 ### Added
 
 - The engine's JavaScript parser (`js_parse`: jsparse.py's trees, node for

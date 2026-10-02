@@ -607,7 +607,9 @@ only in its function (scopes), and in a text over `_LD_LONG` a name only
 `_LD_NEAR` characters from where it was given it. A wallet swap is a behaviour
 (`wallet_swap_at`: wallet patterns of two kinds, the clipboard or the page's
 requests intercepted, an address in the code). The decoded view reads
-literals written wholly in escapes (`_dv_unescape`) and a proxy name reused
+literals written wholly in escapes (`_dv_unescape`; in JavaScript and Python,
+since the Rust-first refactor's phase 2, any literal holding a code escape,
+and the literals the runtime joins: RUST_ENGINE.md §15) and a proxy name reused
 per function (`_dv_proxies`' position lookup), and code built around a
 string array the view reads is a sign of its own (`string_array_line`,
 `_SA_TECHNIQUE_REASON`: CRITICAL at install, a strong import-time reason) —

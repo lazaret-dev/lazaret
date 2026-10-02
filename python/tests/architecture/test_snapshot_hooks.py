@@ -4,7 +4,8 @@ hand-written and seeded cases), held to their recorded outputs
 tokens, follow_hook, install_script_risk, import_time_risk (as written, and
 read as Python and as JavaScript), node_candidates, the `node -e` codes,
 shebang_lang, self_publish_at, runs_dll, join_string_pieces, decoded_view
-and spawned_scripts.
+and spawned_scripts, and decoded_view read as JavaScript and as Python
+(phase 2: their literals read with the lexers).
 """
 import unittest
 
