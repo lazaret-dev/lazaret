@@ -142,6 +142,9 @@ rust/
     src/json.rs, pystr.rs    JSON; Python str semantics on code points ([u32])
     src/unicode.rs           Python 3.10 / Unicode 13.0 predicates (generated/unicode13.rs)
     src/pyre/                CPython's sre: parser, compiler, matcher (see §6)
+    src/linre/               a linear-time regex engine with re's answers, not yet used by the
+                             engine's patterns (§14): parser, sets, programs, lazy DFAs,
+                             backtracker, Pike VM, prefilters
     src/hooks.rs             shlex, _hook_tokens, follow_hook, node_candidates, node -e, #!
     src/signs.rs             install_script_risk, import_time_risk(+severity), decoded_view
                              (and string_array_line), spawned_scripts, and the detectors they
@@ -202,7 +205,8 @@ python/tests/architecture/test_rust_parity_{regex,hooks,hooks_b,signs,scanfile,l
   project_scan,crossfile,hook_commands,hexname,offscreen,lookalike}.py,
   test_wasm_parity{,_signs,_crossfile,_jsparse,_pyparse}.py, test_jsparse_native{,_b}.py,
   test_pyparse_native{,_b,_c}.py, test_rust_deps.py, test_rust_pack.py, hooks_corpus.py,
-  scanfile_corpus.py, jsparse_cases.py, pyparse_cases.py, pyparse_oracle.py
+  scanfile_corpus.py, jsparse_cases.py, pyparse_cases.py, pyparse_oracle.py,
+  test_linre{,_b,_c,_d,_linear}.py, _linre_inputs.py (linre, §14)
 ```
 
 FFI protocol: request `[u32 LE name len][name][u32 LE args len][args JSON][text]`
@@ -698,6 +702,9 @@ cross-file follower in the engine for both packages (`cross_file`, phase
    flow and constant folding of strings over its trees, in place of the
    pattern-and-window readings they rebuild; and the same passes over the
    Python parser's trees (§13).
+9. linre (§14): decide whether the engine's patterns run on it (`p.re` →
+   linre where it accepts the pattern and pyre for the 41 it refuses, or
+   those rewritten in `core.py` as §14 suggests).
 
 ## 11. Licensing
 
@@ -1115,3 +1122,245 @@ the 12,297 files above (190.7 MB) 53.8 and 30.9 MB/s (`cargo run --release
 inputs on a stack of that size). Through the Python binding (ctypes, the
 text in and the JSON out) the 190.7 MB take 7.1 s, 27 MB/s. The parser and
 its Unicode data add 0.58 MB to the WebAssembly module (2.45 MB → 3.03 MB).
+
+## 14. linre, a linear-time regex engine
+
+`src/linre/` is a second regex engine for the engine's patterns: Python's
+`re` syntax for str patterns, `re`'s answers, and time linear in the text
+whatever the text holds. It is written from `re`'s documented and observed
+behaviour, not translated from CPython (whose sources were read for the
+rules, as for any reimplementation), so it needs no line in `rust/NOTICE`.
+**The engine does not use it yet**: `p.re(…)` returns pyre's patterns, and
+what moves to linre is decided after review (§10, item 9). Two calls expose
+it: `linre.probe` (pyre.probe's arguments and answer — search, match,
+fullmatch, finditer with every group, sub with `<…>` and split, at `pos`
+and `endpos`, with `gate` — or `{"error", "refused"}`) and `linre.check`
+(`{"names": […]}`, or nothing for the whole pack: each pattern accepted, with
+its program's size, its lookarounds and the strings it scans for, or
+refused and why).
+
+**What it runs.** Literals and every escape of str patterns; classes with
+ranges, negation and `\w \d \s \W \D \S`; `.` with and without DOTALL;
+alternation; greedy and lazy `* + ? {m} {m,} {,n} {m,n}`; capturing, named
+and non-capturing groups; `^ $ \A \Z \b \B`, with MULTILINE; the flags
+`i m s x a u` as arguments, inline at the start and scoped (`(?i:…)`,
+`(?-i:…)`); comments; lookbehinds (fixed width, as Python requires) and
+lookaheads of bounded width, positive and negative, nested. 616 of the
+pack's 657 patterns.
+
+**What it refuses**, when the pattern is compiled, saying why (`Error {
+refused: true }`; a pattern Python rejects is an error, with Python's
+message): backreferences and conditionals (they need what a group matched);
+a lookahead of unbounded width (`(?!\s*\()`: trying it may read the rest of
+the text from every position); a repeat other than `?` whose body can match
+the empty string (`(a*)*`: sre ends such loops by rules of its own); a
+capturing group inside a positive lookaround; atomic groups and possessive
+repeats; `\N{…}`; the TEMPLATE flag; a lookaround wider than 1,000
+characters or nested more than 8 deep; and a program of more than 30,000
+instructions once counted repeats are expanded.
+
+**Answers.** `re`'s: leftmost-first, with greedy and lazy priorities; the
+same spans and groups for search, match, fullmatch and finditer (the last
+iteration's capture inside a repeat, None for a group the match did not go
+through, lastindex the last group closed); finditer's rule after an empty
+match; a lookbehind reads before `pos`, nothing reads past `endpos`, and a
+match that starts past `endpos` (`match(s, 5, 2)`) answers as sre's does
+(an empty pattern and MULTILINE's `$` match there, a one-character repeat
+fails); `\b` and `\B` hold nowhere in an empty window at 0 (3.10–3.13, as
+pyre); IGNORECASE and ASCII as sre compiles them, with unicode.rs's Unicode
+13.0 tables (sre's lower and upper and its case fixes; a class is tested on
+the lowercased character, or as written when it holds no cased character;
+a range past the Basic Multilingual Plane on the lowercase and on its
+uppercase). Where Python versions differ — an astral letter written in a
+class under IGNORECASE, which 3.10–3.12 match in neither case, and an
+astral range under ASCII and IGNORECASE — linre answers as 3.13 and later,
+and pyre, do. A text is code points: a lone surrogate is a character like
+any other.
+
+**How it runs.** The parser keeps what `re`'s parser keeps where it changes
+an answer (a one-character class is a literal, the item alternatives begin
+with is taken out in front, alternatives of single characters become one
+class); lowering resolves the flags item by item into character sets
+(sorted ranges over all u32 values: the matchers test membership, they
+never fold) and zero-width tests. From that, Thompson programs ordered by
+priority: forward (with capture slots), fullmatch, reverse, one per
+lookaround of more than one character, and the backtracker's copies, in
+which a counted repeat of one set is a single `Run`. A search, in order:
+
+1. Prefilters, each skipping only work that cannot match: strings one of
+   which every match holds (a text gate answers at once for a text that
+   lacks one of each string's character pairs), strings every match starts
+   with (found by their rarest character, sixteen at a time), a set of first
+   characters, and patterns that are one set or a greedy repeat of one,
+   answered by scans alone.
+2. Where a lead string or first character is found, an anchored try: the
+   backtracker's for the first tries and, while most tries match, for a
+   pattern with groups or large counted repeats; the anchored DFA's
+   otherwise. The tries spend at most 8 steps per character the scan moves
+   on, plus 4 per instruction and 256; past that, step 3 from there.
+3. The lazy DFAs. Forward, leftmost-first (the threads after a match are
+   cut), to where the match ends; reverse from there to where it starts
+   (or the pattern's fixed width). A state is an ordered list of threads
+   with facts about the neighbouring character, so one-character
+   lookarounds and anchors are decided inside transitions; a longer
+   lookaround is tried on the text — a set of states stepped over at most
+   its width, nested ones one level deeper — and a state that has one keys
+   its transitions by the outcomes. Each DFA keeps at most 2 MB of states;
+   a search that would empty them too often gives up to the Pike VM.
+4. The groups: the backtracker, in sre's order, on the match's span only,
+   visiting each (instruction, position) once; a span too long for its
+   visited bits (2 MB) goes to the Pike VM.
+5. The Pike VM (threads in priority order, each with its slots) answers
+   what the DFAs give up on.
+
+**Complexity.** For a text of n characters and a program of m instructions
+(counted repeats expanded): the DFAs read each character a bounded number
+of times, one table entry each once the transition is known (a new one
+costs O(m)); a lookaround of width w costs O(w·m) where it is tried; the
+anchored tries cost at most 8n + 4m + 256 steps in all; the backtracker
+visits each (instruction, position) once; the Pike VM is O(n·m). So
+O(n·m) at worst: linear in the text for every accepted pattern, whatever
+the text. No recursion on the text, and no panic on any text of any u32
+values. Compiling costs more than pyre's: the 300 patterns of a scan take
+113 ms against pyre's 35 ms.
+
+**Tests.** `cargo test --release` (`linre/tests.rs`, `linre/charset.rs`):
+the syntax the pack uses compiles, Python's errors are errors, each refusal
+says why; flags inline and as arguments; answers checked against Python's;
+the matchers against each other — the public calls, the Pike VM alone and
+the backtracker alone (sre's search: a try from each start in turn) — on
+35 hand-written patterns and 12,000 seeded random ones (some 8,600 of
+which compile), on random texts of letters, the edge characters and lone
+surrogates, in windows too; 20,000 seeded garbage patterns and texts of
+arbitrary u32 values without a panic; and adversarial texts of 20,000
+repetitions read at once. Against Python's `re`, from `python/` (each
+module in under 10 s; skipped without the library):
+
+```bash
+export LAZARET_NATIVE_LIB=$PWD/../rust/target/release/liblazaret_native.so
+PYTHONPATH=src:. python3 -m unittest tests.architecture.test_linre         # ~8 s
+PYTHONPATH=src:. python3 -m unittest tests.architecture.test_linre_b       # ~7 s
+PYTHONPATH=src:. python3 -m unittest tests.architecture.test_linre_c       # ~8 s
+PYTHONPATH=src:. python3 -m unittest tests.architecture.test_linre_d       # ~2 s
+PYTHONPATH=src:. python3 -m unittest tests.architecture.test_linre_linear  # ~3 s
+```
+
+- `test_linre`: every accepted pack pattern on the regex corpus
+  (`_rust_regex_corpus`), the hand-written texts and the edge characters one
+  by one (ſ, K, İ, ı, U+0085, U+00A0, U+001C–U+001F, U+2028, astral letters
+  and symbols, lone surrogates), at 0, in windows (inside the text, and past
+  each other) and with a text gate: 140,000 texts. And `linre.check`: what
+  is refused is refused for a known reason, and at least 90% of the pack is
+  accepted.
+- `test_linre_b` and `_c` (half of the patterns each): texts sampled from
+  each pattern's parse tree (`_linre_inputs.sample`: a branch, a repeat's
+  count at or next to its bounds, a class's member — a range's ends, a
+  category's members, the edge characters —, a letter's case under
+  IGNORECASE, what a lookbehind wants before and a lookahead after), some
+  of them mutated: about two thirds of them match, and many others nearly
+  do. 80,000 texts.
+- `test_linre_d`: pyre's hand-written patterns (each construct `re`
+  supports for str patterns: linre runs 120 of the 141 and refuses the rest
+  for a known reason), about 100 of linre's own (lookarounds of several
+  characters, nested and at a window's ends; anchors; flags; IGNORECASE
+  past ASCII; astral characters; counted and lazy repeats at their bounds;
+  empty matches; lastindex; the literal scans' corners), and linre against
+  pyre on 300 random classes of astral and other letters under IGNORECASE
+  and ASCII: 110,000 texts.
+- `test_linre_linear`: linear time, below.
+
+Every text goes through search, match, fullmatch, finditer, sub and split
+in both, at 0 and in windows: no difference, on Python 3.10, 3.11, 3.12 and
+3.13. (The sampler keeps the unbounded repeats of more than one character
+short: `re` itself takes exponential time on a near miss of some of them.)
+
+**Linear time.** Pack patterns on texts that make a backtracking matcher
+backtrack, through `pyre.probe` and `linre.probe` (all six operations), best
+of three:
+
+| Pattern, text | pyre | linre |
+|---|---|---|
+| `_SVC_LAUNCHCTL_RE`, "launchctl" + " --a" × k + " x" (`-{1,2}[\w-]+` reads "--a" two ways: 2^k paths) | k = 10: 2.1 ms; 12: 7.7 ms; 14: 30 ms; 16: 120 ms | k = 1,000: 0.5 ms; 100,000: 12 ms |
+| `_DD_PARAM_RE`, n blanks (two `\s*` in a row, from every start: n³) | n = 100: 5.9 ms; 200: 35 ms; 400: 226 ms | n = 100,000: 2.5 ms; 200,000: 4.9 ms |
+| `_JSON_COLON_RE` (`[ \t\n\r]*:`), n blanks (n²) | n = 1,000: 8.3 ms; 2,000: 33 ms; 4,000: 135 ms | n = 100,000: 2.5 ms; 200,000: 4.9 ms |
+
+`_LD_CALLED_RE` (`\s*\(`) and `_DL_JOIN_CHAIN_RE` grow as `_JSON_COLON_RE`
+does. The test asserts the growth (pyre: more than eightfold for two more
+pieces, more than tenfold for four times the text; linre: less than
+eightfold for four times the text) and that linre reads a million
+characters of each in under 2 s.
+
+**Measurements.** Every regex call of a scan of the 1,500-file sample (22
+MB): the scanner's calls recorded with their texts, `pos`, `endpos` and
+text gate, then replayed through both engines in one process, one thread,
+release build, three runs. 300 patterns, 1,465,383 calls, the same answers
+from both. On the 283 patterns linre accepts: **pyre 6.50 s, linre 2.79 s**
+(43%); the 17 it refuses take pyre 0.39 s. By operation, pyre → linre:
+search (501,178 calls) 1.44 → 0.54 s; match (685,921) 0.30 → 0.12 s;
+finditer (175,360) 4.41 → 2.01 s; sub (34,773) 0.35 → 0.12 s; fullmatch
+and split, 1.8 → 1.2 ms and 1.3 → 1.2 ms. The largest gains are on patterns
+sre tries at every name or every blank: `_PX_OBJECT_RE`
+(`(?<![\w$.])([A-Za-z_$][\w$]*)\s*=\s*\{`) 795 → 128 ms, `_DD_ASSIGN_RE`
+754 → 345 ms, `_DV_CALL_RE` 397 → 66 ms, `_LD_TUPLE_ASSIGN_RE` 393 → 85 ms,
+`_PX_USE_RE` 302 → 47 ms, `_LD_PATH_EXPR_RE` (`\s*(?:(?:path|os\s*\.\s*path|…)…`)
+164 → 21 ms, `_DL_STR_RE` (`"(?:\\.|[^"\\])*"|…`) 164 → 16 ms.
+
+linre is slower on 118 patterns (on 90 of them in all three runs), which
+take pyre 225 ms and linre 252 ms: 78 by more than 1.2×, 10 of those on
+more than 1 ms of pyre's time; 42 by more than 1.5×, two on more than
+1 ms (`_SC_SINK_WORD_RE`, 1,668 searches, 4.8 → 7.7 ms; `_DEP_ASSIGN_RE`,
+977, 3.8 → 5.7 ms); 12 by more than 2×, each on less than 0.1 ms in all,
+over a few calls. Why: the first calls of a pattern build its buffers and
+its first DFA states, which pyre has no need of (the patterns over 2×, and
+the patterns the scanner builds for one name, `name(?<![\w$]name)(?![\w$])`);
+fixed costs per call on many short texts (`_NAME_ESCAPE_RE`, 10,814
+finditer calls on texts of 7 characters, 9.9 → 13.3 ms; `_LD_NAME_TOKEN_RE`,
+10,640 windows of 14 characters, 11.3 → 14.2 ms); and a long match read
+three times — forward, reverse, groups — where sre reads it once
+(`_DEP_ASSIGN_RE`'s `([^;]*)`). The module adds 178 KB to the WebAssembly
+build (2.45 MB → 2.63 MB).
+
+**The pack's 41 refusals, with a rewrite** (`linre.check` lists them):
+
+- *A quote matched again* (10): `_DEPS_LOCAL_DEP_RE`, `_DNS_CMD_SUM_RE`,
+  `_DV_ESCAPED_LITERAL_RE`, `_KEYED_READ_RE`, `_KEYED_WRITE_RE`,
+  `_LD_HOST_BUILT_RE`, `_LD_PLAIN_LITERAL_RE`, `_ROUTE_RULE_RE`,
+  `_XF_EMIT_RE`, `_XF_LISTEN_RE`. The text between the quotes cannot hold
+  a quote (or stops at the first one), so one branch per quote character
+  gives the same spans and the same text in the groups (the quote's own
+  group goes, the others are numbered anew): `(["'])([^"'\\\n]*)\2` is
+  `'([^"'\\\n]*)'|"([^"'\\\n]*)"`, `\(\s*[rRuU]?(["'])(.*?)\1` is
+  `\(\s*[rRuU]?(?:"([^"\n]*)"|'([^'\n]*)')` (checked with `re` on random
+  texts).
+- *The same name twice* (3): `_DV_CC_FOR_RE` (`\1`, the loop's variable),
+  `_DV_CC_LITERAL_RE` (`\5`, the comprehension's), `_SA_CHECKSUM_RE`
+  (`(?P=v)`). Not a regular language: capture the second name too, compare
+  the two in code, and on a difference search again from the next start.
+- *Blanks before a lookahead's test* (13): `TAINT_SINKS['js'][9][1]`,
+  `TAINT_SOURCES['js']`, `_DL_CALLBACK_RE`, `_DL_COMMA_CALL_RE`,
+  `_INDIRECT_SINK_RE`, `_KWARG_RE`, `_LD_ALIAS_JS_RE`, `_LD_CLIENT_RE`,
+  `_LD_ENV_ALL_RE`, `_LD_FIRST_MEMBER_RE`, `_LD_MEMBER_READ_RE`,
+  `_XF_JS_EXPORT_LIST_RE`, `_XF_JS_REQ_NS_RE` (`(?!\s*\()`, `(?![ \t]*\.)`,
+  `(?=\s*\()` …): bound the blanks, `(?!\s{0,64}\()`, which answers
+  differently only after 64 of them.
+- *A lookahead over the rest of an argument list or a string* (10):
+  `RULES[7]` (`(?![^()]*\)\s*\{)`), `RULES[9]` and
+  `TAINT_SINKS['js'][3][1]` (an argument list), `_DL_DESERIAL[0]`, `[1]`,
+  `_DL_DESERIAL_CANDIDATE_RE` and `_DL_DESERIAL_RE` (whose `{0,400}?` is
+  bounded but whose `\([^()]*\)` is not), `_NON_HTML_CHAIN_RE` and
+  `_NON_HTML_TYPE_RE` (`(?![^"'`]*(?:html|xml|svg))`),
+  `_XF_JS_MODEXP_FN_RE` (`\([^()]*\)`): bound them (`[^()]{0,400}`, as
+  `_DL_DESERIAL_RE` already bounds its outer loop).
+- `RULES[50]` (1) is SQL-DYNAMIC, which the engine already matches by hand
+  in linear time (`linear.rs`).
+- *An exact rewrite* (2): `_LD_ENV_QUIET_RE`'s
+  `npm_(?:package|lifecycle|config)_(?![\w]*(?:auth|token|passw|secret))\w*`
+  is `npm_(?:package|lifecycle|config)_(?:(?!auth|token|passw|secret)\w)*`
+  (the test at each character of the name, of bounded width; checked with
+  `re` on random texts); `_JWT_CANDIDATE_RE`'s empty match before a token
+  can take the token in, where only its start is used
+  (`(?<![A-Za-z0-9_\-])[A-Za-z0-9_\-]{13,}\.eyJ[A-Za-z0-9_\-]{10}`).
+- *Too large* (2): `RULES[47]` (`(?:[^{}]|\{[^{}]{0,2000}\}){0,2000}`:
+  millions of instructions expanded) and `_DV_ARRAY_RE` (up to 64 strings
+  of up to 400 characters): unbounded repeats in place of the large counts
+  (`(?:[^{}]|\{[^{}]*\})*`) answer differently only past those counts.
