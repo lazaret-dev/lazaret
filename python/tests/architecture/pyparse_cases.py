@@ -235,6 +235,12 @@ ERROR_LINES = [
     "class A:\n    def f(self):\nx = 1\nz = 'unterminated", "if a:\n    try:\n        pass\nw = 1\nw = 'u",
     "if a:\n    match x:\n        case 1:\nw = 1\nw = 'u", "class A:\n    def f(self):\nx = 1\nz = 1abc",
     "class A:\n    @d\nx = 1\nz = 'unterminated", "class A:\n    def f(self):\nx = 1\nz = (",
+    # … a positional argument after a keyword: where the read of the
+    # arguments after it stopped (the last token Python fetched)
+    "f(a=1,\n  b\n)\n", "f(a=1,\n  b,\n  c=2)\n", "f(a=1, b\n\n\n)\n", "f(**k,\n b\n)\n", "f(a=1,\n  b + \n c\n)\n",
+    "x = [f(a=1, b),\n 2,\n 3]\n", "f(a=1,\n b,\n c +)\n", "f(a=1, b, c=d=e)\n", "f(a=1, b, *c, **d, e)\n",
+    "f(a=1,\n b for b in c)\n", "f(**k, *a,\n b)\n", "f(a=1,\nb\n", "g(f(a=1, b\n), c)\n",
+    "f(a=1, po(x=1,\n y=2) @ d(\n'e')\nclass A: pass\n",
     # Python's errors without a line: a NUL, what it cannot encode
     "x = 1\ny\0", "x = 1\ny = '\ud800'",
 ]

@@ -1038,22 +1038,37 @@ impl<'a> Parser<'a> {
         // positional arguments on the stack; keywords in their own list
         let mut keywords: Vec<u32> = Vec::new();
         let (mut seen_kw, mut seen_dstar) = (false, false);
+        // A positional argument after a keyword: Python's error pass reads
+        // the arguments after it before it raises its error, at the last
+        // token it read (`a=args ',' args`; RAISE_SYNTAX_ERROR's place, the
+        // furthest token fetched): its message, and the rest read on, an
+        // argument that does not read ending them.
+        let mut misplaced: Option<&'static str> = None;
+        macro_rules! arg {
+            ($e:expr) => {
+                match $e {
+                    Ok(v) => v,
+                    Err(Fail::Syntax) if misplaced.is_some() => break,
+                    Err(f) => return Err(f),
+                }
+            };
+        }
         while !self.at_op(RPAR) {
             let t = self.tok();
             if t.t == T::Op && t.k == STAR {
                 self.advance();
-                if seen_dstar {
+                if seen_dstar && misplaced.is_none() {
                     return self.fail("iterable argument unpacking follows keyword argument unpacking");
                 }
-                self.enter(L::KEYWORD_ARG)?;
-                let x = self.expression()?;
+                arg!(self.enter(L::KEYWORD_ARG));
+                let x = arg!(self.expression());
                 self.leave(L::KEYWORD_ARG);
                 let n = self.add(Kind::Starred, LOAD, t.s, x.e, [x.n, NONE, NONE, NONE]);
                 self.stack.push(n);
             } else if t.t == T::Op && t.k == DOUBLESTAR {
                 self.advance();
-                self.enter(L::KEYWORD_ARG)?;
-                let x = self.expression()?;
+                arg!(self.enter(L::KEYWORD_ARG));
+                let x = arg!(self.expression());
                 self.leave(L::KEYWORD_ARG);
                 let n = self.add(Kind::keyword, 0, t.s, x.e, [NONE, x.n, NONE, NONE]);
                 keywords.push(n);
@@ -1061,20 +1076,20 @@ impl<'a> Parser<'a> {
             } else if t.t == T::Name && self.peek(1).t == T::Op && self.peek(1).k == EQUAL {
                 self.advance();
                 self.advance();
-                self.enter(L::KEYWORD_ARG)?;
-                let x = self.expression()?;
+                arg!(self.enter(L::KEYWORD_ARG));
+                let x = arg!(self.expression());
                 self.leave(L::KEYWORD_ARG);
                 let n = self.add(Kind::keyword, 0, t.s, x.e, [t.v, x.n, NONE, NONE]);
                 keywords.push(n);
                 seen_kw = true;
             } else {
-                let x = self.named_expression()?;
+                let x = arg!(self.named_expression());
                 if self.at_op(EQUAL) && self.ahead == 0 {
                     // (where Python's error pass puts it: at the expression)
                     let s = self.tree.nodes[x.n as usize].start;
                     return self.fatal_at(s, "expression cannot contain assignment, perhaps you meant \"==\"?");
                 }
-                if self.at_for() {
+                if self.at_for() && misplaced.is_none() {
                     if !genexp || self.stack.len() > mark || !keywords.is_empty() {
                         return self.fail("Generator expression must be parenthesized");
                     }
@@ -1086,13 +1101,12 @@ impl<'a> Parser<'a> {
                     let args = self.tree.push_list(&[g]);
                     return Ok((args, 0, rp.e));
                 }
-                if seen_kw || seen_dstar {
-                    let why = if seen_dstar {
+                if (seen_kw || seen_dstar) && misplaced.is_none() {
+                    misplaced = Some(if seen_dstar {
                         "positional argument follows keyword argument unpacking"
                     } else {
                         "positional argument follows keyword argument"
-                    };
-                    return self.fail_at(x.s, why);
+                    });
                 }
                 self.stack.push(x.n);
             }
@@ -1101,8 +1115,13 @@ impl<'a> Parser<'a> {
             }
             if later == 0 {
                 later = L::LATER_ARG;
-                self.enter(later)?;
+                arg!(self.enter(later));
             }
+        }
+        if let Some(why) = misplaced {
+            let k = self.p_max.max(self.p);
+            let at = self.toks.get(k).map_or(self.src.len() as u32, |t| t.s);
+            return self.fail_at(at, why);
         }
         self.leave(later);
         let rp = self.expect_op(RPAR)?;
