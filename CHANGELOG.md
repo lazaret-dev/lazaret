@@ -28,8 +28,8 @@ before the release.
   and cross-file follower are the native engine's alone. `core.py` (18,815
   lines → about 7,700) keeps the project walk, archives, the registry and
   the guard, the manifest and workflow checks, project mode's passes after
-  the rules (taint, SQL, function metrics), the suppression markers and the
-  reports. `--engine` and `LAZARET_ENGINE` are gone; `--version` still names
+  the rules (Python's taint, SQL, function metrics), the suppression markers
+  and the reports. `--engine` and `LAZARET_ENGINE` are gone; `--version` still names
   the engine, and without the library the scanning commands stop with exit
   code 2 and say what is missing.
 - **A file the engine can't finish is SC-TRUNCATED in both packages**
@@ -135,17 +135,34 @@ before the release.
   benchmark's and installed packages' files; the holdout's counts); in the
   recorded outputs' generated cases 13 import-time answers gained a reason.
 
+- **Project mode's JavaScript taint is the engine's, in both packages.** The
+  `X-*` flows and `Q-FLOW-*` notes for JavaScript and TypeScript come from
+  the engine's pass (`js_flow`, below), which the Python package
+  (`flow._analyze_js`) and the npm package (`scanner/flow.js`) both ask,
+  each building its findings from its outputs; `jsflow.py`, `jsparse.py`
+  and the npm package's twins of them (11,357 lines) are retired. No
+  finding changes: the pass gave jsflow.py's outputs on the parity corpus
+  and on 1,490 installed npm packages, and the Python package's findings
+  through it are the npm twin's on every field. A host can lower the limit
+  of one function's reading (`run_limit`), never raise it. Natively the
+  engine runs its calls that recurse on nested input (this pass and both
+  parsers) on a thread of its own with an 8 MiB stack, kept per calling
+  thread: a host thread with a small stack (512 KiB on macOS, 128 KiB on
+  musl) no longer decides whether the deepest nesting the parser reads can
+  be read. The parser's trees and the pass's outputs are held to their
+  recorded ones (`test_snapshot_js_parse`, `test_snapshot_js_flow`), the
+  WebAssembly build to the library (`test_wasm_parity_jsflow`).
+
 ### Added
 
 - The engine's port of project mode's cross-file JavaScript taint pass
   (`js_flow`: jsflow.py's scopes, bindings, points-to and summaries, on the
   engine's JavaScript parser's trees), held to jsflow.py output for output
-  (`test_jsflow_reference.py`); on 1,490 installed npm packages read as
-  projects it gave the same outputs about twelve times faster. Nothing asks
-  it yet: both packages move to it next, and their JavaScript twins of the
-  pass and the reader retire.
+  (`test_jsflow_reference.py`, retired with jsflow.py); on 1,490 installed
+  npm packages read as projects it gave the same outputs about twelve times
+  faster.
 - The engine's JavaScript parser (`js_parse`: jsparse.py's trees, node for
-  node) and Python parser (`py_parse`: Python 3.13's `ast` trees, node for
+  node, until jsparse.py retired) and Python parser (`py_parse`: Python 3.13's `ast` trees, node for
   node, with its errors), about 60 MB/s each, for the detectors to be
   rebuilt on (`docs/RUST_ENGINE.md` §12, §13).
 - linre, a linear-time regular expression engine with `re`'s answers on 616

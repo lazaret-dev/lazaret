@@ -47,7 +47,7 @@ impl<'p> Eval<'p> {
     pub fn new(p: &'p mut Program, fid: FnId, emit: bool, findings: &'p mut Vec<Out>) -> Eval<'p> {
         let m = p.fns[fid as usize].module;
         let cur = p.fns[fid as usize].scope;
-        let limit = p.work + RUN_BASE + RUN_PER_NODE * p.fns[fid as usize].size;
+        let limit = p.work + p.cfg.run_base + p.cfg.run_per_node * p.fns[fid as usize].size;
         let mut ancestors = BTreeSet::new();
         let mut f = Some(fid);
         while let Some(x) = f {
@@ -1375,6 +1375,7 @@ impl<'p> Eval<'p> {
             self.findings.push(Out::Issue {
                 cat,
                 path,
+                file: self.p.mods[self.m as usize].file,
                 line,
                 source: src_loc,
                 sink: sink_loc,
@@ -1436,7 +1437,7 @@ impl<'p> Eval<'p> {
                         let mut via = u("the call to ");
                         via.extend_from_slice(&name);
                         via.extend(u("()"));
-                        self.findings.push(Out::Issue { cat, path, line, source: here, sink: there, via });
+                        self.findings.push(Out::Issue { cat, path, file: self.p.mods[self.m as usize].file, line, source: here, sink: there, via });
                         reported |= bit(cat);
                     }
                     for &key in t.params.iter() {

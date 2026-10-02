@@ -27,15 +27,13 @@ technique):
      X-* finding naming the source and sink locations (possibly different
      files).
 
-Python analysis is AST-based (stdlib only). JavaScript uses a bounded
-lexer/regex heuristic (no JS parser available without dependencies), so JS
-results are best-effort: a call binds to the function its file names through
-relative require()/import, a call it cannot resolve may reach any function
-of that name, functions are summarized by the parameters that reach a sink
-(directly or through the locals that hold them) and by what they return,
-and each file's work is bounded (see "modules, calls and returned values"
-and "values through local variables"). The npm engine carries a twin of the
-JavaScript half (js/src/scanner/flow.js).
+Python analysis is AST-based (stdlib only). JavaScript and TypeScript are
+the engine's pass (rust/crates/lazaret-engine/src/jsflow/, the `js_flow`
+call; docs/RUST_ENGINE.md): the same approach on parsed trees, with scopes
+and bindings, the functions a call can reach, route handlers and the
+values variables and objects hold, within a work budget per syntax tree
+node; this module builds its findings (_analyze_js). The npm package runs
+the same pass and builds the same findings (js/src/scanner/flow.js).
 
 Public entry point: analyze(files) -> list[issue dict] (never raises)
   files: iterable of {"path": str, "content": str, "lang": "py"|"js"}
@@ -48,8 +46,8 @@ import re
 import sys
 import time
 
+from lazaret.scanner import engine
 from lazaret.scanner import frameworks
-from lazaret.scanner import jsflow
 from lazaret.scanner import taintspec
 
 # ---------------- terminal-control neutralizer (audit H1) ----------------
@@ -1695,23 +1693,46 @@ def _analyze_python(files, findings, time_budget=None):
 
 
 # ======================================================================
-# JavaScript — on parsed trees (lazaret.scanner.jsflow)
+# JavaScript — the engine's pass (rust/crates/lazaret-engine/src/jsflow/)
 # ======================================================================
-# The configured part of the JavaScript model (configure()); jsflow reads it
-# at each analysis.
-_JS_SOURCE_RE = jsflow.SOURCE_RE      # request data by a member's or a callee's text, + configured sources
+# The configured part of the JavaScript model (configure()), handed to the
+# engine at each analysis.
+_JS_SOURCES = []                      # configured sources: guarded patterns (taintspec)
 _JS_SINKS = []                        # configured sinks: (guarded pattern, category)
 _JS_FULL_SAN = set()                  # configured full sanitizers (call names)
 _JS_PARTIAL_SAN = {}                  # configured partial sanitizers: call name -> set(categories)
-_JS_MAX_FILE = jsflow.MAX_FILE        # code points: a larger file is skipped (X-FLOW-SKIPPED)
+_JS_RUN_LIMIT = None                  # (base, steps per node): a lower limit for one function's reading
+_JS_LINES_RE = re.compile(r"\r\n|[\n\r\u2028\u2029]")    # JavaScript's line terminators
+
+
+def _skipped_size(path, n, limit):
+    """X-FLOW-SKIPPED: a file over the pass's size limit (code points)."""
+    return {"rule": "X-FLOW-SKIPPED", "name": "JS flow analysis skipped (size)",
+            "type": "HOTSPOT", "sev": "INFO",
+            "msg": f"{path} is {n} characters; interprocedural JS taint analysis is skipped above {limit} "
+                   f"characters.",
+            "why": "Reading a file this large (usually minified or machine-generated) would cost the "
+                   "cross-file pass more time and memory than a scan should spend on one file.",
+            "fix": "Split or deminify the file, or exclude it from the scan explicitly if the code is generated.",
+            "ref": "Scalability", "file": path, "line": 1, "snippet": [], "snipStart": 1}
 
 
 def _analyze_js(files, findings):
     js_files = [f for f in files if f.get("lang") == "js"]
     if not js_files:
         return
-    cfg = jsflow.config(_JS_SOURCE_RE, _JS_SINKS, _JS_FULL_SAN, _JS_PARTIAL_SAN)
-    jsflow.analyze(js_files, findings, _issue, _flow_note, cfg)
+    outs = engine.js_flow(js_files, _JS_SOURCES, _JS_SINKS, _JS_FULL_SAN, _JS_PARTIAL_SAN, _JS_RUN_LIMIT)
+    lines = {}                        # a file's lines (by its index), for the snippets
+    for out in outs:
+        if out[0] == "skipped_size":
+            findings.append(_skipped_size(out[1], out[2], out[3]))
+        elif out[0] == "issue":
+            _, cat, path, line, source, sink, chain, k = out
+            if k not in lines:
+                lines[k] = _JS_LINES_RE.split(js_files[k]["content"])
+            findings.append(_issue(cat, path, line, lines[k], source, sink, chain))
+        else:
+            findings.append(_flow_note(*out[1:]))
 
 
 # ======================================================================
@@ -1732,7 +1753,6 @@ def configure(cfg, on_warn=None, allow_sanitizers=True):
     become inert while the scan still reports PASSED. allow_sanitizers=False
     (a config from the scanned repository) ignores its sanitizers with a
     note. Never raises on config content."""
-    global _JS_SOURCE_RE
     spec = (cfg if isinstance(cfg, taintspec.TaintSpec)
             else taintspec.validate(cfg, allow_sanitizers=allow_sanitizers))
     if callable(on_warn):
@@ -1745,7 +1765,7 @@ def configure(cfg, on_warn=None, allow_sanitizers=True):
     for name, cats in py.partial.items():
         _EXTRA_PARTIAL_PY[name] = set(_EXTRA_PARTIAL_PY.get(name, ())) | set(cats)
     js = spec.javascript
-    _JS_SOURCE_RE = taintspec.extend_pattern(_JS_SOURCE_RE, js.sources)
+    _JS_SOURCES.extend(js.sources)
     _JS_SINKS.extend(js.sinks)
     _JS_FULL_SAN.update(js.full)
     for name, cats in js.partial.items():

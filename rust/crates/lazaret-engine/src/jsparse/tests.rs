@@ -1,8 +1,8 @@
 //! The parser's own tests: the depth limit of every construct that nests
 //! and the stack the deepest of them takes, the speculation budgets, the
 //! places jsparse.py fails outside its JsSyntaxError, spans, and inputs
-//! that must never panic. (The oracle comparison, node for node, is
-//! python/tests/architecture/test_jsparse_native.py; the depths and
+//! that must never panic. (The trees are held to the recorded ones by
+//! python/tests/architecture/test_snapshot_js_parse.py; the depths and
 //! answers pinned here are jsparse.py's.)
 
 use super::*;

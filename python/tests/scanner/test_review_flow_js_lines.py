@@ -6,10 +6,10 @@ LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR as JavaScript line
 terminators, but flow.py split JS source on "\\n" only: an interprocedural
 X-* finding after such a character reported a line one lower than core's
 findings on the same statement (and the function-definition line in its
-message was off the same way). The JavaScript reader (lazaret.scanner.
-jsparse) numbers lines the way the language does — LF, CR, CRLF, U+2028,
-U+2029 — and the flow pass splits snippets the same way. Inert fixtures
-only.
+message was off the same way). The JavaScript reader (the engine's parser
+since the Rust-first refactor) numbers lines the way the language does —
+LF, CR, CRLF, U+2028, U+2029 — and the flow pass splits snippets the same
+way. Inert fixtures only.
 """
 import os
 import tempfile

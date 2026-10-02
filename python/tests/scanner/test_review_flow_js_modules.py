@@ -1,7 +1,8 @@
 """The JavaScript cross-file pass follows modules and returned values.
 
-The heuristic this pass replaced (0.1.7: it now reads parsed trees,
-lazaret.scanner.jsparse / jsflow) once bound a call to the last function of
+The heuristic this pass replaced (0.1.7: it now reads parsed trees, since
+the Rust-first refactor in the engine: rust/crates/lazaret-engine/src/
+jsflow/) once bound a call to the last function of
 that name anywhere in the project (so commander's `parse()` reached a sink
 in the `ms` package), read a function's own header as a call, saw only calls
 whose arguments held no parentheses, and ignored what functions return.
@@ -30,7 +31,7 @@ Now:
   function a limit of its own, each noting itself when hit; a file nested
   deeper than the reader follows is skipped with a note.
 
-The npm engine's twin (js/src/scanner/jsflow.js) must agree:
+The npm package runs the same pass and builds the same findings:
 tests/architecture/test_js_parity_flow.py. Inert text only.
 """
 import textwrap
@@ -357,12 +358,11 @@ class Bounds(unittest.TestCase):
 
     def test_one_readings_limit_notes_itself(self):
         from unittest import mock
-        from lazaret.scanner import jsflow
         files = {"lib.js": "function runIt(list) {\n  for (const c of list) {\n    if (c) exec(c);\n  }\n}\n"
                            "module.exports = { runIt };\n",
                  "app.js": "const { runIt } = require('./lib');\napp.get('/', (req) => {\n  runIt(req.query.q);\n});\n"}
         self.assertEqual(flows(files), [("X-CMD", "app.js", 3)])
-        with mock.patch.object(jsflow, "RUN_BASE", 0), mock.patch.object(jsflow, "RUN_PER_NODE", 1):
+        with mock.patch.object(flow, "_JS_RUN_LIMIT", (0, 1)):        # (the engine's limit, lowered)
             found = analyze(files)
         self.assertEqual([(i["rule"], i["file"], i["line"]) for i in found], [("Q-FLOW-INCOMPLETE", "lib.js", 1)])
         self.assertIn("stopped reading runIt() in 'lib.js' at its limit", found[0]["msg"])

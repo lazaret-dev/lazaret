@@ -1,92 +1,51 @@
-"""Inputs for the native JavaScript parser's tests (test_jsparse_native*.py,
-test_wasm_parity_jsparse.py), beyond the ones test_js_parity_parse.py
-holds: snippets for what those do not reach (the speculation budgets at
-their edges, jsparse.py's own bugs, surrogates, numbers, regular
-expressions, templates, JSX, TypeScript and Flow corners), every construct
-that nests, and seeded random programs.
+"""Inputs for the tests of the engine's JavaScript parser (the `js_parse`
+call: rust/crates/lazaret-engine/src/jsparse/): test_snapshot_js_parse.py,
+which holds its trees to the ones recorded, test_jsparse_native.py (its
+options and bounds), test_wasm_parity_jsparse.py (the WebAssembly build
+against the native library) and test_lex.py.
 
-The two answers are compared as JSON text (`oracle_json`, `native_json`):
-jsparse.py's dicts written the way json.dumps writes them (compact, ASCII,
-their keys in their order), without recursion — a tree may be as deep as
-its input is long —, and the engine's answer as the call returns it (the
-binding's json.loads would recurse).
+The parser is a port of jsparse.py, the Python package's reader from 0.1.7,
+and was held to it node for node until phase 3 of the Rust-first refactor
+retired jsparse.py and its npm twin; these are the inputs it was held to:
+curated snippets for every construct the cross-file pass reads and the
+errors (READER_SNIPPETS), and for what those do not reach (SNIPPETS: the
+speculation budgets at their edges, jsparse.py's own bugs, which the engine
+reproduces, surrogates, numbers, strings' escapes, regular expressions,
+templates, ASI, comments, JSX, TypeScript and Flow); every construct that
+nests (NESTINGS); seeded soups of tokens and of TypeScript, JSX and Flow
+pieces; seeded mutations of real files.
+
+An answer is kept as JSON text (`native_json`): a tree may be as deep as its
+input is long, deeper than json.loads reads.
 
 Inert text only: nothing here is executed.
 """
-import ctypes
-import json
+import glob
+import os
 import random
 import re
-import struct
 
-from lazaret.scanner import _native, jsparse
+from lazaret.scanner import _native
+from tests import _support
 
 LS, PS = chr(0x2028), chr(0x2029)
 
 
-# ---- the two answers, as JSON text ----
-
-def canonical(value):
-    """json.dumps(value, separators=(",", ":")), for values of any depth."""
-    try:
-        return json.dumps(value, separators=(",", ":"))
-    except RecursionError:
-        pass
-    parts = []
-    stack = [(False, value)]
-    while stack:
-        raw, x = stack.pop()
-        if raw:
-            parts.append(x)
-        elif isinstance(x, dict):
-            tasks = [(True, "{")]
-            for i, (k, v) in enumerate(x.items()):
-                tasks.append((True, ("," if i else "") + json.dumps(k) + ":"))
-                tasks.append((False, v))
-            tasks.append((True, "}"))
-            stack.extend(reversed(tasks))
-        elif isinstance(x, list):
-            tasks = [(True, "[")]
-            for i, v in enumerate(x):
-                if i:
-                    tasks.append((True, ","))
-                tasks.append((False, v))
-            tasks.append((True, "]"))
-            stack.extend(reversed(tasks))
-        else:
-            parts.append(json.dumps(x))
-    return "".join(parts)
-
-
-def oracle_json(src, ts, jsx):
-    """jsparse.parse's tree as JSON text, or {"error": {"line", "reason"}}; where
-    jsparse.py raises something else than JsSyntaxError (its KeyError), line 0 and the
-    exception, as the engine answers it."""
-    try:
-        return canonical(jsparse.parse(src, ts, jsx))
-    except jsparse.JsSyntaxError as e:
-        return canonical({"error": {"line": e.line, "reason": e.reason}})
-    except Exception as e:                          # noqa: BLE001 (jsparse.py's own bugs)
-        return canonical({"error": {"line": 0, "reason": f"{type(e).__name__}: {e}"}})
+def dialect(path):
+    """(TypeScript, JSX) for a file name, as `js_parse_file` picks them:
+    .ts, .mts and .cts are TypeScript, .tsx TypeScript with JSX, anything
+    else JavaScript with JSX (and Flow's annotations)."""
+    lower = path.lower()
+    if lower.endswith((".ts", ".mts", ".cts")):
+        return True, False
+    if lower.endswith(".tsx"):
+        return True, True
+    return False, True
 
 
 def native_raw(name, args, text):
     """(status, the answer's JSON text) of one call of the native library."""
-    lib = _native._load()
-    if lib is None:
-        raise _native.NativeError(_native.load_error())
-    n = name.encode("ascii")
-    a = json.dumps(args, ensure_ascii=True, separators=(",", ":")).encode("ascii")
-    req = struct.pack("<I", len(n)) + n + struct.pack("<I", len(a)) + a + text.encode("utf-8", "surrogatepass")
-    out = ctypes.c_void_p()
-    out_len = ctypes.c_size_t()
-    status = lib.lazaret_engine_call(req, len(req), ctypes.byref(out), ctypes.byref(out_len))
-    try:
-        answer = ctypes.string_at(out.value, out_len.value).decode("ascii") if out.value else ""
-    finally:
-        if out.value:
-            lib.lazaret_engine_free(out.value, out_len.value)
-    return status, answer
+    return _native.call_raw(name, args, text)
 
 
 def native_json(src, ts, jsx, spans=False):
@@ -98,27 +57,11 @@ def native_json(src, ts, jsx, spans=False):
     return answer if status == 0 else f"status {status}: {answer}"
 
 
-def differences(items, limit=5):
-    """[(path, source, where the answers part, jsparse.py's, the engine's)] for the
-    (path, source) items whose answers differ (the dialect from the path)."""
-    found = []
-    for path, src in items:
-        ts, jsx = jsparse.dialect(path)
-        want = oracle_json(src, ts, jsx)
-        got = native_json(src, ts, jsx)
-        if want != got:
-            i = next((k for k, (x, y) in enumerate(zip(want, got)) if x != y), min(len(want), len(got)))
-            found.append((path, json.dumps(src)[:200], i, want[max(0, i - 120):i + 120], got[max(0, i - 120):i + 120]))
-            if len(found) >= limit:
-                break
-    return found
-
-
 SPAN_RE = re.compile(r',"start":(\d+),"end":(\d+)')
 LINE_SPAN_RE = re.compile(r'"line":(\d+),"start":(\d+),"end":(\d+)')
 LINE_END_RE = re.compile(r"\r\n|[\n\r  ]")
 
-# (path, source): the path picks the dialect, as jsparse.dialect does
+# (path, source): the path picks the dialect (dialect())
 SNIPPETS = [
     # jsparse.py's bugs, which the native parser has too: a parenthesized
     # list that starts with a rest element raises KeyError: 'line'; a long
@@ -277,9 +220,9 @@ SNIPPETS = [
     ("x.ts", "let x: ;"), ("x.ts", "type = ;"), ("x.ts", "enum {}"), ("x.ts", "f<>(x)"), ("x.ts", "x as"),
 ]
 
-# every construct that nests: (name, path, source at depth k); jsparse.py's
-# depth limit (MAX_DEPTH) ends each, and the deepest that is read is the
-# deepest stack the parser takes
+# every construct that nests: (name, path, source at depth k); the depth
+# limit (MAX_DEPTH, 256: jsparse.py's) ends each, and the deepest that is
+# read is the deepest stack the parser takes
 NESTINGS = [
     ("parentheses", "n.js", lambda k: "(" * k + "x" + ")" * k),
     ("arrays", "n.js", lambda k: "[" * k + "x" + "]" * k),
@@ -365,7 +308,6 @@ def soup(seed, count, paths=("r.js", "r.ts", "r.tsx", "r.jsx")):
 
 def mutate(sources, seed, count, max_len=60_000):
     """Real files with a few spans dropped, doubled, swapped or cut short."""
-    import re
     rnd = random.Random(seed)
     words = re.compile(r"[A-Za-z_$][\w$]*|\d+|\S")
     pool = [s for s in sources if 100 < len(s[1]) < max_len]
@@ -388,6 +330,129 @@ def mutate(sources, seed, count, max_len=60_000):
                     src = src[:a] + src[c:d] + src[b:c] + src[a:b] + src[d:]
             else:
                 src = src[:b]
+            spans = [m.span() for m in words.finditer(src)]
+            if not spans:
+                break
+        out.append((path, src))
+    return out
+
+
+# ---- the reader's snippets (they held jsparse.js, the npm package's twin, to jsparse.py) ----
+READER_SNIPPETS = [
+    # statements and declarations
+    "var a = 1, b; let [c, , ...d] = e; const { f, g: { h = 2 } = {}, ...i } = j;",
+    "if (a) b(); else if (c) d(); else { e(); }\nfor (let i = 0; i < n; i++) continue;\nfor (const k in o) break;",
+    "for await (const x of y) {}\nwhile (a) do b(); while (c)\nlabel: for (;;) { break label; }",
+    "switch (x) { case 1: case 2: y(); break; default: z(); }\ntry { a() } catch { b() } finally { c() }",
+    "try { a() } catch ({ message }) { b(message) }\nthrow new Error('x');\ndebugger; with (o) { p(); }",
+    "function* g(a = 1, { b }, [c], ...d) { yield a; yield* b; }\nasync function h() { await x; for await (y of z); }",
+    "class A extends (B, C) { static #p = 1; #q() {} get [k]() {} set v(x) {} static async *m() {} static { init(); } }",
+    "import d, * as ns from 'm'; import { a as b, default as c } from './n.js'; import './side';",
+    "export * from './a'; export * as b from './b'; export { c as default, d }; export default class {}",
+    "export const e = 1, f = () => 2; export async function g() {} export { h as 'string name' } from './h';",
+    # expressions
+    "a = b ? c : d ? e : f; g ??= h; i ||= j; k &&= l; m **= 2; n >>>= 1;",
+    "x = a?.b?.[c]?.(d); y = new a.b.C(); z = new new D()(); w = new E; v = new.target; u = import.meta.url;",
+    "f(...a, b, ...c); [1, , 3, ...d]; ({ a, b: c, [d]: e, f() {}, get g() { return 1 }, set g(v) {}, ...h, async *i() {} });",
+    "(a, b) => a + b; async x => x; async (x) => { await x }; () => ({}); (a = 1, { b } = {}, [c] = []) => 0;",
+    "typeof a + void b - delete c.d; !e; ~f; -g; +h; ++i; j--; a ** -b; (-a) ** b; a in b; a instanceof B;",
+    "`a${b}c${`d${e}f`}g`; tag`h${i}`; String.raw`\\u{zz}`; x = a\n`t`;",
+    "a = /[/]\\//g; b = c / d / e; if (x) /re/.test(y); f = (g) / 2; h = i++ / 2; j = [] / 1; k = {} / 2;",
+    "x = 0x1F + 0o17 + 0b11 + 1_000 + .5e-3 + 010 + 08 + 10n + 0xFFn;",
+    "s = 'a\\n\\x41\\u0042\\u{1F600}\\101\\\ncont\\q' + \"\\uD83D\\uDE00\" + '\\uD800' + '\\0';",
+    "a\n++b\nc\n(d)\nreturn_\n/re/g;\nlet x = 1\nlet y = 2\nvar z = a\n[1, 2].map(f)",
+    "function f() { return\nx }\nfunction g() { throw x\n}\nlet async = 1; async\nfunction h() {}",
+    "a = b\n?.c; d = (e, f); g = h, i; j = k ? (l) : m => n;",
+    "yield = 1; let of = 2; for (let of of xs); get = set = static = async = await = 3;",
+    "a" + LS + "b" + PS + "c\r\nd\re\n" + "'x\\" + LS + "y';",
+    "/* a\nb */ x; // c\n<!-- html comment\ny;",
+    "#!/usr/bin/env node\nconsole.log(1);",
+    # JSX
+    "<a:b c=\"d\" {...e} f g={h} i='j' k=<l /> >t{m}<n.o.p />{/* c */}{...q}</a:b>",
+    "<>x{y}</>; <A>{cond ? <B /> : <C x={1} />}</A>; <div dangerouslySetInnerHTML={{ __html: h }} />",
+    "const C = () => <ul>{items.map((i) => <li key={i}>{i}</li>)}</ul>;",
+    # TypeScript (.ts / .tsx)
+    ("a.ts", "let x: number = <number>y; const z = w as unknown as T; v!.u; s satisfies T; f<T>(x); a < b > c;"),
+    ("a.ts", "interface I<T> extends J { a?: string; [k: string]: T; m(): void }\ntype U = A | B & C;\n"
+             "declare module 'm' { export function f(): void; }\ndeclare const d: number;\nexport type { I };"),
+    ("a.ts", "enum E { A = 1, B, C = 'c' }\nconst enum F { X }\nnamespace N.M { export const x = 1; }\n"
+             "import r = require('./r');\nimport q = N.M;\nexport = r;"),
+    ("a.ts", "abstract class A<T> extends B<T> implements I, J { constructor(private x: T, public readonly y?: U) { super(); }\n"
+             "abstract m(): void;\ndeclare z: number;\nf(a: string): void;\nf(a) {}\nprotected static g?(): void {}\n}"),
+    ("a.ts", "@sealed @log() class K { @prop() p: string; @m m(@arg a: string) {} }\n"
+             "function f<T extends K = K>(this: Window, a?: T, ...rest: T[]): asserts a is T {}"),
+    ("a.ts", "const g = <T,>(v: T): T => v; const h = async <T>(x: T) => x; let u: (a: string) => void = null!;"),
+    ("a.ts", "type C<T> = T extends (infer U extends string)[] ? U : T extends `a${infer V}` ? V : never;\n"
+             "let t: [a: string, b?: number, ...c: boolean[]]; let m: { readonly [K in keyof T]?: T[K] };"),
+    ("a.tsx", "const A = <T,>(p: P<T>) => <div<string>>{p.x}</div>; function f() { return <B<C> d={1} />; }"),
+    ("a.tsx", "export default function Page({ a }: { a: string }): JSX.Element { return <p>{a as string}</p>; }"),
+    ("a.mts", "export const x: number = 1;"), ("a.cts", "import fs = require('fs'); export = fs;"),
+    # Flow in .js
+    "// @flow\ntype T = {a: ?string};\nfunction g(x: ?T, y?: string): void { return (x: any); }\nconst re: RegExp = /x/;",
+    # errors
+    "a;\n'open", "a;\n`open ${x}", "/* open", "x = /open", "a b", "f(", "}", "let let = 1;", "x = {a: 1,,}",
+    "(" * 300 + "x" + ")" * 300, "<a><b></a>", ("a.ts", "<a></a>"), "`${", "a.#b", "@", "0b12", "'\\u{110000}'",
+]
+
+def items_of(snippets):
+    """(path, source) for snippets that are a source alone (a .js file) or a pair."""
+    return [s if isinstance(s, tuple) else ("s.js", s) for s in snippets]
+
+
+def own_sources():
+    """The repository's own JavaScript: the npm package's sources and tests, the fixtures."""
+    root = _support.REPO_ROOT
+    paths = sorted(glob.glob(os.path.join(root, "js", "src", "**", "*.js"), recursive=True)
+                   + glob.glob(os.path.join(root, "js", "test", "**", "*.js"), recursive=True)
+                   + glob.glob(os.path.join(root, "js", "bin", "*.js"))
+                   + glob.glob(os.path.join(root, "python", "tests", "fixtures", "**", "*.js"), recursive=True))
+    out = []
+    for p in paths:
+        with open(p, encoding="utf-8", errors="replace", newline="") as f:
+            out.append((os.path.relpath(p, root), f.read()))
+    return out
+
+
+# ---- seeded token soups ----
+TOKENS = ["a", "b1", "$", "_", "if", "else", "for", "while", "return", "function", "=>", "class", "extends",
+          "new", "this", "let", "const", "var", "async", "await", "yield", "import", "export", "from", "as",
+          "(", ")", "[", "]", "{", "}", ";", ",", ".", "?.", "?", ":", "=", "+", "-", "*", "/", "%", "<", ">",
+          "!", "&&", "||", "??", "...", "'s'", '"d"', "`t`", "`a${", "}`", "/re/g", "1", "0x1", "2n", "\n", " ",
+          "<a>", "</a>", "<>", "</>", "{x}", "@d", "#p", "type", "interface", "enum", "namespace", "declare",
+          ":", "string", "<T>", "as", "!", "satisfies", "readonly", "private", "abstract", LS, "\r"]
+
+
+def token_soups(seed, count):
+    rnd = random.Random(seed)
+    out = []
+    for _ in range(count):
+        src = " ".join(rnd.choice(TOKENS) for _ in range(rnd.randint(1, 60)))
+        out.append((rnd.choice(["s.js", "s.ts", "s.tsx", "s.jsx"]), src))
+    return out
+
+
+def mutations(sources, seed, count):
+    """Real files with a few tokens dropped, doubled or swapped (by the regex of words and punctuation)."""
+    rnd = random.Random(seed)
+    words = re.compile(r"[A-Za-z_$][\w$]*|\d+|\S")
+    out = []
+    pool = [s for s in sources if 200 < len(s[1]) < 60_000]
+    for k in range(count):
+        path, src = rnd.choice(pool)
+        spans = [m.span() for m in words.finditer(src)]
+        if not spans:
+            continue
+        for _ in range(rnd.randint(1, 3)):
+            a, b = rnd.choice(spans)
+            op = rnd.randrange(3)
+            if op == 0:
+                src = src[:a] + src[b:]
+            elif op == 1:
+                src = src[:a] + src[a:b] * 2 + src[b:]
+            else:
+                c, d = rnd.choice(spans)
+                if c > b:
+                    src = src[:a] + src[c:d] + src[b:c] + src[a:b] + src[d:]
             spans = [m.span() for m in words.finditer(src)]
             if not spans:
                 break

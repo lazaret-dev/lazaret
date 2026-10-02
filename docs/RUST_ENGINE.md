@@ -1,6 +1,6 @@
 # Lazaret's native scanning engine (Rust)
 
-Status, October 1, 2026: since the Rust-first refactor (phase 1 of §8) the
+Status, October 2, 2026: since the Rust-first refactor (phase 1 of §8) the
 native engine is Lazaret's only engine. The Python reference engine is
 retired — its detectors, the per-file rules and the cross-file follower are
 the engine's alone, `--engine` is gone — and the engine is held to its own
@@ -9,15 +9,17 @@ source of the rules. Every wheel carries the engine, and the sdist its
 sources, which pip compiles where no platform wheel fits (§4). What the
 Python package still does in Python: walking a project, reading archives,
 the registry and the guard, the manifest and workflow checks, project
-mode's passes after the rules (taint, SQL, function metrics), the
-suppression markers and the reports. Since 0.1.8 the npm package runs the
-same engine compiled to WebAssembly (`native/lazaret.wasm`). The JavaScript
-parser (`js_parse`, §12: jsparse.py's trees, node for node), the Python
-parser (`py_parse`, §13: Python 3.13's `ast` trees, node for node) and a
-linear-time regex engine (linre, §14) are in place for the phases that
-follow; every pattern linre accepts runs on it, and the engine's lexers
-(§15) read JavaScript and Python for every caller that asks where a text's
-comments and literals are.
+mode's passes after the rules (Python's taint, SQL, function metrics), the
+suppression markers and the reports; project mode's JavaScript taint is the
+engine's (phase 3: `js_flow`, §16) in both packages. Since 0.1.8 the npm
+package runs the same engine compiled to WebAssembly
+(`native/lazaret.wasm`). The JavaScript parser (`js_parse`, §12: the port
+of jsparse.py, held to its trees node for node until phase 3 retired it),
+the Python parser (`py_parse`, §13: Python 3.13's `ast` trees, node for
+node) and a linear-time regex engine (linre, §14) are in place for the
+phases that follow; every pattern linre accepts runs on it, and the
+engine's lexers (§15) read JavaScript and Python for every caller that asks
+where a text's comments and literals are.
 
 ## 1. What it is
 
@@ -33,9 +35,10 @@ reference, held to its recorded outputs, and a change to what it finds is a
 reviewed difference in those outputs. The npm package runs the same engine
 as WebAssembly (0.1.8). What the npm package still does in JavaScript
 (source decoding, the suppression markers, the manifest and workflow
-checks, the taint, SQL and function passes of project mode, reporting) is
-held to the Python package by the CLI-level parity tests
-(`test_js_parity*`); its comment layout is the engine's lexers' (§15).
+checks, the SQL and function passes of project mode, reporting) is held to
+the Python package by the CLI-level parity tests (`test_js_parity*`); its
+comment layout is the engine's lexers' (§15), and its JavaScript taint the
+engine's pass (§16).
 
 Decisions (fixed):
 
@@ -190,12 +193,12 @@ rust/
     src/findings.rs          mk_issue: texts, snippets, redaction (_SecretLiterals); cap_issues
     src/token.rs             _TokenPattern (S-TOKEN, redaction): JWTs in linear time
     src/normalize.rs         NFC / NFD / NFKC / NFKD (UAX #15, Unicode 13.0 data)
-    src/jsparse/             the JavaScript parser (jsparse.py's trees: §12): scan.rs (literals,
+    src/jsparse/             the JavaScript parser (a port of jsparse.py: §12): scan.rs (literals,
                              character classes, the token patterns by hand), parser.rs (tokens,
                              reads ahead, statements, classes, modules), expr.rs (expressions,
                              patterns, JSX), types.rs (TypeScript's types), tree.rs (the arena),
                              out.rs (JSON)
-    src/jsflow/              project mode's cross-file JavaScript taint (jsflow.py's, §16):
+    src/jsflow/              project mode's cross-file JavaScript taint (a port of jsflow.py, §16):
                              mod.rs (values, scopes, bindings, declaration and resolution),
                              descs.rs (points-to, call targets, routes, order), eval.rs (one
                              reading of a function), driver.rs (the fixpoint, the output)
@@ -227,13 +230,13 @@ scripts/check_rust_deps.py              Cargo.lock and the manifests hold only t
 scripts/check_native_library.py         a built library against its wheel's tag; --dist: the release's wheels
 .github/workflows/wheels.yml            the five libraries, the wheels and the sdist, installed on each
                                         platform (the sdist built by pip on Linux)
-python/tests/architecture/test_snapshot_{hooks,signs,scanfile,lexer,hook_commands,small,crossfile}.py,
-  _snapshots.py, snapshots/             the engine's recorded outputs (§5); scripts/snapshot.py records
-                                        and compares them
+python/tests/architecture/test_snapshot_{hooks,signs,scanfile,lexer,hook_commands,small,crossfile,
+  js_flow,js_parse}.py, _snapshots.py,  the engine's recorded outputs (§5); scripts/snapshot.py records
+  snapshots/                            and compares them
 python/tests/architecture/test_lex.py   the lexers against js_parse's literals and Python 3.13's
                                         tokenize (§15)
 python/tests/architecture/test_rust_parity_regex.py, test_wasm_parity{,_signs,_crossfile,_jsparse,
-  _pyparse}.py, test_jsparse_native{,_b}.py, test_pyparse_native{,_b,_c}.py, test_rust_deps.py,
+  _jsflow,_pyparse}.py, test_jsparse_native.py, test_pyparse_native{,_b,_c}.py, test_rust_deps.py,
   test_rust_pack.py, hooks_corpus.py, scanfile_corpus.py, crossfile_corpus.py, jsparse_cases.py,
   pyparse_cases.py, pyparse_oracle.py, test_linre{,_b,_c,_d,_linear}.py, _linre_inputs.py (linre, §14)
 ```
@@ -408,6 +411,8 @@ pack's `rule_set`) is bumped with any change to what a verdict records.
 | `test_snapshot_hook_commands` | a hook's command read as a program (`hook_command_risk`, `sh_parse`, the reasons), output thrown away and kept | realistic hook commands and a seeded corpus |
 | `test_snapshot_small` | SC-HEXSTR's hidden names and text, SC-HOMOGLYPH's look-alike names, SC-OFFSCREEN-CODE | curated and seeded lines |
 | `test_snapshot_crossfile` | the cross-file follower (`cross_file`): the stream of packages, side by side, one package, distributions, separators | the follower's generated stream (`crossfile_corpus.py`) |
+| `test_snapshot_js_flow` | project mode's cross-file JavaScript taint (`js_flow`, §16): every output in order, with the default model and a configured one; files that are not text, a lowered per-reading limit | the corpus it was held to jsflow.py on: the review's cases, generated projects (`jsgen.py`), token soups |
+| `test_snapshot_js_parse` | the JavaScript parser (`js_parse`, §12): each tree's or error's JSON text (its SHA-256: a tree may be deeper than `json.loads` reads), with spans and without | jsparse_cases.py's inputs: the reader's snippets and its own, every construct that nests around the depth limit, soups, generated projects and mutations of them |
 
 Twins the engine is still compared with, call for call:
 
@@ -415,8 +420,8 @@ Twins the engine is still compared with, call for call:
 |---|---|---|
 | `test_rust_parity_regex` | pyre against Python's `re`: every pack pattern and 126 hand-written probes, search/match/fullmatch/finditer/sub/split with pos/endpos | Python 3.10–3.14 |
 | `test_wasm_parity`, `test_wasm_parity_signs`, `_crossfile` | the WebAssembly build the npm package ships against the platform library, call for call, byte for byte: `hooks_view`, `signs_view`, `scan_file` (dependency mode), `scan_rules`, and the npm binding's `cross_file` against the Python package's | the hooks corpus, the scan_file corpus, this repository's files, the follower's stream |
-| `test_jsparse_native`, `_b` | the JavaScript parser (`js_parse`, `js_parse_file`) against `jsparse.parse`, node for node as JSON text, key for key; spans (§12) | test_js_parity_parse.py's inputs and jsparse_cases.py's |
 | `test_wasm_parity_jsparse` | the parser in the WebAssembly build against the library, byte for byte | the snippets, this repository's JavaScript, soups, every construct that nests at its deepest |
+| `test_wasm_parity_jsflow` | the JavaScript taint pass in the WebAssembly build against the library, byte for byte | `test_snapshot_js_flow`'s sets; every construct that nests at its deepest, request data followed through it |
 | `test_pyparse_native`, `_b`, `_c` | the Python parser (`py_parse`) against Python 3.13's `ast.parse` (a `python3.13` subprocess; skipped without one), node for node as JSON text, with the errors' lines; spans; its Unicode 15.1 data (§13) | pyparse_cases.py's inputs; every identifier character and character name |
 | `test_wasm_parity_pyparse` | the Python parser in the WebAssembly build against the library, byte for byte | the snippets, this repository's Python, programs, soups, every construct that nests at its deepest |
 | `test_linre*` | linre against Python's `re` on the pack's patterns (§14) | the regex corpus and adversarial inputs |
@@ -458,12 +463,13 @@ PYTHONPATH=src:. python3 -m unittest tests.architecture.test_snapshot_signs     
 PYTHONPATH=src:. python3 -m unittest tests.architecture.test_snapshot_scanfile
 PYTHONPATH=src:. python3 -m unittest tests.architecture.test_snapshot_lexer tests.architecture.test_snapshot_small \
   tests.architecture.test_snapshot_hook_commands tests.architecture.test_snapshot_crossfile
+PYTHONPATH=src:. python3 -m unittest tests.architecture.test_snapshot_js_flow tests.architecture.test_snapshot_js_parse
 PYTHONPATH=src:. python3 -m unittest tests.architecture.test_wasm_parity         # ~20 s
 PYTHONPATH=src:. python3 -m unittest tests.architecture.test_wasm_parity_signs   # ~11 s
 PYTHONPATH=src:. python3 -m unittest tests.architecture.test_wasm_parity_crossfile  # ~1 s
-PYTHONPATH=src:. python3 -m unittest tests.architecture.test_jsparse_native      # ~9 s
-PYTHONPATH=src:. python3 -m unittest tests.architecture.test_jsparse_native_b    # ~9 s
+PYTHONPATH=src:. python3 -m unittest tests.architecture.test_jsparse_native      # ~1 s
 PYTHONPATH=src:. python3 -m unittest tests.architecture.test_wasm_parity_jsparse # ~18 s
+PYTHONPATH=src:. python3 -m unittest tests.architecture.test_wasm_parity_jsflow  # ~10 s
 python3 ../scripts/make_rust_tables.py --check && python3 ../scripts/check_rust_deps.py
 ```
 
@@ -677,7 +683,7 @@ benchmark:
 | 0 | Baseline: the detection round committed (rule set 2.15.0), the engine's outputs recorded on the benchmark's files and on installed packages | Done (tag `rust-first-baseline`) |
 | 1 | The Rust engine is the reference: the Python engine, `--engine` and the pure wheel retired; the recorded outputs (§5); the pack as the source of the rules; every wheel a platform wheel, the sdist compiled by pip where none fits; an unanswered file SC-TRUNCATED in both packages | Done |
 | 2 | Decoding, lexers and bytes in the engine: source decoding (BOMs, UTF-16, coding cookies), one token substrate for the detectors | Done (tag `rust-first-phase2`): the lexers (§15: every caller's comments and literals, both packages), the self-read on them, the decoded view on string values (§15). Moved: the data flow, the dead drop, the secret endpoints and received code to phase 3 (they follow names: scopes); bytes to phase 4 (with linre over bytes); source decoding to after phase 3 (the packages' decoders already agree, held by their parity tests, and owning the CJK codecs would put their tables in the WebAssembly module) |
-| 3 | Parsers, scopes and flow: the detectors on bindings over the JavaScript and Python trees (§12, §13), constant folding of strings, the cross-file follower on them, project mode's passes (taint, SQL, function metrics) in the engine; the npm package's twins of them retired | The parsers done; project mode's JavaScript taint ported onto `js_parse`'s trees (§16: `js_flow`, held to jsflow.py). Next, in order: both packages ask the engine, and jsflow.py, jsflow.js and the readers they use retire; Python's taint (flow.py) onto `py_parse`'s trees; then the supply-chain detectors on the same scopes, benchmark-gated |
+| 3 | Parsers, scopes and flow: the detectors on bindings over the JavaScript and Python trees (§12, §13), constant folding of strings, the cross-file follower on them, project mode's passes (taint, SQL, function metrics) in the engine; the npm package's twins of them retired | The parsers done; project mode's JavaScript taint ported onto `js_parse`'s trees (§16: `js_flow`), both packages ask the engine for it, and jsflow.py, jsflow.js and the readers they used are retired (11,357 lines), the pass and the parser held to their recorded outputs. Next, in order: Python's taint (flow.py) onto `py_parse`'s trees; then the supply-chain detectors on the same scopes, benchmark-gated |
 | 4 | Linear-time matching: the pack's patterns on linre (§14), pyre and the shlex port retired, current Unicode | Every pattern linre accepts runs on it (616 of the pack's 657; done first, as no answer changes); the 41 others, pyre and the shlex port not started |
 | 5 | One call per file, a content cache (SHA-256), the guard's scan in a child process that fails closed, archive ambiguity checks | Not started |
 
@@ -822,9 +828,10 @@ commercial use may want a lawyer's view of that sentence.
 ## 12. The JavaScript parser
 
 `src/jsparse/` is a port of `lazaret.scanner.jsparse` (jsparse.py, 0.1.7's
-reader for the cross-file flow engine): the first piece of the engine's
-Rust-first detectors, whose later passes (scope resolution, data flow,
-constant folding of strings) will walk its trees.
+reader for the cross-file flow engine, retired with its npm twin in phase
+3): the first piece of the engine's Rust-first detectors, whose passes
+(project mode's taint, §16; scope resolution, data flow and constant
+folding of strings for the supply-chain detectors next) walk its trees.
 
 **What it reads.** ECMAScript 2025 with JSX and TypeScript — the syntax of
 .js .mjs .cjs .jsx .ts .tsx .mts .cts files — into ESTree-shaped trees:
@@ -833,7 +840,7 @@ TSEnumDeclaration, TSModuleDeclaration, TSImportEquals and
 TSExportAssignment. TypeScript's types, interfaces, aliases, overload
 signatures, abstract members and `declare` statements are read and left
 out; Flow's annotations in a .js file are read as TypeScript's. For every
-input it builds exactly the tree jsparse.py builds — every node type, field,
+input it builds exactly the tree jsparse.py built — every node type, field,
 value and `line` — or fails with the same JsSyntaxError line and reason.
 
 The calls: `js_parse` (`{"ts": false, "jsx": true}` by default, as
@@ -877,9 +884,9 @@ same token, and what reads differently once it has (a later `let x = 1`
 read as an expression) reads the same. Linear time: one token at a time,
 and a token, comment or blank run of 48 code points or more is scanned once
 and kept by its start, for the reads ahead that cross it again (jsparse.py
-scans it again each time: a 1 MB string behind 2,000 `f<` takes it 2.7 s,
+scanned it again each time: a 1 MB string behind 2,000 `f<` took it 2.7 s,
 the engine 0.04 s). Recursion is bounded by the depth limit (the two chains
-jsparse.py recurses on without it are loops here). The deepest stack — a
+jsparse.py recursed on without it are loops here). The deepest stack — a
 253-deep nesting of tagged templates, of the 51 constructs that nest —
 takes 231 KiB natively (release; the crate's test reads every construct at
 its deepest on a 1 MiB thread) and between 64 and 128 KiB in WebAssembly,
@@ -906,25 +913,35 @@ panic.
   engine keeps the answer and drops the cost.
 
 **Tests.** `cargo test --release` (`jsparse/tests.rs`): every construct
-that nests read at the deepest depth jsparse.py reads and failing one deeper
+that nests read at the deepest depth jsparse.py read and failing one deeper
 (the depths are jsparse.py's), all of them on a 1 MiB stack; the budgets at
 their edges (a generic arrow function of 2,044 parameters is one, of 2,045
 is not; function_type_ahead's 256 tokens; the file's allowance spent);
 the KeyError and recursion-limit answers; spans; interned names; 6,000
 seeded soups of pieces and arbitrary code points (controls, lone
 surrogates, values past U+10FFFF) that must not panic.
-`test_jsparse_native` and `_b` compare `js_parse` with `jsparse.parse` as
-JSON text (jsparse.py's dicts written as `json.dumps` writes them, without
-recursion) on test_js_parity_parse.py's inputs — its snippets, the
-repository's JavaScript, 60 seeded projects, 1,500 soups, 300 mutations,
-and its two linearity cases, which the engine reads in well under a second
-— and on jsparse_cases.py's: 231 more snippets (the budgets' edges, the bugs
-above, surrogates, numbers, escapes, regular expressions, templates, ASI,
+Until phase 3 retired jsparse.py (and its npm twin), `test_jsparse_native`
+and `_b` compared `js_parse` with `jsparse.parse` as JSON text (jsparse.py's
+dicts written as `json.dumps` writes them, without recursion) on the inputs
+test_js_parity_parse.py held the twin to — its snippets, the repository's
+JavaScript, 60 seeded projects, 1,500 soups, 300 mutations, and its two
+linearity cases, which the engine reads in well under a second — and on
+jsparse_cases.py's: 231 more snippets (the budgets' edges, the bugs above,
+surrogates, numbers, escapes, regular expressions, templates, ASI,
 comments, JSX, TypeScript, Flow, an error at every kind of token), every
 construct at 19 depths around the limit, 6,000 soups and 800 mutations;
 and the spans (without `start` and `end` the JSON is the same, and `line` is
-the line of `start`). `test_wasm_parity_jsparse` holds the WebAssembly build
-to the library, byte for byte (a Node script speaking native.js's protocol
+the line of `start`). Since then the trees are held to their recorded ones:
+`test_snapshot_js_parse` records each answer's SHA-256 on those inputs (the
+mutations now of generated projects, whose text does not change with the
+repository's: 9,743 answers, every one jsparse.py's before it retired) and
+with spans on the reader's snippets and 12 more projects (84);
+`tests/scanner/test_jsparse.py` pins node shapes, lines, literals, ASI,
+JSX, TypeScript, the dialects, the errors and linear time on the engine;
+`test_jsparse_native` the call's options and bounds (the dialect a path
+picks, spans, the depth limit, the answers kept from jsparse.py, linear
+time). `test_wasm_parity_jsparse` holds the WebAssembly build to the
+library, byte for byte (a Node script speaking native.js's protocol
 answers each call's SHA-256), on those snippets, sources and soups and on
 every construct at its deepest and one deeper.
 
@@ -933,7 +950,7 @@ npm packages installed on the development machine (24,428 files, 348.8 MB;
 typescript's 9.1 MB `lib/typescript.js` the largest), each read in
 `jsparse.dialect`'s dialect: identical trees for 24,424, identical errors
 for 4 (declaration files' `export = function f(…): T;`, a signature
-jsparse.py reads as a function expression), no difference. jsparse.py took
+jsparse.py read as a function expression), no difference. jsparse.py took
 250 s; the engine 12.0 s through the Python binding, its JSON included.
 
 **Throughput**, the release build on one thread, best of three, over those
@@ -941,7 +958,7 @@ jsparse.py reads as a function expression), no difference. jsparse.py took
 JSON 46 MB/s; over ordinary module code (puppeteer-core's 362 ESM files,
 1.9 MB) 70 and 57 MB/s; over typescript's `lib/` (19.8 MB of bundles and
 declaration files) 60 and 50 MB/s (`cargo run --release --example
-jsparse_bench -- throughput DIR…`). jsparse.py reads 1.3 MB/s. The parser
+jsparse_bench -- throughput DIR…`). jsparse.py read 1.3 MB/s. The parser
 adds 0.2 MB to the WebAssembly module (2.25 MB → 2.45 MB).
 
 ## 13. The Python parser
@@ -1627,10 +1644,13 @@ release still fails the gate (INCOMPLETE).
 
 `src/jsflow/` is a port of `lazaret.scanner.jsflow` (jsflow.py, project
 mode's interprocedural JavaScript taint since 0.1.7), function for
-function, onto `js_parse`'s trees: phase 3's first step (§8). jsflow.py is
-its reference until both packages ask the engine; then the npm package's
-twin (`js/src/scanner/jsflow.js`) and the readers both pass uses
-(`jsparse.py`, `js/src/lib/jsparse.js`) retire.
+function, onto `js_parse`'s trees: phase 3's first step (§8). Both packages
+ask the engine for it (the Python package's `flow._analyze_js` through
+`engine.js_flow`, the npm package's `scanner/flow.js` through
+`native.js`'s `jsFlow`), and jsflow.py, its npm twin
+(`js/src/scanner/jsflow.js`) and the readers they used (`jsparse.py`,
+`js/src/lib/jsparse.js`) are retired: 11,357 lines of Python and
+JavaScript.
 
 **The model** (jsflow.py's). Each function gets a summary — which of its
 parameters reach which sinks, what its return value carries — computed to
@@ -1652,30 +1672,53 @@ read, the fixpoint and the reporting pass, the configured part of the
 model, and the output.
 
 **What it answers.** `js_flow` (`{"files": [[path, length], …]}`, the
-contents concatenated as the text; `sources`, `sinks`, `full`, `partial`:
-the configuration taintspec validated) answers the pass's output in
-jsflow.py's order: `["skipped_size", path, n]` (X-FLOW-SKIPPED),
-`["issue", category, path, line, source, sink, chain]` and `["note",
-rule, name, path, line, msg, why, fix]` (Q-FLOW-SKIPPED,
-Q-FLOW-INCOMPLETE); the host builds its findings from them, with their
-snippets and redaction (flow._issue, flow._flow_note). Where jsflow.py
-keeps a dict's insertion order or dedupes with `dict.fromkeys`, so does the
-port — the order of a call's targets decides which of them a finding names
-— and the memoized points-to is filled in the same order (a cycle reads as
+contents concatenated as the text, a length of null for a file whose
+content is not text; `sources`, `sinks`, `full`, `partial`: the
+configuration taintspec validated; `run_limit`: `[base, steps per node]`,
+a lower limit for one function's reading, each part at most the default —
+a host can make the pass cheaper, never longer) answers the pass's output
+in jsflow.py's order: `["skipped_size", path, n, limit]` (X-FLOW-SKIPPED),
+`["issue", category, path, line, source, sink, chain, file]` (`file`: the
+index of the path's file in `files`, whose lines give the snippet) and
+`["note", rule, name, path, line, msg, why, fix]` (Q-FLOW-SKIPPED,
+Q-FLOW-INCOMPLETE); each host builds its findings from them, with their
+snippets and redaction (`flow._issue`, `flow._flow_note`,
+`flow._skipped_size`, and flow.js's twins of them). Where jsflow.py kept a
+dict's insertion order or deduped with `dict.fromkeys`, so does the port —
+the order of a call's targets decides which of them a finding names — and
+the memoized points-to is filled in the same order (a cycle reads as
 unknown while it is open, so what a memo holds depends on what was asked
 first).
 
 **Bounds.** jsflow.py's: a work budget per syntax tree node, a per-reading
 limit, 50 re-analyses of a function, 2,000,000 code points a file and
 8,000,000 a pass. The readings recurse on nested expressions and
-statements as jsflow.py's do; the parser's nesting bound keeps the deepest
-input of each construct within a 2 MiB thread stack (`jsflow/tests.rs`).
+statements as jsflow.py's did; the parser's nesting bound keeps the
+deepest input of each construct under 512 KiB of stack natively (release;
+`jsflow/tests.rs` reads each on a 2 MiB thread). A host's thread may have
+less — a worker thread's default is 512 KiB on macOS and 128 KiB on musl —
+so natively `js_flow`, `js_parse` and `py_parse` run on a thread of the
+engine's own with an 8 MiB stack (`api::OWN_STACK`; 64 MiB in a debug
+build), one per calling thread, made at its first such call and kept for
+the next (the engine's caches, compiled patterns among them, are per
+thread), ending with the calling thread; a call from a thread of 128 KiB
+reads the deepest input of every construct (`jsflow/tests.rs`). It costs
+about 50 µs a call and 7% of the pass over the 1,490 packages below. In
+WebAssembly the calls run on the module's 8 MiB stack, where
+`test_wasm_parity_jsflow` reads the deepest input of every construct.
 
-**Held to jsflow.py.** `test_jsflow_reference.py`: every output, in
-order, on the corpus `test_js_parity_flow.py` holds the npm engine to (the
+**Held to its recorded outputs.** `test_snapshot_js_flow` (§5): every
+output, in order, on the corpus the port was held to jsflow.py on (the
 review's cases, the engine's own, the caps, seeded generated projects,
-token soups), with the default model and a configured one. Before
-committing, also on 1,490 installed npm packages read as projects (each
-package's own files, up to 1.5 MB), with the default model and with a
-configured one that makes `process.env`, `options.*` and `args` sources (591
-outputs): no difference; the engine took 10 s where jsflow.py took 125 s.
+token soups), with the default model and a configured one, and the call's
+own cases (files that are not text, a lowered limit); the hosts' findings
+from it are held to each other by `test_js_parity_flow` (every field of
+every finding, the WebAssembly build's answers through flow.js against the
+library's through flow.py), and the WebAssembly build's answers to the
+library's by `test_wasm_parity_jsflow`. Until jsflow.py retired,
+`test_jsflow_reference.py` held the port to it output for output on that
+corpus, and so did, before each commit, 1,490 installed npm packages read
+as projects (each package's own files, up to 1.5 MB), with the default
+model and with configured ones that make `process.env`, `options.*` and
+`args` sources (329 and 591 outputs): no difference; the engine took 10 s
+where jsflow.py took 125 s.

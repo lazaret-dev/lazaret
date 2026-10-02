@@ -18,8 +18,9 @@ and `lex.structure` calls) held to the parsers and to Python's tokenizer:
 * Both lexers are total: on any text, every character in at most one
   token, in order (seeded soups of the characters that matter).
 
-The JavaScript oracle is the engine's own parser (held to jsparse.py's trees
-by test_jsparse_native*.py); the Python one is a python3.13 subprocess (the
+The JavaScript oracle is the engine's own parser (held to its recorded trees
+by test_snapshot_js_parse.py; to jsparse.py's, node for node, until the
+Rust-first refactor retired it); the Python one is a python3.13 subprocess (the
 suite runs on Python 3.10 to 3.14), skipped where there is none. Inert text
 only: nothing is executed. Skipped where the native library is not built.
 """
@@ -28,12 +29,11 @@ import random
 import subprocess
 import unittest
 
-from lazaret.scanner import _native, jsparse
+from lazaret.scanner import _native
 from tests.architecture import jsgen
 from tests.architecture import jsparse_cases as jcases
 from tests.architecture import pyparse_cases as pcases
 from tests.architecture import pyparse_oracle
-from tests.architecture import test_js_parity_parse as twin
 
 PYTHON313 = pyparse_oracle.PYTHON313
 
@@ -101,7 +101,7 @@ def js_differences(items, limit=5):
     number of files and literals compared."""
     found, files, literals = [], 0, 0
     for path, src in items:
-        ts, jsx = jsparse.dialect(path)
+        ts, jsx = jcases.dialect(path)
         status, answer = jcases.native_raw("js_parse_file", {"path": path, "spans": True}, src)
         tree = json.loads(answer)
         if status != 0 or "error" in tree:
@@ -168,17 +168,17 @@ class JavaScriptLexerTests(unittest.TestCase):
         self.assertGreaterEqual(k, literals)
 
     def test_snippets(self):
-        self.same(twin.items_of(twin.SNIPPETS), 40, 30)
+        self.same(jcases.items_of(jcases.READER_SNIPPETS), 40, 30)
 
     def test_own_sources(self):
-        self.same(twin.own_sources(), 100, 10_000)
+        self.same(jcases.own_sources(), 100, 10_000)
 
     def test_generated_projects(self):
         self.same([(f["path"], f["content"]) for files in jsgen.projects(20261002, 40) for f in files], 100, 5_000)
 
     def test_soups_and_mutations(self):
         # (most do not parse: the ones that do are compared)
-        self.same(twin.soups(20261002, 800) + twin.mutations(twin.own_sources(), 20261002, 200), 50, 1_000)
+        self.same(jcases.token_soups(20261002, 800) + jcases.mutations(jcases.own_sources(), 20261002, 200), 50, 1_000)
 
     def test_typescript_types_are_read_too(self):
         # the parser skips a type; its strings are strings all the same

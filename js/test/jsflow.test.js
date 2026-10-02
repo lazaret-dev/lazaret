@@ -1,5 +1,6 @@
-// The cross-file JavaScript pass on parsed trees (src/scanner/jsflow.js,
-// 0.1.7): twin of tests/scanner/test_jsflow.py. Express-style routes (a
+// The cross-file JavaScript pass on parsed trees (0.1.7; the engine's since
+// the Rust-first refactor: rust/crates/lazaret-engine/src/jsflow/, through
+// src/scanner/flow.js): twin of tests/scanner/test_jsflow.py. Express-style routes (a
 // handler's request and response whatever their names), a request's and a
 // response's methods binding to no project function, a fixed host or a path
 // on this site clearing SSRF and open redirect, Server-Sent Events frames,

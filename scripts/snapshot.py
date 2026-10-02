@@ -13,10 +13,11 @@ script is how a change in those outputs is reviewed:
 SET is a snapshot test's input set (`scripts/snapshot.py sets` lists them),
 or `files:LIST`, a file naming one source file per line: each file's
 dependency-mode scan_file, import-time test, spawned scripts, string-array
-line, data flow and decoded view (by hash). The library is the one
-LAZARET_NATIVE_LIB names, else the installed package's. Recordings hold the
-inputs' first characters, so keep those of malicious corpora outside the
-repository.
+line, data flow and decoded view (by hash). A parser's answer (js_parse,
+py_parse) is recorded as its JSON text, and a difference in it is shown
+where the two texts part. The library is the one LAZARET_NATIVE_LIB names,
+else the installed package's. Recordings hold the inputs' first characters,
+so keep those of malicious corpora outside the repository.
 """
 import argparse
 import gzip
@@ -36,7 +37,11 @@ from lazaret.scanner import _native  # noqa: E402
 MODULES = ("tests.architecture.test_snapshot_hooks", "tests.architecture.test_snapshot_signs",
            "tests.architecture.test_snapshot_scanfile", "tests.architecture.test_snapshot_lexer",
            "tests.architecture.test_snapshot_hook_commands", "tests.architecture.test_snapshot_small",
-           "tests.architecture.test_snapshot_crossfile")
+           "tests.architecture.test_snapshot_crossfile", "tests.architecture.test_snapshot_js_flow",
+           "tests.architecture.test_snapshot_js_parse")
+# calls answering a parsed tree, which may be deeper than json.loads reads:
+# recorded as the answer's JSON text ({"ok_text": …})
+RAW_CALLS = ("js_parse", "js_parse_file", "py_parse")
 EXCERPT = 300                    # characters of each input a recording keeps
 LANGS = {".py": "py", ".pyw": "py", ".js": "js", ".mjs": "js", ".cjs": "js", ".jsx": "js", ".ts": "js",
          ".tsx": "js", ".mts": "js", ".cts": "js"}
@@ -75,10 +80,18 @@ def file_calls(list_path):
 
 
 def run(calls):
-    out = []
-    for i in range(0, len(calls), 500):
-        part = calls[i:i + 500]
-        out.extend(_native.call("batch", {"calls": [[c[0], c[1], c[2]] for c in part], "threads": 2}))
+    out = [None] * len(calls)
+    plain = [k for k, c in enumerate(calls) if c[0] not in RAW_CALLS]
+    for i in range(0, len(plain), 500):
+        part = plain[i:i + 500]
+        batch = [[calls[k][0], calls[k][1], calls[k][2]] for k in part]
+        answers = _native.call("batch", {"calls": batch, "threads": 2})
+        for k, answer in zip(part, answers):
+            out[k] = answer
+    for k, c in enumerate(calls):
+        if c[0] in RAW_CALLS:
+            status, text = _native.call_raw(c[0], c[1], c[2])
+            out[k] = {"ok_text": text} if status == _native.STATUS_OK else {"error": text}
     return out
 
 
@@ -111,6 +124,17 @@ def clip(value, width=400):
     return text if len(text) <= width else text[:width] + " …"
 
 
+def clip_pair(a, b, width=400):
+    """The two outputs, each clipped; two JSON texts (RAW_CALLS) around where they part."""
+    if isinstance(a, dict) and isinstance(b, dict) and "ok_text" in a and "ok_text" in b:
+        x, y = a["ok_text"], b["ok_text"]
+        i = next((k for k, (p, q) in enumerate(zip(x, y)) if p != q), min(len(x), len(y)))
+        lo = max(0, i - width // 3)
+        return tuple(("… " if lo else "") + t[lo:lo + width] + (" …" if lo + width < len(t) else "")
+                     for t in (x, y))
+    return clip(a, width), clip(b, width)
+
+
 def diff(a_path, b_path, show):
     a, b = load(a_path), load(b_path)
     if len(a) != len(b) or any(x["sha"] != y["sha"] or x["call"] != y["call"] for x, y in zip(a, b)):
@@ -122,8 +146,9 @@ def diff(a_path, b_path, show):
     print(f"{len(moved)} of {len(a)} outputs differ" + (": " + ", ".join(f"{c} {n}" for c, n in sorted(by_call.items()))
                                                       if moved else ""))
     for x, y in moved[:show]:
-        print(f"\n#{x['k']} {x['call']} {json.dumps(x['args'], sort_keys=True)}\n  input:  {clip(x['input'], 300)}"
-              f"\n  before: {clip(x['out'])}\n  after:  {clip(y['out'])}")
+        before, after = clip_pair(x["out"], y["out"])
+        print(f"\n#{x['k']} {x['call']} {clip(x['args'], 300)}\n  input:  {clip(x['input'], 300)}"
+              f"\n  before: {before}\n  after:  {after}")
 
 
 def _configure_stdio():

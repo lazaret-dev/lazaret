@@ -302,6 +302,23 @@ export function crossFileIssues(files, skipPaths = new Set(), { who = "Dependenc
   return out;
 }
 
+// ---- the cross-file JavaScript taint pass ----
+
+/**
+ * The cross-file JavaScript taint pass (rust/crates/lazaret-engine/src/jsflow/; the Python
+ * package's engine.js_flow) over `files` ({path, content}: a project's own JavaScript and
+ * TypeScript; a content that is not a string is noted as not text). `runLimit` ([base, steps per
+ * node]) lowers the limit of one function's reading. The pass's outputs, in order:
+ * ["skipped_size", path, n, limit], ["issue", category, path, line, source, sink, chain, the index
+ * of the path's file in `files`], ["note", rule, name, path, line, msg, why, fix].
+ */
+export function jsFlow(files, { runLimit = null } = {}) {
+  const texts = files.map((f) => (typeof f.content === "string" ? f.content : null));
+  const args = { files: files.map((f, k) => [f.path, texts[k] === null ? null : codePoints(texts[k])]) };
+  if (runLimit) args.run_limit = runLimit;
+  return call("js_flow", args, texts.filter((t) => t !== null));
+}
+
 // ---- scan_file ----
 
 const ISSUE_KEYS = ["rule", "name", "type", "sev", "msg", "why", "fix", "ref"];

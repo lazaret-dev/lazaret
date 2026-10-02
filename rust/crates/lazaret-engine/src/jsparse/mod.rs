@@ -1,5 +1,5 @@
-//! A JavaScript parser: a port of `lazaret.scanner.jsparse` (jsparse.py),
-//! which is its reference.
+//! A JavaScript parser: a port of `lazaret.scanner.jsparse` (jsparse.py,
+//! retired in phase 3 of the Rust-first refactor).
 //!
 //! # What it reads
 //!
@@ -15,11 +15,12 @@
 //! validator: a program it cannot read is a syntax error (a line and a
 //! reason), early errors are not checked.
 //!
-//! For every input it builds exactly the tree jsparse.py builds — every
+//! For every input it builds exactly the tree jsparse.py built — every
 //! node, field, value and line — or fails with the same line and reason
-//! (python/tests/architecture/test_jsparse_native.py holds it to that, node
-//! for node). Where jsparse.py has a bug, this has the same one (see
-//! docs/RUST_ENGINE.md, "The JavaScript parser").
+//! (it was held to that node for node until jsparse.py retired; since then
+//! python/tests/architecture/test_snapshot_js_parse.py holds its trees to
+//! the recorded ones). Where jsparse.py had a bug, this has the same one
+//! (see docs/RUST_ENGINE.md, "The JavaScript parser").
 //!
 //! # The tree
 //!

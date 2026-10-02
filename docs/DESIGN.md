@@ -128,8 +128,9 @@ parity test excludes it (`_python_only` in `test_js_parity.py`):
 - **The AST half of the interprocedural flow engine** — `flow.py`'s Python
   analysis is AST-based and has no JS twin; its `X-*` findings and `Q-FLOW-*`
   coverage notes on Python files are Python-only. The JavaScript half of the
-  flow engine *is* twinned (`js/src/scanner/flow.js` and `jsflow.js`, on the
-  reader `js/src/lib/jsparse.js`).
+  flow engine is the native engine's in both packages since the Rust-first
+  refactor's phase 3 (`js_flow`; `js/src/scanner/flow.js` builds the npm
+  package's findings from it, as `flow.py` builds the Python package's).
 
 (The cross-file received-code follower was the second exception until 0.1.8;
 both packages run the native engine's now — §5c.)
@@ -266,22 +267,26 @@ Whole-program analysis that follows untrusted data through function calls and
 across files — a source in one module reaching a sink in another (`X-*`
 findings name both ends). Python analysis is AST-based (import resolution,
 `self`/`cls`, constructors, a worklist fixpoint composing `f → g → sink`
-chains). JavaScript and TypeScript are parsed too (0.1.7): `jsparse.py` reads
+chains). JavaScript and TypeScript are parsed too (0.1.7; since the
+Rust-first refactor's phase 3 by the engine, in both packages: the `js_parse`
+and `js_flow` calls, docs/RUST_ENGINE.md §12 and §16): the parser reads
 ES2025 with JSX, TypeScript and Flow annotations into ESTree trees with every
-node's line (linear: one token at a time, bounded reads ahead, a
-`JsSyntaxError` past `MAX_DEPTH` nesting), and `jsflow.py` follows them with
-the same model — per-function summaries (parameters → sinks, what the
+node's line (linear: one token at a time, bounded reads ahead, an error past
+`MAX_DEPTH` nesting), and the pass follows them with the same model — per-function summaries (parameters → sinks, what the
 function returns) to a fixpoint over the call graph callees first, scopes
 and a flow-insensitive points-to for functions, modules, classes and object
 literals, values followed through locals, closures, containers, callbacks
 and exported variables. It is deterministic: no wall clock — a work budget
 per syntax tree node, a limit per reading of one function and a re-analysis
-cap per function bound it, counted identically in both engines. Its twins
-are `js/src/lib/jsparse.js` and `js/src/scanner/jsflow.js`, held node for
-node and step for step by `test_js_parity_parse.py` and
-`test_js_parity_flow.py` (the latter over seeded generated projects,
-`tests/architecture/jsgen.py`). This is the engine whose **Python (AST)
-half is Python-only** (§2). Custom taint specs
+cap per function bound it. Until phase 3 it was `jsparse.py` and
+`jsflow.py` with npm twins (`js/src/lib/jsparse.js`,
+`js/src/scanner/jsflow.js`) held to them node for node and step for step;
+the engine's port was held to them output for output, then they retired.
+Now `test_snapshot_js_parse.py` and `test_snapshot_js_flow.py` hold the
+parser's trees and the pass's outputs to the recorded ones, and
+`test_js_parity_flow.py` the two packages' findings to each other (over
+seeded generated projects among others, `tests/architecture/jsgen.py`).
+This is the engine whose **Python (AST) half is Python-only** (§2). Custom taint specs
 (`--taint-config`, Semgrep-style) feed both the intra-file and cross-file
 passes. A repository's own `.lazaret-taint.json` is loaded only with
 `--trust-repo-config`, and even then its sanitizers are ignored (a repo could
@@ -899,7 +904,7 @@ fixture.
 |---|---|
 | `python/src/lazaret/scanner/core.py` | The engine: rules, taint, `scan_project`, `--deps`, received-code detector, cross-file follower |
 | `python/src/lazaret/scanner/flow.py` | Interprocedural cross-file taint (Python AST; builds the findings of the JS pass) |
-| `python/src/lazaret/scanner/jsparse.py`, `jsflow.py` | The JavaScript / TypeScript reader and the JS cross-file pass (twins: `js/src/lib/jsparse.js`, `js/src/scanner/jsflow.js`) |
+| `rust/crates/lazaret-engine/src/jsparse/`, `jsflow/` | The JavaScript / TypeScript reader and the JS cross-file pass (the `js_parse` and `js_flow` calls, both packages'; jsparse.py, jsflow.py and their npm twins until phase 3) |
 | `python/src/lazaret/scanner/autorun.py`, `ghworkflow.py` | Editor and AI-agent settings that run commands (SC-AUTORUN) and the workflows the Shai-Hulud worms planted (SC-WORKFLOW-*); twins `js/src/lib/autorun.js`, `ghworkflow.js` |
 | `python/src/lazaret/scanner/frameworks.py` | Which route handler parameters Flask / FastAPI / Django fill from the request (shared by both taint passes; twinned in `js/src/scanner/taint.js`) |
 | `python/src/lazaret/scanner/sca_feeds.py` | CVE bundle build (OSV/KEV/EPSS) |

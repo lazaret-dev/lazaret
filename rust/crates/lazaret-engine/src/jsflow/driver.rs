@@ -96,6 +96,10 @@ pub struct Config {
     pub extra_sinks: Vec<(Rc<Regex>, u8)>,
     pub full: HashSet<PyStr>,
     pub partial: HashMap<PyStr, u8>,
+    /// one reading of one function: run_base + run_per_node steps per node
+    /// of it (RUN_BASE, RUN_PER_NODE unless lowered: with_run_limit)
+    pub run_base: u64,
+    pub run_per_node: u64,
     source: Rc<Regex>,
     sinks: Vec<Rc<Regex>>,
     fixed: Rc<Regex>,
@@ -120,11 +124,21 @@ impl Config {
             extra_sinks: extra_sinks.iter().map(|(p, c)| (compile(p), *c)).collect(),
             full: full.iter().cloned().collect(),
             partial: part,
+            run_base: RUN_BASE,
+            run_per_node: RUN_PER_NODE,
             source: rx(SOURCE_RE),
             sinks: SINKS.iter().map(|(p, _, _)| rx(p)).collect(),
             fixed: rx(FIXED_PREFIX_RE),
             sse: rx(SSE_RE),
         }
+    }
+
+    /// A lower limit for one function's reading (each part at most the
+    /// default: a host can make the pass cheaper, never longer).
+    pub fn with_run_limit(mut self, base: u64, per_node: u64) -> Config {
+        self.run_base = base.min(RUN_BASE);
+        self.run_per_node = per_node.min(RUN_PER_NODE);
+        self
     }
 
     pub fn is_source(&self, text: &[u32]) -> bool {
@@ -165,14 +179,15 @@ impl Config {
 /// What the pass gives, in jsflow.py's order: X-FLOW-SKIPPED findings as
 /// the files are read, issues as the reporting pass finds them, then the
 /// notes. The host builds its findings from them (flow._issue,
-/// flow._flow_note, jsflow._skipped_size).
+/// flow._flow_note, flow._skipped_size; flow.js's twins).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Out {
     /// a file over MAX_FILE code points
     SkippedSize { path: PyStr, n: usize },
     /// request data reaching a sink: (category, the file and line where it
-    /// is reported, the source's location, the sink's, the way it came)
-    Issue { cat: u8, path: PyStr, line: u32, source: PyStr, sink: PyStr, via: PyStr },
+    /// is reported, the index of that file in the input, the source's
+    /// location, the sink's, the way it came)
+    Issue { cat: u8, path: PyStr, file: u32, line: u32, source: PyStr, sink: PyStr, via: PyStr },
     Note { rule: &'static str, name: &'static str, path: PyStr, line: u32, msg: PyStr, why: &'static str, fix: &'static str },
 }
 
@@ -265,18 +280,26 @@ impl Program {
 }
 
 /// The cross-file JavaScript pass over `files` (path, content: the
-/// project's own JavaScript and TypeScript, no dependencies).
-pub fn analyze(files: &[(PyStr, PyStr)], cfg: Config) -> Vec<Out> {
+/// project's own JavaScript and TypeScript, no dependencies; None: a file
+/// whose content is not text, noted as skipped).
+pub fn analyze(files: &[(PyStr, Option<PyStr>)], cfg: Config) -> Vec<Out> {
     let mut prog = Program::new(Rc::new(cfg));
     let mut findings: Vec<Out> = Vec::new();
     let mut skipped: BTreeMap<PyStr, PyStr> = BTreeMap::new();
     let mut over: Vec<PyStr> = Vec::new();
     let mut total = 0usize;
-    for (path, content) in files {
+    for (k, (path, content)) in files.iter().enumerate() {
         let low = lower(path);
         if [".d.ts", ".d.mts", ".d.cts"].iter().any(|e| low.ends_with(&u(e))) {
             continue; // a declaration file: types, no code
         }
+        let content = match content {
+            Some(c) => c,
+            None => {
+                skipped.insert(path.clone(), u("its content is not text"));
+                continue;
+            }
+        };
         if content.len() > MAX_FILE {
             findings.push(Out::SkippedSize { path: path.clone(), n: content.len() });
             continue;
@@ -288,7 +311,7 @@ pub fn analyze(files: &[(PyStr, PyStr)], cfg: Config) -> Vec<Out> {
         match crate::jsparse::parse_file(path, content) {
             Ok(tree) => {
                 total += content.len();
-                prog.add_module(path, tree);
+                prog.add_module(path, tree, k as u32);
             }
             Err(e) => {
                 let ts = crate::jsparse::dialect(path).0;
@@ -504,8 +527,8 @@ fn fixpoint(prog: &mut Program, findings: &mut Vec<Out>) -> Vec<Out> {
             &py_repr(&path),
             &u(&format!(
                 " at its limit of {} + {} steps per syntax tree node; flows through the rest of it may be missing.",
-                commas(RUN_BASE),
-                RUN_PER_NODE
+                commas(prog.cfg.run_base),
+                prog.cfg.run_per_node
             )),
         ]);
         notes.push(Out::Note {

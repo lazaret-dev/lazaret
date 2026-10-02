@@ -5,15 +5,19 @@
 // The Python engine's other half (Python files, AST-based) has no port: the
 // npm engine's gate says so.
 //
-// Since 0.1.7 the pass reads parsed trees (lib/jsparse.js) and follows
-// values with function summaries to a fixpoint: scanner/jsflow.js, the twin
-// of lazaret/scanner/jsflow.py. This module builds the findings and keeps
-// the public entry points.
+// The pass is the engine's (rust/crates/lazaret-engine/src/jsflow/, the
+// `js_flow` call, which the Python package runs too): parsed trees, function
+// summaries to a fixpoint, a work budget per syntax tree node. This module
+// builds the findings from its outputs and keeps the public entry points.
 import { cmpCodePoints } from "../lib/pycompat.js";
+import { jsFlow } from "../lib/native.js";
 import { REDACT, contextRedacted, contextSecrets, redactText, registerScanContext, SECRET_SKIP_RE }
   from "../lib/redact.js";
-import { analyze as analyzeJs } from "./jsflow.js";
 import { splitLines } from "./lines.js";
+
+const LINES_RE = /\r\n|[\n\r\u2028\u2029]/;                // JavaScript's line terminators
+// test hooks: { runLimit: [base, steps per node] } lowers the limit of one function's reading
+export const FLOW_OPTIONS = { runLimit: null };
 
 // category -> [severity, cwe, fix]; twin of flow.SINK_META
 const SINK_META = {
@@ -54,6 +58,35 @@ function flowIssue(cat, callerFile, line, lines, sourceLoc, sinkLoc, chain) {
   };
 }
 
+/** X-FLOW-SKIPPED: a file over the pass's size limit, in code points (twin of flow._skipped_size). */
+function skippedSize(path, n, limit) {
+  return {
+    rule: "X-FLOW-SKIPPED", name: "JS flow analysis skipped (size)", type: "HOTSPOT", sev: "INFO",
+    msg: `${path} is ${n} characters; interprocedural JS taint analysis is skipped above ${limit} characters.`,
+    why: "Reading a file this large (usually minified or machine-generated) would cost the " +
+      "cross-file pass more time and memory than a scan should spend on one file.",
+    fix: "Split or deminify the file, or exclude it from the scan explicitly if the code is generated.",
+    ref: "Scalability", file: path, line: 1, snippet: [], snipStart: 1,
+  };
+}
+
+/** The pass's findings for `files` (twin of flow._analyze_js). */
+function analyzeJs(files, findings) {
+  if (!files.length) return;
+  const lines = new Map();                               // a file's lines (by its index), for the snippets
+  for (const out of jsFlow(files, { runLimit: FLOW_OPTIONS.runLimit })) {
+    if (out[0] === "skipped_size") {
+      findings.push(skippedSize(out[1], out[2], out[3]));
+    } else if (out[0] === "issue") {
+      const [, cat, path, line, source, sink, chain, k] = out;
+      if (!lines.has(k)) lines.set(k, files[k].content.split(LINES_RE));
+      findings.push(flowIssue(cat, path, line, lines.get(k), source, sink, chain));
+    } else {
+      findings.push(flowNote(...out.slice(1)));
+    }
+  }
+}
+
 /** An INFO coverage note (twin of flow._flow_note). */
 function flowNote(rule, name, fname, line, msg, why, fix) {
   return { rule, name, type: "SMELL", sev: "INFO", msg, why, fix,
@@ -75,7 +108,7 @@ export function analyzeFlows(files) {
     js = files.filter((f) => f && typeof f === "object" && f.lang === "js" && !f.dep && typeof f.path === "string");
   } catch { js = []; }
   try {
-    analyzeJs(js, findings, flowIssue, flowNote);
+    analyzeJs(js, findings);
   } catch (e) {
     findings.push(flowNote("Q-FLOW-INCOMPLETE", "Flow analysis incomplete (internal error)",
       js.length ? js[0].path : "?", 1,

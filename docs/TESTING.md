@@ -124,8 +124,8 @@ Notes:
   modules take 2–25 s each (`test_snapshot_signs` and `_hooks`, the hooks
   corpus' ~44,000 cases, the longest): run those two alone and batch the
   rest. `test_wasm_parity.py` (~20 s), `_signs.py` (~11 s), `_crossfile.py`
-  (~1 s), `_jsparse.py` (~18 s) and `_pyparse.py` also need the WebAssembly
-  build (`npm run build`), and skip without it.
+  (~1 s), `_jsparse.py` (~18 s), `_jsflow.py` (~10 s) and `_pyparse.py` also
+  need the WebAssembly build (`npm run build`), and skip without it.
 
 ---
 
@@ -174,7 +174,7 @@ f-strings and comments to Python 3.13's `tokenize`.
 every rule-pack pattern and 126 hand-written probes (search, match,
 fullmatch, finditer, sub, split, with pos/endpos; run it on each Python
 3.10–3.14), and `test_wasm_parity.py`, `_signs.py`, `_crossfile.py`,
-`_jsparse.py` and `_pyparse.py` hold the WebAssembly build the npm package
+`_jsparse.py`, `_jsflow.py` and `_pyparse.py` hold the WebAssembly build the npm package
 ships to the library, call for call and byte for byte, on the same corpora.
 `scripts/make_rust_tables.py --check` fails when the pack leaves its
 canonical form, a pattern stops compiling, its rule set is not the

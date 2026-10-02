@@ -62,7 +62,7 @@ class _EngineState:
             list(lazaret_flow._EXTRA_PY_SINKS),
             set(lazaret_flow.FULL_SANITIZERS_PY),
             dict(lazaret_flow._EXTRA_PARTIAL_PY),
-            lazaret_flow._JS_SOURCE_RE,
+            list(lazaret_flow._JS_SOURCES),
             list(lazaret_flow._JS_SINKS),
             set(lazaret_flow._JS_FULL_SAN),
             dict(lazaret_flow._JS_PARTIAL_SAN),
@@ -86,7 +86,7 @@ class _EngineState:
         lazaret_flow.FULL_SANITIZERS_PY.update(fsp)
         lazaret_flow._EXTRA_PARTIAL_PY.clear()
         lazaret_flow._EXTRA_PARTIAL_PY.update(epp)
-        lazaret_flow._JS_SOURCE_RE = jsrc
+        lazaret_flow._JS_SOURCES[:] = jsrc
         lazaret_flow._JS_SINKS[:] = jsinks
         lazaret_flow._JS_FULL_SAN.clear()
         lazaret_flow._JS_FULL_SAN.update(jfull)

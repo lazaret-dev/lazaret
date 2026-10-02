@@ -183,4 +183,4 @@ jobs:
           node -e 'import("../js/src/lib/native.js").then((n) => { if (!n.available()) process.exit(1); console.log("npm engine", n.call("version").version); })'
           python -m unittest tests.architecture.test_wasm_parity tests.architecture.test_wasm_parity_signs \
             tests.architecture.test_wasm_parity_crossfile tests.architecture.test_wasm_parity_jsparse \
-            tests.architecture.test_wasm_parity_pyparse -v
+            tests.architecture.test_wasm_parity_jsflow tests.architecture.test_wasm_parity_pyparse -v

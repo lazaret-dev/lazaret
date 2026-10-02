@@ -1,7 +1,7 @@
 //! Cross-file taint for JavaScript and TypeScript, on parsed trees: a port
-//! of `lazaret.scanner.jsflow` (jsflow.py), function for function, which is
-//! its reference until both packages ask the engine (phase 3 of the
-//! Rust-first refactor, docs/RUST_ENGINE.md §8).
+//! of `lazaret.scanner.jsflow` (jsflow.py), function for function, which
+//! both packages ask since phase 3 of the Rust-first refactor retired
+//! jsflow.py and its npm twin (docs/RUST_ENGINE.md §8, §16).
 //!
 //! The model is jsflow.py's: each function gets a summary — which of its
 //! parameters reach which sinks, what its return value carries — computed
@@ -13,12 +13,12 @@
 //! followed through a function flow-sensitively (`eval.rs`); the driver
 //! (`driver.rs`) reads the files, runs the fixpoint and the reporting pass
 //! and returns the findings as data, for the host to build its issues from
-//! (flow._issue, flow._flow_note).
+//! (flow._issue, flow._flow_note, flow._skipped_size; flow.js's twins).
 //!
 //! Deterministic: no wall clock — a work budget (steps per tree node), a cap
 //! on one function's reading and a per-function re-analysis cap bound the
-//! pass, as in jsflow.py. Where jsflow.py keeps a dict's insertion order or
-//! dedupes with `dict.fromkeys`, so does this: the order of a call's
+//! pass, as in jsflow.py. Where jsflow.py kept a dict's insertion order or
+//! deduped with `dict.fromkeys`, so does this: the order of a call's
 //! targets decides which of them a finding names.
 
 pub mod descs;
@@ -541,6 +541,8 @@ pub const GLOBAL: u32 = u32::MAX - 1;
 pub struct Mod {
     pub idx: ModId,
     pub path: PyStr,
+    /// the index of its file in the pass's input
+    pub file: u32,
     pub dir: PyStr,
     pub tree: Tree,
     pub scope: ScopeId,
@@ -1044,7 +1046,7 @@ impl Program {
     }
 
     // ---- indexing ----
-    pub fn add_module(&mut self, path: &[u32], tree: Tree) -> ModId {
+    pub fn add_module(&mut self, path: &[u32], tree: Tree, file: u32) -> ModId {
         let norm0: PyStr = path.iter().map(|&c| if c == 0x5C { 0x2F } else { c }).collect();
         let norm = join(&[], &norm0).unwrap_or(norm0);
         let idx = self.mods.len() as ModId;
@@ -1081,6 +1083,7 @@ impl Program {
         self.mods.push(Mod {
             idx,
             path: path.to_vec(),
+            file,
             dir,
             tree,
             scope,

@@ -24,7 +24,8 @@ test_review_flow_sink_line.py).
 * a taint config's JavaScript sources, sinks and sanitizers apply
   (flow.configure).
 
-The npm engine's twin (js/src/scanner/jsflow.js) must agree:
+The pass is the engine's (rust/crates/lazaret-engine/src/jsflow/); the
+npm package runs it too and builds the same findings:
 tests/architecture/test_js_parity_flow.py. Inert text only.
 """
 import textwrap
@@ -174,11 +175,11 @@ class Files(unittest.TestCase):
 
 class Config(unittest.TestCase):
     def setUp(self):
-        self.saved = (flow._JS_SOURCE_RE, list(flow._JS_SINKS), set(flow._JS_FULL_SAN), dict(flow._JS_PARTIAL_SAN))
+        self.saved = (list(flow._JS_SOURCES), list(flow._JS_SINKS), set(flow._JS_FULL_SAN), dict(flow._JS_PARTIAL_SAN))
 
     def tearDown(self):
         src, sinks, full, partial = self.saved
-        flow._JS_SOURCE_RE = src
+        flow._JS_SOURCES[:] = src
         flow._JS_SINKS[:] = sinks
         flow._JS_FULL_SAN.clear()
         flow._JS_FULL_SAN.update(full)

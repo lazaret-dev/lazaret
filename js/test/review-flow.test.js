@@ -1,5 +1,6 @@
 // The cross-file flow engine's JavaScript half (src/scanner/flow.js and,
-// since 0.1.7, src/scanner/jsflow.js on parsed trees), twin of
+// since 0.1.7, a pass on parsed trees: the engine's,
+// rust/crates/lazaret-engine/src/jsflow/), twin of
 // lazaret.scanner.flow's: a request value passed into a function whose
 // parameter reaches a sink (command, code, SQL, XSS, SSRF, redirect) is an
 // X-* finding at the call site that names the sink's own file and line.

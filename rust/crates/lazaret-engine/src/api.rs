@@ -213,6 +213,89 @@ fn batch(args: &Value) -> Result<Value, CallError> {
 /// Threads a batch may ask for.
 pub const MAX_THREADS: usize = 256;
 
+/// The stack of the thread a call that recurses on nested input runs on
+/// natively (the parsers, the JavaScript taint pass): the deepest input each
+/// reads takes a bounded stack — under 512 KiB natively (release;
+/// docs/RUST_ENGINE.md) — which the host's thread may not have (a worker
+/// thread's default is 512 KiB on macOS, 128 KiB on musl). In WebAssembly
+/// they run on the module's own stack, 8 MiB (rust/.cargo/config.toml).
+/// (A debug build's frames are several times larger.)
+pub const OWN_STACK: usize = if cfg!(debug_assertions) { 64 << 20 } else { 8 << 20 };
+
+/// `f` on a thread with an OWN_STACK stack: natively, the calling thread's
+/// own such thread, made at its first call and kept for the next (the
+/// engine's caches, compiled patterns among them, are per thread; a thread
+/// made per call would compile them again each time), ending when the
+/// calling thread does; inline if no thread can be made, and in
+/// WebAssembly.
+fn on_own_stack<T: Send + 'static, F: FnOnce() -> T + Send + 'static>(f: F) -> T {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        own_stack::run(f)
+    }
+    #[cfg(target_arch = "wasm32")]
+    f()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+mod own_stack {
+    use std::cell::RefCell;
+    use std::sync::mpsc::{channel, sync_channel, SendError, Sender};
+
+    type Job = Box<dyn FnOnce() + Send>;
+
+    thread_local! {
+        static WORKER: RefCell<Option<Sender<Job>>> = const { RefCell::new(None) };
+    }
+
+    fn spawn() -> Option<Sender<Job>> {
+        let (tx, rx) = channel::<Job>();
+        std::thread::Builder::new()
+            .name("lazaret-own-stack".into())
+            .stack_size(super::OWN_STACK)
+            .spawn(move || {
+                while let Ok(job) = rx.recv() {
+                    job();
+                }
+            })
+            .ok()?;
+        Some(tx)
+    }
+
+    pub fn run<T: Send + 'static, F: FnOnce() -> T + Send + 'static>(f: F) -> T {
+        let (back, answer) = sync_channel::<T>(1);
+        let job: Job = Box::new(move || {
+            let _ = back.send(f());
+        });
+        // to this thread's worker (made again if it is gone); kept here if none can be made
+        let kept = WORKER.with(|w| {
+            let mut w = w.borrow_mut();
+            let mut job = Some(job);
+            for _ in 0..2 {
+                if w.is_none() {
+                    *w = spawn();
+                }
+                let tx = match w.as_ref() {
+                    Some(tx) => tx,
+                    None => break,
+                };
+                match tx.send(job.take().expect("not sent yet")) {
+                    Ok(()) => return None,
+                    Err(SendError(j)) => {
+                        job = Some(j);
+                        *w = None;
+                    }
+                }
+            }
+            job
+        });
+        if let Some(job) = kept {
+            job();
+        }
+        answer.recv().expect("the call's own thread ended before answering")
+    }
+}
+
 fn batch_item(item: &Value) -> Value {
     let parts = item.as_arr().unwrap_or(&[]);
     let name = parts.first().and_then(|v| v.as_string()).unwrap_or_default();
@@ -297,14 +380,16 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
             } else {
                 (flag("ts", false), flag("jsx", true))
             };
-            Value::Raw(crate::jsparse::to_json(text, ts, jsx, flag("spans", false)))
+            let (spans, text) = (flag("spans", false), text.to_vec());
+            Value::Raw(on_own_stack(move || crate::jsparse::to_json(&text, ts, jsx, spans)))
         }
         "py_parse" => {
             // ast.parse(text) as Python 3.13 builds it, as JSON (pyparse/out.rs),
             // or {"error": {"line": n, "reason": …}}; "spans": each node's start
             // and end (code points) too
             let spans = matches!(args.get("spans"), Some(Value::Bool(true)));
-            Value::Raw(crate::pyparse::to_json(text, spans))
+            let text = text.to_vec();
+            Value::Raw(on_own_stack(move || crate::pyparse::to_json(&text, spans)))
         }
         "scan_file" => {
             let flag = |k: &str, d: bool| match args.get(k) {
@@ -733,25 +818,32 @@ fn cross_file(p: &Pack, args: &Value, text: &[u32]) -> Result<Value, CallError> 
 }
 
 /// js_flow: {"files": [[path, length], …] (their contents, concatenated,
-/// are the text), "sources": [pattern, …], "sinks": [[pattern, category],
-/// …], "full": [name, …], "partial": [[name, [category, …]], …]} (the
-/// configured part of the model: jsflow.config) -> the pass's output in
-/// order: ["skipped_size", path, n], ["issue", category, path, line,
-/// source, sink, via], ["note", rule, name, path, line, msg, why, fix].
+/// are the text; a length of null: a file whose content is not text),
+/// "sources": [pattern, …], "sinks": [[pattern, category], …], "full":
+/// [name, …], "partial": [[name, [category, …]], …] (the configured part
+/// of the model, as taintspec validated it), "run_limit": [base, per node]
+/// (optional: a lower limit for one function's reading)} -> the pass's
+/// output in order: ["skipped_size", path, n, the limit], ["issue",
+/// category, path, line, source, sink, via, the index of the path's file],
+/// ["note", rule, name, path, line, msg, why, fix].
 fn js_flow(args: &Value, text: &[u32]) -> Result<Value, CallError> {
     use crate::jsflow::{self, Config, Out};
     let bad = |m: &str| CallError::BadArgs(format!("js_flow: {}", m));
     let items = args.get("files").and_then(|f| f.as_arr()).ok_or_else(|| bad("files"))?;
-    let mut files: Vec<(PyStr, PyStr)> = Vec::with_capacity(items.len());
+    let mut files: Vec<(PyStr, Option<PyStr>)> = Vec::with_capacity(items.len());
     let mut at = 0usize;
     for item in items {
         let parts = item.as_arr().ok_or_else(|| bad("a file is not [path, length]"))?;
         let path = parts.first().and_then(|v| v.as_str()).ok_or_else(|| bad("a file's path"))?.to_vec();
+        if matches!(parts.get(1), Some(Value::Null)) {
+            files.push((path, None));
+            continue;
+        }
         let len = parts.get(1).and_then(|v| v.as_i64()).filter(|&n| n >= 0).ok_or_else(|| bad("a file's length"))? as usize;
         if at + len > text.len() {
             return Err(bad("the files' lengths run past the text"));
         }
-        files.push((path, text[at..at + len].to_vec()));
+        files.push((path, Some(text[at..at + len].to_vec())));
         at += len;
     }
     if at != text.len() {
@@ -780,12 +872,26 @@ fn js_flow(args: &Value, text: &[u32]) -> Result<Value, CallError> {
         }
         partial.push((name, bits));
     }
-    let out = jsflow::analyze(&files, Config::new(&sources, &sinks, &full, &partial));
+    let mut run_limit = (jsflow::RUN_BASE, jsflow::RUN_PER_NODE);
+    if let Some(limit) = args.get("run_limit") {
+        let parts = limit.as_arr().filter(|p| p.len() == 2).ok_or_else(|| bad("run_limit is not [base, per node]"))?;
+        let n = |v: &Value| v.as_i64().filter(|&n| n >= 0).map(|n| n as u64).ok_or_else(|| bad("a run_limit part"));
+        run_limit = (n(&parts[0])?, n(&parts[1])?);
+    }
+    // (the model is built on the pass's own thread: its patterns are not Send)
+    let out = on_own_stack(move || {
+        jsflow::analyze(&files, Config::new(&sources, &sinks, &full, &partial).with_run_limit(run_limit.0, run_limit.1))
+    });
     Ok(Value::Arr(
         out.into_iter()
             .map(|o| match o {
-                Out::SkippedSize { path, n } => Value::Arr(vec![Value::str("skipped_size"), Value::Str(path), Value::Int(n as i64)]),
-                Out::Issue { cat, path, line, source, sink, via } => Value::Arr(vec![
+                Out::SkippedSize { path, n } => Value::Arr(vec![
+                    Value::str("skipped_size"),
+                    Value::Str(path),
+                    Value::Int(n as i64),
+                    Value::Int(jsflow::MAX_FILE as i64),
+                ]),
+                Out::Issue { cat, path, file, line, source, sink, via } => Value::Arr(vec![
                     Value::str("issue"),
                     Value::str(jsflow::CATS[cat as usize]),
                     Value::Str(path),
@@ -793,6 +899,7 @@ fn js_flow(args: &Value, text: &[u32]) -> Result<Value, CallError> {
                     Value::Str(source),
                     Value::Str(sink),
                     Value::Str(via),
+                    Value::Int(file as i64),
                 ]),
                 Out::Note { rule, name, path, line, msg, why, fix } => Value::Arr(vec![
                     Value::str("note"),

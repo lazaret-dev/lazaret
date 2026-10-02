@@ -282,3 +282,30 @@ def cross_file_issues(files, skip_paths=(), who="Dependency code", one_package=F
         for k, issue in package.get("issues", ()):
             out.extend(_issues(todo[k]["path"], [issue]))
     return out
+
+
+def js_flow(files, sources=(), sinks=(), full=(), partial=None, run_limit=None):
+    """The cross-file JavaScript taint pass (rust/crates/lazaret-engine/src/
+    jsflow/) over `files` ({"path", "content"}: a project's own JavaScript
+    and TypeScript; a content that is not a str is noted as not text), with
+    the model's configured part as taintspec validated it: `sources`
+    (guarded patterns), `sinks` ((guarded pattern, category)), `full`
+    (sanitizers' call names) and `partial` (call name -> categories);
+    `run_limit` (base, steps per node) lowers the limit of one function's
+    reading. The pass's outputs, in order: ["skipped_size", path, n,
+    limit], ["issue", category, path, line, source, sink, chain, the index
+    of the path's file in `files`], ["note", rule, name, path, line, msg,
+    why, fix]. Raises _native.NativeError when the engine cannot answer."""
+    texts = [f["content"] if isinstance(f.get("content"), str) else None for f in files]
+    args = {"files": [[f["path"], None if t is None else len(t)] for f, t in zip(files, texts)]}
+    if sources:
+        args["sources"] = [g.pattern for g in sources]
+    if sinks:
+        args["sinks"] = [[g.pattern, cat] for g, cat in sinks]
+    if full:
+        args["full"] = sorted(full)
+    if partial:
+        args["partial"] = [[name, sorted(cats)] for name, cats in sorted(partial.items())]
+    if run_limit is not None:
+        args["run_limit"] = [int(run_limit[0]), int(run_limit[1])]
+    return _native.call("js_flow", args, "".join(t for t in texts if t is not None))

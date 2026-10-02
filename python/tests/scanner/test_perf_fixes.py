@@ -17,8 +17,9 @@ Acceptance criteria covered:
      on both curated fixtures and randomized inputs (differential).
   3. G3 — the cross-file JavaScript pass completes on adversarial input
      (since 0.1.7 it reads parsed trees: 1500 unclosed functions on one
-     line are one syntax error, noted); files above _JS_MAX_FILE are
-     skipped with a visible INFO finding (X-FLOW-SKIPPED), never silently.
+     line are one syntax error, noted); files above the engine's limit
+     (2,000,000 code points) are skipped with a visible INFO finding
+     (X-FLOW-SKIPPED), never silently.
   4. CLI end-to-end: a project containing the adversarial SQL file scans
      to completion with exit 0 in bounded time and still reports the
      genuine offender.
@@ -250,14 +251,15 @@ class G3FlowEngine(unittest.TestCase):
         self.assertLess(dt, 20.0, f"G3: _analyze_js took {dt:.1f}s")
 
     def test_oversized_file_skip_is_visible(self):
-        big = "var x = 1;\n" + "x;\n" * (lazaret_flow._JS_MAX_FILE // 2)
+        big = "var x = 1;\n" + "x;\n" * 1_000_000          # over the engine's 2,000,000 code points
         files = [{"path": "big.js", "content": big, "lang": "js"}]
         findings = []
         lazaret_flow._analyze_js(files, findings)
         skipped = [i for i in findings if i["rule"] == "X-FLOW-SKIPPED"]
         self.assertEqual(len(skipped), 1)
         self.assertEqual(skipped[0]["sev"], "INFO")
-        self.assertIn("big.js", skipped[0]["msg"])
+        self.assertEqual(skipped[0]["msg"], "big.js is 3000011 characters; interprocedural JS taint analysis is "
+                                            "skipped above 2000000 characters.")
 
 
 class CliEndToEnd(unittest.TestCase):

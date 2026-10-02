@@ -93,8 +93,10 @@ def version():
     return None if lib is None else lib.lazaret_engine_version().decode("ascii")
 
 
-def call(name, args=None, text=""):
-    """Run one call of the native engine and return its JSON answer."""
+def call_raw(name, args=None, text=""):
+    """Run one call of the native engine: (its status, its answer as JSON
+    text), the answer not parsed (a parsed tree may be deeper than
+    json.loads reads)."""
     lib = _load()
     if lib is None:
         raise NativeError(_load_error)
@@ -109,6 +111,12 @@ def call(name, args=None, text=""):
     finally:
         if out.value:
             lib.lazaret_engine_free(out.value, out_len.value)
+    return status, answer
+
+
+def call(name, args=None, text=""):
+    """Run one call of the native engine and return its JSON answer."""
+    status, answer = call_raw(name, args, text)
     if status == STATUS_OK:
         return json.loads(answer)
     message = json.loads(answer).get("error", "") if answer.startswith("{") else answer

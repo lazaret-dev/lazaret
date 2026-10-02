@@ -20,11 +20,10 @@ import os
 import subprocess
 import unittest
 
-from lazaret.scanner import _native, jsparse
+from lazaret.scanner import _native
 from tests import _support
 from tests.architecture import jsgen
 from tests.architecture import jsparse_cases as cases
-from tests.architecture import test_js_parity_parse as twin
 from tests.architecture.test_js_parity import NPM_READY, NPM_SKIP
 
 NATIVE_JS = os.path.join(_support.REPO_ROOT, "js", "src", "lib", "native.js")
@@ -97,7 +96,7 @@ def native_digests(calls):
 def parse_calls(items, spans=False):
     calls = []
     for path, src in items:
-        ts, jsx = jsparse.dialect(path)
+        ts, jsx = cases.dialect(path)
         args = {"ts": ts, "jsx": jsx}
         if spans:
             args["spans"] = True
@@ -119,22 +118,22 @@ class WasmParseParityTests(unittest.TestCase):
         return wasm
 
     def test_every_nesting_at_its_deepest(self):
-        """Each construct at the deepest depth jsparse.py reads (the deepest
+        """Each construct at the deepest depth the parser reads (the deepest
         stack) and one deeper, read the same, no trap."""
         items = []
         for name, path, make in cases.NESTINGS:
-            ts, jsx = jsparse.dialect(path)
+            ts, jsx = cases.dialect(path)
             k = 1
-            while k < 300 and cases.oracle_json(make(k + 1), ts, jsx).startswith('{"type"'):
+            while k < 300 and cases.native_json(make(k + 1), ts, jsx).startswith('{"type"'):
                 k += 1
             items += [(path, make(k)), (path, make(k + 1))]
         answers = self.compare(parse_calls(items))
         self.assertFalse([a for a in answers if not a.startswith("0:")])
 
     def test_snippets_and_sources(self):
-        items = twin.items_of(twin.SNIPPETS) + cases.SNIPPETS + twin.own_sources()
+        items = cases.items_of(cases.READER_SNIPPETS) + cases.SNIPPETS + cases.own_sources()
         self.compare(parse_calls(items))
-        self.compare(parse_calls(twin.items_of(twin.SNIPPETS) + twin.own_sources()[:40], spans=True))
+        self.compare(parse_calls(cases.items_of(cases.READER_SNIPPETS) + cases.own_sources()[:40], spans=True))
 
     def test_soups_and_projects(self):
         items = cases.soup(20261002, 1500) + [(f["path"], f["content"]) for files in jsgen.projects(20261002, 30)

@@ -1,6 +1,10 @@
 """Engine parity for the cross-file flow engine's JavaScript half: the npm
-engine's js/src/scanner/flow.js and jsflow.js against lazaret.scanner.flow
-and jsflow (_analyze_js, analyze), on parsed trees since 0.1.7.
+package's js/src/scanner/flow.js against lazaret.scanner.flow (_analyze_js,
+analyze). Since the Rust-first refactor both run the engine's pass (the
+`js_flow` call: natively in the Python package, as WebAssembly in the npm
+package; before it, jsflow.py and its npm twin) and build their findings
+from its outputs, so this holds the two hosts' findings — and the two
+builds of the pass — to each other.
 
 1. Both CLIs on a tree with JavaScript flows (a command and an SQL sink
    reached from a route in another file, a sanitized and a placeholder call,
@@ -23,8 +27,8 @@ and jsflow (_analyze_js, analyze), on parsed trees since 0.1.7.
    soups: every field of every finding, in order.
 
 All content is inert: nothing is executed, credentials are dummies.
-Skipped where node is missing; the CLI comparisons (1, 2) also where the npm
-engine's WebAssembly build is (npm run build in js/).
+Skipped where node or the npm package's WebAssembly build is missing (npm
+run build in js/).
 """
 import json
 import os
@@ -422,6 +426,7 @@ class FlowParityTests(unittest.TestCase):
                 self.assertEqual([i["rule"] for i in report["issues"]], ["Q-FLOW-SKIPPED"] * 3)
                 self.assertEqual(report["ratings"]["maintainability"], "A")
 
+    @unittest.skipUnless(parity.NPM_READY, parity.NPM_SKIP)
     def test_engines_agree_on_every_finding(self):
         rnd = random.Random(20260927)
         sets = review_cases()
