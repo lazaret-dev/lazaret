@@ -339,7 +339,13 @@ JavaScript twin, `js/src/lib/received.js`, was retired in 0.1.8).
   Python interpreter; and (0.1.8) data read from the machine and followed to
   a send (`core.local_data_sent_at`, below) when it goes to a data-capture
   service or a public IP address, or the whole environment, the instance's
-  credentials or a credential store to an exfiltration service; a request
+  credentials or a credential store to an exfiltration service; (rule set
+  2.17) the whole environment or a credential store sent anywhere, what
+  local commands print about the machine (`_SH_LISTINGS`: `ps`, `netstat`,
+  `ifconfig` …; not what Node's `os` module answers) sent anywhere, and a
+  raw socket's hard-coded public address counted as a public IP address
+  (`signs::raw_public_ip`: not this machine's, a private network's, a
+  link-local or a carrier-grade NAT address); a request
   to a webhook whose secret is written in the code (any service: a
   credential in the URL's path, `core.secret_endpoint_at`), credential files
   sent to a raw public IP address, three or more credential folders named in

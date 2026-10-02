@@ -646,6 +646,59 @@ pub fn raw_ip_connect(p: &Pack, text: &[u32]) -> Option<PyStr> {
     None
 }
 
+/// The first hard-coded public IP address a raw socket is opened to: an
+/// IP literal with a connect call after it within `_RAW_CONNECT_SPAN`
+/// (raw_ip_connect's reading) or around it (`net.connect(8058, '…')`,
+/// `s.connect(('…', 4444))`), else None. The import-time test's.
+fn raw_public_ip(p: &Pack, text: &[u32]) -> Option<PyStr> {
+    if !has(text, "connect") && !has(text, "Socket") {
+        return None;
+    }
+    let max = p.usize("_IP_LITERAL_MAX");
+    let span = p.usize("_RAW_CONNECT_SPAN");
+    let resolvers = p.strs("_PUBLIC_RESOLVERS");
+    let connect = p.re("_RAW_CONNECT_RE");
+    for (k, m) in p.re("_IP_LITERAL_RE").finditer(text).enumerate() {
+        if k >= max {
+            break;
+        }
+        let ip = m.group(1).unwrap_or(&[]);
+        if resolvers.iter().any(|r| r.as_slice() == ip) || !public_ipv4(ip) {
+            continue;
+        }
+        // (a connect call whose arguments hold it: begun at most a short way before it)
+        let before = m.start().saturating_sub(span.min(200));
+        if connect.search_at(text, m.end() as isize, (m.end() + span) as isize).is_some()
+            || connect.search_at(text, before as isize, m.start() as isize).is_some()
+        {
+            return Some(ip.to_vec());
+        }
+    }
+    None
+}
+
+/// Is an IPv4 address public: not this machine's, a private network's, a
+/// link-local or a carrier-grade NAT address?
+fn public_ipv4(addr: &[u32]) -> bool {
+    let parts: Vec<u32> = pystr::split_char(addr, c('.'))
+        .iter()
+        .map(|o| o.iter().try_fold(0u32, |n, &d| if (0x30..=0x39).contains(&d) { Some(n * 10 + d - 0x30) } else { None }))
+        .collect::<Option<Vec<u32>>>()
+        .unwrap_or_default();
+    if parts.len() != 4 || parts.iter().any(|&o| o > 255) {
+        return false;
+    }
+    let (a, b) = (parts[0], parts[1]);
+    !(a == 0
+        || a == 10
+        || a == 127
+        || a >= 224
+        || (a == 169 && b == 254)
+        || (a == 172 && (16..=31).contains(&b))
+        || (a == 192 && b == 168)
+        || (a == 100 && (64..=127).contains(&b)))
+}
+
 // ---------------- dead drops (0.1.8) ----------------
 
 /// core.dead_drop_at: (offset, host) of a send whose address the text fetched
@@ -3387,6 +3440,8 @@ fn import_time_risk_of(p: &Pack, text: &[u32], lang: Option<&str>) -> (Vec<PyStr
                     && p.re("_PUBLIC_KEY_FILE_RE").search(&what).is_none()));
         let dest = capture_service(p, text).or_else(|| if harvest { p.re("_EXFIL_SERVICE_RE").search(text) } else { None });
         let ip = if dest.is_none() && !in_address { p.re("_PUBLIC_IP_URL_RE").search(text) } else { None };
+        // (a raw socket's hard-coded public address is an IP address too)
+        let raw = if dest.is_none() && ip.is_none() && !in_address { raw_public_ip(p, text) } else { None };
         if let Some(dest) = dest {
             reasons.push(cat(&[&p.map_text("_IMPORT_SENT_REASONS", kind), &u(" ("), head(dest.group0(), 40), &u(")")]));
         } else if let Some(ip) = ip {
@@ -3396,8 +3451,15 @@ fn import_time_risk_of(p: &Pack, text: &[u32], lang: Option<&str>) -> (Vec<PyStr
                 None => g,
             };
             reasons.push(cat(&[&p.map_text("_IMPORT_SENT_IP_REASONS", kind), &u(" ("), rest, &u(")")]));
+        } else if let Some(raw) = raw {
+            reasons.push(cat(&[&p.map_text("_IMPORT_SENT_IP_REASONS", kind), &u(" ("), &raw, &u(")")]));
         } else if harvest && kind != "credentials" {
+            // (what no client sends, sent anywhere: _STRONG_IMPORT_REASONS)
             reasons.push(u("reads credentials or the whole environment and sends data over the network"));
+        } else if kind == "report" && !in_address && !p.strs("_LD_OS_NAMED").iter().any(|n| n.as_slice() == what.as_slice()) {
+            // (what a command prints about the machine, sent anywhere: no
+            // library posts `ps aux` when it is loaded)
+            reasons.push(cat(&[&u("sends what local commands report about the machine over the network ("), head(&what, 40), &u(")")]));
         }
         if !reasons.is_empty() {
             line = Some(line_of(text, at));

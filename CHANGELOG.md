@@ -18,7 +18,7 @@ whose outputs were recorded on the benchmark's files and on installed
 packages) — and the phases that follow rebuild the detectors on the
 engine's lexers and parsers (`docs/RUST_ENGINE.md` §8), each change to a
 finding a reviewed difference in the recorded outputs. The lexers (phase
-2) change none on real files; the registry's rule set is 2.16.0, so stored
+2) change none on real files; the registry's rule set is 2.17.0, so stored
 verdicts are scanned again. Whether it ships as 0.1.8 or 0.2.0 is decided
 before the release.
 
@@ -219,6 +219,27 @@ before the release.
   environment. On the benchmark model-providers becomes SUSPICIOUS (445 of
   516 malicious releases; the popular packages unchanged), and the holdout
   gains a release (627 of 747); on installed packages nothing moved.
+- **Import time grades what no library sends, wherever it goes.** Code that
+  runs when a package is loaded (SC-IMPORT-RISK) is CRITICAL, not MAJOR,
+  when it sends the whole environment or a credential store (an SSH key,
+  git credentials, browser storage) anywhere — before, only to a
+  data-capture service, an exfiltration service or a public IP address —
+  and when it sends what local commands print about the machine (`ps aux`,
+  `netstat`, `ifconfig` …; not what Node's `os` module answers). A raw
+  socket's hard-coded public address is an IP address
+  (`net.connect(4444, '203.0.113.7')`, `s.connect(('203.0.113.7', 4444))`;
+  not this machine's, a private network's, a link-local or a carrier-grade
+  NAT address). An SDK's shapes stay as they were: one variable sent (its
+  own key, to its service), variables listed by a prefix, a cloud metadata
+  address, its own service named; a file downloaded and then run stays
+  MAJOR. `os.environb` reads as `os.environ` does: a variable read from it
+  (pyarmor's `os.environb.get(b'http_proxy')`) was the whole environment.
+  The same reasons count in what a package runs when it is used
+  (SC-USE-RISK). Rule set 2.17.0. On the benchmark no verdict moved (the
+  popular packages: 3 SUSPICIOUS, 29 WARN, as before), and five malicious
+  releases' use-time findings now name the whole environment sent; the
+  holdout gains two npm releases (629 of 747), each on SC-IMPORT-RISK; on
+  installed packages nothing moved.
 
 ### Added
 

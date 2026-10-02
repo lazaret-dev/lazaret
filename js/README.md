@@ -142,12 +142,15 @@ resolving to one file. Writes are atomic
   source file is read and scanned as JavaScript), a dependency whose package
   root has a `binding.gyp` and no install script gets npm's implicit
   `node-gyp rebuild` hook (MAJOR), and a dependency's other JavaScript and
-  Python files get the import-time test (`SC-IMPORT-RISK`, MAJOR: the whole
-  environment or a credential store read and sent over the network, a download
-  run through a shell, or a value received over the network run as code (also
-  under an alias or an indirect `eval`), deserialized (`pickle.loads`, unsafe
-  `yaml.load`, `unserialize`; CWE-502), used as a dynamically imported module
-  name, or written to a file the same code then runs). Since 0.1.8 both
+  Python files get the import-time test (`SC-IMPORT-RISK`: CRITICAL for the
+  whole environment or a credential store read and sent over the network,
+  what local commands print about the machine sent (both wherever they go,
+  since rule set 2.17), local data sent to a raw socket's hard-coded public
+  address, a download run through a shell, or a value received over the
+  network run as code (also under an alias or an indirect `eval`); MAJOR when
+  the value is deserialized (`pickle.loads`, unsafe `yaml.load`,
+  `unserialize`; CWE-502), used as a dynamically imported module name, or
+  written to a file the same code then runs). Since 0.1.8 both
   tests also fail on data sent to a webhook or a bot whose secret is in
   the code (any service's), credential files sent to a raw IP
   address, a sweep of three or more credential folders, the host name sent

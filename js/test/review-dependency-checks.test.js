@@ -122,7 +122,7 @@ test("--deps: hooks escalate on what they run; import-time code; what cannot be 
     assert.deepEqual(files("SC-IMPORT-RISK"), ["node_modules/i/index.js", "node_modules/i/lib/util.py", "node_modules/v/index.js"]);
     const risk = rep.issues.find((i) => i.rule === "SC-IMPORT-RISK" && slash(i.file) === "node_modules/i/index.js");
     assert.deepEqual([risk.sev, risk.line, risk.msg],
-      ["MAJOR", 3, "Dependency code reads credentials or the whole environment and sends data over the network."]);
+      ["CRITICAL", 3, "Dependency code reads credentials or the whole environment and sends data over the network."]);
     const redacted = rep.issues.find((i) => i.rule === "SC-IMPORT-RISK" && slash(i.file) === "node_modules/v/index.js");
     assert.equal(redacted.snippet.length, 4);
     assert.ok(!redacted.snippet.join("\n").includes("ghp_") && !redacted.snippet.join("\n").includes("Zq8vN3pL0wX7rT2mK9sB4hF6"));

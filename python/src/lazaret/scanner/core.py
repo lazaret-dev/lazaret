@@ -4743,7 +4743,10 @@ _EXEC_CALL_RE = re.compile(
 # miner, a download run with the Python interpreter (a script, not a
 # binary), a GitHub Actions workflow that dumps every repository secret
 # (see persistence targets), wallet addresses swapped, and code built around
-# a string array (_SA_TECHNIQUE_REASON).
+# a string array (_SA_TECHNIQUE_REASON). Since rule set 2.17, what no client
+# sends (the whole environment, a credential store) and what local commands
+# print about the machine count wherever they are sent, and a raw socket's
+# hard-coded public address is an IP address.
 _STRONG_IMPORT_REASONS = (
     "runs code it receives over the network", "runs a downloaded script through a shell",
     "runs an encoded PowerShell command", "runs PowerShell that", "carries a script that downloads and runs code",
@@ -4755,6 +4758,8 @@ _STRONG_IMPORT_REASONS = (
     "sends what local commands report about the machine to", "reads local files and sends them to an exfiltration service",
     "sends the machine's public IP address to", "sends the machine's user or host name to an IP address",
     "reads credentials or the whole environment and sends them to an IP address",
+    "reads credentials or the whole environment and sends data over the network",
+    "sends what local commands report about the machine over the network",
     "reads local files and sends them to an IP address",
     "collects files from several credential folders", "sends the machine's user or host name to an address it hides",
     "sends the machine's user or host name in a DNS lookup",

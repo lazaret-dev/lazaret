@@ -1,6 +1,6 @@
 {
  "format": 1,
- "rule_set": "2.16.0",
+ "rule_set": "2.17.0",
  "source": "lazaret.scanner.core, extracted by scripts/make_rust_tables.py \u2014 do not edit",
  "values": {
   "ALWAYS_PRUNE_DIRS": {
@@ -10741,7 +10741,7 @@
   },
   "_LD_ENV_ALL_RE": {
    "flags": "",
-   "re": "\\bprocess\\s*\\.\\s*env\\b(?!\\s*(?:\\.|\\[|\\?\\.))|\\bos\\s*\\.\\s*environ\\b(?!\\s*(?:\\[|\\.\\s*(?:get|setdefault|pop|update)\\s*\\())|\\bos\\s*\\.\\s*environb\\b"
+   "re": "\\bprocess\\s*\\.\\s*env\\b(?!\\s*(?:\\.|\\[|\\?\\.))|\\bos\\s*\\.\\s*environb?\\b(?!\\s*(?:\\[|\\.\\s*(?:get|setdefault|pop|update)\\s*\\())"
   },
   "_LD_ENV_KWARG_RE": {
    "flags": "",
@@ -10753,7 +10753,7 @@
   },
   "_LD_ENV_RE": {
    "flags": "",
-   "re": "\\bprocess\\s*\\.\\s*env\\s*(?:\\.\\s*([A-Za-z_$][\\w$]*)|\\[\\s*[\"'`]([^\"'`\\n]{1,100})[\"'`]\\s*\\])|\\bos\\s*\\.\\s*environ\\s*(?:\\[\\s*[rbuRBU]?[\"']([^\"'\\n]{1,100})[\"']\\s*\\]|\\.\\s*get\\s*\\(\\s*[rbuRBU]?[\"']([^\"'\\n]{1,100})[\"'])|\\bos\\s*\\.\\s*getenv\\s*\\(\\s*[rbuRBU]?[\"']([^\"'\\n]{1,100})[\"']"
+   "re": "\\bprocess\\s*\\.\\s*env\\s*(?:\\.\\s*([A-Za-z_$][\\w$]*)|\\[\\s*[\"'`]([^\"'`\\n]{1,100})[\"'`]\\s*\\])|\\bos\\s*\\.\\s*environb?\\s*(?:\\[\\s*[rbuRBU]?[\"']([^\"'\\n]{1,100})[\"']\\s*\\]|\\.\\s*get\\s*\\(\\s*[rbuRBU]?[\"']([^\"'\\n]{1,100})[\"'])|\\bos\\s*\\.\\s*getenvb?\\s*\\(\\s*[rbuRBU]?[\"']([^\"'\\n]{1,100})[\"']"
   },
   "_LD_ENV_SELECT_RE": {
    "flags": "",
@@ -14362,6 +14362,12 @@
     },
     {
      "value": "reads credentials or the whole environment and sends them to an IP address"
+    },
+    {
+     "value": "reads credentials or the whole environment and sends data over the network"
+    },
+    {
+     "value": "sends what local commands report about the machine over the network"
     },
     {
      "value": "reads local files and sends them to an IP address"

