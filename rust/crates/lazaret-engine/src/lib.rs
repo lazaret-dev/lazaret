@@ -19,6 +19,7 @@ pub mod json;
 pub mod jsparse;
 pub mod lexer;
 pub mod linear;
+pub mod linre;
 pub mod normalize;
 pub mod pack;
 pub mod pyparse;

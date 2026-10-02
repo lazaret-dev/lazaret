@@ -64,6 +64,8 @@ pub const CALLS: &[&str] = &[
     "js_parse", "js_parse_file",
     // the Python parser (Python 3.13's ast trees)
     "py_parse",
+    // linre, the linear-time regex engine (not yet what the engine's patterns run on)
+    "linre.probe", "linre.check",
 ];
 
 fn dead_drop(v: Option<(usize, PyStr)>) -> Value {
@@ -368,6 +370,8 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
             })
         }
         "pyre.probe" => probe(args, text)?,
+        "linre.probe" => linre_probe(args, text)?,
+        "linre.check" => linre_check(p, args),
         "shlex_split" => match hooks::shlex_split(text) {
             Some(t) => strs(&t),
             None => Value::Null,
@@ -737,4 +741,170 @@ fn probe(args: &Value, text: &[u32]) -> Result<Value, CallError> {
         out.push(Value::obj(r));
     }
     Ok(Value::obj(vec![("groups", Value::Int(rx.groups as i64)), ("results", Value::Arr(out))]))
+}
+
+fn linre_match_value(m: &crate::linre::Match) -> Value {
+    let mut groups = Vec::new();
+    for g in 1..=m.regex().groups() {
+        groups.push(Value::Int(m.start_of(g) as i64));
+        groups.push(Value::Int(m.end_of(g) as i64));
+    }
+    Value::Arr(vec![
+        Value::Int(m.start() as i64),
+        Value::Int(m.end() as i64),
+        Value::Int(m.lastindex as i64),
+        Value::Arr(groups),
+    ])
+}
+
+fn linre_opt(m: Option<crate::linre::Match>) -> Value {
+    m.map(|m| linre_match_value(&m)).unwrap_or(Value::Null)
+}
+
+/// linre.probe: pyre.probe's answers from linre (search / match / fullmatch
+/// at pos..endpos, finditer, sub with a function, split), for the
+/// differential tests against Python's `re`; {"error": …, "refused": bool}
+/// for a pattern linre does not compile.
+fn linre_probe(args: &Value, text: &[u32]) -> Result<Value, CallError> {
+    use crate::linre::{self, Regex as Linre};
+    let pattern = arg_str(args, "pattern")?;
+    let flags = opt_str(args, "flags").map(|f| linre::flags_from_letters(&crate::pystr::to_string(&f))).unwrap_or(0);
+    let rx = match Linre::new(&pattern, flags) {
+        Ok(rx) => rx,
+        Err(e) => return Ok(Value::obj(vec![("error", Value::str(&e.msg)), ("refused", Value::Bool(e.refused))])),
+    };
+    let texts: Vec<Vec<u32>> = match args.get("texts").and_then(|t| t.as_arr()) {
+        Some(items) => items.iter().filter_map(|v| v.as_str().map(|s| s.to_vec())).collect(),
+        None => vec![text.to_vec()],
+    };
+    let pos = opt_int(args, "pos").unwrap_or(0) as isize;
+    let gated = matches!(args.get("gate"), Some(Value::Bool(true)));
+    let mut out = Vec::new();
+    for t in &texts {
+        let _gate = if gated { crate::textgate::open(t) } else { None };
+        let endpos = opt_int(args, "endpos").map(|e| e as isize).unwrap_or(t.len() as isize);
+        let r = vec![
+            ("search", linre_opt(rx.search_at(t, pos, endpos))),
+            ("match", linre_opt(rx.match_at(t, pos, endpos))),
+            ("fullmatch", linre_opt(rx.fullmatch_at(t, pos, endpos))),
+            ("finditer", Value::Arr(rx.finditer_at(t, pos, endpos).take(10_000).map(|m| linre_match_value(&m)).collect())),
+            (
+                "sub",
+                Value::Str(rx.sub_fn(t, 0, |m| {
+                    let mut v = u("<");
+                    v.extend_from_slice(m.group0());
+                    v.push(b'>' as u32);
+                    v
+                })),
+            ),
+            (
+                "split",
+                Value::Arr(rx.split(t, 0).into_iter().map(|p| p.map(|s| Value::Str(s.to_vec())).unwrap_or(Value::Null)).collect()),
+            ),
+        ];
+        out.push(Value::obj(r));
+    }
+    Ok(Value::obj(vec![("groups", Value::Int(rx.groups() as i64)), ("results", Value::Arr(out))]))
+}
+
+/// One pattern of the pack by the name the parity tests give it: a value's
+/// name, then `[i]` into a list and `['key']` into a map
+/// (`TAINT_SINKS['js'][3][1]`). Answers its {"re", "flags"} value.
+fn pack_pattern<'v>(p: &'v Pack, name: &str) -> Option<&'v Value> {
+    let base_end = name.find('[').unwrap_or(name.len());
+    let mut v = p.raw(&name[..base_end])?;
+    let mut rest = &name[base_end..];
+    while !rest.is_empty() {
+        let close = if rest.starts_with("['") || rest.starts_with("[\"") {
+            let q = &rest[1..2];
+            let inner_end = rest[2..].find(q)? + 2;
+            let key = &rest[2..inner_end];
+            v = v.get("map")?.get(key)?;
+            inner_end + 1
+        } else {
+            let end = rest.find(']')?;
+            let i: usize = rest.get(1..end)?.parse().ok()?;
+            v = v.get("list")?.as_arr()?.get(i)?;
+            end
+        };
+        if rest.as_bytes().get(close) != Some(&b']') {
+            return None;
+        }
+        rest = &rest[close + 1..];
+    }
+    Some(v)
+}
+
+/// Every pattern of the pack, named as the parity tests name them (values in
+/// name order, lists by index, maps in their order).
+pub fn pack_pattern_names(p: &Pack) -> Vec<String> {
+    fn walk(name: String, v: &Value, out: &mut Vec<String>) {
+        if v.get("re").is_some() {
+            out.push(name);
+        } else if let Some(items) = v.get("list").and_then(|l| l.as_arr()) {
+            for (i, x) in items.iter().enumerate() {
+                walk(format!("{}[{}]", name, i), x, out);
+            }
+        } else if let Some(m) = v.get("map").and_then(|m| m.as_obj()) {
+            for (k, x) in m {
+                let key = crate::pystr::to_string(k);
+                let q = if key.contains('\'') && !key.contains('"') { '"' } else { '\'' };
+                walk(format!("{}[{}{}{}]", name, q, key, q), x, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for n in p.names() {
+        if let Some(v) = p.raw(n) {
+            walk(n.to_string(), v, &mut out);
+        }
+    }
+    out
+}
+
+/// linre.check: {"names": [pack names]} (all of the pack's patterns when
+/// absent) -> [{"name", "accepted", "reason"?, "error"?, "insts"?}]: what
+/// linre makes of each pattern, and why it refuses one.
+fn linre_check(p: &Pack, args: &Value) -> Value {
+    let names: Vec<String> = match args.get("names").and_then(|n| n.as_arr()) {
+        Some(items) => items.iter().filter_map(|v| v.as_string()).collect(),
+        None => pack_pattern_names(p),
+    };
+    let mut out = Vec::with_capacity(names.len());
+    for name in names {
+        let mut r = vec![("name", Value::str(&name))];
+        match pack_pattern(p, &name) {
+            None => {
+                r.push(("accepted", Value::Bool(false)));
+                r.push(("reason", Value::str("no such pattern in the pack")));
+            }
+            Some(v) => {
+                let src = v.get("re").and_then(|s| s.as_str()).map(|s| s.to_vec()).unwrap_or_default();
+                let flags = v.get("flags").and_then(|f| f.as_string()).unwrap_or_default();
+                r.push(("flags", Value::str(&flags)));
+                match crate::linre::Regex::new(&src, crate::linre::flags_from_letters(&flags)) {
+                    Ok(rx) => {
+                        let info = rx.info();
+                        let opt = |s: Option<String>| s.map(|s| Value::str(&s)).unwrap_or(Value::Null);
+                        r.push(("accepted", Value::Bool(true)));
+                        r.push(("insts", Value::Int(info.insts as i64)));
+                        r.push(("lookarounds", Value::Int(info.lookarounds as i64)));
+                        r.push(("need", opt(info.need)));
+                        r.push(("lead", opt(info.lead)));
+                        r.push(("first", Value::Bool(info.first)));
+                        r.push(("simple", Value::Bool(info.simple)));
+                    }
+                    Err(e) => {
+                        r.push(("accepted", Value::Bool(false)));
+                        r.push(("reason", Value::str(&e.msg)));
+                        if !e.refused {
+                            r.push(("error", Value::Bool(true)));
+                        }
+                    }
+                }
+            }
+        }
+        out.push(Value::obj(r));
+    }
+    Value::Arr(out)
 }
