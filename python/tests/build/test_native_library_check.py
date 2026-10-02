@@ -12,12 +12,14 @@ on a real Windows executable when pip's launchers are at hand.
 """
 
 import importlib.util
+import io
 import os
 import pathlib
 import platform as platform_module
 import struct
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 import unittest.mock
@@ -442,14 +444,14 @@ class BuiltLibraryTests(unittest.TestCase):
         else:
             self.fail("not an ELF, Mach-O or PE file")
         # --load, in a process of its own (_native keeps the first library it loads): the
-        # library loads here, reports the package's version and answers as core does
+        # library loads here, reports the package's version and gives its known answer
         tag = (f"manylinux_{glibc[0]}_{glibc[1]}_{arch}" if data[:4] == b"\x7fELF"
                else f"macosx_{major}_{minor}_{arch}")
         env = {k: v for k, v in os.environ.items() if not k.startswith("LAZARET_")}
         p = subprocess.run([sys.executable, SCRIPT, str(_built_library()), tag, "--load"], capture_output=True,
                            encoding="utf-8", errors="replace", env=env, timeout=40)
         self.assertEqual(p.returncode, 0, p.stderr)
-        self.assertIn("loads here and answers as the Python engine does", p.stdout)
+        self.assertIn("loads here and answers as it should", p.stdout)
 
 
 class DistTests(unittest.TestCase):
@@ -465,16 +467,13 @@ class DistTests(unittest.TestCase):
         cls.version = cls.backend.version()
         root = pathlib.Path(cls._tmp.name)
         cls.libraries = {"manylinux_2_28_x86_64": elf(), "macosx_11_0_arm64": macho(), "win_amd64": pe()}
-        env = {k: v for k, v in os.environ.items() if k not in ("LAZARET_NATIVE_LIBRARY", "LAZARET_WHEEL_PLATFORM")}
         cls.dist = root / "dist"
         cls.dist.mkdir()
-        with unittest.mock.patch.dict(os.environ, env, clear=True):
-            cls.backend.build_sdist(str(cls.dist))
-            cls.backend.build_wheel(str(cls.dist))
-            for tag, data in cls.libraries.items():
-                lib = root / f"{tag}.bin"
-                lib.write_bytes(data)
-                cls.backend.build_platform_wheel(str(cls.dist), tag, str(lib))
+        cls.backend.build_sdist(str(cls.dist))
+        for tag, data in cls.libraries.items():
+            lib = root / f"{tag}.bin"
+            lib.write_bytes(data)
+            cls.backend.build_platform_wheel(str(cls.dist), tag, str(lib))
 
     def copy(self, skip=()):
         """A copy of the good dist to damage, without the files named."""
@@ -488,6 +487,9 @@ class DistTests(unittest.TestCase):
     def wheel(self, tag):
         return f"lazaret-{self.version}-py3-none-{tag}.whl"
 
+    def sdist(self):
+        return f"lazaret-{self.version}.tar.gz"
+
     def rewrite(self, directory, tag, change):
         """Rewrite a wheel with change({name: bytes}) applied to its members."""
         path = directory / self.wheel(tag)
@@ -498,6 +500,18 @@ class DistTests(unittest.TestCase):
             for name, data in members.items():
                 z.writestr(name, data)
 
+    def rewrite_sdist(self, directory, change):
+        """Rewrite the sdist with change({name: bytes}) applied to its members."""
+        path = directory / self.sdist()
+        with tarfile.open(path) as t:
+            members = {i.name: t.extractfile(i).read() for i in t.getmembers() if i.isfile()}
+        change(members)
+        with tarfile.open(path, "w:gz") as t:
+            for name, data in members.items():
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                t.addfile(info, io.BytesIO(data))
+
     def assertProblem(self, directory, words, expect=TAGS):
         _summaries, problems = check.check_dist(directory, expect)
         self.assertTrue(any(all(w in p for w in words) for p in problems), problems)
@@ -505,7 +519,7 @@ class DistTests(unittest.TestCase):
     def test_the_release_as_built(self):
         summaries, problems = check.check_dist(self.dist, self.TAGS)
         self.assertEqual(problems, [])
-        self.assertEqual(len(summaries), 2 + len(self.TAGS))
+        self.assertEqual(len(summaries), 1 + len(self.TAGS))
         with unittest.mock.patch("sys.stdout"), unittest.mock.patch("sys.stderr"):
             args = ["--dist", str(self.dist)] + [a for t in self.TAGS for a in ("--expect", t)]
             self.assertEqual(check.main(args), 0)
@@ -515,7 +529,15 @@ class DistTests(unittest.TestCase):
         self.assertProblem(self.dist, ["manylinux_2_28_x86_64", "not expected"], expect=self.TAGS[1:])
         self.assertEqual(check.check_dist(self.dist, ())[1], [])       # no --expect: any platforms
 
-    def test_a_platform_wheel_is_the_pure_wheel_plus_its_library(self):
+    def test_no_pure_wheel(self):
+        """A py3-none-any wheel would install a package with no engine."""
+        d = self.copy()
+        (d / self.wheel("win_amd64")).rename(d / self.wheel("any"))
+        self.assertProblem(d, ["py3-none-any", "no engine"], expect=())
+        d = self.copy(skip=tuple(self.wheel(t) for t in self.TAGS))
+        self.assertProblem(d, ["no platform wheels"], expect=())
+
+    def test_a_platform_wheel_is_the_sdists_package_plus_its_library(self):
         d = self.copy()
         self.rewrite(d, "win_amd64", lambda m: m.update({"lazaret/extra.py": b"x = 1\n"}))
         self.assertProblem(d, ["win_amd64", "has lazaret/extra.py"])
@@ -523,8 +545,27 @@ class DistTests(unittest.TestCase):
         self.rewrite(d, "macosx_11_0_arm64", lambda m: m.update({"lazaret/__init__.py": b"# changed\n"}))
         self.assertProblem(d, ["macosx_11_0_arm64", "lazaret/__init__.py differs"])
         d = self.copy()
+        self.rewrite(d, "win_amd64", lambda m: m.pop("lazaret/__init__.py"))
+        self.assertProblem(d, ["win_amd64", "lacks lazaret/__init__.py"])
+        d = self.copy()
         self.rewrite(d, "manylinux_2_28_x86_64", lambda m: m.pop("lazaret/_native/liblazaret_native.so"))
         self.assertProblem(d, ["manylinux_2_28_x86_64", "has no lazaret/_native/liblazaret_native.so"])
+        d = self.copy()
+        wheel_file = f"lazaret-{self.version}.dist-info/WHEEL"
+        self.rewrite(d, "win_amd64", lambda m: m.update({wheel_file: m[wheel_file].replace(b"false", b"true")}))
+        self.assertProblem(d, ["win_amd64", "WHEEL"])
+
+    def test_the_sdist_carries_the_engines_source_and_no_library(self):
+        base = f"lazaret-{self.version}/"
+        d = self.copy()
+        self.rewrite_sdist(d, lambda m: m.pop(base + "rust/Cargo.lock"))
+        self.assertProblem(d, [self.sdist(), "lacks rust/Cargo.lock"])
+        d = self.copy()
+        self.rewrite_sdist(d, lambda m: m.update({base + "src/lazaret/_native/liblazaret_native.so": elf()}))
+        self.assertProblem(d, [self.sdist(), "carries src/lazaret/_native/liblazaret_native.so"])
+        d = self.copy()
+        self.rewrite_sdist(d, lambda m: m.update({base + "src/lazaret/__init__.py": b"# changed\n"}))
+        self.assertProblem(d, ["lazaret/__init__.py differs from the sdist's"])
 
     def test_a_library_that_breaks_its_tags_promise(self):
         d = self.copy()
@@ -536,7 +577,7 @@ class DistTests(unittest.TestCase):
         self.rewrite(d, "win_amd64", lambda m: m.update({"lazaret/_native/lazaret_native.dll": pe(machine=0xAA64)}))
         self.assertProblem(d, ["win_amd64", "machine 0xaa64"])
 
-    def test_a_platform_wheel_carries_the_native_engines_notices(self):
+    def test_every_file_carries_the_native_engines_notices(self):
         dist_info = f"lazaret-{self.version}.dist-info"
         meta = f"{dist_info}/METADATA"
 
@@ -545,26 +586,31 @@ class DistTests(unittest.TestCase):
 
         for change, words in (
                 (plain_apache, ["License-Expression is Apache-2.0", "Python-2.0.1"]),
-                (lambda m: m.pop(f"{dist_info}/licenses/NOTICE"), ["NOTICE", "not in"]),
+                (lambda m: m.pop(f"{dist_info}/licenses/NOTICE"), ["NOTICE", "not at"]),
                 (lambda m: m.update({f"{dist_info}/licenses/NOTICE": b"edited\n"}), ["NOTICE is not rust/NOTICE"]),
                 (lambda m: m.update({meta: m[meta].replace(b"Summary: ", b"Summary: Changed ")}),
-                 ["METADATA differs from the pure wheel's"])):
+                 ["METADATA is not the sdist's PKG-INFO"])):
             with self.subTest(words=words):
                 d = self.copy()
                 self.rewrite(d, "win_amd64", change)
                 self.assertProblem(d, ["win_amd64"] + words)
+        base = f"lazaret-{self.version}/"
+        d = self.copy()
+        self.rewrite_sdist(d, lambda m: m.pop(base + "LICENSE-PYTHON"))
+        self.assertProblem(d, [self.sdist(), "LICENSE-PYTHON"])
+        d = self.copy()
+        self.rewrite_sdist(d, lambda m: m.update({base + "PKG-INFO": m[base + "PKG-INFO"].replace(
+            b"Apache-2.0 AND Python-2.0.1", b"Apache-2.0")}))
+        self.assertProblem(d, [self.sdist(), "License-Expression is Apache-2.0"])
 
     def test_records_and_stray_files(self):
         d = self.copy()
-        self.rewrite(d, "any", lambda m: m.update({"lazaret/__init__.py": m["lazaret/__init__.py"] + b"\n"}))
-        self.assertProblem(d, ["py3-none-any", "RECORD", "lazaret/__init__.py"])
-        d = self.copy()
-        self.rewrite(d, "any", lambda m: m.update({"lazaret/_native/liblazaret_native.so": elf()}))
-        self.assertProblem(d, ["py3-none-any", "carries lazaret/_native/liblazaret_native.so"])
+        self.rewrite(d, "win_amd64", lambda m: m.update({"lazaret/__init__.py": m["lazaret/__init__.py"] + b"\n"}))
+        self.assertProblem(d, ["win_amd64", "RECORD", "lazaret/__init__.py"])
         d = self.copy()
         (d / ".env").write_text("TOKEN=dummy\n", encoding="utf-8")
         self.assertProblem(d, [".env", "not a file of this release"])
-        d = self.copy(skip=(f"lazaret-{self.version}.tar.gz",))
+        d = self.copy(skip=(self.sdist(),))
         self.assertProblem(d, ["0 sdists"])
         d = self.copy()
         (d / self.wheel("win_amd64")).rename(d / "lazaret-9.9.9-py3-none-win_amd64.whl")

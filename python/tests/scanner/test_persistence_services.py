@@ -7,7 +7,8 @@ user unit that runs a Python payload and enabled it from their postinstall.
 Import-time code never gets these reasons: a daemon's `install-service`
 command and the auto-launch libraries write the same files when asked. The
 native engine (which the npm package runs) is held to these by
-js/test/services.test.js and tests/architecture/test_rust_parity_signs.py.
+js/test/services.test.js, and to its recorded outputs by
+tests/architecture/test_snapshot_signs.py.
 
 Everything is inert text: hosts are .invalid, and nothing is written outside
 a temporary directory or executed.
@@ -16,7 +17,7 @@ import json
 import time
 import unittest
 
-from tests import _support  # noqa: F401
+from tests import _support
 from lazaret.scanner import core
 from tests.scanner.test_persistence import scan
 
@@ -109,8 +110,8 @@ class ServiceReasonTests(unittest.TestCase):
 
     def test_the_run_key_span_counts_code_points(self):
         # the write must end within the span: REG_SZ right at its end, and one code point past it
-        near = "CurrentVersion\\Run" + "\U0001F600" * (core._SVC_RUNKEY_SPAN - 6) + "REG_SZ"
-        far = "CurrentVersion\\Run" + "\U0001F600" * (core._SVC_RUNKEY_SPAN - 5) + "REG_SZ"
+        near = "CurrentVersion\\Run" + "\U0001F600" * (_support.pack("_SVC_RUNKEY_SPAN") - 6) + "REG_SZ"
+        far = "CurrentVersion\\Run" + "\U0001F600" * (_support.pack("_SVC_RUNKEY_SPAN") - 5) + "REG_SZ"
         self.assertEqual(core.service_reasons(near), ["adds a program to a Windows Run key"])
         self.assertEqual(core.service_reasons(far), [])
 
@@ -154,7 +155,7 @@ class ServiceReasonTests(unittest.TestCase):
         # and in the strings a file decodes as it runs
         hidden = ("const { execSync } = require('child_process');\n"
                   "execSync(Buffer.from('c3lzdGVtY3RsIC0tdXNlciBlbmFibGUgeC5zZXJ2aWNl', 'base64').toString());\n")
-        self.assertEqual(core.install_script_risk(hidden), ["installs a systemd service" + core._DV_NOTE])
+        self.assertEqual(core.install_script_risk(hidden), ["installs a systemd service" + _support.pack("_DV_NOTE")])
 
     def test_hostile_texts_finish_fast(self):
         cases = ["systemctl -a" * 200_000, "| crontab " * 200_000, "CurrentVersion\\Run " * 200_000,

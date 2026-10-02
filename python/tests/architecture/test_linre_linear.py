@@ -46,23 +46,27 @@ class LinreLinearTimeTests(unittest.TestCase):
 
     def grows(self, engine, name, make, sizes):
         src, flags = self.pack[name]
-        return [seconds(engine, src, flags, make(n)) for n in sizes]
+        # linre's runs take milliseconds: the best of more of them, so a loaded machine's noise
+        # does not pass for growth
+        return [seconds(engine, src, flags, make(n), runs=7 if engine == "linre" else 3) for n in sizes]
 
     def test_pyre_backtracks_exponentially_linre_does_not(self):
         name, make = LAUNCHCTL
         p = self.grows("pyre", name, make, [10, 12, 14])
         self.assertGreater(p[2] / p[0], 8, f"pyre {p}")             # 2^k: fourfold for each two pieces
-        lin = self.grows("linre", name, make, [10_000, 40_000])
+        lin = self.grows("linre", name, make, [40_000, 160_000])
         self.assertLess(lin[1] / lin[0], 8, f"linre {lin}")        # 4x the text: about 4x the time
         self.assertLess(self.grows("linre", name, make, [14])[0], p[2])
 
     def test_pyre_backtracks_polynomially_linre_does_not(self):
         for name, make in SPACES:
             with self.subTest(pattern=name):
-                small = 100 if name == "_DD_PARAM_RE" else 1000    # (the cube: pyre takes 0.2 s on 400)
+                # (the cube: pyre takes 0.2 s on 400; the square, 1 s on 8,000: long enough that a
+                # loaded machine's noise does not hide the growth)
+                small = 100 if name == "_DD_PARAM_RE" else 2000
                 p = self.grows("pyre", name, make, [small, 4 * small])
                 self.assertGreater(p[1] / p[0], 10, f"pyre {p}")    # the square: 16x, the cube: 64x
-                lin = self.grows("linre", name, make, [50_000, 200_000])
+                lin = self.grows("linre", name, make, [200_000, 800_000])
                 self.assertLess(lin[1] / lin[0], 8, f"linre {lin}")
                 self.assertLess(self.grows("linre", name, make, [4 * small])[0] * 5, p[1])
 

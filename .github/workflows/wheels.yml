@@ -1,19 +1,22 @@
-# The Python release's files: the sdist, the pure wheel, and five platform
-# wheels that carry the native engine (rust/, docs/RUST_ENGINE.md). Each
-# platform's library is built, checked and tested on that platform, the
-# seven files are built from one checkout, and each platform wheel is
-# installed with pip on its platform and run. release.yml calls this
-# workflow and publishes what the `dist` job uploads (artifact python-dist).
-# It also runs on pull requests and pushes to main that change what goes
-# into a platform wheel, so a release never meets a platform build for the
-# first time.
+# The Python release's files: the sdist, which carries the native engine's
+# sources (rust/, docs/RUST_ENGINE.md), and five platform wheels, which
+# carry the engine built. Since the Rust-first refactor the package has no
+# engine without it, so there is no pure (py3-none-any) wheel: where no
+# platform wheel fits, pip builds one from the sdist, compiling the engine
+# with cargo. Each platform's library is built, checked and tested on that
+# platform, the six files are built from one checkout, each platform wheel
+# is installed with pip on its platform and run, and on Linux x86-64 pip
+# installs the sdist too. release.yml calls this workflow and publishes what
+# the `dist` job uploads (artifact python-dist). It also runs on pull
+# requests and pushes to main that change what goes into a wheel, so a
+# release never meets a platform build for the first time.
 #
 # Pins, bumped by hand (Dependabot updates the actions, not these):
 # - RUST_VERSION: the compiler every library is built with, installed by the
 #   runner's rustup, which checks each component against the SHA-256 sums
 #   the Rust release publishes. Keep it at or above rust-version in
 #   rust/Cargo.toml, and the same as release.yml's (the npm package's
-#   WebAssembly build). 1.95.0 is the compiler of the parity runs in
+#   WebAssembly build). 1.95.0 is the compiler of the measurements in
 #   docs/RUST_ENGINE.md.
 # - The manylinux_2_28 images, by digest (see the comment at the matrix).
 # The workspace has no external crates, so every build is --offline and
@@ -54,7 +57,7 @@ jobs:
   # tag, so they need glibc 2.28 at most (a build on the runner itself would
   # need its glibc, 2.39). The runner installs the pinned toolchain; the
   # container gets it read-only and links with the image's gcc and glibc.
-  # The check, the load and the parity modules then run inside the image too,
+  # The check, the load and the Python suite then run inside the image too,
   # on its glibc 2.28 and its Python 3.12.
   linux:
     name: library (${{ matrix.tag }})
@@ -101,14 +104,7 @@ jobs:
               py=/opt/python/cp312-cp312/bin/python
               "$py" scripts/check_native_library.py "$lib" "$TAG" --load
               cd python
-              LAZARET_NATIVE_LIB="$lib" "$py" -m unittest tests.architecture.test_rust_parity_regex \
-                tests.architecture.test_rust_parity_hooks tests.architecture.test_rust_parity_hooks_b \
-                tests.architecture.test_rust_parity_signs \
-                tests.architecture.test_rust_parity_scanfile tests.architecture.test_rust_parity_lexer \
-                tests.architecture.test_rust_parity_project tests.architecture.test_rust_parity_project_scan \
-                tests.architecture.test_rust_parity_hook_commands \
-                tests.architecture.test_rust_parity_hexname tests.architecture.test_rust_parity_offscreen \
-                tests.architecture.test_rust_parity_lookalike tests.architecture.test_rust_parity_crossfile'
+              LAZARET_NATIVE_LIB="$lib" "$py" -m unittest discover -s tests -t .'
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: native-${{ matrix.tag }}
@@ -168,17 +164,9 @@ jobs:
         run: cargo +"$RUST_VERSION" build --release --offline --locked --target "$TARGET"
       - name: Check it against its tag, and load it
         run: python scripts/check_native_library.py "$LAZARET_NATIVE_LIB" "$TAG" --load
-      - name: The native engine against the Python engine
+      - name: The Python suite on this library (its recorded outputs among them)
         working-directory: python
-        run: >-
-          python -m unittest tests.architecture.test_rust_parity_regex
-          tests.architecture.test_rust_parity_hooks tests.architecture.test_rust_parity_hooks_b
-          tests.architecture.test_rust_parity_signs
-          tests.architecture.test_rust_parity_scanfile tests.architecture.test_rust_parity_lexer
-          tests.architecture.test_rust_parity_project tests.architecture.test_rust_parity_project_scan
-          tests.architecture.test_rust_parity_hook_commands
-          tests.architecture.test_rust_parity_hexname tests.architecture.test_rust_parity_offscreen
-          tests.architecture.test_rust_parity_lookalike tests.architecture.test_rust_parity_crossfile
+        run: python -m unittest discover -s tests -t .
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: native-${{ matrix.tag }}
@@ -186,9 +174,9 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  # The seven files, from one checkout, stamped with the commit's time. The
-  # platform wheels are the pure wheel's files plus a library, which the
-  # check holds each to, against its own tag.
+  # The six files, from one checkout, stamped with the commit's time. Each
+  # platform wheel is the sdist's package files plus a library, which the
+  # check holds it to, against its own tag.
   dist:
     name: sdist and wheels
     needs: [linux, macos-windows]
@@ -233,8 +221,9 @@ jobs:
 
   # What a user gets: pip, given only these files, installs the platform
   # wheel on its platform, and it runs the native engine, at the package's
-  # version. On Linux x86-64 the pure wheel is installed too: it runs the
-  # Python engine (every platform without a platform wheel gets it).
+  # version. On Linux x86-64 pip also installs the sdist, as it does on a
+  # platform without a platform wheel: it compiles the engine (with the
+  # pinned toolchain) and the package runs it.
   install:
     name: install (${{ matrix.tag }})
     needs: dist
@@ -277,11 +266,23 @@ jobs:
           assert out == f"lazaret {v} (engine: rust {v})", out
           print(out)
           '
-      - name: The pure wheel runs the Python engine
+      - name: Rust ${{ env.RUST_VERSION }}, for the sdist
         if: matrix.tag == 'manylinux_2_28_x86_64'
+        run: rustup toolchain install "$RUST_VERSION" --profile minimal --no-self-update
+      - name: pip builds the sdist, compiling the engine, and it runs
+        if: matrix.tag == 'manylinux_2_28_x86_64'
+        env:
+          RUSTUP_TOOLCHAIN: ${{ env.RUST_VERSION }}
         run: |
-          python -m venv pure
-          pure/bin/python -m pip install --no-index dist/lazaret-*-py3-none-any.whl
-          out="$(pure/bin/python -m lazaret --version)"
-          echo "$out"
-          case "$out" in *"(engine: python)") ;; *) echo "::error::expected the Python engine: $out"; exit 1 ;; esac
+          python -m venv from-source
+          from-source/bin/python -m pip install --no-index dist/lazaret-*.tar.gz
+          from-source/bin/python -c '
+          import importlib.metadata, subprocess, sys
+          from lazaret import __version__ as v
+          wheel = importlib.metadata.distribution("lazaret").read_text("WHEEL")
+          assert "Tag: py3-none-linux_x86_64\n" in wheel, wheel
+          out = subprocess.run([sys.executable, "-m", "lazaret", "--version"], capture_output=True, text=True,
+                               check=True).stdout.strip()
+          assert out == f"lazaret {v} (engine: rust {v})", out
+          print(out)
+          '

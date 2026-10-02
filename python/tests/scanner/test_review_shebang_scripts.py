@@ -16,8 +16,8 @@ Python script as Python reads it: a UTF-7 coding cookie on an extensionless
 script hid code in comments (it was read as UTF-8).
 
 The npm engine: the native engine's shebang_lang (tests/architecture/
-test_rust_parity_hooks.py) and js/src/lib/fs.js scriptSourceLang
-(test_js_parity.py compares the engines). Fixtures are inert text.
+test_snapshot_hooks.py) and js/src/lib/fs.js scriptSourceLang
+(test_js_parity.py compares the packages). Fixtures are inert text.
 """
 import json
 import os

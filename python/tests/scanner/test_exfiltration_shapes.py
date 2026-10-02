@@ -35,13 +35,15 @@ import-time code, the files a package runs when used:
 
 Each has crafted look-alikes that stay quiet. The secrets are fake and built
 here rather than written out whole; hosts are .invalid or TEST-NET; nothing
-runs. The native engine (which the npm package runs) is held to the same
-answers by tests/architecture/test_rust_parity_signs.py.
+runs. The native engine (which the npm package runs) is held to its
+recorded outputs by tests/architecture/test_snapshot_signs.py.
 """
 import unittest
 
 from tests import _support  # noqa: F401
-from lazaret.scanner import core
+from lazaret.scanner import core, engine
+
+HOST_INFO = engine.pack_pattern("_HOST_INFO_RE")
 
 TG = "1234567" + "89:AA" + "bC3dE5fG7hJ9kL1mN3pQ5rS7tV9wX1yZ3"
 DISCORD = ("discord.com/api/webhooks/" + "123456789012345678/"
@@ -231,7 +233,7 @@ class BuiltNamesAndDeadDropTests(unittest.TestCase):
                      "os.hostname();\n",
                      "import socket\nh = socket.gethostname()\nsocket.gethostbyname('api' + '.x.invalid.com')\n"):
             with self.subTest(text=text):
-                self.assertEqual(core.dns_beacon_at(text, core._HOST_INFO_RE.search(text) is not None), -1)
+                self.assertEqual(core.dns_beacon_at(text, HOST_INFO.search(text) is not None), -1)
 
     def test_a_dead_drop(self):
         want = "sends the machine's user or host name to an address it fetches at run time (from {})"

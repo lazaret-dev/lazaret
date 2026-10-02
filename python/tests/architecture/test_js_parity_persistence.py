@@ -1,7 +1,7 @@
 """Engine parity for the persistence targets (0.1.7): the npm engine's
 js/src/lib/autorun.js and js/src/lib/ghworkflow.js against
 lazaret.scanner.autorun and lazaret.scanner.ghworkflow (the install-script
-reasons are the native engine's: test_rust_parity_hooks.py).
+reasons are the native engine's: test_snapshot_hooks.py).
 
 Compared case by case in one node process: the JSON-with-comments reader
 (every value's kind, line and text, or the error's line and reason), the

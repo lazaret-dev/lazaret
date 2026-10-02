@@ -11,8 +11,9 @@
   global["\\x72\\x65\\x71\\x75\\x69\\x72\\x65"]("child_process") spells require in 7.
 
 The npm engine: js/test/review-small-gaps.test.js;
-tests/architecture/test_js_parity.py (the adversarial tree) and
-test_rust_parity_hexname.py compare the engines. Fixtures are inert text.
+tests/architecture/test_js_parity.py (the adversarial tree) compares the
+packages, and test_snapshot_small.py holds the engine's hidden names to its
+recorded outputs. Fixtures are inert text.
 """
 import json
 import os

@@ -12,11 +12,14 @@
   its artifact lands, under the name _native.py loads), of the check's
   --expect list and of the install job are one set, and release.yml
   publishes what it builds.
-- The parity modules skip where the library does not load, so every job that
-  runs them first proves the library loads (a job that built a library the
-  tests can't find would otherwise pass without testing it); likewise the
-  npm engine's (test_js_parity*, test_wasm_parity*) where its WebAssembly
-  build is missing (0.1.8).
+- The native engine is the Python package's only engine (the Rust-first
+  refactor): every job that runs Python tests first builds or installs the
+  library and proves it loads (the engine's own tests skip without it, so a
+  job that built a library the tests can't find would otherwise pass
+  without testing it); likewise the npm engine's (test_js_parity*,
+  test_wasm_parity*) where its WebAssembly build is missing (0.1.8).
+- There is no pure wheel: pip builds the sdist (compiling the engine) where
+  no platform wheel fits, and wheels.yml's install job does so.
 - The npm package's WebAssembly engine is built for a release with the
   compiler of the platform wheels' libraries, and the tarball carries it.
 - No `{a, b}` inside double quotes nested in "$(...)": macOS runs `shell:
@@ -219,33 +222,43 @@ class Bash32Tests(unittest.TestCase):
             self.assertIsNone(BASH32_BRACES.search(fine), fine)
 
 
-class ParityTestsProveTheLibraryLoads(unittest.TestCase):
+class PythonTestsRunOnTheLibrary(unittest.TestCase):
     def test_every_job_that_runs_them_loads_the_library_first(self):
         runs = 0
         for name, workflow in workflows().items():
             for job, text in jobs(workflow).items():
-                if "test_rust_parity_" not in text:
-                    continue
-                runs += 1
-                with self.subTest(workflow=name, job=job):
-                    before = text[:text.index("test_rust_parity_")]
-                    self.assertTrue("--load" in before and "check_native_library.py" in before
-                                    or "_native.available()" in before, "the parity modules would skip silently")
-        self.assertEqual(runs, 3)             # ci.yml's rust job, wheels.yml's two library jobs
+                for at in (m.start() for m in re.finditer(r"-m unittest\b", text)):
+                    runs += 1
+                    with self.subTest(workflow=name, job=job, at=at):
+                        before = text[:at]
+                        self.assertTrue("--load" in before and "check_native_library.py" in before
+                                        or "_native.available()" in before, "the engine's tests would skip")
+                        self.assertTrue("cargo build" in before or 'cargo +"$RUST_VERSION" build' in before,
+                                        "no library is built for them")
+        # ci.yml's python-unit, python-integration, js and rust jobs; wheels.yml's two library jobs
+        self.assertEqual(runs, 6)
 
-    def test_every_job_that_runs_them_runs_them_all(self):
-        # the modules skip without the library, so the jobs that run the whole
-        # suite skip them: each job that builds a library names every one
+    def test_the_whole_suite_runs_where_a_library_is_built(self):
+        """The snapshot tests (test_snapshot_*) skip without the library: the
+        jobs that run the whole suite on one all run them."""
         arch = os.path.join(_support.REPO_ROOT, "python", "tests", "architecture")
-        modules = sorted(f[:-3] for f in os.listdir(arch) if f.startswith("test_rust_parity_") and f.endswith(".py"))
-        self.assertGreater(len(modules), 10)
-        for name, workflow in workflows().items():
-            for job, text in jobs(workflow).items():
-                if "test_rust_parity_" not in text:
-                    continue
-                for module in modules:
-                    with self.subTest(workflow=name, job=job, module=module):
-                        self.assertTrue(re.search(rf"tests\.architecture\.{module}\b", text), "not run here")
+        modules = sorted(f[:-3] for f in os.listdir(arch) if f.startswith("test_snapshot_") and f.endswith(".py"))
+        self.assertGreaterEqual(len(modules), 7)
+        whole = [(name, job) for name, workflow in workflows().items() for job, text in jobs(workflow).items()
+                 if re.search(r"-m unittest discover -s tests -t \.", text)]
+        self.assertEqual(sorted(whole), [("ci.yml", "python-unit"), ("wheels.yml", "linux"),
+                                         ("wheels.yml", "macos-windows")])
+        self.assertFalse([m for m in os.listdir(arch) if m.startswith("test_rust_parity_")
+                          and m != "test_rust_parity_regex.py"], "the Python engine's parity modules are retired")
+
+    def test_no_pure_wheel_and_the_sdist_is_built_by_pip(self):
+        text = read("wheels.yml")
+        self.assertNotIn("py3-none-any", "".join(line + "\n" for _n, line in code_lines(text)))
+        install = jobs(text)["install"]
+        self.assertIn("pip install --no-index dist/lazaret-*.tar.gz", install)
+        self.assertIn("RUSTUP_TOOLCHAIN: ${{ env.RUST_VERSION }}", install)
+        self.assertIn('rustup toolchain install "$RUST_VERSION" --profile minimal', install)
+        self.assertIn('assert out == f"lazaret {v} (engine: rust {v})", out', install)
 
 
 class NpmEngineTests(unittest.TestCase):

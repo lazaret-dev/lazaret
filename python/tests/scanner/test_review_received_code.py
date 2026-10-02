@@ -477,17 +477,33 @@ SP = "venv/lib/python3.12/site-packages/"
 
 def _tainted_exports(text):
     """(names, {class: methods}) of a one-module package that hold or return
-    a received value, as the follower reads them (core._XfPackage)."""
-    mod = core._XfModule("m", "py", SP + "m.py", text)
-    core._xf_py_parse(mod, [])
-    held = core._XfPackage({"m": mod}).tainted()
-    names = frozenset(n for _k, n in held if "." not in n and not n.startswith("<"))
-    classes = {}
-    for _k, n in held:
-        if "." in n and not n.startswith("<"):
-            cls, meth = n.split(".", 1)
-            classes.setdefault(cls, set()).add(meth)
-    return names, {c: frozenset(m) for c, m in classes.items()}
+    a received value, as the follower reads them: each top-level function,
+    name and method of `text` is used by another module of the package
+    (run as code), and those the engine's follower flags are the ones."""
+    import ast
+    tree = ast.parse(text)
+    probes = []
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef):
+            probes.append((node.name, None, f"from .m import {node.name}\nexec({node.name}())\n"))
+        elif isinstance(node, ast.Assign):
+            for t in node.targets:
+                if isinstance(t, ast.Name):
+                    probes.append((t.id, None, f"from .m import {t.id}\nexec({t.id})\n"))
+        elif isinstance(node, ast.ClassDef):
+            for f in node.body:
+                if isinstance(f, ast.FunctionDef):
+                    probes.append((node.name, f.name, f"from .m import {node.name}\nexec({node.name}().{f.name}())\n"))
+    names, classes = set(), {}
+    for name, meth, run in probes:
+        files = [{"path": SP + "pk/" + rel, "content": c, "lang": "py", "dep": True}
+                 for rel, c in (("__init__.py", ""), ("m.py", text), ("run.py", run))]
+        if core._cross_file_received_issues(files):
+            if meth is None:
+                names.add(name)
+            else:
+                classes.setdefault(name, set()).add(meth)
+    return frozenset(names), {c: frozenset(m) for c, m in classes.items()}
 
 
 def _pkgfiles(mapping):

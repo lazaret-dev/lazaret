@@ -23,6 +23,7 @@ import json
 import unittest
 
 from lazaret.scanner import core
+from tests import _support
 from tests.scanner import _dashboard_vm as dash
 
 
@@ -188,8 +189,8 @@ class ShebangUploadTests(unittest.TestCase):
                                                      " PYTHON_NAME_RE.pySource, PYTHON_NAME_RE.flags]"}])
         self.assertEqual(page[0], core._SHEBANG_RE.pattern)
         self.assertNotIn("i", page[1])
-        self.assertEqual(sorted(page[2]), sorted(core._SHEBANG_JS_NAMES))
-        self.assertEqual(page[3], core._PYTHON_NAME_RE.pattern)
+        self.assertEqual(sorted(page[2]), sorted(_support.pack("_SHEBANG_JS_NAMES")))
+        self.assertEqual(page[3], _support.pack("_PYTHON_NAME_RE").pattern)
         self.assertIn("i", page[4])
 
 
@@ -197,7 +198,7 @@ class ShebangUploadTests(unittest.TestCase):
 class LookalikeTableTests(unittest.TestCase):
     def test_the_tables_are_cores(self):
         (page,) = dash.run([{"op": "eval", "expr": "[Object.fromEntries(LOOKALIKES), [...LOOKALIKE_TARGETS].sort(), NAME_RUN_SRC]"}])
-        self.assertEqual(page, [core._LOOKALIKES, sorted(core._LOOKALIKE_TARGETS), core._NAME_RUN_RE.pattern])
+        self.assertEqual(page, [_support.pack("_LOOKALIKES"), sorted(_support.pack("_LOOKALIKE_TARGETS")), _support.pack("_NAME_RUN_RE").pattern])
 
 
 @dash.requires_node

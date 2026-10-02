@@ -2,13 +2,12 @@
 WebAssembly engine's `cross_file` through js/src/lib/native.js
 (crossFileIssues, which the npm --deps checks run) and the platform
 library's through engine.cross_file_issues, on the follower's parity corpus
-(test_rust_parity_crossfile: its own cases and the generated stream of
-Python and npm packages). One Rust source, so they must find the same
+(crossfile_corpus.py: its own cases and the generated stream of Python and
+npm packages). One Rust source, so they must find the same
 findings in the same order, file, line, severity, message and snippet
 alike: what this holds is the npm binding of a call with many texts (each
 file encoded on its own, its length counted in code points as the engine
-reads it) and the WebAssembly build (no threads). With
-test_rust_parity_crossfile, the npm package's follower answers as core's.
+reads it) and the WebAssembly build (no threads).
 
 Skipped where node, the WebAssembly build (npm run build in js/) or the
 native library is missing.
@@ -21,7 +20,8 @@ import unittest
 from lazaret.scanner import _native
 from tests import _support
 from tests.architecture.test_js_parity import NPM_READY, NPM_SKIP
-from tests.architecture.test_rust_parity_crossfile import curated, generated, native, view
+from lazaret.scanner import engine
+from tests.architecture.crossfile_corpus import curated, generated, view
 
 NATIVE_JS = os.path.join(_support.REPO_ROOT, "js", "src", "lib", "native.js")
 NPM = """
@@ -41,6 +41,11 @@ def npm(cases, one_package=False):
     if p.returncode:
         raise AssertionError(f"node exited {p.returncode}: {p.stderr[-2000:]}")
     return json.loads(p.stdout)
+
+
+def native(files, **kwargs):
+    """The platform library's findings (engine.cross_file_issues)."""
+    return engine.cross_file_issues(files, **kwargs)
 
 
 @unittest.skipUnless(NPM_READY, NPM_SKIP)

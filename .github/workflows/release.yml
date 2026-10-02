@@ -10,9 +10,9 @@
 #
 # Order: verify-tag -> test -> build-python + build-npm -> publish-pypi +
 # publish-npm. build-python is wheels.yml: the native library for each of
-# five platforms, built and tested there; the sdist, the pure wheel and the
-# five platform wheels; and each platform wheel installed with pip on its
-# platform and run. Both publish jobs need BOTH builds, so a failure on
+# five platforms, built and tested there; the sdist (with the engine's
+# sources) and the five platform wheels; each platform wheel installed with
+# pip on its platform and run, and the sdist built by pip. Both publish jobs need BOTH builds, so a failure on
 # either side stops both registries (they stay in lockstep). The jobs that
 # hold id-token: write install nothing: they publish the artifacts the build
 # jobs uploaded, with tools pinned to exact versions.
@@ -65,8 +65,8 @@ jobs:
     needs: verify-tag
     uses: ./.github/workflows/ci.yml
 
-  # The sdist, the pure wheel and the five platform wheels (artifact
-  # python-dist), built, checked and installed by wheels.yml.
+  # The sdist and the five platform wheels (artifact python-dist), built,
+  # checked and installed by wheels.yml.
   build-python:
     needs: [verify-tag, test]
     uses: ./.github/workflows/wheels.yml

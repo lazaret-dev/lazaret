@@ -1,19 +1,16 @@
-"""The native engine's rule pack is the same on every platform, and in every
-release.
-
-scripts/make_rust_tables.py extracts every module-level value of core into
-rust/crates/lazaret-engine/rules/lazaret-rules.json, and CI runs its --check
-on Linux, macOS and Windows. A value core computes from the operating
-system's constants would be written as this machine's number and then fail
-the check everywhere else: `_OPEN_FLAGS` (os.O_NOFOLLOW | os.O_NONBLOCK …)
-did, on 0.1.8's first macOS and Windows runs. Here core is imported, in a
-child process, once as it is and once with every os.O_* flag and errno
-number changed (and O_BINARY added, as on Windows); any pack value that
-moves must be left out of the pack (make_rust_tables.PLATFORM_VALUES) or
-computed another way. Likewise with the package's version changed: 0.1.8's
-version bump made the pack stale (core's VERSION was in it), so a release
-would have had to regenerate it; values that move with the version are left
-out (make_rust_tables.RELEASE_VALUES)."""
+"""The native engine's rule pack, rust/crates/lazaret-engine/rules/
+lazaret-rules.json: since the Rust-first refactor it is the source of the
+engine's patterns, sets, limits and finding texts (it was extracted from
+lazaret.scanner.core, which no longer holds them). scripts/make_rust_tables.py
+--check holds it: in its canonical form, naming the registry's rule set,
+every pattern compiling with Python's re (the syntax the engine reads), and
+equal to the values core still keeps for the Python side (the reasons the
+registry ranks, the limits the walk applies), which CI runs on Linux, macOS
+and Windows. Here the same checks run, and the values core keeps are shown
+to move neither with the operating system nor with the release: core is
+imported in a child process with every os.O_* flag and errno number changed
+(and O_BINARY added, as on Windows), and with the package's version changed.
+"""
 
 import json
 import os
@@ -24,6 +21,7 @@ import unittest
 from tests import _support
 
 SCRIPT = os.path.join(_support.REPO_ROOT, "scripts", "make_rust_tables.py")
+PACK = os.path.join(_support.REPO_ROOT, "rust", "crates", "lazaret-engine", "rules", "lazaret-rules.json")
 
 CHILD = r"""
 import errno, importlib.util, json, os, sys
@@ -43,13 +41,13 @@ if sys.argv[1] == "other":
 spec = importlib.util.spec_from_file_location("make_rust_tables", sys.argv[3])
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
-print(json.dumps({"values": mod.pack_data()["values"],
-                  "skipped": sorted(mod.PLATFORM_VALUES | mod.RELEASE_VALUES)}))
+with open(mod.PACK_OUT, encoding="utf-8") as f:
+    print(json.dumps(mod.check_pack(f.read())))
 """
 
 
-def pack(which):
-    env = {k: v for k, v in os.environ.items() if not k.startswith("LAZARET_")}
+def problems(which):
+    env = {k: v for k, v in os.environ.items() if not k.startswith("LAZARET_") or k == "LAZARET_NATIVE_LIB"}
     p = subprocess.run([sys.executable, "-c", CHILD, which, _support.SRC, SCRIPT], capture_output=True,
                        encoding="utf-8", errors="replace", env=env, timeout=40)
     if p.returncode:
@@ -57,42 +55,23 @@ def pack(which):
     return json.loads(p.stdout)
 
 
-class RulePackPortabilityTests(unittest.TestCase):
-    def test_no_value_moves_with_the_operating_system(self):
-        here, other = pack("here"), pack("other")
-        moved = sorted(k for k in set(here["values"]) | set(other["values"])
-                       if here["values"].get(k) != other["values"].get(k))
-        self.assertEqual(moved, [], "these core values depend on the OS: add them to "
-                                    "make_rust_tables.PLATFORM_VALUES (the engine must not read them)")
+class RulePackTests(unittest.TestCase):
+    def test_the_pack_passes_its_checks(self):
+        self.assertEqual(problems("here"), [])
 
-    def test_no_value_moves_with_the_release(self):
-        here, bumped = pack("here"), pack("release")
-        moved = sorted(k for k in set(here["values"]) | set(bumped["values"])
-                       if here["values"].get(k) != bumped["values"].get(k))
-        self.assertEqual(moved, [], "these core values change with the package's version: add them to "
-                                    "make_rust_tables.RELEASE_VALUES, so a version bump leaves the pack as it is")
+    def test_no_value_core_keeps_moves_with_the_operating_system(self):
+        self.assertEqual(problems("other"), [], "a value core and the pack both hold depends on the OS")
 
-    def test_the_left_out_values_are_not_in_the_pack(self):
-        here = pack("here")
-        with open(os.path.join(_support.REPO_ROOT, "rust", "crates", "lazaret-engine", "rules",
-                               "lazaret-rules.json"), encoding="utf-8") as f:
-            shipped = json.load(f)["values"]
-        for name in here["skipped"]:
-            with self.subTest(name):
-                self.assertFalse(name in here["values"], f"{name} is extracted")
-                self.assertFalse(name in shipped, f"{name} is in the shipped pack: rerun "
-                                                  f"scripts/make_rust_tables.py")
+    def test_no_value_core_keeps_moves_with_the_release(self):
+        self.assertEqual(problems("release"), [], "a value core and the pack both hold changes with the version")
 
-
-class RuleSetTests(unittest.TestCase):
     def test_the_pack_names_the_registrys_rule_set(self):
         """The pack says which rule set it holds (the registry's ENGINE_VERSION,
-        which a verdict records): a bump of ENGINE_VERSION regenerates the pack.
-        0.1.8's bump to 2.14.0 left it at 2.13.0, which only CI's --check saw."""
+        which a verdict records): a bump of ENGINE_VERSION changes the pack's
+        rule_set with it."""
         from lazaret.registry.repo import ENGINE_VERSION
-        with open(os.path.join(_support.REPO_ROOT, "rust", "crates", "lazaret-engine", "rules",
-                               "lazaret-rules.json"), encoding="utf-8") as f:
-            self.assertEqual(json.load(f)["rule_set"], ENGINE_VERSION, "rerun scripts/make_rust_tables.py")
+        with open(PACK, encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["rule_set"], ENGINE_VERSION)
 
 
 if __name__ == "__main__":

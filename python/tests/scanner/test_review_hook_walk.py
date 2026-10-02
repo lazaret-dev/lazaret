@@ -14,8 +14,8 @@ Review of the walk the registry (and --deps project scans) use:
   (`2>/dev/null node x.js`), and in `env -S "…"`; `env -C dir` / `sudo -D
   dir` run the command in dir; `node -e` / `-p` requires were not joined
   with the directory a `cd` moved to.
-The native engine answers the same (tests/architecture/
-test_rust_parity_hooks.py compares them; the npm package runs it as
+The native engine answers them (tests/architecture/test_snapshot_hooks.py
+holds it to its recorded outputs; the npm package runs it as
 WebAssembly). Commands are inert strings.
 """
 import json
@@ -49,7 +49,6 @@ class FollowHookTests(unittest.TestCase):
         for cmd, want in cases.items():
             with self.subTest(cmd=cmd):
                 self.assertEqual(core.follow_hook(cmd), (want, True))
-                self.assertEqual(core.hook_script_targets(cmd), want)
 
     def test_limits(self):
         cds = lambda n: "cd a; " * n + "node x.js"                       # noqa: E731

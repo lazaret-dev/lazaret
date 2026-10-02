@@ -1594,10 +1594,11 @@ class _ArtifactScan:
         self._deadline(rel)                  # not one more file past the deadline
         self.sources[rel] = (text, lang)
         self.pending.append((rel, text, lang))
-        # The native engine reads a batch of the first pass's files on threads
-        # (engine.py); the Python engine, a --full scan (project mode, core's)
-        # and the second pass, whose steps read what they scan, one at a time.
-        batch = _engine.BATCH if self.first_pass and not self.full and _engine.name() == "rust" else 1
+        # The engine reads a batch of the first pass's files on threads
+        # (engine.py); a --full scan (project mode: core's passes follow the
+        # engine's rules) and the second pass, whose steps read what they
+        # scan, go one at a time.
+        batch = _engine.BATCH if self.first_pass and not self.full else 1
         if len(self.pending) >= batch:
             self.scan_pending()
 
@@ -1613,9 +1614,10 @@ class _ArtifactScan:
             self.files_scanned += 1
             for i in issues:
                 if i["rule"] in TRUNCATION_RULES:
-                    # the per-file time budget ran out: part of the file was not
-                    # scanned, so the release can't be cleared (it used to be
-                    # listed while the verdict stayed OK)
+                    # part of the file was not scanned (the engine's work budget
+                    # spent, an internal error, the time budget of core's passes),
+                    # so the release can't be cleared (it used to be listed while
+                    # the verdict stayed OK)
                     self.truncate(rel, i["msg"].removeprefix("File not fully scanned: ").rstrip("."))
                 else:
                     self.issues.append(i)
@@ -1646,7 +1648,12 @@ class _ArtifactScan:
             self.add_decode_issues(extra, keep_encoding=False)
             self.manifests[rel] = text
             self._deadline(rel)
-            for i in lazaret.scan_manifest(rel, text, registry=True):
+            try:
+                found = lazaret.scan_manifest(rel, text, registry=True)
+            except _engine.NativeError as exc:
+                self._unanswered(rel, exc)
+                return
+            for i in found:
                 if i["rule"] == "SC-MANIFEST-UNPARSEABLE":
                     self.truncated += 1
                 self.issues.append(i)
@@ -1656,7 +1663,12 @@ class _ArtifactScan:
             self.add_decode_issues(extra, keep_encoding=False)
             self.manifests[rel] = text
             self._deadline(rel)
-            for i in lazaret.scan_gyp(rel, text):
+            try:
+                found = lazaret.scan_gyp(rel, text)
+            except _engine.NativeError as exc:
+                self._unanswered(rel, exc)
+                return
+            for i in found:
                 if i["rule"] == "SC-MANIFEST-UNPARSEABLE":
                     self.truncated += 1
                 self.issues.append(i)
@@ -1666,7 +1678,10 @@ class _ArtifactScan:
             return
         if ext == ".pth":
             text = raw.decode("utf-8-sig", "replace")
-            self.issues.extend(pth_issues(rel, text))
+            try:
+                self.issues.extend(pth_issues(rel, text))
+            except _engine.NativeError as exc:
+                self._unanswered(rel, exc)
             self.scan_source(rel, text, "py")
             return
         lang = lazaret.EXTS.get(ext)
@@ -1821,6 +1836,18 @@ class _ArtifactScan:
             return
         self.issues.append(lazaret._sc_install_hook_issue(
             "binding.gyp", 1, [], "install (implicit)", "node-gyp rebuild", False))
+
+    def _entry_point_manifests(self):
+        """The root package.json's entry points and its implicit node-gyp hook."""
+        for rel, text in list(self.manifests.items()):
+            if os.path.basename(rel) != "package.json":
+                continue
+            data, _problems = lazaret.load_manifest(rel, text)
+            if data is None:
+                continue
+            if rel == "package.json":
+                self._entry_points(rel, data)
+                self._implicit_gyp_hook(rel, data)
 
     def _follow_hooks(self):
         """Follow each install hook to the scripts it runs; escalate the hook
@@ -2050,7 +2077,11 @@ class _ArtifactScan:
             text, lang = self.sources.get(rel, (None, None))
             if text and lang in ("js", "py"):
                 todo.append((rel, text, lang))
-        for rel, text, lang, (reasons, line) in self._import_time_risks(todo):
+        for rel, text, lang, risk in self._import_time_risks(todo):
+            if _engine.unanswered(risk):
+                self._unanswered(rel, risk)
+                continue
+            reasons, line = risk
             if not reasons:
                 continue
             self.issues.append(lazaret.mk_issue(
@@ -2073,11 +2104,12 @@ class _ArtifactScan:
     def _import_time_risks(self, todo, stop=None):
         """(rel, text, lang, import_time_risk's answer) for [(rel, text, lang)]
         (the text with its newlines normalized), in order, a batch at a time
-        (engine.py: the native engine reads a batch on threads, the Python
-        engine a file at a time); the deadline is checked before each batch,
-        and past `stop` (time.monotonic()) no batch is started — with a stop,
-        a batch holds at most USE_RISK_BATCH_CHARS characters, or one file."""
-        size = _engine.BATCH if _engine.name() == "rust" else 1
+        (engine.py: the engine reads a batch on threads; an answer it could
+        not give is the NativeError it stands for, engine.unanswered); the
+        deadline is checked before each batch, and past `stop`
+        (time.monotonic()) no batch is started — with a stop, a batch holds
+        at most USE_RISK_BATCH_CHARS characters, or one file."""
+        size = _engine.BATCH
         start = 0
         while start < len(todo):
             if stop is not None and time.monotonic() > stop:
@@ -2094,6 +2126,25 @@ class _ArtifactScan:
             self._deadline(chunk[0][0])
             for (rel, text, lang), risk in zip(chunk, _engine.import_time_risks([(t, lg) for _r, t, lg in chunk])):
                 yield rel, text, lang, risk
+
+    def _unanswered(self, rel, exc):
+        """A file the engine could not read for a test (engine.unanswered):
+        SC-TRUNCATED, once per file (truncate), in engine.error_issue's words."""
+        self.truncate(rel, _engine.error_issue(rel, exc)["msg"].removeprefix("File not fully scanned: ").rstrip("."))
+
+    def _phase(self, where, step, *args):
+        """Run one step of finish() once the deadline check passes. A call the
+        engine could not answer in it (its work budget spent on a hostile
+        input, an internal error) makes the release INCOMPLETE (SC-TRUNCATED
+        for the release, naming the step) and gives None; the next step runs."""
+        self._deadline(where)
+        try:
+            return step(*args)
+        except _engine.NativeError as exc:
+            why = (_engine.EXHAUSTED if isinstance(exc, _engine.NativeExhausted)
+                   else f"an internal error of the engine ({type(exc).__name__})")
+            self.truncate("(release)", f"the engine could not finish {where}: {why}")
+            return None
 
     def _suspicious(self):
         """Has a strong supply-chain finding made the package SUSPICIOUS already?"""
@@ -2115,7 +2166,11 @@ class _ArtifactScan:
             text, lang = self.sources[rel]
             if text and lang in ("js", "py") and len(text) <= USE_RISK_MAX_CHARS:
                 todo.append((rel, text, lang))
-        for rel, text, lang, (reasons, line) in self._import_time_risks(todo, stop):
+        for rel, text, lang, risk in self._import_time_risks(todo, stop):
+            if _engine.unanswered(risk):
+                self._unanswered(rel, risk)
+                continue
+            reasons, line = risk
             strong = [r for r in reasons if r.startswith(lazaret._STRONG_IMPORT_REASONS)]
             if not strong:
                 continue
@@ -2248,32 +2303,17 @@ class _ArtifactScan:
         # they scan: past it, the rest is not scanned and the archive is
         # INCOMPLETE (this pass used to run to the end whatever the time).
         try:
-            self._deadline("the entry points")
-            for rel, text in list(self.manifests.items()):
-                if os.path.basename(rel) != "package.json":
-                    continue
-                data, _problems = lazaret.load_manifest(rel, text)
-                if data is None:
-                    continue
-                if rel == "package.json":
-                    self._entry_points(rel, data)
-                    self._implicit_gyp_hook(rel, data)
-            self._deadline("the install hooks")
-            self._follow_hooks()
+            self._phase("the entry points", self._entry_point_manifests)
+            self._phase("the install hooks", self._follow_hooks)
             if self.artifact == "sdist":
-                self._deadline("the install scripts")
-                self._python_install_scripts()
+                self._phase("the install scripts", self._python_install_scripts)
             if self.artifact == "wheel":
-                self._deadline("the start-up modules")
-                self._startup_modules()
-            self._deadline("the files the entry points load")
-            reachable = self._reachable()
-            self._deadline("the import-time code")
-            self._import_time_code(reachable)
-            self._deadline("the agent-hijack check")
-            self._agent_hijack()
-            self._deadline("the package's names")
-            self._lookalike_names()
+                self._phase("the start-up modules", self._startup_modules)
+            reachable = self._phase("the files the entry points load", self._reachable)
+            self._phase("the import-time code", self._import_time_code,
+                        reachable if reachable is not None else set(self.entries))
+            self._phase("the agent-hijack check", self._agent_hijack)
+            self._phase("the package's names", self._lookalike_names)
             # interprocedural / cross-file taint (full profile only — needs whole source)
             if self.full and getattr(lazaret, "lazaret_flow", None) is not None:
                 self._deadline("the cross-file analysis")
@@ -4411,13 +4451,9 @@ def main():
                     help="discover: scan the discovered packages (and track them)")
     ap.add_argument("--add", action="store_true",
                     help="discover: add discovered packages to the watchlist")
-    ap.add_argument("--engine", choices=_engine.ENGINES, default=None,
-                    help="The engine that runs the supply-chain tests: rust (the native engine, the default "
-                         "where it is installed) or python (the reference engine; env LAZARET_ENGINE). Both "
-                         "give the same findings.")
     args = ap.parse_args()
     try:
-        _engine.choose(args.engine)
+        _engine.require()
     except _engine.EngineError as exc:
         print(f"error: {exc}", file=sys.stderr)
         sys.exit(2)

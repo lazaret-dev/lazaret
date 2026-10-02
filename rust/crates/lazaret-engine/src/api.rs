@@ -50,7 +50,7 @@ pub const CALLS: &[&str] = &[
     "secret_endpoint_at", "credential_sweep_at", "exec_command_reasons", "dns_beacon_at", "miner_at",
     "raw_ip_connect", "capture_service", "exfil_signs", "service_reasons", "wallet_swap_at", "string_array_line",
     // 0.1.8: a shell text read as a program, and the command lines a script hands a shell
-    "sh_reasons", "shell_text", "code_text", "sh_literal_value",
+    "sh_reasons", "shell_text", "code_text", "sh_literal_value", "sh_parse",
     // 0.1.8: the dead drop
     "dead_drop_at",
     // Phase 2: scan_file, and what it reads
@@ -437,6 +437,31 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
         "credential_sweep_at" => sweep(signs::credential_sweep_at(p, text)),
         "exec_command_reasons" => strs(&crate::shell::exec_command_reasons(p, text)),
         "sh_reasons" => sh_reasons(p, text),
+        "sh_parse" => {
+            // the simple commands of a shell text: [words, substitutions, redirections, piped in,
+            // piped out, what follows, [the program's word or null, the program, negated]]
+            Value::Arr(
+                crate::shell::sh_parse(p, text)
+                    .iter()
+                    .map(|c| {
+                        let (at, program, negated) = crate::shell::sh_program(p, c);
+                        Value::Arr(vec![
+                            strs(&c.words),
+                            Value::Arr(c.subs.iter().map(|s| strs(s)).collect()),
+                            Value::Arr(c.redirs.iter().map(|(a, b)| strs(&[a.clone(), b.clone()])).collect()),
+                            Value::Bool(c.pipe_in),
+                            Value::Bool(c.pipe_out),
+                            Value::str(c.after),
+                            Value::Arr(vec![
+                                at.map(|i| Value::Int(i as i64)).unwrap_or(Value::Null),
+                                Value::Str(program),
+                                Value::Bool(negated),
+                            ]),
+                        ])
+                    })
+                    .collect(),
+            )
+        }
         "shell_text" => Value::Bool(crate::shell::shell_text(p, text)),
         "code_text" => Value::Bool(crate::shell::code_text(p, text)),
         "sh_literal_value" => {

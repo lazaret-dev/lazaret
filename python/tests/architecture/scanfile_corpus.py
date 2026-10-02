@@ -1,5 +1,10 @@
-"""The scan_file parity corpus: source files for test_rust_parity_scanfile.py,
-which holds the native engine's scan_file (dependency mode) to core's.
+"""The scan_file corpus: source files for test_snapshot_scanfile.py, which
+holds the engine's scan_file (dependency mode), scan_rules and file_context
+to their recorded outputs, and for test_wasm_parity_signs.py, which holds
+the WebAssembly build to the native library; and real_files(), this
+repository's sources, its fixtures and a sample of Python's standard
+library, for the comparisons that need no fixed inputs (WebAssembly and
+native on the same machine).
 
 Curated files for each family of findings (CURATED), then a seeded random
 stream of files built from the pieces each family looks at, lines of them
@@ -13,8 +18,10 @@ match text normalizes. Not a test: a plain module of shared data.
 Credentials here are fakes built by concatenation (a whole literal would
 trip secret scanners, GitHub's push protection among them).
 """
+import os
 import random
 
+from tests import _support
 from tests.architecture import hooks_corpus
 
 AWS = "AKIA" + "ABCDEFGHIJKLMNOP"
@@ -180,3 +187,39 @@ def corpus(seed=20260930, scale=1):
                        for _ in range(lines))
         cases.append((_path(rnd), text))
     return cases
+
+
+MAX_REAL = 300_000                     # characters of a real file read
+_LANGS = {".py": "py", ".pyw": "py", ".js": "js", ".jsx": "js", ".ts": "js", ".tsx": "js", ".mts": "js",
+          ".cts": "js", ".mjs": "js", ".cjs": "js", ".sql": "sql"}
+
+
+def lang_of(path):
+    return _LANGS.get(os.path.splitext(path)[1].lower())
+
+
+def real_files():
+    """(path, text): this repository's Python and JavaScript sources and
+    fixtures, and every 12th module of the standard library."""
+    out = []
+    roots = [os.path.join(_support.PY_ROOT, "src"), os.path.join(_support.REPO_ROOT, "js", "src"),
+             os.path.join(_support.PY_ROOT, "tests", "fixtures")]
+    stdlib = []
+    for root, _dirs, files in os.walk(os.path.dirname(os.__file__)):
+        if "site-packages" in root or "dist-packages" in root:
+            continue
+        stdlib += [os.path.join(root, f) for f in files if f.endswith(".py")]
+    paths = []
+    for base in roots:
+        for root, _dirs, files in os.walk(base):
+            paths += [os.path.join(root, f) for f in sorted(files) if lang_of(f)]
+    paths += sorted(stdlib)[::12]
+    for p in paths:
+        try:
+            with open(p, encoding="utf-8", errors="replace") as f:
+                text = f.read()
+        except OSError:
+            continue
+        if len(text) <= MAX_REAL:
+            out.append((os.path.relpath(p, _support.REPO_ROOT) if p.startswith(_support.REPO_ROOT) else p, text))
+    return out

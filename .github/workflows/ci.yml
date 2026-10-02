@@ -21,7 +21,11 @@ jobs:
           persist-credentials: false
       - run: sh scripts/check-versions.sh
 
-  # Unit, adversarial, compatibility, architecture and build tests. Tests that
+  # Unit, adversarial, compatibility, architecture and build tests, on the
+  # native engine: since the Rust-first refactor it is the Python package's
+  # only engine, so each job builds it (the runner's Rust; the build needs no
+  # registry: Cargo.lock lists only the workspace) and proves it loads before
+  # the suite runs, since the engine's own tests skip without it. Tests that
   # need Postgres skip themselves here (LAZARET_TEST_PG_DSN is unset).
   python-unit:
     runs-on: ${{ matrix.os }}
@@ -37,8 +41,16 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python }}
+      - name: The native engine
+        working-directory: rust
+        run: cargo build --release --offline --locked
       - working-directory: python
-        run: python -m unittest discover -s tests -t . -v
+        shell: bash
+        run: |
+          LAZARET_NATIVE_LIB=$(PYTHONPATH=src python -c 'import os; from lazaret.scanner import _native; print(os.path.abspath(os.path.join("..", "rust", "target", "release", _native.library_name())))')
+          export LAZARET_NATIVE_LIB
+          PYTHONPATH=src python -c "from lazaret.scanner import _native; assert _native.available(), _native.load_error(); print('native engine', _native.version())"
+          python -m unittest discover -s tests -t . -v
 
   # Live Postgres. The password only exists inside this job's throwaway
   # container, so it is not a secret.
@@ -69,15 +81,23 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
+      - name: The native engine
+        working-directory: rust
+        run: cargo build --release --offline --locked
       - working-directory: python
-        run: python -m unittest tests.pg.test_integration tests.registry.test_pg_backend -v
+        shell: bash
+        run: |
+          LAZARET_NATIVE_LIB=$(PYTHONPATH=src python -c 'import os; from lazaret.scanner import _native; print(os.path.abspath(os.path.join("..", "rust", "target", "release", _native.library_name())))')
+          export LAZARET_NATIVE_LIB
+          PYTHONPATH=src python -c "from lazaret.scanner import _native; assert _native.available(), _native.load_error(); print('native engine', _native.version())"
+          python -m unittest tests.pg.test_integration tests.registry.test_pg_backend -v
 
   # The npm package runs the native engine as WebAssembly (js/native/lazaret.wasm,
   # docs/RUST_ENGINE.md): built first, with the runner's Rust and its wasm32
   # target (release.yml builds the published one with the pinned toolchain).
-  # Then, once per OS, the npm engine against the Python engine: the
-  # test_js_parity modules skip where the WebAssembly build is missing, so the
-  # step asserts that it loads before them.
+  # Then, once per OS, the npm package against the Python package, both on
+  # the engine: the test_js_parity modules skip where the WebAssembly build or
+  # the native library is missing, so the step asserts that both load first.
   js:
     runs-on: ${{ matrix.os }}
     strategy:
@@ -101,11 +121,18 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
-      - name: The npm engine against the Python engine
+      - name: The native engine
+        if: matrix.node == '24'
+        working-directory: rust
+        run: cargo build --release --offline --locked
+      - name: The npm package against the Python package
         if: matrix.node == '24'
         working-directory: python
         shell: bash
         run: |
+          LAZARET_NATIVE_LIB=$(PYTHONPATH=src python -c 'import os; from lazaret.scanner import _native; print(os.path.abspath(os.path.join("..", "rust", "target", "release", _native.library_name())))')
+          export LAZARET_NATIVE_LIB
+          PYTHONPATH=src python -c "from lazaret.scanner import _native; assert _native.available(), _native.load_error(); print('native engine', _native.version())"
           node -e 'import("../js/src/lib/native.js").then((n) => { if (!n.available()) process.exit(1); console.log("npm engine", n.call("version").version); })'
           python -m unittest tests.architecture.test_js_parity tests.architecture.test_js_parity_config \
             tests.architecture.test_js_parity_core \
@@ -116,11 +143,10 @@ jobs:
             tests.architecture.test_review_final_parity tests.architecture.test_notices -v
 
   # The native engine (rust/, docs/RUST_ENGINE.md): no external crates, its
-  # rule pack current with core, its own tests, and the differential tests
-  # that hold it to the Python engine. Those skip themselves where the
-  # library is not built, so this job builds it first; on Linux it then runs
-  # the whole Python suite with the native engine answering. Rust is on the
-  # runners already; the build needs no registry (Cargo.lock lists only the
+  # rule pack in its canonical form and consistent with the values core still
+  # keeps, its own tests, and its WebAssembly build against the library (the
+  # Python suite runs on the library in python-unit). Rust is on the runners
+  # already; the build needs no registry (Cargo.lock lists only the
   # workspace). Python 3.10 because make_rust_tables.py --check compares the
   # generated Unicode 13.0 tables with 3.10's unicodedata.
   rust:
@@ -142,25 +168,6 @@ jobs:
         run: cargo test --release --offline --locked
       - working-directory: rust
         run: cargo build --release --offline --locked
-      - name: The native engine against the Python engine
-        working-directory: python
-        shell: bash
-        # macOS runs these steps with /bin/bash 3.2, which brace-expands a
-        # {a, b} inside double quotes nested in "$(...)": run 47 split a dict
-        # literal there into two broken programs. The library's name comes
-        # from _native itself, in single quotes.
-        run: |
-          LAZARET_NATIVE_LIB=$(PYTHONPATH=src python -c 'import os; from lazaret.scanner import _native; print(os.path.abspath(os.path.join("..", "rust", "target", "release", _native.library_name())))')
-          export LAZARET_NATIVE_LIB
-          PYTHONPATH=src python -c "from lazaret.scanner import _native; assert _native.available(), _native.load_error(); print('native engine', _native.version())"
-          python -m unittest tests.architecture.test_rust_parity_regex tests.architecture.test_rust_parity_hooks \
-            tests.architecture.test_rust_parity_hooks_b tests.architecture.test_rust_parity_signs \
-            tests.architecture.test_rust_parity_scanfile tests.architecture.test_rust_parity_lexer \
-            tests.architecture.test_rust_parity_project tests.architecture.test_rust_parity_project_scan \
-            tests.architecture.test_rust_parity_hook_commands \
-            tests.architecture.test_rust_parity_hexname tests.architecture.test_rust_parity_offscreen \
-            tests.architecture.test_rust_parity_lookalike tests.architecture.test_rust_parity_crossfile \
-            tests.architecture.test_jsparse_native tests.architecture.test_jsparse_native_b -v
       # The WebAssembly build (the npm package's engine) against this library:
       # the same answers for every case of the corpora. Node is on the runners.
       - run: rustup target add wasm32-unknown-unknown
@@ -177,10 +184,3 @@ jobs:
           python -m unittest tests.architecture.test_wasm_parity tests.architecture.test_wasm_parity_signs \
             tests.architecture.test_wasm_parity_crossfile tests.architecture.test_wasm_parity_jsparse \
             tests.architecture.test_wasm_parity_pyparse -v
-      - name: The whole suite, the native engine answering
-        if: matrix.os == 'ubuntu-latest'
-        working-directory: python
-        shell: bash
-        run: |
-          export LAZARET_NATIVE_LIB="$(pwd)/../rust/target/release/liblazaret_native.so" LAZARET_ENGINE=rust
-          python -m unittest discover -s tests -t .

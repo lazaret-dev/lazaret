@@ -39,29 +39,10 @@ def run(calls, threads=2):
 
 
 def pack(*names):
-    """The rule pack's values of `names` (a text, a number, a list for a set
-    or a list, a dict for a map, the pattern's text for a pattern)."""
-    raw = _native.call("pack.values", {"names": list(names)})
-    out = []
-    for name in names:
-        if raw.get(name) is None:
-            raise KeyError(name)
-        out.append(_value(raw[name]))
+    """The rule pack's values of `names` (engine.pack_value)."""
+    from lazaret.scanner import engine
+    out = [engine.pack_value(n) for n in names]
     return out[0] if len(out) == 1 else out
-
-
-def _value(entry):
-    """A pack entry's value (a map's and a list's entries in turn)."""
-    if not isinstance(entry, dict):
-        return entry
-    if "map" in entry:
-        return {k: _value(v) for k, v in entry["map"].items()}
-    for kind in ("set", "list", "items"):
-        if kind in entry:
-            return [_value(v) for v in entry[kind]]
-    if "re" in entry:
-        return entry["re"]
-    return entry.get("value")
 
 
 def canonical(value):

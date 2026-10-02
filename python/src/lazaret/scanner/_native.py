@@ -3,15 +3,16 @@
 The engine is a shared library (rust/crates/lazaret-ffi) with a C ABI, so it
 needs no compiled Python extension and no third-party binding: stdlib ctypes
 loads it, one binary per platform serves every Python version. A wheel ships
-it as lazaret/_native/<name>; LAZARET_NATIVE_LIB names another copy (a
-development build). Where there is none, `available()` is False and the
-scanner runs its Python engine, the reference, as it always has.
+it as lazaret/_native/<name> (an editable install puts it in
+src/lazaret/_native/); LAZARET_NATIVE_LIB names another copy (a development
+build). Since the Rust-first refactor it is the package's only engine: where
+there is none, `available()` is False and the scanning commands stop
+(engine.require).
 
 A call sends a name, its arguments (JSON) and a text (the str's code points
-as UTF-8, surrogates passed through), and gets JSON back. The engine never
-answers what the Python engine would not: when it cannot answer (its work
-budget spent on a hostile input, an internal error) the call raises, and the
-caller answers with the Python engine instead (see `engine.py`).
+as UTF-8, surrogates passed through), and gets JSON back. When the engine
+cannot answer (its work budget spent on a hostile input, an internal error)
+the call raises; the scans make the file SC-TRUNCATED (see `engine.py`).
 """
 import ctypes
 import json
@@ -26,11 +27,11 @@ _LIB_NAMES = {"win32": "lazaret_native.dll", "darwin": "liblazaret_native.dylib"
 
 
 class NativeError(RuntimeError):
-    """The native engine could not answer (the caller uses the Python engine)."""
+    """The native engine could not answer."""
 
 
 class NativeExhausted(NativeError):
-    """The call spent its work budget (a hostile input): use the Python engine."""
+    """The call spent its work budget (a hostile input): it has no answer."""
 
 
 def library_name():

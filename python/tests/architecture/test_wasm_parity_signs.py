@@ -9,9 +9,9 @@ import unittest
 
 from lazaret.scanner import _native
 from tests.architecture.hooks_corpus import corpus as hook_cases, shard
-from tests.architecture.scanfile_corpus import corpus as file_cases
+from tests.architecture.scanfile_corpus import corpus as file_cases, real_files
 from tests.architecture.test_js_parity import NPM_READY, NPM_SKIP
-from tests.architecture.test_rust_parity_scanfile import call_args, real_files
+from tests.architecture.test_snapshot_scanfile import call_args
 from tests.architecture.test_wasm_parity import both, differences
 
 

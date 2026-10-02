@@ -27,21 +27,21 @@ binds: lazaret_engine_call, lazaret_engine_free and lazaret_engine_version.
 With --load, the library is also loaded here the way
 lazaret/scanner/_native.py loads it (so run it on the library's own
 platform), must report the package's version (python/src/lazaret), and must
-answer one call as the Python engine does.
+give one call its known answer.
 
-The second form checks the Python release's files in DIR: one sdist and one
-pure wheel (py3-none-any), neither with a library, and the platform wheels,
-which must be exactly the --expect tags (when given). Each platform wheel
-holds the pure wheel's files byte for byte plus one library at
-lazaret/_native/<name>, which passes the check above for the wheel's tag,
-and the native engine's license files: part of the engine is a translation
-of CPython code (rust/NOTICE), so a platform wheel carries CPython's license
-and that notice (rust/LICENSE-PYTHON, rust/NOTICE) and declares
-"Apache-2.0 AND Python-2.0.1 AND Unicode-3.0"; its METADATA differs from the
-pure wheel's in those license fields only. The pure wheel declares
-"Apache-2.0 AND Unicode-3.0" (the Unicode data every wheel carries, with
-LICENSE-UNICODE). Every wheel's RECORD must match its files, and every
-License-File it names must be in it.
+The second form checks the Python release's files in DIR: one sdist, with
+the engine's sources (rust/, which pip compiles where no platform wheel
+fits) and no library, and the platform wheels, which must be exactly the
+--expect tags (when given). There is no pure wheel (py3-none-any): since
+the Rust-first refactor the package has no engine without the library.
+Each platform wheel holds the sdist's package files (src/lazaret) byte for
+byte plus one library at lazaret/_native/<name>, which passes the check
+above for the wheel's tag; its METADATA is the sdist's PKG-INFO. Part of the
+engine is a translation of CPython code (rust/NOTICE), so the sdist and
+every wheel carry CPython's license and that notice (rust/LICENSE-PYTHON,
+rust/NOTICE), with LICENSE and LICENSE-UNICODE, and declare
+"Apache-2.0 AND Python-2.0.1 AND Unicode-3.0". Every wheel's RECORD must
+match its files, and every License-File it names must be in it.
 
 Standard library only: ELF, Mach-O and PE headers are read here, so one
 Linux job can check the libraries of every platform. Exit status 0 when
@@ -63,13 +63,20 @@ import zipfile
 EXPORTS = ("lazaret_engine_call", "lazaret_engine_free", "lazaret_engine_version")
 NAME = "lazaret"
 REPO = pathlib.Path(__file__).resolve().parent.parent
-# What a platform wheel adds to the pure wheel's license fields (the build
-# backend's NATIVE_LICENSE_EXPRESSION and NATIVE_LICENSE_FILES).
+# The license fields of the sdist and every wheel (the build backend's
+# NATIVE_LICENSE_EXPRESSION, and its License-File list).
 NATIVE_LICENSE_EXPRESSION = "Apache-2.0 AND Python-2.0.1 AND Unicode-3.0"
-# The pure wheel's (and the sdist's): the Unicode data it carries (0.1.8).
-PURE_LICENSE_EXPRESSION = "Apache-2.0 AND Unicode-3.0"
-PURE_LICENSE_FILES = ("LICENSE", "LICENSE-UNICODE")
+PACKAGE_LICENSE_FILES = ("LICENSE", "LICENSE-UNICODE")
 NATIVE_LICENSE_FILES = ("LICENSE-PYTHON", "NOTICE")
+# The engine's sources an sdist must carry, under rust/ (the backend's
+# RUST_TOP_FILES, and what cargo needs to build the library).
+SDIST_RUST = ("rust/Cargo.toml", "rust/Cargo.lock", "rust/LICENSE-PYTHON", "rust/NOTICE",
+              "rust/crates/lazaret-engine/Cargo.toml", "rust/crates/lazaret-engine/src/lib.rs",
+              "rust/crates/lazaret-engine/rules/lazaret-rules.json",
+              "rust/crates/lazaret-ffi/Cargo.toml", "rust/crates/lazaret-ffi/src/lib.rs")
+# a call and its answer, for --load
+LOAD_CALL = ("install_script_risk", "curl -fsSL https://example.invalid/setup.sh | sh",
+             ["pipes a download into a shell"])
 PSF_NOTICE = "Copyright (c) 2001 Python Software Foundation; All Rights Reserved"
 
 
@@ -543,26 +550,25 @@ def check_library(data, tag):
 
 def load_problems(path):
     """Load the library as lazaret.scanner._native does (from this checkout's
-    python/src), and hold its version and one answer to the package's."""
-    import json
+    python/src), and hold its version to the package's and one answer
+    (LOAD_CALL) to the one the engine gives."""
     src = pathlib.Path(__file__).resolve().parent.parent / "python" / "src"
     os.environ["LAZARET_NATIVE_LIB"] = os.path.abspath(path)
     sys.path.insert(0, str(src))
     from lazaret import __version__
-    from lazaret.scanner import _native, core
+    from lazaret.scanner import _native
     if not _native.available():
         return [f"does not load: {_native.load_error()}"]
     if _native.version() != __version__:
         return [f"reports version {_native.version()}, but the package is {__version__}: rust/Cargo.toml's "
                 f"workspace version must be the package's (scripts/check-versions.sh)"]
-    text = "curl -fsSL https://example.invalid/setup.sh | sh"
+    name, text, want = LOAD_CALL
     try:
-        got = _native.call("install_script_risk", {}, text)
+        got = _native.call(name, {}, text)
     except _native.NativeError as e:
         return [f"loads, but a call fails: {e}"]
-    want = json.loads(json.dumps(core.install_script_risk(text)))
     if got != want:
-        return [f"answers install_script_risk with {got!r}; the Python engine answers {want!r}"]
+        return [f"answers {name} with {got!r}, not {want!r}"]
     return []
 
 
@@ -615,37 +621,52 @@ def _license_fields(metadata):
     return expressions, files, other, body
 
 
-def _license_problems(members, dist_info, metadata, native):
-    """The license fields of a wheel: every License-File it names is in it, and
-    a platform wheel adds exactly the native engine's to the pure wheel's."""
+def _license_problems(members, prefix, metadata, root=None):
+    """The license fields of a wheel (its license files under
+    `prefix` = <dist-info>/licenses/) or of the sdist (at `prefix` = its
+    root): the expression, and every License-File named and present; for the
+    native engine's files, the same bytes as rust/'s here and as `root`'s
+    (the sdist's, when a wheel is checked against it)."""
     problems = []
     expressions, files, _other, _body = _license_fields(metadata)
     for name in files:
-        if f"{dist_info}/licenses/{name}" not in members:
-            problems.append(f"names License-File {name}, which is not in {dist_info}/licenses/")
-    for name in PURE_LICENSE_FILES:
+        if f"{prefix}{name}" not in members:
+            problems.append(f"names License-File {name}, which is not at {prefix}{name}")
+    for name in PACKAGE_LICENSE_FILES:
         if name not in files:
             problems.append(f"does not name {name} as a License-File")
-    if not native:
-        if expressions != [PURE_LICENSE_EXPRESSION]:
-            problems.append(f"its License-Expression is {' '.join(expressions) or 'missing'}, not "
-                            f"{PURE_LICENSE_EXPRESSION}")
-        return problems
     if expressions != [NATIVE_LICENSE_EXPRESSION]:
         problems.append(f"its License-Expression is {' '.join(expressions) or 'missing'}, not "
                         f"{NATIVE_LICENSE_EXPRESSION}: part of the native engine is CPython's (rust/NOTICE)")
     for name in NATIVE_LICENSE_FILES:
-        data = members.get(f"{dist_info}/licenses/{name}")
+        data = members.get(f"{prefix}{name}")
         if name not in files or data is None:
             problems.append(f"does not carry {name} (rust/{name}) as a license file")
             continue
         source = REPO / "rust" / name
         if source.is_file() and data != source.read_bytes().replace(b"\r\n", b"\n"):
             problems.append(f"its {name} is not rust/{name}")
-    license_python = members.get(f"{dist_info}/licenses/LICENSE-PYTHON", b"")
+    for name in PACKAGE_LICENSE_FILES + NATIVE_LICENSE_FILES:
+        if root is not None and name in root and members.get(f"{prefix}{name}") not in (None, root[name]):
+            problems.append(f"its {name} is not the sdist's")
+    license_python = members.get(f"{prefix}LICENSE-PYTHON", b"")
     if license_python and PSF_NOTICE.encode() not in license_python:
         problems.append("its LICENSE-PYTHON lacks the PSF's notice of copyright")
     return problems
+
+
+def _read_sdist(path):
+    """({name under the sdist's top directory: bytes} of its files, [problems])."""
+    members, problems = {}, []
+    with tarfile.open(path) as tar:
+        for info in tar.getmembers():
+            top, _, rest = info.name.partition("/")
+            if not info.isfile():
+                if not info.isdir():
+                    problems.append(f"{info.name} is not a regular file")
+                continue
+            members[rest] = tar.extractfile(info).read()
+    return members, problems
 
 
 def check_dist(directory, expect=()):
@@ -654,11 +675,12 @@ def check_dist(directory, expect=()):
     if not directory.is_dir():
         return [], [f"{directory} is not a directory"]
     problems, summaries = [], []
-    sdists, pure, platform = [], [], {}
+    sdists, platform = [], {}
     for path in sorted(p for p in directory.iterdir() if p.is_file()):
         wheel, sdist = _WHEEL_RE.match(path.name), _SDIST_RE.match(path.name)
         if wheel and wheel.group(2) == "any":
-            pure.append((wheel.group(1), path))
+            problems.append(f"{path.name}: a pure (py3-none-any) wheel, which would install a package with no "
+                            f"engine: every wheel carries the native library")
         elif wheel:
             platform[wheel.group(2)] = (wheel.group(1), path)
         elif sdist:
@@ -667,9 +689,9 @@ def check_dist(directory, expect=()):
             problems.append(f"{path.name}: not a file of this release")
     if len(sdists) != 1:
         problems.append(f"{len(sdists)} sdists; expected one")
-    if len(pure) != 1:
-        problems.append(f"{len(pure)} pure (py3-none-any) wheels; expected one")
-    versions = {v for v, _ in sdists + pure + list(platform.values())}
+    if not platform:
+        problems.append("no platform wheels")
+    versions = {v for v, _ in sdists + list(platform.values())}
     if len(versions) > 1:
         problems.append(f"the files are of different versions: {', '.join(sorted(versions))}")
     if expect:
@@ -677,48 +699,49 @@ def check_dist(directory, expect=()):
             problems.append(f"no platform wheel for {tag}")
         for tag in sorted(set(platform) - set(expect)):
             problems.append(f"a platform wheel for {tag}, which is not expected")
-    for _version, path in sdists:
-        with tarfile.open(path) as tar:
-            names = tar.getnames()
-        bad = [n for n in names if "/_native/" in n or n.endswith(_BINARY_SUFFIXES)]
-        problems += [f"{path.name}: carries {n}" for n in bad]
-        if not bad:
-            summaries.append(f"{path.name}: {len(names)} members, no library")
-    if len(pure) != 1:
+    if len(sdists) != 1:
         return summaries, problems
-    version, pure_path = pure[0]
+    version, sdist_path = sdists[0]
+    sdist, errors = _read_sdist(sdist_path)
+    errors += [f"carries {n}" for n in sorted(sdist) if "/_native/" in n or n.endswith(_BINARY_SUFFIXES)]
+    errors += [f"lacks {n}, the native engine's source (pip compiles it where no platform wheel fits)"
+               for n in SDIST_RUST if n not in sdist]
+    pkg_info = sdist.get("PKG-INFO", b"").decode("utf-8")
+    errors += _license_problems(sdist, "", pkg_info)
+    problems += [f"{sdist_path.name}: {e}" for e in errors]
+    if not errors:
+        summaries.append(f"{sdist_path.name}: {len(sdist)} members, the engine's sources and no library")
+    package = {name[len("src/"):]: data for name, data in sdist.items() if name.startswith(f"src/{NAME}/")}
     dist_info = f"{NAME}-{version}.dist-info"
-    wheel_file, record_file, metadata_file = (f"{dist_info}/WHEEL", f"{dist_info}/RECORD",
-                                              f"{dist_info}/METADATA")
-    base = _read_wheel(pure_path)
-    base_metadata = base.get(metadata_file, b"").decode("utf-8")
-    problems += [f"{pure_path.name}: {p}" for p in _record_problems(base, dist_info)]
-    problems += [f"{pure_path.name}: {p}" for p in _license_problems(base, dist_info, base_metadata, False)]
-    problems += [f"{pure_path.name}: carries {n}" for n in base if "/_native/" in n or n.endswith(_BINARY_SUFFIXES)]
-    summaries.append(f"{pure_path.name}: {len(base)} members, no library")
-    licenses = {f"{dist_info}/licenses/{name}" for name in NATIVE_LICENSE_FILES}
+    wheel_file, record_file, metadata_file, entry_points = (
+        f"{dist_info}/WHEEL", f"{dist_info}/RECORD", f"{dist_info}/METADATA", f"{dist_info}/entry_points.txt")
+    licenses = {f"{dist_info}/licenses/{name}" for name in PACKAGE_LICENSE_FILES + NATIVE_LICENSE_FILES}
+    first_entry_points = None
     for tag, (_v, path) in sorted(platform.items()):
         members = _read_wheel(path)
         errors = _record_problems(members, dist_info)
         library = f"{NAME}/_native/{library_name(tag)}"
-        same = set(base) - {wheel_file, record_file, metadata_file}
-        for name in sorted(same - set(members)):
-            errors.append(f"lacks {name}, which the pure wheel has")
-        for name in sorted(set(members) - same - {wheel_file, record_file, metadata_file, library} - licenses):
-            errors.append(f"has {name}, which the pure wheel does not")
-        for name in sorted(same & set(members)):
-            if members[name] != base[name]:
-                errors.append(f"{name} differs from the pure wheel's")
+        for name in sorted(set(package) - set(members)):
+            errors.append(f"lacks {name}, which the sdist has (src/{name})")
+        for name in sorted(set(members) - set(package) - {wheel_file, record_file, metadata_file, entry_points,
+                                                          library} - licenses):
+            errors.append(f"has {name}, which the sdist does not")
+        for name in sorted(set(package) & set(members)):
+            if members[name] != package[name]:
+                errors.append(f"{name} differs from the sdist's src/{name}")
         metadata = members.get(metadata_file, b"").decode("utf-8")
-        mine, theirs = _license_fields(metadata), _license_fields(base_metadata)
-        if mine[2:] != theirs[2:] or mine[1][:len(theirs[1])] != theirs[1]:
-            errors.append("its METADATA differs from the pure wheel's in more than the native engine's license "
-                          "fields")
-        errors += _license_problems(members, dist_info, metadata, True)
-        want = base.get(wheel_file, b"").decode("utf-8").replace(
-            "Root-Is-Purelib: true", "Root-Is-Purelib: false").replace("Tag: py3-none-any", f"Tag: py3-none-{tag}")
+        if metadata != pkg_info:
+            errors.append("its METADATA is not the sdist's PKG-INFO")
+        errors += _license_problems(members, f"{dist_info}/licenses/", metadata, sdist)
+        want = f"Wheel-Version: 1.0\nGenerator: lazaret_build\nRoot-Is-Purelib: false\nTag: py3-none-{tag}\n"
         if members.get(wheel_file, b"").decode("utf-8") != want:
-            errors.append(f"its WHEEL is not the pure wheel's with Root-Is-Purelib: false and Tag: py3-none-{tag}")
+            errors.append(f"its WHEEL is not the backend's for py3-none-{tag} (Root-Is-Purelib: false)")
+        if first_entry_points is None:
+            first_entry_points = members.get(entry_points)
+        if entry_points not in members:
+            errors.append(f"has no {entry_points}")
+        elif members[entry_points] != first_entry_points:
+            errors.append(f"its {entry_points} differs from the other wheels'")
         if library not in members:
             errors.append(f"has no {library}")
             summary = ""
@@ -727,7 +750,7 @@ def check_dist(directory, expect=()):
             errors += [f"{library}: {p}" for p in found]
         problems += [f"{path.name}: {e}" for e in errors]
         if not errors:
-            summaries.append(f"{path.name}: the pure wheel's files and {library} ({summary})")
+            summaries.append(f"{path.name}: the sdist's package files and {library} ({summary})")
     return summaries, problems
 
 
@@ -760,7 +783,7 @@ def main(argv=None):
         summary, problems = check_library(path.read_bytes(), args.tag)
         if args.load and not problems:
             problems = load_problems(path)
-            summary += "; loads here and answers as the Python engine does" if not problems else ""
+            summary += "; loads here and answers as it should" if not problems else ""
         summaries = [f"{args.library} for {args.tag}: {summary}"] if not problems else []
         problems = [f"{args.library} for {args.tag}: {p}" for p in problems]
     for line in summaries:

@@ -1,8 +1,17 @@
 """The stdlib build backend: what the wheel and sdist contain, that they're
-reproducible, and that an installed wheel actually works."""
+reproducible, and that an installed wheel actually works.
+
+Every wheel carries the native engine (there is no pure wheel since the
+Rust-first refactor). The wheels here are built from the library the suite
+runs on (LAZARET_NATIVE_LIBRARY, tagged for this machine), so nothing is
+compiled; how the backend compiles one with cargo where no library is named
+is checked with cargo mocked.
+"""
 
 import base64
+import contextlib
 import hashlib
+import io
 import os
 import pathlib
 import re
@@ -28,14 +37,29 @@ def backend(path=BACKEND):
     return _support.load_script(path, f"lazaret_build_{abs(hash(path))}")
 
 
+def the_library():
+    """The native library the suite runs on (lazaret.scanner._native's)."""
+    from lazaret.scanner import _native
+    return _native.library_path()
+
+
+def library_env(b):
+    """The environment a wheel of the_library(), for this machine, is built in."""
+    return {"LAZARET_NATIVE_LIBRARY": the_library(), "LAZARET_WHEEL_PLATFORM": b.local_platform()}
+
+
+@unittest.skipUnless(the_library(), "the native library is not built here")
 class BuildTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmp = tempfile.mkdtemp()
         cls.b = backend()
-        cls.wheel = os.path.join(cls.tmp, cls.b.build_wheel(cls.tmp))
+        cls.env = library_env(cls.b)
+        with unittest.mock.patch.dict(os.environ, cls.env):
+            cls.wheel = os.path.join(cls.tmp, cls.b.build_wheel(cls.tmp))
         cls.sdist = os.path.join(cls.tmp, cls.b.build_sdist(cls.tmp))
         cls.version = cls.b.version()
+        cls.platform = cls.b.local_platform()
 
     @classmethod
     def tearDownClass(cls):
@@ -56,7 +80,15 @@ class BuildTests(unittest.TestCase):
     def test_version_comes_from_the_package(self):
         import lazaret
         self.assertEqual(self.version, lazaret.__version__)
-        self.assertTrue(self.wheel.endswith(f"lazaret-{self.version}-py3-none-any.whl"))
+        self.assertTrue(self.wheel.endswith(f"lazaret-{self.version}-py3-none-{self.platform}.whl"))
+
+    def test_the_wheel_carries_the_library(self):
+        name = self.b.native_library_name(self.platform)
+        self.assertEqual(read_member(self.wheel, f"lazaret/_native/{name}"),
+                         pathlib.Path(the_library()).read_bytes())
+        info = read_member(self.wheel, f"lazaret-{self.version}.dist-info/WHEEL").decode()
+        self.assertEqual(info, "Wheel-Version: 1.0\nGenerator: lazaret_build\nRoot-Is-Purelib: false\n"
+                               f"Tag: py3-none-{self.platform}\n")
 
     def test_wheel_contents(self):
         names = self.names()
@@ -72,7 +104,7 @@ class BuildTests(unittest.TestCase):
         meta = read_member(self.wheel, f"lazaret-{self.version}.dist-info/METADATA").decode()
         self.assertIn(f"Version: {self.version}\n", meta)
         self.assertIn("Requires-Python: >=3.10\n", meta)
-        self.assertIn("License-Expression: Apache-2.0 AND Unicode-3.0\n", meta)   # PEP 639; was "License:"
+        self.assertIn("License-Expression: Apache-2.0 AND Python-2.0.1 AND Unicode-3.0\n", meta)   # PEP 639
         self.assertNotIn("Requires-Dist", meta)
 
     def test_record_hashes_match(self):
@@ -104,19 +136,19 @@ class BuildTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as target:
             with zipfile.ZipFile(self.wheel) as z:
                 z.extractall(target)
-            env = dict(os.environ, PYTHONPATH=target)
+            env = {k: v for k, v in os.environ.items() if k != "LAZARET_NATIVE_LIB"}    # the wheel's own library
+            env["PYTHONPATH"] = target
             for name, module, func in re.findall(r"^(\S+) = ([\w.]+):(\w+)$", ep, re.M):
                 with self.subTest(script=name):
                     code = (f"import sys; from {module} import {func}; sys.argv = [{name!r}, '--version']; "
                             f"sys.exit({func}())")
                     p = subprocess.run([sys.executable, "-c", code], capture_output=True, encoding="utf-8",
                                        errors="replace", env=env, cwd=target, timeout=60)
-                    # the scanning commands name the engine they run (engine.py): the
-                    # native one where it is installed, else python
+                    # the scanning commands name the engine (engine.py): the wheel's library
                     self.assertEqual(p.returncode, 0, p.stderr)
                     self.assertRegex(p.stdout, "^" + re.escape(f"{shown.get(name, name)} {self.version}")
-                                     + (r" \(engine: (?:rust \S+|python)\)" if name in ("lazaret", "lazaret-registry")
-                                        else "") + "\n\\Z")
+                                     + (re.escape(f" (engine: rust {self.version})")
+                                        if name in ("lazaret", "lazaret-registry") else "") + "\n\\Z")
 
     def test_a_platform_wheel_carries_the_native_engine(self):
         """LAZARET_NATIVE_LIBRARY and LAZARET_WHEEL_PLATFORM make a platform
@@ -144,49 +176,48 @@ class BuildTests(unittest.TestCase):
                 with self.subTest(env=bad), unittest.mock.patch.dict(os.environ, bad):
                     with self.assertRaises(RuntimeError):
                         self.b.build_wheel(d)
-        self.assertNotIn("lazaret/_native/liblazaret_native.so", self.names())      # the pure wheel has none
         with tarfile.open(self.sdist) as t:
             self.assertFalse([n for n in t.getnames() if "/_native/" in n])
 
-    def test_a_platform_wheel_carries_cpythons_license_and_the_notice(self):
+    def test_every_artifact_carries_cpythons_license_and_the_notice(self):
         """Part of the native engine is a Rust translation of CPython code
-        (rust/NOTICE): a platform wheel carries CPython's LICENSE and that
-        notice as license files and declares both licenses. The pure wheel
-        and the sdist hold none of that code: Apache-2.0, and Unicode-3.0 for
-        the Unicode data they all carry."""
+        (rust/NOTICE): every wheel carries CPython's LICENSE and that notice
+        as license files and declares both licenses, and so does the sdist,
+        which carries the engine's source (the files at its root, where
+        PKG-INFO's License-File finds them)."""
         dist_info = f"lazaret-{self.version}.dist-info"
         with tempfile.TemporaryDirectory() as d:
             lib = pathlib.Path(d, "built.so")
             lib.write_bytes(b"\x7fELF-native-engine")
-            wheel = os.path.join(d, self.b.build_platform_wheel(d, "manylinux_2_28_x86_64", str(lib)))
-            meta = read_member(wheel, f"{dist_info}/METADATA").decode()
-            self.assertIn("License-Expression: Apache-2.0 AND Python-2.0.1 AND Unicode-3.0\n", meta)
-            self.assertEqual(re.findall(r"^License-File: (.+)$", meta, re.M),
-                             ["LICENSE", "LICENSE-UNICODE", "LICENSE-PYTHON", "NOTICE"])
-            for name in ("LICENSE-PYTHON", "NOTICE"):
-                with self.subTest(name=name):
-                    self.assertEqual(read_member(wheel, f"{dist_info}/licenses/{name}"),
-                                     pathlib.Path(_support.REPO_ROOT, "rust", name).read_bytes())
-            self.assertIn(b"Copyright (c) 2001 Python Software Foundation; All Rights Reserved",
-                          read_member(wheel, f"{dist_info}/licenses/LICENSE-PYTHON"))
+            platform_wheel = os.path.join(d, self.b.build_platform_wheel(d, "manylinux_2_28_x86_64", str(lib)))
+            for wheel in (self.wheel, platform_wheel):
+                with self.subTest(wheel=os.path.basename(wheel)):
+                    meta = read_member(wheel, f"{dist_info}/METADATA").decode()
+                    self.assertIn("License-Expression: Apache-2.0 AND Python-2.0.1 AND Unicode-3.0\n", meta)
+                    self.assertEqual(re.findall(r"^License-File: (.+)$", meta, re.M),
+                                     ["LICENSE", "LICENSE-UNICODE", "LICENSE-PYTHON", "NOTICE"])
+                    for name in ("LICENSE-PYTHON", "NOTICE"):
+                        self.assertEqual(read_member(wheel, f"{dist_info}/licenses/{name}"),
+                                         pathlib.Path(_support.REPO_ROOT, "rust", name).read_bytes())
+                    self.assertIn(b"Copyright (c) 2001 Python Software Foundation; All Rights Reserved",
+                                  read_member(wheel, f"{dist_info}/licenses/LICENSE-PYTHON"))
             with unittest.mock.patch.dict(self.b.NATIVE_LICENSE_FILES, {"NOTICE": pathlib.Path(d, "missing")}):
                 with self.assertRaises(RuntimeError) as cm:                 # no notices, no platform wheel
                     self.b.build_platform_wheel(d, "win_amd64", str(lib))
                 self.assertIn("missing", str(cm.exception))
-        pure = read_member(self.wheel, f"{dist_info}/METADATA").decode()
-        self.assertIn("License-Expression: Apache-2.0 AND Unicode-3.0\n", pure)
-        self.assertEqual(re.findall(r"^License-File: (.+)$", pure, re.M), ["LICENSE", "LICENSE-UNICODE"])
-        self.assertFalse([n for n in self.names() if n.endswith(("/LICENSE-PYTHON", "/NOTICE"))])
+        base = f"lazaret-{self.version}/"
         with tarfile.open(self.sdist) as t:
-            self.assertFalse([n for n in t.getnames() if n.endswith(("/LICENSE-PYTHON", "/NOTICE"))])
-            pkg_info = t.extractfile(f"lazaret-{self.version}/PKG-INFO").read().decode()
-        self.assertIn("License-Expression: Apache-2.0 AND Unicode-3.0\n", pkg_info)
+            for name in ("LICENSE-PYTHON", "NOTICE"):
+                self.assertEqual(t.extractfile(base + name).read(),
+                                 pathlib.Path(_support.REPO_ROOT, "rust", name).read_bytes())
+            pkg_info = t.extractfile(base + "PKG-INFO").read().decode()
+        self.assertEqual(pkg_info, read_member(self.wheel, f"{dist_info}/METADATA").decode())
 
     def test_the_command_line_builds_a_platform_wheel_per_platform(self):
         """Release CI: `lazaret_build.py dist --platform TAG=LIBRARY …` writes the
-        sdist, the pure wheel, and one platform wheel per --platform, each the
-        pure wheel's files plus its library. A bad --platform stops the build
-        before anything is written."""
+        sdist and one platform wheel per --platform (and no wheel for this
+        machine), each the same files plus its library. A bad --platform
+        stops the build before anything is written."""
         env = {k: v for k, v in os.environ.items() if k not in ("LAZARET_NATIVE_LIBRARY", "LAZARET_WHEEL_PLATFORM")}
 
         def build(out, *args):
@@ -202,27 +233,24 @@ class BuildTests(unittest.TestCase):
             self.assertEqual(p.returncode, 0, p.stderr)
             v = self.version
             self.assertEqual(sorted(os.listdir(out)), sorted([
-                f"lazaret-{v}.tar.gz", f"lazaret-{v}-py3-none-any.whl",
+                f"lazaret-{v}.tar.gz",
                 f"lazaret-{v}-py3-none-manylinux_2_28_x86_64.whl", f"lazaret-{v}-py3-none-win_amd64.whl"]))
 
             def members(name):
                 with zipfile.ZipFile(os.path.join(out, name)) as z:
                     return {n: z.read(n) for n in z.namelist()}
 
-            pure = members(f"lazaret-{v}-py3-none-any.whl")
+            linux, windows = (members(f"lazaret-{v}-py3-none-{tag}.whl") for tag in ("manylinux_2_28_x86_64",
+                                                                                     "win_amd64"))
             dist_info = f"lazaret-{v}.dist-info/"
-            for tag, library, data in (("manylinux_2_28_x86_64", "liblazaret_native.so", b"\x7fELF-linux"),
-                                       ("win_amd64", "lazaret_native.dll", b"MZ-windows")):
-                with self.subTest(tag=tag):
-                    wheel = members(f"lazaret-{v}-py3-none-{tag}.whl")
-                    notices = {dist_info + "licenses/LICENSE-PYTHON", dist_info + "licenses/NOTICE"}
-                    self.assertEqual(set(wheel) - set(pure), {f"lazaret/_native/{library}"} | notices)
-                    self.assertEqual(set(pure) - set(wheel), set())
-                    self.assertEqual(wheel[f"lazaret/_native/{library}"], data)
-                    for name in pure:
-                        if name not in (dist_info + "WHEEL", dist_info + "RECORD", dist_info + "METADATA"):
-                            self.assertEqual(wheel[name], pure[name], name)
-                    self.assertIn(f"Tag: py3-none-{tag}\n", wheel[dist_info + "WHEEL"].decode())
+            self.assertEqual(linux["lazaret/_native/liblazaret_native.so"], b"\x7fELF-linux")
+            self.assertEqual(windows["lazaret/_native/lazaret_native.dll"], b"MZ-windows")
+            self.assertEqual(set(linux) - {"lazaret/_native/liblazaret_native.so"},
+                             set(windows) - {"lazaret/_native/lazaret_native.dll"})
+            for name in linux:
+                if not name.startswith("lazaret/_native/") and name not in (dist_info + "WHEEL", dist_info + "RECORD"):
+                    self.assertEqual(linux[name], windows[name], name)
+            self.assertEqual(self.names_of(linux), self.names_of(self.member_map(self.wheel)))
 
             for args in (["--platform", "manylinux_2_28_x86_64"], ["--platform", f"any={so}"],
                          ["--platform", f"Linux x86={so}"], ["--platform", f"win_amd64={d}/missing.dll"],
@@ -235,9 +263,20 @@ class BuildTests(unittest.TestCase):
                     self.assertNotIn("Traceback", p.stderr)
                     self.assertFalse(os.path.exists(empty) and os.listdir(empty))
 
+    @staticmethod
+    def member_map(wheel):
+        with zipfile.ZipFile(wheel) as z:
+            return {n: z.read(n) for n in z.namelist()}
+
+    @staticmethod
+    def names_of(members):
+        """A wheel's member names, its library's as lazaret/_native/*."""
+        return sorted("lazaret/_native/*" if n.startswith("lazaret/_native/") else n for n in members)
+
     def test_builds_are_reproducible(self):
         with tempfile.TemporaryDirectory() as d:
-            again_wheel = os.path.join(d, self.b.build_wheel(d))
+            with unittest.mock.patch.dict(os.environ, self.env):
+                again_wheel = os.path.join(d, self.b.build_wheel(d))
             again_sdist = os.path.join(d, self.b.build_sdist(d))
             for first, second in ((self.wheel, again_wheel), (self.sdist, again_sdist)):
                 with self.subTest(artifact=os.path.basename(first)):
@@ -247,23 +286,57 @@ class BuildTests(unittest.TestCase):
         base = f"lazaret-{self.version}/"
         with tarfile.open(self.sdist) as tf:
             names = tf.getnames()
-            for must in ("PKG-INFO", "pyproject.toml", "_build/lazaret_build.py", "LICENSE",
-                         "src/lazaret/scanner/core.py", "src/lazaret/registry/schema.sql"):
+            for must in ("PKG-INFO", "pyproject.toml", "_build/lazaret_build.py", "LICENSE", "LICENSE-PYTHON",
+                         "NOTICE", "src/lazaret/scanner/core.py", "src/lazaret/registry/schema.sql",
+                         # the engine's sources, which pip compiles where no platform wheel fits
+                         "rust/Cargo.toml", "rust/Cargo.lock", "rust/NOTICE", "rust/LICENSE-PYTHON",
+                         "rust/crates/lazaret-engine/Cargo.toml", "rust/crates/lazaret-engine/src/lib.rs",
+                         "rust/crates/lazaret-engine/rules/lazaret-rules.json",
+                         "rust/crates/lazaret-ffi/Cargo.toml", "rust/crates/lazaret-ffi/src/lib.rs"):
                 self.assertIn(base + must, names)
-            self.assertFalse([n for n in names if "/tests/" in n or "__pycache__" in n])
+            self.assertFalse([n for n in names if "/tests/" in n or "__pycache__" in n or "/target/" in n
+                              or "/examples/" in n or "/." in n or n.endswith((".so", ".dll", ".dylib"))])
             with tempfile.TemporaryDirectory() as d:
                 tf.extractall(d, filter="data") if hasattr(tarfile, "data_filter") else tf.extractall(d)
-                # a wheel built from the sdist has the same files as one built from the repo
+                # a wheel built from the sdist (with the same library) is the one built from the repo
                 inner = backend(os.path.join(d, base, "_build", "lazaret_build.py"))
-                rebuilt = os.path.join(d, inner.build_wheel(d))
-                with zipfile.ZipFile(rebuilt) as z:
-                    self.assertEqual(sorted(z.namelist()), sorted(self.names()))
+                self.assertEqual(inner.RUST, pathlib.Path(d, base, "rust").resolve())
+                with unittest.mock.patch.dict(os.environ, self.env):
+                    rebuilt = os.path.join(d, inner.build_wheel(d))
+                self.assertEqual(pathlib.Path(rebuilt).read_bytes(), pathlib.Path(self.wheel).read_bytes())
+                # and so is an sdist built from it
+                again = os.path.join(d, "again")
+                os.mkdir(again)
+                self.assertEqual(pathlib.Path(again, inner.build_sdist(again)).read_bytes(),
+                                 pathlib.Path(self.sdist).read_bytes())
+
+    def test_a_stray_file_among_the_engines_sources_stops_the_sdist(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d, "rust")
+            for rel, path in self.b._rust_files():
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                (root / rel).write_bytes(path.read_bytes())
+            (root / "crates" / "lazaret-engine" / "src" / "lib.rs.orig").write_text("// old\n", encoding="utf-8")
+            (root / "crates" / "lazaret-engine" / "examples").mkdir()
+            (root / "crates" / "lazaret-engine" / "examples" / "x.rs").write_text("fn main() {}\n", encoding="utf-8")
+            with unittest.mock.patch.object(self.b, "RUST", root):
+                with self.assertRaises(self.b.UnexpectedFilesError) as cm:
+                    self.b._rust_files()
+                self.assertIn("lib.rs.orig", str(cm.exception))
+                (root / "crates" / "lazaret-engine" / "src" / "lib.rs.orig").unlink()
+                shipped = [rel for rel, _path in self.b._rust_files()]
+                self.assertNotIn("crates/lazaret-engine/examples/x.rs", shipped)     # examples never ship
+                (root / "Cargo.lock").unlink()
+                with self.assertRaises(RuntimeError) as cm:
+                    self.b._rust_files()
+                self.assertIn("Cargo.lock", str(cm.exception))
 
     def test_installed_wheel_runs_without_the_source_tree(self):
         with tempfile.TemporaryDirectory() as target:
             with zipfile.ZipFile(self.wheel) as z:
                 z.extractall(target)
-            env = dict(os.environ, PYTHONPATH=target)   # only the installed copy
+            env = {k: v for k, v in os.environ.items() if k != "LAZARET_NATIVE_LIB"}
+            env["PYTHONPATH"] = target                  # only the installed copy, and its library
             check = subprocess.run(
                 [sys.executable, "-c", "import lazaret, lazaret.registry.repo, lazaret.mcp.server; print(lazaret.__file__)"],
                 capture_output=True, encoding="utf-8", errors="replace", env=env, cwd=target, timeout=60)
@@ -278,20 +351,120 @@ class BuildTests(unittest.TestCase):
             self.assertNotIn("Traceback", scan.stderr)
             self.assertIn("Supply-chain", scan.stdout)
 
-    def test_editable_wheel_points_at_src(self):
+    def test_editable_wheel_points_at_src_and_places_the_library(self):
         with tempfile.TemporaryDirectory() as d:
-            wheel = os.path.join(d, self.b.build_editable(d))
+            src = pathlib.Path(d, "src")
+            (src / "lazaret").mkdir(parents=True)
+            with unittest.mock.patch.object(self.b, "SRC", src), unittest.mock.patch.dict(os.environ, self.env):
+                wheel = os.path.join(d, self.b.build_editable(d))
             with zipfile.ZipFile(wheel) as z:
                 pth = [n for n in z.namelist() if n.endswith(".pth")]
                 self.assertEqual(len(pth), 1)
-                self.assertEqual(z.read(pth[0]).decode().strip(), _support.SRC)
+                self.assertEqual(z.read(pth[0]).decode().strip(), str(src))
+                self.assertFalse([n for n in z.namelist() if "/_native/" in n])
+            placed = src / "lazaret" / "_native" / self.b.native_library_name(self.platform)
+            self.assertEqual(placed.read_bytes(), pathlib.Path(the_library()).read_bytes())
+
+    def test_an_editable_installs_library_never_ships(self):
+        """src/lazaret/_native/ (where build_editable puts the library) is not
+        packed from the tree: the wheel's library is the one it is built with."""
+        with tempfile.TemporaryDirectory() as d:
+            pkg = pathlib.Path(d, "lazaret")
+            (pkg / "_native").mkdir(parents=True)
+            (pkg / "__init__.py").write_text("__version__ = '0'\n", encoding="utf-8")
+            (pkg / "_native" / "liblazaret_native.so").write_bytes(b"\x7fELF-stale")
+            with unittest.mock.patch.object(self.b, "PKG", pkg):
+                self.assertEqual([p.name for p in self.b._package_files()], ["__init__.py"])
 
     def test_command_line_build(self):
+        env = dict(os.environ, **self.env)
         with tempfile.TemporaryDirectory() as d:
-            p = subprocess.run([sys.executable, BACKEND, d], capture_output=True, encoding="utf-8", errors="replace", timeout=120)
+            p = subprocess.run([sys.executable, BACKEND, d], capture_output=True, encoding="utf-8", errors="replace",
+                               env=env, timeout=120)
             self.assertEqual(p.returncode, 0, p.stderr)
-            self.assertEqual(sorted(os.listdir(d)),
-                             sorted([f"lazaret-{self.version}.tar.gz", f"lazaret-{self.version}-py3-none-any.whl"]))
+            self.assertEqual(sorted(os.listdir(d)), sorted([f"lazaret-{self.version}.tar.gz",
+                                                            f"lazaret-{self.version}-py3-none-{self.platform}.whl"]))
+
+
+class CargoTests(unittest.TestCase):
+    """Where no library is named, the backend compiles one with cargo (cargo
+    itself mocked here: what it runs, and the errors it gives)."""
+
+    def setUp(self):
+        self.b = backend()
+        self.env = {k: v for k, v in os.environ.items()
+                    if k not in ("LAZARET_NATIVE_LIBRARY", "LAZARET_WHEEL_PLATFORM", "CARGO", "CARGO_TARGET_DIR")}
+        quiet = contextlib.redirect_stderr(io.StringIO())       # (the backend says what it runs)
+        quiet.__enter__()
+        self.addCleanup(quiet.__exit__, None, None, None)
+
+    def test_without_cargo_the_build_says_what_to_do(self):
+        with unittest.mock.patch.dict(os.environ, self.env, clear=True), \
+                unittest.mock.patch("shutil.which", return_value=None):
+            with self.assertRaises(RuntimeError) as cm:
+                self.b.build_wheel(tempfile.gettempdir())
+        self.assertIn("cargo was not found", str(cm.exception))
+        self.assertIn("https://rustup.rs", str(cm.exception))
+        self.assertIn("--only-binary", str(cm.exception))
+
+    def test_what_cargo_is_asked_and_what_it_builds(self):
+        with tempfile.TemporaryDirectory() as d:
+            target = pathlib.Path(d, "target")
+            name = self.b.native_library_name(self.b.local_platform())
+            ran = []
+
+            def cargo(cmd, cwd=None, env=None, stdout=None):
+                ran.append((cmd, cwd, env))
+                (target / "release").mkdir(parents=True, exist_ok=True)
+                (target / "release" / name).write_bytes(pathlib.Path(the_library()).read_bytes())
+                return subprocess.CompletedProcess(cmd, 0)
+
+            env = dict(self.env, CARGO="/opt/cargo/bin/cargo", CARGO_TARGET_DIR=str(target))
+            with unittest.mock.patch.dict(os.environ, env, clear=True), \
+                    unittest.mock.patch("subprocess.run", side_effect=cargo):
+                library = self.b.build_native()
+            self.assertEqual(library, target / "release" / name)
+            (cmd, cwd, used), = ran
+            self.assertEqual(cmd, ["/opt/cargo/bin/cargo", "build", "--release", "--offline", "--locked",
+                                   "-p", "lazaret-ffi"])
+            self.assertEqual(cwd, self.b.RUST)
+            if sys.platform == "darwin":
+                self.assertIn(used["MACOSX_DEPLOYMENT_TARGET"], ("11.0", "10.12"))
+            if sys.platform == "win32":
+                self.assertIn("+crt-static", used["RUSTFLAGS"])
+
+    def test_a_failed_or_foreign_build_stops(self):
+        with tempfile.TemporaryDirectory() as d:
+            target = pathlib.Path(d, "target")
+            env = dict(self.env, CARGO="cargo", CARGO_TARGET_DIR=str(target))
+            with unittest.mock.patch.dict(os.environ, env, clear=True):
+                with unittest.mock.patch("subprocess.run", return_value=subprocess.CompletedProcess([], 101)):
+                    with self.assertRaises(RuntimeError) as cm:
+                        self.b.build_native()
+                    self.assertIn("cargo exited with 101", str(cm.exception))
+                with unittest.mock.patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0)):
+                    with self.assertRaises(RuntimeError) as cm:             # nothing built
+                        self.b.build_native()
+                    self.assertIn("built no", str(cm.exception))
+                (target / "release").mkdir(parents=True)
+                (target / "release" / self.b.native_library_name(self.b.local_platform())).write_bytes(b"not a library")
+                with unittest.mock.patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0)):
+                    with self.assertRaises(RuntimeError) as cm:             # it does not load here
+                        self.b.build_native()
+                    self.assertIn("does not load", str(cm.exception))
+
+    def test_the_local_platform_tag(self):
+        tag = self.b.local_platform()
+        self.assertRegex(tag, r"\A[a-z0-9_]+\Z")
+        self.assertNotEqual(tag, "any")
+        with unittest.mock.patch("sysconfig.get_platform", return_value="linux-x86_64"):
+            self.assertEqual(self.b.local_platform(), "linux_x86_64")
+        with unittest.mock.patch("sysconfig.get_platform", return_value="win-amd64"):
+            self.assertEqual(self.b.local_platform(), "win_amd64")
+        for machine, want in (("arm64", "macosx_11_0_arm64"), ("x86_64", "macosx_10_12_x86_64")):
+            with unittest.mock.patch("sysconfig.get_platform", return_value="macosx-10.9-universal2"), \
+                    unittest.mock.patch("platform.machine", return_value=machine):
+                self.assertEqual(self.b.local_platform(), want)
 
 
 if __name__ == "__main__":

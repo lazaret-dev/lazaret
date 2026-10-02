@@ -8,8 +8,8 @@ lexer's literal spans and names_code / namesCode). The name corpus here
 every look-alike letter of the table, letters that are not look-alikes
 (Cyrillic, Greek alpha / nu / rho), NFKC compatibility forms (fullwidth,
 mathematical bold), the invisible U+200C / U+200D, digits and punctuation)
-holds the native engine's lookalike_name to core's in
-test_rust_parity_lookalike.py. The expectations are in
+holds the native engine's lookalike_name to its recorded outputs in
+test_snapshot_small.py. The expectations are in
 tests/scanner/test_review_lookalike_names.py. Skipped where the npm engine
 is not built. Every such character here is written as an escape.
 """
@@ -39,16 +39,16 @@ def unescape(text):
 
 
 PIECES = (["e", "v", "a", "l", "i", "s", "A", "d", "m", "n", "c", "o", "u", "t", "x", "_", "$", "0", "7"]
-          + list(core._LOOKALIKES)
+          + list(_support.pack("_LOOKALIKES"))
           + [chr(c) for c in (0x043F, 0x0438, 0x0432, 0x0442, 0x044F, 0x0436, 0x03B1, 0x03BD, 0x03C1, 0xFF45, 0xFF56,
                               0x1D41E, 0x200C, 0x200D, 0x00E9, 0x0131, 0x017F, 0x212A)]
           + ["eval", "isAdmin", "value", "exec", "require", " ", " ", "=", "(", ")", ".", ";", "'", "[", "]", "-"])
 
 
 SPOOF = {}                                              # ASCII letter -> its look-alikes
-for fake, real in core._LOOKALIKES.items():
+for fake, real in _support.pack("_LOOKALIKES").items():
     SPOOF.setdefault(real, []).append(fake)
-TARGETS = sorted(core._LOOKALIKE_TARGETS)
+TARGETS = sorted(_support.pack("_LOOKALIKE_TARGETS"))
 OTHERS = ["isAdmin", "value", "data", "count", "result", "config", "request", "open"]
 
 

@@ -13,9 +13,9 @@ payloads are placeholders, nothing is executed.
 import base64
 import unittest
 
-from lazaret.scanner import core
+from lazaret.scanner import core, engine
 
-NOTE = core._DV_NOTE
+NOTE = engine.pack_value("_DV_NOTE")
 RUN = "runs code it receives over the network"
 
 
@@ -90,7 +90,7 @@ class DecodedViewTests(unittest.TestCase):
 
     def test_bounded(self):
         import time
-        big = "g('6f73')" + " " * core._DV_MAX_CHARS
+        big = "g('6f73')" + " " * engine.pack_value("_DV_MAX_CHARS")
         self.assertEqual(core.decoded_view(big), big)
         start = time.perf_counter()
         core.decoded_view(("atob('eA==') + " * 20_000) + "\nx = [" + "'a'," * 70_000 + "]\n")
@@ -124,12 +124,10 @@ class XorDecoderTests(unittest.TestCase):
         # (0.1.8: the service the decoded address names is where data would
         # go, not a sign on its own: this shape reads and sends nothing)
         self.assertEqual(core.install_script_risk(ZUTILS), [])
-        self.assertEqual(core._dv_xor_decoders(ZUTILS), {"a": ("base64", b"utf8")})
 
     def test_hex_and_other_keys(self):
         text = ("const k = 'k3y!'; Buffer; x ^ y;\n"
                 + "\n".join(f"dec('{xored(w, b'k3y!', 'hex')}');" for w in ZUTILS_WORDS) + "\n")
-        self.assertEqual(core._dv_xor_decoders(text), {"dec": ("hex", b"k3y!")})
         view = core.decoded_view(text)
         self.assertIn("\n'sqlite3';\n'child_process';\n", view)
 
@@ -148,13 +146,15 @@ class XorDecoderTests(unittest.TestCase):
         # one call in ten may stay unread, not two
         nine = "Buffer x^y 'utf8' " + ",".join(f'a("{xored(w, b"utf8")}")' for w in ZUTILS_WORDS + ["abc", "def"])
         self.assertNotEqual(core.decoded_view(nine + ',a("x-y")'), nine + ',a("x-y")')
-        self.assertEqual(core._dv_xor_decoders(nine + ',a("x-y"),a("x-y")'), {})
+        self.assertEqual(core.decoded_view(nine + ',a("x-y"),a("x-y")'), nine + ',a("x-y"),a("x-y")')
 
     def test_the_first_256_keys_are_tried(self):
         calls = ",".join(f'a("{xored(w, b"utf8")}")' for w in ZUTILS_WORDS)
-        many = "".join(f"'k{i}';" for i in range(core._DV_XOR_MAX_KEYS - 1))
-        self.assertEqual(core._dv_xor_decoders("x^y " + many + "'utf8'; " + calls), {"a": ("base64", b"utf8")})
-        self.assertEqual(core._dv_xor_decoders("x^y " + many + "'k-last'; 'utf8'; " + calls), {})
+        many = "".join(f"'k{i}';" for i in range(engine.pack_value("_DV_XOR_MAX_KEYS") - 1))
+        tried = "Buffer x^y " + many + "'utf8'; " + calls
+        self.assertIn("'sqlite3'", core.decoded_view(tried))
+        past = "Buffer x^y " + many + "'k-last'; 'utf8'; " + calls
+        self.assertEqual(core.decoded_view(past), past)
 
     def test_bounded(self):
         import time
@@ -283,11 +283,11 @@ class CharCodeTests(unittest.TestCase):
     def test_bounded(self):
         import time
         dec = "function d(a) { let s = ''; for (let i = 0; i < a.length; i++) s += String.fromCharCode(a[i] ^ 1); return s; }\n"
-        big = codes("a" * (core._DV_CC_MAX_CODES + 1), lambda c, i: c ^ 1)
+        big = codes("a" * (engine.pack_value("_DV_CC_MAX_CODES") + 1), lambda c, i: c ^ 1)
         self.assertEqual(core.decoded_view(dec + "x = d(" + big + ");\n"), dec + "x = d(" + big + ");\n")
         one = "d(" + codes("abcdefghij" * 40, lambda c, i: c ^ 1) + ");\n"
         view = core.decoded_view(dec + one * 200)                 # 80,000 codes: the work stops at 50,000
-        self.assertEqual(view.count("'abcdefghij"), core._DV_CC_MAX_WORK // 400)
+        self.assertEqual(view.count("'abcdefghij"), engine.pack_value("_DV_CC_MAX_WORK") // 400)
         deep = "(" * 40 + "a[i]" + ")" * 40
         self.assertEqual(core.decoded_view(dec.replace("a[i] ^ 1", deep) + one), dec.replace("a[i] ^ 1", deep) + one)
         start = time.perf_counter()
@@ -414,7 +414,7 @@ class ReceivedCodeFormsTests(unittest.TestCase):
             with self.subTest(quiet):
                 self.assertIsNone(core._received_code_kind(quiet))
         # (0, eval)(x) is an indirect eval, not a runner handed to a call
-        self.assertEqual(core._dl_callbacks("(0, eval)(x);\np.then(eval);\n"), "(0, eval)(x);\np.then((_v)=>eval(_v));\n")
+        self.assertIsNone(core._received_code_kind("(0, eval)(x);\n"))
 
 
 class WrittenAndRunTests(unittest.TestCase):

