@@ -3048,6 +3048,19 @@ pub(crate) fn local_data_sent(p: &Pack, text: &[u32], lang: Option<&str>) -> Opt
     crate::flow::local_data_sent_at(p, text)
 }
 
+/// Received code: data a text receives over the network run as code, a
+/// module it names loaded, or deserialized ((1-based line, category)).
+/// JavaScript is read on its tree, unless it doesn't parse or passes the
+/// pass's bounds; any other text, and those, by the text detector.
+pub(crate) fn received_code(p: &Pack, text: &[u32], lang: Option<&str>) -> Option<(usize, &'static str)> {
+    if lang == Some("js") {
+        if let Some(answer) = crate::jsflow::supply::received_code(text) {
+            return answer;
+        }
+    }
+    received::received_code_kind(p, text, &[], &[])
+}
+
 fn install_script_risk_of(p: &Pack, text: &[u32], shell: bool, command: bool, lang: Option<&str>) -> Vec<PyStr> {
     let mut reasons: Vec<PyStr> = Vec::new();
     // a download piped or substituted into a shell, and PowerShell: in code, where an exec call is handed them
@@ -3063,7 +3076,7 @@ fn install_script_risk_of(p: &Pack, text: &[u32], shell: bool, command: bool, la
         reasons.push(u("pipes a download into a shell"));
     }
     let substituted = rows.iter().any(|row| runs_substituted_download(p, row) && (!code || exec.search(row).is_some()));
-    let received = received::received_code_kind(p, text, &[], &[]);
+    let received = received_code(p, text, lang);
     if substituted {
         reasons.push(cat_reason(p, "run"));
     } else if let Some((_, kind)) = &received {
@@ -3412,7 +3425,7 @@ fn import_time_risk_of(p: &Pack, text: &[u32], lang: Option<&str>) -> (Vec<PyStr
             }
         }
     }
-    let received = received::received_code_kind(p, text, &[], &[]);
+    let received = received_code(p, text, lang);
     if let Some((at, kind)) = &received {
         reasons.push(cat_reason(p, kind));
         line = line.or(Some(*at));

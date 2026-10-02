@@ -204,7 +204,8 @@ rust/
                              descs.rs (points-to, call targets, routes, order), eval.rs (one
                              reading of a function), driver.rs (the fixpoint, the output);
                              supply.rs (its supply-chain model: local data followed to a
-                             network send in an install script or a dependency's code, §18)
+                             network send, and received data to code run, in an install
+                             script or a dependency's code, §18)
     src/pyflow/              project mode's cross-file Python taint (a port of flow.py's Python
                              pass, §17): mod.rs (the model: modules, functions, classes, names,
                              imports, resolution, the frames), eval.rs (one reading of a
@@ -697,7 +698,7 @@ benchmark:
 | 0 | Baseline: the detection round committed (rule set 2.15.0), the engine's outputs recorded on the benchmark's files and on installed packages | Done (tag `rust-first-baseline`) |
 | 1 | The Rust engine is the reference: the Python engine, `--engine` and the pure wheel retired; the recorded outputs (§5); the pack as the source of the rules; every wheel a platform wheel, the sdist compiled by pip where none fits; an unanswered file SC-TRUNCATED in both packages | Done |
 | 2 | Decoding, lexers and bytes in the engine: source decoding (BOMs, UTF-16, coding cookies), one token substrate for the detectors | Done (tag `rust-first-phase2`): the lexers (§15: every caller's comments and literals, both packages), the self-read on them, the decoded view on string values (§15). Moved: the data flow, the dead drop, the secret endpoints and received code to phase 3 (they follow names: scopes); bytes to phase 4 (with linre over bytes); source decoding to after phase 3 (the packages' decoders already agree, held by their parity tests, and owning the CJK codecs would put their tables in the WebAssembly module) |
-| 3 | Parsers, scopes and flow: the detectors on bindings over the JavaScript and Python trees (§12, §13), constant folding of strings, the cross-file follower on them, project mode's passes (taint, SQL, function metrics) in the engine; the npm package's twins of them retired | The parsers done; project mode's JavaScript taint ported onto `js_parse`'s trees (§16: `js_flow`), both packages ask the engine for it, and jsflow.py, jsflow.js and the readers they used are retired (11,357 lines); Python's taint ported onto `py_parse`'s trees (§17: `py_flow`), both packages ask the engine for it (the npm package had no port of it), and flow.py's own pass is retired (1,505 lines); the passes and the parser held to their recorded outputs; the supply-chain data flow on JavaScript's trees (§18: local data sent, reported by the strongest send), benchmark-gated. Next: received code, the dead drop, the secret endpoints and the self-read on the same scopes, then Python's data flow on its trees |
+| 3 | Parsers, scopes and flow: the detectors on bindings over the JavaScript and Python trees (§12, §13), constant folding of strings, the cross-file follower on them, project mode's passes (taint, SQL, function metrics) in the engine; the npm package's twins of them retired | The parsers done; project mode's JavaScript taint ported onto `js_parse`'s trees (§16: `js_flow`), both packages ask the engine for it, and jsflow.py, jsflow.js and the readers they used are retired (11,357 lines); Python's taint ported onto `py_parse`'s trees (§17: `py_flow`), both packages ask the engine for it (the npm package had no port of it), and flow.py's own pass is retired (1,505 lines); the passes and the parser held to their recorded outputs; the supply-chain data flow and received code on JavaScript's trees (§18: local data sent, reported by the strongest send; received data run, loaded or deserialized, from the script's own address), benchmark-gated. Next: the dead drop, the secret endpoints and the self-read on the same scopes, then Python's data flow on its trees |
 | 4 | Linear-time matching: the pack's patterns on linre (§14), pyre and the shlex port retired, current Unicode | Every pattern linre accepts runs on it (616 of the pack's 657; done first, as no answer changes); the 41 others, pyre and the shlex port not started |
 | 5 | One call per file, a content cache (SHA-256), the guard's scan in a child process that fails closed, archive ambiguity checks | Not started |
 
@@ -1843,8 +1844,9 @@ projects, 0.55 s (the parse included, 6.5 MB/s) where it took 7.7 s.
 
 `src/jsflow/supply.rs` is the JavaScript taint pass's second model: the
 supply-chain detectors' data flow — local data a script reads from the
-machine, followed to a network send — on `js_parse`'s trees, with names
-resolved by scope (phase 3's third step, §8). The install-script and
+machine, followed to a network send, and data it receives, followed to
+code run — on `js_parse`'s trees, with names resolved by scope (phase 3's
+third step, §8). The install-script and
 import-time tests ask it for every JavaScript text (`signs::local_data_sent`,
 for the text and its decoded view): it answers what the text follower
 (`flow::local_data_sent_at`) answers — the first send, the kind of data,
@@ -1930,3 +1932,48 @@ one: a React component that shows the payload's code in a `<pre>` block,
 which the text follower read as code (its package is still caught by its
 `index.js`). None of the 230,400 outputs recorded on installed packages
 moved.
+
+**Received code.** The same reading answers the received-code test
+(`received::received_code_kind` on raw text, for the install-script and
+import-time tests): data the script receives over the network run as code
+(`eval` and its indirect forms, `Function` and the constructors that are
+it, `vm`, `Module._compile`, a command line that is the data, an
+interpreter given it as code), a module loaded by a name it gives, or a
+deserializer given it (`unserialize`, `yaml.load`). What a request
+receives — its response, what its callbacks are given, a connection's or a
+server's data, a WebSocket's messages, what a `curl` or `wget` command
+prints — is received when the script addresses it itself: an address that
+isn't its caller's (a parameter, `this`, `arguments` or what is made of
+them), or one it read or received (a dead drop's). A request a library
+makes for its caller — `load(url)`, `request(options)`,
+`` `${this.baseUrl}/x` `` — is not the script's download, and a browser's
+XMLHttpRequest isn't followed (jQuery 1.x's script converter and
+CoffeeScript's `<script type="text/coffeescript">` loader both run what it
+fetches). A response holds what was received, not what was sent. The
+script's own downloader called with its own address (`const get = (u) =>
+fetch(u)`) returns what is received; a command taken from a constant list
+(`for (const c of ['id', 'env']) execSync(c)`) prints what any of them
+prints; a variable of the environment holds what the script stores in it.
+A command line that runs a fixed program with the data as its argument
+(`` `curl …?ip=${ip}` ``, `npm publish --registry=…`) runs no code it
+received; an interpreter given it (`node -e`, `sh -c`) does.
+
+Held to the text detector in the same way: on the benchmark's 20,066
+in-sample JavaScript files the two agree but for three — two payloads the
+tree finds (model-providers' aliased `module.require` and
+`Module._compile`; a response's field run by `eval` in a callback) and a
+text-detector false positive (a recon script whose commands are
+constants; the data flow now reads what they print, the whole
+environment, sent) — and on 28,125 installed files they agree. On the
+benchmark's files nine more import-time answers moved, all of malicious
+samples: those two payloads, that recon script, and six obfuscated
+payloads that send the whole environment as well as run what comes back
+(found in their decoded view, whose names `o[['post']]` now resolve). Of
+the hooks corpus's outputs 27 moved: code in strings, now a stager's
+text; Python handed as JavaScript; the third argument of `eval`; and one
+obfuscated payload that now also sends the environment. Generated probes
+(132) found what the text detector finds and also padding, a runner far
+from the request, an aliased require, without its two false positives (a
+library's loader, code in a string). Known gaps: an address kept in a
+class field (`this.url`, read as a caller's), and an index into a string
+array the decoded view didn't resolve.

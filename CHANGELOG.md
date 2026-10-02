@@ -199,6 +199,26 @@ before the release.
   samples (four gained a reason, one lost one: a React component that only
   displays the code; its package is still caught); on installed packages
   none moved.
+- **Received code reads JavaScript on its tree too.** "Runs code it
+  receives over the network", "loads a module named by data it receives"
+  and "deserializes data it receives" are answered by the same reading
+  (`docs/RUST_ENGINE.md` §18). What it now finds: a response run by
+  `Module._compile` through `require` kept under another name
+  (model-providers), by `eval` 80 lines after the request, by the
+  script's own runner or downloader defined elsewhere in the file,
+  through `.then(eval)`, `new Function.constructor(…)` or a variable of the
+  environment it was stored in. What it no longer claims: code in a string
+  (a stager's text is "carries a script that downloads and runs code"),
+  Python handed as JavaScript, the third argument of `eval`, a fixed
+  program given received data as its argument (`curl …?ip=` + data, `npm
+  publish --registry=…`), and a library's loader for its caller (a request
+  addressed by a parameter, `this` or an option; a browser's
+  XMLHttpRequest, which jQuery 1.x's and CoffeeScript's script loaders
+  run). A command taken from a constant list is read for what it prints:
+  a recon script running `id`, `env` and others in a loop sends the whole
+  environment. On the benchmark model-providers becomes SUSPICIOUS (445 of
+  516 malicious releases; the popular packages unchanged), and the holdout
+  gains a release (627 of 747); on installed packages nothing moved.
 
 ### Added
 

@@ -196,6 +196,10 @@ pub enum Out {
     /// send's offset, the kind of data, what was read, whether only an
     /// address held it)
     Send { at: u32, kind: &'static str, what: PyStr, in_address: bool },
+    /// the supply-chain model: data received over the network reaching code
+    /// run, a module loaded or a deserializer (the sink's offset, the
+    /// category: "run", "import", "deserialize")
+    Received { at: u32, cat: &'static str },
 }
 
 fn commas(n: u64) -> String {

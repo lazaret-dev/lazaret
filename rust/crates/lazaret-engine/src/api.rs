@@ -44,8 +44,8 @@ pub const CALLS: &[&str] = &[
     "self_publish_at", "runs_dll", "join_string_pieces", "received_code_kind", "runs_received_code",
     "downloads_and_runs", "decodes_and_runs", "powershell_risk", "stager_at", "reverse_shell_at",
     "local_data_sent_at", "runs_own_source_at", "reads_own_source", "persistence_reasons",
-    // phase 3 step 3: the data flow on the JavaScript tree (the supply-chain model)
-    "local_data_sent_tree",
+    // phase 3 step 3: the data flow and received code on the JavaScript tree (the supply-chain model)
+    "local_data_sent_tree", "received_code_tree",
     "dumps_workflow_secrets", "pipes_download_to_shell", "runs_substituted_download", "offscreen_code",
     "lex_comment_spans", "logical_text", "hooks_view", "signs_view",
     // 0.1.8: the exfiltration shapes, programs started at login or boot
@@ -558,6 +558,11 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
             crate::jsflow::supply::Answer::Nothing => Value::Null,
             crate::jsflow::supply::Answer::Unread => Value::str("unread"),
         },
+        "received_code_tree" => match crate::jsflow::supply::received_code(text) {
+            Some(Some((line, cat))) => Value::Arr(vec![Value::Int(line as i64), Value::str(cat)]),
+            Some(None) => Value::Null,
+            None => Value::str("unread"),
+        },
         "runs_own_source_at" => Value::Int(signs::runs_own_source_at(p, text, lang) as i64),
         "reads_own_source" => Value::Bool(signs::reads_own_source(p, text)),
         "persistence_reasons" => strs(&signs::persistence_reasons(p, text)),
@@ -922,7 +927,7 @@ fn js_flow(args: &Value, text: &[u32]) -> Result<Value, CallError> {
                     Value::str(fix),
                 ]),
                 // (the supply-chain model's; project mode never gives one)
-                Out::Send { .. } => Value::Null,
+                Out::Send { .. } | Out::Received { .. } => Value::Null,
             })
             .collect(),
     ))
@@ -1021,7 +1026,7 @@ fn flow_out(out: Vec<crate::jsflow::Out>, max_file: usize) -> Value {
                     Value::str(fix),
                 ]),
                 // (the supply-chain model's; project mode never gives one)
-                Out::Send { .. } => Value::Null,
+                Out::Send { .. } | Out::Received { .. } => Value::Null,
             })
             .collect(),
     )

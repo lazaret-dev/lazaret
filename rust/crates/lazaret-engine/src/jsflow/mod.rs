@@ -927,6 +927,14 @@ impl<'t> Ast<'t> {
         if self.kind(prop) == Kind::Literal && matches!(self.op(prop), jt::L_STRING | jt::L_NUMBER) {
             return Some(self.s(prop, jt::A).to_vec());
         }
+        // (a list of one string is that string as a key: `o[['post']]`)
+        if self.kind(prop) == Kind::ArrayExpression {
+            if let [only] = self.list(prop, jt::A) {
+                if *only != NONE && self.kind(*only) == Kind::Literal && self.op(*only) == jt::L_STRING {
+                    return Some(self.s(*only, jt::A).to_vec());
+                }
+            }
+        }
         None
     }
 

@@ -688,6 +688,13 @@ impl<'p> Eval<'p> {
                 }
                 return;
             }
+            // (`process.env.NAME = v`: what reads it later gets v)
+            if let Some(b) = self.sc_env_member(target, scope) {
+                if v.tainted() {
+                    self.write(b, v.plain(), false);
+                }
+                return;
+            }
         }
         if !v.tainted() {
             return;
@@ -833,9 +840,14 @@ impl<'p> Eval<'p> {
             }
             Kind::ImportExpression => {
                 let (src, opts) = (self.a().at(e, A), self.a().opt(e, B));
-                self.expr(Some(src), scope)?;
+                let v = self.expr(Some(src), scope)?;
                 if opts.is_some() {
                     self.expr(opts, scope)?;
+                }
+                if self.p.cfg.supply.is_some() {
+                    // (the supply-chain model: a module named by received data)
+                    let at = self.a().0.nodes[e as usize].start;
+                    self.sc_sink(super::supply::LOAD_NAME, &v, at);
                 }
                 Ok(V::empty())
             }
@@ -1518,6 +1530,12 @@ impl<'p> Eval<'p> {
                                 wrapped = wrapped.union(&src);
                             }
                         }
+                        // (the script's own downloader given its own address)
+                        if table.contains_key(&super::supply::SEND_ADDR) {
+                            if let Some(src) = self.sc_wrapper_receives(node, i, &t) {
+                                wrapped = wrapped.union(&src);
+                            }
+                        }
                     }
                     continue;
                 }
@@ -1538,6 +1556,22 @@ impl<'p> Eval<'p> {
                             };
                             if let Some(src) = src {
                                 wrapped = wrapped.union(&src);
+                            }
+                            for &key in t.params.iter() {
+                                self.reach_adds.push((key, cat, (entry.0, entry.1, entry.2.clone(), false)));
+                            }
+                            continue;
+                        }
+                        // (the script's own downloader given an address it read or received)
+                        if cat == super::supply::SEND_ADDR && t.src && t.params.is_empty() {
+                            if let Some(src) = self.sc_wrapper_receives(node, i, &t) {
+                                wrapped = wrapped.union(&src);
+                            }
+                        }
+                        // (received code the callee runs, loads or deserializes)
+                        if let Some(rc) = super::supply::received_cat(cat) {
+                            if t.src && self.emit && t.sc.as_ref().is_some_and(|s| s.kinds & super::supply::K_RECEIVED != 0) {
+                                self.findings.push(Out::Received { at: entry.1, cat: rc });
                             }
                             for &key in t.params.iter() {
                                 self.reach_adds.push((key, cat, (entry.0, entry.1, entry.2.clone(), false)));
