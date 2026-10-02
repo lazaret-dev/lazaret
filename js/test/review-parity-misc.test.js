@@ -82,9 +82,10 @@ test("source text is read in Unicode 13.0", () => {
     "u.js": "a = 1;\n\\u{10D4A}eval(x)\n\\u200deval(y)\n\\u30fbeval(z)\n",
     "s.py": "x = eval(y)  # \u{1fae0} \u{1f600}\n",
   });
-  // line 3's invisible U+200D glued to eval is also a look-alike name (SC-HOMOGLYPH)
+  // line 3's invisible U+200D glued to eval is also a look-alike name (SC-HOMOGLYPH); u.py's U+FFFD is no
+  // Python the taint pass can read (a Q-FLOW-SKIPPED note, as in Python)
   assert.deepEqual(found, ["s.py:1 S-EVAL-PY", "u.js:2 S-EVAL-JS", "u.js:3 S-EVAL-JS", "u.js:3 SC-HOMOGLYPH",
-    "u.js:4 S-EVAL-JS", "u.py:1 S-EVAL-PY"]);
+    "u.js:4 S-EVAL-JS", "u.py:1 Q-FLOW-SKIPPED", "u.py:1 S-EVAL-PY"]);
   assert.equal(rep.issues.find((i) => i.file === "s.py").snippet[0], "x = eval(y)  # \ufffd \u{1f600}");
 });
 

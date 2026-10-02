@@ -120,26 +120,24 @@ credentials).
   read case by case (`scripts/snapshot.py diff`) and recorded with it, in
   the same commit (`docs/RUST_ENGINE.md` §5).
 
-### The documented Python-only exception
+### Python-only exceptions: none left
 
-One capability runs only in the Python package, by deliberate design, and the
-parity test excludes it (`_python_only` in `test_js_parity.py`):
-
-- **The AST half of the interprocedural flow engine** — `flow.py`'s Python
-  analysis is AST-based and has no JS twin; its `X-*` findings and `Q-FLOW-*`
-  coverage notes on Python files are Python-only. The JavaScript half of the
-  flow engine is the native engine's in both packages since the Rust-first
-  refactor's phase 3 (`js_flow`; `js/src/scanner/flow.js` builds the npm
-  package's findings from it, as `flow.py` builds the Python package's).
-
-(The cross-file received-code follower was the second exception until 0.1.8;
-both packages run the native engine's now — §5c.)
+Until the Rust-first refactor's phase 3 one capability ran only in the
+Python package: the Python half of the interprocedural flow engine
+(`flow.py`'s own AST-based pass, with no JS twin; its `X-*` findings and
+`Q-FLOW-*` notes on Python files were excluded from the parity tests). Both
+halves are the native engine's now, in both packages (`py_flow` and
+`js_flow`; `js/src/scanner/flow.js` builds the npm package's findings from
+them, as `flow.py` builds the Python package's), and the parity tests
+compare those findings too. (The cross-file received-code follower was the
+other exception until 0.1.8 — §5c.)
 
 When the npm package cannot do something the Python package can, it must say so
 honestly rather than silently under-report. This is the **honest-gate pattern**:
-the npm gate's cross-file condition reports how many Python files it did not
-analyze. Any future Python-only feature follows the same rule — degrade
-visibly, and add it to `_python_only` so parity stays green.
+until phase 3 the npm gate's cross-file condition reported how many Python
+files it did not analyze. Any future Python-only feature follows the same
+rule — degrade visibly, and list it in `PYTHON_ONLY` (`test_js_parity.py`)
+so parity stays green.
 
 ---
 
@@ -253,10 +251,12 @@ the parameters a route handler gets from the request are sources — a Flask
 view's URL variables, a FastAPI path operation's parameters (not injected
 dependencies, not types that validate to no free text), a Django view's URL
 parameters. The decisions over a parameter's name, annotation and default
-live in `lazaret.scanner.frameworks` and are shared by the intra-file engine
-(which reads a handler's signature from text: `_route_params`, twinned in
-`js/src/scanner/taint.js`) and the flow engine (which reads it from the AST:
-`_request_params`), so both passes agree on what a handler receives. Comments
+live in `lazaret.scanner.frameworks`, which the intra-file engine reads (it
+takes a handler's signature from text: `_route_params`, twinned in
+`js/src/scanner/taint.js`), and in the flow engine's port of them
+(`pyflow/frameworks.rs`, which reads a handler's parameters from the tree);
+`test_pyflow_frameworks.py` holds the two to the same answers, so both
+passes agree on what a handler receives. Comments
 are **lexed, not guessed** — block-comment/string/template state is tracked
 across lines, and a line counts as a comment only if all of it is, and only if
 both readings of ambiguous text agree.
@@ -265,11 +265,18 @@ both readings of ambiguous text agree.
 
 Whole-program analysis that follows untrusted data through function calls and
 across files — a source in one module reaching a sink in another (`X-*`
-findings name both ends). Python analysis is AST-based (import resolution,
-`self`/`cls`, constructors, a worklist fixpoint composing `f → g → sink`
-chains). JavaScript and TypeScript are parsed too (0.1.7; since the
-Rust-first refactor's phase 3 by the engine, in both packages: the `js_parse`
-and `js_flow` calls, docs/RUST_ENGINE.md §12 and §16): the parser reads
+findings name both ends). Python is read into its syntax trees (import
+resolution, `self`/`cls`, constructors, a worklist fixpoint composing
+`f → g → sink` chains): since the Rust-first refactor's phase 3 by the
+engine, in both packages (the `py_parse` and `py_flow` calls,
+docs/RUST_ENGINE.md §13 and §17), on Python 3.13's trees, within a work
+budget per syntax tree node where flow.py's own pass had a time budget; the
+port was held to that pass output for output, then it retired, and
+`test_snapshot_py_flow.py` holds the engine's outputs to the recorded ones
+(over seeded generated projects among others, `tests/architecture/
+pygen.py`). JavaScript and TypeScript are parsed too (0.1.7; since phase 3
+by the engine, in both packages: the `js_parse` and `js_flow` calls,
+docs/RUST_ENGINE.md §12 and §16): the parser reads
 ES2025 with JSX, TypeScript and Flow annotations into ESTree trees with every
 node's line (linear: one token at a time, bounded reads ahead, an error past
 `MAX_DEPTH` nesting), and the pass follows them with the same model — per-function summaries (parameters → sinks, what the
@@ -286,9 +293,8 @@ Now `test_snapshot_js_parse.py` and `test_snapshot_js_flow.py` hold the
 parser's trees and the pass's outputs to the recorded ones, and
 `test_js_parity_flow.py` the two packages' findings to each other (over
 seeded generated projects among others, `tests/architecture/jsgen.py`).
-This is the engine whose **Python (AST) half is Python-only** (§2). Custom taint specs
-(`--taint-config`, Semgrep-style) feed both the intra-file and cross-file
-passes. A repository's own `.lazaret-taint.json` is loaded only with
+Custom taint specs (`--taint-config`, Semgrep-style; the Python package's)
+feed both the intra-file and cross-file passes. A repository's own `.lazaret-taint.json` is loaded only with
 `--trust-repo-config`, and even then its sanitizers are ignored (a repo could
 silence real findings by declaring `str` a sanitizer).
 
@@ -903,8 +909,9 @@ fixture.
 | Path | What |
 |---|---|
 | `python/src/lazaret/scanner/core.py` | The engine: rules, taint, `scan_project`, `--deps`, received-code detector, cross-file follower |
-| `python/src/lazaret/scanner/flow.py` | Interprocedural cross-file taint (Python AST; builds the findings of the JS pass) |
+| `python/src/lazaret/scanner/flow.py` | Interprocedural cross-file taint: hands the engine's passes the files and the configured model, builds their findings (Python's own AST pass until phase 3) |
 | `rust/crates/lazaret-engine/src/jsparse/`, `jsflow/` | The JavaScript / TypeScript reader and the JS cross-file pass (the `js_parse` and `js_flow` calls, both packages'; jsparse.py, jsflow.py and their npm twins until phase 3) |
+| `rust/crates/lazaret-engine/src/pyparse/`, `pyflow/` | The Python reader (Python 3.13's trees) and the Python cross-file pass (the `py_parse` and `py_flow` calls, both packages'; flow.py's own pass until phase 3) |
 | `python/src/lazaret/scanner/autorun.py`, `ghworkflow.py` | Editor and AI-agent settings that run commands (SC-AUTORUN) and the workflows the Shai-Hulud worms planted (SC-WORKFLOW-*); twins `js/src/lib/autorun.js`, `ghworkflow.js` |
 | `python/src/lazaret/scanner/frameworks.py` | Which route handler parameters Flask / FastAPI / Django fill from the request (shared by both taint passes; twinned in `js/src/scanner/taint.js`) |
 | `python/src/lazaret/scanner/sca_feeds.py` | CVE bundle build (OSV/KEV/EPSS) |

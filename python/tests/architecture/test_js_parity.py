@@ -37,7 +37,6 @@ import sys
 import tempfile
 import unittest
 
-from lazaret.scanner import core
 from tests import _support
 
 NODE = shutil.which("node")
@@ -311,47 +310,22 @@ def issue_key(issue):
     return (issue["rule"], str(issue["file"]).replace("\\", "/"), issue["line"], issue["sev"], issue["msg"])
 
 
-def scanned_lang(project, rel):
-    """'py', 'js', 'sql' or None: how the engines read a scanned file — by its
-    extension, else (an extensionless script) by its #! line, read from the
-    scanned tree when it is still there."""
-    rel = str(rel).replace("\\", "/")
-    ext = os.path.splitext(rel)[1].lower()
-    if ext in core.EXTS:
-        return core.EXTS[ext]
-    if project:
-        try:
-            with open(os.path.join(project, *rel.split("/")), "rb") as f:
-                return core.script_source_lang(f.read(core.HEADER_SAMPLE_BYTES))
-        except OSError:
-            pass
-    return None
-
-
 def _python_only(issue, fixture=None, project=None):
-    """A finding only the Python engine produces: a flow finding on a Python
-    file, or one listed in PYTHON_ONLY for the fixture. project is the scanned
-    root (a report's "project"), for extensionless scripts."""
-    if issue["rule"].startswith(FLOW_PREFIXES):
-        return scanned_lang(project, issue["file"]) == "py"
+    """A finding only the Python engine produces: one listed in PYTHON_ONLY
+    for the fixture. (Until phase 3 of the Rust-first refactor a flow
+    finding on a Python file was too: the npm package had no port of the
+    Python pass; both run the engine's now. project, the scanned root, is
+    kept for the callers.)"""
     return issue["rule"] in PYTHON_ONLY.get(fixture, ())
 
 
 DERIVED = ("pass", "conditions", "counts", "ratings")
-CROSS_FILE = "No cross-file taint flows"
 
 
 def derived(report, field):
-    """A derived report field, compared across engines. The npm engine's
-    cross-file gate label says when the project's Python files were not
-    analyzed ("… (JavaScript only: 2 Python files not analyzed)", report.js
-    crossFileLabel); its condition is the same, so it reads as the Python
-    label here (test_js_parity_flow checks the wording)."""
-    value = report[field]
-    if field == "conditions":
-        value = [dict(c, label=CROSS_FILE) if c["label"].startswith(CROSS_FILE + " (JavaScript only: ") else c
-                 for c in value]
-    return value
+    """A derived report field, compared across engines (the same: since
+    phase 3 the npm engine's cross-file gate label is the Python engine's)."""
+    return report[field]
 
 
 @unittest.skipUnless(NPM_READY, NPM_SKIP)

@@ -58,8 +58,7 @@ class TaintParityTests(unittest.TestCase):
             (js_exit, js, js_err), (py_exit, py, py_err) = both(root)
         self.assertIsNotNone(js, f"JS wrote no report (exit {js_exit}): {js_err[-500:]}")
         self.assertIsNotNone(py, f"Python wrote no report (exit {py_exit}): {py_err[-500:]}")
-        # the Python half of the flow engine (X-*, Q-FLOW-* on Python files)
-        # is Python-only; where it reports, the derived fields may differ
+        # (findings listed as Python-only, if any, may change the derived fields)
         py_only = [i for i in py["issues"] if _python_only(i, project=py.get("project"))]
         js_c = collections.Counter(issue_key(i) for i in js["issues"])
         py_c = collections.Counter(issue_key(i) for i in py["issues"]

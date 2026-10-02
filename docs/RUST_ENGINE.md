@@ -9,9 +9,10 @@ source of the rules. Every wheel carries the engine, and the sdist its
 sources, which pip compiles where no platform wheel fits (§4). What the
 Python package still does in Python: walking a project, reading archives,
 the registry and the guard, the manifest and workflow checks, project
-mode's passes after the rules (Python's taint, SQL, function metrics), the
-suppression markers and the reports; project mode's JavaScript taint is the
-engine's (phase 3: `js_flow`, §16) in both packages. Since 0.1.8 the npm
+mode's passes after the rules (SQL, function metrics), the suppression
+markers and the reports; project mode's taint is the engine's, for
+JavaScript and for Python (phase 3: `js_flow`, §16; `py_flow`, §17), in
+both packages. Since 0.1.8 the npm
 package runs the same engine compiled to WebAssembly
 (`native/lazaret.wasm`). The JavaScript parser (`js_parse`, §12: the port
 of jsparse.py, held to its trees node for node until phase 3 retired it),
@@ -37,8 +38,8 @@ as WebAssembly (0.1.8). What the npm package still does in JavaScript
 (source decoding, the suppression markers, the manifest and workflow
 checks, the SQL and function passes of project mode, reporting) is held to
 the Python package by the CLI-level parity tests (`test_js_parity*`); its
-comment layout is the engine's lexers' (§15), and its JavaScript taint the
-engine's pass (§16).
+comment layout is the engine's lexers' (§15), and its taint the engine's
+passes (§16, §17).
 
 Decisions (fixed):
 
@@ -202,6 +203,12 @@ rust/
                              mod.rs (values, scopes, bindings, declaration and resolution),
                              descs.rs (points-to, call targets, routes, order), eval.rs (one
                              reading of a function), driver.rs (the fixpoint, the output)
+    src/pyflow/              project mode's cross-file Python taint (a port of flow.py's Python
+                             pass, §17): mod.rs (the model: modules, functions, classes, names,
+                             imports, resolution, the frames), eval.rs (one reading of a
+                             function), driver.rs (the files, the fixpoint, the output),
+                             frameworks.rs (route parameters), unparse.rs (ast.unparse)
+    src/quickhash.rs         a quick hash for maps keyed by the engine's own numbers
     src/pyparse/             the Python parser (Python 3.13's ast trees: §13): lexer.rs (tokens,
                              f-strings in pieces), parser.rs (statements, which error Python
                              reports), expr.rs (expressions, targets, arguments, strings),
@@ -209,7 +216,7 @@ rust/
                              unidata.rs (Unicode 15.1: identifiers, NFKC, \N{} names), limits.rs
                              (Python's nesting limits), tree.rs (the arena), out.rs (JSON)
     examples/                profiling tools (profile_calls, profile_scanfile, pattern_times,
-                             pattern_stats, show_need, jsparse_bench, pyparse_bench)
+                             pattern_stats, show_need, jsparse_bench, pyparse_bench, pyflow_bench)
   crates/lazaret-ffi/        cdylib liblazaret_native: the only `unsafe` (the C ABI; the
                              WebAssembly exports)
   .cargo/config.toml         the WebAssembly build's stack (8 MiB, placed first)
@@ -231,14 +238,15 @@ scripts/check_native_library.py         a built library against its wheel's tag;
 .github/workflows/wheels.yml            the five libraries, the wheels and the sdist, installed on each
                                         platform (the sdist built by pip on Linux)
 python/tests/architecture/test_snapshot_{hooks,signs,scanfile,lexer,hook_commands,small,crossfile,
-  js_flow,js_parse}.py, _snapshots.py,  the engine's recorded outputs (§5); scripts/snapshot.py records
-  snapshots/                            and compares them
+  js_flow,js_parse,py_flow}.py,         the engine's recorded outputs (§5); scripts/snapshot.py records
+  _snapshots.py, snapshots/             and compares them
 python/tests/architecture/test_lex.py   the lexers against js_parse's literals and Python 3.13's
                                         tokenize (§15)
 python/tests/architecture/test_rust_parity_regex.py, test_wasm_parity{,_signs,_crossfile,_jsparse,
-  _jsflow,_pyparse}.py, test_jsparse_native.py, test_pyparse_native{,_b,_c}.py, test_rust_deps.py,
-  test_rust_pack.py, hooks_corpus.py, scanfile_corpus.py, crossfile_corpus.py, jsparse_cases.py,
-  pyparse_cases.py, pyparse_oracle.py, test_linre{,_b,_c,_d,_linear}.py, _linre_inputs.py (linre, §14)
+  _jsflow,_pyparse,_pyflow}.py, test_jsparse_native.py, test_pyparse_native{,_b,_c}.py,
+  test_rust_deps.py, test_rust_pack.py, hooks_corpus.py, scanfile_corpus.py, crossfile_corpus.py,
+  jsparse_cases.py, jsgen.py, pyparse_cases.py, pyparse_oracle.py, pygen.py,
+  test_linre{,_b,_c,_d,_linear}.py, _linre_inputs.py (linre, §14)
 ```
 
 FFI protocol: request `[u32 LE name len][name][u32 LE args len][args JSON][text]`
@@ -413,6 +421,7 @@ pack's `rule_set`) is bumped with any change to what a verdict records.
 | `test_snapshot_crossfile` | the cross-file follower (`cross_file`): the stream of packages, side by side, one package, distributions, separators | the follower's generated stream (`crossfile_corpus.py`) |
 | `test_snapshot_js_flow` | project mode's cross-file JavaScript taint (`js_flow`, §16): every output in order, with the default model and a configured one; files that are not text, a lowered per-reading limit | the corpus it was held to jsflow.py on: the review's cases, generated projects (`jsgen.py`), token soups |
 | `test_snapshot_js_parse` | the JavaScript parser (`js_parse`, §12): each tree's or error's JSON text (its SHA-256: a tree may be deeper than `json.loads` reads), with spans and without | jsparse_cases.py's inputs: the reader's snippets and its own, every construct that nests around the depth limit, soups, generated projects and mutations of them |
+| `test_snapshot_py_flow` | project mode's cross-file Python taint (`py_flow`, §17): every output in order, with the default model and a configured one; files that are not text, each limit lowered (and not raised), the frames, a chain whose work counts | the review's cases and generated projects (`pygen.py`), on which it was held to flow.py |
 
 Twins the engine is still compared with, call for call:
 
@@ -422,6 +431,7 @@ Twins the engine is still compared with, call for call:
 | `test_wasm_parity`, `test_wasm_parity_signs`, `_crossfile` | the WebAssembly build the npm package ships against the platform library, call for call, byte for byte: `hooks_view`, `signs_view`, `scan_file` (dependency mode), `scan_rules`, and the npm binding's `cross_file` against the Python package's | the hooks corpus, the scan_file corpus, this repository's files, the follower's stream |
 | `test_wasm_parity_jsparse` | the parser in the WebAssembly build against the library, byte for byte | the snippets, this repository's JavaScript, soups, every construct that nests at its deepest |
 | `test_wasm_parity_jsflow` | the JavaScript taint pass in the WebAssembly build against the library, byte for byte | `test_snapshot_js_flow`'s sets; every construct that nests at its deepest, request data followed through it |
+| `test_wasm_parity_pyflow` | the Python taint pass in the WebAssembly build against the library, byte for byte | `test_snapshot_py_flow`'s sets; every construct that nests at its deepest, `elif` chains at the frames the pass holds |
 | `test_pyparse_native`, `_b`, `_c` | the Python parser (`py_parse`) against Python 3.13's `ast.parse` (a `python3.13` subprocess; skipped without one), node for node as JSON text, with the errors' lines; spans; its Unicode 15.1 data (§13) | pyparse_cases.py's inputs; every identifier character and character name |
 | `test_wasm_parity_pyparse` | the Python parser in the WebAssembly build against the library, byte for byte | the snippets, this repository's Python, programs, soups, every construct that nests at its deepest |
 | `test_linre*` | linre against Python's `re` on the pack's patterns (§14) | the regex corpus and adversarial inputs |
@@ -463,13 +473,15 @@ PYTHONPATH=src:. python3 -m unittest tests.architecture.test_snapshot_signs     
 PYTHONPATH=src:. python3 -m unittest tests.architecture.test_snapshot_scanfile
 PYTHONPATH=src:. python3 -m unittest tests.architecture.test_snapshot_lexer tests.architecture.test_snapshot_small \
   tests.architecture.test_snapshot_hook_commands tests.architecture.test_snapshot_crossfile
-PYTHONPATH=src:. python3 -m unittest tests.architecture.test_snapshot_js_flow tests.architecture.test_snapshot_js_parse
+PYTHONPATH=src:. python3 -m unittest tests.architecture.test_snapshot_js_flow tests.architecture.test_snapshot_js_parse \
+  tests.architecture.test_snapshot_py_flow
 PYTHONPATH=src:. python3 -m unittest tests.architecture.test_wasm_parity         # ~20 s
 PYTHONPATH=src:. python3 -m unittest tests.architecture.test_wasm_parity_signs   # ~11 s
 PYTHONPATH=src:. python3 -m unittest tests.architecture.test_wasm_parity_crossfile  # ~1 s
 PYTHONPATH=src:. python3 -m unittest tests.architecture.test_jsparse_native      # ~1 s
 PYTHONPATH=src:. python3 -m unittest tests.architecture.test_wasm_parity_jsparse # ~18 s
 PYTHONPATH=src:. python3 -m unittest tests.architecture.test_wasm_parity_jsflow  # ~10 s
+PYTHONPATH=src:. python3 -m unittest tests.architecture.test_wasm_parity_pyflow  # ~5 s
 python3 ../scripts/make_rust_tables.py --check && python3 ../scripts/check_rust_deps.py
 ```
 
@@ -683,7 +695,7 @@ benchmark:
 | 0 | Baseline: the detection round committed (rule set 2.15.0), the engine's outputs recorded on the benchmark's files and on installed packages | Done (tag `rust-first-baseline`) |
 | 1 | The Rust engine is the reference: the Python engine, `--engine` and the pure wheel retired; the recorded outputs (§5); the pack as the source of the rules; every wheel a platform wheel, the sdist compiled by pip where none fits; an unanswered file SC-TRUNCATED in both packages | Done |
 | 2 | Decoding, lexers and bytes in the engine: source decoding (BOMs, UTF-16, coding cookies), one token substrate for the detectors | Done (tag `rust-first-phase2`): the lexers (§15: every caller's comments and literals, both packages), the self-read on them, the decoded view on string values (§15). Moved: the data flow, the dead drop, the secret endpoints and received code to phase 3 (they follow names: scopes); bytes to phase 4 (with linre over bytes); source decoding to after phase 3 (the packages' decoders already agree, held by their parity tests, and owning the CJK codecs would put their tables in the WebAssembly module) |
-| 3 | Parsers, scopes and flow: the detectors on bindings over the JavaScript and Python trees (§12, §13), constant folding of strings, the cross-file follower on them, project mode's passes (taint, SQL, function metrics) in the engine; the npm package's twins of them retired | The parsers done; project mode's JavaScript taint ported onto `js_parse`'s trees (§16: `js_flow`), both packages ask the engine for it, and jsflow.py, jsflow.js and the readers they used are retired (11,357 lines), the pass and the parser held to their recorded outputs. Next, in order: Python's taint (flow.py) onto `py_parse`'s trees; then the supply-chain detectors on the same scopes, benchmark-gated |
+| 3 | Parsers, scopes and flow: the detectors on bindings over the JavaScript and Python trees (§12, §13), constant folding of strings, the cross-file follower on them, project mode's passes (taint, SQL, function metrics) in the engine; the npm package's twins of them retired | The parsers done; project mode's JavaScript taint ported onto `js_parse`'s trees (§16: `js_flow`), both packages ask the engine for it, and jsflow.py, jsflow.js and the readers they used are retired (11,357 lines); Python's taint ported onto `py_parse`'s trees (§17: `py_flow`), both packages ask the engine for it (the npm package had no port of it), and flow.py's own pass is retired (1,505 lines); the passes and the parser held to their recorded outputs. Next: the supply-chain detectors on the same scopes, benchmark-gated |
 | 4 | Linear-time matching: the pack's patterns on linre (§14), pyre and the shlex port retired, current Unicode | Every pattern linre accepts runs on it (616 of the pack's 657; done first, as no answer changes); the 41 others, pyre and the shlex port not started |
 | 5 | One call per file, a content cache (SHA-256), the guard's scan in a child process that fails closed, archive ambiguity checks | Not started |
 
@@ -1704,8 +1716,10 @@ the next (the engine's caches, compiled patterns among them, are per
 thread), ending with the calling thread; a call from a thread of 128 KiB
 reads the deepest input of every construct (`jsflow/tests.rs`). It costs
 about 50 µs a call and 7% of the pass over the 1,490 packages below. In
-WebAssembly the calls run on the module's 8 MiB stack, where
-`test_wasm_parity_jsflow` reads the deepest input of every construct.
+WebAssembly a call's frames are on Node's own stack (about 1 MB on its
+main thread), its larger locals on the module's 8 MiB stack;
+`test_wasm_parity_jsflow` reads the deepest input of every construct
+there.
 
 **Held to its recorded outputs.** `test_snapshot_js_flow` (§5): every
 output, in order, on the corpus the port was held to jsflow.py on (the
@@ -1722,3 +1736,103 @@ as projects (each package's own files, up to 1.5 MB), with the default
 model and with configured ones that make `process.env`, `options.*` and
 `args` sources (329 and 591 outputs): no difference; the engine took 10 s
 where jsflow.py took 125 s.
+
+## 17. The cross-file Python taint pass
+
+`src/pyflow/` is a port of flow.py's Python pass (`_PyProject`,
+`_Analyzer`, `_analyze_python`: project mode's interprocedural Python
+taint), function for function, onto `py_parse`'s trees (§13): phase 3's
+second step (§8). Both packages ask the engine for it (the Python
+package's `flow._analyze_python` through `engine.py_flow`, the npm
+package's `scanner/flow.js` through `native.js`'s `pyFlow`), and flow.py's
+own pass is retired (1,505 lines of Python). The npm package had no port
+of it: it now reports the same X-* flows on Python files as the Python
+package, and its cross-file gate no longer says a project's Python files
+were not analyzed.
+
+**The model** (flow.py's). Every function, method, nested def and each
+module's top-level code (a pseudo-function) gets a summary — which
+parameters reach which sinks, which reach the return value and what they
+are clean for there, a request source it returns — computed to a fixpoint
+over the call graph, callees first; a last pass reports a source passed
+into a function whose parameter reaches a sink, or reaching a sink as the
+value another function returned. Calls are matched only to what they can
+name (flow.py's resolution model: imports, re-exports and star imports,
+nested defs, constructors, `self` and `super()` through the class and its
+project bases, typed locals, an unknown receiver's method by name when at
+most four project methods have it). Route handlers (Flask, FastAPI,
+Django) get request data in the parameters their framework fills
+(`frameworks.rs`, with `unparse.rs` for the annotations' and defaults'
+texts, as `ast.unparse` writes them). `mod.rs`: modules, functions,
+classes, names, imports, resolution, the frames; `eval.rs`: one reading of
+one function, its sources, sinks and sanitizers, the summaries it reads at
+calls and commits; `driver.rs`: the files read, the fixpoint and the
+reporting pass, the configured part of the model, the notes.
+
+Where flow.py iterated a set — a function's callees and callers, the
+functions read again, a value's parameters — its order followed memory
+addresses and could change from one run to the next; the port keeps the
+order things were added in (a value's parameters: their signature's
+order). A call's classification (a source, a sink's category, a
+sanitizer, a result that carries no request text) depends only on its
+callee's texts, so it is worked out once for each, when the call is
+resolved.
+
+**What it answers.** `py_flow` (`{"files": [[path, length], …]}`, the
+contents concatenated as the text, a length of null for a file whose
+content is not text; `sources`, `sinks`, `full`, `partial`: the
+configuration taintspec validated (`full`: the configured full
+sanitizers, the built-in ones being the pass's); `max_iters`,
+`max_files`, `max_bytes`, `work_limit` and `run_limit` (`[base, steps per
+node]`): lower limits, each at most the default) answers the pass's
+output in flow.py's order: `["issue", category, path, line, source, sink,
+chain, file]` (`file`: the index of the path's file in `files`, whose
+lines give the snippet) and `["note", rule, name, path, line, msg, why,
+fix]` (Q-FLOW-SKIPPED, Q-FLOW-RECURSION, Q-FLOW-INCOMPLETE); each host
+builds its findings from them (`flow._issue`, `flow._flow_note` and
+flow.js's twins of them). A file the parser refuses is noted as flow.py
+noted it (a syntax error with its line, Python 2, NUL bytes, a lone
+surrogate, nesting past the parser's limits).
+
+**Bounds.** flow.py's time budget (120 s for the fixpoint, as much again
+for reporting) is a work budget: 1,000,000 steps and 48 per syntax tree
+node for the fixpoint, 16 more per node for reporting, 20,000 and 256 per
+node of a function for one reading; and 50 readings of a function, 20,000
+files and 64,000,000 characters, as before. A step is a node read;
+following a long chain of links (a callee's or an attribute's dotted
+name: `x()()()…`, `a.b.c…`) and the texts that makes are more steps past
+64 (one per 16), so code that would cost its length squared — each link of
+a chain read again at the next — is bounded by the budgets too (a chain of
+9,000 calls: a Q-FLOW-INCOMPLETE note, in 0.14 s). Python's
+recursion limit, where flow.py's recursive reading and collecting stopped
+on deeply nested code (a Q-FLOW-RECURSION note: the file, or the functions
+it was reading), is kept as a count of the frames flow.py would have held
+when run from the `lazaret` command (`FRAMES`: a chain of 986 binary
+operators is read, of 987 is not; a module's `elif` chain of 493 is read,
+of 494 is not; its definitions are collected up to 991). flow.py's depended
+on how deep its caller's stack was (the command, the MCP server, a test);
+the engine's does not. Natively the pass runs on the engine's own 8 MiB
+stack (§16); in WebAssembly its frames are on Node's own stack, about
+1 MB, which the frames keep it within: `test_wasm_parity_pyflow` reads
+every construct at its deepest.
+
+**Held to its recorded outputs.** `test_snapshot_py_flow` (§5): every
+output, in order, on the review's cases and seeded generated projects
+(`pygen.py`: packages importing each other every way, every signature,
+classes, routes of each framework, every sink, sanitizers, guards and the
+syntax the pass follows), with the default model and a configured one, and
+the call's own cases (files that are not text, each limit lowered and
+raised, the frames, a chain whose work counts); the hosts' findings from
+it are held to each other by `test_js_parity_flow`, and the WebAssembly
+build's answers to the library's by `test_wasm_parity_pyflow`. Before the
+port was committed it was held to flow.py's pass — its sets iterated in
+order, without its time budget (`bench/pyflow_ref.py`) — output for
+output, with no difference: on the 73 sets of files the test suite handed
+it, on 1,200 more generated projects (5,682 outputs) and the snapshot
+corpus (1,075), with both models, and on 455 projects read from the
+installed packages and Python 3.13's standard library (each top-level
+package or module, up to 1.5 MB: 6,157 files, 70 million characters),
+with the default model and with one that makes `os.environ`, `kwargs`,
+`config` and the like sources (54 and 676 outputs). On those 455 the
+engine took 6.2 s where flow.py's pass took 55 s; on the generated
+projects, 0.55 s (the parse included, 6.5 MB/s) where it took 7.7 s.

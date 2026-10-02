@@ -67,7 +67,7 @@ test("a codec cookie decodes the same as in Python; one no engine decodes is SC-
     "uesc.py": "# coding: unicode_escape\n# \\x0aeval(z)\n",
   }), [
     "dos.py:1 " + q("cp437"), "dos.py:2 S-EVAL-PY",
-    "ebcdic.py:1 " + q("cp037"),
+    "ebcdic.py:1 " + q("cp037"), "ebcdic.py:1 Q-FLOW-SKIPPED",      // (the Python taint pass can't read it, as in Python)
     "u32.py:1 " + q("utf-32"), "u32.py:1 SC-TRUNCATED", "u32.py:2 S-EVAL-PY",
     "uesc.py:1 " + q("unicode-escape"), "uesc.py:1 SC-ESCAPE-CODEC", "uesc.py:3 S-EVAL-PY",   // see review-escape-codecs
   ]);

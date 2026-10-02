@@ -367,8 +367,8 @@ function runChecked(argv, io) {
     add(deps.issues);
     for (const f of deps.files) files.push(f);
     add(skippedIssues);
-    // Cross-file taint flows in the project's JavaScript (the Python engine's
-    // flow.analyze, JavaScript half; dependency files are not analyzed). The
+    // Cross-file taint flows in the project's Python and JavaScript (the
+    // Python engine's flow.analyze; dependency files are not analyzed). The
     // findings copy raw source lines: they get their file's redaction here.
     add(redactFlowIssues(analyzeFlows(files), files));
     const res = redactResult(buildResult(root, files, issues), clipLine);

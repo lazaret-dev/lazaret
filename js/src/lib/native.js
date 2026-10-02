@@ -319,6 +319,29 @@ export function jsFlow(files, { runLimit = null } = {}) {
   return call("js_flow", args, texts.filter((t) => t !== null));
 }
 
+// ---- the cross-file Python taint pass ----
+
+/**
+ * The cross-file Python taint pass (rust/crates/lazaret-engine/src/pyflow/; the Python package's
+ * engine.py_flow) over `files` ({path, content}: a project's own Python; a content that is not a
+ * string is noted as not text), on its built-in model. Each limit lowers the pass's own, never
+ * raises it: `maxIters` (readings of one function in the fixpoint), `maxFiles` and `maxBytes` (the
+ * files and code points read), `workLimit` and `runLimit` ([base, steps per node]: the fixpoint's
+ * budget, one reading's). The pass's outputs, in order: ["issue", category, path, line, source,
+ * sink, chain, the index of the path's file in `files`], ["note", rule, name, path, line, msg, why,
+ * fix].
+ */
+export function pyFlow(files, { maxIters = null, maxFiles = null, maxBytes = null, workLimit = null, runLimit = null } = {}) {
+  const texts = files.map((f) => (typeof f.content === "string" ? f.content : null));
+  const args = { files: files.map((f, k) => [f.path, texts[k] === null ? null : codePoints(texts[k])]) };
+  if (maxIters !== null) args.max_iters = maxIters;
+  if (maxFiles !== null) args.max_files = maxFiles;
+  if (maxBytes !== null) args.max_bytes = maxBytes;
+  if (workLimit) args.work_limit = workLimit;
+  if (runLimit) args.run_limit = runLimit;
+  return call("py_flow", args, texts.filter((t) => t !== null));
+}
+
 // ---- scan_file ----
 
 const ISSUE_KEYS = ["rule", "name", "type", "sev", "msg", "why", "fix", "ref"];

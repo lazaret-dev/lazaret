@@ -28,8 +28,8 @@ before the release.
   and cross-file follower are the native engine's alone. `core.py` (18,815
   lines → about 7,700) keeps the project walk, archives, the registry and
   the guard, the manifest and workflow checks, project mode's passes after
-  the rules (Python's taint, SQL, function metrics), the suppression markers
-  and the reports. `--engine` and `LAZARET_ENGINE` are gone; `--version` still names
+  the rules (SQL, function metrics; taint is the engine's: below), the
+  suppression markers and the reports. `--engine` and `LAZARET_ENGINE` are gone; `--version` still names
   the engine, and without the library the scanning commands stop with exit
   code 2 and say what is missing.
 - **A file the engine can't finish is SC-TRUNCATED in both packages**
@@ -152,6 +152,29 @@ before the release.
   be read. The parser's trees and the pass's outputs are held to their
   recorded ones (`test_snapshot_js_parse`, `test_snapshot_js_flow`), the
   WebAssembly build to the library (`test_wasm_parity_jsflow`).
+- **Project mode's Python taint is the engine's, in both packages: the npm
+  package reports Python flows too.** The `X-*` flows and `Q-FLOW-*` notes
+  for Python come from the engine's pass (`py_flow`, below), which the
+  Python package (`flow._analyze_python`) and the npm package
+  (`scanner/flow.js`) both ask; flow.py's own pass (1,505 lines) is
+  retired. The npm package had no port of it: its project scans now report
+  the same flows on Python files as the Python package's, and its gate's
+  cross-file condition no longer says how many Python files it did not
+  analyze. No finding changes on real code: the pass gave flow.py's
+  outputs on the test suite's file sets, on generated projects and on 455
+  installed packages and standard-library modules read as projects, with
+  the default and a configured model; it took 6.2 s where flow.py took
+  55 s. Bounds are deterministic: flow.py's 120 s time budget is a work
+  budget per syntax tree node, as for JavaScript (a host can lower each
+  limit, never raise it), and a pathologically long chain — `x()()()…`,
+  `a.b.c…` thousands deep, which flow.py read at the cost of its length
+  squared — now spends that budget and ends with a Q-FLOW-INCOMPLETE note.
+  Where flow.py stopped on deeply nested code at Python's recursion limit
+  (a Q-FLOW-RECURSION note), the pass stops at the same nesting as flow.py
+  run from the `lazaret` command, whatever its caller. Files are read as
+  Python 3.13 reads them, on every Python the package runs on (flow.py read
+  them with the running Python's `ast`, so on 3.10 and 3.11 a file using
+  newer syntax was a Q-FLOW-SKIPPED note).
 
 ### Added
 
@@ -161,6 +184,13 @@ before the release.
   (`test_jsflow_reference.py`, retired with jsflow.py); on 1,490 installed
   npm packages read as projects it gave the same outputs about twelve times
   faster.
+- The engine's port of project mode's cross-file Python taint pass
+  (`py_flow`: flow.py's summaries, resolution model and route parameters,
+  on the engine's Python parser's trees), held to flow.py's pass output for
+  output before it retired; held to its recorded outputs
+  (`test_snapshot_py_flow`), the WebAssembly build to the library
+  (`test_wasm_parity_pyflow`), and its route parameters to the intra-file
+  engine's (`test_pyflow_frameworks`).
 - The engine's JavaScript parser (`js_parse`: jsparse.py's trees, node for
   node, until jsparse.py retired) and Python parser (`py_parse`: Python 3.13's `ast` trees, node for
   node, with its errors), about 60 MB/s each, for the detectors to be

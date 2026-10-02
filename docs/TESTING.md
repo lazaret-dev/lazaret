@@ -124,8 +124,9 @@ Notes:
   modules take 2–25 s each (`test_snapshot_signs` and `_hooks`, the hooks
   corpus' ~44,000 cases, the longest): run those two alone and batch the
   rest. `test_wasm_parity.py` (~20 s), `_signs.py` (~11 s), `_crossfile.py`
-  (~1 s), `_jsparse.py` (~18 s), `_jsflow.py` (~10 s) and `_pyparse.py` also
-  need the WebAssembly build (`npm run build`), and skip without it.
+  (~1 s), `_jsparse.py` (~18 s), `_jsflow.py` (~10 s), `_pyparse.py` and
+  `_pyflow.py` (~5 s) also need the WebAssembly build (`npm run build`), and
+  skip without it.
 
 ---
 
@@ -141,10 +142,11 @@ package still does in JavaScript (flow, parsing, the settings and workflow
 readers, gyp, config files, taint) and the CLIs
 on each area's trees (lexing, limits, eval, look-alike names).
 
-The only allowed differences are the documented **Python-only** features
-(`_python_only`): the flow engine's AST half (`X-*`, `Q-FLOW-*` on Python
-files). (The cross-file received-code follower was the other until 0.1.8;
-both packages run the native engine's now.)
+The only allowed differences are documented **Python-only** features
+(`PYTHON_ONLY`, `_python_only`): none since the Rust-first refactor's phase
+3, when the flow engine's Python half (`X-*`, `Q-FLOW-*` on Python files)
+became the native engine's in both packages. (The cross-file received-code
+follower was the other until 0.1.8.)
 Anything else that differs is a real divergence — fix the package, not the
 test. Since 0.1.8 the npm package's rules are the native engine's
 (WebAssembly), so these suites also hold the npm binding: what it passes in,
@@ -164,7 +166,10 @@ generated stream of 700 packages (side by side, one package, distributions,
 separators); `test_snapshot_hook_commands.py` a hook's command read as a
 program; `test_snapshot_small.py` the hidden names, look-alike names and
 off-screen code; `test_snapshot_lexer.py` the comment lexer's spans on dense
-random text in every language. A hash per 100 outputs: a failure names the
+random text in every language; `test_snapshot_js_flow.py`,
+`test_snapshot_js_parse.py` and `test_snapshot_py_flow.py` project mode's
+cross-file taint passes and the JavaScript parser (on generated projects
+among others: `jsgen.py`, `pygen.py`). A hash per 100 outputs: a failure names the
 chunks that moved, and `scripts/snapshot.py diff` the cases. The lexers
 themselves (`docs/RUST_ENGINE.md` §15) are held to the runtimes' own
 readers by `test_lex.py`: the JavaScript lexer's literals to the engine's
@@ -174,7 +179,7 @@ f-strings and comments to Python 3.13's `tokenize`.
 every rule-pack pattern and 126 hand-written probes (search, match,
 fullmatch, finditer, sub, split, with pos/endpos; run it on each Python
 3.10–3.14), and `test_wasm_parity.py`, `_signs.py`, `_crossfile.py`,
-`_jsparse.py`, `_jsflow.py` and `_pyparse.py` hold the WebAssembly build the npm package
+`_jsparse.py`, `_jsflow.py`, `_pyparse.py` and `_pyflow.py` hold the WebAssembly build the npm package
 ships to the library, call for call and byte for byte, on the same corpora.
 `scripts/make_rust_tables.py --check` fails when the pack leaves its
 canonical form, a pattern stops compiling, its rule set is not the
