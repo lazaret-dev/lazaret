@@ -11,7 +11,8 @@ the native engine's whole, findings included; in project mode its rules part
 (`scan_rules`) is the engine's, and the Python engine runs the passes that
 follow it. Phase 3's cross-file follower is the engine's too (`cross_file`;
 §8). The JavaScript parser the detectors are to be rebuilt on is too
-(`js_parse`, §12): jsparse.py's trees, node for node. Since 0.1.8 the npm
+(`js_parse`, §12): jsparse.py's trees, node for node; and a Python parser
+(`py_parse`, §13): Python 3.13's `ast` trees, node for node. Since 0.1.8 the npm
 package runs the same engine compiled to
 WebAssembly (`native/lazaret.wasm`): the supply-chain tests, dependency-mode
 `scan_file`, the rules part of project-mode `scan_file` and the cross-file
@@ -129,7 +130,8 @@ rust/
   Cargo.toml                 workspace; release: lto, codegen-units=1, panic=unwind, strip;
                              wasm: release with panic=abort (the WebAssembly build)
   NOTICE, LICENSE-PYTHON     what is translated from CPython, its notices, CPython's license (§11)
-  LICENSE-UNICODE            the Unicode License v3, for generated/unicode13.rs (§11)
+  LICENSE-UNICODE            the Unicode License v3, for generated/unicode13.rs and
+                             pyparse/unidata.rs (§11)
   crates/lazaret-engine/     #![forbid(unsafe_code)], no dependencies, no I/O
     rules/lazaret-rules.json the rule pack (generated; embedded; `pack.install` can replace it)
     src/api.rs               the calls by name (JSON args + text -> JSON; `budget`); `batch` on
@@ -172,8 +174,14 @@ rust/
                              reads ahead, statements, classes, modules), expr.rs (expressions,
                              patterns, JSX), types.rs (TypeScript's types), tree.rs (the arena),
                              out.rs (JSON)
+    src/pyparse/             the Python parser (Python 3.13's ast trees: §13): lexer.rs (tokens,
+                             f-strings in pieces), parser.rs (statements, which error Python
+                             reports), expr.rs (expressions, targets, arguments, strings),
+                             pattern.rs (match patterns), literal.rs (values), unicode.rs and
+                             unidata.rs (Unicode 15.1: identifiers, NFKC, \N{} names), limits.rs
+                             (Python's nesting limits), tree.rs (the arena), out.rs (JSON)
     examples/                profiling tools (profile_calls, profile_scanfile, pattern_times,
-                             pattern_stats, show_need, jsparse_bench)
+                             pattern_stats, show_need, jsparse_bench, pyparse_bench)
   crates/lazaret-ffi/        cdylib liblazaret_native: the only `unsafe` (the C ABI; the
                              WebAssembly exports)
   .cargo/config.toml         the WebAssembly build's stack (8 MiB, placed first)
@@ -186,13 +194,15 @@ js/src/pool.js, pool-worker.js          the npm CLI's worker threads, each with 
 python/src/lazaret/scanner/engine.py    the engine in use, batching, the Python fallback
 python/_build/lazaret_build.py          LAZARET_NATIVE_LIBRARY + LAZARET_WHEEL_PLATFORM: a platform wheel
 scripts/make_rust_tables.py             the pack (any Python) and unicode13.rs (3.10); --check
+scripts/make_pyparse_tables.py          pyparse/unidata.rs (Python 3.13); --check
 scripts/check_rust_deps.py              Cargo.lock and the manifests hold only the workspace
 scripts/check_native_library.py         a built library against its wheel's tag; --dist: the release's wheels
 .github/workflows/wheels.yml            the five libraries, the wheels, installed on each platform
 python/tests/architecture/test_rust_parity_{regex,hooks,hooks_b,signs,scanfile,lexer,project,
   project_scan,crossfile,hook_commands,hexname,offscreen,lookalike}.py,
-  test_wasm_parity{,_signs,_crossfile,_jsparse}.py, test_jsparse_native{,_b}.py, test_rust_deps.py,
-  test_rust_pack.py, hooks_corpus.py, scanfile_corpus.py, jsparse_cases.py
+  test_wasm_parity{,_signs,_crossfile,_jsparse,_pyparse}.py, test_jsparse_native{,_b}.py,
+  test_pyparse_native{,_b,_c}.py, test_rust_deps.py, test_rust_pack.py, hooks_corpus.py,
+  scanfile_corpus.py, jsparse_cases.py, pyparse_cases.py, pyparse_oracle.py
 ```
 
 FFI protocol: request `[u32 LE name len][name][u32 LE args len][args JSON][text]`
@@ -341,6 +351,8 @@ The differential tests (each module under 45 s, as every module is):
 | `test_wasm_parity`, `test_wasm_parity_signs`, `_crossfile` | the WebAssembly build the npm package ships against the platform library, call for call, byte for byte: `hooks_view`, `signs_view`, `scan_file` (dependency mode), `scan_rules`, and the npm binding's `cross_file` against the Python package's | the hooks corpus, the scan_file corpus, this repository's files, the follower's stream |
 | `test_jsparse_native`, `_b` | the JavaScript parser (`js_parse`, `js_parse_file`) against `jsparse.parse`, node for node as JSON text, key for key; spans (§12) | test_js_parity_parse.py's inputs (snippets, this repository's JavaScript, generated projects, soups, mutations, its linearity cases) and jsparse_cases.py's (the budgets' edges, jsparse.py's bugs, every construct that nests around the depth limit, more soups and mutations) |
 | `test_wasm_parity_jsparse` | the parser in the WebAssembly build against the library, byte for byte | the snippets, this repository's JavaScript, soups, every construct that nests at its deepest |
+| `test_pyparse_native`, `_b`, `_c` | the Python parser (`py_parse`) against Python 3.13's `ast.parse` (a `python3.13` subprocess; skipped without one), node for node as JSON text, with the errors' lines; spans; its Unicode 15.1 data (§13) | pyparse_cases.py: curated snippets of every construct and error, generated programs, this repository's Python, soups, mutations, every construct that nests at Python's deepest and one deeper, a chain of `not`s in 47 contexts, long inputs; every identifier character and character name |
+| `test_wasm_parity_pyparse` | the Python parser in the WebAssembly build against the library, byte for byte | the snippets, this repository's Python, programs, soups, every construct that nests at its deepest |
 
 State: zero differences in every field. The WebAssembly parity holds what
 differs between the two builds of one source — 32-bit sizes, one thread,
@@ -594,7 +606,7 @@ open('cases.json', 'w'))"` from `python/` with `PYTHONPATH=src:.`.
 | 1 | The supply-chain tests and what they read | Done, current through 0.1.8; wired into both packages (0.1.8) |
 | 2 | Per-file rules (`scan_file`: `RULES`, `TEXT_RULES`, secrets, entropy, homoglyphs, hidden Unicode, off-screen code …), the Python and JS/TS lexers | Dependency mode done and wired in (every family, NFKC, the comment lexer, findings with their snippets and redaction). Project mode: the rules part done (`scan_rules`: every rule of `RULES` with Q-LONGLINE and SC-PIPE-SHELL, the families, `TEXT_RULES`) and wired into both packages (0.1.8); the SQL, taint and function passes that follow it not started |
 | 3 | The cross-file follower; archive reading for registry scans | The follower done and wired into both packages (`cross_file`, 0.1.8); archive reading not started |
-| 4 (optional) | The taint flow engines | The JavaScript parser they would read is done (`js_parse`, §12: jsparse.py's trees, node for node); the passes on it (scope resolution, data flow, constant folding of strings) not started |
+| 4 (optional) | The taint flow engines | The parsers they would read are done (`js_parse`, §12: jsparse.py's trees, node for node; `py_parse`, §13: Python 3.13's ast trees, node for node); the passes on them (scope resolution, data flow, constant folding of strings) not started |
 
 ## 9. Known issues
 
@@ -684,7 +696,8 @@ cross-file follower in the engine for both packages (`cross_file`, phase
    engine, and run the 945 packages with each engine nightly.
 8. The detectors on the JavaScript parser (§12): scope resolution, data
    flow and constant folding of strings over its trees, in place of the
-   pattern-and-window readings they rebuild.
+   pattern-and-window readings they rebuild; and the same passes over the
+   Python parser's trees (§13).
 
 ## 11. Licensing
 
@@ -710,7 +723,11 @@ Labs notices name.
 - `generated/unicode13.rs` is Unicode Character Database 13.0 data, under
   the Unicode License v3 (`rust/LICENSE-UNICODE`, the same text as the
   Python and npm packages' `LICENSE-UNICODE`); its header carries the
-  notice, and `rust/NOTICE` says so (0.1.8).
+  notice, and `rust/NOTICE` says so (0.1.8). So is `pyparse/unidata.rs`,
+  the Python parser's Unicode 15.1 data (§13), written from Python 3.13's
+  unicodedata: its header carries the notice and `rust/NOTICE` names it.
+  The Python parser is written from Python's grammar and `ast`'s answers,
+  not translated from CPython's parser: it is Lazaret's own work.
 - `rust/Cargo.toml` declares `Apache-2.0 AND Python-2.0.1 AND Unicode-3.0`.
   The platform wheels carry the compiled engine, so they carry
   `LICENSE-PYTHON` and `NOTICE` as license files (`.dist-info/licenses/`)
@@ -860,3 +877,241 @@ JSON 46 MB/s; over ordinary module code (puppeteer-core's 362 ESM files,
 declaration files) 60 and 50 MB/s (`cargo run --release --example
 jsparse_bench -- throughput DIR…`). jsparse.py reads 1.3 MB/s. The parser
 adds 0.2 MB to the WebAssembly module (2.25 MB → 2.45 MB).
+
+## 13. The Python parser
+
+`src/pyparse/` reads Python source as Python 3.13's `ast.parse(source)`
+does: the second parser the engine's detectors are to be rebuilt on (scope
+resolution and data flow over its trees, as over the JavaScript parser's,
+§12). It is written from Python's grammar and from what `ast` answers,
+which is its oracle: no code of CPython's parser or tokenizer is in it.
+
+**What it reads.** Everything Python 3.13 reads: PEP 701 f-strings (nested
+quotes, comments and backslashes in replacement fields, `=` and `!r`,
+nested format specifiers), `match` and its patterns, `type` aliases and
+type parameters (bounds, constraints, 3.13's defaults, `*Ts`, `**P`),
+`except*`, the walrus, positional-only parameters, any decorator
+expression, the soft keywords, async forms. For every input it builds the
+tree `ast.parse` builds — the same node classes, every field in `_fields`
+order and its value, `lineno`, `col_offset`, `end_lineno`, `end_col_offset`
+— or fails where Python raises: SyntaxError, IndentationError, TabError,
+the error of a NUL, MemoryError and RecursionError for nesting. Python 2 is
+refused as Python refuses it. Only what `ast.parse` checks is checked:
+`return` outside a function or a starred assignment target alone are
+trees, as there (the compiler refuses them later). The text is code points,
+as the engine's PyStr: a lone surrogate or a value past U+10FFFF is refused
+(Python cannot encode such a str for its tokenizer); a coding declaration
+is not read (`ast.parse` of a str ignores it); `from __future__ import
+barry_as_FLUFL` makes `<>` the inequality and `!=` an error, as it does
+there.
+
+The call: `py_parse` (`{}`; `"spans": true` adds each node's `start` and
+`end`, code points, after its positions), answering the tree as JSON —
+`{"_type": "Module", "body": […], "type_ignores": []}`, each node's
+`_type`, its fields in `_fields` order, then its positions (columns in
+UTF-8 bytes, as `ast`'s); a context or an operator `{"_type": "Load"}`; a
+Constant's value `null`, `true`, `false`, a string, `{"Ellipsis": true}`,
+`{"bytes": "<hex>"}`, `{"int": "<decimal digits>"}` (`"0x…"` past 16,384
+bits: converting a longer hexadecimal literal to decimal would take
+quadratic time; every decimal literal Python reads, 4,300 digits at most,
+is below it), `{"float": "<float.hex()>"}` or `{"complex": [re, im]}` —
+or `{"error": {"line": n, "reason": "…"}}`. Line 0 is an error Python
+gives no line: a NUL, a text it cannot encode, the MemoryError and the
+RecursionError of nesting. The reason is the engine's wording (often
+Python's); the line is Python's (below).
+
+**The tree** (`tree.rs`), an arena as the JavaScript parser's: `nodes`, a
+`Vec` of 28-byte `Node`s addressed by `u32` ids, in document order
+(pre-order, children in field order; the Module is 0). A node holds its
+`Kind` (the `ast` class), `start` and `end` (code points, half-open: from
+its first token to past its last), a small enumeration `op` (a context, an
+operator, a conversion, a constant's type), `flags` (`is_async`, `simple`,
+a constant's `kind`), and four slots. One table, `tree::fields(kind)`,
+gives each kind's fields in `_fields` order — name, type (a child, a child
+or None, a list, a list with Nones for a Dict's keys and `kw_defaults`, a
+string, an int, a flag, an enumeration …) and place (a slot, or for
+FunctionDef, AsyncFunctionDef, ClassDef and arguments, which have more
+fields than slots, an item of an extension list) — and drives the JSON
+writer, `each_child`, the accessors by field name (`child`, `children_of`,
+`text_of`), `raw`, `parents` and `compact`. Lists live in one `Vec<u32>`.
+Strings are interned: names (NFKC, as Python normalizes identifiers),
+string values (code points: a `\ud800` escape's lone surrogate is kept),
+bytes, ints' digits; equal names have equal ids. A float's value is its
+`f64`, correctly rounded as Python rounds it. `line_starts` turns spans into
+Python's lines (a line ends at "\r\n", "\r" or "\n"). A tree can be as deep
+as its input is long (binary operators, attributes, calls, subscripts):
+walk it with an explicit stack, as the writer and `compact` do.
+
+**Reading.** `lexer.rs` turns the whole text into tokens first (f-strings
+in pieces, PEP 701's way), up to the first token it refuses. The parser
+(`parser.rs`: statements; `expr.rs`: expressions, targets, arguments,
+parameters, strings and f-strings; `pattern.rs`: match patterns) reads
+them top-down with one token of look-ahead (two or three where the grammar
+asks: a keyword argument's `=`, a walrus, `not in`, `is not`), where
+Python's PEG parser tries alternatives in order: an assignment's targets
+are read as expressions and given their context once the `=` (or `:`, or
+an augmented operator) after them says what they are; a `for`'s targets
+are primaries read up to the `in`; a statement starting with the soft
+keyword `match` is a match statement when its first line ends with `:`;
+`with (` reads the parenthesized items first and, if they are none, reads
+the parentheses again as an expression — the one place it goes back, at
+most once over each token. `literal.rs` gives literals their values
+(escapes, `\N{…}` by name, line continuations; ints of any size, floats).
+
+**Which error, and where.** Python's parser takes tokens from its tokenizer
+as it needs them, so the error it reports is the first it meets, and then
+it may change its mind; the engine reports the same error on the same line:
+
+- a token the tokenizer refuses is the error if the parser reaches it; if
+  the parser fails before, its error stands — unless the tokenizer, reading
+  the rest of the text, raises an error itself (a bad character, an
+  unterminated string, an unmatched bracket, a malformed number: not one
+  inside an f-string, and not one it leaves to its parser, as a bad
+  unindent, a mix of tabs and spaces, too many indentation levels, a
+  backslash before something other than a line break, the end of the text
+  in brackets), which takes its place; and a bracket still open there, if
+  it was opened on a line before the one the parser stopped on, is
+  reported as never closed. Python's generic errors at an INDENT or a
+  DEDENT ("unexpected indent", "unexpected unindent") are never replaced;
+  its own errors there are ("expected an indented block", "expected
+  'except' or 'finally' block"). (A string's escapes are the parser's: a
+  bad `\N{…}` further on changes nothing.)
+- Where its first pass fails, Python reads again with the rules that word
+  its errors (the grammar's `invalid_` rules), which may put the error
+  elsewhere: two expressions side by side inside brackets ("Perhaps you
+  forgot a comma?", at the first; the second read as Python's
+  `expression_without_invalid` reads it — its failing trailers dropped,
+  and, where none of it reads, an error inside the brackets it starts with
+  is the error), `print x`, `a if b` without `else`, a target that is none
+  (at the target, before what follows its `=` is read; an augmented or
+  annotated assignment's once what follows begins to read), a mistaken `=`
+  or `:=` in an expression, a dict's key after its first item not followed
+  by `:` (at the key, whatever follows it) or a key's `:` with no value, an
+  f-string's field with no expression or one that reads only in part (after
+  its first atom), bytes mixed with str (at the token after the strings),
+  an unterminated f-string (on the line it starts). The engine makes those
+  checks where its one pass fails, reading ahead as Python's second pass
+  reads (`Parser::read_ahead`: the reads go back, and their furthest token
+  counts as reached).
+- The end of the text is on its last line; `$`, `?` and a backquote are
+  tokens the parser refuses, not the tokenizer's errors.
+
+The line is Python's for every error of the curated snippets, every file
+of the sweep below and every one of 3,000 seeded mutations (the suite);
+over 160,000 more seeded mutations of this repository's Python (141,627 of
+them errors) 1 line differs, over 160,000 seeded token soups (156,294
+errors) 66 (0.04 %): places where Python's second pass, its memoized reads
+included, takes a turn the engine's checks at the failure point do not
+follow.
+
+**Limits** (`limits.rs`): Python's, so that what it refuses for nesting is
+refused here. Its tokenizer's: 200 open brackets, 99 indentation levels,
+149 nested f-strings, a format specifier inside 2 others — the same. Its
+parser's stack of 6000 rule calls (a MemoryError): the parser keeps an
+estimate of that depth, each construct adding what it costs Python's
+parser there; the estimate is exact for the constructs that nest alone
+(unary operators: 5,969 deep; `lambda` and `**`: 2,984; conditional
+expressions: 5,969; `elif`: 5,965 …) and, where constructs combine, never
+under Python's depth. That depth depends on the way Python first reads a
+construct, and keeps (its parser memoizes): a bracket a statement or an
+assignment's value starts with is first read as a possible assignment
+target, a shorter way; an f-string too, but one first read inside an
+expression costs 18 rule calls more; a line that starts with `match` and
+something a subject can start with is first read as a match statement,
+deeper. The estimate follows those ways. Measured with a chain of `not`s
+at the innermost point of 1,600 random combinations of 1 to 4 of 53
+nesting constructs in 91 statement contexts (1,582 that Python reads), it
+never lets the engine read more than Python: as much for 4 %, within 2
+levels for 62 %, within 8 for 92 %, at most 36 levels short (of 6,000);
+nor in 1,600 more in the 25 contexts where it has no margin; over 300
+random repeated nestings (the deepest repeat count read), 212 give the
+same count, 88 a smaller one, none a larger. The tree's depth: 9,997 nodes
+(Python's C recursion limit less the frames `ast.parse` runs in: a
+RecursionError). `pyparse_cases.NESTINGS` pins 41 constructs at Python's
+depth, `STRICTER` the 4 where the engine stops earlier (a lambda default
+whose default is a lambda: 542 deep where Python reads 596; 98 blocks and
+lambda defaults: 648, 660; parentheses in 100 nested f-strings: 95, 96;
+comprehensions: 199, 200), and `INNERMOST` 47 contexts of the chain of
+`not`s (among them each where an earlier estimate read deeper than
+Python). The parser's recursion follows brackets, blocks, f-strings and
+lambda defaults — the chains without brackets are loops — so the deepest
+input takes a bounded stack: 339 KiB natively (746 nested
+lambda defaults, the deepest; release build; `pyparse_bench stack`) — the
+crate's test reads every construct at its deepest, parsed and written with
+spans, on a 1 MiB thread — and between 64 and 128 KiB in WebAssembly, whose
+stack is 8 MiB (a build with a 64 KiB stack traps on some of the 45 deepest
+inputs, one with 128 KiB on none; the parity test below runs them all in the
+shipped module). Linear time: the tokens are read once (the parenthesized items
+of a `with` at most twice); the error pass's reads ahead happen where the
+read fails; a `\N{…}` name is found by binary search. Every input gives a
+tree or an error, never a panic.
+
+**Unicode 15.1.** Python 3.13 reads identifiers (XID_Start, XID_Continue,
+NFKC) and `\N{…}` names with Unicode 15.1; the engine's tables are 13.0
+(Python 3.10's, for its regular expressions). `pyparse/unidata.rs`, written
+by `scripts/make_pyparse_tables.py` from Python 3.13's unicodedata
+(`python3.13 scripts/make_pyparse_tables.py --check` compares), holds the
+rest: the identifier classes, NFKC for what Unicode assigned since 13.0
+(the 13.0 tables answer for the rest, by Unicode's stability policy), and
+every character name and alias `unicodedata.lookup` reads, front-coded in
+name order with a word dictionary, plus the names made by rule (Hangul
+syllables, CJK unified and compatibility ideographs, Tangut, Khitan, Nushu)
+as ranges. `test_pyparse_native_c` holds them to Python 3.13: the tables
+current (the script's `--check`), every character an identifier may start
+or go on with in a name (the same trees, NFKC included) and 3,000 seeded
+ones it may not hold (refused by both), every one of the 138,552 names
+`unicodedata.name` gives and every alias in a `\N{…}` escape (the same
+strings). Every non-ASCII code point was also compared alone, starting a
+name and inside one: no difference.
+
+**Tests.** `cargo test --release` (`pyparse/tests.rs`): 23 constructs at
+Python's deepest and refused one deeper, the tokenizer's and the parser's
+limits with their errors, all of them on a 1 MiB stack; long inputs
+(100,000 statements, 200,000-item lists and calls, 50,000 f-string fields)
+in linear time; which error, on which line, where there are several;
+values (ints in hexadecimal past 16,384 bits, the 4,300-digit limit,
+float.hex, lone surrogates, bytes, `u''`, barry_as_FLUFL); spans and the
+accessors; interned NFKC names; 8,000 seeded soups of pieces and arbitrary
+code points (controls, NUL, lone surrogates, values past U+10FFFF) that
+must not panic and whose answers are JSON. `test_pyparse_native` and `_b`
+compare `py_parse` with `ast.parse` run by a `python3.13` subprocess
+(`pyparse_oracle.py`, writing ast's trees as the engine writes them,
+without recursion) as JSON text, error lines included: 998 curated
+snippets (every construct, 256 errors, 125 errors whose line is the point),
+400 seeded generated programs, this repository's Python, the spans
+(without `start` and `end` the JSON is the same; `lineno` is the line of
+`start`), 12,000 seeded soups and 3,000 seeded mutations of this
+repository's Python (the same answers; the same lines for every mutation
+and for all but 1 in 200 soups at most), every nesting at Python's deepest
+and one deeper, the four stricter ones, the 47 contexts of a chain of `not`s
+(never longer than Python reads, at most 20 shorter), deep trees and long
+inputs;
+`test_pyparse_native_c` the Unicode 15.1 data (above). They skip without
+Python 3.13 (`LAZARET_PYTHON313` may name one): CI's runners set up 3.10
+only, so they skip there and run on the development machine.
+`test_wasm_parity_pyparse` holds the WebAssembly build to the library,
+byte for byte, on the curated snippets, the repository's Python, programs,
+soups, and every construct at its deepest and one deeper, with and without
+spans (no trap).
+
+On real files (the sweep script is outside the suite): every .py file of
+Python 3.10 to 3.13's standard libraries, `/usr/lib/python3/dist-packages`
+and a pip `dist-packages` of 1.6 GB on the development machine — 12,297
+files, 190.7 MB, each decoded as Python decodes a source file: identical
+trees for 12,296, the same error on the same line for one (an invalid
+character in mediapipe's tests), no difference. And every .py file of the
+benchmarks on the development machine — the corpus of malicious and benign
+packages, the SAST suites, the advisory and rule repositories: 24,021
+files, 196.3 MB; 18 of them not UTF-8 nor declaring their coding, read
+with their bytes as lone surrogates — identical trees for 23,993, the same
+error on the same line for 28 (the 18, which Python cannot encode either;
+10 syntax errors), no difference.
+
+**Throughput**, the release build on one thread, best of three, over the
+standard library (`/usr/lib/python3.13`: 587 files, 10.7 MB): the parse
+59.8 MB/s (the tree compacted), the parse with its JSON 35.5 MB/s; over
+the 12,297 files above (190.7 MB) 53.8 and 30.9 MB/s (`cargo run --release
+--example pyparse_bench -- throughput DIR…`; `… stack KIB CASES.json` runs
+inputs on a stack of that size). Through the Python binding (ctypes, the
+text in and the JSON out) the 190.7 MB take 7.1 s, 27 MB/s. The parser and
+its Unicode data add 0.58 MB to the WebAssembly module (2.45 MB → 3.03 MB).
