@@ -98,8 +98,9 @@ credentials).
   supply-chain tests — the install-script and import-time tests and
   everything they read — `scan_file` in dependency mode, findings included,
   its rules part in project mode (`scan_rules`) and the cross-file follower
-  (`cross_file`), with Python `re` semantics (its own port of sre) and its
-  patterns and finding texts in a rule pack
+  (`cross_file`), with Python `re` semantics (linre, a linear-time engine
+  with `re`'s answers, for every pattern it accepts, and its own port of
+  sre for the rest) and its patterns and finding texts in a rule pack
   (`rust/crates/lazaret-engine/rules/lazaret-rules.json`, the source of the
   rules). It was ported from core function for function and held to it by
   differential tests on every field (zero differences) until the Rust-first

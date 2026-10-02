@@ -18,8 +18,10 @@
 //! (where a search need not look).
 //!
 //! It is written for the engine's patterns (the rule pack's), as their
-//! linear-time replacement for `pyre`; the engine does not use it yet
-//! (`linre.probe` and `linre.check` call it; docs/RUST_ENGINE.md §13).
+//! linear-time replacement for `pyre`: a pyre::Regex runs its searches here
+//! when linre accepts the pattern (`linre.probe` and `linre.check` call it
+//! directly; docs/RUST_ENGINE.md §14). A search's work is counted against
+//! the engine call's budget (crate::budget), as pyre's is.
 
 pub mod backtrack;
 pub mod charset;
@@ -41,6 +43,17 @@ pub use syntax::{
     FLAG_ASCII as ASCII, FLAG_DOTALL as DOTALL, FLAG_IGNORECASE as IGNORECASE, FLAG_MULTILINE as MULTILINE,
     FLAG_UNICODE as UNICODE, FLAG_VERBOSE as VERBOSE,
 };
+
+thread_local! {
+    /// What the search in progress read, where a path that read less than
+    /// the span it covered says so (Regex::find charges it).
+    static READ: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+/// The search in progress read `n` characters (see READ).
+fn read(n: usize) {
+    READ.with(|r| r.set(Some(n)));
+}
 
 /// Why a pattern did not compile: Python rejects it (`refused` false), or
 /// linre does not run it (`refused` true, with the reason).
@@ -296,6 +309,29 @@ impl Regex {
     /// Pike VM answers whatever the DFAs give up on, and a match whose start
     /// lies past the window's end.
     fn find(&self, s: &[u32], start: usize, end: usize, mode: Mode, must_advance: bool) -> Option<(Vec<isize>, usize)> {
+        READ.with(|r| r.set(None));
+        let found = self.find_unbudgeted(s, start, end, mode, must_advance);
+        // The work budget of the engine call in progress (crate::budget): a
+        // sixteenth of the characters the automata read. That is the span
+        // the search covered, but where less was read: nothing for a search
+        // the text gate or a scan for its strings answered (pyre charges
+        // its scans nothing either), what the tries read for one whose
+        // tries all failed, how far the anchored DFA read for a match or
+        // fullmatch that failed. A search past the budget has no answer.
+        let covered = match READ.with(|r| r.take()) {
+            Some(read) => read,
+            None => match &found {
+                Some((_, e)) => e.saturating_sub(start),
+                None => end.saturating_sub(start),
+            },
+        };
+        if covered >= 16 && !crate::budget::spend(covered as u64 / 16) {
+            return None;
+        }
+        found
+    }
+
+    fn find_unbudgeted(&self, s: &[u32], start: usize, end: usize, mode: Mode, must_advance: bool) -> Option<(Vec<isize>, usize)> {
         if mode == Mode::Search && start > end {
             return None;
         }
@@ -303,6 +339,10 @@ impl Regex {
         let p = &inner.progs;
         if let Some(sm) = &inner.simple {
             if let Some(span) = sm.span(s, start, end, mode != Mode::Search, mode == Mode::Full, must_advance) {
+                if span.is_none() {
+                    // (scans for the set's characters, no automaton)
+                    read(0);
+                }
                 return span.map(|(a, b)| {
                     let mut slots = vec![-1isize; p.slots];
                     slots[p.slots - 1] = a as isize;
@@ -347,7 +387,10 @@ impl Regex {
         };
         let mut reached = start;
         match dfa::forward(&inner.shape, p, prog, cache, s, start, end, true, false, self.skip(), &mut c.pike.oracle, &mut reached)? {
-            None => Ok(None),
+            None => {
+                read(reached.saturating_sub(start) + 1);
+                Ok(None)
+            }
             Some(f) => self.with_groups(prog, s, start, f.end, end, c),
         }
     }
@@ -360,12 +403,14 @@ impl Regex {
         let shape = &inner.shape;
         if let Some(n) = &inner.need {
             if !n.occurs(s, start, end) {
+                read(0);
                 return Ok(None);
             }
         }
         if let Some(l) = &inner.lead {
             // (the text gate may say at once that none of them is in the text)
             if l.gated_out(s, start, end) {
+                read(0);
                 return Ok(None);
             }
         }
@@ -386,7 +431,10 @@ impl Regex {
             let mut at = start;
             loop {
                 let q = match k.next(s, at, end) {
-                    None => return Ok(None),
+                    None => {
+                        read(spent);
+                        return Ok(None);
+                    }
                     Some(q) => q,
                 };
                 let budget = (8 * (q - start) + 4 * m + 256).saturating_sub(spent);
@@ -614,6 +662,10 @@ impl<'s> Match<'s> {
     }
     pub fn string(&self) -> &'s [u32] {
         self.s
+    }
+    /// (marks, pos, endpos, lastindex): the match as pyre keeps one.
+    pub fn into_parts(self) -> (Vec<isize>, usize, usize, isize) {
+        (self.marks, self.pos, self.endpos, self.lastindex)
     }
 }
 

@@ -95,6 +95,12 @@ pub struct Regex {
     groupindex: Vec<(Vec<u32>, usize)>,
     /// set for a pattern the matcher is not needed for (see Simple)
     simple: Option<Simple>,
+    /// The same pattern compiled by linre (crate::linre), which every search
+    /// runs on when it accepts the pattern: re's answers, in time linear in
+    /// the text, never backtracking. None: sre's backtracking matcher here
+    /// (a pattern linre refuses — a backreference, a lookahead of unbounded
+    /// width … — one answered without a matcher, or new_backtracking's).
+    lin: Option<crate::linre::Regex>,
 }
 
 /// A pattern simple enough to answer without the matcher: one character of
@@ -182,8 +188,19 @@ pub fn flags_from_letters(letters: &str) -> u32 {
 }
 
 impl Regex {
-    /// re.compile(pattern, flags) for a str pattern.
+    /// re.compile(pattern, flags) for a str pattern: its searches run on
+    /// linre where linre accepts the pattern (see `lin`), else here.
     pub fn new(pattern: &[u32], flags: u32) -> Result<Regex, Error> {
+        let mut rx = Regex::new_backtracking(pattern, flags)?;
+        if rx.simple.is_none() {
+            rx.lin = crate::linre::Regex::new(pattern, flags).ok();
+        }
+        Ok(rx)
+    }
+
+    /// re.compile(pattern, flags) whose searches all run on sre's
+    /// backtracking matcher (pyre.probe: pyre held to Python's re).
+    pub fn new_backtracking(pattern: &[u32], flags: u32) -> Result<Regex, Error> {
         let (p, state) = parser::parse_pattern(pattern, flags).map_err(|e| Error(format!("{} at {}", e.msg, e.pos)))?;
         let code = compiler::code(&p, &state, flags).map_err(|e| Error(e.0))?;
         let groups = state.groups() - 1;
@@ -194,7 +211,20 @@ impl Regex {
             groups,
             groupindex: state.groupdict.clone(),
             simple: simple_of(&p, state.flags | flags, groups),
+            lin: None,
         })
+    }
+
+    /// Do this pattern's searches run in linear time (on linre, or without a
+    /// matcher)?
+    pub fn is_linear(&self) -> bool {
+        self.lin.is_some() || self.simple.is_some()
+    }
+
+    /// linre's match as this pattern's.
+    fn from_lin<'s>(&'s self, s: &'s [u32], m: crate::linre::Match<'s>) -> Match<'s> {
+        let (marks, pos, endpos, lastindex) = m.into_parts();
+        Match { s, re: self, marks, pos, endpos, lastindex }
     }
 
     /// re.compile of a Rust string's code points.
@@ -254,6 +284,9 @@ impl Regex {
     }
 
     pub fn search_at<'s>(&'s self, s: &'s [u32], pos: isize, endpos: isize) -> Option<Match<'s>> {
+        if let Some(l) = &self.lin {
+            return self.timed(|| l.search_at(s, pos, endpos)).map(|m| self.from_lin(s, m));
+        }
         if let Some(simple) = &self.simple {
             let (start, end) = Self::clamp(s, pos, endpos);
             return self.timed(|| match simple {
@@ -319,6 +352,9 @@ impl Regex {
 
     /// pattern.match(s, pos, endpos)
     pub fn match_at<'s>(&'s self, s: &'s [u32], pos: isize, endpos: isize) -> Option<Match<'s>> {
+        if let Some(l) = &self.lin {
+            return self.timed(|| l.match_at(s, pos, endpos)).map(|m| self.from_lin(s, m));
+        }
         if let Some(simple) = &self.simple {
             let (start, end) = Self::clamp(s, pos, endpos);
             return self.timed(|| match simple {
@@ -355,6 +391,9 @@ impl Regex {
 
     /// pattern.fullmatch(s, pos, endpos)
     pub fn fullmatch_at<'s>(&'s self, s: &'s [u32], pos: isize, endpos: isize) -> Option<Match<'s>> {
+        if let Some(l) = &self.lin {
+            return self.timed(|| l.fullmatch_at(s, pos, endpos)).map(|m| self.from_lin(s, m));
+        }
         let mut st = State::new(s, self.groups, pos, endpos);
         st.ptr = st.start;
         st.match_all = true;
@@ -370,7 +409,11 @@ impl Regex {
 
     /// pattern.finditer(s, pos, endpos)
     pub fn finditer_at<'s>(&'s self, s: &'s [u32], pos: isize, endpos: isize) -> FindIter<'s> {
-        FindIter { re: self, st: State::new(s, self.groups, pos, endpos), done: false }
+        let walk = match &self.lin {
+            Some(l) => Walk::Lin(l.finditer_at(s, pos, endpos)),
+            None => Walk::Back { st: Box::new(State::new(s, self.groups, pos, endpos)), done: false },
+        };
+        FindIter { re: self, s, walk }
     }
 
     pub fn finditer<'s>(&'s self, s: &'s [u32]) -> FindIter<'s> {
@@ -400,6 +443,9 @@ impl Regex {
 
     /// pattern.sub(repl, s, count) with a function.
     pub fn sub_fn<'s>(&'s self, s: &'s [u32], count: usize, mut f: impl FnMut(&Match<'s>) -> Vec<u32>) -> Vec<u32> {
+        if let Some(l) = &self.lin {
+            return l.sub_fn(s, count, |m| f(&self.from_lin(s, m.clone())));
+        }
         let mut out: Vec<u32> = Vec::with_capacity(s.len());
         let mut i = 0usize;
         let mut n = 0usize;
@@ -458,6 +504,9 @@ impl Regex {
     /// pattern.split(s, maxsplit): the pieces between matches; groups, when
     /// the pattern has some, in between (None: a group that did not take part).
     pub fn split<'s>(&'s self, s: &'s [u32], maxsplit: usize) -> Vec<Option<&'s [u32]>> {
+        if let Some(l) = &self.lin {
+            return l.split(s, maxsplit);
+        }
         let mut out = Vec::new();
         let mut st = State::new(s, self.groups, 0, s.len() as isize);
         let mut last = st.start;
@@ -659,28 +708,43 @@ impl<'s> Match<'s> {
 /// pattern.finditer: the scanner's search loop.
 pub struct FindIter<'s> {
     re: &'s Regex,
-    st: State<'s>,
-    done: bool,
+    s: &'s [u32],
+    walk: Walk<'s>,
+}
+
+/// How a finditer searches: on linre, or with sre's matcher.
+enum Walk<'s> {
+    Lin(crate::linre::FindIter<'s>),
+    Back { st: Box<State<'s>>, done: bool },
 }
 
 impl<'s> Iterator for FindIter<'s> {
     type Item = Match<'s>;
     fn next(&mut self) -> Option<Match<'s>> {
-        if self.done {
-            return None;
-        }
-        self.st.reset();
-        self.st.ptr = self.st.start;
-        match self.re.timed(|| matcher::sre_search(&mut self.st, &self.re.prog)) {
-            Ok(true) => {
-                let m = self.re.new_match(&self.st);
-                self.st.must_advance = self.st.ptr == self.st.start;
-                self.st.start = self.st.ptr;
-                Some(m)
+        let re = self.re;
+        match &mut self.walk {
+            Walk::Lin(it) => {
+                let s = self.s;
+                re.timed(|| it.next()).map(|m| re.from_lin(s, m))
             }
-            _ => {
-                self.done = true;
-                None
+            Walk::Back { st, done } => {
+                if *done {
+                    return None;
+                }
+                st.reset();
+                st.ptr = st.start;
+                match re.timed(|| matcher::sre_search(st, &re.prog)) {
+                    Ok(true) => {
+                        let m = re.new_match(st);
+                        st.must_advance = st.ptr == st.start;
+                        st.start = st.ptr;
+                        Some(m)
+                    }
+                    _ => {
+                        *done = true;
+                        None
+                    }
+                }
             }
         }
     }

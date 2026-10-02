@@ -15,7 +15,7 @@ same engine compiled to WebAssembly (`native/lazaret.wasm`). The JavaScript
 parser (`js_parse`, §12: jsparse.py's trees, node for node), the Python
 parser (`py_parse`, §13: Python 3.13's `ast` trees, node for node) and a
 linear-time regex engine (linre, §14) are in place for the phases that
-follow.
+follow; every pattern linre accepts runs on it.
 
 ## 1. What it is
 
@@ -152,8 +152,8 @@ rust/
     src/json.rs, pystr.rs    JSON; Python str semantics on code points ([u32])
     src/unicode.rs           Python 3.10 / Unicode 13.0 predicates (generated/unicode13.rs)
     src/pyre/                CPython's sre: parser, compiler, matcher (see §6)
-    src/linre/               a linear-time regex engine with re's answers, not yet used by the
-                             engine's patterns (§14): parser, sets, programs, lazy DFAs,
+    src/linre/               a linear-time regex engine with re's answers, which every pattern it
+                             accepts runs on (§14): parser, sets, programs, lazy DFAs,
                              backtracker, Pike VM, prefilters
     src/hooks.rs             shlex, _hook_tokens, follow_hook, node_candidates, node -e, #!
     src/signs.rs             install_script_risk, import_time_risk(+severity), decoded_view
@@ -535,8 +535,17 @@ It still loses to sre on patterns that could start almost anywhere
 
 ## 7. Performance
 
-Measured before the Rust-first refactor, against the Python engine it
-retired. Single thread, per call, on the hooks corpus (29,795 small cases), best of 3:
+On linre (§14), the engine's five main per-file calls on the 1,500-file
+sample of installed packages (22.3 MB; `scan_file` in dependency mode, the
+import-time test, spawned scripts, the data flow, the decoded view; one
+thread, each call over every file in turn) take **6.9 s, against 10.5 s on
+pyre**: the import-time test 5.08 → 3.05 s, the data flow 1.77 → 1.13 s,
+the decoded view 1.20 → 0.75 s, spawned scripts 1.16 → 0.69 s, `scan_file`
+1.27 → 1.24 s (its rules were gated and hand-matched already).
+
+What follows was measured before the Rust-first refactor, against the
+Python engine it retired. Single thread, per call, on the hooks corpus
+(29,795 small cases), best of 3:
 the native engine is 3.8× the Python engine over all measured calls (shlex
 20×, hook tokens 19×, follow_hook 8×, install_script_risk 3.4×,
 import_time_risk 3×, self-read 8×).
@@ -599,10 +608,10 @@ On two cores, before and after, with the same reports:
 
 The 945 registry scans give the same verdicts, reasons and findings for
 every package. What is left in project mode is core's taint and flow
-engines (§10, item 1); in litellm's registry scan, the import-time test
+engines (phase 3 of §8); in litellm's registry scan, the import-time test
 still leads. A backtracking engine that must give sre's exact answers can't
-skip much more inside one search: the gains were, and are, in not
-searching.
+skip much more inside one search: the gains were in not searching, and
+then (above) in not backtracking.
 
 **The npm package (WebAssembly).** The same calls take 1.4–1.9× the native
 library's time under Node 22's WebAssembly (one thread; compiling and
@@ -653,7 +662,7 @@ benchmark:
 | 1 | The Rust engine is the reference: the Python engine, `--engine` and the pure wheel retired; the recorded outputs (§5); the pack as the source of the rules; every wheel a platform wheel, the sdist compiled by pip where none fits; an unanswered file SC-TRUNCATED in both packages | Done |
 | 2 | Decoding, lexers and bytes in the engine: source decoding (BOMs, UTF-16, coding cookies), one token substrate for the detectors | Not started |
 | 3 | Parsers, scopes and flow: the detectors on bindings over the JavaScript and Python trees (§12, §13), constant folding of strings, the cross-file follower on them, project mode's passes (taint, SQL, function metrics) in the engine; the npm package's twins of them retired | The parsers done |
-| 4 | Linear-time matching: the pack's patterns on linre (§14), pyre and the shlex port retired, current Unicode | linre built, not yet used |
+| 4 | Linear-time matching: the pack's patterns on linre (§14), pyre and the shlex port retired, current Unicode | Every pattern linre accepts runs on it (616 of the pack's 657; done first, as no answer changes); the 41 others, pyre and the shlex port not started |
 | 5 | One call per file, a content cache (SHA-256), the guard's scan in a child process that fails closed, archive ambiguity checks | Not started |
 
 ## 9. Known issues
@@ -665,9 +674,10 @@ benchmark:
   bound it in the pack (a reviewed difference of the recorded outputs).
 - The budget (4e9 steps per call) discards an exhausted answer: in both
   packages the call's file is SC-TRUNCATED (CRITICAL), on hostile input only
-  (no file of the corpora or the benchmark comes near the budget). Steps are
-  charged in batches of 4,096 per search, so short searches cost nothing
-  against it; a call's `budget` argument sets another (`engine.WORK_BUDGET`
+  (no file of the corpora or the benchmark comes near the budget). pyre
+  charges its steps in batches of 4,096 per search, so short searches cost
+  nothing against it, and linre what its automata read (§14); a call's
+  `budget` argument sets another (`engine.WORK_BUDGET`
   in Python, `setWorkBudget` in npm; the tests use a small one).
   `cross_file` gives each package its own budget: a package that spends it
   gives no cross-file finding.
@@ -726,9 +736,9 @@ only.
 2. Phases 2–5 (§8): decoding and the token substrate; the detectors on
    bindings over the parsers' trees, project mode's passes in the engine
    and the npm engine's twins of them (`js/src/scanner/`) retired; the
-   pack's patterns on linre (§14: linre where it accepts the pattern, the
-   41 it refuses rewritten), pyre and the shlex port retired; one call per
-   file, a content cache, the guard's scan isolated.
+   pack's 41 patterns linre refuses rewritten (§14) so that pyre and the
+   shlex port retire; one call per file, a content cache, the guard's scan
+   isolated.
 3. The rest of the npm engine's twins: the manifest, workflow and settings
    checks (`supplychain.js`, `ghworkflow.js`, `autorun.js`), the
    config-file credentials; the dashboard keeps its own script until it can
@@ -1163,9 +1173,25 @@ its Unicode data add 0.58 MB to the WebAssembly module (2.45 MB → 3.03 MB).
 whatever the text holds. It is written from `re`'s documented and observed
 behaviour, not translated from CPython (whose sources were read for the
 rules, as for any reimplementation), so it needs no line in `rust/NOTICE`.
-**The engine does not use it yet**: `p.re(…)` returns pyre's patterns, and
-what moves to linre is decided after review (§10, item 9). Two calls expose
-it: `linre.probe` (pyre.probe's arguments and answer — search, match,
+**The engine runs every pattern linre accepts on it** (since the Rust-first
+refactor's phase 2): a `pyre::Regex` compiles its pattern with linre too,
+and when linre accepts it, search, match, fullmatch, finditer, sub and
+split run there and come back as pyre's matches; the 41 pack patterns it
+refuses (below), and patterns pyre answers without a matcher (one
+character of a set, or a run of them), stay on pyre. A linre search
+charges the call's work budget a sixteenth of the characters its automata
+read (the DFAs, the Pike VM, the backtracker for groups), as pyre charges a
+scan: a search the text gate answers, or a scan for the strings the
+pattern needs, costs nothing (pyre's cost nothing either), a match that
+fails what the DFA read before it died. So the budget still bounds a call,
+and no file needs more of it on linre than on pyre (a 9 MB `typescript.js`
+needs less than 1e8 of the 4e9 steps on both; charging every search the
+whole span it covered, as the first wiring did, spent the budget on the
+largest files — `typescript.js`, `pnpm.cjs`, the benchmark's 11 MB
+obfuscated bundles — in seconds of work). `pyre.probe` runs a pattern as
+the engine runs it (`"backtracking": true`: on sre's matcher alone). Two
+calls expose linre itself: `linre.probe` (pyre.probe's arguments and
+answer — search, match,
 fullmatch, finditer with every group, sub with `<…>` and split, at `pos`
 and `endpos`, with `gate` — or `{"error", "refused"}`) and `linre.check`
 (`{"names": […]}`, or nothing for the whole pack: each pattern accepted, with

@@ -111,7 +111,8 @@ class LinreHandwrittenTests(unittest.TestCase):
             flags = rnd.choice(["i", "ai", ""])
             with self.subTest(pattern=src, flags=flags):
                 args = {"pattern": src, "flags": flags, "texts": texts}
-                self.assertEqual(_native.call("linre.probe", args), _native.call("pyre.probe", args))
+                self.assertEqual(_native.call("linre.probe", args),
+                                 _native.call("pyre.probe", dict(args, backtracking=True)))
 
     def test_longer_texts(self):
         # matches far into a text, across the literal scans' and the DFAs'

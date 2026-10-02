@@ -66,6 +66,14 @@ engine's parsers (`docs/RUST_ENGINE.md` §8). Whether it ships as 0.1.8 or
   (`test_rust_parity_*`, but the regex engine's) are retired.
 - CI: every job that runs Python tests builds the library first and proves
   it loads; `python-unit` runs the whole suite on it on the three systems.
+- **The engine's patterns run on linre** (below) wherever it accepts them:
+  616 of the pack's 657, with `re`'s answers, never backtracking; the 41 it
+  refuses stay on the port of CPython's matcher. Nothing it finds changes,
+  and the five main per-file calls take 6.9 s instead of 10.5 s on 1,500
+  installed files (the import-time test 3.1 s instead of 5.1 s). A
+  hostile text can no longer make those patterns backtrack without end.
+  linre charges the work budget what its automata read, as pyre charges
+  its scans: no file needs more of the budget than it did.
 
 ### Added
 
@@ -75,11 +83,19 @@ engine's parsers (`docs/RUST_ENGINE.md` §8). Whether it ships as 0.1.8 or
   rebuilt on (`docs/RUST_ENGINE.md` §12, §13).
 - linre, a linear-time regular expression engine with `re`'s answers on 616
   of the pack's 657 patterns (lazy DFAs, a bounded backtracker, a Pike VM,
-  prefilters), not yet used by the engine's patterns (§14).
+  prefilters; §14).
 - `scripts/bench.py`, the benchmark harness: registry scans of a labelled
   set of release files (resumable, a deadline each), and the comparison of
   two runs — every release whose verdict or strong findings moved, or, for
   a holdout set, the counts alone.
+
+### Fixed
+
+- A file's decoded view that the work budget cut short was remembered for
+  the file's next call (the install-script test, the import-time test and
+  the string-array test read it in turn), which could then answer from the
+  unfinished reading instead of failing closed. Only a finished reading is
+  remembered.
 
 ## [0.1.8] — 2026-10-01
 

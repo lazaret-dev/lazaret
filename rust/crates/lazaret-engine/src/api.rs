@@ -4,8 +4,8 @@
 //! that read one, the text (a Python str, passed apart from the arguments so
 //! that a large file is not escaped into JSON). It answers with a JSON value,
 //! or an error: an unknown call or bad arguments (a bug in the binding), or
-//! the work budget spent (the binding then answers with the Python reference
-//! engine: see crate::budget).
+//! the work budget spent (the call has no answer, and the bindings make the
+//! file SC-TRUNCATED: see crate::budget).
 
 use crate::json::Value;
 use crate::pack::Pack;
@@ -64,7 +64,7 @@ pub const CALLS: &[&str] = &[
     "js_parse", "js_parse_file",
     // the Python parser (Python 3.13's ast trees)
     "py_parse",
-    // linre, the linear-time regex engine (not yet what the engine's patterns run on)
+    // linre, the linear-time regex engine the patterns run on
     "linre.probe", "linre.check",
 ];
 
@@ -716,11 +716,15 @@ fn opt_match(m: Option<pyre::Match>) -> Value {
 /// pyre.probe: every entry point of a pattern on each text of `texts` (or
 /// on the text), for the differential tests against Python's `re`:
 /// search / match / fullmatch at pos..endpos, finditer, findall, sub with a
-/// function and with a template, split.
+/// function and with a template, split. The pattern runs as the engine runs
+/// it (on linre where linre accepts it); `"backtracking": true`, on sre's
+/// backtracking matcher alone.
 fn probe(args: &Value, text: &[u32]) -> Result<Value, CallError> {
     let pattern = arg_str(args, "pattern")?;
     let flags = opt_str(args, "flags").map(|f| pyre::flags_from_letters(&crate::pystr::to_string(&f))).unwrap_or(0);
-    let rx = match Regex::new(&pattern, flags) {
+    let backtracking = matches!(args.get("backtracking"), Some(Value::Bool(true)));
+    let compiled = if backtracking { Regex::new_backtracking(&pattern, flags) } else { Regex::new(&pattern, flags) };
+    let rx = match compiled {
         Ok(rx) => rx,
         Err(e) => return Ok(Value::obj(vec![("error", Value::str(&e.0))])),
     };

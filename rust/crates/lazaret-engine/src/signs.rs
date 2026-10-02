@@ -2342,7 +2342,11 @@ fn dv_reading(p: &Pack, text: &[u32]) -> Reading {
         return r;
     }
     let r = decoded_view_of(p, text);
-    DV_MEMO.with(|m| *m.borrow_mut() = Some((text.to_vec(), r.clone())));
+    // (a reading the work budget cut short is no answer: the call fails,
+    // and a later call must not be given it)
+    if !crate::budget::exhausted() {
+        DV_MEMO.with(|m| *m.borrow_mut() = Some((text.to_vec(), r.clone())));
+    }
     r
 }
 

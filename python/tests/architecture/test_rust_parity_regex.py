@@ -1,4 +1,6 @@
-"""The Rust engine's `re` (crates/lazaret-engine/src/pyre) against Python's.
+"""The Rust engine's `re` (crates/lazaret-engine/src/pyre) against Python's:
+each pattern as the engine runs it (on linre, src/linre, where linre accepts
+it) and on pyre's backtracking matcher alone (pyre.probe's "backtracking").
 
 Every pattern of the rule pack — every compiled pattern of
 lazaret.scanner.core, with its flags — is compiled by both, and each entry
@@ -91,13 +93,16 @@ def compare(testcase, src, flags, texts, gate=False, **kw):
     args.update({k: v for k, v in kw.items() if v is not None})
     if gate:
         args["gate"] = True
-    got = _native.call("pyre.probe", args)
-    if got != want:
-        testcase.assertNotIn("error", got, f"{src!r}: {got.get('error')}")
-        for t, a, b in zip(texts, want["results"], got["results"]):
-            for key in a:
-                testcase.assertEqual(a[key], b.get(key), f"pattern {src!r} flags {flags!r} {key} on {t!r} {kw}")
-        testcase.assertEqual(want, got)
+    # as the engine runs the pattern (on linre where linre accepts it), and on sre's matcher alone
+    for backtracking in (False, True):
+        got = _native.call("pyre.probe", dict(args, backtracking=True) if backtracking else args)
+        if got != want:
+            testcase.assertNotIn("error", got, f"{src!r}: {got.get('error')}")
+            for t, a, b in zip(texts, want["results"], got["results"]):
+                for key in a:
+                    testcase.assertEqual(a[key], b.get(key), f"pattern {src!r} flags {flags!r} {key} on {t!r} {kw} "
+                                                             f"(backtracking: {backtracking})")
+            testcase.assertEqual(want, got)
     return len(texts)
 
 

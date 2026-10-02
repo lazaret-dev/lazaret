@@ -30,9 +30,12 @@ SPACES = [(name, lambda n: " " * n) for name in ("_DD_PARAM_RE", "_JSON_COLON_RE
 
 def seconds(engine, src, flags, text, runs=3):
     best = float("inf")
+    args = {"pattern": src, "flags": flags, "texts": [text]}
+    if engine == "pyre":
+        args["backtracking"] = True          # (sre's matcher: the engine runs these patterns on linre)
     for _ in range(runs):
         start = time.perf_counter()
-        got = _native.call(engine + ".probe", {"pattern": src, "flags": flags, "texts": [text]})
+        got = _native.call(engine + ".probe", args)
         best = min(best, time.perf_counter() - start)
     assert "error" not in got, got
     return best

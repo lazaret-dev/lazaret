@@ -513,3 +513,27 @@ fn long_texts_stay_linear() {
         assert!(t.elapsed().as_secs_f64() < 5.0, "{:?} took {:?}", src, t.elapsed());
     }
 }
+
+#[test]
+fn the_budget_is_charged_what_the_automata_read() {
+    let text = cps(&"a".repeat(1_000_000));
+    // a search a scan for its strings answers reads nothing with an automaton
+    let needle = Regex::compile(r"needle\d+", 0).unwrap();
+    crate::budget::reset(16);
+    for _ in 0..1000 {
+        assert!(needle.search(&text).is_none());
+    }
+    assert!(!crate::budget::exhausted());
+    // a match that fails at once reads a character or two, wherever it is tried
+    let anchored = Regex::compile(r"ab+c", 0).unwrap();
+    for k in 0..1000 {
+        assert!(anchored.match_at(&text, k, text.len() as isize).is_none());
+    }
+    assert!(!crate::budget::exhausted());
+    // a search the DFA answers by reading the whole text costs a sixteenth of it
+    let runs = Regex::compile(r"a+[^a]", 0).unwrap();
+    crate::budget::reset(1_000_000 / 16 - 1_000);
+    assert!(runs.search(&text).is_none());
+    assert!(crate::budget::exhausted());
+    crate::budget::reset(crate::budget::DEFAULT_STEPS);
+}
