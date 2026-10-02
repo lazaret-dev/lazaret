@@ -8,8 +8,8 @@
 // destination fetched at run time (a dead drop), the host name read through
 // require('os').
 // Twin of python/tests/scanner/test_exfiltration_shapes.py; on a random
-// corpus the engines are held to each other by
-// tests/architecture/test_rust_parity_signs.py (the npm package runs the
+// corpus the engine is held to its recorded outputs by
+// tests/architecture/test_snapshot_signs.py (the npm package runs the
 // native engine). The secrets are fake and built
 // here; hosts are .invalid or TEST-NET; nothing is executed.
 

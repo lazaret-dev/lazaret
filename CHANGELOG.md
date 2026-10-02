@@ -7,6 +7,80 @@ This log starts at 0.1.6; for earlier releases see the git history and tags.
 The format is based on [Keep a Changelog](https://keepachangelog.com); the
 project is pre-1.0, so the 0.x API may still change.
 
+## [Unreleased] — the Rust-first refactor
+
+The native engine becomes Lazaret's only engine. Until now it was held,
+answer for answer, to the Python engine it was ported from: every detection
+landed twice, and the engine could be no better than its twin's structure.
+The refactor retires the twin. This first phase changes no finding — the
+engine answers what it answered at the baseline (tag `rust-first-baseline`,
+whose outputs were recorded on the benchmark's files and on installed
+packages) — and the phases that follow rebuild the detectors on the
+engine's parsers (`docs/RUST_ENGINE.md` §8). Whether it ships as 0.1.8 or
+0.2.0 is decided before the release.
+
+### Changed
+
+- **One engine.** The Python package's supply-chain tests, per-file rules
+  and cross-file follower are the native engine's alone. `core.py` (18,815
+  lines → about 7,700) keeps the project walk, archives, the registry and
+  the guard, the manifest and workflow checks, project mode's passes after
+  the rules (taint, SQL, function metrics), the suppression markers and the
+  reports. `--engine` and `LAZARET_ENGINE` are gone; `--version` still names
+  the engine, and without the library the scanning commands stop with exit
+  code 2 and say what is missing.
+- **A file the engine can't finish is SC-TRUNCATED in both packages**
+  (CRITICAL, so it fails the gate): its work budget spent on a hostile input
+  ("reading it spent the engine's work budget") or an internal error ("its
+  scan failed"), in `scan_file`, the manifests and the registry's
+  import-time and use-time tests; a later step of a registry scan the
+  engine can't finish marks the release, naming the step. The Python engine
+  used to answer instead. A package that
+  spends the cross-file follower's budget, or a follower call the engine
+  refuses, gives no cross-file finding, as in the npm package.
+  `engine.WORK_BUDGET` sets the budget.
+- **Every wheel is a platform wheel.** There is no pure (py3-none-any)
+  wheel: it would install a package with no engine. The sdist carries the
+  engine's sources (`rust/`), and pip compiles them where no platform wheel
+  fits (musllinux, Windows ARM64, other systems), so Rust is needed there;
+  `pip install .` and `pip install -e .` compile it too (an editable install
+  puts the library in `src/lazaret/_native/`). The sdist and every wheel
+  carry `LICENSE-PYTHON` and `NOTICE` and declare `Apache-2.0 AND
+  Python-2.0.1 AND Unicode-3.0`. `wheels.yml` installs the sdist with pip on
+  Linux, compiling the engine, and `check_native_library.py --dist` holds
+  each wheel to the sdist's package files.
+- **The rule pack is the source of the rules**
+  (`rust/crates/lazaret-engine/rules/lazaret-rules.json`), edited by hand:
+  `make_rust_tables.py --check` holds it in its canonical form, every
+  pattern compiling with `re`, its rule set the registry's
+  `ENGINE_VERSION`, and the values core still keeps for the Python side
+  equal to it. `received_spec.json` is retired into it.
+- **The engine is held to its recorded outputs**
+  (`python/tests/architecture/test_snapshot_*.py`, `snapshots/`, a hash per
+  100 outputs): the hooks corpus' ~44,000 cases, the detectors one by one,
+  `scan_file` and `scan_rules` on the scan_file corpus and the fixtures, the
+  comment lexer, hook commands read as programs, hidden and look-alike
+  names, off-screen code and the cross-file follower. A change to what the
+  engine finds is a reviewed difference: `scripts/snapshot.py record` and
+  `diff` show every case it moves. The Python engine's parity modules
+  (`test_rust_parity_*`, but the regex engine's) are retired.
+- CI: every job that runs Python tests builds the library first and proves
+  it loads; `python-unit` runs the whole suite on it on the three systems.
+
+### Added
+
+- The engine's JavaScript parser (`js_parse`: jsparse.py's trees, node for
+  node) and Python parser (`py_parse`: Python 3.13's `ast` trees, node for
+  node, with its errors), about 60 MB/s each, for the detectors to be
+  rebuilt on (`docs/RUST_ENGINE.md` §12, §13).
+- linre, a linear-time regular expression engine with `re`'s answers on 616
+  of the pack's 657 patterns (lazy DFAs, a bounded backtracker, a Pike VM,
+  prefilters), not yet used by the engine's patterns (§14).
+- `scripts/bench.py`, the benchmark harness: registry scans of a labelled
+  set of release files (resumable, a deadline each), and the comparison of
+  two runs — every release whose verdict or strong findings moved, or, for
+  a holdout set, the counts alone.
+
 ## [0.1.8] — 2026-10-01
 
 0.1.8 reads malware by what it does. A round late in its cycle audited

@@ -3,9 +3,9 @@
 // core._cross_file_received_issues), through lib/native.js.
 // python/tests/scanner/test_cross_file_follower.py has the full cases (the
 // forms, the adversarial pass, the crafted false positives, the event
-// emitter of 0.1.8) and tests/architecture/test_rust_parity_crossfile.py
-// holds the native engine to core on them and on a generated stream. Inert
-// text: hosts are .invalid, nothing is executed.
+// emitter of 0.1.8) and tests/architecture/test_snapshot_crossfile.py
+// holds the native engine to its recorded outputs on a generated stream.
+// Inert text: hosts are .invalid, nothing is executed.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";

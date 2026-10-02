@@ -1,9 +1,9 @@
 // Install hooks followed like the Python engine: the native engine
 // (lib/native.js) answers lazaret.scanner.core's follow_hook (with
 // _hook_tokens, a shlex tokenizer), install_script_risk, import_time_risk and
-// node_candidates. Every expectation below is core's result on the same
-// text; tests/architecture/test_rust_parity_hooks.py compares the two
-// engines on a large generated corpus. Hook commands and scripts can be up to
+// node_candidates. Every expectation below is the Python package's result
+// on the same text; tests/architecture/test_snapshot_hooks.py holds the
+// engine to its recorded outputs on a large generated corpus. Hook commands and scripts can be up to
 // 16,000,000 characters: review-hooks-big-*.test.js run each function on
 // inputs of 9 million.
 // All payloads are inert text: hosts are .invalid or TEST-NET (192.0.2.x).

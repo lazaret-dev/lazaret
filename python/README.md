@@ -1,6 +1,6 @@
 # Lazaret
 
-Static security, supply-chain and quality analysis for Python, JavaScript and SQL, with **no dependencies**: Lazaret runs on the Python standard library alone, and even building it downloads nothing.
+Static security, supply-chain and quality analysis for Python, JavaScript and SQL, with **no dependencies**: Lazaret runs on the Python standard library and its own native engine (written in Rust, with no external crates; every wheel carries it), and even building it downloads nothing.
 
 ```bash
 pip install lazaret
@@ -22,7 +22,7 @@ What it finds:
 - **Install guard:** `lazaret guard` in front of `npm install`, `npm ci`, `pnpm add`, `yarn add`, `bun add`, `pip install`, `uv add`, `uv sync`, `uv run` or `uvx` resolves what would be installed, fetches and scans every package in memory, and installs nothing if one is SUSPICIOUS, can't be checked, or is younger than `--min-age` (2 days by default). Private registries and indexes are read with the credentials the package manager's own settings give, sent to that host only. `--plan` checks without installing; verdicts are cached by digest.
 - **Quality:** bugs, code smells, complexity, duplication, with a quality gate and ratings.
 
-Every command prints its version with `--version`; the scanners also name the engine that runs their supply-chain tests. Lazaret 0.1.8 adds a native engine for those tests, written in Rust with no external crates and held to the Python engine answer for answer. pip installs it with the platform wheels for Linux (x86-64 and ARM64, glibc 2.28 or later), macOS (Apple silicon, and Intel from 10.12) and Windows (x64); everywhere else the pure wheel runs the same tests in Python, with the same findings.
+Every command prints its version with `--version`; the scanners also name the engine. Lazaret's scanning engine is native code, written in Rust with no external crates. pip installs it with the platform wheels for Linux (x86-64 and ARM64, glibc 2.28 or later), macOS (Apple silicon, and Intel from 10.12) and Windows (x64); everywhere else pip builds a wheel from the source distribution, which compiles the engine and needs Rust (`rustup`).
 
 Two of its building blocks are usable on their own (provisional APIs until 1.0): `lazaret.pg`, a PostgreSQL client in pure Python with SCRAM-SHA-256, channel binding and TLS; and `lazaret.safexml`, a layer that makes the stdlib XML parsers safe for untrusted input.
 

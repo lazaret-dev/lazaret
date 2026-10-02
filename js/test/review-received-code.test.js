@@ -6,8 +6,8 @@
 // v2 (a binding.gyp expansion running the payload, no install script) were
 // no finding and a MAJOR; python/tests/scanner/test_review_received_code.py
 // and test_review_gyp_expansions.py have the full cases, and
-// tests/architecture/test_rust_parity_signs.py / test_js_parity_gyp.py
-// compare the engines. Everything is inert text: hosts are .invalid.
+// tests/architecture/test_snapshot_signs.py / test_js_parity_gyp.py hold
+// the engine and the packages. Everything is inert text: hosts are .invalid.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";

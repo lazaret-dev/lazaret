@@ -10,8 +10,9 @@ know:
   `python -m unittest` commands, and the authoritative **cross-platform rules**
   (encoding, paths, resources, line endings, OS capabilities, interpreter
   drift, time). Don't duplicate those rules; obey them.
-- **`docs/DESIGN.md` §6–§8** — *why* we test this way (the parity invariant, the
-  0-false-positive discipline, bounded work).
+- **`docs/DESIGN.md` §6–§8** — *why* we test this way (the parity invariant
+  between the packages, the engine's recorded outputs, the 0-false-positive
+  discipline, bounded work).
 
 Everything below is inert by policy: fixtures use `.invalid` / TEST-NET hosts and
 nothing is executed (`STRUCTURE.md` §6).
@@ -23,36 +24,39 @@ nothing is executed (`STRUCTURE.md` §6).
 Run these in order. Stop and fix at the first red; a later green doesn't
 redeem an earlier red.
 
-1. **Behavioral suites (both engines).** The Python `test_review_<topic>` and the
-   npm `review-<topic>.test.js` for the area you touched. Each regression test
-   should fail on the pre-change code and pass after — write it that way.
-2. **Engine parity.** `python/tests/architecture/test_js_parity*.py` (they
+1. **Behavioral suites (both packages).** The Python `test_review_<topic>` and
+   the npm `review-<topic>.test.js` for the area you touched. Each regression
+   test should fail on the pre-change code and pass after — write it that way.
+   The Python suite runs on the native library: build it first (§2).
+2. **The engine's recorded outputs.** A change to what the native engine
+   finds (`rust/`: its code, or the rule pack) moves its recorded outputs
+   (`python/tests/architecture/test_snapshot_*.py`, `snapshots/`): record the
+   affected sets with the engine before and after (`scripts/snapshot.py
+   record <set> --out before.jsonl.gz`, then `--out after.jsonl.gz`), read
+   every case that differs (`scripts/snapshot.py diff before.jsonl.gz
+   after.jsonl.gz`), and only then record the new hashes
+   (`LAZARET_SNAPSHOT_UPDATE=1` on the snapshot tests) and commit them with
+   the change. A failing snapshot test you did not expect is a real change in
+   what the engine answers, not flakiness. Then `python3
+   scripts/make_rust_tables.py --check` (the pack in its canonical form, every
+   pattern compiling, the rule set the registry's), and the WebAssembly build
+   against the library (`test_wasm_parity*.py`, §3).
+3. **Package parity.** `python/tests/architecture/test_js_parity*.py` (they
    need the npm engine built: `cd js && npm run build`). This is the guard that
-   the two packages still agree; treat a parity failure as "one engine is now
+   the two packages still agree; treat a parity failure as "one package is now
    wrong," not as flakiness. A deliberately Python-only feature must be
    registered in `_python_only` (in `test_js_parity.py`) or it will (correctly)
-   break parity. If you touched the install-script or import-time test (or
-   anything they read), or a rule or finding of `scan_file` (`_scan_rules`,
-   `_scan_file` and what they read), also the native engine's — the npm
-   package runs it: `python3 scripts/make_rust_tables.py` (then `--check`),
-   build the library and the WebAssembly module, and `test_rust_parity_*.py`
-   and `test_wasm_parity*.py` (§3).
-3. **Fuzz / differential, where the area has one.** The hooks corpus
-   (`hooks_corpus.py`, ~44,000 curated and generated cases) runs through the
-   native engine and core (`test_rust_parity_hooks.py` and `_hooks_b.py`,
-   `_signs.py`; the engine works in a thread while Python reads the cases, so
-   a module's time is the slower engine's) and through the WebAssembly build
-   and the library (`test_wasm_parity*.py`), and every case is diffed; the
-   cross-file follower's parity (`test_rust_parity_crossfile.py`, the native
-   engine against core) generates 700 packages from the shapes it reads; the
-   flow and lexing parity suites do the same for their areas. The engines
-   must agree on *every* case.
+   break parity.
 4. **False-positive sweep on real code** (§4). The bar is **zero** new findings.
 5. **Bounded-work check** (§5) on an adversarial large input.
-6. **Docs** (`README.md`, this doc / `STRUCTURE.md` / `DESIGN.md` if the
-   architecture moved, `CHANGELOG.md`), then commit (one logical change: core,
-   the native engine, and a JavaScript twin where the npm package still has
-   one, together).
+6. **The benchmark**, for a change to detection: the registry scans of the
+   benchmark's releases before and after the change (`scripts/bench.py`,
+   §4: every difference read), and the holdout's (`compare
+   --aggregate-only`).
+7. **Docs** (`README.md`, this doc / `STRUCTURE.md` / `DESIGN.md` if the
+   architecture moved, `CHANGELOG.md`), then commit (one logical change: the
+   native engine with its recorded outputs, the Python side, and a
+   JavaScript twin where the npm package still has one, together).
 
 Before a **release**, also run the **full cross-subsystem suite** (§6) — it
 catches ripple that per-area tests miss.
@@ -105,30 +109,23 @@ Notes:
   alone.
 - The **parity suites** each spawn Node and take ~5–30 s; run the heavy ones
   (`test_js_parity.py` ~16 s, `test_js_parity_limits.py` ~18 s,
-  `test_review_final_parity.py` ~20 s) alone and batch the light ones. The
-  hooks corpus (~44,000 cases since 0.1.8's string arrays and data flows) no
-  longer fits 45 s in one run: the native engine's parity reads it in two
-  modules, `test_rust_parity_hooks.py` and `_hooks_b.py` (every other
-  case each, ~19 s), and `LAZARET_PARITY_SHARD=k/n` still reads a shard of
-  either (every n-th case from the k-th) on a slower machine.
+  `test_review_final_parity.py` ~20 s) alone and batch the light ones.
   `test_js_parity_limits.py` holds the source-size and CRLF comparisons, split
   from `test_js_parity.py` in 0.1.8 when that module reached 45 s; split a
   module the same way when it nears the limit rather than raising a timeout.
-- The **native engine's parity modules** need the library built
-  (`cd rust && cargo build --release --offline --locked`) and named by
-  `LAZARET_NATIVE_LIB`; without it they skip (so every CI job that runs them
-  first proves the library loads: `scripts/check_native_library.py LIB TAG
-  --load`, or an assertion; `test_review_release_workflow.py` checks that).
-  `test_rust_parity_hooks.py` and `_hooks_b.py` (~19 s each) and `_signs`
-  (~20 s) run alone; `_regex` (~2 s), `_scanfile` (~8 s), `_project` (~6 s),
-  `_project_scan` (~9 s), `_crossfile` (~1 s), `_hook_commands`
-  (~7 s), `_lexer`, `_hexname`, `_offscreen` and `_lookalike` (~1 s each)
-  batch, in two batches (together they near 40 s). `test_wasm_parity.py`
-  (~20 s), `_signs.py` (~11 s) and `_crossfile.py` (~1 s) also need the
-  WebAssembly build (`npm run build`), and skip without either. A suite run with `LAZARET_ENGINE=rust`
-  sends every supply-chain test of the scanner and the registry, the scan
-  of every file (in project mode its rules part) and the cross-file
-  follower through the native engine; `=python` keeps them in core.
+- **The Python suite needs the native library**: since the Rust-first
+  refactor it is the package's only engine. Build it (`cd rust && cargo build
+  --release --offline --locked`) and name it with `LAZARET_NATIVE_LIB`, or
+  install with `pip install -e ./python`, which compiles it and puts it in
+  `src/lazaret/_native/`. Without it the scanning tests fail and the engine's
+  own tests skip, so every CI job that runs Python tests first proves the
+  library loads (`scripts/check_native_library.py LIB TAG --load`, or an
+  assertion; `test_review_release_workflow.py` checks that). The snapshot
+  modules take 2–25 s each (`test_snapshot_signs` and `_hooks`, the hooks
+  corpus' ~44,000 cases, the longest): run those two alone and batch the
+  rest. `test_wasm_parity.py` (~20 s), `_signs.py` (~11 s), `_crossfile.py`
+  (~1 s), `_jsparse.py` (~18 s) and `_pyparse.py` also need the WebAssembly
+  build (`npm run build`), and skip without it.
 
 ---
 
@@ -147,42 +144,39 @@ on each area's trees (lexing, limits, eval, look-alike names).
 The only allowed differences are the documented **Python-only** features
 (`_python_only`): the flow engine's AST half (`X-*`, `Q-FLOW-*` on Python
 files). (The cross-file received-code follower was the other until 0.1.8;
-both packages run the native engine's now, which
-`test_rust_parity_crossfile.py` holds to core on the follower's own cases and
-a generated stream of 700 packages.)
-Anything else that differs is a real divergence — fix the engine, not the test.
-Since 0.1.8 the npm package's rules are the native engine's (WebAssembly), so
-these suites also hold the npm binding: what it passes in, and how it reads
-the answers back.
+both packages run the native engine's now.)
+Anything else that differs is a real divergence — fix the package, not the
+test. Since 0.1.8 the npm package's rules are the native engine's
+(WebAssembly), so these suites also hold the npm binding: what it passes in,
+and how it reads the answers back.
 
-**The native engine** (Rust, `docs/RUST_ENGINE.md`) has no allowed
-differences at all. `test_rust_parity_regex.py` compares its regex engine
-with `re` on every rule-pack pattern and 126 hand-written probes (search,
-match, fullmatch, finditer, sub, split, with pos/endpos; run it on each
-Python 3.10–3.14); `test_rust_parity_hooks.py` and `_hooks_b.py` compare the
-15 fields of `hooks_view` and `test_rust_parity_signs.py` the detectors
-(agent hijack included), case by case, on `hooks_corpus.py` (~44,000 cases:
-curated cases per area, random texts from each area's pieces, and 600
-generated obfuscated files); `test_rust_parity_scanfile.py` compares
-`scan_file(dep=True)` finding for finding, family by family, and each line's
-context, on `scanfile_corpus.py` and real files, and the four normalization
-forms on every code point; `test_rust_parity_project.py` does the same for
-`scan_rules`, project mode's rules part, and `_project_scan.py` for the
-Python package's project mode through the engine (`scan_rules`, then core's
-passes, markers and cap) against `core.scan_file`;
-`test_rust_parity_crossfile.py` compares the cross-file follower
-(`cross_file`) with core's on its own cases and a generated stream of 700
-packages, the whole stream in one call on threads, a package that spends
-its budget read by core; `test_rust_parity_hook_commands.py`
-compares a hook's command read as a program, and `_hexname`, `_offscreen`
-and `_lookalike` their detectors on curated and random lines;
-`test_rust_parity_lexer.py` the comment lexer's spans on dense random text
-in every language. `test_wasm_parity.py`, `_signs.py` and `_crossfile.py`
-then hold the WebAssembly build the npm package ships to the library, call
-for call and byte for byte, on the same corpora.
-`scripts/make_rust_tables.py --check` fails when the pack no longer matches
-`core.py`, and `scripts/check_rust_deps.py` when a crate from outside the
-workspace appears.
+**The native engine** (Rust, `docs/RUST_ENGINE.md` §5) is held to its own
+recorded outputs since the Rust-first refactor retired the Python engine it
+was held to before (with zero differences, on every field, until then).
+`test_snapshot_hooks.py` records the 15 fields of `hooks_view` and
+`test_snapshot_signs.py` the detectors one by one on `hooks_corpus.py`
+(~44,000 cases: curated cases per area, random texts from each area's
+pieces, and 600 generated obfuscated files); `test_snapshot_scanfile.py`
+`scan_file` in dependency mode and `scan_rules`, finding for finding, family
+by family, and each line's context, on `scanfile_corpus.py` and the
+fixtures; `test_snapshot_crossfile.py` the cross-file follower on a
+generated stream of 700 packages (side by side, one package, distributions,
+separators); `test_snapshot_hook_commands.py` a hook's command read as a
+program; `test_snapshot_small.py` the hidden names, look-alike names and
+off-screen code; `test_snapshot_lexer.py` the comment lexer's spans on dense
+random text in every language. A hash per 100 outputs: a failure names the
+chunks that moved, and `scripts/snapshot.py diff` the cases.
+`test_rust_parity_regex.py` still compares the regex engine with `re` on
+every rule-pack pattern and 126 hand-written probes (search, match,
+fullmatch, finditer, sub, split, with pos/endpos; run it on each Python
+3.10–3.14), and `test_wasm_parity.py`, `_signs.py`, `_crossfile.py`,
+`_jsparse.py` and `_pyparse.py` hold the WebAssembly build the npm package
+ships to the library, call for call and byte for byte, on the same corpora.
+`scripts/make_rust_tables.py --check` fails when the pack leaves its
+canonical form, a pattern stops compiling, its rule set is not the
+registry's, or a value core still keeps differs from it; and
+`scripts/check_rust_deps.py` when a crate from outside the workspace
+appears.
 
 ---
 
@@ -223,9 +217,7 @@ assert not issues, issues
 List **every** strong reason, not only the ones a change adds: 0.1.8's full
 sweep found chromedriver's and phantomjs-prebuilt's installers, which define
 `requestBinary()`, read as RequestBin (an exfiltration address) since 0.1.0 —
-earlier sweeps had listed only their new reasons. With the native library
-built, the same sweep is also a parity check: compare core's answers with the
-native `batch` call's, file by file.
+earlier sweeps had listed only their new reasons.
 
 Any hit is a candidate false positive you must **explain** before shipping —
 either it's a real risk (keep it, add a fixture) or the pattern is too loose
@@ -246,6 +238,16 @@ the list of its misses: a rule written from one makes the holdout in-sample.
 A detector that recognizes the samples it was written from shows up there:
 in-sample up, holdout flat.
 
+**The harness.** `scripts/bench.py run MANIFEST OUT.jsonl` scans each
+release of a manifest as `lazaret-registry` does (in memory; nothing is
+unpacked to disk or run) and writes its verdict and strong findings; it is
+resumable and starts no release after `--stop-after` seconds, so loop it
+under a 45 s timeout until it prints `DONE`. `scripts/bench.py compare
+BEFORE.jsonl AFTER.jsonl` gives the verdicts by category in each run and
+every release whose verdict or strong findings moved — read each one —
+and `--aggregate-only` gives the counts alone, for the holdout. The
+samples themselves are kept outside the repository (`STRUCTURE.md` §6).
+
 ---
 
 ## 5. Bounded-work checks
@@ -254,10 +256,12 @@ Anything that reads attacker-controlled text gets a test that feeds it a
 ~100 KB–1 MB adversarial input (many sources, many runners, deep nesting,
 minified rows, pathological brackets) and asserts it finishes fast and returns
 the right answer. See `test_review_received_code.py::test_bounded_work` and
-`::test_new_sinks_stay_bounded` for the shape. The npm regex engine is the
-tighter constraint — it overflows its backtrack stack where CPython only slows —
-so a pattern that's "fine" in Python can still hang Node; the parity fuzz corpus
-and the bounded tests catch it.
+`::test_new_sinks_stay_bounded` for the shape. The engine's patterns run on
+its port of sre, which backtracks as `re` does: a pattern that backtracks
+without end spends the call's work budget and leaves the file SC-TRUNCATED,
+so bound the pattern (or, from phase 4, run it on linre). The npm package's
+remaining JavaScript regexes are the tighter constraint — V8 overflows its
+backtrack stack where CPython only slows — and the bounded tests catch it.
 
 ---
 
@@ -269,9 +273,8 @@ Before tagging, run **every** subsystem green, individually (§2):
 pass is what catches ripple from a change in a widely-imported module like
 `core.py` — it has caught a real regression that per-area tests missed (a
 `--deps` stop-budget accounting bug). Budget for it; it's ~2,400 Python tests +
-~350 JS tests, but each batch is seconds. With the native library built, run
-the Python batches twice, with `LAZARET_ENGINE=rust` and `=python` (CI's
-`rust` job does the first on Linux).
+~350 JS tests, but each batch is seconds. The Python batches run on the
+native library (build it first, §2).
 
 Then the release gates themselves: `sh scripts/check-versions.sh HEAD` (the
 Python, npm and native engine versions agree), and CI's own `versions` check
@@ -345,9 +348,9 @@ worth watching for during a release run.
 | Small subsystem | `PYTHONPATH=src:. python3 -m unittest discover -s tests/mcp -t .` |
 | Big subsystem | batch its files (§2), ≤45 s per batch |
 | Engine parity | `cd js && npm run build`, then `PYTHONPATH=src:. python3 -m unittest tests.architecture.test_js_parity` (heavy; run alone) |
-| Native engine parity | build (`cd rust && cargo build --release --offline --locked`), `export LAZARET_NATIVE_LIB=…`, then `tests.architecture.test_rust_parity_hooks`, `_hooks_b` and `_signs` alone, the other `test_rust_parity_*` in two batches; with `npm run build`, `test_wasm_parity` and `_signs` alone, `_crossfile` in a batch |
-| Rule pack drift | `python3 scripts/make_rust_tables.py --check` (the Unicode table's check needs 3.10) |
-| Spec drift | `tests.architecture.test_received_spec` (core against `received_spec.json`), then the rule pack's check |
+| The engine's recorded outputs | build (`cd rust && cargo build --release --offline --locked`), `export LAZARET_NATIVE_LIB=…`, then `tests.architecture.test_snapshot_hooks` and `_signs` alone, the other `test_snapshot_*` in a batch; with `npm run build`, `test_wasm_parity` and `_signs` alone, `_crossfile` in a batch |
+| Review a change of outputs | `python3 scripts/snapshot.py record SET --out before.jsonl.gz` (engine before), the same `--out after.jsonl.gz` (after), `python3 scripts/snapshot.py diff before.jsonl.gz after.jsonl.gz`; then `LAZARET_SNAPSHOT_UPDATE=1` on the snapshot test |
+| Rule pack checks | `python3 scripts/make_rust_tables.py --check` (the Unicode table's check needs 3.10) |
 | One npm file | `cd js && npm run build` once, then `node --test test/review-received-code.test.js` |
 | Simulate other platforms | `sh scripts/simulate-platforms.sh` |
 | Version agreement | `sh scripts/check-versions.sh HEAD` |

@@ -3,9 +3,9 @@
 // fails on a systemd unit written or enabled, a launchd agent written or
 // loaded, a cron job installed, a Windows Run key written, a scheduled task
 // created, the Startup folder written and an XDG autostart entry; import-time
-// code never gets these. tests/architecture/test_rust_parity_signs.py
-// compares the engines on a random corpus (the npm package runs the native
-// engine). Inert text only: nothing is executed.
+// code never gets these. tests/architecture/test_snapshot_signs.py holds
+// the engine to its recorded outputs on a random corpus (the npm package
+// runs the native engine). Inert text only: nothing is executed.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";

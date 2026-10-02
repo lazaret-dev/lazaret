@@ -2,7 +2,7 @@
 // strings, reverse shells, host information sent out, the grading of
 // import-time reasons and aliased decoders. Twin of
 // python/tests/scanner/test_supply_chain_signals.py; on a random corpus the
-// engines are held to each other by tests/architecture/test_rust_parity_hooks.py
+// engine is held to its recorded outputs by tests/architecture/test_snapshot_hooks.py
 // (the npm package runs the native engine).
 // Everything is inert text: hosts are .invalid, nothing is executed.
 

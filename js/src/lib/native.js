@@ -2,10 +2,11 @@
 // built as WebAssembly (`npm run build`: native/lazaret.wasm) and run by
 // Node's own WebAssembly, so the package stays free of dependencies. It
 // answers the supply-chain tests (install scripts, import-time code, install
-// hooks, received code …) and scan_file's pattern rules and families, as the
-// Python package's native engine does; the Python engine
-// (lazaret.scanner.core) is the reference every answer is held to
-// (python/tests/architecture/test_rust_parity_*.py, test_wasm_parity.py).
+// hooks, received code …), scan_file's pattern rules and families and the
+// cross-file follower, as in the Python package, whose wheels carry the
+// same engine as a library: since the Rust-first refactor the only engine,
+// held to its recorded outputs (python/tests/architecture/test_snapshot_*.py),
+// and this build to the library (test_wasm_parity*.py).
 //
 // One call: a request [u32 LE name length][name][u32 LE args length][args,
 // JSON][text], the text as UTF-8 with lone surrogates passed through (WTF-8:

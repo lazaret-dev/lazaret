@@ -2,8 +2,8 @@
 // (the native engine's hook_command_risk, lib/native.js; the scan's
 // SC-INSTALL-HOOK in lib/supplychain.js). python/tests/scanner/
 // test_hook_commands.py has the full cases, and tests/architecture/
-// test_rust_parity_hook_commands.py holds the native engine's reading (its
-// shell parse included) to the Python engine's. Inert text: reserved names
+// test_snapshot_hook_commands.py holds the native engine's reading (its
+// shell parse included) to its recorded outputs. Inert text: reserved names
 // and private addresses, nothing is executed.
 
 import { test } from "node:test";

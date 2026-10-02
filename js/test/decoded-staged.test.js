@@ -4,8 +4,8 @@
 // several rows and environment variables in the received-code detector, and
 // a script downloaded or decoded, written and run with a shell or an
 // interpreter. python/tests/scanner/test_decoded_and_staged.py has the full
-// cases and tests/architecture/test_rust_parity_hooks.py compares the
-// engines. Inert text: hosts are .invalid, nothing is executed.
+// cases and tests/architecture/test_snapshot_hooks.py holds the engine to
+// its recorded outputs. Inert text: hosts are .invalid, nothing is executed.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
