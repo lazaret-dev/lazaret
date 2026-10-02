@@ -167,6 +167,18 @@ fn which_error_python_reports() {
     assert_eq!(error("x = {'a': 1,\n 'b' c}"), (2, "':' expected after dictionary key".to_string()));
     assert_eq!(error("{1: 1,\n 2 if 3}").0, 2);
     assert_eq!(error("x = {'a':\n}"), (1, "expression expected after dictionary key and ':'".to_string()));
+    // a statement `x, f(…)` whose call's arguments do not read: Python's
+    // error pass reads from the call's `(` again (invalid_assignment), and
+    // a `name = value` there is its error, at the name; not in brackets,
+    // not after a keyword argument's positional one, which comes first
+    let meant = "invalid syntax. Maybe you meant '==' or ':=' instead of '='?".to_string();
+    assert_eq!(error("p , f(a=1,\n b='x'= c=2)"), (1, meant.clone()));
+    assert_eq!(error("p , x.f(1, a=b,\n c='x' = 2)"), (1, meant.clone()));
+    assert_eq!(error("p , g(f(a=1,\n b='x'= c=2))").0, 2);
+    assert_eq!(error("p , [f(a=1,\n b='x'= c=2)]").0, 2);
+    assert_eq!(error("q = p , f(a=1,\n b='x'= c=2)").0, 2);
+    assert_eq!(error("p , g(x, a=1,\n h(b='x'= c=2))"), (2, "positional argument follows keyword argument".to_string()));
+    assert_eq!(error("f(**k, h(b=1 =))").1, "positional argument follows keyword argument unpacking");
     // the expression after another: its failing trailers dropped, an error
     // inside the brackets it starts with reported
     assert_eq!(error("[u g(\n b c)]").0, 1);

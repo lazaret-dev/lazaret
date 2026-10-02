@@ -1083,7 +1083,23 @@ impl<'a> Parser<'a> {
                 keywords.push(n);
                 seen_kw = true;
             } else {
-                let x = arg!(self.named_expression());
+                let at = self.p;
+                let x = match self.named_expression() {
+                    Ok(v) => v,
+                    // (a positional argument after a keyword whose whole
+                    // does not read: Python's error pass takes the part of
+                    // it that does, `h` of `h(…)`, for the argument)
+                    Err(Fail::Syntax) if misplaced.is_none() && (seen_kw || seen_dstar) && self.prefix_reads_at(at) => {
+                        misplaced = Some(if seen_dstar {
+                            "positional argument follows keyword argument unpacking"
+                        } else {
+                            "positional argument follows keyword argument"
+                        });
+                        break;
+                    }
+                    Err(Fail::Syntax) if misplaced.is_some() => break,
+                    Err(f) => return Err(f),
+                };
                 if self.at_op(EQUAL) && self.ahead == 0 {
                     // (where Python's error pass puts it: at the expression)
                     let s = self.tree.nodes[x.n as usize].start;

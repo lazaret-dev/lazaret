@@ -31,6 +31,15 @@ use super::lexer::*;
 use super::limits as L;
 use super::tree::*;
 
+/// The errors of an argument list that Python's error pass raises where it
+/// first reads the list (invalid_arguments).
+const ARGUMENT_ERRORS: [&str; 4] = [
+    "positional argument follows keyword argument",
+    "positional argument follows keyword argument unpacking",
+    "iterable argument unpacking follows keyword argument unpacking",
+    "Generator expression must be parenthesized",
+];
+
 /// Why a read stopped: a syntax error, which a speculative read may take
 /// back, or one it may not (a literal's value, the nesting limit).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -231,6 +240,57 @@ impl<'a> Parser<'a> {
         self.err_why = why;
         self.too_deep = saved.too_deep;
         Ok(if r.is_ok() { Some(end) } else { None })
+    }
+
+    /// A checked read ahead (`read_ahead`) that goes back to where it
+    /// started whatever happens (keeping the furthest token reached,
+    /// `p_max`): the token index where it ended if it read, None if it
+    /// failed, and an error no reading takes back as Err(where, why) — for
+    /// a reading of Python's error pass that may raise its own errors and no
+    /// other.
+    fn read_contained(&mut self, read: fn(&mut Self) -> R<Ex>) -> Result<Option<usize>, (u32, String)> {
+        let saved = Saved {
+            p: self.p,
+            nodes: self.tree.nodes.len(),
+            lists: self.tree.lists.len(),
+            level: self.level,
+            pending: self.pending.len(),
+            stack: self.stack.len(),
+            pieces: self.pieces.len(),
+            text: self.text.len(),
+            depths: (self.fdepth, self.spec_depth, self.lambda_defaults),
+            cheap: (self.cheap_at, self.second_paren_at, self.first_in_paren_at),
+            err_at: self.err_at,
+            err_specific: self.err_specific,
+            too_deep: self.too_deep,
+        };
+        let (why, max_level) = (std::mem::take(&mut self.err_why), self.max_level);
+        self.ahead_checked += 1;
+        let r = read(self);
+        self.ahead_checked -= 1;
+        let end = self.p;
+        self.p_max = self.p_max.max(end);
+        let fatal = if matches!(r, Err(Fail::Fatal)) { Some((self.err_at, self.err_why.clone())) } else { None };
+        self.p = saved.p;
+        self.tree.nodes.truncate(saved.nodes);
+        self.tree.lists.truncate(saved.lists);
+        self.level = saved.level;
+        self.pending.truncate(saved.pending);
+        self.stack.truncate(saved.stack);
+        self.pieces.truncate(saved.pieces);
+        self.text.truncate(saved.text);
+        (self.fdepth, self.spec_depth, self.lambda_defaults) = saved.depths;
+        (self.cheap_at, self.second_paren_at, self.first_in_paren_at) = saved.cheap;
+        self.err_at = saved.err_at;
+        self.err_specific = saved.err_specific;
+        self.err_why = why;
+        self.too_deep = saved.too_deep;
+        self.max_level = max_level;
+        match (fatal, r) {
+            (Some(e), _) => Err(e),
+            (None, Ok(_)) => Ok(Some(end)),
+            (None, Err(_)) => Ok(None),
+        }
     }
 
     /// The brackets open after the tokens before `upto`.
@@ -716,7 +776,22 @@ impl<'a> Parser<'a> {
             self.leave(L::YIELD_STMT);
             y
         } else {
-            self.star_expressions()?
+            let at = self.p;
+            match self.star_expressions() {
+                Ok(x) => x,
+                Err(Fail::Syntax) => {
+                    // (an error Python's error pass raises itself, reading
+                    // the statement before this, comes first: one of its
+                    // own, or an argument list's that it raises reading the
+                    // statement's targets, invalid_arguments)
+                    let arguments = ARGUMENT_ERRORS.contains(&self.err_why.as_str());
+                    if !self.err_specific && !arguments {
+                        self.tuple_call_paren_error(at)?;
+                    }
+                    return Err(Fail::Syntax);
+                }
+                Err(e) => return Err(e),
+            }
         };
         // (a target is checked where Python's error pass checks it: an
         // assignment's at its `=`, before what follows is read; an augmented
@@ -791,6 +866,100 @@ impl<'a> Parser<'a> {
         };
         self.leave(L::STMT);
         Ok(r)
+    }
+
+    /// Python's error pass reads an expression statement that begins
+    /// `x, …` (from token `start`) again as an assignment's invalid target
+    /// (invalid_assignment: `star_named_expression ',' star_named_expressions*
+    /// ':' expression`): an element ends before a call whose arguments do
+    /// not read, and the next repetition of `star_named_expressions` reads
+    /// from that call's `(` as a parenthesized expression, its checks on —
+    /// so a `name = value` there is the error Python reports ("invalid
+    /// syntax. Maybe you meant '==' or ':=' instead of '='?", at the name).
+    /// Err(Fatal) when so; nothing changes otherwise.
+    fn tuple_call_paren_error(&mut self, start: usize) -> R<()> {
+        if self.ahead != 0 {
+            return Ok(());
+        }
+        let saved = (self.p, self.p_max);
+        let comma = |p: &Self, k: usize| p.toks.get(k).map_or(false, |t| t.t == T::Op && t.k == COMMA);
+        // (the elements are read as the statement's first reading read
+        // them: what they raise is not this reading's to raise)
+        self.p = start;
+        let mut k = match self.read_contained(Self::star_named_expression) {
+            Ok(Some(end)) if comma(self, end) => end + 1,
+            _ => {
+                (self.p, self.p_max) = saved;
+                return Ok(());
+            }
+        };
+        let mut found = None;
+        loop {
+            self.p = k;
+            self.p_max = k;
+            let r = self.read_contained(Self::star_named_expression);
+            let reached = self.p_max;
+            match r {
+                Ok(Some(end)) if comma(self, end) => k = end + 1,
+                Ok(None) => {
+                    if let Some(lpar) = self.call_paren_before(k, reached) {
+                        self.p = lpar;
+                        // the repetition raises invalid_named_expression's errors
+                        if let Err((at, why)) = self.read_contained(Self::star_named_expression) {
+                            if why.starts_with("invalid syntax. Maybe you meant") || why.starts_with("cannot assign to ") {
+                                found = Some((at, why));
+                            }
+                        }
+                    }
+                    break;
+                }
+                _ => break,
+            }
+        }
+        (self.p, self.p_max) = saved;
+        match found {
+            Some((at, why)) => self.fatal_at(at, &why),
+            None => Ok(()),
+        }
+    }
+
+    /// The last `(` of a call at the bracket depth of token `from`, before
+    /// token `upto` (where a read from `from` failed): the call its element
+    /// ends before.
+    fn call_paren_before(&self, from: usize, upto: usize) -> Option<usize> {
+        let mut depth = 0i64;
+        let mut found = None;
+        for i in from..upto.min(self.toks.len()) {
+            let t = self.toks[i];
+            if t.t != T::Op {
+                continue;
+            }
+            match t.k {
+                LPAR | LSQB | LBRACE => {
+                    if depth == 0 && t.k == LPAR && i > from {
+                        let b = self.toks[i - 1];
+                        let primary_end = match b.t {
+                            T::Name | T::Number | T::Str | T::FEnd => true,
+                            T::Kw => matches!(b.k, KW_NONE | KW_TRUE | KW_FALSE),
+                            T::Op => matches!(b.k, RPAR | RSQB | RBRACE | ELLIPSIS),
+                            _ => false,
+                        };
+                        if primary_end {
+                            found = Some(i);
+                        }
+                    }
+                    depth += 1;
+                }
+                RPAR | RSQB | RBRACE => {
+                    depth -= 1;
+                    if depth < 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        found
     }
 
     /// An augmented or annotated assignment's target `x`, checked once what
