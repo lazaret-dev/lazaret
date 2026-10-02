@@ -21,6 +21,7 @@ pub mod lexer;
 pub mod linear;
 pub mod normalize;
 pub mod pack;
+pub mod pyparse;
 pub mod pyre;
 pub mod pystr;
 pub mod received;

@@ -231,7 +231,12 @@ crates/lazaret-engine/src/generated/unicode13.rs holds data of the Unicode
 Character Database 13.0 — the code points it assigns, the properties the
 engine's regular expressions and normalization read, decompositions,
 canonical combining classes and the primary composites — written by
-scripts/make_rust_tables.py from Python 3.10's unicodedata. It is
+scripts/make_rust_tables.py from Python 3.10's unicodedata. The Python
+parser's table, unidata.rs in crates/lazaret-engine/src/pyparse/, holds
+data of the Unicode Character Database 15.1 — the characters identifiers
+may hold, normalization data of the characters assigned since 13.0, and
+the character names and their aliases — written by
+scripts/make_pyparse_tables.py from Python 3.13's unicodedata. Both are
 distributed under the Unicode License v3 (LICENSE-UNICODE):
 
     Copyright © 1991-2026 Unicode, Inc.

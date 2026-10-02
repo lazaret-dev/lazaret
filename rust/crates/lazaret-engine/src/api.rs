@@ -62,6 +62,8 @@ pub const CALLS: &[&str] = &[
     "cross_file",
     // the JavaScript parser (jsparse.py's trees)
     "js_parse", "js_parse_file",
+    // the Python parser (Python 3.13's ast trees)
+    "py_parse",
 ];
 
 fn dead_drop(v: Option<(usize, PyStr)>) -> Value {
@@ -289,6 +291,13 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
                 (flag("ts", false), flag("jsx", true))
             };
             Value::Raw(crate::jsparse::to_json(text, ts, jsx, flag("spans", false)))
+        }
+        "py_parse" => {
+            // ast.parse(text) as Python 3.13 builds it, as JSON (pyparse/out.rs),
+            // or {"error": {"line": n, "reason": …}}; "spans": each node's start
+            // and end (code points) too
+            let spans = matches!(args.get("spans"), Some(Value::Bool(true)));
+            Value::Raw(crate::pyparse::to_json(text, spans))
         }
         "scan_file" => {
             let flag = |k: &str, d: bool| match args.get(k) {
