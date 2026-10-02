@@ -137,6 +137,13 @@ before the release.
 
 ### Added
 
+- The engine's port of project mode's cross-file JavaScript taint pass
+  (`js_flow`: jsflow.py's scopes, bindings, points-to and summaries, on the
+  engine's JavaScript parser's trees), held to jsflow.py output for output
+  (`test_jsflow_reference.py`); on 1,490 installed npm packages read as
+  projects it gave the same outputs about twelve times faster. Nothing asks
+  it yet: both packages move to it next, and their JavaScript twins of the
+  pass and the reader retire.
 - The engine's JavaScript parser (`js_parse`: jsparse.py's trees, node for
   node) and Python parser (`py_parse`: Python 3.13's `ast` trees, node for
   node, with its errors), about 60 MB/s each, for the detectors to be

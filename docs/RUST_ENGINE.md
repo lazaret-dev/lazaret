@@ -177,7 +177,8 @@ rust/
     src/lex/                 the lexers (§15): js.rs (JavaScript, TypeScript, JSX: templates and
                              their holes, regular expressions), py.rs (Python, with pyparse's
                              tokenizer), mod.rs (what the detectors ask: comments, strings,
-                             literals, two readings intersected)
+                             literals, two readings intersected), value.rs (literals' values,
+                             the runs a runtime joins)
     src/lexer.rs             lex_comment_spans, every caller's: JavaScript and Python from lex/,
                              SQL (two readings) and any other text by the pack's patterns (§6)
     src/filectx.rs           a file as scan_file reads it (_FileCtx): lines, comment layout,
@@ -194,6 +195,10 @@ rust/
                              reads ahead, statements, classes, modules), expr.rs (expressions,
                              patterns, JSX), types.rs (TypeScript's types), tree.rs (the arena),
                              out.rs (JSON)
+    src/jsflow/              project mode's cross-file JavaScript taint (jsflow.py's, §16):
+                             mod.rs (values, scopes, bindings, declaration and resolution),
+                             descs.rs (points-to, call targets, routes, order), eval.rs (one
+                             reading of a function), driver.rs (the fixpoint, the output)
     src/pyparse/             the Python parser (Python 3.13's ast trees: §13): lexer.rs (tokens,
                              f-strings in pieces), parser.rs (statements, which error Python
                              reports), expr.rs (expressions, targets, arguments, strings),
@@ -672,7 +677,7 @@ benchmark:
 | 0 | Baseline: the detection round committed (rule set 2.15.0), the engine's outputs recorded on the benchmark's files and on installed packages | Done (tag `rust-first-baseline`) |
 | 1 | The Rust engine is the reference: the Python engine, `--engine` and the pure wheel retired; the recorded outputs (§5); the pack as the source of the rules; every wheel a platform wheel, the sdist compiled by pip where none fits; an unanswered file SC-TRUNCATED in both packages | Done |
 | 2 | Decoding, lexers and bytes in the engine: source decoding (BOMs, UTF-16, coding cookies), one token substrate for the detectors | Done (tag `rust-first-phase2`): the lexers (§15: every caller's comments and literals, both packages), the self-read on them, the decoded view on string values (§15). Moved: the data flow, the dead drop, the secret endpoints and received code to phase 3 (they follow names: scopes); bytes to phase 4 (with linre over bytes); source decoding to after phase 3 (the packages' decoders already agree, held by their parity tests, and owning the CJK codecs would put their tables in the WebAssembly module) |
-| 3 | Parsers, scopes and flow: the detectors on bindings over the JavaScript and Python trees (§12, §13), constant folding of strings, the cross-file follower on them, project mode's passes (taint, SQL, function metrics) in the engine; the npm package's twins of them retired | The parsers done. Next, in order: project mode's JavaScript taint (jsflow.py: scopes, bindings, points-to, summaries) ported onto `js_parse`'s trees and held to jsflow.py, jsflow.js retired; Python's (flow.py) onto `py_parse`'s; then the supply-chain detectors on the same scopes, benchmark-gated |
+| 3 | Parsers, scopes and flow: the detectors on bindings over the JavaScript and Python trees (§12, §13), constant folding of strings, the cross-file follower on them, project mode's passes (taint, SQL, function metrics) in the engine; the npm package's twins of them retired | The parsers done; project mode's JavaScript taint ported onto `js_parse`'s trees (§16: `js_flow`, held to jsflow.py). Next, in order: both packages ask the engine, and jsflow.py, jsflow.js and the readers they use retire; Python's taint (flow.py) onto `py_parse`'s trees; then the supply-chain detectors on the same scopes, benchmark-gated |
 | 4 | Linear-time matching: the pack's patterns on linre (§14), pyre and the shlex port retired, current Unicode | Every pattern linre accepts runs on it (616 of the pack's 657; done first, as no answer changes); the 41 others, pyre and the shlex port not started |
 | 5 | One call per file, a content cache (SHA-256), the guard's scan in a child process that fails closed, archive ambiguity checks | Not started |
 
@@ -1617,3 +1622,60 @@ INCOMPLETE. Its `_build.py` is a Windows executable (an `MZ` header) named
 as Python, SC-TRUNCATED as undecodable before and after; the look-alike
 name the old lexer read in its machine code (`HcЅ`) is gone, and the
 release still fails the gate (INCOMPLETE).
+
+## 16. The cross-file JavaScript taint pass
+
+`src/jsflow/` is a port of `lazaret.scanner.jsflow` (jsflow.py, project
+mode's interprocedural JavaScript taint since 0.1.7), function for
+function, onto `js_parse`'s trees: phase 3's first step (§8). jsflow.py is
+its reference until both packages ask the engine; then the npm package's
+twin (`js/src/scanner/jsflow.js`) and the readers both pass uses
+(`jsparse.py`, `js/src/lib/jsparse.js`) retire.
+
+**The model** (jsflow.py's). Each function gets a summary — which of its
+parameters reach which sinks, what its return value carries — computed to
+a fixpoint over the call graph, callees first; findings come from a last
+pass over every function. `mod.rs`: values (`V`: request data with its
+origin and the chain it came by, the parameters it carries, the categories
+it is clean for, joined into a string or not, a request or response
+object), scopes and bindings (var and function hoisting, block-scoped
+`let`, `const` and `class`, parameters, catch clauses, imports), the
+declaration and resolution passes. `descs.rs`: what names hold (a
+flow-insensitive points-to over functions, classes and their instances,
+object literals, modules, built-ins and packages), the functions a call may
+reach (by binding, or by name where it cannot tell: at most four), route
+handlers, the order the fixpoint reads functions in. `eval.rs`: one
+reading of one function (flow-sensitive in it: branches merged, a loop's
+body read again when its first reading changed a value), its sources and
+sinks, the summaries it reads at calls and commits. `driver.rs`: the files
+read, the fixpoint and the reporting pass, the configured part of the
+model, and the output.
+
+**What it answers.** `js_flow` (`{"files": [[path, length], …]}`, the
+contents concatenated as the text; `sources`, `sinks`, `full`, `partial`:
+the configuration taintspec validated) answers the pass's output in
+jsflow.py's order: `["skipped_size", path, n]` (X-FLOW-SKIPPED),
+`["issue", category, path, line, source, sink, chain]` and `["note",
+rule, name, path, line, msg, why, fix]` (Q-FLOW-SKIPPED,
+Q-FLOW-INCOMPLETE); the host builds its findings from them, with their
+snippets and redaction (flow._issue, flow._flow_note). Where jsflow.py
+keeps a dict's insertion order or dedupes with `dict.fromkeys`, so does the
+port — the order of a call's targets decides which of them a finding names
+— and the memoized points-to is filled in the same order (a cycle reads as
+unknown while it is open, so what a memo holds depends on what was asked
+first).
+
+**Bounds.** jsflow.py's: a work budget per syntax tree node, a per-reading
+limit, 50 re-analyses of a function, 2,000,000 code points a file and
+8,000,000 a pass. The readings recurse on nested expressions and
+statements as jsflow.py's do; the parser's nesting bound keeps the deepest
+input of each construct within a 2 MiB thread stack (`jsflow/tests.rs`).
+
+**Held to jsflow.py.** `test_jsflow_reference.py`: every output, in
+order, on the corpus `test_js_parity_flow.py` holds the npm engine to (the
+review's cases, the engine's own, the caps, seeded generated projects,
+token soups), with the default model and a configured one. Before
+committing, also on 1,490 installed npm packages read as projects (each
+package's own files, up to 1.5 MB), with the default model and with a
+configured one that makes `process.env`, `options.*` and `args` sources (591
+outputs): no difference; the engine took 10 s where jsflow.py took 125 s.

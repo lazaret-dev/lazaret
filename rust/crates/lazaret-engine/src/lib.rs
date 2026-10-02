@@ -17,6 +17,7 @@ pub mod flow;
 pub mod generated;
 pub mod hooks;
 pub mod json;
+pub mod jsflow;
 pub mod jsparse;
 pub mod lex;
 pub mod lexer;

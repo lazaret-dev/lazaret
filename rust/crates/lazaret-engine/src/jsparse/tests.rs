@@ -24,10 +24,10 @@ fn error(src: &str, ts: bool, jsx: bool) -> (u32, String) {
 
 /// A construct that nests: (name, ts, jsx, head, opener, middle, closer,
 /// tail, the deepest jsparse.py reads, its error one deeper).
-type Nesting = (&'static str, bool, bool, &'static str, &'static str, &'static str, &'static str, &'static str, usize, &'static str);
+pub(crate) type Nesting = (&'static str, bool, bool, &'static str, &'static str, &'static str, &'static str, &'static str, usize, &'static str);
 
 /// Every construct that nests.
-const NESTINGS: &[Nesting] = &[
+pub(crate) const NESTINGS: &[Nesting] = &[
     ("parentheses", false, true, "", "(", "x", ")", "", 126, "nesting too deep"),
     ("arrays", false, true, "", "[", "x", "]", "", 126, "nesting too deep"),
     ("objects", false, true, "x = ", "{a: ", "1", "}", "", 84, "nesting too deep"),
@@ -81,7 +81,7 @@ const NESTINGS: &[Nesting] = &[
     ("tsx generic arrows", true, true, "x = ", "<T,>(a: T) => ", "<a />;", "", "", 251, "unexpected character ','"),
 ];
 
-fn nested(n: &Nesting, k: usize) -> String {
+pub(crate) fn nested(n: &Nesting, k: usize) -> String {
     format!("{}{}{}{}{}", n.3, n.4.repeat(k), n.5, n.6.repeat(k), n.7)
 }
 

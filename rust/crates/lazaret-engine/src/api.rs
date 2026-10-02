@@ -68,6 +68,8 @@ pub const CALLS: &[&str] = &[
     "linre.probe", "linre.check",
     // the lexers (lex/): a text read once into its language's tokens
     "lex.tokens", "lex.structure",
+    // phase 3: project mode's cross-file JavaScript taint (jsflow/)
+    "js_flow",
 ];
 
 fn dead_drop(v: Option<(usize, PyStr)>) -> Value {
@@ -281,6 +283,7 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
         }
         "pyre.escape" => Value::Str(pyre::escape(text)),
         "cross_file" => cross_file(p, args, text)?,
+        "js_flow" => js_flow(args, text)?,
         "js_parse" | "js_parse_file" => {
             // jsparse.parse(text, ts, jsx) / jsparse.parse_file(path, text): the
             // tree as JSON, or {"error": {"line": n, "reason": …}}; "spans": each
@@ -727,6 +730,83 @@ fn cross_file(p: &Pack, args: &Value, text: &[u32]) -> Result<Value, CallError> 
     };
     let skip: std::collections::HashSet<PyStr> = arg_strs(args, "skip").into_iter().collect();
     Ok(crossfile::answer(crossfile::cross_file(p, &files, &skip, &opts)))
+}
+
+/// js_flow: {"files": [[path, length], …] (their contents, concatenated,
+/// are the text), "sources": [pattern, …], "sinks": [[pattern, category],
+/// …], "full": [name, …], "partial": [[name, [category, …]], …]} (the
+/// configured part of the model: jsflow.config) -> the pass's output in
+/// order: ["skipped_size", path, n], ["issue", category, path, line,
+/// source, sink, via], ["note", rule, name, path, line, msg, why, fix].
+fn js_flow(args: &Value, text: &[u32]) -> Result<Value, CallError> {
+    use crate::jsflow::{self, Config, Out};
+    let bad = |m: &str| CallError::BadArgs(format!("js_flow: {}", m));
+    let items = args.get("files").and_then(|f| f.as_arr()).ok_or_else(|| bad("files"))?;
+    let mut files: Vec<(PyStr, PyStr)> = Vec::with_capacity(items.len());
+    let mut at = 0usize;
+    for item in items {
+        let parts = item.as_arr().ok_or_else(|| bad("a file is not [path, length]"))?;
+        let path = parts.first().and_then(|v| v.as_str()).ok_or_else(|| bad("a file's path"))?.to_vec();
+        let len = parts.get(1).and_then(|v| v.as_i64()).filter(|&n| n >= 0).ok_or_else(|| bad("a file's length"))? as usize;
+        if at + len > text.len() {
+            return Err(bad("the files' lengths run past the text"));
+        }
+        files.push((path, text[at..at + len].to_vec()));
+        at += len;
+    }
+    if at != text.len() {
+        return Err(bad("the files' lengths do not add up to the text"));
+    }
+    let cat = |v: &Value| -> Result<u8, CallError> {
+        let s = v.as_str().ok_or_else(|| bad("a category"))?;
+        let name: String = s.iter().map(|&c| char::from_u32(c).unwrap_or('\u{FFFD}')).collect();
+        jsflow::cat_of(&name).ok_or_else(|| bad("an unknown category"))
+    };
+    let sources = arg_strs(args, "sources");
+    let mut sinks = Vec::new();
+    for item in args.get("sinks").and_then(|v| v.as_arr()).unwrap_or(&[]) {
+        let parts = item.as_arr().ok_or_else(|| bad("a sink is not [pattern, category]"))?;
+        let pat = parts.first().and_then(|v| v.as_str()).ok_or_else(|| bad("a sink's pattern"))?.to_vec();
+        sinks.push((pat, cat(parts.get(1).unwrap_or(&Value::Null))?));
+    }
+    let full = arg_strs(args, "full");
+    let mut partial = Vec::new();
+    for item in args.get("partial").and_then(|v| v.as_arr()).unwrap_or(&[]) {
+        let parts = item.as_arr().ok_or_else(|| bad("a partial sanitizer is not [name, [category, …]]"))?;
+        let name = parts.first().and_then(|v| v.as_str()).ok_or_else(|| bad("a sanitizer's name"))?.to_vec();
+        let mut bits = 0u8;
+        for c in parts.get(1).and_then(|v| v.as_arr()).unwrap_or(&[]) {
+            bits |= jsflow::bit(cat(c)?);
+        }
+        partial.push((name, bits));
+    }
+    let out = jsflow::analyze(&files, Config::new(&sources, &sinks, &full, &partial));
+    Ok(Value::Arr(
+        out.into_iter()
+            .map(|o| match o {
+                Out::SkippedSize { path, n } => Value::Arr(vec![Value::str("skipped_size"), Value::Str(path), Value::Int(n as i64)]),
+                Out::Issue { cat, path, line, source, sink, via } => Value::Arr(vec![
+                    Value::str("issue"),
+                    Value::str(jsflow::CATS[cat as usize]),
+                    Value::Str(path),
+                    Value::Int(line as i64),
+                    Value::Str(source),
+                    Value::Str(sink),
+                    Value::Str(via),
+                ]),
+                Out::Note { rule, name, path, line, msg, why, fix } => Value::Arr(vec![
+                    Value::str("note"),
+                    Value::str(rule),
+                    Value::str(name),
+                    Value::Str(path),
+                    Value::Int(line as i64),
+                    Value::Str(msg),
+                    Value::str(why),
+                    Value::str(fix),
+                ]),
+            })
+            .collect(),
+    ))
 }
 
 fn match_value(m: &pyre::Match) -> Value {

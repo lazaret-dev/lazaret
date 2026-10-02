@@ -131,4 +131,4 @@ pub fn to_json(src: &[u32], ts: bool, jsx: bool, spans: bool) -> String {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
