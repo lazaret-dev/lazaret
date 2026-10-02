@@ -671,7 +671,7 @@ benchmark:
 |---|---|---|
 | 0 | Baseline: the detection round committed (rule set 2.15.0), the engine's outputs recorded on the benchmark's files and on installed packages | Done (tag `rust-first-baseline`) |
 | 1 | The Rust engine is the reference: the Python engine, `--engine` and the pure wheel retired; the recorded outputs (§5); the pack as the source of the rules; every wheel a platform wheel, the sdist compiled by pip where none fits; an unanswered file SC-TRUNCATED in both packages | Done |
-| 2 | Decoding, lexers and bytes in the engine: source decoding (BOMs, UTF-16, coding cookies), one token substrate for the detectors | The lexers done (§15: every caller's comments and literals, both packages); the detectors' own quote scanners, the decoded view and string arrays on tokens, source decoding and bytes not started |
+| 2 | Decoding, lexers and bytes in the engine: source decoding (BOMs, UTF-16, coding cookies), one token substrate for the detectors | The lexers done (§15: every caller's comments and literals, both packages); the self-read on them (the data flow, the dead drop and the secret endpoints wait for scopes, phase 3); the decoded view and string arrays on tokens, source decoding and bytes not started |
 | 3 | Parsers, scopes and flow: the detectors on bindings over the JavaScript and Python trees (§12, §13), constant folding of strings, the cross-file follower on them, project mode's passes (taint, SQL, function metrics) in the engine; the npm package's twins of them retired | The parsers done |
 | 4 | Linear-time matching: the pack's patterns on linre (§14), pyre and the shlex port retired, current Unicode | Every pattern linre accepts runs on it (616 of the pack's 657; done first, as no answer changes); the 41 others, pyre and the shlex port not started |
 | 5 | One call per file, a content cache (SHA-256), the guard's scan in a child process that fails closed, archive ambiguity checks | Not started |
@@ -1536,6 +1536,32 @@ corpora moved where the old lexers misread:
 - `lex_comment_spans` itself, on its dense random texts: 9,372 of 60,000
   answers, all JavaScript (with and without JSX) and Python; SQL and other
   text unchanged.
+
+**The detectors' own quote scanners.** Several detectors find what is
+code with a scanner of their own (`signs::literal_spans`, core's
+`_literal_spans`: quotes paired as they come, a template whole), which a
+quote or a backtick in a comment or in a regular expression throws off
+for the rest of the line, or of the file — an evasion. The self-read
+(`runs_own_source_at`: code run from what a file reads back from itself)
+now reads a JavaScript or Python text (the import-time test's, whose
+language it knows) with the lexers (`prose_spans`: literals and comments
+are not code, a template's holes are); a text of no known language (an
+install script, a hook's command) is still paired. Its read of a
+function's own source (`}).toString()`) counts only where the function
+ends in a comment, the payload kept there (`reads_prose`): read correctly,
+playwright's bundles serialize functions to run in a page, which the old
+pairing had hidden by accident (a quote in a regular expression made 63,000
+characters of one bundle a "string"). The data flow, the dead drop and
+the secret endpoints keep the pairing: read by the lexers, the names they
+follow without scopes meet in minified bundles (playwright's
+`mcpBundleImpl.js`: the environment in one function's `e`, a message
+spread from another's `e` and sent), so they move to the lexers with
+scopes (phase 3; two expected failures in `test_supply_chain_signals.py`
+hold the evasions they still have). Of the 561,324 recorded real-file
+outputs two moved, both gains: two releases of a compromised
+`@emilgroup` package now show the self-read the pairing missed (they decode
+a payload from their own `package.json` into a script a systemd user
+service runs); the benchmark's and the holdout's counts are unchanged.
 
 On the benchmark one release moved: num2words 0.5.15, SUSPICIOUS to
 INCOMPLETE. Its `_build.py` is a Windows executable (an `MZ` header) named

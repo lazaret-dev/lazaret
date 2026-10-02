@@ -849,7 +849,24 @@ pub fn dead_drop_at(p: &Pack, text: &[u32]) -> Option<(usize, PyStr)> {
 
 /// core.reads_own_source
 pub fn reads_own_source(p: &Pack, text: &[u32]) -> bool {
-    p.re("_SELF_READ_RE").search(text).is_some()
+    p.re("_SELF_READ_RE").finditer(text).any(|m| reads_prose(text, m.start()))
+}
+
+/// Does the read of its own source _SELF_READ_RE found at `at` read
+/// something that is not code? Its last form, a function's source
+/// (`}).toString()`), only where the function ends in a comment (`/* … */
+/// }).toString()`, a payload kept there): one that ends in code is source
+/// handed on to run elsewhere (a browser-automation tool's evaluate), not
+/// read back. Every other form: yes.
+fn reads_prose(text: &[u32], at: usize) -> bool {
+    if text.get(at) != Some(&c('}')) {
+        return true;
+    }
+    let mut k = at;
+    while k > 0 && pystr::is_space(text[k - 1]) {
+        k -= 1;
+    }
+    k >= 2 && text[k - 2] == c('*') && text[k - 1] == c('/')
 }
 
 /// len(core._call_args(text))
@@ -914,15 +931,45 @@ pub(crate) fn literal_spans(p: &Pack, text: &[u32]) -> Vec<(usize, usize)> {
     out
 }
 
-/// core.runs_own_source_at
-pub fn runs_own_source_at(p: &Pack, text: &[u32]) -> isize {
+/// The spans of `text` that are not code: in JavaScript or Python (`lang`),
+/// its literals and comments as the language's lexers read them (crate::lex:
+/// what both readings agree on; a template's or an f-string's text is a
+/// literal, their holes code); in a text of no language the lexers read,
+/// its quoted literals paired as they come (`literal_spans`). Sorted,
+/// disjoint.
+fn prose_spans(p: &Pack, text: &[u32], lang: Option<&str>) -> Vec<(usize, usize)> {
+    let st = match lang.and_then(|l| crate::lex::structure(text, l, true)) {
+        Some(st) => st,
+        None => return literal_spans(p, text),
+    };
+    let mut all = st.literals;
+    all.extend(st.comments);
+    all.sort_unstable();
+    let mut out: Vec<(usize, usize)> = Vec::with_capacity(all.len());
+    for (a, b) in all {
+        match out.last_mut() {
+            Some(last) if a <= last.1 => last.1 = last.1.max(b),
+            _ => out.push((a, b)),
+        }
+    }
+    out
+}
+
+/// Does `lang` name a language the lexers read?
+fn lexed(lang: Option<&str>) -> bool {
+    matches!(lang, Some("js" | "py"))
+}
+
+/// core.runs_own_source_at. `lang`: the text's language, when the lexers
+/// read it (what is code is then the lexers' reading: `prose_spans`).
+pub fn runs_own_source_at(p: &Pack, text: &[u32], lang: Option<&str>) -> isize {
     let self_read = p.re("_SELF_READ_RE");
     let sibling = p.re("_SIBLING_DATA_RE");
     let sibling_path = p.re("_SIBLING_PATH_RE");
     if self_read.search(text).is_none() && sibling.search(text).is_none() && sibling_path.search(text).is_none() {
         return -1;
     }
-    let spans = literal_spans(p, text);
+    let spans = prose_spans(p, text, lang);
     let starts: Vec<usize> = spans.iter().map(|&(s, _)| s).collect();
     let literal_at = |pos: usize| -> Option<(usize, usize)> {
         let k = starts.partition_point(|&s| s <= pos);
@@ -935,7 +982,8 @@ pub fn runs_own_source_at(p: &Pack, text: &[u32]) -> isize {
     let in_literal = |pos: usize| -> bool { literal_at(pos).is_some() };
     let reads = |lo: usize, hi: usize| -> bool {
         let part = pystr::sub(text, lo, hi);
-        [self_read, sibling].iter().any(|rx| rx.finditer(part).any(|m| !in_literal(lo + m.start())))
+        self_read.finditer(part).any(|m| !in_literal(lo + m.start()) && reads_prose(text, lo + m.start()))
+            || sibling.finditer(part).any(|m| !in_literal(lo + m.start()))
     };
     let ident = p.re("_IDENT_TOKEN_RE");
     let uses = |lo: usize, hi: usize, names: &HashSet<PyStr>| -> bool {
@@ -955,12 +1003,14 @@ pub fn runs_own_source_at(p: &Pack, text: &[u32]) -> isize {
             assigns.push((m.group(1).unwrap_or(&[]).to_vec(), m.start_of(2) as usize, m.end_of(2) as usize));
         }
     }
-    // names of data files' paths (a template's `${__dirname}` counts)
+    // names of data files' paths (a template's `${__dirname}` counts: read
+    // by the lexers, its hole is code; else the whole template counts)
+    let lexed = lexed(lang);
     let mut paths: HashSet<PyStr> = HashSet::new();
     for (name, lo, hi) in &assigns {
         for m in sibling_path.finditer(pystr::sub(text, *lo, *hi)) {
             match literal_at(lo + m.start()) {
-                Some((s, _)) if text[s] != c('`') => continue,
+                Some((s, _)) if lexed || text[s] != c('`') => continue,
                 _ => {
                     paths.insert(name.clone());
                     break;
@@ -2924,7 +2974,7 @@ fn install_script_risk_of(p: &Pack, text: &[u32], shell: bool, command: bool) ->
     if let Some(ip) = ip {
         reasons.push(cat(&[&u("contacts an address typical of data exfiltration ("), &ip, &u(")")]));
     }
-    if runs_own_source_at(p, text) >= 0 {
+    if runs_own_source_at(p, text, None) >= 0 {
         reasons.push(u("runs code it reads back from its own file or a data file shipped with it"));
     }
     // (0.1.8) data read from the machine and sent, whatever the address; the
@@ -3010,13 +3060,13 @@ pub fn import_time_risk(p: &Pack, text: &[u32], lang: Option<&str>) -> (Vec<PySt
 }
 
 fn import_time_reading(p: &Pack, text: &[u32], lang: Option<&str>) -> (Vec<PyStr>, Option<usize>) {
-    let (reasons, line) = import_time_risk_of(p, text);
+    let (reasons, line) = import_time_risk_of(p, text, lang);
     if !reasons.is_empty() {
-        if let Some(lang) = lang.filter(|l| *l == "py" || *l == "js") {
-            let code = import_code(p, text, lang);
+        if let Some(l) = lang.filter(|l| *l == "py" || *l == "js") {
+            let code = import_code(p, text, l);
             if code != text {
                 let _gate = crate::textgate::open(&code);
-                return import_time_risk_of(p, &code);
+                return import_time_risk_of(p, &code, lang);
             }
         }
     }
@@ -3190,7 +3240,7 @@ fn import_flow(p: &Pack, text: &[u32], flows: &[(usize, PyStr)]) -> Option<(usiz
     None
 }
 
-fn import_time_risk_of(p: &Pack, text: &[u32]) -> (Vec<PyStr>, Option<usize>) {
+fn import_time_risk_of(p: &Pack, text: &[u32], lang: Option<&str>) -> (Vec<PyStr>, Option<usize>) {
     let mut reasons: Vec<PyStr> = Vec::new();
     let mut line: Option<usize> = None;
     let flows = crate::shell::exec_command_flows(p, text);
@@ -3284,7 +3334,7 @@ fn import_time_risk_of(p: &Pack, text: &[u32]) -> (Vec<PyStr>, Option<usize>) {
         signs.push((at as usize, u("opens a reverse shell")));
     }
     let host = p.re("_HOST_INFO_RE").search(text).map(|m| m.start());
-    let at = runs_own_source_at(p, text);
+    let at = runs_own_source_at(p, text, lang);
     if at >= 0 {
         signs.push((at as usize, u("runs code it reads back from its own file or a data file shipped with it")));
     }

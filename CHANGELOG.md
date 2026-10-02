@@ -107,6 +107,17 @@ before the release.
   JavaScript files, and every string, f-string and comment Python 3.13's
   `tokenize` finds in its 19,044 Python files.
 
+- **The self-read reads JavaScript and Python with the lexers.** In the
+  import-time test, a quote or a backtick in a comment or in a regular
+  expression no longer hides the code after it from "runs code it reads
+  back from its own file" (a lone backtick in a comment hid a self-read to
+  the end of the file, and a self-read in a template's `${…}` was text). A
+  function's source read with `.toString()` counts only where the function
+  ends in a comment (the payload kept there), so a browser-automation
+  bundle that serializes functions to run in a page (playwright's) is not
+  one. The data flow and the dead drop still pair quotes as they come
+  until they run on scopes.
+
 ### Added
 
 - The engine's JavaScript parser (`js_parse`: jsparse.py's trees, node for

