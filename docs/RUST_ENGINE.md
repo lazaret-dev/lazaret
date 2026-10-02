@@ -15,7 +15,9 @@ same engine compiled to WebAssembly (`native/lazaret.wasm`). The JavaScript
 parser (`js_parse`, §12: jsparse.py's trees, node for node), the Python
 parser (`py_parse`, §13: Python 3.13's `ast` trees, node for node) and a
 linear-time regex engine (linre, §14) are in place for the phases that
-follow; every pattern linre accepts runs on it.
+follow; every pattern linre accepts runs on it, and the engine's lexers
+(§15) read JavaScript and Python for every caller that asks where a text's
+comments and literals are.
 
 ## 1. What it is
 
@@ -30,10 +32,10 @@ where a linear one would — so the twin is retired: the Rust engine is the
 reference, held to its recorded outputs, and a change to what it finds is a
 reviewed difference in those outputs. The npm package runs the same engine
 as WebAssembly (0.1.8). What the npm package still does in JavaScript
-(source decoding, the comment lexer and the suppression markers, the
-manifest and workflow checks, the taint, SQL and function passes of project
-mode, reporting) is held to the Python package by the CLI-level parity
-tests (`test_js_parity*`).
+(source decoding, the suppression markers, the manifest and workflow
+checks, the taint, SQL and function passes of project mode, reporting) is
+held to the Python package by the CLI-level parity tests
+(`test_js_parity*`); its comment layout is the engine's lexers' (§15).
 
 Decisions (fixed):
 
@@ -172,7 +174,12 @@ rust/
                              lines a script hands a shell (exec_command_reasons)
     src/strarr.rs            javascript-obfuscator's string arrays and proxy objects, for the
                              decoded view
-    src/lexer.rs             _lex_comment_spans (its literals matched by hand loops, §6)
+    src/lex/                 the lexers (§15): js.rs (JavaScript, TypeScript, JSX: templates and
+                             their holes, regular expressions), py.rs (Python, with pyparse's
+                             tokenizer), mod.rs (what the detectors ask: comments, strings,
+                             literals, two readings intersected)
+    src/lexer.rs             lex_comment_spans, every caller's: JavaScript and Python from lex/,
+                             SQL (two readings) and any other text by the pack's patterns (§6)
     src/filectx.rs           a file as scan_file reads it (_FileCtx): lines, comment layout,
                              match text (NFKC, JS escapes), names
     src/scanfile.rs          scan_file in dependency mode, scan_rules (project mode's rules
@@ -218,6 +225,8 @@ scripts/check_native_library.py         a built library against its wheel's tag;
 python/tests/architecture/test_snapshot_{hooks,signs,scanfile,lexer,hook_commands,small,crossfile}.py,
   _snapshots.py, snapshots/             the engine's recorded outputs (§5); scripts/snapshot.py records
                                         and compares them
+python/tests/architecture/test_lex.py   the lexers against js_parse's literals and Python 3.13's
+                                        tokenize (§15)
 python/tests/architecture/test_rust_parity_regex.py, test_wasm_parity{,_signs,_crossfile,_jsparse,
   _pyparse}.py, test_jsparse_native{,_b}.py, test_pyparse_native{,_b,_c}.py, test_rust_deps.py,
   test_rust_pack.py, hooks_corpus.py, scanfile_corpus.py, crossfile_corpus.py, jsparse_cases.py,
@@ -390,7 +399,7 @@ pack's `rule_set`) is bumped with any change to what a verdict records.
 | `test_snapshot_hooks` | the 15 fields of `hooks_view` (shlex, hooks, both supply-chain tests with and without a language, decoded view, spawned scripts …) | the hooks corpus (`hooks_corpus.py`, ~44,400 cases) |
 | `test_snapshot_signs` | the detectors one by one (`signs_view`: received code, PowerShell, stagers, reverse shells, self-read, persistence, the exfiltration shapes, services at login, wallet swaps, the string-array technique …), every field reached; the data flow on long texts | the hooks corpus; six long texts |
 | `test_snapshot_scanfile` | `scan_file` in dependency mode and `scan_rules` (project mode's rules part), finding for finding, every family and variant reached; each line's context (`file_context`) | the scan_file corpus (`scanfile_corpus.py`), this repository's fixtures |
-| `test_snapshot_lexer` | `_lex_comment_spans`: comments, strings, every literal | dense random texts in each language |
+| `test_snapshot_lexer` | `lex_comment_spans`: comments, strings, every literal (the lexers', §15, for JavaScript and Python) | dense random texts in each language |
 | `test_snapshot_hook_commands` | a hook's command read as a program (`hook_command_risk`, `sh_parse`, the reasons), output thrown away and kept | realistic hook commands and a seeded corpus |
 | `test_snapshot_small` | SC-HEXSTR's hidden names and text, SC-HOMOGLYPH's look-alike names, SC-OFFSCREEN-CODE | curated and seeded lines |
 | `test_snapshot_crossfile` | the cross-file follower (`cross_file`): the stream of packages, side by side, one package, distributions, separators | the follower's generated stream (`crossfile_corpus.py`) |
@@ -521,13 +530,15 @@ token are matched or prefiltered by hand, each written for one pattern text
 and used only while the pack holds exactly that text and flags (compared
 once per pack; any other text runs as a regex, so a change of the pattern in
 core makes the engine slower, never wrong, until the hand code follows):
-the lexer's literals (`_LEX_STR`, `_LEX_MYSQL_STR`, `_JS_REGEX_LIT_RE`: each
-has one way to match, so a loop gives its match, as each loop's comment
-argues), and three necessary conditions `scan_file` tests before a search —
+the SQL lexer's literals and those of a text in no language the lexers read
+(`_LEX_STR`, `_LEX_MYSQL_STR`: each has one way to match, so a loop gives its
+match, as each loop's comment argues), and three necessary conditions
+`scan_file` tests before a search —
 `ENTROPY_VALUE_RE` (a quote, then 20 characters of the literal's class),
 `B64_BLOB_RE` (202 characters) and `_SC_SINK_WORD_RE` (a sink's name, or `[`,
-blanks, a quote and an `e` or `F`). `test_rust_parity_lexer` fails when one
-of the loops is changed (checked by mutating them).
+blanks, a quote and an `e` or `F`). `test_snapshot_lexer`'s recorded outputs
+hold what the loops answer (`test_rust_parity_lexer`, which compared them
+with `re` and failed when one was mutated, retired with the Python engine).
 
 It still loses to sre on patterns that could start almost anywhere
 (`_XF_JS_MEMBER_RE`, `_PY_DOC_HEAD_RE`); core only calls those with
@@ -660,7 +671,7 @@ benchmark:
 |---|---|---|
 | 0 | Baseline: the detection round committed (rule set 2.15.0), the engine's outputs recorded on the benchmark's files and on installed packages | Done (tag `rust-first-baseline`) |
 | 1 | The Rust engine is the reference: the Python engine, `--engine` and the pure wheel retired; the recorded outputs (§5); the pack as the source of the rules; every wheel a platform wheel, the sdist compiled by pip where none fits; an unanswered file SC-TRUNCATED in both packages | Done |
-| 2 | Decoding, lexers and bytes in the engine: source decoding (BOMs, UTF-16, coding cookies), one token substrate for the detectors | Not started |
+| 2 | Decoding, lexers and bytes in the engine: source decoding (BOMs, UTF-16, coding cookies), one token substrate for the detectors | The lexers done (§15: every caller's comments and literals, both packages); the detectors' own quote scanners, the decoded view and string arrays on tokens, source decoding and bytes not started |
 | 3 | Parsers, scopes and flow: the detectors on bindings over the JavaScript and Python trees (§12, §13), constant folding of strings, the cross-file follower on them, project mode's passes (taint, SQL, function metrics) in the engine; the npm package's twins of them retired | The parsers done |
 | 4 | Linear-time matching: the pack's patterns on linre (§14), pyre and the shlex port retired, current Unicode | Every pattern linre accepts runs on it (616 of the pack's 657; done first, as no answer changes); the 41 others, pyre and the shlex port not started |
 | 5 | One call per file, a content cache (SHA-256), the guard's scan in a child process that fails closed, archive ambiguity checks | Not started |
@@ -1423,3 +1434,111 @@ build (2.45 MB → 2.63 MB).
   millions of instructions expanded) and `_DV_ARRAY_RE` (up to 64 strings
   of up to 400 characters): unbounded repeats in place of the large counts
   (`(?:[^{}]|\{[^{}]*\})*`) answer differently only past those counts.
+
+## 15. The lexers
+
+`src/lex/` reads a text into its language's tokens once, the way its
+runtime reads it, for every caller that asks where its comments and
+literals are (`lexer::lex_comment_spans`: `scan_file`'s comment layout and
+names, the import-time test's prose, the cross-file follower's comments,
+the Python package's project mode and suppression markers, the npm
+package's comment layout). Until phase 2 each of those read JavaScript and
+Python with regular expressions of its own that paired quotes and slashes:
+a template nested in another's `${…}`, a quote inside a regular
+expression, threw them off for the rest of the text, and the code in a
+template's holes or an f-string's replacement fields was read as text, so
+a call there was not a call.
+
+- **JavaScript** (`js.rs`; TypeScript and JSX too): the tokens of
+  jsparse's scanner (`jsparse/scan.rs`: strings, template text, regular
+  expressions, numbers, names, punctuators), lines ended by LF, CR, U+2028
+  and U+2029 as JavaScript ends them (a line comment or a string ends at
+  any of them). What the parser decides from the grammar the lexer decides
+  from what came before: a `/` begins a regular expression where an
+  expression may begin (after a punctuator but `)`, `]`, `}`, `.` and
+  `?.`; after `return`, `typeof`, `case` and the other words an expression
+  follows; after an `if`/`for`/`while` head's `)` or a block's `}`), and
+  divides elsewhere; a template's text runs to its backtick or `${`, the
+  hole is code to its `}` (braces counted, templates nested to any depth);
+  with JSX, a `<` where an expression may begin, before a name or `>`,
+  opens an element (not TypeScript's `<T,>` or `<T extends …>`), whose
+  attribute strings, text, `{…}` code and nested elements are read as JSX
+  reads them, type arguments after a tag's name as code. A first-line
+  hashbang is a comment. Annex B's `<!--` and `-->` are comments in a
+  script and code in a module (`x <!--y` is `x < !--y`), and a `.js` file
+  does not say which it is: they are read as code, so nothing a module
+  runs is taken for a comment. What the runtime would refuse is read so
+  that it hides nothing below it: a quote not closed on its line is a
+  string to the line's end (a `/*` after it opens no comment), and a `/`
+  whose regular expression is not closed on its line divides, as does
+  every later `/` on the line (so the lexer stays linear).
+- **Python** (`py.rs`): pyparse's tokenizer (Python 3.13's: prefixes,
+  triple quotes, line continuations, f-strings in pieces with PEP 701's
+  nesting), with t-strings read as Python 3.14 reads them (PEP 750:
+  `tokenize_with(src, true)`; the parser stays 3.13's), the comments found
+  between its tokens (ended by LF or CR). Past a token it refuses (an
+  unterminated string, a stray character …), and in a text it refuses
+  whole (a NUL, a lone surrogate), the rest is read plainly (`fallback`:
+  strings to their closing quote — one quote's to the end of its line —,
+  comments to the end of the line). The import-time test's prose (a string
+  statement) ends its line at a CR too.
+- **What both readings agree on** (`mod.rs`, `Structure`): where two
+  runtimes read a text differently, a span is a comment or a literal only
+  if both readings say so, so that what one of them runs is never taken
+  for prose. A JavaScript file that may hold JSX (every one but `.ts`,
+  `.mts`, `.cts`) is read with JSX and without; Python as 3.12 and later
+  read it and as 3.11 did (an f-string a string to its first closing
+  quote, and a `t` before a quote a name, as 3.13 reads it).
+- **SQL and other text** keep the pack's lexer (`lexer.rs`, §6): SQL read
+  as standard SQL and as MySQL reads it, any other text with `#` and `//`
+  line comments, `/* … */` and quoted strings.
+
+Every reading is linear and total (any text, no panic, every character in
+at most one token). `lex.tokens` (one reading's tokens) and
+`lex.structure` (what the detectors ask) expose them; `test_lex.py` holds
+the JavaScript lexer's literals to `js_parse`'s literal nodes, span for
+span, on the parser's own test inputs (curated snippets, the repository's
+JavaScript, generated projects, token soups and mutations), and the Python
+lexer's strings, f-strings and comments to Python 3.13's `tokenize`, on
+the repository's Python, pyparse's curated cases and generated programs.
+On the benchmark's in-sample files (the malicious releases and the popular
+packages; never the holdout) the JavaScript lexer reads every literal of
+the 26,903 JavaScript-family files that parse (3,154,720 literals) as the
+parser does, but for four files' import attributes (`with { type: 'json'
+}`: a string the parser keeps no node for), and the Python lexer every
+string, f-string and comment of 19,044 Python files as Python 3.13's
+`tokenize` does. (The first run found the lexer reading a regular
+expression right after `else` as a division in six files: a statement,
+so a regular expression, may begin after `else` and `do`.)
+
+**What it changed** (phase 2's review of the recorded outputs, case by
+case). On real files nothing: none of the 330,924 outputs on the
+benchmark's files and the 230,400 on installed packages' files moved,
+and the holdout's counts did not. The recorded outputs' adversarial
+corpora moved where the old lexers misread:
+
+- `scan_file` and `scan_rules`, 15 and 16 of 4,257 answers on the
+  scan_file corpus: findings gone on a first line that is a hashbang (a
+  comment, as Node reads it: 4 and 5), after a Python string prefix
+  (`r'` is a string, not code: 2 and 2), in text both readings agree is
+  text (a template's, read as JSX text by the other reading: 1 and 1),
+  and in a block comment opened in a template's `${…}` (1 in
+  `scan_rules`); findings new on look-alike names in a template's holes
+  (8 and 8), and one decode-and-run whose comment only one reading saw.
+- the import-time test's prose (`import_code`), 1,760 of the 44,893
+  `signs_view` answers: 1,522 first-line hashbangs blanked as comments;
+  JavaScript line comments that end at a CR, U+2028 or U+2029, so the code
+  after them is no longer blanked (about 75); a template's holes and
+  regular expressions read as JavaScript reads them; Python comments and
+  string statements ending at a CR. The hooks corpus: 3 more
+  import-time reasons, each for code the old lexer hid in a comment it ran
+  on past a U+2028 or a CR.
+- `lex_comment_spans` itself, on its dense random texts: 9,372 of 60,000
+  answers, all JavaScript (with and without JSX) and Python; SQL and other
+  text unchanged.
+
+On the benchmark one release moved: num2words 0.5.15, SUSPICIOUS to
+INCOMPLETE. Its `_build.py` is a Windows executable (an `MZ` header) named
+as Python, SC-TRUNCATED as undecodable before and after; the look-alike
+name the old lexer read in its machine code (`HcЅ`) is gone, and the
+release still fails the gate (INCOMPLETE).

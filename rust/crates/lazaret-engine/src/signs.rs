@@ -3084,7 +3084,7 @@ fn py_statement_literals(p: &Pack, text: &[u32], literals: &[(usize, usize)], co
             && prior_ok
             && doc_head.match_at(text, ls, s as isize).is_some()
             && !(ls >= 2 && text[ls as usize - 2] == c('\\'))
-            && (j == text.len() || text[j] == c('\n') || text[j] == c('#'))
+            && (j == text.len() || text[j] == c('\n') || text[j] == c('\r') || text[j] == c('#'))
         {
             out.push((s, e));
         }

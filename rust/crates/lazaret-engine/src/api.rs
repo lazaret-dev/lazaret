@@ -66,6 +66,8 @@ pub const CALLS: &[&str] = &[
     "py_parse",
     // linre, the linear-time regex engine the patterns run on
     "linre.probe", "linre.check",
+    // the lexers (lex/): a text read once into its language's tokens
+    "lex.tokens", "lex.structure",
 ];
 
 fn dead_drop(v: Option<(usize, PyStr)>) -> Value {
@@ -368,6 +370,34 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
                 "NFKD" => crate::normalize::nfkd(text),
                 _ => return Err(CallError::BadArgs(format!("unknown normalization form {:?}", form))),
             })
+        }
+        "lex.tokens" => {
+            // the tokens of one reading (lex/): [kind, start, end] each, in
+            // code points; lang "js" (with JSX unless "jsx": false) or "py"
+            let jsx = !matches!(args.get("jsx"), Some(Value::Bool(false)));
+            let toks = match lang {
+                Some("js") => crate::lex::js::tokens(text, jsx),
+                Some("py") => crate::lex::py::tokens(text),
+                _ => return Err(CallError::BadArgs("lex.tokens needs lang 'js' or 'py'".into())),
+            };
+            Value::Arr(
+                toks.iter()
+                    .map(|t| Value::Arr(vec![Value::str(t.kind.name()), Value::Int(t.start as i64), Value::Int(t.end as i64)]))
+                    .collect(),
+            )
+        }
+        "lex.structure" => {
+            // what the detectors ask of a text (lex::Structure): for a file
+            // that may hold JSX, what its two readings agree on
+            let jsx = !matches!(args.get("jsx"), Some(Value::Bool(false)));
+            match crate::lex::structure(text, lang.unwrap_or(""), jsx) {
+                Some(st) => Value::obj(vec![
+                    ("comments", spans_value(&st.comments)),
+                    ("strings", spans_value(&st.strings)),
+                    ("literals", spans_value(&st.literals)),
+                ]),
+                None => return Err(CallError::BadArgs("lex.structure needs lang 'js' or 'py'".into())),
+            }
         }
         "pyre.probe" => probe(args, text)?,
         "linre.probe" => linre_probe(args, text)?,

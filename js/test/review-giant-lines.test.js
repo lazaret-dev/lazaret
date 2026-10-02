@@ -6,12 +6,12 @@
 // string next to eval(atob(…)) and execSync(…) hid both); in the metrics,
 // the whole run died (exit 5). The 16,000,000-byte source limit (0.1.1) let
 // such files through; at 2,000,000 they were SC-TRUNCATED. Now:
-//   * the lexer measures string and regex literals with loops, each the exact
-//     match of the regular expression it replaces (checked below);
+//   * the comment lexer is the native engine's (lex_comment_spans), which
+//     reads a literal without a regular expression;
 //   * pyRe writes a class repeated {N,} times as {N} then *;
 //   * a file whose scan still throws is SC-TRUNCATED (CRITICAL; the gate
 //     fails), and the metrics count its lines as code instead of dying.
-// The Python engine (no stack limit in re) is the reference for findings.
+// The native engine is the reference for findings.
 // All payloads are inert text.
 
 import { test } from "node:test";
@@ -20,43 +20,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { run, scanFile, scanManifest } from "../src/index.js";
-import { lineStrEnd, spanStrEnd, tripleStrEnd, plainStrEnd, jsRegexEnd } from "../src/lib/lexer.js";
 import { pyRe } from "../src/lib/pycompat.js";
-
-const lineStr = (q) => new RegExp(`${q}(?:[^${q}\\\\\\n]|\\\\[\\s\\S])*${q}?`, "y");
-const SPECS = [
-  ["'…' line", lineStrEnd, lineStr("'"), "'"], ['"…" line', lineStrEnd, lineStr('"'), '"'], ["`…` line", lineStrEnd, lineStr("`"), "`"],
-  ["template", spanStrEnd, /`(?:[^`\\]|\\[\s\S])*`?/y, "`"], ["MySQL '…'", spanStrEnd, /'(?:[^'\\]|\\[\s\S])*'?/y, "'"],
-  ["'''…'''", tripleStrEnd, /'''(?:[^'\\]|\\[\s\S]|'(?!''))*(?:'''|$)/y, "'''"],
-  ['"""…"""', tripleStrEnd, /"""(?:[^"\\]|\\[\s\S]|"(?!""))*(?:"""|$)/y, '"""'],
-  ["SQL '…'", plainStrEnd, /'[^']*'?/y, "'"], ["MySQL `…`", plainStrEnd, /`[^`]*`?/y, "`"],
-  ["regex literal", jsRegexEnd, /\/(?![*/])(?:[^/\\[\n]|\\[^\n]|\[(?:[^\]\\\n]|\\[^\n])*\])+\//y, "/"],
-];
-
-test("each literal loop ends where its regular expression's match ends", () => {
-  let seed = 20260926;
-  const rnd = (n) => { seed = (seed * 1103515245 + 12345) % 2 ** 31; return seed % n; };
-  const alphabet = ["'", '"', "`", "\\", "/", "*", "[", "]", "\n", "a", " ", "\ud83d", "\ude00"];
-  for (const [name, end, re, open] of SPECS) {
-    for (let t = 0; t < 20000; t++) {
-      let s = "x" + open;
-      for (let k = rnd(14); k >= 0; k--) s += alphabet[rnd(alphabet.length)];
-      re.lastIndex = 1;
-      const m = re.exec(s);
-      assert.equal(end(s, 1), m ? 1 + m[0].length : -1, `${name} on ${JSON.stringify(s)}`);
-    }
-  }
-});
-
-test("literals of millions of characters are measured without a stack overflow", () => {
-  const big = 9_000_000;           // the regular expressions overflowed from about 8.4 million
-  for (const [name, end, , open] of SPECS) {
-    for (const unit of ["a", "\\a", "a" + open[0]]) {
-      const s = "x" + open + unit.repeat(Math.ceil(big / unit.length));
-      assert.doesNotThrow(() => end(s, 1), `${name} over ${JSON.stringify(unit)}`);
-    }
-  }
-});
 
 test("pyRe writes a class repeated {N,} times as {N} then *: same matches, no overflow", () => {
   assert.equal(pyRe("[ab]{20,}c").source, "[ab]{20}[ab]*c");

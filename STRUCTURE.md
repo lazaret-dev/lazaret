@@ -247,7 +247,8 @@ js/
 │                         loader, one call, the rule pack's values), fs
 │                         (collection, report paths), encoding and codecs
 │                         (BOM/UTF-16/PEP 263), binary (magic bytes), lexer
-│                         (the comment lexer), redact, issue, supplychain
+│                         (the comment layout, the engine's lexers'), redact,
+│                         issue, supplychain
 │                         (install hooks), autorun and ghworkflow (editor and
 │                         agent settings that run commands; the workflows
 │                         the worms planted), jsparse (the JavaScript

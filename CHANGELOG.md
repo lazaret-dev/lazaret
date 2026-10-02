@@ -12,12 +12,15 @@ project is pre-1.0, so the 0.x API may still change.
 The native engine becomes Lazaret's only engine. Until now it was held,
 answer for answer, to the Python engine it was ported from: every detection
 landed twice, and the engine could be no better than its twin's structure.
-The refactor retires the twin. This first phase changes no finding — the
+The refactor retires the twin. Its first phase changes no finding — the
 engine answers what it answered at the baseline (tag `rust-first-baseline`,
 whose outputs were recorded on the benchmark's files and on installed
 packages) — and the phases that follow rebuild the detectors on the
-engine's parsers (`docs/RUST_ENGINE.md` §8). Whether it ships as 0.1.8 or
-0.2.0 is decided before the release.
+engine's lexers and parsers (`docs/RUST_ENGINE.md` §8), each change to a
+finding a reviewed difference in the recorded outputs. The lexers (phase
+2) change none on real files; the registry's rule set is 2.16.0, so stored
+verdicts are scanned again. Whether it ships as 0.1.8 or 0.2.0 is decided
+before the release.
 
 ### Changed
 
@@ -74,6 +77,35 @@ engine's parsers (`docs/RUST_ENGINE.md` §8). Whether it ships as 0.1.8 or
   hostile text can no longer make those patterns backtrack without end.
   linre charges the work budget what its automata read, as pyre charges
   its scans: no file needs more of the budget than it did.
+- **The engine's lexers read JavaScript and Python as their runtimes do**
+  (`docs/RUST_ENGINE.md` §15), for every caller that asks where a text's
+  comments and literals are: the per-file rules' comment layout and
+  names, the import-time test's prose, the cross-file follower, and
+  project mode and the suppression markers in both packages. A template's
+  `${…}` and an f-string's replacement fields are code (a call or a
+  look-alike name there is found, a comment there is a comment);
+  templates nest; a regular expression is told from a division by what
+  comes before it; a JavaScript line comment or string ends at any line
+  terminator (CR, U+2028 and U+2029 too: the old lexer ran a comment on to
+  the next LF, over the code after them), a Python comment at a CR too; a
+  first-line `#!` is a comment; t-strings are read as Python 3.14 reads
+  them. Where two runtimes read a text differently — with JSX or without,
+  Python 3.12 and later or 3.11 — only what both read as prose is prose.
+  What a runtime would refuse hides nothing below it: a quote not closed
+  on its line is a string to the line's end, and Annex B's `<!--` and
+  `-->` stay code (they are code in a module). The npm package's comment
+  lexer (`lexer.js`, about 450 lines) asks the engine instead. The
+  dashboard keeps its own lexer for now, which reads a template's `${…}`
+  and an f-string's fields as text. On real files nothing moved (none of
+  the 561,324 recorded outputs on the benchmark's and installed packages'
+  files; the holdout's counts); the reviewed differences are in the
+  recorded outputs' adversarial corpora, and one benchmark release moved
+  from SUSPICIOUS to INCOMPLETE (a Windows executable named `_build.py`,
+  whose machine code the old lexer happened to read a look-alike name in;
+  still SC-TRUNCATED, still failing the gate). The lexers read every
+  literal the JavaScript parser finds in the benchmark's 26,903 parsing
+  JavaScript files, and every string, f-string and comment Python 3.13's
+  `tokenize` finds in its 19,044 Python files.
 
 ### Added
 
@@ -84,6 +116,10 @@ engine's parsers (`docs/RUST_ENGINE.md` §8). Whether it ships as 0.1.8 or
 - linre, a linear-time regular expression engine with `re`'s answers on 616
   of the pack's 657 patterns (lazy DFAs, a bounded backtracker, a Pike VM,
   prefilters; §14).
+- The engine's lexers as calls: `lex.tokens` (one reading's tokens) and
+  `lex.structure` (what the detectors ask: comments, strings, literals),
+  held to the engine's JavaScript parser and to Python 3.13's `tokenize`
+  by `test_lex.py` (§15).
 - `scripts/bench.py`, the benchmark harness: registry scans of a labelled
   set of release files (resumable, a deadline each), and the comparison of
   two runs — every release whose verdict or strong findings moved, or, for

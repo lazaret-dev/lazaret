@@ -165,7 +165,11 @@ separators); `test_snapshot_hook_commands.py` a hook's command read as a
 program; `test_snapshot_small.py` the hidden names, look-alike names and
 off-screen code; `test_snapshot_lexer.py` the comment lexer's spans on dense
 random text in every language. A hash per 100 outputs: a failure names the
-chunks that moved, and `scripts/snapshot.py diff` the cases.
+chunks that moved, and `scripts/snapshot.py diff` the cases. The lexers
+themselves (`docs/RUST_ENGINE.md` §15) are held to the runtimes' own
+readers by `test_lex.py`: the JavaScript lexer's literals to the engine's
+JavaScript parser, node for node, and the Python lexer's strings,
+f-strings and comments to Python 3.13's `tokenize`.
 `test_rust_parity_regex.py` still compares the regex engine with `re` on
 every rule-pack pattern and 126 hand-written probes (search, match,
 fullmatch, finditer, sub, split, with pos/endpos; run it on each Python

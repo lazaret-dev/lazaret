@@ -1,6 +1,6 @@
 {
  "format": 1,
- "rule_set": "2.15.0",
+ "rule_set": "2.16.0",
  "source": "lazaret.scanner.core, extracted by scripts/make_rust_tables.py \u2014 do not edit",
  "values": {
   "ALWAYS_PRUNE_DIRS": {
@@ -10023,22 +10023,6 @@
    "flags": "",
    "re": "(?:^|[^\\w$])(?:function\\s*\\*?|def)\\s*$"
   },
-  "_FSTR_FIELD_STOP": {
-   "flags": "",
-   "re": "[#'\\\"(){}\\[\\]:]"
-  },
-  "_FSTR_TEXT_STOP": {
-   "map": {
-    "\"": {
-     "flags": "",
-     "re": "[{}\\\\\n\"]"
-    },
-    "'": {
-     "flags": "",
-     "re": "[{}\\\\\n']"
-    }
-   }
-  },
   "_FULL_SAN": {
    "map": {
     "js": {
@@ -10457,45 +10441,6 @@
     }
    }
   },
-  "_JSX_FILE_NEXT": {
-   "flags": "",
-   "re": "[/'\\\"`<]"
-  },
-  "_JSX_JS_NEXT": {
-   "flags": "",
-   "re": "[/'\\\"`{}<]"
-  },
-  "_JSX_KEYWORDS": {
-   "set": [
-    "await",
-    "case",
-    "default",
-    "delete",
-    "do",
-    "else",
-    "in",
-    "instanceof",
-    "new",
-    "of",
-    "return",
-    "throw",
-    "typeof",
-    "void",
-    "yield"
-   ]
-  },
-  "_JSX_NAME_RE": {
-   "flags": "",
-   "re": "[A-Za-z0-9_$.:\\-\\x80-\\U0010ffff]*"
-  },
-  "_JSX_TEXT_NEXT": {
-   "flags": "",
-   "re": "[{}<>]"
-  },
-  "_JSX_WS_RE": {
-   "flags": "",
-   "re": "[ \\t\\n\\r\\f\\v]*"
-  },
   "_JS_BINDING_RE": {
    "flags": "",
    "re": "[A-Za-z_$][\\w$]*"
@@ -10518,52 +10463,6 @@
   "_JS_METHOD_HEAD_RE": {
    "flags": "",
    "re": "^\\s*(?:(?:async|static|get|set)\\s+){0,3}(?!(?:if|for|while|switch|catch|with|function|return)\\b)[A-Za-z_$][\\w$]*\\s*\\([^()]*\\)$"
-  },
-  "_JS_REGEX_KEYWORDS": {
-   "set": [
-    "await",
-    "case",
-    "delete",
-    "do",
-    "else",
-    "in",
-    "instanceof",
-    "new",
-    "of",
-    "return",
-    "throw",
-    "typeof",
-    "void",
-    "yield"
-   ]
-  },
-  "_JS_REGEX_LIT_RE": {
-   "flags": "",
-   "re": "/(?![*/])(?:[^/\\\\\\[\\n]|\\\\.|\\[(?:[^\\]\\\\\\n]|\\\\.)*\\])+/"
-  },
-  "_JS_REGEX_PREV": {
-   "set": [
-    "!",
-    "%",
-    "&",
-    "(",
-    "*",
-    "+",
-    ",",
-    "-",
-    ":",
-    ";",
-    "<",
-    "=",
-    ">",
-    "?",
-    "[",
-    "^",
-    "{",
-    "|",
-    "}",
-    "~"
-   ]
   },
   "_JS_RUNTIMES": {
    "map": {
@@ -11703,20 +11602,6 @@
   "_LEX_NEXT": {
    "items": [
     [
-     "js",
-     {
-      "flags": "",
-      "re": "[/'\\\"`]"
-     }
-    ],
-    [
-     "py",
-     {
-      "flags": "",
-      "re": "[#'\\\"]"
-     }
-    ],
-    [
      "sql",
      {
       "flags": "",
@@ -11734,76 +11619,6 @@
   },
   "_LEX_STR": {
    "items": [
-    [
-     [
-      "js",
-      "'"
-     ],
-     {
-      "flags": "s",
-      "re": "'(?:[^'\\\\\\n]|\\\\.)*'?"
-     }
-    ],
-    [
-     [
-      "js",
-      "\""
-     ],
-     {
-      "flags": "s",
-      "re": "\"(?:[^\"\\\\\\n]|\\\\.)*\"?"
-     }
-    ],
-    [
-     [
-      "js",
-      "`"
-     ],
-     {
-      "flags": "s",
-      "re": "`(?:[^`\\\\]|\\\\.)*`?"
-     }
-    ],
-    [
-     [
-      "py",
-      "'"
-     ],
-     {
-      "flags": "s",
-      "re": "'(?:[^'\\\\\\n]|\\\\.)*'?"
-     }
-    ],
-    [
-     [
-      "py",
-      "'''"
-     ],
-     {
-      "flags": "s",
-      "re": "'''(?:[^'\\\\]|\\\\.|'(?!''))*(?:'''|\\Z)"
-     }
-    ],
-    [
-     [
-      "py",
-      "\""
-     ],
-     {
-      "flags": "s",
-      "re": "\"(?:[^\"\\\\\\n]|\\\\.)*\"?"
-     }
-    ],
-    [
-     [
-      "py",
-      "\"\"\""
-     ],
-     {
-      "flags": "s",
-      "re": "\"\"\"(?:[^\"\\\\]|\\\\.|\"(?!\"\"))*(?:\"\"\"|\\Z)"
-     }
-    ],
     [
      [
       "sql",
@@ -12802,16 +12617,6 @@
   "_PY_DOC_HEAD_RE": {
    "flags": "",
    "re": "[ \\t]*[rRuUbB]{0,2}\\Z"
-  },
-  "_PY_FSTRING_PREFIXES": {
-   "set": [
-    "f",
-    "fr",
-    "rf",
-    "rt",
-    "t",
-    "tr"
-   ]
   },
   "_PY_JOINS": {
    "value": "([{,=+-*/%&|^<>~@\\.\"'"

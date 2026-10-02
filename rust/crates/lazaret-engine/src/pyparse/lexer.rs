@@ -250,6 +250,8 @@ struct Lexer<'a> {
     /// the error being returned is one Python's tokenizer leaves to its
     /// parser (`LexFail::raised`)
     quiet: bool,
+    /// a `t` prefix begins a template string, as in Python 3.14 (PEP 750)
+    tstrings: bool,
 }
 
 #[inline]
@@ -304,6 +306,13 @@ pub fn line_starts(src: &[u32]) -> Vec<u32> {
 /// whole, with line 0 (Python's error has none): a text holding a NUL, or
 /// what Python cannot encode (a lone surrogate, a value beyond U+10FFFF).
 pub fn tokenize(src: &[u32]) -> Result<Lexed, LexError> {
+    tokenize_with(src, false)
+}
+
+/// `tokenize`, and with `tstrings` a `t` prefix (`t`, `tr`, `rt`) begins a
+/// template string, read as an f-string is (Python 3.14, PEP 750: the
+/// lexers read what 3.14 runs; the parser stays 3.13's).
+pub fn tokenize_with(src: &[u32], tstrings: bool) -> Result<Lexed, LexError> {
     if let Some(at) = src.iter().position(|&c| c == 0 || (0xD800..0xE000).contains(&c) || c > 0x10FFFF) {
         let why = if src[at] == 0 {
             "source code string cannot contain null bytes"
@@ -328,6 +337,7 @@ pub fn tokenize(src: &[u32]) -> Result<Lexed, LexError> {
         line_has_tokens: false,
         name_buf: Vec::new(),
         quiet: false,
+        tstrings,
     };
     let fail = match lx.run() {
         Ok(()) => None,
@@ -621,6 +631,7 @@ impl<'a> Lexer<'a> {
                     0x62 => (S_BYTES, false),
                     0x75 => (S_U, false),
                     0x66 => (0, true),
+                    0x74 if self.tstrings => (0, true),
                     _ => {
                         ok = false;
                         (0, false)
