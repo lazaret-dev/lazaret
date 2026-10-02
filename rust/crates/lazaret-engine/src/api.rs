@@ -70,6 +70,8 @@ pub const CALLS: &[&str] = &[
     "lex.tokens", "lex.structure",
     // phase 3: project mode's cross-file JavaScript taint (jsflow/)
     "js_flow",
+    // phase 3: project mode's cross-file Python taint (pyflow/)
+    "py_flow",
 ];
 
 fn dead_drop(v: Option<(usize, PyStr)>) -> Value {
@@ -367,6 +369,7 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
         "pyre.escape" => Value::Str(pyre::escape(text)),
         "cross_file" => cross_file(p, args, text)?,
         "js_flow" => js_flow(args, text)?,
+        "py_flow" => py_flow(args, text)?,
         "js_parse" | "js_parse_file" => {
             // jsparse.parse(text, ts, jsx) / jsparse.parse_file(path, text): the
             // tree as JSON, or {"error": {"line": n, "reason": …}}; "spans": each
@@ -914,6 +917,144 @@ fn js_flow(args: &Value, text: &[u32]) -> Result<Value, CallError> {
             })
             .collect(),
     ))
+}
+
+/// The files of a flow call: [[path, length], …] (their contents,
+/// concatenated, are the text; a length of null: content that is not text).
+fn flow_files(args: &Value, text: &[u32], call: &str) -> Result<Vec<(PyStr, Option<PyStr>)>, CallError> {
+    let bad = |m: &str| CallError::BadArgs(format!("{}: {}", call, m));
+    let items = args.get("files").and_then(|f| f.as_arr()).ok_or_else(|| bad("files"))?;
+    let mut files: Vec<(PyStr, Option<PyStr>)> = Vec::with_capacity(items.len());
+    let mut at = 0usize;
+    for item in items {
+        let parts = item.as_arr().ok_or_else(|| bad("a file is not [path, length]"))?;
+        let path = parts.first().and_then(|v| v.as_str()).ok_or_else(|| bad("a file's path"))?.to_vec();
+        if matches!(parts.get(1), Some(Value::Null)) {
+            files.push((path, None));
+            continue;
+        }
+        let len = parts.get(1).and_then(|v| v.as_i64()).filter(|&n| n >= 0).ok_or_else(|| bad("a file's length"))? as usize;
+        if at + len > text.len() {
+            return Err(bad("the files' lengths run past the text"));
+        }
+        files.push((path, Some(text[at..at + len].to_vec())));
+        at += len;
+    }
+    if at != text.len() {
+        return Err(bad("the files' lengths do not add up to the text"));
+    }
+    Ok(files)
+}
+
+/// The configured part of a flow call's model: (sources, sinks, full,
+/// partial) as taintspec validated them.
+#[allow(clippy::type_complexity)]
+fn flow_model(args: &Value, call: &str) -> Result<(Vec<PyStr>, Vec<(PyStr, u8)>, Vec<PyStr>, Vec<(PyStr, u8)>), CallError> {
+    let bad = |m: &str| CallError::BadArgs(format!("{}: {}", call, m));
+    let cat = |v: &Value| -> Result<u8, CallError> {
+        let s = v.as_str().ok_or_else(|| bad("a category"))?;
+        let name: String = s.iter().map(|&c| char::from_u32(c).unwrap_or('\u{FFFD}')).collect();
+        crate::jsflow::cat_of(&name).ok_or_else(|| bad("an unknown category"))
+    };
+    let sources = arg_strs(args, "sources");
+    let mut sinks = Vec::new();
+    for item in args.get("sinks").and_then(|v| v.as_arr()).unwrap_or(&[]) {
+        let parts = item.as_arr().ok_or_else(|| bad("a sink is not [pattern, category]"))?;
+        let pat = parts.first().and_then(|v| v.as_str()).ok_or_else(|| bad("a sink's pattern"))?.to_vec();
+        sinks.push((pat, cat(parts.get(1).unwrap_or(&Value::Null))?));
+    }
+    let full = arg_strs(args, "full");
+    let mut partial = Vec::new();
+    for item in args.get("partial").and_then(|v| v.as_arr()).unwrap_or(&[]) {
+        let parts = item.as_arr().ok_or_else(|| bad("a partial sanitizer is not [name, [category, …]]"))?;
+        let name = parts.first().and_then(|v| v.as_str()).ok_or_else(|| bad("a sanitizer's name"))?.to_vec();
+        let mut bits = 0u8;
+        for c in parts.get(1).and_then(|v| v.as_arr()).unwrap_or(&[]) {
+            bits |= crate::jsflow::bit(cat(c)?);
+        }
+        partial.push((name, bits));
+    }
+    Ok((sources, sinks, full, partial))
+}
+
+/// A flow call's output: ["issue", category, path, line, source, sink,
+/// via, the index of the path's file], ["note", rule, name, path, line,
+/// msg, why, fix] (and js_flow's ["skipped_size", path, n, the limit]).
+fn flow_out(out: Vec<crate::jsflow::Out>, max_file: usize) -> Value {
+    use crate::jsflow::Out;
+    Value::Arr(
+        out.into_iter()
+            .map(|o| match o {
+                Out::SkippedSize { path, n } => Value::Arr(vec![
+                    Value::str("skipped_size"),
+                    Value::Str(path),
+                    Value::Int(n as i64),
+                    Value::Int(max_file as i64),
+                ]),
+                Out::Issue { cat, path, file, line, source, sink, via } => Value::Arr(vec![
+                    Value::str("issue"),
+                    Value::str(crate::jsflow::CATS[cat as usize]),
+                    Value::Str(path),
+                    Value::Int(line as i64),
+                    Value::Str(source),
+                    Value::Str(sink),
+                    Value::Str(via),
+                    Value::Int(file as i64),
+                ]),
+                Out::Note { rule, name, path, line, msg, why, fix } => Value::Arr(vec![
+                    Value::str("note"),
+                    Value::str(rule),
+                    Value::str(name),
+                    Value::Str(path),
+                    Value::Int(line as i64),
+                    Value::Str(msg),
+                    Value::str(why),
+                    Value::str(fix),
+                ]),
+            })
+            .collect(),
+    )
+}
+
+/// py_flow: {"files": [[path, length], …] (their contents, concatenated,
+/// are the text; a length of null: a file whose content is not text),
+/// "sources", "sinks", "full", "partial" (the configured part of the model,
+/// as taintspec validated it), and lower limits, each at most the default:
+/// "max_iters", "max_files", "max_bytes", "work_limit" and "run_limit"
+/// ([base, per node])} -> the pass's output in order: ["issue", category,
+/// path, line, source, sink, via, the index of the path's file], ["note",
+/// rule, name, path, line, msg, why, fix].
+fn py_flow(args: &Value, text: &[u32]) -> Result<Value, CallError> {
+    use crate::pyflow::{self, Config};
+    let bad = |m: &str| CallError::BadArgs(format!("py_flow: {}", m));
+    let files = flow_files(args, text, "py_flow")?;
+    let (sources, sinks, full, partial) = flow_model(args, "py_flow")?;
+    let count = |k: &str| -> Result<Option<u64>, CallError> {
+        match args.get(k) {
+            None => Ok(None),
+            Some(v) => v.as_i64().filter(|&n| n >= 0).map(|n| Some(n as u64)).ok_or_else(|| bad(k)),
+        }
+    };
+    let pair = |k: &str| -> Result<Option<(u64, u64)>, CallError> {
+        match args.get(k) {
+            None => Ok(None),
+            Some(v) => {
+                let parts = v.as_arr().filter(|p| p.len() == 2).ok_or_else(|| bad(k))?;
+                let n = |v: &Value| v.as_i64().filter(|&n| n >= 0).map(|n| n as u64).ok_or_else(|| bad(k));
+                Ok(Some((n(&parts[0])?, n(&parts[1])?)))
+            }
+        }
+    };
+    let max_iters = count("max_iters")?.map(|n| n.min(u32::MAX as u64) as u32);
+    let max_files = count("max_files")?.map(|n| n as usize);
+    let max_bytes = count("max_bytes")?.map(|n| n as usize);
+    let (work, run) = (pair("work_limit")?, pair("run_limit")?);
+    // (the model is built on the pass's own thread: its patterns are not Send)
+    let out = on_own_stack(move || {
+        let cfg = Config::new(&sources, &sinks, &full, &partial).with_limits(max_iters, max_files, max_bytes, work, run);
+        pyflow::analyze(&files, cfg)
+    });
+    Ok(flow_out(out, 0))
 }
 
 fn match_value(m: &pyre::Match) -> Value {

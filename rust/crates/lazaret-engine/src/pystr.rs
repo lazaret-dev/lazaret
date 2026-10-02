@@ -208,13 +208,21 @@ pub fn starts_with(h: &[u32], needle: &str) -> bool {
 }
 
 pub fn ends_with(h: &[u32], needle: &str) -> bool {
+    let b = needle.as_bytes();
+    if b.is_ascii() {
+        return h.len() >= b.len() && needle_eq(h, h.len() - b.len(), b);
+    }
     let n = u(needle);
     h.len() >= n.len() && h[h.len() - n.len()..] == n[..]
 }
 
 /// h == needle
 pub fn eq(h: &[u32], needle: &str) -> bool {
-    h.len() == needle.chars().count() && starts_with(h, needle)
+    let b = needle.as_bytes();
+    if h.len() == b.len() && b.is_ascii() {
+        return needle_eq(h, 0, b);
+    }
+    !b.is_ascii() && h.iter().copied().eq(needle.chars().map(|c| c as u32))
 }
 
 /// h.count(c, start, end)
@@ -429,6 +437,16 @@ mod tests {
         assert!(contains(&h, "lo w") && !contains(&h, "low"));
         assert_eq!(split_str(&s("a::b::"), &s("::")).len(), 3);
         assert_eq!(strip(&s("\u{85} x \x1c")), &s("x")[..]);
+    }
+
+    #[test]
+    fn equal_and_ends_with_any_needle() {
+        assert!(eq(&s("os.system"), "os.system") && !eq(&s("os.systems"), "os.system") && !eq(&s("os.syste"), "os.system"));
+        assert!(eq(&s(""), "") && !eq(&s("x"), ""));
+        assert!(eq(&s("caf\u{e9}"), "caf\u{e9}") && !eq(&s("cafe"), "caf\u{e9}") && !eq(&s("caf\u{e9}x"), "caf\u{e9}"));
+        assert!(!eq(&s("abcde"), "caf\u{e9}"));      // as long as the needle's UTF-8 bytes
+        assert!(ends_with(&s("a.execute"), "execute") && !ends_with(&s("ute"), "execute") && ends_with(&s("x"), ""));
+        assert!(ends_with(&s("na\u{ef}ve"), "\u{ef}ve") && !ends_with(&s("naive"), "\u{ef}ve"));
     }
 
     #[test]

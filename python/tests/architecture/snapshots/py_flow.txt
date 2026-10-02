@@ -1,0 +1,4 @@
+# py_flow: 224 outputs, a hash per 100 (tests/architecture/_snapshots.py)
+b9e24a1b90c12c19
+1f752e1a86b579b0
+5a68f3c03891a7cc

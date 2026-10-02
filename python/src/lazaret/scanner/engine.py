@@ -284,6 +284,25 @@ def cross_file_issues(files, skip_paths=(), who="Dependency code", one_package=F
     return out
 
 
+def _flow_args(files, sources, sinks, full, partial):
+    """A flow call's files, and the model's configured part (js_flow)."""
+    texts = [f["content"] if isinstance(f.get("content"), str) else None for f in files]
+    args = {"files": [[f["path"], None if t is None else len(t)] for f, t in zip(files, texts)]}
+    if sources:
+        args["sources"] = [g.pattern for g in sources]
+    if sinks:
+        args["sinks"] = [[g.pattern, cat] for g, cat in sinks]
+    if full:
+        args["full"] = sorted(full)
+    if partial:
+        args["partial"] = [[name, sorted(cats)] for name, cats in sorted(partial.items())]
+    return args, "".join(t for t in texts if t is not None)
+
+
+def _pair(limit):
+    return [int(limit[0]), int(limit[1])]
+
+
 def js_flow(files, sources=(), sinks=(), full=(), partial=None, run_limit=None):
     """The cross-file JavaScript taint pass (rust/crates/lazaret-engine/src/
     jsflow/) over `files` ({"path", "content"}: a project's own JavaScript
@@ -296,16 +315,33 @@ def js_flow(files, sources=(), sinks=(), full=(), partial=None, run_limit=None):
     limit], ["issue", category, path, line, source, sink, chain, the index
     of the path's file in `files`], ["note", rule, name, path, line, msg,
     why, fix]. Raises _native.NativeError when the engine cannot answer."""
-    texts = [f["content"] if isinstance(f.get("content"), str) else None for f in files]
-    args = {"files": [[f["path"], None if t is None else len(t)] for f, t in zip(files, texts)]}
-    if sources:
-        args["sources"] = [g.pattern for g in sources]
-    if sinks:
-        args["sinks"] = [[g.pattern, cat] for g, cat in sinks]
-    if full:
-        args["full"] = sorted(full)
-    if partial:
-        args["partial"] = [[name, sorted(cats)] for name, cats in sorted(partial.items())]
+    args, text = _flow_args(files, sources, sinks, full, partial)
     if run_limit is not None:
-        args["run_limit"] = [int(run_limit[0]), int(run_limit[1])]
-    return _native.call("js_flow", args, "".join(t for t in texts if t is not None))
+        args["run_limit"] = _pair(run_limit)
+    return _native.call("js_flow", args, text)
+
+
+def py_flow(files, sources=(), sinks=(), full=(), partial=None, max_iters=None, max_files=None, max_bytes=None,
+            work_limit=None, run_limit=None):
+    """The cross-file Python taint pass (rust/crates/lazaret-engine/src/
+    pyflow/) over `files` ({"path", "content"}: a project's own Python; a
+    content that is not a str is noted as not text), with the model's
+    configured part as for js_flow (`full`: the configured full sanitizers,
+    the built-in ones being the pass's own). Each limit lowers the pass's
+    own, never raises it: `max_iters` (readings of one function in the
+    fixpoint), `max_files` and `max_bytes` (the files and characters read),
+    `work_limit` (base, steps per node: the fixpoint's budget) and
+    `run_limit` (base, steps per node: one reading's). The pass's outputs,
+    in order: ["issue", category, path, line, source, sink, chain, the
+    index of the path's file in `files`], ["note", rule, name, path, line,
+    msg, why, fix]. Raises _native.NativeError when the engine cannot
+    answer."""
+    args, text = _flow_args(files, sources, sinks, full, partial)
+    for key, n in (("max_iters", max_iters), ("max_files", max_files), ("max_bytes", max_bytes)):
+        if n is not None:
+            args[key] = max(0, int(n))
+    if work_limit is not None:
+        args["work_limit"] = _pair(work_limit)
+    if run_limit is not None:
+        args["run_limit"] = _pair(run_limit)
+    return _native.call("py_flow", args, text)
