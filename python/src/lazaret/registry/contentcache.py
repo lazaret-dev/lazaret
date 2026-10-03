@@ -227,9 +227,8 @@ class Memo:
                 if self._flights.get(key) is flight:
                     del self._flights[key]
                 counts = self._counts[kind]
-                if keep and 0 < self.max_bytes and size * MAX_ENTRY_SHARE <= self.max_bytes:
-                    self._answers[key] = (stored, size)
-                    self._answers.move_to_end(key)
+                if keep and size * MAX_ENTRY_SHARE <= self.max_bytes:                  # (a memo of 0 bytes keeps nothing: size is over 0)
+                    self._answers[key] = (stored, size)                                # (a new key goes last: it is the newest)
                     self._bytes += size
                     counts.stored += 1
                     self._evict()

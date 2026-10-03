@@ -763,6 +763,84 @@ class BookkeepingTests(unittest.TestCase):
         self.assertEqual(memo.get_or_compute(b, lambda: ["B again"]), ["B again"])
 
 
+    def test_the_estimate_of_a_dict_counts_its_keys_and_its_values(self):
+        self.assertEqual(cc.estimate({}), 64)
+        self.assertEqual(cc.estimate({"a": "b"}), 64 + 16 + 2 * 50)
+        self.assertEqual(cc.estimate({1: None, 2: None}), 64 + 2 * 16 + 4 * 32)
+        self.assertGreater(cc.estimate({"k" * 1000: 1}), 1000)
+
+    def test_a_memo_with_no_room_counts_what_it_drops_and_stores_and_evicts_nothing(self):
+        memo = cc.Memo(max_bytes=0)
+        memo.get_or_compute(key(), lambda: ["a"])
+        self.assertEqual({n: counts(memo)[n] for n in ("stored", "dropped", "evicted")}, {"stored": 0, "dropped": 1, "evicted": 0})
+
+    def test_a_hit_in_a_batch_keeps_the_answer_from_going_first(self):
+        text = "x" * 500
+        memo = cc.Memo(max_bytes=8 * cc.estimate([text]) + 10)
+        keys = [key(n, n) for n in "abcdefghi"]
+        for k in keys[:8]:
+            memo.get_or_compute(k, lambda: [text])
+        memo.get_or_compute_many([keys[0]], lambda ks: self.fail("asked"))               # (a is used again, in a batch)
+        memo.get_or_compute(keys[8], lambda: [text])                                      # (b goes, not a)
+        self.assertEqual(memo.get_or_compute(keys[0], lambda: ["gone"]), [text])
+        self.assertEqual(memo.get_or_compute(keys[1], lambda: ["gone"]), ["gone"])
+
+    def lead_a_batch(self, memo, k, fail_with):
+        """A thread leads a batch of `k` that raises `fail_with` once its gate opens -> (gate, thread, what it raised)."""
+        gate, started, raised = threading.Event(), threading.Event(), []
+
+        def failing(missing):
+            started.set()
+            gate.wait(TIMEOUT)
+            raise fail_with
+
+        def run():
+            try:
+                memo.get_or_compute_many([k], failing)
+            except BaseException as exc:                                                   # (KeyboardInterrupt too)
+                raised.append(exc)
+        thread = threading.Thread(target=run)
+        thread.start()
+        self.addCleanup(thread.join, TIMEOUT)
+        self.assertTrue(started.wait(TIMEOUT))
+        return gate, thread, raised
+
+    def test_a_batch_that_fails_gives_the_error_to_the_batch_that_waited_for_it(self):
+        memo, k = cc.Memo(), key()
+        gate, thread, raised = self.lead_a_batch(memo, k, ValueError("engine said no"))
+        asked, pool = [], concurrent.futures.ThreadPoolExecutor(1)
+        self.addCleanup(pool.shutdown, True)
+        follower = pool.submit(memo.get_or_compute_many, [k], lambda ks: asked.append(list(ks)) or [["its own"] for _ in ks])
+        time.sleep(0.2)
+        gate.set()
+        thread.join(TIMEOUT)
+        with self.assertRaisesRegex(ValueError, "engine said no"):
+            follower.result(TIMEOUT)
+        self.assertEqual((asked, len(raised), counts(memo)["errors"]), ([], 1, 1))
+
+    def test_a_batch_that_is_interrupted_leaves_the_batch_that_waited_to_ask_for_itself(self):
+        memo, k = cc.Memo(), key()
+        gate, thread, raised = self.lead_a_batch(memo, k, KeyboardInterrupt())
+        pool = concurrent.futures.ThreadPoolExecutor(1)
+        self.addCleanup(pool.shutdown, True)
+        follower = pool.submit(memo.get_or_compute_many, [k], lambda ks: [["its own"] for _ in ks])
+        time.sleep(0.2)
+        gate.set()
+        thread.join(TIMEOUT)
+        self.assertEqual(follower.result(TIMEOUT), [["its own"]])
+        self.assertEqual(len(raised), 1)
+        self.assertIsInstance(raised[0], KeyboardInterrupt)
+        self.assertEqual(counts(memo)["errors"], 0)                                        # (an interrupt is not an engine error)
+
+    def test_the_message_for_the_wrong_answers_says_how_many_came_back_or_that_it_was_no_list(self):
+        keys = [key("a", "a"), key("b", "b")]
+        for memo in (cc.Memo(), cc.NULL):
+            for answers, said in (([["x"]], "got 1"), (None, "got no list"), ([["x"]] * 3, "got 3"), ("abc", "got 3")):
+                with self.subTest(memo=type(memo).__name__, answers=answers):
+                    with self.assertRaisesRegex(ValueError, "asked for 2 answers and " + said + "$"):
+                        memo.get_or_compute_many(keys, lambda missing, answers=answers: answers)
+
+
 class NullMemoTests(unittest.TestCase):
     def test_it_computes_every_time_and_keeps_nothing(self):
         work = Counter(["a"])
