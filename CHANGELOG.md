@@ -7,7 +7,25 @@ This log starts at 0.1.6; for earlier releases see the git history and tags.
 The format is based on [Keep a Changelog](https://keepachangelog.com); the
 project is pre-1.0, so the 0.x API may still change.
 
-## [Unreleased] — the Rust-first refactor
+## [0.1.8] — 2026-10-03
+
+0.1.8 is two rounds of work, released together. Part 1 is the Rust-first
+refactor: the native engine becomes Lazaret's only engine, and the
+supply-chain detectors are rebuilt on its parsers. Part 2 is the detection
+rounds prepared for October 1, which waited for it; their numbers are as
+measured then. Where the numbers stand at release (the benchmark's 516
+malicious releases and 429 popular packages are in-sample; the holdout is
+745 other malicious releases of the same dataset, read only in aggregate):
+
+| | 0.1.8 | 0.1.7 |
+| --- | --- | --- |
+| Malicious releases SUSPICIOUS (in-sample) | 87.0% (449 of 516) | 68% |
+| ... SUSPICIOUS or WARN | 91.1% (470) | 77% |
+| Holdout, SUSPICIOUS | 85.4% (636 of 745) | 70% |
+| Holdout releases that share no code with the benchmark, SUSPICIOUS | 79.5% (395 of 497) | 74% |
+| Popular packages SUSPICIOUS · SUSPICIOUS or WARN | none · 7.2% (31 of 429) | 0.7% · 7.5% |
+
+### Part 1: the Rust-first refactor
 
 The native engine becomes Lazaret's only engine. Until now it was held,
 answer for answer, to the Python engine it was ported from: every detection
@@ -18,11 +36,10 @@ whose outputs were recorded on the benchmark's files and on installed
 packages) — and the phases that follow rebuild the detectors on the
 engine's lexers and parsers (`docs/RUST_ENGINE.md` §8), each change to a
 finding a reviewed difference in the recorded outputs. The lexers (phase
-2) change none on real files; the registry's rule set is 2.18.0, so stored
-verdicts are scanned again. Whether it ships as 0.1.8 or 0.2.0 is decided
-before the release.
+2) change none on real files. The registry's rule set is 2.24.0, so stored
+verdicts are scanned again.
 
-### Changed
+#### Changed
 
 - **One engine.** The Python package's supply-chain tests, per-file rules
   and cross-file follower are the native engine's alone. `core.py` (18,815
@@ -319,7 +336,7 @@ before the release.
   parameter `funсtion` with a Cyrillic с. A look-alike of a name the rule
   watches for (`import`, `eval` …) stays CRITICAL.
 
-### Added
+#### Added
 
 - The engine's port of project mode's cross-file JavaScript taint pass
   (`js_flow`: jsflow.py's scopes, bindings, points-to and summaries, on the
@@ -374,7 +391,7 @@ before the release.
   report for code scanning, whose path is its `sarif` output. Its inputs
   reach its scripts through the environment, never spliced into them.
 
-### Fixed
+#### Fixed
 
 - **The zip reader on what the 0.1.9 lane's fuzzers found** (F-2, F-6,
   F-7). A zip entry with no name raised `IndexError` out of the reader on
@@ -435,7 +452,7 @@ before the release.
   unfinished reading instead of failing closed. Only a finished reading is
   remembered.
 
-## [0.1.8] — 2026-10-01
+### Part 2: the detection rounds (prepared for October 1)
 
 0.1.8 reads malware by what it does. A round late in its cycle audited
 every strong detector for whether it names a behaviour or recognizes the
@@ -506,7 +523,7 @@ The registry scans give the same verdicts, reasons and findings for every
 package; litellm's takes 10.5 s instead of 16.6 s, playwright-core's 5.8 s
 instead of 10.6 s, next's 8.9 s instead of 10.4 s.
 
-### Added
+#### Added
 - **An install hook's command is read as a program** (both engines).
   0.1.7 made a hook CRITICAL when its command merely contained curl, wget,
   eval, base64, `node -e`, `sh -c` or powershell: tokens a hook that fetches
@@ -1069,7 +1086,7 @@ instead of 10.6 s, next's 8.9 s instead of 10.4 s.
   the pack fails every suite run; `js/test/pool.test.js` the npm CLI's
   reports with 1, 2 and 3 worker threads.
 
-### Changed
+#### Changed
 - **Detectors written from samples now read the behaviour** (the audit of
   every strong detector for whether it names what code does or recognizes
   the samples it was written from). An install hook's download and evaluation tools and the
@@ -1246,7 +1263,7 @@ instead of 10.6 s, next's 8.9 s instead of 10.4 s.
   is run there. On two cores the `--deps` scan of an installed tree takes
   3.5 s instead of 5.1 s.
 
-### Removed
+#### Removed
 - **The npm package's JavaScript twins of what the engine answers:**
   `js/src/lib/hooks.js`, `received.js`, `shellpipe.js` and the synced
   `received-spec.json`, `js/src/scanner/linear.js`, and the rule loop,
@@ -1255,7 +1272,7 @@ instead of 10.6 s, next's 8.9 s instead of 10.4 s.
   library no longer exports `RULES` and `TEXT_RULES` (the rules live in the
   engine's rule pack); the supply-chain tests it exports are the engine's.
 
-### Fixed
+#### Fixed
 - **A Python package's browser bundle was import-time code to `--deps`** (both
   packages; the detection round). `--deps` gives every JavaScript and Python
   file of a dependency the import-time test, where the registry reads what
