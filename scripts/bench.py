@@ -75,6 +75,7 @@ def scan_one(rec, deadline_s):
     row["strong"] = [[i["rule"], i["sev"], i["msg"][:700]] for i in res["issues"]
                      if i["rule"].startswith("SC-") and i["sev"] in STRONG]
     row["weak"] = sorted({i["rule"] for i in res["issues"] if i["rule"].startswith("SC-") and i["sev"] == "MAJOR"})
+    row["useTime"] = res.get("useTime")                # how much SC-USE-RISK read (None: not run)
     return row
 
 

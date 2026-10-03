@@ -7,6 +7,19 @@ This log starts at 0.1.6; for earlier releases see the git history and tags.
 The format is based on [Keep a Changelog](https://keepachangelog.com); the
 project is pre-1.0, so the 0.x API may still change.
 
+## [Unreleased]
+
+### Changed
+
+- **SC-USE-RISK reads the same files on every machine.** Registry and guard scans read a
+  package's code that runs only when it is used, smallest files first, for at most 3
+  seconds per release file: a slower machine read less, and nothing said so. The bound
+  is now 24,000,000 characters per release file, which reads what 3 seconds read on two
+  cores at the same cost. A registry scan's result carries what was read (`useTime`:
+  files and characters, of how many, and the bound), in the JSON, the MCP server's answer
+  and a line of the summary when code was left unread (next 16.3.8: 32% of 74 million
+  characters).
+
 ## [0.1.8] — 2026-10-03
 
 0.1.8 is two rounds of work, released together. Part 1 is the Rust-first

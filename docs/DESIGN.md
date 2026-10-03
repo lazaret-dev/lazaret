@@ -645,12 +645,15 @@ Python-only registry checks (0.1.8): SC-USE-RISK runs the import-time test on
 the files no entry point loads (`_ArtifactScan._use_time_code`) and keeps only
 its CRITICAL shapes — skipping tests, examples, docs, demos, benchmarks and a
 web app's static assets (USE_RISK_SKIP_DIRS), not reading once the archive is
-SUSPICIOUS, smallest files first within USE_RISK_SECONDS. What it doesn't reach
-is not SC-TRUNCATED: the file rules read every file. The cross-file follower
-reads the same files as one package (`_cross_file_code`, §5c; its SC-IMPORT-RISK
-names the file), and scripts that install scripts and import-time code start
-with node or python are followed to the package file each runs
-(`_started_scripts`, `core.spawned_scripts`) and tested like the one that
+SUSPICIOUS, smallest files first within USE_RISK_CHARS characters per archive
+(a bound by work, so every machine reads the same files; until 0.1.9 it was 3
+seconds). What it doesn't reach is not SC-TRUNCATED: the file rules read every
+file. The artifact's `useTime` (files and characters read, of how many, and the
+bound) says how much it read, and `print_scan` says so when it left code unread.
+The cross-file follower reads the same files as one package (`_cross_file_code`,
+§5c; its SC-IMPORT-RISK names the file), and scripts that install scripts and
+import-time code start with node or python are followed to the package file each
+runs (`_started_scripts`, `core.spawned_scripts`) and tested like the one that
 started them. SC-NEW-DEPENDENCY
 (`new_dependency_issues`, called by `scan_package`) compares a release's
 dependencies with the release published before it and looks up the added

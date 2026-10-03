@@ -678,7 +678,8 @@ def tool_scan_package(args):
            "profile": res["profile"],
            "filesScanned": res["filesScanned"], "binaryArtifacts": res.get("binaryArtifacts", 0),
            "supplyChainIndicators": res["supplyChain"], "severityCounts": res["sevCounts"],
-           "issueTotal": len(res["issues"]), "issues": [slim(i) for i in res["issues"][:MAX_ISSUES]]}
+           "issueTotal": len(res["issues"]), "issues": [slim(i) for i in res["issues"][:MAX_ISSUES]],
+           "useTime": res.get("useTime")}
     if len(res.get("artifacts") or []) > 1:
         out["artifacts"] = [{k: a.get(k) for k in ("filename", "kind", "verdict", "verdictReason")}
                             for a in res["artifacts"]]

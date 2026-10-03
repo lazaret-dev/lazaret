@@ -1346,19 +1346,20 @@ USE_RISK_SKIP_DIRS = {"example", "examples", "doc", "docs", "demo", "demos", "sa
 # The test costs time on every file it reads, so it reads none once the
 # package is SUSPICIOUS anyway (the Shai-Hulud 2.0 releases' 10 MB
 # bun_environment.js took 10 s each, and changed no verdict), no file of more
-# than USE_RISK_MAX_CHARS characters, and stops after USE_RISK_SECONDS per
-# archive, smallest files first: next 15.5 (4,573 files) took 25 s more to
-# read whole; bounded, a first guarded plan of next, react, react-dom,
-# typescript and eslint took 53 s (50 s with 0.1.7), and every sample of the
-# benchmark this test catches was read in time. What it did not read is not
-# "not scanned" — the rules of the file scan read every file — so the verdict
-# is not INCOMPLETE.
+# than USE_RISK_MAX_CHARS characters, and at most USE_RISK_CHARS characters
+# per archive, smallest files first. The bound is work, not time, so every
+# machine reads the same files (P-14). It was 3 s per archive, which read
+# less on a slower machine, and the report didn't say. 24 million characters
+# read what 3 s read on two cores, at the same cost: all of a litellm wheel's
+# 20 million, 32% of next 16.3.8's 74 million (3 s: 26%). Reading all of
+# next's made its scan 32 s instead of 14 s. What it did not read is not "not
+# scanned" — the rules of the file scan read every file — so the verdict is
+# not INCOMPLETE; the artifact's "useTime" says how much it read.
 USE_RISK_MAX_CHARS = 8_000_000
-USE_RISK_SECONDS = 3.0
-# The native engine reads a batch of files at a time, and the time is checked
-# between batches: a batch holds at most USE_RISK_BATCH_CHARS characters
-# (or one file), or a batch of large bundles overran the time many times over
-# (truffle's: 20 s).
+USE_RISK_CHARS = 24_000_000
+# The native engine reads a batch of files at a time; the archive's deadline
+# (Budget) is checked between batches, which hold at most
+# USE_RISK_BATCH_CHARS characters (or one file) in this step.
 USE_RISK_BATCH_CHARS = 1_000_000
 
 
@@ -1624,6 +1625,7 @@ class _ArtifactScan:
         self.startup = set()       # a wheel's sitecustomize / usercustomize
         self.unread = False        # a member the archive's limits left unread
         self.unused_dependencies = []  # npm: registry names no file uses (_unused_dependencies)
+        self.use_time = None       # what SC-USE-RISK's step read (_use_time_code), None: not run
 
     # ---- bookkeeping ----
     def truncate(self, rel, detail):
@@ -2213,24 +2215,21 @@ class _ArtifactScan:
         self._use_time_code(set(files))
         self._cross_file_code()
 
-    def _import_time_risks(self, todo, stop=None):
+    def _import_time_risks(self, todo, short_batches=False):
         """(rel, text, lang, import_time_risk's answer) for [(rel, text, lang)]
         (the text with its newlines normalized), in order, a batch at a time
         (engine.py: the engine reads a batch on threads; an answer it could
         not give is the NativeError it stands for, engine.unanswered); the
-        deadline is checked before each batch, and past `stop`
-        (time.monotonic()) no batch is started — with a stop, a batch holds
-        at most USE_RISK_BATCH_CHARS characters, or one file."""
+        deadline is checked before each batch. With `short_batches`, a batch
+        holds at most USE_RISK_BATCH_CHARS characters, or one file."""
         size = _engine.BATCH
         start = 0
         while start < len(todo):
-            if stop is not None and time.monotonic() > stop:
-                return
             end, chars = start + 1, len(todo[start][1] or "")
             while end < len(todo) and end - start < size:
                 more = len(todo[end][1] or "")
-                if stop is not None and chars + more > USE_RISK_BATCH_CHARS:
-                    break                   # (stop is checked between batches: keep one short)
+                if short_batches and chars + more > USE_RISK_BATCH_CHARS:
+                    break
                 chars += more
                 end += 1
             chunk = [(rel, lazaret.normalize_newlines(text), lang) for rel, text, lang in todo[start:end]]
@@ -2266,22 +2265,35 @@ class _ArtifactScan:
     def _use_time_code(self, loaded):
         """SC-USE-RISK (CRITICAL): the strong import-time shapes in the other
         JavaScript and Python files of the package — code it runs when it is
-        used (see USE_RISK_SKIP_DIRS)."""
+        used (see USE_RISK_SKIP_DIRS), smallest files first, within
+        USE_RISK_CHARS characters. self.use_time says how much of it was
+        read: files and characters, of how many."""
         if self._suspicious():
             return
-        stop = time.monotonic() + USE_RISK_SECONDS
-        # smallest first: within the time, as many files as can be read (droppers are small)
-        todo = []
+        # smallest first, within USE_RISK_CHARS: as many files as fit (droppers are small), and the
+        # same ones on every machine. Every candidate counts toward the share: a file over
+        # USE_RISK_MAX_CHARS, or past the bound, is one not read.
+        todo, files, chars, room = [], 0, 0, USE_RISK_CHARS
         for rel in sorted(self.sources, key=lambda r: (len(self.sources[r][0] or ""), r)):
             if rel in loaded or rel in self.install_scripts or rel in self.startup or _not_used_code(rel):
                 continue
             text, lang = self.sources[rel]
-            if text and lang in ("js", "py") and len(text) <= USE_RISK_MAX_CHARS:
-                todo.append((rel, text, lang))
-        for rel, text, lang, risk in self._import_time_risks(todo, stop):
-            if _engine.unanswered(risk):
-                self._unanswered(rel, risk)
+            if not text or lang not in ("js", "py"):
                 continue
+            files += 1
+            chars += len(text)
+            if len(text) <= min(room, USE_RISK_MAX_CHARS):
+                todo.append((rel, text, lang))
+                room -= len(text)
+            else:
+                room = -1                   # sizes only grow from here: read nothing after a file left out
+        self.use_time = {"files": 0, "ofFiles": files, "chars": 0, "ofChars": chars, "boundChars": USE_RISK_CHARS}
+        for rel, text, lang, risk in self._import_time_risks(todo, short_batches=True):
+            if _engine.unanswered(risk):
+                self._unanswered(rel, risk)     # SC-TRUNCATED: not read
+                continue
+            self.use_time["files"] += 1
+            self.use_time["chars"] += len(self.sources[rel][0])
             reasons, line = risk
             strong = [r for r in reasons if r.startswith(lazaret._STRONG_IMPORT_REASONS)]
             if not strong:
@@ -2527,7 +2539,7 @@ def _scan_artifact(data, container, artifact, full, budget):
     return {"issues": issues, "filesScanned": st.files_scanned, "binaryArtifacts": st.binaries,
             "truncated": st.truncated, "verdict": verdict, "verdictReason": reason,
             "strongIndicators": strong, "weakIndicators": weak,
-            "unusedDependencies": st.unused_dependencies}
+            "unusedDependencies": st.unused_dependencies, "useTime": st.use_time}
 
 
 def _fmt_bytes(n):
@@ -2981,7 +2993,7 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
                     "archiveBytes": len(data), "digest": digest,
                     **{k: r[k] for k in ("verdict", "verdictReason", "filesScanned",
                                          "binaryArtifacts", "truncated",
-                                         "strongIndicators", "weakIndicators")}})
+                                         "strongIndicators", "weakIndicators", "useTime")}})
     all_issues.extend(new_dependency_issues(eco, name, version, resolved, unused))
     skip_issues, skip_label = _skipped_summary(skipped, byte_budget, limit)
     # one part per release file left out; skip_issues holds one finding per
@@ -3027,7 +3039,33 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
             "digest": per[0]["digest"] if per else None, "artifacts": per,
             "skippedArtifacts": [{"filename": f, "reason": kind, "declaredBytes": size}
                                  for f, kind, size in skipped + not_installed],
+            "useTime": use_time_total([p["useTime"] for p in per]),
             "scannedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")}
+
+
+def use_time_total(parts):
+    """The release's use-time share (_ArtifactScan.use_time): the sums over
+    the release files the step read, with the bound per file it read them
+    with, or None when it ran on none of them (each was SUSPICIOUS before
+    it)."""
+    parts = [p for p in parts if p]
+    if not parts:
+        return None
+    total = {k: sum(p[k] for p in parts) for k in ("files", "ofFiles", "chars", "ofChars")}
+    total["boundChars"] = max(p.get("boundChars", USE_RISK_CHARS) for p in parts)
+    return total
+
+
+def use_time_line(use_time):
+    """One line for a report when the use-time step left code unread (None
+    otherwise): how much it read, of how much, and why the rest is not."""
+    if not use_time or use_time["chars"] >= use_time["ofChars"]:
+        return None
+    percent = use_time["chars"] * 100 // use_time["ofChars"]          # rounded down: 99%, never 100%
+    return (f"SC-USE-RISK read {use_time['files']:,} of the {use_time['ofFiles']:,} files that run only "
+            f"when the package is used, {percent}% of their characters (smallest first, none over "
+            f"{USE_RISK_MAX_CHARS:,} characters, {use_time.get('boundChars', USE_RISK_CHARS):,} in all per "
+            f"release file)")
 
 
 # ---------------- State store (SQLite / Postgres) ----------------
@@ -3584,6 +3622,9 @@ def print_scan(res, top=15):
           f"artifacts · {res['archiveBytes']//1024} KB {res.get('artifact','')} "
           f"· profile: {res['profile']}")
     arts = res.get("artifacts") or []
+    use_time = use_time_line(res.get("useTime") or use_time_total([a.get("useTime") for a in arts]))
+    if use_time:
+        print(f"  {use_time}")
     if len(arts) > 1:
         for a in arts:
             print(f"    {lazaret.sanitize_term(a.get('verdict'))!s:<10} "
