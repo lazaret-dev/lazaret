@@ -352,6 +352,25 @@ def _action_ref(value):
     return kind, name, ref if at else "", at == "@" and _is_hex(ref, 40)
 
 
+def parse_uses(value):
+    """(kind, name, ref, pinned) of a `uses:` value (kind 'action', 'docker' or
+    'workflow'; ref is '' for none); None for a local path. The registry's
+    action checks (registry/actions.py) read the values with it."""
+    return _action_ref(value)
+
+
+def uses(text):
+    """[(line, value)] of every `uses:` of a workflow: a step's, and a job's
+    (a reusable workflow)."""
+    out = []
+    for r in outline(text):
+        p = r["path"]
+        if r["key"] == "uses" and ((len(p) == 4 and p[0] == "jobs" and p[2] == "steps" and p[3] == "-")
+                                   or (len(p) == 2 and p[0] == "jobs")):
+            out.append((r["line"], r["value"]))
+    return out
+
+
 def _tag_like(ref):
     """Does ref read as a version tag (`v4`, `1.2.3`)?"""
     return ref != "" and (ref[0] in _DIGITS or (ref[0] == "v" and ref[1:2] != "" and ref[1] in _DIGITS))
