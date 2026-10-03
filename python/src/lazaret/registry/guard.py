@@ -72,7 +72,7 @@ import urllib.parse
 import urllib.request
 
 from lazaret.scanner import core as lazaret
-from lazaret.scanner import sca
+from lazaret.scanner import sca, timings
 from lazaret.registry import pmsettings, repo
 
 #: Releases younger than this are held back or blocked (--min-age).
@@ -270,7 +270,8 @@ class Fetcher:
         self.check(url)
         req, clean = self.request(url, accept)
         try:
-            return self._opener(clean).open(req, timeout=timeout)
+            with timings.span("network", "request"):
+                return self._opener(clean).open(req, timeout=timeout)
         except urllib.error.HTTPError as exc:
             exc.close()
             hint = ""
@@ -297,13 +298,14 @@ class Fetcher:
                 if length and length.isdigit() and int(length) > max_bytes:
                     raise repo.FetchError(too_big)
                 buf = bytearray()
-                while True:
-                    chunk = r.read(64 * 1024)
-                    if not chunk:
-                        break
-                    buf.extend(chunk)
-                    if len(buf) > max_bytes:
-                        raise repo.FetchError(too_big)
+                with timings.span("network", "read"):
+                    while True:
+                        chunk = r.read(64 * 1024)
+                        if not chunk:
+                            break
+                        buf.extend(chunk)
+                        if len(buf) > max_bytes:
+                            raise repo.FetchError(too_big)
                 return bytes(buf), r.headers
             except (OSError, http.client.HTTPException) as exc:
                 raise repo.FetchError(f"network error fetching {clean}: {exc}") from exc
@@ -425,11 +427,19 @@ def default_cache_path():
     return os.path.join(base, "lazaret", "guard-verdicts.json")
 
 
-def _scan_one(data, container, kind, timeout):
-    """Scan one archive (in a worker process, or here) -> the verdict."""
+def _scan_one(data, container, kind, timeout, timed=False):
+    """Scan one archive (in a worker process, or here) -> the verdict. `timed` (a worker, when the run
+    keeps timings) adds the worker's own `timings` report to the answer, for the parent to merge."""
     budget = repo.Budget(deadline=time.monotonic() + timeout, deadline_detail="scan time budget exceeded")
-    res = repo._scan_artifact(data, container, kind, False, budget)
-    return {"verdict": res["verdict"], "reason": res["verdictReason"], "indicators": summarize(res)}
+    if not timed:
+        with timings.span("scan", "artifact"):
+            res = repo._scan_artifact(data, container, kind, False, budget)
+        return {"verdict": res["verdict"], "reason": res["verdictReason"], "indicators": summarize(res)}
+    here = timings.Timings()
+    with timings.capture(here), here.run(), timings.span("scan", "artifact"):
+        res = repo._scan_artifact(data, container, kind, False, budget)
+    return {"verdict": res["verdict"], "reason": res["verdictReason"], "indicators": summarize(res),
+            "timings": here.report()}
 
 
 class Scanner:
@@ -469,13 +479,18 @@ class Scanner:
         get through the artifact."""
         pool = self._get_pool()
         if pool is not None:
+            kept = timings.current()                 # the run keeps timings: the worker's come back with its answer
             try:
-                future = pool.submit(_scan_one, data, container, kind, self.timeout)
+                future = pool.submit(_scan_one, data, container, kind, self.timeout, *((True,) if kept is not None else ()))
             except (RuntimeError, OSError):
                 future = None
             if future is not None:
                 try:
-                    return future.result(timeout=2 * self.timeout + 60)
+                    with timings.span("scan", "wait for worker"):
+                        answer = future.result(timeout=2 * self.timeout + 60)
+                    if kept is not None and isinstance(answer, dict):
+                        kept.merge(answer.pop("timings", None))
+                    return answer
                 except concurrent.futures.TimeoutError:
                     self._stuck = True
                     raise ScanError("the scan did not finish") from None
@@ -1479,7 +1494,9 @@ def make_index_server(index):
         def _relay(self, url):
             index.fetcher.check(url)
             req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-            with index.fetcher._opener(url).open(req, timeout=repo.DOWNLOAD_TIMEOUT) as r:
+            with timings.span("network", "request"):
+                response = index.fetcher._opener(url).open(req, timeout=repo.DOWNLOAD_TIMEOUT)
+            with response as r:
                 self.send_response(200)
                 self.send_header("Content-Type", "application/octet-stream")
                 length = r.headers.get("Content-Length")
@@ -1489,7 +1506,8 @@ def make_index_server(index):
                     self.close_connection = True
                 self.end_headers()
                 if self.command != "HEAD":
-                    shutil.copyfileobj(r, self.wfile, 1024 * 1024)
+                    with timings.span("network", "relay"):
+                        shutil.copyfileobj(r, self.wfile, 1024 * 1024)
 
         def do_HEAD(self):
             self.do_GET()
@@ -1615,9 +1633,10 @@ def find_tool(name):
 def run_tool(argv, env, cwd=None, capture=False):
     """Run the package manager; capture=True keeps its output (a resolution)."""
     try:
-        return subprocess.run(argv, env=env, cwd=cwd, text=True, encoding="utf-8", errors="replace",
-                              stdout=subprocess.PIPE if capture else None,
-                              stderr=subprocess.STDOUT if capture else None)
+        with timings.span("tool", f"{os.path.basename(argv[0])} {'resolve' if capture else 'run'}"):
+            return subprocess.run(argv, env=env, cwd=cwd, text=True, encoding="utf-8", errors="replace",
+                                  stdout=subprocess.PIPE if capture else None,
+                                  stderr=subprocess.STDOUT if capture else None)
     except OSError as exc:
         raise GuardError(f"could not run {argv[0]}: {exc.strerror or exc}") from None
 
@@ -3010,6 +3029,8 @@ def finish(ctx, installed, restored=(), code=None, index=None):
                "leftOutForOtherPlatforms": ctx.skipped_platform, "installedUnchecked": ctx.unchecked,
                "packages": [c.to_json() for c in checks],
                "heldBack": {p: sorted(v) for p, v in held.items()}}
+        if timings.current() is not None:
+            doc["timings"] = timings.current().report()
         try:
             with open(ctx.opts.json, "w", encoding="utf-8") as f:
                 json.dump(doc, f, indent=2)
@@ -3044,6 +3065,9 @@ def build_parser():
                     help="pip: install the files that were scanned, from a folder, instead of resolving and "
                          "downloading again (needs wheels only; otherwise pip goes through the index as usual)")
     ap.add_argument("--json", metavar="PATH", help="write what was checked, as JSON")
+    ap.add_argument("--timings", action="store_true",
+                    help="say on stderr (and in --json) where the time went: the network, the scans, the package "
+                         "manager, the rest")
     ap.add_argument("--no-cache", action="store_true", help="scan every artifact again (no verdict cache)")
     ap.add_argument("--jobs", type=int, default=DEFAULT_JOBS, metavar="N",
                     help=f"processes that scan at once (default {DEFAULT_JOBS}; 1 scans in this process)")
@@ -3065,6 +3089,19 @@ def main(argv=None):
     if "--" in argv[:first_tool]:
         argv.remove("--")
     opts = build_parser().parse_args(argv)
+    if not getattr(opts, "timings", False):
+        return _run(opts)
+    kept = timings.Timings()
+    with timings.capture(kept), kept.run():
+        code = _run(opts)
+    report = kept.report()
+    if code != EXIT_USAGE or report["phases"]:             # (a command line that was refused took no time worth telling)
+        for line in timings.render(report):
+            print(line, file=sys.stderr)
+    return code
+
+
+def _run(opts):
     ctx = None
     try:
         opts.min_age = parse_duration(opts.min_age)
