@@ -2010,7 +2010,8 @@ first), `get`, `head`, `delete` (all of it an address), `request` (a
 method, then the address), urllib's `urlopen` and `Request` (and Python 2's
 `urllib.urlopen`), a session's or a client's calls, a connection's `send`,
 `sendall`, `write` and `request`, a DNS lookup of a name composed with a
-literal, a network program given data on its command line (its process
+literal (in the call, or where the function or the module gives the name
+its value), a network program given data on its command line (its process
 options, `env=` and `cwd=`, are the program's), a URL whose host the data
 continues (an f-string, `+`, `%`, `.format`), and an object named `session`
 or `client` made where the model doesn't see (the text follower's name
@@ -2092,7 +2093,10 @@ the benchmark's files 19 import-time answers moved, all of malicious
 samples, and none of the installed packages'. No in-sample verdict moved;
 eight malicious releases' findings name more exact data (what `ifconfig`
 reports rather than the host name, a public IP address) or gain received
-code (ptmpl). The holdout's totals are unchanged (629 of 747), but two PyPI
-releases moved from SUSPICIOUS to OK and two from OK to SUSPICIOUS, each on
-the install hook's host-name send. Under the holdout rule, the two lost
-ones weren't opened; none of the 15 shapes above is theirs.
+code (ptmpl). On the holdout, two PyPI releases moved from OK to SUSPICIOUS
+and two from SUSPICIOUS to OK, each on the install hook's host-name send.
+The two lost ones were opened (with the maintainer's approval; they leave
+the holdout). They're a dependency-confusion beacon that looks up, in a
+loop, a name an f-string composed on the line before, which none of the 15
+shapes covered. A lookup now follows its name to that value, and both are
+found. On the 745 releases left, 629 are SUSPICIOUS (84.4%; 627 at 3e).

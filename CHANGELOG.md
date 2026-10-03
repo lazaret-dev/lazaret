@@ -242,9 +242,10 @@ before the release.
   download, unless the script calls it with its own. A text the parser
   doesn't read (Python 2, a fragment) keeps the text detectors. On the
   benchmark no verdict moved, and eight malicious releases' findings name
-  more exact data or gain received code; the holdout's totals are
-  unchanged (629 of 747), with two PyPI releases moving each way between
-  SUSPICIOUS and OK; on installed packages nothing moved. Rule set 2.18.0.
+  more exact data or gain received code; the holdout gains two PyPI
+  releases (629 of the 745 it keeps: two releases opened to find a shape
+  the tree missed left it); on installed packages nothing moved. Rule set
+  2.18.0.
 - **Import time grades what no library sends, wherever it goes.** Code that
   runs when a package is loaded (SC-IMPORT-RISK) is CRITICAL, not MAJOR,
   when it sends the whole environment or a credential store (an SSH key,
