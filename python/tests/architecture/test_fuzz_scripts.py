@@ -41,7 +41,7 @@ EXPECTED_TARGETS = ["archive-tgz", "archive-tbz2", "archive-txz", "archive-zip",
                     "sca-package-lock-json", "sca-yarn-lock", "sca-pnpm-lock-yaml", "sca-bun-lock", "sca-poetry-lock",
                     "sca-uv-lock", "sca-pylock-toml", "sca-pipfile-lock", "sca-requirements-txt", "sca-pyproject-toml",
                     "sca-setup-py", "sca-go-mod", "sca-go-sum", "sca-vendor-modules-txt", "sca-cargo-lock", "sca-cargo-toml", "sca-bundle-index", "sca-bundle-doc", "crates-index", "crates-manifest", "go-zip", "go-mod", "go-sumdb",
-                    "go-resolve", "ecosystem-names", "ecosystem-member-path"]
+                    "go-resolve", "ecosystem-names", "ecosystem-member-path", "verify-answers", "verify-credentials"]
 
 
 def fake(run, seeds=(b"abc",), name="fake", **options):
@@ -1103,6 +1103,87 @@ class RegistryModulePromisesAreLive(unittest.TestCase):
         real = golang.Go.member_path
         self.assertEqual(run(seed, G("member_path", self.every_other(real, lambda self, kind, name, root=None: ("x", None)))),
                          "member-deterministic")
+
+
+class VerificationPromisesAreLive(unittest.TestCase):
+    """The same for the two targets of live secret verification (V-1): each promise is broken by a reader that breaks it."""
+
+    def promise(self, target, data, *patches):
+        run, close = fuzz_targets.TARGETS[target].start()
+        self.addCleanup(close)
+        with contextlib.ExitStack() as stack:
+            for owner, attr, value in patches:
+                stack.enter_context(mock.patch.object(owner, attr, value))
+            with self.assertRaises(fuzz_targets.Violation) as raised:
+                run(data)
+        return raised.exception.rule
+
+    def test_the_answer_promises(self):
+        from lazaret.scanner import secretverify as sv
+        run = lambda seed, interpret: self.promise("verify-answers", seed, (sv, "interpret", interpret))       # noqa: E731
+        github_401 = fuzz_targets.verify_answer(0, 401, b"")
+        github_500 = fuzz_targets.verify_answer(0, 500, b"")
+        slack_cut = fuzz_targets.verify_answer(1, 200, b'{"ok": true}', truncated=True)
+        self.assertEqual(run(github_401, lambda p, r, s=(): ("maybe", "x", None)), "verify-outcome")
+        for detail in ("", "a\nb", "x" * 201, 5, None):
+            self.assertEqual(run(github_401, lambda p, r, s=(), d=detail: ("unknown", d, None)), "verify-detail")
+        for who in ("", "a\x1b[0m", "x" * (sv.MAX_WHO + 1), 5):
+            self.assertEqual(run(github_401, lambda p, r, s=(), w=who: ("unknown", "x", w)), "verify-who")
+        self.assertEqual(run(github_401, lambda p, r, s=(): ("unknown", "secret " + s[0], None)), "verify-leak")
+        self.assertEqual(run(github_401, lambda p, r, s=(): ("unknown", "x", "who " + s[0])), "verify-leak")
+        self.assertEqual(run(github_500, lambda p, r, s=(): ("rejected", "x", None)), "verify-outcome-needs-a-rule")
+        self.assertEqual(run(github_500, lambda p, r, s=(): ("live", "x", None)), "verify-outcome-needs-a-rule")
+        self.assertEqual(run(slack_cut, lambda p, r, s=(): ("live", "x", None)), "verify-truncated-needs-no-body")
+        real = sv.interpret
+        calls = []
+
+        def alternating(provider, response, secrets=()):
+            calls.append(1)
+            return real(provider, response, secrets) if len(calls) % 2 else ("unknown", "other", None)
+        self.assertEqual(run(github_401, alternating), "verify-deterministic")
+
+    def test_the_verifier_has_to_agree_with_the_reader(self):
+        from lazaret.scanner import secretverify as sv
+        original = sv.Verifier.verify
+        seed = fuzz_targets.verify_answer(0, 401, b"")
+        wrong = lambda self, pid, credential: sv.Result(pid, "live", "x", None, 401)                          # noqa: E731
+        self.assertEqual(self.promise("verify-answers", seed, (sv.Verifier, "verify", wrong)), "verify-verifier-agrees")
+        leaking = lambda self, pid, credential: original(self, pid, credential)._replace(detail="ghp_" + "a1B2" * 9)   # noqa: E731
+        self.assertEqual(self.promise("verify-answers", seed, (sv.Verifier, "verify", leaking)), "verify-leak")
+
+    def test_the_credential_promises(self):
+        from lazaret.scanner import secretverify as sv
+        from lazaret.scanner import secretverify_http as http
+        good = fuzz_targets.VERIFY_CREDENTIAL_SEEDS[0]
+        short = b"github\nghp_short"
+        aws = fuzz_targets.VERIFY_CREDENTIAL_SEEDS[10]
+        run = lambda seed, *patches: self.promise("verify-credentials", seed, *patches)                       # noqa: E731
+        original_parts, original_verify, original_build = sv.Verifier._parts, sv.Verifier.verify, sv.build_request
+        accept_all = staticmethod(lambda provider, credential: {"secret": credential} if isinstance(credential, str) else dict(credential))
+        self.assertEqual(run(short, (sv.Verifier, "_parts", accept_all)), "verify-sent-a-credential-that-is-not-the-providers")
+        self.assertEqual(run(good, (sv.Verifier, "_parts", staticmethod(lambda provider, credential: None))), "verify-wrongly-refused")
+        self.assertEqual(run(aws, (sv.Verifier, "_parts", staticmethod(lambda provider, credential: None))), "verify-wrongly-refused")
+        invented = lambda self, pid, credential: sv.Result(pid, "live", "x", None, 200)                       # noqa: E731
+        self.assertEqual(run(short, (sv.Verifier, "verify", invented)), "verify-refused-is-unknown")
+
+        def twice(self, pid, credential):
+            original_verify(self, pid, credential)
+            self._cache.clear()
+            return original_verify(self, pid, credential)
+        self.assertEqual(run(good, (sv.Verifier, "verify", twice)), "verify-one-call")
+
+        def built(change):
+            def build(provider, parts, now):
+                request = original_build(provider, parts, now)
+                return change(request, parts)
+            return (sv, "build_request", build)
+        self.assertEqual(run(good, built(lambda r, p: r._replace(headers=dict(r.headers, X="a\r\nX-Evil: 1")))), "verify-header-injection")
+        self.assertEqual(run(good, built(lambda r, p: r._replace(host="Evil Host"))), "verify-request-sendable")
+        self.assertEqual(run(good, built(lambda r, p: r._replace(host="evil.example.com"))), "verify-host")
+        self.assertEqual(run(good, built(lambda r, p: r._replace(path="/user/" + p["secret"]))), "verify-secret-in-url")
+        self.assertEqual(run(good, built(lambda r, p: r._replace(path=r.path + "?t=" + p["secret"]))), "verify-secret-in-url")
+        self.assertEqual(run(good, (sv, "interpret", lambda p, r, s=(): ("bogus", "x", None))), "verify-answer-passed-through")
+        self.assertEqual(run(good, (sv, "interpret", lambda p, r, s=(): ("rejected", s[0], None))), "verify-leak")
 
 
 class SeedsAndOptions(unittest.TestCase):

@@ -1133,3 +1133,135 @@ register("ecosystem-names", "crates.io and Go: check_name, identity, check_versi
          lambda: list(NAMES_SEEDS), names_start, NAMES_WORDS, max_len=1024)
 register("ecosystem-member-path", "crates.io and Go: member_path over a member name and an archive root", lambda: list(MEMBER_SEEDS),
          member_path_start, MEMBER_WORDS, max_len=1024)
+
+
+# ---------------------------------------------------------------------------------------------- live secret verification (V-1)
+# The credentials below are made up, in the shapes the providers use (AWS's is the pair its documentation gives as an example).
+VERIFY_SAMPLES = {
+    "github": "ghp_" + "a1B2" * 9, "slack": "xoxb-1234567890-abcdefghij", "stripe": "sk_live_" + "a1" * 12, "npm": "npm_" + "A1b2" * 9,
+    "openai": "sk-proj-" + "a1" * 20, "anthropic": "sk-ant-api03-" + "Ab1_" * 10,
+    "aws": {"id": "AKIAABCDEFGHIJKLMNOP", "secret": "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY"},
+}
+VERIFY_FIELDS = ("github", "slack", "stripe", "npm", "openai", "anthropic", "aws")        # (the order of secretverify_providers)
+
+
+def verify_answer(index, status, body, truncated=False):
+    return bytes([index, status >> 8, status & 255, 1 if truncated else 0]) + body
+
+
+def verify_answer_seeds():
+    seeds = []
+    for index, pid in enumerate(VERIFY_FIELDS):
+        secret = VERIFY_SAMPLES[pid]
+        part = secret if isinstance(secret, str) else secret["secret"]
+        for status in (200, 401, 403, 429, 500):
+            for body in (b"", b'{"login": "octocat"}', b'{"ok": true, "user": "bot"}', b'{"ok": false, "error": "invalid_auth"}',
+                         b'{"error": {"type": "permission_error"}}', b'<Error><Code>InvalidClientTokenId</Code></Error>',
+                         b"<Arn>arn:aws:iam::123456789012:user/alice</Arn>", ('{"login": "%s", "user": "%s"}' % (part, part)).encode()):
+                seeds.append(verify_answer(index, status, body))
+    seeds.append(verify_answer(0, 200, b'{"login": "x"}', truncated=True))
+    seeds.append(verify_answer(1, 200, b'{"ok": true', truncated=True))
+    seeds.append(verify_answer(0, 200, b"[" * 3000))
+    return seeds
+
+
+VERIFY_ANSWER_WORDS = (b'{"ok": ', b'"error"', b'"login"', b'"user"', b'"username"', b'"type"', b'"permission_error"', b"true", b"false", b"null",
+                       b"invalid_auth", b"token_revoked", b"ratelimited", b"<Code>", b"</Code>", b"<Arn>", b"</Arn>", b"InvalidClientTokenId",
+                       b"SignatureDoesNotMatch", b"Throttling", b"\x1b[31m", b"\xe2\x80\xae", b"\x00", b"\xff\xfe", b"[", b"{", b'\\ud800', b"\n")
+
+
+def verify_answers_start():
+    from lazaret.scanner import secretverify as sv
+    from lazaret.scanner import secretverify_http as http
+    providers = list(sv.PROVIDERS)
+
+    def run(data):
+        data = data.ljust(4, b"\0")
+        provider = providers[data[0] % len(providers)]
+        status, truncated, body = int.from_bytes(data[1:3], "big") % 700, bool(data[3] & 1), data[4:]
+        credential = VERIFY_SAMPLES[provider["id"]]
+        parts = [credential] if isinstance(credential, str) else list(credential.values())
+        response = http.Response(status, {}, body, truncated)
+        got = sv.interpret(provider, response, parts)
+        outcome, detail, who = got
+        check(outcome in sv.OUTCOMES, "verify-outcome", repr(outcome)[:80])
+        check(isinstance(detail, str) and detail.isprintable() and 0 < len(detail) <= 200, "verify-detail", repr(detail)[:160])
+        check(who is None or (isinstance(who, str) and who.isprintable() and 0 < len(who) <= sv.MAX_WHO), "verify-who", repr(who)[:160])
+        check(not any(part in detail or (who is not None and part in who) for part in parts), "verify-leak", repr(got)[:160])
+        if outcome != sv.UNKNOWN:
+            rules = [r for r in provider["answers"] if r["outcome"] == outcome and status in r["status"]]
+            check(rules, "verify-outcome-needs-a-rule", f"{provider['id']} {status} {outcome}")
+            if truncated:
+                check(any("json" not in r and "code" not in r for r in rules), "verify-truncated-needs-no-body", f"{provider['id']} {status}")
+        check(sv.interpret(provider, response, parts) == got, "verify-deterministic", repr(got)[:120])
+        result = sv.Verifier(lambda request, timeout, max_bytes: response).verify(provider["id"], credential)
+        check(result.outcome == outcome and result.status == status, "verify-verifier-agrees", repr((result, got))[:200])
+        check(not any(part in repr(result) for part in parts), "verify-leak", repr(result)[:160])
+
+    return run, lambda: None
+
+
+VERIFY_CREDENTIAL_SEEDS = [
+    b"github\n" + VERIFY_SAMPLES["github"].encode(), b"github\n" + VERIFY_SAMPLES["github"].encode() + b"\r\nX-Evil: 1",
+    b"github\n" + VERIFY_SAMPLES["github"].encode() + b"\n", b"github\nghp_short", b"slack\n" + VERIFY_SAMPLES["slack"].encode(),
+    b"stripe\n" + VERIFY_SAMPLES["stripe"].encode(), b"npm\n" + VERIFY_SAMPLES["npm"].encode(), b"openai\n" + VERIFY_SAMPLES["openai"].encode(),
+    b"openai\n" + VERIFY_SAMPLES["anthropic"].encode(), b"anthropic\n" + VERIFY_SAMPLES["anthropic"].encode(),
+    b"aws\n" + VERIFY_SAMPLES["aws"]["id"].encode() + b"\n" + VERIFY_SAMPLES["aws"]["secret"].encode(), b"aws\nAKIA\nx", b"aws\n\n",
+    b"github\n", b"\n", b"", b"nonesuch\nx",
+]
+VERIFY_CREDENTIAL_WORDS = (b"github\n", b"slack\n", b"stripe\n", b"npm\n", b"openai\n", b"anthropic\n", b"aws\n", b"ghp_", b"github_pat_", b"xoxb-", b"xoxp-",
+                           b"sk_live_", b"rk_live_", b"npm_", b"sk-", b"sk-ant-", b"sk-proj-", b"AKIA", b"\r\n", b"\n", b"\r", b" ", b"\t", b"\x00",
+                           b"\xc3\xa9", b"\xd9\xa1", b"\xe2\x80\xae", b"Bearer ", b"/", b"+", b"=", b"%0d%0a", b"a" * 36, b"A" * 40)
+
+
+def verify_credentials_start():
+    from lazaret.scanner import secretverify as sv
+    from lazaret.scanner import secretverify_http as http
+    by_id = {p["id"]: p for p in sv.PROVIDERS}
+    providers = list(sv.PROVIDERS)
+
+    def run(data):
+        text = data.decode("utf-8", "surrogateescape")
+        name, _, rest = text.partition("\n")
+        provider = by_id.get(name) or providers[zlib.crc32(data[:16]) % len(providers)]
+        if provider["id"] == "aws":
+            first, _, second = rest.partition("\n")
+            credential = {"id": first, "secret": second.split("\n")[0]}
+        else:
+            credential = rest
+        parts = list(credential.values()) if isinstance(credential, dict) else [credential]
+        calls = []
+
+        def transport(request, timeout, max_bytes):
+            calls.append(request)
+            return http.Response(401, {}, b"", False)
+
+        result = sv.Verifier(transport).verify(provider["id"], credential)
+        items = list(credential.items()) if isinstance(credential, dict) else [("secret", credential)]
+        wanted = all(re.fullmatch(provider["parts"][key], value) is not None and all(0x21 <= ord(c) <= 0x7e for c in value) for key, value in items)
+        if not calls:
+            check(result.outcome == "unknown" and result.status is None, "verify-refused-is-unknown", repr(result)[:160])
+            check(not wanted or len(max(parts, key=len)) > sv.MAX_CREDENTIAL, "verify-wrongly-refused", repr(parts)[:160])
+        else:
+            check(len(calls) == 1, "verify-one-call", len(calls))
+            request = calls[0]
+            check(wanted, "verify-sent-a-credential-that-is-not-the-providers", repr(parts)[:160])
+            check(all("\r" not in v and "\n" not in v for v in request.headers.values()), "verify-header-injection", repr(request.headers)[:200])
+            try:
+                http.check_request(request)
+            except http.TransportError as exc:
+                check(False, "verify-request-sendable", f"{exc} {request.host!r}"[:160])
+            check(request.host == provider["host"], "verify-host", request.host)
+            check(not any(part in request.host + request.path for part in parts), "verify-secret-in-url", repr(request.path)[:160])
+            check(result.outcome in ("live", "rejected", "unknown") and result.status == 401, "verify-answer-passed-through", repr(result)[:160])
+        check(not any(part in repr(result) for part in parts if len(part) >= 12), "verify-leak", repr(result)[:160])   # (a short text is in any sentence)
+
+    return run, lambda: None
+
+
+register("verify-answers", "secret verification: interpret and Verifier.verify over a provider's answer (status, body, cut short): an outcome from the "
+         "three, only where a rule of the table says it, printable text, nothing of the credential in it", verify_answer_seeds,
+         verify_answers_start, VERIFY_ANSWER_WORDS, max_len=4096)
+register("verify-credentials", "secret verification: which credentials Verifier.verify sends, and to where: only one that is the provider's format in "
+         "full, to the table's host, with no part in the URL and no line break in a header", lambda: list(VERIFY_CREDENTIAL_SEEDS),
+         verify_credentials_start, VERIFY_CREDENTIAL_WORDS, max_len=1024)
