@@ -5945,8 +5945,10 @@ def _collect_file(path, rel, st, in_dep, col):
         if bi:
             issues.append(bi)
         return
-    text, info = decode_source(data, lang)
-    issues.extend(encoding_issues(disp, text, info))
+    # read as the registry reads a member (0.1.8): bytes that don't decode to
+    # anything text-like are SC-TRUNCATED, not mojibake no rule can read
+    text, extra = decode_member(disp, data, lang)
+    issues.extend(extra)
     disguised = disguised_binary(disp, data)     # a program under a source file's name (0.1.8)
     if disguised:
         issues.append(disguised)

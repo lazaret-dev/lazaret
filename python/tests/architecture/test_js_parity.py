@@ -208,6 +208,7 @@ ADVERSARIAL = {
     "__pycache__/gone.cpython-311.pyc": _pyc(1),
     "lib/native.so": b"\x7fELF\x02\x01\x01\x00" + b"\0" * 600,
     "bin/_build.py": b"MZ\x90\x00\x03\x00" + b"\0" * 600,          # a program under a source name
+    "bin/blob.py": bytes((i * 151 + 7) % 251 for i in range(4096)),    # bytes that are no text
     "node_modules/evil/native.js": b"\x7fELF\x02\x01\x01\x00" + b"\0" * 600,
     "data/blob.bin": b"\0" * 2_100_000,                              # > 2 MB, not a source
     "big/huge.js": "var y = 2;\n" * 210000,                          # > 2 MB source
@@ -420,6 +421,7 @@ class EngineParityTests(unittest.TestCase):
                     self.assertIn(("SC-HIDDEN-UNICODE", "uni/hidden.js"), found)
                     sevs = {(i["file"].replace("\\", "/"), i["sev"]) for i in js[1]["issues"] if i["rule"] == "SC-BINARY"}
                     self.assertIn(("bin/_build.py", "CRITICAL"), sevs)
+                    self.assertIn(("SC-TRUNCATED", "bin/blob.py"), found)
                     self.assertEqual(("node_modules/evil/native.js", "CRITICAL") in sevs, label == "--deps")
                     self.assertEqual(("SC-AGENT-HIJACK", "node_modules/agent/run.js") in found, label == "--deps")
                     self.assertEqual(sorted((i["file"].replace("\\", "/"), i["line"]) for i in js[1]["issues"]

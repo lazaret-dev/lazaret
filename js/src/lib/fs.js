@@ -426,9 +426,10 @@ function collectFile(full, rel, name, st, dep, col) {
     if (bi) col.binaryIssues.push(bi);
     return;
   }
-  const dec = decodeSource(data, { py: lang === "py" });
-  const content = normalizeNewlines(dec.text);
-  for (const i of encodingIssues(rel, content, dec)) col.binaryIssues.push(i);
+  // read as the registry reads a member (0.1.8): bytes that don't decode to
+  // anything text-like are SC-TRUNCATED, not mojibake no rule can read
+  const [content, found] = decodeMember(rel, data, lang);
+  for (const i of found) col.binaryIssues.push(i);
   const dis = disguisedBinary(rel, data);       // a program under a source file's name (0.1.8)
   if (dis) col.binaryIssues.push(dis);
   col.files.push({ path: rel, content, lang, dep });
@@ -460,6 +461,45 @@ function collectConfig(full, rel, size, col) {
  * source file: `dec` is decodeSource's result, `content` its text with \n
  * line endings. Twin of lazaret.scanner.core.encoding_issues.
  */
+/** Python's f"{x:.0%}": half-even on the exact binary value of x * 100. */
+export function percent(x) {
+  const y = x * 100;
+  const f = Math.floor(y);
+  return `${y - f === 0.5 ? (f % 2 === 0 ? f : f + 1) : Math.round(y)}%`;
+}
+
+/** core._undecodable_share: U+FFFD and control characters in the first 65,536 code points. */
+export function undecodableShare(text) {
+  let n = 0, bad = 0;
+  for (const ch of text) {
+    if (n === 65536) break;
+    n++;
+    const c = ch.codePointAt(0);
+    if (c === 0xfffd || c <= 0x08 || (c >= 0x0e && c <= 0x1a) || (c >= 0x1c && c <= 0x1f) || c === 0x7f
+        || (c >= 0xdc80 && c <= 0xdcff)) bad++;
+  }
+  return n ? bad / n : 0;
+}
+
+/**
+ * Twin of core.decode_member: [text, findings] for a file read as `lang`
+ * ("py" keeps its coding cookie): Q-ENCODING / SC-UTF7 (encodingIssues), and
+ * SC-TRUNCATED when it does not decode to anything text-like (more than 30%
+ * invalid bytes or control characters), so its scan proves nothing. A
+ * directory scan reads every source file this way (0.1.8), as the registry does.
+ */
+export function decodeMember(path, data, lang) {
+  const dec = decodeSource(data, { py: lang === "py" });
+  const text = normalizeNewlines(dec.text);
+  const out = encodingIssues(path, text, dec);
+  const share = undecodableShare(text);
+  if (share > 0.3 && !(MPEG_TS_EXTS.has(pyExt(path).toLowerCase()) && mpegTs(data.subarray(0, 512)))) {
+    out.push(truncatedIssue(path, `content is not decodable as text (${percent(share)} invalid bytes or ` +
+      "control characters), so no rule could read it"));
+  }
+  return [text, out];
+}
+
 export function encodingIssues(rel, content, dec) {
   const out = [];
   if (dec.reported) {

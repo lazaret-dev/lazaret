@@ -394,6 +394,14 @@ before the release.
   kind of release: a disguise. A binary named for what it is (`.so`,
   `.node`) stays as it was, and bytes that are no program stay unread
   (INCOMPLETE). Registry and guard scans. Rule set 2.21.0.
+- **A directory scan read a source file that isn't text as mojibake.** Bytes
+  that don't decode to anything text-like (more than 30% invalid bytes or
+  control characters) in a `.py` or `.js` file of your tree, or with
+  `--deps` of a dependency, got one INFO note and passed the gate; the
+  registry already calls the same member SC-TRUNCATED. Both CLIs
+  read source files the registry's way now (`decode_member`), so the file is
+  SC-TRUNCATED and the scan can't pass. None of 61,538 source files in the
+  benign corpora and installed packages is.
 - **A directory scan read a program under a source file's name as text.**
   The same file in your tree, or with `--deps` in your dependencies, got no
   supply-chain finding and passed the gate. It is SC-BINARY, CRITICAL, there

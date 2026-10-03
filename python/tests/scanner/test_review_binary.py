@@ -11,6 +11,8 @@
 0.1.8: an executable's bytes under a source file's name (a Windows
 executable named `_build.py`, as in num2words 0.5.15) are SC-BINARY, CRITICAL,
 as in the registry. The file was read as text and failed no gate condition.
+And a source file whose bytes don't decode to text is SC-TRUNCATED, as an
+archive member is: it was read as mojibake no rule could read.
 
 Binary fixtures are synthetic headers (an ELF magic followed by zeros, a zip
 local-file header ...); nothing is executable.
@@ -165,6 +167,16 @@ class ProgramsNamedAsSource(unittest.TestCase):
         self.assertEqual(binaries(core.scan_project(root)), set())
         self.assertEqual(binaries(core.scan_project(root, include_deps=True)),
                          {("node_modules/dep/index.js", "CRITICAL")})
+
+    def test_bytes_that_are_no_text_are_not_scanned_as_text(self):
+        root = make_tree({"a.py": "x = 1\n", "blob.py": BLOB, "mz.py": "MZ = 1\n", "accents.py": "s = 'caf\u00e9'\n" * 50})
+        self.addCleanup(shutil.rmtree, root, True)
+        res = core.scan_project(root)
+        truncated = [(i["file"], i["sev"], i["msg"]) for i in res["issues"] if i["rule"] == "SC-TRUNCATED"]
+        self.assertEqual([(f, s) for f, s, _m in truncated], [("blob.py", "CRITICAL")])
+        self.assertRegex(truncated[0][2], r"^File not fully scanned: content is not decodable as text \(\d+% invalid "
+                                          r"bytes or control characters\), so no rule could read it\.$")
+        self.assertFalse({c["label"]: c["ok"] for c in res["conditions"]}["No supply-chain indicators"])
 
     def test_an_oversized_one_by_its_first_bytes(self):
         from unittest import mock

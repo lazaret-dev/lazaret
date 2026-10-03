@@ -258,6 +258,17 @@ test("a program under a source file's name is SC-BINARY, CRITICAL, and fails the
   } finally { cleanup(d); }
 });
 
+test("a source file whose bytes are no text is SC-TRUNCATED, not mojibake scanned (0.1.8)", () => {
+  const blob = Buffer.from(Array.from({ length: 4096 }, (_, i) => (i * 151 + 7) % 251));
+  const d = tree({ "app.py": "x = 1\n", "lib/blob.py": blob, "lib/accents.py": "s = 'café'\n".repeat(50) });
+  try {
+    const r = scan(d);
+    const t = r.rep.issues.filter((i) => i.rule === "SC-TRUNCATED");
+    assert.deepEqual(t.map((i) => [i.file, i.sev]), [[P("lib", "blob.py"), "CRITICAL"]]);
+    assert.match(t[0].msg, /^File not fully scanned: content is not decodable as text \(\d+% invalid bytes or control characters\), so no rule could read it\.$/);
+  } finally { cleanup(d); }
+});
+
 test("a directory's identity keeps all 64 bits of a Windows file ID", () => {
   // NTFS file IDs: a 16-bit sequence number above a 48-bit record number.
   // Records 1000 and 1001 with sequence number 0x1234 are one Number: the

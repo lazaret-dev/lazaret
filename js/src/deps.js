@@ -27,10 +27,9 @@ import { followHook, persistenceReasons, installScriptRisk, importTimeRisk, impo
   agentHijackInCommand, nodeCandidates, shebangLang, spawnedScripts, scriptLang, packValues, crossFileIssues,
   NativeError } from "./lib/native.js";
 import { HOOK_COMMANDS, loadManifest, scInstallHookIssue } from "./lib/supplychain.js";
-import { readBounded, truncatedIssue, scanErrorIssue, strerror, normalizeNewlines, encodingIssues, treeJoin,
+import { readBounded, truncatedIssue, scanErrorIssue, strerror, normalizeNewlines, decodeMember, treeJoin,
   MAX_FILE_BYTES } from "./lib/fs.js";
 import { looksBinary, HEADER_SAMPLE } from "./lib/binary.js";
-import { decodeSource } from "./lib/encoding.js";
 import { mkIssue } from "./lib/issue.js";
 import { REDACT, redactText, registerScanContext, SECRET_SKIP_RE } from "./lib/redact.js";
 import { mapTasks } from "./pool.js";
@@ -58,44 +57,12 @@ const stripSlashes = (p) => p.replace(/\/+$/, "");
 
 export { treeJoin };
 
-/** Python's f"{x:.0%}": half-even on the exact binary value of x * 100. */
-function percent(x) {
-  const y = x * 100;
-  const f = Math.floor(y);
-  return `${y - f === 0.5 ? (f % 2 === 0 ? f : f + 1) : Math.round(y)}%`;
-}
-
-/** core._undecodable_share: U+FFFD and control characters in the first 65,536 code points. */
-function undecodableShare(text) {
-  let n = 0, bad = 0;
-  for (const ch of text) {
-    if (n === 65536) break;
-    n++;
-    const c = ch.codePointAt(0);
-    if (c === 0xfffd || c <= 0x08 || (c >= 0x0e && c <= 0x1a) || (c >= 0x1c && c <= 0x1f) || c === 0x7f
-        || (c >= 0xdc80 && c <= 0xdcff)) bad++;
-  }
-  return n ? bad / n : 0;
-}
-
-const mpegTs = (h) => h.length >= 377 && h[0] === 0x47 && h[188] === 0x47 && h[376] === 0x47;
-
 /**
  * The text of a file read the way core.decode_member reads an archive member
  * run as JavaScript: [text, findings] (Q-ENCODING, and SC-TRUNCATED when it
  * does not decode to anything text-like).
  */
-function decodeScript(path, data) {
-  const dec = decodeSource(data, { py: false });
-  const text = normalizeNewlines(dec.text);
-  const out = encodingIssues(path, text, dec);
-  const share = undecodableShare(text);
-  if (share > 0.3 && !(path.toLowerCase().endsWith(".ts") && mpegTs(data.subarray(0, 512)))) {
-    out.push(truncatedIssue(path, `content is not decodable as text (${percent(share)} invalid bytes or ` +
-      "control characters), so no rule could read it"));
-  }
-  return [text, out];
-}
+const decodeScript = (path, data) => decodeMember(path, data, "js");
 
 /**
  * What a --deps scan knows of the tree, to follow a dependency's install

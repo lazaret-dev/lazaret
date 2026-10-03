@@ -133,7 +133,8 @@ Python files honor PEP 263 coding cookies as the interpreter does: single-byte c
 tables, UTF-7, the escape codecs and the common multi-byte ones, the same in every engine. Anything that
 isn't plain UTF-8 gets a Q-ENCODING note and is scanned as decoded; a codec Lazaret can't decode exactly as
 Python does (UTF-32, ISO-2022-KR, a `\N{name}` escape under unicode_escape, …) is read as UTF-8 and is
-SC-TRUNCATED, so the file is never passed as fully scanned. A UTF-7 cookie is SC-UTF7 (CRITICAL) and a
+SC-TRUNCATED, so the file is never passed as fully scanned; so is a source file whose bytes don't decode to
+text at all (more than 30% invalid bytes or control characters), as in the registry. A UTF-7 cookie is SC-UTF7 (CRITICAL) and a
 unicode_escape or raw_unicode_escape cookie is SC-ESCAPE-CODEC (CRITICAL): Python decodes `+AAo-` or
 `\x0a` to a newline before it reads the code, so text every editor shows as a comment can be code.
 
