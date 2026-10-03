@@ -105,6 +105,8 @@ class CratesContract(EcosystemContract, unittest.TestCase):
         ("crate", "any-9/.cargo-ok", None, (None, None)),
     )
 
+    GOOD_ARCHIVE_MEMBERS = tuple(text_of("fnv-1.0.7.members").split())
+
     def make(self):
         return crates.Crates()
 
@@ -612,6 +614,32 @@ class ArchiveRulesTests(unittest.TestCase):
         self.assertEqual(eco.member_path("crate", "evil/src/lib.rs", "demo-1.0.0/"),
                          (None, "member outside the archive's root directory"))
         self.assertEqual(eco.member_path("crate", "demo-1.0.0/.cargo-ok", "demo-1.0.0/"), (None, None))
+
+    def test_the_root_is_the_name_the_index_spells_and_the_version(self):
+        eco = crates.Crates()
+        res, _ = resolve("fnv", "1.0.7", FNV_INDEX)
+        self.assertEqual(eco.archive_root(res, res.artifacts[0]), "fnv-1.0.7/")
+        res, _ = resolve("Inflector", None, recorded("inflector.index"), path="in/fl/inflector")
+        self.assertEqual(res.info["name"], "Inflector")
+        self.assertEqual(eco.archive_root(res, res.artifacts[0]), "Inflector-%s/" % res[0], "(the name keeps its capital letters)")
+
+    def test_a_version_with_a_pre_release_or_build_part_is_in_the_root_as_written(self):
+        eco = crates.Crates()
+        for version in ("1.0.0-alpha.1", "0.1.0-rc.1.2", "1.2.3+build.5"):
+            res = base.Resolution(version, [{"url": "u", "container": "tgz", "artifact": "crate", "entry": {"cksum": "a" * 64}}],
+                                  info={"name": "demo"})
+            with self.subTest(version=version):
+                self.assertEqual(eco.archive_root(res, res.artifacts[0]), "demo-%s/" % version)
+
+    def test_no_root_is_made_from_what_is_not_a_name_and_a_version(self):
+        eco = crates.Crates()
+        art = {"url": "u", "container": "tgz", "artifact": "crate", "entry": {}}
+        for name, version in (("a/b", "1.0.0"), ("..", "1.0.0"), ("demo", "1"), ("demo", "../1.0.0"), ("demo", 5), ("", "1.0.0"),
+                              ("demo", ""), (5, "1.0.0"), ("de mo", "1.0.0"), ("demo\n", "1.0.0")):
+            res = base.Resolution(version, [art], info={"name": name})
+            with self.subTest(name=name, version=version):
+                self.assertIsNone(eco.archive_root(res, art))
+        self.assertIsNone(eco.archive_root(base.Resolution("1.0.0", [art], info={}), art))
 
 
 if __name__ == "__main__":

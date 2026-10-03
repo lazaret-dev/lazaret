@@ -76,6 +76,12 @@ class Toy(base.Ecosystem):
         art = {"url": url, "container": "tgz", "artifact": "toy", "entry": entry, "filename": filename}
         return base.Resolution(got, [art], [], {"name": name})
 
+    def archive_root(self, resolved, artifact):
+        try:
+            return f"{resolved.info['name']}-{resolved[0]}/"
+        except (AttributeError, KeyError, TypeError):
+            return None
+
     def verify(self, data, entry, name, version):
         digest = entry.get("sha256") if isinstance(entry, dict) else None
         if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", digest):
@@ -121,6 +127,7 @@ class ToyData(EcosystemContract):
     GOOD_SPEC = ("x", "1.0.0")
     SAME_IDENTITY = (("Foo_Bar", "foo-bar"), ("X", "x"))
     DIFFERENT_IDENTITY = (("foo", "foo2"), ("a-b", "ab"))
+    GOOD_ARCHIVE_MEMBERS = ("x-1.0.0/", "x-1.0.0/a.py", "x-1.0.0/a/b.py", "x-1.0.0/PKG-INFO")
     MEMBER_PATHS = (
         ("toy", "x-1.0.0/a/b.py", "x-1.0.0/", ("a/b.py", None)),
         ("toy", "x-1.0.0\\a\\b.py", "x-1.0.0/", ("a/b.py", None)),
@@ -307,6 +314,26 @@ class ArtifactsOutsideKinds(Toy):
     artifact_kinds = ("other",)
 
 
+class RootWithoutSlash(Toy):
+    def archive_root(self, resolved, artifact):
+        return super().archive_root(resolved, artifact).rstrip("/")
+
+
+class RootNobodyAgreesWith(Toy):
+    def archive_root(self, resolved, artifact):
+        return "other-" + super().archive_root(resolved, artifact)
+
+
+class RootEscapes(Toy):
+    def archive_root(self, resolved, artifact):
+        return "../" + super().archive_root(resolved, artifact)
+
+
+class RootCrashesOnOddInput(Toy):
+    def archive_root(self, resolved, artifact):
+        return f"{resolved.info['name']}-{resolved[0]}/"
+
+
 class TheseBrokenModulesAreCaught(unittest.TestCase):
     """The contract has teeth: each fault is found by the test written for it, and the toy it was copied from passes."""
 
@@ -340,6 +367,10 @@ class TheseBrokenModulesAreCaught(unittest.TestCase):
         (ContainerCrash, {"test_container_is_defined_for_every_file_name"}),
         (NotAResolution, {"test_resolve_gives_the_documented_shape_from_recorded_responses"}),
         (ArtifactsOutsideKinds, {"test_resolve_gives_the_documented_shape_from_recorded_responses"}),
+        (RootWithoutSlash, {"test_the_archive_root_is_a_directory_the_member_rules_agree_with"}),
+        (RootNobodyAgreesWith, {"test_the_archive_root_is_a_directory_the_member_rules_agree_with"}),
+        (RootEscapes, {"test_the_archive_root_is_a_directory_the_member_rules_agree_with"}),
+        (RootCrashesOnOddInput, {"test_the_archive_root_is_a_directory_the_member_rules_agree_with"}),
     )
 
     def test_the_toy_it_was_all_copied_from_passes(self):
@@ -858,6 +889,7 @@ class DefaultsTests(unittest.TestCase):
         self.assertIs(eco.links_extracted("any"), True)
         self.assertEqual(eco.run_targets("k", {}, []), base.RunTargets())
         self.assertEqual(eco.declared("k", {}, []), base.Declared())
+        self.assertIsNone(eco.archive_root(None, {}))
         self.assertIsNone(eco.dependencies(None, None))
         self.assertIsNone(eco.discover(None, 10, None))
         self.assertIsNone(eco.popular_names())

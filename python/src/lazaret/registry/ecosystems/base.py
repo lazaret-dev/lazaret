@@ -352,6 +352,13 @@ class Ecosystem:
         None). None for both: the member is the root itself and is not extracted."""
         raise NotImplementedError
 
+    def archive_root(self, resolved, artifact):
+        """The directory, with its trailing slash, that every member of `artifact` (one of `resolved.artifacts`) sits
+        under, when the release says what it is (Go: `<module>@<version>/`; a crate: `<name>-<version>/`); None when
+        the archive has no single known root. `repo.py` passes it on as `iter_archive(..., root=...)`, and a member
+        outside it is an anomaly, as it is for the package manager's own extractor."""
+        return None
+
     def links_extracted(self, kind):
         """Whether the package manager's extractor creates link members (npm's drops them; the others do not)."""
         return True

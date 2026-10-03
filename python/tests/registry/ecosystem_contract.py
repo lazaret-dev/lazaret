@@ -20,6 +20,8 @@ What a module's test file supplies (the class attributes and methods below; the 
     GOOD_NAMES*          names it accepts; GOOD_VERSIONS* likewise
     GOOD_SPEC*           (name, version) that `responses()` can resolve, and `responses()*` the recorded responses
                          (url -> bytes, or an exception to raise) for that spec and for "latest"
+    GOOD_ARCHIVE_MEMBERS member names of the recorded archive of GOOD_SPEC; each must sit under `archive_root`
+    DIGEST_COVERS_EVERY_BYTE / changed_downloads(data)   for a digest of an archive's contents and not of its bytes
     verify_case()*       (data, entry, name, version) that verifies, or None if the registry publishes no digest
     SAME_IDENTITY / DIFFERENT_IDENTITY   pairs of names that are, and are not, the same package
     ACCEPTS              entries of HOSTILE_NAMES / HOSTILE_VERSIONS this module legitimately accepts
@@ -89,6 +91,8 @@ class EcosystemContract:
     EXTRA_BAD_VERSIONS = ()
     MEMBER_PATHS = ()
     MISSING_VERSION = "9999.0.0-none"
+    GOOD_ARCHIVE_MEMBERS = ()               # member names of the recorded archive of GOOD_SPEC, as they appear in it
+    DIGEST_COVERS_EVERY_BYTE = True         # False for a digest of what is in the archive (Go's h1) and not of its bytes
 
     # ---- what a module's test supplies
     def make(self):
@@ -102,6 +106,11 @@ class EcosystemContract:
 
     def hostile_responses(self, url):
         return None
+
+    def changed_downloads(self, data):
+        """Archives that differ from `data` in what the digest covers (a member changed, added, removed or renamed); the
+        module's test supplies them when `DIGEST_COVERS_EVERY_BYTE` is False."""
+        return ()
 
     def malformed_digests(self):
         return ()
@@ -413,12 +422,17 @@ class EcosystemContract:
         self.assertEqual(len(got), 2)
         self.assertTrue(isinstance(got[0], str) and got[0])
         self.assertTrue(isinstance(got[1], str) and got[1])
-        flips = sorted({0, len(data) // 2, len(data) - 1}) if data else []
-        changed = [data + b"\0", data[:-1], b"", b"\0" + data]
-        for i in flips:
-            bad = bytearray(data)
-            bad[i] ^= 1
-            changed.append(bytes(bad))
+        changed = [data[:-1], b""]
+        if self.DIGEST_COVERS_EVERY_BYTE:
+            flips = sorted({0, len(data) // 2, len(data) - 1}) if data else []
+            changed += [data + b"\0", b"\0" + data]
+            for i in flips:
+                bad = bytearray(data)
+                bad[i] ^= 1
+                changed.append(bytes(bad))
+        else:
+            self.assertTrue(self.changed_downloads(data), "a digest of the contents needs changed archives to be tested")
+        changed += list(self.changed_downloads(data))
         for bad in changed:
             with self.subTest(size=len(bad)):
                 caught = self.assertRefusal(lambda: self.eco.verify(bad, entry, name, version), base.DigestError)
@@ -466,6 +480,33 @@ class EcosystemContract:
                     self.assertNotIn("\\", rel)
                     self.assertNotIn("..", rel.split("/"))
                     self.assertFalse(rel.startswith(("../", "./")) or rel in (".", ".."), repr(rel))
+
+    def test_the_archive_root_is_a_directory_the_member_rules_agree_with(self):
+        res, fetch, asked = self.resolve_good()
+        for art in res.artifacts:
+            root = self.eco.archive_root(res, art)
+            if root is None:
+                continue
+            self.assertIsInstance(root, str)
+            self.assertTrue(root.endswith("/") and len(root) > 1 and root.isascii() and root.isprintable(), repr(root))
+            self.assertNotIn("\\", root)
+            self.assertFalse(root.startswith("/") or ".." in root.split("/") or "//" in root, repr(root))
+            kind = art["artifact"]
+            self.assertEqual(self.eco.member_path(kind, root + "dir/file.txt", root), ("dir/file.txt", None))
+            self.assertEqual(self.eco.member_path(kind, root, root), (None, None))
+            rel, problem = self.eco.member_path(kind, "elsewhere-9.9.9/file.txt", root)
+            self.assertIsNone(rel)
+            self.assertTrue(isinstance(problem, str) and problem)
+            for member in self.GOOD_ARCHIVE_MEMBERS:
+                with self.subTest(member=member[:60]):
+                    got = self.eco.member_path(kind, member, root)
+                    if member.endswith("/"):
+                        self.assertEqual(got, (None, None))
+                    else:
+                        self.assertTrue(got[0] and got[1] is None, "a member of the real archive is outside its own root")
+                        self.assertEqual(self.eco.member_path(kind, member), got, "the root the module derives is another")
+        for odd in (None, 5, "x", object(), (), {}):
+            self.assertIsNone(self.eco.archive_root(odd, {}), "a root made out of something that is not a resolution")
 
     def test_links_extracted_is_a_yes_or_a_no_for_every_kind(self):
         for kind in self.eco.artifact_kinds:

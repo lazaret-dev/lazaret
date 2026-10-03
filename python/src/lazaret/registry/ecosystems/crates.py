@@ -201,6 +201,13 @@ class Crates(base.Ecosystem):
     def container(self, filename):
         return "tgz" if isinstance(filename, str) and filename.endswith(".crate") else None
 
+    def archive_root(self, resolved, artifact):
+        try:
+            crate, version = resolved.info["name"], resolved[0]
+        except (AttributeError, KeyError, TypeError):
+            return None
+        return f"{crate}-{version}/" if self._name_ok(crate) and isinstance(version, str) and semver_key(version) else None
+
     def member_path(self, kind, name, root=None):
         rel, problem = base.root_stripped(name, root) if root else base.top_directory_stripped(name)
         if rel is not None and rel.rsplit("/", 1)[-1] == ".cargo-ok":                # (cargo skips these)
