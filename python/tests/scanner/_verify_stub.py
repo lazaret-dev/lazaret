@@ -34,11 +34,12 @@ Seen = collections.namedtuple("Seen", "method host path headers body")
 class Answer:
     """What the stub says: a status, headers, a body; `delay` seconds before it answers; `drip` seconds between the bytes of it
     (a server that is too slow); `huge` bytes of body in place of `body`; `close` to hang up with no answer; `claim` a Content-Length
-    that is not the body's (a server that hangs up before it has sent what it promised)."""
+    that is not the body's (a server that hangs up before it has sent what it promised); `pause` (bytes, seconds): stops for that
+    long once it has sent that many bytes of the body (a server that goes quiet in the middle)."""
 
-    def __init__(self, status=200, body=b"", headers=None, delay=0.0, drip=0.0, huge=0, close=False, claim=None):
+    def __init__(self, status=200, body=b"", headers=None, delay=0.0, drip=0.0, huge=0, close=False, claim=None, pause=None):
         self.status, self.body, self.headers = status, body, dict(headers or {})
-        self.delay, self.drip, self.huge, self.close, self.claim = delay, drip, huge, close, claim
+        self.delay, self.drip, self.huge, self.close, self.claim, self.pause = delay, drip, huge, close, claim, pause
 
 
 def hosts():
@@ -85,6 +86,12 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                     self.wfile.write(body[i:i + 1])
                     self.wfile.flush()
                     time.sleep(answer.drip)
+            elif answer.pause:
+                after, seconds = answer.pause
+                self.wfile.write(body[:after])
+                self.wfile.flush()
+                time.sleep(seconds)
+                self.wfile.write(body[after:])
             else:
                 self.wfile.write(body)
         except OSError:

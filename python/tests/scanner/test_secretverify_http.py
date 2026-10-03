@@ -1,9 +1,14 @@
 """The HTTPS transport of live secret verification (scanner/secretverify_http.py), against a stub provider on 127.0.0.1 (no real
 service is called; the stub's certificate is made with `openssl`, and the tests that need the stub are skipped without it)."""
 
+import os
 import socket
+import ssl
+import threading
 import time
 import unittest
+from http.client import HTTPSConnection
+from unittest import mock
 
 from lazaret.scanner import secretverify_http as http
 from tests.scanner import _verify_stub as vs
@@ -54,6 +59,26 @@ class CheckRequestTests(unittest.TestCase):
         self.assertEqual(len(host), 253)
         self.assertIsNotNone(http.check_request(request(host=host)))
         self.refused(request(host="c" + host))
+
+    def test_the_length_of_the_whole_name_is_bounded_and_not_only_the_length_of_its_labels(self):
+        head = ".".join(["a" * 61] * 4)                               # (four labels that are each allowed)
+        self.assertEqual(len(head + "." + "b" * 5), 253)
+        self.assertIsNotNone(http.check_request(request(host=head + "." + "b" * 5)))
+        self.refused(request(host=head + "." + "b" * 6))             # (254)
+
+    def test_the_limits_are_the_ones_the_documentation_names(self):
+        self.assertEqual((http.MAX_ANSWER_BYTES, http.MAX_HEADERS, http.MAX_HEADER_VALUE, http.MAX_PATH), (65536, 64, 512, 2000))
+        self.assertIsNotNone(http.check_request(request(path="/" + "a" * 1999)))                     # (2,000 characters)
+        self.refused(request(path="/" + "a" * 2000))
+        self.assertIsNotNone(http.check_request(request(headers={"X-A": "v" * 512})))
+        self.refused(request(headers={"X-A": "v" * 513}))
+        self.assertIsNotNone(http.check_request(request(headers={f"X-{i}": "v" for i in range(64)})))
+        self.refused(request(headers={f"X-{i}": "v" for i in range(65)}))
+
+    def test_what_an_error_says_is_its_kind_and_its_note(self):
+        self.assertEqual(str(http.TransportError("tls")), "tls")
+        self.assertEqual(str(http.TransportError("tls", "bad")), "tls: bad")
+        self.assertEqual(http.TransportError("proxy", "x").kind, "proxy")
 
     def test_a_path_is_printable_ascii_that_starts_with_a_slash(self):
         for path in ("", "user", "/a b", "/a\nb", "/é", "/a\x00", "/\x7f", None, 5, "/" + "a" * http.MAX_PATH):
@@ -181,8 +206,9 @@ class RequestTests(StubCase):
                 self.assertEqual(self.send(GOOD, 5, 1000).status, status)
 
     def test_a_refused_request_is_not_sent(self):
-        with self.assertRaises(http.TransportError):
+        with self.assertRaises(http.TransportError) as caught:
             self.send(request(host="127.0.0.1"), 5, 1000)
+        self.assertEqual(caught.exception.kind, "refused")          # (refused by the transport itself, before any connection)
         self.assertEqual(self.seen(), [])
 
     def test_a_request_that_asks_for_no_room_for_an_answer_is_refused(self):
@@ -190,6 +216,45 @@ class RequestTests(StubCase):
             with self.subTest(room), self.assertRaises(http.TransportError) as caught:
                 self.send(GOOD, 5, room)
             self.assertEqual(caught.exception.kind, "refused")
+        self.assertEqual(self.seen(), [])
+
+    def test_room_for_one_byte_is_room(self):
+        self.stub.script["api.github.com"] = vs.Answer(200, b"yz")
+        got = self.send(GOOD, 5, 1)
+        self.assertEqual((got.body, got.truncated), (b"y", True))
+
+    def test_a_request_the_connection_cannot_form_is_refused(self):
+        with mock.patch.object(HTTPSConnection, "request", side_effect=ValueError("bad")):
+            with self.assertRaises(http.TransportError) as caught:
+                self.send(GOOD, 5, 1000)
+        self.assertEqual(caught.exception.kind, "refused")
+
+    def test_the_connection_is_closed_when_the_answer_is_not_one(self):
+        closed, original = [], http._Connection.close
+
+        def spy(conn):
+            closed.append(conn)
+            original(conn)
+
+        self.stub.script["api.github.com"] = vs.Answer(200, b"{}", delay=1.5)           # (an answer that does not come: the connection is not
+        with mock.patch.object(http._Connection, "close", spy), self.assertRaises(http.TransportError):    # closed by anything but the guard)
+            self.send(GOOD, 0.3, 1000)
+        self.assertGreaterEqual(len(closed), 1)
+
+    def test_nothing_is_left_waiting_after_an_answer(self):
+        made = []
+
+        class Spy(threading.Timer):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                made.append(self)
+
+        self.stub.script["api.github.com"] = vs.Answer(200, b"{}")
+        with mock.patch.object(threading, "Timer", Spy):
+            self.send(GOOD, 30, 1000)                                    # (its limit of 30 seconds is not left running)
+        (timer,) = made
+        timer.join(3)
+        self.assertFalse(timer.is_alive())
 
 
 class RedirectTests(StubCase):
@@ -253,6 +318,15 @@ class TimeTests(StubCase):
         self.assertEqual(caught.exception.kind, "timeout")
         self.assertLess(time.monotonic() - started, 3.0)
 
+    def test_a_server_that_goes_quiet_in_the_middle_is_cut_off_at_the_deadline(self):
+        # the first of its bytes comes at 0.7 s of 1.0: a read that waited its own full second would end at 1.7
+        self.stub.script["api.github.com"] = vs.Answer(200, b"y" * 50, delay=0.7, pause=(1, 5.0))
+        started = time.monotonic()
+        with self.assertRaises(http.TransportError) as caught:
+            self.send(GOOD, 1.0, 1000)
+        self.assertEqual(caught.exception.kind, "timeout")
+        self.assertLess(time.monotonic() - started, 1.45)
+
     def test_an_answer_cut_short_is_not_an_answer(self):
         self.stub.script["api.github.com"] = vs.Answer(200, b'{"login": "x"', claim=100)
         with self.assertRaises(http.TransportError) as caught:
@@ -306,6 +380,13 @@ class ConnectionTests(StubCase):
             send(request(headers={"Authorization": "Bearer " + secret}), 5, 1000)
         self.assertNotIn(secret, str(caught.exception))
 
+    def test_without_an_address_of_its_own_the_connection_is_the_standard_one(self):
+        calls = []
+        with mock.patch.object(HTTPSConnection, "connect", lambda conn: calls.append(conn)):
+            conn = http._Connection("api.github.com", 1, ssl.create_default_context(), None)
+            conn.connect()
+        self.assertEqual(calls, [conn])
+
 
 class ProxyTests(StubCase):
     def through(self, proxy, environ_extra=None):
@@ -330,6 +411,25 @@ class ProxyTests(StubCase):
         self.assertEqual(self.stub.transport(env, direct=False)(GOOD, 5, 1000).status, 200)
         self.assertEqual(proxy.requests[0][1]["proxy-authorization"], "Basic dXNlcjpwYXNz")
         self.assertNotIn("proxy-authorization", self.seen()[0].headers)                  # (not passed on to the provider)
+
+    def test_the_proxy_settings_are_the_process_s_unless_they_are_given(self):
+        proxy = self.stub.proxy()
+        url = f"http://{proxy.address[0]}:{proxy.address[1]}"
+        self.stub.script["api.github.com", "/user"] = vs.Answer(200, b"{}")
+        env = {"HTTPS_PROXY": url, "https_proxy": url, "NO_PROXY": "", "no_proxy": ""}
+        with mock.patch.dict(os.environ, env):
+            got = http.https_transport(self.stub.client_context())(GOOD, 5, 1000)         # (no settings given, no address of its own)
+        self.assertEqual(got.status, 200)
+        self.assertEqual(len(proxy.requests), 1)
+
+    def test_an_address_of_its_own_is_not_proxied(self):
+        proxy = self.stub.proxy()
+        proxy.refuse = True
+        self.stub.script["api.github.com"] = vs.Answer(200, b"{}")
+        env = {"https_proxy": f"http://{proxy.address[0]}:{proxy.address[1]}"}
+        got = http.https_transport(self.stub.client_context(), self.stub.address, env)(GOOD, 5, 1000)
+        self.assertEqual(got.status, 200)
+        self.assertEqual(proxy.requests, [])
 
     def test_a_proxy_that_wants_credentials_the_request_has_not_is_a_proxy_error(self):
         proxy = self.stub.proxy(require="Basic dXNlcjpwYXNz")

@@ -332,7 +332,8 @@ class AgeTests(CrateCase):
         cs.default_crates(reg)
         self.addCleanup(reg.close)
         self.reg = reg
-        check = self.check(self.context(), self.pkg("onlynew"))
+        with mock.patch.object(guard, "CRATES_API", reg.url + "api/v1/crates/"), mock.patch.object(guard, "CRATES_API_INTERVAL", 0):
+            check = self.check(self.context(), self.pkg("onlynew"))                  # (here the API is at hand: it is not asked)
         self.assertEqual((check.blocked, check.age), ([], None))
         self.assertEqual(reg.paths("/api/"), [])
 
@@ -391,6 +392,21 @@ class PackagesTests(CrateCase):
         self.assertEqual(listed, {"good-1.0.0", "leaf-1.0.0"})
         self.assertIn("lazaret guard: 2 crates to check (Cargo.lock; crates cargo has unpacked are left out)", self.out.getvalue())
 
+    def test_the_fetcher_is_closed_when_the_checks_are_done_and_when_one_of_them_raises(self):
+        closed, original = [], guard.Fetcher.close
+
+        def spy(fetcher):
+            closed.append(fetcher)
+            original(fetcher)
+
+        pkgs = cargosrc.parse_lock(lock_of(self.reg, ("good", "1.0.0")))
+        with mock.patch.object(guard.Fetcher, "close", spy):
+            self.run_packages(pkgs)
+            self.assertEqual(len(closed), 1)
+            with mock.patch.object(guard, "check_crate", side_effect=RuntimeError("boom")), self.assertRaises(RuntimeError):
+                self.run_packages(pkgs)
+        self.assertEqual(len(closed), 2)
+
     def test_a_crate_to_skip_is_not_checked_and_is_still_listed(self):
         pkgs = cargosrc.parse_lock(lock_of(self.reg, ("good", "1.0.0"), ("evil", "1.0.0")))
         ctx, listed = self.run_packages(pkgs, skip={"evil-1.0.0"})
@@ -426,6 +442,55 @@ class PackagesTests(CrateCase):
         self.assertEqual(sorted((c.name, c.verdict) for c in ctx.checks), [("elsewhere", "OK"), ("leaf", "OK")])
         self.assertEqual(other.paths("/dl/"), ["/dl/elsewhere/elsewhere-1.0.0.crate"])
         self.assertEqual(self.reg.paths("/dl/"), ["/dl/leaf/leaf-1.0.0.crate"])
+
+    def test_crates_io_s_api_host_is_let_through_only_when_crates_io_is_one_of_the_registries(self):
+        asked, original = [], guard.Fetcher
+
+        def spy(hosts, *args, **kwargs):
+            asked.append(set(hosts))
+            return original(hosts, *args, **kwargs)
+
+        other = cs.CratesRegistry()
+        other.add("elsewhere", "1.0.0")
+        self.addCleanup(other.close)
+        away = [cargosrc.Package("elsewhere", "1.0.0", "sparse+" + other.url, other.checksum("elsewhere", "1.0.0"))]
+        mine = cargosrc.parse_lock(lock_of(self.reg, ("leaf", "1.0.0")))
+        with mock.patch.object(cargosrc, "DEFAULT_INDEX", self.reg.url), \
+                mock.patch.object(guard, "CRATES_API", "https://api.example.test/api/v1/crates/"), mock.patch.object(guard, "Fetcher", spy):
+            self.run_packages(away)
+            self.run_packages(mine)
+        self.assertNotIn("api.example.test", asked[0])
+        self.assertIn("api.example.test", asked[1])
+
+    def test_a_download_pattern_is_at_most_512_characters(self):
+        class Config:
+            def __init__(self, doc):
+                self.doc, self.allowed = doc, []
+
+            def json(self, url):
+                return self.doc
+
+            def allow(self, url):
+                self.allowed.append(url)
+
+        stem = "https://dl.example/"
+        for length, fine in ((512, True), (513, False)):
+            with self.subTest(length):
+                fetcher = Config({"dl": stem + "a" * (length - len(stem))})
+                reg = guard.CrateRegistry(fetcher, "https://index.example/")
+                self.assertEqual((reg.dl is not None, reg.error is None, len(fetcher.allowed)), (fine, fine, int(fine)))
+        for doc in ({"dl": ""}, {"dl": 5}, {}, [], None):
+            with self.subTest(doc):
+                self.assertIsNotNone(guard.CrateRegistry(Config(doc), "https://index.example/").error)
+
+    def test_a_registry_whose_downloads_are_at_another_host_is_reached_there_and_only_there(self):
+        other = cs.CratesRegistry(dl_host="localhost")
+        other.add("elsewhere", "1.0.0")
+        self.addCleanup(other.close)
+        pkgs = [cargosrc.Package("elsewhere", "1.0.0", "sparse+" + other.url, other.checksum("elsewhere", "1.0.0"))]
+        ctx, _ = self.run_packages(pkgs)
+        self.assertEqual([(c.name, c.verdict) for c in ctx.checks], [("elsewhere", "OK")])
+        self.assertEqual(other.paths("/dl/"), ["/dl/elsewhere/elsewhere-1.0.0.crate"])
 
     def test_crates_io_replaced_by_a_source_the_guard_cannot_read_is_one_note_and_no_check(self):
         pkgs = cargosrc.parse_lock(lock_of(self.reg, ("good", "1.0.0"), ("leaf", "1.0.0")))
@@ -509,9 +574,10 @@ class HelperTests(TmpCase):
         env = dict(os.environ, FAKE_CARGO_META="null")
         with self.assertRaisesRegex(guard.GuardError, "cargo cannot read the project here"):
             guard.cargo_workspace(fake, [], env, self.tmp, None)
-        env["FAKE_CARGO_META"] = json.dumps({"workspace_root": 5})
-        with self.assertRaises(guard.GuardError):
-            guard.cargo_workspace(fake, [], env, self.tmp, None)
+        for meta in ({"workspace_root": 5}, {"workspace_root": ""}, [1], "text", 7, {"packages": []}):      # (an answer that is no mapping too)
+            env["FAKE_CARGO_META"] = json.dumps(meta)
+            with self.subTest(meta), self.assertRaises(guard.GuardError):
+                guard.cargo_workspace(fake, [], env, self.tmp, None)
 
     def test_the_members_listed_are_bounded(self):
         fake = cs.install_fake_cargo(self.tmp)
@@ -533,6 +599,7 @@ class HelperTests(TmpCase):
             f.write("[[package")
         with self.assertRaisesRegex(guard.GuardError, "Cargo.lock cannot be read"):
             guard.read_cargo_lock(path)
+        self.assertEqual(guard.read_cargo_lock(path, strict=False), [])                     # (a caller that leaves it to cargo to say)
 
     def test_the_lock_a_crate_was_published_with(self):
         lock = lock_of_text = cs.lock_text([("tool", "1.0.0", None, ["leaf"]), ("leaf", "1.0.0", HEX, [])])
@@ -547,6 +614,32 @@ class HelperTests(TmpCase):
         self.assertIsNone(guard._published_lock(ctx, cs.crate_tgz("tool", "1.0.0", {"Cargo.lock": "[[package"}), root))
         self.assertIn("its Cargo.lock cannot be read", ctx.checks[-1].notes[0])
         self.assertIsNone(guard._published_lock(ctx, cs.crate_tgz("tool", "1.0.0", {"Cargo.lock": b"\xff\xfe"}), root))
+
+
+class InterruptTests(TmpCase):
+    def test_the_manifest_and_the_lock_are_put_back_when_the_run_is_cut_short(self):
+        lock, manifest = os.path.join(self.tmp, "Cargo.lock"), os.path.join(self.tmp, "Cargo.toml")
+        for path, text in ((lock, OLD_LOCK), (manifest, '[package]\nname = "app"\n')):
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+
+        def cut_short(argv, env, cwd=None, capture=False):
+            with open(lock, "a", encoding="utf-8") as f:
+                f.write("# cargo was here\n")
+            with open(manifest, "a", encoding="utf-8") as f:
+                f.write('serde = "1"\n')
+            raise KeyboardInterrupt
+
+        ctx = guard.Context(options(tool="cargo"), out=io.StringIO())
+        ctx.scanner = CrateScanner()
+        self.addCleanup(ctx.close)
+        with mock.patch.object(guard, "find_tool", return_value="cargo"), mock.patch.object(guard, "run_tool", side_effect=cut_short), \
+                mock.patch.object(guard, "cargo_workspace", return_value=(self.tmp, [manifest])), \
+                mock.patch.object(cargosrc, "cargo_home", return_value=self.tmp), mock.patch.object(cargosrc, "sources", return_value={}):
+            with self.assertRaises(KeyboardInterrupt):
+                guard.guard_cargo(ctx, ["add", "serde"])
+        self.assertEqual(gs.read(lock), OLD_LOCK)
+        self.assertEqual(gs.read(manifest), '[package]\nname = "app"\n')
 
 
 class FlowCase(TmpCase):
@@ -676,12 +769,21 @@ class BuildCommandTests(FlowCase):
         self.assertEqual(code, 101, out)
         self.assertNotIn("nothing was installed", out)
 
+    def test_a_command_that_failed_says_nothing_of_the_crates_it_unpacked_before_it_did(self):
+        self.plan = {"update": [["lock", self.lock_of(("leaf", "1.0.0"))]], "build": self.unpack("leaf-1.0.0", "stray-9.9.9") + [["exit", 101]]}
+        code, out = self.run_guard("cargo", "build")
+        self.assertEqual(code, 101, out)
+        self.assertNotIn("installed but not checked", out)
+
     def test_a_resolution_that_fails_is_reported_and_the_files_are_put_back(self):
         self.write(self.lock, OLD_LOCK)
-        self.plan = {"update": [["write", self.lock, "half = broken\n"], ["exit", 101]]}
-        code, out = self.run_guard("cargo", "build")
+        self.plan = {"update": [["write", self.lock, "half = broken\n"], ["say", "error: failed to select a version"], ["exit", 101]]}
+        report = os.path.join(self.tmp, "report.json")
+        code, out = self.run_guard("--json", report, "cargo", "build")
         self.assertEqual(code, 3, out)
+        self.assertEqual(json.loads(self.read(report))["installed"], False)
         self.assertIn("lazaret guard: resolving (cargo build) failed (exit 101):", out)
+        self.assertIn("\n  error: failed to select a version", out)                       # (what cargo said, kept and shown by the guard)
         self.assertEqual(self.read(self.lock), OLD_LOCK)
         self.assertEqual(self.commands(), [["update", "--workspace"]])
 
@@ -743,6 +845,15 @@ class BuildCommandTests(FlowCase):
         code, out = self.run_guard("cargo", "build")
         self.assertEqual(code, 0, out)
         self.assertIn("NOTE       fromgit@0.1.0: from a git repository: not checked", out)
+
+    def test_a_crate_of_a_registry_the_guard_cannot_read_is_noted_once_and_not_also_reported_as_unchecked(self):
+        text = self.lock_of(("leaf", "1.0.0")) + ('\n[[package]]\nname = "gitidx"\nversion = "0.1.0"\n'
+                                                 'source = "registry+https://git.example/index"\nchecksum = "' + "ab" * 32 + '"\n')
+        self.plan = {"update": [["lock", text]], "build": self.unpack("leaf-1.0.0", "gitidx-0.1.0")}
+        code, out = self.run_guard("cargo", "build")
+        self.assertEqual(code, 0, out)
+        self.assertIn("NOTE       gitidx@0.1.0: from a registry the guard cannot read", out)
+        self.assertNotIn("installed but not checked", out)
 
     def test_a_vendored_crates_io_is_noted_once_and_the_command_runs(self):
         self.config('[source.crates-io]\nreplace-with = "vendored"\n[source.vendored]\ndirectory = "vendor"\n')
@@ -850,6 +961,16 @@ class LockedAndPlanTests(FlowCase):
         self.assertEqual({(p["ecosystem"], p["name"], p["verdict"]) for p in doc["packages"]},
                          {("crates", "leaf", "OK"), ("crates", "evil", "SUSPICIOUS")})
 
+    def test_json_says_whether_the_command_ran_and_what_it_returned(self):
+        report = os.path.join(self.tmp, "report.json")
+        for tail, want_code, ran in (([], 0, True), ([["exit", 101]], 101, False)):
+            with self.subTest(want_code):
+                self.plan = {"update": [["lock", self.lock_of(("leaf", "1.0.0"))]], "build": self.unpack("leaf-1.0.0") + tail}
+                code, out = self.run_guard("--json", report, "cargo", "build")
+                self.assertEqual(code, want_code, out)
+                doc = json.loads(self.read(report))
+                self.assertEqual((doc["installed"], doc["exitCode"], doc["blocked"]), (ran, want_code, 0))
+
     def test_a_second_run_does_not_fetch_what_the_first_checked(self):
         self.plan = {"update": [["lock", self.lock_of(("good", "1.0.0"), ("leaf", "1.0.0"))]]}
         code, out = self.run_guard("cargo", "build", cache=True)
@@ -873,6 +994,22 @@ class ResolvingCommandTests(FlowCase):
         self.assertIn("checked 1 OK", out)
         self.assertIn('good = "1"', self.read(self.manifest))
         self.assertEqual(self.requested("/dl/"), ["/dl/good/good-1.0.0.crate"])               # (leaf was there before: not fetched)
+
+    def test_json_says_an_add_was_made(self):
+        self.write(self.lock, self.lock_of(("leaf", "1.0.0")))
+        self.plan = {"add": [["append", self.manifest, 'good = "1"\n'], ["lock", self.lock_of(("leaf", "1.0.0"), ("good", "1.0.0"))]]}
+        report = os.path.join(self.tmp, "report.json")
+        code, out = self.run_guard("--json", report, "cargo", "add", "good")
+        self.assertEqual(code, 0, out)
+        doc = json.loads(self.read(report))
+        self.assertEqual((doc["installed"], doc["exitCode"], doc["blocked"]), (True, 0, 0))
+
+    def test_a_lock_that_could_not_be_read_before_the_command_makes_everything_in_the_new_one_new(self):
+        self.write(self.lock, "[[package")                                    # (cargo is the one to say what is wrong with it)
+        self.plan = {"update": [["lock", self.lock_of(("leaf", "1.0.0"), ("good", "1.0.0"))]]}
+        code, out = self.run_guard("cargo", "update")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(sorted(self.requested("/dl/")), ["/dl/good/good-1.0.0.crate", "/dl/leaf/leaf-1.0.0.crate"])
 
     def test_a_blocked_add_puts_back_the_manifest_and_the_lock(self):
         before_manifest = self.read(self.manifest)
@@ -913,10 +1050,13 @@ class ResolvingCommandTests(FlowCase):
     def test_a_command_that_fails_is_not_checked_and_its_files_are_put_back(self):
         self.write(self.lock, OLD_LOCK)
         self.plan = {"add": [["write", self.lock, "half = broken\n"], ["exit", 101]]}
-        code, out = self.run_guard("cargo", "add", "nosuch")
+        report = os.path.join(self.tmp, "report.json")
+        code, out = self.run_guard("--json", report, "cargo", "add", "nosuch")
         self.assertEqual(code, 101, out)
         self.assertEqual(self.read(self.lock), OLD_LOCK)
         self.assertNotIn("crates to check", out)
+        doc = json.loads(self.read(report))
+        self.assertEqual((doc["installed"], doc["exitCode"]), (False, 101))
 
     def test_a_plan_of_add_runs_it_and_puts_everything_back(self):
         self.plan = {"add": [["append", self.manifest, 'good = "1"\n'], ["lock", self.lock_of(("good", "1.0.0"), ("leaf", "1.0.0"))]]}
@@ -963,6 +1103,25 @@ class InstallTests(FlowCase):
         self.assertIn('[dependencies]\ngood = "*"\n', scratch_runs[0]["manifest"])
         self.assertEqual(self.commands()[-1], ["install", "good"])
         self.assertFalse(os.path.exists(scratch_runs[0]["argv"][2]))                         # (the scratch project is gone)
+        self.assertEqual(scratch_runs[0]["argv"][:2], ["generate-lockfile", "--manifest-path"])
+        self.assertNotIn("--offline", scratch_runs[0]["argv"])                                # (only a run that is offline resolves so)
+
+    def test_json_says_whether_cargo_installed_it(self):
+        report = os.path.join(self.tmp, "report.json")
+        for tail, want_code, installed in (([], 0, True), ([["exit", 101]], 101, False)):
+            with self.subTest(want_code):
+                self.plan = {"install": self.unpack("good-1.0.0", "leaf-1.0.0") + tail}
+                code, out = self.run_guard("--json", report, "cargo", "install", "good")
+                self.assertEqual(code, want_code, out)
+                doc = json.loads(self.read(report))
+                self.assertEqual((doc["installed"], doc["exitCode"]), (installed, want_code))
+
+    def test_an_offline_install_resolves_offline_too_and_fetches_nothing(self):
+        self.plan = {"install": self.unpack("good-1.0.0", "leaf-1.0.0")}
+        self.run_guard("cargo", "install", "--offline", "good")
+        (run,) = [r for r in self.runs() if r["argv"][0] == "generate-lockfile"]
+        self.assertEqual(run["argv"][-1], "--offline")
+        self.assertEqual(self.requested("/dl/"), [])
 
     def test_a_hostile_dependency_stops_the_install(self):
         self.plan = {"install": self.unpack("parent-1.0.0", "evil-1.0.0")}
@@ -1007,9 +1166,12 @@ class InstallTests(FlowCase):
         self.assertEqual(self.runs(), [])
 
     def test_a_crate_that_does_not_resolve_is_a_failed_resolution(self):
-        code, out = self.run_guard("cargo", "install", "nosuch")
+        report = os.path.join(self.tmp, "report.json")
+        code, out = self.run_guard("--json", report, "cargo", "install", "nosuch")
         self.assertEqual(code, 3, out)
+        self.assertEqual(json.loads(self.read(report))["installed"], False)
         self.assertIn("resolving (cargo install nosuch) failed", out)
+        self.assertIn("\n  error: no matching package named `nosuch` found", out)             # (what cargo said, kept and shown by the guard)
         self.assertEqual(self.installs(), [])
 
     def test_a_plan_installs_nothing(self):
@@ -1023,6 +1185,12 @@ class InstallTests(FlowCase):
         code, out = self.run_guard("cargo", "install", "good")
         self.assertEqual(code, 1, out)
         self.assertIn("installed but not checked: other-2.0.0", out)
+
+    def test_an_install_that_failed_installed_nothing_and_says_nothing_of_what_it_unpacked(self):
+        self.plan = {"install": self.unpack("good-1.0.0", "leaf-1.0.0", "other-2.0.0") + [["exit", 101]]}
+        code, out = self.run_guard("cargo", "install", "good")
+        self.assertEqual(code, 101, out)
+        self.assertNotIn("installed but not checked", out)
 
     def test_the_toolchain_choice_goes_to_every_command(self):
         self.plan = {"install": self.unpack("good-1.0.0", "leaf-1.0.0")}

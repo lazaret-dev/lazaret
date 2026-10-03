@@ -8,6 +8,7 @@ import json
 import re
 import threading
 import unittest
+from unittest import mock
 
 from lazaret.scanner import secretverify as sv
 from lazaret.scanner import secretverify_http as http
@@ -135,6 +136,15 @@ class IdentifyTests(unittest.TestCase):
                 self.assertEqual(sv.identify(prefix + ch * (low - 1)), [])
                 self.assertEqual(sv.identify(prefix + ch * (high + 1)), [])
 
+    def test_a_credential_is_looked_at_up_to_512_characters_and_no_further(self):
+        wide = {"github": {"secret": re.compile(r"[a-z]+")}}                       # (the shipped patterns stop well short of 512)
+        with mock.patch.dict(sv._SHAPES, wide):
+            self.assertEqual(sv.identify("a" * 512), ["github"])
+            self.assertEqual(sv.identify("a" * 513), [])
+            v = verifier(Fake(default=resp(401)))
+            self.assertEqual(v.verify("github", "a" * 512).outcome, "rejected")
+            self.assertEqual(v.verify("github", "a" * 513).detail, "not this provider's format, so nothing was sent")
+
     def test_what_is_not_a_credential_is_none(self):
         good = SECRETS["github"]
         for text in (good + "\n", good + " ", " " + good, "\n" + good, good + "\r\nX-Evil: 1", good[:-1] + "é", good[:-1] + "١",
@@ -181,6 +191,16 @@ class ValidateTests(unittest.TestCase):
         for bad in ("API.github.com", "127.0.0.1", "localhost", "api.github.com:443", "", None, "a b.com", "api.github.com/x"):
             with self.subTest(bad):
                 self.refused("github", lambda e, bad=bad: e.update(host=bad), "host")
+
+    def test_a_host_may_be_253_characters_and_no_more(self):
+        longest = ".".join(["a" * 63] * 3 + ["b" * 61])
+        self.assertEqual(len(longest), 253)
+        sv.validate(self.table("github", lambda e: e.update(host=longest)))
+        self.refused("github", lambda e: e.update(host=longest + "b"), "host")
+
+    def test_an_answer_rule_may_hold_every_key(self):
+        rule = {"status": [200], "json": {"a": "b"}, "code": ["X"], "outcome": "live", "why": "w", "who": {"json": "login"}}
+        sv.validate(self.table("github", lambda e: e["answers"].append(rule)))
 
     def test_the_request(self):
         self.refused("github", lambda e: e["request"].update(method="PUT"), "method")
@@ -309,6 +329,8 @@ class InterpretTests(unittest.TestCase):
         self.assertEqual(sv.interpret(entry("github"), resp(502))[1], "the provider failed (HTTP 502)")
         self.assertEqual(sv.interpret(entry("github"), resp(599))[1], "the provider failed (HTTP 599)")
         self.assertEqual(sv.interpret(entry("github"), resp(499))[1], "the answer was not one this module knows (HTTP 499)")
+        self.assertEqual(sv.interpret(entry("github"), resp(500))[1], "the provider failed (HTTP 500)")
+        self.assertEqual(sv.interpret(entry("github"), resp(600))[1], "the answer was not one this module knows (HTTP 600)")
 
     def test_an_answer_cut_short_is_read_by_its_status_only(self):
         slack = entry("slack")
@@ -342,6 +364,26 @@ class InterpretTests(unittest.TestCase):
         self.assertEqual(sv.interpret(github, resp(200, {"login": "x" * 500}))[2], "x" * sv.MAX_WHO)
         self.assertEqual(sv.interpret(github, resp(200, {"login": "a b"}))[2], "a?b")
         self.assertEqual(sv.interpret(github, resp(200, {"login": "é ü"}))[2], "é ü")
+
+    def test_the_limits_on_what_is_printed_and_what_is_sent_are_these(self):
+        self.assertEqual((sv.MAX_WHO, sv.MAX_CREDENTIAL), (80, 512))
+        self.assertEqual(len(sv._text("a" * 81, ())), 80)
+        self.assertEqual(len(sv._text("a" * 80, ())), 80)
+        self.assertEqual(sv._text("a" * 79, ()), "a" * 79)
+
+    def test_an_empty_part_redacts_nothing(self):
+        self.assertEqual(sv._text("abc", [""]), "abc")
+        self.assertEqual(sv._text("abc", ["", "b"]), "a[redacted]c")
+
+    def test_an_answer_is_read_as_json_once_however_many_rules_ask(self):
+        with mock.patch.object(sv, "_json", wraps=sv._json) as parse:
+            self.assertEqual(sv.interpret(entry("slack"), resp(200, {"ok": True, "user": "bot"})), ("live", "HTTP 200", "bot"))
+        self.assertEqual(parse.call_count, 1)
+        with mock.patch.object(sv, "_json", wraps=sv._json) as parse:
+            provider = {"answers": [{"status": [200], "json": {"a": "x"}, "outcome": "rejected"},
+                                    {"status": [200], "json": {"b": "y"}, "outcome": "rejected"}, {"status": [200], "outcome": "live"}]}
+            self.assertEqual(sv.interpret(provider, resp(200, b"null"))[0], "live")        # (a document that is no mapping is read once too)
+        self.assertEqual(parse.call_count, 1)
 
     def test_a_credential_in_an_answer_is_not_echoed(self):
         secret = SECRETS["github"]
@@ -435,6 +477,19 @@ class VerifyTests(unittest.TestCase):
         self.assertEqual(got, sv.Result("github", "live", "HTTP 200", "octocat", 200))
         (call,) = fake.calls
         self.assertEqual((call[0].host, call[1], call[2]), ("api.github.com", http.DEFAULT_TIMEOUT, http.MAX_ANSWER_BYTES))
+
+    def test_a_part_that_holds_another_is_redacted_whole(self):
+        pair = {"id": "AKIAABCDEFGHIJKLMNOP", "secret": "xyzAKIAABCDEFGHIJKLMNOPxyz0123456789abcd"}
+        self.assertEqual(len(pair["secret"]), 40)
+        arn = b"<Arn>arn:aws:iam::1:user/" + pair["secret"].encode() + b"</Arn>"
+        got = verifier(Fake(default=resp(200, arn))).verify("aws", pair)
+        self.assertEqual(got.outcome, "live")
+        self.assertNotIn("xyz", got.who)
+        self.assertNotIn("0123456789", got.who)
+        self.assertEqual(got.who, "arn:aws:iam::1:user/[redacted]")
+
+    def test_the_default_transport_is_the_https_one(self):
+        self.assertTrue(callable(sv.Verifier()._transport))
 
     def test_a_rejected_credential(self):
         got = verifier(Fake(default=resp(401))).verify("github", SECRETS["github"])
@@ -610,6 +665,50 @@ class LimitTests(unittest.TestCase):
             v.verify("github", "not a token")
         self.assertEqual(v.verify("github", "ghp_" + "a" * 36).outcome, "rejected")
 
+    def test_the_defaults_are_two_calls_in_flight_per_provider_500_calls_and_120_seconds(self):
+        fake = Fake(default=resp(401))
+        v = sv.Verifier(fake, now=lambda: NOW)
+        got = [v.verify("github", f"ghp_{i:036d}") for i in range(502)]
+        self.assertEqual(len(fake.calls), 500)
+        self.assertEqual((got[499].outcome, got[500].outcome), ("rejected", "unknown"))
+        clock = [100.0]
+        v = sv.Verifier(Fake(default=resp(401)), now=lambda: NOW, clock=lambda: clock[0])
+        v.verify("github", "ghp_" + "a" * 36)
+        clock[0] = 220.0
+        self.assertEqual(v.verify("github", "ghp_" + "b" * 36).outcome, "rejected")
+        clock[0] = 220.5
+        self.assertEqual(v.verify("github", "ghp_" + "c" * 36).outcome, "unknown")
+
+    def test_the_default_width_is_two_calls_to_a_provider_and_four_workers(self):
+        for kw, items, workers, want in (({}, 8, 8, 2), ({"per_provider": 8}, 12, None, 4)):
+            with self.subTest(kw=kw, workers=workers):
+                inflight, peak, lock = [0], [0], threading.Lock()
+
+                def slow(request):
+                    with lock:
+                        inflight[0] += 1
+                        peak[0] = max(peak[0], inflight[0])
+                    threading.Event().wait(0.05)
+                    with lock:
+                        inflight[0] -= 1
+                    return resp(401)
+
+                v = sv.Verifier(Fake(default=slow), now=lambda: NOW, **kw)
+                asked = [("github", "ghp_" + ch * 36) for ch in "abcdefghijkl"[:items]]
+                got = v.verify_all(asked, workers=workers) if workers else v.verify_all(asked)
+                self.assertEqual([r.outcome for r in got], ["rejected"] * items)
+                self.assertEqual(peak[0], want)
+
+    def test_the_wait_is_what_is_left_of_the_interval_not_the_time_of_day(self):
+        clock, slept = [50.0], []
+        v = verifier(Fake(default=resp(500)), interval=2.0, clock=lambda: clock[0], sleep=slept.append)
+        v.verify("github", "ghp_" + "a" * 36)
+        v.verify("github", "ghp_" + "b" * 36)
+        self.assertEqual(slept, [2.0])
+        clock[0] = 51.0
+        v.verify("github", "ghp_" + "c" * 36)
+        self.assertEqual(slept, [2.0, 3.0])
+
     def test_the_least_interval_between_calls_to_one_provider(self):
         clock, slept = [0.0], []
         v = verifier(Fake(default=resp(500)), interval=2.0, clock=lambda: clock[0], sleep=slept.append)
@@ -687,10 +786,42 @@ class VerifyAllTests(unittest.TestCase):
         self.assertEqual(len(fake.calls), 1)
         self.assertEqual(got[0], got[1])
 
+    def test_a_pair_in_either_order_is_asked_once_even_when_both_are_in_flight(self):
+        aws = SECRETS["aws"]
+
+        def slow(request):
+            threading.Event().wait(0.05)
+            return resp(200, AWS_LIVE)
+
+        fake = Fake(default=slow)
+        verifier(fake).verify_all([("aws", dict(aws)), ("aws", {"secret": aws["secret"], "id": aws["id"]})], workers=4)
+        self.assertEqual(len(fake.calls), 1)
+
     def test_nothing_and_one_worker(self):
         self.assertEqual(verifier().verify_all([]), [])
         got = verifier(Fake(default=resp(401))).verify_all([("github", "ghp_" + "a" * 36), ("github", "ghp_" + "b" * 36)], workers=1)
         self.assertEqual([r.outcome for r in got], ["rejected", "rejected"])
+
+    def test_one_worker_asks_one_at_a_time_and_more_workers_ask_together(self):
+        items = [("github", SECRETS["github"]), ("stripe", SECRETS["stripe"]), ("npm", SECRETS["npm"])]   # (three providers, so that no
+        for workers in (1, 0, -3, 3):                                                                    # provider's own limit keeps them in turn)
+            state, gate = {"now": 0, "most": 0}, threading.Lock()
+
+            def slow(request, state=state, gate=gate):
+                with gate:
+                    state["now"] += 1
+                    state["most"] = max(state["most"], state["now"])
+                threading.Event().wait(0.05)
+                with gate:
+                    state["now"] -= 1
+                return resp(401)
+
+            got = verifier(Fake(default=slow)).verify_all(items, workers=workers)
+            self.assertEqual([r.outcome for r in got], ["rejected"] * 3, workers)
+            if workers >= 3:
+                self.assertGreaterEqual(state["most"], 2, workers)
+            else:
+                self.assertEqual(state["most"], 1, workers)           # (nought or fewer is one, not none)
 
     def test_hostile_items_are_unknown_and_do_not_stop_the_rest(self):
         got = verifier(Fake(default=resp(401))).verify_all([("github", None), ("github", ["x"]), ("github", {"a": 1}), ("github", "ghp_" + "a" * 36)])

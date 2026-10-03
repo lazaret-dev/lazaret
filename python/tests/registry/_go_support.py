@@ -182,12 +182,15 @@ def default_modules(proxy):
 
 FAKE_GO = r'''#!@@PYTHON@@
 """A stand-in for the go command. FAKE_GO_ENV: the JSON `go env -json` answers from (null: it fails); FAKE_GO_PLAN: what any other command
-does, as a JSON list of steps; FAKE_GO_LOG: where it writes {"argv", "GOPROXY", "GOMODCACHE", "cwd"}, one line per run."""
+does, as a JSON list of steps; FAKE_GO_ENV_LOG: where it writes the folder each `go env` ran in; FAKE_GO_LOG: where it writes {"argv", "GOPROXY", "GOMODCACHE", "cwd"}, one line per run."""
 import json, os, sys, urllib.request, urllib.error
 
 args = sys.argv[1:]
 if args[:2] == ["env", "-json"]:
     env = json.loads(os.environ.get("FAKE_GO_ENV", "{}"))
+    if os.environ.get("FAKE_GO_ENV_LOG"):              # where `go env` was asked (the folder it ran in)
+        with open(os.environ["FAKE_GO_ENV_LOG"], "a", encoding="utf-8") as f:
+            f.write(os.getcwd() + "\n")
     if env is None:                                    # a go that cannot say its settings
         print("go: broken", file=sys.stderr)
         sys.exit(1)
@@ -222,6 +225,11 @@ for step in json.loads(os.environ.get("FAKE_GO_PLAN", "[]")):
     elif kind == "append":
         with open(step[1], "a", encoding="utf-8") as f:
             f.write(step[2])
+    elif kind == "copy":                               # copy a file of the folder go runs in (step[1]) to another (step[2])
+        with open(step[1], "rb") as src, open(step[2], "wb") as dst:
+            dst.write(src.read())
+    elif kind == "say":                                # print on the standard output
+        print(step[1])
     elif kind == "exit":
         code = step[1]
 sys.exit(code)

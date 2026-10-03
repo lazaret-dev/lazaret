@@ -9,14 +9,17 @@ is installed (skipped where it is not).
 What the scan finds in a Go module today is what it finds in any archive (JavaScript and Python files, install hooks, binaries,
 archive structure); the Go and Rust rules of the engine read `.go` files from the 0.1.9 wiring on."""
 
+import datetime
 import io
 import json
 import os
 import shutil
+import socket
 import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 import urllib.error
 import urllib.request
@@ -318,6 +321,266 @@ class RequestTests(RelayCase):
             self.assertEqual((r.status, r.read()), (200, b""))
 
 
+class StubRelay:
+    """Stands in for GoRelay behind the server: `reply` is called for each request and gives the GoReply (or raises)."""
+
+    def __init__(self, reply):
+        self.reply = reply
+        self.asked = []
+
+    def handle(self, req):
+        self.asked.append(req)
+        return self.reply()
+
+
+class FakeResponse(io.BytesIO):
+    """What a Fetcher.open gives: a body, and the headers it came with."""
+
+    def __init__(self, body, headers):
+        super().__init__(body)
+        self.headers = headers
+
+
+def reach(base, path, method="GET"):
+    """-> (status, headers, body) of one request, with no wait longer than five seconds."""
+    try:
+        with OPENER.open(urllib.request.Request(base + path, method=method), timeout=5) as r:
+            return r.status, r.headers, r.read()
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.headers, exc.read()
+
+
+class ServerTests(unittest.TestCase):
+    """What the Go proxy on this machine says over HTTP, whatever the relay behind it answers."""
+    PATH = "/example.test/good/@v/list"
+
+    def serve(self, reply):
+        relay = StubRelay(reply)
+        server = guard.make_go_server(relay)
+        threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.server = server
+        return relay, f"http://127.0.0.1:{server.server_address[1]}"
+
+    def test_a_text_reply_has_its_type_its_length_and_is_not_cached(self):
+        _relay, base = self.serve(lambda: guard.GoReply(200, b"v1.0.0\n", "text/x-test", None, None))
+        status, headers, body = reach(base, self.PATH)
+        self.assertEqual((status, body), (200, b"v1.0.0\n"))
+        self.assertEqual((headers["Content-Type"], headers["Content-Length"], headers["Cache-Control"]), ("text/x-test", "7", "no-store"))
+        status, headers, body = reach(base, self.PATH, "HEAD")
+        self.assertEqual((status, body, headers["Content-Length"], headers["Content-Type"]), (200, b"", "7", "text/x-test"))
+
+    def test_a_head_request_is_answered_with_no_body_at_all(self):
+        folder = tempfile.mkdtemp(prefix="lazaret-guard-go-")
+        self.addCleanup(guard.remove_tree, folder)
+        path = os.path.join(folder, "m.zip")
+        with open(path, "wb") as f:
+            f.write(b"zipzipzip")
+        replies = (lambda: guard.GoReply(200, b"v1.0.0\n", "text/plain", None, None),
+                   lambda: guard.GoReply(200, None, "application/zip", path, None),
+                   lambda: guard.GoReply(200, None, "application/zip", None, FakeResponse(b"hello", {"Content-Length": "5"})),
+                   lambda: guard.GoReply(200, None, "application/zip", None, FakeResponse(b"hello", {})))
+        for number, reply in enumerate(replies):
+            with self.subTest(number):
+                _relay, base = self.serve(reply)
+                with socket.create_connection(("127.0.0.1", int(base.rsplit(":", 1)[1])), timeout=5) as conn:
+                    conn.sendall(f"HEAD {self.PATH} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n".encode())
+                    data = b""
+                    while True:
+                        block = conn.recv(65536)
+                        if not block:
+                            break
+                        data += block
+                head, _, body = data.partition(b"\r\n\r\n")
+                self.assertTrue(head.startswith(b"HTTP/1.1 200"), head)
+                self.assertEqual(body, b"")
+
+    def test_a_status_that_is_not_200_is_the_replys(self):
+        _relay, base = self.serve(lambda: guard.GoReply(403, b"no\n", "text/plain", None, None))
+        self.assertEqual(reach(base, self.PATH)[::2], (403, b"no\n"))
+
+    def test_a_file_is_sent_with_its_type_and_length(self):
+        folder = tempfile.mkdtemp(prefix="lazaret-guard-go-")
+        self.addCleanup(guard.remove_tree, folder)
+        path = os.path.join(folder, "m.zip")
+        data = bytes(range(256)) * 17
+        with open(path, "wb") as f:
+            f.write(data)
+        _relay, base = self.serve(lambda: guard.GoReply(200, None, "application/zip", path, None))
+        status, headers, body = reach(base, self.PATH)
+        self.assertEqual((status, body, headers["Content-Type"], headers["Content-Length"]), (200, data, "application/zip", str(len(data))))
+        status, headers, body = reach(base, self.PATH, "HEAD")
+        self.assertEqual((status, body, headers["Content-Type"], headers["Content-Length"]), (200, b"", "application/zip", str(len(data))))
+
+    def test_a_stream_is_passed_on_with_its_length(self):
+        _relay, base = self.serve(lambda: guard.GoReply(200, None, "application/zip", None, FakeResponse(b"hello", {"Content-Length": "5"})))
+        status, headers, body = reach(base, self.PATH)
+        self.assertEqual((status, body, headers["Content-Type"], headers["Content-Length"]), (200, b"hello", "application/zip", "5"))
+        status, headers, body = reach(base, self.PATH, "HEAD")
+        self.assertEqual((status, body, headers["Content-Length"]), (200, b"", "5"))
+
+    def test_a_stream_of_unknown_length_ends_when_the_connection_does(self):
+        for length in (None, "", "five", "5, 5", "-5"):
+            with self.subTest(length=length):
+                headers = {} if length is None else {"Content-Length": length}
+                _relay, base = self.serve(lambda: guard.GoReply(200, None, "application/zip", None, FakeResponse(b"hello", headers)))
+                status, got, body = reach(base, self.PATH)
+                self.assertEqual((status, body), (200, b"hello"))
+                self.assertIsNone(got["Content-Length"])
+
+    def test_a_relay_that_fails_gets_a_500_and_the_server_goes_on(self):
+        def boom():
+            raise RuntimeError("a bug")
+
+        relay, base = self.serve(boom)
+        status, headers, body = reach(base, self.PATH)
+        self.assertEqual((status, body, headers["Content-Length"]), (500, b"lazaret guard: internal error\n", "30"))
+        relay.reply = lambda: guard.GoReply(200, b"ok\n", "text/plain", None, None)
+        self.assertEqual(reach(base, self.PATH)[::2], (200, b"ok\n"))
+
+    def test_the_request_the_relay_is_asked_is_the_decoded_one(self):
+        relay, base = self.serve(lambda: guard.GoReply(200, b"", "text/plain", None, None))
+        reach(base, "/example.test/%21big/@v/v1.0.0.info")
+        (req,) = relay.asked
+        self.assertEqual((req.kind, req.module, req.version), ("info", "example.test/Big", "v1.0.0"))
+
+    def test_the_server_is_for_this_machine_and_does_not_wait_on_its_threads(self):
+        server = guard.make_go_server(StubRelay(lambda: None))
+        self.addCleanup(server.server_close)
+        self.assertEqual(server.server_address[0], "127.0.0.1")
+        self.assertTrue(server.daemon_threads)
+        self.assertTrue(server.allow_reuse_address)
+
+
+class TeardownTests(RelayCase):
+    def make(self):
+        return guard.LocalGoProxy(self.context(), [goproxy.Proxy(self.proxy.url, False)], pmsettings.Credentials())
+
+    def test_closing_it_stops_the_server_and_removes_what_it_spooled(self):
+        lp = self.make()
+        self.assertEqual(ask(lp.base, "/example.test/good/@v/v1.0.0.zip")[0], 200)
+        self.assertEqual(len(os.listdir(lp.spool)), 1)
+        with mock.patch.object(lp.server, "shutdown", wraps=lp.server.shutdown) as shutdown, \
+                mock.patch.object(lp.server, "server_close", wraps=lp.server.server_close) as server_close, \
+                mock.patch.object(lp.fetcher, "close", wraps=lp.fetcher.close) as fetcher_close:
+            lp.__exit__(None, None, None)
+        for call in (shutdown, server_close, fetcher_close):
+            call.assert_called_once_with()
+        self.assertFalse(os.path.exists(lp.spool))
+        with self.assertRaises(urllib.error.URLError):
+            OPENER.open(lp.base + "/example.test/good/@v/list", timeout=5)
+
+    def test_closing_it_is_not_troubled_by_a_spool_that_is_gone(self):
+        lp = self.make()
+        shutil.rmtree(lp.spool)
+        lp.__exit__(None, None, None)
+
+    def test_a_blocked_zip_is_not_kept_and_a_clean_one_is(self):
+        lp = self.serve(self.context())
+        self.assertEqual(ask(lp.base, "/example.test/evil/@v/v1.0.0.zip")[0], 403)
+        self.assertEqual(os.listdir(lp.spool), [])
+        self.assertEqual(ask(lp.base, "/example.test/good/@v/v1.0.0.zip")[0], 200)
+        self.assertEqual(len(os.listdir(lp.spool)), 1)
+
+    def test_the_fetcher_follows_a_redirect_to_any_https_host_and_the_checks_name_the_first_proxy(self):
+        lp = self.serve(self.context())
+        self.assertTrue(lp.fetcher.https_redirects)
+        ask(lp.base, "/example.test/good/@v/v1.0.0.zip")
+        self.assertEqual(lp.relay.source, self.proxy.url)
+        self.assertEqual(lp.relay.ctx.checks[0].source, self.proxy.url)
+        lp2 = guard.LocalGoProxy(self.context(), [goproxy.Proxy("direct", False)], pmsettings.Credentials())
+        self.addCleanup(lp2.__exit__, None, None, None)
+        self.assertEqual(lp2.relay.source, "")
+
+
+class RelayDetailTests(RelayCase):
+    def test_the_notes_for_the_report_are_few_and_not_repeated(self):
+        relay = guard.GoRelay(self.context(), None, [], "")
+        for n in range(30):
+            relay.note(f"m{n}")
+            relay.note("m0")
+        self.assertEqual(relay.errors, [f"m{n}" for n in range(20)])
+
+    def test_a_release_time_that_cannot_be_read_is_noted_and_holds_nothing_back(self):
+        self.proxy.fail["/example.test/mixed/@v/v1.1.0.info"] = (200, b"[1]")
+        lp = self.serve(self.context())
+        self.assertEqual(ask(lp.base, "/example.test/mixed/@v/list"), (200, b"v1.0.0\nv1.1.0\n"))
+        self.assertEqual(lp.relay.errors, ["example.test/mixed@v1.1.0: no release time (not a JSON object)"])
+        self.assertEqual(lp.relay.held_back, {})
+
+    def test_a_release_time_the_proxy_cannot_give_is_noted_too(self):
+        self.proxy.fail["/example.test/mixed/@v/v1.1.0.info"] = (500, b"broken")
+        lp = self.serve(self.context())
+        self.assertEqual(ask(lp.base, "/example.test/mixed/@v/list")[0], 200)
+        (note,) = lp.relay.errors
+        self.assertTrue(note.startswith("example.test/mixed@v1.1.0: no release time ("), note)
+        self.proxy.fail["/example.test/mixed/@v/v1.1.0.info"] = (404, b"missing")
+        lp = self.serve(self.context())
+        ask(lp.base, "/example.test/mixed/@v/list")
+        self.assertEqual(lp.relay.errors, ["example.test/mixed@v1.1.0: no release time (not found)"])
+
+    def test_a_release_exactly_at_the_cutoff_is_old_enough(self):
+        ctx = self.context()
+        lp = self.serve(ctx)
+        step = datetime.timedelta(seconds=1)
+        self.assertFalse(lp.relay._too_new("example.test/mixed", ctx.cutoff))
+        self.assertTrue(lp.relay._too_new("example.test/mixed", ctx.cutoff + step))
+        self.assertFalse(lp.relay._too_new("example.test/mixed", ctx.cutoff - step))
+        self.assertFalse(lp.relay._too_new("example.test/mixed", None))
+        self.assertFalse(lp.relay._too_new("golang.org/toolchain", ctx.cutoff + step))
+
+    def test_an_info_is_asked_of_the_proxy_once(self):
+        lp = self.serve(self.context())
+        for _ in range(3):
+            self.assertEqual(ask(lp.base, "/example.test/good/@v/v1.0.0.info")[0], 200)
+        self.assertEqual(len(self.proxy.paths("/example.test/good/@v/v1.0.0.info")), 1)
+
+    def test_the_newest_24_versions_are_looked_up_by_default(self):
+        for minor in range(40):
+            self.proxy.add("example.test/many", f"v1.{minor}.0")
+        lp = self.serve(self.context())
+        self.assertEqual(len(ask(lp.base, "/example.test/many/@v/list")[1].split()), 40)
+        self.assertEqual(len(self.proxy.paths(".info")), 24)
+
+    def test_a_missing_or_gone_answer_is_not_found_for_the_tool_and_not_a_fault(self):
+        for status in (404, 410):
+            for path in ("/example.test/good/@v/list", "/example.test/good/@v/v1.0.0.zip", "/example.test/good/@v/v1.0.0.mod",
+                         "/example.test/good/@latest", "/example.test/good/@v/v1.0.0.info"):
+                with self.subTest(status=status, path=path):
+                    self.proxy.fail[""] = (status, b"nope")
+                    lp = self.serve(self.context())
+                    self.assertEqual(ask(lp.base, path)[0], 404)
+                    self.assertEqual([e for e in lp.relay.errors if "no release time" not in e], [])
+                    self.assertEqual(lp.relay.ctx.checks, [])
+
+    def test_a_list_with_nothing_but_direct_has_nothing_to_relay_and_says_not_found(self):
+        lp = self.serve(self.context(), [goproxy.Proxy("direct", False)])
+        self.assertEqual(ask(lp.base, "/example.test/good/@v/list")[0], 404)
+        self.assertEqual(lp.relay.errors, [])
+        self.assertEqual(ask(lp.base, "/example.test/good/@v/v1.0.0.zip")[0], 404)
+        self.assertEqual(self.proxy.requests, [])
+
+    def test_any_other_failure_is_a_502_with_fixed_text_and_the_reason_is_kept(self):
+        self.proxy.fail[""] = (500, b"secret detail")
+        lp = self.serve(self.context())
+        status, body = ask(lp.base, "/example.test/good/@v/v1.0.0.mod")
+        self.assertEqual((status, body), (502, b"lazaret guard could not fetch this from the proxy it relays\n"))
+        self.assertEqual(len(lp.relay.errors), 1)
+
+    def test_the_reason_a_zip_is_refused_is_short_and_on_one_line(self):
+        class Long(FakeScanner):
+            def scan(self, data, container, kind):
+                return {"verdict": "SUSPICIOUS", "reason": "a\n" + "x" * 500, "indicators": []}
+
+        ctx = self.context()
+        ctx.scanner = Long()
+        lp = self.serve(ctx)
+        status, body = ask(lp.base, "/example.test/good/@v/v1.0.0.zip")
+        self.assertEqual(status, 403)
+        self.assertEqual(body, b"blocked by lazaret guard: " + (b"SUSPICIOUS: a " + b"x" * 286) + b"\n")
+
+
 class ProxyListTests(RelayCase):
     def two(self):
         first = go.GoProxy()
@@ -440,9 +703,22 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(guard.cached_modules(self.tmp),
                          {("example.test/BigCase", "v1.0.0"), ("golang.org/x/net", "v0.1.0"), ("golang.org/x/net", "v0.2.0")})
 
+    def test_a_module_may_have_a_folder_called_sumdb(self):
+        self.touch("cache", "download", "example.test", "sumdb", "@v", "v1.0.0.zip")
+        self.touch("cache", "download", "sumdb", "sum.golang.org", "x", "@v", "v9.zip")
+        self.assertEqual(guard.cached_modules(self.tmp), {("example.test/sumdb", "v1.0.0")})
+
     def test_no_module_cache_is_nothing_cached(self):
         self.assertEqual(guard.cached_modules(os.path.join(self.tmp, "none")), set())
         self.assertEqual(guard.cached_modules(""), set())
+
+    def test_no_module_cache_does_not_mean_the_current_folder(self):
+        self.touch("cache", "download", "example.test", "x", "@v", "v1.0.0.zip")
+        here = os.getcwd()
+        os.chdir(self.tmp)
+        self.addCleanup(os.chdir, here)
+        self.assertEqual(guard.cached_modules(""), set())
+        self.assertEqual(guard.cached_modules(self.tmp), {("example.test/x", "v1.0.0")})
 
     def test_the_files_a_go_command_may_change(self):
         gomod = os.path.join(self.tmp, "proj", "go.mod")
@@ -472,6 +748,12 @@ class HelperTests(unittest.TestCase):
         self.assertIsNone(guard._go_chdir(["build"]))
         self.assertIsNone(guard._go_chdir([]))
 
+    def test_a_flag_and_its_value_at_the_end_of_the_command(self):
+        self.assertEqual(guard._go_flag(["-modfile", "a.mod"], "modfile"), "a.mod")
+        self.assertEqual(guard._go_flag(["x", "--modfile", "a.mod"], "modfile"), "a.mod")
+        self.assertEqual(guard._go_chdir(["build", "-C", "d"]), "d")
+        self.assertEqual(guard._go_chdir(["build", "--C", "d"]), "d")
+
     def test_what_a_plan_fetches(self):
         plan = guard.go_plan
         self.assertEqual(plan(["get", "-u", "x.io/m@v1"], "S"), (["get", "-u", "x.io/m@v1"], None))
@@ -484,6 +766,17 @@ class HelperTests(unittest.TestCase):
             with self.subTest(command):
                 self.assertEqual(plan(command, "S"), (["mod", "download"], None))
         self.assertEqual(plan(["build", "-C", "d", "./..."], "S"), (["mod", "download", "-C", "d"], None))
+
+    def test_every_folder_is_made_writable_before_it_is_removed(self):
+        path = self.touch("ro", "a", "b", "f")
+        with mock.patch.object(guard.os, "chmod", wraps=os.chmod) as chmod:
+            guard.remove_tree(os.path.dirname(os.path.dirname(os.path.dirname(path))))
+        self.assertTrue({(os.path.join(self.tmp, "ro", "a"), 0o700), (os.path.join(self.tmp, "ro", "a", "b"), 0o700)}
+                        <= {c.args for c in chmod.call_args_list})
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "ro")))
+
+    def test_what_is_not_there_is_removed_without_a_fuss(self):
+        guard.remove_tree(os.path.join(self.tmp, "none"))
 
     def test_a_read_only_folder_is_removed(self):
         path = self.touch("ro", "a", "b", "f")
@@ -521,12 +814,18 @@ class FlowCase(unittest.TestCase):
         self.goenv = {"GOPROXY": self.proxy.url, "GOMODCACHE": self.modcache, "GOMOD": self.gomod, "GOPRIVATE": ""}
         self.plan = []
 
-    def run_guard(self, *args, goenv=None, broken=False, timeout=40):
+    def run_guard(self, *args, goenv=None, broken=False, timeout=40, **extra):
         env = gs.base_env(self.tmp)
         env.update(PATH=self.bin + os.pathsep + os.environ.get("PATH", ""),
                    FAKE_GO_ENV=json.dumps(None if broken else (goenv if goenv is not None else self.goenv)),
-                   FAKE_GO_PLAN=json.dumps(self.plan), FAKE_GO_LOG=self.log)
+                   FAKE_GO_PLAN=json.dumps(self.plan), FAKE_GO_LOG=self.log, **extra)
         return gs.run_guard(["--jobs", "1", "--no-cache", *args], self.dir, env, timeout)
+
+    def report(self, *args, **kw):
+        """-> (exit code, output, the --json report) of a run."""
+        path = os.path.join(self.dir, "report.json")
+        code, out = self.run_guard("--json", path, *args, **kw)
+        return code, out, json.loads(self.read(path))
 
     def runs(self):
         with open(self.log, encoding="utf-8") as f:
@@ -572,6 +871,23 @@ class CommandTests(FlowCase):
         self.assertEqual(self.read(self.gomod), before)
         self.assertFalse(os.path.exists(self.gosum))
 
+    def test_a_block_is_exit_1_whatever_go_exits_with(self):
+        for gos in (0, 7):
+            with self.subTest(go=gos):
+                self.plan = [self.zip_step("example.test/evil", "v1.0.0"), ["exit", gos]]
+                code, out = self.run_guard("go", "get", "example.test/evil@v1.0.0")
+                self.assertEqual(code, 1, out)
+                self.assertIn("BLOCKED    example.test/evil@v1.0.0", out)
+
+    def test_a_plan_that_blocks_is_exit_1_and_one_that_does_not_is_exit_0(self):
+        self.plan = [self.zip_step("example.test/evil", "v1.0.0"), ["exit", 0]]
+        code, out = self.run_guard("--plan", "go", "get", "example.test/evil@v1.0.0")
+        self.assertEqual(code, 1, out)
+        self.assertIn("BLOCKED    example.test/evil@v1.0.0", out)
+        self.plan = [self.zip_step("example.test/good", "v1.0.0"), ["exit", 0]]
+        code, out = self.run_guard("--plan", "go", "get", "example.test/good@v1.0.0")
+        self.assertEqual(code, 0, out)
+
     def test_what_passed_keeps_its_changes(self):
         self.plan = [["append", self.gomod, "\nrequire example.test/good v1.0.0\n"], ["write", self.gosum, "sum\n"],
                      self.zip_step("example.test/good", "v1.0.0")]
@@ -612,6 +928,75 @@ class CommandTests(FlowCase):
         self.assertEqual(doc["heldBack"], {})
 
 
+    def test_json_says_whether_anything_was_installed_and_what_the_exit_code_was(self):
+        good, evil = self.zip_step("example.test/good", "v1.0.0"), self.zip_step("example.test/evil", "v1.0.0")
+        cases = (("a run that went well", [good], (), 0, True),
+                 ("a go that failed", [good, ["exit", 3]], (), 3, False),
+                 ("a block, though go went on and said all was well", [evil, ["exit", 0]], (), 1, False),
+                 ("a plan", [good], ("--plan",), 0, False),
+                 ("a plan that failed", [["exit", 1]], ("--plan",), 3, False))
+        for name, plan, flags, code_wanted, installed in cases:
+            with self.subTest(name):
+                self.plan = plan
+                code, out, doc = self.report(*flags, "go", "get", "example.test/good@v1.0.0")
+                self.assertEqual((code, doc["exitCode"], doc["installed"]), (code_wanted, code_wanted, installed), out)
+
+    def test_a_list_that_ends_in_direct_says_the_guard_does_not_fetch_from_version_control(self):
+        code, out = self.run_guard("go", "mod", "download", goenv=dict(self.goenv, GOPROXY=self.proxy.url + ",direct"))
+        self.assertEqual(code, 0, out)
+        self.assertIn("lazaret guard: relaying " + self.proxy.url + "/ (the guard does not fetch from version control: "
+                      "a module the proxy lacks is not fetched, unless GOPRIVATE names it)", out)
+        code, out = self.run_guard("go", "mod", "download")
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("does not fetch from version control", out)
+
+    def test_an_https_proxy_is_relayed_too(self):
+        code, out = self.run_guard("go", "mod", "download", goenv=dict(self.goenv, GOPROXY="https://proxy.example.test"))
+        self.assertEqual(code, 0, out)
+        self.assertIn("lazaret guard: relaying https://proxy.example.test/", out)
+
+    def test_go_s_settings_are_read_where_the_command_runs(self):
+        sub = os.path.join(self.dir, "sub")
+        os.makedirs(sub)
+        for args, folder in ((["go", "build", "-C", "sub", "./..."], sub), (["go", "build", "./..."], self.dir)):
+            with self.subTest(args):
+                envlog = os.path.join(self.dir, f"env-{len(args)}.log")
+                code, out = self.run_guard(*args, FAKE_GO_ENV_LOG=envlog)
+                self.assertEqual(code, 0, out)
+                self.assertEqual([os.path.realpath(line) for line in self.read(envlog).splitlines()], [os.path.realpath(folder)])
+
+    def test_mod_download_and_mod_tidy_are_wrapped_as_they_are(self):
+        for command in (["mod", "download"], ["mod", "tidy"]):
+            with self.subTest(command):
+                code, out = self.run_guard("go", *command)
+                self.assertEqual(code, 0, out)
+                self.assertEqual(self.runs()[-1]["argv"], command)
+
+
+class InterruptTests(unittest.TestCase):
+    def test_go_mod_is_put_back_when_the_run_is_cut_short(self):
+        tmp = tempfile.mkdtemp(prefix="lazaret-guard-go-")
+        self.addCleanup(guard.remove_tree, tmp)
+        gomod = os.path.join(tmp, "go.mod")
+        with open(gomod, "w", encoding="utf-8") as f:
+            f.write("module example.test/app\n")
+        settings = {"GOPROXY": "http://127.0.0.1:9", "GOMOD": gomod, "GOMODCACHE": os.path.join(tmp, "modcache"), "GOPRIVATE": ""}
+
+        def cut_short(argv, env, cwd=None, capture=False):
+            with open(gomod, "a", encoding="utf-8") as f:
+                f.write("require example.test/x v1.0.0\n")
+            raise KeyboardInterrupt
+
+        ctx = guard.Context(options(tool="go"), out=io.StringIO())
+        ctx.scanner = FakeScanner()
+        self.addCleanup(ctx.close)
+        with mock.patch.object(guard, "find_tool", return_value="go"), mock.patch.object(guard, "go_settings", return_value=settings), \
+                mock.patch.object(guard, "run_tool", side_effect=cut_short):
+            with self.assertRaises(KeyboardInterrupt):
+                guard.guard_go(ctx, ["get", "example.test/x@v1.0.0"])
+        self.assertEqual(gs.read(gomod), "module example.test/app\n")
+
+
 class PlanTests(FlowCase):
     def test_a_plan_runs_in_a_cache_of_its_own_and_puts_the_files_back(self):
         before = self.read(self.gomod)
@@ -639,6 +1024,29 @@ class PlanTests(FlowCase):
         self.assertEqual(run["argv"], ["get", "example.test/good@v1.0.0"])
         self.assertNotEqual(os.path.realpath(run["cwd"]), os.path.realpath(self.dir))
         self.assertFalse(os.path.exists(run["cwd"]))
+
+    def test_a_plan_is_silent_where_a_run_shows_what_go_says(self):
+        self.plan = [["say", "go says hello"]]
+        code, out = self.run_guard("go", "mod", "download")
+        self.assertEqual(code, 0, out)
+        self.assertIn("go says hello", out)
+        code, out = self.run_guard("--plan", "go", "mod", "download")
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("go says hello", out)
+
+    def test_the_module_a_plan_of_an_install_runs_in_is_a_module(self):
+        seen = os.path.join(self.dir, "seen-go.mod")
+        self.plan = [["copy", "go.mod", seen]]
+        code, out = self.run_guard("--plan", "go", "install", "example.test/good@v1.0.0")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.read(seen), "module lazaret.guard/plan\n\ngo 1.21\n")
+
+    def test_a_plan_does_not_compare_a_module_cache_it_does_not_use(self):
+        path = os.path.join(self.modcache, "cache", "download", "example.test", "other", "@v", "v1.0.0.zip")
+        self.plan = [["write", path, "zip"]]
+        code, out = self.run_guard("--plan", "go", "mod", "download")
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("not checked", out)
 
     def test_a_plan_that_blocks_says_so(self):
         self.plan = [self.zip_step("example.test/evil", "v1.0.0")]

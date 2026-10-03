@@ -70,9 +70,11 @@ class CratesRegistry:
     `authorizations` (path, Authorization header). With `auth` (a whole Authorization header value) it answers 401 to a request
     without it; `fail` maps a path suffix to (status, body); `pubtimes` False leaves `pubtime` out of the index (a registry that
     has none), and the API then says when; `api` False has no API; `plain_dl` makes `dl` a URL with no markers, so that the
-    download is `<dl>/<crate>/<version>/download`."""
+    download is `<dl>/<crate>/<version>/download`; `dl_host` names the host `dl` points to (the same server by another name, as
+    crates.io's index and downloads are on two hosts)."""
 
-    def __init__(self, auth=None, pubtimes=True, api=True, plain_dl=False):
+    def __init__(self, auth=None, pubtimes=True, api=True, plain_dl=False, dl_host=None):
+        self.dl_host = dl_host
         self.versions = {}                     # name -> {version: {"data", "cksum", "deps", "time", "yanked"}}
         self.requests = []
         self.authorizations = []
@@ -138,7 +140,8 @@ class CratesRegistry:
     def answer(self, path):
         text = "text/plain"
         if path == "/config.json":
-            dl = self.url + "dl" if self.plain_dl else self.url + "dl/{crate}/{crate}-{version}.crate"
+            base = self.url.replace("127.0.0.1", self.dl_host) if self.dl_host else self.url
+            dl = base + "dl" if self.plain_dl else base + "dl/{crate}/{crate}-{version}.crate"
             return 200, json.dumps({"dl": dl, "api": self.url.rstrip("/")}).encode(), "application/json"
         if path.startswith("/api/v1/crates/"):
             parts = path[len("/api/v1/crates/"):].split("/")
@@ -191,7 +194,8 @@ FAKE_CARGO = r'''#!@@PYTHON@@
 fails); FAKE_CARGO_PLAN: {subcommand: [steps]} for every other command; FAKE_CARGO_SCRATCH: {crate: Cargo.lock text} for
 `generate-lockfile` of a project that needs that crate; FAKE_CARGO_LOG: where it writes {"argv", "cwd", "CARGO_HOME"}, one line
 per run. Steps: ["lock", text] writes Cargo.lock at the root, ["write", path, text], ["append", path, text],
-["unpack", home, "name-version"] makes a folder where cargo unpacks a crate, ["exit", code]."""
+["unpack", home, "name-version"] makes a folder where cargo unpacks a crate, ["say", text] writes a line to its error output,
+["exit", code]."""
 import json, os, re, sys
 
 args = sys.argv[1:]
@@ -243,6 +247,8 @@ for step in json.loads(os.environ.get("FAKE_CARGO_PLAN", "{}")).get(sub, []):
             f.write(step[2])
     elif kind == "unpack":
         os.makedirs(os.path.join(step[1], "registry", "src", "index.crates.io-0000000000000000", step[2]), exist_ok=True)
+    elif kind == "say":
+        print(step[1], file=sys.stderr)
     elif kind == "exit":
         code = step[1]
 sys.exit(code)
