@@ -20,6 +20,8 @@ from ._common import (
     NotSupportedError,
     Options,
     depth_exceeded,
+    encoding_failure,
+    expat_encoding_error,
     install_handlers,
     size_exceeded,
 )
@@ -67,13 +69,23 @@ class _SafeBuilderMixin:
 
     def parseFile(self, file):
         limit = self._safe.max_bytes
-        return super().parseFile(LimitedReader(file, limit) if limit is not None else file)
+        try:
+            return super().parseFile(LimitedReader(file, limit) if limit is not None else file)
+        except (LookupError, ValueError) as exc:
+            if not encoding_failure(exc):
+                raise
+            raise expat_encoding_error() from None      # an ExpatError, as for malformed XML (F-1)
 
     def parseString(self, string):
         limit = self._safe.max_bytes
         if limit is not None and len(string) > limit:
             raise size_exceeded(limit)
-        return super().parseString(string)
+        try:
+            return super().parseString(string)
+        except (LookupError, ValueError) as exc:
+            if not encoding_failure(exc):
+                raise
+            raise expat_encoding_error() from None
 
 
 class SafeExpatBuilder(_SafeBuilderMixin, _expatbuilder.ExpatBuilder):

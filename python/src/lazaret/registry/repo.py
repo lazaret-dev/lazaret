@@ -54,6 +54,7 @@ import zlib
 import urllib.error
 import urllib.parse
 import urllib.request
+import warnings
 
 from lazaret.scanner import core as lazaret  # noqa: E402
 
@@ -82,6 +83,9 @@ MAX_MEMBER = _env_number("LAZARET_MAX_SOURCE_BYTES", 16_000_000)
 MAX_FILES = 20_000         # files per package (numpy's sdist alone has >4,000)
 SAMPLE = 8192              # header/entropy sample read from oversized files
 # Stored scans from another engine version are scanned again (has_scan).
+# 2.23: the zip reader on the fuzzers' findings: entries that overlap are
+#      SC-ARCHIVE-OVERLAP, an entry with no name SC-ARCHIVE-PATH, an LZMA
+#      dictionary over 64 MiB is refused (the member is corrupt)
 # 2.22: an npm release's dependencies no file names (SC-UNUSED-DEPENDENCY,
 #      INFO; a brand-new one is SC-NEW-DEPENDENCY, CRITICAL), and a name
 #      like one of Node's built-in modules (child-process) is SC-TYPOSQUAT
@@ -175,7 +179,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.22.0"
+ENGINE_VERSION = "2.23.0"
 
 # ---------------- Trust-chain limits (F9/G14/F10) ----------------
 # Only these hosts may ever be fetched, over https only, and redirects to any
@@ -1140,9 +1144,53 @@ def _zip_preflight(data):
 
 
 # What reading one zip member can raise (bad CRC, broken deflate/bz2/lzma
-# stream, an encrypted or unsupported entry, a bad local header).
+# stream, an encrypted or unsupported entry, a bad local header; an LZMA
+# dictionary the host can't allocate: fuzz finding F-7).
 _ZIP_READ_ERRORS = (zipfile.BadZipFile, OSError, EOFError, ValueError, zlib.error,
-                    lzma.LZMAError, NotImplementedError, RuntimeError)
+                    lzma.LZMAError, NotImplementedError, RuntimeError, MemoryError)
+#: The largest LZMA dictionary a zip entry may declare (xz -9 and 7-Zip's
+#: ultra level use 64 MiB). zipfile allocates it before a byte is decoded:
+#: a 625-byte wheel declaring 4 GiB ended the scan with MemoryError on a host
+#: whose memory is capped (F-7). Wheels are stored or deflated (PEP 427).
+MAX_LZMA_DICT = 64 << 20
+_ZIP_LOCAL = struct.Struct("<4s22xHH")       # signature ... name length, extra length
+
+
+def _lzma_dict_size(data, info):
+    """The dictionary size an LZMA zip entry declares (zipfile's format: a
+    version, the properties' size, then lc/lp/pb and the dictionary, after
+    the local header), or None when the entry isn't one or can't say."""
+    if info.compress_type != zipfile.ZIP_LZMA:
+        return None
+    at = info.header_offset
+    if at < 0 or at + _ZIP_LOCAL.size > len(data):
+        return None
+    sig, n_name, n_extra = _ZIP_LOCAL.unpack_from(data, at)
+    start = at + _ZIP_LOCAL.size + n_name + n_extra
+    head = data[start:start + 9]
+    if sig != b"PK\x03\x04" or len(head) < 9 or int.from_bytes(head[2:4], "little") != 5:
+        return None
+    return int.from_bytes(head[5:9], "little")
+
+
+def _zip_overlaps(data, infos):
+    """The names of zip entries whose bytes begin inside an earlier entry's
+    (by local header offset): the shape of a zip bomb. zipfile 3.12.3+ warns
+    of some and raises for others; this says the same on every version (F-2)."""
+    spans = []
+    for info in infos:
+        at = info.header_offset
+        if at < 0 or at + _ZIP_LOCAL.size > len(data):
+            continue
+        sig, n_name, n_extra = _ZIP_LOCAL.unpack_from(data, at)
+        if sig == b"PK\x03\x04":
+            spans.append((at, at + _ZIP_LOCAL.size + n_name + n_extra + info.compress_size, info.filename))
+    out, reach = [], -1
+    for at, end, name in sorted(spans):
+        if at < reach:
+            out.append(name)
+        reach = max(reach, end)
+    return out
 
 
 def _iter_zip(data, artifact, budget, anomalies):
@@ -1159,16 +1207,31 @@ def _iter_zip(data, artifact, budget, anomalies):
         return
     seen, count, last = {}, 0, "(archive)"
 
-    def read(info, limit):
-        with zf.open(info) as fh:
-            raw = fh.read(limit)
+    def read(info, rel, limit):
+        dictionary = _lzma_dict_size(data, info)
+        if dictionary is not None and dictionary > MAX_LZMA_DICT:
+            raise ValueError(f"an LZMA dictionary of {dictionary:,} bytes, over the {MAX_LZMA_DICT:,}-byte limit")
+        # zipfile 3.12.3+ warns of entries that overlap: _zip_overlaps names
+        # them, so the warning is no line on stderr or, under -W error, an
+        # exception out of the reader (F-2)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with zf.open(info) as fh:
+                raw = fh.read(limit)
         budget.charge(len(raw))
         return raw
 
+    for name in _zip_overlaps(data, infos):
+        anomalies.append(("overlap", name, "its bytes overlap another entry's"))
     with zf:
         try:
             for info in infos:
                 budget.check()
+                if not info.filename:
+                    # no extractor can place it, and Python 3.10's is_dir()
+                    # raised IndexError on it (F-6); 3.11+ dropped it silently
+                    anomalies.append(("noname", "(archive)", "an entry with no name, which was not read"))
+                    continue
                 if info.is_dir():
                     continue
                 rel, problem = canonical_member_path(info.filename, artifact)
@@ -1193,10 +1256,10 @@ def _iter_zip(data, artifact, budget, anomalies):
                 _note_member(seen, rel, anomalies)
                 last = rel
                 try:
-                    raw = read(info, MAX_MEMBER + 1)          # bounded, real bytes
+                    raw = read(info, rel, MAX_MEMBER + 1)     # bounded, real bytes
                 except _ZIP_READ_ERRORS as exc:
-                    yield Member(rel, 0, b"", "corrupt",
-                                 f"member {rel} could not be read ({type(exc).__name__})")
+                    why = str(exc) if str(exc).startswith("an LZMA dictionary") else type(exc).__name__
+                    yield Member(rel, 0, b"", "corrupt", f"member {rel} could not be read ({why})")
                     continue
                 if len(raw) > MAX_MEMBER:
                     yield Member(rel, SAMPLE, raw[:SAMPLE], "member")
@@ -1490,6 +1553,12 @@ def _archive_issue(kind, path, detail):
         "path": ("SC-ARCHIVE-PATH", "Unsafe archive path",
                  "An entry with '..' in its path tries to escape the extraction directory; "
                  "installers refuse it, and no legitimate package tool produces one."),
+        "noname": ("SC-ARCHIVE-PATH", "Unnamed archive entry",
+                   "No extractor can place an entry with no name: installers fail on it or skip it, so "
+                   "its bytes are neither installed nor reviewed, and no packaging tool produces one."),
+        "overlap": ("SC-ARCHIVE-OVERLAP", "Overlapping archive entries",
+                    "Two entries of the zip archive share their bytes: the shape of a zip bomb (one "
+                    "compressed stream counted many times), and no packaging tool produces one."),
     }
     rid, name, why = rules[kind]
     return {"rule": rid, "name": name, "type": "HOTSPOT", "sev": "MAJOR",

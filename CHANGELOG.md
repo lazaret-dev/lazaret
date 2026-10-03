@@ -370,6 +370,22 @@ before the release.
 
 ### Fixed
 
+- **The zip reader on what the 0.1.9 lane's fuzzers found** (F-2, F-6,
+  F-7). A zip entry with no name raised `IndexError` out of the reader on
+  Python 3.10 and was dropped without a word on 3.11+: it is an anomaly
+  (SC-ARCHIVE-PATH), and the entry is not read. An LZMA entry declaring a
+  4 GiB dictionary raised `MemoryError` where memory is capped: a dictionary
+  over 64 MiB is refused before zipfile allocates it, and `MemoryError`
+  reading an entry makes it unread. Entries whose bytes overlap (the shape
+  of a zip bomb) were a warning on Python 3.12.3+, an exception under
+  `-W error`, and no finding: SC-ARCHIVE-OVERLAP (MAJOR), on every version.
+  Rule set 2.23.0.
+- **safexml: a declared encoding Expat can't read** (F-1) ended a parse
+  with `LookupError` or `ValueError`, as in the standard library, so a
+  caller catching the parse error was ended by it (the PyPI release feed's
+  reader among them). Each API now raises its parse error for it
+  (`ParseError`, `ExpatError`, a fatal `SAXParseException`), saying
+  "unknown encoding" without the document's text.
 - **A program under a source file's name made a release INCOMPLETE, not
   SUSPICIOUS.** An executable's bytes in a `.py` or `.js` member (num2words
   0.5.15's `_build.py` is a Windows executable) were an unreadable source

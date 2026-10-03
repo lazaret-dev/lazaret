@@ -11,13 +11,16 @@ from typing import Any
 from xml.sax import expatreader as _expatreader  # lazaret-ignore: S-XML (this module is the hardening layer)
 from xml.sax import handler as _handler  # lazaret-ignore: S-XML (this module is the hardening layer)
 from xml.sax import xmlreader as _xmlreader  # lazaret-ignore: S-XML (this module is the hardening layer)
+from xml.sax import SAXParseException  # lazaret-ignore: S-XML (an exception class, no parsing)
 
 from ._common import (
     DEFAULT_MAX_ATTLIST_DEFAULTS,
     DEFAULT_MAX_DEPTH,
+    UNKNOWN_ENCODING,
     Options,
     _forbid_dtd,
     depth_exceeded,
+    encoding_failure,
     install_handlers,
     size_exceeded,
 )
@@ -61,7 +64,13 @@ class SafeExpatParser(_expatreader.ExpatParser):
         limit = self.options.max_bytes
         if limit is not None and self._fed > limit:
             raise size_exceeded(limit)
-        super().feed(data, isFinal)
+        try:
+            super().feed(data, isFinal)
+        except (LookupError, ValueError) as exc:
+            if not encoding_failure(exc):
+                raise
+            # a fatal parse error, as for malformed XML (F-1)
+            self._err_handler.fatalError(SAXParseException(UNKNOWN_ENCODING, None, self))
 
     def _enter(self, attrs) -> None:
         self._depth += 1

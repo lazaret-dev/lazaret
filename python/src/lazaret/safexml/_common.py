@@ -46,6 +46,30 @@ class SafeXMLError(ValueError):
     """Base class: the document was refused for security reasons."""
 
 
+#: What a parse error says of an encoding Expat can't read: Expat's own
+#: words, with nothing of the document (the encoding's name is its text).
+UNKNOWN_ENCODING = "unknown encoding"
+_UNKNOWN_ENCODING_CODE = pyexpat.errors.codes[pyexpat.errors.XML_ERROR_UNKNOWN_ENCODING]
+
+
+def encoding_failure(exc: BaseException) -> bool:
+    """True for what pyexpat's Parse raises for a declared encoding it can't
+    read, which is not its own error type: LookupError (no codec of that
+    name, "T7") or ValueError ("multi-byte encodings are not supported",
+    "UTF32"). Never one of our refusals. Every API turns it into the parse
+    error it raises for any malformed document (fuzz finding F-1)."""
+    if isinstance(exc, SafeXMLError):
+        return False
+    return isinstance(exc, LookupError) or (isinstance(exc, ValueError) and "encoding" in str(exc))
+
+
+def expat_encoding_error() -> pyexpat.ExpatError:
+    """The ExpatError minidom and XML-RPC raise for such a document."""
+    err = pyexpat.ExpatError(f"{UNKNOWN_ENCODING}: line 1, column 0")
+    err.code, err.lineno, err.offset = _UNKNOWN_ENCODING_CODE, 1, 0
+    return err
+
+
 class DTDForbidden(SafeXMLError):
     def __init__(self, name: str, sysid: str | None, pubid: str | None):
         super().__init__(name, sysid, pubid)
