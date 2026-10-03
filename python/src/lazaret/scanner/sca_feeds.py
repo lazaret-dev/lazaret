@@ -1068,7 +1068,7 @@ def dump_bundle(doc, fh):
 
 def _looks_like_bundle(path):
     head = lazaret_report._read_head(path)       # regular files only; never blocks on a FIFO
-    return head is not None and '"bundleVersion"' in head
+    return head is not None and ('"bundleVersion"' in head or head.startswith(sca.INDEX_MAGIC.decode("ascii")))
 
 
 def check_output_path(path, force=False):
@@ -1094,10 +1094,19 @@ def check_output_path(path, force=False):
         raise BundleOutputError(reason)
 
 
-def write_bundle(doc, path, force=False):
+BUNDLE_FORMATS = ("json", "index")
+
+
+def write_bundle(doc, path, force=False, fmt="json", warn=None):
     """Write `doc` to `path` atomically (temporary file, fsync, rename);
     returns the size in bytes. The destination is checked again at write
-    time; an existing bundle keeps its permissions."""
+    time; an existing bundle keeps its permissions. `fmt` is "json" (one
+    document) or "index" (sca_index.py: the same bundle as a file a scan reads
+    parts of); an indexed bundle is read back whole and checked before it
+    replaces anything; `warn(line)` is called for each thing the bundle had
+    that the scanner would drop or coerce (an indexed bundle's self-check)."""
+    if fmt not in BUNDLE_FORMATS:
+        raise ValueError("unknown bundle format %r" % (fmt,))
     check_output_path(path, force)
     parent = os.path.dirname(os.path.abspath(path)) or os.curdir
     mode = 0o666 & ~lazaret_report._umask()
@@ -1109,10 +1118,21 @@ def write_bundle(doc, path, force=False):
         pass
     fd, tmp = tempfile.mkstemp(dir=parent, prefix=".cve-bundle-", suffix=".tmp")
     try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
-            dump_bundle(doc, fh)
-            fh.flush()
-            os.fsync(fh.fileno())
+        if fmt == "index":
+            from lazaret.scanner import sca_index
+            with os.fdopen(fd, "wb") as fh:
+                summary = sca_index.dump_index(doc, fh)
+                fh.flush()
+                os.fsync(fh.fileno())
+            sca_index.verify_path(tmp)           # what was written reads back as the document
+            for msg in summary["warnings"]:
+                if warn is not None:
+                    warn(msg)
+        else:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+                dump_bundle(doc, fh)
+                fh.flush()
+                os.fsync(fh.fileno())
         try:
             os.chmod(tmp, mode)
         except OSError:
@@ -1120,7 +1140,7 @@ def write_bundle(doc, path, force=False):
         size = os.path.getsize(tmp)
         os.replace(tmp, path)
         tmp = None
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         raise BundleOutputError("cannot write %s: %s" % (path, exc)) from None
     finally:
         if tmp is not None:
@@ -1168,13 +1188,16 @@ def run_update(args, out=None, err=None, fetch_fn=None):
         log("  note: %s: %s" % (what, format(n, ",")))
     for what, n in sorted(counts.items()):
         print("  warning: %s: %s" % (line(what), format(n, ",")), file=err)
-    check = sca.CveBundle(doc)                       # the scanner must read what we write
-    for msg in check.warnings.lines():
-        print("  warning: bundle self-check: %s" % line(msg), file=err)
+    fmt = getattr(args, "bundle_format", None) or "json"
+    if fmt == "json":
+        check = sca.CveBundle(doc)                   # the scanner must read what we write
+        for msg in check.warnings.lines():
+            print("  warning: bundle self-check: %s" % line(msg), file=err)
     for msg in stale_feed_warnings(doc):
         print("  warning: %s" % line(msg), file=err)
     try:
-        size = write_bundle(doc, path, args.force_overwrite)
+        size = write_bundle(doc, path, args.force_overwrite, fmt,
+                            warn=lambda msg: print("  warning: bundle self-check: %s" % line(msg), file=err))
     except BundleOutputError as exc:
         print("error: %s" % line(exc), file=err)
         return EXIT_OUTPUT

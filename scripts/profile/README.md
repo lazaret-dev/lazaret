@@ -45,3 +45,4 @@ numbers.
 | `use_time_coverage.py` | How much of a package the use-time step reads before its box runs out |
 | `release_overlap.py` | How much of a release (or of two versions) is the same bytes: what a cache by content could save |
 | `guard_connections.py` | How many connections, and how much connect time, a guarded install costs; with and without `--keepalive` |
+| `sca_bundle.py` | How much a scan pays to load `cve-bundle.json` whole against opening the indexed bundle built from it (`compare`: load and match seconds, peak memory, file size, and whether both give the same matches); `gen` makes a synthetic bundle the size of the real one |

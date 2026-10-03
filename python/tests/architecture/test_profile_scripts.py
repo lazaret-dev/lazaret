@@ -692,8 +692,9 @@ class ScriptTests(unittest.TestCase):
         self.assertEqual(overlap([])[0]["all"], [0, 0, 0, 0])
 
     def test_every_script_is_standard_library_only_and_names_its_encodings(self):
-        allowed = {"argparse", "collections", "contextlib", "hashlib", "http", "io", "json", "math", "os", "resource",
-                   "statistics", "sys", "tempfile", "threading", "time", "urllib", "_common", "lazaret"}
+        allowed = {"argparse", "collections", "contextlib", "hashlib", "http", "io", "json", "math", "os", "random",
+                   "resource", "statistics", "subprocess", "sys", "tempfile", "threading", "time", "urllib", "_common",
+                   "lazaret"}
         for name in sorted(os.listdir(PROFILE)):
             if not name.endswith(".py"):
                 continue
@@ -707,6 +708,167 @@ class ScriptTests(unittest.TestCase):
                         self.assertIn(module.split(".")[0], allowed)
             if name != "_common.py":
                 self.assertIn("configure_stdio()", text, name)
+
+
+class SCABundleTests(unittest.TestCase):
+    """`sca_bundle.py` (P-5): the bundle a scan loads whole, against the indexed one it reads parts of."""
+
+    def setUp(self):
+        self.script = load("sca_bundle")
+        self.dir = tempfile.mkdtemp(prefix="lz-scabundle-")
+        self.addCleanup(__import__("shutil").rmtree, self.dir, True)
+
+    def run_script(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch("sys.stdout", out), mock.patch("sys.stderr", err):
+            try:
+                code = self.script.main(list(argv))
+            except SystemExit as exc:
+                code = exc.code
+        return code, out.getvalue(), err.getvalue()
+
+    def path(self, name):
+        return os.path.join(self.dir, name)
+
+    def test_the_synthetic_bundle_is_the_shape_of_the_real_one_and_the_same_every_time(self):
+        doc = self.script.synthetic(40)
+        self.assertEqual((doc["bundleVersion"], len(doc["advisories"]), doc["counts"]["advisories"]), (1, 40, 40))
+        self.assertEqual(doc, self.script.synthetic(40))
+        self.assertNotEqual(doc, self.script.synthetic(40, seed=8))
+        adv = doc["advisories"][0]
+        self.assertTrue({"cve", "aliases", "severity", "cvss", "refs", "epss", "packages"} <= set(adv))
+        self.assertTrue(all(p["exact"] and p["ecosystem"] in ("npm", "pypi") and p["ranges"]
+                            for a in doc["advisories"] for p in a["packages"]))
+
+    def test_an_inventory_is_half_names_the_bundle_has_and_half_it_has_not(self):
+        doc = self.script.synthetic(200)
+        inventory = self.script.inventory_of(doc, 100)
+        self.assertEqual(len(inventory), 100)
+        known = {(p["ecosystem"], p["name"]) for a in doc["advisories"] for p in a["packages"]}
+        self.assertEqual(sum((eco, name) in known for eco, name, _ in inventory), 50)
+        self.assertEqual(inventory, self.script.inventory_of(doc, 100))
+        self.assertNotEqual(inventory, self.script.inventory_of(doc, 100, seed=4))
+
+    def test_an_inventory_from_a_bundle_with_less_in_it_than_asked_for_is_padded_and_survives_junk(self):
+        doc = {"advisories": [{"packages": [{"name": "a", "ecosystem": "npm", "exact": True,
+                                             "ranges": [{"fromVersion": "2.0.0"}]},
+                                            {"name": "b", "ecosystem": "pypi", "exact": True, "ranges": []},
+                                            {"name": "loose", "ecosystem": "npm", "exact": False},
+                                            {"name": 5, "ecosystem": "npm", "exact": True}, "junk", None]},
+                              "junk", {"packages": "no"}]}
+        inventory = self.script.inventory_of(doc, 6)
+        self.assertEqual(len(inventory), 6)
+        named = sorted(item for item in inventory if not item[1].startswith("no-advisory"))
+        self.assertEqual(named, [["npm", "a", "2.0.0"], ["pypi", "b", "1.0.0"]])   # (the loose and the nameless are not used;
+        #                                                             a bundle that gives no version gets 1.0.0; four padded)
+        self.assertEqual(self.script.inventory_of({}, 3)[0][1][:11], "no-advisory")
+
+    def test_the_hash_of_the_matches_is_of_their_order_and_not_of_the_order_of_a_ranges_keys(self):
+        def match(cve, rng):
+            return ({"cve": cve}, {"name": "p", "ecosystem": "npm"}, ("npm", "p", "1.0.0", "x"), rng)
+        a = [match("A", {"fromVersion": "1", "toVersion": "2"}), match("B", "all versions")]
+        same = [match("A", {"toVersion": "2", "fromVersion": "1"}), match("B", "all versions")]
+        self.assertEqual(self.script.digest_of(a), self.script.digest_of(same))
+        self.assertNotEqual(self.script.digest_of(a), self.script.digest_of(a[::-1]))
+        self.assertNotEqual(self.script.digest_of(a), self.script.digest_of(a[:1]))
+        self.assertNotEqual(self.script.digest_of(a), self.script.digest_of([a[0], match("B", "other")]))
+
+    def test_the_peak_is_in_megabytes_whatever_the_platform_counts_in(self):
+        usage = mock.Mock(ru_maxrss=2048 * 1024)
+        with mock.patch.object(self.script.resource, "getrusage", return_value=usage):
+            with mock.patch.object(self.script.sys, "platform", "linux"):
+                self.assertEqual(self.script.peak_mb(), 2048.0)               # (kilobytes)
+            with mock.patch.object(self.script.sys, "platform", "darwin"):
+                self.assertEqual(self.script.peak_mb(), 2.1)                  # (bytes)
+        with mock.patch.object(self.script, "resource", None):
+            self.assertIsNone(self.script.peak_mb())
+
+    def test_gen_inventory_build_and_measure_one_after_another(self):
+        bundle, inventory, indexed = self.path("b.json"), self.path("inv.json"), self.path("b.lzx")
+        code, out, err = self.run_script("gen", "60", bundle)
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("60 advisories", out)
+        self.assertEqual(self.run_script("inventory", bundle, inventory, "--deps", "30")[0], 0)
+        code, out, _ = self.run_script("build", bundle, indexed)
+        built = json.loads(out)
+        self.assertEqual((code, built["bytes"], os.path.getsize(indexed)), (0, os.path.getsize(indexed), built["bytes"]))
+        results = {}
+        for path in (bundle, indexed):
+            code, out, _ = self.run_script("measure", path, inventory)
+            self.assertEqual(code, 0)
+            results[json.loads(out)["format"]] = json.loads(out)
+        self.assertEqual(set(results), {"json", "index"})
+        self.assertEqual(results["json"]["digest"], results["index"]["digest"])
+        self.assertEqual((results["json"]["advisories"], results["json"]["deps"]), (60, 30))
+        self.assertGreater(results["json"]["matches"], 0)
+
+    def test_compare_builds_measures_both_and_says_they_agree(self):
+        bundle, report, keep = self.path("b.json"), self.path("report.json"), self.path("kept")
+        self.run_script("gen", "80", bundle)
+        code, out, err = self.run_script("compare", bundle, "--deps", "40", "--runs", "2", "--json", report,
+                                         "--keep", keep)
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("80 advisories; 40 dependencies matched; best of 2", out)
+        self.assertIn("JSON bundle", out)
+        self.assertIn("indexed bundle", out)
+        self.assertIn("the same matches, in the same order", out)
+        with open(report, encoding="utf-8") as fh:
+            data = json.load(fh)
+        self.assertTrue(data["same_answer"])
+        self.assertEqual((data["json"]["format"], data["index"]["format"], data["deps"], data["runs"]),
+                         ("json", "index", 40, 2))
+        self.assertTrue(os.path.exists(os.path.join(keep, "bundle.lzx")))
+        self.assertTrue(os.path.exists(os.path.join(keep, "inventory.json")))
+
+    def fake(self, **change):
+        record = {"bundle": "x", "bytes": 10 ** 6, "format": "json", "advisories": 5, "deps": 4, "load_s": 1.0,
+                  "match_s": 0.5, "matches": 3, "unknown": 0, "peak_mb": 100.0, "digest": "a" * 64}
+        return dict(record, **change)
+
+    def test_two_bundles_that_give_different_matches_are_exit_1(self):
+        built = {"build_s": 1, "parse_s": 1, "bytes": 5, "peak_mb": 9.0}
+        answers = iter([{"deps": 4}, built, self.fake(), self.fake(format="index", digest="b" * 64)])
+        with mock.patch.object(self.script, "child", side_effect=lambda *a: next(answers)):
+            code, out, _ = self.run_script("compare", self.path("any.json"))
+        self.assertEqual(code, 1)
+        self.assertIn("DIFFERENT matches", out)
+
+    def test_a_step_that_fails_is_exit_4_and_says_which(self):
+        with mock.patch.object(self.script, "child", side_effect=RuntimeError("`build` failed (1): boom")):
+            code, _, err = self.run_script("compare", self.path("any.json"))
+        self.assertEqual(code, 4)
+        self.assertIn("`build` failed", err)
+
+    def test_a_missing_or_damaged_bundle_is_exit_4_not_a_traceback(self):
+        for argv in (("inventory", self.path("nowhere.json"), self.path("o.json")),
+                     ("build", self.path("nowhere.json"), self.path("o.lzx")),
+                     ("measure", self.path("nowhere.json"), self.path("o.json"))):
+            with self.subTest(argv[0]):
+                self.assertEqual(self.run_script(*argv)[0], 4)
+        bad = self.path("bad.json")
+        with open(bad, "w", encoding="utf-8") as fh:
+            fh.write("{not json")
+        self.assertEqual(self.run_script("inventory", bad, self.path("o.json"))[0], 4)
+
+    def test_usage_errors_are_exit_2(self):
+        for argv in (("gen", "0", self.path("x.json")), ("compare", "b.json", "--deps", "0"),
+                     ("compare", "b.json", "--runs", "0"), ("inventory", "b.json", "o.json", "--deps", "0")):
+            with self.subTest(argv):
+                self.assertEqual(self.run_script(*argv)[0], 2)
+        self.assertEqual(self.run_script()[0], 2)
+        self.assertEqual(self.run_script("frob")[0], 2)
+
+    def test_the_child_runs_this_script_and_reads_its_last_line(self):
+        done = mock.Mock(returncode=0, stdout="noise\n{\"a\": 1}\n", stderr="")
+        with mock.patch.object(self.script.subprocess, "run", return_value=done) as run:
+            self.assertEqual(self.script.child("measure", "x", "y"), {"a": 1})
+        argv = run.call_args[0][0]
+        self.assertEqual((argv[0], os.path.basename(argv[1]), argv[2:]), (sys.executable, "sca_bundle.py",
+                                                                           ["measure", "x", "y"]))
+        failed = mock.Mock(returncode=3, stdout="", stderr="Traceback ... boom")
+        with mock.patch.object(self.script.subprocess, "run", return_value=failed), \
+                self.assertRaisesRegex(RuntimeError, r"`measure` failed \(3\): .*boom"):
+            self.script.child("measure", "x")
 
 
 @unittest.skipUnless(os.path.exists(WORKFLOW), ".github/workflows/perf.yml is added by the repository owner "

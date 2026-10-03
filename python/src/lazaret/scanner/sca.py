@@ -1854,6 +1854,96 @@ def _strs(v):
     return [x for x in v if isinstance(x, str)] if isinstance(v, list) else []
 
 
+def normalize_advisory(raw, warn, ordinal):
+    """One bundle advisory as the scanner uses it: every field type-checked
+    and normalized (`warn(kind)` counts what was dropped or coerced), or None
+    for an entry that is not an advisory. `ordinal` names an advisory that has
+    no id. CveBundle and the indexed bundle (sca_index.py) both read through
+    this, so a hostile advisory is cleaned the same way from either file."""
+    w = warn
+    if not isinstance(raw, dict):
+        w("malformed advisory entries skipped")
+        return None
+    cve = raw.get("cve") or raw.get("id")
+    if not isinstance(cve, str) or not cve:
+        w("advisory entries without a 'cve' id (kept as 'advisory#N')")
+        cve = "advisory#%d" % ordinal
+    adv = {
+        "cve": cve,
+        "title": raw.get("title") if isinstance(raw.get("title"), str) else None,
+        "severity": raw.get("severity") if isinstance(raw.get("severity"), str) else None,
+        "cvss": _num(raw.get("cvss")),
+        "epss": _num(raw.get("epss")),
+        "epssPercentile": _num(raw.get("epssPercentile")),
+        "knownExploited": raw.get("knownExploited") is True,
+        "malicious": raw.get("malicious") is True,
+        "ransomware": raw.get("ransomware") is True,
+        "dueDate": raw.get("dueDate") if isinstance(raw.get("dueDate"), str) else None,
+        "published": raw.get("published") if isinstance(raw.get("published"), str) else None,
+        "cwes": _strs(raw.get("cwes")),
+        "refs": _strs(raw.get("refs")),
+        "sources": _strs(raw.get("sources")),
+        "packages": [],
+    }
+    for f in ("cvss", "epss", "epssPercentile"):
+        if raw.get(f) is not None and adv[f] is None:
+            w("non-numeric %s values ignored" % f)
+    pkgs = raw.get("packages")
+    if not isinstance(pkgs, list):
+        if pkgs is not None:
+            w("advisories with a malformed 'packages' list skipped")
+        return adv
+    for p in pkgs:
+        if not isinstance(p, dict) or not isinstance(p.get("name"), str) or not p["name"].strip():
+            w("malformed advisory package entries skipped")
+            continue
+        eco = p.get("ecosystem") if p.get("ecosystem") in ("npm", "pypi") else None
+        exact = p.get("exact") is True
+        if exact and eco is None:
+            w("exact package entries without an npm/pypi ecosystem (matched by name)")
+            exact = False
+        ranges = p.get("ranges")
+        if ranges is None:
+            ranges = []
+        if not isinstance(ranges, list) or not all(isinstance(r, dict) for r in ranges):
+            w("malformed affected-version ranges (verdict: unknown)")
+            ranges = None                      # -> SCA-CVE-UNKNOWN on a name match
+        adv["packages"].append({"name": p["name"], "ecosystem": eco, "ranges": ranges,
+                                "exact": exact,
+                                "vendor": p.get("vendor") if isinstance(p.get("vendor"), str) else None})
+    return adv
+
+
+def bundle_header(doc, warn):
+    """-> (advisories, generated_at, sources, counts) of a bundle document:
+    the part of reading one that is the same for every way of storing it.
+    Structural problems (not an object, wrong bundleVersion, 'advisories' not
+    a list) raise ValueError; a field of the wrong type is dropped and counted
+    through `warn`."""
+    if not isinstance(doc, dict) or doc.get("bundleVersion") != 1:
+        raise ValueError("not a Lazaret CVE bundle (bundleVersion != 1)")
+    advisories = doc.get("advisories")
+    if advisories is None:
+        advisories = []
+    if not isinstance(advisories, list):
+        raise ValueError("CVE bundle 'advisories' is %s, not a list"
+                         % type(advisories).__name__)
+    gen = doc.get("generatedAt")
+    generated_at = gen if isinstance(gen, str) else None
+    if gen is not None and not isinstance(gen, str):
+        warn("non-text generatedAt values")
+    sources = doc.get("sources")
+    source_list = _strs(sources)
+    if sources is not None and (not isinstance(sources, list) or len(source_list) != len(sources)):
+        warn("non-text bundle source entries")
+    counts = doc.get("counts")
+    return advisories, generated_at, source_list, counts if isinstance(counts, dict) else {}
+
+
+#: The first bytes of an indexed bundle (sca_index.MAGIC; a test holds the two equal).
+INDEX_MAGIC = b"LZSCAIDX"
+
+
 class CveBundle:
     """Advisories indexed by normalized package name for O(inventory) matching.
 
@@ -1867,25 +1957,8 @@ class CveBundle:
     """
 
     def __init__(self, doc):
-        if not isinstance(doc, dict) or doc.get("bundleVersion") != 1:
-            raise ValueError("not a Lazaret CVE bundle (bundleVersion != 1)")
-        advisories = doc.get("advisories")
-        if advisories is None:
-            advisories = []
-        if not isinstance(advisories, list):
-            raise ValueError("CVE bundle 'advisories' is %s, not a list"
-                             % type(advisories).__name__)
         self.warnings = _Warnings()
-        gen = doc.get("generatedAt")
-        self.generated_at = gen if isinstance(gen, str) else None
-        if gen is not None and not isinstance(gen, str):
-            self.warnings("non-text generatedAt values")
-        sources = doc.get("sources")
-        self.sources = _strs(sources)
-        if sources is not None and (not isinstance(sources, list) or len(self.sources) != len(sources)):
-            self.warnings("non-text bundle source entries")
-        counts = doc.get("counts")
-        self.counts = counts if isinstance(counts, dict) else {}
+        advisories, self.generated_at, self.sources, self.counts = bundle_header(doc, self.warnings)
         self.advisories = []
         self._index = {}            # loose name key -> [(adv, pkg)] (CPE product names)
         self._exact = {}            # (ecosystem, exact_name_key) -> [(adv, pkg)]
@@ -1905,58 +1978,7 @@ class CveBundle:
                     self._index.setdefault(key, []).append((adv, pkg))
 
     def _advisory(self, raw):
-        w = self.warnings
-        if not isinstance(raw, dict):
-            w("malformed advisory entries skipped")
-            return None
-        cve = raw.get("cve") or raw.get("id")
-        if not isinstance(cve, str) or not cve:
-            w("advisory entries without a 'cve' id (kept as 'advisory#N')")
-            cve = "advisory#%d" % (len(self.advisories) + 1)
-        adv = {
-            "cve": cve,
-            "title": raw.get("title") if isinstance(raw.get("title"), str) else None,
-            "severity": raw.get("severity") if isinstance(raw.get("severity"), str) else None,
-            "cvss": _num(raw.get("cvss")),
-            "epss": _num(raw.get("epss")),
-            "epssPercentile": _num(raw.get("epssPercentile")),
-            "knownExploited": raw.get("knownExploited") is True,
-            "malicious": raw.get("malicious") is True,
-            "ransomware": raw.get("ransomware") is True,
-            "dueDate": raw.get("dueDate") if isinstance(raw.get("dueDate"), str) else None,
-            "published": raw.get("published") if isinstance(raw.get("published"), str) else None,
-            "cwes": _strs(raw.get("cwes")),
-            "refs": _strs(raw.get("refs")),
-            "sources": _strs(raw.get("sources")),
-            "packages": [],
-        }
-        for f in ("cvss", "epss", "epssPercentile"):
-            if raw.get(f) is not None and adv[f] is None:
-                w("non-numeric %s values ignored" % f)
-        pkgs = raw.get("packages")
-        if not isinstance(pkgs, list):
-            if pkgs is not None:
-                w("advisories with a malformed 'packages' list skipped")
-            return adv
-        for p in pkgs:
-            if not isinstance(p, dict) or not isinstance(p.get("name"), str) or not p["name"].strip():
-                w("malformed advisory package entries skipped")
-                continue
-            eco = p.get("ecosystem") if p.get("ecosystem") in ("npm", "pypi") else None
-            exact = p.get("exact") is True
-            if exact and eco is None:
-                w("exact package entries without an npm/pypi ecosystem (matched by name)")
-                exact = False
-            ranges = p.get("ranges")
-            if ranges is None:
-                ranges = []
-            if not isinstance(ranges, list) or not all(isinstance(r, dict) for r in ranges):
-                w("malformed affected-version ranges (verdict: unknown)")
-                ranges = None                      # -> SCA-CVE-UNKNOWN on a name match
-            adv["packages"].append({"name": p["name"], "ecosystem": eco, "ranges": ranges,
-                                    "exact": exact,
-                                    "vendor": p.get("vendor") if isinstance(p.get("vendor"), str) else None})
-        return adv
+        return normalize_advisory(raw, self.warnings, len(self.advisories) + 1)
 
     def advisories_for(self, name, ecosystem=None):
         """Every (advisory, package entry) pair that names this dependency,
@@ -1976,14 +1998,29 @@ class CveBundle:
 
     @classmethod
     def load(cls, path):
+        """The bundle at `path`: a JSON document (this class) or an indexed
+        bundle (sca_index.IndexedBundle, told apart by its first bytes; it
+        answers the same calls and reads only what a scan asks about)."""
         try:
             with open(path, "rb") as f:
-                doc = lazaret.json_loads_bounded(f.read().decode("utf-8"))
+                indexed = f.read(len(INDEX_MAGIC)) == INDEX_MAGIC
+                if not indexed:
+                    f.seek(0)
+                    doc = lazaret.json_loads_bounded(f.read().decode("utf-8"))
         except (OSError, ValueError, MemoryError) as e:
             # ValueError covers a deeply nested bundle (JsonTooDeep), bad
             # UTF-8 and the int-digit limit.
             raise ValueError("cannot read CVE bundle %s: %s" % (path, e)) from None
+        if indexed:
+            from lazaret.scanner import sca_index        # imports this module
+            try:
+                return sca_index.IndexedBundle.open(path)
+            except OSError as e:
+                raise ValueError("cannot read CVE bundle %s: %s" % (path, e)) from None
         return cls(doc)
+
+    def close(self):
+        """Nothing to release (an indexed bundle keeps its file open)."""
 
 
 _ISO_RE = re.compile(
@@ -2351,6 +2388,10 @@ def parse_args(argv):
     upd.add_argument("--no-epss", action="store_true",
                      help="build the bundle without EPSS scores (they are shown with "
                           "findings and change no severity)")
+    upd.add_argument("--bundle-format", choices=("json", "index"), default=None,
+                     help="what to write: json (default; one document, diffable) or index "
+                          "(a file a scan reads only the needed parts of: lazaret-sca "
+                          "loads it in milliseconds, not seconds)")
     args = ap.parse_args(argv)
     if args.update_bundle:
         if args.bundle is None:
@@ -2359,7 +2400,8 @@ def parse_args(argv):
             ap.error("--epss-url and --no-epss contradict each other")
     else:
         given = [flag for flag, value in (("--osv-url", args.osv_url), ("--kev-url", args.kev_url),
-                                          ("--epss-url", args.epss_url), ("--no-epss", args.no_epss))
+                                          ("--epss-url", args.epss_url), ("--no-epss", args.no_epss),
+                                          ("--bundle-format", args.bundle_format))
                  if value]
         if given:
             ap.error("%s only apply with --update-bundle" % ", ".join(given))
@@ -2479,7 +2521,15 @@ def _main(argv=None):
     for line in bundle.warnings.lines():
         print("  warning: CVE bundle: %s" % lazaret.sanitize_term(line), file=sys.stderr)
 
-    matches, unknown = match_inventory(inv, bundle)
+    try:
+        matches, unknown = match_inventory(inv, bundle)
+    except ValueError as e:
+        # an indexed bundle is read as the scan asks (a record can be damaged
+        # when the file was opened fine): never an answer built on it.
+        print("error: %s" % lazaret.sanitize_term(e), file=sys.stderr)
+        return EXIT_BUNDLE
+    finally:
+        bundle.close()
     issues = []
     for adv, pkg, dep, hit in sorted(matches, key=lambda m: (m[0].get("cve") or "")):
         if adv.get("knownExploited") is True:

@@ -39,7 +39,7 @@ driver = _support.load_script(os.path.join(FUZZ, "fuzz.py"), "fuzz_driver")
 EXPECTED_TARGETS = ["archive-tgz", "archive-tbz2", "archive-txz", "archive-zip", "xml", "xml-minidom",
                     "sca-package-lock-json", "sca-yarn-lock", "sca-pnpm-lock-yaml", "sca-bun-lock", "sca-poetry-lock",
                     "sca-uv-lock", "sca-pylock-toml", "sca-pipfile-lock", "sca-requirements-txt", "sca-pyproject-toml",
-                    "sca-setup-py"]
+                    "sca-setup-py", "sca-bundle-index", "sca-bundle-doc"]
 
 
 def fake(run, seeds=(b"abc",), name="fake", **options):
@@ -674,6 +674,113 @@ class PromisesAreLive(unittest.TestCase):
         self.assertEqual(self.sca(inv(("npm", "", "1", "w"))), "sca-entry-values")
         self.assertEqual(self.sca(inv(), [(1, 1)]), "sca-warning-shape")
         self.assertEqual(self.sca(inv(), [("kind", "n")]), "sca-warning-shape")
+
+    def bundle(self, name, seed, *patches):
+        run, close = fuzz_targets.TARGETS[name].start()
+        self.addCleanup(close)
+        with contextlib.ExitStack() as stack:
+            for owner, attr, value in patches:
+                stack.enter_context(mock.patch.object(owner, attr, value))
+            with self.assertRaises(fuzz_targets.Violation) as raised:
+                run(seed)
+        return raised.exception.rule
+
+    def test_the_index_promises(self):
+        from lazaret.scanner import sca_index
+        bundle = sca_index.IndexedBundle
+        seed = fuzz_targets.index_seeds()[0]
+        pkg = {"name": "x"}
+        pair = ({"cve": "A", "packages": [pkg]}, pkg)
+        calls = []
+
+        def alternate(self, name, ecosystem=None):
+            calls.append(1)
+            return [pair] if len(calls) % 2 else []
+
+        def damaged(self, name, ecosystem=None):
+            raise sca_index.BundleDamaged("x")
+        run = lambda *patches: self.bundle("sca-bundle-index", seed, *patches)       # noqa: E731
+        self.assertEqual(run((bundle, "advisories_for", lambda self, n, e=None: [1])), "index-answer-shape")
+        self.assertEqual(run((bundle, "advisories_for", lambda self, n, e=None: [({}, {})])), "index-answer-values")
+        self.assertEqual(run((bundle, "advisories_for", lambda self, n, e=None: [({"cve": 5, "packages": []}, pkg)])),
+                         "index-answer-values")
+        self.assertEqual(run((bundle, "advisories_for", lambda self, n, e=None: [({"cve": "A", "packages": [dict(pkg)]}, pkg)])),
+                         "index-answer-package")
+        self.assertEqual(run((sca_index._Advisories, "__len__", lambda self: 10 ** 9)), "index-advisory-count")
+        self.assertEqual(run((bundle, "advisories_for", damaged)), "index-checked-then-damaged")
+        self.assertEqual(run((bundle, "advisories_for", alternate)), "index-deterministic")
+
+    def test_the_index_target_runs_a_file_with_its_checksums_made_right_too(self):
+        from lazaret.scanner import sca_index
+        seed = fuzz_targets.index_seeds()[0]
+        opened = []
+        real = sca_index.IndexedBundle.open
+
+        def spy(path):
+            with open(path, "rb") as fh:
+                opened.append(fh.read())
+            return real(path)
+        run, close = fuzz_targets.TARGETS["sca-bundle-index"].start()
+        self.addCleanup(close)
+        changed = bytearray(seed)
+        changed[sca_index.HEADER.size + 3] ^= 0x20                       # a byte of the metadata
+        with mock.patch.object(sca_index.IndexedBundle, "open", staticmethod(spy)):
+            run(bytes(changed))
+        self.assertEqual(opened[0], bytes(changed))
+        self.assertEqual(opened[1], fuzz_targets.repair_index(bytes(changed)))
+        self.assertNotEqual(opened[0], opened[1])
+
+    def test_repairing_an_index_makes_its_checksums_right_and_nothing_else(self):
+        from lazaret.scanner import sca_index
+        seed = fuzz_targets.index_seeds()[0]
+        self.assertEqual(fuzz_targets.repair_index(seed), seed)
+        self.assertEqual(fuzz_targets.repair_index(seed[:50]), seed[:50])
+        head = sca_index.HEADER.size
+        meta_len = sca_index.HEADER.unpack_from(seed)[8]
+        for at, what in ((head + 5, "metadata"), (head + meta_len + 3, "advisory table"), (len(seed) - 1, "records"),
+                         (head - 1, "the header's own checksum")):
+            changed = bytearray(seed)
+            changed[at] ^= 0x01
+            repaired = fuzz_targets.repair_index(bytes(changed))
+            with self.subTest(what=what):
+                try:
+                    with tempfile.TemporaryDirectory() as folder:
+                        path = os.path.join(folder, "b")
+                        with open(path, "wb") as fh:
+                            fh.write(repaired)
+                        sca_index.IndexedBundle.open(path).close()
+                except ValueError as error:
+                    self.assertNotIn("checksum", str(error))             # whatever else it is, it is not that
+        grown = seed + b"tail"
+        self.assertEqual(sca_index.HEADER.unpack_from(fuzz_targets.repair_index(grown))[3], len(grown))
+
+    def test_the_bundle_document_promises(self):
+        from lazaret.scanner import sca, sca_index
+        seed = fuzz_targets.BUNDLE_DOCS[0]
+        run = lambda *patches: self.bundle("sca-bundle-doc", seed, *patches)         # noqa: E731
+        real_dump = sca_index.dump_index
+
+        def other_warnings(doc, fh):
+            summary = real_dump(doc, fh)
+            summary["warnings"] = ["a warning no bundle has"]
+            return summary
+        self.assertEqual(run((sca, "CveBundle", mock.Mock(side_effect=ValueError("no")))), "bundle-doc-refusal")
+        self.assertEqual(run((sca_index, "dump_index", other_warnings)), "bundle-doc-warnings")
+        self.assertEqual(run((sca_index._Advisories, "__len__", lambda self: 1 + self._bundle._n_adv)), "bundle-doc-count")
+        self.assertEqual(run((sca_index.IndexedBundle, "verify", lambda self: {"advisories": -1})), "bundle-doc-verify")
+        self.assertEqual(run((sca_index.IndexedBundle, "advisories_for", lambda self, n, e=None: [])), "bundle-doc-answers")
+
+    def test_what_the_bundle_readers_refuse_is_not_a_finding(self):
+        from lazaret.scanner import sca_index
+        run, close = fuzz_targets.TARGETS["sca-bundle-index"].start()
+        self.addCleanup(close)
+        for data in (b"", b"LZSCAIDX", b"x" * 500, fuzz_targets.index_seeds()[0][:-1]):
+            run(data)
+        run, close = fuzz_targets.TARGETS["sca-bundle-doc"].start()
+        self.addCleanup(close)
+        for data in (b"", b"[", b"[]", b"{}", b'{"bundleVersion": 2}', b'{"bundleVersion": 1, "advisories": {}}',
+                     b'{"bundleVersion": 1, "advisories": [{"cve": "A", "cvss": NaN}]}', b"\xff\xfe"):
+            run(data)                                                     # refused by both, or by the index only for NaN
 
     def xml(self, root, name="xml", data=b"<a/>"):
         run, close = fuzz_targets.TARGETS[name].start()

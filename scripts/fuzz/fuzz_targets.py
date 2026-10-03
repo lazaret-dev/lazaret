@@ -11,6 +11,10 @@ document, a broken promise (`check` raises `Violation`), or too much time (the d
   scanner uses and the limits it can be given.
 - `sca-*`: `scanner.sca.scan_all` over one file of each kind the inventory reads (the npm, yarn, pnpm and bun
   lockfiles, poetry.lock, uv.lock, pylock.toml, Pipfile.lock, requirements.txt, pyproject.toml, setup.py).
+- `sca-bundle-index`: `scanner.sca_index.IndexedBundle`, the CVE bundle in its indexed file format, run on the bytes as
+  given and on the same bytes with every checksum made right (so the checks behind the checksums run too).
+- `sca-bundle-doc`: the same bundle both ways: any JSON document through `CveBundle` and through `dump_index` and back
+  must say the same about every name it mentions.
 
 Standard library plus this checkout. The seeds are built here, so no fixture is needed."""
 
@@ -413,3 +417,192 @@ def sca_seeds(filename):
 for _filename in SCA_SEEDS:
     register("sca-" + _filename.lower().replace(".", "-").replace("_", "-").replace("--", "-"),
              f"scanner.sca.scan_all reading {_filename}", sca_seeds(_filename), sca_start(_filename), SCA_WORDS, max_len=16384)
+
+
+# ----------------------------------------------------------------------------------------------- CVE bundles
+
+def bundle_json(*advisories, **top):
+    return j(dict({"bundleVersion": 1, "generatedAt": "2026-10-01T00:00:00Z", "sources": ["osv:npm"],
+                   "counts": {"advisories": len(advisories)}, "advisories": list(advisories)}, **top))
+
+
+BUNDLE_DOCS = [
+    bundle_json(
+        {"cve": "CVE-2099-0001", "title": "lodash", "cvss": 9.8, "knownExploited": True,
+         "packages": [{"name": "lodash", "ecosystem": "npm", "exact": True,
+                       "ranges": [{"fromVersion": "0", "toVersion": "4.17.12", "toInclusive": False}]}]},
+        {"cve": "CVE-2099-0002", "packages": [{"name": "python-urllib3", "ecosystem": None, "exact": False,
+                                               "ranges": [{"fromVersion": "1.0", "toVersion": "1.26.17"}]},
+                                              {"name": "Django", "ecosystem": "pypi", "exact": True, "ranges": []}]},
+        {"cve": "CVE-2099-0003", "malicious": True, "packages": [{"name": "@scope/pkg", "ecosystem": "npm", "exact": True,
+                                                                  "ranges": [{}]}]}),
+    bundle_json({"id": "GHSA-aaaa-bbbb-cccc", "cvss": "bad", "packages": [{"name": "requests", "ecosystem": "pypi",
+                                                                            "exact": True, "ranges": "no"}, None, {"name": 5}]},
+                "junk", {"cve": "CVE-2099-0004", "packages": "no"}),
+    bundle_json(),
+]
+BUNDLE_WORDS = (b'"bundleVersion"', b'"advisories"', b'"packages"', b'"exact"', b'"ranges"', b'"fromVersion"', b'"toVersion"',
+                b'"toInclusive"', b'"ecosystem"', b'"npm"', b'"pypi"', b'"name"', b'"cve"', b'"id"', b'"cvss"', b'"epss"',
+                b'"knownExploited"', b'"malicious"', b'"generatedAt"', b'"sources"', b'"counts"', b"null", b"true", b"false",
+                b"NaN", b"Infinity", b"-1", b"1e999", b'"python-', b'"py-', b'"@', b"\\ud800", b"\\u0000", b"[[", b"{}")
+INDEX_WORDS = (b"LZSCAIDX", b"\x01\x00\x00\x00", b"\x00\x00\x00\x00", b"\xff\xff\xff\xff", b"\xff" * 8, b"E\x00npm\x00",
+               b"L\x00", b"x\x9c", b"x\xda", b'{"k":', b'{"n":', b'"p":[[', b'"a":{', b"]]}", b"\x00" * 16)
+
+
+def index_seeds():
+    from lazaret.scanner import sca_index
+    out = []
+    for text in BUNDLE_DOCS:
+        buf = io.BytesIO()
+        sca_index.dump_index(json.loads(text), buf)
+        out.append(buf.getvalue())
+    return out
+
+
+def repair_index(data):
+    """`data` with the file length and every checksum made right, so that a changed file gets past the checks that
+    would refuse nearly all of them and the reader's other checks are what run."""
+    from lazaret.scanner import sca_index as ix
+    if len(data) < ix.HEADER.size:
+        return data
+    out = bytearray(data)
+    f = list(ix.HEADER.unpack_from(out))
+    f[1], f[2], f[3] = ix.FORMAT, 0, len(out)
+    n_adv, n_keys = min(f[4], 4096), min(f[5], 4096)
+    meta_off, meta_len, advtab_off, keytab_off, blobs_off = f[7:12]
+
+    def inside(off, length):
+        return 0 <= off and 0 <= length and off + length <= len(out)
+
+    def crc(off, length):
+        return zlib.crc32(bytes(out[off:off + length])) if inside(off, length) else 0
+
+    for table_off, count, entry in ((advtab_off, n_adv, ix.ADV_ENTRY), (keytab_off, n_keys, ix.KEY_ENTRY)):
+        for i in range(count):
+            at = table_off + i * entry.size
+            if not inside(at, entry.size):
+                break
+            fields = list(entry.unpack_from(out, at))
+            if entry is ix.ADV_ENTRY:
+                fields[2] = crc(blobs_off + fields[0], fields[1])
+            else:
+                fields[3] = crc(blobs_off + fields[1], fields[2])
+            entry.pack_into(out, at, *fields)
+    f[12] = crc(meta_off, meta_len)
+    f[13] = crc(advtab_off, ix.ADV_ENTRY.size * f[4])
+    f[14] = crc(keytab_off, ix.KEY_ENTRY.size * f[5])
+    f[15] = 0
+    f[15] = zlib.crc32(ix.HEADER.pack(*f))
+    ix.HEADER.pack_into(out, 0, *f)
+    return bytes(out)
+
+
+def names_in(advisories):
+    """The package names a bundle mentions (and a few that fold to them), to look up."""
+    names = {"lodash", "python-urllib3", "urllib3", "Django", "@scope/pkg"}
+    for adv in advisories:
+        for pkg in adv.get("packages") or ():
+            if isinstance(pkg, dict) and isinstance(pkg.get("name"), str):
+                name = pkg["name"]
+                names.update((name, name.lower(), name.replace("-", "_"), "python-" + name))
+    return sorted(names)[:64]
+
+
+def index_start():
+    from lazaret.scanner import sca_index
+    folder = tempfile.mkdtemp(prefix="lazaret-fuzz-")
+    path = os.path.join(folder, "bundle.lzx")
+
+    def read(data):
+        with open(path, "wb") as fh:
+            fh.write(data)
+        try:
+            bundle = sca_index.IndexedBundle.open(path)
+        except ValueError:                       # the refusal the reader documents (a damaged or unknown file)
+            return None
+        with bundle:
+            try:
+                checked = bundle.verify()
+            except ValueError:
+                checked = None
+            count = len(bundle.advisories)
+            check(count <= len(data) // sca_index.ADV_ENTRY.size, "index-advisory-count", f"{count} advisories in {len(data)} bytes")
+            answers, errors = {}, 0
+            advisories = []
+            for n in range(min(count, 200)):
+                try:
+                    advisories.append(bundle.advisories[n])
+                except ValueError:
+                    errors += 1
+            for name in names_in(advisories):
+                for eco in (None, "npm", "pypi"):
+                    try:
+                        found = bundle.advisories_for(name, eco)
+                    except ValueError:
+                        errors += 1
+                        continue
+                    check(isinstance(found, list) and all(isinstance(p, tuple) and len(p) == 2 and isinstance(p[0], dict)
+                                                          and isinstance(p[1], dict) for p in found), "index-answer-shape", repr(found)[:120])
+                    for adv, pkg in found:
+                        check(isinstance(adv.get("cve"), str) and isinstance(pkg.get("name"), str), "index-answer-values",
+                              repr((adv.get("cve"), pkg.get("name")))[:120])
+                        check(any(pkg is p for p in adv["packages"]), "index-answer-package", repr(pkg)[:120])
+                    answers[(name, eco)] = found
+            check(not (checked is not None and errors), "index-checked-then-damaged",
+                  f"{errors} lookups failed on a file that passed its check")
+            return answers
+
+    def run(data):
+        for variant in (data, repair_index(data)):
+            first = read(variant)
+            if first is not None:
+                check(read(variant) == first, "index-deterministic", "two reads of one file differ")
+
+    def close():
+        shutil.rmtree(folder, ignore_errors=True)
+    return run, close
+
+
+def doc_start():
+    from lazaret.scanner import core, sca, sca_index
+
+    def run(data):
+        try:
+            doc = core.json_loads_bounded(data.decode("utf-8"))
+        except (ValueError, RecursionError):
+            return
+        try:
+            plain = sca.CveBundle(doc)
+        except ValueError:
+            plain = None
+        buf = io.BytesIO()
+        try:
+            summary = sca_index.dump_index(doc, buf)
+        except ValueError:
+            return                               # refused: a document the index cannot hold (NaN) or one that is no bundle
+        check(plain is not None, "bundle-doc-refusal", "the index accepted a document the JSON bundle refuses")
+        path = os.path.join(folder, "doc.lzx")
+        with open(path, "wb") as fh:
+            fh.write(buf.getvalue())
+        with sca_index.IndexedBundle.open(path) as indexed:
+            check(summary["warnings"] == plain.warnings.lines() == indexed.warnings.lines(), "bundle-doc-warnings",
+                  repr((summary["warnings"], plain.warnings.lines())))
+            check(len(indexed.advisories) == len(plain.advisories), "bundle-doc-count",
+                  f"{len(indexed.advisories)} against {len(plain.advisories)}")
+            check(indexed.verify()["advisories"] == len(plain.advisories), "bundle-doc-verify")
+            for name in names_in(plain.advisories):
+                for eco in (None, "npm", "pypi"):
+                    check(indexed.advisories_for(name, eco) == plain.advisories_for(name, eco), "bundle-doc-answers",
+                          repr((name, eco)))
+
+    folder = tempfile.mkdtemp(prefix="lazaret-fuzz-")
+
+    def close():
+        shutil.rmtree(folder, ignore_errors=True)
+    return run, close
+
+
+register("sca-bundle-index", "scanner.sca_index.IndexedBundle on a file as given and with its checksums made right",
+         index_seeds, index_start, INDEX_WORDS, max_len=16384)
+register("sca-bundle-doc", "a bundle document read as CveBundle and through the indexed file: the same answers",
+         lambda: list(BUNDLE_DOCS), doc_start, BUNDLE_WORDS, max_len=16384)
