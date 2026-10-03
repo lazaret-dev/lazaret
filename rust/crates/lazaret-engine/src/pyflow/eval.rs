@@ -718,8 +718,8 @@ impl<'p> Analyzer<'p> {
                     if let Some(x) = self.sc_subscript(e, &v, &k) {
                         return Ok(x);
                     }
-                    // (a reversal decodes: `s[::-1]`)
-                    if self.sc_reversal(b) {
+                    // (a reversal decodes: `s[::-1]`; a list's reorders its items)
+                    if self.sc_reversal(b) && !self.sc_items_not_text(a, 0) {
                         let at = self.start(e);
                         return Ok(self.sc_decoded(&v, "a reversal", at));
                     }

@@ -5476,16 +5476,21 @@ _PTH_EXEC_RE = re.compile(
 
 
 _PTH_IMPORT = ("import ", "import\t")
+# the engine's reason for a line _PTH_EXEC_RE matches
+_PTH_PAYLOAD = "executes or decodes a payload"
 
 
 def pth_issues(path, text):
     """SC-PTH-EXEC: site.py executes every line of a .pth file in
     site-packages that starts with 'import' at EVERY interpreter start — no
-    import of the package needed. CRITICAL when the line also executes or
-    decodes code, MAJOR otherwise (setuptools' distutils shim and namespace
-    .pth files are this shape: listed for review). The registry's check
-    (lazaret.registry.repo) and the project walk share this one helper's
-    semantics; the npm engine's twin is js/src/lib/pth.js.
+    import of the package needed. CRITICAL when the line's code executes or
+    decodes a payload, or does what the install-script and import-time tests
+    look for (the engine's pth_line_risk, which reads `exec('…')` of a plain
+    literal as the literal's code: coverage's a1_coverage.pth); MAJOR
+    otherwise (setuptools' distutils shim and namespace .pth files are this
+    shape: listed for review). The registry's check (lazaret.registry.repo)
+    and the project walk share this one helper's semantics; the npm engine's
+    twin is js/src/lib/pth.js.
 
     Lines are taken both ways site.py splits them: at \\n, \\r and \\r\\n
     (iterating the file: 3.10, 3.11, early 3.12 releases), and with
@@ -5499,12 +5504,20 @@ def pth_issues(path, text):
         if not (line.startswith(_PTH_IMPORT)
                 or any(part.startswith(_PTH_IMPORT) for part in line.splitlines())):
             continue
-        hostile = bool(_PTH_EXEC_RE.search(line))
+        try:
+            reasons = _ask("pth_line_risk", line)
+        except _native.NativeError:
+            reasons = [_PTH_PAYLOAD]        # (no answer: judged as the worst)
+        if not reasons:
+            tail = "."
+        elif _PTH_PAYLOAD in reasons:
+            tail = " and executes or decodes a payload."
+        else:
+            tail = ", and it " + "; and ".join(reasons) + "."
         out.append(mk_issue(
             {"id": "SC-PTH-EXEC", "name": "Code in a .pth file", "type": "HOTSPOT",
-             "sev": "CRITICAL" if hostile else "MAJOR",
-             "msg": (".pth line runs code at every Python start"
-                     + (" and executes or decodes a payload." if hostile else ".")),
+             "sev": "CRITICAL" if reasons else "MAJOR",
+             "msg": ".pth line runs code at every Python start" + tail,
              "why": ("site.py executes .pth lines that start with 'import' whenever the "
                      "interpreter starts, whether or not the package is imported — a "
                      "persistence and execution vector that needs no install hook."),

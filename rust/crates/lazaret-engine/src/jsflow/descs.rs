@@ -19,6 +19,10 @@ pub enum D {
     Global(PyStr),
     Local,
     Unknown,
+    /// (the supply-chain model) what a call of a Node module's function
+    /// makes, or `new` of its class (`createHash('sha1')`, `http.createServer(app)`):
+    /// its methods are Node's, never the script's functions of the same name
+    Native,
 }
 
 /// How a call's targets were found: by binding only ("definite"), by name
@@ -39,6 +43,21 @@ pub(crate) fn dedupe<T: Clone + Eq + std::hash::Hash>(xs: Vec<T>) -> Vec<T> {
 
 fn unknown() -> Vec<D> {
     vec![D::Unknown]
+}
+
+/// (the supply-chain model) Is a callee, by what it may be, a Node module's
+/// function or class, or a method of what one made (`crypto.createHash`,
+/// `createHash(…).update`)? What a call of it makes is D::Native.
+fn node_made(ds: &[D]) -> bool {
+    !ds.is_empty()
+        && ds.iter().all(|d| match d {
+            D::Native => true,
+            D::Builtin(b) => {
+                let root = b.split(|&c| c == 0x2E || c == 0x2F).next().unwrap_or(&[]);
+                is_in(NODE_BUILTINS, root)
+            }
+            _ => false,
+        })
 }
 
 fn dotted(a: &[u32], b: &[u32]) -> PyStr {
@@ -160,15 +179,40 @@ impl Program {
                 };
                 let mut is_require = Ast(&self.mods[m as usize].tree).is_ident_named(callee, "require")
                     && self.lookup(scope, &u("require")).is_none();
-                if !is_require && self.cfg.supply.is_some() && !args.is_empty() && depth < ALIAS_DEPTH {
-                    // (the supply-chain model: require under another name —
-                    // `const r = require`, `module.require`, `const q = module.require`)
-                    is_require = self.descs_of_expr(m, callee, scope, depth + 1).iter().any(|d| match d {
-                        D::Global(g) => eq(g, "require"),
-                        D::Open(n) => eq(n, "require"),
-                        D::Builtin(b) => eq(b, "module.require"),
-                        _ => false,
-                    });
+                // (the supply-chain model: what the callee may be, read once — a chain of
+                // calls reads each link once, `w.uint32(10).string(a).uint32(18)…`)
+                let mut callee_descs: Option<Vec<D>> = None;
+                if !is_require && self.cfg.supply.is_some() && depth < ALIAS_DEPTH {
+                    // (an arrow called where it is made is what its body is, `var
+                    // __require = (() => createRequire(import.meta.url))()`)
+                    let (ck, body) = {
+                        let a = Ast(&self.mods[m as usize].tree);
+                        let ck = a.kind(callee);
+                        (ck, if ck == Kind::ArrowFunctionExpression { a.at(callee, C) } else { NONE })
+                    };
+                    if ck == Kind::ArrowFunctionExpression
+                        && body != NONE
+                        && self.mods[m as usize].tree.nodes[body as usize].kind != Kind::BlockStatement
+                    {
+                        let fscope = self.fns[self.mods[m as usize].fid_at[callee as usize] as usize].scope;
+                        return self.descs_of_expr(m, body, fscope, depth + 1);
+                    }
+                    let ds = self.descs_of_expr(m, callee, scope, depth + 1);
+                    // (createRequire makes a require)
+                    if ds.iter().any(|d| matches!(d, D::Builtin(b) if eq(b, "module.createRequire"))) {
+                        return vec![D::Builtin(u("module.require"))];
+                    }
+                    // (require under another name: `const r = require`, `module.require`,
+                    // `const q = module.require`)
+                    if !args.is_empty() {
+                        is_require = ds.iter().any(|d| match d {
+                            D::Global(g) => eq(g, "require"),
+                            D::Open(n) => eq(n, "require"),
+                            D::Builtin(b) => eq(b, "module.require"),
+                            _ => false,
+                        });
+                    }
+                    callee_descs = Some(ds);
                 }
                 if is_require && !args.is_empty() {
                     let a = Ast(&self.mods[m as usize].tree);
@@ -184,12 +228,19 @@ impl Program {
                         return vec![self.resolve_spec(fmod, &raw)];
                     }
                 }
+                if !is_require && callee_descs.as_deref().is_some_and(node_made) {
+                    return vec![D::Native];
+                }
                 unknown()
             }
             Kind::NewExpression => {
                 let callee = Ast(&self.mods[m as usize].tree).at(node, A);
+                let ds = self.descs_of_expr(m, callee, scope, depth + 1);
+                if self.cfg.supply.is_some() && depth < ALIAS_DEPTH && node_made(&ds) {
+                    return vec![D::Native];
+                }
                 let mut out = Vec::new();
-                for d in self.descs_of_expr(m, callee, scope, depth + 1) {
+                for d in ds {
                     if let D::Class(c) = d {
                         out.push(D::Inst(c));
                     }
@@ -276,6 +327,52 @@ impl Program {
         }
     }
 
+    /// (the supply-chain model) Are a class's instances made in more than
+    /// one place: two `new` of it or of its subclasses? Its `this.x` then
+    /// is no one binding (one instance's members are not another's: every
+    /// MagicString of a bundle that makes them in its plugins), and an
+    /// instance is a container (eval.rs, sc_instance_call).
+    pub fn sc_made_widely(&mut self, c: ClassId) -> bool {
+        if self.sc_wide.is_none() {
+            let mut sites: HashMap<ClassId, u32> = HashMap::new();
+            let news: Vec<(ModId, NodeId, ScopeId)> = self
+                .fns
+                .iter()
+                .flat_map(|f| {
+                    let m = f.module;
+                    let tree = &self.mods[m as usize].tree;
+                    f.calls
+                        .iter()
+                        .filter(move |&&(n, _)| tree.nodes[n as usize].kind == Kind::NewExpression)
+                        .map(move |&(n, s)| (m, n, s))
+                })
+                .collect();
+            for (m, node, scope) in news {
+                let callee = Ast(&self.mods[m as usize].tree).at(node, jt::A);
+                let mut made: Vec<ClassId> = Vec::new();
+                for d in self.descs_of_expr(m, callee, scope, 0) {
+                    if let D::Class(mut cc) = d {
+                        for _ in 0..ALIAS_DEPTH {
+                            if made.contains(&cc) {
+                                break;
+                            }
+                            made.push(cc);
+                            match self.superclass(cc, 0) {
+                                Some(sup) => cc = sup,
+                                None => break,
+                            }
+                        }
+                    }
+                }
+                for cc in made {
+                    *sites.entry(cc).or_default() += 1;
+                }
+            }
+            self.sc_wide = Some(sites.into_iter().filter(|&(_, n)| n > 1).map(|(cc, _)| cc).collect());
+        }
+        self.sc_wide.as_ref().is_some_and(|w| w.contains(&c))
+    }
+
     /// The method a scope's code belongs to, through arrow functions.
     fn method_fn(&self, scope: ScopeId) -> FnId {
         let mut f = self.scopes[scope as usize].fid;
@@ -351,6 +448,7 @@ impl Program {
                 }
             }
             D::Builtin(b) => vec![D::Builtin(dotted(b, name))],
+            D::Native => vec![D::Native],
             D::Global(g) if is_in(GLOBAL_OBJECTS, g) => vec![D::Builtin(dotted(g, name))],
             _ => {
                 if is_in(COMMON_METHODS, name) {

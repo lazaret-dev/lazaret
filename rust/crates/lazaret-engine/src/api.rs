@@ -44,6 +44,8 @@ pub const CALLS: &[&str] = &[
     "self_publish_at", "runs_dll", "join_string_pieces", "received_code_kind", "runs_received_code",
     "downloads_and_runs", "decodes_and_runs", "powershell_risk", "stager_at", "reverse_shell_at",
     "local_data_sent_at", "runs_own_source_at", "reads_own_source", "persistence_reasons",
+    // a .pth file's import lines (SC-PTH-EXEC)
+    "pth_line_risk",
     // phase 3 step 3: the data flow and received code on the JavaScript and Python trees (the
     // supply-chain models; {"lang": "py"} asks Python's)
     "local_data_sent_tree", "received_code_tree", "decoded_runs_tree", "dropped_run_tree",
@@ -609,6 +611,7 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
         "runs_own_source_at" => Value::Int(signs::runs_own_source_at(p, text, lang) as i64),
         "reads_own_source" => Value::Bool(signs::reads_own_source(p, text)),
         "persistence_reasons" => strs(&signs::persistence_reasons(p, text)),
+        "pth_line_risk" => strs(&signs::pth_line_risk(p, text)),
         "secret_endpoint_at" => at_reason(crate::flow::secret_endpoint_at(p, text)),
         "credential_sweep_at" => sweep(signs::credential_sweep_at(p, text)),
         "exec_command_reasons" => strs(&crate::shell::exec_command_reasons(p, text)),

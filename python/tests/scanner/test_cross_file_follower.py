@@ -158,6 +158,20 @@ JS_QUIET = [
                              "pull().then((c) => console.log(c));\n"}),
     ("an environment variable the package never set",
      {"net.js": JS_NET + "module.exports = { pull };\n", "run.js": "eval(process.env.PAYLOAD);\n"}),
+    # (a variable one file writes and reads itself is that file's, which the
+    # single-file test reads: vite's bundle writes process.env.BROWSER from a
+    # local the follower reads, by its name, as a function that returns what
+    # it fetches, and passes the variable to exec 9,000 lines later; the
+    # finding said it was received "in another file of the package (run)")
+    ("an environment variable written and read in one file",
+     {"run.js": "const { exec } = require('child_process');\nconst fs = require('fs');\n"
+                "function parsed() {\n  return fetch(" + U + ").then((r) => r.text());\n}\n"
+                "function loadEnv(file) {\n  const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));\n"
+                "  if (parsed.BROWSER) process.env.BROWSER = parsed.BROWSER;\n}\n"
+                + "".join(f"function f{i}(x) {{\n  return x + {i};\n}}\n" for i in range(40))
+                + "function openBrowser(url) {\n  const browser = process.env.BROWSER;\n  exec(browser + ' ' + url);\n}\n"
+                "module.exports = { parsed, loadEnv, openBrowser };\n",
+      "lib.js": "module.exports = { version: '1.0.0' };\n"}),
 ]
 
 

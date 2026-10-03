@@ -83,6 +83,19 @@ MAX_MEMBER = _env_number("LAZARET_MAX_SOURCE_BYTES", 16_000_000)
 MAX_FILES = 20_000         # files per package (numpy's sdist alone has >4,000)
 SAMPLE = 8192              # header/entropy sample read from oversized files
 # Stored scans from another engine version are scanned again (has_scan).
+# 2.25: popular packages' false positives (B-1): a library's request for an
+#      address it is given or works out is not the script's own download, a
+#      server's address and options not data it receives, a selection of
+#      the environment's variables (a loop's test, read with what the names
+#      it reads are given) not the whole environment, os.environ by a
+#      constant key one variable, a list's reversal no decoder, a Node
+#      module's objects not the script's classes (createHash(…).update),
+#      createRequire's require a require, one instance of a class made in
+#      several places not every other's members, a .pth line judged by what
+#      its code does (the network or another program CRITICAL; an exec of a
+#      plain literal by the literal's code), a __doc__= keyword no read of
+#      the file's own docstring, and the cross-file follower's environment
+#      variables from another file only
 # 2.24: Python's decoded value run by a shell (os.system, os.popen,
 #      subprocess with shell=True) is SC-EVAL-DECODE, as JavaScript's was
 # 2.23: the zip reader on the fuzzers' findings: entries that overlap are
@@ -181,7 +194,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.24.0"
+ENGINE_VERSION = "2.25.0"
 
 # ---------------- Trust-chain limits (F9/G14/F10) ----------------
 # Only these hosts may ever be fetched, over https only, and redirects to any

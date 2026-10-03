@@ -979,6 +979,24 @@ a file, then run the file").
 
 ## 12. Current state (0.1.8) and backlog
 
+**After 0.1.8: popular packages' false positives.** A sweep of the latest
+releases of 1,204 popular npm and PyPI packages found nine SUSPICIOUS
+(vite, vitest, monaco-editor, future, sympy, ipython, kubernetes, coverage,
+numba), each on a reading that took a library's ordinary code for a
+dropper's. The data flow now reads an address as the script's own only
+when it is text the script writes, local data or a global another file
+defines, and no caller gives it (an object is no address), a server's events (not
+the server) as what it receives, a Node module's objects as Node's
+(`createHash(…).update` is no script's `update()`), `createRequire()` as a
+require, a class made in several places as one container per instance, a
+loop or an object that selects environment variables by name as that
+selection, and a list's reversal as no decoder; SC-PTH-EXEC judges what a
+`.pth` line's code does (an `exec` of a plain literal by the literal's
+code; the network or another program at every interpreter start is
+CRITICAL), `__doc__=` is no read of a docstring, and the cross-file
+follower seeds a file only with the variables another file writes. None of
+the 1,204 is SUSPICIOUS now.
+
 **In 0.1.8, its last round: detection and data flow.** What the behaviour
 pass (below) left at WARN or did not connect, read further (§5d, "The
 detection round"): the data flow's shapes and sources, scoped names, a
@@ -1131,6 +1149,13 @@ comprehensive, so weigh marginal value against FP risk):
   that the flow still does not connect, 12 on a list of services or a hook's
   tokens. Look for such shapes on the benchmark's own files, never on the
   holdout's samples.
+- *Instances in the data flow* (after the false-positive fixes above): a
+  class made in several places keeps one container per instance, so a value
+  given to one method from outside and run by another method of the same
+  instance (`r.setCode(t); r.run()` where `run` evals `this.c`) is not
+  followed, while a class made once still is. Reading `this` as a parameter
+  of each method (sinks reached through it, what its methods store in it)
+  would follow both without merging instances.
 - *What the cross-file follower doesn't follow* (the adversarial pass's known
   misses, kept as tests; the event emitter, relays, 16 hops, `getattr` names
   a file builds and a distribution's modules were built in 0.1.8): a name

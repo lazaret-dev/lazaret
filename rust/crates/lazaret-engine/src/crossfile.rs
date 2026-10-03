@@ -2233,7 +2233,7 @@ impl<'p> Xf<'p> {
         pkg: &Package,
         m: &Module,
         marked: &HashSet<Sym>,
-        envs: &[(PyStr, PyStr)],
+        envs: &[(PyStr, Vec<PyStr>)],
         members: &HashMap<Sym, Vec<(PyStr, bool)>>,
     ) -> Seeds {
         let mut out = Seeds::default();
@@ -2256,7 +2256,13 @@ impl<'p> Xf<'p> {
             }
             self.add(pkg, m, marked, members, &mut out, local, got, label, 0);
         }
-        for (var, label) in envs {
+        // (a variable another file writes: one this file writes itself is the
+        // single-file test's, which read the file already)
+        for (var, keys) in envs {
+            let label = match keys.iter().find(|k| **k != m.key) {
+                Some(k) => k,
+                None => continue,
+            };
             if pystr::find(m.text, var, 0).is_some() {
                 let prefix = if m.lang == Lang::Py { u("environ.") } else { u("process.env.") };
                 out.seeds.insert(concat(&[&prefix, var]), label.clone());
@@ -2347,7 +2353,7 @@ impl<'p> Xf<'p> {
         &self,
         pkg: &Package,
         tainted: &HashSet<Sym>,
-        envs: &[(PyStr, PyStr)],
+        envs: &[(PyStr, Vec<PyStr>)],
         held: &HashMap<Sym, Vec<(PyStr, bool)>>,
     ) -> HashMap<PyStr, (BTreeMap<PyStr, PyStr>, Vec<PyStr>, usize)> {
         struct Hit {
@@ -2505,12 +2511,14 @@ impl<'p> Xf<'p> {
         let runners = pkg.runners(self);
         let mut sorted_tainted: Vec<&Sym> = tainted.iter().collect();
         sorted_tainted.sort();
-        let mut envs: Vec<(PyStr, PyStr)> = Vec::new();
+        // the environment variables written with a received value: (name, the files that do)
+        let mut envs: Vec<(PyStr, Vec<PyStr>)> = Vec::new();
         for (key, name) in sorted_tainted {
             if pystr::starts_with(name, "<env>.") {
                 let var = name[6..].to_vec();
-                if !envs.iter().any(|(v, _)| *v == var) {
-                    envs.push((var, key.clone()));
+                match envs.iter_mut().find(|(v, _)| *v == var) {
+                    Some((_, keys)) => keys.push(key.clone()),
+                    None => envs.push((var, vec![key.clone()])),
                 }
             }
         }

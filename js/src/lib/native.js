@@ -234,6 +234,8 @@ export const shebangLang = (text) => call("shebang_lang", {}, text);
 export const spawnedScripts = (text, lang = null) => call("spawned_scripts", lang ? { lang } : {}, text);
 /** What a text plants to run again (a login item, a cron job, a shell profile …). */
 export const persistenceReasons = (text) => call("persistence_reasons", {}, text);
+/** Why a .pth file's import line is hostile (SC-PTH-EXEC CRITICAL), or []. core.pth_issues */
+export const pthLineRisk = (line) => call("pth_line_risk", {}, line);
 /** [agent, flag, line] when dependency code hands an AI agent's CLI a flag that turns off its confirmations
  * to an exec call, else null. */
 export const agentHijack = (text) => call("agent_hijack", {}, text);

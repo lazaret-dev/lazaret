@@ -438,7 +438,13 @@ impl<'p> Eval<'p> {
         if t == Kind::ForInStatement || t == Kind::ForOfStatement {
             let right = self.a().at(st, B);
             let c = self.cur;
-            it = Some(self.expr(Some(right), c)?.plain());
+            let mut v = self.expr(Some(right), c)?.plain();
+            // (the supply-chain model: a loop that selects some of the
+            // environment's variables does not read the whole of it)
+            if self.p.cfg.supply.is_some() && self.sc_loop_selects_env(st, &v) {
+                v = super::supply::sc_without(&v, super::supply::K_WHOLE_ENV);
+            }
+            it = Some(v);
         }
         let before = self.copy_env()?;
         for _k in 0..2 {
@@ -671,7 +677,7 @@ impl<'p> Eval<'p> {
     }
 
     /// `o.x = v`: the container o holds v too (a weak update).
-    fn member_write(&mut self, target: NodeId, v: &V, scope: ScopeId) {
+    pub(super) fn member_write(&mut self, target: NodeId, v: &V, scope: ScopeId) {
         if self.p.cfg.supply.is_some() {
             // (the supply-chain model: `this.x = v`, `this.x.y = v` hold v in this.x;
             // a connection or a client too)
@@ -1617,12 +1623,18 @@ impl<'p> Eval<'p> {
                 }
             }
             // (the supply-chain model) the closure variables a parameter is written to
+            // (not the `this.x` of a class made in several places, from a call
+            // on an instance: the instance holds it, sc_instance_call)
             let writes: Vec<(usize, Vec<BindId>)> =
                 self.p.fns[fid as usize].param_writes.iter().map(|(&i, bs)| (i, bs.iter().copied().collect())).collect();
+            let outside = !writes.is_empty() && self.sc_on_instance(node);
             for (i, binds) in writes {
                 let t = bound(args, spread, rest, i);
                 if t.tainted() {
                     for b in binds {
+                        if outside && self.p.sc_this_class.get(&b).copied().is_some_and(|c| self.p.sc_made_widely(c)) {
+                            continue;
+                        }
                         self.write(b, t.plain(), false);
                     }
                 }

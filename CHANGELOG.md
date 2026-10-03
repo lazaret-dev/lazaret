@@ -20,6 +20,55 @@ project is pre-1.0, so the 0.x API may still change.
   and a line of the summary when code was left unread (next 16.3.8: 32% of 74 million
   characters).
 
+### Fixed
+
+- **Nine popular packages are no longer SUSPICIOUS.** 0.1.8 gave the verdict to vite
+  8.3.2, vitest 5.0.3, monaco-editor 0.57.0, future 1.0.0, sympy 1.14.0, ipython 9.17.1
+  and kubernetes 36.0.3, and 0.1.7 already to coverage 7.16.2 and numba 0.68.0, so
+  the guard blocked them. Each was a reading that took a library's ordinary code for
+  a dropper's:
+  - A library's loader that fetches an address it is given or works out (Monaco's
+    module loader, vitest's module runner) is not downloading code of its own: an
+    address is the script's own when it is text the script writes (a literal, a
+    template, a constant built from them, an item of a list of them), local data, or a
+    global the page or another file defines (`axios.get(src)`, as before), and its
+    caller doesn't give it (an item of a list it is given is the caller's). An object
+    is no address: TypeScript's emit passes Monaco's loader a namespace, not a URL.
+  - What a server is sent is received (its request handler's arguments, its
+    `request`, `connection`, `upgrade` and `data` events); the server itself, its
+    address and options, and what a framework keeps beside it are not.
+  - A Node module's objects are Node's: `createHash('sha1').update(key)` no longer
+    reaches a bundle's own `update()` methods by name (vite's MagicString), and
+    `createRequire()` makes a require, through a bundler's `__require` wrapper too, so
+    the modules loaded with it are known.
+  - The instances of a class made in several places are each its own container: what
+    one instance's methods are given stays with that instance (every MagicString of
+    vite's plugins shared every other's members). What the class's methods read
+    themselves is still every instance's.
+  - A loop that selects the environment's variables by a test of their names (vite's
+    `loadEnv`) reads a selection, not the whole environment, as `.filter()` and a
+    comprehension's test already did, unless the test excludes some or names secrets;
+    what the names a JavaScript test reads are given counts as its text (a stealer's
+    list of `/TOKEN/i`, `/SECRET/i` patterns). An object given `os.environ` and read by
+    a constant name (kubernetes' in-cluster config, future's urllib backport) reads
+    that one variable.
+  - A list's reversal (`names[::-1]`: sympy's `lambdify`, IPython's completer)
+    reorders items and decodes nothing; a string's still decodes.
+  - SC-PTH-EXEC judges a .pth file's `import` line by what its code does: CRITICAL
+    when it executes or decodes a payload, reaches the network or starts another
+    program (what no library does at every interpreter start: the worms' .pth files
+    download Bun and start it), or does what the install-script and import-time tests
+    look for, MAJOR otherwise. `exec('…')` of a plain literal (coverage's
+    `a1_coverage.pth`) is judged by the literal's code; a literal in escapes is still a
+    payload. The dashboard's twin, which has no engine, still reads a line by its
+    pattern alone.
+  - `__doc__=` as a keyword argument (numba's jitclass) is not a read of the file's own
+    docstring.
+  - The cross-file follower seeds a file only with the environment variables another
+    file writes: vite's bundle writes and reads `process.env.BROWSER` itself.
+
+  The registry's rule set is 2.25.0, so stored verdicts are scanned again.
+
 ## [0.1.8] — 2026-10-03
 
 0.1.8 is two rounds of work, released together. Part 1 is the Rust-first

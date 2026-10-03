@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-9hYCWFj25eXUbqQ2Fb9zUNdXM+CJjyxGpJoPhbheVmw='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-Zkc+8ZiZ+kMwFBNXWxXaOmag4EBJGUdM6QDw1QqBqlk='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
 <title>Lazaret — Security &amp; Quality Review</title>
 <style>
   :root{
@@ -5184,7 +5184,11 @@ function shebangLang(text) {
    site.py executes every line of a .pth file in site-packages that starts
    with 'import' at every interpreter start. An uploaded .pth file gets only
    this check (as in the CLI's project and --deps scans): no other rule runs
-   on it, and it is not counted in the metrics. */
+   on it, and it is not counted in the metrics. The page has no engine: a
+   line is CRITICAL by PTH_EXEC_RE alone, where the CLI and the registry ask
+   the engine (pth_line_risk), which also reads what the line's code does
+   and judges `exec('…')` of a plain literal by the literal's code (an exec
+   here is CRITICAL whatever it runs). */
 const PTH_EXEC_RE = pyRe("\\b(?:exec|eval|compile)\\s*\\(|\\b(?:b64decode|b32decode|b85decode|a85decode|fromhex|unhexlify)\\b|\\.decode\\s*\\(|\\bmarshal\\.loads\\b|\\bzlib\\.decompress\\b|\\bcodecs\\.decode\\b|\\\\x[0-9a-fA-F]{2}");
 function isPth(name) {                         // os.path.splitext(name)[1].lower() == ".pth"
   const base = String(name).split(/[\\/]/).pop();

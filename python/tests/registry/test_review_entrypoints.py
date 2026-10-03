@@ -45,8 +45,9 @@ class PthTests(unittest.TestCase):
         self.assertEqual(res["verdict"], "OK")
 
     def test_pth_issues_helper(self):
-        found = repo.pth_issues("a.pth", "import sys\nlib\nimport os;exec('x')\n")
-        self.assertEqual([(i["line"], i["sev"]) for i in found], [(1, "MAJOR"), (3, "CRITICAL")])
+        # (exec of a plain literal is judged by the literal's code: 'x' runs nothing risky)
+        found = repo.pth_issues("a.pth", "import sys\nlib\nimport os;exec(s)\nimport os;exec('x')\n")
+        self.assertEqual([(i["line"], i["sev"]) for i in found], [(1, "MAJOR"), (3, "CRITICAL"), (4, "MAJOR")])
 
 
 class EntryPointTests(unittest.TestCase):

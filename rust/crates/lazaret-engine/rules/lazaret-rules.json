@@ -1,6 +1,6 @@
 {
  "format": 1,
- "rule_set": "2.24.0",
+ "rule_set": "2.25.0",
  "source": "lazaret.scanner.core, extracted by scripts/make_rust_tables.py \u2014 do not edit",
  "values": {
   "ALWAYS_PRUNE_DIRS": {
@@ -12615,6 +12615,23 @@
     }
    ]
   },
+  "_PTH_REASONS": {
+   "list": [
+    {
+     "value": "executes or decodes a payload"
+    },
+    {
+     "value": "reaches the network"
+    },
+    {
+     "value": "starts another program"
+    }
+   ]
+  },
+  "_PTH_RUN_RE": {
+   "flags": "",
+   "re": "\\bsubprocess\\b|\\bos\\s*\\.\\s*(?:system|popen|startfile|exec[lv]p?e?|spawn[lv]p?e?|posix_spawnp?)\\s*\\(|\\bpty\\s*\\.\\s*spawn\\s*\\(|\\bmultiprocessing\\b"
+  },
   "_PUBLIC_IP_URL_RE": {
    "flags": "",
    "re": "\\b(?:https?|wss?|tcp)://(?!(?:10|127|0)\\.)(?!192\\.168\\.)(?!172\\.(?:1[6-9]|2\\d|3[01])\\.)(?!169\\.254\\.)(?:(?:25[0-5]|2[0-4]\\d|1?\\d?\\d)\\.){3}(?:25[0-5]|2[0-4]\\d|1?\\d?\\d)(?![\\d.])"
@@ -13192,7 +13209,7 @@
   },
   "_SELF_READ_RE": {
    "flags": "",
-   "re": "\\bopen\\s*\\(\\s*(?:os\\.path\\.(?:abspath|realpath)\\s*\\(\\s*)?__file__\\b|\\bPath\\s*\\(\\s*__file__\\s*\\)\\s*\\.\\s*(?:read_text|read_bytes|open)\\s*\\(|\\blinecache\\.getlines?\\s*\\(\\s*__file__\\b|(?<![\\w.])__loader__\\s*\\.\\s*get_source\\s*\\(|(?<![\\w.])__doc__\\b|\\breadFile(?:Sync)?\\s*\\(\\s*(?:__filename\\b|(?:new\\s+URL\\s*\\(\\s*)?import\\.meta\\.url|fileURLToPath\\s*\\(\\s*import\\.meta\\.url)|\\barguments\\s*\\.\\s*callee\\b|\\}\\s*\\)?\\s*\\.\\s*toString\\s*\\(\\s*\\)"
+   "re": "\\bopen\\s*\\(\\s*(?:os\\.path\\.(?:abspath|realpath)\\s*\\(\\s*)?__file__\\b|\\bPath\\s*\\(\\s*__file__\\s*\\)\\s*\\.\\s*(?:read_text|read_bytes|open)\\s*\\(|\\blinecache\\.getlines?\\s*\\(\\s*__file__\\b|(?<![\\w.])__loader__\\s*\\.\\s*get_source\\s*\\(|(?<![\\w.])__doc__\\b(?![ \\t]*=[^=])|\\breadFile(?:Sync)?\\s*\\(\\s*(?:__filename\\b|(?:new\\s+URL\\s*\\(\\s*)?import\\.meta\\.url|fileURLToPath\\s*\\(\\s*import\\.meta\\.url)|\\barguments\\s*\\.\\s*callee\\b|\\}\\s*\\)?\\s*\\.\\s*toString\\s*\\(\\s*\\)"
   },
   "_SELF_READ_THEN_SPAN": {
    "value": 200

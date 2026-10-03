@@ -3025,6 +3025,123 @@ pub fn offscreen_code(p: &Pack, line: &[u32], lang: &str) -> Option<(usize, usiz
     Some((m.end(), m.end() - m.start(), hidden, runs))
 }
 
+// ---------------- a .pth file's import lines ----------------
+
+/// Why an `import` line of a .pth file is hostile — SC-PTH-EXEC CRITICAL
+/// (core.pth_issues, pth.js) — or nothing (_PTH_REASONS): it executes or
+/// decodes a payload (_PTH_EXEC_RE), reaches the network (_NETWORK_RE) or
+/// starts another program (_PTH_RUN_RE) — what no library does at every
+/// interpreter start — or its code does what the install-script and
+/// import-time tests look for. `exec('…')` or `eval('…')` of a plain
+/// literal runs the literal's code: that code is judged in the call's
+/// place, as if the line held it (code in plain sight: coverage's
+/// a1_coverage.pth runs the lines a .pth line can't hold; the worms' .pth
+/// files download Bun and start it). A literal with any escape but \n \t
+/// \r \\ \' \" is not plain (`'\x69\x6d…'`): the call stays, and is a payload.
+pub fn pth_line_risk(p: &Pack, line: &[u32]) -> Vec<PyStr> {
+    let mut out: Vec<PyStr> = Vec::new();
+    pth_risk_of(p, line, 0, &mut out);
+    let mut seen = HashSet::new();
+    out.retain(|r| seen.insert(r.clone()));
+    out
+}
+
+fn pth_risk_of(p: &Pack, code: &[u32], depth: u32, out: &mut Vec<PyStr>) {
+    let (rest, codes) = if depth < 4 { plain_literal_runs(code) } else { (code.to_vec(), Vec::new()) };
+    let reasons = p.strs("_PTH_REASONS");
+    for (k, name) in ["_PTH_EXEC_RE", "_NETWORK_RE", "_PTH_RUN_RE"].iter().enumerate() {
+        if p.re(name).search(&rest).is_some() {
+            out.push(reasons[k].clone());
+        }
+    }
+    out.extend(install_script_risk_with(p, &rest, false, false, Some("py")));
+    out.extend(import_time_risk(p, &rest, Some("py")).0);
+    for c in codes {
+        pth_risk_of(p, &c, depth + 1, out);
+    }
+}
+
+/// The calls of exec or eval given one plain string literal (u its only
+/// prefix; escapes \n \t \r \\ \' \" only): (the text with each replaced by
+/// `None`, the literals' values).
+fn plain_literal_runs(text: &[u32]) -> (PyStr, Vec<PyStr>) {
+    let word = |c: u32| c == 0x5F || char::from_u32(c).is_some_and(|ch| ch.is_alphanumeric());
+    let (mut rest, mut codes) = (Vec::with_capacity(text.len()), Vec::new());
+    let mut i = 0;
+    while i < text.len() {
+        let named = (pystr::starts_with_at(text, i, "exec") || pystr::starts_with_at(text, i, "eval"))
+            && (i == 0 || !word(text[i - 1]))
+            && !text.get(i + 4).is_some_and(|&c| word(c));
+        if named {
+            if let Some((end, code)) = plain_literal_call(text, i + 4) {
+                rest.extend(u("None"));
+                codes.push(code);
+                i = end;
+                continue;
+            }
+        }
+        rest.push(text[i]);
+        i += 1;
+    }
+    (rest, codes)
+}
+
+/// `( 'literal' )` from `j` (after a callee's name): the index after `)`
+/// and the literal's value, when the literal is plain.
+fn plain_literal_call(text: &[u32], mut j: usize) -> Option<(usize, PyStr)> {
+    let blank = |c: u32| c == 0x20 || c == 0x09;
+    while text.get(j).is_some_and(|&c| blank(c)) {
+        j += 1;
+    }
+    if *text.get(j)? != 0x28 {
+        return None;
+    }
+    j += 1;
+    while text.get(j).is_some_and(|&c| blank(c)) {
+        j += 1;
+    }
+    if matches!(text.get(j), Some(&0x75) | Some(&0x55)) {
+        j += 1;
+    }
+    let q = *text.get(j)?;
+    if q != 0x27 && q != 0x22 {
+        return None;
+    }
+    j += 1;
+    let mut value = Vec::new();
+    loop {
+        let c = *text.get(j)?;
+        if c == q {
+            j += 1;
+            break;
+        }
+        match c {
+            0x0A | 0x0D => return None,
+            0x5C => {
+                value.push(match *text.get(j + 1)? {
+                    0x6E => 0x0A,
+                    0x74 => 0x09,
+                    0x72 => 0x0D,
+                    e @ (0x5C | 0x27 | 0x22) => e,
+                    _ => return None,
+                });
+                j += 2;
+            }
+            _ => {
+                value.push(c);
+                j += 1;
+            }
+        }
+    }
+    while text.get(j).is_some_and(|&c| blank(c)) {
+        j += 1;
+    }
+    if *text.get(j)? != 0x29 {
+        return None;
+    }
+    Some((j + 1, value))
+}
+
 // ---------------- the install-script test ----------------
 
 /// core.install_script_risk (a script: shell=True, command=False)

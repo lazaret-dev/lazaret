@@ -723,7 +723,7 @@ impl<'p> Analyzer<'p> {
     /// environment by its name, else None.
     pub(super) fn sc_subscript(&mut self, e: NodeId, base: &Taint, k: &Taint) -> Option<Taint> {
         if base.marks & OBJ_ENV == 0 {
-            return None;
+            return self.sc_env_entry(e, base);
         }
         let slice = b_(self.t(), e);
         let at = self.start(e);
@@ -738,6 +738,71 @@ impl<'p> Analyzer<'p> {
             self.sink_adds.push((p, ENV_NAME, (self.f, at)));
         }
         Some(Taint::empty())
+    }
+
+    /// supply mode: an entry of a value that holds the environment and
+    /// nothing else, by a constant name (`self._environ[HOST_VAR]` where the
+    /// object was given `os.environ`, `proxies['http']` of a dict filled from
+    /// it): that one variable, as `os.environ[name]` reads it, not the whole
+    /// environment. kubernetes' in-cluster config and future's urllib
+    /// backport build a URL from such entries. None: not such a value or key.
+    fn sc_env_entry(&mut self, e: NodeId, base: &Taint) -> Option<Taint> {
+        let kinds = base.sc.as_ref()?.kinds;
+        if kinds & K_WHOLE_ENV == 0 || kinds & !(K_WHOLE_ENV | K_ENV | K_PATH | K_IDENTITY) != 0 {
+            return None;
+        }
+        let slice = b_(self.t(), e);
+        let names = self.sc_key_strs(slice)?;
+        if names.is_empty() {
+            return None;
+        }
+        let at = self.start(e);
+        let mut out = Taint::empty();
+        for name in names {
+            out = out.union(&self.sc_env_var(&name, at));
+        }
+        Some(out)
+    }
+
+    /// The constant strings a subscript's key may be: a literal, or a name
+    /// the function, or a function or module around it, gives constants.
+    fn sc_key_strs(&mut self, slice: NodeId) -> Option<Vec<PyStr>> {
+        if let Some(s) = self.sc_const_str(slice) {
+            return Some(vec![s]);
+        }
+        if self.t().kind(slice) != Kind::Name {
+            return None;
+        }
+        if let Some(found) = self.sc_const_strs(slice, 0) {
+            return Some(found);
+        }
+        // (a name the module gives a constant: `SERVICE_HOST_ENV_NAME = "…"`)
+        let name = self.t().str(a_(self.t(), slice)).to_vec();
+        let saved = self.f;
+        let mut scopes: Vec<FnId> = Vec::new();
+        let mut at = self.p.fns[saved as usize].parent;
+        while let Some(f) = at {
+            if scopes.len() > 8 {
+                break;
+            }
+            scopes.push(f);
+            at = self.p.fns[f as usize].parent;
+        }
+        let body = self.p.mods[self.p.fns[saved as usize].module as usize].body_fn;
+        if body != saved && !scopes.contains(&body) {
+            scopes.push(body);
+        }
+        let mut found = None;
+        for f in scopes {
+            self.f = f;
+            let ix = self.sc_index(f);
+            if ix.assigns.contains_key(&name) {
+                found = self.sc_const_strs_of(&name, 0);
+                break;
+            }
+        }
+        self.f = saved;
+        found
     }
 
     /// supply mode: does a comprehension over the environment's variables
@@ -903,6 +968,40 @@ impl<'p> Analyzer<'p> {
             && t.node(step).op == pt::USUB
             && t.kind(a_(t, step)) == Kind::Constant
             && eq(t.str(a_(t, a_(t, step))), "1")
+    }
+
+    /// supply mode: is `n` a sequence of items and no text: a list, tuple,
+    /// set or dict display or comprehension, a call of `list`, `tuple`,
+    /// `sorted` or `range`, or a name the function gives only those
+    /// (`ids = []` … `ids.append(x)`)? Its reversal (`ids[::-1]`) reorders
+    /// items and decodes nothing: sympy's `lambdify` and IPython's completer
+    /// reverse lists of namespaces and of names.
+    pub(super) fn sc_items_not_text(&mut self, n: NodeId, depth: u32) -> bool {
+        if depth > 3 || n == NONE {
+            return false;
+        }
+        let t = self.t();
+        match t.kind(n) {
+            Kind::List | Kind::Tuple | Kind::Set | Kind::Dict | Kind::ListComp | Kind::SetComp | Kind::DictComp
+            | Kind::GeneratorExp => true,
+            Kind::Call => {
+                let f = a_(t, n);
+                t.kind(f) == Kind::Name && is_one(t.str(a_(t, f)), &["list", "tuple", "sorted", "range"])
+            }
+            Kind::Name => {
+                let name = t.str(a_(t, n)).to_vec();
+                let ix = self.sc_index(self.f);
+                if ix.loops.contains_key(&name) {
+                    return false;
+                }
+                let values = match ix.assigns.get(&name) {
+                    Some(v) if !v.is_empty() && v.len() < 9 => v.clone(),
+                    _ => return false,
+                };
+                values.iter().all(|&v| self.sc_items_not_text(v, depth + 1))
+            }
+            _ => false,
+        }
     }
 
     /// The finding for local data `sc` at a send.
@@ -3521,5 +3620,30 @@ mod tests {
         // not a write: tarfile's and a browser's open
         let src = "import tarfile, webbrowser, base64, subprocess\nt = tarfile.open('out.tar.gz')\nt.write(base64.b64decode(B))\nsubprocess.run(['tar'])\n";
         assert_eq!(dropped(src), None);
+    }
+
+    #[test]
+    fn what_popular_packages_do() {
+        // a list's reversal reorders its items and decodes nothing (sympy's
+        // lambdify, IPython's completer); a string's decodes
+        let items = "import sys\nparts = [sys.argv[1], sys.argv[2]]\nexec(''.join(parts[::-1]))\n";
+        assert_eq!(decoded(items), vec![]);
+        let made = "import sys\nnames = []\nfor a in sys.argv:\n    names.append(a)\nexec(''.join(names[::-1]))\n";
+        assert_eq!(decoded(made), vec![]);
+        let text = "import sys\ns = sys.argv[1]\nexec(s[::-1])\n";
+        assert_eq!(decoded(text), vec![(3, 3)]);
+        // an object given os.environ, read by a constant name, a module's
+        // or a literal: that variable, as os.environ[name] reads it
+        // (kubernetes' in-cluster config, future's urllib backport)
+        let config = "import os\nSERVICE_HOST_ENV_NAME = \"KUBERNETES_SERVICE_HOST\"\nSERVICE_PORT_ENV_NAME = \"KUBERNETES_SERVICE_PORT\"\n\
+                      def _join_host_port(host, port):\n    template = \"%s:%s\"\n    return template % (host, port)\n\
+                      class Loader(object):\n    def __init__(self, token_filename, environ=os.environ):\n        self._environ = environ\n\
+                      \x20   def _load_config(self):\n        self.host = (\"https://\" + _join_host_port(self._environ[SERVICE_HOST_ENV_NAME], self._environ[SERVICE_PORT_ENV_NAME]))\n";
+        assert_eq!(sent(config), None);
+        assert_eq!(sent("import os\ndef load(environ=os.environ):\n    host = \"https://\" + environ[\"KUBERNETES_SERVICE_HOST\"]\n    return host\n"), None);
+        let named = format!("import os, requests\nH = \"NPM_TOKEN\"\ndef load(environ=os.environ):\n    {}load()\n", post("environ[H]"));
+        assert_eq!(sent(&named), found("environment", "NPM_TOKEN"));
+        let whole = format!("import os, requests\ndef load(environ=os.environ):\n    {}load()\n", post("str(environ)"));
+        assert_eq!(sent(&whole), found("environment", "the whole environment"));
     }
 }

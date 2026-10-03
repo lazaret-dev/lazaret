@@ -30,7 +30,7 @@ mod tests;
 
 use crate::jsparse::tree::{self as jt, Kind, NodeId, Tree, NONE};
 use crate::pystr::PyStr;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
 pub use driver::{analyze, Config, Out};
@@ -1052,6 +1052,12 @@ pub struct Program {
     /// (the supply-chain model) a member of `this` — (class or object
     /// literal, its id, the member's name) — as a binding of its own
     pub sc_props: HashMap<(u8, u32, PyStr), BindId>,
+    /// (the supply-chain model) the classes whose instances are made in more
+    /// than one place (`new C(…)` of them or of a subclass): made when first
+    /// asked (descs::Program::sc_made_widely)
+    pub sc_wide: Option<HashSet<ClassId>>,
+    /// (the supply-chain model) a class's `this.x` binding -> the class
+    pub sc_this_class: HashMap<BindId, ClassId>,
 }
 
 impl Program {
@@ -1075,6 +1081,8 @@ impl Program {
             nodes: 0,
             anc: HashMap::new(),
             sc_props: HashMap::new(),
+            sc_wide: None,
+            sc_this_class: HashMap::new(),
         }
     }
 
