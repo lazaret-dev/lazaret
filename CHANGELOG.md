@@ -349,6 +349,24 @@ before the release.
   set of release files (resumable, a deadline each), and the comparison of
   two runs — every release whose verdict or strong findings moved, or, for
   a holdout set, the counts alone.
+- **SC-UNUSED-DEPENDENCY** (registry, INFO): an npm release's runtime
+  dependency that no file of it names — no text quotes it as a module or
+  package name, no field of `package.json` but the dependency lists names
+  it — and that is neither one of npm's 5,000 most-downloaded packages nor
+  in the package's own scope. It is installed, and its install scripts run,
+  for nothing the package does: each @mastra release of June 2026 gained
+  such a dependency, `easy-day-js`, and changed no code. Packages also keep
+  ones their build inlined, so on its own it is context; a brand-new one
+  (SC-NEW-DEPENDENCY) is CRITICAL even past 7 days. Listed only when every
+  text of the release was read whole. The check is
+  `lazaret/registry/unused_deps.py`, language-neutral (declared names,
+  used names and an ecosystem's normalizer in; the declared names nothing
+  uses out), for the crates and Go modules to come. Rule set 2.22.0.
+- **SC-TYPOSQUAT compares npm names with Node's built-in modules** named
+  with a separator (`child_process`, `worker_threads`, `perf_hooks`,
+  `async_hooks`, `trace_events`, `diagnostics_channel`): a dependency on
+  `child-process` installs a stranger's package, since
+  `require('child_process')` loads the built-in.
 
 ### Fixed
 

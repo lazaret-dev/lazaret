@@ -7,6 +7,7 @@ The registry's documents are fakes served by URL; nothing reaches the
 network. Package names are made up.
 """
 import datetime
+import json
 import os
 import unittest
 import urllib.parse
@@ -222,6 +223,29 @@ class ScanPackageTests(unittest.TestCase):
                 res = repo.scan_package("npm", "@acme/files", "0.2.1", resolved=rv)
             rules = [i["rule"] for i in res["issues"]]
             self.assertEqual((res["verdict"], "SC-NEW-DEPENDENCY" in rules), ("OK", False) if off else ("SUSPICIOUS", True))
+
+    def test_one_no_file_names_is_critical(self):
+        """A dependency 7 to 30 days old is MAJOR, and CRITICAL when no file
+        of the release names it (SC-UNUSED-DEPENDENCY)."""
+        manifest = parent()["versions"]["0.2.1"]
+        rv = ("0.2.1", "https://registry.npmjs.org/@acme/files/-/files-0.2.1.tgz", "tgz", "npm", manifest)
+        pj = json.dumps({"name": "@acme/files", "version": "0.2.1", "dependencies": manifest["dependencies"]})
+        reg = Registry({npm("@acme/files"): parent(),
+                        NPM + "easy-day-kit": dep("easy-day-kit", datetime.timedelta(days=10))})
+        for code, want in (("module.exports = require('files-kit');\n", (
+                "CRITICAL", 'Adds a dependency on "easy-day-kit", which 0.2.0 did not have and no file of this release '
+                            "names: a package first published 10 days before this release by mallory, who does not "
+                            "maintain this one.")),
+                           ("require('files-kit');\nrequire('easy-day-kit');\n", (
+                "MAJOR", 'Adds a dependency on "easy-day-kit", which 0.2.0 did not have: a package first published '
+                         "10 days before this release by mallory, who does not maintain this one."))):
+            data = tarball({"package.json": pj, "index.js": code})
+            with self.subTest(code=code), mock.patch.object(repo, "http_json", side_effect=reg), \
+                    mock.patch.object(repo, "http_bytes", return_value=data), \
+                    mock.patch.object(repo, "verify_digest", return_value=None):
+                res = repo.scan_package("npm", "@acme/files", "0.2.1", resolved=rv)
+                self.assertEqual([(i["sev"], i["msg"]) for i in res["issues"] if i["rule"] == "SC-NEW-DEPENDENCY"],
+                                 [want])
 
     def test_an_unreachable_registry_is_not_a_finding(self):
         manifest = parent()["versions"]["0.2.1"]

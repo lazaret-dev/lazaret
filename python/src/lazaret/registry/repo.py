@@ -59,6 +59,7 @@ from lazaret.scanner import core as lazaret  # noqa: E402
 
 from lazaret import safexml as _safexml                 # noqa: E402
 from lazaret.registry import lookalike as _lookalike    # noqa: E402
+from lazaret.registry import unused_deps as _unused     # noqa: E402
 from lazaret.scanner import engine as _engine           # noqa: E402
 from lazaret.safexml import ElementTree as _safe_ET     # noqa: E402
 
@@ -81,6 +82,9 @@ MAX_MEMBER = _env_number("LAZARET_MAX_SOURCE_BYTES", 16_000_000)
 MAX_FILES = 20_000         # files per package (numpy's sdist alone has >4,000)
 SAMPLE = 8192              # header/entropy sample read from oversized files
 # Stored scans from another engine version are scanned again (has_scan).
+# 2.22: an npm release's dependencies no file names (SC-UNUSED-DEPENDENCY,
+#      INFO; a brand-new one is SC-NEW-DEPENDENCY, CRITICAL), and a name
+#      like one of Node's built-in modules (child-process) is SC-TYPOSQUAT
 # 2.21: a program under a source file's name (an executable's bytes in a
 #      .py or .js member) is SC-BINARY, CRITICAL, in a wheel too
 # 2.20: S-TOKEN reads GitHub's fine-grained tokens (github_pat_…), which
@@ -171,7 +175,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.21.0"
+ENGINE_VERSION = "2.22.0"
 
 # ---------------- Trust-chain limits (F9/G14/F10) ----------------
 # Only these hosts may ever be fetched, over https only, and redirects to any
@@ -1547,6 +1551,8 @@ class _ArtifactScan:
         self.entries = set()       # rels that run when installed / imported
         self.install_scripts = set()   # hook targets, setup.py & co (install_script_risk)
         self.startup = set()       # a wheel's sitecustomize / usercustomize
+        self.unread = False        # a member the archive's limits left unread
+        self.unused_dependencies = []  # npm: registry names no file uses (_unused_dependencies)
 
     # ---- bookkeeping ----
     def truncate(self, rel, detail):
@@ -1650,6 +1656,7 @@ class _ArtifactScan:
     def member(self, m):
         rel, size, raw, reason = m
         if reason in ("files", "total", "time", "corrupt"):
+            self.unread = True
             self.truncate(rel, getattr(m, "detail", "") or self.limit_detail(reason, rel, size))
             self.timed_out = self.timed_out or reason == "time"
             return
@@ -2302,6 +2309,32 @@ class _ArtifactScan:
                 requires.append(line[14:].strip())
         self.issues.extend(_lookalike.issues("pypi", name, pypi_dependency_names(requires), rel, text))
 
+    def _unused_dependencies(self):
+        """SC-UNUSED-DEPENDENCY (INFO, 0.1.8): the runtime dependencies of an
+        npm release that no file of it names (registry/unused_deps.py), but
+        not one of npm's most-downloaded packages (a tslib its build
+        inlined) nor one of the package's own scope. Only when every text
+        member was read whole: one past the archive's limits, over the size
+        limit or the text budget, or not reached in time could name it.
+        Kept for scan_package, which makes a brand-new one CRITICAL."""
+        if self.artifact != "npm" or self.unread or self.dropped or self.oversize or self.timed_out:
+            return
+        text = self.manifests.get("package.json")
+        data, _problems = lazaret.load_manifest("package.json", text) if text else (None, None)
+        if not isinstance(data, dict):
+            return
+        name = data.get("name") if isinstance(data.get("name"), str) else ""
+        scope = name.split("/", 1)[0] + "/" if name.startswith("@") and "/" in name else None
+        texts = ([t for t, _lang in self.sources.values() if t]
+                 + [t for r, t in self.manifests.items() if r != "package.json" and t]
+                 + [t for t in self.shell.values() if t] + list(self.deferred.values()))
+        found = [(dep, spec) for dep, spec in _unused.npm_unused(data, texts)
+                 if not (scope and dep.startswith(scope))
+                 and not _lookalike.popular("npm", _unused.npm_registry_name(dep, spec))]
+        if found:
+            self.unused_dependencies = [_unused.npm_registry_name(dep, spec) for dep, spec in found]
+            self.issues.append(_unused_dependency_issue([dep for dep, _spec in found], text))
+
     def _reachable(self):
         """Entry files plus local files they require/import (JS), transitively.
         A file reached this way runs when the package is loaded: one not
@@ -2348,6 +2381,7 @@ class _ArtifactScan:
                         reachable if reachable is not None else set(self.entries))
             self._phase("the agent-hijack check", self._agent_hijack)
             self._phase("the package's names", self._lookalike_names)
+            self._phase("the dependencies nothing uses", self._unused_dependencies)
             # interprocedural / cross-file taint (full profile only — needs whole source)
             if self.full and getattr(lazaret, "lazaret_flow", None) is not None:
                 self._deadline("the cross-file analysis")
@@ -2421,7 +2455,8 @@ def _scan_artifact(data, container, artifact, full, budget):
     verdict, reason, strong, weak = decide_verdict(issues, st.truncated)
     return {"issues": issues, "filesScanned": st.files_scanned, "binaryArtifacts": st.binaries,
             "truncated": st.truncated, "verdict": verdict, "verdictReason": reason,
-            "strongIndicators": strong, "weakIndicators": weak}
+            "strongIndicators": strong, "weakIndicators": weak,
+            "unusedDependencies": st.unused_dependencies}
 
 
 def _fmt_bytes(n):
@@ -2610,12 +2645,41 @@ def _age_text(age):
     return f"{n} day{'s' if n != 1 else ''}"
 
 
-def _new_dependency_issue(eco, dep, age, previous, owners):
-    sev = "CRITICAL" if age < NEW_DEP_CRITICAL else "MAJOR"
+_UNUSED_WHY = ("A dependency is installed with the package, and its install scripts run, whether the package's "
+               "code uses it or not. The @mastra compromise (June 2026) changed no code: each hijacked release gained "
+               "a dependency on easy-day-js, which no file of it named and which carried the payload. Packages also "
+               "keep dependencies their build inlined or that they no longer use, so on its own this is context; a "
+               "scan that sees the dependency is brand-new makes it SC-NEW-DEPENDENCY, CRITICAL.")
+
+
+def _unused_dependency_issue(names, text):
+    """SC-UNUSED-DEPENDENCY (INFO) for an npm release's dependencies that no
+    file names, at the first one's line of package.json."""
+    lines = (text or "").split("\n")
+    line = _lookalike._line_of(text, [json.dumps(names[0]) + ":"])
+    if len(names) == 1:
+        msg = (f'Depends on "{names[0]}", which no file of the package names: installing the package installs it, '
+               "and runs its install scripts, for nothing the package does.")
+    else:
+        shown = ", ".join(f'"{n}"' for n in names[:5]) + (f" and {len(names) - 5} more" if len(names) > 5 else "")
+        msg = (f"Depends on {len(names)} packages no file of the package names ({shown}): installing the package "
+               "installs them, and runs their install scripts, for nothing the package does.")
+    return lazaret.mk_issue(
+        {"id": "SC-UNUSED-DEPENDENCY", "name": "A dependency nothing uses", "type": "HOTSPOT", "sev": "INFO",
+         "msg": msg, "why": _UNUSED_WHY,
+         "fix": "Find out why the package declares it, and read it before installing the package.",
+         "ref": "CWE-506 · Supply chain"}, "package.json", line, lines)
+
+
+def _new_dependency_issue(eco, dep, age, previous, owners, unused=False):
+    """SC-NEW-DEPENDENCY: CRITICAL under NEW_DEP_CRITICAL, or when no file of
+    the release uses it (`unused`, npm), else MAJOR."""
+    sev = "CRITICAL" if age < NEW_DEP_CRITICAL or unused else "MAJOR"
     by = f" by {', '.join(owners[:3])}" if owners else ""
+    had = f"which {previous} did not have" + (" and no file of this release names" if unused else "")
     return lazaret.mk_issue(
         {"id": "SC-NEW-DEPENDENCY", "name": "A release adds a brand-new dependency", "type": "HOTSPOT", "sev": sev,
-         "msg": (f'Adds a dependency on "{dep}", which {previous} did not have: a package first published '
+         "msg": (f'Adds a dependency on "{dep}", {had}: a package first published '
                  f"{_age_text(age)} before this release{by}"
                  + (", who does not maintain this one." if eco == "npm" or owners else ".")),
          "why": ("The @mastra compromise (June 2026) changed no code: each hijacked release gained a dependency on "
@@ -2729,9 +2793,10 @@ def pypi_new_dependencies(name, version, info, fetch=None):
     return previous, found
 
 
-def new_dependency_issues(eco, name, version, resolved):
+def new_dependency_issues(eco, name, version, resolved, unused=()):
     """SC-NEW-DEPENDENCY findings for one release (best effort: [] when the
-    registry can't say)."""
+    registry can't say). unused: the registry names of the dependencies no
+    file of the release names (the artifact scan's unusedDependencies)."""
     if os.environ.get("LAZARET_NO_DEPENDENCY_HISTORY"):
         return []
     try:
@@ -2741,7 +2806,8 @@ def new_dependency_issues(eco, name, version, resolved):
             previous, found = pypi_new_dependencies(name, version, getattr(resolved, "info", None))
     except (FetchError, ValueError):
         return []
-    return [_new_dependency_issue(eco, dep, age, previous, owners) for dep, age, owners in found]
+    unused = set(unused)
+    return [_new_dependency_issue(eco, dep, age, previous, owners, dep in unused) for dep, age, owners in found]
 
 
 @_always_redacted
@@ -2800,7 +2866,7 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
             skipped.append((s.get("filename"), "packagetype", size))
         else:
             not_installed.append((s.get("filename"), "not-installable", size))
-    per, all_issues, truncated = [], [], 0
+    per, all_issues, truncated, unused = [], [], 0, set()
     multi = len(refs) > 1
     downloaded = 0
     for ref in refs:
@@ -2839,12 +2905,13 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
                 issue["artifact"] = ref["filename"]
             all_issues.append(issue)
         truncated += r["truncated"]
+        unused.update(r.get("unusedDependencies") or ())
         per.append({"filename": ref.get("filename"), "kind": ref["artifact"], "url": ref["url"],
                     "archiveBytes": len(data), "digest": digest,
                     **{k: r[k] for k in ("verdict", "verdictReason", "filesScanned",
                                          "binaryArtifacts", "truncated",
                                          "strongIndicators", "weakIndicators")}})
-    all_issues.extend(new_dependency_issues(eco, name, version, resolved))
+    all_issues.extend(new_dependency_issues(eco, name, version, resolved, unused))
     skip_issues, skip_label = _skipped_summary(skipped, byte_budget, limit)
     # one part per release file left out; skip_issues holds one finding per
     # REASON, and used to be counted instead ("1 part" for 3 skipped files)

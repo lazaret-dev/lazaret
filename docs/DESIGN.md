@@ -660,7 +660,14 @@ count (npm's maintainers; PyPI's owners, maintainers and organization, from
 the JSON API's `ownership`). The guard scans each package with
 `_scan_artifact`, so it gets SC-USE-RISK and the follower but not the dependency history (it
 already scans the new dependency itself, and holds back a release younger
-than --min-age).
+than --min-age). SC-UNUSED-DEPENDENCY (`_ArtifactScan._unused_dependencies`,
+npm only, INFO) lists the runtime dependencies no text of the release names
+and that are neither among npm's 5,000 most-downloaded packages nor in its
+own scope, when every text member was read whole; `_scan_artifact` returns
+their registry names (`unusedDependencies`), and `scan_package` makes a new
+one among them CRITICAL. The comparison itself, `registry/unused_deps.py`,
+takes declared names, used names and an ecosystem's normalizer, so a crate's
+or a Go module's dependencies go through the same function.
 
 ### f. The install guard (`lazaret.registry.guard`, 0.1.7)
 
