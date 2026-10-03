@@ -367,6 +367,12 @@ before the release.
   `async_hooks`, `trace_events`, `diagnostics_channel`): a dependency on
   `child-process` installs a stranger's package, since
   `require('child_process')` loads the built-in.
+- **A GitHub Action** (`action.yml`; README.md, "In CI"): it installs
+  Lazaret from the commit a workflow pins, compiling the engine with the
+  runner's cargo, so what runs is that commit's code rather than a package
+  fetched by its version number; scans with `--ci`; and writes a SARIF
+  report for code scanning, whose path is its `sarif` output. Its inputs
+  reach its scripts through the environment, never spliced into them.
 
 ### Fixed
 

@@ -26,6 +26,7 @@ lazaret/
 ├── STRUCTURE.md        this file
 ├── SECURITY.md         security policy and reporting
 ├── LICENSE             Apache-2.0
+├── action.yml          the repository as a GitHub Action (README.md, "In CI")
 ├── .github/            workflows (ci.yml, release.yml, wheels.yml) and dependabot.yml
 ├── docs/RELEASING.md   claiming names, trusted publishing, cutting a release
 ├── docs/RUST_ENGINE.md the native engine: design, recorded outputs, building

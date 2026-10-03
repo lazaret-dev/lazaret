@@ -142,6 +142,38 @@ File names and scanned text printed to the terminal are sanitized: C0 controls (
 C1 controls (U+0080–U+009F) and bidi controls are shown as `·`, so a hostile file name can't rewrite your
 terminal.
 
+### In CI
+
+This repository is a GitHub Action (`action.yml`). It installs Lazaret from the commit you pin it to,
+compiling the engine with the runner's cargo (a minute or two; GitHub's hosted runners have Rust), so what
+runs is that commit's code rather than a package fetched by its version number. It scans the workspace
+with `--ci` and writes a SARIF report for code scanning, whose path is its `sarif` output:
+
+```yaml
+jobs:
+  lazaret:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      security-events: write        # for the SARIF upload
+    steps:
+      - uses: actions/checkout@<full commit SHA>      # pin every action to a commit: a tag can be moved
+        with:
+          persist-credentials: false
+      - uses: lazaret-dev/lazaret@<full commit SHA>   # a release tag's commit
+        id: lazaret
+      - uses: github/codeql-action/upload-sarif@<full commit SHA>
+        if: ${{ !cancelled() }}     # upload when the gate fails too
+        with:
+          sarif_file: ${{ steps.lazaret.outputs.sarif }}
+```
+
+Inputs: `path` (the directory to scan, default `.`), `sarif` (default `lazaret.sarif`, under the scanned
+directory), `gate` (`true`, the default: the step fails when the quality gate does; the report is written
+either way) and `deps` (`true`: also audit installed dependencies, `--deps`). In other CI systems, or to
+skip the compile, install a platform wheel (`pip install --only-binary :all: lazaret==X.Y.Z`; a
+requirements file with `--hash` lines pins the files too) and run `lazaret . --ci --sarif lazaret.sarif`.
+
 ## Detection capabilities
 
 - **63 pattern rules** across Python, JavaScript, and SQL: injection (SQL/command/code), unsafe deserialization, SSTI, XXE, hardcoded secrets, weak crypto/ciphers, TLS/SSH verification, XSS sinks, prototype pollution, NoSQL injection, insecure config, Trojan Source bidi controls (S-BIDI), bugs, code smells, complexity, duplication.
