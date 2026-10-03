@@ -63,7 +63,7 @@ def show(value, limit=120):
     cut = text[:limit]
     shown = repr(cut)
     while len(shown) > limit + 2 and cut:                  # (an escape is longer than the character it stands for: \udcff, \U0010ffff)
-        cut = cut[:min(len(cut) - 1, len(cut) * (limit + 2) // len(shown))]
+        cut = cut[:len(cut) * (limit + 2) // len(shown)]                  # (always shorter: len(shown) > limit + 2)
         shown = repr(cut)
     return shown + ("…" if len(text) > len(cut) else "")
 

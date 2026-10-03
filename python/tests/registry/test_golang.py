@@ -973,7 +973,14 @@ class WhatTheFirstMutationRunFoundUntestedTests(unittest.TestCase):
                  ("gopkg.in/x.v1-unstable", "gopkg.in/x", ".v1-unstable", True), ("gopkg.in/x-unstable", "gopkg.in/x-unstable", "", False),
                  ("gopkg.in/.v1", "gopkg.in/", ".v1", True), ("gopkg.in/x/y.v3", "gopkg.in/x/y", ".v3", True), ("gopkg.in/", "gopkg.in/", "", False),
                  ("gopkg.in/1", "gopkg.in/1", "", False), ("gopkg.in/.v0", "gopkg.in/", ".v0", True), ("gopkg.in/y.v0", "gopkg.in/y", ".v0", True),
-                 ("gopkg.in/y.v1x", "gopkg.in/y.v1x", "", False))
+                 ("gopkg.in/y.v1x", "gopkg.in/y.v1x", "", False),
+                 # (digits that are not 0-9: Go's loop is `'0' <= c <= '9'`, Python's `isdigit` is wider; Go's answers)
+                 ("a/v\u00b2", "a/v\u00b2", "", True), ("a/v2\u00b2", "a/v2\u00b2", "", True), ("a/v\u0662", "a/v\u0662", "", True),
+                 ("a/v1\u0662", "a/v1\u0662", "", True), ("x.y/v\u0662" "3", "x.y/v\u0662" "3", "", True), ("x.y/v\u00b2", "x.y/v\u00b2", "", True),
+                 ("gopkg.in/x.v\u00b2", "gopkg.in/x.v\u00b2", "", False), ("gopkg.in/x.v2\u00b2", "gopkg.in/x.v2\u00b2", "", False),
+                 ("gopkg.in/x.v\u0662", "gopkg.in/x.v\u0662", "", False), ("gopkg.in/x.v2\u0662", "gopkg.in/x.v2\u0662", "", False),
+                 ("gopkg.in/x.v\u00b2" "3", "gopkg.in/x.v\u00b2" "3", "", False),
+                 ("gopkg.in/x.v3\u00b2-unstable", "gopkg.in/x.v3\u00b2-unstable", "", False))
         for path, prefix, major, ok in cases:
             with self.subTest(path=path):
                 self.assertEqual(golang.split_path_version(path), (prefix, major, ok))
@@ -1094,6 +1101,8 @@ class WhatTheFirstMutationRunFoundUntestedTests(unittest.TestCase):
         self.assertEqual(req('require "x.example/y\\'), [])                  # (Go: unexpected EOF in string; this reader goes on)
         self.assertEqual(req("require x.example/y v1.0.0\nrequire x.example/y v1.1.0\n"),
                          [("x.example/y", "v1.0.0", False), ("x.example/y", "v1.1.0", False)])
+        # `(` with one more word after it does not open a block: Go reads it as a path (and accepts the line)
+        self.assertEqual(req("require ( v1.0.0\n"), [("(", "v1.0.0", False)])
 
 
 class ModuleDeclarationTests(unittest.TestCase):

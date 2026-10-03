@@ -484,6 +484,10 @@ class ShowAndNameTests(unittest.TestCase):
                     self.assertLessEqual(len(shown), limit + 3)                       # the quotes and the ellipsis
                     self.assertTrue(shown.endswith("…") and shown.isprintable())
         self.assertEqual(base.show("\udcff" * 3), repr("\udcff" * 3))                 # (short enough: all of it, no ellipsis)
+        # (the cut is as long as the limit allows: a message that quotes a hostile name keeps all it can)
+        self.assertEqual(base.show("\U0010ffff" * 500), repr("\U0010ffff" * 12) + "…")
+        self.assertEqual(base.show("\udcff" * 500), repr("\udcff" * 20) + "…")
+        self.assertEqual(base.show("\x00" * 500), repr("\x00" * 30) + "…")
         self.assertEqual(base.show("", limit=0), "''")
         self.assertEqual(base.show("abc", limit=0), "''…")
         self.assertTrue(base.show("\ud800").isprintable())

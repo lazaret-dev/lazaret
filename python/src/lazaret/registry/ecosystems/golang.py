@@ -392,7 +392,7 @@ def parse_gomod(text):
             verb, args = block, tokens
         else:
             verb, args = tokens[0], tokens[1:]
-            if args[:1] == ["("] and len(args) == 1:
+            if args == ["("]:
                 block = verb if isinstance(verb, str) else ""
                 continue
         if not isinstance(verb, str):
