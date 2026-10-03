@@ -267,6 +267,11 @@ before the release.
   findings now name the whole environment sent; the holdout gains two npm
   releases (629 of 747), each on SC-IMPORT-RISK; on installed packages
   nothing moved.
+- **The release workflow restores no caches and runs one release at a
+  time.** `setup-node`'s package-manager cache is off in the release jobs:
+  a cache restored into the job that can mint a publishing token is a
+  cache-poisoning path, and those jobs install nothing to cache. A second
+  `v*` tag waits for a running release instead of publishing alongside it.
 
 ### Added
 
