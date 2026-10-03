@@ -146,14 +146,25 @@ def outline(text):
     return _outline(text, False)
 
 
-def _outline(text, items):
+def records(text, items=True, seq_blocks=False):
+    """outline(text) for the other CI files that are read the same way
+    (gitlabci.py): `items` adds each record's "item" flag (it is the first of a
+    sequence item), `seq_blocks` reads a block scalar that is a sequence item
+    (`- |`, the way GitLab scripts are written) as one, with its lines in "block"."""
+    return _outline(text, items, seq_blocks)
+
+
+def _outline(text, items, seq_blocks=False):
     """outline(text); with `items`, each record also says whether it is the
     first of a sequence item ("item": the line began with '- ', or the '-'
     stood alone on the one before) — hardening() tells one step from the
-    next by it. outline() leaves the field out, as the twin does."""
+    next by it. outline() leaves the field out, as the twin does. With
+    `seq_blocks`, `- |` opens a block scalar (the lines deeper than the dash)."""
     records, stack, block = [], [], None
     fresh = False
     for n, raw in enumerate(text.split("\n"), 1):
+        if raw.endswith("\r"):                  # a file with Windows line ends
+            raw = raw[:-1]
         if block is not None:
             if not raw.strip(" \t"):
                 continue
@@ -196,6 +207,9 @@ def _outline(text, items):
             if not quoted and _BLOCK_RE.match(value):
                 rec["value"] = ""
                 block = (ind, rec)
+        elif seq_blocks and not quoted and _BLOCK_RE.match(value) and stack and stack[-1][1] == "-":
+            rec["value"] = ""
+            block = (stack[-1][0], rec)
     return records
 
 
@@ -296,8 +310,10 @@ _WRITE_SCOPE_RE = re.compile(r"([A-Za-z-]+)\s*:\s*write\b")
 # where a command can start in a line of a script: at its start, after ; & | (, after then/do/else/sudo/time/
 # exec/command, and after VAR=value words (a value without quotes: it stops at the next operator, so that a
 # long line of `a=b;a=b;…` is read once)
-_CMD = (r"(?:^|[;&|(]|\b(?:then|do|else|sudo|time|exec|command)\s)\s*"
+_CMD = (r"(?:^|[;&|(]|\b(?:then|do|else|if|elif|while|until|sudo|time|exec|command)\s)\s*"
         r"(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;&|()]*\s+)*")
+#: Where a command can start in a line of a script (the shared prefix of the patterns that look for one)
+COMMAND_START = _CMD
 # a command that runs dependencies' code: install hooks, build scripts
 _INSTALL_RE = re.compile(
     _CMD + r"((?:npm\s+(?:ci|install|i|add)|pnpm\s+(?:install|i|add)|yarn\s+(?:install|add)"
@@ -309,6 +325,21 @@ _PUBLISH_RE = re.compile(
     _CMD + r"((?:npm|pnpm|bun)\s+publish\b|yarn\s+(?:npm\s+)?publish\b|twine\s+upload\b|uv\s+publish\b"
     r"|poetry\s+publish\b|cargo\s+publish\b|gh\s+release\s+create\b|docker\s+push\b"
     r"|vsce\s+publish\b|ovsx\s+publish\b|gem\s+push\b|dotnet\s+nuget\s+push\b|helm\s+push\b)")
+# a script fetched and handed to an interpreter without being read. The fetch counts where a command starts, so that
+# `echo curl x | sh` is not one; the interpreter may come after sudo, env and VAR=value words; what is handed over as an
+# argument is a script only in the forms that run it: a process substitution, `-c "$(…)"`, `eval "$(…)"`, iex of a download
+_FETCH_RE = re.compile(_CMD + r"((?:curl|wget|iwr|irm|Invoke-WebRequest|Invoke-RestMethod)\b)", re.I)
+_SCRIPT_HEAD_RE = re.compile(
+    r"\s*(?:sudo\b(?:\s+-\S+)*\s+)?(?:env\s+)?(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;&|()]*\s+)*(?:[\w./-]*/)?"
+    r"((?:ba|z|da|k|a|c)?sh|python[0-9.]*|node|perl|ruby|iex|Invoke-Expression|pwsh|powershell)\b", re.I)
+_FETCHED_ARG_RE = re.compile(
+    r"(?:\b(?:ba|z|da|k|a|c)?sh|\bsource|(?<![\w.])\.)(?:\s+-[A-Za-z]+)*\s+[\"']?<\(\s*(?:curl|wget|iwr|irm)\b"
+    r"|\b(?:(?:ba|z|da|k|a|c)?sh(?:\s+-[A-Za-z]+)*\s+-[A-Za-z]*c|eval)\s+[\"']?\$\(\s*(?:curl|wget|iwr|irm)\b"
+    r"|\b(?:iex|Invoke-Expression)\b[\s\"'&{($]{0,20}(?:iwr|irm|Invoke-WebRequest|Invoke-RestMethod|New-Object\b)", re.I)
+# an interpreter other than a shell runs what it is piped only when it reads it from stdin: `python3 -`, not
+# `python3 -m json.tool`
+_STDIN_ONLY_RE = re.compile(r"(?:\s+-[A-Za-z]+)*(?:\s+-)?\s*\Z")
+_PIPELINE_RE = re.compile(r"\|\||&&|[;\n]")
 #: Actions that publish a release (compared in lower case, with or without a path after the name)
 PUBLISH_ACTIONS = (
     "pypa/gh-action-pypi-publish", "softprops/action-gh-release", "ncipollo/release-action",
@@ -465,9 +496,9 @@ def _release_why(table, steps, events):
         if ref is not None and _in_actions(ref[1].lower(), PUBLISH_ACTIONS):
             return f"it uses {ref[1]}"
         for _line, t in _step_run_lines(recs):
-            m = _PUBLISH_RE.search(t)
-            if m:
-                return f"it runs `{m.group(1)}`"
+            found = publish_command(t)
+            if found is not None:
+                return f"it runs `{found}`"
     return None
 
 
@@ -496,6 +527,60 @@ def _cache_of(recs):
     return None
 
 
+def install_command(text):
+    """The dependency install in a script line (`npm ci`, `pip install`), or None.
+    An install runs its dependencies' hooks and build scripts: a line that
+    passes `--ignore-scripts` is not counted."""
+    m = _INSTALL_RE.search(text)
+    return m.group(1) if m and "--ignore-scripts" not in text else None
+
+
+def publish_command(text):
+    """The command in a script line that publishes a release (`npm publish`,
+    `twine upload`), or None."""
+    m = _PUBLISH_RE.search(text)
+    return m.group(1) if m else None
+
+
+_SHELLS = ("sh", "bash", "zsh", "dash", "ksh", "ash", "csh", "iex", "invoke-expression", "pwsh", "powershell")
+
+
+def pipe_to_shell(text):
+    """A script line that fetches a script and runs it unread: `curl … | sh`
+    (also through `sudo`, `env`, `tee`), `bash <(curl …)`, `sh -c "$(curl …)"`,
+    `eval "$(wget …)"`, `iwr … | iex`. -> the fetch and the interpreter, as
+    `curl … | sh`, or None."""
+    for pipeline in _PIPELINE_RE.split(text):
+        fetched = None
+        for seg in pipeline.replace("|&", "|").split("|"):
+            if fetched is not None:
+                m = _SCRIPT_HEAD_RE.match(seg)
+                if m and (m.group(1).lower().startswith(_SHELLS) or _STDIN_ONLY_RE.match(seg, m.end())):
+                    return f"{fetched} … | {m.group(1)}"
+            m = _FETCH_RE.search(seg)
+            if m and fetched is None:
+                fetched = m.group(1)
+    m = _FETCHED_ARG_RE.search(text)
+    return m.group() if m else None
+
+
+def logical_lines(lines):
+    """[(line, text)] with a script's continued lines (`… \\` at the end) joined to
+    the line they continue, reported at its first line."""
+    out, first, parts = [], 0, None
+    for n, t in lines:
+        if parts is None:
+            first, parts = n, []
+        continued = t.endswith("\\")
+        parts.append(t[:-1] if continued else t)
+        if not continued:
+            out.append((first, " ".join(parts)))
+            parts = None
+    if parts is not None:
+        out.append((first, " ".join(parts)))
+    return out
+
+
 def hardening(text):
     """-> [(kind, line, detail)], by line, for a workflow's text:
     'unpinned' {"uses", "kind", "ref", "first", "tag"}: a `uses:` that is not a
@@ -505,7 +590,9 @@ def hardening(text):
     release workflow that restores a cache; 'perms' {"scopes"}: write permissions
     for the whole workflow; 'perms-missing' {"jobs"}: no top-level permissions
     and jobs without their own; 'oidc-install' {"job", "from", "command"}: a
-    job that can ask for an OIDC token and installs dependencies."""
+    job that can ask for an OIDC token and installs dependencies;
+    'pipe-to-shell' {"job", "command"}: a step that fetches a script and runs it
+    unread (`curl … | sh`)."""
     records = _outline(text, True)
     events = _events(records)
     steps = _steps(records)
@@ -576,14 +663,21 @@ def hardening(text):
         hit = None
         for recs in by_job.get(job, ()):
             for line, t in _step_run_lines(recs):
-                m = _INSTALL_RE.search(t)
-                if m and "--ignore-scripts" not in t:
-                    hit = (line, m.group(1))
+                found = install_command(t)
+                if found is not None:
+                    hit = (line, found)
                     break
             if hit is not None:
                 break
         if hit is not None:
             out.append(("oidc-install", hit[0], {"job": job, "from": source, "command": hit[1]}))
+    # a script fetched and run without being read
+    for job, recs in steps:
+        for line, t in logical_lines(_step_run_lines(recs)):
+            found = pipe_to_shell(t)
+            if found is not None:
+                out.append(("pipe-to-shell", line, {"job": job, "command": found}))
+                break
     out.sort(key=lambda f: (f[1], f[0]))
     return out
 
@@ -607,6 +701,14 @@ _CACHE_WHY = (
 _PERMS_WHY = (
     "A job should get only the access it uses. A workflow-level `permissions:` with a write scope hands it to "
     "every job, the ones that run third-party actions and install dependencies among them.")
+PIPE_SHELL_FIX = (
+    "Save the script to a file, check its SHA-256 against a value kept in the repository, then run it; or install "
+    "the tool from a package manager at a version, with its hash.")
+PIPE_SHELL_WHY = (
+    "A script piped into a shell is not read before it runs: whoever controls the host, or anyone on the path when "
+    "the address is not HTTPS, decides what runs, with the job's token and secrets. The Codecov Bash Uploader, "
+    "piped into a shell by thousands of pipelines, was changed for two months in 2021 to send each job's "
+    "environment to a server of the attacker's.")
 _OIDC_WHY = (
     "Dependencies run code while they install and build, with the job's permissions. An OIDC token is what a "
     "package registry's trusted publishing and a cloud account's federation take as proof of identity, so code "
@@ -672,6 +774,13 @@ def hardening_rule(kind, d):
             "why": _PERMS_WHY,
             "fix": "Set `permissions: contents: read` at the top of the workflow and grant more only where a job needs it.",
             "ref": "CWE-250 · Supply chain"}
+    if kind == "pipe-to-shell":
+        return {
+            "id": "SC-WORKFLOW-PIPE-SHELL", "name": "Workflow runs a script it downloads without reading it",
+            "type": "HOTSPOT", "sev": "MAJOR",
+            "msg": f"The job \"{d['job']}\" fetches a script and runs it as it arrives (`{d['command']}`): it runs "
+                   f"whatever that address serves at that moment.",
+            "why": PIPE_SHELL_WHY, "fix": PIPE_SHELL_FIX, "ref": "CWE-494 · Supply chain"}
     return {
         "id": "SC-WORKFLOW-OIDC-INSTALL", "name": "Job that installs dependencies can request an OIDC token",
         "type": "HOTSPOT", "sev": "MAJOR",

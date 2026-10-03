@@ -162,14 +162,15 @@ export function outline(source) {
  * first of a sequence item (`item`): hardening() tells one step from the next
  * by it (ghworkflow._outline). outline() leaves the field out.
  */
-function outlineRecords(source, items) {
+function outlineRecords(source, items, seqBlocks = false) {
   const records = [];
   let stack = [];
   let block = null;
   let fresh = false;
   const rows = source.split("\n");
   for (let n = 1; n <= rows.length; n++) {
-    const raw = rows[n - 1];
+    let raw = rows[n - 1];
+    if (raw.endsWith("\r")) raw = raw.slice(0, -1);        // a file with Windows line ends
     if (block !== null) {
       if (blankST(raw)) continue;
       if (indentOf(raw) > block[0]) {
@@ -211,9 +212,21 @@ function outlineRecords(source, items) {
         rec.value = "";
         block = [ind, rec];
       }
+    } else if (seqBlocks && !quoted && BLOCK_RE.test(value) && stack.length && stack[stack.length - 1][1] === "-") {
+      rec.value = "";
+      block = [stack[stack.length - 1][0], rec];
     }
   }
   return records;
+}
+
+/**
+ * The outline of the other CI files that are read the same way (gitlabci.js):
+ * with `items`, each record's `item` flag; with `seqBlocks`, a block scalar that
+ * is a sequence item (`- |`) is one (ghworkflow.records).
+ */
+export function yamlRecords(source, items = true, seqBlocks = false) {
+  return outlineRecords(source, items, seqBlocks);
 }
 
 const textOf = (rec) => (rec.value ? [rec.value] : []).concat(rec.block.map(([, t]) => t)).join("\n");
@@ -298,8 +311,10 @@ const PR_CHECKOUT_CMD_SRC = String.raw`\bgit\s+(?:checkout|fetch|switch|pull|mer
 const GH_PR_CHECKOUT_SRC = String.raw`\bgh\s+pr\s+checkout\b`;
 const WRITE_SCOPE_SRC = String.raw`([A-Za-z-]+)\s*:\s*write\b`;
 const CMD_SRC =
-  String.raw`(?:^|[;&|(]|\b(?:then|do|else|sudo|time|exec|command)\s)\s*` +
+  String.raw`(?:^|[;&|(]|\b(?:then|do|else|if|elif|while|until|sudo|time|exec|command)\s)\s*` +
   String.raw`(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;&|()]*\s+)*`;
+/** Where a command can start in a line of a script (ghworkflow.COMMAND_START). */
+export const COMMAND_START = CMD_SRC;
 const INSTALL_SRC =
   CMD_SRC + String.raw`((?:npm\s+(?:ci|install|i|add)|pnpm\s+(?:install|i|add)|yarn\s+(?:install|add)` +
   String.raw`|bun\s+(?:install|i|add)|pip3?\s+install|python3?\s+-m\s+pip\s+install|uv\s+(?:sync|add|pip\s+install)` +
@@ -310,12 +325,27 @@ const PUBLISH_SRC =
   CMD_SRC + String.raw`((?:npm|pnpm|bun)\s+publish\b|yarn\s+(?:npm\s+)?publish\b|twine\s+upload\b|uv\s+publish\b` +
   String.raw`|poetry\s+publish\b|cargo\s+publish\b|gh\s+release\s+create\b|docker\s+push\b` +
   String.raw`|vsce\s+publish\b|ovsx\s+publish\b|gem\s+push\b|dotnet\s+nuget\s+push\b|helm\s+push\b)`;
+const FETCH_SRC = CMD_SRC + String.raw`((?:curl|wget|iwr|irm|Invoke-WebRequest|Invoke-RestMethod)\b)`;
+const SCRIPT_HEAD_SRC =
+  String.raw`\s*(?:sudo\b(?:\s+-\S+)*\s+)?(?:env\s+)?(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;&|()]*\s+)*(?:[\w./-]*/)?` +
+  String.raw`((?:ba|z|da|k|a|c)?sh|python[0-9.]*|node|perl|ruby|iex|Invoke-Expression|pwsh|powershell)\b`;
+const FETCHED_ARG_SRC =
+  String.raw`(?:\b(?:ba|z|da|k|a|c)?sh|\bsource|(?<![\w.])\.)(?:\s+-[A-Za-z]+)*\s+[\"']?<\(\s*(?:curl|wget|iwr|irm)\b` +
+  String.raw`|\b(?:(?:ba|z|da|k|a|c)?sh(?:\s+-[A-Za-z]+)*\s+-[A-Za-z]*c|eval)\s+[\"']?\$\(\s*(?:curl|wget|iwr|irm)\b` +
+  String.raw`|\b(?:iex|Invoke-Expression)\b[\s\"'&{($]{0,20}(?:iwr|irm|Invoke-WebRequest|Invoke-RestMethod|New-Object\b)`;
+const STDIN_ONLY_SRC = String.raw`(?:\s+-[A-Za-z]+)*(?:\s+-)?\s*\Z`;
+const PIPELINE_SRC = String.raw`\|\||&&|[;\n]`;
 const PR_HEAD_RE = pyRe(PR_HEAD_SRC);
 const PR_CHECKOUT_CMD_RE = pyRe(PR_CHECKOUT_CMD_SRC);
 const GH_PR_CHECKOUT_RE = pyRe(GH_PR_CHECKOUT_SRC);
 const WRITE_SCOPE_RE = pyRe(WRITE_SCOPE_SRC, "g");
 const INSTALL_RE = pyRe(INSTALL_SRC);
 const PUBLISH_RE = pyRe(PUBLISH_SRC);
+const FETCH_RE = pyRe(FETCH_SRC, "i");
+const SCRIPT_HEAD_RE = pyRe(SCRIPT_HEAD_SRC, "iy");
+const FETCHED_ARG_RE = pyRe(FETCHED_ARG_SRC, "i");
+const STDIN_ONLY_RE = pyRe(STDIN_ONLY_SRC, "y");
+const PIPELINE_RE = pyRe(PIPELINE_SRC, "g");
 /** Actions that publish a release (ghworkflow.PUBLISH_ACTIONS). */
 export const PUBLISH_ACTIONS = [
   "pypa/gh-action-pypi-publish", "softprops/action-gh-release", "ncipollo/release-action",
@@ -447,8 +477,8 @@ function releaseWhy(table, steps, evs) {
     const ref = use !== null ? actionRef(use[0]) : null;
     if (ref !== null && inActions(ref[1].toLowerCase(), PUBLISH_ACTIONS)) return `it uses ${ref[1]}`;
     for (const [, t] of stepRunLines(recs)) {
-      const m = PUBLISH_RE.exec(t);
-      if (m) return `it runs \`${m[1]}\``;
+      const found = publishCommand(t);
+      if (found !== null) return `it runs \`${found}\``;
     }
   }
   return null;
@@ -476,6 +506,66 @@ function cacheOf(recs) {
     return null;
   }
   return null;
+}
+
+/** The dependency install in a script line (`npm ci`, `pip install`), or null (ghworkflow.install_command). */
+export function installCommand(text) {
+  const m = INSTALL_RE.exec(text);
+  return m && !text.includes("--ignore-scripts") ? m[1] : null;
+}
+
+/** The command in a script line that publishes a release, or null (ghworkflow.publish_command). */
+export function publishCommand(text) {
+  const m = PUBLISH_RE.exec(text);
+  return m ? m[1] : null;
+}
+
+const SHELLS = ["sh", "bash", "zsh", "dash", "ksh", "ash", "csh", "iex", "invoke-expression", "pwsh", "powershell"];
+
+/** Python's `pattern.match(text, pos)` for a sticky pattern. */
+function matchAt(re, text, pos) {
+  re.lastIndex = pos;
+  return re.exec(text);
+}
+
+/** A script line that fetches a script and runs it unread: `curl … | sh`, `bash <(curl …)`, … (ghworkflow.pipe_to_shell). */
+export function pipeToShell(text) {
+  for (const pipeline of text.split(PIPELINE_RE)) {
+    let fetched = null;
+    for (const seg of pipeline.replaceAll("|&", "|").split("|")) {
+      if (fetched !== null) {
+        const m = matchAt(SCRIPT_HEAD_RE, seg, 0);
+        if (m && (SHELLS.some((sh) => m[1].toLowerCase().startsWith(sh)) || matchAt(STDIN_ONLY_RE, seg, m.index + m[0].length))) {
+          return `${fetched} … | ${m[1]}`;
+        }
+      }
+      const f = FETCH_RE.exec(seg);
+      if (f && fetched === null) fetched = f[1];
+    }
+  }
+  const m = FETCHED_ARG_RE.exec(text);
+  return m ? m[0] : null;
+}
+
+/** [[line, text]] with a script's continued lines (`… \\` at the end) joined to the line they continue (ghworkflow.logical_lines). */
+export function logicalLines(lines) {
+  const out = [];
+  let first = 0;
+  let parts = null;
+  for (const [n, t] of lines) {
+    if (parts === null) {
+      first = n;
+      parts = [];
+    }
+    const continued = t.endsWith("\\");
+    parts.push(continued ? t.slice(0, -1) : t);
+    if (!continued) {
+      out.push([first, parts.join(" ")]);
+      parts = null;
+    }
+  }
+  if (parts !== null) out.push([first, parts.join(" ")]);
+  return out;
 }
 
 /** [[kind, line, detail]] by line for a workflow's text (ghworkflow.hardening). */
@@ -556,15 +646,24 @@ export function hardening(source) {
     let hit = null;
     for (const recs of byJob.get(job) ?? []) {
       for (const [line, t] of stepRunLines(recs)) {
-        const m = INSTALL_RE.exec(t);
-        if (m && !t.includes("--ignore-scripts")) {
-          hit = [line, m[1]];
+        const found = installCommand(t);
+        if (found !== null) {
+          hit = [line, found];
           break;
         }
       }
       if (hit !== null) break;
     }
     if (hit !== null) out.push(["oidc-install", hit[0], { job, from: source2, command: hit[1] }]);
+  }
+  for (const [job, recs] of steps) {                          // a script fetched and run without being read
+    for (const [line, t] of logicalLines(stepRunLines(recs))) {
+      const found = pipeToShell(t);
+      if (found !== null) {
+        out.push(["pipe-to-shell", line, { job, command: found }]);
+        break;
+      }
+    }
   }
   out.sort((a, b) => a[1] - b[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
   return out;
@@ -589,6 +688,14 @@ const CACHE_WHY =
 const PERMS_WHY =
   "A job should get only the access it uses. A workflow-level `permissions:` with a write scope hands it to " +
   "every job, the ones that run third-party actions and install dependencies among them.";
+export const PIPE_SHELL_FIX =
+  "Save the script to a file, check its SHA-256 against a value kept in the repository, then run it; or install " +
+  "the tool from a package manager at a version, with its hash.";
+export const PIPE_SHELL_WHY =
+  "A script piped into a shell is not read before it runs: whoever controls the host, or anyone on the path when " +
+  "the address is not HTTPS, decides what runs, with the job's token and secrets. The Codecov Bash Uploader, " +
+  "piped into a shell by thousands of pipelines, was changed for two months in 2021 to send each job's " +
+  "environment to a server of the attacker's.";
 const OIDC_WHY =
   "Dependencies run code while they install and build, with the job's permissions. An OIDC token is what a " +
   "package registry's trusted publishing and a cloud account's federation take as proof of identity, so code " +
@@ -657,6 +764,14 @@ export function hardeningRule(kind, d) {
       fix: "Set `permissions: contents: read` at the top of the workflow and grant more only where a job needs it.",
       ref: "CWE-250 · Supply chain"};
   }
+  if (kind === "pipe-to-shell") {
+    return {
+      id: "SC-WORKFLOW-PIPE-SHELL", name: "Workflow runs a script it downloads without reading it",
+      type: "HOTSPOT", sev: "MAJOR",
+      msg: `The job "${d.job}" fetches a script and runs it as it arrives (\`${d.command}\`): it runs ` +
+        "whatever that address serves at that moment.",
+      why: PIPE_SHELL_WHY, fix: PIPE_SHELL_FIX, ref: "CWE-494 · Supply chain"};
+  }
   return {
     id: "SC-WORKFLOW-OIDC-INSTALL", name: "Job that installs dependencies can request an OIDC token",
     type: "HOTSPOT", sev: "MAJOR",
@@ -673,6 +788,9 @@ export const HARDENING_TWINS = {
   patterns: {
     _PR_HEAD_RE: PR_HEAD_SRC, _PR_CHECKOUT_CMD_RE: PR_CHECKOUT_CMD_SRC, _GH_PR_CHECKOUT_RE: GH_PR_CHECKOUT_SRC,
     _WRITE_SCOPE_RE: WRITE_SCOPE_SRC,
-    _INSTALL_RE: INSTALL_SRC, _PUBLISH_RE: PUBLISH_SRC},
+    _INSTALL_RE: INSTALL_SRC, _PUBLISH_RE: PUBLISH_SRC,
+    _FETCH_RE: FETCH_SRC, _SCRIPT_HEAD_RE: SCRIPT_HEAD_SRC, _FETCHED_ARG_RE: FETCHED_ARG_SRC,
+    _STDIN_ONLY_RE: STDIN_ONLY_SRC, _PIPELINE_RE: PIPELINE_SRC},
+  ignoreCase: ["_FETCH_RE", "_SCRIPT_HEAD_RE", "_FETCHED_ARG_RE"],
   lists: { PUBLISH_ACTIONS, CACHE_ACTIONS, SETUP_CACHES, FIRST_PARTY },
 };
