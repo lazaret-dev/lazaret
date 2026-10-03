@@ -40,6 +40,7 @@ pub mod literal;
 pub mod matcher;
 pub mod parser;
 pub mod prog;
+pub mod scan;
 
 use constants::*;
 use matcher::State;
@@ -92,6 +93,75 @@ pub struct Regex {
     prog: std::sync::Arc<prog::Prog>,
     pub groups: usize,
     groupindex: Vec<(Vec<u32>, usize)>,
+    /// set for a pattern the matcher is not needed for (see Simple)
+    simple: Option<Simple>,
+    /// The same pattern compiled by linre (crate::linre), which every search
+    /// runs on when it accepts the pattern: re's answers, in time linear in
+    /// the text, never backtracking. None: sre's backtracking matcher here
+    /// (a pattern linre refuses — a backreference, a lookahead of unbounded
+    /// width … — one answered without a matcher, or new_backtracking's).
+    lin: Option<crate::linre::Regex>,
+}
+
+/// A pattern simple enough to answer without the matcher: one character of
+/// a set (`[/'"`]`, a lexer's next interesting character) or the longest run
+/// of them (`[ \t\n]*`), a set of literals and ranges only, with no groups
+/// and no IGNORECASE. search and match give the matcher's answers.
+#[derive(Clone, Debug)]
+enum Simple {
+    One(CharSet),
+    Run(CharSet),
+}
+
+#[derive(Clone, Debug)]
+struct CharSet {
+    ascii: u128,
+    ranges: Vec<(u32, u32)>,
+}
+
+impl CharSet {
+    fn of(items: &[parser::SetItem]) -> Option<CharSet> {
+        let mut set = CharSet { ascii: 0, ranges: Vec::new() };
+        for it in items {
+            let (a, b) = match *it {
+                parser::SetItem::Literal(c) => (c, c),
+                parser::SetItem::Range(a, b) => (a, b),
+                _ => return None, // a category (\w, \s …) or a negated set
+            };
+            for c in a..=b.min(127) {
+                set.ascii |= 1u128 << c;
+            }
+            if b >= 128 {
+                set.ranges.push((a.max(128), b));
+            }
+        }
+        Some(set)
+    }
+
+    #[inline]
+    fn has(&self, c: u32) -> bool {
+        if c < 128 {
+            self.ascii & (1u128 << c) != 0
+        } else {
+            self.ranges.iter().any(|&(a, b)| a <= c && c <= b)
+        }
+    }
+}
+
+fn simple_of(p: &parser::SubPattern, flags: u32, groups: usize) -> Option<Simple> {
+    if groups != 0 || flags & FLAG_IGNORECASE != 0 || p.data.len() != 1 {
+        return None;
+    }
+    match &p.data[0] {
+        parser::Node::In(items) => CharSet::of(items).map(Simple::One),
+        parser::Node::Repeat { kind: parser::RepeatKind::Max, min: 0, max: MAXREPEAT, item } if item.data.len() == 1 => {
+            match &item.data[0] {
+                parser::Node::In(items) => CharSet::of(items).map(Simple::Run),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 impl std::fmt::Debug for prog::Prog {
@@ -118,17 +188,43 @@ pub fn flags_from_letters(letters: &str) -> u32 {
 }
 
 impl Regex {
-    /// re.compile(pattern, flags) for a str pattern.
+    /// re.compile(pattern, flags) for a str pattern: its searches run on
+    /// linre where linre accepts the pattern (see `lin`), else here.
     pub fn new(pattern: &[u32], flags: u32) -> Result<Regex, Error> {
+        let mut rx = Regex::new_backtracking(pattern, flags)?;
+        if rx.simple.is_none() {
+            rx.lin = crate::linre::Regex::new(pattern, flags).ok();
+        }
+        Ok(rx)
+    }
+
+    /// re.compile(pattern, flags) whose searches all run on sre's
+    /// backtracking matcher (pyre.probe: pyre held to Python's re).
+    pub fn new_backtracking(pattern: &[u32], flags: u32) -> Result<Regex, Error> {
         let (p, state) = parser::parse_pattern(pattern, flags).map_err(|e| Error(format!("{} at {}", e.msg, e.pos)))?;
         let code = compiler::code(&p, &state, flags).map_err(|e| Error(e.0))?;
+        let groups = state.groups() - 1;
         Ok(Regex {
             pattern: pattern.to_vec(),
             flags: state.flags | flags,
             prog: std::sync::Arc::new(prog::Prog::new(code)),
-            groups: state.groups() - 1,
+            groups,
             groupindex: state.groupdict.clone(),
+            simple: simple_of(&p, state.flags | flags, groups),
+            lin: None,
         })
+    }
+
+    /// Do this pattern's searches run in linear time (on linre, or without a
+    /// matcher)?
+    pub fn is_linear(&self) -> bool {
+        self.lin.is_some() || self.simple.is_some()
+    }
+
+    /// linre's match as this pattern's.
+    fn from_lin<'s>(&'s self, s: &'s [u32], m: crate::linre::Match<'s>) -> Match<'s> {
+        let (marks, pos, endpos, lastindex) = m.into_parts();
+        Match { s, re: self, marks, pos, endpos, lastindex }
     }
 
     /// re.compile of a Rust string's code points.
@@ -176,12 +272,68 @@ impl Regex {
         f()
     }
 
+    /// A match of `simple` at [a, b).
+    fn simple_match<'s>(&'s self, s: &'s [u32], a: usize, b: usize, pos: usize, endpos: usize) -> Match<'s> {
+        Match { s, re: self, marks: vec![a as isize, b as isize], pos, endpos, lastindex: -1 }
+    }
+
+    /// (start, end) of the clamped search range, as State::new clamps it.
+    fn clamp(s: &[u32], pos: isize, endpos: isize) -> (usize, usize) {
+        let n = s.len() as isize;
+        (pos.clamp(0, n) as usize, endpos.clamp(0, n) as usize)
+    }
+
     pub fn search_at<'s>(&'s self, s: &'s [u32], pos: isize, endpos: isize) -> Option<Match<'s>> {
+        if let Some(l) = &self.lin {
+            return self.timed(|| l.search_at(s, pos, endpos)).map(|m| self.from_lin(s, m));
+        }
+        if let Some(simple) = &self.simple {
+            let (start, end) = Self::clamp(s, pos, endpos);
+            return self.timed(|| match simple {
+                Simple::One(set) => {
+                    (start..end).find(|&i| set.has(s[i])).map(|i| self.simple_match(s, i, i + 1, start, end))
+                }
+                Simple::Run(set) => {
+                    if start > end {
+                        return None;
+                    }
+                    let mut j = start;
+                    while j < end && set.has(s[j]) {
+                        j += 1;
+                    }
+                    Some(self.simple_match(s, start, j, start, end))
+                }
+            });
+        }
         let mut st = State::new(s, self.groups, pos, endpos);
         match self.timed(|| matcher::sre_search(&mut st, &self.prog)) {
             Ok(true) => Some(self.new_match(&st)),
             _ => None,
         }
+    }
+
+    /// The strings one of which every match holds (literal.rs), when the
+    /// pattern has them.
+    pub fn need(&self) -> Option<&literal::Need> {
+        self.prog.need.as_ref()
+    }
+
+    /// (development, `stats`: need scans, characters they read, characters
+    /// lead scans read to no start, and to a start)
+    #[cfg(feature = "stats")]
+    pub fn scanned(&self) -> [u64; 4] {
+        let a = &self.prog.scanned;
+        [0, 1, 2, 3].map(|i| a[i].load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    /// Where a search's match can start (first.rs), for a person.
+    pub fn start_text(&self) -> Option<String> {
+        self.prog.first.as_ref().map(|f| f.describe())
+    }
+
+    /// What every match starts with (literal.rs), for a person.
+    pub fn lead_text(&self) -> Option<String> {
+        self.prog.lead.as_ref().map(|n| n.describe())
     }
 
     /// What a search needs the text to hold (literal.rs), for a person.
@@ -200,6 +352,31 @@ impl Regex {
 
     /// pattern.match(s, pos, endpos)
     pub fn match_at<'s>(&'s self, s: &'s [u32], pos: isize, endpos: isize) -> Option<Match<'s>> {
+        if let Some(l) = &self.lin {
+            return self.timed(|| l.match_at(s, pos, endpos)).map(|m| self.from_lin(s, m));
+        }
+        if let Some(simple) = &self.simple {
+            let (start, end) = Self::clamp(s, pos, endpos);
+            return self.timed(|| match simple {
+                Simple::One(set) => {
+                    if start < end && set.has(s[start]) {
+                        Some(self.simple_match(s, start, start + 1, start, end))
+                    } else {
+                        None
+                    }
+                }
+                Simple::Run(set) => {
+                    if start > end {
+                        return None;
+                    }
+                    let mut j = start;
+                    while j < end && set.has(s[j]) {
+                        j += 1;
+                    }
+                    Some(self.simple_match(s, start, j, start, end))
+                }
+            });
+        }
         let mut st = State::new(s, self.groups, pos, endpos);
         st.ptr = st.start;
         match self.timed(|| matcher::sre_match(&mut st, &self.prog, 0, true)) {
@@ -214,6 +391,9 @@ impl Regex {
 
     /// pattern.fullmatch(s, pos, endpos)
     pub fn fullmatch_at<'s>(&'s self, s: &'s [u32], pos: isize, endpos: isize) -> Option<Match<'s>> {
+        if let Some(l) = &self.lin {
+            return self.timed(|| l.fullmatch_at(s, pos, endpos)).map(|m| self.from_lin(s, m));
+        }
         let mut st = State::new(s, self.groups, pos, endpos);
         st.ptr = st.start;
         st.match_all = true;
@@ -229,7 +409,11 @@ impl Regex {
 
     /// pattern.finditer(s, pos, endpos)
     pub fn finditer_at<'s>(&'s self, s: &'s [u32], pos: isize, endpos: isize) -> FindIter<'s> {
-        FindIter { re: self, st: State::new(s, self.groups, pos, endpos), done: false }
+        let walk = match &self.lin {
+            Some(l) => Walk::Lin(l.finditer_at(s, pos, endpos)),
+            None => Walk::Back { st: Box::new(State::new(s, self.groups, pos, endpos)), done: false },
+        };
+        FindIter { re: self, s, walk }
     }
 
     pub fn finditer<'s>(&'s self, s: &'s [u32]) -> FindIter<'s> {
@@ -259,6 +443,9 @@ impl Regex {
 
     /// pattern.sub(repl, s, count) with a function.
     pub fn sub_fn<'s>(&'s self, s: &'s [u32], count: usize, mut f: impl FnMut(&Match<'s>) -> Vec<u32>) -> Vec<u32> {
+        if let Some(l) = &self.lin {
+            return l.sub_fn(s, count, |m| f(&self.from_lin(s, m.clone())));
+        }
         let mut out: Vec<u32> = Vec::with_capacity(s.len());
         let mut i = 0usize;
         let mut n = 0usize;
@@ -317,6 +504,9 @@ impl Regex {
     /// pattern.split(s, maxsplit): the pieces between matches; groups, when
     /// the pattern has some, in between (None: a group that did not take part).
     pub fn split<'s>(&'s self, s: &'s [u32], maxsplit: usize) -> Vec<Option<&'s [u32]>> {
+        if let Some(l) = &self.lin {
+            return l.split(s, maxsplit);
+        }
         let mut out = Vec::new();
         let mut st = State::new(s, self.groups, 0, s.len() as isize);
         let mut last = st.start;
@@ -518,28 +708,43 @@ impl<'s> Match<'s> {
 /// pattern.finditer: the scanner's search loop.
 pub struct FindIter<'s> {
     re: &'s Regex,
-    st: State<'s>,
-    done: bool,
+    s: &'s [u32],
+    walk: Walk<'s>,
+}
+
+/// How a finditer searches: on linre, or with sre's matcher.
+enum Walk<'s> {
+    Lin(crate::linre::FindIter<'s>),
+    Back { st: Box<State<'s>>, done: bool },
 }
 
 impl<'s> Iterator for FindIter<'s> {
     type Item = Match<'s>;
     fn next(&mut self) -> Option<Match<'s>> {
-        if self.done {
-            return None;
-        }
-        self.st.reset();
-        self.st.ptr = self.st.start;
-        match self.re.timed(|| matcher::sre_search(&mut self.st, &self.re.prog)) {
-            Ok(true) => {
-                let m = self.re.new_match(&self.st);
-                self.st.must_advance = self.st.ptr == self.st.start;
-                self.st.start = self.st.ptr;
-                Some(m)
+        let re = self.re;
+        match &mut self.walk {
+            Walk::Lin(it) => {
+                let s = self.s;
+                re.timed(|| it.next()).map(|m| re.from_lin(s, m))
             }
-            _ => {
-                self.done = true;
-                None
+            Walk::Back { st, done } => {
+                if *done {
+                    return None;
+                }
+                st.reset();
+                st.ptr = st.start;
+                match re.timed(|| matcher::sre_search(st, &re.prog)) {
+                    Ok(true) => {
+                        let m = re.new_match(st);
+                        st.must_advance = st.ptr == st.start;
+                        st.start = st.ptr;
+                        Some(m)
+                    }
+                    _ => {
+                        *done = true;
+                        None
+                    }
+                }
             }
         }
     }

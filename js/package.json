@@ -10,8 +10,13 @@
   "files": [
     "bin/",
     "src/",
+    "native/lazaret.wasm",
+    "native/NOTICE",
     "README.md",
     "LICENSE",
+    "LICENSE-PYTHON",
+    "LICENSE-UNICODE",
+    "NOTICE",
     "!**/.*",
     "!**/*.pem",
     "!**/*.key",
@@ -22,6 +27,8 @@
     "node": ">=22"
   },
   "scripts": {
+    "build": "node scripts/build-wasm.js",
+    "prepack": "node scripts/build-wasm.js --check",
     "test": "node --test"
   },
   "keywords": [
@@ -33,7 +40,7 @@
     "typosquatting"
   ],
   "author": "John A. Booth",
-  "license": "Apache-2.0",
+  "license": "Apache-2.0 AND Python-2.0.1 AND Unicode-3.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/lazaret-dev/lazaret.git"

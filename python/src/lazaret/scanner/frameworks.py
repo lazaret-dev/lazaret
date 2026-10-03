@@ -1,11 +1,14 @@
 """Web framework models shared by both taint engines (0.1.7).
 
 The intra-file engine (lazaret.scanner.core, line-based: _route_params) and
-the interprocedural engine (lazaret.scanner.flow, AST-based) both need to
-know which parameters of a route handler a framework fills from the
+the interprocedural engine (the native engine's Python taint pass) both need
+to know which parameters of a route handler a framework fills from the
 request. The decisions live here, over the text of a parameter's name,
-annotation and default, so the two engines agree; the npm engine's twin of
-the intra-file half is js/src/scanner/taint.js (routeParams).
+annotation and default, and in the native engine's port of them
+(rust/crates/lazaret-engine/src/pyflow/frameworks.rs), which
+tests/architecture/test_pyflow_frameworks.py holds to the same answers, so
+the two engines agree: a change here is a change there. The npm engine's
+twin of the intra-file half is js/src/scanner/taint.js (routeParams).
 
 * Flask / Quart: a view takes the variables of its URL rules (`<name>`,
   `<path:name>`); an int, float, uuid or any(…) converter gives no text an

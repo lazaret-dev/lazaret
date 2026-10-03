@@ -41,7 +41,7 @@ class StartupModuleTests(unittest.TestCase):
         res = scan_wheel({**META, "sitecustomize.py": ENV_TO_HOST})
         self.assertEqual(startup(res), [("sitecustomize.py", "CRITICAL")])
         self.assertEqual(res["verdict"], "SUSPICIOUS", res["verdictReason"])
-        self.assertIn("sends data over the network", issues(res, "SC-SITECUSTOMIZE")[0]["msg"])
+        self.assertIn("sends environment variables over the network", issues(res, "SC-SITECUSTOMIZE")[0]["msg"])
 
     def test_modules_that_are_not_installed_at_the_top(self):
         for rel in ("x/sitecustomize.py", "x-1.0.data/scripts/sitecustomize.py",

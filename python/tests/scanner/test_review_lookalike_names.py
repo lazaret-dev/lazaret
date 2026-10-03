@@ -54,6 +54,20 @@ class LookalikeTests(unittest.TestCase):
             "CRITICAL", 1, "'isAdm\u0456n' reads as 'isAdmin', another name in this file, but is spelled with "
                            "U+0456 for 'i'.")])
 
+    def test_a_keyword_is_not_another_name(self):
+        # jQuery's typings (shipped by cypress) name a parameter `function` with
+        # a Cyrillic c: no binding can be called function, so it is a name
+        # mixing alphabets (MAJOR), not a second function (CRITICAL)
+        text = ("declare function each(funcs: any[], funсtion: (i: number) => boolean): void;\n"
+                "export function f() {}\n")
+        self.assertEqual(found(text), [
+            ("MAJOR", 1, "'funсtion' reads as 'function' but is spelled with U+0441 for 'c'.")])
+        self.assertEqual(found("def f(сlass):\n    return сlass\nclass A: pass\n", "py"), [
+            ("MAJOR", 1, "'сlass' reads as 'class' but is spelled with U+0441 for 'c'."),
+            ("MAJOR", 2, "'сlass' reads as 'class' but is spelled with U+0441 for 'c'.")])
+        # a keyword the rule watches is still CRITICAL: import
+        self.assertEqual(found("іmport('x');\nimport y from 'y';\n")[0][0], "CRITICAL")
+
     def test_a_name_that_only_mixes_alphabets(self):
         self.assertEqual(found("const v\u0430lue = 1;\n"),
                          [("MAJOR", 1, "'v\u0430lue' reads as 'value' but is spelled with U+0430 for 'a'.")])
@@ -95,13 +109,18 @@ class LookalikeTests(unittest.TestCase):
                          [("MAJOR", 1, "'v\u0430lue' reads as 'value' but is spelled with U+0430 for 'a'.")])
 
     def test_a_string_is_read_by_the_lexer(self):
-        # a string's other lines (a docstring, a template, a string continued with a
-        # backslash); a template or f-string is one literal, its fields too
+        # a string's other lines (a docstring, a template's text, a string
+        # continued with a backslash)
         for lang, text in [("py", 'def f():\n    """\n    v\u0430lue \u0435val(x)\n    """\n'),
-                           ("js", "const t = `\n  v\u0430lue ${\u0435val(x)}\n`;\n"),
-                           ("js", 'const s = "a\\\n\u0435val";\n'), ("py", "x = f'{\u0435val(p)}'\n")]:
+                           ("js", "const t = `\n  v\u0430lue \u0435val(x)\n`;\n"),
+                           ("js", 'const s = "a\\\n\u0435val";\n')]:
             with self.subTest(text=text):
                 self.assertEqual(found(text, lang), [])
+        # a template's or an f-string's fields are code: a call there runs
+        for lang, text, line in [("js", "const t = `\n  v\u0430lue ${\u0435val(x)}\n`;\n", 2),
+                                 ("py", "x = f'{\u0435val(p)}'\n", 1)]:
+            with self.subTest(text=text):
+                self.assertEqual(found(text, lang), [("CRITICAL", line, EVAL_MSG)])
         # a quote escaped in a string ends nothing
         for lang, text in [("js", "const s = 'it\\'s' + \u0435val(x) + 'y';\n"),
                            ("py", "s = 'it\\'s' + \u0435val(x) + 'y'\n")]:

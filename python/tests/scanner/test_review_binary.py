@@ -8,6 +8,12 @@
    opaque blobs were never checked. Every non-source regular file is now
    classified from a header sample by magic bytes (classify_binary).
 
+0.1.8: an executable's bytes under a source file's name (a Windows
+executable named `_build.py`, as in num2words 0.5.15) are SC-BINARY, CRITICAL,
+as in the registry. The file was read as text and failed no gate condition.
+And a source file whose bytes don't decode to text is SC-TRUNCATED, as an
+archive member is: it was read as mojibake no rule could read.
+
 Binary fixtures are synthetic headers (an ELF magic followed by zeros, a zip
 local-file header ...); nothing is executable.
 """
@@ -30,6 +36,7 @@ JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 100
 ZIP = b"PK\x03\x04" + b"\x14\x00" + b"\x00" * 200
 TAR = b"notes.txt".ljust(257, b"\x00") + b"ustar\x0000" + b"\x00" * 250
 BLOB = random.Random(1234).getrandbits(8 * 4096).to_bytes(4096, "little")
+PE = b"MZ\x90\x00\x03\x00\x00\x00\x04\x00\x00\x00\xff\xff" + b"\x00" * 2034
 
 
 def make_tree(files):
@@ -127,13 +134,60 @@ class SizeCap(unittest.TestCase):
         })
         self.addCleanup(shutil.rmtree, root, True)
         with open(os.path.join(root, "huge.js"), "wb") as fh:
-            fh.truncate(5 * 1024 ** 3)          # sparse: rejected by size, never read
+            fh.truncate(5 * 1024 ** 3)          # sparse: rejected by size, only its first bytes read
         files = by_file(core.scan_project(root))
         for name in ("big.py", "sub/package.json", "huge.js"):
             self.assertEqual(files.get(name), {"SC-TRUNCATED"}, name)
         msg = [i["msg"] for i in core.scan_project(root)["issues"] if i["file"] == "big.py"][0]
         self.assertEqual(msg, "File not fully scanned: 2,400,000 bytes exceeds the "
                               "2,000,000-byte file limit.")
+
+
+def binaries(res):
+    return {(i["file"].replace(os.sep, "/"), i["sev"]) for i in res["issues"] if i["rule"] == "SC-BINARY"}
+
+
+class ProgramsNamedAsSource(unittest.TestCase):
+    def test_flagged_and_the_gate_fails(self):
+        root = make_tree({"a.py": "x = 1\n", "pkg/_build.py": PE, "index.js": ELF, "lib.so": ELF,
+                          "mz.py": "MZ = 1\nELF = 2\n", "blob.py": BLOB})
+        self.addCleanup(shutil.rmtree, root, True)
+        res = core.scan_project(root)
+        self.assertEqual(binaries(res), {("pkg/_build.py", "CRITICAL"), ("index.js", "CRITICAL"),
+                                         ("lib.so", "MAJOR")})
+        self.assertEqual([i["msg"] for i in res["issues"] if i["file"].endswith("_build.py")
+                          and i["rule"] == "SC-BINARY"],
+                         ["_build.py is not source code but a program: Windows PE executable/DLL."])
+        self.assertFalse({c["label"]: c["ok"] for c in res["conditions"]}["No supply-chain indicators"])
+
+    def test_a_dependency_with_deps_only(self):
+        root = make_tree({"a.py": "x = 1\n", "node_modules/dep/index.js": ELF,
+                          "node_modules/dep/package.json": '{"name": "dep", "version": "1.0.0"}'})
+        self.addCleanup(shutil.rmtree, root, True)
+        self.assertEqual(binaries(core.scan_project(root)), set())
+        self.assertEqual(binaries(core.scan_project(root, include_deps=True)),
+                         {("node_modules/dep/index.js", "CRITICAL")})
+
+    def test_bytes_that_are_no_text_are_not_scanned_as_text(self):
+        root = make_tree({"a.py": "x = 1\n", "blob.py": BLOB, "mz.py": "MZ = 1\n", "accents.py": "s = 'caf\u00e9'\n" * 50})
+        self.addCleanup(shutil.rmtree, root, True)
+        res = core.scan_project(root)
+        truncated = [(i["file"], i["sev"], i["msg"]) for i in res["issues"] if i["rule"] == "SC-TRUNCATED"]
+        self.assertEqual([(f, s) for f, s, _m in truncated], [("blob.py", "CRITICAL")])
+        self.assertRegex(truncated[0][2], r"^File not fully scanned: content is not decodable as text \(\d+% invalid "
+                                          r"bytes or control characters\), so no rule could read it\.$")
+        self.assertFalse({c["label"]: c["ok"] for c in res["conditions"]}["No supply-chain indicators"])
+
+    def test_an_oversized_one_by_its_first_bytes(self):
+        from unittest import mock
+        patch = mock.patch.object(core, "SOURCE_SIZE_CAP", 1000)
+        patch.start()
+        self.addCleanup(patch.stop)
+        root = make_tree({"a.py": "x = 1\n", "big.py": PE, "big.js": "x = 1;\n" * 200})
+        self.addCleanup(shutil.rmtree, root, True)
+        files = by_file(core.scan_project(root))
+        self.assertEqual(files.get("big.py"), {"SC-TRUNCATED", "SC-BINARY"})
+        self.assertEqual(files.get("big.js"), {"SC-TRUNCATED"})
 
 
 if __name__ == "__main__":

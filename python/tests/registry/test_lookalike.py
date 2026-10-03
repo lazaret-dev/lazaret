@@ -101,6 +101,27 @@ class LookalikeRegistryTests(unittest.TestCase):
             'Depends on "lodahs", one change from "lodash" (two characters swapped), one of the 5,000 '
             'most-downloaded npm packages.'])
 
+    def test_a_name_like_a_node_builtin(self):
+        """0.1.8: Node's built-in modules named with a separator are compared
+        too: a dependency on child-process installs a stranger's package."""
+        res = scan_npm({"package.json": json.dumps({"name": "crypto-hash-kit", "version": "1.0.0",
+                                                    "dependencies": {"child-process": "^1"}})})
+        self.assertEqual([m for _f, _l, _s, m in typos(res)], [
+            'Depends on "child-process", one change from "child_process" (its separators changed), a module '
+            "built into Node."])
+        self.assertEqual(res["verdict"], "WARN", res["verdictReason"])
+        res = scan_npm({"package.json": json.dumps({"name": "worker-threads", "version": "1.0.0"})})
+        self.assertEqual([m for _f, _l, _s, m in typos(res)], [
+            'The package is named "worker-threads", one change from "worker_threads" (its separators changed), a '
+            "module built into Node."])
+        for name, want in (("childprocess", ("child_process", "its separators changed")),
+                           ("child_proces", ("child_process", "a character dropped")),
+                           ("perf_hook", ("perf_hooks", "a character dropped")),
+                           ("child_process", None), ("events", None), ("async-hook", None),
+                           ("child-process-promise", None)):
+            with self.subTest(name):
+                self.assertEqual(lookalike.builtin_lookalike(name), want)
+
     def test_popular_packages_stay_ok(self):
         res = scan_npm({"package.json": json.dumps({"name": "express", "version": "4.0.0",
                                                     "dependencies": {"debug": "2", "mysql2": "3", "qs": "6"}})})

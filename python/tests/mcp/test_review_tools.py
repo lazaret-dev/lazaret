@@ -178,6 +178,20 @@ class ScanFilesDecodingTests(unittest.TestCase):
         out = server.tool_scan_files({"paths": [path]})
         self.assertIn("Q-ENCODING", {i["rule"] for i in out["files"][path]["issues"]})
 
+    def test_a_program_named_as_source(self):
+        """0.1.8: a Windows executable named _build.py is SC-BINARY, CRITICAL,
+        which says what it is, beside the SC-TRUNCATED that says no rule read it."""
+        root = tempfile.mkdtemp(prefix="lz-mcp-pe-")
+        self.addCleanup(shutil.rmtree, root, True)
+        path = os.path.join(root, "_build.py")
+        with open(path, "wb") as fh:
+            fh.write(b"MZ\x90\x00\x03\x00\x00\x00\x04\x00\x00\x00\xff\xff" + b"\x00" * 2034)
+        out = server.tool_scan_files({"paths": [path]})
+        found = {(i["rule"], i["sev"], i["msg"]) for i in out["files"][path]["issues"]}
+        self.assertIn(("SC-BINARY", "CRITICAL", "_build.py is not source code but a program: "
+                                                "Windows PE executable/DLL."), found)
+        self.assertIn("SC-TRUNCATED", {r for r, _, _ in found})
+
 
 class ScanPackageStoreTests(unittest.TestCase):
     def test_store_failure_keeps_the_verdict(self):

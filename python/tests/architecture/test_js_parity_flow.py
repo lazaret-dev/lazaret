@@ -1,15 +1,20 @@
-"""Engine parity for the cross-file flow engine's JavaScript half: the npm
-engine's js/src/scanner/flow.js and jsflow.js against lazaret.scanner.flow
-and jsflow (_analyze_js, analyze), on parsed trees since 0.1.7.
+"""Engine parity for the cross-file flow engine: the npm package's
+js/src/scanner/flow.js against lazaret.scanner.flow (_analyze_python,
+_analyze_js, analyze). Since the Rust-first refactor both run the engine's
+passes (the `py_flow` and `js_flow` calls: natively in the Python package,
+as WebAssembly in the npm package; before it, flow.py's own Python pass,
+which the npm package had no port of, and jsflow.py and its npm twin) and
+build their findings from their outputs, so this holds the two hosts'
+findings — and the two builds of the passes — to each other.
 
 1. Both CLIs on a tree with JavaScript flows (a command and an SQL sink
    reached from a route in another file, a sanitized and a placeholder call,
    a U+2028 that moves the line, a credential literal in a snippet, a
    dependency that is not analyzed): the same findings, every field of the
    X-* findings including the redacted snippets, the same gate and exit code.
-2. The Python half has no port: its X-* flow on a Python file stays
-   Python-only, and the npm engine's gate label says the project's Python
-   files were not analyzed; with no Python files the labels are identical.
+2. A Python flow beside them: both CLIs report it, and the gate label is
+   the same (the npm engine's said the project's Python files were not
+   analyzed, until it ran the Python pass too).
 3. flow.analyze and analyzeFlows compared directly, in one node process, on
    the review's JavaScript cases (brace counting, sink lines, modules and
    returned values, calls that can't be resolved and the evidence that binds
@@ -20,10 +25,13 @@ and jsflow (_analyze_js, analyze), on parsed trees since 0.1.7.
    variables, TypeScript, JSX), the size caps (code points, not UTF-16
    units), the fixpoint's cap and the work budget, files the reader rejects,
    seeded generated projects (tests/architecture/jsgen.py) and seeded token
-   soups: every field of every finding, in order.
+   soups; and Python's: test_snapshot_py_flow.py's cases and seeded
+   generated projects (tests/architecture/pygen.py): every field of every
+   finding, in order.
 
 All content is inert: nothing is executed, credentials are dummies.
-Skipped where node is missing.
+Skipped where node or the npm package's WebAssembly build is missing (npm
+run build in js/).
 """
 import json
 import os
@@ -84,8 +92,7 @@ def write_tree(root, tree):
 def flows(report):
     return sorted((i["rule"], i["file"].replace("\\", "/"), i["line"], i["sev"], i["msg"], i["name"], i["why"],
                    i["fix"], i["ref"], i["type"], json.dumps(i["snippet"]), i["snipStart"])
-                  for i in report["issues"] if i["rule"].startswith(parity.FLOW_PREFIXES)
-                  and not parity._python_only(i, project=report["project"]))
+                  for i in report["issues"] if i["rule"].startswith(parity.FLOW_PREFIXES))
 
 
 def js_files(*pairs):
@@ -364,6 +371,7 @@ class FlowParityTests(unittest.TestCase):
     maxDiff = None
     assert_same = parity.EngineParityTests.assert_same
 
+    @unittest.skipUnless(parity.NPM_READY, parity.NPM_SKIP)
     def test_cli_trees_agree(self):
         for label, tree, deps in (("js", TREE, False), ("js --deps", TREE, True),
                                   ("js+py", {**TREE, **PY_FLOW}, False)):
@@ -374,35 +382,29 @@ class FlowParityTests(unittest.TestCase):
                 self.assertEqual(flows(js[1]), flows(py[1]))            # every field, redacted snippets included
                 found = {(i["rule"], i["file"].replace("\\", "/"), i["line"]) for i in js[1]["issues"]
                          if i["rule"].startswith("X-")}
+                py_flow = {("X-CMD", "tool/app.py", 10)} if "py" in label else set()
                 self.assertEqual(found, {("X-CMD", "routes/app.js", 5), ("X-SQL", "routes/app.js", 6),
-                                         ("X-CMD", "routes/sep.js", 3)})
+                                         ("X-CMD", "routes/sep.js", 3)} | py_flow)
                 for _, report, _ in (js, py):
                     self.assertNotIn(SEED, json.dumps(report))
                     self.assertFalse([i for i in report["issues"] if i["rule"].startswith("X-")
                                       and "node_modules" in i["file"]])
                 self.assertEqual((js[0], py[0]), (1, 1))
-                js_gate, py_gate = js[1]["conditions"][-1], py[1]["conditions"][-1]
-                self.assertEqual(py_gate, {"label": "No cross-file taint flows", "ok": False})
-                if "py" in label:
-                    self.assertEqual(js_gate, {"label": "No cross-file taint flows (JavaScript only: "
-                                                        "1 Python file not analyzed)", "ok": False})
-                    self.assertIn(("X-CMD", "tool/app.py"), {(i["rule"], i["file"].replace("\\", "/"))
-                                                             for i in py[1]["issues"]})
-                else:
-                    self.assertEqual(js_gate, py_gate)
+                for _, report, _ in (js, py):
+                    self.assertEqual(report["conditions"][-1], {"label": "No cross-file taint flows", "ok": False})
 
-    def test_label_counts_python_files_not_dependencies(self):
+    @unittest.skipUnless(parity.NPM_READY, parity.NPM_SKIP)
+    def test_python_files_and_dependencies_keep_the_label(self):
         tree = {"a.py": "x = 1\n", "b/c.py": "y = 2\n", "node_modules/d/e.py": "z = 3\n",
                 "node_modules/d/package.json": '{"name": "d", "version": "1.0.0"}\n', "app.js": "const a = 1;\n"}
         with tempfile.TemporaryDirectory() as root:
             write_tree(root, tree)
             js, py = parity.both(root, deps=True)
             self.assert_same(js, py, label="label")
-            self.assertEqual(js[1]["conditions"][-1],
-                             {"label": "No cross-file taint flows (JavaScript only: 2 Python files not analyzed)",
-                              "ok": True})
-            self.assertEqual(py[1]["conditions"][-1], {"label": "No cross-file taint flows", "ok": True})
+            for _, report, _ in (js, py):
+                self.assertEqual(report["conditions"][-1], {"label": "No cross-file taint flows", "ok": True})
 
+    @unittest.skipUnless(parity.NPM_READY, parity.NPM_SKIP)
     def test_coverage_notes_do_not_rate_the_code(self):
         """A file the JavaScript reader rejects is a Q-FLOW-SKIPPED note: it
         says what was not analyzed, not how the code is written, so neither
@@ -418,6 +420,32 @@ class FlowParityTests(unittest.TestCase):
                 self.assertEqual([i["rule"] for i in report["issues"]], ["Q-FLOW-SKIPPED"] * 3)
                 self.assertEqual(report["ratings"]["maintainability"], "A")
 
+    def compare(self, sets):
+        """flow.analyze and analyzeFlows on each file set: every field of
+        every finding, in order. The findings."""
+        p = subprocess.run([parity.NODE, "--input-type=module", "-e", NPM_FLOW, FLOW_JS],
+                           input=json.dumps({"sets": sets}), capture_output=True,
+                           encoding="utf-8", errors="replace", timeout=40)
+        self.assertEqual(p.returncode, 0, p.stderr[-2000:])
+        got = json.loads(p.stdout)
+        self.assertEqual(len(got), len(sets))
+        for files, js in zip(sets, got):
+            self.assertEqual(js, flow.analyze(files), json.dumps(files)[:300])
+        return [i for f in got for i in f]
+
+    @unittest.skipUnless(parity.NPM_READY, parity.NPM_SKIP)
+    def test_engines_agree_on_every_python_finding(self):
+        from tests.architecture import pygen, test_snapshot_py_flow as spf
+        sets = [[dict(f, lang="py") for f in files] for files in spf.review_cases() + pygen.projects(20261003, 200)]
+        # a chain whose every link reads the chain again: the work budget's note
+        sets.append([{"path": "c.py", "content": "def f(x):\n    y = x" + "()" * 9000 + "\n", "lang": "py"}])
+        found = self.compare(sets)
+        rules = {i["rule"] for i in found}
+        self.assertTrue({"X-CMD", "X-SQL", "X-XSS", "X-CODE", "X-SSRF", "X-REDIR", "X-PATH", "X-SSTI",
+                         "Q-FLOW-SKIPPED", "Q-FLOW-INCOMPLETE", "Q-FLOW-RECURSION"} <= rules, rules)
+        self.assertGreater(len(found), 500)
+
+    @unittest.skipUnless(parity.NPM_READY, parity.NPM_SKIP)
     def test_engines_agree_on_every_finding(self):
         rnd = random.Random(20260927)
         sets = review_cases()
@@ -425,18 +453,9 @@ class FlowParityTests(unittest.TestCase):
         for _ in range(200):
             sets.append([{"path": f"p{k}.js", "content": soup(rnd) + "\n" + soup(rnd) + "\n" + soup(rnd), "lang": "js"}
                          for k in range(rnd.randint(1, 4))])
-        p = subprocess.run([parity.NODE, "--input-type=module", "-e", NPM_FLOW, FLOW_JS],
-                           input=json.dumps({"sets": sets}), capture_output=True,
-                           encoding="utf-8", errors="replace", timeout=40)
-        self.assertEqual(p.returncode, 0, p.stderr[-2000:])
-        got = json.loads(p.stdout)
-        total = 0
-        for files, js in zip(sets, got):
-            want = flow.analyze(files)
-            total += len(want)
-            self.assertEqual(js, want, json.dumps(files)[:300])
+        found = self.compare(sets)
+        total = len(found)
         # not vacuous: every sink category, both kinds of flow, each note
-        found = [i for f in got for i in f]
         rules = {i["rule"] for i in found}
         self.assertTrue({"X-CMD", "X-SQL", "X-XSS", "X-CODE", "X-SSRF", "X-REDIR", "X-PATH", "X-SSTI", "X-FLOW-SKIPPED",
                          "Q-FLOW-SKIPPED", "Q-FLOW-INCOMPLETE"} <= rules, rules)

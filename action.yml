@@ -1,0 +1,82 @@
+# Lazaret as a GitHub Action: scan the checked-out project and write a
+# SARIF 2.1.0 report for GitHub code scanning (README.md, "In CI").
+#
+#   - uses: lazaret-dev/lazaret@<full commit SHA> # v0.1.8
+#     id: lazaret
+#   - uses: github/codeql-action/upload-sarif@<full commit SHA> # v…
+#     if: ${{ !cancelled() }}
+#     with:
+#       sarif_file: ${{ steps.lazaret.outputs.sarif }}
+#
+# It installs Lazaret from this action's own files, the commit you pin, and
+# compiles the native engine with the runner's cargo (GitHub's hosted
+# runners have Rust; a self-hosted runner needs it, rust-version in
+# rust/Cargo.toml or later): what runs is that commit's code, not a package
+# fetched by its version number, which a registry could be made to serve
+# differently. Nothing is downloaded: the engine has no external crates and
+# the install uses no package index. It takes a minute or two.
+#
+# Inputs reach the scripts through the environment, never spliced into
+# them, so a value can't run as shell.
+name: Lazaret
+description: Security, supply-chain and quality analysis for Python and JavaScript, with a SARIF report for code scanning.
+branding:
+  icon: shield
+  color: gray-dark
+inputs:
+  path:
+    description: The directory to scan, relative to the workspace.
+    required: false
+    default: "."
+  sarif:
+    description: Where to write the SARIF report; a relative path is under the scanned directory, as with the CLI's --sarif.
+    required: false
+    default: lazaret.sarif
+  gate:
+    description: "true: the step fails when Lazaret's quality gate fails (--ci). The report is written either way."
+    required: false
+    default: "true"
+  deps:
+    description: "true: also audit the installed dependencies (node_modules, a virtual environment) for supply-chain indicators (--deps)."
+    required: false
+    default: "false"
+outputs:
+  sarif:
+    description: The SARIF report's path, for github/codeql-action/upload-sarif.
+    value: ${{ steps.scan.outputs.sarif }}
+runs:
+  using: composite
+  steps:
+    - name: Install Lazaret from this action's commit (compiles the engine)
+      shell: bash
+      run: |
+        set -euo pipefail
+        python="$(command -v python3 || command -v python)"
+        "$python" -m venv "$RUNNER_TEMP/lazaret-action"
+        venv="$RUNNER_TEMP/lazaret-action/bin/python"
+        [ -x "$venv" ] || venv="$RUNNER_TEMP/lazaret-action/Scripts/python.exe"
+        "$venv" -m pip install --no-index --disable-pip-version-check "$GITHUB_ACTION_PATH/python"
+    - name: Scan
+      id: scan
+      shell: bash
+      env:
+        SCAN_PATH: ${{ inputs.path }}
+        SARIF_PATH: ${{ inputs.sarif }}
+        GATE: ${{ inputs.gate }}
+        DEPS: ${{ inputs.deps }}
+      run: |
+        set -euo pipefail
+        venv="$RUNNER_TEMP/lazaret-action/bin/python"
+        [ -x "$venv" ] || venv="$RUNNER_TEMP/lazaret-action/Scripts/python.exe"
+        args=(-m lazaret "$SCAN_PATH" --sarif "$SARIF_PATH" --no-html --no-json)
+        case "$GATE" in true) args+=(--ci) ;; false) ;; *) echo "::error::gate must be true or false" >&2; exit 2 ;; esac
+        case "$DEPS" in true) args+=(--deps) ;; false) ;; *) echo "::error::deps must be true or false" >&2; exit 2 ;; esac
+        case "$SARIF_PATH" in
+          /*|[A-Za-z]:*) report="$SARIF_PATH" ;;
+          *) report="${SCAN_PATH%/}/$SARIF_PATH" ;;
+        esac
+        case "$report" in
+          *$'\n'*|*$'\r'*) echo "::error::path and sarif must be one line each" >&2; exit 2 ;;
+        esac
+        echo "sarif=$report" >> "$GITHUB_OUTPUT"
+        "$venv" "${args[@]}"

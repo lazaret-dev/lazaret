@@ -1,8 +1,10 @@
-"""The JavaScript reader the cross-file pass parses with (lazaret.scanner.
-jsparse, 0.1.7): ESTree-shaped trees (acorn's and acorn-jsx's node types and
+"""The JavaScript reader the cross-file pass parses with: the engine's
+parser (the `js_parse` call: rust/crates/lazaret-engine/src/jsparse/), a
+port of lazaret.scanner.jsparse (0.1.7), which the Rust-first refactor
+retired. ESTree-shaped trees (acorn's and acorn-jsx's node types and
 fields) for JavaScript, JSX and TypeScript, every node with the line it
-starts on, and a JsSyntaxError — a line and a reason — for what it cannot
-read, in linear time.
+starts on, and an error — a line and a reason — for what it cannot read, in
+linear time.
 
 What these pin: node shapes, line numbering (LF, CR, CRLF, U+2028, U+2029),
 literals (a string's cooked value with every escape, an escaped surrogate
@@ -15,17 +17,40 @@ decorators), Flow's annotations in a .js file, the dialect a file name
 picks, the errors, and hostile inputs (deep nesting, long speculative
 reads, unterminated literals, minified single lines) staying fast.
 
-The npm engine's twin (js/src/lib/jsparse.js) must build the same trees:
-tests/architecture/test_js_parity_parse.py. Inert text only.
+The trees are held to the recorded ones by
+tests/architecture/test_snapshot_js_parse.py. Inert text only. Skipped where
+the native library is not built.
 """
 import time
 import unittest
 
-from lazaret.scanner import jsparse
+from lazaret.scanner import _native
+
+MAX_DEPTH = 256                  # the parser's depth limit (jsparse::MAX_DEPTH)
+
+
+class JsSyntaxError(Exception):
+    """The parser's answer for what it cannot read: a line and a reason."""
+
+    def __init__(self, line, reason):
+        super().__init__(f"line {line}: {reason}")
+        self.line, self.reason = line, reason
+
+
+def parse(src, ts=False, jsx=True, path=None):
+    """The Program node of `src` (in the dialect `path` picks, when given);
+    JsSyntaxError when it cannot be read."""
+    if path is None:
+        answer = _native.call("js_parse", {"ts": ts, "jsx": jsx}, src)
+    else:
+        answer = _native.call("js_parse_file", {"path": path}, src)
+    if "error" in answer:
+        raise JsSyntaxError(answer["error"]["line"], answer["error"]["reason"])
+    return answer
 
 
 def body(src, ts=False, jsx=True):
-    return jsparse.parse(src, ts, jsx)["body"]
+    return parse(src, ts, jsx)["body"]
 
 
 def expr(src, ts=False, jsx=True):
@@ -33,28 +58,10 @@ def expr(src, ts=False, jsx=True):
     return st["expression"]
 
 
-def error(src, ts=False, jsx=True):
-    with self_raises() as ctx:
-        jsparse.parse(src, ts, jsx)
-    return ctx.exception
-
-
-class self_raises:
-    def __enter__(self):
-        return self
-
-    def __exit__(self, kind, exc, tb):
-        if kind is None:
-            raise AssertionError("no JsSyntaxError")
-        if not issubclass(kind, jsparse.JsSyntaxError):
-            return False
-        self.exception = exc
-        return True
-
-
+@unittest.skipUnless(_native.available(), f"native engine not built ({_native.load_error()})")
 class Shapes(unittest.TestCase):
     def test_a_small_program(self):
-        tree = jsparse.parse("const { a, b: [c] = [] } = require('m');\nexport function f(x, ...y) {\n  return x?.y(z);\n}\n")
+        tree = parse("const { a, b: [c] = [] } = require('m');\nexport function f(x, ...y) {\n  return x?.y(z);\n}\n")
         self.assertEqual(tree["type"], "Program")
         decl, exp = tree["body"]
         self.assertEqual((decl["type"], decl["kind"], decl["line"]), ("VariableDeclaration", "const", 1))
@@ -96,6 +103,7 @@ class Shapes(unittest.TestCase):
         self.assertEqual(expr("import('./x', { with: { type: 'json' } })")["type"], "ImportExpression")
 
 
+@unittest.skipUnless(_native.available(), f"native engine not built ({_native.load_error()})")
 class Lines(unittest.TestCase):
     def test_every_line_terminator(self):
         for nl in ("\n", "\r", "\r\n", "\u2028", "\u2029"):
@@ -114,6 +122,7 @@ class Lines(unittest.TestCase):
         self.assertEqual([st["line"] for st in body("/* a\nb */ x;\n'c\\\nd'; y;")], [2, 3, 4])
 
 
+@unittest.skipUnless(_native.available(), f"native engine not built ({_native.load_error()})")
 class Literals(unittest.TestCase):
     def test_a_strings_cooked_value(self):
         self.assertEqual(expr("'a\\n\\x41\\u0042\\u{1F600}\\101\\\ncont\\q'")["value"],
@@ -148,6 +157,7 @@ class Literals(unittest.TestCase):
         self.assertEqual(expr("`\\u{zz}`" if False else "`\\\\`")["quasis"][0]["raw"], "\\\\")
 
 
+@unittest.skipUnless(_native.available(), f"native engine not built ({_native.load_error()})")
 class Asi(unittest.TestCase):
     def test_restricted_productions_and_continuations(self):
         self.assertEqual([st["type"] for st in body("function f() { return\nx }")[0]["body"]["body"]],
@@ -158,6 +168,7 @@ class Asi(unittest.TestCase):
         self.assertEqual([st["type"] for st in body("x\n=> 1" if False else "x = 1\n[1].map(f)")], ["ExpressionStatement"])
 
 
+@unittest.skipUnless(_native.available(), f"native engine not built ({_native.load_error()})")
 class Jsx(unittest.TestCase):
     def test_elements(self):
         el = expr('<a:b c="d" {...e}>t{f}<g.h /></a:b>')
@@ -169,10 +180,11 @@ class Jsx(unittest.TestCase):
 
     def test_not_in_typescript(self):
         self.assertEqual(expr("<T>(x)", ts=True, jsx=False)["type"], "Identifier")      # an assertion, left out
-        with self.assertRaises(jsparse.JsSyntaxError):
-            jsparse.parse("<a></a>", ts=True, jsx=False)
+        with self.assertRaises(JsSyntaxError):
+            parse("<a></a>", ts=True, jsx=False)
 
 
+@unittest.skipUnless(_native.available(), f"native engine not built ({_native.load_error()})")
 class TypeScript(unittest.TestCase):
     def test_types_are_left_out(self):
         (decl,) = body("let x: number = <number>y;", ts=True, jsx=False)
@@ -212,14 +224,23 @@ class TypeScript(unittest.TestCase):
         self.assertEqual(fn["body"]["body"][0]["argument"]["name"], "x")
 
     def test_dialect(self):
-        self.assertEqual([jsparse.dialect(p) for p in ("a.ts", "b.MTS", "c.cts", "d.tsx", "e.js", "f.jsx", "g.mjs")],
-                         [(True, False)] * 3 + [(True, True)] + [(False, True)] * 3)
+        # (JSX, TypeScript's enums) as each file name reads them
+        def reads(path, src):
+            try:
+                parse(src, path=path)
+                return True
+            except JsSyntaxError:
+                return False
+        self.assertEqual([(reads(p, "<a></a>;"), reads(p, "enum E { A }"))
+                          for p in ("a.ts", "b.MTS", "c.cts", "d.tsx", "e.js", "f.jsx", "g.mjs")],
+                         [(False, True)] * 3 + [(True, True)] + [(True, False)] * 3)
 
 
+@unittest.skipUnless(_native.available(), f"native engine not built ({_native.load_error()})")
 class Errors(unittest.TestCase):
     def check(self, src, line, reason, ts=False):
-        with self.assertRaises(jsparse.JsSyntaxError) as ctx:
-            jsparse.parse(src, ts, not ts)
+        with self.assertRaises(JsSyntaxError) as ctx:
+            parse(src, ts, not ts)
         self.assertEqual((ctx.exception.line, ctx.exception.reason, str(ctx.exception)),
                          (line, reason, f"line {line}: {reason}"))
 
@@ -232,24 +253,23 @@ class Errors(unittest.TestCase):
         self.check("f(", 1, "unexpected end of input")
 
     def test_nesting_is_bounded(self):
-        ok = "(" * (jsparse.MAX_DEPTH // 4) + "x" + ")" * (jsparse.MAX_DEPTH // 4)       # two levels a parenthesis
+        ok = "(" * (MAX_DEPTH // 4) + "x" + ")" * (MAX_DEPTH // 4)       # two levels a parenthesis
         self.assertEqual(expr(ok)["type"], "Identifier")
         for src in ("(" * 5000 + "x" + ")" * 5000, "[" * 100000, "{" * 100000, "a = b = " * 100000 + "c",
                     "function f(){" * 5000, "<a>" * 5000, "if (x) " * 100000 + "y;"):
             with self.subTest(src=src[:20]):
-                with self.assertRaises(jsparse.JsSyntaxError) as ctx:
-                    jsparse.parse(src)
+                with self.assertRaises(JsSyntaxError) as ctx:
+                    parse(src)
                 self.assertEqual(ctx.exception.reason, "nesting too deep")
 
 
+@unittest.skipUnless(_native.available(), f"native engine not built ({_native.load_error()})")
 class Linear(unittest.TestCase):
     def fast(self, src, ts=False, limit=10.0):
         t = time.perf_counter()
-        try:
-            jsparse.parse(src, ts, not ts)
-        except jsparse.JsSyntaxError:
-            pass
+        status, _answer = _native.call_raw("js_parse", {"ts": ts, "jsx": not ts}, src)   # (a tree may be deep)
         dt = time.perf_counter() - t
+        self.assertEqual(status, _native.STATUS_OK)
         self.assertLess(dt, limit, repr(src[:40]))
 
     def test_hostile_inputs(self):
@@ -262,7 +282,8 @@ class Linear(unittest.TestCase):
 
     def test_a_minified_single_line(self):
         # line terminators are looked for between two tokens only (the npm
-        # twin searched to the end of the file: quadratic on one long line)
+        # package's twin of jsparse.py searched to the end of the file:
+        # quadratic on one long line)
         line = "var a=function(b,c){return b+c},d=[1,2,3].map(function(e){return e*2});" * 15000
         self.fast(line, limit=10.0)
 

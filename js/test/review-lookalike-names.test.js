@@ -57,11 +57,14 @@ test("a regex literal holds no names", () => {
 });
 
 test("a string is read by the lexer", () => {
-  // a string's other lines (a docstring, a template, a string continued with a
-  // backslash); a template or f-string is one literal, its fields too
+  // a string's other lines (a docstring, a template's text, a string continued
+  // with a backslash)
   for (const [lang, text] of [["py", 'def f():\n    """\n    v\u0430lue \u0435val(x)\n    """\n'],
-    ["js", "const t = `\n  v\u0430lue ${\u0435val(x)}\n`;\n"], ["js", 'const s = "a\\\n\u0435val";\n'],
-    ["py", "x = f'{\u0435val(p)}'\n"]]) assert.deepEqual(found(text, lang), [], text);
+    ["js", "const t = `\n  v\u0430lue \u0435val(x)\n`;\n"], ["js", 'const s = "a\\\n\u0435val";\n']])
+    assert.deepEqual(found(text, lang), [], text);
+  // a template's or an f-string's fields are code: a call there runs
+  for (const [lang, text, line] of [["js", "const t = `\n  v\u0430lue ${\u0435val(x)}\n`;\n", 2],
+    ["py", "x = f'{\u0435val(p)}'\n", 1]]) assert.deepEqual(found(text, lang), [["CRITICAL", line, EVAL_MSG]], text);
   // a quote escaped in a string ends nothing
   for (const [lang, text] of [["js", "const s = 'it\\'s' + \u0435val(x) + 'y';\n"],
     ["py", "s = 'it\\'s' + \u0435val(x) + 'y'\n"]]) assert.deepEqual(found(text, lang), [["CRITICAL", 1, EVAL_MSG]], text);

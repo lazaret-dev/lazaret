@@ -1,19 +1,25 @@
-// Cross-function and cross-file taint flows in JavaScript: the twin of the
-// JavaScript half of lazaret/scanner/flow.py (_analyze_js, analyze). The two
+// Cross-function and cross-file taint flows in Python and JavaScript: the twin
+// of lazaret/scanner/flow.py (_analyze_python, _analyze_js, analyze). The two
 // must report the same X-* findings — rule, file, line, severity, message,
-// snippet — for the same JavaScript files; the parity tests hold them to it.
-// The Python engine's other half (Python files, AST-based) has no port: the
-// npm engine's gate says so.
+// snippet — for the same files; the parity tests hold them to it.
 //
-// Since 0.1.7 the pass reads parsed trees (lib/jsparse.js) and follows
-// values with function summaries to a fixpoint: scanner/jsflow.js, the twin
-// of lazaret/scanner/jsflow.py. This module builds the findings and keeps
-// the public entry points.
+// The passes are the engine's (rust/crates/lazaret-engine/src/pyflow/ and
+// jsflow/, the `py_flow` and `js_flow` calls, which the Python package runs
+// too): parsed trees, function summaries to a fixpoint, a work budget per
+// syntax tree node. This module builds the findings from their outputs and
+// keeps the public entry points. (Until phase 3 of the Rust-first refactor
+// the Python pass was flow.py's own, on Python's ast, and had no port here.)
 import { cmpCodePoints } from "../lib/pycompat.js";
+import { jsFlow, pyFlow } from "../lib/native.js";
 import { REDACT, contextRedacted, contextSecrets, redactText, registerScanContext, SECRET_SKIP_RE }
   from "../lib/redact.js";
-import { analyze as analyzeJs } from "./jsflow.js";
 import { splitLines } from "./lines.js";
+
+const LINES_RE = /\r\n|[\n\r\u2028\u2029]/;                // JavaScript's line terminators
+// test hooks: { runLimit: [base, steps per node] } lowers the limit of one function's reading of
+// JavaScript; py: the Python pass's lower limits (pyFlow's options: twin of flow.MAX_ITERS,
+// FLOW_MAX_FILES, FLOW_MAX_BYTES and _PY_WORK_LIMIT)
+export const FLOW_OPTIONS = { runLimit: null, py: { maxIters: 50, maxFiles: 20_000, maxBytes: 64_000_000, workLimit: null } };
 
 // category -> [severity, cwe, fix]; twin of flow.SINK_META
 const SINK_META = {
@@ -54,6 +60,50 @@ function flowIssue(cat, callerFile, line, lines, sourceLoc, sinkLoc, chain) {
   };
 }
 
+/** X-FLOW-SKIPPED: a file over the pass's size limit, in code points (twin of flow._skipped_size). */
+function skippedSize(path, n, limit) {
+  return {
+    rule: "X-FLOW-SKIPPED", name: "JS flow analysis skipped (size)", type: "HOTSPOT", sev: "INFO",
+    msg: `${path} is ${n} characters; interprocedural JS taint analysis is skipped above ${limit} characters.`,
+    why: "Reading a file this large (usually minified or machine-generated) would cost the " +
+      "cross-file pass more time and memory than a scan should spend on one file.",
+    fix: "Split or deminify the file, or exclude it from the scan explicitly if the code is generated.",
+    ref: "Scalability", file: path, line: 1, snippet: [], snipStart: 1,
+  };
+}
+
+/** The Python pass's findings for `files` (twin of flow._analyze_python). */
+function analyzePy(files, findings) {
+  if (!files.length) return;
+  const lines = new Map();                               // a file's lines (by its index), for the snippets
+  for (const out of pyFlow(files, FLOW_OPTIONS.py)) {
+    if (out[0] === "issue") {
+      const [, cat, path, line, source, sink, chain, k] = out;
+      if (!lines.has(k)) lines.set(k, files[k].content.split("\n"));
+      findings.push(flowIssue(cat, path, line, lines.get(k), source, sink, chain));
+    } else {
+      findings.push(flowNote(...out.slice(1)));
+    }
+  }
+}
+
+/** The JavaScript pass's findings for `files` (twin of flow._analyze_js). */
+function analyzeJs(files, findings) {
+  if (!files.length) return;
+  const lines = new Map();                               // a file's lines (by its index), for the snippets
+  for (const out of jsFlow(files, { runLimit: FLOW_OPTIONS.runLimit })) {
+    if (out[0] === "skipped_size") {
+      findings.push(skippedSize(out[1], out[2], out[3]));
+    } else if (out[0] === "issue") {
+      const [, cat, path, line, source, sink, chain, k] = out;
+      if (!lines.has(k)) lines.set(k, files[k].content.split(LINES_RE));
+      findings.push(flowIssue(cat, path, line, lines.get(k), source, sink, chain));
+    } else {
+      findings.push(flowNote(...out.slice(1)));
+    }
+  }
+}
+
 /** An INFO coverage note (twin of flow._flow_note). */
 function flowNote(rule, name, fname, line, msg, why, fix) {
   return { rule, name, type: "SMELL", sev: "INFO", msg, why, fix,
@@ -63,26 +113,30 @@ function flowNote(rule, name, fname, line, msg, why, fix) {
 
 
 /**
- * Cross-function / cross-file taint findings for the JavaScript files of a
- * scan (twin of flow.analyze for JavaScript). Never throws: an internal
- * error ends the pass with a Q-FLOW-INCOMPLETE note. Dependency files are
- * not analyzed.
+ * Cross-function / cross-file taint findings for the Python and JavaScript
+ * files of a scan (twin of flow.analyze). Never throws: an internal error
+ * ends a language's pass with a Q-FLOW-INCOMPLETE note. Dependency files
+ * are not analyzed.
  */
 export function analyzeFlows(files) {
   const findings = [];
-  let js = [];
+  let own = [];
   try {
-    js = files.filter((f) => f && typeof f === "object" && f.lang === "js" && !f.dep && typeof f.path === "string");
-  } catch { js = []; }
-  try {
-    analyzeJs(js, findings, flowIssue, flowNote);
-  } catch (e) {
-    findings.push(flowNote("Q-FLOW-INCOMPLETE", "Flow analysis incomplete (internal error)",
-      js.length ? js[0].path : "?", 1,
-      `The JavaScript cross-file taint pass stopped on an internal error (${e?.name ?? "Error"}); ` +
-        "findings it had already produced are kept.",
-      "An unexpected input made the interprocedural engine fail; the rest of the scan is unaffected.",
-      "Please report the file that triggers this to the Lazaret maintainers."));
+    own = files.filter((f) => f && typeof f === "object" && (f.lang === "py" || f.lang === "js") && !f.dep
+      && typeof f.path === "string");
+  } catch { own = []; }
+  for (const [run, lang, name] of [[analyzePy, "py", "Python"], [analyzeJs, "js", "JavaScript"]]) {
+    const mine = own.filter((f) => f.lang === lang);
+    try {
+      run(mine, findings);
+    } catch (e) {
+      findings.push(flowNote("Q-FLOW-INCOMPLETE", "Flow analysis incomplete (internal error)",
+        mine.length ? mine[0].path : "?", 1,
+        `The ${name} cross-file taint pass stopped on an internal error (${e?.name ?? "Error"}); ` +
+          "findings it had already produced are kept.",
+        "An unexpected input made the interprocedural engine fail; the rest of the scan is unaffected.",
+        "Please report the file that triggers this to the Lazaret maintainers."));
+    }
   }
   const sorted = findings.map((f, k) => [f, k])
     .sort((a, b) => cmpCodePoints(String(a[0].file), String(b[0].file)) || a[0].line - b[0].line || a[1] - b[1]);

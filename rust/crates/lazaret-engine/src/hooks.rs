@@ -189,7 +189,35 @@ fn partition_eq(s: &[u32]) -> (&[u32], bool, &[u32]) {
 }
 
 /// core._node_script: (script, preloads, code).
-fn node_script(p: &Pack, args: &[PyStr]) -> (Option<PyStr>, Vec<PyStr>, Option<PyStr>) {
+pub(crate) fn node_script(p: &Pack, args: &[PyStr]) -> (Option<PyStr>, Vec<PyStr>, Option<PyStr>) {
+    let (at, preloads, code) = node_script_at(p, args);
+    (at.map(|k| args[k].clone()), preloads, code)
+}
+
+/// core._runtime_script: (script, preloads, code) for a JavaScript runtime
+/// other than node — node's reading of its words, a subcommand in `runs`
+/// skipped, the script kept only when it names a file.
+fn runtime_script(p: &Pack, args: &[PyStr], runs: &[PyStr]) -> (Option<PyStr>, Vec<PyStr>, Option<PyStr>) {
+    let (mut at, mut preloads, mut code) = node_script_at(p, args);
+    if let Some(k) = at {
+        if in_set(runs, &args[k]) {
+            let (more_at, more, more_code) = node_script_at(p, &args[k + 1..]);
+            preloads.extend(more);
+            code = more_code;
+            at = more_at.map(|m| k + 1 + m);
+        }
+    }
+    let script = at.map(|k| args[k].clone()).filter(|s| {
+        pystr::starts_with(s, "./")
+            || pystr::starts_with(s, "../")
+            || pystr::starts_with(s, "/")
+            || p.re("_RUNTIME_SCRIPT_RE").search(s).is_some()
+    });
+    (script, preloads, code)
+}
+
+/// core._node_script_at: (index of the script, preloads, code).
+fn node_script_at(p: &Pack, args: &[PyStr]) -> (Option<usize>, Vec<PyStr>, Option<PyStr>) {
     let code_flags = p.strs("_NODE_CODE_FLAGS");
     let value_flags = p.strs("_NODE_VALUE_FLAGS");
     let preload_flags = p.strs("_NODE_PRELOAD_FLAGS");
@@ -198,7 +226,7 @@ fn node_script(p: &Pack, args: &[PyStr]) -> (Option<PyStr>, Vec<PyStr>, Option<P
     while i < args.len() {
         let a = &args[i];
         if is(a, "--") {
-            return (args.get(i + 1).cloned(), preloads, None);
+            return (if i + 1 < args.len() { Some(i + 1) } else { None }, preloads, None);
         }
         if pystr::starts_with(a, "-") && !is(a, "-") {
             let (name, eq, val) = partition_eq(a);
@@ -217,13 +245,13 @@ fn node_script(p: &Pack, args: &[PyStr]) -> (Option<PyStr>, Vec<PyStr>, Option<P
             i += 1;
             continue;
         }
-        return (Some(a.clone()), preloads, None);
+        return (Some(i), preloads, None);
     }
     (None, preloads, None)
 }
 
 /// core._interpreter_script: (script, inline code).
-fn interpreter_script(args: &[PyStr]) -> (Option<PyStr>, Option<PyStr>) {
+pub(crate) fn interpreter_script(args: &[PyStr]) -> (Option<PyStr>, Option<PyStr>) {
     let mut i = 0;
     while i < args.len() {
         let a = &args[i];
@@ -451,8 +479,15 @@ impl<'p> Seg<'p> {
         let mut extra: Vec<PyStr> = Vec::new();
         let mut code: Option<PyStr> = None;
         let rest = &words[i + 1..];
+        let runtimes = p.map_strs("_JS_RUNTIMES");
+        let runtime = runtimes.iter().find(|(k, _)| k.as_slice() == base.as_slice());
         if in_set(p.strs("_NODE_NAMES"), &base) {
             let (s, e, cd) = node_script(p, rest);
+            script = s;
+            extra = e;
+            code = cd;
+        } else if let Some((_, runs)) = runtime {
+            let (s, e, cd) = runtime_script(p, rest, runs);
             script = s;
             extra = e;
             code = cd;
@@ -575,6 +610,27 @@ pub fn follow_hook(p: &Pack, cmd: &[u32]) -> (Vec<PyStr>, bool) {
 /// The code of each `node -e` in a command, as written (the parity tests' view).
 pub fn node_e_codes(p: &Pack, cmd: &[u32]) -> Vec<PyStr> {
     p.re("_NODE_E_RE").finditer(cmd).map(|m| m.first_group().unwrap_or(&[]).to_vec()).collect()
+}
+
+/// core._hook_is_suspicious: does an install hook's command run a download
+/// or evaluation tool (INSTALL_HOOK_RE)? `node -e` code that only loads a
+/// file of the package (`node -e "try{require('./postinstall')}catch(e){}"`)
+/// does not count. A hint in the finding's message, never evidence.
+pub fn hook_is_suspicious(p: &Pack, cmd: &[u32]) -> bool {
+    let hook = p.re("INSTALL_HOOK_RE");
+    if hook.search(cmd).is_none() {
+        return false;
+    }
+    let local = p.re("_LOCAL_REQUIRE_RE");
+    let danger = p.re("_INLINE_DANGER_RE");
+    let mut remainder = cmd.to_vec();
+    for m in p.re("_NODE_E_RE").finditer(cmd) {
+        let code = m.first_group().unwrap_or(&[]);
+        if local.search(code).is_some() && danger.search(&local.sub(code, &[], 0)).is_none() {
+            remainder = pystr::replace(&remainder, m.group0(), &u(" "));
+        }
+    }
+    hook.search(&remainder).is_some()
 }
 
 /// core.node_candidates

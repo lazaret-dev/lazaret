@@ -9,15 +9,16 @@
 //
 // The 30 s per-file backstop was checked only between rules, so one text
 // rule's per-match loop ran to the end (a 2 s budget: 13.5 s, all 10k
-// findings). The deadline is now checked inside per-match loops too; the
-// backstop tests below use a fake clock (every Date.now() read is 1 ms
-// later), so they are deterministic on any machine.
+// findings). Since 0.1.8 the pattern rules are the native engine's, which
+// a work budget bounds instead (the steps of its regex matcher): a file that
+// spends it is SC-TRUNCATED, tested below with a small budget.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { scanFile, setScanTimeBudget } from "../src/index.js";
+import { scanFile } from "../src/index.js";
 import { clipLine, mkIssue, cpIndexOf, SNIPPET_MAX, SNIPPET_LEAD } from "../src/lib/issue.js";
 import { cpIndex } from "../src/lib/pycompat.js";
+import { setWorkBudget } from "../src/lib/native.js";
 import { registerScanContext } from "../src/lib/redact.js";
 import { SECRET_SKIP_RE } from "../src/scanner/engine.js";
 
@@ -75,30 +76,19 @@ test("one line of 2.5k-20k `try{}catch(e){}` repeats scans in linear time", () =
   }
 });
 
-/** Run fn with a fake clock: each Date.now() read is 1 ms after the previous one. */
-function withTickingClock(budgetMs, fn) {
-  const realNow = Date.now;
-  let t = 0;
-  Date.now = () => t++;
-  setScanTimeBudget(budgetMs);
-  try { return fn(); } finally { Date.now = realNow; setScanTimeBudget(); }
-}
-
-test("the time backstop stops a text rule's per-match loop", () => {
-  const n = 20_000;
-  // one clock read per line in the line loop, then one per 256 text-rule
-  // matches: the budget runs out ~40 reads into B-EMPTY-CATCH's matches
-  const issues = withTickingClock(n + 40, () =>
-    scanFile({ name: "t.js", lang: "js", content: "try{}catch(e){}\n".repeat(n) }));
-  assert.equal(issues.filter((i) => i.rule === "SC-TRUNCATED").length, 1);
-  const cap = issues.find((i) => i.rule === "Q-CAPPED");
-  const total = issues.filter((i) => i.rule === "B-EMPTY-CATCH").length + (cap ? Number(cap.msg.split(" ")[0]) : 0);
-  assert.ok(total > 0 && total < n, `${total} of ${n} matches reported before the stop (was: all of them)`);
-});
-
-test("the time backstop stops the dependency decode flow inside one long line", () => {
-  // one line holding thousands of statements (dependency mode)
-  const content = "var d = atob(p); ".repeat(5000) + "\n";
-  const issues = withTickingClock(5, () => scanFile({ name: "dep.js", lang: "js", content, dep: true }));
-  assert.equal(issues.filter((i) => i.rule === "SC-TRUNCATED").length, 1);
+test("a file that spends the native engine's work budget is SC-TRUNCATED", () => {
+  // the pattern rules and the families are the native engine's (0.1.8): a work
+  // budget, not the clock, stops it; the file is reported as not fully scanned
+  setWorkBudget(2000);           // (the steps of the searches that take thousands: one long line's)
+  try {
+    for (const dep of [false, true]) {
+      const issues = scanFile({ name: "t.js", lang: "js", content: "var d = atob(p); eval(d); ".repeat(1000) + "\n", dep });
+      assert.deepEqual(issues.filter((i) => i.rule === "SC-TRUNCATED").map((i) => i.msg),
+        ["File not fully scanned: reading it spent the engine's work budget (a pattern that backtracks without "
+          + "end on this text)."], `dep: ${dep}`);
+    }
+  } finally {
+    setWorkBudget();
+  }
+  assert.ok(!scanFile({ name: "t.js", lang: "js", content: "var d = atob(p); eval(d);\n" }).some((i) => i.rule === "SC-TRUNCATED"));
 });

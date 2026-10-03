@@ -1,0 +1,2 @@
+# crossfile_distributions: 41 outputs, a hash per 100 (tests/architecture/_snapshots.py)
+f44a499e5a916d96

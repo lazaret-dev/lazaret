@@ -7,6 +7,7 @@ The registry's documents are fakes served by URL; nothing reaches the
 network. Package names are made up.
 """
 import datetime
+import json
 import os
 import unittest
 import urllib.parse
@@ -147,9 +148,15 @@ class NpmTests(unittest.TestCase):
 PYPI = "https://pypi.org/pypi/"
 
 
-def pypi_project(releases):
-    """{version: first upload} -> the project's JSON document (release files only)."""
-    return {"info": {}, "releases": {v: [{"upload_time_iso_8601": iso(t)}] for v, t in releases.items()}}
+def pypi_project(releases, roles=None, organization=None):
+    """{version: first upload} -> the project's JSON document (release files
+    only), with its "ownership" when `roles` ({user: role}) or an
+    organization is given."""
+    doc = {"info": {}, "releases": {v: [{"upload_time_iso_8601": iso(t)}] for v, t in releases.items()}}
+    if roles is not None or organization is not None:
+        doc["ownership"] = {"roles": [{"role": r, "user": u} for u, r in (roles or {}).items()],
+                            "organization": organization}
+    return doc
 
 
 class PypiTests(unittest.TestCase):
@@ -166,6 +173,33 @@ class PypiTests(unittest.TestCase):
         issue = repo._new_dependency_issue("pypi", *found[0][:2], prev, [])
         self.assertEqual((issue["sev"], issue["file"]), ("CRITICAL", "(release)"))
         self.assertTrue(issue["msg"].endswith("a package first published 24 hours before this release."), issue["msg"])
+
+    def test_the_projects_own_owners_and_organization(self):
+        """(the detection round) the JSON API's "ownership": a requirement an
+        owner or maintainer of the project also owns or maintains, or its
+        organization owns, does not count; another account's does, named."""
+        day = datetime.timedelta(days=1)
+        project = pypi_project({"1.0": OLD, "1.1": RELEASE}, roles={"alice": "Owner", "ci-bot": "Maintainer"},
+                               organization="acme-org")
+        docs = {PYPI + "acme/json": project, PYPI + "acme/1.0/json": {"info": {"requires_dist": []}},
+                PYPI + "acme-core/json": pypi_project({"0.1": RELEASE - day}, roles={"alice": "Owner"}),
+                PYPI + "acme-bot/json": pypi_project({"0.1": RELEASE - day}, roles={"ci-bot": "Maintainer"}),
+                PYPI + "acme-org-lib/json": pypi_project({"0.1": RELEASE - day}, roles={"carol": "Owner"},
+                                                         organization="acme-org"),
+                PYPI + "easy-day/json": pypi_project({"0.1": RELEASE - day}, roles={"mallory": "Owner", "eve": "Maintainer"},
+                                                     organization="other-org"),
+                PYPI + "no-ownership/json": pypi_project({"0.1": RELEASE - day})}
+        info = {"requires_dist": ["acme-core", "acme-bot", "acme-org-lib", "easy-day", "no-ownership"]}
+        prev, found = repo.pypi_new_dependencies("acme", "1.1", info, fetch=Registry(docs))
+        self.assertEqual(found, [("easy-day", day, ["eve", "mallory"]), ("no-ownership", day, [])])
+        msgs = [repo._new_dependency_issue("pypi", d, a, prev, o)["msg"] for d, a, o in found]
+        self.assertTrue(msgs[0].endswith("24 hours before this release by eve, mallory, who does not maintain this one."),
+                        msgs[0])
+        self.assertTrue(msgs[1].endswith("24 hours before this release."), msgs[1])
+        # a project document without "ownership" (a mirror): every account counts, as before
+        docs[PYPI + "acme/json"] = pypi_project({"1.0": OLD, "1.1": RELEASE})
+        prev, found = repo.pypi_new_dependencies("acme", "1.1", info, fetch=Registry(docs))
+        self.assertEqual([d for d, _a, _o in found], ["acme-bot", "acme-core", "acme-org-lib", "easy-day", "no-ownership"])
 
     def test_no_requirements_asks_nothing(self):
         reg = Registry({})
@@ -189,6 +223,29 @@ class ScanPackageTests(unittest.TestCase):
                 res = repo.scan_package("npm", "@acme/files", "0.2.1", resolved=rv)
             rules = [i["rule"] for i in res["issues"]]
             self.assertEqual((res["verdict"], "SC-NEW-DEPENDENCY" in rules), ("OK", False) if off else ("SUSPICIOUS", True))
+
+    def test_one_no_file_names_is_critical(self):
+        """A dependency 7 to 30 days old is MAJOR, and CRITICAL when no file
+        of the release names it (SC-UNUSED-DEPENDENCY)."""
+        manifest = parent()["versions"]["0.2.1"]
+        rv = ("0.2.1", "https://registry.npmjs.org/@acme/files/-/files-0.2.1.tgz", "tgz", "npm", manifest)
+        pj = json.dumps({"name": "@acme/files", "version": "0.2.1", "dependencies": manifest["dependencies"]})
+        reg = Registry({npm("@acme/files"): parent(),
+                        NPM + "easy-day-kit": dep("easy-day-kit", datetime.timedelta(days=10))})
+        for code, want in (("module.exports = require('files-kit');\n", (
+                "CRITICAL", 'Adds a dependency on "easy-day-kit", which 0.2.0 did not have and no file of this release '
+                            "names: a package first published 10 days before this release by mallory, who does not "
+                            "maintain this one.")),
+                           ("require('files-kit');\nrequire('easy-day-kit');\n", (
+                "MAJOR", 'Adds a dependency on "easy-day-kit", which 0.2.0 did not have: a package first published '
+                         "10 days before this release by mallory, who does not maintain this one."))):
+            data = tarball({"package.json": pj, "index.js": code})
+            with self.subTest(code=code), mock.patch.object(repo, "http_json", side_effect=reg), \
+                    mock.patch.object(repo, "http_bytes", return_value=data), \
+                    mock.patch.object(repo, "verify_digest", return_value=None):
+                res = repo.scan_package("npm", "@acme/files", "0.2.1", resolved=rv)
+                self.assertEqual([(i["sev"], i["msg"]) for i in res["issues"] if i["rule"] == "SC-NEW-DEPENDENCY"],
+                                 [want])
 
     def test_an_unreachable_registry_is_not_a_finding(self):
         manifest = parent()["versions"]["0.2.1"]

@@ -91,11 +91,15 @@ def default_npm_packages():
 class NpmRegistry:
     """An npm registry on 127.0.0.1: packuments (with `time`), version
     manifests and tarballs (with Last-Modified). `requests` records
-    (user-agent, path) of every request."""
+    (user-agent, path) of every request, `authorizations` (user-agent, path,
+    Authorization header). With `auth` (a whole Authorization header value)
+    it answers 401 to a request without it: a private registry."""
 
-    def __init__(self, packages=None):
+    def __init__(self, packages=None, auth=None):
         self.packages = default_npm_packages() if packages is None else packages
         self.requests = []
+        self.authorizations = []
+        self.auth = auth
         registry = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -114,6 +118,12 @@ class NpmRegistry:
             def do_GET(self):
                 path = urllib.parse.unquote(urllib.parse.urlsplit(self.path).path).lstrip("/")
                 registry.requests.append((self.headers.get("User-Agent", ""), path))
+                registry.authorizations.append((self.headers.get("User-Agent", ""), path,
+                                                self.headers.get("Authorization")))
+                if registry.auth is not None and self.headers.get("Authorization") != registry.auth:
+                    self._send(401, b'{"error": "authentication required"}',
+                               headers=[("WWW-Authenticate", 'Basic realm="registry"')])
+                    return
                 if "/-/" in path:
                     name, _, file = path.partition("/-/")
                     for version, (data, _m, published) in registry.packages.get(name, {}).items():
@@ -162,12 +172,15 @@ class NpmRegistry:
 
 
 # ---------------- PyPI ----------------
-def wheel(name, version, files, requires=()):
-    """A pure-Python wheel: {path: text} plus its dist-info."""
+def wheel(name, version, files, requires=(), scripts=None):
+    """A pure-Python wheel: {path: text} plus its dist-info (scripts:
+    {command: 'module:function'} console scripts)."""
     dist = f"{name.replace('-', '_')}-{version}.dist-info"
     body = dict(files)
     body[f"{dist}/METADATA"] = (f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n"
                                 + "".join(f"Requires-Dist: {r}\n" for r in requires))
+    if scripts:
+        body[f"{dist}/entry_points.txt"] = "[console_scripts]\n" + "".join(f"{k} = {v}\n" for k, v in scripts.items())
     body[f"{dist}/WHEEL"] = "Wheel-Version: 1.0\nGenerator: lazaret-tests\nRoot-Is-Purelib: true\nTag: py3-none-any\n"
     record = []
     for path, text in body.items():
@@ -203,15 +216,25 @@ def default_pypi_files():
     add("fresh-py", wheel("fresh-py", "1.0", {"fresh_py/__init__.py": "V = 1\n"}))
     add("fresh-py", wheel("fresh-py", "1.1", {"fresh_py/__init__.py": "V = 2\n"}), published=FRESH)
     add("evil-sdist", sdist("evil-sdist", "1.0", {"setup.py": REVERSE_SHELL_SETUP}))
+    # a command-line tool (uvx), and one whose dependency is evil
+    add("good-tool", wheel("good-tool", "1.0", {"good_tool/__init__.py": "def main():\n    print('good-tool ran')\n"},
+                           requires=["good-py"], scripts={"good-tool": "good_tool:main"}))
+    add("evil-tool", wheel("evil-tool", "1.0", {"evil_tool/__init__.py": "def main():\n    print('evil-tool ran')\n"},
+                           requires=["evil-py"], scripts={"evil-tool": "evil_tool:main"}))
     return out
 
 
 class PypiIndex:
-    """A PEP 691 (JSON) simple index on 127.0.0.1 and its files."""
+    """A PEP 691 (JSON) simple index on 127.0.0.1 and its files — or with
+    html=True a PEP 503 one (HTML pages, no upload times); with `auth` (a
+    whole Authorization header value) a private one, answering 401 without
+    it. `requests` records (user-agent, path, Authorization header)."""
 
-    def __init__(self, files=None):
+    def __init__(self, files=None, auth=None, html=False):
         self.files = default_pypi_files() if files is None else files
         self.requests = []
+        self.auth = auth
+        self.html = html
         index = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -231,10 +254,20 @@ class PypiIndex:
 
             def do_GET(self):
                 path = urllib.parse.unquote(urllib.parse.urlsplit(self.path).path)
-                index.requests.append((self.headers.get("User-Agent", ""), path))
+                index.requests.append((self.headers.get("User-Agent", ""), path, self.headers.get("Authorization")))
+                if index.auth is not None and self.headers.get("Authorization") != index.auth:
+                    self.send_response(401)
+                    self.send_header("WWW-Authenticate", 'Basic realm="index"')
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
                 parts = path.strip("/").split("/")
                 if len(parts) == 2 and parts[0] == "simple" and parts[1] in index.files:
-                    self._send(200, json.dumps(index.page(parts[1])).encode(), "application/vnd.pypi.simple.v1+json")
+                    if index.html:
+                        self._send(200, index.html_page(parts[1]).encode(), "text/html; charset=utf-8")
+                    else:
+                        self._send(200, json.dumps(index.page(parts[1])).encode(),
+                                   "application/vnd.pypi.simple.v1+json")
                     return
                 if len(parts) == 3 and parts[0] == "files":
                     for filename, data, _p in index.files.get(parts[1], []):
@@ -257,6 +290,11 @@ class PypiIndex:
                   "size": len(data)}
                  for fn, data, published in self.files[project]]
         return {"meta": {"api-version": "1.1"}, "name": project, "files": files}
+
+    def html_page(self, project):
+        rows = [f'<a href="../../files/{project}/{fn}#sha256={hashlib.sha256(data).hexdigest()}" '
+                f'data-requires-python="&gt;=3.8">{fn}</a><br/>' for fn, data, _p in self.files[project]]
+        return "<!DOCTYPE html><html><body>\n" + "\n".join(rows) + "\n</body></html>\n"
 
     def close(self):
         self.server.shutdown()

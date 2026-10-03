@@ -5,7 +5,8 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { scanFile, RULES } from "../src/index.js";
+import { scanFile } from "../src/index.js";
+import { packValues } from "../src/lib/native.js";
 
 const rules = (content, lang, { dep = false, name = `t.${lang}` } = {}) =>
   scanFile({ name, content, lang, dep }).map((i) => `${i.rule}@${i.line}`).sort();
@@ -79,7 +80,7 @@ test("decode → execute across lines and statements (spec 13)", () => {
 test("message and name text is the Python engine's", () => {
   const hex = scanFile({ name: "t.py", content: 's = "\\x68\\x65\\x6c\\x6c\\x6f\\x20\\x77\\x6f\\x72\\x6c\\x64\\x21\\x21"\n', lang: "py" });
   assert.deepEqual(hex.map((i) => i.rule), ["SC-HEXSTR"]);
-  const rule = (id) => RULES.find((r) => r.id === id);
+  const rule = (id) => packValues("RULES")[0].find((r) => r.id === id);   // the native engine's (core's) table
   assert.equal(rule("S-EVAL-JS").msg, "Use of eval enables arbitrary code execution.");
   assert.equal(rule("S-XML").name, "XML parsing without a hardened parser");
 });

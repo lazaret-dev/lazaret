@@ -22,6 +22,13 @@ one in the package's own npm scope (its owner names those). A finding is
 MAJOR, a weak indicator: a new package with such a name is worth a look,
 and its code is judged by the other tests.
 
+npm names are also compared with Node's built-in modules that have a
+separator in their name (NODE_BUILTINS): a dependency on child-process
+installs a stranger's package, since require('child_process') loads the
+built-in (crypto-hash-sdk, in the benchmark, declares it and uses neither).
+Built-ins named without one (events, buffer) are popular npm packages too,
+browser polyfills, so they are not compared.
+
 The lists and their licences: scripts/update-popular-names.py, and the
 "source" fields of popular_names.json.
 """
@@ -38,6 +45,11 @@ _SEP_RE = re.compile(r"[-_.]")
 _PEP503_RE = re.compile(r"[-_.]+")
 _ECO_TEXT = {"npm": "npm packages", "pypi": "PyPI projects"}
 _DATA = {}
+#: Node's built-in modules named with a separator (string_decoder is a
+#: popular npm package too, so it is a target already).
+NODE_BUILTINS = ("child_process", "worker_threads", "perf_hooks", "async_hooks", "trace_events",
+                 "diagnostics_channel")
+_BUILTIN_BARE = {_SEP_RE.sub("", b): b for b in NODE_BUILTINS}
 
 
 def normalize(eco, name):
@@ -85,6 +97,29 @@ def variants(n):
             out.add(n[:i] + c + n[i:])
     out.discard(n)
     return out
+
+
+def popular(eco, name):
+    """True for one of the registry's most-downloaded names (the targets)."""
+    return isinstance(name, str) and normalize(eco, name) in _load()[eco][0]
+
+
+def builtin_lookalike(name):
+    """(the built-in module, how it was changed) when an npm name looks
+    like one of NODE_BUILTINS (its separators changed, or one change), else
+    None."""
+    n = normalize("npm", name) if isinstance(name, str) else ""
+    if not n or len(n) > MAX_NAME or n in NODE_BUILTINS:
+        return None
+    b = _BUILTIN_BARE.get(_SEP_RE.sub("", n))
+    if b is not None:
+        return b, "its separators changed"
+    if any(abs(len(n) - len(b)) <= 1 for b in NODE_BUILTINS):
+        near = variants(n)
+        for b in NODE_BUILTINS:
+            if b in near:
+                return b, _how(n, b)
+    return None
 
 
 def _how(n, t):
@@ -135,35 +170,54 @@ _WHY = ("A typosquat takes the name of a popular package with one character adde
         "one belong to real packages the lists know; this one is not among them.")
 
 
+_BUILTIN_WHY = ("A package named like a module built into Node is never what code that requires the module "
+                "loads: require('child_process') gets the built-in. A dependency on child-process installs a "
+                "stranger's package, and runs its install scripts, for nothing the code uses; squatters publish "
+                "such names for whoever adds one by mistake.")
+
+
+def _found(eco, name):
+    """(target, how, built-in?) for a look-alike name, else None."""
+    found = lookalike(eco, name)
+    if found is not None:
+        return found + (False,)
+    found = builtin_lookalike(name) if eco == "npm" else None
+    return found + (True,) if found is not None else None
+
+
 def issues(eco, name, deps, rel, text=""):
     """SC-TYPOSQUAT findings (MAJOR) for a release named `name` that declares
     `deps` in `rel` (its text, for the lines)."""
     out, lines = [], (text or "").split("\n")
     count = f"{len(_load()[eco][0]):,}"
     what = _ECO_TEXT[eco]
-    found = lookalike(eco, name) if name else None
+
+    def whose(target, how, builtin):
+        if builtin:
+            return f'one change from "{target}" ({how}), a module built into Node.'
+        return f'one change from "{target}" ({how}), one of the {count} most-downloaded {what}.'
+
+    found = _found(eco, name) if name else None
     if found is not None:
-        target, how = found
+        target, how, builtin = found
         line = _line_of(text, [f'"name": {json.dumps(name)}', f'"name":{json.dumps(name)}', f"Name: {name}"])
         out.append(lazaret.mk_issue(
             {"id": "SC-TYPOSQUAT", "name": "A name like a popular package's", "type": "HOTSPOT", "sev": "MAJOR",
-             "msg": (f'The package is named "{name}", one change from "{target}" ({how}), one of the {count} '
-                     f"most-downloaded {what}."),
-             "why": _WHY,
+             "msg": f'The package is named "{name}", ' + whose(target, how, builtin),
+             "why": _BUILTIN_WHY if builtin else _WHY,
              "fix": f'Make sure "{name}" is the package you meant, not "{target}"; read what it runs before '
                     "installing it.",
              "ref": "CWE-506 · Supply chain"}, rel, line, lines))
     for dep in sorted(deps):
-        found = lookalike(eco, dep)
+        found = _found(eco, dep)
         if found is None:
             continue
-        target, how = found
+        target, how, builtin = found
         line = _line_of(text, [json.dumps(dep) + ":", f"Requires-Dist: {dep}"])
         out.append(lazaret.mk_issue(
             {"id": "SC-TYPOSQUAT", "name": "A name like a popular package's", "type": "HOTSPOT", "sev": "MAJOR",
-             "msg": (f'Depends on "{dep}", one change from "{target}" ({how}), one of the {count} '
-                     f"most-downloaded {what}."),
-             "why": _WHY,
+             "msg": f'Depends on "{dep}", ' + whose(target, how, builtin),
+             "why": _BUILTIN_WHY if builtin else _WHY,
              "fix": f'Check that "{dep}" is the dependency meant, not "{target}", and read it before installing.',
              "ref": "CWE-506 · Supply chain"}, rel, line, lines))
     return out

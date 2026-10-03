@@ -3,27 +3,30 @@
 Quarantine for your dependencies: security & quality scanner for Python and
 JavaScript projects.
 
-The JavaScript engine is a port of Lazaret's scanner (the Python package's
-`lazaret.scanner` and the browser dashboard, `lazaret/web/lazaret.html`): the
-same detection rules, the intra-file taint and SQL-sink analyzers, and the
-obfuscation/entropy secret detection. For a project scan, `npx lazaret` and
-`python -m lazaret` are tested (`python/tests/architecture/test_js_parity.py`)
-to report the same issues (rule, file, line, severity, message), metrics,
-ratings, gate result and exit code. Both run the JavaScript half of the
-cross-file flow engine (`X-*` findings: a request value passed into a
-function, in the same or another file, whose parameter reaches a sink —
-directly or through the local variables that hold it — or a helper's
-returned request value reaching one; a proven RegExp's `exec()` is not a
-command sink; calls bind through
+Its rules run in Lazaret's native engine, written in Rust and compiled to
+WebAssembly (`native/lazaret.wasm`, in the package: nothing to compile at
+install, no native addon, no dependency): every pattern rule, the
+obfuscation, entropy and secret detection, the supply-chain tests and the
+cross-file received-code follower — the same engine the Python package's
+platform wheels carry, held to the Python package's `lazaret.scanner` case by
+case. The intra-file taint and SQL-sink analyzers, the cross-file taint pass
+and the reports are JavaScript, ported from the Python package. For a project
+scan, `npx lazaret` and `python -m lazaret` are tested
+(`python/tests/architecture/test_js_parity.py`) to report the same issues
+(rule, file, line, severity, message), metrics, ratings, gate result and exit
+code. Both run the JavaScript half of the cross-file flow engine (`X-*`
+findings: a request value passed into a function, in the same or another
+file, whose parameter reaches a sink — directly or through the local
+variables that hold it — or a helper's returned request value reaching one; a
+proven RegExp's `exec()` is not a command sink; calls bind through
 `require()`/`import` to the function the file names, and a call it can't
-resolve reaches every project function of that name). The
-Python engine additionally follows flows through Python files and accepts
-taint configs; registry auditing (`lazaret-registry`) is Python-only. When
-the project has Python files, the gate's cross-file condition says so: `No
-cross-file taint flows (JavaScript only: 3 Python files not analyzed)`.
-Since 0.1.8 the Python package can also run its supply-chain tests on a
-native engine written in Rust; this package runs its JavaScript engine,
-which gives the same findings.
+resolve reaches every project function of that name). The Python engine
+additionally follows flows through Python files and accepts taint configs;
+registry auditing (`lazaret-registry`) is Python-only. When the project has
+Python files, the gate's cross-file condition says so: `No cross-file taint
+flows (JavaScript only: 3 Python files not analyzed)`. Through 0.1.7 this
+package ran JavaScript ports of those rules and tests; the findings are the
+same.
 
 ```
 npx lazaret check ./my-project
@@ -79,7 +82,7 @@ resolving to one file. Writes are atomic
   `__import__("base64").b64decode`, and, in dependencies, across statements
   within 10,000 characters of the decode);
   executable `.pth` lines (`SC-PTH-EXEC`); readable text hidden in hex escapes; base64 blobs and
-  strings built from character codes written in the call or in an array it uses; `javascript-obfuscator` identifier signatures; compiled binaries;
+  strings built from character codes written in the call or in an array it uses; `javascript-obfuscator` identifier signatures (MAJOR since 0.1.8: what the obfuscated code does is read instead); compiled binaries;
   unchecked or orphaned `.pyc` files; UTF-7 source (`SC-UTF7`); your own code
   running a download piped into a shell or substituted into a command line
   (`execSync("curl … | bash")`, `execSync('bash -c "$(curl …)"')`,
@@ -116,7 +119,10 @@ resolving to one file. Writes are atomic
   `package.json`, `binding.gyp` and other `.gyp`/`.gypi` file, and `.pth` files (only the `SC-PTH-EXEC`
   check runs on them; they are not counted in the metrics; a directory with
   only a `.pth` file is a valid target). Every other regular file is classified by
-  its magic bytes (`SC-BINARY`). Sources and manifests over 16,000,000 bytes
+  its magic bytes (`SC-BINARY`), and a source file whose bytes are a program
+  (an ELF or Windows executable named `.js` or `.py`) is `SC-BINARY`
+  CRITICAL; one whose bytes don't decode to text is `SC-TRUNCATED`.
+  Sources and manifests over 16,000,000 bytes
   (`--max-source-bytes`, env `LAZARET_MAX_SOURCE_BYTES`) are `SC-TRUNCATED`,
   never silently skipped; so is a file whose rules exceed
   a 30-second time backstop (checked inside each rule's match loop).
@@ -130,31 +136,37 @@ resolving to one file. Writes are atomic
   are pruned unless `--deps` is given; with `--deps` their files get the
   supply-chain and secret rules only, each install hook of a dependency —
   package.json scripts, binding.gyp actions and the command expansions that
-  run a file of the package — is followed to the files it runs (a hook that
-  runs a script collecting the environment or credentials for the network,
-  piping a download into a shell, or running code it receives over the
-  network — a download handed to eval, exec, `new Function`, a shell or an
-  interpreter's inline code — is CRITICAL; a file it runs that is not a
+  run a file of the package — is read as a program and followed to the
+  files it runs (a hook whose command or script sends data read from the
+  machine over the network, pipes a download into a shell, or runs code it
+  receives over the network — a download handed to eval, exec, `new
+  Function`, a shell or an interpreter's inline code — is CRITICAL; a file
+  it runs that is not a
   source file is read and scanned as JavaScript), a dependency whose package
   root has a `binding.gyp` and no install script gets npm's implicit
   `node-gyp rebuild` hook (MAJOR), and a dependency's other JavaScript and
-  Python files get the import-time test (`SC-IMPORT-RISK`, MAJOR: the whole
-  environment or a credential store read next to a network call, a download
-  run through a shell, or a value received over the network run as code (also
-  under an alias or an indirect `eval`), deserialized (`pickle.loads`, unsafe
-  `yaml.load`, `unserialize`; CWE-502), used as a dynamically imported module
-  name, or written to a file the same code then runs). Since 0.1.8 both
-  tests also fail on data sent to a chat bot or webhook whose secret is in
-  the code (Telegram, Discord, Slack), credential files sent to a raw IP
+  Python files get the import-time test (`SC-IMPORT-RISK`: CRITICAL for the
+  whole environment or a credential store read and sent over the network,
+  what local commands print about the machine sent (both wherever they go,
+  since rule set 2.17), local data sent to a raw socket's hard-coded public
+  address, a download run through a shell, or a value received over the
+  network run as code (also under an alias or an indirect `eval`); MAJOR when
+  the value is deserialized (`pickle.loads`, unsafe `yaml.load`,
+  `unserialize`; CWE-502), used as a dynamically imported module name, or
+  written to a file the same code then runs). Since 0.1.8 both
+  tests also fail on data sent to a webhook or a bot whose secret is in
+  the code (any service's), credential files sent to a raw IP
   address, a sweep of three or more credential folders, the host name sent
   to an address kept base64-encoded or in a DNS name the code builds, the
   public IP address sent to a data-capture service, a reverse shell, a
   cryptocurrency miner, and code run from what a file reads back from itself or a data file
   next to it, at once or asynchronously (a `readFile` callback, `.then()`);
   a script a hook runs is followed to the scripts it starts with node or
-  python (`spawn(process.execPath, [file])`, `fork(file)`), the tests read
-  the strings a file decodes as it runs (hex, base64, a file's own decoding
-  helpers, a home-made XOR decoder), and — as in the Python engine — a
+  python (`spawn(process.execPath, [file])`, `fork(file)`), bun or deno, or
+  any program a variable names given a file of code, the tests read the
+  strings a file decodes as it runs (hex, base64, a file's own decoding
+  helpers, a home-made XOR or character-code decoder, javascript-obfuscator's
+  string arrays and proxy objects), and — as in the Python engine — a
   package's files are followed
   into each other: a value received in one file and run in another, through
   wrappers and re-exports, classes, object literals, callbacks and Promises,
@@ -208,6 +220,11 @@ lazaret <directory> [options]          # the same, like the Python CLI
   --version, -h/--help
 ```
 
+A scan with much to read (a megabyte of source or more besides its largest
+file) spreads the files over worker threads, one per core up to 8, each with
+its own instance of the engine; `LAZARET_THREADS` sets how many (`1`: none).
+The findings and their order are the same whatever the number.
+
 Options are parsed like the Python CLI's: `--opt=value` and unique prefixes
 work, `--` ends the options, and an unknown option is a usage error. The
 Python-only options (`--taint-config`, `--strict-taint-config`,
@@ -217,7 +234,8 @@ Exit codes: `0` ok (also a failed gate without `--ci`) · `1` gate failed
 with `--ci`, or a hostile-depth manifest (`SC-MANIFEST-DEPTH`: `package.json`
 or `binding.gyp` nested deeper than 500 levels, the same limit as the Python
 engine on every Python version) · `2` usage
-error (unknown option; missing, non-directory or empty target) · `3` report
+error (unknown option; missing, non-directory or empty target; in a source
+checkout, the WebAssembly engine not built yet) · `3` report
 output error (unsafe or unwritable report path, checked before the scan) ·
 `5` internal error (`error: internal: …`; set `LAZARET_DEBUG=1` for a stack
 trace). Exit `4` (rejected taint config) exists only in the Python CLI.
@@ -243,9 +261,21 @@ import { scanFile, buildResult, run } from "lazaret";
 ```
 
 `scanFile({ name, content, lang, dep })` returns issues with credentials
-already redacted; `setRedactSecrets(false)` opts out.
+already redacted; `setRedactSecrets(false)` opts out. The supply-chain tests
+are exported too (`installScriptRisk`, `importTimeRisk`, `followHook`, …),
+answered by the native engine. The rule tables (`RULES`, `TEXT_RULES`) are
+no longer exported since 0.1.8: they live in the engine's rule pack.
 
-Zero dependencies, ES modules, Node 22+. Tests: `npm test` (built-in
-`node --test` runner).
+Zero dependencies, ES modules, Node 22+. From a source checkout, build the
+engine first: `npm run build` (it needs Rust and `rustup target add
+wasm32-unknown-unknown`, and writes `native/lazaret.wasm` from the
+repository's `rust/`), then `npm test` (built-in `node --test` runner).
+
+Licensed under Apache-2.0, with two parts that are not Lazaret's own (see
+`NOTICE`): the native engine's regular expression engine and shell tokenizer
+are translations of CPython's (`native/NOTICE` lists them), under CPython's
+license (`LICENSE-PYTHON`), and the Unicode 13.0 and codec tables are
+Unicode data, under the Unicode License v3 (`LICENSE-UNICODE`). The
+package's license is `Apache-2.0 AND Python-2.0.1 AND Unicode-3.0`.
 
 Website: https://lazaret.dev · Source: https://github.com/lazaret-dev/lazaret

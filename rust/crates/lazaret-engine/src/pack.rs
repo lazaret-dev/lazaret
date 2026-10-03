@@ -29,6 +29,7 @@ struct Entry {
     needles: OnceLock<crate::pystr::Needles>,
     map_strs: OnceLock<Vec<(Vec<u32>, Vec<Vec<u32>>)>>,
     items_re: OnceLock<Vec<(Value, Regex)>>,
+    derived: OnceLock<Box<dyn std::any::Any + Send + Sync>>,
 }
 
 fn compile_entry(v: &Value) -> Result<Regex, String> {
@@ -62,6 +63,7 @@ impl Pack {
                     needles: OnceLock::new(),
                     map_strs: OnceLock::new(),
                     items_re: OnceLock::new(),
+                    derived: OnceLock::new(),
                 },
             );
         }
@@ -143,6 +145,33 @@ impl Pack {
 
     pub fn usize(&self, name: &str) -> usize {
         self.int(name).max(0) as usize
+    }
+
+    /// A number (core's float limits, such as a share).
+    pub fn float(&self, name: &str) -> f64 {
+        match self.entry(name).raw.get("value") {
+            Some(Value::Float(f)) => *f,
+            Some(Value::Int(i)) => *i as f64,
+            _ => panic!("{} is not a number", name),
+        }
+    }
+
+    /// A string value of a map value ({"id": …, "msg": …}: core's rule dicts).
+    pub fn map_text(&self, name: &str, key: &str) -> Vec<u32> {
+        match self.entry(name).raw.get("map").and_then(|m| m.get(key)).and_then(|v| v.get("value")) {
+            Some(v) => v.as_str().map(|s| s.to_vec()).unwrap_or_default(),
+            None => panic!("{} has no {}", name, key),
+        }
+    }
+
+    /// A value's typed reading, made once from its JSON by `make` and kept
+    /// (the rule table, a token pattern …). One type per value.
+    pub fn derived<T: std::any::Any + Send + Sync>(&self, name: &str, make: impl FnOnce(&Value) -> T) -> &T {
+        let e = self.entry(name);
+        match e.derived.get_or_init(|| Box::new(make(&e.raw))).downcast_ref::<T>() {
+            Some(v) => v,
+            None => panic!("{} is read as two different types", name),
+        }
     }
 
     /// A map of strings to string sets ({"env": {"-u", …}, …}).

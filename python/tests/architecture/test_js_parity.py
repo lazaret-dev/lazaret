@@ -14,7 +14,8 @@ without --deps, suppression tricks, a file with hundreds of findings, CRLF,
 Unicode identifiers, a bidi control, .pyc files, symlinks and special files
 where the OS supports them, files over a 2 MB limit). All fixture content
 is inert: nothing is executed, hosts are TEST-NET (192.0.2.x) or .invalid,
-credentials are dummies. Skipped where Node isn't installed.
+credentials are dummies. Skipped where node or the npm engine's WebAssembly build (npm run build in
+js/) is missing.
 
 Known, deliberate differences: findings only the Python engine produces —
 the Python half of its cross-file flow engine (X-* flows and Q-FLOW-* notes
@@ -36,19 +37,25 @@ import sys
 import tempfile
 import unittest
 
-from lazaret.scanner import core
 from tests import _support
 
 NODE = shutil.which("node")
 JS_BIN = os.path.join(_support.REPO_ROOT, "js", "bin", "lazaret.js")
+# The npm package runs the native engine as WebAssembly (0.1.8): a test that
+# scans with it needs that module built (`npm run build` in js/) as well as
+# node; NPM_READY is node's path then, else None.
+NPM_WASM = os.path.join(_support.REPO_ROOT, "js", "native", "lazaret.wasm")
+NPM_READY = NODE if NODE and os.path.isfile(NPM_WASM) else None
+NPM_SKIP = "the npm engine is not ready: node, and js/native/lazaret.wasm (npm run build in js/)"
 
 # The cross-file flow engine's rules (lazaret.scanner.flow). Its JavaScript
 # half is ported (js/src/scanner/flow.js); its Python half (AST-based) is not,
 # so its X-* flows and Q-FLOW-* notes on Python files are Python-only.
 FLOW_PREFIXES = ("X-", "Q-FLOW-")
 # (The cross-file received-code follower, core._cross_file_received_issues, ran
-# only in the Python engine before 0.1.8; js/src/lib/crossfile.js is its twin
-# now, and test_js_parity_crossfile holds the two to one answer.)
+# only in the Python package before 0.1.8; both run the native engine's port
+# of it now, which test_snapshot_crossfile holds to its recorded outputs and
+# test_wasm_parity_crossfile holds the npm binding to.)
 # fixture -> further rules only the Python engine may report there. (cfgproj's
 # .lazaret-taint.json is repository content: the Python engine loads it only
 # with --trust-repo-config, not passed here, so both engines agree on it.)
@@ -200,6 +207,9 @@ ADVERSARIAL = {
     "__pycache__/mod.cpython-311.pyc": _pyc(0),
     "__pycache__/gone.cpython-311.pyc": _pyc(1),
     "lib/native.so": b"\x7fELF\x02\x01\x01\x00" + b"\0" * 600,
+    "bin/_build.py": b"MZ\x90\x00\x03\x00" + b"\0" * 600,          # a program under a source name
+    "bin/blob.py": bytes((i * 151 + 7) % 251 for i in range(4096)),    # bytes that are no text
+    "node_modules/evil/native.js": b"\x7fELF\x02\x01\x01\x00" + b"\0" * 600,
     "data/blob.bin": b"\0" * 2_100_000,                              # > 2 MB, not a source
     "big/huge.js": "var y = 2;\n" * 210000,                          # > 2 MB source
     "dup/a.py": "".join(f"v{i} = compute({i})\n" for i in range(8)),
@@ -303,50 +313,25 @@ def issue_key(issue):
     return (issue["rule"], str(issue["file"]).replace("\\", "/"), issue["line"], issue["sev"], issue["msg"])
 
 
-def scanned_lang(project, rel):
-    """'py', 'js', 'sql' or None: how the engines read a scanned file — by its
-    extension, else (an extensionless script) by its #! line, read from the
-    scanned tree when it is still there."""
-    rel = str(rel).replace("\\", "/")
-    ext = os.path.splitext(rel)[1].lower()
-    if ext in core.EXTS:
-        return core.EXTS[ext]
-    if project:
-        try:
-            with open(os.path.join(project, *rel.split("/")), "rb") as f:
-                return core.script_source_lang(f.read(core.HEADER_SAMPLE_BYTES))
-        except OSError:
-            pass
-    return None
-
-
 def _python_only(issue, fixture=None, project=None):
-    """A finding only the Python engine produces: a flow finding on a Python
-    file, or one listed in PYTHON_ONLY for the fixture. project is the scanned
-    root (a report's "project"), for extensionless scripts."""
-    if issue["rule"].startswith(FLOW_PREFIXES):
-        return scanned_lang(project, issue["file"]) == "py"
+    """A finding only the Python engine produces: one listed in PYTHON_ONLY
+    for the fixture. (Until phase 3 of the Rust-first refactor a flow
+    finding on a Python file was too: the npm package had no port of the
+    Python pass; both run the engine's now. project, the scanned root, is
+    kept for the callers.)"""
     return issue["rule"] in PYTHON_ONLY.get(fixture, ())
 
 
 DERIVED = ("pass", "conditions", "counts", "ratings")
-CROSS_FILE = "No cross-file taint flows"
 
 
 def derived(report, field):
-    """A derived report field, compared across engines. The npm engine's
-    cross-file gate label says when the project's Python files were not
-    analyzed ("… (JavaScript only: 2 Python files not analyzed)", report.js
-    crossFileLabel); its condition is the same, so it reads as the Python
-    label here (test_js_parity_flow checks the wording)."""
-    value = report[field]
-    if field == "conditions":
-        value = [dict(c, label=CROSS_FILE) if c["label"].startswith(CROSS_FILE + " (JavaScript only: ") else c
-                 for c in value]
-    return value
+    """A derived report field, compared across engines (the same: since
+    phase 3 the npm engine's cross-file gate label is the Python engine's)."""
+    return report[field]
 
 
-@unittest.skipUnless(NODE, "node is not installed")
+@unittest.skipUnless(NPM_READY, NPM_SKIP)
 class EngineParityTests(unittest.TestCase):
     maxDiff = None
 
@@ -434,6 +419,10 @@ class EngineParityTests(unittest.TestCase):
                         self.assertIn(want, found)
                     self.assertEqual(("SC-HOMOGLYPH", "node_modules/evil/lookalike.js") in found, label == "--deps")
                     self.assertIn(("SC-HIDDEN-UNICODE", "uni/hidden.js"), found)
+                    sevs = {(i["file"].replace("\\", "/"), i["sev"]) for i in js[1]["issues"] if i["rule"] == "SC-BINARY"}
+                    self.assertIn(("bin/_build.py", "CRITICAL"), sevs)
+                    self.assertIn(("SC-TRUNCATED", "bin/blob.py"), found)
+                    self.assertEqual(("node_modules/evil/native.js", "CRITICAL") in sevs, label == "--deps")
                     self.assertEqual(("SC-AGENT-HIJACK", "node_modules/agent/run.js") in found, label == "--deps")
                     self.assertEqual(sorted((i["file"].replace("\\", "/"), i["line"]) for i in js[1]["issues"]
                                             if i["rule"] == "SC-HOMOGLYPH" and "/literals." in i["file"].replace("\\", "/")),

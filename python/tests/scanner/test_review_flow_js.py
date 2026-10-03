@@ -5,8 +5,9 @@ literals (`const b = "}"; exec(cmd);` closed the function early and hid the
 sink; `console.log("{" + cmd)` made a function swallow the next one), and the
 200-character window after a sink matched a parameter used in a LATER
 statement. The pass first blanked literals and comments; since 0.1.7 it
-reads parsed trees (lazaret.scanner.jsparse), where a sink's arguments are
-its call's own arguments and a brace in a literal is part of the literal.
+reads parsed trees (the engine's parser since the Rust-first refactor),
+where a sink's arguments are its call's own arguments and a brace in a
+literal is part of the literal.
 These cases stay as regression tests. Inert fixtures only.
 """
 import unittest

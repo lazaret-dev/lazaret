@@ -4,8 +4,9 @@
 // install hook runs was classified by magic bytes and never read. Now a file
 // whose #! line names Node (or bun, deno, ts-node, tsx) or Python is scanned
 // as JavaScript or Python; shell scripts are not, and a file that is not
-// text is still a binary to classify. shebangLang (lib/hooks.js) is core's
-// shebang_lang, scriptSourceLang (lib/fs.js) core's script_source_lang.
+// text is still a binary to classify. shebangLang (the native engine's,
+// lib/native.js) is core's shebang_lang, scriptSourceLang (lib/fs.js) core's
+// script_source_lang.
 // Fixtures are inert text.
 
 import { test } from "node:test";
@@ -14,7 +15,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "nod
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { run } from "../src/index.js";
-import { shebangLang } from "../src/lib/hooks.js";
+import { shebangLang } from "../src/lib/native.js";
 import { scriptSourceLang, collectFiles } from "../src/lib/fs.js";
 
 test("the language a #! line names (the first line only)", () => {

@@ -177,6 +177,34 @@ export function classifyBinary(path, data, size, context = "repo") {
   return null;
 }
 
+/** os.path.basename: after the last "/" (and on Windows "\\"), as pyExt splits. */
+function pyBase(path) {
+  const p = String(path);
+  let s = p.lastIndexOf("/");
+  if (process.platform === "win32") s = Math.max(s, p.lastIndexOf("\\"));
+  return p.slice(s + 1);
+}
+
+/** The leading bytes disguisedBinary reads (core.DISGUISE_SAMPLE_BYTES). */
+export const DISGUISE_SAMPLE = 2048;
+
+/**
+ * SC-BINARY, CRITICAL, for a program under a source file's name (0.1.8): an
+ * executable's or a compiled module's bytes (EXEC_MAGIC, a Windows PE) in a
+ * file named as source code. Unlike a binary named for what it is
+ * (classifyBinary) it is a disguise. Else null. Twin of core.disguised_binary.
+ */
+export function disguisedBinary(path, data) {
+  const header = data.subarray(0, 512);
+  let desc = EXEC_MAGIC.find(([sig]) => startsWith(header, sig))?.[1] ?? null;
+  if (desc === null && startsWith(header, b("MZ"))) desc = "Windows PE executable/DLL";
+  if (desc === null || !looksBinary(data.subarray(0, DISGUISE_SAMPLE))) return null;
+  return issue(path, "SC-BINARY", "Binary artifact in package", "CRITICAL",
+    `${pyBase(path)} is not source code but a program: ${desc}.`,
+    "A source file is read, reviewed and diffed as text; a program under a source file's name hides from that review and from every rule that reads code. No build ships one: compiled code goes in files named for what they are (.so, .pyd, .node, .exe).",
+    "Treat the package or tree that ships it as compromised: find what loads or runs the file, and remove it.");
+}
+
 // ---- __pycache__ bytecode (spec 8) ----------------------------------------
 export const PYC_HEADER = 16;
 

@@ -31,6 +31,17 @@ def load_script(path, name):
     return module
 
 
+def pack(name):
+    """A value of the engine's rule pack, where core keeps it no longer (the
+    Rust-first refactor): a pattern compiled with Python's re (the pack's
+    syntax), else the value (a list for a set, a dict for a map)."""
+    from lazaret.scanner import engine
+    try:
+        return engine.pack_pattern(name)
+    except KeyError:
+        return engine.pack_value(name)
+
+
 def requires_env(var):
     """Skip a test or class unless environment variable `var` is set. Used for
     tests that need a live service (Postgres) or the private samples checkout."""

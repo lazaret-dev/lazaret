@@ -9,9 +9,13 @@ inside one rule's per-match loop — Python engine and dashboard.
   here against the page on astral characters and lone surrogates.
 * The 30 s per-file backstop was checked between rules only, so a text rule
   with thousands of matches ran to the end (a 2 s budget: 13.5 s and all 10k
-  findings). The deadline is checked inside per-match loops in every engine;
-  the backstop tests use a fake clock (every clock read is 1 ms later), so
-  they do not depend on the machine's speed.
+  findings). The deadline is checked inside per-match loops; the backstop
+  tests use a fake clock (every clock read is 1 ms later), so they do not
+  depend on the machine's speed. Since the Rust-first refactor the native
+  engine reads the rules under its work budget (steps of its regex matcher,
+  engine.WORK_BUDGET), not a clock: a file that spends it is SC-TRUNCATED,
+  and the clock still bounds the passes core runs after the engine (taint,
+  SQL, function metrics) in project mode.
 
 Timing bounds are loose (slow CI runners): far above today's cost, far below
 the old one. All content is inert.
@@ -22,7 +26,7 @@ import time
 import unittest
 from unittest import mock
 
-from lazaret.scanner import core
+from lazaret.scanner import core, engine
 from tests.scanner import _dashboard_vm as dash
 
 REPEATS = (2_500, 5_000, 10_000, 20_000)
@@ -58,7 +62,7 @@ def reported(issues, rule):
     return n
 
 
-class PythonEngineTests(unittest.TestCase):
+class PythonPackageTests(unittest.TestCase):
     def test_one_line_repeats_scan_in_linear_time(self):
         for n in REPEATS:
             with self.subTest(repeats=n):
@@ -77,19 +81,25 @@ class PythonEngineTests(unittest.TestCase):
         self.assertEqual(len(out), 240)
         self.assertTrue(out.startswith(E) and out.endswith("catch(e){}"))
 
-    def test_backstop_stops_a_text_rules_match_loop(self):
+    def test_backstop_stops_the_passes_after_the_engine(self):
         n = 20_000
-        # one clock read per line, then one per 256 matches of B-EMPTY-CATCH:
-        # the budget runs out ~40 reads into the text rule
-        with ticking_clock(n + 40):
+        # the engine's rules ran to the end (all n findings); the passes core runs
+        # after them stop at the deadline, 40 clock reads in
+        with ticking_clock(40):
             issues = core.scan_file("t.js", "try{}catch(e){}\n" * n, "js")
-        self.assertEqual(sum(i["rule"] == "SC-TRUNCATED" for i in issues), 1)
-        self.assertTrue(0 < reported(issues, "B-EMPTY-CATCH") < n)
+        (t,) = [i for i in issues if i["rule"] == "SC-TRUNCATED"]
+        self.assertIn("scan time budget exceeded", t["msg"])
+        self.assertEqual(reported(issues, "B-EMPTY-CATCH"), n)
 
-    def test_backstop_stops_the_dependency_decode_flow_on_one_line(self):
-        with ticking_clock(5):
-            issues = core.scan_file("dep.js", "var d = atob(p); " * 5000 + "\n", "js", dep=True)
-        self.assertEqual(sum(i["rule"] == "SC-TRUNCATED" for i in issues), 1)
+    def test_the_work_budget_stops_the_dependency_decode_flow_on_one_line(self):
+        text = "var d = atob(p); " * 5000 + "\n"
+        self.assertEqual(core.scan_file("dep.js", text, "js", dep=True), [])
+        with mock.patch.object(engine, "WORK_BUDGET", 10_000):
+            issues = core.scan_file("dep.js", text, "js", dep=True)
+            self.assertEqual(core.scan_file("dep.js", "var d = 1;\n", "js", dep=True), [])
+        (t,) = issues
+        self.assertEqual((t["rule"], t["sev"]), ("SC-TRUNCATED", "CRITICAL"))
+        self.assertIn(engine.EXHAUSTED, t["msg"])
 
 
 def page_timed(n):

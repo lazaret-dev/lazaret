@@ -54,11 +54,13 @@ import zlib
 import urllib.error
 import urllib.parse
 import urllib.request
+import warnings
 
 from lazaret.scanner import core as lazaret  # noqa: E402
 
 from lazaret import safexml as _safexml                 # noqa: E402
 from lazaret.registry import lookalike as _lookalike    # noqa: E402
+from lazaret.registry import unused_deps as _unused     # noqa: E402
 from lazaret.scanner import engine as _engine           # noqa: E402
 from lazaret.safexml import ElementTree as _safe_ET     # noqa: E402
 
@@ -81,6 +83,59 @@ MAX_MEMBER = _env_number("LAZARET_MAX_SOURCE_BYTES", 16_000_000)
 MAX_FILES = 20_000         # files per package (numpy's sdist alone has >4,000)
 SAMPLE = 8192              # header/entropy sample read from oversized files
 # Stored scans from another engine version are scanned again (has_scan).
+# 2.24: Python's decoded value run by a shell (os.system, os.popen,
+#      subprocess with shell=True) is SC-EVAL-DECODE, as JavaScript's was
+# 2.23: the zip reader on the fuzzers' findings: entries that overlap are
+#      SC-ARCHIVE-OVERLAP, an entry with no name SC-ARCHIVE-PATH, an LZMA
+#      dictionary over 64 MiB is refused (the member is corrupt)
+# 2.22: an npm release's dependencies no file names (SC-UNUSED-DEPENDENCY,
+#      INFO; a brand-new one is SC-NEW-DEPENDENCY, CRITICAL), and a name
+#      like one of Node's built-in modules (child-process) is SC-TYPOSQUAT
+# 2.21: a program under a source file's name (an executable's bytes in a
+#      .py or .js member) is SC-BINARY, CRITICAL, in a wheel too
+# 2.20: S-TOKEN reads GitHub's fine-grained tokens (github_pat_…), which
+#      got only S-ENTROPY
+# 2.19: 0.1.8's droppers: code a script decodes and runs read on the trees
+#      (an XOR, characters' codes, a reversal; a program it decodes, run),
+#      code in a literal not code for the text reading, and a file a script
+#      writes, then runs: a program carved out of another file it ships, or
+#      code it decodes or downloads (a batch file cmd runs, a script); a
+#      keyword's look-alike name is MAJOR, not CRITICAL
+# 2.18: the Rust-first refactor's phase 3: local data sent and code received
+#      read on Python's tree too (a closure's variables, a thread's
+#      arguments, a request object given its data, a callee under another
+#      name; code in strings and comments is not code)
+# 2.17: the Rust-first refactor's phase 3: local data sent and code received
+#      read on JavaScript's tree (a send reported by the strongest data it
+#      carries; a library's request for its caller not the script's
+#      download), and at import time what no client sends (the whole
+#      environment, a credential store) and what local commands print sent
+#      anywhere, and local data sent to a raw socket's public address
+# 2.16: the Rust-first refactor's lexers: comments and literals read as
+#      JavaScript and Python read them (a template's `${…}` and an f-string's
+#      fields code, every line terminator, a first-line #!), the engine's
+#      patterns on a linear-time matcher
+# 2.15: 0.1.8's detection round: local data followed through parameters,
+#      returns, methods, callbacks, constructors, threads and HTTP clients,
+#      command runners and browser profiles read as sources, wallet addresses
+#      swapped for the script's own, literals written in escapes and a proxy
+#      name each function reuses read in the decoded view, code built around a
+#      string array a sign of its own, the cross-file follower through
+#      relays, 16 hops, getattr names a file builds and a distribution's
+#      modules, runners named through the builtins, and PyPI owners for
+#      SC-NEW-DEPENDENCY
+# 2.14: 0.1.8's behaviour pass: an install hook's command read as a program,
+#      local data followed to where it is sent (service lists only label
+#      where it goes; any webhook whose secret is in the code), string arrays,
+#      proxy objects and character-code decoders read in the decoded view,
+#      programs started by any runtime followed, a program's shortcuts
+#      rewritten, SC-EVAL-DECODER for any decoder, `_0x` names and the packer
+#      MAJOR, the Bun loader rule retired, and a program in a string literal
+#      no longer received code
+# 2.13: 0.1.8's DNS names built from values (in code and in shell commands),
+#      the host name sent to an address fetched at run time (a dead drop),
+#      the host name read through require('os') or a destructured import,
+#      and the cross-file follower through event emitters
 # 2.12: 0.1.8's programs set to start at login or boot (systemd, launchd,
 #      cron, Run keys, scheduled tasks, the Startup folder, XDG autostart),
 #      code read back asynchronously or by a path's name from a licence or
@@ -126,7 +181,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.12.0"
+ENGINE_VERSION = "2.24.0"
 
 # ---------------- Trust-chain limits (F9/G14/F10) ----------------
 # Only these hosts may ever be fetched, over https only, and redirects to any
@@ -1091,9 +1146,53 @@ def _zip_preflight(data):
 
 
 # What reading one zip member can raise (bad CRC, broken deflate/bz2/lzma
-# stream, an encrypted or unsupported entry, a bad local header).
+# stream, an encrypted or unsupported entry, a bad local header; an LZMA
+# dictionary the host can't allocate: fuzz finding F-7).
 _ZIP_READ_ERRORS = (zipfile.BadZipFile, OSError, EOFError, ValueError, zlib.error,
-                    lzma.LZMAError, NotImplementedError, RuntimeError)
+                    lzma.LZMAError, NotImplementedError, RuntimeError, MemoryError)
+#: The largest LZMA dictionary a zip entry may declare (xz -9 and 7-Zip's
+#: ultra level use 64 MiB). zipfile allocates it before a byte is decoded:
+#: a 625-byte wheel declaring 4 GiB ended the scan with MemoryError on a host
+#: whose memory is capped (F-7). Wheels are stored or deflated (PEP 427).
+MAX_LZMA_DICT = 64 << 20
+_ZIP_LOCAL = struct.Struct("<4s22xHH")       # signature ... name length, extra length
+
+
+def _lzma_dict_size(data, info):
+    """The dictionary size an LZMA zip entry declares (zipfile's format: a
+    version, the properties' size, then lc/lp/pb and the dictionary, after
+    the local header), or None when the entry isn't one or can't say."""
+    if info.compress_type != zipfile.ZIP_LZMA:
+        return None
+    at = info.header_offset
+    if at < 0 or at + _ZIP_LOCAL.size > len(data):
+        return None
+    sig, n_name, n_extra = _ZIP_LOCAL.unpack_from(data, at)
+    start = at + _ZIP_LOCAL.size + n_name + n_extra
+    head = data[start:start + 9]
+    if sig != b"PK\x03\x04" or len(head) < 9 or int.from_bytes(head[2:4], "little") != 5:
+        return None
+    return int.from_bytes(head[5:9], "little")
+
+
+def _zip_overlaps(data, infos):
+    """The names of zip entries whose bytes begin inside an earlier entry's
+    (by local header offset): the shape of a zip bomb. zipfile 3.12.3+ warns
+    of some and raises for others; this says the same on every version (F-2)."""
+    spans = []
+    for info in infos:
+        at = info.header_offset
+        if at < 0 or at + _ZIP_LOCAL.size > len(data):
+            continue
+        sig, n_name, n_extra = _ZIP_LOCAL.unpack_from(data, at)
+        if sig == b"PK\x03\x04":
+            spans.append((at, at + _ZIP_LOCAL.size + n_name + n_extra + info.compress_size, info.filename))
+    out, reach = [], -1
+    for at, end, name in sorted(spans):
+        if at < reach:
+            out.append(name)
+        reach = max(reach, end)
+    return out
 
 
 def _iter_zip(data, artifact, budget, anomalies):
@@ -1110,16 +1209,31 @@ def _iter_zip(data, artifact, budget, anomalies):
         return
     seen, count, last = {}, 0, "(archive)"
 
-    def read(info, limit):
-        with zf.open(info) as fh:
-            raw = fh.read(limit)
+    def read(info, rel, limit):
+        dictionary = _lzma_dict_size(data, info)
+        if dictionary is not None and dictionary > MAX_LZMA_DICT:
+            raise ValueError(f"an LZMA dictionary of {dictionary:,} bytes, over the {MAX_LZMA_DICT:,}-byte limit")
+        # zipfile 3.12.3+ warns of entries that overlap: _zip_overlaps names
+        # them, so the warning is no line on stderr or, under -W error, an
+        # exception out of the reader (F-2)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with zf.open(info) as fh:
+                raw = fh.read(limit)
         budget.charge(len(raw))
         return raw
 
+    for name in _zip_overlaps(data, infos):
+        anomalies.append(("overlap", name, "its bytes overlap another entry's"))
     with zf:
         try:
             for info in infos:
                 budget.check()
+                if not info.filename:
+                    # no extractor can place it, and Python 3.10's is_dir()
+                    # raised IndexError on it (F-6); 3.11+ dropped it silently
+                    anomalies.append(("noname", "(archive)", "an entry with no name, which was not read"))
+                    continue
                 if info.is_dir():
                     continue
                 rel, problem = canonical_member_path(info.filename, artifact)
@@ -1144,10 +1258,10 @@ def _iter_zip(data, artifact, budget, anomalies):
                 _note_member(seen, rel, anomalies)
                 last = rel
                 try:
-                    raw = read(info, MAX_MEMBER + 1)          # bounded, real bytes
+                    raw = read(info, rel, MAX_MEMBER + 1)     # bounded, real bytes
                 except _ZIP_READ_ERRORS as exc:
-                    yield Member(rel, 0, b"", "corrupt",
-                                 f"member {rel} could not be read ({type(exc).__name__})")
+                    why = str(exc) if str(exc).startswith("an LZMA dictionary") else type(exc).__name__
+                    yield Member(rel, 0, b"", "corrupt", f"member {rel} could not be read ({why})")
                     continue
                 if len(raw) > MAX_MEMBER:
                     yield Member(rel, SAMPLE, raw[:SAMPLE], "member")
@@ -1241,6 +1355,11 @@ USE_RISK_SKIP_DIRS = {"example", "examples", "doc", "docs", "demo", "demos", "sa
 # is not INCOMPLETE.
 USE_RISK_MAX_CHARS = 8_000_000
 USE_RISK_SECONDS = 3.0
+# The native engine reads a batch of files at a time, and the time is checked
+# between batches: a batch holds at most USE_RISK_BATCH_CHARS characters
+# (or one file), or a batch of large bundles overran the time many times over
+# (truffle's: 20 s).
+USE_RISK_BATCH_CHARS = 1_000_000
 
 
 def _not_used_code(rel):
@@ -1289,14 +1408,11 @@ def decide_verdict(issues, truncated):
 # them on the dependencies of a --deps project scan too; the registry uses the
 # same functions.
 _NETWORK_RE = lazaret._NETWORK_RE
-_SECRET_SOURCE_RE = lazaret._SECRET_SOURCE_RE
 _EXFIL_SERVICES = lazaret._EXFIL_SERVICES
-_EXFIL_DEST_RE = lazaret._EXFIL_DEST_RE
 _EXFIL_SERVICE_RE = lazaret._EXFIL_SERVICE_RE
 _PIPE_SCAN_RE = lazaret._PIPE_SCAN_RE
 _pipes_download_to_shell = lazaret._pipes_download_to_shell
 install_script_risk = lazaret.install_script_risk
-_IMPORT_HARVEST_RE = lazaret._IMPORT_HARVEST_RE
 _EXEC_CALL_RE = lazaret._EXEC_CALL_RE
 import_time_risk = lazaret.import_time_risk
 _node_candidates = lazaret.node_candidates
@@ -1410,7 +1526,7 @@ def startup_module_issue(rel, text):
     capability to review, like SC-PTH-EXEC), CRITICAL when the code looks
     hostile by the install-script test (install_script_risk)."""
     module = _STARTUP_MODULE_RE.match(rel).group(1)
-    reasons = _engine.install_script_risk(text)
+    reasons = _engine.install_script_risk(text, lang="py")
     msg = f"{rel} is installed as {module} in site-packages, which Python imports at every start"
     msg += f", and it {'; and '.join(reasons)}." if reasons else "."
     return lazaret.mk_issue(
@@ -1439,6 +1555,12 @@ def _archive_issue(kind, path, detail):
         "path": ("SC-ARCHIVE-PATH", "Unsafe archive path",
                  "An entry with '..' in its path tries to escape the extraction directory; "
                  "installers refuse it, and no legitimate package tool produces one."),
+        "noname": ("SC-ARCHIVE-PATH", "Unnamed archive entry",
+                   "No extractor can place an entry with no name: installers fail on it or skip it, so "
+                   "its bytes are neither installed nor reviewed, and no packaging tool produces one."),
+        "overlap": ("SC-ARCHIVE-OVERLAP", "Overlapping archive entries",
+                    "Two entries of the zip archive share their bytes: the shape of a zip bomb (one "
+                    "compressed stream counted many times), and no packaging tool produces one."),
     }
     rid, name, why = rules[kind]
     return {"rule": rid, "name": name, "type": "HOTSPOT", "sev": "MAJOR",
@@ -1487,6 +1609,8 @@ class _ArtifactScan:
         self.truncated_at = {}     # rel -> its SC-TRUNCATED issue (None past the cap)
         self.timed_out = False     # the deadline passed (recorded once)
         self.sources = {}          # rel -> (text, lang) scanned as source
+        self.pending = []          # source files queued for scan_pending (a batch)
+        self.first_pass = True     # members as they stream by; finish() is the second pass
         self.deferred = {}         # rel -> raw bytes (text, not scanned yet)
         self.deferred_bytes = 0
         self.dropped = set()       # text members not kept (budget)
@@ -1498,6 +1622,8 @@ class _ArtifactScan:
         self.entries = set()       # rels that run when installed / imported
         self.install_scripts = set()   # hook targets, setup.py & co (install_script_risk)
         self.startup = set()       # a wheel's sitecustomize / usercustomize
+        self.unread = False        # a member the archive's limits left unread
+        self.unused_dependencies = []  # npm: registry names no file uses (_unused_dependencies)
 
     # ---- bookkeeping ----
     def truncate(self, rel, detail):
@@ -1505,6 +1631,7 @@ class _ArtifactScan:
         file: another reason for the same file (it also runs at install time,
         and package.json can name it as main, bin and exports) is added to
         that finding's message instead of repeating it."""
+        self.scan_pending()                   # (the files queued before come first)
         if rel in self.truncated_at:
             issue = self.truncated_at[rel]
             if issue is not None and detail not in issue["msg"]:
@@ -1566,21 +1693,41 @@ class _ArtifactScan:
 
     def scan_source(self, rel, text, lang):
         self._deadline(rel)                  # not one more file past the deadline
-        self.files_scanned += 1
-        for i in lazaret.scan_file(rel, text, lang, dep=not self.full):
-            if i["rule"] in TRUNCATION_RULES:
-                # the per-file time budget ran out: part of the file was not
-                # scanned, so the release can't be cleared (it used to be
-                # listed while the verdict stayed OK)
-                self.truncate(rel, i["msg"].removeprefix("File not fully scanned: ").rstrip("."))
-            else:
-                self.issues.append(i)
         self.sources[rel] = (text, lang)
+        self.pending.append((rel, text, lang))
+        # The engine reads a batch of the first pass's files on threads
+        # (engine.py); a --full scan (project mode: core's passes follow the
+        # engine's rules) and the second pass, whose steps read what they
+        # scan, go one at a time.
+        batch = _engine.BATCH if self.first_pass and not self.full else 1
+        if len(self.pending) >= batch:
+            self.scan_pending()
+
+    def scan_pending(self):
+        """Scan the source files queued by scan_source, in order. Their
+        findings are the same whenever they are made; a truncation, and the
+        second pass (finish), scan the queue first."""
+        pending, self.pending = self.pending, []
+        if not pending:
+            return
+        found = _engine.scan_files([(rel, text, lang, not self.full) for rel, text, lang in pending])
+        for (rel, _text, _lang), issues in zip(pending, found):
+            self.files_scanned += 1
+            for i in issues:
+                if i["rule"] in TRUNCATION_RULES:
+                    # part of the file was not scanned (the engine's work budget
+                    # spent, an internal error, the time budget of core's passes),
+                    # so the release can't be cleared (it used to be listed while
+                    # the verdict stayed OK)
+                    self.truncate(rel, i["msg"].removeprefix("File not fully scanned: ").rstrip("."))
+                else:
+                    self.issues.append(i)
 
     # ---- pass 1: members ----
     def member(self, m):
         rel, size, raw, reason = m
         if reason in ("files", "total", "time", "corrupt"):
+            self.unread = True
             self.truncate(rel, getattr(m, "detail", "") or self.limit_detail(reason, rel, size))
             self.timed_out = self.timed_out or reason == "time"
             return
@@ -1596,14 +1743,24 @@ class _ArtifactScan:
                 # signal, not a clean verdict — whatever the first bytes look like.
                 self.truncate(rel, _TRUNC_DETAILS["member"](rel, size))
             # still classifiable by magic/entropy from the decompressed prefix
-            self.classify(rel, raw, size)
+            disguised = lazaret.disguised_binary(rel, raw) if ext in lazaret.EXTS else None
+            if disguised:
+                self.binaries += 1
+                self.issues.append(disguised)
+            else:
+                self.classify(rel, raw, size)
             return
         if base == "package.json":
             text, extra = lazaret.decode_member(rel, raw)
             self.add_decode_issues(extra, keep_encoding=False)
             self.manifests[rel] = text
             self._deadline(rel)
-            for i in lazaret.scan_manifest(rel, text, registry=True):
+            try:
+                found = lazaret.scan_manifest(rel, text, registry=True)
+            except _engine.NativeError as exc:
+                self._unanswered(rel, exc)
+                return
+            for i in found:
                 if i["rule"] == "SC-MANIFEST-UNPARSEABLE":
                     self.truncated += 1
                 self.issues.append(i)
@@ -1613,7 +1770,12 @@ class _ArtifactScan:
             self.add_decode_issues(extra, keep_encoding=False)
             self.manifests[rel] = text
             self._deadline(rel)
-            for i in lazaret.scan_gyp(rel, text):
+            try:
+                found = lazaret.scan_gyp(rel, text)
+            except _engine.NativeError as exc:
+                self._unanswered(rel, exc)
+                return
+            for i in found:
                 if i["rule"] == "SC-MANIFEST-UNPARSEABLE":
                     self.truncated += 1
                 self.issues.append(i)
@@ -1623,14 +1785,22 @@ class _ArtifactScan:
             return
         if ext == ".pth":
             text = raw.decode("utf-8-sig", "replace")
-            self.issues.extend(pth_issues(rel, text))
+            try:
+                self.issues.extend(pth_issues(rel, text))
+            except _engine.NativeError as exc:
+                self._unanswered(rel, exc)
             self.scan_source(rel, text, "py")
             return
         lang = lazaret.EXTS.get(ext)
         if lang is not None:
             text, extra = lazaret.decode_member(rel, raw)
             self.add_decode_issues(extra)
-            if any(i["rule"] == "SC-TRUNCATED" for i in extra):
+            disguised = lazaret.disguised_binary(rel, raw)
+            if disguised:
+                # a program under a source file's name: a disguise, CRITICAL (0.1.8)
+                self.binaries += 1
+                self.issues.append(disguised)
+            elif any(i["rule"] == "SC-TRUNCATED" for i in extra):
                 self.classify(rel, raw, size)   # an ELF named index.js is still an ELF
             self.scan_source(rel, text, lang)
             return
@@ -1779,6 +1949,18 @@ class _ArtifactScan:
         self.issues.append(lazaret._sc_install_hook_issue(
             "binding.gyp", 1, [], "install (implicit)", "node-gyp rebuild", False))
 
+    def _entry_point_manifests(self):
+        """The root package.json's entry points and its implicit node-gyp hook."""
+        for rel, text in list(self.manifests.items()):
+            if os.path.basename(rel) != "package.json":
+                continue
+            data, _problems = lazaret.load_manifest(rel, text)
+            if data is None:
+                continue
+            if rel == "package.json":
+                self._entry_points(rel, data)
+                self._implicit_gyp_hook(rel, data)
+
     def _follow_hooks(self):
         """Follow each install hook to the scripts it runs; escalate the hook
         when one looks hostile (see install_script_risk)."""
@@ -1809,13 +1991,13 @@ class _ArtifactScan:
                 self.install_scripts.add(rel)
                 lang = "sh" if rel.endswith(".sh") else "js"
                 text = self._text_of(rel, lang)
-                reasons = _engine.install_script_risk(text) if text else []
+                reasons = _engine.install_script_risk(text, lang=_engine.script_lang(rel)) if text else []
                 if reasons and issue["sev"] not in STRONG_SEVERITIES:
                     issue["sev"] = "CRITICAL"
                     issue["msg"] = f"Install hook runs {target}, which {'; and '.join(reasons)}."
                 # the scripts it starts with node or python (0.1.8, core.spawned_scripts)
                 for started, more in self._started_scripts(rel, text, base, self.install_scripts):
-                    more = _engine.install_script_risk(more) if more else []
+                    more = _engine.install_script_risk(more, lang=_engine.script_lang(started)) if more else []
                     if more and issue["sev"] not in STRONG_SEVERITIES:
                         issue["sev"] = "CRITICAL"
                         issue["msg"] = (f"Install hook runs {target}, which starts {started}, which "
@@ -1834,7 +2016,7 @@ class _ArtifactScan:
             cur, cur_text, depth = queue.pop(0)
             if not cur_text or depth >= lazaret._SPAWN_MAX_DEPTH:
                 continue
-            for where, path in lazaret.spawned_scripts(lazaret.normalize_newlines(cur_text)):
+            for where, path in _engine.spawned_scripts(lazaret.normalize_newlines(cur_text), _engine.script_lang(cur)):
                 if where != "dir" and cwd is None:
                     continue
                 start = posixpath.dirname(cur) if where == "dir" else cwd
@@ -1898,7 +2080,7 @@ class _ArtifactScan:
             self.entries.add(rel)
             self.install_scripts.add(rel)
             text = self.sources.get(rel, ("", "py"))[0]
-            reasons = _engine.install_script_risk(text)
+            reasons = _engine.install_script_risk(text, lang=_engine.script_lang(rel))
             # a download written to a file and run: CRITICAL in the code pip
             # runs to install an sdist (a prebuilt-binary installer's shape
             # keeps it MAJOR-only in npm hooks and import-time code)
@@ -2007,7 +2189,11 @@ class _ArtifactScan:
             text, lang = self.sources.get(rel, (None, None))
             if text and lang in ("js", "py"):
                 todo.append((rel, text, lang))
-        for rel, text, lang, (reasons, line) in self._import_time_risks(todo):
+        for rel, text, lang, risk in self._import_time_risks(todo):
+            if _engine.unanswered(risk):
+                self._unanswered(rel, risk)
+                continue
+            reasons, line = risk
             if not reasons:
                 continue
             self.issues.append(lazaret.mk_issue(
@@ -2030,17 +2216,47 @@ class _ArtifactScan:
     def _import_time_risks(self, todo, stop=None):
         """(rel, text, lang, import_time_risk's answer) for [(rel, text, lang)]
         (the text with its newlines normalized), in order, a batch at a time
-        (engine.py: the native engine reads a batch on threads, the Python
-        engine a file at a time); the deadline is checked before each batch,
-        and past `stop` (time.monotonic()) no batch is started."""
-        size = _engine.BATCH if _engine.name() == "rust" else 1
-        for start in range(0, len(todo), size):
+        (engine.py: the engine reads a batch on threads; an answer it could
+        not give is the NativeError it stands for, engine.unanswered); the
+        deadline is checked before each batch, and past `stop`
+        (time.monotonic()) no batch is started — with a stop, a batch holds
+        at most USE_RISK_BATCH_CHARS characters, or one file."""
+        size = _engine.BATCH
+        start = 0
+        while start < len(todo):
             if stop is not None and time.monotonic() > stop:
                 return
-            chunk = [(rel, lazaret.normalize_newlines(text), lang) for rel, text, lang in todo[start:start + size]]
+            end, chars = start + 1, len(todo[start][1] or "")
+            while end < len(todo) and end - start < size:
+                more = len(todo[end][1] or "")
+                if stop is not None and chars + more > USE_RISK_BATCH_CHARS:
+                    break                   # (stop is checked between batches: keep one short)
+                chars += more
+                end += 1
+            chunk = [(rel, lazaret.normalize_newlines(text), lang) for rel, text, lang in todo[start:end]]
+            start = end
             self._deadline(chunk[0][0])
             for (rel, text, lang), risk in zip(chunk, _engine.import_time_risks([(t, lg) for _r, t, lg in chunk])):
                 yield rel, text, lang, risk
+
+    def _unanswered(self, rel, exc):
+        """A file the engine could not read for a test (engine.unanswered):
+        SC-TRUNCATED, once per file (truncate), in engine.error_issue's words."""
+        self.truncate(rel, _engine.error_issue(rel, exc)["msg"].removeprefix("File not fully scanned: ").rstrip("."))
+
+    def _phase(self, where, step, *args):
+        """Run one step of finish() once the deadline check passes. A call the
+        engine could not answer in it (its work budget spent on a hostile
+        input, an internal error) makes the release INCOMPLETE (SC-TRUNCATED
+        for the release, naming the step) and gives None; the next step runs."""
+        self._deadline(where)
+        try:
+            return step(*args)
+        except _engine.NativeError as exc:
+            why = (_engine.EXHAUSTED if isinstance(exc, _engine.NativeExhausted)
+                   else f"an internal error of the engine ({type(exc).__name__})")
+            self.truncate("(release)", f"the engine could not finish {where}: {why}")
+            return None
 
     def _suspicious(self):
         """Has a strong supply-chain finding made the package SUSPICIOUS already?"""
@@ -2062,7 +2278,11 @@ class _ArtifactScan:
             text, lang = self.sources[rel]
             if text and lang in ("js", "py") and len(text) <= USE_RISK_MAX_CHARS:
                 todo.append((rel, text, lang))
-        for rel, text, lang, (reasons, line) in self._import_time_risks(todo, stop):
+        for rel, text, lang, risk in self._import_time_risks(todo, stop):
+            if _engine.unanswered(risk):
+                self._unanswered(rel, risk)
+                continue
+            reasons, line = risk
             strong = [r for r in reasons if r.startswith(lazaret._STRONG_IMPORT_REASONS)]
             if not strong:
                 continue
@@ -2082,7 +2302,8 @@ class _ArtifactScan:
     def _cross_file_code(self):
         """SC-IMPORT-RISK (CRITICAL) for a package file that runs a value
         another file of the package received over the network
-        (core._cross_file_received_issues, 0.1.8): the dropper split across
+        (core._cross_file_received_issues, 0.1.8, by the engine in use:
+        engine.cross_file_issues): the dropper split across
         files — _net.py fetches, __init__.py runs what it returns — that
         neither file shows alone. The --deps checks ran it on installed
         dependencies only; a registry or guard scan reads the release before
@@ -2110,7 +2331,7 @@ class _ArtifactScan:
         if len(files) < 2:
             return
         self._deadline("the cross-file follower")
-        for issue in lazaret._cross_file_received_issues(files, who=lambda path: back[path], one_package=True):
+        for issue in _engine.cross_file_issues(files, who=lambda path: back[path], one_package=True):
             issue["file"] = back[issue["file"]]
             self.issues.append(issue)
 
@@ -2159,6 +2380,32 @@ class _ArtifactScan:
                 requires.append(line[14:].strip())
         self.issues.extend(_lookalike.issues("pypi", name, pypi_dependency_names(requires), rel, text))
 
+    def _unused_dependencies(self):
+        """SC-UNUSED-DEPENDENCY (INFO, 0.1.8): the runtime dependencies of an
+        npm release that no file of it names (registry/unused_deps.py), but
+        not one of npm's most-downloaded packages (a tslib its build
+        inlined) nor one of the package's own scope. Only when every text
+        member was read whole: one past the archive's limits, over the size
+        limit or the text budget, or not reached in time could name it.
+        Kept for scan_package, which makes a brand-new one CRITICAL."""
+        if self.artifact != "npm" or self.unread or self.dropped or self.oversize or self.timed_out:
+            return
+        text = self.manifests.get("package.json")
+        data, _problems = lazaret.load_manifest("package.json", text) if text else (None, None)
+        if not isinstance(data, dict):
+            return
+        name = data.get("name") if isinstance(data.get("name"), str) else ""
+        scope = name.split("/", 1)[0] + "/" if name.startswith("@") and "/" in name else None
+        texts = ([t for t, _lang in self.sources.values() if t]
+                 + [t for r, t in self.manifests.items() if r != "package.json" and t]
+                 + [t for t in self.shell.values() if t] + list(self.deferred.values()))
+        found = [(dep, spec) for dep, spec in _unused.npm_unused(data, texts)
+                 if not (scope and dep.startswith(scope))
+                 and not _lookalike.popular("npm", _unused.npm_registry_name(dep, spec))]
+        if found:
+            self.unused_dependencies = [_unused.npm_registry_name(dep, spec) for dep, spec in found]
+            self.issues.append(_unused_dependency_issue([dep for dep, _spec in found], text))
+
     def _reachable(self):
         """Entry files plus local files they require/import (JS), transitively.
         A file reached this way runs when the package is loaded: one not
@@ -2185,6 +2432,8 @@ class _ArtifactScan:
         return seen
 
     def finish(self, anomalies):
+        self.scan_pending()
+        self.first_pass = False
         for kind, path, detail in anomalies:
             self.issues.append(_archive_issue(kind, path, detail))
         reachable = None
@@ -2192,32 +2441,18 @@ class _ArtifactScan:
         # they scan: past it, the rest is not scanned and the archive is
         # INCOMPLETE (this pass used to run to the end whatever the time).
         try:
-            self._deadline("the entry points")
-            for rel, text in list(self.manifests.items()):
-                if os.path.basename(rel) != "package.json":
-                    continue
-                data, _problems = lazaret.load_manifest(rel, text)
-                if data is None:
-                    continue
-                if rel == "package.json":
-                    self._entry_points(rel, data)
-                    self._implicit_gyp_hook(rel, data)
-            self._deadline("the install hooks")
-            self._follow_hooks()
+            self._phase("the entry points", self._entry_point_manifests)
+            self._phase("the install hooks", self._follow_hooks)
             if self.artifact == "sdist":
-                self._deadline("the install scripts")
-                self._python_install_scripts()
+                self._phase("the install scripts", self._python_install_scripts)
             if self.artifact == "wheel":
-                self._deadline("the start-up modules")
-                self._startup_modules()
-            self._deadline("the files the entry points load")
-            reachable = self._reachable()
-            self._deadline("the import-time code")
-            self._import_time_code(reachable)
-            self._deadline("the agent-hijack check")
-            self._agent_hijack()
-            self._deadline("the package's names")
-            self._lookalike_names()
+                self._phase("the start-up modules", self._startup_modules)
+            reachable = self._phase("the files the entry points load", self._reachable)
+            self._phase("the import-time code", self._import_time_code,
+                        reachable if reachable is not None else set(self.entries))
+            self._phase("the agent-hijack check", self._agent_hijack)
+            self._phase("the package's names", self._lookalike_names)
+            self._phase("the dependencies nothing uses", self._unused_dependencies)
             # interprocedural / cross-file taint (full profile only — needs whole source)
             if self.full and getattr(lazaret, "lazaret_flow", None) is not None:
                 self._deadline("the cross-file analysis")
@@ -2291,7 +2526,8 @@ def _scan_artifact(data, container, artifact, full, budget):
     verdict, reason, strong, weak = decide_verdict(issues, st.truncated)
     return {"issues": issues, "filesScanned": st.files_scanned, "binaryArtifacts": st.binaries,
             "truncated": st.truncated, "verdict": verdict, "verdictReason": reason,
-            "strongIndicators": strong, "weakIndicators": weak}
+            "strongIndicators": strong, "weakIndicators": weak,
+            "unusedDependencies": st.unused_dependencies}
 
 
 def _fmt_bytes(n):
@@ -2390,8 +2626,10 @@ def _always_redacted(fn):
 # most NEW_DEP_LOOKUPS added ones: CRITICAL for one first published less than
 # NEW_DEP_CRITICAL before the release, MAJOR for one under NEW_DEP_RECENT.
 # Not counted: a dependency of the package's own npm scope, or one an npm
-# maintainer of the package also maintains; an optional extra's requirement
-# (PyPI); a git, file or URL dependency. Best effort: a document over the
+# maintainer of the package also maintains; (the detection round) on PyPI
+# one an owner or maintainer of the project also owns or maintains, or its
+# organization owns (the JSON API's "ownership"); an optional extra's
+# requirement (PyPI); a git, file or URL dependency. Best effort: a document over the
 # metadata budget (an established package's) or a registry that does not
 # answer is not a finding, and a release with no dependencies costs no
 # request. LAZARET_NO_DEPENDENCY_HISTORY=1 turns it off (an offline scan).
@@ -2478,14 +2716,43 @@ def _age_text(age):
     return f"{n} day{'s' if n != 1 else ''}"
 
 
-def _new_dependency_issue(eco, dep, age, previous, owners):
-    sev = "CRITICAL" if age < NEW_DEP_CRITICAL else "MAJOR"
+_UNUSED_WHY = ("A dependency is installed with the package, and its install scripts run, whether the package's "
+               "code uses it or not. The @mastra compromise (June 2026) changed no code: each hijacked release gained "
+               "a dependency on easy-day-js, which no file of it named and which carried the payload. Packages also "
+               "keep dependencies their build inlined or that they no longer use, so on its own this is context; a "
+               "scan that sees the dependency is brand-new makes it SC-NEW-DEPENDENCY, CRITICAL.")
+
+
+def _unused_dependency_issue(names, text):
+    """SC-UNUSED-DEPENDENCY (INFO) for an npm release's dependencies that no
+    file names, at the first one's line of package.json."""
+    lines = (text or "").split("\n")
+    line = _lookalike._line_of(text, [json.dumps(names[0]) + ":"])
+    if len(names) == 1:
+        msg = (f'Depends on "{names[0]}", which no file of the package names: installing the package installs it, '
+               "and runs its install scripts, for nothing the package does.")
+    else:
+        shown = ", ".join(f'"{n}"' for n in names[:5]) + (f" and {len(names) - 5} more" if len(names) > 5 else "")
+        msg = (f"Depends on {len(names)} packages no file of the package names ({shown}): installing the package "
+               "installs them, and runs their install scripts, for nothing the package does.")
+    return lazaret.mk_issue(
+        {"id": "SC-UNUSED-DEPENDENCY", "name": "A dependency nothing uses", "type": "HOTSPOT", "sev": "INFO",
+         "msg": msg, "why": _UNUSED_WHY,
+         "fix": "Find out why the package declares it, and read it before installing the package.",
+         "ref": "CWE-506 · Supply chain"}, "package.json", line, lines)
+
+
+def _new_dependency_issue(eco, dep, age, previous, owners, unused=False):
+    """SC-NEW-DEPENDENCY: CRITICAL under NEW_DEP_CRITICAL, or when no file of
+    the release uses it (`unused`, npm), else MAJOR."""
+    sev = "CRITICAL" if age < NEW_DEP_CRITICAL or unused else "MAJOR"
     by = f" by {', '.join(owners[:3])}" if owners else ""
+    had = f"which {previous} did not have" + (" and no file of this release names" if unused else "")
     return lazaret.mk_issue(
         {"id": "SC-NEW-DEPENDENCY", "name": "A release adds a brand-new dependency", "type": "HOTSPOT", "sev": sev,
-         "msg": (f'Adds a dependency on "{dep}", which {previous} did not have: a package first published '
+         "msg": (f'Adds a dependency on "{dep}", {had}: a package first published '
                  f"{_age_text(age)} before this release{by}"
-                 + (", who does not maintain this one." if eco == "npm" else ".")),
+                 + (", who does not maintain this one." if eco == "npm" or owners else ".")),
          "why": ("The @mastra compromise (June 2026) changed no code: each hijacked release gained a dependency on "
                  "easy-day-js, published by another account 19 hours before, which carried the payload. A release "
                  "rarely depends on a package that did not exist a week earlier."),
@@ -2541,9 +2808,20 @@ def _pypi_first_upload(files):
     return min(times) if times else None
 
 
+def _pypi_ownership(doc):
+    """({owner and maintainer usernames}, organization or None) of a PyPI
+    JSON document's "ownership"; empty where it has none."""
+    own = doc.get("ownership") if isinstance(doc, dict) else None
+    if not isinstance(own, dict):
+        return set(), None
+    users = {r.get("user") for r in own.get("roles") or () if isinstance(r, dict) and isinstance(r.get("user"), str)}
+    org = own.get("organization")
+    return users, org if isinstance(org, str) and org else None
+
+
 def pypi_new_dependencies(name, version, info, fetch=None):
-    """-> (previous version, [(dependency, age, [])]) for the requirements a
-    PyPI release adds that are recent (see above)."""
+    """-> (previous version, [(dependency, age, its owners and maintainers)])
+    for the requirements a PyPI release adds that are recent (see above)."""
     fetch = fetch or http_json
     mine = pypi_dependency_names((info or {}).get("requires_dist"))
     if not mine:
@@ -2563,6 +2841,7 @@ def pypi_new_dependencies(name, version, info, fetch=None):
     prev = fetch(f"https://pypi.org/pypi/{_quote_seg(name)}/{_quote_seg(previous)}/json")
     prev_info = prev.get("info") if isinstance(prev, dict) else None
     added = sorted(mine - pypi_dependency_names((prev_info or {}).get("requires_dist")))
+    users, org = _pypi_ownership(doc)
     found = []
     for dep in added:
         if len(found) >= NEW_DEP_LOOKUPS:
@@ -2576,14 +2855,19 @@ def pypi_new_dependencies(name, version, info, fetch=None):
         if not firsts:
             continue
         age = max(when - min(firsts), datetime.timedelta(0))
-        if age < NEW_DEP_RECENT:
-            found.append((dep, age, []))
+        if age >= NEW_DEP_RECENT:
+            continue
+        theirs, their_org = _pypi_ownership(ddoc)
+        if users & theirs or (org is not None and their_org == org):
+            continue                     # the project's own account or organization
+        found.append((dep, age, sorted(theirs)))
     return previous, found
 
 
-def new_dependency_issues(eco, name, version, resolved):
+def new_dependency_issues(eco, name, version, resolved, unused=()):
     """SC-NEW-DEPENDENCY findings for one release (best effort: [] when the
-    registry can't say)."""
+    registry can't say). unused: the registry names of the dependencies no
+    file of the release names (the artifact scan's unusedDependencies)."""
     if os.environ.get("LAZARET_NO_DEPENDENCY_HISTORY"):
         return []
     try:
@@ -2593,7 +2877,8 @@ def new_dependency_issues(eco, name, version, resolved):
             previous, found = pypi_new_dependencies(name, version, getattr(resolved, "info", None))
     except (FetchError, ValueError):
         return []
-    return [_new_dependency_issue(eco, dep, age, previous, owners) for dep, age, owners in found]
+    unused = set(unused)
+    return [_new_dependency_issue(eco, dep, age, previous, owners, dep in unused) for dep, age, owners in found]
 
 
 @_always_redacted
@@ -2652,7 +2937,7 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
             skipped.append((s.get("filename"), "packagetype", size))
         else:
             not_installed.append((s.get("filename"), "not-installable", size))
-    per, all_issues, truncated = [], [], 0
+    per, all_issues, truncated, unused = [], [], 0, set()
     multi = len(refs) > 1
     downloaded = 0
     for ref in refs:
@@ -2691,12 +2976,13 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
                 issue["artifact"] = ref["filename"]
             all_issues.append(issue)
         truncated += r["truncated"]
+        unused.update(r.get("unusedDependencies") or ())
         per.append({"filename": ref.get("filename"), "kind": ref["artifact"], "url": ref["url"],
                     "archiveBytes": len(data), "digest": digest,
                     **{k: r[k] for k in ("verdict", "verdictReason", "filesScanned",
                                          "binaryArtifacts", "truncated",
                                          "strongIndicators", "weakIndicators")}})
-    all_issues.extend(new_dependency_issues(eco, name, version, resolved))
+    all_issues.extend(new_dependency_issues(eco, name, version, resolved, unused))
     skip_issues, skip_label = _skipped_summary(skipped, byte_budget, limit)
     # one part per release file left out; skip_issues holds one finding per
     # REASON, and used to be counted instead ("1 part" for 3 skipped files)
@@ -4337,13 +4623,9 @@ def main():
                     help="discover: scan the discovered packages (and track them)")
     ap.add_argument("--add", action="store_true",
                     help="discover: add discovered packages to the watchlist")
-    ap.add_argument("--engine", choices=_engine.ENGINES, default=None,
-                    help="The engine that runs the supply-chain tests: rust (the native engine, the default "
-                         "where it is installed) or python (the reference engine; env LAZARET_ENGINE). Both "
-                         "give the same findings.")
     args = ap.parse_args()
     try:
-        _engine.choose(args.engine)
+        _engine.require()
     except _engine.EngineError as exc:
         print(f"error: {exc}", file=sys.stderr)
         sys.exit(2)

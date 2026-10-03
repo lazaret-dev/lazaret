@@ -11,7 +11,7 @@ use crate::pyre::{Match, Regex};
 use crate::pystr::{self, u, PyStr};
 use crate::rxutil;
 use crate::unicode;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 const fn c(ch: char) -> u32 {
     ch as u32
@@ -99,7 +99,7 @@ impl<'s> Iterator for DlIter<'s> {
     }
 }
 
-fn dl_finditer<'s>(pair: (&'s Regex, &'s Regex), row: &'s [u32], pos: usize, end: Option<usize>) -> DlIter<'s> {
+pub(crate) fn dl_finditer<'s>(pair: (&'s Regex, &'s Regex), row: &'s [u32], pos: usize, end: Option<usize>) -> DlIter<'s> {
     DlIter { exact: pair.0, cand: pair.1, row, pos, end: end.unwrap_or(row.len()), done: false }
 }
 
@@ -298,6 +298,9 @@ fn members(p: &Pack, text: PyStr) -> PyStr {
             let name = rxutil::or_groups(m, &["a", "b"]).unwrap_or(&[]);
             ljust(pystr::concat(&[&o, &u("."), name]), m.group0().len())
         });
+        if has(&text, "getattr") {
+            text = getattr_names(p, text);
+        }
     }
     if has(&text, "['") || has(&text, "[\"") {
         text = p.re("_DL_MEMBER_RE").sub_fn(&text, 0, |m| {
@@ -305,7 +308,85 @@ fn members(p: &Pack, text: PyStr) -> PyStr {
             ljust(pystr::concat(&[&u("."), name]), m.group0().len())
         });
     }
+    if has(&text, "builtins") || has(&text, "global") || has(&text, "window") {
+        text = p.re("_DL_BUILTINS_RE").sub_fn(&text, 0, |m| vec![' ' as u32; m.group0().len()]);
+    }
     text
+}
+
+/// core._dl_getattr_names: getattr(obj, …) whose name is literals joined
+/// with + and names the file gives such a value, read as obj.name.
+fn getattr_names(p: &Pack, text: PyStr) -> PyStr {
+    let rx = p.re("_DL_GETATTR_EXPR_RE");
+    let piece = p.re("_DL_STR_PIECE_RE");
+    let mut wanted: BTreeSet<PyStr> = BTreeSet::new();
+    let mut any = false;
+    for m in rx.finditer(&text) {
+        any = true;
+        for q in piece.finditer(m.name("e").unwrap_or(&[])) {
+            if let Some(n) = q.name("n") {
+                wanted.insert(n.to_vec());
+            }
+        }
+    }
+    if !any {
+        return text;
+    }
+    let wanted: Vec<PyStr> = wanted.into_iter().take(p.usize("_DL_GETATTR_NAMES")).collect();
+    let consts = if wanted.is_empty() { HashMap::new() } else { constants(p, &text, &wanted) };
+    let space = p.re("_DL_SPACE_RE_ANY");
+    let name_full = p.re("_DL_NAME_FULL_RE");
+    rx.sub_fn(&text, 0, |m| match joined(p, m.name("e").unwrap_or(&[]), &consts) {
+        Some(value) if name_full.fullmatch(&value).is_some() => {
+            let o = space.sub(m.name("o").unwrap_or(&[]), &[], 0);
+            ljust(pystr::concat(&[&o, &u("."), &value]), m.group0().len())
+        }
+        _ => m.group0().to_vec(),
+    })
+}
+
+/// core._dl_constants: {name: value} of `names` the text gives a string on
+/// a row of its own and gives nothing else.
+fn constants(p: &Pack, text: &[u32], names: &[PyStr]) -> HashMap<PyStr, PyStr> {
+    let mut values: Vec<(PyStr, Vec<PyStr>)> = Vec::new();
+    for m in p.re("_DL_CONST_RE").finditer(text) {
+        let n = m.name("n").unwrap_or(&[]);
+        if names.iter().any(|w| w.as_slice() == n) {
+            let v = m.name("v").unwrap_or(&[]).to_vec();
+            match values.iter_mut().find(|(k, _)| k.as_slice() == n) {
+                Some((_, vs)) => vs.push(v),
+                None => values.push((n.to_vec(), vec![v])),
+            }
+        }
+    }
+    let mut out = HashMap::new();
+    for (name, given) in values {
+        if given.len() != 1 {
+            continue;
+        }
+        let src = pystr::concat(&[&p.text("_DL_GIVEN_HEAD"), &crate::pyre::escape(&name), &p.text("_DL_GIVEN_TAIL")]);
+        if rxutil::dynamic(src, 0).finditer(text).count() != 1 {
+            continue;
+        }
+        if let Some(value) = joined(p, &given[0], &HashMap::new()) {
+            out.insert(name, value);
+        }
+    }
+    out
+}
+
+/// core._dl_joined: the string literals and names joined with + are, the
+/// names read in `consts`; None where a name is not one of them.
+fn joined(p: &Pack, expr: &[u32], consts: &HashMap<PyStr, PyStr>) -> Option<PyStr> {
+    let mut out: PyStr = Vec::new();
+    for q in p.re("_DL_STR_PIECE_RE").finditer(expr) {
+        if let Some(n) = q.name("n") {
+            out.extend_from_slice(consts.get(n)?);
+        } else {
+            out.extend_from_slice(rxutil::or_groups(&q, &["a", "b"]).unwrap_or(&[]));
+        }
+    }
+    Some(out)
 }
 
 fn callbacks(p: &Pack, text: PyStr, runners: &[PyStr]) -> PyStr {
@@ -603,6 +684,31 @@ impl Code {
         }
         res
     }
+}
+
+/// core._dl_in_code: is offset pos code where `code` reads it — outside its
+/// string literals, or in a template literal's or an f-string's interpolation?
+/// A program written in a string literal is text until something runs it.
+fn in_code(p: &Pack, row: &[u32], code: &Code, pos: usize) -> bool {
+    let i = match code.literal_at(pos) {
+        None => return true,
+        Some(i) => i,
+    };
+    let (s, e) = (code.lit_s[i], code.lit_e[i]);
+    let holes = if row[s] == c('`') {
+        p.re("_DL_TEMPLATE_HOLE_RE")
+    } else {
+        let prefix_chars = p.strs("_DL_PREFIX_CHARS");
+        let mut pre = pystr::sub(row, code.lo.max(s.saturating_sub(2)), s);
+        while !pre.is_empty() && !prefix_chars.iter().any(|x| x.len() == 1 && x[0] == pre[0]) {
+            pre = &pre[1..];
+        }
+        if !pre.contains(&c('f')) && !pre.contains(&c('F')) {
+            return false;
+        }
+        p.re("_DL_FSTRING_HOLE_RE")
+    };
+    holes.finditer_at(row, s as isize, e as isize).any(|m| m.start() < pos && pos < m.end())
 }
 
 /// core._dl_chain_index
@@ -920,6 +1026,18 @@ impl<'r> Row<'r> {
         }
     }
 
+    /// _DlRow.received_in: is a source read inside [lo, hi), in seg's code (in_code)?
+    fn received_in(&self, p: &Pack, seg: usize, lo: usize, hi: usize) -> bool {
+        let mut i = self.src_s.partition_point(|&x| x < lo);
+        while i < self.src_s.len() && self.src_e[i] <= hi {
+            if in_code(p, self.row, &self.codes.all[seg], self.src_s[i]) {
+                return true;
+            }
+            i += 1;
+        }
+        false
+    }
+
     fn phase_at(&mut self, p: &Pack, lim: &Lim, o: usize) -> Option<usize> {
         for &ph in &self.phases {
             let code = &self.codes.all[ph];
@@ -999,7 +1117,7 @@ impl<'r> Row<'r> {
         if p.re("_DL_EMBED_RE").match_at(row, s as isize, e as isize).is_none() {
             return false;
         }
-        dl_within(&self.src_s, &self.src_e, s, e) || dl_any(&live, s, e) || dl_within(&holes.0, &holes.1, s, e)
+        self.received_in(p, ph, s, e) || dl_any(&live, s, e) || dl_within(&holes.0, &holes.1, s, e)
     }
 }
 
@@ -1190,7 +1308,7 @@ impl<'t, 'p> Reader<'t, 'p> {
             let mut grew = false;
             let mut rest: Vec<Fact> = Vec::new();
             for f in pending {
-                let hit = dl_within(&rd.src_s, &rd.src_e, f.lo, f.hi)
+                let hit = rd.received_in(p, f.seg, f.lo, f.hi)
                     || (f.continued && above_live)
                     || (rd.dirty && rd.live_any(p, f.seg, &self.taint, f.lo, f.hi));
                 if !hit {
@@ -1551,7 +1669,45 @@ fn region_names_path(p: &Pack, region: &[u32], path: &[u32]) -> bool {
     if p.re("_DL_NAME_RE").finditer(region).any(|m| m.group0() == path) {
         return true;
     }
-    p.re("_DL_STR_RE").finditer(region).any(|m| norm_path(m.group0()) == path)
+    p.re("_DL_STR_RE").finditer(region).any(|m| {
+        let lit = m.group0();
+        norm_path(lit) == path || command_runs(p, pystr::slice(lit, 1, -1), path)
+    })
+}
+
+/// core._dl_command_runs: does the command line `line` (a string literal's
+/// text) run the file `path` — as a command's program, or as what a program
+/// that runs its argument is given (_DL_RUNNERS)?
+pub(crate) fn command_runs(p: &Pack, line: &[u32], path: &[u32]) -> bool {
+    let runners = p.strs("_DL_RUNNERS");
+    let mut first = true;
+    let mut runner = false;
+    for m in p.re("_DL_CMD_TOKEN_RE").finditer(line) {
+        let tok = m.group0();
+        if tok.len() == 1 && matches!(tok[0], 0x7C | 0x26 | 0x3B | 0x0A) {
+            first = true;
+            runner = false;
+            continue;
+        }
+        let mut word: &[u32] = pystr::strip_chars(tok, "\"'");
+        if first {
+            if word.contains(&c('=')) {
+                continue; // an assignment before the command
+            }
+            first = false;
+            let key: PyStr = if pystr::is_ascii(word) { pystr::lower(word) } else { word.to_vec() };
+            runner = runners.iter().any(|r| *r == key);
+        } else if !runner {
+            continue;
+        }
+        while pystr::starts_with(word, "./") {
+            word = &word[2..];
+        }
+        if word == path {
+            return true;
+        }
+    }
+    false
 }
 
 fn run_interp(p: &Pack, row: &[u32]) -> Option<PyStr> {

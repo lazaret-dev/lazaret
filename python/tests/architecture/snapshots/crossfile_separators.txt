@@ -1,0 +1,2 @@
+# crossfile_separators: 3 outputs, a hash per 100 (tests/architecture/_snapshots.py)
+1683530ecf9bb5bc

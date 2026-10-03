@@ -1,11 +1,11 @@
-"""The `lazaret` command: `lazaret guard <npm|pnpm|pip|uv> …` checks what a
+"""The `lazaret` command: `lazaret guard <npm|pnpm|yarn|bun|pip|uv|uvx> …` checks what a
 package manager is about to install (lazaret.registry.guard); anything else
 scans a project (lazaret.scanner.core). This module sits above the layers: it
 imports only the one it hands the command line to."""
 import os
 import sys
 
-GUARD_TOOLS = ("npm", "pnpm", "pip", "pip3", "uv")
+GUARD_TOOLS = ("npm", "pnpm", "yarn", "bun", "pip", "pip3", "uv", "uvx")
 
 
 def is_guard(argv):

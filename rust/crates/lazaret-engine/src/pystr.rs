@@ -76,6 +76,9 @@ pub fn contains_any(h: &[u32], needles: &[&str]) -> bool {
     needles.iter().any(|n| contains(h, n))
 }
 
+/// A text shorter than this is searched character by character.
+const SHORT: usize = 64;
+
 /// h.find(needle, start) for a Rust string needle.
 pub fn find_str(h: &[u32], needle: &str, start: usize) -> Option<usize> {
     if needle.is_ascii() {
@@ -83,23 +86,51 @@ pub fn find_str(h: &[u32], needle: &str, start: usize) -> Option<usize> {
         if nb.is_empty() {
             return if start <= h.len() { Some(start) } else { None };
         }
-        let first = nb[0] as u32;
         let last_start = h.len().checked_sub(nb.len())?;
-        let mut i = start;
-        while i <= last_start {
-            match h[i..=last_start].iter().position(|&c| c == first) {
-                None => return None,
-                Some(k) => i += k,
+        if h.len() < start + SHORT {
+            // (a short text: each place its first character is)
+            let first = nb[0] as u32;
+            let mut i = start;
+            while i <= last_start {
+                match h[i..=last_start].iter().position(|&c| c == first) {
+                    None => return None,
+                    Some(k) => i += k,
+                }
+                if needle_eq(h, i, nb) {
+                    return Some(i);
+                }
+                i += 1;
             }
-            if needle_eq(h, i, nb) {
-                return Some(i);
+            return None;
+        }
+        if gated_out_str(h, start, h.len(), needle) {
+            return None;
+        }
+        // (each place the needle's rarest character is, in order: pyre/scan.rs)
+        let at = crate::pyre::scan::rarest(nb);
+        let c = nb[at] as u32;
+        let stop = last_start + at + 1;
+        let mut p = start + at;
+        while p < stop {
+            let q = crate::pyre::scan::find1(h, p, stop, c)?;
+            if needle_eq(h, q - at, nb) {
+                return Some(q - at);
             }
-            i += 1;
+            p = q + 1;
         }
         None
     } else {
         find(h, &u(needle), start)
     }
+}
+
+/// Does the open gate of the text h is part of say the ASCII string
+/// `needle` is not in h[start..end] (textgate.rs)?
+#[inline]
+fn gated_out_str(h: &[u32], start: usize, end: usize, needle: &str) -> bool {
+    needle.len() >= 2
+        && end >= start + crate::textgate::MIN_RANGE
+        && crate::textgate::ask(h, |p| !p.may_hold_str(needle)).unwrap_or(false)
 }
 
 /// h.find(n, start)
@@ -119,20 +150,12 @@ pub fn find_in(h: &[u32], n: &[u32], start: usize, end: usize) -> Option<usize> 
     if n.len() > end - start {
         return None;
     }
-    let first = n[0];
-    let last_start = end - n.len();
-    let mut i = start;
-    while i <= last_start {
-        match h[i..=last_start].iter().position(|&c| c == first) {
-            None => return None,
-            Some(k) => i += k,
-        }
-        if h[i..i + n.len()] == *n {
-            return Some(i);
-        }
-        i += 1;
+    if end >= start + crate::textgate::MIN_RANGE && n.len() >= 2 && crate::textgate::ask(h, |p| !p.may_hold(n)).unwrap_or(false) {
+        return None; // (the text lacks one of its pairs: textgate.rs)
     }
-    None
+    // (each place the needle's rarest character is, in order: pyre/scan.rs)
+    let lit = crate::pyre::scan::Literal::new(n);
+    lit.find(h, n, start, end)
 }
 
 /// h.find(c, start)
@@ -185,13 +208,21 @@ pub fn starts_with(h: &[u32], needle: &str) -> bool {
 }
 
 pub fn ends_with(h: &[u32], needle: &str) -> bool {
+    let b = needle.as_bytes();
+    if b.is_ascii() {
+        return h.len() >= b.len() && needle_eq(h, h.len() - b.len(), b);
+    }
     let n = u(needle);
     h.len() >= n.len() && h[h.len() - n.len()..] == n[..]
 }
 
 /// h == needle
 pub fn eq(h: &[u32], needle: &str) -> bool {
-    h.len() == needle.chars().count() && starts_with(h, needle)
+    let b = needle.as_bytes();
+    if h.len() == b.len() && b.is_ascii() {
+        return needle_eq(h, 0, b);
+    }
+    !b.is_ascii() && h.iter().copied().eq(needle.chars().map(|c| c as u32))
 }
 
 /// h.count(c, start, end)
@@ -409,6 +440,16 @@ mod tests {
     }
 
     #[test]
+    fn equal_and_ends_with_any_needle() {
+        assert!(eq(&s("os.system"), "os.system") && !eq(&s("os.systems"), "os.system") && !eq(&s("os.syste"), "os.system"));
+        assert!(eq(&s(""), "") && !eq(&s("x"), ""));
+        assert!(eq(&s("caf\u{e9}"), "caf\u{e9}") && !eq(&s("cafe"), "caf\u{e9}") && !eq(&s("caf\u{e9}x"), "caf\u{e9}"));
+        assert!(!eq(&s("abcde"), "caf\u{e9}"));      // as long as the needle's UTF-8 bytes
+        assert!(ends_with(&s("a.execute"), "execute") && !ends_with(&s("ute"), "execute") && ends_with(&s("x"), ""));
+        assert!(ends_with(&s("na\u{ef}ve"), "\u{ef}ve") && !ends_with(&s("naive"), "\u{ef}ve"));
+    }
+
+    #[test]
     fn normpath_matches_posixpath() {
         for (a, b) in [("", "."), ("a/../..", ".."), ("/a/../..", "/"), ("//a", "//a"), ("///a/./b/", "/a/b"),
                        ("a/b/../c", "a/c"), ("../x", "../x"), ("./", ".")] {
@@ -421,6 +462,7 @@ mod tests {
 /// in one pass over `h` instead of one per string.
 pub struct Needles {
     list: Vec<Vec<u32>>,
+
     /// for each ASCII character, the strings that start with it
     by_first: Vec<Vec<u32>>,
     /// the strings that start past ASCII
@@ -447,6 +489,11 @@ impl Needles {
     pub fn any_in(&self, h: &[u32]) -> bool {
         if self.has_empty {
             return true;
+        }
+        if h.len() >= crate::textgate::MIN_RANGE
+            && crate::textgate::ask(h, |p| self.list.iter().all(|n| !p.may_hold(n))).unwrap_or(false)
+        {
+            return false; // (each string has a pair the text lacks: textgate.rs)
         }
         for (i, &c) in h.iter().enumerate() {
             let cands = if c < 128 { &self.by_first[c as usize] } else { &self.other };

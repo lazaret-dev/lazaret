@@ -104,16 +104,6 @@ class CommentMaskTests(unittest.TestCase):
         src = 'def f(:\n    HELP = """\n# in string\n"""\n  # real'
         self.assertEqual(self.mask(src, "py"), [False, False, False, False, True])
 
-    def test_is_comment_is_line_local(self):
-        self.assertTrue(core.is_comment("  // x", "js"))
-        self.assertTrue(core.is_comment("/* x */", "js"))
-        self.assertFalse(core.is_comment("/**/eval(x)", "js"))
-        self.assertFalse(core.is_comment("  * foo", "js"))
-        self.assertTrue(core.is_comment("-- x", "sql"))
-        self.assertFalse(core.is_comment("/* x */ GRANT ALL", "sql"))
-        self.assertTrue(core.is_comment("   # x", "py"))
-        self.assertFalse(core.is_comment("", "py"))
-
     def test_source_lines_splits_js_line_terminators_only(self):
         self.assertEqual(core.source_lines("a\u2028b\u2029c\r\nd", "js"), ["a", "b", "c", "d"])
         self.assertEqual(core.source_lines("a\u2028b", "py"), ["a\u2028b"])

@@ -18,6 +18,7 @@ import re
 import unittest
 
 from lazaret.scanner import core
+from tests import _support
 from tests.scanner import _dashboard_vm as dash
 
 PAGE_TABLES = r"""(() => {
@@ -83,12 +84,12 @@ class DashboardTableTests(unittest.TestCase):
 
     def test_heuristic_and_suppression_patterns(self):
         for key, rx in (("suppress", core.SUPPRESS_RE), ("secretSkip", core.SECRET_SKIP_RE),
-                        ("entropy", core.ENTROPY_VALUE_RE), ("b64", core.B64_BLOB_RE),
-                        ("obf", core.OBF_IDENT_RE), ("hiddenDanger", core.HIDDEN_TEXT_DANGER_RE)):
+                        ("entropy", core.ENTROPY_VALUE_RE), ("b64", _support.pack("B64_BLOB_RE")),
+                        ("obf", core.OBF_IDENT_RE), ("hiddenDanger", _support.pack("HIDDEN_TEXT_DANGER_RE"))):
             with self.subTest(pattern=key):
                 self.assertEqual(self.page[key], pat(rx))
         self.assertEqual(self.page["unsuppressible"], list(core.UNSUPPRESSIBLE_PREFIXES))
-        self.assertEqual(self.page["commentLineRules"], sorted(core._COMMENT_LINE_RULES))
+        self.assertEqual(self.page["commentLineRules"], sorted(_support.pack("_COMMENT_LINE_RULES")))
 
     def test_redaction_patterns(self):
         self.assertEqual(self.page["secretLines"],
@@ -99,9 +100,9 @@ class DashboardTableTests(unittest.TestCase):
     def test_limits_and_labels(self):
         self.assertEqual(self.page["limits"], {
             "CAP_PER_RULE": core.CAP_PER_RULE, "SNIPPET_MAX": core.SNIPPET_MAX, "SNIPPET_LEAD": core.SNIPPET_LEAD,
-            "LONG_LINE": core.LONG_LINE, "FN_LEN_LIMIT": core.FN_LEN_LIMIT, "FN_CX_LIMIT": core.FN_CX_LIMIT,
-            "FN_HEADER_SCAN_LIMIT": core.FN_HEADER_SCAN_LIMIT, "SC_JOIN_MAX_LINES": core.SC_JOIN_MAX_LINES,
-            "SC_JOIN_MAX_CHARS": core.SC_JOIN_MAX_CHARS, "SQL_CALLS_PER_LINE": core.SQL_CALLS_PER_LINE,
+            "LONG_LINE": _support.pack("LONG_LINE"), "FN_LEN_LIMIT": core.FN_LEN_LIMIT, "FN_CX_LIMIT": core.FN_CX_LIMIT,
+            "FN_HEADER_SCAN_LIMIT": core.FN_HEADER_SCAN_LIMIT, "SC_JOIN_MAX_LINES": _support.pack("SC_JOIN_MAX_LINES"),
+            "SC_JOIN_MAX_CHARS": _support.pack("SC_JOIN_MAX_CHARS"), "SQL_CALLS_PER_LINE": core.SQL_CALLS_PER_LINE,
             "SQL_ARG_MAX": core.SQL_ARG_MAX,
             # the page keeps 2,000,000 (it scans on the tab's main thread); the
             # CLIs default to 16,000,000 (core.SOURCE_SIZE_CAP)

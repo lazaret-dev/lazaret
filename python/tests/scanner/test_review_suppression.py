@@ -74,12 +74,6 @@ class HonoredMarkerTests(unittest.TestCase):
         src = "import os\nos.system(input())  # nosec: S-EVAL-PY\n"
         self.assertIn(("S-OSCMD-PY", 2), rules(src, "py"))
 
-    def test_marker_parse(self):
-        m = core.marker_in_comment("x()  # nosec: S-A, T-B  because", "py")
-        self.assertEqual(core._marker_rules(m), frozenset({"S-A", "T-B"}))
-        self.assertIsNone(core._marker_rules(core.marker_in_comment("x()  # nosec   ", "py")))
-        self.assertIsNone(core.marker_in_comment("x()  # nosecret", "py"))
-
 
 class InvariantTests(unittest.TestCase):
     def test_sc_rules_unsuppressible(self):
@@ -92,10 +86,6 @@ class InvariantTests(unittest.TestCase):
         self.assertNotIn(("S-TOKEN", 1), rules(src, "py"))
 
     def test_marker_does_not_cross_files(self):
-        issue = {"rule": "S-OSCMD-PY", "line": 1}
-        other_file = ["# nosec", "x = 1"]
-        self.assertFalse(core.is_suppressed(issue, ["os.system(x)"], lang="py"))
-        self.assertTrue(core.is_suppressed({"rule": "S-OSCMD-PY", "line": 2}, other_file, lang="py"))
         # a marker in file A never reaches a finding in file B
         a = core.scan_file("a.py", "# nosec\n", "py")
         b = core.scan_file("b.py", "import os\nos.system(input())\n", "py")

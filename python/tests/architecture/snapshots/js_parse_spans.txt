@@ -1,0 +1,2 @@
+# js_parse_spans: 84 outputs, a hash per 100 (tests/architecture/_snapshots.py)
+6b121e9339e24001

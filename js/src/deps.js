@@ -17,23 +17,23 @@
 // walk cannot follow to the end is SC-TRUNCATED. Every JavaScript or Python
 // file of a dependency that no hook runs gets importTimeRisk: SC-IMPORT-RISK;
 // and a file that runs what another file of its package received over the
-// network, the cross-file follower's SC-IMPORT-RISK (lib/crossfile.js).
+// network, the cross-file follower's SC-IMPORT-RISK (the native engine's,
+// through lib/native.js crossFileIssues).
 
-import { lstatSync } from "node:fs";
+import { lstatSync, readdirSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { scanFile } from "./scanner/scan.js";
-import { followHook, treeJoin, persistenceReasons, installScriptRisk, importTimeRisk, importTimeSeverity, agentHijack, agentHijackInCommand, nodeCandidates, shebangLang,
-  HOOK_MAX_CHARS, HOOK_MAX_COMMANDS, HOOK_MAX_TARGETS, HOOK_MAX_PATH, spawnedScripts, SPAWN_MAX_DEPTH,
-  SPAWN_MAX_FILES } from "./lib/hooks.js";
+import { followHook, persistenceReasons, installScriptRisk, importTimeRisk, importTimeSeverity, agentHijack,
+  agentHijackInCommand, nodeCandidates, shebangLang, spawnedScripts, scriptLang, packValues, crossFileIssues,
+  NativeError } from "./lib/native.js";
 import { HOOK_COMMANDS, loadManifest, scInstallHookIssue } from "./lib/supplychain.js";
-import { readBounded, truncatedIssue, scanErrorIssue, strerror, normalizeNewlines, encodingIssues,
+import { readBounded, truncatedIssue, scanErrorIssue, strerror, normalizeNewlines, decodeMember, treeJoin,
   MAX_FILE_BYTES } from "./lib/fs.js";
 import { looksBinary, HEADER_SAMPLE } from "./lib/binary.js";
-import { decodeSource } from "./lib/encoding.js";
 import { mkIssue } from "./lib/issue.js";
-import { crossFileReceivedIssues } from "./lib/crossfile.js";
 import { REDACT, redactText, registerScanContext, SECRET_SKIP_RE } from "./lib/redact.js";
-import { pyStrip, pyRepr } from "./lib/pycompat.js";
+import { mapTasks } from "./pool.js";
+import { pyStrip, pyStripChars, pyRepr, cmpCodePoints, pyEntries, pyRe } from "./lib/pycompat.js";
 
 const DEP_IMPORT_RISK_WHY = "An installed package's code runs with the application's privileges when it is loaded " +
   "or its command runs. Collecting credentials or the whole environment next to a network call is the shape of an " +
@@ -57,44 +57,12 @@ const stripSlashes = (p) => p.replace(/\/+$/, "");
 
 export { treeJoin };
 
-/** Python's f"{x:.0%}": half-even on the exact binary value of x * 100. */
-function percent(x) {
-  const y = x * 100;
-  const f = Math.floor(y);
-  return `${y - f === 0.5 ? (f % 2 === 0 ? f : f + 1) : Math.round(y)}%`;
-}
-
-/** core._undecodable_share: U+FFFD and control characters in the first 65,536 code points. */
-function undecodableShare(text) {
-  let n = 0, bad = 0;
-  for (const ch of text) {
-    if (n === 65536) break;
-    n++;
-    const c = ch.codePointAt(0);
-    if (c === 0xfffd || c <= 0x08 || (c >= 0x0e && c <= 0x1a) || (c >= 0x1c && c <= 0x1f) || c === 0x7f
-        || (c >= 0xdc80 && c <= 0xdcff)) bad++;
-  }
-  return n ? bad / n : 0;
-}
-
-const mpegTs = (h) => h.length >= 377 && h[0] === 0x47 && h[188] === 0x47 && h[376] === 0x47;
-
 /**
  * The text of a file read the way core.decode_member reads an archive member
  * run as JavaScript: [text, findings] (Q-ENCODING, and SC-TRUNCATED when it
  * does not decode to anything text-like).
  */
-function decodeScript(path, data) {
-  const dec = decodeSource(data, { py: false });
-  const text = normalizeNewlines(dec.text);
-  const out = encodingIssues(path, text, dec);
-  const share = undecodableShare(text);
-  if (share > 0.3 && !(path.toLowerCase().endsWith(".ts") && mpegTs(data.subarray(0, 512)))) {
-    out.push(truncatedIssue(path, `content is not decodable as text (${percent(share)} invalid bytes or ` +
-      "control characters), so no rule could read it"));
-  }
-  return [text, out];
-}
+const decodeScript = (path, data) => decodeMember(path, data, "js");
 
 /**
  * What a --deps scan knows of the tree, to follow a dependency's install
@@ -157,13 +125,169 @@ class DependencyTree {
   }
 }
 
+/** The npm package root ("/"-separated) a dependency file lives in, innermost, else null. core._xf_js_package */
+function jsPackageRoot(path) {
+  const parts = path.split("/");
+  for (let i = parts.length - 2; i >= 0; i--) {
+    if (parts[i] === "node_modules") {
+      if (parts[i + 1].startsWith("@") && i + 2 < parts.length) return parts.slice(0, i + 3).join("/");
+      return parts.slice(0, i + 2).join("/");
+    }
+  }
+  return null;
+}
+
+/**
+ * The "/"-separated paths of the dependency JavaScript files that are a web app's static assets:
+ * in a _next, static or public directory of their package, and reached from none of its npm
+ * package's entry points. Twin of core._deps_web_assets.
+ */
+export function webAssets(tree, files) {
+  const [webDirs] = packValues("_DEPS_WEB_DIRS");
+  const found = new Map();                     // npm package root (null: not npm's) -> [paths]
+  for (const f of files) {
+    if (!f.dep || f.lang !== "js") continue;
+    const path = posix(f.path);
+    const root = jsPackageRoot(path);
+    const rel = root !== null ? path.slice(root.length + 1) : path;
+    if (rel.split("/").slice(0, -1).some((part) => webDirs.includes(part.toLowerCase()))) {
+      if (!found.has(root)) found.set(root, []);
+      found.get(root).push(path);
+    }
+  }
+  const out = new Set();
+  for (const [root, paths] of found) {
+    const reached = root !== null ? npmReach(tree, root) : new Set();
+    for (const p of paths) if (!reached.has(p)) out.add(p);
+  }
+  return out;
+}
+
+/** The paths an npm package.json's main, module, bin and exports name. core._deps_npm_entries */
+export function npmEntries(data) {
+  const [max] = packValues("_DEPS_REACH_MAX");
+  const isObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+  const out = [];
+  for (const key of ["main", "module"]) {
+    if (typeof own(data, key) === "string") out.push(own(data, key));
+  }
+  const b = own(data, "bin");
+  if (typeof b === "string") out.push(b);
+  else if (isObject(b)) for (const [, v] of pyEntries(b)) if (typeof v === "string") out.push(v);
+  const stack = [own(data, "exports")];
+  while (stack.length && out.length < max) {
+    const e = stack.pop();
+    if (typeof e === "string") {
+      if (!e.includes("*")) out.push(e);
+    } else if (Array.isArray(e)) {
+      stack.push(...[...e].reverse());
+    } else if (isObject(e)) {
+      stack.push(...pyEntries(e).map(([, v]) => v).reverse());
+    }
+  }
+  return out;
+}
+
+/**
+ * The files of the npm package at `root` its entry points reach: what Node runs for the package
+ * itself and for each entry point, then the local files they require or import and the scripts
+ * they start with node (spawnedScripts), transitively. core._deps_npm_reach
+ */
+function npmReach(tree, root) {
+  const [max, localDep] = packValues("_DEPS_REACH_MAX", "_DEPS_LOCAL_DEP_RE");
+  const rx = pyRe(localDep.re, "gm");
+  const manifest = tree.manifests.get(`${root}/package.json`);
+  const data = manifest !== undefined ? loadManifest(manifest.path, manifest.content)[0] : null;
+  const entries = data !== null && typeof data === "object" && !Array.isArray(data) ? npmEntries(data) : [];
+  const queue = [tree.resolve(root), ...entries.map((e) => treeJoin(root, e)).filter((t) => t !== null).map((t) => tree.resolve(t))];
+  const seen = new Set();
+  while (queue.length && seen.size < max) {
+    const rel = queue.pop();
+    if (rel === null || rel === undefined || seen.has(rel) || !rel.startsWith(root + "/")) continue;
+    seen.add(rel);
+    const f = tree.sources.get(rel);
+    if (f === undefined || f.lang !== "js") continue;
+    const base = dirname(rel);
+    const targets = [...String(f.content).matchAll(rx)].map((m) => [base, m[2]]);
+    for (const [where, t] of spawnedScripts(String(f.content), "js")) targets.push([where === "dir" ? base : root, t]);
+    for (const [at, target] of targets) {
+      const joined = treeJoin(at, target);
+      if (joined !== null) queue.push(tree.resolve(joined));
+    }
+  }
+  return seen;
+}
+
+/**
+ * {"/"-separated path: group} for the dependency Python files under a site-packages or
+ * dist-packages directory of the scan root whose top-level module or package a distribution's
+ * .dist-info/RECORD lists with another: the cross-file follower reads them as one package (the
+ * group is that directory and the first such .dist-info's name, by name). Twin of
+ * core._xf_site_groups.
+ */
+export function siteGroups(root, files) {
+  const [depMarkers, siteMarkers] = packValues("_XF_DEP_MARKERS", "_XF_SITE_MARKERS");
+  const sites = new Map();                     // site dir -> Map(top-level name -> [paths])
+  for (const f of files) {
+    if (!f.dep || f.lang !== "py") continue;
+    const path = posix(f.path);
+    const parts = path.split("/");
+    let idx = -1;
+    for (const m of depMarkers) idx = Math.max(idx, parts.lastIndexOf(m));
+    if (idx < 0 || idx >= parts.length - 1 || !siteMarkers.includes(parts[idx])) continue;
+    const site = parts.slice(0, idx + 1).join("/");
+    if (!sites.has(site)) sites.set(site, new Map());
+    const tops = sites.get(site);
+    if (!tops.has(parts[idx + 1])) tops.set(parts[idx + 1], []);
+    tops.get(parts[idx + 1]).push(path);
+  }
+  const out = {};
+  for (const [site, tops] of sites) {
+    if (tops.size < 2) continue;
+    const where = join(resolve(root), ...site.split("/"));
+    let names;
+    try {
+      names = readdirSync(where).filter((n) => n.endsWith(".dist-info")).sort(cmpCodePoints);
+    } catch { continue; }
+    const label = new Map();                   // top-level name -> its group's .dist-info
+    for (const name of names) {
+      try {                                    // (a real directory: no link is followed)
+        const st = lstatSync(join(where, name));
+        if (!st.isDirectory() || st.isSymbolicLink()) continue;
+      } catch { continue; }
+      const listed = [...recordTops(join(where, name, "RECORD"))].filter((t) => tops.has(t)).sort(cmpCodePoints);
+      if (listed.length < 2) continue;
+      const joined = new Set([name, ...listed.filter((t) => label.has(t)).map((t) => label.get(t))]);
+      const first = [...joined].sort(cmpCodePoints)[0];
+      for (const t of [...[...label].filter(([, g]) => joined.has(g)).map(([t]) => t), ...listed]) label.set(t, first);
+    }
+    for (const [top, group] of label) for (const path of tops.get(top)) out[path] = `${site}/${group}`;
+  }
+  return out;
+}
+
+/** The top-level names a RECORD lists (its rows' first path parts); none when it cannot be read. core._xf_record_tops */
+function recordTops(path) {
+  const [limit] = packValues("_XF_RECORD_BYTES");
+  let data;
+  try { data = readBounded(path, limit + 1); } catch { return new Set(); }
+  if (data.length > limit) return new Set();
+  const out = new Set();
+  for (const row of data.toString("utf8").split("\n")) {
+    const entry = pyStripChars(pyStrip(row.split(",", 1)[0]), '"').replace(/\\/g, "/");
+    const top = entry.split("/", 1)[0];
+    if (top && top !== "." && top !== ".." && !top.includes(":")) out.add(top);
+  }
+  return out;
+}
+
 /**
  * The --deps checks of what dependencies run, after the files and manifests
  * were scanned: escalates the SC-INSTALL-HOOK findings of dependency
  * manifests in `issues` in place and returns { issues, files }: the findings
  * to add and the files read and scanned here. Twin of core.dependency_checks.
  */
-export function dependencyChecks(root, files, manifests, issues, { exclude = [], maxFileBytes = MAX_FILE_BYTES } = {}) {
+export function dependencyChecks(root, files, manifests, issues, { exclude = [], maxFileBytes = MAX_FILE_BYTES, pool = null } = {}) {
   const tree = new DependencyTree(root, files, manifests, exclude, maxFileBytes);
   const depManifests = new Set(manifests.filter((m) => m.dep).map((m) => m.path));
   const out = [], extra = [], run = new Set(), truncated = new Set();
@@ -174,19 +298,57 @@ export function dependencyChecks(root, files, manifests, issues, { exclude = [],
     try { followDependencyHook(tree, issue, cmd, out, extra, run, truncated); }
     catch (e) { out.push(scanErrorIssue(issue.file, e)); }       // one manifest must never kill the run
   }
-  for (const f of files) {
-    if (!f.dep || (f.lang !== "js" && f.lang !== "py") || run.has(posix(f.path))) continue;
-    let found, agent;
-    try { found = dependencyImportIssue(f.path, f.content, f.lang); agent = dependencyAgentIssue(f.path, f.content); }
-    catch (e) { found = scanErrorIssue(f.path, e); agent = null; }
+  // The import-time and agent checks of each dependency file no hook runs; with a worker pool
+  // (pool.js) on its workers, and with them the cross-file follower (below), the answers taken
+  // in order.
+  // (the detection round) a web app's static assets no entry point reaches are left out (webAssets)
+  const assets = webAssets(tree, files);
+  const checks = files.filter((f) => f.dep && (f.lang === "js" || f.lang === "py") && !run.has(posix(f.path))
+    && !assets.has(posix(f.path)))
+    .map((f) => ["dep", [f.path, f.content, f.lang]]);
+  const code = assets.size ? files.filter((f) => !assets.has(posix(f.path))) : files;
+  const groups = siteGroups(tree.root, code);
+  const follow = ["xf", {
+    files: code.filter((f) => f.dep && (f.lang === "js" || f.lang === "py"))
+      .map((f) => ({ path: f.path, lang: f.lang, dep: true, content: f.content })),
+    redact: REDACT.on, siteGroups: groups,
+  }];
+  const answers = mapTasks(pool, pool ? [follow, ...checks] : checks, dependencyTask, dependencyTaskError);
+  for (const [found, agent] of pool ? answers.slice(1) : answers) {
     if (found) out.push(found);
     if (agent) out.push(agent);
   }
-  // Cross-file received code (both engines since 0.1.8, lib/crossfile.js): a value received in
-  // one file of a package and run in another. Skips the files already flagged CRITICAL single-file.
+  // Cross-file received code (both engines since 0.1.8; the native engine's follower, crossfile.rs):
+  // a value received in one file of a package and run in another. Skips the files already flagged
+  // CRITICAL single-file (on a worker the follower skipped none: a skipped file's findings are
+  // left out after, which is the same, as the follower reads each file of a package on its own).
   const flagged = new Set(out.filter((i) => i.rule === "SC-IMPORT-RISK" && i.sev === "CRITICAL").map((i) => posix(i.file)));
-  for (const i of crossFileReceivedIssues(files, flagged)) out.push(i);
+  if (pool) {
+    for (const i of answers[0]) if (!flagged.has(posix(i.file))) out.push(i);
+  } else {
+    try {
+      for (const i of crossFileIssues(code, flagged, { redact: REDACT.on, siteGroups: groups })) out.push(i);
+    } catch (e) {
+      if (!(e instanceof NativeError)) throw e;        // (the engine stopped: no cross-file findings, as before)
+    }
+  }
   return { issues: out, files: extra };
+}
+
+/** A task of dependencyChecks, as a worker of pool.js runs it (pool-worker.js), run here. */
+function dependencyTask([kind, args]) {
+  if (kind === "dep") {
+    const [path, content, lang] = args;
+    return [dependencyImportIssue(path, content, lang), dependencyAgentIssue(path, content)];
+  }
+  return crossFileIssues(args.files, new Set(), { redact: args.redact, siteGroups: args.siteGroups });
+}
+
+/** What a task of dependencyChecks that threw stands for (`error`: an Error, or a worker's {name, message}). */
+function dependencyTaskError([kind, args], error) {
+  if (kind === "dep") return [scanErrorIssue(args[0], error), null];
+  if (error instanceof NativeError || (error && /^Native(Error|Exhausted)$/.test(error.name))) return [];
+  throw error instanceof Error ? error : new Error(`${error && error.name}: ${error && error.message}`);
 }
 
 /** Is `directory` ("/"-separated) an installed npm package's root? Twin of core._is_package_root. */
@@ -237,16 +399,17 @@ function followDependencyHook(tree, issue, cmd, out, extra, run, truncated) {
   const [targets, complete] = followHook(cmd);
   if (!complete && !truncated.has(manifest)) {
     truncated.add(manifest);
-    out.push(truncatedIssue(manifest, `its install hook is more than Lazaret follows (${withCommas(HOOK_MAX_COMMANDS)} ` +
-      `commands, ${HOOK_MAX_TARGETS} scripts, ${withCommas(HOOK_MAX_CHARS)} characters, ` +
-      `${withCommas(HOOK_MAX_PATH)}-character paths)`));
+    const [commands, scripts, chars, path] = packValues("HOOK_MAX_COMMANDS", "HOOK_MAX_TARGETS", "HOOK_MAX_CHARS",
+      "HOOK_MAX_PATH");
+    out.push(truncatedIssue(manifest, `its install hook is more than Lazaret follows (${withCommas(commands)} ` +
+      `commands, ${scripts} scripts, ${withCommas(chars)} characters, ${withCommas(path)}-character paths)`));
   }
   for (const target of targets) {
     const path = treeJoin(base, target);
     const rel = path === null ? null : tree.resolve(path);
     if (rel === null) continue;
     const text = scriptText(tree, rel, rel.endsWith(".sh") ? "sh" : "js", out, extra, run);
-    const reasons = text ? installScriptRisk(text) : [];
+    const reasons = text ? installScriptRisk(text, true, false, scriptLang(rel)) : [];
     if (reasons.length && issue.sev !== "BLOCKER" && issue.sev !== "CRITICAL") {
       const msg = `Install hook runs ${target}, which ${reasons.join("; and ")}.`;
       issue.sev = "CRITICAL";
@@ -256,7 +419,7 @@ function followDependencyHook(tree, issue, cmd, out, extra, run, truncated) {
     if (agent) out.push(agent);
     // the scripts it starts with node or python (0.1.8, spawnedScripts)
     for (const [started, stext] of startedScripts(tree, rel, text, base, out, extra, run)) {
-      const more = stext ? installScriptRisk(stext) : [];
+      const more = stext ? installScriptRisk(stext, true, false, scriptLang(started)) : [];
       if (more.length && issue.sev !== "BLOCKER" && issue.sev !== "CRITICAL") {
         const shown = base && started.startsWith(base + "/") ? started.slice(base.length + 1) : started;
         const msg = `Install hook runs ${target}, which starts ${shown}, which ${more.join("; and ")}.`;
@@ -269,11 +432,12 @@ function followDependencyHook(tree, issue, cmd, out, extra, run, truncated) {
 
 /** [[rel, text]] for the scripts an install script starts with node or python, and those they start. core._started_dependency_scripts. */
 function startedScripts(tree, rel, text, cwd, out, extra, run) {
+  const [SPAWN_MAX_DEPTH, SPAWN_MAX_FILES] = packValues("_SPAWN_MAX_DEPTH", "_SPAWN_MAX_FILES");
   const found = [], seen = new Set([rel]), queue = [[rel, text, 0]];
   while (queue.length && seen.size <= SPAWN_MAX_FILES) {
     const [cur, curText, depth] = queue.shift();
     if (!curText || depth >= SPAWN_MAX_DEPTH) continue;
-    for (const [where, path] of spawnedScripts(curText)) {
+    for (const [where, path] of spawnedScripts(curText, scriptLang(cur))) {
       const joined = treeJoin(where === "dir" ? dirname(cur) : cwd, path);
       const nxt = joined === null ? null : tree.resolve(joined);
       if (nxt === null || seen.has(nxt) || seen.size > SPAWN_MAX_FILES) continue;

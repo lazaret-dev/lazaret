@@ -1,7 +1,8 @@
 // The JavaScript cross-file pass follows modules and returned values (twin of
 // tests/scanner/test_review_flow_js_modules.py; the two engines are compared
 // by tests/architecture/test_js_parity_flow.py). Since 0.1.7 it reads parsed
-// trees (src/lib/jsparse.js, src/scanner/jsflow.js). A call binds to what its
+// trees; it is the engine's pass (rust/crates/lazaret-engine/src/jsflow/,
+// through src/scanner/flow.js). A call binds to what its
 // file names — a visible definition, else what a relative require() / import
 // brings in; where the binding can't be resolved (a package, a path alias,
 // `obj.f()`) the call may reach every project function of that name, and
@@ -15,8 +16,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { analyzeFlows } from "../src/scanner/flow.js";
-import { LIMITS } from "../src/scanner/jsflow.js";
+import { FLOW_OPTIONS, analyzeFlows } from "../src/scanner/flow.js";
 
 const dedent = (s) => {
   const lines = s.replace(/^\n/, "").split("\n");
@@ -270,14 +270,13 @@ test("one reading's limit notes itself", () => {
   const files = { "lib.js": "function runIt(list) {\n  for (const c of list) {\n    if (c) exec(c);\n  }\n}\nmodule.exports = { runIt };\n",
     "app.js": "const { runIt } = require('./lib');\napp.get('/', (req) => {\n  runIt(req.query.q);\n});\n" };
   assert.deepEqual(flows(files), [["X-CMD", "app.js", 3]]);
-  const saved = { ...LIMITS };
   try {
-    Object.assign(LIMITS, { RUN_BASE: 0, RUN_PER_NODE: 1 });
+    FLOW_OPTIONS.runLimit = [0, 1];                     // (the engine's limit, lowered)
     const got = analyze(files);
     assert.deepEqual(got.map((i) => [i.rule, i.file, i.line]), [["Q-FLOW-INCOMPLETE", "lib.js", 1]]);
     assert.match(got[0].msg, /stopped reading runIt\(\) in 'lib\.js' at its limit/);
   } finally {
-    Object.assign(LIMITS, saved);
+    FLOW_OPTIONS.runLimit = null;
   }
 });
 

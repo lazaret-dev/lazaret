@@ -12,16 +12,18 @@ export const TAGLINE = "lazaret: quarantine for your dependencies";
 export { scanFile, scanConfigFile, detectLang, taintScan, setScanTimeBudget } from "./scanner/scan.js";
 export { isConfigFile } from "./lib/configsecrets.js";
 export { analyzeFlows, redactFlowIssues } from "./scanner/flow.js";
-export { RULES, TEXT_RULES, SEV_ORDER, TYPES } from "./scanner/rules.js";
+export { SEV_ORDER, TYPES } from "./scanner/rules.js";
 export { computeMetrics, worstSevRating, maintainabilityRating } from "./scanner/metrics.js";
 export {
   buildResult, jsonRenderer, htmlRenderer, printReport, sarifReport, sarifRenderer,
   jsonReportChunks, htmlReportChunks, sarifChunks, sanitizeTerm, sanitizeTermLine, safeExcerpt,
 } from "./report.js";
 export { scanManifest, scanGyp, redactResult, setRedactSecrets } from "./lib/supplychain.js";
-export { followHook, hookScriptTargets, installScriptRisk, importTimeRisk, importTimeSeverity, nodeCandidates, persistenceReasons } from "./lib/hooks.js";
-export { runsReceivedCode } from "./lib/received.js";
-export { runsSubstitutedDownload } from "./lib/shellpipe.js";
+// The supply-chain tests, answered by the native engine (Rust, as WebAssembly: lib/native.js)
+export {
+  followHook, hookScriptTargets, installScriptRisk, importTimeRisk, importTimeSeverity, nodeCandidates,
+  persistenceReasons, runsReceivedCode, runsSubstitutedDownload,
+} from "./lib/native.js";
 export {
   collectFiles, reportPaths, writeReport, validateReportPaths, validateOutDir, isOurReport,
   ReportPathError, EXIT_OUTPUT,

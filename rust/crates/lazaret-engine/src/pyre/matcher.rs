@@ -354,19 +354,23 @@ pub fn charset(code: &[u32], mut pc: usize, ch: u32) -> bool {
 
 /// SRE(at).
 fn at(st: &State, ptr: usize, at: u32) -> bool {
-    let s = st.s;
+    at_pos(st.s, st.end, ptr, at)
+}
+
+/// SRE(at) at `ptr` of `s` searched up to `end` (the state's end).
+pub fn at_pos(s: &[u32], end: usize, ptr: usize, at: u32) -> bool {
     match at {
         AT_BEGINNING | AT_BEGINNING_STRING => ptr == 0,
         AT_BEGINNING_LINE => ptr == 0 || s[ptr - 1] == 0x0A,
-        AT_END => (st.end.wrapping_sub(ptr) == 1 && s[ptr] == 0x0A) || ptr == st.end,
-        AT_END_LINE => ptr == st.end || s.get(ptr) == Some(&0x0A),
-        AT_END_STRING => ptr == st.end,
+        AT_END => (end.wrapping_sub(ptr) == 1 && s[ptr] == 0x0A) || ptr == end,
+        AT_END_LINE => ptr == end || s.get(ptr) == Some(&0x0A),
+        AT_END_STRING => ptr == end,
         AT_BOUNDARY | AT_NON_BOUNDARY | AT_LOC_BOUNDARY | AT_LOC_NON_BOUNDARY => {
-            if st.end == 0 {
+            if end == 0 {
                 return false;
             }
             let thatp = ptr > 0 && is_ascii_word(s[ptr - 1]);
-            let thisp = ptr < st.end && is_ascii_word(s[ptr]);
+            let thisp = ptr < end && is_ascii_word(s[ptr]);
             if at == AT_BOUNDARY || at == AT_LOC_BOUNDARY {
                 thisp != thatp
             } else {
@@ -374,11 +378,11 @@ fn at(st: &State, ptr: usize, at: u32) -> bool {
             }
         }
         AT_UNI_BOUNDARY | AT_UNI_NON_BOUNDARY => {
-            if st.end == 0 {
+            if end == 0 {
                 return false;
             }
             let thatp = ptr > 0 && unicode::is_word(s[ptr - 1]);
-            let thisp = ptr < st.end && unicode::is_word(s[ptr]);
+            let thisp = ptr < end && unicode::is_word(s[ptr]);
             if at == AT_UNI_BOUNDARY {
                 thisp != thatp
             } else {
@@ -411,6 +415,11 @@ fn unit(code: &[u32], pc: usize, ch: u32) -> Option<bool> {
 /// Does the one-character operation at code[pc] accept `ch`?
 pub fn unit_accepts(code: &[u32], pc: usize, ch: u32) -> bool {
     unit(code, pc, ch).unwrap_or(true)
+}
+
+/// Is code[pc] a one-character operation unit() answers for exactly?
+pub fn unit_known(code: &[u32], pc: usize) -> bool {
+    unit(code, pc, 0).is_some()
 }
 
 /// SRE(count): how many times the one-character item at code[pc] matches
@@ -1308,9 +1317,18 @@ pub fn sre_search(st: &mut State, prog: &Prog) -> Result<bool, ()> {
     if ptr > end {
         return Ok(false);
     }
-    if let Some(need) = &prog.need {
+    if let Some(need) = prog.need.as_ref().filter(|_| prog.check_need) {
         // (a text holding none of the strings every match holds)
-        if !need.occurs(s, ptr, end) {
+        #[cfg(feature = "stats")]
+        let t0 = std::time::Instant::now();
+        let found = need.occurs(s, ptr, end);
+        #[cfg(feature = "stats")]
+        {
+            use std::sync::atomic::Ordering::Relaxed;
+            prog.scanned[0].fetch_add(1, Relaxed);
+            prog.scanned[1].fetch_add(t0.elapsed().as_nanos() as u64, Relaxed);
+        }
+        if !found {
             return Ok(false);
         }
     }
@@ -1378,6 +1396,34 @@ pub fn sre_search(st: &mut State, prog: &Prog) -> Result<bool, ()> {
         if prefix_len > end - ptr {
             return Ok(false);
         }
+        if let Some((lit, scan)) = prog.prefix.as_ref().filter(|(lit, _)| lit.len() == prefix_len) {
+            // each place the prefix occurs, in order (overlapping ones too):
+            // the places sre's own scan of it tries
+            let mut from = ptr;
+            loop {
+                let at = match scan.find(s, lit, from, end) {
+                    None => return Ok(false),
+                    Some(at) => at,
+                };
+                // found a potential match
+                if !budget::spend(1) {
+                    st.aborted = true;
+                    return Err(());
+                }
+                st.must_advance = false;
+                st.start = at;
+                st.ptr = at + prefix_skip;
+                if flags & INFO_LITERAL != 0 {
+                    return Ok(true);
+                }
+                if sre_match(st, prog, pc + 2 * prefix_skip, false)? {
+                    return Ok(true);
+                }
+                st.lastmark = -1;
+                st.lastindex = -1;
+                from = at + 1;
+            }
+        }
         while ptr < end {
             let c = code[prefix];
             loop {
@@ -1434,6 +1480,36 @@ pub fn sre_search(st: &mut State, prog: &Prog) -> Result<bool, ()> {
         return Ok(false);
     }
 
+    if let Some(lead) = &prog.lead {
+        // (every match starts with one of the lead strings: only where one
+        // starts is a match tried, the way sre tries its charset positions)
+        let end = st.end;
+        st.must_advance = false;
+        loop {
+            #[cfg(feature = "stats")]
+            let t0 = std::time::Instant::now();
+            let next = lead.next_start(s, ptr, end);
+            #[cfg(feature = "stats")]
+            {
+                use std::sync::atomic::Ordering::Relaxed;
+                prog.scanned[2].fetch_add(1, Relaxed);
+                prog.scanned[3].fetch_add(t0.elapsed().as_nanos() as u64, Relaxed);
+            }
+            match next {
+                None => return Ok(false),
+                Some(q) => ptr = q,
+            }
+            st.start = ptr;
+            st.ptr = ptr;
+            if sre_match(st, prog, pc, false)? {
+                return Ok(true);
+            }
+            ptr += 1;
+            st.lastmark = -1;
+            st.lastindex = -1;
+        }
+    }
+
     if has_charset {
         let end = st.end;
         st.must_advance = false;
@@ -1456,13 +1532,30 @@ pub fn sre_search(st: &mut State, prog: &Prog) -> Result<bool, ()> {
         }
     }
 
+    // A pattern that starts with ^ under MULTILINE matches only where a line
+    // starts (at 0 or after "\n"): no other start is tried (each would fail
+    // at its first operation).
+    let line_starts = code[pc] == AT && code[pc + 1] == AT_BEGINNING_LINE;
+    let line_start = |p: usize| p == 0 || s[p - 1] == 0x0A;
     if let Some(fs) = first {
         // (no match starts where the first character is not one it can take)
         let real_end = st.end;
         let mut p = ptr;
         let mut toplevel = true;
         while p <= end {
-            if p < real_end && fs.accepts(code, s[p]) {
+            if line_starts && p < real_end && !line_start(p) {
+                // (no match starts before the next line does: on to it)
+                match super::scan::find1(s, p, real_end, 0x0A) {
+                    None => break,
+                    Some(nl) => {
+                        toplevel = false;
+                        st.must_advance = false;
+                        p = nl + 1;
+                        continue;
+                    }
+                }
+            }
+            if p < real_end && (!line_starts || line_start(p)) && fs.may_start(code, s, p, real_end) {
                 st.lastmark = -1;
                 st.lastindex = -1;
                 st.start = p;
@@ -1491,6 +1584,14 @@ pub fn sre_search(st: &mut State, prog: &Prog) -> Result<bool, ()> {
     }
     while !status && ptr < end {
         ptr += 1;
+        if line_starts && !line_start(ptr) {
+            // (on to where the next line starts: s[ptr - 1] is not "\n")
+            ptr = match super::scan::find1(s, ptr, end, 0x0A) {
+                Some(nl) => nl,
+                None => end,
+            };
+            continue;
+        }
         st.lastmark = -1;
         st.lastindex = -1;
         st.start = ptr;

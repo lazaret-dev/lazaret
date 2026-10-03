@@ -1,4 +1,6 @@
-"""Review findings 6-11 and 13 — the Python interprocedural engine (flow.py).
+"""Review findings 6-11 and 13 — the Python interprocedural engine (flow.py's
+Python pass, the engine's since phase 3 of the Rust-first refactor:
+rust/crates/lazaret-engine/src/pyflow/).
 
  6  one unparseable file (parser MemoryError, NUL bytes, Python 2, syntax
     errors) dropped the WHOLE cross-file pass; flow.analyze could raise.
@@ -69,20 +71,17 @@ class ParseFailuresCostOneFile(unittest.TestCase):
     def test_syntax_error(self):
         self.check("broken.py", "def f(:\n    pass\n", "Q-FLOW-SKIPPED", "syntax error")
 
-    def test_parser_raising_anything_is_contained(self):
-        real = flow.ast.parse
-
-        def parse(src, *a, **k):
-            if "BOOM" in src:
-                raise ValueError("source code string cannot contain null bytes")
-            return real(src, *a, **k)
-        with mock.patch.object(flow.ast, "parse", side_effect=parse):
-            self.check("boom.py", "BOOM = 1\n", "Q-FLOW-SKIPPED", "NUL")
+    def test_text_the_parser_cannot_hold_is_contained(self):
+        # a lone surrogate (Python's ast.parse: UnicodeEncodeError)
+        self.check("s.py", "x = '\ud800'\n", "Q-FLOW-SKIPPED", "could not be parsed (UnicodeEncodeError)")
 
     def test_analyze_never_raises(self):
-        with mock.patch.object(flow._Analyzer, "run", side_effect=ZeroDivisionError):
+        with mock.patch.object(flow.engine, "py_flow", side_effect=ZeroDivisionError):
             out = analyze({"a.py": self.VIEW, "b.py": RUNNER})
-        self.assertIn("Q-FLOW-INCOMPLETE", [f["rule"] for f in out])
+        notes = [f for f in out if f["rule"] == "Q-FLOW-INCOMPLETE"]
+        self.assertEqual([n["name"] for n in notes], ["Flow analysis incomplete (internal error)"])
+        self.assertIn("The Python cross-file taint pass stopped on an internal error (ZeroDivisionError)",
+                      notes[0]["msg"])
         # garbage input shapes
         self.assertEqual(flow.analyze([None, 5, {"lang": "py"}, {"path": "x.py", "lang": "py",
                                                                "content": None}])[0]["rule"],
@@ -135,15 +134,13 @@ class SummariesPerCategory(unittest.TestCase):
                 self.assertEqual([r for r, _, _ in xs(out)], ["X-CODE"])
 
     def test_converges(self):
-        runs = []
-        orig = flow._Analyzer.run
-
-        def counting(self):
-            runs.append(self.fn.qualname)
-            return orig(self)
-        with mock.patch.object(flow._Analyzer, "run", counting):
-            analyze({"b.py": self.BOTH_EVAL_FIRST})
-        self.assertLessEqual(runs.count("both"), 3, runs)
+        # two readings of each function settle the summaries: a third would
+        # be cut by the iteration cap, which says so
+        with mock.patch.object(flow, "MAX_ITERS", 2):
+            for body in (self.BOTH_EVAL_FIRST, self.BOTH_SYSTEM_FIRST):
+                with self.subTest(body=body):
+                    out = analyze({"a.py": self.CALLER, "b.py": body})
+                    self.assertEqual([f["rule"] for f in out], ["X-CODE"])
 
     def test_sanitizing_wrapper_clears_across_functions(self):
         """Reviewer repro W1: safe_arg() wraps shlex.quote."""
@@ -353,8 +350,10 @@ class ConvergenceAndPerformance(unittest.TestCase):
     def test_budgets_are_visible(self):
         findings = []
         files = [{"path": "a.py", "content": self.chain(3), "lang": "py"}]
-        flow._analyze_python(files, findings, time_budget=-1)
-        self.assertIn("time budget", " ".join(f["name"] for f in findings))
+        flow._analyze_python(files, findings, work_limit=(0, 0))
+        self.assertEqual([f["name"] for f in findings], ["Flow analysis incomplete (size budget)"] * 2)
+        self.assertRegex(findings[0]["msg"], r"stopped following values at w\d\(\) in 'a\.py' after \d+ steps")
+        self.assertRegex(findings[1]["msg"], r"stopped reporting at w\d\(\) in 'a\.py' after \d+ steps")
         with mock.patch.object(flow, "FLOW_MAX_FILES", 1):
             out = analyze({"a.py": RUNNER, "b.py": RUNNER})
         notes = [f for f in out if f["rule"] == "Q-FLOW-INCOMPLETE"]

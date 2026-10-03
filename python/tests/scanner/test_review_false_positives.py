@@ -31,7 +31,7 @@ Fixtures are inert strings; nothing is executed.
 """
 import unittest
 
-from tests import _support  # noqa: F401
+from tests import _support
 from lazaret.scanner import core
 
 B64 = '"Y29uc29sZS5sb2coMSk="'
@@ -109,12 +109,12 @@ class FlowReachTests(unittest.TestCase):
         return "var pad = [%s];\n" % ("0," * (n // 2))
 
     def test_a_sink_far_from_the_decode_is_not_reached(self):
-        far = core.DEP_FLOW_WINDOW + 500
+        far = _support.pack("DEP_FLOW_WINDOW") + 500
         self.assertEqual(flow_lines(self.DECODE + self.pad(far) + "eval(t);\n"), [])
         self.assertEqual(flow_lines(self.DECODE + self.pad(2_000) + "eval(t);\n"), [3])
 
     def test_propagation_keeps_the_distance_from_the_decode(self):
-        half = core.DEP_FLOW_WINDOW * 2 // 3
+        half = _support.pack("DEP_FLOW_WINDOW") * 2 // 3
         src = self.DECODE + self.pad(half) + "var u = t;\n" + self.pad(half) + "eval(u);\n"
         self.assertEqual(flow_lines(src), [])
         self.assertEqual(flow_lines(self.DECODE + "var u = t;\n" + self.pad(half) + "eval(u);\n"), [4])
@@ -122,7 +122,7 @@ class FlowReachTests(unittest.TestCase):
     def test_bundle_helpers_far_from_a_wasm_decode(self):
         # the shape of npm:pullfrog's dist/index.js
         src = ('var mod = await WebAssembly.compile(Buffer.from("AGFzbQEAAAA=", "base64"));\n'
-               + self.pad(core.DEP_FLOW_WINDOW + 500)
+               + self.pad(_support.pack("DEP_FLOW_WINDOW") + 500)
                + "function __importStar(mod) { var result = {}; result.default = mod; return result; }\n"
                + 'var cp = __importStar(require("child_process"));\n'
                + "var r = __importStar(mod); spawn(r.default); cp.spawn(r);\n")

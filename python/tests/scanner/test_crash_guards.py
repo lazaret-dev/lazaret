@@ -72,7 +72,7 @@ class _EngineState:
             list(lazaret_flow._EXTRA_PY_SINKS),
             set(lazaret_flow.FULL_SANITIZERS_PY),
             dict(lazaret_flow._EXTRA_PARTIAL_PY),
-            lazaret_flow._JS_SOURCE_RE,
+            list(lazaret_flow._JS_SOURCES),
             list(lazaret_flow._JS_SINKS),
             set(lazaret_flow._JS_FULL_SAN),
             dict(lazaret_flow._JS_PARTIAL_SAN),
@@ -95,7 +95,7 @@ class _EngineState:
         lazaret_flow.FULL_SANITIZERS_PY.update(fsp)
         lazaret_flow._EXTRA_PARTIAL_PY.clear()
         lazaret_flow._EXTRA_PARTIAL_PY.update(epp)
-        lazaret_flow._JS_SOURCE_RE = jsrc
+        lazaret_flow._JS_SOURCES[:] = jsrc
         lazaret_flow._JS_SINKS[:] = jsinks
         lazaret_flow._JS_FULL_SAN.clear()
         lazaret_flow._JS_FULL_SAN.update(jfull)
@@ -202,31 +202,30 @@ class TestTaintConfigBadRegex(unittest.TestCase):
                         self.warns)
 
     def test_flow_javascript_sources_bad_regex_warns_not_raises(self):
-        before = lazaret_flow._JS_SOURCE_RE.pattern
+        before = [g.pattern for g in lazaret_flow._JS_SOURCES]
         lazaret_flow.configure({"javascript": {"sources": ["("]}},
                                  on_warn=self.warns.append)
-        self.assertEqual(lazaret_flow._JS_SOURCE_RE.pattern, before)
+        self.assertEqual([g.pattern for g in lazaret_flow._JS_SOURCES], before)
         self.assertTrue(any("not a valid regex" in w for w in self.warns),
                         self.warns)
 
     def test_flow_javascript_sources_non_str_warns_not_raises(self):
         # "|".join(["x", 5]) previously raised TypeError
-        before = lazaret_flow._JS_SOURCE_RE.pattern
+        before = [g.pattern for g in lazaret_flow._JS_SOURCES]
         lazaret_flow.configure({"javascript": {"sources": [5]}},
                                  on_warn=self.warns.append)
-        self.assertEqual(lazaret_flow._JS_SOURCE_RE.pattern, before)
+        self.assertEqual([g.pattern for g in lazaret_flow._JS_SOURCES], before)
         self.assertTrue(self.warns, "expected a warning for non-str source")
 
     def test_flow_javascript_sources_mixed_valid_and_invalid(self):
         # partial failure: the valid pattern still applies
-        before = lazaret_flow._JS_SOURCE_RE.pattern
+        before = [g.pattern for g in lazaret_flow._JS_SOURCES]
         lazaret_flow.configure({"javascript": {"sources": [r"getUser\b", "("]}},
                                  on_warn=self.warns.append)
-        self.assertIn("getUser", lazaret_flow._JS_SOURCE_RE.pattern)
-        self.assertNotEqual(lazaret_flow._JS_SOURCE_RE.pattern, before)
+        self.assertEqual([g.pattern for g in lazaret_flow._JS_SOURCES], before + [r"getUser\b"])
         self.assertTrue(any("not a valid regex" in w for w in self.warns))
         # and it actually matches:
-        self.assertTrue(lazaret_flow._JS_SOURCE_RE.search("var x = getUser();"))
+        self.assertTrue(lazaret_flow._JS_SOURCES[-1].search("var x = getUser();"))
 
     def test_flow_javascript_sink_bad_regex_warns_not_raises(self):
         n = len(lazaret_flow._JS_SINKS)

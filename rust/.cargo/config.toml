@@ -1,0 +1,8 @@
+# The WebAssembly build (`cargo build --profile wasm --target
+# wasm32-unknown-unknown -p lazaret-ffi`, docs/RUST_ENGINE.md): an 8 MiB
+# stack, the main thread's on a native platform, where the 1 MiB default would
+# be the tightest bound on the engine's (bounded) recursion. The stack comes
+# first in the module's memory, so running past it traps instead of
+# overwriting data.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "link-arg=-zstack-size=8388608"]

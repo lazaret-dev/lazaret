@@ -10,7 +10,7 @@ members = ["crates/lazaret-engine", "crates/lazaret-ffi"]
 [workspace.package]
 version = "0.1.8"
 edition = "2021"
-license = "Apache-2.0 AND Python-2.0.1"
+license = "Apache-2.0 AND Python-2.0.1 AND Unicode-3.0"
 rust-version = "1.75"
 repository = "https://github.com/lazaret-dev/lazaret"
 
@@ -21,3 +21,12 @@ codegen-units = 1
 panic = "unwind"          # the FFI boundary turns a panic into an error, never an abort
 debug = false
 strip = true
+
+# The WebAssembly build the npm package ships (docs/RUST_ENGINE.md):
+#   cargo build --profile wasm --target wasm32-unknown-unknown -p lazaret-ffi
+# The release profile, aborting on a panic: the target's standard library is
+# built that way, and the npm binding answers a trap as an engine error and
+# starts a fresh instance (.cargo/config.toml sets the target's stack).
+[profile.wasm]
+inherits = "release"
+panic = "abort"

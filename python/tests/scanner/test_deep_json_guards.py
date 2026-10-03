@@ -292,18 +292,21 @@ class _FlowState:
         self.f = f
         self.saved = (list(f._PY_SOURCE_EXTRA), list(f._EXTRA_PY_SINKS),
                       set(f.FULL_SANITIZERS_PY), dict(f._EXTRA_PARTIAL_PY),
-                      list(f._JS_SINKS), dict(f._JS_PARTIAL_SAN))
+                      list(f._JS_SOURCES), list(f._JS_SINKS), set(f._JS_FULL_SAN), dict(f._JS_PARTIAL_SAN))
 
     def restore(self):
         f = self.f
-        (pse, eps, fsp, epp, jsinks, jpart) = self.saved
+        (pse, eps, fsp, epp, jsrc, jsinks, jfull, jpart) = self.saved
         f._PY_SOURCE_EXTRA[:] = pse
         f._EXTRA_PY_SINKS[:] = eps
         f.FULL_SANITIZERS_PY.clear()
         f.FULL_SANITIZERS_PY.update(fsp)
         f._EXTRA_PARTIAL_PY.clear()
         f._EXTRA_PARTIAL_PY.update(epp)
+        f._JS_SOURCES[:] = jsrc
         f._JS_SINKS[:] = jsinks
+        f._JS_FULL_SAN.clear()
+        f._JS_FULL_SAN.update(jfull)
         f._JS_PARTIAL_SAN.clear()
         f._JS_PARTIAL_SAN.update(jpart)
 

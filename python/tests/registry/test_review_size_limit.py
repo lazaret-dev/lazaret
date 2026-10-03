@@ -82,18 +82,70 @@ class OneFindingPerFileTests(unittest.TestCase):
 
 
 class TimeBudgetTests(unittest.TestCase):
-    """A file whose rules run past the per-file time budget is SC-TRUNCATED;
-    it used to be listed while the verdict stayed OK."""
+    """A file the engine cannot finish is SC-TRUNCATED and the release
+    INCOMPLETE; it used to be listed while the verdict stayed OK. The native
+    engine's bound is its work budget (engine.WORK_BUDGET), not a clock."""
 
-    def test_a_file_past_its_time_budget_makes_the_release_incomplete(self):
-        from lazaret.scanner import core
-        files = {"package.json": manifest(main="index.js"), "index.js": "module.exports = 1;\n" * 50}
-        with mock.patch.object(core, "SCAN_TIME_BUDGET", -1):   # the path a 30 s overrun takes
+    def test_a_file_past_the_work_budget_makes_the_release_incomplete(self):
+        from lazaret.scanner import engine
+        files = {"package.json": manifest(main="index.js"),
+                 "index.js": "var d = atob(p); " * 5000 + "\nmodule.exports = d;\n"}
+        self.assertEqual(scan_npm(files)["verdict"], "OK")
+        with mock.patch.object(engine, "WORK_BUDGET", 10_000):
             res = scan_npm(files)
         self.assertEqual(res["verdict"], "INCOMPLETE", res["verdictReason"])
         self.assertEqual(res["truncated"], 1)
         (t,) = issues(res, "SC-TRUNCATED")
-        self.assertIn("scan time budget exceeded", t["msg"])
+        self.assertIn(engine.EXHAUSTED, t["msg"])
+
+    def test_a_file_the_engine_fails_on_makes_the_release_incomplete(self):
+        from lazaret.scanner import _native
+        files = {"package.json": manifest(main="index.js"), "index.js": "module.exports = 1;\n" * 50}
+        real = _native.call
+
+        def failing(name, args=None, text=""):
+            if name == "batch":
+                return [{"error": "panic", "panic": True} for _ in args["calls"]]
+            return real(name, args, text)
+        with mock.patch.object(_native, "call", side_effect=failing):
+            res = scan_npm(files)
+        self.assertEqual(res["verdict"], "INCOMPLETE", res["verdictReason"])
+        (t,) = issues(res, "SC-TRUNCATED")
+        self.assertIn("its scan failed", t["msg"])
+
+    def test_a_step_the_engine_cannot_finish_makes_the_release_incomplete(self):
+        """A call the engine can't answer in one of the scan's later steps (here
+        the install-script test of a hook's script) marks the release, names
+        the step, and the steps after it still run."""
+        from lazaret.scanner import _native, engine
+        files = {"package.json": manifest(main="index.js", scripts={"postinstall": "node setup.js"}),
+                 "setup.js": "module.exports = 1;\n", "index.js": "module.exports = 1;\n"}
+        real = _native.call
+
+        def failing(name, args=None, text=""):
+            if name == "install_script_risk":
+                raise _native.NativeExhausted("install_script_risk: the call's work budget was spent")
+            return real(name, args, text)
+        with mock.patch.object(_native, "call", side_effect=failing), \
+                mock.patch.object(repo._ArtifactScan, "_agent_hijack", autospec=True) as later:
+            res = scan_npm(files)
+        self.assertEqual(res["verdict"], "INCOMPLETE", res["verdictReason"])
+        (t,) = issues(res, "SC-TRUNCATED")
+        self.assertEqual(t["file"], "(release)")
+        self.assertIn("the engine could not finish the install hooks", t["msg"])
+        self.assertIn(engine.EXHAUSTED, t["msg"])
+        later.assert_called_once()
+
+    def test_a_manifest_the_engine_cannot_read_is_truncated(self):
+        from lazaret.scanner import _native, engine
+        files = {"package.json": manifest(main="index.js"), "index.js": "module.exports = 1;\n"}
+        with mock.patch.object(repo.lazaret, "scan_manifest",
+                               side_effect=_native.NativeExhausted("hook_command_risk: budget")):
+            res = scan_npm(files)
+        self.assertEqual(res["verdict"], "INCOMPLETE", res["verdictReason"])
+        (t,) = issues(res, "SC-TRUNCATED")
+        self.assertEqual(t["file"], "package.json")
+        self.assertIn(engine.EXHAUSTED, t["msg"])
 
     def test_decide_verdict_counts_a_stray_truncation_finding(self):
         stray = [{"rule": "SC-TRUNCATED", "file": "a.js", "sev": "CRITICAL"}]

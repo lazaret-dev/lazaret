@@ -47,8 +47,9 @@ test("extensions follow os.path.splitext", () => {
   assert.equal(rep.pass, true);
 });
 
-// linear.js tested S-CHMOD's tail on the 63 characters after the comma, where
-// the Python pattern's \s* is unbounded: 80 spaces before 0o777 hid it here.
+// The npm engine's linear.js (through 0.1.8) tested S-CHMOD's tail on the 63
+// characters after the comma, where the Python pattern's \s* is unbounded: 80
+// spaces before 0o777 hid it here.
 test("S-CHMOD: any amount of whitespace before the mode", () => {
   const { found } = scanTree({ "c.py": "os.chmod(p," + " ".repeat(80) + "0o777)\nos.chmod(q,\t\t0o644)\n" });
   assert.deepEqual(found, ["c.py:1 S-CHMOD"]);
@@ -81,9 +82,10 @@ test("source text is read in Unicode 13.0", () => {
     "u.js": "a = 1;\n\\u{10D4A}eval(x)\n\\u200deval(y)\n\\u30fbeval(z)\n",
     "s.py": "x = eval(y)  # \u{1fae0} \u{1f600}\n",
   });
-  // line 3's invisible U+200D glued to eval is also a look-alike name (SC-HOMOGLYPH)
+  // line 3's invisible U+200D glued to eval is also a look-alike name (SC-HOMOGLYPH); u.py's U+FFFD is no
+  // Python the taint pass can read (a Q-FLOW-SKIPPED note, as in Python)
   assert.deepEqual(found, ["s.py:1 S-EVAL-PY", "u.js:2 S-EVAL-JS", "u.js:3 S-EVAL-JS", "u.js:3 SC-HOMOGLYPH",
-    "u.js:4 S-EVAL-JS", "u.py:1 S-EVAL-PY"]);
+    "u.js:4 S-EVAL-JS", "u.py:1 Q-FLOW-SKIPPED", "u.py:1 S-EVAL-PY"]);
   assert.equal(rep.issues.find((i) => i.file === "s.py").snippet[0], "x = eval(y)  # \ufffd \u{1f600}");
 });
 

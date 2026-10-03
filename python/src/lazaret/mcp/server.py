@@ -603,7 +603,8 @@ def tool_scan_files(args):
             issues = lazaret.scan_config_file(p, content)
         else:
             content, extra = lazaret.decode_member(p, data)
-            issues = extra + lazaret.scan_file(p, content, lang)
+            disguised = lazaret.disguised_binary(p, data)    # a program under a source file's name
+            issues = extra + ([disguised] if disguised else []) + lazaret.scan_file(p, content, lang)
         files.append({"path": p, "content": content, "lang": lang})
         all_issues.extend(issues)
         out[p] = {"issueCount": len(issues), "issues": [slim(i) for i in issues]}

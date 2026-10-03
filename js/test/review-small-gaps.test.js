@@ -10,9 +10,15 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "nod
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { run, scanFile } from "../src/index.js";
-import { hexHiddenName } from "../src/scanner/scan.js";
 import { jsxReading } from "../src/lib/lexer.js";
 import { EXTS } from "../src/lib/fs.js";
+
+/** The name SC-HEXSTR says a line's escapes hide, else null (core.hex_hidden_name, as its message shows it). */
+const hexHiddenName = (line) => {
+  const found = scanFile({ name: "f.py", content: line + "\n", lang: "py" })
+    .find((i) => i.rule === "SC-HEXSTR" && i.msg.startsWith("Escape sequences hide a name: "));
+  return found ? found.msg.slice("Escape sequences hide a name: ".length + 1, -2) : null;
+};
 
 // an MPEG transport stream: a sync byte (0x47) every 188 bytes
 const VIDEO = Buffer.concat(Array.from({ length: 40 }, (_, k) =>
@@ -80,7 +86,7 @@ test("names hidden in a few escapes", () => {
     [String.raw`b = b"\x00\x01\x65val"`, null], [String.raw`x = "\x41PI system"`, null], [String.raw`x = "e\x76al_thing"`, null],
     [String.raw`x = "\x65"; y = "val"`, null], [String.raw`x = "a\x2fb"`, null], [String.raw`\x65val`, null],
   ];
-  for (const [line, want] of cases) assert.deepEqual(hexHiddenName(line), want, line);
+  for (const [line, want] of cases) assert.deepEqual(hexHiddenName(line), want && want[0], line);
   const eight = String.raw`x = "\x65\x76\x61\x6c\x28\x61\x74\x6f"`;
   const hex = scanFile({ path: "x.js", content: eight + "\n", lang: "js" }).filter((i) => i.rule === "SC-HEXSTR");
   assert.deepEqual(hex.map((i) => i.msg), ["Hex escapes hide readable text: 'eval(ato'."]);

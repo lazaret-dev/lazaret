@@ -27,7 +27,10 @@ Every parsing function accepts these keyword options:
                            plus 64 per declaration (None: unlimited)
 
 Refusals raise subclasses of SafeXMLError (itself a ValueError). Malformed XML
-raises the same errors as the stdlib (e.g. xml.etree.ElementTree.ParseError).
+raises the same errors as the stdlib (e.g. xml.etree.ElementTree.ParseError),
+and so does a declared encoding Expat can't read, where the stdlib raises
+LookupError or ValueError: ParseError, ExpatError (minidom, xmlrpc) or a fatal
+SAXParseException, saying "unknown encoding" without the name.
 """
 
 from ._common import (

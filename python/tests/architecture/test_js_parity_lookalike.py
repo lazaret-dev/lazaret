@@ -1,47 +1,33 @@
-"""Engine parity for SC-HOMOGLYPH's look-alike names: the npm engine's
-lookalikeName (js/src/scanner/scan.js, and the dashboard's copy) against
-core.lookalike_name, case by case on curated lines and a seeded random corpus
-of names built from ASCII letters, every look-alike letter of the table,
-letters that are not look-alikes (Cyrillic, Greek alpha / nu / rho), NFKC
-compatibility forms (fullwidth, mathematical bold), the invisible U+200C /
-U+200D, digits and punctuation; and the tables themselves. Columns are
-compared in code points (the npm engine's are UTF-16 offsets). Then whole
-files: a seeded random corpus of JavaScript, TypeScript and Python built from
+"""Engine parity for SC-HOMOGLYPH's look-alike names, on whole files: a
+seeded random corpus of JavaScript, TypeScript and Python built from
 literals of every kind, comments, regex literals and divisions, escapes and
-look-alike names, scanned by core, the npm engine and the dashboard, whose
-SC-HOMOGLYPH findings must agree (the lexer's literal spans and
-names_code / namesCode). The expectations are in
-tests/scanner/test_review_lookalike_names.py. Skipped where node is missing.
-Every such character here is written as an escape.
+look-alike names, scanned by core and by the npm engine (its native engine,
+as WebAssembly, and its comment layout, the engine's lexers'), whose
+SC-HOMOGLYPH findings must agree (the lexers' literal spans and names_code /
+namesCode). The dashboard keeps its own comment lexer until it runs the
+engine (it reads a template's `${…}` and an f-string's fields as text, and
+some of this corpus's regex literals and divisions otherwise), so it is
+held to the CLI on the fixtures and the curated inputs of
+tests/scanner/test_review_dashboard_parity.py instead. The name corpus here
+(curated lines and a seeded random corpus of names built from ASCII letters,
+every look-alike letter of the table, letters that are not look-alikes
+(Cyrillic, Greek alpha / nu / rho), NFKC compatibility forms (fullwidth,
+mathematical bold), the invisible U+200C / U+200D, digits and punctuation)
+holds the native engine's lookalike_name to its recorded outputs in
+test_snapshot_small.py. The expectations are in
+tests/scanner/test_review_lookalike_names.py. Skipped where the npm engine
+is not built. Every such character here is written as an escape.
 """
 import json
 import os
 import random
-import shutil
 import subprocess
 import unittest
 
 from lazaret.scanner import core
 from tests import _support
-from tests.scanner import _dashboard_vm as dash
+from tests.architecture.test_js_parity import NPM_READY, NPM_SKIP
 
-NODE = shutil.which("node")
-SCAN_JS = os.path.join(_support.REPO_ROOT, "js", "src", "scanner", "scan.js")
-NPM = """
-import { readFileSync } from "node:fs";
-import { pathToFileURL } from "node:url";
-const s = await import(pathToFileURL(process.argv[1]).href);
-const { cases, words } = JSON.parse(readFileSync(0, "utf8"));
-const known = new Set(words);
-const cp = (t, i) => [...t.slice(0, i)].length;
-process.stdout.write(JSON.stringify({
-  tables: { lookalikes: Object.fromEntries(s.LOOKALIKES), targets: [...s.LOOKALIKE_TARGETS].sort(), nameRun: s.NAME_RUN_SRC },
-  results: cases.map(([code, lang]) => {
-    const r = s.lookalikeName(code, lang, () => known);
-    return r && [...r.slice(0, 5), cp(code, r[5])];
-  }),
-}));
-"""
 WORDS = ["eval", "isAdmin", "value", "data", "a", "ab", "count", "Function", "result", "config"]
 CURATED = [
     ("const \\u0435val = eval;", "js"), ("\\u0435val(x)", "js"), ("if (isAdm\\u0456n) {", "js"), ("v\\u0430lue = 1", "py"),
@@ -57,16 +43,16 @@ def unescape(text):
 
 
 PIECES = (["e", "v", "a", "l", "i", "s", "A", "d", "m", "n", "c", "o", "u", "t", "x", "_", "$", "0", "7"]
-          + list(core._LOOKALIKES)
+          + list(_support.pack("_LOOKALIKES"))
           + [chr(c) for c in (0x043F, 0x0438, 0x0432, 0x0442, 0x044F, 0x0436, 0x03B1, 0x03BD, 0x03C1, 0xFF45, 0xFF56,
                               0x1D41E, 0x200C, 0x200D, 0x00E9, 0x0131, 0x017F, 0x212A)]
           + ["eval", "isAdmin", "value", "exec", "require", " ", " ", "=", "(", ")", ".", ";", "'", "[", "]", "-"])
 
 
 SPOOF = {}                                              # ASCII letter -> its look-alikes
-for fake, real in core._LOOKALIKES.items():
+for fake, real in _support.pack("_LOOKALIKES").items():
     SPOOF.setdefault(real, []).append(fake)
-TARGETS = sorted(core._LOOKALIKE_TARGETS)
+TARGETS = sorted(_support.pack("_LOOKALIKE_TARGETS"))
 OTHERS = ["isAdmin", "value", "data", "count", "result", "config", "request", "open"]
 
 
@@ -142,62 +128,24 @@ process.stdout.write(JSON.stringify(files.map(([path, lang, content]) => scanFil
 """
 
 
-@unittest.skipUnless(NODE, "node is not installed")
+@unittest.skipUnless(NPM_READY, NPM_SKIP)
 class WholeFileParityTests(unittest.TestCase):
     maxDiff = None
 
-    def test_core_the_npm_engine_and_the_dashboard_agree(self):
+    def test_core_and_the_npm_engine_agree(self):
         files = file_corpus()
         want = [[[i["sev"], i["line"], i["msg"]] for i in core.scan_file(path, content, lang)
                  if i["rule"] == "SC-HOMOGLYPH"] for path, lang, content in files]
-        p = subprocess.run([NODE, "--input-type=module", "-e", NPM_FILES,
+        p = subprocess.run([NPM_READY, "--input-type=module", "-e", NPM_FILES,
                             os.path.join(_support.REPO_ROOT, "js", "src", "index.js")],
                            input=json.dumps(files), capture_output=True, encoding="utf-8", timeout=60)
         if p.returncode:
             raise AssertionError(p.stderr[-2000:])
         npm = json.loads(p.stdout)
-        page = [[[i["sev"], i["line"], i["msg"]] for i in issues if i["rule"] == "SC-HOMOGLYPH"]
-                for issues in dash.run([{"op": "scanFile", "file": {"name": path, "lang": lang, "content": content}}
-                                        for path, lang, content in files], timeout=60)]
-        diffs = [(f, w, n, g) for f, w, n, g in zip(files, want, npm, page) if not w == n == g]
+        diffs = [(f, w, n) for f, w, n in zip(files, want, npm) if w != n]
         self.assertEqual(diffs[:5], [])
         self.assertGreater(sum(1 for w in want if w), 150)
         self.assertGreater(sum(1 for w in want if not w), 100)
-
-
-@unittest.skipUnless(NODE, "node is not installed")
-class LookalikeParityTests(unittest.TestCase):
-    maxDiff = None
-
-    @classmethod
-    def setUpClass(cls):
-        cls.cases = corpus()
-        p = subprocess.run([NODE, "--input-type=module", "-e", NPM, SCAN_JS],
-                           input=json.dumps({"cases": cls.cases, "words": WORDS}),
-                           capture_output=True, encoding="utf-8", timeout=60)
-        if p.returncode:
-            raise AssertionError(p.stderr[-2000:])
-        out = json.loads(p.stdout)
-        cls.tables, cls.results = out["tables"], out["results"]
-
-    def test_every_case_agrees(self):
-        words = frozenset(WORDS)
-        diffs = []
-        for (code, lang), got in zip(self.cases, self.results):
-            want = core.lookalike_name(code, lang, lambda: words)
-            if (list(want) if want else None) != got:
-                diffs.append((code, lang, want, got))
-        self.assertEqual(diffs[:10], [])
-        found = [r for r in self.results if r]
-        self.assertGreater(sum(1 for r in found if r[2] == "CRITICAL" and not r[3]), 40)    # a target
-        self.assertGreater(sum(1 for r in found if r[3]), 30)                                # another name
-        self.assertGreater(sum(1 for r in found if r[2] == "MAJOR"), 300)
-        self.assertGreater(len(self.results) - len(found), 300)
-
-    def test_the_tables_are_cores(self):
-        self.assertEqual(self.tables["lookalikes"], core._LOOKALIKES)
-        self.assertEqual(self.tables["targets"], sorted(core._LOOKALIKE_TARGETS))
-        self.assertEqual(self.tables["nameRun"], core._NAME_RUN_RE.pattern)
 
 
 if __name__ == "__main__":

@@ -269,6 +269,17 @@ def short(issue):
     return f"{issue['rule']}@{issue['line']} {json.dumps(rest, sort_keys=True, ensure_ascii=False)[:300]}"
 
 
+# What the page reads otherwise than the CLI, by design: (file, rule, line)
+# of each finding only the CLI has. The engine's lexers read a template's
+# `${…}` and an f-string's fields as code (a call there runs:
+# docs/RUST_ENGINE.md §15); the page keeps its own comment lexer, which
+# reads them as text, until it runs the engine itself.
+ONLY_IN_THE_CLI = {
+    ("lookalike_strings.js", "SC-HOMOGLYPH", 3),
+    ("lookalike_strings.py", "SC-HOMOGLYPH", 7),
+}
+
+
 def cli_upload(name, data):
     """What the CLI reports for a source file with these bytes."""
     lang = core.EXTS[os.path.splitext(name)[1].lower()]
@@ -279,6 +290,9 @@ def cli_upload(name, data):
 @dash.requires_node
 class DashboardParityTests(unittest.TestCase):
     def assert_same_findings(self, name, cli, page):
+        expected = [i for i in cli if (name, i["rule"], i["line"]) in ONLY_IN_THE_CLI]
+        self.assertEqual(len(expected), sum(1 for f, _r, _l in ONLY_IN_THE_CLI if f == name), name)
+        cli = [i for i in cli if (name, i["rule"], i["line"]) not in ONLY_IN_THE_CLI]
         a, b = collections.Counter(map(issue_key, cli)), collections.Counter(map(issue_key, page))
         if a == b:
             return

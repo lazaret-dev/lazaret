@@ -1,6 +1,6 @@
 {
  "format": 1,
- "rule_set": "2.12.0",
+ "rule_set": "2.24.0",
  "source": "lazaret.scanner.core, extracted by scripts/make_rust_tables.py \u2014 do not edit",
  "values": {
   "ALWAYS_PRUNE_DIRS": {
@@ -394,6 +394,9 @@
   "HEADER_SAMPLE_BYTES": {
    "value": 512
   },
+  "HEX_LETTER_SHARE": {
+   "value": 0.4
+  },
   "HEX_MIN_ESCAPES": {
    "value": 8
   },
@@ -534,6 +537,9 @@
     }
    ]
   },
+  "OBF_IDENT_MIN": {
+   "value": 5
+  },
   "OBF_IDENT_RE": {
    "flags": "",
    "re": "\\b_0x[0-9a-f]{4,}\\b"
@@ -583,6 +589,9 @@
      "value": "migrations"
     }
    ]
+  },
+  "PREVIEW_MAX": {
+   "value": 60
   },
   "PTH_EXT": {
    "value": ".pth"
@@ -636,6 +645,2760 @@
   },
   "REPO_TAINT_CONFIG": {
    "value": ".lazaret-taint.json"
+  },
+  "RULES": {
+   "list": [
+    {
+     "map": {
+      "fix": {
+       "value": "Replace with safe parsing (ast.literal_eval) or an explicit dispatch table."
+      },
+      "id": {
+       "value": "S-EVAL-PY"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        }
+       ]
+      },
+      "msg": {
+       "value": "Use of eval/exec enables arbitrary code execution."
+      },
+      "name": {
+       "value": "Dynamic code execution"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "(?<![\\w.])(eval|exec)\\s*\\("
+      },
+      "ref": {
+       "value": "CWE-95 \u00b7 OWASP A03: Injection"
+      },
+      "sev": {
+       "value": "CRITICAL"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "If any part of the evaluated string derives from user input, an attacker can run arbitrary code in your process."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Replace with JSON.parse or an explicit dispatch table."
+      },
+      "id": {
+       "value": "S-EVAL-JS"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "js"
+        }
+       ]
+      },
+      "msg": {
+       "value": "Use of eval enables arbitrary code execution."
+      },
+      "name": {
+       "value": "Dynamic code execution"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "(?<![\\w.])eval\\s*\\("
+      },
+      "ref": {
+       "value": "CWE-95 \u00b7 OWASP A03: Injection"
+      },
+      "sev": {
+       "value": "CRITICAL"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "If any part of the evaluated string derives from user input, an attacker can run arbitrary code."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Define functions statically or use a whitelisted dispatch map."
+      },
+      "id": {
+       "value": "S-NEWFUNC"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "js"
+        }
+       ]
+      },
+      "msg": {
+       "value": "new Function() compiles strings into code, equivalent to eval."
+      },
+      "name": {
+       "value": "Function constructor"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "new\\s+Function\\s*\\("
+      },
+      "ref": {
+       "value": "CWE-95 \u00b7 OWASP A03"
+      },
+      "sev": {
+       "value": "CRITICAL"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "String-built functions can execute attacker-controlled input."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Use parameterized queries: cursor.execute(\"SELECT \u2026 WHERE id = %s\", (user_id,))."
+      },
+      "id": {
+       "value": "S-SQL-PY"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        }
+       ]
+      },
+      "msg": {
+       "value": "SQL query built with string formatting/concatenation."
+      },
+      "name": {
+       "value": "SQL built from strings"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "\\.(execute|executemany)\\s*\\(\\s*(f[\\\"']|[\\\"'][^\\\"']*[\\\"']\\s*(%|\\+|\\.format))"
+      },
+      "ref": {
+       "value": "CWE-89 \u00b7 OWASP A03"
+      },
+      "sev": {
+       "value": "BLOCKER"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "Interpolating values into SQL enables SQL injection \u2014 the classic path to full database compromise."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Use placeholders: db.query('SELECT \u2026 WHERE id = ?', [id])."
+      },
+      "id": {
+       "value": "S-SQL-JS"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "js"
+        }
+       ]
+      },
+      "msg": {
+       "value": "SQL query built with template literal or concatenation."
+      },
+      "name": {
+       "value": "SQL built from strings"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "\\.(query|execute)\\s*\\(\\s*(`[^`]*\\$\\{|\\\"[^\\\"]*\\\"\\s*\\+|'[^']*'\\s*\\+|\\w+\\s*\\+\\s*[\\\"'`])"
+      },
+      "ref": {
+       "value": "CWE-89 \u00b7 OWASP A03"
+      },
+      "sev": {
+       "value": "BLOCKER"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "Interpolating values into SQL enables SQL injection."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Use subprocess.run([...]) with a list of args and shell=False."
+      },
+      "id": {
+       "value": "S-OSCMD-PY"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        }
+       ]
+      },
+      "msg": {
+       "value": "os.system/os.popen runs shell commands."
+      },
+      "name": {
+       "value": "OS command execution"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "(?:os|__import__\\(\\s*['\\\"]os['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]os['\\\"]\\s*\\))\\s*\\.\\s*(system|popen)\\s*\\("
+      },
+      "ref": {
+       "value": "CWE-78 \u00b7 OWASP A03"
+      },
+      "sev": {
+       "value": "CRITICAL"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "Any user-influenced portion of the command allows shell injection."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Pass args as a list with shell=False."
+      },
+      "id": {
+       "value": "S-SHELL-TRUE"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        }
+       ]
+      },
+      "msg": {
+       "value": "shell=True passes the command through the shell."
+      },
+      "name": {
+       "value": "subprocess with shell=True"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "shell\\s*=\\s*True"
+      },
+      "ref": {
+       "value": "CWE-78"
+      },
+      "sev": {
+       "value": "CRITICAL"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "Shell metacharacters in user input become command injection."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Use execFile/spawn with an argument array."
+      },
+      "id": {
+       "value": "S-EXEC-JS"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "js"
+        }
+       ]
+      },
+      "msg": {
+       "value": "child_process exec with dynamic command string."
+      },
+      "name": {
+       "value": "Shell exec"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "(?<![#$])(?<!\\bthis\\.)(?<!\\bself\\.)(?<!\\bsuper\\.)(?<!\\basync\\s)(?<!\\bstatic\\s)(?<!\\bget\\s)(?<!\\bset\\s)(?<!\\bfunction\\s)\\b(exec|execSync)\\s*\\((?![^()]*\\)\\s*\\{)\\s*(`[^`]*\\$\\{|[\\\"'][^\\\"']*[\\\"']\\s*\\+|\\w+\\s*[,)+])"
+      },
+      "ref": {
+       "value": "CWE-78 \u00b7 OWASP A03"
+      },
+      "sev": {
+       "value": "CRITICAL"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "HOTSPOT"
+      },
+      "why": {
+       "value": "Dynamic command strings passed to a shell risk command injection."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Use JSON or another data-only format for untrusted input."
+      },
+      "id": {
+       "value": "S-PICKLE"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        }
+       ]
+      },
+      "msg": {
+       "value": "pickle.load(s) executes code embedded in the payload."
+      },
+      "name": {
+       "value": "Unsafe deserialization (pickle)"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "pickle\\.loads?\\s*\\("
+      },
+      "ref": {
+       "value": "CWE-502 \u00b7 OWASP A08"
+      },
+      "sev": {
+       "value": "CRITICAL"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "Unpickling untrusted data is remote code execution by design."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Use yaml.safe_load() or Loader=yaml.SafeLoader."
+      },
+      "id": {
+       "value": "S-YAML"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        }
+       ]
+      },
+      "msg": {
+       "value": "yaml.load without SafeLoader can instantiate arbitrary objects."
+      },
+      "name": {
+       "value": "Unsafe yaml.load"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "yaml\\.load\\s*\\((?!(?:(?!yaml\\.load)[^)])*(?:SafeLoader|safe_load))"
+      },
+      "ref": {
+       "value": "CWE-502"
+      },
+      "sev": {
+       "value": "CRITICAL"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "Full YAML loading executes constructors from the document."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Load secrets from environment variables or a secrets manager, and rotate this one now."
+      },
+      "id": {
+       "value": "S-SECRET"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        },
+        {
+         "value": "js"
+        }
+       ]
+      },
+      "msg": {
+       "value": "Credential appears to be hardcoded in source."
+      },
+      "name": {
+       "value": "Hardcoded credential"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "i",
+       "re": "(password|passwd|pwd|secret|api[_-]?key|access[_-]?key|auth[_-]?token|private[_-]?key)\\s*[:=]\\s*[\\\"'][^\\\"']{4,}[\\\"']"
+      },
+      "ref": {
+       "value": "CWE-798 \u00b7 OWASP A07"
+      },
+      "sev": {
+       "value": "BLOCKER"
+      },
+      "skip": {
+       "flags": "i",
+       "re": "(environ|process\\.env|getenv|config\\[|\\bimport\\b|\\bplaceholder\\b|\\bexample\\b|\\bdummy\\b|\\bsample\\b|\\bmock\\b|\\bmocked\\b|\\bxxxx+\\b|\\{\\{)"
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "Secrets in code leak through version control, logs, and builds; rotation requires a deploy."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Use SHA-256+ for integrity; bcrypt/scrypt/argon2 for passwords."
+      },
+      "id": {
+       "value": "S-WEAKHASH-PY"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        }
+       ]
+      },
+      "msg": {
+       "value": "MD5/SHA-1 are cryptographically broken."
+      },
+      "name": {
+       "value": "Weak hash algorithm"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "hashlib\\.(md5|sha1)\\s*\\("
+      },
+      "ref": {
+       "value": "CWE-327/328"
+      },
+      "sev": {
+       "value": "MAJOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "Collisions are practical; unusable for passwords or signatures."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Use sha256+ for integrity; bcrypt/scrypt/argon2 for passwords."
+      },
+      "id": {
+       "value": "S-WEAKHASH-JS"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "js"
+        }
+       ]
+      },
+      "msg": {
+       "value": "MD5/SHA-1 are cryptographically broken."
+      },
+      "name": {
+       "value": "Weak hash algorithm"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "createHash\\s*\\(\\s*[\\\"'](md5|sha1)[\\\"']"
+      },
+      "ref": {
+       "value": "CWE-327/328"
+      },
+      "sev": {
+       "value": "MAJOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "Collisions are practical; unusable for passwords or signatures."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Keep verify=True; add the internal CA to the trust store instead."
+      },
+      "id": {
+       "value": "S-VERIFY"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        }
+       ]
+      },
+      "msg": {
+       "value": "Certificate verification is disabled."
+      },
+      "name": {
+       "value": "TLS verification disabled"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "verify\\s*=\\s*False|_create_unverified_context"
+      },
+      "ref": {
+       "value": "CWE-295 \u00b7 OWASP A02"
+      },
+      "sev": {
+       "value": "MAJOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "Disabling TLS verification allows trivial man-in-the-middle attacks."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Use https:// unless this is a deliberate local/dev endpoint."
+      },
+      "id": {
+       "value": "S-HTTP"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        },
+        {
+         "value": "js"
+        }
+       ]
+      },
+      "msg": {
+       "value": "URL uses unencrypted http://."
+      },
+      "name": {
+       "value": "Cleartext HTTP URL"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "[\\\"']http://(?!localhost|127\\.0\\.0\\.1|0\\.0\\.0\\.0)"
+      },
+      "ref": {
+       "value": "CWE-319 \u00b7 OWASP A02"
+      },
+      "sev": {
+       "value": "MINOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "HOTSPOT"
+      },
+      "why": {
+       "value": "Data sent over HTTP can be read or altered in transit."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Use secrets module (Python) or crypto.randomBytes / crypto.getRandomValues (JS)."
+      },
+      "id": {
+       "value": "S-RANDOM"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        },
+        {
+         "value": "js"
+        }
+       ]
+      },
+      "msg": {
+       "value": "PRNG used in a security-sensitive value."
+      },
+      "name": {
+       "value": "Non-crypto randomness for secret"
+      },
+      "need": {
+       "flags": "i",
+       "re": "(token|secret|password|otp|nonce|session|key|reset|csrf)"
+      },
+      "re": {
+       "flags": "",
+       "re": "(random\\.(random|randint|choice|randrange|getrandbits)|Math\\.random)\\s*\\("
+      },
+      "ref": {
+       "value": "CWE-338"
+      },
+      "sev": {
+       "value": "MAJOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "HOTSPOT"
+      },
+      "why": {
+       "value": "random/Math.random are predictable; generated tokens can be guessed."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Use textContent, or sanitize with DOMPurify before inserting HTML."
+      },
+      "id": {
+       "value": "S-INNERHTML"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "js"
+        }
+       ]
+      },
+      "msg": {
+       "value": "Assigning raw HTML \u2014 potential XSS sink."
+      },
+      "name": {
+       "value": "HTML injection sink"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "\\.(innerHTML|outerHTML)\\s*=|document\\.write\\s*\\(|insertAdjacentHTML\\s*\\("
+      },
+      "ref": {
+       "value": "CWE-79 \u00b7 OWASP A03"
+      },
+      "sev": {
+       "value": "MAJOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "HOTSPOT"
+      },
+      "why": {
+       "value": "If the value contains user input, scripts can be injected into the page."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Render as text, or sanitize the HTML first."
+      },
+      "id": {
+       "value": "S-DANGER"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "js"
+        }
+       ]
+      },
+      "msg": {
+       "value": "React raw-HTML escape hatch in use."
+      },
+      "name": {
+       "value": "dangerouslySetInnerHTML"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "dangerouslySetInnerHTML"
+      },
+      "ref": {
+       "value": "CWE-79"
+      },
+      "sev": {
+       "value": "MAJOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "HOTSPOT"
+      },
+      "why": {
+       "value": "Bypasses React's XSS protection."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Pass a function reference instead."
+      },
+      "id": {
+       "value": "S-TIMEOUT-STR"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "js"
+        }
+       ]
+      },
+      "msg": {
+       "value": "String argument to setTimeout/setInterval is implied eval."
+      },
+      "name": {
+       "value": "setTimeout with string"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "set(Timeout|Interval)\\s*\\(\\s*[\\\"'`]"
+      },
+      "ref": {
+       "value": "CWE-95"
+      },
+      "sev": {
+       "value": "MAJOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "The string is compiled and executed like eval."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Prefer httpOnly cookies for session tokens."
+      },
+      "id": {
+       "value": "S-LOCALSTORAGE"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "js"
+        }
+       ]
+      },
+      "msg": {
+       "value": "Sensitive value stored in localStorage."
+      },
+      "name": {
+       "value": "Secret in localStorage"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "i",
+       "re": "localStorage\\.setItem\\s*\\(\\s*[\\\"'][^\\\"']*(token|jwt|password|secret|auth)"
+      },
+      "ref": {
+       "value": "CWE-522"
+      },
+      "sev": {
+       "value": "MAJOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "HOTSPOT"
+      },
+      "why": {
+       "value": "localStorage is readable by any script on the page (XSS steals it)."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Pin an explicit algorithm list, e.g. ['HS256'] or ['RS256']."
+      },
+      "id": {
+       "value": "S-JWT-NONE"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "js"
+        },
+        {
+         "value": "py"
+        }
+       ]
+      },
+      "msg": {
+       "value": "JWT verification accepts the 'none' algorithm."
+      },
+      "name": {
+       "value": "JWT 'none' algorithm"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "i",
+       "re": "algorithms?\\s*[:=]\\s*(?:\\[\\s*)?[\\\"']none[\\\"']"
+      },
+      "ref": {
+       "value": "CWE-347"
+      },
+      "sev": {
+       "value": "BLOCKER"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "Attackers can forge unsigned tokens that pass verification."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Whitelist specific origins."
+      },
+      "id": {
+       "value": "S-CORS"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "js"
+        },
+        {
+         "value": "py"
+        }
+       ]
+      },
+      "msg": {
+       "value": "CORS allows all origins."
+      },
+      "name": {
+       "value": "CORS wildcard"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "Access-Control-Allow-Origin[\\\"']?\\s*[,:]\\s*[\\\"']\\*"
+      },
+      "ref": {
+       "value": "OWASP A05"
+      },
+      "sev": {
+       "value": "MAJOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "HOTSPOT"
+      },
+      "why": {
+       "value": "Any website can call this API with the user's credentials context."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Drive debug from an environment variable, defaulting to off."
+      },
+      "id": {
+       "value": "S-DEBUG"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        }
+       ]
+      },
+      "msg": {
+       "value": "debug=True \u2014 never in production."
+      },
+      "name": {
+       "value": "Debug mode enabled"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "debug\\s*=\\s*True"
+      },
+      "ref": {
+       "value": "CWE-489 \u00b7 OWASP A05"
+      },
+      "sev": {
+       "value": "MAJOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "HOTSPOT"
+      },
+      "why": {
+       "value": "Flask/Django debug mode exposes an interactive console and stack traces."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Bind to 127.0.0.1 unless external access is intended."
+      },
+      "id": {
+       "value": "S-BIND-ALL"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        },
+        {
+         "value": "js"
+        }
+       ]
+      },
+      "msg": {
+       "value": "Service binds to 0.0.0.0 (all interfaces)."
+      },
+      "name": {
+       "value": "Binding to all interfaces"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "[\\\"']0\\.0\\.0\\.0[\\\"']"
+      },
+      "ref": {
+       "value": "CWE-668"
+      },
+      "sev": {
+       "value": "MINOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "HOTSPOT"
+      },
+      "why": {
+       "value": "Exposes the service on every network interface, including public ones."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Use tempfile.NamedTemporaryFile or mkstemp."
+      },
+      "id": {
+       "value": "S-MKTEMP"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        }
+       ]
+      },
+      "msg": {
+       "value": "tempfile.mktemp is race-condition prone."
+      },
+      "name": {
+       "value": "Insecure temp file"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "tempfile\\.mktemp\\s*\\("
+      },
+      "ref": {
+       "value": "CWE-377"
+      },
+      "sev": {
+       "value": "MAJOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "The name can be claimed by an attacker between creation and use."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Catch the specific exception types you expect."
+      },
+      "id": {
+       "value": "B-BARE-EXCEPT"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        }
+       ]
+      },
+      "msg": {
+       "value": "Bare except: catches everything, including SystemExit/KeyboardInterrupt."
+      },
+      "name": {
+       "value": "Bare except"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "^\\s*except\\s*:"
+      },
+      "ref": {
+       "value": "Reliability"
+      },
+      "sev": {
+       "value": "MAJOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "BUG"
+      },
+      "why": {
+       "value": "Hides real failures and makes the process unkillable."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Use === and !==."
+      },
+      "id": {
+       "value": "B-EQEQ"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "js"
+        }
+       ]
+      },
+      "msg": {
+       "value": "== / != perform type coercion."
+      },
+      "name": {
+       "value": "Loose equality"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "[^=!<>]==[^=]|[^!]!=[^=]"
+      },
+      "ref": {
+       "value": "Reliability"
+      },
+      "sev": {
+       "value": "MINOR"
+      },
+      "skip": {
+       "flags": "i",
+       "re": "^\\s*(//|\\*|/\\*)"
+      },
+      "type": {
+       "value": "BUG"
+      },
+      "why": {
+       "value": "'' == 0 is true; coercion causes subtle logic bugs."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "File a ticket and link it, or resolve it."
+      },
+      "id": {
+       "value": "Q-TODO"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        },
+        {
+         "value": "js"
+        },
+        {
+         "value": "sql"
+        }
+       ]
+      },
+      "msg": {
+       "value": "Unresolved TODO/FIXME comment."
+      },
+      "name": {
+       "value": "TODO/FIXME marker"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "\\b(TODO|FIXME|XXX|HACK)\\b"
+      },
+      "ref": {
+       "value": "Maintainability"
+      },
+      "sev": {
+       "value": "INFO"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "SMELL"
+      },
+      "why": {
+       "value": "Tracked work living only in comments tends to be forgotten."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Remove, or use a leveled logger."
+      },
+      "id": {
+       "value": "Q-CONSOLE"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "js"
+        }
+       ]
+      },
+      "msg": {
+       "value": "Debug logging left in code."
+      },
+      "name": {
+       "value": "console.log left in code"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "console\\.(log|debug)\\s*\\("
+      },
+      "ref": {
+       "value": "Maintainability"
+      },
+      "sev": {
+       "value": "MINOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "SMELL"
+      },
+      "why": {
+       "value": "Noisy output and possible data leakage in production."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Use let or const."
+      },
+      "id": {
+       "value": "Q-VAR"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "js"
+        }
+       ]
+      },
+      "msg": {
+       "value": "var is function-scoped and hoisted."
+      },
+      "name": {
+       "value": "var declaration"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "\\bvar\\s+[A-Za-z_$]"
+      },
+      "ref": {
+       "value": "Maintainability"
+      },
+      "sev": {
+       "value": "MINOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "SMELL"
+      },
+      "why": {
+       "value": "Block-scoped declarations prevent shadowing bugs."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Remove it, rotate the credential immediately, and load it from a secrets manager."
+      },
+      "id": {
+       "value": "S-TOKEN"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        },
+        {
+         "value": "js"
+        }
+       ]
+      },
+      "msg": {
+       "value": "String matches a known secret format (AWS/GitHub/Slack/Stripe/Google key, private key, or JWT)."
+      },
+      "name": {
+       "value": "Known secret token format"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\\-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----|eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}",
+       "token": [
+        "AKIA[0-9A-Z]{16}",
+        "gh[pousr]_[A-Za-z0-9]{36}",
+        "github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}",
+        "xox[baprs]-[A-Za-z0-9-]{10,}",
+        "sk_live_[A-Za-z0-9]{16,}",
+        "AIza[0-9A-Za-z_\\-]{35}",
+        "-----BEGIN [A-Z ]*PRIVATE KEY-----",
+        "eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}"
+       ]
+      },
+      "ref": {
+       "value": "CWE-798 \u00b7 OWASP A07"
+      },
+      "sev": {
+       "value": "BLOCKER"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "Provider-format tokens in source are live credentials until proven otherwise."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Remove the control characters; where a string really needs one, write it as an escape sequence (e.g. \\u202e) so it is visible."
+      },
+      "id": {
+       "value": "S-BIDI"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        },
+        {
+         "value": "js"
+        },
+        {
+         "value": "sql"
+        }
+       ]
+      },
+      "msg": {
+       "value": "Bidirectional control character in source (Trojan Source)"
+      },
+      "name": {
+       "value": "Trojan Source bidi control"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "[\\u202a-\\u202e\\u2066-\\u2069]"
+      },
+      "ref": {
+       "value": "CWE-451 \u00b7 CVE-2021-42574"
+      },
+      "sev": {
+       "value": "CRITICAL"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "Bidi override and isolate characters make code display in a different order than the compiler reads it, so reviewers approve logic that is not what runs (CVE-2021-42574)."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Pass data as template parameters; never build template source from input."
+      },
+      "id": {
+       "value": "S-SSTI"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        }
+       ]
+      },
+      "msg": {
+       "value": "render_template_string with a non-literal template."
+      },
+      "name": {
+       "value": "Template injection risk"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "render_template_string\\s*\\(\\s*(?![\\\"'])"
+      },
+      "ref": {
+       "value": "CWE-1336 \u00b7 OWASP A03"
+      },
+      "sev": {
+       "value": "CRITICAL"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "User input compiled as a Jinja2 template is server-side template injection \u2192 RCE."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Parse untrusted XML with a hardened parser such as defusedxml or lazaret.safexml."
+      },
+      "id": {
+       "value": "S-XML"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        }
+       ]
+      },
+      "msg": {
+       "value": "Stdlib XML parsers are unsafe for untrusted input."
+      },
+      "name": {
+       "value": "XML parsing without a hardened parser"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "(?:^|\\s)(?:import\\s+xml\\.(?:etree|dom|sax)|from\\s+xml\\.(?:etree|dom|sax))"
+      },
+      "ref": {
+       "value": "CWE-611"
+      },
+      "sev": {
+       "value": "MINOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "HOTSPOT"
+      },
+      "why": {
+       "value": "xml.etree/dom/sax are vulnerable to entity-expansion and (historically) XXE attacks."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Escape user data; use format_html for building markup."
+      },
+      "id": {
+       "value": "S-MARKSAFE"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        }
+       ]
+      },
+      "msg": {
+       "value": "mark_safe bypasses Django's HTML escaping."
+      },
+      "name": {
+       "value": "mark_safe usage"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "mark_safe\\s*\\("
+      },
+      "ref": {
+       "value": "CWE-79"
+      },
+      "sev": {
+       "value": "MAJOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "HOTSPOT"
+      },
+      "why": {
+       "value": "If the value contains user input, this is an XSS vector."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Leave autoescape on; mark trusted fragments individually."
+      },
+      "id": {
+       "value": "S-AUTOESCAPE"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        }
+       ]
+      },
+      "msg": {
+       "value": "Template autoescaping is turned off."
+      },
+      "name": {
+       "value": "Template autoescape disabled"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "autoescape\\s*=\\s*False"
+      },
+      "ref": {
+       "value": "CWE-79"
+      },
+      "sev": {
+       "value": "MAJOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "Every rendered variable becomes a potential XSS vector."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Use RejectPolicy with a managed known_hosts file."
+      },
+      "id": {
+       "value": "S-PARAMIKO"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        }
+       ]
+      },
+      "msg": {
+       "value": "SSH host keys accepted without verification."
+      },
+      "name": {
+       "value": "SSH host key verification disabled"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "AutoAddPolicy|WarningPolicy"
+      },
+      "ref": {
+       "value": "CWE-295"
+      },
+      "sev": {
+       "value": "MAJOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "Enables man-in-the-middle attacks on SSH connections."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Use SSH/SFTP (e.g. paramiko) instead."
+      },
+      "id": {
+       "value": "S-CLEARTEXT-PROTO"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        }
+       ]
+      },
+      "msg": {
+       "value": "Telnet/FTP transmit credentials in cleartext."
+      },
+      "name": {
+       "value": "Cleartext protocol module"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "(?:^|\\s)(?:import\\s+(?:telnetlib|ftplib)|from\\s+(?:telnetlib|ftplib))"
+      },
+      "ref": {
+       "value": "CWE-319"
+      },
+      "sev": {
+       "value": "MINOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "HOTSPOT"
+      },
+      "why": {
+       "value": "Anyone on the network path can capture the credentials."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Use the least permissive mode that works (e.g. 0o600/0o644)."
+      },
+      "id": {
+       "value": "S-CHMOD"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        }
+       ]
+      },
+      "msg": {
+       "value": "File made world-writable (777/767)."
+      },
+      "name": {
+       "value": "Overly permissive file mode"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "chmod\\s*\\([^,()]*,\\s*0o?7[67]7"
+      },
+      "ref": {
+       "value": "CWE-732"
+      },
+      "sev": {
+       "value": "MAJOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "Any local user or process can modify the file."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Use AES-GCM (cryptography library, AESGCM)."
+      },
+      "id": {
+       "value": "S-WEAKCIPHER-PY"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        }
+       ]
+      },
+      "msg": {
+       "value": "DES/RC4/Blowfish/ECB are cryptographically weak."
+      },
+      "name": {
+       "value": "Weak cipher or mode"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "\\b(?:DES|DES3|ARC4|Blowfish)\\.new|MODE_ECB"
+      },
+      "ref": {
+       "value": "CWE-327"
+      },
+      "sev": {
+       "value": "MAJOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "These ciphers/modes are breakable or leak plaintext structure."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Use aes-256-gcm."
+      },
+      "id": {
+       "value": "S-WEAKCIPHER-JS"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "js"
+        }
+       ]
+      },
+      "msg": {
+       "value": "DES/RC4/ECB are cryptographically weak."
+      },
+      "name": {
+       "value": "Weak cipher"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "i",
+       "re": "createCipheriv\\s*\\(\\s*[\\\"'](?:des|des-ede3?|rc4|aes-\\d+-ecb)"
+      },
+      "ref": {
+       "value": "CWE-327"
+      },
+      "sev": {
+       "value": "MAJOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "These ciphers/modes are breakable or leak plaintext structure."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Block __proto__/constructor/prototype keys in merges; use Object.create(null) maps."
+      },
+      "id": {
+       "value": "S-PROTO"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "js"
+        }
+       ]
+      },
+      "msg": {
+       "value": "Write access to __proto__/prototype."
+      },
+      "name": {
+       "value": "Prototype pollution sink"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "\\[\\s*[\\\"']__proto__[\\\"']\\s*\\]|\\.__proto__\\s*[=.[]|constructor\\s*\\[\\s*[\\\"']prototype[\\\"']\\s*\\]"
+      },
+      "ref": {
+       "value": "CWE-1321"
+      },
+      "sev": {
+       "value": "MAJOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "Attacker-controlled keys can pollute Object.prototype and change app behavior globally."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Use query operators ($eq, $in, \u2026) instead."
+      },
+      "id": {
+       "value": "S-NOSQL"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "js"
+        }
+       ]
+      },
+      "msg": {
+       "value": "$where evaluates JavaScript inside the database."
+      },
+      "name": {
+       "value": "MongoDB $where operator"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "\\$where"
+      },
+      "ref": {
+       "value": "CWE-943"
+      },
+      "sev": {
+       "value": "MAJOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "User input in $where is NoSQL injection with code execution."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Don't run untrusted code in-process; use isolated workers/containers."
+      },
+      "id": {
+       "value": "S-VM-JS"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "js"
+        }
+       ]
+      },
+      "msg": {
+       "value": "Node vm module is not a security sandbox."
+      },
+      "name": {
+       "value": "vm module code execution"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "vm\\.runIn(?:New|This)?Context|require\\s*\\(\\s*[\\\"']vm[\\\"']"
+      },
+      "ref": {
+       "value": "CWE-94"
+      },
+      "sev": {
+       "value": "MAJOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "HOTSPOT"
+      },
+      "why": {
+       "value": "Code can escape the vm context and reach the host process."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Use execFile/spawn with an args array and shell:false."
+      },
+      "id": {
+       "value": "S-SPAWN-SHELL"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "js"
+        }
+       ]
+      },
+      "msg": {
+       "value": "shell:true routes the command through a shell."
+      },
+      "name": {
+       "value": "child_process with shell:true"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "shell\\s*:\\s*true"
+      },
+      "ref": {
+       "value": "CWE-78"
+      },
+      "sev": {
+       "value": "CRITICAL"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "Shell metacharacters in arguments become command injection."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Treat as hostile until proven otherwise; inspect the decoded payload."
+      },
+      "id": {
+       "value": "SC-EVAL-DECODE"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        },
+        {
+         "value": "js"
+        }
+       ]
+      },
+      "msg": {
+       "value": "Code decoded (base64/escape) and immediately executed."
+      },
+      "name": {
+       "value": "Decoded payload execution"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "(?:\\b(?:eval|exec|execSync|Function|runIn(?:This|New)?Context)\\s*\\(|\\(\\s*(?:void\\s+)?[\\w$.]+\\s*,\\s*(?:(?:window|globalThis|self|global|top|parent|frames)\\s*\\.\\s*)?(?:eval|Function)\\s*\\)\\s*\\(|\\b(?:eval|Function)\\s*\\.\\s*(?:call|apply)\\s*\\(\\s*(?:void\\s+)?[\\w$.]*\\s*,\\s*\\[?|\\b(?:eval|Function)\\s*\\.\\s*bind\\s*\\([^()]*\\)\\s*\\(|\\bReflect\\s*\\.\\s*apply\\s*\\(\\s*(?:(?:window|globalThis|self|global|top|parent|frames)\\s*\\.\\s*)?(?:eval|Function)\\s*,\\s*(?:void\\s+)?[\\w$.]*\\s*,\\s*\\[|\\[\\s*['\\\"`](?:e(?:['\\\"`]\\s*\\+\\s*['\\\"`])?v(?:['\\\"`]\\s*\\+\\s*['\\\"`])?a(?:['\\\"`]\\s*\\+\\s*['\\\"`])?l|F(?:['\\\"`]\\s*\\+\\s*['\\\"`])?u(?:['\\\"`]\\s*\\+\\s*['\\\"`])?n(?:['\\\"`]\\s*\\+\\s*['\\\"`])?c(?:['\\\"`]\\s*\\+\\s*['\\\"`])?t(?:['\\\"`]\\s*\\+\\s*['\\\"`])?i(?:['\\\"`]\\s*\\+\\s*['\\\"`])?o(?:['\\\"`]\\s*\\+\\s*['\\\"`])?n)['\\\"`]\\s*\\]\\s*\\()\\s*(?:compile\\s*\\(\\s*)?(?:(?:[\\w$]+|__import__\\(\\s*['\\\"][\\w.]+['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"][\\w.]+['\\\"]\\s*\\))\\s*\\.\\s*)*(?:atob|unescape|decodeURIComponent|Buffer\\s*\\.\\s*from|b64decode|(?:codecs|__import__\\(\\s*['\\\"]codecs['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]codecs['\\\"]\\s*\\))\\s*\\.\\s*decode|(?:zlib|__import__\\(\\s*['\\\"]zlib['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]zlib['\\\"]\\s*\\))\\s*\\.\\s*decompress|(?:marshal|__import__\\(\\s*['\\\"]marshal['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]marshal['\\\"]\\s*\\))\\s*\\.\\s*loads|fromhex|unhexlify)\\s*\\("
+      },
+      "ref": {
+       "value": "CWE-506 \u00b7 Supply chain"
+      },
+      "sev": {
+       "value": "BLOCKER"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "Decode-then-execute is the signature pattern of malware droppers and supply-chain implants."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Unpack and review the payload before trusting this file."
+      },
+      "id": {
+       "value": "SC-PACKER"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "js"
+        }
+       ]
+      },
+      "msg": {
+       "value": "Dean Edwards packer signature \u2014 self-decoding packed code."
+      },
+      "name": {
+       "value": "Packed JavaScript (p,a,c,k,e,d)"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "eval\\s*\\(\\s*function\\s*\\(\\s*p\\s*,\\s*a\\s*,\\s*c\\s*,\\s*k\\s*,\\s*e"
+      },
+      "ref": {
+       "value": "CWE-506 \u00b7 Supply chain"
+      },
+      "sev": {
+       "value": "MAJOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "Legitimate modern packages ship minified, not packed; packing hides intent."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Decode the blob and read what it runs; treat the package as hostile until then."
+      },
+      "id": {
+       "value": "SC-EVAL-DECODER"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "js"
+        }
+       ]
+      },
+      "msg": {
+       "value": "Code a function computes from a long literal is run (eval, Function or vm)."
+      },
+      "name": {
+       "value": "Code decoded by its own function and run"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "\\b(?:eval|(?:new\\s+)?Function|runIn(?:This|New)?Context)\\s*\\(\\s*(?:\\(?\\s*function\\s*\\([^()]{0,80}\\)\\s*\\{(?:[^{}]|\\{[^{}]{0,2000}\\}){0,2000}\\}\\s*\\)?|[A-Za-z_$][\\w$]*)\\s*\\(\\s*(?:\\[\\s*\\d+(?:\\s*,\\s*\\d+){199}|'[^'\\n]{1000}|\\\"[^\\\"\\n]{1000}|`[^`]{1000})"
+      },
+      "ref": {
+       "value": "CWE-506 \u00b7 Supply chain"
+      },
+      "sev": {
+       "value": "CRITICAL"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "A decoder over a blob of character codes or text keeps a payload out of sight: the file shows the decoder, never the code it runs."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Inspect the blob's origin; refuse opaque executable data in source trees."
+      },
+      "id": {
+       "value": "SC-MARSHAL"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "py"
+        }
+       ]
+      },
+      "msg": {
+       "value": "Marshalled bytecode is run, or loaded from bytes embedded or decoded in the code."
+      },
+      "name": {
+       "value": "Marshalled bytecode execution"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "",
+       "re": "\\b(?:exec|eval|FunctionType)\\s*\\(\\s*(?:marshal|__import__\\(\\s*['\\\"]marshal['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]marshal['\\\"]\\s*\\))\\s*\\.\\s*loads?\\s*\\(|\\b(?:marshal|__import__\\(\\s*['\\\"]marshal['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]marshal['\\\"]\\s*\\))\\s*\\.\\s*loads\\s*\\(\\s*(?:b['\\\"]|(?:(?:[\\w$]+|__import__\\(\\s*['\\\"][\\w.]+['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"][\\w.]+['\\\"]\\s*\\))\\s*\\.\\s*)*(?:b64decode|b32decode|b85decode|a85decode|decodebytes|decompress|fromhex|unhexlify|a2b_\\w+|decode)\\s*\\()"
+      },
+      "ref": {
+       "value": "CWE-506 \u00b7 Supply chain"
+      },
+      "sev": {
+       "value": "CRITICAL"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "Bytecode blobs evade source review \u2014 a common Python malware technique."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Keep xp_cmdshell disabled; use a vetted, sandboxed job runner instead."
+      },
+      "id": {
+       "value": "SQL-XPCMD"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "sql"
+        }
+       ]
+      },
+      "msg": {
+       "value": "xp_cmdshell runs operating-system commands from SQL Server."
+      },
+      "name": {
+       "value": "OS command execution via SQL"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "i",
+       "re": "\\bxp_cmdshell\\b"
+      },
+      "ref": {
+       "value": "CWE-78 \u00b7 OWASP A03"
+      },
+      "sev": {
+       "value": "CRITICAL"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "Enables full OS command execution from the database; a top post-exploitation target."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Use parameterized dynamic SQL (sp_executesql with @params, or bind variables)."
+      },
+      "id": {
+       "value": "SQL-DYNAMIC"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "sql"
+        }
+       ]
+      },
+      "msg": {
+       "value": "Dynamic SQL built by concatenating variables into the statement."
+      },
+      "name": {
+       "value": "Dynamic SQL from concatenation"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "i",
+       "re": "EXEC(?:UTE)?\\s*\\(\\s*@?\\w+\\s*\\+|EXECUTE\\s+IMMEDIATE\\b(?:(?!EXECUTE\\s+IMMEDIATE\\b)[^;])*\\|\\||sp_executesql\\b(?:(?!sp_executesql\\b)[^;])*\\+|EXEC\\s*\\(\\s*['\\\"][^']*['\\\"]\\s*\\+|SET\\s+@\\w+\\s*=(?:(?!SET\\s+@)[^;'\\\"])*['\\\"](?:(?!SET\\s+@)[^;])*(?:\\+|\\|\\|)"
+      },
+      "ref": {
+       "value": "CWE-89 \u00b7 OWASP A03"
+      },
+      "sev": {
+       "value": "BLOCKER"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "String-built SQL executed with EXEC / EXECUTE IMMEDIATE / sp_executesql is SQL injection inside the database."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Provision credentials out-of-band (secrets manager / vault), not in checked-in SQL."
+      },
+      "id": {
+       "value": "SQL-CRED"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "sql"
+        }
+       ]
+      },
+      "msg": {
+       "value": "Credential embedded in a SQL script."
+      },
+      "name": {
+       "value": "Hardcoded database credential"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "i",
+       "re": "(?:IDENTIFIED\\s+BY\\s+['\\\"][^'\\\"]+['\\\"]|PASSWORD\\s*=?\\s*['\\\"][^'\\\"]+['\\\"]|IDENTIFIED\\s+BY\\s+PASSWORD)"
+      },
+      "ref": {
+       "value": "CWE-798 \u00b7 OWASP A07"
+      },
+      "sev": {
+       "value": "BLOCKER"
+      },
+      "skip": {
+       "flags": "i",
+       "re": "\\bplaceholder\\b|\\bexample\\b|\\bdummy\\b|\\bmock\\b|\\bxxxx+\\b"
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "Passwords in DDL scripts leak through version control and backups."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Grant only the specific privileges the role needs."
+      },
+      "id": {
+       "value": "SQL-GRANT-ALL"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "sql"
+        }
+       ]
+      },
+      "msg": {
+       "value": "GRANT ALL / WITH GRANT OPTION hands over broad privileges."
+      },
+      "name": {
+       "value": "Excessive privilege grant"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "i",
+       "re": "\\bGRANT\\s+ALL\\b|\\bWITH\\s+GRANT\\s+OPTION\\b"
+      },
+      "ref": {
+       "value": "CWE-732 \u00b7 OWASP A01"
+      },
+      "sev": {
+       "value": "MAJOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "HOTSPOT"
+      },
+      "why": {
+       "value": "Violates least privilege; a compromised account inherits everything."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Grant to a specific role instead of PUBLIC."
+      },
+      "id": {
+       "value": "SQL-GRANT-PUBLIC"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "sql"
+        }
+       ]
+      },
+      "msg": {
+       "value": "Privilege granted to PUBLIC (every user)."
+      },
+      "name": {
+       "value": "Grant to PUBLIC"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "i",
+       "re": "\\bGRANT\\b(?:(?!\\bGRANT\\b)[^;])*\\bTO\\s+PUBLIC\\b"
+      },
+      "ref": {
+       "value": "CWE-732 \u00b7 OWASP A01"
+      },
+      "sev": {
+       "value": "MAJOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "HOTSPOT"
+      },
+      "why": {
+       "value": "PUBLIC grants apply to all current and future accounts, including low-trust ones."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Disable FILE privilege; never build these paths from untrusted input."
+      },
+      "id": {
+       "value": "SQL-FILE"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "sql"
+        }
+       ]
+      },
+      "msg": {
+       "value": "SQL reads/writes the server filesystem (OUTFILE / LOAD_FILE)."
+      },
+      "name": {
+       "value": "Filesystem access from SQL"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "i",
+       "re": "\\bINTO\\s+(?:OUTFILE|DUMPFILE)\\b|\\bLOAD_FILE\\s*\\(|\\bLOAD\\s+DATA\\s+INFILE\\b"
+      },
+      "ref": {
+       "value": "CWE-73 \u00b7 OWASP A03"
+      },
+      "sev": {
+       "value": "CRITICAL"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "VULN"
+      },
+      "why": {
+       "value": "A classic data-exfiltration and webshell-drop primitive in SQL injection exploitation."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Disable Ad Hoc Distributed Queries; use configured linked servers with least privilege."
+      },
+      "id": {
+       "value": "SQL-OPENROWSET"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "sql"
+        }
+       ]
+      },
+      "msg": {
+       "value": "OPENROWSET/OPENQUERY perform ad-hoc external connections."
+      },
+      "name": {
+       "value": "Ad-hoc remote data access"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "i",
+       "re": "\\b(?:OPENROWSET|OPENQUERY|OPENDATASOURCE)\\s*\\("
+      },
+      "ref": {
+       "value": "CWE-610"
+      },
+      "sev": {
+       "value": "MAJOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "HOTSPOT"
+      },
+      "why": {
+       "value": "Can reach arbitrary hosts/files and is abused for lateral movement."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Re-enable checks immediately after the bulk operation; scope it tightly."
+      },
+      "id": {
+       "value": "SQL-FK-OFF"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "sql"
+        }
+       ]
+      },
+      "msg": {
+       "value": "Referential-integrity enforcement is turned off."
+      },
+      "name": {
+       "value": "Integrity checks disabled"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "i",
+       "re": "SET\\s+FOREIGN_KEY_CHECKS\\s*=\\s*0|NOCHECK\\s+CONSTRAINT|SET\\s+CONSTRAINTS\\s+ALL\\s+DEFERRED"
+      },
+      "ref": {
+       "value": "CWE-20"
+      },
+      "sev": {
+       "value": "MAJOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "HOTSPOT"
+      },
+      "why": {
+       "value": "Disabling constraints allows orphaned/inconsistent data to be written."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Leave TRUSTWORTHY OFF; sign modules instead."
+      },
+      "id": {
+       "value": "SQL-TRUSTWORTHY"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "sql"
+        }
+       ]
+      },
+      "msg": {
+       "value": "TRUSTWORTHY ON enables privilege escalation paths in SQL Server."
+      },
+      "name": {
+       "value": "TRUSTWORTHY database"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "i",
+       "re": "SET\\s+TRUSTWORTHY\\s+ON"
+      },
+      "ref": {
+       "value": "CWE-269"
+      },
+      "sev": {
+       "value": "MAJOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "HOTSPOT"
+      },
+      "why": {
+       "value": "Combined with impersonation it can lead to sysadmin escalation."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "Use an appropriate isolation level (e.g. READ COMMITTED SNAPSHOT)."
+      },
+      "id": {
+       "value": "SQL-NOLOCK"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "sql"
+        }
+       ]
+      },
+      "msg": {
+       "value": "NOLOCK / READ UNCOMMITTED permits dirty reads."
+      },
+      "name": {
+       "value": "Dirty-read hint"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "i",
+       "re": "WITH\\s*\\(\\s*NOLOCK\\s*\\)|READ\\s+UNCOMMITTED"
+      },
+      "ref": {
+       "value": "Reliability"
+      },
+      "sev": {
+       "value": "MINOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "SMELL"
+      },
+      "why": {
+       "value": "Returns uncommitted, possibly inconsistent data; a common source of subtle bugs."
+      }
+     }
+    },
+    {
+     "map": {
+      "fix": {
+       "value": "List the columns you actually need."
+      },
+      "id": {
+       "value": "SQL-SELECT-STAR"
+      },
+      "langs": {
+       "list": [
+        {
+         "value": "sql"
+        }
+       ]
+      },
+      "msg": {
+       "value": "SELECT * fetches all columns."
+      },
+      "name": {
+       "value": "SELECT *"
+      },
+      "need": {
+       "value": null
+      },
+      "re": {
+       "flags": "i",
+       "re": "\\bSELECT\\s+\\*"
+      },
+      "ref": {
+       "value": "Maintainability"
+      },
+      "sev": {
+       "value": "MINOR"
+      },
+      "skip": {
+       "value": null
+      },
+      "type": {
+       "value": "SMELL"
+      },
+      "why": {
+       "value": "Breaks silently on schema changes and moves unneeded data."
+      }
+     }
+    }
+   ]
   },
   "SARIF_LEVEL": {
    "map": {
@@ -1653,6 +4416,34 @@
   "_AUTORUN_WHY": {
    "value": "Editors and AI coding agents run these commands on their own \u2014 when the folder is opened, a session starts or the agent uses a tool \u2014 with your privileges, without asking each time. The 2026 Shai-Hulud worms (Mini Shai-Hulud, the keyv wave) committed a Claude Code SessionStart hook and a VS Code folder-open task to every repository they reached, so opening a checkout ran the worm."
   },
+  "_B64_RULE": {
+   "map": {
+    "fix": {
+     "value": "Decode and verify the content; move legitimate assets to data files."
+    },
+    "id": {
+     "value": "SC-B64"
+    },
+    "msg": {
+     "value": "Base64 blob (200+ chars) embedded in code."
+    },
+    "name": {
+     "value": "Large base64 blob"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "Embedded encoded blobs can carry second-stage payloads."
+    }
+   }
+  },
   "_B64_URL_LITERAL_RE": {
    "flags": "",
    "re": "[\"'`]aHR0c[A-Za-z0-9+/]{2,}={0,2}[\"'`]"
@@ -1686,12 +4477,33 @@
    "flags": "",
    "re": "[()\\[\\]{}]"
   },
-  "_BUN_RELEASES_RE": {
-   "flags": "i",
-   "re": "oven-sh/bun/releases"
-  },
-  "_BUN_RELEASES_SRC": {
-   "value": "oven-sh/bun/releases"
+  "_CAPPED_RULE": {
+   "map": {
+    "fix": {
+     "value": "Fix or deliberately suppress the {rule} pattern in this file, then re-scan to see the remaining occurrences."
+    },
+    "id": {
+     "value": "Q-CAPPED"
+    },
+    "msg": {
+     "value": "{n} more {rule} findings omitted"
+    },
+    "name": {
+     "value": "Findings capped"
+    },
+    "ref": {
+     "value": "Maintainability"
+    },
+    "sev": {
+     "value": "INFO"
+    },
+    "type": {
+     "value": "SMELL"
+    },
+    "why": {
+     "value": "Findings of one rule that repeat hundreds of times in one file are capped so reports stay readable; security findings are never capped."
+    }
+   }
   },
   "_CAPTURE_SERVICE_RE": {
    "flags": "i",
@@ -1813,32 +4625,37 @@
    "flags": "",
    "re": "(?<![\\w$])(?:(?<=\\.\\.\\.)|(?<!\\.))[A-Za-z_$][\\w$]*"
   },
+  "_CHARCODE_RULE": {
+   "map": {
+    "fix": {
+     "value": "Decode and review what string is being built."
+    },
+    "id": {
+     "value": "SC-CHARCODE"
+    },
+    "msg": {
+     "value": "String assembled from character codes \u2014 obfuscation indicator."
+    },
+    "name": {
+     "value": "Char-code string building"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "fromCharCode chains hide payloads from static review."
+    }
+   }
+  },
   "_CHARCODE_TABLE_RE": {
    "flags": "",
    "re": "(?<![\\w$.])([A-Za-z_$][\\w$]*)\\s*=\\s*\\[((?:\\s*[0-9]{2,3}\\s*,){9,}\\s*[0-9]{2,3})\\s*\\]"
-  },
-  "_CHAT_SECRET_MAX": {
-   "value": 50
-  },
-  "_CHAT_SECRET_MIN_DISTINCT": {
-   "value": 10
-  },
-  "_CHAT_SECRET_NEEDLES": {
-   "list": [
-    {
-     "value": ":AA"
-    },
-    {
-     "value": "webhooks/"
-    },
-    {
-     "value": "hooks.slack.com"
-    }
-   ]
-  },
-  "_CHAT_SECRET_RE": {
-   "flags": "",
-   "re": "(?<![0-9])\\d{8,10}:AA[A-Za-z0-9_-]{33}(?![A-Za-z0-9_-])|\\b[Dd]iscord(?:app)?\\.com/api/webhooks/\\d{17,20}/[A-Za-z0-9_-]{60,80}|\\bhooks\\.slack\\.com/services/T[A-Z0-9]{8,12}/B[A-Z0-9]{8,12}/[A-Za-z0-9]{24}(?![A-Za-z0-9])"
   },
   "_CHILD_PROCESS_RE": {
    "flags": "",
@@ -1871,9 +4688,9 @@
    "flags": "",
    "re": "[\"'`](?:~[/\\\\]|\\$HOME[/\\\\]|%USERPROFILE%[/\\\\])?\\.(ssh|aws|azure|gnupg|docker|kube|ethereum|electrum|bitcoin|solana|npmrc|pypirc|netrc|git-credentials|config[/\\\\]gcloud|password-store|vault-token|terraform\\.d)(?:[/\\\\][^\"'`\\n]{0,60})?[\"'`]"
   },
-  "_CRED_FILE_RE": {
-   "flags": "",
-   "re": "[\"'`](?:~[/\\\\]|\\.[/\\\\])?\\.(?:env|npmrc|pypirc|netrc|git-credentials)[\"'`]|\\.aws[/\\\\]credentials\\b|[/\\\\]\\.ssh[/\\\\]id_\\w+|\\.docker[/\\\\]config\\.json|\\.kube[/\\\\]config\\b"
+  "_CRED_STORE_RE": {
+   "flags": "i",
+   "re": "\\.ssh\\b|\\bid_(?:rsa|ed25519|ecdsa|dsa)\\b(?!\\.pub)|\\.git-credentials|Local Storage"
   },
   "_CRED_SWEEP_MAX": {
    "value": 200
@@ -1948,6 +4765,85 @@
   "_DATA_FILE": {
    "value": "(?:[^\\\"'`{}$\\n]{1,100}\\.(?:txt|dat|bin|png|jpe?g|gif|ico|bmp|svg|wav|mp3|mp4|woff2?|ttf|json|md|cfg|ini|log|db|pyc|so|dll|dylib|exe)|(?:[^\\\"'`{}$\\n]{0,100}[/\\\\])?(?:LICEN[CS]E|COPYING|NOTICE|README|AUTHORS|CHANGELOG|CHANGES|HISTORY|PATENTS)(?:[-.]\\w{1,10})?)"
   },
+  "_DD_ARG_CALLBACK_RE": {
+   "flags": "",
+   "re": ",\\s*(?:async\\s+)?(?:function\\b\\s*[\\w$]*\\s*\\(\\s*([A-Za-z_$][\\w$]*)|\\(\\s*([A-Za-z_$][\\w$]*)[^)\\n]*\\)\\s*=>|([A-Za-z_$][\\w$]*)\\s*=>)"
+  },
+  "_DD_ARG_SPAN": {
+   "value": 2000
+  },
+  "_DD_ASSIGN_RE": {
+   "flags": "",
+   "re": "(?:(?<![^\\n])|[;{]|=>)[ \\t]*(?:(?:const|let|var)[ \\t]+)?([A-Za-z_$][\\w$]*)[ \\t]*\\+?=(?![=>])([^;\\n]*)"
+  },
+  "_DD_AS_RE": {
+   "flags": "",
+   "re": "\\s*as\\s+([A-Za-z_]\\w*)"
+  },
+  "_DD_CALLBACK_RE": {
+   "flags": "",
+   "re": "(?<![\\w$.])([A-Za-z_$][\\w$]*)(?:\\s*\\.\\s*[A-Za-z_$][\\w$]*){0,8}\\s*\\.\\s*(?:on|once|forEach|map|then|each)\\s*\\(\\s*(?:[\"'][^\"'\\n]{0,40}[\"']\\s*,\\s*)?(?:async\\s+)?(?:function\\b\\s*[\\w$]*\\s*)?\\(?\\s*([A-Za-z_$][\\w$]*)"
+  },
+  "_DD_DATA_RE": {
+   "flags": "i",
+   "re": "\\b(?:data|body)\\s*[=:]|\\bjson\\s*=|[\"'](?:POST|PUT|PATCH)[\"']"
+  },
+  "_DD_DESTRUCT_NAME_RE": {
+   "flags": "",
+   "re": "(?:[A-Za-z_$][\\w$]*\\s*:\\s*)?([A-Za-z_$][\\w$]*)\\s*(?:=[^,]*)?\\Z"
+  },
+  "_DD_DESTRUCT_RE": {
+   "flags": "",
+   "re": "\\b(?:const|let|var)\\s*\\{([^}\\n]{1,200})\\}\\s*=([^;\\n]*)"
+  },
+  "_DD_FETCH_RE": {
+   "flags": "",
+   "re": "\\b(?:urlopen|requests\\s*\\.\\s*get|httpx\\s*\\.\\s*get|fetch|axios\\s*\\.\\s*get|https?\\s*\\.\\s*get|got)\\s*\\("
+  },
+  "_DD_FOR_RE": {
+   "flags": "",
+   "re": "\\bfor\\s+([A-Za-z_]\\w*)\\s+in\\s+([^\\n:]{1,200})|\\bfor\\s*\\(\\s*(?:(?:const|let|var)\\s+)?([A-Za-z_$][\\w$]*)\\s+(?:of|in)\\s+([^\\n)]{1,200})"
+  },
+  "_DD_FUNC_RE": {
+   "flags": "",
+   "re": "\\bdef\\s+([A-Za-z_]\\w*)\\s*\\(|\\bfunction\\s*\\*?\\s*([A-Za-z_$][\\w$]*)\\s*\\(|(?<![\\w$.])([A-Za-z_$][\\w$]*)\\s*=\\s*(?:async\\s+)?(?:function\\b|\\([^)\\n]{0,200}\\)\\s*=>|[A-Za-z_$][\\w$]*\\s*=>)"
+  },
+  "_DD_MAX_ASSIGNS": {
+   "value": 5000
+  },
+  "_DD_MAX_CALLS": {
+   "value": 100
+  },
+  "_DD_PARAM_RE": {
+   "flags": "",
+   "re": "\\s*(?:async\\s+)?(?:function\\b\\s*[\\w$]*\\s*)?\\(?\\s*([A-Za-z_$][\\w$]*)"
+  },
+  "_DD_PASSES": {
+   "value": 4
+  },
+  "_DD_RETURN_RE": {
+   "flags": "",
+   "re": "\\breturn\\s+([^\\n;]{1,200})"
+  },
+  "_DD_SEND_RE": {
+   "flags": "",
+   "re": "\\b(?:Request|urlopen|fetch|https?\\s*\\.\\s*request|(?:requests|httpx|axios|got|superagent|needle|session|client)\\s*\\.\\s*(post|put|patch)|(sendBeacon))\\s*\\("
+  },
+  "_DD_THEN_HEAD_RE": {
+   "flags": "",
+   "re": "\\s*\\.\\s*then\\s*\\("
+  },
+  "_DD_THEN_MAX": {
+   "value": 4
+  },
+  "_DD_URL_IN_RE": {
+   "flags": "",
+   "re": "[\"'`]https?://([^/\"'`\\s?#]+)"
+  },
+  "_DD_URL_RE": {
+   "flags": "",
+   "re": "\\A[rbfRBF]{0,2}[\"'`]https?://([^/\"'`\\s?#]+)"
+  },
   "_DECODER_IMPORT_RE": {
    "flags": "m",
    "re": "^[ \\t]*from[ \\t]+(?:base64|binascii|codecs|zlib|marshal|bz2|lzma|gzip)[ \\t]+import[ \\t]+([^\\n#]{1,300})"
@@ -1976,6 +4872,12 @@
   "_DECODE_CALL_SRC": {
    "value": "(?:\\batob|\\bb64decode|\\.\\s*fromhex|\\bunhexlify|\\b(?:codecs|__import__\\(\\s*['\\\"]codecs['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]codecs['\\\"]\\s*\\))\\s*\\.\\s*decode|\\b(?:zlib|__import__\\(\\s*['\\\"]zlib['\\\"]\\s*\\)|importlib\\.import_module\\(\\s*['\\\"]zlib['\\\"]\\s*\\))\\s*\\.\\s*decompress|\\.\\s*decrypt)\\s*\\(|\\bBuffer\\s*\\.\\s*from\\s*\\([^;\\n]{0,300}?['\\\"`]base64['\\\"`]"
   },
+  "_DECODE_FLOW_MSG": {
+   "value": "Decoded payload (assigned at line {line}) reaches a code-execution sink."
+  },
+  "_DECODE_SAME_CALL_MSG": {
+   "value": "Decoded payload reaches a code-execution sink in the same call."
+  },
   "_DECODE_SINK_RE": {
    "flags": "",
    "re": "(?:(?<![\\w$])(require\\s*\\(\\s*['\\\"`][ \\w:]*['\\\"`]\\s*\\)|[A-Za-z_$][\\w$]*)\\s*\\.\\s*)?(?<![\\w$])(eval|exec|execSync|execFile|execFileSync|spawn|spawnSync|Function|runIn(?:This|New)?Context)\\s*\\("
@@ -1987,6 +4889,20 @@
   "_DEF_RE": {
    "flags": "",
    "re": "^\\s*(?:async\\s+def|def|class)\\b"
+  },
+  "_DEPS_LOCAL_DEP_RE": {
+   "flags": "m",
+   "re": "(?:\\brequire\\s*\\(\\s*|\\bimport\\s*\\(\\s*|\\bfrom\\s+|^\\s*import\\s+|\\bexport\\s+[^'\"\\n;]*?\\bfrom\\s+)(['\"])(\\.{1,2}/[^'\"\\n]+)\\1"
+  },
+  "_DEPS_REACH_MAX": {
+   "value": 5000
+  },
+  "_DEPS_WEB_DIRS": {
+   "set": [
+    "_next",
+    "public",
+    "static"
+   ]
   },
   "_DEP_ASSIGN_RE": {
    "flags": "",
@@ -2068,6 +4984,10 @@
   "_DL_BRACKET_RE": {
    "flags": "",
    "re": "[()\\[\\]{},]"
+  },
+  "_DL_BUILTINS_RE": {
+   "flags": "",
+   "re": "(?<![\\w$.])(?:builtins|__builtins__|globalThis|window|global)(?:[ \\t]*\\.[ \\t]*__dict__)?[ \\t]*\\.[ \\t]*(?=(?:exec|eval|compile|__import__|Function)(?![\\w$]))"
   },
   "_DL_CALLBACK_NEEDLES": {
    "list": [
@@ -2179,9 +5099,17 @@
    "flags": "",
    "re": "(?<![\\w$.])[A-Za-z_$][\\w$]*(?:\\s*\\??\\.\\s*[A-Za-z_$][\\w$]*){0,50}"
   },
+  "_DL_CMD_TOKEN_RE": {
+   "flags": "",
+   "re": "[|&;\\n]|[^\\s|&;]+"
+  },
   "_DL_COMMA_CALL_RE": {
    "flags": "",
    "re": "\\(\\s*0\\s*,\\s*(?P<c>[A-Za-z_$][\\w$]*(?:[ \\t]*\\.[ \\t]*[A-Za-z_$][\\w$]*){0,8})\\s*\\)(?=\\s*\\()"
+  },
+  "_DL_CONST_RE": {
+   "flags": "m",
+   "re": "^[ \\t]*(?:(?:const|let|var)[ \\t]+)?(?P<n>[A-Za-z_$][\\w$]*)[ \\t]*=[ \\t]*(?P<v>(?:'[^'\\\\\\n]{0,64}'|\"[^\"\\\\\\n]{0,64}\")(?:[ \\t]*\\+[ \\t]*(?:'[^'\\\\\\n]{0,64}'|\"[^\"\\\\\\n]{0,64}\")){0,8})[ \\t]*;?[ \\t]*$"
   },
   "_DL_DEFAULT_RE": {
    "flags": "",
@@ -2309,9 +5237,22 @@
    "flags": "",
    "re": "\\s*(?:async\\s*)?(?:function\\b|\\([^()]{0,200}\\)\\s*=>|[A-Za-z_$][\\w$]*\\s*=>)"
   },
+  "_DL_GETATTR_EXPR_RE": {
+   "flags": "",
+   "re": "\\bgetattr[ \\t]*\\([ \\t]*(?P<o>[A-Za-z_$][\\w$]*(?:[ \\t]*\\.[ \\t]*[A-Za-z_$][\\w$]*){0,8})[ \\t]*,[ \\t]*(?P<e>(?:'[^'\\\\\\n]{0,64}'|\"[^\"\\\\\\n]{0,64}\"|[A-Za-z_$][\\w$]*)(?:[ \\t]*\\+[ \\t]*(?:'[^'\\\\\\n]{0,64}'|\"[^\"\\\\\\n]{0,64}\"|[A-Za-z_$][\\w$]*)){0,8})[ \\t]*(?:,[^()\\n]{0,120})?\\)"
+  },
+  "_DL_GETATTR_NAMES": {
+   "value": 16
+  },
   "_DL_GETATTR_RE": {
    "flags": "",
    "re": "\\bgetattr[ \\t]*\\([ \\t]*(?P<o>[A-Za-z_$][\\w$]*(?:[ \\t]*\\.[ \\t]*[A-Za-z_$][\\w$]*){0,8})[ \\t]*,[ \\t]*(?:'(?P<a>[A-Za-z_$][\\w$]{0,63})'|\"(?P<b>[A-Za-z_$][\\w$]{0,63})\")[ \\t]*(?:,[^()\\n]{0,120})?\\)"
+  },
+  "_DL_GIVEN_HEAD": {
+   "value": "(?<![\\w$.])"
+  },
+  "_DL_GIVEN_TAIL": {
+   "value": "[ \\t]*(?:[-+*/%&|^@]|\\*\\*|//|<<|>>)?=(?!=)"
   },
   "_DL_HEAD_RE": {
    "flags": "",
@@ -2427,6 +5368,10 @@
   },
   "_DL_NAMED_TAIL": {
    "value": ")(?![\\w$])"
+  },
+  "_DL_NAME_FULL_RE": {
+   "flags": "",
+   "re": "[A-Za-z_$][\\w$]{0,63}"
   },
   "_DL_NAME_RE": {
    "flags": "",
@@ -2678,6 +5623,42 @@
      "flags": "",
      "re": "(?:eval|exec|execfile)\\s*\\(|(?:window|globalThis|global|self)\\.eval\\s*\\(|new\\s+Function\\s*\\(|Function\\s*\\(|runIn(?:This|New)?Context\\s*\\(|new\\s+vm\\.Script\\s*\\(|compileFunction\\s*\\(|_compile\\s*\\(|execSync\\s*\\(|(?:child_process|childProcess|cp)\\.exec\\s*\\(|require\\(\\s*[\"'](?:node:)?child_process[\"']\\s*\\)\\.exec\\s*\\(|os\\.(?:system|popen)\\s*\\(|__import__\\(\\s*[\"']os[\"']\\s*\\)\\.(?:system|popen)\\s*\\(|(?:system|popen)\\s*\\(|(?:subprocess\\.)?get(?:status)?output\\s*\\(|\\(\\s*(?:void\\s+)?[\\w$.]+\\s*,\\s*(?:(?:window|globalThis|self|global|top|parent|frames)\\s*\\.\\s*)?(?:eval|Function)\\s*\\)\\s*\\(|(?:eval|Function)\\s*\\.\\s*call\\s*\\(|(?:eval|Function)\\s*\\.\\s*bind\\s*\\([^()]*\\)\\s*\\(|\\[\\s*['\\\"`](?:e(?:['\\\"`]\\s*\\+\\s*['\\\"`])?v(?:['\\\"`]\\s*\\+\\s*['\\\"`])?a(?:['\\\"`]\\s*\\+\\s*['\\\"`])?l|F(?:['\\\"`]\\s*\\+\\s*['\\\"`])?u(?:['\\\"`]\\s*\\+\\s*['\\\"`])?n(?:['\\\"`]\\s*\\+\\s*['\\\"`])?c(?:['\\\"`]\\s*\\+\\s*['\\\"`])?t(?:['\\\"`]\\s*\\+\\s*['\\\"`])?i(?:['\\\"`]\\s*\\+\\s*['\\\"`])?o(?:['\\\"`]\\s*\\+\\s*['\\\"`])?n)['\\\"`]\\s*\\]\\s*\\(|(?:Function|Object|Array|String|Number|Boolean|Promise|Date|RegExp|Error|Symbol)\\s*\\.\\s*constructor\\s*\\(|constructor\\s*\\.\\s*constructor\\s*\\(|\\[\\s*['\\\"`]constructor['\\\"`]\\s*\\]\\s*\\[\\s*['\\\"`]constructor['\\\"`]\\s*\\]\\s*\\("
     }
+   ]
+  },
+  "_DL_RUNNERS": {
+   "set": [
+    ".",
+    "bash",
+    "bun",
+    "call",
+    "cmd",
+    "cmd.exe",
+    "cscript",
+    "dash",
+    "deno",
+    "exec",
+    "ksh",
+    "node",
+    "nodejs",
+    "nohup",
+    "open",
+    "osascript",
+    "perl",
+    "php",
+    "powershell",
+    "powershell.exe",
+    "pwsh",
+    "py",
+    "python",
+    "python3",
+    "pythonw",
+    "ruby",
+    "sh",
+    "source",
+    "start",
+    "wscript",
+    "xdg-open",
+    "zsh"
    ]
   },
   "_DL_RUNNER_ARG_HEAD": {
@@ -2944,7 +5925,7 @@
   "_DL_SPEC": {
    "map": {
     "$comment": {
-     "value": "Source of truth for the received-code detector's shared data (name sets, character sets, limits, and the patterns: plain regexes and alternative groups built from [assertion, body] pairs), loaded and compiled by both the Python core (scanner/core.py) and the npm engine (js/src/lib/received.js). Edit this file, then run scripts/sync-received-spec.py to update the npm copy (js/src/lib/received-spec.json); tests/architecture/test_received_spec.py fails if the copies drift."
+     "value": "Source of truth for the received-code detector's shared data (name sets, character sets, limits, and the patterns: plain regexes and alternative groups built from [assertion, body] pairs), loaded and compiled by the Python core (scanner/core.py); the native engine, which the npm package runs too, reads what core builds from it in its rule pack (scripts/make_rust_tables.py). tests/architecture/test_received_spec.py holds core to this file."
     },
     "alternatives": {
      "map": {
@@ -3947,6 +6928,106 @@
         }
        ]
       },
+      "_DL_RUNNERS": {
+       "list": [
+        {
+         "value": "start"
+        },
+        {
+         "value": "call"
+        },
+        {
+         "value": "cmd"
+        },
+        {
+         "value": "cmd.exe"
+        },
+        {
+         "value": "sh"
+        },
+        {
+         "value": "bash"
+        },
+        {
+         "value": "zsh"
+        },
+        {
+         "value": "dash"
+        },
+        {
+         "value": "ksh"
+        },
+        {
+         "value": "source"
+        },
+        {
+         "value": "."
+        },
+        {
+         "value": "node"
+        },
+        {
+         "value": "nodejs"
+        },
+        {
+         "value": "bun"
+        },
+        {
+         "value": "deno"
+        },
+        {
+         "value": "python"
+        },
+        {
+         "value": "python3"
+        },
+        {
+         "value": "pythonw"
+        },
+        {
+         "value": "py"
+        },
+        {
+         "value": "perl"
+        },
+        {
+         "value": "ruby"
+        },
+        {
+         "value": "php"
+        },
+        {
+         "value": "pwsh"
+        },
+        {
+         "value": "powershell"
+        },
+        {
+         "value": "powershell.exe"
+        },
+        {
+         "value": "cscript"
+        },
+        {
+         "value": "wscript"
+        },
+        {
+         "value": "osascript"
+        },
+        {
+         "value": "open"
+        },
+        {
+         "value": "xdg-open"
+        },
+        {
+         "value": "nohup"
+        },
+        {
+         "value": "exec"
+        }
+       ]
+      },
       "_DL_RUN_NEEDLES": {
        "list": [
         {
@@ -4123,6 +7204,19 @@
         }
        }
       },
+      "_DL_BUILTINS_RE": {
+       "map": {
+        "flags": {
+         "value": ""
+        },
+        "note": {
+         "value": "a code runner named through the builtins or the global object (builtins.exec, __builtins__.__dict__['eval'] once read as a member, globalThis.eval): read as the runner itself (the detection round)"
+        },
+        "src": {
+         "value": "(?<![\\w$.])(?:builtins|__builtins__|globalThis|window|global)(?:[ \\t]*\\.[ \\t]*__dict__)?[ \\t]*\\.[ \\t]*(?=(?:exec|eval|compile|__import__|Function)(?![\\w$]))"
+        }
+       }
+      },
       "_DL_CALLBACK_RE": {
        "map": {
         "flags": {
@@ -4162,6 +7256,19 @@
         }
        }
       },
+      "_DL_CMD_TOKEN_RE": {
+       "map": {
+        "flags": {
+         "value": ""
+        },
+        "note": {
+         "value": "a command line's tokens: a separator, or a word"
+        },
+        "src": {
+         "value": "[|&;\\n]|[^\\s|&;]+"
+        }
+       }
+      },
       "_DL_COMMA_CALL_RE": {
        "map": {
         "flags": {
@@ -4172,6 +7279,19 @@
         },
         "src": {
          "value": "\\(\\s*0\\s*,\\s*(?P<c>[A-Za-z_$][\\w$]*(?:[ \\t]*\\.[ \\t]*[A-Za-z_$][\\w$]*){0,8})\\s*\\)(?=\\s*\\()"
+        }
+       }
+      },
+      "_DL_CONST_RE": {
+       "map": {
+        "flags": {
+         "value": "m"
+        },
+        "note": {
+         "value": "a name given a string on a row of its own (literals joined with +): a constant where it is given nothing else"
+        },
+        "src": {
+         "value": "^[ \\t]*(?:(?:const|let|var)[ \\t]+)?(?P<n>[A-Za-z_$][\\w$]*)[ \\t]*=[ \\t]*(?P<v>(?:'[^'\\\\\\n]{0,64}'|\"[^\"\\\\\\n]{0,64}\")(?:[ \\t]*\\+[ \\t]*(?:'[^'\\\\\\n]{0,64}'|\"[^\"\\\\\\n]{0,64}\")){0,8})[ \\t]*;?[ \\t]*$"
         }
        }
       },
@@ -4305,6 +7425,19 @@
         }
        }
       },
+      "_DL_GETATTR_EXPR_RE": {
+       "map": {
+        "flags": {
+         "value": ""
+        },
+        "note": {
+         "value": "getattr(obj, \u2026) whose name is literals joined with + or names given such a value (the detection round), read as obj.name when that is known"
+        },
+        "src": {
+         "value": "\\bgetattr[ \\t]*\\([ \\t]*(?P<o>[A-Za-z_$][\\w$]*(?:[ \\t]*\\.[ \\t]*[A-Za-z_$][\\w$]*){0,8})[ \\t]*,[ \\t]*(?P<e>(?:'[^'\\\\\\n]{0,64}'|\"[^\"\\\\\\n]{0,64}\"|[A-Za-z_$][\\w$]*)(?:[ \\t]*\\+[ \\t]*(?:'[^'\\\\\\n]{0,64}'|\"[^\"\\\\\\n]{0,64}\"|[A-Za-z_$][\\w$]*)){0,8})[ \\t]*(?:,[^()\\n]{0,120})?\\)"
+        }
+       }
+      },
       "_DL_GETATTR_RE": {
        "map": {
         "flags": {
@@ -4422,6 +7555,19 @@
         }
        }
       },
+      "_DL_NAME_FULL_RE": {
+       "map": {
+        "flags": {
+         "value": ""
+        },
+        "note": {
+         "value": "a member's name"
+        },
+        "src": {
+         "value": "[A-Za-z_$][\\w$]{0,63}"
+        }
+       }
+      },
       "_DL_NAME_RE": {
        "map": {
         "flags": {
@@ -4497,6 +7643,19 @@
         },
         "src": {
          "value": "\\bshell\\s*=\\s*True\\b"
+        }
+       }
+      },
+      "_DL_STR_PIECE_RE": {
+       "map": {
+        "flags": {
+         "value": ""
+        },
+        "note": {
+         "value": "a piece of a joined name: a literal, or a name"
+        },
+        "src": {
+         "value": "'(?P<a>[^'\\\\\\n]*)'|\"(?P<b>[^\"\\\\\\n]*)\"|(?P<n>[A-Za-z_$][\\w$]*)"
         }
        }
       },
@@ -5544,6 +8703,106 @@
       }
      ]
     },
+    "_DL_RUNNERS": {
+     "list": [
+      {
+       "value": "start"
+      },
+      {
+       "value": "call"
+      },
+      {
+       "value": "cmd"
+      },
+      {
+       "value": "cmd.exe"
+      },
+      {
+       "value": "sh"
+      },
+      {
+       "value": "bash"
+      },
+      {
+       "value": "zsh"
+      },
+      {
+       "value": "dash"
+      },
+      {
+       "value": "ksh"
+      },
+      {
+       "value": "source"
+      },
+      {
+       "value": "."
+      },
+      {
+       "value": "node"
+      },
+      {
+       "value": "nodejs"
+      },
+      {
+       "value": "bun"
+      },
+      {
+       "value": "deno"
+      },
+      {
+       "value": "python"
+      },
+      {
+       "value": "python3"
+      },
+      {
+       "value": "pythonw"
+      },
+      {
+       "value": "py"
+      },
+      {
+       "value": "perl"
+      },
+      {
+       "value": "ruby"
+      },
+      {
+       "value": "php"
+      },
+      {
+       "value": "pwsh"
+      },
+      {
+       "value": "powershell"
+      },
+      {
+       "value": "powershell.exe"
+      },
+      {
+       "value": "cscript"
+      },
+      {
+       "value": "wscript"
+      },
+      {
+       "value": "osascript"
+      },
+      {
+       "value": "open"
+      },
+      {
+       "value": "xdg-open"
+      },
+      {
+       "value": "nohup"
+      },
+      {
+       "value": "exec"
+      }
+     ]
+    },
     "_DL_RUN_NEEDLES": {
      "list": [
       {
@@ -5720,6 +8979,19 @@
       }
      }
     },
+    "_DL_BUILTINS_RE": {
+     "map": {
+      "flags": {
+       "value": ""
+      },
+      "note": {
+       "value": "a code runner named through the builtins or the global object (builtins.exec, __builtins__.__dict__['eval'] once read as a member, globalThis.eval): read as the runner itself (the detection round)"
+      },
+      "src": {
+       "value": "(?<![\\w$.])(?:builtins|__builtins__|globalThis|window|global)(?:[ \\t]*\\.[ \\t]*__dict__)?[ \\t]*\\.[ \\t]*(?=(?:exec|eval|compile|__import__|Function)(?![\\w$]))"
+      }
+     }
+    },
     "_DL_CALLBACK_RE": {
      "map": {
       "flags": {
@@ -5759,6 +9031,19 @@
       }
      }
     },
+    "_DL_CMD_TOKEN_RE": {
+     "map": {
+      "flags": {
+       "value": ""
+      },
+      "note": {
+       "value": "a command line's tokens: a separator, or a word"
+      },
+      "src": {
+       "value": "[|&;\\n]|[^\\s|&;]+"
+      }
+     }
+    },
     "_DL_COMMA_CALL_RE": {
      "map": {
       "flags": {
@@ -5769,6 +9054,19 @@
       },
       "src": {
        "value": "\\(\\s*0\\s*,\\s*(?P<c>[A-Za-z_$][\\w$]*(?:[ \\t]*\\.[ \\t]*[A-Za-z_$][\\w$]*){0,8})\\s*\\)(?=\\s*\\()"
+      }
+     }
+    },
+    "_DL_CONST_RE": {
+     "map": {
+      "flags": {
+       "value": "m"
+      },
+      "note": {
+       "value": "a name given a string on a row of its own (literals joined with +): a constant where it is given nothing else"
+      },
+      "src": {
+       "value": "^[ \\t]*(?:(?:const|let|var)[ \\t]+)?(?P<n>[A-Za-z_$][\\w$]*)[ \\t]*=[ \\t]*(?P<v>(?:'[^'\\\\\\n]{0,64}'|\"[^\"\\\\\\n]{0,64}\")(?:[ \\t]*\\+[ \\t]*(?:'[^'\\\\\\n]{0,64}'|\"[^\"\\\\\\n]{0,64}\")){0,8})[ \\t]*;?[ \\t]*$"
       }
      }
     },
@@ -5902,6 +9200,19 @@
       }
      }
     },
+    "_DL_GETATTR_EXPR_RE": {
+     "map": {
+      "flags": {
+       "value": ""
+      },
+      "note": {
+       "value": "getattr(obj, \u2026) whose name is literals joined with + or names given such a value (the detection round), read as obj.name when that is known"
+      },
+      "src": {
+       "value": "\\bgetattr[ \\t]*\\([ \\t]*(?P<o>[A-Za-z_$][\\w$]*(?:[ \\t]*\\.[ \\t]*[A-Za-z_$][\\w$]*){0,8})[ \\t]*,[ \\t]*(?P<e>(?:'[^'\\\\\\n]{0,64}'|\"[^\"\\\\\\n]{0,64}\"|[A-Za-z_$][\\w$]*)(?:[ \\t]*\\+[ \\t]*(?:'[^'\\\\\\n]{0,64}'|\"[^\"\\\\\\n]{0,64}\"|[A-Za-z_$][\\w$]*)){0,8})[ \\t]*(?:,[^()\\n]{0,120})?\\)"
+      }
+     }
+    },
     "_DL_GETATTR_RE": {
      "map": {
       "flags": {
@@ -6019,6 +9330,19 @@
       }
      }
     },
+    "_DL_NAME_FULL_RE": {
+     "map": {
+      "flags": {
+       "value": ""
+      },
+      "note": {
+       "value": "a member's name"
+      },
+      "src": {
+       "value": "[A-Za-z_$][\\w$]{0,63}"
+      }
+     }
+    },
     "_DL_NAME_RE": {
      "map": {
       "flags": {
@@ -6097,6 +9421,19 @@
       }
      }
     },
+    "_DL_STR_PIECE_RE": {
+     "map": {
+      "flags": {
+       "value": ""
+      },
+      "note": {
+       "value": "a piece of a joined name: a literal, or a name"
+      },
+      "src": {
+       "value": "'(?P<a>[^'\\\\\\n]*)'|\"(?P<b>[^\"\\\\\\n]*)\"|(?P<n>[A-Za-z_$][\\w$]*)"
+      }
+     }
+    },
     "_DL_STR_RE": {
      "map": {
       "flags": {
@@ -6138,6 +9475,10 @@
     }
    }
   },
+  "_DL_STR_PIECE_RE": {
+   "flags": "",
+   "re": "'(?P<a>[^'\\\\\\n]*)'|\"(?P<b>[^\"\\\\\\n]*)\"|(?P<n>[A-Za-z_$][\\w$]*)"
+  },
   "_DL_STR_RE": {
    "flags": "",
    "re": "\\\"(?:\\\\.|[^\\\"\\\\])*\\\"|'(?:\\\\.|[^'\\\\])*'|`(?:\\\\.|[^`\\\\])*`"
@@ -6161,16 +9502,104 @@
    "flags": "",
    "re": "[\\w$]+"
   },
+  "_DNS_ARG_SPAN": {
+   "value": 400
+  },
+  "_DNS_ASSIGN_HEAD": {
+   "value": "(?<![^\\n;{])[ \\t]*(?:(?:const|let|var)[ \\t]+)?"
+  },
+  "_DNS_ASSIGN_SPAN": {
+   "value": 5000
+  },
+  "_DNS_ASSIGN_TAIL": {
+   "value": "[ \\t]*=(?![=>])[ \\t]*([^\\n;]*)"
+  },
   "_DNS_BUILT_NAME_RE": {
    "flags": "",
-   "re": "\\{[^}\\n]+\\}[^\\n]*\\.[A-Za-z]{2,}\\Z"
+   "re": "\\{[^}\\n]+\\}[^\\n]*\\.([A-Za-z]{2,})\\Z"
+  },
+  "_DNS_CALL_RE": {
+   "flags": "",
+   "re": "(?:\\b(?:getaddrinfo|gethostbyname(?:_ex)?)|\\bdns\\.(?:promises\\.)?(?:resolve\\w*|lookup)|\\bresolver\\.(?:resolve|query))\\s*\\("
+  },
+  "_DNS_CMD_SUM_RE": {
+   "flags": "",
+   "re": "([\"'`])(?:nslookup|dig|host|ping6?|curl|wget|Resolve-DnsName)\\s[^\"'`\\n]{0,100}\\1\\s*\\+([^\\n;]{1,300})"
+  },
+  "_DNS_CMD_TEMPLATE_RE": {
+   "flags": "",
+   "re": "[\"'`](?:nslookup|dig|host|ping6?|curl|wget|Resolve-DnsName)\\s[^\"'`\\n]{0,200}?\\{[^}\\n]+\\}[^\\s\"'`/:\\n]*\\.([A-Za-z]{2,})(?![\\w.-])"
+  },
+  "_DNS_FORMAT_RE": {
+   "flags": "",
+   "re": "\\A(?:\"[^\"\\n]*(?:%(?:\\([^)\\n]*\\))?[-#0 +]?\\d*[sdirx]|\\{[^}\\n]*\\})[^\"\\n]*\\.([A-Za-z]{2,})\"|'[^'\\n]*(?:%(?:\\([^)\\n]*\\))?[-#0 +]?\\d*[sdirx]|\\{[^}\\n]*\\})[^'\\n]*\\.([A-Za-z]{2,})')\\s*(?:%|\\.\\s*format\\s*\\()"
+  },
+  "_DNS_LITERAL_RE": {
+   "flags": "",
+   "re": "\"[^\"\\n]*\"|'[^'\\n]*'|`[^`$\\n]*`"
+  },
+  "_DNS_LOCAL_TLDS": {
+   "set": [
+    "arpa",
+    "corp",
+    "example",
+    "home",
+    "internal",
+    "intranet",
+    "invalid",
+    "lan",
+    "local",
+    "localdomain",
+    "localhost",
+    "private",
+    "test"
+   ]
   },
   "_DNS_LOOKUP_MAX": {
    "value": 50
   },
-  "_DNS_LOOKUP_RE": {
+  "_DNS_NAME_RE": {
    "flags": "",
-   "re": "(?:\\b(?:getaddrinfo|gethostbyname(?:_ex)?)|\\bdns\\.(?:promises\\.)?(?:resolve\\w*|lookup)|\\bresolver\\.(?:resolve|query))\\s*\\(\\s*(?:f\"([^\"\\n]{0,300})\"|f'([^'\\n]{0,300})'|`([^`\\n]{0,300})`)"
+   "re": "\\A[A-Za-z_$][\\w$]*\\Z"
+  },
+  "_DNS_SHELL_CMD_RE": {
+   "flags": "",
+   "re": "(?<![\\w.$-])(?:nslookup|dig|host|ping6?|curl|wget|Resolve-DnsName)\\s"
+  },
+  "_DNS_SHELL_CUT_RE": {
+   "flags": "",
+   "re": "[\\n|;&]"
+  },
+  "_DNS_SHELL_HOST_RE": {
+   "flags": "",
+   "re": "\\A(?:https?://)?[^\\s/:\"'`|;&<>()]*\\x00[^\\s/:\"'`|;&<>()]*\\.([A-Za-z]{2,})(?![\\w.-])"
+  },
+  "_DNS_SHELL_ID_RE": {
+   "flags": "i",
+   "re": "\\$\\(\\s*(?:whoami|hostname|id\\s+-un|uname\\s+-n)\\s*\\)|`\\s*(?:whoami|hostname|id\\s+-un|uname\\s+-n)\\s*`|\\$\\{?(?:USER|USERNAME|HOSTNAME|LOGNAME)\\b\\}?|%(?:USERNAME|COMPUTERNAME|USERDOMAIN)%|\\$env:(?:USERNAME|COMPUTERNAME|USERDOMAIN)\\b"
+  },
+  "_DNS_SHELL_LEFT_RE": {
+   "flags": "",
+   "re": "[^\\s\"'`(]*\\Z"
+  },
+  "_DNS_SHELL_RIGHT_RE": {
+   "flags": "",
+   "re": "[^\\s\"'`)]*"
+  },
+  "_DNS_SHELL_SPAN": {
+   "value": 300
+  },
+  "_DNS_SUM_RE": {
+   "flags": "",
+   "re": "\\+\\s*(?:\"[^\"\\n]*\\.([A-Za-z]{2,})\"|'[^'\\n]*\\.([A-Za-z]{2,})'|`[^`$\\n]*\\.([A-Za-z]{2,})`)\\s*\\Z"
+  },
+  "_DNS_TEMPLATE_RE": {
+   "flags": "",
+   "re": "\\A(?:f\"([^\"\\n]{0,300})\"|f'([^'\\n]{0,300})'|`([^`\\n]{0,300})`)"
+  },
+  "_DNS_VALUE_RE": {
+   "flags": "",
+   "re": "[A-Za-z_$(]"
   },
   "_DOTDOT": {
    "value": "(?:'\\.\\.[/\\\\]{0,2}'|\"\\.\\.[/\\\\]{0,2}\"|`\\.\\.[/\\\\]{0,2}`)"
@@ -6221,6 +9650,165 @@
   "_DV_CALL_SRC": {
    "value": "(?<![\\w$.])(?P<name>[A-Za-z_$][\\w$]*)[ \\t]*\\([ \\t]*(?:'(?P<a>[^'\\\\\\n]{1,400})'|\"(?P<b>[^\"\\\\\\n]{1,400})\"|`(?P<c>[^`\\\\\\n$]{1,400})`)[ \\t]*\\)"
   },
+  "_DV_CC_ARG_INT_RE": {
+   "flags": "",
+   "re": "-?(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})"
+  },
+  "_DV_CC_ARG_INT_SRC": {
+   "value": "-?(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})"
+  },
+  "_DV_CC_ARG_STR_RE": {
+   "flags": "",
+   "re": "'(?P<a>[ -&(-\\[\\]-~]{0,400})'|\"(?P<b>[ !#-\\[\\]-~]{0,400})\\\""
+  },
+  "_DV_CC_ARG_STR_SRC": {
+   "value": "'(?P<a>[ -&(-\\[\\]-~]{0,400})'|\"(?P<b>[ !#-\\[\\]-~]{0,400})\\\""
+  },
+  "_DV_CC_ARRAY_TAIL": {
+   "value": "[ \\t]*=[ \\t]*[\\[(]\\s*(?P<items>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:\\s*,\\s*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,4095}\\s*,?)\\s*[\\])]"
+  },
+  "_DV_CC_BINARY": {
+   "map": {
+    "%": {
+     "value": 6
+    },
+    "&": {
+     "value": 3
+    },
+    "*": {
+     "value": 6
+    },
+    "+": {
+     "value": 5
+    },
+    "-": {
+     "value": 5
+    },
+    "<<": {
+     "value": 4
+    },
+    ">>": {
+     "value": 4
+    },
+    ">>>": {
+     "value": 4
+    },
+    "^": {
+     "value": 2
+    },
+    "|": {
+     "value": 1
+    }
+   }
+  },
+  "_DV_CC_BODY": {
+   "value": 600
+  },
+  "_DV_CC_CALL_TAIL": {
+   "value": "[ \\t]*\\((?P<args>(?:[^()'\"\\n]|'[^'\\\\\\n]{0,400}'|\"[^\"\\\\\\n]{0,400}\"){0,20000})\\)"
+  },
+  "_DV_CC_FOR_RE": {
+   "flags": "",
+   "re": "\\bfor[ \\t]*\\([ \\t]*(?:var|let)[ \\t]+(?P<i>[A-Za-z_$][\\w$]*)[ \\t]*=[ \\t]*0[ \\t]*;[ \\t]*\\1[ \\t]*<[ \\t]*(?P<d>[A-Za-z_$][\\w$]*)[ \\t]*\\.[ \\t]*length[ \\t]*;"
+  },
+  "_DV_CC_FOR_SRC": {
+   "value": "\\bfor[ \\t]*\\([ \\t]*(?:var|let)[ \\t]+(?P<i>[A-Za-z_$][\\w$]*)[ \\t]*=[ \\t]*0[ \\t]*;[ \\t]*\\1[ \\t]*<[ \\t]*(?P<d>[A-Za-z_$][\\w$]*)[ \\t]*\\.[ \\t]*length[ \\t]*;"
+  },
+  "_DV_CC_FUNC_RE": {
+   "flags": "",
+   "re": "\\bfunction[ \\t]+(?P<a>[A-Za-z_$][\\w$]*)[ \\t]*\\((?P<pa>[^()\\n]{0,120})\\)[ \\t]*\\{|\\b(?:const|let|var)[ \\t]+(?P<b>[A-Za-z_$][\\w$]*)[ \\t]*=[ \\t]*(?:function\\b[ \\t]*(?:[A-Za-z_$][\\w$]*)?[ \\t]*\\((?P<pb>[^()\\n]{0,120})\\)[ \\t]*\\{|\\((?P<pc>[^()\\n]{0,120})\\)[ \\t]*=>)|\\bdef[ \\t]+(?P<c>[A-Za-z_]\\w*)[ \\t]*\\((?P<pd>[^()\\n]{0,120})\\)[ \\t]*(?:->[^:\\n]{0,80})?:"
+  },
+  "_DV_CC_FUNC_SRC": {
+   "value": "\\bfunction[ \\t]+(?P<a>[A-Za-z_$][\\w$]*)[ \\t]*\\((?P<pa>[^()\\n]{0,120})\\)[ \\t]*\\{|\\b(?:const|let|var)[ \\t]+(?P<b>[A-Za-z_$][\\w$]*)[ \\t]*=[ \\t]*(?:function\\b[ \\t]*(?:[A-Za-z_$][\\w$]*)?[ \\t]*\\((?P<pb>[^()\\n]{0,120})\\)[ \\t]*\\{|\\((?P<pc>[^()\\n]{0,120})\\)[ \\t]*=>)|\\bdef[ \\t]+(?P<c>[A-Za-z_]\\w*)[ \\t]*\\((?P<pd>[^()\\n]{0,120})\\)[ \\t]*(?:->[^:\\n]{0,80})?:"
+  },
+  "_DV_CC_INT": {
+   "value": "(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})"
+  },
+  "_DV_CC_INTS": {
+   "value": "(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?"
+  },
+  "_DV_CC_INT_MAX": {
+   "value": 2147483647
+  },
+  "_DV_CC_INT_RE": {
+   "flags": "",
+   "re": "(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})"
+  },
+  "_DV_CC_LITERAL_RE": {
+   "flags": "",
+   "re": "\\bString[ \\t]*\\.[ \\t]*fromCharCode[ \\t]*(?:\\([ \\t]*(?:\\.\\.\\.[ \\t]*\\[[ \\t]*(?P<a>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?)[ \\t]*\\]|(?P<b>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?))[ \\t]*\\)|\\.[ \\t]*apply[ \\t]*\\([ \\t]*(?:null|undefined|this|String)[ \\t]*,[ \\t]*\\[[ \\t]*(?P<c>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?)[ \\t]*\\][ \\t]*\\))|(?:''|\"\")[ \\t]*\\.[ \\t]*join[ \\t]*\\([ \\t]*(?:map[ \\t]*\\([ \\t]*chr[ \\t]*,[ \\t]*[\\[(][ \\t]*(?P<d>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?)[ \\t]*[\\])][ \\t]*\\)|\\[?[ \\t]*chr[ \\t]*\\([ \\t]*(?P<v>[A-Za-z_]\\w*)[ \\t]*\\)[ \\t]+for[ \\t]+\\5[ \\t]+in[ \\t]+[\\[(][ \\t]*(?P<e>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?)[ \\t]*[\\])][ \\t]*\\]?)[ \\t]*\\)|\\bbyte(?:s|array)[ \\t]*\\([ \\t]*[\\[(][ \\t]*(?P<f>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?)[ \\t]*[\\])][ \\t]*\\)[ \\t]*\\.[ \\t]*decode[ \\t]*\\([^()\\n]{0,20}\\)"
+  },
+  "_DV_CC_LITERAL_SRC": {
+   "value": "\\bString[ \\t]*\\.[ \\t]*fromCharCode[ \\t]*(?:\\([ \\t]*(?:\\.\\.\\.[ \\t]*\\[[ \\t]*(?P<a>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?)[ \\t]*\\]|(?P<b>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?))[ \\t]*\\)|\\.[ \\t]*apply[ \\t]*\\([ \\t]*(?:null|undefined|this|String)[ \\t]*,[ \\t]*\\[[ \\t]*(?P<c>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?)[ \\t]*\\][ \\t]*\\))|(?:''|\"\")[ \\t]*\\.[ \\t]*join[ \\t]*\\([ \\t]*(?:map[ \\t]*\\([ \\t]*chr[ \\t]*,[ \\t]*[\\[(][ \\t]*(?P<d>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?)[ \\t]*[\\])][ \\t]*\\)|\\[?[ \\t]*chr[ \\t]*\\([ \\t]*(?P<v>[A-Za-z_]\\w*)[ \\t]*\\)[ \\t]+for[ \\t]+\\5[ \\t]+in[ \\t]+[\\[(][ \\t]*(?P<e>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?)[ \\t]*[\\])][ \\t]*\\]?)[ \\t]*\\)|\\bbyte(?:s|array)[ \\t]*\\([ \\t]*[\\[(][ \\t]*(?P<f>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?)[ \\t]*[\\])][ \\t]*\\)[ \\t]*\\.[ \\t]*decode[ \\t]*\\([^()\\n]{0,20}\\)"
+  },
+  "_DV_CC_MAP_RE": {
+   "flags": "",
+   "re": "(?<![\\w$.])(?P<d>[A-Za-z_$][\\w$]*)[ \\t]*(?P<split>\\.[ \\t]*split[ \\t]*\\([ \\t]*(?:''|\"\")[ \\t]*\\)[ \\t]*)?\\.[ \\t]*map[ \\t]*\\([ \\t]*(?:function\\b[ \\t]*(?:[A-Za-z_$][\\w$]*)?[ \\t]*\\([ \\t]*(?P<e>[A-Za-z_$][\\w$]*)(?:[ \\t]*,[ \\t]*(?P<i>[A-Za-z_$][\\w$]*))?[ \\t]*\\)[ \\t]*\\{|\\([ \\t]*(?P<e2>[A-Za-z_$][\\w$]*)(?:[ \\t]*,[ \\t]*(?P<i2>[A-Za-z_$][\\w$]*))?[ \\t]*\\)[ \\t]*=>|(?P<e3>[A-Za-z_$][\\w$]*)[ \\t]*=>)"
+  },
+  "_DV_CC_MAP_SRC": {
+   "value": "(?<![\\w$.])(?P<d>[A-Za-z_$][\\w$]*)[ \\t]*(?P<split>\\.[ \\t]*split[ \\t]*\\([ \\t]*(?:''|\"\")[ \\t]*\\)[ \\t]*)?\\.[ \\t]*map[ \\t]*\\([ \\t]*(?:function\\b[ \\t]*(?:[A-Za-z_$][\\w$]*)?[ \\t]*\\([ \\t]*(?P<e>[A-Za-z_$][\\w$]*)(?:[ \\t]*,[ \\t]*(?P<i>[A-Za-z_$][\\w$]*))?[ \\t]*\\)[ \\t]*\\{|\\([ \\t]*(?P<e2>[A-Za-z_$][\\w$]*)(?:[ \\t]*,[ \\t]*(?P<i2>[A-Za-z_$][\\w$]*))?[ \\t]*\\)[ \\t]*=>|(?P<e3>[A-Za-z_$][\\w$]*)[ \\t]*=>)"
+  },
+  "_DV_CC_MAX_CALLS": {
+   "value": 256
+  },
+  "_DV_CC_MAX_CODES": {
+   "value": 4096
+  },
+  "_DV_CC_MAX_DECODERS": {
+   "value": 8
+  },
+  "_DV_CC_MAX_DEPTH": {
+   "value": 16
+  },
+  "_DV_CC_MAX_PARAMS": {
+   "value": 4
+  },
+  "_DV_CC_MAX_TOKENS": {
+   "value": 64
+  },
+  "_DV_CC_MAX_WORK": {
+   "value": 50000
+  },
+  "_DV_CC_NAME_RE": {
+   "flags": "",
+   "re": "[A-Za-z_$][\\w$]*"
+  },
+  "_DV_CC_PYFOR_RE": {
+   "flags": "",
+   "re": "\\bfor[ \\t]+(?P<i>[A-Za-z_]\\w*)[ \\t]+in[ \\t]+range[ \\t]*\\([ \\t]*len[ \\t]*\\([ \\t]*(?P<d>[A-Za-z_]\\w*)[ \\t]*\\)[ \\t]*\\)"
+  },
+  "_DV_CC_PYFOR_SRC": {
+   "value": "\\bfor[ \\t]+(?P<i>[A-Za-z_]\\w*)[ \\t]+in[ \\t]+range[ \\t]*\\([ \\t]*len[ \\t]*\\([ \\t]*(?P<d>[A-Za-z_]\\w*)[ \\t]*\\)[ \\t]*\\)"
+  },
+  "_DV_CC_PYITER_RE": {
+   "flags": "",
+   "re": "\\bfor[ \\t]+(?:(?P<i>[A-Za-z_]\\w*)[ \\t]*,[ \\t]*(?P<e>[A-Za-z_]\\w*)[ \\t]+in[ \\t]+enumerate[ \\t]*\\([ \\t]*(?P<d>[A-Za-z_]\\w*)[ \\t]*\\)|(?P<e2>[A-Za-z_]\\w*)[ \\t]+in[ \\t]+(?P<d2>[A-Za-z_]\\w*)(?![\\w$.(\\[]))"
+  },
+  "_DV_CC_PYITER_SRC": {
+   "value": "\\bfor[ \\t]+(?:(?P<i>[A-Za-z_]\\w*)[ \\t]*,[ \\t]*(?P<e>[A-Za-z_]\\w*)[ \\t]+in[ \\t]+enumerate[ \\t]*\\([ \\t]*(?P<d>[A-Za-z_]\\w*)[ \\t]*\\)|(?P<e2>[A-Za-z_]\\w*)[ \\t]+in[ \\t]+(?P<d2>[A-Za-z_]\\w*)(?![\\w$.(\\[]))"
+  },
+  "_DV_CC_SITE_RE": {
+   "flags": "",
+   "re": "\\bString[ \\t]*\\.[ \\t]*fromCharCode[ \\t]*\\(|(?<![\\w$.])chr[ \\t]*\\("
+  },
+  "_DV_CC_SITE_SRC": {
+   "value": "\\bString[ \\t]*\\.[ \\t]*fromCharCode[ \\t]*\\(|(?<![\\w$.])chr[ \\t]*\\("
+  },
+  "_DV_CC_TOKEN_RE": {
+   "flags": "",
+   "re": "[ \\t]*(?:(?P<num>0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})|(?P<name>[A-Za-z_$][\\w$]*)|(?P<op>>>>|<<|>>|[-+*%&|^~()\\[\\].,]))"
+  },
+  "_DV_CC_TOKEN_SRC": {
+   "value": "[ \\t]*(?:(?P<num>0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})|(?P<name>[A-Za-z_$][\\w$]*)|(?P<op>>>>|<<|>>|[-+*%&|^~()\\[\\].,]))"
+  },
+  "_DV_ESCAPED_LITERAL_RE": {
+   "flags": "",
+   "re": "(?<![\\w$\\\\])(['\"])((?:\\\\x[0-9A-Fa-f]{2}|\\\\u[0-9A-Fa-f]{4}){3,})\\1"
+  },
+  "_DV_ESCAPE_RE": {
+   "flags": "",
+   "re": "\\\\(?:x([0-9A-Fa-f]{2})|u([0-9A-Fa-f]{4}))"
+  },
   "_DV_HELPER_CALL_TAIL": {
    "value": ")[ \\t]*\\([ \\t]*(?:'(?P<a>[^'\\\\\\n]{1,400})'|\"(?P<b>[^\"\\\\\\n]{1,400})\"|`(?P<c>[^`\\\\\\n$]{1,400})`)[ \\t]*\\)"
   },
@@ -6236,7 +9824,7 @@
    "re": "[0-9A-Fa-f]+"
   },
   "_DV_INDEX_TAIL": {
-   "value": "\\s*\\[\\s*(\\d{1,2})\\s*\\]"
+   "value": "\\s*\\[\\s*([0-9]{1,2})\\s*\\]"
   },
   "_DV_JOIN_RE": {
    "flags": "",
@@ -6274,6 +9862,19 @@
   "_DV_MEMBER_SRC": {
    "value": "(?<=[\\w$)\\]])\\[[ \\t]*(?:'(?P<a>[A-Za-z_$][\\w$]{0,63})'|\"(?P<b>[A-Za-z_$][\\w$]{0,63})\")[ \\t]*\\]"
   },
+  "_DV_MEMO": {
+   "list": [
+    {
+     "value": null
+    },
+    {
+     "value": null
+    },
+    {
+     "value": null
+    }
+   ]
+  },
   "_DV_MUTATED_TAIL": {
    "value": "\\s*(?:\\.\\s*(?:push|pop|shift|unshift|splice|reverse|sort|fill|copyWithin|append|insert|extend|remove)\\s*\\(|\\[[^\\]\\n]{0,80}\\]\\s*=(?!=))"
   },
@@ -6305,6 +9906,12 @@
     },
     {
      "value": "base64"
+    },
+    {
+     "value": "chr"
+    },
+    {
+     "value": "byte"
     }
    ]
   },
@@ -6340,26 +9947,37 @@
   "_DV_XOR_MIN_CALLS": {
    "value": 5
   },
+  "_ENTROPY_RULE": {
+   "map": {
+    "fix": {
+     "value": "If it is a secret, rotate it and load it from the environment."
+    },
+    "id": {
+     "value": "S-ENTROPY"
+    },
+    "msg": {
+     "value": "High-entropy string literal \u2014 possible hardcoded secret."
+    },
+    "name": {
+     "value": "High-entropy string"
+    },
+    "ref": {
+     "value": "CWE-798 \u00b7 OWASP A07"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "Random-looking constants are usually keys or tokens."
+    }
+   }
+  },
   "_ENV_ASSIGN_RE": {
    "flags": "",
    "re": "^[A-Za-z_][A-Za-z0-9_]*="
-  },
-  "_ENV_COPY_ANCHOR_RE": {
-   "flags": "",
-   "re": "dict\\(\\s*os\\.environ\\s*\\)|os\\.environ\\.copy\\(\\s*\\)|\\*\\*\\s*os\\.environ|\\.\\.\\.\\s*process\\.env|Object\\.assign\\(\\s*\\{\\s*\\}\\s*,\\s*process\\.env"
-  },
-  "_ENV_COPY_MAX": {
-   "value": 20
-  },
-  "_ENV_COPY_RE": {
-   "flags": "",
-   "re": "(?<![\\w$.])([A-Za-z_$][\\w$]*)\\s{0,40}=\\s{0,40}(?:dict\\(\\s*os\\.environ\\s*\\)|os\\.environ\\.copy\\(\\s*\\)|\\{\\s*\\*\\*\\s*os\\.environ\\s*\\}|\\{\\s*\\.\\.\\.\\s*process\\.env\\s*\\}|Object\\.assign\\(\\s*\\{\\s*\\}\\s*,\\s*process\\.env\\s*\\))"
-  },
-  "_ENV_COPY_USE_HEAD": {
-   "value": "\\b(?:urlencode|dumps|stringify|b64encode|str)\\(\\s*"
-  },
-  "_ENV_COPY_USE_TAIL": {
-   "value": "\\s*[,)]"
   },
   "_EVAL_BY_NAME": {
    "value": "\\[\\s*['\\\"`](?:e(?:['\\\"`]\\s*\\+\\s*['\\\"`])?v(?:['\\\"`]\\s*\\+\\s*['\\\"`])?a(?:['\\\"`]\\s*\\+\\s*['\\\"`])?l|F(?:['\\\"`]\\s*\\+\\s*['\\\"`])?u(?:['\\\"`]\\s*\\+\\s*['\\\"`])?n(?:['\\\"`]\\s*\\+\\s*['\\\"`])?c(?:['\\\"`]\\s*\\+\\s*['\\\"`])?t(?:['\\\"`]\\s*\\+\\s*['\\\"`])?i(?:['\\\"`]\\s*\\+\\s*['\\\"`])?o(?:['\\\"`]\\s*\\+\\s*['\\\"`])?n)['\\\"`]\\s*\\]"
@@ -6367,10 +9985,6 @@
   "_EXEC_CALL_RE": {
    "flags": "",
    "re": "\\b(?:execSync|exec|execFileSync|execFile|spawnSync|spawn|system|popen|Popen|run|call|check_call|check_output|getoutput|getstatusoutput)\\s*\\("
-  },
-  "_EXFIL_DEST_RE": {
-   "flags": "i",
-   "re": "https?://(?:\\d{1,3}\\.){3}\\d{1,3}\\b|pastebin\\.com|\\bngrok|webhook\\.site|discord(?:app)?\\.com/api/webhooks|api\\.telegram\\.org|oastify\\.com|burpcollaborator|\\binteract\\.sh|\\boast\\.(?:pro|live|site|online|fun|me)\\b|requestbin\\.(?:com|net|io)\\b|\\brequestb\\.in\\b|pipedream\\.net|transfer\\.sh|\\.onion\\b"
   },
   "_EXFIL_SERVICES": {
    "value": "pastebin\\.com|\\bngrok|webhook\\.site|discord(?:app)?\\.com/api/webhooks|api\\.telegram\\.org|oastify\\.com|burpcollaborator|\\binteract\\.sh|\\boast\\.(?:pro|live|site|online|fun|me)\\b|requestbin\\.(?:com|net|io)\\b|\\brequestb\\.in\\b|pipedream\\.net|transfer\\.sh|\\.onion\\b"
@@ -6409,22 +10023,6 @@
   "_FN_DEF_BEFORE_RE": {
    "flags": "",
    "re": "(?:^|[^\\w$])(?:function\\s*\\*?|def)\\s*$"
-  },
-  "_FSTR_FIELD_STOP": {
-   "flags": "",
-   "re": "[#'\\\"(){}\\[\\]:]"
-  },
-  "_FSTR_TEXT_STOP": {
-   "map": {
-    "\"": {
-     "flags": "",
-     "re": "[{}\\\\\n\"]"
-    },
-    "'": {
-     "flags": "",
-     "re": "[{}\\\\\n']"
-    }
-   }
   },
   "_FULL_SAN": {
    "map": {
@@ -6548,6 +10146,65 @@
     "module_root_dir"
    ]
   },
+  "_HEXSTR_DANGER_WHY": {
+   "value": "Escaping ordinary printable characters serves no purpose except hiding them from review and search; this text names code execution, a download, or a URL."
+  },
+  "_HEXSTR_NAME_RULE": {
+   "map": {
+    "fix": {
+     "value": "Decode the string and review what it does."
+    },
+    "id": {
+     "value": "SC-HEXSTR"
+    },
+    "msg": {
+     "value": "Escape sequences hide a name: {name!r}."
+    },
+    "name": {
+     "value": "Hex-escaped readable text"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "CRITICAL"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "Nothing needs to escape a letter of a name like this one: writing it as escape sequences only hides it from review and search, and this one names code execution, a download, or a URL."
+    }
+   }
+  },
+  "_HEXSTR_TEXT_RULE": {
+   "map": {
+    "fix": {
+     "value": "Decode the string and review what it does."
+    },
+    "id": {
+     "value": "SC-HEXSTR"
+    },
+    "msg": {
+     "value": "Hex escapes hide readable text: {preview!r}."
+    },
+    "name": {
+     "value": "Hex-escaped readable text"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "Escaping ordinary printable characters serves no purpose except hiding them from review and search; this text is readable once decoded."
+    }
+   }
+  },
   "_HEX_ESCAPE_RE": {
    "flags": "",
    "re": "\\\\x([0-9A-Fa-f]{2})"
@@ -6559,6 +10216,50 @@
   "_HIDDEN_RUN_RE": {
    "flags": "",
    "re": "[\ufe00-\ufe0f\udb40\udc00-\udb40\uddef]{2,}"
+  },
+  "_HIDDEN_UNICODE_RULE": {
+   "map": {
+    "fix": {
+     "value": "Show the characters as escape sequences and decode what they spell; if it is a payload, do not run the file."
+    },
+    "id": {
+     "value": "SC-HIDDEN-UNICODE"
+    },
+    "msg": {
+     "value": "A run of {n} invisible {what} carries hidden data in the code."
+    },
+    "name": {
+     "value": "Invisible-character payload"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "Invisible characters in source carry bytes that no review or diff shows: a variation selector or a tag character has no business in code. GlassWorm hid a payload in variation selectors and decoded it into eval; tag characters smuggle instructions past a reviewer and an AI reading the file. Only a flag emoji and a single emoji variation selector are ordinary."
+    }
+   }
+  },
+  "_HIDDEN_UNICODE_RUNS_MSG": {
+   "value": "A run of {n} invisible {what} carries hidden data in the code, and the file runs code from a string."
+  },
+  "_HIDDEN_UNICODE_WHAT": {
+   "map": {
+    "both": {
+     "value": "variation selectors and tag characters"
+    },
+    "selectors": {
+     "value": "variation selectors"
+    },
+    "tags": {
+     "value": "tag characters"
+    }
+   }
   },
   "_HIDDEN_UNICODE_WHY": {
    "value": "Invisible characters in source carry bytes that no review or diff shows: a variation selector or a tag character has no business in code. GlassWorm hid a payload in variation selectors and decoded it into eval; tag characters smuggle instructions past a reviewer and an AI reading the file. Only a flag emoji and a single emoji variation selector are ordinary."
@@ -6592,6 +10293,16 @@
     "||"
    ]
   },
+  "_HOOK_SHLEX_MEMO": {
+   "list": [
+    {
+     "value": null
+    },
+    {
+     "value": null
+    }
+   ]
+  },
   "_HOOK_WRAPPERS": {
    "set": [
     "command",
@@ -6608,7 +10319,7 @@
   },
   "_HOST_INFO_RE": {
    "flags": "",
-   "re": "\\b(?:socket\\.gethostname|socket\\.getfqdn|platform\\.node|getpass\\.getuser|os\\.getlogin|pwd\\.getpwuid|os\\.hostname|os\\.userInfo)\\s*\\(|\\b(?:getoutput|check_output|getstatusoutput|execSync|popen)\\s*\\(\\s*\\[?\\s*[\"'](?:whoami|hostname|id|uname|ifconfig|ipconfig|systeminfo)\\b|(?:\\$\\(|`)\\s*(?:whoami|hostname|id|uname|ifconfig|ip\\s+a|pwd|ls|cat\\s+/etc/passwd|ps)\\b|\\bos\\.(?:hostname|userInfo)\\s*[,)]"
+   "re": "\\b(?:socket\\.gethostname|socket\\.getfqdn|platform\\.node|getpass\\.getuser|os\\.getlogin|pwd\\.getpwuid|os\\.hostname|os\\.userInfo)\\s*\\(|\\b(?:getoutput|check_output|getstatusoutput|execSync|popen)\\s*\\(\\s*\\[?\\s*[\"'](?:whoami|hostname|id|uname\\s+(?:-[A-Za-z]*[an]|--(?:all|nodename))|ifconfig|ipconfig|systeminfo)\\b|(?:\\$\\(|`)\\s*(?:whoami|hostname|id|uname\\s+(?:-[A-Za-z]*[an]|--(?:all|nodename))|ifconfig|ip\\s+a|pwd|ls|cat\\s+/etc/passwd|ps)\\b|\\bos\\.(?:hostname|userInfo)\\s*[,)]|\\brequire\\(\\s*[\"'](?:node:)?os[\"']\\s*\\)\\s*\\.\\s*(?:hostname|userInfo)\\b|\\b(?:const|let|var|import)\\s*\\{[^{}\\n]{0,200}\\b(?:hostname|userInfo)\\b[^{}\\n]{0,200}\\}\\s*(?:=\\s*require\\(\\s*|from\\s*)[\"'](?:node:)?os[\"']|\\bfrom\\s+(?:socket|getpass)\\s+import\\s+[^\\n]{0,200}\\b(?:gethostname|getfqdn|getuser)\\b"
   },
   "_HTML_RESPONSE_CLASS_RE": {
    "flags": "",
@@ -6630,28 +10341,49 @@
    "flags": "",
    "re": "(?<![\\w$.])[A-Za-z_$][\\w$]*"
   },
-  "_IMPORT_HARVEST_NEEDLES": {
-   "list": [
-    {
-     "value": "process.env"
+  "_IMPORT_SENT_IP_REASONS": {
+   "map": {
+    "address": {
+     "value": "sends the machine's public IP address to an IP address"
     },
-    {
-     "value": "os.environ"
+    "credentials": {
+     "value": "reads credentials or the whole environment and sends them to an IP address"
     },
-    {
-     "value": "id_"
+    "environment": {
+     "value": "reads credentials or the whole environment and sends them to an IP address"
     },
-    {
-     "value": ".git-credentials"
+    "file": {
+     "value": "reads local files and sends them to an IP address"
     },
-    {
-     "value": "leveldb"
+    "identity": {
+     "value": "sends the machine's user or host name to an IP address"
+    },
+    "report": {
+     "value": "sends what local commands report about the machine to an IP address"
     }
-   ]
+   }
   },
-  "_IMPORT_HARVEST_RE": {
-   "flags": "",
-   "re": "JSON\\.stringify\\(\\s*process\\.env\\s*[,)]|\\bjson\\.dumps\\(\\s*(?:dict\\(\\s*)?os\\.environ\\s*[,)]|\\b(?:str|repr)\\(\\s*os\\.environ\\s*\\)|\\burlencode\\(\\s*(?:dict\\(\\s*)?os\\.environ\\s*[,)]|[/\\\\]\\.ssh[/\\\\]id_|\\bid_(?:rsa|ed25519|ecdsa|dsa)\\b(?!\\.pub)|\\.git-credentials|(?i:Local Storage)[/\\\\]leveldb"
+  "_IMPORT_SENT_REASONS": {
+   "map": {
+    "address": {
+     "value": "sends the machine's public IP address to a data-capture service"
+    },
+    "credentials": {
+     "value": "reads credentials or the whole environment and sends them to an exfiltration service"
+    },
+    "environment": {
+     "value": "reads credentials or the whole environment and sends them to an exfiltration service"
+    },
+    "file": {
+     "value": "reads local files and sends them to an exfiltration service"
+    },
+    "identity": {
+     "value": "sends the machine's user or host name to a data-capture service"
+    },
+    "report": {
+     "value": "sends what local commands report about the machine to a data-capture service"
+    }
+   }
   },
   "_INDEX_ARGS_RE": {
    "flags": "",
@@ -6710,45 +10442,6 @@
     }
    }
   },
-  "_JSX_FILE_NEXT": {
-   "flags": "",
-   "re": "[/'\\\"`<]"
-  },
-  "_JSX_JS_NEXT": {
-   "flags": "",
-   "re": "[/'\\\"`{}<]"
-  },
-  "_JSX_KEYWORDS": {
-   "set": [
-    "await",
-    "case",
-    "default",
-    "delete",
-    "do",
-    "else",
-    "in",
-    "instanceof",
-    "new",
-    "of",
-    "return",
-    "throw",
-    "typeof",
-    "void",
-    "yield"
-   ]
-  },
-  "_JSX_NAME_RE": {
-   "flags": "",
-   "re": "[A-Za-z0-9_$.:\\-\\x80-\\U0010ffff]*"
-  },
-  "_JSX_TEXT_NEXT": {
-   "flags": "",
-   "re": "[{}<>]"
-  },
-  "_JSX_WS_RE": {
-   "flags": "",
-   "re": "[ \\t\\n\\r\\f\\v]*"
-  },
   "_JS_BINDING_RE": {
    "flags": "",
    "re": "[A-Za-z_$][\\w$]*"
@@ -6772,51 +10465,47 @@
    "flags": "",
    "re": "^\\s*(?:(?:async|static|get|set)\\s+){0,3}(?!(?:if|for|while|switch|catch|with|function|return)\\b)[A-Za-z_$][\\w$]*\\s*\\([^()]*\\)$"
   },
-  "_JS_REGEX_KEYWORDS": {
-   "set": [
-    "await",
-    "case",
-    "delete",
-    "do",
-    "else",
-    "in",
-    "instanceof",
-    "new",
-    "of",
-    "return",
-    "throw",
-    "typeof",
-    "void",
-    "yield"
-   ]
-  },
-  "_JS_REGEX_LIT_RE": {
-   "flags": "",
-   "re": "/(?![*/])(?:[^/\\\\\\[\\n]|\\\\.|\\[(?:[^\\]\\\\\\n]|\\\\.)*\\])+/"
-  },
-  "_JS_REGEX_PREV": {
-   "set": [
-    "!",
-    "%",
-    "&",
-    "(",
-    "*",
-    "+",
-    ",",
-    "-",
-    ":",
-    ";",
-    "<",
-    "=",
-    ">",
-    "?",
-    "[",
-    "^",
-    "{",
-    "|",
-    "}",
-    "~"
-   ]
+  "_JS_RUNTIMES": {
+   "map": {
+    "babel-node": {
+     "set": []
+    },
+    "bun": {
+     "set": [
+      "run"
+     ]
+    },
+    "bun.exe": {
+     "set": [
+      "run"
+     ]
+    },
+    "deno": {
+     "set": [
+      "run"
+     ]
+    },
+    "deno.exe": {
+     "set": [
+      "run"
+     ]
+    },
+    "esno": {
+     "set": []
+    },
+    "ts-node": {
+     "set": []
+    },
+    "ts-node-esm": {
+     "set": []
+    },
+    "tsx": {
+     "set": []
+    },
+    "vite-node": {
+     "set": []
+    }
+   }
   },
   "_JS_TAG_KEYWORDS": {
    "set": [
@@ -6930,6 +10619,947 @@
    "flags": "",
    "re": "\\s*(?!(?:url|uri|file|filename|path|path_or_file|args|cmd|command|src|dst|source|destination)\\s*=)[A-Za-z_]\\w*\\s*=(?!=)"
   },
+  "_LATER_ID_CONTINUE": {
+   "set": [
+    "\u200c",
+    "\u200d",
+    "\u30fb",
+    "\uff65"
+   ]
+  },
+  "_LD_ABSOLUTE_IN_RE": {
+   "flags": "",
+   "re": "[\"'`](?:/(?:etc|proc|home|root|Users|var|opt|flag|tmp|usr|srv|mnt|run|sys|dev|boot|data|app|workspace|secrets?)\\b|~[/\\\\]|[A-Za-z]:[\\\\/]|\\$HOME\\b|\\$\\{HOME\\}|%(?:USERPROFILE|APPDATA|LOCALAPPDATA|HOMEPATH|PROGRAMDATA)%)"
+  },
+  "_LD_ABSOLUTE_RE": {
+   "flags": "",
+   "re": "[fFrRbBuU]{0,2}[\"'`](?:/[\\w.~-]|~[/\\\\]|[A-Za-z]:[\\\\/]|\\$HOME\\b|\\$\\{HOME\\}|%(?:USERPROFILE|APPDATA|LOCALAPPDATA|HOMEPATH|PROGRAMDATA)%)"
+  },
+  "_LD_ADDRESS_SEND_RE": {
+   "flags": "",
+   "re": "\\b(?:https?\\s*\\.\\s*(?:get|request)|axios\\s*\\.\\s*get|got|requests\\s*\\.\\s*get|httpx\\s*\\.\\s*get)\\s*\\(|\\brequire\\s*\\(\\s*[\"'](?:node:)?https?[\"']\\s*\\)\\s*\\.\\s*(?:get|request)\\s*\\("
+  },
+  "_LD_ALIAS_JS_RE": {
+   "flags": "",
+   "re": "\\b(?:(?:const|let|var)\\s+([A-Za-z_$][\\w$]*)\\s*=\\s*require\\(\\s*[\"'](?:node:)?os[\"']\\s*\\)(?!\\s*(?:\\.|\\[|\\?\\.))|import\\s+(?:\\*\\s*as\\s+)?([A-Za-z_$][\\w$]*)\\s*(?:,\\s*\\{[^{}\\n]{0,300}\\}\\s*)?from\\s*[\"'](?:node:)?os[\"'])"
+  },
+  "_LD_ALIAS_PY_PART_RE": {
+   "flags": "",
+   "re": "\\s*(os|socket|getpass|platform)\\s+as\\s+([A-Za-z_]\\w*)\\s*\\Z"
+  },
+  "_LD_ALIAS_PY_RE": {
+   "flags": "",
+   "re": "(?<![\\w.])import[ \\t]+([A-Za-z_][\\w.]*(?:[ \\t]+as[ \\t]+[A-Za-z_]\\w*)?(?:[ \\t]*,[ \\t]*[A-Za-z_][\\w.]*(?:[ \\t]+as[ \\t]+[A-Za-z_]\\w*)?){0,20})"
+  },
+  "_LD_ALIAS_TAIL": {
+   "value": ")\\s*\\.\\s*([A-Za-z_$][\\w$]*)(?![\\w$])(\\s*\\()?"
+  },
+  "_LD_ARGV_ITEM_RE": {
+   "flags": "",
+   "re": "[\"'`]([^\"'`\\n]{0,100})[\"'`]"
+  },
+  "_LD_ARROW_BODY_RE": {
+   "flags": "",
+   "re": "\\s*(?:async\\s+)?(?:\\([^)\\n]{0,300}\\)|[A-Za-z_$][\\w$]*)\\s*=>\\s*(?!\\{)|\\s*lambda\\b[^:\\n]{0,300}:"
+  },
+  "_LD_BODY_RE": {
+   "flags": "",
+   "re": "\\s*\\{"
+  },
+  "_LD_BODY_SPAN": {
+   "value": 20000
+  },
+  "_LD_CALLBACK_HEAD_RE": {
+   "flags": "",
+   "re": "\\s*(?:async\\s+)?(?:function\\b\\s*(?:\\*\\s*)?(?:[\\w$]+\\s*)?\\(([^)\\n]{0,300})\\)|\\(([^)\\n]{0,300})\\)\\s*=>|([A-Za-z_$][\\w$]*)\\s*=>)|\\s*lambda\\b([^:\\n]{0,300}):"
+  },
+  "_LD_CALLED_RE": {
+   "flags": "",
+   "re": "\\s*\\("
+  },
+  "_LD_CALL_RE": {
+   "flags": "",
+   "re": "(?<![\\w$.])(?:(?:[A-Za-z_$][\\w$]*|require\\s*\\(\\s*[\"'`][^\"'`\\n]{1,60}[\"'`]\\s*\\))\\s*\\.\\s*)*([A-Za-z_$][\\w$]*)\\s*\\(\\s*"
+  },
+  "_LD_CLASS_RE": {
+   "flags": "",
+   "re": "\\bclass\\s+([A-Za-z_$][\\w$]*)"
+  },
+  "_LD_CLIENT_AS_RE": {
+   "flags": "",
+   "re": "\\b(?:requests|httpx|urllib3|aiohttp)\\s*\\.\\s*(?:Session|session|Client|AsyncClient|PoolManager|ClientSession)\\s*\\([^()\\n]{0,300}\\)\\s*as\\s+([A-Za-z_]\\w*)"
+  },
+  "_LD_CLIENT_IMPORT_RE": {
+   "flags": "",
+   "re": "\\bimport\\s+(?:\\*\\s*as\\s+)?([A-Za-z_$][\\w$]*)\\s*(?:,\\s*\\{[^{}\\n]{0,300}\\}\\s*)?from\\s*[\"'](?:node-fetch|cross-fetch|isomorphic-fetch|isomorphic-unfetch|undici|axios|got|request|needle|superagent|phin|bent|ky|make-fetch-happen|minipass-fetch|ofetch|node-fetch-native|wretch)[\"']"
+  },
+  "_LD_CLIENT_MODULES": {
+   "value": "node-fetch|cross-fetch|isomorphic-fetch|isomorphic-unfetch|undici|axios|got|request|needle|superagent|phin|bent|ky|make-fetch-happen|minipass-fetch|ofetch|node-fetch-native|wretch"
+  },
+  "_LD_CLIENT_RE": {
+   "flags": "",
+   "re": "\\brequire\\s*\\(\\s*[\"'](?:node-fetch|cross-fetch|isomorphic-fetch|isomorphic-unfetch|undici|axios|got|request|needle|superagent|phin|bent|ky|make-fetch-happen|minipass-fetch|ofetch|node-fetch-native|wretch)[\"']\\s*\\)(?!\\s*(?:\\.|\\[|\\?\\.))|(?:\\b(?:axios|got|ky)|\\brequire\\s*\\(\\s*[\"'](?:axios|got|ky)[\"']\\s*\\))\\s*\\.\\s*(?:create|extend)\\s*\\(|\\b(?:requests|httpx|urllib3|aiohttp)\\s*\\.\\s*(?:Session|session|Client|AsyncClient|PoolManager|ClientSession)\\s*\\("
+  },
+  "_LD_CLIENT_REQUEST_TAIL": {
+   "value": ")\\s*\\.\\s*request\\s*\\("
+  },
+  "_LD_CLIENT_SEND_TAIL": {
+   "value": ")\\s*(?:\\.\\s*(?:post|put|patch)\\s*)?\\("
+  },
+  "_LD_COLLECT_RE": {
+   "flags": "",
+   "re": "(?<![\\w$.])([A-Za-z_$][\\w$]*)(?:\\s*\\.\\s*[A-Za-z_$][\\w$]*){0,4}\\s*\\.\\s*(?:push|append|extend|add|update|unshift|insert|setdefault)\\s*\\("
+  },
+  "_LD_COMPOSED_RE": {
+   "flags": "",
+   "re": "[\"'`]\\s*\\+|\\+\\s*[fFrRbBuU]{0,2}[\"'`]|[\"']\\s*%\\s*[\\w(]|[\"']\\s*\\.\\s*(?:format|join)\\s*\\(|(?<![\\w$])[fF][rRbB]?[\"']|`[^`\\n]*\\$\\{|\\.\\s*concat\\s*\\("
+  },
+  "_LD_CONNECTION_RE": {
+   "flags": "",
+   "re": "\\b(?:https?|http2|net|tls|dgram)\\s*\\.\\s*(?:get|createSocket)\\s*\\(|\\brequire\\s*\\(\\s*[\"'](?:node:)?(?:https?|http2|net|tls|dgram)[\"']\\s*\\)\\s*\\.\\s*(?:request|get|connect|createConnection|createSocket)\\s*\\(|(?<![\\w$])[A-Za-z_$][\\w$]*\\s*\\.\\s*(?:request|connect|createConnection)\\s*\\(|\\bnew\\s+(?:net\\s*\\.\\s*)?(?:Socket|XMLHttpRequest|WebSocket)\\s*\\(|\\bsocket\\s*\\.\\s*(?:socket|create_connection)\\s*\\(|\\bHTTPS?Connection\\s*\\("
+  },
+  "_LD_CONSTRUCTORS": {
+   "set": [
+    "__init__",
+    "constructor"
+   ]
+  },
+  "_LD_COPY_RE": {
+   "flags": "",
+   "re": "\\b(?:copyfile|copy2|copy|copyFileSync|copyFile|cpSync)\\s*\\("
+  },
+  "_LD_CRED_FILE_RE": {
+   "flags": "",
+   "re": "[fFrRbBuU]{0,2}[\"'`](?:[^\"'`\\n]{0,200}[/\\\\])?\\.(?:env(?:\\.[\\w.-]{1,30})?|npmrc|pypirc|netrc|git-credentials)[\"'`]"
+  },
+  "_LD_DESTRUCT_ARRAY_RE": {
+   "flags": "",
+   "re": "\\b(?:const|let|var)\\s*\\[([^\\]\\n]{1,200})\\]\\s*=([^;\\n]*)"
+  },
+  "_LD_DESTRUCT_PARAM_RE": {
+   "flags": "",
+   "re": "\\s*(?:async\\s+)?(?:function\\b\\s*[\\w$]*\\s*)?\\(\\s*[{\\[]([^{}\\[\\]\\n]{1,200})[}\\]]"
+  },
+  "_LD_ENV_ALL_RE": {
+   "flags": "",
+   "re": "\\bprocess\\s*\\.\\s*env\\b(?!\\s*(?:\\.|\\[|\\?\\.))|\\bos\\s*\\.\\s*environb?\\b(?!\\s*(?:\\[|\\.\\s*(?:get|setdefault|pop|update)\\s*\\())"
+  },
+  "_LD_ENV_KWARG_RE": {
+   "flags": "",
+   "re": "(?<=[(,])\\s*env\\s*=(?![=>])\\s*"
+  },
+  "_LD_ENV_QUIET_RE": {
+   "flags": "i",
+   "re": "(?:npm_(?:package|lifecycle|config)_(?![\\w]*(?:auth|token|passw|secret))\\w*|npm_node_execpath|npm_execpath|INIT_CWD|NODE_ENV|CI)\\Z"
+  },
+  "_LD_ENV_RE": {
+   "flags": "",
+   "re": "\\bprocess\\s*\\.\\s*env\\s*(?:\\.\\s*([A-Za-z_$][\\w$]*)|\\[\\s*[\"'`]([^\"'`\\n]{1,100})[\"'`]\\s*\\])|\\bos\\s*\\.\\s*environb?\\s*(?:\\[\\s*[rbuRBU]?[\"']([^\"'\\n]{1,100})[\"']\\s*\\]|\\.\\s*get\\s*\\(\\s*[rbuRBU]?[\"']([^\"'\\n]{1,100})[\"'])|\\bos\\s*\\.\\s*getenvb?\\s*\\(\\s*[rbuRBU]?[\"']([^\"'\\n]{1,100})[\"']"
+  },
+  "_LD_ENV_SELECT_RE": {
+   "flags": "",
+   "re": "(?:\\s*\\))?\\s*\\.\\s*filter\\s*\\(|(?:\\s*\\.\\s*(?:items|keys|values)\\s*\\(\\s*\\))?[ \\t]+if\\b"
+  },
+  "_LD_EXCLUDES_RE": {
+   "flags": "",
+   "re": "!|\\bnot\\b"
+  },
+  "_LD_EXEC_RE": {
+   "flags": "",
+   "re": "\\b(?:execSync|execFileSync|spawnSync|exec|execFile|check_output|getoutput|getstatusoutput|popen|run|execa|execaSync|execaCommand|execaCommandSync|create_subprocess_shell|create_subprocess_exec)\\s*(\\()\\s*(?:\\[\\s*)?[rbuRBU]?[\"'`]([^\"'`\\n]{1,300})[\"'`]((?:\\s*,\\s*[rbuRBU]?[\"'`][^\"'`\\n]{0,100}[\"'`]){0,8})"
+  },
+  "_LD_EXEC_SEND_RE": {
+   "flags": "",
+   "re": "\\b(?:execSync|exec|spawnSync|spawn|execFileSync|execFile|system|popen|check_output|check_call|call|run|Popen|getoutput)\\s*\\("
+  },
+  "_LD_EXEC_TAIL": {
+   "value": "\\s*(\\()\\s*(?:\\[\\s*)?[rbuRBU]?[\"'`]([^\"'`\\n]{1,300})[\"'`]((?:\\s*,\\s*[rbuRBU]?[\"'`][^\"'`\\n]{0,100}[\"'`]){0,8})"
+  },
+  "_LD_FIRST_MEMBER_RE": {
+   "flags": "",
+   "re": "\\s*(?:\\?\\.|\\.)\\s*([A-Za-z_$][\\w$]*)(?![\\w$])(?!\\s*\\()|\\s*\\[\\s*[\"'`]([^\"'`\\n]{1,60})[\"'`]\\s*\\]"
+  },
+  "_LD_FOR_DESTRUCT_RE": {
+   "flags": "",
+   "re": "\\bfor\\s*\\(\\s*(?:(?:const|let|var)\\s*)?[\\[{]([^\\]{}\\n]{1,200})[\\]}]\\s+(?:of|in)\\s+([^\\n)]{1,200})|\\bfor\\s+(?:\\(\\s*)?([A-Za-z_]\\w*(?:\\s*,\\s*(?:\\(\\s*)?[A-Za-z_]\\w*(?:\\s*\\))?){1,8})(?:\\s*\\))?\\s+in\\s+([^\\n:]{1,200})"
+  },
+  "_LD_FS_ROOT_RE": {
+   "flags": "",
+   "re": "[fFrRbBuU]{0,2}[\"'`](?:/(?:etc|proc|home|root|Users|var|opt|flag|tmp|usr|srv|mnt|run|sys|dev|boot|data|app|workspace|secrets?)\\b|~[/\\\\]|[A-Za-z]:[\\\\/]|\\$HOME\\b|\\$\\{HOME\\}|%(?:USERPROFILE|APPDATA|LOCALAPPDATA|HOMEPATH|PROGRAMDATA)%)"
+  },
+  "_LD_FS_ROOT_SRC": {
+   "value": "[\"'`](?:/(?:etc|proc|home|root|Users|var|opt|flag|tmp|usr|srv|mnt|run|sys|dev|boot|data|app|workspace|secrets?)\\b|~[/\\\\]|[A-Za-z]:[\\\\/]|\\$HOME\\b|\\$\\{HOME\\}|%(?:USERPROFILE|APPDATA|LOCALAPPDATA|HOMEPATH|PROGRAMDATA)%)"
+  },
+  "_LD_FUNC_RE": {
+   "flags": "",
+   "re": "\\bdef\\s+([A-Za-z_]\\w*)\\s*\\(([^)\\n]{0,300})\\)|\\bfunction\\s*\\*?\\s*([A-Za-z_$][\\w$]*)\\s*\\(([^)\\n]{0,300})\\)|(?<![\\w$])([A-Za-z_$][\\w$]*)\\s*[=:]\\s*(?:async\\s+)?(?:function\\b\\s*\\*?\\s*[\\w$]*\\s*\\(([^)\\n]{0,300})\\)|\\(([^)\\n]{0,300})\\)\\s*=>|([A-Za-z_$][\\w$]*)\\s*=>)|(?<![\\w$.])(?!(?:if|for|while|switch|catch|function|with|return)\\b)(?:async\\s+|static\\s+|get\\s+|set\\s+)*([A-Za-z_$][\\w$]*)\\s*\\(([^)\\n]{0,300})\\)\\s*\\{"
+  },
+  "_LD_FUNC_VALUE_RE": {
+   "flags": "",
+   "re": "\\s*(?:async\\s+)?(?:function\\b|\\([^)\\n]{0,300}\\)\\s*=>|[A-Za-z_$][\\w$]*\\s*=>)|\\s*(?:lambda\\b|class\\b)"
+  },
+  "_LD_HOME_RE": {
+   "flags": "",
+   "re": "\\bhomedir\\s*\\(|\\bexpanduser\\s*\\(|\\bPath\\s*\\.\\s*home\\s*\\(|\\bgetcwd\\s*\\(|\\bprocess\\s*\\.\\s*cwd\\s*\\(|\\bPath\\s*\\.\\s*cwd\\s*\\(|\\bprocess\\s*\\.\\s*env\\s*(?:\\.\\s*|\\[\\s*[\"'`])(?:HOME|USERPROFILE|INIT_CWD|APPDATA|LOCALAPPDATA)\\b|\\b(?:environ\\s*(?:\\[\\s*|\\.\\s*get\\s*\\(\\s*)|getenv\\s*\\(\\s*)[\"'](?:HOME|USERPROFILE|APPDATA|LOCALAPPDATA)[\"']|\\bexpandvars\\s*\\(\\s*[rRbBuU]{0,2}[\"'](?:%(?:USERPROFILE|APPDATA|LOCALAPPDATA|HOMEPATH)%|\\$\\{?HOME\\b)"
+  },
+  "_LD_HOST_BUILT_RE": {
+   "flags": "",
+   "re": "[fFrRbBuU]{0,2}([\"'`])(?:https?|wss?)://[^\"'`/\\s?#]{0,200}?(?:\\1\\s*\\+\\s*([^\\n+;,)]{1,200})|\\$\\{([^}\\n]{1,200})\\}|\\{([^}\\n]{1,200})\\})"
+  },
+  "_LD_IDENTITY_RE": {
+   "flags": "",
+   "re": "(?:\\bos\\s*\\.\\s*|\\brequire\\(\\s*[\"'](?:node:)?os[\"']\\s*\\)\\s*\\.\\s*)(hostname|userInfo|homedir|networkInterfaces)\\b(\\s*\\()?|\\b(?:socket\\s*\\.\\s*(?:gethostname|getfqdn)|platform\\s*\\.\\s*node|getpass\\s*\\.\\s*getuser|os\\s*\\.\\s*getlogin|os\\s*\\.\\s*uname|platform\\s*\\.\\s*uname)\\b(\\s*\\()?"
+  },
+  "_LD_IMPORT_JS_RE": {
+   "flags": "",
+   "re": "\\b(?:(?:const|let|var)\\s*\\{([^{}\\n]{1,300})\\}\\s*=\\s*require\\(\\s*|import\\s*\\{([^{}\\n]{1,300})\\}\\s*from\\s*)[\"'](?:node:)?os[\"']"
+  },
+  "_LD_IMPORT_NAME_RE": {
+   "flags": "",
+   "re": "\\s*([A-Za-z_$][\\w$]*)(?:\\s*(?::|\\bas\\b)\\s*([A-Za-z_$][\\w$]*))?\\s*\\Z"
+  },
+  "_LD_IMPORT_PY_RE": {
+   "flags": "",
+   "re": "\\bfrom\\s+(os|socket|getpass|platform)\\s+import\\s+\\(?([^\\n)]{1,300})"
+  },
+  "_LD_KEY_RE": {
+   "flags": "",
+   "re": "\\s*(?:[\"']([^\"'\\n]{1,60})[\"']|([A-Za-z_$][\\w$]*))\\s*:(?!:)"
+  },
+  "_LD_KWARG_RE": {
+   "flags": "",
+   "re": "\\s*([A-Za-z_]\\w*)\\s*=(?!=)"
+  },
+  "_LD_LONG": {
+   "value": 262144
+  },
+  "_LD_LOOKUP_SEND_RE": {
+   "flags": "",
+   "re": "\\b(?:dns\\s*\\.\\s*(?:lookup|resolve\\w*)|gethostbyname|getaddrinfo)\\s*\\("
+  },
+  "_LD_MAX": {
+   "value": 200
+  },
+  "_LD_MAX_CALLS": {
+   "value": 10000
+  },
+  "_LD_MEMBER_ASSIGN_RE": {
+   "flags": "",
+   "re": "(?<![\\w$.])([A-Za-z_$][\\w$]*)((?:\\s*\\.\\s*[A-Za-z_$][\\w$]*|\\s*\\[[^\\]\\n]{1,200}\\]){1,8})[ \\t]*\\+?=(?![=>])"
+  },
+  "_LD_MEMBER_RE": {
+   "flags": "",
+   "re": "\\.\\s*([A-Za-z_$][\\w$]*)|\\[\\s*[\"'`]([^\"'`\\n]{1,60})[\"'`]\\s*\\]"
+  },
+  "_LD_MEMBER_READ_RE": {
+   "flags": "",
+   "re": "\\s*(?:\\??\\.\\s*[A-Za-z_$][\\w$]*(?![\\w$])(?!\\s*\\()|\\[)"
+  },
+  "_LD_MEMO": {
+   "list": [
+    {
+     "value": null
+    },
+    {
+     "value": null
+    }
+   ]
+  },
+  "_LD_MERGE_RE": {
+   "flags": "",
+   "re": "\\bObject\\s*\\.\\s*assign\\s*\\(\\s*([A-Za-z_$][\\w$]*)\\s*,"
+  },
+  "_LD_METADATA_NEEDLES": {
+   "list": [
+    {
+     "value": "169.254"
+    },
+    {
+     "value": "metadata"
+    },
+    {
+     "value": "Metadata"
+    },
+    {
+     "value": "100.100.100.200"
+    },
+    {
+     "value": "fd00:ec2"
+    }
+   ]
+  },
+  "_LD_METADATA_RE": {
+   "flags": "",
+   "re": "169\\.254\\.169\\.254|metadata\\.google\\.internal|100\\.100\\.100\\.200|\\bfd00:ec2::254|/computeMetadata/v1|Metadata-Flavor|/latest/meta-data|/metadata/instance|/metadata/identity/oauth2"
+  },
+  "_LD_METHOD_CALL_RE": {
+   "flags": "",
+   "re": "\\s*(?:\\?\\.|\\.)\\s*([A-Za-z_$][\\w$]*)\\s*\\("
+  },
+  "_LD_METHOD_IN_RE": {
+   "flags": "",
+   "re": "[{,]\\s*(?:(?:async|get|set|static)\\s+)*\\*?\\s*(?:[\"'][^\"'\\n]{1,200}[\"']|(?!(?:if|for|while|switch|catch|function|with|return)(?![\\w$]))[A-Za-z_$][\\w$]*|\\[[^\\]\\n]{1,200}\\])\\s*\\([^)\\n]{0,300}\\)\\s*\\{"
+  },
+  "_LD_METHOD_RE": {
+   "flags": "",
+   "re": "\\s*(?:(?:async|get|set|static)\\s+)*\\*?\\s*(?:[\"'][^\"'\\n]{1,200}[\"']|(?!(?:if|for|while|switch|catch|function|with|return)(?![\\w$]))[A-Za-z_$][\\w$]*|\\[[^\\]\\n]{1,200}\\])\\s*\\([^)\\n]{0,300}\\)\\s*\\{"
+  },
+  "_LD_MODULE_NAMES": {
+   "map": {
+    "getpass": {
+     "map": {
+      "getuser": {
+       "value": "identity"
+      }
+     }
+    },
+    "os": {
+     "map": {
+      "getlogin": {
+       "value": "identity"
+      },
+      "homedir": {
+       "value": "report"
+      },
+      "hostname": {
+       "value": "identity"
+      },
+      "networkInterfaces": {
+       "value": "report"
+      },
+      "uname": {
+       "value": "identity"
+      },
+      "userInfo": {
+       "value": "identity"
+      }
+     }
+    },
+    "platform": {
+     "map": {
+      "node": {
+       "value": "identity"
+      },
+      "uname": {
+       "value": "identity"
+      }
+     }
+    },
+    "socket": {
+     "map": {
+      "getfqdn": {
+       "value": "identity"
+      },
+      "gethostname": {
+       "value": "identity"
+      }
+     }
+    }
+   }
+  },
+  "_LD_NAME_TOKEN_RE": {
+   "flags": "",
+   "re": "(?:(?<=\\.\\.\\.)|(?<![\\w$.]))[A-Za-z_$][\\w$]*"
+  },
+  "_LD_NEAR": {
+   "value": 20000
+  },
+  "_LD_NEEDLES": {
+   "list": [
+    {
+     "value": "env"
+    },
+    {
+     "value": "hostname"
+    },
+    {
+     "value": "userInfo"
+    },
+    {
+     "value": "homedir"
+    },
+    {
+     "value": "networkInterfaces"
+    },
+    {
+     "value": "getuser"
+    },
+    {
+     "value": "getlogin"
+    },
+    {
+     "value": "uname"
+    },
+    {
+     "value": "exec"
+    },
+    {
+     "value": "ipify"
+    },
+    {
+     "value": "ip-api"
+    },
+    {
+     "value": "ipinfo"
+    },
+    {
+     "value": "ifconfig.me"
+    },
+    {
+     "value": "icanhazip"
+    },
+    {
+     "value": "checkip"
+    },
+    {
+     "value": "ipapi"
+    },
+    {
+     "value": "ident.me"
+    },
+    {
+     "value": "myip"
+    },
+    {
+     "value": "wtfismyip"
+    },
+    {
+     "value": "gethostname"
+    },
+    {
+     "value": "getfqdn"
+    },
+    {
+     "value": ".env"
+    },
+    {
+     "value": "npmrc"
+    },
+    {
+     "value": "pypirc"
+    },
+    {
+     "value": "netrc"
+    },
+    {
+     "value": "git-credentials"
+    },
+    {
+     "value": "check_output"
+    },
+    {
+     "value": "getoutput"
+    },
+    {
+     "value": "popen"
+    },
+    {
+     "value": "run"
+    },
+    {
+     "value": "read"
+    },
+    {
+     "value": "open"
+    },
+    {
+     "value": "listdir"
+    },
+    {
+     "value": "scandir"
+    },
+    {
+     "value": "walk"
+    },
+    {
+     "value": "glob"
+    },
+    {
+     "value": "169.254"
+    },
+    {
+     "value": "metadata"
+    },
+    {
+     "value": "Metadata"
+    },
+    {
+     "value": "100.100.100.200"
+    },
+    {
+     "value": "fd00:ec2"
+    },
+    {
+     "value": "platform"
+    },
+    {
+     "value": "create_subprocess"
+    }
+   ]
+  },
+  "_LD_NET_PROGRAM_RE": {
+   "flags": "",
+   "re": "(?:[\"'`]|[;&|]\\s*|\\$\\(\\s*)(?:[\\w./-]*/)?(?:curl|wget|nc|ncat|netcat|nslookup|dig|ping|Invoke-WebRequest|iwr|Invoke-RestMethod|irm)\\b"
+  },
+  "_LD_NOT_IN_ADDRESS": {
+   "set": [
+    "address",
+    "credentials",
+    "environment"
+   ]
+  },
+  "_LD_NOT_NAMES": {
+   "set": [
+    "False",
+    "Infinity",
+    "NaN",
+    "None",
+    "True",
+    "and",
+    "arguments",
+    "as",
+    "assert",
+    "async",
+    "await",
+    "break",
+    "case",
+    "catch",
+    "class",
+    "const",
+    "continue",
+    "debugger",
+    "def",
+    "default",
+    "del",
+    "delete",
+    "do",
+    "elif",
+    "else",
+    "enum",
+    "except",
+    "export",
+    "extends",
+    "false",
+    "finally",
+    "for",
+    "from",
+    "function",
+    "global",
+    "if",
+    "import",
+    "in",
+    "instanceof",
+    "is",
+    "lambda",
+    "let",
+    "new",
+    "nonlocal",
+    "not",
+    "null",
+    "of",
+    "or",
+    "pass",
+    "raise",
+    "return",
+    "static",
+    "switch",
+    "throw",
+    "true",
+    "try",
+    "typeof",
+    "undefined",
+    "var",
+    "void",
+    "while",
+    "with",
+    "yield"
+   ]
+  },
+  "_LD_NOT_READS": {
+   "set": [
+    "Popen",
+    "abspath",
+    "add",
+    "append",
+    "appendFileSync",
+    "basename",
+    "call",
+    "chdir",
+    "check_call",
+    "check_output",
+    "chmod",
+    "chmodSync",
+    "copy",
+    "copyFileSync",
+    "copyfile",
+    "debug",
+    "dirname",
+    "endsWith",
+    "error",
+    "exec",
+    "execFile",
+    "execFileSync",
+    "execSync",
+    "exists",
+    "existsSync",
+    "expanduser",
+    "extend",
+    "fork",
+    "import",
+    "includes",
+    "indexOf",
+    "info",
+    "isabs",
+    "isdir",
+    "isfile",
+    "join",
+    "log",
+    "makedirs",
+    "match",
+    "mkdir",
+    "mkdirSync",
+    "move",
+    "normalize",
+    "popen",
+    "print",
+    "push",
+    "realpath",
+    "relative",
+    "remove",
+    "rename",
+    "renameSync",
+    "replace",
+    "require",
+    "resolve",
+    "rmSync",
+    "rmdirSync",
+    "rmtree",
+    "run",
+    "set",
+    "spawn",
+    "spawnSync",
+    "split",
+    "startsWith",
+    "symlinkSync",
+    "system",
+    "test",
+    "unlink",
+    "unlinkSync",
+    "warn",
+    "writeFile",
+    "writeFileSync"
+   ]
+  },
+  "_LD_NOT_RECEIVERS": {
+   "set": [
+    "console",
+    "document",
+    "exports",
+    "module",
+    "navigator",
+    "os",
+    "process",
+    "sys"
+   ]
+  },
+  "_LD_OPTIONS_SEND_RE": {
+   "flags": "",
+   "re": "\\baxios\\s*\\("
+  },
+  "_LD_OPTION_KEYS": {
+   "set": [
+    "agent",
+    "allow_redirects",
+    "auth",
+    "baseURL",
+    "base_url",
+    "ca",
+    "cache",
+    "cert",
+    "credentials",
+    "decompress",
+    "dispatcher",
+    "encoding",
+    "family",
+    "followRedirect",
+    "follow_redirects",
+    "headers",
+    "hooks",
+    "host",
+    "hostname",
+    "http2",
+    "httpAgent",
+    "https",
+    "httpsAgent",
+    "integrity",
+    "keepalive",
+    "key",
+    "localAddress",
+    "lookup",
+    "maxRedirects",
+    "method",
+    "mode",
+    "path",
+    "port",
+    "protocol",
+    "proxies",
+    "proxy",
+    "redirect",
+    "referrerPolicy",
+    "rejectUnauthorized",
+    "responseType",
+    "retry",
+    "signal",
+    "stream",
+    "throwHttpErrors",
+    "timeout",
+    "timeout_ms",
+    "trust_env",
+    "url",
+    "validateStatus",
+    "verify"
+   ]
+  },
+  "_LD_OS_NAMED": {
+   "set": [
+    "homedir",
+    "hostname",
+    "networkInterfaces",
+    "userInfo"
+   ]
+  },
+  "_LD_OWN_CALL_HEAD": {
+   "value": "(?<![\\w$.])(?:(?:this|self|cls)\\s*\\.\\s*)?("
+  },
+  "_LD_OWN_FOLDER_RE": {
+   "flags": "",
+   "re": "__dirname|__filename|import\\s*\\.\\s*meta|__file__"
+  },
+  "_LD_PARAM_RE": {
+   "flags": "",
+   "re": "\\s*(?:\\.\\.\\.|\\*{1,2})?\\s*([A-Za-z_$][\\w$]*)"
+  },
+  "_LD_PATH_EXPR_RE": {
+   "flags": "",
+   "re": "\\s*(?:(?:path|os\\s*\\.\\s*path|posixpath|ntpath)\\s*\\.\\s*(?:join|resolve|normalize)\\s*\\(|Path\\s*\\(|[fFrRbBuU]{0,2}[\"'`]|[A-Za-z_$][\\w$]*(?:\\s*\\.\\s*[A-Za-z_$][\\w$]*){0,4}\\s*(?:\\(\\s*(?:[rRbBuU]{0,2}[\"'][^\"'\\n]{0,200}[\"'])?\\s*\\))?\\s*(?:[+/]|\\Z))"
+  },
+  "_LD_PLAIN_LITERAL_RE": {
+   "flags": "",
+   "re": "[fFrRbBuU]{0,2}([\"'`])([^\"'`\\n]*)\\1\\Z"
+  },
+  "_LD_PROCESS_KEYS": {
+   "set": [
+    "bufsize",
+    "capture_output",
+    "check",
+    "close_fds",
+    "creationflags",
+    "cwd",
+    "env",
+    "executable",
+    "group",
+    "pass_fds",
+    "preexec_fn",
+    "shell",
+    "start_new_session",
+    "startupinfo",
+    "stderr",
+    "stdin",
+    "stdout",
+    "text",
+    "umask",
+    "universal_newlines",
+    "user"
+   ]
+  },
+  "_LD_PROMISIFY_RE": {
+   "flags": "",
+   "re": "\\b(?:const|let|var)\\s+([A-Za-z_$][\\w$]*)\\s*=\\s*(?:[\\w$]+\\s*\\.\\s*)?promisify\\s*\\(\\s*(?:(?:[\\w$]+|require\\s*\\(\\s*[\"'](?:node:)?child_process[\"']\\s*\\))\\s*\\.\\s*)?(?:exec|execFile)\\s*\\)"
+  },
+  "_LD_PUBLIC_IP_RE": {
+   "flags": "",
+   "re": "\\bapi(?:64)?\\.ipify\\.org\\b|\\bip-api\\.com\\b|\\bipinfo\\.io\\b|\\bifconfig\\.me\\b|\\bicanhazip\\.com\\b|\\bcheckip\\.amazonaws\\.com\\b|\\bipapi\\.co\\b|\\bident\\.me\\b|\\bapi\\.myip\\.com\\b|\\bwtfismyip\\.com\\b"
+  },
+  "_LD_READERS": {
+   "set": [
+    "Database",
+    "Path",
+    "connect",
+    "createReadStream",
+    "glob",
+    "iglob",
+    "listdir",
+    "open",
+    "opendir",
+    "opendirSync",
+    "readFile",
+    "readFileSync",
+    "read_bytes",
+    "read_text",
+    "readdir",
+    "readdirSync",
+    "readlines",
+    "scandir",
+    "walk"
+   ]
+  },
+  "_LD_READS_RE": {
+   "flags": "",
+   "re": "\\b(?:Database|Path|connect|createReadStream|glob|iglob|listdir|open|opendir|opendirSync|readFile|readFileSync|read_bytes|read_text|readdir|readdirSync|readlines|scandir|walk)\\s*\\("
+  },
+  "_LD_REASONS": {
+   "map": {
+    "address": {
+     "value": "sends the machine's public IP address over the network"
+    },
+    "credentials": {
+     "value": "sends what the cloud's instance metadata service gives it (the machine's credentials) over the network"
+    },
+    "environment": {
+     "value": "sends environment variables over the network"
+    },
+    "file": {
+     "value": "reads files outside the package and sends them over the network"
+    },
+    "identity": {
+     "value": "sends the machine's user or host name over the network"
+    },
+    "report": {
+     "value": "sends what local commands report about the machine over the network"
+    }
+   }
+  },
+  "_LD_RECEIVERS": {
+   "set": [
+    "cls",
+    "global",
+    "globalThis",
+    "self",
+    "super",
+    "this",
+    "window"
+   ]
+  },
+  "_LD_REQUEST_SEND_RE": {
+   "flags": "",
+   "re": "\\b(?:requests|httpx|session|client)\\s*\\.\\s*request\\s*\\("
+  },
+  "_LD_SEAL_RE": {
+   "flags": "",
+   "re": "\\b(?:readFileSync|readFile|readdirSync|readdir|createReadStream|opendirSync|opendir|listdir|scandir|walk|glob|iglob|open|existsSync|exists|statSync|lstatSync|isfile|isdir)\\s*\\("
+  },
+  "_LD_SEND_NEEDLES": {
+   "list": [
+    {
+     "value": "request"
+    },
+    {
+     "value": "fetch"
+    },
+    {
+     "value": "post"
+    },
+    {
+     "value": "put"
+    },
+    {
+     "value": "patch"
+    },
+    {
+     "value": "send"
+    },
+    {
+     "value": "write"
+    },
+    {
+     "value": "end("
+    },
+    {
+     "value": "urlopen"
+    },
+    {
+     "value": "Request"
+    },
+    {
+     "value": "get"
+    },
+    {
+     "value": "dns"
+    },
+    {
+     "value": "gethostbyname"
+    },
+    {
+     "value": "getaddrinfo"
+    },
+    {
+     "value": "connect"
+    },
+    {
+     "value": "Socket"
+    },
+    {
+     "value": "socket"
+    },
+    {
+     "value": "curl"
+    },
+    {
+     "value": "wget"
+    },
+    {
+     "value": "nc "
+    },
+    {
+     "value": "nslookup"
+    },
+    {
+     "value": "dig"
+    },
+    {
+     "value": "ping"
+    }
+   ]
+  },
+  "_LD_SEND_RE": {
+   "flags": "",
+   "re": "\\b(?:axios|got|needle|superagent|ky|requests|httpx|session|client|aiohttp)\\s*\\.\\s*(?:post|put|patch)\\s*\\(|\\bsendBeacon\\s*\\(|\\bRequest\\s*\\(|\\burlopen\\s*\\(|(?<![\\w$.])fetch\\s*\\(|\\b(?:globalThis|window|self|global)\\s*\\.\\s*fetch\\s*\\("
+  },
+  "_LD_STATEMENT_SPAN": {
+   "value": 2000
+  },
+  "_LD_TEST_AFTER_RE": {
+   "flags": "",
+   "re": "\\s*(?:[=!]==?|=(?![=>])|&&|\\?(?![.?])|\\b(?:and|is|in|else|instanceof)\\b)"
+  },
+  "_LD_TEST_BEFORE": {
+   "list": [
+    {
+     "value": "typeof"
+    },
+    {
+     "value": "not"
+    }
+   ]
+  },
+  "_LD_THREAD_RE": {
+   "flags": "",
+   "re": "\\b(?:Thread|Process)\\s*\\([^()\\n]{0,200}?\\btarget\\s*=\\s*(?:self\\s*\\.\\s*)?([A-Za-z_]\\w*)[^()\\n]{0,200}?\\bargs\\s*=\\s*[(\\[]"
+  },
+  "_LD_TUPLE_ASSIGN_RE": {
+   "flags": "",
+   "re": "(?<![^\\n])[ \\t]*(?:\\([ \\t]*)?([A-Za-z_]\\w*(?:[ \\t]*,[ \\t]*[A-Za-z_]\\w*){1,8})(?:[ \\t]*,)?(?:[ \\t]*\\))?[ \\t]*=(?![=>])([^\\n]*)"
+  },
+  "_LD_WHOLE_ENV": {
+   "value": "the whole environment"
+  },
+  "_LD_WRITE_TAIL": {
+   "value": "\\s*\\.\\s*(?:write|end|send|sendall|sendto|request)\\s*\\("
+  },
+  "_LD_WRITE_TAIL_RE": {
+   "flags": "",
+   "re": "\\s*\\.\\s*(?:write|end|send|sendall|sendto|request)\\s*\\("
+  },
   "_LETTER_RUN_RE": {
    "flags": "",
    "re": "[A-Za-z]{3}"
@@ -6973,20 +11603,6 @@
   "_LEX_NEXT": {
    "items": [
     [
-     "js",
-     {
-      "flags": "",
-      "re": "[/'\\\"`]"
-     }
-    ],
-    [
-     "py",
-     {
-      "flags": "",
-      "re": "[#'\\\"]"
-     }
-    ],
-    [
      "sql",
      {
       "flags": "",
@@ -7004,76 +11620,6 @@
   },
   "_LEX_STR": {
    "items": [
-    [
-     [
-      "js",
-      "'"
-     ],
-     {
-      "flags": "s",
-      "re": "'(?:[^'\\\\\\n]|\\\\.)*'?"
-     }
-    ],
-    [
-     [
-      "js",
-      "\""
-     ],
-     {
-      "flags": "s",
-      "re": "\"(?:[^\"\\\\\\n]|\\\\.)*\"?"
-     }
-    ],
-    [
-     [
-      "js",
-      "`"
-     ],
-     {
-      "flags": "s",
-      "re": "`(?:[^`\\\\]|\\\\.)*`?"
-     }
-    ],
-    [
-     [
-      "py",
-      "'"
-     ],
-     {
-      "flags": "s",
-      "re": "'(?:[^'\\\\\\n]|\\\\.)*'?"
-     }
-    ],
-    [
-     [
-      "py",
-      "'''"
-     ],
-     {
-      "flags": "s",
-      "re": "'''(?:[^'\\\\]|\\\\.|'(?!''))*(?:'''|\\Z)"
-     }
-    ],
-    [
-     [
-      "py",
-      "\""
-     ],
-     {
-      "flags": "s",
-      "re": "\"(?:[^\"\\\\\\n]|\\\\.)*\"?"
-     }
-    ],
-    [
-     [
-      "py",
-      "\"\"\""
-     ],
-     {
-      "flags": "s",
-      "re": "\"\"\"(?:[^\"\\\\]|\\\\.|\"(?!\"\"))*(?:\"\"\"|\\Z)"
-     }
-    ],
     [
      [
       "sql",
@@ -7132,6 +11678,34 @@
   "_LOCAL_REQUIRE_RE": {
    "flags": "",
    "re": "require\\(\\s*\\\\?[\"'](\\.{1,2}/[^\"'\\\\]+)\\\\?[\"']\\s*\\)"
+  },
+  "_LONGLINE_RULE": {
+   "map": {
+    "fix": {
+     "value": "Break the line up for readability."
+    },
+    "id": {
+     "value": "Q-LONGLINE"
+    },
+    "msg": {
+     "value": "Line exceeds 160 characters."
+    },
+    "name": {
+     "value": "Line too long"
+    },
+    "ref": {
+     "value": "Maintainability"
+    },
+    "sev": {
+     "value": "MINOR"
+    },
+    "type": {
+     "value": "SMELL"
+    },
+    "why": {
+     "value": "Very long lines hurt readability and reviews."
+    }
+   }
   },
   "_LOOKALIKES": {
    "map": {
@@ -7299,6 +11873,130 @@
     },
     "\u0585": {
      "value": "o"
+    }
+   }
+  },
+  "_LOOKALIKE_INVISIBLE": {
+   "value": "an invisible {cp}"
+  },
+  "_LOOKALIKE_KEYWORDS_JS": {
+   "set": [
+    "await",
+    "break",
+    "case",
+    "catch",
+    "class",
+    "const",
+    "continue",
+    "debugger",
+    "default",
+    "delete",
+    "do",
+    "else",
+    "enum",
+    "export",
+    "extends",
+    "false",
+    "finally",
+    "for",
+    "function",
+    "if",
+    "implements",
+    "in",
+    "instanceof",
+    "interface",
+    "let",
+    "new",
+    "null",
+    "package",
+    "private",
+    "protected",
+    "public",
+    "return",
+    "static",
+    "super",
+    "switch",
+    "this",
+    "throw",
+    "true",
+    "try",
+    "typeof",
+    "var",
+    "void",
+    "while",
+    "with",
+    "yield"
+   ]
+  },
+  "_LOOKALIKE_KEYWORDS_PY": {
+   "set": [
+    "False",
+    "None",
+    "True",
+    "and",
+    "as",
+    "assert",
+    "async",
+    "await",
+    "break",
+    "class",
+    "continue",
+    "def",
+    "del",
+    "elif",
+    "else",
+    "except",
+    "finally",
+    "for",
+    "from",
+    "global",
+    "if",
+    "in",
+    "is",
+    "lambda",
+    "nonlocal",
+    "not",
+    "or",
+    "pass",
+    "raise",
+    "return",
+    "try",
+    "while",
+    "with",
+    "yield"
+   ]
+  },
+  "_LOOKALIKE_LETTER": {
+   "value": "{cp} for {reads!r}"
+  },
+  "_LOOKALIKE_OTHER": {
+   "value": ", another name in this file,"
+  },
+  "_LOOKALIKE_RULE": {
+   "map": {
+    "fix": {
+     "value": "Rename it with the letters it appears to have, and find out why it was written this way."
+    },
+    "id": {
+     "value": "SC-HOMOGLYPH"
+    },
+    "msg": {
+     "value": "{name!r} reads as {skeleton!r}{where} but is spelled with {detail}."
+    },
+    "name": {
+     "value": "Look-alike identifier"
+    },
+    "ref": {
+     "value": "CWE-1007 \u00b7 CVE-2021-42694"
+    },
+    "sev": {
+     "value": "CRITICAL"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "A name written with letters from another alphabet that look like Latin ones, or with an invisible character inside it, is not the name a reviewer reads: `const eval = eval` with a Cyrillic e (U+0435) makes a second eval that runs where no one sees eval called, and an isAdmin with a Cyrillic i is not isAdmin (CVE-2021-42694, the homoglyph half of Trojan Source)."
     }
    }
   },
@@ -7552,6 +12250,34 @@
   "_NPM_TOKEN_READ_SRC": {
    "value": "\\bnpm\\s+config\\s+get\\s+[^\\n\"'`;|&]{0,200}?_auth|\\.npmrc\\b[\\s\\S]{0,400}?_authToken|_authToken[\\s\\S]{0,400}?\\.npmrc\\b"
   },
+  "_OBF_IDENT_RULE": {
+   "map": {
+    "fix": {
+     "value": "Diff against the package's published repository; consider removing the dependency."
+    },
+    "id": {
+     "value": "SC-OBF-IDENT"
+    },
+    "msg": {
+     "value": "{n} '_0x\u2026' identifiers \u2014 javascript-obfuscator signature."
+    },
+    "name": {
+     "value": "Obfuscated identifier pattern"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "This naming pattern is produced by obfuscation tools; in a dependency it is a classic indicator of a compromised or malicious package."
+    }
+   }
+  },
   "_OFFSCREEN_CODE_RE": {
    "flags": "",
    "re": "[;,(){}\\[\\]]|(?:const|let|var|function|async|class|def)\\s+[A-Za-z_$(]|[A-Za-z_$][\\w$]*\\s*(?:[.(\\[=;]|[\"'`])|(?:import|from|exec|eval|require)\\b"
@@ -7575,6 +12301,37 @@
   },
   "_OFFSCREEN_READ": {
    "value": 4000
+  },
+  "_OFFSCREEN_RULE": {
+   "map": {
+    "fix": {
+     "value": "Read the whole line (turn on word wrap) and review what it does."
+    },
+    "id": {
+     "value": "SC-OFFSCREEN-CODE"
+    },
+    "msg": {
+     "value": "Code after {blanks} blanks on this line, where editors and review don't show it: {preview!r}."
+    },
+    "name": {
+     "value": "Code hidden off-screen"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "sev": {
+     "value": "MAJOR"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "A long run of blanks pushes code past the right edge of editors, diffs and code review, while the interpreter runs it all the same: @react-native-aria/radio 0.2.14 hid its loader 731 columns right. No formatter puts code there."
+    }
+   }
+  },
+  "_OFFSCREEN_RUNS_WHY": {
+   "value": "A long run of blanks pushes code past the right edge of editors, diffs and code review, while the interpreter runs it all the same: @react-native-aria/radio 0.2.14 hid its loader 731 columns right. No formatter puts code there. This code loads or runs more code."
   },
   "_OFFSCREEN_SRC": {
    "value": "(?<![ \\t])[ \\t]{150,}(?=\\S)"
@@ -7858,47 +12615,13 @@
     }
    ]
   },
-  "_PUBLIC_IP_LOOKUP_NEEDLES": {
-   "list": [
-    {
-     "value": "ipify.org"
-    },
-    {
-     "value": "ip-api.com"
-    },
-    {
-     "value": "ipinfo.io"
-    },
-    {
-     "value": "ifconfig.me"
-    },
-    {
-     "value": "icanhazip.com"
-    },
-    {
-     "value": "checkip.amazonaws.com"
-    },
-    {
-     "value": "ipapi.co"
-    },
-    {
-     "value": "ident.me"
-    },
-    {
-     "value": "api.myip.com"
-    },
-    {
-     "value": "wtfismyip.com"
-    }
-   ]
-  },
-  "_PUBLIC_IP_LOOKUP_RE": {
-   "flags": "",
-   "re": "\\bapi(?:64)?\\.ipify\\.org\\b|\\bip-api\\.com\\b|\\bipinfo\\.io\\b|\\bifconfig\\.me\\b|\\bicanhazip\\.com\\b|\\bcheckip\\.amazonaws\\.com\\b|\\bipapi\\.co\\b|\\bident\\.me\\b|\\bapi\\.myip\\.com\\b|\\bwtfismyip\\.com\\b"
-  },
   "_PUBLIC_IP_URL_RE": {
    "flags": "",
    "re": "\\b(?:https?|wss?|tcp)://(?!(?:10|127|0)\\.)(?!192\\.168\\.)(?!172\\.(?:1[6-9]|2\\d|3[01])\\.)(?!169\\.254\\.)(?:(?:25[0-5]|2[0-4]\\d|1?\\d?\\d)\\.){3}(?:25[0-5]|2[0-4]\\d|1?\\d?\\d)(?![\\d.])"
+  },
+  "_PUBLIC_KEY_FILE_RE": {
+   "flags": "i",
+   "re": "\\.pub\\b|known_hosts"
   },
   "_PUBLIC_RESOLVERS": {
    "set": [
@@ -7919,6 +12642,62 @@
   "_PUBLISH_CMD_SRC": {
    "value": "\\b(?:exec|execSync|execa|execaSync|execFile|execFileSync|spawn|spawnSync|system|popen|Popen|run|call|check_call|check_output|getoutput)\\s*\\(\\s*(?:\\[\\s*)?[\"'`](?:[^\"'`\\n]{0,80}?(?:&&|;|\\|\\|)\\s*)?(?:npx\\s+)?(?:npm|pnpm|yarn|bun)(?:\\.cmd)?(?:[\"'`]\\s*,\\s*(?:\\[\\s*)?[\"'`]|\\s+)publish\\b"
   },
+  "_PX_ARGS": {
+   "value": 4000
+  },
+  "_PX_BINARY_RE": {
+   "flags": "",
+   "re": "\\s*([A-Za-z_$][\\w$]*)(?:\\s*(===|!==|==|!=|<=|>=|<<|>>>|>>|&&|\\|\\||\\*\\*|[-+*/%<>&|^])\\s*|\\s+(instanceof|in)\\s+)([A-Za-z_$][\\w$]*)\\s*"
+  },
+  "_PX_CALL_RE": {
+   "flags": "",
+   "re": "\\s*([A-Za-z_$][\\w$]*)\\s*\\((?P<a>[^()]*)\\)\\s*"
+  },
+  "_PX_DEPTH": {
+   "value": 32
+  },
+  "_PX_END_RE": {
+   "flags": "",
+   "re": "\\s*([,}])"
+  },
+  "_PX_FUNCTION_RE": {
+   "flags": "",
+   "re": "function\\s*(?:[A-Za-z_$][\\w$]*\\s*)?\\((?P<params>[^()]{0,400})\\)\\s*\\{(?:\\s*(?:var|const|let)\\s+[A-Za-z_$][\\w$]*\\s*=\\s*[A-Za-z_$][\\w$]*\\s*;)*\\s*return\\s+(?P<e>[^;{}]{1,400}?)\\s*;?\\s*\\}"
+  },
+  "_PX_KEY_RE": {
+   "flags": "",
+   "re": "\\s*(?:(?P<k>[A-Za-z_$][\\w$]*)|'(?P<k2>[^'\\\\\\n]*)'|\"(?P<k3>[^\"\\\\\\n]*)\")\\s*:\\s*"
+  },
+  "_PX_MAX_ENTRIES": {
+   "value": 256
+  },
+  "_PX_MAX_USES": {
+   "value": 1000000
+  },
+  "_PX_OBJECT_RE": {
+   "flags": "",
+   "re": "(?<![\\w$.])([A-Za-z_$][\\w$]*)\\s*=\\s*\\{"
+  },
+  "_PX_OPEN_RE": {
+   "flags": "",
+   "re": "\\s*\\("
+  },
+  "_PX_REF_CALL_RE": {
+   "flags": "",
+   "re": "\\s*(?P<o>[A-Za-z_$][\\w$]*)\\s*\\[\\s*(?:'(?P<k>[^'\\\\\\n]*)'|\"(?P<k2>[^\"\\\\\\n]*)\")\\s*\\]\\s*\\((?P<a>[^()]*)\\)\\s*"
+  },
+  "_PX_REF_RE": {
+   "flags": "",
+   "re": "(?P<o>[A-Za-z_$][\\w$]*)\\s*\\[\\s*(?:'(?P<k>[^'\\\\\\n]*)'|\"(?P<k2>[^\"\\\\\\n]*)\")\\s*\\]"
+  },
+  "_PX_STRINGS_RE": {
+   "flags": "",
+   "re": "(?:'(?:[^'\\\\\\n]|\\\\[^\\n])*'|\"(?:[^\"\\\\\\n]|\\\\[^\\n])*\")(?:\\s*\\+\\s*(?:'(?:[^'\\\\\\n]|\\\\[^\\n])*'|\"(?:[^\"\\\\\\n]|\\\\[^\\n])*\"))*"
+  },
+  "_PX_USE_RE": {
+   "flags": "",
+   "re": "(?<![\\w$.])([A-Za-z_$][\\w$]*)\\s*\\[\\s*(?:'([^'\\\\\\n]*)'|\"([^\"\\\\\\n]*)\")\\s*\\]"
+  },
   "_PYTHON_NAME_RE": {
    "flags": "i",
    "re": "^(?:python(?:\\d+(?:\\.\\d+)?)?|py)(?:\\.exe)?$"
@@ -7926,16 +12705,6 @@
   "_PY_DOC_HEAD_RE": {
    "flags": "",
    "re": "[ \\t]*[rRuUbB]{0,2}\\Z"
-  },
-  "_PY_FSTRING_PREFIXES": {
-   "set": [
-    "f",
-    "fr",
-    "rf",
-    "rt",
-    "t",
-    "tr"
-   ]
   },
   "_PY_JOINS": {
    "value": "([{,=+-*/%&|^<>~@\\.\"'"
@@ -7952,12 +12721,20 @@
    "flags": "",
    "re": "\\[\\s*(?:\\w*sys\\.executable|[\"']python[\\d.w]*(?:\\.exe)?[\"'])\\s*,|\\bstart\\s+pythonw?\\b|\\b(?:system|popen|getoutput|run|call|Popen)\\s*\\(\\s*f?[\"']python[\\d.w]*(?:\\.exe)?\\s"
   },
+  "_QUOTE_CHAR_RE": {
+   "flags": "",
+   "re": "[\"'`]"
+  },
   "_RAW_CONNECT_RE": {
    "flags": "",
    "re": "\\b(?:socket\\.create_connection|net\\.connect|net\\.createConnection|connect(?:_ex)?)\\s*\\(|\\bnew\\s+net\\.Socket\\b"
   },
   "_RAW_CONNECT_SPAN": {
    "value": 600
+  },
+  "_RAW_IP_URL_RE": {
+   "flags": "i",
+   "re": "https?://(?:\\d{1,3}\\.){3}\\d{1,3}\\b"
   },
   "_READ_CALLBACK_RE": {
    "flags": "",
@@ -8055,6 +12832,10 @@
   "_RULE_ID_SRC": {
    "value": "(?:S|T|SC|X|SQL|B|Q)-[A-Z0-9]+(?:-[A-Z0-9]+)*"
   },
+  "_RUNTIME_SCRIPT_RE": {
+   "flags": "i",
+   "re": "\\.(?:[cm]?[jt]s|[jt]sx)$"
+  },
   "_SAME_SITE_RE": {
    "flags": "",
    "re": "\\s*[rRuUfF]{0,2}[\"'`](?:/(?![/\\\\\"'`{$])|https?://[^/\"'`?#\\\\\\s{}$]+/)"
@@ -8064,6 +12845,218 @@
   },
   "_SAN_BODY": {
    "value": "(?:[^()]|\\([^()]*\\))*"
+  },
+  "_SA_ACC_A_HEAD": {
+   "value": "function\\s+(?P<g>[A-Za-z_$][\\w$]*)\\s*\\(\\s*(?P<p>[A-Za-z_$][\\w$]*)\\s*,\\s*[A-Za-z_$][\\w$]*\\s*\\)\\s*\\{\\s*(?P=p)\\s*=\\s*(?P=p)\\s*-\\s*(?P<off>[^;{}]{1,300});\\s*(?:var|const|let)\\s+[A-Za-z_$][\\w$]*\\s*=\\s*"
+  },
+  "_SA_ACC_B_HEAD": {
+   "value": "function\\s+(?P<g>[A-Za-z_$][\\w$]*)\\s*\\(\\s*[A-Za-z_$][\\w$]*\\s*,\\s*[A-Za-z_$][\\w$]*\\s*\\)\\s*\\{\\s*(?:var|const|let)\\s+[A-Za-z_$][\\w$]*\\s*=\\s*"
+  },
+  "_SA_ACC_B_TAIL": {
+   "value": "\\s*\\(\\s*\\)\\s*;\\s*return\\s+(?P=g)\\s*=\\s*function\\s*\\(\\s*(?P<p>[A-Za-z_$][\\w$]*)\\s*,\\s*[A-Za-z_$][\\w$]*\\s*\\)\\s*\\{\\s*(?P=p)\\s*=\\s*(?P=p)\\s*-\\s*(?P<off>[^;{}]{1,300});"
+  },
+  "_SA_ALIAS_RE": {
+   "flags": "",
+   "re": "(?<![\\w$.])([A-Za-z_$][\\w$]*)\\s*=\\s*([A-Za-z_$][\\w$]*)\\s*(?=[,;)\\n}])"
+  },
+  "_SA_ALPHABET_RE": {
+   "flags": "",
+   "re": "['\"]([A-Za-z0-9+/=]{65})['\"]"
+  },
+  "_SA_ARG_UNIT": {
+   "value": "[^()'\"\\n]|'(?:[^'\\\\\\n]|\\\\[^\\n])*'|\"(?:[^\"\\\\\\n]|\\\\[^\\n])*\""
+  },
+  "_SA_ARRAY_FN_RE": {
+   "flags": "",
+   "re": "function\\s+(?P<fn>[A-Za-z_$][\\w$]*)\\s*\\(\\s*\\)\\s*\\{\\s*(?:var|const|let)\\s+(?P<arr>[A-Za-z_$][\\w$]*)\\s*=\\s*\\["
+  },
+  "_SA_BODY": {
+   "value": 3000
+  },
+  "_SA_CALL_RE": {
+   "flags": "",
+   "re": "(?<![\\w$.])([A-Za-z_$][\\w$]*)\\s*\\(((?:[^()'\"\\n]|'(?:[^'\\\\\\n]|\\\\[^\\n])*'|\"(?:[^\"\\\\\\n]|\\\\[^\\n])*\"|\\((?:[^()'\"\\n]|'(?:[^'\\\\\\n]|\\\\[^\\n])*'|\"(?:[^\"\\\\\\n]|\\\\[^\\n])*\")*\\)){1,400})\\)"
+  },
+  "_SA_CALL_TAIL": {
+   "value": "\\s*\\(\\s*\\)"
+  },
+  "_SA_CHECKSUM_RE": {
+   "flags": "",
+   "re": "try\\s*\\{\\s*(?:var|const|let)\\s+(?P<v>[A-Za-z_$][\\w$]*)\\s*=\\s*(?P<e>[^;]{1,6000});\\s*if\\s*\\(\\s*(?P=v)\\s*===\\s*[A-Za-z_$][\\w$]*\\s*\\)\\s*break"
+  },
+  "_SA_DECIMAL_RE": {
+   "flags": "",
+   "re": "[+-]?(?:\\d+\\.?\\d*(?:[eE][+-]?\\d+)?|\\.\\d+(?:[eE][+-]?\\d+)?)"
+  },
+  "_SA_DEC_MAX": {
+   "value": 15
+  },
+  "_SA_DEPTH": {
+   "value": 8
+  },
+  "_SA_ENTRY_RE": {
+   "flags": "",
+   "re": "\\s*(?:(?P<k>[A-Za-z_$][\\w$]*)|'(?P<k2>[^'\\\\\\n]*)'|\"(?P<k3>[^\"\\\\\\n]*)\")\\s*:\\s*(?P<v>-?\\s*(?:0[xX][0-9a-fA-F]+|(?:0|[1-9]\\d*)(?:\\.\\d+)?)|'(?:[^'\\\\\\n]|\\\\[^\\n])*'|\"(?:[^\"\\\\\\n]|\\\\[^\\n])*\")\\s*(?P<end>[,}])"
+  },
+  "_SA_ESCAPES": {
+   "map": {
+    "b": {
+     "value": "\b"
+    },
+    "f": {
+     "value": "\f"
+    },
+    "n": {
+     "value": "\n"
+    },
+    "r": {
+     "value": "\r"
+    },
+    "t": {
+     "value": "\t"
+    },
+    "v": {
+     "value": "\u000b"
+    }
+   }
+  },
+  "_SA_FUNCTION_TAIL_RE": {
+   "flags": "",
+   "re": "function\\s*$"
+  },
+  "_SA_HEX": {
+   "set": [
+    "0",
+    "1",
+    "2",
+    "3",
+    "4",
+    "5",
+    "6",
+    "7",
+    "8",
+    "9",
+    "A",
+    "B",
+    "C",
+    "D",
+    "E",
+    "F",
+    "a",
+    "b",
+    "c",
+    "d",
+    "e",
+    "f"
+   ]
+  },
+  "_SA_HEX_MAX": {
+   "value": 13
+  },
+  "_SA_IDENT": {
+   "value": "[A-Za-z_$][\\w$]*"
+  },
+  "_SA_INVOKE2_HEAD": {
+   "value": "\\}\\s*\\)\\s*\\(\\s*"
+  },
+  "_SA_INVOKE2_TAIL": {
+   "value": "\\s*,\\s*(?P<t>(?:[^;()]|\\([^;()]*\\)){1,200}?)\\)"
+  },
+  "_SA_INVOKE_HEAD": {
+   "value": "\\}\\s*\\(\\s*"
+  },
+  "_SA_INVOKE_TAIL": {
+   "value": "\\s*,\\s*(?P<t>(?:[^;()]|\\([^;()]*\\)){1,200}?)\\)\\s*\\)"
+  },
+  "_SA_JS_SPACE": {
+   "set": [
+    "\t",
+    "\n",
+    "\u000b",
+    "\f",
+    "\r",
+    " ",
+    "\u00a0",
+    "\u1680",
+    "\u2000",
+    "\u2001",
+    "\u2002",
+    "\u2003",
+    "\u2004",
+    "\u2005",
+    "\u2006",
+    "\u2007",
+    "\u2008",
+    "\u2009",
+    "\u200a",
+    "\u2028",
+    "\u2029",
+    "\u202f",
+    "\u205f",
+    "\u3000",
+    "\ufeff"
+   ]
+  },
+  "_SA_LIT_RE": {
+   "flags": "",
+   "re": "'(?:[^'\\\\\\n]|\\\\[^\\n])*'|\"(?:[^\"\\\\\\n]|\\\\[^\\n])*\""
+  },
+  "_SA_LOOP_BACK": {
+   "value": 20000
+  },
+  "_SA_MAX_ARRAYS": {
+   "value": 4
+  },
+  "_SA_MAX_CALLS": {
+   "value": 1000000
+  },
+  "_SA_MAX_CHARS": {
+   "value": 16000000
+  },
+  "_SA_MAX_ITEMS": {
+   "value": 200000
+  },
+  "_SA_OBJECT_RE": {
+   "flags": "",
+   "re": "(?<![\\w$.])([A-Za-z_$][\\w$]*)\\s*=\\s*\\{"
+  },
+  "_SA_OCT_RE": {
+   "flags": "",
+   "re": "[0-3][0-7]{0,2}|[4-7][0-7]?"
+  },
+  "_SA_OFF": {
+   "value": "(?P<off>[^;{}]{1,300})"
+  },
+  "_SA_PARAM_RE": {
+   "flags": "",
+   "re": "\\s*([A-Za-z_$][\\w$]*)\\s*"
+  },
+  "_SA_SPACE_RE": {
+   "flags": "",
+   "re": "\\s*"
+  },
+  "_SA_TAIL_CALL": {
+   "value": "\\s*\\(\\s*\\)\\s*;?\\s*\\}"
+  },
+  "_SA_TAIL_END": {
+   "value": "\\s*;?\\s*\\}\\s*;?\\s*return\\s+"
+  },
+  "_SA_TAIL_HEAD": {
+   "value": "\\s*;?\\s*"
+  },
+  "_SA_TAIL_MID": {
+   "value": "\\s*=\\s*function\\s*\\(\\s*\\)\\s*\\{\\s*return\\s+"
+  },
+  "_SA_TECHNIQUE_REASON": {
+   "value": "hides its code in a string array it decodes as it runs (an obfuscator's technique)"
+  },
+  "_SA_TOKEN_RE": {
+   "flags": "",
+   "re": "\\s*(?:(?P<num>0[xX][0-9a-fA-F]+|(?:0|[1-9]\\d*)(?:\\.\\d*)?(?:[eE][-+]?\\d+)?|\\.\\d+(?:[eE][-+]?\\d+)?)(?![\\w$])|(?P<str>'(?:[^'\\\\\\n]|\\\\[^\\n])*'|\"(?:[^\"\\\\\\n]|\\\\[^\\n])*\")|(?P<name>[A-Za-z_$][\\w$]*)|(?P<op>[-+*/()\\[\\].,]))"
+  },
+  "_SA_WRAPPER_RE": {
+   "flags": "",
+   "re": "(?:\\bfunction\\s+(?P<n1>[A-Za-z_$][\\w$]*)|(?<![\\w$.])(?P<n2>[A-Za-z_$][\\w$]*)\\s*=\\s*function(?:\\s+[A-Za-z_$][\\w$]*)?)\\s*\\((?P<params>[^()]{0,400})\\)\\s*\\{\\s*return\\s+(?P<target>[A-Za-z_$][\\w$]*)\\s*\\((?P<args>[^()]{0,400})\\)\\s*;?\\s*\\}"
   },
   "_SCRIPT_EXT_RE": {
    "flags": "i",
@@ -8113,13 +13106,39 @@
   "_SECRETS_DUMP_SRC": {
    "value": "\\btoJSON\\s*\\(\\s*secrets\\s*\\)"
   },
+  "_SECRET_LINE_PATTERNS": {
+   "list": [
+    {
+     "flags": "",
+     "re": "AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\\-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----(?:.*?-----END [A-Z ]*PRIVATE KEY-----|.*)|eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}",
+     "token": [
+      "AKIA[0-9A-Z]{16}",
+      "gh[pousr]_[A-Za-z0-9]{36,}",
+      "github_pat_[A-Za-z0-9_]{22,}",
+      "xox[baprs]-[A-Za-z0-9-]{10,}",
+      "sk_live_[A-Za-z0-9]{16,}",
+      "AIza[0-9A-Za-z_\\-]{35}",
+      "-----BEGIN [A-Z ]*PRIVATE KEY-----(?:.*?-----END [A-Z ]*PRIVATE KEY-----|.*)",
+      "eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}"
+     ]
+    },
+    {
+     "flags": "i",
+     "re": "(?:IDENTIFIED\\s+BY\\s+['\\\"][^'\\\"]+['\\\"]|PASSWORD\\s*=?\\s*['\\\"][^'\\\"]+['\\\"]|IDENTIFIED\\s+BY\\s+PASSWORD)"
+    },
+    {
+     "flags": "i",
+     "re": "(?:password|passwd|pwd|secret|api[_-]?key|access[_-]?key|auth[_-]?token|private[_-]?key)\\s*[:=]\\s*[\\\"'][^\\\"']{4,}[\\\"']"
+    },
+    {
+     "flags": "",
+     "re": "(?<=://)[^/\\s@'\\\"]+(?=@)"
+    }
+   ]
+  },
   "_SECRET_RUN_RE": {
    "flags": "",
    "re": "[A-Za-z0-9+/=_\\-]{20,}"
-  },
-  "_SECRET_SOURCE_RE": {
-   "flags": "im",
-   "re": "JSON\\.stringify\\(\\s*process\\.env|Object\\.(?:keys|entries|values)\\(\\s*process\\.env|\\.npmrc|[/\\\\]\\.ssh\\b|~/\\.ssh\\b|id_rsa|id_ed25519|\\.aws[/\\\\]|~/\\.aws\\b|\\.git-credentials|\\.docker[/\\\\]config\\.json|\\.kube[/\\\\]config|Local Storage[/\\\\]leveldb|\\.pypirc|\\.netrc\\b|\\bdict\\(\\s*os\\.environ\\s*\\)|\\bos\\.environ\\.(?:items|keys|values|copy)\\(\\s*\\)|json\\.dumps\\(\\s*(?:dict\\(\\s*)?os\\.environ|\\b(?:str|repr)\\(\\s*os\\.environ\\s*\\)|\\{\\s*\\*\\*\\s*os\\.environ|\\burlencode\\(\\s*(?:dict\\(\\s*)?os\\.environ|\\bos\\.environb\\b|(?:^|[\\s;&(`])(?:env|printenv|set)\\s*(?:\\|(?!\\|)|>)|\\$\\(\\s*(?:env|printenv)\\s*\\)|`\\s*(?:env|printenv)\\s*`"
   },
   "_SELF_PUBLISH_RULE": {
    "map": {
@@ -8207,6 +13226,141 @@
     }
    ]
   },
+  "_SEND_REASONS": {
+   "list": [
+    {
+     "value": "sends the machine's public IP address over the network"
+    },
+    {
+     "value": "sends environment variables over the network"
+    },
+    {
+     "value": "reads files outside the package and sends them over the network"
+    },
+    {
+     "value": "sends the machine's user or host name over the network"
+    },
+    {
+     "value": "sends what local commands report about the machine over the network"
+    },
+    {
+     "value": "sends what the cloud's instance metadata service gives it (the machine's credentials) over the network"
+    },
+    {
+     "value": "sends the machine's user or host name over the network"
+    },
+    {
+     "value": "sends the machine's user or host name in a DNS lookup of a name it builds"
+    },
+    {
+     "value": "sends environment variables over the network"
+    },
+    {
+     "value": "uploads a local file over the network"
+    },
+    {
+     "value": "sends what local commands report about the machine over the network"
+    },
+    {
+     "value": "sends what the cloud's instance metadata service gives it (the machine's credentials) over the network"
+    },
+    {
+     "value": "sends the machine's public IP address over the network"
+    },
+    {
+     "value": "tells a server it was installed (a request whose answer it throws away)"
+    },
+    {
+     "value": "sends the machine's user or host name"
+    },
+    {
+     "value": "sends data to a webhook whose secret"
+    },
+    {
+     "value": "collects files from several credential folders"
+    }
+   ]
+  },
+  "_SE_HOLE_RE": {
+   "flags": "",
+   "re": "\\$\\{\\s*([A-Za-z_$][\\w$]*)\\s*\\}|\\{\\s*([A-Za-z_]\\w*)\\s*\\}"
+  },
+  "_SE_MAX": {
+   "value": 200
+  },
+  "_SE_MIN_DISTINCT": {
+   "value": 10
+  },
+  "_SE_NEEDLES": {
+   "list": [
+    {
+     "value": "fetch"
+    },
+    {
+     "value": "urlopen"
+    },
+    {
+     "value": "Request"
+    },
+    {
+     "value": "sendBeacon"
+    },
+    {
+     "value": "axios"
+    },
+    {
+     "value": "got"
+    },
+    {
+     "value": "ky"
+    },
+    {
+     "value": "needle"
+    },
+    {
+     "value": "superagent"
+    },
+    {
+     "value": ".get"
+    },
+    {
+     "value": ".post"
+    },
+    {
+     "value": ".put"
+    },
+    {
+     "value": ".patch"
+    },
+    {
+     "value": ".request"
+    },
+    {
+     "value": ".send"
+    },
+    {
+     "value": ".open"
+    },
+    {
+     "value": "curl"
+    },
+    {
+     "value": "wget"
+    }
+   ]
+  },
+  "_SE_REQUEST_RE": {
+   "flags": "",
+   "re": "\\b(?:fetch|urlopen|Request|sendBeacon|axios|got|ky|needle|superagent)\\s*\\(|\\.\\s*(?:get|post|put|patch|request|send|open)\\s*\\("
+  },
+  "_SE_SEGMENT_RE": {
+   "flags": "",
+   "re": "[A-Za-z0-9_:-]{20,200}"
+  },
+  "_SE_URL_RE": {
+   "flags": "",
+   "re": "https?://([^\\s\"'`<>/?#]{1,300})([^\\s\"'`<>?#]{0,600})"
+  },
   "_SHEBANG_JS_NAMES": {
    "set": [
     "bun",
@@ -8233,6 +13387,710 @@
     "zsh"
    ]
   },
+  "_SHORTCUT_FOUND_RE": {
+   "flags": "i",
+   "re": "['\"`]\\*?\\.lnk['\"`]"
+  },
+  "_SHORTCUT_SET_RE": {
+   "flags": "",
+   "re": "\\.\\s*(?:Arguments|TargetPath)\\s*\\+?=(?!=)"
+  },
+  "_SH_BEACON_REASON": {
+   "value": "tells a server it was installed (a request whose answer it throws away)"
+  },
+  "_SH_CMD": {
+   "set": [
+    "cmd"
+   ]
+  },
+  "_SH_CONCAT_MAX": {
+   "value": 20
+  },
+  "_SH_CURL_DATA": {
+   "set": [
+    "--data",
+    "--data-ascii",
+    "--data-binary",
+    "--data-raw",
+    "--data-urlencode",
+    "--form",
+    "--form-string",
+    "--json",
+    "--url-query",
+    "-F",
+    "-d"
+   ]
+  },
+  "_SH_CURL_LONG_VALUE": {
+   "set": [
+    "--alt-svc",
+    "--aws-sigv4",
+    "--cacert",
+    "--capath",
+    "--cert",
+    "--cert-type",
+    "--ciphers",
+    "--config",
+    "--connect-timeout",
+    "--connect-to",
+    "--continue-at",
+    "--cookie",
+    "--cookie-jar",
+    "--data",
+    "--data-ascii",
+    "--data-binary",
+    "--data-raw",
+    "--data-urlencode",
+    "--dns-servers",
+    "--doh-url",
+    "--dump-header",
+    "--etag-compare",
+    "--etag-save",
+    "--form",
+    "--form-string",
+    "--header",
+    "--hsts",
+    "--interface",
+    "--json",
+    "--key",
+    "--key-type",
+    "--limit-rate",
+    "--local-port",
+    "--mail-from",
+    "--mail-rcpt",
+    "--max-filesize",
+    "--max-redirs",
+    "--max-time",
+    "--netrc-file",
+    "--noproxy",
+    "--oauth2-bearer",
+    "--output",
+    "--output-dir",
+    "--pinnedpubkey",
+    "--proto",
+    "--proto-redir",
+    "--proxy",
+    "--proxy-header",
+    "--proxy-user",
+    "--quote",
+    "--range",
+    "--referer",
+    "--request",
+    "--resolve",
+    "--retry",
+    "--retry-delay",
+    "--retry-max-time",
+    "--socks4",
+    "--socks4a",
+    "--socks5",
+    "--socks5-hostname",
+    "--speed-limit",
+    "--speed-time",
+    "--stderr",
+    "--telnet-option",
+    "--time-cond",
+    "--trace",
+    "--trace-ascii",
+    "--unix-socket",
+    "--upload-file",
+    "--url",
+    "--url-query",
+    "--user",
+    "--user-agent",
+    "--variable",
+    "--write-out"
+   ]
+  },
+  "_SH_CURL_META": {
+   "set": [
+    "--cookie",
+    "--header",
+    "--oauth2-bearer",
+    "--proxy-header",
+    "--referer",
+    "--user",
+    "--user-agent",
+    "-A",
+    "-H",
+    "-b",
+    "-e",
+    "-u"
+   ]
+  },
+  "_SH_CURL_OUTPUT": {
+   "set": [
+    "--output",
+    "-o"
+   ]
+  },
+  "_SH_CURL_REMOTE_NAME": {
+   "set": [
+    "--remote-name",
+    "--remote-name-all",
+    "-O"
+   ]
+  },
+  "_SH_CURL_SHORT_VALUE": {
+   "set": [
+    "A",
+    "C",
+    "D",
+    "E",
+    "F",
+    "H",
+    "K",
+    "P",
+    "Q",
+    "T",
+    "U",
+    "X",
+    "Y",
+    "b",
+    "c",
+    "d",
+    "e",
+    "m",
+    "o",
+    "r",
+    "t",
+    "u",
+    "w",
+    "x",
+    "y",
+    "z"
+   ]
+  },
+  "_SH_CURL_UPLOAD": {
+   "set": [
+    "--upload-file",
+    "-T"
+   ]
+  },
+  "_SH_DATA_REASONS": {
+   "map": {
+    "address": {
+     "value": "sends the machine's public IP address over the network"
+    },
+    "credentials": {
+     "value": "sends what the cloud's instance metadata service gives it (the machine's credentials) over the network"
+    },
+    "environment": {
+     "value": "sends environment variables over the network"
+    },
+    "file": {
+     "value": "uploads a local file over the network"
+    },
+    "identity": {
+     "value": "sends the machine's user or host name over the network"
+    },
+    "lookup-identity": {
+     "value": "sends the machine's user or host name in a DNS lookup of a name it builds"
+    },
+    "report": {
+     "value": "sends what local commands report about the machine over the network"
+    }
+   }
+  },
+  "_SH_DECLARE": {
+   "set": [
+    "declare",
+    "export",
+    "local",
+    "readonly",
+    "typeset"
+   ]
+  },
+  "_SH_ECHO": {
+   "set": [
+    "echo",
+    "printf"
+   ]
+  },
+  "_SH_ENVIRONMENT": {
+   "set": [
+    "declare",
+    "export",
+    "printenv",
+    "set"
+   ]
+  },
+  "_SH_ENV_REF_RE": {
+   "flags": "i",
+   "re": "\\$env:([A-Za-z_][A-Za-z0-9_]*)|\\$\\{?([A-Za-z_][A-Za-z0-9_]*)|%([A-Za-z_][A-Za-z0-9_]*)%"
+  },
+  "_SH_ESCAPES": {
+   "map": {
+    "0": {
+     "value": "\u0000"
+    },
+    "b": {
+     "value": "\b"
+    },
+    "f": {
+     "value": "\f"
+    },
+    "n": {
+     "value": "\n"
+    },
+    "r": {
+     "value": "\r"
+    },
+    "t": {
+     "value": "\t"
+    },
+    "v": {
+     "value": "\u000b"
+    }
+   }
+  },
+  "_SH_EVAL": {
+   "set": [
+    "eval"
+   ]
+  },
+  "_SH_EXEC_LINE_RE": {
+   "flags": "",
+   "re": "\\b(?:system|popen|execSync|exec|getoutput|getstatusoutput|run|call|check_call|check_output|Popen)\\s*\\(\\s*(?=[rbuRBUfF]{0,2}[\"'`]|[A-Za-z_$])|\\b(?:spawn|spawnSync|execFile|execFileSync|run|call|check_call|check_output|Popen)\\s*\\(\\s*[\\[(]?\\s*[\"'](?:/usr)?(?:/bin/)?(?:ba|z|da|k)?sh[\"']\\s*,\\s*[\\[(]?\\s*[\"']-c[\"']\\s*,\\s*(?=[rbuRBUfF]{0,2}[\"'`])"
+  },
+  "_SH_EXEC_MAX": {
+   "value": 50
+  },
+  "_SH_EXEC_MEMO": {
+   "list": [
+    {
+     "value": null
+    },
+    {
+     "value": null
+    }
+   ]
+  },
+  "_SH_EXEC_NEEDLES": {
+   "list": [
+    {
+     "value": "curl"
+    },
+    {
+     "value": "wget"
+    },
+    {
+     "value": "nc "
+    },
+    {
+     "value": "ncat"
+    },
+    {
+     "value": "netcat"
+    },
+    {
+     "value": "socat"
+    },
+    {
+     "value": "telnet"
+    },
+    {
+     "value": "nslookup"
+    },
+    {
+     "value": "dig "
+    },
+    {
+     "value": "host "
+    },
+    {
+     "value": "ping"
+    }
+   ]
+  },
+  "_SH_FILE_READERS": {
+   "set": [
+    "base64",
+    "bzip2",
+    "cat",
+    "cut",
+    "gzip",
+    "head",
+    "less",
+    "more",
+    "nl",
+    "od",
+    "strings",
+    "tac",
+    "tail",
+    "tar",
+    "type",
+    "xxd",
+    "xz",
+    "zip"
+   ]
+  },
+  "_SH_FILTERS": {
+   "set": [
+    "awk",
+    "base64",
+    "bzip2",
+    "cat",
+    "cut",
+    "fold",
+    "grep",
+    "gzip",
+    "head",
+    "jq",
+    "nl",
+    "od",
+    "openssl",
+    "rev",
+    "sed",
+    "sort",
+    "strings",
+    "tac",
+    "tail",
+    "tee",
+    "tr",
+    "uniq",
+    "xxd",
+    "xz"
+   ]
+  },
+  "_SH_FLAG_A_OR_N_RE": {
+   "flags": "",
+   "re": "-[A-Za-z]*[an][A-Za-z]*\\Z"
+  },
+  "_SH_HOST_RE": {
+   "flags": "",
+   "re": "(?:[A-Za-z][A-Za-z0-9+.-]*://)?(?:[^\\s/?#@]*@)?(\\[[^\\]\\s]*\\]|[^\\s/?#:]*)"
+  },
+  "_SH_HTTP": {
+   "set": [
+    "curl",
+    "wget",
+    "wget2"
+   ]
+  },
+  "_SH_IDENTITY": {
+   "set": [
+    "groups",
+    "hostname",
+    "id",
+    "logname",
+    "users",
+    "w",
+    "who",
+    "whoami"
+   ]
+  },
+  "_SH_IDENTITY_VAR_RE": {
+   "flags": "i",
+   "re": "(?:USER|USERNAME|LOGNAME|HOSTNAME|COMPUTERNAME|USERDOMAIN)\\Z"
+  },
+  "_SH_KEYWORDS": {
+   "set": [
+    "!",
+    "do",
+    "elif",
+    "else",
+    "if",
+    "then",
+    "until",
+    "while",
+    "{"
+   ]
+  },
+  "_SH_LINES_MEMO": {
+   "list": [
+    {
+     "value": null
+    },
+    {
+     "value": null
+    }
+   ]
+  },
+  "_SH_LISTINGS": {
+   "set": [
+    "arp",
+    "df",
+    "dir",
+    "du",
+    "find",
+    "ifconfig",
+    "ip",
+    "ipconfig",
+    "last",
+    "ls",
+    "lsblk",
+    "lscpu",
+    "mount",
+    "netstat",
+    "ps",
+    "pwd",
+    "route",
+    "ss",
+    "systeminfo",
+    "tree",
+    "uptime"
+   ]
+  },
+  "_SH_LOOKUP": {
+   "set": [
+    "dig",
+    "host",
+    "nslookup",
+    "ping",
+    "ping6"
+   ]
+  },
+  "_SH_MAX_DEPTH": {
+   "value": 3
+  },
+  "_SH_NOOPS": {
+   "set": [
+    ":",
+    "echo",
+    "exit",
+    "false",
+    "printf",
+    "return",
+    "true"
+   ]
+  },
+  "_SH_NOT_SHELL_RE": {
+   "flags": "",
+   "re": "\\brequire\\s*\\(|(?<![^\\n])[ \\t]*(?:import|from)[ \\t]+[\\w.{*]|\\bdef[ \\t]+\\w+\\s*\\(|=>|(?<![^\\n])[ \\t]*(?:const|let|var|class)[ \\t]+[A-Za-z_$]|\\bconsole\\s*\\.\\s*log\\b|\\bmodule\\s*\\.\\s*exports\\b|\\bprocess\\s*\\.\\s*(?:env|argv|exit)\\b|\\bprint\\s*\\(|\\bos\\s*\\.\\s*(?:system|environ|popen)\\b"
+  },
+  "_SH_NULL": {
+   "set": [
+    "$null",
+    "/dev/null",
+    "nul"
+   ]
+  },
+  "_SH_PATH_VAR_RE": {
+   "flags": "i",
+   "re": "(?:HOME|USERPROFILE|PWD|INIT_CWD)\\Z"
+  },
+  "_SH_PLAIN_RUN_RE": {
+   "flags": "",
+   "re": "[^ \\t\\r\\n;()&|<>\\\\'\"$`]+"
+  },
+  "_SH_RAW": {
+   "set": [
+    "nc",
+    "ncat",
+    "netcat",
+    "socat",
+    "telnet"
+   ]
+  },
+  "_SH_REDIRECT_OPS": {
+   "list": [
+    {
+     "value": "<<<"
+    },
+    {
+     "value": "<<-"
+    },
+    {
+     "value": ">>"
+    },
+    {
+     "value": ">&"
+    },
+    {
+     "value": ">|"
+    },
+    {
+     "value": "<<"
+    },
+    {
+     "value": "<&"
+    },
+    {
+     "value": "<>"
+    },
+    {
+     "value": ">"
+    },
+    {
+     "value": "<"
+    }
+   ]
+  },
+  "_SH_SCRIPTED_FILTERS": {
+   "set": [
+    "awk",
+    "grep",
+    "jq",
+    "sed"
+   ]
+  },
+  "_SH_SCRIPT_MAX_CHARS": {
+   "value": 1000000
+  },
+  "_SH_SECRET_VAR_RE": {
+   "flags": "i",
+   "re": "TOKEN|SECRET|PASSW|API_?KEY|PRIVATE_?KEY|ACCESS_?KEY|CREDENTIAL|AUTH"
+  },
+  "_SH_SHELLS": {
+   "set": [
+    "ash",
+    "bash",
+    "dash",
+    "ksh",
+    "sh",
+    "zsh"
+   ]
+  },
+  "_SH_STATUS_KEYWORDS": {
+   "set": [
+    "!",
+    "elif",
+    "if",
+    "until",
+    "while"
+   ]
+  },
+  "_SH_URL_RE": {
+   "flags": "",
+   "re": "[A-Za-z][A-Za-z0-9+.-]*://[^\\s/?#]|[^\\s/'\"]*\\.[A-Za-z]{2,}(?::[0-9]+)?(?:[/?#]|\\Z)|[0-9]{1,3}(?:\\.[0-9]{1,3}){3}(?::[0-9]+)?(?:[/?#]|\\Z)"
+  },
+  "_SH_VAR_NAME_RE": {
+   "flags": "",
+   "re": "[A-Za-z_][A-Za-z0-9_]*\\Z"
+  },
+  "_SH_WGET_DATA": {
+   "set": [
+    "--body-data",
+    "--post-data"
+   ]
+  },
+  "_SH_WGET_LONG_VALUE": {
+   "set": [
+    "--accept",
+    "--append-output",
+    "--backups",
+    "--base",
+    "--bind-address",
+    "--body-data",
+    "--body-file",
+    "--ca-certificate",
+    "--ca-directory",
+    "--certificate",
+    "--certificate-type",
+    "--config",
+    "--connect-timeout",
+    "--default-page",
+    "--directory-prefix",
+    "--dns-timeout",
+    "--domains",
+    "--exclude-directories",
+    "--execute",
+    "--ftp-password",
+    "--ftp-user",
+    "--header",
+    "--http-password",
+    "--http-user",
+    "--include-directories",
+    "--input-file",
+    "--level",
+    "--limit-rate",
+    "--load-cookies",
+    "--local-encoding",
+    "--method",
+    "--output-document",
+    "--output-file",
+    "--password",
+    "--post-data",
+    "--post-file",
+    "--private-key",
+    "--private-key-type",
+    "--progress",
+    "--proxy-password",
+    "--proxy-user",
+    "--quota",
+    "--read-timeout",
+    "--referer",
+    "--reject",
+    "--remote-encoding",
+    "--restrict-file-names",
+    "--save-cookies",
+    "--secure-protocol",
+    "--timeout",
+    "--tries",
+    "--user",
+    "--user-agent",
+    "--wait",
+    "--waitretry"
+   ]
+  },
+  "_SH_WGET_META": {
+   "set": [
+    "--header",
+    "--http-password",
+    "--http-user",
+    "--password",
+    "--referer",
+    "--user",
+    "--user-agent",
+    "-U"
+   ]
+  },
+  "_SH_WGET_OUTPUT": {
+   "set": [
+    "--output-document",
+    "-O"
+   ]
+  },
+  "_SH_WGET_SHORT_VALUE": {
+   "set": [
+    "A",
+    "B",
+    "D",
+    "I",
+    "O",
+    "P",
+    "Q",
+    "T",
+    "U",
+    "X",
+    "a",
+    "e",
+    "i",
+    "l",
+    "o",
+    "t",
+    "w"
+   ]
+  },
+  "_SH_WGET_UPLOAD": {
+   "set": [
+    "--body-file",
+    "--post-file"
+   ]
+  },
+  "_SH_XARGS_LONG_VALUE": {
+   "set": [
+    "--arg-file",
+    "--delimiter",
+    "--eof",
+    "--max-args",
+    "--max-chars",
+    "--max-lines",
+    "--max-procs",
+    "--process-slot-var"
+   ]
+  },
+  "_SH_XARGS_SHORT_VALUE": {
+   "set": [
+    "I",
+    "L",
+    "P",
+    "a",
+    "d",
+    "n",
+    "s"
+   ]
+  },
   "_SIBLING_DATA_RE": {
    "flags": "",
    "re": "\\b(?:open|read_text|read_bytes|readFileSync|readFile)\\s*\\([^\\n]{0,200}?(?:__file__|__dirname|import\\.meta\\.url)[^\\n]{0,200}?[\\\"'](?:[^\\\"'`{}$\\n]{1,100}\\.(?:txt|dat|bin|png|jpe?g|gif|ico|bmp|svg|wav|mp3|mp4|woff2?|ttf|json|md|cfg|ini|log|db|pyc|so|dll|dylib|exe)|(?:[^\\\"'`{}$\\n]{0,100}[/\\\\])?(?:LICEN[CS]E|COPYING|NOTICE|README|AUTHORS|CHANGELOG|CHANGES|HISTORY|PATENTS)(?:[-.]\\w{1,10})?)[\\\"']|(?:__file__|__dirname)[^\\n]{0,200}?[\\\"'](?:[^\\\"'`{}$\\n]{1,100}\\.(?:txt|dat|bin|png|jpe?g|gif|ico|bmp|svg|wav|mp3|mp4|woff2?|ttf|json|md|cfg|ini|log|db|pyc|so|dll|dylib|exe)|(?:[^\\\"'`{}$\\n]{0,100}[/\\\\])?(?:LICEN[CS]E|COPYING|NOTICE|README|AUTHORS|CHANGELOG|CHANGES|HISTORY|PATENTS)(?:[-.]\\w{1,10})?)[\\\"'][^\\n]{0,60}?\\.\\s*(?:read_text|read_bytes)\\s*\\("
@@ -8256,10 +14114,10 @@
   },
   "_SPAWN_CALL_RE": {
    "flags": "",
-   "re": "\\b(?:spawn|spawnSync|execFile|execFileSync)\\s*\\(\\s*(?:process\\s*\\.\\s*execPath|process\\s*\\.\\s*argv\\s*\\[\\s*0\\s*\\]|['\"`](?:node|nodejs)(?:\\.exe)?['\"`])\\s*,\\s*\\[|\\bfork\\s*\\(|\\b(?:Popen|run|call|check_call|check_output)\\s*\\(\\s*\\[\\s*(?:sys\\s*\\.\\s*executable|['\"]python[0-9.]*(?:\\.exe)?['\"])\\s*,"
+   "re": "\\b(?:spawn|spawnSync|execFile|execFileSync)\\s*\\(\\s*(?:process\\s*\\.\\s*execPath|process\\s*\\.\\s*argv\\s*\\[\\s*0\\s*\\]|['\"`](?:node|nodejs|(?P<rt>bun|deno))(?:\\.exe)?['\"`]|(?P<js>[A-Za-z_$][\\w$]*))\\s*,\\s*\\[|\\bfork\\s*\\(|\\b(?:Popen|run|call|check_call|check_output)\\s*\\(\\s*\\[\\s*(?:sys\\s*\\.\\s*executable|['\"]python[0-9.]*(?:\\.exe)?['\"]|(?P<py>[A-Za-z_]\\w*))\\s*,"
   },
   "_SPAWN_CALL_SRC": {
-   "value": "\\b(?:spawn|spawnSync|execFile|execFileSync)\\s*\\(\\s*(?:process\\s*\\.\\s*execPath|process\\s*\\.\\s*argv\\s*\\[\\s*0\\s*\\]|['\"`](?:node|nodejs)(?:\\.exe)?['\"`])\\s*,\\s*\\[|\\bfork\\s*\\(|\\b(?:Popen|run|call|check_call|check_output)\\s*\\(\\s*\\[\\s*(?:sys\\s*\\.\\s*executable|['\"]python[0-9.]*(?:\\.exe)?['\"])\\s*,"
+   "value": "\\b(?:spawn|spawnSync|execFile|execFileSync)\\s*\\(\\s*(?:process\\s*\\.\\s*execPath|process\\s*\\.\\s*argv\\s*\\[\\s*0\\s*\\]|['\"`](?:node|nodejs|(?P<rt>bun|deno))(?:\\.exe)?['\"`]|(?P<js>[A-Za-z_$][\\w$]*))\\s*,\\s*\\[|\\bfork\\s*\\(|\\b(?:Popen|run|call|check_call|check_output)\\s*\\(\\s*\\[\\s*(?:sys\\s*\\.\\s*executable|['\"]python[0-9.]*(?:\\.exe)?['\"]|(?P<py>[A-Za-z_]\\w*))\\s*,"
   },
   "_SPAWN_CONCAT_RE": {
    "flags": "",
@@ -8270,10 +14128,10 @@
   },
   "_SPAWN_DIR_RE": {
    "flags": "",
-   "re": "__dirname|os\\s*\\.\\s*path\\s*\\.\\s*dirname\\s*\\(\\s*(?:os\\s*\\.\\s*path\\s*\\.\\s*(?:abspath|realpath)\\s*\\(\\s*)?__file__\\s*\\)?\\s*\\)|Path\\s*\\(\\s*__file__\\s*\\)\\s*(?:\\.\\s*resolve\\s*\\(\\s*\\))?\\s*\\.\\s*parent"
+   "re": "__dirname|os\\s*\\.\\s*path\\s*\\.\\s*dirname\\s*\\(\\s*(?:os\\s*\\.\\s*path\\s*\\.\\s*(?:abspath|realpath)\\s*\\(\\s*)?__file__\\s*\\)?\\s*\\)|Path\\s*\\(\\s*__file__\\s*\\)\\s*(?:\\.\\s*resolve\\s*\\(\\s*\\))?\\s*\\.\\s*parent(?:\\s*\\.\\s*resolve\\s*\\(\\s*\\))?|(?:path\\s*\\.\\s*)?dirname\\s*\\(\\s*(?:url\\s*\\.\\s*)?fileURLToPath\\s*\\(\\s*import\\s*\\.\\s*meta\\s*\\.\\s*url\\s*\\)\\s*\\)|import\\s*\\.\\s*meta\\s*\\.\\s*dirname"
   },
   "_SPAWN_DIR_SRC": {
-   "value": "__dirname|os\\s*\\.\\s*path\\s*\\.\\s*dirname\\s*\\(\\s*(?:os\\s*\\.\\s*path\\s*\\.\\s*(?:abspath|realpath)\\s*\\(\\s*)?__file__\\s*\\)?\\s*\\)|Path\\s*\\(\\s*__file__\\s*\\)\\s*(?:\\.\\s*resolve\\s*\\(\\s*\\))?\\s*\\.\\s*parent"
+   "value": "__dirname|os\\s*\\.\\s*path\\s*\\.\\s*dirname\\s*\\(\\s*(?:os\\s*\\.\\s*path\\s*\\.\\s*(?:abspath|realpath)\\s*\\(\\s*)?__file__\\s*\\)?\\s*\\)|Path\\s*\\(\\s*__file__\\s*\\)\\s*(?:\\.\\s*resolve\\s*\\(\\s*\\))?\\s*\\.\\s*parent(?:\\s*\\.\\s*resolve\\s*\\(\\s*\\))?|(?:path\\s*\\.\\s*)?dirname\\s*\\(\\s*(?:url\\s*\\.\\s*)?fileURLToPath\\s*\\(\\s*import\\s*\\.\\s*meta\\s*\\.\\s*url\\s*\\)\\s*\\)|import\\s*\\.\\s*meta\\s*\\.\\s*dirname"
   },
   "_SPAWN_JOIN_RE": {
    "flags": "",
@@ -8294,6 +14152,9 @@
   },
   "_SPAWN_MAX_FILES": {
    "value": 20
+  },
+  "_SPAWN_MAX_NAMED": {
+   "value": 32
   },
   "_SPAWN_MAX_TARGETS": {
    "value": 8
@@ -8317,6 +14178,14 @@
     "-m",
     "-p"
    ]
+  },
+  "_SPAWN_SCRIPT_EXT_RE": {
+   "flags": "i",
+   "re": "\\.(?:[cm]?[jt]s|[jt]sx|py)$"
+  },
+  "_SPAWN_STR_RE": {
+   "flags": "",
+   "re": "str\\s*\\(\\s*([A-Za-z_]\\w*)\\s*\\)"
   },
   "_SPAWN_VALUE_FLAGS": {
    "set": [
@@ -8565,16 +14434,31 @@
      "value": "carries a GitHub Actions workflow that dumps every repository secret"
     },
     {
-     "value": "sends data to a Telegram bot whose token"
+     "value": "sends data to a webhook whose secret is written in the code"
     },
     {
-     "value": "sends data to a Discord webhook whose token"
+     "value": "sends what local commands report about the machine to"
     },
     {
-     "value": "sends data to a Slack webhook whose key"
+     "value": "reads local files and sends them to an exfiltration service"
     },
     {
-     "value": "reads credential files and sends data to an IP address"
+     "value": "sends the machine's public IP address to"
+    },
+    {
+     "value": "sends the machine's user or host name to an IP address"
+    },
+    {
+     "value": "reads credentials or the whole environment and sends them to an IP address"
+    },
+    {
+     "value": "reads credentials or the whole environment and sends data over the network"
+    },
+    {
+     "value": "sends what local commands report about the machine over the network"
+    },
+    {
+     "value": "reads local files and sends them to an IP address"
     },
     {
      "value": "collects files from several credential folders"
@@ -8586,10 +14470,19 @@
      "value": "sends the machine's user or host name in a DNS lookup"
     },
     {
-     "value": "sends the machine's public IP address to a data-capture"
+     "value": "sends the machine's user or host name to an address it fetches"
     },
     {
      "value": "runs a cryptocurrency miner"
+    },
+    {
+     "value": "swaps the cryptocurrency wallet addresses"
+    },
+    {
+     "value": "hides its code in a string array"
+    },
+    {
+     "value": "runs a program it extracts from inside another file"
     }
    ]
   },
@@ -8796,10 +14689,6 @@
   "_TAINT_CONFIG_WARNINGS": {
    "list": []
   },
-  "_TELEGRAM_API_RE": {
-   "flags": "i",
-   "re": "api\\.telegram\\.org"
-  },
   "_TEMPLATE_IMPORT_RE": {
    "flags": "",
    "re": "(?<![^\\n])[ \\t]*from[ \\t]+(?:jinja2|mako\\.template|django\\.template)[ \\t]+import\\b[^\\n]*\\bTemplate\\b"
@@ -8836,6 +14725,9 @@
      "value": "gh[pousr]_[A-Za-z0-9]{36}"
     },
     {
+     "value": "github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}"
+    },
+    {
      "value": "xox[baprs]-[A-Za-z0-9-]{10,}"
     },
     {
@@ -8850,6 +14742,20 @@
     {
      "value": "eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}"
     }
+   ]
+  },
+  "_TOKEN_PATTERN": {
+   "flags": "",
+   "re": "AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\\-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----|eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}",
+   "token": [
+    "AKIA[0-9A-Z]{16}",
+    "gh[pousr]_[A-Za-z0-9]{36}",
+    "github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}",
+    "xox[baprs]-[A-Za-z0-9-]{10,}",
+    "sk_live_[A-Za-z0-9]{16,}",
+    "AIza[0-9A-Za-z_\\-]{35}",
+    "-----BEGIN [A-Z ]*PRIVATE KEY-----",
+    "eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}"
    ]
   },
   "_TOKEN_REDACT_ALTS": {
@@ -8879,6 +14785,110 @@
      "value": "eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}"
     }
    ]
+  },
+  "_TOKEN_REDACT_PATTERN": {
+   "flags": "",
+   "re": "AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\\-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----(?:.*?-----END [A-Z ]*PRIVATE KEY-----|.*)|eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}",
+   "token": [
+    "AKIA[0-9A-Z]{16}",
+    "gh[pousr]_[A-Za-z0-9]{36,}",
+    "github_pat_[A-Za-z0-9_]{22,}",
+    "xox[baprs]-[A-Za-z0-9-]{10,}",
+    "sk_live_[A-Za-z0-9]{16,}",
+    "AIza[0-9A-Za-z_\\-]{35}",
+    "-----BEGIN [A-Z ]*PRIVATE KEY-----(?:.*?-----END [A-Z ]*PRIVATE KEY-----|.*)",
+    "eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}"
+   ]
+  },
+  "_TOKEN_RULE": {
+   "map": {
+    "fix": {
+     "value": "Remove it, rotate the credential immediately, and load it from a secrets manager."
+    },
+    "id": {
+     "value": "S-TOKEN"
+    },
+    "langs": {
+     "list": [
+      {
+       "value": "py"
+      },
+      {
+       "value": "js"
+      }
+     ]
+    },
+    "msg": {
+     "value": "String matches a known secret format (AWS/GitHub/Slack/Stripe/Google key, private key, or JWT)."
+    },
+    "name": {
+     "value": "Known secret token format"
+    },
+    "need": {
+     "value": null
+    },
+    "re": {
+     "flags": "",
+     "re": "AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\\-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----|eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}",
+     "token": [
+      "AKIA[0-9A-Z]{16}",
+      "gh[pousr]_[A-Za-z0-9]{36}",
+      "github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}",
+      "xox[baprs]-[A-Za-z0-9-]{10,}",
+      "sk_live_[A-Za-z0-9]{16,}",
+      "AIza[0-9A-Za-z_\\-]{35}",
+      "-----BEGIN [A-Z ]*PRIVATE KEY-----",
+      "eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}"
+     ]
+    },
+    "ref": {
+     "value": "CWE-798 \u00b7 OWASP A07"
+    },
+    "sev": {
+     "value": "BLOCKER"
+    },
+    "skip": {
+     "value": null
+    },
+    "type": {
+     "value": "VULN"
+    },
+    "why": {
+     "value": "Provider-format tokens in source are live credentials until proven otherwise."
+    }
+   }
+  },
+  "_TREE_DECODER_SHAPE_RE": {
+   "map": {
+    "js": {
+     "flags": "",
+     "re": "\\b(?:inflate|inflateRaw|gunzip|unzip|brotliDecompress)Sync\\b|\\bBuffer\\s*\\.\\s*from\\s*\\([^;\\n]{0,300}?['\\\"`](?:hex|base64url)['\\\"`]"
+    },
+    "py": {
+     "flags": "",
+     "re": "[\\w\\])]\\s*\\^=?\\s*[\\w(]|\\[\\s*:\\s*:\\s*-\\s*1\\s*\\]|\\bmap\\s*\\(\\s*chr\\b|\\bchr\\s*\\((?:[^()\\n]|\\([^()\\n]*\\))*\\)\\s+for\\b|b32decode|b32hexdecode|b16decode|a85decode|b85decode|z85decode|decodebytes|decodestring|a2b_\\w+|\\bmarshal\\b|\\b(?:gzip|bz2|lzma)\\s*\\.\\s*decompress"
+    }
+   }
+  },
+  "_TREE_PY_KNOWN_DECODER_RE": {
+   "flags": "",
+   "re": "\\b(?:b64decode|urlsafe_b64decode|standard_b64decode|fromhex|unhexlify)\\b|\\bzlib\\s*\\.\\s*decompress\\b|\\bcodecs\\s*\\.\\s*decode\\b"
+  },
+  "_TREE_PY_SHELL_RE": {
+   "flags": "",
+   "re": "\\bsubprocess\\b|\\bos\\s*\\.\\s*(?:system|popen)\\b|\\bsystem\\s*\\(|\\bpopen\\s*\\(|\\bpty\\b|create_subprocess_shell|\\bcommands\\b"
+  },
+  "_TREE_RUN_GATE_RE": {
+   "map": {
+    "js": {
+     "flags": "",
+     "re": "\\beval\\b|\\bFunction\\b|runIn\\w*Context|compileFunction|\\b_compile\\b|\\bexec(?:Sync|File|FileSync)?\\b|\\bspawn(?:Sync)?\\b|\\bfork\\b|\\bexeca\\w*|child_process|\\bconstructor\\s*\\.\\s*constructor\\b"
+    },
+    "py": {
+     "flags": "",
+     "re": "(?<![\\w.])(?:exec|eval|execfile)\\b|\\bbuiltins\\b|__builtins__|\\bsubprocess\\b|\\bos\\s*\\.\\s*(?:system|popen|exec\\w*|spawn\\w*|startfile|posix_spawn\\w*)\\b|\\bsystem\\s*\\(|\\bpopen\\s*\\(|\\bpty\\b|create_subprocess_\\w+|\\bcommands\\b"
+    }
+   }
   },
   "_TYPED_ARG_RE": {
    "flags": "",
@@ -9004,6 +15014,51 @@
     }
    }
   },
+  "_WS_ADDRESS_RE": {
+   "flags": "",
+   "re": "[\"'`](?:0x(?!0{40})[a-fA-F0-9]{40}|(?:bc1|ltc1|tb1)[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{25,62}|bnb1[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{38}|[13LM][a-km-zA-HJ-NP-Z1-9]{25,34}|T[1-9A-HJ-NP-Za-km-z]{33})[\"'`]"
+  },
+  "_WS_CLIP_READ_RE": {
+   "flags": "",
+   "re": "\\bclipboard\\s*\\.\\s*read(?:Text)?\\s*\\(|\\bexecCommand[\"'\\]\\s]*\\(\\s*[\"']paste[\"']|\\b(?:pyperclip|clipboardy|win32clipboard|xerox|klembord)\\s*\\.\\s*(?:paste|readSync|readText|read|GetClipboardData|get)\\s*\\(|\\bclipboard_get\\s*\\(|\\bGetClipboardData\\b|\\bGet-Clipboard\\b|\\bpbpaste\\b|\\bxclip\\b[^\\n\"'`]{0,40}\\s-o\\b|\\bxsel\\b[^\\n\"'`]{0,40}\\s(?:-o|--output)\\b"
+  },
+  "_WS_CLIP_WRITE_RE": {
+   "flags": "",
+   "re": "\\bclipboard\\s*\\.\\s*write(?:Text)?\\s*\\(|\\bexecCommand[\"'\\]\\s]*\\(\\s*[\"']copy[\"']|\\b(?:pyperclip|clipboardy|win32clipboard|xerox|klembord)\\s*\\.\\s*(?:copy|writeSync|writeText|write|SetClipboardText|SetClipboardData|set)\\s*\\(|\\bclipboard_append\\s*\\(|\\bSetClipboardData\\b|\\bSet-Clipboard\\b|\\bpbcopy\\b|\\bxclip\\b|\\bxsel\\b"
+  },
+  "_WS_HOOK_RE": {
+   "flags": "",
+   "re": "\\bXMLHttpRequest\\s*\\.\\s*prototype\\s*\\.\\s*(?:open|send)\\s*=(?!=)|(?<![\\w$.])(?:(?:window|globalThis|self|global)\\s*\\.\\s*)?fetch\\s*=\\s*(?:async\\b|function\\b|\\()|\\bethereum\\s*\\.\\s*(?:request|send|sendAsync|enable)\\s*=(?!=)|\\bProxy\\s*\\(\\s*(?:window\\s*\\.\\s*)?ethereum\\b|\\bdefineProperty\\s*\\(\\s*window\\s*,\\s*[\"']ethereum[\"']"
+  },
+  "_WS_MAX": {
+   "value": 200
+  },
+  "_WS_NEEDLES": {
+   "list": [
+    {
+     "value": "{40}"
+    },
+    {
+     "value": "A-HJ-NP-Z"
+    },
+    {
+     "value": "a-km-z"
+    },
+    {
+     "value": "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
+    },
+    {
+     "value": "bitcoincash:"
+    },
+    {
+     "value": "{33}"
+    }
+   ]
+  },
+  "_WS_PATTERN_RE": {
+   "flags": "",
+   "re": "(0x\\)?\\??\\[[^\\]\\n]{2,24}\\](?:\\{40\\}|\\{40,40\\}))|(\\[[^\\]\\n]{0,12}(?:A-HJ-NP-Z[^\\]\\n]{0,12}a-km-z|a-km-z[^\\]\\n]{0,12}A-HJ-NP-Z)[^\\]\\n]{0,12}\\])|((?:bc1|ltc1|bnb1|tb1|addr1)\\)?\\??\\[|qpzry9x8gf2tvdw0s3jn54khce6mua7l)|(\\bT\\]?\\[A-Za-z1-9\\]\\{33\\})|(bitcoincash:)"
+  },
   "_XF_ARROW_ONE_RE": {
    "flags": "",
    "re": "[ \\t]*(?:async[ \\t]+)?(?P<name>[A-Za-z_$][\\w$]*)[ \\t]*=>"
@@ -9042,6 +15097,35 @@
     },
     {
      "value": "vendor"
+    }
+   ]
+  },
+  "_XF_EMIT_AT_RE": {
+   "flags": "",
+   "re": "\\.[ \\t]*emit[ \\t]*\\("
+  },
+  "_XF_EMIT_GLOBALS": {
+   "set": [
+    "process"
+   ]
+  },
+  "_XF_EMIT_MAX": {
+   "value": 50
+  },
+  "_XF_EMIT_NEEDLE": {
+   "value": "emit"
+  },
+  "_XF_EMIT_RE": {
+   "flags": "",
+   "re": "(?<![\\w$.])(?P<obj>[A-Za-z_$][\\w$]*)[ \\t]*\\.[ \\t]*emit[ \\t]*\\([ \\t]*(?P<q>['\\\"`])(?P<event>[^'\\\"`\\n]{1,100})\\2[ \\t]*,"
+  },
+  "_XF_FIXES": {
+   "list": [
+    {
+     "value": "Read both files: what does {where} receive, and what runs it here?"
+    },
+    {
+     "value": "Read both files: what does this file receive, and what does {where} run?"
     }
    ]
   },
@@ -9224,6 +15308,14 @@
    "flags": "",
    "re": "\\breturn\\b[ \\t]*(?P<expr>[^;\\n]*)"
   },
+  "_XF_LISTEN_AT_RE": {
+   "flags": "",
+   "re": "\\.[ \\t]*(?:on|once|addListener|prependListener|prependOnceListener)[ \\t]*\\("
+  },
+  "_XF_LISTEN_RE": {
+   "flags": "",
+   "re": "(?<![\\w$.])(?P<obj>[A-Za-z_$][\\w$]*)[ \\t]*\\.[ \\t]*(?:on|once|addListener|prependListener|prependOnceListener)[ \\t]*\\([ \\t]*(?P<q>['\\\"`])(?P<event>[^'\\\"`\\n]{1,100})\\2[ \\t]*,[ \\t]*(?:(?:async[ \\t]+)?(?:function\\b[ \\t]*[\\w$]*[ \\t]*\\([ \\t]*(?P<fp>[A-Za-z_$][\\w$]*)|\\([ \\t]*(?P<ap>[A-Za-z_$][\\w$]*)[^)\\n]*\\)[ \\t]*=>|(?P<bp>[A-Za-z_$][\\w$]*)[ \\t]*=>)|(?P<handler>[A-Za-z_$][\\w$]*(?:[ \\t]*\\.[ \\t]*[A-Za-z_$][\\w$]*){0,3})[ \\t]*[,)])"
+  },
   "_XF_LOCAL_DEPTH": {
    "value": 3
   },
@@ -9296,12 +15388,44 @@
    "flags": "",
    "re": "[#'\\\"]"
   },
+  "_XF_RECORD_BYTES": {
+   "value": 4194304
+  },
   "_XF_RETURN_RE": {
    "flags": "",
    "re": "^[ \\t]*return[ \\t](?P<expr>.*)$"
   },
   "_XF_ROUNDS": {
-   "value": 4
+   "value": 16
+  },
+  "_XF_RULE": {
+   "map": {
+    "id": {
+     "value": "SC-IMPORT-RISK"
+    },
+    "name": {
+     "value": "Risky import-time code"
+    },
+    "ref": {
+     "value": "CWE-506 \u00b7 Supply chain"
+    },
+    "type": {
+     "value": "HOTSPOT"
+    },
+    "why": {
+     "value": "A dropper can split what it downloads and the code that runs it across two files of a package, so neither file shows the shape alone: one fetches, the other runs what the first returns. Running code a server sends is the shape no library needs \u2014 whoever controls the server chooses what runs."
+    }
+   }
+  },
+  "_XF_SITE_MARKERS": {
+   "list": [
+    {
+     "value": "site-packages"
+    },
+    {
+     "value": "dist-packages"
+    }
+   ]
   },
   "_XF_SPACE_RE": {
    "flags": "",
@@ -9310,6 +15434,16 @@
   "_XF_STATIC_RE": {
    "flags": "",
    "re": "^[ \\t]*@(?:staticmethod|classmethod)\\b"
+  },
+  "_XF_TAILS": {
+   "list": [
+    {
+     "value": "the value is received in another file of the package ({where})"
+    },
+    {
+     "value": "the function that runs it is in another file of the package ({where})"
+    }
+   ]
   },
   "_XF_WHY": {
    "value": "A dropper can split what it downloads and the code that runs it across two files of a package, so neither file shows the shape alone: one fetches, the other runs what the first returns. Running code a server sends is the shape no library needs \u2014 whoever controls the server chooses what runs."

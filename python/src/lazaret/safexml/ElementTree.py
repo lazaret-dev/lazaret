@@ -49,9 +49,11 @@ from xml.parsers import expat
 from ._common import (
     DEFAULT_MAX_ATTLIST_DEFAULTS,
     DEFAULT_MAX_DEPTH,
+    UNKNOWN_ENCODING,
     Options,
     SafeXMLError,
     depth_exceeded,
+    encoding_failure,
     install_handlers,
     size_exceeded,
 )
@@ -183,12 +185,16 @@ class XMLParser:
             self.parser.Parse(data, False)
         except expat.error as exc:
             self._raise_parse_error(exc)
+        except (LookupError, ValueError) as exc:
+            self._raise_encoding_error(exc)
 
     def close(self) -> Any:
         try:
             self.parser.Parse(b"", True)
         except expat.error as exc:
             self._raise_parse_error(exc)
+        except (LookupError, ValueError) as exc:
+            self._raise_encoding_error(exc)
         try:
             close = self.target.close
         except AttributeError:
@@ -211,6 +217,8 @@ class XMLParser:
             parser.Parse(b"", False)
         except expat.error as exc:
             self._raise_parse_error(exc)
+        except (LookupError, ValueError) as exc:
+            self._raise_encoding_error(exc)
         finally:
             parser.SetReparseDeferralEnabled(was_enabled)
 
@@ -219,6 +227,17 @@ class XMLParser:
         err = ParseError(exc)
         err.code = exc.code
         err.position = exc.lineno, exc.offset
+        raise err from None
+
+    @staticmethod
+    def _raise_encoding_error(exc: Exception) -> None:
+        """A declared encoding Expat can't read is a ParseError like any
+        malformed document (F-1); anything else (a refusal) goes on as it is."""
+        if not encoding_failure(exc):
+            raise exc
+        err = ParseError(f"{UNKNOWN_ENCODING}: line 1, column 0")
+        err.code = expat.errors.codes[expat.errors.XML_ERROR_UNKNOWN_ENCODING]
+        err.position = 1, 0
         raise err from None
 
 

@@ -29,6 +29,8 @@ from ._common import (
     LimitedReader,
     Options,
     depth_exceeded,
+    encoding_failure,
+    expat_encoding_error,
     install_handlers,
     size_exceeded,
 )
@@ -85,7 +87,20 @@ class SafeXMLRPCParser(_client.ExpatParser):
         limit = self.options.max_bytes
         if limit is not None and self._fed > limit:
             raise size_exceeded(limit)
-        super().feed(data)
+        try:
+            super().feed(data)
+        except (LookupError, ValueError) as exc:
+            if not encoding_failure(exc):
+                raise
+            raise expat_encoding_error() from None      # an ExpatError, as for malformed XML (F-1)
+
+    def close(self) -> None:
+        try:
+            super().close()
+        except (LookupError, ValueError) as exc:
+            if not encoding_failure(exc):
+                raise
+            raise expat_encoding_error() from None
 
 
 def _split_safe(kwargs: dict[str, Any]) -> dict[str, Any]:

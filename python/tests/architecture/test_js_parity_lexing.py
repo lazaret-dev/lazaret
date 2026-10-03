@@ -6,14 +6,14 @@ test_js_parity). The
 expectations themselves are in tests/scanner/test_review_lexing.py and
 js/test/review-lexing.test.js; this only holds the engines to each other.
 All content is inert (nothing is executed; hosts are .invalid). Skipped
-where node is missing.
+where the npm engine is not built (node, and npm run build in js/).
 """
 import collections
 import os
 import tempfile
 import unittest
 
-from tests.architecture.test_js_parity import DERIVED, NODE, _python_only, both, derived, issue_key
+from tests.architecture.test_js_parity import DERIVED, NODE, _python_only, both, derived, issue_key, NPM_READY, NPM_SKIP
 
 TREE = {
     # comment masking fails closed (a comment only where both readings agree)
@@ -80,7 +80,7 @@ def write_tree(root, tree):
             f.write(data if isinstance(data, bytes) else data.encode("utf-8"))
 
 
-@unittest.skipUnless(NODE, "node is not installed")
+@unittest.skipUnless(NPM_READY, NPM_SKIP)
 class LexingParityTests(unittest.TestCase):
     maxDiff = None
 

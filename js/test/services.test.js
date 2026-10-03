@@ -3,8 +3,9 @@
 // fails on a systemd unit written or enabled, a launchd agent written or
 // loaded, a cron job installed, a Windows Run key written, a scheduled task
 // created, the Startup folder written and an XDG autostart entry; import-time
-// code never gets these. tests/architecture/test_js_parity_hooks.py compares
-// the engines on a random corpus. Inert text only: nothing is executed.
+// code never gets these. tests/architecture/test_snapshot_signs.py holds
+// the engine to its recorded outputs on a random corpus (the npm package
+// runs the native engine). Inert text only: nothing is executed.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -13,7 +14,7 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { serviceReasons, installScriptRisk, importTimeRisk } from "../src/lib/hooks.js";
+import { serviceReasons, installScriptRisk, importTimeRisk } from "../src/lib/native.js";
 
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "bin", "lazaret.js");
 const UNIT_WRITER = "const { execSync } = require('child_process');\nconst fs = require('fs');\nconst os = require('os');\n"
@@ -104,7 +105,7 @@ test("an install hook's command and the script it runs", () => {
     spawnSync(process.execPath, [CLI, root, "--deps", "--out-dir", out, "-q"], { encoding: "utf8" });
     const rep = JSON.parse(readFileSync(join(out, "lazaret-report.json"), "utf8"));
     assert.deepEqual(rep.issues.filter((i) => i.rule === "SC-INSTALL-HOOK").map((i) => [i.file.replaceAll("\\", "/"), i.sev, i.msg]).sort(), [
-      ["node_modules/p/package.json", "CRITICAL", "Install hook command installs a systemd service."],
+      ["node_modules/p/package.json", "CRITICAL", '"postinstall" script installs a systemd service.'],
       ["node_modules/q/package.json", "CRITICAL", "Install hook runs index.js, which installs a systemd service."]]);
   } finally {
     rmSync(root, { recursive: true, force: true });

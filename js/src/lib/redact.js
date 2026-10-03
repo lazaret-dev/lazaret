@@ -51,12 +51,13 @@ export function entropySecretish(v) {
 
 // ---- provider token signatures, matched in linear time --------------------
 // Same language as the S-TOKEN rule regex
-//   AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36}|xox[baprs]-[A-Za-z0-9-]{10,}
+//   AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}
+//   |xox[baprs]-[A-Za-z0-9-]{10,}
 //   |sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\-]{35}
 //   |-----BEGIN [A-Z ]*PRIVATE KEY-----|eyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}
 // but without the backtracking blow-up of the JWT alternative on a run of
 // "eyJeyJeyJ…" (every head rescanned the whole run: quadratic).
-const HEAD_RE = /AKIA|gh[pousr]_|xox[baprs]-|sk_live_|AIza|-----BEGIN |eyJ/g;
+const HEAD_RE = /AKIA|gh[pousr]_|github_pat_|xox[baprs]-|sk_live_|AIza|-----BEGIN |eyJ/g;
 const HEAD_RE_REDACT = /AKIA|gh[pousr]_|github_pat_|xox[baprs]-|sk_live_|AIza|-----BEGIN |eyJ/g;
 const PEM_END_G = /-----END [A-Z ]*PRIVATE KEY-----/g;
 const isPat = (c) => isAlnum(c) || c === 95;                     // [A-Za-z0-9_]
@@ -75,8 +76,9 @@ function fixedRun(s, i, n, pred) {
 /**
  * Leftmost S-TOKEN match at or after `from`: {index, end, text} or null.
  * `redact` switches to the redaction pattern (core._SECRET_LINE_PATTERNS[0]):
- * gh[pousr]_ takes 36+ characters, github_pat_… tokens count, and a PEM
- * header takes the rest of the line (through a same-line END marker).
+ * gh[pousr]_ takes 36+ characters, github_pat_ any 22+ of [A-Za-z0-9_] (S-TOKEN
+ * reads the token's own form, 22 and 59 characters around an underscore), and
+ * a PEM header takes the rest of the line (through a same-line END marker).
  */
 export function findSecretToken(s, from = 0, { redact = false } = {}) {
   const head = new RegExp(redact ? HEAD_RE_REDACT.source : HEAD_RE.source, "g");
@@ -93,7 +95,10 @@ export function findSecretToken(s, from = 0, { redact = false } = {}) {
         else if (fixedRun(s, p + 4, 35, isJwt)) end = p + 39;
         break;
       case "g":
-        if (m[0] === "github_pat_") { const e = runEnd(s, p + 11, isPat); if (e - (p + 11) >= 22) end = e; }
+        if (m[0] === "github_pat_") {
+          if (redact) { const e = runEnd(s, p + 11, isPat); if (e - (p + 11) >= 22) end = e; }
+          else if (fixedRun(s, p + 11, 22, isAlnum) && s.charCodeAt(p + 33) === 95 && fixedRun(s, p + 34, 59, isAlnum)) end = p + 93;
+        }
         else if (redact) { const e = runEnd(s, p + 4, isAlnum); if (e - (p + 4) >= 36) end = e; }
         else if (fixedRun(s, p + 4, 36, isAlnum)) end = p + 40;
         break;

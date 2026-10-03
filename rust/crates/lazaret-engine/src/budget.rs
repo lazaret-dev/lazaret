@@ -1,12 +1,14 @@
 //! A bound on the work one engine call may do.
 //!
-//! Every backtracking step of the regex matcher is counted against the
-//! budget of the call in progress (a thread's own). Python's `re` has no such
-//! bound, and the reference engine's patterns are bounded by construction, so
-//! on every input the corpora hold the budget is never reached; if a hostile
-//! input reaches it, the call stops and reports `Exhausted` instead of
-//! answering, and the binding answers with the Python reference engine
-//! instead (a slow answer, never a different one).
+//! The regex engines count their work against the budget of the call in
+//! progress (a thread's own): pyre each backtracking step and a sixteenth of
+//! each character a scan reads, linre a sixteenth of the characters its
+//! automata read (neither charges the scans for a pattern's strings, nor a
+//! search the text gate answers). Python's `re` has no such bound. On every
+//! input the corpora hold the budget is never reached; if a hostile input
+//! reaches it, the call stops and reports `Exhausted` instead of answering,
+//! and both packages make the file SC-TRUNCATED (it was not fully read, so
+//! it fails the gate).
 
 use std::cell::Cell;
 

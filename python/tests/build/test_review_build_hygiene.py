@@ -11,6 +11,11 @@ artifacts on every OS.
   only byte-identical on POSIX with LF files.
 - Metadata-Version 2.4 (PEP 639): License-Expression + License-File, and no
   "License ::" classifier (PyPI rejects the combination).
+
+Since the Rust-first refactor every wheel carries the native engine and the
+sdist its sources (rust/): a tree here is python/ with the engine's sources
+beside it as in an sdist, and its wheels carry the library the suite runs
+on, tagged for this machine (nothing is compiled).
 """
 
 import os
@@ -28,18 +33,28 @@ from unittest import mock
 from tests import _support
 
 PY_ROOT = pathlib.Path(_support.PY_ROOT)
-TEXT_SUFFIXES = (".py", ".sql", ".html", ".md", ".toml")
+TEXT_SUFFIXES = (".py", ".sql", ".html", ".md", ".toml", ".rs", ".lock", ".json")
 
 
 def copy_python_tree(dest):
-    """The files the backend reads, copied to dest (no caches)."""
+    """The files the backend reads, copied to dest (no caches): python/'s, and
+    the engine's sources the sdist carries, under dest/rust/ as in an sdist."""
     dest = pathlib.Path(dest)
-    for name in ("pyproject.toml", "README.md", "LICENSE"):
+    for name in ("pyproject.toml", "README.md", "LICENSE", "LICENSE-UNICODE"):
         shutil.copy2(PY_ROOT / name, dest / name)
-    ignore = shutil.ignore_patterns("__pycache__", "*.pyc")
+    ignore = shutil.ignore_patterns("__pycache__", "*.pyc", "_native")
     shutil.copytree(PY_ROOT / "_build", dest / "_build", ignore=ignore)
     shutil.copytree(PY_ROOT / "src", dest / "src", ignore=ignore)
+    for rel, path in load_backend(PY_ROOT)._rust_files():
+        (dest / "rust" / rel).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, dest / "rust" / rel)
     return dest
+
+
+def library_env(b):
+    """The environment a wheel of the suite's library, for this machine, is built in."""
+    from lazaret.scanner import _native
+    return {"LAZARET_NATIVE_LIBRARY": _native.library_path(), "LAZARET_WHEEL_PLATFORM": b.local_platform()}
 
 
 _loaded = 0
@@ -75,8 +90,14 @@ class Tree:
         self.out.mkdir()
         self.b = load_backend(self.root)
 
-    def wheel(self):
-        return self.out / self.b.build_wheel(str(self.out))
+    def wheel(self, out=None):
+        out = self.out if out is None else pathlib.Path(out)
+        with mock.patch.dict(os.environ, library_env(self.b)):
+            return out / self.b.build_wheel(str(out))
+
+    def rust_files(self):
+        """The engine's sources the sdist carries, as the sdist names them."""
+        return ["rust/" + rel for rel, _path in self.b._rust_files()]
 
     def sdist(self):
         return self.out / self.b.build_sdist(str(self.out))
@@ -98,15 +119,16 @@ class AllowlistTests(unittest.TestCase):
         expected = old_package_listing(self.tree.pkg)
         self.assertIn("lazaret/registry/schema.sql", expected)
         self.assertIn("lazaret/web/lazaret.html", expected)
+        library = "lazaret/_native/" + self.tree.b.native_library_name(self.tree.b.local_platform())
         with zipfile.ZipFile(self.tree.wheel()) as z:
             shipped = sorted(n for n in z.namelist() if ".dist-info/" not in n)
-        self.assertEqual(shipped, expected)
+        self.assertEqual(shipped, sorted(expected + [library]))       # and the native engine
         with tarfile.open(self.tree.sdist()) as tf:
             base = f"lazaret-{self.tree.b.version()}/"
             names = sorted(n[len(base):] for n in tf.getnames())
-        self.assertEqual(names, sorted(["LICENSE", "PKG-INFO", "README.md", "pyproject.toml",
-                                        "_build/lazaret_build.py"]
-                                       + ["src/" + n for n in expected]))
+        self.assertEqual(names, sorted(["LICENSE", "LICENSE-UNICODE", "LICENSE-PYTHON", "NOTICE", "PKG-INFO",
+                                        "README.md", "pyproject.toml", "_build/lazaret_build.py"]
+                                       + ["src/" + n for n in expected] + self.tree.rust_files()))
 
     def test_bytecode_caches_are_skipped_not_errors(self):
         cache = self.tree.pkg / "scanner" / "__pycache__"
@@ -194,7 +216,9 @@ class CrossPlatformBytesTests(unittest.TestCase):
     def test_wheel_bytes_do_not_depend_on_the_platform(self):
         # zipfile.ZipInfo picks create_system from sys.platform when it is built
         native = self.lf.wheel().read_bytes()
-        with tempfile.TemporaryDirectory() as d, mock.patch.object(sys, "platform", "win32"):
+        env = library_env(self.lf.b)
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(sys, "platform", "win32"), \
+                mock.patch.dict(os.environ, env):
             windows = (pathlib.Path(d) / self.lf.b.build_wheel(d)).read_bytes()
         self.assertEqual(native, windows)
 
@@ -203,11 +227,12 @@ class CrossPlatformBytesTests(unittest.TestCase):
         self.addCleanup(crlf.close)
         converted = 0
         for path in crlf.root.rglob("*"):
-            if path.is_file() and (path.suffix in TEXT_SUFFIXES or path.name == "LICENSE"):
+            if path.is_file() and (path.suffix in TEXT_SUFFIXES or path.name.startswith("LICENSE")
+                                   or path.name == "NOTICE"):
                 data = path.read_bytes()
                 path.write_bytes(data.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
                 converted += 1
-        self.assertGreater(converted, 20)
+        self.assertGreater(converted, 100)          # the engine's sources among them
         crlf.b = load_backend(crlf.root)     # reload the (now CRLF) backend source
         self.assertEqual(self.lf.wheel().read_bytes(), crlf.wheel().read_bytes())
         self.assertEqual(self.lf.sdist().read_bytes(), crlf.sdist().read_bytes())
@@ -226,10 +251,12 @@ class MetadataTests(unittest.TestCase):
             cls.meta = z.read(f"{dist_info}/METADATA").decode("utf-8")
             cls.names = z.namelist()
             cls.license = z.read(f"{dist_info}/licenses/LICENSE")
+            cls.unicode_license = z.read(f"{dist_info}/licenses/LICENSE-UNICODE")
         with tarfile.open(cls.tree.sdist()) as tf:
             base = f"lazaret-{cls.version}/"
             cls.pkg_info = tf.extractfile(base + "PKG-INFO").read().decode("utf-8")
             cls.sdist_license = tf.extractfile(base + "LICENSE").read()
+            cls.sdist_unicode_license = tf.extractfile(base + "LICENSE-UNICODE").read()
         cls.headers = cls.meta.split("\n\n", 1)[0].splitlines()
 
     @classmethod
@@ -241,14 +268,18 @@ class MetadataTests(unittest.TestCase):
 
     def test_pep_639_license_fields(self):
         self.assertEqual(self.headers[0], "Metadata-Version: 2.4")
-        self.assertEqual(self.field("License-Expression"), ["Apache-2.0"])
-        self.assertEqual(self.field("License-File"), ["LICENSE"])
+        # the Unicode 13.0 table and the dashboard's Unicode and codec tables are Unicode data (0.1.8);
+        # the native engine translates CPython code (rust/NOTICE), and every artifact carries it
+        self.assertEqual(self.field("License-Expression"), ["Apache-2.0 AND Python-2.0.1 AND Unicode-3.0"])
+        self.assertEqual(self.field("License-File"), ["LICENSE", "LICENSE-UNICODE", "LICENSE-PYTHON", "NOTICE"])
         self.assertEqual(self.field("License"), [])      # superseded by License-Expression
         self.assertEqual([c for c in self.field("Classifier") if c.startswith("License ::")], [])
         # License-File paths resolve in both artifacts
         self.assertIn(f"lazaret-{self.version}.dist-info/licenses/LICENSE", self.names)
         self.assertEqual(self.license, self.sdist_license)
         self.assertIn(b"Apache License", self.license)
+        self.assertEqual(self.unicode_license, self.sdist_unicode_license)
+        self.assertIn("UNICODE LICENSE V3".encode(), self.unicode_license)
 
     def test_python_versions_and_urls(self):
         classifiers = self.field("Classifier")

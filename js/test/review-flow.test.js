@@ -1,5 +1,6 @@
 // The cross-file flow engine's JavaScript half (src/scanner/flow.js and,
-// since 0.1.7, src/scanner/jsflow.js on parsed trees), twin of
+// since 0.1.7, a pass on parsed trees: the engine's,
+// rust/crates/lazaret-engine/src/jsflow/), twin of
 // lazaret.scanner.flow's: a request value passed into a function whose
 // parameter reaches a sink (command, code, SQL, XSS, SSRF, redirect) is an
 // X-* finding at the call site that names the sink's own file and line.
@@ -126,11 +127,11 @@ function tree(files) {
   return d;
 }
 
-test("the CLI reports the flow, redacts its snippet, and the gate says Python was not analyzed", () => {
+test("the CLI reports both languages' flows, redacts a snippet, and the gate is the Python engine's", () => {
   const d = tree({
     "lib/h.js": "const { exec } = require('child_process');\nfunction runIt(cmd) {\n  exec('ls ' + cmd);\n}\nmodule.exports = { runIt };\n",
     "app.js": `const { runIt } = require('./lib/h');\napp.get('/x', (req, res) => {\n  const seed = "${SEED}";\n  runIt(req.query.q);\n});\n`,
-    "tool.py": "def add(a, b):\n    return a + b\n",
+    "tool.py": "import os\nfrom flask import request\n\ndef run(cmd):\n    os.system(cmd)\n\ndef view():\n    run(request.args.get('c'))\n",
   });
   try {
     const report = (extra) => {
@@ -141,22 +142,22 @@ test("the CLI reports the flow, redacts its snippet, and the gate says Python wa
     };
     const rep = report([]);
     const flows = rep.issues.filter((i) => i.rule.startsWith("X-"));
-    assert.deepEqual(flows.map((i) => [i.rule, i.file, i.line]), [["X-CMD", "app.js", 4]]);
+    assert.deepEqual(flows.map((i) => [i.rule, i.file, i.line]), [["X-CMD", "app.js", 4], ["X-CMD", "tool.py", 8]]);
+    assert.match(flows[1].msg, /untrusted data from tool\.py:8 reaches a sink at tool\.py:5 \(in run\(\)\) \(interprocedural\)/);
     // the sink path uses the OS separator (native on Windows, like the finding's
     // `file` field and the Python engine), so normalize it before matching
     assert.match(flows[0].msg.replaceAll("\\", "/"), /reaches a sink at lib\/h\.js:3 \(in runIt\(\)\) \(cross-file\)/);
     assert.equal(flows[0].snippet[3 - flows[0].snipStart], '  const seed = "[redacted]";');
     assert.ok(!JSON.stringify(rep).includes(SEED));
-    assert.equal(rep.crossFile, 1);
-    assert.deepEqual(rep.conditions.at(-1),
-      { label: "No cross-file taint flows (JavaScript only: 1 Python file not analyzed)", ok: false });
+    assert.equal(rep.crossFile, 2);
+    assert.deepEqual(rep.conditions.at(-1), { label: "No cross-file taint flows", ok: false });
     assert.equal(rep.pass, false);
     // --no-redact-secrets still works for a project scan
     assert.ok(JSON.stringify(report(["--no-redact-secrets"]).issues.filter((i) => i.rule === "X-CMD")).includes(SEED));
   } finally { rmSync(d, { recursive: true, force: true }); }
 });
 
-test("without Python files the gate label is the Python engine's", () => {
+test("without flows the gate passes, with the Python engine's label", () => {
   const d = tree({ "app.js": "const a = 1;\n" });
   try {
     assert.equal(run(["check", d, "-q", "--no-html"], { out: () => {}, err: () => {}, env: {} }), 0);

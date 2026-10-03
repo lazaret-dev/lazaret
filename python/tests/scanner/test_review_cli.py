@@ -173,13 +173,22 @@ class PerFileErrors(unittest.TestCase):
     def test_one_file_exception_becomes_a_finding(self):
         root = make_tree({"a.py": "eval(x)\n", "boom.py": "x = 1\n", "package.json": "{}"})
         self.addCleanup(shutil.rmtree, root, True)
-        real = core.scan_file
+        real, real_after_rules = core.scan_file, core.scan_file_after_rules
 
+        # boom.py's scan raises with either engine: in core's scan_file (the
+        # Python engine's, and each file's own retry after a batch fails), or
+        # in the part of it core runs after the native engine's rules
         def scan_file(path, content, lang, dep=False):
             if path == "boom.py":
                 raise RecursionError("maximum recursion depth exceeded")
             return real(path, content, lang, dep=dep)
+
+        def scan_file_after_rules(path, content, lang, rules):
+            if path == "boom.py":
+                raise RecursionError("maximum recursion depth exceeded")
+            return real_after_rules(path, content, lang, rules)
         with mock.patch.object(core, "scan_file", scan_file), \
+                mock.patch.object(core, "scan_file_after_rules", scan_file_after_rules), \
                 mock.patch.object(core, "scan_manifest", side_effect=ValueError("bad")):
             res = core.scan_project(root)
         errs = {i["file"]: i for i in res["issues"] if i["rule"] == "SC-TRUNCATED"}

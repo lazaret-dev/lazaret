@@ -18,6 +18,9 @@ pub enum Value {
     Str(Vec<u32>),
     Arr(Vec<Value>),
     Obj(Vec<(Vec<u32>, Value)>),
+    /// JSON text written as it is (a call's answer serialized already: a
+    /// parse tree, which may be deeper than a `Value` should be).
+    Raw(String),
 }
 
 pub const MAX_DEPTH: usize = 500;
@@ -329,6 +332,7 @@ pub fn write_into(out: &mut String, v: &Value) {
             }
         }
         Value::Str(s) => write_str(out, s),
+        Value::Raw(s) => out.push_str(s),
         Value::Arr(items) => {
             out.push('[');
             for (i, x) in items.iter().enumerate() {

@@ -1,4 +1,4 @@
-"""The npm tarball never carries dotfiles or keys.
+"""The npm tarball never carries dotfiles or keys, and carries the engine.
 
 package.json "files" whitelists bin/ and src/, and npm's built-in ignores
 already drop ._*, .DS_Store, *.orig and .*.swp, but a .env, .env.local,
@@ -58,6 +58,21 @@ class NpmPackTests(unittest.TestCase):
             with open(path, "w", encoding="utf-8", newline="\n") as f:
                 f.write("TOKEN=dummy-not-a-secret\n")
         self.assertEqual(packed(self.root), clean)
+
+    def test_the_engine_and_its_notices_are_packed_and_nothing_else_of_native(self):
+        # 0.1.8: the native engine as WebAssembly (npm run build) and its
+        # notices; a stray build product or secret in native/ stays out
+        for name in ("NOTICE", "LICENSE-PYTHON", "LICENSE-UNICODE"):
+            shutil.copy2(os.path.join(JS, name), self.root)
+        native = os.path.join(self.root, "native")
+        os.makedirs(native)
+        for name in ("lazaret.wasm", "NOTICE", "lazaret.wasm.map", "other.wasm", "lazaret.d.ts", ".env"):
+            with open(os.path.join(native, name), "w", encoding="utf-8", newline="\n") as f:
+                f.write("TOKEN=dummy-not-a-secret\n")
+        files = packed(self.root)
+        self.assertEqual([f for f in files if f.startswith("native/")], ["native/NOTICE", "native/lazaret.wasm"])
+        for name in ("package.json", "README.md", "LICENSE", "LICENSE-PYTHON", "LICENSE-UNICODE", "NOTICE"):
+            self.assertIn(name, files)
 
 
 if __name__ == "__main__":

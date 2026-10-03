@@ -1,6 +1,6 @@
 """0.1.8: the exfiltration shapes (tests/scanner/test_exfiltration_shapes.py)
-in registry scans: a wheel whose module sends a Telegram bot what it
-collects, an sdist whose setup.py opens a socket to a hard-coded address, an
+in registry scans: a wheel whose module sends its author's Telegram bot
+what it collects (a webhook whose secret is written in the code), an sdist whose setup.py opens a socket to a hard-coded address, an
 npm package whose main posts to a Slack webhook, and a module run only when
 used (SC-USE-RISK) that sweeps credential folders — each SUSPICIOUS; and a
 wheel that talks to Telegram with its user's token stays OK. The secrets are
@@ -12,7 +12,7 @@ import unittest
 from tests.registry._review_support import scan_npm, scan_sdist, scan_wheel
 
 TG = "1234567" + "89:AA" + "bC3dE5fG7hJ9kL1mN3pQ5rS7tV9wX1yZ3"
-SLACK = "hooks.slack.com/services/" + "TABCDEF12/" + "BABCDEF12/" + "aBcDeFgHiJkLmNoPqRsTuVwX"
+SLACK = "hooks.slack.com/services/" + "TABCDEF12/" + "BABCDEF12/" + "aBcDeFgHiJkLmNoPqRsTuV12"
 META = "Name: lit\nVersion: 1.0\n"
 
 
@@ -28,7 +28,7 @@ class ExfiltrationRegistryTests(unittest.TestCase):
                           "lit-1.0.dist-info/METADATA": META})
         self.assertEqual(res["verdict"], "SUSPICIOUS", res["verdictReason"])
         self.assertIn(("lit/core.py", "CRITICAL", "lit/core.py runs when the package is loaded, and it sends data to a "
-                       "Telegram bot whose token is written in the code (bot 123456789)."),
+                       "webhook whose secret is written in the code (api.telegram.org)."),
                       reasons(res, "SC-IMPORT-RISK"))
 
     def test_an_sdist_whose_setup_py_opens_a_socket(self):

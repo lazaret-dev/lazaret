@@ -29,8 +29,8 @@ class StartedScriptTests(unittest.TestCase):
         manifest = json.dumps({"name": "x", "version": "1.0.0", "scripts": {"postinstall": "node lib/start.js"}})
         res = scan_npm({"package.json": manifest, "lib/start.js": STARTER, "lib/worker/run.js": WORKER})
         self.assertEqual(hooks(res), [("package.json", "CRITICAL",
-                                       "Install hook runs lib/start.js, which starts lib/worker/run.js, which reads "
-                                       "environment variables or credential files and sends data over the network.")])
+                                       "Install hook runs lib/start.js, which starts lib/worker/run.js, which sends "
+                                       "environment variables over the network (the whole environment).")])
         self.assertEqual(res["verdict"], "SUSPICIOUS", res["verdictReason"])
 
     def test_a_chain_of_starts_is_followed_and_bounded(self):

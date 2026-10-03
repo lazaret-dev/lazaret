@@ -33,7 +33,7 @@ All content is inert.
 import unittest
 
 from tests import _support  # noqa: F401
-from lazaret.scanner import core
+from lazaret.scanner import core, frameworks
 
 FLASK = "from flask import Flask, request, send_file, send_from_directory, abort\napp = Flask(__name__)\n"
 FASTAPI = ("from fastapi import FastAPI, Depends, Request, WebSocket, BackgroundTasks\n"
@@ -169,10 +169,10 @@ class FrameworkModelTests(unittest.TestCase):
                                        "            e: Annotated[str, Query()] = None, f: Response = None):\n    pass\n"
                              ).split("\n"), "py")
         self.assertEqual(core._route_params(ctx), {6: ["a", "e"]})
-        self.assertTrue(core._safe_type("Optional[Annotated[list[uuid.UUID], Query()]]"))
-        self.assertTrue(core._safe_type("int | None"))
-        self.assertFalse(core._safe_type("Union[int, str]"))
-        self.assertFalse(core._safe_type("dict[str, int]"))
+        self.assertTrue(frameworks.safe_type("Optional[Annotated[list[uuid.UUID], Query()]]"))
+        self.assertTrue(frameworks.safe_type("int | None"))
+        self.assertFalse(frameworks.safe_type("Union[int, str]"))
+        self.assertFalse(frameworks.safe_type("dict[str, int]"))
         self.assertEqual(core._signature_params("def f(self, a: dict[str, int] = {'x': 1}, *args, b=f(1, 2), **kw):"),
                          [("self", "", ""), ("a", "dict[str, int]", "{'x': 1}"), ("args", "", ""),
                           ("b", "", "f(1, 2)"), ("kw", "", "")])

