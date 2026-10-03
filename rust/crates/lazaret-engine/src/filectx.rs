@@ -322,6 +322,54 @@ impl<'p> FileCtx<'p> {
         }
     }
 
+    /// Is `pos` (an offset in `content`) code: in no comment and, in
+    /// JavaScript and Python, in no literal (a string, a template's or an
+    /// f-string's text, a regular expression; a template's or an f-string's
+    /// holes are code)?
+    pub fn in_code(&self, pos: usize) -> bool {
+        let i = self.starts.partition_point(|&x| x <= pos).saturating_sub(1);
+        let rel = pos - self.starts[i];
+        if self.cspans[i].iter().any(|&(a, b)| a <= rel && rel < b) {
+            return false;
+        }
+        !self.literals.as_ref().is_some_and(|l| crate::lex::within(l, pos))
+    }
+
+    /// Line i's literals (every literal: a string, a template's or an
+    /// f-string's text, a regular expression, one begun on an earlier line
+    /// too) as spans of its match text without comments ([`Self::mcode`]),
+    /// sorted. None where that text is not the line's own characters less
+    /// its comments (NFKC, decoded escapes) or the language has no literals.
+    pub fn code_literals(&self, i: usize) -> Option<Vec<(usize, usize)>> {
+        let literals = self.literals.as_ref()?;
+        if self.mlines[i].is_some() {
+            return None;
+        }
+        let (base, end) = (self.starts[i], self.ends[i]);
+        let cuts = &self.cspans[i];
+        // a point of the line, in the text with the comments cut out
+        let at = |x: usize| -> usize {
+            let mut gone = 0;
+            for &(a, b) in cuts {
+                if a >= x {
+                    break;
+                }
+                gone += b.min(x) - a;
+            }
+            x - gone
+        };
+        let mut out = Vec::new();
+        let mut k = literals.partition_point(|&(_, e)| e <= base); // the first literal ending after base
+        while k < literals.len() && literals[k].0 < end {
+            let (a, b) = (at(literals[k].0.max(base) - base), at(literals[k].1.min(end) - base));
+            if b > a {
+                out.push((a, b));
+            }
+            k += 1;
+        }
+        Some(out)
+    }
+
     /// _FileCtx._js_text: line i's match text (its identifier escapes
     /// decoded outside '…' "…" literals, U+FEFF read as a space);
     /// `blanked`: line i with some of its text blanked, to read instead.
@@ -412,5 +460,42 @@ pub fn js_ident_char(p: &Pack, digits: &[u32]) -> Option<u32> {
         Some(cp)
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Where `what` starts in `text` (ASCII), in characters.
+    fn at(text: &str, what: &str) -> usize {
+        text.find(what).expect(what)
+    }
+
+    fn ctx_of<'p>(p: &'p Pack, text: &str, lang: Lang) -> FileCtx<'p> {
+        let t: Vec<u32> = text.chars().map(|c| c as u32).collect();
+        FileCtx::new(p, &t, lang, false)
+    }
+
+    #[test]
+    fn code_is_neither_a_comment_nor_a_literal() {
+        let p = crate::pack::current();
+        let py = "x = a ^ b  # O(n^2)\ns = 'c ^ d'\nf = f'{e ^ g} h^i'\n\"\"\"\nj ^ k\n\"\"\"\n";
+        let ctx = ctx_of(&p, py, Lang::Py);
+        assert!(ctx.in_code(at(py, "a ^")));
+        assert!(!ctx.in_code(at(py, "n^2")), "a comment");
+        assert!(!ctx.in_code(at(py, "c ^")), "a string");
+        assert!(ctx.in_code(at(py, "e ^")), "an f-string's hole");
+        assert!(!ctx.in_code(at(py, "h^i")), "an f-string's text");
+        assert!(!ctx.in_code(at(py, "j ^")), "a docstring's other lines");
+        let js = "const k = a ^ b; // n^2\nconst r = /x^y/; const t = `${c ^ d} e^f`;\n/* g ^ h */ q(i ^ j);\n";
+        let ctx = ctx_of(&p, js, Lang::Js);
+        assert!(ctx.in_code(at(js, "a ^")));
+        assert!(!ctx.in_code(at(js, "n^2")), "a line comment");
+        assert!(!ctx.in_code(at(js, "x^y")), "a regular expression");
+        assert!(ctx.in_code(at(js, "c ^")), "a template's hole");
+        assert!(!ctx.in_code(at(js, "e^f")), "a template's text");
+        assert!(!ctx.in_code(at(js, "g ^")), "a block comment");
+        assert!(ctx.in_code(at(js, "i ^")));
     }
 }

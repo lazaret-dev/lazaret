@@ -1678,7 +1678,7 @@ fn region_names_path(p: &Pack, region: &[u32], path: &[u32]) -> bool {
 /// core._dl_command_runs: does the command line `line` (a string literal's
 /// text) run the file `path` — as a command's program, or as what a program
 /// that runs its argument is given (_DL_RUNNERS)?
-fn command_runs(p: &Pack, line: &[u32], path: &[u32]) -> bool {
+pub(crate) fn command_runs(p: &Pack, line: &[u32], path: &[u32]) -> bool {
     let runners = p.strs("_DL_RUNNERS");
     let mut first = true;
     let mut runner = false;

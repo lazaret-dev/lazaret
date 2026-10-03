@@ -46,7 +46,7 @@ pub const CALLS: &[&str] = &[
     "local_data_sent_at", "runs_own_source_at", "reads_own_source", "persistence_reasons",
     // phase 3 step 3: the data flow and received code on the JavaScript and Python trees (the
     // supply-chain models; {"lang": "py"} asks Python's)
-    "local_data_sent_tree", "received_code_tree",
+    "local_data_sent_tree", "received_code_tree", "decoded_runs_tree", "dropped_run_tree",
     "dumps_workflow_secrets", "pipes_download_to_shell", "runs_substituted_download", "offscreen_code",
     "lex_comment_spans", "logical_text", "hooks_view", "signs_view",
     // 0.1.8: the exfiltration shapes, programs started at login or boot
@@ -572,6 +572,40 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
             Some(None) => Value::Null,
             None => Value::str("unread"),
         },
+        // code the text decodes and runs: [[the run's offset, the decoding's], …]
+        "decoded_runs_tree" => match if lang == Some("py") {
+            crate::pyflow::supply::decoded_runs(text)
+        } else {
+            crate::jsflow::supply::decoded_runs(text)
+        } {
+            Some(runs) => Value::Arr(runs.iter().map(|&(a, f)| Value::Arr(vec![Value::Int(a as i64), Value::Int(f as i64)])).collect()),
+            None => Value::str("unread"),
+        },
+        // a file the text writes, then runs: [line, what it held, the carved file, the interpreter]
+        "dropped_run_tree" => match if lang == Some("py") {
+            crate::pyflow::supply::dropped_run(text)
+        } else {
+            crate::jsflow::supply::dropped_run(text)
+        } {
+            Some(Some(d)) => {
+                let held: Vec<Value> = [(crate::jsflow::supply::K_DECODED, "decoded"), (crate::jsflow::supply::K_CARVED, "carved"), (crate::jsflow::supply::K_RECEIVED, "received")]
+                    .iter()
+                    .filter(|(b, _)| d.kinds & b != 0)
+                    .map(|(_, n)| Value::str(n))
+                    .collect();
+                Value::Arr(vec![
+                    Value::Int(d.line as i64),
+                    Value::Arr(held),
+                    Value::Str(d.what.clone()),
+                    match d.interp {
+                        Some(i) => Value::Str(i),
+                        None => Value::Null,
+                    },
+                ])
+            }
+            Some(None) => Value::Null,
+            None => Value::str("unread"),
+        },
         "runs_own_source_at" => Value::Int(signs::runs_own_source_at(p, text, lang) as i64),
         "reads_own_source" => Value::Bool(signs::reads_own_source(p, text)),
         "persistence_reasons" => strs(&signs::persistence_reasons(p, text)),
@@ -936,7 +970,7 @@ fn js_flow(args: &Value, text: &[u32]) -> Result<Value, CallError> {
                     Value::str(fix),
                 ]),
                 // (the supply-chain model's; project mode never gives one)
-                Out::Send { .. } | Out::Received { .. } => Value::Null,
+                Out::Send { .. } | Out::Received { .. } | Out::Decoded { .. } | Out::Dropped { .. } => Value::Null,
             })
             .collect(),
     ))
@@ -1035,7 +1069,7 @@ fn flow_out(out: Vec<crate::jsflow::Out>, max_file: usize) -> Value {
                     Value::str(fix),
                 ]),
                 // (the supply-chain model's; project mode never gives one)
-                Out::Send { .. } | Out::Received { .. } => Value::Null,
+                Out::Send { .. } | Out::Received { .. } | Out::Decoded { .. } | Out::Dropped { .. } => Value::Null,
             })
             .collect(),
     )

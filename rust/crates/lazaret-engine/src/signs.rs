@@ -3213,7 +3213,59 @@ fn install_script_risk_of(p: &Pack, text: &[u32], shell: bool, command: bool, la
             None => reasons.push(u("writes a file it decodes and runs it")),
         }
     }
+    if let Some((_, r)) = dropped_reason(text, lang) {
+        push_dropped(&mut reasons, r);
+    }
     reasons
+}
+
+/// The reasons a file written, then run, is given (the text detectors' and
+/// the trees'), by what it held: each kind's reason that names the
+/// interpreter running it, and the same kind's that names none.
+const DROPPED_REASONS: &[(&str, &str)] = &[
+    ("writes code it decodes to a file and runs it with ", "writes a file it decodes and runs it"),
+    ("downloads a script and runs it with ", "downloads a file and then runs it"),
+    ("runs a program it extracts from inside another file", ""),
+];
+
+/// A reason for a file written, then run, unless one of its kind is there;
+/// one that names the interpreter takes the place of its kind's that names
+/// none (the text detectors' `cmd /c x.bat` is a file downloaded and run,
+/// the trees' a script run with cmd).
+fn push_dropped(reasons: &mut Vec<PyStr>, r: PyStr) {
+    let named = |x: &[u32]| DROPPED_REASONS.iter().position(|(n, _)| pystr::starts_with(x, n));
+    let kind = |x: &[u32]| named(x).or_else(|| DROPPED_REASONS.iter().position(|(_, b)| !b.is_empty() && pystr::eq(x, b)));
+    if let Some(k) = kind(&r) {
+        if let Some(i) = reasons.iter().position(|x| kind(x) == Some(k)) {
+            if named(&r).is_some() && named(&reasons[i]).is_none() {
+                reasons[i] = r;
+            }
+            return;
+        }
+    }
+    push_new(reasons, r);
+}
+
+/// A file the text writes, then runs, holding code or a program it decodes,
+/// carves out of another file or downloads (a script an interpreter runs),
+/// read on its tree (JavaScript, Python): the run's line and the reason.
+fn dropped_reason(text: &[u32], lang: Option<&str>) -> Option<(usize, PyStr)> {
+    let d = match lang {
+        Some("js") => crate::jsflow::supply::dropped_run(text)?,
+        Some("py") => crate::pyflow::supply::dropped_run(text)?,
+        _ => None,
+    }?;
+    let reason = if d.kinds & crate::jsflow::supply::K_CARVED != 0 {
+        cat(&[&u("runs a program it extracts from inside another file ("), head(&d.what, 60), &u(")")])
+    } else if d.kinds & crate::jsflow::supply::K_DECODED != 0 {
+        match &d.interp {
+            Some(i) => cat(&[&u("writes code it decodes to a file and runs it with "), i]),
+            None => u("writes a file it decodes and runs it"),
+        }
+    } else {
+        cat(&[&u("downloads a script and runs it with "), d.interp.as_ref()?])
+    };
+    Some((d.line, reason))
 }
 
 // ---------------- the import-time test ----------------
@@ -3513,6 +3565,13 @@ fn import_time_risk_of(p: &Pack, text: &[u32], lang: Option<&str>) -> (Vec<PyStr
             None => reasons.push(u("writes a file it decodes and runs it")),
         }
         line = line.or(Some(at));
+    }
+    if let Some((at, r)) = dropped_reason(text, lang) {
+        let before = reasons.len();
+        push_dropped(&mut reasons, r);
+        if reasons.len() > before {
+            line = line.or(Some(at));
+        }
     }
     let mut signs: Vec<(usize, PyStr)> = Vec::new();
     let ps = powershell_risk(p, text);

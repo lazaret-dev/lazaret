@@ -1,7 +1,7 @@
 # hooks: 44893 outputs, a hash per 100 (tests/architecture/_snapshots.py)
 982cb3452b3e24c4
 b71a4eae44865183
-6b985e35c704cb24
+e4409c0d776d9986
 a55102024e3706f0
 6cf95db1471717b0
 64a7793abf3a6fcc

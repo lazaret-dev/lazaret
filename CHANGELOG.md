@@ -272,6 +272,52 @@ before the release.
   a cache restored into the job that can mint a publishing token is a
   cache-poisoning path, and those jobs install nothing to cache. A second
   `v*` tag waits for a running release instead of publishing alongside it.
+- **A file written, then run, and decoded code run, are read on the trees.**
+  The install-script and import-time tests find a script that writes a
+  file and then runs it, when the file holds code or a program the script
+  decodes, carves out of another file, or downloads and hands an
+  interpreter (`docs/RUST_ENGINE.md` §20): "writes code it decodes to a
+  file and runs it with Python", "runs a program it extracts from inside
+  another file (docs/_static/logo.png)" (a new strong reason:
+  requests-darwin-lite's executable cut out of a PNG it ships), "downloads
+  a script and runs it with node". The JavaScript and Python models match
+  the path written to the path run by its binding or the string it holds,
+  through a joined path, a command line made of parts or written out, an
+  interpreter's flags, and a function that writes and another that runs. A
+  binary downloaded and run is not reported (installers do that: esbuild
+  runs `--version` on the binary it fetched), and `cmd` runs a batch file
+  as a script and anything else as a program. A reason that names the
+  interpreter takes the place of the text detectors' for the same run that
+  names none. In dependency scans SC-EVAL-DECODE reads decoded code run on
+  the trees too, for a JavaScript or Python file whose text has a candidate
+  or that writes out a decoder the text doesn't know (an XOR, characters
+  made of their codes, a reversal …) and calls a runner, both in code; the
+  tree's answer stands, and it counts the sinks the text's reading counts
+  (any object's `execSync`, child_process from `await import`). `chr` decodes in a comprehension or `map(chr, …)`,
+  not alone (numpy's crackfortran evaluates `chr(params[n])`), and a
+  WebAssembly module made of decoded bytes is not code run (es-module-lexer,
+  in tsx and vitest). On the benchmark no popular package is SUSPICIOUS
+  any more (3 before): cypress (the look-alike keyword below) and inspect-ai
+  are WARN and jiti is OK. jiti's decoded value is never run on its tree,
+  and inspect-ai's is a web worker's source held in a template literal
+  (below). Three malicious releases become SUSPICIOUS (448
+  of 516): pywhool's XOR-decoded `exec` in setup.py and requests-darwin-lite
+  (both misses the backlog named), and quasarlib, which was INCOMPLETE; five
+  more gain a reason. The holdout gains two PyPI
+  releases (631 of 745), both sharing no code with the benchmark; on
+  installed packages nothing moved. `scan_file` and the import-time test
+  take the time they took. Rule set 2.19.0.
+- **SC-EVAL-DECODE's flow skips literals.** A decode call or a sink in a
+  string, a template's text or a regular expression is not code, so a name
+  decoded or run there starts or ends no flow: in 129 of the scan_file
+  corpus's 4,257 recorded outputs, all generated fragments, and on the
+  benchmark in inspect-ai's web worker, whose source is a template
+  literal in its 6 MB bundle. The per-line pattern still reads strings.
+- **A keyword's look-alike is a name mixing alphabets** (SC-HOMOGLYPH,
+  MAJOR), not "another name in this file" (CRITICAL): no binding can be
+  called `function`, and jQuery's typings, which cypress ships, name a
+  parameter `funсtion` with a Cyrillic с. A look-alike of a name the rule
+  watches for (`import`, `eval` …) stays CRITICAL.
 
 ### Added
 

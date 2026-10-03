@@ -718,6 +718,15 @@ impl<'p> Analyzer<'p> {
                     if let Some(x) = self.sc_subscript(e, &v, &k) {
                         return Ok(x);
                     }
+                    // (a reversal decodes: `s[::-1]`)
+                    if self.sc_reversal(b) {
+                        let at = self.start(e);
+                        return Ok(self.sc_decoded(&v, "a reversal", at));
+                    }
+                    // (a slice of a binary read past its start: bytes carved out of the file)
+                    if let Some(c) = self.sc_carved(b, &v, self.start(e)) {
+                        return Ok(c);
+                    }
                     return Ok(v.plain());
                 }
                 Ok(v)
@@ -727,6 +736,11 @@ impl<'p> Analyzer<'p> {
                 let r = self.expr(b)?;
                 if self.supply {
                     self.sc_binop(e, &r);
+                    // (an XOR decodes: `chr(ord(c) ^ k)`)
+                    if self.t().node(e).op == pt::BITXOR {
+                        let at = self.start(e);
+                        return Ok(self.sc_decoded(&l.union(&r), "an XOR", at));
+                    }
                     return Ok(l.plain().union(&r.plain()));
                 }
                 Ok(l.union(&r))
@@ -816,7 +830,14 @@ impl<'p> Analyzer<'p> {
             }
             Kind::ListComp | Kind::SetComp | Kind::GeneratorExp => {
                 let gens: Vec<u32> = self.t().list(b).to_vec();
-                self.comprehension(&gens, &[a])
+                let v = self.comprehension(&gens, &[a])?;
+                // (characters made of their codes decode: `chr(c) for c in codes`;
+                // one `chr(n)` is a character)
+                if self.supply && self.sc_chr_call(a) {
+                    let at = self.start(e);
+                    return Ok(self.sc_decoded(&v, "characters' codes", at));
+                }
+                Ok(v)
             }
             Kind::DictComp => {
                 let gens: Vec<u32> = self.t().list(c).to_vec();

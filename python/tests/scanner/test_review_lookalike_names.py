@@ -54,6 +54,20 @@ class LookalikeTests(unittest.TestCase):
             "CRITICAL", 1, "'isAdm\u0456n' reads as 'isAdmin', another name in this file, but is spelled with "
                            "U+0456 for 'i'.")])
 
+    def test_a_keyword_is_not_another_name(self):
+        # jQuery's typings (shipped by cypress) name a parameter `function` with
+        # a Cyrillic c: no binding can be called function, so it is a name
+        # mixing alphabets (MAJOR), not a second function (CRITICAL)
+        text = ("declare function each(funcs: any[], funсtion: (i: number) => boolean): void;\n"
+                "export function f() {}\n")
+        self.assertEqual(found(text), [
+            ("MAJOR", 1, "'funсtion' reads as 'function' but is spelled with U+0441 for 'c'.")])
+        self.assertEqual(found("def f(сlass):\n    return сlass\nclass A: pass\n", "py"), [
+            ("MAJOR", 1, "'сlass' reads as 'class' but is spelled with U+0441 for 'c'."),
+            ("MAJOR", 2, "'сlass' reads as 'class' but is spelled with U+0441 for 'c'.")])
+        # a keyword the rule watches is still CRITICAL: import
+        self.assertEqual(found("іmport('x');\nimport y from 'y';\n")[0][0], "CRITICAL")
+
     def test_a_name_that_only_mixes_alphabets(self):
         self.assertEqual(found("const v\u0430lue = 1;\n"),
                          [("MAJOR", 1, "'v\u0430lue' reads as 'value' but is spelled with U+0430 for 'a'.")])

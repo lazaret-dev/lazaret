@@ -698,7 +698,7 @@ benchmark:
 | 0 | Baseline: the detection round committed (rule set 2.15.0), the engine's outputs recorded on the benchmark's files and on installed packages | Done (tag `rust-first-baseline`) |
 | 1 | The Rust engine is the reference: the Python engine, `--engine` and the pure wheel retired; the recorded outputs (§5); the pack as the source of the rules; every wheel a platform wheel, the sdist compiled by pip where none fits; an unanswered file SC-TRUNCATED in both packages | Done |
 | 2 | Decoding, lexers and bytes in the engine: source decoding (BOMs, UTF-16, coding cookies), one token substrate for the detectors | Done (tag `rust-first-phase2`): the lexers (§15: every caller's comments and literals, both packages), the self-read on them, the decoded view on string values (§15). Moved: the data flow, the dead drop, the secret endpoints and received code to phase 3 (they follow names: scopes); bytes to phase 4 (with linre over bytes); source decoding to after phase 3 (the packages' decoders already agree, held by their parity tests, and owning the CJK codecs would put their tables in the WebAssembly module) |
-| 3 | Parsers, scopes and flow: the detectors on bindings over the JavaScript and Python trees (§12, §13), constant folding of strings, the cross-file follower on them, project mode's passes (taint, SQL, function metrics) in the engine; the npm package's twins of them retired | The parsers done; project mode's JavaScript taint ported onto `js_parse`'s trees (§16: `js_flow`), both packages ask the engine for it, and jsflow.py, jsflow.js and the readers they used are retired (11,357 lines); Python's taint ported onto `py_parse`'s trees (§17: `py_flow`), both packages ask the engine for it (the npm package had no port of it), and flow.py's own pass is retired (1,505 lines); the passes and the parser held to their recorded outputs; the supply-chain data flow and received code on JavaScript's trees (§18: local data sent, reported by the strongest send; received data run, loaded or deserialized, from the script's own address) and on Python's (§19), benchmark-gated. Next: the cross-file follower on bindings and project mode's last passes (SQL, function metrics, intra-file taint). The dead drop, the secret endpoints and the self-read stay on the text detectors for now: on the benchmark's JavaScript they fire in few files, and no examined miss comes from their windows |
+| 3 | Parsers, scopes and flow: the detectors on bindings over the JavaScript and Python trees (§12, §13), constant folding of strings, the cross-file follower on them, project mode's passes (taint, SQL, function metrics) in the engine; the npm package's twins of them retired | The parsers done; project mode's JavaScript taint ported onto `js_parse`'s trees (§16: `js_flow`), both packages ask the engine for it, and jsflow.py, jsflow.js and the readers they used are retired (11,357 lines); Python's taint ported onto `py_parse`'s trees (§17: `py_flow`), both packages ask the engine for it (the npm package had no port of it), and flow.py's own pass is retired (1,505 lines); the passes and the parser held to their recorded outputs; the supply-chain data flow and received code on JavaScript's trees (§18: local data sent, reported by the strongest send; received data run, loaded or deserialized, from the script's own address) and on Python's (§19), benchmark-gated; a file written then run, and decoded code run, on both trees (§20). Next: the cross-file follower on bindings and project mode's last passes (SQL, function metrics, intra-file taint). The dead drop, the secret endpoints and the self-read stay on the text detectors for now: on the benchmark's JavaScript they fire in few files, and no examined miss comes from their windows |
 | 4 | Linear-time matching: the pack's patterns on linre (§14), pyre and the shlex port retired, current Unicode | Every pattern linre accepts runs on it (616 of the pack's 657; done first, as no answer changes); the 41 others, pyre and the shlex port not started |
 | 5 | One call per file, a content cache (SHA-256), the guard's scan in a child process that fails closed, archive ambiguity checks | Not started |
 
@@ -2100,3 +2100,109 @@ the holdout). They're a dependency-confusion beacon that looks up, in a
 loop, a name an f-string composed on the line before, which none of the 15
 shapes covered. A lookup now follows its name to that value, and both are
 found. On the 745 releases left, 629 are SUSPICIOUS (84.4%; 627 at 3e).
+
+## 20. Droppers and decoded code, on the trees
+
+The supply-chain models of §18 and §19 answer two more questions: code the
+script decodes and runs, and a file it writes and then runs (0.1.8's
+droppers). Both are new kinds in the models' values (`Sc`): decoded data
+(`K_DECODED`), a binary's bytes (`K_BYTES`), a slice of them past their
+start (`K_CARVED`), and a file opened to write (`K_WFILE`).
+
+**Decoded code run.** A decoder's result is decoded data. In Python: base64
+and its relatives, hex, `codecs.decode`, zlib's, gzip's, bz2's and lzma's
+decompressions, `marshal.loads`, a `decrypt`, `decompress` or `fromhex`
+method (`Fernet(k).decrypt(d)`), characters made of their codes (`chr(c) for
+c in codes`, `map(chr, codes)`; not a single `chr(n)`: numpy's crackfortran
+evaluates `chr(params[n])`), an XOR of the data, and a reversal (`s[::-1]`).
+In JavaScript: `atob`, `Buffer.from(x, 'base64' | 'base64url' | 'hex')`,
+zlib's synchronous decompressions and a `decrypt` method; characters' codes
+and the like are the decoded view's to read there. Decoded data that reaches
+code run (`eval`, `exec`, `Function`, `vm`, `compile`; an interpreter given
+it as code, `node -e`, `[sys.executable, '-c', code]`; a command line that
+is the program) is reported with where it was decoded (`decoded_runs_tree`).
+A WebAssembly module made from decoded bytes is not code run
+(es-module-lexer's, in tsx and vitest).
+
+SC-EVAL-DECODE in dependency scans asks it. The text's reading (a decoded
+name followed within `DEP_FLOW_WINDOW` to a sink) finds candidates, and
+skips literals: a decode call or a sink in a string, a template's text or a
+regular expression is not code. A JavaScript or Python text with a
+candidate, or one that writes out a decoder the text's reading doesn't know
+(`_TREE_DECODER_SHAPE_RE`: an XOR, characters made of their codes, a
+reversal, the rarer base64 relatives, `marshal`, gzip, bz2 and lzma; in
+JavaScript zlib's synchronous decompressions and hex) and calls a runner
+(`_TREE_RUN_GATE_RE`, an indirect eval), both in code (`FileCtx::in_code`: a
+comment's "O(n^2)" is no XOR), is read on its tree, whose answer stands: it
+drops a candidate whose value never reaches the run and finds what the
+window misses. It counts the sinks the text's reading counts (any object's
+`execSync`; child_process imported with `await import(…)`, a dynamic import
+of a literal being that module in the supply-chain model), and a decode
+inside the run's call is "in the same call". Other texts, and texts over the
+trees' 2 MB, keep the text's reading. A tree costs several times the text's
+reading, and the gate keeps `scan_file` where it was: on the eleven largest
+files of the profile (litellm, botocore, playwright-core) 0.63 s against
+0.64 s before, best of three, and the import-time test, which asks the
+models for every text, 3.21 s against 3.21 s (the hooks every call passes
+compare a name's length before its characters).
+
+**A file written, then run.** The models record what the script writes
+where: `open(p, 'w…')` and the `write` of what it returns, `Path(p).write_bytes(d)`,
+`urlretrieve(url, p)`; `fs.writeFileSync(p, d)`, `fs.createWriteStream(p)`
+and what is piped or written to it. A path is matched by keys: its text in
+its scope (the function in Python, the binding in JavaScript) and the string
+it holds (a literal path, a joined path's literal end). A run of it is an
+argument list or a command line naming it (`subprocess.run([sys.executable,
+p])`, `execSync('node ' + f)`, `os.system(f'sh {p}')`), read as parts: a
+command's start is its program; after an interpreter and its flags, its
+script; a constant command line is read as one (`received::command_runs`).
+What the file held decides the reason (`signs::dropped_reason`):
+
+- code or a program the script decodes: "writes code it decodes to a file
+  and runs it with Python" (or "writes a file it decodes and runs it");
+- a program carved out of another file (a slice of a binary read past its
+  start, requests-darwin-lite's shape): "runs a program it extracts from
+  inside another file (docs/_static/logo.png)", a strong reason;
+- a script it downloads, run by an interpreter: "downloads a script and runs
+  it with node".
+
+A binary downloaded and run is not reported: installers do that (esbuild
+runs `--version` on the binary it fetched). `cmd` runs a batch file (`.bat`,
+`.cmd`) as a script and anything else as a program. A file opened to write
+and read (`'w+'`, `'a+'`) is read too. The install-script and import-time
+tests report the first such run next to the text detectors' reasons of the
+kind: one reason per kind, and one that names the interpreter takes the
+place of one that names none (the text's "downloads a file and then runs
+it" for `cmd /c x.bat`).
+
+Known gaps: a file written through a parameter (a callback given a
+response, a helper given the data: a function's summary keeps no file), and
+JavaScript's summaries keep eight categories in an 8-bit mask, which is
+full.
+
+**Held to** `jsflow::supply::tests` and `pyflow::supply::tests` (each
+shape above, and its negatives: a binary installer, a whole file copied, text
+written, `tarfile.open` and a browser's `open`, another function's local
+name, numpy's `chr`, es-module-lexer's WebAssembly) and
+`tests/registry/test_droppers.py`. On the benchmark's 55,154 in-sample files
+the trees find decoded code run in 44 and a file written then run in 10, all
+of malicious releases: requests-darwin-lite's executable carved out of a
+documentation PNG, durabletask's and guardrails-ai's downloaded scripts run
+with Python, ptmpl's run with bash, @cloudplatform/single-spa's with node,
+and code decoded and run in jupyter-calendar-extension, reportgenpub,
+litellm 1.82.7's compromised proxy and telnyx. They find none in the popular
+packages' files or in 38,363 installed files. Before the fixes above they
+found numpy's crackfortran (in the popular packages, in a compromised
+package's copy of it and in the installed numpy), vitest's mocker and tsx's
+two copies of es-module-lexer. On the benchmark, of the 330,924 outputs
+recorded on its files 18 moved, and none of the 230,400 on installed
+packages. No popular package is SUSPICIOUS any more: cypress's typings'
+look-alike keyword is MAJOR; jiti's bundle, whose decoded value the
+text's window followed to an `eval`, is read on its tree, where the value
+is never run; and inspect-ai's decode and `new Function` are a web
+worker's source, a template literal in a 6 MB bundle, which the text's
+reading now skips. Three malicious releases become
+SUSPICIOUS (448 of 516): pywhool (an XOR decoder in setup.py, its result
+run by `eval(compile(…))`), requests-darwin-lite and quasarlib; five more
+gain a reason. The holdout gains two PyPI releases
+(631 of 745), both sharing no code with the benchmark.

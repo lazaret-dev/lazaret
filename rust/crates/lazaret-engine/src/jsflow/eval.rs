@@ -1573,6 +1573,12 @@ impl<'p> Eval<'p> {
                             if t.src && self.emit && t.sc.as_ref().is_some_and(|s| s.kinds & super::supply::K_RECEIVED != 0) {
                                 self.findings.push(Out::Received { at: entry.1, cat: rc });
                             }
+                            // (code the script decodes, run by the callee)
+                            if t.src && self.emit && cat == super::supply::RUN_CODE {
+                                if let Some(from) = t.sc.as_ref().and_then(|s| super::supply::decoded_at(s)) {
+                                    self.findings.push(Out::Decoded { at: entry.1, from });
+                                }
+                            }
                             for &key in t.params.iter() {
                                 self.reach_adds.push((key, cat, (entry.0, entry.1, entry.2.clone(), false)));
                             }

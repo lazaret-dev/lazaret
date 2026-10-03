@@ -28,6 +28,7 @@ use crate::rxutil;
 use crate::signs;
 use crate::token::TokenPattern;
 use crate::unicode;
+use std::borrow::Cow;
 use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
 
@@ -528,9 +529,17 @@ fn lookalike_name(p: &Pack, code: &[u32], lang: Lang, word_in: &dyn Fn(&[u32]) -
         {
             continue;
         }
+        // (a keyword's look-alike names what the keyword can't: `funсtion`, a
+        // parameter jQuery's typings call function; not another of the file's names)
+        let keywords = match lang {
+            Lang::Py => p.strs("_LOOKALIKE_KEYWORDS_PY"),
+            Lang::Js => p.strs("_LOOKALIKE_KEYWORDS_JS"),
+            _ => &[],
+        };
+        let keyword = keywords.iter().any(|k| *k == skeleton);
         let (critical, other) = if p.strs("_LOOKALIKE_TARGETS").iter().any(|t| *t == skeleton) {
             (true, false)
-        } else if skeleton.len() >= 3 && word_in(&skeleton) {
+        } else if !keyword && skeleton.len() >= 3 && word_in(&skeleton) {
             (true, true)
         } else if p.re("_ASCII_LETTER_RE").search(name).is_some() {
             (false, false)
@@ -790,11 +799,88 @@ fn is_code_sink<'a>(p: &Pack, code: &[u32], m: &pyre::Match, cp_aliases: &dyn Fn
     is(name, "exec") && (is(recv, "child_process") || cp_aliases().contains(recv))
 }
 
-/// core._dep_decode_flow: a decoded value followed through names to a sink.
+/// Does a text write out a decoder the text's reading doesn't know (an
+/// XOR, characters made of their codes, a reversal; in JavaScript zlib's
+/// decompressions, hex) and call something that runs code or a program
+/// (`_TREE_DECODER_SHAPE_RE`, `_TREE_RUN_GATE_RE`, an indirect eval), in
+/// code? (A comment's "O(n^2)" or a docstring's "exec" is neither.)
+fn may_run_written_decoder(ctx: &FileCtx) -> bool {
+    let lang = if ctx.lang == Lang::Py { "py" } else { "js" };
+    let p = ctx.p;
+    let c = &ctx.content;
+    let in_code = |re: &Regex| re.finditer(c).any(|m| ctx.in_code(m.start()));
+    in_code(p.map_re("_TREE_DECODER_SHAPE_RE", lang))
+        && (in_code(p.map_re("_TREE_RUN_GATE_RE", lang)) || in_code(p.re("_INDIRECT_SINK_RE")))
+}
+
+/// The decoded-payload flow on JavaScript's and Python's trees (the
+/// supply-chain models): a decoded value followed by scope to code run, in
+/// code (code in a string is not code). None when the tree can't read the
+/// text (the text's names and windows answer then).
+fn tree_decode_flow(ctx: &FileCtx, rule: &RuleText, out: &mut Vec<Finding>) -> Option<()> {
+    if !matches!(ctx.lang, Lang::Py | Lang::Js) {
+        return None;
+    }
+    let runs = if ctx.lang == Lang::Py {
+        crate::pyflow::supply::decoded_runs(&ctx.content)?
+    } else {
+        crate::jsflow::supply::decoded_runs(&ctx.content)?
+    };
+    let p = ctx.p;
+    let content = &ctx.content;
+    let mut have: HashSet<usize> = out.iter().filter(|f| is(&f.rule.id, "SC-EVAL-DECODE")).map(|f| f.line).collect();
+    let flow_msg = p.text("_DECODE_FLOW_MSG");
+    let same_call_msg = p.text("_DECODE_SAME_CALL_MSG");
+    let line_of = |at: usize| pystr::count_char(content, '\n' as u32, 0, at.min(content.len())) + 1;
+    for (at, from) in runs {
+        let line = line_of(at);
+        if !have.insert(line) {
+            continue;
+        }
+        // (a decode inside the run's call is the same call; one before it, on
+        // its line too, `d = decode(s); eval(d)`, is a decoded value's flow)
+        let msg = if from >= at {
+            same_call_msg.clone()
+        } else {
+            findings::format(&flow_msg, &[("line", Arg::I(line_of(from) as i64))])
+        };
+        let col = at.min(content.len()) - pystr::rfind_char(content, '\n' as u32, 0, at.min(content.len())).map(|x| x + 1).unwrap_or(0);
+        let mut text = rule.clone();
+        text.msg = msg;
+        out.push(Finding::new(text, line, Some(col)));
+    }
+    Some(())
+}
+
+/// core._dep_decode_flow: a decoded value followed to a sink. The text's
+/// reading (names within a window) finds the candidates. A JavaScript or
+/// Python text that has one, or that writes out a decoder the text's
+/// reading doesn't know and calls a runner, is read on its tree, whose
+/// answer stands: it drops a candidate whose code is in a string or whose
+/// value never reaches the run, and finds what the windows miss. (Reading a
+/// tree costs several times the text's reading: only those texts pay it.)
 fn dep_decode_flow(ctx: &FileCtx, rule: &RuleText, out: &mut Vec<Finding>, decode: &Regex, gates: &Gates, g_decode: usize) {
+    let mut found = Vec::new();
+    dep_decode_flow_text(ctx, rule, out, &mut found, decode, gates, g_decode);
+    // (a text over the trees' limit is read on its text alone)
+    let limit = if ctx.lang == Lang::Py { crate::pyflow::supply::MAX_TEXT } else { crate::jsflow::MAX_FILE };
+    if matches!(ctx.lang, Lang::Py | Lang::Js)
+        && ctx.content.len() <= limit
+        && (!found.is_empty() || may_run_written_decoder(ctx))
+        && tree_decode_flow(ctx, rule, out).is_some()
+    {
+        return;
+    }
+    out.extend(found);
+}
+
+/// dep_decode_flow on the text: names followed within DEP_FLOW_WINDOW to a
+/// sink (`existing`: the findings so far, a line of whose is not reported
+/// twice).
+fn dep_decode_flow_text(ctx: &FileCtx, rule: &RuleText, existing: &[Finding], out: &mut Vec<Finding>, decode: &Regex, gates: &Gates, g_decode: usize) {
     let p = ctx.p;
     let ident = p.map_re("_IDENT_RUN_RE", if ctx.lang == Lang::Py { "py" } else { "js" });
-    let mut have: HashSet<usize> = out.iter().filter(|f| is(&f.rule.id, "SC-EVAL-DECODE")).map(|f| f.line).collect();
+    let mut have: HashSet<usize> = existing.iter().filter(|f| is(&f.rule.id, "SC-EVAL-DECODE")).map(|f| f.line).collect();
     // (read when a sink needs them: core reads them first, and they depend on
     // nothing the pass changes)
     let cp_aliases: OnceCell<HashSet<PyStr>> = OnceCell::new();
@@ -830,25 +916,47 @@ fn dep_decode_flow(ctx: &FileCtx, rule: &RuleText, out: &mut Vec<Finding>, decod
             continue;
         }
         let blank = blank_strings(p, code);
+        // code in a literal is not code: a string's, a template's or a
+        // regular expression's text, one begun on an earlier line too (a
+        // template or a triple-quoted string over many lines)
+        let lits = ctx.code_literals(i).unwrap_or_default();
+        let in_lit = |pos: usize| crate::lex::within(&lits, pos);
+        let names: Cow<[u32]> = if lits.is_empty() {
+            Cow::Borrowed(&blank)
+        } else {
+            let mut v = blank.clone();
+            for &(a, b) in &lits {
+                for c in &mut v[a.min(blank.len())..b.min(blank.len())] {
+                    *c = ' ' as u32;
+                }
+            }
+            Cow::Owned(v)
+        };
+        // a decode call in code[a..b]
+        let decodes = |a: usize, b: usize| decode.finditer_at(code, a as isize, b as isize).any(|d| !in_lit(d.start()));
         let mut events: Vec<(usize, u8, pyre::Match)> = Vec::new();
         for m in assign_re.finditer(&blank) {
-            events.push((m.start(), 0, m));
+            if !in_lit(m.start()) {
+                events.push((m.start(), 0, m));
+            }
         }
         for m in sink_re.finditer(&blank) {
-            events.push((m.start(), 1, m));
+            if !in_lit(m.start()) {
+                events.push((m.start(), 1, m));
+            }
         }
         for m in indirect_re.finditer(code) {
-            if blank[m.start()] == code[m.start()] {
+            if blank[m.start()] == code[m.start()] && !in_lit(m.start()) {
                 events.push((m.start(), 2, m));
             }
         }
         events.sort_by_key(|e| (e.0, e.1));
         let mut close: Option<HashMap<usize, usize>> = None;
-        // decodes behind the decoded names in blank[a..b], still in reach at `at`
+        // decodes behind the decoded names in names[a..b], still in reach at `at`
         let live = |decoded: &HashMap<PyStr, (usize, usize)>, a: usize, b: usize, at: usize| -> Vec<(usize, usize)> {
             let mut seen: HashSet<&[u32]> = HashSet::new();
             let mut src = Vec::new();
-            for m in ident.finditer_at(&blank, a as isize, b as isize) {
+            for m in ident.finditer_at(&names, a as isize, b as isize) {
                 let v = m.group0();
                 if !seen.insert(v) {
                     continue;
@@ -866,7 +974,7 @@ fn dep_decode_flow(ctx: &FileCtx, rule: &RuleText, out: &mut Vec<Finding>, decod
             if kind == 0 {
                 let (a, b) = (m.start_of(2) as usize, m.end_of(2) as usize);
                 let name = m.group(1).unwrap_or(&[]).to_vec();
-                if decode.search_at(code, a as isize, b as isize).is_some() {
+                if decodes(a, b) {
                     decoded.insert(name, (i + 1, at));
                     newest = Some(newest.map_or(at, |n| n.max(at)));
                     continue;
@@ -904,7 +1012,7 @@ fn dep_decode_flow(ctx: &FileCtx, rule: &RuleText, out: &mut Vec<Finding>, decod
             let msg = if !src.is_empty() {
                 let line = src.iter().map(|d| d.0).min().unwrap_or(0);
                 findings::format(&flow_msg, &[("line", Arg::I(line as i64))])
-            } else if decode.search_at(code, m.end() as isize, end as isize).is_some() {
+            } else if decodes(m.end(), end) {
                 same_call_msg.clone()
             } else {
                 continue;

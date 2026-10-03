@@ -224,6 +224,19 @@ impl Program {
                 let e = Ast(&self.mods[m as usize].tree).at(node, A);
                 self.descs_of_expr(m, e, scope, depth + 1)
             }
+            // (the supply-chain model: a dynamic import of a literal is that
+            // module, `const cp = await import('child_process')`)
+            Kind::ImportExpression if self.cfg.supply.is_some() => {
+                let a = Ast(&self.mods[m as usize].tree);
+                let fmod = self.fns[self.scopes[scope as usize].fid as usize].module;
+                match a.str_value(a.at(node, A)) {
+                    Some(v) => {
+                        let v = v.to_vec();
+                        vec![self.resolve_spec(fmod, &v)]
+                    }
+                    None => unknown(),
+                }
+            }
             Kind::SequenceExpression => {
                 let last = Ast(&self.mods[m as usize].tree).list(node, A).last().copied();
                 match last {

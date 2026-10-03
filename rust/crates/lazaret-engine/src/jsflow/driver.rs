@@ -200,6 +200,16 @@ pub enum Out {
     /// run, a module loaded or a deserializer (the sink's offset, the
     /// category: "run", "import", "deserialize")
     Received { at: u32, cat: &'static str },
+    /// the supply-chain model: data the script decodes (base64, hex, a
+    /// decompression, a decryption …) reaching code run (the sink's offset,
+    /// the decoding's)
+    Decoded { at: u32, from: u32 },
+    /// the supply-chain model: a file the script writes, then runs as a
+    /// program or with an interpreter, holding code or a program it decodes,
+    /// carves out of another file or downloads (the run's offset, the
+    /// write's, what it held: `K_DECODED`, `K_CARVED` or `K_RECEIVED`, the
+    /// carved file, the interpreter)
+    Dropped { at: u32, from: u32, kinds: u16, what: PyStr, interp: Option<PyStr> },
 }
 
 fn commas(n: u64) -> String {

@@ -1,6 +1,6 @@
 {
  "format": 1,
- "rule_set": "2.18.0",
+ "rule_set": "2.19.0",
  "source": "lazaret.scanner.core, extracted by scripts/make_rust_tables.py \u2014 do not edit",
  "values": {
   "ALWAYS_PRUNE_DIRS": {
@@ -11878,6 +11878,93 @@
   "_LOOKALIKE_INVISIBLE": {
    "value": "an invisible {cp}"
   },
+  "_LOOKALIKE_KEYWORDS_JS": {
+   "set": [
+    "await",
+    "break",
+    "case",
+    "catch",
+    "class",
+    "const",
+    "continue",
+    "debugger",
+    "default",
+    "delete",
+    "do",
+    "else",
+    "enum",
+    "export",
+    "extends",
+    "false",
+    "finally",
+    "for",
+    "function",
+    "if",
+    "implements",
+    "in",
+    "instanceof",
+    "interface",
+    "let",
+    "new",
+    "null",
+    "package",
+    "private",
+    "protected",
+    "public",
+    "return",
+    "static",
+    "super",
+    "switch",
+    "this",
+    "throw",
+    "true",
+    "try",
+    "typeof",
+    "var",
+    "void",
+    "while",
+    "with",
+    "yield"
+   ]
+  },
+  "_LOOKALIKE_KEYWORDS_PY": {
+   "set": [
+    "False",
+    "None",
+    "True",
+    "and",
+    "as",
+    "assert",
+    "async",
+    "await",
+    "break",
+    "class",
+    "continue",
+    "def",
+    "del",
+    "elif",
+    "else",
+    "except",
+    "finally",
+    "for",
+    "from",
+    "global",
+    "if",
+    "in",
+    "is",
+    "lambda",
+    "nonlocal",
+    "not",
+    "or",
+    "pass",
+    "raise",
+    "return",
+    "try",
+    "while",
+    "with",
+    "yield"
+   ]
+  },
   "_LOOKALIKE_LETTER": {
    "value": "{cp} for {reads!r}"
   },
@@ -14392,6 +14479,9 @@
     },
     {
      "value": "hides its code in a string array"
+    },
+    {
+     "value": "runs a program it extracts from inside another file"
     }
    ]
   },
@@ -14759,6 +14849,30 @@
     },
     "why": {
      "value": "Provider-format tokens in source are live credentials until proven otherwise."
+    }
+   }
+  },
+  "_TREE_DECODER_SHAPE_RE": {
+   "map": {
+    "js": {
+     "flags": "",
+     "re": "\\b(?:inflate|inflateRaw|gunzip|unzip|brotliDecompress)Sync\\b|\\bBuffer\\s*\\.\\s*from\\s*\\([^;\\n]{0,300}?['\\\"`](?:hex|base64url)['\\\"`]"
+    },
+    "py": {
+     "flags": "",
+     "re": "[\\w\\])]\\s*\\^=?\\s*[\\w(]|\\[\\s*:\\s*:\\s*-\\s*1\\s*\\]|\\bmap\\s*\\(\\s*chr\\b|\\bchr\\s*\\((?:[^()\\n]|\\([^()\\n]*\\))*\\)\\s+for\\b|b32decode|b32hexdecode|b16decode|a85decode|b85decode|z85decode|decodebytes|decodestring|a2b_\\w+|\\bmarshal\\b|\\b(?:gzip|bz2|lzma)\\s*\\.\\s*decompress"
+    }
+   }
+  },
+  "_TREE_RUN_GATE_RE": {
+   "map": {
+    "js": {
+     "flags": "",
+     "re": "\\beval\\b|\\bFunction\\b|runIn\\w*Context|compileFunction|\\b_compile\\b|\\bexec(?:Sync|File|FileSync)?\\b|\\bspawn(?:Sync)?\\b|\\bfork\\b|\\bexeca\\w*|child_process|\\bconstructor\\s*\\.\\s*constructor\\b"
+    },
+    "py": {
+     "flags": "",
+     "re": "(?<![\\w.])(?:exec|eval|execfile)\\b|\\bbuiltins\\b|__builtins__|\\bsubprocess\\b|\\bos\\s*\\.\\s*(?:system|popen|exec\\w*|spawn\\w*|startfile|posix_spawn\\w*)\\b|\\bsystem\\s*\\(|\\bpopen\\s*\\(|\\bpty\\b|create_subprocess_\\w+|\\bcommands\\b"
     }
    }
   },

