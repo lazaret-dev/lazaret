@@ -1258,6 +1258,7 @@ class PypiIndex:
         self.numbers = {}         # upstream url -> number
         self.results = {}         # number -> (Check, spooled file or None)
         self.held_back = {}       # project -> {version: upload time}
+        self.planned = None       # pip's plan: the numbers of its files, when every one came from this index
         self.errors = []          # what the index could not fetch (for the report, not the tool)
         self.lock = threading.Lock()
         self.number_locks = {}
@@ -2557,7 +2558,7 @@ def _pip_plan(ctx, index, base, exe, pip_args, env):
     except (OSError, ValueError) as exc:
         raise GuardError(f"pip wrote no plan to check ({exc})") from None
     items = plan.get("install") if isinstance(plan, dict) and isinstance(plan.get("install"), list) else []
-    jobs = []
+    jobs, numbers, whole = [], [], True
     for item in items:
         info = item.get("download_info") if isinstance(item, dict) else None
         url = info.get("url") if isinstance(info, dict) and isinstance(info.get("url"), str) else ""
@@ -2565,7 +2566,9 @@ def _pip_plan(ctx, index, base, exe, pip_args, env):
         m = _FILE_PATH_RE.match(urllib.parse.urlsplit(url).path) if url.startswith(base + "/files/") else None
         if m is not None and m.group(1) in index.files:
             jobs.append(lambda n=m.group(1): index.scan(n))
+            numbers.append(m.group(1))
             continue
+        whole = False
         c = ctx.add(Check("pypi", str(meta.get("name", url)), str(meta.get("version", "")), pmsettings.shown(url)))
         if isinstance(info, dict) and ("vcs_info" in info or "dir_info" in info or url.startswith("file:")):
             c.notes.append("a local or version-control source: not checked")
@@ -2573,8 +2576,65 @@ def _pip_plan(ctx, index, base, exe, pip_args, env):
             ctx.block(c, "not downloaded through lazaret guard's index (an extra-index-url or find-links in "
                          "pip's configuration files?), so not checked")
     ctx.say(f"lazaret guard: {plural(len(items), 'package')} to check (pip's plan)")
+    index.planned = numbers if whole and numbers else None
     run_all(jobs)
     return None
+
+
+def _plan_folder(ctx, index):
+    """--from-plan: the files of pip's plan, as the guard scanned them, in a
+    folder of their own that pip installs from instead of resolving and
+    downloading everything again. Each file is hashed once more and must still
+    be the one that was scanned; one that is not is blocked. -> the folder, or
+    None (and pip goes to the index as it always did) when the plan holds a
+    file pip needs the index for: a source distribution builds with
+    requirements the index serves, and a file too large to scan is relayed as
+    it comes."""
+    numbers = index.planned
+    if not numbers:
+        return None
+    rows = []
+    for n in numbers:
+        info = index.files[n]
+        with index.lock:
+            check, spooled = index.results.get(n, (None, None))
+        name = info["filename"]
+        if not name.lower().endswith(".whl"):
+            why = f"{name} is a source distribution, which builds with requirements the index serves"
+        elif check is None or check.blocked or spooled is None or not check.digest.startswith("sha256:"):
+            why = f"{name} was not scanned in full (too large, or not fetched)"
+        elif any(name == r[0] for r in rows):
+            why = f"{name} is in the plan twice"
+        else:
+            rows.append((name, spooled, check))
+            continue
+        ctx.say(f"lazaret guard: --from-plan: {why}, so pip installs through the index")
+        return None
+    folder = os.path.join(index.spool, "plan")
+    try:
+        os.mkdir(folder, 0o700)
+        for name, spooled, check in rows:
+            dest = os.path.join(folder, name)
+            try:
+                os.link(spooled, dest)
+            except OSError:
+                shutil.copyfile(spooled, dest)
+            digest = hashlib.sha256()
+            with open(dest, "rb") as f:
+                for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            if "sha256:" + digest.hexdigest() != check.digest:
+                # not ctx.block: --trust is for findings someone reviewed, not for a file that is not the one scanned
+                check.blocked.append("the file changed between the plan and the install "
+                                     "(its SHA-256 is no longer the one it was scanned with)")
+    except OSError as exc:
+        ctx.say(f"lazaret guard: --from-plan: could not set the folder up ({exc.strerror or exc}), so pip "
+                f"installs through the index")
+        return None
+    if ctx.blocked():
+        return None
+    ctx.say(f"lazaret guard: installing the {plural(len(rows), 'file')} it checked, from a folder (--from-plan)")
+    return folder
 
 
 _UV_PLAN_URL_RE = re.compile(r"^\s*\+\s+([A-Za-z0-9][A-Za-z0-9._-]*)\s+@\s+(\S+)")
@@ -2644,9 +2704,19 @@ def guard_pip(ctx, tool, args):
             code = EXIT_BLOCKED
         if code is None and ctx.opts.plan:
             code = EXIT_OK
+        folder = None
+        if code is None and not uv and getattr(ctx.opts, "from_plan", False):
+            folder = _plan_folder(ctx, li.index)
+            if ctx.blocked():
+                code = EXIT_BLOCKED
         if code is not None:
             return finish(ctx, installed=False, index=li.index, code=code)
-        proc = run_tool(([exe, "pip"] if uv else [exe]) + pip_args, env)
+        if folder is None:
+            argv = ([exe, "pip"] if uv else [exe]) + pip_args
+        else:
+            argv = [exe, pip_args[0], "--no-index", "--find-links", folder] + pip_args[1:]
+            env = {k: v for k, v in env.items() if k not in ("PIP_INDEX_URL", "PIP_TRUSTED_HOST")}
+        proc = run_tool(argv, env)
         blocked = bool(ctx.blocked())
         return finish(ctx, installed=proc.returncode == 0 and not blocked, index=li.index,
                       code=EXIT_BLOCKED if blocked else proc.returncode)
@@ -2970,6 +3040,9 @@ def build_parser():
                     help="block packages judged WARN or INCOMPLETE too (default: SUSPICIOUS only)")
     ap.add_argument("--plan", action="store_true",
                     help="resolve, fetch and scan, then stop: install nothing (a dry run)")
+    ap.add_argument("--from-plan", action="store_true",
+                    help="pip: install the files that were scanned, from a folder, instead of resolving and "
+                         "downloading again (needs wheels only; otherwise pip goes through the index as usual)")
     ap.add_argument("--json", metavar="PATH", help="write what was checked, as JSON")
     ap.add_argument("--no-cache", action="store_true", help="scan every artifact again (no verdict cache)")
     ap.add_argument("--jobs", type=int, default=DEFAULT_JOBS, metavar="N",
@@ -3000,6 +3073,8 @@ def main(argv=None):
         ctx = Context(opts)
         tool, args = opts.tool, list(opts.args)
         ctx.say(f"lazaret guard: {tool} {' '.join(args)}".rstrip())
+        if opts.from_plan and tool != "pip":
+            ctx.say(f"lazaret guard: --from-plan is for pip; {tool} goes through the index as usual")
         if tool in ("npm", "pnpm"):
             return guard_npm(ctx, tool, args)
         if tool == "yarn":
