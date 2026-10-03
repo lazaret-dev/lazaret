@@ -1806,7 +1806,7 @@ leaves the texts to go with their calls, which gives the same answers:
   a HEAD not on `origin/main`, mismatched versions, or an existing tag), then
   push the tag. The GitHub Actions workflow runs the suite, then publishes to
   PyPI and npm via **trusted publishing (OIDC)** — no long-lived tokens. The
-  PyPI release has an sdist (with the engine's sources) and five platform
+  PyPI release has an sdist (with the engine's sources) and eight platform
   wheels with the engine, built, checked and installed on their platforms
   by `wheels.yml` (no pure wheel: pip compiles the sdist elsewhere);
   the npm package carries the same engine as WebAssembly, built by
@@ -2095,7 +2095,7 @@ comprehensive, so weigh marginal value against FP risk):
 - *Engine:* the native engine answers the supply-chain tests (0.1.8,
   `docs/RUST_ENGINE.md`), the dependency-mode scan of each file, the rules
   part of the project-mode scan and the cross-file follower in both
-  packages; release CI builds it into five platform wheels, and the npm
+  packages; release CI builds it into eight platform wheels, and the npm
   package runs it as WebAssembly (its JavaScript twins of those retired) on
   worker threads for a large scan. Next: the project-mode passes that
   follow the rules (SQL, taint, function metrics) in the engine, the rest

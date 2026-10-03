@@ -11,6 +11,12 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Added
 
+- **Platform wheels for musl Linux and Windows ARM64 (W-1).** `musllinux_1_2_x86_64` and `musllinux_1_2_aarch64`
+  (Alpine and other musl systems, musl 1.2 or later) and `win_arm64`, so pip installs the engine there without Rust,
+  where it compiled the sdist before (eight platform wheels in all). The musl libraries are built in PyPA's
+  musllinux_1_2 images and link musl's libc alone: their unwinder is linked in, since a minimal Alpine has no
+  libgcc_s. `check_native_library.py` checks a musllinux tag (musl's libc alone, no symbol versions), and `wheels.yml`
+  installs the musl wheels in those images.
 - **Live secrets: `lazaret scan --verify-secrets` and `npx lazaret --verify-secrets` (V-1; John's decisions 4 and 7).** After the scan, each secret
   finding is asked about where a provider can say whether it is live: a GitHub, Slack, Stripe or npm token, an OpenAI
   or Anthropic API key, or an AWS key pair (a key id and a secret key in the same file). Each credential goes to its

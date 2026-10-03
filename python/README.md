@@ -28,7 +28,7 @@ What it finds:
 - **Before you commit:** `lazaret hook` checks the files being committed, as staged, and fails on the quality gate's security and supply-chain conditions (a credential, a critical vulnerability, a supply-chain indicator, a cross-file taint flow). pre-commit runs it from https://github.com/lazaret-dev/lazaret-pre-commit.
 - **Quality:** bugs, code smells, complexity, duplication, with a quality gate and ratings.
 
-Every command prints its version with `--version`; the scanners also name the engine. Lazaret's scanning engine is native code, written in Rust with no external crates. pip installs it with the platform wheels for Linux (x86-64 and ARM64, glibc 2.28 or later), macOS (Apple silicon, and Intel from 10.12) and Windows (x64); everywhere else pip builds a wheel from the source distribution, which compiles the engine and needs Rust (`rustup`).
+Every command prints its version with `--version`; the scanners also name the engine. Lazaret's scanning engine is native code, written in Rust with no external crates. pip installs it with the platform wheels for Linux (x86-64 and ARM64, with glibc 2.28 or later or with musl 1.2 or later, as on Alpine), macOS (Apple silicon, and Intel from 10.12) and Windows (x64 and ARM64); everywhere else pip builds a wheel from the source distribution, which compiles the engine and needs Rust (`rustup`).
 
 Two of its building blocks are usable on their own (provisional APIs until 1.0): `lazaret.pg`, a PostgreSQL client in pure Python with SCRAM-SHA-256, channel binding and TLS; and `lazaret.safexml`, a layer that makes the stdlib XML parsers safe for untrusted input.
 

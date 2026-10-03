@@ -60,11 +60,12 @@ Decisions (fixed):
   (`engine.require`): there is no engine to fall back on. The workspace
   version (`rust/Cargo.toml`) is the release the engine ships in.
 - The library is `lazaret/_native/<library>` in a wheel: a platform wheel
-  for Linux x86-64 and ARM64 (manylinux_2_28), macOS arm64 from 11.0 and
-  x86-64 from 10.12, and Windows x64; anywhere else pip builds a wheel from
-  the sdist, compiling the engine with cargo (Rust is needed there: §4).
-  An editable install puts it in `src/lazaret/_native/`, and
-  `LAZARET_NATIVE_LIB` names another copy (a development build).
+  for Linux x86-64 and ARM64 (manylinux_2_28 and musllinux_1_2), macOS arm64
+  from 11.0 and x86-64 from 10.12, and Windows x64 and ARM64; anywhere else
+  pip builds a wheel from the sdist, compiling the engine with cargo (Rust
+  is needed there: §4). An editable install puts it in
+  `src/lazaret/_native/`, and `LAZARET_NATIVE_LIB` names another copy (a
+  development build).
 - `python/src/lazaret/scanner/engine.py` sends the supply-chain tests
   through it: the import-time test of every dependency file (`--deps`), of
   every file a registry scan reaches at import time and of the files it runs
@@ -430,36 +431,53 @@ as `build-python`, and run on pull requests and pushes to main that change
 |---|---|---|
 | `manylinux_2_28_x86_64` | ubuntu-24.04 | in `quay.io/pypa/manylinux_2_28_x86_64`, pinned by digest |
 | `manylinux_2_28_aarch64` | ubuntu-24.04-arm | in `quay.io/pypa/manylinux_2_28_aarch64`, pinned by digest |
+| `musllinux_1_2_x86_64` | ubuntu-24.04 | in `quay.io/pypa/musllinux_1_2_x86_64`, pinned by digest; musl's libc dynamic, the unwinder linked in (below) |
+| `musllinux_1_2_aarch64` | ubuntu-24.04-arm | in `quay.io/pypa/musllinux_1_2_aarch64`, the same way |
 | `macosx_11_0_arm64` | macos-15 | `MACOSX_DEPLOYMENT_TARGET=11.0` |
 | `macosx_10_12_x86_64` | macos-15-intel | `MACOSX_DEPLOYMENT_TARGET=10.12` |
 | `win_amd64` | windows-2025 | `-C target-feature=+crt-static` (no Visual C++ runtime needed) |
+| `win_arm64` | windows-11-arm | the same |
 
 Every library is built with Rust `RUST_VERSION` (1.95.0, the compiler of
 §5's and §7's measurements; the runner's rustup installs it and checks each
 component's published SHA-256), `--release --offline --locked`. The Linux
 jobs mount that toolchain read-only into the image, so the library links
-against the image's glibc 2.28; building on the runner itself would need
-its glibc (2.39). Each library is then checked against its tag
-(`scripts/check_native_library.py LIB TAG --load`: machine, the glibc and
-libgcc_s symbol versions and libraries manylinux allows, no RPATH or
-executable stack; the Mach-O minimum macOS and system-only dylibs; a PE DLL
-with ASLR and DEP and no Visual C++ or MinGW runtime; the three exports;
+against the image's glibc 2.28; building on the runner itself would need its
+glibc (2.39). The musl jobs mount the musl-hosted toolchain of the same
+version (rustup installs it on the runner with `--force-non-host`; it runs
+only in the image) and build with two flags. `-C target-feature=-crt-static`
+links musl's libc dynamically: a static libc in a library Python loads would
+be a second libc in the process. And `-L native=` a directory whose
+`libgcc_s.a` is the toolchain's own `libunwind.a` (the unwinder a static
+musl build links): with a dynamic libc, Rust's standard library asks the
+linker for libgcc_s, which a minimal Alpine doesn't have, and this links the
+unwinder in instead. Checked before the jobs first ran, against Ubuntu
+24.04's musl 1.2.4: the library built that way needs `libc.so` alone, loads
+in a musl CPython (python-build-standalone's 3.12.11, which links musl
+dynamically) and passes the whole Python suite there, and a library linked
+the same way catches a panic, as the FFI boundary does. Each library is then
+checked against its tag (`scripts/check_native_library.py LIB TAG --load`:
+machine, the glibc and libgcc_s symbol versions and libraries manylinux
+allows, or musl's libc alone and no symbol versions for musllinux, no RPATH
+or executable stack; the Mach-O minimum macOS and system-only dylibs; a PE
+DLL with ASLR and DEP and no Visual C++ or MinGW runtime; the three exports;
 then loaded as `_native.py` loads it, reporting the package's version and
 giving one call its known answer), and the whole Python suite runs on it on
 its platform (the Linux ones inside the image), the recorded outputs (§5)
-among it. The `dist` job builds the sdist and the five platform wheels from
+among it. The `dist` job builds the sdist and the eight platform wheels from
 one checkout (Python 3.12.14, `SOURCE_DATE_EPOCH`), and
-`check_native_library.py --dist` holds the sdist to the engine's sources
-and no library, each platform wheel to the sdist's package files plus its
+`check_native_library.py --dist` holds the sdist to the engine's sources and
+no library, each platform wheel to the sdist's package files plus its
 library and license files, and its METADATA to the sdist's PKG-INFO; a pure
 wheel is an error. The `install` job then installs each platform wheel with
-pip, from those files only, on its platform, and runs `python -m lazaret
---version` (`lazaret X (engine: rust X)`); on Linux x86-64 pip also builds
-the sdist, compiling the engine with the pinned toolchain, and that install
-runs too. On Linux a build is reproducible: the same commit, toolchain and
-image give the same library bytes wherever the checkout is (cargo passes
-workspace paths relative). Given the same five libraries, the six files are
-too; the Windows linker, though, stamps a time into the DLL.
+pip, from those files only, on its platform (a musl one in its image, with
+the image's Python), and runs `python -m lazaret --version` (`lazaret X
+(engine: rust X)`); on Linux x86-64 pip also builds the sdist, compiling the
+engine with the pinned toolchain, and that install runs too. On Linux a
+build is reproducible: the same commit, toolchain and image give the same
+library bytes wherever the checkout is (cargo passes workspace paths
+relative). Given the same eight libraries, the nine files are too; the
+Windows linker, though, stamps a time into the DLL.
 
 The npm package's module is built the same way in `release.yml`'s
 `build-npm` job: Rust `RUST_VERSION` with its `wasm32-unknown-unknown`
@@ -868,8 +886,7 @@ only.
 4. Archive reading for registry scans in the engine, where it reads as the
    registries' own tools do.
 5. Record the engine in reports (JSON and SARIF), next to the version.
-6. Platform wheels for musllinux and Windows ARM64 (pip compiles the sdist
-   there today).
+6. ~~Platform wheels for musllinux and Windows ARM64~~ (0.1.9: §4).
 
 ## 11. Licensing
 

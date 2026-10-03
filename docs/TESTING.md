@@ -432,10 +432,10 @@ Then the release gates themselves: `sh scripts/check-versions.sh HEAD` (the
 Python, npm and native engine versions agree), and CI's own `versions` check
 runs inside the test stage before any publish job (`docs/RELEASING.md`). The
 platform wheels are built, checked (`scripts/check_native_library.py`) and
-installed on their five platforms by `wheels.yml`, on any pull request that
+installed on their eight platforms by `wheels.yml`, on any pull request that
 changes what goes into them; locally, `python3 scripts/check_native_library.py
 rust/target/release/liblazaret_native.so manylinux_2_39_x86_64 --load` (the
-tag of the glibc you built on) checks a development build the same way.
+tag of the glibc you built on; `musllinux_1_2_x86_64` for a musl build) checks a development build the same way.
 
 ---
 

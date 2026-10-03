@@ -14,6 +14,11 @@ tag says it runs, so the library must keep the tag's promise:
   system and then fails to load there), no GCC_ version newer than the
   manylinux policy's, no C++ runtime, no RPATH or RUNPATH, and no
   executable stack;
+- musllinux_X_Y_ARCH: the same, but it needs musl alone, and no symbol
+  versions (musl has none, so a version means glibc's). libgcc_s is no
+  part of musl, and a minimal Alpine lacks it: the library links its
+  unwinder in (wheels.yml). musl has no versions to hold to X.Y either,
+  so the build image decides that, as glibc's versions do for manylinux;
 - macosx_X_Y_ARCH: a single-architecture Mach-O dylib for ARCH whose
   minimum macOS (LC_BUILD_VERSION, or LC_VERSION_MIN_MACOSX) is at most
   X.Y, and which links only libraries macOS ships (/usr/lib, /System);
@@ -143,6 +148,7 @@ def _show_macos(version):
 # --- platform tags ---------------------------------------------------------------
 
 _MANYLINUX_RE = re.compile(r"manylinux_(\d+)_(\d+)_(x86_64|aarch64)\Z")
+_MUSLLINUX_RE = re.compile(r"musllinux_(\d+)_(\d+)_(x86_64|aarch64)\Z")
 _MACOS_RE = re.compile(r"macosx_(\d+)_(\d+)_(arm64|x86_64)\Z")
 _WINDOWS_MACHINES = {"win_amd64": (0x8664, "AMD64"), "win_arm64": (0xAA64, "ARM64")}
 
@@ -158,7 +164,8 @@ def library_name(tag):
 
 
 def supported(tag):
-    return bool(_MANYLINUX_RE.match(tag) or _MACOS_RE.match(tag) or tag in _WINDOWS_MACHINES)
+    return bool(_MANYLINUX_RE.match(tag) or _MUSLLINUX_RE.match(tag) or _MACOS_RE.match(tag)
+                or tag in _WINDOWS_MACHINES)
 
 
 # --- ELF (Linux) -----------------------------------------------------------------
@@ -295,6 +302,41 @@ def _check_elf(data, tag):
     summary = (f"ELF {machine}, needs {' '.join(elf['needed']) or 'nothing'}; glibc "
                f"{_show(newest['GLIBC']) or '-'}, libgcc_s {_show(newest['GCC']) or '-'}")
     return summary, problems
+
+
+# The names musl's dynamic loader answers for itself, with no file (musl's
+# ldso/dynlink.c): libc.so, libc.musl-x86_64.so.1 (Alpine's), libpthread.so.0
+# and the rest are musl's libc, its loader.
+_MUSL_OWN = ("libc.", "libpthread.", "librt.", "libm.", "libdl.", "libutil.", "libxnet.")
+
+
+def _check_musl(data, tag):
+    _major, _minor, arch = _MUSLLINUX_RE.match(tag).groups()
+    elf = read_elf(data)
+    problems = []
+    if elf["type"] != _ET_DYN:
+        problems.append(f"not a shared object (ELF type {elf['type']})")
+    if elf["machine"] != _EM[arch]:
+        problems.append(f"built for ELF machine {elf['machine']}, not {arch} ({_EM[arch]})")
+    for lib in elf["needed"]:
+        if not lib.startswith(_MUSL_OWN):
+            hint = (": link the unwinder in (wheels.yml), since a minimal Alpine has no libgcc"
+                    if lib.startswith("libgcc_s") else "")
+            problems.append(f"needs {lib}, which is not musl's libc: a musl system may lack it{hint}")
+    versions = sorted({v for names in elf["versions"].values() for v in names})
+    if versions:
+        problems.append(f"needs symbol versions ({', '.join(versions)}), which musl does not have: it was "
+                        f"linked against glibc, not musl")
+    if elf["runpath"]:
+        problems.append(f"has an RPATH/RUNPATH ({', '.join(elf['runpath'])}): it must not load libraries "
+                        f"from other places")
+    if elf["exec_stack"]:
+        problems.append("asks for an executable stack")
+    missing = [name for name in EXPORTS if name not in elf["exports"]]
+    if missing:
+        problems.append(f"does not export {', '.join(missing)}")
+    machine = {number: name for name, number in _EM.items()}.get(elf["machine"], f"machine {elf['machine']}")
+    return f"ELF {machine}, needs {' '.join(elf['needed']) or 'nothing'}; musl", problems
 
 
 # --- Mach-O (macOS) --------------------------------------------------------------
@@ -545,8 +587,9 @@ def check_library(data, tag):
     """(summary, [problems]) for a library's bytes against a platform tag."""
     if not supported(tag):
         return "", [f"{tag!r} is not a platform tag this check knows (manylinux_X_Y_x86_64/aarch64, "
-                    f"macosx_X_Y_arm64/x86_64, win_amd64, win_arm64)"]
-    check = _check_elf if tag.startswith("manylinux") else _check_macho if tag.startswith("macosx") else _check_pe
+                    f"musllinux_X_Y_x86_64/aarch64, macosx_X_Y_arm64/x86_64, win_amd64, win_arm64)"]
+    check = (_check_elf if tag.startswith("manylinux") else _check_musl if tag.startswith("musllinux")
+             else _check_macho if tag.startswith("macosx") else _check_pe)
     try:
         return check(data, tag)
     except Malformed as e:
