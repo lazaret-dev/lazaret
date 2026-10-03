@@ -61,20 +61,20 @@ pub const KIND_NAMES: [&str; 10] =
     ["identity", "environment", "environment", "file", "report", "credentials", "address", "path", "file", "received"];
 
 /// The kinds a send of local data never reports.
-const NOT_LOCAL: u16 = K_PATH | K_RECEIVED;
+pub(crate) const NOT_LOCAL: u16 = K_PATH | K_RECEIVED;
 
 /// The kinds that count even when only an address holds them (the text
 /// follower's `_LD_NOT_IN_ADDRESS` are the others, the whole environment
 /// excepted).
-const STRONG_IN_ADDRESS: u16 = K_IDENTITY | K_WHOLE_ENV | K_FILE | K_CRED_FILE | K_REPORT;
+pub(crate) const STRONG_IN_ADDRESS: u16 = K_IDENTITY | K_WHOLE_ENV | K_FILE | K_CRED_FILE | K_REPORT;
 
 /// What no client sends (import_time_risk's harvest): the instance's
 /// credentials, the whole environment, a credential store. A send that
 /// carries one is reported by it, whatever was read before it.
-const HARVEST: u16 = K_CREDENTIALS | K_WHOLE_ENV | K_CRED_FILE;
+pub(crate) const HARVEST: u16 = K_CREDENTIALS | K_WHOLE_ENV | K_CRED_FILE;
 
 /// Is a finding of this kind and what a harvest (signs.rs grades it so)?
-fn harvest_of(p: &Pack, kind: &str, what: &[u32], whole: &[u32]) -> bool {
+pub(crate) fn harvest_of(p: &Pack, kind: &str, what: &[u32], whole: &[u32]) -> bool {
     match kind {
         "credentials" => true,
         "environment" => what == whole,
@@ -84,12 +84,12 @@ fn harvest_of(p: &Pack, kind: &str, what: &[u32], whole: &[u32]) -> bool {
 }
 
 /// Does a file read's `what` name a credential store?
-fn cred_store(p: &Pack, what: &[u32]) -> bool {
+pub(crate) fn cred_store(p: &Pack, what: &[u32]) -> bool {
     p.re("_CRED_STORE_RE").search(what).is_some() && p.re("_PUBLIC_KEY_FILE_RE").search(what).is_none()
 }
 
 /// The kind's bit for a kind name (the text follower's, and shell.rs's).
-fn kind_bit(kind: &str, what: &[u32], whole: &[u32]) -> u16 {
+pub(crate) fn kind_bit(kind: &str, what: &[u32], whole: &[u32]) -> u16 {
     match kind {
         "identity" | "lookup-identity" => K_IDENTITY,
         "environment" if what == whole => K_WHOLE_ENV,
@@ -102,7 +102,7 @@ fn kind_bit(kind: &str, what: &[u32], whole: &[u32]) -> u16 {
     }
 }
 
-fn bit_index(bit: u16) -> u8 {
+pub(crate) fn bit_index(bit: u16) -> u8 {
     bit.trailing_zeros() as u8
 }
 
@@ -235,7 +235,7 @@ fn dotted2<'a>(a: &'a str, b: &'a [&'a str]) -> impl Fn(&[u32]) -> bool + 'a {
 
 /// Is a literal's text a URL that its host continues past (`'https://'`,
 /// `'http://x-'`): what is joined to it next is resolved as a host name?
-pub(super) fn host_prefix(text: &[u32]) -> bool {
+pub(crate) fn host_prefix(text: &[u32]) -> bool {
     let low: Vec<u32> = text.iter().map(|&c| if (0x41..=0x5A).contains(&c) { c + 32 } else { c }).collect();
     let rest = ["https://", "http://", "wss://", "ws://"].iter().find_map(|s| {
         let s: Vec<u32> = s.chars().map(|c| c as u32).collect();
@@ -349,7 +349,7 @@ fn receives(names: &[PyStr]) -> bool {
 /// Does a command line download: curl or wget first (`_DL_SOURCE`'s exec
 /// form)? What it prints is received, unless it asks the instance's
 /// metadata or a public-IP service (local data: credentials, the address).
-fn downloads(p: &Pack, command: &[u32]) -> bool {
+pub(crate) fn downloads(p: &Pack, command: &[u32]) -> bool {
     let t = pystr::lstrip(command);
     ["curl", "wget"].iter().any(|w| {
         t.len() >= w.len()
@@ -360,12 +360,12 @@ fn downloads(p: &Pack, command: &[u32]) -> bool {
 }
 
 /// The interpreters a command line is given code to run with (`_DL_INTERP`).
-const INTERPRETERS: &[&str] = &[
+pub(crate) const INTERPRETERS: &[&str] = &[
     "node", "nodejs", "bun", "deno", "sh", "bash", "zsh", "dash", "ksh", "python", "python3", "python2", "pythonw",
     "perl", "ruby", "php", "pwsh", "powershell", "osascript", "cmd",
 ];
 /// The flags that make an interpreter run its next argument as code.
-const EVAL_FLAGS: &[&str] = &[
+pub(crate) const EVAL_FLAGS: &[&str] = &[
     "-e", "-E", "-c", "-p", "-r", "--eval", "--print", "-Command", "-command", "-EncodedCommand", "-enc", "/c", "/C",
     "/k", "/K",
 ];

@@ -6,13 +6,13 @@ use super::*;
 use crate::jsflow::Out;
 
 /// A value's place in a reading's environment: a name, or `name.attr`.
-type Key = u64;
+pub(super) type Key = u64;
 
-fn key(name: NameId) -> Key {
+pub(super) fn key(name: NameId) -> Key {
     name as u64
 }
 
-fn attr_key(name: NameId, attr: NameId) -> Key {
+pub(super) fn attr_key(name: NameId, attr: NameId) -> Key {
     ((name as u64 + 1) << 32) | attr as u64
 }
 
@@ -29,21 +29,33 @@ pub struct Analyzer<'p> {
     pub m: ModId,
     pub emit: bool,
     pub findings: &'p mut Vec<Out>,
-    env: QuickMap<Key, Taint>,
+    pub(super) env: QuickMap<Key, Taint>,
     /// (parameter index, category, the sink's place)
-    sink_adds: Vec<(u16, u8, SinkLoc)>,
+    pub(super) sink_adds: Vec<(u16, u8, SinkLoc)>,
     /// parameter index -> the categories it is clean for where returned
-    ret_params: Vec<(u16, u8)>,
-    ret_source: Option<Taint>,
+    pub(super) ret_params: Vec<(u16, u8)>,
+    pub(super) ret_source: Option<Taint>,
     /// self.<attr> written with request data
-    attr_writes: Vec<(NameId, Taint)>,
+    pub(super) attr_writes: Vec<(NameId, Taint)>,
     /// the step count the reading may reach
     limit: u64,
+    /// the supply-chain model (`supply.rs`) instead of project mode's
+    pub(super) supply: bool,
+    /// (the supply-chain model) the reading changed what every function reads
+    pub(super) sc_dirty: bool,
+    /// (the supply-chain model) the module's containers this function puts
+    /// values in (`INFO['h'] = …`, `DATA.append(…)`; it binds no such name)
+    pub(super) sc_mutated: Vec<NameId>,
+    /// (the supply-chain model) the same for a function around this one: its
+    /// variable, and the function
+    pub(super) sc_mutated_back: Vec<(FnId, NameId)>,
+    /// (the supply-chain model) lambdas being read at a call, inside each other
+    pub(super) sc_inline: u8,
 }
 
 /// flow._bind: a call's argument values bound to `g`'s parameters as
 /// inspect.signature binds them (name -> value).
-fn bind(g: &Func, pos: &[Taint], starred: Option<&Taint>, kws: &[(NameId, Taint)], dstar: Option<&Taint>, skip_first: bool) -> Vec<(NameId, Taint)> {
+pub(super) fn bind(g: &Func, pos: &[Taint], starred: Option<&Taint>, kws: &[(NameId, Taint)], dstar: Option<&Taint>, skip_first: bool) -> Vec<(NameId, Taint)> {
     let all_pos: Vec<NameId> = g.posonly.iter().chain(g.args.iter()).copied().collect();
     let positional: &[NameId] = if skip_first && !all_pos.is_empty() { &all_pos[1..] } else { &all_pos };
     let mut out: Vec<(NameId, Taint)> = Vec::new();
@@ -112,15 +124,17 @@ impl<'p> Analyzer<'p> {
         let mut env: QuickMap<Key, Taint> = QuickMap::default();
         let pnames = p.fns[f as usize].pnames.clone();
         for (k, &name) in pnames.iter().enumerate() {
-            env.insert(key(name), Taint { source: false, params: Rc::from(vec![k as u16]), clean: 0, origin: None, via: None });
+            env.insert(key(name), Taint::param(k as u16));
         }
         let line = p.fns[f as usize].line;
-        for name in p.request_params(f).iter() {
+        let supply = p.cfg.supply.is_some();
+        let request_params = if supply { Rc::new(Vec::new()) } else { p.request_params(f) };
+        for name in request_params.iter() {
             let params: Params = match pnames.iter().position(|&n| n == *name) {
                 Some(k) => Rc::from(vec![k as u16]),
                 None => no_params(),
             };
-            env.insert(key(*name), Taint { source: true, params, clean: 0, origin: Some((m, line)), via: None });
+            env.insert(key(*name), Taint { params, ..Taint::src(0, Some((m, line)), None) });
         }
         if let Some(r) = p.fns[f as usize].receiver {
             env.insert(key(r), Taint::empty());
@@ -137,16 +151,21 @@ impl<'p> Analyzer<'p> {
             ret_source: None,
             attr_writes: Vec::new(),
             limit,
+            supply,
+            sc_dirty: false,
+            sc_mutated: Vec::new(),
+            sc_mutated_back: Vec::new(),
+            sc_inline: 0,
         }
     }
 
     #[inline]
-    fn t(&self) -> &Tree {
+    pub(super) fn t(&self) -> &Tree {
         &self.p.mods[self.m as usize].tree
     }
 
     #[inline]
-    fn step(&mut self) -> Result<(), Halt> {
+    pub(super) fn step(&mut self) -> Result<(), Halt> {
         self.p.work += 1;
         if self.p.work > self.limit {
             return Err(Halt::Cut);
@@ -154,12 +173,12 @@ impl<'p> Analyzer<'p> {
         Ok(())
     }
 
-    fn line(&self, n: NodeId) -> u32 {
+    pub(super) fn line(&self, n: NodeId) -> u32 {
         let t = self.t();
         t.line_of(t.node(n).start)
     }
 
-    fn name_of(&mut self, sid: u32) -> NameId {
+    pub(super) fn name_of(&mut self, sid: u32) -> NameId {
         self.p.name(self.m, sid)
     }
 
@@ -171,7 +190,7 @@ impl<'p> Analyzer<'p> {
     }
 
     fn ret(&mut self, t: &Taint) {
-        if t.source {
+        if t.source || t.marks != 0 {
             self.ret_source = Some(match &self.ret_source {
                 None => t.clone(),
                 Some(r) => r.union(t),
@@ -209,6 +228,9 @@ impl<'p> Analyzer<'p> {
 
     pub fn run(&mut self) -> Result<(), Halt> {
         let node = self.p.fns[self.f as usize].node;
+        if self.supply && !self.p.fns[self.f as usize].pseudo {
+            self.sc_defaults(node)?;
+        }
         let body: Vec<u32> = body_of(self.t(), node).to_vec();
         self.stmts(&body)
     }
@@ -238,7 +260,7 @@ impl<'p> Analyzer<'p> {
         out
     }
 
-    fn stmt(&mut self, st: NodeId) -> Result<(), Halt> {
+    pub(super) fn stmt(&mut self, st: NodeId) -> Result<(), Halt> {
         self.p.enter()?;
         let r = self.stmt_inner(st);
         self.p.leave();
@@ -257,6 +279,9 @@ impl<'p> Analyzer<'p> {
                 let decs: Vec<u32> = decorators(self.t(), st).to_vec();
                 for dn in decs {
                     self.expr(dn)?;
+                }
+                if self.supply && kind == Kind::ClassDef {
+                    self.sc_class_body(st)?;
                 }
             }
             Kind::Assign => {
@@ -492,7 +517,7 @@ impl<'p> Analyzer<'p> {
         }
     }
 
-    fn assign(&mut self, tgt: NodeId, t: &Taint) -> Result<(), Halt> {
+    pub(super) fn assign(&mut self, tgt: NodeId, t: &Taint) -> Result<(), Halt> {
         self.p.enter()?;
         let r = self.assign_inner(tgt, t);
         self.p.leave();
@@ -527,8 +552,11 @@ impl<'p> Analyzer<'p> {
                     let base = self.name_of(sid);
                     let attr = self.name_of(attr);
                     self.env.insert(attr_key(base, attr), t.clone());
+                    if self.supply && self.p.fns[self.f as usize].receiver != Some(base) {
+                        self.sc_member_write(base, t);
+                    }
                     let func = &self.p.fns[self.f as usize];
-                    if func.cls.is_some() && func.receiver == Some(base) && t.source {
+                    if func.cls.is_some() && func.receiver == Some(base) && (t.source || t.marks != 0) {
                         match self.attr_writes.iter_mut().find(|(k, _)| *k == attr) {
                             Some(e) => e.1 = e.1.union(t),
                             None => self.attr_writes.push((attr, t.clone())),
@@ -549,8 +577,21 @@ impl<'p> Analyzer<'p> {
                     let k = self.name_of(sid);
                     let nt = self.name_taint(k).union(t);
                     self.env.insert(key(k), nt);
+                    if self.supply && (t.source || t.marks != 0) {
+                        self.sc_mutate(k);
+                    }
                 } else {
-                    self.expr(base)?;
+                    let bv = self.expr(base)?;
+                    if self.supply {
+                        self.sc_env_write(&bv, slice, t);
+                        // a container reached through an attribute or a
+                        // subscript (`self.info['h'] = …`, `d['m']['h'] = …`)
+                        // holds what it is given
+                        let held = t.plain();
+                        if (held.source || held.marks != 0) && matches!(self.t().kind(base), Kind::Attribute | Kind::Subscript) {
+                            self.assign(base, &bv.plain().union(&held))?;
+                        }
+                    }
                 }
             }
             _ => {}
@@ -560,15 +601,27 @@ impl<'p> Analyzer<'p> {
 
     // ---------- expressions ----------
 
-    fn name_taint(&self, name: NameId) -> Taint {
+    pub(super) fn name_taint(&self, name: NameId) -> Taint {
         if let Some(v) = self.env.get(&key(name)) {
+            if self.supply {
+                // (what a nested function gave the variable)
+                if let Some(back) = self.p.closure_back.get(&self.f).and_then(|vars| vars.get(&name)) {
+                    return v.union(back);
+                }
+            }
             return v.clone();
+        }
+        if self.supply {
+            // (a closure's variable: what the function around it gives it)
+            if let Some(v) = self.sc_closure(name) {
+                return v;
+            }
         }
         self.p.mods[self.m as usize].globals.get(&name).cloned().unwrap_or_else(Taint::empty)
     }
 
     fn source(&self, line: u32) -> Taint {
-        Taint { source: true, params: no_params(), clean: 0, origin: Some((self.m, line)), via: None }
+        Taint::src(0, Some((self.m, line)), None)
     }
 
     fn is_source_text(&mut self, s: &[u32]) -> bool {
@@ -609,12 +662,26 @@ impl<'p> Analyzer<'p> {
         match kind {
             Kind::Name => {
                 let k = self.name_of(a);
+                if self.supply {
+                    if let Some(v) = self.sc_name(e, k) {
+                        return Ok(v);
+                    }
+                }
                 Ok(self.name_taint(k))
             }
-            Kind::Constant => Ok(Taint::empty()),
+            Kind::Constant => {
+                if self.supply {
+                    return Ok(self.sc_literal(e));
+                }
+                Ok(Taint::empty())
+            }
             Kind::Call => self.call(e),
             Kind::Attribute => {
-                if self.is_source_node(e) {
+                if self.supply {
+                    if let Some(v) = self.sc_attribute(e)? {
+                        return Ok(v);
+                    }
+                } else if self.is_source_node(e) {
                     let line = self.line(e);
                     return Ok(self.source(line));
                 }
@@ -640,18 +707,28 @@ impl<'p> Analyzer<'p> {
                 self.expr(a)
             }
             Kind::Subscript => {
-                if self.is_source_node(e) {
+                if !self.supply && self.is_source_node(e) {
                     self.expr(b)?;
                     let line = self.line(e);
                     return Ok(self.source(line));
                 }
                 let v = self.expr(a)?;
-                self.expr(b)?;
+                let k = self.expr(b)?;
+                if self.supply {
+                    if let Some(x) = self.sc_subscript(e, &v, &k) {
+                        return Ok(x);
+                    }
+                    return Ok(v.plain());
+                }
                 Ok(v)
             }
             Kind::BinOp => {
                 let l = self.expr(a)?;
                 let r = self.expr(b)?;
+                if self.supply {
+                    self.sc_binop(e, &r);
+                    return Ok(l.plain().union(&r.plain()));
+                }
                 Ok(l.union(&r))
             }
             Kind::BoolOp => {
@@ -687,8 +764,14 @@ impl<'p> Analyzer<'p> {
             Kind::JoinedStr => {
                 let vals: Vec<u32> = self.t().list(a).to_vec();
                 let mut out = Vec::with_capacity(vals.len());
-                for v in vals {
+                for &v in &vals {
                     out.push(self.expr(v)?);
+                }
+                if self.supply {
+                    let parts: Vec<(NodeId, Taint)> = vals.iter().copied().zip(out.iter().cloned()).collect();
+                    self.sc_fstring(e, &parts);
+                    let plains: Vec<Taint> = out.iter().map(|x| x.plain()).collect();
+                    return Ok(union_all(&plains));
                 }
                 Ok(union_all(&out))
             }
@@ -739,7 +822,12 @@ impl<'p> Analyzer<'p> {
                 let gens: Vec<u32> = self.t().list(c).to_vec();
                 self.comprehension(&gens, &[a, b])
             }
-            Kind::Lambda => Ok(Taint::empty()),
+            Kind::Lambda => {
+                if self.supply {
+                    self.sc_lambda(e)?;
+                }
+                Ok(Taint::empty())
+            }
             _ => {
                 let mut kids: Vec<NodeId> = Vec::new();
                 self.t().each_child(e, |x| kids.push(x));
@@ -763,13 +851,17 @@ impl<'p> Analyzer<'p> {
     }
 
     fn comprehension_inner(&mut self, gens: &[u32], elts: &[NodeId]) -> Result<Taint, Halt> {
+        let mut selected = false;
         for &g in gens {
             let (target, iter, ifs) = {
                 let t = self.t();
                 (a_(t, g), b_(t, g), t.list(c_(t, g)).to_vec())
             };
             let v = self.expr(iter)?;
-            self.assign(target, &v)?;
+            if self.supply && self.sc_selects_env(&v, &ifs) {
+                selected = true;
+            }
+            self.assign(target, &if self.supply { v.plain() } else { v })?;
             for cond in ifs {
                 self.expr(cond)?;
             }
@@ -777,6 +869,10 @@ impl<'p> Analyzer<'p> {
         let mut out = Vec::with_capacity(elts.len());
         for &x in elts {
             out.push(self.expr(x)?);
+        }
+        if selected {
+            // (the supply-chain model: some of the environment's variables)
+            return Ok(Taint::empty());
         }
         Ok(union_all(&out))
     }
@@ -852,6 +948,9 @@ impl<'p> Analyzer<'p> {
             union_all(vals)
         };
         let line = self.line(e);
+        if self.supply {
+            return self.sc_call(e, &res, &recv, &pos, starred.as_ref(), &kws, dstar.as_ref());
+        }
 
         let class = res.class;
 
@@ -919,7 +1018,7 @@ impl<'p> Analyzer<'p> {
             for (g, bound) in &bound_all {
                 let gf = &self.p.fns[*g as usize];
                 if let Some(rs) = &gf.ret_source {
-                    t = t.union(&Taint { source: true, params: no_params(), clean: rs.clean, origin: rs.origin, via: Some(*g) });
+                    t = t.union(&Taint { via: Some(*g), ..rs.as_source() });
                 }
                 for &(pname, clean) in &gf.param_to_return {
                     if let Some(b) = bound_get(bound, pname) {
@@ -1026,19 +1125,15 @@ impl<'p> Analyzer<'p> {
             if let Some(rs) = &self.ret_source {
                 match &func.ret_source {
                     None => {
-                        func.ret_source =
-                            Some(Taint { source: true, params: no_params(), clean: rs.clean, origin: rs.origin, via: rs.via });
+                        func.ret_source = Some(rs.as_source());
                         changed = true;
                     }
                     Some(old) => {
-                        if old.clean & rs.clean != old.clean {
-                            func.ret_source = Some(Taint {
-                                source: true,
-                                params: no_params(),
-                                clean: old.clean & rs.clean,
-                                origin: old.origin,
-                                via: old.via,
-                            });
+                        // (the supply-chain model: the kinds it holds, and what it is, only grow)
+                        let sc = crate::jsflow::sc_union(&old.sc, &rs.sc);
+                        let marks = old.marks | rs.marks;
+                        if old.clean & rs.clean != old.clean || sc != old.sc || marks != old.marks {
+                            func.ret_source = Some(Taint { clean: old.clean & rs.clean, sc, marks, ..old.as_source() });
                             changed = true;
                         }
                     }
@@ -1051,34 +1146,47 @@ impl<'p> Analyzer<'p> {
             for (attr, t) in writes {
                 let old = cls.attr_taint.get(&attr).cloned();
                 let new = match &old {
-                    None => Taint { source: true, params: no_params(), clean: t.clean, origin: t.origin, via: t.via },
-                    Some(o) => Taint { source: true, params: no_params(), clean: o.clean & t.clean, origin: o.origin, via: o.via },
+                    None => t.as_source(),
+                    Some(o) => Taint {
+                        clean: o.clean & t.clean,
+                        sc: crate::jsflow::sc_union(&o.sc, &t.sc),
+                        marks: o.marks | t.marks,
+                        ..o.as_source()
+                    },
                 };
-                if old.as_ref().map(|o| o.clean != new.clean).unwrap_or(true) {
+                if old.as_ref().map(|o| o.clean != new.clean || o.sc != new.sc || o.marks != new.marks).unwrap_or(true) {
                     cls.attr_taint.insert(attr, new);
                     cls_changed = true;
                 }
             }
+        }
+        if self.supply && (self.sc_commit() || self.sc_dirty) {
+            glob_changed = true;
         }
         if self.p.fns[f as usize].pseudo {
             let m = self.m;
             let entries: Vec<(Key, Taint)> = self.env.iter().map(|(k, v)| (*k, v.clone())).collect();
             let globals = &mut self.p.mods[m as usize].globals;
             for (k, t) in entries {
-                if k >> 32 != 0 || !t.source {
+                if k >> 32 != 0 || !(t.source || t.marks != 0) {
                     continue;
                 }
                 let name = k as NameId;
                 let old = globals.get(&name).cloned();
+                let new = match &old {
+                    None => t.as_source(),
+                    Some(o) => Taint {
+                        clean: o.clean & t.clean,
+                        sc: crate::jsflow::sc_union(&o.sc, &t.sc),
+                        marks: o.marks | t.marks,
+                        ..o.as_source()
+                    },
+                };
                 let update = match &old {
                     None => true,
-                    Some(o) => o.clean & t.clean != o.clean,
+                    Some(o) => o.clean != new.clean || o.sc != new.sc || o.marks != new.marks,
                 };
                 if update {
-                    let new = match &old {
-                        None => Taint { source: true, params: no_params(), clean: t.clean, origin: t.origin, via: t.via },
-                        Some(o) => Taint { source: true, params: no_params(), clean: o.clean & t.clean, origin: o.origin, via: o.via },
-                    };
                     globals.insert(name, new);
                     glob_changed = true;
                 }

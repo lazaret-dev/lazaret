@@ -18,7 +18,7 @@ whose outputs were recorded on the benchmark's files and on installed
 packages) — and the phases that follow rebuild the detectors on the
 engine's lexers and parsers (`docs/RUST_ENGINE.md` §8), each change to a
 finding a reviewed difference in the recorded outputs. The lexers (phase
-2) change none on real files; the registry's rule set is 2.17.0, so stored
+2) change none on real files; the registry's rule set is 2.18.0, so stored
 verdicts are scanned again. Whether it ships as 0.1.8 or 0.2.0 is decided
 before the release.
 
@@ -194,11 +194,11 @@ before the release.
   reported by its strongest — the instance's credentials, the whole
   environment, a credential store — so a payload's field order no longer
   decides its grade. A text the parser doesn't read, or that passes the
-  pass's work budget, keeps the text follower, as does Python for now. On
-  the benchmark's files 48 import-time answers moved, all of malicious
-  samples (four gained a reason, one lost one: a React component that only
-  displays the code; its package is still caught); on installed packages
-  none moved.
+  pass's work budget, keeps the text follower (Python's is read on its own
+  tree too: below). On the benchmark's files 48 import-time answers moved,
+  all of malicious samples (four gained a reason, one lost one: a React
+  component that only displays the code; its package is still caught); on
+  installed packages none moved.
 - **Received code reads JavaScript on its tree too.** "Runs code it
   receives over the network", "loads a module named by data it receives"
   and "deserializes data it receives" are answered by the same reading
@@ -219,6 +219,32 @@ before the release.
   environment. On the benchmark model-providers becomes SUSPICIOUS (445 of
   516 malicious releases; the popular packages unchanged), and the holdout
   gains a release (627 of 747); on installed packages nothing moved.
+- **Python's data flow and received code read Python on its tree too.** The
+  install-script and import-time tests' "sends … over the network" and
+  received-code reasons are answered for every text handed as Python by the
+  Python taint pass's supply-chain model (`docs/RUST_ENGINE.md` §19), as
+  JavaScript's are by its own: names resolved by scope, the script's own
+  functions by their summaries, `self.x` through the class, a closure's
+  variables, the globals a function declares, a thread's target and its
+  arguments, an object given data in its attributes (`req.data = …` for a
+  request later sent), a session or a client, a variable of the environment
+  the script stores something in, a container of the module's or of an
+  object's that a function fills (`INFO['h'] = …`, `self.items.append(…)`),
+  a variable a nested def assigns `nonlocal`, a class's own statements, a
+  parameter's default, a lambda called by its name, what a lookup answers
+  for the machine's own name (its address), a digest or the characters'
+  codes of the data (still the data), a star import's names, and a callee
+  under another name (`s = os.system`, `getattr(m, 'x')`,
+  `__builtins__.__dict__['exec']`). A comment's triple quotes, padding, and
+  a name that means two things no longer decide the answer, and code in a
+  string or a comment is not code (a stager's text is the stager test's). A
+  request a library makes to its caller's address is not the script's
+  download, unless the script calls it with its own. A text the parser
+  doesn't read (Python 2, a fragment) keeps the text detectors. On the
+  benchmark no verdict moved, and eight malicious releases' findings name
+  more exact data or gain received code; the holdout's totals are
+  unchanged (629 of 747), with two PyPI releases moving each way between
+  SUSPICIOUS and OK; on installed packages nothing moved. Rule set 2.18.0.
 - **Import time grades what no library sends, wherever it goes.** Code that
   runs when a package is loaded (SC-IMPORT-RISK) is CRITICAL, not MAJOR,
   when it sends the whole environment or a credential store (an SSH key,
@@ -235,11 +261,11 @@ before the release.
   MAJOR. `os.environb` reads as `os.environ` does: a variable read from it
   (pyarmor's `os.environb.get(b'http_proxy')`) was the whole environment.
   The same reasons count in what a package runs when it is used
-  (SC-USE-RISK). Rule set 2.17.0. On the benchmark no verdict moved (the
-  popular packages: 3 SUSPICIOUS, 29 WARN, as before), and five malicious
-  releases' use-time findings now name the whole environment sent; the
-  holdout gains two npm releases (629 of 747), each on SC-IMPORT-RISK; on
-  installed packages nothing moved.
+  (SC-USE-RISK). On the benchmark no verdict moved (the popular packages:
+  3 SUSPICIOUS, 29 WARN, as before), and five malicious releases' use-time
+  findings now name the whole environment sent; the holdout gains two npm
+  releases (629 of 747), each on SC-IMPORT-RISK; on installed packages
+  nothing moved.
 
 ### Added
 

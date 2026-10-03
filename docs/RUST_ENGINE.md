@@ -698,7 +698,7 @@ benchmark:
 | 0 | Baseline: the detection round committed (rule set 2.15.0), the engine's outputs recorded on the benchmark's files and on installed packages | Done (tag `rust-first-baseline`) |
 | 1 | The Rust engine is the reference: the Python engine, `--engine` and the pure wheel retired; the recorded outputs (§5); the pack as the source of the rules; every wheel a platform wheel, the sdist compiled by pip where none fits; an unanswered file SC-TRUNCATED in both packages | Done |
 | 2 | Decoding, lexers and bytes in the engine: source decoding (BOMs, UTF-16, coding cookies), one token substrate for the detectors | Done (tag `rust-first-phase2`): the lexers (§15: every caller's comments and literals, both packages), the self-read on them, the decoded view on string values (§15). Moved: the data flow, the dead drop, the secret endpoints and received code to phase 3 (they follow names: scopes); bytes to phase 4 (with linre over bytes); source decoding to after phase 3 (the packages' decoders already agree, held by their parity tests, and owning the CJK codecs would put their tables in the WebAssembly module) |
-| 3 | Parsers, scopes and flow: the detectors on bindings over the JavaScript and Python trees (§12, §13), constant folding of strings, the cross-file follower on them, project mode's passes (taint, SQL, function metrics) in the engine; the npm package's twins of them retired | The parsers done; project mode's JavaScript taint ported onto `js_parse`'s trees (§16: `js_flow`), both packages ask the engine for it, and jsflow.py, jsflow.js and the readers they used are retired (11,357 lines); Python's taint ported onto `py_parse`'s trees (§17: `py_flow`), both packages ask the engine for it (the npm package had no port of it), and flow.py's own pass is retired (1,505 lines); the passes and the parser held to their recorded outputs; the supply-chain data flow and received code on JavaScript's trees (§18: local data sent, reported by the strongest send; received data run, loaded or deserialized, from the script's own address), benchmark-gated. Next: the dead drop, the secret endpoints and the self-read on the same scopes, then Python's data flow on its trees |
+| 3 | Parsers, scopes and flow: the detectors on bindings over the JavaScript and Python trees (§12, §13), constant folding of strings, the cross-file follower on them, project mode's passes (taint, SQL, function metrics) in the engine; the npm package's twins of them retired | The parsers done; project mode's JavaScript taint ported onto `js_parse`'s trees (§16: `js_flow`), both packages ask the engine for it, and jsflow.py, jsflow.js and the readers they used are retired (11,357 lines); Python's taint ported onto `py_parse`'s trees (§17: `py_flow`), both packages ask the engine for it (the npm package had no port of it), and flow.py's own pass is retired (1,505 lines); the passes and the parser held to their recorded outputs; the supply-chain data flow and received code on JavaScript's trees (§18: local data sent, reported by the strongest send; received data run, loaded or deserialized, from the script's own address) and on Python's (§19), benchmark-gated. Next: the cross-file follower on bindings and project mode's last passes (SQL, function metrics, intra-file taint). The dead drop, the secret endpoints and the self-read stay on the text detectors for now: on the benchmark's JavaScript they fire in few files, and no examined miss comes from their windows |
 | 4 | Linear-time matching: the pack's patterns on linre (§14), pyre and the shlex port retired, current Unicode | Every pattern linre accepts runs on it (616 of the pack's 657; done first, as no answer changes); the 41 others, pyre and the shlex port not started |
 | 5 | One call per file, a content cache (SHA-256), the guard's scan in a child process that fails closed, archive ambiguity checks | Not started |
 
@@ -1854,7 +1854,7 @@ what was read, whether only an address held it — and the reasons, their
 grading and the destinations are the tests' as before. A text the parser
 doesn't read (a fragment, TypeScript it can't, a file over 2 MB) or a
 reading past the pass's budget is the text follower's to answer; so is any
-text not handed as JavaScript (Python's data flow is next).
+text not handed as JavaScript or Python (Python's model is §19).
 
 **Why.** The text follower followed names in a window of text: a quote in a
 regular expression or a backtick in a comment opened a string over the
@@ -1977,3 +1977,122 @@ from the request, an aliased require, without its two false positives (a
 library's loader, code in a string). Known gaps: an address kept in a
 class field (`this.url`, read as a caller's), and an index into a string
 array the decoded view didn't resolve.
+
+## 19. The data flow on the Python tree
+
+`src/pyflow/supply.rs` is the Python taint pass's second model, as §18's is
+JavaScript's: local data a script reads from the machine, followed to a
+network send, and data it receives, followed to code run, on `py_parse`'s
+trees. The install-script and import-time tests ask it for every text
+handed as Python (`signs::local_data_sent`, `signs::received_code`); a text
+the parser doesn't read (Python 2, a fragment, bytes), over 2 MB, or past
+the pass's budgets is the text detectors' to answer.
+
+**The model.** The pass is pyflow's (§17) — summaries of the script's own
+functions to a fixpoint, `self.x` through the class, module globals — with
+values that carry JavaScript's kinds of local data (`Sc`) and marks for
+what a value is: a connection (`socket.socket()`,
+`http.client.HTTPSConnection`: what it is written is sent, what it reads is
+received), an HTTP client the script made (`requests.Session()`,
+`httpx.Client()`, `aiohttp.ClientSession()`: its calls send and receive), a
+request object (`urllib.request.Request`: handed to a send, its data),
+`os.environ` itself (a subscript or `.get` reads one variable), and a
+request to the instance's metadata or a public-IP service. Sources are the
+text follower's, from the same tables: an environment variable by its name,
+the whole environment (`os.environ`, `os.environb`; a comprehension that
+selects variables by a test that names no secret is not), the os, socket,
+platform and getpass modules' names, a read of a path outside the package
+(`open`, `os.listdir`, `glob`, `sqlite3.connect`; `Path(x)` is a path, read
+by `read_text()`, `open()`), what a command prints (`check_output`, `run`,
+`Popen`, `getoutput`, `os.popen`), the instance's metadata and a public-IP
+lookup. Sends: requests' and httpx's `post`, `put`, `patch` (the address
+first), `get`, `head`, `delete` (all of it an address), `request` (a
+method, then the address), urllib's `urlopen` and `Request` (and Python 2's
+`urllib.urlopen`), a session's or a client's calls, a connection's `send`,
+`sendall`, `write` and `request`, a DNS lookup of a name composed with a
+literal, a network program given data on its command line (its process
+options, `env=` and `cwd=`, are the program's), a URL whose host the data
+continues (an f-string, `+`, `%`, `.format`), and an object named `session`
+or `client` made where the model doesn't see (the text follower's name
+test).
+
+What the pass adds to pyflow's to follow them: a closure's variables (what
+the function around it gives them), the globals a function declares
+`global`, a thread's, a timer's or an executor's target given its
+arguments, what an object's attribute or a container's `append` or `update`
+is given (the object holds it), a container of the module's that a function
+fills (`INFO['h'] = …`, `DATA.append(…)` where the function binds no such
+name: the module's value holds it), a container on `self` or another
+object, or in another container, that a method fills (`self.info['h'] = …`,
+`self.items.append(…)`), a variable of the function around a def that the
+def assigns `nonlocal` or fills, a class's own statements (run when it is
+defined; what they assign is the class's attribute, read by `self.x`), a
+parameter's default where a call gives none, a lambda's body (a name given
+a lambda and called by it: the body, given the call's arguments), what a
+lookup answers for a name it is given
+(`socket.gethostbyname(socket.gethostname())`: the machine's address), a
+variable of the environment the script stores something in, and the
+script's own wrappers of exec, of a read, of the environment and of a
+download (`run('whoami')`, `env('AWS_SECRET_ACCESS_KEY')`), given their
+argument by position or by keyword. A callee is named through an import
+alias, an alias of its own (`s = os.system`), `getattr(m, 'x')`, a
+namespace's dictionary (`__builtins__.__dict__['exec']`,
+`globals()['eval']`), or, in a snippet that leaves out its import, the
+library a bare `urlopen` or `check_output` usually comes from (and a star
+import's names: `from socket import *`). Not the data: a length, a flag or
+a checksum, what a child process was given, what a file holds for what its
+path was made of. A digest, characters' codes or a number written out still
+are (`md5(host).hexdigest()` is the machine's id).
+
+**Received code.** Python's runners (`exec`, `eval`, and `compile`'s code
+run by them; `os.system`, `os.popen`, `subprocess` with `shell=True`; an
+interpreter given `-c` and the code, `[sys.executable, '-c', code]`),
+importers (`importlib.import_module`, `__import__`) and deserializers
+(pickle, marshal, dill, cloudpickle, jsonpickle, `yaml.load` without a
+safe loader). What a request receives from the script's own address — a
+response's text, content or JSON, a socket's `recv`, what `curl` or `wget`
+prints — reaching them is the finding. A request to an address the caller
+gives (`def load(u): exec(requests.get(u).text)`, `self.url`) is a
+library's, unless the script calls it with its own address
+(`load('https://…')`: the parameter's reach, the address of what is run,
+is in the summary). A fixed program given received data as its argument
+(`os.system('curl -d ' + d)`, `run(['ls', name])`) runs no code it
+received, and code in a string is a stager's (the stager test), as in
+JavaScript.
+
+**Held to** the text detectors on real code before it replaced them: on the
+benchmark's 35,088 in-sample Python files and 9,819 files of installed
+packages, the two answer alike but for 44 files: 29 of 13 malicious
+releases, 13 of six popular packages and two installed ones. The tree reads
+what the text missed (a flow through a closure, a thread's arguments, a
+session, a request object given its data afterwards: s3transfer-sl's
+setup.py; the reverse shells of ReverseShell 0.1.0, which run what a socket
+receives), and drops what the text read wrong (a name that meant two things
+in pip's `distlib/util.py`, a method named `fetch` in dulwich, a path
+normalized in reportlab, an instance-metadata URL in an address in jax and
+an OpenTelemetry detector). Nine of the popular packages' files (litellm's
+and inspect-ai's SDK modules) send one variable by the tree's reading, its
+key or its host to its service, where the text read none or another: an
+SDK's shape, which the import-time and use-time tests don't grade. Of 522
+generated probes (six kinds of local data sent five ways, four kinds of
+received data run seven ways, each through nine shapes: a function, a
+return, a class, a closure, a dictionary, 2,500 lines of padding, triple
+quotes in a comment …) the tree finds all, the text detectors 353. A
+comparison on the holdout, in aggregate, led to 181 more probes of beacon
+shapes, a machine's names sent to a collector. They showed the tree missing
+what the text detectors caught in 15 shapes, all since fixed: containers
+filled on objects and through closures, class bodies, lookups, digests,
+star imports and the others above. Of the 181 the tree finds 159, the text
+detectors 136, and every one the text detectors find.
+`pyflow::supply::tests` hold each piece; the `test_supply_chain_signals`
+case the lexers couldn't pass (triple quotes in a comment) passes. Of the
+hooks corpus's outputs 18 moved: JavaScript handed as Python (`fetch` is no
+Python call), code in strings (a stager's text) and code in comments. On
+the benchmark's files 19 import-time answers moved, all of malicious
+samples, and none of the installed packages'. No in-sample verdict moved;
+eight malicious releases' findings name more exact data (what `ifconfig`
+reports rather than the host name, a public IP address) or gain received
+code (ptmpl). The holdout's totals are unchanged (629 of 747), but two PyPI
+releases moved from SUSPICIOUS to OK and two from OK to SUSPICIOUS, each on
+the install hook's host-name send. Under the holdout rule, the two lost
+ones weren't opened; none of the 15 shapes above is theirs.

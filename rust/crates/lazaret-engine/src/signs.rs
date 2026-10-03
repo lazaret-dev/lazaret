@@ -3087,29 +3087,37 @@ fn push_new(reasons: &mut Vec<PyStr>, r: PyStr) {
 }
 
 /// The data flow: local data a text sends (offset, kind, what, whether only
-/// an address held it). JavaScript is read on its tree (the supply-chain
-/// model of jsflow, phase 3 step 3), unless it doesn't parse or passes the
-/// pass's bounds; any other text, and those, by the text follower.
+/// an address held it). JavaScript and Python are read on their trees (the
+/// supply-chain models of jsflow and pyflow, phase 3 step 3), unless the
+/// text doesn't parse or passes the pass's bounds; any other text, and
+/// those, by the text follower.
 pub(crate) fn local_data_sent(p: &Pack, text: &[u32], lang: Option<&str>) -> Option<(usize, &'static str, PyStr, bool)> {
-    if lang == Some("js") {
-        match crate::jsflow::supply::local_data_sent(text) {
-            crate::jsflow::supply::Answer::Found(at, kind, what, in_address) => return Some((at, kind, what, in_address)),
-            crate::jsflow::supply::Answer::Nothing => return None,
-            crate::jsflow::supply::Answer::Unread => {}
-        }
+    let tree = match lang {
+        Some("js") => crate::jsflow::supply::local_data_sent(text),
+        Some("py") => crate::pyflow::supply::local_data_sent(text),
+        _ => crate::jsflow::supply::Answer::Unread,
+    };
+    match tree {
+        crate::jsflow::supply::Answer::Found(at, kind, what, in_address) => return Some((at, kind, what, in_address)),
+        crate::jsflow::supply::Answer::Nothing => return None,
+        crate::jsflow::supply::Answer::Unread => {}
     }
     crate::flow::local_data_sent_at(p, text)
 }
 
 /// Received code: data a text receives over the network run as code, a
 /// module it names loaded, or deserialized ((1-based line, category)).
-/// JavaScript is read on its tree, unless it doesn't parse or passes the
-/// pass's bounds; any other text, and those, by the text detector.
+/// JavaScript and Python are read on their trees, unless the text doesn't
+/// parse or passes the pass's bounds; any other text, and those, by the
+/// text detector.
 pub(crate) fn received_code(p: &Pack, text: &[u32], lang: Option<&str>) -> Option<(usize, &'static str)> {
-    if lang == Some("js") {
-        if let Some(answer) = crate::jsflow::supply::received_code(text) {
-            return answer;
-        }
+    let tree = match lang {
+        Some("js") => crate::jsflow::supply::received_code(text),
+        Some("py") => crate::pyflow::supply::received_code(text),
+        _ => None,
+    };
+    if let Some(answer) = tree {
+        return answer;
     }
     received::received_code_kind(p, text, &[], &[])
 }

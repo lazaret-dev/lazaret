@@ -81,6 +81,10 @@ MAX_MEMBER = _env_number("LAZARET_MAX_SOURCE_BYTES", 16_000_000)
 MAX_FILES = 20_000         # files per package (numpy's sdist alone has >4,000)
 SAMPLE = 8192              # header/entropy sample read from oversized files
 # Stored scans from another engine version are scanned again (has_scan).
+# 2.18: the Rust-first refactor's phase 3: local data sent and code received
+#      read on Python's tree too (a closure's variables, a thread's
+#      arguments, a request object given its data, a callee under another
+#      name; code in strings and comments is not code)
 # 2.17: the Rust-first refactor's phase 3: local data sent and code received
 #      read on JavaScript's tree (a send reported by the strongest data it
 #      carries; a library's request for its caller not the script's
@@ -157,7 +161,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.17.0"
+ENGINE_VERSION = "2.18.0"
 
 # ---------------- Trust-chain limits (F9/G14/F10) ----------------
 # Only these hosts may ever be fetched, over https only, and redirects to any

@@ -36,6 +36,7 @@
 pub mod driver;
 pub mod eval;
 pub mod frameworks;
+pub mod supply;
 pub mod unparse;
 #[cfg(test)]
 mod tests;
@@ -271,6 +272,12 @@ fn merge_params(a: &Params, b: &Params) -> Params {
 /// `origin`: where the source was read (a module and line); `via`: the
 /// function whose return value delivered it. A value with neither is
 /// flow.py's EMPTY (clean for everything).
+///
+/// With the supply-chain model (`supply.rs`) the source is local data or
+/// data received over the network: `sc` says which kinds the value holds
+/// and which read came first (jsflow's `Sc`), and `marks` what the value is
+/// (a connection, an HTTP client, os.environ itself: `supply::OBJ_*`).
+/// Project mode never sets them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Taint {
     pub source: bool,
@@ -278,11 +285,23 @@ pub struct Taint {
     pub clean: u8,
     pub origin: Option<(ModId, u32)>,
     pub via: Option<FnId>,
+    pub sc: Option<Rc<crate::jsflow::Sc>>,
+    pub marks: u8,
 }
 
 impl Taint {
     pub fn empty() -> Taint {
-        Taint { source: false, params: no_params(), clean: ALL, origin: None, via: None }
+        Taint { source: false, params: no_params(), clean: ALL, origin: None, via: None, sc: None, marks: 0 }
+    }
+
+    /// A value read from function parameter `k` (its index in pnames).
+    pub fn param(k: u16) -> Taint {
+        Taint { source: false, params: Rc::from(vec![k]), clean: 0, origin: None, via: None, sc: None, marks: 0 }
+    }
+
+    /// Request data (or, with the supply-chain model, local data) read at `origin`.
+    pub fn src(clean: u8, origin: Option<(ModId, u32)>, via: Option<FnId>) -> Taint {
+        Taint { source: true, params: no_params(), clean, origin, via, sc: None, marks: 0 }
     }
 
     pub fn tainted(&self) -> bool {
@@ -291,10 +310,10 @@ impl Taint {
 
     /// Concatenation: safe for a category only where both parts are.
     pub fn union(&self, other: &Taint) -> Taint {
-        if !other.tainted() {
+        if !other.tainted() && other.marks & !self.marks == 0 {
             return self.clone();
         }
-        if !self.tainted() {
+        if !self.tainted() && self.marks & !other.marks == 0 {
             return other.clone();
         }
         let src = if self.source { self } else { other };
@@ -302,9 +321,17 @@ impl Taint {
         Taint {
             source,
             params: merge_params(&self.params, &other.params),
-            clean: self.clean & other.clean,
+            clean: if !other.tainted() {
+                self.clean
+            } else if !self.tainted() {
+                other.clean
+            } else {
+                self.clean & other.clean
+            },
             origin: if source { src.origin } else { None },
             via: if source { src.via } else { None },
+            sc: crate::jsflow::sc_union(&self.sc, &other.sc),
+            marks: self.marks | other.marks,
         }
     }
 
@@ -313,6 +340,32 @@ impl Taint {
             return Taint::empty();
         }
         Taint { clean: self.clean | cats, ..self.clone() }
+    }
+
+    /// The value without what it is (`marks`, but `supply::FETCHED`, which
+    /// says what its parameters are): what a call it is given to makes of it.
+    pub fn plain(&self) -> Taint {
+        if self.marks & !supply::FETCHED == 0 {
+            return self.clone();
+        }
+        if !self.tainted() {
+            return Taint::empty();
+        }
+        Taint { marks: self.marks & supply::FETCHED, ..self.clone() }
+    }
+
+    /// The value as a summary keeps it (a source, or with the supply-chain
+    /// model what a value is): no parameters, its facts.
+    pub fn as_source(&self) -> Taint {
+        Taint {
+            source: self.source,
+            params: no_params(),
+            clean: self.clean,
+            origin: self.origin,
+            via: self.via,
+            sc: self.sc.clone(),
+            marks: self.marks,
+        }
     }
 }
 
@@ -417,6 +470,9 @@ pub struct Func {
     pub runs: u32,
     pub request_params: Option<Rc<Vec<NameId>>>,
     pub size: u64,
+    /// the function a nested def is defined in (the supply-chain model reads
+    /// its variables there)
+    pub parent: Option<FnId>,
 }
 
 /// What a name or an expression may be (flow.py's (kind, target)).
@@ -786,6 +842,14 @@ pub struct Project {
     pub n_request: NameId,
     pub n_init: NameId,
     pub n_super: NameId,
+    /// (the supply-chain model) the variables a function gives the defs
+    /// nested in it, and the names each function declares `global`
+    pub closure: QuickMap<FnId, QuickMap<NameId, Taint>>,
+    /// (the supply-chain model) what nested functions give a function's
+    /// variables: `nonlocal x` assigned, or a container of its filled
+    pub closure_back: QuickMap<FnId, QuickMap<NameId, Taint>>,
+    pub global_decls: QuickMap<FnId, Vec<NameId>>,
+    pub nonlocal_decls: QuickMap<FnId, Vec<NameId>>,
 }
 
 impl Project {
@@ -822,6 +886,10 @@ impl Project {
             n_request,
             n_init,
             n_super,
+            closure: QuickMap::default(),
+            closure_back: QuickMap::default(),
+            global_decls: QuickMap::default(),
+            nonlocal_decls: QuickMap::default(),
         }
     }
 
@@ -958,13 +1026,13 @@ impl Project {
         self.frames = 0;
         let limit = self.frame_limit;
         self.frame_limit = limit + 1;
-        let collected = self.collect_items(&body, idx, None, false);
+        let collected = self.collect_items(&body, idx, None, false, None);
         self.frame_limit = limit;
         self.frames = 0;
         if collected.is_err() {
             return false;
         }
-        let body_fn = self.new_func(idx, root, None, true);
+        let body_fn = self.new_func(idx, root, None, true, None);
         self.mods[idx as usize].body_fn = body_fn;
         self.mods[idx as usize].all_funcs.push(body_fn);
         for n in own_nodes(self.tree(idx), &body) {
@@ -973,7 +1041,7 @@ impl Project {
         true
     }
 
-    fn new_func(&mut self, m: ModId, node: NodeId, cls: Option<ClsId>, pseudo: bool) -> FnId {
+    fn new_func(&mut self, m: ModId, node: NodeId, cls: Option<ClsId>, pseudo: bool, parent: Option<FnId>) -> FnId {
         let id = self.fns.len() as FnId;
         let (name, line, mut posonly, mut args, mut kwonly, mut vararg, mut kwarg) =
             (NONE, 1u32, Vec::new(), Vec::new(), Vec::new(), None, None);
@@ -1073,6 +1141,7 @@ impl Project {
             runs: 0,
             request_params: None,
             size,
+            parent,
         });
         id
     }
@@ -1121,20 +1190,21 @@ impl Project {
         }
     }
 
-    /// flow._PyProject._collect, one frame deeper.
-    fn collect(&mut self, body: &[u32], m: ModId, cls: Option<ClsId>, in_func: bool) -> Result<(), Halt> {
+    /// flow._PyProject._collect, one frame deeper (`parent`: the function
+    /// the body is in, if any).
+    fn collect(&mut self, body: &[u32], m: ModId, cls: Option<ClsId>, in_func: bool, parent: Option<FnId>) -> Result<(), Halt> {
         self.enter()?;
-        let r = self.collect_items(body, m, cls, in_func);
+        let r = self.collect_items(body, m, cls, in_func, parent);
         self.leave();
         r
     }
 
-    fn collect_items(&mut self, body: &[u32], m: ModId, cls: Option<ClsId>, in_func: bool) -> Result<(), Halt> {
+    fn collect_items(&mut self, body: &[u32], m: ModId, cls: Option<ClsId>, in_func: bool, parent: Option<FnId>) -> Result<(), Halt> {
         for &node in body {
             let kind = self.tree(m).kind(node);
             match kind {
                 Kind::FunctionDef | Kind::AsyncFunctionDef => {
-                    let fid = self.new_func(m, node, if in_func { None } else { cls }, false);
+                    let fid = self.new_func(m, node, if in_func { None } else { cls }, false, if in_func { parent } else { None });
                     let name = self.fns[fid as usize].name;
                     self.mods[m as usize].all_funcs.push(fid);
                     if in_func {
@@ -1151,7 +1221,7 @@ impl Project {
                         self.funcs_by_name.entry(name).or_default().push(fid);
                     }
                     let fbody: Vec<u32> = body_of(self.tree(m), node).to_vec();
-                    self.collect(&fbody, m, None, true)?;
+                    self.collect(&fbody, m, None, true, Some(fid))?;
                     for n in own_nodes(self.tree(m), &fbody) {
                         self.record_import(m, n);
                     }
@@ -1173,7 +1243,7 @@ impl Project {
                         self.mods[m as usize].classes.insert(name, c);
                     }
                     let cbody: Vec<u32> = body_of(self.tree(m), node).to_vec();
-                    self.collect(&cbody, m, Some(c), false)?;
+                    self.collect(&cbody, m, Some(c), false, None)?;
                 }
                 _ => {
                     for field in ["body", "orelse", "finalbody", "handlers", "cases"] {
@@ -1190,7 +1260,7 @@ impl Project {
                                 stmts.push(s);
                             }
                         }
-                        self.collect(&stmts, m, cls, in_func)?;
+                        self.collect(&stmts, m, cls, in_func, parent)?;
                     }
                 }
             }

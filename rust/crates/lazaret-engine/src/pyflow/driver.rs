@@ -43,6 +43,8 @@ pub struct Config {
     source: Rc<Regex>,
     pub orm: Rc<Regex>,
     py2: Rc<Regex>,
+    /// the supply-chain model (supply.rs) instead of project mode's
+    pub supply: Option<Rc<super::supply::Supply>>,
 }
 
 impl Config {
@@ -71,6 +73,7 @@ impl Config {
             source: rx(SOURCE_RE, 0),
             orm: rx(ORM_RESULT_RE, 0),
             py2: rx(PY2_PRINT_RE, 8),
+            supply: None,
         }
     }
 

