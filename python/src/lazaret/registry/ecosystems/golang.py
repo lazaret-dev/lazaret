@@ -50,7 +50,7 @@ from lazaret.registry.ecosystems import base
 from lazaret.scanner import gomod
 
 __all__ = ["Go", "ECOSYSTEM", "check_module_path", "split_path_version", "check_path_major", "escape", "file_path_problem",
-           "zip_h1", "file_h1", "parse_lookup", "parse_gomod", "is_pseudo_version", "canonical_version", "MAX_NAME", "MAX_ZIP_CONTENT"]
+           "unescape", "zip_h1", "file_h1", "parse_lookup", "parse_gomod", "is_pseudo_version", "canonical_version", "MAX_NAME", "MAX_ZIP_CONTENT"]
 
 PROXY_HOST = "proxy.golang.org"
 SUMDB_HOST = "sum.golang.org"
@@ -203,6 +203,27 @@ def check_path_major(version, path_major):
 def escape(text):
     """The proxy's case encoding of a checked name or version: each capital letter becomes `!` and its lower-case letter."""
     return "".join("!" + ch.lower() if "A" <= ch <= "Z" else ch for ch in text)
+
+
+def unescape(text):
+    """The name or version a proxy URL's `escape`d segment stands for (`module.UnescapePath`'s case decoding), or None when
+    the text is not one: a capital letter, a `!` not followed by a lower-case letter, a trailing `!`, a non-ASCII character."""
+    out, bang = [], False
+    for ch in text:
+        if ord(ch) >= 0x80:
+            return None
+        if bang:
+            if not "a" <= ch <= "z":
+                return None
+            out.append(ch.upper())
+            bang = False
+        elif ch == "!":
+            bang = True
+        elif "A" <= ch <= "Z":
+            return None
+        else:
+            out.append(ch)
+    return None if bang else "".join(out)
 
 
 canonical_version = gomod.canonical_version

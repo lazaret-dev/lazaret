@@ -1,4 +1,4 @@
-"""The `lazaret` command: `lazaret guard <npm|pnpm|yarn|bun|pip|uv|uvx> …` checks what a
+"""The `lazaret` command: `lazaret guard <npm|pnpm|yarn|bun|pip|uv|uvx|go|cargo> …` checks what a
 package manager is about to install (lazaret.registry.guard); `lazaret [scan]
 github:owner/repo[@ref]` (or `gitlab:`) scans a repository at a commit
 (lazaret.registry.sourcescan); anything else scans a project
@@ -7,7 +7,7 @@ one it hands the command line to."""
 import os
 import sys
 
-GUARD_TOOLS = ("npm", "pnpm", "yarn", "bun", "pip", "pip3", "uv", "uvx")
+GUARD_TOOLS = ("npm", "pnpm", "yarn", "bun", "pip", "pip3", "uv", "uvx", "go", "cargo")
 SOURCE_PREFIXES = ("github:", "gitlab:")
 
 
