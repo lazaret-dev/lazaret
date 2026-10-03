@@ -265,7 +265,7 @@ def blocks(head, k, body):
 # engine reads exactly as deep — the tokenizer's limits (200 brackets, 99
 # indentation levels, 149 f-strings), its parser's stack (6000 rule calls:
 # `not`, `-`, `lambda`, `**`, `elif` …), the tree's depth (9,997 nodes: what
-# ast converts)
+# ast converts on Linux and macOS; see pyparse_oracle.deep_trees)
 NESTINGS = [
     ("parentheses", nest("", "(", "x", ")"), 200),
     ("lists", nest("", "[", "x", "]"), 200),

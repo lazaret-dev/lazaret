@@ -10,6 +10,7 @@ Nothing here parses with the running Python's own `ast` (it may not be 3.13),
 and nothing is executed: the sources are only parsed.
 """
 import ctypes
+import functools
 import json
 import os
 import shutil
@@ -130,6 +131,30 @@ def python313():
 
 PYTHON313 = python313()
 SKIP = "Python 3.13 is not installed (python3.13 on the PATH, or LAZARET_PYTHON313): its ast is the oracle"
+
+# CPython's C recursion limit bounds the trees its ast converts: 10000 on
+# Linux and macOS, where ast.parse reads a tree 9,997 nodes deep, but 3000 on
+# Windows, where it refuses one deeper than 2,997 nodes (a RecursionError),
+# and so does its compiler. On every platform, the engine reads what Python
+# reads on Linux and macOS, so a scan's answer doesn't depend on where it
+# runs. Against an oracle with a lower limit, the comparisons that a tree's
+# depth decides are skipped.
+SHALLOW = ("this Python's ast refuses trees that Python reads on Linux and macOS (its C recursion limit is lower, "
+           "as on Windows): the engine reads them, and is compared with Python on those platforms")
+
+
+@functools.lru_cache(maxsize=None)
+def deep_trees():
+    """Does the oracle's ast convert trees as deep as on Linux and macOS (a
+    chain of 9,994 `+`s: NESTINGS' "chained +" at its deepest)?"""
+    return not is_error(oracle(["a" + " + a" * 9994])[0])
+
+
+def too_deep(answer):
+    """Is the answer the RecursionError of an oracle whose ast converts
+    shallower trees than on Linux and macOS (see deep_trees)?"""
+    return (is_error(answer) and json.loads(answer)["error"]["reason"].startswith("RecursionError")
+            and not deep_trees())
 
 
 def oracle(sources, timeout=40):

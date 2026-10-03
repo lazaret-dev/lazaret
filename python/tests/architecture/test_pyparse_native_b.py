@@ -13,6 +13,13 @@ test_pyparse_native.py), on:
   many contexts no longer a chain of `not`s than Python (INNERMOST);
 * long inputs, which it reads in linear time.
 
+The depths are Python's on Linux and macOS. On Windows, CPython's C
+recursion limit is 3000, not 10000, and its ast refuses a tree deeper than
+2,997 nodes. The engine still reads what Python reads on Linux and macOS
+(pyparse_oracle.deep_trees). With Python on Windows as the oracle, the
+comparisons a tree's depth decides are skipped; what the engine reads is
+still held.
+
 Inert text only: nothing is executed. Skipped where Python 3.13 or the
 native library is missing.
 """
@@ -55,10 +62,14 @@ class NativePythonParseCasesTests(unittest.TestCase):
         for i, (name, make, deepest) in enumerate(cases.NESTINGS):
             with self.subTest(construct=name):
                 at, past = want[2 * i], want[2 * i + 1]
-                self.assertFalse(oracle.is_error(at), at[:200])
+                got = oracle.native(make(deepest))
                 self.assertTrue(oracle.is_error(past), past[:200])
-                self.assertEqual(oracle.native(make(deepest)), at)
                 self.assertTrue(oracle.is_error(oracle.native(make(deepest + 1))))
+                if oracle.too_deep(at):                 # deeper than this Python's ast converts (Windows)
+                    self.assertTrue(got.startswith('{"_type":"Module"'), got[:200])
+                    self.skipTest(oracle.SHALLOW)
+                self.assertFalse(oracle.is_error(at), at[:200])
+                self.assertEqual(got, at)
 
     def test_where_the_engine_is_stricter(self):
         sources = []
@@ -76,7 +87,11 @@ class NativePythonParseCasesTests(unittest.TestCase):
     def test_never_deeper_than_python_in_any_context(self):
         # as many `not`s as Python reads in each context: the engine reads no
         # more (its estimate of Python's parser stack errs on the strict
-        # side, never the lenient), and not many fewer
+        # side, never the lenient), and not many fewer. Python reads more
+        # than 5000 in each on Linux and macOS, so an oracle with a lower C
+        # recursion limit refuses every chain for its depth
+        if not oracle.deep_trees():
+            self.skipTest(oracle.SHALLOW)
         deepest = oracle.deepest(cases.INNERMOST)
         for (before, after), k in zip(cases.INNERMOST, deepest):
             with self.subTest(context=before + "…" + after):
@@ -85,9 +100,10 @@ class NativePythonParseCasesTests(unittest.TestCase):
                 self.assertFalse(oracle.is_error(oracle.native(before + "not " * (k - 20) + "x" + after)))
 
     def test_deep_trees_are_refused_as_python_refuses_them(self):
-        # ast converts a tree 9,997 nodes deep at most (a RecursionError), its
-        # parser keeps 6000 rule calls (a MemoryError), no line for either; its
-        # tokenizer 200 brackets (a SyntaxError on the line)
+        # ast converts a tree 9,997 nodes deep at most (2,997 on Windows; a
+        # RecursionError), its parser keeps 6000 rule calls (a MemoryError),
+        # no line for either; its tokenizer 200 brackets (a SyntaxError on
+        # the line)
         for src in ("a" + " + a" * 20000, "a" + ".b" * 50000, "-" * 7000 + "x", "x = " + "[" * 300 + "]" * 300):
             with self.subTest(src=src[:20]):
                 want = oracle.oracle([src])[0]
