@@ -408,7 +408,9 @@ class CargoTests(unittest.TestCase):
         self.assertIn("--only-binary", str(cm.exception))
 
     def test_what_cargo_is_asked_and_what_it_builds(self):
-        with tempfile.TemporaryDirectory() as d:
+        # (build_native loads the library it built, in this process: Windows
+        # can't delete a loaded DLL, so the directory may outlive the test there)
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
             target = pathlib.Path(d, "target")
             name = self.b.native_library_name(self.b.local_platform())
             ran = []

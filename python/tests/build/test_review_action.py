@@ -18,6 +18,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -102,7 +103,9 @@ class ActionFileTests(unittest.TestCase):
             self.assertIn(word, section)
 
 
-@unittest.skipUnless(shutil.which("bash"), "no bash here")
+@unittest.skipUnless(shutil.which("bash") and sys.platform != "win32",
+                     "needs bash (on Windows the one on PATH can be WSL's launcher, while a runner runs the "
+                     "step in Git Bash: the script is tested on Linux and macOS)")
 class ScanStepTests(unittest.TestCase):
     """The scan step's script, run with bash; the venv's python is a stand-in
     that writes its arguments, one per line, and exits with $EXIT."""

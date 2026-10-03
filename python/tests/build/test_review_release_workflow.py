@@ -83,9 +83,13 @@ class NpmPathTests(unittest.TestCase):
         self.assertEqual(misread_specs(good), [])
 
 
-def read(name):
-    with open(os.path.join(WORKFLOWS, name), encoding="utf-8") as fh:
+def text_of(path):
+    with open(path, encoding="utf-8") as fh:
         return fh.read()
+
+
+def read(name):
+    return text_of(os.path.join(WORKFLOWS, name))
 
 
 def workflows():
@@ -284,7 +288,7 @@ class NpmEngineTests(unittest.TestCase):
         # the engine must name it, or nothing runs it
         arch = os.path.join(_support.REPO_ROOT, "python", "tests", "architecture")
         gated = sorted(f[:-3] for f in os.listdir(arch) if f.startswith("test_") and f.endswith(".py")
-                       and "NPM_READY" in open(os.path.join(arch, f), encoding="utf-8").read())
+                       and "NPM_READY" in text_of(os.path.join(arch, f)))
         self.assertGreater(len(gated), 10)
         built = "".join(text for workflow in workflows().values() for text in jobs(workflow).values()
                         if "npm run build" in text)
@@ -303,7 +307,7 @@ class NpmEngineTests(unittest.TestCase):
         self.assertLess(build.index("npm test"), build.index("npm pack"))
         for f in ("package/native/lazaret.wasm", "package/native/NOTICE"):
             self.assertIn(f, build)
-        script = open(os.path.join(_support.REPO_ROOT, "js", "scripts", "build-wasm.js"), encoding="utf-8").read()
+        script = text_of(os.path.join(_support.REPO_ROOT, "js", "scripts", "build-wasm.js"))
         self.assertIn('"--profile", "wasm", "--offline", "--locked", "--target", "wasm32-unknown-unknown"', script)
 
 
