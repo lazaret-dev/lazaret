@@ -119,7 +119,7 @@ const BITS: &[&str] = &[
 fn bits(rng: &mut Rng, max: usize) -> String {
     let mut s = String::new();
     for _ in 0..rng.below(max + 1) {
-        s.push_str(rng.pick(BITS));
+        s.push_str(*rng.pick(BITS));
     }
     s
 }
@@ -132,7 +132,7 @@ fn quoted_body(rng: &mut Rng, quote: &str, escapes: &[&str], newlines: bool) -> 
         let b = *rng.pick(BITS);
         let bad = b.contains(quote) || b.contains('\\') || (!newlines && (b.contains('\n') || b.contains('\r')));
         if bad {
-            s.push_str(rng.pick(escapes));
+            s.push_str(*rng.pick(escapes));
         } else {
             s.push_str(b);
         }
@@ -264,7 +264,7 @@ pub fn gen_toks(lang: &Lang, rng: &mut Rng) -> Vec<Tok> {
         .map(|_| {
             let mut t = (lang.gen)(rng);
             if t.sep.is_empty() {
-                t.sep = rng.pick(SEPS);
+                t.sep = *rng.pick(SEPS);
             }
             t
         })

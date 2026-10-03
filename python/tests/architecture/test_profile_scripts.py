@@ -543,7 +543,7 @@ class RealEngineTests(unittest.TestCase):
     def test_a_real_run_measures_the_engine_and_leaves_it_as_it_found_it(self):
         from lazaret.registry import repo
         from lazaret.scanner import _native
-        before, box = _native.call_raw, repo.USE_RISK_SECONDS
+        before, bound = _native.call_raw, repo.USE_RISK_CHARS
         code, out, _ = self.run_main()
         self.assertEqual(code, 0)
         rep = self.report()
@@ -556,7 +556,7 @@ class RealEngineTests(unittest.TestCase):
         self.assertGreaterEqual(rep["threads"], 1)
         self.assertTrue(rep["engine"])
         self.assertIs(_native.call_raw, before)                       # the engine's own function is back
-        self.assertEqual(repo.USE_RISK_SECONDS, box)                  # and so is the box
+        self.assertEqual(repo.USE_RISK_CHARS, bound)                  # and so is the use-time bound
 
     def test_over_its_budget_fails_unless_told_not_to(self):
         self.write(budget=1e-9)

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """A whole scan on 1, 2, ... engine threads (0.1.9, P-10; the check behind "poor scaling" in the profile).
 
-    python3 scripts/profile/thread_scaling.py npm:next@16.3.8 1 2 [--box SECONDS] [--cache DIR]
+    python3 scripts/profile/thread_scaling.py npm:next@16.3.8 1 2 [--chars N] [--cache DIR]
 
-Wall seconds of one scan per thread count, with the engine's seconds by call name. **Mind the 3-second box**:
-the use-time step stops after `repo.USE_RISK_SECONDS`, so scans on different thread counts may do different work,
-and the comparison is of work as much as of speed; `--box 1000000` takes the box out of it (P-14 makes this
-unnecessary). For equal work, `engine_replay.py scaling` replays recorded batches. Needs the native engine."""
+Wall seconds of one scan per thread count, with the engine's seconds by call name. The use-time step reads at most
+`repo.USE_RISK_CHARS` characters per release file (P-14), so every thread count does the same work; `--chars N`
+changes the bound for the run. For recorded batches, `engine_replay.py scaling` replays them. Needs the native
+engine."""
 
 import argparse
 import collections
@@ -24,7 +24,7 @@ def main(argv=None):
     p = argparse.ArgumentParser(prog="thread_scaling.py", description=__doc__.split("\n\n")[0])
     p.add_argument("spec", metavar="ecosystem:name[@version]")
     p.add_argument("threads", nargs="+", type=int)
-    p.add_argument("--box", type=float, help="seconds the use-time step may take per artifact")
+    p.add_argument("--chars", type=int, help="characters the use-time step may read per release file (default: the code's)")
     p.add_argument("--cache", default=None, help="replay and keep the registry's answers here")
     args = p.parse_args(argv)
     try:
@@ -38,8 +38,8 @@ def main(argv=None):
     if not engine.available():
         print("error: the native engine is not built (cargo build --release in rust/)", file=sys.stderr)
         return 4
-    if args.box is not None:
-        repo.USE_RISK_SECONDS = args.box
+    if args.chars is not None:
+        repo.USE_RISK_CHARS = args.chars
     cache = (_common.recorded_network(repo, args.cache, record=True, replay=True) if args.cache
              else contextlib.nullcontext())
     with cache, _common.engine_spans(_native, timings):

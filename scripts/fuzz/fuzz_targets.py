@@ -59,18 +59,7 @@ TARGETS = {}
 #: -> (the finding's id in docs/0.1.9-findings.md, a small input that shows it, or None when what it shows depends on
 #: the Python version). The driver lists them as known and exits 0 for them; `tests/architecture/test_fuzz_scripts.py`
 #: replays each input and fails when it no longer shows the finding, so the entry goes when the reader is fixed.
-KNOWN = {
-    ("xml", "LookupError@ElementTree.py"): ("F-1", b'<?xml version="1.0" encoding="T7"?><a/>'),
-    ("xml", "ValueError@ElementTree.py"): ("F-1", b'<?xml version="1.0" encoding="UTF32"?><a/>'),
-    ("xml-minidom", "LookupError@minidom.py"): ("F-1", b'<?xml version="1.0" encoding="T7"?><a/>'),
-    ("xml-minidom", "ValueError@minidom.py"): ("F-1", b'<?xml version="1.0" encoding="UTF32"?><a/>'),
-    # CPython since April 2024 (3.12.3, 3.13) warns when two entries of a zip start at one place: on stderr, and no anomaly
-    ("archive-zip", "warning:UserWarning@repo.py"): ("F-2", None),
-    # Python 3.10 (and before): ZipInfo.is_dir() reads the name's last character, an entry with no name has none (3.11+ does not raise)
-    ("archive-zip", "IndexError@repo.py"): ("F-6", None),
-    # an LZMA entry that declares a dictionary of about 4 GiB: MemoryError where memory is capped (an address-space limit, a small VM)
-    ("archive-zip", "MemoryError@repo.py"): ("F-7", None),
-}
+KNOWN = {}   # (F-1, F-2, F-6 and F-7 were fixed in 0.1.8, b2bb0ff: docs/0.1.9-findings.md)
 
 
 def known(target, signature):

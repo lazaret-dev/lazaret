@@ -189,7 +189,7 @@ def main():
     ap.add_argument("--quiet", action="store_true")
     ap.add_argument("--refused", action="store_true", help="name the files rustc refused (or the reader could not read)")
     args = ap.parse_args()
-    files = [l.rstrip("\n") for l in open(args.list)] if args.list else find_files(args.dirs)
+    files = [l.rstrip("\n") for l in open(args.list, encoding="utf-8")] if args.list else find_files(args.dirs)
     ours = mine(args.bin, files)
     stats = collections.Counter()
     shown = 0

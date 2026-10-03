@@ -1,11 +1,12 @@
-# Tests both packages on every push and PR. Also called by release.yml before publishing.
+# Tests both packages on every push to main or next (the branch the work in progress shares) and every PR.
+# Also called by release.yml before publishing.
 # Everything runs on stock interpreters: nothing is pip- or npm-installed.
 # All third-party actions are pinned to full commit SHAs; Dependabot keeps them current.
 name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, next]
   pull_request:
   workflow_call:
 

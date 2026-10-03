@@ -19,9 +19,9 @@ python3 scripts/profile/perf_check.py pin npm:next@16.4.0   # add or move a pack
 
 What is timed: only the engine. The archives are fetched and hashed first, then read into memory, so the network is
 never in the numbers. Each run scans all the archives of a package (`repo._scan_artifact`, the call the guard makes);
-the figure is the seconds spent inside the native engine summed over its threads, the median of three runs, with the
-use-time step's 3-second box raised so that every run reads the same files (until P-14 bounds that step by work). One
-unmeasured scan of the smallest archive comes first, for the engine's set-up.
+the figure is the seconds spent inside the native engine summed over its threads, the median of three runs; every run
+reads the same files, since the use-time step is bounded by characters, not time (P-14). One unmeasured scan of the
+smallest archive comes first, for the engine's set-up.
 
 Budgets start empty, and a package without one is reported and never failed. To calibrate: let the workflow run for a
 week, download the `perf-report` artifacts of several nights, and run `calibrate` on them. It proposes each budget
@@ -41,8 +41,8 @@ numbers.
 | `registry_scan.py` | Where does one registry scan spend its time: network, digest, archive reading, engine by call, other Python |
 | `engine_replay.py hot` | Which files cost the engine the most, replayed one at a time |
 | `engine_replay.py scaling` | How well does the engine scale from one thread to two on equal work |
-| `thread_scaling.py` | The same on a whole scan (mind the 3-second box: `--box`) |
-| `use_time_coverage.py` | How much of a package the use-time step reads before its box runs out |
+| `thread_scaling.py` | The same on a whole scan (`--chars` changes the use-time bound) |
+| `use_time_coverage.py` | How much of a package the use-time step reads within its bound (P-14's `useTime`) |
 | `release_overlap.py` | How much of a release (or of two versions) is the same bytes: what a cache by content could save |
 | `guard_connections.py` | How many connections, and how much connect time, a guarded install costs; with and without `--keepalive` |
 | `sca_bundle.py` | How much a scan pays to load `cve-bundle.json` whole against opening the indexed bundle built from it (`compare`: load and match seconds, peak memory, file size, and whether both give the same matches); `gen` makes a synthetic bundle the size of the real one |

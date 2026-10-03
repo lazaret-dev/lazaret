@@ -14,8 +14,8 @@ or moves a package (it resolves, downloads and hashes).
 
 What is timed. The archives are fetched first and read into memory outside the timed part, so the network is
 never in the numbers. Each run scans every archive of a package with `repo._scan_artifact` (the call the guard
-makes), with the use-time step's 3-second box raised, so that every run reads the same files: until P-14
-bounds that step by work, the box would make a fast runner read more than a slow one. The budget is on
+makes); the use-time step reads at most `repo.USE_RISK_CHARS` characters per release file (P-14), so every run
+reads the same files whatever the runner's speed. The budget is on
 `engine_s`, the seconds spent inside the native engine summed over its threads (the number that does not move
 with the runner's core count the way the wall time does); `wall_s` is reported beside it. Each figure is the
 median of `--runs` runs (3 by default); `spread` is (largest - smallest) / median across them.
@@ -360,19 +360,6 @@ def real_scan():
     return scan
 
 
-@contextlib.contextmanager
-def box_raised(repo):
-    """Every run reads the same use-time files whatever the runner's speed (until P-14 bounds the step by work)."""
-    if not hasattr(repo, "USE_RISK_SECONDS"):
-        yield
-        return
-    saved, repo.USE_RISK_SECONDS = repo.USE_RISK_SECONDS, 1.0e9
-    try:
-        yield
-    finally:
-        repo.USE_RISK_SECONDS = saved
-
-
 def build_parser():
     p = argparse.ArgumentParser(prog="perf_check.py", description="The scheduled performance check of the native engine.")
     p.add_argument("--packages", default=PACKAGES, help="the packages file (default: packages.json beside this script)")
@@ -423,7 +410,7 @@ def _run(args):
     except PinError as exc:
         _say(f"error: {exc}")
         return EXIT_FETCH
-    with _common.engine_spans(_native, timings), box_raised(repo):
+    with _common.engine_spans(_native, timings):
         report = run_check(cfg, args.cache, args.runs, real_scan(), args.only, _say)
     report["threads"] = engine.THREADS
     report["engine"] = _native.version()
