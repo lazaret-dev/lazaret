@@ -352,6 +352,14 @@ before the release.
 
 ### Fixed
 
+- **A program under a source file's name made a release INCOMPLETE, not
+  SUSPICIOUS.** An executable's bytes in a `.py` or `.js` member (num2words
+  0.5.15's `_build.py` is a Windows executable) were an unreadable source
+  file (SC-TRUNCATED) and a binary to review (SC-BINARY, MAJOR; in a wheel,
+  inventory). No build ships one, so it is SC-BINARY, CRITICAL, in every
+  kind of release: a disguise. A binary named for what it is (`.so`,
+  `.node`) stays as it was, and bytes that are no program stay unread
+  (INCOMPLETE). Registry and guard scans. Rule set 2.21.0.
 - **S-TOKEN missed GitHub's fine-grained tokens.** A `github_pat_…` token
   (22 and 59 characters around an underscore) got only S-ENTROPY (MAJOR),
   though secret redaction already knew it; it is S-TOKEN (BLOCKER) in

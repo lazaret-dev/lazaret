@@ -81,6 +81,8 @@ MAX_MEMBER = _env_number("LAZARET_MAX_SOURCE_BYTES", 16_000_000)
 MAX_FILES = 20_000         # files per package (numpy's sdist alone has >4,000)
 SAMPLE = 8192              # header/entropy sample read from oversized files
 # Stored scans from another engine version are scanned again (has_scan).
+# 2.21: a program under a source file's name (an executable's bytes in a
+#      .py or .js member) is SC-BINARY, CRITICAL, in a wheel too
 # 2.20: S-TOKEN reads GitHub's fine-grained tokens (github_pat_…), which
 #      got only S-ENTROPY
 # 2.19: 0.1.8's droppers: code a script decodes and runs read on the trees
@@ -169,7 +171,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.20.0"
+ENGINE_VERSION = "2.21.0"
 
 # ---------------- Trust-chain limits (F9/G14/F10) ----------------
 # Only these hosts may ever be fetched, over https only, and redirects to any
@@ -1663,7 +1665,12 @@ class _ArtifactScan:
                 # signal, not a clean verdict — whatever the first bytes look like.
                 self.truncate(rel, _TRUNC_DETAILS["member"](rel, size))
             # still classifiable by magic/entropy from the decompressed prefix
-            self.classify(rel, raw, size)
+            disguised = lazaret.disguised_binary(rel, raw) if ext in lazaret.EXTS else None
+            if disguised:
+                self.binaries += 1
+                self.issues.append(disguised)
+            else:
+                self.classify(rel, raw, size)
             return
         if base == "package.json":
             text, extra = lazaret.decode_member(rel, raw)
@@ -1710,7 +1717,12 @@ class _ArtifactScan:
         if lang is not None:
             text, extra = lazaret.decode_member(rel, raw)
             self.add_decode_issues(extra)
-            if any(i["rule"] == "SC-TRUNCATED" for i in extra):
+            disguised = lazaret.disguised_binary(rel, raw)
+            if disguised:
+                # a program under a source file's name: a disguise, CRITICAL (0.1.8)
+                self.binaries += 1
+                self.issues.append(disguised)
+            elif any(i["rule"] == "SC-TRUNCATED" for i in extra):
                 self.classify(rel, raw, size)   # an ELF named index.js is still an ELF
             self.scan_source(rel, text, lang)
             return

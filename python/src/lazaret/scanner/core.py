@@ -2875,6 +2875,32 @@ def classify_binary(path, data, size, context):
     return None
 
 
+_DISGUISED_WHY = ("A source file is read, reviewed and diffed as text; a program under a source file's "
+                  "name hides from that review and from every rule that reads code. No build ships one: "
+                  "compiled code goes in files named for what they are (.so, .pyd, .node, .exe).")
+_DISGUISED_FIX = "Treat the release as compromised: find what loads or runs the file, and remove it."
+
+
+def disguised_binary(path, data):
+    """SC-BINARY, CRITICAL, for a program under a source file's name (0.1.8):
+    an executable's or a compiled module's bytes (EXEC_MAGIC, a Windows PE)
+    in a file named as source code (the registry's members). Unlike a
+    binary named for what it is (classify_binary: inventory in a wheel, a
+    capability to review elsewhere) it is a disguise, in a wheel too:
+    num2words 0.5.15's `_build.py` is a Windows executable. Else None."""
+    data = bytes(data or b"")
+    header = data[:512]
+    desc = next((d for sig, d in EXEC_MAGIC if header.startswith(sig)), None)
+    if desc is None and header.startswith(b"MZ"):
+        desc = "Windows PE executable/DLL"
+    if desc is None or not looks_binary(data[:2048]):
+        return None
+    return {"rule": "SC-BINARY", "name": "Binary artifact in package", "type": "HOTSPOT", "sev": "CRITICAL",
+            "msg": f"{os.path.basename(path)} is not source code but a program: {desc}.",
+            "why": _DISGUISED_WHY, "fix": _DISGUISED_FIX, "ref": "CWE-506 · Supply chain",
+            "file": path, "line": 1, "snippet": [], "snipStart": 1}
+
+
 # ---------------- Truncation accounting (verdict integrity, audit C2/G16) ----------------
 # Every place scanning is cut short must emit a signal, never a silent skip:
 # a file that was not scanned cannot be a data point for a clean verdict.
