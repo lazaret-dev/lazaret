@@ -360,6 +360,11 @@ before the release.
   kind of release: a disguise. A binary named for what it is (`.so`,
   `.node`) stays as it was, and bytes that are no program stay unread
   (INCOMPLETE). Registry and guard scans. Rule set 2.21.0.
+- **A directory scan read a program under a source file's name as text.**
+  The same file in your tree, or with `--deps` in your dependencies, got no
+  supply-chain finding and passed the gate. It is SC-BINARY, CRITICAL, there
+  too (an oversized one by its first bytes), and in the MCP server's
+  `scan_files`. Both CLIs.
 - **S-TOKEN missed GitHub's fine-grained tokens.** A `github_pat_…` token
   (22 and 59 characters around an underscore) got only S-ENTROPY (MAJOR),
   though secret redaction already knew it; it is S-TOKEN (BLOCKER) in

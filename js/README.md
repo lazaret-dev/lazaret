@@ -119,7 +119,9 @@ resolving to one file. Writes are atomic
   `package.json`, `binding.gyp` and other `.gyp`/`.gypi` file, and `.pth` files (only the `SC-PTH-EXEC`
   check runs on them; they are not counted in the metrics; a directory with
   only a `.pth` file is a valid target). Every other regular file is classified by
-  its magic bytes (`SC-BINARY`). Sources and manifests over 16,000,000 bytes
+  its magic bytes (`SC-BINARY`), and a source file whose bytes are a program
+  (an ELF or Windows executable named `.js` or `.py`) is `SC-BINARY`
+  CRITICAL. Sources and manifests over 16,000,000 bytes
   (`--max-source-bytes`, env `LAZARET_MAX_SOURCE_BYTES`) are `SC-TRUNCATED`,
   never silently skipped; so is a file whose rules exceed
   a 30-second time backstop (checked inside each rule's match loop).

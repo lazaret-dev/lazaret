@@ -2878,22 +2878,28 @@ def classify_binary(path, data, size, context):
 _DISGUISED_WHY = ("A source file is read, reviewed and diffed as text; a program under a source file's "
                   "name hides from that review and from every rule that reads code. No build ships one: "
                   "compiled code goes in files named for what they are (.so, .pyd, .node, .exe).")
-_DISGUISED_FIX = "Treat the release as compromised: find what loads or runs the file, and remove it."
+_DISGUISED_FIX = ("Treat the package or tree that ships it as compromised: find what loads or runs the "
+                  "file, and remove it.")
+#: The leading bytes disguised_binary reads: an oversized source file's prefix
+#: is read this far (the header test reads the first 512).
+DISGUISE_SAMPLE_BYTES = 2048
 
 
 def disguised_binary(path, data):
     """SC-BINARY, CRITICAL, for a program under a source file's name (0.1.8):
     an executable's or a compiled module's bytes (EXEC_MAGIC, a Windows PE)
-    in a file named as source code (the registry's members). Unlike a
+    in a file named as source code: a registry or guard member, a file of a
+    directory scan (`--deps` too) or one an MCP client names. Unlike a
     binary named for what it is (classify_binary: inventory in a wheel, a
     capability to review elsewhere) it is a disguise, in a wheel too:
-    num2words 0.5.15's `_build.py` is a Windows executable. Else None."""
+    num2words 0.5.15's `_build.py` is a Windows executable. Else None.
+    Twin: js/src/lib/binary.js disguisedBinary."""
     data = bytes(data or b"")
     header = data[:512]
     desc = next((d for sig, d in EXEC_MAGIC if header.startswith(sig)), None)
     if desc is None and header.startswith(b"MZ"):
         desc = "Windows PE executable/DLL"
-    if desc is None or not looks_binary(data[:2048]):
+    if desc is None or not looks_binary(data[:DISGUISE_SAMPLE_BYTES]):
         return None
     return {"rule": "SC-BINARY", "name": "Binary artifact in package", "type": "HOTSPOT", "sev": "CRITICAL",
             "msg": f"{os.path.basename(path)} is not source code but a program: {desc}.",
@@ -5909,11 +5915,22 @@ def _collect_file(path, rel, st, in_dep, col):
     if size > SOURCE_SIZE_CAP:
         issues.append(truncated_issue(
             disp, f"{size:,} bytes exceeds the {SOURCE_SIZE_CAP:,}-byte file limit"))
+        if lang is not None:             # its first bytes still tell a program (as in the registry)
+            try:
+                head = _read_prefix(path, DISGUISE_SAMPLE_BYTES)
+            except OSError:              # not read: the SC-TRUNCATED stands alone, as before
+                head = b""
+            disguised = disguised_binary(disp, head)
+            if disguised:
+                issues.append(disguised)
         return
     data = _read_prefix(path, SOURCE_SIZE_CAP + 1)
     if len(data) > SOURCE_SIZE_CAP:      # grew between the lstat and the read
         issues.append(truncated_issue(
             disp, f"read exceeded the {SOURCE_SIZE_CAP:,}-byte file limit"))
+        disguised = disguised_binary(disp, data) if lang is not None else None
+        if disguised:
+            issues.append(disguised)
         return
     if manifest:
         col["manifests"].append({"path": disp, "dep": in_dep,
@@ -5930,6 +5947,9 @@ def _collect_file(path, rel, st, in_dep, col):
         return
     text, info = decode_source(data, lang)
     issues.extend(encoding_issues(disp, text, info))
+    disguised = disguised_binary(disp, data)     # a program under a source file's name (0.1.8)
+    if disguised:
+        issues.append(disguised)
     col["files"].append({"path": disp, "content": text, "lang": lang, "dep": in_dep})
 
 

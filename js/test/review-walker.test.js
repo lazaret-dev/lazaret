@@ -234,6 +234,30 @@ test("non-source files are classified by magic bytes; the size cap applies to so
   } finally { cleanup(d); }
 });
 
+test("a program under a source file's name is SC-BINARY, CRITICAL, and fails the gate (0.1.8)", () => {
+  const elf = Buffer.concat([Buffer.from([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1, 0]), Buffer.alloc(600)]);
+  const pe = Buffer.concat([Buffer.from("MZ\x90\x00\x03\x00", "latin1"), Buffer.alloc(600)]);
+  const d = tree({
+    "app.py": "x = 1\n",
+    "pkg/_build.py": pe,                                           // num2words 0.5.15's shape
+    "index.js": elf,
+    "mz.py": "MZ = 1\nELF = 2\n",                                  // text that starts like a header
+    "node_modules/dep/index.js": elf,                              // a dependency's: --deps only
+  });
+  try {
+    const sc = (r) => r.rep.issues.filter((i) => i.rule === "SC-BINARY").map((i) => [i.file, i.sev, i.msg]).sort();
+    const own = [
+      ["index.js", "CRITICAL", "index.js is not source code but a program: ELF binary (Linux/Unix executable or shared object)."],
+      [P("pkg", "_build.py"), "CRITICAL", "_build.py is not source code but a program: Windows PE executable/DLL."],
+    ];
+    const r = scan(d);
+    assert.deepEqual(sc(r), own);
+    assert.equal(r.rep.conditions.find((c) => c.label === "No supply-chain indicators").ok, false);
+    assert.deepEqual(sc(scan(d, ["--deps"])), [...own, [P("node_modules", "dep", "index.js"), "CRITICAL",
+      "index.js is not source code but a program: ELF binary (Linux/Unix executable or shared object)."]].sort());
+  } finally { cleanup(d); }
+});
+
 test("a directory's identity keeps all 64 bits of a Windows file ID", () => {
   // NTFS file IDs: a 16-bit sequence number above a 48-bit record number.
   // Records 1000 and 1001 with sequence number 0x1234 are one Number: the

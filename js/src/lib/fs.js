@@ -12,7 +12,8 @@ import {
 import { join, sep, resolve, dirname, basename, isAbsolute } from "node:path";
 import { randomBytes } from "node:crypto";
 import { decodeSource, fsNameToString } from "./encoding.js";
-import { classifyBinary, HEADER_SAMPLE, PYC_HEADER, pycIssues, pycModule, pyExt, looksBinary, mpegTs, MPEG_TS_EXTS } from "./binary.js";
+import { classifyBinary, HEADER_SAMPLE, PYC_HEADER, pycIssues, pycModule, pyExt, looksBinary, mpegTs, MPEG_TS_EXTS,
+  disguisedBinary, DISGUISE_SAMPLE } from "./binary.js";
 import { shebangLang } from "./native.js";
 import { mkIssue, fileIssue } from "./issue.js";
 import { pthIssues } from "./pth.js";
@@ -391,11 +392,23 @@ function collectFile(full, rel, name, st, dep, col) {
   const cap = col.maxFileBytes;
   if (size > cap) {
     col.binaryIssues.push(truncatedIssue(rel, `${withCommas(size)} bytes exceeds the ${withCommas(cap)}-byte file limit`));
+    if (lang) {                     // its first bytes still tell a program (as in the registry)
+      let head = Buffer.alloc(0);
+      try {
+        head = readBounded(full, DISGUISE_SAMPLE);
+      } catch (e) {                 // not read: the SC-TRUNCATED stands alone, as before
+        if (!(e instanceof NotRegularFile || (e && e.code))) throw e;
+      }
+      const dis = disguisedBinary(rel, head);
+      if (dis) col.binaryIssues.push(dis);
+    }
     return;
   }
   const data = readBounded(full, cap + 1);
   if (data.length > cap) {                            // grew between the lstat and the read
     col.binaryIssues.push(truncatedIssue(rel, `read exceeded the ${withCommas(cap)}-byte file limit`));
+    const dis = lang ? disguisedBinary(rel, data) : null;
+    if (dis) col.binaryIssues.push(dis);
     return;
   }
   if (kind) {
@@ -416,6 +429,8 @@ function collectFile(full, rel, name, st, dep, col) {
   const dec = decodeSource(data, { py: lang === "py" });
   const content = normalizeNewlines(dec.text);
   for (const i of encodingIssues(rel, content, dec)) col.binaryIssues.push(i);
+  const dis = disguisedBinary(rel, data);       // a program under a source file's name (0.1.8)
+  if (dis) col.binaryIssues.push(dis);
   col.files.push({ path: rel, content, lang, dep });
 }
 

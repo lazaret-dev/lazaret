@@ -300,6 +300,7 @@ Why a flag rather than using a cursor automatically: `--since` keeps meaning a t
 Archives are classified file by file. Source files run through the normal ruleset; **binary/compiled files are inspected by content (magic bytes), not extension**, because smuggled binaries are a primary supply-chain vector — malicious code inside a compiled blob never appears in reviewable source. The scanner flags:
 
 - **Executables / shared objects** (ELF, PE/DLL, Mach-O, WebAssembly, `.node`, `.pyc`, Java `.class`) — **MAJOR** (WARN) when found in a source distribution or npm tarball, but **INFO inventory** in a wheel, where compiled extensions are expected and the verdict stays OK.
+- **A program under a source file's name** (an executable's bytes in a `.py` or `.js` file, such as a Windows executable named `_build.py`) — **CRITICAL** (SUSPICIOUS) in every kind of release, a wheel too, and in directory scans: no build ships one.
 - **Nested archives** (zip/gzip/xz/tar inside the package) — a known way to hide a second-stage payload from review. Document formats that are archives by design (`.docx`, `.odg`, `.epub`, ...) are not flagged.
 - **Opaque high-entropy blobs** — possible encrypted/packed payloads decoded at runtime. Recognized data assets (images including JPEG 2000 and Photoshop, fonts, ICC color profiles, audio, PDF) are not flagged.
 
