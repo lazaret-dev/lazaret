@@ -477,6 +477,15 @@ class ShowAndNameTests(unittest.TestCase):
         self.assertEqual(base.show(5), "'5'")
         self.assertEqual(base.show(None), "'None'")
         self.assertEqual(base.show(b"ab"), repr("b'ab'"))
+        for ch in ("\udcff", "\U0010ffff", "\u202e", "\x00", "'", "\"", "\\"):               # (a character whose repr is several)
+            for limit in (120, 60, 10, 1):
+                with self.subTest(ch=ascii(ch), limit=limit):
+                    shown = base.show(ch * 500, limit=limit)
+                    self.assertLessEqual(len(shown), limit + 3)                       # the quotes and the ellipsis
+                    self.assertTrue(shown.endswith("…") and shown.isprintable())
+        self.assertEqual(base.show("\udcff" * 3), repr("\udcff" * 3))                 # (short enough: all of it, no ellipsis)
+        self.assertEqual(base.show("", limit=0), "''")
+        self.assertEqual(base.show("abc", limit=0), "''…")
         self.assertTrue(base.show("\ud800").isprintable())
 
     def test_ascii_name(self):
@@ -584,6 +593,18 @@ class FetchRuleTests(unittest.TestCase):
                     "https://dl.example/a/b?c=d#e"):
             with self.subTest(url=url):
                 self.assertIs(self.fetch.check_url(url), url)
+
+    def test_the_url_may_use_every_printable_ascii_character_and_be_2048_long(self):
+        for url in ("https://reg.example/!", "https://reg.example/~", "https://reg.example/!~", "https://reg.example/%7e%21"):
+            with self.subTest(url=url):
+                self.assertIs(self.fetch.check_url(url), url)
+        fits = "https://reg.example/" + "x" * (2048 - len("https://reg.example/"))
+        self.assertEqual(len(fits), 2048)
+        self.assertIs(self.fetch.check_url(fits), fits)
+        self.refused(fits + "x")
+        self.assertEqual(base.MAX_URL_LENGTH, 2048)
+        for edge in (" ", "\x7f", "\x20", "\x80"):
+            self.refused("https://reg.example/a" + edge + "b")
 
     def test_everything_else_is_refused_before_a_request(self):
         for url in ("http://reg.example/x", "ftp://reg.example/x", "file:///etc/passwd", "//reg.example/x",
@@ -757,6 +778,34 @@ class FetchRuleTests(unittest.TestCase):
                 self.rec.answers[url] = body
                 with self.assertRaises(base.FetchError):
                     self.fetch.json_lines(url)
+
+    def test_json_lines_may_start_with_an_empty_line_and_keeps_what_follows_it_separate(self):
+        url = "https://reg.example/l"
+        self.rec.answers[url] = b'\n{"a": 1}\n{"b": 2}'
+        self.assertEqual(self.fetch.json_lines(url), [{"a": 1}, {"b": 2}])
+        self.rec.answers[url] = b'\n{"a": 1}\n{"b": 2}\n'
+        self.assertEqual(self.fetch.json_lines(url), [{"a": 1}, {"b": 2}])
+
+    def test_json_lines_select_turns_each_line_into_what_is_kept_and_none_drops_it(self):
+        url = "https://reg.example/l"
+        self.rec.answers[url] = b'{"a": 1}\n\n{"a": null}\n{"a": 0}\n{"a": 3}\n{"b": 4}'
+        self.assertEqual(self.fetch.json_lines(url), [{"a": 1}, {"a": None}, {"a": 0}, {"a": 3}, {"b": 4}])
+        self.assertEqual(self.fetch.json_lines(url, select=lambda v: v.get("a")), [1, 0, 3])          # (None drops; 0 is kept)
+        seen = []
+        self.fetch.json_lines(url, select=lambda v: seen.append(v))
+        self.assertEqual(len(seen), 5)                                                                 # (each line, once)
+        self.assertEqual(self.fetch.json_lines(url, select=lambda v: None), [])
+
+    def test_a_select_that_refuses_a_line_fails_the_document_as_it_says(self):
+        url = "https://reg.example/l"
+        self.rec.answers[url] = b'{"a": 1}\n{"a": 2}'
+
+        def select(v):
+            if v["a"] == 2:
+                raise base.FetchError("select: line 2 is wrong")
+            return v
+        with self.assertRaisesRegex(base.FetchError, "^select: line 2 is wrong$"):
+            self.fetch.json_lines(url, select=select)
 
     def test_a_line_over_the_line_limit_fails_the_document(self):
         url = "https://reg.example/l"

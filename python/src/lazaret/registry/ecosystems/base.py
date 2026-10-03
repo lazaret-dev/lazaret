@@ -60,7 +60,12 @@ def show(value, limit=120):
     """Text from outside, safe to put in a message: its `repr`, cut short. Control characters, bidi marks and the
     like come out as escapes, so a hostile name or URL cannot paint the terminal or the report."""
     text = value if isinstance(value, str) else repr(value)
-    return repr(text[:limit]) + ("…" if len(text) > limit else "")
+    cut = text[:limit]
+    shown = repr(cut)
+    while len(shown) > limit + 2 and cut:                  # (an escape is longer than the character it stands for: \udcff, \U0010ffff)
+        cut = cut[:min(len(cut) - 1, len(cut) * (limit + 2) // len(shown))]
+        shown = repr(cut)
+    return shown + ("…" if len(text) > len(cut) else "")
 
 
 def ascii_name(value, what, allowed, limit, eco=""):
@@ -83,6 +88,7 @@ HOSTILE_NAMES = (
     "a‮b", "‮", "a​b", "a⁦b", "﻿", "a%2fb", "%2e%2e", "%2E%2E%2F", "a%00b", "a%5cb",
     "a?b", "a#b", "a:b", "a;b", "a@@b", "a b c", "a∕b", "a․b", "．．", "／", "⁄",
     "a\ud800b", "x" * 5000, "x/" * 400, "a" * 300 + "/" + "b" * 300,
+    "\x00" * 200, "\udcff" * 200, "a" + "\u202e" * 200, "\U0010ffff" * 200,       # (each is several characters in a message that quotes it)
 )
 
 # Versions every module must refuse. No `+` and no `v` prefix here: Go and semver versions may have them.
@@ -91,6 +97,7 @@ HOSTILE_VERSIONS = (
     "1\u202e2", "1\u200b2", "\ufeff1\ufeff", "1%2f2", "%2e%2e", "1?x", "1#x", "1;x", "1@2", "1:2", "1/../2", "../1",
     "1" * 101, "1\ud8002", "1\u22152", "\uff11\uff0e\uff12", "1\u20442", "1,2", "1\"2", "1'2", "1<2", "1>2", "1|2",
     "1*2", "1\\", "1$2", "1`2", "1(2)", "1{2}", "1[2]", "1&2", "1=2", "1!2", "1~2", "1^2",
+    "\x00" * 200, "\udcff" * 200, "1" + "\u202e" * 200, "\U0010ffff" * 200,
 )
 
 

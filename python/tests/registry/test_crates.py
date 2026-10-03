@@ -642,5 +642,59 @@ class ArchiveRulesTests(unittest.TestCase):
         self.assertIsNone(eco.archive_root(base.Resolution("1.0.0", [art], info={}), art))
 
 
+class BoundaryTests(unittest.TestCase):
+    """Each limit is exactly where the module says: one under is read, one over is refused."""
+
+    def test_the_limits_are_what_the_module_says(self):
+        self.assertEqual((crates.MAX_NAME, crates.MAX_VERSION, crates.MAX_INDEX_BYTES, crates.MAX_VERSIONS, crates.MAX_DEPS),
+                         (64, 100, 64 * 1024 * 1024, 100_000, 5_000))
+
+    def test_a_version_of_100_characters_is_a_version_and_one_of_101_is_not(self):
+        ok = "1.0.0-" + "a" * 94
+        bad = ok + "a"
+        self.assertEqual((len(ok), len(bad)), (100, 101))
+        self.assertIsNotNone(crates.semver_key(ok))
+        self.assertIsNone(crates.semver_key(bad))
+        eco = crates.Crates()
+        self.assertEqual(eco.check_version(ok), ok)
+        with self.assertRaises(base.SpecError):
+            eco.check_version(bad)
+
+    def test_an_index_may_list_exactly_as_many_versions_as_the_limit_says(self):
+        with mock.patch.object(crates, "MAX_VERSIONS", 3):
+            self.assertEqual(resolve("demo", None, index(line("1.0.0"), line("1.0.1"), line("1.0.2")))[0][0], "1.0.2")
+            with self.assertRaisesRegex(base.FetchError, "lists too many versions"):
+                resolve("demo", None, index(line("1.0.0"), line("1.0.1"), line("1.0.2"), line("1.0.3")))
+
+    def test_an_index_line_may_list_exactly_as_many_dependencies_as_the_limit_says(self):
+        with mock.patch.object(crates, "MAX_DEPS", 3):
+            res, _ = resolve("demo", None, index(line("1.0.0", deps=[dep("a"), dep("b"), dep("c")])))
+            self.assertEqual(crates.Crates().dependencies(res, None), ("a", "b", "c"))
+            with self.assertRaisesRegex(base.FetchError, "dependency list that is not a list, or is too long"):
+                resolve("demo", None, index(line("1.0.0", deps=[dep("a"), dep("b"), dep("c"), dep("d")])))
+
+    def test_a_rust_version_of_40_characters_and_a_links_of_100_are_kept_and_one_more_is_not(self):
+        for field, size in (("rust_version", 40), ("links", 100)):
+            with self.subTest(field=field):
+                kept = resolve("demo", None, index(line("1.0.0", **{field: "x" * size})))[0].info[field]
+                dropped = resolve("demo", None, index(line("1.0.0", **{field: "x" * (size + 1)})))[0].info[field]
+                self.assertEqual((kept, dropped), ("x" * size, None))
+
+    def test_a_path_the_manifest_names_may_be_512_characters_and_not_513(self):
+        eco = crates.Crates()
+        for size, runs in ((512, True), (513, False)):
+            name = "b" * (size - 3) + ".rs"
+            manifest = '[package]\nname = "demo"\nbuild = "%s"\n' % name
+            got = eco.run_targets("crate", {"Cargo.toml": manifest}, [name])
+            self.assertEqual(got.install_scripts, frozenset({name}) if runs else frozenset(), size)
+
+    def test_only_the_first_1000_target_tables_of_a_manifest_are_read(self):
+        text = '[package]\nname = "demo"\n' + "".join('[target.t%d.dependencies]\nd%d = "1"\n' % (i, i) for i in range(1001))
+        got = crates.Crates().declared("crate", {"Cargo.toml": text}, [])
+        self.assertEqual(len(got.dependencies), 1000)
+        self.assertIn("d999", got.dependencies)
+        self.assertNotIn("d1000", got.dependencies)
+
+
 if __name__ == "__main__":
     unittest.main()

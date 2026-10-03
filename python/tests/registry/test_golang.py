@@ -17,6 +17,7 @@ import io
 import json
 import os
 import unittest
+import warnings
 import zipfile
 from unittest import mock
 
@@ -613,6 +614,18 @@ class VerifyTests(unittest.TestCase):
                 self.assertEqual(golang.zip_h1(blob), "h1:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=")
                 with self.assertRaises(base.DigestError):
                     self.eco.verify(blob, self.entry, MOD, "v1.0.0")
+
+    def test_two_members_that_start_at_one_place_are_refused_and_nothing_is_printed(self):
+        blob = bytearray(zip_of([("a.go", b"package a\n", 0, 8), ("b.go", b"package b\n", 0, 8)]))
+        first, second = [i for i in range(len(blob)) if blob[i:i + 4] == b"PK\x01\x02"]
+        blob[second + 42:second + 46] = blob[first + 42:first + 46]                  # (the second entry's local header offset)
+        with warnings.catch_warnings(record=True) as printed:
+            warnings.simplefilter("always")
+            with self.assertRaisesRegex(base.DigestError, "start at one place"):
+                golang.zip_h1(bytes(blob))
+            with self.assertRaises(base.DigestError):
+                self.eco.verify(bytes(blob), self.entry, MOD, "v1.0.0")
+        self.assertEqual([str(w.message) for w in printed], [])
 
     def test_a_member_with_a_wrong_checksum_fails_closed(self):
         data = bytearray(zip_of([("a.go", b"package a\n", 0, 0)]))

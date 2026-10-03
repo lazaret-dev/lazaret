@@ -260,6 +260,8 @@ def _zip_h1(data):
             raise base.DigestError("go: the zip has more members than a module can")
         if sum(i.file_size for i in infos) > MAX_ZIP_CONTENT:
             raise base.DigestError("go: the zip holds more than the 500 MiB a module can")
+        if len({i.header_offset for i in infos}) != len(infos):          # (CPython warns on stderr when it reads such a zip: no module has one)
+            raise base.DigestError("go: two members of the zip start at one place")
         rows, seen = [], set()
         for info in infos:
             if info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
