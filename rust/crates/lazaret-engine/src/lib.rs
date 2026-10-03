@@ -32,6 +32,7 @@ pub mod pyre;
 pub mod pystr;
 pub mod quickhash;
 pub mod received;
+pub mod rsparse;
 pub mod rxutil;
 pub mod scanfile;
 pub mod shell;

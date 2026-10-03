@@ -68,12 +68,18 @@
 //! The arena also holds a few nodes the parser made and then replaced (the `ExprStmt` of an `if` condition, the one
 //! that is read as a statement and turns out to be an expression); nothing reaches them, so read the tree with
 //! [`Tree::preorder`] or [`Tree::each_child`], not by walking `nodes`.
+//!
+//! [`hooks()`] reads a tree for the code that runs without being called: `init` functions, the initializers of
+//! package-level variables, a cgo preamble, `//go:linkname` and `//go:generate`. It lists them with the span of the code
+//! that runs; it decides nothing, and nothing registers it with the engine yet (that waits for the wire-up after 0.1.8).
 
+pub mod hooks;
 pub mod out;
 pub mod parser;
 pub mod scan;
 pub mod tree;
 
+pub use hooks::{hooks, Hook, HookKind};
 pub use parser::{parse, Error, MAX_DEPTH, MAX_LEN};
 pub use tree::{Kind, Node, NodeId, Tree, NONE};
 
