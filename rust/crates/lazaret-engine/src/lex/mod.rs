@@ -192,3 +192,5 @@ pub fn structure(text: &[u32], lang: &str, jsx: bool) -> Option<Structure> {
 mod tests;
 #[cfg(test)]
 mod tests_go_rs;
+#[cfg(test)]
+mod tests_fuzz;

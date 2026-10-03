@@ -170,7 +170,7 @@ fn quote(s: &[u32], i: usize) -> (Kind, usize) {
     let n = s.len();
     let next = if i + 1 < n { s[i + 1] } else { 0 };
     if next == c('\\') {
-        return (Kind::Str, quoted(s, i + 1, c('\'')).min(line_end(s, i + 1).max(i + 2)));
+        return (Kind::Str, quoted_line(s, i + 1, c('\'')));
     }
     // one character, then the closing quote: a character
     if i + 2 < n && s[i + 2] == c('\'') && next != c('\'') && next != c('\n') {
@@ -186,13 +186,25 @@ fn quote(s: &[u32], i: usize) -> (Kind, usize) {
     (Kind::Punct, i + 1)
 }
 
-/// The end of the line holding `from` (the offset of its LF, or the end).
-fn line_end(s: &[u32], from: usize) -> usize {
+/// A character or a byte's literal whose body starts at `from`, closed by
+/// `q`: a backslash takes the next character, and a line break ends it
+/// unclosed (a character cannot span lines, so a quote with none after it
+/// never reads on to the end of the text). Its end.
+fn quoted_line(s: &[u32], from: usize, q: u32) -> usize {
+    let n = s.len();
     let mut e = from;
-    while e < s.len() && s[e] != c('\n') {
-        e += 1;
+    while e < n {
+        if s[e] == c('\\') && e + 1 < n && s[e + 1] != c('\n') {
+            e += 2;
+        } else if s[e] == q {
+            return e + 1;
+        } else if s[e] == c('\n') {
+            return e.max(from + 1);
+        } else {
+            e += 1;
+        }
     }
-    e
+    n
 }
 
 /// A number: digits, `_`, a base prefix, a fraction, an exponent and a
