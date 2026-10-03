@@ -9,6 +9,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -40,6 +41,11 @@ func main() {
 }
 
 func dump(out *bufio.Writer, src []byte) {
+	// go/ast's BasicLit.End() is the start plus the length of the value, and the scanner leaves the carriage returns
+	// out of a raw string's value: a raw string with one ends, as the tree says, before it does. Lazaret's tree says
+	// where it ends, so the oracle is given the text with each carriage return, which is a space to the scanner
+	// everywhere else, made a space (the same length in bytes and in code points).
+	src = bytes.ReplaceAll(src, []byte{'\r'}, []byte{' '})
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "x.go", src, parser.SkipObjectResolution)
 	if err != nil {
