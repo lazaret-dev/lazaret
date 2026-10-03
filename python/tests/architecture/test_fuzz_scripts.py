@@ -23,6 +23,7 @@ import time
 import unittest
 import warnings
 import xml.etree.ElementTree as StdET
+import zlib
 from unittest import mock
 
 from tests import _support
@@ -39,7 +40,8 @@ driver = _support.load_script(os.path.join(FUZZ, "fuzz.py"), "fuzz_driver")
 EXPECTED_TARGETS = ["archive-tgz", "archive-tbz2", "archive-txz", "archive-zip", "xml", "xml-minidom",
                     "sca-package-lock-json", "sca-yarn-lock", "sca-pnpm-lock-yaml", "sca-bun-lock", "sca-poetry-lock",
                     "sca-uv-lock", "sca-pylock-toml", "sca-pipfile-lock", "sca-requirements-txt", "sca-pyproject-toml",
-                    "sca-setup-py", "sca-bundle-index", "sca-bundle-doc"]
+                    "sca-setup-py", "sca-bundle-index", "sca-bundle-doc", "crates-index", "crates-manifest", "go-zip", "go-mod", "go-sumdb",
+                    "go-resolve", "ecosystem-names", "ecosystem-member-path"]
 
 
 def fake(run, seeds=(b"abc",), name="fake", **options):
@@ -824,6 +826,253 @@ class PromisesAreLive(unittest.TestCase):
         with mock.patch.object(ET, "fromstring", mock.Mock(side_effect=LookupError("unknown encoding"))), \
                 self.assertRaises(LookupError):
             run(b"<a/>")
+
+
+class RegistryModulePromisesAreLive(unittest.TestCase):
+    """The same for the targets of the registry modules (crates.io and Go): each promise is broken by a reader that breaks it."""
+
+    def promise(self, target, data, *patches):
+        run, close = fuzz_targets.TARGETS[target].start()
+        self.addCleanup(close)
+        with contextlib.ExitStack() as stack:
+            for owner, attr, value in patches:
+                stack.enter_context(mock.patch.object(owner, attr, value))
+            with self.assertRaises(fuzz_targets.Violation) as raised:
+                run(data)
+        return raised.exception.rule
+
+    @staticmethod
+    def padded(seed, wanted, pad=b"\n"):
+        """`seed` with enough `pad` after it for `wanted(crc32)` to hold: the targets choose what to ask by the bytes."""
+        data = seed
+        while not wanted(zlib.crc32(data)):
+            data += pad
+        return data
+
+    @staticmethod
+    def altered(res, version=None, art=None, info=None):
+        from lazaret.registry.ecosystems import base
+        return base.Resolution(res[0] if version is None else version, [dict(res.artifacts[0], **(art or {}))], res.skipped,
+                               dict(res.info, **(info or {})))
+
+    @staticmethod
+    def every_other(first, second):
+        """A function that gives `first` the first time and `second` the next, and so on."""
+        calls = []
+
+        def answer(*args, **kw):
+            calls.append(1)
+            return first(*args, **kw) if len(calls) % 2 else second(*args, **kw)
+        return answer
+
+    def test_the_crates_index_promises(self):
+        from lazaret.registry.ecosystems import base, crates
+        eco = crates.Crates()
+        real = crates.Crates.resolve
+        latest = self.padded(fuzz_targets.CRATES_INDEX_SEEDS[1], lambda c: c % 5 == 0)
+        asked = self.padded(fuzz_targets.CRATES_INDEX_SEEDS[1], lambda c: c % 5 == 1)
+
+        def resolve_once(data):
+            fetch, _ = fuzz_targets.served(eco, lambda url: data)
+            return real(eco, "fnv", None, fetch)
+        res = resolve_once(latest)
+        art = res.artifacts[0]
+        entry = art["entry"]
+
+        def tweak(change):
+            return lambda self, name, version, fetch: change(real(self, name, version, fetch))
+
+        def fixed(value):
+            return lambda self, name, version, fetch: value
+
+        def failing(self, name, version, fetch):
+            raise base.FetchError("x" * 700)
+
+        def asking_twice(self, name, version, fetch):
+            fetch.bytes("https://index.crates.io/3/f/fnv")
+            return real(self, name, version, fetch)
+        run = lambda data, *patches: self.promise("crates-index", data, *patches)        # noqa: E731
+        R = lambda attr, value: (crates.Crates, attr, value)                              # noqa: E731
+        self.assertEqual(run(latest, R("resolve", failing)), "crates-index-message")
+        self.assertEqual(run(latest, R("resolve", fixed(res))), "crates-index-requests")
+        self.assertEqual(run(latest, R("resolve", asking_twice)), "crates-index-requests")
+        self.assertEqual(run(latest, R("resolve", tweak(tuple))), "crates-index-shape")
+        self.assertEqual(run(latest, R("resolve", tweak(lambda r: self.altered(r, art={"url": "http://evil.example/x.crate"})))), "crates-index-url")
+        self.assertEqual(run(latest, R("resolve", tweak(lambda r: self.altered(r, art={"container": "zip"})))), "crates-index-artifact")
+        self.assertEqual(run(latest, R("resolve", tweak(lambda r: self.altered(r, version="1.0")))), "crates-index-version")
+        self.assertEqual(run(asked, R("resolve", tweak(lambda r: self.altered(r, version="1.0.8")))), "crates-index-asked-for")
+        self.assertEqual(run(latest, R("resolve", tweak(lambda r: self.altered(r, art={"entry": dict(entry, cksum="A" * 64)})))), "crates-index-cksum")
+        self.assertEqual(run(latest, R("resolve", tweak(lambda r: self.altered(r, art={"entry": dict(entry, yanked="no")})))), "crates-index-yanked")
+        self.assertEqual(run(latest, R("resolve", tweak(lambda r: self.altered(r, info={"yanked": True})))), "crates-index-yanked")
+        self.assertEqual(run(latest, R("resolve", tweak(lambda r: self.altered(r, art={"entry": dict(entry, yanked=True)}, info={"yanked": True})))),
+                         "crates-index-latest-yanked")
+        self.assertEqual(run(latest, R("resolve", tweak(lambda r: self.altered(r, info={"name": "other"})))), "crates-index-name")
+        self.assertEqual(run(latest, R("archive_root", lambda self, r, a: "wrong/")), "crates-index-root")
+        self.assertEqual(run(latest, R("dependencies", lambda self, r, fetch: ("b", "a"))), "crates-index-dependencies")
+        self.assertEqual(run(latest, R("dependencies", lambda self, r, fetch: ["a"])), "crates-index-dependencies")
+        self.assertEqual(run(latest, R("dependencies", lambda self, r, fetch: fetch.bytes("https://index.crates.io/3/f/fnv") and ())),
+                         "crates-index-dependencies-asked")
+        self.assertEqual(run(latest, R("verify", lambda self, data, entry, name, version: ("sha256", "0" * 64))), "crates-index-verify")
+        self.assertEqual(run(latest, R("resolve", self.every_other(real, tweak(lambda r: self.altered(r, info={"links": "x"}))))),
+                         "crates-index-deterministic")
+
+    def test_the_crates_manifest_promises(self):
+        from lazaret.registry.ecosystems import base, crates
+        seed = fuzz_targets.CARGO_SEEDS[1]
+        run_real, declared_real = crates.Crates.run_targets, crates.Crates.declared
+        run = lambda *patches: self.promise("crates-manifest", seed, *patches)           # noqa: E731
+        R = lambda attr, value: (crates.Crates, attr, value)                              # noqa: E731
+        members = fuzz_targets.CARGO_MEMBERS
+        self.assertEqual(run(R("run_targets", lambda self, k, m, mem: ())), "crates-manifest-run-type")
+        self.assertEqual(run(R("run_targets", lambda self, k, m, mem: base.RunTargets(entries={"zzz.rs"}))), "crates-manifest-run-members")
+        self.assertEqual(run(R("run_targets", lambda self, k, m, mem: base.RunTargets(startup={members[1]}))), "crates-manifest-startup")
+        self.assertEqual(run(R("declared", lambda self, k, m, mem: ("demo", ()))), "crates-manifest-declared-type")
+        self.assertEqual(run(R("declared", lambda self, k, m, mem: base.Declared("-bad", ()))), "crates-manifest-name")
+        self.assertEqual(run(R("declared", lambda self, k, m, mem: base.Declared(None, ("b", "a")))), "crates-manifest-dependencies")
+        self.assertEqual(run(R("declared", lambda self, k, m, mem: base.Declared(None, ("a b",)))), "crates-manifest-dependencies")
+        self.assertEqual(run(R("declared", self.every_other(declared_real, lambda self, k, m, mem: base.Declared("other", ())))),
+                         "crates-manifest-deterministic")
+        self.assertEqual(run(R("run_targets", self.every_other(run_real, lambda self, k, m, mem: base.RunTargets(entries={members[1]})))),
+                         "crates-manifest-deterministic")
+
+    def test_the_go_zip_promises(self):
+        from lazaret.registry.ecosystems import base, golang
+        seeds = fuzz_targets.go_zip_seeds()
+        module, odd = seeds[0], seeds[2]
+        real = golang.zip_h1
+        other = "h1:" + "B" * 43 + "="
+        run = lambda data, *patches: self.promise("go-zip", data, *patches)               # noqa: E731
+
+        def failing(data):
+            raise base.DigestError("x" * 700)
+        self.assertEqual(run(module, (golang, "zip_h1", failing)), "go-zip-message")
+        self.assertEqual(run(module, (golang, "zip_h1", lambda data: "h1:short")), "go-zip-format")
+        self.assertEqual(run(module, (golang, "zip_h1", lambda data: None)), "go-zip-format")
+        self.assertEqual(run(module, (golang, "zip_h1", self.every_other(real, lambda data: other))), "go-zip-deterministic")
+        self.assertEqual(run(odd, (golang, "zip_h1", lambda data: other)), "go-zip-names")             # (a hash for a zip with two members of one name)
+        self.assertEqual(run(module, (golang.Go, "verify", lambda self, data, entry, name, version: ("h1", "wrong"))), "go-zip-verify")
+        self.assertEqual(run(module, (golang.Go, "verify", lambda self, data, entry, name, version: ("h1", entry["h1"][3:]))),
+                         "go-zip-wrong-hash-accepted")
+
+    def test_the_go_mod_promises(self):
+        from lazaret.registry.ecosystems import base, golang
+        seed = fuzz_targets.GOMOD_SEEDS[0]
+        real = golang.parse_gomod
+        run = lambda *patches: self.promise("go-mod", seed, *patches)                     # noqa: E731
+        P = lambda value: (golang, "parse_gomod", lambda text: value)                     # noqa: E731
+        G = lambda attr, value: (golang.Go, attr, value)                                  # noqa: E731
+        ok = {"module": "example.com/m", "go": "1.22", "require": []}
+        self.assertEqual(run(P([])), "go-mod-shape")
+        self.assertEqual(run(P({"module": None})), "go-mod-shape")
+        self.assertEqual(run(P(dict(ok, module=5))), "go-mod-module")
+        self.assertEqual(run(P(dict(ok, go=5))), "go-mod-go")
+        self.assertEqual(run(P(dict(ok, require=[("a.example/x", "v1.0.0", False)] * 1000))), "go-mod-count")
+        self.assertEqual(run(P(dict(ok, require=[("a.example/x",)]))), "go-mod-requirement-shape")
+        self.assertEqual(run(P(dict(ok, require=[("a.example/x", "v1.0.0", "no")]))), "go-mod-requirement-shape")
+        self.assertEqual(run(P(dict(ok, require=[("a.example/x", "v1", False)]))), "go-mod-requirement-version")
+        self.assertEqual(run(P(dict(ok, require=[("a.example/x", "", False)]))), "go-mod-requirement-version")
+        self.assertEqual(run((golang, "parse_gomod", self.every_other(real, lambda text: dict(ok)))), "go-mod-deterministic")
+        self.assertEqual(run(G("declared", lambda self, k, m, mem: base.Declared("-x", ()))), "go-mod-declared-name")
+        self.assertEqual(run(G("declared", lambda self, k, m, mem: base.Declared(None, ("b.example/y", "a.example/x")))), "go-mod-declared-dependencies")
+        self.assertEqual(run(G("declared", lambda self, k, m, mem: base.Declared(None, ("zz.example/q",)))), "go-mod-declared-from-requirements")
+
+    def test_the_go_sumdb_promises(self):
+        from lazaret.registry.ecosystems import base, golang
+        seed = fuzz_targets.SUMDB_SEEDS[0]
+        real = golang.parse_lookup
+        good = real(seed.decode("utf-8"), fuzz_targets.SUMDB_NAME, fuzz_targets.SUMDB_VERSION)
+        run = lambda *patches: self.promise("go-sumdb", seed, *patches)                   # noqa: E731
+        P = lambda value: (golang, "parse_lookup", lambda text, name, version: value)     # noqa: E731
+        elsewhere = "h1:" + "Z" * 43 + "="
+
+        def failing(text, name, version):
+            raise base.FetchError("x" * 700)
+        self.assertEqual(run((golang, "parse_lookup", failing)), "go-sumdb-message")
+        self.assertEqual(run(P({})), "go-sumdb-shape")
+        self.assertEqual(run(P(dict(good, id=8))), "go-sumdb-id")
+        self.assertEqual(run(P(dict(good, id=True))), "go-sumdb-id")
+        self.assertEqual(run(P(dict(good, h1="bad"))), "go-sumdb-h1")
+        self.assertEqual(run(P(dict(good, gomod_h1="bad"))), "go-sumdb-gomod-h1")
+        self.assertEqual(run(P(dict(good, h1=elsewhere))), "go-sumdb-h1-from-the-record")
+        self.assertEqual(run(P(dict(good, gomod_h1=elsewhere))), "go-sumdb-gomod-from-the-record")
+        self.assertEqual(run((golang, "parse_lookup", self.every_other(real, lambda text, name, version: dict(good, h1=elsewhere)))),
+                         "go-sumdb-deterministic")
+
+    def test_the_go_resolve_promises(self):
+        from lazaret.registry.ecosystems import base, golang
+        eco = golang.Go()
+        real = golang.Go.resolve
+        seed = fuzz_targets.INFO_SEEDS[0]
+        latest = self.padded(seed, lambda c: c % 4 == 0 and (c >> 8) % 5 == 0, b" ")
+        asked = self.padded(seed, lambda c: c % 4 == 0 and (c >> 8) % 5 == 1, b" ")
+
+        def sumdb_for(url):
+            module, _, version = url.rsplit("/lookup/", 1)[1].partition("@")
+            return fuzz_targets.sumdb_text(module, version).encode("utf-8")
+        fetch, _ = fuzz_targets.served(eco, lambda url: sumdb_for(url) if "/lookup/" in url else latest)
+        res = real(eco, "example.com/m", None, fetch)
+        entry = res.artifacts[0]["entry"]
+
+        def tweak(change):
+            return lambda self, name, version, fetch: change(real(self, name, version, fetch))
+
+        def failing(self, name, version, fetch):
+            raise base.FetchError("x" * 700)
+        run = lambda data, *patches: self.promise("go-resolve", data, *patches)           # noqa: E731
+        R = lambda value: (golang.Go, "resolve", value)                                   # noqa: E731
+        self.assertEqual(run(latest, R(failing)), "go-resolve-message")
+        self.assertEqual(run(latest, R(lambda self, name, version, fetch: res)), "go-resolve-requests")
+        self.assertEqual(run(latest, R(tweak(tuple))), "go-resolve-shape")
+        self.assertEqual(run(latest, R(tweak(lambda r: self.altered(r, version="1.0")))), "go-resolve-version")
+        self.assertEqual(run(asked, R(tweak(lambda r: self.altered(r, version="v9.9.9")))), "go-resolve-asked-for")
+        self.assertEqual(run(latest, R(tweak(lambda r: self.altered(r, art={"url": "http://proxy.golang.org/x.zip"})))), "go-resolve-url")
+        self.assertEqual(run(latest, R(tweak(lambda r: self.altered(r, art={"container": "tgz"})))), "go-resolve-artifact")
+        self.assertEqual(run(latest, R(tweak(lambda r: self.altered(r, art={"entry": dict(entry, h1="bad")})))), "go-resolve-h1")
+        self.assertEqual(run(latest, R(tweak(lambda r: self.altered(r, info={"root": "wrong/"})))), "go-resolve-root")
+        self.assertEqual(run(latest, R(tweak(lambda r: self.altered(r, info={"time": "x" * 100})))), "go-resolve-time")
+        self.assertEqual(run(latest, R(self.every_other(real, tweak(lambda r: self.altered(r, info={"time": None}))))), "go-resolve-deterministic")
+
+    def test_the_names_promises(self):
+        from lazaret.registry.ecosystems import base, golang
+        Go = golang.Go
+        run = lambda seed, *patches: self.promise("ecosystem-names", seed, *patches)       # noqa: E731
+        G = lambda attr, value: (Go, attr, value)                                          # noqa: E731
+        name, refused = b"github.com/pkg/errors\nv0.9.1", b"x/y\n1"
+
+        def failing(self, value):
+            raise base.SpecError("x" * 700)
+        self.assertEqual(run(name, G("check_name", failing)), "names-message")
+        self.assertEqual(run(refused, G("identity", lambda self, value: value)), "names-refusal-consistent")
+        self.assertEqual(run(name, G("check_name", lambda self, value: value + "x")), "names-idempotent")
+        self.assertEqual(run(name, G("identity", lambda self, value: value + "x")), "names-identity-idempotent")
+        self.assertEqual(run(name, G("segment", lambda self, value: "a b")), "names-segment")
+        self.assertEqual(run(name, G("segment", lambda self, value: "../x")), "names-segment")
+        self.assertEqual(run(name, G("segment", lambda self, value: "a?b=1")), "names-segment")
+        self.assertEqual(run(name, G("check_version", lambda self, value: None if value is None else value + "x")), "names-version-idempotent")
+        self.assertEqual(run(name, G("segment", lambda self, value: "a b" if value.startswith("v") else value)), "names-version-segment")
+        self.assertEqual(run(name, G("parse_spec", lambda self, value: ("x", "y"))), "names-spec")
+        self.assertEqual(run(name, G("check_version", lambda self, value: failing(self, value))), "names-message")
+
+    def test_the_member_path_promises(self):
+        from lazaret.registry.ecosystems import crates, golang
+        run = lambda seed, *patches: self.promise("ecosystem-member-path", seed, *patches)    # noqa: E731
+        G = lambda attr, value: (golang.Go, attr, value)                                      # noqa: E731
+        C = lambda attr, value: (crates.Crates, attr, value)                                  # noqa: E731
+        seed = fuzz_targets.MEMBER_SEEDS[1]
+        M = lambda result: G("member_path", lambda self, kind, name, root=None: result)       # noqa: E731
+        self.assertEqual(run(seed, M((5, None))), "member-rel-type")
+        self.assertEqual(run(seed, M((None, 5))), "member-problem-type")
+        self.assertEqual(run(seed, M(("a", "problem"))), "member-rel-and-problem")
+        self.assertEqual(run(seed, M((None, "x" * 700))), "member-problem-message")
+        for bad in ("", ".", "/abs", "../x", "a/../b", "a\\b", "a//b"):
+            self.assertEqual(run(seed, M((bad, None))), "member-rel-path", bad)
+        self.assertEqual(run(seed, C("member_path", lambda self, kind, name, root=None: ("a/.cargo-ok", None))), "member-crates-marker")
+        self.assertEqual(run(seed, M(("sub/go.mod", None))), "member-go-mod-only-at-the-root")
+        self.assertEqual(run(seed, M(("sub/GO.MOD", None))), "member-go-mod-only-at-the-root")
+        self.assertEqual(run(b"other/x\nexample.com/m@v1.0.0/", M(("x", None))), "member-under-the-root")
+        real = golang.Go.member_path
+        self.assertEqual(run(seed, G("member_path", self.every_other(real, lambda self, kind, name, root=None: ("x", None)))),
+                         "member-deterministic")
 
 
 class SeedsAndOptions(unittest.TestCase):

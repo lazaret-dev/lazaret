@@ -606,3 +606,486 @@ register("sca-bundle-index", "scanner.sca_index.IndexedBundle on a file as given
          index_seeds, index_start, INDEX_WORDS, max_len=16384)
 register("sca-bundle-doc", "a bundle document read as CveBundle and through the indexed file: the same answers",
          lambda: list(BUNDLE_DOCS), doc_start, BUNDLE_WORDS, max_len=16384)
+
+
+# ------------------------------------------------------------------------------------- registry modules (wave 2)
+# Readers of what a registry sends or a package holds: crates.io's index file and `Cargo.toml`, Go's `.info` answer, checksum
+# database response, `go.mod` and module zip, and the rules every module shares for names and archive member paths.
+# `registry/ecosystems/base.py` documents the errors a module may raise (SpecError, FetchError, DigestError); anything else is a
+# finding, and so is a message that is not a short printable sentence.
+
+MESSAGE_LIMIT = 600
+
+
+def refusal(exc, rule):
+    """A documented refusal says what it refuses in a short sentence of printable text."""
+    text = str(exc)
+    check(text.isprintable() and len(text) <= MESSAGE_LIMIT, rule, repr(text)[:160])
+
+
+def served(eco, answer):
+    """-> (a `base.Fetch` for `eco`, the list of URLs it asked for), over a transport that gives `answer(url)` (bytes, or None
+    for "not found"). Nothing waits and nothing opens a socket."""
+    from lazaret.registry.ecosystems import base
+    asked = []
+
+    def transport(url, **kw):
+        asked.append(url)
+        body = answer(url)
+        if body is None:
+            err = base.FetchError("not found")
+            err.status = 404
+            raise err
+        return body
+    return base.Fetch(eco, transport, clock=lambda: 0.0, sleep=lambda s: None), asked
+
+
+def valid_name(eco, name):
+    from lazaret.registry.ecosystems import base
+    try:
+        return eco.check_name(name) == name
+    except base.SpecError:
+        return False
+
+
+def valid_version(eco, version):
+    from lazaret.registry.ecosystems import base
+    try:
+        return eco.check_version(version) == version
+    except base.SpecError:
+        return False
+
+
+def url_text_ok(url):
+    return isinstance(url, str) and bool(url) and all(0x21 <= ord(c) <= 0x7e for c in url)
+
+
+# ---- crates.io: the index file of one crate
+def crates_line(vers, name="fnv", yanked=False, deps=(), **extra):
+    rec = {"name": name, "vers": vers, "deps": list(deps), "cksum": hashlib.sha256(vers.encode()).hexdigest(),
+           "features": {"default": []}, "yanked": yanked, "v": 2}
+    rec.update(extra)
+    return json.dumps(rec)
+
+
+def crates_dep(name, kind="normal", package=None):
+    rec = {"name": name, "req": "^1", "features": [], "optional": False, "default_features": True, "target": None, "kind": kind}
+    if package is not None:
+        rec["package"] = package
+    return rec
+
+
+def crates_index(*lines):
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+CRATES_INDEX_SEEDS = [
+    crates_index(crates_line("0.1.0"), crates_line("1.0.7", deps=[crates_dep("libc"), crates_dep("rand", "dev"), crates_dep("cc", "build")]),
+                 crates_line("1.1.0", yanked=True), crates_line("2.0.0-rc.1"), crates_line("1.0.8+build.5", rust_version="1.56", links="native")),
+    crates_index(crates_line("1.0.7", deps=[crates_dep("x", package="y"), crates_dep("z", kind=None)])),
+    crates_index(crates_line("1.0.0"), crates_line("1.0.0")),
+    crates_index(crates_line("1.0.0", name="other")),
+    crates_index(crates_line("1.0.0", yanked=True)),
+    b'{"name":"fnv","vers":"1.0.0","cksum":"' + b"a" * 64 + b'","yanked":false}\n\n\n{"name":"FNV","vers":"1.0.1","cksum":"' + b"B" * 64
+    + b'","yanked":false,"deps":[{"name":"a","kind":"normal"}]}',
+    b"[]\n", b"not json\n", b"",
+]
+CRATES_WORDS = (b'"name"', b'"vers"', b'"cksum"', b'"yanked"', b'"deps"', b'"kind"', b'"package"', b'"features"', b'"rust_version"',
+                b'"links"', b'"normal"', b'"build"', b'"dev"', b'"fnv"', b"true", b"false", b"null", b"1.0.0", b"1.0.0-rc.1", b"1.0.0+b",
+                b"0.0.0", b"99999999999999999999.0.0", b'"v"', b"\\u0000", b"\\ud800", b"\n", b"\r\n", b"{}", b"[]", b"NaN", b"1e999")
+
+
+def crates_index_start():
+    from lazaret.registry.ecosystems import base, crates
+    eco = crates.Crates()
+    url = "https://index.crates.io/3/f/fnv"
+
+    def resolve(data, wanted):
+        fetch, asked = served(eco, lambda u: data if u == url else None)
+        return eco.resolve("fnv", wanted, fetch), fetch, asked
+
+    def run(data):
+        wanted = (None, "1.0.7", "0.1.0", "2.0.0-rc.1", "1.0.8")[zlib.crc32(data) % 5]
+        try:
+            res, fetch, asked = resolve(data, wanted)
+        except (base.SpecError, base.FetchError) as exc:
+            refusal(exc, "crates-index-message")
+            return
+        check(asked == [url], "crates-index-requests", asked)
+        check(isinstance(res, base.Resolution) and len(res.artifacts) == 1, "crates-index-shape", type(res).__name__)
+        art = res.artifacts[0]
+        check(url_text_ok(art["url"]) and art["url"].startswith("https://static.crates.io/crates/"), "crates-index-url", repr(art["url"])[:120])
+        check(art["container"] == "tgz" and art["artifact"] == "crate" and eco.container(art["filename"]) == "tgz", "crates-index-artifact",
+              repr(art)[:160])
+        check(valid_version(eco, res[0]), "crates-index-version", repr(res[0])[:80])
+        if wanted is not None:
+            check(res[0].split("+", 1)[0] == wanted.split("+", 1)[0], "crates-index-asked-for", f"{wanted} -> {res[0]}")
+        entry = art["entry"]
+        check(isinstance(entry["cksum"], str) and re.fullmatch(r"[0-9a-f]{64}", entry["cksum"]), "crates-index-cksum", repr(entry["cksum"])[:80])
+        check(type(entry["yanked"]) is bool and res.info["yanked"] is entry["yanked"], "crates-index-yanked", repr(entry["yanked"]))
+        if wanted is None:
+            check(entry["yanked"] is False, "crates-index-latest-yanked", res[0])
+        check(valid_name(eco, res.info["name"]) and res.info["name"].lower() == "fnv", "crates-index-name", repr(res.info["name"])[:80])
+        check(eco.archive_root(res, art) == f"{res.info['name']}-{res[0]}/", "crates-index-root", repr(eco.archive_root(res, art))[:80])
+        deps = eco.dependencies(res, fetch)
+        check(isinstance(deps, tuple) and list(deps) == sorted(set(deps)) and all(valid_name(eco, d) for d in deps), "crates-index-dependencies",
+              repr(deps)[:120])
+        check(len(asked) == 1, "crates-index-dependencies-asked", asked)
+        try:
+            checked = eco.verify(data, entry, "fnv", res[0])
+        except base.DigestError as exc:
+            refusal(exc, "crates-index-message")
+        else:
+            check(checked == ("sha256", hashlib.sha256(data).hexdigest()), "crates-index-verify", repr(checked)[:80])
+        again, _, _ = resolve(data, wanted)
+        check(tuple(again) == tuple(res) and again.artifacts == res.artifacts and again.info == res.info, "crates-index-deterministic",
+              "two resolves of one index differ")
+
+    return run, lambda: None
+
+
+# ---- crates.io: a crate's Cargo.toml
+CARGO_MEMBERS = ["build.rs", "src/lib.rs", "src/main.rs", "src/bin/a.rs", "src/bin/b/main.rs", "custom/build.rs", "lib/x.rs", "bin/tool.rs",
+                 "Cargo.toml", "a.rs", "src/lib/mod.rs", "tools/gen.rs", "src/bin/c/d.rs", "../x.rs", "/abs.rs"]
+CARGO_SEEDS = [
+    b'[package]\nname = "demo"\nversion = "1.0.0"\nedition = "2021"\n\n[dependencies]\nserde = "1"\nrand = { version = "0.8", package = "rand" }\n'
+    b'\n[build-dependencies]\ncc = "1"\n\n[dev-dependencies]\ntempfile = "3"\n',
+    b'[package]\nname = "macros"\nversion = "0.1.0"\nbuild = "custom/build.rs"\n\n[lib]\nproc-macro = true\npath = "lib/x.rs"\n\n[[bin]]\n'
+    b'name = "tool"\npath = "bin/tool.rs"\n',
+    b'[package]\nname = "nobuild"\nbuild = false\n[lib]\nproc_macro = true\n[target.\'cfg(unix)\'.dependencies]\nlibc = "0.2"\n'
+    b'[target."x86_64-pc-windows-msvc".build-dependencies]\nwinres = "0.1"\n',
+    b'[project]\nname = "old"\nversion = "0.0.1"\n[dependencies]\nnum = { git = "https://example.invalid/num", package = "num-traits" }\n',
+    b'[package]\nname = "-bad name"\n[dependencies]\n"a b" = "1"\n"../x" = "1"\n',
+    b'[package]\nbuild = "../x.rs"\n[lib]\npath = "/abs.rs"\n[[bin]]\npath = 5\n[[bin]]\n',
+    b'[workspace]\nmembers = ["a", "b"]\n', b"", b"[[[[", b"= = =",
+]
+CARGO_WORDS = (b"[package]", b"[project]", b"[lib]", b"[[bin]]", b"[dependencies]", b"[build-dependencies]", b"[dev-dependencies]",
+               b"[target.", b"proc-macro = true", b"proc_macro = true", b"build = ", b"build = false", b"path = ", b"name = ", b"package = ",
+               b"\"build.rs\"", b"\"src/lib.rs\"", b"\"../", b"\"/", b"\\\\", b"[[", b"]]", b"{", b"}", b"= {", b"\"\"\"", b"'''", b"\r\n",
+               b"\\u0000", b"inf", b"nan", b"1979-05-27", b".")
+
+
+def crates_manifest_start():
+    from lazaret.registry.ecosystems import base, crates
+    eco = crates.Crates()
+
+    def run(data):
+        manifests = {"Cargo.toml": data.decode("utf-8", "replace")}
+        got = eco.run_targets("crate", manifests, CARGO_MEMBERS)
+        check(isinstance(got, base.RunTargets), "crates-manifest-run-type", type(got).__name__)
+        for label, part in zip(got._fields, got):
+            check(isinstance(part, frozenset) and part <= set(CARGO_MEMBERS), "crates-manifest-run-members", f"{label}: {sorted(part)[:3]}")
+        check(not got.startup, "crates-manifest-startup", "nothing in a crate runs when it is loaded")
+        declared = eco.declared("crate", manifests, CARGO_MEMBERS)
+        check(isinstance(declared, base.Declared), "crates-manifest-declared-type", type(declared).__name__)
+        check(declared.name is None or valid_name(eco, declared.name), "crates-manifest-name", repr(declared.name)[:80])
+        deps = declared.dependencies
+        check(isinstance(deps, tuple) and list(deps) == sorted(set(deps)) and len(deps) <= crates.MAX_DEPS and all(valid_name(eco, d) for d in deps),
+              "crates-manifest-dependencies", repr(deps)[:120])
+        check(eco.run_targets("crate", manifests, CARGO_MEMBERS) == got and eco.declared("crate", manifests, CARGO_MEMBERS) == declared,
+              "crates-manifest-deterministic", "two readings of one manifest differ")
+
+    return run, lambda: None
+
+
+# ---- Go: the module zip, and its h1: hash
+def go_zip_seeds():
+    root = "example.com/m@v1.0.0/"
+    module = [(root + "go.mod", b"module example.com/m\n\ngo 1.22\n", "file"), (root + "m.go", b"package m\n\nfunc F() {}\n", "file"),
+              (root + "cmd/", b"", "dir"), (root + "cmd/tool/main.go", b"package main\n\nfunc main() {}\n", "file"),
+              (root + "LICENSE", b"MIT\n", "file"), (root + "\u00e9/\u4e2d.go", b"package x\n", "file")]
+    odd = [(root + "a.go", b"1", "file"), (root + "a.go", b"2", "file"), (root + "a\nb.go", b"x", "file"), (root + "d/", b"data", "file"),
+           ("../x.go", b"x", "file"), (root + "sub/go.mod", b"module x\n", "file"), (root + "GO.MOD", b"module x\n", "file")]
+    return [zip_bytes(module), zip_bytes(module, zipfile.ZIP_STORED), zip_bytes(odd), zip_bytes([]), zip_bytes(module, comment=b"note"),
+            zip_bytes(module, zipfile.ZIP_BZIP2), zip_bytes(module[:1]), zip_bytes([(root + "e.go", b"", "file")])]
+
+
+GO_ZIP_WORDS = (b"PK\x03\x04", b"PK\x01\x02", b"PK\x05\x06", b"PK\x06\x06", b"PK\x06\x07", b"PK\x07\x08", b"\x08\x00", b"\x00\x08",
+                b"\x14\x00", b"\xff\xff\xff\xff", b"example.com/m@v1.0.0/", b"go.mod", b"\n", b"/", b"\xc3\xa9", b"\xff", b"\x00" * 8)
+
+
+def go_zip_start():
+    from lazaret.registry.ecosystems import base, golang
+    eco = golang.Go()
+    h1_re = re.compile(r"h1:[A-Za-z0-9+/]{43}=")
+    wrong = "h1:" + "A" * 43 + "="
+
+    def run(data):
+        try:
+            first = golang.zip_h1(data)
+        except base.DigestError as exc:
+            refusal(exc, "go-zip-message")
+            return
+        check(isinstance(first, str) and h1_re.fullmatch(first), "go-zip-format", repr(first)[:80])
+        check(golang.zip_h1(data) == first, "go-zip-deterministic", "two hashes of one zip differ")
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            raw = [i.orig_filename.encode("utf-8" if i.flag_bits & 0x800 else "cp437") for i in zf.infolist()]
+        check(len(raw) == len(set(raw)) and not any(b"\n" in n for n in raw), "go-zip-names", "a hash for a zip Go refuses")
+        check(eco.verify(data, {"h1": first}, "example.com/m", "v1.0.0") == ("h1", first[3:]), "go-zip-verify", first)
+        if first != wrong:
+            try:
+                eco.verify(data, {"h1": wrong}, "example.com/m", "v1.0.0")
+            except base.DigestError as exc:
+                refusal(exc, "go-zip-message")
+            else:
+                check(False, "go-zip-wrong-hash-accepted", first)
+
+    return run, lambda: None
+
+
+# ---- Go: go.mod
+GOMOD_SEEDS = [
+    b"module example.com/m\n\ngo 1.22\n\nrequire (\n\ta.example/x v1.0.0\n\tb.example/y v1.2.3 // indirect\n)\n\nrequire c.example/z v0.1.0\n",
+    b'// header\r\nmodule "example.com/m" // c\r\ngo 1.22\r\ntoolchain go1.22.1\r\nrequire (\r\n\t`a.example/x` v1.0.0 //indirect\r\n)\r\n'
+    b'replace a.example/x => ./x\r\nexclude e.example/v v1.0.0\r\nretract v0.9.0\r\n',
+    b"module m\nrequire a.example/x v1.0.0\nrequire a.example/x v1.1.0\nrequire bad v1.0.0\nrequire a.example/y v1\n"
+    b"require a.example/z v1.0.0+incompatible\nrequire a.example/w v0.0.0-20190101000000-abcdefabcdef\n",
+    b"require (\n\trequire (\n\ta.example/x v1.0.0\n))\n(\n)\nmodule (\n\tx.example/m\n)\n", b"module\ngo\nrequire\nrequire (\n", b"",
+    b"module " + b"a" * 300 + b"\nrequire " + b"b.example/" + b"c" * 300 + b" v1.0.0\n", b"\xef\xbb\xbfmodule example.com/m\n", b"module a.b/c /* x */ \n",
+]
+GOMOD_WORDS = (b"module ", b"go ", b"toolchain ", b"require ", b"require (", b"replace ", b"exclude ", b"retract ", b"godebug ", b"tool ",
+               b"ignore ", b"=>", b"(", b")", b"// indirect", b"//indirect", b"// indirect; x", b"/*", b"*/", b"\"", b"`", b"\\", b"\r\n", b"\n",
+               b"v1.0.0", b"v1.0.0+incompatible", b"v0.0.0-20190101000000-abcdefabcdef", b"v2", b"example.com/m", b"gopkg.in/yaml.v3", b"\t",
+               b"\xef\xbb\xbf", b"\x00", b"\xff")
+
+
+def go_mod_start():
+    from lazaret.registry.ecosystems import base, golang
+    eco = golang.Go()
+
+    def run(data):
+        text = data.decode("utf-8", "replace")
+        got = golang.parse_gomod(text)
+        check(isinstance(got, dict) and set(got) == {"module", "go", "require"}, "go-mod-shape", repr(got)[:120])
+        check(got["module"] is None or isinstance(got["module"], str), "go-mod-module", repr(got["module"])[:80])      # (as written: Go's reader
+        check(got["go"] is None or isinstance(got["go"], str), "go-mod-go", repr(got["go"])[:80])                    # takes `module ""` too)
+        require = got["require"]
+        check(isinstance(require, list) and len(require) <= golang.MAX_REQUIRES and len(require) <= len(text), "go-mod-count", f"{len(require)} from {len(text)}")
+        for item in require:
+            check(isinstance(item, tuple) and len(item) == 3 and isinstance(item[0], str) and isinstance(item[2], bool),
+                  "go-mod-requirement-shape", repr(item)[:120])
+            check(golang.canonical_version(item[1]) == item[1] != "", "go-mod-requirement-version", repr(item[1])[:80])
+        check(golang.parse_gomod(text) == got, "go-mod-deterministic", "two readings of one go.mod differ")
+        declared = eco.declared("gomod", {"go.mod": text}, [])
+        check(isinstance(declared, base.Declared) and (declared.name is None or valid_name(eco, declared.name)), "go-mod-declared-name",
+              repr(declared.name)[:80])
+        deps = declared.dependencies
+        check(isinstance(deps, tuple) and list(deps) == sorted(set(deps)) and all(valid_name(eco, d) for d in deps), "go-mod-declared-dependencies",
+              repr(deps)[:120])
+        check(set(deps) <= {path for path, _, _ in require}, "go-mod-declared-from-requirements", repr(deps)[:120])
+
+    return run, lambda: None
+
+
+# ---- Go: the checksum database's answer
+SUMDB_NAME, SUMDB_VERSION = "example.com/m", "v1.0.0"
+SUMDB_HASH_A, SUMDB_HASH_B = "h1:" + "A" * 43 + "=", "h1:" + "B" * 43 + "="
+
+
+def sumdb_text(module=SUMDB_NAME, version=SUMDB_VERSION, number="7", records=None, tree="go.sum database tree\n42\n" + "C" * 43 + "=\n",
+               signature="\u2014 sum.golang.org Az3grlgtzPICa5OS8npVmf1Myq/5IZniMp+ZJurmRDeOoRDe4URYN7u5/Zhcyv2q1gGzGku9nTo+zyWE+xeMcTOAYQ8="):
+    if records is None:
+        records = [f"{module} {version} {SUMDB_HASH_A}", f"{module} {version}/go.mod {SUMDB_HASH_B}"]
+    return f"{number}\n" + "\n".join(records) + f"\n\n{tree}\n{signature}\n"
+
+
+SUMDB_SEEDS = [sumdb_text().encode("utf-8"), sumdb_text(records=[f"{SUMDB_NAME} {SUMDB_VERSION} {SUMDB_HASH_A}"]).encode("utf-8"),
+               sumdb_text(records=[f"{SUMDB_NAME} {SUMDB_VERSION} {SUMDB_HASH_A}", f"{SUMDB_NAME} {SUMDB_VERSION} {SUMDB_HASH_B}"]).encode("utf-8"),
+               sumdb_text(number="x").encode("utf-8"), sumdb_text(tree="").encode("utf-8"), sumdb_text(records=["a b"]).encode("utf-8"),
+               sumdb_text(records=[f"other.example/x {SUMDB_VERSION} {SUMDB_HASH_A}"]).encode("utf-8"), b"", b"\n\n",
+               sumdb_text(number="9" * 40).encode("utf-8"), sumdb_text(records=["", f"{SUMDB_NAME} {SUMDB_VERSION} {SUMDB_HASH_A}"]).encode("utf-8")]
+SUMDB_WORDS = (b"h1:", b"go.sum database tree\n", b"\n\n", b"\xe2\x80\x94 ", b"/go.mod", SUMDB_NAME.encode(), SUMDB_VERSION.encode(), b" ", b"\n",
+               b"\r", b"\x00", b"\t", b"=", b"A" * 43 + b"=", b"0", b"-1", b"+")
+
+
+def go_sumdb_start():
+    from lazaret.registry.ecosystems import base, golang
+    h1_re = re.compile(r"h1:[A-Za-z0-9+/]{43}=")
+
+    def run(data):
+        text = data.decode("utf-8", "replace")
+        try:
+            got = golang.parse_lookup(text, SUMDB_NAME, SUMDB_VERSION)
+        except base.FetchError as exc:
+            refusal(exc, "go-sumdb-message")
+            return
+        check(isinstance(got, dict) and set(got) == {"id", "h1", "gomod_h1"}, "go-sumdb-shape", repr(got)[:120])
+        check(isinstance(got["id"], int) and not isinstance(got["id"], bool) and got["id"] == int(text.split("\n", 1)[0]), "go-sumdb-id", repr(got["id"]))
+        check(isinstance(got["h1"], str) and h1_re.fullmatch(got["h1"]), "go-sumdb-h1", repr(got["h1"])[:80])
+        check(got["gomod_h1"] is None or (isinstance(got["gomod_h1"], str) and h1_re.fullmatch(got["gomod_h1"])), "go-sumdb-gomod-h1",
+              repr(got["gomod_h1"])[:80])
+        check(f"\n{SUMDB_NAME} {SUMDB_VERSION} {got['h1']}\n" in text, "go-sumdb-h1-from-the-record", repr(got["h1"]))
+        if got["gomod_h1"] is not None:
+            check(f"\n{SUMDB_NAME} {SUMDB_VERSION}/go.mod {got['gomod_h1']}\n" in text, "go-sumdb-gomod-from-the-record", repr(got["gomod_h1"]))
+        check(golang.parse_lookup(text, SUMDB_NAME, SUMDB_VERSION) == got, "go-sumdb-deterministic", "two readings of one response differ")
+
+    return run, lambda: None
+
+
+# ---- Go: the proxy's `.info` answer (the checksum database answers for whatever version it is told of)
+INFO_SEEDS = [b'{"Version":"v1.0.0","Time":"2016-01-10T10:55:54Z"}', b'{"Version":"v0.1.0-alpha.1","Time":"2020-01-01T00:00:00Z","Origin":'
+              b'{"VCS":"git","URL":"https://example.invalid/m","Hash":"' + b"a" * 40 + b'"}}', b'{"Version":"v2.0.0+incompatible"}',
+              b'{"Version":"v1.0.0-RC.1"}', b'{"Version":"v0.0.0-20190101000000-abcdefabcdef","Time":"2019-01-01T00:00:00Z"}', b'{"Version":5}',
+              b'{"Version":"../../x"}', b"[]", b"null", b"", b'{"Time":"x"}', b'{"Version":"v1.0.0","Time":"' + b"9" * 400 + b'"}']
+INFO_WORDS = (b'"Version"', b'"Time"', b'"Origin"', b'"v1.0.0"', b'"v2.0.0"', b'"v1.0.0-RC.1"', b'+incompatible', b'-', b'!', b"\\u0000", b"\\ud800",
+              b"null", b"true", b"{", b"}", b"[", b"]", b"2016-01-10T10:55:54Z", b"/", b"..")
+
+
+def go_resolve_start():
+    from lazaret.registry.ecosystems import base, golang
+    eco = golang.Go()
+    names = ("example.com/m", "example.com/m/v2", "github.com/Azure/x", "gopkg.in/yaml.v3")
+
+    def unescape(text):
+        return re.sub(r"!([a-z])", lambda m: m.group(1).upper(), text)
+
+    def serve(data):
+        def answer(url):
+            if "/lookup/" in url:
+                module, _, version = unescape(url.rsplit("/lookup/", 1)[1]).partition("@")
+                return sumdb_text(module, version).encode("utf-8")
+            if url.endswith(".info") or url.endswith("/@latest"):
+                return data
+            return None
+        return served(eco, answer)
+
+    def run(data):
+        name = names[zlib.crc32(data) % len(names)]
+        wanted = (None, "v1.0.0", "v0.1.0-alpha.1", "v2.0.0+incompatible", "v3.0.0")[(zlib.crc32(data) >> 8) % 5]
+        fetch, asked = serve(data)
+        try:
+            res = eco.resolve(name, wanted, fetch)
+        except (base.SpecError, base.FetchError) as exc:
+            refusal(exc, "go-resolve-message")
+            return
+        check(1 <= len(asked) <= 2 and all(url_text_ok(u) and u.startswith(("https://proxy.golang.org/", "https://sum.golang.org/")) for u in asked),
+              "go-resolve-requests", repr(asked)[:200])
+        check(isinstance(res, base.Resolution) and len(res.artifacts) == 1, "go-resolve-shape", type(res).__name__)
+        art = res.artifacts[0]
+        check(valid_version(eco, res[0]), "go-resolve-version", repr(res[0])[:80])
+        if wanted is not None:
+            check(res[0] == wanted, "go-resolve-asked-for", f"{wanted} -> {res[0]}")
+        check(url_text_ok(art["url"]) and art["url"].startswith("https://proxy.golang.org/") and art["url"].endswith(".zip"), "go-resolve-url",
+              repr(art["url"])[:160])
+        check(art["container"] == "zip" and art["artifact"] == "gomod" and eco.container(art["filename"]) == "zip", "go-resolve-artifact",
+              repr(art)[:160])
+        entry = art["entry"]
+        check(re.fullmatch(r"h1:[A-Za-z0-9+/]{43}=", entry["h1"] or "") is not None, "go-resolve-h1", repr(entry)[:120])
+        check(res.info["module"] == name and res.info["root"] == f"{name}@{res[0]}/" and eco.archive_root(res, art) == res.info["root"],
+              "go-resolve-root", repr(res.info)[:160])
+        time_text = res.info["time"]
+        check(time_text is None or (isinstance(time_text, str) and time_text.isprintable() and len(time_text) <= 40), "go-resolve-time", repr(time_text)[:60])
+        again, _ = serve(data)
+        second = eco.resolve(name, wanted, again)
+        check(tuple(second) == tuple(res) and second.artifacts == res.artifacts and second.info == res.info, "go-resolve-deterministic",
+              "two resolves of one answer differ")
+
+    return run, lambda: None
+
+
+# ---- the rules every module shares: names, versions, specs
+NAMES_SEEDS = [b"serde\n1.0.0", b"github.com/pkg/errors\nv0.9.1", b"github.com/Azure/azure-sdk-for-go\nv1.2.3+incompatible", b"Foo_Bar\n1.0.0-rc.1",
+               b"gopkg.in/yaml.v3\nv3.0.1", b"a\n0.0.0", b"x/y\n1", b"example.com/../x\nv1", b"\n", b"", b"a@b\nc@d", b"example.com/CON\nv1.0.0",
+               b"-a\n1.0.0", b"e\xcc\x81\nv1.0.0", b"\xff\xfe\nv\xff", b"a" * 70 + b"\n1.0.0"]
+NAMES_WORDS = (b"/", b"..", b".", b"@", b"-", b"_", b"~", b"!", b"%2f", b"%00", b"\\", b"\n", b" ", b"\t", b"\x00", b"v1.0.0", b"v2", b"+incompatible",
+               b"1.0.0", b"-rc.1", b"+build", b"example.com/", b"github.com/", b"gopkg.in/", b".v3", b"CON", b"nul", b"\xe2\x80\xae", b"\xc3\xa9", b"\xff")
+UNSAFE_SEGMENT = set('?#\\ ')
+
+
+def names_start():
+    from lazaret.registry.ecosystems import base, crates, golang
+    ecosystems = (crates.Crates(), golang.Go())
+
+    def run(data):
+        text = data.decode("utf-8", "surrogateescape")
+        name, _, version = text.partition("\n")
+        for eco in ecosystems:
+            try:
+                good = eco.check_name(name)
+            except base.SpecError as exc:
+                refusal(exc, "names-message")
+                for which in ("identity", "parse_spec"):
+                    try:
+                        getattr(eco, which)(name)
+                    except base.SpecError:
+                        continue
+                    if which == "parse_spec" and ("@" in name or name != name.strip()):       # (a spec may say a version, and has no edge space)
+                        continue
+                    check(False, "names-refusal-consistent", f"{eco.id}: check_name refused it and {which} did not")
+                good = None
+            if good is not None:
+                check(isinstance(good, str) and valid_name(eco, good), "names-idempotent", repr(good)[:80])
+                ident = eco.identity(good)
+                check(isinstance(ident, str) and eco.identity(ident) == ident, "names-identity-idempotent", repr(ident)[:80])
+                seg = eco.segment(good)
+                check(isinstance(seg, str) and seg != "" and not any(not 0x21 <= ord(c) <= 0x7e or c in UNSAFE_SEGMENT for c in seg)
+                      and ".." not in seg.split("/") and not seg.startswith("/"), "names-segment", repr(seg)[:80])
+            try:
+                checked = eco.check_version(version)
+            except base.SpecError as exc:
+                refusal(exc, "names-message")
+                checked = None
+            if checked is not None:
+                check(isinstance(checked, str) and valid_version(eco, checked), "names-version-idempotent", repr(checked)[:80])
+                seg = eco.segment(checked)
+                check(not any(not 0x21 <= ord(c) <= 0x7e or c in UNSAFE_SEGMENT for c in seg) and ".." not in seg.split("/"), "names-version-segment",
+                      repr(seg)[:80])
+                if good is not None:
+                    check(eco.parse_spec(good + "@" + checked) == (good, checked), "names-spec", repr((good, checked))[:120])
+
+    return run, lambda: None
+
+
+# ---- the rules every module shares: the path of a member of an archive
+MEMBER_SEEDS = [b"fnv-1.0.7/src/lib.rs\nfnv-1.0.7/", b"example.com/m@v1.0.0/go.mod\nexample.com/m@v1.0.0/", b"fnv-1.0.7/.cargo-ok\nfnv-1.0.7/",
+                b"example.com/m@v1.0.0/sub/go.mod\nexample.com/m@v1.0.0/", b"example.com/m@v1.0.0/a/../b\nexample.com/m@v1.0.0/",
+                b"example.com/m@v1.0.0/a\\b\nexample.com/m@v1.0.0/", b"x/y/z", b"/abs\n", b"c:/x\n", b"..\n", b"a//b\na/", b"\n", b"",
+                b"example.com/m@v1.0.0/CON\nexample.com/m@v1.0.0/", b"example.com/m@v1.0.0/d/\nexample.com/m@v1.0.0/", b"x@1/y.go"]
+MEMBER_WORDS = (b"/", b"//", b"..", b"/../", b"./", b"\\", b".cargo-ok", b"go.mod", b"GO.MOD", b"@", b"v1.0.0/", b"\n", b"c:", b"C:/", b"\x00",
+                b"\xc3\xa9", b"\xff", b"CON", b"aux.txt", b"~1", b" ", b"fnv-1.0.7/", b"example.com/m@v1.0.0/")
+
+
+def member_path_start():
+    from lazaret.registry.ecosystems import base, crates, golang
+    ecosystems = (crates.Crates(), golang.Go())
+
+    def run(data):
+        text = data.decode("utf-8", "surrogateescape")
+        name, _, root = text.partition("\n")
+        for eco in ecosystems:
+            for kind in eco.artifact_kinds:
+                for given in (None, root) if root else (None,):
+                    rel, problem = eco.member_path(kind, name, given)
+                    check(rel is None or isinstance(rel, str), "member-rel-type", repr(rel)[:80])
+                    check(problem is None or isinstance(problem, str), "member-problem-type", repr(problem)[:80])
+                    check(rel is None or problem is None, "member-rel-and-problem", repr((rel, problem))[:120])
+                    if problem is not None:
+                        refusal(ValueError(problem), "member-problem-message")
+                    if rel is not None:
+                        check(rel != "" and rel != "." and not rel.startswith("/") and ".." not in rel.split("/") and "\\" not in rel and "//" not in rel,
+                              "member-rel-path", repr(rel)[:120])
+                        if eco.id == "crates":
+                            check(rel.rsplit("/", 1)[-1] != ".cargo-ok", "member-crates-marker", repr(rel)[:120])
+                        if eco.id == "go":
+                            check(rel.rsplit("/", 1)[-1].lower() != "go.mod" or rel == "go.mod", "member-go-mod-only-at-the-root", repr(rel)[:120])
+                        if given:
+                            check(name.startswith(given) or name.replace("\\", "/").startswith(given), "member-under-the-root",
+                                  repr((name, given))[:120])
+                    check(eco.member_path(kind, name, given) == (rel, problem), "member-deterministic", repr(name)[:80])
+
+    return run, lambda: None
+
+
+register("crates-index", "crates.io: Crates.resolve over the index file of one crate (the registry's answer, whatever it says)",
+         lambda: list(CRATES_INDEX_SEEDS), crates_index_start, CRATES_WORDS, max_len=16384)
+register("crates-manifest", "crates.io: run_targets and declared over a crate's Cargo.toml", lambda: list(CARGO_SEEDS), crates_manifest_start,
+         CARGO_WORDS, max_len=8192)
+register("go-zip", "Go: the h1: hash of a module zip (zip_h1) and verify against it", go_zip_seeds, go_zip_start, GO_ZIP_WORDS, max_len=16384)
+register("go-mod", "Go: parse_gomod and declared over a go.mod", lambda: list(GOMOD_SEEDS), go_mod_start, GOMOD_WORDS, max_len=8192)
+register("go-sumdb", "Go: parse_lookup over the checksum database's response", lambda: list(SUMDB_SEEDS), go_sumdb_start, SUMDB_WORDS, max_len=4096)
+register("go-resolve", "Go: Go.resolve over the proxy's .info answer (the checksum database answers for what it is told of)",
+         lambda: list(INFO_SEEDS), go_resolve_start, INFO_WORDS, max_len=4096)
+register("ecosystem-names", "crates.io and Go: check_name, identity, check_version, parse_spec and segment over a name and a version",
+         lambda: list(NAMES_SEEDS), names_start, NAMES_WORDS, max_len=1024)
+register("ecosystem-member-path", "crates.io and Go: member_path over a member name and an archive root", lambda: list(MEMBER_SEEDS),
+         member_path_start, MEMBER_WORDS, max_len=1024)
