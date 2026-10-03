@@ -81,6 +81,8 @@ MAX_MEMBER = _env_number("LAZARET_MAX_SOURCE_BYTES", 16_000_000)
 MAX_FILES = 20_000         # files per package (numpy's sdist alone has >4,000)
 SAMPLE = 8192              # header/entropy sample read from oversized files
 # Stored scans from another engine version are scanned again (has_scan).
+# 2.20: S-TOKEN reads GitHub's fine-grained tokens (github_pat_…), which
+#      got only S-ENTROPY
 # 2.19: 0.1.8's droppers: code a script decodes and runs read on the trees
 #      (an XOR, characters' codes, a reversal; a program it decodes, run),
 #      code in a literal not code for the text reading, and a file a script
@@ -167,7 +169,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.19.0"
+ENGINE_VERSION = "2.20.0"
 
 # ---------------- Trust-chain limits (F9/G14/F10) ----------------
 # Only these hosts may ever be fetched, over https only, and redirects to any

@@ -1,6 +1,6 @@
 {
  "format": 1,
- "rule_set": "2.19.0",
+ "rule_set": "2.20.0",
  "source": "lazaret.scanner.core, extracted by scripts/make_rust_tables.py \u2014 do not edit",
  "values": {
   "ALWAYS_PRUNE_DIRS": {
@@ -2054,10 +2054,11 @@
       },
       "re": {
        "flags": "",
-       "re": "AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36}|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\\-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----|eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}",
+       "re": "AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\\-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----|eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}",
        "token": [
         "AKIA[0-9A-Z]{16}",
         "gh[pousr]_[A-Za-z0-9]{36}",
+        "github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}",
         "xox[baprs]-[A-Za-z0-9-]{10,}",
         "sk_live_[A-Za-z0-9]{16,}",
         "AIza[0-9A-Za-z_\\-]{35}",
@@ -14724,6 +14725,9 @@
      "value": "gh[pousr]_[A-Za-z0-9]{36}"
     },
     {
+     "value": "github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}"
+    },
+    {
      "value": "xox[baprs]-[A-Za-z0-9-]{10,}"
     },
     {
@@ -14742,10 +14746,11 @@
   },
   "_TOKEN_PATTERN": {
    "flags": "",
-   "re": "AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36}|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\\-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----|eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}",
+   "re": "AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\\-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----|eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}",
    "token": [
     "AKIA[0-9A-Z]{16}",
     "gh[pousr]_[A-Za-z0-9]{36}",
+    "github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}",
     "xox[baprs]-[A-Za-z0-9-]{10,}",
     "sk_live_[A-Za-z0-9]{16,}",
     "AIza[0-9A-Za-z_\\-]{35}",
@@ -14824,10 +14829,11 @@
     },
     "re": {
      "flags": "",
-     "re": "AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36}|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\\-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----|eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}",
+     "re": "AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\\-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----|eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}",
      "token": [
       "AKIA[0-9A-Z]{16}",
       "gh[pousr]_[A-Za-z0-9]{36}",
+      "github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}",
       "xox[baprs]-[A-Za-z0-9-]{10,}",
       "sk_live_[A-Za-z0-9]{16,}",
       "AIza[0-9A-Za-z_\\-]{35}",

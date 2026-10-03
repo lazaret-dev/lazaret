@@ -30,6 +30,9 @@ from tests import _support
 
 PY = sys.executable
 TOKEN = "ghp_" + "a1B2" * 9                  # GitHub classic PAT shape, made up
+# GitHub fine-grained PAT shape (22 and 59 characters around an underscore),
+# made up and built in pieces so the source holds no token-shaped literal
+PAT = "github" + "_pat_" + "11ABCDEFG0" + "a1b2c3d4e5f6" + "_" + ("Zz9" * 20)[:59]
 PASS = "Zq8!vN3pL0wX7r"                       # a made-up credential
 
 
@@ -161,6 +164,17 @@ class ScanConfigFile(unittest.TestCase):
         text = (f"# GITHUB_TOKEN={TOKEN}\n# DB_PASSWORD={PASS}\n"
                 f"DB_PASSWORD={PASS}\nAWS_KEY=AKIAIOSFODNN7EXAMPLE\nKEY=AKIA2345ABCD6789WXYZ\n")
         self.assertEqual(found(".env", text), [("S-SECRET", 3), ("S-TOKEN", 1), ("S-TOKEN", 5)])
+
+    def test_fine_grained_github_tokens(self):
+        # the CI/CD review's gap: a fine-grained token got only S-ENTROPY
+        self.assertEqual(found(".env", f"GH_PAT={PAT}\n"), [("S-TOKEN", 1)])
+        got = core.scan_file("x.py", f'GH = "{PAT}"\n', "py")
+        self.assertIn(("S-TOKEN", "BLOCKER"), {(i["rule"], i["sev"]) for i in got})
+        self.assertTrue(all(PAT not in json.dumps(i) for i in got), "a snippet shows the token")
+        # not the token's form: no S-TOKEN (the redaction list still reads it)
+        for other in (PAT.replace("_", "x").replace("githubxpatx", "github_pat_"), PAT[:-1]):
+            with self.subTest(other=other):
+                self.assertNotIn("S-TOKEN", [r for r, _ in found(".env", f"GH_PAT={other}\n")])
 
     def test_documentation_tokens_are_not_reported(self):
         jwt_io = ("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9." + C.JWT_IO_PAYLOAD

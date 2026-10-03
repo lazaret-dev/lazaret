@@ -16,7 +16,7 @@ import unittest
 
 from tests.architecture.test_js_parity import DERIVED, NODE, both, derived, issue_key, NPM_READY, NPM_SKIP
 from tests.architecture.test_js_parity_lexing import write_tree
-from tests.scanner.test_config_secrets import PASS, QUIET, REPORTED, TOKEN
+from tests.scanner.test_config_secrets import PASS, PAT, QUIET, REPORTED, TOKEN
 
 TREE = {}
 for n, line in enumerate(REPORTED):
@@ -31,6 +31,7 @@ TREE.update({
     "forms/prod.tfvars": f'db_password = "{PASS}"\n',
     "forms/.pypirc": f"[pypi]\nusername = __token__\npassword = pypi-{PASS}{PASS}\n",
     "forms/run.sh": f"#!/bin/sh\ncurl -H 'Authorization: token {TOKEN}' https://api.invalid\n",
+    "forms/gh.env": f"GH_PAT={PAT}\nGH_PAT_SHORT={PAT[:-1]}\n",
     "markers/.env": (f"A_TOKEN={PASS}  # nosec\nB_TOKEN={TOKEN}  # lazaret-ignore: S-SECRET\n"
                      f"# lazaret-ignore\nC_PASSWORD={PASS}\nD_PASSWORD={PASS} LABEL=\"# nosec\"\n"
                      f"E_PASSWORD={PASS} ; nosec\n"),
@@ -72,6 +73,8 @@ class ConfigParityTests(unittest.TestCase):
         self.assertEqual({f for f in by_file if f.startswith("quiet/")}, set())
         self.assertEqual(by_file["markers/.env"], {("S-TOKEN", 2), ("S-SECRET", 5), ("S-SECRET", 6)})
         self.assertEqual(by_file["comments/app.yaml"], {("S-TOKEN", 2)})
+        self.assertIn(("S-TOKEN", 1), by_file["forms/gh.env"])
+        self.assertNotIn(("S-TOKEN", 2), by_file["forms/gh.env"])
         self.assertEqual(by_file["crlf/.env"], {("S-SECRET", 1)})
         self.assertIn(("S-SECRET", 1), by_file["bom/app.yaml"])
         self.assertIn(("S-SECRET", 1), by_file["utf16/app.yaml"])

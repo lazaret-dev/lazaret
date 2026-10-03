@@ -352,6 +352,11 @@ before the release.
 
 ### Fixed
 
+- **S-TOKEN missed GitHub's fine-grained tokens.** A `github_pat_…` token
+  (22 and 59 characters around an underscore) got only S-ENTROPY (MAJOR),
+  though secret redaction already knew it; it is S-TOKEN (BLOCKER) in
+  source and config files, in both packages and the dashboard (the CI/CD
+  review's gap). Rule set 2.20.0.
 - A file's decoded view that the work budget cut short was remembered for
   the file's next call (the install-script test, the import-time test and
   the string-array test read it in turn), which could then answer from the
