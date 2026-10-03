@@ -73,7 +73,7 @@ import urllib.request
 
 from lazaret.scanner import core as lazaret
 from lazaret.scanner import sca, timings
-from lazaret.registry import pmsettings, repo
+from lazaret.registry import keepalive as keepalive_, pmsettings, repo
 
 #: Releases younger than this are held back or blocked (--min-age).
 DEFAULT_MIN_AGE = 2 * 86400
@@ -204,11 +204,17 @@ class Fetcher:
     is taken out of it and sent to its host alone; messages show URLs
     without it."""
 
-    def __init__(self, hosts, http_hosts=(), auth=None):
+    def __init__(self, hosts, http_hosts=(), auth=None, keepalive=False):
         self.hosts = {h.lower() for h in hosts if h}
         self.http_hosts = {h.lower() for h in http_hosts if h}
         self.auth = auth if auth is not None else pmsettings.Credentials()
         self.lock = threading.Lock()
+        self.pool = keepalive_.Pool() if keepalive else None
+
+    def close(self):
+        """Close the connections kept for reuse (a fetcher without them has none)."""
+        if self.pool is not None:
+            self.pool.close()
 
     def allow(self, url):
         """Let the fetcher reach url's host too."""
@@ -265,28 +271,72 @@ class Fetcher:
             handlers.append(urllib.request.ProxyHandler({}))      # never through a proxy
         return urllib.request.build_opener(*handlers)
 
+    def _http_error(self, code, clean, req):
+        hint = ""
+        if code in (401, 403):
+            if self.auth.withheld(clean):
+                hint = " (its credentials are sent over https only)"
+            elif not req.has_header("Authorization"):
+                hint = " (the package manager's settings give no credentials for this registry)"
+        err = repo.FetchError(f"HTTP {code} fetching {clean}{hint}")
+        err.status = code
+        return err
+
     def open(self, url, accept=None, timeout=repo.DOWNLOAD_TIMEOUT):
         """The open response for url (the caller closes it); FetchError."""
         self.check(url)
         req, clean = self.request(url, accept)
+        if self.pool is not None:
+            try:
+                return self._open_kept(req, clean, timeout)
+            except keepalive_.Unsupported:
+                pass                                        # a proxy or URL the pool does not carry: urllib, as before
         try:
             with timings.span("network", "request"):
                 return self._opener(clean).open(req, timeout=timeout)
         except urllib.error.HTTPError as exc:
             exc.close()
-            hint = ""
-            if exc.code in (401, 403):
-                if self.auth.withheld(clean):
-                    hint = " (its credentials are sent over https only)"
-                elif not req.has_header("Authorization"):
-                    hint = " (the package manager's settings give no credentials for this registry)"
-            err = repo.FetchError(f"HTTP {exc.code} fetching {clean}{hint}")
-            err.status = exc.code
-            raise err from None
+            raise self._http_error(exc.code, clean, req) from None
         except urllib.error.URLError as exc:
             raise repo.FetchError(f"URL error fetching {clean}: {exc.reason}") from exc
         except OSError as exc:
             raise repo.FetchError(f"network error fetching {clean}: {exc}") from exc
+
+    def _open_kept(self, req, clean, timeout):
+        """The same request through the pool's connections. Redirects are followed here, by the rules of
+        `_opener`: at most repo.MAX_REDIRECTS, each target checked by `check`, and a hop carries the headers
+        but only the credentials of its own URL."""
+        url, headers, visited = clean, dict(req.header_items()), {}
+        while True:
+            via = None if _is_loopback(urllib.parse.urlsplit(url).hostname) else keepalive_.proxy_for(url)
+            try:
+                with timings.span("network", "request"):
+                    resp = self.pool.request(url, headers, timeout, via)
+            except (OSError, http.client.HTTPException, UnicodeError) as exc:
+                raise repo.FetchError(f"network error fetching {clean}: {exc}") from exc
+            code = resp.status
+            if 200 <= code < 300:
+                return resp
+            resp.drain()
+            resp.close()
+            location = resp.headers.get("Location") if code in (301, 302, 303, 307, 308) else None
+            if not location:
+                raise self._http_error(code, clean, req)
+            target = urllib.parse.urlsplit(location)
+            if not target.path and target.netloc:
+                target = target._replace(path="/")
+            target = urllib.parse.urldefrag(urllib.parse.urljoin(url, urllib.parse.urlunsplit(target)))[0]
+            try:
+                self.check(target)
+            except repo.FetchError as exc:
+                raise repo.FetchError(f"URL error fetching {clean}: redirect blocked: {exc}") from exc
+            visited[target] = visited.get(target, 0) + 1
+            if visited[target] > 4 or len(visited) > repo.MAX_REDIRECTS:
+                raise self._http_error(code, clean, req)
+            url, headers = target, dict(req.headers)        # (the first request's own credentials stay behind)
+            header = self.auth.header(target)
+            if header:
+                headers["Authorization"] = header
 
     def fetch(self, url, max_bytes=repo.MAX_DOWNLOAD_BYTES, accept=None, timeout=repo.DOWNLOAD_TIMEOUT):
         """-> (body, response headers)."""
@@ -306,6 +356,8 @@ class Fetcher:
                         buf.extend(chunk)
                         if len(buf) > max_bytes:
                             raise repo.FetchError(too_big)
+                if length and length.isdigit() and len(buf) != int(length):
+                    raise repo.FetchError(f"incomplete response ({len(buf)} of {length} bytes): {clean}")
                 return bytes(buf), r.headers
             except (OSError, http.client.HTTPException) as exc:
                 raise repo.FetchError(f"network error fetching {clean}: {exc}") from exc
@@ -897,6 +949,7 @@ class Context:
 
     def __init__(self, opts, out=None):
         self.opts = opts
+        self.keepalive = bool(getattr(opts, "keepalive", False))
         self.min_age = opts.min_age
         self.started = now()
         self.cutoff = self.started - datetime.timedelta(seconds=self.min_age) if self.min_age else None
@@ -1125,11 +1178,14 @@ def check_lock_entries(ctx, entries, registries, installed, label, env=None, rew
         todo[key] = {"name": e["name"], "version": e["version"], "tarball": url, "integrity": e["integrity"],
                      "registry": registries.for_name(e["name"]), "lock_digest": e.get("lock_digest")}
     fetcher = Fetcher({netloc(u) for u in registries.all()} | {netloc(p["tarball"]) for p in todo.values()},
-                      http_hosts=http_hosts, auth=registries.creds)
+                      http_hosts=http_hosts, auth=registries.creds, keepalive=ctx.keepalive)
     other = f"; {plural(ctx.skipped_platform, 'package')} for other platforms left out" \
         if ctx.skipped_platform else ""
     ctx.say(f"lazaret guard: {plural(len(todo), 'package')} to check ({label}{other})")
-    run_all([lambda p=p: check_npm_package(ctx, fetcher, p) for p in todo.values()])
+    try:
+        run_all([lambda p=p: check_npm_package(ctx, fetcher, p) for p in todo.values()])
+    finally:
+        fetcher.close()
     if ctx.blocked():
         return EXIT_BLOCKED
     return EXIT_OK if ctx.opts.plan else None
@@ -2380,7 +2436,7 @@ def _check_uv(ctx, exe, sub, args, env, root, lock, installed):
     urls = [f["url"] for p in todo for f in ([p["sdist"]] if p["sdist"] else []) + p["wheels"]]
     creds = pmsettings.index_credentials(indexes, env, hosts=urls)
     http_hosts = {netloc(i.url) for i in indexes if i.url.startswith("http://")}
-    fetcher = Fetcher({"pypi.org"}, http_hosts=http_hosts, auth=creds)
+    fetcher = Fetcher({"pypi.org"}, http_hosts=http_hosts, auth=creds, keepalive=ctx.keepalive)
     jobs = []
     for p in todo:
         if p["source"] != "registry":
@@ -2395,7 +2451,10 @@ def _check_uv(ctx, exe, sub, args, env, root, lock, installed):
             fetcher.allow(f["url"])
             jobs.append(lambda p=p, f=f: check_file(ctx, fetcher, p["name"], p["version"], f))
     ctx.say(f"lazaret guard: {plural(len(todo), 'package')} to check (uv.lock)")
-    run_all(jobs)
+    try:
+        run_all(jobs)
+    finally:
+        fetcher.close()
     if ctx.blocked():
         return EXIT_BLOCKED, new
     return (EXIT_OK if ctx.opts.plan else None), new
@@ -2519,7 +2578,8 @@ class LocalIndex:
     def __init__(self, ctx, indexes, merge, creds):
         self.spool = tempfile.mkdtemp(prefix="lazaret-guard-")
         http_hosts = {netloc(i.url) for i in indexes if i.url.startswith("http://")}
-        fetcher = Fetcher({netloc(i.url) for i in indexes}, http_hosts=http_hosts, auth=creds)
+        fetcher = Fetcher({netloc(i.url) for i in indexes}, http_hosts=http_hosts, auth=creds, keepalive=ctx.keepalive)
+        self.fetcher = fetcher
         self.index = PypiIndex(ctx, fetcher, self.spool, indexes=indexes, merge=merge)
         self.server = make_index_server(self.index)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
@@ -2532,6 +2592,7 @@ class LocalIndex:
     def __exit__(self, *exc):
         self.server.shutdown()
         self.server.server_close()
+        self.fetcher.close()
         shutil.rmtree(self.spool, ignore_errors=True)
 
     def tool_env(self, env, uv):
@@ -3065,6 +3126,9 @@ def build_parser():
                     help="pip: install the files that were scanned, from a folder, instead of resolving and "
                          "downloading again (needs wheels only; otherwise pip goes through the index as usual)")
     ap.add_argument("--json", metavar="PATH", help="write what was checked, as JSON")
+    ap.add_argument("--keepalive", action="store_true",
+                    help="reuse connections between the guard's requests (experimental: with --timings, compare "
+                         "the network lines with and without it)")
     ap.add_argument("--timings", action="store_true",
                     help="say on stderr (and in --json) where the time went: the network, the scans, the package "
                          "manager, the rest")
