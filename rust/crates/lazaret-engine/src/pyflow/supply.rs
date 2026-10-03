@@ -3164,8 +3164,8 @@ mod tests {
         assert_eq!(sent(&format!("{}{}", head, post("os.environ.get('CI')"))), None);
         let selected = format!("{}opts = {{k: v for k, v in os.environ.items() if k.startswith('X_')}}\n{}", head, post("opts"));
         assert_eq!(sent(&selected), None);
-        let secrets = format!("{}opts = {{k: v for k, v in os.environ.items() if 'TOKEN' in k}}\n{}", head, post("opts"));
-        assert_eq!(sent(&secrets), found("environment", "the whole environment"));
+        let by_name = format!("{}opts = {{k: v for k, v in os.environ.items() if 'TOKEN' in k}}\n{}", head, post("opts"));
+        assert_eq!(sent(&by_name), found("environment", "the whole environment"));
         assert_eq!(sent("import os, subprocess\nsubprocess.run(['curl', 'https://x.invalid'], env=dict(os.environ))\n"), None);
         // a local name environ is not the environment
         assert_eq!(sent(&format!("import requests\nenviron = {{}}\n{}", post("str(environ)"))), None);

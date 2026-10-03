@@ -48,11 +48,14 @@ def text_sinks():
     """The sink names `_DECODE_SINK_RE` alternates, `(?:A|B)?` expanded."""
     with open(PACK, encoding="utf-8") as f:
         pattern = json.load(f)["values"]["_DECODE_SINK_RE"]["re"]
-    group = re.search(r"\(\?<!\[\\w\$\]\)\(([^()]*(?:\(\?:[^()]*\)\??[^()]*)*)\)\\s\*\\\($", pattern)
-    if group is None:
+    # the sinks are the pattern's last group, `(?<![\w$])(eval|exec|…)\s*\(` at its end
+    prefix, suffix = "(?<![\\w$])(", ")\\s*\\("
+    start = pattern.rfind(prefix) + len(prefix)
+    end = len(pattern) - len(suffix)
+    if start < len(prefix) or not pattern.endswith(suffix) or start > end:
         raise AssertionError(f"_DECODE_SINK_RE changed shape: {pattern}")
     names, depth, part = [], 0, ""
-    for ch in group.group(1):                       # split on | at the top level
+    for ch in pattern[start:end]:                   # split on | at the top level
         depth += ch == "("
         depth -= ch == ")"
         if ch == "|" and depth == 0:
