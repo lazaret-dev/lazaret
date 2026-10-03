@@ -18,6 +18,7 @@ import zipfile
 from unittest import mock
 
 from lazaret.registry.ecosystems import base, golang
+from lazaret.scanner import gomod
 from tests import _support
 
 SCRIPT = os.path.join(_support.REPO_ROOT, "scripts", "gooracle")
@@ -69,6 +70,11 @@ class SelfOracle:
             except ValueError as problem:
                 return {"ok": False, "err": str(problem)}
             return {"ok": True, "err": "", "module": got["module"], "require": [list(x) for x in got["require"]]}
+        if op == "parsemod":                                  # (what the project reads of its own go.mod; Go refuses an unknown verb)
+            text = text_of(r["hex"])
+            got = gomod.parse(text)
+            return {"ok": True, "err": "", "module": got["module"], "go": got["go"], "require": [list(x) for x in got["require"]],
+                    "replace": [list(x) for x in got["replace"]]}
         if op == "hashzip":
             with open(r["file"], "rb") as fh:
                 blob = fh.read()

@@ -164,6 +164,7 @@ GOMOD_MODS = ["example.com/m", "github.com/a/b", "golang.org/x/net", "gopkg.in/y
               "x.y/v1", '"quoted.com/m"', "`raw.com/m`", "A.com/Upper"]
 GOMOD_VERS = ["v1.2.3", "v0.0.0-20190101000000-abcdefabcdef", "v2.0.0", "v2.0.0+incompatible", "v1.0.0-rc.1", "v3.1.0", "v0.1.0",
               "1.2.3", "v1", "latest", "v1.2.3+meta"]
+GOMOD_DIRS = ["./local", "../x", "/abs/x", ".", "..", ".\\w", "..\\w", "\\srv", "C:\\x", "c:x", "1:x", "local", "x.y/z", "./", "~/x", "@./x"]
 GOMOD_COMMENTS = ["", " // indirect", " // indirect; foo", " // foo", "//x", " // Deprecated: no", " //indirect", "  //\tindirect  "]
 
 
@@ -179,9 +180,11 @@ def gomod_cases(rnd, n):
         if k < 0.55:
             return "require (\n" + "\n".join(rnd.choice(["\t", "  ", ""]) + req() for _ in range(rnd.randint(0, 4))) + "\n)"
         if k < 0.62:
-            return "replace " + rnd.choice(GOMOD_MODS) + " => ./local"
+            return "replace " + quote(rnd.choice(GOMOD_MODS)) + rnd.choice(["", " " + rnd.choice(GOMOD_VERS)]) + rnd.choice([" => ", "=>", " =>"]) + rnd.choice(GOMOD_DIRS) + rnd.choice(["", "", "", " " + rnd.choice(GOMOD_VERS)])
         if k < 0.67:
-            return "replace (\n\t" + rnd.choice(GOMOD_MODS) + " v1.0.0 => " + rnd.choice(GOMOD_MODS) + " v1.0.1\n)"
+            return "replace (\n\t" + "\n\t".join(
+                quote(rnd.choice(GOMOD_MODS)) + rnd.choice(["", " " + rnd.choice(GOMOD_VERS)]) + " => "
+                + quote(rnd.choice(GOMOD_MODS)) + rnd.choice(["", " " + rnd.choice(GOMOD_VERS)]) for _ in range(rnd.randint(1, 3))) + "\n)"
         if k < 0.72:
             return "exclude " + rnd.choice(GOMOD_MODS) + " " + rnd.choice(GOMOD_VERS)
         if k < 0.77:
@@ -328,6 +331,7 @@ def gather(oracle, scale, seed=20261003):
             reqs.append({"op": "checkzip", "module": "example.com/m", "version": "v1.0.0", "file": path})
         data["checkzip"] = oracle.run(reqs)
         data["parsemod"] = oracle.run([{"op": "parsemodlax", "hex": hexof(t)} for t in gomods])
+        data["parsemodstrict"] = oracle.run([{"op": "parsemod", "hex": hexof(t)} for t in gomods])
         reqs = []
         for i, case in enumerate(zips):
             path = os.path.join(tmp, "h%d.zip" % i)
@@ -341,6 +345,7 @@ def gather(oracle, scale, seed=20261003):
 def compare(data):
     """-> (counts by kind, list of mismatches as text)."""
     from lazaret.registry.ecosystems import base, golang
+    from lazaret.scanner import gomod
     eco, h1_of = python_answers(golang, base)
     bad, count = [], collections.Counter()
 
@@ -384,6 +389,16 @@ def compare(data):
         mine = golang.parse_gomod(text)
         if mine["module"] != r.get("module") or [list(x) for x in mine["require"]] != [list(x) for x in (r.get("require") or [])]:
             miss("go.mod", repr(text), (r.get("module"), r.get("require")), (mine["module"], mine["require"]))
+    for text, r in zip(data["gomods"], data["parsemodstrict"]):          # (a project's own go.mod: Parse, every directive)
+        count["go.mod files read as a project's"] += 1
+        if not r["ok"]:
+            continue
+        count["go.mod files Parse accepts"] += 1
+        mine = gomod.parse(text)
+        want = (r.get("module"), r.get("go"), [list(x) for x in (r.get("require") or [])], [list(x) for x in (r.get("replace") or [])])
+        got = (mine["module"], mine["go"], [list(x) for x in mine["require"]], [list(x) for x in mine["replace"]])
+        if want != got:
+            miss("go.mod (Parse)", repr(text), want, got)
     for case, r in zip(data["zips"], data["hashzip"]):
         count["zips"] += 1
         mine = h1_of(zip_of(case))

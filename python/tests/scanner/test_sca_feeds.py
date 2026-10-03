@@ -110,9 +110,57 @@ DJANGO = ghsa("GHSA-dddd-0009-0009", ["CVE-2099-2002"], "Django",
 # no fix yet: every version from 1.0 up
 UNFIXED = ghsa("GHSA-dddd-0010-0010", [], "yaml-thing", [{"introduced": "1.0"}], eco="PyPI")
 
+# Go and crates.io, in the shapes the real exports have (api.osv.dev: GO-2022-0969, GHSA-69cg-p879-7622, RUSTSEC-2020-0071,
+# RUSTSEC-2021-0139): the Go database names the standard library as a package, a version may be a pseudo-version, and a GitHub
+# advisory names import paths; RustSec opens its ranges at `0.0.0-0` and says in `database_specific` what is no flaw.
+GO_NET = {"id": "GO-2099-0001", "aliases": ["CVE-2099-3001", "GHSA-gggg-0011-0011"], "summary": "net/http2 flood",
+          "modified": "2099-01-03T00:00:00Z",
+          "affected": [
+              {"package": {"name": "stdlib", "ecosystem": "Go", "purl": "pkg:golang/stdlib"},
+               "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "1.18.6"}, {"introduced": "1.19.0-0"},
+                                                          {"fixed": "1.19.1"}]}],
+               "ecosystem_specific": {"imports": [{"path": "net/http", "symbols": ["Serve"]}]}},
+              {"package": {"name": "golang.org/x/net", "ecosystem": "Go", "purl": "pkg:golang/golang.org/x/net"},
+               "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "0.0.0-20990101000000-aaaaaaaaaaaa"}]}],
+               "ecosystem_specific": {"imports": [{"path": "golang.org/x/net/http2", "symbols": ["Server.ServeConn"]}]}}],
+          "database_specific": {"review_status": "REVIEWED", "url": "https://pkg.go.dev/vuln/GO-2099-0001"}}
+GHSA_GO_NET = {"id": "GHSA-gggg-0011-0011", "aliases": ["CVE-2099-3001", "GO-2099-0001"], "summary": "http2 Denial of Service",
+               "database_specific": {"severity": "HIGH", "cwe_ids": []},
+               "severity": [{"type": "CVSS_V3", "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H"}],
+               "affected": [{"package": {"name": "golang.org/x/net", "ecosystem": "Go"},
+                             "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"},
+                                                                       {"fixed": "0.0.0-20990101000000-aaaaaaaaaaaa"}]}]},
+                            {"package": {"name": "golang.org/x/net/http2", "ecosystem": "Go"},
+                             "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"},
+                                                                       {"fixed": "0.0.0-20990101000000-aaaaaaaaaaaa"}]}]}]}
+GO_UPPER = {"id": "GO-2099-0002", "summary": "a module whose path has capitals", "modified": "2099-01-03T00:00:00Z",
+            "affected": [{"package": {"name": "github.com/Example/Lib/v2", "ecosystem": "Go"},
+                          "ranges": [{"type": "SEMVER", "events": [{"introduced": "2.0.0"}, {"fixed": "2.3.1"}]}]}]}
+GO_TOOLCHAIN = {"id": "GO-2099-0003", "summary": "the go command", "modified": "2099-01-03T00:00:00Z",
+                "affected": [{"package": {"name": "toolchain", "ecosystem": "Go"},
+                              "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "1.21.1"}]}]}]}
+RUSTSEC_TIME = {"id": "RUSTSEC-2099-0001", "aliases": ["CVE-2099-4001"], "summary": "Potential segfault in the time crate",
+                "modified": "2099-01-03T00:00:00Z",
+                "severity": [{"type": "CVSS_V3", "score": "CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H"}],
+                "affected": [{"package": {"name": "time", "ecosystem": "crates.io", "purl": "pkg:cargo/time"},
+                              "ranges": [{"type": "SEMVER", "events": [
+                                  {"introduced": "0.0.0-0"}, {"fixed": "0.2.0"}, {"introduced": "0.2.1-0"}, {"fixed": "0.2.23"}]}],
+                              "database_specific": {"categories": ["memory-corruption"], "informational": None}}],
+                "database_specific": {"license": "CC0-1.0"}}
+RUSTSEC_UNMAINTAINED = {"id": "RUSTSEC-2099-0002", "summary": "ansi_term is Unmaintained",
+                        "affected": [{"package": {"name": "ansi_term", "ecosystem": "crates.io"},
+                                      "ranges": [{"type": "SEMVER", "events": [{"introduced": "0.0.0-0"}]}],
+                                      "database_specific": {"informational": "unmaintained"}}]}
+RUSTSEC_UNSOUND = {"id": "RUSTSEC-2099-0003", "summary": "Some_Crate is unsound", "modified": "2099-01-03T00:00:00Z",
+                   "affected": [{"package": {"name": "Some_Crate", "ecosystem": "crates.io"},
+                                 "ranges": [{"type": "SEMVER", "events": [{"introduced": "0.0.0-0"}, {"fixed": "1.2.3"}]}],
+                                 "database_specific": {"informational": "unsound"}}]}
+
 NPM_RECORDS = [LODASH, VITE, MAL_TYPO, MAL_HIJACK, GHSA_HIJACK, MAL_CONFUSION, BABEL, WITHDRAWN,
                MAVEN, SHARED]
 PYPI_RECORDS = [PYSEC_URLLIB3, GHSA_URLLIB3, DJANGO, UNFIXED, SHARED]
+GO_RECORDS = [GO_NET, GHSA_GO_NET, GO_UPPER, GO_TOOLCHAIN]
+CRATES_RECORDS = [RUSTSEC_TIME, RUSTSEC_UNMAINTAINED, RUSTSEC_UNSOUND]
 
 KEV_DOC = {"title": "CISA Catalog of Known Exploited Vulnerabilities", "catalogVersion": "2099.01.06",
            "dateReleased": "2099-01-06T12:00:00.000Z", "count": 3, "vulnerabilities": [
@@ -154,6 +202,8 @@ class Feeds(unittest.TestCase):
         write_zip(os.path.join(self.dir, "npm", "all.zip"), NPM_RECORDS,
                   extra=[("broken.json", "{not json"), ("README.txt", "not a record")])
         write_zip(os.path.join(self.dir, "PyPI", "all.zip"), PYPI_RECORDS)
+        write_zip(os.path.join(self.dir, "Go", "all.zip"), GO_RECORDS)
+        write_zip(os.path.join(self.dir, "crates.io", "all.zip"), CRATES_RECORDS)
         with open(os.path.join(self.dir, "kev.json"), "w", encoding="utf-8") as fh:
             json.dump(KEV_DOC, fh)
         write_epss(os.path.join(self.dir, "epss.csv.gz"))
@@ -351,6 +401,119 @@ class RecordTests(unittest.TestCase):
                          ("_x", "pypi"), ("x_", "pypi"), ("a b", "pypi"), ("é", "pypi")]:
             with self.subTest(name=bad):
                 self.assertIsNone(ok(bad, eco))
+
+
+class GoAndCratesRecordTests(unittest.TestCase):
+    def test_a_go_record_names_modules_and_leaves_the_standard_library(self):
+        counts = sca_feeds.Counts()
+        rec = sca_feeds.osv_record(GO_NET, counts)
+        self.assertEqual(rec["packages"], [("go", "golang.org/x/net", [
+            {"toVersion": "0.0.0-20990101000000-aaaaaaaaaaaa", "toInclusive": False}])])
+        self.assertEqual(rec["aliases"], ["CVE-2099-3001", "GHSA-gggg-0011-0011"])
+        self.assertEqual(counts, {})
+        self.assertEqual(counts.notes, {"Go standard library and toolchain entries (not modules; skipped)": 1})
+        self.assertIsNone(sca_feeds.osv_record(GO_TOOLCHAIN, counts))             # nothing else in it: no record
+        self.assertEqual(counts.notes, {"Go standard library and toolchain entries (not modules; skipped)": 2})
+
+    def test_stdlib_and_toolchain_are_only_not_modules_in_go(self):
+        for eco, name in (("crates.io", "stdlib"), ("npm", "toolchain"), ("PyPI", "stdlib")):
+            rec = dict(GO_TOOLCHAIN, affected=[dict(GO_TOOLCHAIN["affected"][0], package={"name": name, "ecosystem": eco})])
+            with self.subTest(ecosystem=eco):
+                self.assertEqual([p[1] for p in sca_feeds.osv_record(rec)["packages"]], [name])
+        for name in ("std", "stdlib/x", "Stdlib", "go"):                           # (only the two names OSV uses)
+            rec = dict(GO_TOOLCHAIN, affected=[dict(GO_TOOLCHAIN["affected"][0], package={"name": name, "ecosystem": "Go"})])
+            with self.subTest(name=name):
+                self.assertEqual([p[1] for p in sca_feeds.osv_record(rec)["packages"]], [name])
+
+    def test_a_pseudo_version_bound_orders_with_the_modules_versions(self):
+        ranges = sca_feeds.osv_record(GO_NET)["packages"][0][2]
+        for version, hit in (("v0.0.0-20980101000000-bbbbbbbbbbbb", True), ("v0.0.0-20990101000000-aaaaaaaaaaaa", False),
+                             ("v0.0.0-20990102000000-aaaaaaaaaaaa", False), ("v0.1.0", False), ("v0.0.0", False),
+                             ("v1.2.3-0.20980101000000-bbbbbbbbbbbb", False)):
+            with self.subTest(version=version):
+                self.assertEqual(affected(version, ranges, "go"), hit)
+
+    def test_go_versions_with_a_prefix_or_incompatible_are_compared(self):
+        ranges = sca_feeds.osv_record(GO_UPPER)["packages"][0][2]
+        for version, hit in (("v2.0.0", True), ("v2.3.0", True), ("v2.3.1", False), ("v1.9.9", False), ("v2.2.0+incompatible", True),
+                             ("v2.3.1+incompatible", False), ("v2.3.1-rc.1", True)):
+            with self.subTest(version=version):
+                self.assertEqual(affected(version, ranges, "go"), hit)
+
+    def test_a_module_path_keeps_its_case(self):
+        rec = sca_feeds.osv_record(GO_UPPER)
+        self.assertEqual([p[1] for p in rec["packages"]], ["github.com/Example/Lib/v2"])
+        both = dict(GO_UPPER, affected=GO_UPPER["affected"] + [
+            {"package": {"name": "github.com/example/lib/v2", "ecosystem": "Go"}, "ranges": []}])
+        self.assertEqual([p[1] for p in sca_feeds.osv_record(both)["packages"]],
+                         ["github.com/Example/Lib/v2", "github.com/example/lib/v2"])      # two modules
+
+    def test_a_rustsec_range_opens_at_a_prerelease(self):
+        rec = sca_feeds.osv_record(RUSTSEC_TIME)
+        self.assertEqual(rec["packages"][0][:2], ("crates", "time"))
+        ranges = rec["packages"][0][2]
+        self.assertEqual(len(ranges), 2)
+        for version, hit in (("0.1.0", True), ("0.2.0-alpha.1", True), ("0.2.0", False), ("0.2.1-0", True), ("0.2.1", True),
+                             ("0.2.22", True), ("0.2.23", False), ("0.3.0", False), ("0.0.0", True)):
+            with self.subTest(version=version):
+                self.assertEqual(affected(version, ranges, "crates"), hit)
+
+    def test_rustsec_entries_that_are_no_flaw_are_left_out(self):
+        counts = sca_feeds.Counts()
+        self.assertIsNone(sca_feeds.osv_record(RUSTSEC_UNMAINTAINED, counts))
+        self.assertEqual(counts.notes, {"RustSec informational entries (unmaintained or notice; not vulnerabilities; skipped)": 1})
+        self.assertEqual(counts, {})
+        for kind, kept in (("notice", False), ("unmaintained", False), ("unsound", True), (None, True), ("future", True), ("", True),
+                           (["unmaintained"], True)):
+            rec = copy.deepcopy(RUSTSEC_UNMAINTAINED)
+            rec["affected"][0]["database_specific"]["informational"] = kind
+            with self.subTest(informational=kind):
+                self.assertEqual(sca_feeds.osv_record(rec) is not None, kept)
+        rec = copy.deepcopy(RUSTSEC_UNMAINTAINED)
+        del rec["affected"][0]["database_specific"]
+        self.assertIsNotNone(sca_feeds.osv_record(rec))                               # (no word on it: a vulnerability)
+        rec["affected"][0]["database_specific"] = "unmaintained"
+        self.assertIsNotNone(sca_feeds.osv_record(rec))
+        for eco in ("Go", "npm", "PyPI"):                                             # (a RustSec word in another ecosystem's record)
+            other = copy.deepcopy(LODASH)
+            other["affected"][0]["package"]["ecosystem"] = eco
+            other["affected"][0]["database_specific"] = {"informational": "unmaintained"}
+            self.assertIsNotNone(sca_feeds.osv_record(other), eco)
+
+    def test_a_crate_name_is_as_written_and_one_name_with_underscores_or_hyphens(self):
+        rec = sca_feeds.osv_record(RUSTSEC_UNSOUND)
+        self.assertEqual(rec["packages"][0][:2], ("crates", "Some_Crate"))
+        both = copy.deepcopy(RUSTSEC_UNSOUND)
+        both["affected"].append({"package": {"name": "some-crate", "ecosystem": "crates.io"},
+                                 "ranges": [{"type": "SEMVER", "events": [{"introduced": "2.0.0"}]}]})
+        got = sca_feeds.osv_record(both)["packages"]
+        self.assertEqual([(p[0], p[1], len(p[2])) for p in got], [("crates", "Some_Crate", 2)])        # (crates.io holds one of the two)
+
+    def test_names(self):
+        ok = sca_feeds._package_name
+        for name in ("github.com/a/b", "golang.org/x/net", "gopkg.in/yaml.v3", "github.com/A/b/v2", "k8s.io/api", "x.y/z~1", "a+b/c"):
+            self.assertEqual(ok(name, "go"), name)
+        for name in ("", "/a", ".a", "-a", "a b", "a\nb", "é.example/x", "a" * 215, "a\\b"):
+            self.assertIsNone(ok(name, "go"), name)
+        for name in ("time", "serde_json", "Some_Crate", "a-b", "_x", "x" * 64, "0x"):
+            self.assertEqual(ok(name, "crates"), name)
+        for name in ("", "-x", "a.b", "a/b", "a b", "é", "a" * 215):
+            self.assertIsNone(ok(name, "crates"), name)
+        for ecosystem in ("go", "crates"):
+            self.assertEqual(ok("a" * 214, ecosystem), "a" * 214)              # (the longest name there is: 214)
+            self.assertIsNone(ok("a" * 215, ecosystem))
+
+    def test_versions_are_bounded(self):
+        for n, kept in ((128, True), (129, False)):
+            v = "v1.0.0-" + "a" * (n - 7)
+            self.assertEqual(len(v), n)
+            got = sca_feeds.osv_intervals([{"introduced": "0"}, {"fixed": v}], "go")
+            self.assertEqual(got, [{"toVersion": v, "toInclusive": False}] if kept else [{}], n)        # (an event too long is not read)
+
+    def test_a_github_advisory_names_import_paths_too(self):
+        rec = sca_feeds.osv_record(GHSA_GO_NET)
+        self.assertEqual([p[1] for p in rec["packages"]], ["golang.org/x/net", "golang.org/x/net/http2"])
+        self.assertEqual((rec["label"], rec["cvss"]), ("high", 7.5))
 
 
 # ---------------------------------------------------------------------------
@@ -554,10 +717,10 @@ class GroupingTests(unittest.TestCase):
     def test_the_advisory_name(self):
         rank = sca_feeds._id_rank
         ids = ["MAL-2099-1", "PYSEC-2099-1", "GHSA-zzzz-zzzz-zzzz", "CVE-2099-10000", "CVE-2099-9999",
-               "OSV-2099-1"]
+               "OSV-2099-1", "CVE-2098-99999", "RUSTSEC-2099-1", "GO-2099-1"]
         self.assertEqual(sorted(ids, key=rank),
-                         ["CVE-2099-9999", "CVE-2099-10000", "GHSA-zzzz-zzzz-zzzz", "PYSEC-2099-1",
-                          "MAL-2099-1", "OSV-2099-1"])
+                         ["CVE-2098-99999", "CVE-2099-9999", "CVE-2099-10000", "GHSA-zzzz-zzzz-zzzz", "PYSEC-2099-1",
+                          "MAL-2099-1", "GO-2099-1", "RUSTSEC-2099-1", "OSV-2099-1"])
 
     def test_merged_advisory(self):
         kev, _ = sca_feeds.read_kev(json.dumps(KEV_DOC).encode())
@@ -594,17 +757,25 @@ class BuildTests(Feeds):
     def test_the_bundle(self):
         doc, counts = self.build(now=sca_feeds._utc_now())
         self.assertEqual(doc["bundleVersion"], 1)
-        self.assertEqual(doc["sources"], ["osv:npm", "osv:pypi", "cisa-kev", "epss"])
+        self.assertEqual(doc["sources"], ["osv:npm", "osv:pypi", "osv:go", "osv:crates", "cisa-kev", "epss"])
         self.assertTrue(doc["generator"].startswith("lazaret-sca "))
         self.assertEqual(len(doc["attribution"]), 3)                  # OSV sources, KEV, EPSS
         self.assertEqual(counts, {"OSV records that are not valid JSON (skipped)": 1})
         advs = self.by_id(doc)
         self.assertEqual(sorted(advs), [
             "CVE-2099-1001", "CVE-2099-1002", "CVE-2099-1004", "CVE-2099-1007", "CVE-2099-2001",
-            "CVE-2099-2002", "GHSA-dddd-0010-0010", "GHSA-mmmm-0003-0003", "MAL-2099-0001",
-            "MAL-2099-0003"])
-        self.assertEqual(doc["counts"], {"advisories": 10, "packages": 11, "withRanges": 11,
+            "CVE-2099-2002", "CVE-2099-3001", "CVE-2099-4001", "GHSA-dddd-0010-0010", "GHSA-mmmm-0003-0003",
+            "GO-2099-0002", "MAL-2099-0001", "MAL-2099-0003", "RUSTSEC-2099-0003"])
+        self.assertEqual(doc["counts"], {"advisories": 14, "packages": 16, "withRanges": 16,
                                          "knownExploited": 2, "malicious": 3})
+        self.assertEqual([(p["ecosystem"], p["name"]) for p in advs["CVE-2099-3001"]["packages"]],        # (GO- and GHSA- records: one)
+                         [("go", "golang.org/x/net"), ("go", "golang.org/x/net/http2")])
+        self.assertEqual(advs["CVE-2099-3001"]["aliases"], ["GHSA-gggg-0011-0011", "GO-2099-0001"])
+        self.assertEqual(advs["CVE-2099-3001"]["sources"], ["osv:ghsa", "osv:go"])
+        self.assertEqual((advs["CVE-2099-3001"]["severity"], advs["CVE-2099-3001"]["cvss"]), ("high", 7.5))
+        self.assertEqual(advs["CVE-2099-4001"]["packages"][0]["ecosystem"], "crates")
+        self.assertEqual(advs["RUSTSEC-2099-0003"]["packages"][0]["name"], "Some_Crate")
+        self.assertEqual(advs["GO-2099-0002"]["sources"], ["osv:go"])
         self.assertTrue(advs["CVE-2099-1002"]["knownExploited"])      # KEV id was lowercase
         self.assertNotIn("epss", advs["CVE-2099-1002"])               # out-of-range score dropped
         shared = advs["CVE-2099-1007"]["packages"]                    # in both exports: once
@@ -612,12 +783,13 @@ class BuildTests(Feeds):
                          [("npm", "shared-lib"), ("pypi", "shared_lib")])
         feeds = doc["feeds"]
         self.assertEqual(feeds["cisa-kev"]["url"], self.kev)
-        self.assertEqual([e["ecosystems"] for e in feeds["osv"]["exports"]], [["npm"], ["PyPI"]])
+        self.assertEqual([e["ecosystems"] for e in feeds["osv"]["exports"]], [["npm"], ["PyPI"], ["Go"], ["crates.io"]])
+        self.assertEqual([(e["records"], e["keptRecords"]) for e in feeds["osv"]["exports"]], [(10, 8), (5, 5), (4, 3), (3, 2)])
         self.assertEqual(feeds["osv"]["newestModified"], "2099-01-04T00:00:00Z")
         self.assertEqual(feeds["epss"]["modelVersion"], "v2099.01.01")
         loaded = sca.CveBundle(doc)                                   # what lazaret-sca reads
         self.assertEqual(loaded.warnings.lines(), [])
-        self.assertEqual(len(loaded.advisories), 10)
+        self.assertEqual(len(loaded.advisories), 14)
 
     def test_deterministic(self):
         now = sca_feeds._utc_now()
@@ -627,14 +799,14 @@ class BuildTests(Feeds):
         self.assertEqual(first["advisories"], second["advisories"])
 
     def test_one_combined_archive(self):
-        write_zip(self.path("all.zip"), NPM_RECORDS + [r for r in PYPI_RECORDS if r is not SHARED])
+        write_zip(self.path("all.zip"), NPM_RECORDS + [r for r in PYPI_RECORDS if r is not SHARED] + GO_RECORDS + CRATES_RECORDS)
         doc, _ = self.build(osv_url=self.path("all.zip"))
         self.assertEqual(len(doc["feeds"]["osv"]["exports"]), 1)
-        self.assertEqual(doc["counts"]["advisories"], 10)
+        self.assertEqual(doc["counts"]["advisories"], 14)
 
     def test_without_epss(self):
         doc, _ = self.build(epss_url=None)
-        self.assertEqual(doc["sources"], ["osv:npm", "osv:pypi", "cisa-kev"])
+        self.assertEqual(doc["sources"], ["osv:npm", "osv:pypi", "osv:go", "osv:crates", "cisa-kev"])
         self.assertFalse(any("epss" in a for a in doc["advisories"]))
         self.assertFalse(any("EPSS" in line for line in doc["attribution"]))
 
@@ -662,7 +834,22 @@ class BuildTests(Feeds):
         write_zip(self.path("all.zip"), [LODASH, MAVEN])                 # one archive, npm only
         with self.assertRaises(sca_feeds.FeedError) as cm:
             self.build(osv_url=self.path("all.zip"))
-        self.assertIn("no pypi advisories", str(cm.exception))
+        self.assertIn("no pypi or go or crates advisories", str(cm.exception))
+
+    def test_a_go_or_crates_export_with_no_module_or_crate_is_refused(self):
+        """An export of the Go database that holds only the standard library (or the other ecosystems' records) would
+        clear every Go module: refused, as an empty one is."""
+        for export, records, want in (("Go", [GO_TOOLCHAIN], "no go advisories"), ("Go", [LODASH], "no go advisories"),
+                                      ("crates.io", [RUSTSEC_UNMAINTAINED], "no crates advisories"),
+                                      ("crates.io", [GO_UPPER], "no crates advisories")):
+            with self.subTest(export=export, records=[r["id"] for r in records]):
+                write_zip(self.path(export, "all.zip"), records)
+                with self.assertRaises(sca_feeds.FeedError) as cm:
+                    self.build()
+                self.assertIn(want, str(cm.exception))
+                self.assertIn(export, str(cm.exception))
+            write_zip(self.path("Go", "all.zip"), GO_RECORDS)
+            write_zip(self.path("crates.io", "all.zip"), CRATES_RECORDS)
 
     def test_damaged_archives(self):
         with open(self.path("npm", "all.zip"), "rb") as fh:
@@ -778,7 +965,7 @@ class ExactMatchingTests(unittest.TestCase):
     def test_exact_needs_an_ecosystem(self):
         b = bundle_of({"name": "lodash", "ecosystem": "maven", "exact": True, "ranges": []})
         self.assertEqual(b.warnings.lines(),
-                         ["1 exact package entries without an npm/pypi ecosystem (matched by name)"])
+                         ["1 exact package entries without a known ecosystem (matched by name)"])
         self.assertEqual(self.hits(b, "lodash", "npm"), 1)
 
     def test_every_version_affected_needs_no_version(self):
@@ -832,11 +1019,13 @@ class CliTests(Feeds):
     def test_update(self):
         rc, out, err = self.update()
         self.assertEqual(rc, 0, err)
-        self.assertIn("10 advisories", out)
+        self.assertIn("14 advisories", out)
         self.assertIn("OSV records that are not valid JSON (skipped): 1", err)
+        self.assertIn("note: Go standard library and toolchain entries (not modules; skipped): 2", out)
+        self.assertIn("note: RustSec informational entries (unmaintained or notice; not vulnerabilities; skipped): 1", out)
         with open(self.out, encoding="utf-8") as fh:
             doc = json.load(fh)
-        self.assertEqual(doc["counts"]["advisories"], 10)
+        self.assertEqual(doc["counts"]["advisories"], 14)
         self.assertEqual(sca.CveBundle.load(self.out).warnings.lines(), [])
         rc, out, _ = self.update("-q")                                  # replaces its own bundle
         self.assertEqual(rc, 0)

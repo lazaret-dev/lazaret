@@ -40,7 +40,7 @@ driver = _support.load_script(os.path.join(FUZZ, "fuzz.py"), "fuzz_driver")
 EXPECTED_TARGETS = ["archive-tgz", "archive-tbz2", "archive-txz", "archive-zip", "xml", "xml-minidom",
                     "sca-package-lock-json", "sca-yarn-lock", "sca-pnpm-lock-yaml", "sca-bun-lock", "sca-poetry-lock",
                     "sca-uv-lock", "sca-pylock-toml", "sca-pipfile-lock", "sca-requirements-txt", "sca-pyproject-toml",
-                    "sca-setup-py", "sca-bundle-index", "sca-bundle-doc", "crates-index", "crates-manifest", "go-zip", "go-mod", "go-sumdb",
+                    "sca-setup-py", "sca-go-mod", "sca-go-sum", "sca-vendor-modules-txt", "sca-cargo-lock", "sca-cargo-toml", "sca-bundle-index", "sca-bundle-doc", "crates-index", "crates-manifest", "go-zip", "go-mod", "go-sumdb",
                     "go-resolve", "ecosystem-names", "ecosystem-member-path"]
 
 
@@ -663,6 +663,16 @@ class PromisesAreLive(unittest.TestCase):
             run(b"x")
         return raised.exception.rule
 
+    def sca_passes(self, answer):
+        from lazaret.scanner import sca
+
+        def scan_all(root, extra_site_packages=None, warn=None):
+            return answer
+        run, close = fuzz_targets.TARGETS["sca-yarn-lock"].start()
+        self.addCleanup(close)
+        with mock.patch.object(sca, "scan_all", scan_all):
+            run(b"x")
+
     def test_the_inventory_promises(self):
         from lazaret.scanner import sca
         inv = lambda *entries: sca.Inventory(entries)       # noqa: E731
@@ -673,6 +683,16 @@ class PromisesAreLive(unittest.TestCase):
         self.assertEqual(self.sca(inv(("npm", "a", 1, "w"))), "sca-entry-shape")
         self.assertEqual(self.sca(inv(("npm", "a", "1"))), "sca-entry-shape")
         self.assertEqual(self.sca(inv(("gem", "a", "1", "w"))), "sca-entry-values")
+        for eco in ("go", "crates"):
+            self.sca_passes(inv((eco, "a.example/x", "", "w")))                                   # (a version is optional)
+        self.assertEqual(self.sca(inv(("go", "stdlib", "v1.0.0", "go.mod"))), "sca-go-name")
+        self.assertEqual(self.sca(inv(("go", "std/a.b", "v1.0.0", "go.mod"))), "sca-go-name")
+        self.assertEqual(self.sca(inv(("go", "a.example/x", "1.0.0", "go.mod"))), "sca-go-version")
+        self.assertEqual(self.sca(inv(("go", "a.example/x", "latest", "go.mod"))), "sca-go-version")
+        self.sca_passes(inv(("go", "a.example/x", "v1.2.3+incompatible", "go.mod")))
+        self.sca_passes(inv(("go", "a.example/x", "v1", "go.mod")))                               # (any SemVer the inventory could read)
+        self.sca_passes(inv(("crates", "serde", "1.0.152", "Cargo.lock")))
+        self.sca_passes(inv(("crates", "serde", "anything the lock said", "Cargo.lock")))
         self.assertEqual(self.sca(inv(("npm", "", "1", "w"))), "sca-entry-values")
         self.assertEqual(self.sca(inv(), [(1, 1)]), "sca-warning-shape")
         self.assertEqual(self.sca(inv(), [("kind", "n")]), "sca-warning-shape")

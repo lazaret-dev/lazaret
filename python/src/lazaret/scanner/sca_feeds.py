@@ -7,10 +7,10 @@
 Three public sources, no account or API key:
 
   OSV   the Open Source Vulnerabilities database's per-ecosystem exports
-        (storage.googleapis.com/osv-vulnerabilities/{npm,PyPI}/all.zip):
-        GitHub Security Advisories, the PyPA advisory database and OpenSSF
-        malicious-package reports, with exact package names and
-        affected-version ranges.
+        (storage.googleapis.com/osv-vulnerabilities/{npm,PyPI,Go,crates.io}/all.zip):
+        GitHub Security Advisories, the PyPA advisory database, the Go
+        vulnerability database, RustSec and OpenSSF malicious-package
+        reports, with exact package names and affected-version ranges.
   KEV   CISA's Known Exploited Vulnerabilities catalog (its JSON feed, or
         CISA's GitHub mirror of it when the feed can't be reached).
   EPSS  FIRST's Exploit Prediction Scoring System, the daily scores file.
@@ -31,9 +31,17 @@ ranges, which lazaret-sca reports as SCA-CVE-UNKNOWN, never as clear.
 
 Every package entry is marked "exact": OSV names are package-manager names,
 so an entry only matches its own ecosystem and its own name (PEP 503
-normalized for PyPI, as written for npm). Entries without the mark (CPE
-product names from other bundle producers) keep lazaret-sca's looser
-name matching.
+normalized for PyPI, as written for npm and for a Go module path, lowercase
+with `_` as `-` for a crate). Entries without the mark (CPE product names
+from other bundle producers) keep lazaret-sca's looser name matching; a Go
+module or a crate is never matched that way.
+
+Three kinds of OSV entry name no dependency and are left out, counted as
+notes: the Go standard library and toolchain (`stdlib`, `toolchain`: go.mod
+does not pin them) and RustSec's informational advisories that are not
+vulnerabilities (`unmaintained`, `notice`; `unsound` ones stay). Go and
+RustSec entries are module- and crate-level, as the other ecosystems' are:
+an advisory that is about one function reports every use of the version.
 
 Severity: the CVSS 3.x base score computed from the advisory's vector (4.0
 and 2.0 vectors are not scored) and GitHub's severity label, the higher of
@@ -42,15 +50,15 @@ the two. A malicious-package report (OpenSSF's MAL- records) is marked
 KEV-listed CVE. EPSS is shown with each finding and changes no severity.
 
 An update is all or nothing. Every feed is checked before anything is
-written (a KEV catalog with no CVEs, or an export with no npm or no PyPI
-advisories, is refused), and the bundle goes to a temporary file that is
+written (a KEV catalog with no CVEs, or an export with no advisories for
+its ecosystem, is refused), and the bundle goes to a temporary file that is
 renamed over the old one only when complete, so a failed update leaves the
 previous bundle as it was, and the freshness condition ages it.
 
 URLs are https only, redirects stay on https, and every download has a
 byte budget. A file: URL or a plain path reads a local mirror instead (the
-OSV location takes an {ecosystem} placeholder: npm, PyPI). Standard library
-only.
+OSV location takes an {ecosystem} placeholder: npm, PyPI, Go, crates.io).
+Standard library only.
 """
 import csv
 import datetime as _dt
@@ -76,7 +84,7 @@ from lazaret.scanner import reports as lazaret_report
 from lazaret.scanner import sca
 
 OSV_URL = "https://storage.googleapis.com/osv-vulnerabilities/{ecosystem}/all.zip"
-OSV_ECOSYSTEMS = (("npm", "npm"), ("PyPI", "pypi"))    # OSV's directory name, the bundle's name
+OSV_ECOSYSTEMS = (("npm", "npm"), ("PyPI", "pypi"), ("Go", "go"), ("crates.io", "crates"))   # OSV's directory name, the bundle's name
 KEV_URLS = (
     "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json",
     # CISA's own mirror, updated with the feed (github.com/cisagov/kev-data)
@@ -85,7 +93,9 @@ KEV_URLS = (
 EPSS_URL = "https://epss.empiricalsecurity.com/epss_scores-current.csv.gz"
 ATTRIBUTION = [
     "Advisories from OSV (https://osv.dev): GitHub Advisory Database (CC-BY 4.0), "
-    "PyPA Advisory Database (CC-BY 4.0), OpenSSF Malicious Packages (Apache-2.0)",
+    "PyPA Advisory Database (CC-BY 4.0), Go Vulnerability Database (CC-BY 4.0), "
+    "RustSec Advisory Database (public domain; the advisories it imports from the GitHub Advisory Database CC-BY 4.0), "
+    "OpenSSF Malicious Packages (Apache-2.0)",
     "CISA Known Exploited Vulnerabilities Catalog (public domain), "
     "https://www.cisa.gov/known-exploited-vulnerabilities-catalog",
 ]
@@ -271,13 +281,18 @@ def _cvss_of(severities):
 # OSV records -> bundle fragments
 # ---------------------------------------------------------------------------
 
-_ECOSYSTEM = {"npm": "npm", "pypi": "pypi"}         # OSV ecosystem (lowercased) -> bundle
+_ECOSYSTEM = {"npm": "npm", "pypi": "pypi", "go": "go", "crates.io": "crates"}      # OSV ecosystem (lowercased) -> bundle
 _ID_RE = re.compile(r"\A[A-Za-z][A-Za-z0-9]*-[A-Za-z0-9][A-Za-z0-9._:-]{0,99}\Z")
 _CVE_RE = re.compile(r"\ACVE-(\d{4})-(\d{4,9})\Z")
 _CWE_RE = re.compile(r"\ACWE-\d{1,6}\Z")
 _DATE_RE = re.compile(r"\A(\d{4}-\d{2}-\d{2})")
 _PYPI_NAME_RE = re.compile(r"\A[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?\Z")
 _NPM_NAME_RE = re.compile(r"\A(?:@[^\s/@]+/)?[^\s/@][^\s/]*\Z")
+_GO_NAME_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._~+/-]*\Z")       # a module path, or a package's (a GitHub advisory names those)
+_CRATE_NAME_RE = re.compile(r"\A[A-Za-z0-9_][A-Za-z0-9_-]*\Z")
+_NAME_RE = {"pypi": _PYPI_NAME_RE, "go": _GO_NAME_RE, "crates": _CRATE_NAME_RE}
+_NOT_MODULES = frozenset({"stdlib", "toolchain"})               # Go's own: OSV names the standard library and the go command
+_NOT_VULNERABILITIES = frozenset({"unmaintained", "notice"})    # RustSec's `informational` values that are no flaw in a version
 _MAX_NAME = 214
 _MAX_VERSION = 128
 _LABELS = {"critical": "critical", "high": "high", "moderate": "medium", "medium": "medium",
@@ -315,8 +330,7 @@ def _package_name(value, ecosystem):
     name = value.strip()
     if not name or len(name) > _MAX_NAME or not name.isprintable():
         return None
-    regex = _PYPI_NAME_RE if ecosystem == "pypi" else _NPM_NAME_RE
-    return name if regex.match(name) else None
+    return name if _NAME_RE.get(ecosystem, _NPM_NAME_RE).match(name) else None
 
 
 def _event_order(evs, ecosystem):
@@ -462,7 +476,7 @@ def _dedupe_ranges(ranges):
 
 def osv_record(raw, counts=None):
     """The parts of one OSV record the bundle uses, or None when it names
-    no npm/PyPI package, is withdrawn, or isn't an OSV record."""
+    no package of an ecosystem it reads, is withdrawn, or isn't an OSV record."""
     counts = counts if counts is not None else Counts()
     if not isinstance(raw, dict):
         counts.add("OSV files that are not records (skipped)")
@@ -487,6 +501,14 @@ def osv_record(raw, counts=None):
         name = _package_name(pkg.get("name"), eco)
         if name is None:
             counts.add("affected packages with an unusable name (skipped)")
+            continue
+        if eco == "go" and name in _NOT_MODULES:
+            counts.note("Go standard library and toolchain entries (not modules; skipped)")
+            continue
+        aff_ds = aff.get("database_specific") if isinstance(aff.get("database_specific"), dict) else {}
+        informational = aff_ds.get("informational")
+        if eco == "crates" and isinstance(informational, str) and informational in _NOT_VULNERABILITIES:
+            counts.note("RustSec informational entries (unmaintained or notice; not vulnerabilities; skipped)")
             continue
         entry = packages.setdefault((eco, name_key(name, eco)), [name, []])
         entry[1].extend(affected_ranges(aff, eco, counts))
@@ -788,11 +810,11 @@ def read_epss(fileobj, wanted=None, max_rows=MAX_EPSS_ROWS):
 
 def _id_rank(i):
     """Sort key of a vulnerability id: CVEs first (by year and number),
-    then GHSA, PYSEC, MAL and anything else."""
+    then GHSA, PYSEC, MAL, GO, RUSTSEC and anything else."""
     m = _CVE_RE.match(i)
     if m:
         return (0, int(m.group(1)), int(m.group(2)), i)
-    for n, prefix in enumerate(("GHSA-", "PYSEC-", "MAL-"), 1):
+    for n, prefix in enumerate(("GHSA-", "PYSEC-", "MAL-", "GO-", "RUSTSEC-"), 1):
         if i.startswith(prefix):
             return (n, 0, 0, i)
     return (9, 0, 0, i)
@@ -996,8 +1018,8 @@ def build_bundle(osv_url=OSV_URL, kev_urls=KEV_URLS, epss_url=EPSS_URL, *,
                                 "bundle that would clear every %s dependency"
                                 % (location, " or ".join(missing), " and ".join(missing)))
             exports.append({"url": location, "ecosystems": names, "records": n_read,
-                            "npmPypiRecords": n_kept})
-            log("  OSV:       %s records (%s for npm/PyPI, %s) from %s"
+                            "keptRecords": n_kept})
+            log("  OSV:       %s records (%s kept, %s) from %s"
                 % (format(n_read, ","), format(n_kept, ","), _mib(size), location))
         feeds["osv"] = {"exports": exports, "newestModified": newest}
         groups = group_records(list(records.values()))
@@ -1021,7 +1043,7 @@ def build_bundle(osv_url=OSV_URL, kev_urls=KEV_URLS, epss_url=EPSS_URL, *,
         "bundleVersion": 1,
         "generator": "lazaret-sca %s" % _lazaret_pkg.__version__,
         "generatedAt": _iso(now),
-        "sources": ["osv:npm", "osv:pypi", "cisa-kev"] + (["epss"] if epss_url else []),
+        "sources": ["osv:" + eco for _osv_name, eco in OSV_ECOSYSTEMS] + ["cisa-kev"] + (["epss"] if epss_url else []),
         # the data's own terms travel with it (a bundle is often shared)
         "attribution": ATTRIBUTION + ([EPSS_ATTRIBUTION] if epss_url else []),
         "feeds": feeds,

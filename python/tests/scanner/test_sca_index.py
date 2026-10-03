@@ -489,8 +489,13 @@ class WriterTests(Base):
         self.assertEqual(sca_index.keys_of_package(package("foo", "pypi", False)), ["L\0foo", "L\0py-foo", "L\0python-foo"])
         self.assertEqual(sca_index.keys_of_package(package("python-", None, False)), [])
         self.assertEqual(sca_index.keys_for_lookup("foo", "pypi"), ["L\0foo", "L\0py-foo", "L\0python-foo", "E\0pypi\0foo"])
-        self.assertEqual(sca_index.keys_for_lookup("foo", None)[-2:], ["E\0npm\0foo", "E\0pypi\0foo"])
-        self.assertEqual(sca_index.keys_for_lookup("foo", "maven")[-2:], ["E\0npm\0foo", "E\0pypi\0foo"])
+        every = ["E\0npm\0foo", "E\0pypi\0foo", "E\0go\0foo", "E\0crates\0foo"]
+        self.assertEqual(sca_index.keys_for_lookup("foo", None)[-4:], every)
+        self.assertEqual(sca_index.keys_for_lookup("foo", "maven")[-4:], every)
+        self.assertEqual(sca_index.keys_for_lookup("Foo_Bar", "crates"), ["E\0crates\0foo-bar"])      # (no loose keys: only an exact entry names a crate)
+        self.assertEqual(sca_index.keys_for_lookup("github.com/A/b", "go"), ["E\0go\0github.com/A/b"])
+        self.assertEqual(sca_index.keys_of_package(package("Foo_Bar", "crates")), ["E\0crates\0foo-bar"])
+        self.assertEqual(sca_index.keys_of_package(package("github.com/A/b", "go")), ["E\0go\0github.com/A/b"])
         self.assertEqual(len(sca_index.key_digest("odd\ud800name")), 16)           # a lone surrogate is a name too
 
     def test_the_header(self):
@@ -1100,14 +1105,14 @@ class CliTests(feeds.Feeds):
     def test_update_writes_an_indexed_bundle(self):
         rc, out, err = self.update("--bundle-format", "index")
         self.assertEqual(rc, 0, err)
-        self.assertIn("10 advisories", out)
+        self.assertIn("14 advisories", out)
         self.assertIn("OSV records that are not valid JSON (skipped): 1", err)
         with open(self.out, "rb") as fh:
             self.assertEqual(fh.read(8), b"LZSCAIDX")
         b = sca.CveBundle.load(self.out)
         self.addCleanup(b.close)
-        self.assertEqual((len(b.advisories), b.warnings.lines()), (10, []))
-        self.assertEqual(b.verify()["advisories"], 10)
+        self.assertEqual((len(b.advisories), b.warnings.lines()), (14, []))
+        self.assertEqual(b.verify()["advisories"], 14)
 
     def test_a_scan_reads_the_two_formats_alike(self):
         json_path = self.path("out", "cve-bundle.json")
@@ -1195,8 +1200,8 @@ class CliTests(feeds.Feeds):
             self.assertEqual(sca_index.main(["build", json_path, target]), 0, err.getvalue())
             self.assertEqual(sca_index.main(["check", target]), 0)
             self.assertEqual(sca_index.main(["info", target]), 0)
-        self.assertIn("ok: 10 advisories", out.getvalue())
-        self.assertIn("indexed CVE bundle: 10 advisories", out.getvalue())
+        self.assertIn("ok: 14 advisories", out.getvalue())
+        self.assertIn("indexed CVE bundle: 14 advisories", out.getvalue())
         with open(target, "rb") as fh:
             data = bytearray(fh.read())
         data[-1] ^= 1

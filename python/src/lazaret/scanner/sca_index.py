@@ -111,8 +111,8 @@ def keys_of_package(pkg):
 
 def keys_for_lookup(name, ecosystem=None):
     """The keys `CveBundle.advisories_for(name, ecosystem)` reads."""
-    keys = _loose_keys(name, ecosystem)
-    for eco in ((ecosystem,) if ecosystem in ("npm", "pypi") else ("npm", "pypi")):
+    keys = [] if ecosystem in sca.EXACT_ONLY else _loose_keys(name, ecosystem)
+    for eco in ((ecosystem,) if ecosystem in sca.ECOSYSTEMS else sca.ECOSYSTEMS):
         keys.append(_exact_key(name, eco))
     return keys
 

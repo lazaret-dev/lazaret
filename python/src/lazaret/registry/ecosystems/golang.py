@@ -47,6 +47,7 @@ import zipfile
 import zlib
 
 from lazaret.registry.ecosystems import base
+from lazaret.scanner import gomod
 
 __all__ = ["Go", "ECOSYSTEM", "check_module_path", "split_path_version", "check_path_major", "escape", "file_path_problem",
            "zip_h1", "file_h1", "parse_lookup", "parse_gomod", "is_pseudo_version", "canonical_version", "MAX_NAME", "MAX_ZIP_CONTENT"]
@@ -54,20 +55,17 @@ __all__ = ["Go", "ECOSYSTEM", "check_module_path", "split_path_version", "check_
 PROXY_HOST = "proxy.golang.org"
 SUMDB_HOST = "sum.golang.org"
 MAX_NAME = 255
-MAX_VERSION = 100
+MAX_VERSION = gomod.MAX_VERSION
 MAX_ZIP_CONTENT = 500 * 1024 * 1024        # zip.MaxZipFile: the total uncompressed size of a module
-MAX_GOMOD = 16 * 1024 * 1024               # zip.MaxGoMod
+MAX_GOMOD = gomod.MAX_GOMOD                # zip.MaxGoMod
 MAX_ENTRIES = 250_000                      # members of one zip (the biggest modules have tens of thousands)
-MAX_REQUIRES = 20_000
+MAX_REQUIRES = gomod.MAX_REQUIRES
 MAX_LOOKUP_BYTES = 64 * 1024
 
-_NUM = r"(?:0|[1-9][0-9]*)"
-_PRE = r"(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
-_BUILD = r"[0-9A-Za-z-]+"
+_NUM, _PRE, _BUILD = gomod.NUM, gomod.PRE, gomod.BUILD
 _SEMVER = rf"v{_NUM}\.{_NUM}\.{_NUM}(?:-{_PRE}(?:\.{_PRE})*)?"
 VERSION_RE = re.compile(_SEMVER + r"(?:\+incompatible)?")
 _SEMVER_RE = re.compile(_SEMVER + rf"(?:\+{_BUILD}(?:\.{_BUILD})*)?")
-_SEMVER_PARTS = re.compile(rf"v({_NUM})(?:\.({_NUM})(?:\.({_NUM})(?:-({_PRE}(?:\.{_PRE})*))?(?:\+({_BUILD}(?:\.{_BUILD})*))?)?)?")
 _PSEUDO_RE = re.compile(r"v[0-9]+\.(?:0\.0-|[0-9]+\.[0-9]+-(?:[^+]*\.)?0\.)[0-9]{14}-[A-Za-z0-9]+(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?")
 _H1_RE = re.compile(r"h1:[A-Za-z0-9+/]{43}=")
 _TIME_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]{8,20}(?:Z|[+-][0-9]{2}:[0-9]{2})")
@@ -207,16 +205,7 @@ def escape(text):
     return "".join("!" + ch.lower() if "A" <= ch <= "Z" else ch for ch in text)
 
 
-def canonical_version(version):
-    """`module.CanonicalVersion`: `v1` and `v1.2` are `v1.0.0` and `v1.2.0`, build metadata goes except `+incompatible`;
-    "" if `version` is not SemVer."""
-    m = _SEMVER_PARTS.fullmatch(version) if isinstance(version, str) and len(version) <= MAX_VERSION else None
-    if m is None:
-        return ""
-    major, minor, patch, pre, build = m.groups()
-    if minor is None or patch is None:                               # (`v1` and `v1.2`; `v1-pre` and `v1+b` did not match: not SemVer)
-        return f"v{major}.{minor or '0'}.{patch or '0'}"
-    return f"v{major}.{minor}.{patch}" + (f"-{pre}" if pre is not None else "") + ("+incompatible" if build == "incompatible" else "")
+canonical_version = gomod.canonical_version
 
 
 def is_pseudo_version(version):
@@ -323,52 +312,7 @@ def parse_lookup(text, name, version):
 
 
 # ---------------------------------------------------------------- go.mod
-def _ident_char(ch):
-    return ch not in " ()[]{}," and ch.isprintable()
-
-
-def _tokens(line):
-    """One line of a go.mod -> (tokens, comment). A token is text, or None for a string or a character that could not be
-    read; `(` and `)` are tokens. `//` starts a comment, which is returned apart (without the slashes). The rules are
-    those of `modfile`'s lexer."""
-    out, i, n = [], 0, len(line)
-    comment = None
-    while i < n:
-        ch = line[i]
-        if ch in " \t\r":
-            i += 1
-        elif line.startswith("//", i):
-            comment = line[i + 2:]
-            break
-        elif ch in "()[]{},":
-            out.append(ch)
-            i += 1
-        elif ch in "\"`":
-            j, text, ok = i + 1, [], True
-            while j < n and line[j] != ch:
-                if ch == '"' and line[j] == "\\":
-                    if j + 1 < n and line[j + 1] in '"\\':
-                        text.append(line[j + 1])
-                    else:
-                        ok = False                                  # (an escape this reader does not read)
-                    j += 2
-                    continue
-                text.append(line[j])
-                j += 1
-            out.append("".join(text) if ok and j < n else None)
-            i = j + 1
-        else:
-            j = i
-            while j < n and _ident_char(line[j]) and not line.startswith("//", j):
-                j += 1
-            out.append(line[i:j] if j > i else None)
-            i = max(j, i + 1)
-    return out, comment
-
-
-def _indirect(comment):
-    fields = (comment or "").split()
-    return fields == ["indirect"] or len(fields) > 1 and fields[0] == "indirect;"
+_tokens = gomod.tokens                                                # (the lexer is shared with the inventory: scanner/gomod.py)
 
 
 def parse_gomod(text):
@@ -376,36 +320,8 @@ def parse_gomod(text):
     version, indirect), ...]}. It reads the way `modfile.Parse` does for what `Parse` accepts (the tests hold the two
     equal on a list of go.mod files) and goes on past a line it cannot read, since a hostile file is no reason to stop
     reading; it takes the paths as written and does not check them."""
-    if not isinstance(text, str):
-        return {"module": None, "go": None, "require": []}
-    module = goversion = None
-    requires = []
-    block = None
-    for raw in text[:MAX_GOMOD].split("\n"):
-        tokens, comment = _tokens(raw)
-        if not tokens:
-            continue
-        if block is not None:
-            if tokens[0] == ")":
-                block = None
-                continue
-            verb, args = block, tokens
-        else:
-            verb, args = tokens[0], tokens[1:]
-            if args == ["("]:
-                block = verb if isinstance(verb, str) else ""
-                continue
-        if not isinstance(verb, str):
-            continue
-        if verb == "module" and module is None and len(args) == 1 and isinstance(args[0], str):
-            module = args[0]
-        elif verb == "go" and goversion is None and len(args) == 1 and isinstance(args[0], str):
-            goversion = args[0]
-        elif verb == "require" and len(args) == 2 and all(isinstance(a, str) for a in args) and len(requires) < MAX_REQUIRES:
-            version = canonical_version(args[1])
-            if version:
-                requires.append((args[0], version, _indirect(comment)))
-    return {"module": module, "go": goversion, "require": requires}
+    got = gomod.parse(text)
+    return {"module": got["module"], "go": got["go"], "require": got["require"]}
 
 
 # ---------------------------------------------------------------- source files that are handed to other tools

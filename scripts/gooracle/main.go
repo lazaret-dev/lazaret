@@ -140,6 +140,28 @@ func main() {
 				}
 				out["require"] = reqs
 			}
+		case "parsemod":
+			// A go.mod read as the main module's is (modfile.Parse): every directive read, an unknown one refused.
+			f, err := modfile.Parse("go.mod", []byte(r.Path), nil)
+			out["ok"], out["err"] = err == nil, errStr(err)
+			if err == nil {
+				if f.Module != nil {
+					out["module"] = f.Module.Mod.Path
+				}
+				var reqs [][]any
+				for _, q := range f.Require {
+					reqs = append(reqs, []any{q.Mod.Path, q.Mod.Version, q.Indirect})
+				}
+				out["require"] = reqs
+				if f.Go != nil {
+					out["go"] = f.Go.Version
+				}
+				var reps [][]any
+				for _, q := range f.Replace {
+					reps = append(reps, []any{q.Old.Path, q.Old.Version, q.New.Path, q.New.Version})
+				}
+				out["replace"] = reps
+			}
 		case "sumdbserve":
 			// The body of GET /lookup/<module>@<version> of a checksum database that holds these two hashes.
 			if server == nil {

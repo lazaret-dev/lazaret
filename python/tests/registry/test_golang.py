@@ -22,6 +22,7 @@ import zipfile
 from unittest import mock
 
 from lazaret.registry.ecosystems import base, golang
+from lazaret.scanner import gomod
 from tests import _support
 from tests.registry.ecosystem_contract import EcosystemContract
 
@@ -902,7 +903,7 @@ class GoModTests(unittest.TestCase):
             self.assertEqual(golang.parse_gomod(value), {"module": None, "go": None, "require": []})
 
     def test_the_number_of_requirements_is_bounded(self):
-        with mock.patch.object(golang, "MAX_REQUIRES", 3):
+        with mock.patch.object(gomod, "MAX_REQUIRES", 3):
             text = "module a.example/m\n" + "".join("require a.example/x%d v1.0.0\n" % i for i in range(10))
             self.assertEqual(len(golang.parse_gomod(text)["require"]), 3)
 
