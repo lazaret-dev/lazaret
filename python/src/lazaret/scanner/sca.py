@@ -99,6 +99,7 @@ import re
 import stat
 import sys
 import tokenize
+import warnings
 
 # audit H1: lazaret.sanitize_term() is the canonical terminal-control
 # neutralizer; sca output interpolates inventory names/versions and CVE-bundle
@@ -1125,6 +1126,9 @@ def _scan_requirements(path, root, out, warn, seen, depth=0):
     requirements-prod.txt -> requirements/prod.txt) is followed when it
     resolves inside the project; anything that is skipped is counted in a
     warning, never silently dropped."""
+    if "\0" in path:                                # an include named with a NUL byte: no such file
+        warn("requirements includes not found")
+        return
     real = os.path.realpath(path)
     if real in seen:
         return
@@ -1176,13 +1180,17 @@ def _tomllib():
 
 def load_toml(text):
     """Parse TOML: tomllib on 3.11+, else the conservative subset parser
-    below (Python 3.10). Raises ValueError on invalid input."""
+    below (Python 3.10). Raises ValueError on invalid input, and on input nested
+    too deeply to read (tomllib has no depth limit of its own: `[[[[…` raises
+    RecursionError, which the callers, that catch ValueError, would not see)."""
     lib = _tomllib()
     if lib is not None:
         try:
             return lib.loads(text)
         except lib.TOMLDecodeError as exc:
             raise ValueError(str(exc)) from None
+        except RecursionError:
+            raise ValueError("TOML: RecursionError") from None
     return toml_subset_loads(text)
 
 
@@ -1773,14 +1781,16 @@ def _setup_py_requirements(text):
     """install_requires of setup.py, read without running it (ast, or the
     tokenizer when the file is not Python 3): -> (requirements, complete).
     complete is False when part of the value is computed at run time."""
-    try:
-        tree = ast.parse(text)
-    except (SyntaxError, ValueError, MemoryError, RecursionError):
-        return _setup_py_tokens(text)
-    try:
-        return _setup_py_ast(tree)
-    except RecursionError:
-        return _setup_py_tokens(text)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")              # a bad escape in a string is the file's business, not stderr's
+        try:
+            tree = ast.parse(text)
+        except (SyntaxError, ValueError, MemoryError, RecursionError):
+            return _setup_py_tokens(text)
+        try:
+            return _setup_py_ast(tree)
+        except RecursionError:
+            return _setup_py_tokens(text)
 
 
 def _scan_setup_py(root, out, warn):
