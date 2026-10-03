@@ -407,6 +407,17 @@ before the release.
   supply-chain finding and passed the gate. It is SC-BINARY, CRITICAL, there
   too (an oversized one by its first bytes), and in the MCP server's
   `scan_files`. Both CLIs.
+- **Python's decode-then-run didn't count a shell.** A decoded value handed
+  to `os.system`, `os.popen`, `subprocess` with `shell=True` or
+  `subprocess.getoutput` got no finding, while JavaScript's
+  `execSync(atob(…))` was SC-EVAL-DECODE, BLOCKER: an sdist whose `setup.py`
+  ran `os.system(base64.b64decode('d2hvYW1p').decode())` was OK. The text's
+  reading has no Python shell among its sinks, so no candidate sent the file
+  to its tree, which counts them; a Python text with a decoder the text
+  knows (base64, hex, zlib, `codecs`) and a shell is read on its tree now.
+  It reads 24 more of 56,422 benign Python files, and none of them is
+  flagged; 5 more of the benchmark's 745 holdout releases are SUSPICIOUS.
+  Rule set 2.24.0.
 - **S-TOKEN missed GitHub's fine-grained tokens.** A `github_pat_…` token
   (22 and 59 characters around an underscore) got only S-ENTROPY (MAJOR),
   though secret redaction already knew it; it is S-TOKEN (BLOCKER) in

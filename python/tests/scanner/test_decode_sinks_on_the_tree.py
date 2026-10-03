@@ -9,7 +9,14 @@ names from the rule pack and runs each one, through every way the code can
 reach it, on a decoded value: a sink added to the pattern without a probe
 here fails, and so does one the tree stops counting.
 
-The probes are inert: the payload decodes to `console.log(1)`.
+Python's text reading has no shell among its sinks, so a decoded value run
+by a shell (`os.system(b64decode(s).decode())`) had no candidate and was no
+finding, while JavaScript's `execSync(atob(s))` was BLOCKER. A Python text
+with a decoder the text knows and a shell is read on its tree now (0.1.8):
+every shell, after every decoder, is held here, and what is not a run is
+not a finding.
+
+The probes are inert: the payloads decode to `console.log(1)` and `whoami`.
 """
 import json
 import os
@@ -85,6 +92,47 @@ class DecodeSinkTests(unittest.TestCase):
         for body in ("new Function(d)();\n", "shell.execSync(d);\n", "Function(d)();\n"):
             with self.subTest(code=body):
                 self.assertEqual(decode_findings(body), {("SC-EVAL-DECODE", "BLOCKER")})
+
+
+PY_DECODED = "import base64, codecs, os, subprocess, zlib\nd = {decode}\n"
+PY_DECODERS = ("base64.b64decode('d2hvYW1p').decode()", "bytes.fromhex('77686f616d69').decode()",
+               "zlib.decompress(b'x').decode()", "codecs.decode('6a686e6e7a76', 'hex').decode()")
+PY_SHELLS = ("os.system(d)", "os.popen(d)", "subprocess.run(d, shell=True)", "subprocess.Popen(d, shell=True)",
+             "subprocess.call(d, shell=True)", "subprocess.check_output(d, shell=True)", "subprocess.getoutput(d)",
+             "__import__('os').system(d)")
+
+
+def py_findings(text):
+    return {(i["rule"], i["sev"]) for i in core.scan_file("setup.py", text, "py", dep=True)
+            if i["rule"] == "SC-EVAL-DECODE"}
+
+
+class PythonShellTests(unittest.TestCase):
+    def test_a_decoded_value_run_by_a_shell(self):
+        for decode in PY_DECODERS:
+            for run in PY_SHELLS:
+                text = PY_DECODED.format(decode=decode) + run + "\n"
+                with self.subTest(decode=decode, run=run):
+                    self.assertEqual(py_findings(text), {("SC-EVAL-DECODE", "BLOCKER")})
+
+    def test_in_the_same_call(self):
+        self.assertEqual(py_findings("import base64, os\nos.system(base64.b64decode('d2hvYW1p').decode())\n"),
+                         {("SC-EVAL-DECODE", "BLOCKER")})
+
+    def test_what_is_not_a_decoded_value_run(self):
+        decoded = PY_DECODED.format(decode=PY_DECODERS[0])
+        for text in (decoded + "subprocess.run(['echo', d])\n",                 # an argument, not the command
+                     decoded + "print(d)\nsubprocess.run(['ls'])\n",            # never reaches the shell
+                     "import os\nx = 'ls'\nos.system(x)\n",                     # nothing decoded
+                     '"""os.system(base64.b64decode(s))"""\nimport subprocess\nsubprocess.run(["ls"])\n'):
+            with self.subTest(text=text):
+                self.assertEqual(py_findings(text), set())
+
+    def test_an_sdist_that_runs_one_at_install(self):
+        from tests.registry._review_support import scan_sdist
+        res = scan_sdist({"setup.py": "import base64, os\nfrom setuptools import setup\n"
+                                      "os.system(base64.b64decode('d2hvYW1p').decode())\nsetup(name='x')\n"})
+        self.assertEqual(res["verdict"], "SUSPICIOUS", res["verdictReason"])
 
 
 if __name__ == "__main__":

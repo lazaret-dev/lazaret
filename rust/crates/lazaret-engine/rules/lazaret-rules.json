@@ -1,6 +1,6 @@
 {
  "format": 1,
- "rule_set": "2.23.0",
+ "rule_set": "2.24.0",
  "source": "lazaret.scanner.core, extracted by scripts/make_rust_tables.py \u2014 do not edit",
  "values": {
   "ALWAYS_PRUNE_DIRS": {
@@ -14869,6 +14869,14 @@
      "re": "[\\w\\])]\\s*\\^=?\\s*[\\w(]|\\[\\s*:\\s*:\\s*-\\s*1\\s*\\]|\\bmap\\s*\\(\\s*chr\\b|\\bchr\\s*\\((?:[^()\\n]|\\([^()\\n]*\\))*\\)\\s+for\\b|b32decode|b32hexdecode|b16decode|a85decode|b85decode|z85decode|decodebytes|decodestring|a2b_\\w+|\\bmarshal\\b|\\b(?:gzip|bz2|lzma)\\s*\\.\\s*decompress"
     }
    }
+  },
+  "_TREE_PY_KNOWN_DECODER_RE": {
+   "flags": "",
+   "re": "\\b(?:b64decode|urlsafe_b64decode|standard_b64decode|fromhex|unhexlify)\\b|\\bzlib\\s*\\.\\s*decompress\\b|\\bcodecs\\s*\\.\\s*decode\\b"
+  },
+  "_TREE_PY_SHELL_RE": {
+   "flags": "",
+   "re": "\\bsubprocess\\b|\\bos\\s*\\.\\s*(?:system|popen)\\b|\\bsystem\\s*\\(|\\bpopen\\s*\\(|\\bpty\\b|create_subprocess_shell|\\bcommands\\b"
   },
   "_TREE_RUN_GATE_RE": {
    "map": {

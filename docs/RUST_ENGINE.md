@@ -2133,7 +2133,11 @@ candidate, or one that writes out a decoder the text's reading doesn't know
 reversal, the rarer base64 relatives, `marshal`, gzip, bz2 and lzma; in
 JavaScript zlib's synchronous decompressions and hex) and calls a runner
 (`_TREE_RUN_GATE_RE`, an indirect eval), both in code (`FileCtx::in_code`: a
-comment's "O(n^2)" is no XOR), is read on its tree, whose answer stands: it
+comment's "O(n^2)" is no XOR), or (0.1.8) a Python text that uses a decoder
+the text knows (`_TREE_PY_KNOWN_DECODER_RE`: base64, hex, zlib, `codecs`) and
+a shell (`_TREE_PY_SHELL_RE`: `os.system`, `os.popen`, `subprocess`, `pty`),
+since the text's sinks have no shell for Python while JavaScript's
+child_process is one, is read on its tree, whose answer stands: it
 drops a candidate whose value never reaches the run and finds what the
 window misses. It counts the sinks the text's reading counts (any object's
 `execSync`; child_process imported with `await import(…)`, a dynamic import

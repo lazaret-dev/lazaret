@@ -803,14 +803,19 @@ fn is_code_sink<'a>(p: &Pack, code: &[u32], m: &pyre::Match, cp_aliases: &dyn Fn
 /// XOR, characters made of their codes, a reversal; in JavaScript zlib's
 /// decompressions, hex) and call something that runs code or a program
 /// (`_TREE_DECODER_SHAPE_RE`, `_TREE_RUN_GATE_RE`, an indirect eval), in
-/// code? (A comment's "O(n^2)" or a docstring's "exec" is neither.)
+/// code? (A comment's "O(n^2)" or a docstring's "exec" is neither.) Or, in
+/// Python, use a decoder the text knows (base64, hex, zlib, codecs) and a
+/// shell (`_TREE_PY_KNOWN_DECODER_RE`, `_TREE_PY_SHELL_RE`): the text's
+/// sinks have no shell for Python, so `os.system(b64decode(s).decode())`
+/// had no candidate, while JavaScript's child_process is one (0.1.8).
 fn may_run_written_decoder(ctx: &FileCtx) -> bool {
     let lang = if ctx.lang == Lang::Py { "py" } else { "js" };
     let p = ctx.p;
     let c = &ctx.content;
     let in_code = |re: &Regex| re.finditer(c).any(|m| ctx.in_code(m.start()));
-    in_code(p.map_re("_TREE_DECODER_SHAPE_RE", lang))
-        && (in_code(p.map_re("_TREE_RUN_GATE_RE", lang)) || in_code(p.re("_INDIRECT_SINK_RE")))
+    (in_code(p.map_re("_TREE_DECODER_SHAPE_RE", lang))
+        && (in_code(p.map_re("_TREE_RUN_GATE_RE", lang)) || in_code(p.re("_INDIRECT_SINK_RE"))))
+        || (ctx.lang == Lang::Py && in_code(p.re("_TREE_PY_KNOWN_DECODER_RE")) && in_code(p.re("_TREE_PY_SHELL_RE")))
 }
 
 /// The decoded-payload flow on JavaScript's and Python's trees (the
