@@ -930,6 +930,10 @@ class RegistryModulePromisesAreLive(unittest.TestCase):
         self.assertEqual(run(R("declared", lambda self, k, m, mem: base.Declared("-bad", ()))), "crates-manifest-name")
         self.assertEqual(run(R("declared", lambda self, k, m, mem: base.Declared(None, ("b", "a")))), "crates-manifest-dependencies")
         self.assertEqual(run(R("declared", lambda self, k, m, mem: base.Declared(None, ("a b",)))), "crates-manifest-dependencies")
+        self.assertEqual(run(R("declared", lambda self, k, m, mem: base.Declared(None, ("a",), {"a": "1" * (crates.MAX_SPEC + 1)}))),
+                         "crates-manifest-specs")
+        self.assertEqual(run(R("declared", lambda self, k, m, mem: base.Declared(None, ("a",), {"a": "1"}, {"a": "a b"}))),
+                         "crates-manifest-aliases")
         self.assertEqual(run(R("declared", self.every_other(declared_real, lambda self, k, m, mem: base.Declared("other", ())))),
                          "crates-manifest-deterministic")
         self.assertEqual(run(R("run_targets", self.every_other(run_real, lambda self, k, m, mem: base.RunTargets(entries={members[1]})))),
@@ -975,6 +979,12 @@ class RegistryModulePromisesAreLive(unittest.TestCase):
         self.assertEqual(run(G("declared", lambda self, k, m, mem: base.Declared("-x", ()))), "go-mod-declared-name")
         self.assertEqual(run(G("declared", lambda self, k, m, mem: base.Declared(None, ("b.example/y", "a.example/x")))), "go-mod-declared-dependencies")
         self.assertEqual(run(G("declared", lambda self, k, m, mem: base.Declared(None, ("zz.example/q",)))), "go-mod-declared-from-requirements")
+        names = ("a.example/x", "b.example/y", "c.example/z")
+        self.assertEqual(run(G("declared", lambda self, k, m, mem: base.Declared(None, names, {n: "v9.9.9" for n in names}))), "go-mod-declared-specs")
+        self.assertEqual(run(G("declared", lambda self, k, m, mem: base.Declared(None, names, {"a.example/x": "v1.0.0", "b.example/y": "v1.2.3"}))),
+                         "go-mod-declared-specs")
+        self.assertEqual(run(G("declared", lambda self, k, m, mem: base.Declared(
+            None, names, {"a.example/x": "v1.0.0", "b.example/y": "v1.2.3", "c.example/z": "v0.1.0"}, {"a.example/x": "x"}))), "go-mod-declared-specs")
 
     def test_the_go_sumdb_promises(self):
         from lazaret.registry.ecosystems import base, golang

@@ -39,6 +39,7 @@ MAX_VERSION = 100
 MAX_INDEX_BYTES = 64 * 1024 * 1024        # the larger crates' index files are tens of MB (thousands of versions, long feature lists)
 MAX_VERSIONS = 100_000
 MAX_DEPS = 5_000
+MAX_SPEC = 512                            # a version requirement kept as written, no further
 
 _NAME_CHAR = re.compile(r"[A-Za-z0-9_-]")
 _NUM = r"(?:0|[1-9][0-9]*)"
@@ -273,15 +274,24 @@ class Crates(base.Ecosystem):
             for each in list(target.values())[:1000]:
                 if isinstance(each, dict):
                     tables += [each.get("dependencies"), each.get("build-dependencies"), each.get("build_dependencies")]
-        found = set()
+        found, specs, aliases = set(), {}, {}
         for table in tables:
             if not isinstance(table, dict):
                 continue
             for key, spec in list(table.items())[:MAX_DEPS]:
                 real = spec.get("package") if isinstance(spec, dict) and isinstance(spec.get("package"), str) else key
-                if self._name_ok(real):
-                    found.add(real)
-        return base.Declared(name if name is not None and self._name_ok(name) else None, sorted(found)[:MAX_DEPS])
+                if not self._name_ok(real):
+                    continue
+                found.add(real)
+                if real not in specs:                                # (the first table that names it: [dependencies] before the builds')
+                    version = spec if isinstance(spec, str) else spec.get("version") if isinstance(spec, dict) else None
+                    specs[real] = version[:MAX_SPEC] if isinstance(version, str) else None
+                if real != key and real not in aliases and isinstance(key, str) and self._name_ok(key):
+                    aliases[real] = key
+        names = sorted(found)[:MAX_DEPS]
+        keep = set(names)
+        return base.Declared(name if name is not None and self._name_ok(name) else None, names,
+                             {k: v for k, v in specs.items() if k in keep}, {k: v for k, v in aliases.items() if k in keep})
 
 
 ECOSYSTEM = Crates()

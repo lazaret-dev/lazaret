@@ -563,6 +563,42 @@ class DeclaredAndDependenciesTests(unittest.TestCase):
                           "[dependencies.other]\npackage = \"real-other\"\nversion = \"2\"\n")
         self.assertEqual(d.dependencies, ("plain", "rand", "real-other"))
 
+    def test_the_spec_of_each_dependency_is_kept_next_to_its_name(self):
+        d = self.declared(MANIFEST + "[dependencies]\nplain = \"1.2\"\ntable = {version = \"^0.8\", features = [\"x\"]}\n"
+                          "no-version = {path = \"../x\"}\nodd = 5\n"
+                          "[build-dependencies]\ncc = \"1.0.3\"\n[dev-dependencies]\ncriterion = \"0.5\"\n")
+        self.assertEqual(d.dependencies, ("cc", "no-version", "odd", "plain", "table"))
+        self.assertEqual(d.specs, {"cc": "1.0.3", "no-version": None, "odd": None, "plain": "1.2", "table": "^0.8"})
+        self.assertEqual(d.aliases, {})
+
+    def test_the_first_table_that_names_a_dependency_gives_its_spec(self):
+        d = self.declared(MANIFEST + "[build-dependencies]\ncc = \"2\"\n[dependencies]\ncc = \"1\"\n"
+                          "[target.'cfg(unix)'.dependencies]\ncc = \"3\"\n")
+        self.assertEqual(d.dependencies, ("cc",))
+        self.assertEqual(d.specs, {"cc": "1"})                           # ([dependencies] is read before [build-dependencies])
+
+    def test_a_spec_is_kept_as_written_up_to_the_bound(self):
+        for size, kept in ((crates.MAX_SPEC, True), (crates.MAX_SPEC + 1, False)):
+            with self.subTest(size=size):
+                spec = ">=" + "1" * (size - 2)
+                got = self.declared(MANIFEST + "[dependencies]\nbig = \"%s\"\n" % spec).specs["big"]
+                self.assertEqual(got, spec if kept else spec[:crates.MAX_SPEC])
+                self.assertEqual(len(got), crates.MAX_SPEC)
+
+    def test_a_rename_says_which_name_the_code_uses(self):
+        d = self.declared(MANIFEST + "[dependencies]\nmy-rand = {package = \"rand\", version = \"0.8\"}\nplain = \"1\"\n"
+                          "[dependencies.other]\npackage = \"real-other\"\nversion = \"2\"\n"
+                          "[build-dependencies]\nsame = {package = \"same\", version = \"1\"}\n")
+        self.assertEqual(d.dependencies, ("plain", "rand", "real-other", "same"))
+        self.assertEqual(d.aliases, {"rand": "my-rand", "real-other": "other"})            # (a name that is its own name has none)
+        self.assertEqual(d.specs, {"plain": "1", "rand": "0.8", "real-other": "2", "same": "1"})
+
+    def test_a_rename_whose_local_name_is_not_a_name_has_no_alias_and_the_first_one_stays(self):
+        d = self.declared(MANIFEST + "[dependencies]\n\"a b\" = {package = \"rand\"}\n"
+                          "first = {package = \"twice\"}\nsecond = {package = \"twice\"}\n")
+        self.assertEqual(d.dependencies, ("rand", "twice"))
+        self.assertEqual(d.aliases, {"twice": "first"})
+
     def test_the_underscore_spelling_of_the_table_names_is_read_too(self):
         d = self.declared(MANIFEST + "[build_dependencies]\ncc = \"1\"\n[dev_dependencies]\ncriterion = \"1\"\n")
         self.assertEqual(d.dependencies, ("cc",))

@@ -535,9 +535,38 @@ class ValueClassTests(unittest.TestCase):
         d = base.Declared("x", ["a", "b"])
         self.assertEqual((d.name, d.dependencies), ("x", ("a", "b")))
         self.assertEqual(base.Declared(), base.Declared(None, ()))
-        self.assertEqual(base.Declared()._fields, ("name", "dependencies"))
+        self.assertEqual(base.Declared()._fields, ("name", "dependencies", "specs", "aliases"))
+        self.assertEqual((d.specs, d.aliases), ({}, {}))
         with self.assertRaises(AttributeError):
             base.Declared().extra = 1
+
+    def test_declared_keeps_each_dependencys_spec_and_its_rename_next_to_its_name(self):
+        d = base.Declared("x", ["a", "b"], {"a": "^1.2", "b": None}, {"b": "local-b"})
+        self.assertEqual((d.specs, d.aliases), ({"a": "^1.2", "b": None}, {"b": "local-b"}))
+        self.assertEqual(d, base.Declared("x", ("a", "b"), {"b": None, "a": "^1.2"}, {"b": "local-b"}))
+        self.assertNotEqual(d, base.Declared("x", ["a", "b"], {"a": "^1.3", "b": None}, {"b": "local-b"}))
+        self.assertNotEqual(d, base.Declared("x", ["a", "b"], {"a": "^1.2", "b": None}))
+
+    def test_declared_copies_what_it_is_given_so_a_later_change_changes_nothing(self):
+        specs, aliases = {"a": "1"}, {"a": "z"}
+        d = base.Declared("x", ["a"], specs, aliases)
+        specs["a"], aliases["a"] = "2", "y"
+        specs["extra"] = "3"
+        self.assertEqual((d.specs, d.aliases), ({"a": "1"}, {"a": "z"}))
+
+    def test_a_spec_or_a_rename_for_a_name_that_is_not_a_dependency_is_a_bug_and_says_so(self):
+        for kwargs in ({"specs": {"b": "1"}}, {"aliases": {"b": "z"}}):
+            with self.subTest(kwargs=kwargs), self.assertRaisesRegex(ValueError, "which is not a dependency"):
+                base.Declared("x", ["a"], **kwargs)
+        with self.assertRaisesRegex(ValueError, r"a spec for '\\u202e', which"):
+            base.Declared("x", ["a"], {"\u202e": "1"})
+
+    def test_a_spec_is_text_or_none_and_a_rename_is_text(self):
+        for kwargs in ({"specs": {"a": 1}}, {"specs": {"a": b"1"}}, {"aliases": {"a": None}}, {"aliases": {"a": 1}}):
+            with self.subTest(kwargs=kwargs), self.assertRaisesRegex(ValueError, "is not text"):
+                base.Declared("x", ["a"], **kwargs)
+        self.assertEqual(base.Declared("x", ["a"], {"a": None}).specs, {"a": None})
+        self.assertEqual(base.Declared("x", ["a"], {"a": ""}).specs, {"a": ""})
 
 
 # ---------------------------------------------------------------------------
@@ -905,6 +934,203 @@ class RateTests(unittest.TestCase):
         self.assertEqual((errors, sorted(done)), ([], list(range(8))))
         self.assertEqual(sorted(self.clock.slept), [0.5 * i for i in range(1, 8)])
         self.assertEqual(len(self.fetch.requests), 8)
+
+
+# ---------------------------------------------------------------------------
+# The download budget (P-9: the artifacts of a release downloaded from several threads)
+# ---------------------------------------------------------------------------
+
+class DownloadBudgetTests(unittest.TestCase):
+    def test_reserve_takes_what_is_left_and_says_so(self):
+        b = base.DownloadBudget(100)
+        self.assertEqual((b.total, b.left), (100, 100))
+        self.assertTrue(b.reserve(60))
+        self.assertEqual(b.left, 40)
+        self.assertTrue(b.reserve(40))                         # (exactly what is left)
+        self.assertEqual(b.left, 0)
+        self.assertFalse(b.reserve(1))
+        self.assertTrue(b.reserve(0))                          # (nothing is always there)
+        self.assertEqual(b.left, 0)
+
+    def test_a_reservation_that_does_not_fit_takes_nothing(self):
+        b = base.DownloadBudget(100)
+        self.assertFalse(b.reserve(101))
+        self.assertEqual(b.left, 100)
+        self.assertTrue(b.reserve(100))
+
+    def test_what_is_given_back_can_be_taken_again_and_never_exceeds_the_total(self):
+        b = base.DownloadBudget(100)
+        b.reserve(70)
+        b.give_back(20)
+        self.assertEqual(b.left, 50)
+        b.give_back(50)                                        # (back to the whole)
+        self.assertEqual(b.left, 100)
+        with self.assertRaisesRegex(ValueError, "more was given back than was taken"):
+            b.give_back(1)
+        self.assertEqual(b.left, 100)
+        b.give_back(0)
+        self.assertTrue(base.DownloadBudget(0).reserve(0))
+
+    def test_numbers_that_are_not_byte_counts_are_refused(self):
+        for bad in (-1, 1.5, "1", None, True, False, b"1", float("nan")):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    base.DownloadBudget(bad)
+                b = base.DownloadBudget(10)
+                with self.assertRaises(ValueError):
+                    b.reserve(bad)
+                with self.assertRaises(ValueError):
+                    b.give_back(bad)
+                self.assertEqual(b.left, 10)
+
+    def test_threads_that_all_want_the_last_share_cannot_all_have_it(self):
+        for total, want, threads in ((100, 10, 16), (7, 7, 8), (1, 1, 32)):
+            with self.subTest(total=total):
+                b = base.DownloadBudget(total)
+                gate, won = threading.Barrier(threads), []
+
+                def work():
+                    gate.wait(30)
+                    won.append(b.reserve(want))
+
+                pool = [threading.Thread(target=work) for _ in range(threads)]
+                for t in pool:
+                    t.start()
+                for t in pool:
+                    t.join(30)
+                self.assertEqual(sum(won), total // want)
+                self.assertEqual(len(won), threads)
+                self.assertEqual(b.left, total - want * (total // want))
+
+    def test_reserving_and_giving_back_from_many_threads_ends_where_it_began(self):
+        b = base.DownloadBudget(50)
+        errors = []
+
+        def work():
+            try:
+                for _ in range(500):
+                    if b.reserve(7):
+                        b.give_back(7)
+            except BaseException as exc:
+                errors.append(exc)
+
+        pool = [threading.Thread(target=work) for _ in range(8)]
+        for t in pool:
+            t.start()
+        for t in pool:
+            t.join(60)
+        self.assertEqual((errors, b.left), ([], 50))
+
+
+class FetchBudgetTests(unittest.TestCase):
+    URL = "https://dl.example/pkg.tgz"
+
+    def setUp(self):
+        self.eco = Toy()
+        self.rec = Recorder({self.URL: b"x" * 30, "https://dl.example/small": b"s" * 5})
+        self.clock = Clock()
+        self.fetch = base.Fetch(self.eco, self.rec, clock=self.clock, sleep=self.clock.sleep)
+        self.budget = base.DownloadBudget(100)
+
+    def test_a_download_is_charged_for_what_it_received_and_the_rest_comes_back(self):
+        self.assertEqual(self.fetch.bytes(self.URL, max_bytes=80, budget=self.budget), b"x" * 30)
+        self.assertEqual(self.budget.left, 70)
+
+    def test_while_it_runs_it_holds_its_whole_share(self):
+        seen = []
+
+        def transport(url, **kwargs):
+            seen.append(self.budget.left)
+            return b"x" * 5
+
+        fetch = base.Fetch(self.eco, transport, clock=self.clock, sleep=self.clock.sleep)
+        fetch.bytes(self.URL, max_bytes=80, budget=self.budget)
+        self.assertEqual((seen, self.budget.left), ([20], 95))
+
+    def test_a_spent_budget_is_a_fetch_error_and_no_request_is_made(self):
+        self.budget.reserve(90)
+        with self.assertRaisesRegex(base.FetchError, r"^the release's download budget is spent: 'https://dl.example/pkg.tgz'$"):
+            self.fetch.bytes(self.URL, max_bytes=11, budget=self.budget)
+        self.assertEqual((self.rec.calls, self.fetch.requests, self.budget.left), ([], [], 10))
+        self.assertEqual(self.fetch.bytes("https://dl.example/small", max_bytes=10, budget=self.budget), b"s" * 5)   # (what is left is enough)
+        self.assertEqual((len(self.rec.calls), self.budget.left), (1, 5))
+
+    def test_a_request_that_fails_gives_the_whole_share_back(self):
+        for what in (base.FetchError("no"), OSError("down"), http.client.HTTPException("x"), ValueError("v")):
+            with self.subTest(what=type(what).__name__):
+                fetch = base.Fetch(self.eco, Recorder({self.URL: what}), clock=self.clock, sleep=self.clock.sleep)
+                with self.assertRaises(base.FetchError):
+                    fetch.bytes(self.URL, max_bytes=80, budget=self.budget)
+                self.assertEqual(self.budget.left, 100)
+
+    def test_an_answer_that_is_not_bytes_gives_the_share_back(self):
+        fetch = base.Fetch(self.eco, Recorder({self.URL: "text"}), clock=self.clock, sleep=self.clock.sleep)
+        with self.assertRaisesRegex(base.FetchError, "gave no bytes"):
+            fetch.bytes(self.URL, max_bytes=80, budget=self.budget)
+        self.assertEqual(self.budget.left, 100)
+
+    def test_a_body_over_the_limit_is_charged_the_limit(self):
+        fetch = base.Fetch(self.eco, Recorder({self.URL: b"x" * 90}), clock=self.clock, sleep=self.clock.sleep)
+        with self.assertRaisesRegex(base.FetchError, "exceeds"):
+            fetch.bytes(self.URL, max_bytes=80, budget=self.budget)
+        self.assertEqual(self.budget.left, 20)
+
+    def test_a_signal_in_the_transport_gives_the_share_back_too(self):
+        def transport(url, **kwargs):
+            raise KeyboardInterrupt
+
+        fetch = base.Fetch(self.eco, transport, clock=self.clock, sleep=self.clock.sleep)
+        with self.assertRaises(KeyboardInterrupt):
+            fetch.bytes(self.URL, max_bytes=80, budget=self.budget)
+        self.assertEqual(self.budget.left, 100)
+
+    def test_a_refused_url_takes_nothing_and_neither_does_a_download_without_a_budget(self):
+        for url in ("http://dl.example/x", "https://evil.example/x", ""):
+            with self.assertRaises(base.FetchError):
+                self.fetch.bytes(url, max_bytes=80, budget=self.budget)
+        self.assertEqual(self.budget.left, 100)
+        self.assertEqual(self.fetch.bytes(self.URL, max_bytes=80), b"x" * 30)
+        self.assertEqual(self.budget.left, 100)
+
+    def test_a_spent_budget_does_not_use_up_a_turn_of_a_rated_host(self):
+        self.budget.reserve(100)
+        for _ in range(3):
+            with self.assertRaises(base.FetchError):
+                self.fetch.bytes("https://reg.example/x", max_bytes=10, budget=self.budget)
+        self.budget.give_back(100)
+        self.fetch.bytes("https://reg.example/x", max_bytes=10, budget=self.budget)
+        self.assertEqual(self.clock.slept, [])
+
+    def test_two_downloads_that_cannot_both_fit_are_not_both_started(self):
+        started, release, results = threading.Event(), threading.Event(), {}
+
+        def transport(url, **kwargs):
+            started.set()
+            release.wait(30)
+            return b"y" * 10
+
+        fetch = base.Fetch(self.eco, transport, clock=self.clock, sleep=self.clock.sleep)
+
+        def first():
+            results["first"] = fetch.bytes("https://dl.example/a", max_bytes=60, budget=self.budget)
+
+        t = threading.Thread(target=first)
+        t.start()
+        self.assertTrue(started.wait(30))
+        try:
+            with self.assertRaisesRegex(base.FetchError, "download budget is spent"):
+                fetch.bytes("https://dl.example/b", max_bytes=60, budget=self.budget)       # (the first still holds its 60)
+            self.assertEqual(self.budget.left, 40)
+        finally:
+            release.set()
+            t.join(30)
+        self.assertEqual((results, self.budget.left), ({"first": b"y" * 10}, 90))
+        self.assertEqual(fetch.requests, ["https://dl.example/a"])
+
+    def test_json_and_text_do_not_take_a_budget(self):
+        import inspect
+        for name in ("json", "text", "json_lines"):
+            self.assertNotIn("budget", inspect.signature(getattr(base.Fetch, name)).parameters, name)
 
 
 # ---------------------------------------------------------------------------

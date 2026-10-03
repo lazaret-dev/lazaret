@@ -541,6 +541,12 @@ class EcosystemContract:
                         self.assertTrue(declared.name is None or isinstance(declared.name, str))
                         self.assertIsInstance(declared.dependencies, tuple)
                         self.assertTrue(all(isinstance(d, str) for d in declared.dependencies))
+                        self.assertIsInstance(declared.specs, dict)
+                        self.assertIsInstance(declared.aliases, dict)
+                        self.assertLessEqual(set(declared.specs), set(declared.dependencies))
+                        self.assertLessEqual(set(declared.aliases), set(declared.dependencies))
+                        self.assertTrue(all(v is None or isinstance(v, str) for v in declared.specs.values()))
+                        self.assertTrue(all(isinstance(v, str) for v in declared.aliases.values()))
 
     def test_with_no_manifests_nothing_runs_and_nothing_is_declared(self):
         for kind in self.eco.artifact_kinds:

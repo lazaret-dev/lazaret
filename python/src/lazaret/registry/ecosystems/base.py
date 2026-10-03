@@ -24,7 +24,7 @@ import urllib.parse
 
 from lazaret.scanner import core as lazaret
 
-__all__ = ["SpecError", "FetchError", "DigestError", "Resolution", "RunTargets", "Declared", "Ecosystem", "Fetch",
+__all__ = ["SpecError", "FetchError", "DigestError", "Resolution", "RunTargets", "Declared", "Ecosystem", "Fetch", "DownloadBudget",
            "MAX_DOCUMENT_BYTES", "MAX_ARTIFACT_BYTES", "MAX_REDIRECTS", "METADATA_TIMEOUT", "DOWNLOAD_TIMEOUT",
            "VERSION_RE", "show", "ascii_name", "HOSTILE_NAMES", "HOSTILE_VERSIONS", "finish_member_path", "top_directory_stripped",
            "root_stripped"]
@@ -165,16 +165,69 @@ class RunTargets(collections.namedtuple("RunTargets", "entries install_scripts s
         return super().__new__(cls, frozenset(entries), frozenset(install_scripts), frozenset(startup))
 
 
-class Declared(collections.namedtuple("Declared", "name dependencies")):
+class Declared(collections.namedtuple("Declared", "name dependencies specs aliases")):
     """What a package says about itself: its own name and the names of the packages it depends on, as the
-    ecosystem spells them (the look-alike and new-dependency checks read this)."""
+    ecosystem spells them (the look-alike and new-dependency checks read this).
+
+    `specs` keeps each dependency's spec as written next to its name (`{name: text or None}`; npm's `^1.2` or
+    `npm:other@1`, a crate's version requirement, a Go module's version), because what a spec says can change what
+    the name means (an `npm:` alias names another package) and the unused-dependency check reads it. `aliases` is
+    `{name: the name the code uses}` for a dependency the manifest renames (a crate's `package = "x"`): the check
+    looks for the name the code uses, the registry for the name it is known by. Both hold only names in
+    `dependencies`; a module that gives anything else has a bug, and it is a ValueError."""
     __slots__ = ()
 
-    def __new__(cls, name=None, dependencies=()):
-        return super().__new__(cls, name, tuple(dependencies))
+    def __new__(cls, name=None, dependencies=(), specs=None, aliases=None):
+        dependencies = tuple(dependencies)
+        specs, aliases = dict(specs or {}), dict(aliases or {})
+        known = set(dependencies)
+        for table, kind in ((specs, "spec"), (aliases, "alias")):
+            for key, value in table.items():
+                if key not in known:
+                    raise ValueError(f"a {kind} for {show(key)}, which is not a dependency")
+                if not (value is None and kind == "spec") and not isinstance(value, str):
+                    raise ValueError(f"the {kind} of {show(key)} is not text")
+        return super().__new__(cls, name, dependencies, specs, aliases)
 
 
 # ---------------------------------------------------------------- the fetch seam
+class DownloadBudget:
+    """The bytes a release may still download, shared by the threads that download its artifacts (P-9). Taking
+    some is one step under a lock, so two threads cannot both take the last share: `reserve(n)` takes `n` bytes if
+    that many are left and says whether it did; `give_back(n)` returns what a download did not use. `Fetch.bytes`
+    reserves its `max_bytes` (the declared size of the artifact, or the limit) before it asks for anything, and gives
+    back the difference once it has the body, or all of it when the request failed."""
+
+    def __init__(self, total):
+        if type(total) is not int or total < 0:
+            raise ValueError("a download budget is a number of bytes, not less than 0")
+        self.total = total
+        self._left = total
+        self._lock = threading.Lock()
+
+    @property
+    def left(self):
+        with self._lock:
+            return self._left
+
+    def reserve(self, n):
+        if type(n) is not int or n < 0:
+            raise ValueError("a reservation is a number of bytes, not less than 0")
+        with self._lock:
+            if n > self._left:
+                return False
+            self._left -= n
+            return True
+
+    def give_back(self, n):
+        if type(n) is not int or n < 0:
+            raise ValueError("what is given back is a number of bytes, not less than 0")
+        with self._lock:
+            if self._left + n > self.total:
+                raise ValueError("more was given back than was taken")
+            self._left += n
+
+
 class Fetch:
     """The only way a module reaches the network. It is bound to one ecosystem's `hosts`: https, one of those hosts,
     no credentials in the URL, a bounded length, or `FetchError` before any request; the transport's redirects go
@@ -229,26 +282,36 @@ class Fetch:
         if start > now:
             self._sleep(start - now)
 
-    def _get(self, url, max_bytes, accept, timeout):
+    def _get(self, url, max_bytes, accept, timeout, budget=None):
         self.check_url(url)
-        self._wait_turn(url)
-        self.requests.append(url)
+        if budget is not None and not budget.reserve(max_bytes):           # (taken before any request, in one step)
+            raise FetchError(f"the release's download budget is spent: {show(url)}")
+        used = 0
         try:
-            body = self._transport(url, max_bytes=max_bytes, accept=accept, timeout=timeout,
-                                   check_redirect=self.check_url)
-        except FetchError:
-            raise
-        except (OSError, ValueError, http.client.HTTPException) as exc:    # (a transport that did not say it in our words)
-            raise FetchError(f"fetch failed ({type(exc).__name__}): {show(url)}") from None
-        if not isinstance(body, (bytes, bytearray)):
-            raise FetchError(f"the transport gave no bytes for {show(url)}")
-        if len(body) > max_bytes:
-            raise FetchError(f"response exceeds {max_bytes // (1024 * 1024) or 1}MB budget: {show(url)}")
-        return bytes(body)
+            self._wait_turn(url)
+            self.requests.append(url)
+            try:
+                body = self._transport(url, max_bytes=max_bytes, accept=accept, timeout=timeout,
+                                       check_redirect=self.check_url)
+            except FetchError:
+                raise
+            except (OSError, ValueError, http.client.HTTPException) as exc:    # (a transport that did not say it in our words)
+                raise FetchError(f"fetch failed ({type(exc).__name__}): {show(url)}") from None
+            if not isinstance(body, (bytes, bytearray)):
+                raise FetchError(f"the transport gave no bytes for {show(url)}")
+            used = min(len(body), max_bytes)
+            if len(body) > max_bytes:
+                raise FetchError(f"response exceeds {max_bytes // (1024 * 1024) or 1}MB budget: {show(url)}")
+            return bytes(body)
+        finally:
+            if budget is not None:
+                budget.give_back(max_bytes - used)
 
     # ---- what a module asks for
-    def bytes(self, url, max_bytes=MAX_ARTIFACT_BYTES, accept=None):
-        return self._get(url, max_bytes, accept, DOWNLOAD_TIMEOUT)
+    def bytes(self, url, max_bytes=MAX_ARTIFACT_BYTES, accept=None, budget=None):
+        """The body at `url`, at most `max_bytes`. With a `DownloadBudget`, `max_bytes` is reserved from it first (a
+        spent budget is a `FetchError` and no request) and what the body did not use is given back."""
+        return self._get(url, max_bytes, accept, DOWNLOAD_TIMEOUT, budget)
 
     def text(self, url, max_bytes=MAX_DOCUMENT_BYTES, accept=None):
         raw = self._get(url, max_bytes, accept, METADATA_TIMEOUT)

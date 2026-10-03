@@ -21,6 +21,14 @@ The rules:
 * **Nothing unfinished is stored.** A `compute` that ran out of time or budget returns `Uncacheable(answer)`: the
   caller gets the answer, the memo keeps nothing, and a thread that was waiting for it works the question out for
   itself (it may have a different budget: it does not take another thread's cut-short answer).
+  What the caller must return as `Uncacheable`: a call the engine did not answer (`engine.unanswered`: the work
+  budget spent, an internal error, a `NativeError`), and a cross-file answer in which any package is marked
+  `failed` (it would be cached as clean). Anything asked after the artifact's deadline is not asked at all.
+* **What the key says about the path.** The engine's first pass reads no path: key it with `rel=None` and the
+  flags that matter (`lang`, `jsx`, `dep`, `redact`, `neumaier`), so one `.js` file under two paths is one call. A
+  pass that reads the path (core's passes after the rules, in `--full`) keeps the path in the key or is not cached
+  at all: cache the engine's raw answer and run those passes every time. The cross-file question is keyed on the
+  files in the order given, not as a set (the engine's limits make the order count).
 * **A hit is a copy.** The answer is copied on the way in and on the way out, so a caller that changes what it was
   given changes nothing for the next one (`copy=False` for a caller that promises not to).
 * **Bounded by bytes.** The answers are small; the least recently used go first, and an answer larger than a
@@ -72,10 +80,20 @@ def file_key(kind, rel, text, lang, flags=(), pack="", engine=""):
 
 
 def cross_file_key(files, flags=(), pack="", engine=""):
-    """The key of a cross-file question: `files` is [(path, content)] and the key does not depend on their order,
-    and one source file that differs makes it a different key (so the question is asked again, as it must be)."""
-    lines = sorted(f"{path}\0{_digest(content)}" for path, content in files)
-    return ("cross-file", None, _digest("\n".join(lines)), None, _flags(flags), pack, engine)
+    """The key of a cross-file question. `files` is `[(path, lang, content)]` **in the order the engine is given
+    them** (the registry passes `sorted(self.sources)`): the answer is not a function of the set, because where the
+    engine has a limit (the symbols kept, the bodies tested for running a parameter, the first import that names a
+    seed) the order decides what is read. So the key is of the list: put two files the other way round, change a
+    path or a language, or change one byte of one file, and it is another question. `flags` carry the call's other
+    arguments (`one_package`, `skip`, `who`, `groups`, `redact`, `neumaier`, `os.sep`, the work budget): anything
+    the answer depends on that is not in `files`."""
+    parts = []
+    for item in files:
+        if not isinstance(item, (tuple, list)) or len(item) != 3:
+            raise ValueError("a file of a cross-file question is (path, language, content)")
+        path, lang, content = item
+        parts.append(repr((path, lang, _digest(content))))
+    return ("cross-file", None, _digest("\n".join(parts)), None, _flags(flags), pack, engine)
 
 
 # ---------------------------------------------------------------- what a compute returns

@@ -672,6 +672,8 @@ class VerifyTests(unittest.TestCase):
         with mock.patch.object(golang, "MAX_ENTRIES", 2), mock.patch.object(golang, "MAX_ZIP_CONTENT", 2):
             self.assertTrue(golang.zip_h1(blob).startswith("h1:"))
         self.assertEqual((golang.MAX_ZIP_CONTENT, golang.MAX_GOMOD), (500 * 1024 * 1024, 16 * 1024 * 1024))
+        self.assertEqual((golang.MAX_NAME, golang.MAX_VERSION, golang.MAX_ENTRIES, golang.MAX_REQUIRES, golang.MAX_LOOKUP_BYTES),
+                         (255, 100, 250_000, 20_000, 64 * 1024))
 
     def test_a_member_is_read_in_pieces(self):
         body = b"abcdefghij" * 300_000                                          # 3 MB: more than one piece
@@ -847,11 +849,14 @@ class RunTests(unittest.TestCase):
     def test_declared_is_the_module_line_and_the_requirements(self):
         text = 'module example.com/m\n\ngo 1.22\n\nrequire (\n\tb.example/x v1.0.0\n\ta.example/y v1.0.0 // indirect\n)\nrequire "c.example/z" v2.0.0+incompatible\n'
         got = self.eco.declared("gomod", {"go.mod": text}, [])
-        self.assertEqual(got, base.Declared("example.com/m", ["a.example/y", "b.example/x", "c.example/z"]))
+        self.assertEqual(got, base.Declared("example.com/m", ["a.example/y", "b.example/x", "c.example/z"],
+                                            {"a.example/y": "v1.0.0", "b.example/x": "v1.0.0", "c.example/z": "v2.0.0+incompatible"}))
+        self.assertEqual(got.aliases, {})
 
     def test_declared_drops_what_is_not_a_module_path(self):
         text = "module not-a-path\nrequire (\n\tbad v1.0.0\n\tgood.example/x v1.0.0\n\tgood.example/x v1.1.0\n)\n"
-        self.assertEqual(self.eco.declared("gomod", {"go.mod": text}, []), base.Declared(None, ["good.example/x"]))
+        self.assertEqual(self.eco.declared("gomod", {"go.mod": text}, []),
+                         base.Declared(None, ["good.example/x"], {"good.example/x": "v1.0.0"}))      # (a module listed twice: the first line's version)
 
     def test_declared_of_nothing_is_nothing(self):
         for manifests in ({}, {"go.mod": ""}, {"go.mod": None}, {"go.mod": 5}, None, {"other": "module a.b/c"}):
@@ -915,10 +920,180 @@ class GoModTests(unittest.TestCase):
                  ('foo"bar `x y` "a\\"b" "bad\\n"', (['foo"bar', "x y", 'a"b', None], None)),
                  ("a(b)c", (["a", "(", "b", ")", "c"], None)), ("a // b // c", (["a"], " b // c")), ("a//b", (["a"], "b")),
                  ('"unterminated', ([None], None)), ("`unterminated", ([None], None)), ("\x00", ([None], None)), ("a b", (["a", None, "b"], None)),
-                 ("[a, b]", (["[", "a", ",", "b", "]"], None)), ("", ([], None)), ("   \t\r", ([], None)), ("=>", (["=>"], None)))
+                 ("[a, b]", (["[", "a", ",", "b", "]"], None)), ("", ([], None)), ("   \t\r", ([], None)), ("=>", (["=>"], None)),
+                 ('"x"y z', (["x", "y", "z"], None)), ('"x"', (["x"], None)), ('"abc\\', ([None], None)), ('"a\\"b"', (['a"b'], None)),
+                 ('"a\\\\b"', (["a\\b"], None)), ('"a\\nb"', ([None], None)))
         for line, want in cases:
             with self.subTest(line=line):
                 self.assertEqual(golang._tokens(line), want)
+
+
+class WhatTheFirstMutationRunFoundUntestedTests(unittest.TestCase):
+    """Limits that were not at their edge, messages that were not read to the end, and Go's own answers for the short and
+    odd cases the golden file does not have. The expected values of the Go cases are `golang.org/x/mod` v0.22.0's
+    (`scripts/gooracle`, Oct 3); the others are the module's own bounds, tested one under and one over."""
+
+    def test_paths_whose_last_element_ends_in_a_tilde_and_digits_are_refused_as_go_refuses_them(self):
+        for path, ok in (("example.com/a~1", False), ("example.com/a~", True), ("example.com/~1", False), ("example.com/ab~12", False),
+                         ("example.com/a~b", True), ("example.com/a~1.txt", False), ("example.com/a~1b", True), ("example.com/~", True)):
+            with self.subTest(path=path):
+                self.assertEqual(golang.check_module_path(path) is None, ok)
+
+    def test_windows_device_names_are_refused_up_to_9_and_in_any_case(self):
+        for path, ok in (("example.com/com9", False), ("example.com/COM1", False), ("example.com/com1.txt", False), ("example.com/lpt9", False),
+                         ("example.com/nul", False), ("example.com/nul.x", False), ("example.com/Con", False), ("example.com/aux.v", False),
+                         ("example.com/prn", False), ("example.com/com10", True), ("example.com/com0", True), ("example.com/lpt10", True),
+                         ("example.com/lpt0", True), ("example.com/nuls", True), ("example.com/com1x", True)):
+            with self.subTest(path=path):
+                self.assertEqual(golang.check_module_path(path) is None, ok)
+
+    def test_the_first_element_and_the_empty_cases(self):
+        for path, ok in (("-a.com/x", False), ("a.com/-x", True), ("/a.com/x", False), ("a/b", False), ("a.b//c", False), ("a.b/c/", False),
+                         (".a.com/x", False), ("a.com/.x", False), ("a.com/x.", False), ("a..com/x", True), ("a.com/..", False),
+                         ("a.com/x y", False), ("a.com/\u00e9", False)):
+            with self.subTest(path=path):
+                self.assertEqual(golang.check_module_path(path) is None, ok)
+        self.assertEqual(golang.check_module_path("-a.com/x"), "leading dash")
+        self.assertEqual(golang.check_module_path("/a.com/x"), "empty path element")
+
+    def test_the_split_of_a_path_at_its_major_version_is_go_s_on_the_short_and_odd_paths(self):
+        cases = (("", "", "", True), ("1", "1", "", True), ("v", "v", "", True), ("v2", "v2", "", True), ("/v2", "", "/v2", True),
+                 ("a/v2", "a", "/v2", True), ("a/v1", "a/v1", "", False), ("a/v0", "a/v0", "", False), ("a/v02", "a/v02", "", False),
+                 ("a/v2.1", "a/v2.1", "", False), ("a/v10", "a", "/v10", True), ("a/v2/", "a/v2/", "", True), (".v2", ".v2", "", True),
+                 ("1.2", "1.2", "", True), ("123", "123", "", True), ("a/1.2", "a/1.2", "", True), ("a/v", "a/v", "", True),
+                 ("a/v.", "a/v.", "", False), ("/v", "/v", "", True), ("//v2", "/", "/v2", True), ("x.y/v2", "x.y", "/v2", True),
+                 ("x.y/v1", "x.y/v1", "", False), ("x.y/v3.0", "x.y/v3.0", "", False), ("x.y/v3.", "x.y/v3.", "", False),
+                 ("x.y/v.3", "x.y/v.3", "", False),
+                 ("gopkg.in/x.v2", "gopkg.in/x", ".v2", True), ("gopkg.in/x.v0", "gopkg.in/x", ".v0", True),
+                 ("gopkg.in/x.v1", "gopkg.in/x", ".v1", True), ("gopkg.in/x.v02", "gopkg.in/x.v02", "", False),
+                 ("gopkg.in/x.v2-unstable", "gopkg.in/x", ".v2-unstable", True), ("gopkg.in/x.v0-unstable", "gopkg.in/x.v0-unstable", "", False),
+                 ("gopkg.in/v2", "gopkg.in/v2", "", False), ("gopkg.in/.v2", "gopkg.in/", ".v2", True),
+                 ("gopkg.in/x.v", "gopkg.in/x.v", "", False), ("gopkg.in/123", "gopkg.in/123", "", False),
+                 ("gopkg.in/x.v2.1", "gopkg.in/x.v2.1", "", False), ("gopkg.in/x.v10", "gopkg.in/x", ".v10", True),
+                 ("gopkg.in/x.v1-unstable", "gopkg.in/x", ".v1-unstable", True), ("gopkg.in/x-unstable", "gopkg.in/x-unstable", "", False),
+                 ("gopkg.in/.v1", "gopkg.in/", ".v1", True), ("gopkg.in/x/y.v3", "gopkg.in/x/y", ".v3", True), ("gopkg.in/", "gopkg.in/", "", False),
+                 ("gopkg.in/1", "gopkg.in/1", "", False), ("gopkg.in/.v0", "gopkg.in/", ".v0", True), ("gopkg.in/y.v0", "gopkg.in/y", ".v0", True),
+                 ("gopkg.in/y.v1x", "gopkg.in/y.v1x", "", False))
+        for path, prefix, major, ok in cases:
+            with self.subTest(path=path):
+                self.assertEqual(golang.split_path_version(path), (prefix, major, ok))
+
+    def test_the_case_escape_covers_every_capital_and_nothing_next_to_them(self):
+        import string
+        self.assertEqual(golang.escape(string.ascii_uppercase), "".join("!" + c for c in string.ascii_lowercase))
+        self.assertEqual(golang.escape("@AZ[`az{"), "@!a!z[`az{")
+
+    def test_a_name_may_be_255_characters_and_a_version_100(self):
+        eco = golang.Go()
+        name255, name256 = "a.b/" + "C" * 251, "a.b/" + "C" * 252
+        self.assertEqual(eco.check_name(name255), name255)
+        with self.assertRaisesRegex(base.SpecError, "longer than 255 characters"):
+            eco.check_name(name256)
+        self.assertEqual(eco.segment(name255), "a.b/" + "!c" * 251)           # (a module path: escaped)
+        self.assertEqual(eco.segment(name256), "a.b%2FCCC" + "C" * 249)         # (too long for a path: quoted, nothing escaped)
+        v100, v101 = "v1.0.0-" + "A" * 93, "v1.0.0-" + "A" * 94
+        self.assertEqual(eco.check_version(v100), v100)
+        with self.assertRaisesRegex(base.SpecError, "invalid version"):
+            eco.check_version(v101)
+        self.assertEqual(eco.segment(v100), "v1.0.0-" + "!a" * 93)
+        self.assertEqual(eco.segment(v101), v101)
+        self.assertEqual(golang.canonical_version(v100), v100)
+        self.assertEqual(golang.canonical_version(v101), "")
+
+    def test_a_name_that_is_not_one_is_false_and_not_just_false_y(self):
+        eco = golang.Go()
+        self.assertIs(eco._name_ok("example.com/m"), True)
+        self.assertIs(eco._name_ok("nope"), False)
+        self.assertIs(eco._name_ok(None), False)
+
+    def test_the_messages_quote_at_most_60_characters_of_a_name(self):
+        eco = golang.Go()
+        long_name = "example.com/" + "a" * 70 + " b"
+        with self.assertRaises(base.SpecError) as caught:
+            eco.check_name(long_name)
+        self.assertEqual(str(caught.exception),
+                         "go: invalid module path (invalid character in a path element): " + repr(long_name[:60]) + "\u2026")
+        major = "example.com/" + "a" * 60 + "/v2"
+        with self.assertRaises(base.SpecError) as caught:
+            resolve(major, "v1.0.0", {})
+        self.assertEqual(str(caught.exception), "go: version 'v1.0.0' does not fit the major version of " + repr(major[:60]) + "\u2026")
+        entry = {"h1": HASH_A, "gomod_h1": HASH_B}
+        with self.assertRaises(base.DigestError) as caught:
+            eco.verify(DIFFLIB_ZIP, entry, major, "v1.0.0")
+        self.assertEqual(str(caught.exception), "go: the h1 hash of the download does not match the one the checksum database "
+                                                "published for " + repr(major[:60]) + "\u2026 'v1.0.0'")
+        art = {"url": "x", "container": "zip", "artifact": "gomod", "entry": entry, "filename": "x"}
+        res = base.Resolution("v1.0.0", [art], [], {"module": major})
+        mod_url = PROXY + major + "/@v/v1.0.0.mod"
+        served = Served({mod_url: b"module " + major.encode() + b"\n"})
+        with self.assertRaises(base.DigestError) as caught:
+            eco.dependencies(res, served.fetch)
+        self.assertEqual(str(caught.exception), "go: the go.mod of " + repr(major[:60]) + "\u2026 'v1.0.0' does not match the hash "
+                                                "the checksum database published")
+
+    def test_the_proxy_must_answer_for_the_version_asked_and_for_the_major_version_of_the_path(self):
+        def answer(path, asked, given):
+            doc = json.dumps({"Version": given}).encode()
+            url = PROXY + path + ("/@latest" if asked is None else f"/@v/{asked}.info")
+            return resolve(path, asked, {url: doc, SUMDB + path + "@" + given: lookup_text(path, given).encode()})[0]
+
+        self.assertEqual(answer("example.com/m", "v1.0.0", "v1.0.0")[0], "v1.0.0")
+        for path, asked, given in (("example.com/m", "v1.0.0", "v1.0.1"), ("example.com/m", "v1.0.0", "v1.0.0+incompatible"),
+                                   ("example.com/m/v2", "v2.0.0", "v2.0.1"), ("example.com/m/v2", None, "v1.5.0"), ("example.com/m", None, "v2.0.0"),
+                                   ("example.com/m/v2", None, "v3.0.0")):
+            with self.subTest(path=path, asked=asked, given=given), self.assertRaisesRegex(base.FetchError, "another version than the one asked for"):
+                answer(path, asked, given)
+        self.assertEqual(answer("example.com/m/v2", None, "v2.3.4")[0], "v2.3.4")
+        self.assertEqual(answer("example.com/m", None, "v1.9.9")[0], "v1.9.9")
+
+    def test_a_member_compressed_in_a_way_go_does_not_read_is_refused_for_that(self):
+        for name, method in (("bzip2", zipfile.ZIP_BZIP2), ("lzma", zipfile.ZIP_LZMA)):
+            out = io.BytesIO()
+            try:
+                with zipfile.ZipFile(out, "w", method) as z:
+                    z.writestr("a.go", b"package a\n" * 100)
+            except RuntimeError:
+                self.skipTest(f"no {name} here")
+            with self.subTest(method=name), self.assertRaisesRegex(base.DigestError, "uses a compression Go does not read"):
+                golang.zip_h1(out.getvalue())
+
+    def test_the_checksum_databases_record_text_is_checked_as_go_checks_it(self):
+        ok = golang._valid_record_text
+        self.assertTrue(ok("a b c\nd e f\n"))
+        self.assertFalse(ok(""))
+        self.assertFalse(ok("a b c"))                               # no newline at the end
+        self.assertFalse(ok("a b c\n\nd e f\n"))                   # an empty line
+        self.assertFalse(ok("a b c\n\n"))
+        for bad in ("\x00", "\x01", "\t", "\r", "\x1f"):
+            self.assertFalse(ok(f"a{bad}b c\n"), repr(bad))
+        self.assertTrue(ok("a \u00e9 \x7f\n"))                     # (only characters below a space are control characters here)
+
+    def test_a_record_with_a_control_character_is_refused_for_that_and_not_as_another_kind_of_line(self):
+        text = lookup_text("example.com/m", "v1.0.0", extra=f"a\x01b v1.0.0 {HASH_B}\n")
+        with self.assertRaisesRegex(base.FetchError, "sent a record that is not valid"):
+            golang.parse_lookup(text, "example.com/m", "v1.0.0")
+
+    def test_a_record_number_may_have_18_digits_and_not_19(self):
+        self.assertEqual(golang.parse_lookup(lookup_text("example.com/m", "v1.0.0", record_id="1" * 18), "example.com/m", "v1.0.0")["id"], int("1" * 18))
+        with self.assertRaisesRegex(base.FetchError, "layout it does not have"):
+            golang.parse_lookup(lookup_text("example.com/m", "v1.0.0", record_id="1" * 19), "example.com/m", "v1.0.0")
+
+    def test_go_mod_lines_as_go_reads_them_that_the_first_tests_did_not_have(self):
+        def req(text):
+            return golang.parse_gomod("module m\n" + text)["require"]
+
+        self.assertEqual(req('require "x.example/y"v1.0.0\n'), [("x.example/y", "v1.0.0", False)])
+        # a block whose first word cannot be read is skipped as a whole, as Go skips a block it does not know
+        self.assertEqual(req('"bad\\q" (\nrequire x.example/y v1.0.0\n)\nrequire a.example/b v1.0.0\n'), [("a.example/b", "v1.0.0", False)])
+        for comment, indirect in (("// indirect;", False), ("// indirect; more", True), ("// indirect", True), ("//indirect", True),
+                                  ("// indirectly", False), ("// indirect more", False)):
+            with self.subTest(comment=comment):
+                self.assertEqual(req(f"require x.example/y v1.0.0 {comment}\n"), [("x.example/y", "v1.0.0", indirect)])
+        self.assertEqual(req('require "x.example/\\"y" v1.0.0\n'), [('x.example/"y', "v1.0.0", False)])
+        self.assertEqual(req('require "x.example/y\\\\z" v1.0.0\n'), [("x.example/y\\z", "v1.0.0", False)])
+        self.assertEqual(req('require "x.example/y\\'), [])                  # (Go: unexpected EOF in string; this reader goes on)
+        self.assertEqual(req("require x.example/y v1.0.0\nrequire x.example/y v1.1.0\n"),
+                         [("x.example/y", "v1.0.0", False), ("x.example/y", "v1.1.0", False)])
 
 
 class ModuleDeclarationTests(unittest.TestCase):

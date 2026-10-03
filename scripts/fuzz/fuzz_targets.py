@@ -782,6 +782,10 @@ def crates_manifest_start():
         deps = declared.dependencies
         check(isinstance(deps, tuple) and list(deps) == sorted(set(deps)) and len(deps) <= crates.MAX_DEPS and all(valid_name(eco, d) for d in deps),
               "crates-manifest-dependencies", repr(deps)[:120])
+        check(set(declared.specs) <= set(deps) and all(v is None or (isinstance(v, str) and len(v) <= crates.MAX_SPEC) for v in declared.specs.values()),
+              "crates-manifest-specs", repr(declared.specs)[:120])
+        check(set(declared.aliases) <= set(deps) and all(isinstance(v, str) and valid_name(eco, v) for v in declared.aliases.values()),
+              "crates-manifest-aliases", repr(declared.aliases)[:120])
         check(eco.run_targets("crate", manifests, CARGO_MEMBERS) == got and eco.declared("crate", manifests, CARGO_MEMBERS) == declared,
               "crates-manifest-deterministic", "two readings of one manifest differ")
 
@@ -873,6 +877,11 @@ def go_mod_start():
         check(isinstance(deps, tuple) and list(deps) == sorted(set(deps)) and all(valid_name(eco, d) for d in deps), "go-mod-declared-dependencies",
               repr(deps)[:120])
         check(set(deps) <= {path for path, _, _ in require}, "go-mod-declared-from-requirements", repr(deps)[:120])
+        first = {}
+        for path, version, _ in require:
+            first.setdefault(path, version)
+        check(declared.specs == {d: first[d] for d in deps} and not declared.aliases, "go-mod-declared-specs",
+              f"{declared.specs!r} {declared.aliases!r}"[:120])
 
     return run, lambda: None
 

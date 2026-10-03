@@ -175,13 +175,9 @@ def check_module_path(path):
     problem = _path_problem(path, "module")
     if problem:
         return problem
-    first = path.split("/", 1)[0]
-    if not first:
-        return "leading slash"
+    first = path.split("/", 1)[0]                                 # (not empty and not led by a dash: `_path_problem` refused both)
     if "." not in first:
         return "missing dot in the first path element"
-    if first[0] == "-":
-        return "leading dash in the first path element"
     if not all(ch in _FIRST_CHARS for ch in first):
         return "invalid character in the first path element"
     if not split_path_version(path)[2]:
@@ -218,9 +214,7 @@ def canonical_version(version):
     if m is None:
         return ""
     major, minor, patch, pre, build = m.groups()
-    if minor is None or patch is None:
-        if pre is not None or build is not None:
-            return ""                                                # (`v1-pre` is not SemVer)
+    if minor is None or patch is None:                               # (`v1` and `v1.2`; `v1-pre` and `v1+b` did not match: not SemVer)
         return f"v{major}.{minor or '0'}.{patch or '0'}"
     return f"v{major}.{minor}.{patch}" + (f"-{pre}" if pre is not None else "") + ("+incompatible" if build == "incompatible" else "")
 
@@ -574,8 +568,12 @@ class Go(base.Ecosystem):
     def declared(self, kind, manifests, members):
         text = manifests.get("go.mod") if isinstance(manifests, dict) else None
         parsed = parse_gomod(text)
+        specs = {}
+        for path, version, _ in parsed["require"]:
+            if self._name_ok(path) and path not in specs:
+                specs[path] = version
         return base.Declared(parsed["module"] if parsed["module"] is not None and self._name_ok(parsed["module"]) else None,
-                             sorted({path for path, _, _ in parsed["require"] if self._name_ok(path)}))
+                             sorted(specs), specs)
 
 
 ECOSYSTEM = Go()

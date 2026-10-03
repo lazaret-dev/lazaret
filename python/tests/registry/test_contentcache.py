@@ -88,18 +88,41 @@ class KeyTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             cc.file_key("verdict", None, "x", None)
 
-    def test_a_cross_file_key_is_of_the_files_and_not_of_their_order(self):
-        files = [("a.py", "import b"), ("b.py", "x = 1"), ("c/d.py", "y")]
+    def test_a_cross_file_key_is_of_the_files_in_the_order_given_and_their_languages(self):
+        files = [("a.py", "py", "import b"), ("b.py", "py", "x = 1"), ("c/d.py", "py", "y")]
         k = cc.cross_file_key(files, {"one_package": True})
         self.assertEqual(k[0], "cross-file")
-        self.assertEqual(k, cc.cross_file_key(list(reversed(files)), {"one_package": True}))
+        self.assertEqual(k, cc.cross_file_key(list(files), {"one_package": True}))
+        self.assertNotEqual(k, cc.cross_file_key(list(reversed(files)), {"one_package": True}))   # (a limit makes order count)
+        self.assertNotEqual(k, cc.cross_file_key(files[:1] + files[2:] + files[1:2], {"one_package": True}))
         self.assertNotEqual(k, cc.cross_file_key(files, {"one_package": False}))
         self.assertNotEqual(k, cc.cross_file_key(files[:2]))
-        self.assertNotEqual(k, cc.cross_file_key([("a.py", "import b"), ("b.py", "x = 2"), ("c/d.py", "y")],
+        self.assertNotEqual(k, cc.cross_file_key([("a.py", "py", "import b"), ("b.py", "py", "x = 2"), ("c/d.py", "py", "y")],
                                                  {"one_package": True}))
-        self.assertNotEqual(k, cc.cross_file_key([("z.py", "import b")] + files[1:], {"one_package": True}))
-        self.assertNotEqual(cc.cross_file_key([("ab", "c")]), cc.cross_file_key([("a", "bc")]))   # (path and content do not run together)
+        self.assertNotEqual(k, cc.cross_file_key([("z.py", "py", "import b")] + files[1:], {"one_package": True}))
+        self.assertNotEqual(k, cc.cross_file_key([("a.py", "js", "import b")] + files[1:], {"one_package": True}))
         self.assertNotEqual(k, cc.cross_file_key(files, {"one_package": True}, pack="p"))
+        self.assertNotEqual(k, cc.cross_file_key(files, {"one_package": True}, engine="e"))
+
+    def test_the_parts_of_a_cross_file_key_do_not_run_together(self):
+        one = cc.cross_file_key([("ab", "c", "d")])
+        self.assertNotEqual(one, cc.cross_file_key([("a", "bc", "d")]))
+        self.assertNotEqual(one, cc.cross_file_key([("ab", "cd", "")]))
+        self.assertNotEqual(cc.cross_file_key([("a", "b", "c"), ("d", "e", "f")]), cc.cross_file_key([("a", "b", "c\nd"), ("e", "f", "")]))
+        self.assertNotEqual(cc.cross_file_key([("a", None, "x")]), cc.cross_file_key([("a", "None", "x")]))   # (no language is not the language "None")
+
+    def test_a_cross_file_key_wants_a_path_a_language_and_a_content_for_every_file(self):
+        for bad in ([("a.py", "x")], [("a.py", "py", "x", "extra")], ["a.py"], ["abc"], [None]):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                cc.cross_file_key(bad)
+
+    def test_two_flights_for_one_list_in_another_order_are_two_questions(self):
+        memo, work = cc.Memo(), Counter(["x"])
+        files = [("a", "py", "1"), ("b", "py", "2")]
+        memo.get_or_compute(cc.cross_file_key(files), work)
+        memo.get_or_compute(cc.cross_file_key(list(reversed(files))), work)
+        memo.get_or_compute(cc.cross_file_key(files), work)
+        self.assertEqual(work.calls, 2)
 
 
 class OneKeyTests(unittest.TestCase):
