@@ -56,7 +56,6 @@ import http.client
 import http.server
 import ipaddress
 import json
-import multiprocessing
 import os
 import platform
 import re
@@ -73,7 +72,7 @@ import urllib.request
 
 from lazaret.scanner import core as lazaret
 from lazaret.scanner import sca, timings
-from lazaret.registry import keepalive as keepalive_, pmsettings, repo
+from lazaret.registry import keepalive as keepalive_, pmsettings, repo, scanpool
 
 #: Releases younger than this are held back or blocked (--min-age).
 DEFAULT_MIN_AGE = 2 * 86400
@@ -495,17 +494,22 @@ def _scan_one(data, container, kind, timeout, timed=False):
 
 
 class Scanner:
-    """Scans artifacts in memory (lazaret.registry.repo._scan_artifact),
-    several at a time in worker processes (--jobs: scanning is CPU-bound);
-    here, one at a time, when --jobs is 1 or the workers can't run."""
+    """Scans artifacts in memory (lazaret.registry.repo._scan_artifact), in worker processes
+    (registry/scanpool.py): each with an address-space limit and its share of the cores, given the
+    archive as a file, and replaced when it dies. `isolate` None is the old default, workers when
+    `jobs` is over 1; True is workers for any `jobs`; False scans in this process, one at a time
+    (`--no-isolate`). When workers cannot be started at all, it scans here too and says why (`note`)."""
 
-    def __init__(self, cache, timeout=repo.SCAN_TIMEOUT, jobs=1):
+    def __init__(self, cache, timeout=repo.SCAN_TIMEOUT, jobs=1, isolate=None, memory_mb=scanpool.DEFAULT_MEMORY_MB,
+                 note=None):
         self.cache = cache
         self.timeout = timeout
         self.jobs = jobs
+        self.isolate = (jobs > 1) if isolate is None else bool(isolate)
+        self.memory_mb = memory_mb
+        self._note = note
         self._pool = None
-        self._no_pool = jobs <= 1
-        self._stuck = False
+        self._no_pool = not self.isolate
         self._lock = threading.Lock()
         self._here = threading.Lock()
 
@@ -519,12 +523,19 @@ class Scanner:
     def _get_pool(self):
         with self._lock:
             if self._pool is None and not self._no_pool:
-                try:
-                    self._pool = concurrent.futures.ProcessPoolExecutor(
-                        max_workers=self.jobs, mp_context=multiprocessing.get_context("spawn"))
-                except (OSError, ValueError, ImportError, NotImplementedError):
-                    self._no_pool = True
+                self._pool = scanpool.WorkerPool(self.jobs, _scan_one, memory_mb=self.memory_mb)
             return self._pool
+
+    def _scan_here(self):
+        """From now on, scan in this process (no worker could be started)."""
+        with self._lock:
+            first = not self._no_pool
+            self._no_pool = True
+            pool, self._pool = self._pool, None
+        if pool is not None:
+            pool.close()
+        if first and self._note is not None:
+            self._note("lazaret guard: no scan worker could be started; scanning in this process")
 
     def scan(self, data, container, kind):
         """-> {verdict, reason, indicators}; ScanError when the scanner can't
@@ -533,24 +544,19 @@ class Scanner:
         if pool is not None:
             kept = timings.current()                 # the run keeps timings: the worker's come back with its answer
             try:
-                future = pool.submit(_scan_one, data, container, kind, self.timeout, *((True,) if kept is not None else ()))
-            except (RuntimeError, OSError):
-                future = None
-            if future is not None:
-                try:
-                    with timings.span("scan", "wait for worker"):
-                        answer = future.result(timeout=2 * self.timeout + 60)
-                    if kept is not None and isinstance(answer, dict):
-                        kept.merge(answer.pop("timings", None))
-                    return answer
-                except concurrent.futures.TimeoutError:
-                    self._stuck = True
-                    raise ScanError("the scan did not finish") from None
-                except concurrent.futures.process.BrokenProcessPool:
-                    with self._lock:
-                        self._no_pool = True        # scan here from now on
-                except Exception as exc:
-                    raise ScanError(f"the scan failed ({type(exc).__name__})") from None
+                answer = pool.run(data, container, kind, self.timeout, kept is not None)
+            except scanpool.Unavailable:
+                self._scan_here()
+            except scanpool.Hung:
+                raise ScanError("the scan did not finish") from None
+            except scanpool.Died as exc:
+                raise ScanError(str(exc)) from None
+            except Exception as exc:
+                raise ScanError(f"the scan failed ({type(exc).__name__})") from None
+            else:
+                if kept is not None and isinstance(answer, dict):
+                    kept.merge(answer.pop("timings", None))
+                return answer
         with self._here:
             try:
                 return _scan_one(data, container, kind, self.timeout)
@@ -560,15 +566,8 @@ class Scanner:
     def close(self):
         with self._lock:
             pool, self._pool = self._pool, None
-        if pool is None:
-            return
-        if self._stuck:                             # a worker that never finished: stop it
-            for proc in list(getattr(pool, "_processes", {}).values()):
-                try:
-                    proc.terminate()
-                except (OSError, AttributeError):
-                    pass
-        pool.shutdown(wait=not self._stuck, cancel_futures=True)
+        if pool is not None:
+            pool.close()
 
 
 # ---------------- Digests ----------------
@@ -954,7 +953,8 @@ class Context:
         self.started = now()
         self.cutoff = self.started - datetime.timedelta(seconds=self.min_age) if self.min_age else None
         self.cache = None if opts.no_cache else VerdictCache(default_cache_path())
-        self.scanner = Scanner(self.cache, timeout=opts.scan_timeout, jobs=opts.jobs)
+        self.scanner = Scanner(self.cache, timeout=opts.scan_timeout, jobs=opts.jobs, isolate=getattr(opts, "isolate", None),
+                               memory_mb=getattr(opts, "worker_memory", scanpool.DEFAULT_MEMORY_MB), note=self.say)
         self.checks = []
         self.lock = threading.Lock()
         self.out = out or sys.stderr
@@ -3134,7 +3134,14 @@ def build_parser():
                          "manager, the rest")
     ap.add_argument("--no-cache", action="store_true", help="scan every artifact again (no verdict cache)")
     ap.add_argument("--jobs", type=int, default=DEFAULT_JOBS, metavar="N",
-                    help=f"processes that scan at once (default {DEFAULT_JOBS}; 1 scans in this process)")
+                    help=f"scan workers that run at once (default {DEFAULT_JOBS}); each is a process of its own, "
+                         "with the cores shared out among them")
+    ap.add_argument("--no-isolate", dest="isolate", action="store_false",
+                    help="scan in this process, one archive at a time, instead of in worker processes (for a "
+                         "platform where workers cannot start; a scan that grows too large then grows this process)")
+    ap.add_argument("--worker-memory", type=int, default=scanpool.DEFAULT_MEMORY_MB, metavar="MB",
+                    help="address space one scan worker may use, on platforms that have such a limit "
+                         f"(default {scanpool.DEFAULT_MEMORY_MB}; 0 for none); a scan over it is not cleared")
     ap.add_argument("--scan-timeout", type=float, default=repo.SCAN_TIMEOUT, metavar="SEC",
                     help=f"seconds to scan one artifact (default {repo.SCAN_TIMEOUT:g})")
     ap.add_argument("tool", choices=TOOLS, help="the package manager")
@@ -3171,6 +3178,8 @@ def _run(opts):
         opts.min_age = parse_duration(opts.min_age)
         if opts.jobs < 1:
             raise GuardError("--jobs: at least 1")
+        if opts.worker_memory < 0:
+            raise GuardError("--worker-memory: MB, or 0 for no limit")
         ctx = Context(opts)
         tool, args = opts.tool, list(opts.args)
         ctx.say(f"lazaret guard: {tool} {' '.join(args)}".rstrip())

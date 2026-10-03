@@ -5,7 +5,6 @@ back), and the package manager's runs in `lazaret.scanner.timings` spans; `--tim
 table on stderr and `--json` carries the report. Nothing here needs a package manager, a
 registry or the native engine: the scan itself is a stand-in and the server is local."""
 
-import concurrent.futures
 import io
 import json
 import os
@@ -21,20 +20,19 @@ from tests.registry.test_guard import _Server, context
 FAKE = {"verdict": "CLEAN", "verdictReason": "", "issues": []}
 
 
-class FakePool:
-    """A pool that runs the job here, as a worker would, and answers with a finished Future."""
+class FakeWorkers:
+    """A `scanpool.WorkerPool` that runs the job here, as a worker would (and keeps its span)."""
 
     def __init__(self):
         self.submitted = []
 
-    def submit(self, fn, *args):
-        self.submitted.append(args)
-        future = concurrent.futures.Future()
-        try:
-            future.set_result(fn(*args))
-        except BaseException as exc:                        # noqa: BLE001 - what a worker would send back
-            future.set_exception(exc)
-        return future
+    def run(self, data, container, kind, timeout, timed=False):
+        self.submitted.append((data, container, kind, timeout, timed))
+        with timings.span("scan", "wait for worker"):
+            return guard._scan_one(data, container, kind, timeout, timed)
+
+    def close(self):
+        pass
 
 
 class NetworkTests(unittest.TestCase):
@@ -83,18 +81,18 @@ class ScanTests(unittest.TestCase):
 
     def test_a_worker_is_asked_for_its_timings_only_when_they_are_kept(self):
         s = guard.Scanner(None, timeout=10, jobs=2)
-        s._pool = FakePool()
+        s._pool = FakeWorkers()
         s.scan(b"d", "tgz", "npm")
-        self.assertEqual(s._pool.submitted[-1][-1], 10)                     # (data, container, kind, timeout): no flag
+        self.assertEqual(s._pool.submitted[-1], (b"d", "tgz", "npm", 10, False))
         with timings.capture():
             answer = s.scan(b"d", "tgz", "npm")
-        self.assertEqual(s._pool.submitted[-1][-1], True)
+        self.assertEqual(s._pool.submitted[-1], (b"d", "tgz", "npm", 10, True))
         self.assertNotIn("timings", answer)                                 # merged and taken out, not passed on
         self.assertEqual(set(answer), {"verdict", "reason", "indicators"})
 
     def test_the_workers_report_is_merged_with_the_wait(self):
         s = guard.Scanner(None, timeout=10, jobs=2)
-        s._pool = FakePool()
+        s._pool = FakeWorkers()
         with timings.capture() as t:
             s.scan(b"d", "tgz", "npm")
             s.scan(b"d", "tgz", "npm")
