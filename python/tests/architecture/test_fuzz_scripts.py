@@ -1247,8 +1247,6 @@ class ScriptRules(unittest.TestCase):
         self.assertTrue(all(n.startswith("fuzz_") for n in names), names)
 
 
-@unittest.skipUnless(os.path.exists(WORKFLOW), ".github/workflows/fuzz.yml is added by the repository owner "
-                     "(the tools that wrote the rest cannot write under .github/); remove this skip once it is in")
 class WorkflowTests(unittest.TestCase):
     """The rules ci.yml states, for the file that runs the long fuzz."""
 

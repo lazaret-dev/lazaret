@@ -871,8 +871,6 @@ class SCABundleTests(unittest.TestCase):
             self.script.child("measure", "x")
 
 
-@unittest.skipUnless(os.path.exists(WORKFLOW), ".github/workflows/perf.yml is added by the repository owner "
-                     "(the tools that wrote the rest cannot write under .github/); remove this skip once it is in")
 class WorkflowTests(unittest.TestCase):
     """The rules ci.yml states, for the file that runs the check."""
 
