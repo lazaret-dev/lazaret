@@ -257,6 +257,35 @@ every release whose verdict or strong findings moved — read each one —
 and `--aggregate-only` gives the counts alone, for the holdout. The
 samples themselves are kept outside the repository (`STRUCTURE.md` §6).
 
+**The popular releases: the release gate's benign set.** The benchmark's 429
+popular packages are mostly small libraries, and they did not hold the nine
+popular releases 0.1.8 made SUSPICIOUS (vite, vitest, monaco-editor,
+coverage, numba, future, sympy, ipython, kubernetes: B-1).
+`scripts/popular/releases.jsonl` pins 1,205 more: the latest releases, on
+Oct 3, 2026, of popular npm and PyPI packages the benchmark does not hold,
+each the one file the guard scans (npm's tarball; for PyPI the file pip
+installs on Linux x86-64), by version and sha256.
+
+```
+python3 scripts/popular/popular.py fetch --cache DIR --manifest DIR/manifest.jsonl
+python3 scripts/bench.py run DIR/manifest.jsonl RUN.jsonl      # looped under a 45 s timeout
+python3 scripts/bench.py compare BEFORE.jsonl RUN.jsonl
+```
+
+`fetch` downloads them once (about 630 MB; a file already in DIR is hashed
+again, other bytes than the pinned ones are refused). Run the set before and
+after a detection change and before a release, as the benchmark: no release
+may be SUSPICIOUS, and every verdict or strong finding that moves is read.
+0.1.8 makes the nine SUSPICIOUS on it, and 0.1.9 none (36 WARN, and 1
+INCOMPLETE: sharp's 16 MB libvips library, counted as unscanned code). At
+each release, refresh it: `popular.py pin --top 800,400 --exclude FILE
+--cache DIR` takes the latest release of the first 800 npm and 400 PyPI
+names of `python/src/lazaret/registry/popular_names.json` (the most
+downloaded), less the benchmark's benign names, which FILE lists, and
+rewrites the file; a new release of a popular package is what this set
+exists to catch. `popular.py pin npm:vite@8.3.2 …` adds or moves single
+releases, and `popular.py check` validates the file.
+
 ---
 
 ## 5. Bounded-work checks
