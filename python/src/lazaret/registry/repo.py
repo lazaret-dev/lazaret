@@ -85,6 +85,13 @@ MAX_MEMBER = _env_number("LAZARET_MAX_SOURCE_BYTES", 16_000_000)
 MAX_FILES = 20_000         # files per package (numpy's sdist alone has >4,000)
 SAMPLE = 8192              # header/entropy sample read from oversized files
 # Stored scans from another engine version are scanned again (has_scan).
+# 2.26: the in-sample misses examined (D-1, B-4): a command that downloads
+#      or runs code written to a shell's startup file is persistence (any
+#      command, to one named only in strings the script decodes: alinet),
+#      the request client's calls requests (and what they are given
+#      received), a parameter whose default is the script's own address
+#      that address when the caller gives none, a member or require() named
+#      by a constant read by that name
 # 2.25: popular packages' false positives (B-1): a library's request for an
 #      address it is given or works out is not the script's own download, a
 #      server's address and options not data it receives, a selection of
@@ -196,7 +203,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.25.0"
+ENGINE_VERSION = "2.26.0"
 
 # ---------------- Trust-chain limits (F9/G14/F10) ----------------
 # Only these hosts may ever be fetched, over https only, and redirects to any

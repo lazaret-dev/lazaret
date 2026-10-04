@@ -1,6 +1,6 @@
 {
  "format": 1,
- "rule_set": "2.25.0",
+ "rule_set": "2.26.0",
  "source": "lazaret.scanner.core, extracted by scripts/make_rust_tables.py \u2014 do not edit",
  "values": {
   "ALWAYS_PRUNE_DIRS": {
@@ -12531,7 +12531,7 @@
   },
   "_PERSIST_WRITE_RE": {
    "flags": "",
-   "re": "\\b(?:writeFileSync|writeFile|appendFileSync|appendFile|createWriteStream|outputFileSync|outputFile|outputJsonSync|outputJson|writeJsonSync|writeJson|copyFileSync|copyFile|cpSync|renameSync|symlinkSync|write_text|write_bytes|createOrUpdateFileContents)\\s*\\(|\\bjson\\.dump\\s*\\(|\\bshutil\\.(?:copy\\w*|move)\\s*\\(|\\bopen\\s*\\([^()\\n]{0,300}?[\"'][wax]b?\\+?[\"']"
+   "re": "\\b(?:writeFileSync|writeFile|appendFileSync|appendFile|createWriteStream|outputFileSync|outputFile|outputJsonSync|outputJson|writeJsonSync|writeJson|copyFileSync|copyFile|cpSync|renameSync|symlinkSync|write_text|write_bytes|createOrUpdateFileContents)\\s*\\(|\\bjson\\.dump\\s*\\(|\\bshutil\\.(?:copy\\w*|move)\\s*\\(|\\bopen\\s*\\((?:[^()\\n]|\\([^()\\n]{0,200}\\)){0,300}?[\"'][wax]b?\\+?[\"']"
   },
   "_PERSIST_WRITE_SRC": {
    "value": "\\b(?:writeFileSync|writeFile|appendFileSync|appendFile|createWriteStream|outputFileSync|outputFile|outputJsonSync|outputJson|writeJsonSync|writeJson|copyFileSync|copyFile|cpSync|renameSync|symlinkSync|write_text|write_bytes|createOrUpdateFileContents)\\s*\\(|\\bjson\\.dump\\s*\\(|\\bshutil\\.(?:copy\\w*|move)\\s*\\(|\\bopen\\s*\\([^()\\n]{0,300}?[\"'][wax]b?\\+?[\"']"
@@ -14608,6 +14608,13 @@
   "_SVC_PYCRON_WRITE_SRC": {
    "value": "\\.write\\s{0,20}\\("
   },
+  "_SVC_RC_ARGS_MAX": {
+   "value": 400
+  },
+  "_SVC_RC_CONTENT_CALL_RE": {
+   "flags": "",
+   "re": "\\b(?:writeFileSync|writeFile|appendFileSync|appendFile|outputFileSync|outputFile|write_text|write|writelines)\\s*\\("
+  },
   "_SVC_REG_WRITE_RE": {
    "flags": "i",
    "re": "\\breg(?:\\.exe)?[\"'`]?(?:[ \\t]+|\\s{0,20},\\s{0,20}\\[?\\s{0,20}[\"'`])add\\b|\\b(?:New|Set)-ItemProperty\\b|\\bSetValueEx\\b|\\bSetValue\\s{0,20}\\(|\\bputValue\\b|\\bRegSetValue|\\bREG_(?:EXPAND_)?SZ\\b|\\bKEY_(?:SET_VALUE|WRITE|ALL_ACCESS)\\b"
@@ -14631,6 +14638,18 @@
   },
   "_SVC_SCHTASKS_SRC": {
    "value": "\\bschtasks(?:\\.exe)?[\"'`]?(?:[ \\t]+|\\s{0,20},\\s{0,20}\\[?\\s{0,20}[\"'`])[/-]create\\b"
+  },
+  "_SVC_SHELL_RC_RE": {
+   "flags": "",
+   "re": "[\"'`][^\\s\"'`]{0,120}?(?<![\\w.-])\\.(?:bashrc|bash_profile|bash_login|zshrc|zshenv|zprofile|zlogin|kshrc|mkshrc|cshrc|tcshrc)[\"'`]|[\"'`][^\\s\"'`]{0,120}?[/\\\\~]\\.profile[\"'`]|[\"'`][^\\s\"'`]{0,120}?(?<![\\w.-])fish[/\\\\]config\\.fish[\"'`]"
+  },
+  "_SVC_SHELL_RC_RUN_RE": {
+   "flags": "",
+   "re": "\\b(?:curl|wget|Invoke-WebRequest|Invoke-RestMethod|iwr|irm|certutil|bitsadmin)\\b|https?://|\\|\\s*(?:ba|z|k|da)?sh\\b|\\b(?:ba|z|k|da)?sh\\s+-c\\b|\\b(?:node|nodejs|python[23]?|perl|ruby|php|bun|deno|osascript|powershell|pwsh)(?:\\.exe)?[ \\t]+(?:-[A-Za-z]|[\\w./~$\\\\{\\\"'])|\\bnohup\\b|\\bsetsid\\b|\\bbase64\\s+(?:-d|-D|--decode)\\b|[^&\\s]\\s*&\\s*(?:disown\\s*)?(?:\\\\[nr]|[\\\"'`])"
+  },
+  "_SVC_SHELL_RC_SH_RE": {
+   "flags": "",
+   "re": "(?:~|\\$\\{?HOME\\}?)[/\\\\]\\.(?:bashrc|bash_profile|bash_login|zshrc|zshenv|zprofile|zlogin|kshrc|mkshrc|cshrc|tcshrc|profile)(?![\\w.-])|(?:~|\\$\\{?HOME\\}?)[/\\\\]\\.config[/\\\\]fish[/\\\\]config\\.fish(?![\\w.-])"
   },
   "_SVC_STARTUP_RE": {
    "flags": "i",

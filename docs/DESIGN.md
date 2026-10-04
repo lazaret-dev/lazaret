@@ -550,8 +550,13 @@ object's `RegisterTaskDefinition`), the Startup folder or an XDG autostart
 entry written. A line over `_SVC_LINE_MAX` characters (minified code) is not
 read as one statement, so a bundle that names a unit directory in one place
 and writes a file in another is not one; at import time a library that
-manages services is normal, and shell rc files are left out (too many
-installers append a PATH line). The self-read
+manages services is normal. A shell's startup file (0.1.9,
+`shell_rc_written`) counts only when the command written there downloads
+or runs code (`_SVC_SHELL_RC_RUN_RE` in the write call's arguments, or in
+the text a name among them is first given, or before the `>>` of the
+shell's spelling), or when the script names the file only in strings it
+decodes as it runs (alinet): installers append PATH lines, and CLIs their
+completion scripts (@asyncapi/cli's `postinstall`). The self-read
 test reads a file back asynchronously too: a `readFile` callback's data, a
 `.then()` parameter within `_SELF_READ_THEN_SPAN` of the read, Python's
 `with open(p) as f`, when the path names the file itself or a data file next
@@ -1125,15 +1130,23 @@ comprehensive, so weigh marginal value against FP risk):
     a load-testing flood (poppo213) and a wheel with no code at all
     (lightgboost). (@fnos/app's runner is read since the character-code
     decoder: decoded, it sends the machine's host name over the network.)
-  - **Members read through constants**: react-zutils 1.0.1's stealer, once
-    its XOR strings are decoded, calls everything through names its comma
-    declarations give strings (`R='copyFile'` … `p[R](a, l)`, `U[f](l)` for
-    `new sqlite3.Database(l)`), and the same short names hold other strings
-    in other functions; the flow cannot follow what it reads. It and
-    cycalculator-ye51 (an oastify.com address) rested on a list of services,
-    now a label: WARN since the behaviour pass. Read a constant member by the
-    declaration that last gave its name a string before it (as proxy objects
-    are), then let the flow follow.
+  - **Members read through constants** (built in 0.1.9): a member named by
+    a name bound once to a string (`x[N]`, a comma expression's last value
+    included) and `require()` of such a name are read by that name, and the
+    `request` client is a client; react-zutils 1.0.1 is SUSPICIOUS.
+    cycalculator-ye51 posts one variable (`FLAG`, a CTF's) to an
+    oastify.com address, which an SDK does with its key: WARN, by design.
+- *What the in-sample misses show* (0.1.9, all 67 releases the benchmark
+  doesn't call SUSPICIOUS read; 3 found since): another package's code
+  rewritten at import time (@dinzid04/libsignal-node replaces a file of
+  `@whiskeysockets/baileys`), a `.env` read under base64 twice and sent by
+  a second file whose function a computed destructuring key imports
+  (main-util-validation, at use time), JS-Confuser's string concealing
+  (panel-keylogger-sim), a package manager install run at import time
+  (crypto-hash-sdk), a `require()` of a package the manifest doesn't
+  declare (dotenv-express), and a file written from a request callback's
+  data, then run. The rest put their payload outside the release, are
+  proofs of concept, CTFs or empty samples, or ship a compiled binary.
   - **Padding past the window**: in a text over `_LD_LONG` the flow
     follows a name only `_LD_NEAR` characters from where it was given data,
     and reads only `_DD_MAX_ASSIGNS` assignments, so a script padded past

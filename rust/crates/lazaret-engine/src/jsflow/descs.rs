@@ -133,6 +133,62 @@ impl Program {
         out
     }
 
+    /// The string a node holds: a string literal, a template with no
+    /// substitution, or (the supply-chain model) a name bound once, in its
+    /// own module, to one of those or to a sequence ending in one: what
+    /// decoding an obfuscated file leaves, `const N = 'get'; x[N](…)`,
+    /// `require(i)` with `i = 'child_process'`.
+    pub fn const_str(&self, m: ModId, node: NodeId, scope: ScopeId) -> Option<PyStr> {
+        let a = Ast(&self.mods[m as usize].tree);
+        let literal = |v: NodeId| -> Option<PyStr> {
+            if let Some(s) = a.str_value(v) {
+                return Some(s.to_vec());
+            }
+            if a.kind(v) == Kind::TemplateLiteral && a.list(v, jt::B).is_empty() {
+                return a.list(v, jt::A).first().map(|&q| a.s(q, jt::A).to_vec());
+            }
+            None
+        };
+        if let Some(s) = literal(node) {
+            return Some(s);
+        }
+        if self.cfg.supply.is_none() || a.kind(node) != Kind::Identifier {
+            return None;
+        }
+        let b = self.mods[m as usize].bind_at[node as usize];
+        let b = if b == UNSET {
+            self.lookup(scope, a.name(node))?
+        } else if b == GLOBAL {
+            return None;
+        } else {
+            b
+        };
+        let bind = &self.binds[b as usize];
+        if bind.module != m || bind.writes.len() != 1 {
+            return None;
+        }
+        match &bind.writes[0] {
+            Write::Init { node: v, path, .. } if path.is_empty() => {
+                let v = if a.kind(*v) == Kind::SequenceExpression { *a.list(*v, jt::A).last()? } else { *v };
+                literal(v)
+            }
+            _ => None,
+        }
+    }
+
+    /// A member expression's property name: a literal's (Ast::prop_name), or
+    /// a constant's (const_str: `x[N]`).
+    pub fn member_name(&self, m: ModId, node: NodeId, scope: ScopeId) -> Option<PyStr> {
+        let a = Ast(&self.mods[m as usize].tree);
+        if let Some(n) = a.prop_name(node) {
+            return Some(n);
+        }
+        if !a.computed(node) {
+            return None;
+        }
+        self.const_str(m, a.at(node, jt::B), scope)
+    }
+
     /// What an expression may be.
     pub fn descs_of_expr(&mut self, m: ModId, node: NodeId, scope: ScopeId, depth: u32) -> Vec<D> {
         use jt::{A, B, C};
@@ -215,17 +271,10 @@ impl Program {
                     callee_descs = Some(ds);
                 }
                 if is_require && !args.is_empty() {
-                    let a = Ast(&self.mods[m as usize].tree);
                     let arg = args[0];
                     let fmod = self.fns[self.scopes[scope as usize].fid as usize].module;
-                    if let Some(v) = a.str_value(arg) {
-                        let v = v.to_vec();
+                    if let Some(v) = self.const_str(m, arg, scope) {
                         return vec![self.resolve_spec(fmod, &v)];
-                    }
-                    if a.kind(arg) == Kind::TemplateLiteral && a.list(arg, B).is_empty() {
-                        let q = a.list(arg, A);
-                        let raw = q.first().map(|&e| a.s(e, A).to_vec()).unwrap_or_default();
-                        return vec![self.resolve_spec(fmod, &raw)];
                     }
                 }
                 if !is_require && callee_descs.as_deref().is_some_and(node_made) {
@@ -252,10 +301,7 @@ impl Program {
                 }
             }
             Kind::MemberExpression => {
-                let (name, obj) = {
-                    let a = Ast(&self.mods[m as usize].tree);
-                    (a.prop_name(node), a.at(node, A))
-                };
+                let (name, obj) = (self.member_name(m, node, scope), Ast(&self.mods[m as usize].tree).at(node, A));
                 let name = match name {
                     None => return unknown(),
                     Some(n) => n,

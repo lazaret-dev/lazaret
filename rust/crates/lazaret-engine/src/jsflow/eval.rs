@@ -1173,7 +1173,11 @@ impl<'p> Eval<'p> {
         let mut text = (*ctext).clone();
         text.push(0x28);
         let name: Option<PyStr> = if member {
-            self.a().prop_name(callee)
+            if self.p.cfg.supply.is_some() {
+                self.p.member_name(self.m, callee, scope)
+            } else {
+                self.a().prop_name(callee)
+            }
         } else if self.a().is_ident(callee) {
             Some(self.a().name(callee).to_vec())
         } else {

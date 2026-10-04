@@ -1370,7 +1370,160 @@ pub fn service_reasons(p: &Pack, text: &[u32]) -> Vec<PyStr> {
     if autostart.search(text).is_some() && (writes || shell_writes(p, text, autostart)) {
         reasons.push(u("adds a desktop autostart entry"));
     }
+    if let Some(file) = shell_rc_written(p, text, writes, false) {
+        reasons.push(shell_rc_reason(&file));
+    }
     reasons
+}
+
+// ---------------- a shell's startup file (B-4) ----------------
+
+/// The reason for a command written to a shell's startup file.
+fn shell_rc_reason(file: &[u32]) -> PyStr {
+    cat(&[&u("adds a command to a shell's startup file ("), head(file, 40), &u(")")])
+}
+
+/// The file's name, from the path a pattern found (its last part, unquoted).
+fn rc_name(found: &[u32]) -> PyStr {
+    let file = &found[found.iter().rposition(|&ch| ch == c('/') || ch == c('\\')).map(|k| k + 1).unwrap_or(0)..];
+    file.iter().copied().filter(|&ch| !matches!(ch, 0x22 | 0x27 | 0x60)).collect()
+}
+
+/// Whether the text names a shell's startup file, in either spelling.
+fn shell_rc_named(p: &Pack, text: &[u32]) -> bool {
+    p.re("_SVC_SHELL_RC_RE").search(text).is_some() || p.re("_SVC_SHELL_RC_SH_RE").search(text).is_some()
+}
+
+/// The shell startup file (.bashrc, .zshrc, .profile, fish's config.fish, …)
+/// the script writes a command to that downloads or runs code: every line of
+/// it runs at every shell start (MITRE ATT&CK T1546.004). -> the file's name.
+/// A line that only sets a variable, an alias or a completion is not judged:
+/// CLIs add those (@asyncapi/cli's `postinstall` appends its completion
+/// script to the .zshrc), and what they write comes from a command's output.
+/// `any`: whatever the line, for a file named only in strings the script
+/// decodes as it runs (install_script_risk_with: alinet's install script puts
+/// its own command first in the startup file its $SHELL reads).
+fn shell_rc_written(p: &Pack, text: &[u32], writes: bool, any: bool) -> Option<PyStr> {
+    let (rc, sh) = (p.re("_SVC_SHELL_RC_RE"), p.re("_SVC_SHELL_RC_SH_RE"));
+    let runs = p.re("_SVC_SHELL_RC_RUN_RE");
+    // the file API: a path to one, written to, and what is written
+    if writes {
+        if let Some(m) = rc.search(text) {
+            if any || written_runs(p, text, runs) {
+                return Some(rc_name(m.group0()));
+            }
+        }
+    }
+    // the shell's spelling (`echo '…' >> ~/.bashrc`, `… | tee -a $HOME/.profile`): what the line writes
+    let shell_write = p.re("_PERSIST_SHELL_WRITE_RE");
+    let (max, line_max) = (p.usize("_PERSIST_MAX_LINES"), p.usize("_SVC_LINE_MAX"));
+    let mut m = sh.search(text);
+    let mut lines = 0usize;
+    while let Some(mm) = m {
+        if lines >= max {
+            break;
+        }
+        let start = pystr::rfind_char(text, c('\n'), 0, mm.start()).map(|i| i + 1).unwrap_or(0);
+        let end = pystr::find_char(text, c('\n'), mm.end()).unwrap_or(text.len());
+        if end - start <= line_max
+            && shell_write.search_at(text, start as isize, end as isize).is_some()
+            && (any || runs.search_at(text, start as isize, mm.start() as isize).is_some())
+        {
+            return Some(rc_name(mm.group0()));
+        }
+        lines += 1;
+        m = sh.search_at(text, end as isize, text.len() as isize);
+    }
+    None
+}
+
+/// Whether what a script writes downloads or runs code: the arguments of a
+/// write call, or the text a name among them is first given (`LINE = '…'`
+/// then `f.write(LINE)`).
+fn written_runs(p: &Pack, text: &[u32], runs: &crate::pyre::Regex) -> bool {
+    let call = p.re("_SVC_RC_CONTENT_CALL_RE");
+    let (max, span) = (p.usize("_PERSIST_MAX_LINES"), p.usize("_SVC_RC_ARGS_MAX"));
+    let mut names: Vec<&[u32]> = Vec::new();
+    let mut m = call.search(text);
+    let mut calls = 0usize;
+    while let Some(mm) = m {
+        if calls >= max {
+            break;
+        }
+        calls += 1;
+        let end = args_end(text, mm.end(), span);
+        if runs.search_at(text, mm.end() as isize, end as isize).is_some() {
+            return true;
+        }
+        for name in arg_names(&text[mm.end()..end]) {
+            if names.len() < 16 && !names.contains(&name) {
+                names.push(name);
+            }
+        }
+        m = call.search_at(text, end as isize, text.len() as isize);
+    }
+    // (one hop, for at most 16 names: each is looked for once)
+    names.into_iter().any(|name| {
+        first_given(text, name).is_some_and(|at| {
+            let stop = pystr::find_char(text, c('\n'), at).unwrap_or(text.len()).min(at + span);
+            runs.search_at(text, at as isize, stop as isize).is_some()
+        })
+    })
+}
+
+/// Where a call's arguments end: its closing parenthesis, or `span` characters on.
+fn args_end(text: &[u32], from: usize, span: usize) -> usize {
+    let stop = (from + span).min(text.len());
+    let mut depth = 1usize;
+    for (i, &ch) in text[from..stop].iter().enumerate() {
+        if ch == c('(') {
+            depth += 1;
+        } else if ch == c(')') {
+            depth -= 1;
+            if depth == 0 {
+                return from + i;
+            }
+        }
+    }
+    stop
+}
+
+/// The names in a call's arguments (not a member's: `.join`), first to last, once each.
+fn arg_names(args: &[u32]) -> Vec<&[u32]> {
+    let ident = |ch: u32| ch == c('_') || ch == c('$') || pystr::is_alnum(ch);
+    let mut out: Vec<&[u32]> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        if ident(args[i]) && !(c('0')..=c('9')).contains(&args[i]) && (i == 0 || (args[i - 1] != c('.') && !ident(args[i - 1]))) {
+            let j = args[i..].iter().position(|&ch| !ident(ch)).map(|k| i + k).unwrap_or(args.len());
+            if !out.contains(&&args[i..j]) {
+                out.push(&args[i..j]);
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Where the text first gives `name` a value (`name = …`, not `==` or `=>`): just after the `=`.
+fn first_given(text: &[u32], name: &[u32]) -> Option<usize> {
+    let ident = |ch: u32| ch == c('_') || ch == c('$') || pystr::is_alnum(ch);
+    let mut from = 0usize;
+    for _ in 0..50 {
+        let at = pystr::find(text, name, from)?;
+        let end = at + name.len();
+        from = end;
+        if (at > 0 && (ident(text[at - 1]) || text[at - 1] == c('.'))) || (end < text.len() && ident(text[end])) {
+            continue;
+        }
+        let k = end + text[end..].iter().take_while(|&&ch| ch == c(' ') || ch == c('\t')).count();
+        if k < text.len() && text[k] == c('=') && text.get(k + 1).map_or(true, |&ch| ch != c('=') && ch != c('>')) {
+            return Some(k + 1);
+        }
+    }
+    None
 }
 
 // ---------------- code that drives an AI coding agent ----------------
@@ -3162,6 +3315,16 @@ pub fn install_script_risk_with(p: &Pack, text: &[u32], shell: bool, command: bo
         for r in install_script_risk_of(p, &view, shell, command, lang) {
             if !reasons.contains(&r) {
                 reasons.push(cat(&[&r, &note]));
+            }
+        }
+        // (a shell's startup file named only in strings the script decodes: whatever it writes there)
+        if !shell_rc_named(p, text) {
+            let writes = p.re("_PERSIST_WRITE_RE").search(&view).is_some();
+            if let Some(file) = shell_rc_written(p, &view, writes, true) {
+                let r = shell_rc_reason(&file);
+                if !reasons.iter().any(|x| x.starts_with(&r)) {
+                    reasons.push(cat(&[&r, &note]));
+                }
             }
         }
     }

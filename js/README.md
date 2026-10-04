@@ -100,7 +100,9 @@ resolving to one file. Writes are atomic
   its own with `rundll32`/`regsvr32`, or sets a program to start at login or
   boot (a systemd unit, a launchd agent, a crontab, a Windows Run key or
   scheduled task, the Startup folder, an XDG autostart entry: the
-  CanisterWorm releases of @emilgroup's packages).
+  CanisterWorm releases of @emilgroup's packages), or writes a command that
+  downloads or runs code to a shell's startup file (`~/.bashrc`,
+  `~/.zshrc`, `~/.profile` …; not a PATH line or a completion).
 - **Unicode evasion**: JS identifier escapes (`\u0065val`) and Python NFKC
   spellings are matched as the runtime reads them; bidirectional control
   characters are `S-BIDI` (Trojan Source); a name spelled with look-alike
