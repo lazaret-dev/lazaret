@@ -213,6 +213,26 @@ project is pre-1.0, so the 0.x API may still change.
   files and characters, of how many, and the bound), in the JSON, the MCP server's answer
   and a line of the summary when code was left unread (next 16.3.8: 32% of 74 million
   characters).
+- **Every pattern runs in linear time.** linre, the engine's linear-time regex engine,
+  ran 616 of the rules' patterns in 0.1.8, and the port of CPython's backtracking
+  matcher the rest. It now runs every one of them, and every pattern the engine builds
+  as it scans, so no text can make a rule's pattern backtrack; a pattern it would not
+  run fails the tests. It runs lookaheads of any width (`(?!\s*\()`, the rest of an
+  argument list or a string), remembering what each one's walks found in a text, and a
+  backreference to a quote (`(["'])…\1`) as one branch per quote. A pattern that named
+  something twice (a loop's variable, a comprehension's, a string array accessor's
+  parameter) or counted further than a program holds (64 strings in a constant array,
+  a decoder call's 20,000 arguments) is written without it, and the engine checks the
+  match instead. Two read further than before: SC-EVAL-DECODER reads a decoder's whole
+  body (it stopped after 2,000 items), and a write to a shell's startup file reads
+  `open()`'s arguments up to the mode however many there are (it stopped after 300).
+  The other rewritten patterns answer as before: on the benchmark's 945 releases and
+  the 1,205 popular ones, every verdict and every finding is the same. Scans take as
+  long as before (the engine's five main calls on 1,500 installed files: 8.1 s, against
+  8.2 s), and playwright-core's two bundles 4% to 6% fewer instructions. A taint
+  configuration's own patterns run on linre where it runs them, on the backtracking
+  matcher otherwise. The registry's rule set is 2.28.0, so stored verdicts are scanned
+  again.
 
 ### Fixed
 

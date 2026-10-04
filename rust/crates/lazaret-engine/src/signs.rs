@@ -2316,7 +2316,7 @@ struct CcWalk {
 fn cc_walks(p: &Pack, body: &[u32]) -> Vec<CcWalk> {
     let own = |g: Option<&[u32]>| g.map(|x| x.to_vec());
     let mut out: Vec<CcWalk> = Vec::new();
-    for m in p.re("_DV_CC_FOR_RE").finditer(body) {
+    for m in rxutil::finditer_same(p.re("_DV_CC_FOR_RE"), body, 0, body.len(), &[("i", "i_again")]) {
         out.push(CcWalk { at: m.start(), data: m.name("d").unwrap_or(&[]).to_vec(), elem: None,
                           index: own(m.name("i")), split: false, js_map: false });
     }
@@ -2448,7 +2448,9 @@ fn cc_argument(
             let esc = crate::pyre::escape(s);
             let head_src = p.text("_DV_NAME_HEAD");
             let array = rxutil::dynamic(cat(&[&head_src, &esc, &p.text("_DV_CC_ARRAY_TAIL")]), 0);
-            let value = match array.search(view) {
+            let most = p.usize("_DV_CC_ARRAY_MAX_INTS");
+            let fits = |m: &crate::pyre::Match| rxutil::count_numbers(m.name("items").unwrap_or(&[])) <= most;
+            let value = match rxutil::search_checked(&array, view, 0, view.len(), fits) {
                 None => None,
                 Some(a) => {
                     let mutated = rxutil::dynamic(cat(&[&head_src, &esc, &p.text("_DV_MUTATED_TAIL")]), 0);
@@ -2546,7 +2548,14 @@ fn cc_literal_sub(p: &Pack, m: &crate::pyre::Match) -> PyStr {
 /// core._dv_char_codes: the view with the character codes it holds and the
 /// calls of its own character-code decoders read as their text.
 fn dv_char_codes(p: &Pack, view: &[u32]) -> PyStr {
-    let view = p.re("_DV_CC_LITERAL_RE").sub_fn(view, 0, |m| cc_literal_sub(p, m));
+    // (the comprehension's second name is its first, and each list at most
+    // _DV_CC_LITERAL_MAX_INTS numbers: what the pattern held before P-16)
+    let most = p.usize("_DV_CC_LITERAL_MAX_INTS");
+    let fits = |m: &crate::pyre::Match| {
+        rxutil::same_groups(m, &[("v", "v_again")])
+            && ["a", "b", "c", "d", "e", "f"].iter().all(|g| m.name(g).map_or(true, |l| rxutil::count_numbers(l) <= most))
+    };
+    let view = rxutil::sub_checked(p.re("_DV_CC_LITERAL_RE"), view, fits, |m| cc_literal_sub(p, m));
     let decoders = cc_decoders(p, &view);
     if decoders.is_empty() {
         return view;
@@ -2562,7 +2571,9 @@ fn dv_char_codes(p: &Pack, view: &[u32]) -> PyStr {
     let mut work = p.usize("_DV_CC_MAX_WORK");
     let mut calls = 0usize;
     let mut arrays = std::collections::HashMap::new();
-    call.sub_fn(&view, 0, |m| {
+    let (most, longest) = (p.usize("_DV_CC_CALL_MAX_ITEMS"), p.usize("_DV_CC_CALL_MAX_CHARS"));
+    let fits = |m: &crate::pyre::Match| cc_call_fits(m.name("args").unwrap_or(&[]), most, longest);
+    rxutil::sub_checked(&call, &view, fits, |m| {
         if calls >= max_calls {
             return m.group0().to_vec();
         }
@@ -2844,13 +2855,65 @@ fn dv_decoders(p: &Pack, mut view: PyStr) -> PyStr {
     view
 }
 
+/// _DV_CC_CALL_TAIL's own limits (as _DV_ARRAY_RE's below): at most `most`
+/// items in the arguments, a character outside a string or a string each,
+/// and no string longer than `longest`.
+pub(crate) fn cc_call_fits(args: &[u32], most: usize, longest: usize) -> bool {
+    let (mut n, mut i) = (0usize, 0usize);
+    while i < args.len() {
+        let q = args[i];
+        if q == '\'' as u32 || q == '"' as u32 {
+            let from = i + 1;
+            let mut j = from;
+            while j < args.len() && args[j] != q {
+                j += 1;
+            }
+            if j - from > longest {
+                return false;
+            }
+            i = j + 1;
+        } else {
+            i += 1;
+        }
+        n += 1;
+    }
+    n <= most
+}
+
+/// _DV_ARRAY_RE's own limits (counts larger than a program holds, so its
+/// repeats are unbounded and these are checked after it matched): at most
+/// `max_items` strings, each of at most `max_chars` characters.
+pub(crate) fn dv_array_fits(items: &[u32], max_items: usize, max_chars: usize) -> bool {
+    let (mut n, mut i) = (0usize, 0usize);
+    while i < items.len() {
+        let q = items[i];
+        if q == '\'' as u32 || q == '"' as u32 {
+            let from = i + 1;
+            let mut j = from;
+            while j < items.len() && items[j] != q {
+                j += 1;
+            }
+            if j - from > max_chars {
+                return false;
+            }
+            n += 1;
+            i = j + 1;
+        } else {
+            i += 1;
+        }
+    }
+    n <= max_items
+}
+
 /// The last steps of core._decoded_view: constant arrays read where
 /// indexed, members named by literals.
 fn dv_arrays_and_members(p: &Pack, mut view: PyStr) -> PyStr {
     let max_arrays = p.usize("_DV_MAX_ARRAYS");
-    let found: Vec<(PyStr, Vec<PyStr>)> = p
-        .re("_DV_ARRAY_RE")
-        .finditer(&view)
+    let (max_items, max_chars) = (p.usize("_DV_ARRAY_MAX_ITEMS"), p.usize("_DV_ARRAY_MAX_CHARS"));
+    let found: Vec<(PyStr, Vec<PyStr>)> = rxutil::finditer_checked(p.re("_DV_ARRAY_RE"), &view, 0, view.len(), |m| {
+        dv_array_fits(m.name("items").unwrap_or(&[]), max_items, max_chars)
+    })
+    .into_iter()
         .map(|m| {
             let items = p.re("_DV_STR_ITEM_RE").findall(m.name("items").unwrap_or(&[])).into_iter().map(|s| s.to_vec()).collect();
             (m.name("name").unwrap_or(&[]).to_vec(), items)

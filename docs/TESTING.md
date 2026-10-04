@@ -295,9 +295,11 @@ Anything that reads attacker-controlled text gets a test that feeds it a
 minified rows, pathological brackets) and asserts it finishes fast and returns
 the right answer. See `test_review_received_code.py::test_bounded_work` and
 `::test_new_sinks_stay_bounded` for the shape. The engine's patterns run on
-its port of sre, which backtracks as `re` does: a pattern that backtracks
-without end spends the call's work budget and leaves the file SC-TRUNCATED,
-so bound the pattern (or, from phase 4, run it on linre). The npm package's
+linre, in time linear in the text whatever it holds (P-16): a pattern linre
+would not run fails `test_linre` (the pack's) or the recorded-output runs
+(one the engine builds as it scans, through `linre.fallbacks`), so write it
+another way (`docs/RUST_ENGINE.md` §14 has the ways it was done). What a
+detector reads around a match still needs its own bound. The npm package's
 remaining JavaScript regexes are the tighter constraint — V8 overflows its
 backtrack stack where CPython only slows — and the bounded tests catch it.
 

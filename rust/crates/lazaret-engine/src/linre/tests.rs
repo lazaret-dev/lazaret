@@ -120,11 +120,9 @@ fn python_errors_are_errors() {
 #[test]
 fn refuses_with_a_reason() {
     let cases: &[(&str, &str)] = &[
-        (r"(['\x22])x\1", "backreference"),
-        (r"(?P<q>a)(?P=q)", "backreference"),
+        (r"(\w)x\1", "backreference"),
+        (r"(?P<q>ab)(?P=q)", "backreference"),
         (r"(a)?(?(1)b|c)", "conditional"),
-        (r"a(?=.*b)", "lookahead of unbounded width"),
-        (r"a(?!\s*\()", "lookahead of unbounded width"),
         (r"(a|)*", "empty string"),
         (r"(?:a*)+b", "empty string"),
         (r"(?=(a))a", "capturing group inside a positive lookaround"),
@@ -132,7 +130,7 @@ fn refuses_with_a_reason() {
         (r"a++", "possessive"),
         (r"\N{DIGIT ONE}", "character names"),
         (r"(?:a{1,2000}){1,2000}", "too large"),
-        (r"(?<=a{1001})b", "wider than 1000"),
+        (r"(?<=a{1001})b", "lookbehind wider than 1000"),
     ];
     for &(src, why) in cases {
         match Regex::compile(src, 0) {
@@ -143,8 +141,12 @@ fn refuses_with_a_reason() {
             Ok(_) => panic!("{:?} should be refused", src),
         }
     }
-    // a lookahead of bounded width, a fixed-width lookbehind: accepted
-    for src in [r"a(?=b{1,9}c)", r"a(?!\s{0,64}\()", r"(?<=ab|cd)e", r"(?<![\w$.]{2})x", r"x(?=(?:ab|c){1,3})"] {
+    // a lookahead of bounded width, a fixed-width lookbehind, a lookahead
+    // of unbounded width or wider than 1000 (memoized): accepted
+    for src in [
+        r"a(?=b{1,9}c)", r"a(?!\s{0,64}\()", r"(?<=ab|cd)e", r"(?<![\w$.]{2})x", r"x(?=(?:ab|c){1,3})", r"a(?=.*b)",
+        r"a(?!\s*\()", r"a(?=b{1001})", r"(?<=a(?=b*c))b",
+    ] {
         assert!(Regex::compile(src, 0).is_ok(), "{:?}", src);
     }
 }
@@ -597,4 +599,350 @@ fn a_search_by_pairs_answers_as_the_scan_does() {
         }
     }
     assert!(checked > 200, "{}", checked);
+}
+
+
+// ------------------------------------------------- unbounded lookaheads
+
+/// A text for a message.
+fn show(text: &[u32]) -> String {
+    text.iter().map(|&c| char::from_u32(c).unwrap_or('\u{FFFD}')).collect()
+}
+
+/// A match of sre's own matcher (pyre, backtracking) as a View.
+fn view_sre(m: Option<crate::pyre::Match>, groups: usize) -> View {
+    m.map(|m| (m.start() as isize, m.end() as isize, m.lastindex, (1..=groups).map(|k| (m.start_of(k), m.end_of(k))).collect()))
+}
+
+/// linre answers as sre's backtracking matcher (pyre.probe's) does: search,
+/// match, fullmatch and finditer, in a window.
+fn agree_with_sre(src: &str, re: &Regex, sre: &crate::pyre::Regex, text: &[u32], pos: isize, endpos: isize) {
+    let g = re.groups();
+    assert_eq!(g, sre.groups, "{:?}", src);
+    let ctx = || format!("{:?} on {:?} [{}, {}]", src, show(text), pos, endpos);
+    assert_eq!(view(re.search_at(text, pos, endpos)), view_sre(sre.search_at(text, pos, endpos), g), "search: {}", ctx());
+    assert_eq!(view(re.match_at(text, pos, endpos)), view_sre(sre.match_at(text, pos, endpos), g), "match: {}", ctx());
+    assert_eq!(view(re.fullmatch_at(text, pos, endpos)), view_sre(sre.fullmatch_at(text, pos, endpos), g), "fullmatch: {}", ctx());
+    let got: Vec<View> = re.finditer_at(text, pos, endpos).take(300).map(|m| view(Some(m))).collect();
+    let want: Vec<View> = sre.finditer_at(text, pos, endpos).take(300).map(|m| view_sre(Some(m), g)).collect();
+    assert_eq!(got, want, "finditer: {}", ctx());
+}
+
+/// The shapes of the pack's lookaheads of unbounded width, and others.
+const UNBOUNDED_LOOKAHEADS: &[(&str, u32)] = &[
+    (r"\((?![^()]*\)\s*\{)", 0),
+    (r"yaml\.load\s*\((?!(?:(?!yaml\.load)[^)])*(?:SafeLoader|safe_load))", 0),
+    (r"a(?=.*b)", 0),
+    (r"a(?=.*b)", DOTALL),
+    (r"a(?!\s*\()", 0),
+    (r"\w+(?!\s*\()", 0),
+    (r"(?<![\w$])[A-Za-z_$][\w$]*(?![\w$])(?!\s*\()", 0),
+    (r#"\.(?:type\s*\()\s*["'](?![^"']*(?:html|xml|svg))"#, 0),
+    (r"x(?=[ab ]*b)", 0),
+    (r"(?=[a-z0-9_-]{3,}\.ey[a-z]{2})", 0),
+    (r"(\w+)(?=\s*=(?!=))", 0),
+    (r"(?:(?!ab)[a-c])*c", 0),
+    (r"a(?=(?:[^()]|\([^()]*\))*,\s*\{)", 0),
+    (r"EXEC(?:UTE)?\s*\(\s*@?\w+\s*\+|EXECUTE\s+IMMEDIATE\b(?:(?!EXECUTE\s+IMMEDIATE\b)[^;])*\|\|", IGNORECASE),
+    (r"npm_(?:package|config)_(?![\w]*(?:auth|token))\w*\Z", IGNORECASE),
+    (r"\bfoo\b(?![ \t]*=[^=])", 0),
+    (r"=[ \t]*(?=(?:async[ \t]+)?(?:function\b|\([^()]*\)[ \t]*=>|[A-Za-z_$][\w$]*[ \t]*=>))", 0),
+    (r"a(?=b*(?!c+d)e*)", 0),
+    (r"(?!x*(?=y*z))\w", 0),
+    (r"(?<=a(?=b*c))b", 0),
+    (r"(a)(?=(?:b|c)*d)", 0),
+    (r"^\s*(?!.*\bx\b)\w+$", MULTILINE),
+    (r"(?=.*?\d)(?=.*?[a-z])\w{3,}", 0),
+    (r"\b\w+\b(?=(?:\s+\w+){2,}\s*;)", 0),
+    (r"(?P<n>[a-c]+)(?!(?:\s|,)*\))", 0),
+];
+
+const LOOK_PIECES: &[&str] = &[
+    "a", "b", "c", "d", "e", "x", "y", "z", "_", "1", "-", " ", "  ", "\t", "\n", "(", ")", "{", "}", ",", ";", "=",
+    "==", "=>", "'", "\"", ".", "@", "+", "||", "html", "xml", "svg", "safe_load", "SafeLoader", "yaml.load(",
+    "EXECUTE", "IMMEDIATE", "exec(", "npm_package_", "npm_config_", "token", "auth", "foo", ".ey", ".eyJab",
+    "async", "function", "type(", ".type(", "ſ", "K", "é", "\u{10400}",
+];
+
+fn look_text(rng: &mut Rng, most: usize) -> Vec<u32> {
+    let n = rng.below(most + 1);
+    let mut t = Vec::new();
+    for _ in 0..n {
+        let piece = *rng.pick(LOOK_PIECES);
+        // (now and then a long run of one piece: what a walk crosses)
+        let times = if rng.below(12) == 0 { 1 + rng.below(40) } else { 1 };
+        for _ in 0..times {
+            t.extend(piece.chars().map(|c| c as u32));
+        }
+    }
+    t
+}
+
+/// `f` with the memoized lookaheads walked (as a search runs them until
+/// their walks have cost enough), then swept the first time each is tried
+/// (`looks::sweep`): the same answers both ways.
+fn walked_and_swept(mut f: impl FnMut(bool)) {
+    for at_once in [false, true] {
+        super::looks::SWEEP_AT_ONCE.with(|s| s.set(at_once));
+        f(at_once);
+    }
+    super::looks::SWEEP_AT_ONCE.with(|s| s.set(false));
+}
+
+#[test]
+fn unbounded_lookaheads_answer_as_sre() {
+    walked_and_swept(|_| {
+        let mut rng = Rng(20261004);
+        for &(src, flags) in UNBOUNDED_LOOKAHEADS {
+            let re = Regex::compile(src, flags).unwrap_or_else(|e| panic!("{:?}: {}", src, e));
+            let cps: Vec<u32> = src.chars().map(|c| c as u32).collect();
+            let sre = crate::pyre::Regex::new_backtracking(&cps, flags).unwrap();
+            for k in 0..400 {
+                let t = look_text(&mut rng, if k < 300 { 8 } else { 30 });
+                let n = t.len() as isize;
+                agree_with_sre(src, &re, &sre, &t, 0, n);
+                if k % 4 == 0 {
+                    let a = rng.below(t.len() + 1) as isize;
+                    let b = rng.below(t.len() + 2) as isize;
+                    agree_with_sre(src, &re, &sre, &t, a, b);
+                }
+            }
+        }
+    });
+}
+
+/// A random pattern with lookaheads of unbounded width in it.
+fn random_lookahead_pattern(rng: &mut Rng, depth: usize) -> String {
+    const ATOMS: &[&str] = &["a", "b", "c", "x", ".", r"\w", r"\s", "[ab]", "[^a]", r"[^()]", r"\(", r"\)", " "];
+    let mut out = String::new();
+    for _ in 0..1 + rng.below(3) {
+        if depth > 0 && rng.below(3) == 0 {
+            let inner = random_lookahead_pattern(rng, depth - 1);
+            out.push_str(&match rng.below(4) {
+                0 => format!("(?={})", inner),
+                1 => format!("(?!{})", inner),
+                2 => format!("(?:{}|{})", inner, random_lookahead_pattern(rng, depth - 1)),
+                _ => format!("(?:{})", inner),
+            });
+        } else {
+            out.push_str(*rng.pick(ATOMS));
+        }
+        match rng.below(6) {
+            0 => out.push('*'),
+            1 => out.push('+'),
+            2 => out.push_str("*?"),
+            3 => out.push('?'),
+            _ => {}
+        }
+    }
+    out
+}
+
+#[test]
+fn random_unbounded_lookaheads_answer_as_sre() {
+    walked_and_swept(|_| {
+        let mut rng = Rng(4242);
+        let mut compiled = 0;
+        for _ in 0..3000 {
+            let src = format!("{}(?{}{})", random_lookahead_pattern(&mut rng, 1), if rng.below(2) == 0 { "=" } else { "!" },
+                              random_lookahead_pattern(&mut rng, 2));
+            let re = match Regex::compile(&src, 0) {
+                Ok(re) => re,
+                Err(_) => continue,
+            };
+            let cps: Vec<u32> = src.chars().map(|c| c as u32).collect();
+            let sre = match crate::pyre::Regex::new_backtracking(&cps, 0) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            compiled += 1;
+            for k in 0..8 {
+                let t = random_text(&mut rng, 7);
+                let n = t.len() as isize;
+                agree_with_sre(&src, &re, &sre, &t, 0, n);
+                if k % 2 == 0 {
+                    let a = rng.below(t.len() + 1) as isize;
+                    let b = rng.below(t.len() + 2) as isize;
+                    agree_with_sre(&src, &re, &sre, &t, a, b);
+                }
+            }
+        }
+        assert!(compiled > 1500, "{}", compiled);
+    });
+}
+
+/// The memos (and sweeps) a finditer's searches share are about its own
+/// text: the next finditer, over another text in the same buffer (same
+/// address, same length), starts afresh with the pattern's pooled buffers.
+#[test]
+fn a_finditer_never_reads_what_was_learnt_of_another_text() {
+    walked_and_swept(|_| {
+        let re = Regex::compile(r"a(?![^b]*b)", 0).unwrap();
+        // a b at the end: every walk finds it, so nothing matches
+        let mut t = cps(&format!("{}b", "a ".repeat(200)));
+        assert_eq!(re.finditer(&t).count(), 0);
+        // the same buffer, the b made a c: no walk finds one, every a matches
+        let n = t.len();
+        t[n - 1] = 0x63;
+        assert_eq!(re.finditer(&t).count(), 200);
+        let sre = crate::pyre::Regex::new_backtracking(&cps(r"a(?![^b]*b)"), 0).unwrap();
+        agree_with_sre(r"a(?![^b]*b)", &re, &sre, &t, 0, n as isize);
+    });
+}
+
+/// Lookaheads whose walks meet thousands of sets of threads (what the last
+/// dozen characters were): more than a memo keeps, so without the sweep
+/// each walk would go to the text's end. Both shapes, on texts of a's and
+/// b's: the same answers as sre's, and linear time.
+#[test]
+fn lookaheads_of_many_sets_are_swept() {
+    // (none of the bodies ever matches but the second's, at the text's end:
+    // each walk would go to the end)
+    let cases: &[&str] = &[r"a(?![ab]*a[ab]{12}c)", r"b(?=[ab]*b[ab]{10}a[ab]{2}$)", r"(?![ab]*?a[ab]{11}ac)[ab]"];
+    // random a's and b's, then a b and 13 a's (the second's body matches
+    // from every b)
+    let ab = |rng: &mut Rng, n: usize| -> Vec<u32> {
+        let mut t: Vec<u32> = (0..n).map(|_| if rng.below(2) == 0 { 0x61 } else { 0x62 }).collect();
+        t.extend(cps("baaaaaaaaaaaaa"));
+        t
+    };
+    for &src in cases {
+        let re = Regex::compile(src, 0).unwrap();
+        let sre = crate::pyre::Regex::new_backtracking(&cps(src), 0).unwrap();
+        let mut rng = Rng(77);
+        // (3,000 characters: the walks cost enough to be swept part of the
+        // way through a finditer)
+        walked_and_swept(|_| {
+            for _ in 0..3 {
+                let t = ab(&mut rng, 3000);
+                agree_with_sre(src, &re, &sre, &t, 0, t.len() as isize);
+                agree_with_sre(src, &re, &sre, &t, 1000, 2500);
+            }
+        });
+        let (small, large) = (ab(&mut rng, 20_000), ab(&mut rng, 80_000));
+        let mut count = (0, 0);
+        let t1 = timed(|| count.0 = re.finditer(&small).count());
+        let t4 = timed(|| count.1 = re.finditer(&large).count());
+        assert!(count.0 > 1000 && count.1 > 3 * count.0, "{:?}: {:?}", src, count);
+        // (four times the text: about four times the work, never sixteen)
+        assert!(t4 < 8.0 * t1 + 0.05, "{:?}: {:.4}s for 20k, {:.4}s for 80k", src, t1, t4);
+        assert!(t4 < 2.0, "{:?} took {:.3}s", src, t4);
+    }
+}
+
+/// Seconds a closure takes (the best of three).
+fn timed(mut f: impl FnMut()) -> f64 {
+    (0..3)
+        .map(|_| {
+            let t = std::time::Instant::now();
+            f();
+            t.elapsed().as_secs_f64()
+        })
+        .fold(f64::MAX, f64::min)
+}
+
+#[test]
+fn unbounded_lookaheads_stay_linear() {
+    // each of these, searched from every position (finditer) or matched at
+    // every position, would read the rest of the text at each: n² without
+    // the memo
+    let cases: &[(&str, &str, &str)] = &[
+        (r"\s(?!\s*\()", " ", "x"),
+        (r"x(?=[a ]*b)", "x a", "b"),
+        (r#"a(?![^"]*html)"#, "a", ""),
+        (r"a(?=(?:(?!zz)[a-y])*q)", "a", "q"),
+        (r"\((?![^()]*\)\s*\{)", "(", ""),
+        (r"(?:(?!ab)[a-c])*c", "a", "c"),
+    ];
+    for &(src, unit, tail) in cases {
+        let re = Regex::compile(src, 0).unwrap();
+        let make = |n: usize| {
+            let mut t = cps(&unit.repeat(n));
+            t.extend(cps(tail));
+            t
+        };
+        let (small, large) = (make(10_000), make(40_000));
+        let mut count = (0, 0);
+        let t1 = timed(|| count.0 = re.finditer(&small).count());
+        let t4 = timed(|| count.1 = re.finditer(&large).count());
+        assert!(count.1 >= count.0, "{:?}", src);
+        // (four times the text: about four times the work, never sixteen)
+        assert!(t4 < 8.0 * t1 + 0.02, "{:?}: {:.4}s for 10k, {:.4}s for 40k", src, t1, t4);
+        assert!(t4 < 2.0, "{:?} took {:.3}s", src, t4);
+        // a match at each position of one text, each walk on memos learnt
+        // by none of the others (each search starts afresh): linear per call
+        let one = make(20_000);
+        let t = std::time::Instant::now();
+        let _ = re.search(&one);
+        assert!(t.elapsed().as_secs_f64() < 1.0, "{:?}", src);
+    }
+}
+
+// ------------------------------------- backreferences to one character
+
+/// The pack's quote patterns' shapes, and others a one-character group's
+/// backreference makes: each run as branches, answering as sre.
+const CHAR_BACKREFS: &[(&str, u32)] = &[
+    (r#"(["'])([^"'\\\n]*)\1"#, 0),
+    (r#"\(\s*[rRuU]?(["'])(.*?)\1"#, 0),
+    (r#"[fFrRbBuU]{0,2}(["'`])([^"'`\n]*)\1\Z"#, 0),
+    (r#"(?<![\w$.])([A-Za-z_$][\w$]*)\s*\[\s*(["'])([^"'\\\n]*)\2\s*\]"#, 0),
+    (r#"^\s*([A-Za-z_$][\w$]*)\s*\[\s*(["'])([^"'\\\n]*)\2\s*\]\s*=(?![=>])"#, MULTILINE),
+    (r#"[fF]{0,2}(["'`])(?:https?)://[^"'`/\s?#]{0,20}?(?:\1\s*\+\s*([^\n+;,)]{1,20})|\$\{([^}\n]{1,20})\}|\{([^}\n]{1,20})\})"#, 0),
+    (r#"(?<![\w$.])(?P<obj>[A-Za-z_$][\w$]*)[ \t]*\.[ \t]*emit[ \t]*\([ \t]*(?P<q>['"`])(?P<event>[^'"`\n]{1,20})\2[ \t]*,"#, 0),
+    (r#"(?:\brequire\s*\(\s*|\bfrom\s+)(['"])(\.{1,2}/[^'"\n]+)\1"#, 0),
+    (r#"(?:(["'])x\1)*y"#, 0),
+    (r#"(["'])abc\1"#, IGNORECASE),
+    (r#"(['"])(?=\w*\1)"#, 0),
+    (r#"(?P<q>[-+])\d+(?P=q)"#, 0),
+    (r#"([ab])x\1"#, 0),
+    (r#"(['"])(?:a|\1b)+\1"#, 0),
+    (r#"(a)(["'])\2\1"#, 0),
+];
+
+/// Backreferences still refused: a cased character under IGNORECASE, a
+/// group of many characters or of more than one, a group that may not
+/// take part, one inside a repeat with its backreference outside it.
+const STILL_REFUSED: &[(&str, u32)] = &[
+    (r"([ab])x\1", IGNORECASE),
+    (r"(\w)x\1", 0),
+    (r"(xa)\1", 0),
+    (r"(?:(a)|b)\1", 0),
+    (r"(?:(a))*\1", 0),
+    (r"(a)?b\1", 0),
+];
+
+const BACKREF_PIECES: &[&str] = &[
+    "\"", "'", "`", "a", "b", "x", "y", "abc", "ABC", "1", "23", "-", "+", " ", "\t", "\n", "(", ")", "[", "]", "{",
+    "}", "${", "=", "==", ".", ",", ";", "r", "f", "\\", "https://", "http://h", "./", "../m", "require(", "from ",
+    "o.emit(", "_", "$", "ſ",
+];
+
+#[test]
+fn one_character_backreferences_answer_as_sre() {
+    let mut rng = Rng(9);
+    for &(src, flags) in CHAR_BACKREFS {
+        let re = Regex::compile(src, flags).unwrap_or_else(|e| panic!("{:?}: {}", src, e));
+        let cps: Vec<u32> = src.chars().map(|c| c as u32).collect();
+        let sre = crate::pyre::Regex::new_backtracking(&cps, flags).unwrap();
+        for k in 0..500 {
+            let n = rng.below(if k < 400 { 10 } else { 30 });
+            let mut t = Vec::new();
+            for _ in 0..n {
+                t.extend(rng.pick(BACKREF_PIECES).chars().map(|c| c as u32));
+            }
+            let len = t.len() as isize;
+            agree_with_sre(src, &re, &sre, &t, 0, len);
+            if k % 5 == 0 {
+                let a = rng.below(t.len() + 1) as isize;
+                agree_with_sre(src, &re, &sre, &t, a, len);
+            }
+        }
+    }
+    for &(src, flags) in STILL_REFUSED {
+        match Regex::compile(src, flags) {
+            Err(e) => assert!(e.refused && e.msg.contains("backreference"), "{:?}: {}", src, e),
+            Ok(_) => panic!("{:?} should be refused", src),
+        }
+    }
 }

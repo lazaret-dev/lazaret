@@ -86,6 +86,10 @@ MAX_MEMBER = _env_number("LAZARET_MAX_SOURCE_BYTES", 16_000_000)
 MAX_FILES = 20_000         # files per package (numpy's sdist alone has >4,000)
 SAMPLE = 8192              # header/entropy sample read from oversized files
 # Stored scans from another engine version are scanned again (has_scan).
+# 2.28: every pattern runs on linre, the linear-time engine (P-16): the
+#      decoder body SC-EVAL-DECODER reads and the arguments of open() a
+#      shell-profile write reads are no longer cut at 2,000 and 300 items;
+#      the other rewritten patterns answer as before
 # 2.27: Go and Rust source files read by project scans (S-4): their
 #      comments and literals as their lexers read them, and S-SECRET,
 #      S-TOKEN, S-BIDI and Q-TODO on them (a package's are not read yet); a
@@ -209,7 +213,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.27.0"
+ENGINE_VERSION = "2.28.0"
 
 # ---------------- The content memo (P-2a, registry/contentcache.py) ----------------
 # One per scan_package run: the engine answers once for content several of a

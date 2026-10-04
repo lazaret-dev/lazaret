@@ -1,6 +1,6 @@
 {
  "format": 1,
- "rule_set": "2.27.0",
+ "rule_set": "2.28.0",
  "source": "lazaret.scanner.core, extracted by scripts/make_rust_tables.py \u2014 do not edit",
  "values": {
   "ALWAYS_PRUNE_DIRS": {
@@ -2868,7 +2868,7 @@
       },
       "re": {
        "flags": "",
-       "re": "\\b(?:eval|(?:new\\s+)?Function|runIn(?:This|New)?Context)\\s*\\(\\s*(?:\\(?\\s*function\\s*\\([^()]{0,80}\\)\\s*\\{(?:[^{}]|\\{[^{}]{0,2000}\\}){0,2000}\\}\\s*\\)?|[A-Za-z_$][\\w$]*)\\s*\\(\\s*(?:\\[\\s*\\d+(?:\\s*,\\s*\\d+){199}|'[^'\\n]{1000}|\\\"[^\\\"\\n]{1000}|`[^`]{1000})"
+       "re": "\\b(?:eval|(?:new\\s+)?Function|runIn(?:This|New)?Context)\\s*\\(\\s*(?:\\(?\\s*function\\s*\\([^()]{0,80}\\)\\s*\\{(?:[^{}]|\\{[^{}]*\\})*\\}\\s*\\)?|[A-Za-z_$][\\w$]*)\\s*\\(\\s*(?:\\[\\s*\\d+(?:\\s*,\\s*\\d+){199}|'[^'\\n]{1000}|\\\"[^\\\"\\n]{1000}|`[^`]{1000})"
       },
       "ref": {
        "value": "CWE-506 \u00b7 Supply chain"
@@ -9642,9 +9642,15 @@
    "flags": "",
    "re": "&\\d$"
   },
+  "_DV_ARRAY_MAX_CHARS": {
+   "value": 400
+  },
+  "_DV_ARRAY_MAX_ITEMS": {
+   "value": 64
+  },
   "_DV_ARRAY_RE": {
    "flags": "",
-   "re": "(?<![\\w$.])(?P<name>[A-Za-z_$][\\w$]*)[ \\t]*=[ \\t]*\\[(?P<items>(?:\\s*(?:'[^'\\\\\\n]{0,400}'|\"[^\"\\\\\\n]{0,400}\")\\s*,){0,63}\\s*(?:'[^'\\\\\\n]{0,400}'|\"[^\"\\\\\\n]{0,400}\")\\s*,?\\s*)\\]"
+   "re": "(?<![\\w$.])(?P<name>[A-Za-z_$][\\w$]*)[ \\t]*=[ \\t]*\\[(?P<items>(?:\\s*(?:'[^'\\\\\\n]*'|\"[^\"\\\\\\n]*\")\\s*,)*\\s*(?:'[^'\\\\\\n]*'|\"[^\"\\\\\\n]*\")\\s*,?\\s*)\\]"
   },
   "_DV_ARRAY_SRC": {
    "value": "(?<![\\w$.])(?P<name>[A-Za-z_$][\\w$]*)[ \\t]*=[ \\t]*\\[(?P<items>(?:\\s*(?:'[^'\\\\\\n]{0,400}'|\"[^\"\\\\\\n]{0,400}\")\\s*,){0,63}\\s*(?:'[^'\\\\\\n]{0,400}'|\"[^\"\\\\\\n]{0,400}\")\\s*,?\\s*)\\]"
@@ -9694,8 +9700,11 @@
   "_DV_CC_ARG_STR_SRC": {
    "value": "'(?P<a>[ -&(-\\[\\]-~]{0,400})'|\"(?P<b>[ !#-\\[\\]-~]{0,400})\\\""
   },
+  "_DV_CC_ARRAY_MAX_INTS": {
+   "value": 4096
+  },
   "_DV_CC_ARRAY_TAIL": {
-   "value": "[ \\t]*=[ \\t]*[\\[(]\\s*(?P<items>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:\\s*,\\s*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,4095}\\s*,?)\\s*[\\])]"
+   "value": "[ \\t]*=[ \\t]*[\\[(]\\s*(?P<items>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:\\s*,\\s*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10}))*\\s*,?)\\s*[\\])]"
   },
   "_DV_CC_BINARY": {
    "map": {
@@ -9734,12 +9743,18 @@
   "_DV_CC_BODY": {
    "value": 600
   },
+  "_DV_CC_CALL_MAX_CHARS": {
+   "value": 400
+  },
+  "_DV_CC_CALL_MAX_ITEMS": {
+   "value": 20000
+  },
   "_DV_CC_CALL_TAIL": {
-   "value": "[ \\t]*\\((?P<args>(?:[^()'\"\\n]|'[^'\\\\\\n]{0,400}'|\"[^\"\\\\\\n]{0,400}\"){0,20000})\\)"
+   "value": "[ \\t]*\\((?P<args>(?:[^()'\"\\n]|'[^'\\\\\\n]*'|\"[^\"\\\\\\n]*\")*)\\)"
   },
   "_DV_CC_FOR_RE": {
    "flags": "",
-   "re": "\\bfor[ \\t]*\\([ \\t]*(?:var|let)[ \\t]+(?P<i>[A-Za-z_$][\\w$]*)[ \\t]*=[ \\t]*0[ \\t]*;[ \\t]*\\1[ \\t]*<[ \\t]*(?P<d>[A-Za-z_$][\\w$]*)[ \\t]*\\.[ \\t]*length[ \\t]*;"
+   "re": "\\bfor[ \\t]*\\([ \\t]*(?:var|let)[ \\t]+(?P<i>[A-Za-z_$][\\w$]*)[ \\t]*=[ \\t]*0[ \\t]*;[ \\t]*(?P<i_again>[A-Za-z_$][\\w$]*)[ \\t]*<[ \\t]*(?P<d>[A-Za-z_$][\\w$]*)[ \\t]*\\.[ \\t]*length[ \\t]*;"
   },
   "_DV_CC_FOR_SRC": {
    "value": "\\bfor[ \\t]*\\([ \\t]*(?:var|let)[ \\t]+(?P<i>[A-Za-z_$][\\w$]*)[ \\t]*=[ \\t]*0[ \\t]*;[ \\t]*\\1[ \\t]*<[ \\t]*(?P<d>[A-Za-z_$][\\w$]*)[ \\t]*\\.[ \\t]*length[ \\t]*;"
@@ -9764,9 +9779,12 @@
    "flags": "",
    "re": "(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})"
   },
+  "_DV_CC_LITERAL_MAX_INTS": {
+   "value": 400
+  },
   "_DV_CC_LITERAL_RE": {
    "flags": "",
-   "re": "\\bString[ \\t]*\\.[ \\t]*fromCharCode[ \\t]*(?:\\([ \\t]*(?:\\.\\.\\.[ \\t]*\\[[ \\t]*(?P<a>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?)[ \\t]*\\]|(?P<b>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?))[ \\t]*\\)|\\.[ \\t]*apply[ \\t]*\\([ \\t]*(?:null|undefined|this|String)[ \\t]*,[ \\t]*\\[[ \\t]*(?P<c>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?)[ \\t]*\\][ \\t]*\\))|(?:''|\"\")[ \\t]*\\.[ \\t]*join[ \\t]*\\([ \\t]*(?:map[ \\t]*\\([ \\t]*chr[ \\t]*,[ \\t]*[\\[(][ \\t]*(?P<d>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?)[ \\t]*[\\])][ \\t]*\\)|\\[?[ \\t]*chr[ \\t]*\\([ \\t]*(?P<v>[A-Za-z_]\\w*)[ \\t]*\\)[ \\t]+for[ \\t]+\\5[ \\t]+in[ \\t]+[\\[(][ \\t]*(?P<e>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?)[ \\t]*[\\])][ \\t]*\\]?)[ \\t]*\\)|\\bbyte(?:s|array)[ \\t]*\\([ \\t]*[\\[(][ \\t]*(?P<f>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?)[ \\t]*[\\])][ \\t]*\\)[ \\t]*\\.[ \\t]*decode[ \\t]*\\([^()\\n]{0,20}\\)"
+   "re": "\\bString[ \\t]*\\.[ \\t]*fromCharCode[ \\t]*(?:\\([ \\t]*(?:\\.\\.\\.[ \\t]*\\[[ \\t]*(?P<a>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10}))*[ \\t]*,?)[ \\t]*\\]|(?P<b>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10}))*[ \\t]*,?))[ \\t]*\\)|\\.[ \\t]*apply[ \\t]*\\([ \\t]*(?:null|undefined|this|String)[ \\t]*,[ \\t]*\\[[ \\t]*(?P<c>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10}))*[ \\t]*,?)[ \\t]*\\][ \\t]*\\))|(?:''|\"\")[ \\t]*\\.[ \\t]*join[ \\t]*\\([ \\t]*(?:map[ \\t]*\\([ \\t]*chr[ \\t]*,[ \\t]*[\\[(][ \\t]*(?P<d>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10}))*[ \\t]*,?)[ \\t]*[\\])][ \\t]*\\)|\\[?[ \\t]*chr[ \\t]*\\([ \\t]*(?P<v>[A-Za-z_]\\w*)[ \\t]*\\)[ \\t]+for[ \\t]+(?P<v_again>[A-Za-z_]\\w*)[ \\t]+in[ \\t]+[\\[(][ \\t]*(?P<e>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10}))*[ \\t]*,?)[ \\t]*[\\])][ \\t]*\\]?)[ \\t]*\\)|\\bbyte(?:s|array)[ \\t]*\\([ \\t]*[\\[(][ \\t]*(?P<f>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10}))*[ \\t]*,?)[ \\t]*[\\])][ \\t]*\\)[ \\t]*\\.[ \\t]*decode[ \\t]*\\([^()\\n]{0,20}\\)"
   },
   "_DV_CC_LITERAL_SRC": {
    "value": "\\bString[ \\t]*\\.[ \\t]*fromCharCode[ \\t]*(?:\\([ \\t]*(?:\\.\\.\\.[ \\t]*\\[[ \\t]*(?P<a>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?)[ \\t]*\\]|(?P<b>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?))[ \\t]*\\)|\\.[ \\t]*apply[ \\t]*\\([ \\t]*(?:null|undefined|this|String)[ \\t]*,[ \\t]*\\[[ \\t]*(?P<c>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?)[ \\t]*\\][ \\t]*\\))|(?:''|\"\")[ \\t]*\\.[ \\t]*join[ \\t]*\\([ \\t]*(?:map[ \\t]*\\([ \\t]*chr[ \\t]*,[ \\t]*[\\[(][ \\t]*(?P<d>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?)[ \\t]*[\\])][ \\t]*\\)|\\[?[ \\t]*chr[ \\t]*\\([ \\t]*(?P<v>[A-Za-z_]\\w*)[ \\t]*\\)[ \\t]+for[ \\t]+\\5[ \\t]+in[ \\t]+[\\[(][ \\t]*(?P<e>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?)[ \\t]*[\\])][ \\t]*\\]?)[ \\t]*\\)|\\bbyte(?:s|array)[ \\t]*\\([ \\t]*[\\[(][ \\t]*(?P<f>(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})(?:[ \\t]*,[ \\t]*(?:0[xX][0-9a-fA-F]{1,8}|[0-9]{1,10})){0,399}[ \\t]*,?)[ \\t]*[\\])][ \\t]*\\)[ \\t]*\\.[ \\t]*decode[ \\t]*\\([^()\\n]{0,20}\\)"
@@ -12561,7 +12579,7 @@
   },
   "_PERSIST_WRITE_RE": {
    "flags": "",
-   "re": "\\b(?:writeFileSync|writeFile|appendFileSync|appendFile|createWriteStream|outputFileSync|outputFile|outputJsonSync|outputJson|writeJsonSync|writeJson|copyFileSync|copyFile|cpSync|renameSync|symlinkSync|write_text|write_bytes|createOrUpdateFileContents)\\s*\\(|\\bjson\\.dump\\s*\\(|\\bshutil\\.(?:copy\\w*|move)\\s*\\(|\\bopen\\s*\\((?:[^()\\n]|\\([^()\\n]{0,200}\\)){0,300}?[\"'][wax]b?\\+?[\"']"
+   "re": "\\b(?:writeFileSync|writeFile|appendFileSync|appendFile|createWriteStream|outputFileSync|outputFile|outputJsonSync|outputJson|writeJsonSync|writeJson|copyFileSync|copyFile|cpSync|renameSync|symlinkSync|write_text|write_bytes|createOrUpdateFileContents)\\s*\\(|\\bjson\\.dump\\s*\\(|\\bshutil\\.(?:copy\\w*|move)\\s*\\(|\\bopen\\s*\\((?:[^()\\n]|\\([^()\\n]*\\))*?[\"'][wax]b?\\+?[\"']"
   },
   "_PERSIST_WRITE_SRC": {
    "value": "\\b(?:writeFileSync|writeFile|appendFileSync|appendFile|createWriteStream|outputFileSync|outputFile|outputJsonSync|outputJson|writeJsonSync|writeJson|copyFileSync|copyFile|cpSync|renameSync|symlinkSync|write_text|write_bytes|createOrUpdateFileContents)\\s*\\(|\\bjson\\.dump\\s*\\(|\\bshutil\\.(?:copy\\w*|move)\\s*\\(|\\bopen\\s*\\([^()\\n]{0,300}?[\"'][wax]b?\\+?[\"']"
@@ -12894,13 +12912,13 @@
    "value": "(?:[^()]|\\([^()]*\\))*"
   },
   "_SA_ACC_A_HEAD": {
-   "value": "function\\s+(?P<g>[A-Za-z_$][\\w$]*)\\s*\\(\\s*(?P<p>[A-Za-z_$][\\w$]*)\\s*,\\s*[A-Za-z_$][\\w$]*\\s*\\)\\s*\\{\\s*(?P=p)\\s*=\\s*(?P=p)\\s*-\\s*(?P<off>[^;{}]{1,300});\\s*(?:var|const|let)\\s+[A-Za-z_$][\\w$]*\\s*=\\s*"
+   "value": "function\\s+(?P<g>[A-Za-z_$][\\w$]*)\\s*\\(\\s*(?P<p>[A-Za-z_$][\\w$]*)\\s*,\\s*[A-Za-z_$][\\w$]*\\s*\\)\\s*\\{\\s*(?P<p2>[A-Za-z_$][\\w$]*)\\s*=\\s*(?P<p3>[A-Za-z_$][\\w$]*)\\s*-\\s*(?P<off>[^;{}]{1,300});\\s*(?:var|const|let)\\s+[A-Za-z_$][\\w$]*\\s*=\\s*"
   },
   "_SA_ACC_B_HEAD": {
    "value": "function\\s+(?P<g>[A-Za-z_$][\\w$]*)\\s*\\(\\s*[A-Za-z_$][\\w$]*\\s*,\\s*[A-Za-z_$][\\w$]*\\s*\\)\\s*\\{\\s*(?:var|const|let)\\s+[A-Za-z_$][\\w$]*\\s*=\\s*"
   },
   "_SA_ACC_B_TAIL": {
-   "value": "\\s*\\(\\s*\\)\\s*;\\s*return\\s+(?P=g)\\s*=\\s*function\\s*\\(\\s*(?P<p>[A-Za-z_$][\\w$]*)\\s*,\\s*[A-Za-z_$][\\w$]*\\s*\\)\\s*\\{\\s*(?P=p)\\s*=\\s*(?P=p)\\s*-\\s*(?P<off>[^;{}]{1,300});"
+   "value": "\\s*\\(\\s*\\)\\s*;\\s*return\\s+(?P<g2>[A-Za-z_$][\\w$]*)\\s*=\\s*function\\s*\\(\\s*(?P<p>[A-Za-z_$][\\w$]*)\\s*,\\s*[A-Za-z_$][\\w$]*\\s*\\)\\s*\\{\\s*(?P<p2>[A-Za-z_$][\\w$]*)\\s*=\\s*(?P<p3>[A-Za-z_$][\\w$]*)\\s*-\\s*(?P<off>[^;{}]{1,300});"
   },
   "_SA_ALIAS_RE": {
    "flags": "",
@@ -12929,7 +12947,7 @@
   },
   "_SA_CHECKSUM_RE": {
    "flags": "",
-   "re": "try\\s*\\{\\s*(?:var|const|let)\\s+(?P<v>[A-Za-z_$][\\w$]*)\\s*=\\s*(?P<e>[^;]{1,6000});\\s*if\\s*\\(\\s*(?P=v)\\s*===\\s*[A-Za-z_$][\\w$]*\\s*\\)\\s*break"
+   "re": "try\\s*\\{\\s*(?:var|const|let)\\s+(?P<v>[A-Za-z_$][\\w$]*)\\s*=\\s*(?P<e>[^;]{1,6000});\\s*if\\s*\\(\\s*(?P<v_again>[A-Za-z_$][\\w$]*)\\s*===\\s*[A-Za-z_$][\\w$]*\\s*\\)\\s*break"
   },
   "_SA_DECIMAL_RE": {
    "flags": "",

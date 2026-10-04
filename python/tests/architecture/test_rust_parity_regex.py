@@ -47,6 +47,9 @@ def pack_patterns():
         elif "map" in v:
             for k, x in v["map"].items():
                 walk(f"{name}[{k!r}]", x)
+        elif "items" in v:
+            for i, (_, x) in enumerate(v["items"]):
+                walk(f"{name}.items[{i}]", x)
     for name, v in sorted(values.items()):
         walk(name, v)
     return out

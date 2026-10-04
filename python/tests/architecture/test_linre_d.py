@@ -22,8 +22,7 @@ from tests.architecture.test_rust_parity_regex import HANDWRITTEN, HANDWRITTEN_T
 
 # why linre refuses one of these
 REASONS = ("a backreference", "a conditional group", "a repeat whose body can match the empty string",
-           "a lookahead of unbounded width", "a capturing group inside a positive lookaround", "an atomic group",
-           "a possessive repeat")
+           "a capturing group inside a positive lookaround", "an atomic group", "a possessive repeat")
 
 LINRE_HANDWRITTEN = [
     # lookarounds of more than one character, nested, of several widths

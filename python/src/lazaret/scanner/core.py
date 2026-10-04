@@ -981,7 +981,7 @@ R("SC-PACKER", "Packed JavaScript (p,a,c,k,e,d)", "VULN", "MAJOR", ("js",),
 # popular packages has one.
 R("SC-EVAL-DECODER", "Code decoded by its own function and run", "VULN", "CRITICAL", ("js",),
   r"\b(?:eval|(?:new\s+)?Function|runIn(?:This|New)?Context)\s*\(\s*(?:\(?\s*function\s*\([^()]{0,80}\)\s*\{"
-  r"(?:[^{}]|\{[^{}]{0,2000}\}){0,2000}\}\s*\)?|[A-Za-z_$][\w$]*)\s*\(\s*"
+  r"(?:[^{}]|\{[^{}]*\})*\}\s*\)?|[A-Za-z_$][\w$]*)\s*\(\s*"
   r"(?:\[\s*\d+(?:\s*,\s*\d+){199}|'[^'\n]{1000}|\"[^\"\n]{1000}|`[^`]{1000})",
   "Code a function computes from a long literal is run (eval, Function or vm).",
   "A decoder over a blob of character codes or text keeps a payload out of sight: the file shows the "

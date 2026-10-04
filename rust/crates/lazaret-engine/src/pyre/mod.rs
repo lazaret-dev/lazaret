@@ -96,10 +96,11 @@ pub struct Regex {
     /// set for a pattern the matcher is not needed for (see Simple)
     simple: Option<Simple>,
     /// The same pattern compiled by linre (crate::linre), which every search
-    /// runs on when it accepts the pattern: re's answers, in time linear in
-    /// the text, never backtracking. None: sre's backtracking matcher here
-    /// (a pattern linre refuses — a backreference, a lookahead of unbounded
-    /// width … — one answered without a matcher, or new_backtracking's).
+    /// runs on: re's answers, in time linear in the text, never
+    /// backtracking. None only for a pattern answered without a matcher
+    /// (`simple`), new_backtracking's (pyre.probe holds this matcher to
+    /// Python's re), and new_user's that linre refuses (a pattern a user
+    /// wrote in a taint configuration).
     lin: Option<crate::linre::Regex>,
 }
 
@@ -188,9 +189,24 @@ pub fn flags_from_letters(letters: &str) -> u32 {
 }
 
 impl Regex {
-    /// re.compile(pattern, flags) for a str pattern: its searches run on
-    /// linre where linre accepts the pattern (see `lin`), else here.
+    /// re.compile(pattern, flags) for a str pattern, whose searches run on
+    /// linre (P-16): a pattern linre refuses is an error (`refused`), as
+    /// a pattern Python rejects is. Every pattern of the pack, and every one
+    /// the engine builds, is one linre runs (linre.check, linre.fallbacks).
     pub fn new(pattern: &[u32], flags: u32) -> Result<Regex, Error> {
+        let mut rx = Regex::new_backtracking(pattern, flags)?;
+        if rx.simple.is_none() {
+            match crate::linre::Regex::new(pattern, flags) {
+                Ok(l) => rx.lin = Some(l),
+                Err(e) => return Err(Error(format!("linre does not run it: {}", e.msg))),
+            }
+        }
+        Ok(rx)
+    }
+
+    /// re.compile for a pattern a user wrote (a taint configuration's): on
+    /// linre when it runs it, else on sre's backtracking matcher.
+    pub fn new_user(pattern: &[u32], flags: u32) -> Result<Regex, Error> {
         let mut rx = Regex::new_backtracking(pattern, flags)?;
         if rx.simple.is_none() {
             rx.lin = crate::linre::Regex::new(pattern, flags).ok();

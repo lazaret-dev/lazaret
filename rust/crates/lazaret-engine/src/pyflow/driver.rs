@@ -51,7 +51,7 @@ impl Config {
     /// Patterns that fail to compile match nothing (taintspec refused them
     /// before they got here).
     pub fn new(extra_sources: &[PyStr], extra_sinks: &[(PyStr, u8)], full: &[PyStr], partial: &[(PyStr, u8)]) -> Config {
-        let compile = |p: &PyStr| crate::rxutil::dynamic(p.clone(), 0);
+        let compile = |p: &PyStr| crate::rxutil::dynamic_user(p.clone(), 0);
         let mut part: Vec<(PyStr, u8)> = Vec::new();
         for (name, bits) in partial {
             match part.iter_mut().find(|(k, _)| k == name) {

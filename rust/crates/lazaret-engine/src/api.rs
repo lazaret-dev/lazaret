@@ -70,7 +70,7 @@ pub const CALLS: &[&str] = &[
     // the Python parser (Python 3.13's ast trees)
     "py_parse",
     // linre, the linear-time regex engine the patterns run on
-    "linre.probe", "linre.check",
+    "linre.probe", "linre.check", "linre.fallbacks",
     // the lexers (lex/): a text read once into its language's tokens
     "lex.tokens", "lex.structure",
     // phase 3: project mode's cross-file JavaScript taint (jsflow/)
@@ -501,6 +501,9 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
         "pyre.probe" => probe(args, text)?,
         "linre.probe" => linre_probe(args, text)?,
         "linre.check" => linre_check(p, args),
+        // the patterns the engine built that linre would not run, since the
+        // last call (none, the tests hold)
+        "linre.fallbacks" => Value::Arr(crate::rxutil::take_fallbacks().iter().map(|s| Value::str(s)).collect()),
         "shlex_split" => match hooks::shlex_split(text) {
             Some(t) => strs(&t),
             None => Value::Null,
@@ -1150,7 +1153,7 @@ fn probe(args: &Value, text: &[u32]) -> Result<Value, CallError> {
     let pattern = arg_str(args, "pattern")?;
     let flags = opt_str(args, "flags").map(|f| pyre::flags_from_letters(&crate::pystr::to_string(&f))).unwrap_or(0);
     let backtracking = matches!(args.get("backtracking"), Some(Value::Bool(true)));
-    let compiled = if backtracking { Regex::new_backtracking(&pattern, flags) } else { Regex::new(&pattern, flags) };
+    let compiled = if backtracking { Regex::new_backtracking(&pattern, flags) } else { Regex::new_user(&pattern, flags) };
     let rx = match compiled {
         Ok(rx) => rx,
         Err(e) => return Ok(Value::obj(vec![("error", Value::str(&e.0))])),
@@ -1267,10 +1270,18 @@ fn linre_probe(args: &Value, text: &[u32]) -> Result<Value, CallError> {
 /// name, then `[i]` into a list and `['key']` into a map
 /// (`TAINT_SINKS['js'][3][1]`). Answers its {"re", "flags"} value.
 fn pack_pattern<'v>(p: &'v Pack, name: &str) -> Option<&'v Value> {
-    let base_end = name.find('[').unwrap_or(name.len());
+    let base_end = [name.find('['), name.find(".items[")].into_iter().flatten().min().unwrap_or(name.len());
     let mut v = p.raw(&name[..base_end])?;
     let mut rest = &name[base_end..];
     while !rest.is_empty() {
+        if let Some(r) = rest.strip_prefix(".items[") {
+            // a table of (key, pattern) items, by index
+            let end = r.find(']')?;
+            let i: usize = r.get(..end)?.parse().ok()?;
+            v = v.get("items")?.as_arr()?.get(i)?.as_arr()?.get(1)?;
+            rest = &r[end + 1..];
+            continue;
+        }
         let close = if rest.starts_with("['") || rest.starts_with("[\"") {
             let q = &rest[1..2];
             let inner_end = rest[2..].find(q)? + 2;
@@ -1306,6 +1317,12 @@ pub fn pack_pattern_names(p: &Pack) -> Vec<String> {
                 let key = crate::pystr::to_string(k);
                 let q = if key.contains('\'') && !key.contains('"') { '"' } else { '\'' };
                 walk(format!("{}[{}{}{}]", name, q, key, q), x, out);
+            }
+        } else if let Some(items) = v.get("items").and_then(|l| l.as_arr()) {
+            for (i, kv) in items.iter().enumerate() {
+                if let Some(x) = kv.as_arr().and_then(|kv| kv.get(1)) {
+                    walk(format!("{}.items[{}]", name, i), x, out);
+                }
             }
         }
     }

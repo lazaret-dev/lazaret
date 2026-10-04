@@ -99,8 +99,9 @@ credentials).
   everything they read — `scan_file` in dependency mode, findings included,
   its rules part in project mode (`scan_rules`) and the cross-file follower
   (`cross_file`), with Python `re` semantics (linre, a linear-time engine
-  with `re`'s answers, for every pattern it accepts, and its own port of
-  sre for the rest) and its patterns and finding texts in a rule pack
+  with `re`'s answers, for every pattern of the rules and every one the
+  engine builds; its own port of sre only for a taint configuration's
+  patterns linre does not run) and its patterns and finding texts in a rule pack
   (`rust/crates/lazaret-engine/rules/lazaret-rules.json`, the source of the
   rules). It was ported from core function for function and held to it by
   differential tests on every field (zero differences) until the Rust-first
@@ -158,9 +159,12 @@ line yourself.
   U+FFFD). Results must not depend on the host's Unicode tables. Regenerate
   tables with `scripts/make_unicode_tables.py`; never call `unicodedata`
   directly in scan logic.
-- **Bounded, linear work.** No catastrophic backtracking, ever. Patterns are
-  written so the regex engine keeps a bounded number of backtrack entries (the
-  npm engine's engine overflows its stack on millions). Values are followed for
+- **Bounded, linear work.** No catastrophic backtracking, ever. Every pattern
+  of the engine runs on linre, in time linear in the text whatever it holds,
+  and one linre would not run fails the tests (`docs/RUST_ENGINE.md` §14);
+  the npm package's own remaining JavaScript patterns are written so V8's
+  engine keeps a bounded number of backtrack entries (it overflows its stack
+  on millions). Values are followed for
   a fixed window; call arguments are read for a fixed span; a row longer than a
   threshold is treated as minified and read once. When you add a pattern, add a
   "bounded work" test that feeds it a ~100 KB–1 MB adversarial input and asserts
@@ -1057,8 +1061,8 @@ The essentials:
 Everything that reads attacker-controlled text is bounded. The received-code
 detector is the worked example: needle gates decide whether to read a file at
 all; a value is followed for a fixed row window; call arguments and their values
-are read for a fixed character span; brackets are matched in one pass; no pattern
-backtracks more than a bounded amount; a minified row is read once. When you add
+are read for a fixed character span; brackets are matched in one pass; every
+pattern runs in linear time (linre); a minified row is read once. When you add
 anything that scans text, ask "what does this cost on a 50 MB adversarial input?"
 and add a `test_*_bounded` that answers it. The npm regex engine is the tighter
 constraint — it overflows its backtrack stack where CPython merely slows.
