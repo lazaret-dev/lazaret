@@ -12,22 +12,12 @@ The native engine
     native/lazaret.wasm   Lazaret's native engine (the rust/ directory of
                           the repository), compiled to WebAssembly
 
-The engine is Lazaret's own work too, except for its translations of
-CPython code (https://github.com/python/cpython) — the shell tokenizer
-(shlex), the Final_Sigma rule of str.lower() and re's table of extra case
-equivalences — which are distributed under CPython's license: the Python
-Software Foundation License Version 2 and the older licenses of CPython's
-license stack, in LICENSE-PYTHON (CPython 3.14.0's LICENSE file, unchanged;
-SPDX: Python-2.0.1); and for the Unicode 13.0 data it holds, distributed
-under the Unicode License v3 (LICENSE-UNICODE; SPDX: Unicode-3.0).
+The engine is Lazaret's own work too, except for the Unicode 13.0 data it
+holds, distributed under the Unicode License v3 (LICENSE-UNICODE; SPDX:
+Unicode-3.0). Until 0.1.9 parts of it were translations of CPython code;
+native/NOTICE (the engine's own notice, rust/NOTICE) says what they were.
 
-    Copyright (c) 2001 Python Software Foundation; All Rights Reserved
     Copyright © 1991-2026 Unicode, Inc.
-
-native/NOTICE (the engine's own notice, rust/NOTICE) lists what is
-translated from which CPython file, summarizes the changes (section 3 of the
-PSF License) and repeats the originals' notices, among them those of Secret
-Labs AB.
 
 
 Codec names from CPython
@@ -35,7 +25,12 @@ Codec names from CPython
 
 src/lib/codecs.js lists, in PY_CODEC_ALIASES, the codec names CPython's
 encodings package resolves (encodings.aliases and its modules), under
-CPython's license (LICENSE-PYTHON).
+CPython's license (https://github.com/python/cpython): the Python Software
+Foundation License Version 2 (the PSF License) and the older licenses of
+CPython's license stack, in LICENSE-PYTHON (CPython 3.14.0's LICENSE file,
+unchanged; SPDX: Python-2.0.1).
+
+    Copyright (c) 2001 Python Software Foundation; All Rights Reserved
 
 
 Unicode data

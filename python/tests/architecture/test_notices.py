@@ -1,13 +1,12 @@
 """The notices of the npm package and of the Unicode data (0.1.8).
 
 The npm package ships the native engine compiled to WebAssembly
-(js/native/lazaret.wasm, 0.1.8), which holds translations of CPython code
-(shlex, the Final_Sigma rule, re's case equivalences; until P-16 its regex
-engine too) and Unicode 13.0 data, so the package carries
+(js/native/lazaret.wasm, 0.1.8), Lazaret's own work since P-16 retired its
+translations of CPython code, with Unicode 13.0 data; its codec table
+(src/lib/codecs.js) lists CPython's codec names. So the package carries
 CPython's LICENSE (js/LICENSE-PYTHON, the same file as rust/LICENSE-PYTHON),
-the engine's own NOTICE beside the module (js/native/NOTICE: rust/NOTICE,
-which says what was translated and what changed) and a NOTICE of its own,
-and declares Python-2.0.1. The Unicode 13.0 tables (scanner/_unicode13.py,
+the engine's own NOTICE beside the module (js/native/NOTICE: rust/NOTICE)
+and a NOTICE of its own, and declares Python-2.0.1. The Unicode 13.0 tables (scanner/_unicode13.py,
 js/src/lib/unicode13.js, the dashboard's copy, rust/…/generated/unicode13.rs)
 and the single-byte codec tables (js/src/lib/codecs.js and the dashboard's
 copy) are Unicode data: each carries the Unicode notice, every package that

@@ -100,11 +100,11 @@ METADATA = {
 # Deliberately empty: Lazaret has no runtime dependencies. Tested.
 REQUIRES_DIST: list[str] = []
 
-# Every wheel carries the native engine, and the sdist its source, part of
-# which is a Rust translation of CPython code (shlex, the Final_Sigma rule,
-# re's extra case equivalences; rust/NOTICE), distributed under CPython's
-# license: so each carries CPython's LICENSE and the notice, as license
-# files, and says so in its license expression.
+# Every wheel carries the native engine, and the sdist its source, with
+# its notice. The engine is Lazaret's own work since P-16 (rust/NOTICE);
+# each still carries CPython's LICENSE, and says so in its license
+# expression, while the project settles whether the CPython codec names
+# the packages hold (the dashboard's here, the npm package's) need it.
 NATIVE_LICENSE_EXPRESSION = "Apache-2.0 AND Python-2.0.1 AND Unicode-3.0"
 NATIVE_LICENSE_FILES = {"LICENSE-PYTHON": RUST / "LICENSE-PYTHON", "NOTICE": RUST / "NOTICE"}
 

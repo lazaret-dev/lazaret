@@ -10,7 +10,7 @@ members = ["crates/lazaret-engine", "crates/lazaret-ffi"]
 [workspace.package]
 version = "0.1.8"
 edition = "2021"
-license = "Apache-2.0 AND Python-2.0.1 AND Unicode-3.0"
+license = "Apache-2.0 AND Unicode-3.0"
 rust-version = "1.75"
 repository = "https://github.com/lazaret-dev/lazaret"
 

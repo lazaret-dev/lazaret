@@ -178,12 +178,16 @@ f-strings and comments to Python 3.13's `tokenize`.
 `test_rust_parity_regex.py` still compares the regex engine with `re` on
 every rule-pack pattern and 126 hand-written probes (search, match,
 fullmatch, finditer, sub, split, with pos/endpos; run it on each Python
-3.10–3.14), and `test_wasm_parity.py`, `_signs.py`, `_crossfile.py`,
+3.10–3.14), `test_shell_words.py` compares the engine's reading of a
+command's words with Python's shlex (the hooks corpus and random
+commands), and `test_wasm_parity.py`, `_signs.py`, `_crossfile.py`,
 `_jsparse.py`, `_jsflow.py`, `_pyparse.py` and `_pyflow.py` hold the WebAssembly build the npm package
 ships to the library, call for call and byte for byte, on the same corpora.
 `scripts/make_rust_tables.py --check` fails when the pack leaves its
 canonical form, a pattern stops compiling, its rule set is not the
-registry's, or a value core still keeps differs from it; and
+registry's, a value core still keeps differs from it, or `re`'s own table
+of extra case equivalences is not the one the engine derives from
+Unicode's case mappings; and
 `scripts/check_rust_deps.py` when a crate from outside the workspace
 appears.
 

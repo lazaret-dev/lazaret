@@ -965,7 +965,7 @@ pub const FULL_UPPER: &[(u32, &[u32])] = &[
     (0xFB17, &[0x544, 0x53D]),
 ];
 
-/// re's extra case equivalences (re._casefix._EXTRA_CASES): lowercase -> the others.
+/// re's extra case equivalences: lowercase letters that share an uppercase -> the others.
 pub const CASE_FIXES: &[(u32, &[u32])] = &[
     (0x69, &[0x131]),
     (0x73, &[0x17F]),

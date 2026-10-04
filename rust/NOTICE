@@ -2,104 +2,46 @@ Lazaret's native engine: notices
 ================================
 
 The native engine (this directory) is Lazaret's own work, licensed under the
-Apache License 2.0 (../LICENSE), except for the parts listed below, which are
-translations into Rust of code from CPython (https://github.com/python/cpython),
-the reference implementation of Python. Those parts are distributed under
-CPython's license: the Python Software Foundation License Version 2 and the
-older licenses of CPython's license stack, in LICENSE-PYTHON (CPython
-3.14.0's LICENSE file, unchanged; SPDX: Python-2.0.1).
-
-    Copyright (c) 2001 Python Software Foundation; All Rights Reserved
-
-The engine also holds Unicode data (below), distributed under the Unicode
-License v3 in LICENSE-UNICODE (SPDX: Unicode-3.0).
+Apache License 2.0 (../LICENSE). It holds Unicode data (below), distributed
+under the Unicode License v3 in LICENSE-UNICODE (SPDX: Unicode-3.0), so the
+crates' license is Apache-2.0 AND Unicode-3.0.
 
 The compiled engine ships in Lazaret's platform wheels and, compiled to
 WebAssembly, in the npm package (as native/lazaret.wasm, this file as
-native/NOTICE), each with LICENSE-PYTHON and LICENSE-UNICODE; the crates',
-the platform wheels' and the npm package's license is
-Apache-2.0 AND Python-2.0.1 AND Unicode-3.0.
+native/NOTICE), each with LICENSE-UNICODE. Those packages also carry
+CPython's license, LICENSE-PYTHON in this directory (CPython 3.14.0's
+LICENSE file, unchanged; SPDX: Python-2.0.1), and declare
+Apache-2.0 AND Python-2.0.1 AND Unicode-3.0, until the project settles
+whether the codec names they hold outside the engine, which are CPython's
+(js/NOTICE), need it.
 
 
-What is translated from CPython
--------------------------------
+What was CPython's
+------------------
 
-As of CPython 3.11 to 3.14, the behavior the translation keeps:
+Until P-16 (0.1.9), parts of the engine were translations into Rust of
+CPython code (https://github.com/python/cpython), distributed under
+CPython's license as well as Lazaret's:
 
-    crates/lazaret-engine/src/hooks.rs           in part: Lib/shlex.py
-                                                 (shlex_split)
-    crates/lazaret-engine/src/unicode.rs         in part: Objects/unicodeobject.c
-                                                 (handle_capital_sigma)
-    crates/lazaret-engine/src/generated/unicode13.rs
-                                                 in part: the table of
-                                                 Lib/re/_casefix.py
+    src/pyre/                    Lib/re/_parser.py, _compiler.py and
+                                 _constants.py, and Modules/_sre (the SRE
+                                 library, whose notices allowed its
+                                 redistribution under CNRI's Python 1.6
+                                 license and asked any other use to contact
+                                 Secret Labs AB)
+    src/hooks.rs, in part        Lib/shlex.py (shlex_split)
+    src/unicode.rs, in part      Objects/unicodeobject.c
+                                 (handle_capital_sigma)
+    src/generated/unicode13.rs,  the table of Lib/re/_casefix.py
+    in part
 
-The engine's regular expressions are Lazaret's own: linre (src/linre/),
-written from re's documented and observed behaviour, runs every pattern, and
-src/pyre.rs is re's interface to it as the engine's code calls it. (Until
-P-16, src/pyre/ was a translation of CPython's sre — Lib/re/_parser.py,
-_compiler.py and _constants.py and Modules/_sre — whose notices allowed its
-redistribution under CNRI's Python 1.6 license and asked any other use to
-contact Secret Labs AB; it is retired.)
-
-
-Summary of the changes (section 3 of the PSF License)
------------------------------------------------------
-
-- Translated from Python and C into Rust; text is a slice of code points.
-- The shell tokenizer implements one configuration of shlex (posix=True,
-  punctuation_chars=True, whitespace_split=True, no commenters) as one loop.
-- The Final_Sigma rule of str.lower() reads Unicode 13.0 tables of the
-  engine's own, whatever the Python version.
-
-
-The originals' notices
-----------------------
-
-Objects/unicodeobject.c:
-
-    /*
-
-    Unicode implementation based on original code by Fredrik Lundh,
-    modified by Marc-Andre Lemburg <mal@lemburg.com>.
-
-    Major speed upgrades to the method implementations at the Reykjavik
-    NeedForSpeed sprint, by Fredrik Lundh and Andrew Dalke.
-
-    Copyright (c) Corporation for National Research Initiatives.
-
-    --------------------------------------------------------------------
-    The original string type implementation is:
-
-      Copyright (c) 1999 by Secret Labs AB
-      Copyright (c) 1999 by Fredrik Lundh
-
-    By obtaining, using, and/or copying this software and/or its
-    associated documentation, you agree that you have read, understood,
-    and will comply with the following terms and conditions:
-
-    Permission to use, copy, modify, and distribute this software and its
-    associated documentation for any purpose and without fee is hereby
-    granted, provided that the above copyright notice appears in all
-    copies, and that both that copyright notice and this permission notice
-    appear in supporting documentation, and that the name of Secret Labs
-    AB or the author not be used in advertising or publicity pertaining to
-    distribution of the software without specific, written prior
-    permission.
-
-    SECRET LABS AB AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH REGARD TO
-    THIS SOFTWARE, INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
-    FITNESS.  IN NO EVENT SHALL SECRET LABS AB OR THE AUTHOR BE LIABLE FOR
-    ANY SPECIAL, INDIRECT OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
-    WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
-    ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT
-    OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
-    --------------------------------------------------------------------
-
-    */
-
-Lib/shlex.py and Lib/re/_casefix.py carry no notice of their own; CPython's
-license covers them.
+They are retired, and with them their notices. The engine's regular
+expressions are linre (src/linre/), written from re's documented and
+observed behaviour, with src/pyre.rs as re's interface to it; a command's
+words are read by rules written from shlex's documentation; the Final_Sigma
+rule of str.lower() follows the Unicode Standard's definition; and re's
+extra case equivalences are derived from Unicode's case mappings
+(scripts/make_rust_tables.py). Tests hold each to Python's own answers.
 
 
 Unicode data

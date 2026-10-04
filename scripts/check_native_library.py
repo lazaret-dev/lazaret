@@ -36,11 +36,12 @@ fits) and no library, and the platform wheels, which must be exactly the
 the Rust-first refactor the package has no engine without the library.
 Each platform wheel holds the sdist's package files (src/lazaret) byte for
 byte plus one library at lazaret/_native/<name>, which passes the check
-above for the wheel's tag; its METADATA is the sdist's PKG-INFO. Part of the
-engine is a translation of CPython code (rust/NOTICE), so the sdist and
-every wheel carry CPython's license and that notice (rust/LICENSE-PYTHON,
-rust/NOTICE), with LICENSE and LICENSE-UNICODE, and declare
-"Apache-2.0 AND Python-2.0.1 AND Unicode-3.0". Every wheel's RECORD must
+above for the wheel's tag; its METADATA is the sdist's PKG-INFO. The sdist
+and every wheel carry CPython's license and the engine's notice
+(rust/LICENSE-PYTHON, rust/NOTICE), with LICENSE and LICENSE-UNICODE, and
+declare "Apache-2.0 AND Python-2.0.1 AND Unicode-3.0" (the engine is
+Lazaret's own since P-16; CPython's license stays while the CPython codec
+names the packages hold are settled). Every wheel's RECORD must
 match its files, and every License-File it names must be in it.
 
 Standard library only: ELF, Mach-O and PE headers are read here, so one

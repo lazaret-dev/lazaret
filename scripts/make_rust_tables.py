@@ -22,7 +22,7 @@
   lazaret/scanner/_unicode13.py). What Python's `re` and `str` use: \\w
   (isalnum), \\d (isdecimal), \\s (isspace), the simple case mappings sre
   folds with, the full case mappings and the Final_Sigma context of
-  str.lower(), re's extra case equivalences (ſ → s, K → k, …), printable and
+  str.lower(), re's extra case equivalences (s and ſ, µ and μ, …), printable and
   identifier characters. Only Python 3.10 writes it; on any other Python,
   --check verifies that every code point Unicode 13.0 assigns reads the same
   there for the properties the scanner relies on (STABLE), and that the table
@@ -114,12 +114,38 @@ def sre_upper(c):
 
 
 def case_fixes():
+    """re's extra case equivalences, from Unicode's case mappings: the
+    lowercase letters that share an uppercase with another lowercase letter
+    (s and ſ, both S; µ and μ; the Greek letters' variant forms), each ->
+    the others in code point order. Unicode 13.0's letters only, whatever
+    this Python's Unicode; --check holds the result to re's own table."""
+    from lazaret.scanner import _unicode13
+    lows_by_upper = {}
+    for c in range(MAX_CP):
+        if not _unicode13.assigned(c):
+            continue
+        low = chr(c).lower()
+        if len(low) == 1:
+            lows_by_upper.setdefault(chr(c).upper(), set()).add(ord(low))
+    fixes = {}
+    for lows in lows_by_upper.values():
+        if len(lows) > 1:
+            for c in lows:
+                fixes[c] = tuple(sorted(lows - {c}))
+    return fixes
+
+
+def check_case_fixes():
+    """The equivalences re itself adds under IGNORECASE (re._casefix on
+    3.11 and later, sre_compile's table on 3.10) are case_fixes()'s."""
     try:
-        from re._casefix import _EXTRA_CASES as fixes            # 3.11+
+        from re._casefix import _EXTRA_CASES as res                # 3.11+
     except ImportError:
         import sre_compile                                        # 3.10
-        fixes = sre_compile._ignorecase_fixes
-    return {k: tuple(v) for k, v in fixes.items()}
+        res = sre_compile._ignorecase_fixes
+    if {k: tuple(sorted(v)) for k, v in res.items()} != case_fixes():
+        return ["re's extra case equivalences are not the lowercase letters that share an uppercase"]
+    return []
 
 
 def unicode_data():
@@ -229,7 +255,7 @@ def render_unicode(data):
     lists("FULL_LOWER", "str.lower() where it is not LOWER's one character (Σ excepted: its context decides).",
           data["full_lower"])
     lists("FULL_UPPER", "str.upper() where it is not UPPER's one character.", data["full_upper"])
-    lists("CASE_FIXES", "re's extra case equivalences (re._casefix._EXTRA_CASES): lowercase -> the others.",
+    lists("CASE_FIXES", "re's extra case equivalences: lowercase letters that share an uppercase -> the others.",
           data["fixes"])
     out.append("/// (first, last, value of first) of each run of decimal digits: int() reads them.\n")
     out.append("pub const DECIMAL_RUNS: &[(u32, u32, u32)] = &[\n")
@@ -484,6 +510,8 @@ def main(argv):
     else:
         with open(PACK_OUT, "w", encoding="utf-8", newline="\n") as f:
             f.write(render_pack(json.loads(pack)))
+    if check:
+        problems += check_case_fixes()
     if is310:
         uni = render_unicode(unicode_data())
         if check:

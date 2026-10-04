@@ -50,7 +50,7 @@ Decisions (fixed):
 | Rule source | **The pack is the source.** `rust/crates/lazaret-engine/rules/lazaret-rules.json` holds the engine's patterns, sets, limits and finding texts and is edited by hand (it was extracted from `core.py`, which no longer holds them). `scripts/make_rust_tables.py` keeps it in its canonical form, and `--check` holds it there: every pattern compiles with Python's `re` (the syntax the engine reads), its `rule_set` is the registry's `ENGINE_VERSION`, and the values core still keeps for the Python side (the reasons the registry ranks, the walk's limits) are the pack's. Python reads the pack through the engine (`engine.pack_value`, `engine.pack_pattern`). |
 | Engine shape | Generic engine plus data: declarative rules come from the pack, the algorithms are Rust functions (ported from core's, function for function, until the refactor; rebuilt on the parsers in the phases that follow, §8). |
 | Calls | Whole files, batched: one crossing of the boundary per batch of files, read on threads (`std::thread`), answers in input order. |
-| License | Lazaret's code is Apache-2.0; the translations of CPython code (shlex, the Final_Sigma rule, `re`'s table of extra case equivalences) are also under CPython's license, and the Unicode 13.0 tables are Unicode data, under the Unicode License v3, so the crates, the platform wheels and the npm package are `Apache-2.0 AND Python-2.0.1 AND Unicode-3.0` (§11). |
+| License | The engine is Lazaret's own work, Apache-2.0, with Unicode data under the Unicode License v3: the crates are `Apache-2.0 AND Unicode-3.0`. Its translations of CPython code are retired (P-16). The platform wheels and the npm package still carry CPython's license and declare `Apache-2.0 AND Python-2.0.1 AND Unicode-3.0` while the CPython codec names they hold are settled (§11). |
 
 ## 2. Using it
 
@@ -145,7 +145,7 @@ Decisions (fixed):
 rust/
   Cargo.toml                 workspace; release: lto, codegen-units=1, panic=unwind, strip;
                              wasm: release with panic=abort (the WebAssembly build)
-  NOTICE, LICENSE-PYTHON     what is translated from CPython, its notices, CPython's license (§11)
+  NOTICE, LICENSE-PYTHON     the engine's notices (and what was CPython's), CPython's license (§11)
   LICENSE-UNICODE            the Unicode License v3, for generated/unicode13.rs and
                              pyparse/unidata.rs (§11)
   crates/lazaret-engine/     #![forbid(unsafe_code)], no dependencies, no I/O
@@ -682,7 +682,7 @@ benchmark:
 | 1 | The Rust engine is the reference: the Python engine, `--engine` and the pure wheel retired; the recorded outputs (§5); the pack as the source of the rules; every wheel a platform wheel, the sdist compiled by pip where none fits; an unanswered file SC-TRUNCATED in both packages | Done |
 | 2 | Decoding, lexers and bytes in the engine: source decoding (BOMs, UTF-16, coding cookies), one token substrate for the detectors | Done (tag `rust-first-phase2`): the lexers (§15: every caller's comments and literals, both packages), the self-read on them, the decoded view on string values (§15). Moved: the data flow, the dead drop, the secret endpoints and received code to phase 3 (they follow names: scopes); bytes to phase 4 (with linre over bytes); source decoding to after phase 3 (the packages' decoders already agree, held by their parity tests, and owning the CJK codecs would put their tables in the WebAssembly module) |
 | 3 | Parsers, scopes and flow: the detectors on bindings over the JavaScript and Python trees (§12, §13), constant folding of strings, the cross-file follower on them, project mode's passes (taint, SQL, function metrics) in the engine; the npm package's twins of them retired | The parsers done; project mode's JavaScript taint ported onto `js_parse`'s trees (§16: `js_flow`), both packages ask the engine for it, and jsflow.py, jsflow.js and the readers they used are retired (11,357 lines); Python's taint ported onto `py_parse`'s trees (§17: `py_flow`), both packages ask the engine for it (the npm package had no port of it), and flow.py's own pass is retired (1,505 lines); the passes and the parser held to their recorded outputs; the supply-chain data flow and received code on JavaScript's trees (§18: local data sent, reported by the strongest send; received data run, loaded or deserialized, from the script's own address) and on Python's (§19), benchmark-gated; a file written then run, and decoded code run, on both trees (§20). Next: the cross-file follower on bindings and project mode's last passes (SQL, function metrics, intra-file taint). The dead drop, the secret endpoints and the self-read stay on the text detectors for now: on the benchmark's JavaScript they fire in few files, and no examined miss comes from their windows |
-| 4 | Linear-time matching: the pack's patterns on linre (§14), pyre and the shlex port retired, current Unicode | Every pattern runs on linre (P-16, rule set 2.28.0): the pack's 666, its lexers' tables included, and those the engine builds as it scans. Lookaheads of unbounded width run with a memo, and a sweep where the walks would cost more; a quote matched again as branches; a name matched again and counts past what a program holds are checked in code; two patterns read further than before. pyre's port of sre retired (P-16's second part): pyre is re's interface to linre, a pattern linre does not run is an error (a built one fails its call closed), and a taint configuration's patterns are held to what linre runs. Next: the shlex port retired, the Final_Sigma rule and the casefix table from Unicode's data; then current Unicode |
+| 4 | Linear-time matching: the pack's patterns on linre (§14), pyre and the shlex port retired, current Unicode | Every pattern runs on linre (P-16, rule set 2.28.0): the pack's 666, its lexers' tables included, and those the engine builds as it scans. Lookaheads of unbounded width run with a memo, and a sweep where the walks would cost more; a quote matched again as branches; a name matched again and counts past what a program holds are checked in code; two patterns read further than before. pyre's port of sre retired (P-16's second part): pyre is re's interface to linre, a pattern linre does not run is an error (a built one fails its call closed), and a taint configuration's patterns are held to what linre runs. The shlex port is written anew from shlex's documentation, and the Final_Sigma rule and the casefix table come from Unicode's definition and data (P-16's third part): the engine holds no CPython code. Next: current Unicode |
 | 5 | One call per file, a content cache (SHA-256), the guard's scan in a child process that fails closed, archive ambiguity checks | Not started |
 
 ## 9. Known issues
@@ -752,10 +752,10 @@ only.
    holdout's aggregates.
 2. Phases 2–5 (§8): decoding and the token substrate; the detectors on
    bindings over the parsers' trees, project mode's passes in the engine
-   and the npm engine's twins of them (`js/src/scanner/`) retired; the
-   shlex port retired, and current Unicode (pyre's sre port is retired:
-   every pattern runs on linre since P-16, §14); one call per file, a
-   content cache, the guard's scan isolated.
+   and the npm engine's twins of them (`js/src/scanner/`) retired; current
+   Unicode (the translations of CPython code are retired: every pattern
+   runs on linre since P-16, §14, and §11); one call per file, a content
+   cache, the guard's scan isolated.
 3. The rest of the npm engine's twins: the manifest, workflow and settings
    checks (`supplychain.js`, `ghworkflow.js`, `autorun.js`), the
    config-file credentials; the dashboard keeps its own script until it can
@@ -768,56 +768,64 @@ only.
 
 ## 11. Licensing
 
-The engine is Lazaret's own work under Apache-2.0, except for its
-translations of CPython code: `shlex_split` in `hooks.rs` (`Lib/shlex.py`),
-`capital_sigma` in `unicode.rs` (`handle_capital_sigma` in
-`Objects/unicodeobject.c`), and the `_casefix` table in `unicode13.rs`.
-Those are derivative works of CPython and are distributed under CPython's
-license as well: the PSF License Version 2 and the older licenses of its
-stack. Until P-16 pyre was a translation of sre too (`Lib/re/_parser.py`,
-`_compiler.py`, `_constants.py`, `Modules/_sre`), whose files carried the
-SRE library's notices: they allowed its redistribution under CNRI's Python
-1.6 license and asked any other use to contact Secret Labs AB. With every
-pattern on linre, Lazaret's own (§14), that translation is retired, and
-with it those terms; pyre (`pyre.rs`) is re's interface to linre.
+The engine is Lazaret's own work under Apache-2.0, with Unicode data under
+the Unicode License v3. Until P-16 (0.1.9) parts of it were translations of
+CPython code, distributed under CPython's license as well: pyre, a
+translation of sre (`Lib/re/_parser.py`, `_compiler.py`, `_constants.py`,
+`Modules/_sre`), whose files carried the SRE library's notices (they
+allowed its redistribution under CNRI's Python 1.6 license and asked any
+other use to contact Secret Labs AB); `shlex_split` in `hooks.rs`
+(`Lib/shlex.py`); `capital_sigma` in `unicode.rs` (`handle_capital_sigma`
+in `Objects/unicodeobject.c`); and the `_casefix` table in `unicode13.rs`.
+They are retired:
 
-- `rust/NOTICE` lists them, repeats the originals' notices (the PSF's and
-  `unicodeobject.c`'s) and summarizes the changes (section 3 of the PSF
-  License asks for that when the work is distributed).
-- `rust/LICENSE-PYTHON` is CPython 3.14.0's LICENSE, unchanged (a test pins
-  its SHA-256; take a newer one whole, never edited).
-- Each translated file starts with `// SPDX-License-Identifier: Apache-2.0
-  AND Python-2.0.1` and its original's notices.
-- `generated/unicode13.rs` is Unicode Character Database 13.0 data, under
-  the Unicode License v3 (`rust/LICENSE-UNICODE`, the same text as the
-  Python and npm packages' `LICENSE-UNICODE`); its header carries the
-  notice, and `rust/NOTICE` says so (0.1.8). So is `pyparse/unidata.rs`,
-  the Python parser's Unicode 15.1 data (§13), written from Python 3.13's
-  unicodedata: its header carries the notice and `rust/NOTICE` names it.
+- every pattern runs on linre (§14), written from `re`'s documented and
+  observed behaviour, and `pyre.rs` is `re`'s interface to it (P-16's
+  first two parts);
+- `shlex_split` is written from shlex's documentation (its parsing rules in
+  POSIX mode, and `punctuation_chars`), and `test_shell_words.py` holds it
+  to Python's shlex on the hooks corpus and on random commands;
+- the Final_Sigma rule follows the Unicode Standard's definition (section
+  3.13), as `str.lower()` reads it: a character both cased and
+  case-ignorable is passed over (a Rust test holds it to Python's answers);
+- `re`'s extra case equivalences are derived from Unicode's case mappings,
+  the lowercase letters that share an uppercase, by
+  `scripts/make_rust_tables.py`, whose `--check` holds them to `re`'s own
+  table.
+
+So:
+
+- `rust/NOTICE` says the engine is Lazaret's own and what was CPython's,
+  and carries the Unicode notice: `generated/unicode13.rs` is Unicode
+  Character Database 13.0 data, and `pyparse/unidata.rs` the Python
+  parser's Unicode 15.1 data (§13), each with the notice in its header.
   The Python parser is written from Python's grammar and `ast`'s answers,
-  not translated from CPython's parser: it is Lazaret's own work.
-- `rust/Cargo.toml` declares `Apache-2.0 AND Python-2.0.1 AND Unicode-3.0`.
-  Every wheel carries the compiled engine and the sdist its source, so each
-  carries `LICENSE-PYTHON` and `NOTICE` as license files (the wheels'
+  not translated from CPython's parser. `rust/LICENSE-UNICODE` is the same
+  text as the Python and npm packages' `LICENSE-UNICODE`.
+- `rust/Cargo.toml` declares `Apache-2.0 AND Unicode-3.0`.
+- The packages that carry the engine keep CPython's license for now: every
+  wheel carries the compiled engine and the sdist its source, each with
+  `LICENSE-PYTHON` (CPython 3.14.0's LICENSE, unchanged; a test pins its
+  SHA-256) and `NOTICE` as license files (the wheels'
   `.dist-info/licenses/`, the sdist's root) beside `LICENSE` and
-  `LICENSE-UNICODE`, and declares the same expression.
+  `LICENSE-UNICODE`, and declares `Apache-2.0 AND Python-2.0.1 AND
+  Unicode-3.0`; the npm package carries `native/lazaret.wasm` with
+  `rust/NOTICE` as `native/NOTICE` (both written by `npm run build`),
+  `LICENSE-PYTHON` and `LICENSE-UNICODE`, its own `NOTICE` (the CPython
+  codec names of `src/lib/codecs.js`, the Unicode tables of its
+  JavaScript), and declares the same. Whether the codec names, which the
+  npm package and the dashboard list to read a coding cookie as Python
+  does, need CPython's license is the open question; without it, every
+  package would be `Apache-2.0 AND Unicode-3.0`.
   `check_native_library.py --dist` checks the sdist and the wheels before a
-  release.
-- The npm package (0.1.8) carries the compiled engine as
-  `native/lazaret.wasm`, with `rust/NOTICE` as `native/NOTICE` (both written
-  by `npm run build`), `LICENSE-PYTHON` and `LICENSE-UNICODE`; its own
-  `NOTICE` points to them (and names the CPython codec names and Unicode
-  tables of its JavaScript), and it declares `Apache-2.0 AND Python-2.0.1 AND
-  Unicode-3.0`. Its shlex is the engine's since the JavaScript translation
-  (`hooks.js`) was retired. `release.yml` fails a tarball without
-  `native/lazaret.wasm` or `native/NOTICE`.
+  release, and `release.yml` fails a tarball without `native/lazaret.wasm`
+  or `native/NOTICE`.
 
-`tests/architecture/test_rust_notices.py` keeps all of this in place, and
-fails on a Rust file that says it is ported or translated from CPython
-without a notice: a new translation gets a header and a line in
-`rust/NOTICE`. What is left to retire for the engine to be Lazaret's own
-throughout (phase 4): the shlex port, and the Final_Sigma rule and the
-casefix table, which Unicode's own data can give.
+`tests/architecture/test_rust_notices.py` keeps this in place: it fails on
+an engine file that carries CPython's license or says it is ported or
+translated from CPython. A part of CPython that the engine needs is written
+from the documentation and held to Python's answers by a test, never
+translated.
 
 ## 12. The JavaScript parser
 

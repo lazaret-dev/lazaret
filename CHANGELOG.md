@@ -237,6 +237,14 @@ project is pre-1.0, so the 0.x API may still change.
   repeat of what can match the empty string, a `\N{…}` escape), with the reason, as it
   already rejected patterns that could backtrack. The registry's rule set is 2.28.0, so
   stored verdicts are scanned again.
+- **The native engine is Lazaret's own work.** Its last translations of CPython code are
+  retired: the reading of a hook command's words is written from shlex's documentation
+  and held to Python's shlex (on the hooks corpus and 30,000 random commands), the
+  final-sigma rule of `str.lower()` follows the Unicode Standard's definition, and `re`'s
+  extra case equivalences are derived from Unicode's case mappings. Every answer is the
+  same. The engine's notice says what was CPython's, and its crates are
+  `Apache-2.0 AND Unicode-3.0`; the wheels, the sdist and the npm package keep CPython's
+  license for now, for the CPython codec names they hold.
 
 ### Fixed
 
