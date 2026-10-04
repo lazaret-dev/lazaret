@@ -1,0 +1,9 @@
+# file_context_go_rs: 774 outputs, a hash per 100 (tests/architecture/_snapshots.py)
+5615dcdc962ca021
+ab97d0c62febf5ac
+f91c389ceaa683bb
+e2ca1a8e228859f1
+52f8ddb2140a90da
+8556d52e7c870bb6
+5cebf8294dfd4569
+71bb094ffcee28d0

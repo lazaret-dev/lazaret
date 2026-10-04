@@ -182,11 +182,13 @@ rust/
                              decoded view
     src/lex/                 the lexers (§15): js.rs (JavaScript, TypeScript, JSX: templates and
                              their holes, regular expressions), py.rs (Python, with pyparse's
-                             tokenizer), mod.rs (what the detectors ask: comments, strings,
-                             literals, two readings intersected), value.rs (literals' values,
-                             the runs a runtime joins)
-    src/lexer.rs             lex_comment_spans, every caller's: JavaScript and Python from lex/,
-                             SQL (two readings) and any other text by the pack's patterns (§6)
+                             tokenizer), go.rs and rs.rs (Go and Rust: raw strings, runes and
+                             characters, Rust's nested comments and lifetimes), mod.rs (what the
+                             detectors ask: comments, strings, literals, two readings
+                             intersected), value.rs (literals' values, the runs a runtime joins)
+    src/lexer.rs             lex_comment_spans, every caller's: JavaScript, Python, Go and Rust
+                             from lex/, SQL (two readings) and any other text by the pack's
+                             patterns (§6)
     src/filectx.rs           a file as scan_file reads it (_FileCtx): lines, comment layout,
                              match text (NFKC, JS escapes), names
     src/scanfile.rs          scan_file in dependency mode, scan_rules (project mode's rules
@@ -419,7 +421,7 @@ pack's `rule_set`) is bumped with any change to what a verdict records.
 |---|---|---|
 | `test_snapshot_hooks` | the 17 fields of `hooks_view` (shlex, hooks, both supply-chain tests with and without a language, the decoded view with no language and in JavaScript and Python, spawned scripts …) | the hooks corpus (`hooks_corpus.py`, ~44,400 cases) |
 | `test_snapshot_signs` | the detectors one by one (`signs_view`: received code, PowerShell, stagers, reverse shells, self-read, persistence, the exfiltration shapes, services at login, wallet swaps, the string-array technique …), every field reached; the data flow on long texts | the hooks corpus; six long texts |
-| `test_snapshot_scanfile` | `scan_file` in dependency mode and `scan_rules` (project mode's rules part), finding for finding, every family and variant reached; each line's context (`file_context`) | the scan_file corpus (`scanfile_corpus.py`), this repository's fixtures |
+| `test_snapshot_scanfile` | `scan_file` in dependency mode and `scan_rules` (project mode's rules part), finding for finding, every family and variant reached; each line's context (`file_context`); the same three for Go and Rust files (`*_go_rs`: the rules that list them and the families) | the scan_file corpus (`scanfile_corpus.py`, and its Go and Rust part, `go_rs_corpus`), this repository's fixtures |
 | `test_snapshot_lexer` | `lex_comment_spans`: comments, strings, every literal (the lexers', §15, for JavaScript and Python) | dense random texts in each language |
 | `test_snapshot_hook_commands` | a hook's command read as a program (`hook_command_risk`, `sh_parse`, the reasons), output thrown away and kept | realistic hook commands and a seeded corpus |
 | `test_snapshot_small` | SC-HEXSTR's hidden names and text, SC-HOMOGLYPH's look-alike names, SC-OFFSCREEN-CODE | curated and seeded lines |
@@ -1540,6 +1542,23 @@ a call there was not a call.
   `.mts`, `.cts`) is read with JSX and without; Python as 3.12 and later
   read it and as 3.11 did (an f-string a string to its first closing
   quote, and a `t` before a quote a name, as 3.13 reads it).
+- **Go** (`go.rs`) and **Rust** (`rs.rs`), since 0.1.9 (S-4: a project's
+  `.go` and `.rs` files): Go's `//` and `/* */` comments (no nesting),
+  interpreted strings and runes, raw strings in backticks, numbers (hex
+  floats, `_`, imaginary) and Unicode names; Rust's nested block comments
+  and doc comments, strings over several lines, raw strings (`r#"…"#`),
+  byte and C strings, characters told apart from lifetimes and loop labels
+  (`'a` is a name, `'x'` a character), raw identifiers, numbers (`1..2`,
+  `1.max(2)`, `1.5e-3f64`) and a first-line shebang (`#![…]` is code). An
+  interpreted string or a rune not closed on its line ends there; an
+  unclosed comment or raw string runs to the end of the text. One reading
+  each (`Structure::of`): neither language has a second one that could
+  run what the first calls prose. `scan_file` gives them their own `Lang`
+  (`filectx.rs`): the rules that list `go` or `rs` (S-SECRET, S-TOKEN,
+  S-BIDI, Q-TODO) and the families every text gets. The lexers' fuzzer
+  (`examples/fuzz_lex/`, its short gate `lex/tests_fuzz.rs`) builds
+  programs from known tokens and mutates them; its first run found a
+  quadratic read of `'\'` repeated, fixed.
 - **SQL and other text** keep the pack's lexer (`lexer.rs`, §6): SQL read
   as standard SQL and as MySQL reads it, any other text with `#` and `//`
   line comments, `/* … */` and quoted strings.

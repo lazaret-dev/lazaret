@@ -469,12 +469,15 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
         }
         "lex.tokens" => {
             // the tokens of one reading (lex/): [kind, start, end] each, in
-            // code points; lang "js" (with JSX unless "jsx": false) or "py"
+            // code points; lang "js" (with JSX unless "jsx": false), "py",
+            // "go" or "rs"
             let jsx = !matches!(args.get("jsx"), Some(Value::Bool(false)));
             let toks = match lang {
                 Some("js") => crate::lex::js::tokens(text, jsx),
                 Some("py") => crate::lex::py::tokens(text),
-                _ => return Err(CallError::BadArgs("lex.tokens needs lang 'js' or 'py'".into())),
+                Some("go") => crate::lex::go::tokens(text),
+                Some("rs") => crate::lex::rs::tokens(text),
+                _ => return Err(CallError::BadArgs("lex.tokens needs lang 'js', 'py', 'go' or 'rs'".into())),
             };
             Value::Arr(
                 toks.iter()
@@ -492,7 +495,7 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
                     ("strings", spans_value(&st.strings)),
                     ("literals", spans_value(&st.literals)),
                 ]),
-                None => return Err(CallError::BadArgs("lex.structure needs lang 'js' or 'py'".into())),
+                None => return Err(CallError::BadArgs("lex.structure needs lang 'js', 'py', 'go' or 'rs'".into())),
             }
         }
         "pyre.probe" => probe(args, text)?,

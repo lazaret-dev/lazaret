@@ -1,0 +1,17 @@
+# scan_rules_go_rs: 1548 outputs, a hash per 100 (tests/architecture/_snapshots.py)
+feb6f40c53f2d671
+e7c815e01af0ade8
+b0123305547599e9
+df81517ac51b8c0e
+0f094df73b9a9786
+5257cfdd8a479d51
+7cb6a4dca1cb3ff0
+6540aa72508ead37
+257fdc6f36e26327
+35b7081857106d9a
+b737cf759cd43f6a
+84dc28b1b51b3111
+ea141f197bc05507
+64f49ae44bb7de94
+27a66af4e6bf3fef
+cf8028dc63285178

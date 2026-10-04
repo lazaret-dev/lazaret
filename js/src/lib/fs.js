@@ -23,7 +23,12 @@ import { isConfigFile, ownReport, CONFIG_SCAN_CAP } from "./configsecrets.js";
 export const EXTS = {
   ".py": "py", ".pyw": "py", ".js": "js", ".jsx": "js", ".ts": "js", ".tsx": "js",
   ".mts": "js", ".cts": "js", ".mjs": "js", ".cjs": "js", ".sql": "sql",
+  ".go": "go", ".rs": "rs",
 };
+// The languages a dependency tree's files (--deps) are read in (twin of
+// core.DEP_LANGS): a project's own Go and Rust files are read; a package's
+// wait for the engine's Go and Rust detectors.
+export const DEP_LANGS = new Set(["py", "js", "sql"]);
 // gyp files, whatever their name (twin of core.GYP_EXTS): binding.gyp pulls
 // others in ('includes': ['build/common.gypi']) and node-gyp runs their
 // actions and command expansions too, so every one goes to scanGyp.
@@ -366,7 +371,8 @@ function collectFile(full, rel, name, st, dep, col) {
   const ext = pyExt(name).toLowerCase();       // os.path.splitext, as core
   const kind = name === "package.json" || name === "binding.gyp" ? name : GYP_EXTS.has(ext) ? "gyp" : null;
   const pth = !kind && ext === ".pth";
-  let lang = kind || pth ? null : EXTS[ext];
+  let lang = kind || pth ? null : EXTS[ext] ?? null;
+  if (dep && lang !== null && !DEP_LANGS.has(lang)) lang = null;
   const size = st.size;
   if (!kind && !pth && !lang) {
     // spec 9: every other regular file is classified by magic bytes — unless

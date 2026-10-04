@@ -205,7 +205,7 @@ pub fn lex_comment_spans(
     if lang == Some("cfg") {
         panic!("config comment spans are not in the Rust engine yet");
     }
-    if let Some(l @ ("js" | "py")) = lang {
+    if let Some(l @ ("js" | "py" | "go" | "rs")) = lang {
         let st = crate::lex::structure(content, l, jsx).unwrap_or_default();
         if let Some(s) = strings {
             s.extend(st.strings);

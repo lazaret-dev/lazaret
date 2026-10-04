@@ -54,6 +54,22 @@ project is pre-1.0, so the 0.x API may still change.
   On the benchmark, 452 of 516 malicious releases are SUSPICIOUS, up from 449: alinet,
   react-svg-helper-fast and react-zutils. The popular packages and the popular releases
   are unchanged.
+- **A project's Go and Rust files are read.** `.go` and `.rs` files were classified by
+  their bytes, as any data file is, so a Go or Rust repository scanned as "0 files" and
+  passed whatever it held. Both packages now read them, with comments and strings as
+  each language reads them (Rust's nested block comments, raw strings in both, a
+  lifetime not a character): hardcoded credentials (S-SECRET, outside comments; it reads
+  `name = "…"` and `name: "…"`, not yet Go's `:=` or Rust's typed constants), token
+  formats (S-TOKEN, in comments too), Trojan Source characters (S-BIDI), TODO markers,
+  and the checks every text gets (hex-escaped text, invisible characters, base64 blobs,
+  high-entropy literals, long lines). The suppression markers work in their `//`
+  comments. The MCP server's `scan_files` takes them too. Not read yet: a package's Go
+  and Rust files (registry and guard scans) and a dependency tree's (`--deps`), until
+  the engine has its Go and Rust detectors. Their lines count in the metrics, but the
+  duplication measure is for Python, JavaScript and SQL: the gate's 10% was set on
+  those, and with its six-line windows Go's standard library measures 2 to 13% and
+  twenty popular crates 4 to 54%. On those crates and Go's standard library the scan
+  reports test keys and vectors, base64 test data and TODO markers.
 
 ### Changed
 
@@ -131,7 +147,7 @@ project is pre-1.0, so the 0.x API may still change.
   - The cross-file follower seeds a file only with the environment variables another
     file writes: vite's bundle writes and reads `process.env.BROWSER` itself.
 
-  The registry's rule set is 2.26.0, so stored verdicts are scanned again.
+  The registry's rule set is 2.27.0, so stored verdicts are scanned again.
 
 ## [0.1.8] — 2026-10-03
 

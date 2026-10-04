@@ -49,6 +49,8 @@ export function detectLang(name, content) {
   if (/\.(py|pyw)$/i.test(name)) return "py";
   if (/\.(js|jsx|ts|tsx|mts|cts|mjs|cjs)$/i.test(name)) return "js";
   if (/\.sql$/i.test(name)) return "sql";
+  if (/\.go$/i.test(name)) return "go";
+  if (/\.rs$/i.test(name)) return "rs";
   // content heuristic: SQL keywords dominate and no JS/py structure
   if (/\b(SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM|CREATE\s+(TABLE|PROCEDURE|USER)|GRANT|ALTER\s+TABLE)\b/i.test(content)
      && !/\b(function|=>|def |import )\b/.test(content)) return "sql";

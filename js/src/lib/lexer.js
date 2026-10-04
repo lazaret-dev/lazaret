@@ -20,6 +20,8 @@
 //        comments;
 //   sql: as standard SQL and as MySQL reads it (backslash escapes in '…'
 //        "…", `…` names, `/*! … */` executed code, not a comment);
+//   go, rs: as Go and Rust read them (Rust's block comments nest; raw
+//        strings in both);
 //   any other text: `#` and `//` to the end of the line, `/* … */`, quotes.
 // Offsets are the engine's code points, turned into UTF-16 offsets here.
 
@@ -60,7 +62,7 @@ function unitOffsets(s) {
 export function commentSpans(content, lang, strings = null, { jsx = true, literals = null } = {}) {
   if (lang === "cfg") return configCommentSpans(content);          // a config or data file
   const args = { jsx, strings: strings !== null, literals: literals !== null };
-  if (lang === "py" || lang === "js" || lang === "sql") args.lang = lang;
+  if (lang === "py" || lang === "js" || lang === "sql" || lang === "go" || lang === "rs") args.lang = lang;
   const got = call("lex_comment_spans", args, content);
   const units = unitOffsets(content);
   const at = units ? ([a, b]) => [units[a], units[b]] : ([a, b]) => [a, b];

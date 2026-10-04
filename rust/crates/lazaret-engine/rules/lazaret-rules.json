@@ -1,6 +1,6 @@
 {
  "format": 1,
- "rule_set": "2.26.0",
+ "rule_set": "2.27.0",
  "source": "lazaret.scanner.core, extracted by scripts/make_rust_tables.py \u2014 do not edit",
  "values": {
   "ALWAYS_PRUNE_DIRS": {
@@ -327,6 +327,9 @@
     ".cts": {
      "value": "js"
     },
+    ".go": {
+     "value": "go"
+    },
     ".js": {
      "value": "js"
     },
@@ -344,6 +347,9 @@
     },
     ".pyw": {
      "value": "py"
+    },
+    ".rs": {
+     "value": "rs"
     },
     ".sql": {
      "value": "sql"
@@ -1113,6 +1119,12 @@
         },
         {
          "value": "js"
+        },
+        {
+         "value": "go"
+        },
+        {
+         "value": "rs"
         }
        ]
       },
@@ -1902,6 +1914,12 @@
         },
         {
          "value": "sql"
+        },
+        {
+         "value": "go"
+        },
+        {
+         "value": "rs"
         }
        ]
       },
@@ -2040,6 +2058,12 @@
         },
         {
          "value": "js"
+        },
+        {
+         "value": "go"
+        },
+        {
+         "value": "rs"
         }
        ]
       },
@@ -2101,6 +2125,12 @@
         },
         {
          "value": "sql"
+        },
+        {
+         "value": "go"
+        },
+        {
+         "value": "rs"
         }
        ]
       },

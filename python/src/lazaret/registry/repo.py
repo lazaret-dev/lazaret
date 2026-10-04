@@ -86,6 +86,9 @@ MAX_MEMBER = _env_number("LAZARET_MAX_SOURCE_BYTES", 16_000_000)
 MAX_FILES = 20_000         # files per package (numpy's sdist alone has >4,000)
 SAMPLE = 8192              # header/entropy sample read from oversized files
 # Stored scans from another engine version are scanned again (has_scan).
+# 2.27: Go and Rust source files read by project scans (S-4): their
+#      comments and literals as their lexers read them, and S-SECRET,
+#      S-TOKEN, S-BIDI and Q-TODO on them (a package's are not read yet)
 # 2.26: the in-sample misses examined (D-1, B-4): a command that downloads
 #      or runs code written to a shell's startup file is persistence (any
 #      command, to one named only in strings the script decodes: alinet),
@@ -204,7 +207,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.26.0"
+ENGINE_VERSION = "2.27.0"
 
 # ---------------- The content memo (P-2a, registry/contentcache.py) ----------------
 # One per scan_package run: the engine answers once for content several of a
@@ -1837,7 +1840,7 @@ class _ArtifactScan:
         self.members.add(rel)
         base = os.path.basename(rel)
         ext = os.path.splitext(base)[1].lower()
-        wants_text = (base in _MANIFEST_NAMES or ext in lazaret.EXTS
+        wants_text = (base in _MANIFEST_NAMES or lazaret.dep_source_lang(ext) is not None
                       or ext in (".pth", ".gyp", ".gypi"))
         if reason == "member":
             self.oversize.add(rel)
@@ -1846,7 +1849,7 @@ class _ArtifactScan:
                 # signal, not a clean verdict — whatever the first bytes look like.
                 self.truncate(rel, _TRUNC_DETAILS["member"](rel, size))
             # still classifiable by magic/entropy from the decompressed prefix
-            disguised = lazaret.disguised_binary(rel, raw) if ext in lazaret.EXTS else None
+            disguised = lazaret.disguised_binary(rel, raw) if lazaret.dep_source_lang(ext) else None
             if disguised:
                 self.binaries += 1
                 self.issues.append(disguised)
@@ -1894,7 +1897,7 @@ class _ArtifactScan:
                 self._unanswered(rel, exc)
             self.scan_source(rel, text, "py")
             return
-        lang = lazaret.EXTS.get(ext)
+        lang = lazaret.dep_source_lang(ext)
         if lang is not None:
             text, extra = lazaret.decode_member(rel, raw)
             self.add_decode_issues(extra)

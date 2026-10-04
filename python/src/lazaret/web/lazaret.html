@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-Zkc+8ZiZ+kMwFBNXWxXaOmag4EBJGUdM6QDw1QqBqlk='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-fNgXpFjJ+LckPhhftNxuQ6bLwZB63A768g0ydIhhRwg='; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
 <title>Lazaret — Security &amp; Quality Review</title>
 <style>
   :root{
@@ -1683,7 +1683,7 @@ id:"S-YAML", name:"Unsafe yaml.load", type:"VULN", sev:"CRITICAL", langs:["py"],
  ref:"CWE-502",
 },
 {
-id:"S-SECRET", name:"Hardcoded credential", type:"VULN", sev:"BLOCKER", langs:["py", "js"],
+id:"S-SECRET", name:"Hardcoded credential", type:"VULN", sev:"BLOCKER", langs:["py", "js", "go", "rs"],
  re:pyRe("(password|passwd|pwd|secret|api[_-]?key|access[_-]?key|auth[_-]?token|private[_-]?key)\\s*[:=]\\s*[\\\"'][^\\\"']{4,}[\\\"']", "i"),
  skip:pyRe("(environ|process\\.env|getenv|config\\[|\\bimport\\b|\\bplaceholder\\b|\\bexample\\b|\\bdummy\\b|\\bsample\\b|\\bmock\\b|\\bmocked\\b|\\bxxxx+\\b|\\{\\{)", "i"),
  msg:"Credential appears to be hardcoded in source.",
@@ -1822,7 +1822,7 @@ id:"B-EQEQ", name:"Loose equality", type:"BUG", sev:"MINOR", langs:["js"],
  ref:"Reliability",
 },
 {
-id:"Q-TODO", name:"TODO/FIXME marker", type:"SMELL", sev:"INFO", langs:["py", "js", "sql"],
+id:"Q-TODO", name:"TODO/FIXME marker", type:"SMELL", sev:"INFO", langs:["py", "js", "sql", "go", "rs"],
  re:pyRe("\\b(TODO|FIXME|XXX|HACK)\\b", ""),
  msg:"Unresolved TODO/FIXME comment.",
  why:"Tracked work living only in comments tends to be forgotten.",
@@ -1846,7 +1846,7 @@ id:"Q-VAR", name:"var declaration", type:"SMELL", sev:"MINOR", langs:["js"],
  ref:"Maintainability",
 },
 {
-id:"S-TOKEN", name:"Known secret token format", type:"VULN", sev:"BLOCKER", langs:["py", "js"],
+id:"S-TOKEN", name:"Known secret token format", type:"VULN", sev:"BLOCKER", langs:["py", "js", "go", "rs"],
  re:pyRe("AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}|xox[baprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_\\-]{35}|-----BEGIN [A-Z ]*PRIVATE KEY-----|eyJ[A-Za-z0-9_\\-]{10,}\\.eyJ[A-Za-z0-9_\\-]{10,}", ""),
  find:(line) => { const t = findSecretToken(line); return t ? t.index : -1; },
  msg:"String matches a known secret format (AWS/GitHub/Slack/Stripe/Google key, private key, or JWT).",
@@ -1855,7 +1855,7 @@ id:"S-TOKEN", name:"Known secret token format", type:"VULN", sev:"BLOCKER", lang
  ref:"CWE-798 · OWASP A07",
 },
 {
-id:"S-BIDI", name:"Trojan Source bidi control", type:"VULN", sev:"CRITICAL", langs:["py", "js", "sql"],
+id:"S-BIDI", name:"Trojan Source bidi control", type:"VULN", sev:"CRITICAL", langs:["py", "js", "sql", "go", "rs"],
  re:pyRe("[\\u202a-\\u202e\\u2066-\\u2069]", ""),
  msg:"Bidirectional control character in source (Trojan Source)",
  why:"Bidi override and isolate characters make code display in a different order than the compiler reads it, so reviewers approve logic that is not what runs (CVE-2021-42574).",

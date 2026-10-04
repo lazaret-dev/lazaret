@@ -231,7 +231,7 @@ def scan_calls(items):
     from lazaret.scanner import core
     base = _budget({"redact": bool(core.REDACT_SECRETS), "neumaier": False})
     return [("scan_file" if dep else "scan_rules", dict(base, lang=lang, jsx=core.jsx_reading(path), dep=bool(dep)))
-            if lang in ("py", "js", "sql") and isinstance(content, str) else None
+            if lang in ("py", "js", "sql", "go", "rs") and isinstance(content, str) else None
             for path, content, lang, dep in items]
 
 

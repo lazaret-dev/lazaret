@@ -253,7 +253,7 @@ def _lex_comment_spans(content, lang, strings=None, jsx=True, literals=None):
     if lang == "cfg":                       # a config or data file (configsecrets)
         return configsecrets.comment_spans(content)
     args = {"jsx": jsx, "strings": strings is not None, "literals": literals is not None}
-    if lang in ("py", "js", "sql"):
+    if lang in ("py", "js", "sql", "go", "rs"):
         args["lang"] = lang
     got = _native.call("lex_comment_spans", args, content)
     if strings is not None:
@@ -708,7 +708,7 @@ R("S-YAML", "Unsafe yaml.load", "VULN", "CRITICAL", ("py",),
   "Full YAML loading executes constructors from the document.",
   "Use yaml.safe_load() or Loader=yaml.SafeLoader.",
   "CWE-502"),
-R("S-SECRET", "Hardcoded credential", "VULN", "BLOCKER", ("py", "js"),
+R("S-SECRET", "Hardcoded credential", "VULN", "BLOCKER", ("py", "js", "go", "rs"),
   r"(password|passwd|pwd|secret|api[_-]?key|access[_-]?key|auth[_-]?token|private[_-]?key)\s*[:=]\s*[\"'][^\"']{4,}[\"']",
   "Credential appears to be hardcoded in source.",
   "Secrets in code leak through version control, logs, and builds; rotation requires a deploy.",
@@ -820,7 +820,7 @@ R("B-EQEQ", "Loose equality", "BUG", "MINOR", ("js",),
   "Use === and !==.",
   "Reliability",
   skip=r"^\s*(//|\*|/\*)"),
-R("Q-TODO", "TODO/FIXME marker", "SMELL", "INFO", ("py", "js", "sql"),
+R("Q-TODO", "TODO/FIXME marker", "SMELL", "INFO", ("py", "js", "sql", "go", "rs"),
   r"\b(TODO|FIXME|XXX|HACK)\b",
   "Unresolved TODO/FIXME comment.",
   "Tracked work living only in comments tends to be forgotten.",
@@ -840,7 +840,7 @@ R("Q-VAR", "var declaration", "SMELL", "MINOR", ("js",),
   "Maintainability"),
 # ---- Secret token signatures (Gitleaks-style) ----
 # The pattern (text: _TOKEN_ALTS) runs in linear time; see _TokenPattern.
-R("S-TOKEN", "Known secret token format", "VULN", "BLOCKER", ("py", "js"),
+R("S-TOKEN", "Known secret token format", "VULN", "BLOCKER", ("py", "js", "go", "rs"),
   _TOKEN_PATTERN,
   "String matches a known secret format (AWS/GitHub/Slack/Stripe/Google key, private key, or JWT).",
   "Provider-format tokens in source are live credentials until proven otherwise.",
@@ -849,7 +849,7 @@ R("S-TOKEN", "Known secret token format", "VULN", "BLOCKER", ("py", "js"),
 # Review fix (shared semantics 5): Trojan Source. Bidi embedding/override/
 # isolate controls reorder how a line DISPLAYS without changing how it is
 # parsed. Flagged anywhere on a line, comment lines included.
-R("S-BIDI", "Trojan Source bidi control", "VULN", "CRITICAL", ("py", "js", "sql"),
+R("S-BIDI", "Trojan Source bidi control", "VULN", "CRITICAL", ("py", "js", "sql", "go", "rs"),
   r"[\u202a-\u202e\u2066-\u2069]",
   "Bidirectional control character in source (Trojan Source)",
   "Bidi override and isolate characters make code display in a different order than the "
@@ -2930,7 +2930,23 @@ FN_LEN_LIMIT = 60
 FN_CX_LIMIT = 12
 FN_HEADER_SCAN_LIMIT = 2000   # chars of a JS line searched for a function header
 EXTS = {".py": "py", ".pyw": "py", ".js": "js", ".jsx": "js", ".ts": "js", ".tsx": "js",
-        ".mts": "js", ".cts": "js", ".mjs": "js", ".cjs": "js", ".sql": "sql"}
+        ".mts": "js", ".cts": "js", ".mjs": "js", ".cjs": "js", ".sql": "sql",
+        ".go": "go", ".rs": "rs"}
+#: The languages a package's files (registry and guard scans) and a
+#: dependency tree's (--deps) are read in. A project's own Go and Rust files
+#: are read (S-4: its secrets, tokens, bidi controls and the families every
+#: text gets); a package's wait for the engine's Go and Rust detectors, and
+#: are classified as any other file until then.
+DEP_LANGS = frozenset({"py", "js", "sql"})
+
+
+def dep_source_lang(ext):
+    """The language a package's or a dependency tree's file with extension
+    `ext` is read in as source, or None."""
+    lang = EXTS.get(ext)
+    return lang if lang in DEP_LANGS else None
+
+
 # G10 + review item 8: what the project walk never source-scans.
 #   * .git (exactly that name) is always pruned — VCS metadata, never
 #     shippable source (and reported as a Q-SKIPPED-TREE blind spot).
@@ -5897,7 +5913,7 @@ def _collect_file(path, rel, st, in_dep, col):
     size = st.st_size
     manifest = name in MANIFEST_NAMES or ext in GYP_EXTS
     pth = not manifest and ext == PTH_EXT
-    lang = None if manifest or pth else EXTS.get(ext)
+    lang = None if manifest or pth else dep_source_lang(ext) if in_dep else EXTS.get(ext)
     issues = col["issues"]
     if not manifest and not pth and lang is None:
         # FIX-SPEC 9: every non-source regular file is classified by magic
@@ -6819,12 +6835,23 @@ def scan_project(root, exclude=(), include_deps=False, taint_config=None,
 
 
 # ---------------- Metrics / ratings ----------------
+#: The languages whose duplication is measured (windows of six code lines
+#: that repeat). A project's Go and Rust files count in the files, lines of
+#: code and comments, but not yet in the duplication: the gate's 10% was set
+#: on Python and JavaScript, and with these windows Go's standard library
+#: measures 2 to 13% and popular crates 4 to 54% (repetitive tests, an API
+#: written for each type, a file per platform), and this repository's Python
+#: and JavaScript under 1%. Go and Rust need a measure of their own.
+DUP_LANGS = frozenset({"py", "js", "sql"})
+
+
 def compute_metrics(all_files):
     files = [f for f in all_files if not f.get("dep")]  # deps excluded from quality metrics
-    ncloc = comments = 0
+    ncloc = comments = measured = 0
     win_map = {}
     for f in files:
         code = []
+        dup_lang = f.get("lang") is None or f["lang"] in DUP_LANGS
         flines = _unicode13.pin(f["content"]).split("\n")
         try:
             cmask = comment_mask(flines, f["lang"], jsx_reading(f["path"]))
@@ -6838,7 +6865,9 @@ def compute_metrics(all_files):
                 comments += 1
                 continue
             ncloc += 1
-            code.append((t, i, f["path"]))
+            if dup_lang:
+                measured += 1
+                code.append((t, i, f["path"]))
         for i in range(len(code) - 5):
             key = "".join(c[0] for c in code[i:i + 6])
             win_map.setdefault(key, []).append(code[i:i + 6])
@@ -6848,7 +6877,7 @@ def compute_metrics(all_files):
             for win in occ:
                 for _, i, p in win:
                     dup.add((p, i))
-    dup_pct = round(100 * len(dup) / ncloc, 1) if ncloc else 0.0
+    dup_pct = round(100 * len(dup) / measured, 1) if measured else 0.0
     return {"files": len(files), "depFiles": len(all_files) - len(files),
             "ncloc": ncloc, "comments": comments, "dupPct": dup_pct}
 

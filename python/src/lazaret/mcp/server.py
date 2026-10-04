@@ -82,8 +82,9 @@ TOOLS = [
     {
         "name": "scan_directory",
         "description": ("Recursively scan a project directory for security vulnerabilities "
-                        "and code-quality issues in Python/JavaScript files. Returns quality-gate "
-                        "result, metrics, ratings, and the issue list."),
+                        "and code-quality issues in Python/JavaScript files, and for hardcoded "
+                        "credentials, token formats and hidden characters in Go and Rust files. "
+                        "Returns quality-gate result, metrics, ratings, and the issue list."),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -100,7 +101,8 @@ TOOLS = [
     {
         "name": "scan_files",
         "description": ("Scan specific Python/JavaScript files (e.g. only the files changed in a "
-                        "diff), and config files (.env, JSON, YAML, TOML, INI, shell, keys, "
+                        "diff), Go and Rust files (credentials, token formats, hidden characters), "
+                        "and config files (.env, JSON, YAML, TOML, INI, shell, keys, "
                         "Dockerfiles), which are checked for credentials — and, for editor and AI-agent "
                         "settings and GitHub Actions workflows, for the commands they run automatically. "
                         "Returns issues per file. Use after editing to verify the changes introduce no "
@@ -407,7 +409,8 @@ def _preflight(root, exclude, include_deps, ctx):
             if not stat.S_ISREG(mode):
                 continue
             ext = os.path.splitext(e.name)[1].lower()
-            whole = e.name in _MANIFEST_NAMES or ext == lazaret.PTH_EXT or ext in lazaret.EXTS
+            source = lazaret.dep_source_lang(ext) if in_dep else lazaret.EXTS.get(ext)
+            whole = e.name in _MANIFEST_NAMES or ext == lazaret.PTH_EXT or source is not None
             if not whole and ext not in lazaret.COMPILED_EXTS:
                 continue
             n_files += 1
@@ -557,7 +560,7 @@ def tool_scan_files(args):
         if lang is None and lazaret.configsecrets.is_config_file(os.path.basename(p)):
             lang = "cfg"                 # a config or data file: credentials only
         if lang is None:
-            out[p] = {"error": f"Unsupported extension {ext} (need .py/.js/.ts/.jsx/.tsx, "
+            out[p] = {"error": f"Unsupported extension {ext} (need .py/.js/.ts/.jsx/.tsx/.go/.rs, "
                                "or a config file such as .env, .json or .yaml)"}
             continue
         try:

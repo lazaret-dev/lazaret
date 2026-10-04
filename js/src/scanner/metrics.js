@@ -6,8 +6,13 @@ import { pyStrip, pyRound1 } from "../lib/pycompat.js";
 import { normalizeNewlines } from "../lib/fs.js";
 import { pinUnicode } from "../lib/unicode13.js";
 
+// The languages whose duplication is measured (twin of core.DUP_LANGS): a
+// project's Go and Rust files count in the files, lines of code and
+// comments, not yet in the duplication.
+export const DUP_LANGS = new Set(["py", "js", "sql"]);
+
 export function computeMetrics(files) {
-  let ncloc = 0, comments = 0;
+  let ncloc = 0, comments = 0, measured = 0;
   const nonDep = files.filter((f) => !f.dep);   // deps excluded from quality metrics
   const depFiles = files.length - nonDep.length;
   const winMap = new Map();
@@ -18,12 +23,13 @@ export function computeMetrics(files) {
     try { lex = lexLines(lines, f.lang, null, { jsx: jsxReading(key) }); }
     catch { /* its scan failed the same way (SC-TRUNCATED): count its lines as code rather than lose the report (review B3) */ }
     const code = [];
+    const dupLang = f.lang == null || DUP_LANGS.has(f.lang);
     for (let i = 0; i < lines.length; i++) {
       const t = pyStrip(lines[i]);
       if (!t) continue;
       if (lex && lex.comment[i]) { comments++; continue; }
       ncloc++;
-      code.push([t, i]);
+      if (dupLang) { measured++; code.push([t, i]); }
     }
     for (let i = 0; i + 6 <= code.length; i++) {
       let k = code[i][0];
@@ -38,7 +44,7 @@ export function computeMetrics(files) {
     if (occ.length < 2) continue;
     for (const [key, i, code] of occ) for (let j = i; j < i + 6; j++) dupSet.add(`${key}\u0000${code[j][1]}`);
   }
-  const dupPct = ncloc ? pyRound1(100 * dupSet.size / ncloc) : 0;
+  const dupPct = measured ? pyRound1(100 * dupSet.size / measured) : 0;
   return { files: nonDep.length, depFiles, ncloc, comments, dupPct };
 }
 

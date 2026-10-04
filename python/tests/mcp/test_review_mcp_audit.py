@@ -113,8 +113,8 @@ class ScanTargetTests(unittest.TestCase):
 
     def test_nothing_to_scan_is_incomplete(self):
         for label, files in (("empty", {}),
-                             ("only Go and Markdown", {"main.go": "package main\n",
-                                                       "README.md": "# demo\n"})):
+                             ("only Java and Markdown", {"Main.java": "class Main {}\n",
+                                                         "README.md": "# demo\n"})):
             root = tree(files)
             with self.subTest(label):
                 out = server.tool_scan_directory({"path": root})

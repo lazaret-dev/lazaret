@@ -261,6 +261,21 @@ are **lexed, not guessed** — block-comment/string/template state is tracked
 across lines, and a line counts as a comment only if all of it is, and only if
 both readings of ambiguous text agree.
 
+**Go and Rust (0.1.9, S-4).** A project's `.go` and `.rs` files are source
+(`core.EXTS`, `fs.js` `EXTS`): their comments and literals come from the
+engine's Go and Rust lexers, and they get the rules whose `langs` list them
+(S-SECRET, S-TOKEN, S-BIDI, Q-TODO) and the families every text gets. No
+taint, function metric or supply-chain detector reads them yet. Two limits
+are deliberate until the Go and Rust detectors exist: a package's Go and
+Rust files (registry and guard scans) and a dependency tree's (`--deps`)
+are not read (`core.DEP_LANGS`, `dep_source_lang`): reading them for
+secrets alone would add findings a consumer cannot act on and say nothing
+about what their build scripts and initializers run; and their lines are
+left out of the duplication measure (`core.DUP_LANGS`), whose 10% gate was
+set on Python and JavaScript (Go's standard library measures 2 to 13% with
+its six-line windows, popular crates 4 to 54%), while they count in the
+lines of code the maintainability rating divides by.
+
 ### b. Interprocedural / cross-file taint (`flow.py` / `flow.js`)
 
 Whole-program analysis that follows untrusted data through function calls and
