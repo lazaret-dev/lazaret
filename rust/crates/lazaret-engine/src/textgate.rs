@@ -14,6 +14,10 @@
 //! borrows the text, which can be neither changed nor freed meanwhile);
 //! a search of that text, or of any slice of it, asks it. Gates are per
 //! thread.
+//!
+//! While it is open, a gate also keeps what a call's tests read of the
+//! whole text more than once (`memo`: its tokens, which the decoded view
+//! and the prose spans each lex): made once, dropped with the gate.
 
 use std::cell::RefCell;
 use std::marker::PhantomData;
@@ -138,6 +142,8 @@ struct Opened {
     lo: usize,
     hi: usize,
     pairs: Box<Pairs>,
+    /// what `memo` made for the whole text, by its key
+    memo: Vec<(&'static str, Box<dyn std::any::Any>)>,
 }
 
 thread_local! {
@@ -170,7 +176,7 @@ pub fn open(text: &[u32]) -> Option<Gate<'_>> {
     let lo = text.as_ptr() as usize;
     let hi = lo + std::mem::size_of_val(text);
     let pairs = Pairs::read(text);
-    OPEN.with(|o| o.borrow_mut().push(Opened { lo, hi, pairs }));
+    OPEN.with(|o| o.borrow_mut().push(Opened { lo, hi, pairs, memo: Vec::new() }));
     Some(Gate { lo, _text: PhantomData })
 }
 
@@ -188,6 +194,33 @@ pub fn ask<R>(s: &[u32], f: impl FnOnce(&Pairs) -> R) -> Option<R> {
         let o = o.borrow();
         o.iter().rev().find(|g| g.lo <= lo && hi <= g.hi).map(|g| f(&g.pairs))
     })
+}
+
+/// What `make` gives for `s`, made once while a gate is open for exactly
+/// `s` (the whole text, not a part of it) and kept until the gate closes;
+/// `make()` each time when none is. `make` must depend on `s` alone, and
+/// `key` name what it makes.
+pub fn memo<T: Clone + 'static>(s: &[u32], key: &'static str, make: impl FnOnce() -> T) -> T {
+    let lo = s.as_ptr() as usize;
+    let hi = lo + std::mem::size_of_val(s);
+    let whole = |g: &&Opened| g.lo == lo && g.hi == hi;
+    let kept: Option<Option<T>> = OPEN.with(|o| {
+        let o = o.borrow();
+        o.iter().rev().find(whole).map(|g| g.memo.iter().find(|(k, _)| *k == key).and_then(|(_, v)| v.downcast_ref::<T>().cloned()))
+    });
+    match kept {
+        None => make(),
+        Some(Some(v)) => v,
+        Some(None) => {
+            let v = make();
+            OPEN.with(|o| {
+                if let Some(g) = o.borrow_mut().iter_mut().rev().find(|g| g.lo == lo && g.hi == hi) {
+                    g.memo.push((key, Box::new(v.clone())));
+                }
+            });
+            v
+        }
+    }
 }
 
 #[cfg(test)]
@@ -211,6 +244,29 @@ mod tests {
         }
         assert_eq!(ask(&text, |p| p.may_hold_str("return")), None);
         assert!(open(&cps("short")).is_none());
+    }
+
+    #[test]
+    fn a_memo_is_made_once_for_the_whole_open_text_only() {
+        let text = cps(&"let a = 1;\n".repeat(40));
+        let made = std::cell::Cell::new(0);
+        let make = || {
+            made.set(made.get() + 1);
+            text.len()
+        };
+        assert_eq!(memo(&text, "len", make), text.len());
+        assert_eq!(made.get(), 1); // (no gate: made each time)
+        {
+            let _g = open(&text).unwrap();
+            assert_eq!(memo(&text, "len", make), text.len());
+            assert_eq!(memo(&text, "len", make), text.len());
+            assert_eq!(made.get(), 2);
+            assert_eq!(memo(&text[1..], "len", || 7), 7); // (a part of the text: not kept)
+            assert_eq!(memo(&text, "other", || 3usize), 3);
+            assert_eq!(memo(&text, "other", || 4usize), 3);
+        }
+        assert_eq!(memo(&text, "len", make), text.len());
+        assert_eq!(made.get(), 3); // (the gate closed: what it kept went with it)
     }
 
     #[test]

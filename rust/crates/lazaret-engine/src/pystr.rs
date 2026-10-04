@@ -480,6 +480,10 @@ pub struct Needles {
     /// the strings that start past ASCII
     other: Vec<u32>,
     has_empty: bool,
+    /// the strings as the regex engine's literal scan holds them (a scan
+    /// that looks for the characters the strings have at their rarest
+    /// place), for a list it can hold: up to 64 strings, none empty
+    scan: Option<crate::linre::literal::LitSet>,
 }
 
 impl Needles {
@@ -494,7 +498,9 @@ impl Needles {
                 Some(_) => other.push(k as u32),
             }
         }
-        Needles { list: list.to_vec(), by_first, other, has_empty }
+        let lits: Vec<crate::linre::literal::Lit> = list.iter().map(|n| n.iter().map(|&c| vec![c]).collect()).collect();
+        let scan = if has_empty { None } else { crate::linre::literal::LitSet::new(&lits) };
+        Needles { list: list.to_vec(), by_first, other, has_empty, scan }
     }
 
     /// Does `h` hold one of the strings?
@@ -506,6 +512,11 @@ impl Needles {
             && crate::textgate::ask(h, |p| self.list.iter().all(|n| !p.may_hold(n))).unwrap_or(false)
         {
             return false; // (each string has a pair the text lacks: textgate.rs)
+        }
+        if let Some(scan) = &self.scan {
+            // (where it stops, one of the strings starts: the scan keeps
+            // each string or one that starts it, so the answer is the same)
+            return scan.find(h, 0, h.len()).is_some();
         }
         for (i, &c) in h.iter().enumerate() {
             let cands = if c < 128 { &self.by_first[c as usize] } else { &self.other };

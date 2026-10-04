@@ -79,8 +79,73 @@ fn eq(a: &[u32], b: &str) -> bool {
     pystr::eq(a, b)
 }
 
-fn is_one(name: &[u32], set: &[&str]) -> bool {
-    set.iter().any(|s| eq(name, s))
+/// A set of names a callee's or a method's name is tested against: a
+/// table (below), or a list written where it is asked.
+trait NameSet {
+    fn holds(&self, name: &[u32]) -> bool;
+}
+
+impl NameSet for [&str] {
+    fn holds(&self, name: &[u32]) -> bool {
+        self.iter().any(|s| eq(name, s))
+    }
+}
+
+impl<const N: usize> NameSet for [&str; N] {
+    fn holds(&self, name: &[u32]) -> bool {
+        self[..].holds(name)
+    }
+}
+
+/// A table of names, with the lengths and first characters its names have:
+/// the models ask about every call, and most names are none of a table's,
+/// which these two answer without a comparison. (A table's names are
+/// ASCII, so a name's length in characters is a table name's in bytes.)
+struct Table {
+    names: &'static [&'static str],
+    /// bit n: a name of n characters (63: 63 or more)
+    lens: u64,
+    /// bit c: a name that starts with ASCII c
+    firsts: u128,
+}
+
+impl Table {
+    const fn new(names: &'static [&'static str]) -> Table {
+        let mut lens = 0u64;
+        let mut firsts = 0u128;
+        let mut i = 0;
+        while i < names.len() {
+            let b = names[i].as_bytes();
+            assert!(!b.is_empty(), "a table's names are not empty");
+            let mut j = 0;
+            while j < b.len() {
+                assert!(b[j] < 0x80, "a table's names are ASCII");
+                j += 1;
+            }
+            lens |= 1u64 << if b.len() >= 63 { 63 } else { b.len() };
+            firsts |= 1u128 << b[0];
+            i += 1;
+        }
+        Table { names, lens, firsts }
+    }
+}
+
+impl NameSet for Table {
+    #[inline]
+    fn holds(&self, name: &[u32]) -> bool {
+        let n = name.len().min(63);
+        if self.lens & (1u64 << n) == 0 {
+            return false;
+        }
+        match name.first() {
+            Some(&c) if c < 0x80 && self.firsts & (1u128 << c) != 0 => self.names.holds(name),
+            _ => false,
+        }
+    }
+}
+
+fn is_one<S: NameSet + ?Sized>(name: &[u32], set: &S) -> bool {
+    set.holds(name)
 }
 
 fn last(name: &[u32]) -> &[u32] {
@@ -179,132 +244,132 @@ const LOOKUP: Spec = Spec { addresses: -1, composed: true, process: false };
 const PROCESS: Spec = Spec { addresses: 0, composed: false, process: true };
 
 /// HTTP calls that send their data: the address first.
-const POSTS: &[&str] = &[
+const POSTS: &Table = &Table::new(&[
     "requests.post", "requests.put", "requests.patch", "requests.api.post", "requests.api.put", "requests.api.patch",
     "httpx.post", "httpx.put", "httpx.patch", "urllib.request.urlopen", "urllib.request.Request", "urllib2.urlopen",
     "urllib2.Request", "six.moves.urllib.request.urlopen", "six.moves.urllib.request.Request", "urllib.urlopen",
-];
+]);
 /// HTTP calls given a method, then an address.
-const REQUESTS: &[&str] =
-    &["requests.request", "requests.api.request", "httpx.request", "httpx.stream", "aiohttp.request", "urllib3.request"];
+const REQUESTS: &Table =
+    &Table::new(&["requests.request", "requests.api.request", "httpx.request", "httpx.stream", "aiohttp.request", "urllib3.request"]);
 /// HTTP calls that send only what their address holds.
-const GETS: &[&str] = &[
+const GETS: &Table = &Table::new(&[
     "requests.get", "requests.head", "requests.delete", "requests.options", "requests.api.get", "httpx.get",
     "httpx.head", "httpx.delete", "httpx.options",
-];
+]);
 /// Calls that resolve a name (a DNS lookup sends what the name holds).
-const LOOKUPS: &[&str] = &[
+const LOOKUPS: &Table = &Table::new(&[
     "socket.gethostbyname", "socket.gethostbyname_ex", "socket.getaddrinfo", "dns.resolver.resolve",
     "dns.resolver.query",
-];
+]);
 /// Calls whose value is a connection: what it is written is sent, what it
 /// reads is received.
-const CONNECTIONS: &[&str] = &[
+const CONNECTIONS: &Table = &Table::new(&[
     "socket.socket", "socket.create_connection", "socket.fromfd", "ssl.wrap_socket", "http.client.HTTPConnection",
     "http.client.HTTPSConnection", "httplib.HTTPConnection", "httplib.HTTPSConnection", "telnetlib.Telnet",
     "websocket.create_connection", "websocket.WebSocket", "asyncio.open_connection",
-];
+]);
 /// A connection's methods that send.
-const CONN_WRITES: &[&str] = &["send", "sendall", "sendto", "write", "writelines", "request"];
+const CONN_WRITES: &Table = &Table::new(&["send", "sendall", "sendto", "write", "writelines", "request"]);
 /// A connection's methods that receive.
-const CONN_READS: &[&str] = &["recv", "recvfrom", "recv_into", "read", "readline", "readlines", "getresponse", "readexactly"];
+const CONN_READS: &Table = &Table::new(&["recv", "recvfrom", "recv_into", "read", "readline", "readlines", "getresponse", "readexactly"]);
 /// Methods that give a connection back (a socket wrapped in TLS, its file).
-const CONN_CHAIN: &[&str] = &["wrap_socket", "makefile", "dup", "accept"];
+const CONN_CHAIN: &Table = &Table::new(&["wrap_socket", "makefile", "dup", "accept"]);
 /// Calls whose value is an HTTP client: its calls send and receive.
-const CLIENTS: &[&str] = &[
+const CLIENTS: &Table = &Table::new(&[
     "requests.Session", "requests.session", "requests.sessions.Session", "httpx.Client", "httpx.AsyncClient",
     "aiohttp.ClientSession", "urllib3.PoolManager", "urllib3.ProxyManager", "urllib3.HTTPConnectionPool",
     "urllib3.HTTPSConnectionPool", "urllib.request.build_opener", "urllib2.build_opener", "cloudscraper.create_scraper",
-];
-const CLIENT_POSTS: &[&str] = &["post", "put", "patch", "open"];
-const CLIENT_REQUESTS: &[&str] = &["request", "urlopen", "stream"];
-const CLIENT_GETS: &[&str] = &["get", "head", "delete", "options"];
+]);
+const CLIENT_POSTS: &Table = &Table::new(&["post", "put", "patch", "open"]);
+const CLIENT_REQUESTS: &Table = &Table::new(&["request", "urlopen", "stream"]);
+const CLIENT_GETS: &Table = &Table::new(&["get", "head", "delete", "options"]);
 /// HTTP calls that receive (their value is the response), from the
 /// script's own address.
-const RECEIVERS: &[&str] = &[
+const RECEIVERS: &Table = &Table::new(&[
     "requests.get", "requests.post", "requests.put", "requests.patch", "requests.delete", "requests.head",
     "requests.options", "requests.request", "requests.api.get", "requests.api.post", "requests.api.request", "httpx.get",
     "httpx.post", "httpx.put", "httpx.patch", "httpx.delete", "httpx.head", "httpx.options", "httpx.request",
     "httpx.stream", "urllib.request.urlopen", "urllib2.urlopen", "six.moves.urllib.request.urlopen", "aiohttp.request",
     "urllib3.request", "urllib.urlopen",
-];
+]);
 /// The calls that fetch (the instance's metadata, the public IP address).
-const FETCHERS: &[&str] = &["requests.get", "httpx.get", "urllib.request.urlopen", "urllib2.urlopen", "urllib.urlopen"];
+const FETCHERS: &Table = &Table::new(&["requests.get", "httpx.get", "urllib.request.urlopen", "urllib2.urlopen", "urllib.urlopen"]);
 /// The calls that make a request object.
-const REQUEST_OBJECTS: &[&str] =
-    &["urllib.request.Request", "urllib2.Request", "six.moves.urllib.request.Request", "requests.Request"];
+const REQUEST_OBJECTS: &Table =
+    &Table::new(&["urllib.request.Request", "urllib2.Request", "six.moves.urllib.request.Request", "requests.Request"]);
 /// Calls that run a command line and give what it prints.
-const CAPTURES: &[&str] = &[
+const CAPTURES: &Table = &Table::new(&[
     "subprocess.check_output", "subprocess.getoutput", "subprocess.getstatusoutput", "subprocess.run",
     "subprocess.Popen", "os.popen", "commands.getoutput", "commands.getstatusoutput", "asyncio.create_subprocess_shell",
     "asyncio.create_subprocess_exec",
-];
+]);
 /// Calls that start a process (a network program given data sends it).
-const PROCESSES: &[&str] = &[
+const PROCESSES: &Table = &Table::new(&[
     "subprocess.check_output", "subprocess.getoutput", "subprocess.getstatusoutput", "subprocess.run",
     "subprocess.Popen", "subprocess.call", "subprocess.check_call", "os.popen", "os.system", "commands.getoutput",
     "commands.getstatusoutput", "asyncio.create_subprocess_shell", "asyncio.create_subprocess_exec",
-];
+]);
 /// Calls that run a command line through a shell (its text is code).
-const SHELLS: &[&str] = &[
+const SHELLS: &Table = &Table::new(&[
     "os.system", "os.popen", "subprocess.getoutput", "subprocess.getstatusoutput", "commands.getoutput",
     "commands.getstatusoutput", "asyncio.create_subprocess_shell", "pty.spawn",
-];
+]);
 /// Calls that start a process from an argument list (shell=True makes the
 /// first a shell's command line).
-const SPAWNS: &[&str] =
-    &["subprocess.run", "subprocess.call", "subprocess.check_call", "subprocess.check_output", "subprocess.Popen"];
+const SPAWNS: &Table =
+    &Table::new(&["subprocess.run", "subprocess.call", "subprocess.check_call", "subprocess.check_output", "subprocess.Popen"]);
 /// Calls that run a program named by their first argument.
-const PROGRAM_RUNS: &[&str] = &[
+const PROGRAM_RUNS: &Table = &Table::new(&[
     "os.startfile", "os.execv", "os.execve", "os.execl", "os.execle", "os.execlp", "os.execlpe", "os.execvp", "os.execvpe",
     "os.posix_spawn", "os.posix_spawnp", "asyncio.create_subprocess_exec",
-];
+]);
 /// Calls that run a program named by their second argument (the first is a mode).
-const MODE_RUNS: &[&str] =
-    &["os.spawnv", "os.spawnve", "os.spawnl", "os.spawnle", "os.spawnlp", "os.spawnlpe", "os.spawnvp", "os.spawnvpe"];
+const MODE_RUNS: &Table =
+    &Table::new(&["os.spawnv", "os.spawnve", "os.spawnl", "os.spawnle", "os.spawnlp", "os.spawnlpe", "os.spawnvp", "os.spawnvpe"]);
 /// Calls that open a file by its path (their second argument the mode).
-const OPENERS: &[&str] = &["open", "io.open", "codecs.open", "builtins.open"];
+const OPENERS: &Table = &Table::new(&["open", "io.open", "codecs.open", "builtins.open"]);
 /// Calls that give back the path they are given, as a string or a path.
-const PATH_WRAPPERS: &[&str] = &[
+const PATH_WRAPPERS: &Table = &Table::new(&[
     "str", "os.fspath", "os.path.abspath", "os.path.realpath", "os.path.normpath", "os.path.expanduser", "pathlib.Path",
-];
+]);
 /// The path types (`Path(p)` is p).
-const PATH_TYPES: &[&str] = &["Path", "PurePath", "PosixPath", "WindowsPath"];
+const PATH_TYPES: &Table = &Table::new(&["Path", "PurePath", "PosixPath", "WindowsPath"]);
 /// Calls that run code (`_DL_RUNNER`'s Python).
-const RUNNERS: &[&str] = &["exec", "eval", "builtins.exec", "builtins.eval", "execfile", "__builtins__.exec", "__builtins__.eval"];
+const RUNNERS: &Table = &Table::new(&["exec", "eval", "builtins.exec", "builtins.eval", "execfile", "__builtins__.exec", "__builtins__.eval"]);
 /// Calls that load a module by name.
-const IMPORTERS: &[&str] = &["importlib.import_module", "__import__", "builtins.__import__", "importlib.__import__"];
+const IMPORTERS: &Table = &Table::new(&["importlib.import_module", "__import__", "builtins.__import__", "importlib.__import__"]);
 /// Deserializers that run code in what they read (`_DL_DESERIAL`).
-const DESERIALIZERS: &[&str] = &[
+const DESERIALIZERS: &Table = &Table::new(&[
     "pickle.loads", "pickle.load", "pickle.Unpickler", "cPickle.loads", "cPickle.load", "_pickle.loads", "_pickle.load",
     "dill.loads", "dill.load", "cloudpickle.loads", "cloudpickle.load", "marshal.loads", "marshal.load",
     "jsonpickle.decode", "yaml.unsafe_load", "yaml.load",
-];
+]);
 /// A thread's or an executor's call of a function (its arguments: what the
 /// function is given).
-const STARTERS: &[&str] = &["threading.Thread", "multiprocessing.Process", "threading.Timer"];
+const STARTERS: &Table = &Table::new(&["threading.Thread", "multiprocessing.Process", "threading.Timer"]);
 /// Calls whose value is a number or a flag, not the data they are given (a
 /// length, a test, a checksum). A digest, a character's code or a number
 /// written out still carry it: `md5(host).hexdigest()` is the machine's id,
 /// `[ord(c) for c in host]` its name (KEEPS).
-const NUMERIC: &[&str] = &["len", "bool", "hash", "id", "abs", "round", "sum", "isinstance"];
+const NUMERIC: &Table = &Table::new(&["len", "bool", "hash", "id", "abs", "round", "sum", "isinstance"]);
 /// Calls the pass reads as clean whose value still identifies what they are given.
-const KEEPS: &[&str] = &["hexdigest", "digest", "ord"];
+const KEEPS: &Table = &Table::new(&["hexdigest", "digest", "ord"]);
 /// A container's methods that put what they are given into it.
-const COLLECTS: &[&str] = &["append", "extend", "add", "update", "insert", "setdefault", "appendleft", "put"];
+const COLLECTS: &Table = &Table::new(&["append", "extend", "add", "update", "insert", "setdefault", "appendleft", "put"]);
 /// Calls that decode what they are given (`_DECODER_NAMES` with their
 /// modules): what they return is decoded data; run as code, it is code the
 /// script decodes.
-const DECODERS: &[&str] = &[
+const DECODERS: &Table = &Table::new(&[
     "base64.b64decode", "base64.standard_b64decode", "base64.urlsafe_b64decode", "base64.b32decode",
     "base64.b32hexdecode", "base64.b16decode", "base64.a85decode", "base64.b85decode", "base64.z85decode",
     "base64.decodebytes", "base64.decodestring", "binascii.unhexlify", "binascii.a2b_base64", "binascii.a2b_hex",
     "binascii.a2b_uu", "bytes.fromhex", "bytearray.fromhex", "codecs.decode", "zlib.decompress", "gzip.decompress",
     "bz2.decompress", "lzma.decompress", "marshal.loads",
-];
+]);
 /// Methods that decode: a decryption (`Fernet(k).decrypt(d)`), a
 /// decompressor's, `fromhex`.
-const DECODER_METHODS: &[&str] = &["decrypt", "decompress", "fromhex"];
+const DECODER_METHODS: &Table = &Table::new(&["decrypt", "decompress", "fromhex"]);
 
 /// The modules a bare name usually comes from: a snippet that calls
 /// `urlopen(u)` without its import is urllib's, and so is one that has it
@@ -334,6 +399,27 @@ const BARE: &[(&str, &str)] = &[
 /// `__builtins__.__dict__.exec` and `builtins.exec` are `exec`'s,
 /// `globals.x` (`globals()['x']`) is x.
 fn normalize_name(name: &[u32]) -> PyStr {
+    // (the common case, nothing to take out: a part named __dict__, a
+    // namespace's head, builtins' module before a name; the name as it is)
+    let mut parts_n = 0usize;
+    let mut first: &[u32] = &[];
+    let mut dict = false;
+    for (k, part) in name.split(|&c| c == 0x2E).enumerate() {
+        if k == 0 {
+            first = part;
+        }
+        if eq(part, "__dict__") {
+            dict = true;
+            break;
+        }
+        parts_n += 1;
+    }
+    if !dict
+        && !(parts_n > 1 && (eq(first, "globals") || eq(first, "vars") || eq(first, "locals")))
+        && !(parts_n == 2 && (eq(first, "__builtins__") || eq(first, "builtins")))
+    {
+        return name.to_vec();
+    }
     let mut parts: Vec<&[u32]> = name.split(|&c| c == 0x2E).filter(|p| !eq(p, "__dict__")).collect();
     if parts.len() > 1 && (eq(parts[0], "globals") || eq(parts[0], "vars") || eq(parts[0], "locals")) {
         parts.remove(0);
@@ -352,19 +438,20 @@ fn normalize_name(name: &[u32]) -> PyStr {
 }
 
 /// Is a callee's name one of a table's?
-fn any_of(names: &[PyStr], set: &[&str]) -> bool {
-    names.iter().any(|n| is_one(n, set))
+fn any_of<S: NameSet + ?Sized>(names: &[PyStr], set: &S) -> bool {
+    names.iter().any(|n| set.holds(n))
 }
 
-/// [`any_of`] for the hooks every call passes through: a table's names are
-/// ASCII, so a name of another length is not compared.
-fn any_of_ascii(names: &[PyStr], set: &[&str]) -> bool {
-    names.iter().any(|n| is_one_ascii(n, set))
+/// [`any_of`] for the hooks every call passes through (a table's names are
+/// ASCII, so a name of another length is never one of them: [`eq`] says so
+/// at once).
+fn any_of_ascii<S: NameSet + ?Sized>(names: &[PyStr], set: &S) -> bool {
+    any_of(names, set)
 }
 
 /// [`is_one`] for an ASCII table (see [`any_of_ascii`]).
-fn is_one_ascii(name: &[u32], set: &[&str]) -> bool {
-    set.iter().any(|s| s.len() == name.len() && eq(name, s))
+fn is_one_ascii<S: NameSet + ?Sized>(name: &[u32], set: &S) -> bool {
+    set.holds(name)
 }
 
 /// The send a callee's names make, if any.

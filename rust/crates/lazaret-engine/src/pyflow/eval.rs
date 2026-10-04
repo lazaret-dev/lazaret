@@ -1095,7 +1095,7 @@ pub fn classify(cfg: &Config, raw: &[u32], canon: &[u32], precise: bool, attr: b
         builtin_san: cfg.builtin_sanitizer(&[canon, raw]),
         full_result: is_in(canon, FULL_RESULT) || is_in(raw, FULL_RESULT) || cfg.orm.search(&dot_raw).is_some(),
         sql_builder: is_in(canon, SQL_BUILDER_FUNCS) || is_in(raw, SQL_BUILDER_FUNCS) || attr_is_builder,
-        clean_result: in_words(last_part(raw), CLEAN_RESULT),
+        clean_result: clean_result(last_part(raw)),
     }
 }
 
