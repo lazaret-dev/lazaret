@@ -685,6 +685,8 @@ benchmark:
 | 4 | Linear-time matching: the pack's patterns on linre (§14), pyre and the shlex port retired, current Unicode | Every pattern runs on linre (P-16, rule set 2.28.0): the pack's 666, its lexers' tables included, and those the engine builds as it scans. Lookaheads of unbounded width run with a memo, and a sweep where the walks would cost more; a quote matched again as branches; a name matched again and counts past what a program holds are checked in code; two patterns read further than before. pyre's port of sre retired (P-16's second part): pyre is re's interface to linre, a pattern linre does not run is an error (a built one fails its call closed), and a taint configuration's patterns are held to what linre runs. The shlex port is written anew from shlex's documentation, and the Final_Sigma rule and the casefix table come from Unicode's definition and data (P-16's third part): the engine holds no CPython code. Next: current Unicode |
 | 5 | One call per file, a content cache (SHA-256), the guard's scan in a child process that fails closed, archive ambiguity checks | Not started |
 
+A parallel track brings Go and Rust up to Python's and JavaScript's level (R-1, G-1, §21): the Rust reader (`rs_crate`) is built; Go's reader and the registry and guard wiring follow.
+
 ## 9. Known issues
 
 - `Pack::entry` panics on a name the pack lacks; the FFI and `batch` catch it
@@ -2290,3 +2292,65 @@ SUSPICIOUS (448 of 516): pywhool (an XOR decoder in setup.py, its result
 run by `eval(compile(…))`), requests-darwin-lite and quasarlib; five more
 gain a reason. The holdout gains two PyPI releases
 (631 of 745), both sharing no code with the benchmark.
+
+## 21. The Rust reader (R-1)
+
+`rs_crate` reads a crate's `.rs` files for what their code does when the crate
+is built, when it starts and when it is used, so that `lazaret guard cargo` and
+the registry can judge a crate instead of marking it INCOMPLETE (the engine had
+no Rust detectors). The reader is `crates/lazaret-engine/src/rsread/` and uses
+`rsparse` (the items and the token bodies, §3) and `rsparse::hooks` (the build
+script's `main`, `#[proc_macro…]`, `#[ctor]`, load sections, `#![no_main]`).
+
+The code of each moment is read with the test that Python's and JavaScript's
+code of the same moment gets (§18–§20), with the same reasons and severities:
+
+- the **build script** and a **procedural-macro crate** run on the machine that
+  builds a dependent, the analog of an npm install hook and an sdist's
+  `setup.py`: the install-script test, every reason CRITICAL (SC-INSTALL-HOOK);
+- the **start-up functions** (`#[ctor]`/`#[dtor]`, `#[no_mangle] extern fn main`,
+  a `.init_array`-like section, `#![no_main]` with `#[start]`) run before a
+  binary's `main`, the analog of import-time code: the import-time test
+  (SC-IMPORT-RISK; the strong reasons CRITICAL, the rest MAJOR);
+- **everything else** runs when the crate's code is called: the import-time test
+  of which only the strong reasons count (SC-USE-RISK).
+
+The reading evaluates the code the way the trees' data flow does, not with
+patterns over text. `ast.rs` reads a function body's statements and expressions
+from `rsparse`'s tokens (it is not Rust's parser: what it cannot read is one
+`Unknown` leaf and the rest is read; nesting is bounded, so no input recurses
+past it). `val.rs` is a value — the text the code builds where it builds one
+(`format!`, `concat!`, a `+`, a constant, base64 or hex decoded, a byte slice
+read as UTF-8), the items of a list, the data it carries (the supply-chain
+kinds of §18) and the handle it is (a `Command`, an HTTP request, a `TcpStream`,
+a file open for writing). `eval.rs` walks the entry points of each moment,
+following the crate's own functions (a few calls deep, within a step budget),
+its closures and its methods, and records what the code does: a process started
+(`std::process::Command`, read as a shell reads its line, with `sh -c`/`cmd /c`/
+`powershell -Command` scripts pulled out), data sent (`std::net`, reqwest, ureq,
+minreq, attohttpc, curl, raw sockets), a file written and then run or loaded
+(`libloading`), a name looked up (`ToSocketAddrs`, hickory/trust-dns, including
+TXT records — the Go DNS-backdoor shape). The sources are std's and the usual
+crates' (`env::var`/`vars`, `fs::read`, `dirs`/`home`, `whoami`/`hostname`,
+command output, a response). `facts.rs` turns the events into what the tests
+ask (`signs::ModelFacts`): the strongest send and where data goes, code received
+and run, a file written then run, the commands run, and what only the model
+sees (a shell whose stdio is a connection — a reverse shell; a DNS lookup of a
+name built from the host name). The tests still read each file's text too, for
+the signs a literal shows (a stager, a reverse-shell command, a raw IP), with
+comments, tests (`#[cfg(test)]`, `#[test]`) and the code of another moment
+blanked.
+
+A crate is read as its compilation units: the build script's files, the
+library's (`src/lib.rs` and the modules it declares, `#[path]` included) and the
+binaries' (`src/main.rs`, `src/bin/`). `tests/`, `benches/` and `examples/` are
+never built into a dependent and are not read. `SC-USE-RISK`'s reading is
+bounded as the registry bounds Python and JavaScript (smallest files first,
+within a character budget, so every machine reads the same files); `useRead`
+says how much it read.
+
+Nothing changes for Python, JavaScript, Go or any other scan: `rs_crate` is a
+new call, and the install-script and import-time tests take a model's facts only
+when one is given (the text path is untouched, held identical on the benchmark
+and the recorded snapshots). The call that reads Go (`go_package`) and the
+registry and guard wiring that drops the INCOMPLETE verdict follow.

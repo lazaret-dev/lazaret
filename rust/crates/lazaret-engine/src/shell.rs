@@ -1125,17 +1125,24 @@ pub fn exec_command_flows(p: &Pack, text: &[u32]) -> Vec<(usize, PyStr)> {
     if !p.needles("_SH_EXEC_NEEDLES").any_in(text) {
         return Vec::new();
     }
+    command_flows(p, &exec_command_lines(p, text))
+}
+
+/// [`exec_command_flows`] for command lines already found: [(offset, reason)] of what each gives (a Go
+/// or Rust reader's commands, 0.1.9).
+pub fn command_flows(p: &Pack, lines: &[(usize, PyStr)]) -> Vec<(usize, PyStr)> {
     let mut out: Vec<(usize, PyStr)> = Vec::new();
     let mut walk = HookWalk::new();
-    for (at, cmd) in exec_command_lines(p, text) {
-        if crate::signs::pipes_download_to_shell(p, &cmd) {
+    for (at, cmd) in lines {
+        let at = *at;
+        if crate::signs::pipes_download_to_shell(p, cmd) {
             // (a hook's command reads these as the install test does)
             out.push((at, u("pipes a download into a shell")));
         }
-        if pystr::split_char(&cmd, c('\n')).iter().any(|row| crate::signs::runs_substituted_download(p, row)) {
+        if pystr::split_char(cmd, c('\n')).iter().any(|row| crate::signs::runs_substituted_download(p, row)) {
             out.push((at, crate::signs::cat_reason(p, "run")));
         }
-        for r in sh_reasons(p, &cmd, 0, true, &mut walk) {
+        for r in sh_reasons(p, cmd, 0, true, &mut walk) {
             out.push((at, r));
         }
     }

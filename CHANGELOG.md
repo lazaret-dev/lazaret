@@ -11,6 +11,29 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Added
 
+- **A crate's Rust code is read for what it does (R-1, first part).** The engine had no
+  Rust detectors, so a crate's `.rs` code was never read and `lazaret guard cargo` and the
+  registry marked a crate INCOMPLETE. The engine now reads it, with the test that Python's
+  and JavaScript's code of the same moment gets: a build script and a procedural-macro
+  crate run on the machine that builds a dependent, so they get the install-script test,
+  every reason CRITICAL (`setup.py`'s analog); `#[ctor]`/`#[dtor]`, a `.init_array`-like
+  section, a `#[no_mangle] extern "C" fn main` and `#![no_main]` run before a binary's
+  `main`, so they get the import-time test; the rest runs when the crate is used, so it
+  gets the import-time test of which only the shapes no library needs count (SC-USE-RISK).
+  The reader evaluates the code rather than matching patterns over it: it follows the
+  crate's own functions, closures and methods and the strings they build (`format!`,
+  `concat!`, `+`, a constant, base64 or hex decoded, a byte slice read as UTF-8), and
+  records a process started (`std::process::Command`, read as a shell reads its line, with
+  `sh -c`/`cmd /c`/`powershell -Command` scripts pulled out), data sent (`std::net`,
+  reqwest, ureq, minreq, attohttpc, curl, raw sockets), a file written and then run or
+  loaded (`libloading`), and a name looked up (`ToSocketAddrs`, hickory/trust-dns, TXT
+  records included — the DNS-backdoor shape). `tests/`, `benches/` and `examples/` are
+  not read (a dependent never builds them). This is the engine side (`rs_crate`); nothing
+  calls it yet, so no scan's verdict changes. The install-script and import-time tests take
+  a crate's reading only when one is given, so Python's and JavaScript's answers are
+  unchanged (the benchmark and the popular set are identical). The Go reader and the
+  registry and guard wiring that clears the INCOMPLETE verdict follow.
+
 - **Where a run's time goes: `--timings`.** `lazaret-registry` and `lazaret guard` print on
   stderr the seconds spent in the network, reading archives, the engine (by call: the
   file scan, the import-time test, the cross-file follower, …), the package manager (the

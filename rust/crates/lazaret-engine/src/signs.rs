@@ -566,6 +566,12 @@ pub fn wallet_swap_at(p: &Pack, text: &[u32]) -> Option<(usize, PyStr)> {
 /// core._exfil_signs: (offset, reason) of the exfiltration shapes and a
 /// miner. `host`: where _HOST_INFO_RE matches.
 pub fn exfil_signs(p: &Pack, text: &[u32], host: Option<usize>) -> Vec<(usize, PyStr)> {
+    exfil_signs_net(p, text, host, false)
+}
+
+/// [`exfil_signs`], with `net`: a model has seen the code talk to the network (Go's and Rust's network
+/// calls are not the text's `_NETWORK_RE`).
+fn exfil_signs_net(p: &Pack, text: &[u32], host: Option<usize>, net: bool) -> Vec<(usize, PyStr)> {
     let mut signs: Vec<(usize, PyStr)> = Vec::new();
     let at = miner_at(p, text);
     if at >= 0 {
@@ -580,12 +586,12 @@ pub fn exfil_signs(p: &Pack, text: &[u32], host: Option<usize>) -> Vec<(usize, P
     if let Some(endpoint) = crate::flow::secret_endpoint_at(p, text) {
         signs.push(endpoint);
     }
-    let mut net: Option<bool> = None;
+    let mut known: Option<bool> = if net { Some(true) } else { None };
     let mut network = || -> bool {
-        if net.is_none() {
-            net = Some(p.re("_NETWORK_RE").search(text).is_some());
+        if known.is_none() {
+            known = Some(p.re("_NETWORK_RE").search(text).is_some());
         }
-        net.unwrap_or(false)
+        known.unwrap_or(false)
     };
     if let Some((at, names)) = credential_sweep_at(p, text) {
         if network() {
@@ -3370,12 +3376,12 @@ pub fn install_script_risk(p: &Pack, text: &[u32], lang: Option<&str>) -> Vec<Py
 /// command; `lang`, the script's language when known ("js", "py": its
 /// strings are read as its runtime reads them).
 pub fn install_script_risk_with(p: &Pack, text: &[u32], shell: bool, command: bool, lang: Option<&str>) -> Vec<PyStr> {
-    let mut reasons = install_script_risk_of(p, text, shell, command, lang);
+    let mut reasons = install_script_risk_of(p, text, shell, command, lang, None);
     let view = decoded_view(p, text, lang);
     if view != text {
         let _gate = crate::textgate::open(&view);
         let note = p.text("_DV_NOTE");
-        for r in install_script_risk_of(p, &view, shell, command, lang) {
+        for r in install_script_risk_of(p, &view, shell, command, lang, None) {
             if !reasons.contains(&r) {
                 reasons.push(cat(&[&r, &note]));
             }
@@ -3412,15 +3418,80 @@ fn destination<'s>(p: &'s Pack, text: &'s [u32]) -> Option<crate::pyre::Match<'s
 
 /// core._label_sends: adds the label of where the data goes, when one of the reasons sends it.
 pub(crate) fn label_sends(p: &Pack, text: &[u32], reasons: &mut Vec<PyStr>) {
+    label_sends_to(p, text, &[], reasons)
+}
+
+/// [`label_sends`], the addresses a model resolved read too.
+fn label_sends_to(p: &Pack, text: &[u32], dests: &[PyStr], reasons: &mut Vec<PyStr>) {
     let sends = p.strs("_SEND_REASONS");
     if reasons.iter().any(|r| sends.iter().any(|s| r.starts_with(s))) {
-        if let Some(m) = destination(p, text) {
-            let label = cat(&[&u("contacts an address typical of data exfiltration ("), head(m.group0(), 40), &u(")")]);
+        let found: Option<PyStr> = destination(p, text)
+            .map(|m| head(m.group0(), 40).to_vec())
+            .or_else(|| dests.iter().find_map(|d| destination(p, d).map(|m| head(m.group0(), 40).to_vec())));
+        if let Some(m) = found {
+            let label = cat(&[&u("contacts an address typical of data exfiltration ("), &m, &u(")")]);
             if !reasons.contains(&label) {
                 reasons.push(label);
             }
         }
     }
+}
+
+/// What a language's model read of a text's code, for the install-script and import-time tests in place of
+/// the text detectors and the JavaScript and Python trees, which do not read that language (Go and Rust,
+/// 0.1.9: `rsread`). Offsets are the text's; lines are 1-based.
+#[derive(Clone, Debug, Default)]
+pub struct ModelFacts {
+    /// The strongest send of local data: (offset, kind, what, whether only an address held it).
+    pub sent: Option<(usize, &'static str, PyStr, bool)>,
+    /// The addresses the code sends to or reads from, as it builds them.
+    pub dests: Vec<PyStr>,
+    /// The first code received over the network and run: (line, category).
+    pub received: Option<(usize, &'static str)>,
+    /// The first file written then run: (line, reason).
+    pub dropped: Option<(usize, PyStr)>,
+    /// The commands the code runs, as a shell reads them: (offset, command line).
+    pub commands: Vec<(usize, PyStr)>,
+    /// What only the model sees (a reverse shell, a DNS lookup of a name it builds): (offset, reason).
+    pub signs: Vec<(usize, PyStr)>,
+    /// The code talks to the network.
+    pub network: bool,
+}
+
+/// The install-script test of code a model read (a build script, a procedural macro): the text's own signs
+/// and the model's facts, then the text's decoded view on its text alone.
+pub fn install_script_risk_model(p: &Pack, text: &[u32], m: &ModelFacts) -> Vec<PyStr> {
+    let mut reasons = install_script_risk_of(p, text, false, false, None, Some(m));
+    let view = decoded_view(p, text, None);
+    if view != text {
+        let _gate = crate::textgate::open(&view);
+        let note = p.text("_DV_NOTE");
+        for r in install_script_risk_of(p, &view, false, false, None, None) {
+            if !reasons.contains(&r) {
+                reasons.push(cat(&[&r, &note]));
+            }
+        }
+    }
+    reasons
+}
+
+/// The import-time test of code a model read (Go's `init`, Rust's start-up functions): (reasons, the 1-based
+/// line of the first sign).
+pub fn import_time_risk_model(p: &Pack, text: &[u32], m: &ModelFacts) -> (Vec<PyStr>, Option<usize>) {
+    let (mut reasons, mut line) = import_time_risk_of(p, text, None, Some(m));
+    let view = decoded_view(p, text, None);
+    if view != text {
+        let _gate = crate::textgate::open(&view);
+        let (more, at) = import_time_risk_of(p, &view, None, None);
+        let note = p.text("_DV_NOTE");
+        for r in more {
+            if !reasons.contains(&r) {
+                reasons.push(cat(&[&r, &note]));
+                line = line.or(at);
+            }
+        }
+    }
+    (reasons, line)
 }
 
 fn push_new(reasons: &mut Vec<PyStr>, r: PyStr) {
@@ -3465,13 +3536,16 @@ pub(crate) fn received_code(p: &Pack, text: &[u32], lang: Option<&str>) -> Optio
     received::received_code_kind(p, text, &[], &[])
 }
 
-fn install_script_risk_of(p: &Pack, text: &[u32], shell: bool, command: bool, lang: Option<&str>) -> Vec<PyStr> {
+fn install_script_risk_of(p: &Pack, text: &[u32], shell: bool, command: bool, lang: Option<&str>, model: Option<&ModelFacts>) -> Vec<PyStr> {
     let mut reasons: Vec<PyStr> = Vec::new();
     // a download piped or substituted into a shell, and PowerShell: in code, where an exec call is handed them
+    // (a model's commands are read below, as hook commands)
     let code = !command && crate::shell::code_text(p, text);
-    let rows: Vec<&[u32]> = if has(text, "curl") || has(text, "wget") { pystr::split_char(text, c('\n')) } else { Vec::new() };
+    let rows: Vec<&[u32]> = if model.is_none() && (has(text, "curl") || has(text, "wget")) { pystr::split_char(text, c('\n')) } else { Vec::new() };
     let exec = p.re("_EXEC_CALL_RE");
-    let piped = if code {
+    let piped = if model.is_some() {
+        false
+    } else if code {
         rows.iter().any(|row| pipes_download_to_shell(p, row) && exec.search(row).is_some())
     } else {
         pipes_download_to_shell(p, text)
@@ -3480,14 +3554,18 @@ fn install_script_risk_of(p: &Pack, text: &[u32], shell: bool, command: bool, la
         reasons.push(u("pipes a download into a shell"));
     }
     let substituted = rows.iter().any(|row| runs_substituted_download(p, row) && (!code || exec.search(row).is_some()));
-    let received = received_code(p, text, lang);
+    let received = match model {
+        Some(m) => m.received,
+        None => received_code(p, text, lang),
+    };
     if substituted {
         reasons.push(cat_reason(p, "run"));
     } else if let Some((_, kind)) = &received {
         reasons.push(cat_reason(p, kind));
     }
     let ps = powershell_risk(p, text);
-    if !ps.is_empty() && (!code || powershell_run_at(p, text) >= 0) {
+    let ps_run = model.is_some_and(|m| m.commands.iter().any(|(_, c)| p.re("_PS_RE").search(c).is_some()));
+    if !ps.is_empty() && (!code || ps_run || powershell_run_at(p, text) >= 0) {
         reasons.extend(ps);
     }
     let received_runs = matches!(&received, Some((_, k)) if *k == "run");
@@ -3498,33 +3576,54 @@ fn install_script_risk_of(p: &Pack, text: &[u32], shell: bool, command: bool, la
         reasons.push(u("opens a reverse shell"));
     }
     let host = p.re("_HOST_INFO_RE").search(text).map(|m| m.start());
-    for (_at, reason) in exfil_signs(p, text, host) {
+    for (_at, reason) in exfil_signs_net(p, text, host, model.is_some_and(|m| m.network)) {
         push_new(&mut reasons, reason);
     }
+    let dests: &[PyStr] = model.map(|m| m.dests.as_slice()).unwrap_or(&[]);
     let ip: Option<PyStr> = match p.re("_RAW_IP_URL_RE").search(text) {
         Some(m) => Some(head(m.group0(), 40).to_vec()),
-        None => raw_ip_connect(p, text),
+        None => raw_ip_connect(p, text).or_else(|| dests.iter().find_map(|d| p.re("_RAW_IP_URL_RE").search(d).map(|m| head(m.group0(), 40).to_vec()))),
     };
     if let Some(ip) = ip {
         reasons.push(cat(&[&u("contacts an address typical of data exfiltration ("), &ip, &u(")")]));
     }
-    if runs_own_source_at(p, text, None) >= 0 {
+    if model.is_none() && runs_own_source_at(p, text, None) >= 0 {
         reasons.push(u("runs code it reads back from its own file or a data file shipped with it"));
     }
     // (0.1.8) data read from the machine and sent, whatever the address; the
     // commands the script runs, read as programs; where the data goes
-    if let Some((_at, kind, what, in_address)) = local_data_sent(p, text, lang) {
+    let sent = match model {
+        Some(m) => m.sent.clone(),
+        None => local_data_sent(p, text, lang),
+    };
+    if let Some((_at, kind, what, in_address)) = sent {
         let sent = p.map_text("_LD_REASONS", kind);
         let mut reason = sent.clone();
         if kind == "environment" || kind == "file" || kind == "report" {
             reason = cat(&[&sent, &u(" ("), head(&what, 60), &u(")")]);
         }
-        if !reasons.iter().any(|r| r.starts_with(&sent)) && (!in_address || capture_service(p, text).is_some()) {
+        let captured = capture_service(p, text).is_some() || dests.iter().any(|d| capture_service(p, d).is_some());
+        if !reasons.iter().any(|r| r.starts_with(&sent)) && (!in_address || captured) {
             reasons.push(reason);
         }
     }
-    for r in crate::shell::exec_command_reasons(p, text) {
-        push_new(&mut reasons, r);
+    match model {
+        // the commands a model saw run, each read as an install hook's command
+        Some(m) => {
+            for (_, cmd) in &m.commands {
+                for r in crate::shell::hook_command_risk(p, cmd, true) {
+                    push_new(&mut reasons, r);
+                }
+            }
+            for (_, r) in &m.signs {
+                push_new(&mut reasons, r.clone());
+            }
+        }
+        None => {
+            for r in crate::shell::exec_command_reasons(p, text) {
+                push_new(&mut reasons, r);
+            }
+        }
     }
     if shell && crate::shell::shell_text(p, text) {
         let mut walk = crate::shell::HookWalk::new();
@@ -3532,7 +3631,7 @@ fn install_script_risk_of(p: &Pack, text: &[u32], shell: bool, command: bool, la
             push_new(&mut reasons, r);
         }
     }
-    label_sends(p, text, &mut reasons);
+    label_sends_to(p, text, dests, &mut reasons);
     reasons.extend(persistence_reasons(p, text));
     if p.re("_PUBLISH_CMD_RE").search(text).is_some() {
         reasons.push(u("publishes a package to a registry (npm publish)"));
@@ -3542,6 +3641,12 @@ fn install_script_risk_of(p: &Pack, text: &[u32], shell: bool, command: bool, la
     }
     if let Some(dll) = runs_dll(p, text) {
         reasons.push(cat(&[&u("runs a DLL with rundll32 or regsvr32 ("), head(&dll, 40), &u(")")]));
+    }
+    if let Some(m) = model {
+        if let Some((_, r)) = &m.dropped {
+            push_dropped(&mut reasons, r.clone());
+        }
+        return reasons;
     }
     if let Some((_, interp)) = received::downloads_and_runs(p, text) {
         if let Some(interp) = py_run_or(p, text, &interp) {
@@ -3646,13 +3751,13 @@ pub fn import_time_risk(p: &Pack, text: &[u32], lang: Option<&str>) -> (Vec<PySt
 }
 
 fn import_time_reading(p: &Pack, text: &[u32], lang: Option<&str>) -> (Vec<PyStr>, Option<usize>) {
-    let (reasons, line) = import_time_risk_of(p, text, lang);
+    let (reasons, line) = import_time_risk_of(p, text, lang, None);
     if !reasons.is_empty() {
         if let Some(l) = lang.filter(|l| *l == "py" || *l == "js") {
             let code = import_code(p, text, l);
             if code != text {
                 let _gate = crate::textgate::open(&code);
-                return import_time_risk_of(p, &code, lang);
+                return import_time_risk_of(p, &code, lang, None);
             }
         }
     }
@@ -3810,8 +3915,12 @@ fn runs_download_through_shell(p: &Pack, row: &[u32]) -> bool {
 /// core._import_flow: (offset, kind, what, in_address) of the first local
 /// data text sends (local_data_sent_at, then the command lines it hands a
 /// shell), else None. `flows`: exec_command_flows(text).
-fn import_flow(p: &Pack, text: &[u32], flows: &[(usize, PyStr)], lang: Option<&str>) -> Option<(usize, &'static str, PyStr, bool)> {
-    if let Some(flow) = local_data_sent(p, text, lang) {
+fn import_flow(p: &Pack, text: &[u32], flows: &[(usize, PyStr)], lang: Option<&str>, model: Option<&ModelFacts>) -> Option<(usize, &'static str, PyStr, bool)> {
+    let sent = match model {
+        Some(m) => m.sent.clone(),
+        None => local_data_sent(p, text, lang),
+    };
+    if let Some(flow) = sent {
         return Some(flow);
     }
     for (at, reason) in flows {
@@ -3826,11 +3935,15 @@ fn import_flow(p: &Pack, text: &[u32], flows: &[(usize, PyStr)], lang: Option<&s
     None
 }
 
-fn import_time_risk_of(p: &Pack, text: &[u32], lang: Option<&str>) -> (Vec<PyStr>, Option<usize>) {
+fn import_time_risk_of(p: &Pack, text: &[u32], lang: Option<&str>, model: Option<&ModelFacts>) -> (Vec<PyStr>, Option<usize>) {
     let mut reasons: Vec<PyStr> = Vec::new();
     let mut line: Option<usize> = None;
-    let flows = crate::shell::exec_command_flows(p, text);
-    if let Some((at, kind, what, in_address)) = import_flow(p, text, &flows, lang) {
+    let flows = match model {
+        Some(m) => crate::shell::command_flows(p, &m.commands),
+        None => crate::shell::exec_command_flows(p, text),
+    };
+    let dests: &[PyStr] = model.map(|m| m.dests.as_slice()).unwrap_or(&[]);
+    if let Some((at, kind, what, in_address)) = import_flow(p, text, &flows, lang, model) {
         // a data-capture service for any local data; a service a client talks
         // to with its user's key for what no client sends: the whole
         // environment, the instance's credentials, a credential store
@@ -3841,14 +3954,21 @@ fn import_time_risk_of(p: &Pack, text: &[u32], lang: Option<&str>) -> (Vec<PyStr
                 || (kind == "file"
                     && p.re("_CRED_STORE_RE").search(&what).is_some()
                     && p.re("_PUBLIC_KEY_FILE_RE").search(&what).is_none()));
-        let dest = capture_service(p, text).or_else(|| if harvest { p.re("_EXFIL_SERVICE_RE").search(text) } else { None });
-        let ip = if dest.is_none() && !in_address { p.re("_PUBLIC_IP_URL_RE").search(text) } else { None };
+        // (in the text, then in the addresses a model resolved)
+        let find = |re: &str| -> Option<PyStr> {
+            p.re(re).search(text).map(|m| m.group0().to_vec()).or_else(|| dests.iter().find_map(|d| p.re(re).search(d).map(|m| m.group0().to_vec())))
+        };
+        let dest: Option<PyStr> = capture_service(p, text)
+            .map(|m| m.group0().to_vec())
+            .or_else(|| dests.iter().find_map(|d| capture_service(p, d).map(|m| m.group0().to_vec())))
+            .or_else(|| if harvest { find("_EXFIL_SERVICE_RE") } else { None });
+        let ip = if dest.is_none() && !in_address { find("_PUBLIC_IP_URL_RE") } else { None };
         // (a raw socket's hard-coded public address is an IP address too)
         let raw = if dest.is_none() && ip.is_none() && !in_address { raw_public_ip(p, text) } else { None };
         if let Some(dest) = dest {
-            reasons.push(cat(&[&p.map_text("_IMPORT_SENT_REASONS", kind), &u(" ("), head(dest.group0(), 40), &u(")")]));
+            reasons.push(cat(&[&p.map_text("_IMPORT_SENT_REASONS", kind), &u(" ("), head(&dest, 40), &u(")")]));
         } else if let Some(ip) = ip {
-            let g = ip.group0();
+            let g = &ip[..];
             let rest = match pystr::find_str(g, "//", 0) {
                 Some(i) => pystr::from(g, i + 2),
                 None => g,
@@ -3868,7 +3988,17 @@ fn import_time_risk_of(p: &Pack, text: &[u32], lang: Option<&str>) -> (Vec<PyStr
             line = Some(line_of(text, at));
         }
     }
-    if has(text, "curl") || has(text, "wget") {
+    if model.is_some() {
+        // a model's commands: a download piped or substituted into a shell
+        let run = cat_reason(p, "run");
+        for (at, r) in &flows {
+            if pystr::eq(r, "pipes a download into a shell") || *r == run {
+                reasons.push(u("runs a downloaded script through a shell"));
+                line = line.or(Some(line_of(text, *at)));
+                break;
+            }
+        }
+    } else if has(text, "curl") || has(text, "wget") {
         let mut piped = false;
         // (only a row that holds curl or wget can run a download through a
         // shell — runs_download_through_shell asks that first — so the rows
@@ -3907,26 +4037,35 @@ fn import_time_risk_of(p: &Pack, text: &[u32], lang: Option<&str>) -> (Vec<PyStr
             }
         }
     }
-    let received = received_code(p, text, lang);
+    let received = match model {
+        Some(m) => m.received,
+        None => received_code(p, text, lang),
+    };
     if let Some((at, kind)) = &received {
         reasons.push(cat_reason(p, kind));
         line = line.or(Some(*at));
     }
-    if let Some((at, interp)) = received::downloads_and_runs(p, text) {
-        match py_run_or(p, text, &interp).filter(|i| !i.is_empty()) {
-            Some(i) => reasons.push(cat(&[&u("downloads a script and runs it with "), &i])),
-            None => reasons.push(u("downloads a file and then runs it")),
+    if model.is_none() {
+        if let Some((at, interp)) = received::downloads_and_runs(p, text) {
+            match py_run_or(p, text, &interp).filter(|i| !i.is_empty()) {
+                Some(i) => reasons.push(cat(&[&u("downloads a script and runs it with "), &i])),
+                None => reasons.push(u("downloads a file and then runs it")),
+            }
+            line = line.or(Some(at));
         }
-        line = line.or(Some(at));
-    }
-    if let Some((at, interp)) = received::decodes_and_runs(p, text) {
-        match py_run_or(p, text, &interp).filter(|i| !i.is_empty()) {
-            Some(i) => reasons.push(cat(&[&u("writes code it decodes to a file and runs it with "), &i])),
-            None => reasons.push(u("writes a file it decodes and runs it")),
+        if let Some((at, interp)) = received::decodes_and_runs(p, text) {
+            match py_run_or(p, text, &interp).filter(|i| !i.is_empty()) {
+                Some(i) => reasons.push(cat(&[&u("writes code it decodes to a file and runs it with "), &i])),
+                None => reasons.push(u("writes a file it decodes and runs it")),
+            }
+            line = line.or(Some(at));
         }
-        line = line.or(Some(at));
     }
-    if let Some((at, r)) = dropped_reason(text, lang) {
+    let dropped = match model {
+        Some(m) => m.dropped.clone(),
+        None => dropped_reason(text, lang),
+    };
+    if let Some((at, r)) = dropped {
         let before = reasons.len();
         push_dropped(&mut reasons, r);
         if reasons.len() > before {
@@ -3937,6 +4076,11 @@ fn import_time_risk_of(p: &Pack, text: &[u32], lang: Option<&str>) -> (Vec<PyStr
     let ps = powershell_risk(p, text);
     if let Some(first) = ps.first() {
         let at = powershell_run_at(p, text);
+        let at = if at < 0 {
+            model.and_then(|m| m.commands.iter().find(|(_, c)| p.re("_PS_RE").search(c).is_some()).map(|(a, _)| *a as isize)).unwrap_or(-1)
+        } else {
+            at
+        };
         if at >= 0 {
             signs.push((at as usize, first.clone()));
         }
@@ -3953,7 +4097,7 @@ fn import_time_risk_of(p: &Pack, text: &[u32], lang: Option<&str>) -> (Vec<PyStr
         signs.push((at as usize, u("opens a reverse shell")));
     }
     let host = p.re("_HOST_INFO_RE").search(text).map(|m| m.start());
-    let at = runs_own_source_at(p, text, lang);
+    let at = if model.is_some() { -1 } else { runs_own_source_at(p, text, lang) };
     if at >= 0 {
         signs.push((at as usize, u("runs code it reads back from its own file or a data file shipped with it")));
     }
@@ -3962,7 +4106,14 @@ fn import_time_risk_of(p: &Pack, text: &[u32], lang: Option<&str>) -> (Vec<PyStr
             signs.push((m.start(), u("carries a GitHub Actions workflow that dumps every repository secret")));
         }
     }
-    signs.extend(exfil_signs(p, text, host));
+    signs.extend(exfil_signs_net(p, text, host, model.is_some_and(|m| m.network)));
+    if let Some(m) = model {
+        for (at, r) in &m.signs {
+            if !signs.iter().any(|(_, x)| x == r) {
+                signs.push((*at, r.clone()));
+            }
+        }
+    }
     for (at, reason) in signs {
         reasons.push(reason);
         line = line.or(Some(line_of(text, at)));

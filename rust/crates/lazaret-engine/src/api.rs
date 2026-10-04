@@ -65,6 +65,8 @@ pub const CALLS: &[&str] = &[
     "import_code", "scan_rules", "hook_command_view", "hex_view", "lookalike_view",
     // 0.1.8: the cross-file follower, each package on its own budget
     "cross_file",
+    // 0.1.9 (R-1): a crate's code read for what it does when it is built, starts or is used
+    "rs_crate",
     // the JavaScript parser (jsparse.py's trees)
     "js_parse", "js_parse_file",
     // the Python parser (Python 3.13's ast trees)
@@ -373,6 +375,7 @@ fn dispatch(name: &str, args: &Value, text: &[u32]) -> Result<Value, CallError> 
         }
         "pyre.escape" => Value::Str(pyre::escape(text)),
         "cross_file" => cross_file(p, args, text)?,
+        "rs_crate" => rs_crate(p, args, text)?,
         "js_flow" => js_flow(args, text)?,
         "py_flow" => py_flow(args, text)?,
         "js_parse" | "js_parse_file" => {
@@ -882,6 +885,75 @@ fn cross_file(p: &Pack, args: &Value, text: &[u32]) -> Result<Value, CallError> 
     };
     let skip: std::collections::HashSet<PyStr> = arg_strs(args, "skip").into_iter().collect();
     Ok(crossfile::answer(crossfile::cross_file(p, &files, &skip, &opts)))
+}
+
+/// rs_crate: {"files": [[path, length], …] (their contents, concatenated, are
+/// the text; the .rs files of one crate), "build" (the build script's path, or
+/// null), "proc_macro" (bool), "lib" (the library root's path, or null),
+/// "use_file_chars", "use_chars" (SC-USE-RISK's bounds, optional)} ->
+/// {"build": finding|null, "macros": finding|null, "start": [finding, …],
+/// "uses": [finding, …], "read": [file index, …], "useRead": {files, chars,
+/// ofFiles, ofChars}}. A finding is {"file": index, "reasons": [str, …],
+/// "line": n}. Each crate gets the call's budget (crate::rsread::read_crate).
+fn rs_crate(_p: &Pack, args: &Value, text: &[u32]) -> Result<Value, CallError> {
+    use crate::rsread::{read_crate, Found, Options};
+    let bad = |m: &str| CallError::BadArgs(format!("rs_crate: {}", m));
+    let items = args.get("files").and_then(|f| f.as_arr()).ok_or_else(|| bad("files"))?;
+    let mut files: Vec<(PyStr, PyStr)> = Vec::with_capacity(items.len());
+    let mut at = 0usize;
+    for item in items {
+        let parts = item.as_arr().ok_or_else(|| bad("a file is not [path, length]"))?;
+        let path = parts.first().and_then(|v| v.as_str()).ok_or_else(|| bad("a file's path"))?.to_vec();
+        let len = parts.get(1).and_then(|v| v.as_i64()).filter(|&n| n >= 0).ok_or_else(|| bad("a file's length"))? as usize;
+        if at + len > text.len() {
+            return Err(bad("the files' lengths run past the text"));
+        }
+        files.push((path, text[at..at + len].to_vec()));
+        at += len;
+    }
+    if at != text.len() {
+        return Err(bad("the files' lengths do not add up to the text"));
+    }
+    let flag = |k: &str, d: bool| match args.get(k) {
+        Some(Value::Bool(b)) => *b,
+        _ => d,
+    };
+    let mut opts = Options { build: opt_str(args, "build"), proc_macro: flag("proc_macro", false), lib: opt_str(args, "lib"), ..Options::default() };
+    if let Some(n) = opt_int(args, "use_file_chars").filter(|&n| n >= 0) {
+        opts.use_file_chars = n as usize;
+    }
+    if let Some(n) = opt_int(args, "use_chars").filter(|&n| n >= 0) {
+        opts.use_chars = n as usize;
+    }
+    let answer = on_own_stack(move || {
+        let pack = crate::pack::current();
+        let refs: Vec<(PyStr, &[u32])> = files.iter().map(|(p, t)| (p.clone(), t.as_slice())).collect();
+        read_crate(&pack, &refs, &opts)
+    });
+    let finding = |f: &Found| {
+        Value::obj(vec![
+            ("file", Value::Int(f.file as i64)),
+            ("reasons", strs(&f.reasons)),
+            ("line", Value::Int(f.line as i64)),
+        ])
+    };
+    let findings = |fs: &[Found]| Value::Arr(fs.iter().map(finding).collect());
+    Ok(Value::obj(vec![
+        ("build", answer.build.as_ref().map(finding).unwrap_or(Value::Null)),
+        ("macros", answer.macros.as_ref().map(finding).unwrap_or(Value::Null)),
+        ("start", findings(&answer.start)),
+        ("uses", findings(&answer.uses)),
+        ("read", Value::Arr(answer.read.iter().map(|&k| Value::Int(k as i64)).collect())),
+        (
+            "useRead",
+            Value::obj(vec![
+                ("files", Value::Int(answer.use_read.files as i64)),
+                ("chars", Value::Int(answer.use_read.chars as i64)),
+                ("ofFiles", Value::Int(answer.use_read.of_files as i64)),
+                ("ofChars", Value::Int(answer.use_read.of_chars as i64)),
+            ]),
+        ),
+    ]))
 }
 
 /// js_flow: {"files": [[path, length], …] (their contents, concatenated,

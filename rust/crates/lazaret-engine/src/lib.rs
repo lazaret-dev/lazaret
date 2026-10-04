@@ -33,6 +33,7 @@ pub mod pystr;
 pub mod quickhash;
 pub mod received;
 pub mod rsparse;
+pub mod rsread;
 pub mod rxutil;
 pub mod scan;
 pub mod scanfile;
