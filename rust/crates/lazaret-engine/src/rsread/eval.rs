@@ -48,6 +48,16 @@ pub struct Krate<'a> {
     pub b64_fns: HashSet<(u16, u32)>,
 }
 
+/// The deepest nesting of the evaluator's own calls (an expression within an expression, a call's body within its
+/// call): past it a value is unknown and the reading is cut short. The reader's trees are bounded in depth, and this
+/// bounds the evaluator's stack whatever the calls (the Rust reader's review, RR-2).
+pub const MAX_NEST: u32 = 400;
+/// The most events one reading records; past it the reading is cut short (RR-3: a file written then run is matched
+/// against the files written, and the commands are each read by the shell reader).
+pub const MAX_EVENTS: usize = 2_000;
+/// The most closures one reading makes (each holds a copy of its function's names).
+pub const MAX_CLOSURES: usize = 4_096;
+
 pub struct ClosureState {
     pub params: Vec<Pat>,
     pub body: Rc<Ex>,
@@ -83,6 +93,11 @@ pub struct Model<'k, 'a> {
     unit: u8,
     /// The functions not to follow (another scope's): their values are not known here.
     pub not_follow: HashSet<(u16, u32)>,
+    /// The evaluator's nesting (MAX_NEST).
+    nest: u32,
+    /// The reading was cut short: it ran out of steps, of nesting or of events, so what it did not read may hold what
+    /// it looks for (the moment's text is then read by the text test as well, RR-10). The caller resets it.
+    pub cut: bool,
 }
 
 fn eqs(a: &[u32], b: &str) -> bool {
@@ -120,6 +135,8 @@ impl<'k, 'a> Model<'k, 'a> {
             next_id: 1,
             unit: 0,
             not_follow: HashSet::new(),
+            nest: 0,
+            cut: false,
         }
     }
 
@@ -128,7 +145,25 @@ impl<'k, 'a> Model<'k, 'a> {
         if self.steps & 63 == 0 && !crate::budget::spend(1) {
             self.steps = self.max_steps;
         }
-        self.steps < self.max_steps
+        if self.steps >= self.max_steps {
+            self.cut = true;
+            return false;
+        }
+        true
+    }
+
+    /// Work a step does besides the step: `n` characters copied, names copied (RR-4).
+    fn charge(&mut self, chars: usize) {
+        self.steps = self.steps.saturating_add((chars / 64) as u64);
+    }
+
+    /// Records what the code does (at most MAX_EVENTS; past them the reading is cut short).
+    fn ev(&mut self, e: Ev) {
+        if self.events.len() >= MAX_EVENTS {
+            self.cut = true;
+            return;
+        }
+        self.events.push(e);
     }
 
     pub fn out_of_steps(&self) -> bool {
@@ -351,6 +386,17 @@ impl<'k, 'a> Model<'k, 'a> {
         if !self.step() {
             return Val::unknown();
         }
+        if self.nest >= MAX_NEST {
+            self.cut = true;
+            return Val::unknown();
+        }
+        self.nest += 1;
+        let v = self.eval_inner(f, e);
+        self.nest -= 1;
+        v
+    }
+
+    fn eval_inner(&mut self, f: &mut Frame, e: &Ex) -> Val {
         match e {
             Ex::Unknown(_) | Ex::Bool(..) | Ex::Continue(_) => Val::unknown(),
             Ex::Str(s, _, _) => Val::text(s.clone()),
@@ -425,6 +471,17 @@ impl<'k, 'a> Model<'k, 'a> {
                 let x = self.eval(f, a);
                 let y = self.eval(f, b);
                 self.binary(*op, &x, &y)
+            }
+            Ex::Chain(first, rest) => {
+                let mut v = self.eval(f, first);
+                for (op, e, _) in rest.iter() {
+                    if self.out_of_steps() {
+                        return Val::unknown();
+                    }
+                    let y = self.eval(f, e);
+                    v = self.binary(*op, &v, &y);
+                }
+                v
             }
             Ex::Assign(op, lhs, rhs, _) => {
                 let v = self.eval(f, rhs);
@@ -506,8 +563,13 @@ impl<'k, 'a> Model<'k, 'a> {
                 Val::unknown()
             }
             Ex::Closure(params, body, _) => {
+                if self.closures.len() >= MAX_CLOSURES {
+                    self.cut = true;
+                    return Val::unknown();
+                }
                 let idx = self.closures.len() as u32;
-                self.closures.push(ClosureState { params: params.clone(), body: Rc::new((**body).clone()), env: f.vars.clone(), file: f.file });
+                self.charge(f.vars.len() * 16);
+                self.closures.push(ClosureState { params: params.clone(), body: body.clone(), env: f.vars.clone(), file: f.file });
                 Val::obj(Obj::Closure(idx))
             }
             Ex::Return(v, _) => {
@@ -537,7 +599,9 @@ impl<'k, 'a> Model<'k, 'a> {
 
     fn binary(&mut self, op: Op, x: &Val, y: &Val) -> Val {
         if op == Op::Add && (x.s.is_some() || y.s.is_some()) && x.int.is_none() {
-            return Val::concat(x, y);
+            let v = Val::concat(x, y);
+            self.charge(v.s.as_ref().map_or(0, |s| s.len()));
+            return v;
         }
         if let (Some(a), Some(b)) = (x.int, y.int) {
             let n = match op {
@@ -733,6 +797,7 @@ impl<'k, 'a> Model<'k, 'a> {
                 let mut v = Val::text(Vec::new());
                 for x in &pos {
                     v = Val::concat(&v, x);
+                    self.charge(v.s.as_ref().map_or(0, |s| s.len()));
                 }
                 v
             }
@@ -754,9 +819,11 @@ impl<'k, 'a> Model<'k, 'a> {
                     return Val::text(Vec::new());
                 }
                 let fmt = pos[0].text_or_unknown();
-                let vars: HashMap<PyStr, Val> = f.vars.clone();
+                // (the names the string captures, read where they are: not a copy of every name, RR-4)
+                let vars = &f.vars;
                 let mut lookup = |name: &[u32]| -> Val { vars.get(name).cloned().unwrap_or_default() };
                 let v = lit::format(&fmt, &pos[1..], &named, &mut lookup);
+                self.charge(v.s.as_ref().map_or(0, |s| s.len()));
                 if matches!(n.as_str(), "println" | "print" | "eprintln" | "eprint" | "panic") {
                     return Val::unknown();
                 }
@@ -792,18 +859,20 @@ impl<'k, 'a> Model<'k, 'a> {
         match w.obj {
             Obj::WFile(k) => {
                 let st = self.wfiles.get(k as usize).cloned().unwrap_or_default();
-                self.events.push(Ev::Write { file, at, path: st.path, data: data.clone(), append: st.append });
+                self.ev(Ev::Write { file, at, path: st.path, data: data.clone(), append: st.append });
             }
             Obj::Conn(k) => {
                 let st = self.conns.get(k as usize).cloned().unwrap_or_default();
-                self.events.push(Ev::Send { file, at, data: data.clone(), dest: st.addr, in_address: false });
+                self.ev(Ev::Send { file, at, data: data.clone(), dest: st.addr, in_address: false });
             }
             _ => {}
         }
     }
 
     fn send(&mut self, file: u16, at: u32, url: &Val, body: &Val) {
-        self.events.extend(events::send_events(file, at, url, body));
+        for e in events::send_events(file, at, url, body) {
+            self.ev(e);
+        }
     }
 
     fn new_cmd(&mut self, prog: Val, file: u16, at: u32) -> Val {
@@ -819,7 +888,9 @@ impl<'k, 'a> Model<'k, 'a> {
         }
         c.ran = true;
         let c = c.clone();
-        self.events.extend(events::run_events(&c));
+        for e in events::run_events(&c) {
+            self.ev(e);
+        }
     }
 
     /// Commands built but never seen run: run where they were built (a command is built to be run).
@@ -903,6 +974,7 @@ impl<'k, 'a> Model<'k, 'a> {
         }
         let Some(c) = self.closures.get(k as usize) else { return Val::unknown() };
         let (params, body, env, file) = (c.params.clone(), c.body.clone(), c.env.clone(), c.file);
+        self.charge(env.len() * 16);
         let mut frame = Frame { file, vars: env, ret: None };
         for (p, a) in params.iter().zip(args.into_iter().chain(std::iter::repeat(Val::unknown()))) {
             self.bind(&mut frame, p, a);
@@ -997,12 +1069,12 @@ impl<'k, 'a> Model<'k, 'a> {
             return Some(v);
         }
         if ends(full, &["fs", "write"]) {
-            self.events.push(Ev::Write { file, at, path: a0, data: a1, append: false });
+            self.ev(Ev::Write { file, at, path: a0, data: a1, append: false });
             return Some(Val::unknown());
         }
         if ends(full, &["fs", "copy"]) {
             let data = derived(&a0).with_kinds(&a0);
-            self.events.push(Ev::Write { file, at, path: a1, data, append: false });
+            self.ev(Ev::Write { file, at, path: a1, data, append: false });
             return Some(Val::unknown());
         }
         if ends(full, &["File", "create"]) || ends(full, &["File", "create_new"]) {
@@ -1045,7 +1117,7 @@ impl<'k, 'a> Model<'k, 'a> {
         if ends(full, &["TcpStream", "connect"]) || ends(full, &["TcpStream", "connect_timeout"]) {
             let idx = self.conns.len() as u32;
             self.conns.push(ConnState { addr: a0.clone() });
-            self.events.push(Ev::Send { file, at, data: a0.clone(), dest: a0, in_address: true });
+            self.ev(Ev::Send { file, at, data: a0.clone(), dest: a0, in_address: true });
             return Some(Val::obj(Obj::Conn(idx)));
         }
         if ends(full, &["UdpSocket", "bind"]) {
@@ -1084,7 +1156,7 @@ impl<'k, 'a> Model<'k, 'a> {
             return Some(Val::obj(Obj::Curl(idx)));
         }
         if ends(full, &["lookup_host"]) || ends(full, &["dns_lookup", "lookup_host"]) {
-            self.events.push(Ev::Lookup { file, at, name: a0, txt: false });
+            self.ev(Ev::Lookup { file, at, name: a0, txt: false });
             return Some(Val::unknown());
         }
         if ends(full, &["Resolver", "new"]) || ends(full, &["Resolver", "from_system_conf"]) || ends(full, &["Resolver", "default"]) || ends(full, &["TokioAsyncResolver", "tokio"]) || ends(full, &["TokioAsyncResolver", "tokio_from_system_conf"]) {
@@ -1102,7 +1174,7 @@ impl<'k, 'a> Model<'k, 'a> {
         }
         // ---- libraries loaded
         if ends(full, &["Library", "new"]) || ends(full, &["libloading", "Library", "new"]) {
-            self.events.push(Ev::Load { file, at, path: a0 });
+            self.ev(Ev::Load { file, at, path: a0 });
             return Some(Val::unknown());
         }
         // ---- wrappers that keep the value
@@ -1252,7 +1324,7 @@ impl<'k, 'a> Model<'k, 'a> {
                         Val::unknown()
                     }
                     "read_to_string" | "read_to_end" => {
-                        if let Some(name) = lvalue(&args[0]) {
+                        if let Some(name) = args.first().and_then(lvalue) {
                             let data = self.received(at, &recv).with_kinds(&recv);
                             f.vars.insert(name, data);
                         }
@@ -1260,7 +1332,8 @@ impl<'k, 'a> Model<'k, 'a> {
                     }
                     _ => {
                         let mut v = self.received(at, &recv).with_kinds(&recv);
-                        if matches!(n.as_str(), "error_for_status" | "into_reader" | "body_mut" | "into_body" | "bytes_stream") {
+                        // (`unwrap`, `expect`: the response itself, so `get(u).unwrap().copy_to(&mut f)` writes it, RR-9)
+                        if matches!(n.as_str(), "error_for_status" | "into_reader" | "body_mut" | "into_body" | "bytes_stream" | "unwrap" | "expect" | "unwrap_or_else" | "into_result") {
                             v.obj = Obj::Resp;
                         }
                         v
@@ -1272,18 +1345,18 @@ impl<'k, 'a> Model<'k, 'a> {
                 match n.as_str() {
                     "write_all" | "write" | "write_fmt" | "send" => {
                         let addr = self.conns.get(idx).map(|c| c.addr.clone()).unwrap_or_default();
-                        self.events.push(Ev::Send { file, at, data: a0, dest: addr, in_address: false });
+                        self.ev(Ev::Send { file, at, data: a0, dest: addr, in_address: false });
                         return Val::unknown();
                     }
                     "send_to" => {
-                        self.events.push(Ev::Send { file, at, data: a0, dest: a1.clone(), in_address: false });
+                        self.ev(Ev::Send { file, at, data: a0, dest: a1.clone(), in_address: false });
                         return Val::unknown();
                     }
                     "connect" => {
                         if let Some(c) = self.conns.get_mut(idx) {
                             c.addr = a0.clone();
                         }
-                        self.events.push(Ev::Send { file, at, data: a0.clone(), dest: a0, in_address: true });
+                        self.ev(Ev::Send { file, at, data: a0.clone(), dest: a0, in_address: true });
                         return Val::unknown();
                     }
                     "read" | "read_to_end" | "read_to_string" | "read_exact" | "read_line" | "recv" | "recv_from" | "peek" => {
@@ -1329,7 +1402,7 @@ impl<'k, 'a> Model<'k, 'a> {
             Obj::Resolver => {
                 if matches!(n.as_str(), "txt_lookup" | "lookup_ip" | "lookup" | "mx_lookup" | "ipv4_lookup" | "ipv6_lookup" | "ns_lookup" | "srv_lookup") {
                     let txt = n == "txt_lookup" || n == "lookup";
-                    self.events.push(Ev::Lookup { file, at, name: a0.clone(), txt });
+                    self.ev(Ev::Lookup { file, at, name: a0.clone(), txt });
                     let mut r = self.received(at, &a0);
                     let item = r.clone();
                     r.items = Some(Rc::new(vec![item]));
@@ -1348,7 +1421,7 @@ impl<'k, 'a> Model<'k, 'a> {
                 Some(items) => items.first().cloned().unwrap_or_default(),
                 None => recv.clone(),
             };
-            self.events.push(Ev::Lookup { file, at, name, txt: false });
+            self.ev(Ev::Lookup { file, at, name, txt: false });
             return Val::unknown();
         }
         // ---- base64 engines: STANDARD.decode(s), BASE64_STANDARD.decode(s), general_purpose::URL_SAFE.decode(s)
@@ -1369,6 +1442,7 @@ impl<'k, 'a> Model<'k, 'a> {
         }
         // ---- strings, paths and lists
         if let Some(v) = self.text_method(f, &recv, recv_e, &n, &vals, at) {
+            self.charge(v.s.as_ref().map_or(0, |s| s.len()) + v.items.as_ref().map_or(0, |i| i.len() * 16));
             return v;
         }
         // ---- the crate's own method
@@ -1442,7 +1516,11 @@ impl<'k, 'a> Model<'k, 'a> {
                 }
             }
             "repeat" => match (&recv.s, a0.int) {
-                (Some(s), Some(k)) if (0..=64).contains(&k) => Val::text(s.repeat(k as usize)).with_kinds(recv),
+                (Some(s), Some(k)) if (0..=64).contains(&k) => {
+                    // (no more copies than the longest text a value keeps holds, RR-4)
+                    let k = (k as usize).min(val::MAX_TEXT / s.len().max(1) + 1);
+                    Val::text(s.repeat(k)).with_kinds(recv)
+                }
                 _ => derived(recv),
             },
             "push_str" | "push" | "extend" | "extend_from_slice" | "insert_str" | "append" => {
@@ -1466,6 +1544,7 @@ impl<'k, 'a> Model<'k, 'a> {
                     } else {
                         Val::concat(recv, &a0)
                     };
+                    self.charge(new.s.as_ref().map_or(0, |s| s.len()));
                     f.vars.insert(name, new);
                 }
                 Val::unknown()

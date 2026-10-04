@@ -60,6 +60,27 @@ fn base_name(v: &Val) -> PyStr {
     b.strip_suffix(&u(".exe")[..]).map(|x| x.to_vec()).unwrap_or(b)
 }
 
+/// Is a name looked up one the code built from a value and a public domain, as the text detector reads a lookup's
+/// name (`signs::dns_built`): text the code wrote after what it does not know, ending in a domain whose last label
+/// has two letters or more and is not a local one (`.local`, `.internal`, `.invalid`…)? Resolving the machine's own
+/// name, or a name under a local domain, is what network code does (the Rust reader's review, RR-7).
+fn built_name(p: &Pack, name: &Val) -> bool {
+    let Some(s) = &name.s else { return false };
+    let Some(k) = s.iter().rposition(|&c| c == UNKNOWN) else { return false };
+    let mut tail = pystr::lower(&s[k + 1..]);
+    if tail.last() == Some(&('.' as u32)) {
+        tail.pop();
+    }
+    let Some(dot) = tail.iter().rposition(|&c| c == '.' as u32) else { return false };
+    let tld = &tail[dot + 1..];
+    tld.len() >= 2 && tld.iter().all(|&c| char::from_u32(c).is_some_and(|ch| ch.is_ascii_alphabetic())) && !p.strs("_DNS_LOCAL_TLDS").iter().any(|l| l.as_slice() == tld)
+}
+
+/// Is a program a shell or an interpreter (what a reverse shell hands its connection)?
+fn shell_or_interpreter(base: &[u32]) -> bool {
+    INTERPRETERS.iter().chain(super::events::SHELLS.iter()).any(|i| pystr::eq(base, i))
+}
+
 fn line_in(text: &[u32], at: u32) -> usize {
     let at = (at as usize).min(text.len());
     text[..at].iter().filter(|&&c| c == 10).count() + 1
@@ -188,7 +209,8 @@ pub fn facts(p: &Pack, text: &[u32], events: &[Ev], anchor: usize) -> FileFacts 
                         note(*file, *at, &mut first);
                     }
                 }
-                if *conn_io {
+                // (a connection as a shell's input and output: an inetd-style server hands one to its own handler, RR-8)
+                if *conn_io && shell_or_interpreter(&base) {
                     out.signs.push((off(*file, *at), u("opens a reverse shell")));
                     note(*file, *at, &mut first);
                 }
@@ -211,7 +233,7 @@ pub fn facts(p: &Pack, text: &[u32], events: &[Ev], anchor: usize) -> FileFacts 
             Ev::Lookup { file, at, name, txt: _ } => {
                 out.network = true;
                 dest(&mut out, name);
-                if name.kinds & K_IDENTITY != 0 {
+                if name.kinds & K_IDENTITY != 0 && built_name(p, name) {
                     let r = u("sends the machine's user or host name in a DNS lookup of a name it builds");
                     if !out.signs.iter().any(|(_, x)| *x == r) {
                         out.signs.push((off(*file, *at), r));

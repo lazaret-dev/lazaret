@@ -14,9 +14,13 @@
 
 use crate::lex::{Kind as TK, Token};
 use crate::pystr::PyStr;
+use std::rc::Rc;
 
 /// The deepest nesting read; deeper is Unknown.
 pub const MAX_DEPTH: u32 = 96;
+/// The longest chain of postfix operations read as one (`.f()`, `[i]`, `?`, `as T`): a longer one is Unknown, so no
+/// chain builds a tree deeper than this (the Rust reader's review, RR-2).
+pub const MAX_LINKS: usize = 64;
 
 /// Where a body's tokens are.
 #[derive(Clone, Copy)]
@@ -73,6 +77,9 @@ pub enum Ex {
     /// `x as T`: the type's first name (`char`, `u8`).
     Cast(Box<Ex>, PyStr),
     Bin(Op, Box<Ex>, Box<Ex>, u32),
+    /// Two binary operators or more at one level (`a + b + c`), read left to right: flat, so a chain of any length
+    /// is one node deep (each pair: the operator, its right operand and where it is).
+    Chain(Box<Ex>, Vec<(Op, Ex, u32)>),
     /// `a = b`, `a += b` (the operator), …
     Assign(Option<Op>, Box<Ex>, Box<Ex>, u32),
     Range(Option<Box<Ex>>, Option<Box<Ex>>, u32),
@@ -87,7 +94,8 @@ pub enum Ex {
     Loop(Box<Block>, u32),
     While(Box<Ex>, Box<Block>, u32),
     For(Pat, Box<Ex>, Box<Block>, u32),
-    Closure(Vec<Pat>, Box<Ex>, u32),
+    /// A closure: its body is shared, not copied, by each value the closure expression gives.
+    Closure(Vec<Pat>, Rc<Ex>, u32),
     Return(Option<Box<Ex>>, u32),
     Break(Option<Box<Ex>>, u32),
     Continue(u32),
@@ -105,7 +113,7 @@ impl Ex {
             Ex::Assign(_, _, _, a) | Ex::Range(_, _, a) | Ex::Tuple(_, a) | Ex::Array(_, a) | Ex::Repeat(_, _, a) => *a,
             Ex::Struct(_, _, a) | Ex::If(_, _, _, a) | Ex::Match(_, _, a) | Ex::Loop(_, a) | Ex::While(_, _, a) => *a,
             Ex::For(_, _, _, a) | Ex::Closure(_, _, a) | Ex::Return(_, a) | Ex::Break(_, a) | Ex::Let(_, _, a) => *a,
-            Ex::Try(e) | Ex::Await(e) | Ex::Cast(e, _) => e.at(),
+            Ex::Try(e) | Ex::Await(e) | Ex::Cast(e, _) | Ex::Chain(e, _) => e.at(),
             Ex::Block(b) => b.at,
         }
     }
@@ -281,6 +289,21 @@ pub fn params(t: Toks, open: usize) -> Vec<Pat> {
 }
 
 impl<'a> Reader<'a> {
+    // ---------------------------------------------------------------- depth --
+    /// `f` read one level deeper: Unknown past [`MAX_DEPTH`] (the rest of this reader's tokens skipped). Every form the
+    /// reader reads within itself goes through here or through a group's reader, so no input recurses past the bound
+    /// (the Rust reader's review, RR-1: `a = a = …`, `else if` chains, `'a: 'a: …`, `move move …`).
+    fn deeper(&mut self, at: u32, f: impl FnOnce(&mut Self) -> Ex) -> Ex {
+        if self.depth > MAX_DEPTH {
+            self.pos = self.end;
+            return Ex::Unknown(at);
+        }
+        self.depth += 1;
+        let e = f(self);
+        self.depth -= 1;
+        e
+    }
+
     // ---------------------------------------------------------------- tokens --
     fn tok(&self, i: usize) -> Option<&Token> {
         if i < self.end {
@@ -428,6 +451,10 @@ impl<'a> Reader<'a> {
     /// Skips a type at pos; the type's first name (`u8`, `String`, `char`), if any.
     fn skip_type(&mut self) -> PyStr {
         let mut first: PyStr = Vec::new();
+        if self.depth > MAX_DEPTH {
+            self.pos = self.end;
+            return first;
+        }
         let mut steps = 0;
         loop {
             steps += 1;
@@ -498,7 +525,9 @@ impl<'a> Reader<'a> {
                             self.pos = self.after_group(self.pos);
                             if self.seq("->") {
                                 self.pos += 2;
+                                self.depth += 1;
                                 self.skip_type();
+                                self.depth -= 1;
                             }
                         }
                     }
@@ -722,6 +751,10 @@ impl<'a> Reader<'a> {
         if self.pos >= self.end {
             return Pat::Other;
         }
+        if self.depth > MAX_DEPTH {
+            self.pos = self.end;
+            return Pat::Other;
+        }
         if self.word("_") {
             self.pos += 1;
             return Pat::Wild;
@@ -745,7 +778,10 @@ impl<'a> Reader<'a> {
             if self.word("mut") {
                 self.pos += 1;
             }
-            return Pat::Ref(Box::new(self.pat()));
+            self.depth += 1;
+            let inner = self.pat();
+            self.depth -= 1;
+            return Pat::Ref(Box::new(inner));
         }
         if self.p('(') {
             let (mut g, next) = self.group(self.pos);
@@ -797,7 +833,9 @@ impl<'a> Reader<'a> {
                 self.pos += 1;
                 if self.p('@') {
                     self.pos += 1;
+                    self.depth += 1;
                     self.pat();
+                    self.depth -= 1;
                 }
                 // `true`/`false`, a constant or a unit variant (capitalized) are not bindings
                 let lower = name.first().is_some_and(|&c| c == '_' as u32 || char::from_u32(c).is_some_and(|c| c.is_lowercase()));
@@ -969,7 +1007,7 @@ impl<'a> Reader<'a> {
         let lhs = self.range(no_struct);
         if let Some((op, len)) = self.assign_op() {
             self.pos += len;
-            let rhs = self.assign(no_struct);
+            let rhs = self.expr(no_struct);
             return Ex::Assign(op, Box::new(lhs), Box::new(rhs), at);
         }
         lhs
@@ -1053,19 +1091,29 @@ impl<'a> Reader<'a> {
     }
 
     fn bin(&mut self, min: u8, no_struct: bool) -> Ex {
-        let mut lhs = self.unary(no_struct);
+        let first = self.unary(no_struct);
+        // (the operators of one level, read left to right: what `lhs = Bin(op, lhs, rhs)` built, but flat, as a chain
+        // of any length is one node deep; an operand of a higher precedence is read whole by the call for its right side)
+        let mut rest: Vec<(Op, Ex, u32)> = Vec::new();
         let mut guard = 0;
         while let Some((op, len, prec)) = self.bin_op() {
             guard += 1;
-            if prec < min || guard > 100_000 {
+            if prec < min || guard > 1_000_000 {
                 break;
             }
             let at = self.at(self.pos);
             self.pos += len;
             let rhs = self.bin(prec + 1, no_struct);
-            lhs = Ex::Bin(op, Box::new(lhs), Box::new(rhs), at);
+            rest.push((op, rhs, at));
         }
-        lhs
+        match rest.len() {
+            0 => first,
+            1 => {
+                let (op, rhs, at) = rest.pop().expect("one operator");
+                Ex::Bin(op, Box::new(first), Box::new(rhs), at)
+            }
+            _ => Ex::Chain(Box::new(first), rest),
+        }
     }
 
     fn unary(&mut self, no_struct: bool) -> Ex {
@@ -1127,12 +1175,19 @@ impl<'a> Reader<'a> {
     fn postfix(&mut self, mut e: Ex, no_struct: bool) -> Ex {
         let _ = no_struct;
         let mut guard = 0;
+        let mut links = 0usize;
         loop {
             guard += 1;
-            if guard > 100_000 || self.pos >= self.end {
+            if guard > 1_000_000 || self.pos >= self.end {
                 return e;
             }
             let at = self.at(self.pos);
+            // (a chain past MAX_LINKS is read on, its value Unknown: no chain builds a tree deeper than that, RR-2)
+            if links >= MAX_LINKS && self.link_starts() {
+                e = Ex::Unknown(at);
+                links = 0;
+            }
+            links += 1;
             if self.p('?') {
                 self.pos += 1;
                 e = Ex::Try(Box::new(e));
@@ -1195,6 +1250,11 @@ impl<'a> Reader<'a> {
         }
     }
 
+    /// Does a postfix operation start at pos?
+    fn link_starts(&self) -> bool {
+        self.p('?') || (self.p('.') && !self.seq("..")) || self.p('(') || self.p('[') || self.word("as")
+    }
+
     fn block_at(&mut self, open: usize) -> Block {
         let (mut g, next) = self.group(open);
         let mut b = g.stmts();
@@ -1233,7 +1293,7 @@ impl<'a> Reader<'a> {
         if tok.kind == TK::Name && self.text(self.pos).first() == Some(&('\'' as u32)) {
             if self.is_p_at(self.pos + 1, ':') && !self.seq_at(self.pos + 1, "::") {
                 self.pos += 2;
-                return self.primary(no_struct);
+                return self.deeper(at, |r| r.primary(no_struct));
             }
             self.pos += 1;
             return Ex::Unknown(at);
@@ -1420,7 +1480,7 @@ impl<'a> Reader<'a> {
         }
         if is_word(w, "move") {
             self.pos += 1;
-            return self.primary(no_struct);
+            return self.deeper(at, |r| r.primary(no_struct));
         }
         if self.is_keyword(self.pos) && !(is_word(w, "self") || is_word(w, "Self") || is_word(w, "crate") || is_word(w, "super")) {
             self.pos += 1;
@@ -1445,7 +1505,7 @@ impl<'a> Reader<'a> {
             self.pos += 1;
             if self.word("if") {
                 let a = self.at(self.pos);
-                els = Some(Box::new(self.if_expr(a)));
+                els = Some(Box::new(self.deeper(a, |r| r.if_expr(a))));
             } else if self.p('{') {
                 let b = self.block_at(self.pos);
                 els = Some(Box::new(Ex::Block(Box::new(b))));
@@ -1490,7 +1550,7 @@ impl<'a> Reader<'a> {
             self.skip_type();
         }
         let body = self.expr(false);
-        Ex::Closure(params, Box::new(body), at)
+        Ex::Closure(params, Rc::new(body), at)
     }
 
     fn path_expr(&mut self, no_struct: bool, at: u32) -> Ex {
@@ -1620,7 +1680,8 @@ mod tests {
     #[test]
     fn operators_casts_and_turbofish() {
         let b = body("fn f() { let a = x + y * 2 == 3 && !z; let c = b as char; let v = it.collect::<Vec<u8>>(); a ^= 0x42; }");
-        assert!(matches!(&b.stmts[0], Stmt::Let(_, Some(Ex::Bin(Op::And, ..)), _)));
+        // (the operators of one level read flat, left to right: ((x + y * 2) == 3) && !z)
+        assert!(matches!(&b.stmts[0], Stmt::Let(_, Some(Ex::Chain(_, rest)), _) if rest.iter().map(|r| r.0).collect::<Vec<_>>() == [Op::Add, Op::Eq, Op::And]));
         assert!(matches!(&b.stmts[1], Stmt::Let(_, Some(Ex::Cast(_, t)), _) if s(t) == "char"));
         assert!(matches!(&b.stmts[2], Stmt::Let(_, Some(Ex::Method(_, m, _, _)), _) if s(m) == "collect"));
         assert!(matches!(&b.stmts[3], Stmt::Expr(Ex::Assign(Some(Op::BitXor), ..))));

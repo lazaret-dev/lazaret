@@ -2325,7 +2325,11 @@ read as UTF-8; Rust's literals and `format!` are `rsread/lit.rs`), the items of 
 kinds of §18) and the handle it is (a `Command`, an HTTP request, a `TcpStream`,
 a file open for writing). `eval.rs` walks the entry points of each moment,
 following the crate's own functions (a few calls deep, within a step budget),
-its closures and its methods, and records what the code does: a process started
+its closures and its methods; then it reads on their own, their parameters not
+known, the functions of the moment that reading did not reach: every function
+of a build script and of a procedural-macro crate (all of that code runs at
+build), and every function a start-up function calls by name, however deep. It
+records what the code does: a process started
 (`std::process::Command`, read as a shell reads its line, with `sh -c`/`cmd /c`/
 `powershell -Command` scripts pulled out), data sent (`std::net`, reqwest, ureq,
 minreq, attohttpc, curl, raw sockets), a file written and then run or loaded
@@ -2335,8 +2339,9 @@ crates' (`env::var`/`vars`, `fs::read`, `dirs`/`home`, `whoami`/`hostname`,
 command output, a response). The events and what every language reads the same way (a command's line as a shell reads it, the download a command writes to a file, an environment variable's kind) are `model/events.rs`, and `model/facts.rs` turns the events into what the tests
 ask (`signs::ModelFacts`): the strongest send and where data goes, code received
 and run, a file written then run, the commands run, and what only the model
-sees (a shell whose stdio is a connection — a reverse shell; a DNS lookup of a
-name built from the host name). The tests still read each file's text too, for
+sees (a shell or an interpreter whose stdio is a connection — a reverse shell; a
+DNS lookup of a name built from the host name and a public domain, as the text
+detector reads a lookup). The tests still read each file's text too, for
 the signs a literal shows (a stager, a reverse-shell command, a raw IP), with
 comments, tests (`#[cfg(test)]`, `#[test]`) and the code of another moment
 blanked.
@@ -2348,6 +2353,19 @@ never built into a dependent and are not read. `SC-USE-RISK`'s reading is
 bounded as the registry bounds Python and JavaScript (smallest files first,
 within a character budget, so every machine reads the same files); `useRead`
 says how much it read.
+
+The reading has bounds, and a reading that reaches one says so. `ast.rs` counts
+every form it reads within itself against its depth (`MAX_DEPTH`), reads the
+operators of one level as a flat chain and a chain of postfix operations up to
+`MAX_LINKS`, so no tree is deeper than its bounds; the evaluator's own nesting
+stops at `MAX_NEST`, a reading records at most `MAX_EVENTS` events and makes at
+most `MAX_CLOSURES` closures, and the text a step copies is charged to its
+steps. A reading that runs out of steps, nesting or events is cut short, and the
+moment's text is then read by the text test as well, as a Python or JavaScript
+file the models cannot read is: code that pads or spends the reading's steps
+before its payload hides nothing the text shows. (The bounds, the readings of
+every function of a moment and the fallback are the review of Oct 4, RR-1 to
+RR-11 in `audits/lazaret-go-rust-code-review-2026-10-04.md`.)
 
 Nothing changes for Python, JavaScript, Go or any other scan: `rs_crate` is a
 new call, and the install-script and import-time tests take a model's facts only

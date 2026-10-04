@@ -32,7 +32,17 @@ project is pre-1.0, so the 0.x API may still change.
   calls it yet, so no scan's verdict changes. The install-script and import-time tests take
   a crate's reading only when one is given, so Python's and JavaScript's answers are
   unchanged (the benchmark and the popular set are identical). The Go reader and the
-  registry and guard wiring that clears the INCOMPLETE verdict follow.
+  registry and guard wiring that clears the INCOMPLETE verdict follow. Before the Go
+  reader was built on it, the reader was reviewed line by line (Oct 4): input that made it
+  recurse without a bound (a chain of assignments, of `else if`s, of operators or of
+  method calls, a nested pattern or function type) stops at its bounds instead of
+  overflowing the stack, and its events and the text it copies are bounded; a build
+  script's payload many calls deep, or behind code that spends the reading's steps, is
+  read (every function of a build script or a procedural-macro crate is read, so is every
+  function a start-up function calls however deep, and a reading cut short is read by the
+  text test as well); `.unwrap()` on a response keeps the response; code under
+  `#[cfg(all(…, test))]` is a test's; and the reverse-shell and DNS-lookup signs ask what
+  the text detectors ask (a shell or an interpreter; a name built with a public domain).
 
 - **Where a run's time goes: `--timings`.** `lazaret-registry` and `lazaret guard` print on
   stderr the seconds spent in the network, reading archives, the engine (by call: the

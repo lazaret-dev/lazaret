@@ -50,6 +50,9 @@ pub const UNIT_BIN: u8 = 3;
 const BUILD_STEPS: u64 = 3_000_000;
 const USE_STEPS_PER_ROOT: u64 = 40_000;
 const USE_STEPS: u64 = 6_000_000;
+/// The work each function of a moment its hooks' reading did not reach is read with, alone, and in all (RR-10).
+const REST_STEPS_PER_ROOT: u64 = 40_000;
+const REST_STEPS: u64 = 3_000_000;
 
 /// What a crate's reading is told: its build script's path (Cargo.toml's `package.build`, `build.rs` by
 /// default; None for none), whether it is a procedural macro crate, its library's root, and the bounds of
@@ -120,6 +123,31 @@ fn never_built(path: &[u32]) -> bool {
     ["tests", "benches", "examples"].iter().any(|d| pystr::eq(first, d))
 }
 
+/// Is a `cfg` predicate (white space taken out) true only when tests are built: `test`, or `all(…)` with `test` among
+/// its arguments (`all(feature = "x", test)` too, the Rust reader's review, RR-11)?
+fn only_in_tests(compact: &str) -> bool {
+    if compact == "test" {
+        return true;
+    }
+    let Some(inner) = compact.strip_prefix("all(").and_then(|r| r.strip_suffix(')')) else { return false };
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    for (i, b) in inner.bytes().enumerate() {
+        match b {
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            b',' if depth == 0 => {
+                if &inner[start..i] == "test" {
+                    return true;
+                }
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    &inner[start..] == "test"
+}
+
 /// The items inside `#[cfg(test)]`, `#[test]` and the like, and what they hold.
 fn test_items(tree: &Tree, src: &[u32]) -> HashSet<u32> {
     let mut out = HashSet::new();
@@ -135,7 +163,7 @@ fn test_items(tree: &Tree, src: &[u32]) -> HashSet<u32> {
                 if let Some((o, c)) = tree.attr_args(src, a) {
                     let inner: String = (o + 1..c).map(|t| tree.text(src, t)).collect::<Vec<_>>().join(" ");
                     let compact: String = inner.split_whitespace().collect();
-                    if compact == "test" || compact.starts_with("all(test") || compact.contains("(test,") && !compact.contains("not(test") && compact.starts_with("all(") {
+                    if only_in_tests(&compact) {
                         test = true;
                     }
                 }
@@ -303,9 +331,12 @@ pub fn read_crate(p: &Pack, files: &[(PyStr, &[u32])], opts: &Options) -> Answer
             m.run_root(f, i);
         }
         m.flush_cmds();
+        // every other function of the build script, alone: all of its code runs at build, however deep a call it is
+        // reached by (RR-10)
+        read_rest(&mut m, &unit_fns(&krate, UNIT_BUILD), |_, _, _| {});
         owned.extend(m.reached.iter().copied());
         let files_of: Vec<usize> = (0..krate.files.len()).filter(|&k| krate.files[k].unit == UNIT_BUILD).collect();
-        answer.build = install_finding(p, &krate, &m.events, r, &files_of, None);
+        answer.build = install_finding(p, &krate, &m.events, r, &files_of, None, m.cut);
     }
     // ---- procedural macros
     let mut macro_roots: Vec<(u16, u32)> = Vec::new();
@@ -340,11 +371,15 @@ pub fn read_crate(p: &Pack, files: &[(PyStr, &[u32])], opts: &Options) -> Answer
             m.run_root(f, i);
         }
         m.flush_cmds();
+        // (a procedural macro crate's library is all build-time code: its other functions read alone, RR-10, and its
+        // text read whole)
+        if opts.proc_macro {
+            read_rest(&mut m, &unit_fns(&krate, UNIT_LIB), |_, _, _| {});
+        }
         owned.extend(m.reached.iter().copied());
-        // (a procedural macro crate's library is all build-time code: its text read whole)
         if let Some(root) = lib_root.or_else(|| macro_roots.first().map(|r| r.0 as usize)) {
             let files_of: Vec<usize> = (0..krate.files.len()).filter(|&k| krate.files[k].unit == UNIT_LIB).collect();
-            answer.macros = install_finding(p, &krate, &m.events, root, &files_of, None);
+            answer.macros = install_finding(p, &krate, &m.events, root, &files_of, None, m.cut);
         }
     }
     // ---- start-up functions
@@ -352,12 +387,25 @@ pub fn read_crate(p: &Pack, files: &[(PyStr, &[u32])], opts: &Options) -> Answer
         let mut m = Model::new(&krate, p);
         m.max_steps = BUILD_STEPS;
         let mut by_file: HashMap<usize, Vec<usize>> = HashMap::new();
+        let mut cut_files: HashSet<usize> = HashSet::new();
         for &(f, i) in &start_roots {
             let before = m.events.len();
+            m.cut = false;
             m.run_root(f, i);
             m.flush_cmds();
             by_file.entry(f as usize).or_default().extend(before..m.events.len());
+            if m.cut {
+                cut_files.insert(f as usize);
+            }
         }
+        // the functions they call by name, however deep, alone (RR-10)
+        let rest = called_by_name(&krate, &start_roots);
+        read_rest(&mut m, &rest, |m, (f, _), before| {
+            by_file.entry(f as usize).or_default().extend(before..m.events.len());
+            if m.cut {
+                cut_files.insert(f as usize);
+            }
+        });
         let reached = m.reached.clone();
         owned.extend(reached.iter().copied());
         let mut files: Vec<usize> = by_file.keys().copied().collect();
@@ -365,7 +413,7 @@ pub fn read_crate(p: &Pack, files: &[(PyStr, &[u32])], opts: &Options) -> Answer
         for fi in files {
             let evs: Vec<events::Ev> = by_file[&fi].iter().map(|&k| m.events[k].clone()).collect();
             let keep: HashSet<u32> = reached.iter().filter(|(f, _)| *f as usize == fi).map(|(_, i)| *i).collect();
-            if let Some(found) = import_finding(p, &krate, &evs, fi, Some(&keep)) {
+            if let Some(found) = import_finding(p, &krate, &evs, fi, Some(&keep), cut_files.contains(&fi)) {
                 answer.start.push(found);
             }
         }
@@ -422,6 +470,79 @@ fn index(k: &mut Krate) {
     }
 }
 
+/// The functions of a unit with a body, tests left out, in the order of the files and their items.
+fn unit_fns(k: &Krate, unit: u8) -> Vec<(u16, u32)> {
+    let mut out = Vec::new();
+    for (fi, f) in k.files.iter().enumerate() {
+        if f.unit != unit {
+            continue;
+        }
+        for (ii, it) in f.tree.items.iter().enumerate() {
+            if it.kind == IK::Fn && it.body_open != NONE && it.body_close != NONE && !f.test_items.contains(&(ii as u32)) {
+                out.push((fi as u16, ii as u32));
+            }
+        }
+    }
+    out
+}
+
+/// The crate's functions `roots` call by name, and those these call, without the reading's bound on depth: a name in
+/// a body that names functions of the unit (as the use-time test finds a sink's callers). A moment's code is what its
+/// hooks reach, however deep (RR-10).
+fn called_by_name(k: &Krate, roots: &[(u16, u32)]) -> Vec<(u16, u32)> {
+    let mut seen: HashSet<(u16, u32)> = roots.iter().copied().collect();
+    let mut queue: Vec<(u16, u32)> = roots.to_vec();
+    let mut out = Vec::new();
+    while let Some((fi, ii)) = queue.pop() {
+        let f = &k.files[fi as usize];
+        let Some(it) = f.tree.items.get(ii as usize) else { continue };
+        if it.body_open == NONE || it.body_close == NONE {
+            continue;
+        }
+        for t in it.body_open..it.body_close {
+            let Some(tok) = f.tree.toks.get(t as usize) else { break };
+            if tok.kind != crate::lex::Kind::Name {
+                continue;
+            }
+            let name = f.src[tok.start as usize..tok.end as usize].to_vec();
+            if let Some(c) = k.fns.get(&(f.unit, name)) {
+                for &x in c {
+                    if seen.insert(x) {
+                        out.push(x);
+                        queue.push(x);
+                    }
+                }
+            }
+        }
+    }
+    out.sort_unstable();
+    out
+}
+
+/// Reads each of `roots` the reading has not reached yet as a root of its own (its parameters not known), each with
+/// REST_STEPS_PER_ROOT steps and all with REST_STEPS; past those the reading is cut short. `each` is told the root and
+/// where its events start.
+fn read_rest(m: &mut Model, roots: &[(u16, u32)], mut each: impl FnMut(&mut Model, (u16, u32), usize)) {
+    let start = m.steps_used();
+    for &(f, i) in roots {
+        if m.reached.contains(&(f, i)) {
+            continue;
+        }
+        if m.steps_used().saturating_sub(start) >= REST_STEPS {
+            m.cut = true;
+            break;
+        }
+        let before = m.events.len();
+        let cut = m.cut;
+        m.cut = false;
+        m.max_steps = m.steps_used() + REST_STEPS_PER_ROOT;
+        m.run_root(f, i);
+        m.flush_cmds();
+        each(m, (f, i), before);
+        m.cut |= cut;
+    }
+}
+
 /// The function a load section's static points to (`static X: extern fn() = f;`).
 fn static_fn_target(k: &Krate, fi: usize, item: usize) -> Option<(u16, u32)> {
     let f = &k.files[fi];
@@ -459,14 +580,21 @@ fn view(f: &FileRef, keep: Option<&HashSet<u32>>, drop: Option<&HashSet<u32>>) -
 }
 
 /// The install-script test's finding for a moment's code: the events of its reading, and its files' texts.
-fn install_finding(p: &Pack, k: &Krate, events: &[events::Ev], root: usize, files_of: &[usize], keep: Option<&HashSet<u32>>) -> Option<Found> {
+/// The install-script test's finding for a moment's code: the events of its reading, and its files' texts. A reading
+/// cut short (`cut`) has its files' texts read by the text test as well, as a Python or JavaScript file the models
+/// cannot read is (RR-10): what the reading did not reach may hold what it looks for.
+fn install_finding(p: &Pack, k: &Krate, events: &[events::Ev], root: usize, files_of: &[usize], keep: Option<&HashSet<u32>>, cut: bool) -> Option<Found> {
     let mut reasons: Vec<PyStr> = Vec::new();
     let mut line: Option<usize> = None;
     // the model's facts, read with the root file's text; then each other file's text alone
     let root_view = view(&k.files[root], keep, None);
     let facts = facts::facts(p, k.files[root].src, events, root);
     let _gate = crate::textgate::open(&root_view);
-    for r in crate::signs::install_script_risk_model(p, &root_view, &facts.facts) {
+    let mut found = crate::signs::install_script_risk_model(p, &root_view, &facts.facts);
+    if cut {
+        found.extend(crate::signs::install_script_risk_with(p, &root_view, false, false, None));
+    }
+    for r in found {
         if !reasons.contains(&r) {
             reasons.push(r);
         }
@@ -481,7 +609,8 @@ fn install_finding(p: &Pack, k: &Krate, events: &[events::Ev], root: usize, file
         }
         let v = view(&k.files[fi], keep, None);
         let _gate = crate::textgate::open(&v);
-        for r in crate::signs::install_script_risk_model(p, &v, &empty) {
+        let found = if cut { crate::signs::install_script_risk_with(p, &v, false, false, None) } else { crate::signs::install_script_risk_model(p, &v, &empty) };
+        for r in found {
             if !reasons.contains(&r) {
                 reasons.push(r);
             }
@@ -493,12 +622,22 @@ fn install_finding(p: &Pack, k: &Krate, events: &[events::Ev], root: usize, file
     Some(Found { file: root, reasons, line: line.unwrap_or(1) })
 }
 
-/// The import-time test's finding for code read from a start-up function: its file's events and text.
-fn import_finding(p: &Pack, k: &Krate, events: &[events::Ev], file: usize, keep: Option<&HashSet<u32>>) -> Option<Found> {
+/// The import-time test's finding for code read from a start-up function: its file's events and text (and, for a
+/// reading cut short, the text test's, RR-10).
+fn import_finding(p: &Pack, k: &Krate, events: &[events::Ev], file: usize, keep: Option<&HashSet<u32>>, cut: bool) -> Option<Found> {
     let text = view(&k.files[file], keep, None);
     let f = facts::facts(p, k.files[file].src, events, file);
     let _gate = crate::textgate::open(&text);
-    let (reasons, line) = crate::signs::import_time_risk_model(p, &text, &f.facts);
+    let (mut reasons, mut line) = crate::signs::import_time_risk_model(p, &text, &f.facts);
+    if cut {
+        let (more, at) = crate::signs::import_time_risk(p, &text, None);
+        for r in more {
+            if !reasons.contains(&r) {
+                reasons.push(r);
+                line = line.or(at);
+            }
+        }
+    }
     if reasons.is_empty() {
         return None;
     }
@@ -580,16 +719,23 @@ fn use_findings(p: &Pack, k: &Krate, owned: &HashSet<(u16, u32)>, opts: &Options
     m.max_depth = 4;
     m.not_follow = owned.clone();
     let mut by_file: HashMap<usize, Vec<usize>> = HashMap::new();
+    // (the files of the roots whose reading was cut short, or not done: their text is read by the text test too, RR-10)
+    let mut cut_files: HashSet<usize> = HashSet::new();
     let mut total = 0u64;
     for (f, i) in roots {
         if total >= USE_STEPS {
-            break;
+            cut_files.insert(f as usize);
+            continue;
         }
         let before_steps = m.steps_used();
         m.max_steps = before_steps + USE_STEPS_PER_ROOT;
         let before = m.events.len();
+        m.cut = false;
         m.run_root(f, i);
         m.flush_cmds();
+        if m.cut {
+            cut_files.insert(f as usize);
+        }
         total += m.steps_used() - before_steps;
         for e in before..m.events.len() {
             let ef = events::ev_file(&m.events[e]) as usize;
@@ -616,7 +762,17 @@ fn use_findings(p: &Pack, k: &Krate, owned: &HashSet<(u16, u32)>, opts: &Options
         let fx = facts::facts(p, k.files[fi].src, &evs, fi);
         let (reasons, line) = {
             let _gate = crate::textgate::open(&text);
-            crate::signs::import_time_risk_model(p, &text, &fx.facts)
+            let (mut reasons, mut line) = crate::signs::import_time_risk_model(p, &text, &fx.facts);
+            if cut_files.contains(&fi) {
+                let (more, at) = crate::signs::import_time_risk(p, &text, None);
+                for r in more {
+                    if !reasons.contains(&r) {
+                        reasons.push(r);
+                        line = line.or(at);
+                    }
+                }
+            }
+            (reasons, line)
         };
         if !reasons.is_empty() {
             out.push(Found { file: fi, reasons, line: line.or(fx.first_line).unwrap_or(1) });
