@@ -1193,10 +1193,11 @@ comprehensive, so weigh marginal value against FP risk):
   which pip still reads itself beside the guard's index (a file it takes from
   there blocks the install, so it fails closed); and the scan of a very large
   tarball (`next`, 42 MB), which dominates a first install.
-- *From the audit (P1/P2):* a GitHub Action and pre-commit hook, a public
-  nightly benchmark, per-rule docs, a coverage gate and parser fuzzing in CI,
-  optional live secret verification, splitting `core.py`, generating the
-  dashboard's script from `js/src`.
+- *From the audit (P1/P2):* a public nightly benchmark, per-rule docs, a
+  coverage gate and parser fuzzing in CI, optional live secret verification,
+  splitting `core.py`, generating the dashboard's script from `js/src` (the
+  GitHub Action was built in 0.1.8, and the pre-commit hook, `lazaret hook`,
+  in 0.1.9; the npm package has no `hook` command yet).
 
 Prefer doing detection extensions **reactively** — when a real-world dropper
 uses the pattern — over speculatively. The bar that made this tool good is the

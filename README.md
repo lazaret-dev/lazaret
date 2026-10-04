@@ -32,6 +32,7 @@ From a checkout, `pip install ./python` (or `pip install -e ./python` for develo
 | `lazaret-sca` (`lazaret.scanner.sca`) | Dependency CVE scanner: matches installed npm/PyPI packages against a CVE bundle |
 | `lazaret-registry` (`lazaret.registry`) | Registry scanner: audit npm/PyPI packages, track state in a DB |
 | `lazaret guard`, `lazaret-guard` (`lazaret.registry.guard`) | Install guard: check what npm, pnpm, yarn, Bun, pip or uv is about to install (resolve, fetch, scan in memory) and block it before it runs |
+| `lazaret hook` (`lazaret.scanner.hook`) | Commit-time gate: credentials, vulnerabilities and supply-chain threats in the files being committed, as staged; a pre-commit hook |
 | `lazaret-mcp` (`lazaret.mcp`) | MCP server: lets Claude scan code and changes via tools |
 | `lazaret/web/lazaret.html` | Web dashboard: paste or upload code, scan in the browser |
 | `lazaret.pg` | PostgreSQL client used for the registry state DB (pure stdlib) |
@@ -173,6 +174,33 @@ directory), `gate` (`true`, the default: the step fails when the quality gate do
 either way) and `deps` (`true`: also audit installed dependencies, `--deps`). In other CI systems, or to
 skip the compile, install a platform wheel (`pip install --only-binary :all: lazaret==X.Y.Z`; a
 requirements file with `--hash` lines pins the files too) and run `lazaret . --ci --sarif lazaret.sarif`.
+
+### Before you commit (`lazaret hook`)
+
+`lazaret hook` checks the files being committed, as they are staged, and fails on `--ci`'s security and
+supply-chain conditions: no BLOCKER finding (a credential, SQL built from strings), no CRITICAL
+vulnerability, no supply-chain indicator (an install hook that downloads and runs code, a workflow that
+sends out the repository's secrets, code that decodes and runs a payload) and no cross-file taint flow.
+Duplication and maintainability, which `--ci` also gates, are not checked. Each file is scanned as a project
+scan scans it, from git's index, so a partly staged file is checked as it will be committed. With no file
+named it checks the files staged for commit; it prints what fails the gate, and the vulnerabilities of
+MAJOR and above. Since 0.1.9.
+
+With [pre-commit](https://pre-commit.com), the mirror repository installs Lazaret's wheel for your platform
+by version:
+
+```yaml
+repos:
+  - repo: https://github.com/lazaret-dev/lazaret-pre-commit
+    rev: v0.1.9
+    hooks:
+      - id: lazaret
+```
+
+Without it, the git hook is an executable `.git/hooks/pre-commit` holding `#!/bin/sh` and `lazaret hook`. To accept a
+finding, mark its line (Inline suppression, below); to leave files out with pre-commit, use its `exclude`.
+Exit codes: 0 passed or nothing to check, 1 the gate failed, 2 usage error. The npm package has no `hook`
+command yet.
 
 ## Detection capabilities
 

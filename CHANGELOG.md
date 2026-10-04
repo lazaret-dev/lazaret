@@ -16,6 +16,18 @@ project is pre-1.0, so the 0.x API may still change.
   file scan, the import-time test, the cross-file follower, …), the package manager (the
   guard) and the rest of the Python, with the calls each took; the guard puts the same
   report in its `--json`. A scan with no `--timings` records nothing.
+- **The commit-time gate: `lazaret hook`.** It checks the files being committed, as they
+  are staged (read from git's index, so a partly staged file is checked as it will be
+  committed), with the project scan's rules, and fails on `--ci`'s security and
+  supply-chain conditions: no BLOCKER finding, no CRITICAL vulnerability, no supply-chain
+  indicator, no cross-file taint flow. Duplication and maintainability are not a
+  commit's business. With no file named it checks the staged files; pre-commit passes
+  the files being committed. A credential in a `.env`, an install hook that pipes a
+  download into a shell, or a workflow that sends out every repository secret stops
+  the commit. pre-commit runs it from a mirror repository,
+  github.com/lazaret-dev/lazaret-pre-commit, whose package pins the release, written
+  by `scripts/make_pre_commit_mirror.py` (`docs/RELEASING.md`). The npm package
+  points to the Python package for it.
 - **Commands written to a shell's startup file.** An install hook's command, or a script
   it runs or starts, that writes a command that downloads or runs code (`curl … | sh`,
   `nohup node …/agent.js &`) to `~/.bashrc`, `~/.zshrc`, `~/.profile`, fish's

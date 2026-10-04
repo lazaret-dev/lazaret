@@ -238,6 +238,19 @@ function isGuardCommand(argv) {
   try { statSync("guard"); return false; } catch { return true; }
 }
 
+/** `lazaret hook [FILE …]`, the Python package's commit-time gate: `hook` first,
+ * when no path named hook is here to scan, or when what follows is files or
+ * --staged (lazaret._cli.is_hook). */
+function isHookCommand(argv) {
+  if (argv[0] !== "hook") return false;
+  try { statSync("hook"); } catch { return true; }
+  return argv.slice(1).some((a) => {
+    if (a === "--staged") return true;
+    if (a.startsWith("-")) return false;
+    try { return statSync(a).isFile(); } catch { return false; }
+  });
+}
+
 function runChecked(argv, io) {
   const out = io.out ?? ((s) => console.log(s));
   const err = io.err ?? ((s) => console.error(s));
@@ -251,6 +264,11 @@ function runChecked(argv, io) {
   if (isGuardCommand(argv)) {
     err("error: lazaret guard comes with the Python package: pip install lazaret (or pipx install lazaret), "
       + "then run: lazaret guard npm install …");
+    return EXIT_USAGE;
+  }
+  if (isHookCommand(argv)) {
+    err("error: lazaret hook comes with the Python package: pip install lazaret (or pipx install lazaret), "
+      + "or pre-commit's hook (github.com/lazaret-dev/lazaret-pre-commit)");
     return EXIT_USAGE;
   }
   let parsed;

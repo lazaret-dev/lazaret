@@ -1,7 +1,7 @@
 """The `lazaret` command: `lazaret guard <npm|pnpm|yarn|bun|pip|uv|uvx|go|cargo> …` checks what a
-package manager is about to install (lazaret.registry.guard); `lazaret [scan]
-github:owner/repo[@ref]` (or `gitlab:`) scans a repository at a commit
-(lazaret.registry.sourcescan); anything else scans a project
+package manager is about to install (lazaret.registry.guard); `lazaret hook [FILE …]` checks what a
+commit holds (lazaret.scanner.hook); `lazaret [scan] github:owner/repo[@ref]` (or `gitlab:`) scans a
+repository at a commit (lazaret.registry.sourcescan); anything else scans a project
 (lazaret.scanner.core). This module sits above the layers: it imports only the
 one it hands the command line to."""
 import os
@@ -23,6 +23,16 @@ def is_guard(argv):
     return all(a.startswith("-") for a in rest) and not os.path.exists("guard")
 
 
+def is_hook(argv):
+    """Is this command line `lazaret hook …`? `hook` first, when there is no
+    file or folder named hook here to scan, or when what follows is files
+    (pre-commit's call) or --staged."""
+    if not argv or argv[0] != "hook":
+        return False
+    return not os.path.exists("hook") or any(
+        a == "--staged" or (not a.startswith("-") and os.path.isfile(a)) for a in argv[1:])
+
+
 def is_source(argv):
     """Does any argument name a GitHub or GitLab source (and no file or folder
     of that name)? Only a first look, with nothing imported: whether it is the
@@ -35,6 +45,9 @@ def main(argv=None):
     if is_guard(argv):
         from lazaret.registry import guard
         return guard.main(argv[1:])
+    if is_hook(argv):
+        from lazaret.scanner import hook
+        return hook.main(argv[1:])
     if is_source(argv):
         from lazaret.registry import sourcescan
         return sourcescan.main(argv)

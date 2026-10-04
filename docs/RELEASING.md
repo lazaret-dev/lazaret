@@ -114,6 +114,12 @@ Anything merged through the GitHub web UI reaches GitLab the next time you pull 
    - only when **both** builds succeed do the publish jobs start, each waiting for your approval on its environment (`pypi`, `npm`).
 5. PyPI goes live as soon as its job finishes. npm is only *staged*: approve it with 2FA at https://www.npmjs.com/package/lazaret (the **Staged Packages** tab) or with `npm stage approve <stage-id>`. The run's summary page carries a reminder.
 6. - [ ] `python3 scripts/make_typosquat_stubs.py --check` still exits 0.
+7. Once the release is on PyPI, tag the pre-commit mirror (https://github.com/lazaret-dev/lazaret-pre-commit, from 0.1.9). pre-commit installs a Python hook with `pip install .` at its repository's root, which this repository can't serve, so the mirror holds the hook's definition and a package that pins the release; a mirror tagged before PyPI has the release fails to install:
+   ```sh
+   python3 scripts/make_pre_commit_mirror.py 0.2.0 ../lazaret-pre-commit
+   cd ../lazaret-pre-commit && git add -A && git commit -m "Lazaret 0.2.0" && git tag -a v0.2.0 -m v0.2.0 && git push origin main refs/tags/v0.2.0
+   ```
+   The first time, create the repository empty on GitHub (Apache-2.0; the script writes the LICENSE), clone it next to this one, and protect its tags as this repository's are.
 
 `sh scripts/check-versions.sh` with no arguments checks the working tree and fails if any version file has uncommitted changes; `sh scripts/check-versions.sh <ref>` checks the files as committed at a tag, branch or commit (`sh scripts/check-versions.sh v0.0.1`).
 

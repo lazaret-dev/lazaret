@@ -45,6 +45,14 @@ test("lazaret guard points to the Python package (exit 2)", () => {
   }
 });
 
+test("lazaret hook points to the Python package (exit 2)", () => {
+  for (const argv of [["hook"], ["hook", "--staged"]]) {
+    const r = capture(argv);
+    assert.equal(r.code, 2);
+    assert.match(r.err, /lazaret hook comes with the Python package: pip install lazaret/);
+  }
+});
+
 test("check on missing directory exits 2 with error", () => {
   const r = capture(["check", join(tmpdir(), "lazaret-no-such-dir-xyz")]);
   assert.equal(r.code, 2);
