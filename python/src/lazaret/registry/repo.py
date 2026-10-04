@@ -35,6 +35,7 @@ import argparse
 import base64
 import bisect
 import bz2
+import contextlib
 import datetime
 import functools
 import hashlib
@@ -62,6 +63,7 @@ from lazaret import safexml as _safexml                 # noqa: E402
 from lazaret.registry import lookalike as _lookalike    # noqa: E402
 from lazaret.registry import unused_deps as _unused     # noqa: E402
 from lazaret.scanner import engine as _engine           # noqa: E402
+from lazaret.scanner import timings                     # noqa: E402
 from lazaret.safexml import ElementTree as _safe_ET     # noqa: E402
 
 
@@ -386,7 +388,13 @@ def _fetch(url, max_bytes=MAX_DOWNLOAD_BYTES, timeout=DOWNLOAD_TIMEOUT, accept=N
     """Validated, byte-budgeted fetch (F10 + F9a). Reads in bounded chunks so
     a hostile server cannot OOM the scanner with an unbounded stream (a 300MB
     response previously pinned ~714MB RSS via bare r.read()). With `data`
-    (bytes) the request is a POST of that body (PyPI's XML-RPC API)."""
+    (bytes) the request is a POST of that body (PyPI's XML-RPC API). Its
+    seconds are the network's in `--timings`."""
+    with timings.span("network", "fetch"):
+        return _fetch_bytes(url, max_bytes, timeout, accept, data, content_type)
+
+
+def _fetch_bytes(url, max_bytes, timeout, accept, data, content_type):
     _validated_url(url)
     headers = {"User-Agent": USER_AGENT}
     if accept:
@@ -941,9 +949,25 @@ def iter_archive(data, container, artifact=None, *, budget=None, anomalies=None)
     budget = budget if budget is not None else Budget()
     anomalies = anomalies if anomalies is not None else []
     if container == "zip":
-        yield from _iter_zip(data, artifact, budget, anomalies)
+        members = _iter_zip(data, artifact, budget, anomalies)
     else:
-        yield from _iter_tar(data, container, artifact, budget, anomalies)
+        members = _iter_tar(data, container, artifact, budget, anomalies)
+    yield from _timed_members(members)
+
+
+def _timed_members(members):
+    """`members`, the seconds spent reading each (not the caller's, between
+    them) in the archive phase of `--timings`; closed when the caller stops."""
+    try:
+        while True:
+            with timings.span("archive", "iter_archive"):
+                try:
+                    member = next(members)
+                except StopIteration:
+                    return
+            yield member
+    finally:
+        members.close()
 
 
 def _iter_tar(data, container, artifact, budget, anomalies):
@@ -4677,6 +4701,9 @@ def main():
                     help="discover: scan the discovered packages (and track them)")
     ap.add_argument("--add", action="store_true",
                     help="discover: add discovered packages to the watchlist")
+    ap.add_argument("--timings", action="store_true",
+                    help="say on stderr where the time went: the network, reading archives, "
+                         "the engine (by call), the rest")
     args = ap.parse_args()
     try:
         _engine.require()
@@ -4706,6 +4733,11 @@ def main():
         # sys.exit — the MCP server dispatches it); here the CLI keeps the
         # exact legacy behavior.
         sys.exit(str(exc))
+    kept = timings.Timings() if args.timings else None
+    timed = contextlib.ExitStack()
+    if kept is not None:
+        timed.enter_context(timings.capture(kept))
+        timed.enter_context(kept.run())
     try:
         errors = []
         args._errors = errors
@@ -4804,6 +4836,10 @@ def main():
 
     finally:
         store.close()
+        timed.close()
+        if kept is not None:
+            for line in timings.render(kept.report()):
+                print(line, file=sys.stderr)
 
 
 if __name__ == "__main__":

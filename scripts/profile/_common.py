@@ -45,7 +45,11 @@ def use_source_tree():
 @contextlib.contextmanager
 def engine_spans(native, timings):
     """Every call of the native engine is a `timings.span("engine", name)` while this is open (a batch is
-    named for its first call, `batch:scan_file`). Restores the engine's own function after."""
+    named for its first call, `batch:scan_file`). Restores the engine's own function after. The package's own
+    loader opens these spans itself since P-4 (`_native.TIMED`), and is left as it is."""
+    if getattr(native, "TIMED", False):
+        yield
+        return
     real = native.call_raw
 
     def call_raw(name, args=None, text=""):

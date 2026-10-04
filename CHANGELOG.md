@@ -9,6 +9,14 @@ project is pre-1.0, so the 0.x API may still change.
 
 ## [Unreleased]
 
+### Added
+
+- **Where a run's time goes: `--timings`.** `lazaret-registry` and `lazaret guard` print on
+  stderr the seconds spent in the network, reading archives, the engine (by call: the
+  file scan, the import-time test, the cross-file follower, …), the package manager (the
+  guard) and the rest of the Python, with the calls each took; the guard puts the same
+  report in its `--json`. A scan with no `--timings` records nothing.
+
 ### Changed
 
 - **SC-USE-RISK reads the same files on every machine.** Registry and guard scans read a

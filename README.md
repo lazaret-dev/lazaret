@@ -275,6 +275,7 @@ lazaret-registry scan-all                        # scan latest of every tracked 
 lazaret-registry scan-all --rescan --ci          # re-scan all; exit 1 on SUSPICIOUS or INCOMPLETE
 lazaret-registry list                            # tracked packages + last verdict
 lazaret-registry report npm:left-pad@1.3.0       # stored findings for one scan
+lazaret-registry scan pypi:litellm --timings     # and where the time went, on stderr
 ```
 
 Registry results are always redacted, on screen and in the state DB: a secret finding's line is stored as a placeholder naming the rule and the line's length, and credentials on the lines around any finding are masked, because the DB is read back by `report`, the MCP tools and anyone sharing a Postgres database. `--no-redact-secrets` has no effect here (the original lines are in the package's archive); it applies to project scans.

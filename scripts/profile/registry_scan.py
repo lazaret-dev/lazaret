@@ -27,7 +27,9 @@ import _common  # noqa: E402
 
 @contextlib.contextmanager
 def instrumented(repo, core, timings):
-    """Put the phases' spans around the functions that do that phase's work; restore them after."""
+    """Put the phases' spans around the functions that do that phase's work; restore them after. The registry
+    times its own network and archive reading since P-4 (`repo._fetch`, `repo.iter_archive`); those are wrapped
+    only where it does not."""
     saved = {}
 
     def wrap(owner, attr, phase, name=None):
@@ -39,27 +41,28 @@ def instrumented(repo, core, timings):
                 return real(*a, **k)
         setattr(owner, attr, inner)
 
-    real_iter = repo.iter_archive
-    saved[(repo, "iter_archive")] = real_iter
+    if getattr(repo, "_timed_members", None) is None:
+        real_iter = repo.iter_archive
+        saved[(repo, "iter_archive")] = real_iter
 
-    def iter_archive(*a, **k):
-        gen = real_iter(*a, **k)
-        while True:
-            with timings.span("archive", "iter_archive"):
-                try:
-                    member = next(gen)
-                except StopIteration:
-                    return
-            yield member
+        def iter_archive(*a, **k):
+            gen = real_iter(*a, **k)
+            while True:
+                with timings.span("archive", "iter_archive"):
+                    try:
+                        member = next(gen)
+                    except StopIteration:
+                        return
+                yield member
 
-    wrap(repo, "_fetch", "network", "fetch")
+        wrap(repo, "_fetch", "network", "fetch")
+        repo.iter_archive = iter_archive
     wrap(repo, "verify_digest", "digest")
     wrap(repo, "resolve", "resolve")
     if hasattr(repo, "new_dependency_issues"):
         wrap(repo, "new_dependency_issues", "new dependency")
     if hasattr(core, "redact_result"):
         wrap(core, "redact_result", "redact")
-    repo.iter_archive = iter_archive
     try:
         yield
     finally:
