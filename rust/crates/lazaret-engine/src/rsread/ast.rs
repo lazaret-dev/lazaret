@@ -1214,15 +1214,15 @@ impl<'a> Reader<'a> {
             TK::Str => {
                 self.pos += 1;
                 let t = self.text(self.pos - 1);
-                return match crate::rsread::val::literal(t) {
-                    Some(crate::rsread::val::Lit::Str(s, bytes)) => Ex::Str(s, bytes, at),
-                    Some(crate::rsread::val::Lit::Char(c)) => Ex::Char(c, at),
+                return match crate::rsread::lit::literal(t) {
+                    Some(crate::rsread::lit::Lit::Str(s, bytes)) => Ex::Str(s, bytes, at),
+                    Some(crate::rsread::lit::Lit::Char(c)) => Ex::Char(c, at),
                     None => Ex::Unknown(at),
                 };
             }
             TK::Num => {
                 self.pos += 1;
-                return match crate::rsread::val::int_literal(self.text(self.pos - 1)) {
+                return match crate::rsread::lit::int_literal(self.text(self.pos - 1)) {
                     Some(n) => Ex::Int(n, at),
                     None => Ex::Unknown(at),
                 };

@@ -209,7 +209,7 @@ fn tests_and_examples_are_not_read() {
     // the files are classified but not read for what their code does
     let paths = ["src/lib.rs"];
     assert_eq!(a.read.len(), paths.len(), "only src/lib.rs is a built file");
-    assert!(a.uses.is_empty() && a.build.is_none());
+    assert!(all(&a).is_empty(), "{:?}", all(&a));
 }
 
 #[test]

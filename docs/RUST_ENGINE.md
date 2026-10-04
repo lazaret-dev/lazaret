@@ -2319,9 +2319,9 @@ The reading evaluates the code the way the trees' data flow does, not with
 patterns over text. `ast.rs` reads a function body's statements and expressions
 from `rsparse`'s tokens (it is not Rust's parser: what it cannot read is one
 `Unknown` leaf and the rest is read; nesting is bounded, so no input recurses
-past it). `val.rs` is a value — the text the code builds where it builds one
+past it). A value (`model/val.rs`, shared with Go's reader) is the text the code builds where it builds one
 (`format!`, `concat!`, a `+`, a constant, base64 or hex decoded, a byte slice
-read as UTF-8), the items of a list, the data it carries (the supply-chain
+read as UTF-8; Rust's literals and `format!` are `rsread/lit.rs`), the items of a list, the data it carries (the supply-chain
 kinds of §18) and the handle it is (a `Command`, an HTTP request, a `TcpStream`,
 a file open for writing). `eval.rs` walks the entry points of each moment,
 following the crate's own functions (a few calls deep, within a step budget),
@@ -2332,7 +2332,7 @@ minreq, attohttpc, curl, raw sockets), a file written and then run or loaded
 (`libloading`), a name looked up (`ToSocketAddrs`, hickory/trust-dns, including
 TXT records — the Go DNS-backdoor shape). The sources are std's and the usual
 crates' (`env::var`/`vars`, `fs::read`, `dirs`/`home`, `whoami`/`hostname`,
-command output, a response). `facts.rs` turns the events into what the tests
+command output, a response). The events and what every language reads the same way (a command's line as a shell reads it, the download a command writes to a file, an environment variable's kind) are `model/events.rs`, and `model/facts.rs` turns the events into what the tests
 ask (`signs::ModelFacts`): the strongest send and where data goes, code received
 and run, a file written then run, the commands run, and what only the model
 sees (a shell whose stdio is a connection — a reverse shell; a DNS lookup of a

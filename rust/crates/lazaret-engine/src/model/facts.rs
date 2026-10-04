@@ -1,4 +1,4 @@
-//! A reading's events turned into what the install-script and import-time tests ask (0.1.9).
+//! A reader's events turned into what the install-script and import-time tests ask (0.1.9).
 //!
 //! The tests ask Python's and JavaScript's trees the same questions ([`ModelFacts`]): the strongest send of
 //! the machine's data and where data goes, code received and run, a file written and then run, the
@@ -7,7 +7,7 @@
 //! A write to a file a shell or the system runs at login is handed to the persistence readers as the shell
 //! line that would write it.
 
-use super::eval::{Ev, Krate};
+use super::events::Ev;
 use super::val::{Val, UNKNOWN};
 use crate::jsflow::supply::{cred_store, K_ADDRESS, K_BYTES, K_CARVED, K_CREDENTIALS, K_CRED_FILE, K_DECODED, K_ENV, K_FILE, K_IDENTITY, K_RECEIVED, K_REPORT, K_WHOLE_ENV};
 use crate::pack::Pack;
@@ -112,8 +112,9 @@ fn write_line(path: &Val, data: &Val, append: bool) -> Option<PyStr> {
     Some(pystr::concat(&[&u("printf '%s\\n' '"), &content, &u(if append { "' >> '" } else { "' > '" }), &p, &u("'")]))
 }
 
-pub fn facts(p: &Pack, k: &Krate, events: &[Ev], anchor: usize) -> FileFacts {
-    let text = k.files[anchor].src;
+/// The facts of `events` for the file `anchor`, whose text is `text`: offsets and lines are that file's
+/// (an event in another file counts at its start).
+pub fn facts(p: &Pack, text: &[u32], events: &[Ev], anchor: usize) -> FileFacts {
     let mut out = ModelFacts::default();
     let mut first: Option<usize> = None;
     let mut written: Vec<(Vec<PyStr>, u16, PyStr)> = Vec::new();

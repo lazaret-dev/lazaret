@@ -15,9 +15,10 @@
 //! The reading ([`eval`]) evaluates the code from each moment's entry points (the build script's `main`,
 //! each `#[proc_macro…]` function, each start-up function), following the crate's own functions: it records
 //! the processes started, the data sent, the files written and run, the names looked up, with the text each
-//! is given where the code builds it (`format!`, a constant, base64 decoded…). [`facts`] turns those into
-//! what the tests ask ([`crate::signs::ModelFacts`]); the tests also read the code's text for the signs a
-//! text shows (a stager script, a reverse shell's command, a raw IP address), with comments and tests left out.
+//! is given where the code builds it (`format!`, a constant, base64 decoded…). `model::facts` turns those
+//! into what the tests ask ([`crate::signs::ModelFacts`]); the tests also read the code's text for the signs
+//! a text shows (a stager script, a reverse shell's command, a raw IP address), with comments and tests left
+//! out. The values, the events and the facts are shared with Go's reader (`crate::model`).
 //!
 //! A crate is its files: the build script's (it and the modules it declares), the library's (its root and
 //! its modules) and the binaries'. Tests, benches and examples are never built into a dependent, and are not
@@ -25,17 +26,19 @@
 
 pub mod ast;
 pub mod eval;
-pub mod facts;
-pub mod val;
+pub mod lit;
 
 #[cfg(test)]
 mod tests;
 
+use crate::model::{events, facts};
 use crate::pack::Pack;
 use crate::pystr::{self, u, PyStr};
 use crate::rsparse::{self, Kind as IK, Tree, NONE};
 use eval::{FileRef, Krate, Model};
 use std::collections::{HashMap, HashSet};
+
+pub use crate::model::{Found, UseRead};
 
 /// Units of a crate: the code built together.
 pub const UNIT_NONE: u8 = 0;
@@ -65,23 +68,6 @@ impl Default for Options {
     fn default() -> Self {
         Options { build: None, proc_macro: false, lib: None, use_file_chars: 8_000_000, use_chars: 24_000_000 }
     }
-}
-
-/// What the use-time test read: (files, characters) read, of how many.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct UseRead {
-    pub files: usize,
-    pub chars: usize,
-    pub of_files: usize,
-    pub of_chars: usize,
-}
-
-/// One finding: the file, its reasons, the 1-based line of the first.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Found {
-    pub file: usize,
-    pub reasons: Vec<PyStr>,
-    pub line: usize,
 }
 
 /// A crate's reading: the build script's, the procedural macros', the start-up functions' and the rest's.
@@ -377,7 +363,7 @@ pub fn read_crate(p: &Pack, files: &[(PyStr, &[u32])], opts: &Options) -> Answer
         let mut files: Vec<usize> = by_file.keys().copied().collect();
         files.sort_unstable();
         for fi in files {
-            let evs: Vec<eval::Ev> = by_file[&fi].iter().map(|&k| m.events[k].clone()).collect();
+            let evs: Vec<events::Ev> = by_file[&fi].iter().map(|&k| m.events[k].clone()).collect();
             let keep: HashSet<u32> = reached.iter().filter(|(f, _)| *f as usize == fi).map(|(_, i)| *i).collect();
             if let Some(found) = import_finding(p, &krate, &evs, fi, Some(&keep)) {
                 answer.start.push(found);
@@ -473,12 +459,12 @@ fn view(f: &FileRef, keep: Option<&HashSet<u32>>, drop: Option<&HashSet<u32>>) -
 }
 
 /// The install-script test's finding for a moment's code: the events of its reading, and its files' texts.
-fn install_finding(p: &Pack, k: &Krate, events: &[eval::Ev], root: usize, files_of: &[usize], keep: Option<&HashSet<u32>>) -> Option<Found> {
+fn install_finding(p: &Pack, k: &Krate, events: &[events::Ev], root: usize, files_of: &[usize], keep: Option<&HashSet<u32>>) -> Option<Found> {
     let mut reasons: Vec<PyStr> = Vec::new();
     let mut line: Option<usize> = None;
     // the model's facts, read with the root file's text; then each other file's text alone
     let root_view = view(&k.files[root], keep, None);
-    let facts = facts::facts(p, k, events, root);
+    let facts = facts::facts(p, k.files[root].src, events, root);
     let _gate = crate::textgate::open(&root_view);
     for r in crate::signs::install_script_risk_model(p, &root_view, &facts.facts) {
         if !reasons.contains(&r) {
@@ -508,9 +494,9 @@ fn install_finding(p: &Pack, k: &Krate, events: &[eval::Ev], root: usize, files_
 }
 
 /// The import-time test's finding for code read from a start-up function: its file's events and text.
-fn import_finding(p: &Pack, k: &Krate, events: &[eval::Ev], file: usize, keep: Option<&HashSet<u32>>) -> Option<Found> {
+fn import_finding(p: &Pack, k: &Krate, events: &[events::Ev], file: usize, keep: Option<&HashSet<u32>>) -> Option<Found> {
     let text = view(&k.files[file], keep, None);
-    let f = facts::facts(p, k, events, file);
+    let f = facts::facts(p, k.files[file].src, events, file);
     let _gate = crate::textgate::open(&text);
     let (reasons, line) = crate::signs::import_time_risk_model(p, &text, &f.facts);
     if reasons.is_empty() {
@@ -606,7 +592,7 @@ fn use_findings(p: &Pack, k: &Krate, owned: &HashSet<(u16, u32)>, opts: &Options
         m.flush_cmds();
         total += m.steps_used() - before_steps;
         for e in before..m.events.len() {
-            let ef = eval::ev_file(&m.events[e]) as usize;
+            let ef = events::ev_file(&m.events[e]) as usize;
             by_file.entry(ef).or_default().push(e);
         }
     }
@@ -624,10 +610,10 @@ fn use_findings(p: &Pack, k: &Krate, owned: &HashSet<(u16, u32)>, opts: &Options
         room -= n;
         read.files += 1;
         read.chars += n;
-        let evs: Vec<eval::Ev> = by_file.get(&fi).map(|v| v.iter().map(|&e| m.events[e].clone()).collect()).unwrap_or_default();
+        let evs: Vec<events::Ev> = by_file.get(&fi).map(|v| v.iter().map(|&e| m.events[e].clone()).collect()).unwrap_or_default();
         let blanked: HashSet<u32> = owned.iter().filter(|(f, _)| *f as usize == fi).map(|(_, i)| *i).collect();
         let text = view(&k.files[fi], None, Some(&blanked));
-        let fx = facts::facts(p, k, &evs, fi);
+        let fx = facts::facts(p, k.files[fi].src, &evs, fi);
         let (reasons, line) = {
             let _gate = crate::textgate::open(&text);
             crate::signs::import_time_risk_model(p, &text, &fx.facts)
