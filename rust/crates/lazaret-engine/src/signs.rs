@@ -3870,13 +3870,30 @@ fn import_time_risk_of(p: &Pack, text: &[u32], lang: Option<&str>) -> (Vec<PyStr
     }
     if has(text, "curl") || has(text, "wget") {
         let mut piped = false;
-        for (i, row) in pystr::split_char(text, c('\n')).iter().enumerate() {
-            if runs_download_through_shell(p, row) {
+        // (only a row that holds curl or wget can run a download through a
+        // shell — runs_download_through_shell asks that first — so the rows
+        // read are those, in order: each place of either word, its row)
+        let (mut curl, mut wget) = (pystr::find_str(text, "curl", 0), pystr::find_str(text, "wget", 0));
+        let mut from = 0;
+        loop {
+            if curl.is_some_and(|k| k < from) {
+                curl = pystr::find_str(text, "curl", from);
+            }
+            if wget.is_some_and(|k| k < from) {
+                wget = pystr::find_str(text, "wget", from);
+            }
+            let Some(k) = curl.into_iter().chain(wget).min() else {
+                break;
+            };
+            let start = pystr::rfind_char(text, c('\n'), from, k).map_or(from, |n| n + 1);
+            let end = pystr::find_char(text, c('\n'), k).unwrap_or(text.len());
+            if runs_download_through_shell(p, &text[start..end]) {
                 reasons.push(u("runs a downloaded script through a shell"));
-                line = line.or(Some(i + 1));
+                line = line.or(Some(line_of(text, start)));
                 piped = true;
                 break;
             }
+            from = end + 1;
         }
         if !piped {
             // (0.1.8) or a command line built in names, handed to an exec call

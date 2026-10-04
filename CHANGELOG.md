@@ -202,9 +202,14 @@ project is pre-1.0, so the 0.x API may still change.
   text is lexed once, however many of its tests read the tokens. A list of strings to
   find is scanned at its rarest characters. A search over a long text goes to the places
   where its strings' character pairs stand, listed once per call, instead of scanning the
-  text again; on a bundle the scans had read it some 40 to 60 times. On litellm's
-  `proxy_server.py` (0.82 MB) the test runs 32% fewer instructions, and on
-  playwright-core's bundles (3 to 3.5 MB) 28% fewer, with the same answers.
+  text again; on a bundle the scans had read it some 40 to 60 times. A search whose
+  matches all start with one of a few strings looks for them even where their
+  characters are common (each place is checked for a whole string before the matcher
+  tries it), one that could only look for a common first character runs its automaton
+  over the text instead of trying each place, and the automaton reads two characters a
+  round. On litellm's `proxy_server.py` (0.82 MB) the test runs 36% fewer instructions,
+  and on playwright-core's bundles (3 to 3.5 MB, each read after the other) 47% to 48%
+  fewer, with the same answers.
 - **SC-USE-RISK reads the same files on every machine.** Registry and guard scans read a
   package's code that runs only when it is used, smallest files first, for at most 3
   seconds per release file: a slower machine read less, and nothing said so. The bound

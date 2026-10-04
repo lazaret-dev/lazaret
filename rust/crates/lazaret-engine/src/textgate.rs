@@ -284,6 +284,9 @@ pub fn with_bigrams<R>(s: &[u32], f: impl FnOnce(usize, &Bigrams) -> R) -> Optio
 
 /// A column of pairs past this many is not listed.
 const MAX_PAIRS: usize = 256;
+/// Up to this many pairs, a search compares each pair's next place
+/// rather than keep them in a heap.
+const FEW_PAIRS: usize = 16;
 /// A search over at least this many characters of a long open text goes
 /// by where pairs of characters stand rather than by a scan.
 pub const PAIRS_RANGE: usize = 4096;
@@ -345,6 +348,38 @@ pub fn first_by_pairs(s: &[u32], from: usize, last: usize, j: usize, codes: &[u1
     with_bigrams(s, |off, bg| {
         // (the places p of the pairs in the open text: p = off + i + j)
         let (lo, hi) = (off + from + j, off + last + j);
+        if codes.len() <= FEW_PAIRS {
+            // each pair's places from lo on, the smallest next one taken in
+            // turn (no heap to build: a search that stops early is common)
+            let mut lists: [&[u32]; FEW_PAIRS] = [&[]; FEW_PAIRS];
+            let mut n = 0;
+            for &b in codes {
+                let list = bg.of(b as usize);
+                let k = list.partition_point(|&p| (p as usize) < lo);
+                if k < list.len() && list[k] as usize <= hi {
+                    lists[n] = &list[k..];
+                    n += 1;
+                }
+            }
+            while n > 0 {
+                let mut m = 0;
+                for t in 1..n {
+                    if lists[t][0] < lists[m][0] {
+                        m = t;
+                    }
+                }
+                let i = lists[m][0] as usize - off - j;
+                if is_start(i) {
+                    return Some(i);
+                }
+                lists[m] = &lists[m][1..];
+                if lists[m].is_empty() || lists[m][0] as usize > hi {
+                    n -= 1;
+                    lists[m] = lists[n];
+                }
+            }
+            return None;
+        }
         let mut heap: std::collections::BinaryHeap<Reverse<(u32, u16, u32)>> = std::collections::BinaryHeap::with_capacity(codes.len());
         for &b in codes {
             let list = bg.of(b as usize);

@@ -203,10 +203,12 @@ impl Regex {
         let lead_lits = an.prefix(&lowered.hir).filter(|l| l.iter().all(|s| !s.is_empty()));
         let progs = nfa::compile(&lowered.hir, lowered.sets.clone(), &lowered.looks, parsed.groups)?;
         let shape = DfaShape::new(&progs);
-        // (the scan for a lead's strings finds more false starts the more
-        // common their characters are; it beats the DFA up to a point, and
-        // further for a large program, whose DFA states cost most to build)
-        let dense = if progs.fwd.insts.len() > 2000 { 200 } else { 100 };
+        // (the scan for a lead's strings stops at more false starts the
+        // more common their characters are, but it checks each one for a
+        // whole string before a try, and over a long text it goes by where
+        // the strings' pairs stand: it beats the DFA up to a point, further
+        // for a large program, whose DFA states cost most to build)
+        let dense = if progs.fwd.insts.len() > 2000 { 400 } else { 300 };
         let lead = lead_lits
             .as_ref()
             .and_then(|l| literal::LitSet::new(l))

@@ -1302,9 +1302,13 @@ which a counted repeat of one set is a single `Run`. A search, in order:
 1. Prefilters, each skipping only work that cannot match: strings one of
    which every match holds (a text gate answers at once for a text that
    lacks one of each string's character pairs), strings every match starts
-   with (found by their rarest character, sixteen at a time), a set of first
-   characters, and patterns that are one set or a greedy repeat of one,
-   answered by scans alone.
+   with (found by their rarest character, sixteen at a time, and kept even
+   where those characters are common: each place is checked for a whole
+   string before a try, and over a long text the places are the pairs'), a
+   set of first characters when they are rare (at most one character in
+   twenty-five of source text: past that, a try at each place costs more
+   than the DFA's own pass), and patterns that are one set or a greedy
+   repeat of one, answered by scans alone.
 2. Where a lead string or first character is found, an anchored try: the
    backtracker's for the first tries and, while most tries match, for a
    pattern with groups or large counted repeats; the anchored DFA's
