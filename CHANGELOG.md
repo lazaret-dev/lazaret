@@ -84,6 +84,16 @@ project is pre-1.0, so the 0.x API may still change.
   dependencies (SC-GITLAB-TOKEN-INSTALL). Both packages report them, as security
   hotspots. Only a CRITICAL one fails the gate's supply-chain condition: a pull request's
   code checked out by `pull_request_target`, or a file included over plain http.
+- **A Go module or a crate is never OK while its code is not read.** Lazaret has no Go
+  or Rust detectors yet: `lazaret guard go` and `lazaret guard cargo` check a module's or
+  a crate's checksum, age and archive, and read its other files, but not what its `.go`
+  or `.rs` code does when it is built or used (init functions, package initializers and
+  cgo; a build script and procedural macros). Such a module or crate is INCOMPLETE, with
+  one SC-UNREAD-CODE finding that says how many files were not read, rather than OK. Test
+  code the build never compiles does not count (`*_test.go`, `testdata/`; a crate's
+  `tests/`, `benches/` and `examples/`). INCOMPLETE does not block an install unless
+  `--block-warn` is given; a strong finding still makes it SUSPICIOUS. npm and PyPI
+  releases are unchanged.
 
 ### Changed
 

@@ -793,6 +793,18 @@ ecosystem, name, version and digest and is discarded when `ENGINE_VERSION`
 changes. Scans run in `spawn` worker processes (`--jobs`), downloads in
 threads; a stuck worker is terminated at exit.
 
+**What is not read is said (N-1, 0.1.9).** `guard go` and `guard cargo` scan
+a module's zip and a crate's archive like any other (`gomod`, `crate`
+artifacts), but the engine has no Go or Rust detectors yet, so the code that
+runs when they are built or used is not read. `repo._scan_artifact` counts
+it (`UNREAD_CODE`, `_unread_code`: a Go module's `.go` files but its tests,
+`testdata/` and the directories go ignores; a crate's `.rs` files but its
+`tests/`, `benches/` and `examples/`) and adds one SC-UNREAD-CODE finding,
+which `decide_verdict` counts with the truncation rules: INCOMPLETE, never
+OK. A guard that said OK for a crate whose `build.rs` it never read would
+say more than it knows (the readiness review's finding 2). When the Go and
+Rust detectors land, `UNREAD_CODE` loses their entries.
+
 ---
 
 ## 6. How to add or change a rule — the loop

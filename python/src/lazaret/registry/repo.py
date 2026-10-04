@@ -88,7 +88,9 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 # Stored scans from another engine version are scanned again (has_scan).
 # 2.27: Go and Rust source files read by project scans (S-4): their
 #      comments and literals as their lexers read them, and S-SECRET,
-#      S-TOKEN, S-BIDI and Q-TODO on them (a package's are not read yet)
+#      S-TOKEN, S-BIDI and Q-TODO on them (a package's are not read yet); a
+#      Go module or a crate whose code is not read is INCOMPLETE, never OK
+#      (SC-UNREAD-CODE, N-1)
 # 2.26: the in-sample misses examined (D-1, B-4): a command that downloads
 #      or runs code written to a shell's startup file is persistence (any
 #      command, to one named only in strings the script decodes: alinet),
@@ -1368,7 +1370,18 @@ STRONG_SEVERITIES = ("BLOCKER", "CRITICAL")
 VERDICT_RANK = {"OK": 0, "WARN": 1, "INCOMPLETE": 2, "SUSPICIOUS": 3}
 # Rules that mean "not fully scanned": they make a scan INCOMPLETE instead
 # of counting as indicators.
-TRUNCATION_RULES = ("SC-TRUNCATED", "SC-MANIFEST-UNPARSEABLE")
+TRUNCATION_RULES = ("SC-TRUNCATED", "SC-MANIFEST-UNPARSEABLE", "SC-UNREAD-CODE")
+# N-1 (0.1.9): code in a language the engine has no detectors for yet, by the
+# artifact that ships it. A Go module's .go files and a crate's .rs files run
+# when it is built or used (init functions, package initializers and cgo; a
+# build script and procedural macros, then the code), and nothing reads what
+# they do yet. Such an artifact is never OK: one SC-UNREAD-CODE finding says
+# what was not read, and the verdict is INCOMPLETE. Its checksum, age, archive
+# and other files are checked as before. Test code the build never compiles
+# is left out (a Go *_test.go file, a testdata/ directory or one Go ignores; a
+# crate's tests/, benches/ and examples/).
+UNREAD_CODE = {"gomod": ("Go", ".go"), "crate": ("Rust", ".rs")}
+UNREAD_CODE_RULE = "SC-UNREAD-CODE"
 # Directory names that hold tests / fixtures (exact names, case-insensitive).
 # Weaker findings in them are listed as INFO unless the file is reachable from
 # an entry point (main/bin/exports, an install hook, setup.py).
@@ -1450,7 +1463,9 @@ def decide_verdict(issues, truncated):
     """-> (verdict, reason, strong_count, weak_count)."""
     # a truncation finding always counts, even one that reached `issues`
     # without going through _ArtifactScan.truncate (verdict integrity)
-    truncated = max(truncated, len({i.get("file") for i in issues if i["rule"] in TRUNCATION_RULES}))
+    unread = sorted({i["name"].removesuffix(" code not read") for i in issues if i["rule"] == UNREAD_CODE_RULE})
+    truncated = max(truncated, len({i.get("file") for i in issues
+                                    if i["rule"] in TRUNCATION_RULES and i["rule"] != UNREAD_CODE_RULE}))
     indicators = [i for i in issues if i["rule"].startswith("SC-")
                   and i["rule"] not in TRUNCATION_RULES and i["sev"] != "INFO"]
     strong = sum(1 for i in indicators if i["sev"] in STRONG_SEVERITIES)
@@ -1458,9 +1473,12 @@ def decide_verdict(issues, truncated):
     plural = lambda n, word: f"{n} {word}{'' if n == 1 else 's'}"
     if strong:
         return "SUSPICIOUS", plural(strong, "strong supply-chain indicator"), strong, weak
-    if truncated:
-        return ("INCOMPLETE", f"scan incomplete: {plural(truncated, 'part')} not fully scanned, "
-                "so the package can't be cleared", strong, weak)
+    if truncated or unread:
+        parts = ([f"{plural(truncated, 'part')} not fully scanned"] if truncated else []) + (
+            [f"its {' and '.join(unread)} code not read (Lazaret has no {' or '.join(unread)} detectors yet)"]
+            if unread else [])
+        return ("INCOMPLETE", f"scan incomplete: {', and '.join(parts)}, so the package can't be cleared",
+                strong, weak)
     if weak:
         return "WARN", plural(weak, "weaker supply-chain indicator") + " to review", strong, weak
     return "OK", "no supply-chain indicators", strong, weak
@@ -1658,6 +1676,44 @@ class _OutOfTime(Exception):
     """Internal: the archive's deadline passed while scanning (recorded)."""
 
 
+def _unread_code(artifact, rel):
+    """Is `rel`, a member of an `artifact`, code that runs when it is built
+    or used, in a language nothing reads yet (UNREAD_CODE)?"""
+    lang = UNREAD_CODE.get(artifact)
+    if lang is None or not rel.lower().endswith(lang[1]):
+        return False
+    parts = rel.replace("\\", "/").split("/")
+    if artifact == "gomod":
+        # in the module: below its "<path>@<version>" root; go ignores testdata/
+        # and directories whose names start with "." or "_"
+        root = next((k for k, p in enumerate(parts) if "@" in p), -1)
+        inside = parts[root + 1:-1]
+        return not parts[-1].lower().endswith("_test.go") and not any(
+            p.lower() == "testdata" or p[:1] in "._" for p in inside)
+    # a crate (iter_archive gives its paths below its "<name>-<version>" root)
+    return not (len(parts) > 1 and parts[0] in ("tests", "benches", "examples"))
+
+
+def _unread_code_issue(artifact, rels):
+    """The SC-UNREAD-CODE finding for an artifact whose code in `rels`
+    (sorted) nothing reads (N-1)."""
+    lang, _ext = UNREAD_CODE[artifact]
+    what, runs = (("module", "init functions, package initializers, cgo") if artifact == "gomod"
+                  else ("crate", "its build script, procedural macros"))
+    # (a module's path in it: past its "<path>@<version>" root)
+    root = (lambda r: r.split("@", 1)[-1].split("/", 1)[-1]) if artifact == "gomod" else (lambda r: r)
+    shown = ", ".join(root(r) for r in rels[:3]) + (", …" if len(rels) > 3 else "")
+    return {"rule": UNREAD_CODE_RULE, "name": f"{lang} code not read", "type": "HOTSPOT", "sev": "MAJOR",
+            "msg": (f"{len(rels)} {lang} file{'' if len(rels) == 1 else 's'} not read ({shown}): Lazaret has no "
+                    f"{lang} detectors yet, so what runs when the {what} is built or used ({runs}) was not "
+                    f"checked, and the {what} can't be cleared."),
+            "why": (f"A {lang} {what}'s code runs on the machine that builds it. Its checksum, age and archive "
+                    "were checked, and its other files were read; what its code does was not, so a clean "
+                    "verdict would say more than the scan knows."),
+            "fix": f"Review the {what}'s code, or wait for Lazaret's {lang} detectors.",
+            "ref": "CWE-506 · Supply chain", "file": rels[0], "line": 1, "snippet": [], "snipStart": 1}
+
+
 class _ArtifactScan:
     """Scan state for one archive: classify members as they stream by, then
     resolve what package.json / setup.py say runs (entry points, install
@@ -1688,6 +1744,7 @@ class _ArtifactScan:
         self.unread = False        # a member the archive's limits left unread
         self.unused_dependencies = []  # npm: registry names no file uses (_unused_dependencies)
         self.use_time = None       # what SC-USE-RISK's step read (_use_time_code), None: not run
+        self.unread_code = []      # N-1: members whose code nothing reads yet (UNREAD_CODE)
 
     # ---- bookkeeping ----
     def truncate(self, rel, detail):
@@ -1838,6 +1895,8 @@ class _ArtifactScan:
             self.timed_out = self.timed_out or reason == "time"
             return
         self.members.add(rel)
+        if self.artifact in UNREAD_CODE and _unread_code(self.artifact, rel):
+            self.unread_code.append(rel)
         base = os.path.basename(rel)
         ext = os.path.splitext(base)[1].lower()
         wants_text = (base in _MANIFEST_NAMES or lazaret.dep_source_lang(ext) is not None
@@ -2589,6 +2648,8 @@ class _ArtifactScan:
                           f"({type(exc).__name__})", file=sys.stderr)
         except _OutOfTime:
             pass                              # recorded: the archive is INCOMPLETE
+        if self.unread_code:
+            self.issues.append(_unread_code_issue(self.artifact, sorted(self.unread_code)))
         _demote_test_findings(self.issues, reachable if reachable is not None else self.entries)
         # F9b: the decompressed sources are no longer needed
         self.sources, self.deferred, self.shell = {}, {}, {}

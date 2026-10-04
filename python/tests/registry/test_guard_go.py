@@ -851,7 +851,7 @@ class CommandTests(FlowCase):
         self.assertTrue(os.path.samefile(run["cwd"], self.dir))
         self.assertIn("lazaret guard: relaying " + self.proxy.url + "/", out)
         self.assertIn("lazaret guard: releases younger than 2 days are held back at the proxy", out)
-        self.assertIn("lazaret guard: checked 1 OK", out)
+        self.assertIn("lazaret guard: checked 1 INCOMPLETE", out)
 
     def test_nothing_is_said_of_holding_back_with_no_age(self):
         self.plan = [self.zip_step("example.test/good", "v1.0.0")]
@@ -924,7 +924,7 @@ class CommandTests(FlowCase):
         self.assertEqual((doc["tool"], doc["command"], doc["blocked"], doc["exitCode"], doc["installed"]),
                          ("go", ["get", "example.test/good@v1.0.0"], 1, 1, False))
         names = {(p["ecosystem"], p["name"], p["verdict"]) for p in doc["packages"]}
-        self.assertEqual(names, {("go", "example.test/good", "OK"), ("go", "example.test/evil", "SUSPICIOUS")})
+        self.assertEqual(names, {("go", "example.test/good", "INCOMPLETE"), ("go", "example.test/evil", "SUSPICIOUS")})
         self.assertEqual(doc["heldBack"], {})
 
 
@@ -1206,7 +1206,7 @@ class RealGoTests(unittest.TestCase):
     def test_a_clean_module_and_what_it_needs_are_checked_and_added(self):
         code, out = self.run_guard("go", "get", "example.test/good@v1.0.0")
         self.assertEqual(code, 0, out)
-        self.assertIn("lazaret guard: checked 2 OK", out)
+        self.assertIn("lazaret guard: checked 2 INCOMPLETE", out)
         text = gs.read(self.gomod)
         self.assertIn("example.test/good v1.0.0", text)
         self.assertIn("example.test/leaf v1.0.0", text)
@@ -1251,7 +1251,7 @@ class RealGoTests(unittest.TestCase):
         before = gs.read(self.gomod)
         code, out = self.run_guard("--plan", "go", "get", "example.test/good@v1.0.0")
         self.assertEqual(code, 0, out)
-        self.assertIn("lazaret guard: checked 2 OK", out)
+        self.assertIn("lazaret guard: checked 2 INCOMPLETE", out)
         self.assertEqual(gs.read(self.gomod), before)
         self.assertFalse(os.path.exists(os.path.join(self.dir, "go.sum")))
         self.assertFalse(os.path.exists(self.modcache))
@@ -1259,7 +1259,7 @@ class RealGoTests(unittest.TestCase):
     def test_a_plan_of_an_install_changes_nothing_either(self):
         code, out = self.run_guard("--plan", "go", "install", "example.test/good@v1.0.0")
         self.assertEqual(code, 0, out)
-        self.assertIn("lazaret guard: checked 2 OK", out)
+        self.assertIn("lazaret guard: checked 2 INCOMPLETE", out)
         self.assertFalse(os.path.exists(self.modcache))
 
     def test_mod_download_of_what_go_mod_lists(self):
@@ -1267,7 +1267,7 @@ class RealGoTests(unittest.TestCase):
                                "\texample.test/leaf v1.0.0 // indirect\n)\n")
         code, out = self.run_guard("go", "mod", "download")
         self.assertEqual(code, 0, out)
-        self.assertIn("lazaret guard: checked 2 OK", out)
+        self.assertIn("lazaret guard: checked 2 INCOMPLETE", out)
         self.assertTrue(os.path.exists(os.path.join(self.dir, "go.sum")))
 
     def test_a_hostile_module_in_go_mod_blocks_the_download_and_go_sum_is_not_left(self):
@@ -1287,7 +1287,7 @@ class RealGoTests(unittest.TestCase):
         guard.remove_tree(self.modcache)
         code, out = self.run_guard("go", "build", "./...")
         self.assertEqual(code, 0, out)
-        self.assertIn("lazaret guard: checked 2 OK", out)
+        self.assertIn("lazaret guard: checked 2 INCOMPLETE", out)
         self.assertEqual(self.cached(), ["example.test/good@v1.0.0", "example.test/leaf@v1.0.0"])
 
     def test_a_module_cached_already_is_not_fetched_or_checked_again(self):
