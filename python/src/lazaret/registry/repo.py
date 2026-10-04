@@ -60,6 +60,7 @@ import warnings
 from lazaret.scanner import core as lazaret  # noqa: E402
 
 from lazaret import safexml as _safexml                 # noqa: E402
+from lazaret.registry import contentcache as _cache     # noqa: E402
 from lazaret.registry import lookalike as _lookalike    # noqa: E402
 from lazaret.registry import unused_deps as _unused     # noqa: E402
 from lazaret.scanner import engine as _engine           # noqa: E402
@@ -204,6 +205,19 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
 ENGINE_VERSION = "2.26.0"
+
+# ---------------- The content memo (P-2a, registry/contentcache.py) ----------------
+# One per scan_package run: the engine answers once for content several of a
+# release's files hold (a wheel per platform, an sdist with the same modules),
+# and a hit gives exactly what the engine would (its raw answer, rebuilt for
+# the member's own path). LAZARET_NO_CACHE=1 turns it off. The guard and a
+# single archive's scan (_scan_artifact) use none unless given one.
+MEMO_DISABLED_ENV = "LAZARET_NO_CACHE"
+
+
+def new_memo():
+    """A memo for one run: contentcache.Memo, or NULL with LAZARET_NO_CACHE=1."""
+    return _cache.NULL if os.environ.get(MEMO_DISABLED_ENV) == "1" else _cache.Memo()
 
 # ---------------- Trust-chain limits (F9/G14/F10) ----------------
 # Only these hosts may ever be fetched, over https only, and redirects to any
@@ -1646,9 +1660,10 @@ class _ArtifactScan:
     resolve what package.json / setup.py say runs (entry points, install
     hooks, build backends) once every member is known."""
 
-    def __init__(self, artifact, full, budget=None):
+    def __init__(self, artifact, full, budget=None, memo=None):
         self.artifact, self.full = artifact, full
         self.budget = budget       # the archive's Budget (its deadline names itself)
+        self.memo = _cache.NULL if memo is None else memo     # the engine's answers by content (P-2a)
         self.issues, self.files_scanned, self.binaries = [], 0, 0
         self.truncated, self.truncated_emitted = 0, 0
         self.truncated_at = {}     # rel -> its SC-TRUNCATED issue (None past the cap)
@@ -1756,7 +1771,7 @@ class _ArtifactScan:
         pending, self.pending = self.pending, []
         if not pending:
             return
-        found = _engine.scan_files([(rel, text, lang, not self.full) for rel, text, lang in pending])
+        found = self._scan_files([(rel, text, lang, not self.full) for rel, text, lang in pending])
         for (rel, _text, _lang), issues in zip(pending, found):
             self.files_scanned += 1
             for i in issues:
@@ -1768,6 +1783,48 @@ class _ArtifactScan:
                     self.truncate(rel, i["msg"].removeprefix("File not fully scanned: ").rstrip("."))
                 else:
                     self.issues.append(i)
+
+    # ---- the engine, through the memo (P-2a) ----
+    def _key(self, kind, text, lang, flags):
+        return _cache.file_key(kind, None, text, lang, flags, pack=ENGINE_VERSION, engine=_engine.describe())
+
+    def _scan_files(self, items):
+        """engine.scan_files, asking the engine once for each distinct call
+        (its name, its arguments and the text: it reads no path) and building
+        each file's issues for its own path. A call the engine could not
+        answer is not kept."""
+        calls = _engine.scan_calls(items)
+        todo = [k for k, call in enumerate(calls) if call is not None]
+        keys = [self._key("scan", items[k][1], items[k][2], dict(calls[k][1], call=calls[k][0])) for k in todo]
+        asked = dict(zip(keys, [(calls[k][0], calls[k][1], items[k][1]) for k in todo]))
+
+        def compute(missing):
+            return [_cache.Uncacheable(a) if _engine.unanswered(a) else a
+                    for a in _engine.call_answers([asked[key] for key in missing])]
+        answers = self.memo.get_or_compute_many(keys, compute)
+        out = [[] for _ in items]
+        for k, answer in zip(todo, answers):
+            rel, text, lang, _dep = items[k]
+            out[k] = _engine.scan_issues(rel, text, lang, calls[k][0], answer)
+        return out
+
+    def _import_risks(self, items):
+        """engine.import_time_risks for [(text, lang)], once for each distinct
+        file (an answer the engine could not give is not kept)."""
+        flags = {"budget": _engine.WORK_BUDGET}
+        keys = [self._key("import-risk", text, lang, flags) for text, lang in items]
+        asked = dict(zip(keys, items))
+
+        def compute(missing):
+            return [_cache.Uncacheable(a) if _engine.unanswered(a) else a
+                    for a in _engine.import_time_risks([asked[key] for key in missing])]
+        return self.memo.get_or_compute_many(keys, compute)
+
+    def _spawned_scripts(self, text, lang):
+        """engine.spawned_scripts, once for each distinct script (a call the
+        engine could not answer raises, and is not kept)."""
+        return self.memo.get_or_compute(self._key("spawned", text, lang, ()),
+                                        lambda: _engine.spawned_scripts(text, lang))
 
     # ---- pass 1: members ----
     def member(self, m):
@@ -2062,7 +2119,7 @@ class _ArtifactScan:
             cur, cur_text, depth = queue.pop(0)
             if not cur_text or depth >= lazaret._SPAWN_MAX_DEPTH:
                 continue
-            for where, path in _engine.spawned_scripts(lazaret.normalize_newlines(cur_text), _engine.script_lang(cur)):
+            for where, path in self._spawned_scripts(lazaret.normalize_newlines(cur_text), _engine.script_lang(cur)):
                 if where != "dir" and cwd is None:
                     continue
                 start = posixpath.dirname(cur) if where == "dir" else cwd
@@ -2279,7 +2336,7 @@ class _ArtifactScan:
             chunk = [(rel, lazaret.normalize_newlines(text), lang) for rel, text, lang in todo[start:end]]
             start = end
             self._deadline(chunk[0][0])
-            for (rel, text, lang), risk in zip(chunk, _engine.import_time_risks([(t, lg) for _r, t, lg in chunk])):
+            for (rel, text, lang), risk in zip(chunk, self._import_risks([(t, lg) for _r, t, lg in chunk])):
                 yield rel, text, lang, risk
 
     def _unanswered(self, rel, exc):
@@ -2387,7 +2444,15 @@ class _ArtifactScan:
         if len(files) < 2:
             return
         self._deadline("the cross-file follower")
-        for issue in _engine.cross_file_issues(files, who=lambda path: back[path], one_package=True):
+        todo, args = _engine.cross_file_args(files, who=lambda path: back[path], one_package=True)
+        key = _cache.cross_file_key([(f["path"], f["lang"], f["content"]) for f in todo],
+                                    {k: v for k, v in args.items() if k not in ("files", "threads")},
+                                    pack=ENGINE_VERSION, engine=_engine.describe())
+
+        def compute():
+            issues, complete = _engine.cross_file_answer(files, who=lambda path: back[path], one_package=True)
+            return issues if complete else _cache.Uncacheable(issues)    # (a package cut short is not clean)
+        for issue in self.memo.get_or_compute(key, compute):
             issue["file"] = back[issue["file"]]
             self.issues.append(issue)
 
@@ -2564,9 +2629,11 @@ def _pep517_backend(pyproject):
             re.findall(r"""["']([^"']+)["']""", paths.group(1)) if paths else [])
 
 
-def _scan_artifact(data, container, artifact, full, budget):
-    """Scan one archive -> per-artifact result fields (issues, counts, verdict)."""
-    st = _ArtifactScan(artifact, full, budget)
+def _scan_artifact(data, container, artifact, full, budget, memo=None):
+    """Scan one archive -> per-artifact result fields (issues, counts, verdict).
+    `memo`: the engine's answers by content, shared with the release's other
+    files (contentcache.Memo; none by default)."""
+    st = _ArtifactScan(artifact, full, budget, memo)
     anomalies = []
     try:
         for m in iter_archive(data, container, artifact, budget=budget, anomalies=anomalies):
@@ -2996,6 +3063,7 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
     per, all_issues, truncated, unused = [], [], 0, set()
     multi = len(refs) > 1
     downloaded = 0
+    memo = new_memo()                      # (the release's files share the engine's answers: P-2a)
     for ref in refs:
         size = declared_size(ref.get("entry"))
         if cancel is not None and cancel():
@@ -3024,7 +3092,7 @@ def scan_package(eco, name, version=None, full=False, *, resolved=None, deadline
         else:
             budget = Budget(deadline=stop, cancel=cancel, deadline_detail=(
                 f"scan time budget of {SCAN_TIMEOUT:g} s per archive (--scan-timeout) exceeded"))
-        r = _scan_artifact(data, ref["container"], ref["artifact"], full, budget)
+        r = _scan_artifact(data, ref["container"], ref["artifact"], full, budget, memo)
         prefix = f"{ref['filename']}/" if multi and ref.get("filename") else ""
         for issue in r["issues"]:
             if prefix:

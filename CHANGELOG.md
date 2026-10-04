@@ -57,6 +57,15 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Changed
 
+- **A release's files share the engine's answers.** A registry scan asks the engine once
+  about content several of a release's files hold (a wheel per platform, the sdist with
+  the same modules): a file's first pass, the import-time and use-time tests, the
+  scripts a script starts and the cross-file follower. A hit is the engine's own
+  answer, rebuilt for the member's path, so the findings and the verdict are the same;
+  an answer the engine could not finish is never kept. litellm 1.104.0 (an sdist and
+  seven wheels, 21,709 source files) scans in 21 s instead of 61 s on two cores, its
+  engine time from 50 s to 8.5 s. `LAZARET_NO_CACHE=1` turns it off. The guard scans
+  one archive at a time and keeps no memo.
 - **SC-USE-RISK reads the same files on every machine.** Registry and guard scans read a
   package's code that runs only when it is used, smallest files first, for at most 3
   seconds per release file: a slower machine read less, and nothing said so. The bound

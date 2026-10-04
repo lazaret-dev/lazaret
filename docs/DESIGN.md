@@ -880,6 +880,17 @@ return reaches it. Measure a change on the benchmark's heaviest packages
 (litellm, playwright-core, next) against the previous release, not on a
 fixture.
 
+A release's files share the engine's answers (0.1.9, P-2a:
+`registry/contentcache.py`, one `Memo` per `scan_package` run): the
+registry asks once about a file's first pass, the import-time test, the
+scripts a script starts and the cross-file follower for content several of
+the release's files hold. What is kept is the engine's raw answer, keyed by
+the call, its arguments and the text (the engine reads no path; the
+cross-file key is the files in order), never a verdict, and never an answer
+the engine could not finish. So a hit changes the time and nothing else:
+`test_content_memo.py`, and the benchmark scanned with the memo on and off,
+hold that. A store that outlives the run is the next step (P-2b).
+
 ---
 
 ## 9. Versioning, release and delivery

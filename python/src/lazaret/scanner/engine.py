@@ -221,6 +221,41 @@ def _issues(path, answer):
     return out
 
 
+def scan_calls(items):
+    """[(path, content, lang, dep)] -> the engine call that scans each, as
+    (name, args), or None for a file it does not read. Its answer is a
+    function of the name, the args and the text: the engine reads no path
+    (the path's part is `jsx`, from its extension), which is what lets the
+    registry ask once for a file that is in several archives (P-2a,
+    registry/contentcache.py)."""
+    from lazaret.scanner import core
+    base = _budget({"redact": bool(core.REDACT_SECRETS), "neumaier": False})
+    return [("scan_file" if dep else "scan_rules", dict(base, lang=lang, jsx=core.jsx_reading(path), dep=bool(dep)))
+            if lang in ("py", "js", "sql") and isinstance(content, str) else None
+            for path, content, lang, dep in items]
+
+
+def call_answers(calls):
+    """[(name, args, text)] -> the engine's answers, in order, a batch at a
+    time on THREADS threads (an answer it could not give: the NativeError it
+    stands for, unanswered)."""
+    out = []
+    for start in range(0, len(calls), BATCH):
+        chunk = calls[start:start + BATCH]
+        answers = _native.call("batch", {"calls": [list(c) for c in chunk], "threads": THREADS})
+        out.extend(_answer(a) for a in answers)
+    return out
+
+
+def scan_issues(path, content, lang, name, answer):
+    """One file's issues from the engine's answer to its scan_calls call: in
+    dependency mode the engine's (scan_file); in project mode its rules part
+    (scan_rules), after which core runs the passes that follow."""
+    from lazaret.scanner import core
+    rules = [error_issue(path, answer)] if unanswered(answer) else _issues(path, answer)
+    return rules if name == "scan_file" else core.scan_file_after_rules(path, content, lang, rules)
+
+
 def scan_files(items):
     """[(path, content, lang, dep)] -> [issues] for each, in order. In
     dependency mode the engine reads the whole file; in project mode it reads
@@ -229,24 +264,15 @@ def scan_files(items):
     SQL, function length and complexity), the suppression markers and the
     cap. A file the engine could not answer is SC-TRUNCATED: EXHAUSTED when
     it spent its work budget, "its scan failed" on an internal error."""
-    from lazaret.scanner import core
     if not items:
         return []
+    calls = scan_calls(items)
+    todo = [k for k, call in enumerate(calls) if call is not None]
+    answers = call_answers([(calls[k][0], calls[k][1], items[k][1]) for k in todo])
     out = [[] for _ in items]
-    todo = [k for k, (_p, content, lang, _d) in enumerate(items)
-            if lang in ("py", "js", "sql") and isinstance(content, str)]
-    base = _budget({"redact": bool(core.REDACT_SECRETS), "neumaier": False})
-    calls = [("scan_file" if items[k][3] else "scan_rules",
-              dict(base, lang=items[k][2], jsx=core.jsx_reading(items[k][0]), dep=bool(items[k][3])), items[k][1])
-             for k in todo]
-    for start in range(0, len(calls), BATCH):
-        chunk = calls[start:start + BATCH]
-        answers = _native.call("batch", {"calls": [list(c) for c in chunk], "threads": THREADS})
-        for k, (call, _a, _t), answer in zip(todo[start:start + BATCH], chunk, answers):
-            path, content, lang, _dep = items[k]
-            found = _answer(answer)
-            rules = [error_issue(path, found)] if unanswered(found) else _issues(path, found)
-            out[k] = rules if call == "scan_file" else core.scan_file_after_rules(path, content, lang, rules)
+    for k, answer in zip(todo, answers):
+        path, content, lang, _dep = items[k]
+        out[k] = scan_issues(path, content, lang, calls[k][0], answer)
     return out
 
 
@@ -260,10 +286,15 @@ def cross_file_issues(files, skip_paths=(), who="Dependency code", one_package=F
     one call (on THREADS threads), each with its own work budget. A package
     it could not finish is skipped, and a call it refuses altogether (an
     internal error) gives no findings, as in the npm package."""
+    return cross_file_answer(files, skip_paths, who, one_package, site_groups)[0]
+
+
+def cross_file_args(files, skip_paths=(), who="Dependency code", one_package=False, site_groups=None):
+    """The cross-file call's files (the ones it reads, in order) and its
+    arguments other than their text: what its answer is a function of, with
+    the text (P-2a: registry/contentcache.cross_file_key)."""
     from lazaret.scanner import core
     todo = [f for f in files if f.get("dep") and f["lang"] in ("py", "js")]
-    if len(todo) < 2:
-        return []
     args = _budget({"files": [[f["path"], f["lang"], len(f["content"])] for f in todo],
                     "skip": sorted(set(skip_paths)), "one_package": bool(one_package), "sep": os.sep,
                     "redact": bool(core.REDACT_SECRETS), "neumaier": False, "threads": THREADS})
@@ -273,15 +304,27 @@ def cross_file_issues(files, skip_paths=(), who="Dependency code", one_package=F
         args["whos"] = [who(f["path"]) for f in todo]
     else:
         args["who"] = who
+    return todo, args
+
+
+def cross_file_answer(files, skip_paths=(), who="Dependency code", one_package=False, site_groups=None):
+    """(the cross-file follower's findings, whether the engine finished every
+    package): a package it could not finish (its work budget spent) is
+    skipped, and a call it refuses (an internal error) gives no findings, so
+    an answer that is not complete must not be kept as clean (P-2a)."""
+    todo, args = cross_file_args(files, skip_paths, who, one_package, site_groups)
+    if len(todo) < 2:
+        return [], True
     try:
         answer = _native.call("cross_file", args, "".join(f["content"] for f in todo))
     except _native.NativeError:
-        return []
-    out = []
+        return [], False
+    out, complete = [], True
     for package in answer:
+        complete = complete and "failed" not in package
         for k, issue in package.get("issues", ()):
             out.extend(_issues(todo[k]["path"], [issue]))
-    return out
+    return out, complete
 
 
 def _flow_args(files, sources, sinks, full, partial):

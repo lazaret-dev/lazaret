@@ -82,16 +82,16 @@ class StopsAtTheDeadlineTests(unittest.TestCase):
     """The fake clock moves only when a file is decoded or scanned."""
 
     def advancing(self, clock, name):
-        if name == "scan_file":          # the registry scans source files through engine.scan_files
-            real_files = repo._engine.scan_files
+        if name == "scan_file":          # the registry asks the engine about source files through
+            real_answers = repo._engine.call_answers      # engine.call_answers (P-2a: what the memo has not)
 
-            def slow_files(items):
+            def slow_answers(calls):
                 out = []
-                for item in items:
+                for call in calls:
                     clock.now += 1.0
-                    out += real_files([item])
+                    out += real_answers([call])
                 return out
-            return mock.patch.object(repo._engine, "scan_files", slow_files)
+            return mock.patch.object(repo._engine, "call_answers", slow_answers)
         real = getattr(repo.lazaret, name)
 
         def slow(*args, **kwargs):
