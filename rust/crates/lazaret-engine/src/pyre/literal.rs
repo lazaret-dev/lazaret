@@ -104,6 +104,9 @@ pub struct Need {
     /// only ASCII characters there; the rarest such characters), and those
     /// characters: a string can start at i only where s[i + at] is one
     anchor: Option<(usize, Chars)>,
+    /// where a search over a long open text looks (textgate.rs's
+    /// `pair_column`): a column and the pairs of ASCII characters there
+    pairs: Option<(usize, Vec<u16>)>,
 }
 
 /// The ASCII-only masks of a unit (None: it can take a character outside
@@ -160,7 +163,8 @@ impl Need {
                 }
             }
         }
-        Some(Need { strings, masks, shortest, by_first, first_ascii, first_other, second, anchor })
+        let pairs = crate::textgate::pair_column(&masks, shortest, crate::linre::literal::freq);
+        Some(Need { strings, masks, shortest, by_first, first_ascii, first_other, second, anchor, pairs })
     }
 
     /// Does the open gate of the text `s` is part of say none of the strings
@@ -251,6 +255,13 @@ impl Need {
             return None;
         }
         let last = end - self.shortest;
+        if end - start >= crate::textgate::PAIRS_RANGE {
+            if let Some((j, codes)) = &self.pairs {
+                if let Some(found) = crate::textgate::first_by_pairs(s, start, last, *j, codes, |i| self.starts_at(s, i, end)) {
+                    return found;
+                }
+            }
+        }
         if let Some((at, chars)) = &self.anchor {
             // (only where the anchor's characters are: in increasing order, as the plain scan)
             let stop = last + at + 1;
@@ -599,6 +610,55 @@ mod tests {
 
     fn need(src: &str) -> Option<String> {
         Regex::compile(src, 0).expect("compiles").need_text()
+    }
+
+    /// pyre's own searches (the patterns linre refuses) over a long open
+    /// text go by where the pairs of their needed strings and literal
+    /// prefixes stand (textgate.rs); their matches are the scan's, for
+    /// every range, and every match of a finditer.
+    #[test]
+    fn a_search_by_pairs_answers_as_the_scan_does() {
+        let mut seed: u64 = 0x2545_F491_4F6C_DD1D;
+        let mut next = move |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        let alphabet: Vec<u32> = "abcde =(.\n_".chars().map(|c| c as u32).chain([0x00E9]).collect();
+        let text: Vec<u32> = (0..70_000).map(|_| alphabet[next(alphabet.len() as u64) as usize]).collect();
+        // (an unbounded lookahead: linre refuses these, pyre's matcher runs them)
+        let patterns = [
+            r"ab(?=c*d)",
+            r"(?<![\w.])de\b(?![ \t]*=[^=])",
+            r"cab(?=[ab]*e)",
+            r"(?:da|ec)b(?=a*c)",
+            r"bad(?!a*b)",
+            r"e\.c(?=d*a)",
+            r"(?:_a|b_|=c)(?=e*\()",
+        ];
+        let mut checked = 0;
+        for src in patterns {
+            let re = Regex::compile(src, 0).expect("compiles");
+            for _ in 0..12 {
+                let from = next(text.len() as u64 - 5_000) as usize;
+                let end = from + 4_096 + next((text.len() - from - 4_096) as u64 + 1) as usize;
+                let scanned = re.search_at(&text, from as isize, end as isize).map(|m| m.span());
+                let indexed = {
+                    let _gate = crate::textgate::open(&text);
+                    re.search_at(&text, from as isize, end as isize).map(|m| m.span())
+                };
+                assert_eq!(indexed, scanned, "{} [{}, {})", src, from, end);
+                checked += 1;
+            }
+            let all: Vec<(usize, usize)> = re.finditer(&text).map(|m| m.span()).collect();
+            let all_indexed: Vec<(usize, usize)> = {
+                let _gate = crate::textgate::open(&text);
+                re.finditer(&text).map(|m| m.span()).collect()
+            };
+            assert_eq!(all_indexed, all, "{}", src);
+        }
+        assert_eq!(checked, 12 * patterns.len());
     }
 
     #[test]

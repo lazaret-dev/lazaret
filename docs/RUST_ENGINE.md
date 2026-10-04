@@ -171,7 +171,9 @@ rust/
                              module defines, imports, exports, sets in the environment, emits
                              and listens for; one call per scan, a budget per package, threads
     src/textgate.rs          a text's character pairs and triples, read once per call: a search
-                             whose strings need one the text lacks answers at once
+                             whose strings need one the text lacks answers at once; for a long
+                             text, where each pair stands, and what the call's tests read of it
+                             more than once (its tokens)
     src/flow.rs              local data followed to where it is sent (local_data_sent_at), a
                              webhook's secret in the code (secret_endpoint_at)
     src/shell.rs             a shell text read as a program (_sh_parse … _sh_reasons), the command
@@ -549,7 +551,17 @@ searches over one whole text (the import-time and install-script tests, the
 decoded view, the import-time code) read a **text gate** first
 (`textgate.rs`): the text's pairs of characters, and its triples hashed
 into a table sized to it, so a need, a needle or a find whose string has a
-pair or triple the text lacks answers at once.
+pair or triple the text lacks answers at once. For a text of 64 K to 8 M
+characters, the gate also lists where each pair of ASCII characters
+stands, the first time a search over the whole text asks for it. A search
+for a set of strings over 4,096 characters or more of such a text (a
+lead, a need, a literal prefix) then visits the places of the pairs its
+strings have at their rarest column, in order. It tries each place as a
+scan tries the places it stops at, so its answer is the scan's: on a
+bundle the scans had read the text some 40 to 60 times. The gate also
+keeps, until it closes, what a call's tests make of the whole text more
+than once (`memo`: the lexers' tokens, the download tests' lines that
+hold a write, the assignments three tests read).
 
 Beyond the regex engine, a few patterns core runs on every line or every
 token are matched or prefiltered by hand, each written for one pattern text
@@ -562,7 +574,9 @@ match, as each loop's comment argues), and three necessary conditions
 `scan_file` tests before a search —
 `ENTROPY_VALUE_RE` (a quote, then 20 characters of the literal's class),
 `B64_BLOB_RE` (202 characters) and `_SC_SINK_WORD_RE` (a sink's name, or `[`,
-blanks, a quote and an `e` or `F`). `test_snapshot_lexer`'s recorded outputs
+blanks, a quote and an `e` or `F`). The text follower reads
+`_LD_NAME_TOKEN_RE`'s names by hand too (`flow.rs` `NameTokens`, compared at
+each use). `test_snapshot_lexer`'s recorded outputs
 hold what the loops answer (`test_rust_parity_lexer`, which compared them
 with `re` and failed when one was mutated, retired with the Python engine).
 

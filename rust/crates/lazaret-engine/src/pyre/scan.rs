@@ -149,6 +149,9 @@ pub fn rarest(lit: &[u8]) -> usize {
 pub struct Literal {
     at: usize,
     c: u32,
+    /// the column of its rarest pair of ASCII characters and that pair, for
+    /// a search over a long open text (textgate.rs: where it stands)
+    pair: Option<(usize, u16)>,
 }
 
 impl Literal {
@@ -160,7 +163,9 @@ impl Literal {
                 best = (f, k);
             }
         }
-        Literal { at: best.1, c: lit.get(best.1).copied().unwrap_or(0) }
+        let masks: Vec<Vec<Option<u128>>> = vec![lit.iter().map(|&c| if c < 128 { Some(1u128 << c) } else { None }).collect()];
+        let pair = crate::textgate::pair_column(&masks, lit.len(), freq).map(|(j, codes)| (j, codes[0]));
+        Literal { at: best.1, c: lit.get(best.1).copied().unwrap_or(0), pair }
     }
 
     /// The first i in [from, to - lit.len()] where `lit` occurs in s (whole
@@ -172,6 +177,14 @@ impl Literal {
         }
         if to < lit.len() || from > to - lit.len() {
             return None;
+        }
+        if to - from >= crate::textgate::PAIRS_RANGE {
+            if let Some((j, code)) = self.pair {
+                let last = to - lit.len();
+                if let Some(found) = crate::textgate::first_by_pairs(s, from, last, j, &[code], |i| s[i..i + lit.len()] == *lit) {
+                    return found;
+                }
+            }
         }
         let stop = to - lit.len() + self.at + 1; // (exclusive bound of the anchor's position)
         let mut p = from + self.at;

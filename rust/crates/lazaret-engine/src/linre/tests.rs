@@ -537,3 +537,64 @@ fn the_budget_is_charged_what_the_automata_read() {
     assert!(crate::budget::exhausted());
     crate::budget::reset(crate::budget::DEFAULT_STEPS);
 }
+
+/// A search for a set of strings over a long open text goes by where the
+/// pairs of its characters stand (textgate's Bigrams); its answers are the
+/// scan's, for every range, set and text (each in turn: with the gate open,
+/// and with none, which scans).
+#[test]
+fn a_search_by_pairs_answers_as_the_scan_does() {
+    use super::literal::{Lit, LitSet};
+    let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut next = move |n: u64| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed % n
+    };
+    // a text of few characters (so that strings occur), with lines, a
+    // character past ASCII here and there, and a run of one character
+    let alphabet: Vec<u32> = "abcde =(.\n_".chars().map(|c| c as u32).chain([0x00E9]).collect();
+    let mut text: Vec<u32> = (0..70_000).map(|_| alphabet[next(alphabet.len() as u64) as usize]).collect();
+    for c in &mut text[30_000..30_400] {
+        *c = 'a' as u32;
+    }
+    let mut checked = 0;
+    for round in 0..60 {
+        // strings of 1 to 6 units, a unit of one character or of the case
+        // variants of a letter
+        let mut lits: Vec<Lit> = Vec::new();
+        for _ in 0..1 + next(6) {
+            let len = 1 + next(6) as usize;
+            let lit: Lit = (0..len)
+                .map(|_| {
+                    let c = alphabet[next(alphabet.len() as u64) as usize];
+                    if round % 3 == 0 && (c as u8 as char).is_ascii_lowercase() {
+                        vec![c, c - 32]
+                    } else {
+                        vec![c]
+                    }
+                })
+                .collect();
+            lits.push(lit);
+        }
+        let set = match LitSet::new(&lits) {
+            Some(s) => s,
+            None => continue,
+        };
+        for _ in 0..8 {
+            let from = next(text.len() as u64 - 5_000) as usize;
+            let end = from + 4_096 + next((text.len() - from - 4_096) as u64 + 1) as usize;
+            // a part of the text too (a slice starts elsewhere in it)
+            let part_lo = next(1_000) as usize;
+            let scanned = (set.find(&text, from, end), set.find(&text[part_lo..], from.saturating_sub(part_lo), end - part_lo));
+            let indexed = {
+                let _gate = crate::textgate::open(&text);
+                (set.find(&text, from, end), set.find(&text[part_lo..], from.saturating_sub(part_lo), end - part_lo))
+            };
+            assert_eq!(indexed, scanned, "round {} {:?} [{}, {})", round, set.describe(), from, end);
+            checked += 1;
+        }
+    }
+    assert!(checked > 200, "{}", checked);
+}

@@ -1149,21 +1149,17 @@ pub(crate) fn exec_command_lines(p: &Pack, text: &[u32]) -> Vec<(usize, PyStr)> 
     let mut out: Vec<(usize, PyStr)> = Vec::new();
     let mut values: Option<HashMap<PyStr, PyStr>> = None; // name -> the string literal it is given
     let max = p.usize("_SH_EXEC_MAX");
-    let max_assigns = p.usize("_DD_MAX_ASSIGNS");
     for m in p.re("_SH_EXEC_LINE_RE").finditer(text) {
         if out.len() >= max {
             break;
         }
         let vals = values.get_or_insert_with(|| {
             let mut v: HashMap<PyStr, PyStr> = HashMap::new();
-            for (k, a) in p.re("_DD_ASSIGN_RE").finditer(text).enumerate() {
-                if k >= max_assigns {
-                    break;
-                }
-                let value = a.group(2).unwrap_or(&[]);
+            for a in crate::flow::dd_assigns(p, text) {
+                let value = a.value(text);
                 let lead = value.len() - pystr::lstrip(value).len();
-                if let Some((got, _)) = sh_literal_at(p, text, a.start_of(2) as usize + lead) {
-                    let name = a.group(1).unwrap_or(&[]).to_vec();
+                if let Some((got, _)) = sh_literal_at(p, text, a.value_start() + lead) {
+                    let name = a.name(text).to_vec();
                     v.entry(name).or_insert(got);
                 }
             }

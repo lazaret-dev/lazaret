@@ -25,6 +25,16 @@ fn any_in(text: &[u32], needles: &pystr::Needles) -> bool {
     needles.any_in(text)
 }
 
+/// For each line of `text` no longer than `lim.long_row`, does it hold
+/// one of the strings of the write needles (false for a longer line, which
+/// is not asked): kept for the call while a gate is open for `text`, since
+/// both download tests ask it of the same text, line by line.
+fn write_lines(p: &Pack, lim: &Lim, rows: &[&[u32]], text: &[u32]) -> Vec<bool> {
+    let needles = p.needles("_DL_FILE_WRITE_NEEDLES");
+    let long_row = lim.long_row;
+    crate::textgate::memo(text, "_DL_FILE_WRITE_NEEDLES lines", || rows.iter().map(|row| row.len() <= long_row && any_in(row, needles)).collect())
+}
+
 fn in_set(set: &[PyStr], s: &[u32]) -> bool {
     set.iter().any(|x| x.as_slice() == s)
 }
@@ -1736,13 +1746,13 @@ fn pathrun_after(p: &Pack, lim: &Lim, rows: &[&[u32]], k: usize, path: &[u32]) -
     None
 }
 
-fn written_and_run(p: &Pack, lim: &Lim, rows: &[&[u32]], is_src: &dyn Fn(&[u32]) -> bool, downloads: bool) -> Option<usize> {
+fn written_and_run(p: &Pack, lim: &Lim, text: &[u32], rows: &[&[u32]], is_src: &dyn Fn(&[u32]) -> bool, downloads: bool) -> Option<usize> {
     let mut known: HashMap<usize, bool> = HashMap::new();
     let n = rows.len();
-    let needles = p.needles("_DL_FILE_WRITE_NEEDLES");
+    let writes = write_lines(p, lim, rows, text);
     let write = p.re("_DL_FILE_WRITE_RE");
     for (k, row) in rows.iter().enumerate() {
-        if row.len() > lim.long_row || !any_in(row, needles) {
+        if !writes[k] {
             continue;
         }
         let mut near_src: Option<bool> = None;
@@ -1791,7 +1801,7 @@ pub fn downloads_and_runs(p: &Pack, text: &[u32]) -> Option<(usize, Option<PyStr
     let rows: Vec<&[u32]> = pystr::split_char(text, c('\n'));
     let source = p.pair("_DL_SOURCE");
     let is_src = |row: &[u32]| dl_finditer(source, row, 0, None).next().is_some();
-    let hit = written_and_run(p, &lim, &rows, &is_src, true)?;
+    let hit = written_and_run(p, &lim, text, &rows, &is_src, true)?;
     Some((hit + 1, run_interp(p, rows[hit])))
 }
 
@@ -1807,6 +1817,6 @@ pub fn decodes_and_runs(p: &Pack, text: &[u32]) -> Option<(usize, Option<PyStr>)
     let rows: Vec<&[u32]> = pystr::split_char(text, c('\n'));
     let decode = p.re("_DECODE_CALL_RE");
     let is_src = |row: &[u32]| decode.search(row).is_some();
-    let hit = written_and_run(p, &lim, &rows, &is_src, false)?;
+    let hit = written_and_run(p, &lim, text, &rows, &is_src, false)?;
     Some((hit + 1, run_interp(p, rows[hit])))
 }

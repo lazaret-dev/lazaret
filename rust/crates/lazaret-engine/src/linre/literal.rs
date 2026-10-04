@@ -406,6 +406,11 @@ pub struct LitSet {
     masks: Vec<Vec<Option<u128>>>,
     /// the estimated share of positions a scan stops at, per mille
     pub density: u32,
+    /// where a search over an indexed text looks (textgate's Bigrams): a
+    /// column j of the strings whose characters at j and j + 1 are ASCII
+    /// in every string, and the pairs `128 * x + y` they take there; the
+    /// column whose pairs are rarest (by `freq`). None: no such column.
+    pairs: Option<(usize, Vec<u16>)>,
 }
 
 impl LitSet {
@@ -464,9 +469,10 @@ impl LitSet {
                 }
             }
         }
-        let masks = scan.iter().map(|l| l.iter().map(|u| if u.other.is_empty() { Some(u.ascii) } else { None }).collect()).collect();
+        let masks: Vec<Vec<Option<u128>>> = scan.iter().map(|l| l.iter().map(|u| if u.other.is_empty() { Some(u.ascii) } else { None }).collect()).collect();
         let scan_anchor = Anchor::of(&anchor_unit);
-        Some(LitSet { lits: scan, shortest, anchor, scan: scan_anchor, pair, first_other, by_first, masks, density: best.0 })
+        let pairs = crate::textgate::pair_column(&masks, shortest, freq);
+        Some(LitSet { lits: scan, shortest, anchor, scan: scan_anchor, pair, first_other, by_first, masks, density: best.0, pairs })
     }
 
     pub fn shortest(&self) -> usize {
@@ -531,6 +537,13 @@ impl LitSet {
             return None;
         }
         let last = end - self.shortest;
+        if end - from >= crate::textgate::PAIRS_RANGE {
+            if let Some((j, codes)) = &self.pairs {
+                if let Some(found) = crate::textgate::first_by_pairs(text, from, last, *j, codes, |i| self.at(text, i, end)) {
+                    return found;
+                }
+            }
+        }
         let at = self.anchor;
         let mut q = from + at;
         let stop = last + at + 1;

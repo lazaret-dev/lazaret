@@ -18,6 +18,12 @@
 //! While it is open, a gate also keeps what a call's tests read of the
 //! whole text more than once (`memo`: its tokens, which the decoded view
 //! and the prose spans each lex): made once, dropped with the gate.
+//!
+//! A long text's gate also lists where each pair of ASCII characters
+//! stands (`Bigrams`): a search for a pattern's strings over the text
+//! visits the places their pairs stand, in order, instead of scanning the
+//! text for a character, which a call does some dozens of times over a
+//! bundle (linre/literal.rs).
 
 use std::cell::RefCell;
 use std::marker::PhantomData;
@@ -29,6 +35,50 @@ pub const MIN_RANGE: usize = 64;
 
 /// Bits of the triples' table: at most 2^MAX_TRI_BITS (128 KB).
 const MAX_TRI_BITS: u32 = 20;
+
+/// A text this long or longer gets its pairs' places listed when its gate
+/// opens (a shorter one is scanned as cheaply)...
+const MIN_INDEX: usize = 1 << 16;
+/// ...and one longer than this does not (the list holds 4 bytes a
+/// character: 32 MB at most, beside the text's own 32).
+const MAX_INDEX: usize = 1 << 23;
+
+/// Where each pair of ASCII characters stands in a text: the places of
+/// pair `128 * x + y` are `of(128 * x + y)`, ascending.
+pub struct Bigrams {
+    starts: Vec<u32>,
+    places: Vec<u32>,
+}
+
+impl Bigrams {
+    fn read(text: &[u32]) -> Bigrams {
+        let mut starts = vec![0u32; 128 * 128 + 1];
+        for w in text.windows(2) {
+            if w[0] < 128 && w[1] < 128 {
+                starts[(w[0] * 128 + w[1]) as usize + 1] += 1;
+            }
+        }
+        for b in 1..starts.len() {
+            starts[b] += starts[b - 1];
+        }
+        let mut next = starts.clone();
+        let mut places = vec![0u32; starts[128 * 128] as usize];
+        for (i, w) in text.windows(2).enumerate() {
+            if w[0] < 128 && w[1] < 128 {
+                let b = (w[0] * 128 + w[1]) as usize;
+                places[next[b] as usize] = i as u32;
+                next[b] += 1;
+            }
+        }
+        Bigrams { starts, places }
+    }
+
+    /// The places of pair `b` (128 * first + second), ascending.
+    #[inline]
+    pub fn of(&self, b: usize) -> &[u32] {
+        &self.places[self.starts[b] as usize..self.starts[b + 1] as usize]
+    }
+}
 
 /// The pairs of ASCII characters a text holds side by side, and (hashed)
 /// its triples.
@@ -144,6 +194,10 @@ struct Opened {
     pairs: Box<Pairs>,
     /// what `memo` made for the whole text, by its key
     memo: Vec<(&'static str, Box<dyn std::any::Any>)>,
+    /// a long text's pairs, by place: listed the first time a search over
+    /// the whole text asks for them (most calls never search a whole text:
+    /// a file's own rules read it line by line)
+    bigrams: Option<Bigrams>,
 }
 
 thread_local! {
@@ -176,7 +230,7 @@ pub fn open(text: &[u32]) -> Option<Gate<'_>> {
     let lo = text.as_ptr() as usize;
     let hi = lo + std::mem::size_of_val(text);
     let pairs = Pairs::read(text);
-    OPEN.with(|o| o.borrow_mut().push(Opened { lo, hi, pairs, memo: Vec::new() }));
+    OPEN.with(|o| o.borrow_mut().push(Opened { lo, hi, pairs, memo: Vec::new(), bigrams: None }));
     Some(Gate { lo, _text: PhantomData })
 }
 
@@ -193,6 +247,124 @@ pub fn ask<R>(s: &[u32], f: impl FnOnce(&Pairs) -> R) -> Option<R> {
     OPEN.with(|o| {
         let o = o.borrow();
         o.iter().rev().find(|g| g.lo <= lo && hi <= g.hi).map(|g| f(&g.pairs))
+    })
+}
+
+/// `f(where s starts in the open text, the text's pairs by place)`, when
+/// `s` is part of an open text that has them (None otherwise).
+#[inline]
+pub fn with_bigrams<R>(s: &[u32], f: impl FnOnce(usize, &Bigrams) -> R) -> Option<R> {
+    if s.is_empty() {
+        return None;
+    }
+    let lo = s.as_ptr() as usize;
+    let hi = lo + std::mem::size_of_val(s);
+    // (listed from the whole text, the first time `s` is all of it: a part
+    // of it cannot list the rest)
+    let list = OPEN.with(|o| {
+        let o = o.borrow();
+        o.iter().rev().find(|g| g.lo <= lo && hi <= g.hi).is_some_and(|g| {
+            g.bigrams.is_none() && g.lo == lo && g.hi == hi && (MIN_INDEX..=MAX_INDEX).contains(&s.len())
+        })
+    });
+    if list {
+        let listed = Bigrams::read(s);
+        OPEN.with(|o| {
+            if let Some(g) = o.borrow_mut().iter_mut().rev().find(|g| g.lo == lo && g.hi == hi) {
+                g.bigrams = Some(listed);
+            }
+        });
+    }
+    OPEN.with(|o| {
+        let o = o.borrow();
+        let g = o.iter().rev().find(|g| g.lo <= lo && hi <= g.hi)?;
+        g.bigrams.as_ref().map(|b| f((lo - g.lo) / std::mem::size_of::<u32>(), b))
+    })
+}
+
+/// A column of pairs past this many is not listed.
+const MAX_PAIRS: usize = 256;
+/// A search over at least this many characters of a long open text goes
+/// by where pairs of characters stand rather than by a scan.
+pub const PAIRS_RANGE: usize = 4096;
+
+/// Where a search for strings over an indexed text looks: a column j at
+/// which every string has two ASCII characters (by the strings' ASCII masks
+/// per position, None for one past ASCII), and the pairs `128 * x + y` they
+/// take there; of such columns, the one whose pairs are rarest by `freq`
+/// (per mille, a guess). None: no such column.
+pub fn pair_column(masks: &[Vec<Option<u128>>], shortest: usize, freq: impl Fn(u32) -> u32) -> Option<(usize, Vec<u16>)> {
+    let mut best: Option<(u64, usize, Vec<u16>)> = None;
+    for j in 0..shortest.saturating_sub(1).min(24) {
+        let mut codes: Vec<u16> = Vec::new();
+        let mut ok = true;
+        for m in masks {
+            let (Some(a), Some(b)) = (m[j], m[j + 1]) else {
+                ok = false;
+                break;
+            };
+            let mut xs = a;
+            while xs != 0 {
+                let x = xs.trailing_zeros();
+                let mut ys = b;
+                while ys != 0 {
+                    codes.push((x * 128 + ys.trailing_zeros()) as u16);
+                    ys &= ys - 1;
+                }
+                xs &= xs - 1;
+            }
+            if codes.len() > MAX_PAIRS * 4 {
+                ok = false;
+                break;
+            }
+        }
+        if !ok {
+            continue;
+        }
+        codes.sort_unstable();
+        codes.dedup();
+        if codes.is_empty() || codes.len() > MAX_PAIRS {
+            continue;
+        }
+        let cost: u64 = codes.iter().map(|&b| freq((b / 128) as u32) as u64 * freq((b % 128) as u32) as u64).sum();
+        if best.as_ref().map_or(true, |(c, _, _)| cost < *c) {
+            best = Some((cost, j, codes));
+        }
+    }
+    best.map(|(_, j, codes)| (j, codes))
+}
+
+/// The first start i in [from, last] of a string in `s` whose place i + j
+/// holds one of the pairs `codes` and where `is_start(i)`, by where those
+/// pairs stand in the open text `s` is part of: each such place, in order,
+/// tried as a scan tries the places it stops at, so the first that holds a
+/// string is the scan's answer. None: no open text with its pairs listed
+/// holds `s` (scan instead); Some(None): no string starts there.
+pub fn first_by_pairs(s: &[u32], from: usize, last: usize, j: usize, codes: &[u16], mut is_start: impl FnMut(usize) -> bool) -> Option<Option<usize>> {
+    use std::cmp::Reverse;
+    with_bigrams(s, |off, bg| {
+        // (the places p of the pairs in the open text: p = off + i + j)
+        let (lo, hi) = (off + from + j, off + last + j);
+        let mut heap: std::collections::BinaryHeap<Reverse<(u32, u16, u32)>> = std::collections::BinaryHeap::with_capacity(codes.len());
+        for &b in codes {
+            let list = bg.of(b as usize);
+            let k = list.partition_point(|&p| (p as usize) < lo);
+            if k < list.len() && list[k] as usize <= hi {
+                heap.push(Reverse((list[k], b, k as u32)));
+            }
+        }
+        while let Some(Reverse((p, b, k))) = heap.pop() {
+            let i = p as usize - off - j;
+            if is_start(i) {
+                return Some(i);
+            }
+            let list = bg.of(b as usize);
+            let k = k as usize + 1;
+            if k < list.len() && list[k] as usize <= hi {
+                heap.push(Reverse((list[k], b, k as u32)));
+            }
+        }
+        None
     })
 }
 
@@ -267,6 +439,28 @@ mod tests {
         }
         assert_eq!(memo(&text, "len", make), text.len());
         assert_eq!(made.get(), 3); // (the gate closed: what it kept went with it)
+    }
+
+    #[test]
+    fn a_long_text_lists_where_its_pairs_stand() {
+        let mut text = cps(&"ab cd ab\n".repeat(MIN_INDEX / 9 + 1));
+        text.push(0x00E9); // (a pair past ASCII is not listed)
+        text.push(c_('a'));
+        let _g = open(&text).unwrap();
+        // (a part first: nothing is listed until the whole text is asked)
+        assert!(with_bigrams(&text[9..], |off, _| off).is_none());
+        let ab = 128 * 'a' as usize + 'b' as usize;
+        let got = with_bigrams(&text, |off, b| (off, b.of(ab).len(), b.of(ab)[..2].to_vec())).unwrap();
+        assert_eq!(got, (0, 2 * (MIN_INDEX / 9 + 1), vec![0, 6]));
+        // (a part of the text: where it starts in the text)
+        assert_eq!(with_bigrams(&text[9..], |off, _| off), Some(9));
+        let short = cps(&"ab".repeat(200));
+        let _h = open(&short).unwrap();
+        assert!(with_bigrams(&short, |_, _| ()).is_none());
+    }
+
+    fn c_(ch: char) -> u32 {
+        ch as u32
     }
 
     #[test]
