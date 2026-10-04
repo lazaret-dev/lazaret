@@ -115,12 +115,21 @@ class CratesRegistry:
         self.url = f"http://127.0.0.1:{self.server.server_address[1]}/"
         threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
 
-    def add(self, name, version, files=None, deps=(), published=OLD, yanked=False):
-        """Publish a crate -> the SHA-256 (hex) of its `.crate`. deps: [(name, requirement)]."""
-        data = crate_tgz(name, version, files or {})
+    def add(self, name, version, files=None, deps=(), published=OLD, yanked=False, optional=(), features=None):
+        """Publish a crate -> the SHA-256 (hex) of its `.crate`. deps: [(name, requirement)], and optional: [(name, requirement)]
+        the dependencies `features` ({feature: [what it turns on]}) bring in, in the index and in the crate's Cargo.toml (unless
+        `files` gives one), as crates.io keeps both: cargo builds an installed crate from its manifest."""
+        files = dict(files or {})
+        if (deps or optional) and "Cargo.toml" not in files:
+            files["Cargo.toml"] = (f'[package]\nname = "{name}"\nversion = "{version}"\nedition = "2021"\n\n[dependencies]\n'
+                                   + "".join(f'{d} = "{req}"\n' for d, req in deps)
+                                   + "".join(f'{d} = {{ version = "{req}", optional = true }}\n' for d, req in optional)
+                                   + ("\n[features]\n" + "".join(f"{k} = {json.dumps(v)}\n" for k, v in features.items())
+                                      if features else ""))
+        data = crate_tgz(name, version, files)
         cksum = hashlib.sha256(data).hexdigest()
         self.versions.setdefault(name, {})[version] = {"data": data, "cksum": cksum, "deps": list(deps), "time": published,
-                                                       "yanked": yanked}
+                                                       "yanked": yanked, "optional": list(optional), "features": dict(features or {})}
         return cksum
 
     def checksum(self, name, version):
@@ -130,8 +139,11 @@ class CratesRegistry:
         lines = []
         for version, rec in self.versions[name].items():
             line = {"name": name, "vers": version, "cksum": rec["cksum"], "features": {}, "yanked": rec["yanked"], "v": 2,
-                    "deps": [{"name": d, "req": req, "features": [], "optional": False, "default_features": True, "target": None,
-                              "kind": "normal"} for d, req in rec["deps"]]}
+                    "deps": [{"name": d, "req": req, "features": [], "optional": opt, "default_features": True, "target": None,
+                              "kind": "normal"} for opt, group in ((False, rec["deps"]), (True, rec.get("optional", ())))
+                             for d, req in group]}
+            if rec.get("features"):
+                line["features2"] = rec["features"]
             if self.pubtimes:
                 line["pubtime"] = pubtime(rec["time"])
             lines.append(json.dumps(line))
@@ -192,8 +204,9 @@ def default_crates(reg):
 FAKE_CARGO = r'''#!@@PYTHON@@
 """A stand-in for the cargo command. FAKE_CARGO_ROOT: the workspace root; FAKE_CARGO_META: what `cargo metadata` prints (null: it
 fails); FAKE_CARGO_PLAN: {subcommand: [steps]} for every other command; FAKE_CARGO_SCRATCH: {crate: Cargo.lock text} for
-`generate-lockfile` of a project that needs that crate; FAKE_CARGO_LOG: where it writes {"argv", "cwd", "CARGO_HOME"}, one line
-per run. Steps: ["lock", text] writes Cargo.lock at the root, ["write", path, text], ["append", path, text],
+`generate-lockfile` of a project that needs that crate (the guard's scratch project, lazaret-guard-plan) and of the crate itself
+as the root of its own workspace (the lock of "crate:<name>" when there is one, else <name>'s); FAKE_CARGO_LOG: where it writes
+{"argv", "cwd", "CARGO_HOME"}, one line per run. Steps: ["lock", text] writes Cargo.lock at the root, ["write", path, text], ["append", path, text],
 ["unpack", home, "name-version"] makes a folder where cargo unpacks a crate, ["say", text] writes a line to its error output,
 ["exit", code]."""
 import json, os, re, sys
@@ -224,8 +237,12 @@ if sub == "generate-lockfile" and "--manifest-path" in args:
     manifest = args[args.index("--manifest-path") + 1]
     with open(manifest, encoding="utf-8") as f:
         text = f.read()
-    wanted = re.search(r"\[dependencies\]\s*\n\s*([A-Za-z0-9_-]+) =", text).group(1)
     scratch = json.loads(os.environ.get("FAKE_CARGO_SCRATCH", "{}"))
+    package = re.search(r'^name\s*=\s*"([^"]+)"', text, re.M).group(1)
+    if package == "lazaret-guard-plan":
+        wanted = re.search(r"\[dependencies\]\s*\n\s*([A-Za-z0-9_-]+) =", text).group(1)
+    else:
+        wanted = "crate:" + package if "crate:" + package in scratch else package
     if wanted not in scratch:
         print("error: no matching package named `" + wanted + "` found", file=sys.stderr)
         sys.exit(101)

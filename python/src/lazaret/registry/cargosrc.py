@@ -1,14 +1,16 @@
 """Cargo's settings, lockfile and registries: what `lazaret guard cargo` reads to find the crates a command will build and where each
 one is fetched.
 
-    sources(cwd, env)            the `[source.*]` tables of Cargo's configuration files -> {name: {key: value}}
-    registry_of(sources)         where crates.io is read from once source replacement is applied -> Registry
+    config(cwd, env, cli)        the `[source.*]` and `[registries.*]` tables of Cargo's configuration (files, includes, --config)
+    sources(cwd, env)            the `[source.*]` tables -> {name: {key: value}}
+    registry_of(sources, ...)    where crates.io is read from once source replacement is applied -> Registry
     classify(source)             a Cargo.lock `source` -> Source(kind, url): path, git, crates-io, sparse, git-index, other
     parse_lock(text)             Cargo.lock -> [Package(name, version, source, checksum)]
     index_url(base, name)        where the sparse index keeps a crate's file
     download_url(dl, ...)        a crate's `.crate` from the registry's config.json `dl`
     index_record(text, version)  one version's line of an index file -> {cksum, yanked, pubtime}
-    parse_install(args)          `cargo install` arguments -> Install(crates, locked, offline)
+    parse_install(args)          `cargo install` arguments -> Install(crates, locked, offline, at, versions, configs)
+    pinned_install(args, ...)    those arguments with each crate pinned to the version checked
     parse_project(args)          the options of any other command that matter -> Project
     crate_dirs(home)             the crates cargo has unpacked; cached_crate(...) a `.crate` it holds
 
@@ -26,8 +28,8 @@ import re
 from lazaret.registry.ecosystems import base, crates
 from lazaret.scanner import sca
 
-__all__ = ["Registry", "Source", "Package", "Install", "Project", "sources", "registry_of", "classify", "parse_lock", "crate_ok",
-           "index_url", "download_url", "index_record", "parse_install", "parse_project", "cargo_home", "crate_dirs",
+__all__ = ["Registry", "Source", "Package", "Install", "Project", "config", "sources", "registry_of", "classify", "parse_lock", "crate_ok",
+           "index_url", "download_url", "index_record", "parse_install", "pinned_install", "parse_project", "cargo_home", "crate_dirs",
            "cached_crate", "MAX_LOCK_BYTES", "MAX_PACKAGES", "MAX_CONFIG_BYTES", "DEFAULT_INDEX"]
 
 DEFAULT_INDEX = "https://index.crates.io/"
@@ -45,8 +47,8 @@ _METADATA_KEY = re.compile(r"checksum (\S+) (\S+) \((.+)\)")
 Registry = collections.namedtuple("Registry", "kind url")
 Source = collections.namedtuple("Source", "kind url")
 Package = collections.namedtuple("Package", "name version source checksum")
-Install = collections.namedtuple("Install", "crates locked offline")
-Project = collections.namedtuple("Project", "manifest_path locked offline")
+Install = collections.namedtuple("Install", "crates locked offline at versions configs")
+Project = collections.namedtuple("Project", "manifest_path locked offline configs")
 
 
 def cargo_home(env):
@@ -68,10 +70,54 @@ def _read_config(path):
     return doc
 
 
-def sources(cwd, env):
-    """The `[source.<name>]` tables of cargo's configuration -> {name: {key: str}}. Cargo reads `.cargo/config.toml` (or the older
-    `.cargo/config`) in the current folder and each folder above it, then `$CARGO_HOME/config.toml`; what a folder nearer to the
-    current one says wins, key by key."""
+MAX_INCLUDES = 16
+
+
+def _config_file(path, seen, depth=0):
+    """One configuration file with the files it includes (`include`: a path, or a list of paths or of tables with a `path`,
+    relative to the file), in the order cargo merges them: the included ones first, then the file itself, whose values win.
+    -> [dict, …]."""
+    real = os.path.realpath(path)
+    if real in seen or depth > 4 or len(seen) >= MAX_INCLUDES:
+        return []
+    seen.add(real)
+    doc = _read_config(path)
+    out = []
+    include = doc.get("include")
+    for item in ([include] if isinstance(include, (str, dict)) else include if isinstance(include, list) else [])[:MAX_INCLUDES]:
+        rel = item.get("path") if isinstance(item, dict) else item
+        if isinstance(rel, str) and rel:
+            out += _config_file(os.path.join(os.path.dirname(path), rel), seen, depth + 1)
+    out.append(doc)
+    return out
+
+
+def _folder_config(folder, seen):
+    """A `.cargo` folder's file: `config` when there is one (cargo then uses it, and warns, when `config.toml` is there too),
+    else `config.toml`."""
+    for name in ("config", "config.toml"):
+        path = os.path.join(folder, name)
+        if os.path.isfile(path):
+            return _config_file(path, seen)
+    return []
+
+
+def _cli_config(value, cwd, seen):
+    """One `--config` value: TOML (`source.crates-io.replace-with = "x"`) or a file's path, relative to `cwd`."""
+    if "=" in value:
+        try:
+            doc = sca.load_toml(value)
+        except ValueError:
+            return []
+        return [doc] if isinstance(doc, dict) else []
+    return _config_file(os.path.join(cwd, value), seen)
+
+
+def config(cwd, env, cli=()):
+    """Cargo's configuration, as far as the guard reads it -> {"source": {name: {key: str}}, "registries": {name: {key: str}}}.
+    Cargo reads `.cargo/config` or `.cargo/config.toml` in the current folder and each folder above it, then
+    `$CARGO_HOME`'s, with the files each includes merged before it; a folder nearer to the current one wins, key by key, and
+    the command line's `--config` values (`cli`) win over every file, the last of them first."""
     folders, here = [], os.path.abspath(cwd)
     while True:
         folders.append(os.path.join(here, ".cargo"))
@@ -80,20 +126,41 @@ def sources(cwd, env):
             break
         here = parent
     folders.append(cargo_home(env))                                  # (read twice when it is also one of the folders above: the same answer)
-    merged = {}
+    docs = []
     for folder in reversed(folders):                                 # (the farthest first, so that the nearest overrides)
-        for name in ("config", "config.toml"):                       # (config.toml wins over config in one folder)
-            table = _read_config(os.path.join(folder, name)).get("source")
-            for source, keys in (table.items() if isinstance(table, dict) else ()):
+        docs += _folder_config(folder, set())
+    for value in cli or ():
+        docs += _cli_config(value, cwd, set())
+    merged = {"source": {}, "registries": {}}
+    for doc in docs:
+        for section, tables in merged.items():
+            table = doc.get(section)
+            for name, keys in (table.items() if isinstance(table, dict) else ()):
                 if isinstance(keys, dict):
-                    merged.setdefault(source, {}).update({k: v for k, v in keys.items() if isinstance(v, str)})
+                    tables.setdefault(name, {}).update({k: v for k, v in keys.items() if isinstance(v, str)})
     return merged
 
 
-def registry_of(table):
-    """Where crates.io is read from, once cargo's source replacement is followed (`[source.crates-io] replace-with`) ->
-    Registry(kind, url). kind: "sparse" (an HTTP index: the default, or a mirror's), or what the guard cannot read: "git" (a git
-    index), "directory", "local-registry", "git-source" (a vendor folder, a local registry, a git repository), "unknown"."""
+def sources(cwd, env, cli=()):
+    """The `[source.<name>]` tables of cargo's configuration (config()) -> {name: {key: str}}."""
+    return config(cwd, env, cli)["source"]
+
+
+def _index_registry(url):
+    """A registry's index URL -> Registry: "sparse" for an HTTP index, crates.io's own for either of its spellings, "git" else."""
+    if url.startswith("sparse+"):
+        url = url[len("sparse+"):]
+        return Registry("sparse", url if url.endswith("/") else url + "/")
+    if url.rstrip("/") in _CRATES_IO_INDEXES:
+        return Registry("sparse", DEFAULT_INDEX)
+    return Registry("git", url)
+
+
+def registry_of(table, registries=None, env=None):
+    """Where crates.io is read from, once cargo's source replacement is followed (`[source.crates-io] replace-with`, to another
+    `[source]` or to a registry `[registries]` names, or CARGO_REGISTRIES_<NAME>_INDEX) -> Registry(kind, url). kind: "sparse"
+    (an HTTP index: the default, or a mirror's), or what the guard cannot read: "git" (a git index), "directory",
+    "local-registry", "git-source" (a vendor folder, a local registry, a git repository), "unknown"."""
     name, seen = "crates-io", set()
     while True:
         target = table.get(name, {}).get("replace-with")
@@ -108,15 +175,14 @@ def registry_of(table):
     keys = table.get(name, {})
     url = keys.get("registry")
     if url:
-        if url.startswith("sparse+"):
-            url = url[len("sparse+"):]
-            return Registry("sparse", url if url.endswith("/") else url + "/")
-        if url.rstrip("/") in _CRATES_IO_INDEXES:
-            return Registry("sparse", DEFAULT_INDEX)
-        return Registry("git", url)
+        return _index_registry(url)
     for key, kind in (("directory", "directory"), ("local-registry", "local-registry"), ("git", "git-source")):
         if key in keys:
             return Registry(kind, keys[key])
+    index = (registries or {}).get(name, {}).get("index") \
+        or (env or {}).get("CARGO_REGISTRIES_" + name.upper().replace("-", "_") + "_INDEX")
+    if isinstance(index, str) and index:
+        return _index_registry(index)
     return Registry("unknown", name)
 
 
@@ -225,13 +291,18 @@ def index_record(text, version):
     return None
 
 
-#: `cargo install`'s options that take the next argument as their value
-_INSTALL_VALUE = frozenset(("--version", "--git", "--branch", "--tag", "--rev", "--path", "--root", "--index", "--registry",
-                            "--features", "-F", "--bin", "--example", "--target", "--target-dir", "--profile", "-j", "--jobs",
-                            "--config", "--manifest-path", "--color", "-Z", "--message-format", "--lockfile-path",
-                            "--artifact-dir"))
+#: `cargo install`'s options that take the next argument as their value (`--bin`, `--example` and `--target` take it when one
+#: follows that is not an option, as cargo's parser does)
+_INSTALL_VALUE = frozenset(("--version", "--vers", "--branch", "--tag", "--rev", "--root", "--features", "-F", "--bin",
+                            "--example", "--target", "--target-dir", "--profile", "-j", "--jobs", "--config", "--color", "-Z",
+                            "--message-format", "--lockfile-path", "--artifact-dir"))
+#: its options that take none
+_INSTALL_FLAGS = frozenset(("--locked", "--frozen", "--offline", "-f", "--force", "-n", "--dry-run", "--no-track", "--debug",
+                            "-v", "--verbose", "-q", "--quiet", "--ignore-rust-version", "--bins", "--examples",
+                            "--all-features", "--no-default-features", "--keep-going", "--timings"))
 _INSTALL_REFUSED = {"--git": "a git repository", "--path": "a folder", "--index": "another index", "--registry": "another registry",
                     "--list": "a list"}
+_VERBOSE = re.compile(r"-v{2,}")
 
 
 def _requirement(text):
@@ -246,73 +317,108 @@ def _requirement(text):
 
 
 def parse_install(args):
-    """The arguments of `cargo install` (after the word install) -> Install(crates, locked, offline). crates: [(name, requirement
-    or None)], each as `name`, `name@version` or with `--version`. ValueError, with the reason, for what the guard does not read:
-    a git repository, a folder, another registry, no crate named, or an argument that cannot be read."""
-    found, version, locked, offline = [], None, False, False
+    """The arguments of `cargo install` (after the word install) -> Install(crates, locked, offline, at, versions, configs).
+    crates: [(name, requirement or None)], each as `name`, `name@version` or with `--version` (`--vers`); at: where each crate
+    is in `args`; versions: where a `--version` option and its value are; configs: the `--config` values. An argument after
+    `--` is a crate. ValueError, with the reason, for what the guard does not read: a git repository, a folder, another
+    registry, an option it does not know (it could not tell what follows it), no crate named, or an argument that cannot be
+    read."""
+    found, at, versions, configs, version, locked, offline = [], [], [], [], None, False, False
     k = 0
+    rest_are_crates = False
     while k < len(args):
         arg = args[k]
         k += 1
+        if not rest_are_crates and arg == "--":
+            rest_are_crates = True
+            continue
+        if rest_are_crates or not arg.startswith("-") or arg == "-":
+            found.append(arg)
+            at.append(k - 1)
+            continue
         flag, eq, value = arg.partition("=")
-        if arg == "--":
-            break
+        if not arg.startswith("--") and len(arg) > 2 and arg[:2] in ("-F", "-j", "-Z"):
+            flag, eq, value = arg[:2], "=", arg[2:].removeprefix("=")             # (-Fx, -j4, -Zflag: the value attached)
         if flag in _INSTALL_REFUSED:
             raise ValueError(f"cargo install {flag} is not one the guard reads ({_INSTALL_REFUSED[flag]}): it checks crates from "
                              f"crates.io")
-        if arg in ("--locked", "--frozen"):
-            locked = True
-            offline = offline or arg == "--frozen"
-        elif arg == "--offline":
-            offline = True
-        if arg.startswith("-"):
-            if flag in _INSTALL_VALUE and not eq:
-                if k >= len(args):
+        if flag in _INSTALL_VALUE:
+            start = k - 1
+            if not eq:
+                optional = flag in ("--bin", "--example", "--target")
+                if k < len(args) and not (optional and args[k].startswith("-")):
+                    value, k = args[k], k + 1
+                elif not optional:
                     raise ValueError(f"{flag} wants a value")
-                value, k = args[k], k + 1
-            if flag == "--version":
+            if flag in ("--version", "--vers"):
                 version = value
+                versions += list(range(start, k))
+            elif flag == "--config":
+                configs.append(value)
             continue
-        found.append(arg)
+        if arg in _INSTALL_FLAGS or flag == "--timings" or _VERBOSE.fullmatch(arg):
+            if arg in ("--locked", "--frozen"):
+                locked = True
+            if arg in ("--offline", "--frozen"):
+                offline = True
+            continue
+        raise ValueError(f"cargo install {flag[:40]} is not an option the guard knows, so it cannot tell what is installed")
     if not found:
         raise ValueError("name the crate to install: lazaret guard cargo install <crate>")
     if version is not None and len(found) > 1:
         raise ValueError("--version with more than one crate")
     out = []
     for spec in found:
-        name, at, want = spec.partition("@")
-        if not name or (at and not want):
+        name, sep, want = spec.partition("@")
+        if not name or (sep and not want):
             raise ValueError(f"cannot read {spec[:60]!r} as a crate")
-        if at and version is not None:
+        if sep and version is not None:
             raise ValueError("a version both after @ and with --version")
-        req = want if at else version
+        req = want if sep else version
         out.append((name, _requirement(req) if req is not None else None))
         if not crate_ok(name, "0.0.0"):
             raise ValueError(f"{spec[:60]!r} is not a crate name")
-    return Install(out, locked, offline)
+    return Install(out, locked, offline, at, versions, configs)
+
+
+def pinned_install(args, want, versions):
+    """The arguments of `cargo install` with each crate pinned to the version the guard checked (`name@=version`) and the
+    `--version` options left out, so cargo builds that release and not one published while the guard was checking.
+    `want`: parse_install(args); `versions`: [(name, version)] in the order of want.crates."""
+    out = list(args)
+    for index, (name, version) in zip(want.at, versions):
+        out[index] = f"{name}@={version}"
+    drop = set(want.versions)
+    return [a for k, a in enumerate(out) if k not in drop]
 
 
 def parse_project(args):
     """The options of a cargo command that the guard needs (up to `--`, after which come the program's own) ->
-    Project(manifest_path or None, locked, offline); `--frozen` is both."""
-    manifest, locked, offline = None, False, False
+    Project(manifest_path or None, locked, offline, configs); `--frozen` is both; configs: the `--config` values."""
+    manifest, locked, offline, configs = None, False, False, []
     k = 0
     while k < len(args):
         arg = args[k]
         k += 1
         if arg == "--":
             break
-        if arg == "--manifest-path" and k < len(args):
-            manifest, k = args[k], k + 1
+        if arg in ("--manifest-path", "--config") and k < len(args):
+            if arg == "--config":
+                configs.append(args[k])
+            else:
+                manifest = args[k]
+            k += 1
         elif arg.startswith("--manifest-path="):
             manifest = arg[len("--manifest-path="):]
+        elif arg.startswith("--config="):
+            configs.append(arg[len("--config="):])
         elif arg == "--locked":
             locked = True
         elif arg == "--offline":
             offline = True
         elif arg == "--frozen":
             locked = offline = True
-    return Project(manifest, locked, offline)
+    return Project(manifest, locked, offline, configs)
 
 
 def crate_dirs(home):

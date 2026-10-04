@@ -278,6 +278,59 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Fixed
 
+- **The Go/Rust review (Oct 4): the guard checks what cargo and go use, and its own
+  folders, servers and programs are the user's.** A review of the 0.1.9 Go and Rust
+  work (`lazaret guard go` and `cargo`, the registry's Go and crates modules, the SCA
+  inventory; `audits/lazaret-go-rust-code-review-2026-10-04.md` in the project) found
+  ways around the guard; each is fixed with a test that failed before it:
+  - **A crate's files in tar entries of an unusual type** (a device, a FIFO, a type
+    letter tar does not know) were left out unread, and cargo unpacks them as regular
+    files: a crate could carry its `build.rs` so and scan OK. They are read as files, as
+    cargo and pip read them, and are SC-ARCHIVE-TYPE (MAJOR); an npm tarball's are still
+    skipped, as npm skips them. The registry's rule set is 2.29.0, so stored verdicts are
+    scanned again.
+  - **The guard's scratch projects were in the shared `/tmp`** (`cargo install`, yarn 1,
+    `npm install -g`, `go --plan`), where cargo, rustup, yarn, npm and go read settings
+    from the folders above: another user's `rust-toolchain.toml` or `.cargo/config.toml`
+    there ran their program. They are in a folder of the user's own
+    (`LAZARET_GUARD_SCRATCH`, else the cache folder), a workspace of their own, and the
+    package managers run from the user's folder.
+  - **`guard cargo`:** `cargo install` built another graph than the one checked (its
+    features, `--vers`, a release published meanwhile): it installs `NAME@=VERSION` with
+    the features asked for. A crate cargo had unpacked already was never checked; every
+    crate the lock names is. cargo's configuration is read as cargo reads it
+    (`.cargo/config` first, `include`, `--config`, `[registries]`); a source the guard
+    cannot read, a registry that asks for credentials and a git crate are INCOMPLETE,
+    not a note, so `--block-warn` blocks them; the build runs with `--locked`; an
+    ambiguous published lock blocks; a crate unpacked but not checked is named even when
+    the build fails; and "response over" is a typed error, not words in a message.
+  - **`guard go`:** the local proxy served anyone on the machine, with the user's proxy
+    credentials: it answers only a secret path of the run's and its own `Host`, and only
+    the checksum-database paths go asks for. A zip over 200 MiB was fetched again,
+    unscanned, for go: it is fetched once, to a file, and those bytes are go's. Modules
+    go takes from its module cache, or from their repositories (`GONOPROXY`), were never
+    scanned and the run said nothing: they are listed (`go mod download -json`) and
+    scanned where go keeps them, before a build, test, run or install and after a get or
+    a tidy; a vendored build says it is not checked. `go env` no longer downloads a
+    toolchain (`GOTOOLCHAIN=local`); `-C` after `mod download`, `-modfile` in `GOFLAGS`
+    and a program's own arguments are read as go reads them; `GONOPROXY` alone says
+    which modules come from a repository; a release whose time is unknown is said, and
+    blocked under `--block-warn` (cargo's too).
+  - **Programs are looked up in `PATH`'s absolute folders only**, never the current one:
+    on Windows, a project's `go.exe` or `npm.cmd`, or a repository's `git.exe` for
+    `lazaret hook`, ran in the real tool's place.
+  - **`lazaret-sca`:** the modules of a `go.work` and the members of a Cargo workspace
+    without a lock are read, and a `go.mod` or `Cargo.lock` below the root that nothing
+    reads is counted in a warning. An entry with no version from a lock or the build (a
+    git crate beside a crates.io one, the original of a module a fork replaces) is kept
+    as unknown; only a manifest's range gives way to a known version. go.mod's quoted
+    paths are read with Go's escapes, a version too long to read is an unknown, and the
+    lines not read are counted. go.sum gives every version with a zip hash, its modules
+    get go.mod's replacements, and a module go.sum shows replaced is unknown. An unused
+    replacement in `vendor/modules.txt` is not a module. A bundle dates each ecosystem's
+    advisories, and one whose newest is over 30 days old is no source of them, so the
+    coverage condition fails rather than pass on a stopped mirror. go.mod's replacements
+    are looked up rather than read through (20,000 of each took 12 s).
 - **`lazaret-sca` and hostile manifests**, found by the new fuzzers: a NUL byte in a
   requirements file's `-r` path raised an error out of the inventory; a TOML file nested
   too deeply raised `RecursionError` past every reader that catches parse errors (the

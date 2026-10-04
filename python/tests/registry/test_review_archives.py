@@ -229,6 +229,83 @@ class LinkTests(unittest.TestCase):
         self.assertIn("Zip entry marked as a symlink", link[0]["msg"])
 
 
+def typed_member(name, data, typ):
+    """One raw ustar member of type `typ` that carries `data`, as a hostile
+    archive writes it: a device, a FIFO or an unknown type with a size."""
+    ti = tarfile.TarInfo(name)
+    ti.type, ti.mode, ti.size = typ, 0o644, len(data)
+    return ti.tobuf(tarfile.USTAR_FORMAT) + data + b"\0" * (-len(data) % 512)
+
+
+class EntryTypeTests(unittest.TestCase):
+    """The Go/Rust review's RM-1 (Oct 4, 2026): a tar entry that is not a
+    regular file, a directory or a link. pip writes one of a type no tool
+    writes (`9`, `A`) as a regular file, and cargo any entry but a directory
+    or a link as one (a device and a FIFO too); the scan read regular files
+    only, so a setup.py or a build.rs of such a type ran and was never read
+    (the release was OK). npm's node-tar skips them, as the scan does."""
+
+    PKG_INFO = b"Metadata-Version: 2.1\nName: x\nVersion: 1.0\n"
+
+    def sdist(self, typ):
+        return gzip.compress(tar_member("x-1.0/PKG-INFO", self.PKG_INFO)
+                             + typed_member("x-1.0/setup.py", DECODE_EXEC_PY.encode(), typ)
+                             + tar_member("x-1.0/README.md", b"x\n") + b"\0" * 1024)
+
+    def crate(self, typ):
+        return gzip.compress(tar_member("x-1.0.0/Cargo.toml", b'[package]\nname = "x"\nversion = "1.0.0"\n')
+                             + typed_member("x-1.0.0/build.rs", b"fn main() {}\n", typ)
+                             + typed_member("x-1.0.0/tools/run.js", EXFIL_JS.encode(), typ)
+                             + tar_member("x-1.0.0/README.md", b"x\n") + b"\0" * 1024)
+
+    def read(self, data, artifact):
+        anomalies = []
+        names = [m[0] for m in repo.iter_archive(data, "tgz", artifact, anomalies=anomalies)]
+        return names, anomalies
+
+    def test_pip_writes_an_entry_of_an_unknown_type_as_a_file(self):
+        for typ in (b"9", b"A", b"Z"):
+            with self.subTest(typ=typ):
+                names, anomalies = self.read(self.sdist(typ), "sdist")
+                self.assertEqual(names, ["PKG-INFO", "setup.py", "README.md"])
+                self.assertEqual([(k, p) for k, p, _ in anomalies], [("type", "setup.py")])
+                res = scan_bytes(self.sdist(typ), artifact="sdist", eco="pypi")
+                self.assertEqual(res["verdict"], "SUSPICIOUS", res["verdictReason"])
+                self.assertIn("setup.py", {i["file"] for i in issues(res, "SC-EVAL-DECODE")})
+                self.assertEqual([(i["file"], i["sev"]) for i in issues(res, "SC-ARCHIVE-TYPE")], [("setup.py", "MAJOR")])
+
+    def test_cargo_writes_any_entry_but_a_folder_or_a_link_as_a_file(self):
+        for typ in (b"9", b"A", tarfile.CHRTYPE, tarfile.BLKTYPE, tarfile.FIFOTYPE):
+            with self.subTest(typ=typ):
+                names, anomalies = self.read(self.crate(typ), "crate")
+                self.assertEqual(names, ["Cargo.toml", "build.rs", "tools/run.js", "README.md"])   # (the data read by its size)
+                self.assertEqual([(k, p) for k, p, _ in anomalies], [("type", "build.rs"), ("type", "tools/run.js")])
+                res = repo._scan_artifact(self.crate(typ), "tgz", "crate", False, repo.Budget())
+                self.assertEqual(res["verdict"], "SUSPICIOUS", res["verdictReason"])
+                self.assertIn("SC-ARCHIVE-TYPE", rules(res))
+
+    def test_a_device_in_an_sdist_is_not_a_file_pip_writes(self):
+        # pip fails on a device or a FIFO; the entry is not read, and its data is the ambiguity it was
+        names, _anomalies = self.read(self.sdist(tarfile.CHRTYPE), "sdist")
+        self.assertNotIn("setup.py", names)
+
+    def test_npm_skips_them_as_node_tar_does(self):
+        raw = (tar_member("package/package.json", manifest())
+               + typed_member("package/index.js", EXFIL_JS.encode(), b"9")
+               + tar_member("package/after.js", b"1\n") + b"\0" * 1024)
+        names, anomalies = self.read(gzip.compress(raw), "npm")
+        self.assertEqual(names, ["package.json", "after.js"])
+        self.assertEqual(anomalies, [])
+        self.assertEqual(scan_bytes(gzip.compress(raw))["verdict"], "OK")
+
+    def test_regular_files_are_unchanged(self):
+        for artifact, data in (("sdist", self.sdist(tarfile.REGTYPE)), ("crate", self.crate(tarfile.REGTYPE))):
+            with self.subTest(artifact=artifact):
+                names, anomalies = self.read(data, artifact)
+                self.assertEqual(anomalies, [])
+                self.assertIn("README.md", names)
+
+
 class BudgetTests(unittest.TestCase):
     def test_bz2_or_xz_served_as_npm_tgz_is_rejected(self):
         raw = tar_member("package/a.bin", b"\0" * 4096) + b"\0" * 1024

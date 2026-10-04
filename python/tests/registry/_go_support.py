@@ -182,8 +182,10 @@ def default_modules(proxy):
 
 FAKE_GO = r'''#!@@PYTHON@@
 """A stand-in for the go command. FAKE_GO_ENV: the JSON `go env -json` answers from (null: it fails); FAKE_GO_PLAN: what any other command
-does, as a JSON list of steps; FAKE_GO_ENV_LOG: where it writes the folder each `go env` ran in; FAKE_GO_LOG: where it writes {"argv", "GOPROXY", "GOMODCACHE", "cwd"}, one line per run."""
-import json, os, sys, urllib.request, urllib.error
+does, as a JSON list of steps; FAKE_GO_ENV_LOG: where it writes the folder each `go env` ran in; FAKE_GO_LOG: where it writes {"argv", "GOPROXY", "GOMODCACHE", "GOWORK", "GOTOOLCHAIN", "cwd"}, one line per run.
+`go mod download -json` (the guard's list of the modules a command uses) is FAKE_GO_LISTING's: {"steps": [...], "records": [the
+JSON objects it prints], "exit": its exit code, "stderr": what it says}; it is logged to FAKE_GO_LIST_LOG, not FAKE_GO_LOG."""
+import base64, json, os, sys, urllib.request, urllib.error
 
 args = sys.argv[1:]
 if args[:2] == ["env", "-json"]:
@@ -194,16 +196,25 @@ if args[:2] == ["env", "-json"]:
     if env is None:                                    # a go that cannot say its settings
         print("go: broken", file=sys.stderr)
         sys.exit(1)
-    print(json.dumps({k: env.get(k, "") for k in args[2:]}))
+    values = {k: env.get(k, "") for k in args[2:]}
+    if "GONOPROXY" in values and "GONOPROXY" not in env:   # (go's default: GOPRIVATE)
+        values["GONOPROXY"] = env.get("GOPRIVATE", "")
+    print(json.dumps(values))
     sys.exit(0)
-log = os.environ.get("FAKE_GO_LOG")
+listing = None
+if args[:2] == ["mod", "download"] and "-json" in args:
+    listing = json.loads(os.environ.get("FAKE_GO_LISTING") or "{}")
+    log, steps = os.environ.get("FAKE_GO_LIST_LOG"), listing.get("steps", [])
+else:
+    log, steps = os.environ.get("FAKE_GO_LOG"), json.loads(os.environ.get("FAKE_GO_PLAN", "[]"))
 if log:
     with open(log, "a", encoding="utf-8") as f:
         f.write(json.dumps({"argv": args, "GOPROXY": os.environ.get("GOPROXY"), "GOMODCACHE": os.environ.get("GOMODCACHE"),
+                            "GOWORK": os.environ.get("GOWORK"), "GOTOOLCHAIN": os.environ.get("GOTOOLCHAIN"),
                             "cwd": os.getcwd()}) + "\n")
 code = 0
 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-for step in json.loads(os.environ.get("FAKE_GO_PLAN", "[]")):
+for step in steps:
     kind = step[0]
     if kind == "get":                                  # fetch a path of GOPROXY; write what came to a file, or the status
         try:
@@ -222,6 +233,16 @@ for step in json.loads(os.environ.get("FAKE_GO_PLAN", "[]")):
         os.makedirs(os.path.dirname(step[1]) or ".", exist_ok=True)
         with open(step[1], "w", encoding="utf-8") as f:
             f.write(step[2])
+    elif kind == "writeb64":                           # write a file of bytes (base64)
+        os.makedirs(os.path.dirname(step[1]) or ".", exist_ok=True)
+        with open(step[1], "wb") as f:
+            f.write(base64.b64decode(step[2]))
+    elif kind == "cachezip":                           # put a module's zip (base64) in GOMODCACHE, as go leaves one it fetched
+        enc = lambda t: "".join("!" + c.lower() if "A" <= c <= "Z" else c for c in t)
+        path = os.path.join(os.environ["GOMODCACHE"], "cache", "download", enc(step[1]), "@v", enc(step[2]) + ".zip")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(base64.b64decode(step[3]))
     elif kind == "append":
         with open(step[1], "a", encoding="utf-8") as f:
             f.write(step[2])
@@ -232,6 +253,12 @@ for step in json.loads(os.environ.get("FAKE_GO_PLAN", "[]")):
         print(step[1])
     elif kind == "exit":
         code = step[1]
+if listing is not None:
+    for record in listing.get("records", []):
+        print(json.dumps(record, indent="\t"))
+    if listing.get("stderr"):
+        print(listing["stderr"], file=sys.stderr)
+    code = listing.get("exit", code)
 sys.exit(code)
 '''
 

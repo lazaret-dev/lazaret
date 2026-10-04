@@ -36,11 +36,52 @@ class SourcesTests(TmpCase):
         self.assertEqual(table["far"], {"registry": "sparse+https://middle/"})           # (a folder nearer overrides the home's)
         self.assertEqual(table["near"], {"directory": "vendor"})
 
-    def test_config_toml_wins_over_the_older_name_in_one_folder(self):
+    def test_the_older_name_wins_over_config_toml_in_one_folder_as_cargo_reads_them(self):
+        # (cargo warns "both … exist. Using …/config" and reads that one only; the guard read config.toml over it, so it
+        # checked crates.io's bytes while cargo built a replacement's: the Go/Rust review's CG-6)
         write(os.path.join(self.tmp, ".cargo", "config"), '[source.x]\nregistry = "sparse+https://old/"\n')
-        write(os.path.join(self.tmp, ".cargo", "config.toml"), '[source.x]\nregistry = "sparse+https://new/"\n')
-        self.assertEqual(cargosrc.sources(self.tmp, {"CARGO_HOME": os.path.join(self.tmp, "none")})["x"],
-                         {"registry": "sparse+https://new/"})
+        write(os.path.join(self.tmp, ".cargo", "config.toml"), '[source.x]\nregistry = "sparse+https://new/"\n[source.y]\ndirectory = "v"\n')
+        got = cargosrc.sources(self.tmp, {"CARGO_HOME": os.path.join(self.tmp, "none")})
+        self.assertEqual(got, {"x": {"registry": "sparse+https://old/"}})
+
+    def test_an_included_file_is_read_before_the_file_that_includes_it(self):
+        write(os.path.join(self.tmp, ".cargo", "config.toml"),
+              'include = ["more.toml", {path = "most.toml"}]\n[source.crates-io]\nreplace-with = "mine"\n')
+        write(os.path.join(self.tmp, ".cargo", "more.toml"),
+              '[source.crates-io]\nreplace-with = "theirs"\n[source.mine]\nregistry = "sparse+https://mine/"\n')
+        write(os.path.join(self.tmp, ".cargo", "most.toml"), '[source.vendored]\ndirectory = "vendor"\n')
+        got = cargosrc.sources(self.tmp, {"CARGO_HOME": os.path.join(self.tmp, "none")})
+        self.assertEqual(got["crates-io"], {"replace-with": "mine"})             # (the including file's own value wins)
+        self.assertEqual(got["vendored"], {"directory": "vendor"})
+        self.assertEqual(cargosrc.registry_of(got), cargosrc.Registry("sparse", "https://mine/"))
+
+    def test_includes_that_loop_or_go_on_and_on_are_read_once(self):
+        write(os.path.join(self.tmp, ".cargo", "config.toml"), 'include = "a.toml"\n[source.x]\ndirectory = "d"\n')
+        write(os.path.join(self.tmp, ".cargo", "a.toml"), 'include = ["config.toml", "a.toml"]\n[source.a]\ndirectory = "a"\n')
+        got = cargosrc.sources(self.tmp, {"CARGO_HOME": os.path.join(self.tmp, "none")})
+        self.assertEqual(set(got), {"x", "a"})
+
+    def test_a_config_option_wins_over_every_file(self):
+        write(os.path.join(self.tmp, ".cargo", "config.toml"), '[source.crates-io]\nreplace-with = "mine"\n')
+        write(os.path.join(self.tmp, "extra.toml"), '[source.vendored]\ndirectory = "vendor"\n')
+        got = cargosrc.config(self.tmp, {"CARGO_HOME": os.path.join(self.tmp, "none")},
+                              ['source.crates-io.replace-with = "vendored"', "extra.toml"])["source"]
+        self.assertEqual(got["crates-io"], {"replace-with": "vendored"})
+        self.assertEqual(cargosrc.registry_of(got), cargosrc.Registry("directory", "vendor"))
+
+    def test_a_replacement_by_a_registry_is_followed(self):
+        # (`replace-with` may name a registry of [registries], or one an environment variable gives; the guard called it
+        # unknown and checked nothing while cargo used it: the Go/Rust review's CG-4)
+        write(os.path.join(self.tmp, ".cargo", "config.toml"),
+              '[registries.corp]\nindex = "sparse+https://corp.example/index/"\n[source.crates-io]\nreplace-with = "corp"\n')
+        conf = cargosrc.config(self.tmp, {"CARGO_HOME": os.path.join(self.tmp, "none")})
+        self.assertEqual(cargosrc.registry_of(conf["source"], conf["registries"]),
+                         cargosrc.Registry("sparse", "https://corp.example/index/"))
+        self.assertEqual(cargosrc.registry_of({"crates-io": {"replace-with": "my-reg"}}, {},
+                                              {"CARGO_REGISTRIES_MY_REG_INDEX": "https://git.example/index"}),
+                         cargosrc.Registry("git", "https://git.example/index"))
+        self.assertEqual(cargosrc.registry_of({"crates-io": {"replace-with": "nobody"}}, {}, {}),
+                         cargosrc.Registry("unknown", "nobody"))
 
     def test_a_file_that_is_missing_too_large_or_not_toml_says_nothing(self):
         home = os.path.join(self.tmp, "home")
@@ -261,12 +302,45 @@ class IndexRecordTests(unittest.TestCase):
 
 
 class InstallArgumentTests(unittest.TestCase):
+    def three(self, args):
+        got = cargosrc.parse_install(args)
+        return got.crates, got.locked, got.offline
+
     def test_a_crate_a_version_and_the_options_that_matter(self):
-        self.assertEqual(cargosrc.parse_install(["ripgrep"]), ([("ripgrep", None)], False, False))
-        self.assertEqual(cargosrc.parse_install(["--locked", "ripgrep"]), ([("ripgrep", None)], True, False))
-        self.assertEqual(cargosrc.parse_install(["--frozen", "x"]), ([("x", None)], True, True))
-        self.assertEqual(cargosrc.parse_install(["--offline", "x"]), ([("x", None)], False, True))
+        self.assertEqual(self.three(["ripgrep"]), ([("ripgrep", None)], False, False))
+        self.assertEqual(self.three(["--locked", "ripgrep"]), ([("ripgrep", None)], True, False))
+        self.assertEqual(self.three(["--frozen", "x"]), ([("x", None)], True, True))
+        self.assertEqual(self.three(["--offline", "x"]), ([("x", None)], False, True))
         self.assertEqual(cargosrc.parse_install(["a", "b"]).crates, [("a", None), ("b", None)])
+
+    def test_vers_is_cargos_other_name_for_version(self):
+        # (the guard read no version from it and checked the newest release, while cargo installed the one asked for: CG-2)
+        self.assertEqual(cargosrc.parse_install(["--vers", "1.0.0", "a"]).crates, [("a", "=1.0.0")])
+        self.assertEqual(cargosrc.parse_install(["--vers=1.2", "a"]).crates, [("a", "1.2")])
+
+    def test_an_option_the_guard_does_not_know_is_refused(self):
+        # (it could take a value, which would then be read as a crate, or not)
+        for args in (["--frobnicate", "a"], ["-fq", "a"], ["--git-fetch-with-cli", "a"]):
+            with self.subTest(args), self.assertRaisesRegex(ValueError, "not an option the guard knows"):
+                cargosrc.parse_install(args)
+        self.assertEqual(cargosrc.parse_install(["-vv", "--timings=html", "-j4", "-Fx", "--bin", "--locked", "a"]).crates,
+                         [("a", None)])
+
+    def test_each_crate_is_pinned_to_the_version_checked(self):
+        for args, pinned in ((["ripgrep"], ["ripgrep@=14.1.1"]),
+                             (["--version", "14", "--locked", "ripgrep"], ["--locked", "ripgrep@=14.1.1"]),
+                             (["--vers=14", "ripgrep", "--root", "/r"], ["ripgrep@=14.1.1", "--root", "/r"]),
+                             (["ripgrep@^14", "-F", "pcre2"], ["ripgrep@=14.1.1", "-F", "pcre2"])):
+            with self.subTest(args):
+                want = cargosrc.parse_install(args)
+                self.assertEqual(cargosrc.pinned_install(args, want, [("ripgrep", "14.1.1")]), pinned)
+        want = cargosrc.parse_install(["a", "--", "b"])
+        self.assertEqual(want.crates, [("a", None), ("b", None)])                     # (after `--` every argument is a crate)
+        self.assertEqual(cargosrc.pinned_install(["a", "--", "b"], want, [("a", "1.0.0"), ("b", "2.0.0")]),
+                         ["a@=1.0.0", "--", "b@=2.0.0"])
+
+    def test_config_values_are_kept(self):
+        self.assertEqual(cargosrc.parse_install(["--config", "k=1", "--config=other.toml", "a"]).configs, ["k=1", "other.toml"])
 
     def test_versions_three_numbers_are_exact_and_anything_else_a_requirement(self):
         self.assertEqual(cargosrc.parse_install(["a@1.2.3"]).crates, [("a", "=1.2.3")])
@@ -280,10 +354,13 @@ class InstallArgumentTests(unittest.TestCase):
     def test_options_with_values_do_not_take_a_crate_s_place(self):
         got = cargosrc.parse_install(["--features", "x,y", "-F", "z", "--bin", "b", "--root", "/r", "--target", "t", "-j", "4",
                                       "--profile", "release", "--config", "k=v", "a", "--locked", "--force", "-q"])
-        self.assertEqual(got, ([("a", None)], True, False))
+        self.assertEqual((got.crates, got.locked, got.offline), ([("a", None)], True, False))
 
-    def test_after_two_dashes_nothing_is_read(self):
-        self.assertEqual(cargosrc.parse_install(["a", "--", "--git", "b"]).crates, [("a", None)])
+    def test_after_two_dashes_every_argument_is_a_crate(self):
+        # (cargo reads them so: the guard stopped reading there, and cargo installed a crate it never checked)
+        self.assertEqual(cargosrc.parse_install(["a", "--", "b"]).crates, [("a", None), ("b", None)])
+        with self.assertRaisesRegex(ValueError, "not a crate name"):
+            cargosrc.parse_install(["a", "--", "--git"])
 
     def test_what_the_guard_does_not_read(self):
         for args in (["--git", "https://x/y", "a"], ["--git=https://x/y"], ["--path", "."], ["--path=."], ["--list"], ["--index", "u", "a"],
@@ -312,16 +389,18 @@ class InstallArgumentTests(unittest.TestCase):
 
 class ProjectArgumentTests(unittest.TestCase):
     def test_the_options_that_matter(self):
-        self.assertEqual(cargosrc.parse_project(["--release"]), (None, False, False))
-        self.assertEqual(cargosrc.parse_project(["--manifest-path", "x/Cargo.toml", "--locked"]), ("x/Cargo.toml", True, False))
-        self.assertEqual(cargosrc.parse_project(["--manifest-path=y/Cargo.toml", "--offline"]), ("y/Cargo.toml", False, True))
-        self.assertEqual(cargosrc.parse_project(["--frozen"]), (None, True, True))
+        self.assertEqual(cargosrc.parse_project(["--release"]), (None, False, False, []))
+        self.assertEqual(cargosrc.parse_project(["--manifest-path", "x/Cargo.toml", "--locked"]), ("x/Cargo.toml", True, False, []))
+        self.assertEqual(cargosrc.parse_project(["--manifest-path=y/Cargo.toml", "--offline"]), ("y/Cargo.toml", False, True, []))
+        self.assertEqual(cargosrc.parse_project(["--frozen"]), (None, True, True, []))
+        self.assertEqual(cargosrc.parse_project(["--config", "a=1", "--config=b.toml"]), (None, False, False, ["a=1", "b.toml"]))
 
     def test_what_comes_after_two_dashes_is_the_programs(self):
-        self.assertEqual(cargosrc.parse_project(["--locked", "--", "--offline", "--manifest-path", "z"]), (None, True, False))
+        self.assertEqual(cargosrc.parse_project(["--locked", "--", "--offline", "--manifest-path", "z", "--config", "x"]),
+                         (None, True, False, []))
 
     def test_a_manifest_path_with_no_value_is_none(self):
-        self.assertEqual(cargosrc.parse_project(["--manifest-path"]), (None, False, False))
+        self.assertEqual(cargosrc.parse_project(["--manifest-path"]), (None, False, False, []))
 
 
 class CargoFolderTests(TmpCase):

@@ -166,7 +166,8 @@ class VersionTests(unittest.TestCase):
 class WhatIsReadTests(unittest.TestCase):
     def test_not_text_is_nothing(self):
         for value in (None, 5, b"module m", [], {}):
-            self.assertEqual(gomod.parse(value), {"module": None, "go": None, "require": [], "replace": []})
+            self.assertEqual(gomod.parse(value), {"module": None, "go": None, "require": [], "replace": [], "use": [],
+                                                  "unversioned": [], "dropped": 0})
 
     def test_the_module_line(self):
         self.assertEqual(gomod.parse("module a.example/m\n")["module"], "a.example/m")
@@ -184,7 +185,8 @@ class WhatIsReadTests(unittest.TestCase):
     def test_what_is_not_read(self):
         text = ("module m\nexclude a.example/x v1.0.0\nretract v1.0.0\ntoolchain go1.22.1\ngodebug x=y\nunknown thing\n"
                 "tool a.example/t\nrequire a.example/y v1.0.0\n")
-        self.assertEqual(gomod.parse(text), {"module": "m", "go": None, "require": [("a.example/y", "v1.0.0", False)], "replace": []})
+        self.assertEqual(gomod.parse(text), {"module": "m", "go": None, "require": [("a.example/y", "v1.0.0", False)], "replace": [],
+                                             "use": [], "unversioned": [], "dropped": 0})
 
     def test_the_text_is_cut_at_the_limit(self):
         text = "module m\n" + " " * gomod.MAX_GOMOD + "\nrequire a.example/x v1.0.0\n"
@@ -207,6 +209,26 @@ class WhatIsReadTests(unittest.TestCase):
         text = "".join("require a.example/x%d v1.0.0\n" % i for i in range(10))
         with mock.patch.object(gomod, "MAX_REQUIRES", 3):
             self.assertEqual(len(gomod.parse(text)["require"]), 3)
+
+    def test_what_is_not_read_is_counted_and_a_long_version_is_no_version(self):
+        """(the Go/Rust review's SCA-3: a requirement Go reads, with a version over MAX_VERSION characters or a path in an
+        escape this reader did not read, was dropped and nothing said so)"""
+        long_version = "v1.0.0-" + "a" * 94
+        text = ("go 1.22\nrequire evil.example/x " + long_version + "\nrequire \"evil.example\\x2fy\" v1.0.0\n"
+                "require \"evil.example/z\" v1.0.0 // indirect\nrequire good.example/w v1.0.0\nrequire bad.example/q latest\n"
+                "require a.example/no\nreplace a.example/x => b.example/y \"v1\\q\"\n")
+        got = gomod.parse(text)
+        self.assertEqual(got["require"], [("evil.example/y", "v1.0.0", False), ("evil.example/z", "v1.0.0", True),
+                                          ("good.example/w", "v1.0.0", False)])
+        self.assertEqual((got["unversioned"], got["dropped"]), ([("evil.example/x", False)], 3))
+        with mock.patch.object(gomod, "MAX_REQUIRES", 2):
+            got = gomod.parse("".join("require a.example/x%d v1.0.0\n" % i for i in range(5)))
+            self.assertEqual((len(got["require"]), got["dropped"]), (2, 3))
+
+    def test_a_go_work_names_its_modules(self):
+        got = gomod.parse('go 1.22\n\nuse ./a\nuse (\n\t./b\n\t"./c d"\n\t../out\n)\nuse x y\nreplace a.example/x => ./x\n')
+        self.assertEqual(got["use"], ["./a", "./b", "./c d", "../out"])
+        self.assertEqual((got["replace"], got["dropped"]), ([("a.example/x", "", "./x", "")], 1))
 
     def test_the_constants_are_gos(self):
         self.assertEqual((gomod.MAX_GOMOD, gomod.MAX_VERSION), (16 * 1024 * 1024, 100))

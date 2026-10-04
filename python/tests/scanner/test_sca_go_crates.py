@@ -277,7 +277,9 @@ class GoSumTests(Project):
                 self.put("go.sum", self.SUM)
                 self.assertEqual(self.go(), [
                     ("go", "a.example/x", "v1.0.0", "go.mod"),
-                    ("go", "a.example/x", "v1.9.0", "go.sum"),             # (v1.9.0 is the highest with a zip hash)
+                    ("go", "a.example/x", "v1.0.0", "go.sum"),             # (every version with a zip hash: SCA-5)
+                    ("go", "a.example/x", "v1.2.0", "go.sum"),
+                    ("go", "a.example/x", "v1.9.0", "go.sum"),
                     ("go", "c.example/z", "v2.0.0+incompatible", "go.sum"),
                     ("go", "d.example/w", "v1.0.0", "go.sum")])
 
@@ -291,14 +293,15 @@ class GoSumTests(Project):
     def test_go_sum_without_a_go_mod(self):
         self.put("go.sum", self.SUM)
         self.assertEqual([(n, v) for _e, n, v, _w in self.go()],
-                         [("a.example/x", "v1.9.0"), ("c.example/z", "v2.0.0+incompatible"), ("d.example/w", "v1.0.0")])
+                         [("a.example/x", "v1.0.0"), ("a.example/x", "v1.2.0"), ("a.example/x", "v1.9.0"),
+                          ("c.example/z", "v2.0.0+incompatible"), ("d.example/w", "v1.0.0")])
 
     def test_a_go_mod_that_cannot_be_read_leaves_go_sum_to_be(self):
         os.makedirs(os.path.join(self.root, "target"))
         self.put("target/go.mod", "module m\ngo 1.21\nrequire a.example/x v1.0.0\n")
         os.symlink("target/go.mod", os.path.join(self.root, "go.mod"))
         self.put("go.sum", self.SUM)
-        self.assertEqual(len(self.go()), 3)
+        self.assertEqual(len(self.go()), 5)
         self.assertEqual(self.warn.lines(), ["1 unreadable go.mod file(s)"])
 
     def test_go_sum_that_cannot_be_read_is_counted(self):
@@ -306,26 +309,27 @@ class GoSumTests(Project):
         self.assertEqual(self.go(), [])
         self.assertEqual(self.warn.lines(), ["1 unreadable go.sum file(s)"])
 
-    def test_the_highest_version_is_the_semver_highest(self):
+    def test_every_version_with_a_zip_hash_in_semver_order(self):
+        """(the Go/Rust review's SCA-5: only each module's highest was kept, and a line left from before a downgrade, higher
+        than the version built, hid the one built from its advisories)"""
         self.put("go.sum", "a.example/x v1.10.0 h1:A=\na.example/x v1.9.0 h1:B=\na.example/x v1.10.0-rc.1 h1:C=\n"
                            "a.example/x v1.2.0 h1:D=\n")
-        self.assertEqual([v for _e, _n, v, _w in self.go()], ["v1.10.0"])
+        self.assertEqual([v for _e, _n, v, _w in self.go()], ["v1.2.0", "v1.9.0", "v1.10.0-rc.1", "v1.10.0"])
         self.put("go.sum", "a.example/x v0.0.0-20200101000000-aaaaaaaaaaaa h1:A=\na.example/x v0.0.0-20210101000000-bbbbbbbbbbbb h1:B=\n"
                            "a.example/x v0.0.0-20190101000000-cccccccccccc h1:C=\n")
-        self.assertEqual([v for _e, _n, v, _w in self.go()], ["v0.0.0-20210101000000-bbbbbbbbbbbb"])
+        self.assertEqual([v for _e, _n, v, _w in self.go()], ["v0.0.0-20190101000000-cccccccccccc",
+                                                              "v0.0.0-20200101000000-aaaaaaaaaaaa", "v0.0.0-20210101000000-bbbbbbbbbbbb"])
 
-    def test_the_number_of_lines_and_of_modules_is_bounded(self):
+    def test_the_number_of_lines_and_of_modules_is_bounded_and_counted(self):
         text = "".join("a.example/x%d v1.0.0 h1:A=\n" % i for i in range(10))
         self.put("go.sum", text)
         with mock.patch.object(sca, "MAX_GO_SUM_LINES", 4):
             self.assertEqual(len(self.go()), 4)
+            self.assertEqual(self.warn.lines(), ["7 go.sum line(s) past the limit (not read)"])       # (10 lines and the last, empty)
+        self.warn = sca._Warnings()
         with mock.patch.object(sca, "MAX_GO_MODULES", 3):
             self.assertEqual(len(self.go()), 3)
-        with mock.patch.object(sca, "MAX_GO_MODULES", 3):             # (a module already held is still raised)
-            self.put("go.sum", "a.example/a v1.0.0 h1:A=\na.example/b v1.0.0 h1:A=\na.example/c v1.0.0 h1:A=\n"
-                               "a.example/d v1.0.0 h1:A=\na.example/a v1.5.0 h1:B=\n")
-            self.assertEqual([(n, v) for _e, n, v, _w in self.go()], [("a.example/a", "v1.5.0"), ("a.example/b", "v1.0.0"),
-                                                                      ("a.example/c", "v1.0.0")])
+            self.assertEqual(self.warn.lines(), ["7 go.sum module version(s) past the limit (not read)"])
 
     def test_go_sum_names_without_a_dot_are_no_modules(self):
         self.put("go.sum", "stdlib v1.0.0 h1:A=\na.example/x v1.0.0 h1:A=\n")
@@ -346,11 +350,16 @@ class GoVendorTests(Project):
                "e.example/fork\n"
                "# f.example/v => g.example/u v1.0.0\n"
                "# h.example/t latest\n"
+               "## explicit\n"
                "# i.example/s v1.0.0 => i.example/s v1.0.0 extra\n"
+               "## explicit\n"
                "# j.example/r v1.0.0 => j.example/r bad\n"
+               "## explicit\n"
                "#k.example/q v1.0.0\n"
                "## not a module line v1.0.0\n"
-               "# l.example/p v1\n")
+               "# l.example/p v1\n"
+               "## explicit\n"
+               "# m.example/o v1.0.0 => n.example/fork v1.0.1\n")         # (a replacement go mod vendor records, unused)
 
     def test_the_modules_that_are_built(self):
         self.put("vendor/modules.txt", self.MODULES)
@@ -381,13 +390,121 @@ class GoVendorTests(Project):
         self.assertEqual(sca.scan_all(self.root), [("go", "a.example/x", "v1.2.3", "go.mod")])
 
     def test_the_number_of_lines_is_bounded(self):
-        self.put("vendor/modules.txt", "".join("# a.example/x%d v1.0.0\n" % i for i in range(10)))
+        self.put("vendor/modules.txt", "".join("# a.example/x%d v1.0.0\n## explicit\n" % i for i in range(10)))
         with mock.patch.object(sca, "MAX_GO_SUM_LINES", 4):
-            self.assertEqual(len(self.go()), 4)
+            self.assertEqual(len(self.go()), 2)
+            self.assertEqual(self.warn.lines(), ["17 vendor/modules.txt line(s) past the limit (not read)"])
 
     def test_a_path_without_a_dot_is_no_module(self):
-        self.put("vendor/modules.txt", "# stdlib v1.0.0\n# a.example/x v1.0.0\n")
+        self.put("vendor/modules.txt", "# stdlib v1.0.0\n## explicit\n# a.example/x v1.0.0\na.example/x\n")
         self.assertEqual([n for _e, n, _v, _w in self.go()], ["a.example/x"])
+
+    def test_a_replacement_nothing_follows_is_not_a_module_that_is_built(self):
+        """`go mod vendor` (1.17 on) records the replacements it does not use at the end of modules.txt, a `# ` line with nothing
+        after it (the Go/Rust review's SCA-6: they were read as modules that are built, and every advisory of the replaced
+        module was unknown)."""
+        self.put("vendor/modules.txt", "# a.example/x v1.1.0 => ./x\n## explicit; go 1.21\na.example/x\n"
+                                       "# a.example/x v1.0.0 => b.example/fork v1.0.1\n")
+        self.assertEqual(self.go(), [])
+
+
+class ReviewTests(Project):
+    """What the Go/Rust review (Oct 4, 2026) found the inventory left out or got wrong, held as it is now."""
+
+    def test_the_modules_of_a_go_work_are_read(self):
+        """SCA-1: a workspace's modules were never read, and the gate did not notice (no Go dependency was found)."""
+        self.put("package.json", '{"name": "app"}')
+        self.put("go.work", "go 1.22\n\nuse (\n\t./svc-a\n\t./svc-b\n\t../outside\n)\n\nreplace a.example/x => b.example/fork v1.0.1\n")
+        self.put("svc-a/go.mod", "module m/a\n\ngo 1.22\n\nrequire (\n\tgolang.org/x/net v0.17.0\n\ta.example/x v1.0.0\n)\n\n"
+                                 "replace a.example/x => ./local\n")
+        self.put("svc-b/go.mod", "module m/b\n\ngo 1.22\n\nrequire c.example/y v2.0.0\n")
+        self.assertEqual(sorted((n, v, w) for _e, n, v, w in self.go()), [
+            ("a.example/x", "", "svc-a/go.mod (replaced by b.example/fork)"),        # (go.work's replace wins over the module's)
+            ("b.example/fork", "v1.0.1", "svc-a/go.mod (replaces a.example/x)"),
+            ("c.example/y", "v2.0.0", "svc-b/go.mod"),
+            ("golang.org/x/net", "v0.17.0", "svc-a/go.mod")])
+        self.assertEqual(self.warn.lines(), ["1 go.work use line(s) outside the project or of no folder (not read)"])
+
+    def test_a_go_mod_below_the_root_that_nothing_read_is_counted(self):
+        self.put("go.mod", "module m\n\ngo 1.22\n\nrequire a.example/x v1.0.0\n\nreplace a.example/y => ./libs/y\n")
+        self.put("tools/go.mod", "module m/tools\n\ngo 1.22\n")
+        self.put("libs/y/go.mod", "module a.example/y\n")                                  # (a directory a module is replaced by)
+        self.put("testdata/x/go.mod", "module t\n")                                       # (and folders of tools are passed over)
+        self.put("node_modules/p/go.mod", "module t\n")
+        self.put(".git/go.mod", "module t\n")
+        self.go()
+        self.assertEqual(self.warn.lines(), ["1 go.mod file(s) below the root not in a go.work (not read: tools)"])
+
+    def test_a_lock_entry_with_no_version_is_kept_beside_a_known_version(self):
+        """SCA-2: dedup dropped an entry with no version when a version of the name was known, and a git crate in Cargo.lock
+        beside the crates.io one (or a module a fork replaces) was then neither matched nor unknown."""
+        self.put("Cargo.lock", '[[package]]\nname = "smallvec"\nversion = "1.13.2"\nsource = "registry+https://example.invalid/"\n\n'
+                               '[[package]]\nname = "smallvec"\nversion = "0.6.9"\nsource = "git+https://example.invalid/smallvec#abc"\n')
+        self.put("Cargo.toml", '[dependencies]\nsmallvec = "1"\n')
+        got = [(n, v, w) for _e, n, v, w in sca.scan_all(self.root)]
+        self.assertEqual(got, [("smallvec", "1.13.2", "Cargo.lock"), ("smallvec", "", "Cargo.lock (git source)")])   # (the range: gone)
+
+    def test_the_original_of_a_module_a_fork_replaces_is_kept_beside_a_known_version(self):
+        self.put("go.mod", "module m\n\ngo 1.16\n\nrequire a.example/x v1.0.0\n\nreplace a.example/x => b.example/fork v1.0.1\n")
+        self.put("go.sum", "a.example/x v1.0.0 h1:A=\nb.example/fork v1.0.1 h1:B=\n")
+        got = sorted((n, v) for _e, n, v, _w in sca.scan_all(self.root))
+        self.assertEqual(got, [("a.example/x", ""), ("b.example/fork", "v1.0.1")])          # (x is unknown, never matched as built)
+
+    def test_a_declared_range_is_still_made_redundant_by_a_version(self):
+        inv = sca.Inventory([("npm", "lodash", "", sca.Declared("package.json(dependencies) unresolvable:^4")),
+                             ("npm", "lodash", "4.17.21", "package-lock.json"), ("npm", "lodash", "", "package-lock.json")])
+        self.assertEqual(inv.dedup(), [("npm", "lodash", "4.17.21", "package-lock.json"), ("npm", "lodash", "", "package-lock.json")])
+
+    def test_requirements_go_reads_are_read(self):
+        """SCA-3: a version longer than 100 characters and a path with an escape other than \\" and \\\\ dropped the line, with
+        nothing said; a module could hide from its advisories so."""
+        long_version = "v1.0.0-" + "a" * 94
+        self.put("go.mod", "module m\n\ngo 1.22\n\nrequire (\n\tevil.example/x " + long_version + "\n\t\"evil.example\\x2fy\" v1.0.0\n"
+                           "\t\"evil.example/z\" v1.0.0\n\tgood.example/w v1.0.0\n\tbad.example/q latest\n)\n")
+        self.assertEqual(sorted((n, v, w) for _e, n, v, w in self.go()), [
+            ("evil.example/x", "", "go.mod (version not read)"), ("evil.example/y", "v1.0.0", "go.mod"),
+            ("evil.example/z", "v1.0.0", "go.mod"), ("good.example/w", "v1.0.0", "go.mod")])
+        self.assertEqual(self.warn.lines(), ["1 go.mod line(s) not read (a path or version this reader cannot read, or past a limit)"])
+
+    def test_a_module_go_sum_alone_shows_replaced_is_in_the_build_with_no_version(self):
+        """SCA-5: a transitive module (go 1.16: not in go.mod) that a fork replaces was left out; its advisories were silent."""
+        self.put("go.mod", "module m\n\ngo 1.16\n\nrequire a.example/top v1.4.0\n\nreplace x.example/dep => y.example/fork v1.0.1\n")
+        self.put("go.sum", "a.example/top v1.4.0 h1:A=\ny.example/fork v1.0.1 h1:C=\ny.example/fork v1.0.1/go.mod h1:D=\n")
+        self.assertEqual(sorted((n, v) for _e, n, v, _w in self.go()),
+                         [("a.example/top", "v1.4.0"), ("a.example/top", "v1.4.0"), ("x.example/dep", ""), ("y.example/fork", "v1.0.1")])
+
+    def test_replacements_are_looked_up_not_read_through(self):
+        """SCA-7: each requirement read every replace line: 20,000 of each, all for one module, took 12 s."""
+        lines = ["module m", "go 1.21", "require ("] + ["\ta.example/x v1.0.%d" % i for i in range(20000)] + [")", "replace ("]
+        lines += ["\ta.example/x v2.0.%d => ./d" % i for i in range(20000)] + [")"]
+        self.put("go.mod", "\n".join(lines) + "\n")
+        started = datetime.datetime.now()
+        self.assertEqual(len(self.go()), 20000)
+        self.assertLess((datetime.datetime.now() - started).total_seconds(), 5)
+
+    def test_the_members_of_a_cargo_workspace_without_a_lock_are_read(self):
+        """SCA-1: a virtual workspace's members were not read when there was no Cargo.lock."""
+        self.put("Cargo.toml", '[workspace]\nmembers = ["crates/*", "tools/gen", "../escape"]\nexclude = ["crates/skip"]\n'
+                               '[workspace.dependencies]\nserde = "=1.0.0"\n')
+        self.put("crates/a/Cargo.toml", '[package]\nname = "a"\n[dependencies]\ntime = "=0.2.22"\nserde = { workspace = true }\n')
+        self.put("crates/skip/Cargo.toml", '[dependencies]\nskipped = "=1.0.0"\n')
+        self.put("crates/notacrate/README", "x")
+        self.put("tools/gen/Cargo.toml", '[dependencies]\nregex = "1"\n')
+        self.assertEqual(sorted((n, v, w) for _e, n, v, w in self.crates()), [
+            ("regex", "", "tools/gen/Cargo.toml(dependencies) range: 1"),
+            ("serde", "1.0.0", "Cargo.toml(workspace.dependencies)"),
+            ("time", "0.2.22", "crates/a/Cargo.toml(dependencies)")])
+        self.assertEqual(self.warn.lines(), ["1 Cargo workspace member(s) outside the project (not read)"])
+
+    def test_a_cargo_lock_below_the_root_is_counted(self):
+        self.put("Cargo.toml", '[workspace]\nmembers = ["a"]\n')
+        self.put("a/Cargo.toml", '[package]\nname = "a"\n')
+        self.put("other/Cargo.toml", '[package]\nname = "o"\n')
+        self.put("other/Cargo.lock", "version = 3\n")
+        self.put("target/x/Cargo.toml", "")
+        self.put("target/x/Cargo.lock", "")
+        self.crates()
+        self.assertEqual(self.warn.lines(), ["1 Cargo.lock file(s) below the root, of other workspaces (not read: other)"])
 
 
 # ---------------------------------------------------------------------------
@@ -613,6 +730,7 @@ class CargoTomlTests(Project):
         text = "".join("[target.'cfg(a%d)'.dependencies]\nc%d = \"=1.0.0\"\n" % (i, i) for i in range(205))
         self.put("Cargo.toml", text)
         self.assertEqual(len(self.crates()), 200)
+        self.assertEqual(self.warn.lines(), ["5 Cargo.toml target table(s) past the limit (not read)"])
 
     def test_the_lock_makes_a_range_in_the_manifest_redundant(self):
         self.put("Cargo.toml", '[dependencies]\ntime = "0.2"\nserde = "1"\n')

@@ -43,24 +43,30 @@ proxies GOPROXY lists and scans each module zip before the command gets it: a SU
 then fails, and go.mod, go.sum and go.work.sum are put back), and so is one younger than --min-age (its
 release time is the proxy's: the commit or tag time its author recorded, so a module author can backdate it).
 go checks what it is handed against go.sum and the checksum database as ever, so what it accepts is what was
-scanned. Modules go takes from version control (GOPRIVATE, GONOPROXY) do not come through the proxy: they are
-noted, and anything else that reaches the module cache unchecked fails the run. Modules already in the cache
-are not fetched again, so not checked. What the scan reads in a module is what it reads in any archive
-(JavaScript and Python files, install hooks, binaries, the structure of the zip); its Go rules read `.go`
-files once the engine routes them (0.1.9, S-4).
+scanned. The proxy answers only the command's secret path and its own Host (LocalGate). Modules go takes without
+asking the proxy (those already in its module cache, those GONOPROXY names, fetched from their repositories) are
+listed with `go mod download -json` and scanned where go keeps them: before a command that builds a program, after
+one that resolves; anything else that reaches the module cache unchecked fails the run. What the scan reads in a
+module is what it reads in any archive (JavaScript and Python files, install hooks, binaries, the structure of the
+zip); its Go rules read `.go` files once the engine routes them (0.1.9, S-4).
 
 cargo: the resolution is made first (cargo add and update are that themselves; for the commands that build, `cargo update
---workspace`; for `cargo install`, a project of its own that needs only the crate, or with --locked the Cargo.lock the crate
-was published with), then Cargo.lock is read. Every crates.io crate in it that cargo has not unpacked is read from cargo's
-cache or fetched from where cargo fetches it (cargo's source replacement for crates.io is followed: a mirror with a sparse
-index), checked against the lockfile's checksum and scanned in memory as a `.crate`; a SUSPICIOUS one, one that could not be
-checked or one younger than --min-age (the index's `pubtime`, else crates.io's API) blocks the command and Cargo.toml and
-Cargo.lock are put back. Only then does cargo fetch and build, which is when build scripts and procedural macros run. Cargo.lock
-lists the crates of every platform, so the guard checks those cargo would not build here too (a verdict is kept by checksum:
-once). A crate from git, from a registry with a git index, or from a registry that wants credentials, is noted, not checked; a
-crates.io replaced by a vendor folder, a local registry or a git source is not checked at all. Not wrapped: `cargo install`
-of a git repository or a folder, --registry, --index, and the credentials of registries. What the scan reads in a crate is what
-it reads in any archive; its Rust rules (build.rs, procedural macros) read `.rs` files once the engine routes them (0.1.9, S-4).
+--workspace`; for `cargo install`, a project of its own that needs only the crate, with the features asked for, or with
+--locked the Cargo.lock the crate was published with), then Cargo.lock is read. Every crates.io crate in it, those cargo has
+unpacked already too, is read from cargo's cache or fetched from where cargo fetches it (cargo's configuration as cargo merges
+it: source replacement, [registries], include, --config), checked against the lockfile's checksum and scanned in memory as a
+`.crate`; a SUSPICIOUS one, one that could not be checked or one younger than --min-age (the index's `pubtime`, else
+crates.io's API) blocks the command and Cargo.toml and Cargo.lock are put back. Only then does cargo fetch and build, with
+--locked (`cargo install NAME@=VERSION`), which is when build scripts and procedural macros run. Cargo.lock lists the crates
+of every platform, so the guard checks those cargo would not build here too (a verdict is kept by checksum: once). A crate
+from git, a vendor folder or a local registry, from a registry with a git index, or from one that wants credentials, is
+INCOMPLETE, not checked. Not wrapped: `cargo install` of a git repository or a folder, --registry, --index, and the
+credentials of registries. What the scan reads in a crate is what it reads in any archive; its Rust rules (build.rs,
+procedural macros) read `.rs` files once the engine routes them (0.1.9, S-4).
+
+The resolutions made outside the project (cargo install, yarn 1, npm install -g, go install pkg@version, --plan) are made
+in a folder of the user's own (private_scratch), and the package manager is found in PATH's absolute folders only
+(scanner/programs.py).
 
 A private registry or index is used with the credentials the tool's own
 settings give for it (lazaret.registry.pmsettings), sent to that host only.
@@ -82,12 +88,15 @@ import html.parser
 import http.client
 import http.server
 import ipaddress
+import itertools
 import json
 import os
 import platform
 import re
+import secrets
 import shutil
 import socketserver
+import stat
 import subprocess
 import sys
 import tempfile
@@ -98,7 +107,7 @@ import urllib.parse
 import urllib.request
 
 from lazaret.scanner import core as lazaret
-from lazaret.scanner import sca, timings
+from lazaret.scanner import gomod, programs, sca, timings
 from lazaret.registry import cargosrc, goproxy, keepalive as keepalive_, pmsettings, repo, scanpool
 from lazaret.registry.ecosystems import crates, golang
 
@@ -215,6 +224,11 @@ def netloc(url):
         return urllib.parse.urlsplit(url).netloc.rpartition("@")[2].lower()
     except ValueError:
         return ""
+
+
+class TooLarge(repo.FetchError):
+    """A response over the bytes the guard reads: more than it scans, which is not a failure of the package's (a typed error, not
+    a message: a message is text a server can choose)."""
 
 
 class Fetcher:
@@ -369,14 +383,14 @@ class Fetcher:
                 headers["Authorization"] = header
 
     def fetch(self, url, max_bytes=repo.MAX_DOWNLOAD_BYTES, accept=None, timeout=repo.DOWNLOAD_TIMEOUT):
-        """-> (body, response headers)."""
+        """-> (body, response headers). TooLarge for a response over `max_bytes`."""
         clean = pmsettings.shown(url)
         too_big = f"response over {max_bytes // (1024 * 1024)}MB: {clean}"
         with self.open(url, accept, timeout) as r:
             try:
                 length = r.headers.get("Content-Length")
                 if length and length.isdigit() and int(length) > max_bytes:
-                    raise repo.FetchError(too_big)
+                    raise TooLarge(too_big)
                 buf = bytearray()
                 with timings.span("network", "read"):
                     while True:
@@ -385,7 +399,7 @@ class Fetcher:
                             break
                         buf.extend(chunk)
                         if len(buf) > max_bytes:
-                            raise repo.FetchError(too_big)
+                            raise TooLarge(too_big)
                 if length and length.isdigit() and len(buf) != int(length):
                     raise repo.FetchError(f"incomplete response ({len(buf)} of {length} bytes): {clean}")
                 return bytes(buf), r.headers
@@ -394,6 +408,33 @@ class Fetcher:
 
     def get(self, url, max_bytes=repo.MAX_DOWNLOAD_BYTES, accept=None, timeout=repo.DOWNLOAD_TIMEOUT):
         return self.fetch(url, max_bytes, accept, timeout)[0]
+
+    def fetch_to_file(self, url, path, max_bytes, timeout=repo.DOWNLOAD_TIMEOUT):
+        """Write the body of url to `path` (truncated first), as it comes -> (size, its SHA-256 hex). TooLarge past
+        `max_bytes`."""
+        clean = pmsettings.shown(url)
+        too_big = f"response over {max_bytes // (1024 * 1024)}MB: {clean}"
+        digest, size = hashlib.sha256(), 0
+        with self.open(url, None, timeout) as r, open(path, "wb") as out:
+            try:
+                length = r.headers.get("Content-Length")
+                if length and length.isdigit() and int(length) > max_bytes:
+                    raise TooLarge(too_big)
+                with timings.span("network", "read"):
+                    while True:
+                        chunk = r.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        size += len(chunk)
+                        if size > max_bytes:
+                            raise TooLarge(too_big)
+                        digest.update(chunk)
+                        out.write(chunk)
+                if length and length.isdigit() and size != int(length):
+                    raise repo.FetchError(f"incomplete response ({size} of {length} bytes): {clean}")
+            except (OSError, http.client.HTTPException) as exc:
+                raise repo.FetchError(f"network error fetching {clean}: {exc}") from exc
+        return size, digest.hexdigest()
 
     def json(self, url, accept="application/json"):
         return repo._deep_safe_loads(self.get(url, MAX_DOCUMENT, accept, repo.METADATA_TIMEOUT),
@@ -507,6 +548,51 @@ def default_cache_path():
         return explicit
     base = os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache")
     return os.path.join(base, "lazaret", "guard-verdicts.json")
+
+
+def _shared_above(path):
+    """Is `path`, or a folder above it, one another user can write to (world-writable, as /tmp is on Linux)?"""
+    if os.name == "nt":
+        return False                    # (Windows' temporary folder is each user's own)
+    here = os.path.abspath(path)
+    while True:
+        try:
+            if os.stat(here).st_mode & stat.S_IWOTH:
+                return True
+        except OSError:
+            return True
+        parent = os.path.dirname(here)
+        if parent == here:
+            return False
+        here = parent
+
+
+def private_scratch(prefix):
+    """A new folder (mode 0700) for a package manager to work in on the guard's behalf, where no folder above it is one
+    another user can write to: LAZARET_GUARD_SCRATCH when it is set (taken as given), else the user's cache folder
+    (XDG_CACHE_HOME or ~/.cache, lazaret/tmp), else the system's temporary folder when that is the user's own (macOS's,
+    Windows'). cargo, rustup, yarn, npm and go read settings from every folder above the one they run in (cargo's
+    configuration and workspace, rustup's toolchain file, yarn's `yarn-path`, npm's workspace root, go.work), so a file
+    another user put in a shared /tmp could make the guard run their program or check nothing (the Go/Rust review's CG-1).
+    GuardError when there is no such folder."""
+    explicit = os.environ.get("LAZARET_GUARD_SCRATCH")
+    if explicit:
+        os.makedirs(explicit, mode=0o700, exist_ok=True)
+        return tempfile.mkdtemp(prefix=prefix, dir=explicit)
+    cache = os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache")
+    for base in (os.path.join(cache, "lazaret", "tmp"), tempfile.gettempdir()):
+        try:
+            os.makedirs(base, mode=0o700, exist_ok=True)
+        except OSError:
+            continue
+        if _shared_above(base):
+            continue
+        try:
+            return tempfile.mkdtemp(prefix=prefix, dir=base)
+        except OSError:
+            continue
+    raise GuardError("no folder of your own to work in: the cache folder cannot be made and the temporary folder is one other "
+                     "users can write to; set LAZARET_GUARD_SCRATCH (or XDG_CACHE_HOME) to a folder only you can write to")
 
 
 def _scan_one(data, container, kind, timeout, timed=False):
@@ -847,7 +933,7 @@ def node_platform(env=None):
     process.platform and process.arch; glibc or musl on Linux. None where it
     can't be told (a field then filters nothing)."""
     plat = arch = None
-    node = shutil.which("node", path=(env or os.environ).get("PATH"))
+    node = programs.find("node", (env or os.environ).get("PATH"))
     if node:
         try:
             out = subprocess.run([node, "-p", "process.platform + ' ' + process.arch"], env=env,
@@ -994,6 +1080,8 @@ class Context:
         self.skipped_platform = 0           # lockfile packages for other platforms, left out
         self.expected = set()               # (name key, version) the tool may install: checked or noted
         self.unchecked = []                 # installed, but not checked (verify_installed)
+        self.age_unknown = []               # releases whose publish time is not known (--min-age could not hold them)
+        self.notes = []                     # what else the run has to say (one line each)
         self.unchecked_hint = "the registry changed while the guard checked; run it again, or remove them"
 
     def matches(self, patterns, eco, name):
@@ -1025,8 +1113,15 @@ class Context:
             self.block(check, f"{check.verdict} (--block-warn): {check.reason}")
 
     def age_check(self, check, published):
-        """Block a release younger than --min-age (unless --allow-new names it)."""
+        """Block a release younger than --min-age (unless --allow-new names it). One whose publish time is not known (a
+        mirror that does not say, an answer that failed) is said at the end of the run, and blocked under --block-warn: it
+        used to pass with nothing said (the Go/Rust review's CG-4 and GO-9)."""
         if published is None:
+            if self.cutoff is not None and not self.matches(self.opts.allow_new, check.eco, check.name):
+                with self.lock:
+                    self.age_unknown.append(check.label())
+                if self.opts.block_warn:
+                    self.block(check, "its publish time is not known, so --min-age cannot hold it (--block-warn)")
             return
         check.age = int((now() - published).total_seconds())
         if self.cutoff is None or published <= self.cutoff:
@@ -1040,7 +1135,7 @@ class Context:
     def not_checked(self, check, exc):
         """A package that could not be fetched or scanned: blocked (the guard
         fails closed), except a file too large to scan, which is INCOMPLETE."""
-        if "response over" in str(exc):
+        if isinstance(exc, TooLarge):
             self.apply(check, {"verdict": "INCOMPLETE", "indicators": [],
                                "reason": f"larger than the {repo.MAX_DOWNLOAD_BYTES // (1024 * 1024)}MB the guard "
                                          f"scans, not scanned"})
@@ -1364,6 +1459,7 @@ class PypiIndex:
         self.results = {}         # number -> (Check, spooled file or None)
         self.held_back = {}       # project -> {version: upload time}
         self.planned = None       # pip's plan: the numbers of its files, when every one came from this index
+        self.prefix = ""          # the path its pages' links to files start with (the server's secret segment)
         self.errors = []          # what the index could not fetch (for the report, not the tool)
         self.lock = threading.Lock()
         self.number_locks = {}
@@ -1436,7 +1532,7 @@ class PypiIndex:
                                           "size": f.get("size") if isinstance(f.get("size"), int) else None}
                 self.fetcher.allow(upstream)
                 g = dict(f)
-                g["url"] = f"/files/{number}/{urllib.parse.quote(filename)}"
+                g["url"] = f"{self.prefix}/files/{number}/{urllib.parse.quote(filename)}"
                 kept.append(g)
         if undated and self.ctx.cutoff is not None:
             self.note(f"{project}: the index gives no upload times, so --min-age could not hold back its "
@@ -1477,8 +1573,7 @@ class PypiIndex:
                 if container is None:
                     raise repo.FetchError("not an archive pip or uv installs")
                 if info["size"] is not None and info["size"] > repo.MAX_DOWNLOAD_BYTES:
-                    raise repo.FetchError(f"response over {repo.MAX_DOWNLOAD_BYTES // (1024 * 1024)}MB: "
-                                          f"{info['filename']}")
+                    raise TooLarge(f"response over {repo.MAX_DOWNLOAD_BYTES // (1024 * 1024)}MB: {info['filename']}")
                 data = self.fetcher.get(info["url"])
                 sha = hashlib.sha256(data).hexdigest()
                 if info["sha256"] and sha != info["sha256"]:
@@ -1553,8 +1648,32 @@ def _html_page(doc):
     return ("<!DOCTYPE html><html><body>\n" + "\n".join(rows) + "\n</body></html>\n").encode("utf-8")
 
 
-def make_index_server(index):
-    """A threaded HTTP server on 127.0.0.1 (a free port) serving `index`."""
+class LocalGate:
+    """What lets a request through to one of the guard's servers on 127.0.0.1 (the Go proxy, the Python index): the run's
+    secret first path segment, which only the tool the guard runs is told (GOPROXY, PIP_INDEX_URL, UV_INDEX), and a Host
+    header naming the server as the tool was told it. Without them any process of the machine, another user's too, could ask
+    the server for what it relays with the user's credentials for the upstream, and a page in a browser could, by pointing a
+    name of its own at 127.0.0.1 (DNS rebinding: its own name is in the Host header) (the Go/Rust review's GO-3)."""
+
+    def __init__(self):
+        self.token = secrets.token_urlsafe(24)
+        self.host = None                    # "127.0.0.1:port", once the server has its port
+
+    def bind(self, port):
+        self.host = f"127.0.0.1:{port}"
+        return f"http://{self.host}/{self.token}"
+
+    def path(self, handler):
+        """The request's path below the secret segment (with its leading slash), or None for a request to refuse."""
+        if self.host is None or handler.headers.get("Host") != self.host:
+            return None
+        path = urllib.parse.urlsplit(handler.path).path
+        prefix = "/" + self.token + "/"
+        return path[len(prefix) - 1:] if path.startswith(prefix) else None
+
+
+def make_index_server(index, gate=None):
+    """A threaded HTTP server on 127.0.0.1 (a free port) serving `index`; with a LocalGate, only to the tool told its path."""
 
     class Handler(http.server.BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -1603,7 +1722,10 @@ def make_index_server(index):
             self.do_GET()
 
         def do_GET(self):
-            path = urllib.parse.urlsplit(self.path).path
+            path = urllib.parse.urlsplit(self.path).path if gate is None else gate.path(self)
+            if path is None:
+                self._send(404, b"not found\n")
+                return
             try:
                 m = _SIMPLE_PATH_RE.match(path)
                 if m is not None:
@@ -1713,10 +1835,13 @@ class Snapshot:
 
 
 def find_tool(name):
-    """The package manager's executable (after the command line was checked)."""
-    exe = shutil.which(name)
+    """The package manager's executable (after the command line was checked): the first in PATH's folders named by an absolute
+    path, never one in the current folder (programs.find): shutil.which looked in the current folder first on Windows, so a
+    project with a go.exe or an npm.cmd of its own ran it under the guard (the Go/Rust review's GO-8)."""
+    exe = programs.find(name)
     if exe is None:
-        raise GuardError(f"{name} is not on PATH")
+        raise GuardError(f"{name} is not on PATH (the guard looks in PATH's folders named by an absolute path, not in the "
+                         f"current folder)")
     return exe
 
 
@@ -1865,7 +1990,7 @@ def guard_npm(ctx, tool, args):
     exe = find_tool(tool)
     cwd = os.getcwd()
     env = dict(os.environ)
-    scratch = tempfile.mkdtemp(prefix="lazaret-guard-") if global_install else None
+    scratch = private_scratch("lazaret-guard-") if global_install else None
     try:
         if scratch:
             with open(os.path.join(scratch, "package.json"), "w", encoding="utf-8") as f:
@@ -1884,7 +2009,7 @@ def guard_npm(ctx, tool, args):
         before_install = set() if fresh else (installed_npm(tool, root) or set())
         try:
             code = _check_npm(ctx, tool, exe, sub, args, env, where, root, lock_names, registries,
-                              before_install)
+                              before_install, scratch=bool(scratch))
         except BaseException:
             snap.restore()
             raise
@@ -1901,13 +2026,16 @@ def guard_npm(ctx, tool, args):
             shutil.rmtree(scratch, ignore_errors=True)
 
 
-def _check_npm(ctx, tool, exe, sub, args, env, where, root, lock_names, registries, installed):
+def _check_npm(ctx, tool, exe, sub, args, env, where, root, lock_names, registries, installed, scratch=False):
     """Resolve, then check what the lockfile adds. -> None to go on and
     install, else the exit code (the resolution failed, something is blocked,
-    or --plan)."""
+    or --plan). `scratch`: `where` is the guard's own folder (a global
+    install's plan), which no project above it takes in as a workspace."""
     if sub not in NPM_CI:
         flags = ["--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund"] if tool == "npm" \
             else ["--lockfile-only", "--ignore-scripts"]
+        if scratch and tool == "npm":
+            flags.append("--workspaces=false")      # (npm looks above a project for a workspace root that names it)
         resolve = [exe] + [a for a in args if a not in _GLOBAL_FLAGS] + flags
         proc = run_tool(resolve, env, cwd=where, capture=True)
         if proc.returncode != 0:
@@ -2184,7 +2312,7 @@ def guard_yarn_classic(ctx, exe, env, cwd, sub, args):
         ctx.say(f"lazaret guard: releases younger than {format_age(ctx.min_age)} are blocked "
                 f"(yarn 1 has no setting to hold them back)")
     before_install = node_modules_installed(root)
-    scratch = tempfile.mkdtemp(prefix="lazaret-guard-yarn-")
+    scratch = private_scratch("lazaret-guard-yarn-")
     try:
         _copy_yarn_project(root, cwd, scratch)
         where = os.path.normpath(os.path.join(scratch, os.path.relpath(cwd, root)))
@@ -2607,7 +2735,7 @@ def python_indexes(kind, exe, env, cwd, cli_default=None, cli_extras=(), cli_str
 class LocalIndex:
     """The local index (PypiIndex behind make_index_server) for one command:
     `with LocalIndex(ctx, indexes, merge, creds) as li:` — li.index,
-    li.base (http://127.0.0.1:port), li.tool_env(env, uv)."""
+    li.base (http://127.0.0.1:port/<the run's secret segment>), li.tool_env(env, uv)."""
 
     def __init__(self, ctx, indexes, merge, creds):
         self.spool = tempfile.mkdtemp(prefix="lazaret-guard-")
@@ -2615,10 +2743,12 @@ class LocalIndex:
         fetcher = Fetcher({netloc(i.url) for i in indexes}, http_hosts=http_hosts, auth=creds, keepalive=ctx.keepalive)
         self.fetcher = fetcher
         self.index = PypiIndex(ctx, fetcher, self.spool, indexes=indexes, merge=merge)
-        self.server = make_index_server(self.index)
+        self.gate = LocalGate()
+        self.index.prefix = "/" + self.gate.token
+        self.server = make_index_server(self.index, self.gate)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.port = self.server.server_address[1]
-        self.base = f"http://127.0.0.1:{self.port}"
+        self.base = self.gate.bind(self.port)
 
     def __enter__(self):
         return self
@@ -2677,7 +2807,7 @@ def _pip_plan(ctx, index, base, exe, pip_args, env):
         info = item.get("download_info") if isinstance(item, dict) else None
         url = info.get("url") if isinstance(info, dict) and isinstance(info.get("url"), str) else ""
         meta = item.get("metadata") if isinstance(item, dict) and isinstance(item.get("metadata"), dict) else {}
-        m = _FILE_PATH_RE.match(urllib.parse.urlsplit(url).path) if url.startswith(base + "/files/") else None
+        m = _FILE_PATH_RE.match(url[len(base):].split("?", 1)[0].split("#", 1)[0]) if url.startswith(base + "/files/") else None
         if m is not None and m.group(1) in index.files:
             jobs.append(lambda n=m.group(1): index.scan(n))
             numbers.append(m.group(1))
@@ -3062,13 +3192,33 @@ def guard_uv_run(ctx, args):
 # ---------------- Go modules (0.1.9) ----------------
 GO_COMMANDS = ("get", "install", "build", "run", "test", "vet", "list", "mod")
 GO_MOD_COMMANDS = ("download", "tidy")
+#: The commands that build a program (test and run then run it): go takes the modules it has in its module cache already
+#: without asking the proxy, so the guard checks those before the command runs. (vet and list build nothing that runs: what
+#: they fetch is checked as it comes through the proxy.)
+GO_BUILDS = ("install", "build", "run", "test")
 #: The module the go command downloads a Go toolchain as (GOTOOLCHAIN): go checks it against the checksum database itself
 GO_TOOLCHAIN = "golang.org/toolchain"
 #: The newest versions of a module whose release time is looked up when the proxy lists its versions
 GO_PROBES = 24
-GO_ENV_KEYS = ("GOPROXY", "GONOPROXY", "GOPRIVATE", "GOMODCACHE", "GOMOD", "GOWORK", "GO111MODULE")
+GO_ENV_KEYS = ("GOPROXY", "GONOPROXY", "GOPRIVATE", "GOMODCACHE", "GOMOD", "GOWORK", "GO111MODULE", "GOFLAGS")
+#: go's flags that take their value as the next argument (`-flag value`): the build flags and those of the commands the guard
+#: wraps (cmd/go 1.24's flag sets); a reading of the command line skips their values. The others are true or false.
+GO_VALUE_FLAGS = frozenset((
+    "C", "p", "asmflags", "buildmode", "compiler", "covermode", "coverpkg", "coverprofile", "debug-actiongraph",
+    "debug-runtime-trace", "debug-trace", "exec", "f", "gccgoflags", "gcflags", "go", "compat", "installsuffix", "ldflags",
+    "mod", "modfile", "o", "overlay", "pgo", "pkgdir", "reuse", "tags", "toolexec", "vettool", "bench", "benchtime",
+    "blockprofile", "blockprofilerate", "count", "cpu", "cpuprofile", "fuzz", "fuzztime", "fuzzminimizetime", "list",
+    "memprofile", "memprofilerate", "mutexprofile", "mutexprofilefraction", "outputdir", "parallel", "run", "shuffle", "skip",
+    "timeout", "trace", "vet"))
+#: Modules read from one `go mod download -json` list
+MAX_GO_LISTED = 20_000
+#: Bytes of an `.info` record in go's module cache
+MAX_GO_INFO = 64 * 1024
 #: Bytes of a go.mod, a list of versions, an `.info` record (zip.MaxGoMod is 16 MiB)
 MAX_GO_ANSWER = 16 * 1024 * 1024
+#: The largest module zip go takes (zip.MaxZipFile): the relay keeps a zip this large on disk, scanned when it is no larger than
+#: the guard scans (repo.MAX_DOWNLOAD_BYTES), and hands go those bytes
+MAX_GO_ZIP = 500 * 1024 * 1024
 _TEXT = "text/plain; charset=utf-8"
 
 GoReply = collections.namedtuple("GoReply", "code body ctype file stream")
@@ -3231,13 +3381,17 @@ class GoRelay:
             return GoReply(403, f"blocked by lazaret guard: {reason}\n".encode("utf-8", "replace"), _TEXT, None, None)
         if spooled is not None:
             return GoReply(200, None, "application/zip", spooled, None)
-        # too large to scan (INCOMPLETE), or a toolchain: handed over as it comes
-        stream = self._each(goproxy.upstream_path(req), lambda url: self.fetcher.open(url, None, repo.DOWNLOAD_TIMEOUT))
-        return GoReply(200, None, "application/zip", None, stream)
+        if req.module == GO_TOOLCHAIN:
+            # (handed over as it comes: go checks a toolchain against the checksum database whatever GOSUMDB says)
+            stream = self._each(goproxy.upstream_path(req), lambda url: self.fetcher.open(url, None, repo.DOWNLOAD_TIMEOUT))
+            return GoReply(200, None, "application/zip", None, stream)
+        # (no bytes kept that were fetched: never a second download that nothing scanned: the Go/Rust review's GO-2)
+        return GoReply(502, b"lazaret guard could not fetch this from the proxy it relays\n", _TEXT, None, None)
 
     def _scan(self, req):
-        """(Check, spooled file) for one module zip, fetched and scanned once: the Check is None when the proxy has no such zip,
-        the file is None when it is blocked, or is too large to scan (the zip is then relayed as it comes)."""
+        """(Check, spooled file) for one module zip, fetched once (to the spool, as it comes) and scanned: the Check is None when
+        the proxy has no such zip, the file None when it is blocked. A zip larger than the guard scans is INCOMPLETE, and its
+        bytes, the ones fetched, are what go gets (go checks them against go.sum or the checksum database)."""
         module, version = req.module, req.version
         check = Check("go", module, version, self.source)
         if module == GO_TOOLCHAIN:
@@ -3247,28 +3401,41 @@ class GoRelay:
         self.ctx.age_check(check, published)
         if check.blocked:
             return self.ctx.add(check), None
-        spooled = None
+        fd, spooled = tempfile.mkstemp(dir=self.spool)
+        os.close(fd)
         try:
-            data = self._each(goproxy.upstream_path(req),
-                              lambda url: self.fetcher.fetch(url, repo.MAX_DOWNLOAD_BYTES, None, repo.DOWNLOAD_TIMEOUT))[0]
-            check.digest = "sha256:" + hashlib.sha256(data).hexdigest()
-            key = VerdictCache.key("go", module, version, check.digest)
-            hit = self.ctx.scanner.cached(key) or self.ctx.scanner.scan(data, "zip", "gomod")
-            self.ctx.scanner.remember(key, hit, published)
-            self.ctx.apply(check, hit)
-            if not check.blocked:
-                fd, spooled = tempfile.mkstemp(dir=self.spool)
-                with os.fdopen(fd, "wb") as f:
-                    f.write(data)
+            size, sha = self._each(goproxy.upstream_path(req),
+                                   lambda url: self.fetcher.fetch_to_file(url, spooled, MAX_GO_ZIP, repo.DOWNLOAD_TIMEOUT))
+            check.digest = "sha256:" + sha
+            if size > repo.MAX_DOWNLOAD_BYTES:
+                self.ctx.not_checked(check, TooLarge(f"response over {repo.MAX_DOWNLOAD_BYTES // (1024 * 1024)}MB: "
+                                                     f"{module}@{version}"))
+            else:
+                with open(spooled, "rb") as f:
+                    data = f.read()
+                key = VerdictCache.key("go", module, version, check.digest)
+                hit = self.ctx.scanner.cached(key) or self.ctx.scanner.scan(data, "zip", "gomod")
+                del data
+                self.ctx.scanner.remember(key, hit, published)
+                self.ctx.apply(check, hit)
         except (repo.FetchError, ValueError) as exc:
+            os.remove(spooled)
             if getattr(exc, "status", None) in (404, 410):
                 return None, None
-            self.ctx.not_checked(check, exc)
+            if isinstance(exc, TooLarge):
+                self.ctx.block(check, f"larger than the {MAX_GO_ZIP // (1024 * 1024)}MB a module zip can be")
+            else:
+                self.ctx.not_checked(check, exc)
+            return self.ctx.add(check), None
+        if check.blocked:
+            os.remove(spooled)
+            spooled = None
         return self.ctx.add(check), spooled
 
 
-def make_go_server(relay):
-    """A threaded HTTP server on 127.0.0.1 (a free port) answering the Go module proxy protocol from `relay`."""
+def make_go_server(relay, gate=None):
+    """A threaded HTTP server on 127.0.0.1 (a free port) answering the Go module proxy protocol from `relay`; with a LocalGate,
+    only to the go command told its path."""
 
     class Handler(http.server.BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -3312,7 +3479,8 @@ def make_go_server(relay):
             self.do_GET()
 
         def do_GET(self):
-            req = goproxy.parse_request(urllib.parse.unquote(urllib.parse.urlsplit(self.path).path))
+            path = urllib.parse.urlsplit(self.path).path if gate is None else gate.path(self)
+            req = goproxy.parse_request(urllib.parse.unquote(path)) if path is not None else None
             if req is None:
                 self._send(404, b"not found\n")
                 return
@@ -3339,7 +3507,7 @@ def make_go_server(relay):
 
 class LocalGoProxy:
     """The local Go proxy (GoRelay behind make_go_server) for one command: `with LocalGoProxy(ctx, proxies, creds) as lp:` —
-    lp.relay, lp.base (http://127.0.0.1:port)."""
+    lp.relay, lp.base (http://127.0.0.1:port/<the run's secret segment>)."""
 
     def __init__(self, ctx, proxies, creds):
         self.spool = tempfile.mkdtemp(prefix="lazaret-guard-")
@@ -3348,9 +3516,10 @@ class LocalGoProxy:
                           auth=creds, keepalive=ctx.keepalive, https_redirects=True)
         self.fetcher = fetcher
         self.relay = GoRelay(ctx, fetcher, proxies, self.spool, source=pmsettings.shown(urls[0]) if urls else "")
-        self.server = make_go_server(self.relay)
+        self.gate = LocalGate()
+        self.server = make_go_server(self.relay, self.gate)
         threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
-        self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
+        self.base = self.gate.bind(self.server.server_address[1])
 
     def __enter__(self):
         return self
@@ -3374,39 +3543,130 @@ def remove_tree(path):
 
 
 def go_settings(exe, env, cwd):
-    """What `go env` says of the settings the guard reads (GO_ENV_KEYS), as strings; GuardError when go does not say."""
-    doc = pmsettings.run_json([exe, "env", "-json", *GO_ENV_KEYS], env, cwd)
+    """What `go env` says of the settings the guard reads (GO_ENV_KEYS), as strings; GuardError when go does not say. go runs
+    with GOTOOLCHAIN=local: a go.mod whose go line is newer than this go made `go env` download that toolchain from GOPROXY
+    before the guard's proxy was there (the Go/Rust review's GO-5). The command itself switches as it would."""
+    doc = pmsettings.run_json([exe, "env", "-json", *GO_ENV_KEYS], dict(env, GOTOOLCHAIN="local"), cwd)
     if not isinstance(doc, dict) or "GOPROXY" not in doc:
         raise GuardError("could not read go's settings (`go env` failed)")
     return {k: v for k, v in doc.items() if isinstance(v, str)}
 
 
-def _go_flag(args, name):
-    """The value of go's flag -name (`-name value`, `-name=value`, or with two dashes) in args, or None."""
-    for k, a in enumerate(args):
-        flag, eq, value = a.partition("=")
-        if flag in ("-" + name, "--" + name):
+def _go_words(args):
+    """How many of go's arguments are the command's words: two for `mod download`, one for `get`."""
+    return 2 if args[:1] == ["mod"] and len(args) > 1 and not args[1].startswith("-") else 1
+
+
+def _go_scan(args):
+    """go's command line `args` (the command's words first) read as cmd/go reads it -> ({flag: [value, ...]}, [the other
+    arguments]): `-flag value` (GO_VALUE_FLAGS), `-flag=value`, a flag that is true or false (value None), one dash or two.
+    Flags end at `--` and at the first argument that is not one (a package: what follows `go run`'s is the program's), but
+    go test's flags may follow its packages, up to -args (the Go/Rust review's GO-6: `go run . -modfile=x` was read as go's)."""
+    sub = args[0] if args else ""
+    rest = list(args[_go_words(args):]) if args else []
+    flags, other, k = {}, [], 0
+    while k < len(rest):
+        a = rest[k]
+        if sub == "test" and a in ("-args", "--args"):
+            break
+        if a == "--":
+            other.extend(rest[k + 1:])
+            break
+        if a.startswith("-") and a != "-":
+            name, eq, value = (a[2:] if a.startswith("--") else a[1:]).partition("=")
             if eq:
-                return value
-            return args[k + 1] if k + 1 < len(args) else None
-    return None
+                flags.setdefault(name, []).append(value)
+                k += 1
+            elif name in GO_VALUE_FLAGS:
+                if k + 1 < len(rest):
+                    flags.setdefault(name, []).append(rest[k + 1])
+                k += 2
+            else:
+                flags.setdefault(name, []).append(None)
+                k += 1
+            continue
+        if sub != "test":
+            other.extend(rest[k:])
+            break
+        other.append(a)
+        k += 1
+    return flags, other
+
+
+def _go_flag(args, name):
+    """The value of go's flag -name on its command line `args` (the command's words first; _go_scan), or None: the last one
+    given, as go takes it."""
+    values = [v for v in _go_scan(args)[0].get(name, []) if v is not None]
+    return values[-1] if values else None
 
 
 def _go_chdir(args):
-    """The folder of go's -C flag (it must be the first flag after the command), or None."""
-    first = args[1] if len(args) > 1 else ""
+    """The folder of go's -C flag, or None: cmd/go reads it only as the first argument after the command's words (`go build
+    -C dir`, `go mod download -C dir`: the Go/Rust review's GO-6)."""
+    k = _go_words(args) if args else 1
+    first = args[k] if len(args) > k else ""
     if first in ("-C", "--C"):
-        return args[2] if len(args) > 2 else None
+        return args[k + 1] if len(args) > k + 1 else None
     for prefix in ("-C=", "--C="):
         if first.startswith(prefix):
             return first[len(prefix):]
     return None
 
 
-def cached_modules(modcache):
-    """{(module, version)} whose zip is in the module cache (GOMODCACHE/cache/download)."""
+def _goflags(text):
+    """GOFLAGS as go splits it (cmd/internal/quoted.Split: fields between spaces; a field in single or double quotes is what
+    is between them, nothing unescaped) -> [field, ...]; [] for one go refuses (a quote not closed)."""
+    s, fields, k = text or "", [], 0
+    while True:
+        while k < len(s) and s[k] in " \t\r\n":
+            k += 1
+        if k >= len(s):
+            return fields
+        if s[k] in "\"'":
+            end = s.find(s[k], k + 1)
+            if end < 0:
+                return []
+            fields.append(s[k + 1:end])
+            k = end + 1
+            continue
+        j = k
+        while j < len(s) and s[j] not in " \t\r\n":
+            j += 1
+        fields.append(s[k:j])
+        k = j
+
+
+def _goflags_value(text, name):
+    """The value GOFLAGS gives go's flag -name (`-name=value`, the last one), or None. The command line's own wins over it."""
+    found = None
+    for field in _goflags(text):
+        if not field.startswith("-") or field.startswith("---"):
+            continue
+        flag, eq, value = (field[2:] if field.startswith("--") else field[1:]).partition("=")
+        if flag == name and eq:
+            found = value
+    return found
+
+
+def _go_setting(settings, args, name):
+    """go's flag -name as the command takes it: from its command line, else from GOFLAGS (`go env GOFLAGS`)."""
+    return _go_flag(args, name) or _goflags_value(settings.get("GOFLAGS", ""), name)
+
+
+def go_packages(args):
+    """The packages of an install or a run (the arguments that are not go's flags): `go run`'s first only (or its .go files),
+    what follows it being the program's arguments."""
+    other = _go_scan(args)[1]
+    if args[:1] == ["run"]:
+        files = list(itertools.takewhile(lambda a: a.endswith(".go"), other))
+        return files or other[:1]
+    return other
+
+
+def cached_zips(modcache):
+    """{(module, version): the zip's path} of the modules in go's module cache (GOMODCACHE/cache/download)."""
     root = os.path.join(modcache, "cache", "download") if modcache else ""
-    found = set()
+    found = {}
     for folder, dirs, files in os.walk(root):
         if folder == root:
             dirs[:] = [d for d in dirs if d != "sumdb"]
@@ -3417,18 +3677,23 @@ def cached_modules(modcache):
         for name in files:
             version = golang.unescape(name[:-4]) if name.endswith(".zip") else None
             if module is not None and version is not None:
-                found.add((module, version))
+                found[(module, version)] = os.path.join(folder, name)
     return found
+
+
+def cached_modules(modcache):
+    """{(module, version)} whose zip is in the module cache (GOMODCACHE/cache/download)."""
+    return set(cached_zips(modcache))
 
 
 def go_module_files(settings, args, cwd):
     """The files a go command may change that tell what the project depends on: go.mod and go.sum (or the -modfile and
-    the .sum beside it), the workspace's go.work and go.work.sum."""
+    the .sum beside it: on the command line or in GOFLAGS), the workspace's go.work and go.work.sum."""
     files = []
-    gomod = settings.get("GOMOD", "")
-    if gomod and gomod not in (os.devnull, "NUL"):
-        files += [gomod, os.path.join(os.path.dirname(gomod), "go.sum")]
-    alt = _go_flag(args[1:], "modfile")
+    main = settings.get("GOMOD", "")
+    if main and main not in (os.devnull, "NUL"):
+        files += [main, os.path.join(os.path.dirname(main), "go.sum")]
+    alt = _go_setting(settings, args, "modfile")
     if alt:
         alt = os.path.abspath(os.path.join(cwd, alt))
         files += [alt, (alt[:-4] if alt.endswith(".mod") else alt) + ".sum"]
@@ -3438,6 +3703,132 @@ def go_module_files(settings, args, cwd):
     return files
 
 
+def go_vendored(settings, args, cwd):
+    """Does go build from a vendor folder here (cmd/go's rule): -mod=vendor (the command line, else GOFLAGS); with no -mod, a
+    vendor folder beside go.work whose go line is 1.22 or later, or (no workspace) beside go.mod whose go line (the
+    -modfile's, when there is one) is 1.14 or later."""
+    mode = _go_setting(settings, args, "mod")
+    if mode:
+        return mode == "vendor"
+    work = settings.get("GOWORK", "")
+    gomod_path = settings.get("GOMOD", "")
+    if work and work not in ("off", os.devnull, "NUL"):
+        root, version_file, least = os.path.dirname(work), work, (1, 22)
+    elif gomod_path and gomod_path not in (os.devnull, "NUL"):
+        alt = _go_setting(settings, args, "modfile")
+        root, least = os.path.dirname(gomod_path), (1, 14)
+        version_file = os.path.abspath(os.path.join(cwd, alt)) if alt else gomod_path
+    else:
+        return False
+    if not os.path.isdir(os.path.join(root, "vendor")):
+        return False
+    version = gomod.parse(read_text(version_file) or "")["go"]
+    return bool(version) and gomod.go_at_least(version, *least)
+
+
+def go_listing(exe, env, cwd, args=()):
+    """What `go mod download -json` (args: -C and -modfile, or the modules to list) says of the modules it fetches, those go
+    has in its module cache already included -> ([{"Path", "Version", "Zip", "Info", ...}, ...], why the list may be short
+    (go's error) or None). No module's code runs: go fetches (through the guard's proxy; a module GONOPROXY names, from its
+    repository) and checks zips."""
+    chdir = list(args[:2]) if args[:1] == ["-C"] else []
+    argv = [exe, "mod", "download", *chdir, "-json", *args[len(chdir):]]
+    try:
+        with timings.span("tool", "go mod download -json"):
+            proc = subprocess.run(argv, env=env, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                  encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return [], f"go could not be run ({exc.strerror or exc})"
+    records, text, k = [], proc.stdout or "", 0
+    decoder = json.JSONDecoder()
+    while len(records) < MAX_GO_LISTED:
+        while k < len(text) and text[k] in " \t\r\n":
+            k += 1
+        if k >= len(text):
+            break
+        try:
+            doc, k = decoder.raw_decode(text, k)
+        except (ValueError, RecursionError):
+            return records, "go's list could not be read"
+        if isinstance(doc, dict) and isinstance(doc.get("Path"), str) and isinstance(doc.get("Version"), str):
+            records.append(doc)
+    if proc.returncode == 0:
+        return records, None
+    errors = [d["Error"].splitlines()[0] for d in records if isinstance(d.get("Error"), str) and d["Error"].strip()]
+    lines = errors or [line.strip() for line in (proc.stderr or "").splitlines() if line.strip()]
+    return records, (lines[0] if lines else f"exit {proc.returncode}")[:300]
+
+
+def _cached_time(path):
+    """The release time an `.info` record of go's module cache gives (go keeps the proxy's answer beside the zip), or None."""
+    try:
+        with open(path, "rb") as f:
+            body = f.read(MAX_GO_INFO + 1)
+        doc = repo._deep_safe_loads(body, "from go's module cache") if len(body) <= MAX_GO_INFO else None
+    except (OSError, TypeError, ValueError, repo.FetchError):
+        return None
+    return parse_time(doc.get("Time")) if isinstance(doc, dict) else None
+
+
+def _check_cached_zip(ctx, check, path, info):
+    """Scan one zip of go's module cache as the proxy scans one it fetches: the release time (--min-age) from the `.info`
+    beside it, the verdict cache by its SHA-256; one too large to scan is INCOMPLETE, one that cannot be read is blocked."""
+    published = _cached_time(info) if ctx.cutoff is not None and isinstance(info, str) else None
+    ctx.age_check(check, published)
+    if not check.blocked:
+        try:
+            if os.path.getsize(path) > repo.MAX_DOWNLOAD_BYTES:
+                ctx.not_checked(check, TooLarge(f"response over {repo.MAX_DOWNLOAD_BYTES // (1024 * 1024)}MB: {check.label()}"))
+            else:
+                with open(path, "rb") as f:
+                    data = f.read(repo.MAX_DOWNLOAD_BYTES + 1)
+                check.digest = "sha256:" + hashlib.sha256(data).hexdigest()
+                key = VerdictCache.key("go", check.name, check.version, check.digest)
+                hit = ctx.scanner.cached(key) or ctx.scanner.scan(data, "zip", "gomod")
+                del data
+                ctx.scanner.remember(key, hit, published)
+                ctx.apply(check, hit)
+        except (OSError, ValueError, repo.FetchError) as exc:
+            ctx.not_checked(check, repo.FetchError(f"go's module cache could not be read ({getattr(exc, 'strerror', None) or exc})"))
+    ctx.add(check)
+
+
+def check_cached(ctx, relay, records, private):
+    """Check the modules of a list of zips (go_listing's records) that did not come through the guard's proxy in this run:
+    those go had in its module cache already (an earlier command the guard did not see, a --trust), and those it fetched
+    from their repository (GONOPROXY, `private`). Each is read from where go keeps it, scanned as the proxy scans a zip (the
+    Go/Rust review's GO-4: they used to pass unchecked, with nothing said). -> the Checks made."""
+    with relay.lock:
+        done = set(relay.results)
+    done |= {(c.name, c.version) for c in list(ctx.checks) if c.eco == "go"}
+    jobs, made = [], []
+    for rec in records:
+        module, version, path = rec.get("Path"), rec.get("Version"), rec.get("Zip")
+        if (module, version) in done or module == GO_TOOLCHAIN or not isinstance(path, str) or not os.path.isfile(path):
+            continue
+        if golang.check_module_path(module) is not None or not golang.VERSION_RE.fullmatch(version):
+            continue
+        done.add((module, version))
+        check = Check("go", module, version, "version control" if goproxy.glob_matches(private, module) else "module cache")
+        made.append(check)
+        jobs.append(lambda c=check, p=path, i=rec.get("Info"): _check_cached_zip(ctx, c, p, i))
+    run_all(jobs)
+    return made
+
+
+def _zip_records(zips):
+    """cached_zips' {(module, version): path} as go_listing's records."""
+    return [{"Path": m, "Version": v, "Zip": p, "Info": p[:-4] + ".info"} for (m, v), p in sorted(zips.items())]
+
+
+def _plan_module(folder):
+    """An empty module of the guard's own, in `folder` (made), where an install or a run of pkg@version is a `go get`."""
+    os.makedirs(folder)
+    with open(os.path.join(folder, "go.mod"), "w", encoding="utf-8") as f:
+        f.write("module lazaret.guard/plan\n\ngo 1.21\n")
+    return folder
+
+
 def go_plan(args, scratch):
     """-> (the go command that fetches what `args` would, the folder it runs in or None for the current one). get and mod download
     or tidy are that themselves (they run no code); an install or run of pkg@version is `go get` of it in an empty module of
@@ -3445,17 +3836,28 @@ def go_plan(args, scratch):
     sub = args[0]
     if sub in ("get", "mod"):
         return list(args), None
-    given = [a for a in args[1:] if not a.startswith("-") and "@" in a]
-    if sub in ("install", "run") and given:
-        return ["get"] + (given[:1] if sub == "run" else given), scratch
+    given = [a for a in go_packages(args) if "@" in a] if sub in ("install", "run") else []
+    if given:
+        return ["get"] + given, scratch
     chdir = _go_chdir(args)
-    return ["mod", "download"] + (["-C", chdir] if chdir else []), None
+    modfile = _go_flag(args, "modfile")
+    return ["mod", "download"] + (["-C", chdir] if chdir else []) + ([f"-modfile={modfile}"] if modfile else []), None
+
+
+def _listing_args(args, chdir):
+    """The arguments of the guard's `go mod download -json` for a command: its -C and -modfile, and for a `go mod download`
+    the modules it names."""
+    modfile = _go_flag(args, "modfile")
+    named = _go_scan(args)[1] if args[:2] == ["mod", "download"] else []
+    return (["-C", chdir] if chdir else []) + ([f"-modfile={modfile}"] if modfile else []) + named
 
 
 def guard_go(ctx, args):
     """go get, install, build, run, test, vet, list, mod download and mod tidy: the go command runs against a Go proxy of the
     guard's on this machine (GOPROXY), which relays the proxies GOPROXY lists and scans each module zip before the command gets it.
-    go.mod, go.sum and go.work.sum are put back when anything was blocked."""
+    The modules go takes from its module cache or from their repositories (GONOPROXY) without asking the proxy are read from
+    the cache and scanned too: before a command that builds a program (GO_BUILDS), after get, mod download and mod tidy
+    (`go mod download -json` lists them). go.mod, go.sum and go.work.sum are put back when anything was blocked."""
     sub = args[0] if args else ""
     if sub not in GO_COMMANDS or (sub == "mod" and args[1:2] and args[1] not in GO_MOD_COMMANDS) or (sub == "mod" and len(args) < 2):
         raise GuardError("lazaret guard wraps go's commands that fetch modules (get, install, build, run, test, vet, list, "
@@ -3481,21 +3883,27 @@ def guard_go(ctx, args):
     if bad:
         raise GuardError(f"GOPROXY lists {', '.join(pmsettings.shown(u) for u in bad)}: the guard relays https and http "
                          f"proxies, not other kinds (a file:// folder, say)")
-    private = ",".join(x for x in (settings.get("GONOPROXY"), settings.get("GOPRIVATE")) if x)
+    # (go goes to a module's repository when GONOPROXY names it, and `go env` gives GONOPROXY as go takes it: GOPRIVATE when
+    # it is not set. GOPRIVATE alone named modules that came through the proxy: the Go/Rust review's GO-7)
+    private = settings.get("GONOPROXY", "")
     modcache = settings.get("GOMODCACHE", "")
     ctx.say("lazaret guard: relaying " + ", ".join(pmsettings.shown(p.url) for p in relayed)
-            + (" (the guard does not fetch from version control: a module the proxy lacks is not fetched, unless GOPRIVATE names it)"
-               if any(p.url == "direct" for p in proxies) else ""))
+            + (" (the guard does not fetch from version control: a module the proxy lacks is not fetched, unless GONOPROXY or "
+               "GOPRIVATE names it)" if any(p.url == "direct" for p in proxies) else ""))
     if ctx.cutoff is not None:
         ctx.say(f"lazaret guard: releases younger than {format_age(ctx.min_age)} are held back at the proxy "
                 f"(a Go module's age is the commit or tag time its author recorded)")
     ctx.unchecked_hint = ("go did not fetch them through the guard's proxy (GOFLAGS, a module in a version control repository, "
                           "a vendor folder); look at what go downloaded, or run the command again")
     plan = ctx.opts.plan
-    scratch = tempfile.mkdtemp(prefix="lazaret-guard-") if plan else None
-    snap = Snapshot(go_module_files(settings, args, work))
+    builds = sub in GO_BUILDS
+    at_version = [a for a in go_packages(args) if "@" in a] if sub in ("install", "run") else []
+    vendored = builds and not at_version and go_vendored(settings, args, work)
+    scratch = private_scratch("lazaret-guard-") if plan or at_version else None
+    files = go_module_files(settings, args, work)
+    snap = Snapshot(files)
     before = None if plan else cached_modules(modcache)
-    restored = []
+    restored, proc = [], None
     try:
         with LocalGoProxy(ctx, relayed, creds) as lp:
             tool_env = dict(env, GOPROXY=lp.base)
@@ -3503,12 +3911,34 @@ def guard_go(ctx, args):
                 tool_env["GOMODCACHE"] = os.path.join(scratch, "modcache")
                 argv, where = go_plan(args, os.path.join(scratch, "module"))
                 if where is not None:
-                    os.makedirs(where)
-                    with open(os.path.join(where, "go.mod"), "w", encoding="utf-8") as f:
-                        f.write("module lazaret.guard/plan\n\ngo 1.21\n")
+                    _plan_module(where)
+                    tool_env["GOWORK"] = "off"          # (the plan's module alone: no go.work from a folder above it)
                 proc = run_tool([exe] + argv, tool_env, cwd=where or cwd, capture=True)
+                if proc.returncode == 0 and not ctx.blocked():
+                    # (what go fetched from repositories, GONOPROXY, is in the plan's cache: read from there)
+                    check_cached(ctx, lp.relay, _zip_records(cached_zips(tool_env["GOMODCACHE"])), private)
             else:
-                proc = run_tool([exe] + list(args), tool_env, cwd=cwd)
+                if builds and not vendored:
+                    if at_version:
+                        _check_install(ctx, lp.relay, exe, tool_env, os.path.join(scratch, "module"), at_version, private)
+                    else:
+                        records, error = go_listing(exe, tool_env, cwd, _listing_args(args, chdir))
+                        check_cached(ctx, lp.relay, records, private)
+                        if error is not None:
+                            _short_list(ctx, error)
+                    snap.restore()        # (go mod download may have added to go.sum: the command runs on the files as they were)
+                if vendored:
+                    ctx.notes.append("go builds this project's dependencies from its vendor folder: they are the project's "
+                                     "own files, which go does not fetch and the guard did not check")
+                if not ctx.blocked():
+                    proc = run_tool([exe] + list(args), tool_env, cwd=cwd)
+                    if proc.returncode == 0 and not ctx.blocked() and sub in ("get", "mod"):
+                        after = Snapshot(files)
+                        records, error = go_listing(exe, tool_env, cwd, _listing_args(args, chdir))
+                        check_cached(ctx, lp.relay, records, private)
+                        after.restore()   # (the list leaves the files as the command left them)
+                        if error is not None:
+                            _short_list(ctx, error)
         blocked = bool(ctx.blocked())
         if blocked or plan:
             restored = snap.restore()
@@ -3522,20 +3952,49 @@ def guard_go(ctx, args):
     if plan and proc.returncode != 0 and not blocked:
         show_failure(ctx, f"resolving (go {args[0]})", proc)
         return finish(ctx, installed=False, restored=restored, index=relay, code=EXIT_RESOLVE)
-    if before is not None and not blocked and proc.returncode == 0:
-        new = cached_modules(modcache) - before
-        for module, version in sorted(m for m in new if goproxy.glob_matches(private, m[0])):
-            ctx.add(Check("go", module, version, "version control")).notes.append(
-                "fetched straight from its repository (GOPRIVATE or GONOPROXY names it): not checked")
-        verify_installed(ctx, new, "go")
-    if blocked and not plan:
+    if before is not None and not blocked and proc is not None and proc.returncode == 0:
+        new = {k: p for k, p in cached_zips(modcache).items() if k not in before}
+        check_cached(ctx, relay, _zip_records({k: p for k, p in new.items() if goproxy.glob_matches(private, k[0])}), private)
+        verify_installed(ctx, set(new), "go")
+        if ctx.blocked():
+            restored = snap.restore()
+    blocked = bool(ctx.blocked())
+    cached = sorted(c.label() for c in ctx.checks if c.blocked and c.source in ("module cache", "version control"))
+    if cached:
+        ctx.notes.append(f"{_and(cached)} {'was' if len(cached) == 1 else 'were'} in go's module cache already, from a command "
+                         f"the guard did not check or from version control (`go clean -modcache` empties the cache)")
+    if blocked and not plan and len(cached) < len(ctx.blocked()):
         ctx.say("lazaret guard: modules that passed are in go's module cache; a blocked one was not handed over to go")
-    return finish(ctx, installed=proc.returncode == 0 and not blocked and not plan, restored=restored, index=relay,
-                  code=EXIT_BLOCKED if blocked else (EXIT_OK if plan else proc.returncode))
+    code = EXIT_BLOCKED if blocked else (EXIT_OK if plan else (proc.returncode if proc is not None else EXIT_OK))
+    return finish(ctx, installed=proc is not None and proc.returncode == 0 and not blocked and not plan, restored=restored,
+                  index=relay, code=code)
+
+
+def _short_list(ctx, error):
+    ctx.notes.append(f"go could not list every module the command uses ({error}): those in go's module cache already may not "
+                     f"have been checked")
+
+
+def _check_install(ctx, relay, exe, env, folder, packages, private):
+    """Before `go install pkg@version` or `go run pkg@version`: check the modules it builds that go has in its module cache
+    already, listed by `go get` of the packages in an empty module of the guard's (go_plan's reading of an install) and that
+    module's `go mod download -json`."""
+    env = dict(env, GOWORK="off")
+    proc = run_tool([exe, "get", *packages], env, cwd=_plan_module(folder), capture=True)
+    if proc.returncode != 0:
+        if not ctx.blocked():
+            lines = [line.strip() for line in (proc.stdout or "").splitlines() if line.strip()]
+            _short_list(ctx, lines[-1][:300] if lines else f"go get: exit {proc.returncode}")
+        return
+    records, error = go_listing(exe, env, folder)
+    check_cached(ctx, relay, records, private)
+    if error is not None:
+        _short_list(ctx, error)
 
 
 # ---------------- Cargo crates (0.1.9) ----------------
-#: commands that are the resolution themselves (they edit Cargo.toml or Cargo.lock and run no crate's code); every other command
+#: commands that are the resolution themselves (they edit Cargo.toml or Cargo.lock and run no crate's code, though cargo may run a
+#: program the project's own configuration names, a rustc wrapper, to learn the compiler's version); every other command
 #: the guard wraps first resolves, with `cargo update --workspace`, then checks, then runs
 CARGO_RESOLVES = frozenset(("add", "update", "generate-lockfile"))
 CARGO_BUILDS = frozenset(("build", "b", "check", "c", "clippy", "doc", "d", "test", "t", "bench", "run", "r", "fix", "fetch",
@@ -3625,6 +4084,8 @@ def check_crate(ctx, fetcher, registry, pkg, home, offline, keep=None):
         if registry.error is not None:
             raise registry.error
         record, digest = None, pkg.checksum
+        if digest is None and offline:
+            raise repo.FetchError("offline, and the lockfile gives no checksum to check it against")
         if digest is None:
             record = crate_index_record(fetcher, registry, pkg)
             digest = record["cksum"] if record else None
@@ -3656,47 +4117,57 @@ def check_crate(ctx, fetcher, registry, pkg, home, offline, keep=None):
         ctx.age_check(check, published)
     except (repo.FetchError, repo.SpecError, ValueError) as exc:
         if not registry.default and getattr(exc, "status", None) in (401, 403):
-            check.notes.append("the registry asked for credentials the guard does not read: not checked")
+            unchecked(ctx, check, "the registry asked for credentials the guard does not read: not checked")
         else:
             ctx.not_checked(check, exc)
     return check
 
 
+def unchecked(ctx, check, reason):
+    """A package the guard cannot check (a git source, a registry it cannot read): INCOMPLETE with the reason, so it is
+    counted and --block-warn blocks it, where it used to be a note only."""
+    ctx.apply(check, {"verdict": "INCOMPLETE", "reason": reason, "indicators": []})
+
+
 def check_cargo_packages(ctx, packages, registry, home, offline, label, skip=(), keep=None):
-    """Check the registry crates among `packages` (cargosrc.Package): those cargo already unpacked, and those in `skip`
-    (name-version), are left out; a crate from git or another source the guard does not read is noted, not checked.
-    -> the names (`name-version`) of every registry crate the lock lists (what cargo may unpack)."""
-    listed, todo, others = set(), {}, {}
+    """Check the registry crates among `packages` (cargosrc.Package), those cargo has unpacked already included: cargo builds
+    an unpacked crate without fetching it again, and another tool (an editor, `cargo tree`, `cargo metadata`) may have unpacked
+    it (a verdict the cache holds for its checksum is not scanned again). Those in `skip` (name-version) are left out. A crate
+    from git or another source the guard does not read is INCOMPLETE, not checked. -> the names (`name-version`) of every
+    crate the lock lists that cargo may unpack."""
+    listed, todo = set(), {}
     for pkg in packages:
         src = cargosrc.classify(pkg.source)
         if src.kind == "path":
             continue
         dirname = f"{pkg.name}-{pkg.version}"
+        if dirname in skip:
+            listed.add(dirname)
+            continue
         if src.kind == "git":
-            ctx.add(Check("crates", pkg.name, pkg.version, "git")).notes.append("from a git repository: not checked")
+            unchecked(ctx, ctx.add(Check("crates", pkg.name, pkg.version, "git")), "from a git repository: not checked")
+            listed.add(dirname)
             continue
         if src.kind in ("git-index", "other"):
-            ctx.add(Check("crates", pkg.name, pkg.version, src.kind)).notes.append(
-                "from a registry the guard cannot read (a git index, or a source it does not know): not checked")
+            unchecked(ctx, ctx.add(Check("crates", pkg.name, pkg.version, src.kind)),
+                      "from a registry the guard cannot read (a git index, or a source it does not know): not checked")
+            listed.add(dirname)
             continue
         listed.add(dirname)
-        if dirname in skip:
+        if src.kind == "crates-io" and registry.kind != "sparse":
+            unchecked(ctx, ctx.add(Check("crates", pkg.name, pkg.version, registry.kind)),
+                      f"cargo reads crates.io from a {registry.kind.replace('-', ' ')} source "
+                      f"({pmsettings.shown(registry.url)}): not checked")
             continue
         base = registry.url if src.kind == "crates-io" else src.url
         todo[(pkg.name, pkg.version, base)] = pkg
-    if registry.kind != "sparse":
-        if any(cargosrc.classify(p.source).kind == "crates-io" for p in packages):
-            ctx.add(Check("crates", "(crates.io)", "", registry.kind)).notes.append(
-                f"cargo reads crates.io from a {registry.kind.replace('-', ' ')} source ({pmsettings.shown(registry.url)}): "
-                f"the guard cannot check those crates")
-        todo = {k: v for k, v in todo.items() if cargosrc.classify(v.source).kind != "crates-io"}
     if len(todo) > cargosrc.MAX_PACKAGES:
         raise GuardError(f"more than {cargosrc.MAX_PACKAGES} crates to check")
     bases = sorted({k[2] for k in todo})
     http_hosts = {netloc(b) for b in bases if b.startswith("http://")}
     hosts = {netloc(b) for b in bases} | ({netloc(CRATES_API)} if cargosrc.DEFAULT_INDEX in bases else set())
     fetcher = Fetcher(hosts, http_hosts=http_hosts, keepalive=ctx.keepalive)
-    ctx.say(f"lazaret guard: {plural(len(todo), 'crate')} to check ({label}; crates cargo has unpacked are left out)")
+    ctx.say(f"lazaret guard: {plural(len(todo), 'crate')} to check ({label})")
     try:
         registries = {b: CrateRegistry(fetcher, b) for b in bases} if not offline else {}
         if offline:
@@ -3730,9 +4201,10 @@ def read_cargo_lock(path, strict=True):
 
 def guard_cargo(ctx, args):
     """cargo add, update, generate-lockfile, install and the commands that build (build, check, test, run, fetch, ...): the
-    resolution is made first, Cargo.lock is read, every crates.io crate in it that cargo has not unpacked is fetched, checked
-    against its checksum and scanned, and only then does cargo fetch and build. Cargo.toml and Cargo.lock are put back when
-    anything was blocked."""
+    resolution is made first, Cargo.lock is read, every crate in it is checked (against its checksum, then scanned; one cargo
+    has unpacked already too, and a verdict cached for its checksum is not scanned again), and only then does cargo fetch and
+    build, with --locked, so that it builds the lock that was checked. Cargo.toml and Cargo.lock are put back when anything was
+    blocked."""
     tc, rest = cargo_toolchain(args)
     sub = rest[0] if rest else ""
     if sub == "install":
@@ -3749,7 +4221,8 @@ def guard_cargo(ctx, args):
     lock_path = os.path.join(root, "Cargo.lock")
     snap = Snapshot([lock_path, os.path.join(root, "Cargo.toml"), *members])
     home = cargosrc.cargo_home(env)
-    registry = cargosrc.registry_of(cargosrc.sources(cwd, env))
+    conf = cargosrc.config(cwd, env, project.configs)
+    registry = cargosrc.registry_of(conf["source"], conf["registries"], env)
     before_lock = read_cargo_lock(lock_path, strict=False)             # (one cargo cannot read is for cargo to say: all count as new)
     before_unpacked = cargosrc.crate_dirs(home)
     ctx.unchecked_hint = ("cargo got them from somewhere the guard did not look (a git source, a registry the lockfile does not "
@@ -3774,7 +4247,7 @@ def guard_cargo(ctx, args):
             label = "what the command added to Cargo.lock"
         else:
             fetched, label = after, "Cargo.lock"
-        listed = check_cargo_packages(ctx, fetched, registry, home, project.offline, label, skip=before_unpacked)
+        listed = check_cargo_packages(ctx, fetched, registry, home, project.offline, label)
         if sub not in CARGO_RESOLVES:
             listed |= {f"{p.name}-{p.version}" for p in after if cargosrc.classify(p.source).kind != "path"}
         blocked = bool(ctx.blocked())
@@ -3783,26 +4256,29 @@ def guard_cargo(ctx, args):
             return finish(ctx, installed=False, restored=restored, code=EXIT_OK)
         if sub in CARGO_RESOLVES:
             return finish(ctx, installed=True, code=proc.returncode)
-        proc = run_tool([exe, *tc, *rest], env, cwd=cwd)
-        if proc.returncode == 0:
-            ctx.unchecked = sorted(cargosrc.crate_dirs(home) - before_unpacked - listed)
+        # (the lock just checked, kept as it is: cargo stops rather than resolve to crates the guard did not check)
+        locked = [] if project.locked else ["--locked"]
+        proc = run_tool([exe, *tc, sub, *locked, *rest[1:]], env, cwd=cwd)
+        ctx.unchecked = sorted(cargosrc.crate_dirs(home) - before_unpacked - listed)     # (a build script that fails still ran)
         return finish(ctx, installed=proc.returncode == 0, code=proc.returncode)
     except BaseException:
         snap.restore()
         raise
 
 
-def cargo_scratch_lock(ctx, exe, tc, env, scratch, name, req, offline):
+def cargo_scratch_lock(ctx, exe, tc, env, scratch, name, req, offline, cwd):
     """The lock cargo makes for a project that needs crate `name` at `req` (None: the newest) and nothing else, which is the
-    resolution `cargo install` makes for it: -> [cargosrc.Package], or None when cargo could not resolve it."""
+    resolution `cargo install` makes for it: -> [cargosrc.Package], or None when cargo could not resolve it. The project is
+    its own workspace (`[workspace]`: no Cargo.toml above it joins it), and cargo runs from `cwd`, the user's folder, so its
+    configuration and rustup's toolchain are the ones `cargo install` run there reads, not a folder's above the scratch."""
     os.makedirs(os.path.join(scratch, "src"))
     with open(os.path.join(scratch, "Cargo.toml"), "w", encoding="utf-8") as f:
-        f.write('[package]\nname = "lazaret-guard-plan"\nversion = "0.0.0"\nedition = "2021"\n\n[dependencies]\n'
-                f'{name} = {json.dumps(req or "*")}\n')
+        f.write('[package]\nname = "lazaret-guard-plan"\nversion = "0.0.0"\nedition = "2021"\n\n[workspace]\n\n'
+                f'[dependencies]\n{name} = {json.dumps(req or "*")}\n')
     with open(os.path.join(scratch, "src", "lib.rs"), "w", encoding="utf-8") as f:
         f.write("")
     argv = [exe, *tc, "generate-lockfile", "--manifest-path", os.path.join(scratch, "Cargo.toml")] + (["--offline"] if offline else [])
-    proc = run_tool(argv, env, cwd=scratch, capture=True)
+    proc = run_tool(argv, env, cwd=cwd, capture=True)
     if proc.returncode != 0:
         show_failure(ctx, f"resolving (cargo install {name})", proc)
         return None
@@ -3818,9 +4294,11 @@ def _install_root(packages, name):
 
 
 def guard_cargo_install(ctx, tc, rest):
-    """cargo install <crate>…: for each crate, the lock cargo makes for a project that needs only it (what `cargo install`
-    resolves); with --locked, the Cargo.lock the crate was published with. Every crates.io crate in it is checked, and then cargo
-    installs."""
+    """cargo install <crate>…: for each crate, the version cargo picks (the lock of a project that needs only it), that release
+    checked, and then the lock cargo makes for it as the root of a workspace of its own with every feature on (which is how
+    `cargo install` resolves an installed crate, whatever features are asked); with --locked, the Cargo.lock the crate was
+    published with. Every crate in it is checked, and cargo then installs the release checked (`name@=version`), not one
+    published in the meantime."""
     try:
         want = cargosrc.parse_install(rest)
     except ValueError as exc:
@@ -3829,49 +4307,112 @@ def guard_cargo_install(ctx, tc, rest):
     env = dict(os.environ)
     cwd = os.getcwd()
     home = cargosrc.cargo_home(env)
-    registry = cargosrc.registry_of(cargosrc.sources(cwd, env))
+    conf = cargosrc.config(cwd, env, want.configs)
+    registry = cargosrc.registry_of(conf["source"], conf["registries"], env)
     before_unpacked = cargosrc.crate_dirs(home)
     ctx.unchecked_hint = ("cargo got them from somewhere the guard did not look; look at what cargo unpacked, or run the "
                           "command again")
-    scratch = tempfile.mkdtemp(prefix="lazaret-guard-")
-    listed = set()                                  # (every crate any of the lockfiles names: checked, or noted, once)
+    scratch = private_scratch("lazaret-guard-")
+    listed, pinned = set(), []                      # (every crate any of the lockfiles names: checked, or noted, once)
     try:
         for k, (name, req) in enumerate(want.crates):
-            packages = cargo_scratch_lock(ctx, exe, tc, env, os.path.join(scratch, str(k)), name, req, want.offline)
+            here = os.path.join(scratch, str(k))
+            packages = cargo_scratch_lock(ctx, exe, tc, env, os.path.join(here, "dependent"), name, req, want.offline, cwd)
             if packages is None:
                 return finish(ctx, installed=False, code=EXIT_RESOLVE)
             root = _install_root(packages, name)
-            if want.locked and root is not None:
-                kept = {}
-                listed |= check_cargo_packages(ctx, [root], registry, home, want.offline, f"{name}, for its Cargo.lock",
-                                               keep=kept)                  # (its bytes are wanted, so unpacked or not)
-                packages = _published_lock(ctx, kept.get((root.name, root.version)), root) or packages
-            listed |= check_cargo_packages(ctx, packages, registry, home, want.offline, f"what cargo install {name} builds",
-                                           skip=before_unpacked | listed)
+            if root is None:
+                ctx.say(f"lazaret guard: cargo's resolution for {name} does not hold it, so what cargo install builds is not "
+                        f"known: nothing installed")
+                return finish(ctx, installed=False, code=EXIT_RESOLVE)
+            pinned.append((root.name, root.version))
+            kept = {}
+            listed |= check_cargo_packages(ctx, [root], registry, home, want.offline, f"{name}, the crate cargo install builds",
+                                           keep=kept)
+            data = kept.get((root.name, root.version))
+            built = None
+            if data is not None and want.locked:
+                built = _published_lock(ctx, data, root)
+            if data is not None and built is None and not ctx.blocked():
+                built = cargo_crate_lock(ctx, exe, tc, env, os.path.join(here, "crate"), data, root, want.offline, cwd)
+                if built is None:
+                    return finish(ctx, installed=False, code=EXIT_RESOLVE)
+            if built is None:                       # (its bytes are not to be had: the crates a dependent of it resolves)
+                built = packages
+            listed |= check_cargo_packages(ctx, built, registry, home, want.offline, f"what cargo install {name} builds",
+                                           skip=listed)
         if ctx.blocked() or ctx.opts.plan:
             return finish(ctx, installed=False, code=EXIT_OK)
     finally:
         remove_tree(scratch)
-    proc = run_tool([exe, *tc, "install", *rest], env, cwd=cwd)
-    if proc.returncode == 0:
-        ctx.unchecked = sorted(cargosrc.crate_dirs(home) - before_unpacked - listed)
+    proc = run_tool([exe, *tc, "install", *cargosrc.pinned_install(rest, want, pinned)], env, cwd=cwd)
+    # (whether cargo succeeded or not: a build script that fails still ran)
+    ctx.unchecked = sorted(cargosrc.crate_dirs(home) - before_unpacked - listed)
     return finish(ctx, installed=proc.returncode == 0, code=proc.returncode)
+
+
+def cargo_crate_lock(ctx, exe, tc, env, folder, data, root, offline, cwd):
+    """The lock `cargo install` makes for crate `root`: the crate's files (its bytes as the guard checked them) as the root of
+    a workspace of its own, resolved with every feature of it on, as cargo resolves an installed crate's lock, the Cargo.lock it
+    was published with left out (cargo install reads it only with --locked). cargo runs from `cwd`, the user's folder, and
+    only resolves: no code of the crate's runs. -> [cargosrc.Package], or None when cargo could not resolve it."""
+    os.makedirs(folder)
+    real = os.path.realpath(folder)
+    for rel, _size, raw, reason in repo.iter_archive(data, "tgz", "crate"):
+        if reason is not None or rel in ("Cargo.lock", ".cargo-ok"):
+            continue
+        path = os.path.realpath(os.path.join(folder, *rel.split("/")))
+        if not path.startswith(real + os.sep):
+            continue                                # (iter_archive's paths stay inside: this holds whatever it says)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(raw)
+    manifest = os.path.join(folder, "Cargo.toml")
+    text = read_text(manifest)
+    if text is None:
+        ctx.say(f"lazaret guard: {root.name}@{root.version} has no Cargo.toml: what cargo install builds is not known")
+        return None
+    try:
+        own_workspace = isinstance(sca.load_toml(text).get("workspace"), dict)
+    except ValueError:
+        own_workspace = False                       # (cargo will say what it cannot read)
+    if not own_workspace:
+        with open(manifest, "a", encoding="utf-8") as f:
+            f.write("\n[workspace]\n")
+    argv = [exe, *tc, "generate-lockfile", "--manifest-path", manifest] + (["--offline"] if offline else [])
+    proc = run_tool(argv, env, cwd=cwd, capture=True)
+    if proc.returncode != 0:
+        show_failure(ctx, f"resolving (cargo install {root.name}, the crate's own lock)", proc)
+        return None
+    return read_cargo_lock(os.path.join(folder, "Cargo.lock"))
 
 
 def _published_lock(ctx, data, root):
     """The crates in the Cargo.lock a crate was published with (`cargo install --locked` builds with them), or None when the
-    crate has none (cargo says so itself) or it cannot be read."""
+    crate has none (cargo then resolves it as without --locked). A lock the guard cannot be sure of is blocked: two of them in
+    the archive (cargo unpacks the last), one too large to read, or one that is not a lockfile."""
     if data is None:
         return None
+    found, reasons = [], []
     for rel, _size, raw, reason in repo.iter_archive(data, "tgz", "crate"):
-        if rel == "Cargo.lock" and reason is None:
-            try:
-                return cargosrc.parse_lock(bytes(raw).decode("utf-8"))
-            except (ValueError, UnicodeDecodeError):
-                ctx.add(Check("crates", root.name, root.version, "registry")).notes.append(
-                    "its Cargo.lock cannot be read: the crates of a fresh resolution were checked instead")
-                return None
-    return None
+        if rel == "Cargo.lock":
+            found.append(raw)
+            reasons.append(reason)
+    if not found:
+        return None
+    problem = None
+    if len(found) > 1:
+        problem = "its archive holds two Cargo.lock files (cargo unpacks the last one)"
+    elif reasons[0] is not None:
+        problem = "its Cargo.lock is too large to read"
+    else:
+        try:
+            return cargosrc.parse_lock(bytes(found[0]).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            problem = "its Cargo.lock is not a lockfile the guard can read"
+    ctx.block(ctx.add(Check("crates", root.name, root.version, "registry")),
+              f"{problem}: cargo install --locked would build crates the guard has not seen")
+    return []
 
 
 # ---------------- Reporting ----------------
@@ -3916,8 +4457,16 @@ def finish(ctx, installed, restored=(), code=None, index=None):
         newest = max(versions.values())
         ctx.say(f"  held back  {project}: {plural(len(versions), 'release')} younger than {format_age(ctx.min_age)} "
                 f"(newest {format_age((now() - newest).total_seconds())} old; --allow-new {project} lets them in)")
+    if ctx.age_unknown:
+        names = sorted(set(ctx.age_unknown))
+        ctx.say(f"lazaret guard: the publish time of {plural(len(names), 'release')} is not known, so --min-age could not hold "
+                f"{'it' if len(names) == 1 else 'them'}: {', '.join(names[:10])}" + (f", … (+{len(names) - 10})" if len(names) > 10 else "")
+                + " (--block-warn blocks them)")
+    for line in ctx.notes:
+        ctx.say("lazaret guard: " + line)
     if ctx.unchecked:
-        ctx.say(f"lazaret guard: installed but not checked: {', '.join(ctx.unchecked[:10])}"
+        what = "installed but not checked" if installed else "fetched but not checked (the command then failed)"
+        ctx.say(f"lazaret guard: {what}: {', '.join(ctx.unchecked[:10])}"
                 + (f", … (+{len(ctx.unchecked) - 10})" if len(ctx.unchecked) > 10 else "")
                 + f" — {ctx.unchecked_hint}")
     exit_code = EXIT_OK if code is None else code
@@ -3937,6 +4486,8 @@ def finish(ctx, installed, restored=(), code=None, index=None):
                "minAgeSeconds": ctx.min_age, "cutoff": iso(ctx.cutoff) if ctx.cutoff else None,
                "installed": bool(installed and not blocked), "blocked": len(blocked), "exitCode": exit_code,
                "leftOutForOtherPlatforms": ctx.skipped_platform, "installedUnchecked": ctx.unchecked,
+               "ageUnknown": sorted(set(ctx.age_unknown)),
+               "notes": list(ctx.notes),
                "packages": [c.to_json() for c in checks],
                "heldBack": {p: sorted(v) for p, v in held.items()}}
         if timings.current() is not None:

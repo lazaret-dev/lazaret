@@ -270,6 +270,24 @@ class AgeTests(CrateCase):
         self.assertEqual(check.verdict, "OK")                                             # (and it was scanned)
         self.assertEqual(self.reg.paths("/api/"), [])
 
+    def test_a_release_whose_publish_time_is_not_known_is_said_and_blocked_under_block_warn(self):
+        # (a mirror whose index has no pubtime, and no API to ask: it used to pass with nothing said: CG-4)
+        reg = cs.CratesRegistry(pubtimes=False, api=False)
+        cs.default_crates(reg)
+        self.addCleanup(reg.close)
+        self.reg = reg
+        ctx = self.context()
+        check = self.check(ctx, self.pkg("onlynew"))
+        self.assertEqual((check.blocked, check.age), ([], None))
+        self.assertEqual(ctx.age_unknown, ["onlynew@1.0.0"])
+        guard.finish(ctx, installed=True, code=0)
+        self.assertIn("the publish time of 1 release is not known, so --min-age could not hold it: onlynew@1.0.0", self.out.getvalue())
+        ctx = self.context(block_warn=True)
+        check = self.check(ctx, self.pkg("onlynew"))
+        self.assertEqual(check.blocked, ["its publish time is not known, so --min-age cannot hold it (--block-warn)"])
+        ctx = self.context(allow_new=["onlynew"], block_warn=True)
+        self.assertEqual((self.check(ctx, self.pkg("onlynew")).blocked, ctx.age_unknown), ([], []))
+
     def test_allow_new_lets_it_through_and_says_so(self):
         ctx = self.context(allow_new=["onlynew"])
         check = self.check(ctx, self.pkg("onlynew"))
@@ -359,15 +377,21 @@ class AgeTests(CrateCase):
 
 
 class AuthTests(CrateCase):
-    def test_a_registry_that_wants_credentials_is_noted_not_checked_unless_it_is_crates_io(self):
+    def test_a_registry_that_wants_credentials_is_incomplete_not_checked_unless_it_is_crates_io(self):
+        # (INCOMPLETE, where it was a note only: it is counted, and --block-warn blocks it, so a registry that refuses only the
+        # guard cannot wave a crate through: the Go/Rust review's CG-4)
         reg = cs.CratesRegistry(auth="secret-token")
         cs.default_crates(reg)
         self.addCleanup(reg.close)
         self.reg = reg
         check = self.check(self.context(), self.pkg("leaf"))
         self.assertEqual(check.blocked, [])
-        self.assertEqual(check.notes, ["the registry asked for credentials the guard does not read: not checked"])
-        self.assertIsNone(check.verdict)
+        self.assertEqual((check.verdict, check.reason),
+                         ("INCOMPLETE", "the registry asked for credentials the guard does not read: not checked"))
+        self.assertEqual(check.notes, [])
+        check = self.check(self.context(block_warn=True), self.pkg("leaf"))
+        self.assertEqual(len(check.blocked), 1)
+        self.assertIn("INCOMPLETE (--block-warn)", check.blocked[0])
         with mock.patch.object(cargosrc, "DEFAULT_INDEX", reg.url):
             check = self.check(self.context(), self.pkg("leaf"))
         self.assertIn("could not be checked: HTTP 401", check.blocked[0])
@@ -390,7 +414,7 @@ class PackagesTests(CrateCase):
         ctx, listed = self.run_packages(pkgs)
         self.assertEqual(sorted((c.name, c.verdict) for c in ctx.checks), [("good", "OK"), ("leaf", "OK")])
         self.assertEqual(listed, {"good-1.0.0", "leaf-1.0.0"})
-        self.assertIn("lazaret guard: 2 crates to check (Cargo.lock; crates cargo has unpacked are left out)", self.out.getvalue())
+        self.assertIn("lazaret guard: 2 crates to check (Cargo.lock)\n", self.out.getvalue())
 
     def test_the_fetcher_is_closed_when_the_checks_are_done_and_when_one_of_them_raises(self):
         closed, original = [], guard.Fetcher.close
@@ -419,18 +443,21 @@ class PackagesTests(CrateCase):
         ctx, listed = self.run_packages(pkgs)
         self.assertEqual((ctx.checks, listed), ([], set()))
 
-    def test_git_and_other_sources_are_noted_not_checked(self):
+    def test_git_and_other_sources_are_incomplete_not_checked(self):
         pkgs = [cargosrc.Package("fromgit", "0.1.0", "git+https://github.com/x/y#abc", None),
                 cargosrc.Package("gitidx", "0.1.0", "registry+https://git.example/index", HEX),
                 cargosrc.Package("weird", "0.1.0", "ftp://somewhere", None)]
         ctx, listed = self.run_packages(pkgs)
         self.assertEqual(sorted((c.name, c.source) for c in ctx.checks), [("fromgit", "git"), ("gitidx", "git-index"), ("weird", "other")])
-        notes = {c.name: c.notes for c in ctx.checks}
-        self.assertEqual(notes["fromgit"], ["from a git repository: not checked"])
-        self.assertIn("from a registry the guard cannot read", notes["gitidx"][0])
-        self.assertEqual(listed, set())                                                   # (cargo does not unpack those into registry/src)
+        got = {c.name: (c.verdict, c.reason) for c in ctx.checks}
+        self.assertEqual(got["fromgit"], ("INCOMPLETE", "from a git repository: not checked"))
+        self.assertEqual(got["gitidx"][0], "INCOMPLETE")
+        self.assertIn("from a registry the guard cannot read", got["gitidx"][1])
+        self.assertEqual(listed, {"fromgit-0.1.0", "gitidx-0.1.0", "weird-0.1.0"})        # (named: never reported as unpacked unchecked too)
         self.assertEqual(ctx.blocked(), [])
         self.assertEqual(self.reg.requests, [])
+        ctx, _ = self.run_packages(pkgs, block_warn=True)
+        self.assertEqual(len(ctx.blocked()), 3)
 
     def test_another_registry_is_read_at_its_own_index(self):
         other = cs.CratesRegistry()
@@ -492,17 +519,16 @@ class PackagesTests(CrateCase):
         self.assertEqual([(c.name, c.verdict) for c in ctx.checks], [("elsewhere", "OK")])
         self.assertEqual(other.paths("/dl/"), ["/dl/elsewhere/elsewhere-1.0.0.crate"])
 
-    def test_crates_io_replaced_by_a_source_the_guard_cannot_read_is_one_note_and_no_check(self):
+    def test_crates_io_replaced_by_a_source_the_guard_cannot_read_is_incomplete_for_each_crate(self):
         pkgs = cargosrc.parse_lock(lock_of(self.reg, ("good", "1.0.0"), ("leaf", "1.0.0")))
         pkgs.append(cargosrc.Package("fromgit", "0.1.0", "git+https://github.com/x/y#abc", None))
         ctx, listed = self.run_packages(pkgs, registry=cargosrc.Registry("directory", "vendor"))
         by_name = {c.name: c for c in ctx.checks}
-        self.assertEqual(sorted(by_name), ["(crates.io)", "fromgit"])
-        self.assertEqual(by_name["(crates.io)"].notes,
-                         ["cargo reads crates.io from a directory source (vendor): the guard cannot check those crates"])
-        self.assertEqual(by_name["(crates.io)"].source, "directory")
+        self.assertEqual(sorted(by_name), ["fromgit", "good", "leaf"])
+        self.assertEqual((by_name["good"].verdict, by_name["good"].reason, by_name["good"].source),
+                         ("INCOMPLETE", "cargo reads crates.io from a directory source (vendor): not checked", "directory"))
         self.assertEqual(self.reg.requests, [])
-        self.assertEqual(listed, {"good-1.0.0", "leaf-1.0.0"})
+        self.assertEqual(listed, {"good-1.0.0", "leaf-1.0.0", "fromgit-0.1.0"})
 
     def test_no_note_when_there_is_no_crates_io_crate(self):
         ctx, _ = self.run_packages([cargosrc.Package("app", "0.1.0", "", None)], registry=cargosrc.Registry("git", "https://x/y"))
@@ -511,7 +537,7 @@ class PackagesTests(CrateCase):
     def test_a_replaced_source_with_a_git_index_is_named_as_such(self):
         pkgs = cargosrc.parse_lock(lock_of(self.reg, ("leaf", "1.0.0")))
         ctx, _ = self.run_packages(pkgs, registry=cargosrc.Registry("local-registry", "/x"))
-        self.assertIn("from a local registry source (/x)", ctx.checks[0].notes[0])
+        self.assertIn("from a local registry source (/x)", ctx.checks[0].reason)
 
     def test_over_the_limit_it_does_not_start(self):
         pkgs = cargosrc.parse_lock(lock_of(self.reg, ("good", "1.0.0"), ("leaf", "1.0.0"), ("mixed", "1.0.0")))
@@ -611,9 +637,35 @@ class HelperTests(TmpCase):
         self.assertEqual([(p.name, p.version) for p in got], [("tool", "1.0.0"), ("leaf", "1.0.0")])
         self.assertIsNone(guard._published_lock(ctx, cs.crate_tgz("tool", "1.0.0", {}), root))        # (it has none)
         self.assertIsNone(guard._published_lock(ctx, None, root))
-        self.assertIsNone(guard._published_lock(ctx, cs.crate_tgz("tool", "1.0.0", {"Cargo.lock": "[[package"}), root))
-        self.assertIn("its Cargo.lock cannot be read", ctx.checks[-1].notes[0])
-        self.assertIsNone(guard._published_lock(ctx, cs.crate_tgz("tool", "1.0.0", {"Cargo.lock": b"\xff\xfe"}), root))
+        self.assertEqual(ctx.blocked(), [])
+
+    def test_a_published_lock_the_guard_cannot_be_sure_of_is_blocked(self):
+        # (the guard read the first of two, cargo unpacks the last; one too large or not a lockfile was replaced by a fresh
+        # resolution, which is not what cargo install --locked builds: the Go/Rust review's CG-5)
+        lock = cs.lock_text([("tool", "1.0.0", None, ["leaf"]), ("leaf", "1.0.0", HEX, [])])
+        root = cargosrc.Package("tool", "1.0.0", cs.CRATES_IO, HEX)
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+            for member, raw in (("Cargo.toml", b'[package]\nname = "tool"\nversion = "1.0.0"\n'), ("Cargo.lock", lock.encode()),
+                                ("Cargo.lock", lock.replace("1.0.0", "1.0.1").encode())):
+                info = tarfile.TarInfo(f"tool-1.0.0/{member}")
+                info.size = len(raw)
+                tf.addfile(info, io.BytesIO(raw))
+        cases = (("two", buf.getvalue(), "holds two Cargo.lock files"),
+                 ("not a lock", cs.crate_tgz("tool", "1.0.0", {"Cargo.lock": "[[package"}), "not a lockfile"),
+                 ("not text", cs.crate_tgz("tool", "1.0.0", {"Cargo.lock": b"\xff\xfe"}), "not a lockfile"))
+        for label, data, says in cases:
+            with self.subTest(label):
+                ctx = guard.Context(options(tool="cargo"), out=io.StringIO())
+                self.addCleanup(ctx.close)
+                self.assertEqual(guard._published_lock(ctx, data, root), [])
+                (blocked,) = ctx.blocked()
+                self.assertIn(says, blocked.blocked[0])
+        ctx = guard.Context(options(tool="cargo"), out=io.StringIO())
+        self.addCleanup(ctx.close)
+        with mock.patch.object(repo, "MAX_MEMBER", 10):
+            self.assertEqual(guard._published_lock(ctx, cs.crate_tgz("tool", "1.0.0", {"Cargo.lock": lock}), root), [])
+        self.assertIn("too large to read", ctx.blocked()[0].blocked[0])
 
 
 class InterruptTests(TmpCase):
@@ -724,8 +776,9 @@ class BuildCommandTests(FlowCase):
         self.plan = {"update": [["lock", self.lock_of(("good", "1.0.0"), ("leaf", "1.0.0"))]], "build": self.unpack("good-1.0.0", "leaf-1.0.0")}
         code, out = self.run_guard("cargo", "build", "--release")
         self.assertEqual(code, 0, out)
-        self.assertEqual(self.commands(), [["update", "--workspace"], ["build", "--release"]])
-        self.assertIn("lazaret guard: 2 crates to check (Cargo.lock; crates cargo has unpacked are left out)", out)
+        # (with --locked: cargo builds the lock that was checked, and stops rather than resolve to crates it was not: CG-9)
+        self.assertEqual(self.commands(), [["update", "--workspace"], ["build", "--locked", "--release"]])
+        self.assertIn("lazaret guard: 2 crates to check (Cargo.lock)\n", out)
         self.assertIn("lazaret guard: checked 2 INCOMPLETE", out)
         self.assertNotIn("installed but not checked", out)
         self.assertIn('name = "good"', self.read(self.lock))                               # (the resolution stays)
@@ -755,13 +808,13 @@ class BuildCommandTests(FlowCase):
                 self.plan = {"update": [["lock", self.lock_of(("leaf", "1.0.0"))]]}
                 code, out = self.run_guard("cargo", sub)
                 self.assertEqual(code, 0, out)
-                self.assertEqual(self.commands(), [["update", "--workspace"], [sub]])
+                self.assertEqual(self.commands(), [["update", "--workspace"], [sub, "--locked"]])
 
     def test_what_comes_after_two_dashes_is_the_programs_own(self):
         self.plan = {"update": [["lock", self.lock_of(("leaf", "1.0.0"))]]}
         code, out = self.run_guard("cargo", "run", "--", "--locked", "--manifest-path", "x")
         self.assertEqual(code, 0, out)
-        self.assertEqual(self.commands(), [["update", "--workspace"], ["run", "--", "--locked", "--manifest-path", "x"]])
+        self.assertEqual(self.commands(), [["update", "--workspace"], ["run", "--locked", "--", "--locked", "--manifest-path", "x"]])
 
     def test_cargos_own_exit_code_is_the_guards(self):
         self.plan = {"update": [["lock", self.lock_of(("leaf", "1.0.0"))]], "test": [["exit", 101]]}
@@ -769,11 +822,12 @@ class BuildCommandTests(FlowCase):
         self.assertEqual(code, 101, out)
         self.assertNotIn("nothing was installed", out)
 
-    def test_a_command_that_failed_says_nothing_of_the_crates_it_unpacked_before_it_did(self):
+    def test_a_command_that_failed_still_says_what_it_fetched_unchecked(self):
+        # (a build script runs before the build can fail: the guard said nothing of what cargo fetched unchecked then: CG-9)
         self.plan = {"update": [["lock", self.lock_of(("leaf", "1.0.0"))]], "build": self.unpack("leaf-1.0.0", "stray-9.9.9") + [["exit", 101]]}
         code, out = self.run_guard("cargo", "build")
         self.assertEqual(code, 101, out)
-        self.assertNotIn("installed but not checked", out)
+        self.assertIn("fetched but not checked (the command then failed): stray-9.9.9", out)
 
     def test_a_resolution_that_fails_is_reported_and_the_files_are_put_back(self):
         self.write(self.lock, OLD_LOCK)
@@ -824,13 +878,25 @@ class BuildCommandTests(FlowCase):
         self.assertEqual(code, 1, out)
         self.assertIn("BLOCKED    leaf@1.0.0: its sha256 is not the lockfile's", out)
 
-    def test_crates_cargo_has_unpacked_are_left_out(self):
+    def test_crates_cargo_has_unpacked_are_checked_too(self):
+        # (another tool, an editor or `cargo tree`, unpacks crates without running them, and cargo builds an unpacked one
+        # without fetching it again: they were left out, and a hostile one was built: the Go/Rust review's CG-3)
         os.makedirs(os.path.join(self.home, "registry", "src", "index.crates.io-0000000000000000", "evil-1.0.0"))
         self.plan = {"update": [["lock", self.lock_of(("evil", "1.0.0"), ("leaf", "1.0.0"))]]}
         code, out = self.run_guard("cargo", "build")
+        self.assertEqual(code, 1, out)
+        self.assertIn("2 crates to check", out)
+        self.assertIn("BLOCKED    evil@1.0.0: SUSPICIOUS", out)
+        self.assertEqual(self.commands(), [["update", "--workspace"]])
+
+    def test_a_crate_checked_before_is_not_fetched_or_scanned_again(self):
+        self.plan = {"update": [["lock", self.lock_of(("leaf", "1.0.0"))]], "build": self.unpack("leaf-1.0.0")}
+        code, out = self.run_guard("cargo", "build", cache=True)
         self.assertEqual(code, 0, out)
-        self.assertIn("1 crate to check", out)
-        self.assertEqual(self.requested("/dl/"), ["/dl/leaf/leaf-1.0.0.crate"])
+        before = len(self.requested("/dl/"))
+        code, out = self.run_guard("cargo", "build", cache=True)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(len(self.requested("/dl/")), before)                                # (its verdict, by its checksum)
 
     def test_a_crate_cargo_unpacks_that_the_lock_does_not_name_fails_the_run(self):
         self.plan = {"update": [["lock", self.lock_of(("leaf", "1.0.0"))]], "build": self.unpack("leaf-1.0.0", "stray-9.9.9")}
@@ -839,12 +905,16 @@ class BuildCommandTests(FlowCase):
         self.assertIn("installed but not checked: stray-9.9.9", out)
         self.assertIn("cargo got them from somewhere the guard did not look", out)
 
-    def test_a_crate_from_git_is_noted_and_not_fetched(self):
+    def test_a_crate_from_git_is_incomplete_and_not_fetched(self):
         text = self.lock_of(("leaf", "1.0.0")) + '\n[[package]]\nname = "fromgit"\nversion = "0.1.0"\nsource = "git+https://github.com/x/y#abc"\n'
         self.plan = {"update": [["lock", text]], "build": self.unpack("leaf-1.0.0")}
         code, out = self.run_guard("cargo", "build")
         self.assertEqual(code, 0, out)
-        self.assertIn("NOTE       fromgit@0.1.0: from a git repository: not checked", out)
+        self.assertIn("fromgit@0.1.0", out)
+        self.assertIn("from a git repository: not checked", out)
+        code, out = self.run_guard("--block-warn", "cargo", "build")
+        self.assertEqual(code, 1, out)
+        self.assertIn("BLOCKED    fromgit@0.1.0: INCOMPLETE (--block-warn): from a git repository: not checked", out)
 
     def test_a_crate_of_a_registry_the_guard_cannot_read_is_noted_once_and_not_also_reported_as_unchecked(self):
         text = self.lock_of(("leaf", "1.0.0")) + ('\n[[package]]\nname = "gitidx"\nversion = "0.1.0"\n'
@@ -852,23 +922,34 @@ class BuildCommandTests(FlowCase):
         self.plan = {"update": [["lock", text]], "build": self.unpack("leaf-1.0.0", "gitidx-0.1.0")}
         code, out = self.run_guard("cargo", "build")
         self.assertEqual(code, 0, out)
-        self.assertIn("NOTE       gitidx@0.1.0: from a registry the guard cannot read", out)
+        self.assertIn("gitidx@0.1.0", out)
+        self.assertIn("from a registry the guard cannot read", out)
         self.assertNotIn("installed but not checked", out)
 
-    def test_a_vendored_crates_io_is_noted_once_and_the_command_runs(self):
+    def test_a_vendored_crates_io_is_incomplete_and_the_command_runs(self):
         self.config('[source.crates-io]\nreplace-with = "vendored"\n[source.vendored]\ndirectory = "vendor"\n')
         self.plan = {"update": [["lock", self.lock_of(("good", "1.0.0"), ("leaf", "1.0.0"))]]}
         code, out = self.run_guard("cargo", "build")
         self.assertEqual(code, 0, out)
-        self.assertIn("NOTE       (crates.io): cargo reads crates.io from a directory source (vendor): the guard cannot check those crates", out)
-        self.assertEqual(self.commands(), [["update", "--workspace"], ["build"]])
+        self.assertIn("lazaret guard: checked 2 INCOMPLETE", out)
+        self.assertIn("cargo reads crates.io from a directory source (vendor): not checked", out)
+        self.assertEqual(self.commands(), [["update", "--workspace"], ["build", "--locked"]])
+
+    def test_a_config_option_on_the_command_line_is_read(self):
+        # (cargo reads `--config`: the guard did not, and checked crates.io's bytes while cargo built a vendor folder's: CG-6)
+        self.plan = {"update": [["lock", self.lock_of(("good", "1.0.0"), ("leaf", "1.0.0"))]]}
+        code, out = self.run_guard("cargo", "build", "--config", 'source.crates-io.replace-with = "vendored"', "--config",
+                                   'source.vendored.directory = "vendor"')
+        self.assertEqual(code, 0, out)
+        self.assertIn("cargo reads crates.io from a directory source (vendor): not checked", out)
+        self.assertEqual(self.requested("/dl/"), [])
 
     def test_a_toolchain_choice_is_passed_to_every_command(self):
         self.plan = {"update": [["lock", self.lock_of(("leaf", "1.0.0"))]]}
         code, out = self.run_guard("cargo", "+nightly", "build")
         self.assertEqual(code, 0, out)
         self.assertEqual([r["argv"][0] for r in self.runs()], ["+nightly"] * 3)
-        self.assertEqual(self.commands(), [["+nightly", "update", "--workspace"], ["+nightly", "build"]])
+        self.assertEqual(self.commands(), [["+nightly", "update", "--workspace"], ["+nightly", "build", "--locked"]])
 
     def test_a_manifest_path_and_offline_go_to_the_resolution(self):
         self.plan = {"update": [["lock", self.lock_of(("leaf", "1.0.0"))]]}
@@ -990,7 +1071,7 @@ class ResolvingCommandTests(FlowCase):
         code, out = self.run_guard("cargo", "add", "good")
         self.assertEqual(code, 0, out)
         self.assertEqual(self.commands(), [["add", "good"]])
-        self.assertIn("1 crate to check (what the command added to Cargo.lock;", out)
+        self.assertIn("1 crate to check (what the command added to Cargo.lock)", out)
         self.assertIn("checked 1 INCOMPLETE", out)
         self.assertIn('good = "1"', self.read(self.manifest))
         self.assertEqual(self.requested("/dl/"), ["/dl/good/good-1.0.0.crate"])               # (leaf was there before: not fetched)
@@ -1093,18 +1174,52 @@ class InstallTests(FlowCase):
     def installs(self):
         return [a for a in self.commands() if a and a[0] in ("install", "+nightly")]
 
+    def resolutions(self):
+        """The two resolutions of a crate: the scratch project that needs it (which version cargo picks), then the crate itself
+        as the root of its own workspace (what it builds) -> [(kind, run)]."""
+        return [("dependent" if "lazaret-guard-plan" in r["manifest"] else "crate", r) for r in self.runs()
+                if r["argv"][0] == "generate-lockfile"]
+
     def test_the_crate_and_what_it_builds_are_checked_and_then_cargo_installs(self):
         self.plan = {"install": self.unpack("good-1.0.0", "leaf-1.0.0")}
         code, out = self.run_guard("cargo", "install", "good")
         self.assertEqual(code, 0, out)
-        self.assertIn("2 crates to check (what cargo install good builds;", out)
-        scratch_runs = [r for r in self.runs() if r["argv"][0] == "generate-lockfile"]
-        self.assertEqual(len(scratch_runs), 1)
-        self.assertIn('[dependencies]\ngood = "*"\n', scratch_runs[0]["manifest"])
-        self.assertEqual(self.commands()[-1], ["install", "good"])
-        self.assertFalse(os.path.exists(scratch_runs[0]["argv"][2]))                         # (the scratch project is gone)
-        self.assertEqual(scratch_runs[0]["argv"][:2], ["generate-lockfile", "--manifest-path"])
-        self.assertNotIn("--offline", scratch_runs[0]["argv"])                                # (only a run that is offline resolves so)
+        self.assertIn("1 crate to check (good, the crate cargo install builds)", out)
+        self.assertIn("1 crate to check (what cargo install good builds)", out)
+        (dep_kind, dependent), (crate_kind, crate) = self.resolutions()
+        self.assertEqual((dep_kind, crate_kind), ("dependent", "crate"))
+        self.assertIn('[workspace]\n\n[dependencies]\ngood = "*"\n', dependent["manifest"])
+        self.assertIn('name = "good"', crate["manifest"])                                    # (the crate's own manifest…)
+        self.assertTrue(crate["manifest"].endswith("\n[workspace]\n"))                      # (…as a workspace of its own)
+        self.assertEqual(self.commands()[-1], ["install", "good@=1.0.0"])                    # (the release checked, pinned)
+        for _kind, run in self.resolutions():
+            self.assertFalse(os.path.exists(run["argv"][2]))                                  # (the scratch projects are gone)
+            self.assertEqual(run["argv"][:2], ["generate-lockfile", "--manifest-path"])
+            self.assertNotIn("--offline", run["argv"])                                        # (only a run that is offline resolves so)
+            self.assertEqual(os.path.realpath(run["cwd"]), os.path.realpath(self.dir))        # (cargo's settings are the user's folder's)
+
+    def test_what_a_feature_brings_in_is_checked_whatever_features_are_asked(self):
+        # (cargo install resolves a crate's lock with every feature of it on; the scratch project asked for its default
+        # features only, so an optional dependency `--features` turned on was built unchecked: the Go/Rust review's CG-2)
+        self.scratch["crate:good"] = cs.lock_text([("good", "1.0.0", None, ["leaf", "evil"]), ("leaf", "1.0.0", self.sums["leaf"], []),
+                                                   ("evil", "1.0.0", self.sums["evil"], [])])
+        code, out = self.run_guard("cargo", "install", "good")
+        self.assertEqual(code, 1, out)
+        self.assertIn("BLOCKED    evil@1.0.0: SUSPICIOUS", out)
+        self.assertEqual(self.installs(), [])
+
+    def test_vers_is_read_as_version(self):
+        self.plan = {"install": self.unpack("good-1.0.0", "leaf-1.0.0")}
+        code, out = self.run_guard("cargo", "install", "--vers", "1.0.0", "good")
+        self.assertEqual(code, 0, out)
+        self.assertIn('good = "=1.0.0"\n', self.resolutions()[0][1]["manifest"])
+        self.assertEqual(self.commands()[-1], ["install", "good@=1.0.0"])
+
+    def test_an_option_the_guard_does_not_know_is_a_usage_error(self):
+        code, out = self.run_guard("cargo", "install", "--frobnicate", "x", "good")
+        self.assertEqual(code, 2, out)
+        self.assertIn("not an option the guard knows", out)
+        self.assertEqual(self.runs(), [])
 
     def test_json_says_whether_cargo_installed_it(self):
         report = os.path.join(self.tmp, "report.json")
@@ -1139,14 +1254,16 @@ class InstallTests(FlowCase):
                 os.remove(self.log) if os.path.exists(self.log) else None
                 code, out = self.run_guard("cargo", "install", *args)
                 self.assertEqual(code, 0, out)
-                (run,) = [r for r in self.runs() if r["argv"][0] == "generate-lockfile"]
+                (run,) = [r for kind, r in self.resolutions() if kind == "dependent"]
                 self.assertIn(line + "\n", run["manifest"])
+                self.assertEqual(self.commands()[-1], ["install", "good@=1.0.0"])
 
     def test_two_crates_are_resolved_apart_and_what_they_share_is_checked_once(self):
         self.plan = {"install": self.unpack("good-1.0.0", "leaf-1.0.0", "foo_bar-0.2.0")}
         code, out = self.run_guard("cargo", "install", "good", "foo_bar")
         self.assertEqual(code, 0, out)
-        self.assertEqual(len([r for r in self.runs() if r["argv"][0] == "generate-lockfile"]), 2)
+        self.assertEqual([kind for kind, _ in self.resolutions()], ["dependent", "crate", "dependent", "crate"])
+        self.assertEqual(self.commands()[-1], ["install", "good@=1.0.0", "foo_bar@=0.2.0"])
         self.assertEqual(sorted(p for p in self.requested("/dl/")), ["/dl/foo_bar/foo_bar-0.2.0.crate", "/dl/good/good-1.0.0.crate",
                                                                     "/dl/leaf/leaf-1.0.0.crate"])
         self.assertEqual(sorted(c for c in out.split("\n") if "checked" in c), ["lazaret guard: checked 3 INCOMPLETE"])
@@ -1155,7 +1272,7 @@ class InstallTests(FlowCase):
         self.plan = {"install": self.unpack("good-1.0.0", "leaf-1.0.0")}
         code, out = self.run_guard("cargo", "install", "--root", "/tmp/x", "--features", "a,b", "good")
         self.assertEqual(code, 0, out)
-        self.assertEqual(self.commands()[-1], ["install", "--root", "/tmp/x", "--features", "a,b", "good"])
+        self.assertEqual(self.commands()[-1], ["install", "--root", "/tmp/x", "--features", "a,b", "good@=1.0.0"])
 
     def test_what_the_guard_does_not_read_is_a_usage_error(self):
         for args in (["install", "--git", "https://x/y"], ["install", "--path", "."], ["install"], ["install", "--registry", "r", "good"],
@@ -1177,7 +1294,7 @@ class InstallTests(FlowCase):
     def test_a_plan_installs_nothing(self):
         code, out = self.run_guard("--plan", "cargo", "install", "good")
         self.assertEqual(code, 0, out)
-        self.assertEqual([c[0] for c in self.commands()], ["generate-lockfile"])      # (the scratch resolution: no `install`)
+        self.assertEqual([c[0] for c in self.commands()], ["generate-lockfile"] * 2)  # (the two resolutions: no `install`)
         self.assertIn("nothing blocked (--plan: nothing was installed)", out)
 
     def test_a_crate_unpacked_that_was_never_checked_fails_the_run(self):
@@ -1186,11 +1303,13 @@ class InstallTests(FlowCase):
         self.assertEqual(code, 1, out)
         self.assertIn("installed but not checked: other-2.0.0", out)
 
-    def test_an_install_that_failed_installed_nothing_and_says_nothing_of_what_it_unpacked(self):
+    def test_an_install_that_failed_still_says_what_it_fetched_unchecked(self):
+        # (a build script runs before the build can fail: what cargo fetched unchecked is said whether it failed or not)
         self.plan = {"install": self.unpack("good-1.0.0", "leaf-1.0.0", "other-2.0.0") + [["exit", 101]]}
         code, out = self.run_guard("cargo", "install", "good")
         self.assertEqual(code, 101, out)
         self.assertNotIn("installed but not checked", out)
+        self.assertIn("fetched but not checked (the command then failed): other-2.0.0", out)
 
     def test_the_toolchain_choice_goes_to_every_command(self):
         self.plan = {"install": self.unpack("good-1.0.0", "leaf-1.0.0")}
@@ -1302,7 +1421,7 @@ class RealCargoTests(TmpCase):
         self.depend("good")
         code, out = self.guard("cargo", "build")
         self.assertEqual(code, 0, out)
-        self.assertIn("lazaret guard: 2 crates to check (Cargo.lock;", out)
+        self.assertIn("lazaret guard: 2 crates to check (Cargo.lock)\n", out)
         self.assertIn("lazaret guard: checked 2 INCOMPLETE", out)
         self.assertNotIn("installed but not checked", out)
         self.assertTrue(os.path.isdir(os.path.join(self.tmp, "target", "debug")))
@@ -1359,6 +1478,56 @@ class RealCargoTests(TmpCase):
         self.assertIn("BLOCKED    evil@1.0.0", out)
         self.assertFalse(os.path.exists(root))
         self.assertFalse(os.path.exists(os.path.join(self.home, "registry", "src")))
+
+    def test_what_a_feature_of_an_installed_crate_brings_in_is_checked(self):
+        # (cargo install resolves a crate's lock with every feature of it on, and `--features` turns one on; the guard asked
+        # for the default features only, so a dependency a feature brings in was built unchecked: the Go/Rust review's CG-2)
+        self.reg.add("feattool", "1.0.0", files={"src/main.rs": "fn main() {}\n"}, deps=[("leaf", "^1")],
+                     optional=[("evil", "^1")], features={"extra": ["dep:evil"]})
+        root = os.path.join(self.tmp, "root")
+        code, out = self.guard("cargo", "install", "--root", root, "--features", "extra", "feattool")
+        self.assertEqual(code, 1, out)
+        self.assertIn("BLOCKED    evil@1.0.0", out)
+        self.assertFalse(os.path.exists(root))
+
+    def test_a_crate_another_tool_unpacked_is_checked_before_cargo_builds_it(self):
+        # (an editor or `cargo tree` unpacks crates without running them; the guard left unpacked crates out, and cargo built
+        # them without fetching them again: the Go/Rust review's CG-3)
+        self.depend("parent")
+        tree = subprocess.run(["cargo", "tree"], cwd=self.dir, env=self.env, capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", timeout=40)
+        self.assertEqual(tree.returncode, 0, tree.stderr)
+        self.assertIn("evil-1.0.0", cargosrc.crate_dirs(self.home))
+        code, out = self.guard("cargo", "build")
+        self.assertEqual(code, 1, out)
+        self.assertIn("BLOCKED    evil@1.0.0: SUSPICIOUS", out)
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "target")))
+
+    def test_cargo_install_reads_no_settings_from_the_folders_above_its_scratch_project(self):
+        # (the Go/Rust review's CG-1: the scratch project sat in /tmp, and cargo looks for its configuration and a
+        # workspace, and rustup for a toolchain file, in every folder above where cargo runs or the manifest is: files
+        # another user planted there ran a program of theirs, or made the scratch lock empty, so nothing was checked)
+        base = self.env["LAZARET_GUARD_SCRATCH"]
+        marker = os.path.join(self.tmp, "planted-ran")
+        planted = os.path.join(self.tmp, "planted", "bin")
+        os.makedirs(planted)
+        for tool in ("planted.sh", "cargo", "rustc"):
+            with open(os.path.join(planted, tool), "w", encoding="utf-8") as f:
+                f.write(f'#!/bin/sh\necho "$0" >> "{marker}"\n' + ('exec "$@"\n' if tool == "planted.sh" else "exit 1\n"))
+            os.chmod(os.path.join(planted, tool), 0o755)
+        os.makedirs(os.path.join(base, ".cargo"))
+        with open(os.path.join(base, ".cargo", "config.toml"), "w", encoding="utf-8") as f:
+            f.write(f'[resolver]\nincompatible-rust-versions = "fallback"\n[build]\nrustc-wrapper = "{planted}/planted.sh"\n')
+        with open(os.path.join(base, "Cargo.toml"), "w", encoding="utf-8") as f:
+            f.write('[workspace]\nmembers = ["*/*"]\nresolver = "2"\n')
+        with open(os.path.join(base, "rust-toolchain.toml"), "w", encoding="utf-8") as f:
+            f.write(f'[toolchain]\npath = "{os.path.dirname(planted)}"\n')
+        root = os.path.join(self.tmp, "root")
+        code, out = self.guard("cargo", "install", "--root", root, "badtool")
+        self.assertEqual(code, 1, out)
+        self.assertIn("BLOCKED    evil@1.0.0", out)
+        self.assertFalse(os.path.exists(marker), out)
+        self.assertFalse(os.path.exists(os.path.join(base, "Cargo.lock")))
 
     def test_cargo_install_locked_uses_the_lock_the_crate_was_published_with(self):
         self.reg.add("pleaf", "1.0.0")

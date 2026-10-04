@@ -310,6 +310,8 @@ def base_env(tmp):
     env.update({
         "PYTHONPATH": _support.SRC + os.pathsep + _support.PY_ROOT,
         "LAZARET_GUARD_CACHE": os.path.join(tmp, "guard-cache.json"),
+        # (the guard's own folders for a tool's plan: the test's, which is private to the run, rather than ~/.cache's)
+        "LAZARET_GUARD_SCRATCH": os.path.join(tmp, "guard-scratch"),
         "NO_PROXY": "127.0.0.1,localhost", "no_proxy": "127.0.0.1,localhost",
         "npm_config_userconfig": os.path.join(tmp, "npmrc-user"),
         "npm_config_globalconfig": os.path.join(tmp, "npmrc-global"),

@@ -5,10 +5,11 @@ dependency's go.mod and holds it to `golang.org/x/mod`'s `modfile.ParseLax`) and
 (`scanner/sca.py`, which reads the project's own). It is in `scanner` because the layers go mcp, registry, scanner: the
 registry may import this and the inventory may not import the registry.
 
-The lexer is `modfile`'s: a line is words, a quoted string (`"` with `\\"` and `\\\\`, or a raw string in backticks) is one
-word, `(` `)` `[` `]` `{` `}` `,` are words of their own, `//` starts a comment, and a verb followed by a lone `(` opens
-a block that a lone `)` closes. What is read of the lines is `module`, `go`, `require` (with `// indirect`) and `replace`;
-the rest (`exclude`, `retract`, `toolchain`, `godebug`, `tool`) is left, since none of it names a module that is built.
+The lexer is `modfile`'s: a line is words, a quoted string (`"`, read as `strconv.Unquote` reads it, or a raw string in
+backticks) is one word, `(` `)` `[` `]` `{` `}` `,` are words of their own, `//` starts a comment, and a verb followed by a
+lone `(` opens a block that a lone `)` closes. What is read of the lines is `module`, `go`, `require` (with `// indirect`),
+`replace` and go.work's `use`; the rest (`exclude`, `retract`, `toolchain`, `godebug`, `tool`) is left, since none of it
+names a module that is built.
 It goes on past a line it cannot read, because a hostile file is no reason to stop reading, and it takes paths as written:
 checking them is the caller's. Linear in the text, which is cut at `MAX_GOMOD`.
 
@@ -20,10 +21,11 @@ import re
 MAX_GOMOD = 16 * 1024 * 1024               # zip.MaxGoMod
 MAX_REQUIRES = 20_000
 MAX_REPLACES = 20_000
+MAX_USES = 2_000
 MAX_VERSION = 100
 
-__all__ = ["MAX_GOMOD", "MAX_REQUIRES", "MAX_REPLACES", "MAX_VERSION", "NUM", "PRE", "BUILD", "SEMVER_PARTS", "tokens",
-           "parse", "is_directory_path", "canonical_version", "go_at_least"]
+__all__ = ["MAX_GOMOD", "MAX_REQUIRES", "MAX_REPLACES", "MAX_USES", "MAX_VERSION", "NUM", "PRE", "BUILD", "SEMVER_PARTS",
+           "tokens", "unquote", "parse", "is_directory_path", "canonical_version", "go_at_least"]
 
 NUM = r"(?:0|[1-9][0-9]*)"
 PRE = r"(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
@@ -34,6 +36,56 @@ _GO_VERSION = re.compile(r"([1-9][0-9]*)\.(0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*))
 
 def _ident_char(ch):
     return ch not in " ()[]{}," and ch.isprintable()
+
+
+_ESCAPES = {"a": "\a", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v", "\\": "\\", '"': '"'}
+_HEX = frozenset("0123456789abcdefABCDEF")
+
+
+def unquote(body):
+    """The text of a double-quoted Go string whose inside is `body`, as `strconv.Unquote` reads it, or None where Go refuses
+    it: `\\a` `\\b` `\\f` `\\n` `\\r` `\\t` `\\v` `\\\\` `\\"`, `\\x` and two hex digits or `\\` and three octal ones (a byte, up to
+    0377), `\\u` and four or `\\U` and eight hex digits (a code point that is not a surrogate). The bytes are read as UTF-8.
+    Only `\\"` and `\\\\` were read: `"a.example\\x2fb"`, which Go reads as a.example/b, dropped its line (the Go/Rust
+    review's SCA-3)."""
+    if "\\" not in body:
+        return body
+    out, i, n = bytearray(), 0, len(body)
+    while i < n:
+        ch = body[i]
+        if ch != "\\":
+            out += ch.encode("utf-8", "surrogatepass")
+            i += 1
+            continue
+        c = body[i + 1] if i + 1 < n else ""
+        if c in _ESCAPES and c:
+            out += _ESCAPES[c].encode("ascii")
+            i += 2
+        elif c == "x" or c in "01234567" and c:
+            digits = body[i + 2:i + 4] if c == "x" else body[i + 1:i + 4]
+            if len(digits) != (2 if c == "x" else 3) or not all(d in (_HEX if c == "x" else "01234567") for d in digits):
+                return None
+            value = int(digits, 16 if c == "x" else 8)
+            if value > 0xFF:
+                return None
+            out.append(value)
+            i += 4
+        elif c in ("u", "U"):
+            k = 4 if c == "u" else 8
+            digits = body[i + 2:i + 2 + k]
+            if len(digits) != k or not all(d in _HEX for d in digits):
+                return None
+            value = int(digits, 16)
+            if value > 0x10FFFF or 0xD800 <= value <= 0xDFFF:
+                return None
+            out += chr(value).encode("utf-8")
+            i += 2 + k
+        else:
+            return None
+    try:
+        return out.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
 
 
 def tokens(line):
@@ -53,18 +105,13 @@ def tokens(line):
             out.append(ch)
             i += 1
         elif ch in "\"`":
-            j, text, ok = i + 1, [], True
+            j = i + 1
             while j < n and line[j] != ch:
-                if ch == '"' and line[j] == "\\":
-                    if j + 1 < n and line[j + 1] in '"\\':
-                        text.append(line[j + 1])
-                    else:
-                        ok = False                                  # (an escape this reader does not read)
-                    j += 2
-                    continue
-                text.append(line[j])
-                j += 1
-            out.append("".join(text) if ok and j < n else None)
+                j += 2 if ch == '"' and line[j] == "\\" else 1          # (an escape is the backslash and the next character)
+            if j >= n:
+                out.append(None)                                    # (not closed on its line: Go refuses it)
+            else:
+                out.append(unquote(line[i + 1:j]) if ch == '"' else line[i + 1:j])
             i = j + 1
         else:
             j = i
@@ -133,15 +180,19 @@ def _replace(args, canonical):
 
 
 def parse(text, canonical=canonical_version):
-    """The parts of a go.mod that name things -> {"module": path or None, "go": version or None, "require": [(path,
-    version, indirect), ...], "replace": [(old path, old version, new path, new version), ...]}. A version that is not
-    one ("") drops its line (`canonical` is `canonical_version`; a caller may pass another); a replacement without a
-    version is a directory (`is_directory_path`)."""
-    out = {"module": None, "go": None, "require": [], "replace": []}
+    """The parts of a go.mod (or a go.work) that name things -> {"module": path or None, "go": version or None, "require":
+    [(path, version, indirect), ...], "replace": [(old path, old version, new path, new version), ...], "use": [directory,
+    ...] (go.work's), "unversioned": [(path, indirect), ...], "dropped": n}. A version that is not one ("") drops its line
+    (`canonical` is `canonical_version`; a caller may pass another), except one longer than MAX_VERSION, which Go reads
+    and this reader does not: that requirement is in "unversioned", with no version. "dropped" counts the require,
+    replace and use lines not read (a word that could not be read, a version that is not one, past the limits), so that
+    nothing is left out unsaid (the Go/Rust review's SCA-3). A replacement without a version is a directory
+    (`is_directory_path`)."""
+    out = {"module": None, "go": None, "require": [], "replace": [], "use": [], "unversioned": [], "dropped": 0}
     if not isinstance(text, str):
         return out
     block = None
-    requires, replaces = out["require"], out["replace"]
+    requires, replaces, unversioned = out["require"], out["replace"], out["unversioned"]
     for raw in text[:MAX_GOMOD].split("\n"):
         words, comment = tokens(raw)
         if not words:
@@ -161,12 +212,26 @@ def parse(text, canonical=canonical_version):
         elif (verb == "go" and block is None and out["go"] is None and len(args) == 1 and isinstance(args[0], str)
               and _GO_VERSION.fullmatch(args[0])):
             out["go"] = args[0]                                     # (a `go (` block is not read: Go refuses it or leaves it)
-        elif verb == "require" and len(args) == 2 and all(isinstance(a, str) for a in args) and len(requires) < MAX_REQUIRES:
-            version = canonical(args[1])
+        elif verb == "require":
+            version = None
+            if len(args) == 2 and all(isinstance(a, str) for a in args) and len(requires) + len(unversioned) < MAX_REQUIRES:
+                version = canonical(args[1])
+                if not version and len(args[1]) > MAX_VERSION and args[1].startswith("v"):
+                    unversioned.append((args[0], _indirect(comment)))
+                    continue
             if version:
                 requires.append((args[0], version, _indirect(comment)))
-        elif verb == "replace" and len(replaces) < MAX_REPLACES:
-            found = _replace(args, canonical)
+            else:
+                out["dropped"] += 1
+        elif verb == "replace":
+            found = _replace(args, canonical) if len(replaces) < MAX_REPLACES else None
             if found:
                 replaces.append(found)
+            else:
+                out["dropped"] += 1
+        elif verb == "use":
+            if len(args) == 1 and isinstance(args[0], str) and args[0] and len(out["use"]) < MAX_USES:
+                out["use"].append(args[0])
+            else:
+                out["dropped"] += 1
     return out

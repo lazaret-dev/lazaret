@@ -258,6 +258,12 @@ def zip_h1(data):
 
 
 def _zip_h1(data):
+    # (the central directory is checked before zipfile parses it: it builds one record per entry the directory
+    # declares, so a 200 MB download could hold millions; the Go/Rust review's RM-2)
+    from lazaret.registry import repo                    # (here: repo is the registry's, and it does not import this module)
+    refused = repo._zip_preflight(data, max_files=MAX_ENTRIES)
+    if refused:
+        raise base.DigestError(f"go: {refused}")
     with zipfile.ZipFile(io.BytesIO(data)) as z:
         infos = z.infolist()
         if len(infos) > MAX_ENTRIES:

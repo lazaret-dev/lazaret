@@ -876,8 +876,36 @@ class BuildTests(Feeds):
     def test_stale_mirror_warning(self):
         doc, _ = self.build()
         now = sca.parse_generated_at("2099-02-01T00:00:00Z")
-        self.assertEqual(len(sca_feeds.stale_feed_warnings(doc, now)), 2)
+        warnings = sca_feeds.stale_feed_warnings(doc, now)
+        self.assertEqual(len(warnings), 5)                                   # (each ecosystem's advisories, and EPSS)
+        self.assertIn("OSV go advisories (newest record) is 29 days old — is this a stale mirror?", warnings)
         self.assertEqual(sca_feeds.stale_feed_warnings(doc, sca.parse_generated_at("2099-01-07T00:00:00Z")), [])
+
+    def test_each_ecosystems_advisories_are_dated_and_a_stopped_mirror_is_no_source(self):
+        """The Go/Rust review's SCA-4: freshness was the newest record of all the exports, so a Go or crates.io export two
+        years old beside fresh npm and PyPI ones passed as fresh, and as covering the Go and Rust dependencies."""
+        def aged(records, modified):
+            return [dict(r, modified=modified) for r in records]
+        write_zip(self.path("Go", "all.zip"), aged(GO_RECORDS, "2097-01-01T00:00:00Z"))
+        write_zip(self.path("crates.io", "all.zip"), aged(CRATES_RECORDS, "2098-12-10T00:00:00Z"))
+        lines = []
+        doc, _ = self.build(now=sca.parse_generated_at("2099-01-05T00:00:00Z"), log=lines.append)
+        self.assertEqual(doc["sources"], ["osv:npm", "osv:pypi", "osv:crates", "cisa-kev", "epss"])
+        self.assertEqual([e["newestModified"] for e in doc["feeds"]["osv"]["exports"]],
+                         [{"npm": "2099-01-04T00:00:00Z"}, {"pypi": "2099-01-03T10:00:00Z"}, {"go": "2097-01-01T00:00:00Z"},
+                          {"crates": "2098-12-10T00:00:00Z"}])
+        self.assertTrue(any("the newest go advisory is older than 30 days" in line for line in lines), lines)
+        warnings = sca_feeds.stale_feed_warnings(doc, sca.parse_generated_at("2099-01-05T00:00:00Z"))
+        self.assertEqual([w.split(" is ")[0] for w in warnings], ["OSV go advisories (newest record)", "OSV crates advisories (newest record)"])
+        self.assertEqual(sca.CveBundle(doc).sources, doc["sources"])           # (what the scan's coverage condition reads)
+
+    def test_one_archive_for_every_ecosystem_is_dated_by_ecosystem(self):
+        write_zip(self.path("all.zip"), NPM_RECORDS + PYPI_RECORDS + CRATES_RECORDS
+                  + [dict(r, modified="2097-01-01T00:00:00Z") for r in GO_RECORDS])
+        doc, _ = self.build(osv_url=self.path("all.zip"), now=sca.parse_generated_at("2099-01-05T00:00:00Z"))
+        (export,) = doc["feeds"]["osv"]["exports"]
+        self.assertEqual(export["newestModified"]["go"], "2097-01-01T00:00:00Z")
+        self.assertNotIn("osv:go", doc["sources"])
 
     def test_dump_is_one_advisory_per_line(self):
         doc, _ = self.build()

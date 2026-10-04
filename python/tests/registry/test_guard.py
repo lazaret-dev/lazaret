@@ -738,12 +738,18 @@ class PolicyTests(unittest.TestCase):
         ctx.not_checked(failed, repo.FetchError("HTTP 404 fetching https://registry.example/x"))
         self.assertEqual(failed.blocked, ["could not be checked: HTTP 404 fetching https://registry.example/x"])
         big = ctx.add(guard.Check("npm", "big", "1.0.0"))
-        ctx.not_checked(big, repo.FetchError("response over 200MB: https://registry.example/big"))
+        ctx.not_checked(big, guard.TooLarge("response over 200MB: https://registry.example/big"))
         self.assertEqual((big.verdict, big.blocked), ("INCOMPLETE", []))
         strict = context(block_warn=True)
         big = strict.add(guard.Check("npm", "big", "1.0.0"))
-        strict.not_checked(big, repo.FetchError("response over 200MB: x"))
+        strict.not_checked(big, guard.TooLarge("response over 200MB: x"))
         self.assertEqual(len(big.blocked), 1)
+        # (by its type, not its text: a server chooses the text, and a redirect to https://response over.example/ made a
+        # failed download pass as one too large to scan: the Go/Rust review's CG-9)
+        posing = ctx.add(guard.Check("npm", "posing", "1.0.0"))
+        ctx.not_checked(posing, repo.FetchError("URL error fetching https://response over 200MB.example/: refused"))
+        self.assertEqual(posing.verdict, None)
+        self.assertEqual(len(posing.blocked), 1)
 
     def test_what_was_installed_but_not_checked(self):
         ctx = context()

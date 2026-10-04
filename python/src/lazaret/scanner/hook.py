@@ -33,7 +33,7 @@ import tempfile
 import threading
 
 import lazaret as _lazaret_pkg
-from lazaret.scanner import core, engine
+from lazaret.scanner import core, engine, programs
 
 #: build_result's conditions this gate keeps (the other two are quality)
 GATE = ("No blocker issues", "No critical vulnerabilities", "No supply-chain indicators",
@@ -49,8 +49,14 @@ class HookError(Exception):
 
 def _git(root, *args):
     """Run git, reading only (no optional locks, pathspecs literal) -> its
-    stdout, or None when it fails or isn't installed."""
-    cmd = ["git", "--no-optional-locks", "--literal-pathspecs"] + (["-C", root] if root else []) + list(args)
+    stdout, or None when it fails or isn't installed. git is the one in
+    PATH's absolute folders (programs.find), never a git.exe in the
+    repository's own folder, which Windows runs for a bare `git` (the Go/Rust
+    review's GO-8)."""
+    git = programs.find("git")
+    if git is None:
+        return None
+    cmd = [git, "--no-optional-locks", "--literal-pathspecs"] + (["-C", root] if root else []) + list(args)
     try:
         done = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                               stderr=subprocess.DEVNULL, check=False)
@@ -108,7 +114,10 @@ def write_blobs(root, wanted, dest):
     raw (no filter runs), streamed to disk."""
     if not wanted:
         return []
-    cmd = ["git", "--no-optional-locks", "-C", root, "cat-file", "--batch"]
+    git = programs.find("git")
+    if git is None:
+        return [(rel, "git could not be run (it is not on PATH)") for _, rel in wanted]
+    cmd = [git, "--no-optional-locks", "-C", root, "cat-file", "--batch"]
     try:
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     except OSError as exc:

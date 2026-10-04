@@ -167,11 +167,22 @@ class RequestTests(unittest.TestCase):
     def test_the_checksum_database_is_relayed_as_it_is_asked(self):
         got = self.req("/sumdb/sum.golang.org/supported")
         self.assertEqual((got.kind, got.rest), ("sumdb", "sumdb/sum.golang.org/supported"))
-        self.assertEqual(self.req("/sumdb/sum.golang.org/tile/8/0/x001").kind, "sumdb")
+        for path in ("/sumdb/sum.golang.org/latest", "/sumdb/sum.golang.org/tile/8/0/x001/234", "/sumdb/sum.golang.org/tile/8/1/012",
+                     "/sumdb/sum.golang.org/tile/8/data/x001/234.p/17", "/sumdb/sum.golang.org/lookup/github.com/!burnt!sushi/toml@v1.3.2"):
+            with self.subTest(path):
+                self.assertEqual(self.req(path).kind, "sumdb")
         self.assertIsNone(self.req("/sumdb/../x"))
         self.assertIsNone(self.req("/sumdb/a/../../b"))
-        self.assertEqual(self.req("/sumdb/" + "a" * (512 - len("sumdb/"))).kind, "sumdb")
-        self.assertIsNone(self.req("/sumdb/" + "a" * (513 - len("sumdb/"))))
+
+    def test_nothing_but_what_go_asks_of_the_checksum_database_is_relayed(self):
+        # (any path below /sumdb/ was relayed to the proxy with the user's credentials for it, a decoded `?` as a query
+        # string: the Go/Rust review's GO-3)
+        for path in ("/sumdb/sum.golang.org/other", "/sumdb/sum.golang.org/tile/8/0/x001", "/sumdb/sum.golang.org/latest?x=1",
+                     "/sumdb/sum.golang.org/lookup/x.io/m@v1.0.0?y", "/sumdb/sum.golang.org/lookup/../../etc@v1.0.0",
+                     "/sumdb/sum.golang.org/lookup/x.io/m", "/sumdb/sum.golang.org/lookup/x.io/m@notaversion",
+                     "/sumdb/" + "a" * 300 + "/latest", "/sumdb//latest", "/sumdb/sum.golang.org/tile/8/0/../x"):
+            with self.subTest(path):
+                self.assertIsNone(self.req(path))
 
     def test_the_path_at_another_proxy_is_made_again_from_the_checked_names(self):
         for path in ("/github.com/!burnt!sushi/toml/@v/v1.3.2.zip", "/x.io/m/@v/list", "/x.io/m/@latest", "/x.io/m/@v/master.info",

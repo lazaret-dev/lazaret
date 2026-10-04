@@ -845,27 +845,58 @@ Rust detectors land, `UNREAD_CODE` loses their entries.
 **Go and Cargo (0.1.9).** go can be pointed at a proxy, so the Go guard is a
 proxy (`LocalGoProxy`, 127.0.0.1, for the one command) that relays the
 proxies `GOPROXY` lists by go's rules (a comma goes on after a 404 or 410
-only, a bar after any error) and scans each zip before go has it; the
-checksum database's paths are relayed as they are, and go still checks the
-zip against `go.sum` and the database, so what go accepts is what was
-scanned. It never fetches from version control: `direct` is not honoured,
-and a module `GOPRIVATE` names, which go fetches itself, is listed from the
-module cache afterwards as not checked. `--min-age` works at the proxy (a
-young version left out of the list, its `.info` and zip refused), so `go get`
-falls back the way it does when a version is missing. cargo has no such hook:
-a registry's index and download URL are configuration, and a replaced
-source is the user's. So the Cargo guard resolves first (`cargo update
---workspace`, or the lock as it is with `--locked`), reads `Cargo.lock`,
-fetches and checks every crates.io crate cargo has not unpacked against the
-lock's checksum, from where cargo would (`[source]` replacement applied, the
-registry's `dl`), and only then lets cargo run. A crate that cannot be
-checked is blocked; one from somewhere the guard does not read (git, a git
-index, a registry that answers 401 or 403) is listed as not checked, and so
-is anything cargo unpacked that the guard did not check. Every name and
-version that reaches a URL or a path is checked first (`cargosrc.crate_ok`),
-so a hostile lockfile can name nothing but a crate to fetch. The manifests
-and lockfiles of both are snapshotted and put back when anything is
-blocked.
+only, a bar after any error) and scans each zip before go has it; go still
+checks the zip against `go.sum` and the database, so what go accepts is what
+was scanned. The proxy is go's alone (`LocalGate`): it answers a path with
+the run's secret segment and its own `Host` only, and of the checksum
+database only the paths go asks for, so another process on the machine, or
+a page that rebinds a name to 127.0.0.1, cannot use it or the proxy
+credentials it holds (the same gate is on the pip and uv index). A zip is
+fetched once, to the spool, hashed as it comes, and those bytes are go's:
+the size a header claims decides nothing, and a second fetch would hand go
+bytes nothing scanned. It never fetches from version control: `direct` is
+not honoured. go still takes modules without the proxy, from its module
+cache and from repositories (`GONOPROXY`), so the guard lists what a
+command uses (`go mod download -json`, which runs no module's code) and
+scans those zips where go keeps them (`check_cached`): before a command
+that builds a program, so that a hostile module in the cache stops it
+before anything is built or run, and after one that resolves; the listing's
+changes to `go.sum` are put back, so the command finds the files as they
+were. A vendored build fetches nothing and is said to be unchecked.
+`--min-age` works at the proxy (a young version left out of the list, its
+`.info` and zip refused), so `go get` falls back the way it does when a
+version is missing; a cached module's time is the `.info` go kept beside
+it. cargo has no such hook: a registry's index and download URL are
+configuration, and a replaced source is the user's. So the Cargo guard
+resolves first (`cargo update --workspace`, or the lock as it is with
+`--locked`), reads `Cargo.lock`, fetches and checks every crates.io crate
+the lock names against its checksum (one cargo has unpacked already too: a
+verdict cached for its checksum is not scanned again), from where cargo
+would (cargo's configuration as cargo merges it: `[source]` replacement,
+`[registries]`, `include`, `--config`; the registry's `dl`), and only then
+lets cargo run, with `--locked`. `cargo install` resolves in a scratch
+project that is a workspace of its own, with the features asked for, run
+from the user's folder (so its configuration and toolchain are the ones
+`cargo install` reads), and installs `name@=version`. A crate that cannot be
+checked is blocked; one from somewhere the guard does not read (git, a
+vendor folder, a git index, a registry that answers 401 or 403) is
+INCOMPLETE, and anything cargo unpacked that the guard did not check is
+named. Every name and version that reaches a URL or a path is checked first
+(`cargosrc.crate_ok`), so a hostile lockfile can name nothing but a crate to
+fetch. The manifests and lockfiles of both are snapshotted and put back when
+anything is blocked.
+
+**The guard's own folders and programs (0.1.9).** cargo, rustup, yarn, npm
+and go read settings from every folder above where they run (a workspace, a
+toolchain file, a `.yarnrc`'s `yarn-path`, `go.work`), and `/tmp` is a folder
+every user can write to. A resolution the guard makes outside the project is
+made in `private_scratch()`: `LAZARET_GUARD_SCRATCH` as given, else the
+user's cache folder, else the temporary folder, each of these two only if no
+folder above it is one another user can write to (`_shared_above`), and an
+error otherwise. A
+program is found by `scanner/programs.py`, in `PATH`'s absolute folders
+only: `shutil.which` and `CreateProcess` look in the current folder first on
+Windows, where the project is.
 
 **Scan workers (0.1.9).** Every scan runs in a worker (`scanpool.py`),
 `--jobs 1` included, never in the process that downloads, holds the

@@ -121,6 +121,7 @@ MAX_EPSS_ROWS = 20_000_000
 READ_TIMEOUT = 60           # seconds a download may go without receiving data
 MAX_REDIRECTS = 5
 STALE_FEED_DAYS = 7         # warn when a feed's own date is older than this
+STALE_EXPORT_DAYS = 30      # an OSV export whose newest record is older than this is no source of its ecosystems' advisories
 
 EXIT_OUTPUT = lazaret_report.EXIT_OUTPUT     # 3: the bundle can't be written
 EXIT_FEED = sca.EXIT_BUNDLE                  # 4: a feed can't be downloaded or read
@@ -996,15 +997,21 @@ def build_bundle(osv_url=OSV_URL, kev_urls=KEV_URLS, epss_url=EPSS_URL, *,
                 zfile.seek(0)
                 n_read = n_kept = 0
                 seen = set()                      # ecosystems this export has advisories for
+                eco_newest = {}                   # the newest record that names each ecosystem, in this export
                 for _member, raw in read_osv_zip(zfile, counts):
                     n_read += 1
                     rec = osv_record(raw, counts)
                     if rec is None:
                         continue
                     n_kept += 1
-                    seen.update(p[0] for p in rec["packages"])
-                    if rec["modified"] and (newest is None or rec["modified"] > newest):
-                        newest = rec["modified"]
+                    ecos = {p[0] for p in rec["packages"]}
+                    seen.update(ecos)
+                    if rec["modified"]:
+                        if newest is None or rec["modified"] > newest:
+                            newest = rec["modified"]
+                        for eco in ecos:
+                            if eco not in eco_newest or rec["modified"] > eco_newest[eco]:
+                                eco_newest[eco] = rec["modified"]
                     old = records.get(rec["id"])
                     if old is None or (rec["modified"] or "") > (old["modified"] or ""):
                         records[rec["id"]] = rec
@@ -1017,8 +1024,9 @@ def build_bundle(osv_url=OSV_URL, kev_urls=KEV_URLS, epss_url=EPSS_URL, *,
                 raise FeedError("the OSV export %s has no %s advisories — refusing to write a "
                                 "bundle that would clear every %s dependency"
                                 % (location, " or ".join(missing), " and ".join(missing)))
-            exports.append({"url": location, "ecosystems": names, "records": n_read,
-                            "keptRecords": n_kept})
+            exports.append({"url": location, "ecosystems": names, "records": n_read, "keptRecords": n_kept,
+                            "newestModified": {eco: eco_newest[eco] for osv_name, eco in OSV_ECOSYSTEMS
+                                               if osv_name in names and eco in eco_newest}})
             log("  OSV:       %s records (%s kept, %s) from %s"
                 % (format(n_read, ","), format(n_kept, ","), _mib(size), location))
         feeds["osv"] = {"exports": exports, "newestModified": newest}
@@ -1039,11 +1047,16 @@ def build_bundle(osv_url=OSV_URL, kev_urls=KEV_URLS, epss_url=EPSS_URL, *,
     advisories = sorted((advisory(g, kev, epss) for g in groups),
                         key=lambda a: _id_rank(a["cve"]))
     packages = [p for a in advisories for p in a["packages"]]
+    stale = _stale_ecosystems(exports, now)
+    for eco in stale:
+        log("  OSV:       the newest %s advisory is older than %d days: the bundle does not name osv:%s a source (a "
+            "project with %s dependencies fails its coverage condition)" % (eco, STALE_EXPORT_DAYS, eco, eco))
     doc = {
         "bundleVersion": 1,
         "generator": "lazaret-sca %s" % _lazaret_pkg.__version__,
         "generatedAt": _iso(now),
-        "sources": ["osv:" + eco for _osv_name, eco in OSV_ECOSYSTEMS] + ["cisa-kev"] + (["epss"] if epss_url else []),
+        "sources": ["osv:" + eco for _osv_name, eco in OSV_ECOSYSTEMS if eco not in stale]
+                   + ["cisa-kev"] + (["epss"] if epss_url else []),
         # the data's own terms travel with it (a bundle is often shared)
         "attribution": ATTRIBUTION + ([EPSS_ATTRIBUTION] if epss_url else []),
         "feeds": feeds,
@@ -1059,14 +1072,34 @@ def build_bundle(osv_url=OSV_URL, kev_urls=KEV_URLS, epss_url=EPSS_URL, *,
     return doc, counts
 
 
+def _stale_ecosystems(exports, now):
+    """The bundle's ecosystems whose newest advisory, in the export read for them, is older than STALE_EXPORT_DAYS: a mirror
+    of them that stopped. Freshness was the bundle's, by the newest record of all the exports: a Go or crates.io export two
+    years old beside a fresh npm one passed as fresh, and as covering Go (the Go/Rust review's SCA-4)."""
+    out = []
+    for export in exports:
+        for eco, value in sorted((export.get("newestModified") or {}).items()):
+            age = _age_days(value, now)
+            if age is not None and age > STALE_EXPORT_DAYS and eco not in out:
+                out.append(eco)
+    return out
+
+
 def stale_feed_warnings(doc, now=None):
     """Feeds whose own dates are older than STALE_FEED_DAYS (a stale local
-    mirror would otherwise pass as a fresh bundle)."""
+    mirror would otherwise pass as a fresh bundle): each OSV export by its
+    newest record, and EPSS by its score date."""
     now = now or _utc_now()
     feeds = doc.get("feeds") or {}
+    osv = feeds.get("osv") or {}
+    exports = osv.get("exports") if isinstance(osv.get("exports"), list) else []
+    dated = [(eco, value) for e in exports if isinstance(e, dict) and isinstance(e.get("newestModified"), dict)
+             for eco, value in sorted(e["newestModified"].items())]
+    checks = ([("OSV %s advisories (newest record)" % eco, value) for eco, value in dated] if dated
+              else [("OSV (newest record)", osv.get("newestModified"))])
+    checks.append(("EPSS (score date)", (feeds.get("epss") or {}).get("scoreDate")))
     out = []
-    for label, value in (("OSV (newest record)", (feeds.get("osv") or {}).get("newestModified")),
-                         ("EPSS (score date)", (feeds.get("epss") or {}).get("scoreDate"))):
+    for label, value in checks:
         age = _age_days(value, now) if value else None
         if age is not None and age > STALE_FEED_DAYS:
             out.append("%s is %d days old — is this a stale mirror?" % (label, age))

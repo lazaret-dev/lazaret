@@ -90,6 +90,9 @@ python/
 │   │   │                   hardening checks (SC-WORKFLOW-*)
 │   │   ├── gitlabci.py     GitLab CI files' hardening checks (SC-GITLAB-*)
 │   │   ├── timings.py      where a run's time goes (`--timings`)
+│   │   ├── programs.py     where a program Lazaret runs is: PATH's absolute
+│   │   │                   folders only, never the current one (the guard's
+│   │   │                   package managers, the hook's git)
 │   │   ├── sca.py          dependency CVE matching (`lazaret-sca`): Python,
 │   │   │                   JavaScript, Go and Rust lockfiles
 │   │   ├── gomod.py        the `go.mod` reader shared by the Go module auditor and

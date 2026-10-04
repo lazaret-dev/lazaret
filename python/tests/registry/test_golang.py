@@ -628,6 +628,19 @@ class VerifyTests(unittest.TestCase):
                 self.eco.verify(bytes(blob), self.entry, MOD, "v1.0.0")
         self.assertEqual([str(w.message) for w in printed], [])
 
+    def test_a_central_directory_of_more_records_than_a_module_holds_is_refused_before_it_is_parsed(self):
+        # (the Go/Rust review's RM-2: zipfile builds a record per entry of the directory before any limit applied, so a
+        # 200 MB download could hold millions; the directory is checked first, as the registry's zip reader checks it)
+        good = zip_of([("a.go", b"package a\n", 0, 0)])
+        end = good.rindex(b"PK\x05\x06")
+        records = b"PK\x01\x02" * (golang.MAX_ENTRIES + 1)
+        blob = bytearray(good[:end] + records + good[end:])
+        end2 = blob.rindex(b"PK\x05\x06")
+        blob[end2 + 12:end2 + 16] = (len(records) + 64).to_bytes(4, "little")       # (the directory's size: all of it)
+        with self.assertRaisesRegex(base.DigestError, "central directory"):
+            golang.zip_h1(bytes(blob))
+        self.assertTrue(golang.zip_h1(good).startswith("h1:"))
+
     def test_a_member_with_a_wrong_checksum_fails_closed(self):
         data = bytearray(zip_of([("a.go", b"package a\n", 0, 0)]))
         data[data.index(b"package a") + 3] ^= 1
@@ -918,12 +931,16 @@ class GoModTests(unittest.TestCase):
 
     def test_the_tokens(self):
         cases = (('require "a b" v1.0.0 // indirect', (["require", "a b", "v1.0.0"], " indirect")),
-                 ('foo"bar `x y` "a\\"b" "bad\\n"', (['foo"bar', "x y", 'a"b', None], None)),
+                 ('foo"bar `x y` "a\\"b" "bad\\q"', (['foo"bar', "x y", 'a"b', None], None)),
                  ("a(b)c", (["a", "(", "b", ")", "c"], None)), ("a // b // c", (["a"], " b // c")), ("a//b", (["a"], "b")),
                  ('"unterminated', ([None], None)), ("`unterminated", ([None], None)), ("\x00", ([None], None)), ("a b", (["a", None, "b"], None)),
                  ("[a, b]", (["[", "a", ",", "b", "]"], None)), ("", ([], None)), ("   \t\r", ([], None)), ("=>", (["=>"], None)),
                  ('"x"y z', (["x", "y", "z"], None)), ('"x"', (["x"], None)), ('"abc\\', ([None], None)), ('"a\\"b"', (['a"b'], None)),
-                 ('"a\\\\b"', (["a\\b"], None)), ('"a\\nb"', ([None], None)))
+                 ('"a\\\\b"', (["a\\b"], None)), ('"a\\nb"', (["a\nb"], None)),
+                 # (strconv.Unquote's escapes, the Go/Rust review's SCA-3: they were read as words that could not be read)
+                 ('"a.example\\x2fb"', (["a.example/b"], None)), ('"\\141\\u0062\\U00000063"', (["abc"], None)),
+                 ('"a\\\'b"', ([None], None)), ('"\\xff"', ([None], None)), ('"\\ud800"', ([None], None)),
+                 ('"\\400"', ([None], None)), ('"\\x2"', ([None], None)), ('`a\\x2f`', (["a\\x2f"], None)))
         for line, want in cases:
             with self.subTest(line=line):
                 self.assertEqual(golang._tokens(line), want)

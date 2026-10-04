@@ -86,6 +86,10 @@ MAX_MEMBER = _env_number("LAZARET_MAX_SOURCE_BYTES", 16_000_000)
 MAX_FILES = 20_000         # files per package (numpy's sdist alone has >4,000)
 SAMPLE = 8192              # header/entropy sample read from oversized files
 # Stored scans from another engine version are scanned again (has_scan).
+# 2.29: the Go/Rust review's archive fix (RM-1): a tar member of a type that
+#      cargo or pip unpacks as a file (a device, a FIFO, a type tar does not
+#      know) is read as one, and is SC-ARCHIVE-TYPE; it was left out unread,
+#      so a crate's build.rs could hide in one and the crate scan OK
 # 2.28: every pattern runs on linre, the linear-time engine (P-16): the
 #      decoder body SC-EVAL-DECODER reads and the arguments of open() a
 #      shell-profile write reads are no longer cut at 2,000 and 300 items;
@@ -213,7 +217,7 @@ SAMPLE = 8192              # header/entropy sample read from oversized files
 #      entry points and hook targets, Python install scripts
 # 2.3: verdict tiers, decoded hex, install-script inspection; 2.2:
 #      verdict-integrity; 2.1: binary-artifact awareness
-ENGINE_VERSION = "2.28.0"
+ENGINE_VERSION = "2.29.0"
 
 # ---------------- The content memo (P-2a, registry/contentcache.py) ----------------
 # One per scan_package run: the engine answers once for content several of a
@@ -861,6 +865,37 @@ class _TarReader(tarfile.TarFile):
         super()._dbg(level, msg)
 
 
+class _PipTarInfo(tarfile.TarInfo):
+    """An sdist's member as pip reads it. pip unpacks with Python's tarfile,
+    which extracts a member of a type no tool writes (`9`, `A`…) as a regular
+    file, while the scan's loop took only regular files: a setup.py of such a
+    type was run by pip and never read. Here it is a regular file, and the
+    type the archive gave is kept in `odd_type` (None for a regular file). A
+    device or a FIFO is not one pip extracts (it fails on it)."""
+
+    odd_type = None
+
+    def _odd(self):
+        return self.type not in tarfile.SUPPORTED_TYPES
+
+    def _proc_builtin(self, tarfile_):
+        if self._odd():
+            self.odd_type = self.type
+            self.type = tarfile.REGTYPE
+        return super()._proc_builtin(tarfile_)
+
+
+class _CargoTarInfo(_PipTarInfo):
+    """A .crate's member as cargo reads it. Cargo unpacks with Rust's `tar`
+    crate, which reads every entry's data by its size and writes any entry
+    that is not a directory, a link or one of the format's own headers as a
+    regular file: a character or block device and a FIFO too (Python's
+    tarfile reads the data of those as the next headers)."""
+
+    def _odd(self):
+        return self.type in (tarfile.CHRTYPE, tarfile.BLKTYPE, tarfile.FIFOTYPE) or super()._odd()
+
+
 class Member(tuple):
     """(relative_path, real_size, raw_bytes, reason) with a .detail text for
     reasons that need one ('corrupt')."""
@@ -1005,7 +1040,9 @@ def _iter_tar(data, container, artifact, budget, anomalies):
     try:
         codec = _tar_codec(data, container, artifact)
         reader = _Inflater(data, codec, budget)
-        tf = _TarReader.open(fileobj=reader, mode="r|", ignore_zeros=True)
+        # (npm's node-tar writes regular files only, and skips the rest)
+        kinds = {"crate": {"tarinfo": _CargoTarInfo}, "npm": {}}.get(artifact, {"tarinfo": _PipTarInfo})
+        tf = _TarReader.open(fileobj=reader, mode="r|", ignore_zeros=True, **kinds)
     except ArchiveLimit as lim:
         yield Member(last, 0, b"", lim.reason, lim.detail)
         return
@@ -1031,6 +1068,10 @@ def _iter_tar(data, container, artifact, budget, anomalies):
                 continue
             if rel is None:
                 continue                               # the extractor drops it
+            if getattr(m, "odd_type", None) is not None:
+                anomalies.append(("type", rel, f"a tar entry of type {m.odd_type.decode('latin-1')!r}, which "
+                                               f"{'cargo' if artifact == 'crate' else 'pip'} writes as a regular file "
+                                               f"and other tar readers skip"))
             count += 1
             if count > MAX_FILES:
                 yield Member(rel, 0, b"", "files")
@@ -1157,9 +1198,10 @@ _ZIP64_EOCD = struct.Struct("<4sQ2H2L4Q")        # 56 bytes
 MAX_ZIP_CENTRAL_DIR = 64 * 1024 * 1024
 
 
-def _zip_preflight(data):
+def _zip_preflight(data, max_files=None):
     """Refuse a zip whose central directory is too big to parse, BEFORE
-    zipfile.ZipFile() reads it -> None (fine) or the reason.
+    zipfile.ZipFile() reads it -> None (fine) or the reason. `max_files`:
+    the most entries (MAX_FILES; a Go module zip's limit is Go's).
 
     zipfile parses the whole central directory — ~340 MB and 4 s for a
     million records — before MAX_FILES can apply. Read the End Of Central
@@ -1169,6 +1211,7 @@ def _zip_preflight(data):
     more than MAX_FILES record signatures (a count field can lie; zipfile
     parses records until the declared SIZE is consumed). Anything this
     reader can't make sense of is left to zipfile, which reports it."""
+    max_files = MAX_FILES if max_files is None else max_files
     if not isinstance(data, (bytes, bytearray)):
         data = bytes(data)
     n = len(data)
@@ -1195,9 +1238,9 @@ def _zip_preflight(data):
     if not sizes:          # no ZIP64 record: the classic fields are the real ones
         counts, sizes = [count_disk, count], [cd_size]
     declared = max(counts)
-    if declared > MAX_FILES:
+    if declared > max_files:
         return (f"zip central directory declares {declared:,} entries — more than the "
-                f"{MAX_FILES:,}-file limit; the archive was not opened")
+                f"{max_files:,}-file limit; the archive was not opened")
     size = max(sizes)
     if size > MAX_ZIP_CENTRAL_DIR:
         return (f"zip central directory declares {size:,} bytes — more than the "
@@ -1206,8 +1249,8 @@ def _zip_preflight(data):
     # (ZIP64) end record; count their signatures without copying
     start = max(0, min(records) - size)
     found = data.count(_ZIP_CD_SIG, start, pos)
-    if found > MAX_FILES:
-        return (f"zip central directory holds more than {MAX_FILES:,} entries "
+    if found > max_files:
+        return (f"zip central directory holds more than {max_files:,} entries "
                 f"({found:,} records, {declared:,} declared); the archive was not opened")
     return None
 
@@ -1645,6 +1688,11 @@ def _archive_issue(kind, path, detail):
         "overlap": ("SC-ARCHIVE-OVERLAP", "Overlapping archive entries",
                     "Two entries of the zip archive share their bytes: the shape of a zip bomb (one "
                     "compressed stream counted many times), and no packaging tool produces one."),
+        "type": ("SC-ARCHIVE-TYPE", "Archive entry of an unusual type",
+                 "pip writes a tar entry of a type no tool writes as a regular file, and cargo any entry but "
+                 "a directory or a link (a device, a FIFO too), where other tar readers skip it: what is "
+                 "installed or built is not what a reviewer listing the archive sees, and no packaging tool "
+                 "writes one. The entry was read and scanned as the file the installer writes."),
     }
     rid, name, why = rules[kind]
     return {"rule": rid, "name": name, "type": "HOTSPOT", "sev": "MAJOR",

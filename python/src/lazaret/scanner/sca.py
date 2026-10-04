@@ -120,6 +120,7 @@ import ast
 import collections
 import datetime as _dt
 import functools
+import glob
 import importlib
 import io
 import json
@@ -445,6 +446,15 @@ def exact_name_key(name, ecosystem):
 # Dependency inventory
 # ---------------------------------------------------------------------------
 
+class Declared(str):
+    """The `where` of an inventory entry with no version that a manifest declares (a range, a tag, a git or URL
+    dependency of package.json, requirements, pyproject.toml, Cargo.toml): which version is built is said elsewhere, so a
+    version of the same package known from a lock or from what is installed stands for it (Inventory.dedup). An entry with
+    no version from a lock or from the build (a git crate in Cargo.lock, a module a fork replaces, a lock entry that
+    cannot be read) is a thing of its own, kept as unknown."""
+    __slots__ = ()
+
+
 class Inventory(list):
     """[(ecosystem, name, version, where)] — every module we can see installed or pinned."""
 
@@ -452,15 +462,19 @@ class Inventory(list):
         """One entry per (ecosystem, name, version) — several versions of a
         package are all kept, and one version spelled two ways (3.2 in a
         lockfile, 3.2.0 in pyproject.toml) counts once: the first entry is
-        kept. An unknown-version entry ('' — a range, a wildcard, a git
-        dependency) is dropped when a concrete version of the same package is
-        known from elsewhere."""
+        kept. An unknown-version entry that a manifest declares (Declared: a
+        range, a wildcard, a git dependency) is dropped when a concrete
+        version of the same package is known from elsewhere; one from a lock
+        or from the build (a git crate in Cargo.lock beside a crates.io one, the
+        original of a module a fork replaces) is kept: it is another thing
+        than the version known, and its advisories are unknown, never clear
+        (the Go/Rust review's SCA-2)."""
         known = {(e, normalize_pkg(n, e)) for e, n, v, w in self if v}
         seen, out = set(), Inventory()
         for e, n, v, w in self:
             same = version_key(v, e) if v else None     # 3.2 == 3.2.0, as matching sees it
             key = (e, normalize_pkg(n, e), v if same is None else same)
-            if key in seen or (not v and (e, key[1]) in known):
+            if key in seen or (not v and isinstance(w, Declared) and (e, key[1]) in known):
                 continue
             seen.add(key)
             out.append((e, n, v, w))
@@ -946,8 +960,8 @@ def _declared_npm(pj, where_prefix, out):
                 # a ^/~/>= range, a tag, '*', or a git/url/file dependency:
                 # NOT a version — record it unresolvable so a matching
                 # advisory yields version-unknown, never a silent clear
-                out.append(("npm", name, "", "%s(%s) unresolvable:%s" % (
-                    where_prefix, section, str(spec)[:40])))
+                out.append(("npm", name, "", Declared("%s(%s) unresolvable:%s" % (
+                    where_prefix, section, str(spec)[:40]))))
 
 
 def scan_npm_declared(root, warn=None):
@@ -1143,7 +1157,7 @@ def _add_req(out, req, where):
     if ver:
         out.append(("pypi", name, ver, where))
     else:
-        out.append(("pypi", name, "", "%s (range: %s)" % (where, spec) if spec else where))
+        out.append(("pypi", name, "", Declared("%s (range: %s)" % (where, spec) if spec else where)))
 
 
 # -r FILE, -rFILE (pip's option parser takes a short option's value attached),
@@ -1205,14 +1219,14 @@ def _scan_requirements(path, root, out, warn, seen, depth=0):
         if line.startswith(("-e", "--editable")):
             egg = re.search(r"#egg=([A-Za-z0-9._-]+)", line)
             if egg:
-                out.append(("pypi", egg.group(1), "", "%s (editable)" % rel))
+                out.append(("pypi", egg.group(1), "", Declared("%s (editable)" % rel)))
             continue
         if line.startswith("-"):
             continue                                # -i/--index-url/--hash/…
         if "://" in line.split("@", 1)[0] or line.startswith(("git+", "hg+", "svn+", "bzr+")):
             egg = re.search(r"#egg=([A-Za-z0-9._-]+)", line)
             if egg:
-                out.append(("pypi", egg.group(1), "", "%s (url)" % rel))
+                out.append(("pypi", egg.group(1), "", Declared("%s (url)" % rel)))
             continue
         # a requirement may carry trailing options (--hash=…)
         req = re.split(r"\s--?[A-Za-z]", line, maxsplit=1)[0].strip()
@@ -1542,8 +1556,8 @@ def _scan_pyproject(root, out, warn):
             if v:
                 out.append(("pypi", name, v, "pyproject.toml"))
             else:
-                out.append(("pypi", name, "", "pyproject.toml (range: %s)" % str(
-                    spec if not isinstance(spec, dict) else spec.get("version", "…"))[:40]))
+                out.append(("pypi", name, "", Declared("pyproject.toml (range: %s)" % str(
+                    spec if not isinstance(spec, dict) else spec.get("version", "…"))[:40])))
 
 
 def _scan_poetry_lock(root, out, warn):
@@ -1895,19 +1909,35 @@ def scan_pypi_declared(root, warn=None):
 
 MAX_GO_SUM_LINES = 1_000_000
 MAX_GO_MODULES = 200_000
+#: Folders below the project's root looked in for a go.mod or a Cargo.lock that nothing read (and how deep)
+MAX_NESTED_DIRS = 20_000
+MAX_NESTED_DEPTH = 5
+_NESTED_SKIP = frozenset(("node_modules", "vendor", "target", "testdata", "third_party", "dist", "build", "__pycache__",
+                          "venv", "site-packages"))
 
 
-def _go_replacement(candidates, version):
+def _go_replaces(lines, work=None):
+    """`replace` lines (gomod.parse's) -> (those for one version: {(path, version): (new path, new version)}, those for
+    every version: {path: (new path, new version)}). The first line of each wins (Go refuses two). go.work's (`work`, a
+    pair of the same) stand for a module they name, whatever its go.mod says. A dict, not a list read for each requirement:
+    20,000 of each took 12 s (the Go/Rust review's SCA-7)."""
+    exact, wild = ({}, {}) if work is None else (dict(work[0]), dict(work[1]))
+    named = {p for p, _v in exact} | set(wild)
+    for old, old_version, new, new_version in lines:
+        if old in named:
+            continue
+        if old_version:
+            exact.setdefault((old, old_version), (new, new_version))
+        else:
+            wild.setdefault(old, (new, new_version))
+    return exact, wild
+
+
+def _go_replacement(replaces, path, version):
     """(new path, new version) of the replacement that applies to `version` of a module, or None: one written for that
-    version, else one written for every version. `candidates` are the (old version, new path, new version) of the
-    `replace` lines of the module; a new version of "" is a directory."""
-    exact = wild = None
-    for old_version, new, new_version in candidates:
-        if old_version == version and exact is None:
-            exact = (new, new_version)
-        elif old_version == "" and wild is None:
-            wild = (new, new_version)
-    return exact or wild
+    version, else one written for every version. A new version of "" is a directory."""
+    exact, wild = replaces
+    return exact.get((path, version)) or wild.get(path)
 
 
 def _go_built(path, version, replacement, where):
@@ -1938,60 +1968,90 @@ def _go_add(out, warn, built):
             warn("Go module path(s) without a dot in the first element (not inventoried)")
 
 
-def _scan_go_mod(root, out, warn):
-    """go.mod: every `require`, with the `replace` lines applied. -> True when go.mod does not list every module the
-    build needs: absent or unreadable, or a `go` directive before 1.17 (which keeps the modules a dependency needs out
-    of it; go.sum is read for those). The `go` directive's own version is the standard library's, which go.mod does
-    not pin: it is not inventoried."""
-    path = os.path.join(root, "go.mod")
+def _go_dir_targets(folder, replaces):
+    """The folders of the replacements by a directory (`=> ./local`): code of the project's own, not a module to read."""
+    targets = [new for new, new_version in list(replaces[0].values()) + list(replaces[1].values()) if not new_version]
+    return {os.path.normpath(os.path.join(folder, t)) for t in targets if not os.path.isabs(t)}
+
+
+def _scan_go_mod(folder, prefix, out, warn, work=None):
+    """A go.mod: every `require`, with the `replace` lines (and go.work's, `work`) applied -> (whether go.mod does not list
+    every module the build needs: absent or unreadable, or a `go` directive before 1.17, which keeps the modules a
+    dependency needs out of it, so go.sum is read for those; the replaces). The `go` directive's own version is the
+    standard library's, which go.mod does not pin: it is not inventoried. A requirement whose version is too long to read is
+    one with no version, and the lines that could not be read are counted (the Go/Rust review's SCA-3)."""
+    path = os.path.join(folder, "go.mod")
     text = _read_text(path, cap=gomod.MAX_GOMOD)
     if text is None:
         _unusable(warn, path)
-        return True
+        return True, _go_replaces([], work)
     got = gomod.parse(text)
-    replaces = {}
-    for old, old_version, new, new_version in got["replace"]:
-        replaces.setdefault(old, []).append((old_version, new, new_version))
+    replaces = _go_replaces(got["replace"], work)
+    where = prefix + "go.mod"
     for name, version, _indirect in got["require"]:
-        replacement = _go_replacement(replaces.get(name, ()), version)
-        _go_add(out, warn, _go_built(name, version, replacement, "go.mod"))
-    return not gomod.go_at_least(got["go"], 1, 17)
+        _go_add(out, warn, _go_built(name, version, _go_replacement(replaces, name, version), where))
+    for name, _indirect in got["unversioned"]:
+        _go_add(out, warn, _go_built(name, "", _go_replacement(replaces, name, ""), where + " (version not read)"))
+    if got["dropped"]:
+        warn("go.mod line(s) not read (a path or version this reader cannot read, or past a limit)", got["dropped"])
+    return not gomod.go_at_least(got["go"], 1, 17), replaces
 
 
-def _go_sum_modules(text):
-    """go.sum -> {module path: its highest version that has a zip hash}: a module version whose source was fetched. A
-    `/go.mod` line is only the module's go.mod, which the build reads without building the module."""
-    best = {}
-    for n, line in enumerate(text.split("\n")):
-        if n >= MAX_GO_SUM_LINES:
-            break
+def _go_sum_zips(text, warn):
+    """go.sum -> [(module path, version), ...]: every version that has a zip hash, a module version whose source was
+    fetched (a `/go.mod` line is only the module's go.mod, which the build reads without building the module). Every one,
+    not only each module's highest: a line left from before a downgrade is not the version built (the Go/Rust review's
+    SCA-5); an advisory for one that is not built is a false finding, not a missed one."""
+    found = {}
+    lines = text.split("\n")
+    if len(lines) > MAX_GO_SUM_LINES:
+        warn("go.sum line(s) past the limit (not read)", len(lines) - MAX_GO_SUM_LINES)
+        lines = lines[:MAX_GO_SUM_LINES]
+    capped = 0
+    for line in lines:
         fields = line.split()
         if len(fields) != 3 or not fields[2].startswith("h1:") or fields[1].endswith("/go.mod"):
             continue
         version = gomod.canonical_version(fields[1])
         key = version_key(version, "go") if version else None
-        if key is None:
+        if key is None or (fields[0], version) in found:
             continue
-        old = best.get(fields[0])
-        if old is None and len(best) >= MAX_GO_MODULES:
+        if len(found) >= MAX_GO_MODULES:
+            capped += 1
             continue
-        if old is None or key > old[0]:
-            best[fields[0]] = (key, version)
-    return {name: version for name, (_key, version) in best.items()}
+        found[(fields[0], version)] = key
+    if capped:
+        warn("go.sum module version(s) past the limit (not read)", capped)
+    return [nv for nv, _key in sorted(found.items(), key=lambda kv: (kv[0][0], kv[1]))]
 
 
-def _scan_go_sum(root, out, warn):
-    path = os.path.join(root, "go.sum")
+def _scan_go_sum(folder, prefix, out, warn, replaces):
+    """go.sum, for a module whose go.mod does not list every module the build needs, with go.mod's `replace` lines applied;
+    and a module replaced by another whose zip go.sum has is in the build, replaced (the Go/Rust review's SCA-5: it was
+    left out, so its advisories were silent where they are unknown)."""
+    path = os.path.join(folder, "go.sum")
     text = _read_text(path)
     if text is None:
         _unusable(warn, path)
         return
-    _go_add(out, warn, [(name, version, "go.sum") for name, version in sorted(_go_sum_modules(text).items())])
+    where = prefix + "go.sum"
+    zips = _go_sum_zips(text, warn)
+    built = []
+    for name, version in zips:
+        built.extend(_go_built(name, version, _go_replacement(replaces, name, version), where))
+    fetched = set(zips)
+    exact, wild = replaces
+    for old, (new, new_version) in [(old, r) for (old, _v), r in exact.items()] + list(wild.items()):
+        if new_version and new != old and (new, new_version) in fetched:
+            built.append((old, "", "%s (replaced by %s)" % (where, new[:80])))
+    _go_add(out, warn, built)
 
 
 def _scan_go_vendor(root, out, warn):
     """vendor/modules.txt: the modules `go build -mod=vendor` builds, a `# module version` line each (with
-    `=> replacement [version]` when it is replaced)."""
+    `=> replacement [version]` when it is replaced), followed by its `## ` annotations and its packages. A `# ` line with
+    nothing after it is a replacement `go mod vendor` records but does not use (the Go/Rust review's SCA-6: it was read as
+    a module that is built)."""
     vendor = os.path.join(root, "vendor")
     path = os.path.join(vendor, "modules.txt")
     if os.path.islink(vendor) or not os.path.lexists(path):
@@ -2000,10 +2060,19 @@ def _scan_go_vendor(root, out, warn):
     if text is None:
         _unusable(warn, path)
         return
-    for n, line in enumerate(text.split("\n")):
-        if n >= MAX_GO_SUM_LINES:
-            break
-        if not line.startswith("# "):
+    lines = text.split("\n")
+    if len(lines) > MAX_GO_SUM_LINES:
+        warn("vendor/modules.txt line(s) past the limit (not read)", len(lines) - MAX_GO_SUM_LINES)
+        lines = lines[:MAX_GO_SUM_LINES]
+    headers, current = [], None
+    for line in lines:
+        if line.startswith("# "):
+            current = [line, False]
+            headers.append(current)
+        elif line.strip() and current is not None:
+            current[1] = True                      # (a `## ` annotation or a package: the module is vendored)
+    for line, vendored in headers:
+        if not vendored:
             continue
         f = line[2:].split()
         version = gomod.canonical_version(f[1]) if len(f) >= 2 else ""
@@ -2018,14 +2087,86 @@ def _scan_go_vendor(root, out, warn):
         _go_add(out, warn, _go_built(f[0], version, replacement, "vendor/modules.txt"))
 
 
+def _inside(root, path):
+    """Is `path` in the project (its real path under root's), not through a link out of it?"""
+    real_root, real = os.path.realpath(root), os.path.realpath(path)
+    return real == real_root or real.startswith(real_root.rstrip(os.sep) + os.sep)
+
+
+def _go_work(root, warn):
+    """go.work at the project's root -> (the folders of its `use` lines, in the project; its replaces), or None when there
+    is none. A `use` outside the project, or of no folder, is counted, not read."""
+    path = os.path.join(root, "go.work")
+    if not os.path.lexists(path):
+        return None
+    text = _read_text(path, cap=gomod.MAX_GOMOD)
+    if text is None:
+        _unusable(warn, path)
+        return None
+    got = gomod.parse(text)
+    folders = []
+    for use in got["use"]:
+        folder = os.path.normpath(os.path.join(root, use))
+        if os.path.isabs(use) or not os.path.isdir(folder) or not _inside(root, folder):
+            warn("go.work use line(s) outside the project or of no folder (not read)")
+        elif folder not in folders:
+            folders.append(folder)
+    if got["dropped"]:
+        warn("go.work line(s) not read (a path or version this reader cannot read, or past a limit)", got["dropped"])
+    return folders, _go_replaces(got["replace"])
+
+
+def _nested(root, names, known, depth=MAX_NESTED_DEPTH):
+    """The folders below the project's root (not the root) that hold every file of `names` and are not in `known`: a Go
+    module or a Cargo workspace that nothing read. Linked folders, hidden ones and those of tools (node_modules, vendor,
+    target, testdata, ...) are passed over; at most MAX_NESTED_DIRS folders are looked in."""
+    found, seen = [], 0
+    stack = [(root, 0)]
+    while stack:
+        folder, level = stack.pop()
+        try:
+            entries = list(os.scandir(folder))
+        except OSError:
+            continue
+        files = {e.name for e in entries if e.is_file(follow_symlinks=False)}
+        if folder != root and folder not in known and all(n in files for n in names):
+            found.append(folder)
+        if level >= depth:
+            continue
+        for e in sorted(entries, key=lambda e: e.name, reverse=True):
+            if e.is_dir(follow_symlinks=False) and not e.name.startswith(".") and e.name not in _NESTED_SKIP:
+                seen += 1
+                if seen > MAX_NESTED_DIRS:
+                    return sorted(found)
+                stack.append((e.path, level + 1))
+    return sorted(found)
+
+
 def scan_go(root, warn=None):
     """go.mod (with its `replace` lines), go.sum for a module whose go.mod before Go 1.17 does not list what it needs,
-    and vendor/modules.txt. A module replaced by a directory is the project's own code, not inventoried."""
+    and vendor/modules.txt; with a go.work, the same for each module it uses (go.work's `replace` lines winning over theirs).
+    A module replaced by a directory is the project's own code, not inventoried. A go.mod below the root that nothing read
+    (not in go.work, not a directory a module is replaced by) is counted: a Go module of the project's whose modules this
+    inventory does not have (the Go/Rust review's SCA-1: go.work's modules were not read, and nothing said so)."""
     warn = _warn_fn(warn)
     out = Inventory()
-    if _scan_go_mod(root, out, warn):
-        _scan_go_sum(root, out, warn)
+    root = os.path.normpath(root)
+    work = _go_work(root, warn)
+    folders, work_replaces = ([root], None) if work is None else work
+    if work is not None and root not in folders and os.path.lexists(os.path.join(root, "go.mod")):
+        folders = [root] + folders
+    known = set(folders)
+    for folder in folders:
+        prefix = "" if folder == root else _rel(folder, root) + "/"
+        old, replaces = _scan_go_mod(folder, prefix, out, warn, work_replaces)
+        known |= _go_dir_targets(folder, replaces)
+        if old:
+            _scan_go_sum(folder, prefix, out, warn, replaces)
     _scan_go_vendor(root, out, warn)
+    unread = _nested(root, ("go.mod",), known)
+    if unread:
+        warn("go.mod file(s) below the root not in a go.work (not read: %s)" % ", ".join(_rel(f, root) for f in unread[:3])
+             + (", …" if len(unread) > 3 else ""), len(unread))
     return out
 
 
@@ -2033,6 +2174,8 @@ def scan_go(root, warn=None):
 
 _CARGO_EXACT_RE = re.compile(r"=\s*(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)")
 _CARGO_DEPENDENCIES = ("dependencies", "dev-dependencies", "dev_dependencies", "build-dependencies", "build_dependencies")
+MAX_CARGO_TARGETS = 200
+MAX_CARGO_MEMBERS = 2_000
 
 
 def _scan_cargo_lock(root, out, warn):
@@ -2055,10 +2198,10 @@ def _scan_cargo_lock(root, out, warn):
             out.append(("crates", pkg["name"], "", "Cargo.lock (%s source)" % ("git" if source.startswith("git+") else "other")))
 
 
-def _cargo_dependency(name, spec, section, out):
-    """One entry of a dependencies table of Cargo.toml: a version written as `=1.2.3` is one; any other requirement is
-    a range, kept with no version. A path dependency is the project's own; a `workspace = true` one is named by the
-    workspace's table, which is read too."""
+def _cargo_dependency(name, spec, section, out, manifest="Cargo.toml"):
+    """One entry of a dependencies table of a Cargo.toml: a version written as `=1.2.3` is one; any other requirement is
+    a range, kept with no version (a declaration: a version a lock or another file has stands for it). A path dependency
+    is the project's own; a `workspace = true` one is named by the workspace's table, which is read too."""
     package, req = name, None
     if isinstance(spec, str):
         req = spec
@@ -2068,34 +2211,42 @@ def _cargo_dependency(name, spec, section, out):
         if isinstance(spec.get("package"), str) and spec["package"]:
             package = spec["package"]
         if "git" in spec:
-            out.append(("crates", package, "", "Cargo.toml(%s) git" % section))
+            out.append(("crates", package, "", Declared("%s(%s) git" % (manifest, section))))
             return
         req = spec.get("version")
     if not isinstance(req, str):
-        out.append(("crates", package, "", "Cargo.toml(%s) no version" % section))
+        out.append(("crates", package, "", Declared("%s(%s) no version" % (manifest, section))))
         return
     exact = _CARGO_EXACT_RE.fullmatch(req.strip())
     if exact:
-        out.append(("crates", package, exact.group(1), "Cargo.toml(%s)" % section))
+        out.append(("crates", package, exact.group(1), "%s(%s)" % (manifest, section)))
     else:
-        out.append(("crates", package, "", "Cargo.toml(%s) range: %s" % (section, req[:40])))
+        out.append(("crates", package, "", Declared("%s(%s) range: %s" % (manifest, section, req[:40]))))
 
 
-def _scan_cargo_toml(root, out, warn):
-    path = os.path.join(root, "Cargo.toml")
+def _read_cargo_toml(path, warn):
+    """A Cargo.toml as a table, or None (counted when it is there and cannot be read)."""
     text = _read_text(path, cap=5 * 1024 * 1024)
     if text is None:
         _unusable(warn, path)
-        return
+        return None
     try:
         doc = load_toml(text)
     except ValueError:
         warn("unparseable Cargo.toml file(s)")
-        return
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
+def _cargo_manifest(doc, manifest, out, warn):
+    """The dependencies tables of one Cargo.toml: its own, its `[workspace.dependencies]` and its target-specific ones."""
     holders = [("", doc), ("workspace.", doc.get("workspace"))]
     target = doc.get("target")
     if isinstance(target, dict):
-        holders.extend(("target.", t) for t in list(target.values())[:200])
+        tables = list(target.values())
+        if len(tables) > MAX_CARGO_TARGETS:
+            warn("Cargo.toml target table(s) past the limit (not read)", len(tables) - MAX_CARGO_TARGETS)
+        holders.extend(("target.", t) for t in tables[:MAX_CARGO_TARGETS])
     for prefix, holder in holders:
         if not isinstance(holder, dict):
             continue
@@ -2104,16 +2255,59 @@ def _scan_cargo_toml(root, out, warn):
             if isinstance(table, dict):
                 for name, spec in table.items():
                     if isinstance(name, str) and name:
-                        _cargo_dependency(name, spec, prefix + section, out)
+                        _cargo_dependency(name, spec, prefix + section, out, manifest)
+
+
+def _cargo_members(root, doc, warn):
+    """The folders of the members a root Cargo.toml's [workspace] names (`members`, its globs expanded, less `exclude`):
+    those in the project that hold a Cargo.toml, the root left out."""
+    ws = doc.get("workspace")
+    if not isinstance(ws, dict):
+        return []
+    members = [m for m in ws.get("members") or [] if isinstance(m, str) and m] if isinstance(ws.get("members"), list) else []
+    exclude = ws.get("exclude") if isinstance(ws.get("exclude"), list) else []
+    excluded = {os.path.normpath(os.path.join(root, e)) for e in exclude if isinstance(e, str) and e}
+    found = []
+    for pattern in members:
+        parts = pattern.replace("\\", "/").split("/")
+        if os.path.isabs(pattern) or ".." in parts:
+            warn("Cargo workspace member(s) outside the project (not read)")
+            continue
+        names = (sorted(glob.glob(os.path.join(glob.escape(root), pattern))) if any(c in pattern for c in "*?[")
+                 else [os.path.join(root, pattern)])
+        for folder in (os.path.normpath(n) for n in names):
+            if (folder == root or folder in excluded or folder in found or not os.path.isfile(os.path.join(folder, "Cargo.toml"))
+                    or not _inside(root, folder)):
+                continue
+            if len(found) >= MAX_CARGO_MEMBERS:
+                warn("Cargo workspace member(s) past the limit (not read)")
+                return found
+            found.append(folder)
+    return found
 
 
 def scan_crates(root, warn=None):
-    """Cargo.lock (the locked truth) and the root Cargo.toml's dependencies, its `[workspace.dependencies]` and its
-    target-specific ones (the declared truth; the lock covers the workspace members)."""
+    """Cargo.lock (the locked truth); the root Cargo.toml's dependencies, its `[workspace.dependencies]` and its
+    target-specific ones, and those of the workspace's members (the declared truth: without a lock, the members' were not
+    read, the Go/Rust review's SCA-1). A Cargo.lock below the root (another workspace, which nothing read) is counted."""
     warn = _warn_fn(warn)
     out = Inventory()
+    root = os.path.normpath(root)
     _scan_cargo_lock(root, out, warn)
-    _scan_cargo_toml(root, out, warn)
+    known = {root}
+    path = os.path.join(root, "Cargo.toml")
+    doc = _read_cargo_toml(path, warn) if os.path.lexists(path) else None
+    if doc is not None:
+        _cargo_manifest(doc, "Cargo.toml", out, warn)
+        for folder in _cargo_members(root, doc, warn):
+            known.add(folder)
+            member = _read_cargo_toml(os.path.join(folder, "Cargo.toml"), warn)
+            if member is not None:
+                _cargo_manifest(member, _rel(folder, root) + "/Cargo.toml", out, warn)
+    unread = _nested(root, ("Cargo.toml", "Cargo.lock"), known)
+    if unread:
+        warn("Cargo.lock file(s) below the root, of other workspaces (not read: %s)"
+             % ", ".join(_rel(f, root) for f in unread[:3]) + (", …" if len(unread) > 3 else ""), len(unread))
     return out
 
 

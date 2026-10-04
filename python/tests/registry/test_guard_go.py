@@ -9,6 +9,7 @@ is installed (skipped where it is not).
 What the scan finds in a Go module today is what it finds in any archive (JavaScript and Python files, install hooks, binaries,
 archive structure); the Go and Rust rules of the engine read `.go` files from the 0.1.9 wiring on."""
 
+import base64
 import datetime
 import io
 import json
@@ -139,11 +140,33 @@ class ZipTests(RelayCase):
                     lp = self.serve(ctx)
                     got = ask(lp.base, "/example.test/good/@v/v1.0.0.zip")
                     self.assertEqual(got[0], status)
-                    if status == 200:                                                # (relayed as it comes)
+                    if status == 200:                                                # (the bytes fetched, kept, handed over)
                         self.assertEqual(got[1], self.proxy.modules["example.test/good"]["v1.0.0"]["zip"])
                     (check,) = ctx.checks
                     self.assertEqual(check.verdict, "INCOMPLETE")
+                    self.assertRegex(check.digest, r"^sha256:[0-9a-f]{64}$")
                     self.assertEqual(ctx.scanner.calls, [])
+
+    def test_a_zip_too_large_to_scan_is_fetched_once_and_those_bytes_are_go_s(self):
+        # (it was relayed from a second download that nothing looked at: an upstream could serve one size, then other bytes:
+        # the Go/Rust review's GO-2)
+        with mock.patch.object(repo, "MAX_DOWNLOAD_BYTES", 100):
+            ctx = self.context()
+            lp = self.serve(ctx)
+            first = self.proxy.modules["example.test/good"]["v1.0.0"]["zip"]
+            status, body = ask(lp.base, "/example.test/good/@v/v1.0.0.zip")
+            self.proxy.modules["example.test/good"]["v1.0.0"]["zip"] = b"PK other bytes"
+            self.assertEqual((status, body), (200, first))
+            self.assertEqual(ask(lp.base, "/example.test/good/@v/v1.0.0.zip"), (200, first))
+            self.assertEqual(len(self.proxy.paths("/example.test/good/@v/v1.0.0.zip")), 1)
+
+    def test_a_zip_larger_than_go_takes_is_refused(self):
+        with mock.patch.object(guard, "MAX_GO_ZIP", 100), mock.patch.object(repo, "MAX_DOWNLOAD_BYTES", 50):
+            ctx = self.context()
+            lp = self.serve(ctx)
+            self.assertEqual(ask(lp.base, "/example.test/good/@v/v1.0.0.zip")[0], 403)
+            (check,) = ctx.blocked()
+            self.assertIn("a module zip can be", check.blocked[0])
 
     def test_a_zip_that_cannot_be_scanned_is_refused(self):
         ctx = self.context()
@@ -319,6 +342,60 @@ class RequestTests(RelayCase):
         req = urllib.request.Request(lp.base + "/example.test/good/@v/list", method="HEAD")
         with OPENER.open(req, timeout=30) as r:
             self.assertEqual((r.status, r.read()), (200, b""))
+
+
+class GateTests(unittest.TestCase):
+    """The guard's servers on 127.0.0.1 answer only the tool the guard runs: the run's secret first path segment, and a Host
+    header naming the server as the tool was told it (the Go/Rust review's GO-3: any process of the machine, or a page in a
+    browser that pointed a name of its own at 127.0.0.1, could ask them for what they relay with the user's credentials)."""
+
+    def serve_go(self):
+        relay = StubRelay(lambda: guard.GoReply(200, b"v1.0.0\n", "text/plain", None, None))
+        gate = guard.LocalGate()
+        server = guard.make_go_server(relay, gate)
+        threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return relay, gate, gate.bind(server.server_address[1])
+
+    def raw(self, base, path, host):
+        port = int(base.split(":")[2].split("/")[0])
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as conn:
+            conn.sendall(f"GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n".encode())
+            data = b""
+            while True:
+                block = conn.recv(65536)
+                if not block:
+                    break
+                data += block
+        return int(data.split(b" ", 2)[1])
+
+    def test_the_go_proxy_answers_its_path_and_its_host_only(self):
+        relay, gate, base = self.serve_go()
+        token = base.rsplit("/", 1)[1]
+        host = base.split("/")[2]
+        self.assertEqual(reach(base, "/example.test/good/@v/list")[0], 200)
+        self.assertEqual(self.raw(base, "/example.test/good/@v/list", host), 404)                      # (no secret segment)
+        self.assertEqual(self.raw(base, f"/{'x' * len(token)}/example.test/good/@v/list", host), 404)  # (another one)
+        self.assertEqual(self.raw(base, f"/{token}/example.test/good/@v/list", "rebound.example:" + host.split(":")[1]), 404)
+        self.assertEqual(self.raw(base, f"/{token}/example.test/good/@v/list", host), 200)
+        self.assertEqual(len(relay.asked), 2)                                                          # (the refused never reached it)
+
+    def test_each_run_has_its_own_secret(self):
+        self.assertNotEqual(guard.LocalGate().token, guard.LocalGate().token)
+        self.assertGreaterEqual(len(guard.LocalGate().token), 32)
+
+    def test_the_python_index_answers_its_path_and_its_host_only(self):
+        ctx = guard.Context(options(tool="pip", min_age=0), out=io.StringIO())
+        self.addCleanup(ctx.close)
+        li = guard.LocalIndex(ctx, [guard.pmsettings.Index("https://pypi.invalid/simple/", default=True)], False, None)
+        self.addCleanup(li.__exit__, None, None, None)
+        host = li.base.split("/")[2]
+        token = li.base.rsplit("/", 1)[1]
+        self.assertEqual(self.raw(li.base, "/simple/x/", host), 404)
+        self.assertEqual(self.raw(li.base, f"/{token}/files/1/x.whl", "evil.example:" + host.split(":")[1]), 404)
+        self.assertTrue(li.tool_env({}, uv=False)["PIP_INDEX_URL"].startswith(li.base + "/simple/"))
+        self.assertEqual(li.index.prefix, "/" + token)
 
 
 class StubRelay:
@@ -735,11 +812,13 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(files[2:], [os.path.join(self.tmp, "proj", "alt"), os.path.join(self.tmp, "proj", "alt.sum")])
 
     def test_flags(self):
-        self.assertEqual(guard._go_flag(["-modfile", "a.mod", "x"], "modfile"), "a.mod")
-        self.assertEqual(guard._go_flag(["-modfile=a.mod"], "modfile"), "a.mod")
-        self.assertEqual(guard._go_flag(["--modfile=a.mod"], "modfile"), "a.mod")
-        self.assertIsNone(guard._go_flag(["-modfile"], "modfile"))
-        self.assertIsNone(guard._go_flag(["-modfiles=a.mod", "x"], "modfile"))
+        self.assertEqual(guard._go_flag(["build", "-modfile", "a.mod", "x"], "modfile"), "a.mod")
+        self.assertEqual(guard._go_flag(["build", "-modfile=a.mod"], "modfile"), "a.mod")
+        self.assertEqual(guard._go_flag(["build", "--modfile=a.mod"], "modfile"), "a.mod")
+        self.assertEqual(guard._go_flag(["mod", "tidy", "-modfile=a.mod"], "modfile"), "a.mod")
+        self.assertIsNone(guard._go_flag(["build", "-modfile"], "modfile"))
+        self.assertIsNone(guard._go_flag(["build", "-modfiles=a.mod", "x"], "modfile"))
+        self.assertEqual(guard._go_flag(["build", "-modfile=a.mod", "-modfile=b.mod"], "modfile"), "b.mod")   # (the last wins)
         self.assertEqual(guard._go_chdir(["build", "-C", "d", "./..."]), "d")
         self.assertEqual(guard._go_chdir(["build", "-C=d"]), "d")
         self.assertEqual(guard._go_chdir(["build", "--C=d"]), "d")
@@ -749,10 +828,100 @@ class HelperTests(unittest.TestCase):
         self.assertIsNone(guard._go_chdir([]))
 
     def test_a_flag_and_its_value_at_the_end_of_the_command(self):
-        self.assertEqual(guard._go_flag(["-modfile", "a.mod"], "modfile"), "a.mod")
-        self.assertEqual(guard._go_flag(["x", "--modfile", "a.mod"], "modfile"), "a.mod")
+        self.assertEqual(guard._go_flag(["build", "-modfile", "a.mod"], "modfile"), "a.mod")
+        self.assertEqual(guard._go_flag(["build", "-x", "--modfile", "a.mod"], "modfile"), "a.mod")
         self.assertEqual(guard._go_chdir(["build", "-C", "d"]), "d")
         self.assertEqual(guard._go_chdir(["build", "--C", "d"]), "d")
+
+    def test_c_comes_after_both_words_of_a_mod_command(self):
+        """(the Go/Rust review's GO-6: `go mod download -C sub` read its settings, and snapshot its files, in the folder above)"""
+        self.assertEqual(guard._go_chdir(["mod", "download", "-C", "sub"]), "sub")
+        self.assertEqual(guard._go_chdir(["mod", "tidy", "-C=sub"]), "sub")
+        self.assertIsNone(guard._go_chdir(["mod", "download", "-x", "-C", "sub"]))
+
+    def test_only_gos_own_flags_are_read(self):
+        """go's flags end at the first argument that is not one, or at `--`: a program's arguments after `go run`'s package are
+        not go's, nor what follows a flag that takes a value. go test's may follow its packages, up to -args (GO-6)."""
+        flag = guard._go_flag
+        self.assertIsNone(flag(["run", ".", "-modfile=x.mod"], "modfile"))
+        self.assertIsNone(flag(["run", "-exec", "wrap", ".", "-modfile=x.mod"], "modfile"))
+        self.assertEqual(flag(["run", "-exec", "wrap", "-modfile=y.mod", "."], "modfile"), "y.mod")
+        self.assertIsNone(flag(["build", "--", "-modfile=x.mod"], "modfile"))
+        self.assertIsNone(flag(["build", "./...", "-modfile=x.mod"], "modfile"))
+        self.assertEqual(flag(["test", "./...", "-modfile=y.mod", "-args", "-modfile=x.mod"], "modfile"), "y.mod")
+        self.assertEqual(flag(["test", "-run", "TestX", "./...", "-count", "1", "-modfile=y.mod"], "modfile"), "y.mod")
+        self.assertEqual(guard._go_scan(["build", "-tags", "a b", "-v", "./x", "-y"]),
+                         ({"tags": ["a b"], "v": [None]}, ["./x", "-y"]))
+
+    def test_the_packages_of_an_install_and_a_run(self):
+        self.assertEqual(guard.go_packages(["install", "-v", "x.io/a@v1", "x.io/b@v1"]), ["x.io/a@v1", "x.io/b@v1"])
+        self.assertEqual(guard.go_packages(["run", "x.io/a@v1", "arg@here", "-v"]), ["x.io/a@v1"])
+        self.assertEqual(guard.go_packages(["run", ".", "arg@here"]), ["."])
+        self.assertEqual(guard.go_packages(["run", "-exec", "w", "main.go", "util.go", "arg"]), ["main.go", "util.go"])
+
+    def test_goflags_is_split_as_go_splits_it(self):
+        self.assertEqual(guard._goflags(" -mod=mod  '-modfile=a b.mod'\t\"-tags=x y\" -v "),
+                         ["-mod=mod", "-modfile=a b.mod", "-tags=x y", "-v"])
+        self.assertEqual(guard._goflags("-mod=mod '-modfile=a"), [])                        # (go refuses it)
+        self.assertEqual(guard._goflags(""), [])
+        self.assertEqual(guard._goflags_value("-modfile=a.mod --modfile=b.mod", "modfile"), "b.mod")
+        self.assertIsNone(guard._goflags_value("-modfile a.mod", "modfile"))
+        self.assertIsNone(guard._goflags_value("-mod=vendor", "modfile"))
+        self.assertEqual(guard._goflags_value("-mod=vendor -modcacherw", "mod"), "vendor")
+
+    def test_a_modfile_that_goflags_names_is_put_back_too(self):
+        """(GO-6: `go env GOMOD` says go.mod whatever GOFLAGS' -modfile says, so its files were not kept)"""
+        proj = os.path.join(self.tmp, "proj")
+        gomod = os.path.join(proj, "go.mod")
+        settings = {"GOMOD": gomod, "GOWORK": "", "GOFLAGS": "-modcacherw -modfile=alt.mod"}
+        files = guard.go_module_files(settings, ["build", "./..."], proj)
+        self.assertEqual(files[2:], [os.path.join(proj, "alt.mod"), os.path.join(proj, "alt.sum")])
+        files = guard.go_module_files(settings, ["build", "-modfile=cli.mod", "./..."], proj)       # (the command line's wins)
+        self.assertEqual(files[2:], [os.path.join(proj, "cli.mod"), os.path.join(proj, "cli.sum")])
+        files = guard.go_module_files(dict(settings, GOFLAGS=""), ["run", ".", "-modfile=prog.mod"], proj)
+        self.assertEqual(files, [gomod, os.path.join(proj, "go.sum")])                             # (the program's argument)
+
+    def test_when_go_builds_from_a_vendor_folder(self):
+        proj = os.path.join(self.tmp, "proj")
+        os.makedirs(os.path.join(proj, "vendor"))
+        gomod = os.path.join(proj, "go.mod")
+        settings = {"GOMOD": gomod, "GOWORK": "", "GOFLAGS": ""}
+        vendored = guard.go_vendored
+        for text, want in (("module m\n\ngo 1.21\n", True), ("module m\n\ngo 1.14\n", True), ("module m\n\ngo 1.13\n", False),
+                           ("module m\n", False)):
+            with self.subTest(text):
+                self.touch_text(gomod, text)
+                self.assertEqual(vendored(settings, ["build", "./..."], proj), want)
+        self.touch_text(gomod, "module m\n\ngo 1.21\n")
+        self.assertFalse(vendored(settings, ["build", "-mod=mod", "./..."], proj))
+        self.assertFalse(vendored(dict(settings, GOFLAGS="-mod=readonly"), ["build", "./..."], proj))
+        self.assertTrue(vendored(dict(settings, GOFLAGS="-mod=readonly"), ["build", "-mod=vendor"], proj))
+        self.touch_text(os.path.join(proj, "alt.mod"), "module m\n\ngo 1.13\n")
+        self.assertFalse(vendored(settings, ["build", "-modfile=alt.mod"], proj))                  # (the go line is the -modfile's)
+        os.rmdir(os.path.join(proj, "vendor"))
+        self.assertFalse(vendored(settings, ["build", "./..."], proj))
+        self.assertTrue(vendored(dict(settings, GOFLAGS="-mod=vendor"), ["build"], proj))
+        work = os.path.join(self.tmp, "go.work")
+        os.makedirs(os.path.join(self.tmp, "vendor"))
+        for text, want in (("go 1.22\n\nuse ./proj\n", True), ("go 1.21\n\nuse ./proj\n", False)):
+            with self.subTest(text):
+                self.touch_text(work, text)
+                self.assertEqual(vendored(dict(settings, GOWORK=work), ["build"], proj), want)
+
+    def touch_text(self, path, text):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    def test_go_env_runs_with_its_own_toolchain(self):
+        """(GO-5: a go.mod whose go line was newer than this go made `go env` fetch that toolchain from GOPROXY itself)"""
+        env = {"GOTOOLCHAIN": "auto", "PATH": "/x"}
+        with mock.patch.object(guard.pmsettings, "run_json", return_value={"GOPROXY": "https://p.example"}) as run:
+            self.assertEqual(guard.go_settings("go", env, "/w"), {"GOPROXY": "https://p.example"})
+        argv, used, cwd = run.call_args.args
+        self.assertEqual((argv[:3], used["GOTOOLCHAIN"], used["PATH"], cwd), (["go", "env", "-json"], "local", "/x", "/w"))
+        self.assertIn("GOFLAGS", argv)
+        self.assertEqual(env["GOTOOLCHAIN"], "auto")
 
     def test_what_a_plan_fetches(self):
         plan = guard.go_plan
@@ -762,10 +931,12 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(plan(["install", "x.io/a@v1", "x.io/b@latest"], "S"), (["get", "x.io/a@v1", "x.io/b@latest"], "S"))
         self.assertEqual(plan(["install", "-v", "x.io/a@v1"], "S"), (["get", "x.io/a@v1"], "S"))
         self.assertEqual(plan(["run", "x.io/a@v1", "arg@here"], "S"), (["get", "x.io/a@v1"], "S"))
-        for command in (["install", "./cmd/x"], ["run", "."], ["build", "./..."], ["test", "./..."], ["vet", "./..."], ["list", "-m", "all"]):
+        for command in (["install", "./cmd/x"], ["run", "."], ["build", "./..."], ["test", "./..."], ["vet", "./..."], ["list", "-m", "all"],
+                        ["run", ".", "arg@here"]):
             with self.subTest(command):
                 self.assertEqual(plan(command, "S"), (["mod", "download"], None))
         self.assertEqual(plan(["build", "-C", "d", "./..."], "S"), (["mod", "download", "-C", "d"], None))
+        self.assertEqual(plan(["build", "-modfile", "alt.mod", "./..."], "S"), (["mod", "download", "-modfile=alt.mod"], None))
 
     def test_every_folder_is_made_writable_before_it_is_removed(self):
         path = self.touch("ro", "a", "b", "f")
@@ -784,6 +955,121 @@ class HelperTests(unittest.TestCase):
         os.chmod(os.path.dirname(os.path.dirname(path)), stat.S_IRUSR | stat.S_IXUSR)
         guard.remove_tree(os.path.join(self.tmp, "ro"))
         self.assertFalse(os.path.exists(os.path.join(self.tmp, "ro")))
+
+
+class ListingTests(unittest.TestCase):
+    """go_listing: what `go mod download -json` says, read from the fake go."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="lazaret-guard-go-")
+        self.addCleanup(guard.remove_tree, self.tmp)
+        self.exe = go.install_fake_go(self.tmp)
+        self.log = os.path.join(self.tmp, "list.log")
+
+    def listing(self, answer, args=()):
+        env = dict(os.environ, FAKE_GO_LISTING=json.dumps(answer), FAKE_GO_LIST_LOG=self.log)
+        return guard.go_listing(self.exe, env, self.tmp, list(args))
+
+    def test_the_records_are_read_one_after_another(self):
+        records = [{"Path": "example.test/a", "Version": "v1.0.0", "Zip": "/c/a.zip"}, {"Path": "example.test/b", "Version": "v2.0.0"}]
+        got, error = self.listing({"records": records + [{"Path": 3}, ["not", "a", "record"]]})
+        self.assertEqual((got, error), (records, None))
+
+    def test_the_c_flag_comes_first_and_the_modules_named_last(self):
+        self.listing({}, ["-C", "sub", "-modfile=alt.mod", "example.test/a@v1.0.0"])
+        with open(self.log, encoding="utf-8") as f:
+            (run,) = [json.loads(line) for line in f]
+        self.assertEqual(run["argv"], ["mod", "download", "-C", "sub", "-json", "-modfile=alt.mod", "example.test/a@v1.0.0"])
+
+    def test_a_failure_gives_the_records_and_why(self):
+        rec = {"Path": "example.test/a", "Version": "v1.0.0", "Error": "example.test/a@v1.0.0: reading x: 404 Not Found\nmore"}
+        self.assertEqual(self.listing({"records": [rec], "exit": 1}), ([rec], "example.test/a@v1.0.0: reading x: 404 Not Found"))
+        self.assertEqual(self.listing({"stderr": "go: go.mod file not found\n", "exit": 1}), ([], "go: go.mod file not found"))
+        self.assertEqual(self.listing({"exit": 2}), ([], "exit 2"))
+
+    def test_output_that_is_not_json_is_a_short_list(self):
+        env = dict(os.environ, FAKE_GO_LISTING=json.dumps({"steps": [["say", "{not json"]]}))
+        self.assertEqual(guard.go_listing(self.exe, env, self.tmp), ([], "go's list could not be read"))
+
+    def test_a_go_that_cannot_run(self):
+        records, error = guard.go_listing(os.path.join(self.tmp, "none"), dict(os.environ), self.tmp)
+        self.assertEqual(records, [])
+        self.assertIn("go could not be run", error)
+
+
+class CheckCachedTests(RelayCase):
+    """check_cached: a module go has in its module cache (or fetched from its repository) is read from there and scanned as
+    the proxy scans one (the Go/Rust review's GO-4)."""
+
+    def setUp(self):
+        super().setUp()
+        self.cache = tempfile.mkdtemp(prefix="lazaret-guard-go-cache-")
+        self.addCleanup(guard.remove_tree, self.cache)
+
+    def put(self, module, version, files=None, published=None):
+        """A module's zip (and `.info`) in the cache -> its record, as go_listing gives it."""
+        folder = os.path.join(self.cache, "cache", "download", go.encode(module), "@v")
+        os.makedirs(folder, exist_ok=True)
+        zip_path = os.path.join(folder, version + ".zip")
+        with open(zip_path, "wb") as f:
+            f.write(go.module_zip(module, version, files or {"m.go": "package m\n"})[0])
+        if published is not None:
+            with open(zip_path[:-4] + ".info", "w", encoding="utf-8") as f:
+                json.dump({"Version": version, "Time": go.go_time(published)}, f)
+        return {"Path": module, "Version": version, "Zip": zip_path, "Info": zip_path[:-4] + ".info"}
+
+    def test_a_cached_zip_is_scanned_and_one_that_is_hostile_blocked(self):
+        ctx = self.context()
+        lp = self.serve(ctx)
+        made = guard.check_cached(ctx, lp.relay, [self.put("example.test/a", "v1.0.0", published=go.OLD),
+                                                  self.put("example.test/b", "v1.0.0", {"x.js": go.EXFIL_JS}, go.OLD)], "")
+        self.assertEqual([(c.name, c.verdict, c.source, bool(c.blocked)) for c in made],
+                         [("example.test/a", "OK", "module cache", False), ("example.test/b", "SUSPICIOUS", "module cache", True)])
+        self.assertTrue(all(c.digest.startswith("sha256:") for c in made))
+        self.assertEqual(self.proxy.requests, [])                                           # (nothing was fetched)
+
+    def test_what_came_through_the_proxy_or_was_checked_already_is_not_checked_again(self):
+        ctx = self.context()
+        lp = self.serve(ctx)
+        self.assertEqual(ask(lp.base, "/example.test/good/@v/v1.0.0.zip")[0], 200)
+        ctx.add(guard.Check("go", "example.test/c", "v1.0.0"))
+        records = [self.put("example.test/good", "v1.0.0"), self.put("example.test/c", "v1.0.0"),
+                   self.put(guard.GO_TOOLCHAIN, "v0.0.1-go1.99.0.linux-amd64"),
+                   {"Path": "example.test/gone", "Version": "v1.0.0", "Zip": os.path.join(self.cache, "none.zip")},
+                   {"Path": "example.test/nozip", "Version": "v1.0.0"},
+                   dict(self.put("example.test/d", "v1.0.0"), Path="Example.test/d"),               # (not a module path)
+                   dict(self.put("example.test/e", "v1.0.0"), Version="1.0")]                         # (not a version)
+        self.assertEqual(guard.check_cached(ctx, lp.relay, records, ""), [])
+        self.assertEqual(len(ctx.scanner.calls), 1)                                          # (the zip the proxy fetched)
+
+    def test_a_private_module_is_from_version_control(self):
+        ctx = self.context()
+        lp = self.serve(ctx)
+        (check,) = guard.check_cached(ctx, lp.relay, [self.put("corp.example/x", "v1.0.0", published=go.OLD)], "corp.example")
+        self.assertEqual((check.source, check.verdict), ("version control", "OK"))
+
+    def test_min_age_reads_the_time_go_kept_beside_the_zip(self):
+        ctx = self.context()
+        lp = self.serve(ctx)
+        young, unknown = self.put("example.test/y", "v1.0.0", published=go.FRESH), self.put("example.test/u", "v1.0.0")
+        made = guard.check_cached(ctx, lp.relay, [young, unknown], "")
+        self.assertEqual([bool(c.blocked) for c in made], [True, False])
+        self.assertIn("published 1 hour ago, under --min-age 2 days", made[0].blocked[0])
+        self.assertEqual(ctx.age_unknown, ["example.test/u@v1.0.0"])
+        self.assertEqual(len(ctx.scanner.calls), 1)                                          # (a blocked one is not scanned)
+
+    def test_one_too_large_to_scan_is_incomplete_and_one_that_cannot_be_read_is_blocked(self):
+        ctx = self.context()
+        lp = self.serve(ctx)
+        rec = self.put("example.test/big", "v1.0.0", published=go.OLD)
+        with mock.patch.object(guard.repo, "MAX_DOWNLOAD_BYTES", 10):
+            (big,) = guard.check_cached(ctx, lp.relay, [rec], "")
+        self.assertEqual((big.verdict, big.blocked), ("INCOMPLETE", []))
+        ctx = self.context()
+        ctx.scanner = FakeScanner(error=ValueError("not a zip"))
+        lp = self.serve(ctx)
+        (bad,) = guard.check_cached(ctx, lp.relay, [self.put("example.test/bad", "v1.0.0", published=go.OLD)], "")
+        self.assertIn("could not be checked", bad.blocked[0])
 
 
 class FlowCase(unittest.TestCase):
@@ -845,7 +1131,7 @@ class CommandTests(FlowCase):
         self.assertEqual(code, 0, out)
         (run,) = self.runs()
         self.assertEqual(run["argv"], ["get", "example.test/good@v1.0.0"])
-        self.assertRegex(run["GOPROXY"], r"^http://127\.0\.0\.1:\d+$")
+        self.assertRegex(run["GOPROXY"], r"^http://127\.0\.0\.1:\d+/[A-Za-z0-9_-]{32}$")         # (the run's secret path)
         self.assertNotEqual(run["GOPROXY"], self.proxy.url)
         self.assertIsNone(run["GOMODCACHE"])                                                 # (the tool's own, as `go env` said)
         self.assertTrue(os.path.samefile(run["cwd"], self.dir))
@@ -945,7 +1231,7 @@ class CommandTests(FlowCase):
         code, out = self.run_guard("go", "mod", "download", goenv=dict(self.goenv, GOPROXY=self.proxy.url + ",direct"))
         self.assertEqual(code, 0, out)
         self.assertIn("lazaret guard: relaying " + self.proxy.url + "/ (the guard does not fetch from version control: "
-                      "a module the proxy lacks is not fetched, unless GOPRIVATE names it)", out)
+                      "a module the proxy lacks is not fetched, unless GONOPROXY or GOPRIVATE names it)", out)
         code, out = self.run_guard("go", "mod", "download")
         self.assertEqual(code, 0, out)
         self.assertNotIn("does not fetch from version control", out)
@@ -1024,6 +1310,10 @@ class PlanTests(FlowCase):
         self.assertEqual(run["argv"], ["get", "example.test/good@v1.0.0"])
         self.assertNotEqual(os.path.realpath(run["cwd"]), os.path.realpath(self.dir))
         self.assertFalse(os.path.exists(run["cwd"]))
+        # (the Go/Rust review's CG-1 class: its own folder, in which no go.work of a folder above is read)
+        scratch_base = os.path.realpath(gs.base_env(self.tmp)["LAZARET_GUARD_SCRATCH"])
+        self.assertTrue(os.path.realpath(run["cwd"]).startswith(scratch_base + os.sep), run["cwd"])
+        self.assertEqual(run["GOWORK"], "off")
 
     def test_a_plan_is_silent_where_a_run_shows_what_go_says(self):
         self.plan = [["say", "go says hello"]]
@@ -1063,9 +1353,12 @@ class PlanTests(FlowCase):
 
 
 class CacheTests(FlowCase):
-    def cache_zip(self, module, version):
+    def cache_zip(self, module, version, files=None):
+        """A step of the fake go: put a module's zip in the module cache, as go leaves one it fetched (not through the proxy)."""
         path = os.path.join(self.modcache, "cache", "download", go.encode(module), "@v", version + ".zip")
-        return ["write", path, "zip"]
+        if files is None:
+            return ["write", path, "zip"]
+        return ["writeb64", path, base64.b64encode(go.module_zip(module, version, files)[0]).decode()]
 
     def test_a_module_that_did_not_come_through_the_proxy_fails_the_run(self):
         self.plan = [self.zip_step("example.test/good", "v1.0.0"), self.cache_zip("example.test/sneaky", "v1.0.0")]
@@ -1084,26 +1377,194 @@ class CacheTests(FlowCase):
         self.assertEqual(code, 0, out)
         self.assertNotIn("not checked", out)
 
-    def test_a_private_module_is_noted_not_failed(self):
+    def test_a_private_module_is_scanned_where_go_put_it(self):
+        """A module go fetched from its repository (GONOPROXY; GOPRIVATE when that is not set) is read from the module cache and
+        scanned: it used to be a note, `not checked` (the Go/Rust review's GO-4)."""
         self.goenv["GOPRIVATE"] = "example.test/priv,other.test"
-        self.plan = [self.cache_zip("example.test/priv", "v1.2.3"), self.cache_zip("other.test/x/y", "v0.1.0")]
-        code, out = self.run_guard("go", "mod", "download")
+        self.plan = [self.cache_zip("example.test/priv", "v1.2.3", {"p.go": "package priv\n"}),
+                     self.cache_zip("other.test/x/y", "v0.1.0", {"y.go": "package y\n"})]
+        code, out, doc = self.report("go", "mod", "download")
         self.assertEqual(code, 0, out)
-        self.assertIn("example.test/priv@v1.2.3: fetched straight from its repository (GOPRIVATE or GONOPROXY names it): not checked", out)
-        self.assertIn("other.test/x/y@v0.1.0", out)
+        self.assertIn("lazaret guard: checked 2 INCOMPLETE", out)
+        self.assertEqual(sorted((p["name"], p["source"], p["verdict"]) for p in doc["packages"]),
+                         [("example.test/priv", "version control", "INCOMPLETE"), ("other.test/x/y", "version control", "INCOMPLETE")])
+        self.assertNotIn("not checked", out)
 
-    def test_gonoproxy_names_them_too(self):
+    def test_a_hostile_private_module_is_blocked_and_go_mod_put_back(self):
         self.goenv["GONOPROXY"] = "example.test/priv"
-        self.plan = [self.cache_zip("example.test/priv", "v1.2.3")]
-        code, out = self.run_guard("go", "mod", "download")
+        before = self.read(self.gomod)
+        self.plan = [["append", self.gomod, "\nrequire example.test/priv v1.2.3\n"],
+                     self.cache_zip("example.test/priv", "v1.2.3", {"p.go": "package priv\n", "web/x.js": go.EXFIL_JS})]
+        code, out = self.run_guard("go", "get", "example.test/priv@v1.2.3")
+        self.assertEqual(code, 1, out)
+        self.assertIn("BLOCKED    example.test/priv@v1.2.3: SUSPICIOUS", out)
+        self.assertIn("example.test/priv@v1.2.3 was in go's module cache already", out)
+        self.assertEqual(self.read(self.gomod), before)
+
+    def test_gonoproxy_is_what_says_a_module_comes_from_its_repository(self):
+        """go goes to the repository of a module GONOPROXY names; GOPRIVATE is only GONOPROXY's default. With GONOPROXY=none, a
+        module GOPRIVATE names comes through the proxy and is checked there, once (the Go/Rust review's GO-7: it was also listed
+        as fetched from its repository, not checked)."""
+        self.goenv.update(GOPRIVATE="example.test/good", GONOPROXY="none")
+        self.plan = [self.zip_step("example.test/good", "v1.0.0"),
+                     self.cache_zip("example.test/good", "v1.0.0", {"m.go": "package good\n"})]
+        code, out, doc = self.report("go", "mod", "download")
         self.assertEqual(code, 0, out)
-        self.assertIn("fetched straight from its repository", out)
+        self.assertEqual([(p["name"], p["source"]) for p in doc["packages"]], [("example.test/good", self.proxy.url + "/")])
+        self.assertNotIn("repository", out)
 
     def test_nothing_is_compared_after_a_block_or_a_failure(self):
         self.plan = [self.zip_step("example.test/evil", "v1.0.0"), self.cache_zip("example.test/sneaky", "v1.0.0")]
         code, out = self.run_guard("go", "mod", "download")
         self.assertEqual(code, 1, out)
         self.assertNotIn("sneaky", out)
+
+
+class PreCheckTests(FlowCase):
+    """The modules go would take from its module cache without asking the proxy are checked from there: before a command that
+    builds a program, after one that resolves (`go mod download -json`, the fake go's FAKE_GO_LISTING, lists them; the
+    Go/Rust review's GO-4: a warm cache was a build with nothing checked and nothing said)."""
+
+    def cached(self, module, version, files=None, published=go.OLD):
+        """Put a module in the module cache -> its record, as `go mod download -json` gives it."""
+        folder = os.path.join(self.modcache, "cache", "download", go.encode(module), "@v")
+        os.makedirs(folder, exist_ok=True)
+        zip_path = os.path.join(folder, version + ".zip")
+        with open(zip_path, "wb") as f:
+            f.write(go.module_zip(module, version, files or {"m.go": "package m\n"})[0])
+        if published is not None:
+            with open(zip_path[:-4] + ".info", "w", encoding="utf-8") as f:
+                json.dump({"Version": version, "Time": go.go_time(published)}, f)
+        return {"Path": module, "Version": version, "Zip": zip_path, "Info": zip_path[:-4] + ".info"}
+
+    def listed(self, *args, listing=None, **kw):
+        """Run the guard with the fake go's list -> (exit code, output, [the argv and folder of each list])."""
+        log = os.path.join(self.dir, "list.log")
+        code, out = self.run_guard(*args, FAKE_GO_LISTING=json.dumps(listing or {}), FAKE_GO_LIST_LOG=log, **kw)
+        lists = []
+        if os.path.exists(log):
+            with open(log, encoding="utf-8") as f:
+                lists = [json.loads(line) for line in f]
+        return code, out, lists
+
+    def test_a_build_checks_what_go_has_cached_before_it_builds(self):
+        records = [self.cached("example.test/old", "v1.0.0")]
+        code, out, lists = self.listed("go", "build", "./...", listing={"records": records})
+        self.assertEqual(code, 0, out)
+        self.assertEqual([run["argv"] for run in lists], [["mod", "download", "-json"]])
+        self.assertIn("lazaret guard: checked 1 INCOMPLETE", out)
+        self.assertEqual([run["argv"] for run in self.runs()], [["build", "./..."]])
+
+    def test_a_hostile_cached_module_stops_the_build_before_it_runs(self):
+        records = [self.cached("example.test/old", "v1.0.0"), self.cached("example.test/bad", "v1.0.0", {"x.js": go.EXFIL_JS})]
+        for command in (["build", "./..."], ["test", "./..."], ["run", "."], ["install", "./cmd/x"]):
+            with self.subTest(command):
+                code, out, _ = self.listed("go", *command, listing={"records": records})
+                self.assertEqual(code, 1, out)
+                self.assertIn("BLOCKED    example.test/bad@v1.0.0: SUSPICIOUS", out)
+                self.assertIn("example.test/bad@v1.0.0 was in go's module cache already", out)
+                self.assertNotIn("not handed over", out)
+                self.assertFalse(os.path.exists(self.log), out)                              # (go never built it)
+
+    def test_what_the_list_fetched_through_the_proxy_is_checked_there_once(self):
+        dest = os.path.join(self.modcache, "cache", "download", "example.test", "good", "@v", "v1.0.0.zip")
+        listing = {"steps": [self.zip_step("example.test/good", "v1.0.0", dest)],
+                   "records": [{"Path": "example.test/good", "Version": "v1.0.0", "Zip": dest}]}
+        code, out, doc = self.report("go", "build", "./...", FAKE_GO_LISTING=json.dumps(listing))
+        self.assertEqual(code, 0, out)
+        self.assertEqual([(p["name"], p["source"]) for p in doc["packages"]], [("example.test/good", self.proxy.url + "/")])
+
+    def test_vet_and_list_build_no_program_and_are_not_listed(self):
+        for command in (["vet", "./..."], ["list", "-m", "all"]):
+            with self.subTest(command):
+                code, out, lists = self.listed("go", *command, listing={"records": [self.cached("example.test/old", "v1.0.0")]})
+                self.assertEqual((code, lists), (0, []), out)
+
+    def test_a_vendored_project_is_not_listed_and_the_run_says_so(self):
+        os.makedirs(os.path.join(self.dir, "vendor"))
+        code, out, lists = self.listed("go", "build", "./...")
+        self.assertEqual((code, lists), (0, []), out)
+        self.assertIn("lazaret guard: go builds this project's dependencies from its vendor folder", out)
+        self.assertEqual([run["argv"] for run in self.runs()], [["build", "./..."]])
+
+    def test_a_list_that_fails_is_said_and_the_command_runs(self):
+        code, out, _ = self.listed("go", "build", "./...", listing={"stderr": "go: boom", "exit": 1})
+        self.assertEqual(code, 0, out)
+        self.assertIn("lazaret guard: go could not list every module the command uses (go: boom): those in go's module cache "
+                      "already may not have been checked", out)
+        self.assertEqual(len(self.runs()), 1)
+
+    def test_the_build_finds_go_sum_as_it_was(self):
+        """(`go mod download` adds to go.sum: the command must not find a go.sum the guard's list changed)"""
+        with open(self.gosum, "w", encoding="utf-8") as f:
+            f.write("before\n")
+        seen = os.path.join(self.dir, "seen")
+        self.plan = [["copy", "go.sum", seen]]
+        code, out, _ = self.listed("go", "build", "./...", listing={"steps": [["append", self.gosum, "the list's\n"]]})
+        self.assertEqual(code, 0, out)
+        self.assertEqual((self.read(seen), self.read(self.gosum)), ("before\n", "before\n"))
+
+    def test_a_get_checks_what_go_had_cached_after_it_resolves(self):
+        before = self.read(self.gomod)
+        self.plan = [["append", self.gomod, "\nrequire example.test/bad v1.0.0\n"]]
+        records = [self.cached("example.test/bad", "v1.0.0", {"x.js": go.EXFIL_JS})]
+        code, out, lists = self.listed("go", "get", "example.test/bad@v1.0.0", listing={"records": records})
+        self.assertEqual(code, 1, out)
+        self.assertEqual([run["argv"] for run in lists], [["mod", "download", "-json"]])
+        self.assertIn("BLOCKED    example.test/bad@v1.0.0", out)
+        self.assertIn("go.mod put back", out)
+        self.assertEqual(self.read(self.gomod), before)
+
+    def test_the_list_after_a_get_leaves_the_files_as_the_get_left_them(self):
+        self.plan = [["write", self.gosum, "the get's\n"]]
+        code, out, _ = self.listed("go", "mod", "tidy", listing={"steps": [["append", self.gosum, "the list's\n"]]})
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.read(self.gosum), "the get's\n")
+
+    def test_a_download_lists_the_modules_it_names_and_go_s_folder_flags(self):
+        code, out, lists = self.listed("go", "mod", "download", "-x", "example.test/good@v1.0.0")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(lists[0]["argv"], ["mod", "download", "-json", "example.test/good@v1.0.0"])
+        os.makedirs(os.path.join(self.dir, "sub"), exist_ok=True)
+        code, out, lists = self.listed("go", "build", "-C", "sub", "-modfile=alt.mod", "./...")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(lists[-1]["argv"], ["mod", "download", "-C", "sub", "-json", "-modfile=alt.mod"])
+
+    def test_nothing_is_listed_after_a_get_that_failed(self):
+        self.plan = [["exit", 1]]
+        code, out, lists = self.listed("go", "get", "example.test/good@v1.0.0")
+        self.assertEqual((code, lists), (1, []), out)
+
+    def test_an_install_at_a_version_is_listed_in_a_module_of_the_guards(self):
+        records = [self.cached("example.test/bad", "v1.0.0", {"x.js": go.EXFIL_JS})]
+        code, out, lists = self.listed("go", "install", "example.test/tool@v1.0.0", listing={"records": records})
+        self.assertEqual(code, 1, out)
+        (get,) = self.runs()                                                                # (the install never ran)
+        self.assertEqual((get["argv"], get["GOWORK"]), (["get", "example.test/tool@v1.0.0"], "off"))
+        self.assertEqual(os.path.realpath(lists[0]["cwd"]), os.path.realpath(get["cwd"]))
+        scratch_base = os.path.realpath(gs.base_env(self.tmp)["LAZARET_GUARD_SCRATCH"])
+        self.assertTrue(os.path.realpath(get["cwd"]).startswith(scratch_base + os.sep), get["cwd"])
+        self.assertFalse(os.path.exists(get["cwd"]))
+        code, out, _ = self.listed("go", "run", "example.test/tool@v1.0.0", "arg")
+        self.assertEqual(code, 0, out)
+        self.assertEqual([run["argv"] for run in self.runs()[1:]], [["get", "example.test/tool@v1.0.0"],
+                                                                     ["run", "example.test/tool@v1.0.0", "arg"]])
+
+    def test_a_cached_module_younger_than_min_age_is_blocked(self):
+        records = [self.cached("example.test/fresh", "v1.0.0", published=go.FRESH)]
+        code, out, _ = self.listed("go", "build", "./...", listing={"records": records})
+        self.assertEqual(code, 1, out)
+        self.assertIn("example.test/fresh@v1.0.0: published 1 hour ago, under --min-age 2 days", out)
+        code, out, _ = self.listed("--allow-new", "example.test/fresh", "go", "build", "./...", listing={"records": records})
+        self.assertEqual(code, 0, out)
+
+    def test_a_plan_scans_what_go_fetched_from_a_repository(self):
+        self.goenv["GONOPROXY"] = "example.test/priv"
+        data = base64.b64encode(go.module_zip("example.test/priv", "v1.2.3", {"x.js": go.EXFIL_JS})[0]).decode()
+        self.plan = [["cachezip", "example.test/priv", "v1.2.3", data]]
+        code, out = self.run_guard("--plan", "go", "mod", "download")
+        self.assertEqual(code, 1, out)
+        self.assertIn("BLOCKED    example.test/priv@v1.2.3: SUSPICIOUS", out)
 
 
 class RefusalTests(FlowCase):
@@ -1290,13 +1751,60 @@ class RealGoTests(unittest.TestCase):
         self.assertIn("lazaret guard: checked 2 INCOMPLETE", out)
         self.assertEqual(self.cached(), ["example.test/good@v1.0.0", "example.test/leaf@v1.0.0"])
 
-    def test_a_module_cached_already_is_not_fetched_or_checked_again(self):
+    def test_a_module_cached_already_is_not_fetched_again_but_is_checked_where_it_is(self):
         self.assertEqual(self.run_guard("go", "get", "example.test/good@v1.0.0")[0], 0)
         before = len(self.proxy.paths(".zip"))
-        code, out = self.run_guard("go", "mod", "download")
+        code, out, doc = self.report("go", "mod", "download")
         self.assertEqual(code, 0, out)
         self.assertEqual(len(self.proxy.paths(".zip")), before)
+        self.assertIn("lazaret guard: checked 2 INCOMPLETE", out)
+        self.assertEqual({p["source"] for p in doc["packages"]}, {"module cache"})
+
+    def report(self, *args):
+        path = os.path.join(self.dir, "report.json")
+        code, out = self.run_guard("--json", path, *args)
+        return code, out, json.loads(gs.read(path))
+
+    def go(self, *args):
+        """Run go itself (not through the guard), against the fake proxy -> its exit code."""
+        return subprocess.run(["go", *args], cwd=self.dir, env=self.env, capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", timeout=40).returncode
+
+    def test_a_build_checks_what_an_unguarded_command_left_in_the_cache_before_it_builds(self):
+        """(the Go/Rust review's GO-4: with a warm module cache, `guard go build` checked nothing and said nothing)"""
+        self.write(self.gomod, "module example.test/app\n\ngo 1.21\n\nrequire example.test/parent v1.0.0\n")
+        self.write(os.path.join(self.dir, "main.go"),
+                   'package main\n\nimport _ "example.test/parent"\n\nfunc main() {}\n')
+        self.assertEqual(self.go("mod", "tidy"), 0)                                        # (go itself fills the cache)
+        before = len(self.proxy.paths(".zip"))
+        code, out = self.run_guard("go", "build", "-o", "app", ".")
+        self.assertEqual(code, 1, out)
+        self.assertIn("BLOCKED    example.test/evil@v1.0.0: SUSPICIOUS", out)
+        self.assertIn("in go's module cache already", out)
+        self.assertFalse(os.path.exists(os.path.join(self.dir, "app")))                     # (it was not built)
+        self.assertEqual(len(self.proxy.paths(".zip")), before)
+
+    def test_a_vendored_build_is_said_to_be_unchecked(self):
+        self.write(self.gomod, "module example.test/app\n\ngo 1.21\n\nrequire example.test/good v1.0.0\n")
+        self.write(os.path.join(self.dir, "main.go"), 'package main\n\nimport "example.test/good"\n\nfunc main() { _ = good.F() }\n')
+        self.assertEqual(self.go("mod", "tidy"), 0)
+        self.assertEqual(self.go("mod", "vendor"), 0)
+        code, out = self.run_guard("go", "build", "-o", "app", ".")
+        self.assertEqual(code, 0, out)
+        self.assertIn("from its vendor folder", out)
         self.assertNotIn("lazaret guard: checked", out)
+
+    def test_go_env_fetches_no_toolchain_of_its_own(self):
+        """(the Go/Rust review's GO-5: a go line newer than this go made `go env` fetch that toolchain from GOPROXY itself,
+        before the guard's proxy was there; now only the command fetches it, through the guard)"""
+        self.write(self.gomod, "module example.test/app\n\ngo 1.99.0\n")
+        self.env["GOTOOLCHAIN"] = "auto"
+        seen = len(self.proxy.requests)
+        code, out = self.run_guard("go", "mod", "download")
+        self.assertNotEqual(code, 0, out)                                                    # (the fake proxy has no toolchain)
+        asked = self.proxy.requests[seen:]
+        self.assertTrue(asked, out)
+        self.assertEqual({agent for agent, _ in asked}, {guard.USER_AGENT})
 
     def test_a_module_with_capitals_in_its_path(self):
         code, out = self.run_guard("go", "get", "example.test/BigCase@v1.0.0")

@@ -24,6 +24,10 @@ __all__ = ["Proxy", "Request", "parse_goproxy", "glob_matches", "parse_request",
 #: A `.info` request for a branch, a tag or a commit names it in a path segment this long at most
 MAX_QUERY = 200
 _QUERY_RE = re.compile(r"[A-Za-z0-9._+~-]+")
+#: What the go command asks a proxy of the checksum database it mirrors (golang.org/x/mod/sumdb's client): whether it does, the
+#: latest signed tree, a module version's record, and the tiles of the tree
+_SUMDB_RE = re.compile(r"sumdb/(?P<name>[A-Za-z0-9](?:[A-Za-z0-9.-]{0,253}))/(?:supported|latest|lookup/(?P<lookup>[^?#%]{1,400})|"
+                       r"tile/[0-9]{1,2}/(?:[0-9]{1,2}|data)/(?:x[0-9]{3}/){0,8}[0-9]{3}(?:\.p/[0-9]{1,3})?)")
 
 Proxy = collections.namedtuple("Proxy", "url fall_back")
 Request = collections.namedtuple("Request", "kind module version rest")
@@ -126,8 +130,19 @@ def parse_request(path):
     if not isinstance(path, str) or not path.startswith("/") or "\\" in path or "\x00" in path:
         return None
     if path.startswith("/sumdb/"):
+        # (only what go asks of a mirror of the checksum database, so that a request cannot say anything else to the proxy,
+        # with the user's credentials for it: the Go/Rust review's GO-3)
         rest = path[1:]
-        return Request("sumdb", None, None, rest) if len(rest) <= 512 and ".." not in rest.split("/") else None
+        m = _SUMDB_RE.fullmatch(rest)
+        if m is None or ".." in rest.split("/"):
+            return None
+        if m.group("lookup") is not None:
+            escaped, at, version = m.group("lookup").rpartition("@")
+            module, version = golang.unescape(escaped), golang.unescape(version)
+            if not at or module is None or version is None or golang.check_module_path(module) is not None \
+                    or not golang.VERSION_RE.fullmatch(version):
+                return None
+        return Request("sumdb", None, None, rest)
     escaped, _, tail = path[1:].partition("/@")
     module = golang.unescape(escaped)
     if module is None or len(module) > golang.MAX_NAME or golang.check_module_path(module) is not None:
