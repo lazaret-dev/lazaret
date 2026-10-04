@@ -120,7 +120,20 @@ resolving to one file. Writes are atomic
   their name (`bin/cli`, a hook's `./setup`; shell scripts are not read), every
   `package.json`, `binding.gyp` and other `.gyp`/`.gypi` file, and `.pth` files (only the `SC-PTH-EXEC`
   check runs on them; they are not counted in the metrics; a directory with
-  only a `.pth` file is a valid target). Every other regular file is classified by
+  only a `.pth` file is a valid target).
+- Since 0.1.9, a project's own `.go` and `.rs` sources, with comments and
+  strings read as Go and Rust read them: hardcoded credentials (`S-SECRET`),
+  token formats (`S-TOKEN`), Trojan Source characters (`S-BIDI`), TODO markers
+  and the obfuscation and encoding checks every text gets. Their lines count
+  in the metrics but not in the duplication; a dependency tree's Go and Rust
+  files are not read yet.
+- GitHub Actions workflows and GitLab CI files: the shapes the worms planted,
+  and since 0.1.9 the hardening checks (`SC-WORKFLOW-*`: an action not pinned
+  to a commit, `pull_request_target` checking out the pull request's code, a
+  cache in a release workflow, write permissions, an OIDC token in a job that
+  installs, `curl … | sh`; `SC-GITLAB-*`: includes and images not pinned, `curl
+  … | sh`, a merge request's text run as code, a publishing token in a job
+  that installs), security hotspots; only a CRITICAL one fails the gate. Every other regular file is classified by
   its magic bytes (`SC-BINARY`), and a source file whose bytes are a program
   (an ELF or Windows executable named `.js` or `.py`) is `SC-BINARY`
   CRITICAL; one whose bytes don't decode to text is `SC-TRUNCATED`.

@@ -27,7 +27,8 @@ lazaret/
 ├── SECURITY.md         security policy and reporting
 ├── LICENSE             Apache-2.0
 ├── action.yml          the repository as a GitHub Action (README.md, "In CI")
-├── .github/            workflows (ci.yml, release.yml, wheels.yml) and dependabot.yml
+├── .github/            workflows (ci.yml, release.yml, wheels.yml, perf.yml, fuzz.yml)
+│                       and dependabot.yml
 ├── docs/RELEASING.md   claiming names, trusted publishing, cutting a release
 ├── docs/RUST_ENGINE.md the native engine: design, recorded outputs, building
 ├── examples/           lazaret-taint.example.json, mcp-config.json
@@ -39,15 +40,17 @@ lazaret/
 │                       update-popular-names.py,
 │                       check_native_library.py, simulate-platforms.sh,
 │                       snapshot.py, bench.py, popular/popular.py,
-│                       make_pre_commit_mirror.py
+│                       make_pre_commit_mirror.py, make_pyparse_tables.py,
+│                       fuzz/, profile/, goparse/, gooracle/, rsparse/,
+│                       verifylive/
 ├── python/             the PyPI package   (sections 3–4)
 ├── js/                 the npm package    (section 5)
 └── rust/               the native engine  (Cargo workspace, no external crates; NOTICE, LICENSE-PYTHON, LICENSE-UNICODE)
 ```
 
-`scripts/check-versions.sh [REF [TAG]]` fails if the Python and npm versions, the native engine's (`rust/Cargo.toml`'s workspace version and its two `rust/Cargo.lock` entries), or a release tag disagree, so the packages and the engine release in lockstep. Given a ref it reads the version files from that commit (`git show`), so it checks what a tag actually points at; with no ref it reads the working tree and refuses uncommitted changes to any version file. `scripts/tag-release.sh vX.Y.Z` is the only way to cut a tag: it refuses a dirty tree or a commit that isn't on `main`, runs the version check against the tag-to-be, creates an annotated tag, and prints the one-tag push command (see `docs/RELEASING.md`). `scripts/make_bundle.py` builds a source bundle of the repository (for sharing the repo itself, not for installing): only git-tracked files when `.git` exists, never credential files (`.env*`, `.npmrc`, `.pypirc`, `.netrc`, keys, …) or OS junk (`._*`, `.DS_Store`), and byte-for-byte reproducible. Use it (or `git archive`) rather than a plain `tar` of a working tree. `scripts/make_typosquat_stubs.py` builds the defensive stub packages described in `docs/RELEASING.md`; `--check` reports which stub names are still unclaimed. `scripts/dashboard_csp.py` recomputes the dashboard's script hash in its content-security policy (run it after editing the page's script). `scripts/make_codec_tables.py` writes `js/src/lib/codecs.js` (and the dashboard's copy) from Python's codecs, so both engines decode a coding cookie's codec the same way; `scripts/make_unicode_tables.py` writes the Unicode 13.0 table (`lazaret/scanner/_unicode13.py` and its JS twins) both engines read source text in, so results do not depend on the Python or Node version's Unicode. `scripts/simulate-platforms.sh` runs the Python suite the ways Windows, macOS and a non-root CI runner would see it (section 4, "Cross-platform rules"). `scripts/make_rust_tables.py` keeps the native engine's rule pack (`rust/crates/lazaret-engine/rules/lazaret-rules.json`, the source of the engine's patterns, sets, limits and finding texts) in its canonical form and, on Python 3.10, writes its Unicode 13.0 table; `--check` fails when the pack leaves its canonical form, a pattern stops compiling, its rule set is not the registry's, a value core still keeps differs from it, or the table no longer matches. `scripts/snapshot.py` records the engine's outputs on a test's input set and shows the cases that differ between two recordings (`docs/RUST_ENGINE.md` §5). `scripts/bench.py` runs registry scans of a labelled set of release files and compares two runs (in counts only, for a holdout set; `docs/TESTING.md` §4). `scripts/check_rust_deps.py` fails when `rust/Cargo.lock` or a crate's manifest names anything outside the workspace. `scripts/check_native_library.py LIB TAG [--load]` checks a built native library against the platform tag of the wheel it will ship in (ELF, Mach-O and PE headers read with the standard library: the glibc symbol versions a manylinux tag allows, the minimum macOS, no Visual C++ runtime, the exports), and `--dist DIR` checks a release's sdist and wheels against each other; `wheels.yml` runs both. `scripts/update-popular-names.py` rebuilds the registry's list of popular package names (`lazaret/registry/popular_names.json`) from its two public sources. `scripts/popular/popular.py` pins the popular releases the release gate scans as its second benign set (`scripts/popular/releases.jsonl`, by version and sha256), fetches them into a cache and writes a manifest for `scripts/bench.py` (`docs/TESTING.md`). `scripts/make_pre_commit_mirror.py X.Y.Z DIR` writes the pre-commit mirror of a release (`.pre-commit-hooks.yaml` running `lazaret hook`, and a package that pins `lazaret==X.Y.Z`), which pre-commit installs because Lazaret's own repository can't be a Python hook (`docs/RELEASING.md`).
+`scripts/check-versions.sh [REF [TAG]]` fails if the Python and npm versions, the native engine's (`rust/Cargo.toml`'s workspace version and its two `rust/Cargo.lock` entries), or a release tag disagree, so the packages and the engine release in lockstep. Given a ref it reads the version files from that commit (`git show`), so it checks what a tag actually points at; with no ref it reads the working tree and refuses uncommitted changes to any version file. `scripts/tag-release.sh vX.Y.Z` is the only way to cut a tag: it refuses a dirty tree or a commit that isn't on `main`, runs the version check against the tag-to-be, creates an annotated tag, and prints the one-tag push command (see `docs/RELEASING.md`). `scripts/make_bundle.py` builds a source bundle of the repository (for sharing the repo itself, not for installing): only git-tracked files when `.git` exists, never credential files (`.env*`, `.npmrc`, `.pypirc`, `.netrc`, keys, …) or OS junk (`._*`, `.DS_Store`), and byte-for-byte reproducible. Use it (or `git archive`) rather than a plain `tar` of a working tree. `scripts/make_typosquat_stubs.py` builds the defensive stub packages described in `docs/RELEASING.md`; `--check` reports which stub names are still unclaimed. `scripts/dashboard_csp.py` recomputes the dashboard's script hash in its content-security policy (run it after editing the page's script). `scripts/make_codec_tables.py` writes `js/src/lib/codecs.js` (and the dashboard's copy) from Python's codecs, so both engines decode a coding cookie's codec the same way; `scripts/make_unicode_tables.py` writes the Unicode 13.0 table (`lazaret/scanner/_unicode13.py` and its JS twins) both engines read source text in, so results do not depend on the Python or Node version's Unicode. `scripts/simulate-platforms.sh` runs the Python suite the ways Windows, macOS and a non-root CI runner would see it (section 4, "Cross-platform rules"). `scripts/make_rust_tables.py` keeps the native engine's rule pack (`rust/crates/lazaret-engine/rules/lazaret-rules.json`, the source of the engine's patterns, sets, limits and finding texts) in its canonical form and, on Python 3.10, writes its Unicode 13.0 table; `--check` fails when the pack leaves its canonical form, a pattern stops compiling, its rule set is not the registry's, a value core still keeps differs from it, or the table no longer matches. `scripts/snapshot.py` records the engine's outputs on a test's input set and shows the cases that differ between two recordings (`docs/RUST_ENGINE.md` §5). `scripts/bench.py` runs registry scans of a labelled set of release files and compares two runs (in counts only, for a holdout set; `docs/TESTING.md` §4). `scripts/check_rust_deps.py` fails when `rust/Cargo.lock` or a crate's manifest names anything outside the workspace. `scripts/check_native_library.py LIB TAG [--load]` checks a built native library against the platform tag of the wheel it will ship in (ELF, Mach-O and PE headers read with the standard library: the glibc symbol versions a manylinux tag allows, the minimum macOS, no Visual C++ runtime, the exports), and `--dist DIR` checks a release's sdist and wheels against each other; `wheels.yml` runs both. `scripts/update-popular-names.py` rebuilds the registry's list of popular package names (`lazaret/registry/popular_names.json`) from its two public sources. `scripts/popular/popular.py` pins the popular releases the release gate scans as its second benign set (`scripts/popular/releases.jsonl`, by version and sha256), fetches them into a cache and writes a manifest for `scripts/bench.py` (`docs/TESTING.md`). `scripts/make_pre_commit_mirror.py X.Y.Z DIR` writes the pre-commit mirror of a release (`.pre-commit-hooks.yaml` running `lazaret hook`, and a package that pins `lazaret==X.Y.Z`), which pre-commit installs because Lazaret's own repository can't be a Python hook (`docs/RELEASING.md`). `scripts/make_pyparse_tables.py` (Python 3.13) writes the Unicode 15.1 character data the engine's Python parser needs (`pyparse/unidata.rs`); `--check` fails when it is stale. `scripts/fuzz/` fuzzes the readers of untrusted input (`fuzz.py TARGET`; 34 targets: the archive and XML readers, the lockfile and manifest readers of `lazaret-sca`, the registry modules, the CVE bundle, the secret verifier's answers), seeded and shrinking, with its findings in `docs/0.1.9-findings.md`; `fuzz.yml` runs it weekly. `scripts/profile/` holds the scripts behind the profile's numbers (`registry_scan.py`, `engine_replay.py`, `thread_scaling.py`, `sca_bundle.py`, …) and `perf_check.py`, which times the engine on eight packages pinned by sha256 (`packages.json`) against budgets; `perf.yml` runs it nightly. `scripts/goparse/` and `scripts/rsparse/` hold the engine's Go parser and Rust item reader to Go's `go/parser` and to `rustc` (`diff.py` over a corpus and its mutants), `scripts/gooracle/` asks Go's own module code (`golang.org/x/mod`) what the Go module auditor and the `go.mod` reader must answer, and `scripts/verifylive/` checks the secret verifier's table against the real services, by hand. Each has a README; none is needed to build or test Lazaret (the tests use their recorded answers).
 
-`rust/` holds the native engine (`docs/RUST_ENGINE.md`): `crates/lazaret-engine` (no `unsafe`, no I/O, no dependencies: a port of CPython's regex engine, JSON, the supply-chain tests, the dependency-mode scan of a file, the rules part of the project-mode scan, the cross-file follower) and `crates/lazaret-ffi` (the C ABI, loaded by `lazaret/scanner/_native.py` with ctypes). `cargo build --release --offline --locked` needs no registry. The engine's translations of CPython code (the regex engine, shlex, the Final_Sigma rule) are under CPython's license as well as Apache-2.0: `rust/NOTICE` lists them with their original notices and a summary of the changes, and `rust/LICENSE-PYTHON` is CPython's LICENSE, unchanged (`docs/RUST_ENGINE.md`, section 11).
+`rust/` holds the native engine (`docs/RUST_ENGINE.md`): `crates/lazaret-engine` (no `unsafe`, no I/O, no dependencies: a port of CPython's regex engine, JSON, the supply-chain tests, the dependency-mode scan of a file, the rules part of the project-mode scan, the cross-file follower; the Go and Rust lexers, and a Go parser (`goparse/`) and a Rust item reader (`rsparse/`) with the code each language runs without a call, which no scan uses yet) and `crates/lazaret-ffi` (the C ABI, loaded by `lazaret/scanner/_native.py` with ctypes). `cargo build --release --offline --locked` needs no registry. The engine's translations of CPython code (the regex engine, shlex, the Final_Sigma rule) are under CPython's license as well as Apache-2.0: `rust/NOTICE` lists them with their original notices and a summary of the changes, and `rust/LICENSE-PYTHON` is CPython's LICENSE, unchanged (`docs/RUST_ENGINE.md`, section 11).
 
 ---
 
@@ -66,7 +69,8 @@ python/
 │   ├── __main__.py         python -m lazaret  →  lazaret._cli
 │   ├── _cli.py             the `lazaret` command: `lazaret guard …` goes to the
 │   │                       install guard, `lazaret hook …` to the commit-time
-│   │                       gate, everything else to the scanner CLI
+│   │                       gate, a `github:` or `gitlab:` source to the source
+│   │                       scan, everything else to the scanner CLI
 │   ├── scanner/
 │   │   ├── core.py         rule engine, intra-file taint, scan_project() (the one
 │   │   │                   project-scan pipeline, shared by the CLI and MCP), the
@@ -82,14 +86,41 @@ python/
 │   │   │                   fails on --ci's security and supply-chain conditions
 │   │   ├── taintspec.py    taint-config validation (shared by both taint engines)
 │   │   ├── reports.py      safe report paths, report provenance, baseline signing
-│   │   ├── sca.py          dependency CVE matching (`lazaret-sca`)
-│   │   └── sca_feeds.py    `lazaret-sca --update-bundle`: the CVE bundle from OSV,
-│   │                       CISA KEV and EPSS
+│   │   ├── ghworkflow.py   GitHub Actions workflows: the worms' shapes and the
+│   │   │                   hardening checks (SC-WORKFLOW-*)
+│   │   ├── gitlabci.py     GitLab CI files' hardening checks (SC-GITLAB-*)
+│   │   ├── timings.py      where a run's time goes (`--timings`)
+│   │   ├── sca.py          dependency CVE matching (`lazaret-sca`): Python,
+│   │   │                   JavaScript, Go and Rust lockfiles
+│   │   ├── gomod.py        the `go.mod` reader shared by the Go module auditor and
+│   │   │                   the dependency scan
+│   │   ├── sca_feeds.py    `lazaret-sca --update-bundle`: the CVE bundle from OSV,
+│   │   │                   CISA KEV and EPSS
+│   │   ├── sca_index.py    the indexed CVE bundle (`--bundle-format index`)
+│   │   └── secretverify*.py, sigv4.py  live secret verification: the verifier,
+│   │                       the provider table, the one HTTPS transport, AWS
+│   │                       request signing; not called by a scan yet
 │   ├── registry/
 │   │   ├── repo.py         npm / PyPI package auditing (`lazaret-registry`)
 │   │   ├── guard.py        the install guard (`lazaret guard`, `lazaret-guard`):
-│   │   │                   checks what npm / pnpm / yarn / Bun / pip / uv would install
+│   │   │                   checks what npm / pnpm / yarn / Bun / pip / uv / go /
+│   │   │                   cargo would install
+│   │   ├── scanpool.py     the guard's scan workers and their limits
+│   │   ├── keepalive.py    kept-open connections for the guard (`--keepalive`)
+│   │   ├── goproxy.py      GOPROXY lists, module paths and the proxy protocol's
+│   │   │                   requests, for the Go guard
+│   │   ├── cargosrc.py     Cargo's source replacement, `Cargo.lock` and the index,
+│   │   │                   for the Cargo guard
 │   │   ├── pmsettings.py   the package managers' registries, indexes and credentials
+│   │   ├── contentcache.py one engine answer for bytes a release's files share
+│   │   ├── ecosystems/     one module per registry behind one interface (`base.py`):
+│   │   │                   crates.io (`crates.py`), Go modules (`golang.py`)
+│   │   ├── sources.py      a GitHub or GitLab repository at a commit, fetched and
+│   │   │                   read into a directory
+│   │   ├── sourcescan.py   `lazaret scan github:…` / `gitlab:…`: the scan of a
+│   │   │                   checkout, and the report's `source`
+│   │   ├── actions.py      what a workflow's `uses:` point to, asked of GitHub
+│   │   │                   (`python -m lazaret.registry.actions`)
 │   │   └── schema.sql      PostgreSQL setup for the state DB
 │   ├── mcp/server.py       MCP server (`lazaret-mcp`)
 │   ├── web/lazaret.html    browser dashboard (package data)
@@ -98,7 +129,7 @@ python/
 └── tests/                  (section 4)
 ```
 
-Every CLI works both as an installed command and as a module: `lazaret` / `python -m lazaret`, `lazaret-registry` / `python -m lazaret.registry`, `lazaret-mcp` / `python -m lazaret.mcp`, `lazaret-sca` / `python -m lazaret.scanner.sca`, `lazaret-guard` / `python -m lazaret.registry.guard` (or `lazaret guard`), and `lazaret hook` / `python -m lazaret hook`.
+Every CLI works both as an installed command and as a module: `lazaret` / `python -m lazaret`, `lazaret-registry` / `python -m lazaret.registry`, `lazaret-mcp` / `python -m lazaret.mcp`, `lazaret-sca` / `python -m lazaret.scanner.sca`, `lazaret-guard` / `python -m lazaret.registry.guard` (or `lazaret guard`), and `lazaret hook` / `python -m lazaret hook`. Three tools are modules only: `python -m lazaret.registry.actions` (a workflow's actions, online), `python -m lazaret.registry.sources` (a source's checkout, as JSON) and `python -m lazaret.scanner.sca_index` (build, check or describe an indexed bundle).
 
 ### Layering
 
@@ -353,6 +384,8 @@ Nothing from `lazaret-samples` ever enters any artifact. Credential files are re
 - **python-integration**: the live-Postgres tests against a throwaway `postgres:17` service container, pinned by digest.
 - **js**: `npm test` on Linux, macOS, and Windows × Node 22 and 24.
 - **rust**: on Linux, macOS, and Windows: `check_rust_deps.py`, `make_rust_tables.py --check` (on Python 3.10, which the Unicode table is made with), `cargo test` and the release build (`--offline --locked`: no crate is fetched), and the WebAssembly build against the library.
+
+`.github/workflows/perf.yml` (nightly and on demand) times the engine on the packages `scripts/profile/packages.json` pins and checks the budgets recorded there; `.github/workflows/fuzz.yml` (weekly and on demand, Python 3.10 and 3.13) runs `scripts/fuzz/` with a fresh seed and keeps its findings as an artifact; a finding not in `fuzz_targets.KNOWN` fails it. Both follow `ci.yml`'s rules (actions pinned, `contents: read`, no secrets, no caches), and a schedule runs only from the default branch.
 
 Every job that runs Python tests builds the native library first and proves it loads (the engine's own tests skip without it): `python-unit` runs the whole suite on it, the engine's recorded outputs included.
 

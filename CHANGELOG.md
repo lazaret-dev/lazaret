@@ -84,6 +84,33 @@ project is pre-1.0, so the 0.x API may still change.
   dependencies (SC-GITLAB-TOKEN-INSTALL). Both packages report them, as security
   hotspots. Only a CRITICAL one fails the gate's supply-chain condition: a pull request's
   code checked out by `pull_request_target`, or a file included over plain http.
+- **A repository at a commit: `lazaret scan github:owner/repo[@ref]` and
+  `gitlab:group/project[@ref]`.** The ref (a branch, a tag or a commit; none means the
+  default branch) is resolved to a commit, that commit's archive is read into a temporary
+  directory and scanned with every option a folder's scan takes, and the directory is
+  removed. The report names the commit: its `project` is `github:owner/repo@<sha>`, a
+  `source` block says what was read and what was not, the report files are named for it
+  and written to the current directory, and a SARIF report maps its root to the
+  repository at that commit (`versionControlProvenance`). Paths the archive leaves out
+  (`export-ignore` in `.gitattributes`, where many repositories put their tests and
+  `.github/`) are fetched one by one, each written only if it is the blob the commit's
+  tree names. A checkout not read whole is said after the report and marks the result
+  `incomplete`; with `--ci` it exits 1 even when the gate passed, unless
+  `--accept-incomplete`. `GITHUB_TOKEN` and `GITLAB_TOKEN` (read-only) go to the API host
+  only, and `LAZARET_GITLAB_URL` names a GitLab instance. Python package only.
+- **`lazaret guard go` and `lazaret guard cargo`.** The install guard for Go modules (`go
+  get`, `install`, `build`, `run`, `test`, `vet`, `list`, `mod download`, `mod tidy`) and
+  Cargo crates (`add`, `update`, `generate-lockfile`, `install`, `fetch`, `build`,
+  `check`, `test`, `run` and the rest that fetch). For Go, the guard runs a module proxy
+  on the machine for the one command, relays the proxies `GOPROXY` lists as the go
+  command does, and scans each module zip before the tool gets it; go still checks
+  `go.sum` and the checksum database, so what it accepts is what was scanned. For Cargo,
+  it resolves first, checks every crates.io crate in `Cargo.lock` against the lock's
+  checksum and scans it, and only then lets cargo fetch and build. Both take `--min-age`,
+  `--plan` and `--json`, put `go.mod`, `go.sum`, `Cargo.toml` and `Cargo.lock` back when
+  anything is blocked, and list what they could not check (a module go fetches straight
+  from its repository through `GOPRIVATE`, a crate from git or from a registry the guard
+  cannot read).
 - **A Go module or a crate is never OK while its code is not read.** Lazaret has no Go
   or Rust detectors yet: `lazaret guard go` and `lazaret guard cargo` check a module's or
   a crate's checksum, age and archive, and read its other files, but not what its `.go`
@@ -94,9 +121,72 @@ project is pre-1.0, so the 0.x API may still change.
   `tests/`, `benches/` and `examples/`). INCOMPLETE does not block an install unless
   `--block-warn` is given; a strong finding still makes it SUSPICIOUS. npm and PyPI
   releases are unchanged.
+- **Dependency scanning reads Go and Rust.** `lazaret-sca` inventories `go.mod` (with its
+  `replace` lines), `go.sum` for a module older than Go 1.17, `vendor/modules.txt`,
+  `Cargo.lock` and `Cargo.toml`, matched against OSV's `Go` and `crates.io` advisories
+  (`GO-`, `RUSTSEC-`), which `--update-bundle` now downloads. A bundle that does not carry
+  them (`osv:go`, `osv:crates`) fails the gate for a project that has Go or Rust
+  dependencies rather than reporting none. The standard library, the toolchain and
+  RustSec's `unmaintained` and `notice` advisories are not matched.
+- **An indexed CVE bundle.** `lazaret-sca --update-bundle --bundle-format index --bundle
+  cve-bundle.lzx` writes a file a scan reads only the parts of that it needs. On a
+  synthetic bundle the size of OSV's (120,000 advisories), opening it and matching 2,000
+  dependencies takes 0.2 s and 42 MB instead of 6.9 s and 640 MB, with the same matches in
+  the same order. `--bundle` takes either kind. Every part of the file is checked (its
+  length, checksums, layout and order), and a damaged one is exit 4, also when the damage
+  is found in the middle of matching. The JSON bundle stays the default.
+- **`lazaret guard --from-plan pip install …`.** Once pip's plan has been scanned, pip
+  installs the very files that were scanned, from a folder (`--no-index --find-links`),
+  instead of resolving and downloading again; each file is hashed again just before pip
+  runs and must be the one scanned. A plan with an sdist or a file too large to scan goes
+  through the guard's index as before, with a line saying why. On `requests`, `boto3` and
+  `pydantic` the guarded install took 13.5 s instead of 19.2 s (pip alone: 6.1 s).
+  Opt-in.
+- **`lazaret guard --keepalive`** (experimental): the guard's own requests reuse their
+  connections instead of opening a connection and a TLS session for each; redirects and
+  credentials follow the guard's rules as before. Off by default until it is measured on
+  a direct network: with `--timings`, the network lines count the connections made and
+  reused.
+- **What a workflow's actions point to, checked online.** `python -m
+  lazaret.registry.actions WORKFLOW…` asks GitHub about each `uses:`: a pin that is in no
+  branch and at no tag of its repository, such as a fork's commit (SC-ACTION-IMPOSTOR); a
+  version tag that moved since it was first seen (SC-ACTION-TAG-MOVED; what was seen is
+  kept in `~/.cache/lazaret/actions-pins.json`); a tag off the branches
+  (SC-ACTION-OFF-BRANCH); a pin whose `# v1.2.3` comment names another commit
+  (SC-ACTION-PIN-MISMATCH); and, in the action's own `action.yml`, a Docker image without
+  a digest or composite steps not pinned (SC-ACTION-DOCKER-UNPINNED,
+  SC-ACTION-NESTED-UNPINNED). What it could not ask (GitHub's limit of 60 requests an hour
+  without `GITHUB_TOKEN`, a private repository) is reported as not checked. A project
+  scan does not run it.
+- **For contributors: Go and Rust readers in the engine, and the tools that hold them to
+  Go and rustc.** A Go parser (`goparse`), a port of `go/parser` that builds the same tree
+  as Go's own for the Go distribution's 10,368 files and about 430,000 mutants of them
+  (nesting is limited to 256, so one file of the distribution is refused), and a Rust item
+  reader (`rsparse`) that finds exactly the items `rustc` finds in the 7,468 files of 186
+  published crates. With them, the code that runs
+  without being called: `init` functions, package-variable initializers, cgo preambles,
+  `//go:linkname` and `//go:generate`; procedural macros, `#[ctor]` and `#[dtor]`,
+  load-time sections, a crate's entry point, a build script's `main`. Nothing uses them
+  yet: they are what the Go and Rust detectors will read. `scripts/goparse`,
+  `scripts/gooracle` and `scripts/rsparse` are the differential tools; `scripts/fuzz`
+  fuzzes the readers of untrusted input (34 targets: archives, XML, lockfiles, the
+  registry modules, the CVE bundle; weekly in `fuzz.yml`), and `scripts/profile` holds
+  the profile's scripts and a nightly check of the engine's time on eight pinned packages
+  (`perf.yml`; its budgets are set after a week of runs).
 
 ### Changed
 
+- **The guard scans in worker processes, with limits.** Every scan runs in a worker,
+  `--jobs 1` included, never in the process that downloads and talks to the package
+  manager. The archive goes to the worker as a file (mode 0600) and is hashed again
+  there; each worker has an address-space limit (`--worker-memory MB`, default 6144, on
+  Linux) and its share of the cores, and a CPU-time limit backs the scan's own deadline. A
+  worker that dies has the archives it held run again, each alone; one that kills its
+  worker again blocks its package as not checked (`--trust` lets it through). With
+  `--jobs 1`, six large archives took the guard's own peak memory from 2.15 GB to 0.22 GB
+  in the same time. `--no-isolate` scans in the guard's process, for a platform where
+  workers cannot start; the guard falls back to that by itself, and says so, when none
+  can.
 - **A release's files share the engine's answers.** A registry scan asks the engine once
   about content several of a release's files hold (a wheel per platform, the sdist with
   the same modules): a file's first pass, the import-time and use-time tests, the
@@ -126,6 +216,13 @@ project is pre-1.0, so the 0.x API may still change.
 
 ### Fixed
 
+- **`lazaret-sca` and hostile manifests**, found by the new fuzzers: a NUL byte in a
+  requirements file's `-r` path raised an error out of the inventory; a TOML file nested
+  too deeply raised `RecursionError` past every reader that catches parse errors (the
+  inventory, the guard's `uv.lock` reader, the package managers' settings); a `setup.py`
+  with an invalid escape printed a `SyntaxWarning`.
+- **The guard took a cut-off answer for a whole one.** A body shorter than its
+  `Content-Length` was read as a shorter page; it is an error now.
 - **Nine popular packages are no longer SUSPICIOUS.** 0.1.8 gave the verdict to vite
   8.3.2, vitest 5.0.3, monaco-editor 0.57.0, future 1.0.0, sympy 1.14.0, ipython 9.17.1
   and kubernetes 36.0.3, and 0.1.7 already to coverage 7.16.2 and numba 0.68.0, so

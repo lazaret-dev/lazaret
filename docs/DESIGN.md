@@ -701,6 +701,40 @@ one among them CRITICAL. The comparison itself, `registry/unused_deps.py`,
 takes declared names, used names and an ecosystem's normalizer, so a crate's
 or a Go module's dependencies go through the same function.
 
+SCA for Go and Rust (0.1.9): the inventory reads `go.mod` (its `replace`
+lines applied), `go.sum` only for a module whose `go` directive is before
+1.17 (a later `go.mod` lists what the build needs), `vendor/modules.txt`,
+`Cargo.lock` and the root `Cargo.toml`, and the bundle carries OSV's `Go` and
+`crates.io` exports. Names are the registries' own identities, matched
+exactly: a Go module path as written (case-sensitive; `.`, `-` and `_` are not
+alike in it), a crate folded as crates.io folds it (case, and `_` to `-`).
+Versions are ordered as SemVer only, Go's `v` prefix and pseudo-versions
+included. A `replace` by another module keeps the original in with an
+unknown version, so its advisories report unknown rather than nothing; a
+`replace` by a directory, a path dependency and a workspace member are the
+project's own code and are dropped; a Cargo git or other source has no
+version. The standard library and the toolchain are not matched (`go.mod`
+names a minimum Go version, not the toolchain that builds). The source gate is
+fail-closed and per ecosystem: a bundle without `osv:go` or `osv:crates`
+fails a project that has Go or Rust dependencies, and only such a project.
+`scanner/gomod.py` is the one `go.mod` reader, `modfile`'s rules, shared by
+the inventory and the Go module auditor (the scanner never imports the
+registry, so it lives in `scanner/`); `scripts/gooracle` compares it with
+Go's own.
+
+The indexed bundle (`sca_index.py`, `--bundle-format index`) is the same
+advisories in a file a scan reads only where it asks: a header with the
+parts' places and CRC-32s, a key table sorted by a digest of each name's
+key, and one zlib record per advisory and per name. A lookup bisects the
+table, reads the name's record and its advisories, and sorts the pairs by
+their place in the whole bundle, so `advisories_for` answers what the JSON
+bundle's does, in the same order. Nothing is read twice in two ways: the
+writer runs the document through `normalize_advisory` and `bundle_header`,
+`CveBundle`'s own reading, and reads the whole file back and checks it
+before it replaces the old bundle. Every way a file can be wrong is
+`BundleDamaged` (a `ValueError`: exit 4), at open or at the record that is
+read, and a record is inflated within a bound, so a bomb is refused unread.
+
 ### f. The install guard (`lazaret.registry.guard`, 0.1.7)
 
 `lazaret guard <tool> <command>` runs the registry auditor's in-memory scan
@@ -804,6 +838,130 @@ which `decide_verdict` counts with the truncation rules: INCOMPLETE, never
 OK. A guard that said OK for a crate whose `build.rs` it never read would
 say more than it knows (the readiness review's finding 2). When the Go and
 Rust detectors land, `UNREAD_CODE` loses their entries.
+
+**Go and Cargo (0.1.9).** go can be pointed at a proxy, so the Go guard is a
+proxy (`LocalGoProxy`, 127.0.0.1, for the one command) that relays the
+proxies `GOPROXY` lists by go's rules (a comma goes on after a 404 or 410
+only, a bar after any error) and scans each zip before go has it; the
+checksum database's paths are relayed as they are, and go still checks the
+zip against `go.sum` and the database, so what go accepts is what was
+scanned. It never fetches from version control: `direct` is not honoured,
+and a module `GOPRIVATE` names, which go fetches itself, is listed from the
+module cache afterwards as not checked. `--min-age` works at the proxy (a
+young version left out of the list, its `.info` and zip refused), so `go get`
+falls back the way it does when a version is missing. cargo has no such hook:
+a registry's index and download URL are configuration, and a replaced
+source is the user's. So the Cargo guard resolves first (`cargo update
+--workspace`, or the lock as it is with `--locked`), reads `Cargo.lock`,
+fetches and checks every crates.io crate cargo has not unpacked against the
+lock's checksum, from where cargo would (`[source]` replacement applied, the
+registry's `dl`), and only then lets cargo run. A crate that cannot be
+checked is blocked; one from somewhere the guard does not read (git, a git
+index, a registry that answers 401 or 403) is listed as not checked, and so
+is anything cargo unpacked that the guard did not check. Every name and
+version that reaches a URL or a path is checked first (`cargosrc.crate_ok`),
+so a hostile lockfile can name nothing but a crate to fetch. The manifests
+and lockfiles of both are snapshotted and put back when anything is
+blocked.
+
+**Scan workers (0.1.9).** Every scan runs in a worker (`scanpool.py`),
+`--jobs 1` included, never in the process that downloads, holds the
+archives and talks to the package manager: that process peaked at 2 GB
+scanning in place, and a worker that died used to leave the pool scanning in
+it. The archive goes to the worker as a file (0700 directory, 0600 file,
+named by its digest), and the worker hashes it again: other bytes are
+`ArchiveChanged`, never a verdict. Limits follow the work: an address-space
+limit per worker (`--worker-memory`, Linux), the cores shared out among the
+archives running at that moment (`engine.THREADS`, which only the pool
+writes), and a CPU-time limit above the scan's deadline as a backstop. A
+lost worker's archives run again, each alone in a pool of its own; one that
+kills its worker again is `Died`, a scan that failed, which the guard blocks
+as not checked, as it blocks any scan error. A pool that cannot start at
+all (`Unavailable`: no `spawn`, a limit too small to import Python) is told
+apart from one that lost a worker, and only then does the guard scan in its
+own process, once said. Isolation buys memory and robustness, not speed: the
+wall time is the same.
+
+`--from-plan` (pip, opt-in): after pip's plan (`--dry-run --report`) is
+scanned, pip installs the scanned wheels from a folder (`--no-index
+--find-links`) with the user's own arguments, so pip's rules still apply;
+each file is hashed again just before pip runs. A plan with an sdist (its
+build requirements come from the index), a file too large to scan or no
+files at all goes through the index as before. `--keepalive` (opt-in)
+replaces urllib's one connection per request with a pool of `http.client`
+connections; redirects, credentials and hosts stay the fetcher's
+(`_open_kept` applies `_opener`'s rules), and a connection goes back to the
+pool only when its body was read to the end.
+
+### g. Sources: a repository at a commit (`sources.py`, `sourcescan.py`, 0.1.9)
+
+`lazaret scan github:owner/repo[@ref]` and `gitlab:group/project[@ref]` scan
+a commit, not a branch: the ref is resolved to a SHA first, and the SHA is
+what the archive is fetched by and what the report names, so a branch that
+moves while the scan runs cannot change what was read. The rules are the
+registry module's, applied to these hosts: HTTPS only, to fixed hosts
+(`api.github.com`, `codeload.github.com`, `raw.githubusercontent.com`; for
+GitLab the one host of `LAZARET_GITLAB_URL`), never a host taken from a spec,
+a redirect or what was scanned; a token only to the API host, checked for
+characters that could split a header, in no message, report or exception;
+the archive read by `repo.iter_archive` with its byte, file and time budgets,
+links resolved inside it rather than created; nothing run. `sourcescan`
+then runs the ordinary scan (`core.main`, every option) on the directory.
+
+What an archive cannot show is looked for. `git archive` leaves out every
+path marked `export-ignore`, so a payload can sit in the commit and out of
+its tarball. The commit's tree is listed (one call on GitHub, pages on
+GitLab) and every path the archive lacks is fetched on its own and written
+only when it is the blob the tree names (git's blob id, SHA-1 or SHA-256),
+within a request, time and byte budget; a rate limit stops the asking.
+Whatever is still missing, a tree too large to list, or an archive that hit
+a budget makes the checkout incomplete: said after the report, the
+result's `incomplete` and `incompleteReason` set (as an MCP scan that stopped
+early sets them), and `--ci` fails on it unless `--accept-incomplete`. The
+scan is told what it is a scan of (`core.main(argv, source=…)`,
+`set_source`): `project` is the spec at its commit, not the temporary
+directory, and `source` says what was read and what was not; SARIF's
+`versionControlProvenance` maps `%SRCROOT%` to the repository at that commit.
+
+`registry/actions.py` asks GitHub about a workflow's `uses:` under the same
+rules: an impostor commit (a pin in no branch and at no tag tip: GitHub
+serves a fork's commit under the parent's name), a version tag that moved
+since the pin book first saw it, a tag off the branches, a pin comment that
+names another commit, and the action's own `action.yml` (an image without a
+digest, a composite action's unpinned steps, two levels deep). What it could
+not ask (the rate limit, its call budget, an expression in a ref, a private
+repository) is `incomplete`, and an action not checked is not cleared. A
+project scan does not call it: it needs the network, and the offline checks
+(`ghworkflow.hardening`) are the scan's.
+
+### h. Go and Rust in the engine (0.1.9)
+
+The lexers (`lex/go.rs`, `lex/rs.rs`) are what a project scan reads `.go` and
+`.rs` files with today (`Lang::Go`, `Lang::Rs`; comments and literals for the
+rules that read them). The parsers come next, for the detectors (G-1, R-1):
+
+- **The Go parser** (`goparse/`) is `go/parser`'s, not a new reading of Go:
+  the point is that code the compiler builds is code the scan reads the same
+  way. It accepts exactly the files `go/parser` accepts and builds the same
+  tree (`go/ast`'s kinds and spans); `scripts/goparse/diff.py` holds it to Go
+  on the Go distribution and on mutants of it. The one difference is depth:
+  `MAX_DEPTH` 256 against Go's 100,000, since the engine reads untrusted files
+  on a small stack. Comments are not in the tree, so the cgo preamble and the
+  `//go:` directives come from the lexer. What Go leaves to its type checker
+  (a `.(type)` outside a switch, `type T[] int`, `[...]int` with no literal,
+  `select { case 1: }`, a label with no statement) is accepted, as
+  `go/parser` accepts it.
+- **The Rust item reader** (`rsparse/`) is the compiler's reading of items,
+  not a new one: a crate that builds must be a crate the scan reads the same
+  way. It reads the groups in an item's head and in field lists for items,
+  because the compiler's parser sees an item there, and
+  `scripts/rsparse/diff.py` holds it to `rustc`.
+- **The hooks** (`goparse/hooks.rs`, `rsparse/hooks.rs`) list the code that
+  runs without being called: `init` functions, package-variable
+  initializers, cgo preambles, `//go:linkname`, `//go:generate`; procedural
+  macros, `#[ctor]` and `#[dtor]`, load-time sections, a crate's entry point,
+  a build script's `main`. Until detectors read them, a Go module or a crate
+  with code is INCOMPLETE (N-1, §5f), never OK.
 
 ---
 
@@ -980,12 +1138,15 @@ hold that. A store that outlives the run is the next step (P-2b).
 | `python/src/lazaret/scanner/flow.py` | Interprocedural cross-file taint: hands the engine's passes the files and the configured model, builds their findings (Python's own AST pass until phase 3) |
 | `rust/crates/lazaret-engine/src/jsparse/`, `jsflow/` | The JavaScript / TypeScript reader and the JS cross-file pass (the `js_parse` and `js_flow` calls, both packages'; jsparse.py, jsflow.py and their npm twins until phase 3) |
 | `rust/crates/lazaret-engine/src/pyparse/`, `pyflow/` | The Python reader (Python 3.13's trees) and the Python cross-file pass (the `py_parse` and `py_flow` calls, both packages'; flow.py's own pass until phase 3) |
-| `python/src/lazaret/scanner/autorun.py`, `ghworkflow.py` | Editor and AI-agent settings that run commands (SC-AUTORUN) and the workflows the Shai-Hulud worms planted (SC-WORKFLOW-*); twins `js/src/lib/autorun.js`, `ghworkflow.js` |
+| `python/src/lazaret/scanner/autorun.py`, `ghworkflow.py`, `gitlabci.py` | Editor and AI-agent settings that run commands (SC-AUTORUN), the workflows the Shai-Hulud worms planted (SC-WORKFLOW-SECRETS, -BACKDOOR) and the CI files' hardening checks (the other SC-WORKFLOW-* ids, SC-GITLAB-*); twins `js/src/lib/autorun.js`, `ghworkflow.js`, `gitlabci.js` |
 | `python/src/lazaret/scanner/frameworks.py` | Which route handler parameters Flask / FastAPI / Django fill from the request (shared by both taint passes; twinned in `js/src/scanner/taint.js`) |
-| `python/src/lazaret/scanner/sca_feeds.py` | CVE bundle build (OSV/KEV/EPSS) |
+| `python/src/lazaret/scanner/sca_feeds.py`, `sca_index.py`, `gomod.py` | CVE bundle build (OSV/KEV/EPSS), the indexed bundle, the `go.mod` reader |
 | `python/src/lazaret/{registry,mcp,pg,safexml}/` | Registry auditor, MCP server, Postgres client, safe XML |
 | `python/src/lazaret/registry/guard.py`, `python/src/lazaret/_cli.py` | The install guard (`lazaret guard`) and the `lazaret` command's dispatch |
 | `python/src/lazaret/registry/pmsettings.py` | The package managers' own settings as the guard reads them: registries, indexes, credentials by host |
+| `python/src/lazaret/registry/goproxy.py`, `cargosrc.py`, `scanpool.py`, `ecosystems/` | The Go guard's proxy protocol, the Cargo guard's sources and lockfile, the guard's scan workers, the crates.io and Go module auditors |
+| `python/src/lazaret/registry/sources.py`, `sourcescan.py`, `actions.py` | A repository at a commit (`lazaret scan github:…`), its scan and report `source`; a workflow's actions asked of GitHub |
+| `rust/crates/lazaret-engine/src/lex/`, `goparse/`, `rsparse/` | The lexers (JavaScript, Python, Go, Rust), the Go parser and the Rust item reader, with their hooks (not used by a scan yet) |
 | `js/src/lib/native.js`, `js/scripts/build-wasm.js` | The npm package's native engine (WebAssembly: the loader, one call, the pack's values) and its build (`npm run build`) |
 | `js/src/lib/supplychain.js`, `js/src/deps.js`, `js/src/scanner/flow.js`, `js/src/index.js`, `js/src/pool.js` | Install-hook checks, `--deps`, flow twin, npm CLI, its worker threads |
 | `python/tests/architecture/test_js_parity*.py` | The package-parity guards (need `npm run build`) |
