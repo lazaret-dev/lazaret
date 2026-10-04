@@ -7422,15 +7422,21 @@ def sarif_report(res, root=None):
             "locations": [{"physicalLocation": {
                 "artifactLocation": loc,
                 "region": {"startLine": line}}}]})
+    run = {"tool": {"driver": {"name": "Lazaret",
+                               "version": _lazaret_pkg.__version__,
+                               "informationUri": LAZARET_INFORMATION_URI,
+                               "rules": list(rules_seen.values())}},
+           "originalUriBaseIds": {SARIF_SRCROOT: {
+               "uri": _root_uri(res["project"] if root is None else root)}},
+           "results": results}
+    src = res.get("source")
+    if isinstance(src, dict) and src.get("uri") and src.get("commit"):
+        # a github: or gitlab: scan: the files are the repository's at that commit
+        run["versionControlProvenance"] = [{"repositoryUri": src["uri"], "revisionId": src["commit"],
+                                            "mappedTo": {"uriBaseId": SARIF_SRCROOT}}]
     return {"$schema": SARIF_SCHEMA,
             "version": "2.1.0",
-            "runs": [{"tool": {"driver": {"name": "Lazaret",
-                                          "version": _lazaret_pkg.__version__,
-                                          "informationUri": LAZARET_INFORMATION_URI,
-                                          "rules": list(rules_seen.values())}},
-                      "originalUriBaseIds": {SARIF_SRCROOT: {
-                          "uri": _root_uri(res["project"] if root is None else root)}},
-                      "results": results}]}
+            "runs": [run]}
 
 
 # ---------------- Baseline (new-code focus) ----------------
@@ -7640,19 +7646,20 @@ class _PipeSafeStdout:
         return getattr(self._stream, name)
 
 
-def main(argv=None):
+def main(argv=None, source=None):
     """`lazaret` console entry point. argv defaults to sys.argv[1:]. Any
     uncaught exception becomes `error: internal: …` with exit 5 (review item
     4: a non-UTF-8 file name crashed the HTML writer with a traceback and
     exit 1 — indistinguishable from a failed gate). A closed stdout never
-    stops the scan (see _PipeSafeStdout)."""
+    stops the scan (see _PipeSafeStdout). `source`: the source block of a
+    `github:` or `gitlab:` scan (registry/sourcescan.py; set_source)."""
     configure_stdio()
     real_stdout = sys.stdout
     guard = _PipeSafeStdout(real_stdout) if real_stdout is not None else None
     if guard is not None:
         sys.stdout = guard
     try:
-        return _main(argv)
+        return _main(argv, source)
     except (SystemExit, KeyboardInterrupt):
         raise
     except Exception as exc:
@@ -7678,7 +7685,23 @@ def _positive_int(text):
     return value
 
 
-def _main(argv=None):
+def set_source(res, source):
+    """A `github:` or `gitlab:` scan's result (registry/sourcescan.py, N-5):
+    the source and its commit name the project instead of the temporary
+    folder they were read into, and `source` says what was read (spec, the
+    repository's address, the ref asked for, commit, files, bytes) and what
+    was not (complete, incomplete, notes). A checkout not read whole makes
+    the result incomplete, as a capped scan's is."""
+    res["project"] = source["spec"]
+    res["source"] = dict(source)
+    if not source.get("complete", True):
+        gaps = "; ".join(f"{reason}: {detail}" for reason, detail in source.get("incomplete", ())[:3])
+        why = f"the checkout of {source['spec']} was not read whole ({gaps})"
+        res["incomplete"] = True
+        res["incompleteReason"] = f"{res['incompleteReason']}; {why}" if res.get("incompleteReason") else why
+
+
+def _main(argv=None, source=None):
     global REDACT_SECRETS, EXCERPT_WIDTH, SOURCE_SIZE_CAP
     ap = argparse.ArgumentParser(prog="lazaret", description="Lazaret — security & quality scanner for Python/JS projects.")
     ap.add_argument("--version", action="version",
@@ -7805,6 +7828,8 @@ def _main(argv=None):
         # audit H1: a warning can carry content parsed out of scanned files
         # (the flow engine raises on hostile input); sanitize it.
         print(f"warning: {sanitize_term_line(warning)}", file=sys.stderr)
+    if source is not None:
+        set_source(res, source)
 
     # ---- SEAM (flow-sca): baseline block ---------------------------------
     if args.baseline:

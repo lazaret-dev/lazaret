@@ -41,16 +41,18 @@ class Dir(unittest.TestCase):
 
 
 class Recorder:
-    """In place of `core.main`: keeps the arguments and what was on disk at the time."""
+    """In place of `core.main`: keeps the arguments, the source block and what
+    was on disk at the time."""
 
     def __init__(self, result=0, exc=None):
-        self.result, self.exc, self.calls = result, exc, []
+        self.result, self.exc, self.calls, self.sources = result, exc, [], []
 
-    def __call__(self, argv=None):
+    def __call__(self, argv=None, source=None):
         root = next((a for a in argv if os.path.isdir(a) and os.path.basename(a).startswith(("github-", "gitlab-"))), None)
         listing = sorted(os.path.relpath(os.path.join(d, f), root).replace(os.sep, "/")
                          for d, _, fs in os.walk(root) for f in fs) if root else None
         self.calls.append((list(argv), root, listing))
+        self.sources.append(source)
         if self.exc:
             raise self.exc
         return self.result
@@ -332,6 +334,57 @@ class Incomplete(Dir):
         self.assertEqual(sourcescan.not_covered(ck), [("tree", "not listed whole")])
 
 
+class SourceBlock(Dir):
+    """N-5: the scan is told what it is a scan of (`source_block`), and its
+    result says so (`core.set_source`)."""
+
+    def test_the_scan_is_given_the_source(self):
+        rec = Recorder()
+        code, out, err, net = run([SPEC], core_main=rec)
+        self.assertEqual(rec.sources, [{
+            "spec": f"github:o/r@{SHA}", "kind": "github", "repository": "o/r", "ref": "v1", "commit": SHA,
+            "uri": "https://github.com/o/r", "files": 2, "bytes": 14, "complete": True, "incomplete": [],
+            "skipped": [], "notes": [], "anomalies": []}])
+        rec = Recorder()
+        run(["github:o/r"], core_main=rec)
+        self.assertEqual((rec.sources[0]["ref"], rec.sources[0]["spec"]), (None, f"github:o/r@{SHA}"))
+
+    def test_what_was_not_read_is_in_it(self):
+        rec = Recorder()
+        run([SPEC], answers=Incomplete.ANSWERS(), core_main=rec)
+        (block,) = rec.sources
+        self.assertFalse(block["complete"])
+        ((reason, detail),) = block["incomplete"]
+        self.assertEqual(reason, "export-ignore")
+        self.assertTrue(detail.startswith("2 path(s) are in the commit but not in its archive"), detail)
+        self.assertEqual(block["files"], 1)
+
+    def test_a_gitlab_repository_is_on_its_instance_and_no_token_is_kept(self):
+        from tests.registry.test_sources_missing import gitlab
+        env = {"LAZARET_GITLAB_URL": "https://git.example.org", "GITLAB_TOKEN": TOKEN}
+        rec = Recorder()
+        code, out, err, net = run(["gitlab:grp/proj@main"], answers=gitlab(), env=env, core_main=rec)
+        self.assertEqual(code, 0, err)
+        (block,) = rec.sources
+        self.assertEqual((block["uri"], block["repository"], block["kind"], block["complete"]),
+                         ("https://git.example.org/grp/proj", "grp/proj", "gitlab", True))
+        self.assertNotIn(TOKEN, json.dumps(block))
+        self.assertNotIn(self.tmp, json.dumps(block))                   # nor the temporary directory
+
+    def test_the_result_names_the_source_and_keeps_an_earlier_reason(self):
+        res = {"project": "/tmp/lazaret-src-x/github-o-r", "issues": []}
+        core.set_source(res, {"spec": f"github:o/r@{SHA}", "complete": True, "incomplete": []})
+        self.assertEqual(res["project"], f"github:o/r@{SHA}")
+        self.assertEqual(res["source"]["spec"], f"github:o/r@{SHA}")
+        self.assertNotIn("incomplete", res)
+        res = {"project": "x", "incomplete": True, "incompleteReason": "stopped early"}
+        core.set_source(res, {"spec": "github:o/r@abc", "complete": False,
+                              "incomplete": [["tree", "t"], ["export-ignore", "e"], ["skipped", "s"], ["more", "m"]]})
+        self.assertTrue(res["incomplete"])
+        self.assertEqual(res["incompleteReason"], "stopped early; the checkout of github:o/r@abc was not read whole "
+                                                  "(tree: t; export-ignore: e; skipped: s)")
+
+
 def fake_checkout(**fields):
     """In place of `sources.checkout`: a directory and a Checkout carrying what a test says."""
     def make(spec, dest=None, **kw):
@@ -404,8 +457,34 @@ class EndToEnd(Dir):
         with open(os.path.join(self.tmp, NAME + ".json"), encoding="utf-8") as f:
             report = json.load(f)
         self.assertTrue(any(i["file"].endswith("app.py") for i in report["issues"]), report["issues"])
-        self.assertEqual(os.path.basename(report["project"]), "github-o-r")
-        self.assertFalse(os.path.exists(report["project"]))                # the checkout is gone
+        self.assertEqual(report["project"], f"github:o/r@{SHA}")          # not the directory it was read into
+        self.assertEqual((report["source"]["commit"], report["source"]["uri"], report["source"]["complete"]),
+                         (SHA, "https://github.com/o/r", True))
+        self.assertNotIn("incomplete", report)
+        self.assertIn(f"Lazaret scan — github:o/r@{SHA}", out.getvalue())
+
+    @unittest.skipUnless(engine.available(), "the scan needs the native engine")
+    def test_an_incomplete_checkout_s_report_says_so_and_the_sarif_names_the_repository(self):
+        net = Net(gh_answers(files=self.FILES, tree=list(self.FILES) + ["tests/t.py"]))
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = sourcescan.main([SPEC, "-q", "--sarif", "r.sarif"], env={}, http=net)
+        self.assertEqual(code, 0, out.getvalue() + err.getvalue())         # without --ci: said, exit unchanged
+        with open(NAME + ".json", encoding="utf-8") as f:
+            report = json.load(f)
+        self.assertTrue(report["incomplete"])
+        self.assertTrue(report["incompleteReason"].startswith(
+            f"the checkout of github:o/r@{SHA} was not read whole (export-ignore: 1 path(s) are in the commit"),
+            report["incompleteReason"])
+        self.assertFalse(report["source"]["complete"])
+        with open("r.sarif", encoding="utf-8") as f:
+            run_ = json.load(f)["runs"][0]
+        self.assertEqual(run_["versionControlProvenance"], [{"repositoryUri": "https://github.com/o/r",
+                                                             "revisionId": SHA,
+                                                             "mappedTo": {"uriBaseId": "%SRCROOT%"}}])
+        self.assertTrue(run_["results"])
+        self.assertTrue(all(r["locations"][0]["physicalLocation"]["artifactLocation"].get("uriBaseId") == "%SRCROOT%"
+                            for r in run_["results"]), run_["results"][:1])
 
     def test_cli_dispatch_runs_the_same_thing(self):
         seen = []

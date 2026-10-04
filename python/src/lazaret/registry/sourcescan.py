@@ -11,6 +11,12 @@ removes it afterwards. What it adds to a scan of a folder:
   written to the current directory, not to the scan root, which is a temporary
   directory. `--out-dir`, `--json`, `--html` and `--sarif` still decide where
   they go, and the destination is checked before anything is fetched.
+- The report says what it is a report of (N-5, `source_block`): its `project`
+  is the source at its commit (`github:owner/repo@<sha>`), not the temporary
+  directory, and its `source` names the repository, the ref asked for, the
+  commit, what was read and what was not; a checkout not read whole makes the
+  result `incomplete`, with the reason. The SARIF report maps its root to the
+  repository at that commit (`versionControlProvenance`).
 - Fail closed, as everywhere in Lazaret: a checkout that was not read whole (a
   path the archive left out through `export-ignore`, a tree too large to list,
   an archive that hit a byte, file or time budget, a file that could not be
@@ -37,7 +43,7 @@ import tempfile
 from lazaret.registry import sources
 from lazaret.scanner import core, reports
 
-__all__ = ["main", "find", "UsageError", "Plan", "VALUE_OPTIONS", "FLAG_OPTIONS", "not_covered"]
+__all__ = ["main", "find", "UsageError", "Plan", "VALUE_OPTIONS", "FLAG_OPTIONS", "not_covered", "source_block"]
 
 #: `core.main`'s options that take a value, and those that do not.
 VALUE_OPTIONS = ("--out-dir", "--html", "--json", "--exclude", "--sarif", "--baseline", "--taint-config",
@@ -181,6 +187,28 @@ def not_covered(ck):
     return gaps
 
 
+def repository_uri(src, env=None):
+    """The repository's address on its host: github.com's, or the GitLab
+    instance's (`LAZARET_GITLAB_URL`, checked by `sources.gitlab_base`)."""
+    if src.kind == "github":
+        return f"https://github.com/{src.path}"
+    return f"{sources.gitlab_base(env)}/{src.path}"
+
+
+def source_block(src, ck, gaps, env=None):
+    """The report's `source` (N-5): the spec at its commit, the repository and
+    its address, the ref that was asked for (None: the default branch), the
+    commit that was read, the files and bytes read, and whether that is all of
+    the commit (`gaps`, from `not_covered`). `skipped` lists the files not
+    written (too large, in the way of another), `notes` and `anomalies` what the
+    checkout said about the archive. No token, no temporary path."""
+    return {"spec": sources.spec_text(src, ck.commit), "kind": src.kind, "repository": src.path,
+            "ref": src.ref, "commit": ck.commit, "uri": repository_uri(src, env), "files": ck.files,
+            "bytes": ck.bytes, "complete": not gaps, "incomplete": [list(g) for g in gaps],
+            "skipped": [list(s) for s in ck.skipped], "notes": list(ck.notes),
+            "anomalies": [list(a) for a in ck.anomalies]}
+
+
 def _clean(text):
     return core.sanitize_term_line(text)
 
@@ -242,11 +270,11 @@ def main(argv=None, *, env=None, http=None):
         _warn("skipped", [f"{rel}: {why}" for rel, why in ck.skipped if why.startswith("larger than")])
         front = report_defaults(plan, ck.commit, cwd)
         args = front + [ck.root if a is None else a for a in plan.argv]
+        gaps = not_covered(ck)
         try:
-            code = core.main(args)
+            code = core.main(args, source=source_block(plan.spec, ck, gaps, env))
         except SystemExit as exc:
             code = _exit_code(exc)
-        gaps = not_covered(ck)
         if gaps:
             print(f"error: the checkout of {_clean(sources.spec_text(plan.spec, ck.commit))} was not read whole, so this "
                   f"scan does not cover all of the commit:", file=sys.stderr)

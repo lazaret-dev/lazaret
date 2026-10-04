@@ -28,11 +28,19 @@ The rules are the registry module's (`repo.py`), applied to these hosts:
 What an archive cannot show: `git archive` leaves out any path marked
 `export-ignore` in `.gitattributes`, so a payload can sit in the commit and
 out of its tarball. The commit's tree is listed (one call on GitHub, pages
-on GitLab) and every path in it that the archive lacks is reported, and the
-checkout is incomplete: fail closed, as everywhere in Lazaret.
+on GitLab), and every path in it that the archive lacks is fetched on its
+own (N-5, 0.1.9: a public GitHub repository's from
+`raw.githubusercontent.com`, by the commit; with a token, and on GitLab,
+through the API), checked against the blob the tree names, and written
+with the rest: most repositories that keep their tests and workflows out
+of their tarball are read whole. What could not be fetched within the
+budget (`MAX_MISSING_FILES` requests, `MISSING_FILES_SECONDS`, the
+registry's download budget) is reported, and the checkout is incomplete:
+fail closed, as everywhere in Lazaret.
 """
 
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -55,10 +63,17 @@ __all__ = ["SourceError", "Source", "Checkout", "parse_source", "checkout", "sca
 
 GITHUB_API = "api.github.com"
 GITHUB_ARCHIVE = "codeload.github.com"
+GITHUB_RAW = "raw.githubusercontent.com"     # a public repository's files by commit (N-5)
 GITLAB_DEFAULT = "https://gitlab.com"
 SHA_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 MAX_TREE_BYTES = 16 * 1024 * 1024         # one tree listing's JSON
 GITLAB_TREE_PAGES = 100                   # of 100 entries: a larger tree is not listed whole
+#: N-5: the paths the archive left out are fetched one at a time, at most this
+#: many (each a request; GitHub's API allows 60 an hour without a token, which
+#: is why a public repository's files come from raw.githubusercontent.com)
+MAX_MISSING_FILES = 300
+#: ... and within this many seconds (the registry's scan budget, LAZARET_SCAN_TIMEOUT)
+MISSING_FILES_SECONDS = _repo.SCAN_TIMEOUT
 
 Source = namedtuple("Source", "kind path ref")
 
@@ -238,7 +253,7 @@ class Client:
         self._http = http or _http
         if kind == "github":
             self.base = None
-            self.hosts = {GITHUB_API, GITHUB_ARCHIVE}
+            self.hosts = {GITHUB_API, GITHUB_ARCHIVE, GITHUB_RAW}
             self.auth_host = GITHUB_API
         else:
             self.base = base or gitlab_base({})
@@ -310,11 +325,25 @@ class Client:
             url = f"{self._gl(src)}/repository/archive.tar.gz?sha={sha}"
         return self.get(url, what, max_bytes=_repo.MAX_DOWNLOAD_BYTES)
 
+    def file(self, src, sha, path):
+        """One file of the commit, by its path in the tree (N-5: a path the
+        archive left out), within the registry's per-file limit."""
+        what = f"fetching {path} from {spec_text(src, sha)}"
+        if self.kind == "github" and not self.token:
+            owner, repo = (urllib.parse.quote(p) for p in src.path.split("/"))
+            url, accept = f"https://{GITHUB_RAW}/{owner}/{repo}/{sha}/{urllib.parse.quote(path)}", None
+        elif self.kind == "github":
+            url, accept = f"{self._gh(src)}/contents/{urllib.parse.quote(path)}?ref={sha}", "application/vnd.github.raw"
+        else:
+            url, accept = f"{self._gl(src)}/repository/files/{urllib.parse.quote(path, safe='')}/raw?ref={sha}", None
+        return self.get(url, what, accept=accept, max_bytes=_repo.MAX_MEMBER)
+
     def tree(self, src, sha):
-        """The files of the commit's tree: (paths, complete, notes). `complete`
-        is False when the host would not list it whole."""
+        """The files of the commit's tree: ({path: its blob's id, or None},
+        complete, notes). `complete` is False when the host would not list it
+        whole."""
         what = f"listing the tree of {spec_text(src, sha)}"
-        paths, notes = set(), []
+        paths, notes = {}, []
         if self.kind == "github":
             doc = _json(self.get(f"{self._gh(src)}/git/trees/{sha}?recursive=1", what,
                                  accept="application/vnd.github+json", max_bytes=MAX_TREE_BYTES), what)
@@ -346,7 +375,8 @@ class Client:
             if kind == "commit":
                 submodules += 1
             elif kind == "blob" and str(e.get("mode", "")) != "120000":     # (a link is made a file by its target)
-                paths.add(e["path"])
+                blob = e.get("sha") if self.kind == "github" else e.get("id")
+                paths[e["path"]] = blob if isinstance(blob, str) and SHA_RE.fullmatch(blob) else None
         if submodules:
             notes.append(f"{submodules} submodule(s) are not part of the archive and were not read")
         return paths, complete, notes
@@ -407,13 +437,47 @@ class Checkout:
         return f"<Checkout {self.spec} {self.files} files>"
 
 
-def _write_members(members, dest, ck):
-    """Writes the files of `iter_archive`'s members under `dest`: by their
-    canonical relative path, never through a link, a path's case-fold
-    collision kept apart instead of overwritten. -> the set of relative
-    paths written (as the archive named them)."""
-    root = os.path.realpath(dest)
-    taken, written = {}, set()
+class _Writer:
+    """Writes files under a checkout's root: by their canonical relative
+    path, never through a link, a path's case-fold collision kept apart
+    instead of overwritten. `written`: the relative paths written (as the
+    archive or the tree named them)."""
+
+    def __init__(self, dest, ck):
+        self.root, self.ck = os.path.realpath(dest), ck
+        self.taken, self.written = {}, set()
+
+    def write(self, rel, raw):
+        ck = self.ck
+        key = unicodedata.normalize("NFC", rel).casefold()
+        out = rel
+        if key in self.taken and self.taken[key] != rel:
+            n = 1
+            while f"{rel}.lazaret-dup{n}" in self.written:
+                n += 1
+            out = f"{rel}.lazaret-dup{n}"
+            ck.anomalies.append(("case", rel, f"differs from {self.taken[key]} only in case or form; kept as {out}"))
+        self.taken.setdefault(key, rel)
+        target = os.path.join(self.root, *out.split("/"))
+        if os.path.commonpath([self.root, os.path.realpath(os.path.dirname(target))]) != self.root:
+            ck.skipped.append((rel, "outside the checkout"))
+            return
+        try:
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, "wb") as f:
+                f.write(raw)
+        except (OSError, ValueError) as exc:
+            ck.skipped.append((rel, f"could not be written ({type(exc).__name__})"))
+            return
+        self.written.add(rel)
+        ck.files += 1
+        ck.bytes += len(raw)
+
+
+def _write_members(members, writer):
+    """Writes the files of `iter_archive`'s members (`_Writer`). -> the set
+    of relative paths written."""
+    ck = writer.ck
     for m in members:
         rel, size, raw, reason = m
         if reason == "member":
@@ -422,30 +486,53 @@ def _write_members(members, dest, ck):
         if reason:
             ck.incomplete.append((reason, m.detail or f"reading stopped at {rel}"))
             continue
-        key = unicodedata.normalize("NFC", rel).casefold()
-        out = rel
-        if key in taken and taken[key] != rel:
-            n = 1
-            while f"{rel}.lazaret-dup{n}" in written:
-                n += 1
-            out = f"{rel}.lazaret-dup{n}"
-            ck.anomalies.append(("case", rel, f"differs from {taken[key]} only in case or form; kept as {out}"))
-        taken.setdefault(key, rel)
-        target = os.path.join(root, *out.split("/"))
-        if os.path.commonpath([root, os.path.realpath(os.path.dirname(target))]) != root:
-            ck.skipped.append((rel, "outside the checkout"))
+        writer.write(rel, raw)
+    return writer.written
+
+
+def _blob_id(raw, size_of_id):
+    """Git's id of a blob holding `raw` (SHA-1, or SHA-256 for a 64-digit id)."""
+    head = b"blob %d\0" % len(raw)
+    return (hashlib.sha256 if size_of_id == 64 else hashlib.sha1)(head + raw).hexdigest()
+
+
+def _fetch_missing(client, src, sha, missing, writer, deadline):
+    """N-5: each path of the tree the archive left out, fetched on its own and
+    written with the rest, when it is the blob the tree names. `missing`:
+    [(canonical path, the tree's path, its blob's id or None)], sorted; no
+    request is made after `deadline` (time.monotonic()).
+    -> (the canonical paths still missing, why the rest were not fetched)."""
+    ck, left, why, spent = writer.ck, [], None, 0
+    for k, (rel, path, blob) in enumerate(missing):
+        if why is None and k >= MAX_MISSING_FILES:
+            why = f"at most {MAX_MISSING_FILES} are fetched one by one"
+        if why is None and time.monotonic() >= deadline:
+            why = f"the time budget ({MISSING_FILES_SECONDS:g} s) is spent"
+        if why is not None:
+            left.append(rel)
             continue
         try:
-            os.makedirs(os.path.dirname(target), exist_ok=True)
-            with open(target, "wb") as f:
-                f.write(raw)
-        except (OSError, ValueError) as exc:
-            ck.skipped.append((rel, f"could not be written ({type(exc).__name__})"))
+            raw = client.file(src, sha, path)
+        except SourceError as exc:
+            text = str(exc)
+            if "exceeds" in text:
+                ck.skipped.append((rel, f"larger than {_repo.MAX_MEMBER // 1_000_000} MB, not read"))
+                continue
+            left.append(rel)
+            if getattr(exc, "status", None) in (403, 429) or "rate limit" in text:
+                why = text                        # (asking on would only be refused again)
             continue
-        written.add(rel)
-        ck.files += 1
-        ck.bytes += len(raw)
-    return written
+        if blob is not None and _blob_id(raw, len(blob)) != blob:
+            left.append(rel)
+            ck.anomalies.append(("blob", rel, "fetched on its own, it is not the blob the commit's tree names"))
+            continue
+        spent += len(raw)
+        if spent > _repo.MAX_DOWNLOAD_BYTES:
+            left.append(rel)
+            why = f"the download budget ({_repo.MAX_DOWNLOAD_BYTES // (1024 * 1024)} MB) is spent"
+            continue
+        writer.write(rel, raw)
+    return left, why
 
 
 def checkout(spec, dest=None, *, env=None, http=None, check_tree=True):
@@ -473,19 +560,33 @@ def checkout(spec, dest=None, *, env=None, http=None, check_tree=True):
             ck.notes.append("the archive names no commit, so it was not checked against the one resolved")
         budget = _repo.Budget(deadline=time.monotonic() + _repo.SCAN_TIMEOUT)
         members = _repo.iter_archive(data, "tgz", "sdist", budget=budget, anomalies=ck.anomalies)
-        written = _write_members(members, ck.root, ck)
+        writer = _Writer(ck.root, ck)
+        written = set(_write_members(members, writer))
         if check_tree:
             paths, complete, notes = client.tree(src, commit)
             ck.notes.extend(notes)
             if not complete:
                 ck.incomplete.append(("tree", "the tree was not listed whole, so paths left out of the archive "
                                               "(`export-ignore`) cannot be ruled out"))
-            norm = {_repo.canonical_member_path("x/" + p, "sdist")[0] for p in paths}
-            missing = sorted(p for p in norm if p and p not in written)
+            norm = {}
+            for p, blob in paths.items():
+                rel = _repo.canonical_member_path("x/" + p, "sdist")[0]
+                if rel:
+                    norm.setdefault(rel, (p, blob))
+            missing = sorted((rel, p, blob) for rel, (p, blob) in norm.items() if rel not in written)
             if missing:
-                shown = ", ".join(missing[:5]) + (f" and {len(missing) - 5} more" if len(missing) > 5 else "")
-                ck.incomplete.append(("export-ignore", f"{len(missing)} path(s) are in the commit but not in "
-                                                       f"its archive (`export-ignore` in .gitattributes): {shown}"))
+                left, why = _fetch_missing(client, src, commit, missing, writer,
+                                           deadline=time.monotonic() + MISSING_FILES_SECONDS)
+                fetched = len(missing) - len(left)
+                if fetched:
+                    ck.notes.append(f"{fetched} path(s) the archive left out (`export-ignore` in .gitattributes) "
+                                    f"were fetched one by one")
+                if left:
+                    shown = ", ".join(left[:5]) + (f" and {len(left) - 5} more" if len(left) > 5 else "")
+                    ck.incomplete.append(("export-ignore", f"{len(left)} path(s) are in the commit but not in its "
+                                                           f"archive (`export-ignore` in .gitattributes), and were not "
+                                                           f"fetched on their own"
+                                                           + (f" ({why})" if why else "") + f": {shown}"))
     except BaseException:
         ck.cleanup()
         raise
