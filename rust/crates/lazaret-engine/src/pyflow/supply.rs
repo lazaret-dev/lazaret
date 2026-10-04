@@ -3173,10 +3173,9 @@ fn facts_here(text: &[u32]) -> Option<Facts> {
     let (outside, values) = outside_names(&tree, &sup);
     *sup.outside.borrow_mut() = outside;
     *sup.outside_values.borrow_mut() = values;
-    drop(tree);
     let mut cfg = Config::new(&[], &[], &[], &[]);
     cfg.supply = Some(sup.clone());
-    let findings = super::driver::analyze(&[(path, Some(text.to_vec()))], cfg);
+    let findings = super::driver::analyze_with(&[(path, Some(text.to_vec()))], vec![Some(tree)], cfg);
     if findings.iter().any(|n| matches!(n, Out::Note { .. })) {
         return None;
     }

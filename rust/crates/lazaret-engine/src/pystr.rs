@@ -219,8 +219,20 @@ pub fn ends_with(h: &[u32], needle: &str) -> bool {
 /// h == needle
 pub fn eq(h: &[u32], needle: &str) -> bool {
     let b = needle.as_bytes();
-    if h.len() == b.len() && b.is_ascii() {
-        return needle_eq(h, 0, b);
+    // (the common answer, no: more characters than the needle has bytes,
+    // or a first character that differs from an ASCII first byte; the
+    // models compare each name against tables of names this way)
+    if h.len() > b.len() {
+        return false;
+    }
+    match (h.first(), b.first()) {
+        (None, None) => return true,
+        (Some(&c), Some(&d)) if d < 0x80 && c != d as u32 => return false,
+        (None, Some(_)) => return false,
+        _ => {}
+    }
+    if h.len() == b.len() {
+        return b.is_ascii() && needle_eq(h, 0, b);
     }
     !b.is_ascii() && h.iter().copied().eq(needle.chars().map(|c| c as u32))
 }

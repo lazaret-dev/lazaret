@@ -66,6 +66,11 @@ project is pre-1.0, so the 0.x API may still change.
   seven wheels, 21,709 source files) scans in 21 s instead of 61 s on two cores, its
   engine time from 50 s to 8.5 s. `LAZARET_NO_CACHE=1` turns it off. The guard scans
   one archive at a time and keeps no memo.
+- **The import-time test reads a Python file faster.** Its supply-chain model parsed
+  each file twice, once for the names that hold outside paths and once for the flow,
+  and now parses it once. Comparing a name with the model's tables of names also says
+  no sooner. On litellm's `proxy_server.py` (0.82 MB) the test runs 16% fewer
+  instructions, with the same answers.
 - **SC-USE-RISK reads the same files on every machine.** Registry and guard scans read a
   package's code that runs only when it is used, smallest files first, for at most 3
   seconds per release file: a slower machine read less, and nothing said so. The bound
