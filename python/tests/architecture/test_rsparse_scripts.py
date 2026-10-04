@@ -11,7 +11,9 @@ import os
 import random
 import re
 import shutil
+import sys
 import tempfile
+import threading
 import unittest
 
 from tests import _support
@@ -481,6 +483,18 @@ class RustSourceTests(unittest.TestCase):
             text = self.source(name)
             for word in ("socket", "urllib", "http", "requests", "ftplib"):
                 self.assertNotIn(word, text, (name, word))
+
+    def test_the_oracle_leaves_the_process_as_it_was(self):
+        """The tests load rustc_items.py into the process every test shares (CI runs one `unittest discover`). A
+        recursion limit it raised when loaded, or a thread stack size it left after reading a file, was every later
+        test's: tomllib then read TOML nested 200,000 deep that a test expects refused, and the JSON reader went
+        through answers nested 70,000 deep until the stack ran out (Windows, Python 3.10)."""
+        self.assertIsNone(re.search(r"^(?:sys\.setrecursionlimit|threading\.stack_size)\(", self.source("rustc_items.py"), re.M))
+        limit, size = sys.getrecursionlimit(), threading.stack_size()
+        seen = []
+        items.deep(lambda: seen.append(sys.getrecursionlimit()))
+        self.assertEqual(seen, [max(limit, items.DEEP_RECURSION)])
+        self.assertEqual((sys.getrecursionlimit(), threading.stack_size()), (limit, size))
 
     def test_the_only_programs_they_run_are_rustc_and_the_dump(self):
         self.assertEqual(re.findall(r'subprocess\.run\(\["([^"]+)"', self.source("rustc_items.py")), ["rustc"])

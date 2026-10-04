@@ -647,9 +647,12 @@ class CommonTests(unittest.TestCase):
             self.assertEqual(calls, ["u1", "u1", "u2", "u1", "u3", "u3"])
 
     def test_the_source_tree_is_put_first_once(self):
+        # (against the count before: in the one process `unittest discover` runs, tests/__init__.py and the scripts
+        # other tests load, bench.py and gooracle.py, have put the same folder on sys.path already)
+        before = sys.path.count(common.SRC)
         common.use_source_tree()
         common.use_source_tree()
-        self.assertEqual(sys.path.count(common.SRC), 1)
+        self.assertEqual(sys.path.count(common.SRC), max(before, 1))
         self.assertTrue(os.path.isdir(os.path.join(common.SRC, "lazaret")))
 
 

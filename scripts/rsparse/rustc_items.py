@@ -10,7 +10,11 @@ import subprocess
 import sys
 import threading
 
-sys.setrecursionlimit(1_000_000)
+# rustc's dumps nest deeply, so the reading runs on a thread with a large stack and a recursion limit to match
+# (`deep`); both are put back after, never set when the module is imported: the tests load this file, and a raised
+# limit there was every later test's (tomllib then read TOML nested 200,000 deep, which a test expects it to refuse).
+DEEP_RECURSION = 1_000_000
+DEEP_STACK = 512 * 1024 * 1024
 
 TOKEN = re.compile(r'\s*(?:(?P<span>\S+?:\d+:\d+: \d+:\d+ \(#\d+\))|(?P<str>"(?:[^"\\]|\\.)*")|(?P<root>\{\{root\}\}#\d+)|(?P<p>[{}()\[\],:])|(?P<atom>[^\s{}()\[\],:"]+))')
 
@@ -339,6 +343,21 @@ def run_rustc(path, edition):
     return p.returncode, p.stdout.decode("utf-8", "replace"), p.stderr.decode("utf-8", "replace")
 
 
+def deep(work):
+    """Run `work()` on a thread with DEEP_STACK and DEEP_RECURSION, and put the process's recursion limit and thread
+    stack size back after."""
+    limit = sys.getrecursionlimit()
+    size = threading.stack_size(DEEP_STACK)
+    try:
+        sys.setrecursionlimit(max(limit, DEEP_RECURSION))
+        t = threading.Thread(target=work)
+        t.start()
+        t.join()
+    finally:
+        sys.setrecursionlimit(limit)
+        threading.stack_size(size)
+
+
 def items_for_file(path, edition="2021"):
     """-> (lines, error): `lines` as `render` gives them, or an error text if rustc does not take the file."""
     with open(path, "rb") as fh:
@@ -363,10 +382,7 @@ def items_for_file(path, edition="2021"):
         except Exception as exc:  # the dump is not what this script reads
             box["error"] = f"cannot read the dump: {type(exc).__name__}: {exc}"
 
-    threading.stack_size(512 * 1024 * 1024)
-    t = threading.Thread(target=work)
-    t.start()
-    t.join()
+    deep(work)
     if "error" in box:
         return None, box["error"]
     lines = box["lines"]

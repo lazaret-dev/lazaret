@@ -1275,6 +1275,9 @@ class RealCargoTests(TmpCase):
         self.write("src/lib.rs", "")
         self.write("Cargo.toml", '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n')
         self.env = gs.base_env(self.tmp)
+        # (HOME moves into the test's folder, and rustup reads its toolchains and its default from $HOME/.rustup unless
+        # RUSTUP_HOME names the place: on a CI runner nothing does, and cargo stopped at "no default is configured")
+        self.env.setdefault("RUSTUP_HOME", os.path.join(os.path.expanduser("~"), ".rustup"))
         self.env.update(CARGO_HOME=self.home, HOME=self.tmp, CARGO_TARGET_DIR=os.path.join(self.tmp, "target"), CARGO_NET_RETRY="0",
                         CARGO_TERM_COLOR="never")
         self.env.pop("CARGO_REGISTRIES_CRATES_IO_PROTOCOL", None)
